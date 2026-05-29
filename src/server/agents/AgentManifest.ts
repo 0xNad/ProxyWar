@@ -1,0 +1,222 @@
+import fs from "fs/promises";
+import path from "path";
+import { randomUUID } from "crypto";
+import {
+  AgentBrainType,
+  AgentStrategyProfile,
+  agentStrategyProfiles,
+} from "./AgentTypes";
+import { AgentSpec } from "./AgentLeagueMatch";
+import { normalizeExternalAgentEndpointUrl } from "./ExternalAgentNetworkPolicy";
+import { validateExternalAgentTokenReference } from "./ExternalAgentSecrets";
+
+export type AgentManifestBrainType =
+  | AgentBrainType
+  | "planner"
+  | "planner-codex-cli";
+
+export type AgentManifestProvider =
+  | {
+      provider: "mock-llm" | "codex-cli" | "openai" | "rule";
+      model?: string;
+    }
+  | {
+      provider: "external-http";
+      endpointUrl: string;
+      token?: string;
+      tokenEnv?: string;
+      tokenSecret?: string;
+      timeoutMs?: number;
+    };
+
+export interface AgentManifest {
+  schemaVersion: 1;
+  agentName: string;
+  profile: AgentStrategyProfile;
+  brainType: AgentManifestBrainType;
+  plannerExecutorMode?: boolean;
+  personality?: string;
+  policyChangelog?: string;
+  observationPolicy?: "default" | "compact" | "full";
+  skillPreferences?: Partial<Record<string, number>>;
+  provider?: AgentManifestProvider;
+}
+
+export async function loadAgentManifestsFromDirectory(
+  directory: string,
+): Promise<AgentManifest[]> {
+  const entries = await fs.readdir(directory);
+  const files = entries
+    .filter((entry) => entry.endsWith(".json"))
+    .sort((a, b) => a.localeCompare(b));
+  const manifests = await Promise.all(
+    files.map(async (file) =>
+      validateAgentManifest(
+        JSON.parse(await fs.readFile(path.join(directory, file), "utf8")),
+        file,
+      ),
+    ),
+  );
+  if (manifests.length < 3 || manifests.length > 8) {
+    throw new Error("AI league manifest directories must contain 3 to 8 agents");
+  }
+  return manifests;
+}
+
+export function validateAgentManifest(
+  value: unknown,
+  source = "manifest",
+): AgentManifest {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error(`${source} must be a JSON object`);
+  }
+  const manifest = value as Record<string, unknown>;
+  if (manifest.schemaVersion !== 1) {
+    throw new Error(`${source} schemaVersion must be 1`);
+  }
+  if (typeof manifest.agentName !== "string" || manifest.agentName.trim() === "") {
+    throw new Error(`${source} agentName must be a non-empty string`);
+  }
+  if (!agentStrategyProfiles.includes(manifest.profile as AgentStrategyProfile)) {
+    throw new Error(`${source} profile is invalid`);
+  }
+  if (!isManifestBrainType(manifest.brainType)) {
+    throw new Error(`${source} brainType is invalid`);
+  }
+  if (
+    manifest.personality !== undefined &&
+    typeof manifest.personality !== "string"
+  ) {
+    throw new Error(`${source} personality must be a string when provided`);
+  }
+  if (
+    manifest.policyChangelog !== undefined &&
+    typeof manifest.policyChangelog !== "string"
+  ) {
+    throw new Error(`${source} policyChangelog must be a string when provided`);
+  }
+  if (
+    manifest.observationPolicy !== undefined &&
+    manifest.observationPolicy !== "default" &&
+    manifest.observationPolicy !== "compact" &&
+    manifest.observationPolicy !== "full"
+  ) {
+    throw new Error(`${source} observationPolicy is invalid`);
+  }
+  if (
+    manifest.skillPreferences !== undefined &&
+    (manifest.skillPreferences === null ||
+      typeof manifest.skillPreferences !== "object" ||
+      Array.isArray(manifest.skillPreferences))
+  ) {
+    throw new Error(`${source} skillPreferences must be an object`);
+  }
+  return {
+    schemaVersion: 1,
+    agentName: manifest.agentName.trim().slice(0, 80),
+    profile: manifest.profile as AgentStrategyProfile,
+    brainType: manifest.brainType,
+    plannerExecutorMode:
+      typeof manifest.plannerExecutorMode === "boolean"
+        ? manifest.plannerExecutorMode
+        : manifest.brainType === "planner" ||
+          manifest.brainType === "planner-codex-cli" ||
+          manifest.brainType === "planner-executor",
+    personality: manifest.personality,
+    policyChangelog:
+      typeof manifest.policyChangelog === "string"
+        ? manifest.policyChangelog.trim().slice(0, 600)
+        : undefined,
+    observationPolicy: manifest.observationPolicy as
+      | AgentManifest["observationPolicy"]
+      | undefined,
+    skillPreferences: manifest.skillPreferences as AgentManifest["skillPreferences"],
+    provider: validateProvider(manifest.provider, source),
+  };
+}
+
+export function agentManifestToSpec(manifest: AgentManifest): AgentSpec {
+  return {
+    username: manifest.agentName,
+    profile: manifest.profile,
+    persistentID: randomUUID(),
+  };
+}
+
+function validateProvider(
+  value: unknown,
+  source: string,
+): AgentManifest["provider"] {
+  if (value === undefined) {
+    return undefined;
+  }
+  if (value === null || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error(`${source} provider must be an object when provided`);
+  }
+  const provider = value as Record<string, unknown>;
+  if (
+    provider.provider !== "mock-llm" &&
+    provider.provider !== "codex-cli" &&
+    provider.provider !== "openai" &&
+    provider.provider !== "rule" &&
+    provider.provider !== "external-http"
+  ) {
+    throw new Error(`${source} provider.provider is invalid`);
+  }
+  if (provider.provider === "external-http") {
+    if (typeof provider.endpointUrl !== "string") {
+      throw new Error(`${source} provider.endpointUrl must be a string`);
+    }
+    const endpointUrl = validateEndpointUrl(provider.endpointUrl, source);
+    const tokenReference = validateExternalAgentTokenReference(provider, source);
+    if (provider.timeoutMs !== undefined) {
+      if (
+        typeof provider.timeoutMs !== "number" ||
+        !Number.isInteger(provider.timeoutMs) ||
+        provider.timeoutMs < 250 ||
+        provider.timeoutMs > 180_000
+      ) {
+        throw new Error(
+          `${source} provider.timeoutMs must be an integer from 250 to 180000`,
+        );
+      }
+    }
+    return {
+      provider: "external-http",
+      endpointUrl,
+      ...tokenReference,
+      ...(provider.timeoutMs !== undefined
+        ? { timeoutMs: provider.timeoutMs }
+        : {}),
+    };
+  }
+  if (provider.model !== undefined && typeof provider.model !== "string") {
+    throw new Error(`${source} provider.model must be a string when provided`);
+  }
+  return {
+    provider: provider.provider,
+    model: provider.model,
+  } as AgentManifest["provider"];
+}
+
+function isManifestBrainType(value: unknown): value is AgentManifestBrainType {
+  return (
+    value === "rule" ||
+    value === "mock-llm" ||
+    value === "real-llm" ||
+    value === "codex-cli" ||
+    value === "external-http" ||
+    value === "planner-executor" ||
+    value === "planner" ||
+    value === "planner-codex-cli" ||
+    value === "llm"
+  );
+}
+
+function validateEndpointUrl(value: string, source: string): string {
+  try {
+    return normalizeExternalAgentEndpointUrl(value).url;
+  } catch {
+    throw new Error(`${source} provider.endpointUrl must be a valid URL`);
+  }
+}

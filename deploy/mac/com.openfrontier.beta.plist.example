@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.openfrontier.beta</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/zsh</string>
+    <string>/Users/YOUR_USER/Documents/OpenFrontier/deploy/mac/start-open-frontier-beta.zsh</string>
+  </array>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>/Users/YOUR_USER/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+    <key>OPEN_FRONTIER_PROJECT_DIR</key>
+    <string>/Users/YOUR_USER/Documents/OpenFrontier</string>
+    <key>OPEN_FRONTIER_ENV_FILE</key>
+    <string>/Users/YOUR_USER/.open-frontier/open-frontier-beta.env</string>
+  </dict>
+  <key>WorkingDirectory</key>
+  <string>/Users/YOUR_USER/Documents/OpenFrontier</string>
+  <key>StandardOutPath</key>
+  <string>/Users/YOUR_USER/Library/Logs/open-frontier-beta.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/YOUR_USER/Library/Logs/open-frontier-beta.err.log</string>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+</dict>
+</plist>

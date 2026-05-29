@@ -1,0 +1,17 @@
+{
+  "schemaVersion": 1,
+  "agentName": "Defensive Builder",
+  "profile": "defensive",
+  "brainType": "planner",
+  "plannerExecutorMode": true,
+  "personality": "Build durable defenses and avoid wasteful conflict.",
+  "observationPolicy": "default",
+  "skillPreferences": {
+    "defense_building": 1,
+    "troop_conservation": 0.9,
+    "recovery": 0.8
+  },
+  "provider": {
+    "provider": "mock-llm"
+  }
+}

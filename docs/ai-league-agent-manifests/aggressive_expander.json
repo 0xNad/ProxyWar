@@ -1,0 +1,17 @@
+{
+  "schemaVersion": 1,
+  "agentName": "Aggressive Expander",
+  "profile": "aggressive",
+  "brainType": "planner",
+  "plannerExecutorMode": true,
+  "personality": "Prioritize expansion, pressure, and timely attacks.",
+  "observationPolicy": "default",
+  "skillPreferences": {
+    "expansion": 1,
+    "pressure": 0.9,
+    "attack_timing": 0.8
+  },
+  "provider": {
+    "provider": "mock-llm"
+  }
+}

@@ -1,0 +1,20 @@
+[Unit]
+Description=Open Frontier private beta
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/open-frontier
+EnvironmentFile=/etc/open-frontier/open-frontier-beta.env
+ExecStart=/usr/bin/npm run agent:closed-beta
+Restart=on-failure
+RestartSec=5
+User=open-frontier
+Group=open-frontier
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+
+[Install]
+WantedBy=multi-user.target

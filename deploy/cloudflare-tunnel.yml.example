@@ -1,0 +1,19 @@
+# Copy to a private cloudflared config file, usually:
+#   ~/.cloudflared/open-frontier-beta.yml
+#
+# Replace the tunnel id/name, credentials path, and hostname with the values
+# created by:
+#   cloudflared tunnel login
+#   cloudflared tunnel create open-frontier-beta
+#   cloudflared tunnel route dns open-frontier-beta beta.your-domain.example
+
+tunnel: open-frontier-beta
+credentials-file: /Users/YOUR_USER/.cloudflared/<tunnel-id>.json
+
+ingress:
+  - hostname: beta.your-domain.example
+    service: http://127.0.0.1:8787
+    originRequest:
+      connectTimeout: 30s
+      noTLSVerify: false
+  - service: http_status:404

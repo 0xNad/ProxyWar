@@ -1,0 +1,17 @@
+{
+  "schemaVersion": 1,
+  "agentName": "Diplomat",
+  "profile": "diplomatic",
+  "brainType": "planner",
+  "plannerExecutorMode": true,
+  "personality": "Build alliances, support partners, and avoid unnecessary wars.",
+  "observationPolicy": "default",
+  "skillPreferences": {
+    "diplomacy": 1,
+    "support_ally": 0.9,
+    "economy_building": 0.6
+  },
+  "provider": {
+    "provider": "mock-llm"
+  }
+}

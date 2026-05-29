@@ -1,0 +1,157 @@
+import { AllianceExtensionExecution } from "../src/core/execution/alliance/AllianceExtensionExecution";
+import { AllianceRequestExecution } from "../src/core/execution/alliance/AllianceRequestExecution";
+import { Game, MessageType, Player, PlayerType } from "../src/core/game/Game";
+import { playerInfo, setup } from "./util/Setup";
+
+let game: Game;
+let player1: Player;
+let player2: Player;
+let player3: Player;
+
+describe("AllianceExtensionExecution", () => {
+  beforeEach(async () => {
+    game = await setup(
+      "ocean_and_land",
+      {
+        infiniteGold: true,
+        instantBuild: true,
+        infiniteTroops: true,
+      },
+      [
+        playerInfo("player1", PlayerType.Human),
+        playerInfo("player2", PlayerType.Human),
+        playerInfo("player3", PlayerType.Nation),
+      ],
+    );
+
+    player1 = game.player("player1");
+    player2 = game.player("player2");
+    player3 = game.player("player3");
+
+    while (game.inSpawnPhase()) {
+      game.executeNextTick();
+    }
+  });
+
+  test("Successfully extends existing alliance between Humans", () => {
+    vi.spyOn(player1, "canSendAllianceRequest").mockReturnValue(true);
+    vi.spyOn(player2, "canSendAllianceRequest").mockReturnValue(true);
+    vi.spyOn(player2, "isAlive").mockReturnValue(true);
+    vi.spyOn(player1, "isAlive").mockReturnValue(true);
+
+    game.addExecution(new AllianceRequestExecution(player1, player2.id()));
+    game.executeNextTick();
+
+    game.addExecution(new AllianceRequestExecution(player2, player1.id()));
+    game.executeNextTick();
+
+    expect(player1.allianceWith(player2)).toBeTruthy();
+    expect(player2.allianceWith(player1)).toBeTruthy();
+
+    const allianceBefore = player1.allianceWith(player2)!;
+    const allianceSpy = vi.spyOn(allianceBefore, "extend");
+
+    const expirationBefore = allianceBefore.expiresAt();
+
+    game.addExecution(new AllianceExtensionExecution(player1, player2.id()));
+    game.executeNextTick();
+    expect(allianceSpy).toHaveBeenCalledTimes(0); // both players must agree to extend
+    game.addExecution(new AllianceExtensionExecution(player2, player1.id()));
+    game.executeNextTick();
+
+    const allianceAfter = player1.allianceWith(player2)!;
+
+    expect(allianceAfter.id()).toBe(allianceBefore.id());
+
+    const expirationAfter = allianceAfter.expiresAt();
+
+    expect(expirationAfter).toBeGreaterThan(expirationBefore);
+    expect(allianceSpy).toHaveBeenCalledTimes(1);
+  });
+
+  test("Fails gracefully if no alliance exists", () => {
+    game.addExecution(new AllianceExtensionExecution(player1, player2.id()));
+    game.executeNextTick();
+
+    expect(player1.allianceWith(player2)).toBeFalsy();
+    expect(player2.allianceWith(player1)).toBeFalsy();
+  });
+
+  test("Successfully extends existing alliance between Human and non-Human", () => {
+    vi.spyOn(player1, "canSendAllianceRequest").mockReturnValue(true);
+    vi.spyOn(player3, "canSendAllianceRequest").mockReturnValue(true);
+    vi.spyOn(player3, "isAlive").mockReturnValue(true);
+    vi.spyOn(player1, "isAlive").mockReturnValue(true);
+
+    game.addExecution(new AllianceRequestExecution(player1, player3.id()));
+    game.executeNextTick();
+
+    game.addExecution(new AllianceRequestExecution(player3, player1.id()));
+    game.executeNextTick();
+
+    expect(player1.allianceWith(player3)).toBeTruthy();
+    expect(player3.allianceWith(player1)).toBeTruthy();
+
+    const allianceBefore = player1.allianceWith(player3)!;
+    const allianceSpy = vi.spyOn(allianceBefore, "extend");
+    const expirationBefore = allianceBefore.expiresAt();
+
+    game.addExecution(new AllianceExtensionExecution(player1, player3.id()));
+    game.executeNextTick();
+    expect(allianceSpy).toHaveBeenCalledTimes(0); // both players must agree to extend
+    game.addExecution(new AllianceExtensionExecution(player3, player1.id()));
+    game.executeNextTick();
+
+    const allianceAfter = player1.allianceWith(player3)!;
+
+    expect(allianceAfter.id()).toBe(allianceBefore.id());
+
+    const expirationAfter = allianceAfter.expiresAt();
+
+    expect(expirationAfter).toBeGreaterThan(expirationBefore);
+    expect(allianceSpy).toHaveBeenCalledTimes(1);
+  });
+
+  test("Sends message to other player when one player requests renewal", () => {
+    vi.spyOn(player1, "canSendAllianceRequest").mockReturnValue(true);
+    vi.spyOn(player2, "canSendAllianceRequest").mockReturnValue(true);
+    vi.spyOn(player2, "isAlive").mockReturnValue(true);
+    vi.spyOn(player1, "isAlive").mockReturnValue(true);
+
+    // Create alliance between player1 and player2
+    game.addExecution(new AllianceRequestExecution(player1, player2.id()));
+    game.executeNextTick();
+
+    game.addExecution(new AllianceRequestExecution(player2, player1.id()));
+    game.executeNextTick();
+
+    expect(player1.allianceWith(player2)).toBeTruthy();
+    expect(player2.allianceWith(player1)).toBeTruthy();
+
+    // Spy on displayMessage to verify it's called
+    const displayMessageSpy = vi.spyOn(game, "displayMessage");
+
+    // Player1 requests renewal
+    game.addExecution(new AllianceExtensionExecution(player1, player2.id()));
+    game.executeNextTick();
+
+    // Verify message was sent to player2
+    expect(displayMessageSpy).toHaveBeenCalledWith(
+      "events_display.wants_to_renew_alliance",
+      MessageType.RENEW_ALLIANCE,
+      player2.id(),
+      undefined,
+      { name: player1.displayName() },
+    );
+    expect(displayMessageSpy).toHaveBeenCalledTimes(1);
+
+    // Request again - should not send duplicate message
+    game.addExecution(new AllianceExtensionExecution(player1, player2.id()));
+    game.executeNextTick();
+
+    // Should still be called only once (no duplicate)
+    expect(displayMessageSpy).toHaveBeenCalledTimes(1);
+
+    displayMessageSpy.mockRestore();
+  });
+});
