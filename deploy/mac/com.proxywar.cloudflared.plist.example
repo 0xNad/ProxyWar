@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.proxywar.cloudflared</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/zsh</string>
+    <string>/Users/YOUR_USER/Documents/ProxyWar/deploy/mac/start-proxywar-cloudflared.zsh</string>
+  </array>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>/Users/YOUR_USER/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+    <key>PROXYWAR_CLOUDFLARED_CONFIG</key>
+    <string>/Users/YOUR_USER/.cloudflared/proxywar-beta.yml</string>
+    <key>PROXYWAR_CLOUDFLARE_TUNNEL_NAME</key>
+    <string>proxywar-beta</string>
+  </dict>
+  <key>StandardOutPath</key>
+  <string>/Users/YOUR_USER/Library/Logs/proxywar-cloudflared.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/YOUR_USER/Library/Logs/proxywar-cloudflared.err.log</string>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+</dict>
+</plist>

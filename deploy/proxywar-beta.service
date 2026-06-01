@@ -1,0 +1,20 @@
+[Unit]
+Description=ProxyWar private beta
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/proxywar
+EnvironmentFile=/etc/proxywar/proxywar-beta.env
+ExecStart=/usr/bin/npm run agent:closed-beta
+Restart=on-failure
+RestartSec=5
+User=proxywar
+Group=proxywar
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,45 @@
+{
+  "name": "proxywar-agent-starter",
+  "version": "0.1.0",
+  "description": "LLM-backed external agent starter for ProxyWar matches.",
+  "type": "module",
+  "license": "AGPL-3.0-or-later",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/0xNad/ProxyWar-starter-agent.git"
+  },
+  "files": [
+    "AGENT_SKILL.md",
+    "PROXYWAR_AGENT_CARD.md",
+    "README.md",
+    "LICENSE",
+    "launch.sh",
+    "agent-policy.mjs",
+    "manifest.example.json",
+    "simple-agent.mjs",
+    "smoke-test.mjs",
+    "starter-framework.mjs",
+    ".env.example"
+  ],
+  "exports": {
+    ".": "./starter-framework.mjs",
+    "./agent-policy": "./agent-policy.mjs",
+    "./simple-agent": "./simple-agent.mjs"
+  },
+  "bin": {
+    "proxywar-agent-starter": "./simple-agent.mjs"
+  },
+  "scripts": {
+    "launch": "bash ./launch.sh",
+    "start": "node simple-agent.mjs",
+    "self-test": "node smoke-test.mjs",
+    "check": "node --check simple-agent.mjs && node --check smoke-test.mjs && node --check starter-framework.mjs && node -e \"import('./starter-framework.mjs').then((m)=>{if(!m.createStarterAgent||!m.validateDecisionOutput||!m.createHealthResponse||!m.createLlmCompleteFromEnv) throw new Error('starter exports missing'); console.log('starter exports ok')})\"",
+    "test": "npm run check"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "publishConfig": {
+    "access": "public"
+  }
+}

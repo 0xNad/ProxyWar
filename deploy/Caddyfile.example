@@ -1,0 +1,11 @@
+beta.your-domain.example {
+  encode zstd gzip
+
+  header {
+    X-Content-Type-Options nosniff
+    Referrer-Policy same-origin
+    X-Robots-Tag "noindex, nofollow"
+  }
+
+  reverse_proxy 127.0.0.1:8787
+}

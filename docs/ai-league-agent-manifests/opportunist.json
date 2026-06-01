@@ -1,0 +1,17 @@
+{
+  "schemaVersion": 1,
+  "agentName": "Opportunist",
+  "profile": "opportunistic",
+  "brainType": "planner",
+  "plannerExecutorMode": true,
+  "personality": "Prefer useful low-risk moves and pivot when a better opening appears.",
+  "observationPolicy": "default",
+  "skillPreferences": {
+    "opportunism": 1,
+    "economy_building": 0.8,
+    "attack_timing": 0.7
+  },
+  "provider": {
+    "provider": "mock-llm"
+  }
+}

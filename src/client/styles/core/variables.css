@@ -1,0 +1,32 @@
+:root {
+  --theme: "light";
+  --breakPoint-tablet: 800px;
+  --breakPoint-Desktop: 1024px;
+  --blur-md: 4px;
+  --boxBackgroundColor: #111827cc;
+  --fontColor: #202020;
+  --fontColorLight: #fff;
+
+  --primaryColorHover: var(--color-malibu-blue);
+  --primaryColorDisabled: linear-gradient(
+    to right,
+    rgb(74, 74, 74),
+    rgb(61, 61, 61)
+  );
+  --secondaryColor: var(--color-malibu-blue);
+  --secondaryColorHover: var(--color-aquarius);
+  --transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+
+  --primaryColorHoverDark: var(--color-malibu-blue);
+  --primaryColorDisabledDark: #4b5563;
+  --secondaryColorDark: var(--color-malibu-blue);
+  --secondaryColorHoverDark: var(--color-aquarius);
+  --fontColorDark: #f3f4f6;
+
+  /* Achievements */
+  --medal-easy: #cd7f32;
+  --medal-medium: #c0c0c0;
+  --medal-hard: var(--color-cyber-yellow);
+  --medal-impossible: #d32f2f;
+  --medal-custom: #2196f3;
+}

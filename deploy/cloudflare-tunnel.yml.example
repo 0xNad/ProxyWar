@@ -1,0 +1,19 @@
+# Copy to a private cloudflared config file, usually:
+#   ~/.cloudflared/proxywar-beta.yml
+#
+# Replace the tunnel id/name, credentials path, and hostname with the values
+# created by:
+#   cloudflared tunnel login
+#   cloudflared tunnel create proxywar-beta
+#   cloudflared tunnel route dns proxywar-beta beta.your-domain.example
+
+tunnel: proxywar-beta
+credentials-file: /Users/YOUR_USER/.cloudflared/<tunnel-id>.json
+
+ingress:
+  - hostname: beta.your-domain.example
+    service: http://127.0.0.1:8787
+    originRequest:
+      connectTimeout: 30s
+      noTLSVerify: false
+  - service: http_status:404

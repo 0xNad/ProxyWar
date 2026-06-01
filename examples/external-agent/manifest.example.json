@@ -1,0 +1,21 @@
+{
+  "schemaVersion": 1,
+  "agentName": "Example Remote Frontier",
+  "profile": "opportunistic",
+  "brainType": "external-http",
+  "plannerExecutorMode": false,
+  "personality": "Prefer safe expansion, useful builds, and low-risk pressure.",
+  "observationPolicy": "default",
+  "skillPreferences": {
+    "expansion": 1,
+    "opportunism": 0.9,
+    "economy_building": 0.75,
+    "attack_timing": 0.65
+  },
+  "provider": {
+    "provider": "external-http",
+    "endpointUrl": "https://your-agent.example.com/proxywar/decide",
+    "tokenEnv": "PROXYWAR_AGENT_TOKEN",
+    "timeoutMs": 120000
+  }
+}
