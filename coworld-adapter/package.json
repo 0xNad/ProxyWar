@@ -1,0 +1,17 @@
+{
+  "name": "proxywar-coworld",
+  "version": "0.1.0",
+  "description": "Coworld game/player adapter for Proxy War. Wraps the existing legal-action runner and preserves the LegalAction.id decision path; adds no second validator or runner.",
+  "type": "module",
+  "license": "AGPL-3.0-only",
+  "scripts": {
+    "prepare:docker-context": "node scripts/prepare-docker-context.mjs",
+    "build:image": "npm run prepare:docker-context && docker build --platform linux/amd64 -f Dockerfile.coworld -t proxywar-coworld-local:latest .docker-context",
+    "certify": "mkdir -p tmp && TMPDIR=\"$PWD/tmp\" uvx --from coworld==0.1.15 coworld certify coworld/coworld_manifest.json --timeout-seconds 180",
+    "run:episode": "mkdir -p tmp && TMPDIR=\"$PWD/tmp\" uvx --from coworld==0.1.15 coworld run-episode coworld/coworld_manifest.json --verify-replay --timeout-seconds 3600"
+  },
+  "dependencies": {
+    "ajv": "^8.20.0",
+    "jszip": "^3.10.1"
+  }
+}

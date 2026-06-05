@@ -1,0 +1,20 @@
+FROM --platform=$TARGETPLATFORM node:24-bookworm-slim
+
+ENV GAME_ENV=dev
+ENV HUSKY=0
+ENV PROXYWAR_REPO=/app/proxywar
+
+WORKDIR /app/proxywar
+COPY proxywar/package.json proxywar/package-lock.json ./
+RUN npm ci
+COPY proxywar/ ./
+
+WORKDIR /app/integration
+COPY integration/package.json integration/package-lock.json ./
+RUN npm ci --ignore-scripts
+COPY integration/ ./
+
+WORKDIR /app/proxywar
+RUN COWORLD_PREWARM=1 PROXYWAR_REPO=/app/proxywar /app/proxywar/node_modules/.bin/tsx /app/integration/src/no-docker-coworld-episode.ts \
+  && (du -sh /tmp/tsx-* 2>/dev/null || true)
+CMD ["/app/proxywar/node_modules/.bin/tsx", "/app/integration/src/no-docker-coworld-episode.ts"]

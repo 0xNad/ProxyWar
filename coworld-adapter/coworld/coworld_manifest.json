@@ -1,0 +1,299 @@
+{
+  "$schema": "https://raw.githubusercontent.com/Metta-AI/coworld/main/src/coworld/coworld_manifest_schema.json",
+  "game": {
+    "name": "proxywar-local-poc",
+    "version": "0.0.1",
+    "description": "Local-only Proxy War Coworld proof of concept that preserves the LegalAction.id decision path.",
+    "owner": "local-proxywar-poc",
+    "runnable": {
+      "type": "game",
+      "image": "proxywar-coworld-local:latest",
+      "run": [
+        "/app/proxywar/node_modules/.bin/tsx",
+        "/app/integration/src/no-docker-coworld-episode.ts"
+      ],
+      "env": {}
+    },
+    "config_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "tokens",
+        "players",
+        "max_decision_steps",
+        "turns_per_decision_step",
+        "max_decision_ms",
+        "map",
+        "map_size",
+        "difficulty"
+      ],
+      "properties": {
+        "tokens": {
+          "type": "array",
+          "minItems": 2,
+          "maxItems": 2,
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "players": {
+          "type": "array",
+          "minItems": 2,
+          "maxItems": 2,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["name"],
+            "properties": {
+              "name": {
+                "type": "string",
+                "minLength": 1
+              }
+            }
+          }
+        },
+        "max_decision_steps": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 50
+        },
+        "turns_per_decision_step": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1000
+        },
+        "max_decision_ms": {
+          "type": "integer",
+          "minimum": 250,
+          "maximum": 180000
+        },
+        "map": {
+          "type": "string",
+          "enum": ["Pangaea", "Asia"]
+        },
+        "map_size": {
+          "type": "string",
+          "enum": ["Compact", "Normal"]
+        },
+        "difficulty": {
+          "type": "string",
+          "enum": ["Easy", "Medium"]
+        },
+        "replay_tail_turns": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 5000,
+          "default": 0
+        },
+        "player_connect_timeout_seconds": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 300,
+          "default": 120
+        }
+      }
+    },
+    "results_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "scores",
+        "winner_slot",
+        "turn_count",
+        "tick",
+        "decision_count",
+        "accepted_decision_count",
+        "fallback_count",
+        "players"
+      ],
+      "properties": {
+        "scores": {
+          "type": "array",
+          "minItems": 2,
+          "maxItems": 2,
+          "items": {
+            "type": "number"
+          }
+        },
+        "winner_slot": {
+          "type": ["integer", "null"],
+          "minimum": 0,
+          "maximum": 1
+        },
+        "turn_count": {
+          "type": ["integer", "null"],
+          "minimum": 0
+        },
+        "tick": {
+          "type": ["integer", "null"],
+          "minimum": 0
+        },
+        "decision_count": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "accepted_decision_count": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "fallback_count": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "players": {
+          "type": "array",
+          "minItems": 2,
+          "maxItems": 2,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["slot", "name", "score", "tiles_owned", "is_alive"],
+            "properties": {
+              "slot": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 1
+              },
+              "name": {
+                "type": "string"
+              },
+              "score": {
+                "type": "number"
+              },
+              "tiles_owned": {
+                "type": ["integer", "null"],
+                "minimum": 0
+              },
+              "is_alive": {
+                "type": ["boolean", "null"]
+              }
+            }
+          }
+        }
+      }
+    },
+    "protocols": {
+      "player": {
+        "type": "text",
+        "value": "Proxy War Coworld player protocol: connect to COWORLD_PLAYER_WS_URL. The game sends {type:'decision_request', requestID, request:{protocolVersion:'proxywar-agent-v1', observation, legalActions, responseContract}}. The player replies {type:'decision_response', requestID, selectedLegalActionId, reason, confidence?}. selectedLegalActionId must be one offered LegalAction.id from legalActions[].id. The game still validates through Proxy War AgentDecisionValidator."
+      },
+      "global": {
+        "type": "text",
+        "value": "Proxy War Coworld global protocol: /global sends JSON status snapshots and /replay sends the saved replay payload. Browser clients are minimal for the local POC."
+      }
+    },
+    "docs": {
+      "readme": {
+        "type": "text",
+        "value": "# Proxy War Coworld Local POC\n\nProxy War is a simultaneous-turn territorial strategy game. This local Coworld package is a proof of the Coworld game/player shape around the existing Proxy War runner. It preserves the existing LegalAction.id decision path and does not replace the external-agent beta path.\n\n## Rules Summary\n\nEach Coworld player controls one Proxy War slot. During a decision step, the game advances through the existing Proxy War game server and asks each connected player to choose from the current legal actions. The local smoke fixture uses a compact two-player map, a short decision horizon, and deterministic starter policies so certification can run quickly.\n\nA player may only select an action id that the game offered in the current request. The game passes that selected id back through Proxy War's existing AgentDecisionValidator, AgentLeagueMatchRunner, AgentRunner, and GameServer path. Invalid, stale, or missing selections are treated as fallback decisions by the adapter and are visible in the result artifact.\n\n## Player Protocol\n\nPlayers connect to COWORLD_PLAYER_WS_URL. The game sends decision_request messages containing protocolVersion, observation, legalActions, and responseContract fields. The player replies with decision_response, the same requestID, and selectedLegalActionId. selectedLegalActionId must match one offered legalActions[].id exactly.\n\nThe bundled starter player is proxywar-starter-websocket. It is intentionally simple: it reads the offered LegalAction.id values and chooses one legal id. It is useful for certification and local smoke tests, not for competitive play.\n\n## Scoring\n\nThe local POC writes one numeric score per policy slot in results.scores. If Proxy War reports a winner, that slot receives 1 and every other slot receives 0. If the smoke episode ends without a winner, each slot receives its normalized owned-territory share among policy slots. Scores sum to 1 in normal local proofs.\n\nThis scoring rule is locally verified for two-player and generated four-player FFA fixtures and is the shipped POC ranking scalar. Softmax can re-rank with a different scalar after upload by changing only the results.scores values, not the game/player contract or the LegalAction.id path.\n\n## Artifacts\n\nEach episode writes Coworld-compatible results, replay bytes, game/player logs, and Proxy War match artifacts. The local reporter, grader, diagnoser, and optimizer-plan runnables consume the episode bundle shape used by Coworld tooling. Reporter and grader contracts are locally exercised; diagnoser and optimizer are contract-shaped local proofs because Coworld 0.1.15 still marks those roles reserved or runtime-pending.\n\n## Local Status\n\nThis manifest is local-only. It has passed local Coworld certification and local run-episode replay verification, but it must not be described as fully hosted-compatible until Softmax upload, live ranking, final scoring confirmation, and hosted production resource measurements are proven."
+      }
+    }
+  },
+  "player": [
+    {
+      "id": "proxywar-starter-websocket",
+      "name": "Proxy War Starter Websocket Player",
+      "type": "player",
+      "image": "proxywar-coworld-local:latest",
+      "run": ["node", "/app/integration/src/starter-player.mjs"],
+      "description": "Minimal websocket player that chooses one offered LegalAction.id."
+    }
+  ],
+  "reporter": [
+    {
+      "id": "proxywar-summary-reporter",
+      "name": "Proxy War Summary Reporter",
+      "type": "reporter",
+      "image": "proxywar-coworld-local:latest",
+      "run": ["node", "/app/integration/src/proxywar-summary-reporter.mjs"],
+      "description": "Consumes a Coworld episode bundle and writes a report zip with Markdown and machine-readable summary outputs."
+    }
+  ],
+  "commissioner": [],
+  "grader": [
+    {
+      "id": "proxywar-episode-grader",
+      "name": "Proxy War Episode Grader",
+      "type": "grader",
+      "image": "proxywar-coworld-local:latest",
+      "run": ["node", "/app/integration/src/proxywar-episode-grader.mjs"],
+      "description": "Deterministic local proof grader for Coworld's contract-defined/runtime-pending grader role. Consumes an episode bundle and writes a 0..1 usefulness score JSON artifact."
+    }
+  ],
+  "diagnoser": [
+    {
+      "id": "proxywar-policy-diagnoser",
+      "name": "Proxy War Policy Diagnoser",
+      "type": "diagnoser",
+      "image": "proxywar-coworld-local:latest",
+      "run": ["node", "/app/integration/src/proxywar-policy-diagnoser.mjs"],
+      "description": "Local proof diagnoser for Coworld's reserved/tentative diagnoser contract. Consumes an episode bundle and target policy URI and writes a diagnosis zip."
+    }
+  ],
+  "optimizer": [
+    {
+      "id": "proxywar-optimizer-plan",
+      "name": "Proxy War Optimizer Plan",
+      "type": "optimizer",
+      "image": "proxywar-coworld-local:latest",
+      "run": ["node", "/app/integration/src/proxywar-optimizer-plan.mjs"],
+      "description": "Local proof optimizer-plan writer for Coworld's reserved/tentative optimizer role. Writes an advisory policy-iteration plan from report and diagnosis inputs."
+    }
+  ],
+  "variants": [
+    {
+      "id": "local-short-2p",
+      "name": "Local Short 2P",
+      "description": "Short deterministic two-policy Coworld smoke episode.",
+      "game_config": {
+        "players": [
+          {
+            "name": "Coworld Starter 1"
+          },
+          {
+            "name": "Coworld Starter 2"
+          }
+        ],
+        "max_decision_steps": 2,
+        "turns_per_decision_step": 25,
+        "max_decision_ms": 15000,
+        "map": "Pangaea",
+        "map_size": "Compact",
+        "difficulty": "Easy",
+        "replay_tail_turns": 0,
+        "player_connect_timeout_seconds": 120
+      }
+    }
+  ],
+  "certification": {
+    "game_config": {
+      "players": [
+        {
+          "name": "Coworld Starter 1"
+        },
+        {
+          "name": "Coworld Starter 2"
+        }
+      ],
+      "max_decision_steps": 2,
+      "turns_per_decision_step": 25,
+      "max_decision_ms": 15000,
+      "map": "Pangaea",
+      "map_size": "Compact",
+      "difficulty": "Easy",
+      "replay_tail_turns": 0,
+      "player_connect_timeout_seconds": 120
+    },
+    "players": [
+      {
+        "player_id": "proxywar-starter-websocket"
+      },
+      {
+        "player_id": "proxywar-starter-websocket"
+      }
+    ]
+  }
+}
