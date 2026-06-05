@@ -17,9 +17,9 @@ describe("AgentDemoServerJobs", () => {
     });
     const command = buildAgentDemoJobCommand(request);
 
-    expect(command.label).toContain("planner-codex-cli demo");
+    expect(command.label).toContain("planner-claude-cli demo");
     expect(command.args).toContain("src/scripts/ai-agent-league-smoke.ts");
-    expect(command.args).toContain("--brain=planner-codex-cli");
+    expect(command.args).toContain("--brain=planner-claude-cli");
     expect(command.args).toContain("--runner=step-locked");
     expect(command.args).toContain("--scenario=actions");
     expect(command.args).toContain("--max-steps=4");
@@ -205,8 +205,32 @@ describe("AgentDemoServerJobs", () => {
     expect(command.args).toContain("--max-decision-ms=45000");
   });
 
+  it("adds Claude CLI env and safety args without an LLM provider override for Claude jobs", () => {
+    const request = normalizeAgentDemoJobRequest({
+      kind: "demo",
+      brain: "planner-claude-cli",
+      scenario: "actions",
+    });
+    const command = buildAgentDemoJobCommand(request);
+
+    // The smoke runner builds the Claude provider from --brain=planner-claude-cli
+    // via createClaudeCliLlmProviderFromEnv(); it ignores AI_LEAGUE_LLM_PROVIDER,
+    // so the job command must NOT set it (setting it would mislead).
+    expect(command.env.AI_LEAGUE_LLM_PROVIDER).toBeUndefined();
+    expect(command.env.AI_LEAGUE_CLAUDE_TIMEOUT_MS).toBe("60000");
+    expect(command.env.AI_LEAGUE_REQUIRE_EXTERNAL_BRAIN_SUCCESS).toBe("true");
+    expect(command.args).toContain("--brain=planner-claude-cli");
+    expect(command.args).toContain("--disable-alliance-actions");
+    expect(command.args).toContain("--max-decision-ms=60000");
+  });
+
   it("loads the hosted house-agent brain from a controlled env value", () => {
-    expect(loadProxyWarHouseAgentBrain({})).toBe("planner-codex-cli");
+    expect(loadProxyWarHouseAgentBrain({})).toBe("planner-claude-cli");
+    expect(
+      loadProxyWarHouseAgentBrain({
+        PROXYWAR_HOUSE_AGENT_BRAIN: "planner-claude-cli",
+      }),
+    ).toBe("planner-claude-cli");
     expect(
       loadProxyWarHouseAgentBrain({
         PROXYWAR_HOUSE_AGENT_BRAIN: "planner-codex-cli",
@@ -218,12 +242,15 @@ describe("AgentDemoServerJobs", () => {
       }),
     ).toBe("codex-cli");
     expect(agentDemoBrainUsesCodex("planner-codex-cli")).toBe(true);
+    expect(agentDemoBrainUsesCodex("planner-claude-cli")).toBe(false);
     expect(agentDemoBrainUsesCodex("planner")).toBe(false);
     expect(() =>
       loadProxyWarHouseAgentBrain({
         PROXYWAR_HOUSE_AGENT_BRAIN: "planner",
       }),
-    ).toThrow(/must be one of codex-cli, planner-codex-cli/);
+    ).toThrow(
+      /must be one of codex-cli, planner-codex-cli, claude-cli, planner-claude-cli/,
+    );
     expect(() =>
       loadProxyWarHouseAgentBrain({
         PROXYWAR_HOUSE_AGENT_BRAIN: "planner; rm -rf /",

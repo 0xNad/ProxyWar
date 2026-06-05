@@ -1317,7 +1317,7 @@ export async function loadAgentDemoHubModel(
     jobs: (options.jobs ?? []).slice(0, options.limit ?? 50),
     manifests: await discoverManifests(manifestDir),
     savedNations: await listProxyWarNations(nationsDir),
-    houseAgentBrain: options.houseAgentBrain ?? "planner-codex-cli",
+    houseAgentBrain: options.houseAgentBrain ?? "planner-claude-cli",
   };
 }
 
@@ -1418,7 +1418,7 @@ export function renderAgentDemoHubHtml(model: AgentDemoHubModel): string {
     <section class="grid">
       <aside class="panel">
         <h2>Run A Match</h2>
-        <p class="hint">Starts the locked beta match: the latest saved tester agent plus one Codex agent against two Easy built-in nations until a winner emerges.</p>
+        <p class="hint">Starts the locked beta match: the latest saved tester agent plus one house agent against two Easy built-in nations until a winner emerges.</p>
         <form id="demo-form">
           <input type="hidden" name="kind" value="demo">
           <input type="hidden" name="agents" value="1">
@@ -1426,8 +1426,10 @@ export function renderAgentDemoHubHtml(model: AgentDemoHubModel): string {
           <input type="hidden" name="difficulty" value="Easy">
           <label for="brain">Brain</label>
           <select id="brain" name="brain">
-            <option value="codex-cli"${selectedAttribute(model.houseAgentBrain, "codex-cli")}>Codex CLI direct decisions</option>
+            <option value="planner-claude-cli"${selectedAttribute(model.houseAgentBrain, "planner-claude-cli")}>Claude CLI planner</option>
+            <option value="claude-cli"${selectedAttribute(model.houseAgentBrain, "claude-cli")}>Claude CLI direct decisions</option>
             <option value="planner-codex-cli"${selectedAttribute(model.houseAgentBrain, "planner-codex-cli")}>Codex CLI planner</option>
+            <option value="codex-cli"${selectedAttribute(model.houseAgentBrain, "codex-cli")}>Codex CLI direct decisions</option>
           </select>
           <label for="scenario">Scenario</label>
           <select id="scenario" name="scenario">
@@ -1729,11 +1731,15 @@ export function renderProxyWarPublicHtml(model: AgentDemoHubModel): string {
     feedbackOpened: latestFeedbackPreviewVisible,
   };
   const houseAgentBrainLabel =
-    model.houseAgentBrain === "planner-codex-cli"
-      ? "Codex CLI planner"
-      : model.houseAgentBrain === "codex-cli"
-        ? "Codex CLI direct decisions"
-        : "LLM-backed house agent";
+    model.houseAgentBrain === "planner-claude-cli"
+      ? "Claude CLI planner"
+      : model.houseAgentBrain === "claude-cli"
+        ? "Claude CLI direct decisions"
+        : model.houseAgentBrain === "planner-codex-cli"
+          ? "Codex CLI planner"
+          : model.houseAgentBrain === "codex-cli"
+            ? "Codex CLI direct decisions"
+            : "LLM-backed house agent";
   const publicCodexMatchRequestJson = JSON.stringify({
     ...proxyWarTesterSavedRosterJobDefaults,
     brain: model.houseAgentBrain,
@@ -2251,7 +2257,7 @@ export function renderProxyWarPublicHtml(model: AgentDemoHubModel): string {
           <div class="critical-flow" aria-label="Proxy War beta flow">
             <div class="flow-step"><b>Watch</b><span>Open the latest rendered replay first. This confirms what a successful run produces.</span></div>
             <div class="flow-step"><b>Connect</b><span>Paste one public <code>/agent-card.md</code> URL. The endpoint health check runs before match play.</span></div>
-            <div class="flow-step"><b>Run</b><span>Queue the saved tester agent with one Codex house agent against two Easy built-in nations.</span></div>
+            <div class="flow-step"><b>Run</b><span>Queue the saved tester agent with one house agent against two Easy built-in nations.</span></div>
           </div>
           <div class="actions hero-action-row">
             ${latestReplayLink !== null ? `<a class="button" href="${latestReplayLink}" target="_blank">Watch latest replay</a>` : `<a class="button" href="#connect">Paste Agent Card URL</a>`}
@@ -3136,7 +3142,7 @@ export function renderProxyWarPublicHtml(model: AgentDemoHubModel): string {
       const rosterWarning = initialSavedAgentCount === 0
         ? ""
         : "<br><span class=\\"pill\\">External agent saved</span> The latest saved tester agent enters this match with the Codex house agent.";
-      setElementStatus(statusElement, "<strong>" + escapeText(startLabel) + "</strong> Running the saved tester agent plus one Codex house agent against two Easy built-in nations until a winner emerges." + rosterWarning);
+      setElementStatus(statusElement, "<strong>" + escapeText(startLabel) + "</strong> Running the saved tester agent plus one house agent against two Easy built-in nations until a winner emerges." + rosterWarning);
       try {
         const response = await fetch("/api/jobs", {
           method: "POST",
@@ -3454,7 +3460,7 @@ export function renderProxyWarPublicHtmlLegacy(
         <li><div><strong>Copy the LLM starter agent</strong><span>Use the one-click command or starter server code below.</span></div></li>
         <li><div><strong>Test endpoint</strong><span>The health check proves strict LegalAction.id JSON before a match.</span></div></li>
         <li><div><strong>Save agent</strong><span>Keeps the endpoint available for protocol checks and future external-agent runs.</span></div></li>
-        <li><div><strong>Run first match</strong><span>Proxy War runs your saved external agent with one Codex agent against two Easy built-in nations and opens the rendered replay when ready.</span></div></li>
+        <li><div><strong>Run first match</strong><span>Proxy War runs your saved external agent with one house agent against two Easy built-in nations and opens the rendered replay when ready.</span></div></li>
         <li><div><strong>Send feedback</strong><span>Include the run id if anything is confusing, broken, or surprisingly fun.</span></div></li>
       </ol>
     </section>
@@ -3493,7 +3499,7 @@ export function renderProxyWarPublicHtmlLegacy(
         ? `<section id="active-job-banner" class="panel" style="margin-bottom:18px">
             <h2>Match Generation In Progress</h2>
             <p><span class="pill busy">${escapeHtml(activeJob.status)}</span> ${escapeHtml(activeJob.label)}</p>
-            <p class="hint">Codex matches can take several minutes. Keep this page open; it will update and open the rendered replay when the job finishes.</p>
+            <p class="hint">House-agent matches can take several minutes. Keep this page open; it will update and open the rendered replay when the job finishes.</p>
             <div id="active-job-status" class="inline-status">Checking job status...</div>
           </section>`
         : ""
@@ -3586,7 +3592,7 @@ export function renderProxyWarPublicHtmlLegacy(
                 <span id="wizard-save-state" class="pill warn step-state">not saved</span>
               </li>
               <li data-wizard-step="match">
-                <span><strong>Run first match</strong><small>Runs your saved external agent with one Codex agent against two Easy built-in nations.</small></span>
+                <span><strong>Run first match</strong><small>Runs your saved external agent with one house agent against two Easy built-in nations.</small></span>
                 <span id="wizard-match-state" class="pill warn step-state">waiting</span>
               </li>
             </ol>
@@ -3695,7 +3701,7 @@ export function renderProxyWarPublicHtmlLegacy(
 }</pre>
               </div>
             </div>
-            <p class="hint">Flow: start the agent, pass the starter self-test or Test Endpoint check, save the external agent, then run a Codex match.</p>
+            <p class="hint">Flow: start the agent, pass the starter self-test or Test Endpoint check, save the external agent, then run a house-agent match.</p>
           </section>
           <details class="protocol-card" open>
             <summary>Endpoint health-check contract</summary>
@@ -3720,7 +3726,7 @@ export function renderProxyWarPublicHtmlLegacy(
         <form id="demo-form" class="section">
           <h2>Run Codex Strategy Match</h2>
           <input type="hidden" name="kind" value="demo">
-          <input type="hidden" name="brain" value="planner-codex-cli">
+          <input type="hidden" name="brain" value="${escapeHtml(model.houseAgentBrain)}">
           <input type="hidden" name="scenario" value="actions">
           <input type="hidden" name="matchLength" value="full">
           <input type="hidden" name="roster" value="saved">
@@ -3732,11 +3738,11 @@ export function renderProxyWarPublicHtmlLegacy(
           <input type="hidden" name="bots" value="0">
           <input type="hidden" name="nations" value="2">
           <input type="hidden" name="difficulty" value="Easy">
-          <p class="hint">The locked beta default is the latest saved tester agent plus one Codex-backed in-house agent against two Easy built-in nations until a winner emerges. The rendered replay opens automatically when generation finishes.</p>
+          <p class="hint">The locked beta default is the latest saved tester agent plus one in-house agent against two Easy built-in nations until a winner emerges. The rendered replay opens automatically when generation finishes.</p>
           <button class="secondary" type="submit">Run Codex Match</button>
           <div id="demo-status" class="inline-status">
             <strong>Ready.</strong>
-            Press once, then wait here. The default beta run is locked to the saved tester agent, one Codex agent, and two Easy built-in nations; repeated clicks queue extra matches.
+            Press once, then wait here. The default beta run is locked to the saved tester agent, one house agent, and two Easy built-in nations; repeated clicks queue extra matches.
           </div>
           <p class="hint">House agents in this beta are Codex-backed; failed Codex setup should fail loudly instead of falling back to a local bot.</p>
         </form>
@@ -3887,7 +3893,7 @@ export function renderProxyWarPublicHtmlLegacy(
           setExternalCheckStatus(externalHealthCheckHtml(result));
           if (result.ok) {
             setWizardState(wizardTestState, "passed", "good");
-            setFirstMatchStatus('<strong>Endpoint passed.</strong><span class="hint">Save this external agent; the default beta match runs it with one Codex agent versus two Easy built-in nations.</span>');
+            setFirstMatchStatus('<strong>Endpoint passed.</strong><span class="hint">Save this external agent; the default beta match runs it with one house agent versus two Easy built-in nations.</span>');
             setStatus([
               "Endpoint health check: passed",
               "Selected: " + result.selectedLegalActionId,
@@ -3917,7 +3923,7 @@ export function renderProxyWarPublicHtmlLegacy(
       runExternalMatchButton.addEventListener("click", async () => {
         runExternalMatchButton.disabled = true;
         setWizardState(wizardMatchState, "queued", "busy");
-        setFirstMatchStatus('<strong>Starting Codex match...</strong><span class="hint">The locked beta default is the saved tester agent plus one Codex agent against two Easy built-in nations until a winner emerges.</span>');
+        setFirstMatchStatus('<strong>Starting house-agent match...</strong><span class="hint">The locked beta default is the saved tester agent plus one house agent against two Easy built-in nations until a winner emerges.</span>');
         try {
           const response = await fetch("/api/jobs", {
             method: "POST",

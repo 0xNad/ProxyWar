@@ -29,11 +29,22 @@ describe("Proxy War closed beta docs and commands", () => {
 
     expect(scripts["agent:closed-beta"]).toContain("PROXYWAR_BETA_ENABLED");
     expect(scripts["agent:closed-beta"]).toContain(
-      "PROXYWAR_HOUSE_AGENT_BRAIN=planner-codex-cli",
+      "PROXYWAR_HOUSE_AGENT_BRAIN=planner-claude-cli",
     );
-    expect(scripts["agent:closed-beta"]).toContain("AI_LEAGUE_LLM_PROVIDER=codex-cli");
+    expect(scripts["agent:closed-beta"]).toContain(
+      "AI_LEAGUE_CLAUDE_TIMEOUT_MS=60000",
+    );
+    expect(scripts["agent:closed-beta"]).not.toContain(
+      "AI_LEAGUE_LLM_PROVIDER=codex-cli",
+    );
     expect(scripts["agent:closed-beta"]).not.toContain("frontier-beta");
     expect(scripts["agent:beta"]).toBe(scripts["agent:closed-beta"]);
+    expect(scripts["agent:closed-beta:codex"]).toContain(
+      "PROXYWAR_HOUSE_AGENT_BRAIN=planner-codex-cli",
+    );
+    expect(scripts["agent:closed-beta:codex"]).toContain(
+      "AI_LEAGUE_LLM_PROVIDER=codex-cli",
+    );
     expect(scripts["agent:closed-beta:lan"]).toContain("AI_LEAGUE_DEMO_HOST=0.0.0.0");
     expect(scripts["agent:closed-beta:remote"]).toContain(
       "proxywar-remote-beta.ts",

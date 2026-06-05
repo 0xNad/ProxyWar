@@ -58,6 +58,54 @@ describe("ProxyWarHostedBetaReadiness", () => {
     expect(hostedBetaReadinessExitCode(report)).toBe(0);
   });
 
+  it("marks a Claude CLI planner house brain as a ready release without requiring Codex CLI", () => {
+    const report = buildProxyWarHostedBetaReadinessReport({
+      publicReadiness: publicReport("ready"),
+      publicUrl: "https://beta.proxywar.example",
+      allowPrivateAgentEndpoints: false,
+      houseAgentBrain: "planner-claude-cli",
+      codexCli: {
+        required: false,
+        command: null,
+        available: false,
+      },
+      externalAgentDecisionTimeoutMs: 15_000,
+      maxQueuedJobs: 1,
+      rateLimits: {
+        betaLogin: 20,
+        jobs: 8,
+        nations: 24,
+        externalCheck: 40,
+        feedback: 20,
+      },
+      paths: {
+        artifactsWritable: true,
+        jobsWritable: true,
+        feedbackWritable: true,
+        secretsWritable: true,
+        backupWritable: true,
+        backupRootConfigured: true,
+      },
+      requiredFiles: {
+        publicDocs: ["PROXYWAR_START_HERE.md"],
+        externalAgentExamples: ["simple-agent.mjs"],
+        deploymentFiles: ["proxywar-beta.env.example"],
+      },
+      git: {
+        commit: "abc123",
+        originUrl: "git@github.com:0xNad/ProxyWar.git",
+      },
+      now: new Date("2026-05-25T10:00:00.000Z"),
+    });
+
+    expect(report.status).toBe("ready");
+    expect(check(report, "house_agent_brain").status).toBe("pass");
+    expect(check(report, "house_agent_brain").message).toContain("Claude CLI");
+    expect(check(report, "codex_cli").status).toBe("pass");
+    expect(check(report, "codex_cli").message).toContain("not required");
+    expect(hostedBetaReadinessExitCode(report)).toBe(0);
+  });
+
   it("blocks placeholder domains, private endpoints, disabled limits, and missing files", () => {
     const report = buildProxyWarHostedBetaReadinessReport({
       publicReadiness: publicReport("blocked", [

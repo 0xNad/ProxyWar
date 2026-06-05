@@ -295,22 +295,31 @@ function privateEndpointLockCheck(
 function houseAgentBrainCheck(
   houseAgentBrain: string,
 ): ProxyWarHostedBetaReadinessCheck {
+  if (houseAgentBrain === "planner-claude-cli") {
+    return {
+      id: "house_agent_brain",
+      label: "House agent brain",
+      status: "pass",
+      message:
+        "Tester matches default to Claude CLI planner house agents; the server only enforces the legal-action boundary.",
+    };
+  }
   if (houseAgentBrain === "planner-codex-cli") {
     return {
       id: "house_agent_brain",
       label: "House agent brain",
       status: "pass",
       message:
-        "Tester matches default to Codex CLI planner house agents; the server only enforces the legal-action boundary.",
+        "Codex CLI planner house agents are still supported, though Codex is being phased out for the house agent in favor of the Claude CLI planner; the server only enforces the legal-action boundary.",
     };
   }
-  if (houseAgentBrain === "codex-cli") {
+  if (houseAgentBrain === "codex-cli" || houseAgentBrain === "claude-cli") {
     return {
       id: "house_agent_brain",
       label: "House agent brain",
       status: "warn",
       message:
-        "Codex direct-action mode is enabled. This is LLM-backed, but planner mode is preferred for the beta.",
+        "Direct-action LLM mode is enabled. This is LLM-backed, but planner mode is preferred for the beta.",
     };
   }
   return {
@@ -318,7 +327,7 @@ function houseAgentBrainCheck(
     label: "House agent brain",
     status: "fail",
     message:
-      "House agents must be LLM-backed. Note: Codex CLI is being deprecated for the house agent due to ChatGPT-account model/quota limits; a Claude-CLI house brain is the planned replacement once available. Until then, set PROXYWAR_HOUSE_AGENT_BRAIN to an LLM-backed brain before sharing the beta.",
+      "House agents must be LLM-backed. Set PROXYWAR_HOUSE_AGENT_BRAIN to planner-claude-cli (recommended); planner-codex-cli is still supported.",
   };
 }
 

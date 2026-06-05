@@ -14,6 +14,8 @@ export type AgentDemoBrain =
   | "planner"
   | "codex-cli"
   | "planner-codex-cli"
+  | "claude-cli"
+  | "planner-claude-cli"
   | "external-http";
 
 export type AgentDemoScenario = "normal" | "actions" | "attack" | "stepped";
@@ -83,11 +85,15 @@ const brains: readonly AgentDemoBrain[] = [
   "planner",
   "codex-cli",
   "planner-codex-cli",
+  "claude-cli",
+  "planner-claude-cli",
   "external-http",
 ];
 const houseAgentBrains: readonly AgentDemoBrain[] = [
   "codex-cli",
   "planner-codex-cli",
+  "claude-cli",
+  "planner-claude-cli",
 ];
 const scenarios: readonly AgentDemoScenario[] = [
   "normal",
@@ -110,6 +116,7 @@ const defaultManifestDir = path.join(
 );
 const fullMatchDecisionSchedule = "25x20,100x30,250x40,500x150,100x160";
 const defaultCodexDecisionTimeoutMs = "45000";
+const defaultClaudeDecisionTimeoutMs = "60000";
 const defaultExternalAgentDecisionTimeoutMs = "15000";
 const fullMatchWinnerFailSafeSteps = 700;
 
@@ -146,7 +153,7 @@ export function normalizeAgentDemoJobRequest(
     brain: enumValue(
       raw.brain,
       brains,
-      kind === "demo" ? "planner-codex-cli" : "mock-llm",
+      kind === "demo" ? "planner-claude-cli" : "mock-llm",
     ),
     scenario: enumValue(raw.scenario, scenarios, "actions"),
     roster: enumValue(
@@ -208,7 +215,7 @@ export function loadProxyWarHouseAgentBrain(
   return enumValue(
     env.PROXYWAR_HOUSE_AGENT_BRAIN,
     houseAgentBrains,
-    "planner-codex-cli",
+    "planner-claude-cli",
   );
 }
 
@@ -243,6 +250,34 @@ export function buildAgentDemoJobCommand(
           AI_LEAGUE_CODEX_APP_SERVER_IDLE_CLOSE_MS:
             process.env.AI_LEAGUE_CODEX_APP_SERVER_IDLE_CLOSE_MS ??
             String(DEFAULT_CODEX_APP_SERVER_IDLE_CLOSE_MS),
+          AI_LEAGUE_REQUIRE_EXTERNAL_BRAIN_SUCCESS: "true",
+        }
+      : {}),
+    // NOTE: the Claude brain provider is built by the smoke runner directly from
+    // --brain=planner-claude-cli via createClaudeCliLlmProviderFromEnv(); it does
+    // NOT read AI_LEAGUE_LLM_PROVIDER, so we must not set that here.
+    ...(usesClaude(request.brain)
+      ? {
+          AI_LEAGUE_CLAUDE_TIMEOUT_MS:
+            process.env.AI_LEAGUE_CLAUDE_TIMEOUT_MS ??
+            process.env.AI_LEAGUE_LLM_TIMEOUT_MS ??
+            defaultClaudeDecisionTimeoutMs,
+          ...(process.env.AI_LEAGUE_CLAUDE_MODEL ??
+          process.env.AI_LEAGUE_LLM_MODEL
+            ? {
+                AI_LEAGUE_CLAUDE_MODEL: (process.env.AI_LEAGUE_CLAUDE_MODEL ??
+                  process.env.AI_LEAGUE_LLM_MODEL) as string,
+              }
+            : {}),
+          ...(process.env.AI_LEAGUE_CLAUDE_COMMAND
+            ? { AI_LEAGUE_CLAUDE_COMMAND: process.env.AI_LEAGUE_CLAUDE_COMMAND }
+            : {}),
+          ...(process.env.AI_LEAGUE_CLAUDE_DISALLOWED_TOOLS
+            ? {
+                AI_LEAGUE_CLAUDE_DISALLOWED_TOOLS:
+                  process.env.AI_LEAGUE_CLAUDE_DISALLOWED_TOOLS,
+              }
+            : {}),
           AI_LEAGUE_REQUIRE_EXTERNAL_BRAIN_SUCCESS: "true",
         }
       : {}),
@@ -293,7 +328,7 @@ export function buildAgentDemoJobCommand(
 
   if (request.brain === "external-http") {
     throw new Error(
-      "External agents enter beta matches through saved roster manifests. Use brain=planner-codex-cli with roster=saved.",
+      "External agents enter beta matches through saved roster manifests. Use brain=planner-claude-cli with roster=saved.",
     );
   }
 
@@ -317,7 +352,7 @@ function fullAgentLeagueDemoArgs(
 ): string[] {
   if (request.brain === "external-http") {
     throw new Error(
-      "External agents enter full beta matches through saved roster manifests. Use brain=planner-codex-cli with roster=saved.",
+      "External agents enter full beta matches through saved roster manifests. Use brain=planner-claude-cli with roster=saved.",
     );
   }
   return [
@@ -346,6 +381,12 @@ function fullAgentLeagueDemoArgs(
       ? [
           "--disable-alliance-actions",
           `--max-decision-ms=${process.env.AI_LEAGUE_CODEX_TIMEOUT_MS ?? defaultCodexDecisionTimeoutMs}`,
+        ]
+      : []),
+    ...(usesClaude(request.brain)
+      ? [
+          "--disable-alliance-actions",
+          `--max-decision-ms=${claudeDecisionTimeoutMs()}`,
         ]
       : []),
     ...(request.roster === "manifest" || request.roster === "saved"
@@ -391,6 +432,10 @@ function demoArgs(
       `--max-decision-ms=${process.env.AI_LEAGUE_CODEX_TIMEOUT_MS ?? defaultCodexDecisionTimeoutMs}`,
     );
   }
+  if (usesClaude(request.brain)) {
+    args.push("--disable-alliance-actions");
+    args.push(`--max-decision-ms=${claudeDecisionTimeoutMs()}`);
+  }
   if (request.roster === "manifest" || request.roster === "saved") {
     args.push(
       `--agent-manifest-dir=${
@@ -410,6 +455,18 @@ function nationsArgValue(value: number | undefined): string {
 
 function usesCodex(brain: AgentDemoBrain): boolean {
   return brain === "codex-cli" || brain === "planner-codex-cli";
+}
+
+function usesClaude(brain: AgentDemoBrain): boolean {
+  return brain === "claude-cli" || brain === "planner-claude-cli";
+}
+
+function claudeDecisionTimeoutMs(): string {
+  return (
+    process.env.AI_LEAGUE_CLAUDE_TIMEOUT_MS ??
+    process.env.AI_LEAGUE_LLM_TIMEOUT_MS ??
+    defaultClaudeDecisionTimeoutMs
+  );
 }
 
 function enumValue<T extends string>(
