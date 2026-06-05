@@ -19,7 +19,9 @@ export function loadProxyWarDemoServerNetworkConfig(
   return {
     host: normalizeHost(env.AI_LEAGUE_DEMO_HOST),
     port: positiveInt(env.AI_LEAGUE_DEMO_PORT, 8787),
-    publicUrl: normalizeBaseUrl(env.PROXYWAR_PUBLIC_URL),
+    publicUrl: normalizeBaseUrl(
+      firstNonEmpty(env.PROXYWAR_PUBLIC_URL),
+    ),
   };
 }
 
@@ -80,6 +82,13 @@ function positiveInt(value: string | undefined, fallback: number): number {
   if (value === undefined) return fallback;
   const parsed = Number(value);
   return Number.isFinite(parsed) && parsed > 0 ? Math.trunc(parsed) : fallback;
+}
+
+function firstNonEmpty(...values: Array<string | undefined>): string | undefined {
+  for (const value of values) {
+    if (value !== undefined && value.trim() !== "") return value.trim();
+  }
+  return undefined;
 }
 
 function normalizeHost(value: string | undefined): string {

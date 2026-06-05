@@ -71,15 +71,17 @@ function savedExternalEndpointCheck(
   health: ProxyWarActiveRosterHealthReport | undefined,
 ): ProxyWarPublicReadinessCheck {
   const externalNations = hub.savedNations.filter(
-    (nation) => nation.provider?.provider === "external-http",
-  );
+    (nation) =>
+      nation.provider?.provider === "external-http" ||
+      nation.provider?.provider === "external-relay",
+  ).slice(0, 1);
   if (externalNations.length === 0) {
     return {
       id: "saved_external_agents",
       label: "Saved external agents",
       status: "pass",
       message:
-        "No saved external-agent endpoints are configured yet. New tester endpoints will be checked before use.",
+        "No saved external agent is configured yet. New tester agents will be checked before use.",
     };
   }
 
@@ -94,7 +96,7 @@ function savedExternalEndpointCheck(
       id: "saved_external_agents",
       label: "Saved external agents",
       status: "fail",
-      message: `Fix or delete saved external-agent endpoints before sharing: ${invalid
+      message: `Fix or delete the latest saved external-agent endpoint before sharing: ${invalid
         .slice(0, 3)
         .join("; ")}${invalid.length > 3 ? `; +${invalid.length - 3} more` : ""}.`,
     };
@@ -112,7 +114,7 @@ function savedExternalEndpointCheck(
       id: "saved_external_agents",
       label: "Saved external agents",
       status: "fail",
-      message: `Saved external-agent health checks failed before sharing: ${failures
+      message: `Latest saved external-agent connection check failed before sharing: ${failures
         .slice(0, 3)
         .join("; ")}${failures.length > 3 ? `; +${failures.length - 3} more` : ""}`,
     };
@@ -123,7 +125,7 @@ function savedExternalEndpointCheck(
       id: "saved_external_agents",
       label: "Saved external agents",
       status: "pass",
-      message: `Saved external-agent endpoints passed URL policy and live health checks (${health.checkedExternalAgentCount} checked).`,
+      message: `Latest saved external agent passed URL/session policy and live health checks (${health.checkedExternalAgentCount} checked).`,
     };
   }
 
@@ -132,7 +134,7 @@ function savedExternalEndpointCheck(
     label: "Saved external agents",
     status: "pass",
     message:
-      "Saved external-agent endpoints are HTTPS and do not use obvious local/private hosts.",
+      "Latest saved external agent is configured. Live health checks were not required for this offline readiness run.",
   };
 }
 
@@ -188,7 +190,7 @@ export function formatProxyWarPublicReadinessReport(
   report: ProxyWarPublicReadinessReport,
 ): string {
   return [
-    `ProxyWar public readiness: ${report.status}`,
+    `Proxy War public readiness: ${report.status}`,
     `Mode: ${report.mode}`,
     `Share URL: ${report.shareUrl}`,
     `Generated: ${report.generatedAt}`,

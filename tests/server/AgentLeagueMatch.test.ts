@@ -30,6 +30,7 @@ import { GameEnv, ServerConfig } from "../../src/core/configuration/Config";
 import { Executor } from "../../src/core/execution/ExecutionManager";
 import {
   Difficulty,
+  Game,
   GameMapSize,
   GameMapType,
   GameMode,
@@ -57,7 +58,10 @@ import { runAgentStepLockedLeague } from "../../src/server/agents/AgentStepLocke
 import { LlmAgentBrain } from "../../src/server/agents/LlmAgentBrain";
 import { LegalActionBuilder } from "../../src/server/agents/LegalActionBuilder";
 import { MockLlmProvider } from "../../src/server/agents/MockLlmProvider";
-import { LegalAction } from "../../src/server/agents/AgentTypes";
+import {
+  AgentDecision,
+  LegalAction,
+} from "../../src/server/agents/AgentTypes";
 import { GameServer } from "../../src/server/GameServer";
 import { setup } from "../util/Setup";
 
@@ -68,6 +72,22 @@ function makeLogger(): Logger {
     warn: vi.fn(),
     error: vi.fn(),
   } as unknown as Logger;
+}
+
+function deferredDecision(
+  actionID: string,
+  reason: string,
+): {
+  promise: Promise<AgentDecision>;
+  resolve: () => void;
+} {
+  let resolvePromise: (decision: AgentDecision) => void = () => {};
+  return {
+    promise: new Promise((resolve) => {
+      resolvePromise = resolve;
+    }),
+    resolve: () => resolvePromise({ actionID, reason }),
+  };
 }
 
 const serverConfig = {
@@ -106,7 +126,19 @@ describe("AgentLeagueMatchRunner", () => {
       maxCandidates: 500,
     });
     const specs = createDefaultAgentSpecs(4);
-    const participants = createAgentParticipants(specs, log);
+    const participants = createAgentParticipants(specs, log, {
+      brainFactory: (spec) =>
+        new LlmAgentBrain({
+          provider: new MockLlmProvider({
+            mode: "valid",
+            preferKind:
+              spec.profile === "diplomatic" ? "alliance_request" : undefined,
+          }),
+          profile: spec.profile,
+          brainType: "mock-llm",
+          providerTimeoutMs: 100,
+        }),
+    });
     const game = new GameServer(
       "AGENT002",
       log,
@@ -201,6 +233,79 @@ describe("AgentLeagueMatchRunner", () => {
       expect(records.every((record) => record.intent?.type === "spawn")).toBe(
         true,
       );
+    } finally {
+      await game.end({ archive: false });
+    }
+  });
+
+  it("requests all participant decisions in parallel before applying them in roster order", async () => {
+    const log = makeLogger();
+    const legalActions: LegalAction[] = [
+      {
+        id: "hold",
+        kind: "hold",
+        label: "Hold",
+        intent: null,
+        risk: { level: "none", score: 0 },
+      },
+    ];
+    const calls: string[] = [];
+    const deferred = [
+      deferredDecision("hold", "first held"),
+      deferredDecision("hold", "second held"),
+    ];
+    const participants = createAgentParticipants(
+      [
+        { username: "Slow Agent", profile: "opportunistic" },
+        { username: "Other Agent", profile: "aggressive" },
+      ],
+      log,
+      {
+        brainFactory: (spec, index) => ({
+          brainType: "rule",
+          decide: () => {
+            calls.push(spec.username);
+            return deferred[index].promise;
+          },
+        }),
+      },
+    );
+    const game = new GameServer(
+      "AGENT_PARALLEL",
+      log,
+      Date.now(),
+      serverConfig,
+      gameConfig,
+    );
+    const match = new AgentLeagueMatchRunner({
+      game,
+      participants,
+      spawnCandidates: [],
+      log,
+      legalActionBuilder: {
+        build: () => legalActions,
+      } as unknown as LegalActionBuilder,
+    });
+
+    try {
+      const recordsPromise = match.runDecisionTurn({ turnNumber: 2 });
+      await Promise.resolve();
+
+      expect(calls).toEqual(["Slow Agent", "Other Agent"]);
+
+      deferred[1].resolve();
+      await Promise.resolve();
+      deferred[0].resolve();
+      const records = await recordsPromise;
+
+      expect(records.map((record) => record.username)).toEqual([
+        "Slow Agent",
+        "Other Agent",
+      ]);
+      expect(records.map((record) => record.chosenActionID)).toEqual([
+        "hold",
+        "hold",
+      ]);
     } finally {
       await game.end({ archive: false });
     }
@@ -318,7 +423,19 @@ describe("AgentLeagueMatchRunner", () => {
       maxCandidates: 500,
     });
     const specs = createDefaultAgentSpecs(4);
-    const participants = createAgentParticipants(specs, log);
+    const participants = createAgentParticipants(specs, log, {
+      brainFactory: (spec) =>
+        new LlmAgentBrain({
+          provider: new MockLlmProvider({
+            mode: "valid",
+            preferKind:
+              spec.profile === "diplomatic" ? "alliance_request" : undefined,
+          }),
+          profile: spec.profile,
+          brainType: "mock-llm",
+          providerTimeoutMs: 100,
+        }),
+    });
     const game = new GameServer(
       "AGENT003",
       log,
@@ -1045,6 +1162,47 @@ describe("AgentLeagueMatchRunner", () => {
       await game.end({ archive: false });
     }
   }, 600_000);
+
+  it("fails winner-required step-locked runs that hit the fail-safe without a winner", async () => {
+    const log = makeLogger();
+    const activeGame = {
+      inSpawnPhase: () => false,
+      getWinner: () => null,
+      ticks: () => 10,
+    } as unknown as Game;
+    const game = {
+      advanceTurnsForTesting: vi.fn(),
+    } as unknown as GameServer;
+    const mirror = {
+      ingest: vi.fn(async () => 0),
+      gameState: vi.fn(() => activeGame),
+      turnCount: vi.fn(() => 1),
+      pendingTurns: vi.fn(() => 0),
+    } as unknown as AgentLocalGameMirror;
+    const league = {
+      runOpeningTurn: vi.fn(async () => []),
+      runDecisionTurn: vi.fn(async () => []),
+    } as unknown as AgentLeagueMatchRunner;
+
+    await expect(
+      runAgentStepLockedLeague({
+        league,
+        game,
+        mirror,
+        messages: () => [],
+        config: {
+          turnsPerDecisionStep: 25,
+          turnsPerDecisionSchedule: [25],
+          maxSteps: 1,
+          maxSpawnAdvanceTurns: 2_000,
+          maxDecisionMs: 100,
+          requireWinner: true,
+          waitForMirrorCatchup: true,
+        },
+        log,
+      }),
+    ).rejects.toThrow(/without a winner/);
+  });
 });
 
 function spawnIntent(record: { intent: AgentLeagueMatchIntent }) {

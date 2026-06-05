@@ -46,7 +46,7 @@ if (options.checkOnly) {
   const tunnelReady =
     options.provider === "none" ? true : await commandExists(options.provider);
   const readiness = await loadRemoteReadinessReport();
-  console.log("ProxyWar remote beta check");
+  console.log("Proxy War remote beta check");
   console.log(`Local URL: ${urls.localUrl}/public`);
   console.log(`Tunnel provider: ${options.provider}`);
   console.log(`Tunnel command available: ${tunnelReady ? "yes" : "no"}`);
@@ -85,7 +85,7 @@ children.push(server);
 server.stdout.on("data", (chunk: Buffer) => process.stdout.write(chunk));
 server.stderr.on("data", (chunk: Buffer) => process.stderr.write(chunk));
 server.on("error", (error) => {
-  console.error(`ProxyWar beta server failed to start: ${error.message}`);
+  console.error(`Proxy War beta server failed to start: ${error.message}`);
 });
 
 if (options.provider === "cloudflared") {

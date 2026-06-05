@@ -1,7 +1,7 @@
 {
   "name": "proxywar-agent-starter",
   "version": "0.1.0",
-  "description": "LLM-backed external agent starter for ProxyWar matches.",
+  "description": "LLM-backed external agent starter for Proxy War matches.",
   "type": "module",
   "license": "AGPL-3.0-or-later",
   "repository": {
@@ -14,9 +14,11 @@
     "README.md",
     "LICENSE",
     "launch.sh",
+    "bootstrap.sh",
     "agent-policy.mjs",
     "manifest.example.json",
     "simple-agent.mjs",
+    "relay-worker.mjs",
     "smoke-test.mjs",
     "starter-framework.mjs",
     ".env.example"
@@ -24,6 +26,7 @@
   "exports": {
     ".": "./starter-framework.mjs",
     "./agent-policy": "./agent-policy.mjs",
+    "./relay-worker": "./relay-worker.mjs",
     "./simple-agent": "./simple-agent.mjs"
   },
   "bin": {
@@ -32,8 +35,9 @@
   "scripts": {
     "launch": "bash ./launch.sh",
     "start": "node simple-agent.mjs",
+    "relay": "node relay-worker.mjs",
     "self-test": "node smoke-test.mjs",
-    "check": "node --check simple-agent.mjs && node --check smoke-test.mjs && node --check starter-framework.mjs && node -e \"import('./starter-framework.mjs').then((m)=>{if(!m.createStarterAgent||!m.validateDecisionOutput||!m.createHealthResponse||!m.createLlmCompleteFromEnv) throw new Error('starter exports missing'); console.log('starter exports ok')})\"",
+    "check": "node --check simple-agent.mjs && node --check relay-worker.mjs && node --check smoke-test.mjs && node --check starter-framework.mjs && node -e \"import('./starter-framework.mjs').then((m)=>{if(!m.createStarterAgent||!m.validateDecisionOutput||!m.createHealthResponse||!m.createLlmCompleteFromEnv) throw new Error('starter exports missing'); console.log('starter exports ok')})\"",
     "test": "npm run check"
   },
   "engines": {

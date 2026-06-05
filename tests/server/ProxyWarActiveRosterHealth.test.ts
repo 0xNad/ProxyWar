@@ -31,6 +31,20 @@ const mockManifest: AgentManifest = {
   provider: { provider: "mock-llm" },
 };
 
+const relayManifest: AgentManifest = {
+  schemaVersion: 1,
+  agentName: "Relay Tester",
+  profile: "opportunistic",
+  brainType: "external-relay",
+  provider: {
+    provider: "external-relay",
+    relayBaseUrl: "https://beta.example.test",
+    sessionID: "relay_1234567890abcdef12345678",
+    token: "relay-token",
+    timeoutMs: 120_000,
+  },
+};
+
 describe("ProxyWarActiveRosterHealth", () => {
   it("health-checks saved external endpoints before a saved-roster run", async () => {
     const checked: string[] = [];
@@ -78,8 +92,49 @@ describe("ProxyWarActiveRosterHealth", () => {
         checkEndpoint,
       }),
     ).rejects.toThrow(
-      'Saved external agent "Fresh Endpoint" did not pass endpoint health check: network timeout after 1500ms. Fix: Restart the endpoint or delete this saved agent.',
+      'Saved external agent "Fresh Endpoint" did not pass connection health check: network timeout after 1500ms. Fix: Restart the endpoint or delete this saved agent.',
     );
+  });
+
+  it("reports a clear failure when a saved relay session is not live", async () => {
+    const report = await checkProxyWarActiveRosterExternalEndpoints(
+      [relayManifest],
+      { relaySessionExists: () => false },
+    );
+
+    expect(report.ok).toBe(false);
+    expect(report.checkedExternalAgentCount).toBe(1);
+    expect(report.issues).toEqual([
+      {
+        agentName: "Relay Tester",
+        endpoint:
+          "https://beta.example.test/api/agent-relay/sessions/relay_1234567890abcdef12345678",
+        failureReason: "managed relay session is not active",
+        fixHint:
+          "Rerun the /agent-start.sh bootstrap command so the tester worker creates a fresh relay session.",
+      },
+    ]);
+    await expect(
+      assertProxyWarActiveRosterExternalEndpointsHealthy([relayManifest], {
+        relaySessionExists: () => false,
+      }),
+    ).rejects.toThrow(
+      'Saved external agent "Relay Tester" did not pass connection health check: managed relay session is not active. Fix: Rerun the /agent-start.sh bootstrap command so the tester worker creates a fresh relay session.',
+    );
+  });
+
+  it("passes saved relay agents when the relay session is live", async () => {
+    const report = await checkProxyWarActiveRosterExternalEndpoints(
+      [relayManifest],
+      {
+        relaySessionExists: (sessionID) =>
+          sessionID === "relay_1234567890abcdef12345678",
+      },
+    );
+
+    expect(report.ok).toBe(true);
+    expect(report.checkedExternalAgentCount).toBe(1);
+    expect(report.issues).toEqual([]);
   });
 
   it("normalizes provider token references for operator-owned saved agents", () => {

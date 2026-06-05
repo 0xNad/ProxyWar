@@ -51,7 +51,7 @@ async function run() {
     runs: artifacts,
   });
 
-  console.log("ProxyWar evaluation result", {
+  console.log("Proxy War evaluation result", {
     evalID,
     brain,
     scenario,

@@ -12,7 +12,7 @@ const result = await writeAgentDemoIndex({
   limit,
 });
 
-console.log("ProxyWar demo index generated", {
+console.log("Proxy War demo index generated", {
   indexPath: result.indexPath,
   runCount: result.runs.length,
 });

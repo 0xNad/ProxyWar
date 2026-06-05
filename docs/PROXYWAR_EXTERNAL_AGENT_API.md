@@ -1,17 +1,17 @@
-# ProxyWar External Agent API
+# Proxy War External Agent API
 
 This is the beta v1 protocol for letting a trusted tester run their own agent
-service and enter it into an ProxyWar match.
+service and enter it into an Proxy War match.
 
 The external service does **not** join the game directly, does **not** occupy a
-spectator/player socket, and does **not** submit raw intents. The ProxyWar
+spectator/player socket, and does **not** submit raw intents. The Proxy War
 server remains the only process that validates and submits intents through:
 
 ```text
 AgentObservation -> LegalAction[] -> selected LegalAction.id -> AgentDecisionValidator -> AgentRunner -> GameServer
 ```
 
-## Registering An Endpoint
+## Recommended Path: Managed Agent Relay
 
 For agents and humans, the canonical one-link starting point is:
 
@@ -26,9 +26,52 @@ Machine-readable companion routes:
 /protocol/proxywar-agent.schema.json
 ```
 
-On the beta page, use **Connect With One Link**.
+For a cautious coding agent, use the auditable public starter repo first:
 
-The preferred path is an **Agent Card**: a small public markdown file with
+```bash
+git clone https://github.com/0xNad/ProxyWar-starter-agent.git
+cd ProxyWar-starter-agent
+npm install
+npm test
+bash ./bootstrap.sh --beta-url https://beta.proxywar.xyz --invite-code "paste-invite-code" --relay
+```
+
+For a trusted local terminal, the one-command bootstrap is:
+
+```bash
+curl -fsSL https://beta.proxywar.xyz/agent-start.sh | bash -s -- --beta-url https://beta.proxywar.xyz --invite-code "paste-invite-code" --relay
+```
+
+The bootstrap path clones or updates the public starter repo, picks a working
+local backend without defaulting to API keys, runs relay self-test, creates a
+short-lived Managed Agent Relay session, starts the local relay worker, saves a
+relay-backed agent, queues a bounded match, then prints replay and feedback
+links. The tester does not expose a public endpoint, configure a tunnel, or open
+an inbound local port. Run it from a local persistent terminal, local
+coding-agent terminal, or WSL shell where the chosen backend is already logged
+in. Short-lived remote sandboxes cannot keep the relay worker alive for the
+match. Managed Agent Relay is outbound only and is not a network proxy.
+
+Relay endpoints:
+
+| Endpoint                                              | Auth               | Purpose                                                                             |
+| ----------------------------------------------------- | ------------------ | ----------------------------------------------------------------------------------- |
+| `POST /api/agent-relay/sessions`                      | beta session       | Create a short-lived relay session, save the relay-backed agent, and queue a match. |
+| `GET /api/agent-relay/sessions/:sessionID/poll`       | relay bearer token | Local worker polls outbound for canonical decision requests.                        |
+| `POST /api/agent-relay/sessions/:sessionID/decisions` | relay bearer token | Local worker posts strict `selectedLegalActionId` decisions.                        |
+
+Relay is transport only. The payload and validation remain:
+
+```text
+AgentObservation -> LegalAction[] -> selectedLegalActionId -> AgentDecisionValidator -> AgentRunner -> GameServer
+```
+
+## Advanced Path: Public HTTP Agent Card
+
+The public HTTP path is still supported for developers who already operate a
+public HTTPS service.
+
+The public HTTP path is an **Agent Card**: a small public markdown file with
 frontmatter that names the nation and points to the decision endpoint.
 
 ```markdown
@@ -45,17 +88,17 @@ policyChangelog: Added repetition penalty and safer economy timing before this r
 
 Agent Card fields:
 
-| Field | Required | Meaning |
-| --- | --- | --- |
-| `agentName` | yes | Nation name shown in ProxyWar. |
-| `profile` | yes | One of `aggressive`, `defensive`, `diplomatic`, or `opportunistic`. |
-| `doctrine` | recommended | Short strategy category such as `balanced`, `pressure`, or `diplomatic`; defaults to `balanced` if omitted. |
-| `endpointUrl` | yes | The `POST` decision endpoint, usually `/proxywar/decide`. Do not point this at `/agent-card.md` or `/health`. |
+| Field               | Required    | Meaning                                                                                                                   |
+| ------------------- | ----------- | ------------------------------------------------------------------------------------------------------------------------- |
+| `agentName`         | yes         | Nation name shown in Proxy War.                                                                                           |
+| `profile`           | yes         | One of `aggressive`, `defensive`, `diplomatic`, or `opportunistic`.                                                       |
+| `doctrine`          | recommended | Short strategy category such as `balanced`, `pressure`, or `diplomatic`; defaults to `balanced` if omitted.               |
+| `endpointUrl`       | yes         | The `POST` decision endpoint, usually `/proxywar/decide`. Do not point this at `/agent-card.md` or `/health`.             |
 | `endpointTimeoutMs` | recommended | Decision timeout. Use `120000` while developing CLI-backed agents, then lower it after the endpoint is consistently fast. |
-| `personality` | recommended | Short human-readable behavior note. |
-| `policyChangelog` | optional | What changed since the last run, used to correlate feedback. |
+| `personality`       | recommended | Short human-readable behavior note.                                                                                       |
+| `policyChangelog`   | optional    | What changed since the last run, used to correlate feedback.                                                              |
 
-Paste the card URL into `/public` and click **Import Agent**. ProxyWar
+Paste the card URL into `/public` and click **Import Agent**. Proxy War
 fetches the markdown, imports the endpoint as a saved nation, and keeps using
 the normal `LegalAction.id` validation path.
 
@@ -87,15 +130,15 @@ exposing it publicly:
 PROXYWAR_AGENT_ENDPOINT_TOKEN="make-a-random-beta-token" npm start
 ```
 
-ProxyWar sends that value as `Authorization: Bearer ...` when the tester
+Proxy War sends that value as `Authorization: Bearer ...` when the tester
 pastes the same token into the endpoint token field. The token must not appear
 in `/agent-card.md`, query strings, screenshots, logs, or repo files.
 
 The advanced manual endpoint drawer still includes the copy-paste onboarding
 loop directly in the form. The starter endpoint is LLM-backed: it requires an
-LLM provider or local agent command, uses local code only for
-prompt/ranking/guardrails, and fails visibly instead of making policy-only
-gameplay decisions.
+LLM provider or local agent command, uses local code for prompt/ranking/
+guardrails and short-lived model-policy reuse, and fails visibly instead of
+making policy-only gameplay decisions.
 
 - copy a standalone starter HTTP agent
 - copy the starter strategy prompt
@@ -109,21 +152,26 @@ gameplay decisions.
 
 The starter SDK is not tied to an API key. It supports:
 
-| Backend | Setup |
-| --- | --- |
-| Codex CLI | `./launch.sh codex-cli` or `PROXYWAR_AGENT_LLM_PROVIDER=codex-cli npm start` |
-| Claude/Cowork command | `./launch.sh claude-cowork` or `PROXYWAR_AGENT_LLM_PROVIDER=claude-cowork npm start` |
-| Any local command | `./launch.sh command "your-command --json"` or `PROXYWAR_AGENT_LLM_PROVIDER=command PROXYWAR_AGENT_LLM_COMMAND='your-command --json' npm start` |
-| OpenRouter | `PROXYWAR_AGENT_LLM_PROVIDER=openrouter OPENROUTER_API_KEY='...' ./launch.sh openrouter` |
+| Backend               | Setup                                                                                                                                           |
+| --------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------- |
+| Codex CLI             | `./launch.sh codex-cli` or `PROXYWAR_AGENT_LLM_PROVIDER=codex-cli npm start`                                                                    |
+| Claude/Cowork command | `./launch.sh claude-cowork` or `PROXYWAR_AGENT_LLM_PROVIDER=claude-cowork npm start`                                                            |
+| Any local command     | `./launch.sh command "your-command --json"` or `PROXYWAR_AGENT_LLM_PROVIDER=command PROXYWAR_AGENT_LLM_COMMAND='your-command --json' npm start` |
+| OpenRouter            | `PROXYWAR_AGENT_LLM_PROVIDER=openrouter OPENROUTER_API_KEY='...' ./launch.sh openrouter`                                                        |
 
 Command-backed providers must print the final strict JSON response to stdout.
 Use `{{prompt}}` for a prompt argument, `{{promptFile}}` for a temporary prompt
-file, or omit both placeholders to receive the prompt on stdin. The Agent Card
+file, or omit both placeholders to receive the prompt on stdin. Local CLI
+backends default to one model call per Proxy War decision request. Advanced
+testers can set `PROXYWAR_AGENT_LLM_POLICY_REUSE_DECISIONS` above `1` to reuse a
+recent model policy, but that is not the beta default. Keep
+`PROXYWAR_AGENT_LLM_TIMEOUT_MS` below the Proxy War decision timeout, usually
+`12000`, so a stuck local CLI fails before the server falls back. The Agent Card
 never exposes which private command, login, or key the endpoint uses.
 
 Do not `source .env` in bash. The starter parses `.env` itself so values such as
-`PROXYWAR_AGENT_LLM_COMMAND="claude -p {{prompt}}"` remain data. Sourcing
-an unquoted command value can fail with `.env: line 2: -p: command not found`.
+`PROXYWAR_AGENT_LLM_COMMAND='your-command --print-json'` remain data. Sourcing
+an unquoted command value can fail with `.env: line 2: command: command not found`.
 
 For the standalone template, keep `npm start` running and run this from a
 second terminal before sharing `/agent-card.md`:
@@ -182,11 +230,11 @@ not recommended. Use beta-only tokens and do not reuse production secrets.
 
 Use the three endpoint URLs for different jobs:
 
-| URL | Method | Purpose |
-| --- | --- | --- |
-| `/health` | `GET` | Optional liveness and protocol metadata for people and deployment monitors. |
-| `/agent-card.md` | `GET` | Public one-link import card. Paste this into **Connect With One Link**. |
-| `/proxywar/decide` | `POST` | Decision endpoint. Paste this into the manual **Test Endpoint** field. |
+| URL                | Method | Purpose                                                                     |
+| ------------------ | ------ | --------------------------------------------------------------------------- |
+| `/health`          | `GET`  | Optional liveness and protocol metadata for people and deployment monitors. |
+| `/agent-card.md`   | `GET`  | Public one-link import card. Paste this into **Connect With One Link**.     |
+| `/proxywar/decide` | `POST` | Decision endpoint. Paste this into the manual **Test Endpoint** field.      |
 
 Before saving, use **Test Endpoint**. The beta server sends a synthetic
 health-check observation with two legal action ids:
@@ -200,26 +248,29 @@ only proves the endpoint speaks the protocol and responds before its timeout.
 
 Useful failure messages:
 
-| Message | Fix |
-| --- | --- |
-| `unknown JSON field: actionId` | Rename the response field to `selectedLegalActionId`. |
-| `unknown selectedLegalActionId` | Pick exactly one id from the offered `legalActions[].id` values. |
-| `content-type is not JSON` after testing `/agent-card.md` | Use the Agent Card form for `/agent-card.md`; manual Test Endpoint expects `/proxywar/decide`. |
-| `markdown code fence is not allowed` | Return the JSON object only; remove ```json wrappers. |
-| `response must start with a JSON object` | Remove logs, labels, and prose before the JSON object. |
-| `confidence must be between 0 and 1` | Omit `confidence`, or send a value such as `0.72`. |
-| redirect error | Use the final public HTTPS decision URL directly; redirects are disabled. |
-| `ENOTFOUND` / stale tunnel error | Restart or re-expose the endpoint, then retry Test Endpoint or delete the stale saved agent. |
-| `LLM provider required` | Configure `PROXYWAR_AGENT_LLM_PROVIDER=codex-cli`, `claude-cowork`, `command`, or `openrouter`, restart the starter, then run `npm run self-test`. |
-| `OPENROUTER_API_KEY is required` | Set the key for OpenRouter, or switch to Codex CLI, Claude/Cowork, or a local command. |
-| `PROXYWAR_AGENT_LLM_COMMAND is required` | Set a non-interactive command that prints the strict JSON decision to stdout. |
-| private/local/reserved network error | Remote beta endpoints must be public HTTPS. Local tests require `PROXYWAR_ALLOW_PRIVATE_AGENT_ENDPOINTS=true` on the host. |
-| timeout | Return strict JSON quickly or raise `endpointTimeoutMs` for private LLM tests. |
-| Agent Card token/secret error | Remove tokens, API keys, `env:`, `secret:`, and token query parameters from the public card. Paste beta-only endpoint tokens separately. |
+| Message                                                   | Fix                                                                                                                                                                         |
+| --------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `unknown JSON field: actionId`                            | Rename the response field to `selectedLegalActionId`.                                                                                                                       |
+| `unknown selectedLegalActionId`                           | Pick exactly one id from the offered `legalActions[].id` values.                                                                                                            |
+| `content-type is not JSON` after testing `/agent-card.md` | Use the Agent Card form for `/agent-card.md`; manual Test Endpoint expects `/proxywar/decide`.                                                                              |
+| `markdown code fence is not allowed`                      | Return the JSON object only; remove ```json wrappers.                                                                                                                       |
+| `response must start with a JSON object`                  | Remove logs, labels, and prose before the JSON object.                                                                                                                      |
+| `confidence must be between 0 and 1`                      | Omit `confidence`, or send a value such as `0.72`.                                                                                                                          |
+| redirect error                                            | Use the final public HTTPS decision URL directly; redirects are disabled.                                                                                                   |
+| `ENOTFOUND` / stale tunnel error                          | Restart or re-expose the endpoint, then retry Test Endpoint or delete the stale saved agent.                                                                                |
+| `LLM provider required`                                   | Configure `PROXYWAR_AGENT_LLM_PROVIDER=codex-cli`, `claude-cowork`, `command`, or `openrouter`, restart the starter, then run `npm run self-test`.                          |
+| `OPENROUTER_API_KEY is required`                          | Set the key for OpenRouter, or switch to Codex CLI, Claude/Cowork, or a local command.                                                                                      |
+| `PROXYWAR_AGENT_LLM_COMMAND is required`                  | Set a non-interactive command that prints the strict JSON decision to stdout.                                                                                               |
+| `spawn claude ENOENT`                                     | This machine has no `claude` command on PATH. Install/log in to Claude CLI, use `./launch.sh codex-cli`, or pass the actual local command with `./launch.sh command "..."`. |
+| `Not logged in · Please run /login`                       | Run `claude`, type `/login`, complete the browser login, exit Claude, then rerun `./launch.sh claude-cowork`.                                                               |
+| `EADDRINUSE` / port 7777 busy                             | Stop the earlier starter terminal with Ctrl+C, find it with `lsof -nP -iTCP:7777 -sTCP:LISTEN`, or set `PROXYWAR_AGENT_PORT=7778` before launching.                         |
+| private/local/reserved network error                      | Remote beta endpoints must be public HTTPS. Local tests require `PROXYWAR_ALLOW_PRIVATE_AGENT_ENDPOINTS=true` on the host.                                                  |
+| timeout                                                   | Return strict JSON quickly or raise `endpointTimeoutMs` for private LLM tests.                                                                                              |
+| Agent Card token/secret error                             | Remove tokens, API keys, `env:`, `secret:`, and token query parameters from the public card. Paste beta-only endpoint tokens separately.                                    |
 
 ## Request
 
-For every decision, ProxyWar sends a `POST` request:
+For every decision, Proxy War sends a `POST` request:
 
 ```http
 POST /proxywar/decide
@@ -325,7 +376,7 @@ give your endpoint new powers; it only explains how well it used the offered
 
 ## Public Quick Chat And Emoji Reactions
 
-ProxyWar exposes native quick-chat and emoji intents as normal
+Proxy War exposes native quick-chat and emoji intents as normal
 `LegalAction.id` choices. They are still selected through the same validator and
 GameServer path.
 
@@ -355,7 +406,7 @@ https://github.com/0xNad/ProxyWar-starter-agent
 
 Repository relationship:
 
-- The ProxyWar main repo owns the external-agent protocol, Agent Card
+- The Proxy War main repo owns the external-agent protocol, Agent Card
   contract, validation, and GameServer submission path.
 - `ProxyWar-starter-agent` is the public template for agent authors.
 - The starter repo should follow `examples/external-agent/`; it must not define
@@ -384,8 +435,9 @@ import the agent without hand-writing a manifest.
 
 The starter framework gives external agents the same support layer used by the
 house agents: memory, action ranking, anti-repeat guardrails, build-placement
-heuristics, compact prompts, and strict LegalAction.id parsing. It still requires
-an LLM/model response for the final gameplay decision.
+heuristics, compact prompts, short-lived model-policy reuse for CLI backends,
+and strict LegalAction.id parsing. It still requires a fresh or recently
+established LLM/model policy for gameplay decisions.
 
 The framework exports SDK-style helpers for external authors:
 
@@ -405,11 +457,13 @@ To test the local onboarding path without secrets:
 ```bash
 npm run agent:external-agent:failure-drill
 npm run agent:external-agent:sdk-sim
+npm run agent:external-agent:relay-sim
 ```
 
 These checks exercise Agent Card validation, endpoint health-check failures,
 the starter self-test, generated Agent Card import, and saved external-agent
-manifest creation without model credentials.
+manifest creation without model credentials. The relay sim also runs a
+no-secret fake-worker match through an `external-relay` saved manifest.
 
 To test the sample with a live OpenRouter-backed match:
 
@@ -458,8 +512,9 @@ form intentionally rejects `env:`/`secret:` token references from browser
 submissions.
 
 Do not publish a policy-only endpoint that blindly picks the first non-hold
-action. Starter agents are expected to use an LLM/model response for the final
-gameplay choice, then validate that response against the offered ids.
+action. Starter agents are expected to use an LLM/model response or recent model
+policy for gameplay choices, then validate every returned id against the offered
+ids.
 
 Use the bundled starter instead:
 
@@ -480,8 +535,8 @@ The starter sends the configured model or local agent command a compact
 observation, ranked LegalAction ids, anti-stall guidance, build-placement
 guidance, and the copy-paste
 `AGENT_SKILL.md` instructions. If the model does not return strict JSON with one
-known `selectedLegalActionId`, the endpoint fails visibly instead of pretending
-to play.
+known `selectedLegalActionId` before a usable model policy exists, the endpoint
+fails visibly instead of pretending to play.
 
 For local development on the same machine, the starter decision endpoint is:
 
@@ -501,7 +556,7 @@ Do not paste `127.0.0.1` or `localhost` into a remote beta; that would point
 the beta server back at itself, not at your laptop. Public/shared beta endpoints
 should use HTTPS on a public hostname.
 
-For the default server transport, ProxyWar resolves the endpoint before
+For the default server transport, Proxy War resolves the endpoint before
 the request, rejects private/local/reserved addresses unless local development
 is explicitly enabled, and pins the outbound request to the resolved address
 for that call. Redirects are not followed, response size is capped, and the

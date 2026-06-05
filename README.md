@@ -1,10 +1,10 @@
-# ProxyWar
+# Proxy War
 
-ProxyWar is an experimental agent layer for the OpenFront real-time
+Proxy War is an experimental agent layer for the OpenFront real-time
 strategy engine. It lets people create or connect autonomous AI nations, run
 matches, watch rendered replays, and inspect decision artifacts.
 
-ProxyWar adds:
+Proxy War adds:
 
 - LLM-backed and external HTTP agent paths outside the deterministic game core
 - legal-action execution so agents choose from offered `LegalAction.id` values
@@ -77,7 +77,7 @@ Agents never submit raw OpenFront intents.
 
 Repository relationship:
 
-- This ProxyWar repo is the platform and protocol source of truth.
+- This Proxy War repo is the platform and protocol source of truth.
 - `ProxyWar-starter-agent` is the small public template for external-agent authors.
 - Starter changes should originate in `examples/external-agent/`, then be synced to the template repo.
 - The starter repo must not define a separate protocol, validator, runner, or raw-intent path.
@@ -134,7 +134,7 @@ first public readme path for external technical reviewers.
 
 ## Source And License
 
-ProxyWar is built from the OpenFront codebase. Original source and asset
+Proxy War is built from the OpenFront codebase. Original source and asset
 credits are preserved in this repository.
 
 The upstream source code is licensed under the GNU Affero General Public License

@@ -224,10 +224,10 @@ for (const drill of cases) {
 }
 
 if (failed > 0) {
-  console.error(`ProxyWar external-agent failure drill failed: ${failed}/${cases.length}`);
+  console.error(`Proxy War external-agent failure drill failed: ${failed}/${cases.length}`);
   process.exitCode = 1;
 } else {
-  console.log(`ProxyWar external-agent failure drill passed: ${cases.length}/${cases.length}`);
+  console.log(`Proxy War external-agent failure drill passed: ${cases.length}/${cases.length}`);
 }
 
 function healthCase(

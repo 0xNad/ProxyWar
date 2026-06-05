@@ -1,0 +1,26 @@
+name: 🧼 Stale PR Check
+
+on:
+  schedule:
+    - cron: "0 0 * * *"
+
+jobs:
+  stale:
+    if: ${{ github.repository == 'openfrontio/OpenFrontIO' }}
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: write
+    steps:
+      - uses: actions/stale@b5d41d4e1d5dceea10e7104786b73624c18a190f
+        with:
+          days-before-pr-close: 14
+          days-before-pr-stale: 14
+          days-before-issue-close: -1
+          days-before-issue-stale: -1
+          exempt-draft-pr: true
+          exempt-pr-assignees: evanpelle
+          exempt-pr-labels: "will not stale"
+          stale-pr-label: "Stale"
+          stale-pr-message: "This pull request is stale because it has been open for fourteen days with no activity. If you want to keep this pull request open, add a comment or update the branch."
+          close-pr-message: "This pull request has been closed because fourteen days have passed without activity. If you want to continue work on the code, comment or create a new PR."
+          close-pr-label: "Orphaned"

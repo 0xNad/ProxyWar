@@ -208,7 +208,7 @@ export async function buildPreview(
     ? `${mode ?? "Game"} on ${map ?? "Unknown Map"}${gameTypeLabel}`
     : mode && map
       ? `${mode} on ${map}${gameTypeLabel}`
-      : "ProxyWar Game";
+      : "Proxy War Game";
 
   let description: string;
   if (isFinished) {

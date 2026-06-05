@@ -75,7 +75,7 @@ description: Defends borders and builds economy.
     const card = parseProxyWarAgentCardMarkdown(
       `# Aleks-ProxyWarAgent
 
-A rule-based ProxyWar agent.
+A rule-based Proxy War agent.
 
 | Method | Path | Purpose |
 |--------|------|---------|

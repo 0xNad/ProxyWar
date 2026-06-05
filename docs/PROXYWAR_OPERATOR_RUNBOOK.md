@@ -1,4 +1,4 @@
-# ProxyWar Operator Runbook
+# Proxy War Operator Runbook
 
 This is the closed-beta runbook for a small friend/developer test. It keeps the
 scope intentionally narrow: invite gate, connect an agent, run a match, open the
@@ -12,8 +12,12 @@ From the repo root:
 PROXYWAR_BETA_CODE="choose-a-private-code" npm run agent:closed-beta
 ```
 
-The closed-beta command runs Codex CLI-backed house agents. Do not share a beta
-where house-agent matches silently fall back to local planner/rule bots.
+The closed-beta command runs Codex CLI-backed house agents. The hosted default
+uses a persistent Codex subscription worker (`AI_LEAGUE_CODEX_TRANSPORT=app-server`)
+so the match does not start a new Codex CLI process for every decision. Keep
+`AI_LEAGUE_CODEX_APP_SERVER_IDLE_CLOSE_MS=1800000` unless intentionally testing
+a different worker lifecycle. Do not share a beta where house-agent matches
+silently fall back to local planner/rule bots.
 
 For local endpoint testing on the same machine, add:
 
@@ -40,7 +44,7 @@ chat screenshots.
 For a hosted tester release, also run:
 
 ```bash
-PROXYWAR_PUBLIC_URL="https://your-real-domain.example" PROXYWAR_BETA_CODE="choose-a-private-code" PROXYWAR_MAX_QUEUED_JOBS=1 PROXYWAR_HOUSE_AGENT_BRAIN=planner-codex-cli npm run agent:hosted-beta:readiness -- --require-ready
+PROXYWAR_PUBLIC_URL="https://your-real-domain.example" PROXYWAR_BETA_CODE="choose-a-private-code" PROXYWAR_MAX_QUEUED_JOBS=1 PROXYWAR_BACKUP_DIR="/path/to/private/backups" PROXYWAR_HOUSE_AGENT_BRAIN=planner-codex-cli AI_LEAGUE_CODEX_TRANSPORT=app-server AI_LEAGUE_CODEX_APP_SERVER_IDLE_CLOSE_MS=1800000 PROXYWAR_EXTERNAL_AGENT_DECISION_TIMEOUT_MS=15000 npm run agent:hosted-beta:readiness -- --require-ready
 PROXYWAR_PUBLIC_URL="https://your-real-domain.example" PROXYWAR_BETA_CODE="choose-a-private-code" npm run agent:hosted-beta:smoke
 npm run agent:hosted-beta:backup
 ```
@@ -71,7 +75,7 @@ Confirm:
 - **Connect With One Link** has an Agent Card URL field
 - the Agent Card template opens at `/examples/external-agent/PROXYWAR_AGENT_CARD.md`
 - advanced manual endpoint setup contains **Test Endpoint** and **Save Agent**
-- **Run Saved-Roster Match** and per-agent **Delete** controls are visible
+- **Run Codex Match** and per-agent **Delete** controls are visible
 - recent runs list links to rendered gameplay, decision report, and replay timeline
 
 If a rendered replay link is opened before login, the beta login should say it
@@ -90,7 +94,7 @@ Ask the tester to follow this order:
 7. Click **Import Agent**.
 8. Delete any stale local/test agents from **Saved Agents**, or use the saved-agent
    health command below.
-9. Click **Run Saved-Roster Match**.
+9. Click **Run Codex Match**.
 10. Watch the rendered replay that opens.
 11. Send feedback from the page.
 
@@ -112,13 +116,21 @@ Before sharing, check saved external agents from the terminal:
 npm run agent:saved-agents:health
 ```
 
-This is a dry run. If it reports dead temporary tunnels, either re-expose and
-re-import the Agent Card, delete them in the UI, or intentionally archive failed
-saved manifests:
+This is a dry run for saved external HTTP endpoints. If it reports dead
+temporary tunnels, either re-expose and re-import the Agent Card, delete them in
+the UI, or intentionally archive failed saved manifests:
 
 ```bash
 npm run agent:saved-agents:health -- --archive-failed
 ```
+
+Managed relay sessions are process-local. After a beta-server restart, a saved
+relay manifest can still exist on disk while the live session is gone. The
+server can reattach a still-running relay worker when it polls with the saved
+token, but readiness requires recent worker activity, not just a saved manifest.
+Use hosted readiness, hosted smoke, `/api/public-readiness`, or the
+tester-dashboard endpoint health check as the authoritative relay liveness gate;
+if they block, ask the tester to rerun `/agent-start.sh`.
 
 Or run the same check from the terminal:
 
@@ -174,6 +186,8 @@ Codex match does not start:
 - verify Codex CLI is installed and logged in
 - from a trusted repo directory, run a small Codex command manually
 - restart the beta server after fixing Codex CLI
+- if the persistent worker itself is broken, set
+  `AI_LEAGUE_CODEX_TRANSPORT=exec` and restart as a temporary rollback
 
 ## 5. Where Artifacts Live
 
@@ -220,7 +234,7 @@ Before inviting testers:
 - external agent can be saved
 - stale saved agents can be deleted from the UI or archived with
   `npm run agent:saved-agents:health -- --archive-failed`
-- saved-roster match can be queued and completed
+- locked saved-tester-agent plus Codex-vs-Easy-nations match can be queued and completed
 - completed job has a rendered replay link
 - feedback form writes an artifact
 - no local filesystem paths are shown on public beta status

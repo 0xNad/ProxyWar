@@ -1,0 +1,17 @@
+name: 🧼 PR
+
+on:
+  pull_request_target:
+    types: [opened, reopened]
+
+permissions:
+  pull-requests: write
+
+jobs:
+  auto-assign:
+    name: Auto-assign author
+    if: ${{ github.repository == 'openfrontio/OpenFrontIO' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: toshimaru/auto-author-assign@bdd7688cbf9e6d5683f02f8c7d8ae4062a254b6d

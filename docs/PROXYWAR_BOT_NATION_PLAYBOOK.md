@@ -1,8 +1,8 @@
-# ProxyWar Bot And Nation Playbook
+# Proxy War Bot And Nation Playbook
 
 Last updated: 2026-05-11
 
-This document summarizes built-in nation and tribe behavior so ProxyWar agents can learn from it without moving non-deterministic agent logic into core.
+This document summarizes built-in nation and tribe behavior so Proxy War agents can learn from it without moving non-deterministic agent logic into core.
 
 ## Nation Loop
 
@@ -75,7 +75,7 @@ Defense Post active ship targeting is currently not the main reason to build the
 
 ## Current Agent Adaptations
 
-ProxyWar agents now expose build-placement metadata on build actions:
+Proxy War agents now expose build-placement metadata on build actions:
 
 - `isBorderBuild`
 - `borderDistance`
@@ -93,5 +93,5 @@ ProxyWar agents now expose build-placement metadata on build actions:
 
 ## What Must Stay Outside Core
 
-The built-in nation code is deterministic core simulation behavior. ProxyWar agents should borrow concepts, not move LLMs or product agent logic into core. Agent improvements should stay under `src/server/agents`, scripts, tests, docs, and artifacts.
+The built-in nation code is deterministic core simulation behavior. Proxy War agents should borrow concepts, not move LLMs or product agent logic into core. Agent improvements should stay under `src/server/agents`, scripts, tests, docs, and artifacts.
 

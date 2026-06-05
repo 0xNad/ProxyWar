@@ -18,7 +18,7 @@ Examples:
   ./launch.sh openrouter
 
 This script does not source .env. The Node starter reads .env itself so command
-values with spaces, such as "claude -p {{prompt}}", do not get executed by bash.
+values with spaces do not get executed by bash.
 USAGE
 }
 
@@ -86,6 +86,20 @@ for (const line of text.split(/\r?\n/)) {
 NODE
 }
 
+print_port_conflict() {
+  cat >&2 <<EOF
+Port $port on $host is already in use.
+
+Fix:
+- Stop the earlier starter terminal with Ctrl+C, then run ./launch.sh again.
+- Or find the old process with: lsof -nP -iTCP:$port -sTCP:LISTEN
+- Or use another port: PROXYWAR_AGENT_PORT=7778 ./launch.sh ${provider:-codex-cli}
+
+If you use another port, keep the launcher output as the source of truth for the
+Agent Card and decision endpoint URLs.
+EOF
+}
+
 if ! command -v node >/dev/null 2>&1; then
   echo "Node.js 20+ is required before launching the starter." >&2
   exit 1
@@ -108,6 +122,69 @@ if [[ -z "$provider" ]]; then
   echo "No LLM provider configured; defaulting this launch to codex-cli."
 fi
 export PROXYWAR_AGENT_ENDPOINT_TIMEOUT_MS="${PROXYWAR_AGENT_ENDPOINT_TIMEOUT_MS:-120000}"
+export PROXYWAR_AGENT_LLM_TIMEOUT_MS="${PROXYWAR_AGENT_LLM_TIMEOUT_MS:-12000}"
+export PROXYWAR_AGENT_LLM_POLICY_REUSE_DECISIONS="${PROXYWAR_AGENT_LLM_POLICY_REUSE_DECISIONS:-1}"
+
+case "$provider" in
+  claude-cowork)
+    if [[ -z "$command_value" ]] && ! command -v claude >/dev/null 2>&1; then
+      cat >&2 <<'EOF'
+Claude/Cowork provider selected, but no `claude` command was found on PATH.
+
+Fix:
+- Install and log in to the Claude CLI, then run ./launch.sh claude-cowork again.
+- Or use the actual command on this machine:
+  ./launch.sh command "your-command --print-json"
+- Or use Codex CLI if available:
+  ./launch.sh codex-cli
+EOF
+      exit 1
+    fi
+    ;;
+  codex-cli)
+    codex_command="$(env_value CODEX_COMMAND)"
+    codex_command="${codex_command:-codex}"
+    if [[ -z "$command_value" ]] && ! command -v "$codex_command" >/dev/null 2>&1; then
+      cat >&2 <<EOF
+Codex CLI provider selected, but no \`$codex_command\` command was found on PATH.
+
+Fix:
+- Install and log in to Codex CLI, then run ./launch.sh codex-cli again.
+- Or use a custom command:
+  ./launch.sh command "your-command --print-json"
+- Or use OpenRouter if you have a key:
+  ./launch.sh openrouter
+EOF
+      exit 1
+    fi
+    ;;
+  command)
+    if [[ -z "$command_value" ]]; then
+      cat >&2 <<'EOF'
+Command provider selected, but PROXYWAR_AGENT_LLM_COMMAND is empty.
+
+Fix:
+  ./launch.sh command "your-command --print-json"
+
+The command must be non-interactive and print one strict JSON decision to stdout.
+EOF
+      exit 1
+    fi
+    ;;
+  openrouter)
+    openrouter_key="$(env_value OPENROUTER_API_KEY)"
+    if [[ -z "$openrouter_key" ]]; then
+      cat >&2 <<'EOF'
+OpenRouter provider selected, but OPENROUTER_API_KEY is empty.
+
+Fix:
+- Set OPENROUTER_API_KEY, then run ./launch.sh openrouter again.
+- Or use Codex CLI, Claude/Cowork, or a custom command.
+EOF
+      exit 1
+    fi
+    ;;
+esac
 
 host="$(env_value PROXYWAR_AGENT_HOST)"
 port="$(env_value PROXYWAR_AGENT_PORT)"
@@ -124,6 +201,30 @@ log_file="${TMPDIR:-/tmp}/proxywar-starter-agent.$$.log"
 echo "Starting ProxyWar starter agent with provider: $provider"
 echo "Server log: $log_file"
 
+if node - "$host" "$port" <<'NODE'
+const net = require("node:net");
+const host = process.argv[2];
+const port = Number(process.argv[3]);
+const server = net.createServer();
+server.once("error", (error) => {
+  process.exit(error && error.code === "EADDRINUSE" ? 10 : 1);
+});
+server.listen({ host, port }, () => {
+  server.close(() => process.exit(0));
+});
+NODE
+then
+  :
+else
+  status="$?"
+  if [[ "$status" == "10" ]]; then
+    print_port_conflict
+  else
+    echo "Could not verify that $host:$port is available." >&2
+  fi
+  exit 1
+fi
+
 node simple-agent.mjs >"$log_file" 2>&1 &
 server_pid="$!"
 
@@ -138,6 +239,9 @@ ready=0
 for _ in {1..60}; do
   if ! kill -0 "$server_pid" >/dev/null 2>&1; then
     echo "Starter server exited before it became healthy." >&2
+    if grep -q "EADDRINUSE" "$log_file" 2>/dev/null; then
+      print_port_conflict
+    fi
     sed -n '1,160p' "$log_file" >&2 || true
     exit 1
   fi
@@ -171,6 +275,7 @@ if ! npm run self-test; then
   tail -80 "$log_file" >&2 || true
   echo >&2
   echo "Fix the provider/command output, then run ./launch.sh again." >&2
+  echo "If the details mention 'spawn claude ENOENT', this machine has no claude command on PATH; install/log in to Claude CLI, use ./launch.sh codex-cli, or pass a real command with ./launch.sh command \"...\"." >&2
   exit 1
 fi
 

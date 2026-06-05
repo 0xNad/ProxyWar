@@ -221,7 +221,7 @@ export function buildAgentSpectatorReplay(input: {
     snapshots: input.snapshots,
     notes: [
       "This is a local artifact replay. It does not connect to GameServer and cannot submit intents.",
-      "The native ProxyWar replay client expects archived GameRecord API data; game-record.json is saved as a future integration hook.",
+      "The native Proxy War replay client expects archived GameRecord API data; game-record.json is saved as a future integration hook.",
       ...(input.notes ?? []),
     ],
   };
@@ -531,7 +531,7 @@ function spectatorHtml(replay: AgentSpectatorReplay): string {
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>ProxyWar Spectator ${escapeHtml(replay.runID)}</title>
+  <title>Proxy War Spectator ${escapeHtml(replay.runID)}</title>
   <style>
     :root { color-scheme: light; --ink:#17202a; --muted:#627084; --line:#d9e2ec; --paper:#f7f9fc; --accent:#215a9c; --good:#19764b; --warn:#a55b00; --bad:#a32135; }
     * { box-sizing: border-box; }
@@ -588,12 +588,12 @@ function spectatorHtml(replay: AgentSpectatorReplay): string {
 <body>
   <script id="spectator-data" type="application/json">${encoded}</script>
   <header>
-    <h1>ProxyWar Spectator</h1>
+    <h1>Proxy War Spectator</h1>
     <div class="muted">${escapeHtml(replay.runID)} · read-only artifact replay · spectator occupies no player slot</div>
   </header>
   <main>
     <section class="map-panel">
-      <canvas id="map" width="1100" height="720" aria-label="ProxyWar replay map"></canvas>
+      <canvas id="map" width="1100" height="720" aria-label="Proxy War replay map"></canvas>
       <div class="controls">
         <button id="prev" type="button">Prev</button>
         <button id="play" type="button">Play</button>
@@ -641,9 +641,9 @@ function spectatorHtml(replay: AgentSpectatorReplay): string {
           <a href="./match-summary.json">summary</a>
           <a href="./spectator-replay.json">spectator data</a>
           <a href="./game-record.json">game record hook</a>
-          <a href="/ai-league-replay/${encodeURIComponent(replay.runID)}">real ProxyWar renderer</a>
+          <a href="/ai-league-replay/${encodeURIComponent(replay.runID)}">real Proxy War renderer</a>
         </div>
-        <p class="muted">This viewer is static and read-only: it opens no socket, creates no player, and has no intent submission path. The real ProxyWar renderer link is proxied by the local demo/beta server.</p>
+        <p class="muted">This viewer is static and read-only: it opens no socket, creates no player, and has no intent submission path. The real Proxy War renderer link is proxied by the local demo/beta server.</p>
       </section>
     </aside>
   </main>

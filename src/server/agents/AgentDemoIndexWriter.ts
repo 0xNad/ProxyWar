@@ -385,7 +385,7 @@ function demoIndexHtml(
             }
             ${
               run.hasOpenFrontReplay
-                ? `<a href="/ai-league-replay/${encodeURIComponent(run.runID)}">ProxyWar render</a>`
+                ? `<a href="/ai-league-replay/${encodeURIComponent(run.runID)}">Proxy War render</a>`
                 : ""
             }
             <a href="./${encodeURIComponent(run.runID)}/match-report.md">markdown</a>
@@ -426,7 +426,7 @@ function demoIndexHtml(
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>ProxyWar Runs</title>
+  <title>Proxy War Runs</title>
   <style>
     :root { color-scheme: light; --ink:#17202a; --muted:#627084; --line:#d9e2ec; --paper:#f7f9fc; --accent:#215a9c; --good:#19764b; --bad:#a32135; }
     * { box-sizing:border-box; }
@@ -451,7 +451,7 @@ function demoIndexHtml(
 </head>
 <body>
   <header>
-    <h1>ProxyWar Runs</h1>
+    <h1>Proxy War Runs</h1>
     <div class="subtitle">${escapeHtml(runsRootDir)}</div>
   </header>
   <main>
@@ -463,7 +463,7 @@ function demoIndexHtml(
     </section>
     ${
       runs.length === 0
-        ? '<div class="empty">No ProxyWar runs have been written yet.</div>'
+        ? '<div class="empty">No Proxy War runs have been written yet.</div>'
         : `<table>
             <thead>
               <tr>

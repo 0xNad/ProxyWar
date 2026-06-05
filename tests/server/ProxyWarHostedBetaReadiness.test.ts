@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 import {
+  buildProxyWarLivePublicReadinessFailureReport,
   buildProxyWarHostedBetaReadinessReport,
+  fetchProxyWarLivePublicReadinessReport,
   formatProxyWarHostedBetaReadinessReport,
   hostedBetaReadinessExitCode,
 } from "../../src/server/agents/ProxyWarHostedBetaReadiness";
@@ -18,6 +20,7 @@ describe("ProxyWarHostedBetaReadiness", () => {
         command: "/Applications/Codex.app/Contents/Resources/codex",
         available: true,
       },
+      externalAgentDecisionTimeoutMs: 15_000,
       maxQueuedJobs: 1,
       rateLimits: {
         betaLogin: 20,
@@ -50,7 +53,7 @@ describe("ProxyWarHostedBetaReadiness", () => {
     expect(report.generatedAt).toBe("2026-05-25T10:00:00.000Z");
     expect(report.checks.every((check) => check.status === "pass")).toBe(true);
     expect(formatProxyWarHostedBetaReadinessReport(report)).toContain(
-      "ProxyWar hosted beta readiness: ready",
+      "Proxy War hosted beta readiness: ready",
     );
     expect(hostedBetaReadinessExitCode(report)).toBe(0);
   });
@@ -69,6 +72,7 @@ describe("ProxyWarHostedBetaReadiness", () => {
         command: "missing-codex",
         available: false,
       },
+      externalAgentDecisionTimeoutMs: 0,
       maxQueuedJobs: 5,
       rateLimits: {
         betaLogin: 0,
@@ -109,6 +113,7 @@ describe("ProxyWarHostedBetaReadiness", () => {
     expect(check(report, "private_endpoint_lock").status).toBe("fail");
     expect(check(report, "house_agent_brain").status).toBe("pass");
     expect(check(report, "codex_cli").status).toBe("fail");
+    expect(check(report, "external_agent_timeout").status).toBe("fail");
     expect(check(report, "rate_limits").status).toBe("fail");
     expect(check(report, "persistence").status).toBe("fail");
     expect(check(report, "backup").status).toBe("fail");
@@ -128,6 +133,7 @@ describe("ProxyWarHostedBetaReadiness", () => {
         command: "/Applications/Codex.app/Contents/Resources/codex",
         available: true,
       },
+      externalAgentDecisionTimeoutMs: 45_000,
       maxQueuedJobs: 3,
       rateLimits: {
         betaLogin: 20,
@@ -158,6 +164,7 @@ describe("ProxyWarHostedBetaReadiness", () => {
     expect(report.status).toBe("warning");
     expect(check(report, "house_agent_brain").status).toBe("pass");
     expect(check(report, "codex_cli").status).toBe("pass");
+    expect(check(report, "external_agent_timeout").status).toBe("warn");
     expect(check(report, "queue_limit").status).toBe("warn");
     expect(check(report, "backup").status).toBe("warn");
     expect(hostedBetaReadinessExitCode(report)).toBe(1);
@@ -175,6 +182,7 @@ describe("ProxyWarHostedBetaReadiness", () => {
         command: null,
         available: false,
       },
+      externalAgentDecisionTimeoutMs: 15_000,
       maxQueuedJobs: 1,
       rateLimits: {
         betaLogin: 20,
@@ -207,6 +215,64 @@ describe("ProxyWarHostedBetaReadiness", () => {
     expect(formatProxyWarHostedBetaReadinessReport(report)).toContain(
       "House agents must be LLM-backed",
     );
+  });
+
+  it("fetches live public readiness through the invite gate", async () => {
+    const liveReport = publicReport("blocked", [
+      "Rerun the /agent-start.sh bootstrap command.",
+    ]);
+    const calls: Array<{ url: string; init: RequestInit }> = [];
+    const fetchFn = async (url: string, init: RequestInit) => {
+      calls.push({ url, init });
+      if (url === "https://beta.proxywar.example/api/beta/login") {
+        return new Response("", {
+          status: 302,
+          headers: {
+            "set-cookie":
+              "proxywar_beta_session=session-token; Path=/; Secure; HttpOnly",
+          },
+        });
+      }
+      if (url === "https://beta.proxywar.example/api/public-readiness") {
+        return Response.json(liveReport);
+      }
+      return new Response("missing", { status: 404 });
+    };
+
+    const report = await fetchProxyWarLivePublicReadinessReport({
+      publicUrl: "https://beta.proxywar.example/public",
+      inviteCode: "friends-only",
+      fetchFn,
+    });
+
+    expect(report.status).toBe("blocked");
+    expect(report.nextActions).toContain(
+      "Rerun the /agent-start.sh bootstrap command.",
+    );
+    expect(calls.map((call) => call.url)).toEqual([
+      "https://beta.proxywar.example/api/beta/login",
+      "https://beta.proxywar.example/api/public-readiness",
+    ]);
+    expect(String(calls[0].init.body)).toContain("inviteCode=friends-only");
+    expect(calls[1].init.headers).toMatchObject({
+      cookie: "proxywar_beta_session=session-token",
+    });
+  });
+
+  it("builds a blocking report when live public readiness cannot be fetched", () => {
+    const report = buildProxyWarLivePublicReadinessFailureReport({
+      publicUrl: "https://beta.proxywar.example",
+      message: "Live /api/public-readiness check failed: timeout.",
+      now: new Date("2026-06-02T12:00:00.000Z"),
+    });
+
+    expect(report.status).toBe("blocked");
+    expect(report.shareUrl).toBe("https://beta.proxywar.example/public");
+    expect(report.generatedAt).toBe("2026-06-02T12:00:00.000Z");
+    expect(report.checks[0]).toMatchObject({
+      id: "live_public_readiness",
+      status: "fail",
+    });
   });
 });
 

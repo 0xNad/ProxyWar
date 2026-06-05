@@ -1,4 +1,9 @@
 import path from "path";
+import { Difficulty } from "../../core/game/Game";
+import {
+  DEFAULT_CODEX_APP_SERVER_IDLE_CLOSE_MS,
+  DEFAULT_CODEX_PLANNER_MODEL,
+} from "./CodexCliLlmProvider";
 import { defaultProxyWarActiveRosterDir } from "./ProxyWarNationRegistry";
 
 export type AgentDemoJobKind = "demo" | "evaluation" | "tournament";
@@ -14,6 +19,7 @@ export type AgentDemoBrain =
 export type AgentDemoScenario = "normal" | "actions" | "attack" | "stepped";
 export type AgentDemoRoster = "default" | "manifest" | "saved";
 export type AgentDemoMatchLength = "showcase" | "full";
+export type AgentDemoDifficulty = `${Difficulty}`;
 
 export interface AgentDemoJobRequest {
   kind: AgentDemoJobKind;
@@ -21,13 +27,17 @@ export interface AgentDemoJobRequest {
   scenario: AgentDemoScenario;
   roster?: AgentDemoRoster;
   maxSavedNations?: number;
+  fillSavedRoster?: boolean;
   matchLength?: AgentDemoMatchLength;
   runs?: number;
   maxSteps?: number;
   maxTurns?: number;
   turnsPerDecision?: number;
+  requireWinner?: boolean;
+  agents?: number;
   bots?: number;
   nations?: number;
+  difficulty?: AgentDemoDifficulty;
   replayTailTurns?: number;
   externalAgentEndpointUrl?: string;
   externalAgentTimeoutMs?: number;
@@ -87,22 +97,36 @@ const scenarios: readonly AgentDemoScenario[] = [
 ];
 const rosters: readonly AgentDemoRoster[] = ["default", "manifest", "saved"];
 const matchLengths: readonly AgentDemoMatchLength[] = ["showcase", "full"];
+const difficulties: readonly AgentDemoDifficulty[] = [
+  Difficulty.Easy,
+  Difficulty.Medium,
+  Difficulty.Hard,
+  Difficulty.Impossible,
+];
 const defaultManifestDir = path.join(
   process.cwd(),
   "docs",
   "ai-league-agent-manifests",
 );
-const fullMatchDecisionSchedule = "25x20,100x30,250x40,500x150";
+const fullMatchDecisionSchedule = "25x20,100x30,250x40,500x150,100x160";
+const defaultCodexDecisionTimeoutMs = "45000";
+const defaultExternalAgentDecisionTimeoutMs = "15000";
+const fullMatchWinnerFailSafeSteps = 700;
 
+// Locked beta default per operator direction. Change only on explicit request.
 export const proxyWarTesterSavedRosterJobDefaults = {
   kind: "demo",
   scenario: "actions",
   roster: "saved",
-  matchLength: "showcase",
   maxSavedNations: 1,
-  maxSteps: 12,
+  fillSavedRoster: false,
+  matchLength: "full",
+  agents: 1,
+  maxSteps: fullMatchWinnerFailSafeSteps,
+  requireWinner: true,
   bots: 0,
-  nations: 0,
+  nations: 2,
+  difficulty: Difficulty.Easy,
   replayTailTurns: 500,
 } as const;
 
@@ -114,7 +138,7 @@ export function normalizeAgentDemoJobRequest(
   const maxTurns = boundedInteger(raw.maxTurns, 1_000, 90_000, 90_000);
   const turnsPerDecision = boundedInteger(raw.turnsPerDecision, 25, 500, 100);
   const fullMatchStepCap = Math.min(
-    240,
+    1_000,
     Math.max(30, Math.ceil(maxTurns / turnsPerDecision)),
   );
   return {
@@ -131,16 +155,19 @@ export function normalizeAgentDemoJobRequest(
       kind === "demo" ? "default" : "manifest",
     ),
     maxSavedNations: boundedOptionalInteger(raw.maxSavedNations, 0, 8),
+    fillSavedRoster: booleanValue(raw.fillSavedRoster, true),
     matchLength,
     runs: boundedInteger(raw.runs, 1, 5, kind === "evaluation" ? 2 : 1),
     maxSteps: boundedInteger(
       raw.maxSteps,
       1,
-      matchLength === "full" ? 240 : 30,
+      matchLength === "full" ? 1_000 : 30,
       kind === "demo" ? (matchLength === "full" ? fullMatchStepCap : 12) : 5,
     ),
     maxTurns,
     turnsPerDecision,
+    requireWinner: booleanValue(raw.requireWinner, matchLength === "full"),
+    agents: boundedOptionalInteger(raw.agents, 1, 8),
     bots: boundedInteger(
       raw.bots,
       0,
@@ -159,6 +186,7 @@ export function normalizeAgentDemoJobRequest(
           ? 4
           : 0,
     ),
+    difficulty: enumValue(raw.difficulty, difficulties, Difficulty.Medium),
     replayTailTurns: boundedInteger(raw.replayTailTurns, 0, 1_500, 350),
     externalAgentEndpointUrl:
       typeof raw.externalAgentEndpointUrl === "string" &&
@@ -169,7 +197,7 @@ export function normalizeAgentDemoJobRequest(
       raw.externalAgentTimeoutMs,
       250,
       180_000,
-      30_000,
+      Number(defaultExternalAgentDecisionTimeoutMs),
     ),
   };
 }
@@ -198,15 +226,23 @@ export function buildAgentDemoJobCommand(
       ? {
           AI_LEAGUE_LLM_PROVIDER: "codex-cli",
           AI_LEAGUE_CODEX_TIMEOUT_MS:
-            process.env.AI_LEAGUE_CODEX_TIMEOUT_MS ?? "180000",
+            process.env.AI_LEAGUE_CODEX_TIMEOUT_MS ??
+            defaultCodexDecisionTimeoutMs,
           AI_LEAGUE_CODEX_MODEL:
             process.env.AI_LEAGUE_CODEX_MODEL ??
             process.env.AI_LEAGUE_LLM_MODEL ??
-            "gpt-5.4",
+            DEFAULT_CODEX_PLANNER_MODEL,
           AI_LEAGUE_CODEX_REASONING_EFFORT:
             process.env.AI_LEAGUE_CODEX_REASONING_EFFORT ??
             process.env.AI_LEAGUE_LLM_REASONING_EFFORT ??
             "medium",
+          AI_LEAGUE_CODEX_TRANSPORT:
+            process.env.AI_LEAGUE_CODEX_TRANSPORT ?? "app-server",
+          AI_LEAGUE_CODEX_APP_SERVER_FALLBACK:
+            process.env.AI_LEAGUE_CODEX_APP_SERVER_FALLBACK ?? "false",
+          AI_LEAGUE_CODEX_APP_SERVER_IDLE_CLOSE_MS:
+            process.env.AI_LEAGUE_CODEX_APP_SERVER_IDLE_CLOSE_MS ??
+            String(DEFAULT_CODEX_APP_SERVER_IDLE_CLOSE_MS),
           AI_LEAGUE_REQUIRE_EXTERNAL_BRAIN_SUCCESS: "true",
         }
       : {}),
@@ -293,16 +329,23 @@ function fullAgentLeagueDemoArgs(
     `--turns-per-decision-step=${request.turnsPerDecision ?? 100}`,
     `--turns-per-decision-schedule=${fullMatchDecisionSchedule}`,
     "--max-spawn-advance-turns=3000",
+    ...(request.requireWinner === false ? [] : ["--require-winner"]),
+    `--external-agent-max-decision-ms=${
+      process.env.PROXYWAR_EXTERNAL_AGENT_DECISION_TIMEOUT_MS ??
+      defaultExternalAgentDecisionTimeoutMs
+    }`,
     `--replay-tail-turns=${request.replayTailTurns ?? 500}`,
     `--bots=${request.bots ?? 0}`,
     `--nations=${nationsArgValue(request.nations)}`,
+    `--difficulty=${request.difficulty ?? Difficulty.Medium}`,
+    ...(request.agents === undefined ? [] : [`--agents=${request.agents}`]),
     "--map=Pangaea",
     "--map-size=Compact",
     "--vary-spawns",
     ...(usesCodex(request.brain)
       ? [
           "--disable-alliance-actions",
-          `--max-decision-ms=${process.env.AI_LEAGUE_CODEX_TIMEOUT_MS ?? "180000"}`,
+          `--max-decision-ms=${process.env.AI_LEAGUE_CODEX_TIMEOUT_MS ?? defaultCodexDecisionTimeoutMs}`,
         ]
       : []),
     ...(request.roster === "manifest" || request.roster === "saved"
@@ -331,6 +374,8 @@ function demoArgs(
     `--replay-tail-turns=${request.replayTailTurns ?? 350}`,
     `--bots=${request.bots ?? 4}`,
     `--nations=${nationsArgValue(request.nations)}`,
+    `--difficulty=${request.difficulty ?? Difficulty.Medium}`,
+    ...(request.agents === undefined ? [] : [`--agents=${request.agents}`]),
     "--map=Pangaea",
     "--map-size=Compact",
     "--vary-spawns",
@@ -343,7 +388,7 @@ function demoArgs(
   if (usesCodex(request.brain)) {
     args.push("--disable-alliance-actions");
     args.push(
-      `--max-decision-ms=${process.env.AI_LEAGUE_CODEX_TIMEOUT_MS ?? "180000"}`,
+      `--max-decision-ms=${process.env.AI_LEAGUE_CODEX_TIMEOUT_MS ?? defaultCodexDecisionTimeoutMs}`,
     );
   }
   if (request.roster === "manifest" || request.roster === "saved") {
@@ -382,6 +427,20 @@ function enumValue<T extends string>(
     return value as T;
   }
   throw new Error(`${String(value)} must be one of ${allowed.join(", ")}`);
+}
+
+function booleanValue(value: unknown, defaultValue: boolean): boolean {
+  if (value === undefined || value === null || value === "") {
+    return defaultValue;
+  }
+  if (typeof value === "boolean") {
+    return value;
+  }
+  if (typeof value === "string") {
+    if (value === "true") return true;
+    if (value === "false") return false;
+  }
+  throw new Error(`${String(value)} must be true or false`);
 }
 
 function boundedInteger(

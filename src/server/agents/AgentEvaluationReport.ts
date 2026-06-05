@@ -258,7 +258,7 @@ function evaluationReport(
   summary: ReturnType<typeof evaluationSummary>,
 ): string {
   return [
-    `# ProxyWar Evaluation ${summary.evalID}`,
+    `# Proxy War Evaluation ${summary.evalID}`,
     "",
     "## Overview",
     "",

@@ -119,7 +119,7 @@ export function parseProxyWarAgentCardMarkdown(
   const personality =
     firstString(fields, ["personality", "description", "note"]) ??
     firstParagraph(markdown) ??
-    "Imported from an ProxyWar Agent Card.";
+    "Imported from an Proxy War Agent Card.";
   const policyChangelog = firstString(fields, [
     "policyChangelog",
     "changelog",
@@ -230,7 +230,7 @@ function inferLooseAgentCardFields(
       endpointUrl,
       personality:
         firstParagraph(markdown) ??
-        "Imported from an ProxyWar Agent Card without frontmatter.",
+        "Imported from an Proxy War Agent Card without frontmatter.",
     },
     warnings: [
       "Agent Card did not include YAML frontmatter; inferred agentName/profile/endpointUrl from markdown. Add frontmatter for reliable imports.",

@@ -1,4 +1,4 @@
-# ProxyWar Behavior Roadmap
+# Proxy War Behavior Roadmap
 
 Last updated: 2026-05-11
 
@@ -61,7 +61,7 @@ Latest passing full gate:
 
 - `2026-05-11T03-29-06-603Z-frontier-mock-policy-planner-90ae84f0`
 - 10/10 wins
-- one ProxyWar agent vs 5 built-in nations + 5 built-in tribe/bot opponents
+- one Proxy War agent vs 5 built-in nations + 5 built-in tribe/bot opponents
 - Pangaea Compact, Easy difficulty
 - full GameServer/core simulation
 - report: `artifacts/ai-league-benchmarks/2026-05-11T03-29-06-603Z-frontier-mock-policy-planner-90ae84f0/benchmark-report.md`
@@ -77,9 +77,9 @@ Artifacts are written under:
 
 - `artifacts/ai-league-benchmarks/<benchmark-id>/frontier-summary.json`
 - `artifacts/ai-league-benchmarks/<benchmark-id>/frontier-report.md`
-- per-run ProxyWar reports under `artifacts/ai-league-runs/<run-id>/`
+- per-run Proxy War reports under `artifacts/ai-league-runs/<run-id>/`
 
-The benchmark currently measures one ProxyWar agent against built-in `PlayerType.Nation` opponents. Available metrics include survival, winner, tile share, action counts, offered action counts, accepted/rejected intents, audit counts, fallbacks, parser failures, provider attribution, latency, and replay links. If exact placement/win ranking is unavailable, reports use tile share and survival honestly as proxy metrics.
+The benchmark currently measures one Proxy War agent against built-in `PlayerType.Nation` opponents. Available metrics include survival, winner, tile share, action counts, offered action counts, accepted/rejected intents, audit counts, fallbacks, parser failures, provider attribution, latency, and replay links. If exact placement/win ranking is unavailable, reports use tile share and survival honestly as proxy metrics.
 
 ## Where To Add Future Behavior
 

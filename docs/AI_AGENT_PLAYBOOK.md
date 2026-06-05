@@ -148,7 +148,7 @@ Sources reviewed:
   a measured missed family. Use `--profile=all` in the frontier benchmark when
   you need a compact multi-profile sample.
 - Render demos use longer step spacing and replay tail turns so the real
-  ProxyWar replay is watchable instead of ending immediately.
+  Proxy War replay is watchable instead of ending immediately.
 - Current late-game work uses mined human replay timing plus built-in nation
   logic for SAM, missile silo, and nuke target priority. Nuclear actions still
   select existing `LegalAction.id` values; target metadata is produced by the

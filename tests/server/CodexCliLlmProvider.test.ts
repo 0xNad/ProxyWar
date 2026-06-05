@@ -1,6 +1,7 @@
 import fs from "fs/promises";
 import { describe, expect, it } from "vitest";
 import {
+  CodexAppServerCompletionClient,
   CodexCliCommandRunner,
   CodexCliLlmProvider,
   DEFAULT_CODEX_PLANNER_MODEL,
@@ -30,6 +31,8 @@ describe("CodexCliLlmProvider", () => {
       reasoningEffort: "medium",
       timeoutMs: 1234,
       profile: "ai-league",
+      transport: "app-server",
+      appServerIdleCloseMs: 1_800_000,
     });
   });
 
@@ -48,7 +51,33 @@ describe("CodexCliLlmProvider", () => {
     expect(config).toMatchObject({
       model: DEFAULT_CODEX_PLANNER_MODEL,
       reasoningEffort: DEFAULT_CODEX_PLANNER_REASONING_EFFORT,
+      transport: "app-server",
+      appServerIdleCloseMs: 1_800_000,
     });
+  });
+
+  it("can override the persistent app-server idle window", () => {
+    const config = loadCodexCliLlmProviderConfig(
+      {
+        AI_LEAGUE_LLM_PROVIDER: "codex-cli",
+        AI_LEAGUE_CODEX_APP_SERVER_IDLE_CLOSE_MS: "600000",
+      },
+      "/tmp/project",
+    );
+
+    expect(config.appServerIdleCloseMs).toBe(600_000);
+  });
+
+  it("can opt back into process-per-call codex exec transport", () => {
+    const config = loadCodexCliLlmProviderConfig(
+      {
+        AI_LEAGUE_LLM_PROVIDER: "codex-cli",
+        AI_LEAGUE_CODEX_TRANSPORT: "exec",
+      },
+      "/tmp/project",
+    );
+
+    expect(config.transport).toBe("exec");
   });
 
   it("prefers explicit command and can discover the bundled Codex app binary", () => {
@@ -132,6 +161,110 @@ describe("CodexCliLlmProvider", () => {
       '{"selectedLegalActionId":"hold","reason":"Safe hold.","confidence":0.5}',
     );
     expect(seenArgs).toHaveLength(1);
+  });
+
+  it("uses persistent app-server transport with the Codex output schema", async () => {
+    const calls: unknown[] = [];
+    const appServerClient: CodexAppServerCompletionClient = {
+      async complete(input) {
+        calls.push(input);
+        expect(input.command).toBe("codex-test");
+        expect(input.cwd).toBe("/tmp/project");
+        expect(input.model).toBe("gpt-test");
+        expect(input.reasoningEffort).toBe("medium");
+        expect(input.idleCloseMs).toBe(1_800_000);
+        expect(input.outputSchema).toBe("planner");
+        expect(input.prompt).toContain("Do not choose a LegalAction.id");
+        expect(input.schema).toMatchObject({
+          required: [
+            "objective",
+            "turnIntent",
+            "rationale",
+            "maxDecisionCycles",
+            "preferredActionKinds",
+            "enabledModules",
+            "targetPlayerId",
+            "tacticalSettings",
+          ],
+        });
+        return '{"objective":"secure_economy","turnIntent":"build","rationale":"Build economy.","maxDecisionCycles":3,"preferredActionKinds":["build","hold"],"enabledModules":["economy"],"targetPlayerId":null,"tacticalSettings":{"reserveRatio":0.35,"triggerRatio":0.55,"expansionRatio":0.15,"maxConcurrentWars":1,"retreatThreshold":0.35,"maxActionsPerDecision":4}}';
+      },
+    };
+    const provider = new CodexCliLlmProvider({
+      command: "codex-test",
+      cwd: "/tmp/project",
+      timeoutMs: 2_000,
+      model: "gpt-test",
+      reasoningEffort: "medium",
+      outputSchema: "planner",
+      appServerClient,
+      appServerFallbackToExec: false,
+    });
+
+    await expect(provider.complete("planner prompt")).resolves.toContain(
+      '"objective":"secure_economy"',
+    );
+    expect(calls).toHaveLength(1);
+  });
+
+  it("closes the persistent app-server client when the provider closes", () => {
+    let closeCalls = 0;
+    const provider = new CodexCliLlmProvider({
+      command: "codex-test",
+      cwd: "/tmp/project",
+      timeoutMs: 2_000,
+      appServerClient: {
+        async complete() {
+          return '{"selectedLegalActionId":"hold","reason":"Safe hold.","confidence":0.5}';
+        },
+        close() {
+          closeCalls += 1;
+        },
+      },
+    });
+
+    provider.close();
+
+    expect(closeCalls).toBe(1);
+  });
+
+  it("falls back to codex exec when app-server transport fails", async () => {
+    let execCalls = 0;
+    const runner: CodexCliCommandRunner = async (input) => {
+      execCalls += 1;
+      const outputPath =
+        input.args[input.args.indexOf("--output-last-message") + 1];
+      await fs.writeFile(
+        outputPath,
+        '{"selectedLegalActionId":"hold","reason":"Safe hold.","confidence":0.5}',
+      );
+      return {
+        exitCode: 0,
+        stdout: "",
+        stderr: "",
+        timedOut: false,
+      };
+    };
+    const provider = new CodexCliLlmProvider({
+      command: "codex-test",
+      cwd: "/tmp/project",
+      timeoutMs: 2_000,
+      appServerClient: {
+        async complete() {
+          throw new Error("app-server unavailable");
+        },
+      },
+      transport: "app-server",
+      commandRunner: runner,
+    });
+
+    await expect(provider.complete("prompt")).resolves.toContain(
+      '"selectedLegalActionId":"hold"',
+    );
+    await expect(provider.complete("prompt")).resolves.toContain(
+      '"selectedLegalActionId":"hold"',
+    );
+    expect(execCalls).toBe(2);
   });
 
   it("reports a missing codex binary clearly", async () => {

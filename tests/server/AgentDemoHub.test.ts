@@ -8,8 +8,8 @@ import {
   proxyWarAgentProtocolSchema,
   proxyWarAgentStartJson,
   renderAgentDemoHubHtml,
-  renderProxyWarAgentStartHtml,
   renderProxyWarAdminHtml,
+  renderProxyWarAgentStartHtml,
   renderProxyWarPublicHtml,
   renderProxyWarTesterDashboardHtml,
 } from "../../src/server/agents/AgentDemoHub";
@@ -55,7 +55,10 @@ describe("AgentDemoHub", () => {
       await fs.writeFile(path.join(runDir, "spectator.html"), "<html></html>");
       await fs.writeFile(path.join(runDir, "game-record.json"), "{}");
       await fs.writeFile(path.join(runDir, "objective-scorecard.json"), "{}");
-      await fs.writeFile(path.join(runDir, "external-agent-feedback.md"), "# Feedback");
+      await fs.writeFile(
+        path.join(runDir, "external-agent-feedback.md"),
+        "# Feedback",
+      );
       await fs.writeFile(
         path.join(runDir, "external-agent-feedback.json"),
         JSON.stringify({
@@ -97,13 +100,16 @@ describe("AgentDemoHub", () => {
                 {
                   sequence: 9,
                   username: "Remote Frontier",
-                  issue: "Repeated an expansion action after a better build was offered",
-                  observationSummary: "Remote Frontier had a safe economy build",
+                  issue:
+                    "Repeated an expansion action after a better build was offered",
+                  observationSummary:
+                    "Remote Frontier had a safe economy build",
                   chosenActionID: "attack-neutral-1",
                   chosenActionKind: "attack",
                   recommendedActionKinds: ["build", "alliance_request"],
                   offeredActionIDs: ["attack-neutral-1", "build-city-1"],
-                  policyHint: "Rotate into economy when expansion is no longer highest leverage.",
+                  policyHint:
+                    "Rotate into economy when expansion is no longer highest leverage.",
                 },
               ],
               practicePrompts: [
@@ -137,7 +143,10 @@ describe("AgentDemoHub", () => {
           ],
         }),
       );
-      await fs.writeFile(path.join(runDir, "match-package.html"), "<html></html>");
+      await fs.writeFile(
+        path.join(runDir, "match-package.html"),
+        "<html></html>",
+      );
       await fs.writeFile(path.join(runDir, "match-package.md"), "# Package");
       await fs.writeFile(
         path.join(previousRunDir, "match-summary.json"),
@@ -308,7 +317,8 @@ describe("AgentDemoHub", () => {
           profile: "opportunistic",
           brainType: "external-http",
           plannerExecutorMode: false,
-          personality: "External endpoint chooses from offered legal action ids.",
+          personality:
+            "External endpoint chooses from offered legal action ids.",
           policyChangelog:
             "Added repetition penalty and safer economy timing before this rerun.",
           observationPolicy: "default",
@@ -333,7 +343,11 @@ describe("AgentDemoHub", () => {
         tournamentsRootDir,
         evaluationsRootDir,
         nationsDir,
-        manifestDir: path.join(process.cwd(), "docs", "ai-league-agent-manifests"),
+        manifestDir: path.join(
+          process.cwd(),
+          "docs",
+          "ai-league-agent-manifests",
+        ),
         rendererBaseUrl: "http://127.0.0.1:9000",
         closedBeta: { enabled: true, label: "Friends and Family Beta" },
         houseAgentBrain: "planner-codex-cli",
@@ -361,16 +375,36 @@ describe("AgentDemoHub", () => {
       const agentStartJson = proxyWarAgentStartJson(model) as {
         startPage?: string;
         protocolSchema?: string;
+        oneCommandBootstrap?: {
+          script?: string;
+          defaultCommand?: string;
+          importAndRunCommand?: string;
+          does?: string[];
+          security?: string;
+          sourceTransparency?: string;
+        };
+        testerRequirements?: {
+          environment?: string;
+          notSupported?: string;
+          claudeLogin?: string;
+          relaySafety?: string;
+        };
         agentCardContract?: { endpointUrl?: string };
         healthCheck?: { legalActionIds?: string[] };
+        managedRelay?: { default?: boolean; sessionEndpoint?: string };
         setupPaths?: {
+          oneCommand?: string;
+          oneCommandImportAndRun?: string;
+          saferGitHubClone?: string[];
           windowsPowerShell?: string[];
           codexCli?: string;
           claudeCowork?: string;
+          claudeLoginCheck?: string[];
           openRouter?: string;
           selfTest?: string;
           endpointToken?: string;
         };
+        copyPasteAgentPrompt?: string;
         starterSelfTest?: { command?: string; defaultEndpointUrl?: string };
         importAndRunEndpoint?: { path?: string };
         latestReplay?: string | null;
@@ -396,7 +430,9 @@ describe("AgentDemoHub", () => {
                 message: "A showcase-ready tournament is available.",
               },
             ],
-            nextActions: ["Share the /public URL and invite code with testers."],
+            nextActions: [
+              "Share the /public URL and invite code with testers.",
+            ],
           },
           runningJobID: null,
           queuedJobCount: 0,
@@ -426,7 +462,9 @@ describe("AgentDemoHub", () => {
                 message: "A showcase-ready tournament is available.",
               },
             ],
-            nextActions: ["Share the /public URL and invite code with testers."],
+            nextActions: [
+              "Share the /public URL and invite code with testers.",
+            ],
           },
           runningJobID: null,
           queuedJobCount: 0,
@@ -443,12 +481,12 @@ describe("AgentDemoHub", () => {
       expect(model.tournaments).toHaveLength(1);
       expect(model.evaluations).toHaveLength(1);
       expect(model.savedNations).toHaveLength(2);
-      expect(html).toContain("ProxyWar");
+      expect(html).toContain("Proxy War");
       expect(html).toContain("Create AI Nation");
-      expect(html).toContain("Run ProxyWar Match");
+      expect(html).toContain("Run Proxy War Match");
       expect(html).toContain("Watch rendered gameplay");
       expect(html).toContain("Manifest-defined roster");
-      expect(html).toContain("Saved ProxyWar nations");
+      expect(html).toContain("Saved Proxy War nations");
       expect(html).toContain("Iron Coast");
       expect(html).toContain("Aggressive Expander");
       expect(html).toContain("hub-run");
@@ -461,8 +499,8 @@ describe("AgentDemoHub", () => {
       expect(html).toContain("job-1");
       expect(html).toContain("/api/jobs");
       expect(html).toContain("/api/nations");
-      expect(publicHtml).toContain("ProxyWar");
-      expect(publicHtml).toContain("Connect agents. Watch OpenFront unfold.");
+      expect(publicHtml).toContain("Proxy War");
+      expect(publicHtml).toContain("Connect agents. Watch Proxy War unfold.");
       expect(publicHtml).toContain("/agent-start");
       expect(publicHtml).toContain("Agent setup link");
       expect(publicHtml).toContain("A strategy arena for autonomous agents");
@@ -474,7 +512,9 @@ describe("AgentDemoHub", () => {
       expect(publicHtml).toContain("Agent League Showcase");
       expect(publicHtml).toContain("Watch showcase replay");
       expect(publicHtml).toContain("Open leaderboard");
-      expect(publicHtml).toContain("/tournaments/hub-tournament/leaderboard.html");
+      expect(publicHtml).toContain(
+        "/tournaments/hub-tournament/leaderboard.html",
+      );
       expect(publicHtml).toContain("Iron Coast expanded, built defenses");
       expect(publicHtml).toContain("showcase-ready");
       expect(publicHtml).toContain("Friends and Family Beta");
@@ -497,14 +537,16 @@ describe("AgentDemoHub", () => {
       expect(publicHtml).toContain("agent-feedback-status");
       expect(publicHtml).toContain("Remote Frontier accepted 12/12 decisions");
       expect(publicHtml).toContain("Break repeated low-value action loops");
-      expect(publicHtml).toContain("Update the policy to rank safe City or Factory");
+      expect(publicHtml).toContain(
+        "Update the policy to rank safe City or Factory",
+      );
       expect(publicHtml).toContain("Before vs After");
       expect(publicHtml).toContain("Compared with previous feedback run");
       expect(publicHtml).toContain("hub-run-before");
       expect(publicHtml).toContain("+25pp");
       expect(publicHtml).toContain("Refresh comparison");
       expect(publicHtml).toContain("refreshFeedback");
-      expect(publicHtml).toContain('/public#agent-feedback');
+      expect(publicHtml).toContain("/public#agent-feedback");
       expect(publicHtml).toContain("Per-Agent History");
       expect(publicHtml).toContain("Remote Frontier");
       expect(publicHtml).toContain("accepted decisions improved");
@@ -521,7 +563,9 @@ describe("AgentDemoHub", () => {
       expect(publicHtml).toContain("/api/agent-cards/import-and-run");
       expect(publicHtml).toContain("Import & Run Match");
       expect(publicHtml).toContain("Import Only");
-      expect(publicHtml).toContain("/examples/external-agent/PROXYWAR_AGENT_CARD.md");
+      expect(publicHtml).toContain(
+        "/examples/external-agent/PROXYWAR_AGENT_CARD.md",
+      );
       expect(publicHtml).toContain("Advanced: paste endpoint manually");
       expect(publicHtml).toContain("/examples/external-agent/README.md");
       expect(publicHtml).toContain("/docs/PROXYWAR_TESTER_HANDOFF.md");
@@ -535,11 +579,16 @@ describe("AgentDemoHub", () => {
       expect(publicHtml).toContain("npm run self-test");
       expect(publicHtml).toContain("Copy starter command");
       expect(publicHtml).toContain("starter-agent-run-command");
-      expect(publicHtml).toContain(
-        "http://127.0.0.1:7777/agent-card.md",
-      );
+      expect(publicHtml).toContain("http://127.0.0.1:7777/agent-card.md");
       expect(publicHtml).toContain("cat &gt; starter-agent.mjs");
       expect(publicHtml).toContain("node starter-agent.mjs");
+      expect(publicHtml).toContain("defaultClaudeCommandArgs");
+      expect(publicHtml).toContain(
+        "Bash,Edit,MultiEdit,Write,Read,WebFetch,WebSearch",
+      );
+      expect(publicHtml).toContain(
+        "process.env.PROXYWAR_AGENT_LLM_TIMEOUT_MS ?? 12000",
+      );
       expect(publicHtml).toContain("alliance_request");
       expect(publicHtml).toContain("donate_gold");
       expect(publicHtml).toContain("starter-agent-skill");
@@ -553,33 +602,49 @@ describe("AgentDemoHub", () => {
       expect(publicHtml).toContain("externalHealthCheckHtml");
       expect(publicHtml).toContain("Raw output");
       expect(publicHtml).toContain("/api/external-agents/check");
-      expect(publicHtml).toContain("Agent Card import stopped at endpoint health check.");
+      expect(publicHtml).toContain(
+        "Agent Card import stopped at endpoint health check.",
+      );
       expect(publicHtml).toContain("Endpoint health check:");
       expect(publicHtml).toContain("If endpoint health fails");
       expect(publicHtml).toContain("delete the stale saved agent");
-      expect(publicHtml).toContain("Run <code>npm run self-test</code> before importing.");
+      expect(publicHtml).toContain(
+        "Run <code>npm run self-test</code> before importing.",
+      );
       expect(publicHtml).toContain("Saved roster recovery");
       expect(publicHtml).toContain("Run Match");
-      expect(publicHtml).toContain("Run Saved-Roster Match");
-      expect(publicHtml).toContain("12-round saved-roster match");
-      expect(publicHtml).toContain("latest saved agent");
+      expect(publicHtml).toContain("Run Codex Match");
+      expect(publicHtml).toContain("until a winner emerges");
+      expect(publicHtml).toContain("two Easy built-in nations");
       expect(publicHtml).toContain("health check");
       expect(publicHtml).toContain("Tester Evidence Packet");
       expect(publicHtml).toContain("Copy evidence packet");
       expect(publicHtml).toContain("tester-evidence-packet");
-      expect(publicHtml).toContain("ProxyWar tester evidence");
+      expect(publicHtml).toContain("Proxy War tester evidence");
       expect(publicHtml).toContain("Agent Card URL");
-      expect(publicHtml).toContain("Decision endpoint: https://agent.example.com/proxywar/decide");
-      expect(publicHtml).toContain("Endpoint health: not checked in this browser session");
+      expect(publicHtml).toContain(
+        "Decision endpoint: https://agent.example.com/proxywar/decide",
+      );
+      expect(publicHtml).toContain(
+        "Endpoint health: not checked in this browser session",
+      );
       expect(publicHtml).toContain("Run ID: hub-run");
-      expect(publicHtml).toContain("Feedback: /runs/hub-run/external-agent-feedback.md");
+      expect(publicHtml).toContain(
+        "Feedback: /runs/hub-run/external-agent-feedback.md",
+      );
       expect(publicHtml).toContain("renderTesterEvidencePacket");
       expect(publicHtml).toContain("updateTesterEvidenceFromJob");
-      expect(publicHtml).toContain('"matchLength":"showcase"');
+      expect(publicHtml).toContain('"matchLength":"full"');
+      expect(publicHtml).toContain('"roster":"saved"');
       expect(publicHtml).toContain('"maxSavedNations":1');
-      expect(publicHtml).toContain('"maxSteps":12');
+      expect(publicHtml).toContain('"fillSavedRoster":false');
+      expect(publicHtml).toContain('"agents":1');
+      expect(publicHtml).toContain('"maxSteps":700');
+      expect(publicHtml).toContain('"requireWinner":true');
+      expect(publicHtml).toContain('"nations":2');
+      expect(publicHtml).toContain('"difficulty":"Easy"');
       expect(publicHtml).not.toContain("maxTurns: 90000");
-      expect(publicHtml).toContain("House agents: Codex CLI planner");
+      expect(publicHtml).toContain("House agent: Codex CLI planner");
       expect(publicHtml).toContain('"brain":"planner-codex-cli"');
       expect(publicHtml).toContain("Reference Nation");
       expect(publicHtml).toContain("External");
@@ -602,9 +667,13 @@ describe("AgentDemoHub", () => {
       expect(publicHtml).not.toContain("match-summary.json");
       expect(publicHtml).not.toContain("job.outputTail");
       expect(publicHtml).toContain("publicJobStatusHtml");
-      expect(publicHtml).toContain("Completed, but no replay or report artifact was attached.");
+      expect(publicHtml).toContain(
+        "Completed, but no replay or report artifact was attached.",
+      );
       expect(publicHtml).toContain("Replay missing");
-      expect(publicHtml).toContain("game-record.json and spectator-replay.json");
+      expect(publicHtml).toContain(
+        "game-record.json and spectator-replay.json",
+      );
       expect(publicHtml).toContain("run-showcase-tournament");
       expect(publicHtml).toContain("timeline");
       expect(publicHtml).toContain("PROXYWAR_TESTER_HANDOFF.md");
@@ -614,25 +683,33 @@ describe("AgentDemoHub", () => {
       expect(publicRoot.querySelector("#first-agent-checklist")).not.toBeNull();
       expect(publicRoot.querySelector("#agent-feedback")).not.toBeNull();
       expect(publicRoot.querySelectorAll(".comparison-cell")).toHaveLength(4);
-      expect(publicRoot.querySelectorAll(".agent-history-item")).toHaveLength(1);
+      expect(publicRoot.querySelectorAll(".agent-history-item")).toHaveLength(
+        1,
+      );
       expect(publicRoot.querySelector("#external-agent-form")).not.toBeNull();
       expect(publicRoot.querySelector("#agent-card-form")).not.toBeNull();
       expect(publicRoot.querySelector('input[name="cardUrl"]')).not.toBeNull();
       expect(publicRoot.querySelector("#nation-form")).not.toBeNull();
       expect(publicRoot.querySelector("#run-external-match")?.text).toContain(
-        "Run Saved-Roster Match",
+        "Run Codex Match",
       );
-      expect(publicRoot.querySelector("#starter-agent-run-command")?.text).toContain(
-        "node starter-agent.mjs",
-      );
+      expect(
+        publicRoot.querySelector("#starter-agent-run-command")?.text,
+      ).toContain("node starter-agent.mjs");
       expect(publicRoot.querySelector("#starter-agent-skill")?.text).toContain(
         "Choose exactly one offered LegalAction.id",
       );
       expect(publicRoot.querySelectorAll("[data-copy-target]")).toHaveLength(3);
-      expect(publicRoot.querySelectorAll("[data-checklist-step]")).toHaveLength(5);
-      expect(publicRoot.querySelectorAll("[data-checklist-feedback-link]").length).toBeGreaterThan(0);
-      expect(publicRoot.querySelectorAll("[data-delete-nation-id]")).toHaveLength(2);
-      expect(adminHtml).toContain("ProxyWar Admin");
+      expect(publicRoot.querySelectorAll("[data-checklist-step]")).toHaveLength(
+        5,
+      );
+      expect(
+        publicRoot.querySelectorAll("[data-checklist-feedback-link]").length,
+      ).toBeGreaterThan(0);
+      expect(
+        publicRoot.querySelectorAll("[data-delete-nation-id]"),
+      ).toHaveLength(2);
+      expect(adminHtml).toContain("Proxy War Admin");
       expect(adminHtml).toContain("Public Readiness");
       expect(adminHtml).toContain("/api/public-readiness");
       expect(adminHtml).toContain("Agent showcase");
@@ -645,38 +722,100 @@ describe("AgentDemoHub", () => {
       expect(testerDashboardHtml).toContain("Tester Dashboard");
       expect(testerDashboardHtml).toContain("Endpoint Health");
       expect(testerDashboardHtml).toContain("Check Saved External Endpoints");
-      expect(testerDashboardHtml).toContain("/api/tester-dashboard/endpoint-health");
+      expect(testerDashboardHtml).toContain(
+        "/api/tester-dashboard/endpoint-health",
+      );
       expect(testerDashboardHtml).toContain("/openfront-replay/hub-run");
-      expect(testerDashboardHtml).toContain("/runs/hub-run/external-agent-feedback.md");
+      expect(testerDashboardHtml).toContain(
+        "/runs/hub-run/external-agent-feedback.md",
+      );
       expect(testerDashboardHtml).toContain("Remote Frontier");
       expect(testerDashboardHtml).toContain("Queue");
       expect(testerDashboardHtml).not.toContain(rootDir);
       expect(testerDashboardHtml).not.toContain("decisions.jsonl");
       expect(agentStartHtml).toContain(
-        "Build 3 endpoints. Run self-test. Return your Agent Card URL.",
+        "Run one bootstrap command. Get a replay.",
       );
-      expect(agentStartHtml).toContain("Copy starter requirements");
-      expect(agentStartHtml).toContain("Do not paste <code>/proxywar/decide</code>");
+      expect(agentStartHtml).toContain("Copy coding-agent prompt");
+      expect(agentStartHtml).toContain("Copy bootstrap command");
+      expect(agentStartHtml).toContain("/agent-start.sh");
+      expect(agentStartHtml).toContain("--invite-code");
+      expect(agentStartHtml).toContain("Local terminal or local coding agent");
+      expect(agentStartHtml).toContain(
+        "Do not run this inside a short-lived remote sandbox",
+      );
+      expect(agentStartHtml).toContain("Safer GitHub path");
+      expect(agentStartHtml).toContain(
+        "git clone https://github.com/0xNad/ProxyWar-starter-agent.git",
+      );
+      expect(agentStartHtml).toContain("claude -p");
+      expect(agentStartHtml).toContain("--max-turns 1");
+      expect(agentStartHtml).toContain("--disallowedTools");
+      expect(agentStartHtml).toContain("/login");
+      expect(agentStartHtml).toContain("not a network proxy");
+      expect(agentStartHtml).toContain("Keep this terminal open");
+      expect(agentStartHtml).toContain(
+        "Do not paste <code>/proxywar/decide</code>",
+      );
       expect(agentStartHtml).toContain("Before you reply to the tester");
-      expect(agentStartHtml).toContain("Return the public <code>/agent-card.md</code> URL");
-      expect(agentStartHtml).toContain("Self-test: passed");
-      expect(agentStartHtml).toContain("Notes: anything the tester needs to know");
+      expect(agentStartHtml).toContain("Managed Agent Relay");
+      expect(agentStartHtml).toContain("Return replay and feedback links");
+      expect(agentStartHtml).toContain("Self-test: relay passed");
+      expect(agentStartHtml).toContain(
+        "any install/login issue that blocked automation",
+      );
       expect(agentStartHtml).toContain("PROXYWAR_AGENT_ENDPOINT_TOKEN");
       expect(agentStartHtml).toContain("/agent-start.json");
       expect(agentStartHtml).toContain("/protocol/proxywar-agent.schema.json");
       expect(agentStartHtml).toContain("POST /api/agent-cards/import-and-run");
-      expect(agentStartHtml).toContain("GET /agent-card.md");
+      expect(agentStartHtml).toContain("<code>/agent-card.md</code>");
       expect(agentStartHtml).toContain("Copy-paste setup paths");
       expect(agentStartHtml).toContain("Codex CLI local");
       expect(agentStartHtml).toContain("Claude/Cowork command");
       expect(agentStartHtml).toContain("Windows PowerShell");
       expect(agentStartHtml).toContain("Prove starter SDK");
       expect(agentStartHtml).toContain("npm run self-test");
-      expect(agentStartHtml).toContain("/examples/external-agent/smoke-test.mjs");
+      expect(agentStartHtml).toContain(
+        "/examples/external-agent/smoke-test.mjs",
+      );
       expect(agentStartHtml).toContain("Manual Test Endpoint expects");
       expect(agentStartJson.startPage).toBe("/agent-start");
       expect(agentStartJson.protocolSchema).toBe(
         "/protocol/proxywar-agent.schema.json",
+      );
+      expect(agentStartJson.oneCommandBootstrap?.script).toBe(
+        "/agent-start.sh",
+      );
+      expect(agentStartJson.oneCommandBootstrap?.defaultCommand).toContain(
+        "/agent-start.sh",
+      );
+      expect(agentStartJson.oneCommandBootstrap?.importAndRunCommand).toContain(
+        "--invite-code",
+      );
+      expect(agentStartJson.oneCommandBootstrap?.does).toContain(
+        "create a Managed Agent Relay session",
+      );
+      expect(agentStartJson.oneCommandBootstrap?.security).toContain(
+        "relay token",
+      );
+      expect(agentStartJson.oneCommandBootstrap?.sourceTransparency).toContain(
+        "inspect bootstrap.sh",
+      );
+      expect(agentStartJson.testerRequirements?.environment).toContain(
+        "local persistent terminal",
+      );
+      expect(agentStartJson.testerRequirements?.notSupported).toContain(
+        "Short-lived remote sandboxes",
+      );
+      expect(agentStartJson.testerRequirements?.claudeLogin).toContain(
+        "/login",
+      );
+      expect(agentStartJson.testerRequirements?.relaySafety).toContain(
+        "not a network proxy",
+      );
+      expect(agentStartJson.managedRelay?.default).toBe(true);
+      expect(agentStartJson.managedRelay?.sessionEndpoint).toBe(
+        "/api/agent-relay/sessions",
       );
       expect(agentStartJson.agentCardContract?.endpointUrl).toContain(
         "not /agent-card.md",
@@ -685,13 +824,35 @@ describe("AgentDemoHub", () => {
         "health-check:expand",
         "health-check:hold",
       ]);
-      expect(agentStartJson.setupPaths?.windowsPowerShell).toContain("npm start");
+      expect(agentStartJson.setupPaths?.windowsPowerShell).toContain(
+        "npm start",
+      );
+      expect(agentStartJson.setupPaths?.oneCommand).toContain(
+        "/agent-start.sh",
+      );
+      expect(agentStartJson.setupPaths?.oneCommandImportAndRun).toContain(
+        "--invite-code",
+      );
+      expect(agentStartJson.setupPaths?.saferGitHubClone).toContain("npm test");
       expect(agentStartJson.setupPaths?.codexCli).toContain("codex-cli");
-      expect(agentStartJson.setupPaths?.claudeCowork).toContain("claude-cowork");
-      expect(agentStartJson.setupPaths?.openRouter).toContain("OPENROUTER_API_KEY");
-      expect(agentStartJson.setupPaths?.selfTest).toContain("npm run self-test");
+      expect(agentStartJson.setupPaths?.claudeCowork).toContain(
+        "claude-cowork",
+      );
+      expect(agentStartJson.setupPaths?.claudeLoginCheck).toContain(
+        "claude --version",
+      );
+      expect(agentStartJson.setupPaths?.claudeLoginCheck).toContain("/login");
+      expect(agentStartJson.setupPaths?.openRouter).toContain(
+        "OPENROUTER_API_KEY",
+      );
+      expect(agentStartJson.setupPaths?.selfTest).toContain(
+        "npm run self-test",
+      );
       expect(agentStartJson.setupPaths?.endpointToken).toContain(
         "PROXYWAR_AGENT_ENDPOINT_TOKEN",
+      );
+      expect(agentStartJson.copyPasteAgentPrompt).toContain(
+        "local persistent terminal",
       );
       expect(agentStartJson.starterSelfTest?.command).toBe("npm run self-test");
       expect(agentStartJson.starterSelfTest?.defaultEndpointUrl).toBe(

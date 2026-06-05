@@ -31,6 +31,7 @@ export interface ProxyWarHostedBetaReadinessInput {
     command: string | null;
     available: boolean;
   };
+  externalAgentDecisionTimeoutMs: number;
   maxQueuedJobs: number;
   rateLimits: Record<string, number>;
   paths: {
@@ -53,6 +54,15 @@ export interface ProxyWarHostedBetaReadinessInput {
   now?: Date;
 }
 
+type FetchLike = (url: string, init: RequestInit) => Promise<Response>;
+
+export interface ProxyWarLivePublicReadinessFetchOptions {
+  publicUrl: string;
+  inviteCode: string;
+  timeoutMs?: number;
+  fetchFn?: FetchLike;
+}
+
 export function buildProxyWarHostedBetaReadinessReport(
   input: ProxyWarHostedBetaReadinessInput,
 ): ProxyWarHostedBetaReadinessReport {
@@ -62,6 +72,7 @@ export function buildProxyWarHostedBetaReadinessReport(
     privateEndpointLockCheck(input.allowPrivateAgentEndpoints),
     houseAgentBrainCheck(input.houseAgentBrain),
     codexCliCheck(input.codexCli),
+    externalAgentDecisionTimeoutCheck(input.externalAgentDecisionTimeoutMs),
     queueLimitCheck(input.maxQueuedJobs),
     rateLimitCheck(input.rateLimits),
     persistenceCheck(input.paths),
@@ -86,7 +97,7 @@ export function formatProxyWarHostedBetaReadinessReport(
   report: ProxyWarHostedBetaReadinessReport,
 ): string {
   return [
-    `ProxyWar hosted beta readiness: ${report.status}`,
+    `Proxy War hosted beta readiness: ${report.status}`,
     `Share URL: ${report.shareUrl}`,
     `Git commit: ${report.gitCommit ?? "unknown"}`,
     `Generated: ${report.generatedAt}`,
@@ -109,6 +120,87 @@ export function hostedBetaReadinessExitCode(
   if (report.status === "ready") return 0;
   if (report.status === "warning" && options.allowWarnings === true) return 0;
   return 1;
+}
+
+export async function fetchProxyWarLivePublicReadinessReport(
+  options: ProxyWarLivePublicReadinessFetchOptions,
+): Promise<ProxyWarPublicReadinessReport> {
+  const publicUrl = normalizeHostedPublicUrl(options.publicUrl);
+  const timeoutMs = options.timeoutMs ?? 10_000;
+  const fetchFn = options.fetchFn ?? fetch;
+  const loginResponse = await fetchWithTimeout(fetchFn, publicUrl, "/api/beta/login", {
+    timeoutMs,
+    init: {
+      method: "POST",
+      body: new URLSearchParams({
+        inviteCode: options.inviteCode,
+        returnTo: "/public",
+      }),
+      headers: {
+        "content-type": "application/x-www-form-urlencoded",
+      },
+      redirect: "manual",
+    },
+  });
+  if (loginResponse.status !== 302 && loginResponse.status !== 303) {
+    throw new Error(
+      `invite login returned HTTP ${loginResponse.status} instead of a redirect`,
+    );
+  }
+  const cookie = cookieHeaderFromSetCookie(loginResponse.headers.get("set-cookie"));
+  if (cookie === null) {
+    throw new Error("invite login did not return a beta session cookie");
+  }
+
+  const readinessResponse = await fetchWithTimeout(
+    fetchFn,
+    publicUrl,
+    "/api/public-readiness",
+    {
+      timeoutMs,
+      init: {
+        method: "GET",
+        headers: { cookie },
+        redirect: "manual",
+      },
+    },
+  );
+  if (readinessResponse.status !== 200) {
+    throw new Error(
+      `/api/public-readiness returned HTTP ${readinessResponse.status}`,
+    );
+  }
+  const parsed = (await readinessResponse.json()) as unknown;
+  if (!isProxyWarPublicReadinessReport(parsed)) {
+    throw new Error("/api/public-readiness did not return a readiness report");
+  }
+  return parsed;
+}
+
+export function buildProxyWarLivePublicReadinessFailureReport(input: {
+  publicUrl: string | null;
+  message: string;
+  now?: Date;
+}): ProxyWarPublicReadinessReport {
+  const shareUrl =
+    input.publicUrl === null
+      ? "<missing>/public"
+      : `${normalizeHostedPublicUrl(input.publicUrl)}/public`;
+  return {
+    status: "blocked",
+    generatedAt: (input.now ?? new Date()).toISOString(),
+    mode: input.publicUrl === null ? "local-dev" : "remote-beta",
+    shareUrl,
+    checks: [
+      {
+        id: "live_public_readiness",
+        label: "Live public readiness",
+        status: "fail",
+        message: input.message,
+      },
+    ],
+    nextActions: [input.message],
+  };
 }
 
 function publicReadinessCheck(
@@ -257,6 +349,36 @@ function codexCliCheck(input: {
     label: "Codex CLI",
     status: "pass",
     message: `Codex CLI command is available: ${input.command ?? "codex"}.`,
+  };
+}
+
+function externalAgentDecisionTimeoutCheck(
+  timeoutMs: number,
+): ProxyWarHostedBetaReadinessCheck {
+  if (!Number.isInteger(timeoutMs) || timeoutMs < 1_000) {
+    return {
+      id: "external_agent_timeout",
+      label: "External agent timeout",
+      status: "fail",
+      message:
+        "Set PROXYWAR_EXTERNAL_AGENT_DECISION_TIMEOUT_MS to an integer of at least 1000ms.",
+    };
+  }
+  if (timeoutMs > 20_000) {
+    return {
+      id: "external_agent_timeout",
+      label: "External agent timeout",
+      status: "warn",
+      message:
+        "External tester-agent decisions can hold a checkpoint for more than 20s. Use 15000 for hosted beta unless intentionally testing slow agents.",
+    };
+  }
+  return {
+    id: "external_agent_timeout",
+    label: "External agent timeout",
+    status: "pass",
+    message:
+      "External tester-agent decisions are capped separately from Codex house-agent decisions.",
   };
 }
 
@@ -458,4 +580,80 @@ function nextActions(
         "Run the hosted smoke test, then share the /public URL and invite code with testers.",
       ]
     : actions;
+}
+
+async function fetchWithTimeout(
+  fetchFn: FetchLike,
+  publicUrl: string,
+  path: string,
+  options: { timeoutMs: number; init: RequestInit },
+): Promise<Response> {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), options.timeoutMs);
+  try {
+    return await fetchFn(`${publicUrl}${path}`, {
+      ...options.init,
+      signal: controller.signal,
+    });
+  } catch (error) {
+    if (isAbortError(error)) {
+      throw new Error(`${path} timed out after ${options.timeoutMs}ms`);
+    }
+    throw error;
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+function normalizeHostedPublicUrl(value: string): string {
+  let parsed: URL;
+  try {
+    parsed = new URL(value.trim());
+  } catch {
+    throw new Error("publicUrl must be a valid URL");
+  }
+  if (parsed.pathname === "/public") {
+    parsed.pathname = "";
+  }
+  parsed.search = "";
+  parsed.hash = "";
+  return parsed.toString().replace(/\/+$/, "");
+}
+
+function cookieHeaderFromSetCookie(setCookie: string | null): string | null {
+  if (setCookie === null || setCookie.trim() === "") return null;
+  const first = setCookie.split(",").find((part) => part.includes("="));
+  const cookiePair = first?.split(";")[0]?.trim();
+  return cookiePair === undefined || cookiePair === "" ? null : cookiePair;
+}
+
+function isProxyWarPublicReadinessReport(
+  value: unknown,
+): value is ProxyWarPublicReadinessReport {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) {
+    return false;
+  }
+  const report = value as Partial<ProxyWarPublicReadinessReport>;
+  return (
+    (report.status === "ready" ||
+      report.status === "warning" ||
+      report.status === "blocked") &&
+    typeof report.generatedAt === "string" &&
+    (report.mode === "remote-beta" ||
+      report.mode === "invite-local" ||
+      report.mode === "local-dev") &&
+    typeof report.shareUrl === "string" &&
+    Array.isArray(report.checks) &&
+    Array.isArray(report.nextActions)
+  );
+}
+
+function isAbortError(error: unknown): boolean {
+  if (error instanceof Error) {
+    return error.name === "AbortError" || error.message.includes("aborted");
+  }
+  if (error !== null && typeof error === "object") {
+    return (error as { name?: unknown }).name === "AbortError";
+  }
+  return false;
 }

@@ -143,11 +143,11 @@ export function buildProxyWarMatchPackage(
   const artifacts = [
     artifact({
       kind: "rendered_replay",
-      label: "Rendered ProxyWar replay",
+      label: "Rendered Proxy War replay",
       href: renderedReplayUrl,
       audience: "spectator",
       present: hasGameRecord,
-      description: "The primary watch artifact: the match rendered in ProxyWar.",
+      description: "The primary watch artifact: the match rendered in Proxy War.",
     }),
     artifact({
       kind: "demo_replay",
@@ -155,7 +155,7 @@ export function buildProxyWarMatchPackage(
       href: `/openfront-replay/${encodedRunID}`,
       audience: "spectator",
       present: hasGameRecord,
-      description: "The same replay through the ProxyWar demo/beta hub.",
+      description: "The same replay through the Proxy War demo/beta hub.",
     }),
     artifact({
       kind: "match_story",
@@ -240,7 +240,7 @@ export function buildProxyWarMatchPackage(
       href: summary.spectator?.gameRecordPath ?? "game-record.json",
       audience: "technical",
       present: hasGameRecord,
-      description: "Turn stream consumed by the native ProxyWar replay renderer.",
+      description: "Turn stream consumed by the native Proxy War replay renderer.",
     }),
     artifact({
       kind: "summary",
@@ -258,7 +258,7 @@ export function buildProxyWarMatchPackage(
     generatedAt: now.toISOString(),
     runID: summary.runID,
     matchID: summary.matchID ?? null,
-    title: `ProxyWar Match ${summary.runID}`,
+    title: `Proxy War Match ${summary.runID}`,
     routes: {
       renderedReplayUrl: hasGameRecord ? renderedReplayUrl : null,
       demoHubReplayUrl: hasGameRecord ? `/openfront-replay/${encodedRunID}` : null,
@@ -430,8 +430,8 @@ export function proxyWarMatchPackageHtml(
   <div class="shell">
     <header class="topbar">
       <div class="brand">
-        <span class="brand-mark">OF</span>
-        <span>ProxyWar Match Package</span>
+        <span class="brand-mark">PW</span>
+        <span>Proxy War Match Package</span>
       </div>
       <nav aria-label="Match package navigation">
         ${matchPackage.routes.demoHubReplayUrl ? `<a href="${escapeAttribute(matchPackage.routes.demoHubReplayUrl)}">Replay</a>` : ""}
@@ -446,7 +446,7 @@ export function proxyWarMatchPackageHtml(
         <div>
           <div class="eyebrow">Generated match package</div>
           <h1>Match Package</h1>
-          <p class="lede"><code>${escapeHtml(matchPackage.runID)}</code><br>${escapeHtml(matchPackage.matchID ?? "Saved ProxyWar match")} · generated ${escapeHtml(matchPackage.generatedAt)}</p>
+          <p class="lede"><code>${escapeHtml(matchPackage.runID)}</code><br>${escapeHtml(matchPackage.matchID ?? "Saved Proxy War match")} · generated ${escapeHtml(matchPackage.generatedAt)}</p>
         </div>
         <div class="actions">
           ${

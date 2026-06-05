@@ -68,6 +68,58 @@ describe("ProxyWarNationRegistry", () => {
     );
   });
 
+  it("creates a managed relay nation manifest with token secret support", async () => {
+    const rootDir = await fs.mkdtemp(path.join(os.tmpdir(), "proxywar-"));
+    const secretStorePath = path.join(rootDir, "secrets.json");
+    try {
+      const result = await saveProxyWarNation(
+        {
+          agentName: "Relay Frontier",
+          profile: "opportunistic",
+          doctrine: "balanced",
+          agentMode: "external-relay",
+          relayBaseUrl: "https://beta.proxywar.xyz/",
+          relaySessionID: "relay_1234567890abcdef12345678",
+          relayToken: "relay-token",
+          relayTimeoutMs: "120000",
+        },
+        {
+          nationsDir: path.join(rootDir, "nations"),
+          activeRosterDir: path.join(rootDir, "active-roster"),
+          secretStorePath,
+          curatedManifestDir: path.join(
+            process.cwd(),
+            "docs",
+            "ai-league-agent-manifests",
+          ),
+        },
+      );
+
+      expect(result.nation.brainType).toBe("external-relay");
+      expect(result.nation.provider).toMatchObject({
+        provider: "external-relay",
+        relayBaseUrl: "https://beta.proxywar.xyz",
+        sessionID: "relay_1234567890abcdef12345678",
+        timeoutMs: 120000,
+      });
+      expect(
+        result.nation.provider?.provider === "external-relay"
+          ? result.nation.provider.token
+          : undefined,
+      ).toBeUndefined();
+      expect(
+        result.nation.provider?.provider === "external-relay"
+          ? result.nation.provider.tokenSecret
+          : undefined,
+      ).toMatch(/^agent_/);
+      await expect(fs.readFile(result.nation.filePath, "utf8")).resolves.not.toContain(
+        "relay-token",
+      );
+    } finally {
+      await fs.rm(rootDir, { recursive: true, force: true });
+    }
+  });
+
   it("stores external endpoint token env references without plaintext secrets", () => {
     const manifest = createProxyWarNationManifest({
       agentName: "Remote Frontier",
@@ -277,6 +329,50 @@ describe("ProxyWarNationRegistry", () => {
       expect(
         roster.filter((agent) => agent.provider?.provider === "external-http"),
       ).toHaveLength(1);
+    } finally {
+      await fs.rm(rootDir, { recursive: true, force: true });
+    }
+  });
+
+  it("can sync only saved external agents without curated fallback agents", async () => {
+    const rootDir = await fs.mkdtemp(path.join(os.tmpdir(), "proxywar-"));
+    const nationsDir = path.join(rootDir, "nations");
+    const activeRosterDir = path.join(rootDir, "active-roster");
+    const curatedManifestDir = path.join(
+      process.cwd(),
+      "docs",
+      "ai-league-agent-manifests",
+    );
+    try {
+      const saved = await saveProxyWarNation(
+        {
+          agentName: "Tester Agent",
+          profile: "aggressive",
+          doctrine: "pressure",
+          agentMode: "external-http",
+          endpointUrl: "https://tester.example.test/proxywar/decide",
+        },
+        {
+          nationsDir,
+          activeRosterDir,
+          curatedManifestDir,
+        },
+      );
+
+      const roster = await syncProxyWarActiveRoster({
+        nationsDir,
+        activeRosterDir,
+        curatedManifestDir,
+        pinnedNationID: saved.nation.nationID,
+        maxSavedNations: 1,
+        includeCuratedDefaults: false,
+        minRosterSize: 1,
+      });
+
+      expect(roster).toHaveLength(1);
+      expect(roster[0]?.agentName).toBe("Tester Agent");
+      expect(roster[0]?.provider?.provider).toBe("external-http");
+      await expect(fs.readdir(activeRosterDir)).resolves.toHaveLength(1);
     } finally {
       await fs.rm(rootDir, { recursive: true, force: true });
     }

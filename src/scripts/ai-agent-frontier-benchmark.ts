@@ -171,6 +171,8 @@ interface FrontierRunSummary {
   records: AgentDecisionRecord[];
 }
 
+type ClosableAgentBrain = AgentBrain & { close?: () => void };
+
 const autonomousActionKinds = legalActionKinds.filter(
   (kind) => kind !== "hold",
 );
@@ -492,6 +494,7 @@ async function runSingleMatch(input: {
       records,
     };
   } finally {
+    closeParticipantBrains(participants);
     await game.end({ archive: false });
   }
 }
@@ -577,31 +580,38 @@ function createBrain(
       ...providerConfig,
       outputSchema: "planner",
     });
-    return new PlannerExecutorAgentBrain({
-      profile,
-      planner: new LlmAgentPlanner({
-        provider,
+    return withBrainClose(
+      new PlannerExecutorAgentBrain({
         profile,
-        providerTimeoutMs: config.maxDecisionMs,
-        plannerType: "codex-cli",
+        planner: new LlmAgentPlanner({
+          provider,
+          profile,
+          providerTimeoutMs: config.maxDecisionMs,
+          plannerType: "codex-cli",
+        }),
+        executor: executor(),
+        planEveryDecisionSteps: config.planEveryDecisionSteps,
+        runtimeMode: "llm-policy-planner",
+        executorSource: "frontier-policy-executor",
       }),
-      executor: executor(),
-      planEveryDecisionSteps: config.planEveryDecisionSteps,
-      runtimeMode: "llm-policy-planner",
-      executorSource: "frontier-policy-executor",
-    });
+      () => provider.close(),
+    );
   }
   if (config.runtimeMode === "llm-action-selector") {
     const providerConfig = codexCliConfig(config);
-    return new LlmAgentBrain({
-      provider: new CodexCliLlmProvider({
-        ...providerConfig,
-        outputSchema: "decision",
-      }),
-      profile,
-      providerTimeoutMs: config.maxDecisionMs,
-      runtimeMode: "llm-action-selector",
+    const provider = new CodexCliLlmProvider({
+      ...providerConfig,
+      outputSchema: "decision",
     });
+    return withBrainClose(
+      new LlmAgentBrain({
+        provider,
+        profile,
+        providerTimeoutMs: config.maxDecisionMs,
+        runtimeMode: "llm-action-selector",
+      }),
+      () => provider.close(),
+    );
   }
   if (config.runtimeMode === "local-policy-baseline") {
     return new PlannerExecutorAgentBrain({
@@ -621,6 +631,22 @@ function createBrain(
     runtimeMode: "mock-policy-planner",
     executorSource: "frontier-policy-executor",
   });
+}
+
+function withBrainClose<T extends AgentBrain>(
+  brain: T,
+  close: () => void,
+): T {
+  (brain as ClosableAgentBrain).close = close;
+  return brain;
+}
+
+function closeParticipantBrains(
+  participants: Array<{ brain: AgentBrain }>,
+): void {
+  for (const participant of participants) {
+    (participant.brain as ClosableAgentBrain).close?.();
+  }
 }
 
 function frontierExecutorSettings(
@@ -691,7 +717,7 @@ async function writeFrontierReplayArtifacts(input: {
     notes: [
       `Frontier benchmark runtimeMode=${input.config.runtimeMode}.`,
       `One Frontier agent vs ${input.config.nations} official PlayerType.Nation opponent(s) and ${input.config.bots} built-in tribe/bot opponent(s).`,
-      "Native ProxyWar replay uses the saved game-record.json and read-only replay path.",
+      "Native Proxy War replay uses the saved game-record.json and read-only replay path.",
     ],
   });
   await writeAgentLeagueRunArtifacts({
@@ -1668,7 +1694,7 @@ function frontierReport(input: {
   const durationMs = input.completedAt - input.startedAt;
   const passed = wins >= input.config.targetWins;
   return [
-    `# ProxyWar Agent-vs-Nation Benchmark Report`,
+    `# Proxy War Agent-vs-Nation Benchmark Report`,
     "",
     `Benchmark id: \`${input.config.runID}\``,
     `Config: one Frontier agent vs ${input.config.nations} PlayerType.Nation opponent(s) and ${input.config.bots} built-in tribe/bot opponent(s), profile=${input.config.profile}, ${input.config.map} ${input.config.mapSize}, ${input.config.difficulty}, turnsPerDecision=${input.config.turnsPerDecision}, planEveryDecisionSteps=${input.config.planEveryDecisionSteps}, maxTurns=${input.config.maxTurns}, fullMatch=${input.config.fullMatch}, frontierFinishPressure=${input.config.frontierFinishPressure}, navalControl=${input.config.navalControl}, lateGameStrikeTargeting=${input.config.lateGameStrikeTargeting}, personalityDiplomacyPressure=${input.config.personalityDiplomacyPressure}, openingExpansionTempo=${input.config.openingExpansionTempo}, transportTroopBanking=${input.config.transportTroopBanking}, profileRepairReRank=${input.config.profileRepairReRank}.`,
@@ -2001,7 +2027,7 @@ function performanceDiagnosis(
   const buildCount = actionTotals.build ?? 0;
   const retreatCount = actionTotals.retreat ?? 0;
   const lines = [
-    "# ProxyWar Full-Match Performance Diagnosis",
+    "# Proxy War Full-Match Performance Diagnosis",
     "",
     `Benchmark id: \`${config.runID}\``,
     `Gate: ${wins}/${config.runs} wins, require ${config.targetWins}/${config.runs}.`,

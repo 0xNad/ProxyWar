@@ -7,6 +7,7 @@ export {
   createAgentCardMarkdown,
   createFrontierMemory,
   createHealthResponse,
+  defaultClaudeCommandArgs,
   createLlmCompleteFromEnv,
   createStarterAgent,
   decisionForPayloadWithFramework,
@@ -22,6 +23,6 @@ export {
 
 export function decisionForPayload() {
   throw new Error(
-    "The ProxyWar starter agent requires an LLM brain. Use createStarterAgent({ llmComplete }).decide(payload), set PROXYWAR_AGENT_LLM_PROVIDER/PROXYWAR_AGENT_LLM_COMMAND, or set OPENROUTER_API_KEY.",
+    "The Proxy War starter agent requires an LLM brain. Use createStarterAgent({ llmComplete }).decide(payload), set PROXYWAR_AGENT_LLM_PROVIDER/PROXYWAR_AGENT_LLM_COMMAND, or set OPENROUTER_API_KEY.",
   );
 }

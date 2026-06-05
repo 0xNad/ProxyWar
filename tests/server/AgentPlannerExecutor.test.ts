@@ -382,6 +382,154 @@ describe("Planner/executor agent brain", () => {
     );
   });
 
+  it("does not fail must-follow planner repair when the primary control kind is unavailable", async () => {
+    const base = leaderPressureObservation();
+    const observation: AgentObservation = {
+      ...base,
+      ownState:
+        base.ownState === null
+          ? null
+          : {
+              ...base.ownState,
+              troops: 300_000,
+              maxTroops: 800_000,
+              troopRatio: 0.38,
+            },
+      combat: {
+        ...base.combat,
+        ownTroops: 300_000,
+        maxTroops: 800_000,
+        troopRatio: 0.38,
+        incomingAttackPlayerIDs: ["LEADER01"],
+        incomingAttacks: [
+          {
+            attackID: "incoming-leader",
+            targetID: "LEADER01",
+            targetName: "Leader",
+            troops: 720_000,
+            retreating: false,
+            sourceTile: null,
+            borderSize: 20,
+          },
+        ],
+      },
+    };
+    const legalActions: LegalAction[] = [
+      {
+        id: "attack:LEADER01:25",
+        kind: "attack",
+        label: "Attack Leader with 25%",
+        intent: { type: "attack", targetID: "LEADER01", troops: 75_000 },
+        risk: { level: "medium", score: 0.35 },
+        metadata: {
+          targetID: "LEADER01",
+          targetName: "Leader",
+          troopPercentage: 0.25,
+          relativeTroopRatio: 0.42,
+          targetTileShare: 0.42,
+        },
+      },
+      {
+        id: "build:DefensePost:20",
+        kind: "build",
+        label: "Build Defense Post",
+        intent: { type: "build_unit", unit: UnitType.DefensePost, tile: 20 },
+        risk: { level: "low", score: 0.1 },
+        metadata: {
+          role: "defensive",
+          unit: UnitType.DefensePost,
+          defensiveValue: 0.8,
+          frontierValue: 0.9,
+        },
+      },
+      hold(),
+    ];
+    const prompts: string[] = [];
+    const provider: LlmProvider = {
+      providerType: "codex-cli",
+      async complete(prompt: string): Promise<string> {
+        prompts.push(prompt);
+        if (prompts.length === 1) {
+          return JSON.stringify({
+            objective: "expand_territory",
+            turnIntent: "growth",
+            rationale: "Mistakenly keep growing despite home danger.",
+            maxDecisionCycles: 3,
+            preferredActionKinds: ["attack", "hold"],
+            enabledModules: ["expansion", "economy", "defense"],
+            targetPlayerId: null,
+            tacticalSettings: {
+              reserveRatio: 0.35,
+              triggerRatio: 0.55,
+              expansionRatio: 0.15,
+              maxConcurrentWars: 1,
+              retreatThreshold: 0.35,
+              maxActionsPerDecision: 4,
+            },
+          });
+        }
+        const marker = "MUST_FOLLOW_CONTROL:\n";
+        const start = prompt.indexOf(marker);
+        const end = prompt.indexOf("\nVIOLATION:", start);
+        const controls = JSON.parse(
+          prompt.slice(start + marker.length, end),
+        ) as {
+          objective: AgentObjectiveKind;
+          turnIntent: string;
+          targetPlayerId: string | null;
+          preferredActionKinds: string[];
+          enabledModules: string[];
+          maxDecisionCycles: number;
+          reason: string;
+        };
+        return JSON.stringify({
+          objective: controls.objective,
+          turnIntent: controls.turnIntent,
+          rationale: `Following must-follow planner control: ${controls.reason}.`,
+          maxDecisionCycles: controls.maxDecisionCycles,
+          preferredActionKinds: controls.preferredActionKinds,
+          enabledModules: controls.enabledModules,
+          targetPlayerId: controls.targetPlayerId,
+          tacticalSettings: {
+            reserveRatio: 0.45,
+            triggerRatio: 0.55,
+            expansionRatio: 0.12,
+            maxConcurrentWars: 1,
+            retreatThreshold: 0.45,
+            maxActionsPerDecision: 3,
+          },
+        });
+      },
+    };
+    const brain = new PlannerExecutorAgentBrain({
+      profile: "aggressive",
+      planner: new LlmAgentPlanner({
+        provider,
+        profile: "aggressive",
+        plannerType: "codex-cli",
+      }),
+      executor: new FrontierPolicyExecutor("aggressive"),
+    });
+
+    const decision = await brain.decide({ observation, legalActions });
+
+    expect(prompts).toHaveLength(2);
+    expect(prompts[0]).toContain("MUST FOLLOW: objective=survive");
+    expect(prompts[1]).toContain(
+      '"preferredActionKinds":["retreat","build","attack","hold"]',
+    );
+    expect(decision.actionID).toBe("build:DefensePost:20");
+    expect(decision.metadata).toMatchObject({
+      planObjective: "survive",
+      plannerSource: "codex-cli",
+      externalPlannerCall: true,
+      externalActionCall: false,
+      plannerFallbackUsed: false,
+      plannerParseOk: true,
+      plannerRepairUsed: true,
+    });
+  });
+
   it("respects an external LLM planner null or blank target for growth plans", async () => {
     const observation = earlyExpansionObservation();
     const legalActions: LegalAction[] = [

@@ -35,6 +35,11 @@ export interface CreateProxyWarNationInput {
   endpointToken?: unknown;
   endpointTokenEnv?: unknown;
   endpointTimeoutMs?: unknown;
+  relayBaseUrl?: unknown;
+  relaySessionID?: unknown;
+  relayToken?: unknown;
+  relayTokenEnv?: unknown;
+  relayTimeoutMs?: unknown;
 }
 
 export interface ProxyWarNationEntry extends AgentManifest {
@@ -132,19 +137,25 @@ export async function saveProxyWarNation(
 function rejectUserSuppliedTokenReferences(
   input: CreateProxyWarNationInput,
 ): void {
-  if (input.agentMode !== "external-http") {
+  if (input.agentMode !== "external-http" && input.agentMode !== "external-relay") {
     return;
   }
-  if (input.endpointTokenEnv !== undefined) {
+  const tokenEnv =
+    input.agentMode === "external-relay"
+      ? input.relayTokenEnv
+      : input.endpointTokenEnv;
+  const token =
+    input.agentMode === "external-relay" ? input.relayToken : input.endpointToken;
+  if (tokenEnv !== undefined) {
     throw new Error(
       "External agent env token references are operator-only. Paste a beta-only token or leave the token blank.",
     );
   }
-  if (typeof input.endpointToken !== "string") {
+  if (typeof token !== "string") {
     return;
   }
-  const token = input.endpointToken.trim().toLowerCase();
-  if (token.startsWith("env:") || token.startsWith("secret:")) {
+  const cleanedToken = token.trim().toLowerCase();
+  if (cleanedToken.startsWith("env:") || cleanedToken.startsWith("secret:")) {
     throw new Error(
       "External agent token references are operator-only. Paste a beta-only token or leave the token blank.",
     );
@@ -176,23 +187,33 @@ export function createProxyWarNationManifest(
     max: 600,
   });
   const agentMode =
-    input.agentMode === "external-http" ? "external-http" : "manifest";
+    input.agentMode === "external-http" || input.agentMode === "external-relay"
+      ? input.agentMode
+      : "manifest";
   const externalProvider =
-    agentMode === "external-http" ? externalHttpProvider(input) : null;
+    agentMode === "external-http"
+      ? externalHttpProvider(input)
+      : agentMode === "external-relay"
+        ? externalRelayProvider(input)
+        : null;
   return validateAgentManifest(
     {
       schemaVersion: 1,
       agentName,
       profile,
-      brainType: agentMode === "external-http" ? "external-http" : "planner",
-      plannerExecutorMode: agentMode !== "external-http",
+      brainType:
+        agentMode === "external-http" || agentMode === "external-relay"
+          ? agentMode
+          : "planner",
+      plannerExecutorMode:
+        agentMode !== "external-http" && agentMode !== "external-relay",
       personality: personality || defaultPersonality(profile),
       ...(policyChangelog !== "" ? { policyChangelog } : {}),
       observationPolicy: "default",
       skillPreferences: skillPreferencesForDoctrine(profile, doctrine),
       provider: externalProvider ?? { provider: "mock-llm" },
     },
-    "ProxyWar nation",
+    "Proxy War nation",
   );
 }
 
@@ -277,6 +298,8 @@ export async function syncProxyWarActiveRoster(input: {
   activeRosterDir?: string;
   pinnedNationID?: string;
   maxSavedNations?: number;
+  includeCuratedDefaults?: boolean;
+  minRosterSize?: number;
 } = {}): Promise<AgentManifest[]> {
   const nationsDir = input.nationsDir ?? defaultProxyWarNationsDir;
   const curatedManifestDir =
@@ -298,14 +321,29 @@ export async function syncProxyWarActiveRoster(input: {
   );
   const chosenSaved = [...pinned, ...rest].slice(0, maxSavedNations);
   const combined: AgentManifest[] = [...chosenSaved];
-  for (const manifest of curated) {
-    if (combined.length >= 4 && chosenSaved.length > 0) break;
-    if (combined.length >= 8) break;
-    combined.push(manifest);
+  if (input.includeCuratedDefaults !== false) {
+    for (const manifest of curated) {
+      if (combined.length >= 4 && chosenSaved.length > 0) break;
+      if (combined.length >= 8) break;
+      combined.push(manifest);
+    }
   }
-  const activeRoster = combined.slice(0, Math.max(4, Math.min(8, combined.length)));
-  if (activeRoster.length < 4) {
-    throw new Error("ProxyWar active roster needs at least 4 agents");
+  const minRosterSize =
+    input.minRosterSize === undefined
+      ? input.includeCuratedDefaults === false
+        ? 1
+        : 4
+      : Math.max(1, Math.min(8, Math.floor(input.minRosterSize)));
+  const activeRoster = combined.slice(
+    0,
+    Math.max(minRosterSize, Math.min(8, combined.length)),
+  );
+  if (activeRoster.length < minRosterSize) {
+    throw new Error(
+      input.includeCuratedDefaults === false
+        ? "Connect and save at least one external agent before running the beta match"
+        : "Proxy War active roster needs at least 4 agents",
+    );
   }
   await fs.rm(activeRosterDir, { recursive: true, force: true });
   await fs.mkdir(activeRosterDir, { recursive: true });
@@ -450,10 +488,80 @@ function externalHttpProvider(input: CreateProxyWarNationInput) {
   };
 }
 
+function externalRelayProvider(input: CreateProxyWarNationInput) {
+  if (typeof input.relayBaseUrl !== "string") {
+    throw new Error("Managed relay base URL must be text");
+  }
+  if (typeof input.relaySessionID !== "string") {
+    throw new Error("Managed relay session ID must be text");
+  }
+  let relayBaseUrl: string;
+  try {
+    const url = new URL(input.relayBaseUrl);
+    if (url.protocol !== "http:" && url.protocol !== "https:") {
+      throw new Error("bad protocol");
+    }
+    url.hash = "";
+    url.search = "";
+    url.pathname = url.pathname.replace(/\/+$/, "");
+    relayBaseUrl = url.toString().replace(/\/$/, "");
+  } catch {
+    throw new Error("Managed relay base URL must be a valid http or https URL");
+  }
+  const sessionID = input.relaySessionID.trim();
+  if (!/^relay_[a-f0-9]{24}$/i.test(sessionID)) {
+    throw new Error("Managed relay session ID is invalid");
+  }
+  if (input.relayToken !== undefined && input.relayTokenEnv !== undefined) {
+    throw new Error(
+      "Managed relay token can be provided directly or through env, not both",
+    );
+  }
+  const tokenReference =
+    input.relayTokenEnv !== undefined
+      ? normalizeExternalAgentTokenInput(
+          `env:${String(input.relayTokenEnv)}`,
+          "Managed relay token env",
+        )
+      : normalizeExternalAgentTokenInput(
+          input.relayToken ?? "",
+          "Managed relay token",
+        );
+  const timeoutMs = optionalTimeoutMs(input.relayTimeoutMs);
+  return {
+    provider: "external-relay" as const,
+    relayBaseUrl,
+    sessionID,
+    ...tokenReference,
+    ...(timeoutMs !== null ? { timeoutMs } : {}),
+  };
+}
+
 async function protectExternalAgentToken(
   input: CreateProxyWarNationInput,
   options: { secretStorePath?: string; label?: string },
 ): Promise<CreateProxyWarNationInput> {
+  if (input.agentMode === "external-relay" && typeof input.relayToken === "string") {
+    const token = input.relayToken.trim();
+    if (
+      token === "" ||
+      token.toLowerCase().startsWith("env:") ||
+      token.toLowerCase().startsWith("secret:")
+    ) {
+      return input;
+    }
+    const reference = await storeExternalAgentTokenSecret(token, {
+      storePath: options.secretStorePath,
+      label: options.label,
+    });
+    return {
+      ...input,
+      relayToken:
+        reference.tokenSecret === undefined
+          ? undefined
+          : `secret:${reference.tokenSecret}`,
+    };
+  }
   if (input.agentMode !== "external-http" || typeof input.endpointToken !== "string") {
     return input;
   }

@@ -163,6 +163,26 @@ describe("ExternalAgentHealthCheck", () => {
     expect(result.fixHint).toContain("npm run self-test");
   });
 
+  it("coaches users when Claude CLI is installed but not logged in", async () => {
+    const input = normalizeExternalAgentHealthCheckInput({
+      endpointUrl: "https://1.1.1.1/decide",
+      fetchFn: async () =>
+        new Response(
+          JSON.stringify({
+            error:
+              "LLM failed to select a valid, non-stale LegalAction.id: LLM command exited with 1: Not logged in · Please run /login",
+          }),
+          { status: 400, headers: { "content-type": "application/json" } },
+        ),
+    });
+
+    const result = await checkExternalAgentEndpoint(input);
+
+    expect(result.ok).toBe(false);
+    expect(result.fixHint).toContain("Run `claude`");
+    expect(result.fixHint).toContain("/login");
+  });
+
   it("explains that redirects are disabled for decision endpoints", async () => {
     const input = normalizeExternalAgentHealthCheckInput({
       endpointUrl: "https://1.1.1.1/decide",

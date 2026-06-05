@@ -27,22 +27,21 @@ export function loadProxyWarBetaAccessConfig(
 ): ProxyWarBetaAccessConfig {
   const enabled = envFlag(env.PROXYWAR_BETA_ENABLED);
   const sessionTtlMs = positiveInt(
-    env.PROXYWAR_BETA_SESSION_TTL_MS,
+    firstNonEmpty(env.PROXYWAR_BETA_SESSION_TTL_MS),
     DEFAULT_SESSION_TTL_MS,
   );
+  const publicUrl = firstNonEmpty(env.PROXYWAR_PUBLIC_URL);
   return {
     enabled,
     inviteCode:
-      firstNonEmpty(env.PROXYWAR_BETA_CODE, env.PROXYWAR_BETA_PASSWORD) ??
-      null,
+      firstNonEmpty(env.PROXYWAR_BETA_CODE, env.PROXYWAR_BETA_PASSWORD) ?? null,
     cookieName:
       firstNonEmpty(env.PROXYWAR_BETA_COOKIE_NAME) ?? DEFAULT_COOKIE_NAME,
     sessionTtlMs,
     label: firstNonEmpty(env.PROXYWAR_BETA_LABEL) ?? "Closed beta",
     secureCookie:
       envFlag(env.PROXYWAR_BETA_COOKIE_SECURE) ||
-      (firstNonEmpty(env.PROXYWAR_PUBLIC_URL)?.startsWith("https://") ??
-        false),
+      (publicUrl?.startsWith("https://") ?? false),
   };
 }
 
@@ -183,7 +182,7 @@ export function renderProxyWarBetaLoginHtml(
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>ProxyWar Beta</title>
+  <title>Proxy War Beta</title>
   <style>
     :root { color-scheme: light; --ink:#132232; --muted:#64748b; --line:#d8e1eb; --panel:#fff; --paper:#f4f8fb; --accent:#176358; --bad:#9f1d35; --warn:#85610a; }
     * { box-sizing:border-box; }
@@ -205,7 +204,7 @@ export function renderProxyWarBetaLoginHtml(
 <body>
   <main>
     <span class="pill">${escapeHtml(config.label)}</span>
-    <h1>ProxyWar</h1>
+    <h1>Proxy War</h1>
     <p>Enter your invite code to create AI nations, run matches, and watch autonomous strategy replays.</p>
     ${setupWarning}
     ${errorHtml}

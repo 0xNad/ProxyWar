@@ -13,6 +13,10 @@ type ExternalHttpProvider = Extract<
   AgentManifestProvider,
   { provider: "external-http" }
 >;
+type ExternalRelayProvider = Extract<
+  AgentManifestProvider,
+  { provider: "external-relay" }
+>;
 
 export interface ProxyWarActiveRosterHealthIssue {
   agentName: string;
@@ -34,6 +38,7 @@ export type ProxyWarActiveRosterHealthChecker = (
 export interface ProxyWarActiveRosterHealthOptions {
   checkEndpoint?: ProxyWarActiveRosterHealthChecker;
   tokenForProvider?: (provider: ExternalHttpProvider) => string | undefined;
+  relaySessionExists?: (sessionID: string, provider: ExternalRelayProvider) => boolean;
 }
 
 export class ProxyWarActiveRosterHealthError extends Error {
@@ -64,10 +69,14 @@ export async function checkProxyWarActiveRosterExternalEndpoints(
     const provider = agent.provider;
     return provider?.provider === "external-http" ? [{ agent, provider }] : [];
   });
+  const relayAgents = roster.flatMap((agent) => {
+    const provider = agent.provider;
+    return provider?.provider === "external-relay" ? [{ agent, provider }] : [];
+  });
   const checkEndpoint = options.checkEndpoint ?? checkExternalAgentEndpoint;
   const tokenForProvider =
     options.tokenForProvider ?? proxyWarProviderTokenInput;
-  const issues = (
+  const endpointIssues = (
     await Promise.all(
       externalAgents.map(async ({ agent, provider }) => {
         try {
@@ -101,9 +110,28 @@ export async function checkProxyWarActiveRosterExternalEndpoints(
       }),
     )
   ).filter((issue): issue is ProxyWarActiveRosterHealthIssue => issue !== null);
+  const relayIssues =
+    options.relaySessionExists === undefined
+      ? []
+      : relayAgents.flatMap(({ agent, provider }) =>
+          options.relaySessionExists?.(provider.sessionID, provider) === true
+            ? []
+            : [
+                {
+                  agentName: agent.agentName,
+                  endpoint: relayEndpointLabel(provider),
+                  failureReason: "managed relay session is not active",
+                  fixHint:
+                    "Rerun the /agent-start.sh bootstrap command so the tester worker creates a fresh relay session.",
+                },
+              ],
+        );
+  const issues = [...endpointIssues, ...relayIssues];
   return {
     ok: issues.length === 0,
-    checkedExternalAgentCount: externalAgents.length,
+    checkedExternalAgentCount:
+      externalAgents.length +
+      (options.relaySessionExists === undefined ? 0 : relayAgents.length),
     issues,
   };
 }
@@ -127,7 +155,7 @@ function proxyWarActiveRosterHealthErrorMessage(
   const suffix =
     report.issues.length > 1 ? ` (${report.issues.length} saved agents failed)` : "";
   const fixHint = first.fixHint ?? defaultRosterHealthFixHint;
-  return `Saved external agent "${first.agentName}" did not pass endpoint health check: ${first.failureReason}. Fix: ${fixHint}${suffix}`;
+  return `Saved external agent "${first.agentName}" did not pass connection health check: ${first.failureReason}. Fix: ${fixHint}${suffix}`;
 }
 
 function safeEndpointLabel(value: string): string {
@@ -141,3 +169,15 @@ function safeEndpointLabel(value: string): string {
 
 const defaultRosterHealthFixHint =
   "Open the tester dashboard health check, delete stale saved endpoints, or re-import a healthy Agent Card.";
+
+function relayEndpointLabel(provider: ExternalRelayProvider): string {
+  try {
+    const url = new URL(
+      `/api/agent-relay/sessions/${encodeURIComponent(provider.sessionID)}`,
+      provider.relayBaseUrl,
+    );
+    return url.toString();
+  } catch {
+    return `managed relay session ${provider.sessionID}`;
+  }
+}

@@ -301,7 +301,7 @@ function healthCheckFixHint(message: string, endpointUrl: string): string {
     lower.includes("unknown json field: type") ||
     lower.includes("raw intent")
   ) {
-    return "Do not return raw OpenFront intent JSON. Return only selectedLegalActionId, reason, and optional confidence.";
+    return "Do not return raw game-engine intent JSON. Return only selectedLegalActionId, reason, and optional confidence.";
   }
   if (
     lower.includes("llm provider required") ||
@@ -314,6 +314,9 @@ function healthCheckFixHint(message: string, endpointUrl: string): string {
   }
   if (lower.includes("proxywar_agent_llm_command")) {
     return "The command-backed starter needs PROXYWAR_AGENT_LLM_COMMAND set to a non-interactive command that prints the strict JSON decision. Run npm run self-test after restarting.";
+  }
+  if (lower.includes("not logged in") || lower.includes("/login")) {
+    return "Claude CLI is installed but not logged in for terminal use. Run `claude`, type `/login`, complete the browser login, exit Claude, then restart the starter and run npm run self-test.";
   }
   if (
     lower.includes("could not start llm command") ||
@@ -354,7 +357,7 @@ function healthCheckFixHint(message: string, endpointUrl: string): string {
     lower.includes("network") ||
     lower.includes("did not resolve")
   ) {
-    return "Make sure the service is running and reachable from the ProxyWar host. If this is a saved beta agent, restart or re-expose the endpoint, then retry Test Endpoint or delete the stale saved agent.";
+    return "Make sure the service is running and reachable from the Proxy War host. If this is a saved beta agent, restart or re-expose the endpoint, then retry Test Endpoint or delete the stale saved agent.";
   }
   return "Your endpoint must accept POST JSON and return selectedLegalActionId, reason, and optional confidence.";
 }

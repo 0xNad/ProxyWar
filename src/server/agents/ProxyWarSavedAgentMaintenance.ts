@@ -99,7 +99,7 @@ export function formatProxyWarSavedAgentMaintenanceReport(
   report: ProxyWarSavedAgentMaintenanceReport,
 ): string {
   const lines = [
-    `ProxyWar saved external-agent health: ${report.failedExternalAgentCount === 0 ? "ready" : "needs cleanup"}`,
+    `Proxy War saved external-agent health: ${report.failedExternalAgentCount === 0 ? "ready" : "needs cleanup"}`,
     `Checked: ${report.checkedExternalAgentCount}`,
     `Failed: ${report.failedExternalAgentCount}`,
     `Archived: ${report.archivedExternalAgentCount}`,

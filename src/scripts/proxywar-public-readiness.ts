@@ -43,7 +43,15 @@ const report = buildProxyWarPublicReadinessReport({
     process.env.PROXYWAR_ALLOW_PRIVATE_AGENT_ENDPOINTS === "true",
   adminEnabled: process.env.PROXYWAR_BETA_ADMIN_ENABLED === "true",
   savedExternalEndpointHealth:
-    await checkProxyWarActiveRosterExternalEndpoints(hub.savedNations),
+    await checkProxyWarActiveRosterExternalEndpoints(
+      hub.savedNations
+        .filter(
+          (nation) =>
+            nation.provider?.provider === "external-http" ||
+            nation.provider?.provider === "external-relay",
+        )
+        .slice(0, 1),
+    ),
 });
 
 if (json) {

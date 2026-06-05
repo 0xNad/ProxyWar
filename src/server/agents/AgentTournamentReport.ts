@@ -309,7 +309,7 @@ function styleTagsForManifest(manifest: AgentManifest): string[] {
 
 function tournamentMarkdown(summary: TournamentSummary): string {
   return [
-    `# ProxyWar Tournament ${summary.tournamentID}`,
+    `# Proxy War Tournament ${summary.tournamentID}`,
     "",
     "## Overview",
     "",
@@ -438,7 +438,7 @@ function leaderboardHtml(summary: TournamentSummary): string {
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>ProxyWar Tournament ${escapeHtml(summary.tournamentID)}</title>
+  <title>Proxy War Tournament ${escapeHtml(summary.tournamentID)}</title>
   <style>
     body{font:14px/1.45 system-ui,sans-serif;margin:0;background:#f7f9fc;color:#17202a}
     header,main{max-width:1100px;margin:0 auto;padding:24px}
@@ -455,7 +455,7 @@ function leaderboardHtml(summary: TournamentSummary): string {
   </style>
 </head>
 <body>
-  <header><h1>ProxyWar Tournament</h1><p>${escapeHtml(summary.tournamentID)}</p></header>
+  <header><h1>Proxy War Tournament</h1><p>${escapeHtml(summary.tournamentID)}</p></header>
   <main>
     <section><p>${summary.runCount} runs · ${summary.postSpawnNonHoldActionCount} post-spawn non-hold actions · ${summary.acceptedCount} accepted · ${summary.showcase.averageEntertainmentScore}/100 entertainment · ${escapeHtml(summary.showcase.status)}</p>${summary.showcase.bestRunReplayPath ? `<p><a href="${escapeHtml(summary.showcase.bestRunReplayPath)}">Watch best replay</a></p>` : ""}</section>
     <section><h2>Agents</h2><div class="cards">${rosterCards}</div></section>

@@ -1,6 +1,6 @@
-# ProxyWar Public Demo
+# Proxy War Public Demo
 
-ProxyWar is framed as an autonomous strategy league: people create AI
+Proxy War is framed as an autonomous strategy league: people create AI
 nations, enter them into matches, and watch the nations expand, build, ally,
 pressure rivals, or collapse.
 
@@ -16,7 +16,7 @@ Open:
 http://127.0.0.1:8787
 ```
 
-The operator hub starts the artifact browser and, by default, the ProxyWar
+The operator hub starts the artifact browser and, by default, the Proxy War
 replay renderer on port 9000.
 
 For the public-safe product surface, open:
@@ -121,13 +121,13 @@ the operator-only remote beta notes before exposing a local server.
 3. Reference nations are no-code manifests run by the local planner/executor.
 4. External agents are user-owned HTTPS endpoints that choose one
    `LegalAction.id` from each offered action list.
-5. Run a saved-roster match.
-6. Watch the latest match through the rendered ProxyWar replay route.
+5. Run the locked Codex match.
+6. Watch the latest match through the rendered Proxy War replay route.
 7. Use the decision report, static timeline replay, scorecards, audit results,
    and decision reasons to understand what happened.
 
 When a public beta match completes, the page automatically opens the rendered
-ProxyWar replay route for that run. This is a full game render from the saved
+Proxy War replay route for that run. This is a full game render from the saved
 turn stream, not a true live spectator stream yet.
 
 If a tester opens a replay link before entering the invite code, the beta login
@@ -136,9 +136,9 @@ page preserves the replay destination and redirects back after successful login.
 The friend-facing beta button uses `planner-codex-cli` by default. Codex is the
 house-agent strategic brain; the server only narrows decisions to existing
 `LegalAction.id` choices and submits them through the normal validated path.
-The visible tester default health-checks the latest saved external agent and
-runs a bounded 12-strategy-round saved-roster match so first testers get a
-replay without waiting on the long full-match path.
+The visible tester default is locked to the latest saved tester external agent
+plus one in-house Codex agent against two Easy built-in nations until a winner
+emerges.
 
 `Strategy rounds` are the beta-friendly name for step-locked AI decision
 cycles. In each round, every AI nation observes the current game, receives
@@ -189,6 +189,7 @@ files:
 - `/examples/external-agent/simple-agent.mjs`
 - `/examples/external-agent/smoke-test.mjs`
 - `/examples/external-agent/starter-framework.mjs`
+- `/examples/external-agent/bootstrap.sh`
 - `/examples/external-agent/AGENT_SKILL.md`
 
 ## Artifact Paths

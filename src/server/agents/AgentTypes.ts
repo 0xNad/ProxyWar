@@ -17,6 +17,7 @@ export type AgentBrainType =
   | "real-llm"
   | "codex-cli"
   | "external-http"
+  | "external-relay"
   | "planner-executor"
   | "llm";
 

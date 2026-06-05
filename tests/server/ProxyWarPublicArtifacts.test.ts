@@ -70,6 +70,7 @@ describe("ProxyWarPublicArtifacts", () => {
     expect(isProxyWarPublicDoc("AI_NATIONS_LEAGUE.md")).toBe(false);
 
     expect(proxyWarPublicExternalAgentExamples).toContain("simple-agent.mjs");
+    expect(proxyWarPublicExternalAgentExamples).toContain("relay-worker.mjs");
     expect(proxyWarPublicExternalAgentExamples).toContain(
       "starter-framework.mjs",
     );
@@ -79,6 +80,7 @@ describe("ProxyWarPublicArtifacts", () => {
     expect(proxyWarPublicExternalAgentExamples).toContain("AGENT_SKILL.md");
     expect(proxyWarPublicExternalAgentExamples).toContain("package.json");
     expect(proxyWarPublicExternalAgentExamples).toContain("launch.sh");
+    expect(proxyWarPublicExternalAgentExamples).toContain("bootstrap.sh");
     expect(proxyWarPublicExternalAgentExamples).toContain(".env.example");
     expect(proxyWarPublicExternalAgentExamples).toContain("LICENSE");
     expect(isProxyWarPublicExternalAgentExample("simple-agent.mjs")).toBe(

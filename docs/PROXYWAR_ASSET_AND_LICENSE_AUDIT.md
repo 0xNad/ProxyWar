@@ -1,4 +1,4 @@
-# ProxyWar Asset And License Audit
+# Proxy War Asset And License Audit
 
 This is a practical beta-readiness audit, not legal advice.
 
@@ -30,7 +30,7 @@ contributors in public pages and preserve upstream notices.
 
 | Area | Risk | Beta action |
 | --- | --- | --- |
-| OpenFront logo and branding in `proprietary/images` | May be intended for the upstream OpenFront brand rather than the ProxyWar fork. | Avoid using upstream proprietary logo as the ProxyWar product mark unless permission is clear. |
+| OpenFront logo and branding in `proprietary/images` | May be intended for the upstream OpenFront brand rather than the Proxy War fork. | Avoid using upstream proprietary logo as the Proxy War product mark unless permission is clear. |
 | Country and historical flags under `resources/flags` | Large third-party-derived collection with mixed provenance risk. | Do not market with individual flags until provenance is reviewed; in-game use inherits upstream behavior. |
 | Map imagery/data under `resources` and `static` | Inherited OpenFront assets need attribution/license preservation. | Keep license links and credits visible. |
 | Generated AI league artifacts | Can include raw prompts, reasons, debug data, and local paths. | Public beta should show sanitized replay/report artifacts, not raw JSONL by default. |
@@ -39,16 +39,16 @@ contributors in public pages and preserve upstream notices.
 
 For friends-and-family beta:
 
-1. Use the simple ProxyWar text identity in the demo hub.
+1. Use the simple Proxy War text identity in the demo hub.
 2. Link to license/source/credits in the footer.
 3. Avoid a new commercial logo using upstream proprietary logo files.
 4. Treat raw artifacts as operator/debug data.
 5. Before a broader launch, replace or formally approve any proprietary OpenFront
-   branding that appears in the ProxyWar public surface.
+   branding that appears in the Proxy War public surface.
 
 ## Suggested Replacement Work
 
-- Create a simple original ProxyWar wordmark.
+- Create a simple original Proxy War wordmark.
 - Use CSS colors and text rather than inherited logo art on the beta landing
   page.
 - Add a public `/credits` or footer link to source, license, and credits.

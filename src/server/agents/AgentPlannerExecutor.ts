@@ -1009,6 +1009,7 @@ export class LlmAgentPlanner implements AgentPlanner {
         const controlViolation = mustFollowControlViolation(
           parsed,
           decisionBrief.plannerGuidance.recommendedControls,
+          input.legalActions,
         );
         if (controlViolation !== null) {
           const repairPrompt = plannerRepairPrompt({
@@ -1025,6 +1026,7 @@ export class LlmAgentPlanner implements AgentPlanner {
             const repairedViolation = mustFollowControlViolation(
               repaired,
               decisionBrief.plannerGuidance.recommendedControls,
+              input.legalActions,
             );
             if (repairedViolation === null) {
               return {
@@ -19249,6 +19251,7 @@ type ParsedPlannerPlan = Extract<PlannerParseResult, { ok: true }>;
 function mustFollowControlViolation(
   parsed: ParsedPlannerPlan,
   controls: ReturnType<typeof plannerRecommendedControls>,
+  legalActions: readonly LegalAction[],
 ): string | null {
   if (controls.strength !== "must_follow") {
     return null;
@@ -19267,12 +19270,16 @@ function mustFollowControlViolation(
   if (parsed.maxDecisionCycles !== controls.maxDecisionCycles) {
     return `maxDecisionCycles ${parsed.maxDecisionCycles} did not match ${controls.maxDecisionCycles}`;
   }
-  const primaryKind = controls.preferredActionKinds[0];
+  const legalKinds = new Set(legalActions.map((action) => action.kind));
+  const primaryKind = controls.preferredActionKinds.find(
+    (kind): kind is LegalActionKind =>
+      isLegalActionKind(kind) && legalKinds.has(kind),
+  );
   if (
-    isLegalActionKind(primaryKind) &&
+    primaryKind !== undefined &&
     !parsed.preferredActionKinds.includes(primaryKind)
   ) {
-    return `preferredActionKinds omitted primary kind ${primaryKind}`;
+    return `preferredActionKinds omitted primary legal kind ${primaryKind}`;
   }
   const primaryModule = controls.enabledModules[0];
   if (

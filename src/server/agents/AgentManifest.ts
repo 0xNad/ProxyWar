@@ -27,6 +27,15 @@ export type AgentManifestProvider =
       tokenEnv?: string;
       tokenSecret?: string;
       timeoutMs?: number;
+    }
+  | {
+      provider: "external-relay";
+      relayBaseUrl: string;
+      sessionID: string;
+      token?: string;
+      tokenEnv?: string;
+      tokenSecret?: string;
+      timeoutMs?: number;
     };
 
 export interface AgentManifest {
@@ -44,9 +53,17 @@ export interface AgentManifest {
 
 export const proxyWarGameUsernameMaxLength = 27;
 
+export interface LoadAgentManifestsOptions {
+  minAgents?: number;
+  maxAgents?: number;
+}
+
 export async function loadAgentManifestsFromDirectory(
   directory: string,
+  options: LoadAgentManifestsOptions = {},
 ): Promise<AgentManifest[]> {
+  const minAgents = options.minAgents ?? 3;
+  const maxAgents = options.maxAgents ?? 8;
   const entries = await fs.readdir(directory);
   const files = entries
     .filter((entry) => entry.endsWith(".json"))
@@ -59,8 +76,10 @@ export async function loadAgentManifestsFromDirectory(
       ),
     ),
   );
-  if (manifests.length < 3 || manifests.length > 8) {
-    throw new Error("AI league manifest directories must contain 3 to 8 agents");
+  if (manifests.length < minAgents || manifests.length > maxAgents) {
+    throw new Error(
+      `AI league manifest directories must contain ${minAgents} to ${maxAgents} agents`,
+    );
   }
   return manifests;
 }
@@ -161,7 +180,8 @@ function validateProvider(
     provider.provider !== "codex-cli" &&
     provider.provider !== "openai" &&
     provider.provider !== "rule" &&
-    provider.provider !== "external-http"
+    provider.provider !== "external-http" &&
+    provider.provider !== "external-relay"
   ) {
     throw new Error(`${source} provider.provider is invalid`);
   }
@@ -192,6 +212,41 @@ function validateProvider(
         : {}),
     };
   }
+  if (provider.provider === "external-relay") {
+    if (typeof provider.relayBaseUrl !== "string") {
+      throw new Error(`${source} provider.relayBaseUrl must be a string`);
+    }
+    if (typeof provider.sessionID !== "string") {
+      throw new Error(`${source} provider.sessionID must be a string`);
+    }
+    const relayBaseUrl = validateRelayBaseUrl(provider.relayBaseUrl, source);
+    const sessionID = provider.sessionID.trim();
+    if (!/^relay_[a-f0-9]{24}$/i.test(sessionID)) {
+      throw new Error(`${source} provider.sessionID is invalid`);
+    }
+    const tokenReference = validateExternalAgentTokenReference(provider, source);
+    if (provider.timeoutMs !== undefined) {
+      if (
+        typeof provider.timeoutMs !== "number" ||
+        !Number.isInteger(provider.timeoutMs) ||
+        provider.timeoutMs < 250 ||
+        provider.timeoutMs > 180_000
+      ) {
+        throw new Error(
+          `${source} provider.timeoutMs must be an integer from 250 to 180000`,
+        );
+      }
+    }
+    return {
+      provider: "external-relay",
+      relayBaseUrl,
+      sessionID,
+      ...tokenReference,
+      ...(provider.timeoutMs !== undefined
+        ? { timeoutMs: provider.timeoutMs }
+        : {}),
+    };
+  }
   if (provider.model !== undefined && typeof provider.model !== "string") {
     throw new Error(`${source} provider.model must be a string when provided`);
   }
@@ -208,11 +263,27 @@ function isManifestBrainType(value: unknown): value is AgentManifestBrainType {
     value === "real-llm" ||
     value === "codex-cli" ||
     value === "external-http" ||
+    value === "external-relay" ||
     value === "planner-executor" ||
     value === "planner" ||
     value === "planner-codex-cli" ||
     value === "llm"
   );
+}
+
+function validateRelayBaseUrl(value: string, source: string): string {
+  try {
+    const url = new URL(value);
+    if (url.protocol !== "http:" && url.protocol !== "https:") {
+      throw new Error("bad protocol");
+    }
+    url.hash = "";
+    url.search = "";
+    url.pathname = url.pathname.replace(/\/+$/, "");
+    return url.toString().replace(/\/$/, "");
+  } catch {
+    throw new Error(`${source} provider.relayBaseUrl must be a valid URL`);
+  }
 }
 
 function validateEndpointUrl(value: string, source: string): string {

@@ -60,7 +60,7 @@ Strict full-match gate:
 npm run agent:benchmark:bots:full
 ```
 
-This runs 10 full GameServer/core matches with one ProxyWar agent against
+This runs 10 full GameServer/core matches with one Proxy War agent against
 5 built-in `PlayerType.Nation` opponents plus 5 built-in tribe/bot opponents on
 Pangaea Compact at Easy difficulty. This is the current strict pass gate because
 the Medium ladder is still an active behavior-tuning target. It writes both
@@ -71,7 +71,7 @@ legacy frontier artifact names and the public gate artifact names:
 - `performance-diagnosis.md`
 - per-run AI League artifacts when `--write-replay` is enabled
 
-The gate is PASS only when the ProxyWar agent wins 10 out of 10 runs. Any
+The gate is PASS only when the Proxy War agent wins 10 out of 10 runs. Any
 other result is a behavior-tuning failure and should be followed by diagnosis,
 canonical behavior changes, focused tests, and another full benchmark.
 
@@ -97,7 +97,7 @@ Latest passing gate:
 
 - Run id: `2026-05-11T03-29-06-603Z-frontier-mock-policy-planner-90ae84f0`
 - Result: 10/10 wins
-- Conditions: one ProxyWar agent vs 5 built-in nations + 5 built-in
+- Conditions: one Proxy War agent vs 5 built-in nations + 5 built-in
   tribe/bot opponents, Pangaea Compact, Easy, full GameServer/core simulation
 - Report:
   `artifacts/ai-league-benchmarks/2026-05-11T03-29-06-603Z-frontier-mock-policy-planner-90ae84f0/benchmark-report.md`
@@ -109,7 +109,7 @@ Latest Medium ladder sample:
   `npm run agent:benchmark:bots -- --runs=1 --target-wins=1 --nations=3 --max-turns=10000 --write-replay`
 - Run id: `2026-05-11T21-51-08-808Z-frontier-mock-policy-planner-03f9d1d3`
 - Result: 1/1 wins
-- Conditions: one ProxyWar agent vs 3 built-in nations, Pangaea Compact,
+- Conditions: one Proxy War agent vs 3 built-in nations, Pangaea Compact,
   Medium local policy benchmark with `--max-turns=10000`
 - Winner: Frontier Agent at turn 7,901 with 81.5% final tile share
 - Report:

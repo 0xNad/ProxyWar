@@ -129,7 +129,7 @@ describe("AgentSpectatorReplay", () => {
         snapshots: [{ label: "After spawn" }],
       });
       expect(embeddedReplayJson).not.toContain("&quot;");
-      expect(html).toContain("ProxyWar Spectator");
+      expect(html).toContain("Proxy War Spectator");
       expect(html).toContain("spectator occupies no player slot");
       expect(html).toContain("Decision Timeline");
       expect(html).toContain("Current Frame Decisions");
@@ -150,7 +150,7 @@ describe("AgentSpectatorReplay", () => {
       expect(html).toContain("defense_building");
       expect(html).toContain("Skill alternatives");
       expect(html).toContain("opens no socket");
-      expect(html).toContain("real ProxyWar renderer");
+      expect(html).toContain("real Proxy War renderer");
       expect(html).not.toContain("new WebSocket");
       expect(html).not.toContain("fetch(");
     } finally {

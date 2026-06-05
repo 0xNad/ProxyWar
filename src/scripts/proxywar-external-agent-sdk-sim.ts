@@ -159,7 +159,7 @@ try {
     throw new Error(`external-agent dry run failed:\n${dryRun.output}`);
   }
   if (
-    !dryRun.output.includes("ProxyWar external-agent dry run passed") ||
+    !dryRun.output.includes("Proxy War external-agent dry run passed") ||
     !dryRun.output.includes("openFrontReplayUrl") ||
     !dryRun.output.includes("external-agent-feedback.md")
   ) {
@@ -169,7 +169,7 @@ try {
   }
   console.log("PASS no-secret match produced replay and external-agent feedback");
 
-  console.log("ProxyWar external-agent SDK sim passed.");
+  console.log("Proxy War external-agent SDK sim passed.");
 } finally {
   child?.kill("SIGTERM");
   await fs.rm(commandScript, { force: true });

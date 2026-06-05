@@ -244,7 +244,7 @@ describe("AgentDecisionLogWriter", () => {
       });
 
       const report = await fs.readFile(paths.reportPath, "utf8");
-      expect(report).toContain("# ProxyWar Run run-1");
+      expect(report).toContain("# Proxy War Run run-1");
       expect(report).toContain("Builder Agent");
       expect(report).toContain("build:Defense Post:10");
       expect(report).toContain("build_defense/medium");
@@ -283,7 +283,7 @@ describe("AgentDecisionLogWriter", () => {
       expect(visualReport).toContain("match-package.md");
       expect(visualReport).toContain("spectator-telemetry.json");
       expect(visualReport).toContain("Open spectator replay");
-      expect(visualReport).toContain("Open real ProxyWar replay renderer");
+      expect(visualReport).toContain("Open real Proxy War replay renderer");
       expect(visualReport).toContain("Post-spawn cycle 1");
       expect(visualReport).toContain("audit confirmed");
       expect(visualReport).toContain("decisions.jsonl");
@@ -317,7 +317,7 @@ describe("AgentDecisionLogWriter", () => {
       ).resolves.toContain("Protocol Boundary");
       await expect(
         fs.readFile(paths.matchPackageHtmlPath, "utf8"),
-      ).resolves.toContain("ProxyWar Match Package");
+      ).resolves.toContain("Proxy War Match Package");
       await expect(
         fs.readFile(paths.spectatorTelemetryPath, "utf8"),
       ).resolves.toContain('"events"');

@@ -1478,7 +1478,7 @@ function matchReport(
   );
 
   return [
-    `# ProxyWar Run ${input.runID}`,
+    `# Proxy War Run ${input.runID}`,
     "",
     "## Match Overview",
     "",
@@ -1783,9 +1783,9 @@ function matchReport(
           "",
           `- Snapshot replay data: ${summary.spectator.spectatorReplayPath ?? "not written"}`,
           `- Spectator telemetry: ${summary.spectator.spectatorTelemetryPath ?? summary.spectatorTelemetryPath}`,
-          `- Native ProxyWar GameRecord hook: ${summary.spectator.gameRecordPath ?? "not written"}`,
+          `- Native Proxy War GameRecord hook: ${summary.spectator.gameRecordPath ?? "not written"}`,
           "- This artifact viewer does not open a GameServer socket, does not create a player, and cannot submit intents.",
-          `- Real ProxyWar renderer route: /ai-league-replay/${encodeURIComponent(input.runID)}`,
+          `- Real Proxy War renderer route: /ai-league-replay/${encodeURIComponent(input.runID)}`,
         ].join("\n")
       : "Spectator replay was not generated for this run.",
     "",
@@ -1976,7 +1976,7 @@ function visualReport(
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>ProxyWar Run ${escapeHtml(input.runID)}</title>
+  <title>Proxy War Run ${escapeHtml(input.runID)}</title>
   <style>
     :root { color-scheme: light; --ink:#17202a; --muted:#627084; --line:#d9e2ec; --paper:#f7f9fc; --accent:#215a9c; --good:#19764b; --warn:#a55b00; --bad:#a32135; }
     * { box-sizing: border-box; }
@@ -2031,7 +2031,7 @@ function visualReport(
 </head>
 <body>
   <header>
-    <h1>ProxyWar Run</h1>
+    <h1>Proxy War Run</h1>
     <div class="subtitle">${escapeHtml(input.runID)}</div>
   </header>
   <main>
@@ -2081,7 +2081,7 @@ function visualReport(
       }
       ${
         summary.spectator
-          ? `<p><a href="/ai-league-replay/${encodeURIComponent(input.runID)}">Open real ProxyWar replay renderer</a></p><p class="notes">Requires the local demo/beta server; this route is proxied for remote viewers.</p>`
+          ? `<p><a href="/ai-league-replay/${encodeURIComponent(input.runID)}">Open real Proxy War replay renderer</a></p><p class="notes">Requires the local demo/beta server; this route is proxied for remote viewers.</p>`
           : ""
       }
     </section>
@@ -2258,7 +2258,7 @@ function visualReport(
           paths.spectatorPaths
             ? `<li><a href="./spectator.html">spectator.html</a></li>
         <li><a href="./spectator-replay.json">spectator-replay.json</a></li>
-        <li><a href="/ai-league-replay/${encodeURIComponent(input.runID)}">real ProxyWar replay renderer</a> <code>/ai-league-replay/${escapeHtml(input.runID)}</code></li>
+        <li><a href="/ai-league-replay/${encodeURIComponent(input.runID)}">real Proxy War replay renderer</a> <code>/ai-league-replay/${escapeHtml(input.runID)}</code></li>
         ${
           paths.spectatorPaths.gameRecordPath
             ? `<li><a href="./game-record.json">game-record.json</a></li>`

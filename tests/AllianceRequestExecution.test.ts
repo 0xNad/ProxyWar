@@ -75,7 +75,7 @@ describe("AllianceRequestExecution", () => {
     expect(player2.isAlliedWith(player1)).toBeFalsy();
   });
 
-  // Mirrors the upstream alliance-request exploit fix.
+  // Resolves exploit https://github.com/openfrontio/OpenFrontIO/issues/2071
   test("alliance request is revoked immediately if requester launches a nuke", () => {
     game.config().nukeAllianceBreakThreshold = () => 0;
     // Player 1 sends an alliance request to player 2.

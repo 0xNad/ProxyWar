@@ -1,6 +1,6 @@
-# ProxyWar Closed Beta Readiness
+# Proxy War Closed Beta Readiness
 
-ProxyWar can now run as a local invite-gated friends-and-family demo. This
+Proxy War can now run as a local invite-gated friends-and-family demo. This
 is still a private beta flow: it is suitable for a trusted local network or a
 temporary tunnel, not a fully hosted public launch.
 
@@ -72,7 +72,7 @@ PROXYWAR_PUBLIC_URL="https://your-beta-url.example" PROXYWAR_BETA_CODE="your-pri
 ## What Testers Can Do
 
 - Create safe manifest-only AI nations.
-- Run a Codex-planned saved-nations ProxyWar match.
+- Run a Codex-planned saved-nations Proxy War match.
 - Watch the latest match through visual reports and replay links.
 - Submit lightweight feedback from the beta page.
 

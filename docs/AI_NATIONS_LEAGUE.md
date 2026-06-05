@@ -1,6 +1,6 @@
-# ProxyWar / AI Nations League
+# Proxy War / AI Nations League
 
-**ProxyWar** is the public product framing: an autonomous strategy league
+**Proxy War** is the public product framing: an autonomous strategy league
 where humans create AI nations, enter them into matches, and watch those nations
 expand, build, ally, pressure rivals, or collapse.
 
@@ -143,7 +143,7 @@ written by the provider.
 
 ## External Agent Endpoint Contract
 
-ProxyWar now supports a private/testing-only external HTTP agent mode for
+Proxy War now supports a private/testing-only external HTTP agent mode for
 friends who want to run their own agent service. Endpoint agents still use the
 same contract as LLM brains: they receive `AgentObservation` plus public
 `LegalAction[]` entries and must return strict JSON with one
@@ -464,7 +464,7 @@ Files:
   the decisions made during each snapshot.
 - `game-record.json`: a local `GameRecord` generated from the saved
   start/turn stream when available. The `/ai-league-replay/<run-id>` route uses
-  this file to render the match with the real ProxyWar game canvas.
+  this file to render the match with the real Proxy War game canvas.
 - `../index.html`: the run selector generated at
   `artifacts/ai-league-runs/index.html`, listing recent run ids, brain type,
   scenario, runner mode, decision counts, non-hold counts, parser/fallback
@@ -536,7 +536,7 @@ The operator hub is the easiest local product shell. It lists recent match runs 
 tournaments, links to visual reports, artifact replays, scorecards, JSON logs,
 evaluation reports, tournament leaderboards, and persisted demo-server job
 history. It can start safe preconfigured demo, evaluation, and tournament jobs.
-It also links runs into the native ProxyWar replay route and highlights the
+It also links runs into the native Proxy War replay route and highlights the
 latest match with one-click report/replay links.
 
 The match form can use:
@@ -545,7 +545,7 @@ The match form can use:
   opportunistic profiles.
 - `Manifest-defined roster`: the checked-in manifests under
   `docs/ai-league-agent-manifests/`.
-- `Saved ProxyWar nations`: local manifest-only nations created through
+- `Saved Proxy War nations`: local manifest-only nations created through
   the hub, plus curated defaults until there are at least four entrants.
 
 The **Create AI Nation** form is the first public-demo creation flow. It saves a
@@ -562,7 +562,7 @@ inside the game, and do not submit raw game intents. The server still runs
 the agent, builds observations, offers `LegalAction.id` choices, validates the
 decision, and submits normal intents through `AgentRunner -> GameServer`.
 
-Saved ProxyWar nations are written under:
+Saved Proxy War nations are written under:
 
 ```text
 artifacts/proxywar/nations/
@@ -585,7 +585,7 @@ When a beta match job completes, the public page automatically navigates to:
 /openfront-replay/<run-id>
 ```
 
-The demo server proxies the local ProxyWar renderer so remote friends using the
+The demo server proxies the local Proxy War renderer so remote friends using the
 same beta/tunnel URL can watch the rendered replay without opening port 9000
 separately. This is still replay-after-generation, not a true live turn stream
 while the match is running.
@@ -602,7 +602,7 @@ For objective-following demos, set decision cycles to `5` through `10`. Those
 longer step-locked runs give the planner/executor loop enough repeated choices
 for objective scorecards and repetition penalties to become meaningful.
 
-By default the hub starts the local ProxyWar renderer on port 9000 too. The
+By default the hub starts the local Proxy War renderer on port 9000 too. The
 renderer uses a strict port so replay links stay predictable; if port 9000 is
 already occupied, the hub logs the renderer startup failure and assumes the
 existing process on port 9000 is the renderer. If you already have the renderer
@@ -627,7 +627,7 @@ artifacts/ai-league-runs/index.html
 The index is a static page. It does not start a server and does not require a
 database. Every league smoke/demo run also refreshes it automatically after
 writing run artifacts. Runs that include spectator replay data show direct
-`spectator` and ProxyWar render links. Use `agent:demo-server` when you want a
+`spectator` and Proxy War render links. Use `agent:demo-server` when you want a
 single browser shell that can also launch new jobs.
 
 ## Action-Effect Auditing
@@ -657,7 +657,7 @@ Audit statuses:
 - `not_applicable`: no effect was expected, usually because the action was hold
   or the intent was rejected before execution.
 
-The successful demo target is zero failed audits. Unknown audits are
+The successful private demo target is zero failed audits. Unknown audits are
 acceptable only when the artifact explains what the mirror could not prove.
 
 ## Spectator And Real Render Modes
@@ -691,7 +691,7 @@ Read-only guarantees:
 - It has no intent submission path; AI agents still submit validated intents
   only through `AgentRunner -> GameServer`.
 
-The real ProxyWar renderer route is:
+The real Proxy War renderer route is:
 
 ```text
 http://localhost:9000/ai-league-replay/<run-id>
@@ -707,7 +707,7 @@ This route fetches `game-record.json` and `decisions.jsonl` through the local
 dev server, then uses the existing `LocalServer` replay path and real
 `GameRenderer`. The viewer receives no `myClientID`; `LocalServer` ignores
 non-pause intents during replay, so the route is read-only and does not occupy a
-player slot. A compact overlay lists AI decisions while the ProxyWar canvas
+player slot. A compact overlay lists AI decisions while the Proxy War canvas
 renders terrain, territory, structures, bots, agents, attacks, and replay UI.
 
 To generate a run specifically for this real-render demo:
@@ -902,7 +902,7 @@ npm run agent:demo-server
 
 Then open `http://127.0.0.1:8787`. From there you can start a mock/planner demo,
 run a small evaluation, run a manifest tournament, browse recent artifacts, and
-open native ProxyWar replay links for runs that wrote `game-record.json`.
+open native Proxy War replay links for runs that wrote `game-record.json`.
 
 Refresh the local demo index:
 
@@ -944,7 +944,7 @@ Then open the printed URL:
 http://localhost:9000/ai-league-replay/<run-id>
 ```
 
-This is the easiest way to inspect the match with the real ProxyWar canvas
+This is the easiest way to inspect the match with the real Proxy War canvas
 instead of the lightweight static spectator canvas.
 
 The render demo intentionally uses more decision steps, wider turn spacing, and
@@ -1159,7 +1159,7 @@ selected-decision panel showing objective, plan, skill, reason, generated intent
 latency, accepted/rejected status, fallback status, and audit status. It opens no
 socket, creates no player, and cannot submit intents.
 
-For the real ProxyWar renderer route, run:
+For the real Proxy War renderer route, run:
 
 ```bash
 npm run agent:league-demo:render
@@ -1282,9 +1282,9 @@ The leaderboard combines objective score, accepted intent rate, non-hold rate,
 audit score, and fallback/parser/rejected/audit penalties. Every per-run artifact
 remains available under `artifacts/ai-league-runs/<run-id>/`.
 
-## ProxyWar Behavior Consolidation
+## Proxy War Behavior Consolidation
 
-ProxyWar is the public product framing for this internal AI Nations League
+Proxy War is the public product framing for this internal AI Nations League
 runner. The current architecture and gameplay notes are split into focused docs:
 
 - `docs/PROXYWAR_AGENT_ARCHITECTURE.md`
@@ -1303,7 +1303,7 @@ LLM/Codex prompts now explicitly forbid code, TypeScript, shell commands, tool
 calls, and raw game intents. The model still chooses only one offered
 `LegalAction.id`.
 
-Benchmark one ProxyWar agent against built-in nations:
+Benchmark one Proxy War agent against built-in nations:
 
 ```bash
 npm run agent:benchmark:bots
@@ -1319,7 +1319,7 @@ Current passing full gate:
 
 - Run id: `2026-05-11T03-29-06-603Z-frontier-mock-policy-planner-90ae84f0`
 - Result: 10/10 wins
-- Conditions: one ProxyWar planner/executor agent vs 5 built-in
+- Conditions: one Proxy War planner/executor agent vs 5 built-in
   `PlayerType.Nation` opponents plus 5 built-in tribe/bot opponents, Pangaea
   Compact, Easy difficulty, full GameServer/core simulation.
 - Report:

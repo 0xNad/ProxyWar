@@ -59,7 +59,7 @@ const paths = await writeAgentTournamentArtifacts({
   runs: artifacts,
 });
 
-console.log("ProxyWar tournament result", {
+console.log("Proxy War tournament result", {
   tournamentID,
   brain,
   scenario,

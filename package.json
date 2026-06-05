@@ -32,12 +32,12 @@
     "agent:league-demo:planner:codex-cli": "cross-env GAME_ENV=dev AI_LEAGUE_LLM_PROVIDER=codex-cli AI_LEAGUE_REQUIRE_EXTERNAL_BRAIN_SUCCESS=true AI_LEAGUE_CODEX_TIMEOUT_MS=180000 tsx src/scripts/ai-agent-league-smoke.ts --brain=planner-codex-cli --runner=step-locked --scenario=actions --disable-alliance-actions --max-decision-ms=180000 --max-steps=3",
     "agent:league-demo:planner:codex-medium": "cross-env GAME_ENV=dev AI_LEAGUE_LLM_PROVIDER=codex-cli AI_LEAGUE_REQUIRE_EXTERNAL_BRAIN_SUCCESS=true AI_LEAGUE_CODEX_MODEL=gpt-5.4 AI_LEAGUE_CODEX_REASONING_EFFORT=medium AI_LEAGUE_CODEX_TIMEOUT_MS=180000 tsx src/scripts/ai-agent-league-smoke.ts --brain=planner-codex-cli --runner=step-locked --scenario=actions --disable-alliance-actions --max-decision-ms=180000 --max-steps=15 --turns-per-decision-step=100 --replay-tail-turns=350 --bots=5 --nations=5 --map=Pangaea --map-size=Compact --vary-spawns",
     "agent:demo-server": "cross-env GAME_ENV=dev tsx src/scripts/ai-agent-demo-server.ts",
-    "agent:closed-beta": "cross-env GAME_ENV=dev PROXYWAR_BETA_ENABLED=true PROXYWAR_HOUSE_AGENT_BRAIN=planner-codex-cli AI_LEAGUE_LLM_PROVIDER=codex-cli AI_LEAGUE_REQUIRE_EXTERNAL_BRAIN_SUCCESS=true AI_LEAGUE_CODEX_TIMEOUT_MS=180000 tsx src/scripts/ai-agent-demo-server.ts",
-    "agent:closed-beta:codex": "cross-env GAME_ENV=dev PROXYWAR_BETA_ENABLED=true PROXYWAR_HOUSE_AGENT_BRAIN=planner-codex-cli AI_LEAGUE_LLM_PROVIDER=codex-cli AI_LEAGUE_REQUIRE_EXTERNAL_BRAIN_SUCCESS=true AI_LEAGUE_CODEX_TIMEOUT_MS=180000 tsx src/scripts/ai-agent-demo-server.ts",
-    "agent:beta": "cross-env GAME_ENV=dev PROXYWAR_BETA_ENABLED=true PROXYWAR_HOUSE_AGENT_BRAIN=planner-codex-cli AI_LEAGUE_LLM_PROVIDER=codex-cli AI_LEAGUE_REQUIRE_EXTERNAL_BRAIN_SUCCESS=true AI_LEAGUE_CODEX_TIMEOUT_MS=180000 tsx src/scripts/ai-agent-demo-server.ts",
-    "agent:closed-beta:lan": "cross-env GAME_ENV=dev PROXYWAR_BETA_ENABLED=true PROXYWAR_HOUSE_AGENT_BRAIN=planner-codex-cli AI_LEAGUE_LLM_PROVIDER=codex-cli AI_LEAGUE_REQUIRE_EXTERNAL_BRAIN_SUCCESS=true AI_LEAGUE_CODEX_TIMEOUT_MS=180000 AI_LEAGUE_DEMO_HOST=0.0.0.0 tsx src/scripts/ai-agent-demo-server.ts",
-    "agent:closed-beta:remote": "cross-env GAME_ENV=dev PROXYWAR_BETA_ENABLED=true PROXYWAR_HOUSE_AGENT_BRAIN=planner-codex-cli AI_LEAGUE_LLM_PROVIDER=codex-cli AI_LEAGUE_REQUIRE_EXTERNAL_BRAIN_SUCCESS=true AI_LEAGUE_CODEX_TIMEOUT_MS=180000 tsx src/scripts/proxywar-remote-beta.ts",
-    "agent:closed-beta:prod": "cross-env NODE_ENV=production GAME_ENV=dev PROXYWAR_BETA_ENABLED=true PROXYWAR_ALLOW_PRIVATE_AGENT_ENDPOINTS=false PROXYWAR_MAX_QUEUED_JOBS=1 PROXYWAR_HOUSE_AGENT_BRAIN=planner-codex-cli AI_LEAGUE_LLM_PROVIDER=codex-cli AI_LEAGUE_REQUIRE_EXTERNAL_BRAIN_SUCCESS=true AI_LEAGUE_CODEX_TIMEOUT_MS=180000 tsx src/scripts/ai-agent-demo-server.ts",
+    "agent:closed-beta": "cross-env GAME_ENV=dev PROXYWAR_BETA_ENABLED=true PROXYWAR_AGENT_RELAY_REDELIVERY_MS=5000 PROXYWAR_HOUSE_AGENT_BRAIN=planner-codex-cli AI_LEAGUE_LLM_PROVIDER=codex-cli AI_LEAGUE_REQUIRE_EXTERNAL_BRAIN_SUCCESS=true AI_LEAGUE_CODEX_TIMEOUT_MS=45000 AI_LEAGUE_CODEX_APP_SERVER_FALLBACK=false tsx src/scripts/ai-agent-demo-server.ts",
+    "agent:closed-beta:codex": "cross-env GAME_ENV=dev PROXYWAR_BETA_ENABLED=true PROXYWAR_AGENT_RELAY_REDELIVERY_MS=5000 PROXYWAR_HOUSE_AGENT_BRAIN=planner-codex-cli AI_LEAGUE_LLM_PROVIDER=codex-cli AI_LEAGUE_REQUIRE_EXTERNAL_BRAIN_SUCCESS=true AI_LEAGUE_CODEX_TIMEOUT_MS=45000 AI_LEAGUE_CODEX_APP_SERVER_FALLBACK=false tsx src/scripts/ai-agent-demo-server.ts",
+    "agent:beta": "cross-env GAME_ENV=dev PROXYWAR_BETA_ENABLED=true PROXYWAR_AGENT_RELAY_REDELIVERY_MS=5000 PROXYWAR_HOUSE_AGENT_BRAIN=planner-codex-cli AI_LEAGUE_LLM_PROVIDER=codex-cli AI_LEAGUE_REQUIRE_EXTERNAL_BRAIN_SUCCESS=true AI_LEAGUE_CODEX_TIMEOUT_MS=45000 AI_LEAGUE_CODEX_APP_SERVER_FALLBACK=false tsx src/scripts/ai-agent-demo-server.ts",
+    "agent:closed-beta:lan": "cross-env GAME_ENV=dev PROXYWAR_BETA_ENABLED=true PROXYWAR_AGENT_RELAY_REDELIVERY_MS=5000 PROXYWAR_HOUSE_AGENT_BRAIN=planner-codex-cli AI_LEAGUE_LLM_PROVIDER=codex-cli AI_LEAGUE_REQUIRE_EXTERNAL_BRAIN_SUCCESS=true AI_LEAGUE_CODEX_TIMEOUT_MS=45000 AI_LEAGUE_CODEX_APP_SERVER_FALLBACK=false AI_LEAGUE_DEMO_HOST=0.0.0.0 tsx src/scripts/ai-agent-demo-server.ts",
+    "agent:closed-beta:remote": "cross-env GAME_ENV=dev PROXYWAR_BETA_ENABLED=true PROXYWAR_AGENT_RELAY_REDELIVERY_MS=5000 PROXYWAR_HOUSE_AGENT_BRAIN=planner-codex-cli AI_LEAGUE_LLM_PROVIDER=codex-cli AI_LEAGUE_REQUIRE_EXTERNAL_BRAIN_SUCCESS=true AI_LEAGUE_CODEX_TIMEOUT_MS=45000 AI_LEAGUE_CODEX_APP_SERVER_FALLBACK=false tsx src/scripts/proxywar-remote-beta.ts",
+    "agent:closed-beta:prod": "cross-env NODE_ENV=production GAME_ENV=dev PROXYWAR_BETA_ENABLED=true PROXYWAR_ALLOW_PRIVATE_AGENT_ENDPOINTS=false PROXYWAR_MAX_QUEUED_JOBS=1 PROXYWAR_AGENT_RELAY_REDELIVERY_MS=5000 PROXYWAR_HOUSE_AGENT_BRAIN=planner-codex-cli AI_LEAGUE_LLM_PROVIDER=codex-cli AI_LEAGUE_REQUIRE_EXTERNAL_BRAIN_SUCCESS=true AI_LEAGUE_CODEX_TIMEOUT_MS=45000 AI_LEAGUE_CODEX_APP_SERVER_FALLBACK=false tsx src/scripts/ai-agent-demo-server.ts",
     "agent:public-readiness": "cross-env GAME_ENV=dev tsx src/scripts/proxywar-public-readiness.ts",
     "agent:public-readiness:strict": "cross-env GAME_ENV=dev PROXYWAR_BETA_ENABLED=true tsx src/scripts/proxywar-public-readiness.ts --require-ready",
     "agent:hosted-beta:readiness": "cross-env GAME_ENV=dev PROXYWAR_BETA_ENABLED=true tsx src/scripts/proxywar-hosted-beta-readiness.ts",
@@ -49,6 +49,7 @@
     "agent:external-agent:dry-run": "cross-env GAME_ENV=dev tsx src/scripts/proxywar-external-agent-dry-run.ts",
     "agent:external-agent:failure-drill": "cross-env GAME_ENV=dev tsx src/scripts/proxywar-external-agent-failure-drill.ts",
     "agent:external-agent:sdk-sim": "cross-env GAME_ENV=dev tsx src/scripts/proxywar-external-agent-sdk-sim.ts",
+    "agent:external-agent:relay-sim": "cross-env GAME_ENV=dev tsx src/scripts/proxywar-external-agent-relay-sim.ts",
     "agent:saved-agents:health": "cross-env GAME_ENV=dev tsx src/scripts/proxywar-saved-agents-health.ts",
     "agent:evaluate": "tsx src/scripts/ai-agent-evaluate.ts",
     "agent:benchmark:bots": "cross-env GAME_ENV=dev tsx src/scripts/ai-agent-frontier-benchmark.ts --brain=planner --runs=2 --nations=3 --max-turns=6000",
@@ -176,6 +177,9 @@
     "winston": "^3.19.0",
     "ws": "^8.20.0",
     "zod": "^4.4.2"
+  },
+  "overrides": {
+    "protobufjs": "^8.6.0"
   },
   "type": "module"
 }

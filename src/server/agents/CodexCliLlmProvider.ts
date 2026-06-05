@@ -1,4 +1,4 @@
-import { spawn } from "child_process";
+import { spawn, type ChildProcessWithoutNullStreams } from "child_process";
 import { existsSync } from "fs";
 import fs from "fs/promises";
 import os from "os";
@@ -26,6 +26,26 @@ export type CodexCliCommandRunner = (
   input: CodexCliCommandInput,
 ) => Promise<CodexCliCommandResult>;
 
+export type CodexCliTransport = "app-server" | "exec";
+
+export interface CodexAppServerCompletionInput {
+  command: string;
+  prompt: string;
+  cwd: string;
+  timeoutMs: number;
+  idleCloseMs: number;
+  model?: string;
+  reasoningEffort?: string;
+  profile?: string;
+  outputSchema: "decision" | "planner" | "researcher";
+  schema: unknown;
+}
+
+export interface CodexAppServerCompletionClient {
+  complete(input: CodexAppServerCompletionInput): Promise<string>;
+  close?(): void;
+}
+
 export interface CodexCliLlmProviderConfig {
   command: string;
   cwd: string;
@@ -34,15 +54,21 @@ export interface CodexCliLlmProviderConfig {
   reasoningEffort?: string;
   profile?: string;
   outputSchema?: "decision" | "planner" | "researcher";
+  transport?: CodexCliTransport;
   commandRunner?: CodexCliCommandRunner;
+  appServerClient?: CodexAppServerCompletionClient;
+  appServerFallbackToExec?: boolean;
+  appServerIdleCloseMs?: number;
 }
 
+// Locked in-house Codex agent model per beta operator direction.
 export const DEFAULT_CODEX_PLANNER_MODEL = "gpt-5.4";
 export const DEFAULT_CODEX_PLANNER_REASONING_EFFORT = "medium";
 export const DEFAULT_CODEX_RESEARCHER_MODEL = "gpt-5.5";
 export const DEFAULT_CODEX_RESEARCHER_REASONING_EFFORT = "high";
 
 const bundledCodexCliPath = "/Applications/Codex.app/Contents/Resources/codex";
+export const DEFAULT_CODEX_APP_SERVER_IDLE_CLOSE_MS = 30 * 60 * 1_000;
 
 const codexDecisionSchema = {
   type: "object",
@@ -357,12 +383,74 @@ const codexResearcherSchema = {
 export class CodexCliLlmProvider implements LlmProvider {
   readonly providerType = "codex-cli";
   private readonly commandRunner: CodexCliCommandRunner;
+  private readonly configuredAppServerClient: CodexAppServerCompletionClient | null;
+  private appServerClient: CodexAppServerCompletionClient | null = null;
+  private appServerDisabledReason: string | null = null;
 
   constructor(private readonly config: CodexCliLlmProviderConfig) {
     this.commandRunner = config.commandRunner ?? runCodexCliCommand;
+    this.configuredAppServerClient = config.appServerClient ?? null;
   }
 
   async complete(prompt: string): Promise<string> {
+    if (this.transport() === "app-server" && this.appServerDisabledReason === null) {
+      try {
+        return await this.completeViaAppServer(prompt);
+      } catch (error) {
+        if (!this.shouldFallbackToExec()) {
+          throw error;
+        }
+        this.appServerDisabledReason =
+          error instanceof Error ? error.message : String(error);
+        this.close();
+      }
+    }
+
+    return await this.completeViaExec(prompt);
+  }
+
+  close(): void {
+    this.configuredAppServerClient?.close?.();
+    this.appServerClient?.close?.();
+    this.appServerClient = null;
+  }
+
+  private async completeViaAppServer(prompt: string): Promise<string> {
+    const finalText = await this.codexAppServerClient().complete({
+      command: this.config.command,
+      prompt: codexPrompt(prompt, this.config.outputSchema ?? "decision"),
+      cwd: this.config.cwd,
+      timeoutMs: this.config.timeoutMs,
+      idleCloseMs:
+        this.config.appServerIdleCloseMs ??
+        DEFAULT_CODEX_APP_SERVER_IDLE_CLOSE_MS,
+      ...(this.config.model !== undefined ? { model: this.config.model } : {}),
+      ...(this.config.reasoningEffort !== undefined
+        ? { reasoningEffort: this.config.reasoningEffort }
+        : {}),
+      ...(this.config.profile !== undefined
+        ? { profile: this.config.profile }
+        : {}),
+      outputSchema: this.config.outputSchema ?? "decision",
+      schema: this.outputSchema(),
+    });
+    if (finalText.trim() === "") {
+      throw new Error("Codex app-server returned an empty final message");
+    }
+    return finalText.trim();
+  }
+
+  private codexAppServerClient(): CodexAppServerCompletionClient {
+    if (this.configuredAppServerClient !== null) {
+      return this.configuredAppServerClient;
+    }
+    if (this.appServerClient === null) {
+      this.appServerClient = new StdioCodexAppServerCompletionClient();
+    }
+    return this.appServerClient;
+  }
+
+  private async completeViaExec(prompt: string): Promise<string> {
     const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "ai-codex-cli-"));
     const schemaPath = path.join(tempDir, "decision.schema.json");
     const outputPath = path.join(tempDir, "last-message.txt");
@@ -390,6 +478,17 @@ export class CodexCliLlmProvider implements LlmProvider {
     } finally {
       await fs.rm(tempDir, { recursive: true, force: true });
     }
+  }
+
+  private transport(): CodexCliTransport {
+    if (this.config.transport !== undefined) {
+      return this.config.transport;
+    }
+    return this.config.commandRunner !== undefined ? "exec" : "app-server";
+  }
+
+  private shouldFallbackToExec(): boolean {
+    return this.config.appServerFallbackToExec ?? true;
   }
 
   private codexArgs(schemaPath: string, outputPath: string): string[] {
@@ -489,6 +588,15 @@ export function loadCodexCliLlmProviderConfig(
     model,
     reasoningEffort,
     profile: optionalNonEmpty(env.AI_LEAGUE_CODEX_PROFILE),
+    transport: codexCliTransportFromEnv(env),
+    appServerFallbackToExec:
+      optionalNonEmpty(env.AI_LEAGUE_CODEX_APP_SERVER_FALLBACK)?.toLowerCase() !==
+      "false",
+    appServerIdleCloseMs: positiveIntegerEnv(
+      env,
+      "AI_LEAGUE_CODEX_APP_SERVER_IDLE_CLOSE_MS",
+      DEFAULT_CODEX_APP_SERVER_IDLE_CLOSE_MS,
+    ),
   };
 }
 
@@ -508,6 +616,408 @@ export function createCodexCliLlmProviderFromEnv(
   cwd = process.cwd(),
 ): CodexCliLlmProvider {
   return new CodexCliLlmProvider(loadCodexCliLlmProviderConfig(env, cwd));
+}
+
+type JsonRpcID = number;
+
+interface PendingJsonRpcRequest {
+  resolve: (value: unknown) => void;
+  reject: (error: Error) => void;
+  timeoutID: ReturnType<typeof setTimeout>;
+}
+
+interface PendingCodexAppServerTurn {
+  threadID: string;
+  turnID: string | null;
+  text: string;
+  settled: boolean;
+  timeoutID: ReturnType<typeof setTimeout>;
+  promise: Promise<string>;
+  resolve: (value: string) => void;
+  reject: (error: Error) => void;
+}
+
+class StdioCodexAppServerCompletionClient
+  implements CodexAppServerCompletionClient
+{
+  private child: ChildProcessWithoutNullStreams | null = null;
+  private startPromise: Promise<void> | null = null;
+  private stdoutBuffer = "";
+  private nextID = 1;
+  private command: string | null = null;
+  private idleCloseMs = DEFAULT_CODEX_APP_SERVER_IDLE_CLOSE_MS;
+  private idleCloseID: ReturnType<typeof setTimeout> | null = null;
+  private readonly pendingRequests = new Map<JsonRpcID, PendingJsonRpcRequest>();
+  private readonly pendingTurns = new Map<string, PendingCodexAppServerTurn>();
+  private exitHookInstalled = false;
+
+  async complete(input: CodexAppServerCompletionInput): Promise<string> {
+    if (input.profile !== undefined) {
+      throw new Error(
+        "Codex app-server transport does not support AI_LEAGUE_CODEX_PROFILE; set AI_LEAGUE_CODEX_TRANSPORT=exec for profile-based runs.",
+      );
+    }
+
+    await this.ensureStarted(input);
+    this.idleCloseMs = input.idleCloseMs;
+    const threadID = await this.startThread(input);
+    const pendingTurn = this.createPendingTurn(threadID, input.timeoutMs);
+    this.pendingTurns.set(threadID, pendingTurn);
+
+    try {
+      const turn = await this.request(
+        "turn/start",
+        {
+          threadId: threadID,
+          input: [
+            {
+              type: "text",
+              text: input.prompt,
+              text_elements: [],
+            },
+          ],
+          cwd: input.cwd,
+          approvalPolicy: "never",
+          approvalsReviewer: "user",
+          sandboxPolicy: { type: "readOnly", networkAccess: false },
+          ...(input.model !== undefined ? { model: input.model } : {}),
+          ...(input.reasoningEffort !== undefined
+            ? { effort: input.reasoningEffort }
+            : {}),
+          outputSchema: input.schema,
+        },
+        input.timeoutMs,
+      );
+      pendingTurn.turnID = stringAtPath(turn, ["turn", "id"]);
+      return await pendingTurn.promise;
+    } finally {
+      this.settlePendingTurn(
+        pendingTurn,
+        pendingTurn.settled
+          ? null
+          : new Error("Codex app-server turn ended before completion."),
+      );
+      await this.archiveThread(threadID);
+      this.scheduleIdleClose();
+    }
+  }
+
+  close(): void {
+    if (this.idleCloseID !== null) {
+      clearTimeout(this.idleCloseID);
+      this.idleCloseID = null;
+    }
+    const child = this.child;
+    this.child = null;
+    this.startPromise = null;
+    this.rejectAll(new Error("Codex app-server transport closed."));
+    child?.kill("SIGTERM");
+  }
+
+  private async ensureStarted(input: CodexAppServerCompletionInput): Promise<void> {
+    if (this.idleCloseID !== null) {
+      clearTimeout(this.idleCloseID);
+      this.idleCloseID = null;
+    }
+    if (this.child !== null && this.command === input.command) {
+      if (this.startPromise !== null) {
+        await this.startPromise;
+      }
+      return;
+    }
+
+    this.close();
+    this.command = input.command;
+    this.child = spawn(input.command, ["app-server", "--listen", "stdio://"], {
+      cwd: input.cwd,
+      stdio: ["pipe", "pipe", "pipe"],
+      windowsHide: true,
+    });
+    this.child.stdout.on("data", (chunk: Buffer) => this.handleStdout(chunk));
+    this.child.stderr.on("data", () => {
+      // Codex app-server writes operational warnings to stderr. Keep them out of
+      // beta artifacts unless the JSON-RPC request itself fails.
+    });
+    this.child.on("error", (error: NodeJS.ErrnoException) => {
+      this.rejectAll(
+        errorWithCause(appServerStartErrorMessage(input.command, error), error),
+      );
+    });
+    this.child.on("close", (exitCode) => {
+      this.child = null;
+      this.startPromise = null;
+      this.rejectAll(
+        new Error(`Codex app-server exited with code ${exitCode ?? "unknown"}.`),
+      );
+    });
+    if (!this.exitHookInstalled) {
+      this.exitHookInstalled = true;
+      process.once("exit", () => this.child?.kill("SIGTERM"));
+    }
+    this.startPromise = this.request(
+      "initialize",
+      {
+        clientInfo: {
+          name: "proxywar-codex-house-agent",
+          version: "1.0.0",
+        },
+        capabilities: null,
+      },
+      input.timeoutMs,
+    ).then(() => undefined);
+    await this.startPromise;
+  }
+
+  private async startThread(
+    input: CodexAppServerCompletionInput,
+  ): Promise<string> {
+    const result = await this.request(
+      "thread/start",
+      {
+        ...(input.model !== undefined ? { model: input.model } : {}),
+        cwd: input.cwd,
+        approvalPolicy: "never",
+        sandbox: "read-only",
+        ephemeral: true,
+        baseInstructions:
+          "You are running inside Codex app-server for private AI Nations League testing. Return final JSON only.",
+        developerInstructions:
+          "Do not run shell commands. Do not inspect files. Do not use tools.",
+        config: { mcp_servers: {} },
+      },
+      input.timeoutMs,
+    );
+    const threadID = stringAtPath(result, ["thread", "id"]);
+    if (threadID === null) {
+      throw new Error("Codex app-server did not return a thread id.");
+    }
+    return threadID;
+  }
+
+  private createPendingTurn(
+    threadID: string,
+    timeoutMs: number,
+  ): PendingCodexAppServerTurn {
+    let resolveTurn!: (value: string) => void;
+    let rejectTurn!: (error: Error) => void;
+    const promise = new Promise<string>((resolve, reject) => {
+      resolveTurn = resolve;
+      rejectTurn = reject;
+    });
+    const pendingTurn: PendingCodexAppServerTurn = {
+      threadID,
+      turnID: null,
+      text: "",
+      settled: false,
+      timeoutID: setTimeout(() => {
+        this.settlePendingTurn(
+          pendingTurn,
+          new Error(
+            `Codex app-server timed out after ${timeoutMs}ms; no decision was accepted.`,
+          ),
+        );
+        this.close();
+      }, timeoutMs),
+      promise,
+      resolve: (value) => resolveTurn(value),
+      reject: (error) => rejectTurn(error),
+    };
+    return pendingTurn;
+  }
+
+  private async request(
+    method: string,
+    params: unknown,
+    timeoutMs: number,
+  ): Promise<unknown> {
+    if (this.child === null || this.child.stdin.destroyed) {
+      throw new Error("Codex app-server is not running.");
+    }
+    const id = this.nextID++;
+    const request = { jsonrpc: "2.0", id, method, params };
+    return await new Promise<unknown>((resolve, reject) => {
+      const timeoutID = setTimeout(() => {
+        this.pendingRequests.delete(id);
+        reject(
+          new Error(
+            `Codex app-server request ${method} timed out after ${timeoutMs}ms.`,
+          ),
+        );
+      }, timeoutMs);
+      this.pendingRequests.set(id, { resolve, reject, timeoutID });
+      this.child?.stdin.write(`${JSON.stringify(request)}\n`, (error) => {
+        if (error !== undefined && error !== null) {
+          clearTimeout(timeoutID);
+          this.pendingRequests.delete(id);
+          reject(errorWithCause("Codex app-server request write failed.", error));
+        }
+      });
+    });
+  }
+
+  private handleStdout(chunk: Buffer): void {
+    this.stdoutBuffer += chunk.toString("utf8");
+    let newlineIndex = this.stdoutBuffer.indexOf("\n");
+    while (newlineIndex >= 0) {
+      const line = this.stdoutBuffer.slice(0, newlineIndex).trim();
+      this.stdoutBuffer = this.stdoutBuffer.slice(newlineIndex + 1);
+      if (line !== "") {
+        this.handleLine(line);
+      }
+      newlineIndex = this.stdoutBuffer.indexOf("\n");
+    }
+  }
+
+  private handleLine(line: string): void {
+    let message: unknown;
+    try {
+      message = JSON.parse(line);
+    } catch {
+      return;
+    }
+    if (message === null || typeof message !== "object") {
+      return;
+    }
+    const value = message as Record<string, unknown>;
+    if (typeof value.id === "number") {
+      this.handleResponse(value.id, value);
+      return;
+    }
+    if (typeof value.method === "string") {
+      this.handleNotification(value.method, value.params);
+    }
+  }
+
+  private handleResponse(id: number, value: Record<string, unknown>): void {
+    const pending = this.pendingRequests.get(id);
+    if (pending === undefined) {
+      return;
+    }
+    this.pendingRequests.delete(id);
+    clearTimeout(pending.timeoutID);
+    if (value.error !== undefined) {
+      pending.reject(
+        new Error(`Codex app-server error: ${jsonSummary(value.error)}`),
+      );
+      return;
+    }
+    pending.resolve(value.result);
+  }
+
+  private handleNotification(method: string, params: unknown): void {
+    if (method === "item/agentMessage/delta") {
+      const threadID = stringAtPath(params, ["threadId"]);
+      const turnID = stringAtPath(params, ["turnId"]);
+      const delta = stringAtPath(params, ["delta"]);
+      const pendingTurn =
+        threadID === null ? undefined : this.pendingTurns.get(threadID);
+      if (
+        pendingTurn !== undefined &&
+        delta !== null &&
+        (pendingTurn.turnID === null ||
+          turnID === null ||
+          pendingTurn.turnID === turnID)
+      ) {
+        pendingTurn.text += delta;
+      }
+      return;
+    }
+
+    if (method !== "turn/completed") {
+      return;
+    }
+
+    const threadID = stringAtPath(params, ["threadId"]);
+    const pendingTurn =
+      threadID === null ? undefined : this.pendingTurns.get(threadID);
+    if (pendingTurn === undefined) {
+      return;
+    }
+    const turn = valueAtPath(params, ["turn"]);
+    const status = stringAtPath(turn, ["status"]);
+    const completedTurnID = stringAtPath(turn, ["id"]);
+    if (
+      pendingTurn.turnID !== null &&
+      completedTurnID !== null &&
+      pendingTurn.turnID !== completedTurnID
+    ) {
+      return;
+    }
+    pendingTurn.turnID = completedTurnID;
+    if (status !== "completed") {
+      this.settlePendingTurn(
+        pendingTurn,
+        new Error(
+          `Codex app-server turn ${status ?? "failed"}: ${turnError(turn)}`,
+        ),
+      );
+      return;
+    }
+
+    this.settlePendingTurn(
+      pendingTurn,
+      null,
+      pendingTurn.text || agentMessageFromTurn(turn),
+    );
+  }
+
+  private settlePendingTurn(
+    pendingTurn: PendingCodexAppServerTurn,
+    error: Error | null,
+    value = "",
+  ): void {
+    if (pendingTurn.settled) {
+      return;
+    }
+    pendingTurn.settled = true;
+    clearTimeout(pendingTurn.timeoutID);
+    this.pendingTurns.delete(pendingTurn.threadID);
+    if (error !== null) {
+      pendingTurn.reject(error);
+      return;
+    }
+    pendingTurn.resolve(value);
+  }
+
+  private async archiveThread(threadID: string): Promise<void> {
+    try {
+      await this.request("thread/archive", { threadId: threadID }, 2_000);
+    } catch {
+      try {
+        await this.request("thread/unsubscribe", { threadId: threadID }, 2_000);
+      } catch {
+        // Ephemeral thread cleanup is best-effort.
+      }
+    }
+  }
+
+  private scheduleIdleClose(): void {
+    if (
+      this.child === null ||
+      this.pendingRequests.size > 0 ||
+      this.pendingTurns.size > 0
+    ) {
+      return;
+    }
+    if (this.idleCloseID !== null) {
+      clearTimeout(this.idleCloseID);
+    }
+    this.idleCloseID = setTimeout(() => {
+      this.idleCloseID = null;
+      this.close();
+    }, this.idleCloseMs);
+  }
+
+  private rejectAll(error: Error): void {
+    for (const [id, pending] of this.pendingRequests) {
+      clearTimeout(pending.timeoutID);
+      pending.reject(error);
+      this.pendingRequests.delete(id);
+    }
+    for (const pendingTurn of this.pendingTurns.values()) {
+      this.settlePendingTurn(pendingTurn, error);
+    }
+  }
 }
 
 async function runCodexCliCommand(
@@ -602,6 +1112,93 @@ function codexSchemaInstruction(
     default:
       return "Do not run shell commands. Do not inspect files. Choose exactly one listed LegalAction.id. Include confidence as a number from 0 to 1 because this Codex CLI schema requires it.";
   }
+}
+
+function codexCliTransportFromEnv(env: NodeJS.ProcessEnv): CodexCliTransport {
+  const raw = optionalNonEmpty(env.AI_LEAGUE_CODEX_TRANSPORT)?.toLowerCase();
+  if (raw === undefined) {
+    return "app-server";
+  }
+  if (raw === "app-server" || raw === "exec") {
+    return raw;
+  }
+  throw new LlmProviderConfigError(
+    `AI_LEAGUE_CODEX_TRANSPORT must be app-server or exec; received ${raw}.`,
+  );
+}
+
+function valueAtPath(value: unknown, pathParts: readonly string[]): unknown {
+  let current = value;
+  for (const part of pathParts) {
+    if (current === null || typeof current !== "object") {
+      return undefined;
+    }
+    current = (current as Record<string, unknown>)[part];
+  }
+  return current;
+}
+
+function stringAtPath(
+  value: unknown,
+  pathParts: readonly string[],
+): string | null {
+  const nested = valueAtPath(value, pathParts);
+  return typeof nested === "string" ? nested : null;
+}
+
+function agentMessageFromTurn(turn: unknown): string {
+  const items = valueAtPath(turn, ["items"]);
+  if (!Array.isArray(items)) {
+    return "";
+  }
+  return items
+    .filter(
+      (item): item is { type: string; text: string } =>
+        item !== null &&
+        typeof item === "object" &&
+        (item as Record<string, unknown>).type === "agentMessage" &&
+        typeof (item as Record<string, unknown>).text === "string",
+    )
+    .map((item) => item.text)
+    .join("\n");
+}
+
+function turnError(turn: unknown): string {
+  const message = stringAtPath(turn, ["error", "message"]);
+  if (message !== null) {
+    return message;
+  }
+  const additionalDetails = stringAtPath(turn, ["error", "additionalDetails"]);
+  if (additionalDetails !== null) {
+    return additionalDetails;
+  }
+  return jsonSummary(valueAtPath(turn, ["error"]) ?? turn);
+}
+
+function jsonSummary(value: unknown): string {
+  try {
+    const serialized = JSON.stringify(value);
+    if (serialized === undefined) {
+      return String(value);
+    }
+    return sanitizeCodexOutput(
+      serialized.length <= 1_000
+        ? serialized
+        : `${serialized.slice(0, 500)}...${serialized.slice(-500)}`,
+    );
+  } catch {
+    return sanitizeCodexOutput(String(value));
+  }
+}
+
+function appServerStartErrorMessage(
+  command: string,
+  error: NodeJS.ErrnoException,
+): string {
+  if (error.code === "ENOENT") {
+    return `Codex CLI binary "${command}" was not found. Install Codex CLI or set AI_LEAGUE_CODEX_COMMAND.`;
+  }
+  return `Codex app-server failed to start: ${error.message}`;
 }
 
 function positiveIntegerEnv(

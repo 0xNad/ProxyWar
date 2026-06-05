@@ -66,7 +66,7 @@ await fs.writeFile(
   { mode: 0o600 },
 );
 
-console.log("ProxyWar beta backup created", {
+console.log("Proxy War beta backup created", {
   backupID,
   destinationRoot,
   copied: entries.filter((entry) => entry.copied).map((entry) => entry.label),

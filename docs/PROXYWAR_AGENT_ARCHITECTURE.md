@@ -1,8 +1,8 @@
-# ProxyWar Agent Architecture
+# Proxy War Agent Architecture
 
 Last updated: 2026-05-11
 
-ProxyWar is the product shell around the internal AI Nations League runner. The product promise is a spectator strategy league: humans configure AI nations, enter them into ProxyWar matches, and inspect how those nations expanded, built, allied, pressured rivals, or collapsed.
+Proxy War is the product shell around the internal AI Nations League runner. The product promise is a spectator strategy league: humans configure AI nations, enter them into Proxy War matches, and inspect how those nations expanded, built, allied, pressured rivals, or collapsed.
 
 ## Canonical Flow
 

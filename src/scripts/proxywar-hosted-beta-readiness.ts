@@ -15,7 +15,9 @@ import {
   defaultProxyWarNationsDir,
 } from "../server/agents/ProxyWarNationRegistry";
 import {
+  buildProxyWarLivePublicReadinessFailureReport,
   buildProxyWarHostedBetaReadinessReport,
+  fetchProxyWarLivePublicReadinessReport,
   formatProxyWarHostedBetaReadinessReport,
   hostedBetaReadinessExitCode,
 } from "../server/agents/ProxyWarHostedBetaReadiness";
@@ -74,6 +76,10 @@ const hub = await loadAgentDemoHubModel({
   houseAgentBrain: houseAgentBrain.parsed ?? "planner-codex-cli",
 });
 const maxQueuedJobs = positiveInt(process.env.PROXYWAR_MAX_QUEUED_JOBS, 3);
+const externalAgentDecisionTimeoutMs = positiveInt(
+  process.env.PROXYWAR_EXTERNAL_AGENT_DECISION_TIMEOUT_MS,
+  15_000,
+);
 const rateLimits = {
   betaLogin: positiveInt(process.env.PROXYWAR_RATE_LIMIT_BETA_LOGIN, 20),
   jobs: positiveInt(process.env.PROXYWAR_RATE_LIMIT_JOBS, 12),
@@ -81,7 +87,7 @@ const rateLimits = {
   externalCheck: positiveInt(process.env.PROXYWAR_RATE_LIMIT_EXTERNAL_CHECK, 60),
   feedback: positiveInt(process.env.PROXYWAR_RATE_LIMIT_FEEDBACK, 30),
 };
-const publicReadiness = buildProxyWarPublicReadinessReport({
+const localPublicReadiness = buildProxyWarPublicReadinessReport({
   beta,
   network,
   hub,
@@ -92,7 +98,20 @@ const publicReadiness = buildProxyWarPublicReadinessReport({
     process.env.PROXYWAR_ALLOW_PRIVATE_AGENT_ENDPOINTS === "true",
   adminEnabled: process.env.PROXYWAR_BETA_ADMIN_ENABLED === "true",
   savedExternalEndpointHealth:
-    await checkProxyWarActiveRosterExternalEndpoints(hub.savedNations),
+    await checkProxyWarActiveRosterExternalEndpoints(
+      hub.savedNations
+        .filter(
+          (nation) =>
+            nation.provider?.provider === "external-http" ||
+            nation.provider?.provider === "external-relay",
+        )
+        .slice(0, 1),
+    ),
+});
+const publicReadiness = await livePublicReadinessReport({
+  localPublicReadiness,
+  publicUrl: network.publicUrl,
+  inviteCode: beta.inviteCode,
 });
 const report = buildProxyWarHostedBetaReadinessReport({
   publicReadiness,
@@ -107,6 +126,7 @@ const report = buildProxyWarHostedBetaReadinessReport({
     command: codexCommand,
     available: commandAvailable(codexCommand),
   },
+  externalAgentDecisionTimeoutMs,
   maxQueuedJobs,
   rateLimits,
   paths: {
@@ -258,6 +278,31 @@ function commandAvailable(command: string): boolean {
   } catch {
     return false;
   }
+}
+
+async function livePublicReadinessReport(input: {
+  localPublicReadiness: ReturnType<typeof buildProxyWarPublicReadinessReport>;
+  publicUrl: string | null;
+  inviteCode: string | null;
+}): Promise<ReturnType<typeof buildProxyWarPublicReadinessReport>> {
+  if (input.publicUrl === null || input.inviteCode === null) {
+    return input.localPublicReadiness;
+  }
+  try {
+    return await fetchProxyWarLivePublicReadinessReport({
+      publicUrl: input.publicUrl,
+      inviteCode: input.inviteCode,
+    });
+  } catch (error) {
+    return buildProxyWarLivePublicReadinessFailureReport({
+      publicUrl: input.publicUrl,
+      message: `Live /api/public-readiness check failed: ${errorMessage(error)}.`,
+    });
+  }
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }
 
 function loadHouseAgentBrainForReadiness(env: NodeJS.ProcessEnv): {

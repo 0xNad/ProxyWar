@@ -1,4 +1,4 @@
-# ProxyWar Agent Learning Loop
+# Proxy War Agent Learning Loop
 
 This loop is for discovering and validating tactics without giving an LLM raw
 game control.
@@ -251,7 +251,7 @@ Analyze a public human replay:
 npm run agent:learn:human-replay -- --game-id=ahH7r9em
 ```
 
-That downloads or reuses the archived ProxyWar record and writes:
+That downloads or reuses the archived Proxy War record and writes:
 
 ```text
 artifacts/human-replays/<game-id>/game-record.json

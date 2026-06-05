@@ -70,6 +70,7 @@ export function createStarterAgent(options = {}) {
       "LLM provider required. Set PROXYWAR_AGENT_LLM_PROVIDER=codex-cli, claude-cowork, command, or openrouter; set PROXYWAR_AGENT_LLM_COMMAND for custom local tools; set OPENROUTER_API_KEY for OpenRouter; or pass llmComplete. The starter agent never makes policy-only gameplay decisions.",
     );
   }
+  const policyReuse = createPolicyReuseState(options);
 
   return {
     memory,
@@ -78,6 +79,7 @@ export function createStarterAgent(options = {}) {
         memory,
         llmComplete,
         modelName: options.modelName,
+        policyReuse,
       });
     },
   };
@@ -118,9 +120,11 @@ export function describeLlmProviderFromEnv(options = {}) {
   const explicitProvider =
     options.provider ?? process.env.PROXYWAR_AGENT_LLM_PROVIDER;
   const provider = normalizeLlmProvider(explicitProvider);
-  const hasCommand =
-    typeof options.command === "string" ||
-    typeof process.env.PROXYWAR_AGENT_LLM_COMMAND === "string";
+  const command =
+    typeof options.command === "string"
+      ? options.command
+      : process.env.PROXYWAR_AGENT_LLM_COMMAND;
+  const hasCommand = typeof command === "string" && command.trim() !== "";
   if (provider === "codex-cli") {
     return {
       provider,
@@ -128,6 +132,7 @@ export function describeLlmProviderFromEnv(options = {}) {
       label: "Codex CLI",
       secretRequired: false,
       configured: true,
+      policyReuseDecisions: defaultPolicyReuseDecisionInterval(provider),
     };
   }
   if (provider === "claude-cli" || provider === "claude-cowork") {
@@ -138,15 +143,17 @@ export function describeLlmProviderFromEnv(options = {}) {
         provider === "claude-cowork" ? "Claude/Cowork command" : "Claude CLI",
       secretRequired: false,
       configured: true,
+      policyReuseDecisions: defaultPolicyReuseDecisionInterval(provider),
     };
   }
   if (provider === "command" || (provider === "" && hasCommand)) {
     return {
       provider: provider || "command",
       mode: "local-command",
-      label: "Custom local command",
+      label: inferLocalCommandLabel(command),
       secretRequired: false,
       configured: hasCommand,
+      policyReuseDecisions: defaultPolicyReuseDecisionInterval("command"),
     };
   }
   if (
@@ -168,6 +175,23 @@ export function describeLlmProviderFromEnv(options = {}) {
     secretRequired: false,
     configured: false,
   };
+}
+
+function inferLocalCommandLabel(command) {
+  const commandText = String(command ?? "").trim();
+  const firstToken =
+    commandText.match(/^"([^"]+)"/)?.[1] ??
+    commandText.match(/^'([^']+)'/)?.[1] ??
+    commandText.split(/\s+/)[0] ??
+    "";
+  const commandName = firstToken
+    .split(/[\\/]/)
+    .pop()
+    ?.replace(/\.(cmd|exe|ps1|bat)$/i, "")
+    .toLowerCase();
+  if (commandName === "claude") return "Claude/Cowork command";
+  if (commandName === "codex") return "Codex CLI";
+  return "Custom local command";
 }
 
 export function createAgentCardMarkdown(options = {}) {
@@ -221,9 +245,9 @@ personality: ${personality}
 
 # ${agentName}
 
-LLM-backed ProxyWar external agent.
+LLM-backed Proxy War external agent.
 
-This agent uses the ProxyWar starter SDK: memory, action grouping,
+This agent uses the Proxy War starter SDK: memory, action grouping,
 anti-repeat guardrails, build-placement heuristics, ranked LegalAction.id
 briefing, and strict JSON validation. The model still chooses the final
 LegalAction.id.
@@ -273,7 +297,7 @@ export function createHealthResponse(options = {}) {
         ? "bearer-token-required"
         : "none",
       tokenPlacement:
-        "Paste beta-only tokens into the ProxyWar endpoint token field; never put tokens in the Agent Card.",
+        "Paste beta-only tokens into the Proxy War endpoint token field; never put tokens in the Agent Card.",
     },
     llmProvider: describeLlmProviderFromEnv(options.llmProvider ?? {}),
     responseContract: {
@@ -330,7 +354,7 @@ export async function decisionForPayloadWithFramework(payload, options = {}) {
   const validation = validateDecisionPayload(payload);
   if (!validation.ok) {
     throw new Error(
-      `Invalid ProxyWar decision request: ${validation.errors.join("; ")}`,
+      `Invalid Proxy War decision request: ${validation.errors.join("; ")}`,
     );
   }
   const legalActions = validation.legalActions;
@@ -349,6 +373,21 @@ export async function decisionForPayloadWithFramework(payload, options = {}) {
       "No unblocked LegalAction.id choices are available for the LLM.",
     );
   }
+  const policyReuseDecision = decisionFromReusablePolicy({
+    payload,
+    ranked,
+    policyReuse: options.policyReuse,
+    memory,
+    allowExpired: false,
+  });
+  if (policyReuseDecision !== null) {
+    memory.record(payload, policyReuseDecision.action, "llm-policy-reuse");
+    return {
+      selectedLegalActionId: policyReuseDecision.action.id,
+      reason: policyReuseDecision.reason.slice(0, 240),
+      confidence: policyReuseDecision.confidence,
+    };
+  }
 
   const memoryState = buildMemoryState(payload, memory);
   const first = await askLlmForDecision({
@@ -358,32 +397,220 @@ export async function decisionForPayloadWithFramework(payload, options = {}) {
     memoryState,
     modelName: options.modelName,
   });
-  const result = first.ok
-    ? { ...first, source: "llm" }
-    : {
-        ...(await askLlmForDecision({
-          payload,
-          ranked,
-          llmComplete,
-          memoryState,
-          modelName: options.modelName,
-          repairReason: first.error,
-        })),
-        source: "llm-repair",
-      };
+  let result;
+  if (first.ok) {
+    result = { ...first, source: "llm" };
+  } else if (!shouldRetryLlmDecision(first.error)) {
+    result = { ...first, source: "llm" };
+  } else {
+    result = {
+      ...(await askLlmForDecision({
+        payload,
+        ranked,
+        llmComplete,
+        memoryState,
+        modelName: options.modelName,
+        repairReason: first.error,
+      })),
+      source: "llm-repair",
+    };
+  }
   if (!result.ok) {
+    const stalePolicyDecision = decisionFromReusablePolicy({
+      payload,
+      ranked,
+      policyReuse: options.policyReuse,
+      memory,
+      allowExpired: true,
+      failureReason: result.error,
+    });
+    if (stalePolicyDecision !== null) {
+      memory.record(payload, stalePolicyDecision.action, "llm-policy-refresh-failed");
+      return {
+        selectedLegalActionId: stalePolicyDecision.action.id,
+        reason: stalePolicyDecision.reason.slice(0, 240),
+        confidence: stalePolicyDecision.confidence,
+      };
+    }
     throw new Error(
       `LLM failed to select a valid, non-stale LegalAction.id: ${result.error}`,
     );
   }
 
   const selected = result.action;
+  rememberReusablePolicy({
+    payload,
+    action: selected,
+    reason: result.reason,
+    confidence: result.confidence,
+    policyReuse: options.policyReuse,
+    ranked,
+  });
   memory.record(payload, selected, result.source);
   return {
     selectedLegalActionId: selected.id,
     reason: result.reason.slice(0, 240),
     confidence: result.confidence,
   };
+}
+
+function createPolicyReuseState(options = {}) {
+  const refreshEvery = normalizePolicyReuseDecisionInterval(
+    options.policyReuseDecisions ??
+      options.llmPolicyReuseDecisions ??
+      process.env.PROXYWAR_AGENT_LLM_POLICY_REUSE_DECISIONS ??
+      process.env.PROXYWAR_AGENT_LLM_DECISION_INTERVAL ??
+      defaultPolicyReuseDecisionInterval(
+        normalizeLlmProvider(
+          options.provider ?? process.env.PROXYWAR_AGENT_LLM_PROVIDER,
+        ),
+      ),
+  );
+  return {
+    refreshEvery,
+    remaining: 0,
+    policy: null,
+  };
+}
+
+function defaultPolicyReuseDecisionInterval(provider) {
+  return 1;
+}
+
+function normalizePolicyReuseDecisionInterval(value) {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) return 1;
+  return Math.max(1, Math.min(12, Math.floor(parsed)));
+}
+
+function decisionFromReusablePolicy({
+  payload,
+  ranked,
+  policyReuse,
+  memory,
+  allowExpired = false,
+  failureReason,
+}) {
+  if (
+    policyReuse === null ||
+    policyReuse === undefined ||
+    policyReuse.refreshEvery <= 1 ||
+    (!allowExpired && policyReuse.remaining <= 0) ||
+    policyReuse.policy === null
+  ) {
+    return null;
+  }
+  const policy = policyReuse.policy;
+  if (!samePolicyScope(policy, payload)) {
+    policyReuse.remaining = 0;
+    return null;
+  }
+  const preferredKinds = new Set(policy.preferredKinds);
+  const candidate =
+    ranked.find(({ action }) => preferredKinds.has(action.kind)) ??
+    (allowExpired
+      ? ranked.find(({ action }) => action.kind !== "hold") ?? ranked[0]
+      : undefined);
+  if (candidate === undefined) {
+    policyReuse.remaining = 0;
+    return null;
+  }
+  const memoryState = buildMemoryState(payload, memory);
+  const blockReason = guardrailBlockReason(
+    candidate.action,
+    legalActionsFromPayload(payload),
+    memoryState,
+  );
+  if (blockReason !== null) {
+    policyReuse.remaining = 0;
+    return null;
+  }
+  if (allowExpired) {
+    policyReuse.remaining = Math.max(
+      policyReuse.remaining,
+      Math.max(1, policyReuse.refreshEvery - 1),
+    );
+  }
+  policyReuse.remaining -= 1;
+  return {
+    action: candidate.action,
+    confidence: Math.max(0.35, Math.min(0.95, policy.confidence - 0.08)),
+    reason: [
+      allowExpired
+        ? `Continuing recent LLM policy for ${candidate.action.kind} after LLM refresh failed${failureReason ? `: ${failureReason}` : ""}.`
+        : `Following recent LLM policy for ${candidate.action.kind}.`,
+      candidate.reason,
+      policy.reason,
+    ]
+      .filter(Boolean)
+      .join(" "),
+  };
+}
+
+function rememberReusablePolicy({
+  payload,
+  action,
+  reason,
+  confidence,
+  policyReuse,
+  ranked = [],
+}) {
+  if (
+    policyReuse === null ||
+    policyReuse === undefined ||
+    policyReuse.refreshEvery <= 1
+  ) {
+    return;
+  }
+  policyReuse.policy = {
+    matchID: String(payload?.match?.gameID ?? ""),
+    agentID: String(payload?.agent?.agentID ?? ""),
+    preferredKinds: preferredKindsForAction(action, payload, ranked),
+    reason: String(reason ?? "").slice(0, 120),
+    confidence:
+      typeof confidence === "number" && Number.isFinite(confidence)
+        ? confidence
+        : 0.6,
+  };
+  policyReuse.remaining = policyReuse.refreshEvery - 1;
+}
+
+function samePolicyScope(policy, payload) {
+  return (
+    policy.matchID === String(payload?.match?.gameID ?? "") &&
+    policy.agentID === String(payload?.agent?.agentID ?? "")
+  );
+}
+
+function preferredKindsForAction(action, payload, ranked = []) {
+  const kinds = [action.kind];
+  for (const candidate of ranked) {
+    const kind = candidate?.action?.kind;
+    if (typeof kind === "string" && kind !== "hold") {
+      kinds.push(kind);
+    }
+    if (kinds.length >= 4) break;
+  }
+  const guidance = buildAntiStallGuidance(payload, null);
+  if (guidance.active) {
+    for (const candidate of legalActionsFromPayload(payload)) {
+      if (candidate.kind !== action.kind && candidate.kind !== "hold") {
+        kinds.push(candidate.kind);
+        break;
+      }
+    }
+  }
+  return [...new Set(kinds)].slice(0, 4);
+}
+
+function shouldRetryLlmDecision(error) {
+  const value = String(error ?? "").toLowerCase();
+  if (value.includes("timed out")) return false;
+  if (value.includes("could not start llm command")) return false;
+  if (value.includes("llm command exited")) return false;
+  if (value.includes("spawn ") || value.includes("enoent")) return false;
+  if (value.includes("not logged in")) return false;
+  return true;
 }
 
 export function decisionForPayload(payload) {
@@ -1767,7 +1994,7 @@ export function openRouterCompleteFromEnv(options = {}) {
           authorization: `Bearer ${apiKey}`,
           "content-type": "application/json",
           "http-referer": "http://127.0.0.1:8787",
-          "x-title": "ProxyWar Starter Agent",
+          "x-title": "Proxy War Starter Agent",
         },
         body: JSON.stringify({
           model,
@@ -1840,7 +2067,7 @@ export function commandComplete(options = {}) {
   const timeoutMs = normalizeProviderTimeoutMs(
     options.timeoutMs ??
       process.env.PROXYWAR_AGENT_LLM_TIMEOUT_MS ??
-      120_000,
+      12_000,
   );
   const cwd =
     options.cwd ?? process.env.PROXYWAR_AGENT_LLM_CWD ?? process.cwd();
@@ -1895,7 +2122,7 @@ function codexCliCompleteFromEnv(options = {}) {
       options.timeoutMs ??
       process.env.PROXYWAR_AGENT_LLM_TIMEOUT_MS ??
       process.env.AI_LEAGUE_CODEX_TIMEOUT_MS ??
-      180_000,
+      12_000,
     cwd: options.cwd,
   });
 }
@@ -1910,10 +2137,32 @@ function claudeCommandCompleteFromEnv(provider, options = {}) {
     (provider === "claude-cowork" ? "claude" : "claude");
   return commandComplete({
     command,
-    args: ["-p", "{{prompt}}"],
-    timeoutMs: options.timeoutMs,
+    args: defaultClaudeCommandArgs(
+      options.model ??
+        process.env.PROXYWAR_AGENT_LLM_MODEL ??
+        process.env.CLAUDE_MODEL,
+    ),
+    timeoutMs:
+      options.timeoutMs ??
+      process.env.PROXYWAR_AGENT_LLM_TIMEOUT_MS ??
+      12_000,
     cwd: options.cwd,
   });
+}
+
+export function defaultClaudeCommandArgs(model = "") {
+  const args = [
+    "-p",
+    "--max-turns",
+    "1",
+    "--disallowedTools",
+    "Bash,Edit,MultiEdit,Write,Read,WebFetch,WebSearch",
+  ];
+  const normalizedModel = String(model ?? "").trim();
+  if (normalizedModel !== "") {
+    args.push("--model", normalizedModel);
+  }
+  return args;
 }
 
 function normalizeLlmProvider(value) {
@@ -2082,7 +2331,9 @@ function runCompletionCommand({
     let stdout = "";
     let stderr = "";
     let settled = false;
+    let timedOut = false;
     const timer = setTimeout(() => {
+      timedOut = true;
       child.kill("SIGTERM");
       setTimeout(() => child.kill("SIGKILL"), 1_000).unref?.();
     }, timeoutMs);
@@ -2109,6 +2360,10 @@ function runCompletionCommand({
       if (settled) return;
       settled = true;
       clearTimeout(timer);
+      if (timedOut) {
+        reject(new Error(`LLM command timed out after ${timeoutMs}ms.`));
+        return;
+      }
       if (code !== 0) {
         reject(
           new Error(

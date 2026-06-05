@@ -94,21 +94,25 @@ async function run() {
     reasoningEffort: config.reasoningEffort,
     outputSchema: "researcher",
   });
-  const raw = await provider.complete(prompt);
-  const proposal = parseResearcherProposal(raw);
-  const jsonPath = path.join(config.outputDir, "research-proposal.json");
-  const markdownPath = path.join(config.outputDir, "research-proposal.md");
-  await fs.writeFile(jsonPath, `${JSON.stringify(proposal, null, 2)}\n`);
-  await fs.writeFile(markdownPath, researcherProposalMarkdown(proposal));
+  try {
+    const raw = await provider.complete(prompt);
+    const proposal = parseResearcherProposal(raw);
+    const jsonPath = path.join(config.outputDir, "research-proposal.json");
+    const markdownPath = path.join(config.outputDir, "research-proposal.md");
+    await fs.writeFile(jsonPath, `${JSON.stringify(proposal, null, 2)}\n`);
+    await fs.writeFile(markdownPath, researcherProposalMarkdown(proposal));
 
-  console.log("Post-match researcher complete", {
-    benchmarkID: config.benchmarkID,
-    model: config.model,
-    reasoningEffort: config.reasoningEffort,
-    report: markdownPath,
-    json: jsonPath,
-    prompt: promptPath,
-  });
+    console.log("Post-match researcher complete", {
+      benchmarkID: config.benchmarkID,
+      model: config.model,
+      reasoningEffort: config.reasoningEffort,
+      report: markdownPath,
+      json: jsonPath,
+      prompt: promptPath,
+    });
+  } finally {
+    provider.close();
+  }
 }
 
 async function configFromArgs(args: string[]): Promise<ResearcherConfig> {
@@ -152,9 +156,9 @@ async function researcherPrompt(config: ResearcherConfig): Promise<string> {
   const artifacts = await artifactExcerpts(config);
   const decisionSamples = await interestingDecisionSamples(config.benchmarkDir);
   return [
-    "# ProxyWar Post-Match Researcher",
+    "# Proxy War Post-Match Researcher",
     "",
-    "You are the offline researcher for the ProxyWar Champion Agent.",
+    "You are the offline researcher for the Proxy War Champion Agent.",
     "Goal: make the agent measurably stronger against built-in hard nations.",
     "",
     "Hard constraints:",

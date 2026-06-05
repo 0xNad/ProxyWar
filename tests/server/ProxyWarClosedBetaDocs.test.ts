@@ -2,7 +2,7 @@ import fs from "fs/promises";
 import path from "path";
 import { describe, expect, it } from "vitest";
 
-describe("ProxyWar closed beta docs and commands", () => {
+describe("Proxy War closed beta docs and commands", () => {
   it("documents the closed beta launch command that package.json exposes", async () => {
     const [packageJson, readinessDoc, remoteDoc, publicDemoDoc, aiLeagueDoc] =
       await Promise.all([

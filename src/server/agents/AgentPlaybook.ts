@@ -4,7 +4,7 @@ import { fileURLToPath } from "url";
 import { AgentStrategyProfile } from "./AgentTypes";
 
 export const openFrontAgentPlaybook = [
-  "ProxyWar priorities: expand territory, preserve enough troops to defend, build economy, then attack only when the target is weak or strategically exposed.",
+  "Proxy War priorities: expand territory, preserve enough troops to defend, build economy, then attack only when the target is weak or strategically exposed.",
   "Early game: claim nearby neutral land, avoid thin borders, build the first City safely inside owned territory, and build Ports on coast or Factories inland when affordable.",
   "Combat: prefer weak bordered targets, use modest troop percentages unless clearly stronger, avoid attacking allies, and avoid opening several risky wars at once.",
   "Defense: use Defense Posts near vulnerable borders, keep gold for emergency structures, and do not spend all troops while exposed.",

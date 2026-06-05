@@ -16,6 +16,7 @@ export interface AgentStepLockedLeagueConfig {
   maxSteps: number;
   maxSpawnAdvanceTurns: number;
   maxDecisionMs: number;
+  requireWinner: boolean;
   waitForMirrorCatchup: boolean;
 }
 
@@ -52,6 +53,7 @@ const defaultConfig: AgentStepLockedLeagueConfig = {
   maxSteps: 1,
   maxSpawnAdvanceTurns: 2_000,
   maxDecisionMs: 120_000,
+  requireWinner: false,
   waitForMirrorCatchup: true,
 };
 
@@ -142,6 +144,12 @@ export async function runAgentStepLockedLeague(
         (record) => record.audit?.auditStatus === "failed",
       ).length,
     });
+  }
+
+  if (config.requireWinner && currentGame.getWinner() === null) {
+    throw new Error(
+      `step-locked full match reached ${config.maxSteps} decision steps without a winner`,
+    );
   }
 
   return {

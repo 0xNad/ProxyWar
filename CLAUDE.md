@@ -82,3 +82,6 @@ Tests use a `setup()` helper from `tests/util/Setup.ts` that creates a full game
 - **Schemas/Validation:** Zod
 - **Testing:** Vitest
 - **Server:** Node.js, Express, ws (WebSocket)
+
+<!-- Local-only operating guide (working model, autonomy, internal workspaces). Gitignored; absent from public clones. -->
+@CLAUDE.local.md

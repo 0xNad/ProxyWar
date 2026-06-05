@@ -92,10 +92,12 @@ describe("AgentDemoServerJobs", () => {
     expect(command.args).toContain("src/scripts/ai-agent-league-smoke.ts");
     expect(command.args).toContain("--runner=step-locked");
     expect(command.args).toContain("--scenario=actions");
-    expect(command.args).toContain("--max-steps=240");
+    expect(command.args).toContain("--max-steps=900");
+    expect(command.args).toContain("--require-winner");
+    expect(command.args).toContain("--external-agent-max-decision-ms=15000");
     expect(command.args).toContain("--turns-per-decision-step=100");
     expect(command.args).toContain(
-      "--turns-per-decision-schedule=25x20,100x30,250x40,500x150",
+      "--turns-per-decision-schedule=25x20,100x30,250x40,500x150,100x160",
     );
     expect(command.args).toContain("--nations=disabled");
     expect(command.args).toContain("--bots=0");
@@ -105,7 +107,7 @@ describe("AgentDemoServerJobs", () => {
     expect(command.args).toContain("--run-id=full-demo-1");
   });
 
-  it("uses a bounded saved-roster request for the tester-facing beta run", () => {
+  it("locks the tester-facing beta run to saved tester agents plus one Codex house agent and Easy nations", () => {
     const request = normalizeAgentDemoJobRequest({
       ...proxyWarTesterSavedRosterJobDefaults,
       brain: "planner-codex-cli",
@@ -114,18 +116,32 @@ describe("AgentDemoServerJobs", () => {
       artifactID: "tester-beta-1",
     });
 
-    expect(request.matchLength).toBe("showcase");
+    expect(request.matchLength).toBe("full");
+    expect(request.roster).toBe("saved");
     expect(request.maxSavedNations).toBe(1);
-    expect(request.maxSteps).toBe(12);
-    expect(command.label).toContain("planner-codex-cli demo");
-    expect(command.args).toContain("--max-steps=12");
+    expect(request.fillSavedRoster).toBe(false);
+    expect(request.agents).toBe(1);
+    expect(request.maxSteps).toBe(700);
+    expect(request.requireWinner).toBe(true);
+    expect(request.nations).toBe(2);
+    expect(request.difficulty).toBe("Easy");
+    expect(command.label).toContain("planner-codex-cli full match");
+    expect(command.args).toContain("--agents=1");
+    expect(command.args).toContain("--max-steps=700");
+    expect(command.args).toContain("--require-winner");
+    expect(command.args).toContain("--external-agent-max-decision-ms=15000");
     expect(command.args).toContain("--bots=0");
-    expect(command.args).toContain("--nations=disabled");
+    expect(command.args).toContain("--nations=2");
+    expect(command.args).toContain("--difficulty=Easy");
+    expect(command.env.AI_LEAGUE_CODEX_TIMEOUT_MS).toBe("45000");
+    expect(command.env.AI_LEAGUE_CODEX_TRANSPORT).toBe("app-server");
+    expect(command.env.AI_LEAGUE_CODEX_APP_SERVER_FALLBACK).toBe("false");
+    expect(command.env.AI_LEAGUE_CODEX_APP_SERVER_IDLE_CLOSE_MS).toBe("1800000");
     expect(command.args.some((arg) => arg.includes("active-roster"))).toBe(
       true,
     );
-    expect(command.args).not.toContain(
-      "--turns-per-decision-schedule=25x20,100x30,250x40,500x150",
+    expect(command.args).toContain(
+      "--turns-per-decision-schedule=25x20,100x30,250x40,500x150,100x160",
     );
   });
 
@@ -157,7 +173,7 @@ describe("AgentDemoServerJobs", () => {
     ).toBe(true);
   });
 
-  it("can launch saved ProxyWar nation rosters", () => {
+  it("can launch saved Proxy War nation rosters", () => {
     const request = normalizeAgentDemoJobRequest({
       kind: "demo",
       brain: "planner",
@@ -183,10 +199,10 @@ describe("AgentDemoServerJobs", () => {
     expect(command.env.AI_LEAGUE_CODEX_MODEL).toBe("gpt-5.4");
     expect(command.env.AI_LEAGUE_CODEX_REASONING_EFFORT).toBe("medium");
     expect(command.env.AI_LEAGUE_REQUIRE_EXTERNAL_BRAIN_SUCCESS).toBe("true");
+    expect(command.env.AI_LEAGUE_CODEX_TIMEOUT_MS).toBe("45000");
+    expect(command.env.AI_LEAGUE_CODEX_APP_SERVER_FALLBACK).toBe("false");
     expect(command.args).toContain("--disable-alliance-actions");
-    expect(
-      command.args.some((arg) => arg.startsWith("--max-decision-ms=")),
-    ).toBe(true);
+    expect(command.args).toContain("--max-decision-ms=45000");
   });
 
   it("loads the hosted house-agent brain from a controlled env value", () => {

@@ -1,6 +1,6 @@
-# ProxyWar Remote Friends Beta
+# Proxy War Remote Friends Beta
 
-This guide is for sharing a local ProxyWar beta with trusted friends or
+This guide is for sharing a local Proxy War beta with trusted friends or
 family.
 
 ## Recommended Remote Flow
@@ -110,7 +110,7 @@ Share a LAN URL plus the invite code.
 - external endpoint agent registration for friends who want to run their own
   agent service
 - Codex-planned saved-nations match launcher
-- automatic transfer into the rendered ProxyWar replay when a match completes
+- automatic transfer into the rendered Proxy War replay when a match completes
 - saved external agents matched with Codex-powered house agents in the trusted
   beta flow
 - varied spawn selection between runs
@@ -159,7 +159,7 @@ must return strict JSON:
 }
 ```
 
-The endpoint never sends raw game intents. ProxyWar validates the
+The endpoint never sends raw game intents. Proxy War validates the
 selected id and still submits through `AgentRunner -> GameServer`. Saved
 external endpoints are part of the local saved-nations queue. The beta match can
 add Codex-powered house agents when more entrants are needed.
@@ -198,8 +198,9 @@ status at:
 /admin
 ```
 
-The beta page now labels saved entrants as the **Next Match Queue**. The next
-saved-roster match uses saved entrants first, then house agents as needed.
+The beta page saves external entrants for the tester match. The default match
+button is locked to the latest saved tester external agent plus one in-house
+Codex agent against two Easy built-in nations until a winner emerges.
 
 Closed beta mode serves only allowlisted artifact names through a path-safe
 route. The allowlist includes replay files plus `decisions.jsonl` and
@@ -233,7 +234,7 @@ roster, and real match path all work on the host machine.
 
 ## Current Remote Limitations
 
-- The rendered ProxyWar view is currently a replay that starts as soon as the
+- The rendered Proxy War view is currently a replay that starts as soon as the
   generated match completes. It is not yet a true live stream of turns while the
   match is still running.
 - External endpoint mode is private/testing-only. There is no public account,
@@ -241,7 +242,7 @@ roster, and real match path all work on the host machine.
 - Match jobs are bounded by a local one-at-a-time runner. The remote helper
   rejects extra queued jobs by default so accidental duplicate Codex clicks do
   not stack long runs.
-- The visible ProxyWar renderer uses the native replay controls and now
+- The visible Proxy War renderer uses the native replay controls and now
   autoplays at a faster spectator speed, but it may spend a few seconds loading
   before the clock visibly advances.
 - Agent communication is currently quick-chat/emoji/target actions.
@@ -317,7 +318,7 @@ The latest beta QA pass verified:
 - public readiness gate
 - Codex job launch through `/api/jobs`
 - completed job artifact attachment
-- rendered ProxyWar replay route
+- rendered Proxy War replay route
 - AI decision overlay
 - replay autoplay and action-feed overlay
 - clean replay console in local QA

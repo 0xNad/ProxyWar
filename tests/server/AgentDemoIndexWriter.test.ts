@@ -142,12 +142,12 @@ describe("AgentDemoIndexWriter", () => {
       expect(runs[0]?.externalFeedbackPreview?.summary).toContain(
         "This run did not include external-http agents.",
       );
-      expect(html).toContain("ProxyWar Runs");
+      expect(html).toContain("Proxy War Runs");
       expect(html).toContain("index-run-1");
       expect(html).toContain("mock-llm");
       expect(html).toContain("visual-report.html");
       expect(html).toContain("spectator.html");
-      expect(html).toContain("ProxyWar render");
+      expect(html).toContain("Proxy War render");
       expect(html).toContain("1 snapshots");
       expect(html).toContain("Objective");
       expect(html).toContain("Story");
@@ -169,7 +169,7 @@ describe("AgentDemoIndexWriter", () => {
       });
       expect(runs).toHaveLength(0);
       await expect(fs.readFile(indexPath, "utf8")).resolves.toContain(
-        "No ProxyWar runs",
+        "No Proxy War runs",
       );
     } finally {
       await fs.rm(rootDir, { recursive: true, force: true });

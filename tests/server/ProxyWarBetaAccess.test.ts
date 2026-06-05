@@ -103,7 +103,7 @@ describe("ProxyWarBetaAccess", () => {
       "/ai-league-replay/run-1",
     );
 
-    expect(html).toContain("ProxyWar");
+    expect(html).toContain("Proxy War");
     expect(html).toContain("PROXYWAR_BETA_CODE");
     expect(html).toContain("Nope");
     expect(html).toContain('name="returnTo" value="/ai-league-replay/run-1"');

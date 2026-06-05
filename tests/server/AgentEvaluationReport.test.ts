@@ -116,7 +116,7 @@ describe("AgentEvaluationReport", () => {
       });
 
       const report = await fs.readFile(paths.reportPath, "utf8");
-      expect(report).toContain("# ProxyWar Evaluation eval-1");
+      expect(report).toContain("# Proxy War Evaluation eval-1");
       expect(report).toContain("build:Defense Post:10");
       expect(report).toContain("Objective score");
       expect(report).toContain("run-1");

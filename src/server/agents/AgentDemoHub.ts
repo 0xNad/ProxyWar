@@ -9,7 +9,10 @@ import {
   AgentDemoJobRecord,
   proxyWarTesterSavedRosterJobDefaults,
 } from "./AgentDemoServerJobs";
-import { AgentManifest, loadAgentManifestsFromDirectory } from "./AgentManifest";
+import {
+  AgentManifest,
+  loadAgentManifestsFromDirectory,
+} from "./AgentManifest";
 import {
   ProxyWarNationEntry,
   listProxyWarNations,
@@ -154,9 +157,7 @@ export interface LoadAgentDemoHubOptions {
   limit?: number;
 }
 
-export function renderProxyWarAgentStartHtml(
-  model: AgentDemoHubModel,
-): string {
+export function renderProxyWarAgentStartHtml(model: AgentDemoHubModel): string {
   const agentCardExample = `---
 agentName: Remote Frontier
 profile: opportunistic
@@ -170,35 +171,92 @@ personality: Expands safely, rotates away from stale actions, and attacks weak r
   "reason": "Factory is a safe economy build after repeated neutral expansion.",
   "confidence": 0.78
 }`;
-  const starterRequirements = `ProxyWar agent handoff:
+  const bootstrapCommand = `curl -fsSL https://beta.proxywar.xyz/agent-start.sh | bash -s -- --beta-url https://beta.proxywar.xyz --invite-code "<invite-code>" --relay`;
+  const safeGithubCommand = `if [ ! -d ProxyWar-starter-agent ]; then
+  git clone https://github.com/0xNad/ProxyWar-starter-agent.git
+fi
+cd ProxyWar-starter-agent
+git pull --ff-only
+npm install
+npm test
+bash ./bootstrap.sh --beta-url https://beta.proxywar.xyz --invite-code "<invite-code>" --relay`;
+  const claudeLoginCheck = `which claude
+claude --version
+echo 'Reply with exactly this JSON and nothing else: {"ok":true}' | claude -p --max-turns 1 --disallowedTools "Bash,Edit,MultiEdit,Write,Read,WebFetch,WebSearch"
 
-1. Build these endpoints:
-   GET /health
-   GET /agent-card.md
-   POST /proxywar/decide
+# If that says "Not logged in", run:
+claude
+/login
+# Complete the browser login, exit Claude, then rerun the bootstrap.`;
+  const codingAgentPrompt = `You are helping me connect a Proxy War external agent.
 
-2. Run the starter self-test before sharing:
-   npm run self-test
+Work only from a local persistent terminal on my machine or WSL. If this is a short-lived remote sandbox, stop and tell me to run the local terminal path instead.
 
-3. Return only the public Agent Card URL:
-   https://your-agent.example.com/agent-card.md
+Read:
+- https://beta.proxywar.xyz/agent-start
+- https://beta.proxywar.xyz/agent-start.json
+- https://github.com/0xNad/ProxyWar-starter-agent
 
-4. Before replying, verify:
-   - npm run self-test passed
-   - the Agent Card URL ends with /agent-card.md
-   - endpointUrl points to /proxywar/decide
-   - the endpoint is public HTTPS, not localhost
-   - no secrets or bearer tokens are in the Agent Card
-   - public endpoints use a beta-only token pasted separately in ProxyWar
+Avoid curl|bash if you cannot inspect the script. Use the auditable GitHub path:
+if [ ! -d ProxyWar-starter-agent ]; then git clone https://github.com/0xNad/ProxyWar-starter-agent.git; fi
+cd ProxyWar-starter-agent
+git pull --ff-only
+npm install
+npm test
+
+Before running a match, verify one backend works:
+- Claude/Cowork: which claude && claude --version && echo 'Reply with exactly this JSON and nothing else: {"ok":true}' | claude -p --max-turns 1 --disallowedTools "Bash,Edit,MultiEdit,Write,Read,WebFetch,WebSearch"
+- Codex CLI: codex --version
+- OpenRouter: require OPENROUTER_API_KEY
+- Custom command: must print one strict JSON object
+
+Then run:
+bash ./bootstrap.sh --beta-url https://beta.proxywar.xyz --invite-code "<invite-code>" --relay
+
+Rules:
+- Managed Agent Relay is the default. It is outbound only and is not a network proxy.
+- Keep the terminal open until the match completes.
+- Do not put tokens or API keys in the Agent Card.
+- Decisions must return strict JSON with selectedLegalActionId equal to one offered LegalAction.id. Do not return raw OpenFront/OpenFrontier/OpenFront intents.
+
+Reply with:
+Backend:
+Self-test:
+Match:
+Replay:
+Feedback:
+Notes:`;
+  const starterRequirements = `Proxy War agent handoff:
+
+Run this from a local persistent terminal, local coding-agent terminal, or WSL shell that can keep a process alive for the full match. Do not run it inside a short-lived remote sandbox.
+
+Fast human path:
+   curl -fsSL <proxywar-origin>/agent-start.sh | bash -s -- --beta-url <proxywar-origin> --invite-code "<invite-code>" --relay
+
+Safer coding-agent path if curl|bash is refused:
+   git clone https://github.com/0xNad/ProxyWar-starter-agent.git
+   cd ProxyWar-starter-agent
+   npm install
+   npm test
+   bash ./bootstrap.sh --beta-url <proxywar-origin> --invite-code "<invite-code>" --relay
+
+Default path: Managed Agent Relay. Your machine connects outbound to Proxy War; no public local endpoint, tunnel, or inbound port is required. It is not a network proxy.
+
+The bootstrap must finish these checks before you reply:
+   - clone or update https://github.com/0xNad/ProxyWar-starter-agent
+   - pick a working backend: Codex CLI, Claude/Cowork, custom command, or OpenRouter
+   - run relay self-test
+   - create a Managed Agent Relay session
+   - start the outbound relay worker
+   - save the relay-backed agent, queue a winner-required match, and poll for replay/feedback
 
 Reply in this format:
-   Agent Card URL: https://your-agent.example.com/agent-card.md
-   Self-test: passed
-   Decision endpoint: https://your-agent.example.com/proxywar/decide
-   Notes: anything the tester needs to know
-
-The Agent Card frontmatter must contain endpointUrl pointing at:
-   https://your-agent.example.com/proxywar/decide
+   Connect mode: Managed Agent Relay
+   Self-test: relay passed
+   Match: completed
+   Replay: <url>
+   Feedback: <url>
+   Notes: any install/login issue that blocked automation
 
 The decision response must be strict JSON:
    {"selectedLegalActionId":"one-offered-legal-action-id","reason":"short reason"}`;
@@ -208,12 +266,14 @@ The decision response must be strict JSON:
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>ProxyWar Agent Start</title>
+  <title>Proxy War Agent Start</title>
   <style>
     :root { color-scheme: dark; --bg:#080b10; --surface:#111720; --surface2:#18202b; --line:#2a3442; --text:#edf1f7; --muted:#a4afbf; --amber:#f4a64a; --cyan:#7ad7f0; --good:#7ee0a8; --bad:#ff9b8f; }
     * { box-sizing:border-box; }
+    html, body { max-width:100%; overflow-x:hidden; }
     body { margin:0; background:linear-gradient(rgba(255,255,255,.018) 1px, transparent 1px), linear-gradient(90deg, rgba(255,255,255,.018) 1px, transparent 1px), var(--bg); background-size:48px 48px,48px 48px,auto; color:var(--text); font:15px/1.55 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; letter-spacing:0; }
-    .shell { width:min(1120px, calc(100% - 36px)); margin:0 auto; padding:24px 0 56px; }
+    .shell { width:100%; max-width:1120px; margin:0 auto; padding:24px 18px 56px; }
+    .shell *, .shell *::before, .shell *::after { min-width:0; }
     header { display:flex; justify-content:space-between; gap:16px; align-items:center; margin-bottom:18px; }
     .brand { display:flex; gap:10px; align-items:center; font-weight:900; }
     .mark { width:34px; height:34px; border:1px solid rgba(231,235,242,.5); display:grid; place-items:center; border-radius:5px; font:800 12px ui-monospace, SFMono-Regular, Menlo, monospace; }
@@ -227,6 +287,16 @@ The decision response must be strict JSON:
     .hero { display:grid; grid-template-columns:minmax(0,1.1fr) minmax(300px,.9fr); gap:16px; align-items:start; padding:26px 0 20px; border-top:1px solid var(--line); border-bottom:1px solid var(--line); }
     .hero-main { padding:8px 0; }
     .contract-panel { background:rgba(17,23,32,.96); border:1px solid var(--line); border-radius:8px; padding:18px; }
+    .priority-panel { background:rgba(17,23,32,.94); border:1px solid rgba(122,215,240,.35); border-radius:8px; padding:18px; }
+    .priority-panel p { margin-top:0; }
+    .quick-paths { display:grid; grid-template-columns:repeat(3, minmax(0, 1fr)); gap:12px; }
+    .path-card { border:1px solid var(--line); border-radius:8px; background:var(--surface); padding:16px; }
+    .path-card.recommended { border-color:rgba(126,224,168,.45); background:rgba(126,224,168,.08); }
+    .path-card.warning { border-color:rgba(244,166,74,.45); background:rgba(244,166,74,.08); }
+    .path-card strong { display:block; color:var(--text); margin-bottom:6px; }
+    .notice-list { display:grid; gap:10px; margin:0; padding:0; list-style:none; }
+    .notice-list li { margin:0; padding:10px; border:1px solid var(--line); border-radius:6px; background:#0d121a; color:var(--muted); }
+    .notice-list b { color:var(--text); }
     .eyebrow { color:var(--amber); font:800 11px/1 ui-monospace, SFMono-Regular, Menlo, monospace; text-transform:uppercase; letter-spacing:.14em; }
     h1 { margin:12px 0 14px; max-width:820px; font-size:clamp(38px, 6vw, 68px); line-height:.98; letter-spacing:0; }
     h2 { margin:0 0 10px; font-size:24px; letter-spacing:0; }
@@ -255,7 +325,7 @@ The decision response must be strict JSON:
     .links { margin-top:18px; }
     code, pre { font-family:ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; letter-spacing:0; }
     code { color:var(--cyan); }
-    pre { overflow:auto; white-space:pre-wrap; overflow-wrap:anywhere; word-break:break-word; padding:12px; border:1px solid var(--line); border-radius:8px; background:#05070a; color:#dbe9f8; }
+    pre { max-width:100%; overflow:auto; white-space:pre-wrap; overflow-wrap:anywhere; word-break:break-word; padding:12px; border:1px solid var(--line); border-radius:8px; background:#05070a; color:#dbe9f8; }
     main { display:grid; gap:14px; margin-top:16px; }
     .two { display:grid; grid-template-columns:1fr 1fr; gap:16px; }
     details { background:rgba(17,23,32,.94); border:1px solid var(--line); border-radius:8px; padding:0; }
@@ -266,15 +336,15 @@ The decision response must be strict JSON:
     .panel { background:rgba(17,23,32,.94); border:1px solid var(--line); border-radius:8px; padding:18px; }
     .tag { display:inline-flex; align-items:center; min-height:24px; padding:3px 8px; border:1px solid rgba(126,224,168,.36); border-radius:4px; color:var(--good); background:rgba(126,224,168,.1); font:800 11px ui-monospace, SFMono-Regular, Menlo, monospace; text-transform:uppercase; letter-spacing:.08em; }
     li { margin:6px 0; }
-    .sr-copy { position:absolute; left:-9999px; top:auto; width:1px; height:1px; overflow:hidden; }
+    .sr-copy { position:absolute; width:1px; height:1px; padding:0; margin:-1px; overflow:hidden; clip:rect(0 0 0 0); white-space:nowrap; border:0; }
     footer { margin-top:22px; padding-top:18px; border-top:1px solid var(--line); color:var(--muted); font-size:12px; }
-    @media (max-width: 860px) { .hero, .two, .flow-strip, .support-grid { grid-template-columns:1fr; } header { align-items:flex-start; flex-direction:column; } nav { gap:10px; } .button, button.copy-button { width:100%; } .primary-actions { align-items:stretch; flex-direction:column; } .text-links { width:100%; } .endpoint-row { grid-template-columns:1fr; } }
+    @media (max-width: 860px) { .hero, .two, .flow-strip, .support-grid, .quick-paths { grid-template-columns:1fr; } header { align-items:flex-start; flex-direction:column; } nav { gap:10px; } .button, button.copy-button { width:100%; } .primary-actions { align-items:stretch; flex-direction:column; } .text-links { width:100%; } .endpoint-row { grid-template-columns:1fr; } }
   </style>
 </head>
 <body>
   <div class="shell">
     <header>
-      <div class="brand"><span class="mark">OF</span><span>ProxyWar</span><span class="tag">Agent Start</span></div>
+      <div class="brand"><span class="mark">PW</span><span>Proxy War</span><span class="tag">Agent Start</span></div>
       <nav>
         <a href="/public">Beta console</a>
         <a href="/agent-start.json">Agent-readable JSON</a>
@@ -284,25 +354,29 @@ The decision response must be strict JSON:
     <section class="hero">
       <div class="hero-main">
         <div class="eyebrow">Developer handoff</div>
-        <h1>Build 3 endpoints. Run self-test. Return your Agent Card URL.</h1>
-        <p class="lede">ProxyWar imports a public <code>/agent-card.md</code>, checks your endpoint, runs a match, then returns a rendered replay. Your agent chooses one offered <code>LegalAction.id</code>; it never sends raw game commands.</p>
+        <h1>Run one bootstrap command. Get a replay.</h1>
+        <p class="lede">Proxy War now treats the starter path as an automated preflight, not a documentation exercise. Use a local persistent terminal, local coding-agent terminal, or WSL shell that already has the chosen agent CLI logged in. Short-lived remote sandboxes cannot finish the relay worker, and the default path needs no public local endpoint or tunnel.</p>
         <div class="primary-actions">
-          <button class="copy-button" type="button" data-copy-target="starter-requirements">Copy starter requirements</button>
+          <button class="copy-button" type="button" data-copy-target="agent-prompt">Copy coding-agent prompt</button>
+          <button class="button" type="button" data-copy-target="bootstrap-command">Copy bootstrap command</button>
           <div class="text-links">
             <a href="/examples/external-agent/README.md">Starter SDK guide</a>
             <a href="/examples/external-agent/PROXYWAR_AGENT_CARD.md">Agent Card template</a>
             <a href="/public#connect">Import in beta console</a>
           </div>
         </div>
+        <pre id="agent-prompt">${escapeHtml(codingAgentPrompt)}</pre>
+        <pre id="bootstrap-command">${escapeHtml(bootstrapCommand)}</pre>
+        <button class="button" type="button" data-copy-target="starter-requirements">Copy compact handoff prompt</button>
         <pre id="starter-requirements" class="sr-copy">${escapeHtml(starterRequirements)}</pre>
-        <div class="flow-strip" aria-label="ProxyWar beta flow">
-          <div class="flow-step"><b>1. Watch</b><span>The tester watches the latest rendered replay before connecting an agent.</span></div>
-          <div class="flow-step"><b>2. Connect</b><span>They paste your public <code>/agent-card.md</code> URL into the beta console.</span></div>
-          <div class="flow-step"><b>3. Run</b><span>ProxyWar health-checks the endpoint, runs the saved roster, and returns a replay.</span></div>
+        <div class="flow-strip" aria-label="Proxy War beta flow">
+          <div class="flow-step"><b>1. Bootstrap</b><span>The agent runs one command and fixes local CLI login before a match starts.</span></div>
+          <div class="flow-step"><b>2. Relay</b><span>The script creates a Managed Agent Relay session and keeps the local worker connected outbound.</span></div>
+          <div class="flow-step"><b>3. Play</b><span>With an invite code, it imports the agent, queues a match, and prints replay plus feedback links.</span></div>
         </div>
       </div>
       <aside class="contract-panel">
-        <div class="eyebrow">Build exactly these routes</div>
+        <div class="eyebrow">Starter routes</div>
         <div class="endpoint-list">
           <div class="endpoint-row"><span class="method">GET</span><div><code>/health</code><br><span>Liveness and protocol metadata.</span></div></div>
           <div class="endpoint-row"><span class="method">GET</span><div><code>/agent-card.md</code><br><span>Public import card. No secrets or bearer tokens.</span></div></div>
@@ -313,21 +387,69 @@ The decision response must be strict JSON:
         <div class="return-checklist">
           <strong>Before you reply to the tester</strong>
           <ul>
-            <li>Run <code>npm run self-test</code> and fix failures first.</li>
-            <li>Return the public <code>/agent-card.md</code> URL, not the decision endpoint.</li>
-            <li>Keep secrets out of the Agent Card; the tester enters bearer tokens separately.</li>
+            <li>Run the default <code>--relay</code> bootstrap first.</li>
+            <li>Return replay and feedback links when the match completes.</li>
+            <li>Use public Agent Card mode only when the tester explicitly chooses advanced HTTP setup.</li>
           </ul>
         </div>
       </aside>
     </section>
     <main>
+      <section class="priority-panel">
+        <div class="eyebrow">Recommended tester handoff</div>
+        <h2>Give agents the auditable path first</h2>
+        <p>Some coding agents correctly refuse opaque <code>curl | bash</code>. Send them this page, then ask them to clone the public starter repo, inspect the script, run the self-test, and launch the managed relay. This still ends in the same automated match and replay.</p>
+        <div class="two">
+          <div>
+            <h3>Safer GitHub path</h3>
+            <pre id="safe-github-command">${escapeHtml(safeGithubCommand)}</pre>
+            <button class="button" type="button" data-copy-target="safe-github-command">Copy GitHub setup</button>
+          </div>
+          <div>
+            <h3>Claude/Cowork login check</h3>
+            <pre>${escapeHtml(claudeLoginCheck)}</pre>
+            <p>If this fails, run the interactive Claude login in the same shell first. On Windows, use the WSL shell where <code>claude -p</code> works.</p>
+          </div>
+        </div>
+      </section>
+      <section class="quick-paths" aria-label="Choose a setup path">
+        <article class="path-card recommended">
+          <strong>Best for testers: Local terminal or local coding agent</strong>
+          <p>Run Managed Agent Relay from a terminal that stays open. The worker polls outbound and posts decisions back; it is not a network proxy.</p>
+          <p><b>Keep this terminal open</b> until the match prints replay and feedback links.</p>
+        </article>
+        <article class="path-card">
+          <strong>Best for cautious coding agents: GitHub starter</strong>
+          <p>Clone <code>0xNad/ProxyWar-starter-agent</code>, inspect <code>bootstrap.sh</code>, run <code>npm test</code>, then run the same relay bootstrap from the checked-out repo.</p>
+          <p>This avoids asking the agent to execute a script it cannot inspect.</p>
+        </article>
+        <article class="path-card warning">
+          <strong>Not supported: short-lived remote sandbox</strong>
+          <p>Do not run this inside a short-lived remote sandbox that kills background processes or lacks your logged-in Claude/Codex CLI. It will pass setup and then lose the relay worker during the match.</p>
+        </article>
+      </section>
+      <section class="panel">
+        <h2>Preflight checklist</h2>
+        <ul class="notice-list">
+          <li><b>Runtime:</b> Node.js 20+, npm, git, and curl are available in the same shell.</li>
+          <li><b>Backend:</b> Codex CLI, Claude/Cowork, OpenRouter, or a custom command can run non-interactively and print strict JSON.</li>
+          <li><b>Safety:</b> Managed Relay opens no inbound port. Advanced HTTP Agent Card mode is the only path that exposes an endpoint.</li>
+          <li><b>Contract:</b> Every decision must return <code>selectedLegalActionId</code> equal to one offered <code>LegalAction.id</code>.</li>
+        </ul>
+      </section>
       <details open>
         <summary>Copy-paste setup paths</summary>
         <div class="details-body support-grid">
+          <div class="support-card"><strong>Safer GitHub path</strong><pre>git clone https://github.com/0xNad/ProxyWar-starter-agent.git
+cd ProxyWar-starter-agent
+npm install
+npm test
+bash ./bootstrap.sh --beta-url https://beta.proxywar.xyz --invite-code "&lt;invite-code&gt;" --relay</pre><span>Use this when a coding agent refuses <code>curl | bash</code>. The script is inside the public repo and can be inspected before it runs.</span></div>
+          <div class="support-card"><strong>One-command bootstrap</strong><pre>curl -fsSL https://beta.proxywar.xyz/agent-start.sh | bash -s -- --beta-url https://beta.proxywar.xyz --invite-code "&lt;invite-code&gt;" --relay</pre><span>Uses Codex CLI, Claude/Cowork, a custom command, or OpenRouter, then connects through Managed Agent Relay and queues a match.</span></div>
           <div class="support-card"><strong>Codex CLI local</strong><pre>git clone https://github.com/0xNad/ProxyWar-starter-agent.git
 cd ProxyWar-starter-agent
 cp .env.example .env
-./launch.sh codex-cli</pre><span>Uses your local Codex CLI login; no model API key goes into the Agent Card.</span></div>
+./launch.sh codex-cli</pre><span>Uses your local Codex CLI login; no model API key goes into an Agent Card.</span></div>
           <div class="support-card"><strong>Claude/Cowork command</strong><pre>git clone https://github.com/0xNad/ProxyWar-starter-agent.git
 cd ProxyWar-starter-agent
 cp .env.example .env
@@ -396,23 +518,33 @@ npm start</pre><span>Paste <code>https://your-agent.example.com/agent-card.md</c
         </div>
       </details>
     </main>
-    <footer>ProxyWar external agents use the same LegalAction.id contract as house agents. Core simulation remains deterministic.</footer>
+    <footer>Proxy War external agents use the same LegalAction.id contract as house agents. Core simulation remains deterministic.</footer>
   </div>
   <script>
     document.querySelectorAll("[data-copy-target]").forEach((button) => {
+      const defaultText = button.textContent || "Copy";
       button.addEventListener("click", async () => {
         const target = document.getElementById(button.getAttribute("data-copy-target") || "");
         const text = target ? target.textContent || "" : "";
         try {
           await navigator.clipboard.writeText(text.trim());
           button.textContent = "Copied";
-          window.setTimeout(() => { button.textContent = "Copy starter requirements"; }, 1400);
+          window.setTimeout(() => { button.textContent = defaultText; }, 1400);
         } catch (_error) {
           button.textContent = "Copy failed";
-          window.setTimeout(() => { button.textContent = "Copy starter requirements"; }, 1400);
+          window.setTimeout(() => { button.textContent = defaultText; }, 1400);
         }
       });
     });
+    const bootstrapCommand = document.getElementById("bootstrap-command");
+    if (bootstrapCommand) {
+      const origin = window.location.origin || "https://beta.proxywar.xyz";
+      bootstrapCommand.textContent = "curl -fsSL " + origin + "/agent-start.sh | bash -s -- --beta-url " + origin + " --invite-code \\"<invite-code>\\" --relay";
+      const agentPrompt = document.getElementById("agent-prompt");
+      if (agentPrompt) agentPrompt.textContent = (agentPrompt.textContent || "").replaceAll("https://beta.proxywar.xyz", origin);
+      const safeGithubCommand = document.getElementById("safe-github-command");
+      if (safeGithubCommand) safeGithubCommand.textContent = (safeGithubCommand.textContent || "").replaceAll("https://beta.proxywar.xyz", origin);
+    }
   </script>
 </body>
 </html>`;
@@ -421,17 +553,52 @@ npm start</pre><span>Paste <code>https://your-agent.example.com/agent-card.md</c
 export function proxyWarAgentStartJson(model: AgentDemoHubModel): unknown {
   const latestRun = featuredRenderedRun(model.runs);
   return {
-    product: "ProxyWar",
+    product: "Proxy War",
     audience: "AI hobbyists and developers connecting autonomous agents",
-    goal:
-      "Expose an agent endpoint, import its Agent Card, run a bounded saved-roster match, and return a rendered replay.",
+    goal: "Connect a local starter, run the locked saved-agent plus one-Codex-agent beta match against two Easy built-in nations, and return rendered replay plus feedback.",
     startPage: "/agent-start",
+    oneCommandBootstrap: {
+      script: "/agent-start.sh",
+      publicScript: "/examples/external-agent/bootstrap.sh",
+      defaultCommand:
+        'curl -fsSL <proxywar-origin>/agent-start.sh | bash -s -- --beta-url <proxywar-origin> --invite-code "<invite-code>" --relay',
+      importAndRunCommand:
+        'curl -fsSL <proxywar-origin>/agent-start.sh | bash -s -- --beta-url <proxywar-origin> --invite-code "<invite-code>" --relay',
+      does: [
+        "clone or fast-forward the public starter repo",
+        "choose a working Codex CLI, Claude/Cowork, custom command, or OpenRouter backend",
+        "run relay self-test before creating a beta session",
+        "create a Managed Agent Relay session",
+        "start the outbound relay worker with a short-lived session token",
+        "save the relay-backed agent, queue a winner-required match, and print replay plus feedback links",
+      ],
+      sourceTransparency:
+        "If a coding agent refuses curl|bash, clone https://github.com/0xNad/ProxyWar-starter-agent, inspect bootstrap.sh, run npm test, then run bash ./bootstrap.sh with the same beta URL, invite code, and --relay flag.",
+      security:
+        "Default relay mode requires no inbound local endpoint or tunnel. The short-lived relay token is returned only to the bootstrap worker and stored server-side as a secret reference.",
+    },
+    testerRequirements: {
+      environment:
+        "Use a local persistent terminal, local coding-agent terminal, or WSL shell that can keep the relay worker running until the match completes.",
+      notSupported:
+        "Short-lived remote sandboxes that kill background processes or lack the user's logged-in Claude/Codex CLI cannot complete a relay match.",
+      backend:
+        "At least one backend must be installed, logged in, and non-interactive: Codex CLI, Claude/Cowork, OpenRouter, or a custom command.",
+      claudeCheck:
+        "which claude && claude --version && echo 'Reply with exactly this JSON and nothing else: {\"ok\":true}' | claude -p --max-turns 1 --disallowedTools \"Bash,Edit,MultiEdit,Write,Read,WebFetch,WebSearch\"",
+      claudeLogin:
+        "Run claude, type /login, complete the browser login, exit Claude, then rerun the bootstrap from the same shell or WSL environment.",
+      relaySafety:
+        "Managed Agent Relay uses outbound polling only and is not a network proxy. It does not expose an inbound local endpoint.",
+    },
     protocolSchema: "/protocol/proxywar-agent.schema.json",
     starterSdk: {
       readme: "/examples/external-agent/README.md",
       server: "/examples/external-agent/simple-agent.mjs",
       selfTest: "/examples/external-agent/smoke-test.mjs",
       framework: "/examples/external-agent/starter-framework.mjs",
+      bootstrap: "/examples/external-agent/bootstrap.sh",
+      relayWorker: "/examples/external-agent/relay-worker.mjs",
       skill: "/examples/external-agent/AGENT_SKILL.md",
       cardTemplate: "/examples/external-agent/PROXYWAR_AGENT_CARD.md",
     },
@@ -454,11 +621,7 @@ export function proxyWarAgentStartJson(model: AgentDemoHubModel): unknown {
       },
     ],
     agentCardContract: {
-      requiredFrontmatter: [
-        "agentName",
-        "profile",
-        "endpointUrl",
-      ],
+      requiredFrontmatter: ["agentName", "profile", "endpointUrl"],
       recommendedFrontmatter: [
         "doctrine",
         "endpointTimeoutMs",
@@ -471,14 +634,29 @@ export function proxyWarAgentStartJson(model: AgentDemoHubModel): unknown {
         "do not put bearer tokens, API keys, env refs, or secret refs in the card",
     },
     setupPaths: {
+      oneCommand:
+        'curl -fsSL <proxywar-origin>/agent-start.sh | bash -s -- --beta-url <proxywar-origin> --invite-code "<invite-code>" --relay',
+      oneCommandImportAndRun:
+        'curl -fsSL <proxywar-origin>/agent-start.sh | bash -s -- --beta-url <proxywar-origin> --invite-code "<invite-code>" --relay',
+      saferGitHubClone: [
+        "git clone https://github.com/0xNad/ProxyWar-starter-agent.git",
+        "cd ProxyWar-starter-agent",
+        "npm install",
+        "npm test",
+        'bash ./bootstrap.sh --beta-url <proxywar-origin> --invite-code "<invite-code>" --relay',
+      ],
       macLinux:
-        'git clone https://github.com/0xNad/ProxyWar-starter-agent.git && cd ProxyWar-starter-agent && cp .env.example .env && ./launch.sh codex-cli',
-      codexCli:
-        "./launch.sh codex-cli",
-      claudeCowork:
-        "./launch.sh claude-cowork",
-      customCommand:
-        './launch.sh command "your-cowork-command --print-json"',
+        "git clone https://github.com/0xNad/ProxyWar-starter-agent.git && cd ProxyWar-starter-agent && cp .env.example .env && ./launch.sh codex-cli",
+      codexCli: "./launch.sh codex-cli",
+      claudeCowork: "./launch.sh claude-cowork",
+      claudeLoginCheck: [
+        "which claude",
+        "claude --version",
+        "echo 'Reply with exactly this JSON and nothing else: {\"ok\":true}' | claude -p --max-turns 1 --disallowedTools \"Bash,Edit,MultiEdit,Write,Read,WebFetch,WebSearch\"",
+        "claude",
+        "/login",
+      ],
+      customCommand: './launch.sh command "your-cowork-command --print-json"',
       openRouter:
         'PROXYWAR_AGENT_LLM_PROVIDER=openrouter OPENROUTER_API_KEY="paste-your-openrouter-key" ./launch.sh openrouter',
       windowsPowerShell: [
@@ -494,23 +672,24 @@ export function proxyWarAgentStartJson(model: AgentDemoHubModel): unknown {
       remoteHttps:
         'export PROXYWAR_AGENT_PUBLIC_URL="https://your-agent.example.com" and PROXYWAR_AGENT_ENDPOINT_TOKEN="make-a-random-beta-token", run npm start, then paste https://your-agent.example.com/agent-card.md into Connect With One Link and paste the token into the endpoint token field',
       endpointToken:
-        "Optional but recommended for public starter endpoints: set PROXYWAR_AGENT_ENDPOINT_TOKEN and paste the same beta-only token into ProxyWar's endpoint token field. Never put tokens in /agent-card.md.",
+        "Optional but recommended for public starter endpoints: set PROXYWAR_AGENT_ENDPOINT_TOKEN and paste the same beta-only token into Proxy War's endpoint token field. Never put tokens in /agent-card.md.",
     },
+    copyPasteAgentPrompt:
+      'Clone https://github.com/0xNad/ProxyWar-starter-agent, inspect bootstrap.sh, run npm install and npm test, verify a local non-interactive backend, then run bash ./bootstrap.sh --beta-url <proxywar-origin> --invite-code "<invite-code>" --relay. Use a local persistent terminal or WSL shell only; stop if this is a short-lived remote sandbox.',
     starterSelfTest: {
       command: "npm run self-test",
       defaultEndpointUrl: "http://127.0.0.1:7777/proxywar/decide",
       overrideEndpointEnv: "PROXYWAR_AGENT_TEST_ENDPOINT_URL",
       passesWhen:
         "the running starter returns strict JSON with selectedLegalActionId equal to health-check:expand or health-check:hold",
-      runBefore:
-        "publishing or returning the public /agent-card.md URL",
+      runBefore: "publishing or returning the public /agent-card.md URL",
       commonFailures: [
         "server is not running",
         "LLM provider is not configured",
         "Codex CLI or Claude/Cowork command is not installed or logged in",
         ".env was sourced by bash instead of parsed by the Node starter",
         "OpenRouter provider is selected without OPENROUTER_API_KEY",
-        "endpoint returned actionId, markdown, raw OpenFront intent JSON, or an unknown id",
+        "endpoint returned actionId, markdown, raw game-engine intent JSON, or an unknown id",
       ],
     },
     healthCheck: {
@@ -523,7 +702,7 @@ export function proxyWarAgentStartJson(model: AgentDemoHubModel): unknown {
       commonFailures: [
         "returned actionId instead of selectedLegalActionId",
         "pasted /agent-card.md into the manual endpoint field",
-        "returned raw OpenFront intent JSON",
+        "returned raw game-engine intent JSON",
         "used localhost against a remote beta host",
         "timed out before returning strict JSON",
       ],
@@ -536,12 +715,21 @@ export function proxyWarAgentStartJson(model: AgentDemoHubModel): unknown {
         confidence: "optional number from 0 to 1",
       },
       forbidden: [
-        "raw OpenFront intents",
+        "raw game intents",
         "invented action ids",
         "tool calls",
         "code output",
         "freeform prose without JSON",
       ],
+    },
+    managedRelay: {
+      default: true,
+      sessionEndpoint: "/api/agent-relay/sessions",
+      workerPollEndpoint: "/api/agent-relay/sessions/{sessionID}/poll",
+      workerDecisionEndpoint: "/api/agent-relay/sessions/{sessionID}/decisions",
+      internalRequestEndpoint: "/api/agent-relay/sessions/{sessionID}/requests",
+      transport:
+        "The local starter polls outbound for canonical Proxy War decision requests and posts selectedLegalActionId responses back. It does not expose an inbound endpoint.",
     },
     betaConsole: "/public",
     importAndRunEndpoint: {
@@ -567,7 +755,7 @@ export function proxyWarAgentStartJson(model: AgentDemoHubModel): unknown {
 export function proxyWarAgentProtocolSchema(): unknown {
   return {
     $schema: "https://json-schema.org/draft/2020-12/schema",
-    title: "ProxyWar external agent decision response",
+    title: "Proxy War external agent decision response",
     type: "object",
     additionalProperties: false,
     required: ["selectedLegalActionId", "reason"],
@@ -591,7 +779,7 @@ export function proxyWarAgentProtocolSchema(): unknown {
   };
 }
 
-const starterAgentSkillPrompt = `You control one ProxyWar nation.
+const starterAgentSkillPrompt = `You control one Proxy War nation.
 
 Return strict JSON only:
 {
@@ -666,7 +854,7 @@ http.createServer(async (request, response) => {
         reason: "short human-readable string",
         confidence: "optional number from 0 to 1"
       },
-      forbidden: ["raw OpenFront intents", "invented ids", "actionId alias"]
+      forbidden: ["raw game intents", "invented ids", "actionId alias"]
     }));
     return;
   }
@@ -717,7 +905,7 @@ http.createServer(async (request, response) => {
     }));
   }
 }).listen(port, host, () => {
-  console.log("ProxyWar LLM starter agent listening at http://" + host + ":" + port + decisionPath);
+  console.log("Proxy War LLM starter agent listening at http://" + host + ":" + port + decisionPath);
   console.log("Agent Card: http://" + host + ":" + port + cardPath);
   console.log("LLM brain: " + describeLlmProvider().label);
 });
@@ -742,7 +930,7 @@ function createAgentCardMarkdown(request) {
     "",
     "# " + agentName,
     "",
-    "LLM-backed ProxyWar external agent. It chooses exactly one offered LegalAction.id and never emits raw intents.",
+    "LLM-backed Proxy War external agent. It chooses exactly one offered LegalAction.id and never emits raw intents.",
     ""
   ].join("\\n");
 }
@@ -807,7 +995,7 @@ async function complete(prompt) {
     if (process.env.PROXYWAR_AGENT_LLM_COMMAND) {
       return completeCommandFromEnv(prompt);
     }
-    return completeCommand(process.env.CLAUDE_COMMAND ?? "claude", ["-p", "{{prompt}}"], prompt);
+    return completeCommand(process.env.CLAUDE_COMMAND ?? "claude", defaultClaudeCommandArgs(), prompt);
   }
   if (llmProvider === "command" || process.env.PROXYWAR_AGENT_LLM_COMMAND) {
     return completeCommandFromEnv(prompt);
@@ -821,7 +1009,7 @@ async function complete(prompt) {
       authorization: "Bearer " + apiKey,
       "content-type": "application/json",
       "http-referer": "http://127.0.0.1:8787",
-      "x-title": "ProxyWar Starter Agent"
+      "x-title": "Proxy War Starter Agent"
     },
     body: JSON.stringify({
       model,
@@ -854,8 +1042,18 @@ function completeCommandFromEnv(prompt) {
   return completeCommand(parts[0], parts.slice(1).concat(args), prompt);
 }
 
+function defaultClaudeCommandArgs() {
+  return [
+    "-p",
+    "--max-turns",
+    "1",
+    "--disallowedTools",
+    "Bash,Edit,MultiEdit,Write,Read,WebFetch,WebSearch"
+  ];
+}
+
 function completeCommand(command, args, prompt) {
-  const timeoutMs = Math.max(1000, Math.min(600000, Number(process.env.PROXYWAR_AGENT_LLM_TIMEOUT_MS ?? 120000)));
+  const timeoutMs = Math.max(1000, Math.min(600000, Number(process.env.PROXYWAR_AGENT_LLM_TIMEOUT_MS ?? 12000)));
   const prepared = prepareCommandArgs(args, prompt);
   return new Promise((resolve, reject) => {
     const child = spawn(command, prepared.args, {
@@ -1074,14 +1272,15 @@ ${starterAgentServerCode}
 EOF
 PROXYWAR_AGENT_LLM_PROVIDER=codex-cli node starter-agent.mjs
 # Or:
-# PROXYWAR_AGENT_LLM_PROVIDER=claude-cowork PROXYWAR_AGENT_LLM_COMMAND='claude -p {{prompt}}' node starter-agent.mjs
+# PROXYWAR_AGENT_LLM_PROVIDER=claude-cowork PROXYWAR_AGENT_LLM_COMMAND='claude -p --max-turns 1 --disallowedTools "Bash,Edit,MultiEdit,Write,Read,WebFetch,WebSearch"' node starter-agent.mjs
 # PROXYWAR_AGENT_LLM_PROVIDER=openrouter OPENROUTER_API_KEY="paste-your-openrouter-key" node starter-agent.mjs`;
 
 export async function loadAgentDemoHubModel(
   options: LoadAgentDemoHubOptions = {},
 ): Promise<AgentDemoHubModel> {
   const runsRootDir =
-    options.runsRootDir ?? path.join(process.cwd(), "artifacts", "ai-league-runs");
+    options.runsRootDir ??
+    path.join(process.cwd(), "artifacts", "ai-league-runs");
   const tournamentsRootDir =
     options.tournamentsRootDir ??
     path.join(process.cwd(), "artifacts", "ai-league-tournaments");
@@ -1089,9 +1288,11 @@ export async function loadAgentDemoHubModel(
     options.evaluationsRootDir ??
     path.join(process.cwd(), "artifacts", "ai-league-evals");
   const manifestDir =
-    options.manifestDir ?? path.join(process.cwd(), "docs", "ai-league-agent-manifests");
+    options.manifestDir ??
+    path.join(process.cwd(), "docs", "ai-league-agent-manifests");
   const nationsDir =
-    options.nationsDir ?? path.join(process.cwd(), "artifacts", "proxywar", "nations");
+    options.nationsDir ??
+    path.join(process.cwd(), "artifacts", "proxywar", "nations");
   const { runs } = await writeAgentDemoIndex({
     runsRootDir,
     limit: options.limit ?? 50,
@@ -1142,7 +1343,7 @@ export function renderAgentDemoHubHtml(model: AgentDemoHubModel): string {
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>ProxyWar Demo</title>
+  <title>Proxy War Demo</title>
   <style>
     :root { color-scheme: light; --ink:#16202d; --muted:#607086; --line:#d9e1ec; --paper:#f5f7fb; --panel:#fff; --accent:#1d5e8f; --accent-2:#1f7a55; --bad:#a32438; --warn:#8a5c05; }
     * { box-sizing:border-box; }
@@ -1189,7 +1390,7 @@ export function renderAgentDemoHubHtml(model: AgentDemoHubModel): string {
 </head>
 <body>
   <header>
-    <h1>ProxyWar</h1>
+    <h1>Proxy War</h1>
     <p>Create AI nations, enter them into autonomous strategy matches, and watch them expand, ally, fight, or collapse.</p>
   </header>
   <main>
@@ -1217,9 +1418,12 @@ export function renderAgentDemoHubHtml(model: AgentDemoHubModel): string {
     <section class="grid">
       <aside class="panel">
         <h2>Run A Match</h2>
-        <p class="hint">Starts an ProxyWar match. Use showcase mode for quick QA. Tester matches use saved/external agents plus Codex-powered house agents, not built-in nations.</p>
+        <p class="hint">Starts the locked beta match: the latest saved tester agent plus one Codex agent against two Easy built-in nations until a winner emerges.</p>
         <form id="demo-form">
           <input type="hidden" name="kind" value="demo">
+          <input type="hidden" name="agents" value="1">
+          <input type="hidden" name="nations" value="2">
+          <input type="hidden" name="difficulty" value="Easy">
           <label for="brain">Brain</label>
           <select id="brain" name="brain">
             <option value="codex-cli"${selectedAttribute(model.houseAgentBrain, "codex-cli")}>Codex CLI direct decisions</option>
@@ -1236,12 +1440,12 @@ export function renderAgentDemoHubHtml(model: AgentDemoHubModel): string {
           <select id="roster" name="roster">
             <option value="default">Default four profiles</option>
             <option value="manifest">Manifest-defined roster</option>
-            <option value="saved">Saved ProxyWar nations</option>
+            <option value="saved">Saved Proxy War nations</option>
           </select>
           <p class="hint">Saved rosters use your created nations plus curated defaults until there are at least four entrants.</p>
           ${
             model.savedNations.length === 0
-              ? '<p class="hint">No saved ProxyWar nations yet.</p>'
+              ? '<p class="hint">No saved Proxy War nations yet.</p>'
               : `<div class="manifest-grid">${savedNationCards}</div>`
           }
           ${
@@ -1249,13 +1453,13 @@ export function renderAgentDemoHubHtml(model: AgentDemoHubModel): string {
               ? '<p class="hint">No manifest roster files were found.</p>'
               : `<div class="manifest-grid">${manifestCards}</div>`
           }
-          <label for="maxSteps">Strategy rounds</label>
-          <input id="maxSteps" name="maxSteps" type="number" min="1" max="30" value="12">
+          <label for="maxSteps">Decision-step fail-safe</label>
+          <input id="maxSteps" name="maxSteps" type="number" min="1" max="1000" value="700">
           <p class="hint">One round freezes the match, lets each AI observe and act, then advances the game. More rounds means a longer watchable match.</p>
-          <input type="hidden" name="matchLength" value="showcase">
+          <input type="hidden" name="matchLength" value="full">
           <label for="bots">Built-in bots</label>
-          <input id="bots" name="bots" type="number" min="0" max="12" value="5">
-          <button type="submit">Run ProxyWar Match</button>
+          <input id="bots" name="bots" type="number" min="0" max="12" value="0">
+          <button type="submit">Run Proxy War Match</button>
         </form>
         <form id="nation-form" class="section">
           <h3>Create AI Nation</h3>
@@ -1301,7 +1505,7 @@ export function renderAgentDemoHubHtml(model: AgentDemoHubModel): string {
         </form>
         <div class="section">
           <h3>Renderer</h3>
-          <p class="hint">Native ProxyWar replay route: <a href="${escapeAttribute(model.rendererBaseUrl)}" target="_blank">${escapeHtml(model.rendererBaseUrl)}</a>. Start this hub with the default renderer option, or run the renderer script separately if needed.</p>
+          <p class="hint">Native Proxy War replay route: <a href="${escapeAttribute(model.rendererBaseUrl)}" target="_blank">${escapeHtml(model.rendererBaseUrl)}</a>. Start this hub with the default renderer option, or run the renderer script separately if needed.</p>
           ${
             latestRun?.hasOpenFrontReplay
               ? `<p><a href="/openfront-replay/${encodeURIComponent(latestRun.runID)}" target="_blank">Open latest run in native renderer</a></p>`
@@ -1334,7 +1538,7 @@ export function renderAgentDemoHubHtml(model: AgentDemoHubModel): string {
       <h2>Recent Match Runs</h2>
       ${
         model.runs.length === 0
-          ? '<div class="empty">No ProxyWar match artifacts found yet.</div>'
+          ? '<div class="empty">No Proxy War match artifacts found yet.</div>'
           : `<table>
               <thead>
                 <tr>
@@ -1397,7 +1601,7 @@ export function renderAgentDemoHubHtml(model: AgentDemoHubModel): string {
           const created = await response.json();
           if (!response.ok) throw new Error(created.error ?? "request failed");
           if (endpoint === "/api/nations") {
-            output.textContent = "Saved nation: " + created.nation.agentName + "\\nActive roster size: " + created.activeRosterCount + "\\nRefresh to see it in Saved ProxyWar nations.";
+            output.textContent = "Saved nation: " + created.nation.agentName + "\\nActive roster size: " + created.activeRosterCount + "\\nRefresh to see it in Saved Proxy War nations.";
           } else {
             await pollJob(created.jobID);
           }
@@ -1433,27 +1637,34 @@ export function renderProxyWarPublicHtml(model: AgentDemoHubModel): string {
   const latestRun = featuredRenderedRun(model.runs);
   const latestTournament = featuredShowcaseTournament(model.tournaments);
   const activeJob =
-    model.jobs.find((job) => job.status === "running" || job.status === "queued") ??
-    null;
+    model.jobs.find(
+      (job) => job.status === "running" || job.status === "queued",
+    ) ?? null;
   const savedCards = model.savedNations
     .map((nation) => sleekSavedNationCard(nation))
     .join("\n");
   const externalAgentCount = model.savedNations.filter(
     (nation) => nation.provider?.provider === "external-http",
   ).length;
-  const recentRows = model.runs.slice(0, 8).map((run) => sleekPublicRunRow(run)).join("\n");
-  const showcaseLeaderboardRows = latestTournament?.leaderboard
-    ?.slice(0, 4)
-    .map((agent, index) => publicTournamentLeaderboardRow(agent, index))
-    .join("\n") ?? "";
-  const showcaseAgentCards = latestTournament?.showcase?.agents
-    ?.slice(0, 4)
-    .map((agent) => publicTournamentAgentCard(agent))
-    .join("\n") ?? "";
-  const showcaseHighlights = latestTournament?.showcase?.highlightReel
-    ?.slice(0, 5)
-    .map((highlight) => `<li>${escapeHtml(highlight)}</li>`)
-    .join("\n") ?? "";
+  const recentRows = model.runs
+    .slice(0, 8)
+    .map((run) => sleekPublicRunRow(run))
+    .join("\n");
+  const showcaseLeaderboardRows =
+    latestTournament?.leaderboard
+      ?.slice(0, 4)
+      .map((agent, index) => publicTournamentLeaderboardRow(agent, index))
+      .join("\n") ?? "";
+  const showcaseAgentCards =
+    latestTournament?.showcase?.agents
+      ?.slice(0, 4)
+      .map((agent) => publicTournamentAgentCard(agent))
+      .join("\n") ?? "";
+  const showcaseHighlights =
+    latestTournament?.showcase?.highlightReel
+      ?.slice(0, 5)
+      .map((highlight) => `<li>${escapeHtml(highlight)}</li>`)
+      .join("\n") ?? "";
   const latestReplayLink =
     latestRun !== null && latestRun.hasOpenFrontReplay
       ? `/openfront-replay/${encodeURIComponent(latestRun.runID)}`
@@ -1465,7 +1676,8 @@ export function renderProxyWarPublicHtml(model: AgentDemoHubModel): string {
   const previousFeedbackRun =
     latestFeedbackRun === null
       ? null
-      : feedbackRuns.find((run) => run.runID !== latestFeedbackRun.runID) ?? null;
+      : (feedbackRuns.find((run) => run.runID !== latestFeedbackRun.runID) ??
+        null);
   const latestTournamentReplayLink = latestTournament
     ? publicTournamentBestReplayLink(latestTournament)
     : null;
@@ -1484,7 +1696,7 @@ export function renderProxyWarPublicHtml(model: AgentDemoHubModel): string {
       : null;
   const latestFailedJob =
     latestRun === null
-      ? model.jobs.find((job) => job.status === "failed") ?? null
+      ? (model.jobs.find((job) => job.status === "failed") ?? null)
       : null;
   const initialTesterEvidenceState: PublicTesterEvidenceState = {
     agentCardUrl: null,
@@ -1522,7 +1734,7 @@ export function renderProxyWarPublicHtml(model: AgentDemoHubModel): string {
       : model.houseAgentBrain === "codex-cli"
         ? "Codex CLI direct decisions"
         : "LLM-backed house agent";
-  const publicSavedRosterMatchRequestJson = JSON.stringify({
+  const publicCodexMatchRequestJson = JSON.stringify({
     ...proxyWarTesterSavedRosterJobDefaults,
     brain: model.houseAgentBrain,
   });
@@ -1532,7 +1744,7 @@ export function renderProxyWarPublicHtml(model: AgentDemoHubModel): string {
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>ProxyWar</title>
+  <title>Proxy War</title>
   <style>
     :root { color-scheme: light; --ink:#18212d; --muted:#657386; --line:#d9e1e8; --paper:#f6f8f5; --panel:#fff; --soft:#f8fbf8; --accent:#176358; --accent-2:#263f57; --warn:#94640f; --bad:#a43b4b; --good:#1f744e; }
     * { box-sizing:border-box; }
@@ -2017,11 +2229,11 @@ export function renderProxyWarPublicHtml(model: AgentDemoHubModel): string {
   <div class="shell">
     <header class="topbar">
       <div class="brand">
-        <span class="brand-mark">OF</span>
-        <span>ProxyWar</span>
+        <span class="brand-mark">PW</span>
+        <span>Proxy War</span>
         ${model.closedBeta?.enabled ? `<span class="pill warn">${escapeHtml(model.closedBeta.label)}</span>` : ""}
       </div>
-      <nav aria-label="ProxyWar navigation">
+      <nav aria-label="Proxy War navigation">
         ${latestReplayLink !== null ? `<a href="${latestReplayLink}" target="_blank">Watch</a>` : `<a href="#runs">Watch</a>`}
         <a href="#connect">Connect</a>
         <a href="#run-match">Run</a>
@@ -2033,36 +2245,36 @@ export function renderProxyWarPublicHtml(model: AgentDemoHubModel): string {
       <div class="hero-copy">
         <div>
           <div class="eyebrow">A strategy arena for autonomous agents</div>
-          <h1>Connect agents. Watch OpenFront unfold.</h1>
+          <h1>Connect agents. Watch Proxy War unfold.</h1>
           <p class="lede">Paste one Agent Card URL, run a match with Codex-backed house nations, then watch the rendered replay and improve your agent from its decision feedback.</p>
-          <div class="prompt-line">Contract: AgentObservation + LegalAction[] → selectedLegalActionId. Agents never submit raw OpenFront commands.</div>
-          <div class="critical-flow" aria-label="ProxyWar beta flow">
+          <div class="prompt-line">Contract: AgentObservation + LegalAction[] → selectedLegalActionId. Agents never submit raw game-engine commands.</div>
+          <div class="critical-flow" aria-label="Proxy War beta flow">
             <div class="flow-step"><b>Watch</b><span>Open the latest rendered replay first. This confirms what a successful run produces.</span></div>
             <div class="flow-step"><b>Connect</b><span>Paste one public <code>/agent-card.md</code> URL. The endpoint health check runs before match play.</span></div>
-            <div class="flow-step"><b>Run</b><span>Queue a saved-roster match. House agents fill empty slots.</span></div>
+            <div class="flow-step"><b>Run</b><span>Queue the saved tester agent with one Codex house agent against two Easy built-in nations.</span></div>
           </div>
           <div class="actions hero-action-row">
             ${latestReplayLink !== null ? `<a class="button" href="${latestReplayLink}" target="_blank">Watch latest replay</a>` : `<a class="button" href="#connect">Paste Agent Card URL</a>`}
             <div class="hero-text-links">
               <a href="#connect">Connect Agent Card</a>
-              <a href="#run-match">Run saved roster</a>
+              <a href="#run-match">Run beta match</a>
               <a href="/agent-start">Agent setup link</a>
             </div>
           </div>
         </div>
-        <p class="hint">Beta flow: connect or configure one entrant, run a saved-roster match, watch the replay, then improve the agent.</p>
+        <p class="hint">Beta flow: connect or configure an agent, run the locked beta match, watch the replay, then improve from the feedback surfaces.</p>
       </div>
       <aside class="hero-status">
         <div>
           <div class="eyebrow">Trusted technical beta</div>
           <h2>Latest rendered match</h2>
-          <p class="hint">${latestRun ? `Latest run: ${escapeHtml(latestRun.runID)}` : "No match artifacts yet. Run a saved-roster match to generate the first rendered replay."}</p>
+          <p class="hint">${latestRun ? `Latest run: ${escapeHtml(latestRun.runID)}` : "No match artifacts yet. Run the locked beta match to generate the first rendered replay."}</p>
         </div>
         ${
           latestRun !== null
             ? `<div class="latest-run-card">
                 <div>
-                  <span class="pill ${latestRun.hasOpenFrontReplay ? "good" : "bad"}">${latestRun.hasOpenFrontReplay ? "Rendered OpenFront replay" : "Replay artifact missing"}</span>
+                  <span class="pill ${latestRun.hasOpenFrontReplay ? "good" : "bad"}">${latestRun.hasOpenFrontReplay ? "Rendered Proxy War replay" : "Replay artifact missing"}</span>
                   <h3>${escapeHtml(latestRun.runID)}</h3>
                   <p class="hint">${escapeHtml(latestRun.brainMode ?? "unknown brain")} · ${escapeHtml(latestRun.scenario ?? "unknown scenario")} · ${escapeHtml(latestRun.runnerMode ?? "unknown mode")}</p>
                 </div>
@@ -2129,7 +2341,7 @@ export function renderProxyWarPublicHtml(model: AgentDemoHubModel): string {
             <span class="check-index">3</span>
             <div>
               <h3>Save Agent</h3>
-              <p class="hint">Store the entrant in the local roster used by saved-roster matches.</p>
+              <p class="hint">Store the entrant for protocol checks and future external-agent runs.</p>
             </div>
             <span class="check-state" data-checklist-state>Waiting</span>
           </li>
@@ -2207,7 +2419,7 @@ export function renderProxyWarPublicHtml(model: AgentDemoHubModel): string {
           <div>
             <div class="eyebrow">C · Connect your agent</div>
             <h2>Paste your agent's /agent-card.md link.</h2>
-            <p class="hint">Send your coding agent the setup link below. When it returns a public Agent Card URL, paste it here. ProxyWar imports the nation profile, tests the endpoint, queues a match, and returns a replay.</p>
+            <p class="hint">Send your coding agent the setup link below. When it returns a public Agent Card URL, paste it here. Proxy War imports the nation profile, tests the endpoint, queues a match, and returns a replay.</p>
           </div>
           <div class="section-tools">
             <a class="button secondary compact" href="/agent-start">Open setup link</a>
@@ -2246,7 +2458,7 @@ export function renderProxyWarPublicHtml(model: AgentDemoHubModel): string {
             </details>
           </form>
           <div id="endpoint-health-summary" class="health-strip" aria-live="polite"><strong>Endpoint health:</strong> not checked yet. If it fails, fix the response contract before running a match.</div>
-          <div id="agent-card-status" class="status-box" aria-live="polite"><strong>Agent Card not imported yet.</strong> Paste a public <code>/agent-card.md</code> URL and ProxyWar will show the import, health-check, and match result here.<ul class="recovery-list"><li>Card URL ends in <code>/agent-card.md</code>.</li><li>Card frontmatter has <code>endpointUrl</code> pointing at <code>/proxywar/decide</code>.</li><li>Run <code>npm run self-test</code> before importing.</li></ul></div>
+          <div id="agent-card-status" class="status-box" aria-live="polite"><strong>Agent Card not imported yet.</strong> Paste a public <code>/agent-card.md</code> URL and Proxy War will show the import, health-check, and match result here.<ul class="recovery-list"><li>Card URL ends in <code>/agent-card.md</code>.</li><li>Card frontmatter has <code>endpointUrl</code> pointing at <code>/proxywar/decide</code>.</li><li>Run <code>npm run self-test</code> before importing.</li></ul></div>
           <p class="hint">The markdown card is public setup data. Secrets are pasted separately and stored as local secret references.</p>
         </div>
         <details class="advanced-connect">
@@ -2307,11 +2519,11 @@ export function renderProxyWarPublicHtml(model: AgentDemoHubModel): string {
           <div>
             <div class="eyebrow">E · Run match</div>
             <h2>Run Match</h2>
-            <p class="hint">Starts a 12-round saved-roster match. Your latest saved agent enters first after a health check; every house nation filling an empty slot is ${escapeHtml(houseAgentBrainLabel)}.</p>
+            <p class="hint">Starts the locked beta match: the latest saved tester agent plus one ${escapeHtml(houseAgentBrainLabel)} agent against two Easy built-in nations until a winner emerges.</p>
           </div>
-          <button id="run-external-match" class="button" type="button">Run Saved-Roster Match</button>
+          <button id="run-external-match" class="button" type="button">Run Codex Match</button>
         </div>
-        <div id="first-match-status" class="status-box" aria-live="polite">Ready. House agents: ${escapeHtml(houseAgentBrainLabel)}. Save at least one agent for the tester path, then run a match.<ul class="recovery-list"><li>If the saved endpoint is stale, delete it and import a fresh Agent Card.</li><li>If endpoint health fails, fix <code>selectedLegalActionId</code> before retrying.</li></ul></div>
+        <div id="first-match-status" class="status-box" aria-live="polite">Ready. House agent: ${escapeHtml(houseAgentBrainLabel)}. The default match uses the latest saved tester agent and two Easy built-in nations, and it must finish with a winner.<ul class="recovery-list"><li>Connect and save an external agent before running the tester match.</li><li>If endpoint health fails, fix <code>selectedLegalActionId</code> before saving the agent.</li></ul></div>
       </section>
 
       <section id="tester-evidence" class="card evidence-card">
@@ -2380,7 +2592,7 @@ export function renderProxyWarPublicHtml(model: AgentDemoHubModel): string {
         </div>
         ${
           recentRows === ""
-            ? `<div class="empty-state"><strong>No runs yet.</strong><br>Run a saved-roster match. When a replay artifact is attached, the latest replay button appears at the top of this page.</div>`
+            ? `<div class="empty-state"><strong>No runs yet.</strong><br>Run the locked beta match. When a replay artifact is attached, the latest replay button appears at the top of this page.</div>`
             : `<div class="table-wrap"><table><thead><tr><th>Run</th><th>Decisions</th><th>Links</th></tr></thead><tbody>${recentRows}</tbody></table></div>`
         }
       </section>
@@ -2416,7 +2628,7 @@ export function renderProxyWarPublicHtml(model: AgentDemoHubModel): string {
       </section>
     </main>
     <footer>
-      <span>Built on OpenFront.io, an AGPL-licensed open-source game. ProxyWar is an experimental fork/layer for autonomous agent matches.</span>
+      <span>Proxy War is an experimental autonomous-agent strategy arena built on an AGPL-licensed open-source game engine.</span>
       <span class="links">
         <a href="/docs/PROXYWAR_ASSET_AND_LICENSE_AUDIT.md" target="_blank">Source, credits & license notes</a>
         <a href="/docs/PROXYWAR_TESTER_HANDOFF.md" target="_blank">Tester handoff</a>
@@ -2754,7 +2966,7 @@ export function renderProxyWarPublicHtml(model: AgentDemoHubModel): string {
         job.status === "completed" && readyRunID && refreshFeedback ? "<span class=\\"pill busy\\">Refreshing comparison...</span>" : "",
         readyTournamentID ? "<div class=\\"links\\"><a href=\\"" + tournamentUrl + "\\">Open tournament leaderboard</a><a href=\\"/tournaments/" + encodeURIComponent(readyTournamentID) + "/tournament-report.md\\">Tournament report</a></div>" : "",
         readyEvaluationID ? "<div class=\\"links\\"><a href=\\"" + evaluationUrl + "\\">Evaluation report</a></div>" : "",
-        completedWithoutArtifact ? "<span class=\\"pill bad\\">Replay missing</span> The job says completed, but ProxyWar could not attach a rendered replay. Rerun the match and ask the operator to check for game-record.json and spectator-replay.json." : "",
+        completedWithoutArtifact ? "<span class=\\"pill bad\\">Replay missing</span> The job says completed, but Proxy War could not attach a rendered replay. Rerun the match and ask the operator to check for game-record.json and spectator-replay.json." : "",
         job.status === "failed" ? "<span class=\\"pill bad\\">Failed</span> " + escapeText(job.errorSummary || "No clear error was reported.") + jobRecoveryHtml(job) : "",
         job.status === "queued" ? "<span class=\\"hint\\">Queued. The beta queue is intentionally small; leave this tab open and avoid clicking Run again.</span>" : "",
         job.status === "running" ? "<span class=\\"hint\\">Match is running. Short beta runs can still take a few minutes while agents decide. Leave this tab open.</span>" : ""
@@ -2780,7 +2992,7 @@ export function renderProxyWarPublicHtml(model: AgentDemoHubModel): string {
     function renderTesterEvidencePacket() {
       if (!testerEvidencePacket) return;
       testerEvidencePacket.textContent = [
-        "ProxyWar tester evidence",
+        "Proxy War tester evidence",
         "Agent Card URL: " + (testerEvidenceState.agentCardUrl || "none pasted yet"),
         "Agent: " + (testerEvidenceState.agentName || "none saved yet"),
         "Decision endpoint: " + (testerEvidenceState.agentEndpoint || "none saved yet"),
@@ -2922,14 +3134,14 @@ export function renderProxyWarPublicHtml(model: AgentDemoHubModel): string {
     async function startSavedRosterMatch(statusElement, button, startLabel, options) {
       if (button) button.disabled = true;
       const rosterWarning = initialSavedAgentCount === 0
-        ? "<br><span class=\\"pill warn\\">No saved agents</span> This will run without a tester-owned external agent. Connect one first for the beta path."
-        : "";
-      setElementStatus(statusElement, "<strong>" + escapeText(startLabel) + "</strong> Saved agents enter first; defaults fill empty slots. This first beta run is bounded to 12 strategy rounds." + rosterWarning);
+        ? ""
+        : "<br><span class=\\"pill\\">External agent saved</span> The latest saved tester agent enters this match with the Codex house agent.";
+      setElementStatus(statusElement, "<strong>" + escapeText(startLabel) + "</strong> Running the saved tester agent plus one Codex house agent against two Easy built-in nations until a winner emerges." + rosterWarning);
       try {
         const response = await fetch("/api/jobs", {
           method: "POST",
           headers: { "content-type": "application/json" },
-          body: JSON.stringify(${publicSavedRosterMatchRequestJson})
+          body: JSON.stringify(${publicCodexMatchRequestJson})
         });
         const result = await response.json();
         if (!response.ok) throw new Error(result.error || "match request failed");
@@ -3014,11 +3226,14 @@ export function renderProxyWarPublicHtml(model: AgentDemoHubModel): string {
 </html>`;
 }
 
-export function renderProxyWarPublicHtmlLegacy(model: AgentDemoHubModel): string {
+export function renderProxyWarPublicHtmlLegacy(
+  model: AgentDemoHubModel,
+): string {
   const latestRun = featuredRenderedRun(model.runs);
   const activeJob =
-    model.jobs.find((job) => job.status === "running" || job.status === "queued") ??
-    null;
+    model.jobs.find(
+      (job) => job.status === "running" || job.status === "queued",
+    ) ?? null;
   const savedNationCards = model.savedNations
     .map((nation) => savedNationCard(nation))
     .join("\n");
@@ -3027,12 +3242,15 @@ export function renderProxyWarPublicHtmlLegacy(model: AgentDemoHubModel): string
   ).length;
   const queuedCount = Math.min(8, model.savedNations.length);
   const fillerCount = Math.max(0, 4 - queuedCount);
-  const recentRows = model.runs.slice(0, 12).map((run) => publicRunRow(run)).join("\n");
+  const recentRows = model.runs
+    .slice(0, 12)
+    .map((run) => publicRunRow(run))
+    .join("\n");
   const latestReplayLink =
     latestRun !== null && latestRun.hasOpenFrontReplay
       ? `/openfront-replay/${encodeURIComponent(latestRun.runID)}`
       : null;
-  const publicSavedRosterMatchRequestJson = JSON.stringify({
+  const publicCodexMatchRequestJson = JSON.stringify({
     ...proxyWarTesterSavedRosterJobDefaults,
     brain: model.houseAgentBrain,
   });
@@ -3042,7 +3260,7 @@ export function renderProxyWarPublicHtmlLegacy(model: AgentDemoHubModel): string
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>ProxyWar</title>
+  <title>Proxy War</title>
   <style>
     :root { color-scheme: light; --ink:#18202b; --muted:#627084; --line:#d8e0e7; --paper:#f4f6f1; --panel:#fff; --panel-soft:#f9fbf6; --accent:#21745f; --accent-dark:#213f57; --amber:#9a6410; --red:#a43b4b; --violet:#5d5795; }
     * { box-sizing:border-box; }
@@ -3162,11 +3380,11 @@ export function renderProxyWarPublicHtmlLegacy(model: AgentDemoHubModel): string
   <div class="shell">
     <header class="topbar">
       <div class="brand">
-        <span class="brand-mark">OF</span>
-        <span>ProxyWar</span>
+        <span class="brand-mark">PW</span>
+        <span>Proxy War</span>
         ${model.closedBeta?.enabled ? `<span class="pill warn">${escapeHtml(model.closedBeta.label)}</span>` : ""}
       </div>
-      <nav aria-label="ProxyWar navigation">
+      <nav aria-label="Proxy War navigation">
         ${latestReplayLink !== null ? `<a href="${latestReplayLink}" target="_blank">Latest rendered replay</a>` : ""}
         <a href="#external-agent-form">Connect agent</a>
         <a href="#queue">Roster</a>
@@ -3181,7 +3399,7 @@ export function renderProxyWarPublicHtmlLegacy(model: AgentDemoHubModel): string
       <div class="hero-copy">
         <div>
           <div class="eyebrow">Autonomous strategy league for AI builders</div>
-          <h1>Build an AI nation. Watch it play ProxyWar.</h1>
+          <h1>Build an AI nation. Watch it play Proxy War.</h1>
           <p>Configure a reference nation or connect your own agent brain, enter it into a match with Codex-powered house agents, then inspect the rendered replay and decision trail.</p>
           <div class="hero-actions">
             ${latestReplayLink !== null ? `<a class="cta" href="${latestReplayLink}" target="_blank">Watch latest rendered gameplay</a>` : `<a class="cta" href="#demo-form">Run first match</a>`}
@@ -3189,14 +3407,14 @@ export function renderProxyWarPublicHtmlLegacy(model: AgentDemoHubModel): string
             <a class="cta secondary" href="https://github.com/0xNad/ProxyWar-starter-agent" target="_blank" rel="noopener noreferrer">Use starter template</a>
           </div>
         </div>
-        <div class="flow" aria-label="ProxyWar flow">
+        <div class="flow" aria-label="Proxy War flow">
           <article><strong>Create</strong><span class="hint">Name a nation and choose a doctrine.</span></article>
-          <article><strong>Connect</strong><span class="hint">Optionally point ProxyWar at your own HTTPS agent.</span></article>
-          <article><strong>Watch</strong><span class="hint">Open the rendered ProxyWar replay after generation.</span></article>
+          <article><strong>Connect</strong><span class="hint">Optionally point Proxy War at your own HTTPS agent.</span></article>
+          <article><strong>Watch</strong><span class="hint">Open the rendered Proxy War replay after generation.</span></article>
           <article><strong>Improve</strong><span class="hint">Use reasons, scorecards, and timelines to tune the next entrant.</span></article>
         </div>
       </div>
-      <aside class="arena-preview" aria-label="ProxyWar match preview">
+      <aside class="arena-preview" aria-label="Proxy War match preview">
         <div class="arena-head">
           <div>
             <strong>Latest Arena State</strong>
@@ -3235,12 +3453,12 @@ export function renderProxyWarPublicHtmlLegacy(model: AgentDemoHubModel): string
         <li><div><strong>Watch the latest replay</strong><span>Confirms the renderer, replay route, speed controls, and decision overlay work.</span></div></li>
         <li><div><strong>Copy the LLM starter agent</strong><span>Use the one-click command or starter server code below.</span></div></li>
         <li><div><strong>Test endpoint</strong><span>The health check proves strict LegalAction.id JSON before a match.</span></div></li>
-        <li><div><strong>Save agent</strong><span>Adds a manifest-only entrant to the next saved-roster match.</span></div></li>
-        <li><div><strong>Run first match</strong><span>ProxyWar fills empty slots and opens the rendered replay when ready.</span></div></li>
+        <li><div><strong>Save agent</strong><span>Keeps the endpoint available for protocol checks and future external-agent runs.</span></div></li>
+        <li><div><strong>Run first match</strong><span>Proxy War runs your saved external agent with one Codex agent against two Easy built-in nations and opens the rendered replay when ready.</span></div></li>
         <li><div><strong>Send feedback</strong><span>Include the run id if anything is confusing, broken, or surprisingly fun.</span></div></li>
       </ol>
     </section>
-    <section class="stat-grid" aria-label="ProxyWar run metrics">
+    <section class="stat-grid" aria-label="Proxy War run metrics">
       <div class="stat"><span>Matches</span><strong>${model.runs.length}</strong></div>
       <div class="stat"><span>Accepted Decisions</span><strong>${sum(model.runs, "acceptedCount")}</strong></div>
       <div class="stat"><span>Non-hold Actions</span><strong>${sum(model.runs, "postSpawnNonHoldActionCount")}</strong></div>
@@ -3250,7 +3468,7 @@ export function renderProxyWarPublicHtmlLegacy(model: AgentDemoHubModel): string
     <section class="builder-path" aria-label="Builder quick start">
       <article>
         <h3>Fast path: configure a reference nation</h3>
-        <p class="hint">No code required. Choose doctrine, profile, and skill preferences. ProxyWar runs the local planner/executor for you.</p>
+        <p class="hint">No code required. Choose doctrine, profile, and skill preferences. Proxy War runs the local planner/executor for you.</p>
       </article>
       <article>
         <h3>Builder path: connect your own agent brain</h3>
@@ -3302,7 +3520,7 @@ export function renderProxyWarPublicHtmlLegacy(model: AgentDemoHubModel): string
       <aside class="panel">
         <form id="nation-form">
           <h2>Configure Reference Nation</h2>
-          <p class="hint">No-code manifest setup. ProxyWar runs this nation with the local planner/executor; this is not your external model.</p>
+          <p class="hint">No-code manifest setup. Proxy War runs this nation with the local planner/executor; this is not your external model.</p>
           <label for="agentName">Nation name</label>
           <input id="agentName" name="agentName" type="text" maxlength="60" value="Iron Coast">
           <label for="profile">Profile</label>
@@ -3364,18 +3582,18 @@ export function renderProxyWarPublicHtmlLegacy(model: AgentDemoHubModel): string
                 <span id="wizard-test-state" class="pill warn step-state">not tested</span>
               </li>
               <li data-wizard-step="save">
-                <span><strong>Save agent</strong><small>Adds this external brain to the next saved-roster match.</small></span>
+                <span><strong>Save agent</strong><small>Keeps this external brain available for protocol checks and future external-agent runs.</small></span>
                 <span id="wizard-save-state" class="pill warn step-state">not saved</span>
               </li>
               <li data-wizard-step="match">
-                <span><strong>Run first match</strong><small>Uses saved agents first, then fills empty slots with reference nations.</small></span>
+                <span><strong>Run first match</strong><small>Runs your saved external agent with one Codex agent against two Easy built-in nations.</small></span>
                 <span id="wizard-match-state" class="pill warn step-state">waiting</span>
               </li>
             </ol>
-            <button id="run-external-match" class="utility" type="button">Run First External-Agent Match</button>
+            <button id="run-external-match" class="utility" type="button">Run First Beta Match</button>
             <div id="first-match-status" class="inline-status">
               <strong>First-match path ready.</strong>
-              Test and save the endpoint, then run a saved-roster match from here.
+              Test and save the endpoint, then run the locked beta match from here.
             </div>
             <div id="external-agent-feedback-preview" class="inline-status">
               <strong>Feedback preview appears after a match.</strong>
@@ -3504,17 +3722,21 @@ export function renderProxyWarPublicHtmlLegacy(model: AgentDemoHubModel): string
           <input type="hidden" name="kind" value="demo">
           <input type="hidden" name="brain" value="planner-codex-cli">
           <input type="hidden" name="scenario" value="actions">
-          <input type="hidden" name="matchLength" value="showcase">
+          <input type="hidden" name="matchLength" value="full">
           <input type="hidden" name="roster" value="saved">
           <input type="hidden" name="maxSavedNations" value="1">
-          <input type="hidden" name="maxSteps" value="12">
+          <input type="hidden" name="fillSavedRoster" value="false">
+          <input type="hidden" name="agents" value="1">
+          <input type="hidden" name="maxSteps" value="700">
+          <input type="hidden" name="requireWinner" value="true">
           <input type="hidden" name="bots" value="0">
-          <input type="hidden" name="nations" value="0">
-          <p class="hint">Codex-powered house agents fill the saved roster around tester agents. Built-in nations are disabled here; they remain benchmark-only. The first beta run is bounded to 12 strategy rounds, and the rendered replay opens automatically when generation finishes.</p>
+          <input type="hidden" name="nations" value="2">
+          <input type="hidden" name="difficulty" value="Easy">
+          <p class="hint">The locked beta default is the latest saved tester agent plus one Codex-backed in-house agent against two Easy built-in nations until a winner emerges. The rendered replay opens automatically when generation finishes.</p>
           <button class="secondary" type="submit">Run Codex Match</button>
           <div id="demo-status" class="inline-status">
             <strong>Ready.</strong>
-            Press once, then wait here. The default beta run is bounded to 12 strategy rounds; repeated clicks queue extra matches.
+            Press once, then wait here. The default beta run is locked to the saved tester agent, one Codex agent, and two Easy built-in nations; repeated clicks queue extra matches.
           </div>
           <p class="hint">House agents in this beta are Codex-backed; failed Codex setup should fail loudly instead of falling back to a local bot.</p>
         </form>
@@ -3573,7 +3795,7 @@ export function renderProxyWarPublicHtmlLegacy(model: AgentDemoHubModel): string
     </section>
   </main>
   <footer>
-    ProxyWar is built on the OpenFront engine for autonomous-agent matches. Source, license, asset credits, and beta notes are kept in the repository docs: <code>LICENSE</code>, <code>LICENSE-ASSETS</code>, <code>CREDITS.md</code>, and <code>docs/PROXYWAR_ASSET_AND_LICENSE_AUDIT.md</code>.
+    Proxy War is built for autonomous-agent matches. Source, license, asset credits, and beta notes are kept in the repository docs: <code>LICENSE</code>, <code>LICENSE-ASSETS</code>, <code>CREDITS.md</code>, and <code>docs/PROXYWAR_ASSET_AND_LICENSE_AUDIT.md</code>.
   </footer>
   </div>
   <script>
@@ -3665,7 +3887,7 @@ export function renderProxyWarPublicHtmlLegacy(model: AgentDemoHubModel): string
           setExternalCheckStatus(externalHealthCheckHtml(result));
           if (result.ok) {
             setWizardState(wizardTestState, "passed", "good");
-            setFirstMatchStatus('<strong>Endpoint passed.</strong><span class="hint">Save this external agent so it joins the next saved-roster match.</span>');
+            setFirstMatchStatus('<strong>Endpoint passed.</strong><span class="hint">Save this external agent; the default beta match runs it with one Codex agent versus two Easy built-in nations.</span>');
             setStatus([
               "Endpoint health check: passed",
               "Selected: " + result.selectedLegalActionId,
@@ -3695,7 +3917,7 @@ export function renderProxyWarPublicHtmlLegacy(model: AgentDemoHubModel): string
       runExternalMatchButton.addEventListener("click", async () => {
         runExternalMatchButton.disabled = true;
         setWizardState(wizardMatchState, "queued", "busy");
-        setFirstMatchStatus('<strong>Starting saved-roster match...</strong><span class="hint">Your latest saved external agent is health-checked and entered first; defaults fill open slots for a bounded 12-round beta run.</span>');
+        setFirstMatchStatus('<strong>Starting Codex match...</strong><span class="hint">The locked beta default is the saved tester agent plus one Codex agent against two Easy built-in nations until a winner emerges.</span>');
         try {
           const response = await fetch("/api/jobs", {
             method: "POST",
@@ -3704,8 +3926,7 @@ export function renderProxyWarPublicHtmlLegacy(model: AgentDemoHubModel): string
               kind: "demo",
               brain: ${JSON.stringify(model.houseAgentBrain)},
               scenario: "actions",
-              roster: "saved",
-              ...${publicSavedRosterMatchRequestJson}
+              ...${publicCodexMatchRequestJson}
             })
           });
           const result = await response.json();
@@ -4004,7 +4225,7 @@ export function renderProxyWarAdminHtml(model: ProxyWarAdminModel): string {
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>ProxyWar Admin</title>
+  <title>Proxy War Admin</title>
   <style>
     :root { color-scheme: light; --ink:#142030; --muted:#5c6f83; --line:#d7e0ea; --paper:#f5f8fb; --panel:#fff; --accent:#1e6d64; }
     * { box-sizing:border-box; }
@@ -4029,7 +4250,7 @@ export function renderProxyWarAdminHtml(model: ProxyWarAdminModel): string {
 </head>
 <body>
   <header>
-    <h1>ProxyWar Admin</h1>
+    <h1>Proxy War Admin</h1>
     <p>Local beta control-plane status. Secrets and local filesystem paths are intentionally not shown here.</p>
   </header>
   <main>
@@ -4099,8 +4320,9 @@ export function renderProxyWarTesterDashboardHtml(
   const latestFeedbackRun =
     model.hub.runs.find((run) => run.hasExternalFeedback) ?? latestRenderedRun;
   const activeJob =
-    model.hub.jobs.find((job) => job.status === "running" || job.status === "queued") ??
-    null;
+    model.hub.jobs.find(
+      (job) => job.status === "running" || job.status === "queued",
+    ) ?? null;
   const jobRows = model.hub.jobs
     .slice(0, 8)
     .map(
@@ -4149,7 +4371,7 @@ export function renderProxyWarTesterDashboardHtml(
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>ProxyWar Tester Dashboard</title>
+  <title>Proxy War Tester Dashboard</title>
   <style>
     :root { color-scheme: dark; --paper:#07090d; --panel:#11151e; --line:#252d3c; --ink:#e8edf5; --muted:#93a0b4; --accent:#f4a64a; --good:#7ee0a8; --bad:#ff7a6b; --warn:#f0c869; }
     * { box-sizing:border-box; }
@@ -4297,25 +4519,26 @@ async function discoverTournaments(
 ): Promise<AgentDemoTournamentIndexEntry[]> {
   try {
     await fs.mkdir(tournamentsRootDir, { recursive: true });
-    const dirents = await fs.readdir(tournamentsRootDir, { withFileTypes: true });
+    const dirents = await fs.readdir(tournamentsRootDir, {
+      withFileTypes: true,
+    });
     const directoryCandidates = recentDirectoryCandidates(dirents, limit);
     const entries = await Promise.all(
-      directoryCandidates
-        .map(async (dirent) => {
-          const directory = path.join(tournamentsRootDir, dirent.name);
-          const summaryPath = path.join(directory, "tournament-summary.json");
-          const summary = await readJson<TournamentIndexSummary>(summaryPath);
-          if (summary === null) return null;
-          return {
-            ...summary,
-            tournamentID: summary.tournamentID ?? dirent.name,
-            directory,
-            summaryPath,
-            reportPath: path.join(directory, "tournament-report.md"),
-            leaderboardPath: path.join(directory, "leaderboard.json"),
-            leaderboardHtmlPath: path.join(directory, "leaderboard.html"),
-          };
-        }),
+      directoryCandidates.map(async (dirent) => {
+        const directory = path.join(tournamentsRootDir, dirent.name);
+        const summaryPath = path.join(directory, "tournament-summary.json");
+        const summary = await readJson<TournamentIndexSummary>(summaryPath);
+        if (summary === null) return null;
+        return {
+          ...summary,
+          tournamentID: summary.tournamentID ?? dirent.name,
+          directory,
+          summaryPath,
+          reportPath: path.join(directory, "tournament-report.md"),
+          leaderboardPath: path.join(directory, "leaderboard.json"),
+          leaderboardHtmlPath: path.join(directory, "leaderboard.html"),
+        };
+      }),
     );
     return entries
       .filter((entry): entry is AgentDemoTournamentIndexEntry => entry !== null)
@@ -4332,23 +4555,24 @@ async function discoverEvaluations(
 ): Promise<AgentDemoEvaluationIndexEntry[]> {
   try {
     await fs.mkdir(evaluationsRootDir, { recursive: true });
-    const dirents = await fs.readdir(evaluationsRootDir, { withFileTypes: true });
+    const dirents = await fs.readdir(evaluationsRootDir, {
+      withFileTypes: true,
+    });
     const directoryCandidates = recentDirectoryCandidates(dirents, limit);
     const entries = await Promise.all(
-      directoryCandidates
-        .map(async (dirent) => {
-          const directory = path.join(evaluationsRootDir, dirent.name);
-          const summaryPath = path.join(directory, "evaluation-summary.json");
-          const summary = await readJson<EvaluationIndexSummary>(summaryPath);
-          if (summary === null) return null;
-          return {
-            ...summary,
-            evalID: summary.evalID ?? dirent.name,
-            directory,
-            summaryPath,
-            reportPath: path.join(directory, "evaluation-report.md"),
-          };
-        }),
+      directoryCandidates.map(async (dirent) => {
+        const directory = path.join(evaluationsRootDir, dirent.name);
+        const summaryPath = path.join(directory, "evaluation-summary.json");
+        const summary = await readJson<EvaluationIndexSummary>(summaryPath);
+        if (summary === null) return null;
+        return {
+          ...summary,
+          evalID: summary.evalID ?? dirent.name,
+          directory,
+          summaryPath,
+          reportPath: path.join(directory, "evaluation-report.md"),
+        };
+      }),
     );
     return entries
       .filter((entry): entry is AgentDemoEvaluationIndexEntry => entry !== null)
@@ -4359,10 +4583,9 @@ async function discoverEvaluations(
   }
 }
 
-function recentDirectoryCandidates<T extends { isDirectory(): boolean; name: string }>(
-  dirents: T[],
-  limit: number,
-): T[] {
+function recentDirectoryCandidates<
+  T extends { isDirectory(): boolean; name: string },
+>(dirents: T[], limit: number): T[] {
   const poolSize = Math.max(limit * 8, 160);
   return dirents
     .filter((dirent) => dirent.isDirectory())
@@ -4397,14 +4620,102 @@ async function readJson<T>(filePath: string): Promise<T | null> {
 
 function renderArenaTiles(): string {
   const pattern = [
-    "", "", "a", "a", "a", "", "", "b", "b", "", "", "",
-    "", "a", "a", "a", "a", "", "b", "b", "b", "", "c", "",
-    "", "a", "a", "", "", "", "b", "b", "", "c", "c", "c",
-    "", "", "", "", "d", "d", "", "", "", "c", "c", "",
-    "e", "e", "", "d", "d", "d", "", "a", "", "", "", "",
-    "e", "e", "e", "", "d", "", "a", "a", "a", "", "b", "",
-    "", "e", "", "", "", "", "a", "a", "", "b", "b", "b",
-    "", "", "", "c", "c", "", "", "", "", "b", "b", "",
+    "",
+    "",
+    "a",
+    "a",
+    "a",
+    "",
+    "",
+    "b",
+    "b",
+    "",
+    "",
+    "",
+    "",
+    "a",
+    "a",
+    "a",
+    "a",
+    "",
+    "b",
+    "b",
+    "b",
+    "",
+    "c",
+    "",
+    "",
+    "a",
+    "a",
+    "",
+    "",
+    "",
+    "b",
+    "b",
+    "",
+    "c",
+    "c",
+    "c",
+    "",
+    "",
+    "",
+    "",
+    "d",
+    "d",
+    "",
+    "",
+    "",
+    "c",
+    "c",
+    "",
+    "e",
+    "e",
+    "",
+    "d",
+    "d",
+    "d",
+    "",
+    "a",
+    "",
+    "",
+    "",
+    "",
+    "e",
+    "e",
+    "e",
+    "",
+    "d",
+    "",
+    "a",
+    "a",
+    "a",
+    "",
+    "b",
+    "",
+    "",
+    "e",
+    "",
+    "",
+    "",
+    "",
+    "a",
+    "a",
+    "",
+    "b",
+    "b",
+    "b",
+    "",
+    "",
+    "",
+    "c",
+    "c",
+    "",
+    "",
+    "",
+    "",
+    "b",
+    "b",
+    "",
   ];
   return pattern
     .map((kind) => `<span class="tile${kind === "" ? "" : ` ${kind}`}"></span>`)
@@ -4529,7 +4840,7 @@ function savedNationCard(nation: ProxyWarNationEntry): string {
   const modeHint =
     nation.provider?.provider === "external-http"
       ? "A user-owned endpoint will choose LegalAction.id values during the match."
-      : "ProxyWar will run this entrant with the local planner/executor.";
+      : "Proxy War will run this entrant with the local planner/executor.";
   return `<div class="manifest-card">
     <strong>${escapeHtml(nation.agentName)}</strong>
     <span class="pill good">${escapeHtml(nation.profile)}</span>
@@ -4609,12 +4920,12 @@ function publicExternalFeedbackPanel(
         </div>`;
   const body =
     run === null
-      ? `<div class="status-box">No completed match yet. Save an agent and run a saved-roster match to generate coaching feedback.</div>`
+      ? `<div class="status-box">No completed match yet. Run the locked beta match to generate the first replay and feedback surfaces.</div>`
       : preview === undefined
         ? `<div class="status-box">${
             run.hasExternalFeedback
               ? "Feedback exists for this run, but no compact preview was available. Open the full feedback artifact."
-              : "This run has no external-agent feedback artifact yet. Run a saved-roster match with an external agent to generate one."
+              : "This run has no tester external-agent feedback artifact yet. External-agent feedback appears after a run that includes a saved tester agent."
           }</div>`
         : publicExternalFeedbackPreviewHtml(preview, previousPreview);
   return `<details id="agent-feedback" class="card feedback-card supporting-panel">
@@ -4720,11 +5031,13 @@ function publicExternalFeedbackComparisonHtml(
   if (previousPreview === undefined) {
     return `<div class="feedback-block">
       <h3>Before vs After</h3>
-      <p class="hint">Run one more saved-roster match after changing the agent policy to compare the new feedback against this run.</p>
+      <p class="hint">Run one more explicit external-agent match after changing the agent policy to compare the new feedback against this run.</p>
     </div>`;
   }
   const currentFix =
-    preview.priorityFixes[0] ?? preview.topSuggestions[0] ?? "No urgent fix detected.";
+    preview.priorityFixes[0] ??
+    preview.topSuggestions[0] ??
+    "No urgent fix detected.";
   const previousFix =
     previousPreview.priorityFixes[0] ??
     previousPreview.topSuggestions[0] ??
@@ -4761,11 +5074,11 @@ function comparisonCell(
         ? "good"
         : "bad";
   const deltaText =
-    format === "percent"
-      ? percentagePointDelta(delta)
-      : signedNumber(delta);
-  const currentText = format === "percent" ? percent(current) : numberCell(current);
-  const previousText = format === "percent" ? percent(previous) : numberCell(previous);
+    format === "percent" ? percentagePointDelta(delta) : signedNumber(delta);
+  const currentText =
+    format === "percent" ? percent(current) : numberCell(current);
+  const previousText =
+    format === "percent" ? percent(previous) : numberCell(previous);
   return `<div class="comparison-cell">
     <span>${escapeHtml(label)}</span>
     <strong>${escapeHtml(currentText)}</strong>
@@ -4808,11 +5121,14 @@ function publicAgentFeedbackHistoryHtml(
   runs: AgentDemoRunIndexEntry[],
   savedNations: ProxyWarNationEntry[],
 ): string {
-  const groups = publicAgentFeedbackHistoryGroups(runs, savedNations, 5).slice(0, 4);
+  const groups = publicAgentFeedbackHistoryGroups(runs, savedNations, 5).slice(
+    0,
+    4,
+  );
   if (groups.length === 0) {
     return `<div class="feedback-block">
       <h3>Per-Agent History</h3>
-      <p class="hint">No per-agent feedback history exists yet. Run a saved-roster match with external agents to build trends.</p>
+      <p class="hint">No per-agent feedback history exists yet. Run explicit external-agent matches to build trends.</p>
     </div>`;
   }
   return `<div class="feedback-block">
@@ -4846,14 +5162,12 @@ function publicAgentFeedbackHistoryGroups(
     for (const agent of preview.agents) {
       const key = normalizeAgentHistoryKey(agent.username) || agent.agentID;
       const policyChangelog = policyChangelogByAgent.get(key);
-      const group =
-        groups.get(key) ??
-        {
-          username: agent.username,
-          profile: agent.profile,
-          ...(policyChangelog !== undefined ? { policyChangelog } : {}),
-          entries: [],
-        };
+      const group = groups.get(key) ?? {
+        username: agent.username,
+        profile: agent.profile,
+        ...(policyChangelog !== undefined ? { policyChangelog } : {}),
+        entries: [],
+      };
       if (group.entries.length < maxEntriesPerAgent) {
         group.entries.push({
           runID: run.runID,
@@ -4864,7 +5178,9 @@ function publicAgentFeedbackHistoryGroups(
       groups.set(key, group);
     }
   }
-  return [...groups.values()].sort((a, b) => b.entries.length - a.entries.length);
+  return [...groups.values()].sort(
+    (a, b) => b.entries.length - a.entries.length,
+  );
 }
 
 function publicAgentFeedbackHistoryGroupHtml(
@@ -4954,7 +5270,8 @@ function agentDelta(
       : higherIsBetter === delta > 0
         ? "good"
         : "bad";
-  const text = format === "percent" ? percentagePointDelta(delta) : signedNumber(delta);
+  const text =
+    format === "percent" ? percentagePointDelta(delta) : signedNumber(delta);
   return `<div class="delta ${className}">${escapeHtml(text)}</div>`;
 }
 
@@ -4994,7 +5311,7 @@ function publicTesterEvidencePacketText(
   state: PublicTesterEvidenceState,
 ): string {
   return [
-    "ProxyWar tester evidence",
+    "Proxy War tester evidence",
     `Agent Card URL: ${state.agentCardUrl ?? "none pasted yet"}`,
     `Agent: ${state.agentName ?? "none saved yet"}`,
     `Decision endpoint: ${state.agentEndpoint ?? "none saved yet"}`,
@@ -5154,7 +5471,9 @@ function publicTournamentBestReplayLink(
   return null;
 }
 
-function publicTournamentAgentCard(agent: TournamentIndexShowcaseAgent): string {
+function publicTournamentAgentCard(
+  agent: TournamentIndexShowcaseAgent,
+): string {
   const tags = Array.isArray(agent.styleTags)
     ? agent.styleTags.filter((tag) => typeof tag === "string").slice(0, 4)
     : [];

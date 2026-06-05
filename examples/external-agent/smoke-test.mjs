@@ -39,7 +39,7 @@ const legalActions = [
 
 try {
   const result = await testEndpoint(endpointUrl);
-  console.log("ProxyWar starter self-test passed.");
+  console.log("Proxy War starter self-test passed.");
   console.log(`Endpoint: ${endpointUrl}`);
   console.log(`selectedLegalActionId: ${result.selectedLegalActionId}`);
   console.log(`reason: ${result.reason}`);
@@ -47,7 +47,7 @@ try {
     "Next: expose /agent-card.md and paste that Agent Card URL into Connect With One Link.",
   );
 } catch (error) {
-  console.error("ProxyWar starter self-test failed.");
+  console.error("Proxy War starter self-test failed.");
   console.error(`Endpoint: ${endpointUrl}`);
   console.error(`Fix: ${fixHint(error)}`);
   console.error(`Details: ${errorMessage(error)}`);
@@ -208,7 +208,7 @@ function fixHint(error) {
     return "The decision endpoint must return application/json with the strict decision object.";
   }
   if (message.includes("http 401") || message.includes("http 403")) {
-    return "If your starter requires PROXYWAR_AGENT_ENDPOINT_TOKEN, set PROXYWAR_AGENT_TEST_TOKEN to the same value for self-test and paste that beta-only token into ProxyWar's endpoint token field.";
+    return "If your starter requires PROXYWAR_AGENT_ENDPOINT_TOKEN, set PROXYWAR_AGENT_TEST_TOKEN to the same value for self-test and paste that beta-only token into Proxy War's endpoint token field.";
   }
   if (message.includes("invalid json") || message.includes("json")) {
     return "Return strict JSON only, with no markdown fence, prose wrapper, tool call, or code.";
@@ -220,6 +220,9 @@ function fixHint(error) {
     message.includes("proxywar_agent_llm_command")
   ) {
     return "Configure a backend first: PROXYWAR_AGENT_LLM_PROVIDER=codex-cli, claude-cowork, command, or openrouter.";
+  }
+  if (message.includes("not logged in") || message.includes("/login")) {
+    return "Claude CLI is installed but not logged in for terminal use. Run `claude`, type `/login`, complete the browser login, exit Claude, then rerun ./launch.sh claude-cowork.";
   }
   if (
     message.includes("could not start llm command") ||

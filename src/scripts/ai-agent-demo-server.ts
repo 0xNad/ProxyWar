@@ -1,5 +1,5 @@
 import { spawn, type ChildProcess } from "child_process";
-import { randomUUID } from "crypto";
+import { randomUUID, timingSafeEqual } from "crypto";
 import express, { type Request, type Response } from "express";
 import fs from "fs/promises";
 import http from "http";
@@ -29,6 +29,16 @@ import {
   saveProxyWarNation,
   syncProxyWarActiveRoster,
 } from "../server/agents/ProxyWarNationRegistry";
+import type { ProxyWarDoctrine } from "../server/agents/ProxyWarNationRegistry";
+import {
+  ExternalAgentRelayError,
+  ExternalAgentRelayStore,
+} from "../server/agents/ExternalAgentRelay";
+import type { ExternalAgentRequest } from "../server/agents/ExternalHttpAgentBrain";
+import {
+  agentStrategyProfiles,
+  type AgentStrategyProfile,
+} from "../server/agents/AgentTypes";
 import {
   betaSessionCookieHeader,
   clearBetaSessionCookieHeader,
@@ -52,6 +62,7 @@ import {
   checkExternalAgentEndpoint,
   normalizeExternalAgentHealthCheckInput,
 } from "../server/agents/ExternalAgentHealthCheck";
+import { resolveExternalAgentToken } from "../server/agents/ExternalAgentSecrets";
 import { assertExternalAgentEndpointAllowed } from "../server/agents/ExternalAgentNetworkPolicy";
 import {
   assertProxyWarActiveRosterExternalEndpointsHealthy,
@@ -99,7 +110,7 @@ const tournamentsRootDir = path.join(
 const evaluationsRootDir = path.join(process.cwd(), "artifacts", "ai-league-evals");
 const jobsRootDir = path.join(process.cwd(), "artifacts", "ai-league-demo-jobs");
 const jobsPath = path.join(jobsRootDir, "jobs.json");
-const configuredNationsRootDir = process.env.PROXYWAR_NATIONS_DIR?.trim();
+const configuredNationsRootDir = firstConfiguredEnv("PROXYWAR_NATIONS_DIR");
 const nationsRootDir =
   configuredNationsRootDir !== undefined && configuredNationsRootDir !== ""
     ? path.resolve(configuredNationsRootDir)
@@ -130,32 +141,68 @@ const jobs = new Map<string, AgentDemoJobRecord>(
 const queuedJobIDs: string[] = [];
 let runningJobID: string | null = null;
 let runningChild: ChildProcess | null = null;
-const maxQueuedJobs = positiveInt(process.env.PROXYWAR_MAX_QUEUED_JOBS, 3);
+const maxQueuedJobs = positiveInt(
+  firstConfiguredEnv("PROXYWAR_MAX_QUEUED_JOBS"),
+  3,
+);
 const rateLimiter = new ProxyWarRateLimiter({
-  windowMs: positiveInt(process.env.PROXYWAR_RATE_LIMIT_WINDOW_MS, 60_000),
+  windowMs: positiveInt(
+    firstConfiguredEnv("PROXYWAR_RATE_LIMIT_WINDOW_MS"),
+    60_000,
+  ),
   initialSnapshot: await readRateLimitState(),
 });
 const rateLimits = {
-  betaLogin: positiveInt(process.env.PROXYWAR_RATE_LIMIT_BETA_LOGIN, 20),
-  jobs: positiveInt(process.env.PROXYWAR_RATE_LIMIT_JOBS, 12),
-  nations: positiveInt(process.env.PROXYWAR_RATE_LIMIT_NATIONS, 30),
+  betaLogin: positiveInt(
+    firstConfiguredEnv("PROXYWAR_RATE_LIMIT_BETA_LOGIN"),
+    20,
+  ),
+  jobs: positiveInt(
+    firstConfiguredEnv("PROXYWAR_RATE_LIMIT_JOBS"),
+    12,
+  ),
+  nations: positiveInt(
+    firstConfiguredEnv("PROXYWAR_RATE_LIMIT_NATIONS"),
+    30,
+  ),
   externalCheck: positiveInt(
-    process.env.PROXYWAR_RATE_LIMIT_EXTERNAL_CHECK,
+    firstConfiguredEnv("PROXYWAR_RATE_LIMIT_EXTERNAL_CHECK"),
     60,
   ),
-  feedback: positiveInt(process.env.PROXYWAR_RATE_LIMIT_FEEDBACK, 30),
+  feedback: positiveInt(
+    firstConfiguredEnv("PROXYWAR_RATE_LIMIT_FEEDBACK"),
+    30,
+  ),
 };
-const betaAdminEnabled =
-  process.env.PROXYWAR_BETA_ADMIN_ENABLED === "true";
-const allowPrivateAgentEndpoints =
-  process.env.PROXYWAR_ALLOW_PRIVATE_AGENT_ENDPOINTS === "true";
+const betaAdminEnabled = envFlag("PROXYWAR_BETA_ADMIN_ENABLED");
+const allowPrivateAgentEndpoints = envFlag(
+  "PROXYWAR_ALLOW_PRIVATE_AGENT_ENDPOINTS",
+);
 const houseAgentBrain = loadProxyWarHouseAgentBrain(process.env);
+const agentRelay = new ExternalAgentRelayStore({
+  sessionTtlMs: positiveInt(
+    process.env.PROXYWAR_AGENT_RELAY_SESSION_TTL_MS,
+    2 * 60 * 60 * 1_000,
+  ),
+  requestTimeoutMs: positiveInt(
+    process.env.PROXYWAR_AGENT_RELAY_DECISION_TIMEOUT_MS,
+    120_000,
+  ),
+  redeliveryMs: positiveInt(
+    process.env.PROXYWAR_AGENT_RELAY_REDELIVERY_MS,
+    5_000,
+  ),
+});
+const relayActiveIdleMs = positiveInt(
+  process.env.PROXYWAR_AGENT_RELAY_ACTIVE_IDLE_MS,
+  90_000,
+);
 const interruptedJobsReset = resetInterruptedJobs();
 if (interruptedJobsReset > 0) {
   await persistJobs();
 }
 
-app.use(express.json({ limit: "32kb" }));
+app.use(express.json({ limit: "256kb" }));
 app.use(express.urlencoded({ extended: false }));
 app.use((_req, res, next) => {
   res.setHeader("X-Robots-Tag", "noindex, nofollow");
@@ -264,8 +311,58 @@ app.get("/protocol/proxywar-agent.schema.json", (_req, res) => {
   res.json(proxyWarAgentProtocolSchema());
 });
 
+app.get("/agent-start.sh", serveProxyWarAgentBootstrapScript);
 app.get("/docs/:artifact", servePublicDoc);
 app.get("/examples/external-agent/:artifact", servePublicExternalAgentExample);
+
+app.get("/api/agent-relay/sessions/:sessionID/poll", async (req, res) => {
+  try {
+    await restoreSavedRelaySessionIfPossible(req.params.sessionID, bearerToken(req));
+    const result = await agentRelay.poll({
+      sessionID: req.params.sessionID,
+      token: bearerToken(req),
+      waitMs: optionalPositiveInt(queryParam(req.query.waitMs)),
+    });
+    res.json(result);
+  } catch (error) {
+    sendRelayError(res, error);
+  }
+});
+
+app.post("/api/agent-relay/sessions/:sessionID/decisions", (req, res) => {
+  try {
+    const body = req.body as Record<string, unknown>;
+    const result = agentRelay.submitDecision({
+      sessionID: req.params.sessionID,
+      token: bearerToken(req),
+      requestID: typeof body.requestID === "string" ? body.requestID : "",
+      response: body,
+    });
+    res.json({ ok: true, requestID: result.requestID });
+  } catch (error) {
+    sendRelayError(res, error);
+  }
+});
+
+app.post("/api/agent-relay/sessions/:sessionID/requests", async (req, res) => {
+  try {
+    await restoreSavedRelaySessionIfPossible(req.params.sessionID, bearerToken(req));
+    const body = req.body as Record<string, unknown>;
+    const result = await agentRelay.requestDecision({
+      sessionID: req.params.sessionID,
+      token: bearerToken(req),
+      request: normalizeRelayDecisionRequest(body.request ?? body),
+      timeoutMs: optionalPositiveInt(body.timeoutMs),
+    });
+    res.json({
+      ok: true,
+      requestID: result.requestID,
+      responseText: result.responseText,
+    });
+  } catch (error) {
+    sendRelayError(res, error);
+  }
+});
 
 app.use((req, res, next) => {
   if (!betaAccess.enabled || hasValidBetaSession(req)) {
@@ -273,7 +370,7 @@ app.use((req, res, next) => {
     return;
   }
   if (req.path.startsWith("/api/")) {
-    res.status(401).json({ error: "ProxyWar beta invite required" });
+    res.status(401).json({ error: "Proxy War beta invite required" });
     return;
   }
   res.redirect(`/beta?next=${encodeURIComponent(req.originalUrl)}`);
@@ -517,11 +614,38 @@ app.post("/api/tester-dashboard/endpoint-health", async (req, res) => {
   try {
     const nations = await listProxyWarNations(nationsRootDir);
     const externalNations = nations.filter(
-      (nation) => nation.provider?.provider === "external-http",
+      (nation) =>
+        nation.provider?.provider === "external-http" ||
+        nation.provider?.provider === "external-relay",
     );
     const results = [];
     for (const nation of externalNations) {
       const provider = nation.provider;
+      if (provider?.provider === "external-relay") {
+        const live = agentRelay.hasActiveSession(
+          provider.sessionID,
+          relayActiveIdleMs,
+        );
+        results.push({
+          nationID: nation.nationID,
+          agentName: nation.agentName,
+          profile: nation.profile,
+          ok: live,
+          endpoint: relaySessionLabel(provider.relayBaseUrl, provider.sessionID),
+          latencyMs: 0,
+          ...(live
+            ? {
+                selectedLegalActionId: "live relay session",
+                reason: "Managed relay worker session is active.",
+              }
+            : {
+                failureReason: "managed relay session is not active",
+                fixHint:
+                  "Rerun the /agent-start.sh bootstrap command so the tester worker creates a fresh relay session.",
+              }),
+        });
+        continue;
+      }
       if (provider?.provider !== "external-http") continue;
       try {
         const result = await checkExternalAgentEndpoint(
@@ -567,6 +691,108 @@ app.post("/api/tester-dashboard/endpoint-health", async (req, res) => {
   }
 });
 
+app.post("/api/agent-relay/sessions", async (req, res) => {
+  if (!enforceRateLimit("nations", rateLimits.nations, req, res)) {
+    return;
+  }
+
+  try {
+    const body = req.body as Record<string, unknown>;
+    const queueMatch = body.queueMatch !== false;
+    if (queueMatch) {
+      if (!enforceRateLimit("jobs", rateLimits.jobs, req, res)) {
+        return;
+      }
+      if (runningJobID !== null && queuedJobIDs.length >= maxQueuedJobs) {
+        res.status(429).json({
+          ok: false,
+          error:
+            "The Proxy War demo queue is full. Wait for the current jobs to finish and try again.",
+          runningJobID,
+          queuedJobCount: queuedJobIDs.length,
+        });
+        return;
+      }
+    }
+    const agentName = cleanRelayAgentName(body.agentName);
+    const profile = cleanRelayProfile(body.profile);
+    const doctrine = cleanRelayDoctrine(body.doctrine);
+    const timeoutMs = optionalPositiveInt(body.timeoutMs) ?? 120_000;
+    const relay = agentRelay.createSession({
+      agentName,
+      profile,
+      relayBaseUrl: publicOriginForRequest(req),
+    });
+    const saved = await saveProxyWarNation(
+      {
+        agentName,
+        profile,
+        doctrine,
+        personality:
+          typeof body.personality === "string" && body.personality.trim() !== ""
+            ? body.personality
+            : "Managed relay starter agent. It receives canonical Proxy War decision requests over outbound polling.",
+        policyChangelog:
+          typeof body.policyChangelog === "string" ? body.policyChangelog : "",
+        agentMode: "external-relay",
+        relayBaseUrl: relay.relayBaseUrl,
+        relaySessionID: relay.sessionID,
+        relayToken: relay.sessionToken,
+        relayTimeoutMs: timeoutMs,
+      },
+      { nationsDir: nationsRootDir },
+    );
+    const activeRoster = await syncProxyWarActiveRoster({
+      nationsDir: nationsRootDir,
+      pinnedNationID: saved.nation.nationID,
+      maxSavedNations: 1,
+      includeCuratedDefaults: false,
+      minRosterSize: 1,
+    });
+    const request = normalizeAgentDemoJobRequest({
+      ...proxyWarTesterSavedRosterJobDefaults,
+      brain: houseAgentBrain,
+    });
+    const queued = queueMatch ? enqueueProxyWarJob(request) : null;
+    if (queued?.ok === false) {
+        agentRelay.closeSession({
+          sessionID: relay.sessionID,
+          token: relay.sessionToken,
+        });
+        res.status(429).json({
+          ok: false,
+          error: queued.error,
+          runningJobID,
+          queuedJobCount: queuedJobIDs.length,
+        });
+        return;
+      }
+
+    res.status(queueMatch ? 202 : 201).json({
+      ok: true,
+      relay,
+      nation: {
+        nationID: saved.nation.nationID,
+        agentName: saved.nation.agentName,
+        profile: saved.nation.profile,
+        fileName: saved.nation.fileName,
+      },
+      activeRosterCount: activeRoster.length,
+      jobRequest: request,
+      ...(queued?.ok === true
+        ? {
+            jobID: queued.job.jobID,
+            label: queued.job.label,
+            status: queued.job.status,
+            jobStatusUrl: `/api/jobs/${encodeURIComponent(queued.job.jobID)}`,
+          }
+        : {}),
+    });
+  } catch (error) {
+    sendRelayError(res, error);
+  }
+});
+
 app.post("/api/jobs", async (req, res) => {
   if (!enforceRateLimit("jobs", rateLimits.jobs, req, res)) {
     return;
@@ -577,8 +803,13 @@ app.post("/api/jobs", async (req, res) => {
       const activeRoster = await syncProxyWarActiveRoster({
         nationsDir: nationsRootDir,
         maxSavedNations: request.maxSavedNations,
+        includeCuratedDefaults: request.fillSavedRoster !== false,
+        minRosterSize: request.fillSavedRoster === false ? 1 : undefined,
       });
-      await assertProxyWarActiveRosterExternalEndpointsHealthy(activeRoster);
+      await assertProxyWarActiveRosterExternalEndpointsHealthy(activeRoster, {
+        relaySessionExists: (sessionID) =>
+          agentRelay.hasActiveSession(sessionID, relayActiveIdleMs),
+      });
     }
     const queued = enqueueProxyWarJob(request);
     if (!queued.ok) {
@@ -715,7 +946,7 @@ app.post("/api/agent-cards/import-and-run", async (req, res) => {
     res.status(429).json({
       ok: false,
       error:
-        "The ProxyWar demo queue is full. Wait for the current jobs to finish and try again.",
+        "The Proxy War demo queue is full. Wait for the current jobs to finish and try again.",
       runningJobID,
       queuedJobCount: queuedJobIDs.length,
     });
@@ -761,6 +992,8 @@ app.post("/api/agent-cards/import-and-run", async (req, res) => {
       nationsDir: nationsRootDir,
       pinnedNationID: result.nation.nationID,
       maxSavedNations: 1,
+      includeCuratedDefaults: false,
+      minRosterSize: 1,
     });
     const request = normalizeAgentDemoJobRequest({
       ...proxyWarTesterSavedRosterJobDefaults,
@@ -915,7 +1148,7 @@ app.get("/openfront-replay/:runID", (req, res) => {
 
 const renderer = maybeStartRenderer();
 const server = app.listen(port, host, () => {
-  console.log(`ProxyWar demo hub: ${serverUrls.localUrl}`);
+  console.log(`Proxy War demo hub: ${serverUrls.localUrl}`);
   if (serverUrls.lanUrls.length > 0) {
     console.log(`LAN access: ${serverUrls.lanUrls.join(", ")}`);
   }
@@ -923,10 +1156,10 @@ const server = app.listen(port, host, () => {
     console.log(`Public URL: ${serverUrls.publicUrl}`);
   }
   if (betaAccess.enabled) {
-    console.log(`ProxyWar closed beta: ${serverUrls.localUrl}/public`);
+    console.log(`Proxy War closed beta: ${serverUrls.localUrl}/public`);
     console.log("Invite gate is enabled. The invite code is not printed.");
   }
-  console.log(`ProxyWar renderer: ${rendererBaseUrl}`);
+  console.log(`Proxy War renderer: ${rendererBaseUrl}`);
   console.log("Press Ctrl-C to stop.");
 });
 
@@ -973,8 +1206,26 @@ async function loadPublicReadinessReport(
     allowPrivateAgentEndpoints,
     adminEnabled: betaAdminEnabled,
     savedExternalEndpointHealth:
-      await checkProxyWarActiveRosterExternalEndpoints(model.savedNations),
+      await checkProxyWarActiveRosterExternalEndpoints(
+        latestSavedExternalAgents(model.savedNations),
+        {
+          relaySessionExists: (sessionID) =>
+            agentRelay.hasActiveSession(sessionID, relayActiveIdleMs),
+        },
+      ),
   });
+}
+
+function latestSavedExternalAgents(
+  nations: Awaited<ReturnType<typeof loadAgentDemoHubModel>>["savedNations"],
+) {
+  return nations
+    .filter(
+      (nation) =>
+        nation.provider?.provider === "external-http" ||
+        nation.provider?.provider === "external-relay",
+    )
+    .slice(0, 1);
 }
 
 function inviteCodeFromBody(body: Record<string, unknown>): string {
@@ -989,6 +1240,171 @@ function endpointLabel(value: string): string {
   } catch {
     return "invalid endpoint";
   }
+}
+
+function relaySessionLabel(relayBaseUrl: string, sessionID: string): string {
+  try {
+    const url = new URL(
+      `/api/agent-relay/sessions/${encodeURIComponent(sessionID)}`,
+      relayBaseUrl,
+    );
+    return url.toString();
+  } catch {
+    return `managed relay session ${sessionID}`;
+  }
+}
+
+function bearerToken(req: Request): string | undefined {
+  const header = req.headers.authorization;
+  const value = Array.isArray(header) ? header[0] : header;
+  const match = value?.match(/^Bearer\s+(.+)$/i);
+  return match?.[1]?.trim();
+}
+
+async function restoreSavedRelaySessionIfPossible(
+  sessionID: string,
+  bearer: string | undefined,
+): Promise<void> {
+  if (agentRelay.hasSession(sessionID) || bearer === undefined || bearer === "") {
+    return;
+  }
+  const nations = await listProxyWarNations(nationsRootDir);
+  const saved = nations.find(
+    (nation) =>
+      nation.provider?.provider === "external-relay" &&
+      nation.provider.sessionID === sessionID,
+  );
+  const provider = saved?.provider;
+  if (saved === undefined || provider?.provider !== "external-relay") {
+    return;
+  }
+  let savedToken: string | undefined;
+  try {
+    savedToken = resolveExternalAgentToken(provider);
+  } catch {
+    return;
+  }
+  if (savedToken === undefined || !sameSecretValue(savedToken, bearer)) {
+    return;
+  }
+  agentRelay.restoreSession({
+    sessionID,
+    sessionToken: savedToken,
+    agentName: saved.agentName,
+    profile: saved.profile,
+    relayBaseUrl: provider.relayBaseUrl,
+  });
+}
+
+function sameSecretValue(left: string, right: string): boolean {
+  const leftBuffer = Buffer.from(left);
+  const rightBuffer = Buffer.from(right);
+  return (
+    leftBuffer.length === rightBuffer.length &&
+    timingSafeEqual(leftBuffer, rightBuffer)
+  );
+}
+
+function sendRelayError(res: Response, error: unknown): void {
+  if (error instanceof ExternalAgentRelayError) {
+    res.status(error.statusCode).json({
+      ok: false,
+      error: error.message,
+      code: error.code,
+      ...(error.fix !== undefined ? { fix: error.fix } : {}),
+    });
+    return;
+  }
+  res.status(400).json({
+    ok: false,
+    error: error instanceof Error ? error.message : "invalid managed relay request",
+  });
+}
+
+function publicOriginForRequest(req: Request): string {
+  if (serverUrls.publicUrl !== null) {
+    return serverUrls.publicUrl;
+  }
+  const forwardedHost = firstHeaderValue(req.headers["x-forwarded-host"]);
+  const host = forwardedHost ?? firstHeaderValue(req.headers.host) ?? "";
+  const forwardedProto = firstHeaderValue(req.headers["x-forwarded-proto"]);
+  const protocol =
+    forwardedProto ??
+    (host.startsWith("127.0.0.1") || host.startsWith("localhost")
+      ? "http"
+      : "https");
+  if (host === "") {
+    return serverUrls.localUrl;
+  }
+  return `${protocol}://${host}`.replace(/\/+$/, "");
+}
+
+function cleanRelayAgentName(value: unknown): string {
+  if (typeof value !== "string") {
+    return "Relay Frontier";
+  }
+  const cleaned = value.replace(/\s+/g, " ").trim();
+  if (cleaned.length < 2) {
+    return "Relay Frontier";
+  }
+  return cleaned.slice(0, 60);
+}
+
+function cleanRelayProfile(value: unknown): AgentStrategyProfile {
+  return typeof value === "string" &&
+    (agentStrategyProfiles as readonly string[]).includes(value)
+    ? (value as AgentStrategyProfile)
+    : "opportunistic";
+}
+
+function cleanRelayDoctrine(value: unknown): ProxyWarDoctrine {
+  const doctrines = [
+    "balanced",
+    "economic",
+    "fortress",
+    "diplomatic",
+    "pressure",
+  ] as const;
+  return typeof value === "string" && doctrines.includes(value as ProxyWarDoctrine)
+    ? (value as ProxyWarDoctrine)
+    : "balanced";
+}
+
+function optionalPositiveInt(value: unknown): number | undefined {
+  if (value === undefined || value === null || value === "") {
+    return undefined;
+  }
+  const parsed = typeof value === "number" ? value : Number(value);
+  return Number.isInteger(parsed) && parsed > 0 ? parsed : undefined;
+}
+
+function normalizeRelayDecisionRequest(value: unknown): ExternalAgentRequest {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) {
+    throw new ExternalAgentRelayError(
+      "Managed relay request body must be a JSON object.",
+      400,
+      "relay_request_invalid",
+      "Post the canonical Proxy War decision request under request.",
+    );
+  }
+  const request = value as Partial<ExternalAgentRequest>;
+  if (request.protocolVersion !== "proxywar-agent-v1") {
+    throw new ExternalAgentRelayError(
+      "Managed relay request has the wrong protocolVersion.",
+      400,
+      "relay_protocol_invalid",
+      "Use protocolVersion proxywar-agent-v1.",
+    );
+  }
+  if (!Array.isArray(request.legalActions) || request.legalActions.length === 0) {
+    throw new ExternalAgentRelayError(
+      "Managed relay request must include legalActions.",
+      400,
+      "relay_legal_actions_missing",
+      "Send the same legalActions array that the AgentBrain received.",
+    );
+  }
+  return request as ExternalAgentRequest;
 }
 
 async function assertExternalEndpointInputAllowed(
@@ -1038,7 +1454,7 @@ function enforceRateLimit(
   }
   res.setHeader("Retry-After", String(Math.ceil(result.retryAfterMs / 1_000)));
   res.status(429).json({
-    error: "Too many ProxyWar beta requests. Please wait and try again.",
+    error: "Too many Proxy War beta requests. Please wait and try again.",
   });
   return false;
 }
@@ -1102,13 +1518,13 @@ function proxyRendererRequest(
   res: express.Response,
 ): void {
   if (process.env.AI_LEAGUE_DEMO_RENDERER === "false") {
-    res.status(503).send("ProxyWar renderer is not running for this demo server.");
+    res.status(503).send("Proxy War renderer is not running for this demo server.");
     return;
   }
   if (!isLoopbackRendererBaseUrl(rendererBaseUrl)) {
     res
       .status(503)
-      .send("ProxyWar renderer proxy is restricted to a loopback renderer URL.");
+      .send("Proxy War renderer proxy is restricted to a loopback renderer URL.");
     return;
   }
   if (betaAccess.enabled && req.originalUrl.startsWith("/@fs")) {
@@ -1140,7 +1556,7 @@ function proxyRendererRequest(
   proxyReq.on("error", (error) => {
     res
       .status(502)
-      .send(`ProxyWar renderer is unavailable: ${error.message}`);
+      .send(`Proxy War renderer is unavailable: ${error.message}`);
   });
   proxyReq.end();
 }
@@ -1209,6 +1625,21 @@ function servePublicDoc(req: express.Request, res: express.Response): void {
       res.status(404).send("doc not found");
     }
   });
+}
+
+function serveProxyWarAgentBootstrapScript(
+  _req: express.Request,
+  res: express.Response,
+): void {
+  res.setHeader("content-type", "text/x-shellscript; charset=utf-8");
+  res.sendFile(
+    path.join(externalAgentExampleRootDir, "bootstrap.sh"),
+    (error) => {
+      if (error !== undefined) {
+        res.status(404).send("bootstrap script not found");
+      }
+    },
+  );
 }
 
 function servePublicExternalAgentExample(
@@ -1356,12 +1787,12 @@ function maybeStartRenderer(): ChildProcess | null {
   child.stdout.on("data", (chunk: Buffer) => process.stdout.write(chunk));
   child.stderr.on("data", (chunk: Buffer) => process.stderr.write(chunk));
   child.on("error", (error) => {
-    console.error(`ProxyWar renderer failed to start: ${error.message}`);
+    console.error(`Proxy War renderer failed to start: ${error.message}`);
   });
   child.on("close", (code) => {
     if (code !== 0 && code !== null) {
       console.error(
-        `ProxyWar renderer exited with code ${code}. If port ${rendererPort} is already in use, the hub will link to the existing process at ${rendererBaseUrl}.`,
+        `Proxy War renderer exited with code ${code}. If port ${rendererPort} is already in use, the hub will link to the existing process at ${rendererBaseUrl}.`,
       );
     }
   });
@@ -1449,7 +1880,7 @@ function enqueueProxyWarJob(
     return {
       ok: false,
       error:
-        "The ProxyWar demo queue is full. Wait for the current jobs to finish and try again.",
+        "The Proxy War demo queue is full. Wait for the current jobs to finish and try again.",
     };
   }
   const jobID = randomUUID();
@@ -1773,4 +2204,18 @@ function positiveInt(value: string | undefined, fallback: number): number {
   }
   const parsed = Number(value);
   return Number.isInteger(parsed) && parsed >= 0 ? parsed : fallback;
+}
+
+function firstConfiguredEnv(...names: string[]): string | undefined {
+  for (const name of names) {
+    const value = process.env[name];
+    if (value !== undefined && value.trim() !== "") return value.trim();
+  }
+  return undefined;
+}
+
+function envFlag(name: string): boolean {
+  return ["1", "true", "yes", "on"].includes(
+    process.env[name]?.trim().toLowerCase() ?? "",
+  );
 }

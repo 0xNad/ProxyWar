@@ -70,7 +70,7 @@ http
             agentName:
               process.env.PROXYWAR_AGENT_NAME ?? "Frontier SDK Agent",
           }),
-          message: "Paste agentCardUrl into ProxyWar Connect With One Link.",
+          message: "Paste agentCardUrl into Proxy War Connect With One Link.",
         }),
       );
       return;
@@ -101,7 +101,7 @@ http
       response.end(
         JSON.stringify({
           error: "missing or invalid bearer token",
-          fix: "Paste the same beta-only token into ProxyWar's endpoint token field. Do not put it in the Agent Card.",
+          fix: "Paste the same beta-only token into Proxy War's endpoint token field. Do not put it in the Agent Card.",
         }),
       );
       return;
@@ -129,7 +129,7 @@ http
   })
   .listen(port, host, () => {
     console.log(
-      `ProxyWar LLM starter agent listening at http://${host}:${port}${decisionPath}`,
+      `Proxy War LLM starter agent listening at http://${host}:${port}${decisionPath}`,
     );
     console.log(`Agent Card: http://${host}:${port}${cardPath}`);
     console.log(`LLM brain: ${llmProvider.label}`);

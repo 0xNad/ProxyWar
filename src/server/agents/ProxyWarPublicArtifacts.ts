@@ -32,11 +32,13 @@ export const proxyWarPublicDocs = [
 export const proxyWarPublicExternalAgentExamples = [
   "README.md",
   "simple-agent.mjs",
+  "relay-worker.mjs",
   "starter-framework.mjs",
   "agent-policy.mjs",
   "manifest.example.json",
   "package.json",
   "launch.sh",
+  "bootstrap.sh",
   ".env.example",
   "LICENSE",
   "PROXYWAR_AGENT_CARD.md",

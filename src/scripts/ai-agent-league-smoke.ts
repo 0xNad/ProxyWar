@@ -41,6 +41,7 @@ import {
   createDefaultAgentSpecs,
 } from "../server/agents/AgentLeagueMatch";
 import type { SpawnCandidate } from "../server/agents/AgentLeagueMatch";
+import { externalBrainCleanlinessReport } from "../server/agents/AgentExternalBrainCleanliness";
 import {
   AgentLocalGameMirror,
   waitForMirrorState,
@@ -65,6 +66,7 @@ import {
 import type { AgentManifest } from "../server/agents/AgentManifest";
 import { resolveExternalAgentToken } from "../server/agents/ExternalAgentSecrets";
 import { ExternalHttpAgentBrain } from "../server/agents/ExternalHttpAgentBrain";
+import { ExternalRelayAgentBrain } from "../server/agents/ExternalRelayAgentBrain";
 import type {
   AgentBrain,
   AgentBrainType,
@@ -110,9 +112,15 @@ async function run() {
   const brainMode = brainModeFromArgs(args, scenario);
   const runnerMode = runnerModeFromArgs(args);
   const stepLockedConfig = stepLockedConfigFromArgs(args);
+  const externalAgentMaxDecisionMs = positiveIntegerArg(
+    args,
+    "--external-agent-max-decision-ms=",
+    Math.min(stepLockedConfig.maxDecisionMs, 15_000),
+  );
   const disabledActionKinds = disabledActionKindsFromArgs(args);
   const botCount = nonNegativeIntegerArg(args, "--bots=", 0);
   const nationCount = nationsArg(args, "disabled");
+  const explicitAgentCount = args.some((arg) => arg.startsWith("--agents="));
   const agentCount = positiveIntegerArg(args, "--agents=", 4);
   const replayTailTurns = nonNegativeIntegerArg(args, "--replay-tail-turns=", 0);
   const manifestDir =
@@ -143,11 +151,19 @@ async function run() {
         ? codexCliConfig?.timeoutMs
         : realLlmConfig?.timeoutMs;
   const manifests =
-    manifestDir === null ? null : await loadAgentManifestsFromDirectory(manifestDir);
-  const specs =
-    manifests === null
-      ? createDefaultAgentSpecs(agentCount)
-      : manifests.map(agentManifestToSpec);
+    manifestDir === null
+      ? null
+      : await loadAgentManifestsFromDirectory(manifestDir, {
+          minAgents: explicitAgentCount ? 1 : 3,
+          maxAgents: explicitAgentCount ? Math.max(1, 8 - agentCount) : 8,
+        });
+  const manifestSpecs = manifests?.map(agentManifestToSpec) ?? [];
+  const houseSpecs =
+    manifests === null || explicitAgentCount ? createDefaultAgentSpecs(agentCount) : [];
+  const specs = manifests === null ? houseSpecs : [...manifestSpecs, ...houseSpecs];
+  if (specs.length > 8) {
+    throw new Error("AI league matches support 1 to 8 agent participants");
+  }
   const baseGameConfig = gameConfigForScenario(scenario, args);
   const selectedGameConfig = {
     ...baseGameConfig,
@@ -170,6 +186,7 @@ async function run() {
   );
   const hasManifestBrainOverride =
     manifests?.some((manifest) => manifestHasBrainOverride(manifest)) ?? false;
+  const manifestCount = manifests?.length ?? 0;
   const spawnPlan =
     scenario === "attack"
       ? buildAttackScenarioSpawnPlan(terrain.gameMap, {
@@ -193,7 +210,7 @@ async function run() {
         ? undefined
         : (spec, index) =>
             createBrainForManifestOrMode(
-              manifests?.[index],
+              index < manifestCount ? manifests?.[index] : undefined,
               spec,
               scenario,
               brainMode,
@@ -201,6 +218,7 @@ async function run() {
                 ? codexCliProvider
                 : realLlmProvider,
               decisionTimeoutMs,
+              externalAgentMaxDecisionMs,
             ),
   });
   const roster = agentRunRoster(participants);
@@ -331,7 +349,7 @@ async function run() {
         brainMode,
         records: allRecords,
       });
-      console.log("ProxyWar multi-agent smoke result", {
+      console.log("Proxy War multi-agent smoke result", {
         scenario,
         runnerMode,
         mirror: {
@@ -491,7 +509,7 @@ async function run() {
       records: league.decisionRecords(),
     });
 
-    console.log("ProxyWar multi-agent smoke result", {
+    console.log("Proxy War multi-agent smoke result", {
       scenario,
       runnerMode,
       mirror: {
@@ -514,6 +532,7 @@ async function run() {
       openFrontReplayUrl: `http://localhost:9000/ai-league-replay/${encodeURIComponent(runID)}`,
     });
   } finally {
+    codexCliProvider?.close();
     await game.end({ archive: false });
   }
 }
@@ -597,6 +616,7 @@ function stepLockedConfigFromArgs(
       2_000,
     ),
     maxDecisionMs: positiveIntegerArg(args, "--max-decision-ms=", 120_000),
+    requireWinner: args.includes("--require-winner"),
     waitForMirrorCatchup: !args.includes("--no-mirror-catchup"),
   };
 }
@@ -864,18 +884,39 @@ function createBrainForManifestOrMode(
   brainMode: SmokeBrainMode,
   provider: LlmProvider | null,
   providerTimeoutMs: number | undefined,
+  externalAgentMaxDecisionMs: number,
 ): AgentBrain {
   if (manifest?.provider?.provider === "external-http") {
     return new ExternalHttpAgentBrain({
       endpointUrl: manifest.provider.endpointUrl,
       token: resolveExternalAgentToken(manifest.provider),
-      timeoutMs: manifest.provider.timeoutMs ?? providerTimeoutMs,
+      timeoutMs: externalAgentTimeoutMs({
+        manifestTimeoutMs: manifest.provider.timeoutMs,
+        providerTimeoutMs,
+        externalAgentMaxDecisionMs,
+      }),
       profile: spec.profile,
     });
   }
-  if (manifest?.brainType === "external-http") {
+  if (manifest?.provider?.provider === "external-relay") {
+    return new ExternalRelayAgentBrain({
+      relayBaseUrl: manifest.provider.relayBaseUrl,
+      sessionID: manifest.provider.sessionID,
+      token: resolveExternalAgentToken(manifest.provider),
+      timeoutMs: externalAgentTimeoutMs({
+        manifestTimeoutMs: manifest.provider.timeoutMs,
+        providerTimeoutMs,
+        externalAgentMaxDecisionMs,
+      }),
+      profile: spec.profile,
+    });
+  }
+  if (
+    manifest?.brainType === "external-http" ||
+    manifest?.brainType === "external-relay"
+  ) {
     throw new Error(
-      `${manifest.agentName} uses external-http brainType but has no external-http provider`,
+      `${manifest.agentName} uses ${manifest.brainType} brainType but has no matching provider`,
     );
   }
   if (brainMode === "rule") {
@@ -884,10 +925,25 @@ function createBrainForManifestOrMode(
   return createBrainForMode(spec, scenario, brainMode, provider, providerTimeoutMs);
 }
 
+function externalAgentTimeoutMs(input: {
+  manifestTimeoutMs: number | undefined;
+  providerTimeoutMs: number | undefined;
+  externalAgentMaxDecisionMs: number;
+}): number {
+  const requested =
+    input.manifestTimeoutMs ?? input.providerTimeoutMs ?? input.externalAgentMaxDecisionMs;
+  return Math.max(
+    250,
+    Math.min(requested, input.externalAgentMaxDecisionMs),
+  );
+}
+
 function manifestHasBrainOverride(manifest: AgentManifest): boolean {
   return (
     manifest.brainType === "external-http" ||
-    manifest.provider?.provider === "external-http"
+    manifest.brainType === "external-relay" ||
+    manifest.provider?.provider === "external-http" ||
+    manifest.provider?.provider === "external-relay"
   );
 }
 
@@ -1179,59 +1235,32 @@ function assertRequiredExternalBrainSucceeded(input: {
     return;
   }
 
-  const externalCalls = input.records.filter(
-    (record) =>
-      record.decisionMetadata?.externalPlannerCall === true ||
-      record.decisionMetadata?.externalActionCall === true,
-  );
-  const parserFailures = input.records.filter(
-    (record) =>
-      record.decisionMetadata?.parseSuccess === false ||
-      record.decisionMetadata?.plannerParseOk === false,
-  );
-  const fallbacks = input.records.filter(
-    (record) =>
-      record.decisionMetadata?.fallbackUsed === true ||
-      record.decisionMetadata?.plannerFallbackUsed === true,
-  );
-  const rejected = input.records.filter((record) => !record.result.accepted);
-
-  if (
-    externalCalls.length > 0 &&
-    parserFailures.length === 0 &&
-    fallbacks.length === 0 &&
-    rejected.length === 0
-  ) {
+  const report = externalBrainCleanlinessReport(input);
+  if (report.ok) {
     return;
   }
-
-  const firstFailure =
-    parserFailures[0] ?? fallbacks[0] ?? rejected[0] ?? input.records[0];
-  const failureReason =
-    firstFailure?.decisionMetadata?.plannerParseFailureReason ??
-    firstFailure?.decisionMetadata?.parseFailureReason ??
-    firstFailure?.decisionMetadata?.brainErrorReason ??
-    firstFailure?.result.reason ??
-    "external brain did not produce a clean accepted decision";
 
   throw new Error(
     [
       `Required ${input.brainMode} run was not clean, so this is not a real Codex-controlled match.`,
-      `externalCalls=${externalCalls.length}`,
-      `parserFailures=${parserFailures.length}`,
-      `fallbacks=${fallbacks.length}`,
-      `rejectedIntents=${rejected.length}`,
-      `firstFailure=${String(failureReason)}`,
+      `externalCalls=${report.externalCalls}`,
+      `cleanExternalCalls=${report.cleanExternalCalls}`,
+      `parserFailures=${report.parserFailures}`,
+      `fallbacks=${report.fallbacks}`,
+      `rejectedIntents=${report.rejectedIntents}`,
+      `firstFailure=${report.firstFailureReason}`,
     ].join(" "),
   );
 }
 
 function requiresExternalBrainSuccess(brainMode: SmokeBrainMode): boolean {
+  if (process.env.AI_LEAGUE_REQUIRE_EXTERNAL_BRAIN_SUCCESS === "true") {
+    return true;
+  }
   if (brainMode !== "codex-cli" && brainMode !== "planner-codex-cli") {
     return false;
   }
   return (
-    process.env.AI_LEAGUE_REQUIRE_EXTERNAL_BRAIN_SUCCESS === "true" ||
     process.env.AI_LEAGUE_REQUIRE_CODEX_SUCCESS === "true"
   );
 }

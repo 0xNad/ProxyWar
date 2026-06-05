@@ -122,10 +122,10 @@ describe("AiLeagueReplayOverlay", () => {
 
     const overlay = document.getElementById("ai-league-replay-overlay");
     expect(overlay).not.toBeNull();
-    expect(overlay?.textContent).toContain("ProxyWar Replay");
+    expect(overlay?.textContent).toContain("Proxy War Replay");
     expect(overlay?.textContent).toContain("build:Defense Post:10");
     expect(overlay?.textContent).toContain(
-      "1 ProxyWar agents vs 10 built-in opponents",
+      "1 Proxy War agents vs 10 built-in opponents",
     );
     expect(overlay?.textContent).toContain("Recent action feed");
     expect(overlay?.textContent).toContain("chat: 1");
@@ -138,7 +138,7 @@ describe("AiLeagueReplayOverlay", () => {
     expect(overlay?.textContent).toContain("Match story: 74/100 promising");
     expect(overlay?.textContent).toContain("The match had expansion");
     expect(overlay?.textContent).toContain("No direct combat yet.");
-    expect(overlay?.textContent).toContain("real ProxyWar replay renderer");
+    expect(overlay?.textContent).toContain("real Proxy War replay renderer");
     expect(overlay?.querySelector("a")?.getAttribute("href")).toContain(
       "/ai-league-runs/run-render-1",
     );
@@ -352,7 +352,7 @@ describe("AiLeagueReplayOverlay", () => {
     );
     expect(
       document.getElementById("ai-league-replay-mode-banner")?.textContent,
-    ).toBe("Replay mode: watching ProxyWar agents");
+    ).toBe("Replay mode: watching Proxy War agents");
   });
 });
 

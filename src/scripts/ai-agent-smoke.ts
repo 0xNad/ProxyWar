@@ -79,7 +79,7 @@ const intent =
       };
 const queuedIntents = (game as unknown as { intents: StampedIntent[] }).intents;
 
-console.log("ProxyWar smoke result", {
+console.log("Proxy War smoke result", {
   join,
   intent,
   queuedIntents: queuedIntents.map((queuedIntent) => ({

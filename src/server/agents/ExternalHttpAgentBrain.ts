@@ -25,7 +25,7 @@ export interface ExternalHttpAgentBrainOptions {
   fallbackBrain?: AgentBrain;
 }
 
-interface ExternalAgentRequest {
+export interface ExternalAgentRequest {
   protocolVersion: "proxywar-agent-v1";
   agent: {
     agentID: string;
@@ -152,7 +152,7 @@ export class ExternalHttpAgentBrain implements AgentBrain {
       const init: RequestInit = {
         method: "POST",
         headers: this.headers(),
-        body: JSON.stringify(requestPayload(input)),
+        body: JSON.stringify(buildExternalAgentRequestPayload(input)),
         signal: controller.signal,
         redirect: "manual",
       };
@@ -218,7 +218,9 @@ export class ExternalHttpAgentBrain implements AgentBrain {
   }
 }
 
-function requestPayload(input: AgentBrainInput): ExternalAgentRequest {
+export function buildExternalAgentRequestPayload(
+  input: AgentBrainInput,
+): ExternalAgentRequest {
   const { observation, legalActions } = input;
   return {
     protocolVersion: "proxywar-agent-v1",
@@ -241,7 +243,7 @@ function requestPayload(input: AgentBrainInput): ExternalAgentRequest {
       risk: action.risk,
       metadata: action.metadata,
     })),
-    decisionSupport: buildDecisionSupport(observation, legalActions),
+    decisionSupport: buildExternalAgentDecisionSupport(observation, legalActions),
     responseContract: {
       selectedLegalActionId:
         "must exactly match one offered legalActions[].id",
@@ -251,7 +253,7 @@ function requestPayload(input: AgentBrainInput): ExternalAgentRequest {
   };
 }
 
-function buildDecisionSupport(
+export function buildExternalAgentDecisionSupport(
   observation: AgentBrainInput["observation"],
   legalActions: LegalAction[],
 ): ExternalAgentRequest["decisionSupport"] {

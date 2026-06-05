@@ -217,7 +217,7 @@ describe("ProxyWarPublicReadiness", () => {
 
     expect(report.status).toBe("warning");
     expect(formatProxyWarPublicReadinessReport(report)).toContain(
-      "ProxyWar public readiness: warning",
+      "Proxy War public readiness: warning",
     );
     expect(publicReadinessExitCode(report)).toBe(1);
     expect(publicReadinessExitCode(report, { allowWarnings: true })).toBe(0);

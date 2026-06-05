@@ -98,7 +98,7 @@ interface ExamplePolicyModule {
     cardPath?: string;
     agentName?: string;
     endpointTokenRequired?: boolean;
-    llmProvider?: { provider?: string };
+    llmProvider?: { provider?: string; command?: string };
   }): {
     ok: boolean;
     protocolVersion: string;
@@ -106,7 +106,12 @@ interface ExamplePolicyModule {
     agentCardUrl: string;
     auth: { decisionEndpoint: string; tokenPlacement: string };
     responseContract: { selectedLegalActionId: string };
-    llmProvider?: { provider: string; mode: string; configured: boolean };
+    llmProvider?: {
+      provider: string;
+      mode: string;
+      label: string;
+      configured: boolean;
+    };
   };
   createLlmCompleteFromEnv(options?: {
     provider?: string;
@@ -114,10 +119,12 @@ interface ExamplePolicyModule {
     args?: string[];
     timeoutMs?: number;
   }): ((prompt: string) => Promise<string>) | null;
+  defaultClaudeCommandArgs(model?: string): string[];
   createStarterAgent(options: {
     llmComplete?: (prompt: string) => Promise<string>;
     memory?: unknown;
     provider?: string;
+    policyReuseDecisions?: number;
   }): {
     decide(payload: unknown): Promise<{
       selectedLegalActionId: string;
@@ -204,6 +211,40 @@ function runStarterSmokeTest(endpointUrl: string): Promise<{
     const timeout = setTimeout(() => {
       child.kill("SIGKILL");
       reject(new Error(`smoke-test timed out: ${output}`));
+    }, 8_000);
+    child.stdout.setEncoding("utf8");
+    child.stderr.setEncoding("utf8");
+    child.stdout.on("data", (chunk) => {
+      output += chunk;
+    });
+    child.stderr.on("data", (chunk) => {
+      output += chunk;
+    });
+    child.on("error", (error) => {
+      clearTimeout(timeout);
+      reject(error);
+    });
+    child.on("close", (code) => {
+      clearTimeout(timeout);
+      resolve({ exitCode: code ?? -1, output });
+    });
+  });
+}
+
+function runStarterCommand(args: string[]): Promise<{
+  exitCode: number;
+  output: string;
+}> {
+  return new Promise((resolve, reject) => {
+    const child = spawn(args[0] ?? "", args.slice(1), {
+      cwd: path.join(process.cwd(), "examples", "external-agent"),
+      env: process.env,
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    let output = "";
+    const timeout = setTimeout(() => {
+      child.kill("SIGKILL");
+      reject(new Error(`starter command timed out: ${args.join(" ")}\n${output}`));
     }, 8_000);
     child.stdout.setEncoding("utf8");
     child.stderr.setEncoding("utf8");
@@ -352,6 +393,48 @@ describe("external-agent example policy", () => {
     expect(health.llmProvider?.mode).toBe("none");
   });
 
+  it("labels known local command backends in health metadata", async () => {
+    const policy = await loadPolicy();
+    const health = policy.createHealthResponse({
+      llmProvider: {
+        provider: "",
+        command:
+          'claude -p --max-turns 1 --disallowedTools "Bash,Edit,MultiEdit,Write,Read,WebFetch,WebSearch"',
+      },
+    });
+
+    expect(health.llmProvider).toMatchObject({
+      provider: "command",
+      mode: "local-command",
+      label: "Claude/Cowork command",
+      configured: true,
+      policyReuseDecisions: 1,
+    });
+  });
+
+  it("uses a non-interactive one-turn Claude CLI command by default", async () => {
+    const policy = await loadPolicy();
+    const args = policy.defaultClaudeCommandArgs();
+
+    expect(args).toContain("-p");
+    expect(args).toContain("--max-turns");
+    expect(args).toContain("1");
+    expect(args).toContain("--disallowedTools");
+    expect(args.join(" ")).toContain("Bash");
+    expect(args.join(" ")).toContain("Read");
+    expect(args.join(" ")).not.toContain("{{prompt}}");
+  });
+
+  it("keeps Claude CLI safety flags when selecting a model", async () => {
+    const policy = await loadPolicy();
+    const args = policy.defaultClaudeCommandArgs("claude-sonnet-4-6");
+
+    expect(args).toContain("-p");
+    expect(args).toContain("--disallowedTools");
+    expect(args).toContain("--model");
+    expect(args).toContain("claude-sonnet-4-6");
+  });
+
   it("can use a command-backed local agent instead of an API key", async () => {
     const policy = await loadPolicy();
     const script = [
@@ -390,35 +473,40 @@ describe("external-agent example policy", () => {
     expect(decision?.selectedLegalActionId).toBe("hold");
   });
 
-  it("the runnable starter exposes health, decision, and Agent Card routes", async () => {
-    const [source, smokeTest, launchScript, packageJson] = await Promise.all([
-      fs.readFile(
-        path.join(
-          process.cwd(),
-          "examples",
-          "external-agent",
-          "simple-agent.mjs",
+  it("the runnable starter exposes health, decision, Agent Card, and bootstrap routes", async () => {
+    const [source, smokeTest, launchScript, bootstrapScript, packageJson] =
+      await Promise.all([
+        fs.readFile(
+          path.join(
+            process.cwd(),
+            "examples",
+            "external-agent",
+            "simple-agent.mjs",
+          ),
+          "utf8",
         ),
-        "utf8",
-      ),
-      fs.readFile(
-        path.join(
-          process.cwd(),
-          "examples",
-          "external-agent",
-          "smoke-test.mjs",
+        fs.readFile(
+          path.join(
+            process.cwd(),
+            "examples",
+            "external-agent",
+            "smoke-test.mjs",
+          ),
+          "utf8",
         ),
-        "utf8",
-      ),
-      fs.readFile(
-        path.join(process.cwd(), "examples", "external-agent", "launch.sh"),
-        "utf8",
-      ),
-      fs.readFile(
-        path.join(process.cwd(), "examples", "external-agent", "package.json"),
-        "utf8",
-      ),
-    ]);
+        fs.readFile(
+          path.join(process.cwd(), "examples", "external-agent", "launch.sh"),
+          "utf8",
+        ),
+        fs.readFile(
+          path.join(process.cwd(), "examples", "external-agent", "bootstrap.sh"),
+          "utf8",
+        ),
+        fs.readFile(
+          path.join(process.cwd(), "examples", "external-agent", "package.json"),
+          "utf8",
+        ),
+      ]);
 
     expect(source).toContain("/health");
     expect(source).toContain("/agent-card.md");
@@ -434,8 +522,21 @@ describe("external-agent example policy", () => {
     expect(smokeTest).toContain("PROXYWAR_AGENT_TEST_TOKEN");
     expect(launchScript).toContain("does not source .env");
     expect(launchScript).toContain("npm run self-test");
+    expect(bootstrapScript).toContain("--invite-code");
+    expect(bootstrapScript).toContain("PROXYWAR_AGENT_ENDPOINT_TOKEN");
+    expect(bootstrapScript).toContain("codex-cli");
+    expect(bootstrapScript).toContain("claude-cowork");
+    expect(bootstrapScript).toContain("/api/agent-cards/import-and-run");
     expect(packageJson).toContain('"self-test"');
     expect(packageJson).toContain('"launch"');
+    expect(packageJson).toContain('"bootstrap.sh"');
+  });
+
+  it("bootstrap script is parseable by the system shell", async () => {
+    const result = await runStarterCommand(["bash", "-n", "bootstrap.sh"]);
+
+    expect(result.exitCode).toBe(0);
+    expect(result.output).toBe("");
   });
 
   it("starter self-test accepts the selectedLegalActionId health-check contract", async () => {
@@ -550,7 +651,7 @@ describe("external-agent example policy", () => {
         setTimeout(() => resolve(), 2_000).unref();
       });
     }
-    expect(output).toContain("ProxyWar LLM starter agent listening");
+    expect(output).toContain("Proxy War LLM starter agent listening");
   });
 
   it("starter self-test explains actionId as the wrong response field", async () => {
@@ -570,6 +671,32 @@ describe("external-agent example policy", () => {
       expect(result.exitCode).toBe(1);
       expect(result.output).toContain("starter self-test failed");
       expect(result.output).toContain("Return selectedLegalActionId");
+    } finally {
+      await server.close();
+    }
+  });
+
+  it("starter self-test explains Claude CLI login failures", async () => {
+    const server = await listenForSmokeTest(async (request, response) => {
+      for await (const _chunk of request) {
+        // Drain request body before responding.
+      }
+      response.writeHead(400, { "content-type": "application/json" });
+      response.end(
+        JSON.stringify({
+          error:
+            "LLM failed to select a valid, non-stale LegalAction.id: LLM command exited with 1: Not logged in · Please run /login",
+        }),
+      );
+    });
+
+    try {
+      const result = await runStarterSmokeTest(server.endpointUrl);
+
+      expect(result.exitCode).toBe(1);
+      expect(result.output).toContain("starter self-test failed");
+      expect(result.output).toContain("Run `claude`");
+      expect(result.output).toContain("/login");
     } finally {
       await server.close();
     }
@@ -1293,7 +1420,7 @@ ${JSON.stringify({
       ranked,
     );
 
-    expect(prompt).toContain("ProxyWar Agent Skill");
+    expect(prompt).toContain("Proxy War Agent Skill");
     expect(prompt).toContain("Choose exactly one `LegalAction.id`");
     expect(prompt).toContain("Selectable legal actions");
     expect(prompt).toContain("selectableActionIDs");
@@ -1335,6 +1462,143 @@ ${JSON.stringify({
 
     expect(decision?.selectedLegalActionId).toBe("build:Factory:2");
     expect(decision?.reason).toContain("Economy build");
+  });
+
+  it("reuses a recent LLM policy for CLI-friendly follow-up decisions", async () => {
+    const policy = await loadPolicy();
+    const prompts: string[] = [];
+    const agent = policy.createStarterAgent({
+      policyReuseDecisions: 3,
+      llmComplete: async (prompt: string) => {
+        prompts.push(prompt);
+        return JSON.stringify({
+          selectedLegalActionId: "expand:terra-nullius:10",
+          reason: "Keep expanding while safe neutral land is available.",
+          confidence: 0.86,
+        });
+      },
+    });
+    const payload = {
+      match: { gameID: "TEST" },
+      agent: { agentID: "agent-1" },
+      observation: {
+        profile: "opportunistic",
+        phase: "active",
+      },
+      legalActions: [
+        action("expand:terra-nullius:10", "attack", {
+          expansion: true,
+          targetID: null,
+          troopPercent: 10,
+        }),
+        action("build:Factory:2", "build", {
+          unit: "Factory",
+          role: "economic",
+          economicValue: 0.7,
+        }),
+        action("hold", "hold", {}, "none"),
+      ],
+    };
+
+    const first = await agent.decide(payload);
+    const second = await agent.decide({
+      ...payload,
+      observation: {
+        ...payload.observation,
+        memory: { recentActionKind: "attack", repeatedActionCount: 1 },
+      },
+    });
+
+    expect(first?.selectedLegalActionId).toBe("expand:terra-nullius:10");
+    expect(second?.selectedLegalActionId).toBe("expand:terra-nullius:10");
+    expect(second?.reason).toContain("Following recent LLM policy");
+    expect(prompts).toHaveLength(1);
+  });
+
+  it("continues a recent LLM policy when a refresh times out", async () => {
+    const policy = await loadPolicy();
+    let calls = 0;
+    const agent = policy.createStarterAgent({
+      policyReuseDecisions: 2,
+      llmComplete: async () => {
+        calls += 1;
+        if (calls > 1) {
+          throw new Error("LLM command timed out after 30000ms.");
+        }
+        return JSON.stringify({
+          selectedLegalActionId: "expand:terra-nullius:10",
+          reason: "Expand now, then keep using safe ranked alternatives.",
+          confidence: 0.8,
+        });
+      },
+    });
+    const firstPayload = {
+      match: { gameID: "TEST" },
+      agent: { agentID: "agent-1" },
+      observation: { profile: "opportunistic", phase: "active" },
+      legalActions: [
+        action("expand:terra-nullius:10", "attack", {
+          expansion: true,
+          targetID: null,
+          troopPercent: 10,
+        }),
+        action("build:Factory:2", "build", {
+          unit: "Factory",
+          role: "economic",
+          economicValue: 0.7,
+        }),
+        action("hold", "hold", {}, "none"),
+      ],
+    };
+
+    await agent.decide(firstPayload);
+    await agent.decide(firstPayload);
+    const timedOutRefreshDecision = await agent.decide({
+      ...firstPayload,
+      observation: {
+        profile: "opportunistic",
+        phase: "active",
+        memory: { repeatedActionKind: "attack", repeatedActionCount: 3 },
+      },
+      legalActions: [
+        action("build:Factory:2", "build", {
+          unit: "Factory",
+          role: "economic",
+          economicValue: 0.7,
+        }),
+        action("hold", "hold", {}, "none"),
+      ],
+    });
+
+    expect(calls).toBe(2);
+    expect(timedOutRefreshDecision?.selectedLegalActionId).toBe(
+      "build:Factory:2",
+    );
+    expect(timedOutRefreshDecision?.reason).toContain(
+      "after LLM refresh failed",
+    );
+  });
+
+  it("still fails visibly on timeout before any LLM policy exists", async () => {
+    const policy = await loadPolicy();
+    const agent = policy.createStarterAgent({
+      policyReuseDecisions: 4,
+      llmComplete: async () => {
+        throw new Error("LLM command timed out after 30000ms.");
+      },
+    });
+
+    await expect(
+      agent.decide({
+        match: { gameID: "TEST" },
+        agent: { agentID: "agent-1" },
+        observation: { profile: "opportunistic", phase: "active" },
+        legalActions: [
+          action("expand:terra-nullius:10", "attack", { expansion: true }),
+          action("hold", "hold", {}, "none"),
+        ],
+      }),
+    ).rejects.toThrow(/LLM command timed out/);
   });
 
   it("reprompts when the LLM chooses a stale repeated expansion", async () => {

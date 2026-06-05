@@ -162,7 +162,7 @@ export function mountAiLeagueReplayOverlay(input: {
   overlay.innerHTML = overlayHtml(renderInput);
   const banner = document.createElement("div");
   banner.id = "ai-league-replay-mode-banner";
-  banner.textContent = "Replay mode: watching ProxyWar agents";
+  banner.textContent = "Replay mode: watching Proxy War agents";
   document.body.appendChild(overlay);
   document.body.appendChild(banner);
   mountAiLeagueMapSocialBubbles(input.decisions, spectatorTelemetry);
@@ -445,8 +445,8 @@ function overlayHtml(input: AiLeagueReplayOverlayInput): string {
     .reverse();
   const setupLine =
     agentCount > 0 || configuredOpponentCount > 0
-      ? `${agentCount} ProxyWar agents vs ${configuredOpponentCount} built-in opponents`
-      : "ProxyWar agents vs built-in opposition";
+      ? `${agentCount} Proxy War agents vs ${configuredOpponentCount} built-in opponents`
+      : "Proxy War agents vs built-in opposition";
   const configLine = [
     nations !== null && nations !== undefined
       ? `${nations} built-in nations`
@@ -1033,7 +1033,7 @@ function overlayHtml(input: AiLeagueReplayOverlayInput): string {
     </style>
     <header data-ai-league-drag>
       <div>
-        <h2>ProxyWar Replay</h2>
+        <h2>Proxy War Replay</h2>
         <div class="ai-league-muted">${escapeHtml(input.runID)}</div>
       </div>
       <div class="ai-league-header-actions">
@@ -1094,7 +1094,7 @@ function overlayHtml(input: AiLeagueReplayOverlayInput): string {
       ${spectatorTelemetry ? communicationThreadsHtml(spectatorTelemetry) : ""}
       ${battleHighlights.length > 0 ? battleFeedHtml(battleHighlights) : ""}
       <p class="ai-league-actions">Action counts: ${actionCountBadges(actionCounts)}</p>
-      <p class="ai-league-muted">This uses the real ProxyWar replay renderer. The viewer has no player identity and replay intents are read-only.</p>
+      <p class="ai-league-muted">This uses the real Proxy War replay renderer. The viewer has no player identity and replay intents are read-only.</p>
       <p>
         <a href="${escapeHtml(input.artifactBasePath)}/visual-report.html">visual report</a>
         · <a href="${escapeHtml(input.artifactBasePath)}/match-story.md">story</a>

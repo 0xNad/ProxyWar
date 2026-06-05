@@ -1,13 +1,13 @@
-# ProxyWar Beta Tester Guide
+# Proxy War Beta Tester Guide
 
-ProxyWar is a spectator strategy league. You connect or configure an AI
+Proxy War is a spectator strategy league. You connect or configure an AI
 nation, run a match, and watch what your nation does.
 
 ## Join
 
 1. Open the beta link from the operator.
 2. Enter the invite code.
-3. You should land on the ProxyWar beta page.
+3. You should land on the Proxy War beta page.
 
 ## Configure A Reference Nation
 
@@ -38,13 +38,13 @@ one listed action id:
 }
 ```
 
-It cannot submit raw game commands. ProxyWar validates the selected id and
+It cannot submit raw game commands. Proxy War validates the selected id and
 submits the matching game intent server-side. See
 `docs/PROXYWAR_EXTERNAL_AGENT_API.md` for the full private v1 protocol.
 
 Use **Test Endpoint** before saving. A passing test means your service can read
-the protocol payload and choose one offered id. Your saved endpoint then appears
-in the **Next Match Queue** for the next saved-roster match.
+the protocol payload and choose one offered id. Your saved endpoint is retained
+for the tester match and future external-agent match modes.
 
 If you publish an Agent Card, paste its `/agent-card.md` URL into **Connect With
 One Link**. If you use the advanced manual form, paste the decision endpoint,
@@ -52,26 +52,25 @@ usually `/proxywar/decide`.
 
 ## Run A Match
 
-Use **Run Saved-Roster Match**. The tester-facing default health-checks the
-latest saved external agent and runs a bounded 12-strategy-round match so the
-queue returns a replay quickly; operators can still run longer matches
-separately.
+Use **Run Codex Match**. The tester-facing default is locked to one in-house
+Codex agent plus your latest saved external agent against two Easy built-in
+nations until a winner emerges.
 
-The server enters the latest saved nation into a step-locked autonomous match
-with LLM-backed ProxyWar house agents filling the other slots. Codex plans
-house-agent strategy; the server turns those plans into validated
-`LegalAction.id` choices.
+The server enters your saved external agent and one Codex-backed Proxy War
+agent into a step-locked autonomous match with two Easy built-in nation
+opponents. Codex plans house-agent strategy; every agent still returns or
+selects validated `LegalAction.id` choices.
 
 When the job finishes, the page should automatically open the rendered
-ProxyWar replay. You can also open:
+Proxy War replay. You can also open:
 
 - **Visual report** for the match story
 - **Match story** for a short recap, entertainment score, and boringness warnings
 - **Replay timeline** for decision-by-decision inspection
-- **ProxyWar replay** when available
+- **Proxy War replay** when available
 - **Scorecard** for objective-following and action quality
 
-The ProxyWar replay starts in a read-only spectator mode. It does not occupy a
+The Proxy War replay starts in a read-only spectator mode. It does not occupy a
 player slot and cannot submit intents. The AI panel shows recent attacks,
 builds, targets, quick-chat calls, latency, accepted/rejected status, and links
 to the durable artifacts.

@@ -84,7 +84,7 @@ async function loadReplayRecord(config: AnalyzerConfig): Promise<{
   const response = await fetch(url);
   if (!response.ok) {
     throw new Error(
-      `Failed to fetch ProxyWar replay ${config.gameID}: ${response.status} ${response.statusText}`,
+      `Failed to fetch Proxy War replay ${config.gameID}: ${response.status} ${response.statusText}`,
     );
   }
   const text = await response.text();

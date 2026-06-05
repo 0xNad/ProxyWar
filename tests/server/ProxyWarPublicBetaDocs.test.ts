@@ -2,7 +2,7 @@ import fs from "fs/promises";
 import path from "path";
 import { describe, expect, it } from "vitest";
 
-describe("ProxyWar public beta onboarding docs", () => {
+describe("Proxy War public beta onboarding docs", () => {
   it("keeps tester handoff, external-agent examples, and asset audit available", async () => {
     const root = process.cwd();
     const [
@@ -17,7 +17,9 @@ describe("ProxyWar public beta onboarding docs", () => {
       exampleAgentCard,
       exampleAgent,
       exampleSmokeTest,
+      exampleRelayWorker,
       exampleLaunch,
+      exampleBootstrap,
       examplePolicy,
       starterFramework,
       exampleManifest,
@@ -42,7 +44,10 @@ describe("ProxyWar public beta onboarding docs", () => {
         path.join(root, "docs", "PROXYWAR_ASSET_AND_LICENSE_AUDIT.md"),
         "utf8",
       ),
-      fs.readFile(path.join(root, "examples", "external-agent", "README.md"), "utf8"),
+      fs.readFile(
+        path.join(root, "examples", "external-agent", "README.md"),
+        "utf8",
+      ),
       fs.readFile(
         path.join(root, "examples", "external-agent", "PROXYWAR_AGENT_CARD.md"),
         "utf8",
@@ -56,7 +61,15 @@ describe("ProxyWar public beta onboarding docs", () => {
         "utf8",
       ),
       fs.readFile(
+        path.join(root, "examples", "external-agent", "relay-worker.mjs"),
+        "utf8",
+      ),
+      fs.readFile(
         path.join(root, "examples", "external-agent", "launch.sh"),
+        "utf8",
+      ),
+      fs.readFile(
+        path.join(root, "examples", "external-agent", "bootstrap.sh"),
         "utf8",
       ),
       fs.readFile(
@@ -89,8 +102,9 @@ describe("ProxyWar public beta onboarding docs", () => {
       ),
     ]);
 
-    const scripts = (JSON.parse(packageJson) as { scripts: Record<string, string> })
-      .scripts;
+    const scripts = (
+      JSON.parse(packageJson) as { scripts: Record<string, string> }
+    ).scripts;
 
     expect(scripts["agent:external-agent:dry-run"]).toContain(
       "proxywar-external-agent-dry-run.ts",
@@ -101,6 +115,9 @@ describe("ProxyWar public beta onboarding docs", () => {
     expect(scripts["agent:external-agent:sdk-sim"]).toContain(
       "proxywar-external-agent-sdk-sim.ts",
     );
+    expect(scripts["agent:external-agent:relay-sim"]).toContain(
+      "proxywar-external-agent-relay-sim.ts",
+    );
     expect(scripts["agent:public-readiness"]).toContain(
       "proxywar-public-readiness.ts",
     );
@@ -110,25 +127,49 @@ describe("ProxyWar public beta onboarding docs", () => {
     expect(startHere).toContain("npm run agent:external-agent:dry-run");
     expect(startHere).toContain("npm run agent:external-agent:failure-drill");
     expect(startHere).toContain("npm run agent:external-agent:sdk-sim");
+    expect(startHere).toContain("npm run agent:external-agent:relay-sim");
+    expect(startHere).toContain("/agent-start.sh");
+    expect(startHere).toContain("Managed Agent Relay");
     expect(startHere).toContain("LegalAction.id");
     expect(externalApi).toContain("examples/external-agent/simple-agent.mjs");
     expect(externalApi).toContain("Agent Card");
+    expect(externalApi).toContain("/agent-start.sh");
+    expect(externalApi).toContain("Managed Agent Relay");
+    expect(externalApi).toContain("/api/agent-relay/sessions");
+    expect(externalApi).toContain("auditable public starter repo");
+    expect(externalApi).toContain("not a network proxy");
+    expect(externalApi).toContain("--invite-code");
     expect(externalApi).toContain("createHealthResponse");
     expect(externalApi).toContain("unknown JSON field: actionId");
     expect(externalApi).toContain("Do not `source .env`");
     expect(externalApi).toContain("npm run self-test");
     expect(externalApi).toContain("PROXYWAR_AGENT_ENDPOINT_TOKEN");
+    expect(externalApi).toContain("spawn claude ENOENT");
+    expect(externalApi).toContain("Not logged in");
+    expect(externalApi).toContain("EADDRINUSE");
     expect(externalApi).toContain("npm run agent:external-agent:dry-run");
     expect(externalApi).toContain("npm run agent:external-agent:failure-drill");
     expect(externalApi).toContain("npm run agent:external-agent:sdk-sim");
+    expect(externalApi).toContain("npm run agent:external-agent:relay-sim");
     expect(testerHandoff).toContain("ProxyWar-starter-agent");
+    expect(testerHandoff).toContain("/agent-start.sh");
+    expect(testerHandoff).toContain("Managed Agent Relay");
+    expect(testerHandoff).toContain("short-lived remote sandbox");
+    expect(testerHandoff).toContain("not a network proxy");
+    expect(testerHandoff).toContain("auditable GitHub path");
+    expect(testerHandoff).toContain("claude -p");
     expect(testerHandoff).toContain("selectedLegalActionId");
     expect(testerHandoff).toContain("npm run self-test");
-    expect(testerHandoff).toContain("d713535");
+    expect(testerHandoff).toContain("fba21ea");
     expect(testerHandoff).toContain("Could not start LLM command claude");
     expect(testerHandoff).toContain("PROXYWAR_AGENT_ENDPOINT_TOKEN");
     expect(testerHandoff).toContain("401");
-    expect(testerHandoff).toContain("Starter commit from `git rev-parse --short HEAD`");
+    expect(testerHandoff).toContain("spawn claude ENOENT");
+    expect(testerHandoff).toContain("Not logged in");
+    expect(testerHandoff).toContain("EADDRINUSE");
+    expect(testerHandoff).toContain(
+      "Starter commit from `git rev-parse --short HEAD`",
+    );
     expect(testerHandoff).toContain("Common Fixes");
     expect(testerHandoff).toContain("Send Back After A Run");
     expect(testerHandoff).not.toContain("PROXYWAR_OPERATOR_RUNBOOK");
@@ -143,6 +184,7 @@ describe("ProxyWar public beta onboarding docs", () => {
     expect(publicDemo).toContain("PROXYWAR_TESTER_HANDOFF.md");
     expect(publicDemo).toContain("PROXYWAR_ASSET_AND_LICENSE_AUDIT.md");
     expect(publicDemo).toContain("/examples/external-agent/simple-agent.mjs");
+    expect(publicDemo).toContain("/examples/external-agent/bootstrap.sh");
     expect(publicDemo).toContain("/examples/external-agent/AGENT_SKILL.md");
     expect(publicDemo).toContain("agent:external-agent:dry-run");
     expect(publicDemo).toContain("raw run-directory serving is restricted");
@@ -156,15 +198,28 @@ describe("ProxyWar public beta onboarding docs", () => {
     expect(exampleReadme).toMatch(/Test\s+Endpoint/);
     expect(exampleReadme).toContain("PROXYWAR_AGENT_CARD.md");
     expect(exampleReadme).toContain("npm run agent:external-agent:dry-run");
-    expect(exampleReadme).toContain("npm run agent:external-agent:failure-drill");
+    expect(exampleReadme).toContain(
+      "npm run agent:external-agent:failure-drill",
+    );
     expect(exampleReadme).toContain("npm run agent:external-agent:sdk-sim");
+    expect(exampleReadme).toContain("npm run agent:external-agent:relay-sim");
     expect(exampleReadme).toContain("starter-framework.mjs");
     expect(exampleReadme).toContain("Template Package Readiness");
+    expect(exampleReadme).toContain("One-Command Bootstrap");
+    expect(exampleReadme).toContain("Managed Agent Relay");
+    expect(exampleReadme).toContain("auditable GitHub path");
+    expect(exampleReadme).toContain("not a network proxy");
+    expect(exampleReadme).toContain("/api/agent-relay/sessions");
+    expect(exampleReadme).toContain("relay-worker.mjs");
+    expect(exampleReadme).toContain("/agent-start.sh");
+    expect(exampleReadme).toContain("--invite-code");
     expect(exampleReadme).toContain("/agent-card.md");
     expect(exampleReadme).toContain("URL Map");
     expect(exampleReadme).toContain("unknown JSON field: actionId");
     expect(exampleReadme).toContain("PROXYWAR_AGENT_PUBLIC_URL");
     expect(exampleReadme).toContain("PROXYWAR_AGENT_ENDPOINT_TOKEN");
+    expect(exampleReadme).toContain("Please run /login");
+    expect(exampleReadme).toContain("EADDRINUSE");
     expect(exampleReadme).toContain("LLM-backed");
     expect(exampleReadme).toContain("Codex CLI");
     expect(exampleReadme).toContain("Claude/Cowork");
@@ -182,8 +237,22 @@ describe("ProxyWar public beta onboarding docs", () => {
     expect(exampleSmokeTest).toContain("health-check:expand");
     expect(exampleSmokeTest).toContain("selectedLegalActionId");
     expect(exampleSmokeTest).toContain("PROXYWAR_AGENT_TEST_ENDPOINT_URL");
+    expect(exampleRelayWorker).toContain("PROXYWAR_AGENT_RELAY_SESSION_ID");
+    expect(exampleRelayWorker).toContain("selectedLegalActionId");
+    expect(exampleRelayWorker).toContain("createStarterAgent");
+    expect(exampleRelayWorker).toContain("error: message.slice(0, 500)");
+    expect(exampleRelayWorker).not.toContain('selectedLegalActionId: "invalid"');
     expect(exampleLaunch).toContain("decision_url=");
     expect(exampleLaunch).toContain("PROXYWAR_AGENT_TEST_ENDPOINT_URL");
+    expect(exampleLaunch).toContain("Port $port on $host is already in use");
+    expect(exampleLaunch).toContain("no `claude` command was found");
+    expect(exampleBootstrap).toContain("/api/agent-cards/import-and-run");
+    expect(exampleBootstrap).toContain("/api/agent-relay/sessions");
+    expect(exampleBootstrap).toContain("npm run relay -- --self-test");
+    expect(exampleBootstrap).toContain("PROXYWAR_AGENT_ENDPOINT_TOKEN");
+    expect(exampleBootstrap).toContain("--exit-after-ready");
+    expect(exampleBootstrap).toContain("cloudflared");
+    expect(exampleBootstrap).toContain("localtunnel");
     expect(examplePolicy).toContain("createStarterAgent");
     expect(examplePolicy).toContain("createAgentCardMarkdown");
     expect(examplePolicy).toContain("createHealthResponse");
@@ -202,6 +271,8 @@ describe("ProxyWar public beta onboarding docs", () => {
     expect(examplePackage).toContain('"start"');
     expect(examplePackage).toContain('"launch"');
     expect(examplePackage).toContain('"self-test"');
+    expect(examplePackage).toContain('"relay"');
+    expect(examplePackage).toContain("relay-worker.mjs");
     expect(examplePackage).toContain("smoke-test.mjs");
     expect(examplePackage).toContain('"exports"');
     expect(exampleEnv).toContain("OPENROUTER_API_KEY");
@@ -214,6 +285,9 @@ describe("ProxyWar public beta onboarding docs", () => {
     expect(exampleAgent).not.toContain("intent:");
     expect(exampleManifest).toContain('"provider": "external-http"');
     expect(exampleSkill).toContain("Never emit raw game intents");
+    expect(exampleSkill).toContain("/agent-start.sh");
+    expect(exampleSkill).toContain("short-lived remote");
+    expect(exampleSkill).toContain("not a network proxy");
     expect(exampleSkill).toContain("npm run self-test");
     expect(exampleSkill).toContain("PROXYWAR_AGENT_ENDPOINT_TOKEN");
   });

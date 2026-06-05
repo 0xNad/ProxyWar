@@ -77,7 +77,7 @@ describe("PublicAssetManifest", () => {
       path.join(resourcesDir, "manifest.json"),
       JSON.stringify(
         {
-          name: "ProxyWar",
+          name: "Proxy War",
           icons,
         },
         null,

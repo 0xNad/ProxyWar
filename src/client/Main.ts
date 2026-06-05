@@ -803,7 +803,7 @@ class Client {
         return;
       }
       alert(
-        `ProxyWar replay artifacts are missing for run ${runID}. Try a newer completed match from the Recent Matches list.`,
+        `Proxy War replay artifacts are missing for run ${runID}. Try a newer completed match from the Recent Matches list.`,
       );
       return;
     }

@@ -96,7 +96,7 @@ try {
     path.join(dryRunDir, "external-agent-dry-run-summary.json"),
     `${JSON.stringify(summary, null, 2)}\n`,
   );
-  console.log("ProxyWar external-agent dry run passed", summary);
+  console.log("Proxy War external-agent dry run passed", summary);
 } finally {
   for (const child of children) {
     if (child.exitCode === null) child.kill("SIGTERM");

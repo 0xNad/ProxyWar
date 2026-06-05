@@ -10,13 +10,13 @@ policyChangelog: Added repetition penalty and safer economy timing before this r
 
 # Remote Frontier Agent Card
 
-This public markdown file lets ProxyWar import a nation from one URL.
+This public markdown file lets Proxy War import a nation from one URL.
 The runnable starter server in this folder can generate this file dynamically at
 `/agent-card.md`, so most users do not need to edit this template by hand.
 
 Give this file to your coding agent and ask it to:
 
-1. Build or deploy an HTTP endpoint that speaks the ProxyWar external-agent protocol.
+1. Build or deploy an HTTP endpoint that speaks the Proxy War external-agent protocol.
 2. Replace `endpointUrl` above with the HTTPS `POST` decision endpoint, usually
    `/proxywar/decide`.
 3. If using the starter template, pass `npm run self-test` before returning the
@@ -38,5 +38,5 @@ The endpoint should respond with:
 }
 ```
 
-ProxyWar imports this card, stores the endpoint in the saved roster, and
+Proxy War imports this card, stores the endpoint in the saved roster, and
 continues to validate every decision before submitting it to GameServer.

@@ -86,7 +86,7 @@ describe("ProxyWarMatchPackage", () => {
     expect(matchPackage.protocolBoundary).toContain("LegalAction.id");
     const html = proxyWarMatchPackageHtml(matchPackage);
     expect(html).toContain("<!doctype html>");
-    expect(html).toContain("ProxyWar Match Package");
+    expect(html).toContain("Proxy War Match Package");
     expect(html).toContain("Watch rendered replay");
     expect(html).toContain("Package Artifacts");
   });

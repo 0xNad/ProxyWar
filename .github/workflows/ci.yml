@@ -60,6 +60,20 @@ jobs:
       - run: npm ci
       - run: npx eslint --format gha
 
+  prettier:
+    name: 🎨 Prettier
+    if: ${{ github.repository == 'openfrontio/OpenFrontIO' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "24"
+          cache: "npm"
+      - run: npm ci
+      - run: npx prettier --check .
+
   gen-maps:
     name: 🗺️ Generated maps up to date
     runs-on: ubuntu-latest

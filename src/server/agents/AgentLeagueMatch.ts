@@ -76,8 +76,8 @@ export interface RunAgentDecisionTurnOptions {
 }
 
 export function createDefaultAgentSpecs(count = 4): AgentSpec[] {
-  if (count < 3 || count > 8) {
-    throw new Error("AI Nations League local matches support 3 to 8 agents");
+  if (count < 1 || count > 8) {
+    throw new Error("AI Nations League local matches support 1 to 8 agents");
   }
 
   return Array.from({ length: count }, (_, index) => {
@@ -170,6 +170,227 @@ export class AgentLeagueMatchRunner {
   async runDecisionTurn(
     options: RunAgentDecisionTurnOptions = {},
   ): Promise<AgentDecisionRecord[]> {
+    if (options.phaseOverride === "spawn") {
+      return this.runDecisionTurnSerial(options);
+    }
+
+    const turnSpawnCandidates = [
+      ...(options.spawnCandidates ?? this.options.spawnCandidates),
+    ];
+    const startingRecordCount = this.records.length;
+    const decisionInputs = this.options.participants.map((participant) => {
+      const observationInput: BuildAgentObservationInput = {
+        agentID: participant.runner.agentID,
+        clientID: participant.runner.clientID(),
+        username: participant.spec.username,
+        profile: participant.spec.profile,
+        gameID: this.options.game.id,
+        turnNumber: options.turnNumber ?? 0,
+        gameState: options.gameState,
+        phaseOverride: options.phaseOverride,
+        objective: this.objectiveManager.currentObjective(
+          participant.runner.agentID,
+        ),
+        recentDecisions: this.recentDecisionsFor(participant),
+      };
+      const initialObservation = this.observationBuilder.build(observationInput);
+      const recentCommunications = this.recentCommunicationSignalsFor(
+        participant,
+        initialObservation,
+      );
+      const baseObservation =
+        recentCommunications.length === 0
+          ? initialObservation
+          : this.observationBuilder.build({
+              ...observationInput,
+              recentCommunications,
+            });
+      const legalActions = this.filterDisabledActionKinds(
+        this.legalActionBuilder.build({
+          observation: baseObservation,
+          spawnCandidates: turnSpawnCandidates,
+        }),
+      );
+      const objective = this.objectiveManager.objectiveFor({
+        agentID: participant.runner.agentID,
+        profile: participant.spec.profile,
+        observation: baseObservation,
+        legalActions,
+        turnNumber: baseObservation.turnNumber,
+      });
+      const observation: AgentObservation = {
+        ...baseObservation,
+        objective,
+      };
+      return {
+        participant,
+        observation,
+        observationSummary: this.observationBuilder.summarize(observation),
+        legalActions,
+      };
+    });
+
+    const decisions = await Promise.all(
+      decisionInputs.map(async (input) => {
+        const decisionStartedAt = Date.now();
+        const decision = await decideWithSafetyFallback({
+          brain: input.participant.brain,
+          fallbackProfile: input.participant.spec.profile,
+          observation: input.observation,
+          legalActions: input.legalActions,
+          maxDecisionMs: options.maxDecisionMs,
+        });
+        return {
+          ...input,
+          decision,
+          decisionLatencyMs: Date.now() - decisionStartedAt,
+        };
+      }),
+    );
+
+    let availableCandidates = [...turnSpawnCandidates];
+    const sameTurnDiplomacyParticipants = new Set<string>();
+    const sameTurnAllianceRequests = new Set<string>();
+    const sameTurnBuildTiles: number[] = [];
+
+    for (const input of decisions) {
+      const submissionLegalActions = this.filterDisabledActionKinds(
+        this.filterSameTurnBuildActions(
+          this.filterSameTurnDiplomacyActions(
+            this.filterSameTurnSpawnActions(
+              input.legalActions,
+              availableCandidates,
+            ),
+            input.observation,
+            sameTurnDiplomacyParticipants,
+            sameTurnAllianceRequests,
+          ),
+          options.gameState,
+          sameTurnBuildTiles,
+        ),
+      );
+      const { participant, observation, decision, decisionLatencyMs } = input;
+      const requestedActionIDs = requestedDecisionActionIDs(decision);
+      const rejectedActionIDs: string[] = [];
+      const selectedActions: Array<{
+        action: LegalAction | null;
+        requestedActionID: string;
+        reason: string;
+      }> = [];
+
+      for (const actionID of requestedActionIDs) {
+        const actionDecision: AgentDecision = { ...decision, actionID };
+        const validation = this.decisionValidator(
+          actionDecision,
+          submissionLegalActions,
+        );
+        if (validation.ok) {
+          selectedActions.push({
+            action: validation.action,
+            requestedActionID: actionID,
+            reason: decision.reason,
+          });
+        } else {
+          rejectedActionIDs.push(actionID);
+        }
+      }
+
+      if (selectedActions.length === 0) {
+        const validation = this.decisionValidator(
+          decision,
+          submissionLegalActions,
+        );
+        const action = actionFromValidation(validation);
+        selectedActions.push({
+          action,
+          requestedActionID: decision.actionID,
+          reason: decisionReason(decision, validation, action),
+        });
+      }
+
+      selectedActions.forEach((selected, batchIndex) => {
+        const batchDecision: AgentDecision = {
+          ...decision,
+          actionID: selected.requestedActionID,
+          metadata: batchDecisionMetadata({
+            metadata: decision.metadata,
+            batchIndex,
+            batchSize: selectedActions.length,
+            requestedActionIDs,
+            rejectedActionIDs,
+          }),
+        };
+        const result = selected.action
+          ? this.submitLegalAction(participant.runner, selected.action)
+          : {
+              accepted: false,
+              reason: "no legal fallback action available",
+              submittedIntent: null,
+            };
+        const record = this.recordDecision({
+          participant,
+          turnNumber: observation.turnNumber,
+          observationSummary: input.observationSummary,
+          observation,
+          legalActions: submissionLegalActions,
+          chosenAction: selected.action,
+          decision: batchDecision,
+          decisionLatencyMs,
+          reason: selected.reason,
+          result,
+        });
+
+        if (selected.action?.kind === "spawn") {
+          availableCandidates = this.removeNearbySpawnCandidates(
+            availableCandidates,
+            selected.action,
+          );
+        }
+        this.reserveSameTurnDiplomacy(
+          selected.action,
+          observation,
+          sameTurnDiplomacyParticipants,
+          sameTurnAllianceRequests,
+        );
+        this.reserveSameTurnBuild(selected.action, sameTurnBuildTiles);
+
+        this.log.info("league agent decision recorded", {
+          sequence: record.sequence,
+          agentID: record.agentID,
+          profile: record.profile,
+          observationSummary: record.observationSummary,
+          objectiveKind: record.objectiveKind,
+          objectiveAligned: record.objectiveAligned,
+          legalActionIDs: record.legalActionIDs,
+          legalActionIDsByKind: record.legalActionIDsByKind,
+          chosenActionID: record.chosenActionID,
+          chosenActionKind: record.chosenActionKind,
+          chosenActionMetadata: record.chosenActionMetadata,
+          runtimeMode: record.decisionMetadata?.runtimeMode,
+          plannerSource: record.decisionMetadata?.plannerSource,
+          executorSource: record.decisionMetadata?.executorSource,
+          actionSelectionSource: record.decisionMetadata?.actionSelectionSource,
+          externalPlannerCall: record.decisionMetadata?.externalPlannerCall,
+          externalActionCall: record.decisionMetadata?.externalActionCall,
+          rawProviderOutputPresent:
+            record.decisionMetadata?.rawProviderOutputPresent,
+          attackActionIDs: record.attackActionIDs,
+          decisionMetadata: compactDecisionMetadata(record.decisionMetadata),
+          decisionLatencyMs: record.decisionLatencyMs,
+          intent: record.intent,
+          accepted: result.accepted,
+          reason: record.reason,
+          fallbackUsed: record.decisionMetadata?.fallbackUsed ?? false,
+        });
+      });
+    }
+
+    return this.records.slice(startingRecordCount);
+  }
+
+  private async runDecisionTurnSerial(
+    options: RunAgentDecisionTurnOptions = {},
+  ): Promise<AgentDecisionRecord[]> {
     let availableCandidates = [
       ...(options.spawnCandidates ?? this.options.spawnCandidates),
     ];
@@ -240,116 +461,145 @@ export class AgentLeagueMatchRunner {
         maxDecisionMs: options.maxDecisionMs,
       });
       const decisionLatencyMs = Date.now() - decisionStartedAt;
-      const requestedActionIDs = requestedDecisionActionIDs(decision);
-      const rejectedActionIDs: string[] = [];
-      const selectedActions: Array<{
-        action: LegalAction | null;
-        requestedActionID: string;
-        reason: string;
-      }> = [];
-
-      for (const actionID of requestedActionIDs) {
-        const actionDecision: AgentDecision = { ...decision, actionID };
-        const validation = this.decisionValidator(actionDecision, legalActions);
-        if (validation.ok) {
-          selectedActions.push({
-            action: validation.action,
-            requestedActionID: actionID,
-            reason: decision.reason,
-          });
-        } else {
-          rejectedActionIDs.push(actionID);
-        }
-      }
-
-      if (selectedActions.length === 0) {
-        const validation = this.decisionValidator(decision, legalActions);
-        const action = actionFromValidation(validation);
-        selectedActions.push({
-          action,
-          requestedActionID: decision.actionID,
-          reason: decisionReason(decision, validation, action),
-        });
-      }
-
-      selectedActions.forEach((selected, batchIndex) => {
-        const batchDecision: AgentDecision = {
-          ...decision,
-          actionID: selected.requestedActionID,
-          metadata: batchDecisionMetadata({
-            metadata: decision.metadata,
-            batchIndex,
-            batchSize: selectedActions.length,
-            requestedActionIDs,
-            rejectedActionIDs,
-          }),
-        };
-        const result = selected.action
-          ? this.submitLegalAction(participant.runner, selected.action)
-          : {
-              accepted: false,
-              reason: "no legal fallback action available",
-              submittedIntent: null,
-            };
-        const record = this.recordDecision({
-          participant,
-          turnNumber: observation.turnNumber,
-          observationSummary: this.observationBuilder.summarize(observation),
-          observation,
-          legalActions,
-          chosenAction: selected.action,
-          decision: batchDecision,
-          decisionLatencyMs,
-          reason: selected.reason,
-          result,
-        });
-
-        if (selected.action?.kind === "spawn") {
-          availableCandidates = this.removeNearbySpawnCandidates(
-            availableCandidates,
-            selected.action,
-          );
-        }
-        this.reserveSameTurnDiplomacy(
-          selected.action,
-          observation,
-          sameTurnDiplomacyParticipants,
-          sameTurnAllianceRequests,
-        );
-        this.reserveSameTurnBuild(selected.action, sameTurnBuildTiles);
-
-        this.log.info("league agent decision recorded", {
-          sequence: record.sequence,
-          agentID: record.agentID,
-          profile: record.profile,
-          observationSummary: record.observationSummary,
-          objectiveKind: record.objectiveKind,
-          objectiveAligned: record.objectiveAligned,
-          legalActionIDs: record.legalActionIDs,
-          legalActionIDsByKind: record.legalActionIDsByKind,
-          chosenActionID: record.chosenActionID,
-          chosenActionKind: record.chosenActionKind,
-          chosenActionMetadata: record.chosenActionMetadata,
-          runtimeMode: record.decisionMetadata?.runtimeMode,
-          plannerSource: record.decisionMetadata?.plannerSource,
-          executorSource: record.decisionMetadata?.executorSource,
-          actionSelectionSource: record.decisionMetadata?.actionSelectionSource,
-          externalPlannerCall: record.decisionMetadata?.externalPlannerCall,
-          externalActionCall: record.decisionMetadata?.externalActionCall,
-          rawProviderOutputPresent:
-            record.decisionMetadata?.rawProviderOutputPresent,
-          attackActionIDs: record.attackActionIDs,
-          decisionMetadata: compactDecisionMetadata(record.decisionMetadata),
-          decisionLatencyMs: record.decisionLatencyMs,
-          intent: record.intent,
-          accepted: result.accepted,
-          reason: record.reason,
-          fallbackUsed: record.decisionMetadata?.fallbackUsed ?? false,
-        });
+      availableCandidates = this.applyDecision({
+        participant,
+        observation,
+        observationSummary: this.observationBuilder.summarize(observation),
+        legalActions,
+        decision,
+        decisionLatencyMs,
+        availableCandidates,
+        sameTurnDiplomacyParticipants,
+        sameTurnAllianceRequests,
+        sameTurnBuildTiles,
       });
     }
 
     return this.records.slice(startingRecordCount);
+  }
+
+  private applyDecision(input: {
+    participant: AgentParticipant;
+    observation: AgentObservation;
+    observationSummary: string;
+    legalActions: LegalAction[];
+    decision: AgentDecision;
+    decisionLatencyMs: number;
+    availableCandidates: SpawnCandidate[];
+    sameTurnDiplomacyParticipants: Set<string>;
+    sameTurnAllianceRequests: Set<string>;
+    sameTurnBuildTiles: number[];
+  }): SpawnCandidate[] {
+    const requestedActionIDs = requestedDecisionActionIDs(input.decision);
+    const rejectedActionIDs: string[] = [];
+    const selectedActions: Array<{
+      action: LegalAction | null;
+      requestedActionID: string;
+      reason: string;
+    }> = [];
+
+    for (const actionID of requestedActionIDs) {
+      const actionDecision: AgentDecision = { ...input.decision, actionID };
+      const validation = this.decisionValidator(actionDecision, input.legalActions);
+      if (validation.ok) {
+        selectedActions.push({
+          action: validation.action,
+          requestedActionID: actionID,
+          reason: input.decision.reason,
+        });
+      } else {
+        rejectedActionIDs.push(actionID);
+      }
+    }
+
+    if (selectedActions.length === 0) {
+      const validation = this.decisionValidator(input.decision, input.legalActions);
+      const action = actionFromValidation(validation);
+      selectedActions.push({
+        action,
+        requestedActionID: input.decision.actionID,
+        reason: decisionReason(input.decision, validation, action),
+      });
+    }
+
+    let availableCandidates = input.availableCandidates;
+    selectedActions.forEach((selected, batchIndex) => {
+      const batchDecision: AgentDecision = {
+        ...input.decision,
+        actionID: selected.requestedActionID,
+        metadata: batchDecisionMetadata({
+          metadata: input.decision.metadata,
+          batchIndex,
+          batchSize: selectedActions.length,
+          requestedActionIDs,
+          rejectedActionIDs,
+        }),
+      };
+      const result = selected.action
+        ? this.submitLegalAction(input.participant.runner, selected.action)
+        : {
+            accepted: false,
+            reason: "no legal fallback action available",
+            submittedIntent: null,
+          };
+      const record = this.recordDecision({
+        participant: input.participant,
+        turnNumber: input.observation.turnNumber,
+        observationSummary: input.observationSummary,
+        observation: input.observation,
+        legalActions: input.legalActions,
+        chosenAction: selected.action,
+        decision: batchDecision,
+        decisionLatencyMs: input.decisionLatencyMs,
+        reason: selected.reason,
+        result,
+      });
+
+      if (selected.action?.kind === "spawn") {
+        availableCandidates = this.removeNearbySpawnCandidates(
+          availableCandidates,
+          selected.action,
+        );
+      }
+      this.reserveSameTurnDiplomacy(
+        selected.action,
+        input.observation,
+        input.sameTurnDiplomacyParticipants,
+        input.sameTurnAllianceRequests,
+      );
+      this.reserveSameTurnBuild(selected.action, input.sameTurnBuildTiles);
+
+      this.log.info("league agent decision recorded", {
+        sequence: record.sequence,
+        agentID: record.agentID,
+        profile: record.profile,
+        observationSummary: record.observationSummary,
+        objectiveKind: record.objectiveKind,
+        objectiveAligned: record.objectiveAligned,
+        legalActionIDs: record.legalActionIDs,
+        legalActionIDsByKind: record.legalActionIDsByKind,
+        chosenActionID: record.chosenActionID,
+        chosenActionKind: record.chosenActionKind,
+        chosenActionMetadata: record.chosenActionMetadata,
+        runtimeMode: record.decisionMetadata?.runtimeMode,
+        plannerSource: record.decisionMetadata?.plannerSource,
+        executorSource: record.decisionMetadata?.executorSource,
+        actionSelectionSource: record.decisionMetadata?.actionSelectionSource,
+        externalPlannerCall: record.decisionMetadata?.externalPlannerCall,
+        externalActionCall: record.decisionMetadata?.externalActionCall,
+        rawProviderOutputPresent:
+          record.decisionMetadata?.rawProviderOutputPresent,
+        attackActionIDs: record.attackActionIDs,
+        decisionMetadata: compactDecisionMetadata(record.decisionMetadata),
+        decisionLatencyMs: record.decisionLatencyMs,
+        intent: record.intent,
+        accepted: result.accepted,
+        reason: record.reason,
+        fallbackUsed: record.decisionMetadata?.fallbackUsed ?? false,
+      });
+    });
+
+    return availableCandidates;
   }
 
   decisionRecords(): AgentDecisionRecord[] {
@@ -551,6 +801,25 @@ export class AgentLeagueMatchRunner {
       (candidate) =>
         distanceBetweenCandidates(candidate, chosen) >= this.minSpawnDistance,
     );
+  }
+
+  private filterSameTurnSpawnActions(
+    legalActions: LegalAction[],
+    availableCandidates: SpawnCandidate[],
+  ): LegalAction[] {
+    if (!legalActions.some((action) => action.kind === "spawn")) {
+      return legalActions;
+    }
+    const availableTiles = new Set(
+      availableCandidates.map((candidate) => candidate.tile),
+    );
+    return legalActions.filter((action) => {
+      if (action.kind !== "spawn") {
+        return true;
+      }
+      const tile = action.metadata?.tile;
+      return typeof tile === "number" && availableTiles.has(tile);
+    });
   }
 
   private filterSameTurnDiplomacyActions(
