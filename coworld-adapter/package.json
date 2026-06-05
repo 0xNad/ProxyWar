@@ -11,6 +11,7 @@
     "run:episode": "mkdir -p tmp && TMPDIR=\"$PWD/tmp\" uvx --from coworld==0.1.15 coworld run-episode coworld/coworld_manifest.json --verify-replay --timeout-seconds 3600"
   },
   "dependencies": {
+    "@anthropic-ai/bedrock-sdk": "^0.29.2",
     "ajv": "^8.20.0",
     "jszip": "^3.10.1"
   }

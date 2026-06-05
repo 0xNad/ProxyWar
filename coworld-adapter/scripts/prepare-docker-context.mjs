@@ -16,6 +16,8 @@ const proxyWarEntries = [
   "tsconfig.json",
   "src",
   "resources",
+  // ship the starter SDK (createStarterAgent) so the LLM policy can import it
+  "examples",
 ];
 
 const integrationEntries = [

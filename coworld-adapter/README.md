@@ -45,6 +45,33 @@ Coworld policy container
 - **variants / certification** — one short, deterministic two-player smoke
   fixture.
 
+## Competitive policy (LLM)
+
+`src/llm-player.mjs` is the competitive policy — a thin websocket transport
+around the existing Proxy War starter agent (`createStarterAgent` from
+`examples/external-agent/starter-framework.mjs`). It reuses the real prompt,
+strict legal-id validation, cross-episode memory, anti-stall, ranking, and safe
+fallback; the only policy-specific code is the websocket loop and the LLM
+provider. It still only ever returns one offered `LegalAction.id`, and the game
+re-validates it.
+
+The provider is pluggable via env — no keys in the image or manifest:
+
+- **Bedrock** (the hosted default): upload with `upload-policy --use-bedrock`,
+  which runs the pod under Coworld's Bedrock service account (`USE_BEDROCK=true`
+  + AWS creds resolved from the default chain).
+- Any starter-SDK provider for local testing via `PROXYWAR_AGENT_LLM_PROVIDER`:
+  `openrouter` (with `OPENROUTER_API_KEY` passed as `--secret-env`), `codex-cli`,
+  `claude-cowork`, or `command`. With none configured it falls back to a
+  deterministic heuristic, so it never stalls a match.
+
+Upload it as a submitted policy:
+
+```sh
+coworld upload-policy proxywar-coworld-local:latest --name proxywar-bedrock-v1 \
+  --run node --run /app/integration/src/llm-player.mjs --use-bedrock
+```
+
 ## Build and certify
 
 You need Docker (linux/amd64), Node 24+, and [`uv`](https://docs.astral.sh/uv/).

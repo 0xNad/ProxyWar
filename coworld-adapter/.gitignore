@@ -2,7 +2,7 @@ node_modules/
 .docker-context/
 tmp/
 artifacts/
-coworld/results/
+coworld/results*/
 *.log
 .env
 .env.*
