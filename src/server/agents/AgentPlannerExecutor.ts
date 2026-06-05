@@ -109,6 +109,7 @@ export interface AgentPlanDecision {
   reason: string;
   latencyMs: number;
   fallbackUsed: boolean;
+  llmPlannerDegraded?: boolean;
   rawPlannerOutput?: string;
   promptLength?: number;
   parseOk?: boolean;
@@ -318,6 +319,9 @@ export class PlannerExecutorAgentBrain implements AgentBrain {
         plannerRefreshReason: plannerRefreshReason ?? "active_plan_reused",
         plannerLatencyMs: planDecision?.latencyMs ?? 0,
         plannerFallbackUsed: planDecision?.fallbackUsed ?? false,
+        ...(planDecision?.llmPlannerDegraded !== undefined
+          ? { llmPlannerDegraded: planDecision.llmPlannerDegraded }
+          : {}),
         ...(planDecision?.reason !== undefined
           ? { plannerDecisionReason: planDecision.reason }
           : {}),
@@ -1131,6 +1135,10 @@ export class LlmAgentPlanner implements AgentPlanner {
       reason: `Planner fallback after LLM planner failed: ${reason}`,
       latencyMs: Date.now() - started,
       fallbackUsed: true,
+      // This fallback only runs for an LLM-backed planner (codex-cli/real-llm)
+      // whose LLM planner call failed: the match is now running on local policy,
+      // NOT LLM-controlled. Flag it so artifacts/audits can detect a degraded match.
+      llmPlannerDegraded: true,
       rawPlannerOutput: raw,
       promptLength,
       parseOk: false,

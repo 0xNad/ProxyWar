@@ -342,7 +342,14 @@ async function run() {
         gameRecord,
         notes: artifactNotes(scenario, brainMode, runnerMode),
       });
-      await writeAgentDemoIndex();
+      // Skip the global demo-index rebuild by default: writeAgentDemoIndex()
+      // readdir+reads every historical run in artifacts/ai-league-runs (tens of
+      // thousands of files / tens of GB), which is wasteful on automated
+      // smoke/dry-run matches. The live beta server writes its index elsewhere,
+      // so only rebuild here when explicitly requested.
+      if (process.env.PROXYWAR_WRITE_DEMO_INDEX === "1") {
+        await writeAgentDemoIndex();
+      }
 
       const allRecords = league.decisionRecords();
       assertRequiredExternalBrainSucceeded({
@@ -503,7 +510,14 @@ async function run() {
       gameRecord,
       notes: artifactNotes(scenario, brainMode, runnerMode),
     });
-    await writeAgentDemoIndex();
+    // Skip the global demo-index rebuild by default: writeAgentDemoIndex()
+    // readdir+reads every historical run in artifacts/ai-league-runs (tens of
+    // thousands of files / tens of GB), which is wasteful on automated
+    // smoke/dry-run matches. The live beta server writes its index elsewhere,
+    // so only rebuild here when explicitly requested.
+    if (process.env.PROXYWAR_WRITE_DEMO_INDEX === "1") {
+      await writeAgentDemoIndex();
+    }
     assertRequiredExternalBrainSucceeded({
       brainMode,
       records: league.decisionRecords(),

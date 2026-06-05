@@ -318,7 +318,7 @@ function houseAgentBrainCheck(
     label: "House agent brain",
     status: "fail",
     message:
-      "House agents must be LLM-backed. Set PROXYWAR_HOUSE_AGENT_BRAIN=planner-codex-cli before sharing the beta.",
+      "House agents must be LLM-backed. Note: Codex CLI is being deprecated for the house agent due to ChatGPT-account model/quota limits; a Claude-CLI house brain is the planned replacement once available. Until then, set PROXYWAR_HOUSE_AGENT_BRAIN to an LLM-backed brain before sharing the beta.",
   };
 }
 

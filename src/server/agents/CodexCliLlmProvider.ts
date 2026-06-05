@@ -62,7 +62,7 @@ export interface CodexCliLlmProviderConfig {
 }
 
 // Locked in-house Codex agent model per beta operator direction.
-export const DEFAULT_CODEX_PLANNER_MODEL = "gpt-5.4";
+export const DEFAULT_CODEX_PLANNER_MODEL = "gpt-5.5";
 export const DEFAULT_CODEX_PLANNER_REASONING_EFFORT = "medium";
 export const DEFAULT_CODEX_RESEARCHER_MODEL = "gpt-5.5";
 export const DEFAULT_CODEX_RESEARCHER_REASONING_EFFORT = "high";

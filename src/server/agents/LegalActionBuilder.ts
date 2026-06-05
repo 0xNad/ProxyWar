@@ -329,25 +329,21 @@ export class LegalActionBuilder {
         metadata: {
           unit: build.unit,
           role: build.role,
-          targetID: kind === "nuke" ? (build.nukeTargetID ?? null) : null,
-          targetName: kind === "nuke" ? (build.nukeTargetName ?? null) : null,
-          targetTiles: kind === "nuke" ? (build.nukeTargetTiles ?? null) : null,
-          targetTileShare:
-            kind === "nuke" ? (build.nukeTargetTileShare ?? null) : null,
-          targetStructureUnit:
-            kind === "nuke" ? (build.nukeTargetStructureUnit ?? null) : null,
-          targetStructureLevel:
-            kind === "nuke" ? (build.nukeTargetStructureLevel ?? null) : null,
-          targetStructurePriority:
-            kind === "nuke"
-              ? (build.nukeTargetStructurePriority ?? null)
-              : null,
-          targetStructureDensity:
-            kind === "nuke" ? (build.nukeTargetStructureDensity ?? null) : null,
-          targetSamCoverage:
-            kind === "nuke" ? (build.nukeTargetSamCoverage ?? null) : null,
-          nuclearTargetPriority:
-            kind === "nuke" ? (build.nukeTargetPriority ?? null) : null,
+          ...(kind === "nuke"
+            ? {
+                targetID: build.nukeTargetID ?? null,
+                targetName: build.nukeTargetName ?? null,
+                targetTiles: build.nukeTargetTiles ?? null,
+                targetTileShare: build.nukeTargetTileShare ?? null,
+                targetStructureUnit: build.nukeTargetStructureUnit ?? null,
+                targetStructureLevel: build.nukeTargetStructureLevel ?? null,
+                targetStructurePriority:
+                  build.nukeTargetStructurePriority ?? null,
+                targetStructureDensity: build.nukeTargetStructureDensity ?? null,
+                targetSamCoverage: build.nukeTargetSamCoverage ?? null,
+                nuclearTargetPriority: build.nukeTargetPriority ?? null,
+              }
+            : {}),
           targetTile: build.targetTile,
           buildTile: build.buildTile,
           cost: build.cost,
