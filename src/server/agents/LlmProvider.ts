@@ -1,4 +1,9 @@
-export type LlmProviderType = "mock" | "openai" | "codex-cli" | "custom";
+export type LlmProviderType =
+  | "mock"
+  | "openai"
+  | "codex-cli"
+  | "claude-cli"
+  | "custom";
 
 export class LlmProviderConfigError extends Error {
   constructor(message: string) {

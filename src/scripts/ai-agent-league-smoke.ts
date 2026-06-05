@@ -32,6 +32,7 @@ import {
   CodexCliLlmProvider,
   loadCodexCliLlmProviderConfig,
 } from "../server/agents/CodexCliLlmProvider";
+import { createClaudeCliLlmProviderFromEnv } from "../server/agents/ClaudeCliLlmProvider";
 import {
   AgentLeagueMatchRunner,
   AgentSpec,
@@ -144,6 +145,8 @@ async function run() {
           ...codexCliConfig,
           outputSchema: brainMode === "planner-codex-cli" ? "planner" : "decision",
         });
+  const claudeCliProvider =
+    brainMode === "planner-claude-cli" ? createClaudeCliLlmProviderFromEnv() : null;
   const decisionTimeoutMs =
     runnerMode === "step-locked"
       ? stepLockedConfig.maxDecisionMs
@@ -216,7 +219,9 @@ async function run() {
               brainMode,
               brainMode === "codex-cli" || brainMode === "planner-codex-cli"
                 ? codexCliProvider
-                : realLlmProvider,
+                : brainMode === "planner-claude-cli"
+                  ? claudeCliProvider
+                  : realLlmProvider,
               decisionTimeoutMs,
               externalAgentMaxDecisionMs,
             ),
@@ -733,6 +738,9 @@ function brainModeFromArgs(
   if (args.includes("--brain=planner-codex-cli")) {
     return "planner-codex-cli";
   }
+  if (args.includes("--brain=planner-claude-cli")) {
+    return "planner-claude-cli";
+  }
   if (args.includes("--brain=mock-llm")) {
     return "mock-llm";
   }
@@ -1011,6 +1019,31 @@ function createBrainForMode(
       planEveryDecisionSteps: 3,
     });
   }
+  if (brainMode === "planner-claude-cli") {
+    if (provider === null) {
+      throw new LlmProviderConfigError(
+        "planner-claude-cli smoke requested but no provider was configured.",
+      );
+    }
+    return new PlannerExecutorAgentBrain({
+      profile: spec.profile,
+      planner: new LlmAgentPlanner({
+        provider,
+        profile: spec.profile,
+        providerTimeoutMs,
+        plannerType: "real-llm",
+      }),
+      executor: new FrontierPolicyExecutor(spec.profile, {
+        settings: {
+          territoryFirstNeutralLandEnabled: true,
+          maxActionsPerDecision: 5,
+          siloTileShareRatio: 0.14,
+          samTileShareRatio: 0.14,
+        },
+      }),
+      planEveryDecisionSteps: 3,
+    });
+  }
   if (brainMode === "real-llm" || brainMode === "codex-cli") {
     if (provider === null) {
       throw new LlmProviderConfigError(
@@ -1104,7 +1137,8 @@ type SmokeBrainMode =
   | "real-llm"
   | "codex-cli"
   | "planner"
-  | "planner-codex-cli";
+  | "planner-codex-cli"
+  | "planner-claude-cli";
 type SmokeRunnerMode = "realtime" | "step-locked";
 
 function defaultRunID(
@@ -1120,7 +1154,9 @@ function defaultRunID(
 }
 
 function artifactBrainMode(brainMode: SmokeBrainMode): AgentBrainType {
-  return brainMode === "planner" || brainMode === "planner-codex-cli"
+  return brainMode === "planner" ||
+    brainMode === "planner-codex-cli" ||
+    brainMode === "planner-claude-cli"
     ? "planner-executor"
     : brainMode;
 }
@@ -1249,7 +1285,16 @@ function assertRequiredExternalBrainSucceeded(input: {
     return;
   }
 
-  const report = externalBrainCleanlinessReport(input);
+  const report = externalBrainCleanlinessReport({
+    // planner-claude-cli is an external-provider planner-executor brain, so it
+    // shares the planner-codex-cli cleanliness semantics (clean external planner
+    // calls with house fallbacks tolerated).
+    brainMode:
+      input.brainMode === "planner-claude-cli"
+        ? "planner-codex-cli"
+        : input.brainMode,
+    records: input.records,
+  });
   if (report.ok) {
     return;
   }

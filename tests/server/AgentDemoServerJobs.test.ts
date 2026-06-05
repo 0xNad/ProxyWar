@@ -196,7 +196,7 @@ describe("AgentDemoServerJobs", () => {
     const command = buildAgentDemoJobCommand(request);
 
     expect(command.env.AI_LEAGUE_LLM_PROVIDER).toBe("codex-cli");
-    expect(command.env.AI_LEAGUE_CODEX_MODEL).toBe("gpt-5.4");
+    expect(command.env.AI_LEAGUE_CODEX_MODEL).toBe("gpt-5.5");
     expect(command.env.AI_LEAGUE_CODEX_REASONING_EFFORT).toBe("medium");
     expect(command.env.AI_LEAGUE_REQUIRE_EXTERNAL_BRAIN_SUCCESS).toBe("true");
     expect(command.env.AI_LEAGUE_CODEX_TIMEOUT_MS).toBe("45000");

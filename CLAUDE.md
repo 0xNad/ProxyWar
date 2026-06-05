@@ -1,19 +1,28 @@
 # CLAUDE.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+Guidance for Claude Code (claude.ai/code) working in this repository.
+
+The shared engineering rules, repository model, autonomy policy, prioritization, and the
+project-state reading list live in **AGENTS.md** — imported below so Claude loads the same
+rules any coding agent does, and so the "read `docs/project-state/` first" preamble is
+automatic. (AGENTS.md and CLAUDE.local.md are gitignored, so they load locally and are absent
+from public clones.)
+
+@AGENTS.md
 
 ## Commands
 
 ```bash
-npm run inst             # Install deps (uses npm ci --ignore-scripts — do NOT use npm install)
+npm run inst             # Install deps (npm ci --ignore-scripts — do NOT use npm install)
 npm run dev              # Run client + server in dev mode with hot reload
 npm run start:client     # Client only
 npm run start:server-dev # Server only
-npm test                 # Run all tests (Vitest)
+npm test                 # Run all tests (vitest run && vitest run tests/server)
 npm run test:coverage    # Tests with coverage
 npm run lint             # ESLint
 npm run lint:fix         # ESLint with auto-fix
 npm run format           # Prettier
+npm exec -- tsc --noEmit # Typecheck
 npm run build-prod       # Production build
 ```
 
@@ -23,6 +32,9 @@ npm run build-prod       # Production build
 npx vitest tests/YourTest.test.ts --run
 npx vitest NationAllianceBehavior --run # match by name pattern
 ```
+
+AGENTS.md (local) lists the agent/beta commands (`agent:demo-server`, `agent:closed-beta`,
+`agent:public-readiness:strict`, `agent:external-agent:dry-run`, `agent:benchmark:external-full`, …).
 
 ## Architecture
 
@@ -82,6 +94,13 @@ Tests use a `setup()` helper from `tests/util/Setup.ts` that creates a full game
 - **Schemas/Validation:** Zod
 - **Testing:** Vitest
 - **Server:** Node.js, Express, ws (WebSocket)
+
+## Claude Code
+
+- Use **plan mode** for changes under `src/core/**` and the agent-protocol files: `AgentRunner.ts`, `AgentDecisionValidator.ts`, `LegalActionBuilder.ts`, `AgentObservationBuilder.ts`, `AgentPlannerExecutor.ts`. (A PreToolUse hook also blocks LLM/provider imports into `src/core`.)
+- `src/core` is deterministic **simulation**. The rule is **no LLM/Codex/OpenAI/provider logic in core** — config/map loading over `fetch` (`DefaultConfig.ts`, the map loaders) is the existing, allowed exception, not a violation.
+- Specialist role **subagents** live in `.claude/agents/` (invoked on demand, not as live threads). The **reviewer** subagent checks this project's invariants before risky changes; ask for it on edits to `AgentPlannerExecutor.ts` or `AgentDemoHub.ts`.
+- **Git guardrails:** never force-push, delete branches, or rewrite history. Land changes on a branch off `main` using the `claude/` prefix; commit/push and any deploy/publish are gated outward actions — do them only when the operator asked in-conversation.
 
 <!-- Local-only operating guide (working model, autonomy, internal workspaces). Gitignored; absent from public clones. -->
 @CLAUDE.local.md
