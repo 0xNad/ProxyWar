@@ -57,7 +57,18 @@ export class AgentMemoryBuilder {
       turnsSinceLastProductiveAction,
       repeatedActionKind: repeated.kind,
       repeatedActionCount: repeated.count,
-      avoidActionIDs: repeated.count >= 2 ? repeated.actionIDs : [],
+      avoidActionIDs: Array.from(
+        new Set([
+          ...(repeated.count >= 2 ? repeated.actionIDs : []),
+          // Also brake EXACT actionID repeats that interleave with other kinds
+          // or holds (e.g. emoji:A, hold, emoji:A, quick_chat:B, emoji:A): the
+          // consecutive-same-kind streak above misses these, which let a
+          // boxed-in agent spam the same low-value social action without it
+          // ever landing in avoidActionIDs. Hold/spawn are already excluded
+          // (recentNonHold), so holding while genuinely stuck is not braked.
+          ...exactRepeatActionIDs(recentNonHold, 2),
+        ]),
+      ),
       summary: memorySummary({
         recentActions,
         repeatedActionKind: repeated.kind,
@@ -97,6 +108,23 @@ function repeatedAction(decisions: RecentAgentDecision[]): {
     count,
     actionIDs,
   };
+}
+
+// Exact actionIDs that appear at least `minCount` times in the window,
+// regardless of whether the repeats are consecutive. Complements
+// repeatedAction() (which only catches a consecutive same-kind streak) so the
+// exact-repeat brake also covers interleaved repeats.
+function exactRepeatActionIDs(
+  decisions: RecentAgentDecision[],
+  minCount: number,
+): string[] {
+  const counts = new Map<string, number>();
+  for (const decision of decisions) {
+    counts.set(decision.actionID, (counts.get(decision.actionID) ?? 0) + 1);
+  }
+  return Array.from(counts.entries())
+    .filter(([, count]) => count >= minCount)
+    .map(([actionID]) => actionID);
 }
 
 function trailingHoldCount(decisions: RecentAgentDecision[]): number {
