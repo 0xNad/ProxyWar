@@ -14543,9 +14543,16 @@ function scoreFrontierAction(input: {
     } else if (
       action.kind === "attack" &&
       action.metadata?.expansion !== true &&
-      metadataNumber(action, "relativeTroopRatio") >= 1.4
+      (target?.type === PlayerType.Bot ||
+        metadataNumber(action, "relativeTroopRatio") >= 1.8)
     ) {
-      add("combat", 85, "snowball: conquer a much-weaker neighbour to grow");
+      // Eat tribes (bots) freely; only attack a non-tribe when clearly weaker
+      // (>=1.8x), so we don't provoke a Hard nation that is just briefly low.
+      add(
+        "combat",
+        target?.type === PlayerType.Bot ? 95 : 70,
+        "snowball: conquer a tribe / clearly-weaker neighbour to grow",
+      );
     }
   }
   // Once established, press the dominant rival (the leader) to convert a snowball
