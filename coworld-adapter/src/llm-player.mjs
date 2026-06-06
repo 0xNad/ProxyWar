@@ -25,6 +25,8 @@
 import { createRequire } from "node:module";
 import { pathToFileURL } from "node:url";
 
+import { redactCoworldPlayerUrl } from "./coworld-url.mjs";
+
 const proxyWarRepo = process.env.PROXYWAR_REPO ?? "/app/proxywar";
 const MODEL_ID =
   process.env.PROXYWAR_LLM_MODEL_ID ??
@@ -110,7 +112,9 @@ async function main() {
   const socket = new WebSocket(url);
 
   socket.on("open", () => {
-    console.log(`connected ${url} (provider=${providerLabel})`);
+    console.log(
+      `connected ${redactCoworldPlayerUrl(url)} (provider=${providerLabel})`,
+    );
   });
 
   socket.on("message", async (data) => {
