@@ -344,7 +344,9 @@ export class Transport {
       }
       while (this.buffer.length > 0) {
         console.log("sending dropped message");
-        const msg = this.buffer.pop();
+        // Drain FIFO so buffered messages are re-sent in their original
+        // order; pop() would reverse them (LIFO).
+        const msg = this.buffer.shift();
         if (msg === undefined) {
           console.warn("msg is undefined");
           continue;
