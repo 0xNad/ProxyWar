@@ -14531,6 +14531,35 @@ function scoreFrontierAction(input: {
     penalties.push(reason);
   };
 
+  // SNOWBALL: against equal-strength nation AIs the agent only wins by out-growing
+  // the field early — consuming neutral land and weak/tribe neighbours faster than
+  // the nations do. While we are not yet dominant, strongly reward growth actions so
+  // the policy snowballs instead of stalling at a sliver of the map and being ground
+  // down. relativeTroopRatio >= 1.4 means the target has well under our troop count
+  // (tribes and weak nations), i.e. a cheap, profitable conquest.
+  if (ownTileShare < 0.6) {
+    if (isNeutralGrowthAction(action)) {
+      add("expansion", 100, "snowball: claim neutral/tribe territory to out-grow rivals");
+    } else if (
+      action.kind === "attack" &&
+      action.metadata?.expansion !== true &&
+      metadataNumber(action, "relativeTroopRatio") >= 1.4
+    ) {
+      add("combat", 85, "snowball: conquer a much-weaker neighbour to grow");
+    }
+  }
+  // Once established, press the dominant rival (the leader) to convert a snowball
+  // lead into an actual win instead of stalling at a fraction of the map.
+  if (
+    ownTileShare >= 0.15 &&
+    !ownIsLeader &&
+    targetIsLeader &&
+    action.kind === "attack" &&
+    action.metadata?.expansion !== true
+  ) {
+    add("combat", 70, "press the leader to contest the win");
+  }
+
   if (settings.profileRepairReRankEnabled) {
     const repairScore = scoreProfileRepairRerankAction({
       profile,
