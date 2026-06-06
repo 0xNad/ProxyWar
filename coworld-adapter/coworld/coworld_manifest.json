@@ -9,7 +9,9 @@
       "type": "game",
       "image": "proxywar-coworld-local:latest",
       "run": [
-        "/app/proxywar/node_modules/.bin/tsx",
+        "node",
+        "--import",
+        "tsx/esm",
         "/app/integration/src/no-docker-coworld-episode.ts"
       ],
       "env": {}
