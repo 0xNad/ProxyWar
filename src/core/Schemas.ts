@@ -335,13 +335,13 @@ export const AttackIntentSchema = z.object({
 
 export const SpawnIntentSchema = z.object({
   type: z.literal("spawn"),
-  tile: z.number(),
+  tile: z.number().int().nonnegative(),
 });
 
 export const BoatAttackIntentSchema = z.object({
   type: z.literal("boat"),
   troops: z.number().nonnegative(),
-  dst: z.number(),
+  dst: z.number().int().nonnegative(),
 });
 
 export const AllianceRequestIntentSchema = z.object({
@@ -396,35 +396,40 @@ export const DonateTroopIntentSchema = z.object({
 export const BuildUnitIntentSchema = z.object({
   type: z.literal("build_unit"),
   unit: z.enum(UnitType),
-  tile: z.number(),
+  tile: z.number().int().nonnegative(),
   rocketDirectionUp: z.boolean().optional(),
 });
 
 export const UpgradeStructureIntentSchema = z.object({
   type: z.literal("upgrade_structure"),
   unit: z.enum(UnitType),
-  unitId: z.number(),
+  unitId: z.number().int().nonnegative(),
 });
 
 export const CancelAttackIntentSchema = z.object({
   type: z.literal("cancel_attack"),
-  attackID: z.string(),
+  // Bound the string to close the unbounded-input surface for untrusted
+  // external agents. Real attack IDs are 8-char base-36 (PseudoRandom.nextID),
+  // so 64 is generous headroom; we deliberately do NOT couple to GAME_ID_REGEX
+  // here — a malformed ID just fails the lookup harmlessly, and strict format
+  // matching would reject otherwise-valid identifiers.
+  attackID: z.string().max(64),
 });
 
 export const CancelBoatIntentSchema = z.object({
   type: z.literal("cancel_boat"),
-  unitID: z.number(),
+  unitID: z.number().int().nonnegative(),
 });
 
 export const MoveWarshipIntentSchema = z.object({
   type: z.literal("move_warship"),
   unitIds: z.array(z.number().int()).nonempty(),
-  tile: z.number(),
+  tile: z.number().int().nonnegative(),
 });
 
 export const DeleteUnitIntentSchema = z.object({
   type: z.literal("delete_unit"),
-  unitId: z.number(),
+  unitId: z.number().int().nonnegative(),
 });
 
 export const QuickChatIntentSchema = z.object({
