@@ -34,6 +34,7 @@ import {
   ExternalAgentRelayError,
   ExternalAgentRelayStore,
 } from "../server/agents/ExternalAgentRelay";
+import { AgentRelayRateGuard } from "../server/agents/AgentRelayRateGuard";
 import type { ExternalAgentRequest } from "../server/agents/ExternalHttpAgentBrain";
 import {
   agentStrategyProfiles,
@@ -174,6 +175,14 @@ const rateLimits = {
     firstConfiguredEnv("PROXYWAR_RATE_LIMIT_FEEDBACK"),
     30,
   ),
+  // Managed-relay routes are polled by automated workers (~1 long poll / 25s
+  // steady, faster during active play), so this scope is far more generous than
+  // the human-initiated scopes above. It only caps tunnelled external callers;
+  // loopback traffic (the game subprocess, local self-tests) is exempt.
+  agentRelay: positiveInt(
+    firstConfiguredEnv("PROXYWAR_RATE_LIMIT_AGENT_RELAY"),
+    600,
+  ),
 };
 const betaAdminEnabled = envFlag("PROXYWAR_BETA_ADMIN_ENABLED");
 const allowPrivateAgentEndpoints = envFlag(
@@ -198,6 +207,24 @@ const relayActiveIdleMs = positiveInt(
   process.env.PROXYWAR_AGENT_RELAY_ACTIVE_IDLE_MS,
   90_000,
 );
+const relayMaxConcurrentPolls = positiveInt(
+  process.env.PROXYWAR_AGENT_RELAY_MAX_CONCURRENT_POLLS,
+  8,
+);
+// DoS guard for the pre-gate managed-relay routes: per-IP request-rate limit
+// plus a per-IP cap on concurrently-held long polls (the `poll` route holds a
+// socket up to 30s). Trusted loopback callers are exempt so the game subprocess
+// and local tooling are never throttled.
+const agentRelayGuard = new AgentRelayRateGuard<Request>({
+  rateLimiter,
+  requestsPerWindow: rateLimits.agentRelay,
+  maxConcurrentPolls: relayMaxConcurrentPolls,
+  key: rateLimitKey,
+  isTrusted: isTrustedLocalRelayRequest,
+  onConsume: () => {
+    void persistRateLimitState();
+  },
+});
 const interruptedJobsReset = resetInterruptedJobs();
 if (interruptedJobsReset > 0) {
   await persistJobs();
@@ -317,6 +344,13 @@ app.get("/docs/:artifact", servePublicDoc);
 app.get("/examples/external-agent/:artifact", servePublicExternalAgentExample);
 
 app.get("/api/agent-relay/sessions/:sessionID/poll", async (req, res) => {
+  if (!agentRelayGuard.enforceRequestRate(req, res)) {
+    return;
+  }
+  const releasePollSlot = agentRelayGuard.acquirePollSlot(req, res);
+  if (releasePollSlot === null) {
+    return;
+  }
   try {
     await restoreSavedRelaySessionIfPossible(req.params.sessionID, bearerToken(req));
     const result = await agentRelay.poll({
@@ -327,10 +361,15 @@ app.get("/api/agent-relay/sessions/:sessionID/poll", async (req, res) => {
     res.json(result);
   } catch (error) {
     sendRelayError(res, error);
+  } finally {
+    releasePollSlot();
   }
 });
 
 app.post("/api/agent-relay/sessions/:sessionID/decisions", (req, res) => {
+  if (!agentRelayGuard.enforceRequestRate(req, res)) {
+    return;
+  }
   try {
     const body = req.body as Record<string, unknown>;
     const result = agentRelay.submitDecision({
@@ -346,6 +385,9 @@ app.post("/api/agent-relay/sessions/:sessionID/decisions", (req, res) => {
 });
 
 app.post("/api/agent-relay/sessions/:sessionID/requests", async (req, res) => {
+  if (!agentRelayGuard.enforceRequestRate(req, res)) {
+    return;
+  }
   try {
     await restoreSavedRelaySessionIfPossible(req.params.sessionID, bearerToken(req));
     const body = req.body as Record<string, unknown>;
@@ -1471,6 +1513,24 @@ function rateLimitKey(req: Request): string {
     }
   }
   return remoteAddress !== "" ? remoteAddress : (req.ip ?? "unknown");
+}
+
+// A managed-relay request is "trusted local" when it arrives directly over
+// loopback with no forwarding headers — i.e. the in-process game subprocess
+// (local/dev mode) or a local self-test, never a tunnelled external client.
+// Such callers bypass the relay rate limit and concurrent-poll cap so the
+// game's own decision traffic is never throttled. A loopback request that
+// carries cf-connecting-ip / x-forwarded-for came through the public tunnel
+// and is treated as external (the inverse of the forwarded branch above).
+function isTrustedLocalRelayRequest(req: Request): boolean {
+  const remoteAddress = req.socket.remoteAddress ?? req.ip ?? "";
+  if (!isLoopbackAddress(remoteAddress)) {
+    return false;
+  }
+  return (
+    firstHeaderValue(req.headers["cf-connecting-ip"]) === null &&
+    firstHeaderValue(req.headers["x-forwarded-for"]) === null
+  );
 }
 
 function firstHeaderValue(value: string | string[] | undefined): string | null {
