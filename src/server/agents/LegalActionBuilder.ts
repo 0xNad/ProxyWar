@@ -879,19 +879,28 @@ function spawnCandidateCoordinateBounds(
   width: number;
   height: number;
 } | null {
-  const coordinates = candidates.filter(
-    (candidate) =>
-      typeof candidate.x === "number" && typeof candidate.y === "number",
-  );
-  if (coordinates.length === 0) {
+  // NOTE: compute min/max with a single loop, NOT Math.min(...xs)/Math.max(...xs).
+  // Spreading a large coordinate array as function arguments overflows the
+  // engine argument limit ("Maximum call stack size exceeded") on maps whose
+  // spawn-candidate pool is large — which crashed the agent at game start.
+  let minX = Infinity;
+  let maxX = -Infinity;
+  let minY = Infinity;
+  let maxY = -Infinity;
+  let found = false;
+  for (const candidate of candidates) {
+    if (typeof candidate.x !== "number" || typeof candidate.y !== "number") {
+      continue;
+    }
+    found = true;
+    if (candidate.x < minX) minX = candidate.x;
+    if (candidate.x > maxX) maxX = candidate.x;
+    if (candidate.y < minY) minY = candidate.y;
+    if (candidate.y > maxY) maxY = candidate.y;
+  }
+  if (!found) {
     return null;
   }
-  const xs = coordinates.map((candidate) => candidate.x!);
-  const ys = coordinates.map((candidate) => candidate.y!);
-  const minX = Math.min(...xs);
-  const maxX = Math.max(...xs);
-  const minY = Math.min(...ys);
-  const maxY = Math.max(...ys);
   return {
     minX,
     maxX,

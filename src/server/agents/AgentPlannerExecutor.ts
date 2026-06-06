@@ -7059,12 +7059,18 @@ function spawnActionCoordinateBounds(
   if (coordinates.length === 0) {
     return null;
   }
-  const xs = coordinates.map(({ x }) => x);
-  const ys = coordinates.map(({ y }) => y);
-  const minX = Math.min(...xs);
-  const maxX = Math.max(...xs);
-  const minY = Math.min(...ys);
-  const maxY = Math.max(...ys);
+  // Loop-based min/max (NOT Math.min(...xs)): spreading a large coordinate
+  // array overflows the engine argument limit on big spawn pools.
+  let minX = Infinity;
+  let maxX = -Infinity;
+  let minY = Infinity;
+  let maxY = -Infinity;
+  for (const { x, y } of coordinates) {
+    if (x < minX) minX = x;
+    if (x > maxX) maxX = x;
+    if (y < minY) minY = y;
+    if (y > maxY) maxY = y;
+  }
   const width = Math.max(1, maxX - minX);
   const height = Math.max(1, maxY - minY);
   return {
