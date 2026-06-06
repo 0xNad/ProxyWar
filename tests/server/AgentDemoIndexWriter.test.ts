@@ -130,7 +130,7 @@ describe("AgentDemoIndexWriter", () => {
       });
       await fs.writeFile(
         path.join(runsRootDir, "index-run-1", "game-record.json"),
-        "{}",
+        JSON.stringify({ info: { gameID: "INDEXGAME" }, turns: [] }),
       );
 
       const { indexPath, runs } = await writeAgentDemoIndex({
@@ -171,6 +171,47 @@ describe("AgentDemoIndexWriter", () => {
       await expect(fs.readFile(indexPath, "utf8")).resolves.toContain(
         "No Proxy War runs",
       );
+    } finally {
+      await fs.rm(rootDir, { recursive: true, force: true });
+    }
+  });
+
+  it("treats a compacted game-record stub as no rendered replay", async () => {
+    const rootDir = await fs.mkdtemp(path.join(os.tmpdir(), "ai-demo-index-"));
+    const runsRootDir = path.join(rootDir, "runs");
+    const runDir = path.join(runsRootDir, "stub-run");
+    await fs.mkdir(runDir, { recursive: true });
+    try {
+      await fs.writeFile(
+        path.join(runDir, "match-summary.json"),
+        JSON.stringify({
+          runID: "stub-run",
+          scenario: "actions",
+          brainMode: "mock-llm",
+          runnerMode: "step-locked",
+          completedAt: "2026-01-02T00:00:00.000Z",
+        }),
+      );
+      // The RangeError fallback in AgentSpectatorReplay writes this stub when the full
+      // GameRecord is too large to serialize. The native renderer cannot replay it, so the
+      // availability gate must report no rendered replay rather than a dead-end link.
+      await fs.writeFile(
+        path.join(runDir, "game-record.json"),
+        JSON.stringify({
+          compacted: true,
+          reason: "Full native game-record.json was too large to serialize.",
+          turnCount: 29701,
+          gameID: "STUBGAME",
+        }),
+      );
+
+      const { indexPath, runs } = await writeAgentDemoIndex({ runsRootDir });
+      const html = await fs.readFile(indexPath, "utf8");
+
+      expect(runs).toHaveLength(1);
+      expect(runs[0]?.hasOpenFrontReplay).toBe(false);
+      expect(html).not.toContain("/ai-league-replay/stub-run");
+      expect(html).not.toContain("Proxy War render");
     } finally {
       await fs.rm(rootDir, { recursive: true, force: true });
     }

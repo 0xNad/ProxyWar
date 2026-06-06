@@ -64,6 +64,7 @@ import {
 } from "../server/agents/ExternalAgentHealthCheck";
 import { resolveExternalAgentToken } from "../server/agents/ExternalAgentSecrets";
 import { assertExternalAgentEndpointAllowed } from "../server/agents/ExternalAgentNetworkPolicy";
+import { gameRecordFileIsRenderable } from "../server/agents/AgentSpectatorReplay";
 import {
   assertProxyWarActiveRosterExternalEndpointsHealthy,
   checkProxyWarActiveRosterExternalEndpoints,
@@ -1988,14 +1989,18 @@ async function attachExactArtifact(
     const runDir = path.join(runsRootDir, artifactID);
     const summary = await readJsonRecord(path.join(runDir, "match-summary.json"));
     if (summary?.runID === artifactID) {
-      const hasReplayRecord = await fileExists(path.join(runDir, "game-record.json"));
+      const hasReplayRecord = await gameRecordFileIsRenderable(
+        path.join(runDir, "game-record.json"),
+      );
       const hasReplayData = await fileExists(
         path.join(runDir, "spectator-replay.json"),
       );
       if (!hasReplayRecord || !hasReplayData) {
         job.errorSummary = [
           "The match wrote a summary but did not write the replay artifacts needed for rendered gameplay.",
-          !hasReplayRecord ? "Missing game-record.json." : "",
+          !hasReplayRecord
+            ? "Missing or unrenderable game-record.json (it may be a compacted stub written when the full record was too large)."
+            : "",
           !hasReplayData ? "Missing spectator-replay.json." : "",
         ]
           .filter(Boolean)

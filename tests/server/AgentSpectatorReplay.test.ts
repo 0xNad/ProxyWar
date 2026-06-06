@@ -6,6 +6,7 @@ import { GameMapSize, GameMapType } from "../../src/core/game/Game";
 import type { Game } from "../../src/core/game/Game";
 import {
   buildAgentSpectatorReplay,
+  gameRecordFileIsRenderable,
   writeAgentSpectatorReplayArtifacts,
 } from "../../src/server/agents/AgentSpectatorReplay";
 
@@ -153,6 +154,50 @@ describe("AgentSpectatorReplay", () => {
       expect(html).toContain("real Proxy War renderer");
       expect(html).not.toContain("new WebSocket");
       expect(html).not.toContain("fetch(");
+    } finally {
+      await fs.rm(rootDir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("gameRecordFileIsRenderable", () => {
+  it("accepts a real record but rejects the compacted stub and unreadable files", async () => {
+    const rootDir = await fs.mkdtemp(path.join(os.tmpdir(), "ai-record-"));
+    try {
+      const realPath = path.join(rootDir, "real.json");
+      const stubPath = path.join(rootDir, "stub.json");
+      const malformedPath = path.join(rootDir, "malformed.json");
+      const nonObjectPath = path.join(rootDir, "non-object.json");
+
+      await fs.writeFile(
+        realPath,
+        JSON.stringify({ info: { gameID: "GAME1" }, turns: [] }),
+      );
+      // The RangeError fallback in writeAgentSpectatorReplayArtifacts writes exactly this
+      // shape when the full GameRecord is too large to serialize.
+      await fs.writeFile(
+        stubPath,
+        JSON.stringify({
+          compacted: true,
+          reason: "Full native game-record.json was too large to serialize.",
+          turnCount: 29701,
+          gameID: "GAME1",
+        }),
+      );
+      await fs.writeFile(malformedPath, "{ not valid json");
+      await fs.writeFile(nonObjectPath, "42");
+
+      await expect(gameRecordFileIsRenderable(realPath)).resolves.toBe(true);
+      await expect(gameRecordFileIsRenderable(stubPath)).resolves.toBe(false);
+      await expect(gameRecordFileIsRenderable(malformedPath)).resolves.toBe(
+        false,
+      );
+      await expect(gameRecordFileIsRenderable(nonObjectPath)).resolves.toBe(
+        false,
+      );
+      await expect(
+        gameRecordFileIsRenderable(path.join(rootDir, "missing.json")),
+      ).resolves.toBe(false);
     } finally {
       await fs.rm(rootDir, { recursive: true, force: true });
     }

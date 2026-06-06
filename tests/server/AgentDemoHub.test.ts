@@ -53,7 +53,10 @@ describe("AgentDemoHub", () => {
         }),
       );
       await fs.writeFile(path.join(runDir, "spectator.html"), "<html></html>");
-      await fs.writeFile(path.join(runDir, "game-record.json"), "{}");
+      await fs.writeFile(
+        path.join(runDir, "game-record.json"),
+        JSON.stringify({ info: { gameID: "HUBGAME" }, turns: [] }),
+      );
       await fs.writeFile(path.join(runDir, "objective-scorecard.json"), "{}");
       await fs.writeFile(
         path.join(runDir, "external-agent-feedback.md"),

@@ -282,6 +282,9 @@ export async function writeAgentSpectatorReplayArtifacts(
       if (!(error instanceof RangeError)) {
         throw error;
       }
+      console.warn(
+        `[AgentSpectatorReplay] Full game-record.json was too large to serialize for run "${input.replay.runID}" in ${input.directory}; wrote a compacted stub instead. The native Proxy War renderer cannot replay this run (treated as no rendered replay).`,
+      );
       await fs.writeFile(
         gameRecordPath,
         `${JSON.stringify(compactGameRecordSummary(input.gameRecord), null, 2)}\n`,
@@ -394,6 +397,39 @@ function compactGameRecordSummary(gameRecord: GameRecord | null | undefined): {
         ? gameRecord.info.gameID
         : null,
   };
+}
+
+/**
+ * A rendered (native Proxy War) replay is only "available" when game-record.json holds a
+ * real GameRecord — not the `{ compacted: true, ... }` stub that
+ * writeAgentSpectatorReplayArtifacts falls back to when JSON.stringify of the full record
+ * throws RangeError (see compactGameRecordSummary). The native client renderer
+ * (src/client/Main.ts) runs GameRecordSchema.safeParse on this file, so a stub passes a
+ * fileExists()-only "replay available" gate yet dead-ends the renderer with an
+ * "invalid replay record" alert. "Replay available" gates must use this, not fileExists.
+ */
+export async function gameRecordFileIsRenderable(
+  filePath: string,
+): Promise<boolean> {
+  let raw: string;
+  try {
+    raw = await fs.readFile(filePath, "utf8");
+  } catch {
+    return false;
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return false;
+  }
+  if (typeof parsed !== "object" || parsed === null) {
+    return false;
+  }
+  const record = parsed as { compacted?: unknown; turns?: unknown };
+  // The compacted stub is { compacted: true, ... } and has no turns timeline; a real
+  // GameRecord always carries a top-level turns array (GameRecordSchema in Schemas.ts).
+  return record.compacted !== true && Array.isArray(record.turns);
 }
 
 function spectatorDecision(record: AgentDecisionRecord): AgentSpectatorDecision {

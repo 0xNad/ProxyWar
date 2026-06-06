@@ -1,5 +1,6 @@
 import fs from "fs/promises";
 import path from "path";
+import { gameRecordFileIsRenderable } from "./AgentSpectatorReplay";
 import type {
   ExternalAgentCoachingExample,
   ExternalAgentFeedback,
@@ -147,7 +148,7 @@ async function discoverRuns(
         }
         const spectatorPath = path.join(directory, "spectator.html");
         const hasSpectatorReplay = await fileExists(spectatorPath);
-        const hasOpenFrontReplay = await fileExists(
+        const hasOpenFrontReplay = await gameRecordFileIsRenderable(
           path.join(directory, "game-record.json"),
         );
         const scorecardJsonPath = path.join(directory, "objective-scorecard.json");
