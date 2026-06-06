@@ -26,3 +26,7 @@ src/assets/
 eslint_out.txt
 artifacts/
 outputs/
+scripts/auto-resume.sh
+scripts/.auto-resume.log
+scripts/.auto-resume.nohup.log
+scripts/.auto-resume-backups/
