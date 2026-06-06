@@ -27,7 +27,10 @@ import {
 import { createPartialGameRecord } from "../core/Util";
 import { archive, finalizeGameRecord } from "./Archive";
 import { Client } from "./Client";
-import { ClientMsgRateLimiter } from "./ClientMsgRateLimiter";
+import {
+  ClientMsgRateLimiter,
+  clampRejoinFromTurn,
+} from "./ClientMsgRateLimiter";
 export enum GamePhase {
   Lobby = "LOBBY",
   Active = "ACTIVE",
@@ -818,10 +821,7 @@ export class GameServer {
     // Clamp lastTurn defensively: a rejoin with a negative / NaN / huge value
     // must not produce an unbounded or malformed turn slice. (The rejoin rate
     // limit bounds how often this full-history send can be triggered.)
-    const fromTurn = Math.min(
-      Math.max(0, Math.floor(Number(lastTurn) || 0)),
-      this.turns.length,
-    );
+    const fromTurn = clampRejoinFromTurn(lastTurn, this.turns.length);
     try {
       ws.send(
         JSON.stringify({

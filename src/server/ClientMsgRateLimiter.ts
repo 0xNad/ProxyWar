@@ -8,6 +8,24 @@ const MAX_INTENT_SIZE = 2000;
 const TOTAL_BYTES = 2 * 1024 * 1024; // 2MB per client
 export type RateLimitResult = "ok" | "limit" | "kick";
 
+/**
+ * Magnitude half of the rejoin-DoS defense (the per-client rejoin rate limiter
+ * below is the frequency half). On a rejoin the server slices the turn history
+ * from `lastTurn`; a negative / NaN / non-finite / oversized value must not
+ * produce an unbounded or malformed slice. Clamp to a valid in-range integer
+ * index within [0, turnsLength]: non-finite/NaN/non-number -> 0, negatives -> 0,
+ * floats floored, and anything past the end -> turnsLength (an empty tail).
+ *
+ * Pure + exported so this security-relevant behavior is unit-tested
+ * independently of the heavyweight GameServer it is called from.
+ */
+export function clampRejoinFromTurn(
+  lastTurn: number,
+  turnsLength: number,
+): number {
+  return Math.min(Math.max(0, Math.floor(Number(lastTurn) || 0)), turnsLength);
+}
+
 interface ClientBucket {
   perSecond: RateLimiter;
   perMinute: RateLimiter;

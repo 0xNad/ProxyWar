@@ -1,5 +1,8 @@
 import { describe, expect, it } from "vitest";
-import { ClientMsgRateLimiter } from "../../src/server/ClientMsgRateLimiter";
+import {
+  ClientMsgRateLimiter,
+  clampRejoinFromTurn,
+} from "../../src/server/ClientMsgRateLimiter";
 
 const CLIENT_A = "clientA" as any;
 const CLIENT_B = "clientB" as any;
@@ -76,6 +79,44 @@ describe("ClientMsgRateLimiter", () => {
       const limiter = new ClientMsgRateLimiter();
       for (let i = 0; i < 30; i++) limiter.check(CLIENT_A, "rejoin", SMALL);
       expect(limiter.check(CLIENT_B, "rejoin", SMALL)).toBe("ok");
+    });
+  });
+
+  describe("clampRejoinFromTurn (rejoin slice magnitude guard)", () => {
+    const LEN = 1000; // turns.length
+
+    it("passes a normal in-range index through unchanged", () => {
+      expect(clampRejoinFromTurn(500, LEN)).toBe(500);
+    });
+
+    it("clamps an index past the end to turns.length (empty tail, not OOB)", () => {
+      expect(clampRejoinFromTurn(50_000, LEN)).toBe(LEN);
+    });
+
+    it("clamps negatives to 0 (no unbounded full-history slice from a negative)", () => {
+      expect(clampRejoinFromTurn(-1, LEN)).toBe(0);
+      expect(clampRejoinFromTurn(-50_000, LEN)).toBe(0);
+    });
+
+    it("treats NaN / non-finite / non-number as 0", () => {
+      expect(clampRejoinFromTurn(NaN, LEN)).toBe(0);
+      expect(clampRejoinFromTurn(undefined as unknown as number, LEN)).toBe(0);
+      expect(clampRejoinFromTurn(null as unknown as number, LEN)).toBe(0);
+      expect(clampRejoinFromTurn("garbage" as unknown as number, LEN)).toBe(0);
+    });
+
+    it("clamps +Infinity to turns.length and -Infinity to 0", () => {
+      expect(clampRejoinFromTurn(Infinity, LEN)).toBe(LEN);
+      expect(clampRejoinFromTurn(-Infinity, LEN)).toBe(0);
+    });
+
+    it("floors fractional indices to a valid integer", () => {
+      expect(clampRejoinFromTurn(12.9, LEN)).toBe(12);
+    });
+
+    it("accepts the boundary indices 0 and turns.length", () => {
+      expect(clampRejoinFromTurn(0, LEN)).toBe(0);
+      expect(clampRejoinFromTurn(LEN, LEN)).toBe(LEN);
     });
   });
 
