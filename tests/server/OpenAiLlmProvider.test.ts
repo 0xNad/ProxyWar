@@ -99,6 +99,37 @@ describe("OpenAiLlmProvider", () => {
     await expect(provider.complete("prompt")).rejects.toThrow(/timed out/);
   });
 
+  it("redacts non-sk bearer tokens from HTTP error bodies", async () => {
+    const secretToken = "proxy-tok_ABC123.def-456";
+    const provider = new OpenAiLlmProvider({
+      apiKey: "test-key",
+      model: "gpt-test",
+      endpoint: "https://proxy.test/v1/responses",
+      timeoutMs: 1_000,
+      maxRetries: 0,
+      maxOutputTokens: 42,
+      fetchFn: async () =>
+        new Response(
+          JSON.stringify({
+            error: {
+              message: `Unauthorized: Bearer ${secretToken} was rejected`,
+            },
+          }),
+          { status: 401 },
+        ),
+    });
+
+    const error = await provider.complete("prompt").then(
+      () => {
+        throw new Error("expected complete() to reject");
+      },
+      (err: unknown) => err as Error,
+    );
+
+    expect(error.message).toContain("Bearer [redacted-token]");
+    expect(error.message).not.toContain(secretToken);
+  });
+
   it("extracts SDK-style output_text when present", () => {
     expect(extractOpenAiResponseText({ output_text: "  hello  " })).toBe(
       "hello",

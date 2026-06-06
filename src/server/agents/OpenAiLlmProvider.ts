@@ -220,5 +220,6 @@ function errorWithCause(message: string, cause: unknown): Error {
 function safeErrorBody(body: string): string {
   return body
     .replace(/sk-[A-Za-z0-9_-]+/g, "[redacted-api-key]")
+    .replace(/Bearer\s+[A-Za-z0-9._-]+/gi, "Bearer [redacted-token]")
     .slice(0, 500);
 }
