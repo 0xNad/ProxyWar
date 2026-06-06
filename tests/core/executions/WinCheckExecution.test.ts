@@ -84,6 +84,37 @@ describe("WinCheckExecution", () => {
     expect(mg.setWinner).not.toHaveBeenCalled();
   });
 
+  it("does not declare a premature FFA winner when all land is fallout (divide-by-zero guard)", () => {
+    // Every land tile is nuclear fallout => numTilesWithoutFallout === 0.
+    // Without the guard, owned / 0 === Infinity > threshold would wrongly
+    // declare an instant winner; the guard treats it as 0% so the territory
+    // clause is skipped and only the time-limit clauses can end the game.
+    const player = {
+      numTilesOwned: vi.fn(() => 10),
+      name: vi.fn(() => "P1"),
+    };
+    mg.players = vi.fn(() => [player]);
+    mg.numLandTiles = vi.fn(() => 100);
+    mg.numTilesWithFallout = vi.fn(() => 100);
+    // mg.ticks() is 0 here (pre-timer), so no time-limit clause can fire.
+    winCheck.checkWinnerFFA();
+    expect(mg.setWinner).not.toHaveBeenCalled();
+    expect(winCheck.isActive()).toBe(true);
+  });
+
+  it("does not declare a premature Team winner when all land is fallout (divide-by-zero guard)", () => {
+    const player = {
+      numTilesOwned: vi.fn(() => 10),
+      team: vi.fn(() => ColoredTeams.Red),
+    };
+    mg.players = vi.fn(() => [player]);
+    mg.numLandTiles = vi.fn(() => 100);
+    mg.numTilesWithFallout = vi.fn(() => 100);
+    winCheck.checkWinnerTeam();
+    expect(mg.setWinner).not.toHaveBeenCalled();
+    expect(winCheck.isActive()).toBe(true);
+  });
+
   it("should return false for activeDuringSpawnPhase", () => {
     expect(winCheck.activeDuringSpawnPhase()).toBe(false);
   });

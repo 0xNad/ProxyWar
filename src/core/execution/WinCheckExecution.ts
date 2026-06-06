@@ -68,9 +68,17 @@ export class WinCheckExecution implements Execution {
       (this.mg.ticks() - this.mg.config().numSpawnPhaseTurns()) / 10;
     const numTilesWithoutFallout =
       this.mg.numLandTiles() - this.mg.numTilesWithFallout();
+    // Guard against divide-by-zero: when every land tile is nuclear fallout
+    // numTilesWithoutFallout is 0, so `owned / 0` is Infinity (> any threshold,
+    // a premature/wrong win) or 0/0 NaN. Treat a non-positive divisor as 0% so
+    // the territory clause is simply skipped and the time-limit clauses still
+    // force a winner.
+    const ownedPercentage =
+      numTilesWithoutFallout > 0
+        ? (max.numTilesOwned() / numTilesWithoutFallout) * 100
+        : 0;
     if (
-      (max.numTilesOwned() / numTilesWithoutFallout) * 100 >
-        this.mg.config().percentageTilesOwnedToWin() ||
+      ownedPercentage > this.mg.config().percentageTilesOwnedToWin() ||
       (this.mg.config().gameConfig().maxTimerValue !== undefined &&
         timeElapsed - this.mg.config().gameConfig().maxTimerValue! * 60 >= 0) ||
       timeElapsed >= WinCheckExecution.HARD_TIME_LIMIT_SECONDS
@@ -104,7 +112,10 @@ export class WinCheckExecution implements Execution {
       (this.mg.ticks() - this.mg.config().numSpawnPhaseTurns()) / 10;
     const numTilesWithoutFallout =
       this.mg.numLandTiles() - this.mg.numTilesWithFallout();
-    const percentage = (max[1] / numTilesWithoutFallout) * 100;
+    // See checkWinnerFFA: guard divide-by-zero under full nuclear fallout
+    // (divisor 0 -> Infinity/NaN). Non-positive divisor counts as 0%.
+    const percentage =
+      numTilesWithoutFallout > 0 ? (max[1] / numTilesWithoutFallout) * 100 : 0;
     if (
       percentage > this.mg.config().percentageTilesOwnedToWin() ||
       (this.mg.config().gameConfig().maxTimerValue !== undefined &&
