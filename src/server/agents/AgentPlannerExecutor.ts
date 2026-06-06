@@ -14,6 +14,7 @@ import {
   StrategicSkillEvaluator,
 } from "./AgentStrategicSkills";
 import { buildAgentTacticalAffordances } from "./AgentTacticalAffordances";
+import { tunedNumber } from "./AgentTunables";
 import {
   AgentBrain,
   AgentBrainInput,
@@ -165,14 +166,16 @@ export interface PlannerExecutorAgentBrainOptions {
   executorSource?: string;
 }
 
+export { tunedNumber } from "./AgentTunables";
+
 export const defaultAgentSettings: AgentSettings = {
   seed: "frontier-agent",
-  reserveRatio: 0.35,
-  triggerRatio: 0.55,
-  expansionRatio: 0.15,
-  maxConcurrentWars: 1,
-  retreatThreshold: 0.35,
-  maxActionsPerDecision: 4,
+  reserveRatio: tunedNumber("RESERVE_RATIO", 0.35),
+  triggerRatio: tunedNumber("TRIGGER_RATIO", 0.55),
+  expansionRatio: tunedNumber("EXPANSION_RATIO", 0.15),
+  maxConcurrentWars: tunedNumber("MAX_CONCURRENT_WARS", 1),
+  retreatThreshold: tunedNumber("RETREAT_THRESHOLD", 0.35),
+  maxActionsPerDecision: tunedNumber("MAX_ACTIONS_PER_DECISION", 4),
   frontierFinishPressureEnabled: true,
   navalControlEnabled: true,
   lateGameStrikeTargetingEnabled: true,
@@ -183,10 +186,10 @@ export const defaultAgentSettings: AgentSettings = {
   humanReplayEconomyCadenceEnabled: true,
   profileRepairReRankEnabled: true,
   firstCityTargetAfterStableExpansion: true,
-  portTileShareRatio: 0.06,
-  factoryTileShareRatio: 0.09,
-  samTileShareRatio: 0.18,
-  siloTileShareRatio: 0.28,
+  portTileShareRatio: tunedNumber("PORT_TILE_SHARE_RATIO", 0.06),
+  factoryTileShareRatio: tunedNumber("FACTORY_TILE_SHARE_RATIO", 0.09),
+  samTileShareRatio: tunedNumber("SAM_TILE_SHARE_RATIO", 0.18),
+  siloTileShareRatio: tunedNumber("SILO_TILE_SHARE_RATIO", 0.28),
   profileWeights: {
     aggressive: {
       combat: 1.22,
@@ -15643,7 +15646,10 @@ function scoreFrontierAction(input: {
         54,
         "hard-nation opening uses a nation-style burst expansion",
       );
-    } else if (troopCommitment > settings.expansionRatio + 0.08) {
+    } else if (
+      troopCommitment >
+      settings.expansionRatio + tunedNumber("OVEREXPAND_PENALTY_MARGIN", 0.08)
+    ) {
       penalize(46, "large neutral expansion is only for the opening land grab");
     }
     if (troopCommitment <= settings.expansionRatio + 0.03) {
@@ -15656,7 +15662,8 @@ function scoreFrontierAction(input: {
       strongerAttackableThreat &&
       observation.strategic.priority === "build_defense" &&
       observation.strategic.urgency !== "low" &&
-      (ownTileShare >= 0.24 || criticalBorderCollapse)
+      (ownTileShare >= tunedNumber("DEFENSE_STABILIZE_TILESHARE", 0.24) ||
+        criticalBorderCollapse)
     ) {
       penalize(
         122,

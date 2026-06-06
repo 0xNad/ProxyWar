@@ -1,3 +1,4 @@
+import { tunedNumber } from "./AgentTunables";
 import {
   AgentCombatState,
   AgentGamePhase,
@@ -50,7 +51,8 @@ function strategicScores(input: BuildAgentStrategicStateInput) {
     (player) =>
       !player.isFriendly &&
       player.isAlive &&
-      player.troops > (own?.troops ?? 0) * 1.15,
+      player.troops >
+        (own?.troops ?? 0) * tunedNumber("THREAT_BORDER_TROOP_RATIO", 1.15),
   );
   const weakAttackable = attackable.filter(
     (player) =>
@@ -135,14 +137,17 @@ function strategicPriority(
   if (input.phase === "spawn") {
     return "spawn";
   }
-  if (scores.threat >= 0.85 || scores.defense >= 0.85) {
+  if (
+    scores.threat >= tunedNumber("THREAT_FLIP_SCORE", 0.85) ||
+    scores.defense >= tunedNumber("DEFENSE_FLIP_SCORE", 0.85)
+  ) {
     return "build_defense";
   }
   if (input.profile === "defensive" && scores.defense >= 0.6) {
     return "build_defense";
   }
   if (
-    scores.offense >= 0.55 &&
+    scores.offense >= tunedNumber("OFFENSE_TRIGGER_SCORE", 0.55) &&
     (input.profile === "aggressive" || input.profile === "opportunistic")
   ) {
     return "attack";
@@ -160,8 +165,8 @@ function strategicPriority(
     return "naval";
   }
   if (
-    scores.expansion >= 0.8 &&
-    (scores.idleTroops >= 0.4 ||
+    scores.expansion >= tunedNumber("EXPANSION_SCORE_GATE", 0.8) &&
+    (scores.idleTroops >= tunedNumber("EXPAND_IDLE_TROOPS_GATE", 0.4) ||
       input.profile === "aggressive" ||
       input.profile === "opportunistic")
   ) {
