@@ -47,6 +47,7 @@ import {
 import { GameConfig, StampedIntent } from "../../src/core/Schemas";
 import {
   AgentLeagueMatchRunner,
+  AgentSpec,
   agentStrategyProfiles,
   buildAttackScenarioSpawnPlan,
   buildSpawnCandidates,
@@ -1282,3 +1283,220 @@ class StaticMapLoader implements GameMapLoader {
     return enumKey.toLowerCase();
   }
 }
+
+// Regression guard for benchmark/league non-determinism. Root cause: GameServer
+// detects client disconnects on a wall-clock timeout and injects a
+// `mark_disconnected` intent into the (otherwise deterministic) turn stream.
+// Manual-tick harnesses advance turns far faster than wall-clock, so the timeout
+// fired at a load-dependent turn number, diverging same-seed runs. The fix:
+// the agent league runner starts the game with realtimeClock:false, which skips
+// both the real-time endTurn interval and the wall-clock disconnect detection.
+describe("AgentLeagueMatchRunner manual-clock determinism", () => {
+  const FIXED_SPECS: AgentSpec[] = [
+    {
+      username: "Aggressive Agent 1",
+      profile: "aggressive",
+      clientID: "DTM00001",
+      persistentID: "determ-agent-1",
+    },
+    {
+      username: "Defensive Agent 2",
+      profile: "defensive",
+      clientID: "DTM00002",
+      persistentID: "determ-agent-2",
+    },
+    {
+      username: "Diplomatic Agent 3",
+      profile: "diplomatic",
+      clientID: "DTM00003",
+      persistentID: "determ-agent-3",
+    },
+  ];
+
+  function makeParticipants(log: Logger) {
+    return createAgentParticipants(FIXED_SPECS, log, {
+      brainFactory: (spec) =>
+        new LlmAgentBrain({
+          provider: new MockLlmProvider({ mode: "valid" }),
+          profile: spec.profile,
+          brainType: "mock-llm",
+          providerTimeoutMs: 100,
+        }),
+    });
+  }
+
+  function forceStaleLastPing(game: GameServer): void {
+    // Simulate "no ping for longer than disconnectedTimeout" without waiting in
+    // wall-clock: this is exactly the condition that injected mark_disconnected.
+    for (const client of (
+      game as unknown as { allClients: Map<string, { lastPing: number }> }
+    ).allClients.values()) {
+      client.lastPing = 0;
+    }
+  }
+
+  function injectedWallClockDisconnect(
+    messages: ReturnType<
+      ReturnType<typeof makeParticipants>[number]["runner"]["serverMessages"]
+    >,
+  ): boolean {
+    // Only the wall-clock disconnect (isDisconnected: true) is the
+    // load-dependent, non-deterministic one. The isDisconnected:false marker
+    // injected at join time is deterministic and expected.
+    return messages.some(
+      (message) =>
+        message.type === "turn" &&
+        message.turn.intents.some(
+          (intent) =>
+            intent.type === "mark_disconnected" &&
+            intent.isDisconnected === true,
+        ),
+    );
+  }
+
+  it("does not inject wall-clock mark_disconnected intents in manual-clock mode", async () => {
+    const log = makeLogger();
+    const mapLoader = new StaticMapLoader();
+    const config = { ...gameConfig, gameMapSize: GameMapSize.Compact };
+    const terrain = await loadTerrainMap(
+      config.gameMap,
+      config.gameMapSize,
+      mapLoader,
+    );
+    const participants = makeParticipants(log);
+    const game = new GameServer(
+      "DETERMCLK1",
+      log,
+      Date.now(),
+      steppedServerConfig,
+      config,
+    );
+    const match = new AgentLeagueMatchRunner({
+      game,
+      participants,
+      spawnCandidates: buildSpawnCandidates(terrain.gameMap, {
+        maxCandidates: 500,
+        stride: 2,
+      }),
+      log,
+    });
+    try {
+      match.attachAgents();
+      match.startGame(); // realtimeClock:false
+      forceStaleLastPing(game);
+      game.advanceTurnsForTesting(20); // crosses several %5 disconnect checks
+      expect(
+        injectedWallClockDisconnect(participants[0]!.runner.serverMessages()),
+      ).toBe(false);
+    } finally {
+      await game.end({ archive: false });
+    }
+  }, 120_000);
+
+  it("still injects mark_disconnected when the real-time clock is enabled (production behavior preserved)", async () => {
+    const log = makeLogger();
+    const mapLoader = new StaticMapLoader();
+    const config = { ...gameConfig, gameMapSize: GameMapSize.Compact };
+    const terrain = await loadTerrainMap(
+      config.gameMap,
+      config.gameMapSize,
+      mapLoader,
+    );
+    const participants = makeParticipants(log);
+    const game = new GameServer(
+      "DETERMCLK2",
+      log,
+      Date.now(),
+      steppedServerConfig,
+      config,
+    );
+    const match = new AgentLeagueMatchRunner({
+      game,
+      participants,
+      spawnCandidates: buildSpawnCandidates(terrain.gameMap, {
+        maxCandidates: 500,
+        stride: 2,
+      }),
+      log,
+    });
+    try {
+      match.attachAgents();
+      game.start(); // default realtimeClock:true (production path)
+      forceStaleLastPing(game);
+      game.advanceTurnsForTesting(20);
+      expect(
+        injectedWallClockDisconnect(participants[0]!.runner.serverMessages()),
+      ).toBe(true);
+    } finally {
+      await game.end({ archive: false });
+    }
+  }, 120_000);
+
+  it("produces an identical server turn stream for two same-seed manual-clock runs", async () => {
+    // The turn stream (turnNumber -> intents broadcast by the GameServer) is the
+    // exact artifact that diverged in the original bug: a wall-clock
+    // mark_disconnected intent landed on a load-dependent turn. With the fix it
+    // is purely agent-driven, so two same-seed manual-clock runs are identical.
+    const runOnce = async (): Promise<{ opening: string[]; turns: string[] }> => {
+      const log = makeLogger();
+      const mapLoader = new StaticMapLoader();
+      const config = { ...gameConfig, gameMapSize: GameMapSize.Compact };
+      const terrain = await loadTerrainMap(
+        config.gameMap,
+        config.gameMapSize,
+        mapLoader,
+      );
+      const participants = makeParticipants(log);
+      // Identical gameID across both runs => identical core PRNG seed.
+      const game = new GameServer(
+        "DETERMSEED",
+        log,
+        1_000_003,
+        steppedServerConfig,
+        config,
+      );
+      const match = new AgentLeagueMatchRunner({
+        game,
+        participants,
+        spawnCandidates: buildSpawnCandidates(terrain.gameMap, {
+          maxCandidates: 500,
+          stride: 2,
+        }),
+        log,
+      });
+      try {
+        match.attachAgents();
+        match.startGame();
+        const opening = await match.runOpeningTurn(0, { maxDecisionMs: 100 });
+        // Advance well past the 30s wall-clock disconnect window (in turns).
+        game.advanceTurnsForTesting(1_500);
+        const turns = participants[0]!.runner
+          .serverMessages()
+          .filter((message) => message.type === "turn")
+          .map(
+            (message) =>
+              `${message.turn.turnNumber}:${JSON.stringify(message.turn.intents)}`,
+          );
+        return {
+          opening: opening.map(
+            (record) => `${record.agentID}:${record.chosenActionID}`,
+          ),
+          turns,
+        };
+      } finally {
+        await game.end({ archive: false });
+      }
+    };
+
+    const first = await runOnce();
+    const second = await runOnce();
+    expect(first.opening.length).toBeGreaterThan(0);
+    expect(first.turns.length).toBeGreaterThan(0);
+    expect(second.opening).toEqual(first.opening);
+    expect(second.turns).toEqual(first.turns);
+    // And no wall-clock disconnect intent should appear at all in manual mode.
+    expect(
+      first.turns.some((turn) => turn.includes('"isDisconnected":true')),
+    ).toBe(false);
+  }, 600_000);
+});

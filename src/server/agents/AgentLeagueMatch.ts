@@ -148,7 +148,12 @@ export class AgentLeagueMatchRunner {
   }
 
   startGame(): void {
-    this.options.game.start();
+    // Manual-tick mode: this runner drives turns via advanceTurnsForTesting and
+    // has no real network clients. Disable the server's real-time clock so the
+    // simulation is deterministic (no wall-clock endTurn interval, no wall-clock
+    // disconnect detection injecting mark_disconnected intents at load-dependent
+    // turns). Without this, same-seed benchmark/league runs diverge.
+    this.options.game.start({ realtimeClock: false });
     this.log.info("league game started", {
       gameID: this.options.game.id,
       agents: this.options.participants.length,

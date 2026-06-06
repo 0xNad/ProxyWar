@@ -38,6 +38,13 @@ export interface GameEndOptions {
   archive?: boolean;
 }
 
+export interface GameStartOptions {
+  // Real-time clock (the wall-clock endTurn interval and wall-clock disconnect
+  // detection). Defaults to true. Manual-tick harnesses that drive turns via
+  // advanceTurnsForTesting() should pass false to stay deterministic.
+  realtimeClock?: boolean;
+}
+
 const KICK_REASON_DUPLICATE_SESSION = "kick_reason.duplicate_session";
 const KICK_REASON_LOBBY_CREATOR = "kick_reason.lobby_creator";
 const KICK_REASON_ADMIN = "kick_reason.admin";
@@ -66,6 +73,10 @@ export class GameServer {
   private hasReachedMaxPlayerCount: boolean = false;
 
   private endTurnIntervalID: ReturnType<typeof setInterval> | undefined;
+  // When false (manual-tick harnesses), the real-time endTurn interval and the
+  // wall-clock disconnect detection are disabled so turn-driven runs stay
+  // deterministic. Defaults to true (production) and is set in start().
+  private realtimeClock = true;
 
   private lastPingUpdate = 0;
 
@@ -723,10 +734,17 @@ export class GameServer {
     });
   }
 
-  public start() {
+  public start(options: GameStartOptions = {}) {
     if (this._hasStarted || this._hasEnded) {
       return;
     }
+    // Manual-tick harnesses (benchmarks, the agent league runner) drive turns
+    // synchronously via advanceTurnsForTesting() and have no real network
+    // clients. Disabling the real-time clock makes those runs deterministic:
+    // it skips both the wall-clock endTurn interval and the wall-clock
+    // disconnect detection that would otherwise inject mark_disconnected
+    // intents at a load-dependent turn number. Production leaves it enabled.
+    this.realtimeClock = options.realtimeClock ?? true;
     this._hasStarted = true;
     this._startTime = Date.now();
     // Set last ping to start so we don't immediately stop the game
@@ -753,10 +771,12 @@ export class GameServer {
     }
     this.gameStartInfo = result.data satisfies GameStartInfo;
 
-    this.endTurnIntervalID = setInterval(
-      () => this.endTurn(),
-      this.config.turnIntervalMs(),
-    );
+    if (this.realtimeClock) {
+      this.endTurnIntervalID = setInterval(
+        () => this.endTurn(),
+        this.config.turnIntervalMs(),
+      );
+    }
     this.activeClients.forEach((c) => {
       this.log.info("sending start message", {
         clientID: c.clientID,
@@ -1044,6 +1064,13 @@ export class GameServer {
   }
 
   private checkDisconnectedStatus() {
+    // Manual-tick harnesses advance turns far faster than wall-clock and have
+    // no real network clients, so a wall-clock ping timeout would inject a
+    // mark_disconnected intent at a load-dependent turn number and make the
+    // (otherwise deterministic) simulation diverge run-to-run. Skip it.
+    if (!this.realtimeClock) {
+      return;
+    }
     if (this.turns.length % 5 !== 0) {
       return;
     }
