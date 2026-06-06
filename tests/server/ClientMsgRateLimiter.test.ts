@@ -56,6 +56,29 @@ describe("ClientMsgRateLimiter", () => {
     });
   });
 
+  describe("rejoin messages (DoS guard)", () => {
+    it("allows rejoins up to the per-minute budget then limits", () => {
+      const limiter = new ClientMsgRateLimiter();
+      let ok = 0;
+      let limited = 0;
+      for (let i = 0; i < 30; i++) {
+        const r = limiter.check(CLIENT_A, "rejoin", SMALL);
+        if (r === "ok") ok++;
+        else if (r === "limit") limited++;
+      }
+      // REJOINS_PER_MINUTE = 12; a rejoin forces a full turn-history re-send,
+      // so excess rejoins are dropped to prevent a memory/CPU/bandwidth DoS.
+      expect(ok).toBe(12);
+      expect(limited).toBe(18);
+    });
+
+    it("rejoin budget is per client", () => {
+      const limiter = new ClientMsgRateLimiter();
+      for (let i = 0; i < 30; i++) limiter.check(CLIENT_A, "rejoin", SMALL);
+      expect(limiter.check(CLIENT_B, "rejoin", SMALL)).toBe("ok");
+    });
+  });
+
   describe("total bytes limit", () => {
     it("kicks when cumulative bytes reach 2MB", () => {
       const limiter = new ClientMsgRateLimiter();

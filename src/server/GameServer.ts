@@ -795,11 +795,18 @@ export class GameServer {
       isLobbyCreator: this.lobbyCreatorID === client.clientID,
     });
 
+    // Clamp lastTurn defensively: a rejoin with a negative / NaN / huge value
+    // must not produce an unbounded or malformed turn slice. (The rejoin rate
+    // limit bounds how often this full-history send can be triggered.)
+    const fromTurn = Math.min(
+      Math.max(0, Math.floor(Number(lastTurn) || 0)),
+      this.turns.length,
+    );
     try {
       ws.send(
         JSON.stringify({
           type: "start",
-          turns: this.turns.slice(lastTurn),
+          turns: this.turns.slice(fromTurn),
           gameStartInfo: this.gameStartInfo,
           lobbyCreatedAt: this.createdAt,
           myClientID: client.clientID,
