@@ -237,6 +237,76 @@ describe("Planner/executor agent brain", () => {
     expect(decision.actionID).toBe("expand:terra-nullius:10");
   });
 
+  it("parses a plan even when the LLM wraps the JSON in prose and code fences", async () => {
+    // Give the agent a base so the base-building control does not override the free
+    // choice; this test isolates lenient JSON parsing of prose/fence-wrapped output.
+    const observation: AgentObservation = {
+      ...activeObservation("expand_territory"),
+      ownState: {
+        playerID: "agent-1",
+        clientID: null,
+        smallID: 1,
+        name: "Planner Agent",
+        type: PlayerType.Human,
+        isAlive: true,
+        isDisconnected: false,
+        isTraitor: false,
+        hasSpawned: true,
+        troops: 500_000,
+        maxTroops: 800_000,
+        troopRatio: 0.6,
+        gold: "1000",
+        tilesOwned: 2500,
+        tileShare: 0.25,
+        borderTiles: 100,
+        outgoingAttacks: 0,
+        incomingAttacks: 0,
+        outgoingAllianceRequests: 0,
+        incomingAllianceRequests: 0,
+      },
+    };
+    const legalActions = buildLegalActions();
+    const provider: LlmProvider = {
+      providerType: "codex-cli",
+      async complete(): Promise<string> {
+        return [
+          "Sure — here is my strategic plan for this turn:",
+          "```json",
+          JSON.stringify({
+            objective: "secure_economy",
+            turnIntent: "build",
+            rationale: "Build economy before expanding.",
+            maxDecisionCycles: 2,
+            preferredActionKinds: ["build", "hold"],
+            enabledModules: ["economy", "defense"],
+            targetPlayerId: null,
+          }),
+          "```",
+          "Let me know if you want me to adjust the tactical settings.",
+        ].join("\n");
+      },
+    };
+    const brain = new PlannerExecutorAgentBrain({
+      profile: "opportunistic",
+      planner: new LlmAgentPlanner({
+        provider,
+        profile: "opportunistic",
+        plannerType: "codex-cli",
+      }),
+      executor: new FrontierPolicyExecutor("opportunistic"),
+      planEveryDecisionSteps: 3,
+    });
+
+    const decision = await brain.decide({ observation, legalActions });
+
+    expect(decision.metadata).toMatchObject({
+      plannerRan: true,
+      plannerFallbackUsed: false,
+      plannerParseOk: true,
+      planObjective: "secure_economy",
+    });
+  });
+
   it("accumulates a persistent opponent model (theory of mind) across decisions", async () => {
     const base = leaderPressureObservation();
     const sampleVisible = base.visiblePlayers[0]!;

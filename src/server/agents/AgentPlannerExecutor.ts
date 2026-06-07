@@ -19798,6 +19798,47 @@ type PlannerParseResult =
     }
   | { ok: false; reason: string };
 
+/**
+ * Extract the first balanced top-level JSON object from arbitrary text (handles
+ * string literals + escapes). LLM CLIs (esp. Claude) frequently wrap the plan JSON
+ * in prose ("Here is the plan: {...} let me know") or append a trailing note, which
+ * a strict JSON.parse rejects. Pulling out the first {...} lets a valid plan inside
+ * chatter still parse, cutting planner fallbacks. Returns null if none found.
+ */
+function extractFirstJsonObject(text: string): string | null {
+  const start = text.indexOf("{");
+  if (start === -1) {
+    return null;
+  }
+  let depth = 0;
+  let inString = false;
+  let escaped = false;
+  for (let i = start; i < text.length; i++) {
+    const ch = text[i];
+    if (inString) {
+      if (escaped) {
+        escaped = false;
+      } else if (ch === "\\") {
+        escaped = true;
+      } else if (ch === '"') {
+        inString = false;
+      }
+      continue;
+    }
+    if (ch === '"') {
+      inString = true;
+    } else if (ch === "{") {
+      depth += 1;
+    } else if (ch === "}") {
+      depth -= 1;
+      if (depth === 0) {
+        return text.slice(start, i + 1);
+      }
+    }
+  }
+  return null;
+}
+
 function parsePlannerOutput(
   raw: string,
   legalActions: LegalAction[],
@@ -19809,8 +19850,21 @@ function parsePlannerOutput(
   try {
     parsed = JSON.parse(normalized);
   } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    return { ok: false, reason: `planner JSON malformed: ${message}` };
+    // Fall back to extracting the first balanced JSON object before giving up, so a
+    // valid plan wrapped in prose / code fences / trailing notes still parses.
+    const extracted =
+      extractFirstJsonObject(normalized) ?? extractFirstJsonObject(raw);
+    if (extracted !== null) {
+      try {
+        parsed = JSON.parse(extracted);
+      } catch {
+        const message = error instanceof Error ? error.message : String(error);
+        return { ok: false, reason: `planner JSON malformed: ${message}` };
+      }
+    } else {
+      const message = error instanceof Error ? error.message : String(error);
+      return { ok: false, reason: `planner JSON malformed: ${message}` };
+    }
   }
   if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
     return { ok: false, reason: "planner response must be a JSON object" };
