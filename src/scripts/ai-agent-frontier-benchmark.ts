@@ -2,6 +2,7 @@ import { randomUUID } from "crypto";
 import fs from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
+import os from "os";
 import winston from "winston";
 import { GameEnv, ServerConfig } from "../core/configuration/Config";
 import {
@@ -31,6 +32,7 @@ import {
   createAgentParticipants,
 } from "../server/agents/AgentLeagueMatch";
 import { writeAgentLearningArtifacts } from "../server/agents/AgentLearningArtifacts";
+import { createClaudeCliLlmProviderFromEnv } from "../server/agents/ClaudeCliLlmProvider";
 import {
   buildAgentMatchStory,
   type AgentProfileDifferentiationGate,
@@ -86,6 +88,7 @@ type FrontierBrainMode =
   | AgentRuntimeMode
   | "planner"
   | "planner-codex-cli"
+  | "planner-claude-cli"
   | "rule-planner"
   | "codex-cli"
   | "external-http";
@@ -572,6 +575,27 @@ function createBrain(
       endpointUrl: config.externalAgentEndpointUrl,
       timeoutMs: config.externalAgentTimeoutMs,
       profile,
+    });
+  }
+  if (config.brainMode === "planner-claude-cli") {
+    // Run the Claude CLI from an empty dir OUTSIDE the repo so each per-decision
+    // call does not reload this project's large CLAUDE.md / .claude settings / MCP
+    // servers (measured ~1s+ cold-start saved per decision).
+    const cleanCwd = path.join(os.tmpdir(), "proxywar-claude-cli-cwd");
+    fs.mkdirSync(cleanCwd, { recursive: true });
+    const provider = createClaudeCliLlmProviderFromEnv(process.env, cleanCwd);
+    return new PlannerExecutorAgentBrain({
+      profile,
+      planner: new LlmAgentPlanner({
+        provider,
+        profile,
+        providerTimeoutMs: config.maxDecisionMs,
+        plannerType: "real-llm",
+      }),
+      executor: executor(),
+      planEveryDecisionSteps: config.planEveryDecisionSteps,
+      runtimeMode: "llm-policy-planner",
+      executorSource: "frontier-policy-executor",
     });
   }
   if (config.runtimeMode === "llm-policy-planner") {
@@ -1586,6 +1610,7 @@ const supportedBrainModes: readonly FrontierBrainMode[] = [
   "rule-planner",
   "planner",
   "planner-codex-cli",
+  "planner-claude-cli",
   "codex-cli",
   "external-http",
 ];
@@ -1597,6 +1622,8 @@ function normalizeRuntimeMode(brainMode: FrontierBrainMode): AgentRuntimeMode {
     case "planner":
       return "mock-policy-planner";
     case "planner-codex-cli":
+      return "llm-policy-planner";
+    case "planner-claude-cli":
       return "llm-policy-planner";
     case "codex-cli":
       return "llm-action-selector";

@@ -424,6 +424,17 @@ export class PlannerExecutorAgentBrain implements AgentBrain {
     if (this.currentPlan === null) {
       return "no_active_plan";
     }
+    // Speed/cost: do NOT fire a (slow) LLM replan on every single decision. A real
+    // incoming attack still replans immediately; otherwise require a minimum gap
+    // between LLM replans and let the deterministic executor run the intervening
+    // decisions. This cuts LLM calls (the dominant cost of a game) ~2x with no loss
+    // of strategy quality or threat responsiveness. Tunable via PROXYWAR_TUNE_MIN_REPLAN_GAP.
+    if (input.observation.combat.incomingAttackPlayerIDs.length > 0) {
+      return "incoming_attack";
+    }
+    if (this.decisionsSincePlan < tunedNumber("MIN_REPLAN_GAP", 2)) {
+      return null;
+    }
     if (this.decisionsSincePlan >= this.currentPlan.maxDecisionCycles) {
       return "plan_max_decision_cycles";
     }
