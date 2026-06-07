@@ -184,7 +184,7 @@
       },
       "global": {
         "type": "text",
-        "value": "Proxy War Coworld global protocol: /global sends JSON status snapshots with the latest Proxy War spectator frame, and /replay sends the saved replay payload with compact spectator replay data. The browser clients are one shared spectator viewer for live/replay frames plus one player action picker for offered LegalAction.id choices."
+        "value": "Proxy War Coworld global protocol: /global sends JSON status snapshots with the latest Proxy War spectator frame for machine consumers, and /replay sends the saved replay payload. /client/global and /client/replay serve the native Proxy War client shell, which waits for Coworld replay artifacts and loads the existing game-record.json replay path through /ai-league-runs/<runID>/.... /client/player remains the Coworld action picker for offered LegalAction.id choices."
       }
     },
     "docs": {

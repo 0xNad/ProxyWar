@@ -10,8 +10,8 @@ This local POC exposes the route family Coworld certification expects:
 - `WEBSOCKET /replay`
 
 `/global` sends status snapshots while the episode runs. Snapshot messages include
-the latest Proxy War spectator frame, public match config, and map dimensions so
-`/client/global` can render live territory state without occupying a player slot.
+the latest Proxy War spectator frame, public match config, and map dimensions for
+machine consumers.
 
 `/replay` sends the saved replay payload:
 
@@ -33,9 +33,9 @@ the latest Proxy War spectator frame, public match config, and map dimensions so
 The browser clients are part of the Coworld surface, with only two browser
 client shapes:
 
-- `/client/global` and `/client/replay` use the same spectator viewer, with map
-  drawing and frame playback. Global connects to `/global` for live frames;
-  replay connects to `/replay` for saved frames.
+- `/client/global` and `/client/replay` serve the native Proxy War client shell.
+  The client waits for Coworld replay artifacts, then loads the existing
+  `game-record.json` replay path through `/ai-league-runs/<runID>/...`.
 - `/client/player` connects to `/player`, shows each decision request, and lets a
   human choose one offered `LegalAction.id`.
 

@@ -62,10 +62,13 @@
     <script>
       window.__PROXYWAR_AI_REPLAY__ =
         location.pathname.startsWith("/ai-league-replay/") ||
-        location.pathname.startsWith("/openfront-replay/");
+        location.pathname.startsWith("/openfront-replay/") ||
+        location.pathname === "/client/global" ||
+        location.pathname === "/client/replay";
       window.GIT_COMMIT = <%- gitCommit %>;
       window.ASSET_MANIFEST = <%- assetManifest %>;
-      window.CDN_BASE = <%- cdnBase %>;
+      window.CDN_BASE =
+        <%- cdnBase %> || (window.__PROXYWAR_AI_REPLAY__ ? location.origin : "");
       window.BOOTSTRAP_CONFIG = {
         gameEnv: <%- gameEnv %>,
       };

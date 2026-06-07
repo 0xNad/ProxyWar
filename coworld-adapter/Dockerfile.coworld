@@ -8,6 +8,7 @@ WORKDIR /app/proxywar
 COPY proxywar/package.json proxywar/package-lock.json ./
 RUN npm ci --ignore-scripts
 COPY proxywar/ ./
+RUN npm run build-prod
 
 WORKDIR /app/integration
 COPY integration/package.json integration/package-lock.json ./

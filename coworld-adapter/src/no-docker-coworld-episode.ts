@@ -1,5 +1,6 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { randomUUID } from "node:crypto";
+import * as fsSync from "node:fs";
 import fs from "node:fs/promises";
 import http from "node:http";
 import { createRequire } from "node:module";
@@ -17,6 +18,26 @@ const { WebSocket, WebSocketServer } = require(
   `${proxyWarRepo}/node_modules/ws`,
 );
 const winston = require(`${proxyWarRepo}/node_modules/winston`);
+const proxyWarStaticRoot = path.join(proxyWarRepo, "static");
+const proxyWarPublicRunArtifacts = new Set([
+  "game-record.json",
+  "decisions.jsonl",
+  "match-summary.json",
+  "match-package.json",
+  "match-package.html",
+  "match-package.md",
+  "spectator-replay.json",
+  "spectator-telemetry.json",
+  "visual-report.html",
+  "spectator.html",
+  "objective-scorecard.md",
+  "match-story.md",
+  "behavior-quality-report.json",
+  "behavior-quality-report.md",
+  "external-agent-feedback.md",
+]);
+
+let proxyWarAppShellPromise: Promise<string> | null = null;
 
 type LegalActionView = {
   id: string;
@@ -68,9 +89,9 @@ type CoworldResults = {
 };
 
 class CoworldProtocolServer {
-  private readonly server = http.createServer((request, response) =>
-    this.handleHttp(request, response),
-  );
+  private readonly server = http.createServer((request, response) => {
+    void this.handleHttp(request, response);
+  });
   private readonly wsServer = new WebSocketServer({ noServer: true });
   private readonly players = new Map<number, InstanceType<typeof WebSocket>>();
   private readonly pending = new Map<string, PendingDecision>();
@@ -264,25 +285,34 @@ class CoworldProtocolServer {
     });
   }
 
-  private handleHttp(
+  private async handleHttp(
     request: http.IncomingMessage,
     response: http.ServerResponse,
-  ): void {
+  ): Promise<void> {
     const url = new URL(request.url ?? "/", "http://127.0.0.1");
     if (url.pathname === "/healthz") {
       writeJson(response, 200, { ok: true });
+      return;
+    }
+    if (url.pathname === "/coworld/replay-info") {
+      writeJson(response, 200, this.replayInfo());
+      return;
+    }
+    if (await this.writeRunArtifact(url, response)) {
+      return;
+    }
+    if (
+      url.pathname === "/client/global" ||
+      url.pathname === "/client/replay"
+    ) {
+      await writeProxyWarAppShell(response);
       return;
     }
     if (url.pathname === "/client/player") {
       writeHtml(response, coworldPlayerClientHtml());
       return;
     }
-    if (url.pathname === "/client/global") {
-      writeHtml(response, coworldGlobalClientHtml());
-      return;
-    }
-    if (url.pathname === "/client/replay") {
-      writeHtml(response, coworldReplayClientHtml());
+    if (await writeProxyWarStaticAsset(url, response)) {
       return;
     }
     writeJson(response, 404, { error: "not found" });
@@ -411,6 +441,74 @@ class CoworldProtocolServer {
 
   private latestSnapshot(): unknown {
     return this.snapshots[this.snapshots.length - 1] ?? null;
+  }
+
+  private replayInfo(): Record<string, unknown> {
+    const runID = this.replayRunID();
+    const artifactDirectory =
+      runID === null ? null : this.proxyWarArtifactDirectory(runID);
+    return {
+      ready: runID !== null && artifactDirectory !== null,
+      runID,
+      artifactBasePath:
+        runID === null ? null : `/ai-league-runs/${encodeURIComponent(runID)}`,
+      snapshotCount: this.snapshots.length,
+      replayReady: this.replayPayload !== null,
+    };
+  }
+
+  private replayRunID(): string | null {
+    if (this.replayPayload === null || typeof this.replayPayload !== "object") {
+      return null;
+    }
+    const runID = (this.replayPayload as Record<string, unknown>).runID;
+    return typeof runID === "string" && isSafeProxyWarArtifactSegment(runID)
+      ? runID
+      : null;
+  }
+
+  private proxyWarArtifactDirectory(runID: string): string | null {
+    if (this.replayPayload === null || typeof this.replayPayload !== "object") {
+      return null;
+    }
+    const artifacts = (this.replayPayload as Record<string, unknown>)
+      .proxyWarArtifacts;
+    if (artifacts === null || typeof artifacts !== "object") {
+      return null;
+    }
+    const directory = (artifacts as Record<string, unknown>).directory;
+    if (typeof directory !== "string" || path.basename(directory) !== runID) {
+      return null;
+    }
+    return directory;
+  }
+
+  private async writeRunArtifact(
+    url: URL,
+    response: http.ServerResponse,
+  ): Promise<boolean> {
+    const match = url.pathname.match(/^\/ai-league-runs\/([^/]+)\/([^/]+)$/);
+    if (match === null) {
+      return false;
+    }
+    const runID = decodeURIComponent(match[1]);
+    const artifact = decodeURIComponent(match[2]);
+    const directory = this.proxyWarArtifactDirectory(runID);
+    if (
+      directory === null ||
+      !isSafeProxyWarArtifactSegment(runID) ||
+      !proxyWarPublicRunArtifacts.has(artifact)
+    ) {
+      writeText(response, 404, "artifact not available");
+      return true;
+    }
+    const filePath = path.resolve(directory, artifact);
+    if (!isInsideRoot(filePath, directory) || !fsSync.existsSync(filePath)) {
+      writeText(response, 404, "artifact not found");
+      return true;
+    }
+    await writeFile(response, filePath);
+    return true;
   }
 }
 
@@ -1320,312 +1418,6 @@ function enumValue(
   return match;
 }
 
-function coworldGlobalClientHtml(): string {
-  return coworldSpectatorClientHtml({
-    title: "Proxy War Coworld Global",
-    endpoint: "/global",
-    modeLabel: "Live replay viewer",
-    waitingText:
-      "Waiting for Proxy War spectator snapshots. Connect all players to start the match.",
-  });
-}
-
-function coworldReplayClientHtml(): string {
-  return coworldSpectatorClientHtml({
-    title: "Proxy War Coworld Replay",
-    endpoint: "/replay",
-    modeLabel: "Replay viewer",
-    waitingText: "Waiting for Coworld replay data.",
-  });
-}
-
-function coworldSpectatorClientHtml(input: {
-  title: string;
-  endpoint: "/global" | "/replay";
-  modeLabel: string;
-  waitingText: string;
-}): string {
-  return `<!doctype html>
-<html lang="en">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>${escapeHtml(input.title)}</title>
-  <style>${coworldClientCss()}</style>
-</head>
-<body>
-  <header>
-    <div>
-      <h1>${escapeHtml(input.title)}</h1>
-      <p>${escapeHtml(input.modeLabel)}</p>
-    </div>
-    <strong id="connection">connecting</strong>
-  </header>
-  <main class="spectator">
-    <section class="surface">
-      <canvas id="map" width="1100" height="720" aria-label="Proxy War map"></canvas>
-      <div class="controls">
-        <button id="prev" type="button">Prev</button>
-        <button id="play" type="button">Play</button>
-        <button id="next" type="button">Next</button>
-        <input id="scrub" type="range" min="0" max="0" value="0" aria-label="Replay frame">
-        <strong id="frame-label">No frame</strong>
-      </div>
-      <div class="metrics">
-        <div>Turn<strong id="turn">-</strong></div>
-        <div>Tick<strong id="tick">-</strong></div>
-        <div>Snapshots<strong id="snapshot-count">0</strong></div>
-        <div>Players<strong id="player-count">0</strong></div>
-      </div>
-      <dl id="match-state" class="match-state"></dl>
-      <div class="viewer-grid">
-        <section>
-          <h2>Agents</h2>
-          <div id="roster" class="roster"></div>
-        </section>
-        <section>
-          <h2>Frame Decisions</h2>
-          <div id="decisions" class="timeline"></div>
-        </section>
-      </div>
-    </section>
-  </main>
-  <script>
-    const endpoint = ${JSON.stringify(input.endpoint)};
-    const waitingText = ${JSON.stringify(input.waitingText)};
-    const state = {
-      snapshots: [],
-      map: null,
-      frame: 0,
-      replay: null,
-      lastMessage: null,
-      playing: false,
-      timer: null
-    };
-    const canvas = document.getElementById("map");
-    const ctx = canvas.getContext("2d");
-    const scrub = document.getElementById("scrub");
-    const playButton = document.getElementById("play");
-
-    connect();
-    render();
-
-    document.getElementById("prev").addEventListener("click", () => setFrame(state.frame - 1));
-    document.getElementById("next").addEventListener("click", () => setFrame(state.frame + 1));
-    scrub.addEventListener("input", () => setFrame(Number(scrub.value)));
-    playButton.addEventListener("click", () => {
-      if (state.playing) stopPlayback();
-      else startPlayback();
-    });
-
-    function connect() {
-      const protocol = location.protocol === "https:" ? "wss:" : "ws:";
-      const socket = new WebSocket(protocol + "//" + location.host + endpoint);
-      socket.addEventListener("open", () => setConnection("connected"));
-      socket.addEventListener("close", () => setConnection("closed"));
-      socket.addEventListener("error", () => setConnection("socket error"));
-      socket.addEventListener("message", (event) => {
-        const message = JSON.parse(event.data);
-        state.lastMessage = message;
-        if (message.type === "state") {
-          if (message.map) state.map = message.map;
-          if (message.spectatorReplay) loadReplay(message.spectatorReplay);
-          if (message.snapshot) appendSnapshot(message.snapshot);
-        }
-        if (message.type === "replay") {
-          const replay = message.replay && message.replay.spectatorReplay;
-          if (replay) loadReplay(replay);
-        }
-        render();
-      });
-    }
-
-    function setConnection(label) {
-      document.getElementById("connection").textContent = label;
-    }
-
-    function loadReplay(replay) {
-      state.replay = replay;
-      state.map = replay.map || state.map;
-      state.snapshots = Array.isArray(replay.snapshots) ? replay.snapshots : [];
-      state.frame = state.snapshots.length > 0 ? state.snapshots.length - 1 : 0;
-      syncScrubber();
-    }
-
-    function appendSnapshot(snapshot) {
-      const previous = state.snapshots[state.snapshots.length - 1];
-      if (
-        previous &&
-        previous.turnNumber === snapshot.turnNumber &&
-        previous.tick === snapshot.tick &&
-        previous.label === snapshot.label
-      ) {
-        state.snapshots[state.snapshots.length - 1] = snapshot;
-      } else {
-        state.snapshots.push(snapshot);
-      }
-      state.frame = state.snapshots.length - 1;
-      syncScrubber();
-    }
-
-    function startPlayback() {
-      if (state.snapshots.length <= 1) return;
-      state.playing = true;
-      playButton.textContent = "Pause";
-      state.timer = setInterval(() => {
-        if (state.frame >= state.snapshots.length - 1) {
-          stopPlayback();
-          return;
-        }
-        setFrame(state.frame + 1);
-      }, 900);
-    }
-
-    function stopPlayback() {
-      state.playing = false;
-      playButton.textContent = "Play";
-      clearInterval(state.timer);
-      state.timer = null;
-    }
-
-    function setFrame(frame) {
-      state.frame = Math.max(0, Math.min(Math.floor(frame), Math.max(0, state.snapshots.length - 1)));
-      syncScrubber();
-      render();
-    }
-
-    function syncScrubber() {
-      scrub.max = String(Math.max(0, state.snapshots.length - 1));
-      scrub.value = String(state.frame);
-    }
-
-    function render() {
-      const snapshot = state.snapshots[state.frame] || null;
-      document.getElementById("snapshot-count").textContent = String(state.snapshots.length);
-      document.getElementById("player-count").textContent = String(snapshot && Array.isArray(snapshot.players) ? snapshot.players.length : 0);
-      document.getElementById("turn").textContent = snapshot ? String(snapshot.turnNumber) : "-";
-      document.getElementById("tick").textContent = snapshot ? String(snapshot.tick) : "-";
-      document.getElementById("frame-label").textContent = snapshot ? snapshot.label : "No frame";
-      renderMatchState(snapshot);
-      renderMap(snapshot);
-      renderRoster(snapshot);
-      renderDecisions(snapshot);
-    }
-
-    function renderMatchState(snapshot) {
-      const message = state.lastMessage || {};
-      const replay = state.replay || {};
-      const config = message.config || {};
-      const map = state.map || replay.map || {};
-      document.getElementById("match-state").innerHTML = [
-        row("Event", message.event || "n/a"),
-        row("Map", (map.gameMap || config.map || "unknown") + " / " + (map.gameMapSize || config.map_size || "unknown")),
-        row("Connected", (message.connectedPlayers ?? 0) + " / " + (message.requiredPlayers ?? config.player_count ?? 0)),
-        row("Replay", message.replayReady ? "ready" : state.replay ? "loaded" : "not ready"),
-        row("Phase", snapshot ? snapshot.phase : "n/a")
-      ].join("");
-    }
-
-    function renderMap(snapshot) {
-      ctx.clearRect(0, 0, canvas.width, canvas.height);
-      ctx.fillStyle = "#d8e5ef";
-      ctx.fillRect(0, 0, canvas.width, canvas.height);
-      if (!snapshot) {
-        ctx.fillStyle = "#17202a";
-        ctx.font = "24px system-ui, sans-serif";
-        ctx.fillText(waitingText, 32, 64);
-        return;
-      }
-      const map = mapDimensions(snapshot);
-      const pad = 16;
-      const scale = Math.min((canvas.width - pad * 2) / map.width, (canvas.height - pad * 2) / map.height);
-      const offsetX = (canvas.width - map.width * scale) / 2;
-      const offsetY = (canvas.height - map.height * scale) / 2;
-      ctx.fillStyle = "#eef5eb";
-      ctx.fillRect(offsetX, offsetY, map.width * scale, map.height * scale);
-      for (const player of snapshot.players || []) {
-        ctx.fillStyle = safeColor(player.color);
-        for (const tile of player.tiles || []) {
-          const x = tile % map.width;
-          const y = Math.floor(tile / map.width);
-          ctx.fillRect(offsetX + x * scale, offsetY + y * scale, Math.max(1.2, scale), Math.max(1.2, scale));
-        }
-        for (const unit of player.units || []) {
-          const x = unit.tile % map.width;
-          const y = Math.floor(unit.tile / map.width);
-          ctx.beginPath();
-          ctx.arc(offsetX + x * scale, offsetY + y * scale, Math.max(3, scale * 2), 0, Math.PI * 2);
-          ctx.fillStyle = "#fff";
-          ctx.fill();
-          ctx.strokeStyle = "#111827";
-          ctx.stroke();
-        }
-      }
-    }
-
-    function renderRoster(snapshot) {
-      const players = snapshot && Array.isArray(snapshot.players) ? snapshot.players : [];
-      document.getElementById("roster").innerHTML = players.length === 0
-        ? '<p class="muted">No player state yet.</p>'
-        : players.map((player) =>
-            '<article class="agent"><strong><span class="swatch" style="background:' + safeColor(player.color) + '"></span>' +
-            h(player.username) + '</strong><span>' + h(player.profile || "agent") + ' · ' +
-            h(player.brainType || "unknown") + '</span><code>' +
-            h(player.tilesOwned) + ' tiles · ' + h(player.troops) + ' troops · gold ' + h(player.gold) +
-            '</code></article>'
-          ).join("");
-    }
-
-    function renderDecisions(snapshot) {
-      const decisions = snapshot && Array.isArray(snapshot.decisions) ? snapshot.decisions : [];
-      document.getElementById("decisions").innerHTML = decisions.length === 0
-        ? '<p class="muted">No decisions on this frame.</p>'
-        : decisions.map((decision) =>
-            '<article class="decision"><strong>' + h(decision.username) + '</strong>' +
-            '<span class="badge">' + h(decision.selectedActionKind) + '</span>' +
-            '<code>' + h(decision.selectedLegalActionId) + '</code>' +
-            '<p>' + h(decision.reason || "") + '</p>' +
-            '<small>' + h(decision.accepted ? "accepted" : "rejected") + ' · ' + h(decision.resultReason || "") + '</small></article>'
-          ).join("");
-    }
-
-    function mapDimensions(snapshot) {
-      const map = state.map || (state.replay && state.replay.map) || {};
-      const inferredWidth = inferWidth(snapshot);
-      return {
-        width: Number(map.width || inferredWidth),
-        height: Number(map.height || inferredWidth)
-      };
-    }
-
-    function inferWidth(snapshot) {
-      const tiles = (snapshot.players || []).flatMap((player) => player.tiles || []);
-      const maxTile = tiles.length === 0 ? 0 : Math.max(...tiles);
-      return Math.max(64, Math.ceil(Math.sqrt(maxTile + 1)));
-    }
-
-    function row(label, value) {
-      return '<dt>' + h(label) + '</dt><dd>' + h(value) + '</dd>';
-    }
-
-    function safeColor(value) {
-      return /^#[0-9a-f]{6}$/i.test(String(value)) ? String(value) : "#64748b";
-    }
-
-    function h(value) {
-      return String(value ?? "").replace(/[&<>"']/g, (char) => ({
-        "&": "&amp;",
-        "<": "&lt;",
-        ">": "&gt;",
-        '"': "&quot;",
-        "'": "&#39;"
-      }[char]));
-    }
-  </script>
-</body>
-</html>`;
-}
-
 function coworldPlayerClientHtml(): string {
   return `<!doctype html>
 <html lang="en">
@@ -1785,6 +1577,113 @@ function coworldClientCss(): string {
   `;
 }
 
+async function writeProxyWarAppShell(
+  response: http.ServerResponse,
+): Promise<void> {
+  const html = await proxyWarAppShellHtml();
+  response.writeHead(200, {
+    "content-type": "text/html; charset=utf-8",
+    "cache-control": "no-store",
+  });
+  response.end(html);
+}
+
+async function proxyWarAppShellHtml(): Promise<string> {
+  if (proxyWarAppShellPromise === null) {
+    proxyWarAppShellPromise = (async () => {
+      const { renderHtmlContent } = await importProxyWar(
+        "src/server/RenderHtml.ts",
+      );
+      const staticHtmlPath = path.join(proxyWarStaticRoot, "index.html");
+      const htmlPath = fsSync.existsSync(staticHtmlPath)
+        ? staticHtmlPath
+        : path.join(proxyWarRepo, "index.html");
+      return await renderHtmlContent(htmlPath);
+    })();
+  }
+  return await proxyWarAppShellPromise;
+}
+
+async function writeProxyWarStaticAsset(
+  url: URL,
+  response: http.ServerResponse,
+): Promise<boolean> {
+  const requestPath = decodeURIComponent(url.pathname);
+  if (!isProxyWarStaticAssetPath(requestPath)) {
+    return false;
+  }
+  const filePath = path.resolve(proxyWarStaticRoot, requestPath.slice(1));
+  if (
+    !isInsideRoot(filePath, proxyWarStaticRoot) ||
+    !fsSync.existsSync(filePath) ||
+    !fsSync.statSync(filePath).isFile()
+  ) {
+    return false;
+  }
+  await writeFile(response, filePath);
+  return true;
+}
+
+function isProxyWarStaticAssetPath(requestPath: string): boolean {
+  return (
+    requestPath.startsWith("/assets/") ||
+    requestPath.startsWith("/_assets/") ||
+    requestPath.startsWith("/images/") ||
+    requestPath.startsWith("/sounds/") ||
+    requestPath.startsWith("/maps/") ||
+    requestPath.startsWith("/lang/") ||
+    requestPath.startsWith("/flags/") ||
+    requestPath.startsWith("/icons/") ||
+    requestPath.startsWith("/sprites/") ||
+    requestPath.startsWith("/fonts/") ||
+    requestPath === "/manifest.json" ||
+    requestPath === "/favicon.ico" ||
+    requestPath === "/asset-manifest.json"
+  );
+}
+
+async function writeFile(
+  response: http.ServerResponse,
+  filePath: string,
+): Promise<void> {
+  const body = await fs.readFile(filePath);
+  response.writeHead(200, {
+    "content-type": mimeType(filePath),
+    "cache-control": "public, max-age=31536000, immutable",
+  });
+  response.end(body);
+}
+
+function mimeType(filePath: string): string {
+  switch (path.extname(filePath)) {
+    case ".css":
+      return "text/css; charset=utf-8";
+    case ".html":
+      return "text/html; charset=utf-8";
+    case ".js":
+    case ".mjs":
+      return "text/javascript; charset=utf-8";
+    case ".json":
+    case ".webmanifest":
+      return "application/json; charset=utf-8";
+    case ".png":
+      return "image/png";
+    case ".jpg":
+    case ".jpeg":
+      return "image/jpeg";
+    case ".svg":
+      return "image/svg+xml";
+    case ".webp":
+      return "image/webp";
+    case ".woff2":
+      return "font/woff2";
+    case ".wasm":
+      return "application/wasm";
+    default:
+      return "application/octet-stream";
+  }
+}
+
 function writeJson(
   response: http.ServerResponse,
   status: number,
@@ -1794,9 +1693,36 @@ function writeJson(
   response.end(JSON.stringify(body));
 }
 
+function writeText(
+  response: http.ServerResponse,
+  status: number,
+  body: string,
+): void {
+  response.writeHead(status, { "content-type": "text/plain; charset=utf-8" });
+  response.end(body);
+}
+
 function writeHtml(response: http.ServerResponse, html: string): void {
   response.writeHead(200, { "content-type": "text/html; charset=utf-8" });
   response.end(html);
+}
+
+function isSafeProxyWarArtifactSegment(value: string): boolean {
+  return (
+    value.length > 0 &&
+    value.length <= 180 &&
+    value !== "." &&
+    value !== ".." &&
+    value === path.basename(value) &&
+    /^[a-zA-Z0-9._:-]+$/.test(value)
+  );
+}
+
+function isInsideRoot(filePath: string, rootDir: string): boolean {
+  const relative = path.relative(path.resolve(rootDir), filePath);
+  return (
+    relative !== "" && !relative.startsWith("..") && !path.isAbsolute(relative)
+  );
 }
 
 function escapeHtml(value: string): string {

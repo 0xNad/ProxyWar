@@ -53,9 +53,9 @@ import "./SinglePlayerModal";
 import { StoreModal } from "./Store";
 import "./TerritoryPatternsModal";
 import { TerritoryPatternsModal } from "./TerritoryPatternsModal";
-import { PauseGameIntentEvent } from "./Transport";
 import { TokenLoginModal } from "./TokenLoginModal";
 import {
+  PauseGameIntentEvent,
   SendKickPlayerIntentEvent,
   SendStartGameEvent,
   SendUpdateGameConfigIntentEvent,
@@ -71,6 +71,7 @@ import {
 } from "./Utils";
 import { ReplaySpeedMultiplier } from "./utilities/ReplaySpeedMultiplier";
 
+import { isCoworldReplayRoute } from "./AiLeagueReplayMode";
 import "./components/DesktopNavBar";
 import "./components/Footer";
 import "./components/MainLayout";
@@ -251,7 +252,9 @@ export interface JoinLobbyEvent {
     | "host"
     | "matchmaking"
     | "singleplayer"
-    | "ai-league-replay";
+    | "ai-league-replay"
+    | "coworld-replay";
+  coworldReplayPath?: string;
   publicLobbyInfo?: GameInfo | PublicGameInfo;
 }
 
@@ -728,6 +731,10 @@ class Client {
       await this.openAiLeagueReplay(decodeURIComponent(aiLeagueReplayMatch[1]));
       return;
     }
+    if (isCoworldReplayRoute()) {
+      await this.openCoworldReplay();
+      return;
+    }
     const lobbyId =
       pathMatch && GAME_ID_REGEX.test(pathMatch[1]) ? pathMatch[1] : null;
     if (lobbyId) {
@@ -773,20 +780,28 @@ class Client {
     }
   }
 
-  private async openAiLeagueReplay(runID: string) {
+  private async openAiLeagueReplay(
+    runID: string,
+    options: {
+      source?: Extract<
+        JoinLobbyEvent["source"],
+        "ai-league-replay" | "coworld-replay"
+      >;
+      coworldReplayPath?: string;
+    } = {},
+  ) {
     const artifactBasePath = `/ai-league-runs/${encodeURIComponent(runID)}`;
     const [
       recordResponse,
       decisionsResponse,
       summaryResponse,
       spectatorTelemetryResponse,
-    ] =
-      await Promise.all([
-        fetch(`${artifactBasePath}/game-record.json`),
-        fetch(`${artifactBasePath}/decisions.jsonl`),
-        fetch(`${artifactBasePath}/match-summary.json`),
-        fetch(`${artifactBasePath}/spectator-telemetry.json`),
-      ]);
+    ] = await Promise.all([
+      fetch(`${artifactBasePath}/game-record.json`),
+      fetch(`${artifactBasePath}/decisions.jsonl`),
+      fetch(`${artifactBasePath}/match-summary.json`),
+      fetch(`${artifactBasePath}/spectator-telemetry.json`),
+    ]);
 
     if (!recordResponse.ok) {
       const spectatorResponse = await fetch(
@@ -875,13 +890,52 @@ class Client {
         detail: {
           gameID: parsed.data.info.gameID,
           gameRecord: parsed.data,
-          source: "ai-league-replay",
+          source: options.source ?? "ai-league-replay",
           aiLeagueRunID: runID,
+          coworldReplayPath: options.coworldReplayPath,
         } satisfies JoinLobbyEvent,
         bubbles: true,
         composed: true,
       }),
     );
+  }
+
+  private async openCoworldReplay() {
+    const coworldReplayPath = window.location.pathname + window.location.search;
+    const loading = document.createElement("div");
+    loading.id = "coworld-replay-loading";
+    loading.textContent = "Waiting for Proxy War replay...";
+    loading.setAttribute(
+      "style",
+      [
+        "position:fixed",
+        "inset:0",
+        "z-index:100000",
+        "display:grid",
+        "place-items:center",
+        "background:#070b12",
+        "color:white",
+        "font:600 18px system-ui,sans-serif",
+      ].join(";"),
+    );
+    document.body.appendChild(loading);
+    while (true) {
+      const response = await fetch("/coworld/replay-info", {
+        cache: "no-store",
+      });
+      if (response.ok) {
+        const info = await response.json();
+        if (info.ready === true && typeof info.runID === "string") {
+          loading.remove();
+          await this.openAiLeagueReplay(info.runID, {
+            source: "coworld-replay",
+            coworldReplayPath,
+          });
+          return;
+        }
+      }
+      await new Promise((resolve) => setTimeout(resolve, 1000));
+    }
   }
 
   private async handleJoinLobby(event: CustomEvent<JoinLobbyEvent>) {
@@ -1000,6 +1054,7 @@ class Client {
 
       if (
         lobby.source !== "ai-league-replay" &&
+        lobby.source !== "coworld-replay" &&
         window.PageOS?.session?.newPageView
       ) {
         window.PageOS.session.newPageView();
@@ -1008,17 +1063,25 @@ class Client {
       crazyGamesSDK.gameplayStart();
       document.body.classList.add("in-game");
 
-      // Ensure there's a homepage entry in history before adding the lobby entry
-      if (window.location.hash === "" || window.location.hash === "#") {
+      const preserveCoworldReplayUrl = lobby.source === "coworld-replay";
+      // Ensure there's a homepage entry in history before adding the lobby entry.
+      if (
+        !preserveCoworldReplayUrl &&
+        (window.location.hash === "" || window.location.hash === "#")
+      ) {
         history.replaceState(null, "", window.location.origin + "#refresh");
       }
       const lobbyIdHidden = !this.userSettings.lobbyIdVisibility();
       if (lobby.gameRecord !== undefined && lobby.aiLeagueRunID) {
-        history.pushState(
-          null,
-          "",
-          `/ai-league-replay/${encodeURIComponent(lobby.aiLeagueRunID)}`,
-        );
+        if (!preserveCoworldReplayUrl) {
+          history.pushState(
+            null,
+            "",
+            `/ai-league-replay/${encodeURIComponent(lobby.aiLeagueRunID)}`,
+          );
+        } else if (lobby.coworldReplayPath !== undefined) {
+          history.replaceState(null, "", lobby.coworldReplayPath);
+        }
         const runtimeWindow = window as typeof window & {
           __openFrontPromoCaptureLock?: boolean;
         };
