@@ -192,7 +192,13 @@ export function buildAgentBehaviorQualityReport(
     expansion: records.some(isNeutralExpansionAction),
     build: records.some(isBuildMoment),
     combat: records.some(isCombatMoment),
-    diplomacy: records.some(isDiplomacyMoment),
+    // Require a CONSEQUENTIAL diplomacy beat (a structural alliance/embargo/target/
+    // donate action, or a chat/emoji that actually leads to an aligned move) — a lone
+    // decorative emoji no longer satisfies the visible diplomacy arc.
+    diplomacy: records.some(
+      (record) =>
+        isDiplomacyMoment(record) && diplomacyHasFollowThrough(record, records),
+    ),
   };
 
   for (const agentRecords of agents.values()) {

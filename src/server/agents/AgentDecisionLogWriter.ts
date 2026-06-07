@@ -9,6 +9,10 @@ import {
   writeAgentBehaviorQualityArtifacts,
 } from "./AgentBehaviorQualityReport";
 import {
+  buildAgentDramaReport,
+  writeAgentDramaReportArtifacts,
+} from "./AgentDramaReport";
+import {
   AgentMatchStory,
   AgentMatchStoryPaths,
   buildAgentMatchStory,
@@ -134,6 +138,8 @@ export interface AgentLeagueRunArtifactPaths {
   externalAgentFeedbackMarkdownPath: string;
   behaviorQualityJsonPath: string;
   behaviorQualityMarkdownPath: string;
+  dramaReportJsonPath: string;
+  dramaReportMarkdownPath: string;
   matchStoryJsonPath: string;
   matchStoryMarkdownPath: string;
   matchPackageJsonPath: string;
@@ -352,6 +358,19 @@ export async function writeAgentLeagueRunArtifacts(
     report: behaviorQuality,
     directory,
   });
+  const dramaReport = buildAgentDramaReport({
+    runID: input.runID,
+    matchID: input.matchID,
+    scenario: input.scenario,
+    brainMode: input.brainMode,
+    records: input.records,
+    roster: input.roster,
+    finalState: input.finalState,
+  });
+  const dramaReportPaths = await writeAgentDramaReportArtifacts({
+    report: dramaReport,
+    directory,
+  });
   const spectatorPaths =
     input.spectatorReplay === undefined
       ? null
@@ -444,6 +463,8 @@ export async function writeAgentLeagueRunArtifacts(
     externalAgentFeedbackMarkdownPath: externalFeedbackPaths.markdownPath,
     behaviorQualityJsonPath: behaviorQualityPaths.jsonPath,
     behaviorQualityMarkdownPath: behaviorQualityPaths.markdownPath,
+    dramaReportJsonPath: dramaReportPaths.jsonPath,
+    dramaReportMarkdownPath: dramaReportPaths.markdownPath,
     matchStoryJsonPath: matchStoryPaths.jsonPath,
     matchStoryMarkdownPath: matchStoryPaths.markdownPath,
     matchPackageJsonPath: matchPackagePaths.jsonPath,
