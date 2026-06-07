@@ -194,6 +194,19 @@ Benchmark lessons so far:
   specific alliance protects a flank or balances a stronger neighbor. Do not add
   diplomacy to every growth plan, because over-allying future conquest targets
   can make later pressure harder.
+- Human replay diplomacy baseline (82 recent public FFA games, winner-conditioned).
+  In multi-rival fields (several comparable powers, i.e. self-play / FFA-style
+  matches, NOT a duel vs one weak nation): alliances are universal and early —
+  nearly every surviving player opens one by ~1.5 min, so seek an early alliance
+  instead of fighting the opening alone. Winners betray MORE and LATER than the
+  field: ~90% of winners break an alliance (vs ~71% overall), first betrayal
+  ~10.5 min (vs ~9), median 2 breaks (vs 1). The winning pattern is: ally early to
+  survive the opening, ride the alliance while it still grows you, then break it
+  decisively once you are strong enough that betrayal converts into a lead — not a
+  premature break that only makes an enemy. Time the break with the OPPONENT_MODEL
+  signals (trust, momentum, allianceExpiresAt, predictedNextAction): pre-empt a
+  stronger ally that is likely to turn on you, and absorb a weaker ally when taking
+  its land clearly grows you faster than the pact does.
 - Do not confuse pressure intent with permission to attack. If reserves are
   low, an outgoing attack is already active, home danger is high, or the target
   is stronger, choose build, fortify, diplomacy, embargo, target mark, or hold
