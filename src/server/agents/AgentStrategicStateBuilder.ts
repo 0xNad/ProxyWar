@@ -86,17 +86,35 @@ function strategicScores(input: BuildAgentStrategicStateInput) {
   const tiles = Math.max(own?.tilesOwned ?? 0, 1);
   const idleTroops = clamp01(troops / Math.max(50_000, tiles * 250));
 
+  // Over-expansion collapse guard. The measured Hard death mode is NOT under-expansion:
+  // the agent farms a huge neutral perimeter (~17k tiles) with near-zero economy/defense
+  // and thin per-tile reserves, then collapses once bordered by multiple stronger rivals.
+  // When that condition holds, stop grabbing more neutral land and flip toward
+  // consolidation (defense/economy). Requires real territory first, so the opening land
+  // grab and easy/low-pressure games are unaffected (gate won't fire at low tile counts
+  // or with <2 stronger borders). Thresholds tunable via PROXYWAR_TUNE_*.
+  const overExtended =
+    tiles >= tunedNumber("OVEREXTEND_MIN_TILES", 150) &&
+    strongerBorderThreats.length >=
+      tunedNumber("OVEREXTEND_STRONG_BORDERS", 2) &&
+    idleTroops < tunedNumber("OVEREXTEND_IDLE_FLOOR", 0.35);
+  const baseDefense =
+    input.combat.incomingAttackPlayerIDs.length > 0
+      ? 1
+      : defensiveBuilds.length > 0 && strongerBorderThreats.length > 0
+        ? 0.85
+        : defensiveBuilds.length > 0 && bordered.length > 0
+          ? 0.65
+          : 0;
+
   return {
-    expansion: input.combat.canExpandIntoNeutral ? 0.9 : 0,
+    expansion: input.combat.canExpandIntoNeutral
+      ? overExtended
+        ? tunedNumber("OVEREXTEND_EXPANSION_SCORE", 0.15)
+        : 0.9
+      : 0,
     economy: economicBuilds.length > 0 ? (tiles < 200 ? 0.85 : 0.65) : 0,
-    defense:
-      input.combat.incomingAttackPlayerIDs.length > 0
-        ? 1
-        : defensiveBuilds.length > 0 && strongerBorderThreats.length > 0
-          ? 0.85
-          : defensiveBuilds.length > 0 && bordered.length > 0
-            ? 0.65
-            : 0,
+    defense: overExtended ? Math.max(baseDefense, 0.9) : baseDefense,
     offense:
       weakAttackable.length > 0
         ? Math.min(1, 0.55 + weakAttackable.length * 0.1)

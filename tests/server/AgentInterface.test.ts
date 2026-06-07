@@ -278,6 +278,90 @@ describe("AI Nations League agent interface", () => {
     });
   });
 
+  it("restrains expansion and flips to defense when over-extended against strong borders", () => {
+    const buildStrategic = (ownTroops: number) =>
+      new AgentStrategicStateBuilder().build({
+        profile: "aggressive",
+        phase: "active",
+        ownState: {
+          playerID: "PLAYER01",
+          clientID: "CLNT0001",
+          smallID: 1,
+          name: "Over-extended Agent",
+          type: PlayerType.Human,
+          isAlive: true,
+          isDisconnected: false,
+          isTraitor: false,
+          hasSpawned: true,
+          troops: ownTroops,
+          gold: "200000",
+          tilesOwned: 2000,
+          borderTiles: 400,
+          outgoingAttacks: 0,
+          incomingAttacks: 0,
+          outgoingAllianceRequests: 0,
+          incomingAllianceRequests: 0,
+        },
+        visiblePlayers: [1, 2].map((n) => ({
+          playerID: `RIVAL0${n}`,
+          clientID: `CLNT000${n}`,
+          smallID: n + 1,
+          name: `Strong Rival ${n}`,
+          type: PlayerType.Human,
+          isAlive: true,
+          isDisconnected: false,
+          hasSpawned: true,
+          troops: 400_000,
+          gold: "100000",
+          tilesOwned: 2500,
+          sharesBorder: true,
+          isAllied: false,
+          isFriendly: false,
+          relation: Relation.Hostile,
+          canAttack: true,
+          canRequestAlliance: false,
+          canDonateGold: false,
+          canDonateTroops: false,
+          canEmbargo: true,
+          hasEmbargoAgainst: false,
+          outgoingAttack: false,
+          incomingAttack: false,
+          hasOutgoingAllianceRequest: false,
+          hasIncomingAllianceRequest: false,
+          relativeTroopRatio: ownTroops / 400_000,
+        })),
+        combat: {
+          ownTroops,
+          borderedPlayerIDs: ["RIVAL01", "RIVAL02"],
+          attackablePlayerIDs: ["RIVAL01", "RIVAL02"],
+          canExpandIntoNeutral: true,
+          neutralExpansionLegalReason: "neutral land nearby",
+          incomingAttackPlayerIDs: [],
+          outgoingAttackPlayerIDs: [],
+          weakestAttackableTargetID: "RIVAL01",
+          strongestAttackableTargetID: "RIVAL01",
+          blockerNotes: [],
+        },
+        nonCombat: {
+          buildOptions: [],
+          supportOptions: [],
+          embargoOptions: [],
+          blockerNotes: [],
+        },
+      });
+
+    // Over-extended: 2000 tiles, thin reserves (idleTroops ~0.2), 2 stronger borders.
+    const overExtended = buildStrategic(100_000);
+    expect(overExtended.scores.expansion).toBe(0.15);
+    expect(overExtended.scores.defense).toBeGreaterThanOrEqual(0.9);
+    expect(overExtended.priority).toBe("build_defense");
+
+    // Same perimeter but thick reserves (and no stronger borders) -> NOT over-extended,
+    // so the opening/healthy land-grab drive is preserved.
+    const healthy = buildStrategic(600_000);
+    expect(healthy.scores.expansion).toBe(0.9);
+  });
+
   it("offers legal spawn candidates before an agent has spawned", async () => {
     const game = await setup("big_plains", { nations: "disabled" });
     const spawnCandidates = buildSpawnCandidates(game.map(), {
