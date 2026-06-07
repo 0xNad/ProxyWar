@@ -424,17 +424,6 @@ export class PlannerExecutorAgentBrain implements AgentBrain {
     if (this.currentPlan === null) {
       return "no_active_plan";
     }
-    // Speed/cost: do NOT fire a (slow) LLM replan on every single decision. A real
-    // incoming attack still replans immediately; otherwise require a minimum gap
-    // between LLM replans and let the deterministic executor run the intervening
-    // decisions. This cuts LLM calls (the dominant cost of a game) ~2x with no loss
-    // of strategy quality or threat responsiveness. Tunable via PROXYWAR_TUNE_MIN_REPLAN_GAP.
-    if (input.observation.combat.incomingAttackPlayerIDs.length > 0) {
-      return "incoming_attack";
-    }
-    if (this.decisionsSincePlan < tunedNumber("MIN_REPLAN_GAP", 2)) {
-      return null;
-    }
     if (this.decisionsSincePlan >= this.currentPlan.maxDecisionCycles) {
       return "plan_max_decision_cycles";
     }
@@ -14542,42 +14531,6 @@ function scoreFrontierAction(input: {
     penalties.push(reason);
   };
 
-  // SNOWBALL: against equal-strength nation AIs the agent only wins by out-growing
-  // the field early — consuming neutral land and weak/tribe neighbours faster than
-  // the nations do. While we are not yet dominant, strongly reward growth actions so
-  // the policy snowballs instead of stalling at a sliver of the map and being ground
-  // down. relativeTroopRatio >= 1.4 means the target has well under our troop count
-  // (tribes and weak nations), i.e. a cheap, profitable conquest.
-  if (ownTileShare < 0.6) {
-    if (isNeutralGrowthAction(action)) {
-      add("expansion", 100, "snowball: claim neutral/tribe territory to out-grow rivals");
-    } else if (
-      action.kind === "attack" &&
-      action.metadata?.expansion !== true &&
-      (target?.type === PlayerType.Bot ||
-        metadataNumber(action, "relativeTroopRatio") >= 1.8)
-    ) {
-      // Eat tribes (bots) freely; only attack a non-tribe when clearly weaker
-      // (>=1.8x), so we don't provoke a Hard nation that is just briefly low.
-      add(
-        "combat",
-        target?.type === PlayerType.Bot ? 95 : 70,
-        "snowball: conquer a tribe / clearly-weaker neighbour to grow",
-      );
-    }
-  }
-  // Once established, press the dominant rival (the leader) to convert a snowball
-  // lead into an actual win instead of stalling at a fraction of the map.
-  if (
-    ownTileShare >= 0.15 &&
-    !ownIsLeader &&
-    targetIsLeader &&
-    action.kind === "attack" &&
-    action.metadata?.expansion !== true
-  ) {
-    add("combat", 70, "press the leader to contest the win");
-  }
-
   if (settings.profileRepairReRankEnabled) {
     const repairScore = scoreProfileRepairRerankAction({
       profile,
@@ -19506,6 +19459,8 @@ function plannerPrompt(
     "For safe opening growth, do not enable diplomacy unless a specific alliance is needed for survival or the objective is build_alliance.",
     "Choose enabledModules from: emergency_survival, spawn_opening, expansion, defense, economy, diplomacy, combat, naval, nuclear_endgame, utility_social.",
     "Include targetPlayerId and tacticalSettings for reserveRatio, triggerRatio, expansionRatio, maxConcurrentWars, retreatThreshold, and maxActionsPerDecision.",
+    "OPPONENT MODELING (theory of mind): each visiblePlayers entry now carries relation, alliance status/expiry (allianceExpiresAt, allianceInExtensionWindow), pending alliance requests (hasIncoming/OutgoingAllianceRequest), embargoes (hasEmbargoAgainst), and incoming/outgoing attacks. observation.recentCommunications shows what other players just signaled (propose_alliance, coordinate_attack, warn_threat, request_support, taunt) and to whom. Use these to infer each rival's intentions, not just their troop counts: who is a dependable ally, who is likely to betray, who is coordinating against whom, and who is snowballing into the lead.",
+    "DIPLOMACY: prefer build_alliance/pressure_rival objectives when an alliance protects a flank or balances a stronger rival, when a rival proposes one (hasIncomingAllianceRequest), or when two rivals are coordinating against you. Anticipate betrayal: an ally whose alliance is expiring (allianceInExtensionWindow) or who would gain by turning on you is a betrayal risk; consider pre-empting or breaking the alliance first. Politics and timely betrayal are legitimate winning play, not noise.",
     'Required JSON: {"objective":"expand_territory","turnIntent":"growth","rationale":"short reason","maxDecisionCycles":3,"preferredActionKinds":["attack"],"enabledModules":["expansion","economy","defense"],"targetPlayerId":null,"tacticalSettings":{"reserveRatio":0.35,"triggerRatio":0.55,"expansionRatio":0.15,"maxConcurrentWars":1,"retreatThreshold":0.35,"maxActionsPerDecision":4}}',
     "PLANNER_DECISION_BRIEF:",
     JSON.stringify(decisionBrief),
@@ -19531,13 +19486,43 @@ function plannerPrompt(
         sharesBorder: player.sharesBorder,
         isAllied: player.isAllied,
         isFriendly: player.isFriendly,
+        relation: player.relation,
         canAttack: player.canAttack,
         relativeTroopRatio: player.relativeTroopRatio,
+        canRequestAlliance: player.canRequestAlliance,
+        hasIncomingAllianceRequest: player.hasIncomingAllianceRequest,
+        hasOutgoingAllianceRequest: player.hasOutgoingAllianceRequest,
+        canBreakAlliance: player.canBreakAlliance,
+        canExtendAlliance: player.canExtendAlliance,
+        canRejectAlliance: player.canRejectAlliance,
+        allianceExpiresAt: player.allianceExpiresAt,
+        allianceInExtensionWindow: player.allianceInExtensionWindow,
+        canEmbargo: player.canEmbargo,
+        hasEmbargoAgainst: player.hasEmbargoAgainst,
+        canStopEmbargo: player.canStopEmbargo,
+        incomingAttack: player.incomingAttack,
+        outgoingAttack: player.outgoingAttack,
+        canDonateGold: player.canDonateGold,
+        canDonateTroops: player.canDonateTroops,
+        canTarget: player.canTarget,
       })),
       objective: input.observation.objective,
       endgame: input.observation.endgame,
       strategic: input.observation.strategic,
       memory: input.observation.memory,
+      recentCommunications: (input.observation.recentCommunications ?? [])
+        .slice(-12)
+        .map((signal) => ({
+          turn: signal.turnNumber,
+          from: signal.senderName,
+          fromID: signal.senderPlayerID ?? signal.senderAgentID,
+          to: signal.recipientName ?? null,
+          kind: signal.actionKind,
+          intent: signal.intent,
+          target: signal.targetName ?? null,
+          message: signal.message ?? signal.emojiText ?? null,
+          direct: signal.directToAgent,
+        })),
       combat: input.observation.combat,
       tacticalAffordances: buildAgentTacticalAffordances({
         observation: input.observation,
