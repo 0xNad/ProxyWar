@@ -303,13 +303,10 @@ class CoworldProtocolServer {
     }
     if (
       url.pathname === "/client/global" ||
-      url.pathname === "/client/replay"
+      url.pathname === "/client/replay" ||
+      url.pathname === "/client/player"
     ) {
       await writeProxyWarAppShell(response);
-      return;
-    }
-    if (url.pathname === "/client/player") {
-      writeHtml(response, coworldPlayerClientHtml());
       return;
     }
     if (await writeProxyWarStaticAsset(url, response)) {
@@ -653,7 +650,7 @@ async function runCoworldGameContainer(): Promise<void> {
       "application/json",
     );
     server.sendFinal();
-    await sleep(200);
+    await sleep(Number(process.env.COWORLD_POSTGAME_SERVER_MS ?? 1500));
     console.log(
       JSON.stringify(
         {
@@ -1418,165 +1415,6 @@ function enumValue(
   return match;
 }
 
-function coworldPlayerClientHtml(): string {
-  return `<!doctype html>
-<html lang="en">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Proxy War Coworld Player</title>
-  <style>${coworldClientCss()}</style>
-</head>
-<body>
-  <header>
-    <div>
-      <h1>Proxy War Coworld Player</h1>
-      <p>Browser player slot client</p>
-    </div>
-    <strong id="connection">connecting</strong>
-  </header>
-  <main class="player">
-    <section>
-      <h2>Current Request</h2>
-      <dl id="request-summary"></dl>
-      <div id="actions" class="actions"></div>
-    </section>
-    <section>
-      <h2>Observation</h2>
-      <pre id="observation">Waiting for a decision request.</pre>
-    </section>
-    <section>
-      <h2>Log</h2>
-      <pre id="log"></pre>
-    </section>
-  </main>
-  <script>
-    const state = { request: null, socket: null };
-    connect();
-
-    function connect() {
-      const protocol = location.protocol === "https:" ? "wss:" : "ws:";
-      const socket = new WebSocket(protocol + "//" + location.host + "/player" + location.search);
-      state.socket = socket;
-      socket.addEventListener("open", () => setConnection("connected"));
-      socket.addEventListener("close", () => setConnection("closed"));
-      socket.addEventListener("error", () => setConnection("socket error"));
-      socket.addEventListener("message", (event) => {
-        const message = JSON.parse(event.data);
-        appendLog(message);
-        if (message.type === "hello") setConnection("slot " + message.slot);
-        if (message.type === "decision_request") renderRequest(message);
-        if (message.type === "final") setConnection("match finished");
-      });
-    }
-
-    function renderRequest(message) {
-      state.request = message;
-      const request = message.request || {};
-      const actions = Array.isArray(request.legalActions) ? request.legalActions : [];
-      document.getElementById("request-summary").innerHTML = [
-        row("Request", message.requestID),
-        row("Slot", message.slot),
-        row("Protocol", request.protocolVersion || "unknown"),
-        row("Legal actions", actions.length)
-      ].join("");
-      document.getElementById("observation").textContent = JSON.stringify(request.observation || request, null, 2);
-      document.getElementById("actions").innerHTML = actions.map((action, index) =>
-        '<button type="button" data-action-index="' + index + '">' +
-        '<strong>' + h(action.label || action.id) + '</strong>' +
-        '<code>' + h(action.id) + '</code>' +
-        '<span>' + h(action.kind || "action") + '</span></button>'
-      ).join("");
-      document.querySelectorAll("[data-action-index]").forEach((button) => {
-        button.addEventListener("click", () => chooseAction(actions[Number(button.dataset.actionIndex)]));
-      });
-    }
-
-    function chooseAction(action) {
-      const message = state.request;
-      if (!message || !action) return;
-      state.socket.send(JSON.stringify({
-        type: "decision_response",
-        requestID: message.requestID,
-        selectedLegalActionId: action.id,
-        reason: "selected in Coworld browser player",
-        confidence: 0.8
-      }));
-      appendLog({ type: "decision_response", requestID: message.requestID, selectedLegalActionId: action.id });
-      state.request = null;
-      document.getElementById("actions").innerHTML = '<p class="muted">Decision sent. Waiting for the next request.</p>';
-    }
-
-    function setConnection(label) {
-      document.getElementById("connection").textContent = label;
-    }
-
-    function appendLog(message) {
-      const log = document.getElementById("log");
-      log.textContent = JSON.stringify(message, null, 2) + "\\n\\n" + log.textContent;
-    }
-
-    function row(label, value) {
-      return '<dt>' + h(label) + '</dt><dd>' + h(value) + '</dd>';
-    }
-
-    function h(value) {
-      return String(value ?? "").replace(/[&<>"']/g, (char) => ({
-        "&": "&amp;",
-        "<": "&lt;",
-        ">": "&gt;",
-        '"': "&quot;",
-        "'": "&#39;"
-      }[char]));
-    }
-  </script>
-</body>
-</html>`;
-}
-
-function coworldClientCss(): string {
-  return `
-    :root { color-scheme: light; --ink:#17202a; --muted:#627084; --line:#d9e2ec; --paper:#f7f9fc; --accent:#215a9c; }
-    * { box-sizing:border-box; }
-    body { margin:0; font:14px/1.45 system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; color:var(--ink); background:var(--paper); }
-    header { display:flex; align-items:center; justify-content:space-between; gap:16px; padding:20px 28px; background:#fff; border-bottom:1px solid var(--line); }
-    h1 { margin:0; font-size:26px; }
-    h2 { margin:0 0 10px; font-size:16px; }
-    p { margin:0; }
-    header p, .muted { color:var(--muted); }
-    header strong { border:1px solid var(--line); border-radius:999px; padding:6px 10px; background:#f8fbff; color:var(--accent); }
-    main.spectator { max-width:1240px; margin:0 auto; padding:18px 28px 28px; }
-    main.player { display:grid; grid-template-columns:minmax(340px, 440px) minmax(420px, 1fr); gap:18px; max-width:1400px; margin:0 auto; padding:18px 28px 28px; }
-    main.player section:last-child { grid-column:1 / -1; }
-    section, .surface { background:#fff; border:1px solid var(--line); border-radius:8px; padding:14px; }
-    .surface { display:grid; gap:12px; }
-    canvas { width:100%; height:auto; display:block; border:1px solid var(--line); border-radius:8px; background:#d8e5ef; }
-    .viewer-grid { display:grid; grid-template-columns:minmax(260px, 360px) 1fr; gap:12px; align-items:start; }
-    .roster, .timeline, .actions { display:grid; gap:12px; }
-    .controls { display:flex; gap:10px; align-items:center; flex-wrap:wrap; }
-    .controls input { flex:1; min-width:180px; }
-    button { border:1px solid var(--line); background:#fff; color:var(--ink); border-radius:6px; padding:8px 10px; font-weight:700; cursor:pointer; }
-    button:hover { border-color:var(--accent); color:var(--accent); }
-    .metrics { display:grid; grid-template-columns:repeat(auto-fit, minmax(120px, 1fr)); gap:10px; }
-    .metrics div { border:1px solid var(--line); border-radius:8px; padding:10px; }
-    .metrics strong { display:block; font-size:20px; margin-top:3px; }
-    dl { display:grid; grid-template-columns:max-content 1fr; gap:6px 12px; margin:0; }
-    .match-state { grid-template-columns:repeat(auto-fit, minmax(160px, 1fr)); border:1px solid var(--line); border-radius:8px; padding:10px; background:#f8fbff; }
-    .match-state dt { font-size:12px; }
-    .match-state dd { font-weight:700; }
-    dt { color:var(--muted); font-weight:700; }
-    dd { margin:0; min-width:0; overflow-wrap:anywhere; }
-    .agent, .decision { border:1px solid var(--line); border-radius:8px; padding:10px; display:grid; gap:4px; background:#fff; }
-    .decision p { color:#334155; }
-    .badge { display:inline-flex; width:max-content; padding:2px 8px; border-radius:999px; background:#e7eef7; color:var(--accent); font-size:12px; font-weight:700; }
-    .swatch { display:inline-block; width:10px; height:10px; border-radius:999px; margin-right:6px; vertical-align:middle; }
-    code, pre { font-family:ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; overflow-wrap:anywhere; }
-    pre { max-height:50vh; overflow:auto; margin:0; white-space:pre-wrap; background:#f8fbff; border:1px solid var(--line); border-radius:8px; padding:12px; }
-    .actions button { text-align:left; display:grid; gap:4px; }
-    @media (max-width: 980px) { main.spectator, main.player { grid-template-columns:1fr; padding:14px; } .viewer-grid { grid-template-columns:1fr; } header { padding:16px; align-items:flex-start; flex-direction:column; } }
-  `;
-}
-
 async function writeProxyWarAppShell(
   response: http.ServerResponse,
 ): Promise<void> {
@@ -1700,11 +1538,6 @@ function writeText(
 ): void {
   response.writeHead(status, { "content-type": "text/plain; charset=utf-8" });
   response.end(body);
-}
-
-function writeHtml(response: http.ServerResponse, html: string): void {
-  response.writeHead(200, { "content-type": "text/html; charset=utf-8" });
-  response.end(html);
 }
 
 function isSafeProxyWarArtifactSegment(value: string): boolean {

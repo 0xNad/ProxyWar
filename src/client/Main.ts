@@ -25,6 +25,7 @@ import { userAuth } from "./Auth";
 import "./ClanModal";
 import { joinLobby, type JoinLobbyResult } from "./ClientGameRunner";
 import { getPlayerCosmeticsRefs } from "./Cosmetics";
+import { mountCoworldPlayerOverlay } from "./CoworldPlayerOverlay";
 import { crazyGamesSDK } from "./CrazyGamesSDK";
 import "./FlagInput";
 import { FlagInput } from "./FlagInput";
@@ -71,7 +72,10 @@ import {
 } from "./Utils";
 import { ReplaySpeedMultiplier } from "./utilities/ReplaySpeedMultiplier";
 
-import { isCoworldReplayRoute } from "./AiLeagueReplayMode";
+import {
+  isCoworldPlayerRoute,
+  isCoworldReplayRoute,
+} from "./AiLeagueReplayMode";
 import "./components/DesktopNavBar";
 import "./components/Footer";
 import "./components/MainLayout";
@@ -731,6 +735,10 @@ class Client {
       await this.openAiLeagueReplay(decodeURIComponent(aiLeagueReplayMatch[1]));
       return;
     }
+    if (isCoworldPlayerRoute()) {
+      await this.openCoworldPlayer();
+      return;
+    }
     if (isCoworldReplayRoute()) {
       await this.openCoworldReplay();
       return;
@@ -934,8 +942,13 @@ class Client {
           return;
         }
       }
-      await new Promise((resolve) => setTimeout(resolve, 1000));
+      await new Promise((resolve) => setTimeout(resolve, 250));
     }
+  }
+
+  private async openCoworldPlayer() {
+    mountCoworldPlayerOverlay();
+    await this.openCoworldReplay();
   }
 
   private async handleJoinLobby(event: CustomEvent<JoinLobbyEvent>) {
