@@ -160,6 +160,123 @@ describe("Planner/executor agent brain", () => {
     );
   });
 
+  it("accumulates a persistent opponent model (theory of mind) across decisions", async () => {
+    const base = leaderPressureObservation();
+    const sampleVisible = base.visiblePlayers[0]!;
+    const rival = (over: Partial<AgentVisiblePlayer>): AgentVisiblePlayer => ({
+      ...sampleVisible,
+      playerID: "RIVAL02",
+      clientID: "RIVAL02",
+      name: "Rival",
+      type: PlayerType.Nation,
+      isAlive: true,
+      sharesBorder: true,
+      tileShare: 0.14,
+      relativeTroopRatio: 1.1,
+      incomingAttack: false,
+      outgoingAttack: false,
+      hasIncomingAllianceRequest: false,
+      ...over,
+    });
+    const tribe: AgentVisiblePlayer = {
+      ...sampleVisible,
+      playerID: "TRIBE01",
+      clientID: "TRIBE01",
+      name: "Tribe",
+      type: PlayerType.Bot,
+      isAlive: true,
+      tileShare: 0.02,
+    };
+    const prompts: string[] = [];
+    const provider: LlmProvider = {
+      providerType: "codex-cli",
+      async complete(prompt: string): Promise<string> {
+        prompts.push(prompt);
+        return JSON.stringify({
+          objective: "expand_territory",
+          turnIntent: "growth",
+          rationale: "grow",
+          maxDecisionCycles: 2,
+          preferredActionKinds: ["attack", "hold"],
+          enabledModules: ["expansion"],
+          targetPlayerId: null,
+          tacticalSettings: {
+            reserveRatio: 0.35,
+            triggerRatio: 0.55,
+            expansionRatio: 0.15,
+            maxConcurrentWars: 1,
+            retreatThreshold: 0.35,
+            maxActionsPerDecision: 3,
+          },
+        });
+      },
+    };
+    const brain = new PlannerExecutorAgentBrain({
+      profile: "opportunistic",
+      planner: new LlmAgentPlanner({
+        provider,
+        profile: "opportunistic",
+        plannerType: "codex-cli",
+      }),
+      executor: new FrontierPolicyExecutor("opportunistic"),
+      planEveryDecisionSteps: 3,
+    });
+    const legalActions = buildLegalActions();
+
+    // Decision 1: rival is a current ally; a weak tribe is also on the board.
+    const obs1: AgentObservation = {
+      ...base,
+      gameID: "GAME-A",
+      visiblePlayers: [
+        rival({ isAllied: true, isFriendly: true, relation: Relation.Friendly }),
+        tribe,
+      ],
+    };
+    await brain.decide({ observation: obs1, legalActions });
+    const model1 = obs1.opponentModel ?? [];
+    // Tribes are not political actors -> excluded; the ally is tracked.
+    expect(model1.map((entry) => entry.playerID)).toEqual(["RIVAL02"]);
+    expect(model1[0]).toMatchObject({ isAllied: true, betrayedMe: false });
+    expect(prompts[0]).toContain("OPPONENT_MODEL");
+    expect(prompts[0]).toContain("RIVAL02");
+
+    // Decision 2 (same game): the ally turns on me — breaks the alliance and attacks.
+    const obs2: AgentObservation = {
+      ...base,
+      gameID: "GAME-A",
+      visiblePlayers: [
+        rival({
+          isAllied: false,
+          isFriendly: false,
+          relation: Relation.Hostile,
+          incomingAttack: true,
+        }),
+      ],
+      combat: { ...base.combat, incomingAttackPlayerIDs: ["RIVAL02"] },
+    };
+    await brain.decide({ observation: obs2, legalActions });
+    const model2 = obs2.opponentModel ?? [];
+    expect(model2[0]).toMatchObject({ playerID: "RIVAL02", betrayedMe: true });
+    expect(model2[0]!.attacksOnMe).toBeGreaterThanOrEqual(1);
+    expect(model2[0]!.trust).toBeLessThanOrEqual(0.2);
+
+    // A new game resets the ledger: a fresh hostile rival is NOT a betrayer.
+    const obs3: AgentObservation = {
+      ...base,
+      gameID: "GAME-B",
+      visiblePlayers: [
+        rival({ isAllied: false, isFriendly: false, relation: Relation.Hostile }),
+      ],
+    };
+    await brain.decide({ observation: obs3, legalActions });
+    const model3 = obs3.opponentModel ?? [];
+    expect(model3[0]).toMatchObject({
+      playerID: "RIVAL02",
+      betrayedMe: false,
+      attacksOnMe: 0,
+    });
+  });
+
   it("briefs the external LLM planner to take low-share builds after sustained expansion", async () => {
     const base = earlyExpansionObservation();
     const observation: AgentObservation = {

@@ -622,6 +622,35 @@ export interface AgentMemory {
   notes: string[];
 }
 
+/**
+ * A persistent, per-game belief about one rival, accumulated across decisions
+ * (the agent's "theory of mind" substrate). Derived deterministically from the
+ * ordered observation stream — no wall-clock, no RNG — so replays stay reproducible.
+ */
+export interface AgentOpponentModelEntry {
+  playerID: string;
+  name: string;
+  tileShare: number;
+  /** myTroops/theirTroops style ratio: >1 means I am stronger than them. */
+  relativeTroopRatio?: number;
+  relation: Relation;
+  isAllied: boolean;
+  /** Smoothed territory trend since first seen. */
+  momentum: "rising" | "falling" | "flat";
+  /** Distinct times this rival has launched an attack on me this game. */
+  attacksOnMe: number;
+  /** Was an ally of mine, then turned hostile / attacked me. */
+  betrayedMe: boolean;
+  isLeader: boolean;
+  /** This rival's most recent communication intent (to me or broadcast), if any. */
+  lastSignal: AgentCommunicationIntent | null;
+  threat: "high" | "medium" | "low";
+  /** 0..1 estimate of how trustworthy this rival is as an ally. */
+  trust: number;
+  /** Deterministic theory-of-mind guess at what this rival will do next. */
+  predictedNextAction: string;
+}
+
 export interface AgentObservation {
   agentID: string;
   clientID: string | null;
@@ -641,6 +670,8 @@ export interface AgentObservation {
   objective: AgentObjectiveState | null;
   recentDecisions: RecentAgentDecision[];
   recentCommunications?: AgentCommunicationSignal[];
+  /** Persistent per-rival belief state (theory of mind). Populated by the brain. */
+  opponentModel?: AgentOpponentModelEntry[];
   endgame?: {
     winner: string | null;
     leaderID: string | null;

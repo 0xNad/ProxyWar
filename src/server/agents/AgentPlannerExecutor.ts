@@ -1,4 +1,4 @@
-import { PlayerType, UnitType } from "../../core/game/Game";
+import { PlayerType, Relation, UnitType } from "../../core/game/Game";
 import {
   nuclearStrikePriorityScore,
   nuclearTargetStructurePriority,
@@ -19,8 +19,11 @@ import {
   AgentBrain,
   AgentBrainInput,
   AgentBrainType,
+  AgentCommunicationIntent,
   AgentCommunicationSignal,
   AgentDecision,
+  AgentOpponentModelEntry,
+  AgentVisiblePlayer,
   AgentFrontierConversionTimingAffordance,
   AgentFrontierFinishPressureAffordance,
   AgentObjectiveKind,
@@ -219,10 +222,107 @@ export const defaultAgentSettings: AgentSettings = {
   },
 };
 
+/** Internal, per-game accumulator behind the agent's theory-of-mind model. */
+interface OpponentLedgerEntry {
+  name: string;
+  tileShareEma: number;
+  attacksOnMe: number;
+  wasAttackingMe: boolean;
+  iAttacked: number;
+  wasAttackedByMe: boolean;
+  everAllied: boolean;
+  betrayedMe: boolean;
+  lastSignal: AgentCommunicationIntent | null;
+}
+
+const OPPONENT_MODEL_MAX_ENTRIES = 8;
+const OPPONENT_MOMENTUM_EPS = 0.004;
+const OPPONENT_TILESHARE_EMA_ALPHA = 0.2;
+
+function opponentThreatLevel(
+  player: AgentVisiblePlayer,
+): "high" | "medium" | "low" {
+  if (player.incomingAttack) {
+    return "high";
+  }
+  const strongerHostileNeighbor =
+    player.sharesBorder &&
+    !player.isAllied &&
+    (player.relativeTroopRatio ?? 1) < 1 &&
+    (player.relation === Relation.Hostile ||
+      player.relation === Relation.Distrustful);
+  if (strongerHostileNeighbor) {
+    return "high";
+  }
+  if (player.sharesBorder && !player.isAllied && !player.isFriendly) {
+    return "medium";
+  }
+  return "low";
+}
+
+function predictOpponentNextAction(
+  player: AgentVisiblePlayer,
+  momentum: "rising" | "falling" | "flat",
+  isLeader: boolean,
+): string {
+  if (player.incomingAttack) {
+    return "attacking_me";
+  }
+  if (player.hasIncomingAllianceRequest) {
+    return "wants_alliance_with_me";
+  }
+  if (player.isAllied && player.allianceInExtensionWindow === true) {
+    return "alliance_expiring";
+  }
+  if (player.isAllied && (player.relativeTroopRatio ?? 1) < 0.8) {
+    return "strong_ally_betrayal_risk";
+  }
+  const stronger = (player.relativeTroopRatio ?? 1) < 1;
+  if (
+    player.sharesBorder &&
+    stronger &&
+    (player.relation === Relation.Hostile ||
+      player.relation === Relation.Distrustful)
+  ) {
+    return "may_attack_me";
+  }
+  if (isLeader && momentum === "rising") {
+    return "snowballing_to_win";
+  }
+  if (momentum === "rising") {
+    return "expanding";
+  }
+  if (momentum === "falling") {
+    return "losing_ground";
+  }
+  return "stable";
+}
+
+function opponentTrust(
+  player: AgentVisiblePlayer,
+  entry: OpponentLedgerEntry,
+): number {
+  let trust = 0.5;
+  if (entry.betrayedMe) {
+    trust = 0.05;
+  } else if (entry.attacksOnMe > 0) {
+    trust = Math.max(0.1, 0.5 - entry.attacksOnMe * 0.12);
+  } else if (entry.everAllied && player.isAllied) {
+    trust = 0.85;
+  } else if (player.relation === Relation.Friendly) {
+    trust = 0.7;
+  } else if (player.relation === Relation.Hostile) {
+    trust = 0.2;
+  }
+  return Math.round(trust * 100) / 100;
+}
+
 export class PlannerExecutorAgentBrain implements AgentBrain {
   readonly brainType: AgentBrainType;
   private currentPlan: StrategicPlan | null = null;
   private decisionsSincePlan = 0;
+  private readonly opponentLedger = new Map<string, OpponentLedgerEntry>();
+  private opponentLedgerGameID: string | null = null;
   private readonly executor: AgentExecutor;
   private readonly planEveryDecisionSteps: number;
   private readonly runtimeMode: AgentRuntimeMode;
@@ -243,7 +343,115 @@ export class PlannerExecutorAgentBrain implements AgentBrain {
       options.executorSource ?? defaultExecutorSource(this.executor);
   }
 
+  /**
+   * Update the persistent per-rival belief state from this tick's observation and
+   * return a compact, ranked opponent model (theory-of-mind substrate). Runs every
+   * decision so trends/betrayals accumulate; deterministic (derives only from the
+   * ordered observation stream). Resets when a new game starts.
+   */
+  private updateOpponentModel(input: AgentBrainInput): AgentOpponentModelEntry[] {
+    const obs = input.observation;
+    if (this.opponentLedgerGameID !== obs.gameID) {
+      this.opponentLedger.clear();
+      this.opponentLedgerGameID = obs.gameID;
+    }
+    const latestSignalBySender = new Map<string, AgentCommunicationIntent>();
+    for (const signal of obs.recentCommunications ?? []) {
+      const senderID = signal.senderPlayerID ?? signal.senderAgentID;
+      if (senderID) {
+        latestSignalBySender.set(senderID, signal.intent);
+      }
+    }
+    const ownTileShare = obs.ownState?.tileShare ?? 0;
+    // Political actors only: nations + other agents, not weak tribes (PlayerType.Bot).
+    const rivals = obs.visiblePlayers.filter(
+      (player) => player.isAlive && player.type !== PlayerType.Bot,
+    );
+    const maxRivalTileShare = rivals.reduce(
+      (max, player) => Math.max(max, player.tileShare ?? 0),
+      0,
+    );
+    const entries: AgentOpponentModelEntry[] = rivals.map((player) => {
+      const tileShare = player.tileShare ?? 0;
+      const entry: OpponentLedgerEntry = this.opponentLedger.get(
+        player.playerID,
+      ) ?? {
+        name: player.name,
+        tileShareEma: tileShare,
+        attacksOnMe: 0,
+        wasAttackingMe: false,
+        iAttacked: 0,
+        wasAttackedByMe: false,
+        everAllied: false,
+        betrayedMe: false,
+        lastSignal: null,
+      };
+      // Count distinct attack events (rising edge), not per-tick presence.
+      if (player.incomingAttack && !entry.wasAttackingMe) {
+        entry.attacksOnMe += 1;
+      }
+      entry.wasAttackingMe = player.incomingAttack;
+      if (player.outgoingAttack && !entry.wasAttackedByMe) {
+        entry.iAttacked += 1;
+      }
+      entry.wasAttackedByMe = player.outgoingAttack;
+      if (player.isAllied) {
+        entry.everAllied = true;
+      }
+      if (
+        entry.everAllied &&
+        !player.isAllied &&
+        (player.incomingAttack || player.relation === Relation.Hostile)
+      ) {
+        entry.betrayedMe = true;
+      }
+      const signal = latestSignalBySender.get(player.playerID);
+      if (signal !== undefined) {
+        entry.lastSignal = signal;
+      }
+      const delta = tileShare - entry.tileShareEma;
+      const momentum: "rising" | "falling" | "flat" =
+        delta > OPPONENT_MOMENTUM_EPS
+          ? "rising"
+          : delta < -OPPONENT_MOMENTUM_EPS
+            ? "falling"
+            : "flat";
+      entry.tileShareEma =
+        entry.tileShareEma * (1 - OPPONENT_TILESHARE_EMA_ALPHA) +
+        tileShare * OPPONENT_TILESHARE_EMA_ALPHA;
+      entry.name = player.name;
+      this.opponentLedger.set(player.playerID, entry);
+      const isLeader =
+        tileShare >= maxRivalTileShare &&
+        tileShare >= ownTileShare &&
+        tileShare > 0;
+      return {
+        playerID: player.playerID,
+        name: player.name,
+        tileShare: Math.round(tileShare * 1000) / 1000,
+        relativeTroopRatio: player.relativeTroopRatio,
+        relation: player.relation,
+        isAllied: player.isAllied,
+        momentum,
+        attacksOnMe: entry.attacksOnMe,
+        betrayedMe: entry.betrayedMe,
+        isLeader,
+        lastSignal: entry.lastSignal,
+        threat: opponentThreatLevel(player),
+        trust: opponentTrust(player, entry),
+        predictedNextAction: predictOpponentNextAction(
+          player,
+          momentum,
+          isLeader,
+        ),
+      };
+    });
+    entries.sort((a, b) => b.tileShare - a.tileShare);
+    return entries.slice(0, OPPONENT_MODEL_MAX_ENTRIES);
+  }
+
   async decide(input: AgentBrainInput): Promise<AgentDecision> {
+    input.observation.opponentModel = this.updateOpponentModel(input);
     const plannerRefreshReason = this.plannerRefreshReason(input);
     let planDecision: AgentPlanDecision | null = null;
     if (plannerRefreshReason !== null) {
@@ -19465,6 +19673,9 @@ function plannerPrompt(
     "PLANNER_DECISION_BRIEF:",
     JSON.stringify(decisionBrief),
     "END_PLANNER_DECISION_BRIEF",
+    "OPPONENT_MODEL (your persistent beliefs about each rival this game, ranked by territory; use for theory of mind — trust is 0..1, predictedNextAction is your own running guess, betrayedMe/attacksOnMe are memory of their past conduct toward you):",
+    JSON.stringify(input.observation.opponentModel ?? []),
+    "END_OPPONENT_MODEL",
     "FRONTIER_AGENT_SKILL:",
     frontierAgentSkill,
     "END_FRONTIER_AGENT_SKILL",
