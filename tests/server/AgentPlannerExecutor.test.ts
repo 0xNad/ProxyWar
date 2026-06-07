@@ -85,7 +85,35 @@ describe("Planner/executor agent brain", () => {
   });
 
   it("lets an external LLM planner choose strategy while the executor selects the legal action", async () => {
-    const observation = activeObservation("expand_territory");
+    // Give the agent a real territorial base so the base-building control (which forces
+    // expand_territory while tile share is below the base floor) does not override the
+    // LLM's free strategy choice. This test verifies that free choice flows through; the
+    // no-base override is covered by the dedicated base-building test.
+    const observation: AgentObservation = {
+      ...activeObservation("expand_territory"),
+      ownState: {
+        playerID: "agent-1",
+        clientID: null,
+        smallID: 1,
+        name: "Planner Agent",
+        type: PlayerType.Human,
+        isAlive: true,
+        isDisconnected: false,
+        isTraitor: false,
+        hasSpawned: true,
+        troops: 500_000,
+        maxTroops: 800_000,
+        troopRatio: 0.6,
+        gold: "1000",
+        tilesOwned: 2500,
+        tileShare: 0.25,
+        borderTiles: 100,
+        outgoingAttacks: 0,
+        incomingAttacks: 0,
+        outgoingAllianceRequests: 0,
+        incomingAllianceRequests: 0,
+      },
+    };
     const legalActions = buildLegalActions();
     const prompts: string[] = [];
     const provider: LlmProvider = {
@@ -158,6 +186,55 @@ describe("Planner/executor agent brain", () => {
     expect(String(decision.metadata?.planTacticalSettings)).toContain(
       '"reserveRatio":0.42',
     );
+  });
+
+  it("forces base-building (must_follow expand) over pressure when the agent has no territory", async () => {
+    // No ownState -> tile share 0 (no base) and neutral growth is legal -> the
+    // base-building control must fire as must_follow expand_territory so the agent
+    // claims land instead of attacking comparable rivals (the measured 0%-elimination
+    // failure mode was 65% pressure_rival while sitting at ~0% tile share).
+    const observation = activeObservation("pressure_rival");
+    const legalActions = buildLegalActions();
+    const prompts: string[] = [];
+    const provider: LlmProvider = {
+      providerType: "codex-cli",
+      async complete(prompt: string): Promise<string> {
+        prompts.push(prompt);
+        return JSON.stringify({
+          objective: "expand_territory",
+          turnIntent: "growth",
+          rationale: "claim neutral land",
+          maxDecisionCycles: 2,
+          preferredActionKinds: ["attack", "hold"],
+          enabledModules: ["expansion", "economy", "defense"],
+          targetPlayerId: null,
+          tacticalSettings: {
+            reserveRatio: 0.35,
+            triggerRatio: 0.55,
+            expansionRatio: 0.15,
+            maxConcurrentWars: 1,
+            retreatThreshold: 0.35,
+            maxActionsPerDecision: 3,
+          },
+        });
+      },
+    };
+    const brain = new PlannerExecutorAgentBrain({
+      profile: "aggressive",
+      planner: new LlmAgentPlanner({
+        provider,
+        profile: "aggressive",
+        plannerType: "codex-cli",
+      }),
+      executor: new FrontierPolicyExecutor("aggressive"),
+      planEveryDecisionSteps: 3,
+    });
+
+    const decision = await brain.decide({ observation, legalActions });
+
+    expect(prompts[0]).toContain("MUST FOLLOW: objective=expand_territory");
+    // executor should pick the neutral land grab, not a rival attack
+    expect(decision.actionID).toBe("expand:terra-nullius:10");
   });
 
   it("accumulates a persistent opponent model (theory of mind) across decisions", async () => {

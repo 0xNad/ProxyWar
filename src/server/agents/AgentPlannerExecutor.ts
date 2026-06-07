@@ -19394,6 +19394,33 @@ function plannerRecommendedControls(input: {
       reason: "home danger is high",
     };
   }
+  // Base-building first. An agent with essentially no territory that attacks a
+  // comparable rival just bleeds troops and gets eliminated (measured: 65% of
+  // decisions were pressure_rival while sitting at ~0% tile share -> dead). While
+  // below the base floor and safe neutral land remains, EXPANSION is must_follow and
+  // outranks the pressure gate: claim neutral land and weak tribes to build a base
+  // before pressuring rivals. Uses the existing directive machinery (no prompt bloat).
+  if (
+    ownTileShare < tunedNumber("BASE_TILESHARE_FLOOR", 0.1) &&
+    input.neutralGrowthActionCount > 0 &&
+    input.homeDanger !== "high"
+  ) {
+    return {
+      strength: "must_follow",
+      objective: "expand_territory",
+      turnIntent: "growth",
+      targetPlayerId: null,
+      preferredActionKinds: input.hasBoatAction
+        ? ["attack", "boat", "hold"]
+        : ["attack", "hold"],
+      enabledModules: input.hasBoatAction
+        ? ["expansion", "economy", "defense", "naval"]
+        : ["expansion", "economy", "defense"],
+      maxDecisionCycles: 2,
+      reason:
+        "no territorial base yet (tile share below base floor): claim neutral land and weak tribes before pressuring comparable rivals",
+    };
+  }
   if (input.pressureReady && input.pressureReadyTargetID !== null) {
     return {
       strength: "must_follow",
