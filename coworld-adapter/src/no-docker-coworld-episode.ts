@@ -1324,7 +1324,7 @@ function coworldGlobalClientHtml(): string {
   return coworldSpectatorClientHtml({
     title: "Proxy War Coworld Global",
     endpoint: "/global",
-    modeLabel: "Live global viewer",
+    modeLabel: "Live replay viewer",
     waitingText:
       "Waiting for Proxy War spectator snapshots. Connect all players to start the match.",
   });
@@ -1377,25 +1377,18 @@ function coworldSpectatorClientHtml(input: {
         <div>Snapshots<strong id="snapshot-count">0</strong></div>
         <div>Players<strong id="player-count">0</strong></div>
       </div>
+      <dl id="match-state" class="match-state"></dl>
+      <div class="viewer-grid">
+        <section>
+          <h2>Agents</h2>
+          <div id="roster" class="roster"></div>
+        </section>
+        <section>
+          <h2>Frame Decisions</h2>
+          <div id="decisions" class="timeline"></div>
+        </section>
+      </div>
     </section>
-    <aside class="side">
-      <section>
-        <h2>Match</h2>
-        <dl id="match-state"></dl>
-      </section>
-      <section>
-        <h2>Agents</h2>
-        <div id="roster" class="roster"></div>
-      </section>
-      <section>
-        <h2>Frame Decisions</h2>
-        <div id="decisions" class="timeline"></div>
-      </section>
-      <section>
-        <h2>Replay Data</h2>
-        <pre id="raw">${escapeHtml(input.waitingText)}</pre>
-      </section>
-    </aside>
   </main>
   <script>
     const endpoint = ${JSON.stringify(input.endpoint)};
@@ -1517,7 +1510,6 @@ function coworldSpectatorClientHtml(input: {
       renderMap(snapshot);
       renderRoster(snapshot);
       renderDecisions(snapshot);
-      renderRaw(snapshot);
     }
 
     function renderMatchState(snapshot) {
@@ -1595,12 +1587,6 @@ function coworldSpectatorClientHtml(input: {
             '<p>' + h(decision.reason || "") + '</p>' +
             '<small>' + h(decision.accepted ? "accepted" : "rejected") + ' · ' + h(decision.resultReason || "") + '</small></article>'
           ).join("");
-    }
-
-    function renderRaw(snapshot) {
-      document.getElementById("raw").textContent = snapshot
-        ? JSON.stringify(snapshot, null, 2)
-        : JSON.stringify(state.lastMessage || { status: waitingText }, null, 2);
     }
 
     function mapDimensions(snapshot) {
@@ -1767,13 +1753,14 @@ function coworldClientCss(): string {
     p { margin:0; }
     header p, .muted { color:var(--muted); }
     header strong { border:1px solid var(--line); border-radius:999px; padding:6px 10px; background:#f8fbff; color:var(--accent); }
-    main.spectator { display:grid; grid-template-columns:minmax(520px, 1fr) 420px; gap:18px; max-width:1500px; margin:0 auto; padding:18px 28px 28px; }
+    main.spectator { max-width:1240px; margin:0 auto; padding:18px 28px 28px; }
     main.player { display:grid; grid-template-columns:minmax(340px, 440px) minmax(420px, 1fr); gap:18px; max-width:1400px; margin:0 auto; padding:18px 28px 28px; }
     main.player section:last-child { grid-column:1 / -1; }
     section, .surface { background:#fff; border:1px solid var(--line); border-radius:8px; padding:14px; }
     .surface { display:grid; gap:12px; }
     canvas { width:100%; height:auto; display:block; border:1px solid var(--line); border-radius:8px; background:#d8e5ef; }
-    .side, .roster, .timeline, .actions { display:grid; gap:12px; }
+    .viewer-grid { display:grid; grid-template-columns:minmax(260px, 360px) 1fr; gap:12px; align-items:start; }
+    .roster, .timeline, .actions { display:grid; gap:12px; }
     .controls { display:flex; gap:10px; align-items:center; flex-wrap:wrap; }
     .controls input { flex:1; min-width:180px; }
     button { border:1px solid var(--line); background:#fff; color:var(--ink); border-radius:6px; padding:8px 10px; font-weight:700; cursor:pointer; }
@@ -1782,6 +1769,9 @@ function coworldClientCss(): string {
     .metrics div { border:1px solid var(--line); border-radius:8px; padding:10px; }
     .metrics strong { display:block; font-size:20px; margin-top:3px; }
     dl { display:grid; grid-template-columns:max-content 1fr; gap:6px 12px; margin:0; }
+    .match-state { grid-template-columns:repeat(auto-fit, minmax(160px, 1fr)); border:1px solid var(--line); border-radius:8px; padding:10px; background:#f8fbff; }
+    .match-state dt { font-size:12px; }
+    .match-state dd { font-weight:700; }
     dt { color:var(--muted); font-weight:700; }
     dd { margin:0; min-width:0; overflow-wrap:anywhere; }
     .agent, .decision { border:1px solid var(--line); border-radius:8px; padding:10px; display:grid; gap:4px; background:#fff; }
@@ -1791,7 +1781,7 @@ function coworldClientCss(): string {
     code, pre { font-family:ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; overflow-wrap:anywhere; }
     pre { max-height:50vh; overflow:auto; margin:0; white-space:pre-wrap; background:#f8fbff; border:1px solid var(--line); border-radius:8px; padding:12px; }
     .actions button { text-align:left; display:grid; gap:4px; }
-    @media (max-width: 980px) { main.spectator, main.player { grid-template-columns:1fr; padding:14px; } header { padding:16px; align-items:flex-start; flex-direction:column; } }
+    @media (max-width: 980px) { main.spectator, main.player { grid-template-columns:1fr; padding:14px; } .viewer-grid { grid-template-columns:1fr; } header { padding:16px; align-items:flex-start; flex-direction:column; } }
   `;
 }
 

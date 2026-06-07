@@ -30,12 +30,12 @@ the latest Proxy War spectator frame, public match config, and map dimensions so
 }
 ```
 
-The browser clients are part of the Coworld surface:
+The browser clients are part of the Coworld surface, with only two browser
+client shapes:
 
-- `/client/global` connects to `/global`, draws the live spectator map, and shows
-  the current roster and frame decisions.
-- `/client/replay` connects to `/replay`, draws the saved spectator replay, and
-  provides frame playback.
+- `/client/global` and `/client/replay` use the same spectator viewer, with map
+  drawing and frame playback. Global connects to `/global` for live frames;
+  replay connects to `/replay` for saved frames.
 - `/client/player` connects to `/player`, shows each decision request, and lets a
   human choose one offered `LegalAction.id`.
 
