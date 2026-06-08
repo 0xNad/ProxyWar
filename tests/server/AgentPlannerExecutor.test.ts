@@ -7,6 +7,7 @@ import {
   LlmAgentPlanner,
   MockLlmPlanner,
   PlannerExecutorAgentBrain,
+  rankLegalActionsForPrompt,
   RuleAgentExecutor,
   RuleAgentPlanner,
   StrategicPlan,
@@ -15276,6 +15277,58 @@ describe("Planner/executor agent brain", () => {
     expect(decision.actionIDs).toContain("quick_chat:ALLY02:misc.team_up");
     expect(decision.actionIDs).toContain("emoji:ALLY02:10");
     expect(decision.selectedModules).toContain("combat");
+  });
+});
+
+describe("rankLegalActionsForPrompt (unified LLM shortlist ranker)", () => {
+  it("only ever returns ids that were offered as legal actions", () => {
+    const legalActions = buildLegalActions();
+    const offered = new Set(legalActions.map((action) => action.id));
+    const ranked = rankLegalActionsForPrompt({
+      input: { observation: activeObservation("expand_territory"), legalActions },
+      profile: "opportunistic",
+    });
+    expect(ranked.length).toBeGreaterThan(0);
+    for (const candidate of ranked) {
+      // Safety invariant: the shortlist can never smuggle a non-offered id to the LLM.
+      expect(offered.has(candidate.id)).toBe(true);
+    }
+  });
+
+  it("returns candidates sorted by descending totalScore with policy + skill fields", () => {
+    const legalActions = buildLegalActions();
+    const ranked = rankLegalActionsForPrompt({
+      input: { observation: activeObservation("expand_territory"), legalActions },
+      profile: "opportunistic",
+    });
+    for (let i = 1; i < ranked.length; i++) {
+      expect(ranked[i - 1]!.totalScore).toBeGreaterThanOrEqual(
+        ranked[i]!.totalScore,
+      );
+    }
+    const top = ranked[0]!;
+    expect(typeof top.policyScore).toBe("number");
+    expect(typeof top.skillScore).toBe("number");
+    expect(typeof top.module).toBe("string");
+  });
+
+  it("respects the limit and returns [] for no legal actions", () => {
+    const legalActions = buildLegalActions();
+    const limited = rankLegalActionsForPrompt({
+      input: { observation: activeObservation("expand_territory"), legalActions },
+      profile: "opportunistic",
+      limit: 1,
+    });
+    expect(limited.length).toBe(1);
+    expect(
+      rankLegalActionsForPrompt({
+        input: {
+          observation: activeObservation("expand_territory"),
+          legalActions: [],
+        },
+        profile: "opportunistic",
+      }),
+    ).toEqual([]);
   });
 });
 

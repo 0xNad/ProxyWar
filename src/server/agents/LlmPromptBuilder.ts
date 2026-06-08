@@ -3,7 +3,7 @@ import {
   openFrontAgentPlaybook,
   profilePlaybook,
 } from "./AgentPlaybook";
-import { StrategicSkillEvaluator } from "./AgentStrategicSkills";
+import { rankLegalActionsForPrompt } from "./AgentPlannerExecutor";
 import { AgentObservation, LegalAction } from "./AgentTypes";
 
 export interface BuildLlmPromptInput {
@@ -22,22 +22,26 @@ export class LlmPromptBuilder {
       risk: action.risk,
       metadata: action.metadata ?? {},
     }));
-    const skillEvaluation = new StrategicSkillEvaluator().evaluate({
-      observation: input.observation,
-      legalActions: input.legalActions,
-    });
-    const strategicSkills = skillEvaluation.actions
-      .slice(0, 10)
-      .map((action) => ({
-        id: action.actionID,
-        kind: action.actionKind,
-        totalScore: action.totalScore,
-        topSkill: action.topSkill,
-        topSkillScore: action.topSkillScore,
-        penalties: action.penalties,
-        planAligned: action.planAligned,
-        objectiveAligned: action.objectiveAligned,
-      }));
+    // Unified candidate ranking: the SAME scorer the deterministic executor uses
+    // (`scoreFrontierAction` policy + strategic skill), so the LLM picks among genuinely
+    // strong candidates and improvements to the executor scorer transfer to the LLM agent.
+    const rankedCandidates = rankLegalActionsForPrompt({
+      input: {
+        observation: input.observation,
+        legalActions: input.legalActions,
+      },
+      profile: input.observation.profile,
+      limit: 12,
+    }).map((candidate) => ({
+      id: candidate.id,
+      kind: candidate.kind,
+      totalScore: candidate.totalScore,
+      policyScore: candidate.policyScore,
+      skillScore: candidate.skillScore,
+      module: candidate.module,
+      topSkill: candidate.topSkill,
+      penalties: candidate.penalties,
+    }));
 
     return [
       "You are an AI Nations League agent brain.",
@@ -48,7 +52,7 @@ export class LlmPromptBuilder {
       "Prefer useful non-hold actions when their risk and metadata look reasonable.",
       "Use hold only when it is the only legal action or every non-hold action is clearly harmful.",
       "If memory shows repeated neutral expansion, prefer a high-scoring economy, diplomacy, or real pressure action over another neutral expansion unless expansion is clearly the only useful option.",
-      "Use STRATEGIC_SKILL_SCORES_JSON as compact guidance; higher totalScore is usually better, and penalties explain why an action may be stale or unsafe.",
+      "RANKED_CANDIDATES_JSON is the engine's own ranking of the legal actions (policy + strategic skill). Higher totalScore is stronger; module names the strategic intent; penalties explain why an action may be stale or unsafe. Treat it as a strong prior: usually pick from the top candidates, but you may override it when theory-of-mind reasoning, alliance/betrayal timing, or opponent modeling justify a different choice — explain why in reason.",
       "OPENFRONT_PLAYBOOK:",
       openFrontAgentPlaybook,
       profilePlaybook(input.observation.profile),
@@ -68,9 +72,9 @@ export class LlmPromptBuilder {
       "LEGAL_ACTIONS_JSON:",
       JSON.stringify(legalActions, null, 2),
       "END_LEGAL_ACTIONS_JSON",
-      "STRATEGIC_SKILL_SCORES_JSON:",
-      JSON.stringify(strategicSkills, null, 2),
-      "END_STRATEGIC_SKILL_SCORES_JSON",
+      "RANKED_CANDIDATES_JSON:",
+      JSON.stringify(rankedCandidates, null, 2),
+      "END_RANKED_CANDIDATES_JSON",
     ]
       .filter((line): line is string => line !== null)
       .join("\n");

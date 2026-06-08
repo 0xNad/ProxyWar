@@ -160,7 +160,7 @@ describe("LLM agent decision contract", () => {
     expect(prompt).toContain("no recent agent decisions");
     expect(prompt).toContain("build_alliance");
     expect(prompt).toContain("Build alliance network");
-    expect(prompt).toContain("STRATEGIC_SKILL_SCORES_JSON");
+    expect(prompt).toContain("RANKED_CANDIDATES_JSON");
     expect(prompt).toContain("diplomacy");
   });
 

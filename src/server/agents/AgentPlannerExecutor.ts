@@ -920,6 +920,134 @@ const schedulerSlotThresholds: Record<FrontierSchedulerSlot, number> = {
   utility_social: 55,
 };
 
+/**
+ * Shared frontier ranker — the SINGLE source of truth for "how strong is each legal
+ * action right now". Combines the policy score (`scoreFrontierAction`, the deterministic
+ * module scoring) with the strategic-skill score, sorts with the canonical tie-breaks, and
+ * returns both the ranked list and the skill evaluation it computed.
+ *
+ * Both the deterministic executor (`FrontierPolicyExecutor.decide`) AND the LLM agent's
+ * candidate shortlist (`rankLegalActionsForPrompt` -> `LlmPromptBuilder`) call this, so the
+ * LLM sees exactly the candidates the executor would rank highest. This is what closes the
+ * "transfer trap": iterate on `scoreFrontierAction` and the improvement reaches the LLM
+ * agent's shortlist too, instead of only the rule executor.
+ */
+function rankFrontierActions(args: {
+  input: AgentBrainInput;
+  plan: StrategicPlan;
+  settings: AgentSettings;
+  profile: AgentStrategyProfile;
+}): {
+  scored: FrontierRankedAction[];
+  skillEvaluation: ReturnType<StrategicSkillEvaluator["evaluate"]>;
+} {
+  const { input, plan, settings, profile } = args;
+  const skillEvaluation = new StrategicSkillEvaluator().evaluate({
+    ...input,
+    plan,
+  });
+  const scored: FrontierRankedAction[] = input.legalActions
+    .map((action) => {
+      const policy = scoreFrontierAction({
+        input,
+        plan,
+        action,
+        settings,
+        profile,
+      });
+      const skill = skillEvaluationForAction(skillEvaluation, action.id);
+      const skillScore = skill?.totalScore ?? 0;
+      const totalScore = clampScore(
+        policy.totalScore + Math.round(skillScore * 0.28),
+      );
+      const primaryModule = primaryPolicyModule(policy, action);
+      return {
+        action,
+        policy,
+        skill,
+        totalScore,
+        primaryModule,
+        schedulerSlot: schedulerSlotForAction(action, primaryModule),
+      };
+    })
+    .sort(
+      (a, b) =>
+        b.totalScore - a.totalScore ||
+        frontierActionTieBreak(a.action) - frontierActionTieBreak(b.action) ||
+        frontierActionIntensityTieBreak(a.action, b.action) ||
+        a.action.id.localeCompare(b.action.id),
+    );
+  return { scored, skillEvaluation };
+}
+
+/** Deterministic plan synthesis for plan-less callers (the LLM action-selector shortlist). */
+function synthesizeRulePlanSync(
+  input: AgentBrainInput,
+  profile: AgentStrategyProfile,
+): StrategicPlan {
+  const objective = choosePlanObjective(input, profile);
+  return strategicPlanForObjective({
+    objective,
+    input,
+    plannerSource: "rule",
+    rationale: ruleRationale(objective, input),
+    targetPlayerId: reusablePlanTarget(input, null, objective),
+  });
+}
+
+/** A single ranked candidate, flattened for the LLM prompt. */
+export interface RankedActionForPrompt {
+  id: string;
+  kind: LegalActionKind;
+  totalScore: number;
+  policyScore: number;
+  skillScore: number;
+  module: FrontierPolicyModule;
+  schedulerSlot: string;
+  penalties: string[];
+  topSkill: string | undefined;
+}
+
+/**
+ * Rank the offered legal actions with the executor's real scorer, for use as the LLM agent's
+ * candidate shortlist. When no plan is supplied (the pure action-selector has no planner), a
+ * deterministic rule plan is synthesized so scoring still has a strategic frame. The LLM then
+ * picks among genuinely-strong candidates and applies judgment the scorer cannot (theory of
+ * mind, alliance/betrayal timing, opponent modeling).
+ */
+export function rankLegalActionsForPrompt(args: {
+  input: AgentBrainInput;
+  profile: AgentStrategyProfile;
+  plan?: StrategicPlan;
+  limit?: number;
+}): RankedActionForPrompt[] {
+  if (args.input.legalActions.length === 0) {
+    return [];
+  }
+  const profile = args.profile;
+  const plan = args.plan ?? synthesizeRulePlanSync(args.input, profile);
+  const baseSettings = resolveAgentSettings(profile, undefined, profile);
+  const settings = applyTacticalSettings(baseSettings, plan.tacticalSettings);
+  const { scored } = rankFrontierActions({
+    input: args.input,
+    plan,
+    settings,
+    profile,
+  });
+  const limit = args.limit ?? 12;
+  return scored.slice(0, limit).map((candidate) => ({
+    id: candidate.action.id,
+    kind: candidate.action.kind,
+    totalScore: candidate.totalScore,
+    policyScore: candidate.policy.totalScore,
+    skillScore: candidate.skill?.totalScore ?? 0,
+    module: candidate.primaryModule,
+    schedulerSlot: candidate.schedulerSlot,
+    penalties: candidate.policy.penalties,
+    topSkill: candidate.skill?.topSkill,
+  }));
+}
+
 export class FrontierPolicyExecutor implements AgentExecutor {
   private readonly baseSettings: AgentSettings;
 
@@ -948,41 +1076,12 @@ export class FrontierPolicyExecutor implements AgentExecutor {
       this.baseSettings,
       plan.tacticalSettings,
     );
-    const skillEvaluation = new StrategicSkillEvaluator().evaluate({
-      ...input,
+    const { scored, skillEvaluation } = rankFrontierActions({
+      input,
       plan,
+      settings,
+      profile: this.profile,
     });
-    const scored: FrontierRankedAction[] = input.legalActions
-      .map((action) => {
-        const policy = scoreFrontierAction({
-          input,
-          plan,
-          action,
-          settings,
-          profile: this.profile,
-        });
-        const skill = skillEvaluationForAction(skillEvaluation, action.id);
-        const skillScore = skill?.totalScore ?? 0;
-        const totalScore = clampScore(
-          policy.totalScore + Math.round(skillScore * 0.28),
-        );
-        const primaryModule = primaryPolicyModule(policy, action);
-        return {
-          action,
-          policy,
-          skill,
-          totalScore,
-          primaryModule,
-          schedulerSlot: schedulerSlotForAction(action, primaryModule),
-        };
-      })
-      .sort(
-        (a, b) =>
-          b.totalScore - a.totalScore ||
-          frontierActionTieBreak(a.action) - frontierActionTieBreak(b.action) ||
-          frontierActionIntensityTieBreak(a.action, b.action) ||
-          a.action.id.localeCompare(b.action.id),
-      );
 
     const selectedBatch = selectFrontierActionBatch({
       input,

@@ -116,17 +116,17 @@ export class MockLlmProvider implements LlmProvider {
       : undefined;
     return (
       preferred?.id ??
-      this.skillScoredLegalActionId(prompt, actions) ??
+      this.rankedCandidateLegalActionId(prompt, actions) ??
       this.objectiveLegalActionId(prompt, actions) ??
       this.nonHoldLegalActionId(prompt)
     );
   }
 
-  private skillScoredLegalActionId(
+  private rankedCandidateLegalActionId(
     prompt: string,
     actions: PromptLegalAction[],
   ): string | null {
-    const scores = strategicSkillScoresFromPrompt(prompt);
+    const scores = rankedCandidatesFromPrompt(prompt);
     if (scores.length === 0) {
       return null;
     }
@@ -198,9 +198,9 @@ function legalActionsFromPrompt(prompt: string): PromptLegalAction[] {
   }
 }
 
-function strategicSkillScoresFromPrompt(prompt: string): PromptStrategicSkillScore[] {
+function rankedCandidatesFromPrompt(prompt: string): PromptStrategicSkillScore[] {
   const match = prompt.match(
-    /STRATEGIC_SKILL_SCORES_JSON:\s*([\s\S]*?)\s*END_STRATEGIC_SKILL_SCORES_JSON/,
+    /RANKED_CANDIDATES_JSON:\s*([\s\S]*?)\s*END_RANKED_CANDIDATES_JSON/,
   );
   if (match === null) {
     return [];
