@@ -74,7 +74,23 @@ export class LlmPromptBuilder {
       input.observation.opponentModel.length > 0
         ? [
             "OPPONENT_MODEL_JSON:",
-            JSON.stringify(input.observation.opponentModel, null, 2),
+            // Compact (top rivals, ToM-decision fields, single line) to protect the
+            // action-selector's JSON-adherence — verbose prompt blocks regress parse rate.
+            JSON.stringify(
+              input.observation.opponentModel.slice(0, 6).map((o) => ({
+                id: o.playerID,
+                name: o.name,
+                tileShare: o.tileShare,
+                trust: o.trust,
+                momentum: o.momentum,
+                predicted: o.predictedNextAction,
+                betrayedMe: o.betrayedMe,
+                attacksOnMe: o.attacksOnMe,
+                allied: o.isAllied,
+                leader: o.isLeader,
+                relation: o.relation,
+              })),
+            ),
             "END_OPPONENT_MODEL_JSON",
           ]
         : []),
