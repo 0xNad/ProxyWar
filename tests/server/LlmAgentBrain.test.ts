@@ -164,8 +164,12 @@ describe("LLM agent decision contract", () => {
     expect(prompt).toContain("diplomacy");
   });
 
-  it("rejects out-of-range numeric confidence", () => {
-    const result = new LlmDecisionParser().parse(
+  // The house parser is ROBUST (not strict): an agentic LLM wraps its decision in prose /
+  // code fences / extra reasoning fields. We extract the decision and tolerate advisory-field
+  // noise, while PRESERVING the safety-critical checks (must be a valid offered LegalAction.id;
+  // raw intents without selectedLegalActionId are still rejected).
+  it("ignores out-of-range confidence (advisory field; does not fail the decision)", () => {
+    const result = new LlmDecisionParser({ strict: false }).parse(
       JSON.stringify({
         selectedLegalActionId: "alliance:PLAYER02",
         reason: "This creates an early safety buffer.",
@@ -174,47 +178,50 @@ describe("LLM agent decision contract", () => {
       legalActions,
     );
 
-    expect(result).toMatchObject({
-      ok: false,
-      reason: "confidence must be between 0 and 1",
-    });
+    expect(result).toMatchObject({ ok: true, selectedLegalActionId: "alliance:PLAYER02" });
+    if (result.ok) {
+      expect(result.confidence).toBeUndefined();
+    }
   });
 
-  it("rejects a single fenced JSON object", () => {
-    const result = new LlmDecisionParser().parse(
+  it("accepts a fenced JSON object (strips the code fence)", () => {
+    const result = new LlmDecisionParser({ strict: false }).parse(
       '```json\n{"selectedLegalActionId":"hold","reason":"No safe action is available.","confidence":0.5}\n```',
       legalActions,
     );
 
-    expect(result).toMatchObject({
-      ok: false,
-      reason: "markdown code fence is not allowed; return the JSON object only",
-    });
+    expect(result).toMatchObject({ ok: true, selectedLegalActionId: "hold" });
   });
 
-  it("rejects malformed JSON", () => {
-    const result = new LlmDecisionParser().parse("{bad json", legalActions);
+  it("accepts a decision wrapped in reasoning prose (extracts the JSON object)", () => {
+    const result = new LlmDecisionParser({ strict: false }).parse(
+      'Let me think — holding is safest here. {"selectedLegalActionId":"hold","reason":"safe"} Let me know if you want changes.',
+      legalActions,
+    );
 
-    expect(result).toMatchObject({
-      ok: false,
-    });
-    expect(result.reason).toContain("malformed JSON");
+    expect(result).toMatchObject({ ok: true, selectedLegalActionId: "hold" });
   });
 
-  it("rejects code-like model output instead of treating it as gameplay", () => {
-    const result = new LlmDecisionParser().parse(
+  it("fails when no JSON object is present", () => {
+    const result = new LlmDecisionParser({ strict: false }).parse(
+      "no json object here at all",
+      legalActions,
+    );
+
+    expect(result.ok).toBe(false);
+  });
+
+  it("fails on unparseable JSON-like output", () => {
+    const result = new LlmDecisionParser({ strict: false }).parse(
       'const action = legalActions[0]; return { selectedLegalActionId: action.id, reason: "scripted" };',
       legalActions,
     );
 
-    expect(result).toMatchObject({
-      ok: false,
-    });
-    expect(result.reason).toContain("strict JSON only");
+    expect(result.ok).toBe(false);
   });
 
   it("rejects an unknown legal action id", () => {
-    const result = new LlmDecisionParser().parse(
+    const result = new LlmDecisionParser({ strict: false }).parse(
       JSON.stringify({
         selectedLegalActionId: "attack:missing",
         reason: "Trying something else.",
@@ -229,7 +236,7 @@ describe("LLM agent decision contract", () => {
   });
 
   it("rejects a missing selectedLegalActionId", () => {
-    const result = new LlmDecisionParser().parse(
+    const result = new LlmDecisionParser({ strict: false }).parse(
       JSON.stringify({ reason: "No id." }),
       legalActions,
     );
@@ -240,8 +247,8 @@ describe("LLM agent decision contract", () => {
     });
   });
 
-  it("rejects invalid confidence values", () => {
-    const result = new LlmDecisionParser().parse(
+  it("ignores non-numeric confidence", () => {
+    const result = new LlmDecisionParser({ strict: false }).parse(
       JSON.stringify({
         selectedLegalActionId: "hold",
         reason: "Hold safely.",
@@ -250,69 +257,60 @@ describe("LLM agent decision contract", () => {
       legalActions,
     );
 
-    expect(result).toMatchObject({
-      ok: false,
-      reason: "confidence must be a finite number",
-    });
+    expect(result).toMatchObject({ ok: true, selectedLegalActionId: "hold" });
   });
 
-  it.each([
-    [
-      "empty output",
-      "",
-      "empty LLM response",
-    ],
-    [
-      "extra field",
+  it("ignores extra reasoning fields", () => {
+    const result = new LlmDecisionParser({ strict: false }).parse(
       JSON.stringify({
         selectedLegalActionId: "hold",
         reason: "Hold.",
-        intent: { type: "spawn", tile: 1 },
+        analysis: "a longer chain of thought the agent emitted",
       }),
-      "unknown JSON field: intent",
-    ],
-    [
-      "raw intent JSON",
+      legalActions,
+    );
+
+    expect(result).toMatchObject({ ok: true, selectedLegalActionId: "hold" });
+  });
+
+  it("rejects raw intent JSON (no selectedLegalActionId — safety preserved)", () => {
+    const result = new LlmDecisionParser({ strict: false }).parse(
       JSON.stringify({ type: "spawn", tile: 1 }),
-      "unknown JSON field: type",
-    ],
-    [
-      "actionId alias",
-      JSON.stringify({
-        actionId: "hold",
-        reason: "Hold.",
-      }),
-      "unknown JSON field: actionId. Use selectedLegalActionId instead.",
-    ],
-    [
-      "empty reason",
-      JSON.stringify({
-        selectedLegalActionId: "hold",
-        reason: "  ",
-      }),
-      "reason cannot be empty",
-    ],
-    [
-      "array response",
-      JSON.stringify([{ selectedLegalActionId: "hold", reason: "Hold." }]),
-      "LLM response must be a JSON object",
-    ],
-    [
-      "primitive response",
-      JSON.stringify("hold"),
-      "LLM response must be a JSON object",
-    ],
-  ])("rejects %s", (_label, raw, reason) => {
-    const result = new LlmDecisionParser().parse(raw, legalActions);
+      legalActions,
+    );
 
     expect(result).toMatchObject({
       ok: false,
-      reason,
+      reason: "selectedLegalActionId must be a string",
     });
   });
 
-  it("rejects overlong reasons", () => {
-    const result = new LlmDecisionParser({ maxReasonLength: 10 }).parse(
+  it("accepts the actionId alias (maps it to selectedLegalActionId)", () => {
+    const result = new LlmDecisionParser({ strict: false }).parse(
+      JSON.stringify({ actionId: "hold", reason: "Hold." }),
+      legalActions,
+    );
+
+    expect(result).toMatchObject({ ok: true, selectedLegalActionId: "hold" });
+  });
+
+  it("tolerates an empty reason (reason is advisory)", () => {
+    const result = new LlmDecisionParser({ strict: false }).parse(
+      JSON.stringify({ selectedLegalActionId: "hold", reason: "  " }),
+      legalActions,
+    );
+
+    expect(result).toMatchObject({ ok: true, selectedLegalActionId: "hold" });
+  });
+
+  it("rejects empty output", () => {
+    const result = new LlmDecisionParser({ strict: false }).parse("", legalActions);
+
+    expect(result).toMatchObject({ ok: false, reason: "empty LLM response" });
+  });
+
+  it("truncates overlong reasons instead of failing", () => {
+    const result = new LlmDecisionParser({ maxReasonLength: 10, strict: false }).parse(
       JSON.stringify({
         selectedLegalActionId: "hold",
         reason: "This reason is too long.",
@@ -320,10 +318,10 @@ describe("LLM agent decision contract", () => {
       legalActions,
     );
 
-    expect(result).toMatchObject({
-      ok: false,
-      reason: "reason exceeds 10 characters",
-    });
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.reason.length).toBeLessThanOrEqual(10);
+    }
   });
 
   it("falls back safely when mock LLM output is invalid", async () => {

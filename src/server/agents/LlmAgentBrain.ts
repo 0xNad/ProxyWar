@@ -38,7 +38,9 @@ export class LlmAgentBrain implements AgentBrain {
           ? "codex-cli"
           : "real-llm");
     this.promptBuilder = options.promptBuilder ?? new LlmPromptBuilder();
-    this.parser = options.parser ?? new LlmDecisionParser();
+    // Robust parsing for the in-house agentic LLM (extract the decision from prose /
+    // code fences / extra reasoning fields). External agents keep the strict default.
+    this.parser = options.parser ?? new LlmDecisionParser({ strict: false });
   }
 
   async decide(input: AgentBrainInput): Promise<AgentDecision> {
