@@ -374,7 +374,7 @@ class CoworldProtocolServer {
         JSON.stringify({
           type: "hello",
           slot,
-          protocol: "proxywar-coworld-poc-v1",
+          protocol: "proxywar-coworld-v1",
         }),
       );
       this.broadcastGlobal(this.statusSnapshot(`player-${slot}-connected`));
@@ -622,8 +622,8 @@ async function runStandaloneNoDockerProof(): Promise<void> {
     server.sendFinal();
     await waitForPlayersToExit(playerProcesses);
     await fs.writeFile(
-      path.join(workspace, "poc-report.md"),
-      pocReport({
+      path.join(workspace, "coworld-report.md"),
+      coworldReport({
         workspace,
         results: result.results,
         proxyWarArtifactDir: result.proxyWarArtifactDir,
@@ -860,19 +860,19 @@ async function runProxyWarEpisode(
       startedAt,
       completedAt,
     });
-    const runID = `coworld-poc-${new Date()
+    const runID = `coworld-${new Date()
       .toISOString()
       .replace(/[:.]/g, "-")}-${randomUUID().slice(0, 8)}`;
     const runNote = process.env.COGAME_RESULTS_URI
-      ? "Coworld container POC harness."
-      : "Local no-Docker Coworld-shaped POC harness.";
+      ? "Coworld container harness."
+      : "Local no-Docker Coworld-shaped harness.";
     const certificationNote = process.env.COGAME_RESULTS_URI
       ? "This episode ran through Coworld's game/player container env contract."
       : "Official Coworld certification is not part of this no-Docker command.";
     const spectatorReplay = modules.buildAgentSpectatorReplay({
       runID,
       matchID: game.id,
-      scenario: "coworld-poc",
+      scenario: "coworld",
       brainMode: "external-http",
       runnerMode: "step-locked",
       finalGameState: stepResult.finalGameState,
@@ -883,7 +883,7 @@ async function runProxyWarEpisode(
     const artifacts = await modules.writeAgentLeagueRunArtifacts({
       runID,
       matchID: game.id,
-      scenario: "coworld-poc",
+      scenario: "coworld",
       brainMode: "external-http",
       runnerMode: "step-locked",
       runnerConfig: {
@@ -1613,17 +1613,17 @@ function requiredEnv(name: string): string {
   return value;
 }
 
-function pocReport(input: {
+function coworldReport(input: {
   workspace: string;
   results: CoworldResults;
   proxyWarArtifactDir: string;
 }): string {
   return [
-    "# Proxy War Coworld Local POC Report",
+    "# Proxy War Coworld Report",
     "",
     "Status: no-Docker Coworld-shaped episode path passed.",
     "",
-    "This run proves the local adapter can drive Proxy War through a Coworld-shaped websocket player protocol and produce Coworld-style results/replay files.",
+    "This run proves the adapter can drive Proxy War through a Coworld-shaped websocket player protocol and produce Coworld-style results/replay files.",
     "",
     "It does not prove official Coworld compatibility because Docker is unavailable in this environment, so `coworld certify` could not run.",
     "",

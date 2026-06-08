@@ -1,6 +1,6 @@
 # Proxy War Coworld Global And Replay Protocol
 
-This local POC exposes the route family Coworld certification expects:
+The Proxy War Coworld exposes the route family Coworld certification expects:
 
 - `GET /healthz`
 - `GET /client/player?slot=...&token=...`

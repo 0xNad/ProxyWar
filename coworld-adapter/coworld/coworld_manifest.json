@@ -1,10 +1,10 @@
 {
   "$schema": "https://raw.githubusercontent.com/Metta-AI/coworld/main/src/coworld/coworld_manifest_schema.json",
   "game": {
-    "name": "proxywar-local-poc",
-    "version": "0.0.1",
-    "description": "Local-only Proxy War Coworld proof of concept that preserves the LegalAction.id decision path.",
-    "owner": "local-proxywar-poc",
+    "name": "proxywar",
+    "version": "0.0.4",
+    "description": "Hosted Proxy War Coworld adapter that preserves the LegalAction.id decision path.",
+    "owner": "proxywar",
     "runnable": {
       "type": "game",
       "image": "proxywar-coworld-local:latest",
@@ -190,7 +190,7 @@
     "docs": {
       "readme": {
         "type": "text",
-        "value": "# Proxy War Coworld Local POC\n\nProxy War is a simultaneous-turn territorial strategy game. This local Coworld package is a proof of the Coworld game/player shape around the existing Proxy War runner. It preserves the existing LegalAction.id decision path and does not replace the external-agent beta path.\n\n## Rules Summary\n\nEach Coworld player controls one Proxy War slot. During a decision step, the game advances through the existing Proxy War game server and asks each connected player to choose from the current legal actions. The local smoke fixture uses a compact two-player map, a short decision horizon, and deterministic starter policies so certification can run quickly.\n\nA player may only select an action id that the game offered in the current request. The game passes that selected id back through Proxy War's existing AgentDecisionValidator, AgentLeagueMatchRunner, AgentRunner, and GameServer path. Invalid, stale, or missing selections are treated as fallback decisions by the adapter and are visible in the result artifact.\n\n## Player Protocol\n\nPlayers connect to COWORLD_PLAYER_WS_URL. The game sends decision_request messages containing protocolVersion, observation, legalActions, and responseContract fields. The player replies with decision_response, the same requestID, and selectedLegalActionId. selectedLegalActionId must match one offered legalActions[].id exactly.\n\nThe bundled starter player is proxywar-starter-websocket. It is intentionally simple: it reads the offered LegalAction.id values and chooses one legal id. It is useful for certification and local smoke tests, not for competitive play.\n\n## Scoring\n\nThe local POC writes one numeric score per policy slot in results.scores. If Proxy War reports a winner, that slot receives 1 and every other slot receives 0. If the smoke episode ends without a winner, each slot receives its normalized owned-territory share among policy slots. Scores sum to 1 in normal local proofs.\n\nThis scoring rule is locally verified for two-player and generated four-player FFA fixtures and is the shipped POC ranking scalar. Softmax can re-rank with a different scalar after upload by changing only the results.scores values, not the game/player contract or the LegalAction.id path.\n\n## Artifacts\n\nEach episode writes Coworld-compatible results, replay bytes, game/player logs, and Proxy War match artifacts. The local reporter, grader, diagnoser, and optimizer-plan runnables consume the episode bundle shape used by Coworld tooling. Reporter and grader contracts are locally exercised; diagnoser and optimizer are contract-shaped local proofs because Coworld 0.1.15 still marks those roles reserved or runtime-pending.\n\n## Local Status\n\nThis manifest is local-only. It has passed local Coworld certification and local run-episode replay verification, but it must not be described as fully hosted-compatible until Softmax upload, live ranking, final scoring confirmation, and hosted production resource measurements are proven."
+        "value": "# Proxy War Coworld\n\nProxy War is a simultaneous-turn territorial strategy game. This Coworld package runs Proxy War through the existing game runner and preserves the LegalAction.id decision path.\n\n## Rules Summary\n\nEach Coworld player controls one Proxy War slot. During a decision step, the game advances through the existing Proxy War game server and asks each connected player to choose from the current legal actions. The smoke fixture uses a compact two-player map, a short decision horizon, and deterministic starter policies so certification can run quickly.\n\nA player may only select an action id that the game offered in the current request. The game passes that selected id back through Proxy War's existing AgentDecisionValidator, AgentLeagueMatchRunner, AgentRunner, and GameServer path. Invalid, stale, or missing selections are treated as fallback decisions by the adapter and are visible in the result artifact.\n\n## Player Protocol\n\nPlayers connect to COWORLD_PLAYER_WS_URL. The game sends decision_request messages containing protocolVersion, observation, legalActions, and responseContract fields. The player replies with decision_response, the same requestID, and selectedLegalActionId. selectedLegalActionId must match one offered legalActions[].id exactly.\n\nThe bundled starter player is proxywar-starter-websocket. It is intentionally simple: it reads the offered LegalAction.id values and chooses one legal id. It is useful for certification and smoke tests, not for competitive play.\n\n## Scoring\n\nThe adapter writes one numeric score per policy slot in results.scores. If Proxy War reports a winner, that slot receives 1 and every other slot receives 0. If the smoke episode ends without a winner, each slot receives its normalized owned-territory share among policy slots. Scores sum to 1 in normal proofs.\n\nThis scoring rule is the shipped ranking scalar. Softmax can re-rank with a different scalar after upload by changing only the results.scores values, not the game/player contract or the LegalAction.id path.\n\n## Artifacts\n\nEach episode writes Coworld-compatible results, replay bytes, game/player logs, and Proxy War match artifacts. The reporter, grader, diagnoser, and optimizer-plan runnables consume the episode bundle shape used by Coworld tooling. Reporter and grader contracts are exercised; diagnoser and optimizer are contract-shaped because Coworld 0.1.15 still marks those roles reserved or runtime-pending.\n\n## Hosted Status\n\nThis manifest is the canonical hosted Proxy War Coworld. It runs with the tsx loader so read-only episode pods do not need writable /tmp, sanitizes Coworld policy labels into Proxy War usernames, and serves global, replay, and player Coworld client routes from the native Proxy War viewer."
       }
     }
   },
@@ -222,7 +222,7 @@
       "type": "grader",
       "image": "proxywar-coworld-local:latest",
       "run": ["node", "/app/integration/src/proxywar-episode-grader.mjs"],
-      "description": "Deterministic local proof grader for Coworld's contract-defined/runtime-pending grader role. Consumes an episode bundle and writes a 0..1 usefulness score JSON artifact."
+      "description": "Deterministic grader for Coworld's contract-defined/runtime-pending grader role. Consumes an episode bundle and writes a 0..1 usefulness score JSON artifact."
     }
   ],
   "diagnoser": [
@@ -232,7 +232,7 @@
       "type": "diagnoser",
       "image": "proxywar-coworld-local:latest",
       "run": ["node", "/app/integration/src/proxywar-policy-diagnoser.mjs"],
-      "description": "Local proof diagnoser for Coworld's reserved/tentative diagnoser contract. Consumes an episode bundle and target policy URI and writes a diagnosis zip."
+      "description": "Diagnoser for Coworld's reserved/tentative diagnoser contract. Consumes an episode bundle and target policy URI and writes a diagnosis zip."
     }
   ],
   "optimizer": [
@@ -242,13 +242,13 @@
       "type": "optimizer",
       "image": "proxywar-coworld-local:latest",
       "run": ["node", "/app/integration/src/proxywar-optimizer-plan.mjs"],
-      "description": "Local proof optimizer-plan writer for Coworld's reserved/tentative optimizer role. Writes an advisory policy-iteration plan from report and diagnosis inputs."
+      "description": "Optimizer-plan writer for Coworld's reserved/tentative optimizer role. Writes an advisory policy-iteration plan from report and diagnosis inputs."
     }
   ],
   "variants": [
     {
-      "id": "local-short-2p",
-      "name": "Local Short 2P",
+      "id": "short-2p",
+      "name": "Short 2P",
       "description": "Short deterministic two-policy Coworld smoke episode.",
       "game_config": {
         "players": [
