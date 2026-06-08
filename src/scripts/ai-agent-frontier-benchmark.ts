@@ -89,6 +89,7 @@ type FrontierBrainMode =
   | "planner"
   | "planner-codex-cli"
   | "planner-claude-cli"
+  | "action-claude-cli"
   | "rule-planner"
   | "codex-cli"
   | "external-http";
@@ -596,6 +597,20 @@ function createBrain(
       planEveryDecisionSteps: config.planEveryDecisionSteps,
       runtimeMode: "llm-policy-planner",
       executorSource: "frontier-policy-executor",
+    });
+  }
+  if (config.brainMode === "action-claude-cli") {
+    // LLM-FIRST agent: Claude picks the LegalAction.id directly (action-selector),
+    // choosing from the ranked shortlist LlmPromptBuilder supplies. The executor is
+    // NOT the decision-maker here; it only ranks/advises + provides a safe fallback.
+    const cleanCwd = path.join(os.tmpdir(), "proxywar-claude-cli-cwd");
+    fs.mkdirSync(cleanCwd, { recursive: true });
+    const provider = createClaudeCliLlmProviderFromEnv(process.env, cleanCwd);
+    return new LlmAgentBrain({
+      provider,
+      profile,
+      providerTimeoutMs: config.maxDecisionMs,
+      runtimeMode: "llm-action-selector",
     });
   }
   if (config.runtimeMode === "llm-policy-planner") {
@@ -1611,6 +1626,7 @@ const supportedBrainModes: readonly FrontierBrainMode[] = [
   "planner",
   "planner-codex-cli",
   "planner-claude-cli",
+  "action-claude-cli",
   "codex-cli",
   "external-http",
 ];
@@ -1625,6 +1641,8 @@ function normalizeRuntimeMode(brainMode: FrontierBrainMode): AgentRuntimeMode {
       return "llm-policy-planner";
     case "planner-claude-cli":
       return "llm-policy-planner";
+    case "action-claude-cli":
+      return "llm-action-selector";
     case "codex-cli":
       return "llm-action-selector";
     case "external-http":
