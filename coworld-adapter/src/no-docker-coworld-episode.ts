@@ -88,6 +88,32 @@ type CoworldResults = {
   }>;
 };
 
+const proxyWarUsernameInvalidCharacters = /[^a-zA-Z0-9_ üÜ.]+/gu;
+
+function proxyWarUsernames(
+  players: Array<{ name: string }>,
+  maxLength: number,
+): string[] {
+  const seen = new Set<string>();
+  return players.map((player, index) => {
+    const fallback = `Coworld Player ${index + 1}`;
+    const normalized = player.name
+      .replace(proxyWarUsernameInvalidCharacters, " ")
+      .replace(/\s+/gu, " ")
+      .trim();
+    const base = (normalized.length >= 3 ? normalized : fallback)
+      .slice(0, maxLength)
+      .trim();
+    let username = base.length >= 3 ? base : fallback.slice(0, maxLength);
+    if (seen.has(username)) {
+      const suffix = ` ${index + 1}`;
+      username = `${username.slice(0, maxLength - suffix.length).trim()}${suffix}`;
+    }
+    seen.add(username);
+    return username;
+  });
+}
+
 class CoworldProtocolServer {
   private readonly server = http.createServer((request, response) => {
     void this.handleHttp(request, response);
@@ -759,8 +785,12 @@ async function runProxyWarEpisode(
     stride: 2,
   });
   const profiles = ["aggressive", "defensive", "diplomatic", "opportunistic"];
-  const specs = config.players.map((player, index) => ({
-    username: player.name.slice(0, modules.proxyWarGameUsernameMaxLength ?? 27),
+  const usernames = proxyWarUsernames(
+    config.players,
+    modules.proxyWarGameUsernameMaxLength ?? 27,
+  );
+  const specs = config.players.map((_player, index) => ({
+    username: usernames[index],
     profile: profiles[index % profiles.length],
     persistentID: randomUUID(),
   }));
