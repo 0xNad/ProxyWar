@@ -53,6 +53,7 @@ export class LlmPromptBuilder {
       "Use hold only when it is the only legal action or every non-hold action is clearly harmful.",
       "If memory shows repeated neutral expansion, prefer a high-scoring economy, diplomacy, or real pressure action over another neutral expansion unless expansion is clearly the only useful option.",
       "RANKED_CANDIDATES_JSON is the engine's own ranking of the legal actions (policy + strategic skill). Higher totalScore is stronger; module names the strategic intent; penalties explain why an action may be stale or unsafe. Treat it as a strong prior: usually pick from the top candidates, but you may override it when theory-of-mind reasoning, alliance/betrayal timing, or opponent modeling justify a different choice — explain why in reason.",
+      "OPPONENT_MODEL_JSON is your persistent belief about each rival this game (ranked by territory). Use it for theory of mind: trust is 0..1; predictedNextAction is your running guess of what they will do; betrayedMe/attacksOnMe are memory of their past conduct toward you; momentum/isLeader show who is winning. Factor it into who to ally, pressure, or betray — and when.",
       "OPENFRONT_PLAYBOOK:",
       openFrontAgentPlaybook,
       profilePlaybook(input.observation.profile),
@@ -69,6 +70,14 @@ export class LlmPromptBuilder {
       "OBSERVATION_JSON:",
       JSON.stringify(observation, null, 2),
       "END_OBSERVATION_JSON",
+      ...(input.observation.opponentModel &&
+      input.observation.opponentModel.length > 0
+        ? [
+            "OPPONENT_MODEL_JSON:",
+            JSON.stringify(input.observation.opponentModel, null, 2),
+            "END_OPPONENT_MODEL_JSON",
+          ]
+        : []),
       "LEGAL_ACTIONS_JSON:",
       JSON.stringify(legalActions, null, 2),
       "END_LEGAL_ACTIONS_JSON",

@@ -6,12 +6,15 @@ import {
   FrontierPolicyExecutor,
   LlmAgentPlanner,
   MockLlmPlanner,
+  OpponentModelLedger,
   PlannerExecutorAgentBrain,
   rankLegalActionsForPrompt,
   RuleAgentExecutor,
   RuleAgentPlanner,
   StrategicPlan,
 } from "../../src/server/agents/AgentPlannerExecutor";
+import { LlmAgentBrain } from "../../src/server/agents/LlmAgentBrain";
+import { MockLlmProvider } from "../../src/server/agents/MockLlmProvider";
 import { buildAgentTacticalAffordances } from "../../src/server/agents/AgentTacticalAffordances";
 import {
   AgentObjectiveKind,
@@ -15277,6 +15280,64 @@ describe("Planner/executor agent brain", () => {
     expect(decision.actionIDs).toContain("quick_chat:ALLY02:misc.team_up");
     expect(decision.actionIDs).toContain("emoji:ALLY02:10");
     expect(decision.selectedModules).toContain("combat");
+  });
+});
+
+describe("OpponentModelLedger + action-selector theory-of-mind perception", () => {
+  it("the action-selector (LlmAgentBrain) folds the opponent model into its prompt", async () => {
+    const base = leaderPressureObservation();
+    const sampleVisible = base.visiblePlayers[0]!;
+    const rival: AgentVisiblePlayer = {
+      ...sampleVisible,
+      playerID: "RIVAL02",
+      clientID: "RIVAL02",
+      name: "Rival",
+      type: PlayerType.Nation,
+      isAlive: true,
+      sharesBorder: true,
+      tileShare: 0.14,
+      relativeTroopRatio: 1.1,
+    };
+    const obs: AgentObservation = { ...base, visiblePlayers: [rival] };
+    const brain = new LlmAgentBrain({
+      provider: new MockLlmProvider({ mode: "valid" }),
+      profile: "opportunistic",
+      includePromptInMetadata: true,
+    });
+    const decision = await brain.decide({
+      observation: obs,
+      legalActions: buildLegalActions(),
+    });
+    // Previously the action-selector had NO opponent model; now it owns its own ledger.
+    expect(obs.opponentModel?.[0]?.playerID).toBe("RIVAL02");
+    expect(typeof obs.opponentModel?.[0]?.predictedNextAction).toBe("string");
+    const prompt = (decision.metadata?.llmPrompt as string | undefined) ?? "";
+    expect(prompt).toContain("OPPONENT_MODEL_JSON");
+    expect(prompt).toContain("RIVAL02");
+  });
+
+  it("the ledger is reusable standalone and resets per game", () => {
+    const base = leaderPressureObservation();
+    const sampleVisible = base.visiblePlayers[0]!;
+    const rival: AgentVisiblePlayer = {
+      ...sampleVisible,
+      playerID: "RIVAL02",
+      type: PlayerType.Nation,
+      isAlive: true,
+      tileShare: 0.2,
+    };
+    const ledger = new OpponentModelLedger();
+    const m1 = ledger.update({
+      observation: { ...base, gameID: "G1", visiblePlayers: [rival] },
+      legalActions: buildLegalActions(),
+    });
+    expect(m1.map((e) => e.playerID)).toEqual(["RIVAL02"]);
+    // New game resets: a fresh hostile rival is not yet a betrayer.
+    const m2 = ledger.update({
+      observation: { ...base, gameID: "G2", visiblePlayers: [rival] },
+      legalActions: buildLegalActions(),
+    });
+    expect(m2[0]?.betrayedMe).toBe(false);
   });
 });
 

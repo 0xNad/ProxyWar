@@ -317,43 +317,26 @@ function opponentTrust(
   return Math.round(trust * 100) / 100;
 }
 
-export class PlannerExecutorAgentBrain implements AgentBrain {
-  readonly brainType: AgentBrainType;
-  private currentPlan: StrategicPlan | null = null;
-  private decisionsSincePlan = 0;
-  private readonly opponentLedger = new Map<string, OpponentLedgerEntry>();
-  private opponentLedgerGameID: string | null = null;
-  private readonly executor: AgentExecutor;
-  private readonly planEveryDecisionSteps: number;
-  private readonly runtimeMode: AgentRuntimeMode;
-  private readonly executorSource: string;
+/**
+ * Persistent per-rival belief state (theory-of-mind substrate). Holds the running ledger
+ * for ONE game and, each decision, folds this tick's observation into it and returns a
+ * compact, ranked opponent model. Deterministic (derives only from the ordered observation
+ * stream); resets when a new game starts.
+ *
+ * Extracted from PlannerExecutorAgentBrain so BOTH the planner brain AND the LLM-first
+ * action-selector (LlmAgentBrain) can give the LLM opponent-modeling perception — without
+ * it, an LLM agent cannot do theory-of-mind. Hold ONE instance per brain per game and call
+ * update() before building the prompt.
+ */
+export class OpponentModelLedger {
+  private readonly ledger = new Map<string, OpponentLedgerEntry>();
+  private gameID: string | null = null;
 
-  constructor(private readonly options: PlannerExecutorAgentBrainOptions) {
-    this.brainType = options.brainType ?? "planner-executor";
-    this.executor =
-      options.executor ??
-      new FrontierPolicyExecutor(options.profile, {
-        settings: options.settings,
-        seed: `${options.profile}:planner-executor`,
-      });
-    this.planEveryDecisionSteps = options.planEveryDecisionSteps ?? 3;
-    this.runtimeMode =
-      options.runtimeMode ?? runtimeModeForPlanner(options.planner.plannerType);
-    this.executorSource =
-      options.executorSource ?? defaultExecutorSource(this.executor);
-  }
-
-  /**
-   * Update the persistent per-rival belief state from this tick's observation and
-   * return a compact, ranked opponent model (theory-of-mind substrate). Runs every
-   * decision so trends/betrayals accumulate; deterministic (derives only from the
-   * ordered observation stream). Resets when a new game starts.
-   */
-  private updateOpponentModel(input: AgentBrainInput): AgentOpponentModelEntry[] {
+  update(input: AgentBrainInput): AgentOpponentModelEntry[] {
     const obs = input.observation;
-    if (this.opponentLedgerGameID !== obs.gameID) {
-      this.opponentLedger.clear();
-      this.opponentLedgerGameID = obs.gameID;
+    if (this.gameID !== obs.gameID) {
+      this.ledger.clear();
+      this.gameID = obs.gameID;
     }
     const latestSignalBySender = new Map<string, AgentCommunicationIntent>();
     for (const signal of obs.recentCommunications ?? []) {
@@ -373,9 +356,7 @@ export class PlannerExecutorAgentBrain implements AgentBrain {
     );
     const entries: AgentOpponentModelEntry[] = rivals.map((player) => {
       const tileShare = player.tileShare ?? 0;
-      const entry: OpponentLedgerEntry = this.opponentLedger.get(
-        player.playerID,
-      ) ?? {
+      const entry: OpponentLedgerEntry = this.ledger.get(player.playerID) ?? {
         name: player.name,
         tileShareEma: tileShare,
         attacksOnMe: 0,
@@ -420,7 +401,7 @@ export class PlannerExecutorAgentBrain implements AgentBrain {
         entry.tileShareEma * (1 - OPPONENT_TILESHARE_EMA_ALPHA) +
         tileShare * OPPONENT_TILESHARE_EMA_ALPHA;
       entry.name = player.name;
-      this.opponentLedger.set(player.playerID, entry);
+      this.ledger.set(player.playerID, entry);
       const isLeader =
         tileShare >= maxRivalTileShare &&
         tileShare >= ownTileShare &&
@@ -449,9 +430,35 @@ export class PlannerExecutorAgentBrain implements AgentBrain {
     entries.sort((a, b) => b.tileShare - a.tileShare);
     return entries.slice(0, OPPONENT_MODEL_MAX_ENTRIES);
   }
+}
+
+export class PlannerExecutorAgentBrain implements AgentBrain {
+  readonly brainType: AgentBrainType;
+  private currentPlan: StrategicPlan | null = null;
+  private decisionsSincePlan = 0;
+  private readonly opponentModelLedger = new OpponentModelLedger();
+  private readonly executor: AgentExecutor;
+  private readonly planEveryDecisionSteps: number;
+  private readonly runtimeMode: AgentRuntimeMode;
+  private readonly executorSource: string;
+
+  constructor(private readonly options: PlannerExecutorAgentBrainOptions) {
+    this.brainType = options.brainType ?? "planner-executor";
+    this.executor =
+      options.executor ??
+      new FrontierPolicyExecutor(options.profile, {
+        settings: options.settings,
+        seed: `${options.profile}:planner-executor`,
+      });
+    this.planEveryDecisionSteps = options.planEveryDecisionSteps ?? 3;
+    this.runtimeMode =
+      options.runtimeMode ?? runtimeModeForPlanner(options.planner.plannerType);
+    this.executorSource =
+      options.executorSource ?? defaultExecutorSource(this.executor);
+  }
 
   async decide(input: AgentBrainInput): Promise<AgentDecision> {
-    input.observation.opponentModel = this.updateOpponentModel(input);
+    input.observation.opponentModel = this.opponentModelLedger.update(input);
     const plannerRefreshReason = this.plannerRefreshReason(input);
     let planDecision: AgentPlanDecision | null = null;
     if (plannerRefreshReason !== null) {

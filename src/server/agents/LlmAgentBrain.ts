@@ -1,3 +1,4 @@
+import { OpponentModelLedger } from "./AgentPlannerExecutor";
 import {
   AgentBrain,
   AgentBrainInput,
@@ -28,6 +29,10 @@ export class LlmAgentBrain implements AgentBrain {
   readonly brainType: AgentBrainType;
   private readonly promptBuilder: LlmPromptBuilder;
   private readonly parser: LlmDecisionParser;
+  // Theory-of-mind perception: the action-selector has no planner, so it owns its own
+  // per-rival belief ledger and folds each tick into observation.opponentModel before the
+  // prompt is built. Without this the LLM-first agent sees no opponent model at all.
+  private readonly opponentModelLedger = new OpponentModelLedger();
 
   constructor(private readonly options: LlmAgentBrainOptions) {
     this.brainType =
@@ -64,6 +69,9 @@ export class LlmAgentBrain implements AgentBrain {
         },
       };
     }
+
+    // Populate theory-of-mind perception before building the prompt.
+    input.observation.opponentModel = this.opponentModelLedger.update(input);
 
     const prompt = this.promptBuilder.build({
       observation: input.observation,
