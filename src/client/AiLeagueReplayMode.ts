@@ -12,13 +12,20 @@ export function isAiLeagueReplayRoute(
 export function isCoworldReplayRoute(
   pathname = window.location.pathname,
 ): boolean {
-  return pathname === "/client/global" || pathname === "/client/replay";
+  return (
+    isCoworldRoute(pathname, "/client/global") ||
+    isCoworldRoute(pathname, "/client/replay")
+  );
 }
 
 export function isCoworldPlayerRoute(
   pathname = window.location.pathname,
 ): boolean {
-  return pathname === "/client/player";
+  return isCoworldRoute(pathname, "/client/player");
+}
+
+function isCoworldRoute(pathname: string, route: string): boolean {
+  return pathname === route || pathname.endsWith(`/proxy${route}`);
 }
 
 const spectatorNameByAgentName = new Map<string, string>([

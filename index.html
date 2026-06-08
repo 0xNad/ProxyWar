@@ -60,12 +60,14 @@
 
     <!-- Injected from Server env -->
     <script>
+      const isCoworldRoute = (route) =>
+        location.pathname === route || location.pathname.endsWith(`/proxy${route}`);
       window.__PROXYWAR_AI_REPLAY__ =
         location.pathname.startsWith("/ai-league-replay/") ||
         location.pathname.startsWith("/openfront-replay/") ||
-        location.pathname === "/client/global" ||
-        location.pathname === "/client/replay" ||
-        location.pathname === "/client/player";
+        isCoworldRoute("/client/global") ||
+        isCoworldRoute("/client/replay") ||
+        isCoworldRoute("/client/player");
       window.GIT_COMMIT = <%- gitCommit %>;
       window.ASSET_MANIFEST = <%- assetManifest %>;
       window.CDN_BASE =
