@@ -1040,11 +1040,17 @@ async function runRouteChecks(
   config: CoworldConfig,
 ): Promise<void> {
   await requireHttpOk(`http://127.0.0.1:${port}/healthz`);
-  await requireHttpOk(`http://127.0.0.1:${port}/client/global`);
-  await requireHttpOk(
-    `http://127.0.0.1:${port}/client/player?slot=0&token=${encodeURIComponent(
-      config.tokens[0],
-    )}`,
+  assertCoworldAppShellAssets(
+    await requireHttpOk(`http://127.0.0.1:${port}/client/global`),
+    "/client/global",
+  );
+  assertCoworldAppShellAssets(
+    await requireHttpOk(
+      `http://127.0.0.1:${port}/client/player?slot=0&token=${encodeURIComponent(
+        config.tokens[0],
+      )}`,
+    ),
+    "/client/player",
   );
   await requireBadPlayerRejected(
     `ws://127.0.0.1:${port}/player?slot=0&token=bad`,
@@ -1053,7 +1059,10 @@ async function runRouteChecks(
 }
 
 async function runReplayChecks(port: number): Promise<void> {
-  await requireHttpOk(`http://127.0.0.1:${port}/client/replay`);
+  assertCoworldAppShellAssets(
+    await requireHttpOk(`http://127.0.0.1:${port}/client/replay`),
+    "/client/replay",
+  );
   const message = await requireWebSocketMessage(
     `ws://127.0.0.1:${port}/replay`,
   );
@@ -1063,11 +1072,26 @@ async function runReplayChecks(port: number): Promise<void> {
   }
 }
 
-async function requireHttpOk(url: string): Promise<void> {
+function assertCoworldAppShellAssets(html: string, route: string): void {
+  if (!html.includes("../assets/") || !html.includes("../_assets/")) {
+    throw new Error(`${route} app shell did not use Coworld-relative assets`);
+  }
+  if (
+    html.includes('src="/assets/') ||
+    html.includes('href="/assets/') ||
+    html.includes('src="/_assets/') ||
+    html.includes('href="/_assets/')
+  ) {
+    throw new Error(`${route} app shell still contains root-absolute assets`);
+  }
+}
+
+async function requireHttpOk(url: string): Promise<string> {
   const response = await fetch(url);
   if (!response.ok) {
     throw new Error(`${url} returned HTTP ${response.status}`);
   }
+  return await response.text();
 }
 
 async function requireBadPlayerRejected(url: string): Promise<void> {
@@ -1103,11 +1127,10 @@ async function requireWebSocketMessage(url: string): Promise<string> {
       websocket.close();
       reject(new Error(`Timed out waiting for websocket message: ${url}`));
     }, 5000);
-    websocket.on("message", (data) => {
+    websocket.on("message", (message) => {
       clearTimeout(timeout);
-      const text = String(data);
       websocket.close();
-      resolve(text);
+      resolve(message.toString());
     });
     websocket.on("error", (error) => {
       clearTimeout(timeout);
@@ -1466,7 +1489,10 @@ async function proxyWarAppShellHtml(): Promise<string> {
       const htmlPath = fsSync.existsSync(staticHtmlPath)
         ? staticHtmlPath
         : path.join(proxyWarRepo, "index.html");
-      return await renderHtmlContent(htmlPath);
+      return await renderHtmlContent(htmlPath, {
+        htmlAssetBase: "..",
+        viteAssetBase: "..",
+      });
     })();
   }
   return await proxyWarAppShellPromise;

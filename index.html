@@ -60,8 +60,18 @@
 
     <!-- Injected from Server env -->
     <script>
+      const coworldClientRoutes = [
+        "/client/global",
+        "/client/replay",
+        "/client/player",
+      ];
       const isCoworldRoute = (route) =>
         location.pathname === route || location.pathname.endsWith(`/proxy${route}`);
+      const coworldAssetBase = () => {
+        const route = coworldClientRoutes.find(isCoworldRoute);
+        if (!route) return "";
+        return `${location.origin}${location.pathname.slice(0, -route.length)}`;
+      };
       window.__PROXYWAR_AI_REPLAY__ =
         location.pathname.startsWith("/ai-league-replay/") ||
         location.pathname.startsWith("/openfront-replay/") ||
@@ -71,7 +81,9 @@
       window.GIT_COMMIT = <%- gitCommit %>;
       window.ASSET_MANIFEST = <%- assetManifest %>;
       window.CDN_BASE =
-        <%- cdnBase %> || (window.__PROXYWAR_AI_REPLAY__ ? location.origin : "");
+        <%- cdnBase %> ||
+        coworldAssetBase() ||
+        (window.__PROXYWAR_AI_REPLAY__ ? location.origin : "");
       window.BOOTSTRAP_CONFIG = {
         gameEnv: <%- gameEnv %>,
       };

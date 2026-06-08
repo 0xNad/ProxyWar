@@ -48,6 +48,17 @@ function isAbsoluteUrl(path: string): boolean {
   return /^https?:\/\//i.test(path);
 }
 
+function joinAssetBase(baseUrl: string, path: string): string {
+  const trimmedBase = baseUrl.replace(/\/+$/, "");
+  if (trimmedBase.length === 0) {
+    return path;
+  }
+  if (isAbsoluteUrl(trimmedBase) || trimmedBase.startsWith("/")) {
+    return `${trimmedBase}${path.startsWith("/") ? path : `/${path}`}`;
+  }
+  return `${trimmedBase}/${path.replace(/^\/+/, "")}`;
+}
+
 export function buildAssetUrl(
   path: string,
   assetManifest: AssetManifest = {},
@@ -61,7 +72,7 @@ export function buildAssetUrl(
 
   const directUrl = assetManifest[normalizedPath];
   if (directUrl) {
-    return baseUrl ? `${baseUrl.replace(/\/+$/, "")}${directUrl}` : directUrl;
+    return baseUrl ? joinAssetBase(baseUrl, directUrl) : directUrl;
   }
 
   return `/${encodeAssetPath(normalizedPath)}`;

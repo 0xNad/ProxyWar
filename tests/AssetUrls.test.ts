@@ -100,6 +100,16 @@ describe("AssetUrls", () => {
       ),
     ).toBe("https://cdn.example.com/_assets/images/Favicon.hash.svg");
   });
+
+  test("joins relative baseUrl onto hashed URLs", () => {
+    expect(
+      buildAssetUrl(
+        "images/Favicon.svg",
+        { "images/Favicon.svg": "/_assets/images/Favicon.hash.svg" },
+        "..",
+      ),
+    ).toBe("../_assets/images/Favicon.hash.svg");
+  });
 });
 
 describe("rewriteAssetsForCdn", () => {
