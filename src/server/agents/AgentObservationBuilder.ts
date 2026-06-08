@@ -177,6 +177,11 @@ export class AgentObservationBuilder {
       username: input.username,
       profile: input.profile,
       gameID: input.gameID,
+      gameMode: player !== null && player.team() !== null ? "Team" : "FFA",
+      alivePlayerCount: input.gameState
+        ? input.gameState.players().filter((candidate) => candidate.isAlive())
+            .length
+        : undefined,
       phase,
       turnNumber: input.turnNumber,
       tick,
@@ -274,6 +279,7 @@ export class AgentObservationBuilder {
       isDisconnected: player.isDisconnected(),
       isTraitor: player.isTraitor(),
       hasSpawned: player.hasSpawned(),
+      team: player.team(),
       troops: player.troops(),
       maxTroops,
       troopRatio: roundRatio(player.troops() / Math.max(maxTroops, 1)),
@@ -337,6 +343,8 @@ export class AgentObservationBuilder {
           isAllied: player.isAlliedWith(other),
           isFriendly: player.isFriendly(other),
           relation: player.relation(other),
+          team: other.team(),
+          isTeammate: player.isOnSameTeam(other),
           canAttack,
           ...(canAttack
             ? {

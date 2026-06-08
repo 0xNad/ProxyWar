@@ -55,6 +55,8 @@ export interface AgentOwnState {
   incomingAttacks: number;
   outgoingAllianceRequests: number;
   incomingAllianceRequests: number;
+  /** Team id in Team mode; null in FFA/1v1 (universal-agent: mode awareness). */
+  team?: string | null;
   unitCounts?: Partial<Record<UnitType, number>>;
   spawnTile?: TileRef;
 }
@@ -99,6 +101,10 @@ export interface AgentVisiblePlayer {
   allianceInExtensionWindow?: boolean;
   relativeTroopRatio?: number;
   spawnDistance?: number;
+  /** Team id in Team mode; null in FFA/1v1. */
+  team?: string | null;
+  /** True if this player is on the agent's own team (never betray/attack a teammate). */
+  isTeammate?: boolean;
 }
 
 export interface AgentAttackOption {
@@ -657,6 +663,10 @@ export interface AgentObservation {
   username: string;
   profile: AgentStrategyProfile;
   gameID: string;
+  /** Game configuration (universal-agent: adapt to mode, not a fixed 4-FFA assumption). */
+  gameMode?: "FFA" | "Team";
+  /** Count of currently-alive players (any N), so the agent scales from 1v1 to many-player. */
+  alivePlayerCount?: number;
   phase: AgentGamePhase;
   turnNumber: number;
   tick: number | null;
