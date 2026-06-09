@@ -2703,7 +2703,7 @@ function publicChatReactionCandidate(
         candidate.action,
         selected.map((item) => item.action),
       ) &&
-      candidate.totalScore >= 8,
+      candidate.totalScore >= tunedNumber("SOCIAL_MIN_SCORE", 8),
   );
 }
 
@@ -2726,7 +2726,7 @@ function contextualEmojiReactionCandidate(
         candidate.action,
         selected.map((item) => item.action),
       ) &&
-      candidate.totalScore >= 8,
+      candidate.totalScore >= tunedNumber("SOCIAL_MIN_SCORE", 8),
   );
 }
 

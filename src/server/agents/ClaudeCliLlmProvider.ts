@@ -72,6 +72,21 @@ export const runClaudeCliCommand: ClaudeCliCommandRunner = (input) =>
     child.stdin.end();
   });
 
+// Serialize ALL Claude CLI invocations process-wide. Concurrent `claude -p` subprocesses
+// (e.g. multiple house agents deciding in the same game tick) cause CLI timeouts -> parse
+// failures -> silent fallback to the rule executor, which would quietly turn a model agent
+// into a heuristic bot. One subprocess at a time keeps every agent genuinely model-driven.
+// Single-agent runs are unaffected (no contention).
+let claudeCliChain: Promise<unknown> = Promise.resolve();
+function withClaudeCliLock<T>(task: () => Promise<T>): Promise<T> {
+  const result = claudeCliChain.then(task, task);
+  claudeCliChain = result.then(
+    () => undefined,
+    () => undefined,
+  );
+  return result;
+}
+
 export class ClaudeCliLlmProvider implements LlmProvider {
   readonly providerType = "claude-cli";
   private readonly commandRunner: ClaudeCliCommandRunner;
@@ -94,13 +109,15 @@ export class ClaudeCliLlmProvider implements LlmProvider {
       args.push("--model", model);
     }
 
-    const result = await this.commandRunner({
-      command: this.config.command ?? "claude",
-      args,
-      stdin: prompt,
-      cwd: this.config.cwd,
-      timeoutMs,
-    });
+    const result = await withClaudeCliLock(() =>
+      this.commandRunner({
+        command: this.config.command ?? "claude",
+        args,
+        stdin: prompt,
+        cwd: this.config.cwd,
+        timeoutMs,
+      }),
+    );
 
     if (result.timedOut) {
       throw new Error(`Claude CLI timed out after ${timeoutMs}ms`);

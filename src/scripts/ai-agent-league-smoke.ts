@@ -1,5 +1,6 @@
 import { randomUUID } from "crypto";
 import fs from "fs";
+import os from "os";
 import path from "path";
 import { fileURLToPath } from "url";
 import winston from "winston";
@@ -32,7 +33,11 @@ import {
   CodexCliLlmProvider,
   loadCodexCliLlmProviderConfig,
 } from "../server/agents/CodexCliLlmProvider";
-import { createClaudeCliLlmProviderFromEnv } from "../server/agents/ClaudeCliLlmProvider";
+import {
+  ClaudeCliLlmProvider,
+  createClaudeCliLlmProviderFromEnv,
+  loadClaudeCliLlmProviderConfig,
+} from "../server/agents/ClaudeCliLlmProvider";
 import {
   AgentLeagueMatchRunner,
   AgentSpec,
@@ -147,6 +152,45 @@ async function run() {
         });
   const claudeCliProvider =
     brainMode === "planner-claude-cli" ? createClaudeCliLlmProviderFromEnv() : null;
+  // Promo mode: one Claude model per agent (e.g. --models=claude-fable-5,opus,sonnet),
+  // optional display names (--names=Fable 5,Opus 4.8,Sonnet 4.6). Each agent gets its own
+  // provider bound to its model; the provider serializes CLI calls globally so concurrent
+  // ticks never collide into a fallback.
+  const promoModels =
+    args
+      .find((a) => a.startsWith("--models="))
+      ?.slice("--models=".length)
+      .split(",")
+      .map((s) => s.trim())
+      .filter(Boolean) ?? null;
+  const promoNames =
+    args
+      .find((a) => a.startsWith("--names="))
+      ?.slice("--names=".length)
+      .split(",")
+      .map((s) => s.trim())
+      .filter(Boolean) ?? null;
+  // Run each `claude` call from a clean dir OUTSIDE the repo so it doesn't load this
+  // project's CLAUDE.md/.claude settings (slow + would bias the model toward "coding
+  // agent" instead of game-player).
+  const claudeCleanCwd = path.join(os.tmpdir(), "proxywar-claude-cli-cwd");
+  fs.mkdirSync(claudeCleanCwd, { recursive: true });
+  const claudeBaseConfig = {
+    ...loadClaudeCliLlmProviderConfig(),
+    cwd: claudeCleanCwd,
+  };
+  const claudeProviderCache = new Map<number, ClaudeCliLlmProvider>();
+  const claudeProviderForIndex = (index: number): ClaudeCliLlmProvider => {
+    let provider = claudeProviderCache.get(index);
+    if (!provider) {
+      provider = new ClaudeCliLlmProvider({
+        ...claudeBaseConfig,
+        model: promoModels?.[index] ?? claudeBaseConfig.model,
+      });
+      claudeProviderCache.set(index, provider);
+    }
+    return provider;
+  };
   const decisionTimeoutMs =
     runnerMode === "step-locked"
       ? stepLockedConfig.maxDecisionMs
@@ -163,6 +207,16 @@ async function run() {
   const manifestSpecs = manifests?.map(agentManifestToSpec) ?? [];
   const houseSpecs =
     manifests === null || explicitAgentCount ? createDefaultAgentSpecs(agentCount) : [];
+  // Promo: name each agent after its model and give them an identical profile so the only
+  // variable is the model driving the LLM planner (a genuine model-vs-model showcase).
+  if (promoModels) {
+    houseSpecs.forEach((spec, index) => {
+      if (promoNames?.[index]) {
+        spec.username = promoNames[index];
+      }
+      spec.profile = "aggressive";
+    });
+  }
   const specs = manifests === null ? houseSpecs : [...manifestSpecs, ...houseSpecs];
   if (specs.length > 8) {
     throw new Error("AI league matches support 1 to 8 agent participants");
@@ -220,7 +274,9 @@ async function run() {
               brainMode === "codex-cli" || brainMode === "planner-codex-cli"
                 ? codexCliProvider
                 : brainMode === "planner-claude-cli"
-                  ? claudeCliProvider
+                  ? promoModels
+                    ? claudeProviderForIndex(index)
+                    : claudeCliProvider
                   : realLlmProvider,
               decisionTimeoutMs,
               externalAgentMaxDecisionMs,
