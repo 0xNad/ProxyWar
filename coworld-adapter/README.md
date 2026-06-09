@@ -26,7 +26,7 @@ Coworld policy container
 - Passes local `coworld certify` and `coworld run-episode --verify-replay`
   against Coworld **0.1.15**.
 - Verified at 8 parallel local episodes.
-- Ready for hosted Coworld upload as `proxywar:0.0.7`.
+- Ready for hosted Coworld upload as `proxywar:0.0.8`.
 - Uses the `tsx` loader rather than the `tsx` CLI so read-only episode pods do
   not need writable `/tmp`.
 - Sanitizes Coworld policy labels into Proxy War usernames before entering the
@@ -44,8 +44,8 @@ Coworld policy container
   optimizer are contract-shaped, matching Coworld's reserved/runtime-pending
   status for those roles.
 - **commissioner** — empty, i.e. the Coworld platform-default commissioner.
-- **variants / certification** — one short, deterministic two-player smoke
-  fixture.
+- **variants / certification** — one bounded two-player tournament default,
+  plus a short deterministic certification fixture.
 
 ## Competitive policy (LLM)
 
@@ -61,7 +61,7 @@ The provider is pluggable via env — no keys in the image or manifest:
 
 - **Bedrock** (the hosted default): upload with `upload-policy --use-bedrock`,
   which runs the pod under Coworld's Bedrock service account (`USE_BEDROCK=true`
-  + AWS creds resolved from the default chain).
+  with AWS creds resolved from the default chain).
 - Any starter-SDK provider for local testing via `PROXYWAR_AGENT_LLM_PROVIDER`:
   `openrouter` (with `OPENROUTER_API_KEY` passed as `--secret-env`), `codex-cli`,
   `claude-cowork`, or `command`. With none configured it falls back to a
@@ -85,7 +85,7 @@ This adapter lives inside the main `0xNad/ProxyWar` repo, so the engine is the
 repo root — run from this directory:
 
 ```sh
-PROXYWAR_REPO=.. npm run build:image   # build linux/amd64 image from both sources
+PROXYWAR_REPO=.. npm run build:image # build linux/amd64 image from both sources
 
 # run Coworld's official certification (image reachable, episode runs,
 # player/global routes probed, bad token rejected, results + replay verified)
