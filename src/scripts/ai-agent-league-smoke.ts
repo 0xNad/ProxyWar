@@ -150,8 +150,11 @@ async function run() {
           ...codexCliConfig,
           outputSchema: brainMode === "planner-codex-cli" ? "planner" : "decision",
         });
-  const claudeCliProvider =
-    brainMode === "planner-claude-cli" ? createClaudeCliLlmProviderFromEnv() : null;
+  const usesClaudeCli =
+    brainMode === "planner-claude-cli" || brainMode === "action-claude-cli";
+  const claudeCliProvider = usesClaudeCli
+    ? createClaudeCliLlmProviderFromEnv()
+    : null;
   // Promo mode: one Claude model per agent (e.g. --models=claude-fable-5,opus,sonnet),
   // optional display names (--names=Fable 5,Opus 4.8,Sonnet 4.6). Each agent gets its own
   // provider bound to its model; the provider serializes CLI calls globally so concurrent
@@ -273,7 +276,7 @@ async function run() {
               brainMode,
               brainMode === "codex-cli" || brainMode === "planner-codex-cli"
                 ? codexCliProvider
-                : brainMode === "planner-claude-cli"
+                : usesClaudeCli
                   ? promoModels
                     ? claudeProviderForIndex(index)
                     : claudeCliProvider
@@ -797,6 +800,9 @@ function brainModeFromArgs(
   if (args.includes("--brain=planner-claude-cli")) {
     return "planner-claude-cli";
   }
+  if (args.includes("--brain=action-claude-cli")) {
+    return "action-claude-cli";
+  }
   if (args.includes("--brain=mock-llm")) {
     return "mock-llm";
   }
@@ -1134,6 +1140,25 @@ function createBrainForMode(
       includePromptInMetadata: true,
     });
   }
+  if (brainMode === "action-claude-cli") {
+    if (provider === null) {
+      throw new LlmProviderConfigError(
+        "action-claude-cli smoke requested but no provider was configured.",
+      );
+    }
+    // FULL LLM authority: the model picks the LegalAction.id directly from the complete
+    // legal menu every decision step (no deterministic executor choosing moves). Optional
+    // shared personality (same text for every agent => fair) via AI_LEAGUE_AGENT_PERSONALITY.
+    return new LlmAgentBrain({
+      provider,
+      profile: spec.profile,
+      brainType: "llm",
+      runtimeMode: "llm-action-selector",
+      providerTimeoutMs,
+      includePromptInMetadata: false,
+      personality: process.env.AI_LEAGUE_AGENT_PERSONALITY?.trim() || undefined,
+    });
+  }
   throw new Error(`Unsupported brain mode: ${brainMode}`);
 }
 
@@ -1214,7 +1239,8 @@ type SmokeBrainMode =
   | "codex-cli"
   | "planner"
   | "planner-codex-cli"
-  | "planner-claude-cli";
+  | "planner-claude-cli"
+  | "action-claude-cli";
 type SmokeRunnerMode = "realtime" | "step-locked";
 
 function defaultRunID(
@@ -1230,6 +1256,9 @@ function defaultRunID(
 }
 
 function artifactBrainMode(brainMode: SmokeBrainMode): AgentBrainType {
+  if (brainMode === "action-claude-cli") {
+    return "llm";
+  }
   return brainMode === "planner" ||
     brainMode === "planner-codex-cli" ||
     brainMode === "planner-claude-cli"
@@ -1368,7 +1397,11 @@ function assertRequiredExternalBrainSucceeded(input: {
     brainMode:
       input.brainMode === "planner-claude-cli"
         ? "planner-codex-cli"
-        : input.brainMode,
+        : // action-claude-cli is an external-provider action selector, so it shares the
+          // codex-cli cleanliness semantics (every decision must be a clean LLM call).
+          input.brainMode === "action-claude-cli"
+          ? "codex-cli"
+          : input.brainMode,
     records: input.records,
   });
   if (report.ok) {
