@@ -103,6 +103,11 @@ export class ClaudeCliLlmProvider implements LlmProvider {
       "1",
       "--disallowedTools",
       this.config.disallowedTools ?? DEFAULT_CLAUDE_DISALLOWED_TOOLS,
+      // Ignore the host's personal settings (CLAUDE.md, a global effortLevel like xhigh,
+      // MCP servers) so every game decision runs at the CLI's fast default effort and isn't
+      // biased by the operator's coding-agent config. Per-decision latency dropped from
+      // ~30s to ~8s in testing.
+      "--setting-sources=",
     ];
     const model = (this.config.model ?? "").trim();
     if (model !== "") {
