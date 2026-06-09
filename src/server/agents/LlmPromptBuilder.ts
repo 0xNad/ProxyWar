@@ -5,6 +5,10 @@ import {
 } from "./AgentPlaybook";
 import { rankLegalActionsForPrompt } from "./AgentPlannerExecutor";
 import { AgentObservation, LegalAction } from "./AgentTypes";
+import {
+  sanitizeUntrustedDisplayString,
+  UNTRUSTED_DISPLAY_RULE,
+} from "./PromptSanitizer";
 
 export interface BuildLlmPromptInput {
   observation: AgentObservation;
@@ -18,7 +22,8 @@ export class LlmPromptBuilder {
     const legalActions = input.legalActions.map((action) => ({
       id: action.id,
       kind: action.kind,
-      label: action.label,
+      // Labels embed rival display names — sanitize the prompt copy (never the source).
+      label: sanitizeUntrustedDisplayString(action.label, 80),
       risk: action.risk,
       metadata: action.metadata ?? {},
     }));
@@ -46,6 +51,7 @@ export class LlmPromptBuilder {
     return [
       "You are an AI Nations League agent brain.",
       "Choose exactly one action by selecting a listed LegalAction.id.",
+      UNTRUSTED_DISPLAY_RULE,
       "You must not invent actions, describe new actions, or output raw game intents.",
       "Do not write code, TypeScript, shell commands, tool calls, or analysis outside the JSON object.",
       "You are deciding a game move, not programming the game.",
@@ -79,7 +85,7 @@ export class LlmPromptBuilder {
             JSON.stringify(
               input.observation.opponentModel.slice(0, 6).map((o) => ({
                 id: o.playerID,
-                name: o.name,
+                name: sanitizeUntrustedDisplayString(o.name),
                 tileShare: o.tileShare,
                 trust: o.trust,
                 momentum: o.momentum,
@@ -108,7 +114,7 @@ export class LlmPromptBuilder {
   private observationView(observation: AgentObservation) {
     return {
       agentID: observation.agentID,
-      username: observation.username,
+      username: sanitizeUntrustedDisplayString(observation.username),
       profile: observation.profile,
       gameID: observation.gameID,
       phase: observation.phase,
@@ -117,7 +123,8 @@ export class LlmPromptBuilder {
       ownState: observation.ownState,
       visiblePlayers: observation.visiblePlayers.map((player) => ({
         playerID: player.playerID,
-        name: player.name,
+        // Rival display names are untrusted free text — sanitize the prompt copy.
+        name: sanitizeUntrustedDisplayString(player.name),
         isAlive: player.isAlive,
         isDisconnected: player.isDisconnected,
         troops: player.troops,
@@ -156,7 +163,11 @@ export class LlmPromptBuilder {
       objective: observation.objective,
       endgame: observation.endgame,
       recentDecisions: observation.recentDecisions,
-      notes: observation.notes,
+      // Notes are our own sentences but interpolate rival names — strip any carried
+      // control/zero-width bytes without truncating the sentence meaning.
+      notes: observation.notes.map((note) =>
+        sanitizeUntrustedDisplayString(note, 240),
+      ),
     };
   }
 }
