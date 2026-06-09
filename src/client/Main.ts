@@ -796,9 +796,11 @@ class Client {
         "ai-league-replay" | "coworld-replay"
       >;
       coworldReplayPath?: string;
+      artifactBasePath?: string;
     } = {},
   ) {
-    const artifactBasePath = `/ai-league-runs/${encodeURIComponent(runID)}`;
+    const artifactBasePath =
+      options.artifactBasePath ?? `/ai-league-runs/${encodeURIComponent(runID)}`;
     const [
       recordResponse,
       decisionsResponse,
@@ -938,6 +940,9 @@ class Client {
           await this.openAiLeagueReplay(info.runID, {
             source: "coworld-replay",
             coworldReplayPath,
+            artifactBasePath: `../ai-league-runs/${encodeURIComponent(
+              info.runID,
+            )}`,
           });
           return;
         }
