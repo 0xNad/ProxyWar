@@ -42,6 +42,7 @@ import {
   waitForMirrorState,
 } from "../server/agents/AgentLocalGameMirror";
 import { AgentObservationBuilder } from "../server/agents/AgentObservationBuilder";
+import { StrategyAgentBrain } from "../server/agents/StrategyAgentBrain";
 import {
   AgentSettings,
   FrontierPolicyExecutor,
@@ -91,6 +92,7 @@ type FrontierBrainMode =
   | "planner-claude-cli"
   | "action-claude-cli"
   | "rule-planner"
+  | "strategy"
   | "codex-cli"
   | "external-http";
 
@@ -566,6 +568,9 @@ function createBrain(
     new FrontierPolicyExecutor(profile, {
       settings: frontierExecutorSettings(config),
     });
+  if (config.brainMode === "strategy") {
+    return new StrategyAgentBrain(profile);
+  }
   if (config.brainMode === "external-http") {
     if (config.externalAgentEndpointUrl === null) {
       throw new Error(
@@ -1623,6 +1628,7 @@ const supportedBrainModes: readonly FrontierBrainMode[] = [
   "llm-policy-planner",
   "llm-action-selector",
   "rule-planner",
+  "strategy",
   "planner",
   "planner-codex-cli",
   "planner-claude-cli",
@@ -1634,6 +1640,8 @@ const supportedBrainModes: readonly FrontierBrainMode[] = [
 function normalizeRuntimeMode(brainMode: FrontierBrainMode): AgentRuntimeMode {
   switch (brainMode) {
     case "rule-planner":
+      return "local-policy-baseline";
+    case "strategy":
       return "local-policy-baseline";
     case "planner":
       return "mock-policy-planner";
