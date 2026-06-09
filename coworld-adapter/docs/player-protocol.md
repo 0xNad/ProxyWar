@@ -1,7 +1,7 @@
 # Proxy War Coworld Player Protocol
 
-This local POC keeps Proxy War's existing external-agent contract and carries it
-over a Coworld websocket.
+The Proxy War Coworld keeps Proxy War's existing external-agent contract and
+carries it over a Coworld websocket.
 
 The player container reads `COWORLD_PLAYER_WS_URL` and connects to:
 

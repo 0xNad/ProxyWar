@@ -6,8 +6,9 @@ ENV PROXYWAR_REPO=/app/proxywar
 
 WORKDIR /app/proxywar
 COPY proxywar/package.json proxywar/package-lock.json ./
-RUN npm ci
+RUN npm ci --ignore-scripts
 COPY proxywar/ ./
+RUN npm run build-prod
 
 WORKDIR /app/integration
 COPY integration/package.json integration/package-lock.json ./
@@ -19,5 +20,4 @@ WORKDIR /app/proxywar
 # IPC server socket under /tmp (tsx-<n>/<n>.pipe); on a read-only root filesystem
 # (how Coworld/k8s hardens episode pods) that listen() fails with EROFS and the
 # container exits 1 before any app output. The loader needs no writable /tmp.
-RUN COWORLD_PREWARM=1 PROXYWAR_REPO=/app/proxywar node --import tsx/esm /app/integration/src/no-docker-coworld-episode.ts
 CMD ["node", "--import", "tsx/esm", "/app/integration/src/no-docker-coworld-episode.ts"]

@@ -1,7 +1,8 @@
 import { createRequire } from "node:module";
 
-const proxyWarRepo =
-  process.env.PROXYWAR_REPO ?? "/app/proxywar";
+import { redactCoworldPlayerUrl } from "./coworld-url.mjs";
+
+const proxyWarRepo = process.env.PROXYWAR_REPO ?? "/app/proxywar";
 const require = createRequire(import.meta.url);
 const { WebSocket } = require(`${proxyWarRepo}/node_modules/ws`);
 
@@ -13,7 +14,7 @@ if (!url) {
 const socket = new WebSocket(url);
 
 socket.on("open", () => {
-  console.log(`connected ${url}`);
+  console.log(`connected ${redactCoworldPlayerUrl(url)}`);
 });
 
 socket.on("message", (data) => {
@@ -34,8 +35,8 @@ socket.on("message", (data) => {
       requestID: message.requestID,
       selectedLegalActionId: action.id,
       reason: `Starter selected ${action.kind}: ${action.label}`,
-      confidence: action.kind === "hold" ? 0.45 : 0.72
-    })
+      confidence: action.kind === "hold" ? 0.45 : 0.72,
+    }),
   );
 });
 
@@ -62,14 +63,14 @@ function chooseAction(actions) {
     "boat",
     "alliance_request",
     "quick_chat",
-    "emoji"
+    "emoji",
   ];
   for (const kind of preferredKinds) {
     const action = actions.find(
       (candidate) =>
         candidate.kind === kind &&
         candidate.risk?.level !== "high" &&
-        !String(candidate.id).includes("avoid")
+        !String(candidate.id).includes("avoid"),
     );
     if (action) {
       return action;

@@ -6,16 +6,18 @@ const localRoot = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
   "..",
 );
-const proxyWarRepo =
-  process.env.PROXYWAR_REPO ?? "/app/proxywar";
+const proxyWarRepo = process.env.PROXYWAR_REPO ?? path.resolve(localRoot, "..");
 const contextRoot = path.join(localRoot, ".docker-context");
 
 const proxyWarEntries = [
+  "index.html",
   "package.json",
   "package-lock.json",
   "tsconfig.json",
+  "vite.config.ts",
   "src",
   "resources",
+  "proprietary",
   // ship the starter SDK (createStarterAgent) so the LLM policy can import it
   "examples",
 ];
@@ -32,8 +34,16 @@ const integrationEntries = [
 await fs.rm(contextRoot, { recursive: true, force: true });
 await fs.mkdir(contextRoot, { recursive: true });
 
-await copyEntries(proxyWarRepo, path.join(contextRoot, "proxywar"), proxyWarEntries);
-await copyEntries(localRoot, path.join(contextRoot, "integration"), integrationEntries);
+await copyEntries(
+  proxyWarRepo,
+  path.join(contextRoot, "proxywar"),
+  proxyWarEntries,
+);
+await copyEntries(
+  localRoot,
+  path.join(contextRoot, "integration"),
+  integrationEntries,
+);
 await fs.copyFile(
   path.join(localRoot, "Dockerfile.coworld"),
   path.join(contextRoot, "Dockerfile.coworld"),

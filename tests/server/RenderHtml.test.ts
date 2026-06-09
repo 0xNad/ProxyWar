@@ -5,6 +5,7 @@ import { afterEach, describe, expect, test } from "vitest";
 import {
   clearAppShellContentCache,
   getAppShellContent,
+  renderHtmlContent,
   setAppShellCacheHeaders,
 } from "../../src/server/RenderHtml";
 
@@ -56,5 +57,26 @@ describe("RenderHtml", () => {
       "public, max-age=0, s-maxage=300, stale-while-revalidate=86400",
     );
     expect(headers.get("Content-Type")).toBe("text/html");
+  });
+
+  test("renders route-relative asset bases when requested", async () => {
+    tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "render-html-"));
+    const htmlPath = path.join(tempDir, "index.html");
+    await fs.writeFile(
+      htmlPath,
+      [
+        '<script src="<%- cdnBaseRaw %>/assets/index.js"></script>',
+        "<script>window.CDN_BASE = <%- cdnBase %>;</script>",
+      ].join("\n"),
+      "utf8",
+    );
+
+    const html = await renderHtmlContent(htmlPath, {
+      htmlAssetBase: "..",
+      viteAssetBase: "..",
+    });
+
+    expect(html).toContain('src="../assets/index.js"');
+    expect(html).toContain('window.CDN_BASE = ""');
   });
 });
