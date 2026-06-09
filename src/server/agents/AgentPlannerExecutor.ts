@@ -14,7 +14,11 @@ import {
   StrategicSkillEvaluator,
 } from "./AgentStrategicSkills";
 import { buildAgentTacticalAffordances } from "./AgentTacticalAffordances";
-import { tunedNumber } from "./AgentTunables";
+import { directiveCommitmentEnabled, tunedNumber } from "./AgentTunables";
+import {
+  sanitizeUntrustedDisplayString,
+  UNTRUSTED_DISPLAY_RULE,
+} from "./PromptSanitizer";
 import {
   AgentBrain,
   AgentBrainInput,
@@ -91,6 +95,22 @@ export interface AgentSettings extends Required<AgentTacticalSettings> {
   >;
 }
 
+/**
+ * Binding directive (the P1 keystone): a decisive standing order from the LLM
+ * Commander that the executor MUST obey. Decisive-or-absent — there are no advisory
+ * levels. While present, the executor's tactical heuristics may pick the mechanics
+ * (exact variant/tile) but may not veto the strategic decision; only the explicit
+ * never-exempt survival gates still pre-empt it. A commitment lives and dies with
+ * its plan (plans expire within <=3 decisions), so the Commander re-affirms or
+ * drops it at every re-plan. Only ever set when the LLM planner emitted it AND
+ * `directiveCommitmentEnabled()` was on at parse time — rule/fallback planners
+ * never produce one.
+ */
+export interface AgentPlanCommitment {
+  targetPlayerId: string;
+  minAttackRatio: number;
+}
+
 export interface StrategicPlan {
   planID: string;
   objective: AgentObjectiveKind;
@@ -105,6 +125,7 @@ export interface StrategicPlan {
   forbiddenActionKinds: LegalActionKind[];
   enabledModules?: FrontierPolicyModule[];
   tacticalSettings?: AgentTacticalSettings;
+  commitment?: AgentPlanCommitment;
   plannerSource: "rule" | "mock-llm" | "codex-cli" | "real-llm";
 }
 
@@ -121,6 +142,8 @@ export interface AgentPlanDecision {
   repairUsed?: boolean;
   repairReason?: string;
   repairPromptLength?: number;
+  /** The previous plan carried a commitment that the rule fallback dropped. */
+  commitmentDroppedOnFallback?: boolean;
 }
 
 export interface AgentPlanner {
@@ -436,6 +459,9 @@ export class PlannerExecutorAgentBrain implements AgentBrain {
   readonly brainType: AgentBrainType;
   private currentPlan: StrategicPlan | null = null;
   private decisionsSincePlan = 0;
+  /** Whether the last decision under an active commitment selected a qualifying
+   * committed action — intentional repetition then must not trigger a re-plan. */
+  private lastCommitmentHonored = false;
   private readonly opponentModelLedger = new OpponentModelLedger();
   private readonly executor: AgentExecutor;
   private readonly planEveryDecisionSteps: number;
@@ -482,6 +508,10 @@ export class PlannerExecutorAgentBrain implements AgentBrain {
       externalPlannerCall &&
       typeof planDecision?.rawPlannerOutput === "string" &&
       planDecision.rawPlannerOutput.trim().length > 0;
+    // Binding-directive audit (single outcome-level point, independent of the
+    // enforcement code paths): did the final selection honor an active commitment?
+    const commitmentAudit = auditCommitmentAdherence(input, plan, execution);
+    this.lastCommitmentHonored = commitmentAudit?.honored === true;
 
     return {
       actionID: execution.actionID,
@@ -499,6 +529,19 @@ export class PlannerExecutorAgentBrain implements AgentBrain {
         externalPlannerCall,
         externalActionCall: false,
         rawProviderOutputPresent,
+        ...(commitmentAudit !== null
+          ? {
+              directiveCommitmentActive: true,
+              directiveCommitmentTarget: commitmentAudit.targetPlayerId,
+              directiveCommitmentMinRatio: commitmentAudit.minAttackRatio,
+              ...(commitmentAudit.overrideEvent !== null
+                ? { executorOverrideEvent: commitmentAudit.overrideEvent }
+                : {}),
+            }
+          : {}),
+        ...(planDecision?.commitmentDroppedOnFallback === true
+          ? { commitmentDroppedOnFallback: true }
+          : {}),
         planID: plan.planID,
         planObjective: plan.objective,
         planTurnIntent: turnIntent,
@@ -668,7 +711,13 @@ export class PlannerExecutorAgentBrain implements AgentBrain {
     ) {
       return "expansion_plan_diverged_to_defense";
     }
-    if (input.observation.memory.repeatedActionCount >= 2) {
+    if (
+      input.observation.memory.repeatedActionCount >= 2 &&
+      !(this.currentPlan.commitment !== undefined && this.lastCommitmentHonored)
+    ) {
+      // Repetition under an honored commitment is intentional (sustained pressure
+      // on the committed target) — re-planning every 2 decisions would burn the
+      // planner quota the keystone exists to protect.
       return "repeated_action_memory";
     }
     if (
@@ -701,7 +750,18 @@ export class PlannerExecutorAgentBrain implements AgentBrain {
       return "expansion_plan_handoff_to_economy";
     }
     if (input.observation.combat.incomingAttackPlayerIDs.length > 0) {
-      return "incoming_attack";
+      const committedTarget = this.currentPlan.commitment?.targetPlayerId;
+      const onlyCommittedTargetAttacks =
+        committedTarget !== undefined &&
+        input.observation.combat.incomingAttackPlayerIDs.every(
+          (playerID) => playerID === committedTarget,
+        );
+      // A counterattack FROM the committed target is the expected shape of the war
+      // we chose — it must not force a re-plan every decision. Any third-party
+      // attacker still triggers an immediate re-plan.
+      if (!onlyCommittedTargetAttacks) {
+        return "incoming_attack";
+      }
     }
     if (
       this.currentPlan.objective === "build_alliance" &&
@@ -1362,6 +1422,13 @@ export class LlmAgentPlanner implements AgentPlanner {
                   maxDecisionCycles: repaired.maxDecisionCycles,
                   targetPlayerId: repaired.targetPlayerId,
                   tacticalSettings: repaired.tacticalSettings,
+                  // The repair template centers on must-follow controls; never let a
+                  // repair pass silently launder a kill-window commitment out of the
+                  // plan — carry the original commitment forward if the repair lost it.
+                  commitment: validatedCommitment(
+                    repaired.commitment ?? parsed.commitment,
+                    input,
+                  ),
                 }),
                 reason: repaired.rationale,
                 latencyMs: Date.now() - started,
@@ -1404,6 +1471,7 @@ export class LlmAgentPlanner implements AgentPlanner {
             maxDecisionCycles: parsed.maxDecisionCycles,
             targetPlayerId: parsed.targetPlayerId,
             tacticalSettings: parsed.tacticalSettings,
+            commitment: validatedCommitment(parsed.commitment, input),
           }),
           reason: parsed.rationale,
           latencyMs: Date.now() - started,
@@ -1460,6 +1528,11 @@ export class LlmAgentPlanner implements AgentPlanner {
       promptLength,
       parseOk: false,
       parseFailureReason: reason,
+      // The rule fallback never emits a commitment; if the previous plan was
+      // driving a binding kill-order, record that the fallback dropped it.
+      ...(previousPlan?.commitment !== undefined
+        ? { commitmentDroppedOnFallback: true }
+        : {}),
     };
   }
 }
@@ -1560,6 +1633,127 @@ function applyTacticalSettings(
   };
 }
 
+/**
+ * Binding-directive enforcement (P1 keystone): when the LLM Commander committed to
+ * breaking a target, select the qualifying attack — a non-expansion land attack on
+ * the committed target at >= minAttackRatio (or a player-targeted boat invasion when
+ * no land route exists) whose post-exemption blocking reasons are empty (the
+ * decisive-commitment exemptions clear the tunable safety gates; only the
+ * never-exempt existential backstops can still block). Variant choice is the one
+ * CLOSEST ABOVE the committed floor, not the largest. Runs directly after the
+ * survival selectors: survival pre-empts a commitment; every tactical selector
+ * below must not.
+ */
+function commitmentDirectiveCandidate(
+  input: AgentBrainInput,
+  plan: StrategicPlan,
+  scored: readonly FrontierRankedAction[],
+): FrontierRankedAction | undefined {
+  const commitment = plan.commitment;
+  if (commitment === undefined) {
+    return undefined;
+  }
+  const ownTroops =
+    input.observation.combat.ownTroops ?? input.observation.ownState?.troops ?? 0;
+  const qualifying = scored.filter((candidate) => {
+    if (!actionTargetsPlayer(candidate.action, commitment.targetPlayerId)) {
+      return false;
+    }
+    const isLandAttack =
+      candidate.action.kind === "attack" &&
+      candidate.action.metadata?.expansion !== true;
+    const isBoatInvasion = candidate.action.kind === "boat";
+    if (!isLandAttack && !isBoatInvasion) {
+      return false;
+    }
+    if (
+      isLandAttack &&
+      committedTroopRatio(candidate.action, ownTroops) < commitment.minAttackRatio
+    ) {
+      return false;
+    }
+    return schedulingBlockingReasons(candidate).length === 0;
+  });
+  if (qualifying.length === 0) {
+    return undefined;
+  }
+  const landQualifying = qualifying.filter(
+    (candidate) => candidate.action.kind === "attack",
+  );
+  const pool = landQualifying.length > 0 ? landQualifying : qualifying;
+  return [...pool].sort((a, b) => {
+    const aDistance = Math.abs(
+      committedTroopRatio(a.action, ownTroops) - commitment.minAttackRatio,
+    );
+    const bDistance = Math.abs(
+      committedTroopRatio(b.action, ownTroops) - commitment.minAttackRatio,
+    );
+    return aDistance - bDistance || b.totalScore - a.totalScore;
+  })[0];
+}
+
+/**
+ * Outcome-level commitment audit (agentic-share v2). Measures what was actually
+ * SELECTED against what the commitment required — deliberately independent of the
+ * enforcement code paths, so the metric cannot be fooled by enforcement bugs:
+ * - honored: the final batch contains a qualifying committed action.
+ * - "declined_committed_action": a qualifying land attack EXISTED but was not
+ *   selected — the violation the v2 gate drives to zero.
+ * - "boat_only_availability": only a sea route existed and was not taken.
+ * - "no_legal_committed_action": nothing qualifying was offered (availability,
+ *   not a violation).
+ */
+function auditCommitmentAdherence(
+  input: AgentBrainInput,
+  plan: StrategicPlan,
+  execution: AgentExecutionDecision,
+): {
+  targetPlayerId: string;
+  minAttackRatio: number;
+  honored: boolean;
+  overrideEvent: string | null;
+} | null {
+  const commitment = plan.commitment;
+  if (commitment === undefined) {
+    return null;
+  }
+  const ownTroops =
+    input.observation.combat.ownTroops ?? input.observation.ownState?.troops ?? 0;
+  const qualifiesLand = (action: LegalAction) =>
+    action.kind === "attack" &&
+    action.metadata?.expansion !== true &&
+    actionTargetsPlayer(action, commitment.targetPlayerId) &&
+    committedTroopRatio(action, ownTroops) >= commitment.minAttackRatio;
+  const qualifiesBoat = (action: LegalAction) =>
+    action.kind === "boat" &&
+    actionTargetsPlayer(action, commitment.targetPlayerId);
+  const landAvailable = input.legalActions.some(qualifiesLand);
+  const boatAvailable = input.legalActions.some(qualifiesBoat);
+  const selectedIDs = new Set([
+    execution.actionID,
+    ...(execution.actionIDs ?? []),
+  ]);
+  const selectedActions = input.legalActions.filter((action) =>
+    selectedIDs.has(action.id),
+  );
+  const honored = selectedActions.some(
+    (action) => qualifiesLand(action) || qualifiesBoat(action),
+  );
+  const overrideEvent = honored
+    ? null
+    : landAvailable
+      ? "declined_committed_action"
+      : boatAvailable
+        ? "boat_only_availability"
+        : "no_legal_committed_action";
+  return {
+    targetPlayerId: commitment.targetPlayerId,
+    minAttackRatio: commitment.minAttackRatio,
+    honored,
+    overrideEvent,
+  };
+}
+
 function selectFrontierActionBatch(input: {
   input: AgentBrainInput;
   plan: StrategicPlan;
@@ -1615,6 +1809,17 @@ function selectFrontierActionBatch(input: {
   );
   if (survivalPanicProbeRecovery !== undefined) {
     return [survivalPanicProbeRecovery];
+  }
+  // Binding directive (P1 keystone): a decisive LLM commitment pre-empts every
+  // tactical selector below. Survival selectors above intentionally still win.
+  // Single-action batch: no social filler rides along with a kill-order.
+  const commitmentDirective = commitmentDirectiveCandidate(
+    input.input,
+    plan,
+    scored,
+  );
+  if (commitmentDirective !== undefined) {
+    return [commitmentDirective];
   }
   const hardNationOpeningForceExpansion = directSelectionCandidate(
     hardNationOpeningForceExpansionCandidate(input.input, scored),
@@ -3143,6 +3348,14 @@ function cooperativeDiplomacyCandidate(
         return false;
       }
       if (
+        plan.commitment !== undefined &&
+        actionTargetsPlayer(candidate.action, plan.commitment.targetPlayerId)
+      ) {
+        // Never court the player we are committed to breaking: an accepted
+        // alliance with the committed target would silently neuter the kill-order.
+        return false;
+      }
+      if (
         hasPolicyPenalty(candidate, "do not protect a runaway") ||
         hasPolicyPenalty(candidate, "do not ally with hard-nation conquest") ||
         hasPolicyPenalty(
@@ -3307,7 +3520,8 @@ function politicalShowcaseBatch(
   maxActions: number,
   observation: AgentObservation,
 ): FrontierRankedAction[] {
-  if (maxActions <= 1) {
+  if (maxActions <= 1 || plan.commitment !== undefined) {
+    // No social filler while a binding kill-order is active.
     return [primary];
   }
   const selected: FrontierRankedAction[] = [primary];
@@ -3340,6 +3554,7 @@ function combatFollowThroughBatch(
 ): FrontierRankedAction[] {
   if (
     maxActions <= 1 ||
+    plan.commitment !== undefined || // no social filler while a kill-order is active
     primary.action.kind !== "attack" ||
     primary.action.metadata?.expansion === true
   ) {
@@ -6560,7 +6775,10 @@ function repeatedPressureProbeEscalationCandidate(
   ) {
     return undefined;
   }
+  // While a binding commitment is active, escalation may only serve the committed
+  // target — stale probe history on another rival must not hijack the kill-order.
   const targetID =
+    plan.commitment?.targetPlayerId ??
     recentRepeatedLowCommitmentAttackTargetID(input.observation, 8, 3) ??
     plan.targetPlayerId ??
     recentAcceptedTargetID(input.observation, ["attack"], 8);
@@ -13321,6 +13539,10 @@ function schedulingBlockingReasons(candidate: FrontierRankedAction): string[] {
       candidate,
       "frontier finish pressure escalates repeated probes",
     );
+    const decisiveCommitmentAttack = hasPolicyContribution(
+      candidate,
+      "decisive directive commitment binds this attack",
+    );
     for (const reason of [
       "active pressure makes new wars unsafe",
       "urgent defense state makes non-leader attacks too risky",
@@ -13384,6 +13606,29 @@ function schedulingBlockingReasons(candidate: FrontierRankedAction): string[] {
           "large attack needs a decisive troop edge outside finish mode",
           "attack would deplete the reserve below competitive defense",
           "urgent defense state makes non-leader attacks too risky",
+          "hostile action does not match the active focus target",
+        ].includes(reason)
+      ) {
+        continue;
+      }
+      // Binding directive (P1 keystone): a decisive LLM commitment bypasses the
+      // tunable safety gates that produced the measured under-commitment, but the
+      // existential backstops below are NEVER exempt for it: "max concurrent wars
+      // already reached", "urgent defense should not trade into a stronger leader",
+      // "urgent defense state makes non-leader attacks too risky", "finish current
+      // war before opening another front", "boxed hard-nation opening must not feed
+      // rival before breakout", "recent retreat needs a troop rebuild before
+      // counterattack" — plus every reason not in this exemption list.
+      if (
+        decisiveCommitmentAttack &&
+        [
+          "troop ratio is below attack trigger",
+          "attack would deplete the reserve below competitive defense",
+          "multi-rival opening pressure should use reserve-preserving probes",
+          "medium attack needs a clear troop edge outside finish mode",
+          "hard-nation attack wave should rebuild troops before another medium strike",
+          "attack lacks a clear troop edge",
+          "attacking a stronger rival feeds them troops",
           "hostile action does not match the active focus target",
         ].includes(reason)
       ) {
@@ -13660,6 +13905,24 @@ function schedulingBlockingReasons(candidate: FrontierRankedAction): string[] {
       [
         "multi-rival opening pressure should use reserve-preserving probes",
         "medium and large attacks require a developed troop base",
+        "medium attack needs a clear troop edge outside finish mode",
+      ].includes(reason)
+    ) {
+      continue;
+    }
+    // Binding directive (P1 keystone): development/readiness gates in this loop are
+    // tunable-quality safety, not existential — a decisive LLM commitment clears them
+    // for the committed target. Transport/retreat/naval reasons stay blocking.
+    if (
+      candidate.action.kind === "attack" &&
+      hasPolicyContribution(
+        candidate,
+        "decisive directive commitment binds this attack",
+      ) &&
+      [
+        "multi-rival opening pressure should use reserve-preserving probes",
+        "medium and large attacks require a developed troop base",
+        "large attacks require a durable land and troop lead",
         "medium attack needs a clear troop edge outside finish mode",
       ].includes(reason)
     ) {
@@ -16551,6 +16814,15 @@ function scoreFrontierAction(input: {
     );
   }
 
+  if (
+    action.kind === "boat" &&
+    input.plan.commitment !== undefined &&
+    actionTargetsPlayer(action, input.plan.commitment.targetPlayerId)
+  ) {
+    // Binding directive, sea route: a player-targeted boat on the committed target
+    // is the qualifying invasion when no land attack exists (island/coastal rivals).
+    add("combat", 150, "decisive directive commitment binds this boat invasion");
+  }
   if (action.kind === "attack" && action.metadata?.expansion !== true) {
     add(
       "combat",
@@ -16574,6 +16846,16 @@ function scoreFrontierAction(input: {
         troopCommitment <= 0.28 ? 156 : 118,
         "frontier finish pressure escalates repeated probes",
       );
+    }
+    if (
+      input.plan.commitment !== undefined &&
+      actionTargetsPlayer(action, input.plan.commitment.targetPlayerId) &&
+      troopCommitment >= input.plan.commitment.minAttackRatio
+    ) {
+      // Binding directive: the LLM Commander committed to breaking this target at
+      // >= minAttackRatio. This contribution both ranks the attack decisively AND
+      // marks the candidate for the decisive-commitment blocking exemptions.
+      add("combat", 170, "decisive directive commitment binds this attack");
     }
     if (targetIsLeader) {
       add("combat", 28, "target is current land leader");
@@ -18463,12 +18745,21 @@ function strategicPlanForObjective(input: {
   maxDecisionCycles?: number;
   targetPlayerId?: string | null;
   tacticalSettings?: AgentTacticalSettings;
+  commitment?: AgentPlanCommitment;
 }): StrategicPlan {
   const preferredActionKinds =
     input.preferredActionKinds ?? preferredKinds(input.objective);
   const enabledModules =
     input.enabledModules ??
     modulesForObjectiveAndKinds(input.objective, preferredActionKinds);
+  // A binding commitment must stay executable: the objective's default forbidden
+  // kinds may not forbid the committed attack kinds.
+  const forbiddenActionKinds =
+    input.commitment !== undefined
+      ? forbiddenKinds(input.objective).filter(
+          (kind) => kind !== "attack" && kind !== "boat",
+        )
+      : forbiddenKinds(input.objective);
   return {
     planID: `${input.input.observation.agentID}:${input.objective}:${input.input.observation.turnNumber}`,
     objective: input.objective,
@@ -18494,10 +18785,13 @@ function strategicPlanForObjective(input: {
       "agent comes under attack",
     ],
     preferredActionKinds,
-    forbiddenActionKinds: forbiddenKinds(input.objective),
+    forbiddenActionKinds,
     enabledModules,
     ...(input.tacticalSettings !== undefined
       ? { tacticalSettings: input.tacticalSettings }
+      : {}),
+    ...(input.commitment !== undefined
+      ? { commitment: input.commitment }
       : {}),
     plannerSource: input.plannerSource,
   };
@@ -19663,6 +19957,11 @@ function plannerRepairPrompt(input: {
     "Your previous planner JSON contradicted a MUST FOLLOW control.",
     "Return corrected JSON only. Do not select a LegalAction.id and do not output game intents.",
     "The corrected JSON must match objective, turnIntent, targetPlayerId, maxDecisionCycles, primary preferred action kind, and primary module from MUST_FOLLOW_CONTROL.",
+    ...(directiveCommitmentEnabled()
+      ? [
+          'If your previous JSON included a "commitment" object, include the SAME commitment unchanged in the corrected JSON — the repair must not drop an active kill-order.',
+        ]
+      : []),
     "MUST_FOLLOW_CONTROL:",
     JSON.stringify(controls),
     "VIOLATION:",
@@ -19756,7 +20055,10 @@ function summarizePlannerAction(action: LegalAction | undefined) {
     kind: action.kind,
     risk: action.risk.level,
     targetID: metadataString(action, "targetID"),
-    targetName: metadataString(action, "targetName"),
+    targetName:
+      metadataString(action, "targetName") === null
+        ? null
+        : sanitizeUntrustedDisplayString(metadataString(action, "targetName")),
     troopPercent:
       metadataNumber(action, "troopPercentage") ||
       metadataNumber(action, "troopPercent") ||
@@ -19786,6 +20088,7 @@ function plannerPrompt(
   return [
     "You are the slow planner for an AI Nations League agent.",
     "Return JSON only. Do not select a LegalAction.id and do not output game intents.",
+    UNTRUSTED_DISPLAY_RULE,
     "Read PLANNER_DECISION_BRIEF first. It is the compact tactical summary; use the full observation only to verify details.",
     "If PLANNER_DECISION_BRIEF.plannerGuidance.recommendedControls.strength is must_follow, follow that objective/turnIntent/target/modules unless the full observation directly contradicts it.",
     "CURRENT_CONTROL_DIRECTIVE:",
@@ -19802,12 +20105,25 @@ function plannerPrompt(
     "Include targetPlayerId and tacticalSettings for reserveRatio, triggerRatio, expansionRatio, maxConcurrentWars, retreatThreshold, and maxActionsPerDecision.",
     "OPPONENT MODELING (theory of mind): each visiblePlayers entry now carries relation, alliance status/expiry (allianceExpiresAt, allianceInExtensionWindow), pending alliance requests (hasIncoming/OutgoingAllianceRequest), embargoes (hasEmbargoAgainst), and incoming/outgoing attacks. observation.recentCommunications shows what other players just signaled (propose_alliance, coordinate_attack, warn_threat, request_support, taunt) and to whom. Use these to infer each rival's intentions, not just their troop counts: who is a dependable ally, who is likely to betray, who is coordinating against whom, and who is snowballing into the lead.",
     "DIPLOMACY: prefer build_alliance/pressure_rival objectives when an alliance protects a flank or balances a stronger rival, when a rival proposes one (hasIncomingAllianceRequest), or when two rivals are coordinating against you. Anticipate betrayal: an ally whose alliance is expiring (allianceInExtensionWindow) or who would gain by turning on you is a betrayal risk; consider pre-empting or breaking the alliance first. Politics and timely betrayal are legitimate winning play, not noise.",
-    'Required JSON: {"objective":"expand_territory","turnIntent":"growth","rationale":"short reason","maxDecisionCycles":3,"preferredActionKinds":["attack"],"enabledModules":["expansion","economy","defense"],"targetPlayerId":null,"tacticalSettings":{"reserveRatio":0.35,"triggerRatio":0.55,"expansionRatio":0.15,"maxConcurrentWars":1,"retreatThreshold":0.35,"maxActionsPerDecision":4}}',
+    ...(directiveCommitmentEnabled()
+      ? [
+          'BINDING COMMITMENT (your real authority): when a kill-window is genuinely open — a reachable rival you must break now, with a real troop edge or strategic necessity — add "commitment":{"targetPlayerId":"<their id>","minAttackRatio":0.25} to your JSON. A commitment BINDS the executor: it must sustain attacks of at least minAttackRatio on that target and may not veto your decision with safety heuristics (only true survival emergencies pre-empt it). Without a commitment the executor may decline attacks it judges unsafe — which loses won games when pressure must be sustained.',
+          "STARTING a commitment is a judgment call; MAINTAINING one is not: while the window holds (target not broken, home not collapsing), re-emit the same commitment in every new plan. Dropping it mid-kill forfeits the war. Drop it deliberately when the target is broken, allied, or a bigger threat emerged. minAttackRatio: 0.25 standard, 0.4 to finish a broken rival, 0.1 only for sustained probing.",
+        ]
+      : []),
+    directiveCommitmentEnabled()
+      ? 'Required JSON: {"objective":"expand_territory","turnIntent":"growth","rationale":"short reason","maxDecisionCycles":3,"preferredActionKinds":["attack"],"enabledModules":["expansion","economy","defense"],"targetPlayerId":null,"commitment":null,"tacticalSettings":{"reserveRatio":0.35,"triggerRatio":0.55,"expansionRatio":0.15,"maxConcurrentWars":1,"retreatThreshold":0.35,"maxActionsPerDecision":4}}'
+      : 'Required JSON: {"objective":"expand_territory","turnIntent":"growth","rationale":"short reason","maxDecisionCycles":3,"preferredActionKinds":["attack"],"enabledModules":["expansion","economy","defense"],"targetPlayerId":null,"tacticalSettings":{"reserveRatio":0.35,"triggerRatio":0.55,"expansionRatio":0.15,"maxConcurrentWars":1,"retreatThreshold":0.35,"maxActionsPerDecision":4}}',
     "PLANNER_DECISION_BRIEF:",
     JSON.stringify(decisionBrief),
     "END_PLANNER_DECISION_BRIEF",
     "OPPONENT_MODEL (your persistent beliefs about each rival this game, ranked by territory; use for theory of mind — trust is 0..1, predictedNextAction is your own running guess, betrayedMe/attacksOnMe are memory of their past conduct toward you):",
-    JSON.stringify(input.observation.opponentModel ?? []),
+    JSON.stringify(
+      (input.observation.opponentModel ?? []).map((entry) => ({
+        ...entry,
+        name: sanitizeUntrustedDisplayString(entry.name),
+      })),
+    ),
     "END_OPPONENT_MODEL",
     "FRONTIER_AGENT_SKILL:",
     frontierAgentSkill,
@@ -19819,7 +20135,8 @@ function plannerPrompt(
       ownState: input.observation.ownState,
       visiblePlayers: input.observation.visiblePlayers.map((player) => ({
         playerID: player.playerID,
-        name: player.name,
+        // Rival display names are untrusted free text — sanitize the prompt copy.
+        name: sanitizeUntrustedDisplayString(player.name),
         type: player.type,
         isAlive: player.isAlive,
         troops: player.troops,
@@ -19858,13 +20175,26 @@ function plannerPrompt(
         .slice(-12)
         .map((signal) => ({
           turn: signal.turnNumber,
-          from: signal.senderName,
+          // Rival-sourced free text — the longest injection surface in this prompt.
+          from: sanitizeUntrustedDisplayString(signal.senderName),
           fromID: signal.senderPlayerID ?? signal.senderAgentID,
-          to: signal.recipientName ?? null,
+          to:
+            signal.recipientName !== undefined && signal.recipientName !== null
+              ? sanitizeUntrustedDisplayString(signal.recipientName)
+              : null,
           kind: signal.actionKind,
           intent: signal.intent,
-          target: signal.targetName ?? null,
-          message: signal.message ?? signal.emojiText ?? null,
+          target:
+            signal.targetName !== undefined && signal.targetName !== null
+              ? sanitizeUntrustedDisplayString(signal.targetName)
+              : null,
+          message:
+            signal.message ?? signal.emojiText
+              ? sanitizeUntrustedDisplayString(
+                  signal.message ?? signal.emojiText ?? "",
+                  160,
+                )
+              : null,
           direct: signal.directToAgent,
         })),
       combat: input.observation.combat,
@@ -19875,7 +20205,8 @@ function plannerPrompt(
       legalActions: input.legalActions.map((action) => ({
         id: action.id,
         kind: action.kind,
-        label: action.label,
+        // Labels embed rival display names — sanitize the prompt copy only.
+        label: sanitizeUntrustedDisplayString(action.label, 80),
         metadata: action.metadata ?? {},
         risk: action.risk,
       })),
@@ -19901,8 +20232,75 @@ type PlannerParseResult =
       enabledModules?: FrontierPolicyModule[];
       targetPlayerId: string | null;
       tacticalSettings?: AgentTacticalSettings;
+      commitment?: AgentPlanCommitment;
     }
   | { ok: false; reason: string };
+
+/**
+ * Syntactic commitment parse (binding directives keystone). Shape-validates and
+ * clamps; semantic target validation (visible/alive/not allied/not self) happens
+ * in `validatedCommitment` where the observation is available. Invalid commitment
+ * NEVER rejects the whole plan — it degrades to undefined.
+ */
+function parsePlanCommitment(
+  raw: unknown,
+  targetPlayerIdFallback: string | null,
+): AgentPlanCommitment | undefined {
+  if (!directiveCommitmentEnabled()) {
+    return undefined;
+  }
+  if (raw === null || typeof raw !== "object" || Array.isArray(raw)) {
+    return undefined;
+  }
+  const value = raw as Record<string, unknown>;
+  const target =
+    typeof value.targetPlayerId === "string" &&
+    value.targetPlayerId.trim() !== ""
+      ? value.targetPlayerId.trim()
+      : targetPlayerIdFallback;
+  if (target === null || target === "") {
+    return undefined;
+  }
+  const rawRatio =
+    typeof value.minAttackRatio === "number" &&
+    Number.isFinite(value.minAttackRatio)
+      ? value.minAttackRatio
+      : 0.25;
+  return {
+    targetPlayerId: target,
+    minAttackRatio: Math.max(0.1, Math.min(0.4, rawRatio)),
+  };
+}
+
+/**
+ * Semantic commitment validation against the live observation: the committed
+ * target must be a visible, alive, non-allied rival (and not the agent itself).
+ * Returns undefined otherwise so a hallucinated/ally/self target can never bind
+ * the executor.
+ */
+function validatedCommitment(
+  commitment: AgentPlanCommitment | undefined,
+  input: AgentBrainInput,
+): AgentPlanCommitment | undefined {
+  if (commitment === undefined) {
+    return undefined;
+  }
+  if (commitment.targetPlayerId === input.observation.ownState?.playerID) {
+    return undefined;
+  }
+  const target = input.observation.visiblePlayers.find(
+    (player) => player.playerID === commitment.targetPlayerId,
+  );
+  if (
+    target === undefined ||
+    !target.isAlive ||
+    target.isAllied ||
+    target.isTeammate === true
+  ) {
+    return undefined;
+  }
+  return commitment;
+}
 
 /**
  * Extract the first balanced top-level JSON object from arbitrary text (handles
@@ -20008,6 +20406,15 @@ function parsePlannerOutput(
     value.objective,
     preferredActionKinds,
   );
+  const commitment = parsePlanCommitment(value.commitment, targetPlayerId);
+  // A valid commitment must be executable: never let the same plan forbid the
+  // attack kinds it commits to, and make sure the combat module can run.
+  const reconciledModules =
+    commitment !== undefined &&
+    enabledModules !== undefined &&
+    !enabledModules.includes("combat")
+      ? [...enabledModules, "combat" as FrontierPolicyModule]
+      : enabledModules;
   return {
     ok: true,
     objective: value.objective,
@@ -20015,9 +20422,10 @@ function parsePlannerOutput(
     rationale: value.rationale.trim().slice(0, 280),
     maxDecisionCycles,
     preferredActionKinds,
-    enabledModules,
+    enabledModules: reconciledModules,
     targetPlayerId,
     ...(tacticalSettings !== undefined ? { tacticalSettings } : {}),
+    ...(commitment !== undefined ? { commitment } : {}),
   };
 }
 

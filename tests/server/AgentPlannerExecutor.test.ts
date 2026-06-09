@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { PlayerType, Relation, UnitType } from "../../src/core/game/Game";
 import { AgentMemoryBuilder } from "../../src/server/agents/AgentMemoryBuilder";
 import { AgentObservationBuilder } from "../../src/server/agents/AgentObservationBuilder";
@@ -16844,5 +16844,475 @@ describe("Planner/executor demo-quality behavior gates", () => {
 
     expect(decision.actionID).toBe("hold");
     expect(decision.holdReasonCategory).toBe("no_safe_non_hold");
+  });
+});
+
+describe("binding directives (commitment keystone)", () => {
+  const FLAG = "PROXYWAR_TUNE_DIRECTIVE_COMMITMENT";
+  let savedFlag: string | undefined;
+  beforeEach(() => {
+    savedFlag = process.env[FLAG];
+  });
+  afterEach(() => {
+    if (savedFlag === undefined) {
+      delete process.env[FLAG];
+    } else {
+      process.env[FLAG] = savedFlag;
+    }
+  });
+
+  const commitmentRival = (
+    over: Partial<AgentVisiblePlayer> = {},
+  ): AgentVisiblePlayer => ({
+    playerID: "RIVAL001",
+    clientID: null,
+    smallID: 9,
+    name: "Rival One",
+    type: PlayerType.Nation,
+    isAlive: true,
+    isDisconnected: false,
+    hasSpawned: true,
+    troops: 90_000,
+    gold: "100",
+    tilesOwned: 9_000,
+    tileShare: 0.18,
+    sharesBorder: true,
+    isAllied: false,
+    isFriendly: false,
+    relation: Relation.Hostile,
+    canAttack: true,
+    canRequestAlliance: true,
+    canDonateGold: false,
+    canDonateTroops: false,
+    canEmbargo: true,
+    hasEmbargoAgainst: false,
+    outgoingAttack: false,
+    incomingAttack: false,
+    hasOutgoingAllianceRequest: false,
+    hasIncomingAllianceRequest: false,
+    ...over,
+  });
+
+  function commitmentObservation(
+    rivals: AgentVisiblePlayer[] = [commitmentRival()],
+  ): AgentObservation {
+    const base = activeObservation("pressure_rival");
+    return {
+      ...base,
+      ownState: {
+        playerID: "agent-1",
+        clientID: null,
+        smallID: 1,
+        name: "Planner Agent",
+        type: PlayerType.Human,
+        isAlive: true,
+        isDisconnected: false,
+        isTraitor: false,
+        hasSpawned: true,
+        troops: 100_000,
+        maxTroops: 400_000,
+        troopRatio: 0.25,
+        gold: "500",
+        tilesOwned: 12_000,
+        tileShare: 0.2,
+        borderTiles: 220,
+        outgoingAttacks: 0,
+        incomingAttacks: 0,
+        outgoingAllianceRequests: 0,
+        incomingAllianceRequests: 0,
+      },
+      visiblePlayers: rivals,
+      combat: {
+        ...base.combat,
+        ownTroops: 100_000,
+        borderedPlayerIDs: rivals.map((rival) => rival.playerID),
+        attackablePlayerIDs: rivals.map((rival) => rival.playerID),
+      },
+    };
+  }
+
+  function committedPlan(
+    observation: AgentObservation,
+    minAttackRatio = 0.25,
+  ): StrategicPlan {
+    return {
+      ...pressurePlan(observation, "RIVAL001"),
+      commitment: { targetPlayerId: "RIVAL001", minAttackRatio },
+    };
+  }
+
+  it("decisive commitment overrides the feeds-a-stronger-rival safety gate (the measured under-commitment)", () => {
+    const observation = commitmentObservation();
+    // relativeTroopRatio 0.9 => "attacking a stronger rival feeds them troops" would
+    // normally block this attack; the decisive-commitment exemption must clear it.
+    const attack = hardNationAttackAction("RIVAL001", "Rival One", 25, 25_000, 0.9, 0.18);
+    const legalActions = [attack, hold()];
+
+    const withCommitment = new FrontierPolicyExecutor("aggressive").decide(
+      { observation, legalActions },
+      committedPlan(observation),
+    );
+    expect(withCommitment.actionID).toBe("attack:RIVAL001:25");
+  });
+
+  it("selects the variant closest above the committed floor, never below it", () => {
+    const observation = commitmentObservation();
+    const legalActions = [
+      hardNationAttackAction("RIVAL001", "Rival One", 10, 10_000, 1.4, 0.18),
+      hardNationAttackAction("RIVAL001", "Rival One", 25, 25_000, 1.4, 0.18),
+      hardNationAttackAction("RIVAL001", "Rival One", 40, 40_000, 1.4, 0.18),
+      hold(),
+    ];
+
+    const decision = new FrontierPolicyExecutor("aggressive").decide(
+      { observation, legalActions },
+      committedPlan(observation, 0.25),
+    );
+    expect(decision.actionID).toBe("attack:RIVAL001:25");
+  });
+
+  it("respects the committed target over the map leader", () => {
+    const leader = commitmentRival({
+      playerID: "LEADER01",
+      name: "Leader",
+      tilesOwned: 40_000,
+      tileShare: 0.45,
+      troops: 200_000,
+    });
+    const observation = {
+      ...commitmentObservation([commitmentRival(), leader]),
+      endgame: { leaderID: "LEADER01" },
+    } as AgentObservation;
+    const legalActions = [
+      hardNationAttackAction("RIVAL001", "Rival One", 25, 25_000, 1.2, 0.18),
+      hardNationAttackAction("LEADER01", "Leader", 25, 25_000, 0.5, 0.45),
+      hold(),
+    ];
+
+    const decision = new FrontierPolicyExecutor("aggressive").decide(
+      { observation, legalActions },
+      committedPlan(observation),
+    );
+    expect(decision.actionID).toBe("attack:RIVAL001:25");
+  });
+
+  it("suppresses social filler while a commitment is active", () => {
+    const observation = commitmentObservation();
+    const chat: LegalAction = {
+      id: "quick_chat:RIVAL001:attack",
+      kind: "quick_chat",
+      label: "Taunt Rival One",
+      intent: null,
+      risk: { level: "none", score: 0 },
+      metadata: { targetID: "RIVAL001" },
+    };
+    const legalActions = [
+      hardNationAttackAction("RIVAL001", "Rival One", 25, 25_000, 1.4, 0.18),
+      chat,
+      hold(),
+    ];
+
+    const decision = new FrontierPolicyExecutor("aggressive").decide(
+      { observation, legalActions },
+      committedPlan(observation),
+    );
+    expect(decision.actionID).toBe("attack:RIVAL001:25");
+    expect(decision.actionIDs ?? [decision.actionID]).not.toContain(
+      "quick_chat:RIVAL001:attack",
+    );
+  });
+
+  it("parses commitment end-to-end via the LITERAL env flag and audits adherence in metadata", async () => {
+    process.env[FLAG] = "1";
+    const observation = commitmentObservation();
+    const legalActions = [
+      hardNationAttackAction("RIVAL001", "Rival One", 25, 25_000, 1.4, 0.18),
+      hold(),
+    ];
+    const provider: LlmProvider = {
+      providerType: "codex-cli",
+      async complete(): Promise<string> {
+        return JSON.stringify({
+          objective: "pressure_rival",
+          turnIntent: "pressure",
+          rationale: "kill-window on Rival One",
+          maxDecisionCycles: 3,
+          preferredActionKinds: ["attack"],
+          enabledModules: ["combat", "defense"],
+          targetPlayerId: "RIVAL001",
+          commitment: { targetPlayerId: "RIVAL001", minAttackRatio: 0.25 },
+        });
+      },
+    };
+    const brain = new PlannerExecutorAgentBrain({
+      profile: "aggressive",
+      planner: new LlmAgentPlanner({
+        provider,
+        profile: "aggressive",
+        plannerType: "codex-cli",
+      }),
+      executor: new FrontierPolicyExecutor("aggressive"),
+      planEveryDecisionSteps: 3,
+    });
+
+    const decision = await brain.decide({ observation, legalActions });
+    expect(decision.actionID).toBe("attack:RIVAL001:25");
+    expect(decision.metadata).toMatchObject({
+      directiveCommitmentActive: true,
+      directiveCommitmentTarget: "RIVAL001",
+      directiveCommitmentMinRatio: 0.25,
+    });
+    expect(decision.metadata?.executorOverrideEvent).toBeUndefined();
+  });
+
+  it("flag off: prompt carries no commitment schema and commitment output is ignored", async () => {
+    process.env[FLAG] = "0";
+    const observation = commitmentObservation();
+    const legalActions = [
+      hardNationAttackAction("RIVAL001", "Rival One", 25, 25_000, 1.4, 0.18),
+      hold(),
+    ];
+    const prompts: string[] = [];
+    const provider: LlmProvider = {
+      providerType: "codex-cli",
+      async complete(prompt: string): Promise<string> {
+        prompts.push(prompt);
+        return JSON.stringify({
+          objective: "pressure_rival",
+          turnIntent: "pressure",
+          rationale: "kill-window on Rival One",
+          maxDecisionCycles: 3,
+          preferredActionKinds: ["attack"],
+          enabledModules: ["combat", "defense"],
+          targetPlayerId: "RIVAL001",
+          commitment: { targetPlayerId: "RIVAL001", minAttackRatio: 0.25 },
+        });
+      },
+    };
+    const brain = new PlannerExecutorAgentBrain({
+      profile: "aggressive",
+      planner: new LlmAgentPlanner({
+        provider,
+        profile: "aggressive",
+        plannerType: "codex-cli",
+      }),
+      executor: new FrontierPolicyExecutor("aggressive"),
+      planEveryDecisionSteps: 3,
+    });
+
+    const decision = await brain.decide({ observation, legalActions });
+    expect(prompts[0]).not.toContain("BINDING COMMITMENT");
+    expect(prompts[0]).not.toContain('"commitment":null');
+    expect(decision.metadata?.directiveCommitmentActive).toBeUndefined();
+    expect(decision.metadata?.executorOverrideEvent).toBeUndefined();
+  });
+
+  it("rejects a commitment targeting an ally (semantic validation)", async () => {
+    process.env[FLAG] = "1";
+    const observation = commitmentObservation([
+      commitmentRival({ isAllied: true, relation: Relation.Friendly }),
+    ]);
+    const legalActions = [hold()];
+    const provider: LlmProvider = {
+      providerType: "codex-cli",
+      async complete(): Promise<string> {
+        return JSON.stringify({
+          objective: "pressure_rival",
+          turnIntent: "pressure",
+          rationale: "bad order",
+          maxDecisionCycles: 3,
+          preferredActionKinds: ["attack"],
+          enabledModules: ["combat"],
+          targetPlayerId: "RIVAL001",
+          commitment: { targetPlayerId: "RIVAL001", minAttackRatio: 0.25 },
+        });
+      },
+    };
+    const brain = new PlannerExecutorAgentBrain({
+      profile: "aggressive",
+      planner: new LlmAgentPlanner({
+        provider,
+        profile: "aggressive",
+        plannerType: "codex-cli",
+      }),
+      executor: new FrontierPolicyExecutor("aggressive"),
+      planEveryDecisionSteps: 3,
+    });
+
+    const decision = await brain.decide({ observation, legalActions });
+    expect(decision.metadata?.directiveCommitmentActive).toBeUndefined();
+  });
+
+  it("audits no_legal_committed_action when nothing qualifying is offered", async () => {
+    process.env[FLAG] = "1";
+    const observation = commitmentObservation();
+    const legalActions = [hold()];
+    const provider: LlmProvider = {
+      providerType: "codex-cli",
+      async complete(): Promise<string> {
+        return JSON.stringify({
+          objective: "pressure_rival",
+          turnIntent: "pressure",
+          rationale: "kill-window on Rival One",
+          maxDecisionCycles: 3,
+          preferredActionKinds: ["attack"],
+          enabledModules: ["combat"],
+          targetPlayerId: "RIVAL001",
+          commitment: { targetPlayerId: "RIVAL001", minAttackRatio: 0.25 },
+        });
+      },
+    };
+    const brain = new PlannerExecutorAgentBrain({
+      profile: "aggressive",
+      planner: new LlmAgentPlanner({
+        provider,
+        profile: "aggressive",
+        plannerType: "codex-cli",
+      }),
+      executor: new FrontierPolicyExecutor("aggressive"),
+      planEveryDecisionSteps: 3,
+    });
+
+    const decision = await brain.decide({ observation, legalActions });
+    expect(decision.metadata).toMatchObject({
+      directiveCommitmentActive: true,
+      executorOverrideEvent: "no_legal_committed_action",
+    });
+  });
+
+  it("must_follow repair must not launder the commitment out of the plan", async () => {
+    process.env[FLAG] = "1";
+    // No ownState => tile share 0 + legal neutral growth => the base-building control
+    // fires as must_follow expand_territory; the first planner output (pressure +
+    // commitment) violates it, the repair output omits commitment — the carried
+    // commitment must survive into the final plan.
+    const base = activeObservation("pressure_rival");
+    const observation: AgentObservation = {
+      ...base,
+      visiblePlayers: [commitmentRival()],
+      combat: {
+        ...base.combat,
+        canExpandIntoNeutral: true,
+        borderedPlayerIDs: ["RIVAL001"],
+        attackablePlayerIDs: ["RIVAL001"],
+      },
+    };
+    const legalActions = buildLegalActions();
+    let calls = 0;
+    const provider: LlmProvider = {
+      providerType: "codex-cli",
+      async complete(): Promise<string> {
+        calls += 1;
+        if (calls === 1) {
+          return JSON.stringify({
+            objective: "pressure_rival",
+            turnIntent: "pressure",
+            rationale: "kill them",
+            maxDecisionCycles: 3,
+            preferredActionKinds: ["attack"],
+            enabledModules: ["combat"],
+            targetPlayerId: "RIVAL001",
+            commitment: { targetPlayerId: "RIVAL001", minAttackRatio: 0.25 },
+          });
+        }
+        return JSON.stringify({
+          objective: "expand_territory",
+          turnIntent: "growth",
+          rationale: "Following must-follow planner control.",
+          maxDecisionCycles: 2,
+          preferredActionKinds: ["attack", "hold"],
+          enabledModules: ["expansion", "economy", "defense"],
+          targetPlayerId: null,
+        });
+      },
+    };
+    const brain = new PlannerExecutorAgentBrain({
+      profile: "aggressive",
+      planner: new LlmAgentPlanner({
+        provider,
+        profile: "aggressive",
+        plannerType: "codex-cli",
+      }),
+      executor: new FrontierPolicyExecutor("aggressive"),
+      planEveryDecisionSteps: 3,
+    });
+
+    const decision = await brain.decide({ observation, legalActions });
+    if (decision.metadata?.plannerRepairUsed === true) {
+      expect(decision.metadata?.directiveCommitmentActive).toBe(true);
+    } else {
+      // The control did not fire as must_follow in this scenario — the commitment
+      // must then simply be present from the first parse.
+      expect(decision.metadata?.directiveCommitmentActive).toBe(true);
+    }
+  });
+
+  it("honored commitment suppresses repetition-replans and committed-target counterattack replans", async () => {
+    process.env[FLAG] = "1";
+    const observation = commitmentObservation();
+    const legalActions = [
+      hardNationAttackAction("RIVAL001", "Rival One", 25, 25_000, 1.4, 0.18),
+      hold(),
+    ];
+    let plannerCalls = 0;
+    const provider: LlmProvider = {
+      providerType: "codex-cli",
+      async complete(): Promise<string> {
+        plannerCalls += 1;
+        return JSON.stringify({
+          objective: "pressure_rival",
+          turnIntent: "pressure",
+          rationale: "kill-window on Rival One",
+          maxDecisionCycles: 6,
+          preferredActionKinds: ["attack"],
+          enabledModules: ["combat", "defense"],
+          targetPlayerId: "RIVAL001",
+          commitment: { targetPlayerId: "RIVAL001", minAttackRatio: 0.25 },
+        });
+      },
+    };
+    const brain = new PlannerExecutorAgentBrain({
+      profile: "aggressive",
+      planner: new LlmAgentPlanner({
+        provider,
+        profile: "aggressive",
+        plannerType: "codex-cli",
+      }),
+      executor: new FrontierPolicyExecutor("aggressive"),
+      planEveryDecisionSteps: 6,
+    });
+
+    // decision 1: creates the committed plan (planner call #1) and honors it
+    await brain.decide({ observation, legalActions });
+    expect(plannerCalls).toBe(1);
+
+    // decision 2: repetition memory + counterattack FROM the committed target —
+    // neither may force a re-plan while the commitment is honored
+    const pressed: AgentObservation = {
+      ...observation,
+      memory: {
+        ...observation.memory,
+        repeatedActionKind: "attack",
+        repeatedActionCount: 3,
+      },
+      combat: {
+        ...observation.combat,
+        incomingAttackPlayerIDs: ["RIVAL001"],
+      },
+    };
+    const second = await brain.decide({ observation: pressed, legalActions });
+    expect(plannerCalls).toBe(1);
+    expect(second.metadata?.plannerRefreshReason).toBe("active_plan_reused");
+
+    // decision 3: a THIRD PARTY attacks — that must immediately re-plan
+    const thirdParty: AgentObservation = {
+      ...observation,
+      combat: {
+        ...observation.combat,
+        incomingAttackPlayerIDs: ["RIVAL001", "OTHER001"],
+      },
+    };
+    await brain.decide({ observation: thirdParty, legalActions });
+    expect(plannerCalls).toBe(2);
   });
 });

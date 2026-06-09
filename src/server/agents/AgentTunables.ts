@@ -24,3 +24,14 @@ export function tunedNumber(name: string, fallback: number): number {
   const parsed = Number(raw);
   return Number.isFinite(parsed) ? parsed : fallback;
 }
+
+/**
+ * Binding-directives feature flag (the P1 keystone). Reads the EXACT env var
+ * `PROXYWAR_TUNE_DIRECTIVE_COMMITMENT` (A/B arms set "0"/"1" on the same build).
+ * Default ON. Gates the planner-prompt commitment schema and commitment parsing;
+ * downstream enforcement keys off `plan.commitment` presence, which can only be
+ * set when this flag was on at parse time.
+ */
+export function directiveCommitmentEnabled(): boolean {
+  return tunedNumber("DIRECTIVE_COMMITMENT", 1) >= 1;
+}
