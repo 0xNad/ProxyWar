@@ -928,7 +928,7 @@ class Client {
     );
     document.body.appendChild(loading);
     while (true) {
-      const response = await fetch("/coworld/replay-info", {
+      const response = await fetch("../coworld/replay-info", {
         cache: "no-store",
       });
       if (response.ok) {
