@@ -1040,17 +1040,19 @@ async function runRouteChecks(
   config: CoworldConfig,
 ): Promise<void> {
   await requireHttpOk(`http://127.0.0.1:${port}/healthz`);
-  assertCoworldAppShellAssets(
-    await requireHttpOk(`http://127.0.0.1:${port}/client/global`),
+  const globalClientUrl = `http://127.0.0.1:${port}/client/global`;
+  await assertCoworldAppShellAssets(
+    await requireHttpOk(globalClientUrl),
     "/client/global",
+    globalClientUrl,
   );
-  assertCoworldAppShellAssets(
-    await requireHttpOk(
-      `http://127.0.0.1:${port}/client/player?slot=0&token=${encodeURIComponent(
-        config.tokens[0],
-      )}`,
-    ),
+  const playerClientUrl = `http://127.0.0.1:${port}/client/player?slot=0&token=${encodeURIComponent(
+    config.tokens[0],
+  )}`;
+  await assertCoworldAppShellAssets(
+    await requireHttpOk(playerClientUrl),
     "/client/player",
+    playerClientUrl,
   );
   await requireBadPlayerRejected(
     `ws://127.0.0.1:${port}/player?slot=0&token=bad`,
@@ -1059,9 +1061,11 @@ async function runRouteChecks(
 }
 
 async function runReplayChecks(port: number): Promise<void> {
-  assertCoworldAppShellAssets(
-    await requireHttpOk(`http://127.0.0.1:${port}/client/replay`),
+  const replayClientUrl = `http://127.0.0.1:${port}/client/replay`;
+  await assertCoworldAppShellAssets(
+    await requireHttpOk(replayClientUrl),
     "/client/replay",
+    replayClientUrl,
   );
   const message = await requireWebSocketMessage(
     `ws://127.0.0.1:${port}/replay`,
@@ -1072,8 +1076,12 @@ async function runReplayChecks(port: number): Promise<void> {
   }
 }
 
-function assertCoworldAppShellAssets(html: string, route: string): void {
-  if (!html.includes("../assets/") || !html.includes("../_assets/")) {
+async function assertCoworldAppShellAssets(
+  html: string,
+  route: string,
+  pageUrl: string,
+): Promise<void> {
+  if (!html.includes("../assets/") || !html.includes("../assets/_assets/")) {
     throw new Error(`${route} app shell did not use Coworld-relative assets`);
   }
   if (
@@ -1083,6 +1091,12 @@ function assertCoworldAppShellAssets(html: string, route: string): void {
     html.includes('href="/_assets/')
   ) {
     throw new Error(`${route} app shell still contains root-absolute assets`);
+  }
+  const assetRefs = [
+    ...html.matchAll(/(?:src|href)="([^"]*(?:assets|_assets)[^"]*)"/g),
+  ].map((match) => match[1]);
+  for (const assetRef of new Set(assetRefs)) {
+    await requireHttpOk(new URL(assetRef, pageUrl).toString());
   }
 }
 
@@ -1490,7 +1504,7 @@ async function proxyWarAppShellHtml(): Promise<string> {
         ? staticHtmlPath
         : path.join(proxyWarRepo, "index.html");
       return await renderHtmlContent(htmlPath, {
-        htmlAssetBase: "..",
+        htmlAssetBase: "../assets",
         viteAssetBase: "..",
       });
     })();
@@ -1506,7 +1520,10 @@ async function writeProxyWarStaticAsset(
   if (!isProxyWarStaticAssetPath(requestPath)) {
     return false;
   }
-  const filePath = path.resolve(proxyWarStaticRoot, requestPath.slice(1));
+  const staticRequestPath = requestPath.startsWith("/assets/_assets/")
+    ? requestPath.slice("/assets".length)
+    : requestPath;
+  const filePath = path.resolve(proxyWarStaticRoot, staticRequestPath.slice(1));
   if (
     !isInsideRoot(filePath, proxyWarStaticRoot) ||
     !fsSync.existsSync(filePath) ||

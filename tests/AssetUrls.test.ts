@@ -106,9 +106,9 @@ describe("AssetUrls", () => {
       buildAssetUrl(
         "images/Favicon.svg",
         { "images/Favicon.svg": "/_assets/images/Favicon.hash.svg" },
-        "..",
+        "../assets",
       ),
-    ).toBe("../_assets/images/Favicon.hash.svg");
+    ).toBe("../assets/_assets/images/Favicon.hash.svg");
   });
 });
 

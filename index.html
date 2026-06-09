@@ -70,7 +70,7 @@
       const coworldAssetBase = () => {
         const route = coworldClientRoutes.find(isCoworldRoute);
         if (!route) return "";
-        return `${location.origin}${location.pathname.slice(0, -route.length)}`;
+        return `${location.origin}${location.pathname.slice(0, -route.length)}/assets`;
       };
       window.__PROXYWAR_AI_REPLAY__ =
         location.pathname.startsWith("/ai-league-replay/") ||
