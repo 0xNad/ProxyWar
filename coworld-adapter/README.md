@@ -2,8 +2,9 @@
 
 A thin [Coworld](https://github.com/Metta-AI/coworld) game/player adapter for
 **Proxy War**, an OpenFront-based autonomous strategy game. It packages Proxy
-War as a Coworld so policies can compete in local episodes, certification, and
-(once hosted) tournaments — **without changing how Proxy War makes decisions.**
+War as a Coworld so policies can compete in local episodes, certification,
+hosted play, and tournaments — **without changing how Proxy War makes
+decisions.**
 
 The core invariant: a policy still chooses exactly one offered `LegalAction.id`.
 The adapter sends that selection back through Proxy War's existing
@@ -25,10 +26,11 @@ Coworld policy container
 - Passes local `coworld certify` and `coworld run-episode --verify-replay`
   against Coworld **0.1.15**.
 - Verified at 8 parallel local episodes.
-- **Local-only.** It has **not** been uploaded, hosted, or ranked on a Coworld
-  platform, and must not be described as fully hosted-compatible until hosted
-  upload, live ranking, final scoring confirmation, and hosted resource limits
-  are proven.
+- Ready for hosted Coworld upload as `proxywar:0.0.8`.
+- Uses the `tsx` loader rather than the `tsx` CLI so read-only episode pods do
+  not need writable `/tmp`.
+- Sanitizes Coworld policy labels into Proxy War usernames before entering the
+  native Proxy War runner.
 
 ## What is in the manifest
 
@@ -42,8 +44,8 @@ Coworld policy container
   optimizer are contract-shaped, matching Coworld's reserved/runtime-pending
   status for those roles.
 - **commissioner** — empty, i.e. the Coworld platform-default commissioner.
-- **variants / certification** — one short, deterministic two-player smoke
-  fixture.
+- **variants / certification** — one bounded two-player tournament default,
+  plus a short deterministic certification fixture.
 
 ## Competitive policy (LLM)
 
@@ -59,7 +61,7 @@ The provider is pluggable via env — no keys in the image or manifest:
 
 - **Bedrock** (the hosted default): upload with `upload-policy --use-bedrock`,
   which runs the pod under Coworld's Bedrock service account (`USE_BEDROCK=true`
-  + AWS creds resolved from the default chain).
+  with AWS creds resolved from the default chain).
 - Any starter-SDK provider for local testing via `PROXYWAR_AGENT_LLM_PROVIDER`:
   `openrouter` (with `OPENROUTER_API_KEY` passed as `--secret-env`), `codex-cli`,
   `claude-cowork`, or `command`. With none configured it falls back to a
@@ -83,7 +85,7 @@ This adapter lives inside the main `0xNad/ProxyWar` repo, so the engine is the
 repo root — run from this directory:
 
 ```sh
-PROXYWAR_REPO=.. npm run build:image   # build linux/amd64 image from both sources
+PROXYWAR_REPO=.. npm run build:image # build linux/amd64 image from both sources
 
 # run Coworld's official certification (image reachable, episode runs,
 # player/global routes probed, bad token rejected, results + replay verified)
@@ -107,7 +109,7 @@ A successful `certify` prints `Certified coworld/coworld_manifest.json`.
 - If the episode ends with no winner, each slot scores its normalized owned-tile
   share among policy slots (so the scores sum to `1`).
 
-This is the shipped POC ranking scalar. It is continuous, so short episodes that
+This is the shipped ranking scalar. It is continuous, so short episodes that
 end before elimination still produce a meaningful ranking signal. A hosting
 platform can re-rank with a different scalar by changing only the `scores[]`
 values — that does not change the game/player contract or the `LegalAction.id`

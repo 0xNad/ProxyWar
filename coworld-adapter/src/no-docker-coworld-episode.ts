@@ -1,21 +1,43 @@
+import { spawn, type ChildProcess } from "node:child_process";
+import { randomUUID } from "node:crypto";
+import * as fsSync from "node:fs";
 import fs from "node:fs/promises";
 import http from "node:http";
-import path from "node:path";
-import zlib from "node:zlib";
-import { spawn, type ChildProcess } from "node:child_process";
 import { createRequire } from "node:module";
-import { randomUUID } from "node:crypto";
+import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import zlib from "node:zlib";
 
 const localRoot = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
   "..",
 );
-const proxyWarRepo =
-  process.env.PROXYWAR_REPO ?? "/app/proxywar";
+const proxyWarRepo = process.env.PROXYWAR_REPO ?? "/app/proxywar";
 const require = createRequire(import.meta.url);
-const { WebSocket, WebSocketServer } = require(`${proxyWarRepo}/node_modules/ws`);
+const { WebSocket, WebSocketServer } = require(
+  `${proxyWarRepo}/node_modules/ws`,
+);
 const winston = require(`${proxyWarRepo}/node_modules/winston`);
+const proxyWarStaticRoot = path.join(proxyWarRepo, "static");
+const proxyWarPublicRunArtifacts = new Set([
+  "game-record.json",
+  "decisions.jsonl",
+  "match-summary.json",
+  "match-package.json",
+  "match-package.html",
+  "match-package.md",
+  "spectator-replay.json",
+  "spectator-telemetry.json",
+  "visual-report.html",
+  "spectator.html",
+  "objective-scorecard.md",
+  "match-story.md",
+  "behavior-quality-report.json",
+  "behavior-quality-report.md",
+  "external-agent-feedback.md",
+]);
+
+let proxyWarAppShellPromise: Promise<string> | null = null;
 
 type LegalActionView = {
   id: string;
@@ -66,16 +88,44 @@ type CoworldResults = {
   }>;
 };
 
+const proxyWarUsernameInvalidCharacters = /[^a-zA-Z0-9_ üÜ.]+/gu;
+
+function proxyWarUsernames(
+  players: Array<{ name: string }>,
+  maxLength: number,
+): string[] {
+  const seen = new Set<string>();
+  return players.map((player, index) => {
+    const fallback = `Coworld Player ${index + 1}`;
+    const normalized = player.name
+      .replace(proxyWarUsernameInvalidCharacters, " ")
+      .replace(/\s+/gu, " ")
+      .trim();
+    const base = (normalized.length >= 3 ? normalized : fallback)
+      .slice(0, maxLength)
+      .trim();
+    let username = base.length >= 3 ? base : fallback.slice(0, maxLength);
+    if (seen.has(username)) {
+      const suffix = ` ${index + 1}`;
+      username = `${username.slice(0, maxLength - suffix.length).trim()}${suffix}`;
+    }
+    seen.add(username);
+    return username;
+  });
+}
+
 class CoworldProtocolServer {
-  private readonly server = http.createServer((request, response) =>
-    this.handleHttp(request, response),
-  );
+  private readonly server = http.createServer((request, response) => {
+    void this.handleHttp(request, response);
+  });
   private readonly wsServer = new WebSocketServer({ noServer: true });
   private readonly players = new Map<number, InstanceType<typeof WebSocket>>();
   private readonly pending = new Map<string, PendingDecision>();
   private readonly globalSockets = new Set<InstanceType<typeof WebSocket>>();
   private readonly replaySockets = new Set<InstanceType<typeof WebSocket>>();
   private readonly snapshots: unknown[] = [];
+  private spectatorMap: Record<string, unknown> | null = null;
+  private spectatorReplay: Record<string, unknown> | null = null;
   private replayPayload: unknown = null;
   private portValue: number | null = null;
 
@@ -90,7 +140,11 @@ class CoworldProtocolServer {
         this.wsServer.handleUpgrade(request, socket, head, (websocket) => {
           this.globalSockets.add(websocket);
           websocket.on("close", () => this.globalSockets.delete(websocket));
-          websocket.send(JSON.stringify(this.statusSnapshot("global-connected")));
+          websocket.send(
+            JSON.stringify(
+              this.statusSnapshot("global-connected", this.latestSnapshot()),
+            ),
+          );
         });
         return;
       }
@@ -180,13 +234,31 @@ class CoworldProtocolServer {
     };
   }
 
-  recordSnapshot(snapshot: unknown): void {
+  recordSnapshot(
+    snapshot: unknown,
+    map: Record<string, unknown> | null = null,
+  ): void {
+    if (map !== null) {
+      this.spectatorMap = map;
+    }
     this.snapshots.push(snapshot);
-    this.broadcastGlobal(this.statusSnapshot("snapshot"));
+    this.broadcastGlobal(this.statusSnapshot("snapshot", snapshot));
   }
 
   setReplayPayload(payload: unknown): void {
-    this.replayPayload = payload;
+    this.replayPayload = publicReplayPayload(payload);
+    const spectatorReplay = spectatorReplayFromPayload(this.replayPayload);
+    if (spectatorReplay !== null) {
+      this.spectatorReplay = spectatorReplay;
+      this.spectatorMap = spectatorMapFromReplay(spectatorReplay);
+      if (this.snapshots.length === 0) {
+        this.snapshots.push(...spectatorSnapshotsFromReplay(spectatorReplay));
+      }
+    }
+    this.broadcastReplay();
+    this.broadcastGlobal(
+      this.statusSnapshot("replay-ready", this.latestSnapshot()),
+    );
   }
 
   sendFinal(): void {
@@ -239,25 +311,31 @@ class CoworldProtocolServer {
     });
   }
 
-  private handleHttp(
+  private async handleHttp(
     request: http.IncomingMessage,
     response: http.ServerResponse,
-  ): void {
+  ): Promise<void> {
     const url = new URL(request.url ?? "/", "http://127.0.0.1");
     if (url.pathname === "/healthz") {
       writeJson(response, 200, { ok: true });
       return;
     }
-    if (url.pathname === "/client/player") {
-      writeHtml(response, "Proxy War Coworld Player", "Player websocket client placeholder.");
+    if (url.pathname === "/coworld/replay-info") {
+      writeJson(response, 200, this.replayInfo());
       return;
     }
-    if (url.pathname === "/client/global") {
-      writeHtml(response, "Proxy War Coworld Global", "Global viewer placeholder.");
+    if (await this.writeRunArtifact(url, response)) {
       return;
     }
-    if (url.pathname === "/client/replay") {
-      writeHtml(response, "Proxy War Coworld Replay", "Replay viewer placeholder.");
+    if (
+      url.pathname === "/client/global" ||
+      url.pathname === "/client/replay" ||
+      url.pathname === "/client/player"
+    ) {
+      await writeProxyWarAppShell(response);
+      return;
+    }
+    if (await writeProxyWarStaticAsset(url, response)) {
       return;
     }
     writeJson(response, 404, { error: "not found" });
@@ -265,7 +343,9 @@ class CoworldProtocolServer {
 
   private handlePlayerUpgrade(
     request: http.IncomingMessage,
-    socket: Parameters<InstanceType<typeof WebSocketServer>["handleUpgrade"]>[1],
+    socket: Parameters<
+      InstanceType<typeof WebSocketServer>["handleUpgrade"]
+    >[1],
     head: Buffer,
     url: URL,
   ): void {
@@ -294,7 +374,7 @@ class CoworldProtocolServer {
         JSON.stringify({
           type: "hello",
           slot,
-          protocol: "proxywar-coworld-poc-v1",
+          protocol: "proxywar-coworld-v1",
         }),
       );
       this.broadcastGlobal(this.statusSnapshot(`player-${slot}-connected`));
@@ -336,12 +416,17 @@ class CoworldProtocolServer {
         externalRawOutput: JSON.stringify(message).slice(0, 1000),
         offeredLegalActionCount: pending.legalActions.length,
         confidence:
-          typeof message.confidence === "number" ? message.confidence : undefined,
+          typeof message.confidence === "number"
+            ? message.confidence
+            : undefined,
       },
     });
   }
 
-  private statusSnapshot(event: string): Record<string, unknown> {
+  private statusSnapshot(
+    event: string,
+    latestSnapshot: unknown = null,
+  ): Record<string, unknown> {
     return {
       type: "state",
       event,
@@ -349,6 +434,10 @@ class CoworldProtocolServer {
       requiredPlayers: this.config.tokens.length,
       snapshotCount: this.snapshots.length,
       replayReady: this.replayPayload !== null,
+      config: publicCoworldConfig(this.config),
+      map: this.spectatorMap,
+      snapshot: latestSnapshot,
+      spectatorReplay: this.spectatorReplay,
     };
   }
 
@@ -358,6 +447,104 @@ class CoworldProtocolServer {
         websocket.send(JSON.stringify(snapshot));
       }
     }
+  }
+
+  private broadcastReplay(): void {
+    for (const websocket of this.replaySockets) {
+      if (websocket.readyState === WebSocket.OPEN) {
+        websocket.send(
+          JSON.stringify({
+            type: "replay",
+            replay: this.replayPayload,
+          }),
+        );
+      }
+    }
+  }
+
+  private latestSnapshot(): unknown {
+    return this.snapshots[this.snapshots.length - 1] ?? null;
+  }
+
+  private replayInfo(): Record<string, unknown> {
+    const runID = this.replayRunID();
+    const artifactDirectory =
+      runID === null ? null : this.proxyWarArtifactDirectory(runID);
+    return {
+      ready: runID !== null && artifactDirectory !== null,
+      runID,
+      artifactBasePath:
+        runID === null ? null : `/ai-league-runs/${encodeURIComponent(runID)}`,
+      snapshotCount: this.snapshots.length,
+      replayReady: this.replayPayload !== null,
+    };
+  }
+
+  private replayRunID(): string | null {
+    if (this.replayPayload === null || typeof this.replayPayload !== "object") {
+      return null;
+    }
+    const runID = (this.replayPayload as Record<string, unknown>).runID;
+    return typeof runID === "string" && isSafeProxyWarArtifactSegment(runID)
+      ? runID
+      : null;
+  }
+
+  private proxyWarArtifactDirectory(runID: string): string | null {
+    if (this.replayPayload === null || typeof this.replayPayload !== "object") {
+      return null;
+    }
+    const artifacts = (this.replayPayload as Record<string, unknown>)
+      .proxyWarArtifacts;
+    if (artifacts === null || typeof artifacts !== "object") {
+      return null;
+    }
+    const directory = (artifacts as Record<string, unknown>).directory;
+    if (typeof directory !== "string" || path.basename(directory) !== runID) {
+      return null;
+    }
+    return directory;
+  }
+
+  private async writeRunArtifact(
+    url: URL,
+    response: http.ServerResponse,
+  ): Promise<boolean> {
+    const match = url.pathname.match(/^\/ai-league-runs\/([^/]+)\/([^/]+)$/);
+    if (match === null) {
+      return false;
+    }
+    const runID = decodeURIComponent(match[1]);
+    const artifact = decodeURIComponent(match[2]);
+    const directory = this.proxyWarArtifactDirectory(runID);
+    if (
+      directory === null ||
+      !isSafeProxyWarArtifactSegment(runID) ||
+      !proxyWarPublicRunArtifacts.has(artifact)
+    ) {
+      writeText(response, 404, "artifact not available");
+      return true;
+    }
+    const filePath = path.resolve(directory, artifact);
+    if (isInsideRoot(filePath, directory) && fsSync.existsSync(filePath)) {
+      await writeFile(response, filePath);
+      return true;
+    }
+    const inlineArtifacts = (this.replayPayload as Record<string, unknown>)
+      .inlineRunArtifacts;
+    if (inlineArtifacts !== null && typeof inlineArtifacts === "object") {
+      const body = (inlineArtifacts as Record<string, unknown>)[artifact];
+      if (typeof body === "string") {
+        response.writeHead(200, {
+          "content-type": mimeType(artifact),
+          "cache-control": "no-store",
+        });
+        response.end(body);
+        return true;
+      }
+    }
+    writeText(response, 404, "artifact not found");
+    return true;
   }
 }
 
@@ -376,7 +563,9 @@ class StaticMapLoader {
       map4xBin: () => fs.readFile(path.join(mapDir, "map4x.bin")),
       map16xBin: () => fs.readFile(path.join(mapDir, "map16x.bin")),
       manifest: async () =>
-        JSON.parse(await fs.readFile(path.join(mapDir, "manifest.json"), "utf8")),
+        JSON.parse(
+          await fs.readFile(path.join(mapDir, "manifest.json"), "utf8"),
+        ),
       webpPath: path.join(mapDir, "thumbnail.webp"),
     };
     this.maps.set(map, mapData);
@@ -446,8 +635,8 @@ async function runStandaloneNoDockerProof(): Promise<void> {
     server.sendFinal();
     await waitForPlayersToExit(playerProcesses);
     await fs.writeFile(
-      path.join(workspace, "poc-report.md"),
-      pocReport({
+      path.join(workspace, "coworld-report.md"),
+      coworldReport({
         workspace,
         results: result.results,
         proxyWarArtifactDir: result.proxyWarArtifactDir,
@@ -500,7 +689,7 @@ async function runCoworldGameContainer(): Promise<void> {
       "application/json",
     );
     server.sendFinal();
-    await sleep(200);
+    await sleep(Number(process.env.COWORLD_POSTGAME_SERVER_MS ?? 1500));
     console.log(
       JSON.stringify(
         {
@@ -519,7 +708,9 @@ async function runCoworldGameContainer(): Promise<void> {
 }
 
 async function runCoworldReplayContainer(): Promise<void> {
-  const replayPayload = await readReplayPayload(requiredEnv("COGAME_LOAD_REPLAY_URI"));
+  const replayPayload = await readReplayPayload(
+    requiredEnv("COGAME_LOAD_REPLAY_URI"),
+  );
   const config =
     replayConfig(replayPayload) ??
     ({
@@ -607,14 +798,21 @@ async function runProxyWarEpisode(
     stride: 2,
   });
   const profiles = ["aggressive", "defensive", "diplomatic", "opportunistic"];
-  const specs = config.players.map((player, index) => ({
-    username: player.name.slice(0, modules.proxyWarGameUsernameMaxLength ?? 27),
+  const usernames = proxyWarUsernames(
+    config.players,
+    modules.proxyWarGameUsernameMaxLength ?? 27,
+  );
+  const specs = config.players.map((_player, index) => ({
+    username: usernames[index],
     profile: profiles[index % profiles.length],
     persistentID: randomUUID(),
   }));
   const participants = modules.createAgentParticipants(specs, log, {
     brainFactory: (spec: unknown, index: number) =>
-      protocolServer.brainForSlot(index, modules.buildExternalAgentRequestPayload),
+      protocolServer.brainForSlot(
+        index,
+        modules.buildExternalAgentRequestPayload,
+      ),
   });
   const roster = agentRunRoster(participants);
   const spectatorSnapshots: unknown[] = [];
@@ -645,7 +843,7 @@ async function runProxyWarEpisode(
       onSnapshot: (snapshot: {
         label: string;
         turnNumber: number;
-        gameState: unknown;
+        gameState: any;
         records: unknown[];
       }) => {
         const spectatorSnapshot = modules.buildAgentSpectatorSnapshot({
@@ -653,7 +851,14 @@ async function runProxyWarEpisode(
           roster,
         });
         spectatorSnapshots.push(spectatorSnapshot);
-        protocolServer.recordSnapshot(spectatorSnapshot);
+        protocolServer.recordSnapshot(spectatorSnapshot, {
+          width: snapshot.gameState.width(),
+          height: snapshot.gameState.height(),
+          gameMap: String(snapshot.gameState.config().gameConfig().gameMap),
+          gameMapSize: String(
+            snapshot.gameState.config().gameConfig().gameMapSize,
+          ),
+        });
       },
       log,
     });
@@ -668,19 +873,19 @@ async function runProxyWarEpisode(
       startedAt,
       completedAt,
     });
-    const runID = `coworld-poc-${new Date()
+    const runID = `coworld-${new Date()
       .toISOString()
       .replace(/[:.]/g, "-")}-${randomUUID().slice(0, 8)}`;
     const runNote = process.env.COGAME_RESULTS_URI
-      ? "Coworld container POC harness."
-      : "Local no-Docker Coworld-shaped POC harness.";
+      ? "Coworld container harness."
+      : "Local no-Docker Coworld-shaped harness.";
     const certificationNote = process.env.COGAME_RESULTS_URI
       ? "This episode ran through Coworld's game/player container env contract."
       : "Official Coworld certification is not part of this no-Docker command.";
     const spectatorReplay = modules.buildAgentSpectatorReplay({
       runID,
       matchID: game.id,
-      scenario: "coworld-poc",
+      scenario: "coworld",
       brainMode: "external-http",
       runnerMode: "step-locked",
       finalGameState: stepResult.finalGameState,
@@ -691,7 +896,7 @@ async function runProxyWarEpisode(
     const artifacts = await modules.writeAgentLeagueRunArtifacts({
       runID,
       matchID: game.id,
-      scenario: "coworld-poc",
+      scenario: "coworld",
       brainMode: "external-http",
       runnerMode: "step-locked",
       runnerConfig: {
@@ -719,6 +924,10 @@ async function runProxyWarEpisode(
       rootDir: path.join(workspace, "proxywar-runs"),
       notes: [runNote, certificationNote],
     });
+    const compactSpectatorReplay =
+      artifacts.spectatorReplayPath === null
+        ? spectatorReplay
+        : JSON.parse(await fs.readFile(artifacts.spectatorReplayPath, "utf8"));
     const results = coworldResults({
       config,
       finalState,
@@ -731,10 +940,23 @@ async function runProxyWarEpisode(
         replayKind: "proxywar-coworld-local-poc",
         runID,
         matchID: game.id,
-        config,
+        config: publicCoworldConfig(config),
         results,
         finalState,
         proxyWarArtifacts: artifacts,
+        inlineRunArtifacts: {
+          "game-record.json": JSON.stringify(gameRecord),
+          "decisions.jsonl": await fs.readFile(artifacts.decisionsPath, "utf8"),
+          "match-summary.json": await fs.readFile(
+            artifacts.summaryPath,
+            "utf8",
+          ),
+          "spectator-telemetry.json": await fs.readFile(
+            artifacts.spectatorTelemetryPath,
+            "utf8",
+          ),
+        },
+        spectatorReplay: compactSpectatorReplay,
         spectatorSnapshotCount: spectatorSnapshots.length,
       },
       proxyWarArtifactDir: artifacts.directory,
@@ -794,15 +1016,19 @@ function startPlayers(
   protocolServer: CoworldProtocolServer,
 ): ChildProcess[] {
   return config.tokens.map((_token, slot) =>
-    spawn(process.execPath, [path.join(localRoot, "src", "starter-player.mjs")], {
-      cwd: localRoot,
-      env: {
-        ...process.env,
-        PROXYWAR_REPO: proxyWarRepo,
-        COWORLD_PLAYER_WS_URL: protocolServer.playerUrl(slot),
+    spawn(
+      process.execPath,
+      [path.join(localRoot, "src", "starter-player.mjs")],
+      {
+        cwd: localRoot,
+        env: {
+          ...process.env,
+          PROXYWAR_REPO: proxyWarRepo,
+          COWORLD_PLAYER_WS_URL: protocolServer.playerUrl(slot),
+        },
+        stdio: ["ignore", "pipe", "pipe"],
       },
-      stdio: ["ignore", "pipe", "pipe"],
-    }).on("error", (error) => {
+    ).on("error", (error) => {
       throw error;
     }),
   );
@@ -824,7 +1050,9 @@ async function waitForPlayersToExit(children: ChildProcess[]): Promise<void> {
             if (code === 0 || code === null) {
               resolve();
             } else {
-              reject(new Error(`player ${child.pid} exited ${code}: ${stderr}`));
+              reject(
+                new Error(`player ${child.pid} exited ${code}: ${stderr}`),
+              );
             }
           });
         }),
@@ -832,32 +1060,77 @@ async function waitForPlayersToExit(children: ChildProcess[]): Promise<void> {
   );
 }
 
-async function runRouteChecks(port: number, config: CoworldConfig): Promise<void> {
+async function runRouteChecks(
+  port: number,
+  config: CoworldConfig,
+): Promise<void> {
   await requireHttpOk(`http://127.0.0.1:${port}/healthz`);
-  await requireHttpOk(`http://127.0.0.1:${port}/client/global`);
-  await requireHttpOk(
-    `http://127.0.0.1:${port}/client/player?slot=0&token=${encodeURIComponent(
-      config.tokens[0],
-    )}`,
+  const globalClientUrl = `http://127.0.0.1:${port}/client/global`;
+  await assertCoworldAppShellAssets(
+    await requireHttpOk(globalClientUrl),
+    "/client/global",
+    globalClientUrl,
   );
-  await requireBadPlayerRejected(`ws://127.0.0.1:${port}/player?slot=0&token=bad`);
+  const playerClientUrl = `http://127.0.0.1:${port}/client/player?slot=0&token=${encodeURIComponent(
+    config.tokens[0],
+  )}`;
+  await assertCoworldAppShellAssets(
+    await requireHttpOk(playerClientUrl),
+    "/client/player",
+    playerClientUrl,
+  );
+  await requireBadPlayerRejected(
+    `ws://127.0.0.1:${port}/player?slot=0&token=bad`,
+  );
   await requireWebSocketMessage(`ws://127.0.0.1:${port}/global`);
 }
 
 async function runReplayChecks(port: number): Promise<void> {
-  await requireHttpOk(`http://127.0.0.1:${port}/client/replay`);
-  const message = await requireWebSocketMessage(`ws://127.0.0.1:${port}/replay`);
+  const replayClientUrl = `http://127.0.0.1:${port}/client/replay`;
+  await assertCoworldAppShellAssets(
+    await requireHttpOk(replayClientUrl),
+    "/client/replay",
+    replayClientUrl,
+  );
+  const message = await requireWebSocketMessage(
+    `ws://127.0.0.1:${port}/replay`,
+  );
   const parsed = JSON.parse(message);
   if (parsed.type !== "replay" || parsed.replay === null) {
     throw new Error("/replay did not return a replay payload");
   }
 }
 
-async function requireHttpOk(url: string): Promise<void> {
+async function assertCoworldAppShellAssets(
+  html: string,
+  route: string,
+  pageUrl: string,
+): Promise<void> {
+  if (!html.includes("../assets/") || !html.includes("../assets/_assets/")) {
+    throw new Error(`${route} app shell did not use Coworld-relative assets`);
+  }
+  if (
+    html.includes('src="/assets/') ||
+    html.includes('href="/assets/') ||
+    html.includes('src="/_assets/') ||
+    html.includes('href="/_assets/')
+  ) {
+    throw new Error(`${route} app shell still contains root-absolute assets`);
+  }
+  const assetRefs = [
+    ...html.matchAll(/(?:src|href)="([^"]*(?:assets|_assets)[^"]*)"/g),
+  ].map((match) => match[1]);
+  for (const assetRef of new Set(assetRefs)) {
+    await requireHttpOk(new URL(assetRef, pageUrl).toString());
+  }
+}
+
+async function requireHttpOk(url: string): Promise<string> {
   const response = await fetch(url);
   if (!response.ok) {
     throw new Error(`${url} returned HTTP ${response.status}`);
   }
+  return await response.text();
 }
 
 async function requireBadPlayerRejected(url: string): Promise<void> {
@@ -893,11 +1166,10 @@ async function requireWebSocketMessage(url: string): Promise<string> {
       websocket.close();
       reject(new Error(`Timed out waiting for websocket message: ${url}`));
     }, 5000);
-    websocket.on("message", (data) => {
+    websocket.on("message", (message) => {
       clearTimeout(timeout);
-      const text = String(data);
       websocket.close();
-      resolve(text);
+      resolve(message.toString());
     });
     websocket.on("error", (error) => {
       clearTimeout(timeout);
@@ -912,7 +1184,10 @@ async function loadConfig(): Promise<CoworldConfig> {
     return JSON.parse(raw);
   }
   const manifest = JSON.parse(
-    await fs.readFile(path.join(localRoot, "coworld", "coworld_manifest.json"), "utf8"),
+    await fs.readFile(
+      path.join(localRoot, "coworld", "coworld_manifest.json"),
+      "utf8",
+    ),
   );
   return {
     ...manifest.certification.game_config,
@@ -970,6 +1245,78 @@ async function readReplayPayload(uri: string): Promise<unknown> {
   return JSON.parse(inflated.toString("utf8"));
 }
 
+function publicCoworldConfig(config: CoworldConfig): Record<string, unknown> {
+  return {
+    players: config.players,
+    max_decision_steps: config.max_decision_steps,
+    turns_per_decision_step: config.turns_per_decision_step,
+    max_decision_ms: config.max_decision_ms,
+    map: config.map,
+    map_size: config.map_size,
+    difficulty: config.difficulty,
+    replay_tail_turns: config.replay_tail_turns,
+    player_connect_timeout_seconds: config.player_connect_timeout_seconds,
+    player_count: config.tokens.length,
+  };
+}
+
+function publicReplayPayload(payload: unknown): unknown {
+  if (payload === null || typeof payload !== "object") {
+    return payload;
+  }
+  const record = payload as Record<string, unknown>;
+  if (record.config === null || typeof record.config !== "object") {
+    return payload;
+  }
+  const config = record.config as Record<string, unknown>;
+  const { tokens, ...publicConfig } = config;
+  const players = Array.isArray(config.players) ? config.players : [];
+  return {
+    ...record,
+    config: {
+      ...publicConfig,
+      player_count:
+        typeof config.player_count === "number"
+          ? config.player_count
+          : Array.isArray(tokens)
+            ? tokens.length
+            : players.length,
+    },
+  };
+}
+
+function spectatorReplayFromPayload(
+  payload: unknown,
+): Record<string, unknown> | null {
+  if (payload === null || typeof payload !== "object") {
+    return null;
+  }
+  const replay = (payload as Record<string, unknown>).spectatorReplay;
+  if (replay === null || typeof replay !== "object" || Array.isArray(replay)) {
+    return null;
+  }
+  return replay as Record<string, unknown>;
+}
+
+function spectatorMapFromReplay(
+  replay: Record<string, unknown> | null,
+): Record<string, unknown> | null {
+  if (
+    replay === null ||
+    replay.map === null ||
+    typeof replay.map !== "object"
+  ) {
+    return null;
+  }
+  return replay.map as Record<string, unknown>;
+}
+
+function spectatorSnapshotsFromReplay(
+  replay: Record<string, unknown>,
+): unknown[] {
+  return Array.isArray(replay.snapshots) ? replay.snapshots : [];
+}
+
 function replayConfig(payload: unknown): CoworldConfig | null {
   if (
     payload !== null &&
@@ -978,7 +1325,32 @@ function replayConfig(payload: unknown): CoworldConfig | null {
     (payload as { config?: unknown }).config !== null &&
     typeof (payload as { config?: unknown }).config === "object"
   ) {
-    return (payload as { config: CoworldConfig }).config;
+    const config = (payload as { config: Record<string, unknown> }).config;
+    const players = Array.isArray(config.players)
+      ? (config.players as Array<{ name: string }>)
+      : [];
+    const playerCount =
+      typeof config.player_count === "number"
+        ? config.player_count
+        : players.length;
+    return {
+      tokens: Array.from({ length: playerCount }, () => ""),
+      players,
+      max_decision_steps: Number(config.max_decision_steps ?? 1),
+      turns_per_decision_step: Number(config.turns_per_decision_step ?? 1),
+      max_decision_ms: Number(config.max_decision_ms ?? 1000),
+      map: String(config.map ?? "Pangaea"),
+      map_size: String(config.map_size ?? "Compact"),
+      difficulty: String(config.difficulty ?? "Easy"),
+      replay_tail_turns:
+        typeof config.replay_tail_turns === "number"
+          ? config.replay_tail_turns
+          : undefined,
+      player_connect_timeout_seconds:
+        typeof config.player_connect_timeout_seconds === "number"
+          ? config.player_connect_timeout_seconds
+          : 1,
+    };
   }
   return null;
 }
@@ -1044,8 +1416,9 @@ function coworldResults(input: {
     turn_count: input.finalState.turnCount,
     tick: input.finalState.tick,
     decision_count: input.records.length,
-    accepted_decision_count: input.records.filter((record) => record.result.accepted)
-      .length,
+    accepted_decision_count: input.records.filter(
+      (record) => record.result.accepted,
+    ).length,
     fallback_count: input.records.filter(
       (record) => record.decisionMetadata?.fallbackUsed === true,
     ).length,
@@ -1112,16 +1485,136 @@ function agentRunRoster(
   }));
 }
 
-function enumValue(values: Record<string, unknown>, requested: string): unknown {
+function enumValue(
+  values: Record<string, unknown>,
+  requested: string,
+): unknown {
   const byKey = values[requested];
   if (byKey !== undefined) {
     return byKey;
   }
-  const match = Object.values(values).find((value) => String(value) === requested);
+  const match = Object.values(values).find(
+    (value) => String(value) === requested,
+  );
   if (match === undefined) {
     throw new Error(`${requested} is not a valid enum value`);
   }
   return match;
+}
+
+async function writeProxyWarAppShell(
+  response: http.ServerResponse,
+): Promise<void> {
+  const html = await proxyWarAppShellHtml();
+  response.writeHead(200, {
+    "content-type": "text/html; charset=utf-8",
+    "cache-control": "no-store",
+  });
+  response.end(html);
+}
+
+async function proxyWarAppShellHtml(): Promise<string> {
+  if (proxyWarAppShellPromise === null) {
+    proxyWarAppShellPromise = (async () => {
+      const { renderHtmlContent } = await importProxyWar(
+        "src/server/RenderHtml.ts",
+      );
+      const staticHtmlPath = path.join(proxyWarStaticRoot, "index.html");
+      const htmlPath = fsSync.existsSync(staticHtmlPath)
+        ? staticHtmlPath
+        : path.join(proxyWarRepo, "index.html");
+      return await renderHtmlContent(htmlPath, {
+        htmlAssetBase: "../assets",
+        viteAssetBase: "..",
+      });
+    })();
+  }
+  return await proxyWarAppShellPromise;
+}
+
+async function writeProxyWarStaticAsset(
+  url: URL,
+  response: http.ServerResponse,
+): Promise<boolean> {
+  const requestPath = decodeURIComponent(url.pathname);
+  if (!isProxyWarStaticAssetPath(requestPath)) {
+    return false;
+  }
+  const staticRequestPath = requestPath.startsWith("/assets/_assets/")
+    ? requestPath.slice("/assets".length)
+    : requestPath;
+  const filePath = path.resolve(proxyWarStaticRoot, staticRequestPath.slice(1));
+  if (
+    !isInsideRoot(filePath, proxyWarStaticRoot) ||
+    !fsSync.existsSync(filePath) ||
+    !fsSync.statSync(filePath).isFile()
+  ) {
+    return false;
+  }
+  await writeFile(response, filePath);
+  return true;
+}
+
+function isProxyWarStaticAssetPath(requestPath: string): boolean {
+  return (
+    requestPath.startsWith("/assets/") ||
+    requestPath.startsWith("/_assets/") ||
+    requestPath.startsWith("/images/") ||
+    requestPath.startsWith("/sounds/") ||
+    requestPath.startsWith("/maps/") ||
+    requestPath.startsWith("/lang/") ||
+    requestPath.startsWith("/flags/") ||
+    requestPath.startsWith("/icons/") ||
+    requestPath.startsWith("/sprites/") ||
+    requestPath.startsWith("/fonts/") ||
+    requestPath === "/manifest.json" ||
+    requestPath === "/favicon.ico" ||
+    requestPath === "/asset-manifest.json"
+  );
+}
+
+async function writeFile(
+  response: http.ServerResponse,
+  filePath: string,
+): Promise<void> {
+  const body = await fs.readFile(filePath);
+  response.writeHead(200, {
+    "content-type": mimeType(filePath),
+    "cache-control": "public, max-age=31536000, immutable",
+  });
+  response.end(body);
+}
+
+function mimeType(filePath: string): string {
+  switch (path.extname(filePath)) {
+    case ".css":
+      return "text/css; charset=utf-8";
+    case ".html":
+      return "text/html; charset=utf-8";
+    case ".js":
+    case ".mjs":
+      return "text/javascript; charset=utf-8";
+    case ".json":
+    case ".webmanifest":
+      return "application/json; charset=utf-8";
+    case ".jsonl":
+      return "text/plain; charset=utf-8";
+    case ".png":
+      return "image/png";
+    case ".jpg":
+    case ".jpeg":
+      return "image/jpeg";
+    case ".svg":
+      return "image/svg+xml";
+    case ".webp":
+      return "image/webp";
+    case ".woff2":
+      return "font/woff2";
+    case ".wasm":
+      return "application/wasm";
+    default:
+      return "application/octet-stream";
+  }
 }
 
 function writeJson(
@@ -1133,16 +1626,30 @@ function writeJson(
   response.end(JSON.stringify(body));
 }
 
-function writeHtml(
+function writeText(
   response: http.ServerResponse,
-  title: string,
+  status: number,
   body: string,
 ): void {
-  response.writeHead(200, { "content-type": "text/html; charset=utf-8" });
-  response.end(
-    `<!doctype html><meta charset="utf-8"><title>${escapeHtml(
-      title,
-    )}</title><h1>${escapeHtml(title)}</h1><p>${escapeHtml(body)}</p>`,
+  response.writeHead(status, { "content-type": "text/plain; charset=utf-8" });
+  response.end(body);
+}
+
+function isSafeProxyWarArtifactSegment(value: string): boolean {
+  return (
+    value.length > 0 &&
+    value.length <= 180 &&
+    value !== "." &&
+    value !== ".." &&
+    value === path.basename(value) &&
+    /^[a-zA-Z0-9._:-]+$/.test(value)
+  );
+}
+
+function isInsideRoot(filePath: string, rootDir: string): boolean {
+  const relative = path.relative(path.resolve(rootDir), filePath);
+  return (
+    relative !== "" && !relative.startsWith("..") && !path.isAbsolute(relative)
   );
 }
 
@@ -1171,17 +1678,17 @@ function requiredEnv(name: string): string {
   return value;
 }
 
-function pocReport(input: {
+function coworldReport(input: {
   workspace: string;
   results: CoworldResults;
   proxyWarArtifactDir: string;
 }): string {
   return [
-    "# Proxy War Coworld Local POC Report",
+    "# Proxy War Coworld Report",
     "",
     "Status: no-Docker Coworld-shaped episode path passed.",
     "",
-    "This run proves the local adapter can drive Proxy War through a Coworld-shaped websocket player protocol and produce Coworld-style results/replay files.",
+    "This run proves the adapter can drive Proxy War through a Coworld-shaped websocket player protocol and produce Coworld-style results/replay files.",
     "",
     "It does not prove official Coworld compatibility because Docker is unavailable in this environment, so `coworld certify` could not run.",
     "",

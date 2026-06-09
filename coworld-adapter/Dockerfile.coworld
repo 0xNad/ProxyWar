@@ -6,8 +6,9 @@ ENV PROXYWAR_REPO=/app/proxywar
 
 WORKDIR /app/proxywar
 COPY proxywar/package.json proxywar/package-lock.json ./
-RUN npm ci
+RUN npm ci --ignore-scripts
 COPY proxywar/ ./
+RUN npm run build-prod
 
 WORKDIR /app/integration
 COPY integration/package.json integration/package-lock.json ./
@@ -15,6 +16,8 @@ RUN npm ci --ignore-scripts
 COPY integration/ ./
 
 WORKDIR /app/proxywar
-RUN COWORLD_PREWARM=1 PROXYWAR_REPO=/app/proxywar /app/proxywar/node_modules/.bin/tsx /app/integration/src/no-docker-coworld-episode.ts \
-  && (du -sh /tmp/tsx-* 2>/dev/null || true)
-CMD ["/app/proxywar/node_modules/.bin/tsx", "/app/integration/src/no-docker-coworld-episode.ts"]
+# Use the tsx LOADER (node --import tsx/esm), NOT the tsx CLI. The CLI spawns an
+# IPC server socket under /tmp (tsx-<n>/<n>.pipe); on a read-only root filesystem
+# (how Coworld/k8s hardens episode pods) that listen() fails with EROFS and the
+# container exits 1 before any app output. The loader needs no writable /tmp.
+CMD ["node", "--import", "tsx/esm", "/app/integration/src/no-docker-coworld-episode.ts"]

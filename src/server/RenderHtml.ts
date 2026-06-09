@@ -10,10 +10,20 @@ const APP_SHELL_CACHE_CONTROL =
 
 const appShellContentCache = new Map<string, Promise<string>>();
 
-export async function renderHtmlContent(htmlPath: string): Promise<string> {
+export type RenderHtmlOptions = {
+  htmlAssetBase?: string;
+  viteAssetBase?: string;
+};
+
+export async function renderHtmlContent(
+  htmlPath: string,
+  options: RenderHtmlOptions = {},
+): Promise<string> {
   const htmlContent = await fs.readFile(htmlPath, "utf-8");
   const assetManifest = await getRuntimeAssetManifest();
   const cdnBase = process.env.CDN_BASE ?? "";
+  const htmlAssetBase = options.htmlAssetBase ?? cdnBase;
+  const viteAssetBase = options.viteAssetBase ?? cdnBase;
   return ejs.render(htmlContent, {
     gitCommit: JSON.stringify(process.env.GIT_COMMIT ?? "undefined"),
     assetManifest: JSON.stringify(assetManifest),
@@ -22,26 +32,34 @@ export async function renderHtmlContent(htmlPath: string): Promise<string> {
     // e.g. <script src="<%- cdnBaseRaw %>/assets/index-XXX.js">. The Vite
     // build plugin inject-cdn-base-template rewrites Vite's emitted /assets/
     // refs to use this placeholder.
-    cdnBaseRaw: cdnBase,
+    cdnBaseRaw: viteAssetBase,
     gameEnv: JSON.stringify(process.env.GAME_ENV ?? "dev"),
-    manifestHref: buildAssetUrl("manifest.json", assetManifest, cdnBase),
-    faviconHref: buildAssetUrl("images/Favicon.svg", assetManifest, cdnBase),
+    manifestHref: buildAssetUrl("manifest.json", assetManifest, htmlAssetBase),
+    faviconHref: buildAssetUrl(
+      "images/Favicon.svg",
+      assetManifest,
+      htmlAssetBase,
+    ),
     gameplayScreenshotUrl: buildAssetUrl(
       "images/GameplayScreenshot.png",
       assetManifest,
-      cdnBase,
+      htmlAssetBase,
     ),
     backgroundImageUrl: buildAssetUrl(
       "images/background.webp",
       assetManifest,
-      cdnBase,
+      htmlAssetBase,
     ),
     desktopLogoImageUrl: buildAssetUrl(
       "images/OpenFront.png",
       assetManifest,
-      cdnBase,
+      htmlAssetBase,
     ),
-    mobileLogoImageUrl: buildAssetUrl("images/OF.png", assetManifest, cdnBase),
+    mobileLogoImageUrl: buildAssetUrl(
+      "images/OF.png",
+      assetManifest,
+      htmlAssetBase,
+    ),
   });
 }
 

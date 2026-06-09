@@ -1,8 +1,31 @@
-export function isAiLeagueReplayRoute(pathname = window.location.pathname): boolean {
+export function isAiLeagueReplayRoute(
+  pathname = window.location.pathname,
+): boolean {
   return (
     pathname.startsWith("/ai-league-replay/") ||
-    pathname.startsWith("/openfront-replay/")
+    pathname.startsWith("/openfront-replay/") ||
+    isCoworldReplayRoute(pathname) ||
+    isCoworldPlayerRoute(pathname)
   );
+}
+
+export function isCoworldReplayRoute(
+  pathname = window.location.pathname,
+): boolean {
+  return (
+    isCoworldRoute(pathname, "/client/global") ||
+    isCoworldRoute(pathname, "/client/replay")
+  );
+}
+
+export function isCoworldPlayerRoute(
+  pathname = window.location.pathname,
+): boolean {
+  return isCoworldRoute(pathname, "/client/player");
+}
+
+function isCoworldRoute(pathname: string, route: string): boolean {
+  return pathname === route || pathname.endsWith(`/proxy${route}`);
 }
 
 const spectatorNameByAgentName = new Map<string, string>([
