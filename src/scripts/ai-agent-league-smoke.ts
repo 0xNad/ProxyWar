@@ -765,9 +765,29 @@ function runIDFromArgs(args: string[]): string | null {
 }
 
 function disabledActionKindsFromArgs(args: string[]): LegalActionKind[] {
-  return args.includes("--disable-alliance-actions")
-    ? ["alliance_request"]
-    : [];
+  const disabled: LegalActionKind[] = [];
+  if (args.includes("--disable-alliance-actions")) {
+    disabled.push("alliance_request");
+  }
+  // FORGE experiment: --disable-social strips chat/emoji from the offered menu so
+  // the executor cannot pad moves with social filler instead of converting attacks.
+  if (args.includes("--disable-social")) {
+    disabled.push("quick_chat", "emoji");
+  }
+  // Generic escape hatch: --disable-action-kinds=quick_chat,emoji,target_player
+  const generic = args.find((arg) =>
+    arg.startsWith("--disable-action-kinds="),
+  );
+  if (generic) {
+    for (const kind of generic
+      .slice("--disable-action-kinds=".length)
+      .split(",")
+      .map((value) => value.trim())
+      .filter(Boolean)) {
+      disabled.push(kind as LegalActionKind);
+    }
+  }
+  return disabled;
 }
 
 function gameConfigForScenario(
