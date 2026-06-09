@@ -26,7 +26,7 @@ Coworld policy container
 - Passes local `coworld certify` and `coworld run-episode --verify-replay`
   against Coworld **0.1.15**.
 - Verified at 8 parallel local episodes.
-- Ready for hosted Coworld upload as `proxywar:0.0.5`.
+- Ready for hosted Coworld upload as `proxywar:0.0.6`.
 - Uses the `tsx` loader rather than the `tsx` CLI so read-only episode pods do
   not need writable `/tmp`.
 - Sanitizes Coworld policy labels into Proxy War usernames before entering the
