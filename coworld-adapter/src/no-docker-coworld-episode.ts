@@ -526,11 +526,24 @@ class CoworldProtocolServer {
       return true;
     }
     const filePath = path.resolve(directory, artifact);
-    if (!isInsideRoot(filePath, directory) || !fsSync.existsSync(filePath)) {
-      writeText(response, 404, "artifact not found");
+    if (isInsideRoot(filePath, directory) && fsSync.existsSync(filePath)) {
+      await writeFile(response, filePath);
       return true;
     }
-    await writeFile(response, filePath);
+    const inlineArtifacts = (this.replayPayload as Record<string, unknown>)
+      .inlineRunArtifacts;
+    if (inlineArtifacts !== null && typeof inlineArtifacts === "object") {
+      const body = (inlineArtifacts as Record<string, unknown>)[artifact];
+      if (typeof body === "string") {
+        response.writeHead(200, {
+          "content-type": mimeType(artifact),
+          "cache-control": "no-store",
+        });
+        response.end(body);
+        return true;
+      }
+    }
+    writeText(response, 404, "artifact not found");
     return true;
   }
 }
@@ -931,6 +944,18 @@ async function runProxyWarEpisode(
         results,
         finalState,
         proxyWarArtifacts: artifacts,
+        inlineRunArtifacts: {
+          "game-record.json": JSON.stringify(gameRecord),
+          "decisions.jsonl": await fs.readFile(artifacts.decisionsPath, "utf8"),
+          "match-summary.json": await fs.readFile(
+            artifacts.summaryPath,
+            "utf8",
+          ),
+          "spectator-telemetry.json": await fs.readFile(
+            artifacts.spectatorTelemetryPath,
+            "utf8",
+          ),
+        },
         spectatorReplay: compactSpectatorReplay,
         spectatorSnapshotCount: spectatorSnapshots.length,
       },
@@ -1572,6 +1597,8 @@ function mimeType(filePath: string): string {
     case ".json":
     case ".webmanifest":
       return "application/json; charset=utf-8";
+    case ".jsonl":
+      return "text/plain; charset=utf-8";
     case ".png":
       return "image/png";
     case ".jpg":
