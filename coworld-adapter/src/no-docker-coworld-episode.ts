@@ -1243,25 +1243,20 @@ function publicReplayPayload(payload: unknown): unknown {
   if (record.config === null || typeof record.config !== "object") {
     return payload;
   }
-  return {
-    ...record,
-    config: publicConfigRecord(record.config as Record<string, unknown>),
-  };
-}
-
-function publicConfigRecord(
-  config: Record<string, unknown>,
-): Record<string, unknown> {
+  const config = record.config as Record<string, unknown>;
   const { tokens, ...publicConfig } = config;
   const players = Array.isArray(config.players) ? config.players : [];
   return {
-    ...publicConfig,
-    player_count:
-      typeof config.player_count === "number"
-        ? config.player_count
-        : Array.isArray(tokens)
-          ? tokens.length
-          : players.length,
+    ...record,
+    config: {
+      ...publicConfig,
+      player_count:
+        typeof config.player_count === "number"
+          ? config.player_count
+          : Array.isArray(tokens)
+            ? tokens.length
+            : players.length,
+    },
   };
 }
 

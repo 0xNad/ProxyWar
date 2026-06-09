@@ -139,12 +139,13 @@ function actionButton(
   action: CoworldLegalAction,
 ): HTMLButtonElement {
   const button = document.createElement("button");
+  const riskText = action.risk?.level ? ` · ${action.risk.level} risk` : "";
   button.type = "button";
   button.className = "coworld-player-action";
   button.innerHTML = `
     <strong>${escapeHtml(action.label ?? action.id)}</strong>
     <code>${escapeHtml(action.id)}</code>
-    <span>${escapeHtml(action.kind ?? "action")}${riskLabel(action)}</span>
+    <span>${escapeHtml(action.kind ?? "action")}${riskText}</span>
   `;
   button.addEventListener("click", () => chooseAction(state, action));
   return button;
@@ -173,10 +174,6 @@ function chooseAction(
   state.request = null;
   state.actions.textContent = "";
   state.summary.textContent = "Decision sent. Waiting for the next request.";
-}
-
-function riskLabel(action: CoworldLegalAction): string {
-  return action.risk?.level ? ` · ${action.risk.level} risk` : "";
 }
 
 function setStatus(state: CoworldPlayerState, status: string): void {
