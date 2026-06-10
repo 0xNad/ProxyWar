@@ -60,7 +60,8 @@ export function isModelUnavailableError(message) {
     text.includes("not_found") ||
     text.includes("access to the model") ||
     text.includes("not authorized to invoke this model") ||
-    text.includes("model is not supported")
+    text.includes("model is not supported") ||
+    text.includes("use case details")
   );
 }
 const REGION =
@@ -106,7 +107,7 @@ function createBedrockComplete() {
           .trim();
       } catch (error) {
         lastError = error;
-        if (lockedIndex === null && isModelUnavailableError(error?.message)) {
+        if (isModelUnavailableError(error?.message)) {
           console.error(
             `bedrock model unavailable, trying next candidate: ${candidate} -> ${String(error?.message).slice(0, 160)}`,
           );

@@ -317,7 +317,8 @@ export function isModelUnavailableError(message: unknown): boolean {
     text.includes("not_found") ||
     text.includes("access to the model") ||
     text.includes("not authorized to invoke this model") ||
-    text.includes("model is not supported")
+    text.includes("model is not supported") ||
+    text.includes("use case details")
   );
 }
 
@@ -381,7 +382,7 @@ function createBedrockProvider(
         } catch (error) {
           lastError = error;
           const message = error instanceof Error ? error.message : error;
-          if (lockedIndex === null && isModelUnavailableError(message)) {
+          if (isModelUnavailableError(message)) {
             console.error(
               `keystone bedrock model unavailable, trying next: ${candidate} -> ${String(message).slice(0, 160)}`,
             );
