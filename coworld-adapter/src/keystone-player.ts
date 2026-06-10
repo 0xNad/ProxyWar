@@ -295,7 +295,7 @@ export function bedrockModelCandidates(
   return [
     ...(env.PROXYWAR_LLM_MODEL_ID ? [env.PROXYWAR_LLM_MODEL_ID] : []),
     "us.anthropic.claude-sonnet-4-6",
-    "anthropic.claude-sonnet-4-6",
+    "global.anthropic.claude-sonnet-4-6",
     "us.anthropic.claude-haiku-4-5",
     "us.anthropic.claude-sonnet-4-5-20250929-v1:0",
   ];
