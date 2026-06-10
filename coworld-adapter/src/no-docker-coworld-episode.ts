@@ -409,7 +409,14 @@ class CoworldProtocolServer {
         brain: "coworld-websocket",
         externalActionCall: true,
         parseSuccess: true,
-        fallbackUsed: false,
+        // Degradation flags come from the player on the wire — never assume
+        // health. A policy whose brain failed must show up in fallback_count
+        // and replays (the v1 bedrock seat failed silently for 60+ rounds
+        // because this was hardcoded false).
+        fallbackUsed: message.fallbackUsed === true,
+        ...(message.llmPlannerDegraded === true
+          ? { llmPlannerDegraded: true }
+          : {}),
         coworldSlot: slot,
         coworldRequestID: requestID,
         rawProviderOutputPresent: true,

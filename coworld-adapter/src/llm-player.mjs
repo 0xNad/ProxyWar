@@ -145,6 +145,7 @@ async function main() {
     }
 
     let decision;
+    let degraded = false;
     try {
       // The full starter brain: prompt, memory, anti-stall, ranking,
       // strict legal-id validation, and safe fallback all live in here.
@@ -152,10 +153,14 @@ async function main() {
     } catch (error) {
       console.error(`decide failed: ${error?.message ?? error}`);
       // Last-resort: never stall the match — pick any offered legal action.
+      // This is a DEGRADED decision and must be loud: the flags below travel
+      // on the wire so game-side artifacts record it (the v1 seat played 60+
+      // hosted rounds in this branch while replays reported 0 fallbacks).
+      degraded = true;
       const actions = message.request?.legalActions ?? [];
       decision = {
         selectedLegalActionId: actions[0]?.id,
-        reason: "transport fallback",
+        reason: `transport fallback: ${String(error?.message ?? error).slice(0, 200)}`,
         confidence: 0.3,
       };
     }
@@ -167,6 +172,7 @@ async function main() {
         selectedLegalActionId: decision.selectedLegalActionId,
         reason: decision.reason ?? "starter-agent",
         confidence: decision.confidence ?? 0.7,
+        ...(degraded ? { fallbackUsed: true, llmPlannerDegraded: true } : {}),
       }),
     );
   });
