@@ -65,6 +65,7 @@ describe("ClaudeCliLlmProvider", () => {
       "1",
       "--disallowedTools",
       DEFAULT_CLAUDE_DISALLOWED_TOOLS,
+      "--setting-sources=",
     ]);
     // No --model unless one is configured.
     expect(calls[0].args).not.toContain("--model");
@@ -86,6 +87,7 @@ describe("ClaudeCliLlmProvider", () => {
       "1",
       "--disallowedTools",
       "Bash,Read",
+      "--setting-sources=",
       "--model",
       "claude-sonnet-4-6",
     ]);

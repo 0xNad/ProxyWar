@@ -74,6 +74,31 @@ coworld upload-policy proxywar-coworld-local:latest --name proxywar-bedrock-v1 \
   --run node --run /app/integration/src/llm-player.mjs --use-bedrock
 ```
 
+## Keystone policy (in-house Commander–Executor agent)
+
+`src/keystone-player.ts` runs the in-house Commander–Executor v2 agent
+(`PlannerExecutorAgentBrain`, binding directives) as a Coworld websocket
+policy. The executor answers every `decision_request` from the current
+Strategic Directive without awaiting any LLM call; Commander refreshes run in
+the background between decisions (`DeferredAgentPlanner`), so the
+`max_decision_ms` clock is structurally satisfied. It still only ever returns
+one offered `LegalAction.id`, and the game re-validates it.
+
+Modes via `PROXYWAR_KEYSTONE_MODE`: `executor` (default — deterministic, no
+LLM), `mock` (plan-path plumbing test), `claude-cli` (local dev on the Claude
+CLI subscription), `bedrock` (hosted, `upload-policy --use-bedrock`; do not
+rely on it until the inference payer is confirmed with Softmax). It needs the
+repo at `PROXYWAR_REPO` (default `/app/proxywar`) and runs under
+`node --import tsx/esm`:
+
+```sh
+coworld upload-policy proxywar-coworld-local:latest --name proxywar-keystone \
+  --run node --run --import --run tsx/esm \
+  --run /app/integration/src/keystone-player.ts
+```
+
+(Add `--use-bedrock` for the LLM Commander once the payer question is settled.)
+
 ## Build and certify
 
 You need Docker (linux/amd64), Node 24+, and [`uv`](https://docs.astral.sh/uv/).
