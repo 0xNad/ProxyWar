@@ -39,10 +39,10 @@ const MODEL_ID_CANDIDATES = [
   ...(process.env.PROXYWAR_LLM_MODEL_ID
     ? [process.env.PROXYWAR_LLM_MODEL_ID]
     : []),
+  "us.anthropic.claude-sonnet-4-6",
   "anthropic.claude-sonnet-4-6",
-  "anthropic.claude-haiku-4-5",
+  "us.anthropic.claude-haiku-4-5",
   "us.anthropic.claude-sonnet-4-5-20250929-v1:0",
-  "anthropic.claude-sonnet-4-5-20250929-v1:0",
 ];
 const MODEL_ID = MODEL_ID_CANDIDATES[0];
 

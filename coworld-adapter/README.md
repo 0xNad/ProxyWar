@@ -44,8 +44,11 @@ Coworld policy container
   optimizer are contract-shaped, matching Coworld's reserved/runtime-pending
   status for those roles.
 - **commissioner** — empty, i.e. the Coworld platform-default commissioner.
-- **variants / certification** — one bounded two-player tournament default,
-  plus a short deterministic certification fixture.
+- **variants / certification** — `tournament-2p` (default: 25 decision steps ×
+  60 turns, ~1500-turn games, memory-validated end to end) and `ffa-4p` (the
+  first fixed-size rung of the intended open-seat FFA mode), plus a short
+  deterministic certification fixture. A 50×100 config was measured to exceed
+  game-container memory and is intentionally not shipped.
 
 ## Competitive policy (LLM)
 

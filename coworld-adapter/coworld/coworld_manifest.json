@@ -2,7 +2,7 @@
   "$schema": "https://raw.githubusercontent.com/Metta-AI/coworld/main/src/coworld/coworld_manifest_schema.json",
   "game": {
     "name": "proxywar",
-    "version": "0.0.8",
+    "version": "0.0.9",
     "description": "Hosted Proxy War Coworld adapter that preserves the LegalAction.id decision path.",
     "owner": "proxywar",
     "runnable": {
@@ -47,7 +47,9 @@
           "items": {
             "type": "object",
             "additionalProperties": false,
-            "required": ["name"],
+            "required": [
+              "name"
+            ],
             "properties": {
               "name": {
                 "type": "string",
@@ -73,15 +75,24 @@
         },
         "map": {
           "type": "string",
-          "enum": ["Pangaea", "Asia"]
+          "enum": [
+            "Pangaea",
+            "Asia"
+          ]
         },
         "map_size": {
           "type": "string",
-          "enum": ["Compact", "Normal"]
+          "enum": [
+            "Compact",
+            "Normal"
+          ]
         },
         "difficulty": {
           "type": "string",
-          "enum": ["Easy", "Medium"]
+          "enum": [
+            "Easy",
+            "Medium"
+          ]
         },
         "replay_tail_turns": {
           "type": "integer",
@@ -121,16 +132,25 @@
           }
         },
         "winner_slot": {
-          "type": ["integer", "null"],
+          "type": [
+            "integer",
+            "null"
+          ],
           "minimum": 0,
           "maximum": 1
         },
         "turn_count": {
-          "type": ["integer", "null"],
+          "type": [
+            "integer",
+            "null"
+          ],
           "minimum": 0
         },
         "tick": {
-          "type": ["integer", "null"],
+          "type": [
+            "integer",
+            "null"
+          ],
           "minimum": 0
         },
         "decision_count": {
@@ -152,7 +172,13 @@
           "items": {
             "type": "object",
             "additionalProperties": false,
-            "required": ["slot", "name", "score", "tiles_owned", "is_alive"],
+            "required": [
+              "slot",
+              "name",
+              "score",
+              "tiles_owned",
+              "is_alive"
+            ],
             "properties": {
               "slot": {
                 "type": "integer",
@@ -166,11 +192,17 @@
                 "type": "number"
               },
               "tiles_owned": {
-                "type": ["integer", "null"],
+                "type": [
+                  "integer",
+                  "null"
+                ],
                 "minimum": 0
               },
               "is_alive": {
-                "type": ["boolean", "null"]
+                "type": [
+                  "boolean",
+                  "null"
+                ]
               }
             }
           }
@@ -200,7 +232,10 @@
       "name": "Proxy War Starter Websocket Player",
       "type": "player",
       "image": "proxywar-coworld-local:latest",
-      "run": ["node", "/app/integration/src/starter-player.mjs"],
+      "run": [
+        "node",
+        "/app/integration/src/starter-player.mjs"
+      ],
       "description": "Minimal websocket player that chooses one offered LegalAction.id."
     }
   ],
@@ -210,7 +245,10 @@
       "name": "Proxy War Summary Reporter",
       "type": "reporter",
       "image": "proxywar-coworld-local:latest",
-      "run": ["node", "/app/integration/src/proxywar-summary-reporter.mjs"],
+      "run": [
+        "node",
+        "/app/integration/src/proxywar-summary-reporter.mjs"
+      ],
       "description": "Consumes a Coworld episode bundle and writes a report zip with Markdown and machine-readable summary outputs."
     }
   ],
@@ -221,7 +259,10 @@
       "name": "Proxy War Episode Grader",
       "type": "grader",
       "image": "proxywar-coworld-local:latest",
-      "run": ["node", "/app/integration/src/proxywar-episode-grader.mjs"],
+      "run": [
+        "node",
+        "/app/integration/src/proxywar-episode-grader.mjs"
+      ],
       "description": "Deterministic grader for Coworld's contract-defined/runtime-pending grader role. Consumes an episode bundle and writes a 0..1 usefulness score JSON artifact."
     }
   ],
@@ -231,7 +272,10 @@
       "name": "Proxy War Policy Diagnoser",
       "type": "diagnoser",
       "image": "proxywar-coworld-local:latest",
-      "run": ["node", "/app/integration/src/proxywar-policy-diagnoser.mjs"],
+      "run": [
+        "node",
+        "/app/integration/src/proxywar-policy-diagnoser.mjs"
+      ],
       "description": "Diagnoser for Coworld's reserved/tentative diagnoser contract. Consumes an episode bundle and target policy URI and writes a diagnosis zip."
     }
   ],
@@ -241,7 +285,10 @@
       "name": "Proxy War Optimizer Plan",
       "type": "optimizer",
       "image": "proxywar-coworld-local:latest",
-      "run": ["node", "/app/integration/src/proxywar-optimizer-plan.mjs"],
+      "run": [
+        "node",
+        "/app/integration/src/proxywar-optimizer-plan.mjs"
+      ],
       "description": "Optimizer-plan writer for Coworld's reserved/tentative optimizer role. Writes an advisory policy-iteration plan from report and diagnosis inputs."
     }
   ],
@@ -249,7 +296,7 @@
     {
       "id": "tournament-2p",
       "name": "Tournament 2P",
-      "description": "Default two-policy FFA tournament episode with a bounded but meaningful decision horizon.",
+      "description": "Default two-policy tournament episode: 50 decision steps x 100 turns (~5000+ turn games, ~50 decisions per policy). Hosted-validated 2026-06-10: a full 5301-turn episode completed in ~15 minutes on the platform. (Local amd64-emulated runs of this config can exhaust Docker memory - use a reduced-step episode request for local smoke.)",
       "game_config": {
         "players": [
           {

@@ -223,7 +223,12 @@ describe("Coworld keystone player", () => {
   });
 
   it("bedrock model autodetect: env pin first, unavailable-errors classified", () => {
-    expect(bedrockModelCandidates({})[0]).toBe("anthropic.claude-sonnet-4-6");
+    // us. inference-profile id first — the hosted account rejects bare ids
+    // with "on-demand throughput isn't supported" (verified from the v2
+    // qualifier 2026-06-10).
+    expect(bedrockModelCandidates({})[0]).toBe(
+      "us.anthropic.claude-sonnet-4-6",
+    );
     expect(
       bedrockModelCandidates({ PROXYWAR_LLM_MODEL_ID: "my.custom-id" })[0],
     ).toBe("my.custom-id");
