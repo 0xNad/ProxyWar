@@ -25,7 +25,10 @@ export type AgentRuntimeMode =
   | "local-policy-baseline"
   | "mock-policy-planner"
   | "llm-policy-planner"
-  | "llm-action-selector";
+  | "llm-action-selector"
+  /** Labeled deterministic autopilot that plays out a capped endgame; decisions
+   * under this mode are never model play and must never be presented as such. */
+  | "autopilot-executor";
 
 export type AgentGamePhase =
   | "lobby"

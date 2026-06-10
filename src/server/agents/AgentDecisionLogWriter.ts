@@ -105,6 +105,10 @@ export interface WriteAgentLeagueRunArtifactsInput {
     stepsCompleted?: number | null;
     mirrorCatchupSucceeded?: boolean | null;
     onlyHoldReason?: string | null;
+    /** Labeled autopilot endgame failsafe budget (0 = disabled). */
+    autopilotEndgameSteps?: number | null;
+    /** Step at which the labeled deterministic autopilot engaged, or null. */
+    autopilotEngagedAtStep?: number | null;
     replayTailTurns?: number | null;
     agents?: number | null;
     bots?: number | null;

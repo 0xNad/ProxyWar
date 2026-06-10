@@ -18,6 +18,16 @@ export interface AgentStepLockedLeagueConfig {
   maxDecisionMs: number;
   requireWinner: boolean;
   waitForMirrorCatchup: boolean;
+  /**
+   * Labeled autopilot endgame (operator-approved failsafe, OFF by default):
+   * when > 0 and the step cap is reached without a winner, `onAutopilotEngage`
+   * fires once and the match continues for up to this many extra decision
+   * steps so the replay can complete instead of throwing away the whole run.
+   * `requireWinner` still fails loud if even autopilot produces no winner.
+   * Only takes effect when the caller provides `onAutopilotEngage` — a silent
+   * deterministic continuation with no brain switch is forbidden.
+   */
+  autopilotExtraSteps: number;
 }
 
 export interface RunAgentStepLockedLeagueOptions {
@@ -32,6 +42,12 @@ export interface RunAgentStepLockedLeagueOptions {
     gameState: Game;
     records: AgentDecisionRecord[];
   }) => void;
+  /**
+   * Swap participants onto labeled deterministic autopilot brains. Required for
+   * `autopilotExtraSteps` to take effect; the league itself only extends the
+   * step budget and records the switch point.
+   */
+  onAutopilotEngage?: (input: { step: number }) => void;
   log?: Logger;
 }
 
@@ -46,6 +62,8 @@ export interface AgentStepLockedLeagueResult {
   mirrorCatchupSucceeded: boolean;
   postSpawnNonHoldActionCount: number;
   onlyHoldReason: string | null;
+  /** Decision step index at which the labeled autopilot endgame engaged, or null. */
+  autopilotEngagedAtStep: number | null;
 }
 
 const defaultConfig: AgentStepLockedLeagueConfig = {
@@ -55,6 +73,7 @@ const defaultConfig: AgentStepLockedLeagueConfig = {
   maxDecisionMs: 120_000,
   requireWinner: false,
   waitForMirrorCatchup: true,
+  autopilotExtraSteps: 0,
 };
 
 export async function runAgentStepLockedLeague(
@@ -90,9 +109,27 @@ export async function runAgentStepLockedLeague(
 
   const postSpawnRecords: AgentDecisionRecord[] = [];
   let stepsCompleted = 0;
-  for (let step = 0; step < config.maxSteps; step++) {
+  // Autopilot only arms when the caller wires a brain switch: extending the
+  // step budget without swapping to labeled autopilot brains would be the
+  // forbidden silent deterministic continuation.
+  const autopilotExtraSteps =
+    options.onAutopilotEngage !== undefined ? config.autopilotExtraSteps : 0;
+  let autopilotEngagedAtStep: number | null = null;
+  for (let step = 0; step < config.maxSteps + autopilotExtraSteps; step++) {
     if (currentGame.getWinner() !== null) {
       break;
+    }
+    if (step >= config.maxSteps && autopilotEngagedAtStep === null) {
+      autopilotEngagedAtStep = step;
+      options.log?.warn(
+        "autopilot endgame engaged: step cap reached without a winner; switching to labeled deterministic autopilot brains",
+        {
+          step,
+          maxSteps: config.maxSteps,
+          autopilotExtraSteps,
+        },
+      );
+      options.onAutopilotEngage?.({ step });
     }
     const beforeStepGame = currentGame;
     const records = await options.league.runDecisionTurn({
@@ -121,7 +158,9 @@ export async function runAgentStepLockedLeague(
       afterGame: currentGame,
     });
     options.onSnapshot?.({
-      label: `Post-spawn cycle ${step + 1}`,
+      label: `Post-spawn cycle ${step + 1}${
+        autopilotEngagedAtStep !== null ? " (autopilot endgame)" : ""
+      }`,
       turnNumber: options.mirror.turnCount(),
       gameState: currentGame,
       records,
@@ -148,7 +187,10 @@ export async function runAgentStepLockedLeague(
 
   if (config.requireWinner && currentGame.getWinner() === null) {
     throw new Error(
-      `step-locked full match reached ${config.maxSteps} decision steps without a winner`,
+      `step-locked full match reached ${config.maxSteps + autopilotExtraSteps} decision steps without a winner` +
+        (autopilotEngagedAtStep !== null
+          ? ` (autopilot endgame engaged at step ${autopilotEngagedAtStep} and also failed to finish)`
+          : ""),
     );
   }
 
@@ -167,6 +209,7 @@ export async function runAgentStepLockedLeague(
         record.chosenActionKind !== "spawn",
     ).length,
     onlyHoldReason: onlyHoldReason(postSpawnRecords),
+    autopilotEngagedAtStep,
   };
 }
 

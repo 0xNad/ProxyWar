@@ -316,6 +316,42 @@ async function run() {
             }),
           );
         },
+        // Labeled autopilot endgame (operator-approved failsafe): swap every
+        // participant onto a deterministic planner-executor brain tagged with
+        // runtimeMode "autopilot-executor". Decisions after this point are NOT
+        // model play and artifacts must say so; silent fallback stays forbidden.
+        ...(stepLockedConfig.autopilotExtraSteps > 0
+          ? {
+              onAutopilotEngage: ({ step }: { step: number }) => {
+                log.warn(
+                  "AUTOPILOT ENDGAME ENGAGED: deterministic executor plays out the endgame; decisions from this step are NOT model play",
+                  {
+                    step,
+                    autopilotExtraSteps: stepLockedConfig.autopilotExtraSteps,
+                  },
+                );
+                for (const participant of participants) {
+                  participant.brain = new PlannerExecutorAgentBrain({
+                    profile: participant.spec.profile,
+                    planner: new MockLlmPlanner(participant.spec.profile),
+                    executor: new FrontierPolicyExecutor(
+                      participant.spec.profile,
+                      {
+                        settings: {
+                          territoryFirstNeutralLandEnabled: true,
+                          maxActionsPerDecision: 5,
+                          siloTileShareRatio: 0.14,
+                          samTileShareRatio: 0.14,
+                        },
+                      },
+                    ),
+                    planEveryDecisionSteps: 3,
+                    runtimeMode: "autopilot-executor",
+                  });
+                }
+              },
+            }
+          : {}),
         log,
       });
 
@@ -388,6 +424,8 @@ async function run() {
           stepsCompleted: stepResult.stepsCompleted,
           mirrorCatchupSucceeded: stepResult.mirrorCatchupSucceeded,
           onlyHoldReason: stepResult.onlyHoldReason,
+          autopilotEndgameSteps: stepLockedConfig.autopilotExtraSteps,
+          autopilotEngagedAtStep: stepResult.autopilotEngagedAtStep,
           replayTailTurns,
           agents: specs.length,
           bots: botCount,
@@ -696,6 +734,13 @@ function stepLockedConfigFromArgs(
     maxDecisionMs: positiveIntegerArg(args, "--max-decision-ms=", 120_000),
     requireWinner: args.includes("--require-winner"),
     waitForMirrorCatchup: !args.includes("--no-mirror-catchup"),
+    // Labeled autopilot endgame failsafe (OFF by default): extra deterministic
+    // decision steps allowed after --max-steps if no winner exists yet.
+    autopilotExtraSteps: nonNegativeIntegerArg(
+      args,
+      "--autopilot-endgame-steps=",
+      0,
+    ),
   };
 }
 

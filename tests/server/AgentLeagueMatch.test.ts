@@ -1204,6 +1204,146 @@ describe("AgentLeagueMatchRunner", () => {
       }),
     ).rejects.toThrow(/without a winner/);
   });
+
+  it("engages the labeled autopilot endgame at the step cap and completes once autopilot finds a winner", async () => {
+    const log = makeLogger();
+    let autopilotEngaged = false;
+    const activeGame = {
+      inSpawnPhase: () => false,
+      // Winner appears only after the autopilot brain switch, so the run must
+      // cross the step cap to finish.
+      getWinner: () => (autopilotEngaged ? "winner" : null),
+      ticks: () => 10,
+    } as unknown as Game;
+    const game = {
+      advanceTurnsForTesting: vi.fn(),
+    } as unknown as GameServer;
+    const mirror = {
+      ingest: vi.fn(async () => 0),
+      gameState: vi.fn(() => activeGame),
+      turnCount: vi.fn(() => 1),
+      pendingTurns: vi.fn(() => 0),
+    } as unknown as AgentLocalGameMirror;
+    const league = {
+      runOpeningTurn: vi.fn(async () => []),
+      runDecisionTurn: vi.fn(async () => []),
+    } as unknown as AgentLeagueMatchRunner;
+    const onAutopilotEngage = vi.fn(({ step }: { step: number }) => {
+      expect(step).toBe(2);
+      autopilotEngaged = true;
+    });
+
+    const result = await runAgentStepLockedLeague({
+      league,
+      game,
+      mirror,
+      messages: () => [],
+      config: {
+        turnsPerDecisionStep: 25,
+        maxSteps: 2,
+        maxSpawnAdvanceTurns: 2_000,
+        maxDecisionMs: 100,
+        requireWinner: true,
+        waitForMirrorCatchup: true,
+        autopilotExtraSteps: 3,
+      },
+      onAutopilotEngage,
+      log,
+    });
+
+    expect(onAutopilotEngage).toHaveBeenCalledTimes(1);
+    expect(result.autopilotEngagedAtStep).toBe(2);
+    expect(result.stepsCompleted).toBe(3);
+  });
+
+  it("fails loud when even the autopilot endgame finds no winner", async () => {
+    const log = makeLogger();
+    const activeGame = {
+      inSpawnPhase: () => false,
+      getWinner: () => null,
+      ticks: () => 10,
+    } as unknown as Game;
+    const game = {
+      advanceTurnsForTesting: vi.fn(),
+    } as unknown as GameServer;
+    const mirror = {
+      ingest: vi.fn(async () => 0),
+      gameState: vi.fn(() => activeGame),
+      turnCount: vi.fn(() => 1),
+      pendingTurns: vi.fn(() => 0),
+    } as unknown as AgentLocalGameMirror;
+    const league = {
+      runOpeningTurn: vi.fn(async () => []),
+      runDecisionTurn: vi.fn(async () => []),
+    } as unknown as AgentLeagueMatchRunner;
+    const onAutopilotEngage = vi.fn();
+
+    await expect(
+      runAgentStepLockedLeague({
+        league,
+        game,
+        mirror,
+        messages: () => [],
+        config: {
+          turnsPerDecisionStep: 25,
+          maxSteps: 1,
+          maxSpawnAdvanceTurns: 2_000,
+          maxDecisionMs: 100,
+          requireWinner: true,
+          waitForMirrorCatchup: true,
+          autopilotExtraSteps: 2,
+        },
+        onAutopilotEngage,
+        log,
+      }),
+    ).rejects.toThrow(/autopilot endgame engaged at step 1 and also failed/);
+    expect(onAutopilotEngage).toHaveBeenCalledTimes(1);
+  });
+
+  it("never arms autopilot extra steps without an onAutopilotEngage brain switch", async () => {
+    const log = makeLogger();
+    const activeGame = {
+      inSpawnPhase: () => false,
+      getWinner: () => null,
+      ticks: () => 10,
+    } as unknown as Game;
+    const game = {
+      advanceTurnsForTesting: vi.fn(),
+    } as unknown as GameServer;
+    const mirror = {
+      ingest: vi.fn(async () => 0),
+      gameState: vi.fn(() => activeGame),
+      turnCount: vi.fn(() => 1),
+      pendingTurns: vi.fn(() => 0),
+    } as unknown as AgentLocalGameMirror;
+    const runDecisionTurn = vi.fn(async () => []);
+    const league = {
+      runOpeningTurn: vi.fn(async () => []),
+      runDecisionTurn,
+    } as unknown as AgentLeagueMatchRunner;
+
+    await expect(
+      runAgentStepLockedLeague({
+        league,
+        game,
+        mirror,
+        messages: () => [],
+        config: {
+          turnsPerDecisionStep: 25,
+          maxSteps: 1,
+          maxSpawnAdvanceTurns: 2_000,
+          maxDecisionMs: 100,
+          requireWinner: true,
+          waitForMirrorCatchup: true,
+          // No onAutopilotEngage callback: the extra budget must stay inert so
+          // a silent deterministic continuation is impossible.
+          autopilotExtraSteps: 5,
+        },
+        log,
+      }),
+    ).rejects.toThrow(/reached 1 decision steps without a winner/);
+    expect(runDecisionTurn).toHaveBeenCalledTimes(1);
+  });
 });
 
 function spawnIntent(record: { intent: AgentLeagueMatchIntent }) {
