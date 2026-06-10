@@ -16,21 +16,22 @@
 // selectedLegalActionId per decision, so executor cascade batches
 // (AgentDecision.actionIDs) degrade to their primary action here.
 //
-// Modes (PROXYWAR_KEYSTONE_MODE):
-//   executor   (default) deterministic FrontierPolicyExecutor + rule planner.
-//              No LLM. Safe seat-filler — NOT "the agent" in the operator's
-//              sense (agent = LLM brain).
+// Modes (PROXYWAR_KEYSTONE_MODE; DEFAULT = the LLM Commander — bedrock when
+// USE_BEDROCK=true, otherwise claude-cli; "the agent" IS the LLM brain):
+//   claude-cli local default — Claude CLI subscription via AI_LEAGUE_CLAUDE_*.
+//              Fails loud if the CLI is missing/logged out (no silent rule bot).
+//   bedrock    hosted default under --use-bedrock pods (USE_BEDROCK=true) —
+//              Claude on Bedrock, inference on Softmax's service account
+//              (payer confirmed 2026-06-10).
+//   executor   EXPLICIT OPT-IN only: deterministic FrontierPolicyExecutor +
+//              rule planner. No LLM. NOT "the agent" — never present it as
+//              such (operator standing rule).
 //   mock       MockLlmPlanner plumbing test. No LLM.
-//   claude-cli local dev only — Claude CLI subscription via AI_LEAGUE_CLAUDE_*.
-//   bedrock    hosted only — Claude on Bedrock under the platform service
-//              account (upload-policy --use-bedrock pods set USE_BEDROCK=true).
-//              Do not rely on this until the inference payer is confirmed
-//              with Softmax.
 //
 // Env (all optional unless noted):
 //   COWORLD_PLAYER_WS_URL        required at runtime (set by the platform)
 //   PROXYWAR_REPO                repo root inside the pod (default /app/proxywar)
-//   PROXYWAR_KEYSTONE_MODE       see above (default "executor")
+//   PROXYWAR_KEYSTONE_MODE       see above (default: LLM Commander)
 //   PROXYWAR_KEYSTONE_PROFILE    strategy profile (default "aggressive")
 //   PROXYWAR_KEYSTONE_PLAN_EVERY Commander cadence in decision steps (default 3)
 //   PROXYWAR_LLM_MODEL_ID / AWS_REGION / PROXYWAR_LLM_TIMEOUT_MS  bedrock mode
@@ -89,7 +90,7 @@ const RESPONSE_REASON_MAX_LENGTH = 500;
 export function keystoneModeFromEnv(
   env: NodeJS.ProcessEnv = process.env,
 ): KeystoneMode {
-  const raw = env.PROXYWAR_KEYSTONE_MODE?.trim().toLowerCase() || "executor";
+  const raw = env.PROXYWAR_KEYSTONE_MODE?.trim().toLowerCase() ?? "";
   if (
     raw === "executor" ||
     raw === "mock" ||
@@ -98,9 +99,18 @@ export function keystoneModeFromEnv(
   ) {
     return raw;
   }
-  throw new Error(
-    `Unknown PROXYWAR_KEYSTONE_MODE "${raw}" (expected executor|mock|claude-cli|bedrock)`,
-  );
+  if (raw !== "") {
+    throw new Error(
+      `Unknown PROXYWAR_KEYSTONE_MODE "${raw}" (expected executor|mock|claude-cli|bedrock)`,
+    );
+  }
+  // Default = the LLM Commander. "The agent" IS the LLM brain (operator
+  // standing rule) — deterministic executor mode is explicit opt-in only and
+  // must never silently stand in for the agent. Hosted --use-bedrock pods set
+  // USE_BEDROCK=true (inference on Softmax's service account, payer confirmed
+  // 2026-06-10); everywhere else the Claude CLI subscription is the default
+  // and fails loud if unavailable.
+  return env.USE_BEDROCK === "true" ? "bedrock" : "claude-cli";
 }
 
 /**
@@ -171,12 +181,20 @@ export function decisionToResponse(
     rawConfidence <= 1
       ? rawConfidence
       : 0.7;
+  // Degradation flags travel on the wire so the game-side artifacts can
+  // record them — a dead/degraded LLM brain must never look healthy in
+  // replays (the hosted proxywar-bedrock seat failed silently for 60+ rounds
+  // because the transport had no loudness channel).
+  const llmPlannerDegraded = decision.metadata?.llmPlannerDegraded === true;
+  const plannerFallbackUsed = decision.metadata?.plannerFallbackUsed === true;
   return {
     type: "decision_response",
     requestID,
     selectedLegalActionId: decision.actionID,
     reason: decision.reason.slice(0, RESPONSE_REASON_MAX_LENGTH),
     confidence,
+    ...(llmPlannerDegraded ? { llmPlannerDegraded: true } : {}),
+    ...(plannerFallbackUsed ? { fallbackUsed: true } : {}),
   };
 }
 

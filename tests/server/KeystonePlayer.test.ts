@@ -215,13 +215,37 @@ describe("Coworld keystone player", () => {
     expect((response.reason as string).length).toBe(500);
   });
 
-  it("keystoneModeFromEnv defaults to executor and rejects unknown modes", () => {
-    expect(keystoneModeFromEnv({})).toBe("executor");
+  it("keystoneModeFromEnv defaults to the LLM Commander — never silently deterministic", () => {
+    // Local default: Claude CLI subscription. Hosted --use-bedrock pods:
+    // Bedrock. The deterministic executor requires explicit opt-in ("the
+    // agent" IS the LLM brain — operator standing rule).
+    expect(keystoneModeFromEnv({})).toBe("claude-cli");
+    expect(keystoneModeFromEnv({ USE_BEDROCK: "true" })).toBe("bedrock");
+    expect(keystoneModeFromEnv({ PROXYWAR_KEYSTONE_MODE: "executor" })).toBe(
+      "executor",
+    );
     expect(keystoneModeFromEnv({ PROXYWAR_KEYSTONE_MODE: "bedrock" })).toBe(
       "bedrock",
     );
     expect(() =>
       keystoneModeFromEnv({ PROXYWAR_KEYSTONE_MODE: "warp-drive" }),
     ).toThrow(/Unknown PROXYWAR_KEYSTONE_MODE/);
+  });
+
+  it("decisionToResponse carries degradation flags on the wire", () => {
+    const degraded = decisionToResponse("req_2", {
+      actionID: "hold:wait",
+      reason: "carrying standing directive",
+      metadata: { llmPlannerDegraded: true, plannerFallbackUsed: true },
+    });
+    expect(degraded.llmPlannerDegraded).toBe(true);
+    expect(degraded.fallbackUsed).toBe(true);
+
+    const healthy = decisionToResponse("req_3", {
+      actionID: "attack:rival",
+      reason: "executing directive",
+    });
+    expect("llmPlannerDegraded" in healthy).toBe(false);
+    expect("fallbackUsed" in healthy).toBe(false);
   });
 });
