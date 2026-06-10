@@ -285,8 +285,10 @@ export class DeferredAgentPlanner implements AgentPlanner {
 function createBedrockProvider(
   env: NodeJS.ProcessEnv = process.env,
 ): LlmProvider {
-  const modelId =
-    env.PROXYWAR_LLM_MODEL_ID ?? "anthropic.claude-3-5-sonnet-20240620-v1:0";
+  // The previous pin (anthropic.claude-3-5-sonnet-20240620-v1:0) is
+  // end-of-life on Bedrock (hosted 404, verified from pod logs 2026-06-10).
+  // Current Bedrock ids = first-party id with an "anthropic." prefix.
+  const modelId = env.PROXYWAR_LLM_MODEL_ID ?? "anthropic.claude-sonnet-4-6";
   const region = env.AWS_REGION ?? env.AWS_DEFAULT_REGION ?? "us-west-2";
   const timeoutMs = Number(env.PROXYWAR_LLM_TIMEOUT_MS ?? 12000);
   let client: {

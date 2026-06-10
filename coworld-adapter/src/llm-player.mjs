@@ -28,9 +28,13 @@ import { pathToFileURL } from "node:url";
 import { redactCoworldPlayerUrl } from "./coworld-url.mjs";
 
 const proxyWarRepo = process.env.PROXYWAR_REPO ?? "/app/proxywar";
+// Default Bedrock model id. The previous pin
+// (anthropic.claude-3-5-sonnet-20240620-v1:0) reached end-of-life on Bedrock —
+// every hosted call 404'd ("model version has reached the end of its life"),
+// verified from the league pod logs 2026-06-10. Current Bedrock ids are the
+// first-party id with an "anthropic." prefix, no date/ARN suffix.
 const MODEL_ID =
-  process.env.PROXYWAR_LLM_MODEL_ID ??
-  "anthropic.claude-3-5-sonnet-20240620-v1:0";
+  process.env.PROXYWAR_LLM_MODEL_ID ?? "anthropic.claude-sonnet-4-6";
 const REGION =
   process.env.AWS_REGION ?? process.env.AWS_DEFAULT_REGION ?? "us-west-2";
 const TIMEOUT_MS = Number(process.env.PROXYWAR_LLM_TIMEOUT_MS ?? 12000);
