@@ -64,8 +64,10 @@ The provider is pluggable via env — no keys in the image or manifest:
   with AWS creds resolved from the default chain).
 - Any starter-SDK provider for local testing via `PROXYWAR_AGENT_LLM_PROVIDER`:
   `openrouter` (with `OPENROUTER_API_KEY` passed as `--secret-env`), `codex-cli`,
-  `claude-cowork`, or `command`. With none configured it falls back to a
-  deterministic heuristic, so it never stalls a match.
+  `claude-cowork`, or `command`. With none configured it **fails loud at
+  startup** — a seat without a working LLM provider is not an agent and must
+  never silently play deterministic. (`PROXYWAR_LLM_MOCK=1` exists for explicit
+  plumbing tests only.)
 
 Upload it as a submitted policy:
 
@@ -84,20 +86,20 @@ the background between decisions (`DeferredAgentPlanner`), so the
 `max_decision_ms` clock is structurally satisfied. It still only ever returns
 one offered `LegalAction.id`, and the game re-validates it.
 
-Modes via `PROXYWAR_KEYSTONE_MODE`: `executor` (default — deterministic, no
-LLM), `mock` (plan-path plumbing test), `claude-cli` (local dev on the Claude
-CLI subscription), `bedrock` (hosted, `upload-policy --use-bedrock`; do not
-rely on it until the inference payer is confirmed with Softmax). It needs the
-repo at `PROXYWAR_REPO` (default `/app/proxywar`) and runs under
-`node --import tsx/esm`:
+The default mode is the **LLM Commander**: Claude on Bedrock in hosted
+`--use-bedrock` pods (`USE_BEDROCK=true`), the Claude CLI subscription locally.
+`PROXYWAR_KEYSTONE_MODE=mock` exists for protocol plumbing tests only. There
+is deliberately **no deterministic mode**: the agent is the LLM brain, and LLM
+failures surface loudly (`llmPlannerDegraded`/`fallbackUsed` travel on the
+`decision_response` wire so replays can never report a degraded brain as
+healthy). It needs the repo at `PROXYWAR_REPO` (default `/app/proxywar`) and
+runs under `node --import tsx/esm`:
 
 ```sh
 coworld upload-policy proxywar-coworld-local:latest --name proxywar-keystone \
   --run node --run --import --run tsx/esm \
-  --run /app/integration/src/keystone-player.ts
+  --run /app/integration/src/keystone-player.ts --use-bedrock
 ```
-
-(Add `--use-bedrock` for the LLM Commander once the payer question is settled.)
 
 ## Build and certify
 

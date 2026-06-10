@@ -23,10 +23,12 @@
 //   bedrock    hosted default under --use-bedrock pods (USE_BEDROCK=true) —
 //              Claude on Bedrock, inference on Softmax's service account
 //              (payer confirmed 2026-06-10).
-//   executor   EXPLICIT OPT-IN only: deterministic FrontierPolicyExecutor +
-//              rule planner. No LLM. NOT "the agent" — never present it as
-//              such (operator standing rule).
-//   mock       MockLlmPlanner plumbing test. No LLM.
+//   mock       MockLlmPlanner protocol-test plumbing only. Never a seat.
+//
+// There is deliberately NO deterministic/executor mode. Operator rule
+// (2026-06-10, permanent): never run, default to, or suggest a deterministic
+// executor as the agent or a seat. LLM failures must be loud (thrown or
+// llmPlannerDegraded on the wire), never silently absorbed by a rule bot.
 //
 // Env (all optional unless noted):
 //   COWORLD_PLAYER_WS_URL        required at runtime (set by the platform)
@@ -65,7 +67,7 @@ export interface KeystoneModules {
   claudeCli: ClaudeCliModule;
 }
 
-export type KeystoneMode = "executor" | "mock" | "claude-cli" | "bedrock";
+export type KeystoneMode = "mock" | "claude-cli" | "bedrock";
 
 export interface KeystoneBrainOptions {
   mode: KeystoneMode;
@@ -91,25 +93,20 @@ export function keystoneModeFromEnv(
   env: NodeJS.ProcessEnv = process.env,
 ): KeystoneMode {
   const raw = env.PROXYWAR_KEYSTONE_MODE?.trim().toLowerCase() ?? "";
-  if (
-    raw === "executor" ||
-    raw === "mock" ||
-    raw === "claude-cli" ||
-    raw === "bedrock"
-  ) {
+  if (raw === "mock" || raw === "claude-cli" || raw === "bedrock") {
     return raw;
   }
   if (raw !== "") {
     throw new Error(
-      `Unknown PROXYWAR_KEYSTONE_MODE "${raw}" (expected executor|mock|claude-cli|bedrock)`,
+      `Unknown PROXYWAR_KEYSTONE_MODE "${raw}" (expected mock|claude-cli|bedrock; ` +
+        `there is no deterministic mode by design — the agent is the LLM brain)`,
     );
   }
   // Default = the LLM Commander. "The agent" IS the LLM brain (operator
-  // standing rule) — deterministic executor mode is explicit opt-in only and
-  // must never silently stand in for the agent. Hosted --use-bedrock pods set
-  // USE_BEDROCK=true (inference on Softmax's service account, payer confirmed
-  // 2026-06-10); everywhere else the Claude CLI subscription is the default
-  // and fails loud if unavailable.
+  // standing rule, permanent) — there is no deterministic mode to fall back
+  // to. Hosted --use-bedrock pods set USE_BEDROCK=true (inference on
+  // Softmax's service account, payer confirmed 2026-06-10); everywhere else
+  // the Claude CLI subscription is the default and fails loud if unavailable.
   return env.USE_BEDROCK === "true" ? "bedrock" : "claude-cli";
 }
 
@@ -350,9 +347,7 @@ export function createKeystoneBrain(
   });
 
   let planner: AgentPlanner;
-  if (options.mode === "executor") {
-    planner = new RuleAgentPlanner(options.profile);
-  } else if (options.mode === "mock") {
+  if (options.mode === "mock") {
     planner = new MockLlmPlanner(options.profile);
   } else {
     const provider =

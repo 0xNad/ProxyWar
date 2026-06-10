@@ -102,10 +102,18 @@ async function main() {
     providerLabel = `bedrock:${MODEL_ID}@${REGION}`;
   } else {
     const envComplete = createLlmCompleteFromEnv();
-    llmComplete = envComplete ?? createMockComplete();
-    providerLabel = envComplete
-      ? process.env.PROXYWAR_AGENT_LLM_PROVIDER || "env-provider"
-      : "mock";
+    if (envComplete === null) {
+      // Fail loud, never silently mock: a seat without a working LLM provider
+      // is not an agent (operator rule 2026-06-10 — the hosted bedrock seat
+      // spent 60+ rounds on silent fallbacks before this was enforced).
+      throw new Error(
+        "No LLM provider configured. Set USE_BEDROCK=true (hosted), a starter-SDK " +
+          "provider env (PROXYWAR_AGENT_LLM_PROVIDER/PROXYWAR_AGENT_LLM_COMMAND/" +
+          "OPENROUTER_API_KEY), or PROXYWAR_LLM_MOCK=1 for explicit plumbing tests.",
+      );
+    }
+    llmComplete = envComplete;
+    providerLabel = process.env.PROXYWAR_AGENT_LLM_PROVIDER || "env-provider";
   }
   const agent = createStarterAgent({ llmComplete, modelName: MODEL_ID });
 

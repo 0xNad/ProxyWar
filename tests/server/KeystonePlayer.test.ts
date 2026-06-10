@@ -123,9 +123,9 @@ describe("Coworld keystone player", () => {
     expect(() => requestToBrainInput(request)).toThrow(/no legalActions/);
   });
 
-  it("executor mode answers in-clock with an offered LegalAction.id", async () => {
+  it("mock mode answers in-clock with an offered LegalAction.id (protocol plumbing)", async () => {
     const brain = createKeystoneBrain(modules, {
-      mode: "executor",
+      mode: "mock",
       profile: "aggressive",
     });
     const rebuilt = requestToBrainInput(wireRequest(spawnBrainInput()));
@@ -136,18 +136,6 @@ describe("Coworld keystone player", () => {
 
     expect(["spawn:10", "hold:wait"]).toContain(decision.actionID);
     expect(elapsedMs).toBeLessThan(2000);
-  });
-
-  it("mock mode plumbs the LLM plan path and still selects an offered id", async () => {
-    const brain = createKeystoneBrain(modules, {
-      mode: "mock",
-      profile: "aggressive",
-    });
-    const rebuilt = requestToBrainInput(wireRequest(spawnBrainInput()));
-
-    const decision = await brain.decide(rebuilt);
-
-    expect(["spawn:10", "hold:wait"]).toContain(decision.actionID);
   });
 
   it("DeferredAgentPlanner answers in-clock while the Commander refresh is in flight", async () => {
@@ -215,18 +203,18 @@ describe("Coworld keystone player", () => {
     expect((response.reason as string).length).toBe(500);
   });
 
-  it("keystoneModeFromEnv defaults to the LLM Commander — never silently deterministic", () => {
+  it("keystoneModeFromEnv defaults to the LLM Commander; no deterministic mode exists", () => {
     // Local default: Claude CLI subscription. Hosted --use-bedrock pods:
-    // Bedrock. The deterministic executor requires explicit opt-in ("the
-    // agent" IS the LLM brain — operator standing rule).
+    // Bedrock. There is deliberately no executor/deterministic mode ("the
+    // agent" IS the LLM brain — operator standing rule, permanent).
     expect(keystoneModeFromEnv({})).toBe("claude-cli");
     expect(keystoneModeFromEnv({ USE_BEDROCK: "true" })).toBe("bedrock");
-    expect(keystoneModeFromEnv({ PROXYWAR_KEYSTONE_MODE: "executor" })).toBe(
-      "executor",
-    );
     expect(keystoneModeFromEnv({ PROXYWAR_KEYSTONE_MODE: "bedrock" })).toBe(
       "bedrock",
     );
+    expect(() =>
+      keystoneModeFromEnv({ PROXYWAR_KEYSTONE_MODE: "executor" }),
+    ).toThrow(/no deterministic mode by design/);
     expect(() =>
       keystoneModeFromEnv({ PROXYWAR_KEYSTONE_MODE: "warp-drive" }),
     ).toThrow(/Unknown PROXYWAR_KEYSTONE_MODE/);
