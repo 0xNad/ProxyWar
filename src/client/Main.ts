@@ -620,6 +620,17 @@ class Client {
       customElements.whenDefined("host-lobby-modal"),
     ]);
 
+    // Coworld surfaces (Observatory replays / browser player) go straight
+    // into the match — never run landing-page hash/SDK logic for them.
+    if (isCoworldPlayerRoute()) {
+      await this.openCoworldPlayer();
+      return;
+    }
+    if (isCoworldReplayRoute()) {
+      await this.openCoworldReplay();
+      return;
+    }
+
     // Check if CrazyGames SDK is enabled first (no hash needed in CrazyGames)
     if (crazyGamesSDK.isOnCrazyGames()) {
       const lobbyId = await crazyGamesSDK.getInviteGameId();
@@ -733,14 +744,6 @@ class Client {
     );
     if (aiLeagueReplayMatch) {
       await this.openAiLeagueReplay(decodeURIComponent(aiLeagueReplayMatch[1]));
-      return;
-    }
-    if (isCoworldPlayerRoute()) {
-      await this.openCoworldPlayer();
-      return;
-    }
-    if (isCoworldReplayRoute()) {
-      await this.openCoworldReplay();
       return;
     }
     const lobbyId =
@@ -929,6 +932,10 @@ class Client {
       ].join(";"),
     );
     document.body.appendChild(loading);
+    // Hand off from the server-injected first-paint splash (the adapter's
+    // injectCoworldSplash in coworld-adapter/src/coworld-appshell.ts — keep
+    // the id in sync) now that our own overlay covers the page.
+    document.getElementById("proxywar-coworld-splash")?.remove();
     while (true) {
       const response = await fetch("../coworld/replay-info", {
         cache: "no-store",
@@ -936,7 +943,16 @@ class Client {
       if (response.ok) {
         const info = await response.json();
         if (info.ready === true && typeof info.runID === "string") {
-          loading.remove();
+          // Straight into the match: keep the branded overlay up until the
+          // first replay frame renders, so the game-start/credits modal
+          // never flashes on Observatory surfaces. Safety timeout so a
+          // failed load can never trap the viewer behind the overlay.
+          loading.textContent = "Loading replay...";
+          const removeLoading = () => loading.remove();
+          document.addEventListener("ai-league-replay-frame", removeLoading, {
+            once: true,
+          });
+          setTimeout(removeLoading, 45_000);
           await this.openAiLeagueReplay(info.runID, {
             source: "coworld-replay",
             coworldReplayPath,
