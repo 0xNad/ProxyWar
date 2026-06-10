@@ -494,7 +494,7 @@ describe("AgentDemoHub", () => {
       expect(html).toContain("Aggressive Expander");
       expect(html).toContain("hub-run");
       expect(html).toContain("/runs/hub-run/visual-report.html");
-      expect(html).toContain("/openfront-replay/hub-run");
+      expect(html).toContain("/proxywar-replay/hub-run");
       expect(html).toContain("hub-tournament");
       expect(html).toContain("/tournaments/hub-tournament/leaderboard.html");
       expect(html).toContain("hub-eval");
@@ -665,7 +665,7 @@ describe("AgentDemoHub", () => {
       expect(publicHtml).toContain("window.location.href = watchUrl");
       expect(publicHtml).toContain("Iron Coast");
       expect(publicHtml).toContain("local planner");
-      expect(publicHtml).toContain("/openfront-replay/hub-run");
+      expect(publicHtml).toContain("/proxywar-replay/hub-run");
       expect(publicHtml).not.toContain("decisions.jsonl");
       expect(publicHtml).not.toContain("match-summary.json");
       expect(publicHtml).not.toContain("job.outputTail");
@@ -728,7 +728,7 @@ describe("AgentDemoHub", () => {
       expect(testerDashboardHtml).toContain(
         "/api/tester-dashboard/endpoint-health",
       );
-      expect(testerDashboardHtml).toContain("/openfront-replay/hub-run");
+      expect(testerDashboardHtml).toContain("/proxywar-replay/hub-run");
       expect(testerDashboardHtml).toContain(
         "/runs/hub-run/external-agent-feedback.md",
       );
@@ -864,7 +864,7 @@ describe("AgentDemoHub", () => {
       expect(agentStartJson.importAndRunEndpoint?.path).toBe(
         "/api/agent-cards/import-and-run",
       );
-      expect(agentStartJson.latestReplay).toBe("/openfront-replay/hub-run");
+      expect(agentStartJson.latestReplay).toBe("/proxywar-replay/hub-run");
       expect(protocolSchema.properties).toHaveProperty("selectedLegalActionId");
     } finally {
       await fs.rm(rootDir, { recursive: true, force: true });

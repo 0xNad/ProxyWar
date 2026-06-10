@@ -39,10 +39,9 @@
     "join": "Join Lobby",
     "solo": "Solo",
     "game_info": "Game info",
-    "wiki": "Wiki",
     "privacy_policy": "Privacy Policy",
     "terms_of_service": "Terms of Service",
-    "copyright": "© OpenFront™ and Contributors",
+    "copyright": "© Proxy War and Contributors",
     "play": "Play",
     "news": "News",
     "store": "Store",
@@ -69,7 +68,7 @@
     "copied_to_clipboard": "Info copied to the clipboard! Feel free to share it on our Discord if you need help.",
     "os": "OS",
     "device_pixel_ratio": "Device Pixel Ratio",
-    "chromium_tip": "OpenFront runs best on Chromium-based browsers.",
+    "chromium_tip": "Proxy War runs best on Chromium-based browsers.",
     "hardware_acceleration_tip": "Make sure hardware acceleration is enabled in your browser settings for optimal performance.",
     "renderer": "Renderer",
     "max_texture_size": "Max Texture Size",
@@ -89,7 +88,7 @@
   },
   "help_modal": {
     "video_tutorial": "Video Tutorial",
-    "video_tutorial_title": "OpenFront.io Tutorial",
+    "video_tutorial_title": "Gameplay Tutorial",
     "hotkeys": "Hotkeys",
     "table_key": "Key",
     "table_action": "Action",
@@ -179,7 +178,7 @@
     "build_mirv": "MIRV",
     "build_mirv_desc": "The most powerful bomb in the game. Splits up into smaller bombs that will cover a huge range of territory. Only damages the player that you first clicked on to build it. Spawns from the nearest Missile Silo and lands in the area you first clicked to build it.",
     "player_icons": "Player icons",
-    "troubleshooting_desc": "If you experience performance issues, crashes, or other problems while playing OpenFront, please visit our Troubleshooting page for help diagnosing and fixing common issues:",
+    "troubleshooting_desc": "If you experience performance issues, crashes, or other problems while playing Proxy War, please visit our Troubleshooting page for help diagnosing and fixing common issues:",
     "icon_desc": "Examples of some of the ingame icons you will encounter and what they mean:",
     "icon_crown": "Crown - Number 1. This is the top player in the leaderboard.",
     "icon_traitor": "Broken shield - Traitor. This player attacked an ally.",
@@ -900,7 +899,7 @@
     "not_enough_money": "Not enough money"
   },
   "win_modal": {
-    "support_openfront": "Support OpenFront!",
+    "support_openfront": "Support Proxy War!",
     "territory_pattern": "Purchase a territory skin to go ad-free!",
     "died": "You died",
     "your_team": "Your team won!",
@@ -912,10 +911,6 @@
     "keep": "Keep Playing",
     "spectate": "Spectate",
     "requeue": "Play Again",
-    "wishlist": "Wishlist on Steam!",
-    "join_discord": "Join Our Discord Community!",
-    "discord_description": "Connect with players, discover new features, and win prizes!",
-    "join_server": "Join Server",
     "youtube_tutorial": "Need some help?"
   },
   "leaderboard": {
@@ -1212,15 +1207,15 @@
     "warning": "WARNING",
     "dismiss": "Dismiss",
     "go_to_item": "Go to item {num}",
-    "firefox_warning": "OpenFront.io doesn't perform well with [Firefox-based browsers](https://simple.wikipedia.org/wiki/Web_browsers_based_on_Firefox). We recommend you to use a [Chromium-based browser](https://en.wikipedia.org/wiki/Chromium_(web_browser)#Browsers_based_on_Chromium) for best performance."
+    "firefox_warning": "Proxy War doesn't perform well with [Firefox-based browsers](https://simple.wikipedia.org/wiki/Web_browsers_based_on_Firefox). We recommend you to use a [Chromium-based browser](https://en.wikipedia.org/wiki/Chromium_(web_browser)#Browsers_based_on_Chromium) for best performance."
   },
   "ios_banner": {
-    "text": "For fullscreen, add OpenFront to your Home Screen",
+    "text": "For fullscreen, add Proxy War to your Home Screen",
     "how": "How",
     "later": "Later",
     "never": "Never",
     "modal_title": "Fullscreen on iOS",
-    "modal_desc": "Your browser doesn't support fullscreen, but you can add OpenFront to your Home Screen for an immersive experience:",
+    "modal_desc": "Your browser doesn't support fullscreen, but you can add Proxy War to your Home Screen for an immersive experience:",
     "step_share": "Tap the Share button in your browser",
     "step_scroll_and_tap": "Scroll down and tap",
     "step_add_to_home_label": "Add to Home Screen",

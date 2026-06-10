@@ -747,7 +747,7 @@ export function proxyWarAgentStartJson(model: AgentDemoHubModel): unknown {
     },
     latestReplay:
       latestRun !== null && latestRun.hasOpenFrontReplay
-        ? `/openfront-replay/${latestRun.runID}`
+        ? `/proxywar-replay/${latestRun.runID}`
         : null,
   };
 }
@@ -1406,7 +1406,7 @@ export function renderAgentDemoHubHtml(model: AgentDemoHubModel): string {
             <h2>Latest Rendered Match</h2>
             <p><code>${escapeHtml(latestRun.runID)}</code></p>
             <div class="links">
-              ${latestRun.hasOpenFrontReplay ? `<a href="/openfront-replay/${encodeURIComponent(latestRun.runID)}" target="_blank">Watch rendered gameplay</a>` : ""}
+              ${latestRun.hasOpenFrontReplay ? `<a href="/proxywar-replay/${encodeURIComponent(latestRun.runID)}" target="_blank">Watch rendered gameplay</a>` : ""}
               ${latestRun.hasMatchPackage ? `<a href="/runs/${encodeURIComponent(latestRun.runID)}/${latestRun.matchPackageLinkFileName}">Match package</a>` : ""}
               <a href="/runs/${encodeURIComponent(latestRun.runID)}/visual-report.html">Decision report</a>
               ${latestRun.hasSpectatorReplay ? `<a href="/runs/${encodeURIComponent(latestRun.runID)}/spectator.html">Watch artifact replay</a>` : ""}
@@ -1510,7 +1510,7 @@ export function renderAgentDemoHubHtml(model: AgentDemoHubModel): string {
           <p class="hint">Native Proxy War replay route: <a href="${escapeAttribute(model.rendererBaseUrl)}" target="_blank">${escapeHtml(model.rendererBaseUrl)}</a>. Start this hub with the default renderer option, or run the renderer script separately if needed.</p>
           ${
             latestRun?.hasOpenFrontReplay
-              ? `<p><a href="/openfront-replay/${encodeURIComponent(latestRun.runID)}" target="_blank">Open latest run in native renderer</a></p>`
+              ? `<p><a href="/proxywar-replay/${encodeURIComponent(latestRun.runID)}" target="_blank">Open latest run in native renderer</a></p>`
               : ""
           }
         </div>
@@ -1669,7 +1669,7 @@ export function renderProxyWarPublicHtml(model: AgentDemoHubModel): string {
       .join("\n") ?? "";
   const latestReplayLink =
     latestRun !== null && latestRun.hasOpenFrontReplay
-      ? `/openfront-replay/${encodeURIComponent(latestRun.runID)}`
+      ? `/proxywar-replay/${encodeURIComponent(latestRun.runID)}`
       : null;
   const feedbackRuns = model.runs.filter(
     (run) => run.externalFeedbackPreview !== undefined,
@@ -1709,7 +1709,7 @@ export function renderProxyWarPublicHtml(model: AgentDemoHubModel): string {
     runID: latestRun?.runID ?? null,
     replayPath:
       latestRun?.hasOpenFrontReplay === true
-        ? `/openfront-replay/${encodeURIComponent(latestRun.runID)}`
+        ? `/proxywar-replay/${encodeURIComponent(latestRun.runID)}`
         : null,
     feedbackPath: latestFeedbackLink,
     failureSummary: latestFailedJob?.errorSummary ?? null,
@@ -2291,7 +2291,7 @@ export function renderProxyWarPublicHtml(model: AgentDemoHubModel): string {
                   <div class="metric"><span>Rejected</span><strong>${numberCell(latestRun.rejectedCount)}</strong></div>
                 </div>
                 <div class="links">
-                  ${latestRun.hasOpenFrontReplay ? `<a class="button" href="/openfront-replay/${encodeURIComponent(latestRun.runID)}" target="_blank">Watch rendered replay</a>` : ""}
+                  ${latestRun.hasOpenFrontReplay ? `<a class="button" href="/proxywar-replay/${encodeURIComponent(latestRun.runID)}" target="_blank">Watch rendered replay</a>` : ""}
                   ${latestRun.hasMatchPackage ? `<a class="button secondary" href="/runs/${encodeURIComponent(latestRun.runID)}/${latestRun.matchPackageLinkFileName}">Match package</a>` : ""}
                   ${!latestRun.hasOpenFrontReplay ? `<a class="button secondary" href="#run-match">Run again</a>` : ""}
                 </div>
@@ -2952,7 +2952,7 @@ export function renderProxyWarPublicHtml(model: AgentDemoHubModel): string {
       const readyRunID = job.status === "completed" ? job.latestRunID : undefined;
       const readyTournamentID = job.status === "completed" ? job.latestTournamentID : undefined;
       const readyEvaluationID = job.status === "completed" ? job.latestEvaluationID : undefined;
-      const watchUrl = readyRunID ? "/openfront-replay/" + encodeURIComponent(readyRunID) : "";
+      const watchUrl = readyRunID ? "/proxywar-replay/" + encodeURIComponent(readyRunID) : "";
       const tournamentUrl = readyTournamentID ? "/tournaments/" + encodeURIComponent(readyTournamentID) + "/leaderboard.html" : "";
       const evaluationUrl = readyEvaluationID ? "/evaluations/" + encodeURIComponent(readyEvaluationID) + "/evaluation-report.md" : "";
       const completedWithoutArtifact = job.status === "completed" && !readyRunID && !readyTournamentID && !readyEvaluationID;
@@ -3049,7 +3049,7 @@ export function renderProxyWarPublicHtml(model: AgentDemoHubModel): string {
       testerEvidenceState.jobStatus = status + jobID;
       if (typeof job.latestRunID === "string" && job.latestRunID.trim()) {
         testerEvidenceState.runID = job.latestRunID;
-        testerEvidenceState.replayPath = "/openfront-replay/" + encodeURIComponent(job.latestRunID);
+        testerEvidenceState.replayPath = "/proxywar-replay/" + encodeURIComponent(job.latestRunID);
         testerEvidenceState.feedbackPath = "/runs/" + encodeURIComponent(job.latestRunID) + "/external-agent-feedback.md";
       }
       if (status === "failed") {
@@ -3254,7 +3254,7 @@ export function renderProxyWarPublicHtmlLegacy(
     .join("\n");
   const latestReplayLink =
     latestRun !== null && latestRun.hasOpenFrontReplay
-      ? `/openfront-replay/${encodeURIComponent(latestRun.runID)}`
+      ? `/proxywar-replay/${encodeURIComponent(latestRun.runID)}`
       : null;
   const publicCodexMatchRequestJson = JSON.stringify({
     ...proxyWarTesterSavedRosterJobDefaults,
@@ -3513,7 +3513,7 @@ export function renderProxyWarPublicHtmlLegacy(
               <code>${escapeHtml(latestRun.runID)}</code>
             </div>
             <div class="links">
-              ${latestRun.hasOpenFrontReplay ? `<a class="cta" href="/openfront-replay/${encodeURIComponent(latestRun.runID)}" target="_blank">Watch rendered gameplay</a>` : ""}
+              ${latestRun.hasOpenFrontReplay ? `<a class="cta" href="/proxywar-replay/${encodeURIComponent(latestRun.runID)}" target="_blank">Watch rendered gameplay</a>` : ""}
               ${latestRun.hasMatchPackage ? `<a class="cta secondary" href="/runs/${encodeURIComponent(latestRun.runID)}/${latestRun.matchPackageLinkFileName}">Match package</a>` : ""}
               <a class="cta secondary" href="/runs/${encodeURIComponent(latestRun.runID)}/visual-report.html">Decision report</a>
               ${latestRun.hasSpectatorReplay ? `<a class="cta secondary" href="/runs/${encodeURIComponent(latestRun.runID)}/spectator.html">Replay timeline</a>` : ""}
@@ -4160,7 +4160,7 @@ export function renderProxyWarPublicHtmlLegacy(
     }
     function publicJobStatusHtml(job) {
       const readyRunID = job.status === "completed" ? job.latestRunID : undefined;
-      const watchUrl = readyRunID ? "/openfront-replay/" + encodeURIComponent(readyRunID) : "";
+      const watchUrl = readyRunID ? "/proxywar-replay/" + encodeURIComponent(readyRunID) : "";
       const runLinks = readyRunID ? [
         '<a href="' + watchUrl + '">Watch rendered gameplay</a>',
         '<a href="/runs/' + encodeURIComponent(readyRunID) + '/match-package.html">Match package</a>',
@@ -4276,7 +4276,7 @@ export function renderProxyWarAdminHtml(model: ProxyWarAdminModel): string {
         <a href="/">Operator hub</a>
         <a href="/api/status">Status JSON</a>
         <a href="/api/public-readiness">Public readiness JSON</a>
-        ${latestRenderedRun?.hasOpenFrontReplay ? `<a href="/openfront-replay/${encodeURIComponent(latestRenderedRun.runID)}">Latest rendered replay</a>` : ""}
+        ${latestRenderedRun?.hasOpenFrontReplay ? `<a href="/proxywar-replay/${encodeURIComponent(latestRenderedRun.runID)}">Latest rendered replay</a>` : ""}
       </div>
       <p class="hint">Renderer: ${escapeHtml(model.server.rendererBaseUrl)}</p>
     </section>
@@ -4360,7 +4360,7 @@ export function renderProxyWarTesterDashboardHtml(
         <td>${numberCell(run.postSpawnNonHoldActionCount)}</td>
         <td>${numberCell(run.acceptedCount)} / ${numberCell(run.rejectedCount)}</td>
         <td class="links">
-          ${run.hasOpenFrontReplay ? `<a href="/openfront-replay/${encodeURIComponent(run.runID)}">replay</a>` : ""}
+          ${run.hasOpenFrontReplay ? `<a href="/proxywar-replay/${encodeURIComponent(run.runID)}">replay</a>` : ""}
           ${run.hasMatchPackage ? `<a href="/runs/${encodeURIComponent(run.runID)}/${run.matchPackageLinkFileName}">package</a>` : ""}
           ${run.hasExternalFeedback ? `<a href="/runs/${encodeURIComponent(run.runID)}/external-agent-feedback.md">feedback</a>` : ""}
         </td>
@@ -4419,7 +4419,7 @@ export function renderProxyWarTesterDashboardHtml(
     </div>
     <nav class="links">
       <a class="button" href="/public">Beta page</a>
-      ${latestRenderedRun?.hasOpenFrontReplay ? `<a class="button" href="/openfront-replay/${encodeURIComponent(latestRenderedRun.runID)}">Latest replay</a>` : ""}
+      ${latestRenderedRun?.hasOpenFrontReplay ? `<a class="button" href="/proxywar-replay/${encodeURIComponent(latestRenderedRun.runID)}">Latest replay</a>` : ""}
       <a class="button" href="/api/public-readiness">Readiness JSON</a>
     </nav>
   </header>
@@ -4438,7 +4438,7 @@ export function renderProxyWarTesterDashboardHtml(
           ? '<div class="empty">No rendered run found yet. Run a match before sharing the beta.</div>'
           : `<p><code>${escapeHtml(latestRenderedRun.runID)}</code></p>
             <div class="links" style="margin-top:10px">
-              ${latestRenderedRun.hasOpenFrontReplay ? `<a href="/openfront-replay/${encodeURIComponent(latestRenderedRun.runID)}">Rendered replay</a>` : ""}
+              ${latestRenderedRun.hasOpenFrontReplay ? `<a href="/proxywar-replay/${encodeURIComponent(latestRenderedRun.runID)}">Rendered replay</a>` : ""}
               ${latestRenderedRun.hasMatchPackage ? `<a href="/runs/${encodeURIComponent(latestRenderedRun.runID)}/${latestRenderedRun.matchPackageLinkFileName}">Match package</a>` : ""}
               <a href="/runs/${encodeURIComponent(latestRenderedRun.runID)}/visual-report.html">Decision report</a>
               ${latestFeedbackRun?.hasExternalFeedback ? `<a href="/runs/${encodeURIComponent(latestFeedbackRun.runID)}/external-agent-feedback.md">External-agent feedback</a>` : ""}
@@ -4741,7 +4741,7 @@ function runRow(run: AgentDemoRunIndexEntry): string {
     <td>${numberCell(run.parseFailureCount)} / ${numberCell(run.fallbackCount)}</td>
     <td>${auditPills(run.confirmedEffectCount, run.unknownEffectCount, run.failedEffectCount)}</td>
     <td class="links">
-      ${run.hasOpenFrontReplay ? `<a href="/openfront-replay/${runID}" target="_blank">rendered gameplay</a>` : ""}
+      ${run.hasOpenFrontReplay ? `<a href="/proxywar-replay/${runID}" target="_blank">rendered gameplay</a>` : ""}
       ${run.hasMatchPackage ? `<a href="/runs/${runID}/${run.matchPackageLinkFileName}">match package</a>` : ""}
       <a href="/runs/${runID}/visual-report.html">decision report</a>
       ${run.hasSpectatorReplay ? `<a href="/runs/${runID}/spectator.html">artifact replay</a>` : ""}
@@ -4761,7 +4761,7 @@ function publicRunRow(run: AgentDemoRunIndexEntry): string {
     <td>${numberCell(run.decisionCount)}</td>
     <td>${numberCell(run.postSpawnNonHoldActionCount)}</td>
     <td class="links">
-      ${run.hasOpenFrontReplay ? `<a href="/openfront-replay/${runID}" target="_blank">rendered gameplay</a>` : ""}
+      ${run.hasOpenFrontReplay ? `<a href="/proxywar-replay/${runID}" target="_blank">rendered gameplay</a>` : ""}
       ${run.hasMatchPackage ? `<a href="/runs/${runID}/${run.matchPackageLinkFileName}">match package</a>` : ""}
       <a href="/runs/${runID}/visual-report.html">decision report</a>
       ${run.hasSpectatorReplay ? `<a href="/runs/${runID}/spectator.html">replay</a>` : ""}
@@ -4920,7 +4920,7 @@ function publicExternalFeedbackPanel(
     run === null
       ? ""
       : `<div class="links">
-          ${run.hasOpenFrontReplay ? `<a href="/openfront-replay/${runID}" target="_blank">Watch replay</a>` : ""}
+          ${run.hasOpenFrontReplay ? `<a href="/proxywar-replay/${runID}" target="_blank">Watch replay</a>` : ""}
           ${run.hasExternalFeedback ? `<a href="/runs/${runID}/external-agent-feedback.md" target="_blank" data-checklist-feedback-link>Open full feedback</a>` : ""}
           <a href="/runs/${runID}/visual-report.html" target="_blank">Decision report</a>
         </div>`;
@@ -5336,7 +5336,7 @@ function sleekPublicRunRow(run: AgentDemoRunIndexEntry): string {
     <td><code>${escapeHtml(run.runID)}</code><div class="muted-row">${escapeHtml(run.completedAt ?? "unknown")}</div></td>
     <td>${numberCell(run.decisionCount)} decisions<div class="muted-row">${numberCell(run.postSpawnNonHoldActionCount)} non-hold · ${numberCell(run.acceptedCount)} accepted · ${numberCell(run.rejectedCount)} rejected</div></td>
     <td><div class="links">
-      ${run.hasOpenFrontReplay ? `<a href="/openfront-replay/${runID}" target="_blank">rendered replay</a>` : ""}
+      ${run.hasOpenFrontReplay ? `<a href="/proxywar-replay/${runID}" target="_blank">rendered replay</a>` : ""}
       ${run.hasMatchPackage ? `<a href="/runs/${runID}/${run.matchPackageLinkFileName}">match package</a>` : ""}
       <a href="/runs/${runID}/visual-report.html">decision report</a>
       ${run.hasSpectatorReplay ? `<a href="/runs/${runID}/spectator.html">timeline</a>` : ""}
@@ -5368,7 +5368,7 @@ function jobArtifactLinks(job: AgentDemoJobRecord): string {
   }
   if (job.latestRunID !== undefined) {
     const runID = encodeURIComponent(job.latestRunID);
-    return `<a href="/openfront-replay/${runID}" target="_blank">rendered gameplay</a><a href="/runs/${runID}/match-package.html">match package</a><a href="/runs/${runID}/visual-report.html">decision report</a><a href="/runs/${runID}/spectator.html">timeline</a>`;
+    return `<a href="/proxywar-replay/${runID}" target="_blank">rendered gameplay</a><a href="/runs/${runID}/match-package.html">match package</a><a href="/runs/${runID}/visual-report.html">decision report</a><a href="/runs/${runID}/spectator.html">timeline</a>`;
   }
   if (job.latestTournamentID !== undefined) {
     const tournamentID = encodeURIComponent(job.latestTournamentID);
@@ -5464,12 +5464,12 @@ function publicTournamentBestReplayLink(
 ): string | null {
   const runID = tournament.showcase?.bestRunID;
   if (typeof runID === "string" && runID.trim() !== "") {
-    return `/openfront-replay/${encodeURIComponent(runID)}`;
+    return `/proxywar-replay/${encodeURIComponent(runID)}`;
   }
   const replayPath = tournament.showcase?.bestRunReplayPath;
   if (
     typeof replayPath === "string" &&
-    (replayPath.startsWith("/openfront-replay/") ||
+    (replayPath.startsWith("/proxywar-replay/") ||
       replayPath.startsWith("/ai-league-replay/"))
   ) {
     return replayPath;

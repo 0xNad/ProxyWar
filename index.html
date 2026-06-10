@@ -42,14 +42,14 @@
     </style>
 
     <!-- SEO -->
-    <link rel="canonical" href="https://openfront.io/" />
+    <link rel="canonical" href="https://beta.proxywar.xyz/" />
     <meta
       name="description"
       content="Conquer the world in this multiplayer battle royale! Expand your nation, eliminate opponents, and dominate the map in this fast-paced IO game."
     />
 
     <!-- Open Graph -->
-    <meta property="og:url" content="https://openfront.io/" />
+    <meta property="og:url" content="https://beta.proxywar.xyz/" />
     <meta property="og:title" content="Proxy War - Battle Royale" />
     <meta
       property="og:description"
@@ -74,6 +74,7 @@
       };
       window.__PROXYWAR_AI_REPLAY__ =
         location.pathname.startsWith("/ai-league-replay/") ||
+        location.pathname.startsWith("/proxywar-replay/") ||
         location.pathname.startsWith("/openfront-replay/") ||
         isCoworldRoute("/client/global") ||
         isCoworldRoute("/client/replay") ||
@@ -123,7 +124,7 @@
     <script>
       window.googletag = window.googletag || { cmd: [] };
       googletag.cmd.push(function () {
-        googletag.pubads().set("page_url", "http://openfront.io ");
+        googletag.pubads().set("page_url", "https://beta.proxywar.xyz");
       });
     </script>
 

@@ -8,6 +8,12 @@ import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import zlib from "node:zlib";
 
+import {
+  coworldAppShellRoute,
+  injectCoworldSplash,
+  type CoworldAppShellRoute,
+} from "./coworld-appshell.ts";
+
 const localRoot = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
   "..",
@@ -327,12 +333,9 @@ class CoworldProtocolServer {
     if (await this.writeRunArtifact(url, response)) {
       return;
     }
-    if (
-      url.pathname === "/client/global" ||
-      url.pathname === "/client/replay" ||
-      url.pathname === "/client/player"
-    ) {
-      await writeProxyWarAppShell(response);
+    const appShellRoute = coworldAppShellRoute(url.pathname);
+    if (appShellRoute !== null) {
+      await writeProxyWarAppShell(response, appShellRoute);
       return;
     }
     if (await writeProxyWarStaticAsset(url, response)) {
@@ -1511,8 +1514,11 @@ function enumValue(
 
 async function writeProxyWarAppShell(
   response: http.ServerResponse,
+  route: CoworldAppShellRoute,
 ): Promise<void> {
-  const html = await proxyWarAppShellHtml();
+  // Cover the shell with a Proxy War splash from the first paint — the
+  // landing page in index.html must never flash on Observatory surfaces.
+  const html = injectCoworldSplash(await proxyWarAppShellHtml(), route);
   response.writeHead(200, {
     "content-type": "text/html; charset=utf-8",
     "cache-control": "no-store",
