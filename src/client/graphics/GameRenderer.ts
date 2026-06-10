@@ -413,6 +413,10 @@ export class GameRenderer {
 
     //show whole map on startup
     this.transformHandler.centerAll(0.9);
+    // Dev/replay hook: expose the transform handler so replay tooling (e.g. promo
+    // recording) can lock the camera to the whole map. No-op for normal gameplay.
+    (window as unknown as Record<string, unknown>).__proxywarTransform =
+      this.transformHandler;
 
     let rafId = requestAnimationFrame(() => this.renderGame());
     this.canvas.addEventListener("contextlost", () => {
