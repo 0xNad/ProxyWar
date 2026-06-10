@@ -580,7 +580,7 @@ app.get("/api/tester-dashboard", async (_req, res, next) => {
           : {
               runID: latestRun.runID,
               replayUrl: latestRun.hasOpenFrontReplay
-                ? `/openfront-replay/${encodeURIComponent(latestRun.runID)}`
+                ? `/proxywar-replay/${encodeURIComponent(latestRun.runID)}`
                 : null,
               matchPackageUrl: latestRun.hasMatchPackage
                 ? `/runs/${encodeURIComponent(latestRun.runID)}/${latestRun.matchPackageLinkFileName}`
@@ -1031,7 +1031,7 @@ app.post("/api/agent-cards/import-and-run", async (req, res) => {
       replayUrl:
         queued.job.latestRunID === undefined
           ? null
-          : `/openfront-replay/${encodeURIComponent(queued.job.latestRunID)}`,
+          : `/proxywar-replay/${encodeURIComponent(queued.job.latestRunID)}`,
     });
   } catch (error) {
     res.status(400).json({
@@ -1138,13 +1138,21 @@ app.get("/api/jobs/:jobID", (req, res) => {
   res.json(jobResponse(job));
 });
 
-app.get("/openfront-replay/:runID", (req, res) => {
-  if (!isSafeProxyWarArtifactSegment(req.params.runID)) {
-    res.status(404).send("AI league replay record not found.");
-    return;
-  }
-  res.redirect(`/ai-league-replay/${encodeURIComponent(req.params.runID)}`);
-});
+// "/openfront-replay" is the legacy path — previously published replay links
+// must keep working. New links are emitted as "/proxywar-replay".
+for (const replayRoute of [
+  "/proxywar-replay/:runID",
+  "/openfront-replay/:runID",
+]) {
+  app.get(replayRoute, (req, res) => {
+    const runID = String(req.params.runID);
+    if (!isSafeProxyWarArtifactSegment(runID)) {
+      res.status(404).send("AI league replay record not found.");
+      return;
+    }
+    res.redirect(`/ai-league-replay/${encodeURIComponent(runID)}`);
+  });
+}
 
 const renderer = maybeStartRenderer();
 const server = app.listen(port, host, () => {
@@ -1697,7 +1705,7 @@ function jobArtifactLinks(job: AgentDemoJobRecord): {
   if (job.latestRunID !== undefined) {
     const runID = encodeURIComponent(job.latestRunID);
     return {
-      replayUrl: `/openfront-replay/${runID}`,
+      replayUrl: `/proxywar-replay/${runID}`,
       reportUrl: `/runs/${runID}/match-report.md`,
     };
   }

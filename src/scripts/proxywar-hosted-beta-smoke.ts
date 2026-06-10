@@ -450,7 +450,7 @@ if (options.runMatch) {
       completed.replayUrl ??
       (completed.latestRunID === undefined
         ? undefined
-        : `/openfront-replay/${encodeURIComponent(completed.latestRunID)}`);
+        : `/proxywar-replay/${encodeURIComponent(completed.latestRunID)}`);
     if (replayUrl === undefined) {
       throw new Error("Completed match did not expose a rendered replay URL.");
     }

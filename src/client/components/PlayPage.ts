@@ -1,6 +1,5 @@
 import { LitElement, html } from "lit";
 import { customElement } from "lit/decorators.js";
-import { assetUrl } from "../../core/AssetUrls";
 import "./NewsBox";
 
 @customElement("play-page")
@@ -52,11 +51,11 @@ export class PlayPage extends LitElement {
             <div
               class="col-start-2 flex items-center justify-center text-malibu-blue min-w-0"
             >
-              <img
-                src=${assetUrl("images/OpenFrontLogo.svg")}
-                alt="OpenFront"
-                class="h-full w-auto"
-              />
+              <span
+                class="text-2xl font-bold tracking-[0.2em] whitespace-nowrap"
+                style="font-family: 'OpenFront', Inter, sans-serif"
+                >PROXY WAR</span
+              >
             </div>
 
             <div

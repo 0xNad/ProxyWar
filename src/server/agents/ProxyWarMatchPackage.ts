@@ -152,7 +152,7 @@ export function buildProxyWarMatchPackage(
     artifact({
       kind: "demo_replay",
       label: "Demo hub replay route",
-      href: `/openfront-replay/${encodedRunID}`,
+      href: `/proxywar-replay/${encodedRunID}`,
       audience: "spectator",
       present: hasGameRecord,
       description: "The same replay through the Proxy War demo/beta hub.",
@@ -261,7 +261,7 @@ export function buildProxyWarMatchPackage(
     title: `Proxy War Match ${summary.runID}`,
     routes: {
       renderedReplayUrl: hasGameRecord ? renderedReplayUrl : null,
-      demoHubReplayUrl: hasGameRecord ? `/openfront-replay/${encodedRunID}` : null,
+      demoHubReplayUrl: hasGameRecord ? `/proxywar-replay/${encodedRunID}` : null,
     },
     metrics: {
       decisionCount: summary.decisionCount ?? 0,

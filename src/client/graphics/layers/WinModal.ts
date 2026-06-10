@@ -2,7 +2,6 @@ import { html, LitElement, TemplateResult } from "lit";
 import { customElement, state } from "lit/decorators.js";
 import {
   getGamesPlayed,
-  isInIframe,
   translateText,
   TUTORIAL_VIDEO_URL,
 } from "../../../client/Utils";
@@ -46,7 +45,6 @@ export class WinModal extends LitElement implements Layer {
 
   private _title: string;
 
-  private rand = Math.random();
 
   // Override to prevent shadow DOM creation
   createRenderRoot() {
@@ -106,20 +104,10 @@ export class WinModal extends LitElement implements Layer {
   }
 
   innerHtml() {
-    if (isInIframe()) {
-      return this.steamWishlist();
-    }
-
     if (!this.isWin && getGamesPlayed() < 3) {
       return this.renderYoutubeTutorial();
     }
-    if (this.rand < 0.25) {
-      return this.steamWishlist();
-    } else if (this.rand < 0.5) {
-      return this.discordDisplay();
-    } else {
-      return this.renderPatternButton();
-    }
+    return this.renderPatternButton();
   }
 
   renderYoutubeTutorial() {
@@ -185,40 +173,6 @@ export class WinModal extends LitElement implements Layer {
             ></cosmetic-button>
           `,
         )}
-      </div>
-    `;
-  }
-
-  steamWishlist(): TemplateResult {
-    return html`<p class="m-0 mb-5 text-center bg-black/30 p-2.5 rounded-sm">
-      <a
-        href="https://store.steampowered.com/app/3560670"
-        target="_blank"
-        rel="noopener noreferrer"
-        class="text-[#4a9eff] underline font-medium transition-colors duration-200 text-2xl hover:text-[#6db3ff]"
-      >
-        ${translateText("win_modal.wishlist")}
-      </a>
-    </p>`;
-  }
-
-  discordDisplay(): TemplateResult {
-    return html`
-      <div class="text-center mb-6 bg-black/30 p-2.5 rounded-sm">
-        <h3 class="text-xl font-semibold text-white mb-3">
-          ${translateText("win_modal.join_discord")}
-        </h3>
-        <p class="text-white mb-3">
-          ${translateText("win_modal.discord_description")}
-        </p>
-        <a
-          href="https://discord.com/invite/openfront"
-          target="_blank"
-          rel="noopener noreferrer"
-          class="inline-block px-6 py-3 bg-indigo-600 text-white rounded-sm font-semibold transition-all duration-200 hover:bg-indigo-700 hover:-translate-y-px no-underline"
-        >
-          ${translateText("win_modal.join_server")}
-        </a>
       </div>
     `;
   }

@@ -3,6 +3,8 @@ export function isAiLeagueReplayRoute(
 ): boolean {
   return (
     pathname.startsWith("/ai-league-replay/") ||
+    pathname.startsWith("/proxywar-replay/") ||
+    // Legacy path — previously published replay links must keep working.
     pathname.startsWith("/openfront-replay/") ||
     isCoworldReplayRoute(pathname) ||
     isCoworldPlayerRoute(pathname)

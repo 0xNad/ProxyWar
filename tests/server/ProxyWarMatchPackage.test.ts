@@ -58,7 +58,7 @@ describe("ProxyWarMatchPackage", () => {
       runID: "public-run",
       routes: {
         renderedReplayUrl: "/ai-league-replay/public-run",
-        demoHubReplayUrl: "/openfront-replay/public-run",
+        demoHubReplayUrl: "/proxywar-replay/public-run",
       },
       metrics: {
         decisionCount: 12,
