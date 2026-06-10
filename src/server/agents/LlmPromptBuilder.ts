@@ -74,7 +74,9 @@ export class LlmPromptBuilder {
       input.personality ? `Agent personality: ${input.personality}` : null,
       `Agent profile: ${input.observation.profile}`,
       "OBSERVATION_JSON:",
-      JSON.stringify(observation, null, 2),
+      // Compact JSON throughout: pretty-printing tripled prompt bytes (~95KB prompts ->
+      // slow time-to-first-token + Sonnet timeout fallbacks) with zero model benefit.
+      JSON.stringify(observation),
       "END_OBSERVATION_JSON",
       ...(input.observation.opponentModel &&
       input.observation.opponentModel.length > 0
@@ -101,10 +103,10 @@ export class LlmPromptBuilder {
           ]
         : []),
       "LEGAL_ACTIONS_JSON:",
-      JSON.stringify(legalActions, null, 2),
+      JSON.stringify(legalActions),
       "END_LEGAL_ACTIONS_JSON",
       "RANKED_CANDIDATES_JSON:",
-      JSON.stringify(rankedCandidates, null, 2),
+      JSON.stringify(rankedCandidates),
       "END_RANKED_CANDIDATES_JSON",
     ]
       .filter((line): line is string => line !== null)
