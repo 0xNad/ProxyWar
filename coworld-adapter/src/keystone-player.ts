@@ -282,23 +282,62 @@ export class DeferredAgentPlanner implements AgentPlanner {
   }
 }
 
+/**
+ * Bedrock model-id candidates, tried in order until one answers. The original
+ * single pin (anthropic.claude-3-5-sonnet-20240620-v1:0) reached end-of-life
+ * on Bedrock and the hosted seat silently failed every call for 60+ rounds —
+ * autodetect makes a retired/disabled id self-healing instead of fatal.
+ * PROXYWAR_LLM_MODEL_ID (when set) is always tried first.
+ */
+export function bedrockModelCandidates(
+  env: NodeJS.ProcessEnv = process.env,
+): string[] {
+  return [
+    ...(env.PROXYWAR_LLM_MODEL_ID ? [env.PROXYWAR_LLM_MODEL_ID] : []),
+    "anthropic.claude-sonnet-4-6",
+    "anthropic.claude-haiku-4-5",
+    "us.anthropic.claude-sonnet-4-5-20250929-v1:0",
+    "anthropic.claude-sonnet-4-5-20250929-v1:0",
+  ];
+}
+
+/**
+ * True when the error means "this model id is unusable on this account" —
+ * retired, unknown, disabled, or needs an inference profile. Anything else
+ * (auth, throttle, timeout) is NOT a reason to switch models.
+ */
+export function isModelUnavailableError(message: unknown): boolean {
+  const text = String(message ?? "").toLowerCase();
+  return (
+    text.includes("end of its life") ||
+    text.includes("model identifier is invalid") ||
+    text.includes("provided model identifier") ||
+    text.includes("on-demand throughput") ||
+    text.includes("not found") ||
+    text.includes("not_found") ||
+    text.includes("access to the model") ||
+    text.includes("not authorized to invoke this model") ||
+    text.includes("model is not supported")
+  );
+}
+
+type BedrockClientLike = {
+  messages: {
+    create: (
+      body: Record<string, unknown>,
+      options: { timeout: number },
+    ) => Promise<{ content?: Array<{ text?: unknown }> }>;
+  };
+};
+
 function createBedrockProvider(
   env: NodeJS.ProcessEnv = process.env,
 ): LlmProvider {
-  // The previous pin (anthropic.claude-3-5-sonnet-20240620-v1:0) is
-  // end-of-life on Bedrock (hosted 404, verified from pod logs 2026-06-10).
-  // Current Bedrock ids = first-party id with an "anthropic." prefix.
-  const modelId = env.PROXYWAR_LLM_MODEL_ID ?? "anthropic.claude-sonnet-4-6";
+  const candidates = bedrockModelCandidates(env);
   const region = env.AWS_REGION ?? env.AWS_DEFAULT_REGION ?? "us-west-2";
   const timeoutMs = Number(env.PROXYWAR_LLM_TIMEOUT_MS ?? 12000);
-  let client: {
-    messages: {
-      create: (
-        body: Record<string, unknown>,
-        options: { timeout: number },
-      ) => Promise<{ content?: Array<{ text?: unknown }> }>;
-    };
-  } | null = null;
+  let client: BedrockClientLike | null = null;
+  let lockedIndex: number | null = null;
   return {
     providerType: "custom",
     async complete(prompt: string): Promise<string> {
@@ -307,8 +346,10 @@ function createBedrockProvider(
         // vite/vitest never try to bundle it.
         const bedrockSpecifier = "@anthropic-ai/bedrock-sdk";
         const mod = (await import(/* @vite-ignore */ bedrockSpecifier)) as {
-          default?: new (options: { awsRegion: string }) => typeof client;
-          AnthropicBedrock?: new (options: { awsRegion: string }) => typeof client;
+          default?: new (options: { awsRegion: string }) => BedrockClientLike;
+          AnthropicBedrock?: new (options: {
+            awsRegion: string;
+          }) => BedrockClientLike;
         };
         const AnthropicBedrock = mod.default ?? mod.AnthropicBedrock;
         if (AnthropicBedrock === undefined) {
@@ -316,18 +357,44 @@ function createBedrockProvider(
         }
         client = new AnthropicBedrock({ awsRegion: region });
       }
-      const response = await client!.messages.create(
-        {
-          model: modelId,
-          max_tokens: 1024,
-          messages: [{ role: "user", content: prompt }],
-        },
-        { timeout: timeoutMs },
+      const startIndex = lockedIndex ?? 0;
+      let lastError: unknown = null;
+      for (let i = startIndex; i < candidates.length; i += 1) {
+        const candidate = candidates[i];
+        try {
+          const response = await client.messages.create(
+            {
+              model: candidate,
+              max_tokens: 1024,
+              messages: [{ role: "user", content: prompt }],
+            },
+            { timeout: timeoutMs },
+          );
+          if (lockedIndex !== i) {
+            lockedIndex = i;
+            console.log(`keystone bedrock model locked: ${candidate}`);
+          }
+          return (response?.content ?? [])
+            .map((block) => (typeof block?.text === "string" ? block.text : ""))
+            .join("")
+            .trim();
+        } catch (error) {
+          lastError = error;
+          const message = error instanceof Error ? error.message : error;
+          if (lockedIndex === null && isModelUnavailableError(message)) {
+            console.error(
+              `keystone bedrock model unavailable, trying next: ${candidate} -> ${String(message).slice(0, 160)}`,
+            );
+            continue;
+          }
+          throw error;
+        }
+      }
+      throw new Error(
+        `No Bedrock model candidate is usable on this account (tried ${candidates.join(", ")}): ${String(
+          lastError instanceof Error ? lastError.message : lastError,
+        ).slice(0, 200)}`,
       );
-      return (response?.content ?? [])
-        .map((block) => (typeof block?.text === "string" ? block.text : ""))
-        .join("")
-        .trim();
     },
   };
 }

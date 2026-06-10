@@ -14,9 +14,11 @@ import type {
   LegalAction,
 } from "../../src/server/agents/AgentTypes";
 import {
+  bedrockModelCandidates,
   createKeystoneBrain,
   decisionToResponse,
   DeferredAgentPlanner,
+  isModelUnavailableError,
   keystoneModeFromEnv,
   requestToBrainInput,
   type KeystoneModules,
@@ -218,6 +220,39 @@ describe("Coworld keystone player", () => {
     expect(() =>
       keystoneModeFromEnv({ PROXYWAR_KEYSTONE_MODE: "warp-drive" }),
     ).toThrow(/Unknown PROXYWAR_KEYSTONE_MODE/);
+  });
+
+  it("bedrock model autodetect: env pin first, unavailable-errors classified", () => {
+    expect(bedrockModelCandidates({})[0]).toBe("anthropic.claude-sonnet-4-6");
+    expect(
+      bedrockModelCandidates({ PROXYWAR_LLM_MODEL_ID: "my.custom-id" })[0],
+    ).toBe("my.custom-id");
+    expect(bedrockModelCandidates({}).length).toBeGreaterThanOrEqual(3);
+
+    // Switch-model errors
+    expect(
+      isModelUnavailableError(
+        "404 This model version has reached the end of its life.",
+      ),
+    ).toBe(true);
+    expect(
+      isModelUnavailableError("The provided model identifier is invalid"),
+    ).toBe(true);
+    expect(
+      isModelUnavailableError(
+        "Invocation with on-demand throughput isn't supported",
+      ),
+    ).toBe(true);
+    // Do-NOT-switch errors (auth/throttle/timeout)
+    expect(isModelUnavailableError("403 Forbidden: security token")).toBe(
+      false,
+    );
+    expect(isModelUnavailableError("ThrottlingException: rate exceeded")).toBe(
+      false,
+    );
+    expect(isModelUnavailableError("Request timed out after 12000ms")).toBe(
+      false,
+    );
   });
 
   it("decisionToResponse carries degradation flags on the wire", () => {
