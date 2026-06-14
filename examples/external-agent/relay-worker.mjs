@@ -113,7 +113,7 @@ async function relayFetch(url, init) {
     redirect: "manual",
   });
   const text = await response.text();
-  let json = null;
+  let json;
   try {
     json = text === "" ? null : JSON.parse(text);
   } catch {

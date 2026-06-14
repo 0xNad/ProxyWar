@@ -4,10 +4,7 @@ import type {
   AgentObservation,
   LegalAction,
 } from "../../src/server/agents/AgentTypes";
-import {
-  ExternalAgentRelayError,
-  ExternalAgentRelayStore,
-} from "../../src/server/agents/ExternalAgentRelay";
+import { ExternalAgentRelayStore } from "../../src/server/agents/ExternalAgentRelay";
 import { ExternalRelayAgentBrain } from "../../src/server/agents/ExternalRelayAgentBrain";
 import { buildExternalAgentRequestPayload } from "../../src/server/agents/ExternalHttpAgentBrain";
 

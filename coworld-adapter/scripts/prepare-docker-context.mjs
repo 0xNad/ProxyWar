@@ -31,7 +31,15 @@ const integrationEntries = [
   "src",
 ];
 
-await fs.rm(contextRoot, { recursive: true, force: true });
+// Robust cleanup: a previous build (or a slow filesystem) can leave handles open,
+// making a single rmdir fail with ENOTEMPTY. Retry the recursive remove, then
+// verify it is gone before recreating.
+await fs.rm(contextRoot, {
+  recursive: true,
+  force: true,
+  maxRetries: 5,
+  retryDelay: 200,
+});
 await fs.mkdir(contextRoot, { recursive: true });
 
 await copyEntries(

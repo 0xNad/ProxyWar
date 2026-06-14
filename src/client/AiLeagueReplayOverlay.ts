@@ -792,7 +792,42 @@ function overlayHtml(input: AiLeagueReplayOverlayInput): string {
         font-weight: 700;
         text-decoration: none;
       }
-      body.ai-league-replay-mode heads-up-message {
+      /*
+       * Spectator/replay declutter. These surfaces all assume a LOCAL HUMAN
+       * player (attack-ratio slider, build menu, your-nation sidebar, emoji
+       * picker, action/quick-chat panels, spawn pickers, player-action modals).
+       * A replay has no local player, so they are dead clutter / a credibility
+       * problem. Hiding the host custom-elements is the minimal replay-scoped
+       * fix: the ai-league-replay-mode body class is added ONLY by
+       * mountAiLeagueReplayOverlay (ai-league + Coworld replays), so live play
+       * is untouched. We deliberately KEEP spectator-useful surfaces visible:
+       * events-display (event log), leader-board / team-stats (standings),
+       * game-right-sidebar + replay-panel (the replay scrubber/speed/options),
+       * win-modal + alert-frame (outcome reveal).
+       */
+      body.ai-league-replay-mode heads-up-message,
+      body.ai-league-replay-mode control-panel,
+      body.ai-league-replay-mode unit-display,
+      body.ai-league-replay-mode build-menu,
+      body.ai-league-replay-mode emoji-table,
+      body.ai-league-replay-mode player-panel,
+      body.ai-league-replay-mode attacks-display,
+      body.ai-league-replay-mode chat-display,
+      body.ai-league-replay-mode chat-modal,
+      body.ai-league-replay-mode send-resource-modal,
+      body.ai-league-replay-mode player-moderation-modal,
+      body.ai-league-replay-mode spawn-timer,
+      body.ai-league-replay-mode immunity-timer {
+        display: none !important;
+      }
+      /*
+       * game-left-sidebar is the local player's nation/team card. Hide it in
+       * replay too, but NOT when the native-spectator showcase is active — that
+       * mode manages game-left-sidebar itself (it hides the personal one and
+       * mounts its own native leaderboard). The :not(...) keeps the two modes
+       * from fighting over the same element.
+       */
+      body.ai-league-replay-mode:not(.ai-league-native-spectator-ui) game-left-sidebar {
         display: none !important;
       }
       #ai-league-replay-mode-banner {

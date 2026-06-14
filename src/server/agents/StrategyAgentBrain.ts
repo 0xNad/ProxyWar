@@ -147,7 +147,10 @@ export class StrategyAgentBrain implements AgentBrain {
           x.kind === "attack" &&
           x.metadata?.expansion === true &&
           x.risk.level !== "high",
-      ) ?? find((x) => x.kind === "boat" && x.metadata?.targetID == null);
+      ) ??
+      find(
+        (x) => x.kind === "boat" && (x.metadata?.targetID ?? null) === null,
+      );
     if (expand) return expand;
 
     // 6. Fallbacks: a clearly favorable (low-risk, we're stronger) attack, build, hold.

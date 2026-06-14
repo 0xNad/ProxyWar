@@ -1,7 +1,25 @@
 import { EventBus, GameEvent } from "../../core/EventBus";
 import { Cell } from "../../core/game/Game";
 import { GameView, PlayerView, UnitView } from "../../core/game/GameView";
+import { isAiLeagueReplayRoute } from "../AiLeagueReplayMode";
 import { CenterCameraEvent, DragEvent, ZoomEvent } from "../InputHandler";
+
+/**
+ * Replay / spectator surfaces (the `/ai-league-replay/...`, `/proxywar-replay/...`,
+ * legacy `/openfront-replay/...`, and Coworld `/client/{global,replay,player}` routes)
+ * have no local human player, so the spectator should see the whole territorial board
+ * rather than being slammed into a single player at high zoom. `index.html` sets
+ * `window.__PROXYWAR_AI_REPLAY__` for exactly these routes before the bundle runs;
+ * `isAiLeagueReplayRoute()` is the matching pathname check. Either signal alone is
+ * sufficient (they are redundant by design — both derive from the same replay routes);
+ * normal live play sets NEITHER, so live play is byte-for-byte unchanged.
+ */
+function isReplaySpectatorView(): boolean {
+  const replayWindow = window as typeof window & {
+    __PROXYWAR_AI_REPLAY__?: boolean;
+  };
+  return replayWindow.__PROXYWAR_AI_REPLAY__ === true || isAiLeagueReplayRoute();
+}
 
 export class GoToPlayerEvent implements GameEvent {
   constructor(
@@ -49,6 +67,15 @@ export class TransformHandler {
     this.eventBus.on(GoToPositionEvent, (e) => this.onGoToPosition(e));
     this.eventBus.on(GoToUnitEvent, (e) => this.onGoToUnit(e));
     this.eventBus.on(CenterCameraEvent, () => this.centerCamera());
+
+    // Replay/spectator: start fit-to-map (whole board centered) from t=0.
+    // GameRenderer.initialize() also calls centerAll() shortly after, but
+    // initializing here guarantees the very first paint is fit-to-map and makes
+    // the intent explicit. Live play keeps the hand-tuned zoomed-in defaults
+    // above (scale 1.8 / offsets -350,-200) untouched.
+    if (isReplaySpectatorView()) {
+      this.centerAll(0.95);
+    }
   }
 
   public updateCanvasBoundingRect() {
@@ -197,7 +224,14 @@ export class TransformHandler {
       return;
     }
     this.target = new Cell(nameLocation.x, nameLocation.y);
-    this.targetScale = event.zoom ?? null;
+    // In replay/spectator mode keep the full-map fit (set by
+    // GameRenderer.initialize -> centerAll) and never auto-zoom onto a single
+    // player. The replay spectator-focus path (ClientGameRunner) and any
+    // leaderboard/event "go to player" click would otherwise slam the camera to
+    // a high zoom on one nation and hide the rest of the board. We still PAN to
+    // the player so click-to-focus works; we just drop the zoom component.
+    // Guarded so live play is unchanged.
+    this.targetScale = isReplaySpectatorView() ? null : (event.zoom ?? null);
     this.intervalID = setInterval(() => this.goTo(), GOTO_INTERVAL_MS);
   }
 

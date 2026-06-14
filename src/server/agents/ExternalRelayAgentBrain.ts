@@ -115,7 +115,7 @@ export class ExternalRelayAgentBrain implements AgentBrain {
       return (parsed as { responseText: string }).responseText;
     } catch (error) {
       if (isAbortError(error)) {
-        throw new Error(`timed out after ${this.timeoutMs}ms`);
+        throw new Error(`timed out after ${this.timeoutMs}ms`, { cause: error });
       }
       throw error;
     } finally {

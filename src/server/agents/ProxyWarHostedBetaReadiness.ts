@@ -606,7 +606,9 @@ async function fetchWithTimeout(
     });
   } catch (error) {
     if (isAbortError(error)) {
-      throw new Error(`${path} timed out after ${options.timeoutMs}ms`);
+      throw new Error(`${path} timed out after ${options.timeoutMs}ms`, {
+        cause: error,
+      });
     }
     throw error;
   } finally {

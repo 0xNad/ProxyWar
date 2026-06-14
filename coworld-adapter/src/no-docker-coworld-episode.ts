@@ -13,6 +13,7 @@ import {
   injectCoworldSplash,
   type CoworldAppShellRoute,
 } from "./coworld-appshell.ts";
+import { resolveWinnerSlot, type WinnerRef } from "./coworld-results.ts";
 
 const localRoot = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
@@ -22,7 +23,10 @@ const proxyWarRepo = process.env.PROXYWAR_REPO ?? "/app/proxywar";
 const require = createRequire(import.meta.url);
 const { WebSocket, WebSocketServer } = require(
   `${proxyWarRepo}/node_modules/ws`,
-);
+) as {
+  WebSocket: typeof import("ws").WebSocket;
+  WebSocketServer: typeof import("ws").WebSocketServer;
+};
 const winston = require(`${proxyWarRepo}/node_modules/winston`);
 const proxyWarStaticRoot = path.join(proxyWarRepo, "static");
 const proxyWarPublicRunArtifacts = new Set([
@@ -85,6 +89,7 @@ type CoworldResults = {
   decision_count: number;
   accepted_decision_count: number;
   fallback_count: number;
+  degraded_count: number;
   players: Array<{
     slot: number;
     name: string;
@@ -124,7 +129,13 @@ class CoworldProtocolServer {
   private readonly server = http.createServer((request, response) => {
     void this.handleHttp(request, response);
   });
-  private readonly wsServer = new WebSocketServer({ noServer: true });
+  // maxPayload caps a single inbound frame; a legitimate decision_response is far
+  // under 256 KiB. Without it, ws defaults to 100 MiB, so one oversized frame from
+  // any of the 4 seats could OOM the memory-tight episode.
+  private readonly wsServer = new WebSocketServer({
+    noServer: true,
+    maxPayload: 256 * 1024,
+  });
   private readonly players = new Map<number, InstanceType<typeof WebSocket>>();
   private readonly pending = new Map<string, PendingDecision>();
   private readonly globalSockets = new Set<InstanceType<typeof WebSocket>>();
@@ -231,12 +242,10 @@ class CoworldProtocolServer {
   }
 
   brainForSlot(slot: number, buildRequestPayload: (input: unknown) => unknown) {
-    const server = this;
     return {
       brainType: "external-http",
-      async decide(input: unknown) {
-        return server.decide(slot, buildRequestPayload(input));
-      },
+      decide: async (input: unknown) =>
+        this.decide(slot, buildRequestPayload(input)),
     };
   }
 
@@ -384,12 +393,25 @@ class CoworldProtocolServer {
     });
   }
 
-  private handlePlayerMessage(slot: number, data: Buffer): void {
+  private handlePlayerMessage(
+    slot: number,
+    data: import("ws").RawData,
+  ): void {
     let message: Record<string, unknown>;
     try {
       message = JSON.parse(String(data));
     } catch (error) {
-      throw new Error(`Coworld player slot ${slot} sent invalid JSON`);
+      // A single malformed frame from ONE seat must NEVER crash the container:
+      // this runs inside a `ws` 'message' listener with no surrounding try, so a
+      // throw becomes an uncaught exception that kills the whole 4-player episode.
+      // Ignore the frame (like an unknown message type below); the seat simply
+      // misses this decision window and times out loudly if it keeps sending junk.
+      console.warn(
+        `[coworld] player slot ${slot} sent invalid JSON; ignoring frame: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+      return;
     }
     if (message.type !== "decision_response") {
       return;
@@ -629,7 +651,9 @@ async function runStandaloneNoDockerProof(): Promise<void> {
   const port = await server.listen();
   const playerProcesses = startPlayers(config, server);
   try {
-    await runRouteChecks(port, config);
+    if (process.env.PROXYWAR_SKIP_ROUTE_CHECKS !== "1") {
+      await runRouteChecks(port, config);
+    }
     await server.waitForPlayers();
     const result = await runProxyWarEpisode(config, workspace, server);
     server.setReplayPayload(result.replayPayload);
@@ -641,7 +665,9 @@ async function runStandaloneNoDockerProof(): Promise<void> {
       path.join(workspace, "replay"),
       `${JSON.stringify(result.replayPayload, null, 2)}\n`,
     );
-    await runReplayChecks(port);
+    if (process.env.PROXYWAR_SKIP_ROUTE_CHECKS !== "1") {
+      await runReplayChecks(port);
+    }
     server.sendFinal();
     await waitForPlayersToExit(playerProcesses);
     await fs.writeFile(
@@ -786,6 +812,12 @@ async function runProxyWarEpisode(
     startingGold: 200000,
     maxPlayers: config.tokens.length,
   };
+  // NOTE: the 3rd GameServer arg is `createdAt` (a wall-clock game-start
+  // timestamp), NOT the RNG seed. The simulation RNG is seeded from the FIXED
+  // match id "COWRLD01" in GameRunner (simpleHash(gameID)), so the SCORED outcome
+  // and the winner are deterministic given the policies regardless of this
+  // timestamp. (A fixed tiny value would be a footgun for any future code that
+  // calls GameServer.phase(), so use a real now.)
   const game = new modules.GameServer(
     "COWRLD01",
     log,
@@ -1238,7 +1270,10 @@ async function writeUri(
     const response = await fetch(uri, {
       method: "PUT",
       headers: { "content-type": contentType },
-      body,
+      // string | Buffer is a valid request body at runtime; the DOM BodyInit
+      // type (loaded alongside Node's fetch in this monorepo) doesn't model
+      // Buffer, so assert the runtime-correct type.
+      body: body as BodyInit,
     });
     if (!response.ok) {
       throw new Error(`${uri} returned HTTP ${response.status}`);
@@ -1407,10 +1442,8 @@ function coworldResults(input: {
     (sum, player) => sum + Math.max(0, player.tilesOwned ?? 0),
     0,
   );
-  const winnerIndex = input.finalState.players.findIndex((player) =>
-    input.finalState.phase.includes(player.username),
-  );
-  const winner_slot = winnerIndex >= 0 ? winnerIndex : null;
+  // Winner slot is resolved by identity in finalKnownState (not a name substring).
+  const winner_slot = input.finalState.winnerSlot;
   const scores = input.finalState.players.map((player, index) => {
     if (winner_slot !== null) {
       return index === winner_slot ? 1 : 0;
@@ -1429,8 +1462,16 @@ function coworldResults(input: {
     accepted_decision_count: input.records.filter(
       (record) => record.result.accepted,
     ).length,
+    // A decision is a fallback if it fell back OR the LLM planner degraded —
+    // a degraded-but-not-fallback decision (e.g. the standing directive kept
+    // executing after a Commander failure) must not read as 0 fallbacks.
     fallback_count: input.records.filter(
-      (record) => record.decisionMetadata?.fallbackUsed === true,
+      (record) =>
+        record.decisionMetadata?.fallbackUsed === true ||
+        record.decisionMetadata?.llmPlannerDegraded === true,
+    ).length,
+    degraded_count: input.records.filter(
+      (record) => record.decisionMetadata?.llmPlannerDegraded === true,
     ).length,
     players: input.finalState.players.map((player, slot) => ({
       slot,
@@ -1457,25 +1498,43 @@ function finalKnownState(input: {
         ? "spawn"
         : "active"
       : `winner:${typeof winner === "string" ? winner : winner.name()}`;
+  // Resolve each participant's live Player once, by clientID identity.
+  const resolved = input.participants.map((participant) => {
+    const clientID = participant.runner.clientID();
+    const player =
+      clientID === null ? null : input.gameState.playerByClientID(clientID);
+    return { participant, player };
+  });
+  // Winner -> slot by IDENTITY (see resolveWinnerSlot — never a name substring).
+  const winnerRef: WinnerRef =
+    winner === null
+      ? { type: "none" }
+      : typeof winner === "string"
+        ? { type: "team", team: winner }
+        : { type: "player", id: winner.id() };
+  const winnerSlot = resolveWinnerSlot(
+    resolved.map(({ player }) => ({
+      id: player?.id() ?? null,
+      team: player?.team() ?? null,
+      tilesOwned: player?.numTilesOwned() ?? 0,
+    })),
+    winnerRef,
+  );
   return {
     phase,
+    winnerSlot,
     tick: input.gameState.ticks(),
     turnCount: input.turnCount,
-    players: input.participants.map((participant) => {
-      const clientID = participant.runner.clientID();
-      const player =
-        clientID === null ? null : input.gameState.playerByClientID(clientID);
-      return {
-        agentID: participant.runner.agentID,
-        username: participant.spec.username,
-        profile: participant.spec.profile,
-        playerID: player?.id() ?? null,
-        isAlive: player?.isAlive() ?? null,
-        tilesOwned: player?.numTilesOwned() ?? null,
-        troops: player?.troops() ?? null,
-        gold: player?.gold()?.toString() ?? null,
-      };
-    }),
+    players: resolved.map(({ participant, player }) => ({
+      agentID: participant.runner.agentID,
+      username: participant.spec.username,
+      profile: participant.spec.profile,
+      playerID: player?.id() ?? null,
+      isAlive: player?.isAlive() ?? null,
+      tilesOwned: player?.numTilesOwned() ?? null,
+      troops: player?.troops() ?? null,
+      gold: player?.gold()?.toString() ?? null,
+    })),
   };
 }
 
@@ -1666,23 +1725,6 @@ function isInsideRoot(filePath: string, rootDir: string): boolean {
   );
 }
 
-function escapeHtml(value: string): string {
-  return value.replace(/[&<>"']/g, (char) => {
-    switch (char) {
-      case "&":
-        return "&amp;";
-      case "<":
-        return "&lt;";
-      case ">":
-        return "&gt;";
-      case '"':
-        return "&quot;";
-      default:
-        return "&#39;";
-    }
-  });
-}
-
 function requiredEnv(name: string): string {
   const value = process.env[name];
   if (!value) {
@@ -1711,6 +1753,7 @@ function coworldReport(input: {
     `- Decisions: ${input.results.decision_count}`,
     `- Accepted decisions: ${input.results.accepted_decision_count}`,
     `- Fallbacks: ${input.results.fallback_count}`,
+    `- Degraded (llmPlannerDegraded): ${input.results.degraded_count}`,
     "",
     "Remaining verification gate:",
     "",
@@ -1726,5 +1769,17 @@ function sleep(ms: number): Promise<void> {
 function waitForever(): Promise<never> {
   return new Promise(() => undefined);
 }
+
+// Defense-in-depth: a throw inside a ws/event listener or any async callback would
+// otherwise crash the container with a bare stack (or hang). Log it loudly and exit
+// non-zero so the platform sees a clearly-failed episode, never a silent crash.
+process.on("uncaughtException", (error) => {
+  console.error("[coworld] FATAL uncaughtException:", error);
+  process.exit(1);
+});
+process.on("unhandledRejection", (reason) => {
+  console.error("[coworld] FATAL unhandledRejection:", reason);
+  process.exit(1);
+});
 
 await main();

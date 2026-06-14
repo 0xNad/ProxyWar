@@ -17316,3 +17316,317 @@ describe("binding directives (commitment keystone)", () => {
     expect(plannerCalls).toBe(2);
   });
 });
+
+describe("FM-1 enforce conversion over neutral (cash the midgame kill window)", () => {
+  const FLAG = "PROXYWAR_TUNE_ENFORCE_CONVERSION";
+  let savedFlag: string | undefined;
+  beforeEach(() => {
+    savedFlag = process.env[FLAG];
+  });
+  afterEach(() => {
+    if (savedFlag === undefined) {
+      delete process.env[FLAG];
+    } else {
+      process.env[FLAG] = savedFlag;
+    }
+  });
+
+  const fmRival = (
+    over: Partial<AgentVisiblePlayer> = {},
+  ): AgentVisiblePlayer => ({
+    playerID: "RIVAL001",
+    clientID: null,
+    smallID: 9,
+    name: "Rival One",
+    type: PlayerType.Nation,
+    isAlive: true,
+    isDisconnected: false,
+    hasSpawned: true,
+    troops: 60_000,
+    gold: "100",
+    tilesOwned: 9_000,
+    tileShare: 0.15,
+    sharesBorder: true,
+    isAllied: false,
+    isFriendly: false,
+    relation: Relation.Hostile,
+    canAttack: true,
+    canRequestAlliance: true,
+    canDonateGold: false,
+    canDonateTroops: false,
+    canEmbargo: true,
+    hasEmbargoAgainst: false,
+    outgoingAttack: false,
+    incomingAttack: false,
+    hasOutgoingAllianceRequest: false,
+    hasIncomingAllianceRequest: false,
+    relativeTroopRatio: 4,
+    ...over,
+  });
+
+  // A winning-midgame position: the agent owns a 3-5x troop edge over a bordered,
+  // weaker rival (exactly the FM-1 kill window) and neutral land is also available.
+  function fmObservation(opts: {
+    ownTroops: number;
+    ownTiles: number;
+    rival?: AgentVisiblePlayer;
+  }): AgentObservation {
+    const base = activeObservation("pressure_rival");
+    const rival = opts.rival ?? fmRival();
+    return {
+      ...base,
+      ownState: {
+        playerID: "agent-1",
+        clientID: null,
+        smallID: 1,
+        name: "Planner Agent",
+        type: PlayerType.Human,
+        isAlive: true,
+        isDisconnected: false,
+        isTraitor: false,
+        hasSpawned: true,
+        troops: opts.ownTroops,
+        maxTroops: Math.round(opts.ownTroops / 0.7),
+        troopRatio: 0.7,
+        gold: "500",
+        tilesOwned: opts.ownTiles,
+        tileShare: opts.ownTiles / 60_000,
+        borderTiles: 300,
+        outgoingAttacks: 0,
+        incomingAttacks: 0,
+        outgoingAllianceRequests: 0,
+        incomingAllianceRequests: 0,
+      },
+      visiblePlayers: [rival],
+      combat: {
+        ...base.combat,
+        ownTroops: opts.ownTroops,
+        troopRatio: 0.7,
+        borderedPlayerIDs: [rival.playerID],
+        attackablePlayerIDs: [rival.playerID],
+        canExpandIntoNeutral: true,
+      },
+      memory: { ...base.memory, recentExpansionCount: 3 },
+    };
+  }
+
+  function fmAttack(troopPercent: number, ownTroops: number): LegalAction {
+    return {
+      id: `attack:RIVAL001:${troopPercent}`,
+      kind: "attack",
+      label: `Attack Rival One with ${troopPercent}%`,
+      intent: {
+        type: "attack",
+        targetID: "RIVAL001",
+        troops: Math.round((ownTroops * troopPercent) / 100),
+      },
+      risk: { level: "medium", score: 0.3 },
+      metadata: {
+        targetID: "RIVAL001",
+        targetName: "Rival One",
+        troops: Math.round((ownTroops * troopPercent) / 100),
+        troopPercent,
+        troopPercentage: troopPercent / 100,
+        relativeTroopRatio: 4,
+        targetTileShare: 0.15,
+        sharesBorder: true,
+      },
+    };
+  }
+
+  function fmNeutral(troopPercent: number): LegalAction {
+    return {
+      id: `expand:terra-nullius:${troopPercent}`,
+      kind: "attack",
+      label: "Expand neutral land",
+      intent: { type: "attack", targetID: null, troops: troopPercent * 1000 },
+      risk: { level: "low", score: 0.1 },
+      metadata: { expansion: true, troopPercentage: troopPercent / 100, troopPercent },
+    };
+  }
+
+  // An UNDER-RESOURCED kill window: low troop reserve and a small land base, so the
+  // only conversion-ready attack offered is a large (35%) over-commit. This is the
+  // position that still reproduces the FM-1 selection failure on this build — built
+  // directly from AgentObservationBuilder (aggressive profile) rather than via
+  // activeObservation so the scorer penalizes the over-commit as in real games.
+  function underResourcedObservation(): AgentObservation {
+    const base = new AgentObservationBuilder().build({
+      agentID: "agent-1",
+      clientID: null,
+      username: "Planner Agent",
+      profile: "aggressive",
+      gameID: "PLAN",
+      turnNumber: 2400,
+      phaseOverride: "active",
+    });
+    return {
+      ...base,
+      ownState: {
+        playerID: "agent-1",
+        clientID: null,
+        smallID: 1,
+        name: "Planner Agent",
+        type: PlayerType.Human,
+        isAlive: true,
+        isDisconnected: false,
+        isTraitor: false,
+        hasSpawned: true,
+        troops: 100_000,
+        maxTroops: 400_000,
+        troopRatio: 0.18,
+        gold: "500",
+        tilesOwned: 9_000,
+        tileShare: 0.15,
+        borderTiles: 220,
+        outgoingAttacks: 0,
+        incomingAttacks: 0,
+        outgoingAllianceRequests: 0,
+        incomingAllianceRequests: 0,
+      },
+      visiblePlayers: [
+        fmRival({ troops: 30_000, tilesOwned: 10_800, tileShare: 0.18 }),
+      ],
+      combat: {
+        ...base.combat,
+        ownTroops: 100_000,
+        troopRatio: 0.18,
+        borderedPlayerIDs: ["RIVAL001"],
+        attackablePlayerIDs: ["RIVAL001"],
+        canExpandIntoNeutral: true,
+      },
+      memory: { ...base.memory, recentExpansionCount: 0 },
+    };
+  }
+
+  function fmPlan(): StrategicPlan {
+    return {
+      ...pressurePlan(fmObservation({ ownTroops: 300_000, ownTiles: 16_000 }), "RIVAL001"),
+    };
+  }
+
+  it("the constructed position offers an executor-ready conversion attack", () => {
+    const observation = fmObservation({ ownTroops: 300_000, ownTiles: 16_000 });
+    const legalActions = [fmAttack(25, 300_000), fmNeutral(35), fmNeutral(10), hold()];
+    const conversion = buildAgentTacticalAffordances({
+      observation,
+      legalActions,
+    }).frontierConversionTiming;
+    expect(conversion?.recommended).toBe(true);
+    expect(conversion?.executorReady).toBe(true);
+    expect(conversion?.bestExecutorReadyTargetID).toBe("RIVAL001");
+  });
+
+  it("ON: selects the decisive conversion attack over neutral expansion (cashes the kill)", () => {
+    process.env[FLAG] = "1";
+    const observation = fmObservation({ ownTroops: 300_000, ownTiles: 16_000 });
+    const legalActions = [fmAttack(25, 300_000), fmNeutral(35), fmNeutral(10), hold()];
+    const decision = new FrontierPolicyExecutor("aggressive").decide(
+      { observation, legalActions },
+      fmPlan(),
+    );
+    expect(decision.actionID).toBe("attack:RIVAL001:25");
+  });
+
+  it("default (flag unset) behaves as ON and cashes the kill", () => {
+    delete process.env[FLAG];
+    const observation = fmObservation({ ownTroops: 300_000, ownTiles: 16_000 });
+    const legalActions = [fmAttack(25, 300_000), fmNeutral(35), fmNeutral(10), hold()];
+    const decision = new FrontierPolicyExecutor("aggressive").decide(
+      { observation, legalActions },
+      fmPlan(),
+    );
+    expect(decision.actionID).toBe("attack:RIVAL001:25");
+  });
+
+  it("ON: clamps every neutral-growth candidate strictly below the conversion-ready attack", () => {
+    process.env[FLAG] = "1";
+    const observation = fmObservation({ ownTroops: 300_000, ownTiles: 16_000 });
+    const legalActions = [fmAttack(25, 300_000), fmNeutral(35), fmNeutral(10), hold()];
+    const ranked = rankLegalActionsForPrompt({
+      input: { observation, legalActions },
+      profile: "aggressive",
+      plan: fmPlan(),
+      limit: 8,
+    });
+    const attackScore = ranked.find((r) => r.id === "attack:RIVAL001:25")
+      ?.totalScore;
+    expect(attackScore).toBeDefined();
+    const neutralScores = ranked
+      .filter((r) => r.id.startsWith("expand:terra-nullius"))
+      .map((r) => r.totalScore);
+    expect(neutralScores.length).toBeGreaterThan(0);
+    for (const neutralScore of neutralScores) {
+      expect(neutralScore).toBeLessThan(attackScore as number);
+    }
+    // The conversion-ready attack is the top-ranked candidate.
+    expect(ranked[0]?.id).toBe("attack:RIVAL001:25");
+  });
+
+  // The genuine FM-1 failure surface that still reproduces on this build: an
+  // UNDER-RESOURCED player whose only conversion-ready attack is an over-extending
+  // large (35%) commit. With the flag OFF the executor farms neutral while the kill
+  // window is open (the FM-1 disease — `expand:terra-nullius` is selected). With the
+  // flag ON it refuses to select any neutral expansion over the conversion-ready
+  // attack: the neutral candidates are clamped below the conversion attack, so the
+  // executor takes the attack if it is schedulable, and otherwise holds for one
+  // cycle to re-plan rather than farming neutral.
+  it("under-resourced kill window: OFF farms neutral, ON never selects neutral over the conversion attack", () => {
+    const observation = underResourcedObservation();
+    const legalActions = [fmAttack(35, 100_000), fmNeutral(35), fmNeutral(10), hold()];
+    // Precondition: the affordance still says a conversion attack is executor-ready.
+    expect(
+      buildAgentTacticalAffordances({ observation, legalActions })
+        .frontierConversionTiming?.executorReady,
+    ).toBe(true);
+
+    process.env[FLAG] = "0";
+    const off = new FrontierPolicyExecutor("aggressive").decide(
+      { observation, legalActions },
+      fmPlan(),
+    );
+    // Baseline (pre-fix): the agent farms neutral while the kill window is open.
+    expect(off.actionID).toBe("expand:terra-nullius:10");
+
+    process.env[FLAG] = "1";
+    const on = new FrontierPolicyExecutor("aggressive").decide(
+      { observation, legalActions },
+      fmPlan(),
+    );
+    // With the fix on, neutral is never chosen over the conversion-ready attack.
+    expect(on.actionID).not.toBe("expand:terra-nullius:10");
+    expect(on.actionID).not.toBe("expand:terra-nullius:35");
+  });
+
+  // Byte-equivalence of the OFF arm (the A/B champion): for the same build and the
+  // same position, flag OFF must reproduce the exact pre-fix selection. Asserted
+  // across a position where the fix is a no-op (schedulable attack already wins) and
+  // the position where it bites (the under-resourced large commit), against an
+  // explicit per-position baseline.
+  it("OFF: selection is unchanged vs the pre-fix baseline across positions", () => {
+    const cases: Array<{
+      observation: AgentObservation;
+      legalActions: LegalAction[];
+      baseline: string;
+    }> = [
+      {
+        observation: fmObservation({ ownTroops: 300_000, ownTiles: 16_000 }),
+        legalActions: [fmAttack(25, 300_000), fmNeutral(35), fmNeutral(10), hold()],
+        baseline: "attack:RIVAL001:25",
+      },
+      {
+        observation: underResourcedObservation(),
+        legalActions: [fmAttack(35, 100_000), fmNeutral(35), fmNeutral(10), hold()],
+        baseline: "expand:terra-nullius:10",
+      },
+    ];
+    for (const testCase of cases) {
+      process.env[FLAG] = "0";
+      const decision = new FrontierPolicyExecutor("aggressive").decide(
+        { observation: testCase.observation, legalActions: testCase.legalActions },
+        fmPlan(),
+      );
+      expect(decision.actionID).toBe(testCase.baseline);
+    }
+  });
+});

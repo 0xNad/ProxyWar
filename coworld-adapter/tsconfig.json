@@ -1,0 +1,14 @@
+{
+  // Local typecheck for the adapter sources. The adapter is executed via tsx
+  // (transpile-only) and bundled into the Docker image, so this config exists
+  // purely for `tsc --noEmit` type verification in the repo layout, where the
+  // `../../src/...` type-only imports resolve to the main ProxyWar repo.
+  "extends": "../tsconfig.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "allowImportingTsExtensions": true,
+    "types": ["node"]
+  },
+  "include": ["src/**/*"],
+  "exclude": ["node_modules", ".docker-context", "tmp"]
+}

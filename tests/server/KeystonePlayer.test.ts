@@ -21,6 +21,7 @@ import {
   isModelUnavailableError,
   keystoneModeFromEnv,
   requestToBrainInput,
+  transportFallbackResponse,
   type KeystoneModules,
 } from "../../coworld-adapter/src/keystone-player";
 
@@ -275,5 +276,54 @@ describe("Coworld keystone player", () => {
     });
     expect("llmPlannerDegraded" in healthy).toBe(false);
     expect("fallbackUsed" in healthy).toBe(false);
+  });
+
+  it("transport fallback is LOUD: degraded flags on the wire + a valid offered id", () => {
+    // This is the exact path the socket message handler takes when the brain
+    // (or payload reconstruction) throws. A dead/degraded brain must NEVER
+    // look healthy on the wire — the v1 bedrock seat played 60+ hosted rounds
+    // on a silent fallback because this branch had no loudness channel.
+    const request = wireRequest(spawnBrainInput());
+    const offeredIDs = (
+      (request as { legalActions: Array<{ id: string }> }).legalActions
+    ).map((action) => action.id);
+
+    const response = transportFallbackResponse(
+      "req_fallback",
+      request,
+      "brain exploded: ECONNRESET",
+    );
+
+    // Honest degradation flags — reverting the fix (omitting these) fails here.
+    expect(response.llmPlannerDegraded).toBe(true);
+    expect(response.fallbackUsed).toBe(true);
+    // Still answers with a VALID offered LegalAction.id (never a stall / empty).
+    expect(typeof response.selectedLegalActionId).toBe("string");
+    expect(response.selectedLegalActionId).not.toBe("");
+    expect(offeredIDs).toContain(response.selectedLegalActionId as string);
+    // The inner error text is preserved for incident triage.
+    expect(response.reason as string).toContain("brain exploded: ECONNRESET");
+    expect(response.type).toBe("decision_response");
+    expect(response.requestID).toBe("req_fallback");
+  });
+
+  it("transport fallback prefers an offered hold action over legalActions[0]", () => {
+    // legalActions[0] is the higher-risk spawn; the lowest-risk no-op (hold)
+    // is the safer last resort when the brain is down.
+    const request = wireRequest(spawnBrainInput());
+
+    const response = transportFallbackResponse("req_hold", request, "boom");
+
+    expect(response.selectedLegalActionId).toBe("hold:wait");
+  });
+
+  it("transport fallback never throws on an empty/missing legalActions payload", () => {
+    const response = transportFallbackResponse("req_empty", {}, "no payload");
+
+    // No offered actions -> empty id, but it is still a LOUD degraded response
+    // (the loudness channel must survive even the worst-case payload).
+    expect(response.selectedLegalActionId).toBe("");
+    expect(response.llmPlannerDegraded).toBe(true);
+    expect(response.fallbackUsed).toBe(true);
   });
 });

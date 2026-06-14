@@ -27,9 +27,14 @@ Coworld policy container
 ## Status
 
 - Passes local `coworld certify` and `coworld run-episode --verify-replay`
-  against Coworld **0.1.15**.
+  against Coworld **0.1.20** (the pin was bumped from 0.1.15, which crashes on the
+  current platform API shapes for episode queries and image upload).
 - Verified at 8 parallel local episodes.
-- Ready for hosted Coworld upload as `proxywar:0.0.8`.
+- The canonical package is `proxywar:0.0.9` (two fixed seats). A separate
+  four-seat package, `proxywar-ffa-4p` (`coworld/coworld_manifest_ffa4p.json`),
+  also certifies locally — a Coworld declares exactly one fixed seat count
+  (the certifier requires `players` minItems == maxItems), so FFA is its own
+  package rather than a variable-seat variant of `proxywar`.
 - Uses the `tsx` loader rather than the `tsx` CLI so read-only episode pods do
   not need writable `/tmp`.
 - Sanitizes Coworld policy labels into Proxy War usernames before entering the

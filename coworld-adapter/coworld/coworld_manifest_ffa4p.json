@@ -1,9 +1,9 @@
 {
   "$schema": "https://raw.githubusercontent.com/Metta-AI/coworld/main/src/coworld/coworld_manifest_schema.json",
   "game": {
-    "name": "proxywar",
-    "version": "0.0.9",
-    "description": "Hosted Proxy War Coworld adapter that preserves the LegalAction.id decision path.",
+    "name": "proxywar-ffa-4p",
+    "version": "0.0.1",
+    "description": "Hosted Proxy War Coworld 4-player FFA package (fixed 4 seats) that preserves the LegalAction.id decision path. Separate from proxywar (2-seat) because a Coworld declares one fixed seat count.",
     "owner": "proxywar",
     "runnable": {
       "type": "game",
@@ -33,8 +33,8 @@
       "properties": {
         "tokens": {
           "type": "array",
-          "minItems": 2,
-          "maxItems": 2,
+          "minItems": 4,
+          "maxItems": 4,
           "items": {
             "type": "string",
             "minLength": 1
@@ -42,8 +42,8 @@
         },
         "players": {
           "type": "array",
-          "minItems": 2,
-          "maxItems": 2,
+          "minItems": 4,
+          "maxItems": 4,
           "items": {
             "type": "object",
             "additionalProperties": false,
@@ -61,7 +61,7 @@
         "max_decision_steps": {
           "type": "integer",
           "minimum": 1,
-          "maximum": 50
+          "maximum": 100
         },
         "turns_per_decision_step": {
           "type": "integer",
@@ -125,8 +125,8 @@
       "properties": {
         "scores": {
           "type": "array",
-          "minItems": 2,
-          "maxItems": 2,
+          "minItems": 4,
+          "maxItems": 4,
           "items": {
             "type": "number"
           }
@@ -137,7 +137,7 @@
             "null"
           ],
           "minimum": 0,
-          "maximum": 1
+          "maximum": 3
         },
         "turn_count": {
           "type": [
@@ -171,8 +171,8 @@
         },
         "players": {
           "type": "array",
-          "minItems": 2,
-          "maxItems": 2,
+          "minItems": 4,
+          "maxItems": 4,
           "items": {
             "type": "object",
             "additionalProperties": false,
@@ -187,7 +187,7 @@
               "slot": {
                 "type": "integer",
                 "minimum": 0,
-                "maximum": 1
+                "maximum": 3
               },
               "name": {
                 "type": "string"
@@ -226,7 +226,7 @@
     "docs": {
       "readme": {
         "type": "text",
-        "value": "# Proxy War Coworld\n\nProxy War is a simultaneous-turn territorial strategy game. This Coworld package runs Proxy War through the existing game runner and preserves the LegalAction.id decision path.\n\n## Rules Summary\n\nEach Coworld player controls one Proxy War slot. During a decision step, the game advances through the existing Proxy War game server and asks each connected player to choose from the current legal actions. The default variant uses a compact two-player map, 50 decision cycles, 100 turns per cycle, and a short replay tail so hosted tournaments produce meaningful expansion, economy, and combat evidence without requiring a 170-minute full match. Certification keeps a separate short smoke fixture so upload checks stay fast.\n\nA player may only select an action id that the game offered in the current request. The game passes that selected id back through Proxy War's existing AgentDecisionValidator, AgentLeagueMatchRunner, AgentRunner, and GameServer path. Invalid, stale, or missing selections are treated as fallback decisions by the adapter and are visible in the result artifact.\n\n## Player Protocol\n\nPlayers connect to COWORLD_PLAYER_WS_URL. The game sends decision_request messages containing protocolVersion, observation, legalActions, and responseContract fields. The player replies with decision_response, the same requestID, and selectedLegalActionId. selectedLegalActionId must match one offered legalActions[].id exactly.\n\nThe bundled starter player is proxywar-starter-websocket. It is intentionally simple: it reads the offered LegalAction.id values and chooses one legal id. It is useful for certification and smoke tests, not for competitive play.\n\n## Scoring\n\nThe adapter writes one numeric score per policy slot in results.scores. If Proxy War reports a winner, that slot receives 1 and every other slot receives 0. If a bounded episode ends without a winner, each slot receives its normalized owned-territory share among policy slots. Scores sum to 1 in normal proofs.\n\nThis scoring rule is the shipped ranking scalar. Softmax can re-rank with a different scalar after upload by changing only the results.scores values, not the game/player contract or the LegalAction.id path.\n\n## Artifacts\n\nEach episode writes Coworld-compatible results, replay bytes, game/player logs, and Proxy War match artifacts. The reporter, grader, diagnoser, and optimizer-plan runnables consume the episode bundle shape used by Coworld tooling. Reporter and grader contracts are exercised; diagnoser and optimizer are contract-shaped because Coworld 0.1.15 still marks those roles reserved or runtime-pending.\n\n## Hosted Status\n\nThis manifest is the canonical hosted Proxy War Coworld. It runs with the tsx loader so read-only episode pods do not need writable /tmp, sanitizes Coworld policy labels into Proxy War usernames, and serves global, replay, and player Coworld client routes from the native Proxy War viewer."
+        "value": "# Proxy War Coworld\n\nProxy War is a simultaneous-turn territorial strategy game. This Coworld package runs a fixed four-player free-for-all through the existing Proxy War game runner and preserves the LegalAction.id decision path. It is a separate package from the two-seat proxywar Coworld because a Coworld declares exactly one fixed seat count (the certifier requires players minItems == maxItems).\n\n## Rules Summary\n\nEach Coworld player controls one Proxy War slot. During a decision step, the game advances through the existing Proxy War game server and asks each connected player to choose from the current legal actions. The default variant uses a four-player map, up to 100 decision cycles, 100 turns per cycle, ends when a player controls 80% of the map, and a short replay tail so hosted tournaments produce meaningful expansion, economy, and combat evidence without requiring a 170-minute full match. Certification keeps a separate short four-seat smoke fixture (2 decision steps x 25 turns) so certify finishes fast; the hosted FFA variant runs up to a 100-step x 100-turn episode (~10000 turns) on the same Compact map, ending when a player reaches 80% map control.\n\nA player may only select an action id that the game offered in the current request. The game passes that selected id back through Proxy War's existing AgentDecisionValidator, AgentLeagueMatchRunner, AgentRunner, and GameServer path. Invalid, stale, or missing selections are treated as fallback decisions by the adapter and are visible in the result artifact.\n\n## Player Protocol\n\nPlayers connect to COWORLD_PLAYER_WS_URL. The game sends decision_request messages containing protocolVersion, observation, legalActions, and responseContract fields. The player replies with decision_response, the same requestID, and selectedLegalActionId. selectedLegalActionId must match one offered legalActions[].id exactly.\n\nThe bundled starter player is proxywar-starter-websocket. It is intentionally simple: it reads the offered LegalAction.id values and chooses one legal id. It is useful for certification and smoke tests, not for competitive play.\n\n## Scoring\n\nThe adapter writes one numeric score per policy slot in results.scores. If Proxy War reports a winner, that slot receives 1 and every other slot receives 0. If a bounded episode ends without a winner, each of the four slots receives its normalized owned-territory share among policy slots. Scores sum to 1 in normal proofs.\n\nThis scoring rule is the shipped ranking scalar. Softmax can re-rank with a different scalar after upload by changing only the results.scores values, not the game/player contract or the LegalAction.id path.\n\n## Artifacts\n\nEach episode writes Coworld-compatible results, replay bytes, game/player logs, and Proxy War match artifacts. The reporter, grader, diagnoser, and optimizer-plan runnables consume the episode bundle shape used by Coworld tooling. Reporter and grader contracts are exercised; diagnoser and optimizer are contract-shaped because Coworld 0.1.15 still marks those roles reserved or runtime-pending.\n\n## Hosted Status\n\nThis manifest is the canonical hosted Proxy War Coworld. It runs with the tsx loader so read-only episode pods do not need writable /tmp, sanitizes Coworld policy labels into Proxy War usernames, and serves global, replay, and player Coworld client routes from the native Proxy War viewer."
       }
     }
   },
@@ -298,19 +298,25 @@
   ],
   "variants": [
     {
-      "id": "tournament-2p",
-      "name": "Tournament 2P",
-      "description": "Default two-policy tournament episode: 50 decision steps x 100 turns (~5000+ turn games, ~50 decisions per policy). Hosted-validated 2026-06-10: a full 5301-turn episode completed in ~15 minutes on the platform. (Local amd64-emulated runs of this config can exhaust Docker memory - use a reduced-step episode request for local smoke.)",
+      "id": "four-player-ffa",
+      "name": "Four Player FFA",
+      "description": "Four-policy free-for-all on a compact map: up to 100 decision steps x 100 turns (~10000 turns), 100 decisions per seat. Four seats fight simultaneously until one player controls 80% of the map (the FFA win threshold) or the decision-step cap is reached - so alliance, betrayal, and last-survivor dynamics emerge and a decisive winner normally arrives well before the cap. The step cap is the compute guardrail (it bounds per-episode policy calls); a full episode runs in well under 1GB of memory.",
       "game_config": {
         "players": [
           {
-            "name": "Coworld Starter 1"
+            "name": "Coworld FFA 1"
           },
           {
-            "name": "Coworld Starter 2"
+            "name": "Coworld FFA 2"
+          },
+          {
+            "name": "Coworld FFA 3"
+          },
+          {
+            "name": "Coworld FFA 4"
           }
         ],
-        "max_decision_steps": 50,
+        "max_decision_steps": 100,
         "turns_per_decision_step": 100,
         "max_decision_ms": 15000,
         "map": "Pangaea",
@@ -325,10 +331,16 @@
     "game_config": {
       "players": [
         {
-          "name": "Coworld Starter 1"
+          "name": "Coworld FFA 1"
         },
         {
-          "name": "Coworld Starter 2"
+          "name": "Coworld FFA 2"
+        },
+        {
+          "name": "Coworld FFA 3"
+        },
+        {
+          "name": "Coworld FFA 4"
         }
       ],
       "max_decision_steps": 2,
@@ -341,6 +353,12 @@
       "player_connect_timeout_seconds": 120
     },
     "players": [
+      {
+        "player_id": "proxywar-starter-websocket"
+      },
+      {
+        "player_id": "proxywar-starter-websocket"
+      },
       {
         "player_id": "proxywar-starter-websocket"
       },

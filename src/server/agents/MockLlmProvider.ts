@@ -89,6 +89,15 @@ export class MockLlmProvider implements LlmProvider {
           ...this.validDecision(prompt),
           confidence: "very sure",
         });
+      default: {
+        // Exhaustiveness guard: if a new MockLlmProviderMode is added without a
+        // case, this fails to compile (never) and throws clearly at runtime
+        // instead of returning undefined as a confusing parse failure.
+        const exhaustive: never = this.options.mode;
+        throw new Error(
+          `MockLlmProvider: unhandled mode "${String(exhaustive)}"`,
+        );
+      }
     }
   }
 

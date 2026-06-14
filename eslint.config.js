@@ -60,4 +60,12 @@ export default [
       ],
     },
   },
+  {
+    // Plain JS/MJS/CJS module files (build scripts, .mjs policies, adapter JS
+    // modules) are not part of a TS project, so the type-aware project service
+    // cannot resolve them ("not found by the project service"). Lint them
+    // without type-checking instead of erroring on every such file.
+    files: ["**/*.{js,mjs,cjs}"],
+    ...tseslint.configs.disableTypeChecked,
+  },
 ];

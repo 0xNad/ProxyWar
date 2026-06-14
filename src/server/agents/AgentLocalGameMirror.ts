@@ -15,6 +15,11 @@ export interface WaitForMirrorStateOptions {
 export class AgentLocalGameMirror {
   private runner: GameRunner | null = null;
   private readonly seenTurns = new Set<number>();
+  // Cursor into the append-only server-message history. Ingest processes only
+  // messages past this index, keeping TOTAL ingest work O(messages) instead of
+  // O(messages^2) under the per-tick catch-up poll — the long-game OOM driver
+  // (AGENT-02) that made the 4-player FFA episode OOM as decision steps grew.
+  private consumedCount = 0;
 
   constructor(
     private readonly mapLoader: GameMapLoader,
@@ -27,7 +32,11 @@ export class AgentLocalGameMirror {
       return 0;
     }
 
-    for (const message of messages) {
+    // Only walk messages we have not consumed yet (append-only history, so the
+    // cursor is stable across the growing snapshots passed each poll).
+    const start = this.consumedCount < messages.length ? this.consumedCount : 0;
+    for (let i = start; i < messages.length; i++) {
+      const message = messages[i];
       if (message.type !== "turn") {
         continue;
       }
@@ -37,6 +46,7 @@ export class AgentLocalGameMirror {
       this.runner.addTurn(message.turn);
       this.seenTurns.add(message.turn.turnNumber);
     }
+    this.consumedCount = messages.length;
 
     return this.executePendingTurns();
   }
@@ -98,7 +108,12 @@ export async function waitForMirrorState(
   options: WaitForMirrorStateOptions,
 ): Promise<Game> {
   const timeoutMs = options.timeoutMs ?? 5_000;
-  const pollIntervalMs = options.pollIntervalMs ?? 5;
+  // 5ms was an aggressive poll: each poll re-copies the entire server-message
+  // history (serverMessages() => [...sentMessages]), so a tight poll over a long
+  // game is the dominant transient-allocation / GC-thrash source behind the
+  // long-game OOM. 50ms is far below the decision cadence (max_decision_ms ~15s)
+  // and cuts that copy churn ~10x with no observable latency cost.
+  const pollIntervalMs = options.pollIntervalMs ?? 50;
   const deadline = Date.now() + timeoutMs;
 
   while (Date.now() <= deadline) {

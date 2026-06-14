@@ -2460,10 +2460,19 @@ function estimateCost(runs: FrontierRunSummary[]) {
   const outputChars = sum(
     externalRecords.map((record) => {
       const metadata = record.decisionMetadata ?? {};
-      return (
-        stringMetadata(metadata, "plannerRawOutput").length +
-        stringMetadata(metadata, "llmRawOutput").length
-      );
+      // Prefer the length sentinels (the league trims the raw output blobs out of
+      // the retained records to bound long-game memory — see AGENT-01 /
+      // compactDecisionMetadata); fall back to the raw string length only when a
+      // length field is absent/zero (records produced outside the league trim).
+      // Mirrors the inputChars `|| ... || 0` idiom above (numberMetadata returns 0,
+      // not undefined, for a missing key).
+      const plannerOutputChars =
+        numberMetadata(metadata, "plannerRawOutputLength") ||
+        stringMetadata(metadata, "plannerRawOutput").length;
+      const llmOutputChars =
+        numberMetadata(metadata, "llmRawOutputLength") ||
+        stringMetadata(metadata, "llmRawOutput").length;
+      return plannerOutputChars + llmOutputChars;
     }),
   );
   const estimatedInputChars =

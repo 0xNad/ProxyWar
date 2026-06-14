@@ -300,12 +300,17 @@ export class AgentLeagueMatchRunner {
         }
       }
 
+      let validationFallbackUsed = false;
       if (selectedActions.length === 0) {
         const validation = this.decisionValidator(
           decision,
           submissionLegalActions,
         );
         const action = actionFromValidation(validation);
+        // The policy's requested action id(s) were all invalid; the validator
+        // substituted a fallback (hold). Record it loudly (below) instead of
+        // letting it read as a healthy hold.
+        validationFallbackUsed = !validation.ok;
         selectedActions.push({
           action,
           requestedActionID: decision.actionID,
@@ -323,6 +328,7 @@ export class AgentLeagueMatchRunner {
             batchSize: selectedActions.length,
             requestedActionIDs,
             rejectedActionIDs,
+            validationFallbackUsed: validationFallbackUsed && batchIndex === 0,
           }),
         };
         const result = selected.action
@@ -517,9 +523,13 @@ export class AgentLeagueMatchRunner {
       }
     }
 
+    let validationFallbackUsed = false;
     if (selectedActions.length === 0) {
       const validation = this.decisionValidator(input.decision, input.legalActions);
       const action = actionFromValidation(validation);
+      // The policy's requested action id(s) were all invalid; the validator
+      // substituted a fallback (hold). Record it loudly (below).
+      validationFallbackUsed = !validation.ok;
       selectedActions.push({
         action,
         requestedActionID: input.decision.actionID,
@@ -538,6 +548,7 @@ export class AgentLeagueMatchRunner {
           batchSize: selectedActions.length,
           requestedActionIDs,
           rejectedActionIDs,
+          validationFallbackUsed: validationFallbackUsed && batchIndex === 0,
         }),
       };
       const result = selected.action
@@ -677,7 +688,12 @@ export class AgentLeagueMatchRunner {
       chosenActionID: input.chosenAction?.id ?? input.decision.actionID,
       chosenActionKind: input.chosenAction?.kind ?? "hold",
       reason: input.reason,
-      decisionMetadata: input.decision.metadata,
+      // Trim the heavy raw-LLM debug blobs (prompt + raw model/planner output)
+      // BEFORE retaining the record in this.records[]. They are the dominant
+      // turn-linear memory growth driving the long-game OOM (AGENT-01) and are
+      // never read back as full strings — only the structured flags, sources,
+      // scores, and lengths the report/replay/result exporters need are kept.
+      decisionMetadata: compactDecisionMetadata(input.decision.metadata),
       chosenActionMetadata: input.chosenAction?.metadata,
       tacticalAffordances: buildAgentTacticalAffordances({
         observation: input.observation,
@@ -1002,6 +1018,17 @@ function diplomacyTargetID(action: LegalAction): string | null {
   return typeof metadataTarget === "string" ? metadataTarget : null;
 }
 
+// Brain types whose THROW means the LLM specifically degraded (not just a generic
+// rule fallback). A claude-cli house brain surfaces as "real-llm" via the provider
+// mapping; "claude-cli" is listed defensively. Used to set llmPlannerDegraded on
+// the safety fallback so degradation auditors don't under-count.
+const LLM_DEGRADABLE_BRAIN_TYPES = new Set<string>([
+  "real-llm",
+  "codex-cli",
+  "claude-cli",
+  "llm",
+]);
+
 async function decideWithSafetyFallback(input: {
   brain: AgentBrain;
   fallbackProfile: AgentStrategyProfile;
@@ -1021,6 +1048,9 @@ async function decideWithSafetyFallback(input: {
     );
   } catch (error) {
     const reason = error instanceof Error ? error.message : String(error);
+    const isLlmBrain = LLM_DEGRADABLE_BRAIN_TYPES.has(
+      input.brain.brainType ?? "",
+    );
     const fallbackDecision = await new RuleAgentBrain(
       input.fallbackProfile,
     ).decide({
@@ -1035,6 +1065,10 @@ async function decideWithSafetyFallback(input: {
         brainType: input.brain.brainType ?? "rule",
         brainErrorReason: reason,
         fallbackUsed: true,
+        // An LLM-backed brain that THREW degraded the LLM specifically — flag it
+        // so auditors keyed on llmPlannerDegraded (Coworld result contract, the
+        // behavior report) don't under-count it as a plain rule fallback.
+        ...(isLlmBrain ? { llmPlannerDegraded: true } : {}),
         fallbackActionID: fallbackDecision.actionID,
       },
     };
@@ -1084,18 +1118,51 @@ function groupLegalActionsByKind(
   );
 }
 
+// The LLM/planner brains attach large, unbounded raw debug strings to each
+// decision's metadata: the ~95KB prompt (`llmPrompt`) plus the full, untruncated
+// model responses (`llmRawOutput`, `plannerRawOutput`). Retaining those for every
+// decision across a long game is the dominant turn-linear memory growth behind the
+// long-game OOM (AGENT-01). This strips the heavy blobs to a sentinel + length while
+// preserving every small structured field downstream report/replay/result consumers
+// read (sources, parse flags, fallbackUsed / llmPlannerDegraded, scores, etc.). The
+// on-disk artifact's rawLlmPrompt/rawLlmOutput/plannerRawOutput become the sentinel
+// by design — the loudness flags and lengths still survive. Note `externalRawOutput`
+// is deliberately NOT trimmed: its producers already truncate it to 1KB, so it is
+// bounded and not an OOM driver.
+const COMPACTED_RAW_SENTINEL = "[stored in artifact only]";
+
 function compactDecisionMetadata(
   metadata: AgentDecisionRecord["decisionMetadata"],
 ): AgentDecisionRecord["decisionMetadata"] {
-  if (metadata?.llmPrompt === undefined) {
+  if (metadata === undefined) {
     return metadata;
   }
-  return {
-    ...metadata,
-    llmPrompt: "[stored in artifact only]",
-    llmPromptLength:
-      typeof metadata.llmPrompt === "string" ? metadata.llmPrompt.length : null,
-  };
+  // Only act on fields still holding the heavy raw value, not an already-applied
+  // sentinel, so the helper is idempotent (the live-log copies call it on records
+  // that recordDecision already compacted) and the true *Length values survive.
+  const needsTrim = (value: unknown): value is string =>
+    typeof value === "string" && value !== COMPACTED_RAW_SENTINEL;
+  const hasHeavyField =
+    needsTrim(metadata.llmPrompt) ||
+    needsTrim(metadata.llmRawOutput) ||
+    needsTrim(metadata.plannerRawOutput);
+  if (!hasHeavyField) {
+    return metadata;
+  }
+  const compacted = { ...metadata };
+  if (needsTrim(metadata.llmPrompt)) {
+    compacted.llmPrompt = COMPACTED_RAW_SENTINEL;
+    compacted.llmPromptLength = metadata.llmPrompt.length;
+  }
+  if (needsTrim(metadata.llmRawOutput)) {
+    compacted.llmRawOutput = COMPACTED_RAW_SENTINEL;
+    compacted.llmRawOutputLength = metadata.llmRawOutput.length;
+  }
+  if (needsTrim(metadata.plannerRawOutput)) {
+    compacted.plannerRawOutput = COMPACTED_RAW_SENTINEL;
+    compacted.plannerRawOutputLength = metadata.plannerRawOutput.length;
+  }
+  return compacted;
 }
 
 function requestedDecisionActionIDs(decision: AgentDecision): string[] {
@@ -1185,6 +1252,7 @@ function batchDecisionMetadata(input: {
   batchSize: number;
   requestedActionIDs: string[];
   rejectedActionIDs: string[];
+  validationFallbackUsed?: boolean;
 }): AgentDecision["metadata"] {
   const metadata: AgentDecision["metadata"] = {
     ...(input.metadata ?? {}),
@@ -1193,6 +1261,14 @@ function batchDecisionMetadata(input: {
     batchActionIDs: input.requestedActionIDs.join(","),
     batchRejectedActionIDs: input.rejectedActionIDs.join(","),
   };
+
+  if (input.validationFallbackUsed) {
+    // Every offered action the policy selected was invalid, so the validator
+    // substituted a hold. Surface it as a fallback so fallback_count and the
+    // Coworld result contract never read an unusable policy as a healthy hold.
+    metadata.fallbackUsed = true;
+    metadata.validationFallbackUsed = true;
+  }
 
   if (input.batchIndex > 0) {
     metadata.plannerRan = false;

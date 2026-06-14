@@ -30,3 +30,7 @@ scripts/auto-resume.sh
 scripts/.auto-resume.log
 scripts/.auto-resume.nohup.log
 scripts/.auto-resume-backups/
+
+# Coworld adapter: generated Docker build context + episode scratch
+coworld-adapter/.docker-context/
+coworld-adapter/tmp/

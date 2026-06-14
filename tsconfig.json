@@ -3,6 +3,11 @@
   "compilerOptions": {
     // Language and Environment
     "target": "ES2020",
+    // ES2022 lib enables Error `cause` (ErrorOptions) for incident-preserving
+    // rethrows; the emit target stays ES2020. Node 24 + modern browsers support
+    // the runtime APIs, and no code uses importScripts/ScriptHost (the dropped
+    // es2020.full libs), verified before narrowing.
+    "lib": ["ES2022", "DOM", "DOM.Iterable"],
     // Modules
     "module": "ESNext",
     "moduleResolution": "bundler",

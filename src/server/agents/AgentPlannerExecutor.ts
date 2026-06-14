@@ -14,7 +14,12 @@ import {
   StrategicSkillEvaluator,
 } from "./AgentStrategicSkills";
 import { buildAgentTacticalAffordances } from "./AgentTacticalAffordances";
-import { directiveCommitmentEnabled, tunedNumber } from "./AgentTunables";
+import {
+  behindAndFallingEscapeEnabled,
+  directiveCommitmentEnabled,
+  enforceConversionOverNeutralEnabled,
+  tunedNumber,
+} from "./AgentTunables";
 import {
   sanitizeUntrustedDisplayString,
   UNTRUSTED_DISPLAY_RULE,
@@ -1013,6 +1018,11 @@ function rankFrontierActions(args: {
     ...input,
     plan,
   });
+  const rankOrder = (a: FrontierRankedAction, b: FrontierRankedAction) =>
+    b.totalScore - a.totalScore ||
+    frontierActionTieBreak(a.action) - frontierActionTieBreak(b.action) ||
+    frontierActionIntensityTieBreak(a.action, b.action) ||
+    a.action.id.localeCompare(b.action.id);
   const scored: FrontierRankedAction[] = input.legalActions
     .map((action) => {
       const policy = scoreFrontierAction({
@@ -1037,14 +1047,78 @@ function rankFrontierActions(args: {
         schedulerSlot: schedulerSlotForAction(action, primaryModule),
       };
     })
-    .sort(
-      (a, b) =>
-        b.totalScore - a.totalScore ||
-        frontierActionTieBreak(a.action) - frontierActionTieBreak(b.action) ||
-        frontierActionIntensityTieBreak(a.action, b.action) ||
-        a.action.id.localeCompare(b.action.id),
-    );
+    .sort(rankOrder);
+  enforceConversionOverNeutralRanking(scored, rankOrder);
   return { scored, skillEvaluation };
+}
+
+/**
+ * FM-1 ("cash the midgame kill window"). Makes the EXISTING soft scorer penalty
+ * `"frontier conversion ready target should outrank neutral growth"` BINDING at the
+ * final ranking, so a neutral-land/neutral-boat expansion can never be SELECTED
+ * over a decisive favorable attack on a bordered rival while a conversion kill
+ * window is open. It adds no new heuristic: it only enforces the conversion-
+ * readiness signal the scorer already computes, and it selects only among offered
+ * `LegalAction.id`s (it re-orders, never fabricates an action or an intent).
+ *
+ * Mechanism: a candidate is an executor-ready conversion attack iff the scorer
+ * tagged it with the contribution `"frontier conversion ready attack uses
+ * calibrated weak-rival window"` — added solely when
+ * `actionMatchesFrontierConversionReadyAttack` is true (i.e.
+ * `frontierConversionTiming.recommended && executorReady`, and the action is the
+ * favorable, non-high-risk attack on the best ready target). When at least one such
+ * attack is offered, every neutral-growth candidate is clamped strictly below the
+ * highest such attack, so at least one conversion-ready attack outranks all neutral
+ * expansion at every downstream selection surface (the scored argmax, the scheduler
+ * fill, and the `useful`/`alignedFallback`/`productiveFallback` chain).
+ *
+ * Note on the resulting action: if the highest conversion-ready attack is itself
+ * schedulable, the executor now selects THAT attack (the cashed kill). If the only
+ * conversion-ready attack offered is one a SEPARATE sustainability gate blocks (an
+ * over-extending large commit by an under-resourced player — see the
+ * `"large attacks require a durable land and troop lead"` scheduling reason), the
+ * executor declines both the reckless attack and neutral-farming and holds for one
+ * cycle to re-plan, which is the intended anti-FM-1 behavior (do not farm neutral
+ * while a kill window is open) rather than the death-spiral of mindless expansion.
+ * Re-tuning that sustainability gate to allow the decisive commit is FM-3 scope and
+ * deliberately NOT done here.
+ *
+ * Gated by `PROXYWAR_TUNE_ENFORCE_CONVERSION` (default ON). When OFF — or when no
+ * conversion-ready attack is offered — this is a no-op and `scored` (and therefore
+ * the selection) is byte-for-byte identical to the shipped pre-fix order.
+ */
+function enforceConversionOverNeutralRanking(
+  scored: FrontierRankedAction[],
+  rankOrder: (a: FrontierRankedAction, b: FrontierRankedAction) => number,
+): void {
+  if (!enforceConversionOverNeutralEnabled()) {
+    return;
+  }
+  const conversionReadyScores = scored
+    .filter((candidate) =>
+      hasPolicyContribution(
+        candidate,
+        "frontier conversion ready attack uses calibrated weak-rival window",
+      ),
+    )
+    .map((candidate) => candidate.totalScore);
+  if (conversionReadyScores.length === 0) {
+    return;
+  }
+  const neutralCeiling = Math.max(0, Math.max(...conversionReadyScores) - 1);
+  let clamped = false;
+  for (const candidate of scored) {
+    if (
+      isNeutralGrowthAction(candidate.action) &&
+      candidate.totalScore > neutralCeiling
+    ) {
+      candidate.totalScore = neutralCeiling;
+      clamped = true;
+    }
+  }
+  if (clamped) {
+    scored.sort(rankOrder);
+  }
 }
 
 /** Deterministic plan synthesis for plan-less callers (the LLM action-selector shortlist). */
@@ -1821,6 +1895,20 @@ function selectFrontierActionBatch(input: {
   if (commitmentDirective !== undefined) {
     return [commitmentDirective];
   }
+  // FM-2a ("trade or die"): when behind-and-falling, force the single best
+  // controlled strike before the neutral-territory / banking / hold paths below,
+  // so the "feeds a stronger rival" over-caution gate can no longer convert
+  // "behind" into "can't fight back" into death-by-banking. It sits BELOW the
+  // survival recoveries and the explicit binding commitment (those still win) and
+  // ABOVE neutral expansion/banking. No-op (undefined) when the flag is off, when
+  // not behind-and-falling, or when no credible (non-suicidal) strike is offered.
+  const behindAndFallingStrike = behindAndFallingStrikeCandidate(
+    input.input,
+    scored,
+  );
+  if (behindAndFallingStrike !== undefined) {
+    return [behindAndFallingStrike];
+  }
   const hardNationOpeningForceExpansion = directSelectionCandidate(
     hardNationOpeningForceExpansionCandidate(input.input, scored),
   );
@@ -1966,10 +2054,17 @@ function selectFrontierActionBatch(input: {
   if (reserveSafeFrontierConversion !== undefined) {
     return [reserveSafeFrontierConversion];
   }
-  const earlyTransportTroopBanking = directSelectionCandidate(
-    transportTroopBankingCandidate(input.input, plan, settings, scored),
-    { allowPlannerForbidden: true },
-  );
+  // FM-2a banking cap: once behind-and-falling and already banking offshore for
+  // N cycles, banked troops must be committed (dying with banked troops is a
+  // strict loss), so suppress the banking candidate and fall through.
+  const earlyTransportTroopBanking = behindAndFallingBankingCapReached(
+    input.input.observation,
+  )
+    ? undefined
+    : directSelectionCandidate(
+        transportTroopBankingCandidate(input.input, plan, settings, scored),
+        { allowPlannerForbidden: true },
+      );
   if (earlyTransportTroopBanking !== undefined) {
     return [earlyTransportTroopBanking];
   }
@@ -2054,10 +2149,15 @@ function selectFrontierActionBatch(input: {
   if (openingExpansionTempo !== undefined && maxActions <= 1) {
     return [openingExpansionTempo];
   }
-  const transportTroopBanking = directSelectionCandidate(
-    transportTroopBankingCandidate(input.input, plan, settings, scored),
-    { allowPlannerForbidden: true },
-  );
+  // FM-2a banking cap (second banking site): same rule as the early site above.
+  const transportTroopBanking = behindAndFallingBankingCapReached(
+    input.input.observation,
+  )
+    ? undefined
+    : directSelectionCandidate(
+        transportTroopBankingCandidate(input.input, plan, settings, scored),
+        { allowPlannerForbidden: true },
+      );
   if (transportTroopBanking !== undefined) {
     return [transportTroopBanking];
   }
@@ -4890,6 +4990,160 @@ function desiredOpeningExpansionCommitment(
     return 0.25;
   }
   return settings.expansionRatio;
+}
+
+/**
+ * FM-2a ("behind-and-falling: trade or die"). True when the agent has fallen into
+ * the measured death-spiral regime: it is the weakest power, a bordered rival is
+ * pulling away, and its own land is shrinking. Derived entirely from EXISTING
+ * observation signals (no new persistent state, no RNG, no wall-clock), so it is
+ * deterministic and replay-stable:
+ *   1. below par   — own tile share < a fair 1/N share for the alive-player count;
+ *   2. dominated   — some BORDERED rival's tile share > ~1.5x the agent's;
+ *   3. falling     — own tile count is below its recent peak (memory trend down).
+ * Thresholds are `PROXYWAR_TUNE_*`-tunable for the A/B sweep but the master gate is
+ * the single `behindAndFallingEscapeEnabled()` flag checked by the caller.
+ */
+function isBehindAndFalling(
+  observation: AgentBrainInput["observation"],
+): boolean {
+  const ownState = observation.ownState;
+  if (ownState === null || !ownState.isAlive || !ownState.hasSpawned) {
+    return false;
+  }
+  const ownTileShare =
+    ownState.tileShare ?? observation.endgame?.ownTileShare ?? 0;
+  if (ownTileShare <= 0) {
+    return false;
+  }
+  // Par share = a fair 1/N slice for however many powers are still alive (universal
+  // across 1v1..many-player). Fall back to counting alive visible players + self.
+  const aliveCount =
+    observation.alivePlayerCount ??
+    observation.visiblePlayers.filter((player) => player.isAlive).length + 1;
+  const parShare = 1 / Math.max(2, aliveCount);
+  if (ownTileShare >= parShare) {
+    return false;
+  }
+  const rivalDominanceRatio = tunedNumber("BEHIND_RIVAL_DOMINANCE", 1.5);
+  const ownPlayerID = ownState.playerID;
+  const borderedDominantRival = observation.visiblePlayers.some(
+    (player) =>
+      player.isAlive &&
+      player.playerID !== ownPlayerID &&
+      player.type !== PlayerType.Bot &&
+      player.sharesBorder &&
+      !player.isAllied &&
+      (player.tileShare ?? 0) > rivalDominanceRatio * ownTileShare,
+  );
+  if (!borderedDominantRival) {
+    return false;
+  }
+  const minLossRatio = tunedNumber("BEHIND_FALL_MIN_LOSS", 0.02);
+  return (
+    recentOwnTileLossRatio(observation, ownState.tilesOwned ?? 0) >= minLossRatio
+  );
+}
+
+/**
+ * FM-2a strike escape. When the agent is behind-and-falling, returns the single
+ * highest-value executor-ready CONTROLLED strike that is already offered, so the
+ * agent trades instead of holding/banking to death. This is the only place the
+ * "feeds a stronger rival" / "active pressure unsafe" / "finish current war first"
+ * over-caution gate is relaxed for this regime — and it is relaxed only by SELECTING
+ * an offered `LegalAction.id` here directly (it re-orders nothing and fabricates no
+ * action or intent).
+ *
+ * Credibility guard (this is "trade", never "suicide"): the strike must be a
+ * direct-conquest action (non-expansion attack / player boat / nuke) on a BORDERED
+ * rival, with a real troop commitment, whose own risk level is NOT "high" (an attack
+ * is "high" risk in LegalActionBuilder exactly when the target out-troops the agent —
+ * i.e. a hopeless overmatch), and that does NOT carry the genuine reserve-suicide
+ * penalty "attack would deplete the reserve below competitive defense". If every
+ * offered strike is a hopeless overmatch this returns undefined and the normal ladder
+ * resumes (the banking cap below still prevents death-by-accumulation).
+ */
+function behindAndFallingStrikeCandidate(
+  input: AgentBrainInput,
+  scored: readonly FrontierRankedAction[],
+): FrontierRankedAction | undefined {
+  if (!behindAndFallingEscapeEnabled() || !isBehindAndFalling(input.observation)) {
+    return undefined;
+  }
+  const observation = input.observation;
+  const borderedRivalIDs = new Set(observation.combat.borderedPlayerIDs);
+  const attackableRivalIDs = new Set(observation.combat.attackablePlayerIDs);
+  const ownTroops =
+    observation.combat.ownTroops ?? observation.ownState?.troops ?? 0;
+  // "Trade, not feed": only force a strike the agent does not LOSE on its face —
+  // a real per-attack troop edge. This both keeps the escape a credible trade and
+  // makes it defer to genuine survival/escape logic (a 10% probe at half the
+  // leader's troops into an invading leader is a feed, not a trade — leave that to
+  // the rebase-transport/escape candidates).
+  const minStrikeRatio = tunedNumber("BEHIND_STRIKE_MIN_RATIO", 1);
+  return scored
+    .filter((candidate) => {
+      if (!isDirectConquestAction(candidate.action)) {
+        return false;
+      }
+      if (candidate.action.risk.level === "high") {
+        return false;
+      }
+      if (
+        hasPolicyPenalty(
+          candidate,
+          "attack would deplete the reserve below competitive defense",
+        )
+      ) {
+        return false;
+      }
+      // Troop-on-troop strikes (attack / player boat) must carry a real edge;
+      // nukes are targeted by their own strategic affordance, not troop ratio.
+      if (
+        candidate.action.kind !== "nuke" &&
+        metadataNumber(candidate.action, "relativeTroopRatio") < minStrikeRatio
+      ) {
+        return false;
+      }
+      const targetID = actionPlayerID(candidate.action);
+      if (
+        targetID === null ||
+        !(borderedRivalIDs.has(targetID) || attackableRivalIDs.has(targetID))
+      ) {
+        return false;
+      }
+      return committedTroopRatio(candidate.action, ownTroops) > 0;
+    })
+    .sort(
+      (a, b) =>
+        b.totalScore - a.totalScore ||
+        metadataNumber(b.action, "relativeTroopRatio") -
+          metadataNumber(a.action, "relativeTroopRatio") ||
+        a.action.id.localeCompare(b.action.id),
+    )[0];
+}
+
+/**
+ * FM-2a banking cap. True when the agent is behind-and-falling AND has already
+ * spent at least N consecutive decision cycles boating troops offshore. In that
+ * case the executor must STOP banking and commit (dying with banked troops is a
+ * strict loss), so the caller suppresses `transportTroopBankingCandidate` and lets
+ * the ladder fall through to a strike / re-plan. Gated by the same master flag, so
+ * when OFF this is always false and banking selection is unchanged.
+ */
+function behindAndFallingBankingCapReached(
+  observation: AgentBrainInput["observation"],
+): boolean {
+  if (!behindAndFallingEscapeEnabled() || !isBehindAndFalling(observation)) {
+    return false;
+  }
+  const maxBankingCycles = Math.max(
+    1,
+    Math.round(tunedNumber("BEHIND_BANK_CAP_CYCLES", 2)),
+  );
+  return (
+    recentConsecutiveAcceptedActionKind(observation, "boat") >= maxBankingCycles
+  );
 }
 
 function transportTroopBankingCandidate(

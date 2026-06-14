@@ -196,6 +196,38 @@ export function decisionToResponse(
 }
 
 /**
+ * Last-resort transport fallback. When the brain (or payload reconstruction)
+ * throws, the match must not stall — but the resulting decision is DEGRADED and
+ * MUST be loud. This routes through decisionToResponse with a synthesized
+ * degraded AgentDecision so the wire carries fallbackUsed + llmPlannerDegraded
+ * (matching llm-player.mjs). A dead/degraded brain must never look healthy in
+ * replays — the v1 bedrock seat played 60+ hosted rounds on a silent fallback
+ * because this branch had no loudness channel. Prefers an offered hold action
+ * (lowest-risk no-op) over blindly taking legalActions[0].
+ */
+export function transportFallbackResponse(
+  requestID: string,
+  request: unknown,
+  errorMessage: string,
+): Record<string, unknown> {
+  const actions =
+    (request as { legalActions?: Array<{ id?: unknown; kind?: unknown }> })
+      ?.legalActions ?? [];
+  const holdAction = actions.find((action) => action.kind === "hold");
+  const fallbackActionID = String((holdAction ?? actions[0])?.id ?? "");
+  return decisionToResponse(requestID, {
+    actionID: fallbackActionID,
+    reason: `keystone transport fallback: ${errorMessage}`,
+    metadata: {
+      confidence: 0.3,
+      fallbackUsed: true,
+      plannerFallbackUsed: true,
+      llmPlannerDegraded: true,
+    },
+  });
+}
+
+/**
  * In-clock Commander adapter. plan() never awaits the wrapped LLM planner:
  * it returns the freshest completed background refresh if one landed,
  * otherwise carries the current directive (or a rule bootstrap plan before the
@@ -208,6 +240,10 @@ export class DeferredAgentPlanner implements AgentPlanner {
   private inFlight = false;
   private completed: AgentPlanDecision | null = null;
   private lastKnownPlan: StrategicPlan | null = null;
+  // Set when a background Commander refresh failed but there was no plan to attach
+  // the degraded flags to (no standing directive AND the bootstrap also failed).
+  // The next plan() surfaces it so the degradation is never silent.
+  private pendingDegradation: string | null = null;
 
   constructor(
     private readonly inner: AgentPlanner,
@@ -226,22 +262,34 @@ export class DeferredAgentPlanner implements AgentPlanner {
       this.lastKnownPlan = landed.plan;
       return landed;
     }
+    // Surface (once) any degradation from a prior refresh failure that had no
+    // plan to carry it.
+    const degraded = this.pendingDegradation;
+    this.pendingDegradation = null;
     const carriedPlan = previousPlan ?? this.lastKnownPlan;
     this.startBackgroundRefresh(input, carriedPlan);
     if (carriedPlan !== null) {
       return {
         plan: carriedPlan,
         reason:
-          "Commander refresh in flight; executing the standing directive in-clock.",
+          degraded !== null
+            ? `Commander refresh failed (${degraded}); executing the standing directive degraded.`
+            : "Commander refresh in flight; executing the standing directive in-clock.",
         latencyMs: 0,
-        fallbackUsed: false,
+        fallbackUsed: degraded !== null,
+        ...(degraded !== null ? { llmPlannerDegraded: true } : {}),
       };
     }
     const bootstrapDecision = await this.bootstrap.plan(input, previousPlan);
     this.lastKnownPlan = bootstrapDecision.plan;
     return {
       ...bootstrapDecision,
-      reason: `Bootstrap plan while the first Commander refresh is in flight: ${bootstrapDecision.reason}`,
+      reason:
+        degraded !== null
+          ? `Bootstrap plan after a Commander refresh failed (${degraded}); running degraded.`
+          : `Bootstrap plan while the first Commander refresh is in flight: ${bootstrapDecision.reason}`,
+      fallbackUsed: degraded !== null ? true : bootstrapDecision.fallbackUsed,
+      ...(degraded !== null ? { llmPlannerDegraded: true } : {}),
     };
   }
 
@@ -274,6 +322,11 @@ export class DeferredAgentPlanner implements AgentPlanner {
             fallbackUsed: true,
             llmPlannerDegraded: true,
           };
+        } else {
+          // No standing directive and the bootstrap also failed: we cannot
+          // fabricate a plan, but the degradation must not be silent — flag it so
+          // the next plan() (which re-attempts the bootstrap) surfaces it.
+          this.pendingDegradation = message;
         }
       })
       .finally(() => {
@@ -518,17 +571,14 @@ async function main(): Promise<void> {
       const messageText =
         error instanceof Error ? error.message : String(error);
       console.error(`keystone decide failed: ${messageText}`);
-      // Last-resort: never stall the match — pick any offered legal action.
-      const actions =
-        (message.request as { legalActions?: Array<{ id?: unknown }> })
-          ?.legalActions ?? [];
-      response = {
-        type: "decision_response",
+      // Last-resort: degraded but LOUD — fallbackUsed + llmPlannerDegraded
+      // travel on the wire so the game-side artifacts never report a dead
+      // brain as healthy. See transportFallbackResponse.
+      response = transportFallbackResponse(
         requestID,
-        selectedLegalActionId: String(actions[0]?.id ?? ""),
-        reason: "keystone transport fallback",
-        confidence: 0.3,
-      };
+        message.request,
+        messageText,
+      );
     }
     const elapsedMs = Date.now() - startedAt;
     if (elapsedMs > 5000) {
