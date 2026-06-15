@@ -46,13 +46,44 @@ export const runClaudeCliCommand: ClaudeCliCommandRunner = (input) =>
     const child = spawn(input.command, input.args, {
       cwd: input.cwd,
       stdio: ["pipe", "pipe", "pipe"],
+      // Own process group so a timeout can kill the WHOLE claude subprocess tree.
+      // The claude CLI forks children that hold the stdio pipes; killing only the
+      // parent leaves them running (they keep an API call open, burning the
+      // subscription) and "close" never fires.
+      detached: true,
     });
     let stdout = "";
     let stderr = "";
     let timedOut = false;
+    let settled = false;
+    const settle = (result: ClaudeCliCommandResult): void => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      clearTimeout(timer);
+      resolve(result);
+    };
+    const killTree = (): void => {
+      try {
+        if (typeof child.pid === "number") {
+          process.kill(-child.pid, "SIGKILL"); // negative pid => the process group
+          return;
+        }
+      } catch {
+        // group gone or unsupported — fall through to the single-process kill
+      }
+      child.kill("SIGKILL");
+    };
     const timer = setTimeout(() => {
       timedOut = true;
-      child.kill("SIGKILL");
+      killTree();
+      // Resolve NOW instead of waiting for "close": a wedged claude subprocess tree
+      // may never emit close, and claude calls are serialized (withClaudeCliLock),
+      // so a hung call would block EVERY later Commander call and stall the whole
+      // game (the watchdog then kills it). Returning timedOut lets the planner fall
+      // back for this one decision and the game continues.
+      settle({ stdout, stderr, code: null, timedOut: true });
     }, input.timeoutMs);
     child.stdout.on("data", (chunk) => {
       stdout += String(chunk);
@@ -61,12 +92,15 @@ export const runClaudeCliCommand: ClaudeCliCommandRunner = (input) =>
       stderr += String(chunk);
     });
     child.on("error", (error) => {
+      if (settled) {
+        return;
+      }
+      settled = true;
       clearTimeout(timer);
       reject(error);
     });
     child.on("close", (code) => {
-      clearTimeout(timer);
-      resolve({ stdout, stderr, code, timedOut });
+      settle({ stdout, stderr, code, timedOut });
     });
     child.stdin.write(input.stdin);
     child.stdin.end();
