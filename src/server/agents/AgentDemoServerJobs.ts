@@ -117,7 +117,12 @@ const defaultManifestDir = path.join(
 const fullMatchDecisionSchedule = "25x20,100x30,250x40,500x150,100x160";
 const defaultCodexDecisionTimeoutMs = "45000";
 const defaultClaudeDecisionTimeoutMs = "60000";
-const defaultExternalAgentDecisionTimeoutMs = "15000";
+// Connected/relay players run their own LLM. Cheap open-weight player brains
+// (e.g. deepseek-v4-flash via OpenRouter) measure ~19s mean / 33s max per
+// decision through the full starter-SDK prompt, so the old 15s default caused
+// timeout-fallbacks for legitimate agents. 45s gives headroom over the
+// observed max; still env-overridable via PROXYWAR_EXTERNAL_AGENT_DECISION_TIMEOUT_MS.
+const defaultExternalAgentDecisionTimeoutMs = "45000";
 const fullMatchWinnerFailSafeSteps = 700;
 
 // Locked beta default per operator direction. Change only on explicit request.

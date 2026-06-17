@@ -94,7 +94,7 @@ describe("AgentDemoServerJobs", () => {
     expect(command.args).toContain("--scenario=actions");
     expect(command.args).toContain("--max-steps=900");
     expect(command.args).toContain("--require-winner");
-    expect(command.args).toContain("--external-agent-max-decision-ms=15000");
+    expect(command.args).toContain("--external-agent-max-decision-ms=45000");
     expect(command.args).toContain("--turns-per-decision-step=100");
     expect(command.args).toContain(
       "--turns-per-decision-schedule=25x20,100x30,250x40,500x150,100x160",
@@ -129,7 +129,7 @@ describe("AgentDemoServerJobs", () => {
     expect(command.args).toContain("--agents=1");
     expect(command.args).toContain("--max-steps=700");
     expect(command.args).toContain("--require-winner");
-    expect(command.args).toContain("--external-agent-max-decision-ms=15000");
+    expect(command.args).toContain("--external-agent-max-decision-ms=45000");
     expect(command.args).toContain("--bots=0");
     expect(command.args).toContain("--nations=2");
     expect(command.args).toContain("--difficulty=Easy");
