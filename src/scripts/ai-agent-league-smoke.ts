@@ -84,6 +84,9 @@ import {
   OpenAiLlmProvider,
   loadOpenAiLlmProviderConfig,
 } from "../server/agents/OpenAiLlmProvider";
+import { createOpenRouterLlmProviderFromEnv } from "../server/agents/OpenRouterLlmProvider";
+import { loadPlayerStrategySpecFromEnv } from "../server/agents/PlayerStrategySpec";
+import type { PlayerStrategySpec } from "../server/agents/PlayerStrategySpec";
 import { RuleAgentBrain } from "../server/agents/RuleAgentBrain";
 import { GameServer } from "../server/GameServer";
 
@@ -154,6 +157,11 @@ async function run() {
     brainMode === "planner-claude-cli" || brainMode === "action-claude-cli";
   const claudeCliProvider = usesClaudeCli
     ? createClaudeCliLlmProviderFromEnv()
+    : null;
+  const usesOpenRouter =
+    brainMode === "openrouter" || brainMode === "planner-openrouter";
+  const openRouterProvider = usesOpenRouter
+    ? createOpenRouterLlmProviderFromEnv()
     : null;
   // Promo mode: one Claude model per agent (e.g. --models=claude-fable-5,opus,sonnet),
   // optional display names (--names=Fable 5,Opus 4.8,Sonnet 4.6). Each agent gets its own
@@ -280,7 +288,9 @@ async function run() {
                   ? promoModels
                     ? claudeProviderForIndex(index)
                     : claudeCliProvider
-                  : realLlmProvider,
+                  : usesOpenRouter
+                    ? openRouterProvider
+                    : realLlmProvider,
               decisionTimeoutMs,
               externalAgentMaxDecisionMs,
             ),
@@ -848,6 +858,12 @@ function brainModeFromArgs(
   if (args.includes("--brain=action-claude-cli")) {
     return "action-claude-cli";
   }
+  if (args.includes("--brain=planner-openrouter")) {
+    return "planner-openrouter";
+  }
+  if (args.includes("--brain=openrouter")) {
+    return "openrouter";
+  }
   if (args.includes("--brain=mock-llm")) {
     return "mock-llm";
   }
@@ -1071,7 +1087,18 @@ function createBrainForManifestOrMode(
   if (brainMode === "rule") {
     return new RuleAgentBrain(spec.profile);
   }
-  return createBrainForMode(spec, scenario, brainMode, provider, providerTimeoutMs);
+  // Player strategy spec: per-seat from the manifest, else a single spec from env
+  // (AI_LEAGUE_PLAYER_STRATEGY_SPEC) for the sponsored single-seat path.
+  const playerStrategySpec =
+    manifest?.strategySpec ?? loadPlayerStrategySpecFromEnv();
+  return createBrainForMode(
+    spec,
+    scenario,
+    brainMode,
+    provider,
+    providerTimeoutMs,
+    playerStrategySpec,
+  );
 }
 
 function externalAgentTimeoutMs(input: {
@@ -1096,12 +1123,24 @@ function manifestHasBrainOverride(manifest: AgentManifest): boolean {
   );
 }
 
+// Beta seats can tighten the replan cadence (default 3) so a player's strategy is
+// re-expressed more often. Env-overridable via PROXYWAR_PLAN_EVERY_DECISION_STEPS.
+function planEveryDecisionStepsFromEnv(): number {
+  const raw = process.env.PROXYWAR_PLAN_EVERY_DECISION_STEPS?.trim();
+  const parsed = raw === undefined || raw === "" ? NaN : Number(raw);
+  if (Number.isInteger(parsed) && parsed >= 1 && parsed <= 10) {
+    return parsed;
+  }
+  return 3;
+}
+
 function createBrainForMode(
   spec: AgentSpec,
   scenario: SmokeScenario,
   brainMode: Exclude<SmokeBrainMode, "rule">,
   provider: LlmProvider | null,
   providerTimeoutMs: number | undefined,
+  playerStrategySpec: PlayerStrategySpec | null = null,
 ): AgentBrain {
   if (brainMode === "mock-llm") {
     return createMockLlmBrain(spec, scenario, providerTimeoutMs);
@@ -1171,6 +1210,35 @@ function createBrainForMode(
       planEveryDecisionSteps: 3,
     });
   }
+  if (brainMode === "planner-openrouter") {
+    if (provider === null) {
+      throw new LlmProviderConfigError(
+        "planner-openrouter smoke requested but no provider was configured.",
+      );
+    }
+    // The player's posture knob maps onto the agent profile (profile weights); the
+    // rest of the spec binds at the planner's merge chokepoint.
+    const profile = playerStrategySpec?.posture ?? spec.profile;
+    return new PlannerExecutorAgentBrain({
+      profile,
+      planner: new LlmAgentPlanner({
+        provider,
+        profile,
+        providerTimeoutMs,
+        plannerType: "real-llm",
+        playerStrategySpec: playerStrategySpec ?? undefined,
+      }),
+      executor: new FrontierPolicyExecutor(profile, {
+        settings: {
+          territoryFirstNeutralLandEnabled: true,
+          maxActionsPerDecision: 5,
+          siloTileShareRatio: 0.14,
+          samTileShareRatio: 0.14,
+        },
+      }),
+      planEveryDecisionSteps: planEveryDecisionStepsFromEnv(),
+    });
+  }
   if (brainMode === "real-llm" || brainMode === "codex-cli") {
     if (provider === null) {
       throw new LlmProviderConfigError(
@@ -1194,6 +1262,23 @@ function createBrainForMode(
     // FULL LLM authority: the model picks the LegalAction.id directly from the complete
     // legal menu every decision step (no deterministic executor choosing moves). Optional
     // shared personality (same text for every agent => fair) via AI_LEAGUE_AGENT_PERSONALITY.
+    return new LlmAgentBrain({
+      provider,
+      profile: spec.profile,
+      brainType: "llm",
+      runtimeMode: "llm-action-selector",
+      providerTimeoutMs,
+      includePromptInMetadata: false,
+      personality: process.env.AI_LEAGUE_AGENT_PERSONALITY?.trim() || undefined,
+    });
+  }
+  if (brainMode === "openrouter") {
+    if (provider === null) {
+      throw new LlmProviderConfigError(
+        "openrouter smoke requested but no provider was configured.",
+      );
+    }
+    // Full LLM authority: the model picks the LegalAction.id directly each step.
     return new LlmAgentBrain({
       provider,
       profile: spec.profile,
@@ -1285,7 +1370,9 @@ type SmokeBrainMode =
   | "planner"
   | "planner-codex-cli"
   | "planner-claude-cli"
-  | "action-claude-cli";
+  | "action-claude-cli"
+  | "openrouter"
+  | "planner-openrouter";
 type SmokeRunnerMode = "realtime" | "step-locked";
 
 function defaultRunID(
@@ -1301,12 +1388,13 @@ function defaultRunID(
 }
 
 function artifactBrainMode(brainMode: SmokeBrainMode): AgentBrainType {
-  if (brainMode === "action-claude-cli") {
+  if (brainMode === "action-claude-cli" || brainMode === "openrouter") {
     return "llm";
   }
   return brainMode === "planner" ||
     brainMode === "planner-codex-cli" ||
-    brainMode === "planner-claude-cli"
+    brainMode === "planner-claude-cli" ||
+    brainMode === "planner-openrouter"
     ? "planner-executor"
     : brainMode;
 }
@@ -1440,11 +1528,13 @@ function assertRequiredExternalBrainSucceeded(input: {
     // shares the planner-codex-cli cleanliness semantics (clean external planner
     // calls with house fallbacks tolerated).
     brainMode:
-      input.brainMode === "planner-claude-cli"
+      input.brainMode === "planner-claude-cli" ||
+      input.brainMode === "planner-openrouter"
         ? "planner-codex-cli"
-        : // action-claude-cli is an external-provider action selector, so it shares the
-          // codex-cli cleanliness semantics (every decision must be a clean LLM call).
-          input.brainMode === "action-claude-cli"
+        : // action-claude-cli / openrouter are external-provider action selectors, so they
+          // share the codex-cli cleanliness semantics (every decision must be a clean LLM call).
+          input.brainMode === "action-claude-cli" ||
+            input.brainMode === "openrouter"
           ? "codex-cli"
           : input.brainMode,
     records: input.records,

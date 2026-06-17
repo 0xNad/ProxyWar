@@ -46,6 +46,11 @@ import {
 } from "./AgentTypes";
 import { LlmProvider } from "./LlmProvider";
 import { RuleAgentBrain } from "./RuleAgentBrain";
+import {
+  doctrinePromptSuffix,
+  mergePlayerConstraintsIntoPlan,
+} from "./PlayerStrategySpec";
+import type { PlayerStrategySpec } from "./PlayerStrategySpec";
 
 export type FrontierPolicyModule =
   | "emergency_survival"
@@ -1441,6 +1446,9 @@ export class LlmAgentPlanner implements AgentPlanner {
       profile: AgentStrategyProfile;
       providerTimeoutMs?: number;
       plannerType: "codex-cli" | "real-llm";
+      // Optional player-authored strategy that binds onto the finalized plan
+      // (forbidden/preferred kinds, tactical ratios) and seeds the prompt doctrine.
+      playerStrategySpec?: PlayerStrategySpec;
     },
   ) {
     this.plannerType = options.plannerType;
@@ -1450,9 +1458,36 @@ export class LlmAgentPlanner implements AgentPlanner {
     input: AgentBrainInput,
     previousPlan: StrategicPlan | null,
   ): Promise<AgentPlanDecision> {
+    const decision = await this.planInner(input, previousPlan);
+    // Bind the player's strategy spec onto the finalized plan at a SINGLE chokepoint,
+    // so it applies to every return path (normal, repair, fallback). The executor
+    // enforces forbiddenActionKinds (hard pre-rank filter) + preferredActionKinds, so
+    // constraints hold even if the LLM degrades — yet the seat stays a real LLM
+    // Commander (the spec only constrains the plan it authored, never replaces it).
+    if (this.options.playerStrategySpec === undefined) {
+      return decision;
+    }
+    return {
+      ...decision,
+      plan: mergePlayerConstraintsIntoPlan(
+        decision.plan,
+        this.options.playerStrategySpec,
+      ),
+    };
+  }
+
+  private async planInner(
+    input: AgentBrainInput,
+    previousPlan: StrategicPlan | null,
+  ): Promise<AgentPlanDecision> {
     const started = Date.now();
     const decisionBrief = plannerDecisionBrief(input, previousPlan);
-    const prompt = plannerPrompt(input, previousPlan, decisionBrief);
+    const prompt = plannerPrompt(
+      input,
+      previousPlan,
+      decisionBrief,
+      doctrinePromptSuffix(this.options.playerStrategySpec ?? null),
+    );
     let raw = "";
     try {
       raw = await withTimeout(
@@ -20338,6 +20373,7 @@ function plannerPrompt(
   input: AgentBrainInput,
   previousPlan: StrategicPlan | null,
   decisionBrief = plannerDecisionBrief(input, previousPlan),
+  playerDoctrine = "",
 ): string {
   return [
     "You are the slow planner for an AI Nations League agent.",
@@ -20382,6 +20418,7 @@ function plannerPrompt(
     "FRONTIER_AGENT_SKILL:",
     frontierAgentSkill,
     "END_FRONTIER_AGENT_SKILL",
+    ...(playerDoctrine !== "" ? [playerDoctrine] : []),
     "Observation:",
     JSON.stringify({
       profile: input.observation.profile,

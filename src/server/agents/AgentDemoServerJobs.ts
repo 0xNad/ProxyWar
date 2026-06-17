@@ -4,6 +4,7 @@ import {
   DEFAULT_CODEX_APP_SERVER_IDLE_CLOSE_MS,
   DEFAULT_CODEX_PLANNER_MODEL,
 } from "./CodexCliLlmProvider";
+import { DEFAULT_OPENROUTER_MODEL } from "./OpenRouterLlmProvider";
 import { defaultProxyWarActiveRosterDir } from "./ProxyWarNationRegistry";
 
 export type AgentDemoJobKind = "demo" | "evaluation" | "tournament";
@@ -16,6 +17,8 @@ export type AgentDemoBrain =
   | "planner-codex-cli"
   | "claude-cli"
   | "planner-claude-cli"
+  | "openrouter"
+  | "planner-openrouter"
   | "external-http";
 
 export type AgentDemoScenario = "normal" | "actions" | "attack" | "stepped";
@@ -87,6 +90,8 @@ const brains: readonly AgentDemoBrain[] = [
   "planner-codex-cli",
   "claude-cli",
   "planner-claude-cli",
+  "openrouter",
+  "planner-openrouter",
   "external-http",
 ];
 const houseAgentBrains: readonly AgentDemoBrain[] = [
@@ -94,6 +99,8 @@ const houseAgentBrains: readonly AgentDemoBrain[] = [
   "planner-codex-cli",
   "claude-cli",
   "planner-claude-cli",
+  "openrouter",
+  "planner-openrouter",
 ];
 const scenarios: readonly AgentDemoScenario[] = [
   "normal",
@@ -117,6 +124,9 @@ const defaultManifestDir = path.join(
 const fullMatchDecisionSchedule = "25x20,100x30,250x40,500x150,100x160";
 const defaultCodexDecisionTimeoutMs = "45000";
 const defaultClaudeDecisionTimeoutMs = "60000";
+// Sponsored OpenRouter seats (deepseek-v4-flash) run ~19s mean / 33s max per
+// planner call; 45s gives headroom. Env-overridable via AI_LEAGUE_OPENROUTER_TIMEOUT_MS.
+const defaultOpenRouterDecisionTimeoutMs = "45000";
 // Connected/relay players run their own LLM. Cheap open-weight player brains
 // (e.g. deepseek-v4-flash via OpenRouter) measure ~19s mean / 33s max per
 // decision through the full starter-SDK prompt, so the old 15s default caused
@@ -286,6 +296,36 @@ export function buildAgentDemoJobCommand(
           AI_LEAGUE_REQUIRE_EXTERNAL_BRAIN_SUCCESS: "true",
         }
       : {}),
+    // OpenRouter sponsored seat: the smoke runner builds the provider from these
+    // env vars (createOpenRouterLlmProviderFromEnv). A missing key makes the
+    // provider throw on load (fail loud) — never a silent rule fallback.
+    ...(usesOpenRouter(request.brain)
+      ? {
+          AI_LEAGUE_OPENROUTER_TIMEOUT_MS:
+            process.env.AI_LEAGUE_OPENROUTER_TIMEOUT_MS ??
+            defaultOpenRouterDecisionTimeoutMs,
+          ...(process.env.AI_LEAGUE_OPENROUTER_API_KEY ??
+          process.env.OPENROUTER_API_KEY
+            ? {
+                AI_LEAGUE_OPENROUTER_API_KEY: (process.env
+                  .AI_LEAGUE_OPENROUTER_API_KEY ??
+                  process.env.OPENROUTER_API_KEY) as string,
+              }
+            : {}),
+          AI_LEAGUE_OPENROUTER_MODEL:
+            process.env.AI_LEAGUE_OPENROUTER_MODEL ??
+            process.env.OPENROUTER_MODEL ??
+            process.env.PROXYWAR_AGENT_LLM_MODEL ??
+            DEFAULT_OPENROUTER_MODEL,
+          ...(process.env.AI_LEAGUE_OPENROUTER_MAX_TOKENS
+            ? {
+                AI_LEAGUE_OPENROUTER_MAX_TOKENS:
+                  process.env.AI_LEAGUE_OPENROUTER_MAX_TOKENS,
+              }
+            : {}),
+          AI_LEAGUE_REQUIRE_EXTERNAL_BRAIN_SUCCESS: "true",
+        }
+      : {}),
   };
 
   if (request.kind === "evaluation") {
@@ -394,6 +434,11 @@ function fullAgentLeagueDemoArgs(
           `--max-decision-ms=${claudeDecisionTimeoutMs()}`,
         ]
       : []),
+    ...(usesOpenRouter(request.brain)
+      ? // Keep alliance actions ENABLED for openrouter: diplomacy is a core
+        // strategy-spec axis (the diplomatic posture would be meaningless without it).
+        [`--max-decision-ms=${openRouterDecisionTimeoutMs()}`]
+      : []),
     ...(request.roster === "manifest" || request.roster === "saved"
       ? [
           `--agent-manifest-dir=${
@@ -441,6 +486,9 @@ function demoArgs(
     args.push("--disable-alliance-actions");
     args.push(`--max-decision-ms=${claudeDecisionTimeoutMs()}`);
   }
+  if (usesOpenRouter(request.brain)) {
+    args.push(`--max-decision-ms=${openRouterDecisionTimeoutMs()}`);
+  }
   if (request.roster === "manifest" || request.roster === "saved") {
     args.push(
       `--agent-manifest-dir=${
@@ -471,6 +519,17 @@ function claudeDecisionTimeoutMs(): string {
     process.env.AI_LEAGUE_CLAUDE_TIMEOUT_MS ??
     process.env.AI_LEAGUE_LLM_TIMEOUT_MS ??
     defaultClaudeDecisionTimeoutMs
+  );
+}
+
+function usesOpenRouter(brain: AgentDemoBrain): boolean {
+  return brain === "openrouter" || brain === "planner-openrouter";
+}
+
+function openRouterDecisionTimeoutMs(): string {
+  return (
+    process.env.AI_LEAGUE_OPENROUTER_TIMEOUT_MS ??
+    defaultOpenRouterDecisionTimeoutMs
   );
 }
 

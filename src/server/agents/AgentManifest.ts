@@ -9,6 +9,10 @@ import {
 import { AgentSpec } from "./AgentLeagueMatch";
 import { normalizeExternalAgentEndpointUrl } from "./ExternalAgentNetworkPolicy";
 import { validateExternalAgentTokenReference } from "./ExternalAgentSecrets";
+import {
+  parsePlayerStrategySpec,
+  PlayerStrategySpec,
+} from "./PlayerStrategySpec";
 
 export type AgentManifestBrainType =
   | AgentBrainType
@@ -48,6 +52,8 @@ export interface AgentManifest {
   policyChangelog?: string;
   observationPolicy?: "default" | "compact" | "full";
   skillPreferences?: Partial<Record<string, number>>;
+  /** Player-authored strategy that binds onto the planner's plan (see PlayerStrategySpec). */
+  strategySpec?: PlayerStrategySpec;
   provider?: AgentManifestProvider;
 }
 
@@ -132,6 +138,15 @@ export function validateAgentManifest(
   ) {
     throw new Error(`${source} skillPreferences must be an object`);
   }
+  let strategySpec: PlayerStrategySpec | undefined;
+  if (manifest.strategySpec !== undefined) {
+    try {
+      strategySpec = parsePlayerStrategySpec(manifest.strategySpec);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      throw new Error(`${source} strategySpec is invalid: ${message}`);
+    }
+  }
   return {
     schemaVersion: 1,
     agentName: manifest.agentName.trim().slice(0, 80),
@@ -152,6 +167,7 @@ export function validateAgentManifest(
       | AgentManifest["observationPolicy"]
       | undefined,
     skillPreferences: manifest.skillPreferences as AgentManifest["skillPreferences"],
+    strategySpec,
     provider: validateProvider(manifest.provider, source),
   };
 }

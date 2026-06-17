@@ -1,6 +1,7 @@
 export type LlmProviderType =
   | "mock"
   | "openai"
+  | "openrouter"
   | "codex-cli"
   | "claude-cli"
   | "custom";
