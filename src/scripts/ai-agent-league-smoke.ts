@@ -228,6 +228,12 @@ async function run() {
       spec.profile = "aggressive";
     });
   }
+  // Quick-start: stamp the player's chosen name onto the sponsored agent so the
+  // tester sees THEIR agent (not a generated default) in the match and replay.
+  const playerAgentName = process.env.AI_LEAGUE_PLAYER_AGENT_NAME?.trim();
+  if (playerAgentName && explicitAgentCount && houseSpecs.length > 0) {
+    houseSpecs[0].username = playerAgentName.slice(0, 27);
+  }
   const specs = manifests === null ? houseSpecs : [...manifestSpecs, ...houseSpecs];
   if (specs.length > 8) {
     throw new Error("AI league matches support 1 to 8 agent participants");

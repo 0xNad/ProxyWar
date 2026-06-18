@@ -50,6 +50,8 @@ export interface AgentDemoJobRequest {
   replayTailTurns?: number;
   externalAgentEndpointUrl?: string;
   externalAgentTimeoutMs?: number;
+  /** Player-chosen display name for the sponsored agent (quick-start path). */
+  agentName?: string;
   /** Player-authored strategy for a sponsored openrouter seat (quick-start path). */
   strategySpec?: PlayerStrategySpec;
 }
@@ -189,7 +191,7 @@ export function normalizeAgentDemoJobRequest(
     maxSteps: boundedInteger(
       raw.maxSteps,
       1,
-      matchLength === "full" ? 1_000 : 30,
+      matchLength === "full" ? 1_000 : 80,
       kind === "demo" ? (matchLength === "full" ? fullMatchStepCap : 12) : 5,
     ),
     maxTurns,
@@ -227,11 +229,27 @@ export function normalizeAgentDemoJobRequest(
       180_000,
       Number(defaultExternalAgentDecisionTimeoutMs),
     ),
+    agentName: sanitizeQuickStartAgentName(raw.agentName),
     strategySpec:
       raw.strategySpec === undefined || raw.strategySpec === null
         ? undefined
         : parsePlayerStrategySpec(raw.strategySpec),
   };
+}
+
+// Player-chosen quick-start name -> a safe OpenFront in-game username: strip control
+// chars/newlines, collapse whitespace, clamp to 27 (OpenFront's username limit).
+// Returns undefined when blank so the default agent name applies.
+function sanitizeQuickStartAgentName(value: unknown): string | undefined {
+  if (typeof value !== "string") return undefined;
+  // Strip control chars/newlines (charCode compare avoids a no-control-regex lint),
+  // collapse whitespace, clamp to OpenFront's 27-char username limit.
+  const cleaned = Array.from(value)
+    .map((ch) => (ch.charCodeAt(0) < 0x20 || ch.charCodeAt(0) === 0x7f ? " " : ch))
+    .join("")
+    .replace(/\s+/g, " ")
+    .trim();
+  return cleaned === "" ? undefined : cleaned.slice(0, 27);
 }
 
 export function loadProxyWarHouseAgentBrain(
@@ -332,6 +350,9 @@ export function buildAgentDemoJobCommand(
                 AI_LEAGUE_OPENROUTER_MAX_TOKENS:
                   process.env.AI_LEAGUE_OPENROUTER_MAX_TOKENS,
               }
+            : {}),
+          ...(request.agentName
+            ? { AI_LEAGUE_PLAYER_AGENT_NAME: request.agentName }
             : {}),
           ...(request.strategySpec !== undefined
             ? {

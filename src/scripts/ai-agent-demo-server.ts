@@ -916,7 +916,7 @@ app.post("/api/quick-start", async (req, res) => {
   try {
     const body = (req.body ?? {}) as Record<string, unknown>;
     const maxSteps = Number(
-      process.env.PROXYWAR_QUICK_START_MAX_STEPS ?? "12",
+      process.env.PROXYWAR_QUICK_START_MAX_STEPS ?? "40",
     );
     const request = normalizeAgentDemoJobRequest({
       kind: "demo",
@@ -931,9 +931,14 @@ app.post("/api/quick-start", async (req, res) => {
       bots: 2,
       nations: 3,
       difficulty: "Easy",
-      maxSteps: Number.isInteger(maxSteps) ? maxSteps : 16,
+      // ~40 decision steps so nations make contact and the strategy actually plays
+      // out (expansion -> war/alliances) instead of ending in the opening land-grab.
+      maxSteps: Number.isInteger(maxSteps) ? maxSteps : 40,
       requireWinner: false,
-      replayTailTurns: 300,
+      replayTailTurns: 1500,
+      // The tester's chosen name -> the sponsored agent's in-game username.
+      agentName:
+        typeof body.agentName === "string" ? body.agentName : undefined,
       strategySpec: body.strategySpec ?? {},
     });
     const queued = enqueueProxyWarJob(request);
