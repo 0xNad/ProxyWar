@@ -925,10 +925,13 @@ app.post("/api/quick-start", async (req, res) => {
       roster: "default",
       matchLength: "showcase",
       agents: 1,
-      bots: 0,
-      nations: 2,
+      // Crowded board (5 built-in opponents) forces early contact so the player's
+      // strategy visibly diverges — a spacious 2-player board is all opening
+      // land-grab where every playstyle looks the same.
+      bots: 2,
+      nations: 3,
       difficulty: "Easy",
-      maxSteps: Number.isInteger(maxSteps) ? maxSteps : 12,
+      maxSteps: Number.isInteger(maxSteps) ? maxSteps : 16,
       requireWinner: false,
       replayTailTurns: 300,
       strategySpec: body.strategySpec ?? {},
