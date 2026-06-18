@@ -144,6 +144,52 @@ describe("mergePlayerConstraintsIntoPlan", () => {
       expansionRatio: 0.6,
     });
   });
+
+  it("seeds a seek_alliance directive for a diplomacy objectiveBias", () => {
+    const merged = mergePlayerConstraintsIntoPlan(basePlan(), {
+      objectiveBias: "diplomacy",
+    });
+    expect(merged.allianceDirective).toEqual({ stance: "seek_alliance" });
+  });
+
+  it("seeds a seek_alliance directive for a diplomatic posture", () => {
+    const merged = mergePlayerConstraintsIntoPlan(basePlan(), {
+      posture: "diplomatic",
+    });
+    expect(merged.allianceDirective).toEqual({ stance: "seek_alliance" });
+  });
+
+  it("does not seed an alliance directive for a military/aggressive spec", () => {
+    const merged = mergePlayerConstraintsIntoPlan(basePlan(), {
+      objectiveBias: "military",
+      posture: "aggressive",
+    });
+    expect(merged.allianceDirective).toBeUndefined();
+  });
+
+  it("does not override an alliance directive the Commander already set", () => {
+    const plan = basePlan({
+      allianceDirective: { stance: "hold_alliance", targetPlayerId: "ally1" },
+    });
+    const merged = mergePlayerConstraintsIntoPlan(plan, {
+      objectiveBias: "diplomacy",
+    });
+    expect(merged.allianceDirective).toEqual({
+      stance: "hold_alliance",
+      targetPlayerId: "ally1",
+    });
+  });
+
+  it("a diplomacy spec drops an existing commitment (single-directive invariant)", () => {
+    const plan = basePlan({
+      commitment: { targetPlayerId: "rivalX", minAttackRatio: 0.25 },
+    });
+    const merged = mergePlayerConstraintsIntoPlan(plan, {
+      objectiveBias: "diplomacy",
+    });
+    expect(merged.allianceDirective).toEqual({ stance: "seek_alliance" });
+    expect(merged.commitment).toBeUndefined();
+  });
 });
 
 describe("doctrinePromptSuffix", () => {

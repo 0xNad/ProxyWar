@@ -15393,6 +15393,75 @@ describe("rankLegalActionsForPrompt (unified LLM shortlist ranker)", () => {
   });
 });
 
+describe("Phase 2 binding alliance directive", () => {
+  function allianceLegalActions(): LegalAction[] {
+    return [
+      {
+        id: "expand:terra-nullius:10",
+        kind: "attack",
+        label: "Expand",
+        intent: { type: "attack", targetID: null, troops: 100 },
+        risk: { level: "low", score: 0.1 },
+        metadata: { expansion: true },
+      },
+      {
+        id: "alliance:ALLY01",
+        kind: "alliance_request",
+        label: "Request alliance",
+        intent: { type: "allianceRequest", recipient: "ALLY01" },
+        risk: { level: "low", score: 0.05 },
+        metadata: { recipientID: "ALLY01", recipientName: "Potential ally" },
+      },
+      hold(),
+    ];
+  }
+  // An expansion plan (no alliance preference) — so without a directive the executor
+  // expands, and WITH the directive it is forced onto the alliance instead. That
+  // contrast is the whole Phase 2 thesis.
+  function expandPlan(
+    allianceDirective?: StrategicPlan["allianceDirective"],
+  ): StrategicPlan {
+    return {
+      planID: "agent-1:expand",
+      objective: "expand_territory",
+      turnIntent: "growth",
+      targetPlayerId: null,
+      rationale: "grow",
+      startedAtTick: 4,
+      maxDecisionCycles: 3,
+      successCriteria: [],
+      failureCriteria: [],
+      preferredActionKinds: ["attack", "hold"],
+      forbiddenActionKinds: [],
+      enabledModules: ["expansion", "economy"],
+      plannerSource: "real-llm",
+      ...(allianceDirective !== undefined ? { allianceDirective } : {}),
+    };
+  }
+
+  it("forces the directed alliance over expansion when an alliance directive is bound", () => {
+    const decision = new FrontierPolicyExecutor("opportunistic").decide(
+      {
+        observation: activeObservation("expand_territory"),
+        legalActions: allianceLegalActions(),
+      },
+      expandPlan({ stance: "seek_alliance" }),
+    );
+    expect(decision.actionID).toBe("alliance:ALLY01");
+  });
+
+  it("does NOT force the alliance with no directive (default-off behavior unchanged)", () => {
+    const decision = new FrontierPolicyExecutor("opportunistic").decide(
+      {
+        observation: activeObservation("expand_territory"),
+        legalActions: allianceLegalActions(),
+      },
+      expandPlan(),
+    );
+    expect(decision.actionID).not.toBe("alliance:ALLY01");
+  });
+});
+
 function activeObservation(
   objectiveKind: AgentObjectiveKind,
 ): AgentObservation {

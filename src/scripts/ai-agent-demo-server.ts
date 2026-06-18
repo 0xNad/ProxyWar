@@ -14,6 +14,7 @@ import {
   renderProxyWarAdminHtml,
   renderProxyWarTesterDashboardHtml,
 } from "../server/agents/AgentDemoHub";
+import { renderQuickStartPlayHtml } from "../server/agents/QuickStartPlayPage";
 import {
   buildAgentDemoJobCommand,
   proxyWarTesterSavedRosterJobDefaults,
@@ -494,6 +495,16 @@ app.get("/public", async (_req, res, next) => {
   }
 });
 
+// Zero-install tester entry point: write a strategy, a sponsored LLM agent plays it.
+app.get("/play", (_req, res) => {
+  res.type("html").send(
+    renderQuickStartPlayHtml({
+      replayPathPrefix: "/proxywar-replay",
+      betaLabel: betaAccess.enabled ? betaAccess.label : "Beta",
+    }),
+  );
+});
+
 app.get("/tester-dashboard", async (_req, res, next) => {
   try {
     const model = await loadAgentDemoHubModel({
@@ -876,6 +887,73 @@ app.post("/api/jobs", async (req, res) => {
       ...(error instanceof ProxyWarActiveRosterHealthError
         ? { health: error.report }
         : {}),
+    });
+  }
+});
+
+// Public quick-start: the zero-install tester path. The tester only supplies a
+// strategy spec; the brain (sponsored openrouter/deepseek seat), opponents
+// (built-in nations), and bounded size are LOCKED here so the public endpoint can
+// never request an expensive brain or oversized match.
+app.post("/api/quick-start", async (req, res) => {
+  if (!enforceRateLimit("jobs", rateLimits.jobs, req, res)) {
+    return;
+  }
+  const hasOpenRouterKey =
+    (
+      process.env.AI_LEAGUE_OPENROUTER_API_KEY ??
+      process.env.OPENROUTER_API_KEY ??
+      ""
+    ).trim() !== "";
+  if (!hasOpenRouterKey) {
+    res.status(503).json({
+      ok: false,
+      error:
+        "Sponsored quick-start play is not configured on this server yet (no OpenRouter key).",
+    });
+    return;
+  }
+  try {
+    const body = (req.body ?? {}) as Record<string, unknown>;
+    const maxSteps = Number(
+      process.env.PROXYWAR_QUICK_START_MAX_STEPS ?? "12",
+    );
+    const request = normalizeAgentDemoJobRequest({
+      kind: "demo",
+      brain: "planner-openrouter",
+      scenario: "actions",
+      roster: "default",
+      matchLength: "showcase",
+      agents: 1,
+      bots: 0,
+      nations: 2,
+      difficulty: "Easy",
+      maxSteps: Number.isInteger(maxSteps) ? maxSteps : 12,
+      requireWinner: false,
+      replayTailTurns: 300,
+      strategySpec: body.strategySpec ?? {},
+    });
+    const queued = enqueueProxyWarJob(request);
+    if (!queued.ok) {
+      res.status(429).json({
+        ok: false,
+        error: queued.error,
+        runningJobID,
+        queuedJobCount: queuedJobIDs.length,
+      });
+      return;
+    }
+    res.status(202).json({
+      jobID: queued.job.jobID,
+      label: queued.job.label,
+      status: queued.job.status,
+      jobStatusUrl: `/api/jobs/${encodeURIComponent(queued.job.jobID)}`,
+    });
+  } catch (error) {
+    res.status(400).json({
+      ok: false,
+      error:
+        error instanceof Error ? error.message : "invalid quick-start request",
     });
   }
 });

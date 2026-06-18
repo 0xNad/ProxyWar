@@ -5,6 +5,10 @@ import {
   DEFAULT_CODEX_PLANNER_MODEL,
 } from "./CodexCliLlmProvider";
 import { DEFAULT_OPENROUTER_MODEL } from "./OpenRouterLlmProvider";
+import {
+  parsePlayerStrategySpec,
+  PlayerStrategySpec,
+} from "./PlayerStrategySpec";
 import { defaultProxyWarActiveRosterDir } from "./ProxyWarNationRegistry";
 
 export type AgentDemoJobKind = "demo" | "evaluation" | "tournament";
@@ -46,6 +50,8 @@ export interface AgentDemoJobRequest {
   replayTailTurns?: number;
   externalAgentEndpointUrl?: string;
   externalAgentTimeoutMs?: number;
+  /** Player-authored strategy for a sponsored openrouter seat (quick-start path). */
+  strategySpec?: PlayerStrategySpec;
 }
 
 export interface AgentDemoJobCommand {
@@ -221,6 +227,10 @@ export function normalizeAgentDemoJobRequest(
       180_000,
       Number(defaultExternalAgentDecisionTimeoutMs),
     ),
+    strategySpec:
+      raw.strategySpec === undefined || raw.strategySpec === null
+        ? undefined
+        : parsePlayerStrategySpec(raw.strategySpec),
   };
 }
 
@@ -321,6 +331,13 @@ export function buildAgentDemoJobCommand(
             ? {
                 AI_LEAGUE_OPENROUTER_MAX_TOKENS:
                   process.env.AI_LEAGUE_OPENROUTER_MAX_TOKENS,
+              }
+            : {}),
+          ...(request.strategySpec !== undefined
+            ? {
+                AI_LEAGUE_PLAYER_STRATEGY_SPEC: JSON.stringify(
+                  request.strategySpec,
+                ),
               }
             : {}),
           AI_LEAGUE_REQUIRE_EXTERNAL_BRAIN_SUCCESS: "true",

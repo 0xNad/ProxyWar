@@ -16,10 +16,11 @@ export const DEFAULT_OPENROUTER_ENDPOINT =
   "https://openrouter.ai/api/v1/chat/completions";
 export const DEFAULT_OPENROUTER_MODEL = "deepseek/deepseek-v4-flash";
 export const DEFAULT_OPENROUTER_TIMEOUT_MS = 45_000;
-// Higher than the starter agent's single-action 220: the planner emits a full
-// JSON strategic plan (objective, intent, preferred/forbidden kind arrays,
-// rationale, optional commitment), which truncates well under 220 tokens.
-export const DEFAULT_OPENROUTER_MAX_TOKENS = 600;
+// Content-only budget for the planner's JSON plan (objective, intent,
+// preferred/forbidden arrays, rationale, optional commitment). Reasoning is
+// disabled by default (see reasoningEnabled), so 800 is ample headroom; raise it
+// only if you re-enable reasoning, which consumes this same budget first.
+export const DEFAULT_OPENROUTER_MAX_TOKENS = 800;
 
 // Neutral system message: enforce strict JSON (also satisfies OpenRouter's
 // response_format=json_object requirement that some message mention "json")
@@ -39,6 +40,11 @@ export interface OpenRouterLlmProviderConfig {
   maxRetries: number;
   maxOutputTokens: number;
   temperature: number;
+  // When false (default), send reasoning:{enabled:false}. Reasoning models
+  // (e.g. deepseek-v4-flash) otherwise spend the whole token budget on reasoning
+  // and return EMPTY content on long planner prompts -> fail-loud. Off = reliable
+  // content, lower latency, lower cost.
+  reasoningEnabled?: boolean;
   referer?: string;
   title?: string;
   fetchFn?: FetchLike;
@@ -104,6 +110,11 @@ export class OpenRouterLlmProvider implements LlmProvider {
           temperature: this.config.temperature,
           max_tokens: this.config.maxOutputTokens,
           response_format: { type: "json_object" },
+          // Disable reasoning unless explicitly enabled — otherwise a reasoning
+          // model burns the whole budget thinking and returns empty content.
+          ...(this.config.reasoningEnabled === true
+            ? {}
+            : { reasoning: { enabled: false } }),
         }),
         signal: controller.signal,
       });
@@ -191,9 +202,10 @@ export function loadOpenRouterLlmProviderConfig(
     model,
     endpoint,
     timeoutMs,
-    maxRetries: positiveIntegerEnv(env, "AI_LEAGUE_OPENROUTER_MAX_RETRIES", 0, {
+    // One retry by default: a rare transient empty/5xx then succeeds.
+    maxRetries: positiveIntegerEnv(env, "AI_LEAGUE_OPENROUTER_MAX_RETRIES", 1, {
       min: 0,
-      max: 2,
+      max: 3,
     }),
     maxOutputTokens: positiveIntegerEnv(
       env,
@@ -201,11 +213,10 @@ export function loadOpenRouterLlmProviderConfig(
       DEFAULT_OPENROUTER_MAX_TOKENS,
       { min: 64, max: 4_000 },
     ),
-    temperature: unitFloatEnv(
-      env,
-      "AI_LEAGUE_OPENROUTER_TEMPERATURE",
-      0.2,
-    ),
+    temperature: unitFloatEnv(env, "AI_LEAGUE_OPENROUTER_TEMPERATURE", 0.2),
+    reasoningEnabled:
+      (env.AI_LEAGUE_OPENROUTER_REASONING?.trim().toLowerCase() ?? "off") ===
+      "on",
     referer:
       env.AI_LEAGUE_OPENROUTER_REFERER?.trim() || "https://proxywar.xyz",
     title: env.AI_LEAGUE_OPENROUTER_TITLE?.trim() || "Proxy War",

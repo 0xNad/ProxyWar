@@ -8,6 +8,7 @@ import { sanitizeUntrustedDisplayString } from "./PromptSanitizer";
 // Type-only imports: erased at runtime, so this module does NOT create a runtime
 // cycle with AgentPlannerExecutor (which imports the functions below at runtime).
 import type {
+  AgentAllianceDirective,
   AgentTacticalSettings,
   StrategicPlan,
 } from "./AgentPlannerExecutor";
@@ -210,12 +211,27 @@ export function mergePlayerConstraintsIntoPlan(
       ? plan.tacticalSettings
       : { ...plan.tacticalSettings, ...definedOnly(spec.tacticalSettings) };
 
+  // Seed a binding alliance directive from a diplomacy-leaning spec unless the
+  // Commander already bound one — this is what makes a "diplomatic" player strategy
+  // actually ally (the executor's allianceDirectiveCandidate then enforces it).
+  const wantsAlliance =
+    spec.objectiveBias === "diplomacy" || spec.posture === "diplomatic";
+  const allianceDirective: AgentAllianceDirective | undefined =
+    plan.allianceDirective ??
+    (wantsAlliance ? { stance: "seek_alliance" } : undefined);
+  // Single-directive invariant: a diplomacy spec's alliance overrides an aggressive
+  // commitment (the player chose diplomacy over a kill-window), so the plan never
+  // carries both — which also keeps the override-audit telemetry unambiguous.
+  const finalCommitment =
+    allianceDirective !== undefined ? undefined : commitment;
+
   return {
     ...plan,
     forbiddenActionKinds: forbidden,
     preferredActionKinds: preferred,
     tacticalSettings,
-    commitment,
+    commitment: finalCommitment,
+    allianceDirective,
   };
 }
 

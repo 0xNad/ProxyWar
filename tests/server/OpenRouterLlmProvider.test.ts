@@ -30,9 +30,10 @@ describe("OpenRouterLlmProvider", () => {
       apiKey: "test-key",
       model: DEFAULT_OPENROUTER_MODEL,
       timeoutMs: DEFAULT_OPENROUTER_TIMEOUT_MS,
-      maxRetries: 0,
+      maxRetries: 1,
       maxOutputTokens: DEFAULT_OPENROUTER_MAX_TOKENS,
       temperature: 0.2,
+      reasoningEnabled: false,
     });
   });
 
@@ -89,11 +90,32 @@ describe("OpenRouterLlmProvider", () => {
       temperature: 0.2,
       max_tokens: 600,
       response_format: { type: "json_object" },
+      reasoning: { enabled: false },
     });
     expect(body.messages.at(-1)).toMatchObject({
       role: "user",
       content: "plan prompt",
     });
+  });
+
+  it("omits the reasoning-disable flag when reasoning is enabled", async () => {
+    const calls: RequestInit[] = [];
+    const provider = new OpenRouterLlmProvider({
+      apiKey: "k",
+      model: "m",
+      endpoint: "https://example.test/v1/chat/completions",
+      timeoutMs: 1_000,
+      maxRetries: 0,
+      maxOutputTokens: 600,
+      temperature: 0.2,
+      reasoningEnabled: true,
+      fetchFn: async (_input, init) => {
+        calls.push(init);
+        return chatResponse('{"objective":"survive"}');
+      },
+    });
+    await provider.complete("p");
+    expect(JSON.parse(calls[0].body as string).reasoning).toBeUndefined();
   });
 
   it("times out slow provider calls (fail loud)", async () => {

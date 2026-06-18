@@ -37,6 +37,17 @@ export function directiveCommitmentEnabled(): boolean {
 }
 
 /**
+ * Binding diplomacy directive flag (Keystone Phase 2). Reads the EXACT env var
+ * `PROXYWAR_TUNE_DIRECTIVE_DIPLOMACY` (A/B arms set "0"/"1"). Default ON. Gates the
+ * planner-prompt alliance schema and alliance-directive parsing; downstream
+ * enforcement keys off `plan.allianceDirective` presence, which can only be set
+ * when this flag was on at parse time (or when seeded by a player strategy spec).
+ */
+export function directiveDiplomacyEnabled(): boolean {
+  return tunedNumber("DIRECTIVE_DIPLOMACY", 1) >= 1;
+}
+
+/**
  * FM-1 fix flag — "cash the midgame kill window." Reads the EXACT env var
  * `PROXYWAR_TUNE_ENFORCE_CONVERSION` (A/B arms set "0"/"1" on the same build).
  * Default ON (it is a competitiveness fix). When ON, the action ranking clamps

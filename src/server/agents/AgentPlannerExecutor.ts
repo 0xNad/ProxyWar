@@ -17,6 +17,7 @@ import { buildAgentTacticalAffordances } from "./AgentTacticalAffordances";
 import {
   behindAndFallingEscapeEnabled,
   directiveCommitmentEnabled,
+  directiveDiplomacyEnabled,
   enforceConversionOverNeutralEnabled,
   tunedNumber,
 } from "./AgentTunables";
@@ -121,6 +122,20 @@ export interface AgentPlanCommitment {
   minAttackRatio: number;
 }
 
+/**
+ * Binding diplomacy directive (Keystone Phase 2). The diplomacy analog of
+ * `AgentPlanCommitment`: a standing order that the executor MUST carry out by
+ * selecting an `alliance_request`/`alliance_extend` over expansion/attack this
+ * cycle (only true survival pre-empts). `targetPlayerId` binds to a specific
+ * rival; omit it to seek any available alliance. Set only when the Commander
+ * emitted it (with `directiveDiplomacyEnabled()` on) OR a player strategy spec
+ * seeded it — never by rule/fallback planners.
+ */
+export interface AgentAllianceDirective {
+  stance: "seek_alliance" | "hold_alliance";
+  targetPlayerId?: string;
+}
+
 export interface StrategicPlan {
   planID: string;
   objective: AgentObjectiveKind;
@@ -136,6 +151,7 @@ export interface StrategicPlan {
   enabledModules?: FrontierPolicyModule[];
   tacticalSettings?: AgentTacticalSettings;
   commitment?: AgentPlanCommitment;
+  allianceDirective?: AgentAllianceDirective;
   plannerSource: "rule" | "mock-llm" | "codex-cli" | "real-llm";
 }
 
@@ -522,6 +538,7 @@ export class PlannerExecutorAgentBrain implements AgentBrain {
     // enforcement code paths): did the final selection honor an active commitment?
     const commitmentAudit = auditCommitmentAdherence(input, plan, execution);
     this.lastCommitmentHonored = commitmentAudit?.honored === true;
+    const allianceAudit = auditAllianceDirectiveAdherence(input, plan, execution);
 
     return {
       actionID: execution.actionID,
@@ -546,6 +563,18 @@ export class PlannerExecutorAgentBrain implements AgentBrain {
               directiveCommitmentMinRatio: commitmentAudit.minAttackRatio,
               ...(commitmentAudit.overrideEvent !== null
                 ? { executorOverrideEvent: commitmentAudit.overrideEvent }
+                : {}),
+            }
+          : {}),
+        ...(allianceAudit !== null
+          ? {
+              directiveAllianceActive: true,
+              directiveAllianceStance: allianceAudit.stance,
+              ...(allianceAudit.targetPlayerId !== null
+                ? { directiveAllianceTarget: allianceAudit.targetPlayerId }
+                : {}),
+              ...(allianceAudit.overrideEvent !== null
+                ? { executorOverrideEvent: allianceAudit.overrideEvent }
                 : {}),
             }
           : {}),
@@ -1538,6 +1567,10 @@ export class LlmAgentPlanner implements AgentPlanner {
                     repaired.commitment ?? parsed.commitment,
                     input,
                   ),
+                  allianceDirective: validatedAllianceDirective(
+                    repaired.allianceDirective ?? parsed.allianceDirective,
+                    input,
+                  ),
                 }),
                 reason: repaired.rationale,
                 latencyMs: Date.now() - started,
@@ -1581,6 +1614,10 @@ export class LlmAgentPlanner implements AgentPlanner {
             targetPlayerId: parsed.targetPlayerId,
             tacticalSettings: parsed.tacticalSettings,
             commitment: validatedCommitment(parsed.commitment, input),
+            allianceDirective: validatedAllianceDirective(
+              parsed.allianceDirective,
+              input,
+            ),
           }),
           reason: parsed.rationale,
           latencyMs: Date.now() - started,
@@ -1802,6 +1839,58 @@ function commitmentDirectiveCandidate(
 }
 
 /**
+ * Binding alliance-directive enforcement (Keystone Phase 2): when the Commander
+ * (or a player strategy spec) bound a diplomacy stance, select the directed
+ * alliance action — an alliance_request/alliance_extend to the bound target (or
+ * any available ally when no target is set) whose scheduling is unblocked. The
+ * diplomacy analog of commitmentDirectiveCandidate. Runs directly after the
+ * commitment selector: survival and an explicit kill-commitment still pre-empt
+ * it; every tactical/expansion selector below must not.
+ */
+function allianceDirectiveCandidate(
+  input: AgentBrainInput,
+  plan: StrategicPlan,
+  scored: readonly FrontierRankedAction[],
+): FrontierRankedAction | undefined {
+  const directive = plan.allianceDirective;
+  if (directive === undefined) {
+    return undefined;
+  }
+  // A bound alliance directive is the player's/Commander's explicit will: select a
+  // legal offered alliance action even when the policy would otherwise decline it
+  // (the diplomacy analog of how a commitment overrides the tunable attack-safety
+  // gates — e.g. the diplomacy-module reluctance penalty). Only legality matters:
+  // it must be an offered alliance LegalAction.id matching the directive's target.
+  const qualifying = scored.filter((candidate) => {
+    const kind = candidate.action.kind;
+    if (kind !== "alliance_request" && kind !== "alliance_extend") {
+      return false;
+    }
+    if (
+      directive.targetPlayerId !== undefined &&
+      !actionTargetsPlayer(candidate.action, directive.targetPlayerId)
+    ) {
+      return false;
+    }
+    return true;
+  });
+  if (qualifying.length === 0) {
+    return undefined;
+  }
+  // hold_alliance prefers extending an existing alliance; seek_alliance prefers a
+  // fresh request. Within the preferred kind, take the highest-scored.
+  const preferredKind =
+    directive.stance === "hold_alliance"
+      ? "alliance_extend"
+      : "alliance_request";
+  return [...qualifying].sort((a, b) => {
+    const aPreferred = a.action.kind === preferredKind ? 0 : 1;
+    const bPreferred = b.action.kind === preferredKind ? 0 : 1;
+    return aPreferred - bPreferred || b.totalScore - a.totalScore;
+  })[0];
+}
+
+/**
  * Outcome-level commitment audit (agentic-share v2). Measures what was actually
  * SELECTED against what the commitment required — deliberately independent of the
  * enforcement code paths, so the metric cannot be fooled by enforcement bugs:
@@ -1858,6 +1947,52 @@ function auditCommitmentAdherence(
   return {
     targetPlayerId: commitment.targetPlayerId,
     minAttackRatio: commitment.minAttackRatio,
+    honored,
+    overrideEvent,
+  };
+}
+
+/**
+ * Outcome-level alliance-directive audit (agentic-share v2), independent of the
+ * enforcement path. honored: the final batch contains a qualifying alliance
+ * action. "declined_alliance_action": a qualifying alliance was offered but not
+ * selected (the override the gate drives to zero). "no_legal_alliance_action":
+ * nothing qualifying was offered (availability, not a violation).
+ */
+function auditAllianceDirectiveAdherence(
+  input: AgentBrainInput,
+  plan: StrategicPlan,
+  execution: AgentExecutionDecision,
+): {
+  targetPlayerId: string | null;
+  stance: string;
+  honored: boolean;
+  overrideEvent: string | null;
+} | null {
+  const directive = plan.allianceDirective;
+  if (directive === undefined) {
+    return null;
+  }
+  const qualifies = (action: LegalAction) =>
+    (action.kind === "alliance_request" || action.kind === "alliance_extend") &&
+    (directive.targetPlayerId === undefined ||
+      actionTargetsPlayer(action, directive.targetPlayerId));
+  const available = input.legalActions.some(qualifies);
+  const selectedIDs = new Set([
+    execution.actionID,
+    ...(execution.actionIDs ?? []),
+  ]);
+  const honored = input.legalActions
+    .filter((action) => selectedIDs.has(action.id))
+    .some(qualifies);
+  const overrideEvent = honored
+    ? null
+    : available
+      ? "declined_alliance_action"
+      : "no_legal_alliance_action";
+  return {
+    targetPlayerId: directive.targetPlayerId ?? null,
+    stance: directive.stance,
     honored,
     overrideEvent,
   };
@@ -1929,6 +2064,17 @@ function selectFrontierActionBatch(input: {
   );
   if (commitmentDirective !== undefined) {
     return [commitmentDirective];
+  }
+  // Binding alliance directive (Phase 2): a bound diplomacy stance pre-empts the
+  // tactical/expansion selectors below — survival and an explicit kill commitment
+  // above still win. Single-action batch: the alliance IS this cycle's decision.
+  const allianceDirectiveAction = allianceDirectiveCandidate(
+    input.input,
+    plan,
+    scored,
+  );
+  if (allianceDirectiveAction !== undefined) {
+    return [allianceDirectiveAction];
   }
   // FM-2a ("trade or die"): when behind-and-falling, force the single best
   // controlled strike before the neutral-territory / banking / hold paths below,
@@ -19035,6 +19181,7 @@ function strategicPlanForObjective(input: {
   targetPlayerId?: string | null;
   tacticalSettings?: AgentTacticalSettings;
   commitment?: AgentPlanCommitment;
+  allianceDirective?: AgentAllianceDirective;
 }): StrategicPlan {
   const preferredActionKinds =
     input.preferredActionKinds ?? preferredKinds(input.objective);
@@ -19081,6 +19228,9 @@ function strategicPlanForObjective(input: {
       : {}),
     ...(input.commitment !== undefined
       ? { commitment: input.commitment }
+      : {}),
+    ...(input.allianceDirective !== undefined
+      ? { allianceDirective: input.allianceDirective }
       : {}),
     plannerSource: input.plannerSource,
   };
@@ -20401,9 +20551,14 @@ function plannerPrompt(
           "STARTING a commitment is a judgment call; MAINTAINING one is not: while the window holds (target not broken, home not collapsing), re-emit the same commitment in every new plan. Dropping it mid-kill forfeits the war. Drop it deliberately when the target is broken, allied, or a bigger threat emerged. minAttackRatio: 0.25 standard, 0.4 to finish a broken rival, 0.1 only for sustained probing.",
         ]
       : []),
+    ...(directiveDiplomacyEnabled()
+      ? [
+          'BINDING ALLIANCE (your real authority for diplomacy): when an alliance is worth committing to — a neighbor you need to keep peaceful, an ally to hold against a bigger threat, or a diplomatic line you are playing — add "allianceDirective":{"stance":"seek_alliance","targetPlayerId":"<their id, or omit to seek any available ally>"} to your JSON. A bound alliance directive BINDS the executor: it will pick the alliance_request/alliance_extend you direct OVER expansion or attacks this cycle (only true survival pre-empts). Use stance "hold_alliance" to extend/defend an existing alliance. Without it the executor treats alliances as low-priority filler and keeps attacking, so a diplomatic plan never actually allies.',
+        ]
+      : []),
     directiveCommitmentEnabled()
-      ? 'Required JSON: {"objective":"expand_territory","turnIntent":"growth","rationale":"short reason","maxDecisionCycles":3,"preferredActionKinds":["attack"],"enabledModules":["expansion","economy","defense"],"targetPlayerId":null,"commitment":null,"tacticalSettings":{"reserveRatio":0.35,"triggerRatio":0.55,"expansionRatio":0.15,"maxConcurrentWars":1,"retreatThreshold":0.35,"maxActionsPerDecision":4}}'
-      : 'Required JSON: {"objective":"expand_territory","turnIntent":"growth","rationale":"short reason","maxDecisionCycles":3,"preferredActionKinds":["attack"],"enabledModules":["expansion","economy","defense"],"targetPlayerId":null,"tacticalSettings":{"reserveRatio":0.35,"triggerRatio":0.55,"expansionRatio":0.15,"maxConcurrentWars":1,"retreatThreshold":0.35,"maxActionsPerDecision":4}}',
+      ? 'Required JSON: {"objective":"expand_territory","turnIntent":"growth","rationale":"short reason","maxDecisionCycles":3,"preferredActionKinds":["attack"],"enabledModules":["expansion","economy","defense"],"targetPlayerId":null,"commitment":null,"allianceDirective":null,"tacticalSettings":{"reserveRatio":0.35,"triggerRatio":0.55,"expansionRatio":0.15,"maxConcurrentWars":1,"retreatThreshold":0.35,"maxActionsPerDecision":4}}'
+      : 'Required JSON: {"objective":"expand_territory","turnIntent":"growth","rationale":"short reason","maxDecisionCycles":3,"preferredActionKinds":["attack"],"enabledModules":["expansion","economy","defense"],"targetPlayerId":null,"allianceDirective":null,"tacticalSettings":{"reserveRatio":0.35,"triggerRatio":0.55,"expansionRatio":0.15,"maxConcurrentWars":1,"retreatThreshold":0.35,"maxActionsPerDecision":4}}',
     "PLANNER_DECISION_BRIEF:",
     JSON.stringify(decisionBrief),
     "END_PLANNER_DECISION_BRIEF",
@@ -20524,6 +20679,7 @@ type PlannerParseResult =
       targetPlayerId: string | null;
       tacticalSettings?: AgentTacticalSettings;
       commitment?: AgentPlanCommitment;
+      allianceDirective?: AgentAllianceDirective;
     }
   | { ok: false; reason: string };
 
@@ -20591,6 +20747,64 @@ function validatedCommitment(
     return undefined;
   }
   return commitment;
+}
+
+function parseAllianceDirective(
+  raw: unknown,
+): AgentAllianceDirective | undefined {
+  if (!directiveDiplomacyEnabled()) {
+    return undefined;
+  }
+  if (raw === null || typeof raw !== "object" || Array.isArray(raw)) {
+    return undefined;
+  }
+  const value = raw as Record<string, unknown>;
+  const stance =
+    value.stance === "hold_alliance"
+      ? "hold_alliance"
+      : value.stance === "seek_alliance"
+        ? "seek_alliance"
+        : undefined;
+  if (stance === undefined) {
+    return undefined;
+  }
+  const target =
+    typeof value.targetPlayerId === "string" &&
+    value.targetPlayerId.trim() !== ""
+      ? value.targetPlayerId.trim()
+      : undefined;
+  return {
+    stance,
+    ...(target !== undefined ? { targetPlayerId: target } : {}),
+  };
+}
+
+/**
+ * Semantic alliance-directive validation. A specific target must be a visible,
+ * alive, non-self rival; an invalid specific target falls back to a broad seek
+ * (drop targetPlayerId) rather than binding to a hallucinated/dead/self target.
+ * A broad seek (no target) is always valid.
+ */
+function validatedAllianceDirective(
+  directive: AgentAllianceDirective | undefined,
+  input: AgentBrainInput,
+): AgentAllianceDirective | undefined {
+  if (directive === undefined) {
+    return undefined;
+  }
+  if (directive.targetPlayerId === undefined) {
+    return directive;
+  }
+  if (directive.targetPlayerId === input.observation.ownState?.playerID) {
+    return { stance: directive.stance };
+  }
+  const target = input.observation.visiblePlayers.find(
+    (player) => player.playerID === directive.targetPlayerId,
+  );
+  if (target === undefined || !target.isAlive) {
+    return { stance: directive.stance };
+  }
+  return directive;
 }
 
 /**
@@ -20698,14 +20912,35 @@ function parsePlannerOutput(
     preferredActionKinds,
   );
   const commitment = parsePlanCommitment(value.commitment, targetPlayerId);
-  // A valid commitment must be executable: never let the same plan forbid the
-  // attack kinds it commits to, and make sure the combat module can run.
-  const reconciledModules =
+  // Commitment and alliance directive are mutually exclusive: a kill-commitment
+  // outranks and pre-empts an alliance at the executor anyway, so dropping the
+  // alliance when a commitment exists keeps the plan single-directive and prevents
+  // the two override audits from colliding on the shared executorOverrideEvent key.
+  const allianceDirective =
+    commitment !== undefined
+      ? undefined
+      : parseAllianceDirective(value.allianceDirective);
+  // A binding directive must be executable: a commitment needs the combat module,
+  // an alliance directive needs the diplomacy module. (A commitment's plan may also
+  // not forbid the attack kinds it commits to — handled in strategicPlanForObjective.)
+  let reconciledModules = enabledModules;
+  if (
     commitment !== undefined &&
-    enabledModules !== undefined &&
-    !enabledModules.includes("combat")
-      ? [...enabledModules, "combat" as FrontierPolicyModule]
-      : enabledModules;
+    reconciledModules !== undefined &&
+    !reconciledModules.includes("combat")
+  ) {
+    reconciledModules = [...reconciledModules, "combat" as FrontierPolicyModule];
+  }
+  if (
+    allianceDirective !== undefined &&
+    reconciledModules !== undefined &&
+    !reconciledModules.includes("diplomacy")
+  ) {
+    reconciledModules = [
+      ...reconciledModules,
+      "diplomacy" as FrontierPolicyModule,
+    ];
+  }
   return {
     ok: true,
     objective: value.objective,
@@ -20717,6 +20952,7 @@ function parsePlannerOutput(
     targetPlayerId,
     ...(tacticalSettings !== undefined ? { tacticalSettings } : {}),
     ...(commitment !== undefined ? { commitment } : {}),
+    ...(allianceDirective !== undefined ? { allianceDirective } : {}),
   };
 }
 
