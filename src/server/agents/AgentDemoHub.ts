@@ -217,7 +217,7 @@ Rules:
 - Managed Agent Relay is the default. It is outbound only and is not a network proxy.
 - Keep the terminal open until the match completes.
 - Do not put tokens or API keys in the Agent Card.
-- Decisions must return strict JSON with selectedLegalActionId equal to one offered LegalAction.id. Do not return raw OpenFront/OpenFrontier/OpenFront intents.
+- Decisions must return strict JSON with selectedLegalActionId equal to one offered LegalAction.id. Do not return raw OpenFront or ProxyWar engine intents.
 
 Reply with:
 Backend:
