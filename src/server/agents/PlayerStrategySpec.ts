@@ -48,6 +48,11 @@ export interface PlayerStrategySpec {
   preferredKinds?: LegalActionKind[];
   /** Action kinds the executor must never pick (HARD pre-rank filter). */
   forbiddenKinds?: LegalActionKind[];
+  /** Action kinds the player explicitly PERMITS, lifting any forbid a preset/posture
+   *  would otherwise impose (subtracted from forbiddenActionKinds in the merge). This is
+   *  what lets a custom doctrine like "ally everyone" win over a preset's hard
+   *  forbiddenKinds — the structured inverse of forbiddenKinds. */
+  allowKinds?: LegalActionKind[];
   /** Tactical ratio overrides (aggression, reserve, expansion, wars, …). */
   tacticalSettings?: AgentTacticalSettings;
   /** Free-text strategy guidance appended to the planner prompt (sanitized, capped). */
@@ -109,6 +114,10 @@ export function parsePlayerStrategySpec(raw: unknown): PlayerStrategySpec {
   if (forbidden !== undefined) {
     spec.forbiddenKinds = forbidden;
   }
+  const allowed = validateKinds(obj.allowKinds, "allowKinds");
+  if (allowed !== undefined) {
+    spec.allowKinds = allowed;
+  }
 
   if (obj.tacticalSettings !== undefined) {
     spec.tacticalSettings = validateTacticalSettings(obj.tacticalSettings);
@@ -159,6 +168,7 @@ export function isEmptyStrategySpec(spec: PlayerStrategySpec | null): boolean {
     spec.objectiveBias === undefined &&
     (spec.preferredKinds === undefined || spec.preferredKinds.length === 0) &&
     (spec.forbiddenKinds === undefined || spec.forbiddenKinds.length === 0) &&
+    (spec.allowKinds === undefined || spec.allowKinds.length === 0) &&
     spec.tacticalSettings === undefined &&
     (spec.doctrine === undefined || spec.doctrine === "")
   );
@@ -183,13 +193,20 @@ export function mergePlayerConstraintsIntoPlan(
     return plan;
   }
 
-  const playerForbids = new Set(spec.forbiddenKinds ?? []);
+  // allowKinds is an explicit lift: it removes a kind from the forbidden set even if a
+  // preset/posture/objective would otherwise block it. This is what lets a custom doctrine
+  // (e.g. "ally everyone") win over a preset's hard forbiddenKinds. An explicit allow also
+  // means the player is NOT pacifist about that kind, so it's excluded from playerForbids.
+  const allowSet = new Set(spec.allowKinds ?? []);
+  const playerForbids = new Set(
+    (spec.forbiddenKinds ?? []).filter((kind) => !allowSet.has(kind)),
+  );
   let commitment = plan.commitment;
 
   let forbidden = unique([
     ...plan.forbiddenActionKinds,
     ...(spec.forbiddenKinds ?? []),
-  ]);
+  ]).filter((kind) => !allowSet.has(kind));
 
   if (playerForbids.has("attack")) {
     // Pacifist player intent overrides an LLM kill-window commitment.
@@ -255,9 +272,20 @@ export function doctrinePromptSuffix(spec: PlayerStrategySpec | null): string {
   if (spec.preferredKinds !== undefined && spec.preferredKinds.length > 0) {
     lines.push(`- Favor these action kinds: ${spec.preferredKinds.join(", ")}`);
   }
-  if (spec.forbiddenKinds !== undefined && spec.forbiddenKinds.length > 0) {
+  // Only report a kind as hard-blocked if it isn't explicitly allowed — otherwise the
+  // model would be told not to use the very action the doctrine just unblocked.
+  const allowSet = new Set(spec.allowKinds ?? []);
+  const effectiveForbidden = (spec.forbiddenKinds ?? []).filter(
+    (kind) => !allowSet.has(kind),
+  );
+  if (effectiveForbidden.length > 0) {
     lines.push(
-      `- Never use these action kinds (already hard-blocked): ${spec.forbiddenKinds.join(", ")}`,
+      `- Never use these action kinds (already hard-blocked): ${effectiveForbidden.join(", ")}`,
+    );
+  }
+  if (spec.allowKinds !== undefined && spec.allowKinds.length > 0) {
+    lines.push(
+      `- These action kinds are explicitly allowed for you: ${spec.allowKinds.join(", ")}`,
     );
   }
   if (spec.doctrine !== undefined && spec.doctrine !== "") {

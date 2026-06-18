@@ -59,6 +59,16 @@ describe("parsePlayerStrategySpec", () => {
     ).toThrow(/reserveRatio/);
   });
 
+  it("parses and validates allowKinds", () => {
+    const spec = parsePlayerStrategySpec({
+      allowKinds: ["alliance_request", "alliance_extend"],
+    });
+    expect(spec.allowKinds).toEqual(["alliance_request", "alliance_extend"]);
+    expect(() =>
+      parsePlayerStrategySpec({ allowKinds: ["alliance_request", "fly"] }),
+    ).toThrow(/invalid action kind/);
+  });
+
   it("sanitizes and caps the doctrine", () => {
     const spec = parsePlayerStrategySpec({ doctrine: "x".repeat(5000) });
     expect((spec.doctrine ?? "").length).toBeLessThanOrEqual(600);
@@ -105,6 +115,39 @@ describe("mergePlayerConstraintsIntoPlan", () => {
     expect(merged.preferredActionKinds).toEqual(
       expect.arrayContaining(["boat", "build"]),
     );
+  });
+
+  it("lifts a forbidden kind via allowKinds (custom doctrine overrides a preset block)", () => {
+    // The Conqueror preset forbids the alliance kinds; a custom doctrine that wants to
+    // ally must be able to lift them. allowKinds removes them from forbiddenActionKinds.
+    const plan = basePlan({ forbiddenActionKinds: [] });
+    const merged = mergePlayerConstraintsIntoPlan(plan, {
+      forbiddenKinds: ["alliance_request", "alliance_extend", "break_alliance"],
+      allowKinds: ["alliance_request", "alliance_extend", "break_alliance"],
+    });
+    expect(merged.forbiddenActionKinds).not.toContain("alliance_request");
+    expect(merged.forbiddenActionKinds).not.toContain("alliance_extend");
+  });
+
+  it("allowKinds also lifts a kind the plan/objective forbade", () => {
+    const plan = basePlan({ forbiddenActionKinds: ["nuke", "embargo"] });
+    const merged = mergePlayerConstraintsIntoPlan(plan, {
+      allowKinds: ["nuke"],
+    });
+    expect(merged.forbiddenActionKinds).not.toContain("nuke");
+    expect(merged.forbiddenActionKinds).toContain("embargo");
+  });
+
+  it("an explicit allow on attack prevents the pacifist commitment-drop", () => {
+    const plan = basePlan({
+      commitment: { targetPlayerId: "rivalX", minAttackRatio: 0.25 },
+    });
+    const merged = mergePlayerConstraintsIntoPlan(plan, {
+      forbiddenKinds: ["attack"],
+      allowKinds: ["attack"],
+    });
+    expect(merged.commitment).toBeDefined();
+    expect(merged.forbiddenActionKinds).not.toContain("attack");
   });
 
   it("drops an LLM commitment when the player forbids attack (pacifist precedence)", () => {
@@ -210,6 +253,19 @@ describe("doctrinePromptSuffix", () => {
     expect(suffix).toContain("alliance_request");
     expect(suffix).toContain("Ally early");
   });
+
+  it("does not report an allowed kind as hard-blocked, and lists it as allowed", () => {
+    const suffix = doctrinePromptSuffix({
+      forbiddenKinds: ["alliance_request", "nuke"],
+      allowKinds: ["alliance_request"],
+      doctrine: "Ally everyone.",
+    });
+    // alliance_request was lifted -> it must NOT appear on the hard-blocked line...
+    expect(suffix).toMatch(/hard-blocked\): nuke/);
+    expect(suffix).not.toMatch(/hard-blocked\)[^\n]*alliance_request/);
+    // ...and it should be surfaced as explicitly allowed.
+    expect(suffix).toContain("explicitly allowed for you: alliance_request");
+  });
 });
 
 describe("isEmptyStrategySpec", () => {
@@ -217,5 +273,8 @@ describe("isEmptyStrategySpec", () => {
     expect(isEmptyStrategySpec(null)).toBe(true);
     expect(isEmptyStrategySpec({})).toBe(true);
     expect(isEmptyStrategySpec({ posture: "aggressive" })).toBe(false);
+    expect(isEmptyStrategySpec({ allowKinds: ["alliance_request"] })).toBe(
+      false,
+    );
   });
 });

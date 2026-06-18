@@ -323,6 +323,14 @@ export class AgentObservationBuilder {
         const hasOutgoingAllianceRequest = player
           .outgoingAllianceRequests()
           .some((request) => request.recipient() === other);
+        // Rival-rival coalition edge: who THIS rival is allied with, other than us.
+        // Alliances are public game state, so this is observable for any pair; the agent
+        // already learns its own alliance with `other` via isAllied below. Deterministic
+        // (reads the ordered ally list only — no RNG/wall-clock).
+        const alliedWithVisibleIds = other
+          .allies()
+          .filter((ally) => ally.id() !== player.id() && ally.id() !== other.id())
+          .map((ally) => ally.id());
 
         return {
           playerID: other.id(),
@@ -381,6 +389,7 @@ export class AgentObservationBuilder {
               }
             : {}),
           ...(relativeTroopRatio !== undefined ? { relativeTroopRatio } : {}),
+          ...(alliedWithVisibleIds.length > 0 ? { alliedWithVisibleIds } : {}),
           ...this.spawnDistance(player, other),
         };
       });

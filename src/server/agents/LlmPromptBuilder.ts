@@ -138,6 +138,8 @@ export class LlmPromptBuilder {
         isAllied: player.isAllied,
         isFriendly: player.isFriendly,
         relation: player.relation,
+        // Rival-rival coalition edge so the Commander can see a 3v1 forming.
+        alliedWithVisibleIds: player.alliedWithVisibleIds,
         canAttack: player.canAttack,
         attackLegalReason: player.attackLegalReason,
         attackBlocker: player.attackBlocker,

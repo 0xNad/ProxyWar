@@ -377,6 +377,25 @@ describe("FrontierAgent expanded legal action surface", () => {
     expect(prompt).toContain("LegalAction.id");
   });
 
+  it("forwards the rival-rival coalition graph (alliedWithVisibleIds) into the prompt", () => {
+    const base = expandedObservation();
+    const observation: AgentObservation = {
+      ...base,
+      visiblePlayers: [
+        { ...base.visiblePlayers[0], alliedWithVisibleIds: ["FRND0001"] },
+        ...base.visiblePlayers.slice(1),
+      ],
+    };
+    const prompt = new LlmPromptBuilder().build({
+      observation,
+      legalActions: [holdAction()],
+    });
+    // The Commander must be able to SEE that RIVAL001 is allied with FRND0001
+    // (a coalition it is not in) — otherwise it cannot react to a 3v1 forming.
+    expect(prompt).toContain("alliedWithVisibleIds");
+    expect(prompt).toContain('"alliedWithVisibleIds":["FRND0001"]');
+  });
+
   it("maps social context to expressive emoji and public chat choices", () => {
     const betrayer = visiblePlayer("ALLY0001", {
       name: "False Ally",

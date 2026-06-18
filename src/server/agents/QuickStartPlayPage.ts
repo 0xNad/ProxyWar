@@ -175,7 +175,14 @@ export function renderQuickStartPlayHtml(
   playBtn.addEventListener('click', function(){
     var spec = JSON.parse(JSON.stringify(PRESETS[picked]));
     var custom = document.getElementById('doctrine').value.trim();
-    if (custom) spec.doctrine = custom;
+    if (custom) {
+      spec.doctrine = custom;
+      // A custom doctrine is the player's OWN strategy and overrides the preset's hard
+      // action-kind blocks, so written intent (e.g. "ally everyone" under Conqueror) is
+      // not silently vetoed. Soft leans (posture, preferredKinds) stay as a starting bias.
+      spec.allowKinds = spec.forbiddenKinds || [];
+      spec.forbiddenKinds = [];
+    }
     playBtn.disabled = true;
     setStatus('<span class="spin"></span>Starting your match…', 'run');
     fetch('/api/quick-start', {

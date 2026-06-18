@@ -104,6 +104,11 @@ export interface AgentVisiblePlayer {
   allianceInExtensionWindow?: boolean;
   relativeTroopRatio?: number;
   spawnDistance?: number;
+  /** Player IDs of OTHER visible players this rival is allied with (the rival-rival
+   *  coalition edge — excludes the agent itself, whose alliance is `isAllied`). Lets the
+   *  Commander see a coalition / 3v1 forming instead of only its own alliances. Omitted
+   *  when this rival has no alliances with other visible players. */
+  alliedWithVisibleIds?: string[];
   /** Team id in Team mode; null in FFA/1v1. */
   team?: string | null;
   /** True if this player is on the agent's own team (never betray/attack a teammate). */
