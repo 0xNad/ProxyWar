@@ -644,8 +644,6 @@ function spectatorHtml(replay: AgentSpectatorReplay): string {
       </div>
       <div id="kind-filters" class="filters" aria-label="Action filters"></div>
       <div class="metric-grid">
-        <div class="metric">Brain<strong id="brain"></strong></div>
-        <div class="metric">Runner<strong id="runner"></strong></div>
         <div class="metric">Turn<strong id="turn"></strong></div>
         <div class="metric">Tick<strong id="tick"></strong></div>
       </div>
@@ -711,8 +709,6 @@ function spectatorHtml(replay: AgentSpectatorReplay): string {
       null;
     scrub.max = String(Math.max(0, replay.snapshots.length - 1));
     scrub.value = String(frame);
-    document.getElementById("brain").textContent = replay.brainMode;
-    document.getElementById("runner").textContent = replay.runnerMode;
     document.getElementById("replay-notes").innerHTML =
       '<strong>Replay mode</strong>' +
       '<ul>' +
@@ -822,7 +818,6 @@ function spectatorHtml(replay: AgentSpectatorReplay): string {
         document.getElementById("roster").innerHTML = replay.roster.map((agent) =>
           '<article class="agent"><strong>' + escapeHtml(agent.username) +
           '</strong><span class="muted">' + escapeHtml(agent.profile || "agent") +
-          ' · ' + escapeHtml(agent.brainType || replay.brainMode) +
           '</span><code>no snapshot state</code></article>'
         ).join("");
         ctx.clearRect(0, 0, canvas.width, canvas.height);
@@ -849,7 +844,7 @@ function spectatorHtml(replay: AgentSpectatorReplay): string {
       document.getElementById("roster").innerHTML = snapshot.players.map((player) =>
         '<article class="agent"><strong><span class="swatch" style="background:' + player.color + '"></span>' +
         escapeHtml(player.username) + '</strong><span class="muted">' +
-        escapeHtml(player.profile || "agent") + ' · ' + escapeHtml(player.brainType || replay.brainMode) +
+        escapeHtml(player.profile || "agent") +
         '</span><code>' + player.tilesOwned + ' tiles · ' + player.troops + ' troops</code></article>'
       ).join("");
     }
