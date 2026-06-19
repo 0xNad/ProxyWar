@@ -1050,7 +1050,10 @@ async function startLobbyMatch(lobby: ProxyWarLobby): Promise<void> {
       roster: "manifest",
       agentManifestDir: dir,
       matchLength: "showcase",
-      agents: LOBBY_SIZE,
+      // No explicit `agents` count: that makes the smoke ADD house agents on top
+      // of the manifests (seats 8, not 4). With roster=manifest the N manifests
+      // ARE the players. No saved-roster fill either.
+      fillSavedRoster: false,
       bots: 0,
       nations: 0,
       difficulty: "Easy",
