@@ -1057,7 +1057,8 @@ async function startLobbyMatch(lobby: ProxyWarLobby): Promise<void> {
       bots: 0,
       nations: 0,
       difficulty: "Easy",
-      maxSteps: Number.isInteger(maxSteps) ? maxSteps : 40,
+      maxSteps: Number.isInteger(maxSteps) ? maxSteps : 12,
+      turnsPerDecision: 50,
       requireWinner: false,
       replayTailTurns: 1500,
     });

@@ -168,10 +168,13 @@ export function normalizeAgentDemoJobRequest(
   const kind = enumValue(raw.kind, jobKinds, "demo");
   const matchLength = enumValue(raw.matchLength, matchLengths, "showcase");
   const maxTurns = boundedInteger(raw.maxTurns, 1_000, 90_000, 90_000);
-  const turnsPerDecision = boundedInteger(raw.turnsPerDecision, 25, 500, 100);
+  const turnsPerDecision =
+    raw.turnsPerDecision === undefined || raw.turnsPerDecision === null
+      ? undefined
+      : boundedInteger(raw.turnsPerDecision, 25, 500, 100);
   const fullMatchStepCap = Math.min(
     1_000,
-    Math.max(30, Math.ceil(maxTurns / turnsPerDecision)),
+    Math.max(30, Math.ceil(maxTurns / (turnsPerDecision ?? 100))),
   );
   return {
     kind,
@@ -193,7 +196,7 @@ export function normalizeAgentDemoJobRequest(
     maxSteps: boundedInteger(
       raw.maxSteps,
       1,
-      matchLength === "full" ? 1_000 : 80,
+      matchLength === "full" ? 1_000 : 1_000,
       kind === "demo" ? (matchLength === "full" ? fullMatchStepCap : 12) : 5,
     ),
     maxTurns,
@@ -506,7 +509,7 @@ function demoArgs(
     `--brain=${request.brain}`,
     "--runner=step-locked",
     `--max-steps=${request.maxSteps ?? 12}`,
-    "--turns-per-decision-step=25",
+    `--turns-per-decision-step=${request.turnsPerDecision ?? 25}`,
     `--replay-tail-turns=${request.replayTailTurns ?? 350}`,
     `--bots=${request.bots ?? 4}`,
     `--nations=${nationsArgValue(request.nations)}`,
