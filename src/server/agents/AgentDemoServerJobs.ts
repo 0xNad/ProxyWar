@@ -371,7 +371,12 @@ export function buildAgentDemoJobCommand(
                 ),
               }
             : {}),
-          AI_LEAGUE_REQUIRE_EXTERNAL_BRAIN_SUCCESS: "true",
+          // Sponsored tester games (quick-start + lobby) must COMPLETE and surface
+          // a replay even when agents legitimately pick "hold" (the harness counts
+          // a hold as a non-clean fallback). The strict clean-run gate is for
+          // benchmark/validation runs, not live play — requiring it here failed
+          // whole games that had already finished with a perfectly good replay.
+          AI_LEAGUE_REQUIRE_EXTERNAL_BRAIN_SUCCESS: "false",
         }
       : {}),
   };
