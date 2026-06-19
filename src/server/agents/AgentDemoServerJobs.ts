@@ -54,6 +54,8 @@ export interface AgentDemoJobRequest {
   agentName?: string;
   /** Player-authored strategy for a sponsored openrouter seat (quick-start path). */
   strategySpec?: PlayerStrategySpec;
+  /** Custom manifest dir for a multi-agent lobby match (one manifest per joiner). */
+  agentManifestDir?: string;
 }
 
 export interface AgentDemoJobCommand {
@@ -230,6 +232,11 @@ export function normalizeAgentDemoJobRequest(
       Number(defaultExternalAgentDecisionTimeoutMs),
     ),
     agentName: sanitizeQuickStartAgentName(raw.agentName),
+    agentManifestDir:
+      typeof raw.agentManifestDir === "string" &&
+      raw.agentManifestDir.trim() !== ""
+        ? raw.agentManifestDir.trim()
+        : undefined,
     strategySpec:
       raw.strategySpec === undefined || raw.strategySpec === null
         ? undefined
@@ -530,9 +537,10 @@ function demoArgs(
   if (request.roster === "manifest" || request.roster === "saved") {
     args.push(
       `--agent-manifest-dir=${
-        request.roster === "saved"
+        request.agentManifestDir ??
+        (request.roster === "saved"
           ? defaultProxyWarActiveRosterDir
-          : defaultManifestDir
+          : defaultManifestDir)
       }`,
     );
   }

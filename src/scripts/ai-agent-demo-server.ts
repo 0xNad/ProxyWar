@@ -24,6 +24,10 @@ import {
   normalizeAgentDemoJobRequest,
 } from "../server/agents/AgentDemoServerJobs";
 import {
+  parsePlayerStrategySpec,
+  PlayerStrategySpec,
+} from "../server/agents/PlayerStrategySpec";
+import {
   defaultProxyWarNationsDir,
   deleteProxyWarNation,
   listProxyWarNations,
@@ -964,6 +968,194 @@ app.post("/api/quick-start", async (req, res) => {
         error instanceof Error ? error.message : "invalid quick-start request",
     });
   }
+});
+
+// ---------------------------------------------------------------------------
+// Lobby: shared 4-agent matches. Players join with a prompt and wait; when 4
+// have joined, the lobby seals and ONE match runs with all 4 agents — each
+// driven by its joiner's prompt via a per-seat manifest — and all 4 poll the
+// same result. Strict fill: a match never starts until 4 real players join.
+// ---------------------------------------------------------------------------
+const LOBBY_SIZE = 4;
+type LobbyStatus = "waiting" | "starting" | "running" | "completed" | "failed";
+interface LobbyMember {
+  token: string;
+  agentName: string;
+  strategySpec: PlayerStrategySpec;
+}
+interface ProxyWarLobby {
+  id: string;
+  members: LobbyMember[];
+  status: LobbyStatus;
+  jobID: string | null;
+  error: string | null;
+}
+let formingLobby: ProxyWarLobby | null = null;
+const lobbiesById = new Map<string, ProxyWarLobby>();
+
+function currentFormingLobby(): ProxyWarLobby {
+  if (formingLobby === null) {
+    const lobby: ProxyWarLobby = {
+      id: randomUUID(),
+      members: [],
+      status: "waiting",
+      jobID: null,
+      error: null,
+    };
+    formingLobby = lobby;
+    lobbiesById.set(lobby.id, lobby);
+  }
+  return formingLobby;
+}
+
+function lobbyProfileForSpec(
+  spec: PlayerStrategySpec,
+): "aggressive" | "defensive" | "diplomatic" | "opportunistic" {
+  const posture = spec.posture;
+  return posture === "aggressive" ||
+    posture === "defensive" ||
+    posture === "diplomatic"
+    ? posture
+    : "opportunistic";
+}
+
+async function startLobbyMatch(lobby: ProxyWarLobby): Promise<void> {
+  lobby.status = "starting";
+  try {
+    const dir = path.join(process.cwd(), "artifacts", "lobby", lobby.id);
+    await fs.mkdir(dir, { recursive: true });
+    await Promise.all(
+      lobby.members.map((member, index) => {
+        const manifest = {
+          schemaVersion: 1 as const,
+          agentName: member.agentName,
+          profile: lobbyProfileForSpec(member.strategySpec),
+          brainType: "planner-executor" as const,
+          strategySpec: member.strategySpec,
+        };
+        return fs.writeFile(
+          path.join(dir, `agent-${index + 1}.json`),
+          JSON.stringify(manifest, null, 2),
+          "utf8",
+        );
+      }),
+    );
+    // 4 agents run ~4x the planner calls of a solo match, so the per-agent step
+    // budget is lower to keep the shared match watchably short (env-tunable).
+    const maxSteps = Number(process.env.PROXYWAR_LOBBY_MAX_STEPS ?? "12");
+    const request = normalizeAgentDemoJobRequest({
+      kind: "demo",
+      brain: "planner-openrouter",
+      scenario: "actions",
+      roster: "manifest",
+      agentManifestDir: dir,
+      matchLength: "showcase",
+      agents: LOBBY_SIZE,
+      bots: 0,
+      nations: 0,
+      difficulty: "Easy",
+      maxSteps: Number.isInteger(maxSteps) ? maxSteps : 40,
+      requireWinner: false,
+      replayTailTurns: 1500,
+    });
+    const queued = enqueueProxyWarJob(request);
+    if (!queued.ok) {
+      lobby.status = "failed";
+      lobby.error = queued.error;
+      return;
+    }
+    lobby.jobID = queued.job.jobID;
+    lobby.status = "running";
+  } catch (error) {
+    lobby.status = "failed";
+    lobby.error =
+      error instanceof Error ? error.message : "lobby match failed to start";
+  }
+}
+
+app.post("/api/lobby/join", (req, res) => {
+  if (!enforceRateLimit("jobs", rateLimits.jobs, req, res)) {
+    return;
+  }
+  const hasOpenRouterKey =
+    (
+      process.env.AI_LEAGUE_OPENROUTER_API_KEY ??
+      process.env.OPENROUTER_API_KEY ??
+      ""
+    ).trim() !== "";
+  if (!hasOpenRouterKey) {
+    res.status(503).json({
+      ok: false,
+      error: "Sponsored play is not configured on this server yet.",
+    });
+    return;
+  }
+  const body = (req.body ?? {}) as Record<string, unknown>;
+  let strategySpec: PlayerStrategySpec;
+  try {
+    strategySpec = parsePlayerStrategySpec(body.strategySpec ?? {});
+  } catch (error) {
+    res.status(400).json({
+      ok: false,
+      error: error instanceof Error ? error.message : "invalid strategy",
+    });
+    return;
+  }
+  const rawName = typeof body.agentName === "string" ? body.agentName.trim() : "";
+  const agentName = (rawName === "" ? "Agent" : rawName).slice(0, 27);
+  const lobby = currentFormingLobby();
+  const token = randomUUID();
+  lobby.members.push({ token, agentName, strategySpec });
+  const sealed = lobby.members.length >= LOBBY_SIZE;
+  res.status(202).json({
+    lobbyId: lobby.id,
+    token,
+    slot: lobby.members.length,
+    size: LOBBY_SIZE,
+    status: sealed ? "starting" : "waiting",
+  });
+  if (sealed) {
+    formingLobby = null; // the next joiner forms a fresh lobby
+    void startLobbyMatch(lobby);
+  }
+});
+
+app.get("/api/lobby/:lobbyId", (req, res) => {
+  const lobby = lobbiesById.get(req.params.lobbyId);
+  if (!lobby) {
+    res.status(404).json({ ok: false, error: "unknown lobby" });
+    return;
+  }
+  const base = {
+    lobbyId: lobby.id,
+    count: lobby.members.length,
+    size: LOBBY_SIZE,
+    agentNames: lobby.members.map((member) => member.agentName),
+  };
+  if (lobby.jobID) {
+    const job = jobs.get(lobby.jobID);
+    if (job?.status === "completed") {
+      res.json({
+        ...base,
+        status: "completed",
+        replayUrl: job.latestRunID
+          ? `/proxywar-replay/${encodeURIComponent(job.latestRunID)}`
+          : null,
+      });
+      return;
+    }
+    if (job?.status === "failed") {
+      res.json({
+        ...base,
+        status: "failed",
+        error: job.errorSummary ?? lobby.error,
+      });
+      return;
+    }
+    res.json({ ...base, status: "running" });
+    return;
+  }
+  res.json({ ...base, status: lobby.status, error: lobby.error });
 });
 
 app.post("/api/nations", async (req, res) => {
