@@ -49,6 +49,14 @@ export function renderQuickStartPlayHtml(
     border-radius:999px; padding:7px 13px; cursor:pointer; color:#c7d0de;
     font:inherit; font-size:12.5px; transition:border-color .12s, color .12s; }
   .ex:hover { border-color:#39455a; color:var(--fg); }
+  .matches { display:flex; flex-direction:column; gap:8px; }
+  .match { display:flex; align-items:center; gap:10px; background:var(--card);
+    border:1px solid var(--line); border-radius:11px; padding:11px 14px; font-size:13.5px; }
+  .match .who { flex:1; color:#c7d0de; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .match .st { font-size:11px; letter-spacing:.05em; text-transform:uppercase; color:var(--muted); }
+  .match.live .st { color:var(--ok); }
+  .match a.w { color:var(--link); text-decoration:none; font-weight:700; white-space:nowrap; }
+  .match a.w:hover { text-decoration:underline; }
   .play { margin-top:10px; width:100%; background:var(--go); color:#1c0f09; border:0;
     border-radius:13px; padding:16px; font-size:17px; font-weight:800; cursor:pointer;
     letter-spacing:.01em; }
@@ -85,6 +93,11 @@ export function renderQuickStartPlayHtml(
 
   <button class="play" id="play">▶ Find a 4-player match</button>
   <div class="status" id="status">When 4 players have joined, the match begins. You'll get a replay link.</div>
+
+  <section id="matches-wrap" style="margin-top:40px; display:none;">
+    <label style="margin-bottom:12px">Recent matches</label>
+    <div class="matches" id="matches"></div>
+  </section>
 
   <footer>
     Four players, four strategies, one war — each agent is a real LLM making every move from the legal options.
@@ -151,6 +164,29 @@ export function renderQuickStartPlayHtml(
         poll(res.j.lobbyId);
       }).catch(function(){ setStatus('Network error. Try again.', 'err'); playBtn.disabled = false; });
   });
+
+  function esc(s){ var d = document.createElement('div'); d.textContent = String(s); return d.innerHTML; }
+  function renderMatches(){
+    fetch('/api/lobby/matches').then(function(r){ return r.json(); }).then(function(d){
+      var ms = d.matches || [];
+      var wrap = document.getElementById('matches-wrap');
+      var box = document.getElementById('matches');
+      if (!ms.length) { wrap.style.display = 'none'; return; }
+      wrap.style.display = 'block';
+      box.innerHTML = ms.map(function(m){
+        var who = (m.agentNames && m.agentNames.length) ? m.agentNames.join(', ') : (m.count + '/' + m.size + ' joining');
+        if (m.status === 'completed' && m.replayUrl)
+          return '<div class="match"><span class="who">' + esc(who) + '</span><a class="w" href="' + m.replayUrl + '">▶ replay</a></div>';
+        if (m.status === 'running' || m.status === 'starting')
+          return '<div class="match live"><span class="who">' + esc(who) + '</span><span class="st">playing</span></div>';
+        if (m.status === 'waiting')
+          return '<div class="match"><span class="who">' + esc(who) + '</span><span class="st">forming ' + m.count + '/' + m.size + '</span></div>';
+        return '<div class="match"><span class="who">' + esc(who) + '</span><span class="st">' + esc(m.status || '') + '</span></div>';
+      }).join('');
+    }).catch(function(){});
+  }
+  renderMatches();
+  setInterval(renderMatches, 5000);
 })();
 </script>
 </body>

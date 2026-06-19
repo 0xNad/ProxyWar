@@ -1124,12 +1124,7 @@ app.post("/api/lobby/join", (req, res) => {
   }
 });
 
-app.get("/api/lobby/:lobbyId", (req, res) => {
-  const lobby = lobbiesById.get(req.params.lobbyId);
-  if (!lobby) {
-    res.status(404).json({ ok: false, error: "unknown lobby" });
-    return;
-  }
+function lobbyView(lobby: ProxyWarLobby): Record<string, unknown> {
   const base = {
     lobbyId: lobby.id,
     count: lobby.members.length,
@@ -1139,27 +1134,45 @@ app.get("/api/lobby/:lobbyId", (req, res) => {
   if (lobby.jobID) {
     const job = jobs.get(lobby.jobID);
     if (job?.status === "completed") {
-      res.json({
+      return {
         ...base,
         status: "completed",
         replayUrl: job.latestRunID
           ? `/proxywar-replay/${encodeURIComponent(job.latestRunID)}`
           : null,
-      });
-      return;
+      };
     }
     if (job?.status === "failed") {
-      res.json({
+      return {
         ...base,
         status: "failed",
         error: job.errorSummary ?? lobby.error,
-      });
-      return;
+      };
     }
-    res.json({ ...base, status: "running" });
+    return { ...base, status: "running" };
+  }
+  return { ...base, status: lobby.status, error: lobby.error };
+}
+
+// Recent matches (most recent first) for the /play "Matches" panel — forming,
+// in-progress, and completed lobbies tracked since the server started. NOTE:
+// in-memory, so this list resets on a server restart (replays persist on disk).
+app.get("/api/lobby/matches", (_req, res) => {
+  const matches = [...lobbiesById.values()]
+    .filter((lobby) => lobby.members.length > 0)
+    .reverse()
+    .slice(0, 20)
+    .map(lobbyView);
+  res.json({ matches });
+});
+
+app.get("/api/lobby/:lobbyId", (req, res) => {
+  const lobby = lobbiesById.get(req.params.lobbyId);
+  if (!lobby) {
+    res.status(404).json({ ok: false, error: "unknown lobby" });
     return;
   }
-  res.json({ ...base, status: lobby.status, error: lobby.error });
+  res.json(lobbyView(lobby));
 });
 
 app.post("/api/nations", async (req, res) => {
