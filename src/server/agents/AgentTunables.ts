@@ -48,6 +48,19 @@ export function directiveDiplomacyEnabled(): boolean {
 }
 
 /**
+ * Binding economy directive flag (Keystone Phase 2.2). Reads the EXACT env var
+ * `PROXYWAR_TUNE_DIRECTIVE_BUILD` (A/B arms set "0"/"1"). DEFAULT OFF — this is a new
+ * behavioral lever (a build directive is the lowest-bar directive and pre-empts
+ * expansion/attack), so it ships inert and is measured on an A/B arm before becoming
+ * default. Gates the planner-prompt build schema and build-directive parsing;
+ * downstream enforcement keys off `plan.buildDirective` presence, which can only be
+ * set when this flag was on at parse time.
+ */
+export function directiveBuildEnabled(): boolean {
+  return tunedNumber("DIRECTIVE_BUILD", 0) >= 1;
+}
+
+/**
  * FM-1 fix flag — "cash the midgame kill window." Reads the EXACT env var
  * `PROXYWAR_TUNE_ENFORCE_CONVERSION` (A/B arms set "0"/"1" on the same build).
  * Default ON (it is a competitiveness fix). When ON, the action ranking clamps

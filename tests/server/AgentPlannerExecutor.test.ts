@@ -11,6 +11,7 @@ import {
   rankLegalActionsForPrompt,
   RuleAgentExecutor,
   RuleAgentPlanner,
+  singleBindingDirective,
   StrategicPlan,
 } from "../../src/server/agents/AgentPlannerExecutor";
 import { LlmAgentBrain } from "../../src/server/agents/LlmAgentBrain";
@@ -15459,6 +15460,152 @@ describe("Phase 2 binding alliance directive", () => {
       expandPlan(),
     );
     expect(decision.actionID).not.toBe("alliance:ALLY01");
+  });
+});
+
+describe("Phase 2.2 binding build directive", () => {
+  // An expansion plan: without a build directive the executor expands; WITH it the
+  // executor is forced onto the directed economic build instead. That contrast is the
+  // whole Phase 2.2 thesis (the prompt's "build factories/ports" can finally bind).
+  function buildPlan(
+    buildDirective?: StrategicPlan["buildDirective"],
+  ): StrategicPlan {
+    return {
+      planID: "agent-1:expand",
+      objective: "expand_territory",
+      turnIntent: "growth",
+      targetPlayerId: null,
+      rationale: "grow",
+      startedAtTick: 4,
+      maxDecisionCycles: 3,
+      successCriteria: [],
+      failureCriteria: [],
+      preferredActionKinds: ["attack", "hold"],
+      forbiddenActionKinds: [],
+      enabledModules: ["expansion", "economy"],
+      plannerSource: "real-llm",
+      ...(buildDirective !== undefined ? { buildDirective } : {}),
+    };
+  }
+
+  it("forces the directed economic build over expansion when a build directive is bound", () => {
+    const decision = new FrontierPolicyExecutor("opportunistic").decide(
+      {
+        observation: activeObservation("expand_territory"),
+        legalActions: buildLegalActions(),
+      },
+      buildPlan({ unit: "any" }),
+    );
+    expect(decision.actionID).toBe("build:City:100");
+  });
+
+  it("forces a specifically directed unit (City) over expansion", () => {
+    const decision = new FrontierPolicyExecutor("opportunistic").decide(
+      {
+        observation: activeObservation("expand_territory"),
+        legalActions: buildLegalActions(),
+      },
+      buildPlan({ unit: "City" }),
+    );
+    expect(decision.actionID).toBe("build:City:100");
+  });
+
+  it("does NOT force when the directed unit is not buildable this cycle", () => {
+    // Only a City build is legal; a Factory directive finds no qualifying build and
+    // falls through to the tactical selectors rather than forcing the city.
+    const decision = new FrontierPolicyExecutor("opportunistic").decide(
+      {
+        observation: activeObservation("expand_territory"),
+        legalActions: buildLegalActions(),
+      },
+      buildPlan({ unit: "Factory" }),
+    );
+    expect(decision.actionID).not.toBe("build:City:100");
+  });
+
+  it("does NOT force a defensive build (role filter: economy only)", () => {
+    const legalActions: LegalAction[] = [
+      {
+        id: "expand:terra-nullius:10",
+        kind: "attack",
+        label: "Expand",
+        intent: { type: "attack", targetID: null, troops: 100 },
+        risk: { level: "low", score: 0.1 },
+        metadata: { expansion: true },
+      },
+      {
+        id: "build:Defense Post:100",
+        kind: "build",
+        label: "Build Defense Post",
+        intent: { type: "build_unit", unit: UnitType.DefensePost, tile: 100 },
+        risk: { level: "low", score: 0.15 },
+        metadata: { role: "defensive", unit: "Defense Post" },
+      },
+      hold(),
+    ];
+    const decision = new FrontierPolicyExecutor("opportunistic").decide(
+      { observation: activeObservation("expand_territory"), legalActions },
+      buildPlan({ unit: "any" }),
+    );
+    // No ECONOMIC build exists, so an "any" build directive forces nothing — a
+    // defensive structure is never selected by an economy directive.
+    expect(decision.actionID).not.toBe("build:Defense Post:100");
+  });
+
+  it("does NOT force a build with no directive (default-off behavior unchanged)", () => {
+    const decision = new FrontierPolicyExecutor("opportunistic").decide(
+      {
+        observation: activeObservation("expand_territory"),
+        legalActions: buildLegalActions(),
+      },
+      buildPlan(),
+    );
+    expect(decision.actionID).not.toBe("build:City:100");
+  });
+});
+
+describe("singleBindingDirective (single-directive invariant, precedence commitment > alliance > build)", () => {
+  const commitment = { targetPlayerId: "rivalX", minAttackRatio: 0.25 };
+  const alliance = { stance: "seek_alliance" as const };
+  const build = { unit: "City" as const };
+
+  it("keeps only the commitment when commitment + build are both present (repair cross-mix)", () => {
+    // The exact repair-path bug: a commitment from the original parse + a build from
+    // the repaired output must collapse to the commitment alone.
+    const result = singleBindingDirective({
+      commitment,
+      buildDirective: build,
+    });
+    expect(result.commitment).toEqual(commitment);
+    expect(result.buildDirective).toBeUndefined();
+    expect(result.allianceDirective).toBeUndefined();
+  });
+
+  it("keeps only the commitment when all three are present", () => {
+    const result = singleBindingDirective({
+      commitment,
+      allianceDirective: alliance,
+      buildDirective: build,
+    });
+    expect(result.commitment).toEqual(commitment);
+    expect(result.allianceDirective).toBeUndefined();
+    expect(result.buildDirective).toBeUndefined();
+  });
+
+  it("keeps the alliance over a build (alliance > build)", () => {
+    const result = singleBindingDirective({
+      allianceDirective: alliance,
+      buildDirective: build,
+    });
+    expect(result.allianceDirective).toEqual(alliance);
+    expect(result.buildDirective).toBeUndefined();
+  });
+
+  it("passes a lone build directive through unchanged", () => {
+    const result = singleBindingDirective({ buildDirective: build });
+    expect(result.buildDirective).toEqual(build);
+    expect(result.commitment).toBeUndefined();
+    expect(result.allianceDirective).toBeUndefined();
   });
 });
 

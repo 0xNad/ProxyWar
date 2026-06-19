@@ -16,6 +16,7 @@ import {
 import { buildAgentTacticalAffordances } from "./AgentTacticalAffordances";
 import {
   behindAndFallingEscapeEnabled,
+  directiveBuildEnabled,
   directiveCommitmentEnabled,
   directiveDiplomacyEnabled,
   enforceConversionOverNeutralEnabled,
@@ -136,6 +137,21 @@ export interface AgentAllianceDirective {
   targetPlayerId?: string;
 }
 
+/**
+ * Binding economy directive (Keystone Phase 2.2). The economy analog of
+ * `AgentPlanCommitment`/`AgentAllianceDirective`: a standing order that the executor
+ * MUST carry out by selecting an economic `build` (City/Factory/Port) over
+ * expansion/attack this cycle, when one is legal (only survival, an active kill
+ * commitment, and a bound alliance pre-empt it). `unit` names a specific economic
+ * structure, or "any" for any economic build. Set only when the Commander emitted it
+ * (with `directiveBuildEnabled()` on) — never by rule/fallback planners. Mutually
+ * exclusive with commitment + allianceDirective (precedence commitment > alliance >
+ * build) so the single override-audit key stays unambiguous.
+ */
+export interface AgentBuildDirective {
+  unit: "City" | "Factory" | "Port" | "any";
+}
+
 export interface StrategicPlan {
   planID: string;
   objective: AgentObjectiveKind;
@@ -152,6 +168,7 @@ export interface StrategicPlan {
   tacticalSettings?: AgentTacticalSettings;
   commitment?: AgentPlanCommitment;
   allianceDirective?: AgentAllianceDirective;
+  buildDirective?: AgentBuildDirective;
   plannerSource: "rule" | "mock-llm" | "codex-cli" | "real-llm";
 }
 
@@ -539,6 +556,7 @@ export class PlannerExecutorAgentBrain implements AgentBrain {
     const commitmentAudit = auditCommitmentAdherence(input, plan, execution);
     this.lastCommitmentHonored = commitmentAudit?.honored === true;
     const allianceAudit = auditAllianceDirectiveAdherence(input, plan, execution);
+    const buildAudit = auditBuildDirectiveAdherence(input, plan, execution);
 
     return {
       actionID: execution.actionID,
@@ -575,6 +593,15 @@ export class PlannerExecutorAgentBrain implements AgentBrain {
                 : {}),
               ...(allianceAudit.overrideEvent !== null
                 ? { executorOverrideEvent: allianceAudit.overrideEvent }
+                : {}),
+            }
+          : {}),
+        ...(buildAudit !== null
+          ? {
+              directiveBuildActive: true,
+              directiveBuildUnit: buildAudit.unit,
+              ...(buildAudit.overrideEvent !== null
+                ? { executorOverrideEvent: buildAudit.overrideEvent }
                 : {}),
             }
           : {}),
@@ -1563,14 +1590,22 @@ export class LlmAgentPlanner implements AgentPlanner {
                   // The repair template centers on must-follow controls; never let a
                   // repair pass silently launder a kill-window commitment out of the
                   // plan — carry the original commitment forward if the repair lost it.
-                  commitment: validatedCommitment(
-                    repaired.commitment ?? parsed.commitment,
-                    input,
-                  ),
-                  allianceDirective: validatedAllianceDirective(
-                    repaired.allianceDirective ?? parsed.allianceDirective,
-                    input,
-                  ),
+                  // Collapse to a single binding directive: the per-field `??` recombine
+                  // above can carry a directive from the original parse alongside a
+                  // different one from the repaired output.
+                  ...singleBindingDirective({
+                    commitment: validatedCommitment(
+                      repaired.commitment ?? parsed.commitment,
+                      input,
+                    ),
+                    allianceDirective: validatedAllianceDirective(
+                      repaired.allianceDirective ?? parsed.allianceDirective,
+                      input,
+                    ),
+                    buildDirective: validatedBuildDirective(
+                      repaired.buildDirective ?? parsed.buildDirective,
+                    ),
+                  }),
                 }),
                 reason: repaired.rationale,
                 latencyMs: Date.now() - started,
@@ -1613,11 +1648,16 @@ export class LlmAgentPlanner implements AgentPlanner {
             maxDecisionCycles: parsed.maxDecisionCycles,
             targetPlayerId: parsed.targetPlayerId,
             tacticalSettings: parsed.tacticalSettings,
-            commitment: validatedCommitment(parsed.commitment, input),
-            allianceDirective: validatedAllianceDirective(
-              parsed.allianceDirective,
-              input,
-            ),
+            // parsePlannerOutput already enforces single-directive, but route through
+            // the same collapse for a uniform, future-proof invariant at every site.
+            ...singleBindingDirective({
+              commitment: validatedCommitment(parsed.commitment, input),
+              allianceDirective: validatedAllianceDirective(
+                parsed.allianceDirective,
+                input,
+              ),
+              buildDirective: validatedBuildDirective(parsed.buildDirective),
+            }),
           }),
           reason: parsed.rationale,
           latencyMs: Date.now() - started,
@@ -1891,6 +1931,52 @@ function allianceDirectiveCandidate(
 }
 
 /**
+ * True for a legal action that satisfies a build directive: an economic `build`
+ * (City/Factory/Port — `metadata.role === "economic"`) whose unit matches the
+ * directive ("any" matches any economic structure). Shared shape used by both the
+ * candidate selector and the independent adherence audit (each re-derives it, they
+ * do not share a closure, so an enforcement bug cannot fake adherence).
+ */
+function actionSatisfiesBuildDirective(
+  action: LegalAction,
+  directive: AgentBuildDirective,
+): boolean {
+  if (action.kind !== "build" || action.metadata?.role !== "economic") {
+    return false;
+  }
+  return directive.unit === "any" || action.metadata?.unit === directive.unit;
+}
+
+/**
+ * Binding build-directive enforcement (Keystone Phase 2.2): when the Commander bound
+ * an economy stance, select the directed economic build over expansion/attack this
+ * cycle. The economy analog of `allianceDirectiveCandidate`. Runs directly after the
+ * alliance selector: survival, an explicit kill commitment, and a bound alliance all
+ * still pre-empt it; every tactical/expansion selector below must not. Affordability
+ * is handled upstream (unaffordable builds are never offered as legal actions), so an
+ * absent build simply yields no candidate (the audit records availability).
+ */
+function buildDirectiveCandidate(
+  input: AgentBrainInput,
+  plan: StrategicPlan,
+  scored: readonly FrontierRankedAction[],
+): FrontierRankedAction | undefined {
+  const directive = plan.buildDirective;
+  if (directive === undefined) {
+    return undefined;
+  }
+  const qualifying = scored.filter((candidate) =>
+    actionSatisfiesBuildDirective(candidate.action, directive),
+  );
+  if (qualifying.length === 0) {
+    return undefined;
+  }
+  // Among legal directed builds, take the highest-scored (the shared scorer already
+  // ranks city/factory/port placement quality).
+  return [...qualifying].sort((a, b) => b.totalScore - a.totalScore)[0];
+}
+
+/**
  * Outcome-level commitment audit (agentic-share v2). Measures what was actually
  * SELECTED against what the commitment required — deliberately independent of the
  * enforcement code paths, so the metric cannot be fooled by enforcement bugs:
@@ -1998,6 +2084,48 @@ function auditAllianceDirectiveAdherence(
   };
 }
 
+/**
+ * Outcome-level build-directive audit (agentic-share v2), independent of the
+ * enforcement path. honored: the final batch contains a qualifying economic build.
+ * "declined_build_action": a qualifying build was offered but not selected (the
+ * override the gate drives to zero). "no_legal_build_action": nothing qualifying was
+ * offered (availability, not a violation — e.g. the agent could not afford a build).
+ */
+function auditBuildDirectiveAdherence(
+  input: AgentBrainInput,
+  plan: StrategicPlan,
+  execution: AgentExecutionDecision,
+): {
+  unit: string;
+  honored: boolean;
+  overrideEvent: string | null;
+} | null {
+  const directive = plan.buildDirective;
+  if (directive === undefined) {
+    return null;
+  }
+  const qualifies = (action: LegalAction) =>
+    actionSatisfiesBuildDirective(action, directive);
+  const available = input.legalActions.some(qualifies);
+  const selectedIDs = new Set([
+    execution.actionID,
+    ...(execution.actionIDs ?? []),
+  ]);
+  const honored = input.legalActions
+    .filter((action) => selectedIDs.has(action.id))
+    .some(qualifies);
+  const overrideEvent = honored
+    ? null
+    : available
+      ? "declined_build_action"
+      : "no_legal_build_action";
+  return {
+    unit: directive.unit,
+    honored,
+    overrideEvent,
+  };
+}
+
 function selectFrontierActionBatch(input: {
   input: AgentBrainInput;
   plan: StrategicPlan;
@@ -2075,6 +2203,18 @@ function selectFrontierActionBatch(input: {
   );
   if (allianceDirectiveAction !== undefined) {
     return [allianceDirectiveAction];
+  }
+  // Binding build directive (Phase 2.2): a bound economy stance forces the directed
+  // economic build (city/factory/port) over the expansion/attack/banking selectors
+  // below — survival, an explicit kill commitment, and a bound alliance above still
+  // win. Single-action batch: the build IS this cycle's decision.
+  const buildDirectiveAction = buildDirectiveCandidate(
+    input.input,
+    plan,
+    scored,
+  );
+  if (buildDirectiveAction !== undefined) {
+    return [buildDirectiveAction];
   }
   // FM-2a ("trade or die"): when behind-and-falling, force the single best
   // controlled strike before the neutral-territory / banking / hold paths below,
@@ -19182,20 +19322,25 @@ function strategicPlanForObjective(input: {
   tacticalSettings?: AgentTacticalSettings;
   commitment?: AgentPlanCommitment;
   allianceDirective?: AgentAllianceDirective;
+  buildDirective?: AgentBuildDirective;
 }): StrategicPlan {
   const preferredActionKinds =
     input.preferredActionKinds ?? preferredKinds(input.objective);
   const enabledModules =
     input.enabledModules ??
     modulesForObjectiveAndKinds(input.objective, preferredActionKinds);
-  // A binding commitment must stay executable: the objective's default forbidden
-  // kinds may not forbid the committed attack kinds.
+  // A binding directive must stay executable: the objective's default forbidden kinds
+  // may not forbid the kinds the directive forces. The three directives are mutually
+  // exclusive (commitment > alliance > build), so the strip is directive-specific:
+  // a commitment keeps attack/boat; a build directive keeps build.
   const forbiddenActionKinds =
     input.commitment !== undefined
       ? forbiddenKinds(input.objective).filter(
           (kind) => kind !== "attack" && kind !== "boat",
         )
-      : forbiddenKinds(input.objective);
+      : input.buildDirective !== undefined
+        ? forbiddenKinds(input.objective).filter((kind) => kind !== "build")
+        : forbiddenKinds(input.objective);
   return {
     planID: `${input.input.observation.agentID}:${input.objective}:${input.input.observation.turnNumber}`,
     objective: input.objective,
@@ -19231,6 +19376,9 @@ function strategicPlanForObjective(input: {
       : {}),
     ...(input.allianceDirective !== undefined
       ? { allianceDirective: input.allianceDirective }
+      : {}),
+    ...(input.buildDirective !== undefined
+      ? { buildDirective: input.buildDirective }
       : {}),
     plannerSource: input.plannerSource,
   };
@@ -20401,6 +20549,11 @@ function plannerRepairPrompt(input: {
           'If your previous JSON included a "commitment" object, include the SAME commitment unchanged in the corrected JSON — the repair must not drop an active kill-order.',
         ]
       : []),
+    ...(directiveBuildEnabled()
+      ? [
+          'If your previous JSON included a "buildDirective" object, include the SAME buildDirective unchanged in the corrected JSON.',
+        ]
+      : []),
     "MUST_FOLLOW_CONTROL:",
     JSON.stringify(controls),
     "VIOLATION:",
@@ -20556,9 +20709,34 @@ function plannerPrompt(
           'BINDING ALLIANCE (your real authority for diplomacy): when an alliance is worth committing to — a neighbor you need to keep peaceful, an ally to hold against a bigger threat, or a diplomatic line you are playing — add "allianceDirective":{"stance":"seek_alliance","targetPlayerId":"<their id, or omit to seek any available ally>"} to your JSON. A bound alliance directive BINDS the executor: it will pick the alliance_request/alliance_extend you direct OVER expansion or attacks this cycle (only true survival pre-empts). Use stance "hold_alliance" to extend/defend an existing alliance. Without it the executor treats alliances as low-priority filler and keeps attacking, so a diplomatic plan never actually allies.',
         ]
       : []),
-    directiveCommitmentEnabled()
-      ? 'Required JSON: {"objective":"expand_territory","turnIntent":"growth","rationale":"short reason","maxDecisionCycles":3,"preferredActionKinds":["attack"],"enabledModules":["expansion","economy","defense"],"targetPlayerId":null,"commitment":null,"allianceDirective":null,"tacticalSettings":{"reserveRatio":0.35,"triggerRatio":0.55,"expansionRatio":0.15,"maxConcurrentWars":1,"retreatThreshold":0.35,"maxActionsPerDecision":4}}'
-      : 'Required JSON: {"objective":"expand_territory","turnIntent":"growth","rationale":"short reason","maxDecisionCycles":3,"preferredActionKinds":["attack"],"enabledModules":["expansion","economy","defense"],"targetPlayerId":null,"allianceDirective":null,"tacticalSettings":{"reserveRatio":0.35,"triggerRatio":0.55,"expansionRatio":0.15,"maxConcurrentWars":1,"retreatThreshold":0.35,"maxActionsPerDecision":4}}',
+    ...(directiveBuildEnabled()
+      ? [
+          'BINDING BUILD (your real authority for economy): when growing your economy is the priority this cycle — you want cities/factories/ports built rather than troops spent on expansion or attacks — add "buildDirective":{"unit":"any"} to your JSON (or "City"/"Factory"/"Port" for a specific structure). A bound build directive BINDS the executor: it will pick the directed economic build OVER expansion or attacks this cycle when one is legal (only survival, an active commitment, or a bound alliance pre-empt it). Without it the executor may keep expanding/attacking instead of building the economy your strategy calls for. Mutually exclusive with commitment/allianceDirective — set at most one binding directive per cycle.',
+        ]
+      : []),
+    // Programmatic Required-JSON example: each binding-directive key is shown only when
+    // its flag is on, so the example matches the live schema for any flag combination
+    // (the prior hardcoded strings could not express an independent build flag).
+    `Required JSON: ${JSON.stringify({
+      objective: "expand_territory",
+      turnIntent: "growth",
+      rationale: "short reason",
+      maxDecisionCycles: 3,
+      preferredActionKinds: ["attack"],
+      enabledModules: ["expansion", "economy", "defense"],
+      targetPlayerId: null,
+      ...(directiveCommitmentEnabled() ? { commitment: null } : {}),
+      ...(directiveDiplomacyEnabled() ? { allianceDirective: null } : {}),
+      ...(directiveBuildEnabled() ? { buildDirective: null } : {}),
+      tacticalSettings: {
+        reserveRatio: 0.35,
+        triggerRatio: 0.55,
+        expansionRatio: 0.15,
+        maxConcurrentWars: 1,
+        retreatThreshold: 0.35,
+        maxActionsPerDecision: 4,
+      },
+    })}`,
     "PLANNER_DECISION_BRIEF:",
     JSON.stringify(decisionBrief),
     "END_PLANNER_DECISION_BRIEF",
@@ -20680,6 +20858,7 @@ type PlannerParseResult =
       tacticalSettings?: AgentTacticalSettings;
       commitment?: AgentPlanCommitment;
       allianceDirective?: AgentAllianceDirective;
+      buildDirective?: AgentBuildDirective;
     }
   | { ok: false; reason: string };
 
@@ -20808,6 +20987,76 @@ function validatedAllianceDirective(
 }
 
 /**
+ * Syntactic build-directive parse (Phase 2.2). Shape-validates and clamps `unit` to
+ * the four allowed values (defaulting "any"), gated on the feature flag. A build
+ * directive has no target to hallucinate, so the heavier semantic checks the
+ * commitment/alliance validators run do not apply — availability ("is a build legal
+ * now") is handled by the candidate selector + audit. Invalid input degrades to
+ * undefined and NEVER rejects the whole plan.
+ */
+function parseBuildDirective(raw: unknown): AgentBuildDirective | undefined {
+  if (!directiveBuildEnabled()) {
+    return undefined;
+  }
+  if (raw === null || typeof raw !== "object" || Array.isArray(raw)) {
+    return undefined;
+  }
+  const value = raw as Record<string, unknown>;
+  const unit =
+    value.unit === "City" ||
+    value.unit === "Factory" ||
+    value.unit === "Port" ||
+    value.unit === "any"
+      ? value.unit
+      : "any";
+  return { unit };
+}
+
+/**
+ * Semantic build-directive validation. A build directive carries no rival target, so
+ * there is nothing to hallucinate; the `unit` enum is already clamped at parse. This
+ * is a deliberate thin pass-through (kept for symmetry with the commitment/alliance
+ * validators and as a hook for future semantic checks) — affordability/legality of a
+ * concrete build this cycle is enforced by `buildDirectiveCandidate` and recorded by
+ * `auditBuildDirectiveAdherence`, mirroring how a commitment with no legal attack this
+ * tick is kept on the plan and surfaced as availability, not dropped.
+ */
+function validatedBuildDirective(
+  directive: AgentBuildDirective | undefined,
+): AgentBuildDirective | undefined {
+  return directive;
+}
+
+/**
+ * Collapse a directive trio to the single-binding-directive invariant (precedence
+ * commitment > alliance > build). `parsePlannerOutput` enforces this at parse time, but
+ * the repair path recombines directives per-field with `??` fallbacks, which can
+ * resurrect a SECOND directive (e.g. a commitment from the original parse plus a build
+ * from the repaired output). Applying this at every plan-construction call site
+ * guarantees the finalized plan carries at most one binding directive, so the executor
+ * override audits never collide (last-writer-wins) on the shared `executorOverrideEvent`
+ * telemetry key.
+ */
+export function singleBindingDirective(input: {
+  commitment?: AgentPlanCommitment;
+  allianceDirective?: AgentAllianceDirective;
+  buildDirective?: AgentBuildDirective;
+}): {
+  commitment?: AgentPlanCommitment;
+  allianceDirective?: AgentAllianceDirective;
+  buildDirective?: AgentBuildDirective;
+} {
+  const commitment = input.commitment;
+  const allianceDirective =
+    commitment !== undefined ? undefined : input.allianceDirective;
+  const buildDirective =
+    commitment !== undefined || allianceDirective !== undefined
+      ? undefined
+      : input.buildDirective;
+  return { commitment, allianceDirective, buildDirective };
+}
+
+/**
  * Extract the first balanced top-level JSON object from arbitrary text (handles
  * string literals + escapes). LLM CLIs (esp. Claude) frequently wrap the plan JSON
  * in prose ("Here is the plan: {...} let me know") or append a trailing note, which
@@ -20920,9 +21169,18 @@ function parsePlannerOutput(
     commitment !== undefined
       ? undefined
       : parseAllianceDirective(value.allianceDirective);
-  // A binding directive must be executable: a commitment needs the combat module,
-  // an alliance directive needs the diplomacy module. (A commitment's plan may also
-  // not forbid the attack kinds it commits to — handled in strategicPlanForObjective.)
+  // Build directive is the lowest-priority binding directive (precedence
+  // commitment > alliance > build): drop it when either of the others is set, reading
+  // the FINALIZED allianceDirective above. Keeps the plan single-directive so the
+  // three override audits never collide on the shared executorOverrideEvent key.
+  const buildDirective =
+    commitment !== undefined || allianceDirective !== undefined
+      ? undefined
+      : parseBuildDirective(value.buildDirective);
+  // A binding directive must be executable: a commitment needs the combat module, an
+  // alliance directive needs the diplomacy module, a build directive needs the economy
+  // module. (A commitment's plan may also not forbid the attack kinds it commits to —
+  // handled in strategicPlanForObjective.)
   let reconciledModules = enabledModules;
   if (
     commitment !== undefined &&
@@ -20941,6 +21199,13 @@ function parsePlannerOutput(
       "diplomacy" as FrontierPolicyModule,
     ];
   }
+  if (
+    buildDirective !== undefined &&
+    reconciledModules !== undefined &&
+    !reconciledModules.includes("economy")
+  ) {
+    reconciledModules = [...reconciledModules, "economy" as FrontierPolicyModule];
+  }
   return {
     ok: true,
     objective: value.objective,
@@ -20953,6 +21218,7 @@ function parsePlannerOutput(
     ...(tacticalSettings !== undefined ? { tacticalSettings } : {}),
     ...(commitment !== undefined ? { commitment } : {}),
     ...(allianceDirective !== undefined ? { allianceDirective } : {}),
+    ...(buildDirective !== undefined ? { buildDirective } : {}),
   };
 }
 

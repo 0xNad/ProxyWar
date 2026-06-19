@@ -233,6 +233,31 @@ describe("mergePlayerConstraintsIntoPlan", () => {
     expect(merged.allianceDirective).toEqual({ stance: "seek_alliance" });
     expect(merged.commitment).toBeUndefined();
   });
+
+  it("a diplomacy spec drops a buildDirective (single-directive invariant: alliance > build)", () => {
+    const plan = basePlan({ buildDirective: { unit: "City" } });
+    const merged = mergePlayerConstraintsIntoPlan(plan, {
+      objectiveBias: "diplomacy",
+    });
+    expect(merged.allianceDirective).toEqual({ stance: "seek_alliance" });
+    expect(merged.buildDirective).toBeUndefined();
+  });
+
+  it("drops a buildDirective when the player forbids build", () => {
+    const plan = basePlan({ buildDirective: { unit: "any" } });
+    const merged = mergePlayerConstraintsIntoPlan(plan, {
+      forbiddenKinds: ["build"],
+    });
+    expect(merged.buildDirective).toBeUndefined();
+  });
+
+  it("keeps a buildDirective when the spec does not conflict", () => {
+    const plan = basePlan({ buildDirective: { unit: "Factory" } });
+    const merged = mergePlayerConstraintsIntoPlan(plan, {
+      preferredKinds: ["build"],
+    });
+    expect(merged.buildDirective).toEqual({ unit: "Factory" });
+  });
 });
 
 describe("doctrinePromptSuffix", () => {
