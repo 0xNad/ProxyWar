@@ -547,7 +547,9 @@ describe("Planner/executor agent brain", () => {
 
     const decision = await brain.decide({ observation, legalActions });
 
-    expect(prompts[0]).toContain("MUST FOLLOW: objective=pressure_rival");
+    // pressureReady is now a STRONG HINT (not must_follow) — the Commander still gets the
+    // executor-ready pressure window in the prompt, and here it chooses to follow it.
+    expect(prompts[0]).toContain("STRONG HINT: objective=pressure_rival");
     expect(prompts[0]).toContain("targetPlayerId=CHAD01");
     expect(decision.actionID).toBe("attack:CHAD01:25");
     expect(decision.metadata).toMatchObject({
@@ -561,7 +563,7 @@ describe("Planner/executor agent brain", () => {
     });
   });
 
-  it("repairs an external LLM planner response that ignores a must-follow pressure control", async () => {
+  it("lets the Commander decline an executor-ready pressure hint (no forced repair, since pressureReady is now a strong hint)", async () => {
     const base = closeLeaderConversionObservation();
     const observation: AgentObservation = {
       ...base,
@@ -628,27 +630,19 @@ describe("Planner/executor agent brain", () => {
 
     const decision = await brain.decide({ observation, legalActions });
 
-    expect(prompts).toHaveLength(2);
+    // pressureReady is a STRONG HINT, so the Commander's own choice (expand_territory)
+    // stands — there is NO forced repair. The window is shown as a hint, not an order.
+    expect(prompts).toHaveLength(1);
     expect(prompts[0]).toContain(
-      "FINAL_DECISION_CHECK:\nMUST FOLLOW: objective=pressure_rival",
+      "FINAL_DECISION_CHECK:\nSTRONG HINT: objective=pressure_rival",
     );
-    expect(prompts[1]).toContain(
-      "Your previous planner JSON contradicted a MUST FOLLOW control.",
-    );
-    expect(decision.actionID).toBe("attack:CHAD01:25");
     expect(decision.metadata).toMatchObject({
-      planObjective: "pressure_rival",
-      planTurnIntent: "pressure",
-      planTargetPlayerId: "CHAD01",
+      planObjective: "expand_territory",
       plannerSource: "codex-cli",
       externalPlannerCall: true,
-      externalActionCall: false,
       plannerParseOk: true,
-      plannerRepairUsed: true,
     });
-    expect(String(decision.metadata?.plannerRawOutput)).toContain(
-      "REPAIR_OUTPUT",
-    );
+    expect(decision.metadata?.plannerRepairUsed).not.toBe(true);
   });
 
   it("does not fail must-follow planner repair when the primary control kind is unavailable", async () => {

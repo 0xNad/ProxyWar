@@ -20410,7 +20410,14 @@ function plannerRecommendedControls(input: {
   }
   if (input.pressureReady && input.pressureReadyTargetID !== null) {
     return {
-      strength: "must_follow",
+      // STRONG HINT, not must_follow (2026-06-19): "an attack is executor-ready" is a
+      // STRATEGY call (who/whether to attack), which the LLM Commander — driven by the
+      // player's doctrine — must own. As must_follow it overrode every doctrine (forced
+      // pressure_rival), so the agent never allied/built-economy even when the prompt
+      // asked. Demoted to a hint so the Commander can decline it (e.g. to ally, turtle,
+      // or build) while still being told the window exists. Spawn + survive stay
+      // must_follow (mechanical/existential); base-floor + economy-window stay too.
+      strength: "strong_hint",
       objective: "pressure_rival",
       turnIntent: "pressure",
       targetPlayerId: input.pressureReadyTargetID,
