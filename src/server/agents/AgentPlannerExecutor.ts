@@ -8194,7 +8194,7 @@ function spawnActionCoordinateBounds(
   };
 }
 
-function spawnProfilePreference(
+export function spawnProfilePreference(
   action: LegalAction,
   profile: AgentStrategyProfile,
 ): number {
@@ -8333,7 +8333,7 @@ function spawnScoutSeed(observation: AgentObservation): string {
   ].join(":");
 }
 
-function stableFraction(seed: string): number {
+export function stableFraction(seed: string): number {
   let hash = 2166136261;
   for (let index = 0; index < seed.length; index += 1) {
     hash ^= seed.charCodeAt(index);

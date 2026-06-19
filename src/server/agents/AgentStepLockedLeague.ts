@@ -80,12 +80,11 @@ export async function runAgentStepLockedLeague(
   options: RunAgentStepLockedLeagueOptions,
 ): Promise<AgentStepLockedLeagueResult> {
   const config = { ...defaultConfig, ...options.config };
-  const openingRecords = await options.league.runOpeningTurn(0, {
-    maxDecisionMs: config.maxDecisionMs,
+  const openingRecords = await options.league.runSpawnPhase({
+    mirror: options.mirror,
+    messages: options.messages,
+    turnsPerSpawnTick: turnsForDecisionStep(config, 0),
   });
-
-  options.game.advanceTurnsForTesting(1);
-  await options.mirror.ingest(options.messages());
 
   let currentGame = await advanceUntil({
     game: options.game,

@@ -1074,7 +1074,35 @@ describe("AgentLeagueMatchRunner", () => {
         log,
       });
 
-      expect(result.openingRecords).toHaveLength(4);
+      // Built-in-style spawn: runSpawnPhase emits one deterministic (non-LLM) spawn
+      // record per agent PER spawn tick (the agent jumps around), not one per agent.
+      const spawnRecords = result.openingRecords;
+      expect(new Set(spawnRecords.map((record) => record.agentID)).size).toBe(4);
+      expect(
+        spawnRecords.every((record) => record.chosenActionKind === "spawn"),
+      ).toBe(true);
+      // Deterministic, no LLM: every spawn record is the synthetic explorer decision,
+      // never an LLM call (keeps it out of the aliveness count) and always accepted.
+      expect(
+        spawnRecords.every(
+          (record) => record.decisionMetadata?.spawnExploration === true,
+        ),
+      ).toBe(true);
+      expect(
+        spawnRecords.every(
+          (record) => record.decisionMetadata?.rawProviderOutputPresent !== true,
+        ),
+      ).toBe(true);
+      expect(spawnRecords.every((record) => record.result.accepted)).toBe(true);
+      // Jumps around: each agent visits >= 2 distinct spawn tiles over the phase.
+      for (const agentID of new Set(spawnRecords.map((r) => r.agentID))) {
+        const tiles = new Set(
+          spawnRecords
+            .filter((record) => record.agentID === agentID)
+            .map((record) => record.chosenActionID),
+        );
+        expect(tiles.size).toBeGreaterThanOrEqual(2);
+      }
       expect(result.postSpawnRecords).toHaveLength(4);
       expect(result.finalGameState.inSpawnPhase()).toBe(false);
       expect(result.mirrorCatchupSucceeded).toBe(true);
@@ -1151,14 +1179,26 @@ describe("AgentLeagueMatchRunner", () => {
         log,
       });
 
-      const records = [...result.openingRecords, ...result.postSpawnRecords];
-      expect(records).toHaveLength(8);
+      // Spawn is deterministic now (no brain), so a timing-out brain does NOT affect it:
+      // every spawn record is the synthetic explorer decision and is accepted.
       expect(
-        records.every(
+        result.openingRecords.every(
+          (record) => record.decisionMetadata?.spawnExploration === true,
+        ),
+      ).toBe(true);
+      expect(result.openingRecords.every((record) => record.result.accepted)).toBe(
+        true,
+      );
+      // The ACTIVE phase hits the timing-out brain and falls back safely.
+      expect(result.postSpawnRecords).toHaveLength(4);
+      expect(
+        result.postSpawnRecords.every(
           (record) => record.decisionMetadata?.fallbackUsed === true,
         ),
       ).toBe(true);
-      expect(records.every((record) => record.result.accepted)).toBe(true);
+      expect(
+        result.postSpawnRecords.every((record) => record.result.accepted),
+      ).toBe(true);
     } finally {
       await game.end({ archive: false });
     }
@@ -1182,6 +1222,7 @@ describe("AgentLeagueMatchRunner", () => {
     } as unknown as AgentLocalGameMirror;
     const league = {
       runOpeningTurn: vi.fn(async () => []),
+      runSpawnPhase: vi.fn(async () => []),
       runDecisionTurn: vi.fn(async () => []),
     } as unknown as AgentLeagueMatchRunner;
 
@@ -1226,6 +1267,7 @@ describe("AgentLeagueMatchRunner", () => {
     } as unknown as AgentLocalGameMirror;
     const league = {
       runOpeningTurn: vi.fn(async () => []),
+      runSpawnPhase: vi.fn(async () => []),
       runDecisionTurn: vi.fn(async () => []),
     } as unknown as AgentLeagueMatchRunner;
     const onAutopilotEngage = vi.fn(({ step }: { step: number }) => {
@@ -1274,6 +1316,7 @@ describe("AgentLeagueMatchRunner", () => {
     } as unknown as AgentLocalGameMirror;
     const league = {
       runOpeningTurn: vi.fn(async () => []),
+      runSpawnPhase: vi.fn(async () => []),
       runDecisionTurn: vi.fn(async () => []),
     } as unknown as AgentLeagueMatchRunner;
     const onAutopilotEngage = vi.fn();
@@ -1319,6 +1362,7 @@ describe("AgentLeagueMatchRunner", () => {
     const runDecisionTurn = vi.fn(async () => []);
     const league = {
       runOpeningTurn: vi.fn(async () => []),
+      runSpawnPhase: vi.fn(async () => []),
       runDecisionTurn,
     } as unknown as AgentLeagueMatchRunner;
 

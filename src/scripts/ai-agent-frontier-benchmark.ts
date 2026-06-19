@@ -343,11 +343,11 @@ async function runSingleMatch(input: {
     league.attachAgents();
     const roster = frontierRoster(participants);
     league.startGame();
-    const openingRecords = await league.runOpeningTurn(0, {
-      maxDecisionMs: input.config.maxDecisionMs,
+    const openingRecords = await league.runSpawnPhase({
+      mirror,
+      messages,
+      turnsPerSpawnTick: input.config.turnsPerDecision,
     });
-    game.advanceTurnsForTesting(1);
-    await mirror.ingest(messages());
     let currentGame = await advanceUntil({
       game,
       mirror,

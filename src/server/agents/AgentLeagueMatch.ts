@@ -1,8 +1,11 @@
 import { randomUUID } from "crypto";
 import { Logger } from "winston";
 import { Game } from "../../core/game/Game";
+import { ServerMessage } from "../../core/Schemas";
 import { GameServer } from "../GameServer";
 import { validateAgentDecision } from "./AgentDecisionValidator";
+import { AgentLocalGameMirror } from "./AgentLocalGameMirror";
+import { selectSpawnTile } from "./AgentSpawnExplorer";
 import {
   actionAlignsWithObjective,
   AgentObjectiveManager,
@@ -170,6 +173,89 @@ export class AgentLeagueMatchRunner {
       spawnCandidates: this.options.spawnCandidates,
       maxDecisionMs: options.maxDecisionMs,
     });
+  }
+
+  /**
+   * Drive the spawn phase like a built-in nation: deterministically, with NO LLM call.
+   * Built-in nations re-jitter their spawn near a region every spawn-phase tick and
+   * settle (`NationExecution.randomSpawnLand`); this gives the agent the same behavior
+   * by, each spawn tick, selecting an EXPLORING spawn tile (jump) via `selectSpawnTile`,
+   * submitting + recording it (a synthetic non-LLM decision), then advancing the sim —
+   * until the spawn phase ends. The LLM Commander (`brain.decide`) is bypassed here and
+   * engages only in the active phase, so spawn costs zero model latency. Replaces the
+   * single `runOpeningTurn()` at the eval entrypoints. Returns the spawn decision records.
+   */
+  async runSpawnPhase(options: {
+    mirror: AgentLocalGameMirror;
+    messages: () => ServerMessage[];
+    turnsPerSpawnTick?: number;
+    maxSpawnTicks?: number;
+  }): Promise<AgentDecisionRecord[]> {
+    const startingRecordCount = this.records.length;
+    const turnsPerSpawnTick = Math.max(1, options.turnsPerSpawnTick ?? 10);
+    // Bound the loop the way the step-locked league bounds spawn advance
+    // (maxSpawnAdvanceTurns: 2000): a loud throw on overrun, never a silent hang.
+    const maxSpawnTicks =
+      options.maxSpawnTicks ?? Math.ceil(2_000 / turnsPerSpawnTick);
+    let availableCandidates = [...this.options.spawnCandidates];
+
+    for (let tick = 0; tick <= maxSpawnTicks; tick += 1) {
+      await options.mirror.ingest(options.messages());
+      const gameState = options.mirror.gameState();
+      if (gameState !== null && !gameState.inSpawnPhase()) {
+        return this.records.slice(startingRecordCount);
+      }
+      const spawnProgress =
+        gameState !== null
+          ? gameState.ticks() /
+            Math.max(1, gameState.config().numSpawnPhaseTurns())
+          : 0;
+
+      for (const participant of this.options.participants) {
+        const observation = this.observationBuilder.build({
+          agentID: participant.runner.agentID,
+          clientID: participant.runner.clientID(),
+          username: participant.spec.username,
+          profile: participant.spec.profile,
+          gameID: this.options.game.id,
+          turnNumber: gameState?.ticks() ?? 0,
+          gameState: gameState ?? undefined,
+          phaseOverride: "spawn",
+          objective: this.objectiveManager.currentObjective(
+            participant.runner.agentID,
+          ),
+          recentDecisions: this.recentDecisionsFor(participant),
+        });
+        const legalActions = this.legalActionBuilder.build({
+          observation,
+          spawnCandidates: availableCandidates,
+        });
+        const spawnAction = selectSpawnTile({
+          spawnActions: legalActions,
+          profile: participant.spec.profile,
+          gameID: this.options.game.id,
+          agentID: participant.runner.agentID,
+          tick,
+          spawnProgress,
+        });
+        if (spawnAction === undefined) {
+          continue;
+        }
+        availableCandidates = this.submitAndRecordSpawn({
+          participant,
+          observation,
+          legalActions,
+          spawnAction,
+          availableCandidates,
+        });
+      }
+
+      this.options.game.advanceTurnsForTesting(turnsPerSpawnTick);
+    }
+
+    throw new Error(
+      `runSpawnPhase did not reach the active phase after ${maxSpawnTicks} spawn ticks`,
+    );
   }
 
   async runDecisionTurn(
@@ -640,6 +726,52 @@ export class AgentLeagueMatchRunner {
       reason: result.reason,
       submittedIntent: result.intent,
     };
+  }
+
+  private submitAndRecordSpawn(input: {
+    participant: AgentParticipant;
+    observation: AgentObservation;
+    legalActions: LegalAction[];
+    spawnAction: LegalAction;
+    availableCandidates: SpawnCandidate[];
+  }): SpawnCandidate[] {
+    // A synthetic, deterministic (non-LLM) spawn decision. The metadata flags keep it OUT
+    // of the LLM-aliveness count (rawProviderOutputPresent:false) and the external-brain-
+    // cleanliness external-call count (externalPlannerCall/externalActionCall:false); the
+    // chosen tile is always a legal buildSpawnCandidates tile, so the submit is accepted
+    // and rejectedIntents stays 0.
+    const decision: AgentDecision = {
+      actionID: input.spawnAction.id,
+      reason: "deterministic built-in-style spawn exploration",
+      metadata: {
+        brain: "deterministic-spawn",
+        actionSelectionSource: "deterministic-spawn",
+        externalPlannerCall: false,
+        externalActionCall: false,
+        rawProviderOutputPresent: false,
+        spawnExploration: true,
+      },
+    };
+    const result = this.submitLegalAction(
+      input.participant.runner,
+      input.spawnAction,
+    );
+    this.recordDecision({
+      participant: input.participant,
+      turnNumber: input.observation.turnNumber,
+      observationSummary: this.observationBuilder.summarize(input.observation),
+      observation: input.observation,
+      legalActions: input.legalActions,
+      chosenAction: input.spawnAction,
+      decision,
+      decisionLatencyMs: 0,
+      reason: decision.reason,
+      result,
+    });
+    return this.removeNearbySpawnCandidates(
+      input.availableCandidates,
+      input.spawnAction,
+    );
   }
 
   private recordDecision(input: {
