@@ -1008,10 +1008,10 @@ const HOUSE_AGENTS: { agentName: string; strategySpec: PlayerStrategySpec }[] = 
   {
     agentName: HOUSE_CHAMPION_NAME,
     strategySpec: {
-      posture: "opportunistic",
+      posture: "aggressive",
       objectiveBias: "expand",
       doctrine:
-        "Expand hard into open land early to out-produce everyone. Make a non-aggression alliance with the nearest strong rival to avoid a two-front war, then strike once you clearly outproduce a neighbor. Never run more than two wars at once; consolidate, then press your strongest advantage to eliminate the weakest reachable rival.",
+        "Expand relentlessly into open land and take territory from the weakest neighbor you can reach. Never sit idle — always be expanding or pressing an attack. Hold at most ONE alliance of convenience and break it the moment you can seize the ally's land; do not over-ally or you will be ganged up on. Avoid fighting two strong powers at once: pick off the weak first, then turn on the strong.",
     },
   },
   {
