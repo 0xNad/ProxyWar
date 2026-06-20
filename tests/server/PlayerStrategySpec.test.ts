@@ -258,6 +258,53 @@ describe("mergePlayerConstraintsIntoPlan", () => {
     });
     expect(merged.buildDirective).toEqual({ unit: "Factory" });
   });
+
+  it("seeds a build directive for an economy objectiveBias (the economy analog of the alliance seeding)", () => {
+    const merged = mergePlayerConstraintsIntoPlan(basePlan(), {
+      objectiveBias: "economy",
+    });
+    expect(merged.buildDirective).toEqual({ unit: "any" });
+    expect(merged.allianceDirective).toBeUndefined();
+    expect(merged.commitment).toBeUndefined();
+  });
+
+  it("does not seed a build directive for non-economy leans", () => {
+    expect(
+      mergePlayerConstraintsIntoPlan(basePlan(), { objectiveBias: "expand" })
+        .buildDirective,
+    ).toBeUndefined();
+    expect(
+      mergePlayerConstraintsIntoPlan(basePlan(), { objectiveBias: "military" })
+        .buildDirective,
+    ).toBeUndefined();
+  });
+
+  it("does not override a buildDirective the Commander already set", () => {
+    const plan = basePlan({ buildDirective: { unit: "Factory" } });
+    const merged = mergePlayerConstraintsIntoPlan(plan, {
+      objectiveBias: "economy",
+    });
+    expect(merged.buildDirective).toEqual({ unit: "Factory" });
+  });
+
+  it("an economy spec does not seed a build directive when the player forbids build", () => {
+    const merged = mergePlayerConstraintsIntoPlan(basePlan(), {
+      objectiveBias: "economy",
+      forbiddenKinds: ["build"],
+    });
+    expect(merged.buildDirective).toBeUndefined();
+  });
+
+  it("an existing commitment pre-empts an economy spec's build seeding (commitment > build)", () => {
+    const plan = basePlan({
+      commitment: { targetPlayerId: "rivalX", minAttackRatio: 0.25 },
+    });
+    const merged = mergePlayerConstraintsIntoPlan(plan, {
+      objectiveBias: "economy",
+    });
+    expect(merged.commitment).toBeDefined();
+    expect(merged.buildDirective).toBeUndefined();
+  });
 });
 
 describe("doctrinePromptSuffix", () => {

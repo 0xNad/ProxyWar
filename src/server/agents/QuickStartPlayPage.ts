@@ -73,6 +73,22 @@ export function renderQuickStartPlayHtml(
   @keyframes s { to { transform:rotate(360deg); } }
   footer { color:var(--muted); font-size:12.5px; margin-top:40px; line-height:1.6; }
   code { color:#aeb8c8; }
+  details.tune { margin:-8px 0 26px; border:1px solid var(--line); border-radius:11px;
+    background:var(--card); }
+  details.tune > summary { cursor:pointer; padding:12px 14px; color:var(--muted);
+    font-size:13px; list-style:none; letter-spacing:.02em; }
+  details.tune > summary::-webkit-details-marker { display:none; }
+  details.tune > summary::before { content:"⚙ "; }
+  details.tune[open] > summary { border-bottom:1px solid var(--line); color:var(--fg); }
+  .tune-grid { display:grid; grid-template-columns:1fr 1fr; gap:14px; padding:14px; }
+  .tune-row label { margin-bottom:6px; }
+  .tune select { width:100%; background:var(--bg); color:var(--fg); border:1px solid var(--line);
+    border-radius:9px; padding:10px 11px; font:inherit; }
+  .tune-checks { display:flex; flex-wrap:wrap; gap:8px 18px; padding:0 14px 14px; }
+  label.chk { display:flex; align-items:center; gap:7px; color:#c7d0de; font-size:13.5px;
+    margin:0; cursor:pointer; }
+  label.chk input { accent-color:var(--go); width:15px; height:15px; }
+  .tune-note { color:var(--muted); font-size:11.5px; padding:0 14px 13px; margin:0; }
 </style>
 </head>
 <body>
@@ -90,6 +106,39 @@ export function renderQuickStartPlayHtml(
     <textarea id="prompt" maxlength="600" placeholder="e.g. Build a strong economy with factories and ports. Ally with neighbors early. Only attack someone once you clearly outproduce them — then commit."></textarea>
     <div class="examples" id="examples"></div>
   </div>
+
+  <details class="tune">
+    <summary>Fine-tune (optional)</summary>
+    <div class="tune-grid">
+      <div class="tune-row">
+        <label for="lean">Strategy lean</label>
+        <select id="lean">
+          <option value="">Auto — let the prompt decide</option>
+          <option value="expand">Expand fast</option>
+          <option value="economy">Economy &amp; build</option>
+          <option value="military">Military</option>
+          <option value="diplomacy">Diplomacy</option>
+          <option value="survive">Survive</option>
+        </select>
+      </div>
+      <div class="tune-row">
+        <label for="posture">Posture</label>
+        <select id="posture">
+          <option value="">Auto</option>
+          <option value="aggressive">Aggressive</option>
+          <option value="defensive">Defensive</option>
+          <option value="diplomatic">Diplomatic</option>
+          <option value="opportunistic">Opportunistic</option>
+        </select>
+      </div>
+    </div>
+    <div class="tune-checks">
+      <label class="chk"><input type="checkbox" id="allow-alliances" checked /> Allow alliances</label>
+      <label class="chk"><input type="checkbox" id="allow-betrayal" checked /> Allow betrayal</label>
+      <label class="chk"><input type="checkbox" id="allow-nukes" checked /> Allow nukes</label>
+    </div>
+    <p class="tune-note">These bind your agent: a forbidden action is never taken, and a lean steers what it builds and whether it allies. Leave on Auto to let your written strategy drive.</p>
+  </details>
 
   <button class="play" id="play">▶ Find a 4-player match</button>
   <div class="status" id="status">When 4 players have joined, the match begins. You'll get a replay link.</div>
@@ -151,6 +200,20 @@ export function renderQuickStartPlayHtml(
     }).catch(function(){ setTimeout(function(){ poll(lobbyId); }, 3500); });
   }
 
+  function buildSpec(doctrine){
+    var spec = { doctrine: doctrine };
+    var lean = document.getElementById('lean').value;
+    if (lean) spec.objectiveBias = lean;
+    var posture = document.getElementById('posture').value;
+    if (posture) spec.posture = posture;
+    var forbid = [];
+    if (!document.getElementById('allow-alliances').checked) { forbid.push('alliance_request'); forbid.push('alliance_extend'); }
+    if (!document.getElementById('allow-betrayal').checked) forbid.push('break_alliance');
+    if (!document.getElementById('allow-nukes').checked) forbid.push('nuke');
+    if (forbid.length) spec.forbiddenKinds = forbid;
+    return spec;
+  }
+
   playBtn.addEventListener('click', function(){
     var doctrine = promptEl.value.trim();
     if (!doctrine) { setStatus('Write a strategy first — a sentence or two on how your agent should play.', 'err'); promptEl.focus(); return; }
@@ -158,7 +221,7 @@ export function renderQuickStartPlayHtml(
     setStatus('<span class="spin"></span>Joining the lobby…', 'run');
     fetch('/api/lobby/join', {
       method:'POST', headers:{'Content-Type':'application/json'},
-      body: JSON.stringify({ agentName: document.getElementById('name').value, strategySpec: { doctrine: doctrine } })
+      body: JSON.stringify({ agentName: document.getElementById('name').value, strategySpec: buildSpec(doctrine) })
     }).then(function(r){ return r.json().then(function(j){ return { ok:r.ok, j:j }; }); })
       .then(function(res){
         if (!res.ok) { setStatus('Could not join: ' + (res.j.error || 'try again'), 'err'); playBtn.disabled = false; return; }

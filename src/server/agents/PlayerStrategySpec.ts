@@ -9,6 +9,7 @@ import { sanitizeUntrustedDisplayString } from "./PromptSanitizer";
 // cycle with AgentPlannerExecutor (which imports the functions below at runtime).
 import type {
   AgentAllianceDirective,
+  AgentBuildDirective,
   AgentTacticalSettings,
   StrategicPlan,
 } from "./AgentPlannerExecutor";
@@ -241,17 +242,20 @@ export function mergePlayerConstraintsIntoPlan(
   // carries both — which also keeps the override-audit telemetry unambiguous.
   const finalCommitment =
     allianceDirective !== undefined ? undefined : commitment;
-  // Single-directive invariant extends to the build directive (precedence
-  // commitment > alliance > build): a spec-seeded alliance or a kept commitment drops
-  // a Commander's buildDirective, and a player who forbids "build" drops it too — so
-  // the finalized plan never carries two binding directives (which would collide on
-  // the shared executorOverrideEvent audit key).
-  const buildDirective =
+  // Seed a binding build directive from an economy-leaning spec (the economy analog of
+  // the alliance seeding above) unless a higher-precedence directive is bound (precedence
+  // commitment > alliance > build) or the player forbids "build". This is what makes an
+  // "economy" player strategy actually build cities/factories/ports instead of being
+  // steamrolled into expansion/attacks by the executor. A Commander-emitted buildDirective
+  // is preserved. The single-directive invariant holds: the finalized plan never carries
+  // two binding directives (which would collide on the shared executorOverrideEvent key).
+  const wantsBuild = spec.objectiveBias === "economy";
+  const buildDirective: AgentBuildDirective | undefined =
     allianceDirective !== undefined ||
     finalCommitment !== undefined ||
     playerForbids.has("build")
       ? undefined
-      : plan.buildDirective;
+      : (plan.buildDirective ?? (wantsBuild ? { unit: "any" } : undefined));
 
   return {
     ...plan,

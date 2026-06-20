@@ -145,7 +145,8 @@ export interface AgentAllianceDirective {
  * expansion/attack this cycle, when one is legal (only survival, an active kill
  * commitment, and a bound alliance pre-empt it). `unit` names a specific economic
  * structure, or "any" for any economic build. Set only when the Commander emitted it
- * (with `directiveBuildEnabled()` on) — never by rule/fallback planners. Mutually
+ * (with `directiveBuildEnabled()` on) OR a player strategy spec with an economy lean
+ * seeded it — never by rule/fallback planners. Mutually
  * exclusive with commitment + allianceDirective (precedence commitment > alliance >
  * build) so the single override-audit key stays unambiguous.
  */
