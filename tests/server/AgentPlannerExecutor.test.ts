@@ -17974,4 +17974,28 @@ describe("Economy bootstrap lever (PROXYWAR_TUNE_ECONOMY_BOOTSTRAP)", () => {
     ]);
     expect(decision.actionID).toBe("build:City:100");
   });
+
+  it("ON: with a City but no Factory, builds the Factory next (income engine, not just one City)", async () => {
+    process.env[FLAG] = "1";
+    const base = noCityObservation();
+    const observation: AgentObservation = {
+      ...base,
+      ownState: { ...base.ownState!, unitCounts: { [UnitType.City]: 1 } },
+    };
+    const factoryAction: LegalAction = {
+      id: "build:Factory:101",
+      kind: "build",
+      label: "Build Factory",
+      intent: { type: "build_unit", unit: UnitType.Factory, tile: 101 },
+      risk: { level: "medium", score: 0.3 },
+      metadata: { role: "economic", unit: "Factory" },
+    };
+    const decision = await decide(observation, [
+      expandAction(),
+      factoryAction,
+      defensePostAction(),
+      hold(),
+    ]);
+    expect(decision.actionID).toBe("build:Factory:101");
+  });
 });

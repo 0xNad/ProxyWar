@@ -1301,11 +1301,7 @@ export class FrontierPolicyExecutor implements AgentExecutor {
     // and NOT under attack, strip Defense Posts at this single batch choke point so gold
     // banks toward the City (which economyBootstrapCityCandidate then builds once it is
     // affordable). Falls back to the best non-Defense offered action.
-    if (
-      economyBootstrapEnabled() &&
-      ownUnitCount(input.observation, UnitType.City) === 0 &&
-      !incomingHomePressure(input.observation)
-    ) {
+    if (economyBootstrapBankingActive(input.observation)) {
       const stripped = selectedBatch.filter(
         (candidate) => !isDefensePostAction(candidate.action),
       );
@@ -2015,30 +2011,53 @@ function buildDirectiveCandidate(
  * below it (survival, an explicit kill commitment, a bound alliance, and a bound build
  * directive all sit ABOVE it and still win). Banking toward the City's gold cost is
  * handled by the paired Defense-Post penalty in scoreFrontierAction. No-op (undefined)
- * when the flag is off, the agent already has a City, it is under attack, or no City
- * build is offered (not yet affordable / not placeable).
+ * when the flag is off, the baseline is complete, it is under attack, or no qualifying
+ * economy build is offered (not yet affordable / not placeable).
+ *
+ * VERIFIED (run ab-couple-ecoboot3-r1): the first-City form crossed the 125k gold wall
+ * and built City #1 (turn 1575, audit-confirmed), but the cascade stalled — the agent
+ * reverted to attack/expand and never built the offered Factory. So the bootstrap is a
+ * baseline INCOME ENGINE (first City, then first Factory — both land-based, no shore
+ * dependency), not just the first City, so the economy actually compounds toward the
+ * income needed for the Silo/Port → advanced-warfare tree.
  */
-function economyBootstrapCityCandidate(
+function economyBootstrapBaselineIncomplete(
+  observation: AgentBrainInput["observation"],
+): boolean {
+  return (
+    ownUnitCount(observation, UnitType.City) === 0 ||
+    ownUnitCount(observation, UnitType.Factory) === 0
+  );
+}
+
+/** Bootstrap "bank for the next economy structure" gate: flag on, baseline still
+ *  incomplete, and not under attack (real defense always pre-empts). */
+function economyBootstrapBankingActive(
+  observation: AgentBrainInput["observation"],
+): boolean {
+  return (
+    economyBootstrapEnabled() &&
+    economyBootstrapBaselineIncomplete(observation) &&
+    !incomingHomePressure(observation)
+  );
+}
+
+function economyBootstrapStructureCandidate(
   input: AgentBrainInput,
   scored: readonly FrontierRankedAction[],
 ): FrontierRankedAction | undefined {
-  if (!economyBootstrapEnabled()) {
+  if (!economyBootstrapBankingActive(input.observation)) {
     return undefined;
   }
-  const observation = input.observation;
-  if (ownUnitCount(observation, UnitType.City) !== 0) {
-    return undefined;
-  }
-  const incomingCount =
-    observation.combat.incomingAttackPlayerIDs.length +
-    (observation.combat.incomingAttacks?.length ?? 0);
-  if (incomingCount !== 0) {
-    return undefined;
-  }
+  // Build the income engine in order: first City, then first Factory.
+  const nextUnit =
+    ownUnitCount(input.observation, UnitType.City) === 0
+      ? UnitType.City
+      : UnitType.Factory;
   return scored.find(
     (candidate) =>
       candidate.action.kind === "build" &&
-      metadataString(candidate.action, "unit") === UnitType.City,
+      metadataString(candidate.action, "unit") === nextUnit,
   );
 }
 
@@ -2303,9 +2322,12 @@ function selectFrontierActionBatch(input: {
   // and below survival / commitment / alliance / build-directive, which all still win.
   // Single-action batch: the first City IS this cycle's decision. No-op when off, when
   // the agent already has a City, when under attack, or when no City build is offered.
-  const economyBootstrapCity = economyBootstrapCityCandidate(input.input, scored);
-  if (economyBootstrapCity !== undefined) {
-    return [economyBootstrapCity];
+  const economyBootstrapStructure = economyBootstrapStructureCandidate(
+    input.input,
+    scored,
+  );
+  if (economyBootstrapStructure !== undefined) {
+    return [economyBootstrapStructure];
   }
   const hardNationOpeningForceExpansion = directSelectionCandidate(
     hardNationOpeningForceExpansionCandidate(input.input, scored),
@@ -6271,13 +6293,8 @@ function urgentFortifyPlanCandidate(
   // the gold drain that keeps the first City permanently unaffordable. Bank the gold
   // instead; the offered first City is taken by economyBootstrapCityCandidate. This
   // mirrors the paired scorer penalty (which the candidate pre-emption here bypasses).
-  if (economyBootstrapEnabled() && ownUnitCount(observation, UnitType.City) === 0) {
-    const incomingCount =
-      observation.combat.incomingAttackPlayerIDs.length +
-      (observation.combat.incomingAttacks?.length ?? 0);
-    if (incomingCount === 0) {
-      return undefined;
-    }
+  if (economyBootstrapBankingActive(observation)) {
+    return undefined;
   }
   const urgentFortify =
     (plan.objective === "fortify_border" || plan.objective === "survive") &&
@@ -15800,15 +15817,10 @@ function scoreFrontierAction(input: {
   // precautionary Defense Posts so gold banks toward the City. Building the first City
   // once it is affordable is forced UPSTREAM by economyBootstrapCityCandidate (it
   // pre-empts the neutral-expansion selectors that otherwise outrank a scored build).
-  if (
-    economyBootstrapEnabled() &&
-    incomingCount === 0 &&
-    isDefensePostAction(action) &&
-    ownUnitCount(observation, UnitType.City) === 0
-  ) {
+  if (economyBootstrapBankingActive(observation) && isDefensePostAction(action)) {
     penalize(
       320,
-      "economy bootstrap: bank gold for the first City instead of precautionary defense",
+      "economy bootstrap: bank gold for the economy baseline instead of precautionary defense",
     );
   }
 
