@@ -1529,7 +1529,12 @@ function assertRequiredExternalBrainSucceeded(input: {
   brainMode: SmokeBrainMode;
   records: AgentDecisionRecord[];
 }): void {
-  if (!requiresExternalBrainSuccess(input.brainMode)) {
+  const requireStrict = requiresExternalBrainSuccess(input.brainMode);
+  // The fully-down guard runs for ANY real-LLM brain, even when the strict clean-run gate
+  // is off (sponsored/live games set REQUIRE_EXTERNAL_BRAIN_SUCCESS=false to tolerate the
+  // occasional "hold"/fallback). So only return early when there is nothing to check.
+  const guardFullyDown = isExternalProviderBrain(input.brainMode);
+  if (!requireStrict && !guardFullyDown) {
     return;
   }
 
@@ -1549,6 +1554,29 @@ function assertRequiredExternalBrainSucceeded(input: {
           : input.brainMode,
     records: input.records,
   });
+
+  // Fail loud when a real-LLM brain's provider is FULLY DOWN — every external call attempted
+  // but none succeeded — INDEPENDENT of the strict gate. A match with zero successful LLM
+  // calls ran 100% on the local-policy executor and must never be presented as the user's LLM
+  // agent. Exposed 2026-06-20: the OpenRouter spend cap exhausted → 0% LLM, yet the sponsored
+  // game (REQUIRE=false) silently "completed". (externalCalls===0 means no call was attempted —
+  // e.g. a trivial all-spawn match — which is not a provider failure, so it is not caught here.)
+  if (
+    guardFullyDown &&
+    report.externalCalls > 0 &&
+    report.cleanExternalCalls === 0
+  ) {
+    throw new Error(
+      `${input.brainMode} provider produced ZERO successful calls ` +
+        `(${report.externalCalls} attempted, all failed) — sponsored play is unavailable ` +
+        `(LLM provider down or over quota). Refusing to present a 100% local-policy match ` +
+        `as an LLM agent. firstFailure=${report.firstFailureReason}`,
+    );
+  }
+
+  if (!requireStrict) {
+    return;
+  }
   if (report.ok) {
     return;
   }
@@ -1563,6 +1591,23 @@ function assertRequiredExternalBrainSucceeded(input: {
       `rejectedIntents=${report.rejectedIntents}`,
       `firstFailure=${report.firstFailureReason}`,
     ].join(" "),
+  );
+}
+
+/**
+ * Brains that drive decisions through an external LLM provider (so a fully-down provider
+ * means the match silently ran on the local-policy executor). Excludes rule / mock-llm /
+ * planner (mock), which never make external calls.
+ */
+function isExternalProviderBrain(brainMode: SmokeBrainMode): boolean {
+  return (
+    brainMode === "codex-cli" ||
+    brainMode === "planner-codex-cli" ||
+    brainMode === "planner-claude-cli" ||
+    brainMode === "action-claude-cli" ||
+    brainMode === "planner-openrouter" ||
+    brainMode === "openrouter" ||
+    brainMode === "real-llm"
   );
 }
 
