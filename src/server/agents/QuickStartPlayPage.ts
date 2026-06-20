@@ -89,6 +89,8 @@ export function renderQuickStartPlayHtml(
     margin:0; cursor:pointer; }
   label.chk input { accent-color:var(--go); width:15px; height:15px; }
   .tune-note { color:var(--muted); font-size:11.5px; padding:0 14px 13px; margin:0; }
+  .record { text-align:center; margin-top:11px; font-size:13px; color:var(--muted); }
+  .record b { color:var(--ok); font-weight:800; }
 </style>
 </head>
 <body>
@@ -142,6 +144,7 @@ export function renderQuickStartPlayHtml(
 
   <button class="play" id="play">▶ Find a 4-player match</button>
   <div class="status" id="status">When 4 players have joined, the match begins. You'll get a replay link.</div>
+  <div class="record" id="record" style="display:none"></div>
   <section id="result-card" style="margin-top:24px; display:none;"></section>
 
   <section id="matches-wrap" style="margin-top:40px; display:none;">
@@ -177,6 +180,7 @@ export function renderQuickStartPlayHtml(
 
   var statusEl = document.getElementById('status');
   var playBtn = document.getElementById('play');
+  var myName = '';
   function setStatus(html, cls){ statusEl.className = 'status' + (cls?(' '+cls):''); statusEl.innerHTML = html; }
 
   function poll(lobbyId){
@@ -184,6 +188,7 @@ export function renderQuickStartPlayHtml(
       if (j.status === 'completed') {
         setStatus(j.replayUrl ? 'Match complete.' : 'Match finished but produced no replay.', j.replayUrl ? 'done' : 'err');
         renderResultCard(j.result, j.replayUrl);
+        recordFinish(j.result && j.result.standings, myName);
         playBtn.disabled = false; playBtn.textContent = '▶ Find another match'; return;
       }
       if (j.status === 'failed') {
@@ -217,6 +222,7 @@ export function renderQuickStartPlayHtml(
   playBtn.addEventListener('click', function(){
     var doctrine = promptEl.value.trim();
     if (!doctrine) { setStatus('Write a strategy first — a sentence or two on how your agent should play.', 'err'); promptEl.focus(); return; }
+    myName = (document.getElementById('name').value || '').trim();
     playBtn.disabled = true;
     setStatus('<span class="spin"></span>Joining the lobby…', 'run');
     fetch('/api/lobby/join', {
@@ -274,6 +280,28 @@ export function renderQuickStartPlayHtml(
       }).join('');
     }).catch(function(){});
   }
+  function loadRecord(){ try { return JSON.parse(localStorage.getItem('pw_record') || 'null') || {}; } catch(e){ return {}; } }
+  function saveRecord(r){ try { localStorage.setItem('pw_record', JSON.stringify(r)); } catch(e){} }
+  function ordinal(n){ return n===1?'1st':(n===2?'2nd':(n===3?'3rd':(n+'th'))); }
+  function renderRecord(){
+    var r = loadRecord(); var el = document.getElementById('record');
+    if (!el) return;
+    if (!r || !r.played){ el.style.display='none'; return; }
+    el.style.display='block';
+    el.innerHTML = 'Your record: <b>' + (r.wins||0) + '</b> ' + (r.wins===1?'win':'wins') + ' in ' + r.played + ' game' + (r.played===1?'':'s') + ' · best finish ' + ordinal(r.best||4);
+  }
+  function recordFinish(standings, name){
+    if (!standings || !standings.length || !name) return;
+    var me = String(name).trim().toLowerCase(); var rank = 0;
+    for (var i=0;i<standings.length;i++){ if (String(standings[i].name||'').trim().toLowerCase() === me){ rank = i+1; break; } }
+    if (!rank) return;
+    var r = loadRecord();
+    r.played = (r.played||0) + 1;
+    if (rank === 1) r.wins = (r.wins||0) + 1;
+    r.best = r.best ? Math.min(r.best, rank) : rank;
+    saveRecord(r); renderRecord();
+  }
+  renderRecord();
   renderMatches();
   setInterval(renderMatches, 5000);
 })();
