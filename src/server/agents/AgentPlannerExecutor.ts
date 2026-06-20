@@ -6237,6 +6237,20 @@ function urgentFortifyPlanCandidate(
   settings?: Pick<AgentSettings, "frontierFinishPressureEnabled">,
 ): FrontierRankedAction | undefined {
   const observation = input.observation;
+  // Economy bootstrap (PROXYWAR_TUNE_ECONOMY_BOOTSTRAP, default OFF): while the agent
+  // is economy-less and NOT actually under attack, do NOT pre-empt with precautionary
+  // Defense Posts — that "build_defense" phantom-defense path (no incoming attack) is
+  // the gold drain that keeps the first City permanently unaffordable. Bank the gold
+  // instead; the offered first City is taken by economyBootstrapCityCandidate. This
+  // mirrors the paired scorer penalty (which the candidate pre-emption here bypasses).
+  if (economyBootstrapEnabled() && ownUnitCount(observation, UnitType.City) === 0) {
+    const incomingCount =
+      observation.combat.incomingAttackPlayerIDs.length +
+      (observation.combat.incomingAttacks?.length ?? 0);
+    if (incomingCount === 0) {
+      return undefined;
+    }
+  }
   const urgentFortify =
     (plan.objective === "fortify_border" || plan.objective === "survive") &&
     plan.preferredActionKinds.some((kind) =>

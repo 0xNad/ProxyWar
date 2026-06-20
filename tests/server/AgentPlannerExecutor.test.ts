@@ -17958,4 +17958,20 @@ describe("Economy bootstrap lever (PROXYWAR_TUNE_ECONOMY_BOOTSTRAP)", () => {
     expect(offDecision.actionID).not.toBe("build:City:100");
     expect(onDecision.actionID).toBe("build:City:100");
   });
+
+  it("ON: in phantom build_defense priority with no real attack, builds the City (no urgentFortify Defense Post pre-empt)", async () => {
+    process.env[FLAG] = "1";
+    const base = noCityObservation();
+    const observation: AgentObservation = {
+      ...base,
+      strategic: { ...base.strategic, priority: "build_defense", urgency: "high" },
+    };
+    const decision = await decide(observation, [
+      expandAction(),
+      cityAction(),
+      defensePostAction(),
+      hold(),
+    ]);
+    expect(decision.actionID).toBe("build:City:100");
+  });
 });
