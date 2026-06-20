@@ -371,13 +371,16 @@ export function buildAgentDemoJobCommand(
                 ),
               }
             : {}),
-          // NOTE: do NOT re-enable PROXYWAR_TUNE_ECONOMY_BOOTSTRAP / _DIRECTIVE_BUILD
-          // here yet. Enabling them on the beta path (2026-06-20) made games FAIL mid-run
-          // with "accepted build intent was not reflected in mirrored core state" — the
-          // bootstrap's forced first-City build trips the demo-server action-smoke audit
-          // (the agent thread's A/B harness in outputs/ does not run that gate, so it was
-          // green there). Re-enable only after the agent thread resolves that
-          // build-audit incompatibility. See decision-log 2026-06-20.
+          // Economy tunables ON for sponsored beta games so a player's "economy" lean
+          // banks gold + builds (City→Factory) instead of bleeding it on Defense Posts,
+          // and a bound buildDirective is honored end-to-end. NB: the 2026-06-20 failures
+          // here were NOT the bootstrap — they were an over-strict action-diversity smoke
+          // that required an exact buildTile match (unset for directive/bootstrap-forced
+          // builds); fixed in 2af6ca57a. The bootstrap's forced build IS verified to reflect
+          // a unit in the agent thread's runs. Default-OFF globally; scoped to the openrouter
+          // beta path (the agent thread's A/B harness in outputs/ is separate). See decision-log.
+          PROXYWAR_TUNE_ECONOMY_BOOTSTRAP: "1",
+          PROXYWAR_TUNE_DIRECTIVE_BUILD: "1",
           // Sponsored tester games (quick-start + lobby) must COMPLETE and surface
           // a replay even when agents legitimately pick "hold" (the harness counts
           // a hold as a non-clean fallback). The strict clean-run gate is for
