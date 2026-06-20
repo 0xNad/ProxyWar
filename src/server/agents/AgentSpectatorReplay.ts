@@ -655,6 +655,14 @@ function spectatorHtml(replay: AgentSpectatorReplay): string {
     </section>
     <aside class="side">
       <section class="panel">
+        <h2>Result</h2>
+        <div id="result"></div>
+      </section>
+      <section class="panel">
+        <h2>Story</h2>
+        <div id="story"></div>
+      </section>
+      <section class="panel">
         <h2>Agents</h2>
         <div id="roster" class="roster"></div>
       </section>
@@ -716,6 +724,40 @@ function spectatorHtml(replay: AgentSpectatorReplay): string {
         ? replay.notes.map((note) => '<li>' + escapeHtml(note) + '</li>').join("")
         : '<li>This run did not include additional replay notes.</li>') +
       '</ul>';
+    // Final standing: the games end on a step cap with no declared winner, so rank
+    // the last snapshot's players by territory held.
+    (function renderResult(){
+      var snaps = replay.snapshots || [];
+      var players = [];
+      for (var i = snaps.length - 1; i >= 0; i--) {
+        if (snaps[i].players && snaps[i].players.length) { players = snaps[i].players; break; }
+      }
+      var ranked = players.slice().sort(function(a,b){ return (b.tilesOwned||0)-(a.tilesOwned||0); });
+      var el = document.getElementById("result");
+      if (!ranked.length) { el.innerHTML = '<p class="muted">No final standing recorded.</p>'; return; }
+      el.innerHTML = ranked.map(function(p,i){
+        return '<div style="display:flex;justify-content:space-between;gap:8px;padding:4px 0;">' +
+          '<span>' + (i===0 ? '🏆 ' : (i+1)+'. ') + '<strong>' + escapeHtml(p.username||'agent') + '</strong></span>' +
+          '<span class="muted">' + Number(p.tilesOwned||0).toLocaleString() + ' tiles</span></div>';
+      }).join("");
+    })();
+    // Story: the per-run drama-report.json (alliances, betrayals, eliminations) is
+    // already computed + served statically under /runs/<id>/. Surface it as the recap.
+    fetch('/runs/' + encodeURIComponent(replay.runID) + '/drama-report.json')
+      .then(function(r){ return r.ok ? r.json() : null; })
+      .then(function(d){
+        var el = document.getElementById("story");
+        if (!el) return;
+        if (!d) { el.innerHTML = '<p class="muted">No story recorded for this match.</p>'; return; }
+        var summary = [(d.allianceFormedCount||0)+' alliances', (d.allianceBrokenCount||0)+' broken', (d.betrayalCount||0)+' betrayals', (d.eliminationCount||0)+' eliminations'].join(' · ');
+        var moments = (d.topMoments||[]).slice().sort(function(a,b){ return (a.turnNumber||0)-(b.turnNumber||0); }).slice(0,10);
+        function tone(t){ return t==='betrayal' ? '#e06c75' : (t==='alliance'||t==='cooperation' ? '#37d39b' : '#aeb8c8'); }
+        el.innerHTML = '<p class="muted">' + escapeHtml(summary) + (d.dramaGrade ? ' · ' + escapeHtml(d.dramaGrade) : '') + '</p>' +
+          (moments.length
+            ? moments.map(function(m){ return '<div style="padding:3px 0;color:' + tone(m.tone) + '"><span class="muted">turn ' + (m.turnNumber||0) + '</span> ' + escapeHtml(m.message || ((m.actor||'?')+' '+(m.kind||''))) + '</div>'; }).join("")
+            : '<p class="muted">Quiet match — no standout moments.</p>');
+      })
+      .catch(function(){ var el=document.getElementById("story"); if(el) el.innerHTML='<p class="muted">Story unavailable.</p>'; });
     followAgentSelect.innerHTML = '<option value="">Follow all agents</option>' + replay.roster.map((agent) => '<option value="' + escapeHtml(agent.agentID) + '">' + escapeHtml(agent.username) + '</option>').join("");
     followAgentSelect.addEventListener("change", () => {
       followedAgentID = followAgentSelect.value;

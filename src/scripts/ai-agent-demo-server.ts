@@ -989,6 +989,8 @@ interface ProxyWarLobby {
   status: LobbyStatus;
   jobID: string | null;
   error: string | null;
+  /** Cached {standings, story} read once from the run's drama-report.json on completion. */
+  result?: Record<string, unknown> | null;
 }
 let formingLobby: ProxyWarLobby | null = null;
 const lobbiesById = new Map<string, ProxyWarLobby>();
@@ -1166,13 +1168,80 @@ app.get("/api/lobby/matches", (_req, res) => {
   res.json({ matches });
 });
 
-app.get("/api/lobby/:lobbyId", (req, res) => {
+// A finished match's result (standings + story) from the run's drama-report.json —
+// a small file carrying both per-agent finalTilesOwned and the key moments.
+async function readMatchResult(
+  runID: string,
+): Promise<Record<string, unknown> | null> {
+  try {
+    const raw = await fs.readFile(
+      path.join(runsRootDir, runID, "drama-report.json"),
+      "utf8",
+    );
+    const d = JSON.parse(raw) as Record<string, unknown>;
+    const agents = Array.isArray(d.agents)
+      ? (d.agents as Record<string, unknown>[])
+      : [];
+    const standings = agents
+      .slice()
+      .sort(
+        (a, b) =>
+          ((b.finalTilesOwned as number) || 0) -
+          ((a.finalTilesOwned as number) || 0),
+      )
+      .map((a) => ({
+        name: a.username,
+        tiles: (a.finalTilesOwned as number) || 0,
+        alive: a.isAlive !== false,
+        attacks: (a.attacksInitiated as number) || 0,
+        alliances: (a.alliancesFormed as number) || 0,
+        betrayals: (a.alliancesBroken as number) || 0,
+      }));
+    const moments = (Array.isArray(d.topMoments) ? d.topMoments : [])
+      .slice()
+      .sort(
+        (a: Record<string, unknown>, b: Record<string, unknown>) =>
+          ((a.turnNumber as number) || 0) - ((b.turnNumber as number) || 0),
+      )
+      .slice(0, 8)
+      .map((m: Record<string, unknown>) => ({
+        turn: (m.turnNumber as number) || 0,
+        tone: (m.tone as string) || "",
+        text:
+          (m.message as string) ||
+          `${(m.actor as string) || "?"} ${(m.kind as string) || ""}`.trim(),
+      }));
+    return {
+      standings,
+      story: {
+        alliancesFormed: (d.allianceFormedCount as number) || 0,
+        alliancesBroken: (d.allianceBrokenCount as number) || 0,
+        betrayals: (d.betrayalCount as number) || 0,
+        eliminations: (d.eliminationCount as number) || 0,
+        grade: (d.dramaGrade as string) ?? null,
+        moments,
+      },
+    };
+  } catch {
+    return null;
+  }
+}
+
+app.get("/api/lobby/:lobbyId", async (req, res) => {
   const lobby = lobbiesById.get(req.params.lobbyId);
   if (!lobby) {
     res.status(404).json({ ok: false, error: "unknown lobby" });
     return;
   }
-  res.json(lobbyView(lobby));
+  const view = lobbyView(lobby);
+  if (view.status === "completed" && lobby.result === undefined) {
+    const job = lobby.jobID ? jobs.get(lobby.jobID) : null;
+    lobby.result =
+      typeof job?.latestRunID === "string"
+        ? await readMatchResult(job.latestRunID)
+        : null;
+  }
+  res.json({ ...view, result: lobby.result ?? null });
 });
 
 app.post("/api/nations", async (req, res) => {

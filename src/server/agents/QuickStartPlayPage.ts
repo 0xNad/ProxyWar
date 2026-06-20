@@ -93,6 +93,7 @@ export function renderQuickStartPlayHtml(
 
   <button class="play" id="play">▶ Find a 4-player match</button>
   <div class="status" id="status">When 4 players have joined, the match begins. You'll get a replay link.</div>
+  <section id="result-card" style="margin-top:24px; display:none;"></section>
 
   <section id="matches-wrap" style="margin-top:40px; display:none;">
     <label style="margin-bottom:12px">Recent matches</label>
@@ -132,8 +133,8 @@ export function renderQuickStartPlayHtml(
   function poll(lobbyId){
     fetch('/api/lobby/' + encodeURIComponent(lobbyId)).then(function(r){ return r.json(); }).then(function(j){
       if (j.status === 'completed') {
-        if (j.replayUrl) setStatus('Match complete. <a class="replay" href="' + j.replayUrl + '">▶ Watch the replay</a>', 'done');
-        else setStatus('Match finished but produced no replay. Try again.', 'err');
+        setStatus(j.replayUrl ? 'Match complete.' : 'Match finished but produced no replay.', j.replayUrl ? 'done' : 'err');
+        renderResultCard(j.result, j.replayUrl);
         playBtn.disabled = false; playBtn.textContent = '▶ Find another match'; return;
       }
       if (j.status === 'failed') {
@@ -166,6 +167,31 @@ export function renderQuickStartPlayHtml(
   });
 
   function esc(s){ var d = document.createElement('div'); d.textContent = String(s); return d.innerHTML; }
+  function renderResultCard(result, replayUrl){
+    var box = document.getElementById('result-card');
+    if (!box) return;
+    var parts = [];
+    if (result && result.standings && result.standings.length){
+      parts.push('<label style="margin-bottom:10px">Final standing</label>');
+      parts.push(result.standings.map(function(s,i){
+        return '<div class="match"><span class="who">' + (i===0?'🏆 ':(i+1)+'. ') + esc(s.name||'agent') + (s.alive===false?' <span class="muted">(out)</span>':'') + '</span><span class="st">' + Number(s.tiles||0).toLocaleString() + ' tiles</span></div>';
+      }).join(''));
+    }
+    if (result && result.story){
+      var st = result.story;
+      parts.push('<label style="margin:18px 0 10px">What happened</label>');
+      parts.push('<p class="muted" style="margin:0 0 8px">' + (st.alliancesFormed||0) + ' alliances · ' + (st.betrayals||0) + ' betrayals · ' + (st.eliminations||0) + ' eliminations' + (st.grade?(' · '+esc(st.grade)):'') + '</p>');
+      if (st.moments && st.moments.length){
+        parts.push(st.moments.map(function(m){
+          var c = m.tone==='betrayal' ? '#e06c75' : ((m.tone==='alliance'||m.tone==='cooperation') ? '#37d39b' : 'var(--muted)');
+          return '<div style="padding:3px 0;font-size:13.5px;color:' + c + '"><span class="muted">turn ' + (m.turn||0) + '</span> ' + esc(m.text||'') + '</div>';
+        }).join(''));
+      }
+    }
+    if (replayUrl) parts.push('<div style="margin-top:16px"><a class="replay" href="' + replayUrl + '">▶ Watch the full game</a></div>');
+    box.innerHTML = parts.join('');
+    box.style.display = parts.length ? 'block' : 'none';
+  }
   function renderMatches(){
     fetch('/api/lobby/matches').then(function(r){ return r.json(); }).then(function(d){
       var ms = d.matches || [];
