@@ -17998,4 +17998,21 @@ describe("Economy bootstrap lever (PROXYWAR_TUNE_ECONOMY_BOOTSTRAP)", () => {
     ]);
     expect(decision.actionID).toBe("build:Factory:101");
   });
+
+  it("ON: with a City but Factory not yet affordable, still strips the precautionary Defense Post (keeps banking for the Factory)", async () => {
+    process.env[FLAG] = "1";
+    const base = noCityObservation();
+    const observation: AgentObservation = {
+      ...base,
+      ownState: { ...base.ownState!, unitCounts: { [UnitType.City]: 1 } },
+    };
+    // City built, no Factory offered (not affordable yet); only a precautionary
+    // Defense Post + expand. The choke point must still strip the Defense Post.
+    const decision = await decide(observation, [
+      expandAction(),
+      defensePostAction(),
+      hold(),
+    ]);
+    expect(decision.actionID).not.toBe("build:Defense Post:200");
+  });
 });
