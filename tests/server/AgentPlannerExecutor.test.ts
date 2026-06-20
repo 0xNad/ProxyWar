@@ -18015,4 +18015,35 @@ describe("Economy bootstrap lever (PROXYWAR_TUNE_ECONOMY_BOOTSTRAP)", () => {
     ]);
     expect(decision.actionID).not.toBe("build:Defense Post:200");
   });
+
+  it("ON: with City+Factory+Port but no Warship, forces the Warship (cascade to the cheapest advanced unit)", async () => {
+    process.env[FLAG] = "1";
+    const base = noCityObservation();
+    const observation: AgentObservation = {
+      ...base,
+      ownState: {
+        ...base.ownState!,
+        unitCounts: {
+          [UnitType.City]: 1,
+          [UnitType.Factory]: 1,
+          [UnitType.Port]: 1,
+        },
+      },
+    };
+    const warshipAction: LegalAction = {
+      id: "build:Warship:300",
+      kind: "warship",
+      label: "Build Warship",
+      intent: { type: "build_unit", unit: UnitType.Warship, tile: 300 },
+      risk: { level: "medium", score: 0.3 },
+      metadata: { unit: "Warship" },
+    };
+    const decision = await decide(observation, [
+      expandAction(),
+      warshipAction,
+      defensePostAction(),
+      hold(),
+    ]);
+    expect(decision.actionID).toBe("build:Warship:300");
+  });
 });

@@ -2021,23 +2021,34 @@ function buildDirectiveCandidate(
  * dependency), not just the first City, so the economy actually compounds toward the
  * income needed for the Silo/Port → advanced-warfare tree.
  */
-function economyBootstrapBaselineIncomplete(
+// The bootstrap cascade, in order: an income engine (City, Factory) then the cheapest
+// advanced unit (Port → Warship). The natural economy already reaches a Port on Pangaea
+// (~turn 3975); forcing the next missing step pushes the agent through to an actual
+// Warship — the realistic emergent advanced-warfare target. Banking (Defense-Post
+// suppression while safe) continues until the whole cascade is owned.
+const ECONOMY_BOOTSTRAP_CASCADE: readonly UnitType[] = [
+  UnitType.City,
+  UnitType.Factory,
+  UnitType.Port,
+  UnitType.Warship,
+];
+
+function economyBootstrapCascadeIncomplete(
   observation: AgentBrainInput["observation"],
 ): boolean {
-  return (
-    ownUnitCount(observation, UnitType.City) === 0 ||
-    ownUnitCount(observation, UnitType.Factory) === 0
+  return ECONOMY_BOOTSTRAP_CASCADE.some(
+    (unit) => ownUnitCount(observation, unit) === 0,
   );
 }
 
-/** Bootstrap "bank for the next economy structure" gate: flag on, baseline still
- *  incomplete, and not under attack (real defense always pre-empts). */
+/** Bootstrap "bank for the next cascade unit" gate: flag on, cascade still incomplete,
+ *  and not under attack (real defense always pre-empts). */
 function economyBootstrapBankingActive(
   observation: AgentBrainInput["observation"],
 ): boolean {
   return (
     economyBootstrapEnabled() &&
-    economyBootstrapBaselineIncomplete(observation) &&
+    economyBootstrapCascadeIncomplete(observation) &&
     !incomingHomePressure(observation)
   );
 }
@@ -2049,14 +2060,18 @@ function economyBootstrapStructureCandidate(
   if (!economyBootstrapBankingActive(input.observation)) {
     return undefined;
   }
-  // Build the income engine in order: first City, then first Factory.
-  const nextUnit =
-    ownUnitCount(input.observation, UnitType.City) === 0
-      ? UnitType.City
-      : UnitType.Factory;
+  // Force the first MISSING cascade unit when it is offered (City → Factory → Port →
+  // Warship). A Warship build action has kind "warship"; the rest are kind "build".
+  const nextUnit = ECONOMY_BOOTSTRAP_CASCADE.find(
+    (unit) => ownUnitCount(input.observation, unit) === 0,
+  );
+  if (nextUnit === undefined) {
+    return undefined;
+  }
   return scored.find(
     (candidate) =>
-      candidate.action.kind === "build" &&
+      (candidate.action.kind === "build" ||
+        candidate.action.kind === "warship") &&
       metadataString(candidate.action, "unit") === nextUnit,
   );
 }
