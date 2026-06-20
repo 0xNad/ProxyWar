@@ -1357,10 +1357,14 @@ function assertActionDiversitySmokeSucceeded(
   }
 
   const player = gameState.playerByClientID(selected.clientID ?? "");
-  const built = player
-    ?.units(selected.intent.unit)
-    .some((unit) => unit.tile() === selected.chosenActionMetadata?.buildTile);
-  if (!built) {
+  // Reflected if the player now owns a unit of the built type. The earlier check
+  // required a unit on EXACTLY chosenActionMetadata.buildTile, which spuriously failed
+  // legitimate builds whose decision metadata omits buildTile (e.g. a directive- or
+  // bootstrap-forced economy build) — failing whole beta games even though the structure
+  // was built. A genuinely unreflected build (zero units of the type) still throws. See
+  // decision-log 2026-06-20.
+  const builtCount = player?.units(selected.intent.unit).length ?? 0;
+  if (builtCount === 0) {
     throw new Error(
       "action smoke failed: accepted build intent was not reflected in mirrored core state",
     );
