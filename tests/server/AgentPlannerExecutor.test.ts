@@ -17840,3 +17840,122 @@ describe("FM-1 enforce conversion over neutral (cash the midgame kill window)", 
     }
   });
 });
+
+describe("Economy bootstrap lever (PROXYWAR_TUNE_ECONOMY_BOOTSTRAP)", () => {
+  const FLAG = "PROXYWAR_TUNE_ECONOMY_BOOTSTRAP";
+  let saved: string | undefined;
+  beforeEach(() => {
+    saved = process.env[FLAG];
+  });
+  afterEach(() => {
+    if (saved === undefined) {
+      delete process.env[FLAG];
+    } else {
+      process.env[FLAG] = saved;
+    }
+  });
+
+  // A large, safe, economy-less position — the verified ab-ffa4p-arsenal-r1 state:
+  // ~12k tiles, gold banked past the 125k first-City cost, no City, NOT under attack.
+  const noCityObservation = (): AgentObservation => ({
+    ...activeObservation("expand_territory"),
+    ownState: {
+      playerID: "agent-1",
+      clientID: null,
+      smallID: 1,
+      name: "Planner Agent",
+      type: PlayerType.Human,
+      isAlive: true,
+      isDisconnected: false,
+      isTraitor: false,
+      hasSpawned: true,
+      troops: 500_000,
+      maxTroops: 800_000,
+      troopRatio: 0.6,
+      gold: "200000",
+      tilesOwned: 12_000,
+      tileShare: 0.3,
+      borderTiles: 100,
+      outgoingAttacks: 0,
+      incomingAttacks: 0,
+      outgoingAllianceRequests: 0,
+      incomingAllianceRequests: 0,
+    },
+  });
+  const defensePostAction = (): LegalAction => ({
+    id: "build:Defense Post:200",
+    kind: "build",
+    label: "Build Defense Post",
+    intent: { type: "build_unit", unit: UnitType.DefensePost, tile: 200 },
+    risk: { level: "low", score: 0.2 },
+    metadata: { role: "defensive", unit: "Defense Post" },
+  });
+  const cityAction = (): LegalAction => ({
+    id: "build:City:100",
+    kind: "build",
+    label: "Build City",
+    intent: { type: "build_unit", unit: UnitType.City, tile: 100 },
+    risk: { level: "medium", score: 0.3 },
+    metadata: { role: "economic", unit: "City" },
+  });
+  const expandAction = (): LegalAction => ({
+    id: "expand:terra-nullius:10",
+    kind: "attack",
+    label: "Expand",
+    intent: { type: "attack", targetID: null, troops: 100 },
+    risk: { level: "low", score: 0.1 },
+    metadata: { expansion: true },
+  });
+  const decide = async (
+    observation: AgentObservation,
+    legalActions: LegalAction[],
+  ) => {
+    const planned = await new RuleAgentPlanner("aggressive").plan(
+      { observation, legalActions },
+      null,
+    );
+    return new FrontierPolicyExecutor("aggressive").decide(
+      { observation, legalActions },
+      planned.plan,
+    );
+  };
+
+  it("ON: with no City and no incoming attack, builds the first City to bootstrap the economy", async () => {
+    process.env[FLAG] = "1";
+    const decision = await decide(noCityObservation(), [
+      expandAction(),
+      cityAction(),
+      defensePostAction(),
+      hold(),
+    ]);
+    expect(decision.actionID).toBe("build:City:100");
+  });
+
+  it("ON: with no City affordable yet, does not drain gold on a precautionary Defense Post (banks for the City)", async () => {
+    process.env[FLAG] = "1";
+    // City not offered (not yet affordable); only a precautionary Defense Post + expand.
+    const decision = await decide(noCityObservation(), [
+      expandAction(),
+      defensePostAction(),
+      hold(),
+    ]);
+    expect(decision.actionID).not.toBe("build:Defense Post:200");
+  });
+
+  it("OFF (default) vs ON: the lever is the cause — OFF expands, ON builds the first City", async () => {
+    const actions = (): LegalAction[] => [
+      expandAction(),
+      cityAction(),
+      defensePostAction(),
+      hold(),
+    ];
+    delete process.env[FLAG];
+    const offDecision = await decide(noCityObservation(), actions());
+    process.env[FLAG] = "1";
+    const onDecision = await decide(noCityObservation(), actions());
+    delete process.env[FLAG];
+    // Shipped behavior (OFF) does NOT force the first City; the lever (ON) does.
+    expect(offDecision.actionID).not.toBe("build:City:100");
+    expect(onDecision.actionID).toBe("build:City:100");
+  });
+});

@@ -61,6 +61,23 @@ export function directiveBuildEnabled(): boolean {
 }
 
 /**
+ * Economy-bootstrap behavior (`PROXYWAR_TUNE_ECONOMY_BOOTSTRAP`, A/B arms set
+ * "0"/"1"). DEFAULT OFF. Fixes the verified `ab-ffa4p-arsenal-r1` failure: the agent
+ * expands well (~46k tiles) but never banks its first City's 125k gold cost — it
+ * spends gold on precautionary Defense Posts (boats are gold-free, so Defense Posts
+ * are the only discretionary gold sink), so City/Factory/Port and the whole
+ * infra/advanced-warfare tree stay permanently unaffordable (offered 0/211). When ON
+ * and the agent has NO City and is NOT under attack, the frontier scorer penalizes
+ * precautionary Defense Posts (so gold banks toward the City) and strongly prefers
+ * the first City once it becomes affordable+offered. Tightly gated (pre-first-City +
+ * not-under-attack) so normal defensive play is untouched; ships inert and is measured
+ * on a watched-game arm before becoming default.
+ */
+export function economyBootstrapEnabled(): boolean {
+  return tunedNumber("ECONOMY_BOOTSTRAP", 0) >= 1;
+}
+
+/**
  * FM-1 fix flag — "cash the midgame kill window." Reads the EXACT env var
  * `PROXYWAR_TUNE_ENFORCE_CONVERSION` (A/B arms set "0"/"1" on the same build).
  * Default ON (it is a competitiveness fix). When ON, the action ranking clamps

@@ -19,6 +19,7 @@ import {
   directiveBuildEnabled,
   directiveCommitmentEnabled,
   directiveDiplomacyEnabled,
+  economyBootstrapEnabled,
   enforceConversionOverNeutralEnabled,
   tunedNumber,
 } from "./AgentTunables";
@@ -1977,6 +1978,43 @@ function buildDirectiveCandidate(
 }
 
 /**
+ * Economy-bootstrap first-City selector (`PROXYWAR_TUNE_ECONOMY_BOOTSTRAP`, default
+ * OFF). Verified fix for ab-ffa4p-arsenal-r1: the agent expands well but never starts
+ * an economy because the neutral-expansion selectors outrank a (merely scored) City
+ * build, so the first City is never selected even when affordable. When ON, the agent
+ * has NO City, and is NOT under attack, this forces the offered first-City build the
+ * moment it is affordable — pre-empting the neutral-expansion/attack/banking selectors
+ * below it (survival, an explicit kill commitment, a bound alliance, and a bound build
+ * directive all sit ABOVE it and still win). Banking toward the City's gold cost is
+ * handled by the paired Defense-Post penalty in scoreFrontierAction. No-op (undefined)
+ * when the flag is off, the agent already has a City, it is under attack, or no City
+ * build is offered (not yet affordable / not placeable).
+ */
+function economyBootstrapCityCandidate(
+  input: AgentBrainInput,
+  scored: readonly FrontierRankedAction[],
+): FrontierRankedAction | undefined {
+  if (!economyBootstrapEnabled()) {
+    return undefined;
+  }
+  const observation = input.observation;
+  if (ownUnitCount(observation, UnitType.City) !== 0) {
+    return undefined;
+  }
+  const incomingCount =
+    observation.combat.incomingAttackPlayerIDs.length +
+    (observation.combat.incomingAttacks?.length ?? 0);
+  if (incomingCount !== 0) {
+    return undefined;
+  }
+  return scored.find(
+    (candidate) =>
+      candidate.action.kind === "build" &&
+      metadataString(candidate.action, "unit") === UnitType.City,
+  );
+}
+
+/**
  * Outcome-level commitment audit (agentic-share v2). Measures what was actually
  * SELECTED against what the commitment required — deliberately independent of the
  * enforcement code paths, so the metric cannot be fooled by enforcement bugs:
@@ -2229,6 +2267,17 @@ function selectFrontierActionBatch(input: {
   );
   if (behindAndFallingStrike !== undefined) {
     return [behindAndFallingStrike];
+  }
+  // Economy bootstrap (PROXYWAR_TUNE_ECONOMY_BOOTSTRAP, default OFF): build the first
+  // City the moment it is affordable, pre-empting the neutral-expansion / political /
+  // banking selectors below. It sits BELOW the default-ON behind-and-falling escape
+  // strike on purpose — a losing agent fights (or trades) rather than banks a City —
+  // and below survival / commitment / alliance / build-directive, which all still win.
+  // Single-action batch: the first City IS this cycle's decision. No-op when off, when
+  // the agent already has a City, when under attack, or when no City build is offered.
+  const economyBootstrapCity = economyBootstrapCityCandidate(input.input, scored);
+  if (economyBootstrapCity !== undefined) {
+    return [economyBootstrapCity];
   }
   const hardNationOpeningForceExpansion = directSelectionCandidate(
     hardNationOpeningForceExpansionCandidate(input.input, scored),
@@ -15698,6 +15747,27 @@ function scoreFrontierAction(input: {
         repairScore.penaltyReason ?? "",
       );
     }
+  }
+
+  // Economy bootstrap banking (PROXYWAR_TUNE_ECONOMY_BOOTSTRAP, default OFF). Verified
+  // fix for ab-ffa4p-arsenal-r1: the agent expands to ~46k tiles but never banks its
+  // first City's 125k gold cost — it spends gold on precautionary Defense Posts (boats
+  // are gold-free, so Defense Posts are the only discretionary gold sink), so the whole
+  // economy->infra->advanced-warfare tree stays unaffordable (offered 0/211). Gated to
+  // pre-first-City AND not-under-attack so reactive defense is untouched: suppress
+  // precautionary Defense Posts so gold banks toward the City. Building the first City
+  // once it is affordable is forced UPSTREAM by economyBootstrapCityCandidate (it
+  // pre-empts the neutral-expansion selectors that otherwise outrank a scored build).
+  if (
+    economyBootstrapEnabled() &&
+    incomingCount === 0 &&
+    isDefensePostAction(action) &&
+    ownUnitCount(observation, UnitType.City) === 0
+  ) {
+    penalize(
+      320,
+      "economy bootstrap: bank gold for the first City instead of precautionary defense",
+    );
   }
 
   if (communicationSignal !== null) {
