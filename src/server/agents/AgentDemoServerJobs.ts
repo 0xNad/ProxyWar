@@ -371,6 +371,14 @@ export function buildAgentDemoJobCommand(
                 ),
               }
             : {}),
+          // Sponsored beta games run the agent thread's reviewer-passed economy
+          // tunables ON so a player's "economy" lean actually banks gold + builds
+          // (City→Factory) instead of bleeding it on Defense Posts, and so a bound
+          // buildDirective is honored end-to-end. Both ship default-OFF globally;
+          // this scopes them to the openrouter beta path only (the agent thread's
+          // A/B harness in outputs/ is a separate code path, unaffected).
+          PROXYWAR_TUNE_ECONOMY_BOOTSTRAP: "1",
+          PROXYWAR_TUNE_DIRECTIVE_BUILD: "1",
           // Sponsored tester games (quick-start + lobby) must COMPLETE and surface
           // a replay even when agents legitimately pick "hold" (the harness counts
           // a hold as a non-clean fallback). The strict clean-run gate is for
