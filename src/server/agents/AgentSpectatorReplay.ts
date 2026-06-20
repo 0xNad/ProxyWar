@@ -659,10 +659,6 @@ function spectatorHtml(replay: AgentSpectatorReplay): string {
         <div id="result"></div>
       </section>
       <section class="panel">
-        <h2>Story</h2>
-        <div id="story"></div>
-      </section>
-      <section class="panel">
         <h2>Agents</h2>
         <div id="roster" class="roster"></div>
       </section>
@@ -741,23 +737,10 @@ function spectatorHtml(replay: AgentSpectatorReplay): string {
           '<span class="muted">' + Number(p.tilesOwned||0).toLocaleString() + ' tiles</span></div>';
       }).join("");
     })();
-    // Story: the per-run drama-report.json (alliances, betrayals, eliminations) is
-    // already computed + served statically under /runs/<id>/. Surface it as the recap.
-    fetch('/runs/' + encodeURIComponent(replay.runID) + '/drama-report.json')
-      .then(function(r){ return r.ok ? r.json() : null; })
-      .then(function(d){
-        var el = document.getElementById("story");
-        if (!el) return;
-        if (!d) { el.innerHTML = '<p class="muted">No story recorded for this match.</p>'; return; }
-        var summary = [(d.allianceFormedCount||0)+' alliances', (d.allianceBrokenCount||0)+' broken', (d.betrayalCount||0)+' betrayals', (d.eliminationCount||0)+' eliminations'].join(' · ');
-        var moments = (d.topMoments||[]).slice().sort(function(a,b){ return (a.turnNumber||0)-(b.turnNumber||0); }).slice(0,10);
-        function tone(t){ return t==='betrayal' ? '#e06c75' : (t==='alliance'||t==='cooperation' ? '#37d39b' : '#aeb8c8'); }
-        el.innerHTML = '<p class="muted">' + escapeHtml(summary) + (d.dramaGrade ? ' · ' + escapeHtml(d.dramaGrade) : '') + '</p>' +
-          (moments.length
-            ? moments.map(function(m){ return '<div style="padding:3px 0;color:' + tone(m.tone) + '"><span class="muted">turn ' + (m.turnNumber||0) + '</span> ' + escapeHtml(m.message || ((m.actor||'?')+' '+(m.kind||''))) + '</div>'; }).join("")
-            : '<p class="muted">Quiet match — no standout moments.</p>');
-      })
-      .catch(function(){ var el=document.getElementById("story"); if(el) el.innerHTML='<p class="muted">Story unavailable.</p>'; });
+    // NOTE: no Story panel / drama-report fetch here — this spectator viewer is a static,
+    // self-contained artifact that must open no socket and issue no fetch (see the test +
+    // the "opens no socket" note above). The drama story lives on the /play result card,
+    // which is served (with its data) by the demo/beta server.
     followAgentSelect.innerHTML = '<option value="">Follow all agents</option>' + replay.roster.map((agent) => '<option value="' + escapeHtml(agent.agentID) + '">' + escapeHtml(agent.username) + '</option>').join("");
     followAgentSelect.addEventListener("change", () => {
       followedAgentID = followAgentSelect.value;
