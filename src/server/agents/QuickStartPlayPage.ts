@@ -188,6 +188,12 @@ export function renderQuickStartPlayHtml(
 
   function poll(lobbyId){
     fetch('/api/lobby/' + encodeURIComponent(lobbyId)).then(function(r){ return r.json(); }).then(function(j){
+      if (j && j.ok === false) {
+        // 404 "unknown lobby" — the in-memory lobby is gone (e.g. the server restarted
+        // mid-wait). Stop polling instead of spinning forever on a dead id.
+        setStatus('This lobby expired (the server may have restarted). Start a new match.', 'err');
+        playBtn.disabled = false; playBtn.textContent = '▶ Find a 4-player match'; return;
+      }
       if (j.status === 'completed') {
         setStatus(j.replayUrl ? 'Match complete.' : 'Match finished but produced no replay.', j.replayUrl ? 'done' : 'err');
         renderResultCard(j.result, j.replayUrl);
