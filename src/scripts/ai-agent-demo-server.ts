@@ -982,6 +982,8 @@ interface LobbyMember {
   token: string;
   agentName: string;
   strategySpec: PlayerStrategySpec;
+  /** True for an auto-filled house agent (not a human joiner). */
+  isHouse?: boolean;
 }
 interface ProxyWarLobby {
   id: string;
@@ -989,9 +991,48 @@ interface ProxyWarLobby {
   status: LobbyStatus;
   jobID: string | null;
   error: string | null;
+  /** Grace-window timer: when the first human joins we wait briefly for others,
+   *  then auto-fill remaining seats with house agents and start. */
+  startTimer?: ReturnType<typeof setTimeout> | null;
   /** Cached {standings, story} read once from the run's drama-report.json on completion. */
   result?: Record<string, unknown> | null;
 }
+
+// Empty lobby seats are filled with real LLM house agents (planner-executor brain +
+// a fixed strategySpec — NEVER deterministic fillers) so a match starts promptly
+// instead of waiting for four humans. HOUSE_CHAMPION_NAME is the fixed benchmark to
+// beat; the /play result card detects it by this exact name (keep them in sync).
+const HOUSE_CHAMPION_NAME = "Proxy Champion";
+const LOBBY_GRACE_MS = Number(process.env.PROXYWAR_LOBBY_GRACE_MS ?? "25000");
+const HOUSE_AGENTS: { agentName: string; strategySpec: PlayerStrategySpec }[] = [
+  {
+    agentName: HOUSE_CHAMPION_NAME,
+    strategySpec: {
+      posture: "opportunistic",
+      objectiveBias: "expand",
+      doctrine:
+        "Expand hard into open land early to out-produce everyone. Make a non-aggression alliance with the nearest strong rival to avoid a two-front war, then strike once you clearly outproduce a neighbor. Never run more than two wars at once; consolidate, then press your strongest advantage to eliminate the weakest reachable rival.",
+    },
+  },
+  {
+    agentName: "Ironwall",
+    strategySpec: {
+      posture: "defensive",
+      objectiveBias: "economy",
+      doctrine:
+        "Build a dominant economy — cities first, then factories and ports. Fortify borders and only fight when attacked or when a neighbor is clearly weaker on your border. Win on production and late-game troop mass.",
+    },
+  },
+  {
+    agentName: "Coalition",
+    strategySpec: {
+      posture: "diplomatic",
+      objectiveBias: "diplomacy",
+      doctrine:
+        "Ally widely and early, back allies with gold, and turn the lobby against whoever is in the lead. Avoid first strikes; let rivals bleed each other, then take the spoils.",
+    },
+  },
+];
 let formingLobby: ProxyWarLobby | null = null;
 const lobbiesById = new Map<string, ProxyWarLobby>();
 
@@ -1023,6 +1064,22 @@ function lobbyProfileForSpec(
 
 async function startLobbyMatch(lobby: ProxyWarLobby): Promise<void> {
   lobby.status = "starting";
+  if (lobby.startTimer) {
+    clearTimeout(lobby.startTimer);
+    lobby.startTimer = null;
+  }
+  // Fill any empty seats with real LLM house agents (Champion first) so the match
+  // runs without waiting for four humans. House agents are planner-executor LLM
+  // agents with fixed strategySpecs — not deterministic fillers.
+  for (let i = 0; lobby.members.length < LOBBY_SIZE; i++) {
+    const house = HOUSE_AGENTS[i % HOUSE_AGENTS.length];
+    lobby.members.push({
+      token: randomUUID(),
+      agentName: house.agentName,
+      strategySpec: house.strategySpec,
+      isHouse: true,
+    });
+  }
   try {
     const dir = path.join(process.cwd(), "artifacts", "lobby", lobby.id);
     await fs.mkdir(dir, { recursive: true });
@@ -1121,8 +1178,22 @@ app.post("/api/lobby/join", (req, res) => {
     status: sealed ? "starting" : "waiting",
   });
   if (sealed) {
+    if (lobby.startTimer) clearTimeout(lobby.startTimer);
     formingLobby = null; // the next joiner forms a fresh lobby
     void startLobbyMatch(lobby);
+  } else if (lobby.startTimer == null) {
+    // First human in a fresh lobby: open a grace window for other humans to join,
+    // then auto-fill the remaining seats with house agents and start. Avoids the
+    // cold-start trap where a match never begins because four humans never queue.
+    lobby.startTimer = setTimeout(() => {
+      if (lobby.status !== "waiting" || lobby.members.length === 0) {
+        return;
+      }
+      if (formingLobby === lobby) {
+        formingLobby = null;
+      }
+      void startLobbyMatch(lobby);
+    }, LOBBY_GRACE_MS);
   }
 });
 

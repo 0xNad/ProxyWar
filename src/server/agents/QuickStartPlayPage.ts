@@ -91,6 +91,8 @@ export function renderQuickStartPlayHtml(
   .tune-note { color:var(--muted); font-size:11.5px; padding:0 14px 13px; margin:0; }
   .record { text-align:center; margin-top:11px; font-size:13px; color:var(--muted); }
   .record b { color:var(--ok); font-weight:800; }
+  .champ { text-align:center; font-size:15px; font-weight:700; color:var(--muted); margin:0 0 14px; }
+  .champ.win { color:var(--ok); }
 </style>
 </head>
 <body>
@@ -181,6 +183,7 @@ export function renderQuickStartPlayHtml(
   var statusEl = document.getElementById('status');
   var playBtn = document.getElementById('play');
   var myName = '';
+  var CHAMPION_NAME = 'Proxy Champion';
   function setStatus(html, cls){ statusEl.className = 'status' + (cls?(' '+cls):''); statusEl.innerHTML = html; }
 
   function poll(lobbyId){
@@ -236,11 +239,24 @@ export function renderQuickStartPlayHtml(
   });
 
   function esc(s){ var d = document.createElement('div'); d.textContent = String(s); return d.innerHTML; }
+  function rankOf(standings, name){
+    var t = String(name||'').trim().toLowerCase();
+    if (!t || !standings) return 0;
+    for (var i=0;i<standings.length;i++){ if (String(standings[i].name||'').trim().toLowerCase() === t) return i+1; }
+    return 0;
+  }
   function renderResultCard(result, replayUrl){
     var box = document.getElementById('result-card');
     if (!box) return;
     var parts = [];
     if (result && result.standings && result.standings.length){
+      var champRank = rankOf(result.standings, CHAMPION_NAME);
+      var youRank = rankOf(result.standings, myName);
+      if (champRank && youRank && youRank !== champRank){
+        parts.push(youRank < champRank
+          ? '<div class="champ win">🏆 You beat the Champion!</div>'
+          : '<div class="champ">The Champion held the line — rematch?</div>');
+      }
       parts.push('<label style="margin-bottom:10px">Final standing</label>');
       parts.push(result.standings.map(function(s,i){
         return '<div class="match"><span class="who">' + (i===0?'🏆 ':(i+1)+'. ') + esc(s.name||'agent') + (s.alive===false?' <span class="muted">(out)</span>':'') + '</span><span class="st">' + Number(s.tiles||0).toLocaleString() + ' tiles</span></div>';
@@ -292,8 +308,7 @@ export function renderQuickStartPlayHtml(
   }
   function recordFinish(standings, name){
     if (!standings || !standings.length || !name) return;
-    var me = String(name).trim().toLowerCase(); var rank = 0;
-    for (var i=0;i<standings.length;i++){ if (String(standings[i].name||'').trim().toLowerCase() === me){ rank = i+1; break; } }
+    var rank = rankOf(standings, name);
     if (!rank) return;
     var r = loadRecord();
     r.played = (r.played||0) + 1;
