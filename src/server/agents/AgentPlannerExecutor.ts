@@ -1286,12 +1286,39 @@ export class FrontierPolicyExecutor implements AgentExecutor {
       profile: this.profile,
     });
 
-    const selectedBatch = selectFrontierActionBatch({
+    let selectedBatch = selectFrontierActionBatch({
       input,
       plan,
       settings,
       scored,
     });
+    // Economy bootstrap (PROXYWAR_TUNE_ECONOMY_BOOTSTRAP, default OFF): Defense Posts are
+    // woven through several selection paths (scorer, urgent-fortify candidate, multi-
+    // action batch filler), so even with those guarded a precautionary Defense Post can
+    // still ride a batch and drain the gold the first City needs (the agent peaked at
+    // 123,550 vs a 125k City in run ab-ffa4p-ecoboot-r1). While the agent is economy-less
+    // and NOT under attack, strip Defense Posts at this single batch choke point so gold
+    // banks toward the City (which economyBootstrapCityCandidate then builds once it is
+    // affordable). Falls back to the best non-Defense offered action.
+    if (
+      economyBootstrapEnabled() &&
+      ownUnitCount(input.observation, UnitType.City) === 0 &&
+      !incomingHomePressure(input.observation)
+    ) {
+      const stripped = selectedBatch.filter(
+        (candidate) => !isDefensePostAction(candidate.action),
+      );
+      if (stripped.length > 0) {
+        selectedBatch = stripped;
+      } else {
+        const alternative = scored.find(
+          (candidate) => !isDefensePostAction(candidate.action),
+        );
+        if (alternative !== undefined) {
+          selectedBatch = [alternative];
+        }
+      }
+    }
     const selected = selectedBatch[0] ?? scored[0];
     const profileRepairRerank = profileRepairRerankAudit(scored, selectedBatch);
     const topContributions = selectedBatch
