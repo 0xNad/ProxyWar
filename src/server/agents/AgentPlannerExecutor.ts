@@ -2021,16 +2021,14 @@ function buildDirectiveCandidate(
  * dependency), not just the first City, so the economy actually compounds toward the
  * income needed for the Silo/Port → advanced-warfare tree.
  */
-// The bootstrap cascade, in order: an income engine (City, Factory) then the cheapest
-// advanced unit (Port → Warship). The natural economy already reaches a Port on Pangaea
-// (~turn 3975); forcing the next missing step pushes the agent through to an actual
-// Warship — the realistic emergent advanced-warfare target. Banking (Defense-Post
-// suppression while safe) continues until the whole cascade is owned.
+// The bootstrap cascade, in order: an income engine (City, then Factory). Probe
+// ab-couplelong-warship-r1 confirmed extending this to Port→Warship does NOT reach an
+// advanced unit — the cascade re-banks ~1800 turns per 125k structure, so a Warship
+// would land ~turn 6500+, past where games resolve (~5400). Kept to the validated
+// income engine; emergent advanced warfare is a long-horizon structural problem.
 const ECONOMY_BOOTSTRAP_CASCADE: readonly UnitType[] = [
   UnitType.City,
   UnitType.Factory,
-  UnitType.Port,
-  UnitType.Warship,
 ];
 
 function economyBootstrapCascadeIncomplete(
