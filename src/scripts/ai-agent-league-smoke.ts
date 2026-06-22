@@ -88,6 +88,7 @@ import { createOpenRouterLlmProviderFromEnv } from "../server/agents/OpenRouterL
 import { loadPlayerStrategySpecFromEnv } from "../server/agents/PlayerStrategySpec";
 import type { PlayerStrategySpec } from "../server/agents/PlayerStrategySpec";
 import { RuleAgentBrain } from "../server/agents/RuleAgentBrain";
+import { StarterBotAgentBrain } from "../server/agents/StarterBotAgentBrain";
 import { GameServer } from "../server/GameServer";
 
 const log = winston.createLogger({
@@ -1093,6 +1094,12 @@ function createBrainForManifestOrMode(
   if (brainMode === "rule") {
     return new RuleAgentBrain(spec.profile);
   }
+  // starter-bot: the faithful in-process port of the Coworld starter policy — the
+  // held-out opponent class the eval must measure Keystone against (NOT OpenFront's
+  // built-in nation AI). Only ever selects an offered LegalAction.id (same contract).
+  if (brainMode === "starter-bot") {
+    return new StarterBotAgentBrain();
+  }
   // Player strategy spec: per-seat from the manifest, else a single spec from env
   // (AI_LEAGUE_PLAYER_STRATEGY_SPEC) for the sponsored single-seat path.
   const playerStrategySpec =
@@ -1374,6 +1381,7 @@ function assertActionDiversitySmokeSucceeded(
 type SmokeScenario = "league" | "attack" | "actions";
 type SmokeBrainMode =
   | "rule"
+  | "starter-bot"
   | "mock-llm"
   | "real-llm"
   | "codex-cli"
@@ -1400,6 +1408,10 @@ function defaultRunID(
 function artifactBrainMode(brainMode: SmokeBrainMode): AgentBrainType {
   if (brainMode === "action-claude-cli" || brainMode === "openrouter") {
     return "llm";
+  }
+  if (brainMode === "starter-bot") {
+    // StarterBotAgentBrain.brainType === "rule" (a deterministic rule policy).
+    return "rule";
   }
   return brainMode === "planner" ||
     brainMode === "planner-codex-cli" ||
@@ -1551,7 +1563,11 @@ function assertRequiredExternalBrainSucceeded(input: {
           input.brainMode === "action-claude-cli" ||
             input.brainMode === "openrouter"
           ? "codex-cli"
-          : input.brainMode,
+          : // starter-bot is a deterministic rule policy (no external calls) — same
+            // cleanliness class as "rule".
+            input.brainMode === "starter-bot"
+            ? "rule"
+            : input.brainMode,
     records: input.records,
   });
 
