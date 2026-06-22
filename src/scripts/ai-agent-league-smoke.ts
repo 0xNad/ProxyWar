@@ -120,6 +120,15 @@ async function run() {
   const args = process.argv.slice(2);
   const scenario = scenarioFromArgs(args);
   const brainMode = brainModeFromArgs(args, scenario);
+  // --opponent-brain=<mode>: seat 0 (the subject) uses --brain; seats 1+ use this.
+  // Enables the realigned eval — Keystone (seat 0) vs N starter-bot opponents — the
+  // held-out Coworld field, instead of a uniform brain across all seats.
+  const opponentBrainArg = args.find((arg) =>
+    arg.startsWith("--opponent-brain="),
+  );
+  const opponentBrainMode: SmokeBrainMode | null = opponentBrainArg
+    ? (opponentBrainArg.slice("--opponent-brain=".length) as SmokeBrainMode)
+    : null;
   const runnerMode = runnerModeFromArgs(args);
   const stepLockedConfig = stepLockedConfigFromArgs(args);
   const externalAgentMaxDecisionMs = positiveIntegerArg(
@@ -279,28 +288,46 @@ async function run() {
       runID,
       varySpawns: args.includes("--vary-spawns"),
     });
+  // Provider for a given brain mode (per-mode, so opponent seats can differ from
+  // seat 0). EXACTLY replicates the prior inline selection when called with brainMode,
+  // so existing single-brain runs are unchanged; rule/starter-bot/mock-llm/planner
+  // ignore the returned provider.
+  const providerForBrainMode = (
+    mode: SmokeBrainMode,
+    index: number,
+  ): LlmProvider | null => {
+    if (mode === "codex-cli" || mode === "planner-codex-cli") {
+      return codexCliProvider;
+    }
+    if (mode === "planner-claude-cli" || mode === "action-claude-cli") {
+      return promoModels ? claudeProviderForIndex(index) : claudeCliProvider;
+    }
+    if (mode === "openrouter" || mode === "planner-openrouter") {
+      return openRouterProvider;
+    }
+    return realLlmProvider;
+  };
   const participants = createAgentParticipants(specs, log, {
     brainFactory:
-      brainMode === "rule" && !hasManifestBrainOverride
+      brainMode === "rule" &&
+      !hasManifestBrainOverride &&
+      opponentBrainMode === null
         ? undefined
-        : (spec, index) =>
-            createBrainForManifestOrMode(
+        : (spec, index) => {
+            const mode =
+              opponentBrainMode !== null && index > 0
+                ? opponentBrainMode
+                : brainMode;
+            return createBrainForManifestOrMode(
               index < manifestCount ? manifests?.[index] : undefined,
               spec,
               scenario,
-              brainMode,
-              brainMode === "codex-cli" || brainMode === "planner-codex-cli"
-                ? codexCliProvider
-                : usesClaudeCli
-                  ? promoModels
-                    ? claudeProviderForIndex(index)
-                    : claudeCliProvider
-                  : usesOpenRouter
-                    ? openRouterProvider
-                    : realLlmProvider,
+              mode,
+              providerForBrainMode(mode, index),
               decisionTimeoutMs,
               externalAgentMaxDecisionMs,
-            ),
+            );
+          },
   });
   const roster = agentRunRoster(participants);
   const spectatorSnapshots: AgentSpectatorSnapshot[] = [];
