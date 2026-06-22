@@ -7233,15 +7233,28 @@ function frontierConversionTimingAttackCandidate(
         input.observation.memory.recentExpansionCount >= 3 &&
         (conversion.bestExecutorReadyRelativeTroopRatio ?? 0) >= 1.8 &&
         conversion.homeDanger === "low";
-      const desiredCommitment = decisiveConversionWindow
-        ? 0.25
-        : leaderBlockedSideConversion && ownTiles >= 20_000
+      // Endgame-conversion fix (verified ab-ffaeco-* runs: a dominant agent reached ~9.6:1 troop
+      // ratio vs a rival yet this conversion-timing selector kept targeting <=0.25, so the agent
+      // plateaued at ~57-62% share with zero eliminations). Every desiredCommitment branch below
+      // caps at 0.25 — a reserve-safe pulse that trims a few border tiles and expires before a
+      // defended core regrows. When we are DOMINANT (>=35k tiles, the isDominantConversionMode
+      // threshold) AND strongly overmatch the conversion target (>=2.2:1), only a decisive
+      // commitment outpaces core regrowth, so escalate to the largest rung here. The dominance gate
+      // keeps early-game conversions (small land) on their reserve-safe 0.1/0.18 probes — without it
+      // a local 2.2:1 edge would wrongly escalate mid-expansion.
+      const stronglyOvermatched =
+        Math.max(aRelative, bRelative) >= 2.2 && ownTiles >= 35_000;
+      const desiredCommitment = stronglyOvermatched
+        ? 0.4
+        : decisiveConversionWindow
           ? 0.25
-          : leaderBlockedSideConversion
-            ? 0.1
-            : ownTiles > 0 && ownTiles < 20_000
+          : leaderBlockedSideConversion && ownTiles >= 20_000
+            ? 0.25
+            : leaderBlockedSideConversion
               ? 0.1
-              : 0.18;
+              : ownTiles > 0 && ownTiles < 20_000
+                ? 0.1
+                : 0.18;
       return (
         (leaderBlockedSideConversion
           ? Math.abs(aCommitment - desiredCommitment) -

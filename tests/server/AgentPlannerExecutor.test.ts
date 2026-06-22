@@ -18017,3 +18017,68 @@ describe("Economy bootstrap lever (PROXYWAR_TUNE_ECONOMY_BOOTSTRAP)", () => {
   });
 
 });
+
+describe("Dominant endgame conversion: overmatch commits decisively", () => {
+  const decide = async (
+    observation: AgentObservation,
+    legalActions: LegalAction[],
+  ) => {
+    const planned = await new RuleAgentPlanner("aggressive").plan(
+      { observation, legalActions },
+      null,
+    );
+    return new FrontierPolicyExecutor("aggressive").decide(
+      { observation, legalActions },
+      planned.plan,
+    );
+  };
+
+  const dominantObservation = (chadRatio: number): AgentObservation => {
+    const base = closeLeaderConversionObservation();
+    return {
+      ...base,
+      ownState:
+        base.ownState === null
+          ? null
+          : { ...base.ownState, tileShare: 0.6, tilesOwned: 45_000 },
+      visiblePlayers: base.visiblePlayers.map((p) =>
+        p.playerID === "CHAD01" ? { ...p, relativeTroopRatio: chadRatio } : p,
+      ),
+    };
+  };
+
+  const attack = (pct: number, ratio: number): LegalAction => ({
+    id: `attack:CHAD01:${Math.round(pct * 100)}`,
+    kind: "attack",
+    label: `Attack CHAD01 ${Math.round(pct * 100)}%`,
+    intent: {
+      type: "attack",
+      targetID: "CHAD01",
+      troops: Math.round(560_000 * pct),
+    },
+    risk: { level: "medium", score: 0.4 },
+    metadata: {
+      targetID: "CHAD01",
+      troopPercentage: pct,
+      relativeTroopRatio: ratio,
+    },
+  });
+
+  it("strongly overmatched (>=2.2:1): prefers the decisive 0.40 attack over the reserve-safe 0.25 pulse", async () => {
+    const decision = await decide(dominantObservation(2.83), [
+      attack(0.25, 2.83),
+      attack(0.4, 2.83),
+      hold(),
+    ]);
+    expect(decision.actionID).toBe("attack:CHAD01:40");
+  });
+
+  it("only mildly ahead (<2.2:1): stays reserve-safe — does NOT pick the oversized 0.40 attack", async () => {
+    const decision = await decide(dominantObservation(1.5), [
+      attack(0.25, 1.5),
+      attack(0.4, 1.5),
+      hold(),
+    ]);
+    expect(decision.actionID).not.toBe("attack:CHAD01:40");
+  });
+});
