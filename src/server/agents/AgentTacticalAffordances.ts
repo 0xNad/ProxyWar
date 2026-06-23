@@ -22,6 +22,7 @@ import type {
   AgentObservation,
   AgentOpeningExpansionTempoAffordance,
   AgentPersonalityDiplomacyPressureAffordance,
+  AgentSurvivalAllianceAffordance,
   AgentTacticalAffordances,
   AgentTransportTroopBankingAffordance,
   LegalAction,
@@ -45,6 +46,58 @@ const TROOP_BANKING_MEDIUM_DANGER_RATIO = 0.1;
 const TROOP_BANKING_MAX_ACTIVE_BANK_RATIO = 0.8;
 const LATE_GAME_STRIKE_MIN_PRIORITY = 118;
 const PERSONALITY_DIPLOMACY_MIN_SCORE = 74;
+const SURVIVAL_ALLIANCE_MIN_TURN = 300; // post-spawn; the point is to ally EARLY, before falling behind
+
+function survivalAllianceAffordance(input: {
+  observation: AgentObservation;
+  legalActions?: LegalAction[];
+}): AgentSurvivalAllianceAffordance {
+  const { observation } = input;
+  const ownID = observation.ownState?.playerID ?? null;
+  const ownTileShare =
+    observation.ownState?.tileShare ?? observation.endgame?.ownTileShare ?? 0;
+  const rivals = observation.visiblePlayers.filter(
+    (player) => player.isAlive && player.playerID !== ownID,
+  );
+  const hasAlliance = observation.visiblePlayers.some(
+    (player) => player.isAllied,
+  );
+  const isLeader = ownID !== null && observation.endgame?.leaderID === ownID;
+  const allyCandidates = rivals.filter(
+    (player) => player.canRequestAlliance && !player.isAllied,
+  );
+  // Ally the STRONGEST reachable rival: it's the biggest threat (neutralize it / avoid being its
+  // target) and the most useful shield while the others grind each other down.
+  const bestAlly = [...allyCandidates].sort(
+    (a, b) => (b.tileShare ?? 0) - (a.tileShare ?? 0),
+  )[0];
+  const recentAllyAttempts = observation.recentDecisions.filter(
+    (decision) => decision.actionKind === "alliance_request",
+  ).length;
+  // EARLY survival alliance: in a multi-way FFA, before we've fallen behind, ally a strong rival so
+  // we are never the lone 1-vs-many target. Fires post-spawn when we have no alliance, are not the
+  // leader, and a strong rival is reachable. Backs off after a couple of unaccepted attempts.
+  const recommended =
+    observation.turnNumber >= SURVIVAL_ALLIANCE_MIN_TURN &&
+    rivals.length >= 2 &&
+    !hasAlliance &&
+    !isLeader &&
+    bestAlly !== undefined &&
+    recentAllyAttempts < 2;
+  return {
+    tacticID: "survival_alliance",
+    recommended,
+    turnNumber: observation.turnNumber,
+    ownTileShare,
+    aliveRivalCount: rivals.length,
+    hasAlliance,
+    bestAllyTargetID: bestAlly?.playerID ?? null,
+    bestAllyName: bestAlly?.name ?? null,
+    reason: recommended
+      ? `Multi-way FFA (${rivals.length} rivals), no alliance, not leading. Ally ${bestAlly.name} (strongest reachable rival) NOW — an early alliance keeps you off the 1-vs-many target list and lets the others grind each other down; betray decisively later when an ally weakens.`
+      : "",
+  };
+}
 
 export function buildAgentTacticalAffordances(input: {
   observation: AgentObservation;
@@ -59,6 +112,7 @@ export function buildAgentTacticalAffordances(input: {
   const lateGameStrikeTargeting = lateGameStrikeTargetingAffordance(input);
   const personalityDiplomacyPressure =
     personalityDiplomacyPressureAffordance(input);
+  const survivalAlliance = survivalAllianceAffordance(input);
   const notes: string[] = [];
   if (openingExpansionTempo.recommended) {
     notes.push(
@@ -100,6 +154,11 @@ export function buildAgentTacticalAffordances(input: {
       "personality_diplomacy_pressure is available; evaluator should watch whether profile-specific social pressure, alliance, support, or communication creates visible match story beats",
     );
   }
+  if (survivalAlliance.recommended) {
+    notes.push(
+      "survival_alliance is available; evaluator should watch whether the agent allies a strong rival EARLY (before falling behind) to avoid being ganged 1-vs-many, then betrays when an ally weakens",
+    );
+  }
   return {
     transportTroopBanking,
     openingExpansionTempo,
@@ -109,6 +168,7 @@ export function buildAgentTacticalAffordances(input: {
     navalControl,
     lateGameStrikeTargeting,
     personalityDiplomacyPressure,
+    survivalAlliance,
     notes,
   };
 }
