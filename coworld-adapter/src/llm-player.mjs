@@ -39,10 +39,14 @@ const MODEL_ID_CANDIDATES = [
   ...(process.env.PROXYWAR_LLM_MODEL_ID
     ? [process.env.PROXYWAR_LLM_MODEL_ID]
     : []),
+  // Confirmed enabled on the Softmax Bedrock account 2026-06-23 (us-east-1, us-west-2,
+  // us-east-2). Haiku MUST be the full date-suffixed inference-profile id — the bare
+  // "us.anthropic.claude-haiku-4-5" is not a valid inference-profile id and fails validation;
+  // sonnet-4-5 is the bare model id (us-west-2), not a us.-prefixed profile.
   "us.anthropic.claude-sonnet-4-6",
   "global.anthropic.claude-sonnet-4-6",
-  "us.anthropic.claude-haiku-4-5",
-  "us.anthropic.claude-sonnet-4-5-20250929-v1:0",
+  "us.anthropic.claude-haiku-4-5-20251001-v1:0",
+  "anthropic.claude-sonnet-4-5-20250929-v1:0",
 ];
 const MODEL_ID = MODEL_ID_CANDIDATES[0];
 
