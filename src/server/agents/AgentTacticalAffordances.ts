@@ -21,6 +21,7 @@ import type {
   AgentNavalControlAffordance,
   AgentObservation,
   AgentOpeningExpansionTempoAffordance,
+  AgentBackstabAllyAffordance,
   AgentPersonalityDiplomacyPressureAffordance,
   AgentSurvivalAllianceAffordance,
   AgentTacticalAffordances,
@@ -99,6 +100,48 @@ function survivalAllianceAffordance(input: {
   };
 }
 
+const BACKSTAB_MIN_TURN = 1500; // betray LATE -- after the alliance has done its job
+const BACKSTAB_MIN_RELATIVE_RATIO = 1.4; // overmatch the (now-weakened) ally before betraying
+
+function backstabAllyAffordance(input: {
+  observation: AgentObservation;
+  legalActions?: LegalAction[];
+}): AgentBackstabAllyAffordance {
+  const { observation } = input;
+  const ownID = observation.ownState?.playerID ?? null;
+  const ownTileShare =
+    observation.ownState?.tileShare ?? observation.endgame?.ownTileShare ?? 0;
+  // Current allies we now clearly overmatch -- the "weaker one" to backstab (betray late, decisively).
+  const overmatchedAllies = observation.visiblePlayers.filter(
+    (player) =>
+      player.isAllied &&
+      player.isAlive &&
+      player.playerID !== ownID &&
+      (player.relativeTroopRatio ?? 0) >= BACKSTAB_MIN_RELATIVE_RATIO,
+  );
+  // Betray the WEAKEST such ally (most takeable land, least retaliation).
+  const backstabTarget = [...overmatchedAllies].sort(
+    (a, b) => (a.tileShare ?? 0) - (b.tileShare ?? 0),
+  )[0];
+  const underAttack = observation.combat.incomingAttackPlayerIDs.length > 0;
+  const recommended =
+    observation.turnNumber >= BACKSTAB_MIN_TURN &&
+    backstabTarget !== undefined &&
+    ownTileShare >= 0.25 &&
+    !underAttack;
+  return {
+    tacticID: "backstab_ally",
+    recommended,
+    turnNumber: observation.turnNumber,
+    backstabTargetID: backstabTarget?.playerID ?? null,
+    backstabTargetName: backstabTarget?.name ?? null,
+    ownTileShare,
+    reason: recommended
+      ? `BACKSTAB ${backstabTarget.name}: you now overmatch your ally and you are established (${(ownTileShare * 100).toFixed(0)}% share). break_alliance and take their land -- this is the "betray late" payoff that converts a held alliance into a winning lead.`
+      : "",
+  };
+}
+
 export function buildAgentTacticalAffordances(input: {
   observation: AgentObservation;
   legalActions?: LegalAction[];
@@ -113,6 +156,7 @@ export function buildAgentTacticalAffordances(input: {
   const personalityDiplomacyPressure =
     personalityDiplomacyPressureAffordance(input);
   const survivalAlliance = survivalAllianceAffordance(input);
+  const backstabAlly = backstabAllyAffordance(input);
   const notes: string[] = [];
   if (openingExpansionTempo.recommended) {
     notes.push(
@@ -159,6 +203,11 @@ export function buildAgentTacticalAffordances(input: {
       "survival_alliance is available; evaluator should watch whether the agent allies a strong rival EARLY (before falling behind) to avoid being ganged 1-vs-many, then betrays when an ally weakens",
     );
   }
+  if (backstabAlly.recommended) {
+    notes.push(
+      "backstab_ally is available; evaluator should watch whether the agent breaks an alliance it now overmatches and takes the ally's land (the betray-late payoff)",
+    );
+  }
   return {
     transportTroopBanking,
     openingExpansionTempo,
@@ -169,6 +218,7 @@ export function buildAgentTacticalAffordances(input: {
     lateGameStrikeTargeting,
     personalityDiplomacyPressure,
     survivalAlliance,
+    backstabAlly,
     notes,
   };
 }

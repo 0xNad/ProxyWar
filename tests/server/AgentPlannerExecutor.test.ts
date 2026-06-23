@@ -18128,3 +18128,164 @@ describe("Dominant endgame conversion: overmatch commits decisively", () => {
     expect(decision.actionID).toBe("attack:CHAD01:40");
   });
 });
+
+describe("Betray late: deterministic backstab of an overmatched ally", () => {
+  const decide = async (
+    observation: AgentObservation,
+    legalActions: LegalAction[],
+  ) => {
+    const planned = await new RuleAgentPlanner("aggressive").plan(
+      { observation, legalActions },
+      null,
+    );
+    return new FrontierPolicyExecutor("aggressive").decide(
+      { observation, legalActions },
+      planned.plan,
+    );
+  };
+
+  // Established (60% share), late game (turn 1600), an overmatched ALLY (SIDE02 at
+  // 1.8:1), and NO attackable non-ally rival (so the dominant-elimination lock cannot
+  // pre-empt — the ally must be broken before it can be attacked). The `backstab_ally`
+  // affordance recommends breaking SIDE02; this is exactly the "betray late" window.
+  const backstabBase = (overrides?: {
+    sideAllied?: boolean;
+    sideRatio?: number;
+    incomingAttackPlayerIDs?: string[];
+    tileShare?: number;
+    turnNumber?: number;
+  }): AgentObservation => {
+    const base = closeLeaderConversionObservation();
+    const turnNumber = overrides?.turnNumber ?? 1_600;
+    const tileShare = overrides?.tileShare ?? 0.6;
+    const incomingAttackPlayerIDs = overrides?.incomingAttackPlayerIDs ?? [];
+    return {
+      ...base,
+      turnNumber,
+      tick: turnNumber,
+      ownState:
+        base.ownState === null
+          ? null
+          : { ...base.ownState, tileShare, tilesOwned: 45_000 },
+      visiblePlayers: base.visiblePlayers.map((p) =>
+        p.playerID === "SIDE02"
+          ? {
+              ...p,
+              isAllied: overrides?.sideAllied ?? true,
+              isFriendly: overrides?.sideAllied ?? true,
+              relation: Relation.Friendly,
+              canBreakAlliance: true,
+              canRequestAlliance: false,
+              relativeTroopRatio: overrides?.sideRatio ?? 1.8,
+            }
+          : p,
+      ),
+      combat: {
+        ...base.combat,
+        // No attackable non-ally rival: the ally is the only realistic target, and
+        // attacking it requires breaking the pact first. Keeps the dominant-elimination
+        // lock from firing so this test isolates the backstab leaf.
+        attackablePlayerIDs: [],
+        weakestAttackableTargetID: null,
+        strongestAttackableTargetID: null,
+        incomingAttackPlayerIDs,
+        incomingAttacks: incomingAttackPlayerIDs.map((id) => ({
+          attackID: `inc:${id}`,
+          targetID: id,
+          targetName: id,
+          troops: 250_000,
+          retreating: false,
+          sourceTile: null,
+          borderSize: 10,
+        })),
+      },
+    };
+  };
+
+  const withAffordances = (observation: AgentObservation): AgentObservation => ({
+    ...observation,
+    tacticalAffordances: buildAgentTacticalAffordances({ observation }),
+  });
+
+  const breakAlliance = (targetID: string): LegalAction => ({
+    id: `break_alliance:${targetID}`,
+    kind: "break_alliance",
+    label: `Break alliance with ${targetID}`,
+    intent: { type: "breakAlliance", recipient: targetID },
+    risk: { level: "high", score: 0.7 },
+    metadata: { targetID, action: "break" },
+  });
+
+  it("recommended + a legal break targets the overmatched ally: forces the break", async () => {
+    const observation = withAffordances(backstabBase());
+    expect(observation.tacticalAffordances?.backstabAlly?.recommended).toBe(
+      true,
+    );
+    expect(observation.tacticalAffordances?.backstabAlly?.backstabTargetID).toBe(
+      "SIDE02",
+    );
+    const decision = await decide(observation, [
+      breakAlliance("SIDE02"),
+      hold(),
+    ]);
+    expect(decision.actionID).toBe("break_alliance:SIDE02");
+  });
+
+  it("NOT recommended (ally not overmatched): does not break the alliance", async () => {
+    // Ally at 1.1:1 is below the 1.4x overmatch gate -> affordance stays off.
+    const observation = withAffordances(backstabBase({ sideRatio: 1.1 }));
+    expect(observation.tacticalAffordances?.backstabAlly?.recommended).toBe(
+      false,
+    );
+    const decision = await decide(observation, [
+      breakAlliance("SIDE02"),
+      hold(),
+    ]);
+    expect(decision.actionID).not.toBe("break_alliance:SIDE02");
+  });
+
+  it("NOT recommended (no ally to betray): does not break the alliance", async () => {
+    // SIDE02 is not allied -> there is nothing to backstab.
+    const observation = withAffordances(backstabBase({ sideAllied: false }));
+    expect(observation.tacticalAffordances?.backstabAlly?.recommended).toBe(
+      false,
+    );
+    const decision = await decide(observation, [
+      breakAlliance("SIDE02"),
+      hold(),
+    ]);
+    expect(decision.actionID).not.toBe("break_alliance:SIDE02");
+  });
+
+  it("defense takes precedence: under attack, the leaf refuses to betray even on a stale 'recommended'", async () => {
+    // Build the affordances from a safe (no-incoming-attack) snapshot so the cached
+    // signal reads recommended=true, then inject an incoming attack into the live
+    // observation. The leaf's defense-in-depth incoming-attack guard must override the
+    // stale signal and refuse the betray (survival/defense wins over betrayal).
+    const safe = withAffordances(backstabBase());
+    expect(safe.tacticalAffordances?.backstabAlly?.recommended).toBe(true);
+    const underAttack: AgentObservation = {
+      ...safe,
+      combat: {
+        ...safe.combat,
+        incomingAttackPlayerIDs: ["CHAD01"],
+        incomingAttacks: [
+          {
+            attackID: "inc:CHAD01",
+            targetID: "CHAD01",
+            targetName: "Chad",
+            troops: 250_000,
+            retreating: false,
+            sourceTile: null,
+            borderSize: 10,
+          },
+        ],
+      },
+    };
+    const decision = await decide(underAttack, [
+      breakAlliance("SIDE02"),
+      hold(),
+    ]);
+    expect(decision.actionID).not.toBe("break_alliance:SIDE02");
+  });
+});

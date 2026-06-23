@@ -2279,6 +2279,63 @@ function dominantEliminationLockCandidate(
   )[0];
 }
 
+/**
+ * Deterministic "betray late" leaf (the back half of the operator's ally-early /
+ * betray-late strategy). The `backstab_ally` tactical affordance computes correctly
+ * and recommends the break, but the LLM Commander reliably will NOT break a
+ * protective alliance off a JSON signal (two eval runs: 69 recommendations, 0 breaks).
+ * So force the single `break_alliance` here in the executor.
+ *
+ * Mechanism: when `tacticalAffordances.backstabAlly.recommended` is true, return the
+ * already-scored, already-legal `break_alliance` candidate whose action targets the
+ * affordance's `backstabTargetID`. It only RE-ORDERS among offered `LegalAction.id`s —
+ * it never fabricates an action or an intent. The break itself is the whole decision;
+ * the conversion / dominant-elimination logic attacks the ex-ally on subsequent turns.
+ *
+ * This intentionally OVERRIDES the scorer's "keep alliances" over-caution penalties
+ * ("do not break non-leader alliances", "multi-rival matches should keep alliances
+ * until the endgame", "breaking a comparable alliance opens a losing front") — those
+ * are strategic caution, not defensive necessity, and overriding them is the entire
+ * point of betray-late. It does NOT override genuine defense: the affordance already
+ * gates on no incoming attacks (`incomingAttackPlayerIDs.length === 0`) plus a >=1.4x
+ * troop overmatch and >=0.25 own-tile share, and this leaf RE-CHECKS the incoming-
+ * attack guard at the executor (defense-in-depth) so a betray can never fire while the
+ * agent is under attack. Precedence: this sits BELOW survival recoveries, the binding
+ * kill-commitment, the bound alliance/build directives, AND the dominant-elimination
+ * lock in `selectFrontierActionBatch`, so none of those can be pre-empted by a betray.
+ */
+function backstabAllyBreakCandidate(
+  input: AgentBrainInput,
+  scored: readonly FrontierRankedAction[],
+): FrontierRankedAction | undefined {
+  const observation = input.observation;
+  const backstab = observation.tacticalAffordances?.backstabAlly;
+  if (backstab?.recommended !== true) {
+    return undefined;
+  }
+  const backstabTargetID = backstab.backstabTargetID;
+  if (backstabTargetID === null) {
+    return undefined;
+  }
+  // Defense-in-depth: never betray while under attack, even if the affordance signal
+  // is stale. The affordance already requires no incoming attacks; re-assert it here.
+  if (observation.combat.incomingAttackPlayerIDs.length > 0) {
+    return undefined;
+  }
+  const breaks = scored.filter(
+    (candidate) =>
+      candidate.action.kind === "break_alliance" &&
+      actionTargetsPlayer(candidate.action, backstabTargetID),
+  );
+  if (breaks.length === 0) {
+    return undefined;
+  }
+  return [...breaks].sort(
+    (a, b) =>
+      b.totalScore - a.totalScore || a.action.id.localeCompare(b.action.id),
+  )[0];
+}
+
 function selectFrontierActionBatch(input: {
   input: AgentBrainInput;
   plan: StrategicPlan;
@@ -2382,6 +2439,18 @@ function selectFrontierActionBatch(input: {
   );
   if (dominantEliminationLock !== undefined) {
     return [dominantEliminationLock];
+  }
+  // Betray-late leaf: when the `backstab_ally` affordance recommends breaking an
+  // alliance the agent now overmatches (established, not under attack), force the single
+  // `break_alliance` on that ally — the LLM Commander won't break a protective alliance
+  // off the JSON signal, so the executor makes it deterministic. Sits BELOW survival /
+  // kill-commitment / bound alliance+build / dominant-elimination lock (those still win)
+  // and ABOVE the behind-and-falling / neutral-expansion / banking paths. Single-action
+  // batch: the break IS this cycle's decision; the conversion logic takes the ex-ally's
+  // land on later turns. No-op when not recommended or no matching break is offered.
+  const backstabAllyBreak = backstabAllyBreakCandidate(input.input, scored);
+  if (backstabAllyBreak !== undefined) {
+    return [backstabAllyBreak];
   }
   // FM-2a ("trade or die"): when behind-and-falling, force the single best
   // controlled strike before the neutral-territory / banking / hold paths below,
