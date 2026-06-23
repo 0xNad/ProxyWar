@@ -2224,6 +2224,61 @@ function auditBuildDirectiveAdherence(
   };
 }
 
+// Dominant elimination lock (P2): when dominant + clearly overmatching the weakest attackable bordered
+// rival, return the largest reserve-safe favorable attack on THAT rival, so force concentrates on one
+// target until its core cracks and it is eliminated — instead of spreading and plateauing. The next
+// step the weakest rival is whoever remains, so the lock walks down the field. Gated tightly: dominant
+// only + a clear overall troop edge (>=1.6:1) over the locked rival; the offered commitment caps at 0.40
+// (keeps >=60% reserve), and it DEFERS to active home defense by skipping attacks the urgent-defense gate
+// flags (the lock pre-empts the selectors below, which enforce that gate, so it must apply it here too).
+function dominantEliminationLockCandidate(
+  input: AgentBrainInput,
+  scored: readonly FrontierRankedAction[],
+): FrontierRankedAction | undefined {
+  const observation = input.observation;
+  if (!isDominantConversionMode(observation)) {
+    return undefined;
+  }
+  const lockTarget = observation.combat.weakestAttackableTargetID;
+  if (lockTarget === null) {
+    return undefined;
+  }
+  const weakest = observation.visiblePlayers.find(
+    (player) => player.playerID === lockTarget,
+  );
+  const relativeTroopRatio = weakest?.relativeTroopRatio ?? 0;
+  if (relativeTroopRatio > 0 && relativeTroopRatio < 1.6) {
+    return undefined;
+  }
+  const ownTroops =
+    observation.combat.ownTroops ?? observation.ownState?.troops ?? 0;
+  const locked = scored.filter(
+    (candidate) =>
+      candidate.action.kind === "attack" &&
+      candidate.action.metadata?.expansion !== true &&
+      candidate.action.risk.level !== "high" &&
+      actionTargetsPlayer(candidate.action, lockTarget) &&
+      actionIsFavorableHostileAttack(candidate.action) &&
+      // Defer to active home defense: the selectors below the lock reject attacks carrying the
+      // urgent-defense penalty, and the lock pre-empts them — so apply that same gate here so a
+      // dominant-but-home-threatened agent doesn't lock-attack when it should defend (reviewer-found).
+      !hasPolicyPenalty(
+        candidate,
+        "urgent defense state makes non-leader attacks too risky",
+      ),
+  );
+  if (locked.length === 0) {
+    return undefined;
+  }
+  return [...locked].sort(
+    (a, b) =>
+      committedTroopRatio(b.action, ownTroops) -
+        committedTroopRatio(a.action, ownTroops) ||
+      b.totalScore - a.totalScore ||
+      a.action.id.localeCompare(b.action.id),
+  )[0];
+}
+
 function selectFrontierActionBatch(input: {
   input: AgentBrainInput;
   plan: StrategicPlan;
@@ -2313,6 +2368,20 @@ function selectFrontierActionBatch(input: {
   );
   if (buildDirectiveAction !== undefined) {
     return [buildDirectiveAction];
+  }
+  // Dominant elimination lock (P2 — the force-concentration lever). When dominant AND clearly
+  // overmatching the WEAKEST attackable bordered rival, concentrate force on that ONE rival (the
+  // largest reserve-safe favorable attack on it) to crack its core and ELIMINATE, instead of
+  // spreading attacks across rivals and plateauing (~57% share / 0 eliminations vs Medium nations).
+  // Spreading keeps the LOCAL border ratio below the core-cracking threshold; locking makes it climb.
+  // Pre-empts the conversion/expansion selectors below; survival / kill-commitment / bound
+  // alliance+build above still win.
+  const dominantEliminationLock = dominantEliminationLockCandidate(
+    input.input,
+    scored,
+  );
+  if (dominantEliminationLock !== undefined) {
+    return [dominantEliminationLock];
   }
   // FM-2a ("trade or die"): when behind-and-falling, force the single best
   // controlled strike before the neutral-territory / banking / hold paths below,

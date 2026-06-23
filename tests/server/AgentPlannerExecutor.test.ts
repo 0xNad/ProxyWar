@@ -18081,4 +18081,50 @@ describe("Dominant endgame conversion: overmatch commits decisively", () => {
     ]);
     expect(decision.actionID).not.toBe("attack:CHAD01:40");
   });
+
+  it("dominant: locks force on the WEAKEST attackable rival (concentrates, doesn't spread)", async () => {
+    const base = closeLeaderConversionObservation();
+    const obs: AgentObservation = {
+      ...base,
+      ownState:
+        base.ownState === null
+          ? null
+          : { ...base.ownState, tileShare: 0.6, tilesOwned: 45_000 },
+      visiblePlayers: base.visiblePlayers.map((p) =>
+        p.playerID === "CHAD01"
+          ? { ...p, relativeTroopRatio: 2.8 }
+          : p.playerID === "SIDE02"
+            ? { ...p, canAttack: true, relativeTroopRatio: 1.8 }
+            : p,
+      ),
+      combat: {
+        ...base.combat,
+        attackablePlayerIDs: ["CHAD01", "SIDE02"],
+        weakestAttackableTargetID: "CHAD01",
+      },
+    };
+    const sideAttack = (pct: number): LegalAction => ({
+      id: `attack:SIDE02:${Math.round(pct * 100)}`,
+      kind: "attack",
+      label: `Attack SIDE02 ${Math.round(pct * 100)}%`,
+      intent: {
+        type: "attack",
+        targetID: "SIDE02",
+        troops: Math.round(560_000 * pct),
+      },
+      risk: { level: "medium", score: 0.4 },
+      metadata: {
+        targetID: "SIDE02",
+        troopPercentage: pct,
+        relativeTroopRatio: 1.8,
+      },
+    });
+    // Both rivals are attackable; the lock must concentrate on the WEAKEST (CHAD01), not split.
+    const decision = await decide(obs, [
+      attack(0.4, 2.8),
+      sideAttack(0.4),
+      hold(),
+    ]);
+    expect(decision.actionID).toBe("attack:CHAD01:40");
+  });
 });
