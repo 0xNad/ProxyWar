@@ -2,7 +2,7 @@
   "$schema": "https://raw.githubusercontent.com/Metta-AI/coworld/main/src/coworld/coworld_manifest_schema.json",
   "game": {
     "name": "proxywar-ffa-4p",
-    "version": "0.0.1",
+    "version": "0.0.2",
     "description": "Hosted Proxy War Coworld 4-player FFA package (fixed 4 seats) that preserves the LegalAction.id decision path. Separate from proxywar (2-seat) because a Coworld declares one fixed seat count.",
     "owner": "proxywar",
     "runnable": {
