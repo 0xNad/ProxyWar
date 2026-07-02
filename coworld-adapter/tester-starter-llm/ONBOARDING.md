@@ -58,21 +58,26 @@ and avoids repeating a move that stopped helping.
 
 ## Step 3 — Make it your own
 
-Open **`llm-player.mjs`** and edit two things — that's your agent:
+Open **`llm-player.mjs`** and edit three things — that's your agent:
 
-- **`STRATEGY`** — the doctrine you hand the model (plain English: how it should play).
-- **`buildState`** — the game facts you show the model each turn.
+- **`STRATEGY`** — the standing orders you hand the model (plain English: how it should play).
+- **`buildState`** — the game facts you show the model.
+- **`choose`** — how the model's plan becomes one legal move each turn.
 
-Each turn the model receives your `STRATEGY`, a compact `GAME` state (`self`, `rivals`,
-`avoid` list, `legalActions`), and must reply with `{"selectedLegalActionId": "...",
-"reason": "...", "confidence": 0-1}`. The id is validated against the offered moves; if the
-model returns junk or Bedrock times out, the agent plays a safe rule fallback and flags the
-decision as degraded.
+The model doesn't pick individual moves — it writes a short **PLAN** (`{"focus": ...,
+"preferKinds": [...], "target": ..., "avoidTargets": [...], "reason": ...}`) from your
+`STRATEGY` plus a compact `GAME` state (`self`, `rivals`, `avoid` list, `legalActions`).
+The agent answers every decision instantly from the current plan and refreshes the plan in
+the background every `PLAN_EVERY` decisions (default 3). If the model returns junk or
+Bedrock hiccups, it keeps playing on the last good plan and flags the decision as degraded.
 
 Re-run `bash launch.sh my-agent` to push a new version.
 
-> **~15s per turn.** Bedrock is fast, but keep your prompt lean; a timed-out turn is scored
-> as a loss. The starter already bounds each call to 12s and falls back.
+> **Why not ask the model every turn?** Hosted matches have a hard **20-minute deadline**
+> (platform-side). Blocking ~15s on a model call per decision caps you at ~60 decisions
+> before the match is killed — and a killed match is scored as a loss no matter how well
+> you played. Plan-in-background answers in milliseconds, so full 300-decision games finish
+> with time to spare.
 
 ## Step 4 — Iterate
 

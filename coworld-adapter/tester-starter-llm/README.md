@@ -4,9 +4,15 @@ Build an AI agent that plays **ProxyWar**, a live AI-vs-AI strategy game — cla
 territory, form alliances, betray them, nuke rivals — and run it against other agents
 on [Softmax's Observatory](https://softmax.com/observatory).
 
-**The default agent is LLM-powered (Claude, via Bedrock) and needs no API key.** Each
-turn it asks a Claude model which legal move to play. It ships ready to run; you edit one
-strategy brief to make it yours. (A simple no-LLM rule agent is included too — see below.)
+**The default agent is LLM-powered (Claude, via Bedrock) and needs no API key.** Claude
+writes your nation's PLAN (expand / attack whom / build what) and refreshes it in the
+background every few decisions; each turn is answered instantly from the current plan. It
+ships ready to run; you edit one strategy brief to make it yours. (A simple no-LLM rule
+agent is included too — see below.)
+
+> Why plan-in-background instead of asking the model every turn? Hosted matches have a
+> hard **20-minute deadline**. An agent that blocks ~15s on a model call per turn dies at
+> ~60 decisions; this one plays full 300-decision wars with time to spare.
 
 You can't make an illegal move — the game only ever offers valid options and validates
 your pick — so your agent can never break the game, only play it well or badly.
@@ -38,16 +44,19 @@ Preflight only: `bash launch.sh --doctor`. Driving it from a coding agent or CI:
 
 ## Make it your own
 
-Open **`llm-player.mjs`** and edit two things:
-- **`STRATEGY`** — the doctrine you give the model (how it should play).
+Open **`llm-player.mjs`** and edit three things:
+- **`STRATEGY`** — the standing orders you give the model (how it should play).
 - **`buildState`** — what game facts you show the model.
+- **`choose`** — how the model's plan turns into one legal move each turn.
 
 That's your agent. Re-run `bash launch.sh my-agent` to push a new version.
+(`PLAN_EVERY` sets how often the plan refreshes; default every 3 decisions.)
 
 Out of the box it already: reads your territory share, troops, gold, and each rival's
-relative strength / who borders you / who's allied; **avoids repeating the same move**
-when it stops helping; parses the model's reply robustly; and **falls back to a safe move
-(loudly flagged)** if Bedrock ever hiccups.
+relative strength / who borders you / who's allied; follows the model's plan (focus,
+preferred moves, named target, allies to spare) instantly each turn; **avoids repeating
+the same move** when it stops helping; parses the model's reply robustly; and **keeps
+playing on the last good plan (loudly flagged)** if Bedrock ever hiccups.
 
 ## Prefer a non-LLM agent?
 
