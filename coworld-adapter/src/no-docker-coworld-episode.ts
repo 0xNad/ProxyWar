@@ -140,7 +140,16 @@ class CoworldProtocolServer {
   private readonly pending = new Map<string, PendingDecision>();
   private readonly globalSockets = new Set<InstanceType<typeof WebSocket>>();
   private readonly replaySockets = new Set<InstanceType<typeof WebSocket>>();
-  private readonly snapshots: unknown[] = [];
+  // Live-episode snapshots are latest-only: the /global broadcast and status
+  // only ever read the newest frame + the count, and the results/replay artifacts
+  // are built from the RUNNER's own spectatorSnapshots array (not this one). Keeping
+  // one reference + a counter here (instead of every frame) avoids a second
+  // unbounded O(steps) retention alongside the runner's, contributing to the
+  // long-episode pod OOM. The replay-container path (setReplayPayload) still holds
+  // the loaded replay's already-compacted (<=80) snapshots for /global serving.
+  private latestLiveSnapshot: unknown = null;
+  private liveSnapshotCount = 0;
+  private replaySnapshots: unknown[] = [];
   private spectatorMap: Record<string, unknown> | null = null;
   private spectatorReplay: Record<string, unknown> | null = null;
   private replayPayload: unknown = null;
@@ -256,7 +265,8 @@ class CoworldProtocolServer {
     if (map !== null) {
       this.spectatorMap = map;
     }
-    this.snapshots.push(snapshot);
+    this.latestLiveSnapshot = snapshot;
+    this.liveSnapshotCount += 1;
     this.broadcastGlobal(this.statusSnapshot("snapshot", snapshot));
   }
 
@@ -266,8 +276,8 @@ class CoworldProtocolServer {
     if (spectatorReplay !== null) {
       this.spectatorReplay = spectatorReplay;
       this.spectatorMap = spectatorMapFromReplay(spectatorReplay);
-      if (this.snapshots.length === 0) {
-        this.snapshots.push(...spectatorSnapshotsFromReplay(spectatorReplay));
+      if (this.replaySnapshots.length === 0 && this.liveSnapshotCount === 0) {
+        this.replaySnapshots = spectatorSnapshotsFromReplay(spectatorReplay);
       }
     }
     this.broadcastReplay();
@@ -464,7 +474,7 @@ class CoworldProtocolServer {
       event,
       connectedPlayers: this.players.size,
       requiredPlayers: this.config.tokens.length,
-      snapshotCount: this.snapshots.length,
+      snapshotCount: this.snapshotCount(),
       replayReady: this.replayPayload !== null,
       config: publicCoworldConfig(this.config),
       map: this.spectatorMap,
@@ -495,7 +505,17 @@ class CoworldProtocolServer {
   }
 
   private latestSnapshot(): unknown {
-    return this.snapshots[this.snapshots.length - 1] ?? null;
+    return (
+      this.latestLiveSnapshot ??
+      this.replaySnapshots[this.replaySnapshots.length - 1] ??
+      null
+    );
+  }
+
+  private snapshotCount(): number {
+    return this.liveSnapshotCount > 0
+      ? this.liveSnapshotCount
+      : this.replaySnapshots.length;
   }
 
   private replayInfo(): Record<string, unknown> {
@@ -507,7 +527,7 @@ class CoworldProtocolServer {
       runID,
       artifactBasePath:
         runID === null ? null : `/ai-league-runs/${encodeURIComponent(runID)}`,
-      snapshotCount: this.snapshots.length,
+      snapshotCount: this.snapshotCount(),
       replayReady: this.replayPayload !== null,
     };
   }
@@ -858,7 +878,24 @@ async function runProxyWarEpisode(
   });
   const roster = agentRunRoster(participants);
   const spectatorSnapshots: unknown[] = [];
+  let memTelemetrySnapshots = 0;
+  // stderr, NOT the winston logger: the episode logger is level "warn", and pod
+  // log retrieval is the whole point — this is the hosted OOM/crash forensics line.
+  const logMemTelemetry = (label: string, turnNumber: number) => {
+    const mb = (bytes: number) => Math.round(bytes / (1024 * 1024));
+    const usage = process.memoryUsage();
+    console.error(
+      `[MEM] ${label} turn=${turnNumber} rssMB=${mb(usage.rss)} heapUsedMB=${mb(usage.heapUsed)} externalMB=${mb(usage.external)}`,
+    );
+  };
   const mirror = new modules.AgentLocalGameMirror(mapLoader, log);
+  // Time-based curve too (snapshots can be sparse); unref'd so it never holds
+  // the process open, cleared on completion.
+  const memTelemetryTimer = setInterval(
+    () => logMemTelemetry("interval", mirror.turnCount()),
+    60_000,
+  );
+  memTelemetryTimer.unref();
   const mirrorMessages = () => participants[0]?.runner.serverMessages() ?? [];
   const league = new modules.AgentLeagueMatchRunner({
     game,
@@ -901,10 +938,16 @@ async function runProxyWarEpisode(
             snapshot.gameState.config().gameConfig().gameMapSize,
           ),
         });
+        memTelemetrySnapshots += 1;
+        if (memTelemetrySnapshots % 10 === 1) {
+          logMemTelemetry("snapshot", snapshot.turnNumber);
+        }
       },
       log,
     });
     const completedAt = Date.now();
+    clearInterval(memTelemetryTimer);
+    logMemTelemetry("episode-complete", mirror.turnCount());
     const finalState = finalKnownState({
       participants,
       gameState: stepResult.finalGameState,

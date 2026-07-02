@@ -7,6 +7,7 @@ import type { Game } from "../../src/core/game/Game";
 import {
   buildAgentSpectatorReplay,
   gameRecordFileIsRenderable,
+  sampleNumbers,
   writeAgentSpectatorReplayArtifacts,
 } from "../../src/server/agents/AgentSpectatorReplay";
 
@@ -156,6 +157,92 @@ describe("AgentSpectatorReplay", () => {
       expect(html).not.toContain("fetch(");
     } finally {
       await fs.rm(rootDir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("build-time tile sampling", () => {
+  // Long-episode OOM fix contract: capping snapshot tiles at BUILD time
+  // (buildAgentSpectatorSnapshot) must produce the byte-identical artifact that
+  // write-time compaction produced from full tile arrays. If sampleNumbers or
+  // the cap ever diverges between the two passes, this test fails.
+  it("writes byte-identical artifacts for full vs pre-sampled >800-tile snapshots", async () => {
+    const fullTiles = Array.from({ length: 1000 }, (_, i) => i);
+    const makeReplay = (tiles: number[]) =>
+      buildAgentSpectatorReplay({
+        runID: "sampling-equivalence",
+        matchID: "SAMPLE01",
+        scenario: "actions",
+        brainMode: "mock-llm",
+        runnerMode: "step-locked",
+        finalGameState: fakeGame(),
+        roster: [
+          {
+            agentID: "agent-1",
+            username: "Sampler Agent",
+            profile: "defensive",
+            clientID: "CLIENT01",
+            brainType: "mock-llm",
+          },
+        ],
+        snapshots: [
+          {
+            label: "Late game",
+            turnNumber: 900,
+            tick: 9000,
+            phase: "active",
+            decisions: [],
+            players: [
+              {
+                agentID: "agent-1",
+                clientID: "CLIENT01",
+                playerID: "PLAYER01",
+                username: "Sampler Agent",
+                profile: "defensive",
+                brainType: "mock-llm",
+                color: "#2563eb",
+                isAlive: true,
+                hasSpawned: true,
+                tilesOwned: fullTiles.length,
+                troops: 500,
+                gold: "1000",
+                tiles,
+                units: [],
+              },
+            ],
+          },
+        ],
+      });
+
+    const fullDir = await fs.mkdtemp(path.join(os.tmpdir(), "ai-sample-full-"));
+    const preDir = await fs.mkdtemp(path.join(os.tmpdir(), "ai-sample-pre-"));
+    try {
+      const fromFull = await writeAgentSpectatorReplayArtifacts({
+        directory: fullDir,
+        replay: makeReplay(fullTiles),
+      });
+      const fromPreSampled = await writeAgentSpectatorReplayArtifacts({
+        directory: preDir,
+        replay: makeReplay(sampleNumbers(fullTiles, 800)),
+      });
+
+      const fullData = await fs.readFile(fromFull.replayDataPath, "utf8");
+      const preData = await fs.readFile(fromPreSampled.replayDataPath, "utf8");
+      expect(preData).toBe(fullData);
+
+      const fullHtml = await fs.readFile(fromFull.spectatorPath, "utf8");
+      const preHtml = await fs.readFile(fromPreSampled.spectatorPath, "utf8");
+      expect(preHtml).toBe(fullHtml);
+
+      const parsed = JSON.parse(preData) as {
+        snapshots: { players: { tiles: number[]; tilesOwned: number }[] }[];
+      };
+      expect(parsed.snapshots[0].players[0].tiles.length).toBe(800);
+      expect(parsed.snapshots[0].players[0].tilesOwned).toBe(1000);
+      expect(preData).toContain("tile arrays capped at 800");
+    } finally {
+      await fs.rm(fullDir, { recursive: true, force: true });
+      await fs.rm(preDir, { recursive: true, force: true });
     }
   });
 });

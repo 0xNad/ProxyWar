@@ -20,4 +20,8 @@ WORKDIR /app/proxywar
 # IPC server socket under /tmp (tsx-<n>/<n>.pipe); on a read-only root filesystem
 # (how Coworld/k8s hardens episode pods) that listen() fails with EROFS and the
 # container exits 1 before any app output. The loader needs no writable /tmp.
-CMD ["node", "--import", "tsx/esm", "/app/integration/src/no-docker-coworld-episode.ts"]
+# Cap the V8 heap: Node sizes its default old-space from HOST memory, not the
+# pod's cgroup limit, so a long episode lets garbage accumulate until the kernel
+# OOM-kills the pod (exit 137 -> the hosted "game_error"). 640MB forces full GCs
+# well inside a 1GB episode pod; the episode's live set stays ~400-500MB.
+CMD ["node", "--max-old-space-size=640", "--import", "tsx/esm", "/app/integration/src/no-docker-coworld-episode.ts"]
