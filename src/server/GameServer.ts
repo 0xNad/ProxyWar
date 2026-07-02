@@ -367,11 +367,17 @@ export class GameServer {
         }
         const clientMsg = parsed.data;
         const bytes = Buffer.byteLength(message, "utf8");
-        const rateResult = this.intentRateLimiter.check(
-          client.clientID,
-          clientMsg.type,
-          bytes,
-        );
+        // Manual-tick harnesses (realtimeClock: false — benchmarks, the agent
+        // league runner) have only trusted in-process clients and compress the
+        // game far below wall-clock time, so a wall-clock intent rate limit
+        // would silently drop legitimate intents (e.g. per-spawn-tick
+        // relocations) depending on machine speed — exactly the
+        // nondeterminism manual-tick mode exists to eliminate. The anti-DoS
+        // limiter guards real network clients; production games always run
+        // with the real-time clock and keep it fully active.
+        const rateResult = this.realtimeClock
+          ? this.intentRateLimiter.check(client.clientID, clientMsg.type, bytes)
+          : "ok";
         if (rateResult === "kick") {
           this.log.warn(`Client rate limit exceeded, kicking`, {
             clientID: client.clientID,

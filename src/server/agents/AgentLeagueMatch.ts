@@ -210,44 +210,57 @@ export class AgentLeagueMatchRunner {
           ? gameState.ticks() /
             Math.max(1, gameState.config().numSpawnPhaseTurns())
           : 0;
+      // A spawn intent submitted now lands in the NEXT server turn, and its
+      // SpawnExecution only applies while the spawn phase is still running
+      // (execution tick <= numSpawnPhaseTurns). At the boundary tick
+      // (ticks === numSpawnPhaseTurns) a submission would be recorded as
+      // accepted but silently never execute — a dead record whose tile
+      // contradicts the player's actual spawn in the replay. Keep advancing
+      // to the phase end, but stop submitting intents that cannot execute,
+      // so the last recorded spawn per agent IS the tile it spawned on.
+      const spawnIntentCanStillExecute =
+        gameState === null ||
+        gameState.ticks() < gameState.config().numSpawnPhaseTurns();
 
-      for (const participant of this.options.participants) {
-        const observation = this.observationBuilder.build({
-          agentID: participant.runner.agentID,
-          clientID: participant.runner.clientID(),
-          username: participant.spec.username,
-          profile: participant.spec.profile,
-          gameID: this.options.game.id,
-          turnNumber: gameState?.ticks() ?? 0,
-          gameState: gameState ?? undefined,
-          phaseOverride: "spawn",
-          objective: this.objectiveManager.currentObjective(
-            participant.runner.agentID,
-          ),
-          recentDecisions: this.recentDecisionsFor(participant),
-        });
-        const legalActions = this.legalActionBuilder.build({
-          observation,
-          spawnCandidates: availableCandidates,
-        });
-        const spawnAction = selectSpawnTile({
-          spawnActions: legalActions,
-          profile: participant.spec.profile,
-          gameID: this.options.game.id,
-          agentID: participant.runner.agentID,
-          tick,
-          spawnProgress,
-        });
-        if (spawnAction === undefined) {
-          continue;
+      if (spawnIntentCanStillExecute) {
+        for (const participant of this.options.participants) {
+          const observation = this.observationBuilder.build({
+            agentID: participant.runner.agentID,
+            clientID: participant.runner.clientID(),
+            username: participant.spec.username,
+            profile: participant.spec.profile,
+            gameID: this.options.game.id,
+            turnNumber: gameState?.ticks() ?? 0,
+            gameState: gameState ?? undefined,
+            phaseOverride: "spawn",
+            objective: this.objectiveManager.currentObjective(
+              participant.runner.agentID,
+            ),
+            recentDecisions: this.recentDecisionsFor(participant),
+          });
+          const legalActions = this.legalActionBuilder.build({
+            observation,
+            spawnCandidates: availableCandidates,
+          });
+          const spawnAction = selectSpawnTile({
+            spawnActions: legalActions,
+            profile: participant.spec.profile,
+            gameID: this.options.game.id,
+            agentID: participant.runner.agentID,
+            tick,
+            spawnProgress,
+          });
+          if (spawnAction === undefined) {
+            continue;
+          }
+          availableCandidates = this.submitAndRecordSpawn({
+            participant,
+            observation,
+            legalActions,
+            spawnAction,
+            availableCandidates,
+          });
         }
-        availableCandidates = this.submitAndRecordSpawn({
-          participant,
-          observation,
-          legalActions,
-          spawnAction,
-          availableCandidates,
-        });
       }
 
       this.options.game.advanceTurnsForTesting(turnsPerSpawnTick);

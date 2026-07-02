@@ -45,6 +45,7 @@ import {
   MapManifest,
 } from "../../src/core/game/TerrainMapLoader";
 import { GameConfig, StampedIntent } from "../../src/core/Schemas";
+import { externalBrainCleanlinessReport } from "../../src/server/agents/AgentExternalBrainCleanliness";
 import {
   AgentLeagueMatchRunner,
   AgentSpec,
@@ -499,6 +500,192 @@ describe("AgentLeagueMatchRunner", () => {
       await game.end({ archive: false });
     }
   });
+
+  it("drives the spawn phase deterministically with zero brain calls (runSpawnPhase)", async () => {
+    const log = makeLogger();
+    const mapLoader = new StaticMapLoader();
+    const config = { ...gameConfig, gameMapSize: GameMapSize.Compact };
+    const terrain = await loadTerrainMap(
+      config.gameMap,
+      config.gameMapSize,
+      mapLoader,
+    );
+    const specs = createDefaultAgentSpecs(4);
+    // The spy proves the LLM Commander is fully bypassed during spawn: any call
+    // to brain.decide while runSpawnPhase drives the phase is a regression.
+    const decideSpy = vi.fn(async () => ({
+      actionID: "hold",
+      reason: "the brain must not be consulted during the spawn phase",
+    }));
+    const participants = createAgentParticipants(specs, log, {
+      brainFactory: () => ({ brainType: "mock-llm", decide: decideSpy }),
+    });
+    const game = new GameServer(
+      "AGENT012",
+      log,
+      Date.now(),
+      steppedServerConfig,
+      config,
+    );
+    const match = new AgentLeagueMatchRunner({
+      game,
+      participants,
+      spawnCandidates: buildSpawnCandidates(terrain.gameMap, {
+        maxCandidates: 500,
+        stride: 2,
+      }),
+      log,
+    });
+    const mirror = new AgentLocalGameMirror(mapLoader, log);
+
+    try {
+      match.attachAgents();
+      match.startGame();
+      const spawnRecords = await match.runSpawnPhase({
+        mirror,
+        messages: () => participants[0]?.runner.serverMessages() ?? [],
+        turnsPerSpawnTick: 25,
+      });
+
+      // No LLM during spawn.
+      expect(decideSpy).not.toHaveBeenCalled();
+
+      // Every spawn record is the synthetic deterministic-explorer decision: a
+      // legal spawn tile (accepted) flagged as non-LLM output so the aliveness
+      // (rawProviderOutputRecordCount) and cleanliness (rejectedIntents) reports
+      // stay uncorrupted.
+      expect(spawnRecords.length).toBeGreaterThan(0);
+      expect(
+        spawnRecords.every((record) => record.chosenActionKind === "spawn"),
+      ).toBe(true);
+      expect(spawnRecords.every((record) => record.result.accepted)).toBe(true);
+      expect(
+        spawnRecords.every(
+          (record) =>
+            record.decisionMetadata?.rawProviderOutputPresent === false &&
+            record.decisionMetadata?.actionSelectionSource ===
+              "deterministic-spawn" &&
+            record.decisionMetadata?.spawnExploration === true,
+        ),
+      ).toBe(true);
+      expect(
+        externalBrainCleanlinessReport({
+          brainMode: "mock-llm",
+          records: spawnRecords,
+        }).rejectedIntents,
+      ).toBe(0);
+
+      // Jumps around: each agent visits >= 2 distinct spawn tiles over the phase.
+      const agentIDs = [...new Set(spawnRecords.map((record) => record.agentID))];
+      expect(agentIDs).toHaveLength(4);
+      for (const agentID of agentIDs) {
+        const tiles = new Set(
+          spawnRecords
+            .filter((record) => record.agentID === agentID)
+            .map((record) => spawnIntent(record).tile),
+        );
+        expect(tiles.size).toBeGreaterThanOrEqual(2);
+      }
+
+      // The loop returns because the spawn phase actually ended...
+      const mirrorGame = mirror.gameState();
+      if (mirrorGame === null) {
+        throw new Error("expected mirror game state after the spawn phase");
+      }
+      expect(mirrorGame.inSpawnPhase()).toBe(false);
+
+      // ...and the LAST recorded spawn per agent is the tile the player actually
+      // spawned on (each re-issued SpawnExecution relocates; the final one wins),
+      // so the decision log's settle tile matches the replay.
+      for (const agentID of agentIDs) {
+        const agentRecords = spawnRecords.filter(
+          (record) => record.agentID === agentID,
+        );
+        const lastRecord = agentRecords[agentRecords.length - 1];
+        expect(
+          mirrorGame.playerByClientID(lastRecord.clientID!)?.spawnTile(),
+        ).toBe(spawnIntent(lastRecord).tile);
+      }
+    } finally {
+      await game.end({ archive: false });
+    }
+  }, 600_000);
+
+  it("stops spawn submissions at the phase boundary so the final record is the real spawn", async () => {
+    const log = makeLogger();
+    const mapLoader = new StaticMapLoader();
+    const config = { ...gameConfig, gameMapSize: GameMapSize.Compact };
+    const terrain = await loadTerrainMap(
+      config.gameMap,
+      config.gameMapSize,
+      mapLoader,
+    );
+    const specs = createDefaultAgentSpecs(1);
+    const decideSpy = vi.fn(async () => ({
+      actionID: "hold",
+      reason: "the brain must not be consulted during the spawn phase",
+    }));
+    const participants = createAgentParticipants(specs, log, {
+      brainFactory: () => ({ brainType: "mock-llm", decide: decideSpy }),
+    });
+    const game = new GameServer(
+      "AGENT013",
+      log,
+      Date.now(),
+      steppedServerConfig,
+      config,
+    );
+    const match = new AgentLeagueMatchRunner({
+      game,
+      participants,
+      spawnCandidates: buildSpawnCandidates(terrain.gameMap, {
+        maxCandidates: 500,
+        stride: 2,
+      }),
+      log,
+      // A 1-tile prune radius keeps the candidate pool alive through the WHOLE
+      // spawn phase (the default per-submission prune radius exhausts a
+      // 500-candidate pool mid-phase), so the loop still has legal spawn tiles
+      // at the boundary tick (ticks === numSpawnPhaseTurns). A submission there
+      // would be recorded as accepted but land one server turn AFTER the phase
+      // closes and silently never execute — a dead record whose tile
+      // contradicts the player's actual spawn. A single agent keeps the
+      // requested centers free of cross-agent spawn-area contention.
+      minSpawnDistance: 1,
+    });
+    const mirror = new AgentLocalGameMirror(mapLoader, log);
+
+    try {
+      match.attachAgents();
+      match.startGame();
+      const spawnRecords = await match.runSpawnPhase({
+        mirror,
+        messages: () => participants[0]?.runner.serverMessages() ?? [],
+        turnsPerSpawnTick: 25,
+      });
+
+      expect(decideSpy).not.toHaveBeenCalled();
+      const mirrorGame = mirror.gameState();
+      if (mirrorGame === null) {
+        throw new Error("expected mirror game state after the spawn phase");
+      }
+      expect(mirrorGame.inSpawnPhase()).toBe(false);
+      expect(spawnRecords.length).toBeGreaterThanOrEqual(2);
+      // No submission at or past the boundary tick: a spawn intent submitted at
+      // ticks >= numSpawnPhaseTurns cannot execute anymore (dead record).
+      expect(
+        Math.max(...spawnRecords.map((record) => record.turnNumber)),
+      ).toBeLessThan(mirrorGame.config().numSpawnPhaseTurns());
+      // Last-wins relocation: the final recorded spawn tile is where the player
+      // actually spawned.
+      const lastRecord = spawnRecords[spawnRecords.length - 1];
+      expect(
+        mirrorGame.playerByClientID(lastRecord.clientID!)?.spawnTile(),
+      ).toBe(spawnIntent(lastRecord).tile);
+    } finally {
+      await game.end({ archive: false });
+    }
+  }, 600_000);
 
   it("runs a real post-spawn decision turn from live core state", async () => {
     const log = makeLogger();

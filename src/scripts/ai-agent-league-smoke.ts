@@ -532,7 +532,14 @@ async function run() {
       return;
     }
 
-    const openingRecords = await league.runOpeningTurn();
+    // Deterministic built-in-style spawn (no LLM): runSpawnPhase submits an
+    // exploring spawn tile per agent each spawn tick and advances the sim
+    // itself until the spawn phase ends, so the wait below resolves on the
+    // first poll. Same entrypoint swap as the benchmark and step-locked paths.
+    const openingRecords = await league.runSpawnPhase({
+      mirror,
+      messages: mirrorMessages,
+    });
     const postSpawnGame = await waitForMirrorState({
       mirror,
       messages: mirrorMessages,
@@ -558,6 +565,10 @@ async function run() {
       gameState: postSpawnGame,
     });
     const postSpawnTurnCount = mirror.turnCount();
+    // startGame() runs the match on a manual clock (realtimeClock: false), so
+    // nothing ends turns by itself here: advance two — one to land the
+    // just-submitted intents, one so their executions tick — before auditing.
+    game.advanceTurnsForTesting(2);
     const afterPostSpawnGame = await waitForMirrorState({
       mirror,
       messages: mirrorMessages,
