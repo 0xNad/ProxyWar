@@ -1,0 +1,11 @@
+{
+  "name": "proxywar-agent-llm",
+  "version": "1.0.0",
+  "type": "module",
+  "license": "MIT",
+  "description": "ProxyWar LLM agent (Bedrock). Falls back to a rule pick if Bedrock is unreachable.",
+  "dependencies": {
+    "ws": "^8.18.0",
+    "@anthropic-ai/bedrock-sdk": "^0.29.2"
+  }
+}
