@@ -250,59 +250,11 @@
       "description": "Minimal websocket player that chooses one offered LegalAction.id."
     }
   ],
-  "reporter": [
-    {
-      "id": "proxywar-summary-reporter",
-      "name": "Proxy War Summary Reporter",
-      "type": "reporter",
-      "image": "proxywar-coworld-local:latest",
-      "run": [
-        "node",
-        "/app/integration/src/proxywar-summary-reporter.mjs"
-      ],
-      "description": "Consumes a Coworld episode bundle and writes a report zip with Markdown and machine-readable summary outputs."
-    }
-  ],
+  "reporter": [],
   "commissioner": [],
-  "grader": [
-    {
-      "id": "proxywar-episode-grader",
-      "name": "Proxy War Episode Grader",
-      "type": "grader",
-      "image": "proxywar-coworld-local:latest",
-      "run": [
-        "node",
-        "/app/integration/src/proxywar-episode-grader.mjs"
-      ],
-      "description": "Deterministic grader for Coworld's contract-defined/runtime-pending grader role. Consumes an episode bundle and writes a 0..1 usefulness score JSON artifact."
-    }
-  ],
-  "diagnoser": [
-    {
-      "id": "proxywar-policy-diagnoser",
-      "name": "Proxy War Policy Diagnoser",
-      "type": "diagnoser",
-      "image": "proxywar-coworld-local:latest",
-      "run": [
-        "node",
-        "/app/integration/src/proxywar-policy-diagnoser.mjs"
-      ],
-      "description": "Diagnoser for Coworld's reserved/tentative diagnoser contract. Consumes an episode bundle and target policy URI and writes a diagnosis zip."
-    }
-  ],
-  "optimizer": [
-    {
-      "id": "proxywar-optimizer-plan",
-      "name": "Proxy War Optimizer Plan",
-      "type": "optimizer",
-      "image": "proxywar-coworld-local:latest",
-      "run": [
-        "node",
-        "/app/integration/src/proxywar-optimizer-plan.mjs"
-      ],
-      "description": "Optimizer-plan writer for Coworld's reserved/tentative optimizer role. Writes an advisory policy-iteration plan from report and diagnosis inputs."
-    }
-  ],
+  "grader": [],
+  "diagnoser": [],
+  "optimizer": [],
   "variants": [
     {
       "id": "four-player-ffa-pangaea",
