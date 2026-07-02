@@ -1,0 +1,772 @@
+{
+  "$schema": "https://raw.githubusercontent.com/Metta-AI/coworld/main/src/coworld/coworld_manifest_schema.json",
+  "game": {
+    "name": "proxywar-ffa-12p",
+    "version": "0.0.3",
+    "description": "Hosted Proxy War Coworld 12-player FFA package (fixed 12 seats) that preserves the LegalAction.id decision path. The 12p rung of the proxywar-ffa fixed-size ladder (4p, 8p, 12p); each rung is a separate package because a Coworld declares exactly one fixed seat count. Ships the same curated multi-map rotation (8 large/medium maps) and game image as the other rungs.",
+    "owner": "proxywar",
+    "runnable": {
+      "type": "game",
+      "image": "proxywar-coworld-local:latest",
+      "run": [
+        "node",
+        "--max-old-space-size=640",
+        "--import",
+        "tsx/esm",
+        "/app/integration/src/no-docker-coworld-episode.ts"
+      ],
+      "env": {}
+    },
+    "config_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "tokens",
+        "players",
+        "max_decision_steps",
+        "turns_per_decision_step",
+        "max_decision_ms",
+        "map",
+        "map_size",
+        "difficulty"
+      ],
+      "properties": {
+        "tokens": {
+          "type": "array",
+          "minItems": 12,
+          "maxItems": 12,
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "players": {
+          "type": "array",
+          "minItems": 12,
+          "maxItems": 12,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "name"
+            ],
+            "properties": {
+              "name": {
+                "type": "string",
+                "minLength": 1
+              }
+            }
+          }
+        },
+        "max_decision_steps": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 300
+        },
+        "turns_per_decision_step": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1000
+        },
+        "max_decision_ms": {
+          "type": "integer",
+          "minimum": 250,
+          "maximum": 180000
+        },
+        "map": {
+          "type": "string",
+          "enum": [
+            "Pangaea",
+            "Asia",
+            "World",
+            "GiantWorldMap",
+            "Europe",
+            "NorthAmerica",
+            "Africa",
+            "Mena"
+          ]
+        },
+        "map_size": {
+          "type": "string",
+          "enum": [
+            "Compact",
+            "Normal"
+          ]
+        },
+        "difficulty": {
+          "type": "string",
+          "enum": [
+            "Easy",
+            "Medium"
+          ]
+        },
+        "replay_tail_turns": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 5000,
+          "default": 0
+        },
+        "player_connect_timeout_seconds": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 300,
+          "default": 120
+        }
+      }
+    },
+    "results_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "scores",
+        "winner_slot",
+        "turn_count",
+        "tick",
+        "decision_count",
+        "accepted_decision_count",
+        "fallback_count",
+        "players"
+      ],
+      "properties": {
+        "scores": {
+          "type": "array",
+          "minItems": 12,
+          "maxItems": 12,
+          "items": {
+            "type": "number"
+          }
+        },
+        "winner_slot": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0,
+          "maximum": 11
+        },
+        "turn_count": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "tick": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "decision_count": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "accepted_decision_count": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "fallback_count": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "degraded_count": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "players": {
+          "type": "array",
+          "minItems": 12,
+          "maxItems": 12,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "slot",
+              "name",
+              "score",
+              "tiles_owned",
+              "is_alive"
+            ],
+            "properties": {
+              "slot": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 11
+              },
+              "name": {
+                "type": "string"
+              },
+              "score": {
+                "type": "number"
+              },
+              "tiles_owned": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "minimum": 0
+              },
+              "is_alive": {
+                "type": [
+                  "boolean",
+                  "null"
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    "protocols": {
+      "player": {
+        "type": "text",
+        "value": "Proxy War Coworld player protocol: connect to COWORLD_PLAYER_WS_URL. The game sends {type:'decision_request', requestID, request:{protocolVersion:'proxywar-agent-v1', observation, legalActions, responseContract}}. The player replies {type:'decision_response', requestID, selectedLegalActionId, reason, confidence?}. selectedLegalActionId must be one offered LegalAction.id from legalActions[].id. The game still validates through Proxy War AgentDecisionValidator."
+      },
+      "global": {
+        "type": "text",
+        "value": "Proxy War Coworld global protocol: /global sends JSON status snapshots with the latest Proxy War spectator frame for machine consumers, and /replay sends the saved replay payload. /client/global and /client/replay serve the native Proxy War client shell, which waits for Coworld replay artifacts and loads the existing game-record.json replay path through /ai-league-runs/<runID>/.... /client/player serves the same native view and adds a Coworld player sidebar that connects to /player for offered LegalAction.id choices."
+      }
+    },
+    "docs": {
+      "readme": {
+        "type": "text",
+        "value": "# Proxy War Coworld\n\nProxy War is a simultaneous-turn territorial strategy game. This Coworld package runs a fixed twelve-player free-for-all through the existing Proxy War game runner and preserves the LegalAction.id decision path. Each Coworld declares exactly one fixed seat count (the certifier requires players minItems == maxItems), so this 12-seat package is the 12p rung of the proxywar-ffa fixed-size ladder (proxywar-ffa-4p, proxywar-ffa-8p, proxywar-ffa-12p); the other rungs are separate packages with the same game image, player protocol, and curated map rotation but a different fixed seat count.\n\n## Rules Summary\n\nEach Coworld player controls one Proxy War slot. During a decision step, the game advances through the existing Proxy War game server and asks each connected player to choose from the current legal actions. Each play variant seats 12 players, runs up to 300 decision cycles, 100 turns per cycle, ends when a player controls 80% of the map, and keeps a short replay tail so hosted tournaments produce meaningful expansion, economy, and combat evidence without requiring a full-length match. This package ships a curated rotation of eight large/medium maps (Pangaea, Asia, World, Giant World Map, Europe, North America, Africa, Mena) - one play variant per map, all identical except the map - so a league can vary terrain across episodes. The config_schema map enum lists the same eight maps, so a commissioner that selects a map directly (rather than a named variant) is also constrained to the curated set. Certification keeps a separate short twelve-seat smoke fixture (2 decision steps x 25 turns) on Pangaea so certify finishes fast; each hosted FFA variant runs up to a 300-step x 100-turn episode (~30000 turns) on its map, ending when a player reaches 80% map control.\n\n## Player Protocol\n\nPlayers connect to COWORLD_PLAYER_WS_URL. The game sends decision_request messages containing protocolVersion, observation, legalActions, and responseContract fields. The player replies with decision_response, the same requestID, and selectedLegalActionId. selectedLegalActionId must match one offered legalActions[].id exactly.\n\nThe bundled starter player is proxywar-starter-websocket. It is intentionally simple: it reads the offered LegalAction.id values and chooses one legal id. It is useful for certification and smoke tests, not for competitive play.\n\n## Scoring\n\nThe adapter writes one numeric score per policy slot in results.scores. If Proxy War reports a winner, that slot receives 1 and every other slot receives 0. If a bounded episode ends without a winner, each of the 12 slots receives its normalized owned-territory share among policy slots. Scores sum to 1 in normal proofs.\n\nThis scoring rule is the shipped ranking scalar. Softmax can re-rank with a different scalar after upload by changing only the results.scores values, not the game/player contract or the LegalAction.id path.\n\n## Artifacts\n\nEach episode writes Coworld-compatible results, replay bytes, game/player logs, and Proxy War match artifacts. The reporter, grader, diagnoser, and optimizer-plan runnables consume the episode bundle shape used by Coworld tooling. Reporter and grader contracts are exercised; diagnoser and optimizer are contract-shaped because Coworld 0.1.15 still marks those roles reserved or runtime-pending.\n\n## Hosted Status\n\nThis manifest is a hosted Proxy War Coworld FFA rung (12 seats). It runs with the tsx loader so read-only episode pods do not need writable /tmp, sanitizes Coworld policy labels into Proxy War usernames, and serves global, replay, and player Coworld client routes from the native Proxy War viewer."
+      }
+    }
+  },
+  "player": [
+    {
+      "id": "proxywar-starter-websocket",
+      "name": "Proxy War Starter Websocket Player",
+      "type": "player",
+      "image": "proxywar-coworld-local:latest",
+      "run": [
+        "node",
+        "/app/integration/src/starter-player.mjs"
+      ],
+      "description": "Minimal websocket player that chooses one offered LegalAction.id."
+    }
+  ],
+  "reporter": [],
+  "commissioner": [],
+  "grader": [],
+  "diagnoser": [],
+  "optimizer": [],
+  "variants": [
+    {
+      "id": "twelve-player-ffa-pangaea",
+      "name": "Twelve Player FFA - Pangaea",
+      "description": "Twelve-policy free-for-all on Pangaea (Compact): 12 seats fight simultaneously, up to 300 decision steps x 100 turns (~30000 turns), 300 decisions per seat, ending when a player controls 80% of the map or the decision-step cap is reached. Same image, player protocol, and rules as every rung of the ladder; only the map and seat count differ.",
+      "game_config": {
+        "players": [
+          {
+            "name": "Coworld FFA 1"
+          },
+          {
+            "name": "Coworld FFA 2"
+          },
+          {
+            "name": "Coworld FFA 3"
+          },
+          {
+            "name": "Coworld FFA 4"
+          },
+          {
+            "name": "Coworld FFA 5"
+          },
+          {
+            "name": "Coworld FFA 6"
+          },
+          {
+            "name": "Coworld FFA 7"
+          },
+          {
+            "name": "Coworld FFA 8"
+          },
+          {
+            "name": "Coworld FFA 9"
+          },
+          {
+            "name": "Coworld FFA 10"
+          },
+          {
+            "name": "Coworld FFA 11"
+          },
+          {
+            "name": "Coworld FFA 12"
+          }
+        ],
+        "max_decision_steps": 300,
+        "turns_per_decision_step": 100,
+        "max_decision_ms": 60000,
+        "map": "Pangaea",
+        "map_size": "Compact",
+        "difficulty": "Easy",
+        "replay_tail_turns": 500,
+        "player_connect_timeout_seconds": 120
+      }
+    },
+    {
+      "id": "twelve-player-ffa-asia",
+      "name": "Twelve Player FFA - Asia",
+      "description": "Twelve-policy free-for-all on Asia (Compact): 12 seats fight simultaneously, up to 300 decision steps x 100 turns (~30000 turns), 300 decisions per seat, ending when a player controls 80% of the map or the decision-step cap is reached. Same image, player protocol, and rules as every rung of the ladder; only the map and seat count differ.",
+      "game_config": {
+        "players": [
+          {
+            "name": "Coworld FFA 1"
+          },
+          {
+            "name": "Coworld FFA 2"
+          },
+          {
+            "name": "Coworld FFA 3"
+          },
+          {
+            "name": "Coworld FFA 4"
+          },
+          {
+            "name": "Coworld FFA 5"
+          },
+          {
+            "name": "Coworld FFA 6"
+          },
+          {
+            "name": "Coworld FFA 7"
+          },
+          {
+            "name": "Coworld FFA 8"
+          },
+          {
+            "name": "Coworld FFA 9"
+          },
+          {
+            "name": "Coworld FFA 10"
+          },
+          {
+            "name": "Coworld FFA 11"
+          },
+          {
+            "name": "Coworld FFA 12"
+          }
+        ],
+        "max_decision_steps": 300,
+        "turns_per_decision_step": 100,
+        "max_decision_ms": 60000,
+        "map": "Asia",
+        "map_size": "Compact",
+        "difficulty": "Easy",
+        "replay_tail_turns": 500,
+        "player_connect_timeout_seconds": 120
+      }
+    },
+    {
+      "id": "twelve-player-ffa-world",
+      "name": "Twelve Player FFA - World",
+      "description": "Twelve-policy free-for-all on World (Compact): 12 seats fight simultaneously, up to 300 decision steps x 100 turns (~30000 turns), 300 decisions per seat, ending when a player controls 80% of the map or the decision-step cap is reached. Same image, player protocol, and rules as every rung of the ladder; only the map and seat count differ.",
+      "game_config": {
+        "players": [
+          {
+            "name": "Coworld FFA 1"
+          },
+          {
+            "name": "Coworld FFA 2"
+          },
+          {
+            "name": "Coworld FFA 3"
+          },
+          {
+            "name": "Coworld FFA 4"
+          },
+          {
+            "name": "Coworld FFA 5"
+          },
+          {
+            "name": "Coworld FFA 6"
+          },
+          {
+            "name": "Coworld FFA 7"
+          },
+          {
+            "name": "Coworld FFA 8"
+          },
+          {
+            "name": "Coworld FFA 9"
+          },
+          {
+            "name": "Coworld FFA 10"
+          },
+          {
+            "name": "Coworld FFA 11"
+          },
+          {
+            "name": "Coworld FFA 12"
+          }
+        ],
+        "max_decision_steps": 300,
+        "turns_per_decision_step": 100,
+        "max_decision_ms": 60000,
+        "map": "World",
+        "map_size": "Compact",
+        "difficulty": "Easy",
+        "replay_tail_turns": 500,
+        "player_connect_timeout_seconds": 120
+      }
+    },
+    {
+      "id": "twelve-player-ffa-giant-world",
+      "name": "Twelve Player FFA - Giant World Map",
+      "description": "Twelve-policy free-for-all on Giant World Map (Compact): 12 seats fight simultaneously, up to 300 decision steps x 100 turns (~30000 turns), 300 decisions per seat, ending when a player controls 80% of the map or the decision-step cap is reached. Same image, player protocol, and rules as every rung of the ladder; only the map and seat count differ.",
+      "game_config": {
+        "players": [
+          {
+            "name": "Coworld FFA 1"
+          },
+          {
+            "name": "Coworld FFA 2"
+          },
+          {
+            "name": "Coworld FFA 3"
+          },
+          {
+            "name": "Coworld FFA 4"
+          },
+          {
+            "name": "Coworld FFA 5"
+          },
+          {
+            "name": "Coworld FFA 6"
+          },
+          {
+            "name": "Coworld FFA 7"
+          },
+          {
+            "name": "Coworld FFA 8"
+          },
+          {
+            "name": "Coworld FFA 9"
+          },
+          {
+            "name": "Coworld FFA 10"
+          },
+          {
+            "name": "Coworld FFA 11"
+          },
+          {
+            "name": "Coworld FFA 12"
+          }
+        ],
+        "max_decision_steps": 300,
+        "turns_per_decision_step": 100,
+        "max_decision_ms": 60000,
+        "map": "GiantWorldMap",
+        "map_size": "Compact",
+        "difficulty": "Easy",
+        "replay_tail_turns": 500,
+        "player_connect_timeout_seconds": 120
+      }
+    },
+    {
+      "id": "twelve-player-ffa-europe",
+      "name": "Twelve Player FFA - Europe",
+      "description": "Twelve-policy free-for-all on Europe (Compact): 12 seats fight simultaneously, up to 300 decision steps x 100 turns (~30000 turns), 300 decisions per seat, ending when a player controls 80% of the map or the decision-step cap is reached. Same image, player protocol, and rules as every rung of the ladder; only the map and seat count differ.",
+      "game_config": {
+        "players": [
+          {
+            "name": "Coworld FFA 1"
+          },
+          {
+            "name": "Coworld FFA 2"
+          },
+          {
+            "name": "Coworld FFA 3"
+          },
+          {
+            "name": "Coworld FFA 4"
+          },
+          {
+            "name": "Coworld FFA 5"
+          },
+          {
+            "name": "Coworld FFA 6"
+          },
+          {
+            "name": "Coworld FFA 7"
+          },
+          {
+            "name": "Coworld FFA 8"
+          },
+          {
+            "name": "Coworld FFA 9"
+          },
+          {
+            "name": "Coworld FFA 10"
+          },
+          {
+            "name": "Coworld FFA 11"
+          },
+          {
+            "name": "Coworld FFA 12"
+          }
+        ],
+        "max_decision_steps": 300,
+        "turns_per_decision_step": 100,
+        "max_decision_ms": 60000,
+        "map": "Europe",
+        "map_size": "Compact",
+        "difficulty": "Easy",
+        "replay_tail_turns": 500,
+        "player_connect_timeout_seconds": 120
+      }
+    },
+    {
+      "id": "twelve-player-ffa-north-america",
+      "name": "Twelve Player FFA - North America",
+      "description": "Twelve-policy free-for-all on North America (Compact): 12 seats fight simultaneously, up to 300 decision steps x 100 turns (~30000 turns), 300 decisions per seat, ending when a player controls 80% of the map or the decision-step cap is reached. Same image, player protocol, and rules as every rung of the ladder; only the map and seat count differ.",
+      "game_config": {
+        "players": [
+          {
+            "name": "Coworld FFA 1"
+          },
+          {
+            "name": "Coworld FFA 2"
+          },
+          {
+            "name": "Coworld FFA 3"
+          },
+          {
+            "name": "Coworld FFA 4"
+          },
+          {
+            "name": "Coworld FFA 5"
+          },
+          {
+            "name": "Coworld FFA 6"
+          },
+          {
+            "name": "Coworld FFA 7"
+          },
+          {
+            "name": "Coworld FFA 8"
+          },
+          {
+            "name": "Coworld FFA 9"
+          },
+          {
+            "name": "Coworld FFA 10"
+          },
+          {
+            "name": "Coworld FFA 11"
+          },
+          {
+            "name": "Coworld FFA 12"
+          }
+        ],
+        "max_decision_steps": 300,
+        "turns_per_decision_step": 100,
+        "max_decision_ms": 60000,
+        "map": "NorthAmerica",
+        "map_size": "Compact",
+        "difficulty": "Easy",
+        "replay_tail_turns": 500,
+        "player_connect_timeout_seconds": 120
+      }
+    },
+    {
+      "id": "twelve-player-ffa-africa",
+      "name": "Twelve Player FFA - Africa",
+      "description": "Twelve-policy free-for-all on Africa (Compact): 12 seats fight simultaneously, up to 300 decision steps x 100 turns (~30000 turns), 300 decisions per seat, ending when a player controls 80% of the map or the decision-step cap is reached. Same image, player protocol, and rules as every rung of the ladder; only the map and seat count differ.",
+      "game_config": {
+        "players": [
+          {
+            "name": "Coworld FFA 1"
+          },
+          {
+            "name": "Coworld FFA 2"
+          },
+          {
+            "name": "Coworld FFA 3"
+          },
+          {
+            "name": "Coworld FFA 4"
+          },
+          {
+            "name": "Coworld FFA 5"
+          },
+          {
+            "name": "Coworld FFA 6"
+          },
+          {
+            "name": "Coworld FFA 7"
+          },
+          {
+            "name": "Coworld FFA 8"
+          },
+          {
+            "name": "Coworld FFA 9"
+          },
+          {
+            "name": "Coworld FFA 10"
+          },
+          {
+            "name": "Coworld FFA 11"
+          },
+          {
+            "name": "Coworld FFA 12"
+          }
+        ],
+        "max_decision_steps": 300,
+        "turns_per_decision_step": 100,
+        "max_decision_ms": 60000,
+        "map": "Africa",
+        "map_size": "Compact",
+        "difficulty": "Easy",
+        "replay_tail_turns": 500,
+        "player_connect_timeout_seconds": 120
+      }
+    },
+    {
+      "id": "twelve-player-ffa-mena",
+      "name": "Twelve Player FFA - Mena",
+      "description": "Twelve-policy free-for-all on Mena (Compact): 12 seats fight simultaneously, up to 300 decision steps x 100 turns (~30000 turns), 300 decisions per seat, ending when a player controls 80% of the map or the decision-step cap is reached. Same image, player protocol, and rules as every rung of the ladder; only the map and seat count differ.",
+      "game_config": {
+        "players": [
+          {
+            "name": "Coworld FFA 1"
+          },
+          {
+            "name": "Coworld FFA 2"
+          },
+          {
+            "name": "Coworld FFA 3"
+          },
+          {
+            "name": "Coworld FFA 4"
+          },
+          {
+            "name": "Coworld FFA 5"
+          },
+          {
+            "name": "Coworld FFA 6"
+          },
+          {
+            "name": "Coworld FFA 7"
+          },
+          {
+            "name": "Coworld FFA 8"
+          },
+          {
+            "name": "Coworld FFA 9"
+          },
+          {
+            "name": "Coworld FFA 10"
+          },
+          {
+            "name": "Coworld FFA 11"
+          },
+          {
+            "name": "Coworld FFA 12"
+          }
+        ],
+        "max_decision_steps": 300,
+        "turns_per_decision_step": 100,
+        "max_decision_ms": 60000,
+        "map": "Mena",
+        "map_size": "Compact",
+        "difficulty": "Easy",
+        "replay_tail_turns": 500,
+        "player_connect_timeout_seconds": 120
+      }
+    }
+  ],
+  "certification": {
+    "game_config": {
+      "players": [
+        {
+          "name": "Coworld FFA 1"
+        },
+        {
+          "name": "Coworld FFA 2"
+        },
+        {
+          "name": "Coworld FFA 3"
+        },
+        {
+          "name": "Coworld FFA 4"
+        },
+        {
+          "name": "Coworld FFA 5"
+        },
+        {
+          "name": "Coworld FFA 6"
+        },
+        {
+          "name": "Coworld FFA 7"
+        },
+        {
+          "name": "Coworld FFA 8"
+        },
+        {
+          "name": "Coworld FFA 9"
+        },
+        {
+          "name": "Coworld FFA 10"
+        },
+        {
+          "name": "Coworld FFA 11"
+        },
+        {
+          "name": "Coworld FFA 12"
+        }
+      ],
+      "max_decision_steps": 2,
+      "turns_per_decision_step": 25,
+      "max_decision_ms": 15000,
+      "map": "Pangaea",
+      "map_size": "Compact",
+      "difficulty": "Easy",
+      "replay_tail_turns": 0,
+      "player_connect_timeout_seconds": 120
+    },
+    "players": [
+      {
+        "player_id": "proxywar-starter-websocket"
+      },
+      {
+        "player_id": "proxywar-starter-websocket"
+      },
+      {
+        "player_id": "proxywar-starter-websocket"
+      },
+      {
+        "player_id": "proxywar-starter-websocket"
+      },
+      {
+        "player_id": "proxywar-starter-websocket"
+      },
+      {
+        "player_id": "proxywar-starter-websocket"
+      },
+      {
+        "player_id": "proxywar-starter-websocket"
+      },
+      {
+        "player_id": "proxywar-starter-websocket"
+      },
+      {
+        "player_id": "proxywar-starter-websocket"
+      },
+      {
+        "player_id": "proxywar-starter-websocket"
+      },
+      {
+        "player_id": "proxywar-starter-websocket"
+      },
+      {
+        "player_id": "proxywar-starter-websocket"
+      }
+    ]
+  }
+}
