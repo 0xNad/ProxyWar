@@ -56,6 +56,7 @@ import {
   createDefaultAgentSpecs,
 } from "../../src/server/agents/AgentLeagueMatch";
 import { AgentLocalGameMirror } from "../../src/server/agents/AgentLocalGameMirror";
+import { SPAWN_CONVERGE_PROGRESS } from "../../src/server/agents/AgentSpawnExplorer";
 import { runAgentStepLockedLeague } from "../../src/server/agents/AgentStepLockedLeague";
 import { LlmAgentBrain } from "../../src/server/agents/LlmAgentBrain";
 import { LegalActionBuilder } from "../../src/server/agents/LegalActionBuilder";
@@ -643,15 +644,14 @@ describe("AgentLeagueMatchRunner", () => {
         stride: 2,
       }),
       log,
-      // A 1-tile prune radius keeps the candidate pool alive through the WHOLE
-      // spawn phase (the default per-submission prune radius exhausts a
-      // 500-candidate pool mid-phase), so the loop still has legal spawn tiles
-      // at the boundary tick (ticks === numSpawnPhaseTurns). A submission there
-      // would be recorded as accepted but land one server turn AFTER the phase
-      // closes and silently never execute — a dead record whose tile
-      // contradicts the player's actual spawn. A single agent keeps the
-      // requested centers free of cross-agent spawn-area contention.
-      minSpawnDistance: 1,
+      // Default minSpawnDistance on purpose: stake-based reservation only
+      // excludes OTHER agents' current stakes, and this run has a single agent,
+      // so the candidate pool stays alive through the WHOLE spawn phase and the
+      // loop still has legal spawn tiles at the boundary tick
+      // (ticks === numSpawnPhaseTurns). A submission there would be recorded as
+      // accepted but land one server turn AFTER the phase closes and silently
+      // never execute — a dead record whose tile contradicts the player's
+      // actual spawn.
     });
     const mirror = new AgentLocalGameMirror(mapLoader, log);
 
@@ -682,6 +682,135 @@ describe("AgentLeagueMatchRunner", () => {
       expect(
         mirrorGame.playerByClientID(lastRecord.clientID!)?.spawnTile(),
       ).toBe(spawnIntent(lastRecord).tile);
+    } finally {
+      await game.end({ archive: false });
+    }
+  }, 600_000);
+
+  it("releases vacated spawn stakes so relocation survives to the converge window (no pool exhaustion)", async () => {
+    const log = makeLogger();
+    const mapLoader = new StaticMapLoader();
+    const config = { ...gameConfig, gameMapSize: GameMapSize.Compact };
+    const terrain = await loadTerrainMap(
+      config.gameMap,
+      config.gameMapSize,
+      mapLoader,
+    );
+    const specs = createDefaultAgentSpecs(4);
+    const decideSpy = vi.fn(async () => ({
+      actionID: "hold",
+      reason: "the brain must not be consulted during the spawn phase",
+    }));
+    const participants = createAgentParticipants(specs, log, {
+      brainFactory: () => ({ brainType: "mock-llm", decide: decideSpy }),
+    });
+    const game = new GameServer(
+      "AGENT014",
+      log,
+      Date.now(),
+      steppedServerConfig,
+      config,
+    );
+    const spawnCandidates = buildSpawnCandidates(terrain.gameMap, {
+      maxCandidates: 500,
+      stride: 2,
+    });
+    // DEFAULT minSpawnDistance on purpose: the regression this guards is the
+    // shared pool exhausting under the real pruning radius. Cumulative pruning
+    // burned every submission's neighborhood forever — including the submitting
+    // agent's own vacated picks — emptying a 500-candidate pool mid-phase, so
+    // relocation froze around 40-60% progress and the converge-to-anchor settle
+    // never ran on a live pool (watched run ab-ffa4p-spawnwatch-r1: submissions
+    // stopped at turn 125 of 300).
+    const match = new AgentLeagueMatchRunner({
+      game,
+      participants,
+      spawnCandidates,
+      log,
+    });
+    const mirror = new AgentLocalGameMirror(mapLoader, log);
+
+    try {
+      match.attachAgents();
+      match.startGame();
+      const spawnRecords = await match.runSpawnPhase({
+        mirror,
+        messages: () => participants[0]?.runner.serverMessages() ?? [],
+        turnsPerSpawnTick: 25,
+      });
+
+      expect(decideSpy).not.toHaveBeenCalled();
+      const mirrorGame = mirror.gameState();
+      if (mirrorGame === null) {
+        throw new Error("expected mirror game state after the spawn phase");
+      }
+      expect(mirrorGame.inSpawnPhase()).toBe(false);
+      expect(spawnRecords.every((record) => record.result.accepted)).toBe(true);
+      const spawnPhaseTurns = mirrorGame.config().numSpawnPhaseTurns();
+      const agentIDs = [...new Set(spawnRecords.map((record) => record.agentID))];
+      expect(agentIDs).toHaveLength(4);
+
+      const lateThreshold = Math.floor(spawnPhaseTurns * 0.6);
+      const convergeThreshold = Math.ceil(
+        spawnPhaseTurns * SPAWN_CONVERGE_PROGRESS,
+      );
+      for (const agentID of agentIDs) {
+        const agentRecords = spawnRecords.filter(
+          (record) => record.agentID === agentID,
+        );
+        // Pool alive late: under cumulative pruning the pool emptied mid-phase
+        // and submissions stopped before 60% progress; with stake release every
+        // agent still relocates in the last 40% of the phase.
+        expect(
+          agentRecords.some((record) => record.turnNumber >= lateThreshold),
+        ).toBe(true);
+        // The final settle happens IN the converge window (>= 80% progress) and
+        // before the boundary tick — the converge-to-anchor logic runs on a live
+        // pool instead of the tile being locked in mid-phase.
+        const last = agentRecords[agentRecords.length - 1]!;
+        expect(last.turnNumber).toBeGreaterThanOrEqual(convergeThreshold);
+        expect(last.turnNumber).toBeLessThan(spawnPhaseTurns);
+        // Last-wins relocation: the settle tile is where the player actually
+        // spawned.
+        expect(
+          mirrorGame.playerByClientID(last.clientID!)?.spawnTile(),
+        ).toBe(spawnIntent(last).tile);
+      }
+
+      // Reservation invariant preserved: replaying submissions in order, no agent
+      // ever picks a tile inside ANOTHER agent's CURRENT (most recent accepted)
+      // stake neighborhood. Own previous stakes are released — relocating near
+      // one's own vacated pick is legal.
+      const candidateByTile = new Map(
+        spawnCandidates.map((candidate) => [candidate.tile, candidate]),
+      );
+      const minDistance = match.effectiveMinSpawnDistance();
+      expect(minDistance).toBeGreaterThan(1);
+      const stakes = new Map<
+        string,
+        { x?: number; y?: number; tile: number }
+      >();
+      for (const record of spawnRecords) {
+        const tile = spawnIntent(record).tile;
+        const chosen = candidateByTile.get(tile);
+        expect(chosen).toBeDefined();
+        for (const [otherAgentID, stake] of stakes) {
+          if (otherAgentID === record.agentID) {
+            continue;
+          }
+          const distance =
+            chosen!.x !== undefined &&
+            chosen!.y !== undefined &&
+            stake.x !== undefined &&
+            stake.y !== undefined
+              ? Math.hypot(chosen!.x - stake.x, chosen!.y - stake.y)
+              : chosen!.tile === stake.tile
+                ? 0
+                : Number.POSITIVE_INFINITY;
+          expect(distance).toBeGreaterThanOrEqual(minDistance);
+        }
+        stakes.set(record.agentID, chosen!);
+      }
     } finally {
       await game.end({ archive: false });
     }
