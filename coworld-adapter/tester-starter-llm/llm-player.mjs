@@ -44,6 +44,15 @@ const STRATEGY = [
   "(cities, ports, factories) once you have a base; attack only weak or exposed bordered rivals.",
   "Read relativeTroopRatio (your troops / theirs): attack when comfortably above 1, avoid when below 1.",
   "Don't attack allies. Don't start several wars at once. Ally early, betray late and only when it clearly wins.",
+  "UPGRADE, don't sprawl: 'upgrade' actions level up a City/Port/Factory/Silo/SAM IN PLACE — no new",
+  "land needed, cost capped ~1M — so when land is tight or you have a base, prefer upgrades over new builds.",
+  "Keep gold WORKING, not hoarded. gold > 5M means you are under-spending: buy upgrades, Defense Posts,",
+  "a Missile Silo (~1M), and SAM Launchers (~1.5M) beside your city cluster — SAMs auto-intercept enemy",
+  "nukes in ~70 tiles and are the only thing that saves your economy from one bomb.",
+  "If gold > 30M and a rival dominates the map, MIRV them (~25M, appears as a high-risk build naming the",
+  "target): 350 warheads gut an empire. Atom (~750k) and Hydrogen (~5M) bombs punish mid-size threats.",
+  "High-risk actions (nukes) are only playable if you include their kind in preferKinds AND name the",
+  "victim in target — do both when you mean it.",
 ].join(" ");
 const PLAN_EVERY = Number(process.env.PLAN_EVERY || 3); // refresh the plan every N decisions
 const PLAN_KINDS = [
@@ -80,6 +89,7 @@ function buildState(obs, actions) {
   const self = {
     tileShare: own.tileShare, troops: own.troops, troopRatio: own.troopRatio,
     gold: own.gold, borderTiles: own.borderTiles, incomingAttacks: own.incomingAttacks,
+    structures: own.units, // your buildings (counts) — upgrade these instead of sprawling
   };
   const rivals = (obs.visiblePlayers || [])
     .filter((p) => p && p.isAlive)
@@ -87,7 +97,10 @@ function buildState(obs, actions) {
       name: clean(p.name), tileShare: p.tileShare, relativeTroopRatio: p.relativeTroopRatio,
       sharesBorder: p.sharesBorder, isAllied: p.isAllied, relation: p.relation, canAttack: p.canAttack,
     }));
-  const legal = actions.map((a) => ({ id: a.id, kind: a.kind, label: clean(a.label), risk: a.risk?.level }));
+  const legal = actions.map((a) => ({
+    id: a.id, kind: a.kind, label: clean(a.label), risk: a.risk?.level,
+    ...(a.metadata?.cost !== undefined ? { cost: a.metadata.cost } : {}),
+  }));
   return { phase: obs.phase, self, rivals, avoid: avoidActionIDs(), legalActions: legal };
 }
 
@@ -170,8 +183,13 @@ function choose(actions) {
   const matchesAvoidedTarget = (a) =>
     avoidTargets.some((t) => t && String(a.label || "").toLowerCase().includes(t.toLowerCase()));
   for (const kind of order) {
+    // High-risk actions (nukes/MIRV arrive as high-risk builds) are eligible ONLY
+    // when the plan explicitly lists this kind in preferKinds — the model must
+    // authorize aggression; otherwise the old always-skip-high-risk rule applies.
+    const authorized = planned.includes(kind);
     const candidates = actions.filter(
-      (c) => c.kind === kind && c.risk?.level !== "high" && !avoid.has(c.id) && !matchesAvoidedTarget(c),
+      (c) => c.kind === kind && (authorized || c.risk?.level !== "high") &&
+        !avoid.has(c.id) && !matchesAvoidedTarget(c),
     );
     if (candidates.length === 0) continue;
     // Within the kind, prefer the plan's named target when one is offered.

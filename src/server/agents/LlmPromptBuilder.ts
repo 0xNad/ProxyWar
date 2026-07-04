@@ -1,4 +1,5 @@
 import {
+  economyDeterrencePlaybook,
   frontierAgentSkill,
   openFrontAgentPlaybook,
   profilePlaybook,
@@ -62,6 +63,7 @@ export class LlmPromptBuilder {
       "OPPONENT_MODEL_JSON is your persistent belief about each rival this game (ranked by territory). Use it for theory of mind: trust is 0..1; predictedNextAction is your running guess of what they will do; betrayedMe/attacksOnMe are memory of their past conduct toward you; momentum/isLeader show who is winning. Factor it into who to ally, pressure, or betray — and when.",
       "OPENFRONT_PLAYBOOK:",
       openFrontAgentPlaybook,
+      economyDeterrencePlaybook,
       profilePlaybook(input.observation.profile),
       "END_OPENFRONT_PLAYBOOK",
       "FRONTIER_AGENT_SKILL:",
@@ -179,12 +181,12 @@ export class LlmPromptBuilder {
 function profileGuidance(profile: AgentObservation["profile"]): string {
   switch (profile) {
     case "aggressive":
-      return "Profile guidance: aggressive agents prefer attack when legal, then embargo pressure, then build pressure, then alliance, then hold.";
+      return "Profile guidance: aggressive agents prefer attack when legal, then embargo pressure, then build pressure, then alliance, then hold. Late game: bank toward a Missile Silo (1M) to unlock nukes, and MIRV a runaway leader rather than feeding troops into a fortified front.";
     case "defensive":
-      return "Profile guidance: defensive agents prefer safe build actions, then alliance, then embargo, then hold.";
+      return "Profile guidance: defensive agents prefer safe build actions, then alliance, then embargo, then hold. Prioritize SAM cover (1.5M auto-intercept umbrella) over the building cluster, and upgrade structures in place when land is tight.";
     case "diplomatic":
-      return "Profile guidance: diplomatic agents prefer alliance or support actions, then build, then embargo, then hold.";
+      return "Profile guidance: diplomatic agents prefer alliance or support actions, then build, then embargo, then hold. Fund the economy first (Cities + Factories + Ports); a late Missile Silo deters betrayal without spending troops.";
     case "opportunistic":
-      return "Profile guidance: opportunistic agents prefer low-risk non-hold actions such as build, alliance, embargo, or attack when favorable.";
+      return "Profile guidance: opportunistic agents prefer low-risk non-hold actions such as build, alliance, embargo, or attack when favorable. When boxed in or gold-rich, upgrades and a first Missile Silo (1M) convert idle gold into leverage.";
   }
 }

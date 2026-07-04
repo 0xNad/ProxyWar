@@ -15603,6 +15603,732 @@ describe("singleBindingDirective (single-directive invariant, precedence commitm
   });
 });
 
+describe("K2 build directive deterrent units (MissileSilo/SAMLauncher)", () => {
+  const FLAG = "PROXYWAR_TUNE_DIRECTIVE_BUILD";
+  let savedFlag: string | undefined;
+  beforeEach(() => {
+    savedFlag = process.env[FLAG];
+  });
+  afterEach(() => {
+    if (savedFlag === undefined) {
+      delete process.env[FLAG];
+    } else {
+      process.env[FLAG] = savedFlag;
+    }
+  });
+
+  function deterrentPlan(
+    buildDirective?: StrategicPlan["buildDirective"],
+  ): StrategicPlan {
+    return {
+      planID: "agent-1:expand",
+      objective: "expand_territory",
+      turnIntent: "growth",
+      targetPlayerId: null,
+      rationale: "grow",
+      startedAtTick: 4,
+      maxDecisionCycles: 3,
+      successCriteria: [],
+      failureCriteria: [],
+      preferredActionKinds: ["attack", "hold"],
+      forbiddenActionKinds: [],
+      enabledModules: ["expansion", "economy", "defense"],
+      plannerSource: "real-llm",
+      ...(buildDirective !== undefined ? { buildDirective } : {}),
+    };
+  }
+
+  const siloBuildAction = (): LegalAction => ({
+    id: "build:Missile Silo:300",
+    kind: "build",
+    label: "Build Missile Silo",
+    intent: { type: "build_unit", unit: UnitType.MissileSilo, tile: 300 },
+    risk: { level: "medium", score: 0.35 },
+    metadata: { role: "infrastructure", unit: UnitType.MissileSilo },
+  });
+  const samBuildAction = (): LegalAction => ({
+    id: "build:SAM Launcher:301",
+    kind: "build",
+    label: "Build SAM Launcher",
+    intent: { type: "build_unit", unit: UnitType.SAMLauncher, tile: 301 },
+    risk: { level: "low", score: 0.15 },
+    metadata: { role: "defensive", unit: UnitType.SAMLauncher },
+  });
+
+  it("a MissileSilo directive forces the silo build over expansion and economy", () => {
+    const decision = new FrontierPolicyExecutor("opportunistic").decide(
+      {
+        observation: activeObservation("expand_territory"),
+        legalActions: [...buildLegalActions(), siloBuildAction()],
+      },
+      deterrentPlan({ unit: "MissileSilo" }),
+    );
+    expect(decision.actionID).toBe("build:Missile Silo:300");
+  });
+
+  it("a SAMLauncher directive forces the SAM build over expansion and economy", () => {
+    const decision = new FrontierPolicyExecutor("opportunistic").decide(
+      {
+        observation: activeObservation("expand_territory"),
+        legalActions: [...buildLegalActions(), samBuildAction()],
+      },
+      deterrentPlan({ unit: "SAMLauncher" }),
+    );
+    expect(decision.actionID).toBe("build:SAM Launcher:301");
+  });
+
+  it('"any" binds only ECONOMIC builds — deterrent units are never matched by "any"', () => {
+    const decision = new FrontierPolicyExecutor("opportunistic").decide(
+      {
+        observation: activeObservation("expand_territory"),
+        legalActions: [
+          {
+            id: "expand:terra-nullius:10",
+            kind: "attack",
+            label: "Expand",
+            intent: { type: "attack", targetID: null, troops: 100 },
+            risk: { level: "low", score: 0.1 },
+            metadata: { expansion: true },
+          },
+          siloBuildAction(),
+          samBuildAction(),
+          hold(),
+        ],
+      },
+      deterrentPlan({ unit: "any" }),
+    );
+    // No economic build is offered, so an "any" directive forces nothing — the
+    // deterrent builds must not be bound by an economy-lean directive.
+    expect(decision.actionID).not.toBe("build:Missile Silo:300");
+    expect(decision.actionID).not.toBe("build:SAM Launcher:301");
+  });
+
+  it("economic directive semantics unchanged: a City directive ignores an offered silo", () => {
+    const decision = new FrontierPolicyExecutor("opportunistic").decide(
+      {
+        observation: activeObservation("expand_territory"),
+        legalActions: [...buildLegalActions(), siloBuildAction()],
+      },
+      deterrentPlan({ unit: "City" }),
+    );
+    expect(decision.actionID).toBe("build:City:100");
+  });
+
+  // No expansion action offered in the parse tests: with safe neutral expansion
+  // legal, the decision brief's base-building control goes must_follow
+  // expand_territory and a secure_economy plan is repair-looped into the rule
+  // fallback (which never carries a directive) — the parse path under test here
+  // is the build-priority cycle where the Commander binds a deterrent build.
+  const parseTestActions = (): LegalAction[] => [
+    {
+      id: "build:City:100",
+      kind: "build",
+      label: "Build City",
+      intent: { type: "build_unit", unit: UnitType.City, tile: 100 },
+      risk: { level: "medium", score: 0.3 },
+      metadata: { role: "economic", unit: "City" },
+    },
+    hold(),
+  ];
+
+  it("the Commander can emit buildDirective MissileSilo (parser accepts the new unit)", async () => {
+    process.env[FLAG] = "1";
+    const provider: LlmProvider = {
+      providerType: "codex-cli",
+      async complete(): Promise<string> {
+        return JSON.stringify({
+          objective: "secure_economy",
+          turnIntent: "build",
+          rationale: "stand up deterrence",
+          maxDecisionCycles: 2,
+          preferredActionKinds: ["build", "hold"],
+          enabledModules: ["economy", "defense"],
+          targetPlayerId: null,
+          buildDirective: { unit: "MissileSilo" },
+        });
+      },
+    };
+    const planDecision = await new LlmAgentPlanner({
+      provider,
+      profile: "opportunistic",
+      plannerType: "codex-cli",
+    }).plan(
+      {
+        observation: activeObservation("secure_economy"),
+        legalActions: parseTestActions(),
+      },
+      null,
+    );
+    expect(planDecision.fallbackUsed).toBe(false);
+    expect(planDecision.plan.buildDirective).toEqual({ unit: "MissileSilo" });
+  });
+
+  it('an unknown buildDirective unit still clamps to "any"', async () => {
+    process.env[FLAG] = "1";
+    const provider: LlmProvider = {
+      providerType: "codex-cli",
+      async complete(): Promise<string> {
+        return JSON.stringify({
+          objective: "secure_economy",
+          turnIntent: "build",
+          rationale: "build something",
+          maxDecisionCycles: 2,
+          preferredActionKinds: ["build", "hold"],
+          enabledModules: ["economy"],
+          targetPlayerId: null,
+          buildDirective: { unit: "Warship" },
+        });
+      },
+    };
+    const planDecision = await new LlmAgentPlanner({
+      provider,
+      profile: "opportunistic",
+      plannerType: "codex-cli",
+    }).plan(
+      {
+        observation: activeObservation("secure_economy"),
+        legalActions: parseTestActions(),
+      },
+      null,
+    );
+    expect(planDecision.fallbackUsed).toBe(false);
+    expect(planDecision.plan.buildDirective).toEqual({ unit: "any" });
+  });
+});
+
+describe("K2 gold-pressure spend-down lever (PROXYWAR_TUNE_GOLD_PRESSURE)", () => {
+  const FLAGS = [
+    "PROXYWAR_TUNE_GOLD_PRESSURE",
+    "PROXYWAR_TUNE_GOLD_PRESSURE_FLOOR",
+    "PROXYWAR_TUNE_GOLD_PRESSURE_MIRV_FLOOR",
+  ] as const;
+  let savedFlags: Record<string, string | undefined> = {};
+  beforeEach(() => {
+    savedFlags = {};
+    for (const flag of FLAGS) {
+      savedFlags[flag] = process.env[flag];
+      delete process.env[flag];
+    }
+  });
+  afterEach(() => {
+    for (const flag of FLAGS) {
+      const saved = savedFlags[flag];
+      if (saved === undefined) {
+        delete process.env[flag];
+      } else {
+        process.env[flag] = saved;
+      }
+    }
+  });
+
+  function richObservation(
+    gold: string,
+    options: { turnNumber?: number; siloCount?: number } = {},
+  ): AgentObservation {
+    const turnNumber = options.turnNumber ?? 900;
+    const base = new AgentObservationBuilder().build({
+      agentID: "agent-1",
+      clientID: null,
+      username: "Planner Agent",
+      profile: "aggressive",
+      gameID: "PLAN",
+      turnNumber,
+      phaseOverride: "active",
+    });
+    return {
+      ...base,
+      turnNumber,
+      tick: turnNumber,
+      ownState: {
+        playerID: "agent-1",
+        clientID: null,
+        smallID: 1,
+        name: "Planner Agent",
+        type: PlayerType.Human,
+        isAlive: true,
+        isDisconnected: false,
+        isTraitor: false,
+        hasSpawned: true,
+        troops: 500_000,
+        maxTroops: 800_000,
+        troopRatio: 0.6,
+        gold,
+        tilesOwned: 14_000,
+        tileShare: 0.2,
+        borderTiles: 100,
+        outgoingAttacks: 0,
+        incomingAttacks: 0,
+        outgoingAllianceRequests: 0,
+        incomingAllianceRequests: 0,
+        unitCounts: {
+          [UnitType.City]: 1,
+          [UnitType.Factory]: 1,
+          ...(options.siloCount !== undefined
+            ? { [UnitType.MissileSilo]: options.siloCount }
+            : {}),
+        },
+      },
+      combat: {
+        ...base.combat,
+        canExpandIntoNeutral: true,
+        incomingAttackPlayerIDs: [],
+        incomingAttacks: [],
+      },
+      memory: {
+        ...base.memory,
+        recentActions: [],
+        recentBuildCount: 0,
+      },
+    };
+  }
+
+  const expandAction = (): LegalAction => ({
+    id: "expand:terra-nullius:10",
+    kind: "attack",
+    label: "Expand",
+    intent: { type: "attack", targetID: null, troops: 100 },
+    risk: { level: "low", score: 0.1 },
+    metadata: { expansion: true },
+  });
+  const cityBuildAction = (): LegalAction => ({
+    id: "build:City:100",
+    kind: "build",
+    label: "Build City",
+    intent: { type: "build_unit", unit: UnitType.City, tile: 100 },
+    risk: { level: "medium", score: 0.3 },
+    metadata: { role: "economic", unit: "City" },
+  });
+  const nukeStrikeAction = (): LegalAction => ({
+    id: "nuke:Atom Bomb:RIVAL:777",
+    kind: "nuke",
+    label: "Launch Atom Bomb",
+    intent: { type: "build_unit", unit: UnitType.AtomBomb, tile: 777 },
+    risk: { level: "high", score: 0.75 },
+    metadata: { unit: UnitType.AtomBomb, targetID: "RIVAL" },
+  });
+
+  function spendPlan(): StrategicPlan {
+    return {
+      planID: "agent-1:economy",
+      objective: "secure_economy",
+      targetPlayerId: null,
+      rationale: "grow the engine",
+      startedAtTick: 0,
+      maxDecisionCycles: 3,
+      successCriteria: [],
+      failureCriteria: [],
+      preferredActionKinds: ["build", "hold"],
+      forbiddenActionKinds: [],
+      enabledModules: ["economy", "defense"],
+      plannerSource: "mock-llm",
+    };
+  }
+
+  it("ON: fires on the 2nd consecutive rich decision, forcing the top build/upgrade with a gold-pressure reason", () => {
+    process.env.PROXYWAR_TUNE_GOLD_PRESSURE = "1";
+    const executor = new FrontierPolicyExecutor("aggressive");
+    const observation = richObservation("5000000");
+    const legalActions = [expandAction(), cityBuildAction(), hold()];
+    const first = executor.decide({ observation, legalActions }, spendPlan());
+    // Streak 1: the natural ranking still wins (expansion), no forcing yet.
+    expect(first.actionID).toBe("expand:terra-nullius:10");
+    const second = executor.decide({ observation, legalActions }, spendPlan());
+    // Streak 2: the hoard has sat above the floor for 2 consecutive decisions —
+    // the highest-ranked build/upgrade is forced and the reason says why.
+    expect(second.actionID).toBe("build:City:100");
+    expect(second.reason).toContain("goldPressure=spend-down");
+  });
+
+  it("ON: does NOT fire below the floor", () => {
+    process.env.PROXYWAR_TUNE_GOLD_PRESSURE = "1";
+    const executor = new FrontierPolicyExecutor("aggressive");
+    const observation = richObservation("1000000");
+    const legalActions = [expandAction(), cityBuildAction(), hold()];
+    for (let index = 0; index < 3; index += 1) {
+      const decision = executor.decide(
+        { observation, legalActions },
+        spendPlan(),
+      );
+      expect(decision.actionID).toBe("expand:terra-nullius:10");
+    }
+  });
+
+  it("OFF (default): rich decisions never force — byte-identical shipped behavior", () => {
+    const executor = new FrontierPolicyExecutor("aggressive");
+    const observation = richObservation("5000000");
+    const legalActions = [expandAction(), cityBuildAction(), hold()];
+    const first = executor.decide({ observation, legalActions }, spendPlan());
+    const second = executor.decide({ observation, legalActions }, spendPlan());
+    // Pinned pre-change baseline: both decisions expand (see K2 review packet).
+    expect(first.actionID).toBe("expand:terra-nullius:10");
+    expect(second.actionID).toBe("expand:terra-nullius:10");
+    expect(second.reason).not.toContain("goldPressure");
+  });
+
+  it("never forces a nuke: with no build/upgrade offered it falls through unchanged", () => {
+    process.env.PROXYWAR_TUNE_GOLD_PRESSURE = "1";
+    const executor = new FrontierPolicyExecutor("aggressive");
+    const observation = richObservation("5000000");
+    const legalActions = [nukeStrikeAction(), expandAction(), hold()];
+    executor.decide({ observation, legalActions }, spendPlan());
+    const second = executor.decide({ observation, legalActions }, spendPlan());
+    // Streak is 2, but the only spend targets offered are a nuke (kind "nuke",
+    // structurally excluded) and expansion — the selector must fall through.
+    expect(second.actionID).not.toBe("nuke:Atom Bomb:RIVAL:777");
+    expect(second.actionID).toBe("expand:terra-nullius:10");
+    expect(second.reason).not.toContain("goldPressure");
+  });
+
+  it("(e) MIRV-bank floor: with a silo and turn>=1600, 5M does not fire but 35M does", () => {
+    process.env.PROXYWAR_TUNE_GOLD_PRESSURE = "1";
+    const legalActions = [expandAction(), cityBuildAction(), hold()];
+    // 5M gold with a standing silo in the nuke era: the effective floor is the
+    // 30M MIRV bank, so pressure must NOT fire (the agent is banking a MIRV).
+    const bankingExecutor = new FrontierPolicyExecutor("aggressive");
+    const bankingObservation = richObservation("5000000", {
+      turnNumber: 1_700,
+      siloCount: 1,
+    });
+    for (let index = 0; index < 3; index += 1) {
+      const decision = bankingExecutor.decide(
+        { observation: bankingObservation, legalActions },
+        spendPlan(),
+      );
+      expect(decision.actionID).toBe("expand:terra-nullius:10");
+    }
+    // 35M gold clears even the MIRV bank: pressure fires on the 2nd decision.
+    const richExecutor = new FrontierPolicyExecutor("aggressive");
+    const richObservation35M = richObservation("35000000", {
+      turnNumber: 1_700,
+      siloCount: 1,
+    });
+    richExecutor.decide(
+      { observation: richObservation35M, legalActions },
+      spendPlan(),
+    );
+    const forced = richExecutor.decide(
+      { observation: richObservation35M, legalActions },
+      spendPlan(),
+    );
+    expect(forced.actionID).toBe("build:City:100");
+    expect(forced.reason).toContain("goldPressure=spend-down");
+  });
+
+  it("(e2) pre-1600 a standing silo does not raise the floor (base 3M still applies)", () => {
+    process.env.PROXYWAR_TUNE_GOLD_PRESSURE = "1";
+    const executor = new FrontierPolicyExecutor("aggressive");
+    const observation = richObservation("5000000", {
+      turnNumber: 900,
+      siloCount: 1,
+    });
+    const legalActions = [expandAction(), cityBuildAction(), hold()];
+    executor.decide({ observation, legalActions }, spendPlan());
+    const second = executor.decide({ observation, legalActions }, spendPlan());
+    expect(second.actionID).toBe("build:City:100");
+  });
+});
+
+describe("K2.3 upgrade visibility lever (PROXYWAR_TUNE_UPGRADE_VISIBILITY)", () => {
+  const FLAG = "PROXYWAR_TUNE_UPGRADE_VISIBILITY";
+  let savedFlag: string | undefined;
+  beforeEach(() => {
+    savedFlag = process.env[FLAG];
+    delete process.env[FLAG];
+  });
+  afterEach(() => {
+    if (savedFlag === undefined) {
+      delete process.env[FLAG];
+    } else {
+      process.env[FLAG] = savedFlag;
+    }
+  });
+
+  // Agent-only political match (all alive visible players Human) so the
+  // political-infrastructure selector — the path that reads
+  // politicalShowcaseInfrastructurePriority's upgrade arm — is live.
+  // Default fixture is LAND-TIGHT: the builder's affordances come from an empty
+  // world (no neutral expansion), which is exactly the boxed-in late-game shape.
+  // Pass neutralExpansionOpen to recompute real affordances with
+  // combat.canExpandIntoNeutral=true so the land-tight signal is OFF and only
+  // the gold condition can trigger the boost.
+  function politicalObservation(options: {
+    turnNumber: number;
+    gold: string;
+    neutralExpansionOpen?: boolean;
+  }): AgentObservation {
+    const { turnNumber, gold } = options;
+    const base = new AgentObservationBuilder().build({
+      agentID: "agent-1",
+      clientID: null,
+      username: "Planner Agent",
+      profile: "opportunistic",
+      gameID: "PLAN",
+      turnNumber,
+      phaseOverride: "active",
+    });
+    const assembled: AgentObservation = {
+      ...base,
+      turnNumber,
+      tick: turnNumber,
+      ownState: {
+        playerID: "agent-1",
+        clientID: null,
+        smallID: 1,
+        name: "Planner Agent",
+        type: PlayerType.Human,
+        isAlive: true,
+        isDisconnected: false,
+        isTraitor: false,
+        hasSpawned: true,
+        troops: 500_000,
+        maxTroops: 800_000,
+        troopRatio: 0.6,
+        gold,
+        tilesOwned: 14_000,
+        tileShare: 0.2,
+        borderTiles: 100,
+        outgoingAttacks: 0,
+        incomingAttacks: 0,
+        outgoingAllianceRequests: 0,
+        incomingAllianceRequests: 0,
+        unitCounts: {
+          [UnitType.City]: 2,
+          [UnitType.Factory]: 1,
+          [UnitType.Port]: 1,
+        },
+      },
+      visiblePlayers: (["HUMANA", "HUMANB"] as const).map(
+        (playerID, index) => ({
+          playerID,
+          clientID: playerID,
+          smallID: index + 2,
+          name: playerID,
+          type: PlayerType.Human,
+          isAlive: true,
+          isDisconnected: false,
+          hasSpawned: true,
+          troops: 400_000,
+          gold: "100000",
+          tilesOwned: 12_000,
+          tileShare: 0.15,
+          sharesBorder: true,
+          isAllied: false,
+          isFriendly: false,
+          relation: Relation.Neutral,
+          canAttack: false,
+          canRequestAlliance: false,
+          canDonateGold: false,
+          canDonateTroops: false,
+          canEmbargo: false,
+          hasEmbargoAgainst: false,
+          outgoingAttack: false,
+          incomingAttack: false,
+          hasOutgoingAllianceRequest: false,
+          hasIncomingAllianceRequest: false,
+        }),
+      ),
+      combat: {
+        ...base.combat,
+        canExpandIntoNeutral: options.neutralExpansionOpen === true,
+        incomingAttackPlayerIDs: [],
+        incomingAttacks: [],
+      },
+      memory: {
+        ...base.memory,
+        recentActions: [],
+        recentBuildCount: 0,
+      },
+    };
+    if (options.neutralExpansionOpen !== true) {
+      return assembled;
+    }
+    // Recompute the affordances from the assembled observation so the
+    // conversion affordance reports neutralExpansionAvailable=true (no legal
+    // action snapshot passed -> it falls back to combat.canExpandIntoNeutral).
+    return {
+      ...assembled,
+      tacticalAffordances: buildAgentTacticalAffordances({
+        observation: assembled,
+      }),
+    };
+  }
+
+  const upgradeCityAction = (): LegalAction => ({
+    id: "upgrade:City:42",
+    kind: "upgrade_structure",
+    label: "Upgrade City #42",
+    intent: { type: "upgrade_structure", unit: UnitType.City, unitId: 42 },
+    risk: { level: "low", score: 0.2 },
+    metadata: { unit: UnitType.City, unitID: 42, level: 1, cost: "250000" },
+  });
+  const defensePostBuildAction = (): LegalAction => ({
+    id: "build:Defense Post:200",
+    kind: "build",
+    label: "Build Defense Post",
+    intent: { type: "build_unit", unit: UnitType.DefensePost, tile: 200 },
+    risk: { level: "low", score: 0.2 },
+    metadata: { role: "defensive", unit: "Defense Post" },
+  });
+  const samBuildOffer = (): LegalAction => ({
+    id: "build:SAM Launcher:888",
+    kind: "build",
+    label: "Build SAM Launcher",
+    intent: { type: "build_unit", unit: UnitType.SAMLauncher, tile: 888 },
+    risk: { level: "low", score: 0.1 },
+    metadata: { role: "defensive", unit: UnitType.SAMLauncher },
+  });
+
+  function upgradePlan(): StrategicPlan {
+    return {
+      planID: "agent-1:economy",
+      objective: "secure_economy",
+      targetPlayerId: null,
+      rationale: "deepen the cluster",
+      startedAtTick: 0,
+      maxDecisionCycles: 3,
+      successCriteria: [],
+      failureCriteria: [],
+      preferredActionKinds: ["build", "hold"],
+      forbiddenActionKinds: [],
+      enabledModules: ["economy", "defense"],
+      plannerSource: "mock-llm",
+    };
+  }
+
+  it("ON + gold-rich: upgrades become visible pre-1600 (from turn >= 800)", () => {
+    // Neutral expansion left OPEN so the land-tight signal is off: the flip
+    // below is attributable to the gold-rich condition alone.
+    const fixture = () => ({
+      observation: politicalObservation({
+        turnNumber: 1_000,
+        gold: "5000000",
+        neutralExpansionOpen: true,
+      }),
+      legalActions: [upgradeCityAction(), defensePostBuildAction(), hold()],
+    });
+    expect(
+      fixture().observation.tacticalAffordances?.frontierConversionTiming
+        ?.neutralExpansionAvailable,
+    ).toBe(true);
+    delete process.env[FLAG];
+    const offDecision = new FrontierPolicyExecutor("opportunistic").decide(
+      fixture(),
+      upgradePlan(),
+    );
+    process.env[FLAG] = "1";
+    const onDecision = new FrontierPolicyExecutor("opportunistic").decide(
+      fixture(),
+      upgradePlan(),
+    );
+    // The lever is the cause: OFF keeps the upgrade invisible, ON selects it.
+    expect(offDecision.actionID).not.toBe("upgrade:City:42");
+    expect(onDecision.actionID).toBe("upgrade:City:42");
+  });
+
+  it("OFF (default): the pre-1600 upgrade stays invisible — pinned shipped behavior", () => {
+    const decision = new FrontierPolicyExecutor("opportunistic").decide(
+      {
+        observation: politicalObservation({
+          turnNumber: 1_000,
+          gold: "5000000",
+        }),
+        legalActions: [upgradeCityAction(), defensePostBuildAction(), hold()],
+      },
+      upgradePlan(),
+    );
+    // Pinned pre-change baseline for this exact fixture: Defense Post.
+    expect(decision.actionID).toBe("build:Defense Post:200");
+  });
+
+  it("OFF: the legacy turn>=1600 arm is unchanged (old-constant regression)", () => {
+    const decision = new FrontierPolicyExecutor("opportunistic").decide(
+      {
+        observation: politicalObservation({
+          turnNumber: 1_700,
+          gold: "100000",
+        }),
+        legalActions: [upgradeCityAction(), defensePostBuildAction(), hold()],
+      },
+      upgradePlan(),
+    );
+    // Pinned pre-change baseline: the flat 360-from-1600 arm selects the upgrade.
+    expect(decision.actionID).toBe("upgrade:City:42");
+  });
+
+  it("ON: no boost when neither land-tight nor gold-rich (identical to OFF)", () => {
+    const fixture = () => ({
+      observation: politicalObservation({
+        turnNumber: 1_000,
+        gold: "100000",
+        neutralExpansionOpen: true,
+      }),
+      legalActions: [upgradeCityAction(), defensePostBuildAction(), hold()],
+    });
+    delete process.env[FLAG];
+    const offDecision = new FrontierPolicyExecutor("opportunistic").decide(
+      fixture(),
+      upgradePlan(),
+    );
+    process.env[FLAG] = "1";
+    const onDecision = new FrontierPolicyExecutor("opportunistic").decide(
+      fixture(),
+      upgradePlan(),
+    );
+    // Poor and un-boxed: the flag must change nothing at all.
+    expect(onDecision.actionID).toBe(offDecision.actionID);
+    expect(onDecision.actionID).not.toBe("upgrade:City:42");
+  });
+
+  it("ON + land-tight: upgrades become visible even when poor", () => {
+    process.env[FLAG] = "1";
+    const observation = politicalObservation({
+      turnNumber: 1_000,
+      gold: "100000",
+    });
+    const legalActions = [
+      upgradeCityAction(),
+      defensePostBuildAction(),
+      hold(),
+    ];
+    // Real affordances from the real builder: no offered expansion actions and
+    // combat.canExpandIntoNeutral=false make the conversion affordance report
+    // neutralExpansionAvailable=false — the land-tight signal.
+    const landTightObservation: AgentObservation = {
+      ...observation,
+      tacticalAffordances: buildAgentTacticalAffordances({
+        observation,
+        legalActions,
+      }),
+    };
+    expect(
+      landTightObservation.tacticalAffordances?.frontierConversionTiming
+        ?.neutralExpansionAvailable,
+    ).toBe(false);
+    const decision = new FrontierPolicyExecutor("opportunistic").decide(
+      { observation: landTightObservation, legalActions },
+      upgradePlan(),
+    );
+    expect(decision.actionID).toBe("upgrade:City:42");
+  });
+
+  it("ON: boosted upgrades stay capped below the SAM tier", () => {
+    process.env[FLAG] = "1";
+    const decision = new FrontierPolicyExecutor("opportunistic").decide(
+      {
+        observation: politicalObservation({
+          turnNumber: 1_700,
+          gold: "5000000",
+        }),
+        legalActions: [upgradeCityAction(), samBuildOffer(), hold()],
+      },
+      upgradePlan(),
+    );
+    // The boosted upgrade scores 420; the SAM tier is 450 — deterrence must
+    // still outrank an upgrade when both are offered.
+    expect(decision.actionID).toBe("build:SAM Launcher:888");
+  });
+});
+
 function activeObservation(
   objectiveKind: AgentObjectiveKind,
 ): AgentObservation {
