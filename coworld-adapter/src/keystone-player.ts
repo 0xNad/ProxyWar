@@ -76,6 +76,13 @@ export interface KeystoneBrainOptions {
   providerTimeoutMs?: number;
   /** Override the LLM provider (tests / future transports). */
   provider?: LlmProvider;
+  /**
+   * Pure-blocking Commander: run the LLM planner synchronously on the wire
+   * critical path (no DeferredAgentPlanner background refresh), so the bedrock
+   * call's latency is visible and a bedrock failure is LOUD (thrown). Used to
+   * definitively validate the LLM transport. Pair with planEveryDecisionSteps=1.
+   */
+  blocking?: boolean;
 }
 
 // Mirrors the league-smoke planner-claude-cli executor settings so local play
@@ -86,6 +93,37 @@ const KEYSTONE_EXECUTOR_SETTINGS = {
   siloTileShareRatio: 0.14,
   samTileShareRatio: 0.14,
 } as const;
+
+/**
+ * Keystone behavior-flag env plumbing (K1/K2 of plan keen-sparking-hollerith).
+ * The executor reads these `PROXYWAR_TUNE_*` variables directly from process.env
+ * at decision time (src/server/agents/AgentTunables.ts), and keystone-player runs
+ * the executor in-process — so a hosted pod env carrying any of these reaches the
+ * policy with no further wiring. DEFAULTS ALL OFF IN CODE: nothing here (or in the
+ * repo defaults) sets a value, so the hosted policy ships inert and an arm is
+ * enabled later via the pod env only after the local forge A/B verdict. The
+ * explicit allowlist + boot-log summary exist so which arm a pod ran is auditable
+ * from its logs instead of inferred.
+ */
+const KEYSTONE_TUNABLE_FLAG_ENV_VARS = [
+  "PROXYWAR_TUNE_ECONOMY_BOOTSTRAP",
+  "PROXYWAR_TUNE_DIRECTIVE_BUILD",
+  "PROXYWAR_TUNE_GOLD_PRESSURE",
+  "PROXYWAR_TUNE_GOLD_PRESSURE_FLOOR",
+  "PROXYWAR_TUNE_GOLD_PRESSURE_MIRV_FLOOR",
+  "PROXYWAR_TUNE_UPGRADE_VISIBILITY",
+] as const;
+
+/** One-line boot-log summary of which keystone behavior flags the pod env set —
+ *  "tunables=defaults" when none are, i.e. the shipped all-off configuration. */
+export function keystoneTunableFlagSummary(
+  env: NodeJS.ProcessEnv = process.env,
+): string {
+  const set = KEYSTONE_TUNABLE_FLAG_ENV_VARS.filter(
+    (name) => (env[name] ?? "").trim() !== "",
+  ).map((name) => `${name}=${env[name]?.trim()}`);
+  return set.length === 0 ? "tunables=defaults" : `tunables=[${set.join(",")}]`;
+}
 
 const RESPONSE_REASON_MAX_LENGTH = 500;
 
@@ -482,15 +520,21 @@ export function createKeystoneBrain(
       (options.mode === "claude-cli"
         ? modules.claudeCli.createClaudeCliLlmProviderFromEnv()
         : createBedrockProvider());
-    planner = new DeferredAgentPlanner(
-      new LlmAgentPlanner({
-        provider,
-        profile: options.profile,
-        providerTimeoutMs: options.providerTimeoutMs,
-        plannerType: "real-llm",
-      }),
-      new RuleAgentPlanner(options.profile),
-    );
+    const llmPlanner = new LlmAgentPlanner({
+      provider,
+      profile: options.profile,
+      providerTimeoutMs: options.providerTimeoutMs,
+      plannerType: "real-llm",
+    });
+    // Pure-blocking Commander: await the LLM planner directly so the bedrock call
+    // sits on the wire critical path (visible latency, loud failures). Otherwise
+    // the in-clock DeferredAgentPlanner refreshes it in the background.
+    planner = options.blocking
+      ? llmPlanner
+      : new DeferredAgentPlanner(
+          llmPlanner,
+          new RuleAgentPlanner(options.profile),
+        );
   }
 
   return new PlannerExecutorAgentBrain({
@@ -522,9 +566,15 @@ async function main(): Promise<void> {
   const mode = keystoneModeFromEnv();
   const profile = (process.env.PROXYWAR_KEYSTONE_PROFILE?.trim() ||
     "aggressive") as AgentStrategyProfile;
+  const blocking =
+    process.env.PROXYWAR_KEYSTONE_BLOCKING === "1" ||
+    process.env.PROXYWAR_KEYSTONE_BLOCKING?.trim().toLowerCase() === "true";
   const planEveryRaw = Number(process.env.PROXYWAR_KEYSTONE_PLAN_EVERY ?? "3");
-  const planEveryDecisionSteps =
-    Number.isFinite(planEveryRaw) && planEveryRaw >= 1
+  // Blocking pure-Commander runs the LLM EVERY decision (planEvery=1) so every
+  // wire decision is bedrock-driven and the transport is fully exercised.
+  const planEveryDecisionSteps = blocking
+    ? 1
+    : Number.isFinite(planEveryRaw) && planEveryRaw >= 1
       ? Math.floor(planEveryRaw)
       : 3;
 
@@ -533,7 +583,35 @@ async function main(): Promise<void> {
     mode,
     profile,
     planEveryDecisionSteps,
+    blocking,
   });
+
+  // Optional one-shot Bedrock diagnostic (gated; OFF in production). The pod
+  // stderr 403s for us via the Coworld CLI, so this surfaces cred presence + the
+  // real Bedrock error into every wire `reason` (which lands in the readable
+  // decisions.jsonl). Splits "runner injected no creds" from "creds present but
+  // failing" from "our request is malformed".
+  let bedrockDiag = "";
+  if (process.env.PROXYWAR_KEYSTONE_BEDROCK_DIAG === "1") {
+    const resolvedRegion =
+      process.env.AWS_REGION ?? process.env.AWS_DEFAULT_REGION ?? "us-west-2";
+    const keyState = process.env.AWS_ACCESS_KEY_ID ? "set" : "MISSING";
+    const tokenState = process.env.AWS_SESSION_TOKEN ? "set" : "absent";
+    let probe = "?";
+    try {
+      const out = await createBedrockProvider().complete(
+        "Reply with the single word OK.",
+      );
+      probe = `OK:${out.slice(0, 24)}`;
+    } catch (error) {
+      probe = (error instanceof Error ? error.message : String(error)).slice(
+        0,
+        260,
+      );
+    }
+    bedrockDiag = `BEDROCKDIAG[USE_BEDROCK=${process.env.USE_BEDROCK ?? "unset"} key=${keyState} token=${tokenState} AWS_REGION=${process.env.AWS_REGION ?? "unset"} resolved=${resolvedRegion} probe=${probe}]`;
+    console.log(bedrockDiag);
+  }
 
   const require = createRequire(import.meta.url);
   const { WebSocket } = require(`${repoRoot}/node_modules/ws`);
@@ -541,7 +619,7 @@ async function main(): Promise<void> {
 
   socket.on("open", () => {
     console.log(
-      `keystone connected ${redactPlayerUrl(url)} (mode=${mode}, profile=${profile}, planEvery=${planEveryDecisionSteps})`,
+      `keystone connected ${redactPlayerUrl(url)} (mode=${mode}, profile=${profile}, planEvery=${planEveryDecisionSteps}, blocking=${blocking}, ${keystoneTunableFlagSummary()})`,
     );
   });
 
@@ -583,6 +661,9 @@ async function main(): Promise<void> {
         message.request,
         messageText,
       );
+    }
+    if (bedrockDiag) {
+      response.reason = `${bedrockDiag} || ${String(response.reason ?? "")}`;
     }
     const elapsedMs = Date.now() - startedAt;
     if (elapsedMs > 5000) {
