@@ -1304,8 +1304,13 @@ export class AgentObservationBuilder {
     player: Player,
     tile: number,
   ): boolean {
+    // O(1) ownership lookup per neighbor (same pattern as the front-tile scans
+    // above). player.tiles() allocates a full copy of the territory set per
+    // call — doing that per neighbor inside neutralIslandTransportTiles's
+    // whole-map scan was 77% of ALL CPU on shore-dense maps (10p Britannia:
+    // profiled 250s of 321s; hosted games died at the episode deadline).
     for (const neighbor of gameState.neighbors(tile)) {
-      if (player.tiles().has(neighbor)) {
+      if (gameState.owner(neighbor) === player) {
         return true;
       }
     }
