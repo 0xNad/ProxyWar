@@ -180,7 +180,6 @@ export class RailroadLayer implements Layer {
       this.canvas.height / (this.game.height() * 2),
     );
 
-    // eslint-disable-next-line @typescript-eslint/no-unused-vars
     for (const [_, rail] of this.existingRailroads) {
       this.paintRail(rail.tile);
     }

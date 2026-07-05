@@ -1181,7 +1181,7 @@ app.post("/api/lobby/join", (req, res) => {
     if (lobby.startTimer) clearTimeout(lobby.startTimer);
     formingLobby = null; // the next joiner forms a fresh lobby
     void startLobbyMatch(lobby);
-  } else if (lobby.startTimer == null) {
+  } else if (lobby.startTimer === null || lobby.startTimer === undefined) {
     // First human in a fresh lobby: open a grace window for other humans to join,
     // then auto-fill the remaining seats with house agents and start. Avoids the
     // cold-start trap where a match never begins because four humans never queue.

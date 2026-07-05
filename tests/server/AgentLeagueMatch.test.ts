@@ -1575,7 +1575,10 @@ describe("AgentLeagueMatchRunner manual-clock determinism", () => {
     } finally {
       await game.end({ archive: false });
     }
-  }, 120_000);
+    // 600s like the other heavy league-match sims in this file: these two
+    // full-runner tests exceed 120s on slow shared CI runners under coverage
+    // instrumentation while passing quickly locally.
+  }, 600_000);
 
   it("still injects mark_disconnected when the real-time clock is enabled (production behavior preserved)", async () => {
     const log = makeLogger();
@@ -1614,7 +1617,7 @@ describe("AgentLeagueMatchRunner manual-clock determinism", () => {
     } finally {
       await game.end({ archive: false });
     }
-  }, 120_000);
+  }, 600_000);
 
   it("produces an identical server turn stream for two same-seed manual-clock runs", async () => {
     // The turn stream (turnNumber -> intents broadcast by the GameServer) is the
