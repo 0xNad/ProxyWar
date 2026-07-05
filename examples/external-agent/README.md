@@ -300,7 +300,7 @@ PROXYWAR_AGENT_LLM_MODEL="optional model for codex-cli, claude-cowork, or openro
 PROXYWAR_AGENT_LLM_TIMEOUT_MS="12000"
 PROXYWAR_AGENT_LLM_POLICY_REUSE_DECISIONS="1 by default; higher values are advanced opt-in"
 OPENROUTER_API_KEY="only required for provider=openrouter"
-OPENROUTER_MODEL="google/gemini-flash-1.5"
+OPENROUTER_MODEL="google/gemini-2.5-flash-lite"
 PROXYWAR_AGENT_NAME="Your Nation"
 PROXYWAR_AGENT_PROFILE="opportunistic"
 PROXYWAR_AGENT_DOCTRINE="expand, build economy, punish weak borders"
