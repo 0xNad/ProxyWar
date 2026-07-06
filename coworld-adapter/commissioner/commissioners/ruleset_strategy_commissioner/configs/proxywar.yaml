@@ -1,0 +1,67 @@
+schedule_interval_minutes: 30
+
+scoring:
+  # Per-episode win rate, not raw score: a conquest game's winner is whoever ends the episode
+  # dominant, not whoever racked up the biggest score number, and win rate is directly comparable
+  # whether the episode was a 2p duel or a 12p FFA.
+  round_score: win
+  leaderboard:
+    # MMR (OpenSkill / Plackett-Luce), not an EWMA of raw round scores: the population-aware ladder
+    # (see the custom commissioner) runs Competition episodes at varying seat counts (2/4/8/12) as
+    # the real champion count grows, and only a placement-based skill rating is comparable across
+    # match sizes -- an EWMA of win-rate would conflate "won a 2-way duel" with "won an FFA of 12."
+    type: mmr
+
+defaults:
+  seating: rolling_window
+  # `strict` is intentional, not a placeholder: the custom commissioner's ladder always routes each
+  # Competition round to the largest declared variant whose seat count is <= the real champion count
+  # (see proxywar_app.py), so num_agents <= len(primary_entries) is a structural invariant here, not
+  # a hope -- fill_seats never has to fire. `strict` makes that invariant loud (an immediate error)
+  # instead of silently duplicating a policy into its own opponent if the invariant were ever broken.
+  fill_seats: strict
+  min_entries_to_start: 2
+  stage:
+    label: Competition round
+    episodes: 4
+    min_episodes_per_entrant: 1
+
+divisions:
+  qualifiers:
+    name: Qualifiers
+    level: -99
+    match:
+      name: Qualifiers
+      type: staging
+    entrants: qualifying
+    min_entries_to_start: 1
+    stages:
+      - id: crash_check
+        schedule:
+          label: Crash check
+          self_play: true
+          attempts: 2
+          min_episodes_per_entrant: 2
+        on_round_complete:
+          - id: qualified
+            criteria:
+              completed_episodes_gt: 0
+            actions:
+              - type: update_membership
+                division: competition
+                status: competing
+                substatus: champion
+          - id: disqualified
+            criteria: otherwise
+            actions:
+              - type: update_membership
+                status: disqualified
+                substatus: inactive
+
+  competition:
+    name: Competition
+    level: 1
+    match:
+      type: competition
+    entrants: champions
+    min_entries_to_start: 2

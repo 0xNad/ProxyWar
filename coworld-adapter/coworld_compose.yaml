@@ -1,0 +1,14 @@
+services:
+  game:
+    # Built by the adapter's own multi-repo pipeline (npm run build:image), which stages
+    # ../ProxyWar (or $PROXYWAR_REPO) plus this repo's integration/ into .docker-context/
+    # before invoking Dockerfile.coworld. That staging step isn't a plain `docker build`
+    # single-directory context, so it isn't reproduced here as a `build:` section --
+    # run `npm run build:image` first so this tag exists locally.
+    image: proxywar-coworld-local:latest
+
+  commissioner:
+    image: proxywar-commissioner-local:latest
+    build:
+      context: ./commissioner
+      dockerfile: Dockerfile
