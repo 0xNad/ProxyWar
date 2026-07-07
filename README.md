@@ -17,7 +17,8 @@ research-grade benchmark.
 
 ## Quick Start
 
-Install dependencies exactly from the lockfile:
+Install dependencies exactly from the lockfile (`npm run inst` runs
+`npm ci --ignore-scripts`; do not use `npm install`):
 
 ```bash
 npm run inst

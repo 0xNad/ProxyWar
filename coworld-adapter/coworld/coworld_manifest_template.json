@@ -2,7 +2,6 @@
   "$schema": "https://raw.githubusercontent.com/Metta-AI/coworld/main/src/coworld/coworld_manifest_schema.json",
   "game": {
     "name": "proxywar",
-    "version": "0.1.0",
     "description": "Hosted Proxy War Coworld adapter that preserves the LegalAction.id decision path.",
     "owner": "proxywar",
     "config_schema": {
@@ -216,7 +215,7 @@
     },
     "runnable": {
       "type": "game",
-      "image": "proxywar-coworld-local:coworld-016e3c064f92",
+      "image": "{{GAME_IMAGE}}",
       "run": [
         "node",
         "--import",
@@ -261,12 +260,10 @@
   "commissioner": [
     {
       "type": "commissioner",
-      "image": "proxywar-commissioner-local:coworld-f8a2620c9aef",
-      "run": [],
-      "env": {},
       "id": "proxywar-ladder-commissioner",
       "name": "ProxyWar Ladder Commissioner",
-      "description": "Config-driven ruleset_strategy commissioner (Qualifiers self-play crash check -> Competition), with one custom override: each Competition round counts the real distinct champions currently in the league and routes to the largest declared seat count (2/4/8/12) that fits them, so the league runs today at 2p and scales up as more committed policies join, with no re-publish required. Scoring is win-rate per episode aggregated into an OpenSkill (MMR) rating, since the same league runs episodes of varying size over time and only a placement-based rating is comparable across match sizes."
+      "description": "Config-driven ruleset_strategy commissioner (Qualifiers self-play crash check -> Competition), with one custom override: each Competition round counts the real distinct champions currently in the league and routes to the largest declared seat count (2/4/8/12) that fits them, so the league runs today at 2p and scales up as more committed policies join, with no re-publish required. Scoring is win-rate per episode aggregated into an OpenSkill (MMR) rating, since the same league runs episodes of varying size over time and only a placement-based rating is comparable across match sizes.",
+      "image": "{{COMMISSIONER_IMAGE}}"
     }
   ],
   "grader": [],
@@ -289,6 +286,7 @@
     {
       "id": "qualifier",
       "name": "Qualifier (crash/connect check)",
+      "description": "Cheap self-play smoke test for the Qualifiers staging division: one real policy duplicated into both seats, a short 5-decision-step episode (well under a minute), just to confirm it connects, responds to LegalAction.id, and doesn't crash before it ever occupies a real head-to-head seat.",
       "game_config": {
         "players": [
           {
@@ -308,8 +306,7 @@
         "replay_tail_turns": 0,
         "player_connect_timeout_seconds": 120,
         "episode_timeout_seconds": 180
-      },
-      "description": "Cheap self-play smoke test for the Qualifiers staging division: one real policy duplicated into both seats, a short 5-decision-step episode (well under a minute), just to confirm it connects, responds to LegalAction.id, and doesn't crash before it ever occupies a real head-to-head seat."
+      }
     },
     {
       "id": "tournament-2p",
@@ -339,6 +336,7 @@
     {
       "id": "tournament-4p",
       "name": "Four Player FFA",
+      "description": "Four-policy free-for-all on a compact map: up to 300 decision steps x 100 turns (~30000 turns), 300 decisions per seat. Four seats fight simultaneously until one player controls 80% of the map (the FFA win threshold) or the decision-step cap is reached - so alliance, betrayal, and last-survivor dynamics emerge and a decisive winner normally arrives well before the cap. The step cap is the compute guardrail (it bounds per-episode policy calls); a full episode runs in well under 1GB of memory.",
       "game_config": {
         "players": [
           {
@@ -364,12 +362,12 @@
         "player_connect_timeout_seconds": 120,
         "num_agents": 4,
         "episode_timeout_seconds": 2400
-      },
-      "description": "Four-policy free-for-all on a compact map: up to 300 decision steps x 100 turns (~30000 turns), 300 decisions per seat. Four seats fight simultaneously until one player controls 80% of the map (the FFA win threshold) or the decision-step cap is reached - so alliance, betrayal, and last-survivor dynamics emerge and a decisive winner normally arrives well before the cap. The step cap is the compute guardrail (it bounds per-episode policy calls); a full episode runs in well under 1GB of memory."
+      }
     },
     {
       "id": "tournament-8p",
       "name": "Tournament 8P",
+      "description": "DRAFT, unvalidated by the game author: an 8-policy free-for-all, extrapolated from the shipped 4-player FFA (300 decision steps x 100 turns, first-to-80%-map-control win condition). Verify real wall-clock via `coworld run-episode --variant tournament-8p` before this rung ever seats a real league round.",
       "game_config": {
         "players": [
           {
@@ -407,12 +405,12 @@
         "replay_tail_turns": 500,
         "player_connect_timeout_seconds": 120,
         "episode_timeout_seconds": 3000
-      },
-      "description": "DRAFT, unvalidated by the game author: an 8-policy free-for-all, extrapolated from the shipped 4-player FFA (300 decision steps x 100 turns, first-to-80%-map-control win condition). Verify real wall-clock via `coworld run-episode --variant tournament-8p` before this rung ever seats a real league round."
+      }
     },
     {
       "id": "tournament-12p",
       "name": "Tournament 12P",
+      "description": "DRAFT, unvalidated by the game author: a 12-policy free-for-all -- the seat count the author expects the game to 'shine' at. Extrapolated, not playtested; verify real wall-clock via `coworld run-episode --variant tournament-12p` before this rung ever seats a real league round.",
       "game_config": {
         "players": [
           {
@@ -462,8 +460,7 @@
         "replay_tail_turns": 500,
         "player_connect_timeout_seconds": 120,
         "episode_timeout_seconds": 3600
-      },
-      "description": "DRAFT, unvalidated by the game author: a 12-policy free-for-all -- the seat count the author expects the game to 'shine' at. Extrapolated, not playtested; verify real wall-clock via `coworld run-episode --variant tournament-12p` before this rung ever seats a real league round."
+      }
     }
   ],
   "certification": {

@@ -1,0 +1,43 @@
+name: 🏷️ Rename guard
+
+# The project renamed from "Open Frontier" to "Proxy War" (2026-06-05). This
+# guard keeps the old name from creeping back in.
+#
+# Deliberately allowed:
+# - "OpenFront" / "openfront": the upstream game engine — those strings must
+#   stay for attribution and licensing.
+# - "FrontierAgent": the in-house agent skill name (skills/FrontierAgent/,
+#   frontierAgentSkill). It is embedded in live LLM prompts, so renaming it is
+#   a behavior-affecting change tracked separately — not a mechanical sweep.
+
+on:
+  merge_group:
+    types:
+      - checks_requested
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  no-open-frontier:
+    name: 🚫 No Open Frontier residue
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+        with:
+          submodules: false
+      - name: Grep tracked files for old-name residue
+        run: |
+          # Matches OPEN_FRONTIER, OpenFrontier, open-frontier, "Open Frontier"
+          # (case-insensitive, optional -/_/space separator). "OpenFront" alone
+          # does not match. This workflow file excludes itself.
+          if git grep -nI -iE 'open[-_ ]?frontier' -- ':!.github/workflows/rename-guard.yml'; then
+            echo "::error::Old project naming found (see grep output above). The project is Proxy War — use PROXYWAR_* / proxywar. Upstream OpenFront strings are fine and are not matched."
+            exit 1
+          fi
+          echo "Clean: no old-name residue in tracked files."
