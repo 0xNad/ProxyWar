@@ -121,6 +121,9 @@ export class AgentLeagueMatchRunner {
   private readonly objectiveManager = new AgentObjectiveManager();
   private readonly decisionValidator: typeof validateAgentDecision;
   private readonly disabledActionKinds: Set<LegalActionKind>;
+  // Log-once bookkeeping for seatEliminated. Liveness itself is recomputed
+  // from the game snapshot every decision turn — never latched here.
+  private readonly eliminatedSeatsAnnounced = new Set<string>();
 
   constructor(private readonly options: AgentLeagueMatchOptions) {
     this.log = options.log.child({ comp: "agent_league_match" });
@@ -295,7 +298,14 @@ export class AgentLeagueMatchRunner {
       ...(options.spawnCandidates ?? this.options.spawnCandidates),
     ];
     const startingRecordCount = this.records.length;
-    const decisionInputs = this.options.participants.map((participant) => {
+    // Eliminated seats are not polled at all: no observation build, no brain
+    // call, no decision record. Roster-shaped outputs (results.scores,
+    // players[], the spectator roster) are built from the full participants
+    // list elsewhere and stay full-length.
+    const activeParticipants = this.options.participants.filter(
+      (participant) => !this.seatEliminated(participant, options.gameState),
+    );
+    const decisionInputs = activeParticipants.map((participant) => {
       const observationInput: BuildAgentObservationInput = {
         agentID: participant.runner.agentID,
         clientID: participant.runner.clientID(),
@@ -732,6 +742,57 @@ export class AgentLeagueMatchRunner {
 
   decisionRecords(): AgentDecisionRecord[] {
     return [...this.records];
+  }
+
+  /**
+   * A seat stops being polled once its core player is dead — isAlive() ===
+   * false, i.e. zero owned tiles, the same rule the simulation itself uses
+   * (PlayerImpl.isAlive). Hosted Coworld episodes previously polled every
+   * seat every decision step regardless (12p ereq_f5ac00e9: two eliminated
+   * keystone seats received 119/99 ghost "own=0 tiles" decision turns),
+   * burning pod CPU and polluting decisions.jsonl. Liveness is recomputed
+   * from the CURRENT snapshot every turn — never latched — so a tile-less
+   * player whose transport boat is still en route resumes being polled if
+   * the landing revives them. Deliberately conservative guards: no snapshot,
+   * spawn phase, unresolvable player, or a NEVER-spawned player all keep the
+   * seat polled — a seat that failed to enter the game should stay loud in
+   * decisions.jsonl, not silently vanish.
+   */
+  private seatEliminated(
+    participant: AgentParticipant,
+    gameState: Game | undefined,
+  ): boolean {
+    if (gameState === undefined || gameState.inSpawnPhase()) {
+      return false;
+    }
+    const clientID = participant.runner.clientID();
+    if (clientID === null) {
+      return false;
+    }
+    const player = gameState.playerByClientID(clientID);
+    if (player === null || !player.hasSpawned()) {
+      return false;
+    }
+    if (player.isAlive()) {
+      if (this.eliminatedSeatsAnnounced.delete(participant.runner.agentID)) {
+        this.log.info("league seat revived; decision polling resumed", {
+          agentID: participant.runner.agentID,
+          username: participant.spec.username,
+          tick: gameState.ticks(),
+        });
+      }
+      return false;
+    }
+    if (!this.eliminatedSeatsAnnounced.has(participant.runner.agentID)) {
+      this.eliminatedSeatsAnnounced.add(participant.runner.agentID);
+      this.log.info("league seat eliminated; decision polling stopped", {
+        agentID: participant.runner.agentID,
+        username: participant.spec.username,
+        profile: participant.spec.profile,
+        tick: gameState.ticks(),
+      });
+    }
+    return true;
   }
 
   private submitLegalAction(

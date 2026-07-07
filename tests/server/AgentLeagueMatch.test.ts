@@ -935,6 +935,129 @@ describe("AgentLeagueMatchRunner", () => {
     }
   });
 
+  it("stops polling a seat once its player is eliminated and resumes on revival", async () => {
+    const log = makeLogger();
+    const candidateGame = await setup("big_plains", { nations: "disabled" });
+    const spawnCandidates = buildSpawnCandidates(candidateGame.map(), {
+      maxCandidates: 500,
+    });
+    const specs = createDefaultAgentSpecs(4);
+    const participants = createAgentParticipants(specs, log);
+    const game = new GameServer(
+      "AGENTELM",
+      log,
+      Date.now(),
+      serverConfig,
+      gameConfig,
+    );
+    const match = new AgentLeagueMatchRunner({
+      game,
+      participants,
+      spawnCandidates,
+      log,
+    });
+
+    try {
+      match.attachAgents();
+      match.startGame();
+      const openingRecords = await match.runOpeningTurn();
+      const playerInfos = openingRecords.map(
+        (record, index) =>
+          new PlayerInfo(
+            record.username,
+            PlayerType.Human,
+            record.clientID,
+            agentPlayerID(index),
+          ),
+      );
+      const coreGame = await setup(
+        "big_plains",
+        { nations: "disabled" },
+        playerInfos,
+      );
+      const executor = new Executor(coreGame, "AGENTELM", undefined);
+
+      coreGame.addExecution(
+        ...executor.createExecs({
+          turnNumber: 0,
+          intents: openingRecords.map((record) => ({
+            ...spawnIntent(record),
+            clientID: record.clientID!,
+          })) as StampedIntent[],
+        }),
+      );
+
+      let ticks = 0;
+      while (coreGame.inSpawnPhase() && ticks < 1000) {
+        coreGame.executeNextTick();
+        ticks++;
+      }
+      expect(coreGame.inSpawnPhase()).toBe(false);
+
+      const victimRecord = openingRecords[0];
+      const victim = coreGame.playerByClientID(victimRecord.clientID!)!;
+      const attacker = coreGame.playerByClientID(openingRecords[1].clientID!)!;
+      expect(victim.isAlive()).toBe(true);
+      const victimTiles = [...victim.tiles()];
+      for (const tile of victimTiles) {
+        attacker.conquer(tile);
+      }
+      // The core elimination rule this feature keys off: dead = zero tiles.
+      expect(victim.isAlive()).toBe(false);
+      expect(victim.hasSpawned()).toBe(true);
+
+      const firstStep = await match.runDecisionTurn({
+        turnNumber: 2,
+        gameState: coreGame,
+      });
+      expect(firstStep).toHaveLength(3);
+      expect(firstStep.map((record) => record.agentID)).not.toContain(
+        victimRecord.agentID,
+      );
+
+      const secondStep = await match.runDecisionTurn({
+        turnNumber: 3,
+        gameState: coreGame,
+      });
+      expect(secondStep).toHaveLength(3);
+      expect(secondStep.map((record) => record.agentID)).not.toContain(
+        victimRecord.agentID,
+      );
+
+      // No post-elimination decision records exist for the dead seat, while
+      // its pre-elimination (spawn) records are preserved.
+      const victimRecords = match
+        .decisionRecords()
+        .filter((record) => record.agentID === victimRecord.agentID);
+      expect(victimRecords.length).toBeGreaterThan(0);
+      expect(victimRecords.every((record) => record.turnNumber < 2)).toBe(true);
+
+      // The elimination is announced exactly once, not once per step.
+      const infoMock = log.info as unknown as ReturnType<typeof vi.fn>;
+      expect(
+        infoMock.mock.calls.filter(
+          ([message]) =>
+            message === "league seat eliminated; decision polling stopped",
+        ),
+      ).toHaveLength(1);
+
+      // Liveness is recomputed per step, never latched: a revived player
+      // (e.g. a transport boat landing after total tile loss) is polled again.
+      victim.conquer(victimTiles[0]);
+      expect(victim.isAlive()).toBe(true);
+      const revivedStep = await match.runDecisionTurn({
+        turnNumber: 4,
+        gameState: coreGame,
+      });
+      expect(revivedStep).toHaveLength(4);
+      expect(revivedStep.map((record) => record.agentID)).toContain(
+        victimRecord.agentID,
+      );
+    } finally {
+      await game.end({ archive: false });
+    }
+  });
+
   it("allows reciprocal same-turn alliance requests without unrelated diplomacy collisions", async () => {
     const log = makeLogger();
     const candidateGame = await setup("big_plains", { nations: "disabled" });
