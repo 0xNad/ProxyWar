@@ -216,7 +216,7 @@
     },
     "runnable": {
       "type": "game",
-      "image": "proxywar-coworld-local:coworld-3438de305e81",
+      "image": "proxywar-coworld-local:coworld-016e3c064f92",
       "run": [
         "node",
         "--import",
@@ -246,7 +246,7 @@
   "player": [
     {
       "type": "player",
-      "image": "proxywar-coworld-local:coworld-3438de305e81",
+      "image": "proxywar-coworld-local:coworld-016e3c064f92",
       "run": [
         "node",
         "/app/integration/src/starter-player.mjs"
@@ -257,24 +257,11 @@
       "description": "Minimal websocket player that chooses one offered LegalAction.id."
     }
   ],
-  "reporter": [
-    {
-      "type": "reporter",
-      "image": "proxywar-coworld-local:coworld-3438de305e81",
-      "run": [
-        "node",
-        "/app/integration/src/proxywar-summary-reporter.mjs"
-      ],
-      "env": {},
-      "id": "proxywar-summary-reporter",
-      "name": "Proxy War Summary Reporter",
-      "description": "Consumes a Coworld episode bundle and writes a report zip with Markdown and machine-readable summary outputs."
-    }
-  ],
+  "reporter": [],
   "commissioner": [
     {
       "type": "commissioner",
-      "image": "proxywar-commissioner-local:coworld-0233522adaea",
+      "image": "proxywar-commissioner-local:coworld-f8a2620c9aef",
       "run": [],
       "env": {},
       "id": "proxywar-ladder-commissioner",
@@ -282,38 +269,12 @@
       "description": "Config-driven ruleset_strategy commissioner (Qualifiers self-play crash check -> Competition), with one custom override: each Competition round counts the real distinct champions currently in the league and routes to the largest declared seat count (2/4/8/12) that fits them, so the league runs today at 2p and scales up as more committed policies join, with no re-publish required. Scoring is win-rate per episode aggregated into an OpenSkill (MMR) rating, since the same league runs episodes of varying size over time and only a placement-based rating is comparable across match sizes."
     }
   ],
-  "grader": [
-    {
-      "type": "grader",
-      "image": "proxywar-coworld-local:coworld-3438de305e81",
-      "run": [
-        "node",
-        "/app/integration/src/proxywar-episode-grader.mjs"
-      ],
-      "env": {},
-      "id": "proxywar-episode-grader",
-      "name": "Proxy War Episode Grader",
-      "description": "Deterministic grader for Coworld's contract-defined/runtime-pending grader role. Consumes an episode bundle and writes a 0..1 usefulness score JSON artifact."
-    }
-  ],
-  "diagnoser": [
-    {
-      "type": "diagnoser",
-      "image": "proxywar-coworld-local:coworld-3438de305e81",
-      "run": [
-        "node",
-        "/app/integration/src/proxywar-policy-diagnoser.mjs"
-      ],
-      "env": {},
-      "id": "proxywar-policy-diagnoser",
-      "name": "Proxy War Policy Diagnoser",
-      "description": "Diagnoser for Coworld's reserved/tentative diagnoser contract. Consumes an episode bundle and target policy URI and writes a diagnosis zip."
-    }
-  ],
+  "grader": [],
+  "diagnoser": [],
   "optimizer": [
     {
       "type": "optimizer",
-      "image": "proxywar-coworld-local:coworld-3438de305e81",
+      "image": "proxywar-coworld-local:coworld-016e3c064f92",
       "run": [
         "node",
         "/app/integration/src/proxywar-optimizer-plan.mjs"
@@ -352,28 +313,28 @@
     },
     {
       "id": "tournament-2p",
-      "name": "Tournament 2P",
+      "name": "Qualifier (crash/connect check)",
       "game_config": {
         "players": [
           {
-            "name": "Coworld Starter 1"
+            "name": "Qualifier Seat 1"
           },
           {
-            "name": "Coworld Starter 2"
+            "name": "Qualifier Seat 2"
           }
         ],
-        "max_decision_steps": 50,
-        "turns_per_decision_step": 100,
+        "num_agents": 2,
+        "max_decision_steps": 5,
+        "turns_per_decision_step": 25,
         "max_decision_ms": 15000,
         "map": "Pangaea",
         "map_size": "Compact",
         "difficulty": "Easy",
-        "replay_tail_turns": 500,
+        "replay_tail_turns": 0,
         "player_connect_timeout_seconds": 120,
-        "num_agents": 2,
         "episode_timeout_seconds": 1200
       },
-      "description": "Default two-policy tournament episode: 50 decision steps x 100 turns (~5000+ turn games, ~50 decisions per policy). Hosted-validated 2026-06-10: a full 5301-turn episode completed in ~15 minutes on the platform. (Local amd64-emulated runs of this config can exhaust Docker memory - use a reduced-step episode request for local smoke.)"
+      "description": "Cheap self-play smoke test for the Qualifiers staging division: one real policy duplicated into both seats, a short 5-decision-step episode (well under a minute), just to confirm it connects, responds to LegalAction.id, and doesn't crash before it ever occupies a real head-to-head seat."
     },
     {
       "id": "tournament-4p",

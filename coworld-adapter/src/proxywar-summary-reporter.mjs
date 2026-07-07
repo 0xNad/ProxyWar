@@ -1,69 +1,85 @@
 import fs from "node:fs/promises";
 import path from "node:path";
+import zlib from "node:zlib";
 import JSZip from "jszip";
 
+// Speaks the platform's real reporter protocol: one COGAME_REPORT_REQUEST env var
+// (a JSON-encoded ReportRequest -- request_id, episodes[], report_uri), artifacts
+// referenced by file://.../https://... ReporterArtifactRef, output written as a
+// report.zip containing a manifest.json {reporter_id, render?, event_log?, trace?}.
+// See packages/coworld/src/coworld/reporter_protocol.py and report.py in metta for
+// the authoritative schema; there was no prior JS implementation to pattern-match,
+// this is a straight port of the Python reference (paint_arena_summarizer.py).
+
 const REPORTER_ID = "proxywar-summary-reporter";
+const ZIP_ENTRY_DATE = new Date(1980, 0, 1); // deterministic zip output, matches the platform's own writer
 
-const bundleUri = requiredEnv("COGAME_EPISODE_BUNDLE_URI");
-const reportUri = requiredEnv("COGAME_REPORT_URI");
-const bundle = await JSZip.loadAsync(await readUriBuffer(bundleUri));
-const bundleManifest = JSON.parse(await readZipText(bundle, "manifest.json"));
-const results = JSON.parse(await readZipText(bundle, bundleManifest.files.results));
-const replay = JSON.parse(await readZipText(bundle, bundleManifest.files.replay));
-const decisions = await readDecisionRows(bundle, bundleManifest);
+async function main() {
+  const request = JSON.parse(requiredEnv("COGAME_REPORT_REQUEST"));
+  const episodeSummaries = [];
+  for (const episode of request.episodes) {
+    episodeSummaries.push(await summarizeEpisode(episode));
+  }
+  const summary = episodeSummaries.length === 1 ? episodeSummaries[0] : { episodes: episodeSummaries };
 
-const summary = {
-  reporter_id: REPORTER_ID,
-  status: bundleManifest.status,
-  scores: results.scores,
-  winner_slot: results.winner_slot,
-  turn_count: results.turn_count,
-  decision_count: results.decision_count,
-  accepted_decision_count: results.accepted_decision_count,
-  fallback_count: results.fallback_count,
-  replay_kind: replay.replayKind,
-  spectator_snapshot_count: replay.spectatorSnapshotCount,
-  decision_kinds: countBy(decisions, (decision) => decision.selectedActionKind ?? "unknown"),
-};
+  const report = new JSZip();
+  report.file(
+    "manifest.json",
+    `${JSON.stringify({ reporter_id: REPORTER_ID, render: "summary.md", trace: "summary.json" }, null, 2)}\n`,
+    { date: ZIP_ENTRY_DATE },
+  );
+  report.file("summary.json", `${JSON.stringify(summary, null, 2)}\n`, { date: ZIP_ENTRY_DATE });
+  report.file("summary.md", renderSummary(summary), { date: ZIP_ENTRY_DATE });
 
-const report = new JSZip();
-report.file(
-  "manifest.json",
-  `${JSON.stringify(
-    {
+  const reportBytes = await report.generateAsync({ type: "nodebuffer", compression: "DEFLATE", platform: "UNIX" });
+  await writeUri(request.report_uri, reportBytes, "application/zip");
+
+  console.log(
+    JSON.stringify(
+      { ok: true, reporter_id: REPORTER_ID, request_id: request.request_id, report_uri: request.report_uri, summary },
+      null,
+      2,
+    ),
+  );
+}
+
+async function summarizeEpisode(episode) {
+  if (episode.status !== "success") {
+    return {
       reporter_id: REPORTER_ID,
-      render: "summary.md",
-      trace: "summary.json",
-    },
-    null,
-    2,
-  )}\n`,
-);
-report.file("summary.json", `${JSON.stringify(summary, null, 2)}\n`);
-report.file("summary.md", renderSummary(summary));
+      status: episode.status,
+      error: episode.inline_json?.error_info ?? null,
+    };
+  }
 
-await writeUri(reportUri, await report.generateAsync({ type: "nodebuffer" }));
+  const results = await readJsonArtifact(episode.artifacts.results);
+  const replay = await readJsonArtifact(episode.artifacts.replay);
+  const decisions = parseDecisionRows(replay);
 
-console.log(
-  JSON.stringify(
-    {
-      ok: true,
-      reporter_id: REPORTER_ID,
-      bundleUri,
-      reportUri,
-      summary,
-    },
-    null,
-    2,
-  ),
-);
+  return {
+    reporter_id: REPORTER_ID,
+    status: episode.status,
+    scores: results.scores,
+    winner_slot: results.winner_slot,
+    turn_count: results.turn_count,
+    decision_count: results.decision_count,
+    accepted_decision_count: results.accepted_decision_count,
+    fallback_count: results.fallback_count,
+    replay_kind: replay.replayKind,
+    spectator_snapshot_count: replay.spectatorSnapshotCount,
+    decision_kinds: countBy(decisions, (decision) => decision.selectedActionKind ?? "unknown"),
+  };
+}
 
-async function readDecisionRows(bundle, manifest) {
-  const decisionsPath = manifest.files.proxywar_artifacts?.["decisions.jsonl"];
-  if (!decisionsPath) {
+// Per-decision rows aren't a separate certifier-provided artifact -- the game engine
+// (no-docker-coworld-episode.ts) embeds them as a decisions.jsonl string inside the
+// replay payload's inlineRunArtifacts, so they ride along with the replay fetch above
+// rather than needing their own bundle entry.
+function parseDecisionRows(replay) {
+  const raw = replay?.inlineRunArtifacts?.["decisions.jsonl"];
+  if (!raw) {
     return [];
   }
-  const raw = await readZipText(bundle, decisionsPath);
   return raw
     .trim()
     .split("\n")
@@ -72,9 +88,23 @@ async function readDecisionRows(bundle, manifest) {
 }
 
 function renderSummary(summary) {
+  if (summary.episodes) {
+    return [
+      "# Proxy War Coworld Episode Summary",
+      "",
+      `${summary.episodes.length} episodes in this report.`,
+      "",
+      ...summary.episodes.flatMap((episode, index) => [`## Episode ${index + 1}`, "", ...renderEpisodeLines(episode), ""]),
+    ].join("\n");
+  }
+  return ["# Proxy War Coworld Episode Summary", "", ...renderEpisodeLines(summary), ""].join("\n");
+}
+
+function renderEpisodeLines(summary) {
+  if (summary.status !== "success") {
+    return [`Status: ${summary.status}`, `Error: ${summary.error?.error ?? "unknown"}`];
+  }
   return [
-    "# Proxy War Coworld Episode Summary",
-    "",
     `Reporter: ${summary.reporter_id}`,
     `Scores: ${summary.scores.join(", ")}`,
     `Winner slot: ${summary.winner_slot ?? "none"}`,
@@ -88,8 +118,7 @@ function renderSummary(summary) {
     "## Decision Kinds",
     "",
     ...Object.entries(summary.decision_kinds).map(([kind, count]) => `- ${kind}: ${count}`),
-    "",
-  ].join("\n");
+  ];
 }
 
 function countBy(values, keyFn) {
@@ -101,29 +130,39 @@ function countBy(values, keyFn) {
   return counts;
 }
 
-async function readZipText(zip, fileName) {
-  const file = zip.file(fileName);
-  if (!file) {
-    throw new Error(`Bundle is missing ${fileName}`);
-  }
-  return await file.async("string");
+async function readJsonArtifact(ref) {
+  const bytes = await readUriBytes(ref.uri);
+  const decoded = ref.encoding === "zlib" ? zlib.inflateSync(bytes) : bytes;
+  return JSON.parse(decoded.toString("utf8"));
 }
 
-async function readUriBuffer(uri) {
+async function readUriBytes(uri) {
   if (uri.startsWith("file://")) {
     return await fs.readFile(new URL(uri));
   }
   if (/^https?:\/\//.test(uri)) {
-    const response = await fetch(uri);
-    if (!response.ok) {
-      throw new Error(`${uri} returned HTTP ${response.status}`);
-    }
-    return Buffer.from(await response.arrayBuffer());
+    return await fetchWithRetry(uri);
   }
   return await fs.readFile(uri);
 }
 
-async function writeUri(uri, body) {
+async function fetchWithRetry(uri, attempts = 5) {
+  let lastError;
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    const response = await fetch(uri);
+    if (response.ok) {
+      return Buffer.from(await response.arrayBuffer());
+    }
+    lastError = new Error(`${uri} returned HTTP ${response.status}`);
+    if (response.status !== 429 && (response.status < 500 || response.status >= 600)) {
+      throw lastError;
+    }
+    await new Promise((resolve) => setTimeout(resolve, Math.min(8000, 500 * 2 ** attempt)));
+  }
+  throw lastError;
+}
+
+async function writeUri(uri, body, contentType) {
   if (uri.startsWith("file://")) {
     const filePath = new URL(uri);
     await fs.mkdir(path.dirname(filePath.pathname), { recursive: true });
@@ -133,7 +172,7 @@ async function writeUri(uri, body) {
   if (/^https?:\/\//.test(uri)) {
     const response = await fetch(uri, {
       method: "PUT",
-      headers: { "content-type": "application/zip" },
+      headers: { "content-type": contentType },
       body,
     });
     if (!response.ok) {
@@ -152,3 +191,5 @@ function requiredEnv(name) {
   }
   return value;
 }
+
+await main();

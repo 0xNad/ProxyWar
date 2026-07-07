@@ -4,11 +4,16 @@ services:
     # ../ProxyWar (or $PROXYWAR_REPO) plus this repo's integration/ into .docker-context/
     # before invoking Dockerfile.coworld. That staging step isn't a plain `docker build`
     # single-directory context, so it isn't reproduced here as a `build:` section --
-    # run `npm run build:image` first so this tag exists locally.
+    # run `npm run build:image` first so this tag exists locally. That script already pins
+    # --platform linux/amd64, matching the platform declared here.
     image: proxywar-coworld-local:latest
+    platform: linux/amd64
 
   commissioner:
+    # Hosted Coworld episodes require linux/amd64 -- without this, `docker compose build`
+    # on an Apple Silicon host produces an arm64 image that upload-coworld rejects outright.
     image: proxywar-commissioner-local:latest
+    platform: linux/amd64
     build:
       context: ./commissioner
       dockerfile: Dockerfile
