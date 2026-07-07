@@ -321,7 +321,7 @@
           }
         ],
         "num_agents": 2,
-        "max_decision_steps": 5,
+        "max_decision_steps": 300,
         "turns_per_decision_step": 25,
         "max_decision_ms": 15000,
         "map": "Pangaea",
@@ -396,7 +396,7 @@
           }
         ],
         "num_agents": 8,
-        "max_decision_steps": 400,
+        "max_decision_steps": 300,
         "turns_per_decision_step": 100,
         "max_decision_ms": 15000,
         "map": "Pangaea",
@@ -451,7 +451,7 @@
           }
         ],
         "num_agents": 12,
-        "max_decision_steps": 500,
+        "max_decision_steps": 250,
         "turns_per_decision_step": 100,
         "max_decision_ms": 15000,
         "map": "Pangaea",

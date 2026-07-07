@@ -27,7 +27,7 @@ Coworld policy container
 ## Status
 
 - Passes local `coworld certify` and `coworld run-episode --verify-replay`
-  against Coworld **0.1.20** (the pin was bumped from 0.1.15, which crashes on the
+  against the CURRENT coworld CLI (unpinned; stale pins silently break secret injection and the
   current platform API shapes for episode queries and image upload).
 - Verified at 8 parallel local episodes.
 - The canonical package is `proxywar:0.0.9` (two fixed seats). A separate

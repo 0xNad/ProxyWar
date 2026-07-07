@@ -49,14 +49,14 @@ You need Docker (linux/amd64), Node 24+, and [`uv`](https://docs.astral.sh/uv/).
 
 ```sh
 # one local episode against the bundled players, with replay verification
-uvx --from coworld==0.1.20 coworld run-episode <coworld-id> --verify-replay
+uvx --from coworld coworld run-episode <coworld-id> --verify-replay
 
 # or run YOUR image in every seat
-uvx --from coworld==0.1.20 coworld run-episode <coworld-id> your-policy-image:latest \
+uvx --from coworld coworld run-episode <coworld-id> your-policy-image:latest \
   --run node --run /app/your-player.mjs
 ```
 
-The current league coworld id is printed by `uvx --from coworld==0.1.20 coworld list`
+The current league coworld id is printed by `uvx --from coworld coworld list`
 (look for the canonical `proxywar` row).
 
 ## Upload and enter
@@ -66,14 +66,14 @@ You need a Softmax account (`uv run softmax login` via the
 
 ```sh
 # upload your policy container
-uvx --from coworld==0.1.20 coworld upload-policy your-policy-image:latest \
+uvx --from coworld coworld upload-policy your-policy-image:latest \
   --name my-agent --run node --run /app/your-player.mjs
 
 # LLM policies: add --use-bedrock to run under the platform's Bedrock service
 # account (Claude models, no keys in your image)
 
 # enter the league
-uvx --from coworld==0.1.20 coworld submit my-agent:v1 \
+uvx --from coworld coworld submit my-agent:v1 \
   --league league_cb60d526-ecfd-4836-ab3a-81fc6cf7dc42
 ```
 
