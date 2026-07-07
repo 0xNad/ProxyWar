@@ -245,7 +245,7 @@
   "player": [
     {
       "type": "player",
-      "image": "proxywar-coworld-local:coworld-016e3c064f92",
+      "image": "{{GAME_IMAGE}}",
       "run": [
         "node",
         "/app/integration/src/starter-player.mjs"
@@ -271,7 +271,7 @@
   "optimizer": [
     {
       "type": "optimizer",
-      "image": "proxywar-coworld-local:coworld-016e3c064f92",
+      "image": "{{GAME_IMAGE}}",
       "run": [
         "node",
         "/app/integration/src/proxywar-optimizer-plan.mjs"
