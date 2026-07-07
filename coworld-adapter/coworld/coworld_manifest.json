@@ -216,7 +216,7 @@
     },
     "runnable": {
       "type": "game",
-      "image": "proxywar-coworld-local:coworld-016e3c064f92",
+      "image": "proxywar-coworld-local:coworld-77ed32cc4461",
       "run": [
         "node",
         "--import",
@@ -246,7 +246,7 @@
   "player": [
     {
       "type": "player",
-      "image": "proxywar-coworld-local:coworld-016e3c064f92",
+      "image": "proxywar-coworld-local:coworld-77ed32cc4461",
       "run": [
         "node",
         "/app/integration/src/starter-player.mjs"
@@ -261,7 +261,7 @@
   "commissioner": [
     {
       "type": "commissioner",
-      "image": "proxywar-commissioner-local:coworld-f8a2620c9aef",
+      "image": "proxywar-commissioner-local:coworld-321e5fea0b25",
       "run": [],
       "env": {},
       "id": "proxywar-ladder-commissioner",
@@ -274,7 +274,7 @@
   "optimizer": [
     {
       "type": "optimizer",
-      "image": "proxywar-coworld-local:coworld-016e3c064f92",
+      "image": "proxywar-coworld-local:coworld-77ed32cc4461",
       "run": [
         "node",
         "/app/integration/src/proxywar-optimizer-plan.mjs"
@@ -324,7 +324,7 @@
           }
         ],
         "num_agents": 2,
-        "max_decision_steps": 5,
+        "max_decision_steps": 300,
         "turns_per_decision_step": 25,
         "max_decision_ms": 15000,
         "map": "Pangaea",
@@ -398,7 +398,7 @@
           }
         ],
         "num_agents": 8,
-        "max_decision_steps": 400,
+        "max_decision_steps": 300,
         "turns_per_decision_step": 100,
         "max_decision_ms": 15000,
         "map": "Pangaea",
@@ -453,7 +453,7 @@
           }
         ],
         "num_agents": 12,
-        "max_decision_steps": 500,
+        "max_decision_steps": 250,
         "turns_per_decision_step": 100,
         "max_decision_ms": 15000,
         "map": "Pangaea",

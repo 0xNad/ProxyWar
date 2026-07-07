@@ -218,6 +218,7 @@
       "image": "{{GAME_IMAGE}}",
       "run": [
         "node",
+        "--max-old-space-size=640",
         "--import",
         "tsx/esm",
         "/app/integration/src/no-docker-coworld-episode.ts"
