@@ -2,7 +2,7 @@
   "$schema": "https://raw.githubusercontent.com/Metta-AI/coworld/main/src/coworld/coworld_manifest_schema.json",
   "game": {
     "name": "proxywar",
-    "version": "0.1.0",
+    "version": "0.1.1",
     "description": "Hosted Proxy War Coworld adapter that preserves the LegalAction.id decision path.",
     "owner": "proxywar",
     "config_schema": {
@@ -219,6 +219,7 @@
       "image": "proxywar-coworld-local:coworld-77ed32cc4461",
       "run": [
         "node",
+        "--max-old-space-size=640",
         "--import",
         "tsx/esm",
         "/app/integration/src/no-docker-coworld-episode.ts"
@@ -261,7 +262,7 @@
   "commissioner": [
     {
       "type": "commissioner",
-      "image": "proxywar-commissioner-local:coworld-321e5fea0b25",
+      "image": "proxywar-commissioner-local:coworld-b5060bc5a573",
       "run": [],
       "env": {},
       "id": "proxywar-ladder-commissioner",
@@ -495,5 +496,6 @@
         "player_id": "proxywar-starter-websocket"
       }
     ]
-  }
+  },
+  "episode_timeout_minutes": 100
 }

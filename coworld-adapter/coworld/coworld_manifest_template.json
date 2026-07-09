@@ -464,6 +464,7 @@
       }
     }
   ],
+  "episode_timeout_minutes": 100,
   "certification": {
     "game_config": {
       "players": [
