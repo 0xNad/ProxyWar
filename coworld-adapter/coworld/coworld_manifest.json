@@ -2,7 +2,7 @@
   "$schema": "https://raw.githubusercontent.com/Metta-AI/coworld/main/src/coworld/coworld_manifest_schema.json",
   "game": {
     "name": "proxywar",
-    "version": "0.1.1",
+    "version": "0.1.2",
     "description": "Hosted Proxy War Coworld adapter that preserves the LegalAction.id decision path.",
     "owner": "proxywar",
     "config_schema": {
@@ -262,7 +262,7 @@
   "commissioner": [
     {
       "type": "commissioner",
-      "image": "proxywar-commissioner-local:coworld-b5060bc5a573",
+      "image": "proxywar-commissioner-local:coworld-1921d114d61e",
       "run": [],
       "env": {},
       "id": "proxywar-ladder-commissioner",
@@ -399,7 +399,7 @@
           }
         ],
         "num_agents": 8,
-        "max_decision_steps": 300,
+        "max_decision_steps": 400,
         "turns_per_decision_step": 100,
         "max_decision_ms": 15000,
         "map": "Pangaea",
@@ -454,7 +454,7 @@
           }
         ],
         "num_agents": 12,
-        "max_decision_steps": 250,
+        "max_decision_steps": 500,
         "turns_per_decision_step": 100,
         "max_decision_ms": 15000,
         "map": "Pangaea",

@@ -11,17 +11,22 @@ from commissioners.common.ruleset_strategy.scheduling import schedule_entries
 
 # Declared once here and in the manifest's variants[] -- each id must exist there, and each
 # entry's game_config.num_agents must equal the seat count declared for it below.
-COMPETITION_LADDER: list[tuple[str, int]] = [
-    ("tournament-2p", 2),
-    ("tournament-4p", 4),
-    ("tournament-8p", 8),
-    ("tournament-12p", 12),
+# Each rung declares a MAP POOL (variant ids differing only by map); rounds rotate
+# through the pool by round_number so a season sweeps every map deterministically.
+# Pool order matters: index 0 is the most battle-tested map (Pangaea) so round 1 of
+# any fresh league lands on proven config.
+COMPETITION_LADDER: list[tuple[int, list[str]]] = [
+    (2, ["tournament-2p-pangaea", "tournament-2p-asia"]),
+    (4, ["tournament-4p-pangaea", "tournament-4p-asia", "tournament-4p-europe"]),
+    (8, ["tournament-8p-pangaea", "tournament-8p-world", "tournament-8p-asia"]),
+    (12, ["tournament-12p-pangaea", "tournament-12p-world", "tournament-12p-europe"]),
 ]
 
 
 class ProxyWarCommissioner(RulesetStrategyCommissioner):
     """Stock ruleset_strategy commissioner, plus one override: Competition rounds route to a
-    seat-count ladder instead of a single fixed variant.
+    seat-count ladder instead of a single fixed variant, and rotate through each rung's
+    map pool by round number.
 
     Everything else (Qualifiers' self-play crash check, scoring, seating, promotion) is pure
     YAML config (see configs/proxywar.yaml) -- this override exists only because the platform
@@ -45,7 +50,10 @@ class ProxyWarCommissioner(RulesetStrategyCommissioner):
         rule = select_rule(config, view.current_division, view.memberships)
         entries = view.entries(rule)
         available_variant_ids = {variant.id for variant in round_start.variants}
-        variant_id, num_agents = self._fit_ladder_rung(len(entries), available_variant_ids)
+        round_number = getattr(round_start, "round_number", 0) or 0
+        variant_id, num_agents = self._fit_ladder_rung(
+            len(entries), available_variant_ids, round_number
+        )
 
         return schedule_entries(
             pool=view.pool(rule),
@@ -58,18 +66,29 @@ class ProxyWarCommissioner(RulesetStrategyCommissioner):
             recent_results=round_start.recent_results,
         )
 
-    def _fit_ladder_rung(self, champion_count: int, available_variant_ids: set[str]) -> tuple[str, int]:
-        ladder = [rung for rung in COMPETITION_LADDER if rung[0] in available_variant_ids]
+    def _fit_ladder_rung(
+        self, champion_count: int, available_variant_ids: set[str], round_number: int
+    ) -> tuple[str, int]:
+        ladder = [
+            (seats, pool)
+            for seats, variant_pool in COMPETITION_LADDER
+            if (pool := [v for v in variant_pool if v in available_variant_ids])
+        ]
         if not ladder:
             raise ValueError(
                 "none of the configured competition ladder variants "
-                f"({[v for v, _ in COMPETITION_LADDER]}) are declared in this manifest"
+                f"({[v for _, pool in COMPETITION_LADDER for v in pool]}) "
+                "are declared in this manifest"
             )
         # The largest rung the real champion count fills -- schedule_entries' rolling_window
         # seating then windows that field across multiple episodes if it exceeds the rung, so
         # every real champion still plays even at the smallest declared rung.
-        fitting = [rung for rung in ladder if rung[1] <= champion_count]
-        return fitting[-1] if fitting else ladder[0]
+        fitting = [rung for rung in ladder if rung[0] <= champion_count]
+        seats, pool = fitting[-1] if fitting else ladder[0]
+        # Rotate the rung's map pool by round number: deterministic, stateless, and a
+        # season sweeps every declared map. Anchored so round 1 (and the certifier's
+        # round_number-less probe) lands on pool[0] -- the battle-tested Pangaea config.
+        return pool[(max(round_number, 1) - 1) % len(pool)], seats
 
 
 register_commissioner("proxywar_scaling", ProxyWarCommissioner)
