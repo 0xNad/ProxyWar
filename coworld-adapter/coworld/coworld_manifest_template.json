@@ -697,61 +697,6 @@
         "player_connect_timeout_seconds": 120,
         "episode_timeout_seconds": 3600
       }
-    },
-    {
-      "id": "tournament-12p-europe",
-      "name": "Tournament 12P - Europe",
-      "description": "DRAFT, unvalidated by the game author: a 12-policy free-for-all -- the seat count the author expects the game to 'shine' at. Extrapolated, not playtested; verify real wall-clock via `coworld run-episode --variant tournament-12p` before this rung ever seats a real league round.",
-      "game_config": {
-        "players": [
-          {
-            "name": "Coworld Starter 1"
-          },
-          {
-            "name": "Coworld Starter 2"
-          },
-          {
-            "name": "Coworld Starter 3"
-          },
-          {
-            "name": "Coworld Starter 4"
-          },
-          {
-            "name": "Coworld Starter 5"
-          },
-          {
-            "name": "Coworld Starter 6"
-          },
-          {
-            "name": "Coworld Starter 7"
-          },
-          {
-            "name": "Coworld Starter 8"
-          },
-          {
-            "name": "Coworld Starter 9"
-          },
-          {
-            "name": "Coworld Starter 10"
-          },
-          {
-            "name": "Coworld Starter 11"
-          },
-          {
-            "name": "Coworld Starter 12"
-          }
-        ],
-        "num_agents": 12,
-        "max_decision_steps": 500,
-        "turns_per_decision_step": 100,
-        "max_decision_ms": 15000,
-        "map": "Europe",
-        "map_size": "Normal",
-        "difficulty": "Easy",
-        "replay_tail_turns": 500,
-        "player_connect_timeout_seconds": 120,
-        "episode_timeout_seconds": 3600
-      }
     }
   ],
   "episode_timeout_minutes": 100,

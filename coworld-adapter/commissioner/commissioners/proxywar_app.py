@@ -19,7 +19,7 @@ COMPETITION_LADDER: list[tuple[int, list[str]]] = [
     (2, ["tournament-2p-pangaea", "tournament-2p-asia"]),
     (4, ["tournament-4p-pangaea", "tournament-4p-asia", "tournament-4p-europe"]),
     (8, ["tournament-8p-pangaea", "tournament-8p-world", "tournament-8p-asia"]),
-    (12, ["tournament-12p-pangaea", "tournament-12p-world", "tournament-12p-europe"]),
+    (12, ["tournament-12p-pangaea", "tournament-12p-world"]),
 ]
 
 
