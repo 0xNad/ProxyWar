@@ -19014,4 +19014,70 @@ describe("Betray late: deterministic backstab of an overmatched ally", () => {
     ]);
     expect(decision.actionID).not.toBe("break_alliance:SIDE02");
   });
+
+  it("degradedOrigin: every decision under a fallback-authored plan is flagged, and a healthy refresh clears it", async () => {
+    const observation = activeObservation("secure_economy");
+    const legalActions = buildLegalActions();
+    let failNext = true;
+    const provider: LlmProvider = {
+      providerType: "codex-cli",
+      async complete(): Promise<string> {
+        if (failNext) {
+          throw new Error("provider down");
+        }
+        return JSON.stringify({
+          objective: "expand_territory",
+          turnIntent: "expand",
+          rationale: "Recovered: expand while the front is open.",
+          maxDecisionCycles: 2,
+          preferredActionKinds: ["expand", "attack", "hold"],
+          enabledModules: ["expansion", "defense"],
+          targetPlayerId: null,
+          tacticalSettings: {
+            reserveRatio: 0.42,
+            triggerRatio: 0.6,
+            expansionRatio: 0.12,
+            maxConcurrentWars: 1,
+            retreatThreshold: 0.38,
+            maxActionsPerDecision: 3,
+          },
+        });
+      },
+    };
+    const brain = new PlannerExecutorAgentBrain({
+      profile: "opportunistic",
+      planner: new LlmAgentPlanner({
+        provider,
+        profile: "opportunistic",
+        plannerType: "codex-cli",
+      }),
+      executor: new FrontierPolicyExecutor("opportunistic"),
+      planEveryDecisionSteps: 3,
+    });
+
+    // Decision 1: refresh fails -> rule fallback plan, flagged on the refresh
+    // decision itself (pre-existing behavior).
+    const d1 = await brain.decide({ observation, legalActions });
+    expect(d1.metadata?.llmPlannerDegraded).toBe(true);
+
+    // Decisions 2-3: no refresh runs (planEvery=3), but the STANDING plan is
+    // fallback-authored — previously these carried healthy metadata and
+    // artifacts under-counted degradation ~5:1.
+    const d2 = await brain.decide({ observation, legalActions });
+    const d3 = await brain.decide({ observation, legalActions });
+    expect(d2.metadata?.plannerRan).toBe(false);
+    expect(d2.metadata?.llmPlannerDegraded).toBe(true);
+    expect(d3.metadata?.llmPlannerDegraded).toBe(true);
+
+    // Decision 4: refresh due; provider healthy again -> new plan replaces the
+    // degraded one and the flag clears.
+    failNext = false;
+    const d4 = await brain.decide({ observation, legalActions });
+    expect(d4.metadata?.plannerRan).toBe(true);
+    expect(d4.metadata?.llmPlannerDegraded ?? false).toBe(false);
+
+    // Decision 5: interval decision under the HEALTHY plan stays unflagged.
+    const d5 = await brain.decide({ observation, legalActions });
+    expect(d5.metadata?.llmPlannerDegraded ?? false).toBe(false);
+  });
 });

@@ -375,7 +375,10 @@ export class DeferredAgentPlanner implements AgentPlanner {
         const plan = carriedPlan ?? fallback?.plan ?? null;
         if (plan !== null) {
           this.completed = {
-            plan,
+            // Mark the plan itself as degraded-origin: the executor then flags
+            // EVERY decision run under it (not just this refresh) until a
+            // healthy Commander refresh replaces it.
+            plan: { ...plan, degradedOrigin: true },
             reason: `Commander refresh failed (${message}); continuing on the standing directive.`,
             latencyMs: 0,
             fallbackUsed: true,

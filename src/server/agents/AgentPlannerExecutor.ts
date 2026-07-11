@@ -180,6 +180,15 @@ export interface StrategicPlan {
   allianceDirective?: AgentAllianceDirective;
   buildDirective?: AgentBuildDirective;
   plannerSource: "rule" | "mock-llm" | "codex-cli" | "real-llm";
+  /**
+   * True when this plan was authored by the RULE fallback after an LLM
+   * planner failure. Every decision executed under such a plan is flagged
+   * llmPlannerDegraded — not just the decision where the refresh failed —
+   * so artifacts count the real extent of a degraded match (previously
+   * under-reported ~5:1 at the default planEvery cadence). A healthy
+   * refresh replaces the plan and the flag clears with it.
+   */
+  degradedOrigin?: boolean;
 }
 
 export interface AgentPlanDecision {
@@ -656,8 +665,13 @@ export class PlannerExecutorAgentBrain implements AgentBrain {
         plannerRefreshReason: plannerRefreshReason ?? "active_plan_reused",
         plannerLatencyMs: planDecision?.latencyMs ?? 0,
         plannerFallbackUsed: planDecision?.fallbackUsed ?? false,
-        ...(planDecision?.llmPlannerDegraded !== undefined
-          ? { llmPlannerDegraded: planDecision.llmPlannerDegraded }
+        ...(planDecision?.llmPlannerDegraded !== undefined ||
+        plan.degradedOrigin === true
+          ? {
+              llmPlannerDegraded:
+                planDecision?.llmPlannerDegraded === true ||
+                plan.degradedOrigin === true,
+            }
           : {}),
         ...(planDecision?.reason !== undefined
           ? { plannerDecisionReason: planDecision.reason }
@@ -1774,7 +1788,11 @@ export class LlmAgentPlanner implements AgentPlanner {
     );
     return {
       ...fallback,
-      plan: { ...fallback.plan, plannerSource: this.plannerType },
+      plan: {
+        ...fallback.plan,
+        plannerSource: this.plannerType,
+        degradedOrigin: true,
+      },
       reason: `Planner fallback after LLM planner failed: ${reason}`,
       latencyMs: Date.now() - started,
       fallbackUsed: true,
