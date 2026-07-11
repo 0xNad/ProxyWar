@@ -105,23 +105,22 @@ const KEYSTONE_EXECUTOR_SETTINGS = {
  * explicit allowlist + boot-log summary exist so which arm a pod ran is auditable
  * from its logs instead of inferred.
  */
-const KEYSTONE_TUNABLE_FLAG_ENV_VARS = [
-  "PROXYWAR_TUNE_ECONOMY_BOOTSTRAP",
-  "PROXYWAR_TUNE_DIRECTIVE_BUILD",
-  "PROXYWAR_TUNE_GOLD_PRESSURE",
-  "PROXYWAR_TUNE_GOLD_PRESSURE_FLOOR",
-  "PROXYWAR_TUNE_GOLD_PRESSURE_MIRV_FLOOR",
-  "PROXYWAR_TUNE_UPGRADE_VISIBILITY",
-] as const;
-
 /** One-line boot-log summary of which keystone behavior flags the pod env set —
- *  "tunables=defaults" when none are, i.e. the shipped all-off configuration. */
+ *  "tunables=defaults" when none are, i.e. the shipped all-off configuration.
+ *  Scans the PROXYWAR_TUNE_ prefix rather than an allowlist: the executor reads
+ *  ~30 tunables (booleans in AgentTunables.ts plus tunedNumber numerics), and a
+ *  stale allowlist meant a pod could run non-default behavior while logging
+ *  "tunables=defaults" — defeating the audit purpose of this line. */
 export function keystoneTunableFlagSummary(
   env: NodeJS.ProcessEnv = process.env,
 ): string {
-  const set = KEYSTONE_TUNABLE_FLAG_ENV_VARS.filter(
-    (name) => (env[name] ?? "").trim() !== "",
-  ).map((name) => `${name}=${env[name]?.trim()}`);
+  const set = Object.keys(env)
+    .filter(
+      (name) =>
+        name.startsWith("PROXYWAR_TUNE_") && (env[name] ?? "").trim() !== "",
+    )
+    .sort()
+    .map((name) => `${name}=${env[name]?.trim()}`);
   return set.length === 0 ? "tunables=defaults" : `tunables=[${set.join(",")}]`;
 }
 
@@ -298,6 +297,11 @@ export class DeferredAgentPlanner implements AgentPlanner {
       const landed = this.completed;
       this.completed = null;
       this.lastKnownPlan = landed.plan;
+      // Arm the NEXT refresh against the current observation before returning.
+      // Without this, refreshes only ever started on calls that arrived
+      // empty-handed, which silently halved the Commander cadence to
+      // 2x planEvery and executed every landed plan one interval stale.
+      this.startBackgroundRefresh(input, landed.plan);
       return landed;
     }
     // Surface (once) any degradation from a prior refresh failure that had no
@@ -632,7 +636,12 @@ async function main(): Promise<void> {
     );
   });
 
-  socket.on("message", async (data: unknown) => {
+  // Serialize decision handling: a platform retry that overlaps an in-flight
+  // request must not interleave brain.decide() on shared mutable state
+  // (decisionsSincePlan, opponent-ledger rising-edge counters).
+  let decisionChain: Promise<void> = Promise.resolve();
+  let sawFinal = false;
+  socket.on("message", (data: unknown) => {
     let message: {
       type?: unknown;
       requestID?: unknown;
@@ -640,10 +649,16 @@ async function main(): Promise<void> {
     };
     try {
       message = JSON.parse(String(data));
-    } catch {
+    } catch (error) {
+      // A malformed frame silently dropped looks like a seat timeout
+      // platform-side — log it so the failure is attributable from pod logs.
+      console.error(
+        `keystone: dropping unparseable frame (${error instanceof Error ? error.message : String(error)})`,
+      );
       return;
     }
     if (message.type === "final") {
+      sawFinal = true;
       console.log("episode final; exiting");
       socket.close();
       return;
@@ -651,39 +666,47 @@ async function main(): Promise<void> {
     if (message.type !== "decision_request") {
       return;
     }
-    const requestID = String(message.requestID ?? "");
-    const startedAt = Date.now();
-    let response: Record<string, unknown>;
-    try {
-      const input = requestToBrainInput(message.request);
-      const decision = await brain.decide(input);
-      response = decisionToResponse(requestID, decision);
-    } catch (error) {
-      const messageText =
-        error instanceof Error ? error.message : String(error);
-      console.error(`keystone decide failed: ${messageText}`);
-      // Last-resort: degraded but LOUD — fallbackUsed + llmPlannerDegraded
-      // travel on the wire so the game-side artifacts never report a dead
-      // brain as healthy. See transportFallbackResponse.
-      response = transportFallbackResponse(
-        requestID,
-        message.request,
-        messageText,
-      );
-    }
-    if (bedrockDiag) {
-      response.reason = `${bedrockDiag} || ${String(response.reason ?? "")}`;
-    }
-    const elapsedMs = Date.now() - startedAt;
-    if (elapsedMs > 5000) {
-      console.warn(
-        `keystone decision took ${elapsedMs}ms — investigate before the clock bites`,
-      );
-    }
-    socket.send(JSON.stringify(response));
+    decisionChain = decisionChain.then(async () => {
+      const requestID = String(message.requestID ?? "");
+      const startedAt = Date.now();
+      let response: Record<string, unknown>;
+      try {
+        const input = requestToBrainInput(message.request);
+        const decision = await brain.decide(input);
+        response = decisionToResponse(requestID, decision);
+      } catch (error) {
+        const messageText =
+          error instanceof Error ? error.message : String(error);
+        console.error(`keystone decide failed: ${messageText}`);
+        // Last-resort: degraded but LOUD — fallbackUsed + llmPlannerDegraded
+        // travel on the wire so the game-side artifacts never report a dead
+        // brain as healthy. See transportFallbackResponse.
+        response = transportFallbackResponse(
+          requestID,
+          message.request,
+          messageText,
+        );
+      }
+      if (bedrockDiag) {
+        response.reason = `${bedrockDiag} || ${String(response.reason ?? "")}`;
+      }
+      const elapsedMs = Date.now() - startedAt;
+      if (elapsedMs > 5000) {
+        console.warn(
+          `keystone decision took ${elapsedMs}ms — investigate before the clock bites`,
+        );
+      }
+      socket.send(JSON.stringify(response));
+    });
   });
 
   socket.on("close", () => {
+    // A transport death mid-episode must not masquerade as a clean exit —
+    // the platform (and our artifacts) should see the seat die loudly.
+    if (!sawFinal) {
+      console.error("keystone: websocket closed before the final message");
+      process.exit(1);
+    }
     process.exit(0);
   });
 
