@@ -1613,7 +1613,12 @@ export class LlmAgentPlanner implements AgentPlanner {
     try {
       raw = await withTimeout(
         this.options.provider.complete(prompt),
-        this.options.providerTimeoutMs ?? 30_000,
+        // Default must exceed the providers' own timeouts (Claude CLI: 60s,
+        // serialized behind a process-wide lock; Bedrock: up to 4 candidate
+        // attempts x 12s). At 30s a single slow call cascaded: the abandoned
+        // subprocess kept the lock while the NEXT refresh burned its whole
+        // budget queued — consecutive llmPlannerDegraded from one slow call.
+        this.options.providerTimeoutMs ?? 90_000,
       );
       const parsed = parsePlannerOutput(raw, input.legalActions);
       if (parsed.ok) {
@@ -1630,7 +1635,9 @@ export class LlmAgentPlanner implements AgentPlanner {
           });
           const repairedRaw = await withTimeout(
             this.options.provider.complete(repairPrompt),
-            this.options.providerTimeoutMs ?? 30_000,
+            // Same rationale as the primary call above: the default must
+            // exceed the providers' own lock-serialized timeouts.
+            this.options.providerTimeoutMs ?? 90_000,
           );
           const repaired = parsePlannerOutput(repairedRaw, input.legalActions);
           if (repaired.ok) {

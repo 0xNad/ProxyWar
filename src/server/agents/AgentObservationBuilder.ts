@@ -390,7 +390,7 @@ export class AgentObservationBuilder {
             : {}),
           ...(relativeTroopRatio !== undefined ? { relativeTroopRatio } : {}),
           ...(alliedWithVisibleIds.length > 0 ? { alliedWithVisibleIds } : {}),
-          ...this.spawnDistance(player, other),
+          ...this.spawnDistance(gameState, player, other),
         };
       });
   }
@@ -649,6 +649,14 @@ export class AgentObservationBuilder {
   ): BuildTargetCandidate | null {
     let best: BuildTargetCandidate | null = null;
     let bestScore = Number.NEGATIVE_INFINITY;
+    // Candidate-independent inputs, hoisted: recomputing these per candidate
+    // (up to 400 of them) re-ran three full border×neighbor scans each time —
+    // the same per-iteration-copy class as the touchesOwnedTerritory hotspot,
+    // and it fires exactly when the agent is rich enough to afford builds on
+    // a large late-game border.
+    const borderTiles = Array.from(player.borderTiles());
+    const hostileFrontTiles = this.hostileFrontTiles(gameState, player);
+    const incomingFrontTiles = this.incomingAttackFrontTiles(gameState, player);
     for (const tile of this.buildSearchTiles(gameState, player, unit).slice(
       0,
       buildCandidateLimit(unit),
@@ -661,6 +669,9 @@ export class AgentObservationBuilder {
           unit,
           tile,
           buildTile,
+          borderTiles,
+          hostileFrontTiles,
+          incomingFrontTiles,
         );
         if (
           unit === UnitType.DefensePost &&
@@ -701,7 +712,13 @@ export class AgentObservationBuilder {
       if (spawnTile === undefined) {
         return a - b;
       }
-      return Math.abs(a - spawnTile) - Math.abs(b - spawnTile) || a - b;
+      // Manhattan distance, not |Δref|: linear tile-ref arithmetic treats a
+      // tile one row down as ~a full map-width away, which row-biased the
+      // candidate pool feeding the buildCandidateLimit() truncation.
+      return (
+        gameState.manhattanDist(a, spawnTile) -
+          gameState.manhattanDist(b, spawnTile) || a - b
+      );
     });
   }
 
@@ -711,10 +728,12 @@ export class AgentObservationBuilder {
     unit: AgentBuildOption["unit"],
     targetTile: number,
     buildTile: number,
+    // Candidate-independent, computed once per findBuildTarget sweep and
+    // passed in — see the hoist comment there.
+    borderTiles: readonly number[],
+    hostileFrontTiles: readonly number[],
+    incomingFrontTiles: readonly number[],
   ): BuildPlacementAnalysis {
-    const borderTiles = Array.from(player.borderTiles());
-    const hostileFrontTiles = this.hostileFrontTiles(gameState, player);
-    const incomingFrontTiles = this.incomingAttackFrontTiles(gameState, player);
     const borderDistance = nearestManhattanDistance(
       gameState,
       buildTile,
@@ -1382,6 +1401,7 @@ export class AgentObservationBuilder {
   }
 
   private spawnDistance(
+    gameState: Game,
     player: Player,
     other: Player,
   ): { spawnDistance?: number } {
@@ -1390,7 +1410,9 @@ export class AgentObservationBuilder {
     if (mySpawn === undefined || otherSpawn === undefined) {
       return {};
     }
-    return { spawnDistance: Math.abs(mySpawn - otherSpawn) };
+    // Manhattan distance — |Δref| was |Δy·width + Δx|, garbage as a spatial
+    // signal for the external agents and LLM prompts this serializes into.
+    return { spawnDistance: gameState.manhattanDist(mySpawn, otherSpawn) };
   }
 }
 
@@ -1792,7 +1814,7 @@ function buildPlacementReason(
 function nearestManhattanDistance(
   gameState: Game,
   tile: number,
-  candidates: number[],
+  candidates: readonly number[],
 ): number {
   return nearestManhattanDistanceOrNull(gameState, tile, candidates) ?? 9_999;
 }
@@ -1800,7 +1822,7 @@ function nearestManhattanDistance(
 function nearestManhattanDistanceOrNull(
   gameState: Game,
   tile: number,
-  candidates: number[],
+  candidates: readonly number[],
 ): number | null {
   let best: number | null = null;
   for (const candidate of candidates) {

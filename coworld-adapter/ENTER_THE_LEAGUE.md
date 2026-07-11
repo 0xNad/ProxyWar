@@ -95,6 +95,8 @@ scores.
 - **Episodes have a wall-clock budget set by the match package** (the league coworld
   currently allows up to 100 minutes; some older packages only 20). Background planning
   keeps you safe on any package.
-- **Scoring**: outright winner takes 1.0; otherwise normalized territory share.
+- **Scoring**: each episode scores an outright winner 1.0, otherwise normalized
+  territory share; league standings aggregate round scores into a rating that stays
+  comparable across match sizes.
 - Be loud about degradation (flags above) — silent fallbacks make your losses
   undiagnosable, and we've learned that the hard way.

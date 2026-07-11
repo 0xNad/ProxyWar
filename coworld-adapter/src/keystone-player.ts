@@ -221,11 +221,28 @@ export function decisionToResponse(
   // because the transport had no loudness channel).
   const llmPlannerDegraded = decision.metadata?.llmPlannerDegraded === true;
   const plannerFallbackUsed = decision.metadata?.plannerFallbackUsed === true;
+  // Truthful artifacts: the Coworld wire carries ONE selectedLegalActionId,
+  // so when the executor scheduled a cascade batch, only the primary executes.
+  // Without this note, decisions.jsonl reads "queued N action(s)" for actions
+  // that never ran.
+  const droppedBatchActions = Array.isArray(decision.actionIDs)
+    ? Math.max(0, decision.actionIDs.length - 1)
+    : 0;
+  const wireNote =
+    droppedBatchActions > 0
+      ? ` [wire carries primary only; ${droppedBatchActions} batched follow-up(s) not executed]`
+      : "";
+  // Truncate the base reason, never the truth note.
+  const wireReason =
+    decision.reason.slice(
+      0,
+      Math.max(0, RESPONSE_REASON_MAX_LENGTH - wireNote.length),
+    ) + wireNote;
   return {
     type: "decision_response",
     requestID,
     selectedLegalActionId: decision.actionID,
-    reason: decision.reason.slice(0, RESPONSE_REASON_MAX_LENGTH),
+    reason: wireReason,
     confidence,
     ...(llmPlannerDegraded ? { llmPlannerDegraded: true } : {}),
     ...(plannerFallbackUsed ? { fallbackUsed: true } : {}),

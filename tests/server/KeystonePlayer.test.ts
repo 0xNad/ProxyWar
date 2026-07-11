@@ -168,6 +168,38 @@ describe("Coworld keystone player", () => {
     expect(second.plan.planID).toBe("llm-plan-1");
   });
 
+  it("DeferredAgentPlanner keeps the full Commander cadence: consuming a landed plan arms the next refresh", async () => {
+    const input = spawnBrainInput();
+    let innerCalls = 0;
+    const countingInner: AgentPlanner = {
+      plannerType: "real-llm",
+      plan: () => {
+        innerCalls++;
+        return Promise.resolve(makePlanDecision(`llm-plan-${innerCalls}`));
+      },
+    };
+    const deferred = new DeferredAgentPlanner(
+      countingInner,
+      new plannerExecutorModule.RuleAgentPlanner("aggressive"),
+    );
+
+    // Each plan() call either starts a refresh or consumes a landed one AND
+    // starts the next. The pre-fix behavior only started refreshes on
+    // empty-handed calls, so N calls produced ~N/2 inner refreshes — silently
+    // halving the documented planEvery cadence and serving every landed plan
+    // one interval stale.
+    const CALLS = 6;
+    let previous = null as Awaited<ReturnType<typeof deferred.plan>> | null;
+    for (let i = 0; i < CALLS; i++) {
+      previous = await deferred.plan(input, previous?.plan ?? null);
+      // let the instant background refresh land before the next call
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+    expect(innerCalls).toBeGreaterThanOrEqual(CALLS - 1);
+    // And landed plans are actually consumed, not just recomputed.
+    expect(previous?.plan.planID).toContain("llm-plan-");
+  });
+
   it("DeferredAgentPlanner surfaces Commander failures loudly", async () => {
     const input = spawnBrainInput();
     const failingInner: AgentPlanner = {
