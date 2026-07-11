@@ -84,11 +84,14 @@ PROXYWAR_BETA_ENABLED=true
 PROXYWAR_PUBLIC_URL=https://beta.your-domain.example
 PROXYWAR_ALLOW_PRIVATE_AGENT_ENDPOINTS=false
 PROXYWAR_MAX_QUEUED_JOBS=1
-PROXYWAR_HOUSE_AGENT_BRAIN=planner-codex-cli
-AI_LEAGUE_LLM_PROVIDER=codex-cli
-AI_LEAGUE_CODEX_MODEL=gpt-5.4
-AI_LEAGUE_CODEX_TRANSPORT=app-server
-AI_LEAGUE_CODEX_APP_SERVER_IDLE_CLOSE_MS=1800000
+PROXYWAR_HOUSE_AGENT_BRAIN=planner-claude-cli
+AI_LEAGUE_CLAUDE_TIMEOUT_MS=60000
+# Legacy Codex opt-in (deprecated as house brain; do not pin a model here —
+# gpt-5.4 returns HTTP 400 on ChatGPT accounts, defer to ~/.codex/config.toml):
+# PROXYWAR_HOUSE_AGENT_BRAIN=planner-codex-cli
+# AI_LEAGUE_LLM_PROVIDER=codex-cli
+# AI_LEAGUE_CODEX_TRANSPORT=app-server
+# AI_LEAGUE_CODEX_APP_SERVER_IDLE_CLOSE_MS=1800000
 AI_LEAGUE_REQUIRE_EXTERNAL_BRAIN_SUCCESS=true
 PROXYWAR_EXTERNAL_AGENT_DECISION_TIMEOUT_MS=15000
 PROXYWAR_AGENT_RELAY_ACTIVE_IDLE_MS=90000
@@ -97,13 +100,13 @@ PROXYWAR_NATIONS_DIR=/var/lib/proxywar/nations
 ```
 
 The tester-facing beta match default is locked to the latest saved tester
-external agent plus one in-house Codex agent using ChatGPT mini 5.4 (`gpt-5.4`)
+external agent plus one in-house Claude agent (Keystone, `planner-claude-cli`)
 against two Easy built-in nations until a winner emerges. `maxSteps=700` is an
 operator fail-safe intended to reach the core game's forced-winner timer; do not
 present the fail-safe as the match objective. Change the roster, model, or Easy
 built-in nation default only after an explicit operator request.
 
-Hosted matches cap external tester-agent decisions separately from the Codex
+Hosted matches cap external tester-agent decisions separately from the
 house-agent budget. Set `PROXYWAR_EXTERNAL_AGENT_DECISION_TIMEOUT_MS` if needed;
 the default is `15000`, so a stuck local Claude/Codex/custom command falls back
 fast enough for a full game to keep moving.
@@ -121,12 +124,14 @@ old local QA agents, localhost endpoints, and throwaway manifests out of the
 hosted beta roster. The readiness gate blocks public sharing if any saved
 external agent still points at HTTP, localhost, LAN, private, or reserved hosts.
 
-`planner-codex-cli` means the house nations use Codex CLI as the strategic
-brain. The server still enforces that final actions are existing
+`planner-claude-cli` means the house nations use the Claude CLI (Keystone) as
+the strategic brain. The server still enforces that final actions are existing
 `LegalAction.id` choices, but the house-agent strategy is not a local rule bot.
-This is the intended private-beta mode.
+This is the intended private-beta mode. `planner-codex-cli` remains available
+as a legacy opt-in only.
 
-For hosted beta, `AI_LEAGUE_CODEX_TRANSPORT=app-server` is the intended Codex
+If you opt into the legacy Codex house brain,
+`AI_LEAGUE_CODEX_TRANSPORT=app-server` is the intended Codex
 subscription path. It keeps one long-lived `codex app-server --listen stdio://`
 worker alive across match decisions and avoids starting Codex CLI for every
 decision. The default `AI_LEAGUE_CODEX_APP_SERVER_IDLE_CLOSE_MS=1800000` keeps
@@ -189,8 +194,9 @@ The readiness command checks:
 - private endpoint lock
 - saved external-agent URL policy, live HTTP endpoint health, and live managed
   relay session health through the hosted `/api/public-readiness` route
-- Codex-powered house-agent brain
-- Codex CLI command availability
+- LLM-backed house-agent brain (`planner-claude-cli` recommended;
+  `planner-codex-cli` legacy)
+- Codex CLI command availability (only when a Codex house brain is opted into)
 - external tester-agent decision timeout
 - rendered replay availability
 - showcase availability

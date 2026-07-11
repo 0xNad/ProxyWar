@@ -21,7 +21,11 @@ import {
   directiveDiplomacyEnabled,
   economyBootstrapEnabled,
   enforceConversionOverNeutralEnabled,
+  goldPressureEnabled,
+  goldPressureFloor,
+  goldPressureMirvBankFloor,
   tunedNumber,
+  upgradeVisibilityEnabled,
 } from "./AgentTunables";
 import {
   sanitizeUntrustedDisplayString,
@@ -139,19 +143,23 @@ export interface AgentAllianceDirective {
 }
 
 /**
- * Binding economy directive (Keystone Phase 2.2). The economy analog of
- * `AgentPlanCommitment`/`AgentAllianceDirective`: a standing order that the executor
- * MUST carry out by selecting an economic `build` (City/Factory/Port) over
- * expansion/attack this cycle, when one is legal (only survival, an active kill
- * commitment, and a bound alliance pre-empt it). `unit` names a specific economic
- * structure, or "any" for any economic build. Set only when the Commander emitted it
- * (with `directiveBuildEnabled()` on) OR a player strategy spec with an economy lean
+ * Binding economy/deterrence directive (Keystone Phase 2.2 + K2). The economy analog
+ * of `AgentPlanCommitment`/`AgentAllianceDirective`: a standing order that the executor
+ * MUST carry out by selecting the directed `build` over expansion/attack this cycle,
+ * when one is legal (only survival, an active kill commitment, and a bound alliance
+ * pre-empt it). `unit` names a specific structure, or "any" for any ECONOMIC build.
+ * Economic semantics are unchanged: "City"/"Factory"/"Port"/"any" bind economic
+ * builds only. K2 adds the two deterrent units — "MissileSilo" (unlocks nukes) and
+ * "SAMLauncher" (auto-intercept umbrella) — which bind that exact unit's build
+ * regardless of build role (silo is role "infrastructure", SAM "defensive"); "any"
+ * deliberately does NOT match them. Set only when the Commander emitted it (with
+ * `directiveBuildEnabled()` on) OR a player strategy spec with an economy lean
  * seeded it — never by rule/fallback planners. Mutually
  * exclusive with commitment + allianceDirective (precedence commitment > alliance >
  * build) so the single override-audit key stays unambiguous.
  */
 export interface AgentBuildDirective {
-  unit: "City" | "Factory" | "Port" | "any";
+  unit: "City" | "Factory" | "Port" | "MissileSilo" | "SAMLauncher" | "any";
 }
 
 export interface StrategicPlan {
@@ -1254,6 +1262,17 @@ export function rankLegalActionsForPrompt(args: {
 
 export class FrontierPolicyExecutor implements AgentExecutor {
   private readonly baseSettings: AgentSettings;
+  /**
+   * Gold-pressure "consecutively rich" streak (K2): count of consecutive decide()
+   * calls whose parsed `ownState.gold` exceeded the effective pressure floor.
+   * Per-instance mutable state mirroring the brain-class counter pattern
+   * (`decisionsSincePlan`/`lastCommitmentHonored`) because observation memory
+   * records action kinds, not gold history. One executor instance serves one agent
+   * for one game, and the update is a pure function of (previous streak,
+   * observation), so decisions stay deterministic and replayable. Always 0 while
+   * `goldPressureEnabled()` is off.
+   */
+  private goldPressureRichStreak = 0;
 
   constructor(
     private readonly profile: AgentStrategyProfile,
@@ -1287,11 +1306,16 @@ export class FrontierPolicyExecutor implements AgentExecutor {
       profile: this.profile,
     });
 
+    this.goldPressureRichStreak = nextGoldPressureRichStreak(
+      this.goldPressureRichStreak,
+      input.observation,
+    );
     let selectedBatch = selectFrontierActionBatch({
       input,
       plan,
       settings,
       scored,
+      goldPressureStreak: this.goldPressureRichStreak,
     });
     // Economy bootstrap (PROXYWAR_TUNE_ECONOMY_BOOTSTRAP, default OFF): Defense Posts are
     // woven through several selection paths (scorer, urgent-fortify candidate, multi-
@@ -1337,6 +1361,22 @@ export class FrontierPolicyExecutor implements AgentExecutor {
       input,
       blockedHostileSummary,
     });
+    // Gold-pressure audit trail (K2): when the spend-down slot's forced pick IS the
+    // single selected action, say so in the reason so decisions.jsonl shows why a
+    // build/upgrade pre-empted expansion/attack. Recomputed pure (same inputs as the
+    // cascade slot) and compared by identity; empty string whenever the flag is off,
+    // the streak is short, or a different action was selected — leaving the reason
+    // byte-identical to shipped behavior.
+    const goldPressurePick = goldPressureSpendCandidate(
+      scored,
+      this.goldPressureRichStreak,
+    );
+    const goldPressureText =
+      goldPressurePick !== undefined &&
+      selectedBatch.length === 1 &&
+      selectedBatch[0] === goldPressurePick
+        ? ` goldPressure=spend-down(gold=${parsedObservedGold(input.observation) ?? "?"}>floor=${effectiveGoldPressureFloor(input.observation)},streak=${this.goldPressureRichStreak})`
+        : "";
     const holdReasonCategory = holdReasonCategoryForSelected({
       selected,
       input,
@@ -1347,7 +1387,7 @@ export class FrontierPolicyExecutor implements AgentExecutor {
       ...(selectedBatch.length > 1
         ? { actionIDs: selectedBatch.map((candidate) => candidate.action.id) }
         : {}),
-      reason: `Frontier module scheduler queued ${selectedBatch.length} action(s), primary ${selected.action.label} total=${selected.totalScore} schedule=${topContributions}${skillText}${penalties}${contextText}`,
+      reason: `Frontier module scheduler queued ${selectedBatch.length} action(s), primary ${selected.action.label} total=${selected.totalScore} schedule=${topContributions}${skillText}${penalties}${contextText}${goldPressureText}`,
       planFollowed: selectedBatch.some((candidate) =>
         actionAlignsPlan(candidate.action, plan),
       ),
@@ -1573,7 +1613,12 @@ export class LlmAgentPlanner implements AgentPlanner {
     try {
       raw = await withTimeout(
         this.options.provider.complete(prompt),
-        this.options.providerTimeoutMs ?? 30_000,
+        // Default must exceed the providers' own timeouts (Claude CLI: 60s,
+        // serialized behind a process-wide lock; Bedrock: up to 4 candidate
+        // attempts x 12s). At 30s a single slow call cascaded: the abandoned
+        // subprocess kept the lock while the NEXT refresh burned its whole
+        // budget queued — consecutive llmPlannerDegraded from one slow call.
+        this.options.providerTimeoutMs ?? 90_000,
       );
       const parsed = parsePlannerOutput(raw, input.legalActions);
       if (parsed.ok) {
@@ -1590,7 +1635,9 @@ export class LlmAgentPlanner implements AgentPlanner {
           });
           const repairedRaw = await withTimeout(
             this.options.provider.complete(repairPrompt),
-            this.options.providerTimeoutMs ?? 30_000,
+            // Same rationale as the primary call above: the default must
+            // exceed the providers' own lock-serialized timeouts.
+            this.options.providerTimeoutMs ?? 90_000,
           );
           const repaired = parsePlannerOutput(repairedRaw, input.legalActions);
           if (repaired.ok) {
@@ -1956,17 +2003,34 @@ function allianceDirectiveCandidate(
 }
 
 /**
- * True for a legal action that satisfies a build directive: an economic `build`
- * (City/Factory/Port — `metadata.role === "economic"`) whose unit matches the
- * directive ("any" matches any economic structure). Shared shape used by both the
- * candidate selector and the independent adherence audit (each re-derives it, they
- * do not share a closure, so an enforcement bug cannot fake adherence).
+ * True for a legal action that satisfies a build directive. Economic directives
+ * (City/Factory/Port/"any") match an economic `build` (`metadata.role === "economic"`)
+ * whose unit matches ("any" matches any economic structure) — semantics unchanged.
+ * Deterrent directives (K2: MissileSilo/SAMLauncher) match that exact unit's `build`
+ * regardless of role (silo is role "infrastructure", SAM "defensive"); "any" never
+ * matches them, so an economy-lean directive cannot accidentally bind a deterrent.
+ * Nuke actions can never qualify: `actionKindForBuild` gives Atom/Hydrogen/MIRV the
+ * kind "nuke", not "build". Shared shape used by both the candidate selector and the
+ * independent adherence audit (each re-derives it, they do not share a closure, so an
+ * enforcement bug cannot fake adherence).
  */
 function actionSatisfiesBuildDirective(
   action: LegalAction,
   directive: AgentBuildDirective,
 ): boolean {
-  if (action.kind !== "build" || action.metadata?.role !== "economic") {
+  if (action.kind !== "build") {
+    return false;
+  }
+  // Directive literals are the compact spellings the Commander emits
+  // ("MissileSilo"/"SAMLauncher"); build metadata carries the UnitType display
+  // values ("Missile Silo"/"SAM Launcher") — map explicitly.
+  if (directive.unit === "MissileSilo") {
+    return action.metadata?.unit === UnitType.MissileSilo;
+  }
+  if (directive.unit === "SAMLauncher") {
+    return action.metadata?.unit === UnitType.SAMLauncher;
+  }
+  if (action.metadata?.role !== "economic") {
     return false;
   }
   return directive.unit === "any" || action.metadata?.unit === directive.unit;
@@ -1997,8 +2061,103 @@ function buildDirectiveCandidate(
     return undefined;
   }
   // Among legal directed builds, take the highest-scored (the shared scorer already
-  // ranks city/factory/port placement quality).
+  // ranks city/factory/port/silo/SAM placement quality).
   return [...qualifying].sort((a, b) => b.totalScore - a.totalScore)[0];
+}
+
+/**
+ * Parse `observation.ownState.gold` (a decimal string produced by
+ * `player.gold().toString()`; core gold is bigint) into a number for threshold
+ * comparison. Tolerates bigint-ish strings safely: trims whitespace, strips one
+ * trailing "n", and accepts digits only — anything else (missing ownState,
+ * malformed text, negatives) yields null so gold pressure simply never engages.
+ * Values beyond 2^53 lose precision but remain finite and ordered, which is all a
+ * floor comparison needs.
+ */
+function parsedObservedGold(observation: AgentObservation): number | null {
+  const raw = observation.ownState?.gold;
+  if (typeof raw === "number") {
+    return Number.isFinite(raw) ? raw : null;
+  }
+  if (typeof raw !== "string") {
+    return null;
+  }
+  const text = raw.trim().replace(/n$/i, "");
+  if (!/^\d+$/.test(text)) {
+    return null;
+  }
+  const value = Number(text);
+  return Number.isFinite(value) ? value : null;
+}
+
+/**
+ * Deterrent-aware gold-pressure floor (K2, plan keen-sparking-hollerith). While the
+ * player has NO MissileSilo or the game is pre-turn-1600, the base floor applies
+ * (default 3M — structure costs cap at 1-3M, so idle gold above that is buying
+ * nothing). Once a silo exists AND turn >= 1600 (the nuke era), the floor rises to
+ * the MIRV-bank floor (default 30M) so forced spend-down can never drain the war
+ * chest below the ~25M a MIRV costs — a flat floor would force-spend forever and
+ * make the MIRV permanently unreachable. Reads the silo count from the same
+ * `ownState.unitCounts` field the nuclear-infrastructure scoring already uses.
+ */
+function effectiveGoldPressureFloor(observation: AgentObservation): number {
+  const turnNumber = observation.turnNumber ?? 0;
+  const siloCount = ownUnitCount(observation, UnitType.MissileSilo);
+  return siloCount >= 1 && turnNumber >= 1_600
+    ? goldPressureMirvBankFloor()
+    : goldPressureFloor();
+}
+
+/**
+ * Advance the per-instance "consecutively rich" streak (K2). Pure function of the
+ * previous streak + the current observation (no clock, no randomness): returns
+ * previous+1 when the flag is on and parsed gold exceeds the effective floor,
+ * otherwise 0. The streak must survive across decisions, and observation memory
+ * (`memory.recentActions`) records action kinds, not gold, so the caller keeps the
+ * running value as a private executor field — mirroring the brain-class private
+ * counter pattern (`decisionsSincePlan`/`lastCommitmentHonored`).
+ */
+function nextGoldPressureRichStreak(
+  previousStreak: number,
+  observation: AgentObservation,
+): number {
+  if (!goldPressureEnabled()) {
+    return 0;
+  }
+  const gold = parsedObservedGold(observation);
+  if (gold === null || gold <= effectiveGoldPressureFloor(observation)) {
+    return 0;
+  }
+  return previousStreak + 1;
+}
+
+/**
+ * Gold-pressure spend-down selector (`PROXYWAR_TUNE_GOLD_PRESSURE`, default OFF; K2
+ * of plan keen-sparking-hollerith — the "96M hoard" insurance). When the flag is on
+ * and gold has sat above the effective pressure floor for >= 2 consecutive decisions,
+ * force the highest-RANKED offered action whose kind is `build` or
+ * `upgrade_structure` — converting an idle hoard into structures/upgrades instead of
+ * letting income compound unspent. Never a nuke: nuke builds carry kind "nuke"
+ * (`actionKindForBuild`), so the kind filter excludes them structurally and nuclear
+ * strikes stay ranking-driven. `scored` is already in canonical rank order (ranker
+ * tie-breaks included), so the first qualifying entry IS the highest-ranked. Sits in
+ * the precedence cascade directly AFTER the bound build-directive slot: survival, an
+ * explicit kill commitment, a bound alliance, and a bound build directive all still
+ * pre-empt it; when no build/upgrade is offered (or the streak/flag gate fails) it
+ * returns undefined and the cascade falls through unchanged.
+ */
+function goldPressureSpendCandidate(
+  scored: readonly FrontierRankedAction[],
+  richStreak: number,
+): FrontierRankedAction | undefined {
+  if (!goldPressureEnabled() || richStreak < 2) {
+    return undefined;
+  }
+  return scored.find(
+    (candidate) =>
+      candidate.action.kind === "build" ||
+      candidate.action.kind === "upgrade_structure",
+  );
 }
 
 /**
@@ -2021,23 +2180,32 @@ function buildDirectiveCandidate(
  * dependency), not just the first City, so the economy actually compounds toward the
  * income needed for the Silo/Port → advanced-warfare tree.
  */
-function economyBootstrapBaselineIncomplete(
+// The bootstrap cascade, in order: an income engine (City, then Factory). Probe
+// ab-couplelong-warship-r1 confirmed extending this to Port→Warship does NOT reach an
+// advanced unit — the cascade re-banks ~1800 turns per 125k structure, so a Warship
+// would land ~turn 6500+, past where games resolve (~5400). Kept to the validated
+// income engine; emergent advanced warfare is a long-horizon structural problem.
+const ECONOMY_BOOTSTRAP_CASCADE: readonly UnitType[] = [
+  UnitType.City,
+  UnitType.Factory,
+];
+
+function economyBootstrapCascadeIncomplete(
   observation: AgentBrainInput["observation"],
 ): boolean {
-  return (
-    ownUnitCount(observation, UnitType.City) === 0 ||
-    ownUnitCount(observation, UnitType.Factory) === 0
+  return ECONOMY_BOOTSTRAP_CASCADE.some(
+    (unit) => ownUnitCount(observation, unit) === 0,
   );
 }
 
-/** Bootstrap "bank for the next economy structure" gate: flag on, baseline still
- *  incomplete, and not under attack (real defense always pre-empts). */
+/** Bootstrap "bank for the next cascade unit" gate: flag on, cascade still incomplete,
+ *  and not under attack (real defense always pre-empts). */
 function economyBootstrapBankingActive(
   observation: AgentBrainInput["observation"],
 ): boolean {
   return (
     economyBootstrapEnabled() &&
-    economyBootstrapBaselineIncomplete(observation) &&
+    economyBootstrapCascadeIncomplete(observation) &&
     !incomingHomePressure(observation)
   );
 }
@@ -2049,14 +2217,18 @@ function economyBootstrapStructureCandidate(
   if (!economyBootstrapBankingActive(input.observation)) {
     return undefined;
   }
-  // Build the income engine in order: first City, then first Factory.
-  const nextUnit =
-    ownUnitCount(input.observation, UnitType.City) === 0
-      ? UnitType.City
-      : UnitType.Factory;
+  // Force the first MISSING cascade unit when it is offered (City → Factory → Port →
+  // Warship). A Warship build action has kind "warship"; the rest are kind "build".
+  const nextUnit = ECONOMY_BOOTSTRAP_CASCADE.find(
+    (unit) => ownUnitCount(input.observation, unit) === 0,
+  );
+  if (nextUnit === undefined) {
+    return undefined;
+  }
   return scored.find(
     (candidate) =>
-      candidate.action.kind === "build" &&
+      (candidate.action.kind === "build" ||
+        candidate.action.kind === "warship") &&
       metadataString(candidate.action, "unit") === nextUnit,
   );
 }
@@ -2211,11 +2383,129 @@ function auditBuildDirectiveAdherence(
   };
 }
 
+// Dominant elimination lock (P2): when dominant + clearly overmatching the weakest attackable bordered
+// rival, return the largest reserve-safe favorable attack on THAT rival, so force concentrates on one
+// target until its core cracks and it is eliminated — instead of spreading and plateauing. The next
+// step the weakest rival is whoever remains, so the lock walks down the field. Gated tightly: dominant
+// only + a clear overall troop edge (>=1.6:1) over the locked rival; the offered commitment caps at 0.40
+// (keeps >=60% reserve), and it DEFERS to active home defense by skipping attacks the urgent-defense gate
+// flags (the lock pre-empts the selectors below, which enforce that gate, so it must apply it here too).
+function dominantEliminationLockCandidate(
+  input: AgentBrainInput,
+  scored: readonly FrontierRankedAction[],
+): FrontierRankedAction | undefined {
+  const observation = input.observation;
+  if (!isDominantConversionMode(observation)) {
+    return undefined;
+  }
+  const lockTarget = observation.combat.weakestAttackableTargetID;
+  if (lockTarget === null) {
+    return undefined;
+  }
+  const weakest = observation.visiblePlayers.find(
+    (player) => player.playerID === lockTarget,
+  );
+  const relativeTroopRatio = weakest?.relativeTroopRatio ?? 0;
+  if (relativeTroopRatio > 0 && relativeTroopRatio < 1.6) {
+    return undefined;
+  }
+  const ownTroops =
+    observation.combat.ownTroops ?? observation.ownState?.troops ?? 0;
+  const locked = scored.filter(
+    (candidate) =>
+      candidate.action.kind === "attack" &&
+      candidate.action.metadata?.expansion !== true &&
+      candidate.action.risk.level !== "high" &&
+      actionTargetsPlayer(candidate.action, lockTarget) &&
+      actionIsFavorableHostileAttack(candidate.action) &&
+      // Defer to active home defense: the selectors below the lock reject attacks carrying the
+      // urgent-defense penalty, and the lock pre-empts them — so apply that same gate here so a
+      // dominant-but-home-threatened agent doesn't lock-attack when it should defend (reviewer-found).
+      !hasPolicyPenalty(
+        candidate,
+        "urgent defense state makes non-leader attacks too risky",
+      ),
+  );
+  if (locked.length === 0) {
+    return undefined;
+  }
+  return [...locked].sort(
+    (a, b) =>
+      committedTroopRatio(b.action, ownTroops) -
+        committedTroopRatio(a.action, ownTroops) ||
+      b.totalScore - a.totalScore ||
+      a.action.id.localeCompare(b.action.id),
+  )[0];
+}
+
+/**
+ * Deterministic "betray late" leaf (the back half of the operator's ally-early /
+ * betray-late strategy). The `backstab_ally` tactical affordance computes correctly
+ * and recommends the break, but the LLM Commander reliably will NOT break a
+ * protective alliance off a JSON signal (two eval runs: 69 recommendations, 0 breaks).
+ * So force the single `break_alliance` here in the executor.
+ *
+ * Mechanism: when `tacticalAffordances.backstabAlly.recommended` is true, return the
+ * already-scored, already-legal `break_alliance` candidate whose action targets the
+ * affordance's `backstabTargetID`. It only RE-ORDERS among offered `LegalAction.id`s —
+ * it never fabricates an action or an intent. The break itself is the whole decision;
+ * the conversion / dominant-elimination logic attacks the ex-ally on subsequent turns.
+ *
+ * This intentionally OVERRIDES the scorer's "keep alliances" over-caution penalties
+ * ("do not break non-leader alliances", "multi-rival matches should keep alliances
+ * until the endgame", "breaking a comparable alliance opens a losing front") — those
+ * are strategic caution, not defensive necessity, and overriding them is the entire
+ * point of betray-late. It does NOT override genuine defense: the affordance already
+ * gates on no incoming attacks (`incomingAttackPlayerIDs.length === 0`) plus a >=1.4x
+ * troop overmatch and >=0.25 own-tile share, and this leaf RE-CHECKS the incoming-
+ * attack guard at the executor (defense-in-depth) so a betray can never fire while the
+ * agent is under attack. Precedence: this sits BELOW survival recoveries, the binding
+ * kill-commitment, the bound alliance/build directives, AND the dominant-elimination
+ * lock in `selectFrontierActionBatch`, so none of those can be pre-empted by a betray.
+ */
+function backstabAllyBreakCandidate(
+  input: AgentBrainInput,
+  scored: readonly FrontierRankedAction[],
+): FrontierRankedAction | undefined {
+  const observation = input.observation;
+  const backstab = observation.tacticalAffordances?.backstabAlly;
+  if (backstab?.recommended !== true) {
+    return undefined;
+  }
+  const backstabTargetID = backstab.backstabTargetID;
+  if (backstabTargetID === null) {
+    return undefined;
+  }
+  // Defense-in-depth: never betray while under attack, even if the affordance signal
+  // is stale. The affordance already requires no incoming attacks; re-assert it here.
+  if (observation.combat.incomingAttackPlayerIDs.length > 0) {
+    return undefined;
+  }
+  const breaks = scored.filter(
+    (candidate) =>
+      candidate.action.kind === "break_alliance" &&
+      actionTargetsPlayer(candidate.action, backstabTargetID),
+  );
+  if (breaks.length === 0) {
+    return undefined;
+  }
+  return [...breaks].sort(
+    (a, b) =>
+      b.totalScore - a.totalScore || a.action.id.localeCompare(b.action.id),
+  )[0];
+}
+
 function selectFrontierActionBatch(input: {
   input: AgentBrainInput;
   plan: StrategicPlan;
   settings: AgentSettings;
   scored: FrontierRankedAction[];
+  /**
+   * Gold-pressure "consecutively rich" streak carried by the calling executor
+   * instance (K2). Optional so every other construction site keeps its exact
+   * current behavior: absent/0 means the gold-pressure slot can never fire.
+   */
+  goldPressureStreak?: number;
 }): FrontierRankedAction[] {
   const { scored, plan, settings } = input;
   const first = scored[0];
@@ -2300,6 +2590,49 @@ function selectFrontierActionBatch(input: {
   );
   if (buildDirectiveAction !== undefined) {
     return [buildDirectiveAction];
+  }
+  // Gold-pressure spend-down (K2, PROXYWAR_TUNE_GOLD_PRESSURE, default OFF): once
+  // gold has sat above the effective pressure floor for >=2 consecutive decisions,
+  // force the highest-ranked offered build/upgrade (never a nuke — the kind filter
+  // excludes kind "nuke" structurally) so an idle hoard becomes structures instead
+  // of compounding unspent. Sits directly AFTER the bound build directive: survival,
+  // kill-commitment, bound alliance, and bound build all still win; everything below
+  // (dominant lock, betray leaf, expansion, banking) is what hoarding hides behind.
+  // Single-action batch: the spend IS this cycle's decision. No-op when the flag is
+  // off, the streak is short, or no build/upgrade is offered (falls through
+  // unchanged).
+  const goldPressureSpend = goldPressureSpendCandidate(
+    scored,
+    input.goldPressureStreak ?? 0,
+  );
+  if (goldPressureSpend !== undefined) {
+    return [goldPressureSpend];
+  }
+  // Dominant elimination lock (P2 — the force-concentration lever). When dominant AND clearly
+  // overmatching the WEAKEST attackable bordered rival, concentrate force on that ONE rival (the
+  // largest reserve-safe favorable attack on it) to crack its core and ELIMINATE, instead of
+  // spreading attacks across rivals and plateauing (~57% share / 0 eliminations vs Medium nations).
+  // Spreading keeps the LOCAL border ratio below the core-cracking threshold; locking makes it climb.
+  // Pre-empts the conversion/expansion selectors below; survival / kill-commitment / bound
+  // alliance+build above still win.
+  const dominantEliminationLock = dominantEliminationLockCandidate(
+    input.input,
+    scored,
+  );
+  if (dominantEliminationLock !== undefined) {
+    return [dominantEliminationLock];
+  }
+  // Betray-late leaf: when the `backstab_ally` affordance recommends breaking an
+  // alliance the agent now overmatches (established, not under attack), force the single
+  // `break_alliance` on that ally — the LLM Commander won't break a protective alliance
+  // off the JSON signal, so the executor makes it deterministic. Sits BELOW survival /
+  // kill-commitment / bound alliance+build / dominant-elimination lock (those still win)
+  // and ABOVE the behind-and-falling / neutral-expansion / banking paths. Single-action
+  // batch: the break IS this cycle's decision; the conversion logic takes the ex-ally's
+  // land on later turns. No-op when not recommended or no matching break is offered.
+  const backstabAllyBreak = backstabAllyBreakCandidate(input.input, scored);
+  if (backstabAllyBreak !== undefined) {
+    return [backstabAllyBreak];
   }
   // FM-2a ("trade or die"): when behind-and-falling, force the single best
   // controlled strike before the neutral-territory / banking / hold paths below,
@@ -4522,6 +4855,25 @@ function politicalShowcaseInfrastructurePriority(
       unit === UnitType.Port ||
       unit === UnitType.MissileSilo)
   ) {
+    // Dynamic upgrade visibility (K2.3, PROXYWAR_TUNE_UPGRADE_VISIBILITY, default
+    // OFF — flag off keeps the shipped flat gate byte-identical). When ON, upgrades
+    // become scoreable from turn >= 800 once the position is land-tight (the
+    // conversion affordance the executor already reads reports no neutral expansion
+    // available — sprawl has stopped working, so upgrade in place) OR gold-rich
+    // (parsed gold above the base pressure floor — banked income should deepen the
+    // cluster). Boosted score 420 stays capped below the SAM tier (450) so
+    // deterrence still outranks an upgrade, and above the legacy 360 so a justified
+    // upgrade beats the flat late-game arm.
+    if (upgradeVisibilityEnabled() && turnNumber >= 800) {
+      const landTight =
+        observation.tacticalAffordances?.frontierConversionTiming
+          ?.neutralExpansionAvailable === false;
+      const goldRich =
+        (parsedObservedGold(observation) ?? 0) > goldPressureFloor();
+      if (landTight || goldRich) {
+        return 420;
+      }
+    }
     return turnNumber >= 1_600 ? 360 : 0;
   }
   if (action.kind === "build" && unit === UnitType.DefensePost) {
@@ -7220,15 +7572,28 @@ function frontierConversionTimingAttackCandidate(
         input.observation.memory.recentExpansionCount >= 3 &&
         (conversion.bestExecutorReadyRelativeTroopRatio ?? 0) >= 1.8 &&
         conversion.homeDanger === "low";
-      const desiredCommitment = decisiveConversionWindow
-        ? 0.25
-        : leaderBlockedSideConversion && ownTiles >= 20_000
+      // Endgame-conversion fix (verified ab-ffaeco-* runs: a dominant agent reached ~9.6:1 troop
+      // ratio vs a rival yet this conversion-timing selector kept targeting <=0.25, so the agent
+      // plateaued at ~57-62% share with zero eliminations). Every desiredCommitment branch below
+      // caps at 0.25 — a reserve-safe pulse that trims a few border tiles and expires before a
+      // defended core regrows. When we are DOMINANT (>=35k tiles, the isDominantConversionMode
+      // threshold) AND strongly overmatch the conversion target (>=2.2:1), only a decisive
+      // commitment outpaces core regrowth, so escalate to the largest rung here. The dominance gate
+      // keeps early-game conversions (small land) on their reserve-safe 0.1/0.18 probes — without it
+      // a local 2.2:1 edge would wrongly escalate mid-expansion.
+      const stronglyOvermatched =
+        Math.max(aRelative, bRelative) >= 2.2 && ownTiles >= 35_000;
+      const desiredCommitment = stronglyOvermatched
+        ? 0.4
+        : decisiveConversionWindow
           ? 0.25
-          : leaderBlockedSideConversion
-            ? 0.1
-            : ownTiles > 0 && ownTiles < 20_000
+          : leaderBlockedSideConversion && ownTiles >= 20_000
+            ? 0.25
+            : leaderBlockedSideConversion
               ? 0.1
-              : 0.18;
+              : ownTiles > 0 && ownTiles < 20_000
+                ? 0.1
+                : 0.18;
       return (
         (leaderBlockedSideConversion
           ? Math.abs(aCommitment - desiredCommitment) -
@@ -20842,7 +21207,7 @@ function plannerPrompt(
       : []),
     ...(directiveBuildEnabled()
       ? [
-          'BINDING BUILD (your real authority for economy): when growing your economy is the priority this cycle — you want cities/factories/ports built rather than troops spent on expansion or attacks — add "buildDirective":{"unit":"any"} to your JSON (or "City"/"Factory"/"Port" for a specific structure). A bound build directive BINDS the executor: it will pick the directed economic build OVER expansion or attacks this cycle when one is legal (only survival, an active commitment, or a bound alliance pre-empt it). Without it the executor may keep expanding/attacking instead of building the economy your strategy calls for. Mutually exclusive with commitment/allianceDirective — set at most one binding directive per cycle.',
+          'BINDING BUILD (your real authority for economy & deterrence): when growing your economy — or standing up deterrence — is the priority this cycle, add "buildDirective":{"unit":"any"} to your JSON ("any" binds any economic build; "City"/"Factory"/"Port" bind that economic structure). Deterrent units must be named exactly: "MissileSilo" (1M gold; nukes physically REQUIRE an active silo, so no silo means no nuclear options ever) or "SAMLauncher" (1.5M; ~70-tile auto-intercept umbrella — place it over your City/Factory/Port/silo cluster). A bound build directive BINDS the executor: it will pick the directed build OVER expansion or attacks this cycle when one is legal (only survival, an active commitment, or a bound alliance pre-empt it). Without it the executor may keep expanding/attacking instead of building what your strategy calls for. Mutually exclusive with commitment/allianceDirective — set at most one binding directive per cycle.',
         ]
       : []),
     // Programmatic Required-JSON example: each binding-directive key is shown only when
@@ -21118,11 +21483,11 @@ function validatedAllianceDirective(
 }
 
 /**
- * Syntactic build-directive parse (Phase 2.2). Shape-validates and clamps `unit` to
- * the four allowed values (defaulting "any"), gated on the feature flag. A build
- * directive has no target to hallucinate, so the heavier semantic checks the
- * commitment/alliance validators run do not apply — availability ("is a build legal
- * now") is handled by the candidate selector + audit. Invalid input degrades to
+ * Syntactic build-directive parse (Phase 2.2 + K2 deterrent units). Shape-validates
+ * and clamps `unit` to the six allowed values (defaulting "any"), gated on the feature
+ * flag. A build directive has no target to hallucinate, so the heavier semantic checks
+ * the commitment/alliance validators run do not apply — availability ("is a build
+ * legal now") is handled by the candidate selector + audit. Invalid input degrades to
  * undefined and NEVER rejects the whole plan.
  */
 function parseBuildDirective(raw: unknown): AgentBuildDirective | undefined {
@@ -21137,6 +21502,8 @@ function parseBuildDirective(raw: unknown): AgentBuildDirective | undefined {
     value.unit === "City" ||
     value.unit === "Factory" ||
     value.unit === "Port" ||
+    value.unit === "MissileSilo" ||
+    value.unit === "SAMLauncher" ||
     value.unit === "any"
       ? value.unit
       : "any";

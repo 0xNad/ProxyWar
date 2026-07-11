@@ -121,6 +121,9 @@ export class AgentLeagueMatchRunner {
   private readonly objectiveManager = new AgentObjectiveManager();
   private readonly decisionValidator: typeof validateAgentDecision;
   private readonly disabledActionKinds: Set<LegalActionKind>;
+  // Log-once bookkeeping for seatEliminated. Liveness itself is recomputed
+  // from the game snapshot every decision turn — never latched here.
+  private readonly eliminatedSeatsAnnounced = new Set<string>();
 
   constructor(private readonly options: AgentLeagueMatchOptions) {
     this.log = options.log.child({ comp: "agent_league_match" });
@@ -197,7 +200,16 @@ export class AgentLeagueMatchRunner {
     // (maxSpawnAdvanceTurns: 2000): a loud throw on overrun, never a silent hang.
     const maxSpawnTicks =
       options.maxSpawnTicks ?? Math.ceil(2_000 / turnsPerSpawnTick);
-    let availableCandidates = [...this.options.spawnCandidates];
+    // Each agent's CURRENT spawn stake: the candidate of its most recent ACCEPTED
+    // spawn submission. Every tick each agent's pool is rebuilt from the full base
+    // pool minus OTHER agents' current stakes (spawnCandidatesAvailableTo), so a
+    // relocating agent RELEASES the neighborhood it vacated. The old cumulative
+    // pruning removed every submission's minSpawnDistance neighborhood from one
+    // shared pool forever — including the submitter's own previous picks — which
+    // exhausted a ~500-candidate pool by ~turn 125-175 of a 300-turn spawn phase
+    // (4 agents, run ab-ffa4p-spawnwatch-r1): relocation froze mid-phase and the
+    // converge-to-anchor settle never ran on a live pool.
+    const spawnStakes = new Map<string, SpawnCandidate>();
 
     for (let tick = 0; tick <= maxSpawnTicks; tick += 1) {
       await options.mirror.ingest(options.messages());
@@ -210,44 +222,61 @@ export class AgentLeagueMatchRunner {
           ? gameState.ticks() /
             Math.max(1, gameState.config().numSpawnPhaseTurns())
           : 0;
+      // A spawn intent submitted now lands in the NEXT server turn, and its
+      // SpawnExecution only applies while the spawn phase is still running
+      // (execution tick <= numSpawnPhaseTurns). At the boundary tick
+      // (ticks === numSpawnPhaseTurns) a submission would be recorded as
+      // accepted but silently never execute — a dead record whose tile
+      // contradicts the player's actual spawn in the replay. Keep advancing
+      // to the phase end, but stop submitting intents that cannot execute,
+      // so the last recorded spawn per agent IS the tile it spawned on.
+      const spawnIntentCanStillExecute =
+        gameState === null ||
+        gameState.ticks() < gameState.config().numSpawnPhaseTurns();
 
-      for (const participant of this.options.participants) {
-        const observation = this.observationBuilder.build({
-          agentID: participant.runner.agentID,
-          clientID: participant.runner.clientID(),
-          username: participant.spec.username,
-          profile: participant.spec.profile,
-          gameID: this.options.game.id,
-          turnNumber: gameState?.ticks() ?? 0,
-          gameState: gameState ?? undefined,
-          phaseOverride: "spawn",
-          objective: this.objectiveManager.currentObjective(
+      if (spawnIntentCanStillExecute) {
+        for (const participant of this.options.participants) {
+          const observation = this.observationBuilder.build({
+            agentID: participant.runner.agentID,
+            clientID: participant.runner.clientID(),
+            username: participant.spec.username,
+            profile: participant.spec.profile,
+            gameID: this.options.game.id,
+            turnNumber: gameState?.ticks() ?? 0,
+            gameState: gameState ?? undefined,
+            phaseOverride: "spawn",
+            objective: this.objectiveManager.currentObjective(
+              participant.runner.agentID,
+            ),
+            recentDecisions: this.recentDecisionsFor(participant),
+          });
+          const availableCandidates = this.spawnCandidatesAvailableTo(
             participant.runner.agentID,
-          ),
-          recentDecisions: this.recentDecisionsFor(participant),
-        });
-        const legalActions = this.legalActionBuilder.build({
-          observation,
-          spawnCandidates: availableCandidates,
-        });
-        const spawnAction = selectSpawnTile({
-          spawnActions: legalActions,
-          profile: participant.spec.profile,
-          gameID: this.options.game.id,
-          agentID: participant.runner.agentID,
-          tick,
-          spawnProgress,
-        });
-        if (spawnAction === undefined) {
-          continue;
+            spawnStakes,
+          );
+          const legalActions = this.legalActionBuilder.build({
+            observation,
+            spawnCandidates: availableCandidates,
+          });
+          const spawnAction = selectSpawnTile({
+            spawnActions: legalActions,
+            profile: participant.spec.profile,
+            gameID: this.options.game.id,
+            agentID: participant.runner.agentID,
+            tick,
+            spawnProgress,
+          });
+          if (spawnAction === undefined) {
+            continue;
+          }
+          this.submitAndRecordSpawn({
+            participant,
+            observation,
+            legalActions,
+            spawnAction,
+            spawnStakes,
+          });
         }
-        availableCandidates = this.submitAndRecordSpawn({
-          participant,
-          observation,
-          legalActions,
-          spawnAction,
-          availableCandidates,
-        });
       }
 
       this.options.game.advanceTurnsForTesting(turnsPerSpawnTick);
@@ -269,7 +298,14 @@ export class AgentLeagueMatchRunner {
       ...(options.spawnCandidates ?? this.options.spawnCandidates),
     ];
     const startingRecordCount = this.records.length;
-    const decisionInputs = this.options.participants.map((participant) => {
+    // Eliminated seats are not polled at all: no observation build, no brain
+    // call, no decision record. Roster-shaped outputs (results.scores,
+    // players[], the spectator roster) are built from the full participants
+    // list elsewhere and stay full-length.
+    const activeParticipants = this.options.participants.filter(
+      (participant) => !this.seatEliminated(participant, options.gameState),
+    );
+    const decisionInputs = activeParticipants.map((participant) => {
       const observationInput: BuildAgentObservationInput = {
         agentID: participant.runner.agentID,
         clientID: participant.runner.clientID(),
@@ -708,6 +744,57 @@ export class AgentLeagueMatchRunner {
     return [...this.records];
   }
 
+  /**
+   * A seat stops being polled once its core player is dead — isAlive() ===
+   * false, i.e. zero owned tiles, the same rule the simulation itself uses
+   * (PlayerImpl.isAlive). Hosted Coworld episodes previously polled every
+   * seat every decision step regardless (12p ereq_f5ac00e9: two eliminated
+   * keystone seats received 119/99 ghost "own=0 tiles" decision turns),
+   * burning pod CPU and polluting decisions.jsonl. Liveness is recomputed
+   * from the CURRENT snapshot every turn — never latched — so a tile-less
+   * player whose transport boat is still en route resumes being polled if
+   * the landing revives them. Deliberately conservative guards: no snapshot,
+   * spawn phase, unresolvable player, or a NEVER-spawned player all keep the
+   * seat polled — a seat that failed to enter the game should stay loud in
+   * decisions.jsonl, not silently vanish.
+   */
+  private seatEliminated(
+    participant: AgentParticipant,
+    gameState: Game | undefined,
+  ): boolean {
+    if (gameState === undefined || gameState.inSpawnPhase()) {
+      return false;
+    }
+    const clientID = participant.runner.clientID();
+    if (clientID === null) {
+      return false;
+    }
+    const player = gameState.playerByClientID(clientID);
+    if (player === null || !player.hasSpawned()) {
+      return false;
+    }
+    if (player.isAlive()) {
+      if (this.eliminatedSeatsAnnounced.delete(participant.runner.agentID)) {
+        this.log.info("league seat revived; decision polling resumed", {
+          agentID: participant.runner.agentID,
+          username: participant.spec.username,
+          tick: gameState.ticks(),
+        });
+      }
+      return false;
+    }
+    if (!this.eliminatedSeatsAnnounced.has(participant.runner.agentID)) {
+      this.eliminatedSeatsAnnounced.add(participant.runner.agentID);
+      this.log.info("league seat eliminated; decision polling stopped", {
+        agentID: participant.runner.agentID,
+        username: participant.spec.username,
+        profile: participant.spec.profile,
+        tick: gameState.ticks(),
+      });
+    }
+    return true;
+  }
+
   private submitLegalAction(
     runner: AgentRunner,
     action: LegalAction,
@@ -733,8 +820,8 @@ export class AgentLeagueMatchRunner {
     observation: AgentObservation;
     legalActions: LegalAction[];
     spawnAction: LegalAction;
-    availableCandidates: SpawnCandidate[];
-  }): SpawnCandidate[] {
+    spawnStakes: Map<string, SpawnCandidate>;
+  }): void {
     // A synthetic, deterministic (non-LLM) spawn decision. The metadata flags keep it OUT
     // of the LLM-aliveness count (rawProviderOutputPresent:false) and the external-brain-
     // cleanliness external-call count (externalPlannerCall/externalActionCall:false); the
@@ -768,10 +855,20 @@ export class AgentLeagueMatchRunner {
       reason: decision.reason,
       result,
     });
-    return this.removeNearbySpawnCandidates(
-      input.availableCandidates,
-      input.spawnAction,
-    );
+    // Replace (never accumulate) this agent's stake: submitting a new spawn tile
+    // means the agent vacated its previous pick, so that neighborhood is released
+    // for everyone on the next spawnCandidatesAvailableTo rebuild. Only an ACCEPTED
+    // submission moves the stake — a rejected intent leaves the player's actual
+    // pending spawn tile unchanged.
+    const tile = input.spawnAction.metadata?.tile;
+    if (result.accepted && typeof tile === "number") {
+      const staked = this.options.spawnCandidates.find(
+        (candidate) => candidate.tile === tile,
+      );
+      if (staked !== undefined) {
+        input.spawnStakes.set(input.participant.runner.agentID, staked);
+      }
+    }
   }
 
   private recordDecision(input: {
@@ -936,6 +1033,47 @@ export class AgentLeagueMatchRunner {
         );
       })
       .slice(-8);
+  }
+
+  /**
+   * The effective minimum spawn-tile separation enforced between DIFFERENT agents'
+   * current spawn stakes (the constructor override or the density-derived default).
+   * Exposed so harnesses/tests can verify reservation semantics without duplicating
+   * the default-derivation formula.
+   */
+  effectiveMinSpawnDistance(): number {
+    return this.minSpawnDistance;
+  }
+
+  /**
+   * The spawn pool the given agent may pick from THIS tick: the full base pool minus
+   * the minSpawnDistance neighborhood of every OTHER agent's current stake (its most
+   * recent accepted spawn tile). Rebuilt from current stakes on every call instead of
+   * cumulatively pruned, so relocation releases the vacated neighborhood — only tiles
+   * agents currently hold reserve space. The agent's OWN stake is deliberately not
+   * excluded from its own pool: excluding it would re-prune the agent's anchor right
+   * after it settles there, forcing an oscillation away from the anchor on every
+   * converge tick.
+   */
+  private spawnCandidatesAvailableTo(
+    agentID: string,
+    spawnStakes: ReadonlyMap<string, SpawnCandidate>,
+  ): SpawnCandidate[] {
+    const rivalStakes: SpawnCandidate[] = [];
+    for (const [stakeAgentID, stake] of spawnStakes) {
+      if (stakeAgentID !== agentID) {
+        rivalStakes.push(stake);
+      }
+    }
+    if (rivalStakes.length === 0) {
+      return [...this.options.spawnCandidates];
+    }
+    return this.options.spawnCandidates.filter((candidate) =>
+      rivalStakes.every(
+        (stake) =>
+          distanceBetweenCandidates(candidate, stake) >= this.minSpawnDistance,
+      ),
+    );
   }
 
   private removeNearbySpawnCandidates(

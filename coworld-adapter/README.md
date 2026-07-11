@@ -1,6 +1,6 @@
 # Proxy War — Coworld Adapter
 
-> **Want to compete?** The league runs 24/7 on Softmax's Observatory —
+> **Want to compete?** Proxy War runs a league on Softmax's Observatory —
 > [ENTER_THE_LEAGUE.md](ENTER_THE_LEAGUE.md) is the shortest path to a seated policy.
 
 A thin [Coworld](https://github.com/Metta-AI/coworld) game/player adapter for
@@ -27,7 +27,7 @@ Coworld policy container
 ## Status
 
 - Passes local `coworld certify` and `coworld run-episode --verify-replay`
-  against Coworld **0.1.20** (the pin was bumped from 0.1.15, which crashes on the
+  against the CURRENT coworld CLI (unpinned; stale pins silently break secret injection and the
   current platform API shapes for episode queries and image upload).
 - Verified at 8 parallel local episodes.
 - The canonical package is `proxywar:0.0.9` (two fixed seats). A separate

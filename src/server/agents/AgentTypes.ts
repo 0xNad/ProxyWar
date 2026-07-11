@@ -497,6 +497,28 @@ export interface AgentPersonalityDiplomacyPressureAffordance {
   reasons: string[];
 }
 
+export interface AgentSurvivalAllianceAffordance {
+  tacticID: "survival_alliance";
+  recommended: boolean;
+  turnNumber: number;
+  ownTileShare: number;
+  aliveRivalCount: number;
+  hasAlliance: boolean;
+  bestAllyTargetID: string | null;
+  bestAllyName: string | null;
+  reason: string;
+}
+
+export interface AgentBackstabAllyAffordance {
+  tacticID: "backstab_ally";
+  recommended: boolean;
+  turnNumber: number;
+  backstabTargetID: string | null;
+  backstabTargetName: string | null;
+  ownTileShare: number;
+  reason: string;
+}
+
 export interface AgentTacticalAffordances {
   transportTroopBanking: AgentTransportTroopBankingAffordance;
   openingExpansionTempo?: AgentOpeningExpansionTempoAffordance;
@@ -506,6 +528,8 @@ export interface AgentTacticalAffordances {
   navalControl?: AgentNavalControlAffordance;
   lateGameStrikeTargeting?: AgentLateGameStrikeTargetingAffordance;
   personalityDiplomacyPressure?: AgentPersonalityDiplomacyPressureAffordance;
+  survivalAlliance?: AgentSurvivalAllianceAffordance;
+  backstabAlly?: AgentBackstabAllyAffordance;
   notes: string[];
 }
 

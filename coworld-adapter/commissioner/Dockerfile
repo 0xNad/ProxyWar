@@ -1,0 +1,25 @@
+# ProxyWar tournament commissioner: the config-driven ruleset_strategy framework (vendored from
+# Metta-AI/coworld-tools `commissioners/`) plus one custom override (ProxyWarCommissioner in
+# commissioners/proxywar_app.py) that routes each Competition round to a seat-count ladder
+# (2p/4p/8p/12p) sized to how many real policies are currently in the league. Built and bundled by
+# `coworld build` as this coworld's `commissioner` runnable.
+FROM python:3.13-slim
+
+# No COMMISSIONER_KEY here, deliberately: commissioners/proxywar_app.py builds its FastAPI `app`
+# by passing the key directly to commissioner_app("proxywar_scaling"), not via this env var.
+# commissioners/common/app.py -- imported as a side effect of importing proxywar_app -- ALSO builds
+# its own throwaway default app at import time using COMMISSIONER_KEY (or "config_driven" if unset);
+# setting it to "proxywar_scaling" here would make that eager, unrelated construction run before
+# proxywar_app.py has registered the class, and crash the import with "Unknown commissioner_key".
+ENV RULESET_STRATEGY_CONFIG_NAME=proxywar \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1
+
+WORKDIR /app
+COPY pyproject.toml README.md /app/
+COPY commissioners /app/commissioners
+
+RUN pip install --no-cache-dir .
+
+EXPOSE 8080
+CMD ["uvicorn", "commissioners.proxywar_app:app", "--host", "0.0.0.0", "--port", "8080"]

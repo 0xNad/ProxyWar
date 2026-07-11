@@ -1,0 +1,9 @@
+{
+  "name": "proxywar-agent",
+  "private": true,
+  "type": "module",
+  "description": "Self-contained ProxyWar starter policy. Edit chooseAction() in starter-player.mjs.",
+  "dependencies": {
+    "ws": "^8.18.0"
+  }
+}

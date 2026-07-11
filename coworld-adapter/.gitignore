@@ -9,3 +9,8 @@ coworld/results*/
 *.pem
 *.key
 .DS_Store
+
+# Python (commissioner/ package)
+__pycache__/
+*.pyc
+*.egg-info/

@@ -73,7 +73,8 @@ const hub = await loadAgentDemoHubModel({
   rendererBaseUrl,
   jobs,
   nationsDir: roots.nations,
-  houseAgentBrain: houseAgentBrain.parsed ?? "planner-codex-cli",
+  // Claude is the house brain (Keystone); Codex remains opt-in via env.
+  houseAgentBrain: houseAgentBrain.parsed ?? "planner-claude-cli",
 });
 const maxQueuedJobs = positiveInt(process.env.PROXYWAR_MAX_QUEUED_JOBS, 3);
 const externalAgentDecisionTimeoutMs = positiveInt(

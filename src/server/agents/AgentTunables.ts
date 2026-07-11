@@ -78,6 +78,52 @@ export function economyBootstrapEnabled(): boolean {
 }
 
 /**
+ * Gold-pressure spend-down flag (Keystone K2, plan keen-sparking-hollerith). Reads the
+ * EXACT env var `PROXYWAR_TUNE_GOLD_PRESSURE` (A/B arms set "0"/"1"). DEFAULT OFF —
+ * ships inert and is measured on a forge A/B arm before becoming default. When ON, the
+ * executor's precedence cascade forces the highest-ranked offered build/upgrade action
+ * (never a nuke) once parsed `ownState.gold` has exceeded the effective pressure floor
+ * for >=2 consecutive decisions — the "96M hoard" insurance: gold sitting idle above
+ * the floor is converted into structures/upgrades instead of compounding unspent.
+ */
+export function goldPressureEnabled(): boolean {
+  return tunedNumber("GOLD_PRESSURE", 0) >= 1;
+}
+
+/**
+ * Base gold-pressure floor (`PROXYWAR_TUNE_GOLD_PRESSURE_FLOOR`, default 3,000,000).
+ * Applies while the player has no MissileSilo or before turn 1600: structure costs cap
+ * at 1-3M, so gold above ~3M pre-deterrence is buying nothing.
+ */
+export function goldPressureFloor(): number {
+  return tunedNumber("GOLD_PRESSURE_FLOOR", 3_000_000);
+}
+
+/**
+ * MIRV-bank gold-pressure floor (`PROXYWAR_TUNE_GOLD_PRESSURE_MIRV_FLOOR`, default
+ * 30,000,000). Once a MissileSilo exists AND turn >= 1600 (the nuke era), the pressure
+ * floor rises to this value so forced spend-down can never drain the war chest below
+ * the ~25M a MIRV costs — a flat 3M floor would make the MIRV permanently unreachable
+ * by force-spending the bank forever.
+ */
+export function goldPressureMirvBankFloor(): number {
+  return tunedNumber("GOLD_PRESSURE_MIRV_FLOOR", 30_000_000);
+}
+
+/**
+ * Upgrade-visibility flag (Keystone K2, plan keen-sparking-hollerith). Reads the EXACT
+ * env var `PROXYWAR_TUNE_UPGRADE_VISIBILITY` (A/B arms set "0"/"1"). DEFAULT OFF —
+ * when OFF the political-showcase upgrade scoring arm is byte-identical to shipped
+ * behavior (flat 360 from turn >= 1600). When ON, upgrades score from turn >= 800
+ * when the position is land-tight (no neutral expansion available) or gold-rich
+ * (above the base gold-pressure floor), capped below the SAM tier, so "upgrade in
+ * place" becomes visible exactly when sprawling has stopped working.
+ */
+export function upgradeVisibilityEnabled(): boolean {
+  return tunedNumber("UPGRADE_VISIBILITY", 0) >= 1;
+}
+
+/**
  * FM-1 fix flag — "cash the midgame kill window." Reads the EXACT env var
  * `PROXYWAR_TUNE_ENFORCE_CONVERSION` (A/B arms set "0"/"1" on the same build).
  * Default ON (it is a competitiveness fix). When ON, the action ranking clamps

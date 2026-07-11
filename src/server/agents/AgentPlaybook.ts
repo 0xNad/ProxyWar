@@ -13,6 +13,21 @@ export const openFrontAgentPlaybook = [
   "Full arsenal — build the tech tree and use it when the board calls for it, do not only expand and attack: Ports unlock Warships (naval control + coastal assault via Transport boats); Missile Silos unlock nuclear strikes (Atom Bomb / Hydrogen Bomb / MIRV) to break a dominant rival, crack a fortified border, or end a stalemate; SAM Launchers shoot down incoming nukes. Build a Port and a Missile Silo once your economy can afford them, and reach for warships, nukes, and SAM defense when a rival is too strong, too fortified, or threatening you with nukes.",
 ].join("\n");
 
+/**
+ * Compact economy-and-deterrence facts (K3 of plan keen-sparking-hollerith). The
+ * verified failure mode behind gold starvation: agents buy 50k Defense Posts instead
+ * of banking the 125k first City, income never compounds, and the 1M silo / 1.5M SAM /
+ * 25M MIRV tree stays permanently unaffordable — so these facts state the causal
+ * chain and the price list explicitly. Shared vocabulary: included in the LLM
+ * action-selector prompt (LlmPromptBuilder) and mirrored in
+ * skills/FrontierAgent/SKILL.md, which the Commander planner prompt embeds.
+ */
+export const economyDeterrencePlaybook = [
+  "ECONOMY & DETERRENCE: Income compounds only through structures — Cities raise income and max troops, Factories multiply nearby City output (build them adjacent), and Ports add sea-trade gold. Bank the 125k first-City cost early instead of spending 50k on precautionary Defense Posts; an economy started late never catches up.",
+  "A Missile Silo (1M gold) UNLOCKS nukes: nuclear strikes physically require an active silo, so no silo means no nuclear option ever. A SAM Launcher (1.5M, ~70-tile auto-intercept umbrella) protects your City/Factory/Port/silo cluster — without one, a single enemy nuke erases the economy. A MIRV (~25M) guts a runaway leader before the win timer.",
+  "When land is tight, UPGRADE existing Cities/Factories/Ports/silos in place instead of sprawling new buildings. Gold sitting above ~3M is a wasted weapon: spend it on structures, upgrades, silos, or SAM cover — or, once a silo stands, bank deliberately toward nukes and the MIRV.",
+].join("\n");
+
 export function profilePlaybook(profile: AgentStrategyProfile): string {
   switch (profile) {
     case "aggressive":

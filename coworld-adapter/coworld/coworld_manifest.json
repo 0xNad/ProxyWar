@@ -2,20 +2,9 @@
   "$schema": "https://raw.githubusercontent.com/Metta-AI/coworld/main/src/coworld/coworld_manifest_schema.json",
   "game": {
     "name": "proxywar",
-    "version": "0.0.9",
+    "version": "0.1.4",
     "description": "Hosted Proxy War Coworld adapter that preserves the LegalAction.id decision path.",
     "owner": "proxywar",
-    "runnable": {
-      "type": "game",
-      "image": "proxywar-coworld-local:latest",
-      "run": [
-        "node",
-        "--import",
-        "tsx/esm",
-        "/app/integration/src/no-docker-coworld-episode.ts"
-      ],
-      "env": {}
-    },
     "config_schema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "type": "object",
@@ -34,7 +23,7 @@
         "tokens": {
           "type": "array",
           "minItems": 2,
-          "maxItems": 2,
+          "maxItems": 12,
           "items": {
             "type": "string",
             "minLength": 1
@@ -43,7 +32,7 @@
         "players": {
           "type": "array",
           "minItems": 2,
-          "maxItems": 2,
+          "maxItems": 12,
           "items": {
             "type": "object",
             "additionalProperties": false,
@@ -61,7 +50,7 @@
         "max_decision_steps": {
           "type": "integer",
           "minimum": 1,
-          "maximum": 50
+          "maximum": 600
         },
         "turns_per_decision_step": {
           "type": "integer",
@@ -77,7 +66,14 @@
           "type": "string",
           "enum": [
             "Pangaea",
-            "Asia"
+            "Asia",
+            "World",
+            "GiantWorldMap",
+            "Europe",
+            "NorthAmerica",
+            "Africa",
+            "Mena",
+            "Britannia"
           ]
         },
         "map_size": {
@@ -105,6 +101,18 @@
           "minimum": 0,
           "maximum": 300,
           "default": 120
+        },
+        "num_agents": {
+          "type": "integer",
+          "minimum": 2,
+          "maximum": 12,
+          "description": "Connected real-policy seats for this variant (commissioner ladder routing)."
+        },
+        "episode_timeout_seconds": {
+          "type": "integer",
+          "minimum": 60,
+          "maximum": 3600,
+          "description": "Real wall-clock budget for this variant's episode. Explicit so the commissioner framework's max(300, 2x this) duration limit isn't computed from the unrelated player_connect_timeout_seconds fallback and truncate a real multi-minute match."
         }
       }
     },
@@ -126,7 +134,7 @@
         "scores": {
           "type": "array",
           "minItems": 2,
-          "maxItems": 2,
+          "maxItems": 12,
           "items": {
             "type": "number"
           }
@@ -137,7 +145,7 @@
             "null"
           ],
           "minimum": 0,
-          "maximum": 1
+          "maximum": 11
         },
         "turn_count": {
           "type": [
@@ -172,7 +180,7 @@
         "players": {
           "type": "array",
           "minItems": 2,
-          "maxItems": 2,
+          "maxItems": 12,
           "items": {
             "type": "object",
             "additionalProperties": false,
@@ -187,7 +195,7 @@
               "slot": {
                 "type": "integer",
                 "minimum": 0,
-                "maximum": 1
+                "maximum": 11
               },
               "name": {
                 "type": "string"
@@ -213,6 +221,18 @@
         }
       }
     },
+    "runnable": {
+      "type": "game",
+      "image": "proxywar-coworld-local:coworld-77ed32cc4461",
+      "run": [
+        "node",
+        "--max-old-space-size=640",
+        "--import",
+        "tsx/esm",
+        "/app/integration/src/no-docker-coworld-episode.ts"
+      ],
+      "env": {}
+    },
     "protocols": {
       "player": {
         "type": "text",
@@ -227,80 +247,131 @@
       "readme": {
         "type": "text",
         "value": "# Proxy War Coworld\n\nProxy War is a simultaneous-turn territorial strategy game. This Coworld package runs Proxy War through the existing game runner and preserves the LegalAction.id decision path.\n\n## Rules Summary\n\nEach Coworld player controls one Proxy War slot. During a decision step, the game advances through the existing Proxy War game server and asks each connected player to choose from the current legal actions. The default variant uses a compact two-player map, 50 decision cycles, 100 turns per cycle, and a short replay tail so hosted tournaments produce meaningful expansion, economy, and combat evidence without requiring a 170-minute full match. Certification keeps a separate short smoke fixture so upload checks stay fast.\n\nA player may only select an action id that the game offered in the current request. The game passes that selected id back through Proxy War's existing AgentDecisionValidator, AgentLeagueMatchRunner, AgentRunner, and GameServer path. Invalid, stale, or missing selections are treated as fallback decisions by the adapter and are visible in the result artifact.\n\n## Player Protocol\n\nPlayers connect to COWORLD_PLAYER_WS_URL. The game sends decision_request messages containing protocolVersion, observation, legalActions, and responseContract fields. The player replies with decision_response, the same requestID, and selectedLegalActionId. selectedLegalActionId must match one offered legalActions[].id exactly.\n\nThe bundled starter player is proxywar-starter-websocket. It is intentionally simple: it reads the offered LegalAction.id values and chooses one legal id. It is useful for certification and smoke tests, not for competitive play.\n\n## Scoring\n\nThe adapter writes one numeric score per policy slot in results.scores. If Proxy War reports a winner, that slot receives 1 and every other slot receives 0. If a bounded episode ends without a winner, each slot receives its normalized owned-territory share among policy slots. Scores sum to 1 in normal proofs.\n\nThis scoring rule is the shipped ranking scalar. Softmax can re-rank with a different scalar after upload by changing only the results.scores values, not the game/player contract or the LegalAction.id path.\n\n## Artifacts\n\nEach episode writes Coworld-compatible results, replay bytes, game/player logs, and Proxy War match artifacts. The reporter, grader, diagnoser, and optimizer-plan runnables consume the episode bundle shape used by Coworld tooling. Reporter and grader contracts are exercised; diagnoser and optimizer are contract-shaped because Coworld 0.1.15 still marks those roles reserved or runtime-pending.\n\n## Hosted Status\n\nThis manifest is the canonical hosted Proxy War Coworld. It runs with the tsx loader so read-only episode pods do not need writable /tmp, sanitizes Coworld policy labels into Proxy War usernames, and serves global, replay, and player Coworld client routes from the native Proxy War viewer."
-      }
+      },
+      "pages": []
     }
   },
   "player": [
     {
-      "id": "proxywar-starter-websocket",
-      "name": "Proxy War Starter Websocket Player",
       "type": "player",
-      "image": "proxywar-coworld-local:latest",
+      "image": "proxywar-coworld-local:coworld-77ed32cc4461",
       "run": [
         "node",
         "/app/integration/src/starter-player.mjs"
       ],
+      "env": {},
+      "id": "proxywar-starter-websocket",
+      "name": "Proxy War Starter Websocket Player",
       "description": "Minimal websocket player that chooses one offered LegalAction.id."
     }
   ],
-  "reporter": [
+  "reporter": [],
+  "commissioner": [
     {
-      "id": "proxywar-summary-reporter",
-      "name": "Proxy War Summary Reporter",
-      "type": "reporter",
-      "image": "proxywar-coworld-local:latest",
-      "run": [
-        "node",
-        "/app/integration/src/proxywar-summary-reporter.mjs"
-      ],
-      "description": "Consumes a Coworld episode bundle and writes a report zip with Markdown and machine-readable summary outputs."
+      "type": "commissioner",
+      "image": "proxywar-commissioner-local:coworld-03a1e1786b32",
+      "run": [],
+      "env": {},
+      "id": "proxywar-ladder-commissioner",
+      "name": "ProxyWar Ladder Commissioner",
+      "description": "Config-driven ruleset_strategy commissioner (Qualifiers self-play crash check -> Competition), with one custom override: each Competition round counts the real distinct champions currently in the league and routes to the largest declared seat count (2/4/8/12) that fits them, then rotates that rung's map pool (Pangaea/Asia/World/Europe) by round number - so the league runs today at 2p, scales up as more committed policies join, and sweeps every map across a season, with no re-publish required. Scoring is win-rate per episode aggregated into an OpenSkill (MMR) rating, since the same league runs episodes of varying size over time and only a placement-based rating is comparable across match sizes."
     }
   ],
-  "commissioner": [],
-  "grader": [
-    {
-      "id": "proxywar-episode-grader",
-      "name": "Proxy War Episode Grader",
-      "type": "grader",
-      "image": "proxywar-coworld-local:latest",
-      "run": [
-        "node",
-        "/app/integration/src/proxywar-episode-grader.mjs"
-      ],
-      "description": "Deterministic grader for Coworld's contract-defined/runtime-pending grader role. Consumes an episode bundle and writes a 0..1 usefulness score JSON artifact."
-    }
-  ],
-  "diagnoser": [
-    {
-      "id": "proxywar-policy-diagnoser",
-      "name": "Proxy War Policy Diagnoser",
-      "type": "diagnoser",
-      "image": "proxywar-coworld-local:latest",
-      "run": [
-        "node",
-        "/app/integration/src/proxywar-policy-diagnoser.mjs"
-      ],
-      "description": "Diagnoser for Coworld's reserved/tentative diagnoser contract. Consumes an episode bundle and target policy URI and writes a diagnosis zip."
-    }
-  ],
+  "grader": [],
+  "diagnoser": [],
   "optimizer": [
     {
-      "id": "proxywar-optimizer-plan",
-      "name": "Proxy War Optimizer Plan",
       "type": "optimizer",
-      "image": "proxywar-coworld-local:latest",
+      "image": "proxywar-coworld-local:coworld-77ed32cc4461",
       "run": [
         "node",
         "/app/integration/src/proxywar-optimizer-plan.mjs"
       ],
+      "env": {},
+      "id": "proxywar-optimizer-plan",
+      "name": "Proxy War Optimizer Plan",
       "description": "Optimizer-plan writer for Coworld's reserved/tentative optimizer role. Writes an advisory policy-iteration plan from report and diagnosis inputs."
     }
   ],
   "variants": [
     {
-      "id": "tournament-2p",
-      "name": "Tournament 2P",
-      "description": "Default two-policy tournament episode: 50 decision steps x 100 turns (~5000+ turn games, ~50 decisions per policy). Hosted-validated 2026-06-10: a full 5301-turn episode completed in ~15 minutes on the platform. (Local amd64-emulated runs of this config can exhaust Docker memory - use a reduced-step episode request for local smoke.)",
+      "id": "qualifier",
+      "name": "Qualifier (crash/connect check)",
+      "game_config": {
+        "players": [
+          {
+            "name": "Qualifier Seat 1"
+          },
+          {
+            "name": "Qualifier Seat 2"
+          }
+        ],
+        "num_agents": 2,
+        "max_decision_steps": 5,
+        "turns_per_decision_step": 25,
+        "max_decision_ms": 15000,
+        "map": "Pangaea",
+        "map_size": "Compact",
+        "difficulty": "Easy",
+        "replay_tail_turns": 0,
+        "player_connect_timeout_seconds": 120,
+        "episode_timeout_seconds": 180
+      },
+      "description": "Cheap self-play smoke test for the Qualifiers staging division: one real policy duplicated into both seats, a short 5-decision-step episode (well under a minute), just to confirm it connects, responds to LegalAction.id, and doesn't crash before it ever occupies a real head-to-head seat."
+    },
+    {
+      "id": "tournament-2p-pangaea",
+      "name": "Qualifier (crash/connect check) - Pangaea",
+      "game_config": {
+        "players": [
+          {
+            "name": "Qualifier Seat 1"
+          },
+          {
+            "name": "Qualifier Seat 2"
+          }
+        ],
+        "num_agents": 2,
+        "max_decision_steps": 300,
+        "turns_per_decision_step": 25,
+        "max_decision_ms": 15000,
+        "map": "Pangaea",
+        "map_size": "Compact",
+        "difficulty": "Easy",
+        "replay_tail_turns": 0,
+        "player_connect_timeout_seconds": 120,
+        "episode_timeout_seconds": 1200
+      },
+      "description": "Cheap self-play smoke test for the Qualifiers staging division: one real policy duplicated into both seats, a short 5-decision-step episode (well under a minute), just to confirm it connects, responds to LegalAction.id, and doesn't crash before it ever occupies a real head-to-head seat."
+    },
+    {
+      "id": "tournament-2p-asia",
+      "name": "Qualifier (crash/connect check) - Asia",
+      "game_config": {
+        "players": [
+          {
+            "name": "Qualifier Seat 1"
+          },
+          {
+            "name": "Qualifier Seat 2"
+          }
+        ],
+        "num_agents": 2,
+        "max_decision_steps": 300,
+        "turns_per_decision_step": 25,
+        "max_decision_ms": 15000,
+        "map": "Asia",
+        "map_size": "Compact",
+        "difficulty": "Easy",
+        "replay_tail_turns": 0,
+        "player_connect_timeout_seconds": 120,
+        "episode_timeout_seconds": 1200
+      },
+      "description": "Cheap self-play smoke test for the Qualifiers staging division: one real policy duplicated into both seats, a short 5-decision-step episode (well under a minute), just to confirm it connects, responds to LegalAction.id, and doesn't crash before it ever occupies a real head-to-head seat."
+    },
+    {
+      "id": "tournament-4p-pangaea",
+      "name": "Four Player FFA - Pangaea",
       "game_config": {
         "players": [
           {
@@ -308,17 +379,327 @@
           },
           {
             "name": "Coworld Starter 2"
+          },
+          {
+            "name": "Coworld Starter 3"
+          },
+          {
+            "name": "Coworld Starter 4"
           }
         ],
-        "max_decision_steps": 50,
+        "max_decision_steps": 300,
         "turns_per_decision_step": 100,
         "max_decision_ms": 15000,
         "map": "Pangaea",
         "map_size": "Compact",
         "difficulty": "Easy",
         "replay_tail_turns": 500,
-        "player_connect_timeout_seconds": 120
-      }
+        "player_connect_timeout_seconds": 120,
+        "num_agents": 4,
+        "episode_timeout_seconds": 2400
+      },
+      "description": "Four-policy free-for-all on a compact map: up to 300 decision steps x 100 turns (~30000 turns), 300 decisions per seat. Four seats fight simultaneously until one player controls 80% of the map (the FFA win threshold) or the decision-step cap is reached - so alliance, betrayal, and last-survivor dynamics emerge and a decisive winner normally arrives well before the cap. The step cap is the compute guardrail (it bounds per-episode policy calls); a full episode runs in well under 1GB of memory."
+    },
+    {
+      "id": "tournament-4p-asia",
+      "name": "Four Player FFA - Asia",
+      "game_config": {
+        "players": [
+          {
+            "name": "Coworld Starter 1"
+          },
+          {
+            "name": "Coworld Starter 2"
+          },
+          {
+            "name": "Coworld Starter 3"
+          },
+          {
+            "name": "Coworld Starter 4"
+          }
+        ],
+        "max_decision_steps": 300,
+        "turns_per_decision_step": 100,
+        "max_decision_ms": 15000,
+        "map": "Asia",
+        "map_size": "Compact",
+        "difficulty": "Easy",
+        "replay_tail_turns": 500,
+        "player_connect_timeout_seconds": 120,
+        "num_agents": 4,
+        "episode_timeout_seconds": 2400
+      },
+      "description": "Four-policy free-for-all on a compact map: up to 300 decision steps x 100 turns (~30000 turns), 300 decisions per seat. Four seats fight simultaneously until one player controls 80% of the map (the FFA win threshold) or the decision-step cap is reached - so alliance, betrayal, and last-survivor dynamics emerge and a decisive winner normally arrives well before the cap. The step cap is the compute guardrail (it bounds per-episode policy calls); a full episode runs in well under 1GB of memory."
+    },
+    {
+      "id": "tournament-4p-europe",
+      "name": "Four Player FFA - Europe",
+      "game_config": {
+        "players": [
+          {
+            "name": "Coworld Starter 1"
+          },
+          {
+            "name": "Coworld Starter 2"
+          },
+          {
+            "name": "Coworld Starter 3"
+          },
+          {
+            "name": "Coworld Starter 4"
+          }
+        ],
+        "max_decision_steps": 300,
+        "turns_per_decision_step": 100,
+        "max_decision_ms": 15000,
+        "map": "Europe",
+        "map_size": "Compact",
+        "difficulty": "Easy",
+        "replay_tail_turns": 500,
+        "player_connect_timeout_seconds": 120,
+        "num_agents": 4,
+        "episode_timeout_seconds": 2400
+      },
+      "description": "Four-policy free-for-all on a compact map: up to 300 decision steps x 100 turns (~30000 turns), 300 decisions per seat. Four seats fight simultaneously until one player controls 80% of the map (the FFA win threshold) or the decision-step cap is reached - so alliance, betrayal, and last-survivor dynamics emerge and a decisive winner normally arrives well before the cap. The step cap is the compute guardrail (it bounds per-episode policy calls); a full episode runs in well under 1GB of memory."
+    },
+    {
+      "id": "tournament-8p-pangaea",
+      "name": "Tournament 8P - Pangaea",
+      "game_config": {
+        "players": [
+          {
+            "name": "Coworld Starter 1"
+          },
+          {
+            "name": "Coworld Starter 2"
+          },
+          {
+            "name": "Coworld Starter 3"
+          },
+          {
+            "name": "Coworld Starter 4"
+          },
+          {
+            "name": "Coworld Starter 5"
+          },
+          {
+            "name": "Coworld Starter 6"
+          },
+          {
+            "name": "Coworld Starter 7"
+          },
+          {
+            "name": "Coworld Starter 8"
+          }
+        ],
+        "num_agents": 8,
+        "max_decision_steps": 400,
+        "turns_per_decision_step": 100,
+        "max_decision_ms": 15000,
+        "map": "Pangaea",
+        "map_size": "Normal",
+        "difficulty": "Easy",
+        "replay_tail_turns": 500,
+        "player_connect_timeout_seconds": 120,
+        "episode_timeout_seconds": 3000
+      },
+      "description": "DRAFT, unvalidated by the game author: an 8-policy free-for-all, extrapolated from the shipped 4-player FFA (300 decision steps x 100 turns, first-to-80%-map-control win condition). Verify real wall-clock via `coworld run-episode --variant tournament-8p` before this rung ever seats a real league round."
+    },
+    {
+      "id": "tournament-8p-world",
+      "name": "Tournament 8P - World",
+      "game_config": {
+        "players": [
+          {
+            "name": "Coworld Starter 1"
+          },
+          {
+            "name": "Coworld Starter 2"
+          },
+          {
+            "name": "Coworld Starter 3"
+          },
+          {
+            "name": "Coworld Starter 4"
+          },
+          {
+            "name": "Coworld Starter 5"
+          },
+          {
+            "name": "Coworld Starter 6"
+          },
+          {
+            "name": "Coworld Starter 7"
+          },
+          {
+            "name": "Coworld Starter 8"
+          }
+        ],
+        "num_agents": 8,
+        "max_decision_steps": 400,
+        "turns_per_decision_step": 100,
+        "max_decision_ms": 15000,
+        "map": "World",
+        "map_size": "Normal",
+        "difficulty": "Easy",
+        "replay_tail_turns": 500,
+        "player_connect_timeout_seconds": 120,
+        "episode_timeout_seconds": 3000
+      },
+      "description": "DRAFT, unvalidated by the game author: an 8-policy free-for-all, extrapolated from the shipped 4-player FFA (300 decision steps x 100 turns, first-to-80%-map-control win condition). Verify real wall-clock via `coworld run-episode --variant tournament-8p` before this rung ever seats a real league round."
+    },
+    {
+      "id": "tournament-8p-asia",
+      "name": "Tournament 8P - Asia",
+      "game_config": {
+        "players": [
+          {
+            "name": "Coworld Starter 1"
+          },
+          {
+            "name": "Coworld Starter 2"
+          },
+          {
+            "name": "Coworld Starter 3"
+          },
+          {
+            "name": "Coworld Starter 4"
+          },
+          {
+            "name": "Coworld Starter 5"
+          },
+          {
+            "name": "Coworld Starter 6"
+          },
+          {
+            "name": "Coworld Starter 7"
+          },
+          {
+            "name": "Coworld Starter 8"
+          }
+        ],
+        "num_agents": 8,
+        "max_decision_steps": 400,
+        "turns_per_decision_step": 100,
+        "max_decision_ms": 15000,
+        "map": "Asia",
+        "map_size": "Normal",
+        "difficulty": "Easy",
+        "replay_tail_turns": 500,
+        "player_connect_timeout_seconds": 120,
+        "episode_timeout_seconds": 3000
+      },
+      "description": "DRAFT, unvalidated by the game author: an 8-policy free-for-all, extrapolated from the shipped 4-player FFA (300 decision steps x 100 turns, first-to-80%-map-control win condition). Verify real wall-clock via `coworld run-episode --variant tournament-8p` before this rung ever seats a real league round."
+    },
+    {
+      "id": "tournament-12p-pangaea",
+      "name": "Tournament 12P - Pangaea",
+      "game_config": {
+        "players": [
+          {
+            "name": "Coworld Starter 1"
+          },
+          {
+            "name": "Coworld Starter 2"
+          },
+          {
+            "name": "Coworld Starter 3"
+          },
+          {
+            "name": "Coworld Starter 4"
+          },
+          {
+            "name": "Coworld Starter 5"
+          },
+          {
+            "name": "Coworld Starter 6"
+          },
+          {
+            "name": "Coworld Starter 7"
+          },
+          {
+            "name": "Coworld Starter 8"
+          },
+          {
+            "name": "Coworld Starter 9"
+          },
+          {
+            "name": "Coworld Starter 10"
+          },
+          {
+            "name": "Coworld Starter 11"
+          },
+          {
+            "name": "Coworld Starter 12"
+          }
+        ],
+        "num_agents": 12,
+        "max_decision_steps": 500,
+        "turns_per_decision_step": 100,
+        "max_decision_ms": 15000,
+        "map": "Pangaea",
+        "map_size": "Normal",
+        "difficulty": "Easy",
+        "replay_tail_turns": 500,
+        "player_connect_timeout_seconds": 120,
+        "episode_timeout_seconds": 3600
+      },
+      "description": "DRAFT, unvalidated by the game author: a 12-policy free-for-all -- the seat count the author expects the game to 'shine' at. Extrapolated, not playtested; verify real wall-clock via `coworld run-episode --variant tournament-12p` before this rung ever seats a real league round."
+    },
+    {
+      "id": "tournament-12p-world",
+      "name": "Tournament 12P - World",
+      "game_config": {
+        "players": [
+          {
+            "name": "Coworld Starter 1"
+          },
+          {
+            "name": "Coworld Starter 2"
+          },
+          {
+            "name": "Coworld Starter 3"
+          },
+          {
+            "name": "Coworld Starter 4"
+          },
+          {
+            "name": "Coworld Starter 5"
+          },
+          {
+            "name": "Coworld Starter 6"
+          },
+          {
+            "name": "Coworld Starter 7"
+          },
+          {
+            "name": "Coworld Starter 8"
+          },
+          {
+            "name": "Coworld Starter 9"
+          },
+          {
+            "name": "Coworld Starter 10"
+          },
+          {
+            "name": "Coworld Starter 11"
+          },
+          {
+            "name": "Coworld Starter 12"
+          }
+        ],
+        "num_agents": 12,
+        "max_decision_steps": 500,
+        "turns_per_decision_step": 100,
+        "max_decision_ms": 15000,
+        "map": "World",
+        "map_size": "Normal",
+        "difficulty": "Easy",
+        "replay_tail_turns": 500,
+        "player_connect_timeout_seconds": 120,
+        "episode_timeout_seconds": 3600
+      },
+      "description": "DRAFT, unvalidated by the game author: a 12-policy free-for-all -- the seat count the author expects the game to 'shine' at. Extrapolated, not playtested; verify real wall-clock via `coworld run-episode --variant tournament-12p` before this rung ever seats a real league round."
     }
   ],
   "certification": {
@@ -338,7 +719,9 @@
       "map_size": "Compact",
       "difficulty": "Easy",
       "replay_tail_turns": 0,
-      "player_connect_timeout_seconds": 120
+      "player_connect_timeout_seconds": 120,
+      "num_agents": 2,
+      "episode_timeout_seconds": 300
     },
     "players": [
       {
@@ -348,5 +731,6 @@
         "player_id": "proxywar-starter-websocket"
       }
     ]
-  }
+  },
+  "episode_timeout_minutes": 100
 }

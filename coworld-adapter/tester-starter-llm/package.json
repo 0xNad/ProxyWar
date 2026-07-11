@@ -1,0 +1,11 @@
+{
+  "name": "proxywar-agent-llm",
+  "version": "1.0.0",
+  "type": "module",
+  "license": "MIT",
+  "description": "ProxyWar LLM agent (Bedrock). Claude plans in the background; every decision is answered instantly from the current plan (hosted matches have a hard wall-clock budget). Keeps playing, loudly degraded, if Bedrock is unreachable.",
+  "dependencies": {
+    "ws": "^8.18.0",
+    "@anthropic-ai/bedrock-sdk": "^0.29.2"
+  }
+}

@@ -178,7 +178,18 @@ export function buildAgentSpectatorSnapshot(input: {
         tilesOwned: player.numTilesOwned(),
         troops: player.troops(),
         gold: player.gold().toString(),
-        tiles: Array.from(player.tiles()),
+        // Cap tiles at BUILD time with the exact same selection the final
+        // artifact compaction applies (sampleNumbers -> maxTilesPerReplayPlayer).
+        // Retaining the full per-player tile Set for every snapshot across a long
+        // episode is the dominant O(steps x territory) memory growth that OOM-kills
+        // the hosted Coworld episode pod; the artifact downsamples to this exact cap
+        // at the end anyway, so build-time capping is byte-identical for the replay
+        // and idempotent under the final compactSnapshotTiles pass. `tilesOwned`
+        // above preserves the true count for anyone who needs it.
+        tiles: sampleNumbers(
+          Array.from(player.tiles()),
+          maxTilesPerReplayPlayer,
+        ),
         units: spectatorUnitTypes.flatMap((type) =>
           player.units(type).map((unit) => ({
             type,
@@ -308,14 +319,14 @@ function compactSpectatorReplayForArtifact(
     maxReplaySnapshotsForArtifact,
   ).map(compactSnapshotTiles);
   const snapshotCompacted = snapshots.length < replay.snapshots.length;
-  const tilesCompacted = snapshots.some((snapshot, index) =>
+  // Tiles are capped when a player owns more than the per-player cap. Detect this
+  // from `tilesOwned` (ground truth) rather than by comparing array lengths, so the
+  // note stays correct whether the cap was applied here or already at snapshot-build
+  // time (build-time capping is the long-episode-OOM fix; it must not silently drop
+  // this note or change the emitted artifact).
+  const tilesCompacted = snapshots.some((snapshot) =>
     snapshot.players.some(
-      (player, playerIndex) =>
-        player.tiles.length <
-        (sampleSnapshots(
-          replay.snapshots,
-          maxReplaySnapshotsForArtifact,
-        )[index]?.players[playerIndex]?.tiles.length ?? player.tiles.length),
+      (player) => player.tilesOwned > maxTilesPerReplayPlayer,
     ),
   );
   if (!snapshotCompacted && !tilesCompacted) {
@@ -367,7 +378,10 @@ function compactSnapshotTiles(
   };
 }
 
-function sampleNumbers(values: number[], maxValues: number): number[] {
+// Exported for the byte-equivalence regression test: build-time tile sampling
+// (buildAgentSpectatorSnapshot) and write-time compaction (compactSnapshotTiles)
+// must use this same function or long-episode snapshots change the artifact.
+export function sampleNumbers(values: number[], maxValues: number): number[] {
   if (values.length <= maxValues) {
     return values;
   }

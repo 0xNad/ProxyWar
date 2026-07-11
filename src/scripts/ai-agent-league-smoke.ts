@@ -88,6 +88,7 @@ import { createOpenRouterLlmProviderFromEnv } from "../server/agents/OpenRouterL
 import { loadPlayerStrategySpecFromEnv } from "../server/agents/PlayerStrategySpec";
 import type { PlayerStrategySpec } from "../server/agents/PlayerStrategySpec";
 import { RuleAgentBrain } from "../server/agents/RuleAgentBrain";
+import { StarterBotAgentBrain } from "../server/agents/StarterBotAgentBrain";
 import { GameServer } from "../server/GameServer";
 
 const log = winston.createLogger({
@@ -119,6 +120,15 @@ async function run() {
   const args = process.argv.slice(2);
   const scenario = scenarioFromArgs(args);
   const brainMode = brainModeFromArgs(args, scenario);
+  // --opponent-brain=<mode>: seat 0 (the subject) uses --brain; seats 1+ use this.
+  // Enables the realigned eval — Keystone (seat 0) vs N starter-bot opponents — the
+  // held-out Coworld field, instead of a uniform brain across all seats.
+  const opponentBrainArg = args.find((arg) =>
+    arg.startsWith("--opponent-brain="),
+  );
+  const opponentBrainMode: SmokeBrainMode | null = opponentBrainArg
+    ? (opponentBrainArg.slice("--opponent-brain=".length) as SmokeBrainMode)
+    : null;
   const runnerMode = runnerModeFromArgs(args);
   const stepLockedConfig = stepLockedConfigFromArgs(args);
   const externalAgentMaxDecisionMs = positiveIntegerArg(
@@ -278,28 +288,46 @@ async function run() {
       runID,
       varySpawns: args.includes("--vary-spawns"),
     });
+  // Provider for a given brain mode (per-mode, so opponent seats can differ from
+  // seat 0). EXACTLY replicates the prior inline selection when called with brainMode,
+  // so existing single-brain runs are unchanged; rule/starter-bot/mock-llm/planner
+  // ignore the returned provider.
+  const providerForBrainMode = (
+    mode: SmokeBrainMode,
+    index: number,
+  ): LlmProvider | null => {
+    if (mode === "codex-cli" || mode === "planner-codex-cli") {
+      return codexCliProvider;
+    }
+    if (mode === "planner-claude-cli" || mode === "action-claude-cli") {
+      return promoModels ? claudeProviderForIndex(index) : claudeCliProvider;
+    }
+    if (mode === "openrouter" || mode === "planner-openrouter") {
+      return openRouterProvider;
+    }
+    return realLlmProvider;
+  };
   const participants = createAgentParticipants(specs, log, {
     brainFactory:
-      brainMode === "rule" && !hasManifestBrainOverride
+      brainMode === "rule" &&
+      !hasManifestBrainOverride &&
+      opponentBrainMode === null
         ? undefined
-        : (spec, index) =>
-            createBrainForManifestOrMode(
+        : (spec, index) => {
+            const mode =
+              opponentBrainMode !== null && index > 0
+                ? opponentBrainMode
+                : brainMode;
+            return createBrainForManifestOrMode(
               index < manifestCount ? manifests?.[index] : undefined,
               spec,
               scenario,
-              brainMode,
-              brainMode === "codex-cli" || brainMode === "planner-codex-cli"
-                ? codexCliProvider
-                : usesClaudeCli
-                  ? promoModels
-                    ? claudeProviderForIndex(index)
-                    : claudeCliProvider
-                  : usesOpenRouter
-                    ? openRouterProvider
-                    : realLlmProvider,
+              mode,
+              providerForBrainMode(mode, index),
               decisionTimeoutMs,
               externalAgentMaxDecisionMs,
-            ),
+            );
+          },
   });
   const roster = agentRunRoster(participants);
   const spectatorSnapshots: AgentSpectatorSnapshot[] = [];
@@ -504,7 +532,14 @@ async function run() {
       return;
     }
 
-    const openingRecords = await league.runOpeningTurn();
+    // Deterministic built-in-style spawn (no LLM): runSpawnPhase submits an
+    // exploring spawn tile per agent each spawn tick and advances the sim
+    // itself until the spawn phase ends, so the wait below resolves on the
+    // first poll. Same entrypoint swap as the benchmark and step-locked paths.
+    const openingRecords = await league.runSpawnPhase({
+      mirror,
+      messages: mirrorMessages,
+    });
     const postSpawnGame = await waitForMirrorState({
       mirror,
       messages: mirrorMessages,
@@ -530,6 +565,10 @@ async function run() {
       gameState: postSpawnGame,
     });
     const postSpawnTurnCount = mirror.turnCount();
+    // startGame() runs the match on a manual clock (realtimeClock: false), so
+    // nothing ends turns by itself here: advance two — one to land the
+    // just-submitted intents, one so their executions tick — before auditing.
+    game.advanceTurnsForTesting(2);
     const afterPostSpawnGame = await waitForMirrorState({
       mirror,
       messages: mirrorMessages,
@@ -1093,6 +1132,12 @@ function createBrainForManifestOrMode(
   if (brainMode === "rule") {
     return new RuleAgentBrain(spec.profile);
   }
+  // starter-bot: the faithful in-process port of the Coworld starter policy — the
+  // held-out opponent class the eval must measure Keystone against (NOT OpenFront's
+  // built-in nation AI). Only ever selects an offered LegalAction.id (same contract).
+  if (brainMode === "starter-bot") {
+    return new StarterBotAgentBrain();
+  }
   // Player strategy spec: per-seat from the manifest, else a single spec from env
   // (AI_LEAGUE_PLAYER_STRATEGY_SPEC) for the sponsored single-seat path.
   const playerStrategySpec =
@@ -1374,6 +1419,7 @@ function assertActionDiversitySmokeSucceeded(
 type SmokeScenario = "league" | "attack" | "actions";
 type SmokeBrainMode =
   | "rule"
+  | "starter-bot"
   | "mock-llm"
   | "real-llm"
   | "codex-cli"
@@ -1400,6 +1446,10 @@ function defaultRunID(
 function artifactBrainMode(brainMode: SmokeBrainMode): AgentBrainType {
   if (brainMode === "action-claude-cli" || brainMode === "openrouter") {
     return "llm";
+  }
+  if (brainMode === "starter-bot") {
+    // StarterBotAgentBrain.brainType === "rule" (a deterministic rule policy).
+    return "rule";
   }
   return brainMode === "planner" ||
     brainMode === "planner-codex-cli" ||
@@ -1551,7 +1601,11 @@ function assertRequiredExternalBrainSucceeded(input: {
           input.brainMode === "action-claude-cli" ||
             input.brainMode === "openrouter"
           ? "codex-cli"
-          : input.brainMode,
+          : // starter-bot is a deterministic rule policy (no external calls) — same
+            // cleanliness class as "rule".
+            input.brainMode === "starter-bot"
+            ? "rule"
+            : input.brainMode,
     records: input.records,
   });
 

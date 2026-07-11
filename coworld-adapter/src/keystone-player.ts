@@ -76,6 +76,13 @@ export interface KeystoneBrainOptions {
   providerTimeoutMs?: number;
   /** Override the LLM provider (tests / future transports). */
   provider?: LlmProvider;
+  /**
+   * Pure-blocking Commander: run the LLM planner synchronously on the wire
+   * critical path (no DeferredAgentPlanner background refresh), so the bedrock
+   * call's latency is visible and a bedrock failure is LOUD (thrown). Used to
+   * definitively validate the LLM transport. Pair with planEveryDecisionSteps=1.
+   */
+  blocking?: boolean;
 }
 
 // Mirrors the league-smoke planner-claude-cli executor settings so local play
@@ -86,6 +93,36 @@ const KEYSTONE_EXECUTOR_SETTINGS = {
   siloTileShareRatio: 0.14,
   samTileShareRatio: 0.14,
 } as const;
+
+/**
+ * Keystone behavior-flag env plumbing (K1/K2 of plan keen-sparking-hollerith).
+ * The executor reads these `PROXYWAR_TUNE_*` variables directly from process.env
+ * at decision time (src/server/agents/AgentTunables.ts), and keystone-player runs
+ * the executor in-process — so a hosted pod env carrying any of these reaches the
+ * policy with no further wiring. DEFAULTS ALL OFF IN CODE: nothing here (or in the
+ * repo defaults) sets a value, so the hosted policy ships inert and an arm is
+ * enabled later via the pod env only after the local forge A/B verdict. The
+ * explicit allowlist + boot-log summary exist so which arm a pod ran is auditable
+ * from its logs instead of inferred.
+ */
+/** One-line boot-log summary of which keystone behavior flags the pod env set —
+ *  "tunables=defaults" when none are, i.e. the shipped all-off configuration.
+ *  Scans the PROXYWAR_TUNE_ prefix rather than an allowlist: the executor reads
+ *  ~30 tunables (booleans in AgentTunables.ts plus tunedNumber numerics), and a
+ *  stale allowlist meant a pod could run non-default behavior while logging
+ *  "tunables=defaults" — defeating the audit purpose of this line. */
+export function keystoneTunableFlagSummary(
+  env: NodeJS.ProcessEnv = process.env,
+): string {
+  const set = Object.keys(env)
+    .filter(
+      (name) =>
+        name.startsWith("PROXYWAR_TUNE_") && (env[name] ?? "").trim() !== "",
+    )
+    .sort()
+    .map((name) => `${name}=${env[name]?.trim()}`);
+  return set.length === 0 ? "tunables=defaults" : `tunables=[${set.join(",")}]`;
+}
 
 const RESPONSE_REASON_MAX_LENGTH = 500;
 
@@ -184,11 +221,28 @@ export function decisionToResponse(
   // because the transport had no loudness channel).
   const llmPlannerDegraded = decision.metadata?.llmPlannerDegraded === true;
   const plannerFallbackUsed = decision.metadata?.plannerFallbackUsed === true;
+  // Truthful artifacts: the Coworld wire carries ONE selectedLegalActionId,
+  // so when the executor scheduled a cascade batch, only the primary executes.
+  // Without this note, decisions.jsonl reads "queued N action(s)" for actions
+  // that never ran.
+  const droppedBatchActions = Array.isArray(decision.actionIDs)
+    ? Math.max(0, decision.actionIDs.length - 1)
+    : 0;
+  const wireNote =
+    droppedBatchActions > 0
+      ? ` [wire carries primary only; ${droppedBatchActions} batched follow-up(s) not executed]`
+      : "";
+  // Truncate the base reason, never the truth note.
+  const wireReason =
+    decision.reason.slice(
+      0,
+      Math.max(0, RESPONSE_REASON_MAX_LENGTH - wireNote.length),
+    ) + wireNote;
   return {
     type: "decision_response",
     requestID,
     selectedLegalActionId: decision.actionID,
-    reason: decision.reason.slice(0, RESPONSE_REASON_MAX_LENGTH),
+    reason: wireReason,
     confidence,
     ...(llmPlannerDegraded ? { llmPlannerDegraded: true } : {}),
     ...(plannerFallbackUsed ? { fallbackUsed: true } : {}),
@@ -260,6 +314,11 @@ export class DeferredAgentPlanner implements AgentPlanner {
       const landed = this.completed;
       this.completed = null;
       this.lastKnownPlan = landed.plan;
+      // Arm the NEXT refresh against the current observation before returning.
+      // Without this, refreshes only ever started on calls that arrived
+      // empty-handed, which silently halved the Commander cadence to
+      // 2x planEvery and executed every landed plan one interval stale.
+      this.startBackgroundRefresh(input, landed.plan);
       return landed;
     }
     // Surface (once) any degradation from a prior refresh failure that had no
@@ -341,16 +400,29 @@ export class DeferredAgentPlanner implements AgentPlanner {
  * on Bedrock and the hosted seat silently failed every call for 60+ rounds —
  * autodetect makes a retired/disabled id self-healing instead of fatal.
  * PROXYWAR_LLM_MODEL_ID (when set) is always tried first.
+ *
+ * PROXYWAR_LLM_MODEL_STRICT=1 (with a pinned id) disables the fall-through:
+ * the pinned model is the ONLY candidate, so an unavailable id degrades the
+ * seat loudly (llmPlannerDegraded on the wire) instead of silently playing a
+ * different model. Required for model-labeled seats — a seat advertised as
+ * model X must never quietly answer as model Y.
  */
 export function bedrockModelCandidates(
   env: NodeJS.ProcessEnv = process.env,
 ): string[] {
+  if (env.PROXYWAR_LLM_MODEL_ID && env.PROXYWAR_LLM_MODEL_STRICT === "1") {
+    return [env.PROXYWAR_LLM_MODEL_ID];
+  }
   return [
     ...(env.PROXYWAR_LLM_MODEL_ID ? [env.PROXYWAR_LLM_MODEL_ID] : []),
+    // Confirmed enabled on the Softmax Bedrock account 2026-06-23 (us-east-1, us-west-2,
+    // us-east-2). Haiku MUST be the full date-suffixed inference-profile id — the bare
+    // "us.anthropic.claude-haiku-4-5" is not a valid inference-profile id and fails
+    // validation; sonnet-4-5 is the bare model id (us-west-2), not a us.-prefixed profile.
     "us.anthropic.claude-sonnet-4-6",
     "global.anthropic.claude-sonnet-4-6",
-    "us.anthropic.claude-haiku-4-5",
-    "us.anthropic.claude-sonnet-4-5-20250929-v1:0",
+    "us.anthropic.claude-haiku-4-5-20251001-v1:0",
+    "anthropic.claude-sonnet-4-5-20250929-v1:0",
   ];
 }
 
@@ -478,15 +550,21 @@ export function createKeystoneBrain(
       (options.mode === "claude-cli"
         ? modules.claudeCli.createClaudeCliLlmProviderFromEnv()
         : createBedrockProvider());
-    planner = new DeferredAgentPlanner(
-      new LlmAgentPlanner({
-        provider,
-        profile: options.profile,
-        providerTimeoutMs: options.providerTimeoutMs,
-        plannerType: "real-llm",
-      }),
-      new RuleAgentPlanner(options.profile),
-    );
+    const llmPlanner = new LlmAgentPlanner({
+      provider,
+      profile: options.profile,
+      providerTimeoutMs: options.providerTimeoutMs,
+      plannerType: "real-llm",
+    });
+    // Pure-blocking Commander: await the LLM planner directly so the bedrock call
+    // sits on the wire critical path (visible latency, loud failures). Otherwise
+    // the in-clock DeferredAgentPlanner refreshes it in the background.
+    planner = options.blocking
+      ? llmPlanner
+      : new DeferredAgentPlanner(
+          llmPlanner,
+          new RuleAgentPlanner(options.profile),
+        );
   }
 
   return new PlannerExecutorAgentBrain({
@@ -518,9 +596,15 @@ async function main(): Promise<void> {
   const mode = keystoneModeFromEnv();
   const profile = (process.env.PROXYWAR_KEYSTONE_PROFILE?.trim() ||
     "aggressive") as AgentStrategyProfile;
+  const blocking =
+    process.env.PROXYWAR_KEYSTONE_BLOCKING === "1" ||
+    process.env.PROXYWAR_KEYSTONE_BLOCKING?.trim().toLowerCase() === "true";
   const planEveryRaw = Number(process.env.PROXYWAR_KEYSTONE_PLAN_EVERY ?? "3");
-  const planEveryDecisionSteps =
-    Number.isFinite(planEveryRaw) && planEveryRaw >= 1
+  // Blocking pure-Commander runs the LLM EVERY decision (planEvery=1) so every
+  // wire decision is bedrock-driven and the transport is fully exercised.
+  const planEveryDecisionSteps = blocking
+    ? 1
+    : Number.isFinite(planEveryRaw) && planEveryRaw >= 1
       ? Math.floor(planEveryRaw)
       : 3;
 
@@ -529,7 +613,35 @@ async function main(): Promise<void> {
     mode,
     profile,
     planEveryDecisionSteps,
+    blocking,
   });
+
+  // Optional one-shot Bedrock diagnostic (gated; OFF in production). The pod
+  // stderr 403s for us via the Coworld CLI, so this surfaces cred presence + the
+  // real Bedrock error into every wire `reason` (which lands in the readable
+  // decisions.jsonl). Splits "runner injected no creds" from "creds present but
+  // failing" from "our request is malformed".
+  let bedrockDiag = "";
+  if (process.env.PROXYWAR_KEYSTONE_BEDROCK_DIAG === "1") {
+    const resolvedRegion =
+      process.env.AWS_REGION ?? process.env.AWS_DEFAULT_REGION ?? "us-west-2";
+    const keyState = process.env.AWS_ACCESS_KEY_ID ? "set" : "MISSING";
+    const tokenState = process.env.AWS_SESSION_TOKEN ? "set" : "absent";
+    let probe: string;
+    try {
+      const out = await createBedrockProvider().complete(
+        "Reply with the single word OK.",
+      );
+      probe = `OK:${out.slice(0, 24)}`;
+    } catch (error) {
+      probe = (error instanceof Error ? error.message : String(error)).slice(
+        0,
+        260,
+      );
+    }
+    bedrockDiag = `BEDROCKDIAG[USE_BEDROCK=${process.env.USE_BEDROCK ?? "unset"} key=${keyState} token=${tokenState} AWS_REGION=${process.env.AWS_REGION ?? "unset"} resolved=${resolvedRegion} probe=${probe}]`;
+    console.log(bedrockDiag);
+  }
 
   const require = createRequire(import.meta.url);
   const { WebSocket } = require(`${repoRoot}/node_modules/ws`);
@@ -537,11 +649,16 @@ async function main(): Promise<void> {
 
   socket.on("open", () => {
     console.log(
-      `keystone connected ${redactPlayerUrl(url)} (mode=${mode}, profile=${profile}, planEvery=${planEveryDecisionSteps})`,
+      `keystone connected ${redactPlayerUrl(url)} (mode=${mode}, profile=${profile}, planEvery=${planEveryDecisionSteps}, blocking=${blocking}, ${keystoneTunableFlagSummary()})`,
     );
   });
 
-  socket.on("message", async (data: unknown) => {
+  // Serialize decision handling: a platform retry that overlaps an in-flight
+  // request must not interleave brain.decide() on shared mutable state
+  // (decisionsSincePlan, opponent-ledger rising-edge counters).
+  let decisionChain: Promise<void> = Promise.resolve();
+  let sawFinal = false;
+  socket.on("message", (data: unknown) => {
     let message: {
       type?: unknown;
       requestID?: unknown;
@@ -549,10 +666,16 @@ async function main(): Promise<void> {
     };
     try {
       message = JSON.parse(String(data));
-    } catch {
+    } catch (error) {
+      // A malformed frame silently dropped looks like a seat timeout
+      // platform-side — log it so the failure is attributable from pod logs.
+      console.error(
+        `keystone: dropping unparseable frame (${error instanceof Error ? error.message : String(error)})`,
+      );
       return;
     }
     if (message.type === "final") {
+      sawFinal = true;
       console.log("episode final; exiting");
       socket.close();
       return;
@@ -560,36 +683,47 @@ async function main(): Promise<void> {
     if (message.type !== "decision_request") {
       return;
     }
-    const requestID = String(message.requestID ?? "");
-    const startedAt = Date.now();
-    let response: Record<string, unknown>;
-    try {
-      const input = requestToBrainInput(message.request);
-      const decision = await brain.decide(input);
-      response = decisionToResponse(requestID, decision);
-    } catch (error) {
-      const messageText =
-        error instanceof Error ? error.message : String(error);
-      console.error(`keystone decide failed: ${messageText}`);
-      // Last-resort: degraded but LOUD — fallbackUsed + llmPlannerDegraded
-      // travel on the wire so the game-side artifacts never report a dead
-      // brain as healthy. See transportFallbackResponse.
-      response = transportFallbackResponse(
-        requestID,
-        message.request,
-        messageText,
-      );
-    }
-    const elapsedMs = Date.now() - startedAt;
-    if (elapsedMs > 5000) {
-      console.warn(
-        `keystone decision took ${elapsedMs}ms — investigate before the clock bites`,
-      );
-    }
-    socket.send(JSON.stringify(response));
+    decisionChain = decisionChain.then(async () => {
+      const requestID = String(message.requestID ?? "");
+      const startedAt = Date.now();
+      let response: Record<string, unknown>;
+      try {
+        const input = requestToBrainInput(message.request);
+        const decision = await brain.decide(input);
+        response = decisionToResponse(requestID, decision);
+      } catch (error) {
+        const messageText =
+          error instanceof Error ? error.message : String(error);
+        console.error(`keystone decide failed: ${messageText}`);
+        // Last-resort: degraded but LOUD — fallbackUsed + llmPlannerDegraded
+        // travel on the wire so the game-side artifacts never report a dead
+        // brain as healthy. See transportFallbackResponse.
+        response = transportFallbackResponse(
+          requestID,
+          message.request,
+          messageText,
+        );
+      }
+      if (bedrockDiag) {
+        response.reason = `${bedrockDiag} || ${String(response.reason ?? "")}`;
+      }
+      const elapsedMs = Date.now() - startedAt;
+      if (elapsedMs > 5000) {
+        console.warn(
+          `keystone decision took ${elapsedMs}ms — investigate before the clock bites`,
+        );
+      }
+      socket.send(JSON.stringify(response));
+    });
   });
 
   socket.on("close", () => {
+    // A transport death mid-episode must not masquerade as a clean exit —
+    // the platform (and our artifacts) should see the seat die loudly.
+    if (!sawFinal) {
+      console.error("keystone: websocket closed before the final message");
+      process.exit(1);
+    }
     process.exit(0);
   });
 

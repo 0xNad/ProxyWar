@@ -16,6 +16,27 @@ embargoes to pressure hostile players, protect sea lanes with ports and
 warships, and escalate to SAMs, silos, nukes, and MIRVs only when the game state
 justifies the cost.
 
+## Economy & Deterrence Facts
+
+The causal chain that decides late games: income compounds only through
+structures, and the whole advanced tree hangs off that income.
+
+- Cities raise income and max troops; Factories multiply nearby City output
+  (build them adjacent); Ports add sea-trade gold. Bank the 125k first-City
+  cost early instead of spending 50k on precautionary Defense Posts — an
+  economy started late never catches up.
+- A Missile Silo (1M gold) UNLOCKS nukes: nuclear strikes physically require an
+  active silo, so no silo means no nuclear option ever.
+- A SAM Launcher (1.5M, ~70-tile auto-intercept umbrella) protects the
+  City/Factory/Port/silo cluster; without one, a single enemy nuke erases the
+  economy.
+- A MIRV (~25M) guts a runaway leader before the win timer.
+- When land is tight, UPGRADE existing structures in place instead of
+  sprawling new buildings.
+- Gold sitting above ~3M is a wasted weapon: spend it on structures, upgrades,
+  silos, or SAM cover — or, once a silo stands, bank deliberately toward nukes
+  and the MIRV.
+
 ## Decision Contract
 
 There are two valid operating modes:
@@ -78,6 +99,27 @@ The slow planner should decide what kind of turn this is: growth, build,
 fortify, pressure, survive, diplomacy, naval, or spawn. It should not select
 the action id in planner/executor mode. The executor will translate the plan
 into one existing legal action id or a short compatible ordered batch.
+
+When the runner's prompt offers binding directives (they are feature-flagged;
+emit them only when the prompt describes them), the plan JSON may carry AT MOST
+ONE of these optional keys:
+
+- `"commitment": {"targetPlayerId": "<id>", "minAttackRatio": 0.25}` — a
+  binding kill-order the executor must sustain.
+- `"allianceDirective": {"stance": "seek_alliance", "targetPlayerId": "<id>"}`
+  — a binding diplomacy stance (omit targetPlayerId to seek any ally;
+  `"hold_alliance"` extends/defends an existing one).
+- `"buildDirective": {"unit": "any"}` — a binding build order. `"any"` binds
+  any economic build; `"City"`/`"Factory"`/`"Port"` bind that economic
+  structure; `"MissileSilo"` (1M, unlocks nukes) and `"SAMLauncher"` (1.5M,
+  auto-intercept umbrella) bind that exact deterrent build — `"any"` never
+  matches the deterrent units, so name them explicitly when deterrence is the
+  plan.
+
+A bound directive pre-empts the executor's own tactical preferences (only
+survival — and a higher-precedence directive: commitment > alliance > build —
+overrides it), so emit one only when this cycle's strategy genuinely depends on
+that action class happening.
 
 When a `PLANNER_DECISION_BRIEF` is present, read it before the long observation.
 It is the tactical control surface for the LLM planner: action mix, pressure

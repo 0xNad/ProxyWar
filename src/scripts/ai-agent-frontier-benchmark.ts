@@ -2979,7 +2979,14 @@ class StaticMapLoader implements GameMapLoader {
 
   constructor() {
     const currentFile = fileURLToPath(import.meta.url);
-    this.rootDir = path.resolve(path.dirname(currentFile), "../../static/maps");
+    // resources/maps is the TRACKED map source (same root the coworld adapter
+    // uses). static/maps is a build output that `vite build` empties — reading
+    // it here made the benchmark break after any host build-prod (ENOENT on
+    // manifest.json), which is machine-state, not code.
+    this.rootDir = path.resolve(
+      path.dirname(currentFile),
+      "../../resources/maps",
+    );
   }
 
   getMapData(map: GameMapType): MapData {

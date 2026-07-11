@@ -1,6 +1,5 @@
 import { beforeEach, describe, expect, it } from "vitest";
 import { mountAiLeagueReplayOverlay } from "../../src/client/AiLeagueReplayOverlay";
-import { ReplaySpeedMultiplier } from "../../src/client/utilities/ReplaySpeedMultiplier";
 
 describe("AiLeagueReplayOverlay", () => {
   beforeEach(() => {
@@ -22,15 +21,6 @@ describe("AiLeagueReplayOverlay", () => {
         finalState: {
           opponents: [{ playerID: "n1" }, { playerID: "n2" }],
         },
-        matchStory: {
-          entertainmentScore: 74,
-          grade: "promising",
-          summary: "The match had expansion, builds, and diplomacy.",
-          spectatorHighlights: [
-            "2 build action(s) created visible economy or defense moments.",
-          ],
-          boringnessWarnings: ["No direct combat yet."],
-        },
       },
       decisions: [
         {
@@ -44,6 +34,7 @@ describe("AiLeagueReplayOverlay", () => {
           legalActionIDsByKind: {
             build: ["build:Defense Post:10"],
           },
+          planObjective: "fortify_core",
           reason: "Build a defensive post.",
           decisionLatencyMs: 25,
           fallbackUsed: false,
@@ -127,18 +118,19 @@ describe("AiLeagueReplayOverlay", () => {
     expect(overlay?.textContent).toContain(
       "1 Proxy War agents vs 10 built-in opponents",
     );
-    expect(overlay?.textContent).toContain("Recent action feed");
-    expect(overlay?.textContent).toContain("chat: 1");
-    expect(overlay?.textContent).toContain("Focus fire on Rival!");
-    expect(overlay?.textContent).toContain("Replay speed");
-    expect(overlay?.textContent).toContain("Opening neutral land: 2/2");
-    expect(overlay?.textContent).toContain(
-      "The spawn phase blocks attacks",
-    );
-    expect(overlay?.textContent).toContain("Match story: 74/100 promising");
-    expect(overlay?.textContent).toContain("The match had expansion");
-    expect(overlay?.textContent).toContain("No direct combat yet.");
-    expect(overlay?.textContent).toContain("real Proxy War replay renderer");
+    // Playstyle line replaces the action-count tally and recent-action feed.
+    expect(overlay?.querySelector(".ai-league-playstyle")).not.toBeNull();
+    expect(overlay?.querySelector(".ai-league-metrics")).not.toBeNull();
+    // No speed slider, story card, or opening-neutral section in the overlay.
+    expect(overlay?.querySelector("[data-ai-league-speed]")).toBeNull();
+    expect(overlay?.querySelector(".ai-league-story")).toBeNull();
+    expect(overlay?.textContent).not.toContain("Match story");
+    expect(overlay?.textContent).not.toContain("Opening neutral land");
+    // Directive (planObjective) is surfaced in the decision card.
+    expect(overlay?.textContent).toContain("fortify_core");
+    // Decision card no longer prints latency / intent type / audit status.
+    expect(overlay?.textContent).not.toContain("25ms");
+    expect(overlay?.textContent).not.toContain("build_unit");
     expect(overlay?.querySelector("a")?.getAttribute("href")).toContain(
       "/ai-league-runs/run-render-1",
     );
@@ -151,60 +143,158 @@ describe("AiLeagueReplayOverlay", () => {
           players: [
             {
               playerID: "agent-one",
+              smallID: 1,
               clientID: "client-one",
               username: "Agent One",
               displayName: "Agent One",
               x: 320,
               y: 240,
               tilesOwned: 42,
+              allies: [],
+              embargoes: [],
+              alliances: [],
             },
           ],
         },
       }),
     );
 
-    const mapBubble = document.querySelector<HTMLElement>(
-      "#ai-league-social-map-bubbles .ai-league-map-social-bubble",
-    );
-    expect(mapBubble?.textContent).toContain("Focus fire on Rival!");
-    expect(mapBubble?.textContent).toContain("Agent One");
-    expect(mapBubble?.style.left).toBe("224px");
-    expect(document.getElementById("ai-league-social-transcript")?.textContent).toContain(
-      "Political radio",
-    );
+    // Floating map message bubbles were removed: no bubble layer is mounted.
+    expect(document.getElementById("ai-league-social-map-bubbles")).toBeNull();
+    expect(
+      document.querySelector(".ai-league-map-social-bubble"),
+    ).toBeNull();
+    // The political-radio transcript stays and now carries the social line
+    // (speaker + text) that used to render in the bubble.
+    const transcript = document.getElementById("ai-league-social-transcript");
+    expect(transcript?.textContent).toContain("Political radio");
+    expect(transcript?.textContent).toContain("Focus fire on Rival!");
+    expect(transcript?.textContent).toContain("Agent One");
+
+    // Standings strip updates live from the frame event (ranked, share %).
+    const standings = overlay?.querySelector("[data-ai-league-diplomacy-rows]");
+    expect(standings?.textContent).toContain("Agent One");
+    expect(standings?.textContent).toContain("100%");
   });
 
-  it("changes replay speed from the overlay slider", () => {
-    const speedChanges: ReplaySpeedMultiplier[] = [];
-
+  it("renders a live diplomacy strip with ally and embargo glyphs from frame state", () => {
     mountAiLeagueReplayOverlay({
-      runID: "run-render-speed",
-      artifactBasePath: "/ai-league-runs/run-render-speed",
+      runID: "diplomacy-render",
+      artifactBasePath: "/ai-league-runs/diplomacy-render",
       decisions: [],
-      onReplaySpeedChange: (speed) => {
-        speedChanges.push(speed);
-      },
     });
 
-    const slider = document.querySelector<HTMLInputElement>(
-      "[data-ai-league-speed]",
+    document.dispatchEvent(
+      new CustomEvent("ai-league-replay-frame", {
+        detail: {
+          tick: 1000,
+          turnNumber: 1000,
+          players: [
+            {
+              playerID: "p1",
+              smallID: 1,
+              clientID: "c1",
+              username: "Crimson",
+              displayName: "Crimson",
+              x: 100,
+              y: 100,
+              color: "rgb(220, 38, 38)",
+              tilesOwned: 60,
+              allies: [2],
+              targets: [3],
+              embargoes: ["p3"],
+              alliances: [
+                { other: "p2", expiresAt: 5000, hasExtensionRequest: true },
+              ],
+            },
+            {
+              playerID: "p2",
+              smallID: 2,
+              clientID: "c2",
+              username: "Azure",
+              displayName: "Azure",
+              x: 200,
+              y: 200,
+              color: "rgb(37, 99, 235)",
+              tilesOwned: 30,
+              allies: [1],
+              targets: [],
+              embargoes: [],
+              alliances: [
+                { other: "p1", expiresAt: 5000, hasExtensionRequest: false },
+              ],
+            },
+            {
+              playerID: "p3",
+              smallID: 3,
+              clientID: "c3",
+              username: "Slate",
+              displayName: "Slate",
+              x: 300,
+              y: 300,
+              color: "rgb(22, 163, 74)",
+              tilesOwned: 10,
+              allies: [],
+              targets: [],
+              embargoes: [],
+              alliances: [],
+            },
+          ],
+        },
+      }),
     );
-    const label = document.querySelector<HTMLElement>(
-      "[data-ai-league-speed-label]",
+
+    const rows = document.querySelector("[data-ai-league-diplomacy-rows]");
+    expect(rows?.querySelectorAll(".ai-league-diplo-row").length).toBe(3);
+    // Ranked by tiles: Crimson 60 (60%), Azure 30 (30%), Slate 10 (10%).
+    expect(rows?.textContent).toContain("60%");
+    expect(rows?.textContent).toContain("30%");
+    expect(rows?.textContent).toContain("10%");
+    // Ally + embargo + war stance chips render (type by class, not hue).
+    const allyChip = rows?.querySelector<HTMLElement>(".ai-league-stance.ally");
+    const embargoChip = rows?.querySelector<HTMLElement>(
+      ".ai-league-stance.embargo",
     );
-
-    expect(slider).not.toBeNull();
-    expect(slider?.value).toBe("3");
-    expect(label?.textContent).toBe("Max");
-
-    slider!.value = "1";
-    slider!.dispatchEvent(new Event("input", { bubbles: true }));
-
-    expect(label?.textContent).toBe("1x");
-    expect(speedChanges).toEqual([ReplaySpeedMultiplier.normal]);
+    const warChip = rows?.querySelector<HTMLElement>(".ai-league-stance.war");
+    expect(allyChip).not.toBeNull();
+    expect(embargoChip).not.toBeNull();
+    // Crimson targets Slate -> a war chip is produced from frame target state.
+    expect(warChip).not.toBeNull();
+    // The relationship is shown by an ICON, not a trailing word: each chip's
+    // glyph holds an inline <svg> and the translated label lives on title /
+    // aria-label, NOT as a parenthesized inline text label.
+    for (const chip of [allyChip, embargoChip, warChip]) {
+      const glyph = chip?.querySelector<HTMLElement>(".ai-league-stance-glyph");
+      expect(glyph?.querySelector("svg")).not.toBeNull();
+    }
+    expect(
+      allyChip?.querySelector(".ai-league-stance-glyph")?.getAttribute("title"),
+    ).toContain("ally");
+    expect(
+      embargoChip
+        ?.querySelector(".ai-league-stance-glyph")
+        ?.getAttribute("aria-label"),
+    ).toContain("embargo");
+    expect(
+      warChip?.querySelector(".ai-league-stance-glyph")?.getAttribute("title"),
+    ).toContain("war");
+    // The relationship word is no longer rendered as a parenthesized inline
+    // label next to the name.
+    expect(rows?.textContent).not.toContain("(embargo)");
+    expect(rows?.textContent).not.toContain("(ally)");
+    expect(rows?.textContent).not.toContain("(war)");
+    // The on-map engine color (rgb) drives the dots, not the fallback palette hex.
+    const crimsonDot = rows?.querySelector<HTMLElement>(".ai-league-color-dot");
+    expect(crimsonDot?.getAttribute("style")).toContain("rgb(220, 38, 38)");
+    // No N x N relationship matrix any more.
+    expect(
+      document.querySelectorAll("[data-spectator-relationship-cell]").length,
+    ).toBe(0);
+    // Extension request still surfaces the renew glyph (now alongside the icon).
+    expect(rows?.textContent).toContain("↻");
   });
 
-  it("renders relationship matrix, readable diplomacy feed, and replay jump controls", () => {
+  it("surfaces a headline lower-third for promotable events and toggles talks", () => {
     const jumps: number[] = [];
     document.addEventListener("ai-league-replay-jump-turn", (event) => {
       jumps.push((event as CustomEvent<{ turnNumber: number }>).detail.turnNumber);
@@ -218,34 +308,41 @@ describe("AiLeagueReplayOverlay", () => {
     });
 
     const overlay = document.getElementById("ai-league-replay-overlay");
-    expect(overlay?.textContent).toContain("Politics board");
-    expect(overlay?.textContent).toContain("Leader: Blitz");
-    expect(overlay?.textContent).toContain("Diplomacy feed");
-    expect(overlay?.textContent).toContain("pact is over");
-    expect(
-      overlay?.querySelectorAll("[data-spectator-relationship-cell]").length,
-    ).toBeGreaterThan(0);
-
-    const cell = overlay?.querySelector<HTMLButtonElement>(
-      '[data-spectator-relationship-cell][data-from-agent="a2"][data-to-agent="a1"]',
+    // Diplomacy talks feed is present but collapsed behind a toggle.
+    const comms = overlay?.querySelector<HTMLElement>("[data-spectator-comms]");
+    expect(comms).not.toBeNull();
+    expect(comms?.hidden).toBe(true);
+    expect(comms?.textContent).toContain("pact is over");
+    const toggle = overlay?.querySelector<HTMLButtonElement>(
+      "[data-spectator-talks-toggle]",
     );
-    cell?.click();
-    expect(cell?.classList.contains("active")).toBe(true);
-    expect(
-      overlay?.querySelector("[data-spectator-filter-label]")?.textContent,
-    ).toContain("Blitz -> Atlas");
+    toggle?.click();
+    expect(comms?.hidden).toBe(false);
 
+    // Story timeline is gone.
+    expect(document.getElementById("ai-league-story-timeline")).toBeNull();
+
+    // Headline lower-third exists and reveals a betrayal headline on the frame.
+    const headline = document.getElementById("ai-league-headline-event");
+    expect(headline).not.toBeNull();
+    expect(headline?.hidden).toBe(true);
+    document.dispatchEvent(
+      new CustomEvent("ai-league-replay-frame", {
+        detail: { tick: 505, turnNumber: 505, players: [] },
+      }),
+    );
+    expect(headline?.hidden).toBe(false);
+    expect(headline?.textContent).toContain("ai_league_replay.headline_betrayal");
+
+    // Replay jump still works from the comm-thread turn buttons.
     const jump = overlay?.querySelector<HTMLButtonElement>(
       "[data-ai-league-jump-turn]",
     );
     jump?.click();
     expect(jumps.length).toBeGreaterThan(0);
-    expect(document.getElementById("ai-league-story-timeline")?.textContent).toContain(
-      "break",
-    );
   });
 
-  it("keeps map political callouts readable by showing at most two at once", () => {
+  it("keeps the political-radio transcript readable by showing at most two lines at once", () => {
     mountAiLeagueReplayOverlay({
       runID: "politics-map",
       artifactBasePath: "/ai-league-runs/politics-map",
@@ -261,44 +358,57 @@ describe("AiLeagueReplayOverlay", () => {
           players: [
             {
               playerID: "p1",
+              smallID: 1,
               clientID: "c1",
               username: "Atlas",
               displayName: "Atlas",
               x: 300,
               y: 260,
               tilesOwned: 60,
+              allies: [],
+              embargoes: [],
+              alliances: [],
             },
             {
               playerID: "p2",
+              smallID: 2,
               clientID: "c2",
               username: "Blitz",
               displayName: "Blitz",
               x: 420,
               y: 280,
               tilesOwned: 90,
+              allies: [],
+              embargoes: [],
+              alliances: [],
             },
             {
               playerID: "p3",
+              smallID: 3,
               clientID: "c3",
               username: "Civic",
               displayName: "Civic",
               x: 520,
               y: 300,
               tilesOwned: 20,
+              allies: [],
+              embargoes: [],
+              alliances: [],
             },
           ],
         },
       }),
     );
 
+    // No floating map bubbles are mounted any more.
+    expect(document.getElementById("ai-league-social-map-bubbles")).toBeNull();
+    expect(document.querySelector(".ai-league-map-social-bubble")).toBeNull();
+    // The political radio stays and caps at two lines at once.
+    const transcript = document.getElementById("ai-league-social-transcript");
+    expect(transcript?.textContent).toContain("Political radio");
     expect(
-      document.querySelectorAll(
-        "#ai-league-social-map-bubbles .ai-league-map-social-bubble",
-      ),
+      transcript?.querySelectorAll(".ai-league-social-transcript-line"),
     ).toHaveLength(2);
-    expect(
-      document.getElementById("ai-league-social-transcript")?.textContent,
-    ).toContain("Political radio");
   });
 
   it("lets spectators move and reset the replay panel", () => {
@@ -335,7 +445,7 @@ describe("AiLeagueReplayOverlay", () => {
     expect(overlay.getAttribute("style")).toBeNull();
   });
 
-  it("adds a read-only replay banner without mutating OpenFront-owned prompt DOM", () => {
+  it("enters read-only replay mode without mutating OpenFront-owned prompt DOM or adding a replay-mode banner", () => {
     document.body.innerHTML =
       '<div id="prompt">Choose a starting location</div>';
 
@@ -350,9 +460,9 @@ describe("AiLeagueReplayOverlay", () => {
     expect(document.body.classList.contains("ai-league-replay-mode")).toBe(
       true,
     );
-    expect(
-      document.getElementById("ai-league-replay-mode-banner")?.textContent,
-    ).toBe("Replay mode: watching Proxy War agents");
+    // The "Replay mode: watching Proxy War agents" banner was removed (it
+    // overlapped the end-of-game winner banner); it must no longer be mounted.
+    expect(document.getElementById("ai-league-replay-mode-banner")).toBeNull();
   });
 });
 
