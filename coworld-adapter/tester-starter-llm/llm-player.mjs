@@ -113,7 +113,7 @@ function extractJson(text) {
     if (inStr) { if (esc) esc = false; else if (c === "\\") esc = true; else if (c === '"') inStr = false; continue; }
     if (c === '"') inStr = true;
     else if (c === "{") { if (depth === 0) start = i; depth++; }
-    else if (c === "}") { depth--; if (depth === 0 && start >= 0) { try { return JSON.parse(s.slice(start, i + 1)); } catch (e) {} } }
+    else if (c === "}") { depth--; if (depth === 0 && start >= 0) { try { return JSON.parse(s.slice(start, i + 1)); } catch { /* not valid JSON - keep scanning */ } } }
   }
   return null;
 }

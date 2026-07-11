@@ -597,7 +597,7 @@ async function main(): Promise<void> {
       process.env.AWS_REGION ?? process.env.AWS_DEFAULT_REGION ?? "us-west-2";
     const keyState = process.env.AWS_ACCESS_KEY_ID ? "set" : "MISSING";
     const tokenState = process.env.AWS_SESSION_TOKEN ? "set" : "absent";
-    let probe = "?";
+    let probe: string;
     try {
       const out = await createBedrockProvider().complete(
         "Reply with the single word OK.",

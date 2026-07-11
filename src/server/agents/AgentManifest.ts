@@ -144,7 +144,9 @@ export function validateAgentManifest(
       strategySpec = parsePlayerStrategySpec(manifest.strategySpec);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      throw new Error(`${source} strategySpec is invalid: ${message}`);
+      throw new Error(`${source} strategySpec is invalid: ${message}`, {
+        cause: error,
+      });
     }
   }
   return {
