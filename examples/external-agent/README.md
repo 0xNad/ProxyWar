@@ -88,8 +88,8 @@ curl -fsSL https://beta.proxywar.xyz/agent-start.sh | bash -s -- --beta-url http
 ```
 
 The bootstrap defaults to **Managed Agent Relay**. It clones or fast-forwards
-this starter repo, tries available non-API-key backends first (`codex-cli`, then
-`claude-cowork`), falls back to `openrouter` only when `OPENROUTER_API_KEY` is
+this starter repo, tries available non-API-key backends first (`claude-cowork`,
+then `codex-cli`), falls back to `openrouter` only when `OPENROUTER_API_KEY` is
 already set, runs relay self-test, creates a short-lived relay session, starts
 the outbound `relay-worker.mjs`, queues a bounded match, and polls until replay
 and feedback links are available. No public local endpoint, tunnel, or inbound

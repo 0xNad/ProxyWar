@@ -72,9 +72,13 @@ should share:
 - `OpenAiLlmProvider`: an opt-in real provider outside core. It reads config
   from environment variables, calls the OpenAI Responses API with timeout and
   retry limits, and returns raw text to the existing strict parser.
-- `CodexCliLlmProvider`: a private-testing-only provider outside core. It shells
-  out to `codex exec` with a read-only sandbox and an output schema. It never
-  reads Codex OAuth files or manually reuses tokens.
+- `ClaudeCliLlmProvider`: the default house-brain provider outside core
+  (`planner-claude-cli`, Keystone). It shells out to the `claude` CLI with a
+  timeout and fails loud — no silent fallback — when the CLI is missing, not
+  logged in, times out, or returns empty output.
+- `CodexCliLlmProvider`: a legacy, private-testing-only provider outside core.
+  It shells out to `codex exec` with a read-only sandbox and an output schema.
+  It never reads Codex OAuth files or manually reuses tokens.
 - `AgentDecisionLogWriter`: writes durable local run artifacts for inspection,
   replay support, audits, and explaining why agents acted.
 - `AgentMatchStory`: turns decision logs into spectator-facing recap artifacts
@@ -1018,7 +1022,8 @@ goal across several decision cycles.
 ## Planner / Executor Mode
 
 The main product mode is **LLM policy planner + local engine-derived
-executor**. The LLM/Codex layer is a slow governor: it chooses objectives,
+executor**. The LLM layer (Claude CLI by default; Codex/OpenAI opt-in) is a
+slow governor: it chooses objectives,
 preferred action kinds, enabled policy modules, targets, and tactical
 constraints occasionally. The local planner/executor then scores the current
 legal action menu quickly and selects concrete `LegalAction.id` values.
@@ -1036,10 +1041,12 @@ Runtime modes are reported explicitly:
   zero external calls.
 - `mock-policy-planner`: mock planner plus local executor; zero external calls
   and useful only for plumbing/tests.
-- `llm-policy-planner`: Codex/OpenAI/custom planner plus local executor; this
-  is the main target product mode.
-- `llm-action-selector`: Codex/OpenAI/custom provider directly chooses one
-  offered `LegalAction.id`; expensive comparison/debug mode.
+- `llm-policy-planner`: Claude/Codex/OpenAI/custom planner plus local executor;
+  this is the main target product mode. The Claude CLI planner
+  (`planner-claude-cli`, Keystone) is the default house configuration; the
+  Codex planner is a legacy opt-in.
+- `llm-action-selector`: Claude/Codex/OpenAI/custom provider directly chooses
+  one offered `LegalAction.id`; expensive comparison/debug mode.
 
 Legacy names remain as aliases: `rule-planner`, `planner`,
 `planner-codex-cli`, and `codex-cli`.
@@ -1050,22 +1057,24 @@ Run the mock policy-planner demo:
 npm run agent:league-demo:planner
 ```
 
-Run the Codex CLI planner demo:
+Run the Claude CLI planner (Keystone, the default house brain):
+
+```bash
+GAME_ENV=dev AI_LEAGUE_REQUIRE_EXTERNAL_BRAIN_SUCCESS=true AI_LEAGUE_CLAUDE_TIMEOUT_MS=60000 npx tsx src/scripts/ai-agent-league-smoke.ts --brain=planner-claude-cli --runner=step-locked --scenario=actions --max-steps=3
+```
+
+Run a full benchmark-style match with the Claude planner:
+
+```bash
+GAME_ENV=dev AI_LEAGUE_REQUIRE_EXTERNAL_BRAIN_SUCCESS=true npx tsx src/scripts/ai-agent-frontier-benchmark.ts --brain=planner-claude-cli --full-match --runs=1 --require-wins=1 --nations=5 --bots=5 --map=Pangaea --map-size=Compact --difficulty=Easy --max-turns=90000 --write-replay
+```
+
+Legacy, opt-in: run the Codex CLI planner demo (model/effort come from
+`~/.codex/config.toml`; do not pin `gpt-5.4` — it fails with HTTP 400 on
+ChatGPT accounts):
 
 ```bash
 AI_LEAGUE_CODEX_TIMEOUT_MS=180000 npm run agent:league-demo:planner:codex-cli
-```
-
-Use a cheaper Codex CLI planner configuration:
-
-```bash
-AI_LEAGUE_CODEX_MODEL=gpt-5.4 AI_LEAGUE_CODEX_REASONING_EFFORT=medium npm run agent:league-demo:planner:codex-medium
-```
-
-Run a full benchmark-style match with that cheaper planner configuration:
-
-```bash
-AI_LEAGUE_CODEX_MODEL=gpt-5.4 AI_LEAGUE_CODEX_REASONING_EFFORT=medium npm run agent:benchmark:bots:full:codex-medium
 ```
 
 The planner is not allowed to submit game intents or select raw actions.

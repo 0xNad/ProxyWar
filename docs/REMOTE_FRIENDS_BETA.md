@@ -200,7 +200,8 @@ status at:
 
 The beta page saves external entrants for the tester match. The default match
 button is locked to the latest saved tester external agent plus one in-house
-Codex agent against two Easy built-in nations until a winner emerges.
+Claude agent (Keystone) against two Easy built-in nations until a winner
+emerges.
 
 Closed beta mode serves only allowlisted artifact names through a path-safe
 route. The allowlist includes replay files plus `decisions.jsonl` and
@@ -260,40 +261,51 @@ The beta page uses **Strategy rounds** instead of human turns. In each round the
 runner pauses match advancement, gives every AI nation a fresh observation and
 legal actions, records decisions, submits validated intents, then advances the
 game. More rounds means a longer match and more agent decisions before the
-rendered replay opens. For a friend-facing Codex test, start with the default
-six rounds. Increase the round count only after the first rendered replay opens
+rendered replay opens. For a friend-facing house-agent test, start with the
+default six rounds. Increase the round count only after the first rendered replay opens
 successfully.
 
-## Codex CLI Model/Effort
+## House-Agent Brain
 
-Codex CLI demos can be run with a cheaper model/effort setting:
-
-```bash
-AI_LEAGUE_CODEX_MODEL=gpt-5.4 AI_LEAGUE_CODEX_REASONING_EFFORT=medium npm run agent:league-demo:planner:codex-medium
-```
-
-For an internal benchmark-style match against built-in nations:
+The house agent is Claude CLI-backed by default (`planner-claude-cli`,
+Keystone). The closed-beta scripts already configure it:
 
 ```bash
-AI_LEAGUE_CODEX_MODEL=gpt-5.4 AI_LEAGUE_CODEX_REASONING_EFFORT=medium npm run agent:benchmark:bots:full:codex-medium
+PROXYWAR_BETA_CODE="make-a-private-code" npm run agent:closed-beta:remote
 ```
 
-The private-beta house-agent mode uses Codex as the strategic brain while the
+For an internal benchmark-style match against built-in nations with the Claude
+planner:
+
+```bash
+GAME_ENV=dev AI_LEAGUE_REQUIRE_EXTERNAL_BRAIN_SUCCESS=true npx tsx src/scripts/ai-agent-frontier-benchmark.ts --brain=planner-claude-cli --full-match --runs=1 --require-wins=1 --nations=5 --bots=5 --map=Pangaea --map-size=Compact --difficulty=Easy --max-turns=90000 --write-replay
+```
+
+Legacy, opt-in: Codex CLI demos can still be run (model/effort come from
+`~/.codex/config.toml`; do not pin `gpt-5.4` — it fails with HTTP 400 on
+ChatGPT accounts):
+
+```bash
+AI_LEAGUE_CODEX_REASONING_EFFORT=medium npm run agent:league-demo:planner:codex-medium
+```
+
+The private-beta house-agent mode uses Claude as the strategic brain while the
 server keeps decisions inside the offered LegalAction.id menu.
 
-The friend-facing beta page uses the Codex house-agent path by default. Built-in
-OpenFront nations and bots are benchmark opponents, not the default tester-match
-framing.
+The friend-facing beta page uses the Claude house-agent path by default.
+Built-in OpenFront nations and bots are benchmark opponents, not the default
+tester-match framing.
 
-If a Codex match finishes in only a few seconds, treat that as a setup failure,
-not a real match. The beta runner now fails Codex jobs visibly when Codex CLI is
-missing, not logged in, returns invalid planner JSON, or falls back to the local
-planner. The server will automatically use the bundled macOS Codex app binary at
+If a house-agent match finishes in only a few seconds, treat that as a setup
+failure, not a real match. The beta runner fails LLM jobs visibly when the
+configured CLI is missing, not logged in, returns invalid planner JSON, or
+falls back to the local planner. On the legacy Codex path, the server will
+automatically use the bundled macOS Codex app binary at
 `/Applications/Codex.app/Contents/Resources/codex` when `codex` is not on your
 Terminal `PATH`. You can still override it explicitly:
 
 ```bash
-AI_LEAGUE_CODEX_COMMAND="/Applications/Codex.app/Contents/Resources/codex" PROXYWAR_BETA_CODE="make-a-private-code" npm run agent:closed-beta:remote
+AI_LEAGUE_CODEX_COMMAND="/Applications/Codex.app/Contents/Resources/codex" PROXYWAR_BETA_CODE="make-a-private-code" npm run agent:closed-beta:codex
 ```
 
 Existing failed/fallback runs cannot be fixed by refreshing the browser. Start a
