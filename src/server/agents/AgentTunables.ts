@@ -169,3 +169,24 @@ export function enforceConversionOverNeutralEnabled(): boolean {
 export function behindAndFallingEscapeEnabled(): boolean {
   return tunedNumber("BEHIND_AND_FALLING", 1) >= 1;
 }
+
+/**
+ * Diplomacy reserved menu slots (`PROXYWAR_TUNE_DIPLOMACY_SLOTS`, A/B arms set
+ * "0"/"1"). DEFAULT OFF. The legal-action menu caps at 96 entries assembled
+ * attacks-first; on crowded maps (10-12 players, many borders) the cap fills
+ * before ANY diplomacy action is emitted, so exactly when politics decide games
+ * the agent literally cannot choose "ally" — the option is never offered
+ * (2026-07-11 audit, agent-code lane). When ON, LegalActionBuilder assembles
+ * with headroom and applies a reserved-quota truncation: diplomacy kinds
+ * (alliance_request/reject/extend, break_alliance, target_player, embargo_all,
+ * donations) keep up to DIPLOMACY_RESERVED_SLOTS entries and the remaining
+ * budget goes to the other kinds in their original order. Cap total unchanged.
+ */
+export function diplomacySlotsEnabled(): boolean {
+  return tunedNumber("DIPLOMACY_SLOTS", 0) >= 1;
+}
+
+/** Reserved diplomacy entries under the cap (PROXYWAR_TUNE_DIPLOMACY_RESERVE, default 8). */
+export function diplomacyReservedSlots(): number {
+  return Math.max(1, Math.min(24, tunedNumber("DIPLOMACY_RESERVE", 8)));
+}

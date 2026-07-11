@@ -1,4 +1,8 @@
 import { getSpawnTiles } from "../../core/execution/Util";
+import {
+  diplomacyReservedSlots,
+  diplomacySlotsEnabled,
+} from "./AgentTunables";
 import { UnitType } from "../../core/game/Game";
 import { GameMap, TileRef } from "../../core/game/GameMap";
 import {
@@ -94,7 +98,14 @@ export class LegalActionBuilder {
     }
 
     const ownTroops = input.observation.ownState?.troops ?? 0;
-    const maxActions = input.maxPostSpawnActions ?? 96;
+    const capActions = input.maxPostSpawnActions ?? 96;
+    // With reserved diplomacy slots ON, assemble with headroom so the
+    // late-emitted diplomacy categories actually get built, then apply the
+    // reserved-quota truncation at the end (total stays <= capActions).
+    // Flag OFF => maxActions === capActions and the truncation is a no-op:
+    // byte-identical menus to the pre-flag behavior.
+    const diplomacySlots = diplomacySlotsEnabled();
+    const maxActions = diplomacySlots ? capActions + 32 : capActions;
     const actions: LegalAction[] = [];
 
     for (const attack of input.observation.combat.outgoingAttacks ?? []) {
@@ -666,7 +677,10 @@ export class LegalActionBuilder {
       });
     }
 
-    return actions;
+    if (diplomacySlots && actions.length > capActions) {
+      return reservedQuotaTruncate(actions, capActions, diplomacyReservedSlots());
+    }
+    return actions.slice(0, capActions);
   }
 }
 
@@ -1131,4 +1145,62 @@ function parseIntegerString(value: string | null): bigint | null {
 function deterministicFraction(value: number): number {
   const x = Math.sin(value * 12.9898) * 43758.5453;
   return x - Math.floor(x);
+}
+
+/** Diplomacy kinds protected by the reserved-slot truncation. */
+const DIPLOMACY_KINDS = new Set([
+  "alliance_request",
+  "alliance_reject",
+  "alliance_extend",
+  "break_alliance",
+  "target_player",
+  "embargo_all",
+  "donate_gold",
+  "donate_troops",
+]);
+
+/**
+ * Truncate to `cap` total entries while guaranteeing diplomacy actions up to
+ * `reserve` slots. Relative order within each group is preserved, and the
+ * final list keeps the original assembly order (non-diplomacy first where it
+ * appeared first). If there are fewer diplomacy actions than the reserve, the
+ * unused reserve goes back to the other kinds.
+ */
+export function reservedQuotaTruncate(
+  actions: readonly LegalAction[],
+  cap: number,
+  reserve: number,
+): LegalAction[] {
+  const diplomacy = actions.filter((action) => DIPLOMACY_KINDS.has(action.kind));
+  const othersCount = actions.length - diplomacy.length;
+  // Diplomacy gets its reserve PLUS any budget the other kinds cannot use, so
+  // the menu always fills to cap when enough actions exist (reviewer finding:
+  // without the top-up, 85 others + 20 diplomacy at cap 96/reserve 8 wasted
+  // 3 slots while dropping diplomacy).
+  const keepDiplomacy = Math.min(
+    diplomacy.length,
+    Math.max(reserve, cap - othersCount),
+    cap,
+  );
+  const keepOthers = Math.min(othersCount, cap - keepDiplomacy);
+  const keptDiplomacyIds = new Set(
+    diplomacy.slice(0, keepDiplomacy).map((action) => action.id),
+  );
+  const result: LegalAction[] = [];
+  let othersKept = 0;
+  for (const action of actions) {
+    if (keptDiplomacyIds.has(action.id)) {
+      result.push(action);
+    } else if (
+      !DIPLOMACY_KINDS.has(action.kind) &&
+      othersKept < keepOthers
+    ) {
+      result.push(action);
+      othersKept++;
+    }
+    if (result.length >= cap) {
+      break;
+    }
+  }
+  return result;
 }
