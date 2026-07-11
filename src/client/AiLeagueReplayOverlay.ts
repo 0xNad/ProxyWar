@@ -4,6 +4,7 @@ import {
   aiLeagueSpectatorText,
   isAiLeagueNativeSpectatorUiEnabled,
 } from "./AiLeagueReplayMode";
+import { translateText } from "./Utils";
 
 interface AiLeagueDecisionLogEntry {
   sequence: number;
@@ -19,6 +20,8 @@ interface AiLeagueDecisionLogEntry {
   socialText?: string;
   socialTargetName?: string;
   reason: string;
+  planObjective?: string;
+  planRationale?: string;
   decisionLatencyMs: number;
   fallbackUsed: boolean;
   parseSuccess?: boolean;
@@ -30,18 +33,35 @@ interface AiLeagueDecisionLogEntry {
   generatedIntent?: unknown;
 }
 
+interface AiLeagueReplayFrameAlliance {
+  other: string;
+  expiresAt: number;
+  hasExtensionRequest: boolean;
+}
+
+interface AiLeagueReplayFramePlayer {
+  playerID: string;
+  smallID: number;
+  clientID: string | null;
+  username: string;
+  displayName: string;
+  x: number;
+  y: number;
+  // Real engine on-map color (PlayerView.territoryColor()), as an rgb string.
+  // Optional so older frame payloads degrade to the identity palette.
+  color?: string;
+  tilesOwned: number;
+  allies: number[];
+  // smallIDs of rivals this player is actively attacking (PlayerView.targets()).
+  targets?: number[];
+  embargoes: string[];
+  alliances: AiLeagueReplayFrameAlliance[];
+}
+
 interface AiLeagueReplayFrameEventDetail {
   tick: number;
   turnNumber: number;
-  players: Array<{
-    playerID: string;
-    clientID: string | null;
-    username: string;
-    displayName: string;
-    x: number;
-    y: number;
-    tilesOwned: number;
-  }>;
+  players: AiLeagueReplayFramePlayer[];
 }
 
 interface AiLeagueSpectatorAgent {
@@ -53,23 +73,6 @@ interface AiLeagueSpectatorAgent {
   finalTilesOwned?: number | null;
   finalTroops?: number | null;
   isAlive?: boolean | null;
-}
-
-interface AiLeagueSpectatorRelationship {
-  fromAgentID: string;
-  toAgentID: string;
-  trust: number;
-  distrust: number;
-  tension: number;
-  allianceState: string;
-  attacksSent: number;
-  attacksReceived: number;
-  betrayals: number;
-  tradeGivenGold: number;
-  tradeGivenTroops: number;
-  lastMajorEventTurn: number | null;
-  currentLabel: string;
-  reasons: string[];
 }
 
 interface AiLeagueSpectatorEvent {
@@ -106,7 +109,11 @@ interface AiLeagueSpectatorTelemetry {
   version: 1;
   runID: string;
   agents: AiLeagueSpectatorAgent[];
-  relationships: AiLeagueSpectatorRelationship[];
+  // Legacy relationship-matrix telemetry. The N×N trust/distrust/tension matrix
+  // it backed was removed in favor of the engine-authoritative diplomacy strip;
+  // the field is still validated as an array for telemetry-shape compatibility
+  // but no longer typed or consumed.
+  relationships: unknown[];
   events: AiLeagueSpectatorEvent[];
   communicationThreads: AiLeagueSpectatorCommunicationThread[];
   timelineBuckets: AiLeagueSpectatorTimelineBucket[];
@@ -141,10 +148,8 @@ export function mountAiLeagueReplayOverlay(input: {
   onReplaySpeedChange?: (speed: ReplaySpeedMultiplier) => void;
 }) {
   document.getElementById("ai-league-replay-overlay")?.remove();
-  document.getElementById("ai-league-replay-mode-banner")?.remove();
-  document.getElementById("ai-league-social-map-bubbles")?.remove();
   document.getElementById("ai-league-social-transcript")?.remove();
-  document.getElementById("ai-league-story-timeline")?.remove();
+  document.getElementById("ai-league-headline-event")?.remove();
   document.body.classList.add("ai-league-replay-mode");
   document.body.classList.toggle(
     "ai-league-native-spectator-ui",
@@ -160,15 +165,13 @@ export function mountAiLeagueReplayOverlay(input: {
   const overlay = document.createElement("aside");
   overlay.id = "ai-league-replay-overlay";
   overlay.innerHTML = overlayHtml(renderInput);
-  const banner = document.createElement("div");
-  banner.id = "ai-league-replay-mode-banner";
-  banner.textContent = "Replay mode: watching Proxy War agents";
   document.body.appendChild(overlay);
-  document.body.appendChild(banner);
-  mountAiLeagueMapSocialBubbles(input.decisions, spectatorTelemetry);
-  mountAiLeagueStoryTimeline(spectatorTelemetry);
+  mountAiLeagueSocialTranscript(input.decisions, spectatorTelemetry);
+  mountAiLeagueHeadlineEvent(input.decisions, spectatorTelemetry);
   mountReplayPanelControls(overlay);
-  mountSpectatorRelationshipInteractions(overlay, spectatorTelemetry);
+  mountAiLeagueDiplomacyStrip(overlay, input.decisions, spectatorTelemetry);
+  mountAiLeagueTalksToggle(overlay, spectatorTelemetry);
+  mountAiLeagueDecisionLogExpander(overlay);
   mountReplayJumpControls(document);
 
   overlay
@@ -178,19 +181,6 @@ export function mountAiLeagueReplayOverlay(input: {
         overlay.classList.toggle("collapsed"),
       );
     });
-  const speedSlider = overlay.querySelector<HTMLInputElement>(
-    "[data-ai-league-speed]",
-  );
-  const speedLabel = overlay.querySelector<HTMLElement>(
-    "[data-ai-league-speed-label]",
-  );
-  speedSlider?.addEventListener("input", () => {
-    const option = replaySpeedOption(Number(speedSlider.value));
-    if (speedLabel !== null) {
-      speedLabel.textContent = option.label;
-    }
-    input.onReplaySpeedChange?.(option.speed);
-  });
 }
 
 function mountReplayPanelControls(overlay: HTMLElement) {
@@ -287,55 +277,31 @@ function mountReplayPanelControls(overlay: HTMLElement) {
     });
 }
 
-function mountSpectatorRelationshipInteractions(
+// Wires the collapsible "Show talks" toggle for the diplomacy comm-thread feed.
+// (Formerly mountSpectatorRelationshipInteractions, which also drove the now-
+// removed relationship matrix; the matrix is gone, so only the toggle remains.)
+function mountAiLeagueTalksToggle(
   overlay: HTMLElement,
   telemetry: AiLeagueSpectatorTelemetry | null,
 ) {
   if (telemetry === null) {
     return;
   }
-  const label = overlay.querySelector<HTMLElement>(
-    "[data-spectator-filter-label]",
+  const toggle = overlay.querySelector<HTMLButtonElement>(
+    "[data-spectator-talks-toggle]",
   );
-  const threads = Array.from(
-    overlay.querySelectorAll<HTMLElement>("[data-spectator-thread]"),
-  );
-  const clear = () => {
-    overlay
-      .querySelectorAll<HTMLElement>("[data-spectator-relationship-cell]")
-      .forEach((cell) => cell.classList.remove("active"));
-    threads.forEach((thread) => thread.classList.remove("hidden"));
-    if (label !== null) {
-      label.textContent = "Showing all relationships";
-    }
-  };
-  overlay
-    .querySelector<HTMLButtonElement>("[data-spectator-clear-filter]")
-    ?.addEventListener("click", clear);
-  overlay
-    .querySelectorAll<HTMLButtonElement>("[data-spectator-relationship-cell]")
-    .forEach((cell) => {
-      cell.addEventListener("click", () => {
-        const fromAgentID = cell.dataset.fromAgent ?? "";
-        const toAgentID = cell.dataset.toAgent ?? "";
-        const fromName = cell.dataset.fromName ?? fromAgentID;
-        const toName = cell.dataset.toName ?? toAgentID;
-        overlay
-          .querySelectorAll<HTMLElement>("[data-spectator-relationship-cell]")
-          .forEach((candidate) => candidate.classList.remove("active"));
-        cell.classList.add("active");
-        threads.forEach((thread) => {
-          const ids = (thread.dataset.agentIds ?? "").split(/\s+/);
-          thread.classList.toggle(
-            "hidden",
-            !(ids.includes(fromAgentID) && ids.includes(toAgentID)),
-          );
-        });
-        if (label !== null) {
-          label.textContent = `Focused on ${fromName} -> ${toName}`;
-        }
-      });
-    });
+  const comms = overlay.querySelector<HTMLElement>("[data-spectator-comms]");
+  if (toggle === null || comms === null) {
+    return;
+  }
+  toggle.addEventListener("click", () => {
+    const nowHidden = !comms.hidden;
+    comms.hidden = nowHidden;
+    toggle.setAttribute("aria-expanded", String(!nowHidden));
+    toggle.textContent = nowHidden
+      ? translateText("ai_league_replay.talks_show")
+      : translateText("ai_league_replay.talks_hide");
+  });
 }
 
 function mountReplayJumpControls(root: Document) {
@@ -384,85 +350,188 @@ function mountReplayJumpControls(root: Document) {
   };
 }
 
-function mountAiLeagueStoryTimeline(
+interface AiLeagueHeadlineEvent {
+  turnNumber: number;
+  sequence: number;
+  kind: "betrayal" | "elimination" | "first_strike";
+  toneClass: string;
+  text: string;
+}
+
+function headlineEventsFor(
+  telemetry: AiLeagueSpectatorTelemetry | null,
+): AiLeagueHeadlineEvent[] {
+  if (telemetry === null) {
+    return [];
+  }
+  const headlines: AiLeagueHeadlineEvent[] = [];
+  const firstStrikeSeen = new Set<string>();
+  const ordered = [...telemetry.events].sort(
+    (a, b) => a.turnNumber - b.turnNumber || a.sequence - b.sequence,
+  );
+  for (const event of ordered) {
+    const actor = aiLeagueSpectatorDisplayName(event.actorName);
+    const target = event.targetName
+      ? aiLeagueSpectatorDisplayName(event.targetName)
+      : null;
+    if (
+      (event.kind === "alliance_break" || event.tone === "betrayal") &&
+      target !== null
+    ) {
+      headlines.push({
+        turnNumber: event.turnNumber,
+        sequence: event.sequence,
+        kind: "betrayal",
+        toneClass: "betrayal",
+        text: translateText("ai_league_replay.headline_betrayal", {
+          actor,
+          target,
+        }),
+      });
+      continue;
+    }
+    if (event.kind === "elimination" && target !== null) {
+      headlines.push({
+        turnNumber: event.turnNumber,
+        sequence: event.sequence,
+        kind: "elimination",
+        toneClass: "war",
+        text: translateText("ai_league_replay.headline_elimination", {
+          actor,
+          target,
+        }),
+      });
+      continue;
+    }
+    if (
+      (event.kind === "attack" || event.kind === "target_call") &&
+      target !== null
+    ) {
+      const pairKey = `${event.actorAgentID}->${event.targetAgentID ?? target}`;
+      if (!firstStrikeSeen.has(pairKey)) {
+        firstStrikeSeen.add(pairKey);
+        headlines.push({
+          turnNumber: event.turnNumber,
+          sequence: event.sequence,
+          kind: "first_strike",
+          toneClass: "threat",
+          text: translateText("ai_league_replay.headline_first_strike", {
+            actor,
+            target,
+          }),
+        });
+      }
+    }
+  }
+  return headlines;
+}
+
+function mountAiLeagueHeadlineEvent(
+  decisions: readonly AiLeagueDecisionLogEntry[],
   telemetry: AiLeagueSpectatorTelemetry | null,
 ) {
-  if (telemetry === null) {
+  const win = window as Window & {
+    __aiLeagueHeadlineCleanup?: () => void;
+  };
+  win.__aiLeagueHeadlineCleanup?.();
+  const headlines = headlineEventsFor(telemetry);
+  void decisions;
+  const lowerThird = document.createElement("div");
+  lowerThird.id = "ai-league-headline-event";
+  lowerThird.setAttribute("aria-live", "polite");
+  lowerThird.hidden = true;
+  document.body.appendChild(lowerThird);
+  if (headlines.length === 0) {
+    win.__aiLeagueHeadlineCleanup = () => {
+      lowerThird.remove();
+    };
     return;
   }
-  const timelineEvents = telemetry.timelineBuckets
-    .flatMap((bucket) => bucket.events)
-    .sort((a, b) => b.importance - a.importance || a.turnNumber - b.turnNumber)
-    .slice(0, 18)
-    .sort((a, b) => a.turnNumber - b.turnNumber || a.sequence - b.sequence);
-  if (timelineEvents.length === 0) {
-    return;
+  const onFrame = (event: Event) => {
+    const detail = (event as CustomEvent<AiLeagueReplayFrameEventDetail>).detail;
+    if (!detail || !Number.isFinite(detail.turnNumber)) {
+      return;
+    }
+    const active = headlines
+      .filter(
+        (headline) =>
+          headline.turnNumber <= detail.turnNumber &&
+          detail.turnNumber <= headline.turnNumber + 60,
+      )
+      .sort(
+        (a, b) =>
+          b.turnNumber - a.turnNumber || b.sequence - a.sequence,
+      )[0];
+    if (active === undefined) {
+      lowerThird.hidden = true;
+      lowerThird.innerHTML = "";
+      return;
+    }
+    lowerThird.hidden = false;
+    lowerThird.className = `ai-league-headline ${escapeHtml(active.toneClass)}`;
+    lowerThird.innerHTML = `<span class="ai-league-headline-tag">${escapeHtml(headlineKindLabel(active.kind))}</span><span class="ai-league-headline-text">${escapeHtml(active.text)}</span>`;
+  };
+  document.addEventListener("ai-league-replay-frame", onFrame);
+  win.__aiLeagueHeadlineCleanup = () => {
+    document.removeEventListener("ai-league-replay-frame", onFrame);
+    lowerThird.remove();
+  };
+}
+
+function headlineKindLabel(kind: AiLeagueHeadlineEvent["kind"]): string {
+  if (kind === "betrayal") {
+    return translateText("ai_league_replay.headline_tag_betrayal");
   }
-  const timeline = document.createElement("nav");
-  timeline.id = "ai-league-story-timeline";
-  timeline.setAttribute("aria-label", "Political replay timeline");
-  timeline.innerHTML = `<span class="ai-league-timeline-title">Story</span>${timelineEvents
-    .map(
-      (event) =>
-        `<button type="button" class="ai-league-timeline-marker ${escapeHtml(event.tone)}" data-ai-league-jump-turn="${event.turnNumber}" title="${escapeHtml(event.message)}">${escapeHtml(timelineEventLabel(event))}</button>`,
-    )
-    .join("")}`;
-  document.body.appendChild(timeline);
+  if (kind === "elimination") {
+    return translateText("ai_league_replay.headline_tag_elimination");
+  }
+  return translateText("ai_league_replay.headline_tag_first_strike");
 }
 
 function overlayHtml(input: AiLeagueReplayOverlayInput): string {
-  const nonHold = input.decisions.filter(
-    (decision) =>
-      decision.selectedActionKind !== "hold" &&
-      decision.selectedActionKind !== "spawn",
-  );
   const rejected = input.decisions.filter(
     (decision) => !decision.result.accepted,
   );
   const fallback = input.decisions.filter((decision) => decision.fallbackUsed);
   const actionCounts = input.decisions.reduce<Record<string, number>>(
     (counts, decision) => {
-      counts[decision.selectedActionKind] =
-        (counts[decision.selectedActionKind] ?? 0) + 1;
+      const kind = actionLabel(decision);
+      counts[kind] = (counts[kind] ?? 0) + 1;
       return counts;
     },
     {},
   );
+  const playstyleKinds = Object.entries(actionCounts)
+    .filter(([kind]) => kind !== "hold" && kind !== "spawn")
+    .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+    .slice(0, 3)
+    .map(([kind]) => kind);
   const agentCount = input.summary?.roster?.length ?? 0;
-  const visibleOpponentCount =
-    input.summary?.finalState?.opponents?.length ?? 0;
   const bots = input.summary?.runnerConfig?.bots ?? null;
   const nations = input.summary?.runnerConfig?.nations ?? null;
   const maxSteps = input.summary?.runnerConfig?.maxSteps ?? null;
   const configuredOpponentCount = numericCount(nations) + numericCount(bots);
-  const battleHighlights = input.decisions
-    .filter(
-      (decision) =>
-        decision.selectedActionKind !== "spawn" &&
-        decision.selectedActionKind !== "hold",
-    )
-    .slice(-10)
-    .reverse();
   const setupLine =
     agentCount > 0 || configuredOpponentCount > 0
       ? `${agentCount} Proxy War agents vs ${configuredOpponentCount} built-in opponents`
-      : "Proxy War agents vs built-in opposition";
+      : translateText("ai_league_replay.setup_generic");
+  const mapName =
+    typeof input.summary?.runnerConfig?.map === "string"
+      ? input.summary.runnerConfig.map
+      : null;
+  const difficulty =
+    typeof input.summary?.runnerConfig?.difficulty === "string"
+      ? input.summary.runnerConfig.difficulty
+      : null;
   const configLine = [
-    nations !== null && nations !== undefined
-      ? `${nations} built-in nations`
-      : null,
-    bots !== null && bots !== undefined ? `${bots} tribes/bots` : null,
+    mapName,
+    difficulty,
     maxSteps !== null && maxSteps !== undefined
-      ? `${maxSteps} decision cycles`
-      : null,
-    visibleOpponentCount > 0
-      ? `${visibleOpponentCount} visible in final mirror snapshot`
+      ? translateText("ai_league_replay.setup_turns", { turns: maxSteps })
       : null,
   ]
     .filter(Boolean)
     .join(" · ");
-  const matchStory = input.summary?.matchStory ?? null;
-  const openingNeutral = openingNeutralSummary(input.decisions);
   const spectatorTelemetry =
     input.spectatorTelemetry as AiLeagueSpectatorTelemetry | null;
 
@@ -473,7 +542,7 @@ function overlayHtml(input: AiLeagueReplayOverlayInput): string {
         top: 16px;
         right: 16px;
         z-index: 50000;
-        width: min(420px, calc(100vw - 32px));
+        width: min(360px, calc(100vw - 32px));
         max-height: calc(100vh - 32px);
         overflow: hidden;
         display: grid;
@@ -483,14 +552,15 @@ function overlayHtml(input: AiLeagueReplayOverlayInput): string {
         background: rgba(255, 255, 255, 0.94);
         color: #17202a;
         box-shadow: 0 18px 60px rgba(15, 23, 42, 0.22);
-        font: 13px/1.35 system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        font: 14px/1.4 system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        font-variant-numeric: tabular-nums;
       }
       body.ai-league-native-spectator-ui #ai-league-replay-overlay {
         top: auto;
         right: auto;
         left: 16px;
         bottom: 16px;
-        width: min(440px, calc(100vw - 32px));
+        width: min(360px, calc(100vw - 32px));
         max-height: min(58vh, 520px);
       }
       #ai-league-replay-overlay.collapsed {
@@ -549,49 +619,130 @@ function overlayHtml(input: AiLeagueReplayOverlayInput): string {
       }
       .ai-league-metrics {
         display: grid;
-        grid-template-columns: repeat(4, 1fr);
-        gap: 8px;
+        grid-template-columns: repeat(3, 1fr);
+        gap: 6px;
         margin-bottom: 10px;
       }
       .ai-league-metric {
         border: 1px solid rgba(15, 23, 42, 0.12);
         border-radius: 8px;
-        padding: 8px;
+        padding: 6px;
         background: #f8fafc;
+        font-size: 12px;
       }
       .ai-league-metric b {
         display: block;
-        font-size: 16px;
+        font-size: 14px;
+        font-variant-numeric: tabular-nums;
+      }
+      .ai-league-metric.warn {
+        background: #fff2dc;
+        border-color: rgba(165, 91, 0, 0.4);
+        color: #a55b00;
       }
       .ai-league-actions {
         margin: 0 0 10px;
         color: #475569;
       }
-      .ai-league-speed {
+      .ai-league-playstyle {
+        display: flex;
+        align-items: center;
+        flex-wrap: wrap;
+        gap: 5px;
+        margin: 0 0 10px;
+        color: #475569;
+        font-size: 12px;
+      }
+      .ai-league-standings {
         display: grid;
-        gap: 7px;
+        gap: 5px;
         border: 1px solid rgba(15, 23, 42, 0.12);
         border-radius: 8px;
         padding: 9px;
         margin: 0 0 10px;
         background: #fff;
       }
-      .ai-league-speed-row {
+      .ai-league-standings-title {
+        font-weight: 900;
+        color: #334155;
+      }
+      .ai-league-diplo-row {
         display: flex;
-        justify-content: space-between;
-        gap: 10px;
         align-items: center;
-      }
-      .ai-league-speed input {
-        width: 100%;
-        accent-color: #215a9c;
-      }
-      .ai-league-speed-labels {
-        display: flex;
-        justify-content: space-between;
-        color: #64748b;
-        font-size: 11px;
+        gap: 6px;
+        font-size: 13px;
         font-weight: 700;
+      }
+      .ai-league-diplo-rank {
+        min-width: 16px;
+        color: #64748b;
+        font-variant-numeric: tabular-nums;
+      }
+      .ai-league-color-dot {
+        flex: 0 0 auto;
+        width: 11px;
+        height: 11px;
+        border-radius: 50%;
+        border: 1px solid rgba(15, 23, 42, 0.35);
+      }
+      .ai-league-diplo-name {
+        font-weight: 900;
+        color: #17202a;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+        max-width: 96px;
+      }
+      .ai-league-diplo-share {
+        margin-left: auto;
+        font-variant-numeric: tabular-nums;
+        font-weight: 900;
+        color: #334155;
+      }
+      .ai-league-diplo-stances {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        margin-top: 3px;
+        flex-wrap: wrap;
+        font-size: 12px;
+        font-weight: 700;
+      }
+      .ai-league-stance {
+        display: inline-flex;
+        align-items: center;
+        gap: 3px;
+        color: #475569;
+      }
+      .ai-league-stance .ai-league-color-dot {
+        width: 9px;
+        height: 9px;
+      }
+      .ai-league-stance-glyph {
+        display: inline-flex;
+        align-items: center;
+        gap: 2px;
+        font-weight: 900;
+        line-height: 0;
+      }
+      .ai-league-stance-glyph svg {
+        display: block;
+      }
+      .ai-league-stance-renew {
+        font-size: 11px;
+        line-height: 1;
+      }
+      .ai-league-stance.ally .ai-league-stance-glyph {
+        color: #15803d;
+      }
+      .ai-league-stance.war .ai-league-stance-glyph {
+        color: #b91c1c;
+      }
+      .ai-league-stance.embargo .ai-league-stance-glyph {
+        color: #92400e;
+      }
+      .ai-league-stance.expiring {
+        opacity: 0.55;
       }
       .ai-league-feed {
         display: grid;
@@ -632,20 +783,6 @@ function overlayHtml(input: AiLeagueReplayOverlayInput): string {
         margin-bottom: 10px;
         background: #eef7fb;
       }
-      .ai-league-story {
-        border: 1px solid rgba(33, 90, 156, 0.18);
-        border-radius: 8px;
-        padding: 9px;
-        margin: 0 0 10px;
-        background: #fff;
-      }
-      .ai-league-story ul {
-        margin: 6px 0 0 18px;
-        padding: 0;
-      }
-      .ai-league-story li {
-        margin: 3px 0;
-      }
       .ai-league-politics {
         border: 1px solid rgba(15, 23, 42, 0.12);
         border-radius: 8px;
@@ -656,59 +793,11 @@ function overlayHtml(input: AiLeagueReplayOverlayInput): string {
       .ai-league-politics-head {
         display: flex;
         justify-content: space-between;
-        align-items: start;
-        gap: 10px;
-        margin-bottom: 8px;
-      }
-      .ai-league-relationship-grid {
-        display: grid;
-        gap: 5px;
-        overflow-x: auto;
-        padding-bottom: 2px;
-      }
-      .ai-league-relationship-name,
-      .ai-league-relationship-cell,
-      .ai-league-relationship-empty {
-        min-width: 92px;
-        min-height: 58px;
-      }
-      .ai-league-relationship-name {
-        display: flex;
         align-items: center;
-        font-weight: 900;
-        color: #334155;
-        font-size: 12px;
+        gap: 10px;
       }
-      .ai-league-relationship-cell {
-        display: grid;
-        gap: 3px;
-        text-align: left;
-        background: #f8fafc;
-        border-color: rgba(15, 23, 42, 0.12);
-        font-size: 11px;
-        font-weight: 800;
-      }
-      .ai-league-relationship-cell.active {
-        outline: 2px solid #215a9c;
-        outline-offset: 1px;
-      }
-      .ai-league-relationship-cell.ally {
-        background: #e7f8ef;
-        color: #14532d;
-      }
-      .ai-league-relationship-cell.rival,
-      .ai-league-relationship-cell.target {
-        background: #fff1e7;
-        color: #7c2d12;
-      }
-      .ai-league-relationship-cell.betrayed {
-        background: #ffe4e6;
-        color: #881337;
-      }
-      .ai-league-relationship-label {
-        text-transform: uppercase;
-        font-size: 10px;
-        letter-spacing: 0;
+      .ai-league-talks[hidden] {
+        display: none;
       }
       .ai-league-comms {
         display: grid;
@@ -768,20 +857,47 @@ function overlayHtml(input: AiLeagueReplayOverlayInput): string {
         padding: 2px 7px;
         background: #e7eef7;
         color: #215a9c;
-        font-size: 11px;
+        font-size: 12px;
         font-weight: 800;
       }
       .ai-league-badge.ok {
         background: #e5f8ef;
         color: #19764b;
       }
+      /*
+       * Rejected/invalid decision badge: neutral slate, NOT red. Red is
+       * reserved exclusively for war/betrayal signals (the war glyph and
+       * betrayal social tones) so the aggression cue stays unambiguous.
+       */
       .ai-league-badge.bad {
-        background: #fde8ed;
-        color: #a32135;
+        background: #e2e8f0;
+        color: #475569;
       }
       .ai-league-badge.warn {
         background: #fff2dc;
         color: #a55b00;
+      }
+      .ai-league-directive {
+        margin: 4px 0 0;
+        color: #334155;
+        font-size: 12px;
+      }
+      .ai-league-directive b {
+        color: #17202a;
+      }
+      .ai-league-decisions-head {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        gap: 8px;
+        margin: 12px 0 0;
+      }
+      .ai-league-decisions-title {
+        font-weight: 900;
+        color: #334155;
+      }
+      .ai-league-decision-extra[hidden] {
+        display: none;
       }
       #ai-league-replay-overlay code {
         font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
@@ -811,7 +927,6 @@ function overlayHtml(input: AiLeagueReplayOverlayInput): string {
       body.ai-league-replay-mode build-menu,
       body.ai-league-replay-mode emoji-table,
       body.ai-league-replay-mode player-panel,
-      body.ai-league-replay-mode attacks-display,
       body.ai-league-replay-mode chat-display,
       body.ai-league-replay-mode chat-modal,
       body.ai-league-replay-mode send-resource-modal,
@@ -829,90 +944,6 @@ function overlayHtml(input: AiLeagueReplayOverlayInput): string {
        */
       body.ai-league-replay-mode:not(.ai-league-native-spectator-ui) game-left-sidebar {
         display: none !important;
-      }
-      #ai-league-replay-mode-banner {
-        position: fixed;
-        top: 15%;
-        left: 50%;
-        transform: translateX(-50%);
-        z-index: 49999;
-        pointer-events: none;
-        display: inline-flex;
-        align-items: center;
-        justify-content: center;
-        min-height: 36px;
-        max-width: min(560px, 90vw);
-        padding: 7px 14px;
-        border-radius: 8px;
-        background: rgba(15, 23, 42, 0.76);
-        color: #fff;
-        font: 700 15px/1.25 system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-        text-align: center;
-        backdrop-filter: blur(8px);
-      }
-      #ai-league-social-map-bubbles {
-        position: fixed;
-        inset: 0;
-        z-index: 49998;
-        pointer-events: none;
-        overflow: hidden;
-        font: 800 14px/1.2 system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-      }
-      .ai-league-map-social-bubble {
-        position: absolute;
-        max-width: min(340px, 46vw);
-        min-width: 180px;
-        transform: translate(-50%, -115%);
-        padding: 9px 11px;
-        border: 2px solid rgba(29, 94, 143, 0.9);
-        border-radius: 10px 10px 10px 3px;
-        background: rgba(238, 246, 255, 0.96);
-        color: #17324d;
-        box-shadow: 0 12px 34px rgba(15, 23, 42, 0.22);
-        text-align: left;
-        overflow-wrap: break-word;
-      }
-      body.ai-league-native-spectator-ui .ai-league-map-social-bubble {
-        transform: translate(-50%, 0);
-      }
-      .ai-league-map-social-bubble.emoji {
-        min-width: 44px;
-        max-width: 72px;
-        font-size: 26px;
-        line-height: 1;
-        border-color: rgba(161, 98, 7, 0.9);
-        background: rgba(255, 247, 237, 0.96);
-        text-align: center;
-      }
-      .ai-league-map-social-bubble.betrayal {
-        border-color: rgba(169, 50, 38, 0.95);
-        background: rgba(255, 241, 242, 0.97);
-        color: #6f1d1b;
-      }
-      .ai-league-map-social-bubble.conspiracy {
-        border-color: rgba(88, 28, 135, 0.9);
-        background: rgba(245, 243, 255, 0.97);
-        color: #3b0764;
-      }
-      .ai-league-map-social-bubble.threat {
-        border-color: rgba(180, 83, 9, 0.95);
-        background: rgba(255, 247, 237, 0.97);
-        color: #713f12;
-      }
-      .ai-league-map-social-speaker {
-        display: block;
-        margin-bottom: 3px;
-        color: rgba(15, 23, 42, 0.72);
-        font-size: 11px;
-        font-weight: 900;
-        text-transform: uppercase;
-        letter-spacing: 0;
-      }
-      .ai-league-map-social-bubble small {
-        display: block;
-        margin-top: 3px;
-        color: #64748b;
-        font-size: 11px;
       }
       #ai-league-social-transcript {
         position: fixed;
@@ -981,51 +1012,46 @@ function overlayHtml(input: AiLeagueReplayOverlayInput): string {
         background: #dcfce7;
         color: #166534;
       }
-      #ai-league-story-timeline {
+      #ai-league-headline-event {
         position: fixed;
         left: 50%;
-        bottom: 16px;
+        bottom: 9%;
         transform: translateX(-50%);
-        z-index: 50000;
-        width: min(760px, calc(100vw - 36px));
-        display: flex;
-        gap: 6px;
+        z-index: 49997;
+        pointer-events: none;
+        display: inline-flex;
         align-items: center;
-        overflow-x: auto;
-        padding: 8px;
-        border: 1px solid rgba(15, 23, 42, 0.16);
-        border-radius: 8px;
-        background: rgba(255, 255, 255, 0.94);
-        box-shadow: 0 12px 34px rgba(15, 23, 42, 0.18);
-        font: 700 12px/1.2 system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        gap: 9px;
+        max-width: min(640px, 92vw);
+        padding: 9px 15px;
+        border-radius: 10px;
+        background: rgba(15, 23, 42, 0.82);
+        color: #fff;
+        box-shadow: 0 12px 34px rgba(15, 23, 42, 0.3);
+        backdrop-filter: blur(8px);
+        font: 800 15px/1.3 system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        text-align: left;
       }
-      .ai-league-timeline-title {
-        flex: 0 0 auto;
-        color: #334155;
-        font-weight: 900;
+      #ai-league-headline-event[hidden] {
+        display: none;
       }
-      .ai-league-timeline-marker {
+      .ai-league-headline-tag {
         flex: 0 0 auto;
-        border: 1px solid rgba(15, 23, 42, 0.16);
         border-radius: 999px;
-        background: #f8fafc;
-        color: #17202a;
-        padding: 5px 8px;
-        cursor: pointer;
-        font-weight: 800;
+        padding: 2px 8px;
+        background: rgba(255, 255, 255, 0.18);
+        font-size: 11px;
+        text-transform: uppercase;
+        letter-spacing: 0.04em;
       }
-      .ai-league-timeline-marker.betrayal {
-        background: #ffe4e6;
-        color: #881337;
+      .ai-league-headline.betrayal {
+        background: rgba(136, 19, 55, 0.9);
       }
-      .ai-league-timeline-marker.pact {
-        background: #e7f8ef;
-        color: #14532d;
+      .ai-league-headline.war {
+        background: rgba(153, 27, 27, 0.9);
       }
-      .ai-league-timeline-marker.threat,
-      .ai-league-timeline-marker.war {
-        background: #ffedd5;
-        color: #7c2d12;
+      .ai-league-headline.threat {
+        background: rgba(124, 45, 18, 0.9);
       }
       @media (max-width: 740px) {
         #ai-league-replay-overlay {
@@ -1055,14 +1081,14 @@ function overlayHtml(input: AiLeagueReplayOverlayInput): string {
           padding: 5px 7px;
         }
         .ai-league-metrics {
-          grid-template-columns: repeat(2, minmax(0, 1fr));
+          grid-template-columns: repeat(3, minmax(0, 1fr));
         }
         #ai-league-social-transcript {
           display: none;
         }
-        #ai-league-story-timeline {
+        #ai-league-headline-event {
           bottom: 8px;
-          width: calc(100vw - 16px);
+          max-width: calc(100vw - 16px);
         }
       }
     </style>
@@ -1077,198 +1103,365 @@ function overlayHtml(input: AiLeagueReplayOverlayInput): string {
       </div>
     </header>
     <div class="ai-league-body">
+      <section class="ai-league-standings" data-ai-league-diplomacy aria-label="${escapeHtml(translateText("ai_league_replay.standings_title"))}">
+        <div class="ai-league-standings-title">${escapeHtml(translateText("ai_league_replay.standings_title"))}</div>
+        <div data-ai-league-diplomacy-rows>
+          <div class="ai-league-muted">${escapeHtml(translateText("ai_league_replay.standings_waiting"))}</div>
+        </div>
+      </section>
       <section class="ai-league-metrics">
-        <div class="ai-league-metric">Decisions<b>${input.decisions.length}</b></div>
-        <div class="ai-league-metric">Non-hold<b>${nonHold.length}</b></div>
-        <div class="ai-league-metric">Rejected<b>${rejected.length}</b></div>
-        <div class="ai-league-metric">Fallbacks<b>${fallback.length}</b></div>
+        <div class="ai-league-metric">${escapeHtml(translateText("ai_league_replay.metric_moves"))}<b>${input.decisions.length}</b></div>
+        <div class="ai-league-metric">${escapeHtml(translateText("ai_league_replay.metric_invalid"))}<b>${rejected.length}</b></div>
+        <div class="ai-league-metric${fallback.length > 0 ? " warn" : ""}">${escapeHtml(translateText("ai_league_replay.metric_recovered"))}<b>${fallback.length}</b></div>
       </section>
       <section class="ai-league-match-setup">
         <strong>${escapeHtml(setupLine)}</strong>
         ${configLine ? `<div class="ai-league-muted">${escapeHtml(configLine)}</div>` : ""}
       </section>
-      ${
-        matchStory
-          ? `<section class="ai-league-story">
-        <strong>Match story: ${escapeHtml(String(matchStory.entertainmentScore ?? "n/a"))}/100 ${escapeHtml(matchStory.grade ?? "")}</strong>
-        <div class="ai-league-muted">${escapeHtml(matchStory.summary ?? "Story summary unavailable.")}</div>
-        ${
-          matchStory.spectatorHighlights?.length
-            ? `<ul>${matchStory.spectatorHighlights
-                .slice(0, 3)
-                .map((highlight) => `<li>${escapeHtml(highlight)}</li>`)
-                .join("")}</ul>`
-            : ""
-        }
-        ${matchStory.boringnessWarnings?.length ? `<p class="ai-league-muted">Warnings: ${escapeHtml(matchStory.boringnessWarnings.slice(0, 2).join(" · "))}</p>` : ""}
-      </section>`
-          : ""
-      }
-      ${
-        openingNeutral !== null
-          ? `<section class="ai-league-match-setup">
-        <strong>Opening neutral land: ${openingNeutral.chosen}/${openingNeutral.available} legal chances taken</strong>
-        <div class="ai-league-muted">${openingNeutral.firstTurn === null ? "No neutral expansion action was recorded." : `First visible neutral expansion: turn ${openingNeutral.firstTurn}. The spawn phase blocks attacks before active play, so the replay starts with a short static countdown.`}</div>
-      </section>`
-          : ""
-      }
-      <section class="ai-league-speed" aria-label="Replay speed control">
-        <div class="ai-league-speed-row">
-          <strong>Replay speed</strong>
-          <span class="ai-league-badge" data-ai-league-speed-label>Max</span>
-        </div>
-        <input data-ai-league-speed type="range" min="0" max="3" step="1" value="3" aria-label="Replay speed">
-        <div class="ai-league-speed-labels" aria-hidden="true">
-          <span>0.5x</span>
-          <span>1x</span>
-          <span>2x</span>
-          <span>Max</span>
-        </div>
-      </section>
-      ${spectatorTelemetry ? politicsBoardHtml(spectatorTelemetry) : ""}
+      ${playstyleKinds.length > 0 ? playstyleLineHtml(playstyleKinds) : ""}
       ${spectatorTelemetry ? communicationThreadsHtml(spectatorTelemetry) : ""}
-      ${battleHighlights.length > 0 ? battleFeedHtml(battleHighlights) : ""}
-      <p class="ai-league-actions">Action counts: ${actionCountBadges(actionCounts)}</p>
-      <p class="ai-league-muted">This uses the real Proxy War replay renderer. The viewer has no player identity and replay intents are read-only.</p>
+      <p class="ai-league-muted">${escapeHtml(translateText("ai_league_replay.disclaimer"))}</p>
       <p>
-        <a href="${escapeHtml(input.artifactBasePath)}/visual-report.html">visual report</a>
-        · <a href="${escapeHtml(input.artifactBasePath)}/match-story.md">story</a>
-        · <a href="${escapeHtml(input.artifactBasePath)}/spectator-telemetry.json">politics data</a>
-        · <a href="${escapeHtml(input.artifactBasePath)}/decisions.jsonl">decisions</a>
-        · <a href="${escapeHtml(input.artifactBasePath)}/match-summary.json">summary</a>
+        <a href="${escapeHtml(input.artifactBasePath)}/visual-report.html">${escapeHtml(translateText("ai_league_replay.link_visual_report"))}</a>
+        · <a href="${escapeHtml(input.artifactBasePath)}/spectator-telemetry.json">${escapeHtml(translateText("ai_league_replay.link_politics_data"))}</a>
+        · <a href="${escapeHtml(input.artifactBasePath)}/decisions.jsonl">${escapeHtml(translateText("ai_league_replay.link_decisions"))}</a>
+        · <a href="${escapeHtml(input.artifactBasePath)}/match-summary.json">${escapeHtml(translateText("ai_league_replay.link_summary"))}</a>
       </p>
-      ${input.decisions.map(decisionHtml).join("")}
+      ${decisionLogHtml(input.decisions)}
     </div>
     <div class="ai-league-resize-handle" data-ai-league-resize aria-hidden="true"></div>`;
 }
 
-function openingNeutralSummary(
-  decisions: AiLeagueDecisionLogEntry[],
-): { available: number; chosen: number; firstTurn: number | null } | null {
-  const opening = decisions.filter((decision) => decision.turnNumber <= 900);
-  const available = opening.filter(hasNeutralExpansionLegalAction).length;
-  const chosen = opening.filter(
-    (decision) =>
-      hasNeutralExpansionLegalAction(decision) &&
-      isNeutralExpansionAction(decision),
-  ).length;
-  const firstTurn =
-    decisions
-      .filter(isNeutralExpansionAction)
-      .map((decision) => decision.turnNumber)
-      .sort((a, b) => a - b)[0] ?? null;
-  if (available === 0 && firstTurn === null) {
-    return null;
-  }
-  return { available, chosen, firstTurn };
-}
-
-function hasNeutralExpansionLegalAction(
-  decision: AiLeagueDecisionLogEntry,
-): boolean {
-  return (decision.legalActionIDsByKind?.attack ?? []).some((actionID) =>
-    actionID.startsWith("expand:terra-nullius"),
-  );
-}
-
-function isNeutralExpansionAction(decision: AiLeagueDecisionLogEntry): boolean {
-  return (
-    (decision.batchActionIDs ?? []).some((actionID) =>
-      actionID.startsWith("expand:terra-nullius"),
-    ) ||
-    decision.selectedLegalActionId.startsWith("expand:terra-nullius") ||
-    (decision.selectedActionKind === "attack" &&
-      decision.selectedActionMetadata?.expansion === true)
-  );
-}
-
-function replaySpeedOption(index: number): {
-  label: string;
-  speed: ReplaySpeedMultiplier;
-} {
-  const options = [
-    { label: "0.5x", speed: ReplaySpeedMultiplier.slow },
-    { label: "1x", speed: ReplaySpeedMultiplier.normal },
-    { label: "2x", speed: ReplaySpeedMultiplier.fast },
-    { label: "Max", speed: ReplaySpeedMultiplier.fastest },
-  ];
-  return options[Math.max(0, Math.min(options.length - 1, Math.round(index)))]!;
-}
-
-function politicsBoardHtml(
-  telemetry: AiLeagueSpectatorTelemetry,
-): string {
-  const agents = telemetry.agents;
-  const leader = [...agents]
-    .filter((agent) => typeof agent.finalTilesOwned === "number")
-    .sort((a, b) => (b.finalTilesOwned ?? 0) - (a.finalTilesOwned ?? 0))[0];
-  const columns = `132px repeat(${Math.max(1, agents.length)}, minmax(92px, 1fr))`;
-  const headerCells = [
-    '<div class="ai-league-relationship-name">From / To</div>',
-    ...agents.map(
-      (agent) =>
-        `<div class="ai-league-relationship-name">${escapeHtml(aiLeagueSpectatorDisplayName(agent.username))}</div>`,
-    ),
-  ].join("");
-  const rows = agents
-    .map((from) =>
-      [
-        `<div class="ai-league-relationship-name">${escapeHtml(aiLeagueSpectatorDisplayName(from.username))}</div>`,
-        ...agents.map((to) => {
-          if (from.agentID === to.agentID) {
-            return '<div class="ai-league-relationship-empty"></div>';
-          }
-          const relationship = relationshipFor(
-            telemetry,
-            from.agentID,
-            to.agentID,
-          );
-          if (relationship === null) {
-            return '<div class="ai-league-relationship-empty"></div>';
-          }
-          return relationshipCellHtml(relationship, from, to);
-        }),
-      ].join(""),
+function playstyleLineHtml(kinds: string[]): string {
+  const badges = kinds
+    .map(
+      (kind) =>
+        `<span class="ai-league-badge">${escapeHtml(actionLabelFromKind(kind))}</span>`,
     )
-    .join("");
-  return `
-    <section class="ai-league-politics" data-ai-league-politics>
-      <div class="ai-league-politics-head">
-        <div>
-          <strong>Politics board</strong>
-          <div class="ai-league-muted">${leader ? `Leader: ${escapeHtml(aiLeagueSpectatorDisplayName(leader.username))} (${leader.finalTilesOwned ?? 0} tiles)` : "Leader data unavailable"}</div>
-        </div>
-        <button type="button" data-spectator-clear-filter>All talks</button>
-      </div>
-      <div class="ai-league-muted" data-spectator-filter-label>Showing all relationships</div>
-      <div class="ai-league-relationship-grid" style="grid-template-columns:${columns}">
-        ${headerCells}${rows}
-      </div>
-    </section>`;
+    .join(" ");
+  return `<p class="ai-league-playstyle"><strong>${escapeHtml(translateText("ai_league_replay.playstyle_label"))}</strong> ${badges}</p>`;
 }
 
-function relationshipCellHtml(
-  relationship: AiLeagueSpectatorRelationship,
-  from: AiLeagueSpectatorAgent,
-  to: AiLeagueSpectatorAgent,
-): string {
-  const label = relationship.currentLabel || "neutral";
-  const reason = relationship.reasons[0] ?? "No recent direct event.";
+const AI_LEAGUE_DECISION_LOG_CAP = 15;
+
+function decisionLogHtml(decisions: AiLeagueDecisionLogEntry[]): string {
+  if (decisions.length === 0) {
+    return "";
+  }
+  const visible = decisions.slice(-AI_LEAGUE_DECISION_LOG_CAP);
+  const hidden = decisions.slice(0, Math.max(0, decisions.length - visible.length));
+  const expander =
+    hidden.length > 0
+      ? `<button type="button" class="ai-league-badge" data-ai-league-decision-expander aria-expanded="false">${escapeHtml(translateText("ai_league_replay.decisions_show_all", { count: hidden.length }))}</button>`
+      : "";
   return `
-    <button
-      type="button"
-      class="ai-league-relationship-cell ${escapeHtml(label)}"
-      data-spectator-relationship-cell
-      data-from-agent="${escapeHtml(from.agentID)}"
-      data-to-agent="${escapeHtml(to.agentID)}"
-      data-from-name="${escapeHtml(aiLeagueSpectatorDisplayName(from.username))}"
-      data-to-name="${escapeHtml(aiLeagueSpectatorDisplayName(to.username))}"
-      title="${escapeHtml(reason)}"
-    >
-      <span class="ai-league-relationship-label">${escapeHtml(label)}</span>
-      <span>T ${relationship.trust} / D ${relationship.distrust}</span>
-      <span>Heat ${relationship.tension}</span>
-    </button>`;
+    <div class="ai-league-decisions-head">
+      <span class="ai-league-decisions-title">${escapeHtml(translateText("ai_league_replay.decisions_title"))}</span>
+      ${expander}
+    </div>
+    ${
+      hidden.length > 0
+        ? `<div class="ai-league-decision-extra" data-ai-league-decision-extra hidden>${hidden.map(decisionHtml).join("")}</div>`
+        : ""
+    }
+    ${visible.map(decisionHtml).join("")}`;
+}
+
+function mountAiLeagueDecisionLogExpander(overlay: HTMLElement) {
+  const expander = overlay.querySelector<HTMLButtonElement>(
+    "[data-ai-league-decision-expander]",
+  );
+  const extra = overlay.querySelector<HTMLElement>(
+    "[data-ai-league-decision-extra]",
+  );
+  if (expander === null || extra === null) {
+    return;
+  }
+  expander.addEventListener("click", () => {
+    const nowHidden = !extra.hidden;
+    extra.hidden = nowHidden;
+    expander.setAttribute("aria-expanded", String(!nowHidden));
+    expander.textContent = nowHidden
+      ? translateText("ai_league_replay.decisions_show_all", {
+          count: extra.childElementCount,
+        })
+      : translateText("ai_league_replay.decisions_show_recent");
+  });
+}
+
+// Deuteranopia-separable identity palette (no red/green-only pair). Hue encodes
+// player identity ONLY; relationship type is carried by glyph/class, never hue.
+const AI_LEAGUE_PLAYER_PALETTE = [
+  "#1f77b4",
+  "#ff7f0e",
+  "#9467bd",
+  "#17becf",
+  "#bcbd22",
+  "#8c564b",
+  "#e377c2",
+  "#7f7f7f",
+];
+
+function aiLeaguePlayerColor(smallID: number): string {
+  const index =
+    ((Math.trunc(smallID) % AI_LEAGUE_PLAYER_PALETTE.length) +
+      AI_LEAGUE_PLAYER_PALETTE.length) %
+    AI_LEAGUE_PLAYER_PALETTE.length;
+  return AI_LEAGUE_PLAYER_PALETTE[index]!;
+}
+
+// Prefer the real engine on-map color so the diplomacy/standings dots match
+// what the spectator sees on the map; fall back to the identity palette only
+// when the frame payload omits a color (older payloads / missing field).
+function aiLeagueDisplayColor(player: AiLeagueReplayFramePlayer): string {
+  if (typeof player.color === "string" && player.color.trim().length > 0) {
+    return player.color;
+  }
+  return aiLeaguePlayerColor(player.smallID);
+}
+
+function mountAiLeagueDiplomacyStrip(
+  overlay: HTMLElement,
+  decisions: readonly AiLeagueDecisionLogEntry[],
+  telemetry: AiLeagueSpectatorTelemetry | null,
+) {
+  void telemetry;
+  const container = overlay.querySelector<HTMLElement>(
+    "[data-ai-league-diplomacy-rows]",
+  );
+  if (container === null) {
+    return;
+  }
+  const win = window as Window & {
+    __aiLeagueDiplomacyCleanup?: () => void;
+  };
+  win.__aiLeagueDiplomacyCleanup?.();
+  const directiveByName = latestDirectiveByPlayer(decisions);
+  const onFrame = (event: Event) => {
+    const detail = (event as CustomEvent<AiLeagueReplayFrameEventDetail>).detail;
+    if (!detail || !Array.isArray(detail.players) || detail.players.length === 0) {
+      return;
+    }
+    container.innerHTML = diplomacyRowsHtml(
+      detail.players,
+      detail.tick,
+      directiveByName,
+    );
+  };
+  document.addEventListener("ai-league-replay-frame", onFrame);
+  win.__aiLeagueDiplomacyCleanup = () => {
+    document.removeEventListener("ai-league-replay-frame", onFrame);
+  };
+}
+
+function latestDirectiveByPlayer(
+  decisions: readonly AiLeagueDecisionLogEntry[],
+): Map<string, string> {
+  const byName = new Map<string, string>();
+  for (const decision of decisions) {
+    const objective =
+      typeof decision.planObjective === "string" &&
+      decision.planObjective.trim().length > 0
+        ? decision.planObjective.trim()
+        : null;
+    if (objective === null) {
+      continue;
+    }
+    byName.set(normalizeName(decision.username), objective);
+  }
+  return byName;
+}
+
+function diplomacyRowsHtml(
+  players: AiLeagueReplayFramePlayer[],
+  currentTick: number,
+  directiveByName: Map<string, string>,
+): string {
+  const totalTiles = players.reduce(
+    (sum, player) => sum + Math.max(0, player.tilesOwned),
+    0,
+  );
+  const bySmallID = new Map<number, AiLeagueReplayFramePlayer>();
+  const byPlayerID = new Map<string, AiLeagueReplayFramePlayer>();
+  for (const player of players) {
+    bySmallID.set(player.smallID, player);
+    byPlayerID.set(player.playerID, player);
+  }
+  const ranked = [...players].sort((a, b) => b.tilesOwned - a.tilesOwned);
+  return ranked
+    .map((player, index) => {
+      const share =
+        totalTiles > 0
+          ? Math.round((player.tilesOwned / totalTiles) * 100)
+          : 0;
+      const stances = diplomacyStancesHtml(
+        player,
+        bySmallID,
+        byPlayerID,
+        currentTick,
+      );
+      const directive = directiveByName.get(normalizeName(player.username));
+      return `
+        <div class="ai-league-diplo-row">
+          <span class="ai-league-diplo-rank">${index + 1}</span>
+          <span class="ai-league-color-dot" style="background:${escapeHtml(aiLeagueDisplayColor(player))}"></span>
+          <span class="ai-league-diplo-name">${escapeHtml(aiLeagueSpectatorDisplayName(player.displayName || player.username))}</span>
+          <span class="ai-league-diplo-share">${share}%</span>
+        </div>
+        ${stances ? `<div class="ai-league-diplo-stances">${stances}</div>` : ""}
+        ${
+          directive
+            ? `<p class="ai-league-directive"><b>${escapeHtml(translateText("ai_league_replay.directive_label"))}</b> ${escapeHtml(directive)}</p>`
+            : ""
+        }`;
+    })
+    .join("");
+}
+
+function diplomacyStancesHtml(
+  player: AiLeagueReplayFramePlayer,
+  bySmallID: Map<number, AiLeagueReplayFramePlayer>,
+  byPlayerID: Map<string, AiLeagueReplayFramePlayer>,
+  currentTick: number,
+): string {
+  const stances: string[] = [];
+  // Players already shown as an ally. Ally is the dominant label: we don't
+  // additionally tag an ally with war/embargo icons (keeps the row readable).
+  // War and embargo are independent dimensions and do NOT suppress each other —
+  // a rival can carry both a war ● and an embargo ⊘ toward the same player.
+  const alliedSmallIDs = new Set<number>();
+  const expiringByOther = new Map<string, boolean>();
+  const extensionByOther = new Map<string, boolean>();
+  const NEAR_EXPIRY_TICKS = 300;
+  const allies = Array.isArray(player.allies) ? player.allies : [];
+  const targets = Array.isArray(player.targets) ? player.targets : [];
+  const embargoes = Array.isArray(player.embargoes) ? player.embargoes : [];
+  const alliances = Array.isArray(player.alliances) ? player.alliances : [];
+  for (const alliance of alliances) {
+    expiringByOther.set(
+      alliance.other,
+      alliance.expiresAt - currentTick < NEAR_EXPIRY_TICKS,
+    );
+    extensionByOther.set(alliance.other, alliance.hasExtensionRequest);
+  }
+  for (const allySmallID of allies) {
+    const ally = bySmallID.get(allySmallID);
+    if (ally === undefined) {
+      continue;
+    }
+    alliedSmallIDs.add(allySmallID);
+    const expiring = expiringByOther.get(ally.playerID) === true;
+    const extension = extensionByOther.get(ally.playerID) === true;
+    stances.push(
+      stanceChipHtml(
+        "ally",
+        ally,
+        translateText("ai_league_replay.stance_ally"),
+        expiring,
+        extension,
+      ),
+    );
+  }
+  // War is bidirectional: this player attacking a rival, or a rival attacking
+  // this player. Encoded by the red crossed-swords icon (type by icon + the
+  // war class's red color, not a new identity hue).
+  const warSmallIDs = new Set<number>(targets);
+  for (const other of bySmallID.values()) {
+    if (other.smallID === player.smallID) {
+      continue;
+    }
+    if (Array.isArray(other.targets) && other.targets.includes(player.smallID)) {
+      warSmallIDs.add(other.smallID);
+    }
+  }
+  for (const warSmallID of warSmallIDs) {
+    const rival = bySmallID.get(warSmallID);
+    if (rival === undefined || alliedSmallIDs.has(warSmallID)) {
+      continue;
+    }
+    stances.push(
+      stanceChipHtml(
+        "war",
+        rival,
+        translateText("ai_league_replay.stance_war"),
+        false,
+        false,
+      ),
+    );
+  }
+  // Embargoes are bidirectional: either party can be the source.
+  const embargoTargets = new Set<string>(embargoes);
+  for (const other of byPlayerID.values()) {
+    if (other.playerID === player.playerID) {
+      continue;
+    }
+    if (Array.isArray(other.embargoes) && other.embargoes.includes(player.playerID)) {
+      embargoTargets.add(other.playerID);
+    }
+  }
+  for (const targetPlayerID of embargoTargets) {
+    const target = byPlayerID.get(targetPlayerID);
+    if (target === undefined || alliedSmallIDs.has(target.smallID)) {
+      continue;
+    }
+    stances.push(
+      stanceChipHtml(
+        "embargo",
+        target,
+        translateText("ai_league_replay.stance_embargo"),
+        false,
+        false,
+      ),
+    );
+  }
+  return stances.join("");
+}
+
+// Inline relationship icons. These mirror the native client's diplomacy
+// iconography (resources/images/AllianceIcon.svg green handshake,
+// EmbargoWhiteIcon.svg no-trade circle, SwordIcon.svg crossed blade) but are
+// INLINED (no assetUrl / no CDN fetch) so the replay overlay stays fully
+// self-contained — no new fetch/WebSocket and no asset-bucket dependency.
+// `currentColor` lets each icon inherit the per-stance color set in CSS
+// (.ai-league-stance.ally/.war/.embargo .ai-league-stance-glyph), so RED stays
+// reserved for war only. The icon carries the human label via title +
+// aria-label; the relationship word is no longer printed inline.
+const AI_LEAGUE_STANCE_ICON_SVG: Record<
+  "ally" | "war" | "embargo",
+  string
+> = {
+  // Alliance: clasped hands (handshake) — alliance/cooperation.
+  ally:
+    `<svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">` +
+    `<path d="M3 12l3-3 4 3 2-2 3 3"/><path d="M14 9l3-3 4 4-3 3"/><path d="M11 13l2 2"/></svg>`,
+  // War: crossed swords — active conflict.
+  war:
+    `<svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">` +
+    `<path d="M4 4l11 11"/><path d="M3 7l2-3 3 2"/><path d="M14 17l3 3 3-3-3-3"/>` +
+    `<path d="M20 4L9 15"/><path d="M21 7l-2-3-3 2"/><path d="M10 17l-3 3-3-3 3-3"/></svg>`,
+  // Embargo: a circle with a diagonal bar — no-trade / blocked.
+  embargo:
+    `<svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">` +
+    `<circle cx="12" cy="12" r="9"/><path d="M5.6 5.6l12.8 12.8"/></svg>`,
+};
+
+function stanceChipHtml(
+  kind: "ally" | "war" | "embargo",
+  other: AiLeagueReplayFramePlayer,
+  label: string,
+  expiring: boolean,
+  hasExtensionRequest: boolean,
+): string {
+  // The relationship is shown ONLY by the icon; `label` (translated
+  // ally/war/embargo) is the accessible name on the icon, never an inline word.
+  // The renew glyph (↻) for a pending alliance extension is appended to the
+  // accessible label so it stays conveyed without a trailing text label.
+  const accessibleLabel = `${label}${hasExtensionRequest ? " ↻" : ""}`;
+  return `<span class="ai-league-stance ${kind}${expiring ? " expiring" : ""}">
+      <span class="ai-league-color-dot" style="background:${escapeHtml(aiLeagueDisplayColor(other))}"></span>
+      <span>${escapeHtml(aiLeagueSpectatorDisplayName(other.displayName || other.username))}</span>
+      <span class="ai-league-stance-glyph" role="img" title="${escapeHtml(accessibleLabel)}" aria-label="${escapeHtml(accessibleLabel)}">${AI_LEAGUE_STANCE_ICON_SVG[kind]}${hasExtensionRequest ? `<span class="ai-league-stance-renew" aria-hidden="true">↻</span>` : ""}</span>
+    </span>`;
 }
 
 function communicationThreadsHtml(
@@ -1276,16 +1469,15 @@ function communicationThreadsHtml(
 ): string {
   const threads = telemetry.communicationThreads.slice(0, 8);
   if (threads.length === 0) {
-    return `
-      <section class="ai-league-politics">
-        <strong>Diplomacy feed</strong>
-        <div class="ai-league-muted">No direct political messages were recorded.</div>
-      </section>`;
+    return "";
   }
   return `
     <section class="ai-league-politics">
-      <strong>Diplomacy feed</strong>
-      <div class="ai-league-comms" data-spectator-comms>
+      <div class="ai-league-politics-head">
+        <strong>${escapeHtml(translateText("ai_league_replay.talks_title"))}</strong>
+        <button type="button" class="ai-league-badge" data-spectator-talks-toggle aria-expanded="false">${escapeHtml(translateText("ai_league_replay.talks_show"))}</button>
+      </div>
+      <div class="ai-league-comms ai-league-talks" data-spectator-comms hidden>
         ${threads.map((thread) => communicationThreadHtml(thread, telemetry)).join("")}
       </div>
     </section>`;
@@ -1326,64 +1518,31 @@ function communicationMessageHtml(event: AiLeagueSpectatorEvent): string {
     </div>`;
 }
 
-function battleFeedHtml(decisions: AiLeagueDecisionLogEntry[]): string {
-  return `
-    <section>
-      <strong>Recent action feed</strong>
-      <div class="ai-league-feed">
-        ${decisions
-          .map(
-            (decision) => `
-              <div class="ai-league-feed-item">
-                <span class="ai-league-badge">${escapeHtml(actionLabel(decision))}</span>
-                <div>
-                  <strong>${escapeHtml(aiLeagueSpectatorDisplayName(decision.username))}</strong>
-                  <code>${escapeHtml(decision.selectedLegalActionId)}</code>
-                  ${socialBubbleHtml(decision)}
-                  <p>${escapeHtml(shortText(decision.reason, 150))}</p>
-                </div>
-              </div>`,
-          )
-          .join("")}
-      </div>
-    </section>`;
-}
-
-function actionCountBadges(actionCounts: Record<string, number>): string {
-  return Object.entries(actionCounts)
-    .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
-    .map(
-      ([kind, count]) =>
-        `<span class="ai-league-badge">${escapeHtml(actionLabelFromKind(kind))}: ${count}</span>`,
-    )
-    .join(" ");
-}
-
 function decisionHtml(decision: AiLeagueDecisionLogEntry): string {
+  const directive =
+    typeof decision.planObjective === "string" &&
+    decision.planObjective.trim().length > 0
+      ? decision.planObjective.trim()
+      : null;
   return `
     <article class="ai-league-decision">
       <div class="ai-league-row">
-        <strong>${decision.sequence}. ${escapeHtml(decision.username)}</strong>
-        <span class="ai-league-muted">turn ${decision.turnNumber}</span>
+        <strong>${escapeHtml(decision.username)}</strong>
+        <span class="ai-league-muted">${escapeHtml(translateText("ai_league_replay.turn_label", { turn: decision.turnNumber }))}</span>
       </div>
       <div class="ai-league-badges">
         <span class="ai-league-badge">${escapeHtml(actionLabel(decision))}</span>
-        <span class="ai-league-badge ${decision.result.accepted ? "ok" : "bad"}">${decision.result.accepted ? "accepted" : "rejected"}</span>
+        <span class="ai-league-badge ${decision.result.accepted ? "ok" : "bad"}">${escapeHtml(decision.result.accepted ? translateText("ai_league_replay.decision_accepted") : translateText("ai_league_replay.decision_rejected"))}</span>
         ${
           decision.fallbackUsed
-            ? '<span class="ai-league-badge warn">fallback</span>'
-            : ""
-        }
-        ${
-          decision.auditStatus
-            ? `<span class="ai-league-badge">${escapeHtml(decision.auditStatus)}</span>`
+            ? `<span class="ai-league-badge warn">${escapeHtml(translateText("ai_league_replay.decision_recovered"))}</span>`
             : ""
         }
       </div>
       <code>${escapeHtml(decision.selectedLegalActionId)}</code>
       ${socialBubbleHtml(decision)}
+      ${directive ? `<p class="ai-league-directive"><b>${escapeHtml(translateText("ai_league_replay.directive_label"))}</b> ${escapeHtml(directive)}</p>` : ""}
       <p>${escapeHtml(decision.reason)}</p>
-      <div class="ai-league-muted">${decision.decisionLatencyMs}ms · ${escapeHtml(intentSummary(decision.generatedIntent))}</div>
     </article>`;
 }
 
@@ -1496,7 +1655,13 @@ function mapSocialEvents(
     .sort((a, b) => a.turnNumber - b.turnNumber || a.sequence - b.sequence);
 }
 
-function mountAiLeagueMapSocialBubbles(
+// Mounts ONLY the bottom-left "political radio" social transcript. The floating
+// map message bubbles that used to hover over each agent were removed (operator
+// direction): they cluttered the map. The transcript panel is the kept social
+// surface. The per-event visibility window is still gated by
+// theatreEventBubbleDuration so the radio shows each line for the same duration
+// it previously showed the bubble.
+function mountAiLeagueSocialTranscript(
   decisions: readonly AiLeagueDecisionLogEntry[],
   telemetry: AiLeagueSpectatorTelemetry | null,
 ) {
@@ -1504,11 +1669,8 @@ function mountAiLeagueMapSocialBubbles(
     __aiLeagueSocialBubblesCleanup?: () => void;
   };
   win.__aiLeagueSocialBubblesCleanup?.();
-  const layer = document.createElement("div");
-  layer.id = "ai-league-social-map-bubbles";
   const transcript = document.createElement("div");
   transcript.id = "ai-league-social-transcript";
-  document.body.appendChild(layer);
   document.body.appendChild(transcript);
   const socialEvents = mapSocialEvents(decisions, telemetry);
   const onFrame = (event: Event) => {
@@ -1526,55 +1688,13 @@ function mountAiLeagueMapSocialBubbles(
       )
       .sort((a, b) => b.importance - a.importance || b.turnNumber - a.turnNumber)
       .slice(0, 2);
-    layer.innerHTML = active
-      .map((socialEvent, index) =>
-        mapSocialBubbleHtml(socialEvent, detail, index),
-      )
-      .filter(Boolean)
-      .join("");
     transcript.innerHTML = socialTranscriptHtml(active);
   };
   document.addEventListener("ai-league-replay-frame", onFrame);
   win.__aiLeagueSocialBubblesCleanup = () => {
     document.removeEventListener("ai-league-replay-frame", onFrame);
-    layer.remove();
     transcript.remove();
   };
-}
-
-function mapSocialBubbleHtml(
-  socialEvent: AiLeagueMapSocialEvent,
-  frame: AiLeagueReplayFrameEventDetail,
-  index: number,
-): string {
-  const player = frame.players.find(
-    (candidate) =>
-      normalizeName(candidate.username) === normalizeName(socialEvent.username) ||
-      normalizeName(candidate.displayName) === normalizeName(socialEvent.username),
-  );
-  if (player === undefined) {
-    return "";
-  }
-  const offsets = bubbleOffset(index);
-  const x = clamp(player.x + offsets.x, 88, window.innerWidth - 88);
-  const y = clamp(player.y - 40 + offsets.y, 46, window.innerHeight - 56);
-  const tone = socialEvent.tone;
-  const className = [
-    "ai-league-map-social-bubble",
-    socialEvent.kind === "emoji" ? "emoji" : "",
-    tone,
-  ]
-    .filter(Boolean)
-    .join(" ");
-  return `<div class="${className}" style="left:${x}px;top:${y}px">${
-    socialEvent.kind === "emoji"
-      ? ""
-      : `<span class="ai-league-map-social-speaker">${escapeHtml(aiLeagueSpectatorDisplayName(socialEvent.username))}</span>`
-  }${escapeHtml(shortText(aiLeagueSpectatorText(socialEvent.text), socialEvent.kind === "emoji" ? 6 : 118))}${
-    socialEvent.targetName && socialEvent.kind !== "emoji"
-      ? `<small>to ${escapeHtml(aiLeagueSpectatorDisplayName(socialEvent.targetName))}</small>`
-      : ""
-  }</div>`;
 }
 
 function theatreTextForDecision(
@@ -1648,15 +1768,6 @@ function theatreImportance(decision: AiLeagueDecisionLogEntry): number {
   return 55;
 }
 
-function bubbleOffset(index: number): { x: number; y: number } {
-  const offsets = [
-    { x: -96, y: -72 },
-    { x: 96, y: -36 },
-    { x: -44, y: -128 },
-    { x: 44, y: -92 },
-  ];
-  return offsets[index % offsets.length]!;
-}
 
 function socialTranscriptHtml(
   socialEvents: readonly AiLeagueMapSocialEvent[],
@@ -1720,34 +1831,17 @@ function clamp(value: number, min: number, max: number): number {
   return Math.max(min, Math.min(max, value));
 }
 
-function intentSummary(intent: unknown): string {
-  if (intent === null || intent === undefined) {
-    return "no intent";
-  }
-  if (typeof intent === "object") {
-    const type =
-      "type" in intent ? String((intent as { type?: unknown }).type) : "intent";
-    return type;
-  }
-  return String(intent);
-}
-
 interface AiLeagueReplaySummary {
   roster?: unknown[];
   runnerConfig?: {
     bots?: number | string | null;
     nations?: number | string | null;
     maxSteps?: number | null;
+    map?: string | null;
+    difficulty?: string | null;
   } | null;
   finalState?: {
     opponents?: unknown[];
-  } | null;
-  matchStory?: {
-    entertainmentScore?: number;
-    grade?: string;
-    summary?: string;
-    spectatorHighlights?: string[];
-    boringnessWarnings?: string[];
   } | null;
 }
 
@@ -1771,20 +1865,6 @@ function normalizeSpectatorTelemetry(
   return candidate as AiLeagueSpectatorTelemetry;
 }
 
-function relationshipFor(
-  telemetry: AiLeagueSpectatorTelemetry,
-  fromAgentID: string,
-  toAgentID: string,
-): AiLeagueSpectatorRelationship | null {
-  return (
-    telemetry.relationships.find(
-      (relationship) =>
-        relationship.fromAgentID === fromAgentID &&
-        relationship.toAgentID === toAgentID,
-    ) ?? null
-  );
-}
-
 function agentName(
   telemetry: AiLeagueSpectatorTelemetry,
   agentID: string,
@@ -1795,24 +1875,6 @@ function agentName(
         agentID,
     )
   );
-}
-
-function timelineEventLabel(event: AiLeagueSpectatorEvent): string {
-  const prefix =
-    event.kind === "alliance_break"
-      ? "break"
-      : event.kind === "alliance_formed"
-        ? "pact"
-        : event.kind === "nuke"
-          ? "nuke"
-          : event.kind === "attack"
-            ? "war"
-            : event.kind === "trade"
-              ? "trade"
-              : event.kind === "target_call"
-                ? "target"
-                : event.kind;
-  return `${prefix} ${event.turnNumber}`;
 }
 
 function readStoredPanelLayout(
@@ -1872,10 +1934,35 @@ function actionLabel(decision: AiLeagueDecisionLogEntry): string {
   return decision.selectedActionKind;
 }
 
+// Action-kind labels for the playstyle badges. Known kinds route through
+// translateText (ai_league_replay.action_<kind>); unknown kinds fall back to
+// the raw game-internal identifier so a new kind never renders blank.
+// Keys are the labels produced by actionLabel()/actionLabelFromKind() callers
+// (note: "expand"/"chat"/"target" are already-derived labels, while the rest
+// are raw selectedActionKind values). Unknown kinds fall back to the raw id.
+const AI_LEAGUE_ACTION_LABEL_KEYS: Record<string, string> = {
+  attack: "ai_league_replay.action_attack",
+  expand: "ai_league_replay.action_expand",
+  build: "ai_league_replay.action_build",
+  chat: "ai_league_replay.action_chat",
+  quick_chat: "ai_league_replay.action_chat",
+  emoji: "ai_league_replay.action_emoji",
+  target: "ai_league_replay.action_target",
+  target_player: "ai_league_replay.action_target",
+  alliance_request: "ai_league_replay.action_alliance_request",
+  alliance_extend: "ai_league_replay.action_alliance_extend",
+  alliance_reject: "ai_league_replay.action_alliance_reject",
+  break_alliance: "ai_league_replay.action_break_alliance",
+  donate_gold: "ai_league_replay.action_donate_gold",
+  donate_troops: "ai_league_replay.action_donate_troops",
+  embargo: "ai_league_replay.action_embargo",
+  embargo_all: "ai_league_replay.action_embargo_all",
+  nuke: "ai_league_replay.action_nuke",
+};
+
 function actionLabelFromKind(kind: string): string {
-  if (kind === "quick_chat") return "chat";
-  if (kind === "target_player") return "target";
-  return kind;
+  const key = AI_LEAGUE_ACTION_LABEL_KEYS[kind];
+  return key !== undefined ? translateText(key) : kind;
 }
 
 function numericCount(value: number | string | null | undefined): number {

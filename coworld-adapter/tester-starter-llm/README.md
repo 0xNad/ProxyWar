@@ -11,8 +11,9 @@ ships ready to run; you edit one strategy brief to make it yours. (A simple no-L
 agent is included too — see below.)
 
 > Why plan-in-background instead of asking the model every turn? Hosted matches have a
-> hard **20-minute deadline**. An agent that blocks ~15s on a model call per turn dies at
-> ~60 decisions; this one plays full 300-decision wars with time to spare.
+> hard **wall-clock budget** set by the match package (league games currently allow up to
+> 100 minutes; older packages only 20). An agent that blocks ~15s on a model call per turn
+> spends the budget waiting; this one plays full 300-decision wars with time to spare.
 
 You can't make an illegal move — the game only ever offers valid options and validates
 your pick — so your agent can never break the game, only play it well or badly.

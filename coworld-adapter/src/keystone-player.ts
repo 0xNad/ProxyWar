@@ -379,10 +379,19 @@ export class DeferredAgentPlanner implements AgentPlanner {
  * on Bedrock and the hosted seat silently failed every call for 60+ rounds —
  * autodetect makes a retired/disabled id self-healing instead of fatal.
  * PROXYWAR_LLM_MODEL_ID (when set) is always tried first.
+ *
+ * PROXYWAR_LLM_MODEL_STRICT=1 (with a pinned id) disables the fall-through:
+ * the pinned model is the ONLY candidate, so an unavailable id degrades the
+ * seat loudly (llmPlannerDegraded on the wire) instead of silently playing a
+ * different model. Required for model-labeled seats — a seat advertised as
+ * model X must never quietly answer as model Y.
  */
 export function bedrockModelCandidates(
   env: NodeJS.ProcessEnv = process.env,
 ): string[] {
+  if (env.PROXYWAR_LLM_MODEL_ID && env.PROXYWAR_LLM_MODEL_STRICT === "1") {
+    return [env.PROXYWAR_LLM_MODEL_ID];
+  }
   return [
     ...(env.PROXYWAR_LLM_MODEL_ID ? [env.PROXYWAR_LLM_MODEL_ID] : []),
     // Confirmed enabled on the Softmax Bedrock account 2026-06-23 (us-east-1, us-west-2,

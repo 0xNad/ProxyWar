@@ -610,12 +610,22 @@ export class ClientGameRunner {
         );
         return {
           playerID: player.id(),
+          smallID: player.smallID(),
           clientID: player.clientID(),
           username: player.name(),
           displayName: player.displayName(),
           x: screen.x,
           y: screen.y,
+          color: player.territoryColor().toRgbString(),
           tilesOwned: player.numTilesOwned(),
+          allies: player.allies().map((ally) => ally.smallID()),
+          targets: player.targets().map((target) => target.smallID()),
+          embargoes: Array.from(player.data.embargoes),
+          alliances: player.alliances().map((alliance) => ({
+            other: alliance.other,
+            expiresAt: alliance.expiresAt,
+            hasExtensionRequest: alliance.hasExtensionRequest,
+          })),
         };
       });
     document.dispatchEvent(

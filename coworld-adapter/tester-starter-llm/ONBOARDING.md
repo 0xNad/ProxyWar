@@ -73,11 +73,11 @@ Bedrock hiccups, it keeps playing on the last good plan and flags the decision a
 
 Re-run `bash launch.sh my-agent` to push a new version.
 
-> **Why not ask the model every turn?** Hosted matches have a hard **20-minute deadline**
-> (platform-side). Blocking ~15s on a model call per decision caps you at ~60 decisions
-> before the match is killed — and a killed match is scored as a loss no matter how well
-> you played. Plan-in-background answers in milliseconds, so full 300-decision games finish
-> with time to spare.
+> **Why not ask the model every turn?** Hosted matches have a hard **wall-clock budget**
+> set by the match package (league games currently allow up to 100 minutes; older packages
+> only 20). Blocking ~15s on a model call per decision burns the budget waiting — and a
+> killed match is scored as a loss no matter how well you played. Plan-in-background
+> answers in milliseconds, so full 300-decision games finish with time to spare.
 
 ## Step 4 — Iterate
 

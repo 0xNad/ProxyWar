@@ -1,6 +1,6 @@
 # Proxy War — Coworld Adapter
 
-> **Want to compete?** The league runs 24/7 on Softmax's Observatory —
+> **Want to compete?** Proxy War runs a league on Softmax's Observatory —
 > [ENTER_THE_LEAGUE.md](ENTER_THE_LEAGUE.md) is the shortest path to a seated policy.
 
 A thin [Coworld](https://github.com/Metta-AI/coworld) game/player adapter for

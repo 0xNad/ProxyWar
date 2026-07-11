@@ -1,10 +1,11 @@
 /**
  * ProxyWar LLM agent (Bedrock) — deferred-planning edition.
  *
- * WHY THIS SHAPE: hosted episodes have a HARD 20-minute deadline (Coworld
- * GAME.md: "Hosted episode Jobs have a 20 minute active deadline"). An agent
- * that calls the model INLINE on every decision (~15-25s each) caps out at
- * ~50-80 decisions and the platform kills the game. So this agent answers
+ * WHY THIS SHAPE: hosted episodes have a hard wall-clock budget set by the
+ * match package (the league coworld currently allows up to 100 minutes;
+ * older packages only 20). An agent that calls the model INLINE on every
+ * decision (~15-25s each) spends the whole budget waiting on the model and
+ * the platform kills the game. So this agent answers
  * every decision INSTANTLY from its current PLAN (a short doctrine the model
  * wrote), and refreshes that plan with Claude (via AWS Bedrock) in the
  * BACKGROUND every few decisions. Full 300-decision games finish with time to

@@ -1,9 +1,11 @@
 # Enter the Proxy War league
 
-Proxy War runs a live, always-on league on [Softmax's Observatory](https://softmax.com/observatory):
-rounds start every 30 minutes, every policy plays full tournament games (50 decisions ×
-100 turns, ~5000-turn matches), and every episode produces a watchable replay that opens
-straight into the match. This page is the shortest path from "I want in" to a seated policy.
+Proxy War runs a commissioner-scheduled league on
+[Softmax's Observatory](https://softmax.com/observatory): full free-for-all games whose
+seat count scales with the number of active policies (2/4/8/12-seat rungs, 300-500
+decisions × 100 turns), a curated map rotation that sweeps every round, and a watchable
+replay for every episode. This page is the shortest path from "I want in" to a seated
+policy.
 
 ## What a policy is
 
@@ -72,13 +74,14 @@ uvx --from coworld coworld upload-policy your-policy-image:latest \
 # LLM policies: add --use-bedrock to run under the platform's Bedrock service
 # account (Claude models, no keys in your image)
 
-# enter the league
-uvx --from coworld coworld submit my-agent:v1 \
-  --league league_cb60d526-ecfd-4836-ab3a-81fc6cf7dc42
+# enter the league (find the current Proxy War league id first)
+uvx --from coworld coworld leagues        # look for the Proxywar row
+uvx --from coworld coworld submit my-agent:v1 --league <league_...>
 ```
 
-New policies start in **Qualifiers** and graduate to the Competition division
-automatically. Rounds run every 30 minutes; your seat plays whether you're online or not.
+New policies start in **Qualifiers** (a cheap self-play crash check) and graduate to the
+Competition division automatically. Rounds run on the commissioner's schedule; your seat
+plays whether you're online or not.
 Watch your games at [softmax.com/observatory](https://softmax.com/observatory) — every
 episode page has the replay, per-decision logs (including your policy's stderr), and
 scores.
@@ -89,6 +92,9 @@ scores.
   (and counted).
 - **15 seconds per decision.** Architect for it: answer from a standing plan and refresh
   your expensive reasoning asynchronously rather than blocking the clock.
+- **Episodes have a wall-clock budget set by the match package** (the league coworld
+  currently allows up to 100 minutes; some older packages only 20). Background planning
+  keeps you safe on any package.
 - **Scoring**: outright winner takes 1.0; otherwise normalized territory share.
 - Be loud about degradation (flags above) — silent fallbacks make your losses
   undiagnosable, and we've learned that the hard way.
