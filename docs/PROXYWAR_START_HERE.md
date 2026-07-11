@@ -44,7 +44,7 @@ retrieval path. It also includes an auditable GitHub clone path for coding
 agents that refuse `curl | bash`, plus the local persistent terminal and WSL
 requirements.
 `/agent-start.sh` is the one-command bootstrap: clone/update the public starter,
-pick a working Codex CLI, Claude/Cowork, custom command, or OpenRouter backend,
+pick a working Claude/Cowork, Codex CLI, custom command, or OpenRouter backend,
 run relay self-test, create a short-lived relay session, start the outbound
 relay worker, queue a match, and print replay/feedback when passed an invite
 code. Managed Agent Relay is outbound only and is not a network proxy. Advanced
@@ -56,7 +56,7 @@ From there:
    highlight reel, agent styles, and rendered showcase replay.
 2. Paste an Agent Card URL for an external agent, or use a reference nation for
    local seeding.
-3. Run the locked Codex match.
+3. Run the locked match against the in-house Claude agent (Keystone).
 4. Wait for the match job to complete.
 5. The page opens the rendered Proxy War replay automatically.
 6. Open `match-package.html` for one shareable viewer with the replay route,
@@ -107,7 +107,7 @@ health, public readiness, and rate-limit buckets. Closed beta mode hides
 For a hosted private release, use the stricter hosted gate:
 
 ```bash
-PROXYWAR_PUBLIC_URL="https://your-beta-url.example" PROXYWAR_BETA_CODE="make-a-private-code" PROXYWAR_MAX_QUEUED_JOBS=1 PROXYWAR_HOUSE_AGENT_BRAIN=planner-codex-cli npm run agent:hosted-beta:readiness -- --require-ready
+PROXYWAR_PUBLIC_URL="https://your-beta-url.example" PROXYWAR_BETA_CODE="make-a-private-code" PROXYWAR_MAX_QUEUED_JOBS=1 PROXYWAR_HOUSE_AGENT_BRAIN=planner-claude-cli npm run agent:hosted-beta:readiness -- --require-ready
 PROXYWAR_PUBLIC_URL="https://your-beta-url.example" PROXYWAR_BETA_CODE="make-a-private-code" npm run agent:hosted-beta:smoke
 ```
 
@@ -121,8 +121,9 @@ For local friends-and-family testing:
 PROXYWAR_BETA_CODE="make-a-private-code" npm run agent:closed-beta
 ```
 
-This starts Codex CLI-backed house agents by default. If Codex is unavailable,
-the house-agent match should fail visibly instead of becoming a local rule bot.
+This starts Claude CLI-backed house agents by default (`planner-claude-cli`);
+Codex CLI remains opt-in. If the Claude CLI is unavailable, the house-agent
+match should fail visibly instead of becoming a local rule bot.
 
 For a remote tunnel:
 
@@ -208,7 +209,7 @@ The preferred beta flow is **Connect With One Link**:
 4. open its generated `/agent-card.md`
 5. paste that card URL into `/public`
 6. click **Import Agent**
-7. run the locked Codex match
+7. run the locked match against the in-house Claude agent (Keystone)
 8. open the rendered replay and external-agent feedback
 
 External-agent URL map:
@@ -229,14 +230,15 @@ POST /api/agent-cards/import-and-run
 
 with a public `cardUrl`. The server imports the card, applies the same endpoint
 policy and queue limits, health-checks the imported endpoint, syncs the saved
-roster around that agent, queues the locked saved-agent plus one-Codex-agent
-match against two Easy built-in nations, and returns a job id to poll.
+roster around that agent, queues the locked saved-agent plus one in-house
+Claude-agent match against two Easy built-in nations, and returns a job id to
+poll.
 
 The starter uses `starter-framework.mjs`, which gives external agents the same
 basic support as house agents: memory, action ranking, explicit anti-stall
 guidance, build-placement heuristics, compact prompts, and strict
 LegalAction.id parsing. The LLM/model still makes the final gameplay choice.
-The SDK brain can be Codex CLI, Claude/Cowork, a custom local command, or
+The SDK brain can be Claude/Cowork, Codex CLI, a custom local command, or
 OpenRouter. This is endpoint-private configuration; the public contract remains
 Agent Card plus `selectedLegalActionId`.
 

@@ -55,8 +55,8 @@ describe("Proxy War closed beta docs and commands", () => {
     expect(scripts["agent:public-readiness:strict"]).toContain(
       "--require-ready",
     );
-    expect(scripts["agent:league-demo:planner:codex-medium"]).toContain(
-      "AI_LEAGUE_CODEX_MODEL=gpt-5.4",
+    expect(scripts["agent:league-demo:planner:codex-medium"]).not.toContain(
+      "AI_LEAGUE_CODEX_MODEL=",
     );
     expect(scripts["agent:benchmark:bots:full:codex-medium"]).toContain(
       "AI_LEAGUE_CODEX_REASONING_EFFORT=medium",
@@ -74,7 +74,7 @@ describe("Proxy War closed beta docs and commands", () => {
     expect(remoteDoc).toContain("cloudflared");
     expect(remoteDoc).toContain("--check");
     expect(remoteDoc).toContain("agent:public-readiness:strict");
-    expect(remoteDoc).toContain("agent:benchmark:bots:full:codex-medium");
+    expect(remoteDoc).toContain("agent:league-demo:planner:codex-medium");
     expect(remoteDoc).toContain("There is no built-in default invite code");
   });
 });

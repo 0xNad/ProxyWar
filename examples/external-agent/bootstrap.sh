@@ -56,7 +56,7 @@ Options:
 What this does in relay mode:
   1. Checks git, Node.js 20+, npm, and curl.
   2. Clones or fast-forwards the public starter repo.
-  3. Finds a working Codex CLI, Claude/Cowork, custom command, or OpenRouter backend.
+  3. Finds a working Claude/Cowork, Codex CLI, custom command, or OpenRouter backend.
   4. Runs relay self-test before contacting Proxy War.
   5. Logs into beta, creates /api/agent-relay/sessions, starts the relay worker,
      queues a saved-agent match, then prints replay and feedback links.
@@ -295,8 +295,8 @@ candidate_providers() {
     return
   fi
   if [[ -n "$COMMAND_VALUE" ]]; then printf '%s\n' "command"; fi
-  if have codex; then printf '%s\n' "codex-cli"; fi
   if have claude; then printf '%s\n' "claude-cowork"; fi
+  if have codex; then printf '%s\n' "codex-cli"; fi
   if [[ -n "${OPENROUTER_API_KEY:-}" ]]; then printf '%s\n' "openrouter"; fi
 }
 

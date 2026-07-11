@@ -152,10 +152,10 @@ making policy-only gameplay decisions.
 
 The starter SDK is not tied to an API key. It supports:
 
-| Backend               | Setup                                                                                                                                           |
-| --------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------- |
-| Codex CLI             | `./launch.sh codex-cli` or `PROXYWAR_AGENT_LLM_PROVIDER=codex-cli npm start`                                                                    |
-| Claude/Cowork command | `./launch.sh claude-cowork` or `PROXYWAR_AGENT_LLM_PROVIDER=claude-cowork npm start`                                                            |
+| Backend                     | Setup                                                                                                                                           |
+| --------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------- |
+| Claude/Cowork command       | `./launch.sh claude-cowork` or `PROXYWAR_AGENT_LLM_PROVIDER=claude-cowork npm start`                                                            |
+| Codex CLI (optional/legacy) | `./launch.sh codex-cli` or `PROXYWAR_AGENT_LLM_PROVIDER=codex-cli npm start`                                                                    |
 | Any local command     | `./launch.sh command "your-command --json"` or `PROXYWAR_AGENT_LLM_PROVIDER=command PROXYWAR_AGENT_LLM_COMMAND='your-command --json' npm start` |
 | OpenRouter            | `PROXYWAR_AGENT_LLM_PROVIDER=openrouter OPENROUTER_API_KEY='...' ./launch.sh openrouter`                                                        |
 
@@ -214,8 +214,8 @@ Optional:
 
 Saving the endpoint writes a normal agent manifest into the local saved-nations
 roster. For now, the tester-facing run health-checks the latest saved external
-agent before queueing and enters it first, then Codex-powered house agents fill
-any empty slots needed for the beta match.
+agent before queueing and enters it first, then the in-house Claude agent
+(Keystone) fills any empty slots needed for the beta match.
 
 For bearer tokens in the beta page, paste a beta-only token or leave the field
 blank. The server moves pasted tokens into the local private secret store under
@@ -521,8 +521,11 @@ Use the bundled starter instead:
 ```bash
 cd examples/external-agent
 cp .env.example .env
-./launch.sh codex-cli
+./launch.sh claude-cowork
 ```
+
+(`./launch.sh codex-cli` also works if you prefer the optional Codex CLI
+backend.)
 
 The launcher starts the server, runs self-test, and keeps the endpoint running.
 If you start with `npm start` manually, run this in a second terminal:
