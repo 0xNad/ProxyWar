@@ -267,8 +267,19 @@ function mountReplayPanelControls(overlay: HTMLElement) {
     dragState = null;
     resizeState = null;
   };
+  // Same remount-cleanup pattern as every other document-level mount in this
+  // file: without it each overlay remount stacks another listener pair, and
+  // every onMove closure pins the previous detached overlay element.
+  const win = window as Window & {
+    __aiLeaguePanelControlsCleanup?: () => void;
+  };
+  win.__aiLeaguePanelControlsCleanup?.();
   document.addEventListener("mousemove", onMove);
   document.addEventListener("mouseup", onUp);
+  win.__aiLeaguePanelControlsCleanup = () => {
+    document.removeEventListener("mousemove", onMove);
+    document.removeEventListener("mouseup", onUp);
+  };
   overlay
     .querySelector<HTMLButtonElement>("[data-ai-league-reset-layout]")
     ?.addEventListener("click", () => {
@@ -436,6 +447,11 @@ function mountAiLeagueHeadlineEvent(
   win.__aiLeagueHeadlineCleanup?.();
   const headlines = headlineEventsFor(telemetry);
   void decisions;
+  // Headlines are the marquee moments (betrayals, eliminations, nukes) — hold
+  // them at least as long as the social transcript holds an important line
+  // (theatreEventBubbleDuration tops out at 700 turns; 60 turns blinked past
+  // in under a second at Max replay speed).
+  const HEADLINE_VISIBLE_TURNS = 300;
   const lowerThird = document.createElement("div");
   lowerThird.id = "ai-league-headline-event";
   lowerThird.setAttribute("aria-live", "polite");
@@ -456,7 +472,7 @@ function mountAiLeagueHeadlineEvent(
       .filter(
         (headline) =>
           headline.turnNumber <= detail.turnNumber &&
-          detail.turnNumber <= headline.turnNumber + 60,
+          detail.turnNumber <= headline.turnNumber + HEADLINE_VISIBLE_TURNS,
       )
       .sort(
         (a, b) =>
@@ -1237,16 +1253,25 @@ function mountAiLeagueDiplomacyStrip(
   };
   win.__aiLeagueDiplomacyCleanup?.();
   const directiveByName = latestDirectiveByPlayer(decisions);
+  // Frames fire every game tick; standings only change on ownership/diplomacy
+  // events. Skipping identical re-renders avoids per-tick innerHTML churn
+  // (layout + listener teardown) on the hottest spectator surface.
+  let lastRowsHtml = "";
   const onFrame = (event: Event) => {
     const detail = (event as CustomEvent<AiLeagueReplayFrameEventDetail>).detail;
     if (!detail || !Array.isArray(detail.players) || detail.players.length === 0) {
       return;
     }
-    container.innerHTML = diplomacyRowsHtml(
+    const rowsHtml = diplomacyRowsHtml(
       detail.players,
       detail.tick,
       directiveByName,
     );
+    if (rowsHtml === lastRowsHtml) {
+      return;
+    }
+    lastRowsHtml = rowsHtml;
+    container.innerHTML = rowsHtml;
   };
   document.addEventListener("ai-league-replay-frame", onFrame);
   win.__aiLeagueDiplomacyCleanup = () => {
@@ -1287,9 +1312,24 @@ function diplomacyRowsHtml(
     bySmallID.set(player.smallID, player);
     byPlayerID.set(player.playerID, player);
   }
-  const ranked = [...players].sort((a, b) => b.tilesOwned - a.tilesOwned);
-  return ranked
-    .map((player, index) => {
+  const rankedAll = [...players].sort((a, b) => b.tilesOwned - a.tilesOwned);
+  // Bots/tribes are frame players too — a bots>0 replay would otherwise flood
+  // the strip with dozens of rows. Cap to the contenders; the map tells the rest.
+  const STANDINGS_MAX_ROWS = 12;
+  const ranked = rankedAll.slice(0, STANDINGS_MAX_ROWS);
+  const hiddenCount = rankedAll.length - ranked.length;
+  const moreLine =
+    hiddenCount > 0
+      ? `<p class="ai-league-diplo-more">${escapeHtml(
+          translateText("ai_league_replay.standings_more").replace(
+            "{count}",
+            String(hiddenCount),
+          ),
+        )}</p>`
+      : "";
+  return (
+    ranked
+      .map((player, index) => {
       const share =
         totalTiles > 0
           ? Math.round((player.tilesOwned / totalTiles) * 100)
@@ -1314,8 +1354,9 @@ function diplomacyRowsHtml(
             ? `<p class="ai-league-directive"><b>${escapeHtml(translateText("ai_league_replay.directive_label"))}</b> ${escapeHtml(directive)}</p>`
             : ""
         }`;
-    })
-    .join("");
+      })
+      .join("") + moreLine
+  );
 }
 
 function diplomacyStancesHtml(

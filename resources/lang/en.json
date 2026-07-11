@@ -1041,7 +1041,7 @@
     "metric_moves": "Moves",
     "metric_invalid": "Invalid",
     "metric_recovered": "Recovered",
-    "setup_generic": "Proxy War agents vs built-in opposition",
+    "setup_generic": "Proxy War agents",
     "setup_turns": "{turns}-turn",
     "playstyle_label": "Plays mostly",
     "action_attack": "attack",
@@ -1083,7 +1083,8 @@
     "headline_first_strike": "{actor} strikes {target}",
     "headline_tag_betrayal": "Betrayal",
     "headline_tag_elimination": "Elimination",
-    "headline_tag_first_strike": "First strike"
+    "headline_tag_first_strike": "First strike",
+    "standings_more": "+{count} more"
   },
   "error_modal": {
     "crashed": "Game crashed!",
