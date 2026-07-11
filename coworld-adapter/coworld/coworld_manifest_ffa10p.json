@@ -2,7 +2,7 @@
   "$schema": "https://raw.githubusercontent.com/Metta-AI/coworld/main/src/coworld/coworld_manifest_schema.json",
   "game": {
     "name": "proxywar-ffa-10p",
-    "version": "0.0.2",
+    "version": "0.0.3",
     "description": "Hosted Proxy War Coworld 10-player FFA package (fixed 10 seats) that preserves the LegalAction.id decision path. Same image + memory-capped runner as the 4p/12p packages; adds Britannia to the map allowlist for a 5v5-scale medium-map FFA.",
     "owner": "proxywar",
     "runnable": {

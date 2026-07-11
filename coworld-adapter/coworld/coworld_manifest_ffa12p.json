@@ -2,7 +2,7 @@
   "$schema": "https://raw.githubusercontent.com/Metta-AI/coworld/main/src/coworld/coworld_manifest_schema.json",
   "game": {
     "name": "proxywar-ffa-12p",
-    "version": "0.0.3",
+    "version": "0.0.4",
     "description": "Hosted Proxy War Coworld 12-player FFA package (fixed 12 seats) that preserves the LegalAction.id decision path. The 12p rung of the proxywar-ffa fixed-size ladder (4p, 8p, 12p); each rung is a separate package because a Coworld declares exactly one fixed seat count. Ships the same curated multi-map rotation (8 large/medium maps) and game image as the other rungs.",
     "owner": "proxywar",
     "runnable": {
