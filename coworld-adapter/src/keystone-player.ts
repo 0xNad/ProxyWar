@@ -173,7 +173,10 @@ export async function loadKeystoneModules(
  * keeps intents — policies never see or emit raw intents), so intent is null
  * here and the brain selects purely by id/kind/risk/metadata.
  */
-export function requestToBrainInput(request: unknown): AgentBrainInput {
+export function requestToBrainInput(
+  request: unknown,
+  pinnedProfile?: AgentStrategyProfile,
+): AgentBrainInput {
   const record = request as {
     observation?: AgentObservation;
     legalActions?: Array<{
@@ -201,7 +204,19 @@ export function requestToBrainInput(request: unknown): AgentBrainInput {
     risk: action.risk ?? { level: "medium", score: 0.5 },
     metadata: action.metadata,
   }));
-  return { observation: record.observation, legalActions };
+  // Profile pin (v9 finding, 2026-07-12 A/B game2): the GAME side assigns a
+  // strategy profile per seat slot, so the same keystone build played
+  // "aggressive" in one slot and "diplomatic" in another — the Commander prompt
+  // and module weights key off observation.profile, silently rotating the
+  // agent's whole personality with its seat index. Keystone's stance is policy
+  // config, not game state: pin it to OUR configured profile so behavior is
+  // slot-invariant. Game state is untouched.
+  const observation =
+    pinnedProfile !== undefined &&
+    record.observation.profile !== pinnedProfile
+      ? { ...record.observation, profile: pinnedProfile }
+      : record.observation;
+  return { observation, legalActions };
 }
 
 export function decisionToResponse(
@@ -691,7 +706,7 @@ async function main(): Promise<void> {
       const startedAt = Date.now();
       let response: Record<string, unknown>;
       try {
-        const input = requestToBrainInput(message.request);
+        const input = requestToBrainInput(message.request, profile);
         const decision = await brain.decide(input);
         response = decisionToResponse(requestID, decision);
       } catch (error) {

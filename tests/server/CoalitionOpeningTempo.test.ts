@@ -97,6 +97,7 @@ function rival(over: Partial<AgentVisiblePlayer>): AgentVisiblePlayer {
 function coalitionObservation(
   visiblePlayers: AgentVisiblePlayer[],
   over: Partial<AgentObservation> = {},
+  turnNumber = 2500,
 ): AgentObservation {
   const base = new AgentObservationBuilder().build({
     agentID: "agent-1",
@@ -104,7 +105,7 @@ function coalitionObservation(
     username: "Keystone",
     profile: "aggressive",
     gameID: "COAL",
-    turnNumber: 2500,
+    turnNumber,
     phaseOverride: "active",
   });
   return {
@@ -238,6 +239,8 @@ describe("coalition (PROXYWAR_TUNE_COALITION)", () => {
 
   it("Commander prompt gains the COALITION MODE block exactly when the regime holds", async () => {
     process.env.PROXYWAR_TUNE_COALITION = "1";
+    // t2500 with a neutral expand offered = land grab live -> the block must
+    // forbid starting ANY war (leader included) and must never court the leader.
     const prompts: string[] = [];
     const provider: LlmProvider = {
       providerType: "codex-cli",
@@ -295,9 +298,74 @@ describe("coalition (PROXYWAR_TUNE_COALITION)", () => {
     expect(prompts.length).toBeGreaterThanOrEqual(1);
     expect(prompts[0]).toContain("COALITION MODE — RUNAWAY LEADER: Odin");
     expect(prompts[0]).toContain("IS the acceptance");
-    expect(prompts[0]).toContain("at the leader (LEADER) only");
+    expect(prompts[0]).toContain("NEVER request an alliance with the leader");
+    // Land grab live (t2500 + neutral offered): war on ANYONE is forbidden.
+    expect(prompts[0]).toContain("do NOT start a war now");
+    expect(prompts[0]).not.toContain("at the leader (LEADER) only");
     // Coalition suppresses the dominance window outright.
     expect(prompts[0]).not.toContain("DOMINANCE WINDOW");
+  });
+
+  it("after the land grab, the block aims all pressure at the leader", async () => {
+    process.env.PROXYWAR_TUNE_COALITION = "1";
+    const prompts: string[] = [];
+    const provider: LlmProvider = {
+      providerType: "codex-cli",
+      async complete(prompt: string): Promise<string> {
+        prompts.push(prompt);
+        return JSON.stringify({
+          objective: "pressure_rival",
+          turnIntent: "pressure",
+          rationale: "contain the leader",
+          maxDecisionCycles: 1,
+          preferredActionKinds: ["attack", "hold"],
+          enabledModules: ["combat", "defense", "economy"],
+          targetPlayerId: "LEADER",
+          tacticalSettings: {
+            reserveRatio: 0.35,
+            triggerRatio: 0.55,
+            expansionRatio: 0.15,
+            maxConcurrentWars: 1,
+            retreatThreshold: 0.35,
+            maxActionsPerDecision: 4,
+          },
+        });
+      },
+    };
+    const brain = new PlannerExecutorAgentBrain({
+      profile: "aggressive",
+      planner: new LlmAgentPlanner({
+        provider,
+        profile: "aggressive",
+        plannerType: "codex-cli",
+      }),
+      executor: new FrontierPolicyExecutor("aggressive"),
+      planEveryDecisionSteps: 3,
+    });
+    // t4000, no neutral growth offered: the pressure directive applies.
+    await brain.decide({
+      observation: coalitionObservation([leader(), minor()], {}, 4000),
+      legalActions: [
+        {
+          id: "attack:LEADER:25",
+          kind: "attack",
+          label: "Attack Odin with 25%",
+          intent: { type: "attack", targetID: "LEADER", troops: 100_000 },
+          risk: { level: "medium", score: 0.3 },
+          metadata: { targetID: "LEADER", sharesBorder: true },
+        },
+        {
+          id: "hold",
+          kind: "hold",
+          label: "Hold",
+          intent: null,
+          risk: { level: "none", score: 0 },
+        },
+      ],
+    });
+    expect(prompts.length).toBeGreaterThanOrEqual(1);
+    expect(prompts[0]).toContain("at the leader (LEADER) only");
+    expect(prompts[0]).not.toContain("do NOT start a war now");
   });
 });
 
@@ -487,24 +555,45 @@ describe("attack ladder (PROXYWAR_TUNE_ATTACK_LADDER, via war-mode strikes)", ()
       }),
     );
 
-  it("ladder ON: first exchange probes at 10%, second commits 25%, third+ kills at 40%", () => {
+  it("ladder never applies to an ACTIVE INVADER: max-commit defense regardless of flag", () => {
     process.env.PROXYWAR_TUNE_WAR_MODE = "1";
     process.env.PROXYWAR_TUNE_ATTACK_LADDER = "1";
+    // ENEMY is in incomingAttackPlayerIDs — answering a 40% invasion with a
+    // 10% probe is under-defense (v8 A/B games 1-2 fast collapses).
     expect(
       warModeCounterstrikeCandidate(
         { observation: invasion(0), legalActions: [] },
         strikes(),
       )?.action.id,
+    ).toBe("attack:ENEMY:40");
+  });
+
+  const duel = (recentAttacksOnEnemy: number): AgentObservation => {
+    const base = invasion(recentAttacksOnEnemy);
+    return {
+      ...base,
+      combat: { ...base.combat, incomingAttackPlayerIDs: [] },
+    };
+  };
+
+  it("ladder ON (duel regime, no incoming): 10% probe first, 25% second, 40% after", () => {
+    process.env.PROXYWAR_TUNE_WAR_MODE = "1";
+    process.env.PROXYWAR_TUNE_ATTACK_LADDER = "1";
+    expect(
+      warModeCounterstrikeCandidate(
+        { observation: duel(0), legalActions: [] },
+        strikes(),
+      )?.action.id,
     ).toBe("attack:ENEMY:10");
     expect(
       warModeCounterstrikeCandidate(
-        { observation: invasion(1), legalActions: [] },
+        { observation: duel(1), legalActions: [] },
         strikes(),
       )?.action.id,
     ).toBe("attack:ENEMY:25");
     expect(
       warModeCounterstrikeCandidate(
-        { observation: invasion(3), legalActions: [] },
+        { observation: duel(3), legalActions: [] },
         strikes(),
       )?.action.id,
     ).toBe("attack:ENEMY:40");
@@ -515,7 +604,7 @@ describe("attack ladder (PROXYWAR_TUNE_ATTACK_LADDER, via war-mode strikes)", ()
     delete process.env.PROXYWAR_TUNE_ATTACK_LADDER;
     expect(
       warModeCounterstrikeCandidate(
-        { observation: invasion(0), legalActions: [] },
+        { observation: duel(0), legalActions: [] },
         strikes(),
       )?.action.id,
     ).toBe("attack:ENEMY:40");

@@ -6249,7 +6249,17 @@ export function warModeCounterstrikeCandidate(
       // escalation step for that target (10% probe -> 25% -> 40% kill) instead
       // of always the largest — flat max-commit grinding never cracks a
       // defended core, and opening every exchange at 40% wastes the probe read.
-      if (attackLadderEnabled()) {
+      // v9 carve-out (A/B games 1-2 fast collapses): NEVER ladder against an
+      // ACTIVE INVADER — answering a 40% invasion with a 10% probe is weaker
+      // defense than v7's max-commit counter. The ladder applies only to
+      // proactive strikes (the endgame-duel leader), where probing first is
+      // information, not under-defense.
+      const invaders = observation.combat.incomingAttackPlayerIDs;
+      const ladderApplies =
+        attackLadderEnabled() &&
+        !invaders.includes(actionPlayerID(a.action) ?? "") &&
+        !invaders.includes(actionPlayerID(b.action) ?? "");
+      if (ladderApplies) {
         const desiredA = ladderDesiredTroopRatio(
           observation,
           actionPlayerID(a.action) ?? "",
@@ -21836,7 +21846,12 @@ function plannerPrompt(
       : []),
     ...(coalitionLeader !== null && coalitionLeader !== undefined
       ? [
-          `COALITION MODE — RUNAWAY LEADER: ${coalitionLeader.name} (${coalitionLeader.playerID}) holds ${pictureShare(coalitionLeader.tileShare)} of the map; we hold ${pictureShare(promptOwnShare)}. In an FFA the field contains the leader together or dies alone. RULES: (1) Do NOT attack the other non-leader players — every tile they lose feeds the leader's snowball; they are your buffer and your coalition. (2) ACCEPT their alliances: sending alliance_request to a player whose hasIncomingAllianceRequest is true IS the acceptance — alliances form on mutual request. Prefer allianceDirective {"stance":"seek_alliance","targetPlayerId":"<a non-leader id>"} to lock the coalition in. (3) Aim ALL pressure — and any commitment — at the leader (${coalitionLeader.playerID}) only.`,
+          `COALITION MODE — RUNAWAY LEADER: ${coalitionLeader.name} (${coalitionLeader.playerID}) holds ${pictureShare(coalitionLeader.tileShare)} of the map; we hold ${pictureShare(promptOwnShare)}. In an FFA the field contains the leader together or dies alone. RULES: (1) Do NOT attack the other non-leader players — every tile they lose feeds the leader's snowball; they are your buffer and your coalition. (2) ACCEPT their alliances: sending alliance_request to a player whose hasIncomingAllianceRequest is true IS the acceptance — alliances form on mutual request. Prefer allianceDirective {"stance":"seek_alliance","targetPlayerId":"<a non-leader id>"} to lock the coalition in. NEVER request an alliance with the leader — courting the player you must contain wastes the request and confuses the coalition. ${
+            input.observation.turnNumber <= 3_000 &&
+            decisionBrief.legalActionMix.neutralGrowthActionCount > 0
+              ? `(3) The land grab is still live: do NOT start a war now — not even against the leader; a premature charge at the strongest player is suicide. Secure alliances, keep expanding into neutral land, and out-grow them until the map is claimed or you are attacked.`
+              : `(3) Aim ALL pressure — and any commitment — at the leader (${coalitionLeader.playerID}) only.`
+          }`,
         ]
       : []),
     "If PLANNER_DECISION_BRIEF.plannerGuidance.recommendedControls.strength is must_follow, follow that objective/turnIntent/target/modules unless the full observation directly contradicts it.",
