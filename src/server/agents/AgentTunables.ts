@@ -276,6 +276,67 @@ export function warModeDuelCombinedShare(): number {
 }
 
 /**
+ * Coalition flag (keystone v8, operator directive 2026-07-12: "gang up on the
+ * leader"). Reads the EXACT env var `PROXYWAR_TUNE_COALITION` (A/B arms set
+ * "0"/"1"). DEFAULT OFF. Anti-runaway-leader balance-of-power play: when one
+ * rival's map share exceeds COALITION_LEADER_FLOOR and COALITION_LEADER_RATIO x
+ * our own, the Commander prompt gains a COALITION MODE block (do not attack
+ * non-leaders, accept their alliances, aim all pressure at the leader) and the
+ * executor gains one leaf: force-accept an incoming alliance request from a
+ * non-leader (acceptance = the counter alliance_request; core forms the
+ * alliance on mutual request, PlayerImpl.canSendAllianceRequest returns true
+ * exactly for this case). Arm together with WAR_MODE so the invaded case stays
+ * covered above this leaf. (A besieged-ally donation leaf was designed and
+ * removed pre-ship: no rival-under-siege signal exists in the observation yet.)
+ * Measured basis: in every analyzed loss the agent co-farmed the minors —
+ * feeding the leader both corpses — and ignored explicit coordinate-attack
+ * proposals from the third seat.
+ */
+export function coalitionEnabled(): boolean {
+  return tunedNumber("COALITION", 0) >= 1;
+}
+
+/** Coalition leader share floor (`PROXYWAR_TUNE_COALITION_LEADER_FLOOR`, default 0.18). */
+export function coalitionLeaderShareFloor(): number {
+  return Math.max(0.05, Math.min(0.6, tunedNumber("COALITION_LEADER_FLOOR", 0.18)));
+}
+
+/** Coalition leader ratio vs own share (`PROXYWAR_TUNE_COALITION_LEADER_RATIO`, default 1.15, clamped >= 1). */
+export function coalitionLeaderRatio(): number {
+  return Math.max(1, tunedNumber("COALITION_LEADER_RATIO", 1.15));
+}
+
+/**
+ * Opening-tempo flag (keystone v8, tempo forensics 2026-07-12). Reads the EXACT
+ * env var `PROXYWAR_TUNE_OPENING_TEMPO` (A/B arms set "0"/"1"). DEFAULT OFF.
+ * Measured: the agent's per-decision expand yield EQUALS the league leader's,
+ * but it spends only 7-9 of its first 17 decisions expanding (leader: 13-15) —
+ * boats and builds eat the slots and the tile deficit at t2000 decides games.
+ * When ON, during the opening window (turn <= 3000): the early neutral-island
+ * boat rush is skipped while a mainland neutral expand is offered, and — only
+ * with no incoming attacks — a multi-action batch whose primary is not an
+ * attack gets its best neutral land expand promoted to the wire primary.
+ * Survival/binding-directive singletons are structurally untouched (length-1
+ * batches are never reordered).
+ */
+export function openingTempoEnabled(): boolean {
+  return tunedNumber("OPENING_TEMPO", 0) >= 1;
+}
+
+/**
+ * Attack-ladder flag (keystone v8). Reads the EXACT env var
+ * `PROXYWAR_TUNE_ATTACK_LADDER` (A/B arms set "0"/"1"). DEFAULT OFF. The league
+ * leader escalates per target — 10% probe, 25%, then 40% kill commits — while
+ * keystone grinds a flat 25% that never cracks a defended core. When ON, the
+ * war-mode counterstrike prefers the offered attack whose troop commitment is
+ * closest to the ladder step for that target (0 prior consecutive attacks ->
+ * ~10%, 1 -> ~25%, 2+ -> ~40%) instead of always the largest commitment.
+ */
+export function attackLadderEnabled(): boolean {
+  return tunedNumber("ATTACK_LADDER", 0) >= 1;
+}
+
+/**
  * Economy-bootstrap minimum own tiles (`PROXYWAR_TUNE_ECONOMY_BOOTSTRAP_MIN_TILES`,
  * default 0 = shipped behavior). Opening-tempo forensics (2026-07-12): with the
  * bootstrap armed, the agent builds its first City at t400 with 52 tiles in every
