@@ -2705,18 +2705,6 @@ function selectFrontierActionBatch(input: {
   if (survivalPanicProbeRecovery !== undefined) {
     return [survivalPanicProbeRecovery];
   }
-  // Thin plan execution (v11, flag-gated): the Commander's named intent IS the
-  // decision — pressure-with-target attacks that target, growth expands.
-  // Survival recoveries above still pre-empt; undefined falls through to the
-  // binding directives and the full cascade unchanged.
-  const thinPlanExecution = thinPlanExecutionCandidate(
-    input.input,
-    plan,
-    scored,
-  );
-  if (thinPlanExecution !== undefined) {
-    return [thinPlanExecution];
-  }
   // Binding directive (P1 keystone): a decisive LLM commitment pre-empts every
   // tactical selector below. Survival selectors above intentionally still win.
   // Single-action batch: no social filler rides along with a kill-order.
@@ -2750,6 +2738,21 @@ function selectFrontierActionBatch(input: {
   );
   if (buildDirectiveAction !== undefined) {
     return [buildDirectiveAction];
+  }
+  // Thin plan execution (v11, flag-gated): the Commander's named intent IS the
+  // decision — pressure-with-target attacks that target, growth expands.
+  // Sits BELOW the three binding directives (reviewer finding B: commitment /
+  // alliance / build keep their documented precedence, so the prompt's "own
+  // the build cadence via buildDirective" guidance actually works) and BELOW
+  // the survival recoveries; the leaf itself stands down when the war-mode
+  // invasion regime is live. Undefined falls through to the cascade unchanged.
+  const thinPlanExecution = thinPlanExecutionCandidate(
+    input.input,
+    plan,
+    scored,
+  );
+  if (thinPlanExecution !== undefined) {
+    return [thinPlanExecution];
   }
   // Gold-pressure spend-down (K2, PROXYWAR_TUNE_GOLD_PRESSURE, default OFF): once
   // gold has sat above the effective pressure floor for >=2 consecutive decisions,
@@ -6196,10 +6199,10 @@ export function coalitionAllianceAcceptCandidate(
  *     target is not an active invader);
  *   - growth: the best offered mainland neutral expand.
  * Everything else (build/diplomacy/fortify/survive/naval) falls through to the
- * binding directives and the cascade. Returns offered `LegalAction.id`s only.
- * Sits BELOW the survival recoveries (they still pre-empt) and ABOVE the
- * binding-directive leaves — when the Commander names a target, that IS the
- * decision.
+ * cascade. Returns offered `LegalAction.id`s only. Sits BELOW the survival
+ * recoveries AND the three binding directives (commitment/alliance/build keep
+ * their documented precedence), and stands down entirely while the war-mode
+ * invasion regime is live so the counterstrike defense stays reachable.
  */
 export function thinPlanExecutionCandidate(
   input: AgentBrainInput,
@@ -6210,6 +6213,14 @@ export function thinPlanExecutionCandidate(
     return undefined;
   }
   const observation = input.observation;
+  // Invasion carve-out (reviewer finding A): the survival recoveries above are
+  // plan-intent-gated and do NOT cover invasion-at-parity — with thin armed, a
+  // growth plan during an invasion would mask the proven war-mode defense
+  // below every cycle. When the war-mode regime is live, this leaf stands down
+  // entirely so the counterstrike stays reachable.
+  if (warModeInvaderIDs(observation).size > 0) {
+    return undefined;
+  }
   if (plan.turnIntent === "growth") {
     return scored
       .filter(
@@ -22016,7 +22027,7 @@ function plannerPrompt(
     "END_CURRENT_CONTROL_DIRECTIVE",
     ...(thinExecutorEnabled()
       ? [
-          "THIN EXECUTOR ACTIVE: the executor executes YOUR named intent each cycle with minimal reinterpretation — a pressure plan with a targetPlayerId attacks that target every decision it legally can; a growth plan expands into neutral land. That makes your target choice the whole game: name it precisely, update it the moment the situation changes, and own the build cadence yourself (emit buildDirective when economy or deterrence needs a turn) and diplomacy (allianceDirective).",
+          "THIN EXECUTOR ACTIVE: the executor executes YOUR named intent each cycle with minimal reinterpretation — a pressure plan with a targetPlayerId attacks that target every decision it legally can; a growth plan expands into neutral land. Your binding directives (commitment, allianceDirective, buildDirective) always pre-empt the named intent, and invasion defense pre-empts everything. That makes your target choice the whole game: name it precisely, update it the moment the situation changes, and own the build cadence yourself (emit buildDirective when economy or deterrence needs a turn) and diplomacy (allianceDirective).",
         ]
       : []),
     "Choose one objective from: choose_spawn, expand_territory, secure_economy, fortify_border, pressure_rival, build_alliance, survive.",

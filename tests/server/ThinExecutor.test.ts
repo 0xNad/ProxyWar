@@ -201,6 +201,42 @@ describe("thin executor (PROXYWAR_TUNE_THIN_EXECUTOR)", () => {
     ).toBeUndefined();
   });
 
+  it("stands down during an active invasion (war-mode defense stays reachable)", () => {
+    process.env.PROXYWAR_TUNE_THIN_EXECUTOR = "1";
+    process.env.PROXYWAR_TUNE_WAR_MODE = "1";
+    const base = observation();
+    const invaded: AgentObservation = {
+      ...base,
+      ownState: { ...base.ownState!, tilesOwned: 90_000 },
+      combat: { ...base.combat, incomingAttackPlayerIDs: ["RAIDER"] },
+      memory: {
+        ...base.memory,
+        recentActions: [
+          {
+            sequence: 1,
+            actionID: "hold",
+            actionKind: "hold",
+            reason: "hold",
+            accepted: true,
+            ownTiles: 100_000, // 10% recent loss => invasion regime live
+          },
+        ],
+      },
+    };
+    expect(
+      thinPlanExecutionCandidate(
+        { observation: invaded, legalActions: [] },
+        plan("growth", null),
+        [
+          ranked("expand:terra-nullius:20", "attack", 40, {
+            metadata: { expansion: true },
+          }),
+        ],
+      ),
+    ).toBeUndefined();
+    delete process.env.PROXYWAR_TUNE_WAR_MODE;
+  });
+
   it("other intents fall through (build/diplomacy stay with the directives)", () => {
     process.env.PROXYWAR_TUNE_THIN_EXECUTOR = "1";
     expect(
