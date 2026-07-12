@@ -190,3 +190,41 @@ export function diplomacySlotsEnabled(): boolean {
 export function diplomacyReservedSlots(): number {
   return Math.max(1, Math.min(24, tunedNumber("DIPLOMACY_RESERVE", 8)));
 }
+
+/**
+ * Dominance-conversion flag (keystone v6, league-loss analysis 2026-07-12). Reads the
+ * EXACT env var `PROXYWAR_TUNE_DOMINANCE_CONVERSION` (A/B arms set "0"/"1"). DEFAULT
+ * OFF — ships inert and is armed via the pod env after hosted A/B. Fixes the measured
+ * Commander inertia (league R.189: 223 expand_territory orders vs 11 pressure_rival
+ * while holding a winning share; hostile options offered every endgame decision): the
+ * growth control gate fires whenever ANY neutral land remains, with no share cap, so a
+ * dominant agent is told to keep expanding into neutral instead of eliminating rivals.
+ * When ON, the planner brief derives a STRATEGIC_PICTURE line for every plan and, when
+ * the agent's tile share exceeds DOMINANCE_RATIO x the strongest bordered rival's (and
+ * the share floor, with home danger not high and an attackable bordered rival), emits a
+ * strong-hint pressure_rival control + a DOMINANCE WINDOW prompt block asking for a
+ * binding commitment. Prompt/controls only: no executor scoring, ranking, or safety
+ * change, and no new action source — the Commander still owns the strategy call.
+ */
+export function dominanceConversionEnabled(): boolean {
+  return tunedNumber("DOMINANCE_CONVERSION", 0) >= 1;
+}
+
+/**
+ * Dominance ratio (`PROXYWAR_TUNE_DOMINANCE_RATIO`, default 1.3): own tile share must
+ * be at least this multiple of the strongest bordered non-allied rival's share for the
+ * dominance window to open. Clamped to >= 1 so the window can never open from behind.
+ */
+export function dominanceConversionRatio(): number {
+  return Math.max(1, tunedNumber("DOMINANCE_RATIO", 1.3));
+}
+
+/**
+ * Dominance share floor (`PROXYWAR_TUNE_DOMINANCE_SHARE_FLOOR`, default 0.12): minimum
+ * own tile share before the dominance window can open, so early spawn-phase noise (a
+ * 2% share "dominating" a 1% neighbor) never triggers conversion before a base exists.
+ * Sits deliberately above the BASE_TILESHARE_FLOOR must-follow expansion gate (0.1).
+ */
+export function dominanceConversionShareFloor(): number {
+  return Math.max(0, tunedNumber("DOMINANCE_SHARE_FLOOR", 0.12));
+}

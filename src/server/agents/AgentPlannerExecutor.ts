@@ -19,6 +19,9 @@ import {
   directiveBuildEnabled,
   directiveCommitmentEnabled,
   directiveDiplomacyEnabled,
+  dominanceConversionEnabled,
+  dominanceConversionRatio,
+  dominanceConversionShareFloor,
   economyBootstrapEnabled,
   enforceConversionOverNeutralEnabled,
   goldPressureEnabled,
@@ -20664,6 +20667,126 @@ function actionTargetsPlayer(action: LegalAction, playerID: string): boolean {
   );
 }
 
+/**
+ * Dominance-conversion window (keystone v6, PROXYWAR_TUNE_DOMINANCE_CONVERSION).
+ * Open when the agent's tile share is at least DOMINANCE_RATIO x the strongest
+ * bordered non-allied rival's share (and above the share floor) while an attackable
+ * bordered rival exists. Target = the WEAKEST attackable bordered rival by tile
+ * share (fastest elimination; kill-confirmation logic), tie-broken by fewer troops.
+ * Derivation only — consumed by the control gate and the prompt, never by executor
+ * scoring, so the flag OFF path is byte-identical to shipped behavior.
+ */
+interface PlannerDominanceWindow {
+  ownTileShare: number;
+  strongestBorderedRivalShare: number;
+  strongestBorderedRivalName: string;
+  targetPlayerId: string;
+  targetName: string;
+  targetTileShare: number;
+  /** Own troops / target troops (>= 1 means the agent is stronger). */
+  targetRelativeTroopRatio: number | null;
+}
+
+function plannerDominanceWindow(
+  observation: AgentObservation,
+  homeDanger: string,
+): PlannerDominanceWindow | null {
+  if (!dominanceConversionEnabled() || homeDanger === "high") {
+    return null;
+  }
+  if (observation.phase === "spawn") {
+    return null;
+  }
+  const ownTileShare =
+    observation.ownState?.tileShare ?? observation.endgame?.ownTileShare ?? 0;
+  if (ownTileShare < dominanceConversionShareFloor()) {
+    return null;
+  }
+  const borderedRivals = observation.visiblePlayers.filter(
+    (player) =>
+      player.isAlive === true &&
+      player.sharesBorder === true &&
+      player.isAllied !== true,
+  );
+  if (borderedRivals.length === 0) {
+    return null;
+  }
+  const strongest = borderedRivals.reduce((best, player) =>
+    (player.tileShare ?? 0) > (best.tileShare ?? 0) ? player : best,
+  );
+  if (ownTileShare < dominanceConversionRatio() * (strongest.tileShare ?? 0)) {
+    return null;
+  }
+  const attackable = borderedRivals.filter(
+    (player) => player.canAttack === true,
+  );
+  if (attackable.length === 0) {
+    return null;
+  }
+  const target = attackable.reduce((best, player) => {
+    const bestShare = best.tileShare ?? 0;
+    const share = player.tileShare ?? 0;
+    if (share !== bestShare) {
+      return share < bestShare ? player : best;
+    }
+    return (player.troops ?? 0) < (best.troops ?? 0) ? player : best;
+  });
+  return {
+    ownTileShare,
+    strongestBorderedRivalShare: strongest.tileShare ?? 0,
+    // Rival display names are untrusted free text; the window is serialized into
+    // the planner prompt (brief JSON + DOMINANCE block), so sanitize at the source.
+    strongestBorderedRivalName: sanitizeUntrustedDisplayString(
+      strongest.name,
+      40,
+    ),
+    targetPlayerId: target.playerID,
+    targetName: sanitizeUntrustedDisplayString(target.name, 40),
+    targetTileShare: target.tileShare ?? 0,
+    targetRelativeTroopRatio: target.relativeTroopRatio ?? null,
+  };
+}
+
+/** Percent formatting for the strategic-picture prompt line ("34%", "0.8%"). */
+function pictureShare(share: number | null | undefined): string {
+  const value = (share ?? 0) * 100;
+  return `${value >= 10 ? Math.round(value) : Math.round(value * 10) / 10}%`;
+}
+
+/**
+ * STRATEGIC_PICTURE — one derived plain-English situation line per plan (keystone
+ * v6). The raw numbers were always in the observation JSON; this surfaces the
+ * comparative read ("we hold X%, border Y who has only Z%") that league evidence
+ * shows the Commander otherwise fails to derive under a growth-hint directive.
+ */
+function plannerStrategicPicture(observation: AgentObservation): string | null {
+  if (!dominanceConversionEnabled() || observation.phase === "spawn") {
+    return null;
+  }
+  const ownTileShare =
+    observation.ownState?.tileShare ?? observation.endgame?.ownTileShare ?? 0;
+  const bordered = observation.visiblePlayers
+    .filter((player) => player.isAlive === true && player.sharesBorder === true)
+    .sort((a, b) => (b.tileShare ?? 0) - (a.tileShare ?? 0))
+    .slice(0, 5);
+  const rivalSummaries = bordered.map((player) => {
+    const ratio = player.relativeTroopRatio;
+    const troopNote =
+      ratio === undefined || ratio === null
+        ? ""
+        : `, our troops ${ratio.toFixed(2)}x theirs`;
+    const allianceNote = player.isAllied === true ? ", ALLIED" : "";
+    return `${sanitizeUntrustedDisplayString(player.name, 40)} holds ${pictureShare(
+      player.tileShare,
+    )}${troopNote}${allianceNote}`;
+  });
+  const borderText =
+    rivalSummaries.length > 0
+      ? `Bordered players (largest first): ${rivalSummaries.join("; ")}.`
+      : "No bordered rivals are visible.";
+  return `We hold ${pictureShare(ownTileShare)} of the map at turn ${observation.turnNumber}. ${borderText}`;
+}
+
 function plannerDecisionBrief(
   input: AgentBrainInput,
   previousPlan: StrategicPlan | null,
@@ -20712,6 +20835,7 @@ function plannerDecisionBrief(
     buildActions.length === 0 &&
     (previousPlan?.objective === "secure_economy" ||
       observation.strategic.priority === "build_economy");
+  const dominanceWindow = plannerDominanceWindow(observation, homeDanger);
   const recommendedControls = plannerRecommendedControls({
     observation,
     neutralGrowthActionCount: neutralGrowthActions.length,
@@ -20721,6 +20845,7 @@ function plannerDecisionBrief(
     buildActionCount: buildActions.length,
     economicBuildActionCount: economicBuildActions.length,
     homeDanger,
+    dominanceWindow,
   });
 
   return {
@@ -20826,6 +20951,9 @@ function plannerDecisionBrief(
     },
     plannerGuidance: {
       recommendedControls,
+      // Conditional spread: the brief is JSON.stringify'd into the prompt, and a
+      // null-valued key would break flag-OFF byte-identity with shipped prompts.
+      ...(dominanceWindow !== null ? { dominanceWindow } : {}),
       recommendedPosture: plannerPostureHints({
         observation,
         growthSafe,
@@ -20859,6 +20987,7 @@ function plannerRecommendedControls(input: {
   buildActionCount: number;
   economicBuildActionCount: number;
   homeDanger: string;
+  dominanceWindow: PlannerDominanceWindow | null;
 }) {
   const ownTileShare =
     input.observation.ownState?.tileShare ??
@@ -20952,6 +21081,27 @@ function plannerRecommendedControls(input: {
       maxDecisionCycles: 1,
       reason:
         "low-share hard-nation run has legal economic build after sustained expansion; take economy before attack loop repeats",
+    };
+  }
+  // Dominance conversion (keystone v6, flag-gated): when the agent is the clearly
+  // strongest bordered power, "neutral land remains" is no longer a reason to keep
+  // growing — the measured league failure mode is a dominant agent expanding into
+  // neutral for hundreds of decisions while rivals recover (R.189). Fires ABOVE the
+  // growth hint and BELOW spawn/survive/base-floor/pressure-ready/economy-window, so
+  // proven opening and economy discipline is untouched. Strong hint, not must_follow:
+  // the Commander owns the strategy call (2026-06-19 lesson) — the binding teeth come
+  // from the commitment the DOMINANCE WINDOW prompt block asks it to emit.
+  if (input.dominanceWindow !== null && input.homeDanger !== "high") {
+    return {
+      strength: "strong_hint",
+      objective: "pressure_rival",
+      turnIntent: "pressure",
+      targetPlayerId: input.dominanceWindow.targetPlayerId,
+      preferredActionKinds: ["attack", "target_player", "embargo", "hold"],
+      enabledModules: ["combat", "defense", "economy"],
+      maxDecisionCycles: 1,
+      reason:
+        "dominance window open: we are the strongest bordered power; convert the lead into eliminations instead of neutral growth",
     };
   }
   if (input.neutralGrowthActionCount > 0 && input.homeDanger !== "high") {
@@ -21192,19 +21342,41 @@ function plannerPrompt(
   decisionBrief = plannerDecisionBrief(input, previousPlan),
   playerDoctrine = "",
 ): string {
+  const strategicPicture = plannerStrategicPicture(input.observation);
+  const dominanceWindow = decisionBrief.plannerGuidance.dominanceWindow;
   return [
     "You are the slow planner for an AI Nations League agent.",
     "Return JSON only. Do not select a LegalAction.id and do not output game intents.",
     UNTRUSTED_DISPLAY_RULE,
     "Read PLANNER_DECISION_BRIEF first. It is the compact tactical summary; use the full observation only to verify details.",
+    ...(strategicPicture !== null
+      ? [`STRATEGIC_PICTURE: ${strategicPicture}`]
+      : []),
+    ...(dominanceWindow !== null && dominanceWindow !== undefined
+      ? [
+          `DOMINANCE WINDOW OPEN: we hold ${pictureShare(dominanceWindow.ownTileShare)} of the map — the strongest bordered rival (${dominanceWindow.strongestBorderedRivalName}) holds only ${pictureShare(dominanceWindow.strongestBorderedRivalShare)}. Games are won by eliminating rivals, not by owning neutral land; neutral expansion from a dominant position forfeits tempo and lets rivals recover. Unless the full observation shows a real survival threat, set objective=pressure_rival and turnIntent=pressure on ${dominanceWindow.targetName} (targetPlayerId ${dominanceWindow.targetPlayerId}, ${pictureShare(dominanceWindow.targetTileShare)} of the map${
+            dominanceWindow.targetRelativeTroopRatio !== null
+              ? `, our troops ${dominanceWindow.targetRelativeTroopRatio.toFixed(2)}x theirs`
+              : ""
+          })${
+            directiveCommitmentEnabled()
+              ? ", and add a binding commitment on that target so the executor sustains the attack instead of drifting back to neutral growth"
+              : ""
+          }.`,
+        ]
+      : []),
     "If PLANNER_DECISION_BRIEF.plannerGuidance.recommendedControls.strength is must_follow, follow that objective/turnIntent/target/modules unless the full observation directly contradicts it.",
     "CURRENT_CONTROL_DIRECTIVE:",
     plannerControlDirective(decisionBrief.plannerGuidance.recommendedControls),
     "END_CURRENT_CONTROL_DIRECTIVE",
     "Choose one objective from: choose_spawn, expand_territory, secure_economy, fortify_border, pressure_rival, build_alliance, survive.",
     "Choose one turnIntent from: spawn, growth, build, fortify, pressure, survive, diplomacy, naval. turnIntent is the category the executor should prioritize this cycle if a matching legal action is safe.",
-    "Treat tacticalAffordances as executor-readiness signals, not generic encouragement to fight. Keep growth/build/fortify unless a pressure affordance is explicitly ready.",
-    "Only switch from growth to pressure for frontierConversionTiming when recommended=true, executorReady=true, bestExecutorReadyTargetID is present, and homeDanger is not high. Otherwise keep growth or economy tempo.",
+    dominanceWindow !== null && dominanceWindow !== undefined
+      ? "Treat tacticalAffordances as executor-readiness signals, not generic encouragement to fight. Keep growth/build/fortify unless a pressure affordance is explicitly ready or the DOMINANCE WINDOW above is open."
+      : "Treat tacticalAffordances as executor-readiness signals, not generic encouragement to fight. Keep growth/build/fortify unless a pressure affordance is explicitly ready.",
+    dominanceWindow !== null && dominanceWindow !== undefined
+      ? "Only switch from growth to pressure for frontierConversionTiming when recommended=true, executorReady=true, bestExecutorReadyTargetID is present, and homeDanger is not high — OR when the DOMINANCE WINDOW above is open, which justifies pressure on its own. Otherwise keep growth or economy tempo."
+      : "Only switch from growth to pressure for frontierConversionTiming when recommended=true, executorReady=true, bestExecutorReadyTargetID is present, and homeDanger is not high. Otherwise keep growth or economy tempo.",
     "Only switch to finish pressure when frontierFinishPressure.recommended=true and decisiveAttackActionCount is positive. Avoid repeated 10% probes when no decisive executor-ready attack exists.",
     "For growth/economy plans, set targetPlayerId to null unless the brief says a specific target is needed now.",
     "For safe opening growth, do not enable diplomacy unless a specific alliance is needed for survival or the objective is build_alliance.",
