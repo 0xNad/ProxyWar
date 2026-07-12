@@ -100,6 +100,10 @@ export interface AgentVisiblePlayer {
   incomingAttack: boolean;
   hasOutgoingAllianceRequest: boolean;
   hasIncomingAllianceRequest: boolean;
+  /** This rival has ANY live incoming attack (from anyone — not agent-relative
+   *  like `incomingAttack`). The coalition "leader's victim" support signal.
+   *  Omitted when false (additive, wire-compatible). */
+  underSiege?: boolean;
   allianceExpiresAt?: number;
   allianceInExtensionWindow?: boolean;
   relativeTroopRatio?: number;

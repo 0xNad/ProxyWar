@@ -22011,6 +22011,7 @@ function plannerPrompt(
         canStopEmbargo: player.canStopEmbargo,
         incomingAttack: player.incomingAttack,
         outgoingAttack: player.outgoingAttack,
+        ...(player.underSiege === true ? { underSiege: true } : {}),
         canDonateGold: player.canDonateGold,
         canDonateTroops: player.canDonateTroops,
         canTarget: player.canTarget,

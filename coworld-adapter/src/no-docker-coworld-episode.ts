@@ -859,14 +859,23 @@ async function runProxyWarEpisode(
     maxCandidates: 1000,
     stride: 2,
   });
-  const profiles = ["aggressive", "defensive", "diplomatic", "opportunistic"];
+  // Uniform seat profile (proxywar 0.1.6, fairness fix 2026-07-12): the old
+  // per-index rotation ["aggressive","defensive","diplomatic","opportunistic"]
+  // silently gave every policy a different personality depending on its seat
+  // slot — the profile shapes the game-side observation stream (strategic
+  // priorities, objectives, posture hints), so the same policy played
+  // measurably differently in slot 0 vs slot 2 in every league round and every
+  // A/B (verified across 3 keystone builds). All competitive seats now get the
+  // same neutral profile; skill differences come from the POLICIES, not from
+  // which chair they drew.
+  const uniformProfile = "opportunistic";
   const usernames = proxyWarUsernames(
     config.players,
     modules.proxyWarGameUsernameMaxLength ?? 27,
   );
   const specs = config.players.map((_player, index) => ({
     username: usernames[index],
-    profile: profiles[index % profiles.length],
+    profile: uniformProfile,
     persistentID: randomUUID(),
   }));
   const participants = modules.createAgentParticipants(specs, log, {
