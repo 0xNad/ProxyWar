@@ -63,6 +63,9 @@ function visibleRival(over: Partial<AgentVisiblePlayer>): AgentVisiblePlayer {
 function dominantObservation(
   visiblePlayers: AgentVisiblePlayer[],
   ownTileShare = 0.3,
+  // Past the 3,000-turn opening window by default: the v7 land-grab guard keeps
+  // the window closed while the opening is live AND neutral growth is offered.
+  turnNumber = 4000,
 ): AgentObservation {
   const base = new AgentObservationBuilder().build({
     agentID: "agent-1",
@@ -70,7 +73,7 @@ function dominantObservation(
     username: "Keystone",
     profile: "aggressive",
     gameID: "DOM",
-    turnNumber: 2000,
+    turnNumber,
     phaseOverride: "active",
   });
   return {
@@ -316,5 +319,83 @@ describe("dominance conversion (PROXYWAR_TUNE_DOMINANCE_CONVERSION)", () => {
       ]),
     );
     expect(prompt).not.toContain("DOMINANCE WINDOW");
+  });
+
+  it("land-grab guard (v7): mid-opening with neutral growth offered, the window stays closed even when dominant", async () => {
+    process.env[FLAG] = "1";
+    // Game2 regression: dominant at t1500 with the land grab live must NOT open
+    // the window — an unprovoked war forfeits the opening tempo.
+    const prompt = await capturePrompt(
+      dominantObservation([strongRival(), weakRival()], 0.3, 1500),
+    );
+    expect(prompt).toContain("STRATEGIC_PICTURE");
+    expect(prompt).not.toContain("DOMINANCE WINDOW");
+    expect(prompt).toContain("STRONG HINT: objective=expand_territory");
+  });
+
+  it("land-grab guard (v7): mid-opening with NO neutral growth offered, the window opens", async () => {
+    process.env[FLAG] = "1";
+    const observation = dominantObservation(
+      [strongRival(), weakRival()],
+      0.3,
+      1500,
+    );
+    const prompts: string[] = [];
+    const provider = {
+      providerType: "codex-cli" as const,
+      async complete(prompt: string): Promise<string> {
+        prompts.push(prompt);
+        return JSON.stringify({
+          objective: "pressure_rival",
+          turnIntent: "pressure",
+          rationale: "convert",
+          maxDecisionCycles: 1,
+          preferredActionKinds: ["attack", "hold"],
+          enabledModules: ["combat", "defense", "economy"],
+          targetPlayerId: "WEAK01",
+          tacticalSettings: {
+            reserveRatio: 0.35,
+            triggerRatio: 0.55,
+            expansionRatio: 0.15,
+            maxConcurrentWars: 1,
+            retreatThreshold: 0.35,
+            maxActionsPerDecision: 4,
+          },
+        });
+      },
+    };
+    const brain = new PlannerExecutorAgentBrain({
+      profile: "aggressive",
+      planner: new LlmAgentPlanner({
+        provider,
+        profile: "aggressive",
+        plannerType: "codex-cli",
+      }),
+      executor: new FrontierPolicyExecutor("aggressive"),
+      planEveryDecisionSteps: 3,
+    });
+    // No expand:terra-nullius offered — neutral land is exhausted locally.
+    await brain.decide({
+      observation,
+      legalActions: [
+        {
+          id: "attack:WEAK01:25",
+          kind: "attack",
+          label: "Attack Weakling with 25%",
+          intent: { type: "attack", targetID: "WEAK01", troops: 100_000 },
+          risk: { level: "medium", score: 0.3 },
+          metadata: { targetID: "WEAK01", sharesBorder: true },
+        },
+        {
+          id: "hold",
+          kind: "hold",
+          label: "Hold",
+          intent: null,
+          risk: { level: "none", score: 0 },
+        },
+      ],
+    });
+    expect(prompts.length).toBeGreaterThanOrEqual(1);
+    expect(prompts[0]).toContain("DOMINANCE WINDOW OPEN");
   });
 });

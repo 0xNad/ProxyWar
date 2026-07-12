@@ -23,12 +23,17 @@ import {
   dominanceConversionRatio,
   dominanceConversionShareFloor,
   economyBootstrapEnabled,
+  economyBootstrapMinTiles,
   enforceConversionOverNeutralEnabled,
   goldPressureEnabled,
   goldPressureFloor,
   goldPressureMirvBankFloor,
+  primaryArgmaxEnabled,
   tunedNumber,
   upgradeVisibilityEnabled,
+  warModeDuelCombinedShare,
+  warModeEnabled,
+  warModeMinStrikeRatio,
 } from "./AgentTunables";
 import {
   sanitizeUntrustedDisplayString,
@@ -1357,6 +1362,18 @@ export class FrontierPolicyExecutor implements AgentExecutor {
         }
       }
     }
+    // Wire-primary argmax (v7, flag-gated): reorder so the best-scored promotable
+    // action leads the batch — on single-action wires only the primary executes.
+    // Applied after every selector so batch membership is already final.
+    let primaryArgmaxText = "";
+    if (primaryArgmaxEnabled() && selectedBatch.length > 1) {
+      const before = selectedBatch[0]!;
+      const reordered = promoteArgmaxPrimary(selectedBatch);
+      if (reordered[0] !== before) {
+        primaryArgmaxText = ` primaryArgmax=promoted(${reordered[0]!.action.kind}/${reordered[0]!.totalScore} over ${before.action.kind}/${before.totalScore})`;
+        selectedBatch = reordered;
+      }
+    }
     const selected = selectedBatch[0] ?? scored[0];
     const profileRepairRerank = profileRepairRerankAudit(scored, selectedBatch);
     const topContributions = selectedBatch
@@ -1394,6 +1411,17 @@ export class FrontierPolicyExecutor implements AgentExecutor {
       selectedBatch[0] === goldPressurePick
         ? ` goldPressure=spend-down(gold=${parsedObservedGold(input.observation) ?? "?"}>floor=${effectiveGoldPressureFloor(input.observation)},streak=${this.goldPressureRichStreak})`
         : "";
+    // War-mode audit trail (v7): when the forced counterstrike IS the selected
+    // single action, say so in the reason. Recomputed pure (same inputs as the
+    // cascade leaf) and compared by identity; empty string whenever the flag is
+    // off or a different action was selected — reason stays byte-identical.
+    const warModePick = warModeCounterstrikeCandidate(input, scored);
+    const warModeText =
+      warModePick !== undefined &&
+      selectedBatch.length === 1 &&
+      selectedBatch[0] === warModePick
+        ? ` warMode=counterstrike(target=${actionPlayerID(warModePick.action) ?? "?"})`
+        : "";
     const holdReasonCategory = holdReasonCategoryForSelected({
       selected,
       input,
@@ -1404,7 +1432,7 @@ export class FrontierPolicyExecutor implements AgentExecutor {
       ...(selectedBatch.length > 1
         ? { actionIDs: selectedBatch.map((candidate) => candidate.action.id) }
         : {}),
-      reason: `Frontier module scheduler queued ${selectedBatch.length} action(s), primary ${selected.action.label} total=${selected.totalScore} schedule=${topContributions}${skillText}${penalties}${contextText}${goldPressureText}`,
+      reason: `Frontier module scheduler queued ${selectedBatch.length} action(s), primary ${selected.action.label} total=${selected.totalScore} schedule=${topContributions}${skillText}${penalties}${contextText}${goldPressureText}${warModeText}${primaryArgmaxText}`,
       planFollowed: selectedBatch.some((candidate) =>
         actionAlignsPlan(candidate.action, plan),
       ),
@@ -2226,6 +2254,10 @@ function economyBootstrapBankingActive(
 ): boolean {
   return (
     economyBootstrapEnabled() &&
+    // Opening-tempo guard (v7): the whole bootstrap sleeps until the agent owns a
+    // real land base, so the first City stops pre-empting the t400-2000 land grab
+    // (default 0 keeps shipped behavior; the pod env arms a threshold).
+    (observation.ownState?.tilesOwned ?? 0) >= economyBootstrapMinTiles() &&
     economyBootstrapCascadeIncomplete(observation) &&
     !incomingHomePressure(observation)
   );
@@ -2516,6 +2548,56 @@ function backstabAllyBreakCandidate(
   )[0];
 }
 
+/**
+ * Wire-primary argmax reorder (v7, PROXYWAR_TUNE_PRIMARY_ARGMAX — pure; exported
+ * for tests; the flag check lives at the call site). The scheduler's batch primary
+ * is chosen by module rotation, which single-action wire runtimes turn into a
+ * systematic error: only the primary executes, so a score-9 neutral expand ships
+ * while a score-100 defensive build rides the batch and is dropped (measured 28/40
+ * decisions in one hosted game). Reorders the batch so the highest-scored
+ * PROMOTABLE candidate leads. Deliberately narrow:
+ *   - promotable kinds: attack / boat / build / upgrade_structure / warship —
+ *     never diplomacy, social, or nuke (cross-module scores are not calibrated
+ *     against these, and nukes keep their own strategic gate);
+ *   - a deliberate combat primary (non-expansion conquest action) is never
+ *     displaced by a DIFFERENT combat action — target choice is intentional;
+ *   - promotion requires a STRICTLY higher totalScore.
+ * Batch membership is unchanged — this reorders only.
+ */
+export function promoteArgmaxPrimary(
+  batch: readonly FrontierRankedAction[],
+): FrontierRankedAction[] {
+  if (batch.length < 2) {
+    return [...batch];
+  }
+  const primary = batch[0]!;
+  const promotableKinds = new Set([
+    "attack",
+    "boat",
+    "build",
+    "upgrade_structure",
+    "warship",
+  ]);
+  const isCombatConquest = (action: LegalAction) =>
+    isDirectConquestAction(action) && action.kind !== "nuke";
+  const top = batch
+    .filter((candidate) => promotableKinds.has(candidate.action.kind))
+    .sort(
+      (a, b) =>
+        b.totalScore - a.totalScore || a.action.id.localeCompare(b.action.id),
+    )[0];
+  if (top === undefined || top === primary) {
+    return [...batch];
+  }
+  if (top.totalScore <= primary.totalScore) {
+    return [...batch];
+  }
+  if (isCombatConquest(primary.action) && isCombatConquest(top.action)) {
+    return [...batch];
+  }
+  return [top, ...batch.filter((candidate) => candidate !== top)];
+}
+
 function selectFrontierActionBatch(input: {
   input: AgentBrainInput;
   plan: StrategicPlan;
@@ -2654,6 +2736,20 @@ function selectFrontierActionBatch(input: {
   const backstabAllyBreak = backstabAllyBreakCandidate(input.input, scored);
   if (backstabAllyBreak !== undefined) {
     return [backstabAllyBreak];
+  }
+  // War mode (v7, PROXYWAR_TUNE_WAR_MODE, default OFF): under invasion-and-shrinking
+  // or an endgame duel with the leader, force the best offered counterstrike on the
+  // actual aggressor/leader at the relaxed WAR_MIN_RATIO floor. Sits BELOW survival
+  // recoveries and every binding directive (those still win) and ABOVE FM-2a — the
+  // invader outranks the juiciest bystander target. Single-action batch: the
+  // counterstrike IS this cycle's decision. No-op when the flag is off or neither
+  // regime holds.
+  const warModeCounterstrike = warModeCounterstrikeCandidate(
+    input.input,
+    scored,
+  );
+  if (warModeCounterstrike !== undefined) {
+    return [warModeCounterstrike];
   }
   // FM-2a ("trade or die"): when behind-and-falling, force the single best
   // controlled strike before the neutral-territory / banking / hold paths below,
@@ -5836,6 +5932,121 @@ function isBehindAndFalling(
   return (
     recentOwnTileLossRatio(observation, ownState.tilesOwned ?? 0) >= minLossRatio
   );
+}
+
+/**
+ * War-mode triggers (v7, PROXYWAR_TUNE_WAR_MODE — 4-game hosted forensics
+ * 2026-07-12). Two measured regimes where every attack gate stayed shut while the
+ * game was being lost:
+ *   INVASION — a rival is actively attacking and own land is shrinking. (Game 0:
+ *   threat=1/urgency=high for 1,200 turns, 115k→43k tiles, response was one 10%
+ *   probe because no gate authorizes fighting back without a clear troop edge.)
+ *   DUEL — the endgame is a two-power border war (exactly one bordered non-allied
+ *   rival, at least our share, together holding most of the map). (Game 1: 40.6%
+ *   share and troop parity vs the leader, yet frontierConversionTiming demanded an
+ *   edge a defender-advantage stalemate never shows; share bled 40.6%→15.7%.)
+ * Both are pure functions of the current observation — no new state, no RNG.
+ */
+export function warModeInvaderIDs(
+  observation: AgentBrainInput["observation"],
+): Set<string> {
+  const targets = new Set<string>();
+  if (!warModeEnabled()) {
+    return targets;
+  }
+  const ownState = observation.ownState;
+  if (ownState === null || !ownState.isAlive || !ownState.hasSpawned) {
+    return targets;
+  }
+  const incoming = observation.combat.incomingAttackPlayerIDs;
+  if (
+    incoming.length > 0 &&
+    recentOwnTileLossRatio(observation, ownState.tilesOwned ?? 0) >=
+      // Clamped like the other war knobs: a non-positive env value must not turn
+      // "incoming attack exists" alone into a standing war trigger.
+      Math.max(0.005, Math.min(0.5, tunedNumber("WAR_FALL_MIN_LOSS", 0.02)))
+  ) {
+    for (const playerID of incoming) {
+      targets.add(playerID);
+    }
+  }
+  const borderedRivals = observation.visiblePlayers.filter(
+    (player) =>
+      player.isAlive &&
+      player.playerID !== ownState.playerID &&
+      player.type !== PlayerType.Bot &&
+      player.sharesBorder &&
+      !player.isAllied,
+  );
+  if (borderedRivals.length === 1) {
+    const rival = borderedRivals[0]!;
+    const ownTileShare =
+      ownState.tileShare ?? observation.endgame?.ownTileShare ?? 0;
+    const rivalShare = rival.tileShare ?? 0;
+    if (
+      rivalShare >= ownTileShare &&
+      ownTileShare + rivalShare >= warModeDuelCombinedShare()
+    ) {
+      targets.add(rival.playerID);
+    }
+  }
+  return targets;
+}
+
+/**
+ * War-mode counterstrike. Forces the single best OFFERED direct-conquest action
+ * (non-expansion attack / player boat — never a nuke, which keeps its own strategic
+ * gate) on an active invader or the duel leader. This is the one place the troop-
+ * edge requirement is deliberately relaxed to WAR_MIN_RATIO (default 0.8): in a
+ * defender-advantage endgame "no clear edge" is permanent, so demanding one converts
+ * parity into a slow loss. Guards that stay: the reserve-suicide penalty, a real
+ * troop commitment, and target restriction to the aggressor/leader only. Selects an
+ * offered `LegalAction.id`; fabricates nothing. Sits ABOVE the FM-2a strike (the
+ * invader outranks the juiciest bystander) and BELOW survival recoveries and every
+ * binding directive.
+ */
+export function warModeCounterstrikeCandidate(
+  input: AgentBrainInput,
+  scored: readonly FrontierRankedAction[],
+): FrontierRankedAction | undefined {
+  const targets = warModeInvaderIDs(input.observation);
+  if (targets.size === 0) {
+    return undefined;
+  }
+  const observation = input.observation;
+  const ownTroops =
+    observation.combat.ownTroops ?? observation.ownState?.troops ?? 0;
+  const minRatio = warModeMinStrikeRatio();
+  return scored
+    .filter((candidate) => {
+      const action = candidate.action;
+      if (!isDirectConquestAction(action) || action.kind === "nuke") {
+        return false;
+      }
+      const targetID = actionPlayerID(action);
+      if (targetID === null || !targets.has(targetID)) {
+        return false;
+      }
+      if (metadataNumber(action, "relativeTroopRatio") < minRatio) {
+        return false;
+      }
+      if (
+        hasPolicyPenalty(
+          candidate,
+          "attack would deplete the reserve below competitive defense",
+        )
+      ) {
+        return false;
+      }
+      return committedTroopRatio(action, ownTroops) > 0;
+    })
+    .sort(
+      (a, b) =>
+        committedTroopRatio(b.action, ownTroops) -
+          committedTroopRatio(a.action, ownTroops) ||
+        b.totalScore - a.totalScore ||
+        a.action.id.localeCompare(b.action.id),
+    )[0];
 }
 
 /**
@@ -20690,11 +20901,24 @@ interface PlannerDominanceWindow {
 function plannerDominanceWindow(
   observation: AgentObservation,
   homeDanger: string,
+  neutralGrowthActionCount: number,
 ): PlannerDominanceWindow | null {
   if (!dominanceConversionEnabled() || homeDanger === "high") {
     return null;
   }
   if (observation.phase === "spawn") {
+    return null;
+  }
+  // Land-grab guard (v7, hosted A/B game2): opening the window mid-land-grab made
+  // the agent start an unprovoked war at t1500 while ~40% of the map was neutral —
+  // it burned the whole opening on 10-25% probes while the eventual winner took the
+  // free land at 16k tiles per decision. Being ahead is not a reason to stop
+  // grabbing free territory: the window stays closed while the opening window is
+  // live AND neutral growth is still offered.
+  if (
+    observation.turnNumber <= tunedNumber("DOMINANCE_OPENING_TURNS", 3_000) &&
+    neutralGrowthActionCount > 0
+  ) {
     return null;
   }
   const ownTileShare =
@@ -20835,7 +21059,11 @@ function plannerDecisionBrief(
     buildActions.length === 0 &&
     (previousPlan?.objective === "secure_economy" ||
       observation.strategic.priority === "build_economy");
-  const dominanceWindow = plannerDominanceWindow(observation, homeDanger);
+  const dominanceWindow = plannerDominanceWindow(
+    observation,
+    homeDanger,
+    neutralGrowthActions.length,
+  );
   const recommendedControls = plannerRecommendedControls({
     observation,
     neutralGrowthActionCount: neutralGrowthActions.length,

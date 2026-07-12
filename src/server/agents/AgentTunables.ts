@@ -228,3 +228,62 @@ export function dominanceConversionRatio(): number {
 export function dominanceConversionShareFloor(): number {
   return Math.max(0, tunedNumber("DOMINANCE_SHARE_FLOOR", 0.12));
 }
+
+/**
+ * Wire-primary argmax flag (keystone v7, 4-game forensics 2026-07-12). Reads the EXACT
+ * env var `PROXYWAR_TUNE_PRIMARY_ARGMAX` (A/B arms set "0"/"1"). DEFAULT OFF. The
+ * Frontier scheduler assembles multi-action batches whose PRIMARY is chosen by module
+ * rotation, not score — correct for the local runtime (the whole batch executes) but
+ * catastrophic on single-action wires (Coworld carries ONE selectedLegalActionId per
+ * decision): measured 28/40 decisions in one hosted game shipped a score-9-16 neutral
+ * expand while a score-100 defensive build / combat attack / mainland expand rode the
+ * batch and was dropped. When ON, the batch is reordered so the highest-scored
+ * promotable candidate (attack/boat/build/upgrade — never diplomacy, social, or nuke,
+ * whose cross-module scores are not calibrated against these) becomes the primary,
+ * and a deliberate combat primary is never displaced by a different combat action
+ * (target choice is intentional). Batch CONTENT is unchanged — only the order.
+ */
+export function primaryArgmaxEnabled(): boolean {
+  return tunedNumber("PRIMARY_ARGMAX", 0) >= 1;
+}
+
+/**
+ * War-mode flag (keystone v7, 4-game forensics 2026-07-12). Reads the EXACT env var
+ * `PROXYWAR_TUNE_WAR_MODE` (A/B arms set "0"/"1"). DEFAULT OFF. Fixes the measured
+ * terminal passivity: invaded at near-parity (threat=1, urgency=high, tiles shrinking
+ * for 1200 turns) the agent answered an 11-attack sustained invasion with one 10%
+ * probe, because every attack gate demands a clear troop edge that a defender-
+ * advantage endgame never shows. When ON, two regimes authorize a forced
+ * counterstrike selected from OFFERED actions only: (a) under invasion — incoming
+ * attacks present AND own tiles falling; (b) endgame duel — exactly one bordered
+ * non-allied rival, at least our share, combined share >= WAR_DUEL_COMBINED_SHARE.
+ * In these regimes the strike ratio floor drops to WAR_MIN_RATIO (default 0.8) and
+ * the risk-level gate is replaced by that ratio floor plus the reserve-suicide
+ * penalty check. Targets only the actual invader(s) or the duel leader.
+ */
+export function warModeEnabled(): boolean {
+  return tunedNumber("WAR_MODE", 0) >= 1;
+}
+
+/** War-mode strike ratio floor (`PROXYWAR_TUNE_WAR_MIN_RATIO`, default 0.8, clamped 0.5-1.5). */
+export function warModeMinStrikeRatio(): number {
+  return Math.max(0.5, Math.min(1.5, tunedNumber("WAR_MIN_RATIO", 0.8)));
+}
+
+/** War-mode duel combined-share threshold (`PROXYWAR_TUNE_WAR_DUEL_COMBINED_SHARE`, default 0.6). */
+export function warModeDuelCombinedShare(): number {
+  return Math.max(0.3, Math.min(0.95, tunedNumber("WAR_DUEL_COMBINED_SHARE", 0.6)));
+}
+
+/**
+ * Economy-bootstrap minimum own tiles (`PROXYWAR_TUNE_ECONOMY_BOOTSTRAP_MIN_TILES`,
+ * default 0 = shipped behavior). Opening-tempo forensics (2026-07-12): with the
+ * bootstrap armed, the agent builds its first City at t400 with 52 tiles in every
+ * game, donating a ~100-turn land-grab head start; the winning rival builds its first
+ * City at ~20k tiles / t1100. When set, the whole bootstrap (banking + forced
+ * structure) stays dormant until the agent owns at least this many tiles, so the
+ * opening decision budget goes to territory first.
+ */
+export function economyBootstrapMinTiles(): number {
+  return Math.max(0, tunedNumber("ECONOMY_BOOTSTRAP_MIN_TILES", 0));
+}
