@@ -6221,6 +6221,12 @@ export function warModeCounterstrikeCandidate(
   const ownTroops =
     observation.combat.ownTroops ?? observation.ownState?.troops ?? 0;
   const minRatio = warModeMinStrikeRatio();
+  // Set-level ladder gate: an ACTIVE invader anywhere in the target set means
+  // pure max-commit defense for this whole selection (see comment in sort).
+  const invaders = observation.combat.incomingAttackPlayerIDs;
+  const ladderActive =
+    attackLadderEnabled() &&
+    [...targets].every((targetID) => !invaders.includes(targetID));
   return scored
     .filter((candidate) => {
       const action = candidate.action;
@@ -6253,13 +6259,12 @@ export function warModeCounterstrikeCandidate(
       // ACTIVE INVADER — answering a 40% invasion with a 10% probe is weaker
       // defense than v7's max-commit counter. The ladder applies only to
       // proactive strikes (the endgame-duel leader), where probing first is
-      // information, not under-defense.
-      const invaders = observation.combat.incomingAttackPlayerIDs;
-      const ladderApplies =
-        attackLadderEnabled() &&
-        !invaders.includes(actionPlayerID(a.action) ?? "") &&
-        !invaders.includes(actionPlayerID(b.action) ?? "");
-      if (ladderApplies) {
+      // information, not under-defense. Decided SET-LEVEL (any invader among
+      // the targets disables the ladder for the whole call): a per-pair check
+      // is an inconsistent comparator in mixed invader/duel candidate sets
+      // (reviewer-found intransitivity — sort order would be
+      // implementation-defined and a 10% probe could win over defense).
+      if (ladderActive) {
         const desiredA = ladderDesiredTroopRatio(
           observation,
           actionPlayerID(a.action) ?? "",

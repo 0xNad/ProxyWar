@@ -599,6 +599,56 @@ describe("attack ladder (PROXYWAR_TUNE_ATTACK_LADDER, via war-mode strikes)", ()
     ).toBe("attack:ENEMY:40");
   });
 
+  it("mixed target set (invader + duel rival): ladder disabled set-level, max-commit wins deterministically", () => {
+    process.env.PROXYWAR_TUNE_WAR_MODE = "1";
+    process.env.PROXYWAR_TUNE_ATTACK_LADDER = "1";
+    // RAIDER actively invades (incoming + falling tiles); ENEMY is the bordered
+    // duel leader. Per-pair laddering here was an inconsistent comparator
+    // (reviewer-found); set-level gating must yield a 40% pick, never a probe.
+    const base = invasion(0);
+    const observation: AgentObservation = {
+      ...base,
+      visiblePlayers: [
+        ...base.visiblePlayers,
+        rival({
+          playerID: "RAIDER",
+          clientID: "RAIDER",
+          name: "Raider",
+          sharesBorder: false,
+          canAttack: false,
+          tileShare: 0.05,
+          outgoingAttack: true,
+        }),
+      ],
+      combat: {
+        ...base.combat,
+        incomingAttackPlayerIDs: ["RAIDER"],
+        attackablePlayerIDs: ["ENEMY", "RAIDER"],
+        borderedPlayerIDs: ["ENEMY"],
+      },
+    };
+    const candidates = [
+      ...[10, 25, 40].map((pc) =>
+        ranked(`attack:ENEMY:${pc}`, "attack", 60, {
+          risk: { level: "high", score: 0.7 },
+          metadata: { targetID: "ENEMY", relativeTroopRatio: 0.9, troopPercent: pc },
+        }),
+      ),
+      ...[10, 25, 40].map((pc) =>
+        ranked(`attack:RAIDER:${pc}`, "attack", 60, {
+          risk: { level: "high", score: 0.7 },
+          metadata: { targetID: "RAIDER", relativeTroopRatio: 0.9, troopPercent: pc },
+        }),
+      ),
+    ];
+    const picked = warModeCounterstrikeCandidate(
+      { observation, legalActions: [] },
+      candidates,
+    );
+    // 40% commitment wins; id tiebreak makes it deterministic.
+    expect(picked?.action.id).toBe("attack:ENEMY:40");
+  });
+
   it("ladder OFF: war mode keeps its max-commitment preference", () => {
     process.env.PROXYWAR_TUNE_WAR_MODE = "1";
     delete process.env.PROXYWAR_TUNE_ATTACK_LADDER;
