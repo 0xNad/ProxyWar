@@ -324,6 +324,26 @@ export function openingTempoEnabled(): boolean {
 }
 
 /**
+ * Thin-executor flag (keystone v11, architectural experiment 2026-07-12). Reads
+ * the EXACT env var `PROXYWAR_TUNE_THIN_EXECUTOR` (A/B arms set "0"/"1").
+ * DEFAULT OFF. Five A/B cycles established mechanical parity with the league
+ * leader while still losing every mid-game: his architecture executes the LLM
+ * plan's named action+target with near-zero reinterpretation, ours re-derives
+ * the decision through a deep heuristic cascade that plays the conversion
+ * phase worse than the model does. When ON, a high-priority leaf executes the
+ * CURRENT plan's named intent directly: a pressure plan with a targetPlayerId
+ * selects the best offered qualifying attack on that target every cycle; a
+ * growth plan selects the best offered mainland neutral expand. Survival
+ * recoveries still pre-empt; binding directives (commitment / alliance /
+ * build) behave as before; all other intents fall through to the cascade.
+ * Selects only offered `LegalAction.id`s — this removes reinterpretation, it
+ * adds no new action source.
+ */
+export function thinExecutorEnabled(): boolean {
+  return tunedNumber("THIN_EXECUTOR", 0) >= 1;
+}
+
+/**
  * Attack-ladder flag (keystone v8). Reads the EXACT env var
  * `PROXYWAR_TUNE_ATTACK_LADDER` (A/B arms set "0"/"1"). DEFAULT OFF. The league
  * leader escalates per target — 10% probe, 25%, then 40% kill commits — while

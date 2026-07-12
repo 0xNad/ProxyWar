@@ -34,6 +34,7 @@ import {
   goldPressureMirvBankFloor,
   openingTempoEnabled,
   primaryArgmaxEnabled,
+  thinExecutorEnabled,
   tunedNumber,
   upgradeVisibilityEnabled,
   warModeDuelCombinedShare,
@@ -2703,6 +2704,18 @@ function selectFrontierActionBatch(input: {
   );
   if (survivalPanicProbeRecovery !== undefined) {
     return [survivalPanicProbeRecovery];
+  }
+  // Thin plan execution (v11, flag-gated): the Commander's named intent IS the
+  // decision — pressure-with-target attacks that target, growth expands.
+  // Survival recoveries above still pre-empt; undefined falls through to the
+  // binding directives and the full cascade unchanged.
+  const thinPlanExecution = thinPlanExecutionCandidate(
+    input.input,
+    plan,
+    scored,
+  );
+  if (thinPlanExecution !== undefined) {
+    return [thinPlanExecution];
   }
   // Binding directive (P1 keystone): a decisive LLM commitment pre-empts every
   // tactical selector below. Survival selectors above intentionally still win.
@@ -6170,6 +6183,100 @@ export function coalitionAllianceAcceptCandidate(
 // agent-relative ("this rival is attacking ME"), so no rival-under-siege signal
 // exists in the observation yet. The donation leaf returns with a real
 // under-attack-by-others field (alliedWithVisibleIds pattern) in a later cycle.
+// (0.1.6 added `underSiege` to the observation; the leaf lands once the league
+// runs a game version that emits it.)
+
+/**
+ * Thin plan execution (v11, PROXYWAR_TUNE_THIN_EXECUTOR — the architectural
+ * experiment). Executes the CURRENT plan's named intent with minimal
+ * reinterpretation:
+ *   - pressure + targetPlayerId: the best offered qualifying direct-conquest
+ *     action on THAT target (war-mode-grade guards: ratio floor, no
+ *     reserve-suicide, real commitment; ladder sizing when armed and the
+ *     target is not an active invader);
+ *   - growth: the best offered mainland neutral expand.
+ * Everything else (build/diplomacy/fortify/survive/naval) falls through to the
+ * binding directives and the cascade. Returns offered `LegalAction.id`s only.
+ * Sits BELOW the survival recoveries (they still pre-empt) and ABOVE the
+ * binding-directive leaves — when the Commander names a target, that IS the
+ * decision.
+ */
+export function thinPlanExecutionCandidate(
+  input: AgentBrainInput,
+  plan: StrategicPlan,
+  scored: readonly FrontierRankedAction[],
+): FrontierRankedAction | undefined {
+  if (!thinExecutorEnabled() || input.observation.phase === "spawn") {
+    return undefined;
+  }
+  const observation = input.observation;
+  if (plan.turnIntent === "growth") {
+    return scored
+      .filter(
+        (candidate) =>
+          candidate.action.kind === "attack" &&
+          candidate.action.metadata?.expansion === true,
+      )
+      .sort(
+        (a, b) =>
+          b.totalScore - a.totalScore || a.action.id.localeCompare(b.action.id),
+      )[0];
+  }
+  if (plan.turnIntent !== "pressure" || plan.targetPlayerId === null) {
+    return undefined;
+  }
+  const targetID = plan.targetPlayerId;
+  const ownTroops =
+    observation.combat.ownTroops ?? observation.ownState?.troops ?? 0;
+  const minRatio = warModeMinStrikeRatio();
+  const invaders = observation.combat.incomingAttackPlayerIDs;
+  const ladderActive = attackLadderEnabled() && !invaders.includes(targetID);
+  return scored
+    .filter((candidate) => {
+      const action = candidate.action;
+      if (!isDirectConquestAction(action) || action.kind === "nuke") {
+        return false;
+      }
+      if (actionPlayerID(action) !== targetID) {
+        return false;
+      }
+      if (metadataNumber(action, "relativeTroopRatio") < minRatio) {
+        return false;
+      }
+      if (
+        hasPolicyPenalty(
+          candidate,
+          "attack would deplete the reserve below competitive defense",
+        )
+      ) {
+        return false;
+      }
+      return committedTroopRatio(action, ownTroops) > 0;
+    })
+    .sort((a, b) => {
+      if (ladderActive) {
+        const desired = ladderDesiredTroopRatio(observation, targetID);
+        const distA = Math.abs(
+          committedTroopRatio(a.action, ownTroops) - desired,
+        );
+        const distB = Math.abs(
+          committedTroopRatio(b.action, ownTroops) - desired,
+        );
+        if (distA !== distB) {
+          return distA - distB;
+        }
+        return (
+          b.totalScore - a.totalScore || a.action.id.localeCompare(b.action.id)
+        );
+      }
+      return (
+        committedTroopRatio(b.action, ownTroops) -
+          committedTroopRatio(a.action, ownTroops) ||
+        b.totalScore - a.totalScore ||
+        a.action.id.localeCompare(b.action.id)
+      );
+    })[0];
+}
 
 /**
  * Attack-ladder step (v8, PROXYWAR_TUNE_ATTACK_LADDER). Desired troop commitment
@@ -21907,6 +22014,11 @@ function plannerPrompt(
     "CURRENT_CONTROL_DIRECTIVE:",
     plannerControlDirective(decisionBrief.plannerGuidance.recommendedControls),
     "END_CURRENT_CONTROL_DIRECTIVE",
+    ...(thinExecutorEnabled()
+      ? [
+          "THIN EXECUTOR ACTIVE: the executor executes YOUR named intent each cycle with minimal reinterpretation — a pressure plan with a targetPlayerId attacks that target every decision it legally can; a growth plan expands into neutral land. That makes your target choice the whole game: name it precisely, update it the moment the situation changes, and own the build cadence yourself (emit buildDirective when economy or deterrence needs a turn) and diplomacy (allianceDirective).",
+        ]
+      : []),
     "Choose one objective from: choose_spawn, expand_territory, secure_economy, fortify_border, pressure_rival, build_alliance, survive.",
     "Choose one turnIntent from: spawn, growth, build, fortify, pressure, survive, diplomacy, naval. turnIntent is the category the executor should prioritize this cycle if a matching legal action is safe.",
     dominanceWindow !== null && dominanceWindow !== undefined
