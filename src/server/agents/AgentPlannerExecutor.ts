@@ -22028,6 +22028,7 @@ function plannerPrompt(
     ...(thinExecutorEnabled()
       ? [
           "THIN EXECUTOR ACTIVE: the executor executes YOUR named intent each cycle with minimal reinterpretation — a pressure plan with a targetPlayerId attacks that target every decision it legally can; a growth plan expands into neutral land. Your binding directives (commitment, allianceDirective, buildDirective) always pre-empt the named intent, and invasion defense pre-empts everything. That makes your target choice the whole game: name it precisely, update it the moment the situation changes, and own the build cadence yourself (emit buildDirective when economy or deterrence needs a turn) and diplomacy (allianceDirective).",
+          "KILL-CHAIN DISCIPLINE (thin executor): commit to ONE target and stay on it until they are broken (tiles collapsing) or dead — switching targets mid-fight forfeits every prior exchange. Sequence your kills: when opening hostilities take the WEAKEST reachable rival first (fast eliminations snowball your land and economy), then the next weakest; fight the strongest player only with a coalition at your back or when they come for you. Expand while you have free land; the moment your frontier meets a rival you cannot avoid, the kill-chain starts.",
         ]
       : []),
     "Choose one objective from: choose_spawn, expand_territory, secure_economy, fortify_border, pressure_rival, build_alliance, survive.",
