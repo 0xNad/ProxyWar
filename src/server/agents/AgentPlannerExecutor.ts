@@ -21523,6 +21523,50 @@ function plannerRecommendedControls(input: {
         "no territorial base yet (tile share below base floor): claim neutral land and weak tribes before pressuring comparable rivals",
     };
   }
+  // Opening leader-war guard (v10, flag-gated under OPENING_TEMPO): in THREE
+  // consecutive A/B rounds (v7/v8/v9, same slot each time) the pressure-ready
+  // hint fired at ~t1500 against the TOP-SHARE rival and the resulting war
+  // forfeited the land grab and the game. Early wars on the WEAKEST rival are
+  // expansion (the league leader kills the weakest at t1600); early wars on the
+  // STRONGEST are suicide. While the opening is live and neutral growth is
+  // offered, suppress the pressure hint only when its target is the strongest
+  // visible rival — weak-target conversion stays available.
+  if (
+    input.pressureReady &&
+    input.pressureReadyTargetID !== null &&
+    openingTempoEnabled() &&
+    input.observation.turnNumber <= 3_000 &&
+    input.neutralGrowthActionCount > 0
+  ) {
+    const rivals = input.observation.visiblePlayers.filter(
+      (player) => player.isAlive && !player.isAllied,
+    );
+    const strongest = rivals.reduce(
+      (best, player) =>
+        (player.tileShare ?? 0) > (best?.tileShare ?? 0) ? player : best,
+      undefined as (typeof rivals)[number] | undefined,
+    );
+    if (
+      strongest !== undefined &&
+      strongest.playerID === input.pressureReadyTargetID
+    ) {
+      return {
+        strength: "strong_hint",
+        objective: "expand_territory",
+        turnIntent: "growth",
+        targetPlayerId: null,
+        preferredActionKinds: input.hasBoatAction
+          ? ["attack", "boat", "hold"]
+          : ["attack", "hold"],
+        enabledModules: input.hasBoatAction
+          ? ["expansion", "economy", "defense", "naval"]
+          : ["expansion", "economy", "defense"],
+        maxDecisionCycles: 3,
+        reason:
+          "opening leader-war guard: the pressure-ready target is the strongest rival and the land grab is live; out-grow them instead of charging",
+      };
+    }
+  }
   if (input.pressureReady && input.pressureReadyTargetID !== null) {
     return {
       // STRONG HINT, not must_follow (2026-06-19): "an attack is executor-ready" is a
