@@ -1408,37 +1408,96 @@ export class FrontierPolicyExecutor implements AgentExecutor {
         ];
       }
     }
-    // Opening-commitment enforcement (v13, flag-gated): whichever selector chose
-    // the primary, if it is a NEUTRAL LAND expand below the commitment floor
-    // while troops idle high and share is small, swap in the offered expand
-    // whose commitment is closest to the floor. This is the wire-level
-    // guarantee behind the desired-commitment floors — the measured loss was a
-    // fixed 10% grind with a near-cap troop stack, out-expanded 5:1.
+    // Frontier-commitment enforcement (v13, widened v14 per daveey forensics):
+    // wire-level guarantee that idle troops buy land ANY time meaningful
+    // frontier remains — not just in the opening. Hosted telemetry proved the
+    // v13 version produced parity exactly while it fired and the loss window
+    // was exactly where the shipped anti-repeat rotation + "opening land grab
+    // only" penalty clamped the grind back to 10-20% (the league's winning
+    // agents expand at a FLAT 35% forever). v14 widening: (a) fires when the
+    // primary is a low-commit expand OR a neutral banking BOAT while land
+    // expands are offered (the measured dead loop); (b) share ceiling 0.26 ->
+    // 0.35; (c) the swap-target filter deliberately IGNORES scorer penalties
+    // (that bypass is the point — anti-repeat must not break commitment), and
+    // (d) NO-OP SUPPRESSION: when recent accepted expands changed nothing
+    // (tiles flat across recent memory), the expansion primary is swapped for
+    // the best non-expansion development/war candidate instead — 77% of the
+    // measured loss-game expand picks were dead turns.
     let openingCommitText = "";
     if (
       openingCommitEnabled() &&
       (input.observation.combat.troopRatio ??
         input.observation.ownState?.troopRatio ??
         0) >= openingCommitTroopFloor() &&
-      (input.observation.ownState?.tileShare ?? 0) < 0.26
+      (input.observation.ownState?.tileShare ?? 0) < 0.35
     ) {
+      const ownTroopsNow =
+        input.observation.combat.ownTroops ??
+        input.observation.ownState?.troops ??
+        0;
       const primaryAction = selectedBatch[0]?.action ?? scored[0]?.action;
-      const primaryIsLowExpand =
+      const recentDecisions = input.observation.memory.recentActions;
+      const recentTiles = recentDecisions
+        .map((decision) => decision.ownTiles ?? 0)
+        .filter((tiles) => tiles > 0);
+      const recentAcceptedExpands = recentDecisions.filter(
+        (decision) =>
+          decision.accepted === true && decision.actionKind === "attack",
+      ).length;
+      const tilesFlat =
+        recentTiles.length >= 4 &&
+        recentAcceptedExpands >= 3 &&
+        Math.max(...recentTiles) === Math.min(...recentTiles);
+      const primaryIsExpand =
         primaryAction !== undefined &&
         primaryAction.kind === "attack" &&
-        primaryAction.metadata?.expansion === true &&
-        committedTroopRatio(
-          primaryAction,
-          input.observation.combat.ownTroops ??
-            input.observation.ownState?.troops ??
-            0,
-        ) <
-          openingCommitRatio() - 0.05;
-      if (primaryIsLowExpand) {
-        const ownTroopsNow =
-          input.observation.combat.ownTroops ??
-          input.observation.ownState?.troops ??
-          0;
+        primaryAction.metadata?.expansion === true;
+      const landExpandOffered = scored.some(
+        (candidate) =>
+          candidate.action.kind === "attack" &&
+          candidate.action.metadata?.expansion === true,
+      );
+      const primaryIsBankingBoat =
+        primaryAction !== undefined &&
+        primaryAction.kind === "boat" &&
+        metadataString(primaryAction, "targetID") === null &&
+        landExpandOffered;
+      if (primaryIsExpand && tilesFlat) {
+        // No-op suppression: expansion is doing literally nothing — develop
+        // or fight instead (build/upgrade/player-boat preferred over more
+        // neutral banking).
+        const development = scored
+          .filter((candidate) => {
+            const kind = candidate.action.kind;
+            if (kind === "build" || kind === "upgrade_structure") {
+              return true;
+            }
+            if (kind === "boat") {
+              return metadataString(candidate.action, "targetID") !== null;
+            }
+            return (
+              kind === "attack" &&
+              candidate.action.metadata?.expansion !== true
+            );
+          })
+          .sort(
+            (a, b) =>
+              b.totalScore - a.totalScore ||
+              a.action.id.localeCompare(b.action.id),
+          )[0];
+        if (development !== undefined && development.action !== primaryAction) {
+          openingCommitText = ` openingCommit=noopSuppressed(${development.action.id})`;
+          selectedBatch = [
+            development,
+            ...selectedBatch.filter((candidate) => candidate !== development),
+          ];
+        }
+      } else if (
+        (primaryIsExpand &&
+          committedTroopRatio(primaryAction, ownTroopsNow) <
+            openingCommitRatio() - 0.05) ||
+        primaryIsBankingBoat
+      ) {
         const better = scored
           .filter(
             (candidate) =>

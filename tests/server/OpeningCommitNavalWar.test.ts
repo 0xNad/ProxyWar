@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { PlayerType, Relation } from "../../src/core/game/Game";
+import { PlayerType, Relation, UnitType } from "../../src/core/game/Game";
 import { AgentObservationBuilder } from "../../src/server/agents/AgentObservationBuilder";
 import {
   navalWarCandidate,
@@ -297,6 +297,74 @@ describe("opening-commitment floor (PROXYWAR_TUNE_OPENING_COMMIT)", () => {
     );
     expect(decision.actionID).toBe("expand:terra-nullius:35");
     expect(decision.reason).toContain("openingCommit=escalated");
+  });
+
+  it("v14: a neutral banking-boat primary is escalated to the land expand while frontier remains", async () => {
+    process.env.PROXYWAR_TUNE_OPENING_COMMIT = "1";
+    const actionsWithBoat: LegalAction[] = [
+      {
+        id: "boat:1234:16",
+        kind: "boat",
+        label: "Send 16% transport to Terra Nullius",
+        intent: { type: "boat", troops: 96_000, dst: 1234 },
+        risk: { level: "low", score: 0.2 },
+        metadata: {},
+      },
+      ...expansionActions(),
+    ];
+    const planned = await new RuleAgentPlanner("aggressive").plan(
+      { observation: openingObservation(), legalActions: actionsWithBoat },
+      null,
+    );
+    const decision = keystoneExecutor().decide(
+      { observation: openingObservation(), legalActions: actionsWithBoat },
+      planned.plan,
+    );
+    // Regardless of which primary the cascade chose, the wire carries a
+    // committed land expand, never a banking boat, while frontier remains.
+    expect(decision.actionID).toBe("expand:terra-nullius:35");
+  });
+
+  it("v14: no-op suppression — expansion primary with tiles flat swaps to the best development action", async () => {
+    process.env.PROXYWAR_TUNE_OPENING_COMMIT = "1";
+    const base = openingObservation();
+    const observation: AgentObservation = {
+      ...base,
+      memory: {
+        ...base.memory,
+        recentActions: [12_000, 12_000, 12_000, 12_000, 12_000].map(
+          (ownTiles, i) => ({
+            sequence: i,
+            actionID: "expand:terra-nullius:10",
+            actionKind: "attack" as const,
+            reason: "expand",
+            accepted: true,
+            ownTiles,
+          }),
+        ),
+      },
+    };
+    const actions: LegalAction[] = [
+      ...expansionActions(),
+      {
+        id: "build:City:100",
+        kind: "build",
+        label: "Build City",
+        intent: { type: "build_unit", unit: UnitType.City, tile: 100 },
+        risk: { level: "medium", score: 0.3 },
+        metadata: { role: "economic", unit: "City" },
+      },
+    ];
+    const planned = await new RuleAgentPlanner("aggressive").plan(
+      { observation, legalActions: actions },
+      null,
+    );
+    const decision = keystoneExecutor().decide(
+      { observation, legalActions: actions },
+      planned.plan,
+    );
+    expect(decision.actionID).toBe("build:City:100");
+    expect(decision.reason).toContain("openingCommit=noopSuppressed");
   });
 
   it("flag OFF: shipped de-escalation picks the low-commitment expand", async () => {
