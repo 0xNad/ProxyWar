@@ -54,6 +54,10 @@ function serveProprietaryDir(
 function serveAiLeagueArtifacts(): Plugin {
   return {
     name: "serve-ai-league-artifacts",
+    // vite-plugin-html registers a pre-enforced history fallback that rewrites
+    // text/html navigations to the app shell; enforce pre (this plugin is
+    // earlier in the array) so real artifact files win for browser documents.
+    enforce: "pre",
     configureServer(server) {
       const runsDir = path.join(__dirname, "artifacts", "ai-league-runs");
       server.middlewares.use((req, res, next) => {

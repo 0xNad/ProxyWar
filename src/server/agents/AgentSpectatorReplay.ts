@@ -574,7 +574,7 @@ function uniqueTurn(): (turn: Turn) => boolean {
   };
 }
 
-function spectatorHtml(replay: AgentSpectatorReplay): string {
+export function spectatorHtml(replay: AgentSpectatorReplay): string {
   const encoded = jsonForInlineScript(replay);
   return `<!doctype html>
 <html lang="en">
