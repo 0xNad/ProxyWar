@@ -32,9 +32,15 @@ replay downloads. It never uploads, submits, or creates hosted work.
 With the dev stack up (`npm run dev`) or the demo server
 (`npm run agent:demo-server`):
 
-- League page: `/ai-league-runs/league/index.html`
+- League page: `/league` (alias for `/ai-league-runs/league/index.html`)
 - Per-battle spectator page: linked from each battle card (`▶ Watch`)
 - Real-client render: `Full render` link (`/ai-league-replay/<runID>`)
+
+On a beta-gated server, `/league` and the mirror-written
+`league-<runID>` bundles are viewable anonymously (the invite gate lets
+exactly those paths through — see `isProxyWarPublicLeaguePath`); all other
+run directories and pages stay behind the gate. The `Full render` links
+require a beta session.
 
 ## Flags
 

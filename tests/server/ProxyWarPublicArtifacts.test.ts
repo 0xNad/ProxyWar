@@ -2,6 +2,8 @@ import { describe, expect, it } from "vitest";
 import {
   isProxyWarPublicDoc,
   isProxyWarPublicExternalAgentExample,
+  isProxyWarPublicLeagueArtifact,
+  isProxyWarPublicLeaguePath,
   isProxyWarPublicRunArtifact,
   isProxyWarPublicTournamentArtifact,
   isSafeProxyWarArtifactSegment,
@@ -101,5 +103,54 @@ describe("ProxyWarPublicArtifacts", () => {
     expect(isSafeProxyWarArtifactSegment("nested/file")).toBe(false);
     expect(isSafeProxyWarArtifactSegment("")).toBe(false);
     expect(isSafeProxyWarArtifactSegment("x".repeat(181))).toBe(false);
+  });
+
+  it("allows only the league site files as league artifacts", () => {
+    expect(isProxyWarPublicLeagueArtifact("index.html")).toBe(true);
+    expect(isProxyWarPublicLeagueArtifact("data.json")).toBe(true);
+    expect(isProxyWarPublicLeagueArtifact("secrets.json")).toBe(false);
+    expect(isProxyWarPublicLeagueArtifact("spectator.html")).toBe(false);
+  });
+
+  it("lets only league mirror paths through the beta gate anonymously", () => {
+    expect(isProxyWarPublicLeaguePath("/league")).toBe(true);
+    expect(isProxyWarPublicLeaguePath("/ai-league-runs/league/index.html")).toBe(
+      true,
+    );
+    expect(isProxyWarPublicLeaguePath("/ai-league-runs/league/data.json")).toBe(
+      true,
+    );
+    expect(
+      isProxyWarPublicLeaguePath(
+        "/ai-league-runs/league-coworld-2026-07-13T10-40-45-699Z-9ed769ef/spectator.html",
+      ),
+    ).toBe(true);
+    expect(
+      isProxyWarPublicLeaguePath(
+        "/ai-league-runs/league-coworld-2026-07-13T10-40-45-699Z-9ed769ef/decisions.jsonl",
+      ),
+    ).toBe(true);
+    // Non-league run directories stay gated, whatever the artifact.
+    expect(
+      isProxyWarPublicLeaguePath(
+        "/ai-league-runs/coworld-2026-07-13T10-40-45-699Z-9ed769ef/spectator.html",
+      ),
+    ).toBe(false);
+    expect(
+      isProxyWarPublicLeaguePath("/ai-league-runs/2026-06-05-run/spectator.html"),
+    ).toBe(false);
+    // League dirs expose only allowlisted artifact names.
+    expect(
+      isProxyWarPublicLeaguePath("/ai-league-runs/league/secrets.json"),
+    ).toBe(false);
+    expect(
+      isProxyWarPublicLeaguePath("/ai-league-runs/league-x/agent-config.json"),
+    ).toBe(false);
+    // Traversal/odd shapes are rejected.
+    expect(
+      isProxyWarPublicLeaguePath("/ai-league-runs/league/../secret.html"),
+    ).toBe(false);
+    expect(isProxyWarPublicLeaguePath("/ai-league-runs/league/")).toBe(false);
+    expect(isProxyWarPublicLeaguePath("/api/league")).toBe(false);
   });
 });

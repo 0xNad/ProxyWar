@@ -45,8 +45,45 @@ export const proxyWarPublicExternalAgentExamples = [
   "AGENT_SKILL.md",
 ] as const;
 
+export const proxyWarPublicLeagueArtifacts = [
+  "index.html",
+  "data.json",
+] as const;
+
 export function isProxyWarPublicRunArtifact(fileName: string): boolean {
   return (proxyWarPublicRunArtifacts as readonly string[]).includes(fileName);
+}
+
+export function isProxyWarPublicLeagueArtifact(fileName: string): boolean {
+  return (proxyWarPublicLeagueArtifacts as readonly string[]).includes(
+    fileName,
+  );
+}
+
+/**
+ * Paths the beta invite gate lets through anonymously: the league mirror's
+ * static site (`/ai-league-runs/league/...`) and the mirror-written episode
+ * bundles (`/ai-league-runs/league-<runID>/...`). Other run directories stay
+ * behind the beta gate.
+ */
+export function isProxyWarPublicLeaguePath(pathname: string): boolean {
+  if (pathname === "/league") {
+    return true;
+  }
+  const match = /^\/ai-league-runs\/(league(?:-[a-zA-Z0-9._:-]+)?)\/([a-zA-Z0-9._:-]+)$/.exec(
+    pathname,
+  );
+  if (match === null) {
+    return false;
+  }
+  const runKey = match[1];
+  const artifact = match[2];
+  if (!isSafeProxyWarArtifactSegment(runKey)) {
+    return false;
+  }
+  return runKey === "league"
+    ? isProxyWarPublicLeagueArtifact(artifact)
+    : isProxyWarPublicRunArtifact(artifact);
 }
 
 export function isProxyWarPublicTournamentArtifact(fileName: string): boolean {

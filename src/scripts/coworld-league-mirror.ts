@@ -196,11 +196,15 @@ async function ensureEpisodeReplayCached(
 async function unpackEpisodeRunDir(
   replay: ParsedHostedReplay,
   runsRootDir: string,
-): Promise<{ watchHrefFromLeagueDir: string; fullRenderHref: string } | null> {
+): Promise<{ watchHref: string; fullRenderHref: string } | null> {
   if (replay.spectatorReplay === null) {
     return null;
   }
-  const runDir = path.join(runsRootDir, replay.runID);
+  // The `league-` prefix is what the beta invite gate's public-league path
+  // allowlist keys on — only mirror-written bundles become anonymously
+  // viewable, never other run directories.
+  const publicRunKey = `league-${replay.runID}`;
+  const runDir = path.join(runsRootDir, publicRunKey);
   const spectatorPath = path.join(runDir, "spectator.html");
   if (!(await fileExists(spectatorPath))) {
     await fs.mkdir(runDir, { recursive: true });
@@ -216,10 +220,10 @@ async function unpackEpisodeRunDir(
       spectatorHtml(replay.spectatorReplay as AgentSpectatorReplay),
     );
   }
-  const encodedRunId = encodeURIComponent(replay.runID);
+  const encodedRunKey = encodeURIComponent(publicRunKey);
   return {
-    watchHrefFromLeagueDir: `../${encodedRunId}/spectator.html`,
-    fullRenderHref: `/ai-league-replay/${encodedRunId}`,
+    watchHref: `/ai-league-runs/${encodedRunKey}/spectator.html`,
+    fullRenderHref: `/ai-league-replay/${encodedRunKey}`,
   };
 }
 
@@ -282,7 +286,7 @@ async function syncOnce(options: MirrorOptions): Promise<void> {
             meta.roundId === null
               ? null
               : (roundNumbers.get(meta.roundId) ?? null),
-          watchHref: unpacked?.watchHrefFromLeagueDir ?? null,
+          watchHref: unpacked?.watchHref ?? null,
           fullRenderHref: unpacked?.fullRenderHref ?? null,
         }),
       );

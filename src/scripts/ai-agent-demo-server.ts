@@ -60,6 +60,8 @@ import {
 import {
   isProxyWarPublicDoc,
   isProxyWarPublicExternalAgentExample,
+  isProxyWarPublicLeagueArtifact,
+  isProxyWarPublicLeaguePath,
   isProxyWarPublicRunArtifact,
   isProxyWarPublicTournamentArtifact,
   isSafeProxyWarArtifactSegment,
@@ -417,11 +419,23 @@ app.use((req, res, next) => {
     next();
     return;
   }
+  if (req.method === "GET" && isProxyWarPublicLeaguePath(req.path)) {
+    next();
+    return;
+  }
   if (req.path.startsWith("/api/")) {
     res.status(401).json({ error: "Proxy War beta invite required" });
     return;
   }
   res.redirect(`/beta?next=${encodeURIComponent(req.originalUrl)}`);
+});
+
+app.get("/league", (_req, res) => {
+  res.sendFile(path.resolve(runsRootDir, "league", "index.html"), (error) => {
+    if (error !== undefined) {
+      res.status(404).send("league page not generated yet");
+    }
+  });
 });
 
 if (betaAccess.enabled) {
@@ -2071,10 +2085,10 @@ function servePublicRunArtifact(
 ): void {
   const runID = stringParam(req.params.runID);
   const artifact = stringParam(req.params.artifact);
-  if (
-    !isSafeProxyWarArtifactSegment(runID) ||
-    !isProxyWarPublicRunArtifact(artifact)
-  ) {
+  const artifactAllowed =
+    isProxyWarPublicRunArtifact(artifact) ||
+    (runID === "league" && isProxyWarPublicLeagueArtifact(artifact));
+  if (!isSafeProxyWarArtifactSegment(runID) || !artifactAllowed) {
     res.status(404).send("artifact not available");
     return;
   }
