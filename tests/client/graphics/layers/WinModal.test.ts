@@ -24,7 +24,11 @@ vi.mock("../../../../src/client/Cosmetics", () => ({
   fetchCosmetics: vi.fn(async () => []),
   handlePurchase: vi.fn(),
   patternRelationship: vi.fn(() => ({})),
+  resolveCosmetics: vi.fn(() => []),
+  purchaseCosmetic: vi.fn(),
 }));
+
+vi.mock("../../../../src/client/components/CosmeticButton", () => ({}));
 
 vi.mock("../../../../src/client/CrazyGamesSDK", () => ({
   crazyGamesSDK: {
@@ -36,9 +40,11 @@ vi.mock("../../../../src/client/CrazyGamesSDK", () => ({
 
 describe("WinModal Requeue", () => {
   let mockLocationHref = "";
+  let mockLocationPathname = "/";
 
   beforeEach(() => {
     mockLocationHref = "";
+    mockLocationPathname = "/";
     // Mock window.location.href using Object.defineProperty
     const locationMock = {
       get href() {
@@ -46,6 +52,12 @@ describe("WinModal Requeue", () => {
       },
       set href(value: string) {
         mockLocationHref = value;
+      },
+      get pathname() {
+        return mockLocationPathname;
+      },
+      set pathname(value: string) {
+        mockLocationPathname = value;
       },
     };
     Object.defineProperty(window, "location", {
@@ -98,6 +110,41 @@ describe("WinModal Requeue", () => {
       handleExit();
 
       expect(window.location.href).toBe("/");
+    });
+  });
+
+  describe("league replay mode", () => {
+    it("exit navigates to /league from a replay, / otherwise", async () => {
+      const { WinModal } = await import(
+        "../../../../src/client/graphics/layers/WinModal"
+      );
+      const modal = new WinModal();
+
+      window.location.pathname = "/ai-league-replay/league-coworld-x";
+      (modal as unknown as { _handleExit: () => void })._handleExit();
+      expect(window.location.href).toBe("/league");
+
+      window.location.pathname = "/";
+      (modal as unknown as { _handleExit: () => void })._handleExit();
+      expect(window.location.href).toBe("/");
+    });
+
+    it("shows no tutorial or store upsell in replay mode", async () => {
+      const { WinModal } = await import(
+        "../../../../src/client/graphics/layers/WinModal"
+      );
+      const modal = new WinModal();
+
+      window.location.pathname = "/ai-league-replay/league-coworld-x";
+      const replayInner = modal.innerHtml();
+      expect(replayInner.strings.join("").trim()).toBe("");
+
+      window.location.pathname = "/";
+      const normalInner = modal.innerHtml();
+      const rendered =
+        normalInner.strings.join(" ") + normalInner.values.join(" ");
+      expect(rendered).toContain("win_modal.support_openfront");
+      expect(rendered).not.toContain("iframe");
     });
   });
 

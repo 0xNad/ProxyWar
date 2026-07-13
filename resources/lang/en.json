@@ -908,10 +908,10 @@
     "other_won": "{player} has won!",
     "nation_won": "Nation {nation} has won!",
     "exit": "Exit Game",
+    "back_to_league": "Back to League",
     "keep": "Keep Playing",
     "spectate": "Spectate",
-    "requeue": "Play Again",
-    "youtube_tutorial": "Need some help?"
+    "requeue": "Play Again"
   },
   "leaderboard": {
     "hide": "Hide",

@@ -1,10 +1,6 @@
 import { html, LitElement, TemplateResult } from "lit";
 import { customElement, state } from "lit/decorators.js";
-import {
-  getGamesPlayed,
-  translateText,
-  TUTORIAL_VIDEO_URL,
-} from "../../../client/Utils";
+import { translateText } from "../../../client/Utils";
 import { EventBus } from "../../../core/EventBus";
 import { RankedType } from "../../../core/game/Game";
 import { GameUpdateType } from "../../../core/game/GameUpdates";
@@ -75,7 +71,11 @@ export class WinModal extends LitElement implements Layer {
             variant="primary"
             width="block"
             class="flex-1"
-            translationKey="win_modal.exit"
+            .title=${translateText(
+              this.isLeagueReplay()
+                ? "win_modal.back_to_league"
+                : "win_modal.exit",
+            )}
             @click=${this._handleExit}
           ></o-button>
           ${this.isRankedGame
@@ -103,32 +103,20 @@ export class WinModal extends LitElement implements Layer {
     `;
   }
 
-  innerHtml() {
-    if (!this.isWin && getGamesPlayed() < 3) {
-      return this.renderYoutubeTutorial();
-    }
-    return this.renderPatternButton();
+  /**
+   * True when the client is showing a rendered league/agent replay
+   * (`/ai-league-replay/<runID>`) rather than a played game. Replay viewers
+   * get the bare result — no tutorials, store upsells, or play-again flows.
+   */
+  private isLeagueReplay(): boolean {
+    return window.location.pathname.startsWith("/ai-league-replay/");
   }
 
-  renderYoutubeTutorial() {
-    return html`
-      <div class="text-center mb-6 bg-black/30 p-2.5 rounded-sm">
-        <h3 class="text-xl font-semibold text-white mb-3">
-          ${translateText("win_modal.youtube_tutorial")}
-        </h3>
-        <!-- 56.25% = 9:16 -->
-        <div class="relative w-full pb-[56.25%]">
-          <iframe
-            class="absolute top-0 left-0 w-full h-full rounded-sm"
-            src="${this.isVisible ? TUTORIAL_VIDEO_URL : ""}"
-            title="YouTube video player"
-            frameborder="0"
-            allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share"
-            allowfullscreen
-          ></iframe>
-        </div>
-      </div>
-    `;
+  innerHtml() {
+    if (this.isLeagueReplay()) {
+      return html``;
+    }
+    return this.renderPatternButton();
   }
 
   renderPatternButton() {
@@ -179,7 +167,9 @@ export class WinModal extends LitElement implements Layer {
 
   async show() {
     crazyGamesSDK.gameplayStop();
-    await this.loadPatternContent();
+    if (!this.isLeagueReplay()) {
+      await this.loadPatternContent();
+    }
     // Check if this is a ranked game
     this.isRankedGame =
       this.game.config().gameConfig().rankedType === RankedType.OneVOne;
@@ -199,7 +189,7 @@ export class WinModal extends LitElement implements Layer {
 
   private _handleExit() {
     this.hide();
-    window.location.href = "/";
+    window.location.href = this.isLeagueReplay() ? "/league" : "/";
   }
 
   private _handleRequeue() {
