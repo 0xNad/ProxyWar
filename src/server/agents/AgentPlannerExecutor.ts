@@ -1475,6 +1475,9 @@ export class FrontierPolicyExecutor implements AgentExecutor {
     if (
       primaryArgmaxEnabled() &&
       openingTempoText === "" &&
+      // The openingCommit escalation is a wire-level guarantee (reviewer
+      // finding): argmax must not demote the floored expand it just installed.
+      openingCommitText === "" &&
       selectedBatch.length > 1
     ) {
       const before = selectedBatch[0]!;
