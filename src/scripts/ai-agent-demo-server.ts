@@ -247,6 +247,29 @@ app.use((_req, res, next) => {
   res.setHeader("Referrer-Policy", "same-origin");
   next();
 });
+
+// League-wrapper-only mode: serve nothing but the public league mirror and
+// its replay renders. Every other surface — beta login, hub, /play, tester
+// dashboard, admin, relay, job APIs (anything that could start a match on
+// the operator's account) — is unreachable. Reversible via env flag.
+const leagueWrapperOnly =
+  process.env.PROXYWAR_LEAGUE_WRAPPER_ONLY === "true";
+if (leagueWrapperOnly) {
+  app.use((req, res, next) => {
+    if (req.method === "GET" || req.method === "HEAD") {
+      if (
+        isProxyWarPublicLeaguePath(req.path) ||
+        isProxyWarPublicRendererAssetPath(req.path)
+      ) {
+        next();
+        return;
+      }
+      res.redirect("/league");
+      return;
+    }
+    res.status(404).send("not available in league wrapper mode");
+  });
+}
 app.get("/beta", (req, res) => {
   const returnTo = normalizeProxyWarBetaReturnTo(queryParam(req.query.next));
   if (!betaAccess.enabled) {

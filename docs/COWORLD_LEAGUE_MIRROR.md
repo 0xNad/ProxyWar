@@ -36,11 +36,17 @@ With the dev stack up (`npm run dev`) or the demo server
 - Per-battle spectator page: linked from each battle card (`▶ Watch`)
 - Real-client render: `Full render` link (`/ai-league-replay/<runID>`)
 
-On a beta-gated server, `/league` and the mirror-written
-`league-<runID>` bundles are viewable anonymously (the invite gate lets
-exactly those paths through — see `isProxyWarPublicLeaguePath`); all other
-run directories and pages stay behind the gate. The `Full render` links
-require a beta session.
+On a beta-gated server, `/league`, the mirror-written `league-<runID>`
+bundles, and their real-client renders are viewable anonymously (the invite
+gate lets exactly those paths through — see `isProxyWarPublicLeaguePath`);
+all other run directories and pages stay behind the gate.
+
+`PROXYWAR_LEAGUE_WRAPPER_ONLY=true` goes further: the server serves ONLY the
+league mirror and its replay renders. Everything else — beta login, hub,
+`/play`, tester dashboard, admin, relay and job APIs (anything that could
+start a match on the operator's account) — is unreachable; GETs redirect to
+`/league` and other methods 404. Remove the env flag and restart to bring the
+full beta server back.
 
 ## Flags
 
