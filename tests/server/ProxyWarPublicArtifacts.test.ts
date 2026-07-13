@@ -4,6 +4,7 @@ import {
   isProxyWarPublicExternalAgentExample,
   isProxyWarPublicLeagueArtifact,
   isProxyWarPublicLeaguePath,
+  isProxyWarPublicRendererAssetPath,
   isProxyWarPublicRunArtifact,
   isProxyWarPublicTournamentArtifact,
   isSafeProxyWarArtifactSegment,
@@ -152,5 +153,37 @@ describe("ProxyWarPublicArtifacts", () => {
     ).toBe(false);
     expect(isProxyWarPublicLeaguePath("/ai-league-runs/league/")).toBe(false);
     expect(isProxyWarPublicLeaguePath("/api/league")).toBe(false);
+  });
+
+  it("lets league full renders through the gate but not other replays", () => {
+    expect(
+      isProxyWarPublicLeaguePath(
+        "/ai-league-replay/league-coworld-2026-07-13T10-40-45-699Z-9ed769ef",
+      ),
+    ).toBe(true);
+    expect(
+      isProxyWarPublicLeaguePath(
+        "/ai-league-replay/coworld-2026-07-13T10-40-45-699Z-9ed769ef",
+      ),
+    ).toBe(false);
+    expect(isProxyWarPublicLeaguePath("/ai-league-replay/league-x/extra")).toBe(
+      false,
+    );
+    expect(isProxyWarPublicLeaguePath("/ai-league-replay/")).toBe(false);
+  });
+
+  it("marks renderer asset prefixes as anonymously fetchable", () => {
+    expect(isProxyWarPublicRendererAssetPath("/src/client/Main.ts")).toBe(true);
+    expect(isProxyWarPublicRendererAssetPath("/assets/index.js")).toBe(true);
+    expect(isProxyWarPublicRendererAssetPath("/maps/pangaea/map.bin")).toBe(
+      true,
+    );
+    expect(isProxyWarPublicRendererAssetPath("/favicon.ico")).toBe(true);
+    expect(isProxyWarPublicRendererAssetPath("/@vite/client")).toBe(true);
+    // Not a listed prefix, and prefix names must match whole segments.
+    expect(isProxyWarPublicRendererAssetPath("/@fs/etc/passwd")).toBe(false);
+    expect(isProxyWarPublicRendererAssetPath("/srcs/evil.js")).toBe(false);
+    expect(isProxyWarPublicRendererAssetPath("/public")).toBe(false);
+    expect(isProxyWarPublicRendererAssetPath("/tester-dashboard")).toBe(false);
   });
 });

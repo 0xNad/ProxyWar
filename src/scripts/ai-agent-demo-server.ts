@@ -62,9 +62,11 @@ import {
   isProxyWarPublicExternalAgentExample,
   isProxyWarPublicLeagueArtifact,
   isProxyWarPublicLeaguePath,
+  isProxyWarPublicRendererAssetPath,
   isProxyWarPublicRunArtifact,
   isProxyWarPublicTournamentArtifact,
   isSafeProxyWarArtifactSegment,
+  proxyWarPublicRendererAssetPrefixes,
 } from "../server/agents/ProxyWarPublicArtifacts";
 import {
   checkExternalAgentEndpoint,
@@ -419,7 +421,11 @@ app.use((req, res, next) => {
     next();
     return;
   }
-  if (req.method === "GET" && isProxyWarPublicLeaguePath(req.path)) {
+  if (
+    req.method === "GET" &&
+    (isProxyWarPublicLeaguePath(req.path) ||
+      isProxyWarPublicRendererAssetPath(req.path))
+  ) {
     next();
     return;
   }
@@ -2011,23 +2017,8 @@ function isLoopbackAddress(value: string): boolean {
 function rendererProxyPrefixes(): string[] {
   return [
     "/ai-league-replay",
-    "/@vite",
-    "/@id",
     "/@fs",
-    "/src",
-    "/node_modules",
-    "/assets",
-    "/resources",
-    "/images",
-    "/sounds",
-    "/maps",
-    "/lang",
-    "/flags",
-    "/icons",
-    "/sprites",
-    "/fonts",
-    "/manifest.json",
-    "/favicon.ico",
+    ...proxyWarPublicRendererAssetPrefixes,
   ];
 }
 

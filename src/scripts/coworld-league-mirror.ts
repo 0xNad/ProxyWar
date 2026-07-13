@@ -193,6 +193,10 @@ async function ensureEpisodeReplayCached(
   return cachedPath;
 }
 
+// Bump when bundle contents change shape so existing directories regenerate
+// in place on the next sync (files are overwritten, never deleted).
+const bundleVersion = "2";
+
 async function unpackEpisodeRunDir(
   replay: ParsedHostedReplay,
   runsRootDir: string,
@@ -205,20 +209,30 @@ async function unpackEpisodeRunDir(
   // viewable, never other run directories.
   const publicRunKey = `league-${replay.runID}`;
   const runDir = path.join(runsRootDir, publicRunKey);
-  const spectatorPath = path.join(runDir, "spectator.html");
-  if (!(await fileExists(spectatorPath))) {
+  const versionPath = path.join(runDir, ".mirror-bundle-version");
+  const upToDate =
+    (await fileExists(versionPath)) &&
+    (await fs.readFile(versionPath, "utf8")).trim() === bundleVersion;
+  if (!upToDate) {
     await fs.mkdir(runDir, { recursive: true });
     for (const [name, contents] of Object.entries(replay.inlineRunArtifacts)) {
       await writeFileAtomic(path.join(runDir, name), contents);
     }
+    // Point the bundle's own runID at the public key so links generated
+    // inside spectator.html (the real-renderer link) resolve publicly.
+    const publicSpectatorReplay = {
+      ...replay.spectatorReplay,
+      runID: publicRunKey,
+    } as AgentSpectatorReplay;
     await writeFileAtomic(
       path.join(runDir, "spectator-replay.json"),
-      `${JSON.stringify(replay.spectatorReplay, null, 2)}\n`,
+      `${JSON.stringify(publicSpectatorReplay, null, 2)}\n`,
     );
     await writeFileAtomic(
-      spectatorPath,
-      spectatorHtml(replay.spectatorReplay as AgentSpectatorReplay),
+      path.join(runDir, "spectator.html"),
+      spectatorHtml(publicSpectatorReplay),
     );
+    await writeFileAtomic(versionPath, `${bundleVersion}\n`);
   }
   const encodedRunKey = encodeURIComponent(publicRunKey);
   return {

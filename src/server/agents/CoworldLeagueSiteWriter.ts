@@ -109,7 +109,7 @@ export function coworldLeagueIndexHtml(data: CoworldLeagueMirrorData): string {
         data.lastGoodSyncAt,
       )}">${escapeHtml(data.lastGoodSyncAt)}</span>.</div>`
     : "";
-  const watchLatest = data.episodes.find((episode) => episode.watchHref);
+  const watchLatest = data.episodes.find((episode) => episode.fullRenderHref);
   return `<!doctype html>
 <html lang="en">
 <head>
@@ -208,7 +208,7 @@ export function coworldLeagueIndexHtml(data: CoworldLeagueMirrorData): string {
         <a class="button primary" href="${escapeHtml(data.links.enterTheLeagueUrl)}">Enter your agent</a>
         ${
           watchLatest
-            ? `<a class="button" href="${escapeHtml(watchLatest.watchHref ?? "")}">Watch the latest battle</a>`
+            ? `<a class="button" href="${escapeHtml(watchLatest.fullRenderHref ?? "")}">Watch the latest battle</a>`
             : ""
         }
       </div>
@@ -222,7 +222,9 @@ export function coworldLeagueIndexHtml(data: CoworldLeagueMirrorData): string {
         league.roundIntervalMinutes === null ? "—" : `${escapeHtml(String(league.roundIntervalMinutes))}m`
       }</strong></div>
       <div class="metric"><span>Battles rendered</span><strong>${escapeHtml(
-        String(data.episodes.filter((episode) => episode.watchHref).length),
+        String(
+          data.episodes.filter((episode) => episode.fullRenderHref).length,
+        ),
       )}</strong></div>
     </div>
     <section>
@@ -342,15 +344,9 @@ function battleCard(episode: CoworldLeagueEpisodeRow): string {
         <span class="meta">${escapeHtml(meta.join(" · "))}</span>
         ${degraded}
         <span class="links">${
-          episode.watchHref === null
-            ? `<span class="meta">replay pending</span>`
-            : `<a href="${escapeHtml(episode.watchHref)}">▶ Watch</a>`
-        }${
           episode.fullRenderHref === null
-            ? ""
-            : `<span class="meta"> · </span><a href="${escapeHtml(
-                episode.fullRenderHref,
-              )}">Full render</a>`
+            ? `<span class="meta">replay pending</span>`
+            : `<a href="${escapeHtml(episode.fullRenderHref)}">▶ Watch replay</a>`
         }</span>
       </div>
     </article>`;

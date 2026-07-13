@@ -50,6 +50,37 @@ export const proxyWarPublicLeagueArtifacts = [
   "data.json",
 ] as const;
 
+/**
+ * Renderer asset prefixes anonymous visitors may GET so the real-client
+ * replay render works without a beta session. Everything here is generic
+ * client/runtime material (the repo is public); page documents stay gated.
+ * "/@fs" is deliberately absent — the demo server blocks it in beta mode.
+ */
+export const proxyWarPublicRendererAssetPrefixes = [
+  "/@vite",
+  "/@id",
+  "/src",
+  "/node_modules",
+  "/assets",
+  "/resources",
+  "/images",
+  "/sounds",
+  "/maps",
+  "/lang",
+  "/flags",
+  "/icons",
+  "/sprites",
+  "/fonts",
+  "/manifest.json",
+  "/favicon.ico",
+] as const;
+
+export function isProxyWarPublicRendererAssetPath(pathname: string): boolean {
+  return proxyWarPublicRendererAssetPrefixes.some(
+    (prefix) => pathname === prefix || pathname.startsWith(`${prefix}/`),
+  );
+}
+
 export function isProxyWarPublicRunArtifact(fileName: string): boolean {
   return (proxyWarPublicRunArtifacts as readonly string[]).includes(fileName);
 }
@@ -69,6 +100,12 @@ export function isProxyWarPublicLeagueArtifact(fileName: string): boolean {
 export function isProxyWarPublicLeaguePath(pathname: string): boolean {
   if (pathname === "/league") {
     return true;
+  }
+  const renderMatch = /^\/ai-league-replay\/(league-[a-zA-Z0-9._:-]+)$/.exec(
+    pathname,
+  );
+  if (renderMatch !== null) {
+    return isSafeProxyWarArtifactSegment(renderMatch[1]);
   }
   const match = /^\/ai-league-runs\/(league(?:-[a-zA-Z0-9._:-]+)?)\/([a-zA-Z0-9._:-]+)$/.exec(
     pathname,

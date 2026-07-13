@@ -89,7 +89,7 @@ function sampleData(): CoworldLeagueMirrorData {
             color: "#d97706",
           },
         ],
-        watchHref: "../coworld-run/spectator.html",
+        watchHref: "/ai-league-runs/coworld-run/spectator.html",
         fullRenderHref: "/ai-league-replay/coworld-run",
       },
       {
@@ -136,11 +136,13 @@ describe("coworldLeagueIndexHtml", () => {
     expect(html).not.toContain("⚠ 0 degraded");
   });
 
-  test("links watchable battles and marks pending ones", () => {
+  test("links the full render as the single replay button", () => {
     const html = coworldLeagueIndexHtml(sampleData());
-    expect(html).toContain('href="../coworld-run/spectator.html"');
-    expect(html).toContain("/ai-league-replay/coworld-run");
+    expect(html).toContain('href="/ai-league-replay/coworld-run"');
+    expect(html).toContain("▶ Watch replay");
     expect(html).toContain("replay pending");
+    // The spectator page is no longer linked from battle cards.
+    expect(html).not.toContain("spectator.html");
   });
 
   test("shows the stale banner only when stale", () => {
