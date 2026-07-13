@@ -118,14 +118,20 @@ const rendererListenHost = process.env.AI_LEAGUE_RENDERER_HOST ?? "127.0.0.1";
 const rendererBaseUrl =
   process.env.AI_LEAGUE_RENDERER_BASE_URL ?? `http://127.0.0.1:${rendererPort}`;
 const staticRootDir = path.join(process.cwd(), "static");
-const runsRootDir = path.join(process.cwd(), "artifacts", "ai-league-runs");
+const configuredArtifactsRootDir = firstConfiguredEnv(
+  "PROXYWAR_ARTIFACTS_ROOT",
+);
+const artifactsRootDir =
+  configuredArtifactsRootDir === undefined
+    ? path.join(process.cwd(), "artifacts")
+    : path.resolve(configuredArtifactsRootDir);
+const runsRootDir = path.join(artifactsRootDir, "ai-league-runs");
 const tournamentsRootDir = path.join(
-  process.cwd(),
-  "artifacts",
+  artifactsRootDir,
   "ai-league-tournaments",
 );
-const evaluationsRootDir = path.join(process.cwd(), "artifacts", "ai-league-evals");
-const jobsRootDir = path.join(process.cwd(), "artifacts", "ai-league-demo-jobs");
+const evaluationsRootDir = path.join(artifactsRootDir, "ai-league-evals");
+const jobsRootDir = path.join(artifactsRootDir, "ai-league-demo-jobs");
 const jobsPath = path.join(jobsRootDir, "jobs.json");
 const configuredNationsRootDir = firstConfiguredEnv("PROXYWAR_NATIONS_DIR");
 const nationsRootDir =
@@ -140,15 +146,13 @@ const externalAgentExampleRootDir = path.join(
 );
 const betaAccess = loadProxyWarBetaAccessConfig();
 const betaFeedbackRootDir = path.join(
-  process.cwd(),
-  "artifacts",
+  artifactsRootDir,
   "proxywar",
   "beta-feedback",
 );
 const betaFeedbackPath = path.join(betaFeedbackRootDir, "feedback.jsonl");
 const rateLimitStatePath = path.join(
-  process.cwd(),
-  "artifacts",
+  artifactsRootDir,
   "proxywar",
   "rate-limits.json",
 );
@@ -1177,7 +1181,7 @@ async function startLobbyMatch(lobby: ProxyWarLobby): Promise<void> {
     });
   }
   try {
-    const dir = path.join(process.cwd(), "artifacts", "lobby", lobby.id);
+    const dir = path.join(artifactsRootDir, "lobby", lobby.id);
     await fs.mkdir(dir, { recursive: true });
     await Promise.all(
       lobby.members.map((member, index) => {
