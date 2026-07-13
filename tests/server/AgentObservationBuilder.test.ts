@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { AttackExecution } from "../../src/core/execution/AttackExecution";
 import { AllianceRequestExecution } from "../../src/core/execution/alliance/AllianceRequestExecution";
 import { PlayerInfo, PlayerType } from "../../src/core/game/Game";
 import { AgentObservationBuilder } from "../../src/server/agents/AgentObservationBuilder";
@@ -86,5 +87,23 @@ describe("AgentObservationBuilder rival-rival coalition graph", () => {
     expect(seenA?.isAllied).toBe(true);
     // rivalA is allied only with the agent, so it has no rival-rival edge.
     expect(seenA?.alliedWithVisibleIds).toBeUndefined();
+  });
+
+  it("marks a rival under siege when another rival has a live attack on it", async () => {
+    const game = await threePlayerGame();
+    const rivalA = game.player("P_A");
+    const rivalB = game.player("P_B");
+    rivalA.conquer(game.ref(1, 1));
+    rivalA.conquer(game.ref(2, 1));
+
+    game.addExecution(new AttackExecution(100, rivalB, rivalA.id()));
+    game.executeNextTick();
+
+    expect(rivalA.incomingAttacks().length).toBeGreaterThan(0);
+    const seenA = observe(game).visiblePlayers.find(
+      (player) => player.playerID === "P_A",
+    );
+    expect(seenA?.underSiege).toBe(true);
+    expect(seenA?.incomingAttack).toBe(false);
   });
 });

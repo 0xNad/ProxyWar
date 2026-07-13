@@ -331,13 +331,22 @@ export function openingTempoEnabled(): boolean {
  * near-cap idle stack (900k troops, troopRatio 0.67 at t600) and loses the
  * land race 5:1 by t2000 — every later failure is downstream of being the
  * smallest seat. When ON, the neutral-expansion commitment is FLOORED at
- * OPENING_COMMIT_RATIO (default 0.35) whenever own troopRatio >=
- * OPENING_COMMIT_TROOP_FLOOR (default 0.55) — idle troops buy land; the
- * recentExpansionCount de-escalation applies only when troops are actually
- * scarce.
+ * OPENING_COMMIT_RATIO (default 0.35) throughout the opening window; after
+ * turn 3000 the floor applies only when own troopRatio >=
+ * OPENING_COMMIT_TROOP_FLOOR (default 0.55). The separate default-off
+ * OPENING_PHASE_LOCK flag owns the v17 hostile-opening experiment.
  */
 export function openingCommitEnabled(): boolean {
   return tunedNumber("OPENING_COMMIT", 0) >= 1;
+}
+
+/**
+ * Behind-tempo hostile-opening phase lock (keystone v17 candidate). Reads the
+ * EXACT env var `PROXYWAR_TUNE_OPENING_PHASE_LOCK` (A/B arms "0"/"1").
+ * DEFAULT OFF so the proven v16 opening-commit arm remains an isolated control.
+ */
+export function openingPhaseLockEnabled(): boolean {
+  return tunedNumber("OPENING_PHASE_LOCK", 0) >= 1;
 }
 
 /** Floored expansion commitment when troops idle high (default 0.35, clamped 0.1-0.5). */

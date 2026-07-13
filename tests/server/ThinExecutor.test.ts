@@ -24,6 +24,7 @@ type Ranked = Parameters<typeof promoteArgmaxPrimary>[0][number];
 const FLAGS = [
   "PROXYWAR_TUNE_THIN_EXECUTOR",
   "PROXYWAR_TUNE_ATTACK_LADDER",
+  "PROXYWAR_TUNE_WAR_MODE",
 ] as const;
 
 function ranked(

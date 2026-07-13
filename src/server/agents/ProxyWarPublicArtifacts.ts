@@ -62,6 +62,7 @@ export const proxyWarPublicRendererAssetPrefixes = [
   "/src",
   "/node_modules",
   "/assets",
+  "/_assets",
   "/resources",
   "/images",
   "/sounds",

@@ -102,6 +102,11 @@ import {
   ProxyWarRateLimiter,
   type ProxyWarRateLimitSnapshot,
 } from "../server/agents/ProxyWarRateLimit";
+import {
+  getAppShellContent,
+  setHtmlNoCacheHeaders,
+} from "../server/RenderHtml";
+import { applyStaticAssetCacheControl } from "../server/StaticAssetCache";
 
 const app = express();
 const networkConfig = loadProxyWarDemoServerNetworkConfig();
@@ -112,6 +117,7 @@ const rendererPort = Number(process.env.AI_LEAGUE_RENDERER_PORT ?? "9000");
 const rendererListenHost = process.env.AI_LEAGUE_RENDERER_HOST ?? "127.0.0.1";
 const rendererBaseUrl =
   process.env.AI_LEAGUE_RENDERER_BASE_URL ?? `http://127.0.0.1:${rendererPort}`;
+const staticRootDir = path.join(process.cwd(), "static");
 const runsRootDir = path.join(process.cwd(), "artifacts", "ai-league-runs");
 const tournamentsRootDir = path.join(
   process.cwd(),
@@ -460,11 +466,16 @@ app.use((req, res, next) => {
 });
 
 app.get("/league", (_req, res) => {
-  res.sendFile(path.resolve(runsRootDir, "league", "index.html"), (error) => {
-    if (error !== undefined) {
-      res.status(404).send("league page not generated yet");
-    }
-  });
+  res.sendFile(
+    path.join("league", "index.html"),
+    { root: runsRootDir },
+    (error) => {
+      if (error !== undefined && error !== null) {
+        console.error(`Failed to serve the league page: ${error.message}`);
+        res.status(404).send("league page not generated yet");
+      }
+    },
+  );
 });
 
 if (betaAccess.enabled) {
@@ -494,8 +505,50 @@ if (betaAccess.enabled) {
   );
 }
 
-for (const prefix of rendererProxyPrefixes()) {
-  app.use(prefix, proxyRendererRequest);
+if (leagueWrapperOnly) {
+  app.get("/ai-league-replay/:runID", async (req, res) => {
+    if (!isProxyWarPublicLeaguePath(req.path)) {
+      res.status(404).send("AI league replay record not found.");
+      return;
+    }
+    try {
+      const content = await getAppShellContent(
+        path.resolve(staticRootDir, "index.html"),
+      );
+      setHtmlNoCacheHeaders(res);
+      res.send(content);
+    } catch (error) {
+      console.error(
+        `Failed to serve the built replay client: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+      res
+        .status(503)
+        .send("Proxy War replay client is not built for this server.");
+    }
+  });
+
+  const serveBuiltRendererAsset = express.static(staticRootDir, {
+    fallthrough: true,
+    setHeaders: (res) => {
+      applyStaticAssetCacheControl(
+        res.setHeader.bind(res),
+        res.req.originalUrl,
+      );
+    },
+  });
+  app.use((req, res, next) => {
+    if (!isProxyWarPublicRendererAssetPath(req.path)) {
+      next();
+      return;
+    }
+    serveBuiltRendererAsset(req, res, next);
+  });
+} else {
+  for (const prefix of rendererProxyPrefixes()) {
+    app.use(prefix, proxyRendererRequest);
+  }
 }
 
 app.get("/", async (_req, res, next) => {
@@ -1688,7 +1741,11 @@ const server = app.listen(port, host, () => {
     console.log(`Proxy War closed beta: ${serverUrls.localUrl}/public`);
     console.log("Invite gate is enabled. The invite code is not printed.");
   }
-  console.log(`Proxy War renderer: ${rendererBaseUrl}`);
+  console.log(
+    leagueWrapperOnly
+      ? `Proxy War renderer: built client at ${staticRootDir}`
+      : `Proxy War renderer: ${rendererBaseUrl}`,
+  );
   console.log("Press Ctrl-C to stop.");
 });
 
@@ -2295,7 +2352,10 @@ function rendererProxyHeaders(
 }
 
 function maybeStartRenderer(): ChildProcess | null {
-  if (process.env.AI_LEAGUE_DEMO_RENDERER === "false") {
+  if (
+    leagueWrapperOnly ||
+    process.env.AI_LEAGUE_DEMO_RENDERER === "false"
+  ) {
     return null;
   }
   const child = spawn(localBin("vite"), [

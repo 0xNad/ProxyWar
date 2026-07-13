@@ -175,6 +175,7 @@ describe("ProxyWarPublicArtifacts", () => {
   it("marks renderer asset prefixes as anonymously fetchable", () => {
     expect(isProxyWarPublicRendererAssetPath("/src/client/Main.ts")).toBe(true);
     expect(isProxyWarPublicRendererAssetPath("/assets/index.js")).toBe(true);
+    expect(isProxyWarPublicRendererAssetPath("/_assets/index.js")).toBe(true);
     expect(isProxyWarPublicRendererAssetPath("/maps/pangaea/map.bin")).toBe(
       true,
     );

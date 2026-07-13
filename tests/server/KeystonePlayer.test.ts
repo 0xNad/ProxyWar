@@ -126,6 +126,15 @@ describe("Coworld keystone player", () => {
     expect(() => requestToBrainInput(request)).toThrow(/no legalActions/);
   });
 
+  it("pins the configured policy profile instead of inheriting the seat profile", () => {
+    const request = wireRequest(spawnBrainInput());
+
+    const rebuilt = requestToBrainInput(request, "opportunistic");
+
+    expect(rebuilt.observation.profile).toBe("opportunistic");
+    expect(spawnBrainInput().observation.profile).toBe("aggressive");
+  });
+
   it("mock mode answers in-clock with an offered LegalAction.id (protocol plumbing)", async () => {
     const brain = createKeystoneBrain(modules, {
       mode: "mock",

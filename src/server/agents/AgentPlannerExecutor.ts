@@ -37,6 +37,7 @@ import {
   openingCommitEnabled,
   openingCommitRatio,
   openingCommitTroopFloor,
+  openingPhaseLockEnabled,
   openingTempoEnabled,
   primaryArgmaxEnabled,
   thinExecutorEnabled,
@@ -1434,6 +1435,61 @@ export class FrontierPolicyExecutor implements AgentExecutor {
     const openingWindowLive = input.observation.turnNumber <= 3_000;
     if (
       openingCommitEnabled() &&
+      openingPhaseLockEnabled() &&
+      openingWindowLive &&
+      plan.commitment === undefined &&
+      input.observation.combat.incomingAttackPlayerIDs.length === 0
+    ) {
+      const primary = selectedBatch[0]?.action;
+      const primaryIsHostileAttack =
+        primary?.kind === "attack" && primary.metadata?.expansion !== true;
+      if (primaryIsHostileAttack) {
+        const tactical = buildAgentTacticalAffordances({
+          observation: input.observation,
+          legalActions: input.legalActions,
+        });
+        if (
+          tactical.openingExpansionTempo?.behindExpectedTempo === true &&
+          tactical.openingExpansionTempo.homeDanger !== "high" &&
+          tactical.frontierConversionTiming?.executorReady !== true
+        ) {
+          const ownTroops =
+            input.observation.combat.ownTroops ??
+            input.observation.ownState?.troops ??
+            0;
+          const phaseLockedExpansion = scored
+            .filter(
+              (candidate) =>
+                candidate.action.kind === "attack" &&
+                candidate.action.metadata?.expansion === true &&
+                candidate.action.risk.level !== "high",
+            )
+            .sort(
+              (a, b) =>
+                Math.abs(
+                  committedTroopRatio(a.action, ownTroops) -
+                    openingCommitRatio(),
+                ) -
+                  Math.abs(
+                    committedTroopRatio(b.action, ownTroops) -
+                      openingCommitRatio(),
+                  ) ||
+                b.totalScore - a.totalScore ||
+                a.action.id.localeCompare(b.action.id),
+            )[0];
+          if (phaseLockedExpansion !== undefined) {
+            openingCommitText = ` openingCommit=phaseLocked(${phaseLockedExpansion.action.id} over ${primary.id})`;
+            selectedBatch = replaceOpeningCommitPrimary(
+              selectedBatch,
+              phaseLockedExpansion,
+              settings.maxActionsPerDecision,
+            );
+          }
+        }
+      }
+    }
+    if (
+      openingCommitEnabled() &&
       (openingWindowLive ||
         (input.observation.combat.troopRatio ??
           input.observation.ownState?.troopRatio ??
@@ -1451,7 +1507,9 @@ export class FrontierPolicyExecutor implements AgentExecutor {
         .filter((tiles) => tiles > 0);
       const recentAcceptedExpands = recentDecisions.filter(
         (decision) =>
-          decision.accepted === true && decision.actionKind === "attack",
+          decision.accepted === true &&
+          decision.actionKind === "attack" &&
+          decision.expansion === true,
       ).length;
       const tilesFlat =
         recentTiles.length >= 4 &&
@@ -1475,31 +1533,14 @@ export class FrontierPolicyExecutor implements AgentExecutor {
         // No-op suppression: expansion is doing literally nothing — develop
         // or fight instead (build/upgrade/player-boat preferred over more
         // neutral banking).
-        const development = scored
-          .filter((candidate) => {
-            const kind = candidate.action.kind;
-            if (kind === "build" || kind === "upgrade_structure") {
-              return true;
-            }
-            if (kind === "boat") {
-              return metadataString(candidate.action, "targetID") !== null;
-            }
-            return (
-              kind === "attack" &&
-              candidate.action.metadata?.expansion !== true
-            );
-          })
-          .sort(
-            (a, b) =>
-              b.totalScore - a.totalScore ||
-              a.action.id.localeCompare(b.action.id),
-          )[0];
+        const development = openingCommitDevelopmentCandidate(scored);
         if (development !== undefined && development.action !== primaryAction) {
           openingCommitText = ` openingCommit=noopSuppressed(${development.action.id})`;
-          selectedBatch = [
+          selectedBatch = replaceOpeningCommitPrimary(
+            selectedBatch,
             development,
-            ...selectedBatch.filter((candidate) => candidate !== development),
-          ];
+            settings.maxActionsPerDecision,
+          );
         }
       } else if (
         (primaryIsExpand &&
@@ -1532,10 +1573,11 @@ export class FrontierPolicyExecutor implements AgentExecutor {
           )[0];
         if (better !== undefined && better.action !== primaryAction) {
           openingCommitText = ` openingCommit=escalated(${better.action.id})`;
-          selectedBatch = [
+          selectedBatch = replaceOpeningCommitPrimary(
+            selectedBatch,
             better,
-            ...selectedBatch.filter((candidate) => candidate !== better),
-          ];
+            settings.maxActionsPerDecision,
+          );
         }
       }
     }
@@ -6539,7 +6581,10 @@ export function navalWarCandidate(
     .map((decision) => decision.ownTiles ?? 0)
     .filter((tiles) => tiles > 0);
   const recentExpands = recent.filter(
-    (decision) => decision.accepted === true && decision.actionKind === "attack",
+    (decision) =>
+      decision.accepted === true &&
+      decision.actionKind === "attack" &&
+      decision.expansion === true,
   ).length;
   const tilesFlat =
     tilesSeen.length >= 4 &&
@@ -14898,6 +14943,72 @@ function directSelectionCandidate(
   return candidate;
 }
 
+/**
+ * Select a real development alternative when recent neutral expansion is
+ * proven to be a no-op. Hostile attacks must pass the same safety gates used
+ * by the normal direct-selection path; a no-op guard must never create a new
+ * unsafe war as a side effect.
+ */
+export function openingCommitDevelopmentCandidate(
+  scored: readonly FrontierRankedAction[],
+): FrontierRankedAction | undefined {
+  return scored
+    .filter((candidate) => {
+      const kind = candidate.action.kind;
+      if (kind === "build" || kind === "upgrade_structure") {
+        return true;
+      }
+      if (kind === "boat") {
+        if (
+          metadataString(candidate.action, "targetID") === null ||
+          candidate.action.risk.level === "high"
+        ) {
+          return false;
+        }
+        return (
+          directSelectionCandidate(candidate) !== undefined &&
+          !hasSchedulingBlockingPolicyPenalty(candidate)
+        );
+      }
+      if (
+        kind !== "attack" ||
+        candidate.action.metadata?.expansion === true ||
+        candidate.action.risk.level === "high"
+      ) {
+        return false;
+      }
+      return (
+        directSelectionCandidate(candidate) !== undefined &&
+        !hasSchedulingBlockingPolicyPenalty(candidate)
+      );
+    })
+    .sort(
+      (a, b) =>
+        b.totalScore - a.totalScore || a.action.id.localeCompare(b.action.id),
+    )[0];
+}
+
+/**
+ * Replace—not prepend—the wire primary and keep at most one neutral-expansion
+ * candidate. This preserves the configured batch cap and prevents the local
+ * multi-action runner from executing the action the selector just condemned.
+ */
+function replaceOpeningCommitPrimary(
+  selectedBatch: readonly FrontierRankedAction[],
+  replacement: FrontierRankedAction,
+  maxActionsPerDecision: number,
+): FrontierRankedAction[] {
+  const maxActions = Math.max(1, Math.trunc(maxActionsPerDecision));
+  return [
+    replacement,
+    ...selectedBatch.slice(1).filter(
+      (candidate) =>
+        candidate !== replacement &&
+        candidate.action.metadata?.expansion !== true,
+    ),
+  ].slice(0, maxActions);
+}
+
 function hasPlannerForbiddenDirectOverride(
   candidate: FrontierRankedAction,
 ): boolean {
@@ -21736,6 +21847,7 @@ function plannerDecisionBrief(
     economicBuildActionCount: economicBuildActions.length,
     homeDanger,
     dominanceWindow,
+    coalitionLeader,
   });
 
   return {
@@ -21848,15 +21960,26 @@ function plannerDecisionBrief(
       recommendedPosture: plannerPostureHints({
         observation,
         growthSafe,
-        pressureReady,
-        pressureReadyTargetID,
+        pressureReady:
+          coalitionLeader === null
+            ? pressureReady
+            : pressureReady &&
+              pressureReadyTargetID === coalitionLeader.playerID,
+        pressureReadyTargetID:
+          coalitionLeader?.playerID ?? pressureReadyTargetID,
         noExecutableBuild,
         buildActionCount: buildActions.length,
         homeDanger,
       }),
-      targetPlayerIdPolicy: pressureReady
-        ? `Use ${pressureReadyTargetID} only if choosing pressure; otherwise use null.`
-        : "Use null for growth/economy/fortify plans; no pressure target is executor-ready.",
+      targetPlayerIdPolicy:
+        coalitionLeader !== null
+          ? observation.turnNumber <= 3_000 &&
+            neutralGrowthActions.length > 0
+            ? "Use null during the coalition opening land grab; do not start a war on any rival."
+            : `Coalition mode allows pressure on ${coalitionLeader.playerID} only; never target a non-leader.`
+          : pressureReady
+            ? `Use ${pressureReadyTargetID} only if choosing pressure; otherwise use null.`
+            : "Use null for growth/economy/fortify plans; no pressure target is executor-ready.",
       modulePolicy:
         growthSafe && diplomacyActions.length > 0
           ? "For safe opening growth, exclude diplomacy unless the plan is explicitly build_alliance or a named alliance is needed for survival."
@@ -21879,6 +22002,7 @@ function plannerRecommendedControls(input: {
   economicBuildActionCount: number;
   homeDanger: string;
   dominanceWindow: PlannerDominanceWindow | null;
+  coalitionLeader: CoalitionLeader | null;
 }) {
   const ownTileShare =
     input.observation.ownState?.tileShare ??
@@ -21939,6 +22063,39 @@ function plannerRecommendedControls(input: {
       maxDecisionCycles: 2,
       reason:
         "no territorial base yet (tile share below base floor): claim neutral land and weak tribes before pressuring comparable rivals",
+    };
+  }
+  if (input.coalitionLeader !== null) {
+    if (
+      input.observation.turnNumber <= 3_000 &&
+      input.neutralGrowthActionCount > 0
+    ) {
+      return {
+        strength: "strong_hint",
+        objective: "expand_territory",
+        turnIntent: "growth",
+        targetPlayerId: null,
+        preferredActionKinds: input.hasBoatAction
+          ? ["attack", "boat", "hold"]
+          : ["attack", "hold"],
+        enabledModules: input.hasBoatAction
+          ? ["expansion", "economy", "defense", "naval"]
+          : ["expansion", "economy", "defense"],
+        maxDecisionCycles: 2,
+        reason:
+          "coalition opening: keep taking neutral land and do not feed any rival before the land grab closes",
+      };
+    }
+    return {
+      strength: "strong_hint",
+      objective: "pressure_rival",
+      turnIntent: "pressure",
+      targetPlayerId: input.coalitionLeader.playerID,
+      preferredActionKinds: ["attack", "target_player", "embargo", "hold"],
+      enabledModules: ["combat", "defense", "economy", "diplomacy"],
+      maxDecisionCycles: 1,
+      reason:
+        "coalition mode: contain the runaway leader without feeding non-leaders",
     };
   }
   // Opening leader-war guard (v10, flag-gated under OPENING_TEMPO): in THREE

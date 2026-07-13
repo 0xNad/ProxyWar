@@ -355,6 +355,21 @@ describe("coalition (PROXYWAR_TUNE_COALITION)", () => {
           metadata: { targetID: "LEADER", sharesBorder: true },
         },
         {
+          id: "attack:MINOR:25",
+          kind: "attack",
+          label: "Attack weak non-leader with 25%",
+          intent: { type: "attack", targetID: "MINOR", troops: 100_000 },
+          risk: { level: "low", score: 0.2 },
+          metadata: {
+            targetID: "MINOR",
+            targetName: "James",
+            sharesBorder: true,
+            relativeTroopRatio: 2.5,
+            targetTileShare: 0.08,
+            troopPercentage: 0.25,
+          },
+        },
+        {
           id: "hold",
           kind: "hold",
           label: "Hold",
@@ -366,6 +381,18 @@ describe("coalition (PROXYWAR_TUNE_COALITION)", () => {
     expect(prompts.length).toBeGreaterThanOrEqual(1);
     expect(prompts[0]).toContain("at the leader (LEADER) only");
     expect(prompts[0]).not.toContain("do NOT start a war now");
+    expect(prompts[0]).toContain(
+      '"recommendedControls":{"strength":"strong_hint","objective":"pressure_rival","turnIntent":"pressure","targetPlayerId":"LEADER"',
+    );
+    expect(prompts[0]).toContain(
+      '"targetPlayerIdPolicy":"Coalition mode allows pressure on LEADER only; never target a non-leader."',
+    );
+    expect(prompts[0]).not.toContain(
+      '"recommendedControls":{"strength":"strong_hint","objective":"pressure_rival","turnIntent":"pressure","targetPlayerId":"MINOR"',
+    );
+    expect(prompts[0]).not.toContain(
+      "executor-ready target MINOR exists",
+    );
   });
 });
 
