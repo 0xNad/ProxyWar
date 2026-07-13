@@ -1496,7 +1496,10 @@ export class FrontierPolicyExecutor implements AgentExecutor {
         (primaryIsExpand &&
           committedTroopRatio(primaryAction, ownTroopsNow) <
             openingCommitRatio() - 0.05) ||
-        primaryIsBankingBoat
+        // !tilesFlat (reviewer): never re-install an expand the no-op detector
+        // has already condemned — the navalWar fallback can emit a banking
+        // boat exactly when tiles are flat.
+        (primaryIsBankingBoat && !tilesFlat)
       ) {
         const better = scored
           .filter(
