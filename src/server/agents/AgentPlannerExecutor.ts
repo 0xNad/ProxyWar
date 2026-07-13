@@ -6549,7 +6549,13 @@ export function navalWarCandidate(
     })
     .sort(
       (a, b) =>
-        b.totalScore - a.totalScore || a.action.id.localeCompare(b.action.id),
+        // Boats FIRST while isolated (v15, hosted evidence: the planner
+        // demanded "bank into naval transports" for 4,000 turns while
+        // higher-scored builds won this sort and the island seat froze) —
+        // then score.
+        Number(b.action.kind === "boat") - Number(a.action.kind === "boat") ||
+        b.totalScore - a.totalScore ||
+        a.action.id.localeCompare(b.action.id),
     )[0];
 }
 
@@ -6602,7 +6608,22 @@ export function warModeCounterstrikeCandidate(
   const observation = input.observation;
   const ownTroops =
     observation.combat.ownTroops ?? observation.ownState?.troops ?? 0;
-  const minRatio = warModeMinStrikeRatio();
+  // Opening conservatism (v15): a marginal-ratio counterstrike during the land
+  // grab trades the opening for a coin-flip war (measured: t1400 strike at
+  // ~1.0 rr, penalized "attack lacks a clear troop edge", lost tiles AND the
+  // race). While the opening window is live and our tiles are not collapsing,
+  // hold the v7 standard (rr >= 1.0); the relaxed floor applies once the
+  // opening is over or we are genuinely being eaten.
+  const openingLive = observation.turnNumber <= 3_000;
+  const collapsing =
+    recentOwnTileLossRatio(
+      observation,
+      observation.ownState?.tilesOwned ?? 0,
+    ) >= 0.08;
+  const minRatio =
+    openingLive && !collapsing
+      ? Math.max(1, warModeMinStrikeRatio())
+      : warModeMinStrikeRatio();
   // Set-level ladder gate: an ACTIVE invader anywhere in the target set means
   // pure max-commit defense for this whole selection (see comment in sort).
   const invaders = observation.combat.incomingAttackPlayerIDs;
@@ -22297,7 +22318,7 @@ function plannerPrompt(
     "END_CURRENT_CONTROL_DIRECTIVE",
     ...(thinExecutorEnabled()
       ? [
-          "THIN EXECUTOR ACTIVE: the executor executes YOUR named intent each cycle with minimal reinterpretation — a pressure plan with a targetPlayerId attacks that target every decision it legally can; a growth plan expands into neutral land. Your binding directives (commitment, allianceDirective, buildDirective) always pre-empt the named intent, and invasion defense pre-empts everything. That makes your target choice the whole game: name it precisely, update it the moment the situation changes, and own the build cadence yourself (emit buildDirective when economy or deterrence needs a turn) and diplomacy (allianceDirective).",
+          "THIN EXECUTOR ACTIVE: the executor executes YOUR named intent each cycle with minimal reinterpretation — a pressure plan with a targetPlayerId attacks that target every decision it legally can; a growth plan expands into neutral land. Your binding directives (commitment, allianceDirective, buildDirective) always pre-empt the named intent, and invasion defense pre-empts everything. That makes your target choice the whole game: name it precisely, update it the moment the situation changes, and NEVER camp a dead target — if your named pressure target has produced no executed attack for several cycles (they out-troop you and every strike is gated), RETARGET to the best rival you can actually hit or switch to growth/economy; a pressure plan that executes nothing is a forfeit. Own the build cadence yourself (emit buildDirective when economy or deterrence needs a turn) and diplomacy (allianceDirective).",
           "KILL-CHAIN DISCIPLINE (thin executor): commit to ONE target and stay on it until they are broken (tiles collapsing) or dead — switching targets mid-fight forfeits every prior exchange. Sequence your kills: when opening hostilities take the WEAKEST reachable rival first (fast eliminations snowball your land and economy), then the next weakest; fight the strongest player only with a coalition at your back or when they come for you. Expand while you have free land; the moment your frontier meets a rival you cannot avoid, the kill-chain starts.",
         ]
       : []),
