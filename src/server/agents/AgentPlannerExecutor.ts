@@ -1424,11 +1424,20 @@ export class FrontierPolicyExecutor implements AgentExecutor {
     // the best non-expansion development/war candidate instead — 77% of the
     // measured loss-game expand picks were dead turns.
     let openingCommitText = "";
+    // v16 (side-by-side allocator forensics): the troop-floor condition
+    // disarmed the commit exactly when we had just SPENT troops on the last
+    // 35% expand — ratio dips below the floor, a 10% expand leaks through,
+    // ratio recovers, oscillate. Six 10% expands leaked per gate game while
+    // the league leader holds 35% regardless of troops (spent troops return
+    // as territory income). During the opening window the commitment ignores
+    // the troop floor entirely; the floor still gates the post-opening case.
+    const openingWindowLive = input.observation.turnNumber <= 3_000;
     if (
       openingCommitEnabled() &&
-      (input.observation.combat.troopRatio ??
-        input.observation.ownState?.troopRatio ??
-        0) >= openingCommitTroopFloor() &&
+      (openingWindowLive ||
+        (input.observation.combat.troopRatio ??
+          input.observation.ownState?.troopRatio ??
+          0) >= openingCommitTroopFloor()) &&
       (input.observation.ownState?.tileShare ?? 0) < 0.35
     ) {
       const ownTroopsNow =
