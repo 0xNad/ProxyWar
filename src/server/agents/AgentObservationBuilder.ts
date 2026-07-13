@@ -380,6 +380,12 @@ export class AgentObservationBuilder {
           incomingAttack: player
             .incomingAttacks()
             .some((attack) => attack.attacker() === other),
+          // Rival-under-siege signal (0.1.6): incomingAttack above is
+          // AGENT-relative ("this rival is attacking ME"). underSiege is the
+          // rival's own state — ANY live attack on them, from anyone — the
+          // signal coalition support needs ("prop up the leader's victim")
+          // that was previously underivable from the observation.
+          ...(other.incomingAttacks().length > 0 ? { underSiege: true } : {}),
           hasOutgoingAllianceRequest,
           hasIncomingAllianceRequest,
           ...(allianceInfo !== null

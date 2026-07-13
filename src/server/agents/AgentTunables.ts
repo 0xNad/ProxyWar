@@ -190,3 +190,231 @@ export function diplomacySlotsEnabled(): boolean {
 export function diplomacyReservedSlots(): number {
   return Math.max(1, Math.min(24, tunedNumber("DIPLOMACY_RESERVE", 8)));
 }
+
+/**
+ * Dominance-conversion flag (keystone v6, league-loss analysis 2026-07-12). Reads the
+ * EXACT env var `PROXYWAR_TUNE_DOMINANCE_CONVERSION` (A/B arms set "0"/"1"). DEFAULT
+ * OFF — ships inert and is armed via the pod env after hosted A/B. Fixes the measured
+ * Commander inertia (league R.189: 223 expand_territory orders vs 11 pressure_rival
+ * while holding a winning share; hostile options offered every endgame decision): the
+ * growth control gate fires whenever ANY neutral land remains, with no share cap, so a
+ * dominant agent is told to keep expanding into neutral instead of eliminating rivals.
+ * When ON, the planner brief derives a STRATEGIC_PICTURE line for every plan and, when
+ * the agent's tile share exceeds DOMINANCE_RATIO x the strongest bordered rival's (and
+ * the share floor, with home danger not high and an attackable bordered rival), emits a
+ * strong-hint pressure_rival control + a DOMINANCE WINDOW prompt block asking for a
+ * binding commitment. Prompt/controls only: no executor scoring, ranking, or safety
+ * change, and no new action source — the Commander still owns the strategy call.
+ */
+export function dominanceConversionEnabled(): boolean {
+  return tunedNumber("DOMINANCE_CONVERSION", 0) >= 1;
+}
+
+/**
+ * Dominance ratio (`PROXYWAR_TUNE_DOMINANCE_RATIO`, default 1.3): own tile share must
+ * be at least this multiple of the strongest bordered non-allied rival's share for the
+ * dominance window to open. Clamped to >= 1 so the window can never open from behind.
+ */
+export function dominanceConversionRatio(): number {
+  return Math.max(1, tunedNumber("DOMINANCE_RATIO", 1.3));
+}
+
+/**
+ * Dominance share floor (`PROXYWAR_TUNE_DOMINANCE_SHARE_FLOOR`, default 0.12): minimum
+ * own tile share before the dominance window can open, so early spawn-phase noise (a
+ * 2% share "dominating" a 1% neighbor) never triggers conversion before a base exists.
+ * Sits deliberately above the BASE_TILESHARE_FLOOR must-follow expansion gate (0.1).
+ */
+export function dominanceConversionShareFloor(): number {
+  return Math.max(0, tunedNumber("DOMINANCE_SHARE_FLOOR", 0.12));
+}
+
+/**
+ * Wire-primary argmax flag (keystone v7, 4-game forensics 2026-07-12). Reads the EXACT
+ * env var `PROXYWAR_TUNE_PRIMARY_ARGMAX` (A/B arms set "0"/"1"). DEFAULT OFF. The
+ * Frontier scheduler assembles multi-action batches whose PRIMARY is chosen by module
+ * rotation, not score — correct for the local runtime (the whole batch executes) but
+ * catastrophic on single-action wires (Coworld carries ONE selectedLegalActionId per
+ * decision): measured 28/40 decisions in one hosted game shipped a score-9-16 neutral
+ * expand while a score-100 defensive build / combat attack / mainland expand rode the
+ * batch and was dropped. When ON, the batch is reordered so the highest-scored
+ * promotable candidate (attack/boat/build/upgrade — never diplomacy, social, or nuke,
+ * whose cross-module scores are not calibrated against these) becomes the primary,
+ * and a deliberate combat primary is never displaced by a different combat action
+ * (target choice is intentional). Batch CONTENT is unchanged — only the order.
+ */
+export function primaryArgmaxEnabled(): boolean {
+  return tunedNumber("PRIMARY_ARGMAX", 0) >= 1;
+}
+
+/**
+ * War-mode flag (keystone v7, 4-game forensics 2026-07-12). Reads the EXACT env var
+ * `PROXYWAR_TUNE_WAR_MODE` (A/B arms set "0"/"1"). DEFAULT OFF. Fixes the measured
+ * terminal passivity: invaded at near-parity (threat=1, urgency=high, tiles shrinking
+ * for 1200 turns) the agent answered an 11-attack sustained invasion with one 10%
+ * probe, because every attack gate demands a clear troop edge that a defender-
+ * advantage endgame never shows. When ON, two regimes authorize a forced
+ * counterstrike selected from OFFERED actions only: (a) under invasion — incoming
+ * attacks present AND own tiles falling; (b) endgame duel — exactly one bordered
+ * non-allied rival, at least our share, combined share >= WAR_DUEL_COMBINED_SHARE.
+ * In these regimes the strike ratio floor drops to WAR_MIN_RATIO (default 0.8) and
+ * the risk-level gate is replaced by that ratio floor plus the reserve-suicide
+ * penalty check. Targets only the actual invader(s) or the duel leader.
+ */
+export function warModeEnabled(): boolean {
+  return tunedNumber("WAR_MODE", 0) >= 1;
+}
+
+/** War-mode strike ratio floor (`PROXYWAR_TUNE_WAR_MIN_RATIO`, default 0.8, clamped 0.5-1.5). */
+export function warModeMinStrikeRatio(): number {
+  return Math.max(0.5, Math.min(1.5, tunedNumber("WAR_MIN_RATIO", 0.8)));
+}
+
+/** War-mode duel combined-share threshold (`PROXYWAR_TUNE_WAR_DUEL_COMBINED_SHARE`, default 0.6). */
+export function warModeDuelCombinedShare(): number {
+  return Math.max(0.3, Math.min(0.95, tunedNumber("WAR_DUEL_COMBINED_SHARE", 0.6)));
+}
+
+/**
+ * Coalition flag (keystone v8, operator directive 2026-07-12: "gang up on the
+ * leader"). Reads the EXACT env var `PROXYWAR_TUNE_COALITION` (A/B arms set
+ * "0"/"1"). DEFAULT OFF. Anti-runaway-leader balance-of-power play: when one
+ * rival's map share exceeds COALITION_LEADER_FLOOR and COALITION_LEADER_RATIO x
+ * our own, the Commander prompt gains a COALITION MODE block (do not attack
+ * non-leaders, accept their alliances, aim all pressure at the leader) and the
+ * executor gains one leaf: force-accept an incoming alliance request from a
+ * non-leader (acceptance = the counter alliance_request; core forms the
+ * alliance on mutual request, PlayerImpl.canSendAllianceRequest returns true
+ * exactly for this case). Arm together with WAR_MODE so the invaded case stays
+ * covered above this leaf. (A besieged-ally donation leaf was designed and
+ * removed pre-ship: no rival-under-siege signal exists in the observation yet.)
+ * Measured basis: in every analyzed loss the agent co-farmed the minors —
+ * feeding the leader both corpses — and ignored explicit coordinate-attack
+ * proposals from the third seat.
+ */
+export function coalitionEnabled(): boolean {
+  return tunedNumber("COALITION", 0) >= 1;
+}
+
+/** Coalition leader share floor (`PROXYWAR_TUNE_COALITION_LEADER_FLOOR`, default 0.18). */
+export function coalitionLeaderShareFloor(): number {
+  return Math.max(0.05, Math.min(0.6, tunedNumber("COALITION_LEADER_FLOOR", 0.18)));
+}
+
+/** Coalition leader ratio vs own share (`PROXYWAR_TUNE_COALITION_LEADER_RATIO`, default 1.15, clamped >= 1). */
+export function coalitionLeaderRatio(): number {
+  return Math.max(1, tunedNumber("COALITION_LEADER_RATIO", 1.15));
+}
+
+/**
+ * Opening-tempo flag (keystone v8, tempo forensics 2026-07-12). Reads the EXACT
+ * env var `PROXYWAR_TUNE_OPENING_TEMPO` (A/B arms set "0"/"1"). DEFAULT OFF.
+ * Measured: the agent's per-decision expand yield EQUALS the league leader's,
+ * but it spends only 7-9 of its first 17 decisions expanding (leader: 13-15) —
+ * boats and builds eat the slots and the tile deficit at t2000 decides games.
+ * When ON, during the opening window (turn <= 3000): the early neutral-island
+ * boat rush is skipped while a mainland neutral expand is offered, and — only
+ * with no incoming attacks — a multi-action batch whose primary is not an
+ * attack gets its best neutral land expand promoted to the wire primary.
+ * Survival/binding-directive singletons are structurally untouched (length-1
+ * batches are never reordered).
+ */
+export function openingTempoEnabled(): boolean {
+  return tunedNumber("OPENING_TEMPO", 0) >= 1;
+}
+
+/**
+ * Opening-commitment flag (keystone v13, qd1n forensics 2026-07-13). Reads the
+ * EXACT env var `PROXYWAR_TUNE_OPENING_COMMIT` (A/B arms "0"/"1"). DEFAULT OFF.
+ * Measured: the league's new leader ramps neutral-expansion troop commitment
+ * 10->20->35% by t700 and holds 35%; keystone pins 10% while sitting on a
+ * near-cap idle stack (900k troops, troopRatio 0.67 at t600) and loses the
+ * land race 5:1 by t2000 — every later failure is downstream of being the
+ * smallest seat. When ON, the neutral-expansion commitment is FLOORED at
+ * OPENING_COMMIT_RATIO (default 0.35) whenever own troopRatio >=
+ * OPENING_COMMIT_TROOP_FLOOR (default 0.55) — idle troops buy land; the
+ * recentExpansionCount de-escalation applies only when troops are actually
+ * scarce.
+ */
+export function openingCommitEnabled(): boolean {
+  return tunedNumber("OPENING_COMMIT", 0) >= 1;
+}
+
+/** Floored expansion commitment when troops idle high (default 0.35, clamped 0.1-0.5). */
+export function openingCommitRatio(): number {
+  return Math.max(0.1, Math.min(0.5, tunedNumber("OPENING_COMMIT_RATIO", 0.35)));
+}
+
+/** Own troopRatio above which the commitment floor applies (default 0.55). */
+export function openingCommitTroopFloor(): number {
+  return Math.max(0.2, Math.min(0.95, tunedNumber("OPENING_COMMIT_TROOP_FLOOR", 0.55)));
+}
+
+/**
+ * Naval-war flag (keystone v13, qd1n forensics 2026-07-13). Reads the EXACT env
+ * var `PROXYWAR_TUNE_NAVAL_WAR` (A/B arms "0"/"1"). DEFAULT OFF. Measured (the
+ * 15,600-turn freeze): with NO bordered rivals the planner brief said "no
+ * executor-ready pressure target" forever, the seat banked 10.3M troops (100%
+ * cap) + 67M gold, spent 105 consecutive primaries on no-op neutral expansions
+ * (own tiles never changed), launched 3 boats all game, and watched the leader
+ * walk to an 84.9% domination win. When ON: if no bordered non-allied rival
+ * exists, at least one rival is alive, and own troopRatio >=
+ * NAVAL_WAR_TROOP_FLOOR (default 0.7), the best offered PLAYER-targeting boat
+ * becomes the forced primary (war goes to sea); and a neutral-expansion primary
+ * whose recent picks changed nothing (own tiles flat) is suppressed in favor of
+ * the best non-expansion candidate.
+ */
+export function navalWarEnabled(): boolean {
+  return tunedNumber("NAVAL_WAR", 0) >= 1;
+}
+
+/** Own troopRatio above which the naval war trips (default 0.7). */
+export function navalWarTroopFloor(): number {
+  return Math.max(0.3, Math.min(0.95, tunedNumber("NAVAL_WAR_TROOP_FLOOR", 0.7)));
+}
+
+/**
+ * Thin-executor flag (keystone v11, architectural experiment 2026-07-12). Reads
+ * the EXACT env var `PROXYWAR_TUNE_THIN_EXECUTOR` (A/B arms set "0"/"1").
+ * DEFAULT OFF. Five A/B cycles established mechanical parity with the league
+ * leader while still losing every mid-game: his architecture executes the LLM
+ * plan's named action+target with near-zero reinterpretation, ours re-derives
+ * the decision through a deep heuristic cascade that plays the conversion
+ * phase worse than the model does. When ON, a high-priority leaf executes the
+ * CURRENT plan's named intent directly: a pressure plan with a targetPlayerId
+ * selects the best offered qualifying attack on that target every cycle; a
+ * growth plan selects the best offered mainland neutral expand. Survival
+ * recoveries still pre-empt; binding directives (commitment / alliance /
+ * build) behave as before; all other intents fall through to the cascade.
+ * Selects only offered `LegalAction.id`s — this removes reinterpretation, it
+ * adds no new action source.
+ */
+export function thinExecutorEnabled(): boolean {
+  return tunedNumber("THIN_EXECUTOR", 0) >= 1;
+}
+
+/**
+ * Attack-ladder flag (keystone v8). Reads the EXACT env var
+ * `PROXYWAR_TUNE_ATTACK_LADDER` (A/B arms set "0"/"1"). DEFAULT OFF. The league
+ * leader escalates per target — 10% probe, 25%, then 40% kill commits — while
+ * keystone grinds a flat 25% that never cracks a defended core. When ON, the
+ * war-mode counterstrike prefers the offered attack whose troop commitment is
+ * closest to the ladder step for that target (0 prior consecutive attacks ->
+ * ~10%, 1 -> ~25%, 2+ -> ~40%) instead of always the largest commitment.
+ */
+export function attackLadderEnabled(): boolean {
+  return tunedNumber("ATTACK_LADDER", 0) >= 1;
+}
+
+/**
+ * Economy-bootstrap minimum own tiles (`PROXYWAR_TUNE_ECONOMY_BOOTSTRAP_MIN_TILES`,
+ * default 0 = shipped behavior). Opening-tempo forensics (2026-07-12): with the
+ * bootstrap armed, the agent builds its first City at t400 with 52 tiles in every
+ * game, donating a ~100-turn land-grab head start; the winning rival builds its first
+ * City at ~20k tiles / t1100. When set, the whole bootstrap (banking + forced
+ * structure) stays dormant until the agent owns at least this many tiles, so the
+ * opening decision budget goes to territory first.
+ */
+export function economyBootstrapMinTiles(): number {
+  return Math.max(0, tunedNumber("ECONOMY_BOOTSTRAP_MIN_TILES", 0));
+}

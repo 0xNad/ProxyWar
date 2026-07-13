@@ -15,17 +15,36 @@ import {
 } from "./AgentStrategicSkills";
 import { buildAgentTacticalAffordances } from "./AgentTacticalAffordances";
 import {
+  attackLadderEnabled,
   behindAndFallingEscapeEnabled,
+  coalitionEnabled,
+  coalitionLeaderRatio,
+  coalitionLeaderShareFloor,
   directiveBuildEnabled,
   directiveCommitmentEnabled,
   directiveDiplomacyEnabled,
+  dominanceConversionEnabled,
+  dominanceConversionRatio,
+  dominanceConversionShareFloor,
   economyBootstrapEnabled,
+  economyBootstrapMinTiles,
   enforceConversionOverNeutralEnabled,
   goldPressureEnabled,
   goldPressureFloor,
   goldPressureMirvBankFloor,
+  navalWarEnabled,
+  navalWarTroopFloor,
+  openingCommitEnabled,
+  openingCommitRatio,
+  openingCommitTroopFloor,
+  openingTempoEnabled,
+  primaryArgmaxEnabled,
+  thinExecutorEnabled,
   tunedNumber,
   upgradeVisibilityEnabled,
+  warModeDuelCombinedShare,
+  warModeEnabled,
+  warModeMinStrikeRatio,
 } from "./AgentTunables";
 import {
   sanitizeUntrustedDisplayString,
@@ -1354,6 +1373,191 @@ export class FrontierPolicyExecutor implements AgentExecutor {
         }
       }
     }
+    // Opening tempo primary (v8, flag-gated): during the opening window, a
+    // multi-action batch whose module-rotation primary is not an attack hands
+    // the single-action wire to a build/boat/social pick — measured as the
+    // decisive tile-race loss (7-9 of 17 opening decisions expanding vs the
+    // league leader's 13-15, with equal per-expand yield). Promote the best
+    // mainland neutral expand to primary instead. Forced singletons untouched;
+    // argmax is skipped when this fires (it could re-promote a build over the
+    // tempo play).
+    let openingTempoText = "";
+    if (
+      openingTempoEnabled() &&
+      input.observation.turnNumber <= 3_000 &&
+      selectedBatch.length > 1 &&
+      input.observation.combat.incomingAttackPlayerIDs.length === 0 &&
+      selectedBatch[0]!.action.kind !== "attack"
+    ) {
+      const landExpand = selectedBatch
+        .filter(
+          (candidate) =>
+            candidate.action.kind === "attack" &&
+            candidate.action.metadata?.expansion === true,
+        )
+        .sort(
+          (a, b) =>
+            b.totalScore - a.totalScore ||
+            a.action.id.localeCompare(b.action.id),
+        )[0];
+      if (landExpand !== undefined) {
+        openingTempoText = ` openingTempo=promoted(expand over ${selectedBatch[0]!.action.kind})`;
+        selectedBatch = [
+          landExpand,
+          ...selectedBatch.filter((candidate) => candidate !== landExpand),
+        ];
+      }
+    }
+    // Frontier-commitment enforcement (v13, widened v14 per daveey forensics):
+    // wire-level guarantee that idle troops buy land ANY time meaningful
+    // frontier remains — not just in the opening. Hosted telemetry proved the
+    // v13 version produced parity exactly while it fired and the loss window
+    // was exactly where the shipped anti-repeat rotation + "opening land grab
+    // only" penalty clamped the grind back to 10-20% (the league's winning
+    // agents expand at a FLAT 35% forever). v14 widening: (a) fires when the
+    // primary is a low-commit expand OR a neutral banking BOAT while land
+    // expands are offered (the measured dead loop); (b) share ceiling 0.26 ->
+    // 0.35; (c) the swap-target filter deliberately IGNORES scorer penalties
+    // (that bypass is the point — anti-repeat must not break commitment), and
+    // (d) NO-OP SUPPRESSION: when recent accepted expands changed nothing
+    // (tiles flat across recent memory), the expansion primary is swapped for
+    // the best non-expansion development/war candidate instead — 77% of the
+    // measured loss-game expand picks were dead turns.
+    let openingCommitText = "";
+    // v16 (side-by-side allocator forensics): the troop-floor condition
+    // disarmed the commit exactly when we had just SPENT troops on the last
+    // 35% expand — ratio dips below the floor, a 10% expand leaks through,
+    // ratio recovers, oscillate. Six 10% expands leaked per gate game while
+    // the league leader holds 35% regardless of troops (spent troops return
+    // as territory income). During the opening window the commitment ignores
+    // the troop floor entirely; the floor still gates the post-opening case.
+    const openingWindowLive = input.observation.turnNumber <= 3_000;
+    if (
+      openingCommitEnabled() &&
+      (openingWindowLive ||
+        (input.observation.combat.troopRatio ??
+          input.observation.ownState?.troopRatio ??
+          0) >= openingCommitTroopFloor()) &&
+      (input.observation.ownState?.tileShare ?? 0) < 0.35
+    ) {
+      const ownTroopsNow =
+        input.observation.combat.ownTroops ??
+        input.observation.ownState?.troops ??
+        0;
+      const primaryAction = selectedBatch[0]?.action ?? scored[0]?.action;
+      const recentDecisions = input.observation.memory.recentActions;
+      const recentTiles = recentDecisions
+        .map((decision) => decision.ownTiles ?? 0)
+        .filter((tiles) => tiles > 0);
+      const recentAcceptedExpands = recentDecisions.filter(
+        (decision) =>
+          decision.accepted === true && decision.actionKind === "attack",
+      ).length;
+      const tilesFlat =
+        recentTiles.length >= 4 &&
+        recentAcceptedExpands >= 3 &&
+        Math.max(...recentTiles) === Math.min(...recentTiles);
+      const primaryIsExpand =
+        primaryAction !== undefined &&
+        primaryAction.kind === "attack" &&
+        primaryAction.metadata?.expansion === true;
+      const landExpandOffered = scored.some(
+        (candidate) =>
+          candidate.action.kind === "attack" &&
+          candidate.action.metadata?.expansion === true,
+      );
+      const primaryIsBankingBoat =
+        primaryAction !== undefined &&
+        primaryAction.kind === "boat" &&
+        metadataString(primaryAction, "targetID") === null &&
+        landExpandOffered;
+      if (primaryIsExpand && tilesFlat) {
+        // No-op suppression: expansion is doing literally nothing — develop
+        // or fight instead (build/upgrade/player-boat preferred over more
+        // neutral banking).
+        const development = scored
+          .filter((candidate) => {
+            const kind = candidate.action.kind;
+            if (kind === "build" || kind === "upgrade_structure") {
+              return true;
+            }
+            if (kind === "boat") {
+              return metadataString(candidate.action, "targetID") !== null;
+            }
+            return (
+              kind === "attack" &&
+              candidate.action.metadata?.expansion !== true
+            );
+          })
+          .sort(
+            (a, b) =>
+              b.totalScore - a.totalScore ||
+              a.action.id.localeCompare(b.action.id),
+          )[0];
+        if (development !== undefined && development.action !== primaryAction) {
+          openingCommitText = ` openingCommit=noopSuppressed(${development.action.id})`;
+          selectedBatch = [
+            development,
+            ...selectedBatch.filter((candidate) => candidate !== development),
+          ];
+        }
+      } else if (
+        (primaryIsExpand &&
+          committedTroopRatio(primaryAction, ownTroopsNow) <
+            openingCommitRatio() - 0.05) ||
+        // !tilesFlat (reviewer): never re-install an expand the no-op detector
+        // has already condemned — the navalWar fallback can emit a banking
+        // boat exactly when tiles are flat.
+        (primaryIsBankingBoat && !tilesFlat)
+      ) {
+        const better = scored
+          .filter(
+            (candidate) =>
+              candidate.action.kind === "attack" &&
+              candidate.action.metadata?.expansion === true &&
+              candidate.action.risk.level !== "high",
+          )
+          .sort(
+            (a, b) =>
+              Math.abs(
+                committedTroopRatio(a.action, ownTroopsNow) -
+                  openingCommitRatio(),
+              ) -
+                Math.abs(
+                  committedTroopRatio(b.action, ownTroopsNow) -
+                    openingCommitRatio(),
+                ) ||
+              b.totalScore - a.totalScore ||
+              a.action.id.localeCompare(b.action.id),
+          )[0];
+        if (better !== undefined && better.action !== primaryAction) {
+          openingCommitText = ` openingCommit=escalated(${better.action.id})`;
+          selectedBatch = [
+            better,
+            ...selectedBatch.filter((candidate) => candidate !== better),
+          ];
+        }
+      }
+    }
+    // Wire-primary argmax (v7, flag-gated): reorder so the best-scored promotable
+    // action leads the batch — on single-action wires only the primary executes.
+    // Applied after every selector so batch membership is already final.
+    let primaryArgmaxText = "";
+    if (
+      primaryArgmaxEnabled() &&
+      openingTempoText === "" &&
+      // The openingCommit escalation is a wire-level guarantee (reviewer
+      // finding): argmax must not demote the floored expand it just installed.
+      openingCommitText === "" &&
+      selectedBatch.length > 1
+    ) {
+      const before = selectedBatch[0]!;
+      const reordered = promoteArgmaxPrimary(selectedBatch);
+      if (reordered[0] !== before) {
+        primaryArgmaxText = ` primaryArgmax=promoted(${reordered[0]!.action.kind}/${reordered[0]!.totalScore} over ${before.action.kind}/${before.totalScore})`;
+        selectedBatch = reordered;
+      }
+    }
     const selected = selectedBatch[0] ?? scored[0];
     const profileRepairRerank = profileRepairRerankAudit(scored, selectedBatch);
     const topContributions = selectedBatch
@@ -1391,6 +1595,17 @@ export class FrontierPolicyExecutor implements AgentExecutor {
       selectedBatch[0] === goldPressurePick
         ? ` goldPressure=spend-down(gold=${parsedObservedGold(input.observation) ?? "?"}>floor=${effectiveGoldPressureFloor(input.observation)},streak=${this.goldPressureRichStreak})`
         : "";
+    // War-mode audit trail (v7): when the forced counterstrike IS the selected
+    // single action, say so in the reason. Recomputed pure (same inputs as the
+    // cascade leaf) and compared by identity; empty string whenever the flag is
+    // off or a different action was selected — reason stays byte-identical.
+    const warModePick = warModeCounterstrikeCandidate(input, scored);
+    const warModeText =
+      warModePick !== undefined &&
+      selectedBatch.length === 1 &&
+      selectedBatch[0] === warModePick
+        ? ` warMode=counterstrike(target=${actionPlayerID(warModePick.action) ?? "?"})`
+        : "";
     const holdReasonCategory = holdReasonCategoryForSelected({
       selected,
       input,
@@ -1401,7 +1616,7 @@ export class FrontierPolicyExecutor implements AgentExecutor {
       ...(selectedBatch.length > 1
         ? { actionIDs: selectedBatch.map((candidate) => candidate.action.id) }
         : {}),
-      reason: `Frontier module scheduler queued ${selectedBatch.length} action(s), primary ${selected.action.label} total=${selected.totalScore} schedule=${topContributions}${skillText}${penalties}${contextText}${goldPressureText}`,
+      reason: `Frontier module scheduler queued ${selectedBatch.length} action(s), primary ${selected.action.label} total=${selected.totalScore} schedule=${topContributions}${skillText}${penalties}${contextText}${goldPressureText}${warModeText}${primaryArgmaxText}${openingTempoText}${openingCommitText}`,
       planFollowed: selectedBatch.some((candidate) =>
         actionAlignsPlan(candidate.action, plan),
       ),
@@ -2223,6 +2438,10 @@ function economyBootstrapBankingActive(
 ): boolean {
   return (
     economyBootstrapEnabled() &&
+    // Opening-tempo guard (v7): the whole bootstrap sleeps until the agent owns a
+    // real land base, so the first City stops pre-empting the t400-2000 land grab
+    // (default 0 keeps shipped behavior; the pod env arms a threshold).
+    (observation.ownState?.tilesOwned ?? 0) >= economyBootstrapMinTiles() &&
     economyBootstrapCascadeIncomplete(observation) &&
     !incomingHomePressure(observation)
   );
@@ -2513,6 +2732,56 @@ function backstabAllyBreakCandidate(
   )[0];
 }
 
+/**
+ * Wire-primary argmax reorder (v7, PROXYWAR_TUNE_PRIMARY_ARGMAX — pure; exported
+ * for tests; the flag check lives at the call site). The scheduler's batch primary
+ * is chosen by module rotation, which single-action wire runtimes turn into a
+ * systematic error: only the primary executes, so a score-9 neutral expand ships
+ * while a score-100 defensive build rides the batch and is dropped (measured 28/40
+ * decisions in one hosted game). Reorders the batch so the highest-scored
+ * PROMOTABLE candidate leads. Deliberately narrow:
+ *   - promotable kinds: attack / boat / build / upgrade_structure / warship —
+ *     never diplomacy, social, or nuke (cross-module scores are not calibrated
+ *     against these, and nukes keep their own strategic gate);
+ *   - a deliberate combat primary (non-expansion conquest action) is never
+ *     displaced by a DIFFERENT combat action — target choice is intentional;
+ *   - promotion requires a STRICTLY higher totalScore.
+ * Batch membership is unchanged — this reorders only.
+ */
+export function promoteArgmaxPrimary(
+  batch: readonly FrontierRankedAction[],
+): FrontierRankedAction[] {
+  if (batch.length < 2) {
+    return [...batch];
+  }
+  const primary = batch[0]!;
+  const promotableKinds = new Set([
+    "attack",
+    "boat",
+    "build",
+    "upgrade_structure",
+    "warship",
+  ]);
+  const isCombatConquest = (action: LegalAction) =>
+    isDirectConquestAction(action) && action.kind !== "nuke";
+  const top = batch
+    .filter((candidate) => promotableKinds.has(candidate.action.kind))
+    .sort(
+      (a, b) =>
+        b.totalScore - a.totalScore || a.action.id.localeCompare(b.action.id),
+    )[0];
+  if (top === undefined || top === primary) {
+    return [...batch];
+  }
+  if (top.totalScore <= primary.totalScore) {
+    return [...batch];
+  }
+  if (isCombatConquest(primary.action) && isCombatConquest(top.action)) {
+    return [...batch];
+  }
+  return [top, ...batch.filter((candidate) => candidate !== top)];
+}
+
 function selectFrontierActionBatch(input: {
   input: AgentBrainInput;
   plan: StrategicPlan;
@@ -2609,6 +2878,21 @@ function selectFrontierActionBatch(input: {
   if (buildDirectiveAction !== undefined) {
     return [buildDirectiveAction];
   }
+  // Thin plan execution (v11, flag-gated): the Commander's named intent IS the
+  // decision — pressure-with-target attacks that target, growth expands.
+  // Sits BELOW the three binding directives (reviewer finding B: commitment /
+  // alliance / build keep their documented precedence, so the prompt's "own
+  // the build cadence via buildDirective" guidance actually works) and BELOW
+  // the survival recoveries; the leaf itself stands down when the war-mode
+  // invasion regime is live. Undefined falls through to the cascade unchanged.
+  const thinPlanExecution = thinPlanExecutionCandidate(
+    input.input,
+    plan,
+    scored,
+  );
+  if (thinPlanExecution !== undefined) {
+    return [thinPlanExecution];
+  }
   // Gold-pressure spend-down (K2, PROXYWAR_TUNE_GOLD_PRESSURE, default OFF): once
   // gold has sat above the effective pressure floor for >=2 consecutive decisions,
   // force the highest-ranked offered build/upgrade (never a nuke — the kind filter
@@ -2651,6 +2935,41 @@ function selectFrontierActionBatch(input: {
   const backstabAllyBreak = backstabAllyBreakCandidate(input.input, scored);
   if (backstabAllyBreak !== undefined) {
     return [backstabAllyBreak];
+  }
+  // War mode (v7, PROXYWAR_TUNE_WAR_MODE, default OFF): under invasion-and-shrinking
+  // or an endgame duel with the leader, force the best offered counterstrike on the
+  // actual aggressor/leader at the relaxed WAR_MIN_RATIO floor. Sits BELOW survival
+  // recoveries and every binding directive (those still win) and ABOVE FM-2a — the
+  // invader outranks the juiciest bystander target. Single-action batch: the
+  // counterstrike IS this cycle's decision. No-op when the flag is off or neither
+  // regime holds.
+  const warModeCounterstrike = warModeCounterstrikeCandidate(
+    input.input,
+    scored,
+  );
+  if (warModeCounterstrike !== undefined) {
+    return [warModeCounterstrike];
+  }
+  // Coalition leaf (v8, PROXYWAR_TUNE_COALITION, default OFF): while a runaway
+  // leader exists, accept a pending alliance request from a non-leader — the
+  // counter alliance_request IS the acceptance in core, and no league policy
+  // prioritizes it, so agent-agent alliances otherwise never form. Below
+  // survival / binding directives / war-mode (all still win — arm COALITION
+  // together with WAR_MODE so the invaded case stays covered); above FM-2a and
+  // the expansion paths. Single-action batch: the alliance IS this decision.
+  const coalitionAccept = coalitionAllianceAcceptCandidate(input.input, scored);
+  if (coalitionAccept !== undefined) {
+    return [coalitionAccept];
+  }
+  // Naval war (v13, PROXYWAR_TUNE_NAVAL_WAR, default OFF): with no land border
+  // to any rival, "no pressure target" is a false peace — force the best
+  // offered player-targeting boat (or, when expansion has stopped changing the
+  // tile count, the best real development action) so the seat can never freeze
+  // for thousands of turns banking capped troops while a leader walks to
+  // domination. Below war-mode/coalition (disjoint regimes) and above FM-2a.
+  const navalWar = navalWarCandidate(input.input, scored);
+  if (navalWar !== undefined) {
+    return [navalWar];
   }
   // FM-2a ("trade or die"): when behind-and-falling, force the single best
   // controlled strike before the neutral-territory / banking / hold paths below,
@@ -2706,10 +3025,25 @@ function selectFrontierActionBatch(input: {
   if (demoQualityEconomyHandoff !== undefined) {
     return [demoQualityEconomyHandoff];
   }
-  const earlyNeutralIslandRush = directSelectionCandidate(
-    earlyNeutralIslandRushCandidate(input.input, plan, settings, scored),
-    { allowPlannerForbidden: true },
-  );
+  // Opening tempo (v8, flag-gated): while the opening window is live and a
+  // MAINLAND neutral expand is offered, skip the island boat rush entirely —
+  // measured: each opening boat pick costs ~4.4k tiles of next-interval growth
+  // vs the land expand it displaces, and the t900-1200 boat streak is where the
+  // tile race was lost. Boats resume when the mainland frontier is exhausted.
+  const openingTempoLandFirst =
+    openingTempoEnabled() &&
+    input.input.observation.turnNumber <= 3_000 &&
+    scored.some(
+      (candidate) =>
+        candidate.action.kind === "attack" &&
+        candidate.action.metadata?.expansion === true,
+    );
+  const earlyNeutralIslandRush = openingTempoLandFirst
+    ? undefined
+    : directSelectionCandidate(
+        earlyNeutralIslandRushCandidate(input.input, plan, settings, scored),
+        { allowPlannerForbidden: true },
+      );
   if (earlyNeutralIslandRush !== undefined) {
     return territoryMaximizerBatch(
       earlyNeutralIslandRush,
@@ -5705,6 +6039,16 @@ function desiredStandingNeutralLandCommitment(
     observation.combat.troopRatio ?? observation.ownState?.troopRatio ?? 0;
   const ownTileShare =
     observation.ownState?.tileShare ?? observation.endgame?.ownTileShare ?? 0;
+  // Opening-commitment floor (v13, flag-gated): same idle-troops-buy-land rule
+  // as the opening path — while troops are plentiful and share is small, the
+  // standing neutral grind must not trickle at 10-20%.
+  if (
+    openingCommitEnabled() &&
+    troopRatio >= openingCommitTroopFloor() &&
+    ownTileShare < 0.26
+  ) {
+    return Math.max(openingCommitRatio(), 0.2);
+  }
   if (troopRatio <= settings.retreatThreshold * 0.5) {
     return 0.1;
   }
@@ -5761,6 +6105,36 @@ function desiredOpeningExpansionCommitment(
   const troopRatio =
     observation.combat.troopRatio ?? observation.ownState?.troopRatio ?? 1;
   const recentExpansionCount = observation.memory.recentExpansionCount;
+  // Opening-commitment floor (v13, flag-gated): idle troops buy land. The
+  // measured league loss: a fixed-10% grind with troopRatio 0.67 and 900k
+  // banked was out-expanded 5:1 by an opponent holding 35%. While troops are
+  // plentiful the recentExpansionCount de-escalation must not starve the
+  // land race — it exists to protect a SCARCE troop pool, not a full one.
+  if (openingCommitEnabled() && troopRatio >= openingCommitTroopFloor()) {
+    return Math.max(
+      openingCommitRatio(),
+      desiredOpeningExpansionCommitmentShipped(
+        ownTiles,
+        troopRatio,
+        recentExpansionCount,
+        settings,
+      ),
+    );
+  }
+  return desiredOpeningExpansionCommitmentShipped(
+    ownTiles,
+    troopRatio,
+    recentExpansionCount,
+    settings,
+  );
+}
+
+function desiredOpeningExpansionCommitmentShipped(
+  ownTiles: number,
+  troopRatio: number,
+  recentExpansionCount: number,
+  settings: AgentSettings,
+): number {
   if (
     recentExpansionCount >= 6 ||
     (recentExpansionCount >= 3 && troopRatio < 0.4)
@@ -5833,6 +6207,501 @@ function isBehindAndFalling(
   return (
     recentOwnTileLossRatio(observation, ownState.tilesOwned ?? 0) >= minLossRatio
   );
+}
+
+/**
+ * War-mode triggers (v7, PROXYWAR_TUNE_WAR_MODE — 4-game hosted forensics
+ * 2026-07-12). Two measured regimes where every attack gate stayed shut while the
+ * game was being lost:
+ *   INVASION — a rival is actively attacking and own land is shrinking. (Game 0:
+ *   threat=1/urgency=high for 1,200 turns, 115k→43k tiles, response was one 10%
+ *   probe because no gate authorizes fighting back without a clear troop edge.)
+ *   DUEL — the endgame is a two-power border war (exactly one bordered non-allied
+ *   rival, at least our share, together holding most of the map). (Game 1: 40.6%
+ *   share and troop parity vs the leader, yet frontierConversionTiming demanded an
+ *   edge a defender-advantage stalemate never shows; share bled 40.6%→15.7%.)
+ * Both are pure functions of the current observation — no new state, no RNG.
+ */
+export function warModeInvaderIDs(
+  observation: AgentBrainInput["observation"],
+): Set<string> {
+  const targets = new Set<string>();
+  if (!warModeEnabled()) {
+    return targets;
+  }
+  const ownState = observation.ownState;
+  if (ownState === null || !ownState.isAlive || !ownState.hasSpawned) {
+    return targets;
+  }
+  const incoming = observation.combat.incomingAttackPlayerIDs;
+  if (
+    incoming.length > 0 &&
+    recentOwnTileLossRatio(observation, ownState.tilesOwned ?? 0) >=
+      // Clamped like the other war knobs: a non-positive env value must not turn
+      // "incoming attack exists" alone into a standing war trigger.
+      Math.max(0.005, Math.min(0.5, tunedNumber("WAR_FALL_MIN_LOSS", 0.02)))
+  ) {
+    for (const playerID of incoming) {
+      targets.add(playerID);
+    }
+  }
+  const borderedRivals = observation.visiblePlayers.filter(
+    (player) =>
+      player.isAlive &&
+      player.playerID !== ownState.playerID &&
+      player.type !== PlayerType.Bot &&
+      player.sharesBorder &&
+      !player.isAllied,
+  );
+  if (borderedRivals.length === 1) {
+    const rival = borderedRivals[0]!;
+    const ownTileShare =
+      ownState.tileShare ?? observation.endgame?.ownTileShare ?? 0;
+    const rivalShare = rival.tileShare ?? 0;
+    if (
+      rivalShare >= ownTileShare &&
+      ownTileShare + rivalShare >= warModeDuelCombinedShare()
+    ) {
+      targets.add(rival.playerID);
+    }
+  }
+  return targets;
+}
+
+/**
+ * Coalition runaway-leader detection (v8, PROXYWAR_TUNE_COALITION). The
+ * balance-of-power regime: some rival holds a map share above the floor AND
+ * meaningfully above ours. Excludes allies (betray-late owns that endgame) and
+ * never fires when WE are the leader (the ratio requirement structurally
+ * prevents it). Pure function of the observation.
+ */
+interface CoalitionLeader {
+  playerID: string;
+  name: string;
+  tileShare: number;
+}
+
+export function coalitionRunawayLeader(
+  observation: AgentBrainInput["observation"],
+): CoalitionLeader | null {
+  if (!coalitionEnabled() || observation.phase === "spawn") {
+    return null;
+  }
+  const ownState = observation.ownState;
+  if (ownState === null || !ownState.isAlive || !ownState.hasSpawned) {
+    return null;
+  }
+  const ownTileShare =
+    ownState.tileShare ?? observation.endgame?.ownTileShare ?? 0;
+  const rivals = observation.visiblePlayers.filter(
+    (player) =>
+      player.isAlive &&
+      player.playerID !== ownState.playerID &&
+      player.type !== PlayerType.Bot &&
+      !player.isAllied,
+  );
+  if (rivals.length === 0) {
+    return null;
+  }
+  const leader = rivals.reduce((best, player) =>
+    (player.tileShare ?? 0) > (best.tileShare ?? 0) ? player : best,
+  );
+  const leaderShare = leader.tileShare ?? 0;
+  if (
+    leaderShare < coalitionLeaderShareFloor() ||
+    leaderShare < coalitionLeaderRatio() * ownTileShare
+  ) {
+    return null;
+  }
+  return {
+    playerID: leader.playerID,
+    name: sanitizeUntrustedDisplayString(leader.name, 40),
+    tileShare: leaderShare,
+  };
+}
+
+/**
+ * Coalition alliance accept (v8). Core forms an alliance on MUTUAL request:
+ * sending alliance_request to a player with a pending incoming request IS the
+ * acceptance (AllianceRequestExecution: "If the recipient already has pending
+ * alliance request, then accept it"; canSendAllianceRequest returns true exactly
+ * for this case). No agent policy in the league prioritizes this, so agent-agent
+ * alliances never form — James's coordinate-attack diplomacy goes unanswered
+ * every game. When a runaway leader exists and a NON-leader rival has a pending
+ * request toward us, force the counter-request. Selects an offered
+ * `LegalAction.id`; single-action batch.
+ */
+export function coalitionAllianceAcceptCandidate(
+  input: AgentBrainInput,
+  scored: readonly FrontierRankedAction[],
+): FrontierRankedAction | undefined {
+  const leader = coalitionRunawayLeader(input.observation);
+  if (leader === null) {
+    return undefined;
+  }
+  const requestors = new Map(
+    input.observation.visiblePlayers
+      .filter(
+        (player) =>
+          player.isAlive &&
+          player.type !== PlayerType.Bot &&
+          player.hasIncomingAllianceRequest === true &&
+          player.playerID !== leader.playerID &&
+          !player.isAllied,
+      )
+      .map((player) => [player.playerID, player]),
+  );
+  if (requestors.size === 0) {
+    return undefined;
+  }
+  return scored
+    .filter((candidate) => {
+      if (candidate.action.kind !== "alliance_request") {
+        return false;
+      }
+      const targetID =
+        actionPlayerID(candidate.action) ??
+        metadataString(candidate.action, "recipientID");
+      return targetID !== null && requestors.has(targetID);
+    })
+    .sort(
+      (a, b) =>
+        b.totalScore - a.totalScore || a.action.id.localeCompare(b.action.id),
+    )[0];
+}
+
+// NOTE (v8 reviewer finding): a "support besieged allies with donations" leaf was
+// designed here and REMOVED before shipping — AgentVisiblePlayer.incomingAttack is
+// agent-relative ("this rival is attacking ME"), so no rival-under-siege signal
+// exists in the observation yet. The donation leaf returns with a real
+// under-attack-by-others field (alliedWithVisibleIds pattern) in a later cycle.
+// (0.1.6 added `underSiege` to the observation; the leaf lands once the league
+// runs a game version that emits it.)
+
+/**
+ * Thin plan execution (v11, PROXYWAR_TUNE_THIN_EXECUTOR — the architectural
+ * experiment). Executes the CURRENT plan's named intent with minimal
+ * reinterpretation:
+ *   - pressure + targetPlayerId: the best offered qualifying direct-conquest
+ *     action on THAT target (war-mode-grade guards: ratio floor, no
+ *     reserve-suicide, real commitment; ladder sizing when armed and the
+ *     target is not an active invader);
+ *   - growth: the best offered mainland neutral expand.
+ * Everything else (build/diplomacy/fortify/survive/naval) falls through to the
+ * cascade. Returns offered `LegalAction.id`s only. Sits BELOW the survival
+ * recoveries AND the three binding directives (commitment/alliance/build keep
+ * their documented precedence), and stands down entirely while the war-mode
+ * invasion regime is live so the counterstrike defense stays reachable.
+ */
+export function thinPlanExecutionCandidate(
+  input: AgentBrainInput,
+  plan: StrategicPlan,
+  scored: readonly FrontierRankedAction[],
+): FrontierRankedAction | undefined {
+  if (!thinExecutorEnabled() || input.observation.phase === "spawn") {
+    return undefined;
+  }
+  const observation = input.observation;
+  // Invasion carve-out (reviewer finding A): the survival recoveries above are
+  // plan-intent-gated and do NOT cover invasion-at-parity — with thin armed, a
+  // growth plan during an invasion would mask the proven war-mode defense
+  // below every cycle. When the war-mode regime is live, this leaf stands down
+  // entirely so the counterstrike stays reachable.
+  if (warModeInvaderIDs(observation).size > 0) {
+    return undefined;
+  }
+  if (plan.turnIntent === "growth") {
+    return scored
+      .filter(
+        (candidate) =>
+          candidate.action.kind === "attack" &&
+          candidate.action.metadata?.expansion === true,
+      )
+      .sort(
+        (a, b) =>
+          b.totalScore - a.totalScore || a.action.id.localeCompare(b.action.id),
+      )[0];
+  }
+  if (plan.turnIntent !== "pressure" || plan.targetPlayerId === null) {
+    return undefined;
+  }
+  const targetID = plan.targetPlayerId;
+  const ownTroops =
+    observation.combat.ownTroops ?? observation.ownState?.troops ?? 0;
+  const minRatio = warModeMinStrikeRatio();
+  const invaders = observation.combat.incomingAttackPlayerIDs;
+  const ladderActive = attackLadderEnabled() && !invaders.includes(targetID);
+  return scored
+    .filter((candidate) => {
+      const action = candidate.action;
+      if (!isDirectConquestAction(action) || action.kind === "nuke") {
+        return false;
+      }
+      if (actionPlayerID(action) !== targetID) {
+        return false;
+      }
+      if (metadataNumber(action, "relativeTroopRatio") < minRatio) {
+        return false;
+      }
+      if (
+        hasPolicyPenalty(
+          candidate,
+          "attack would deplete the reserve below competitive defense",
+        )
+      ) {
+        return false;
+      }
+      return committedTroopRatio(action, ownTroops) > 0;
+    })
+    .sort((a, b) => {
+      if (ladderActive) {
+        const desired = ladderDesiredTroopRatio(observation, targetID);
+        const distA = Math.abs(
+          committedTroopRatio(a.action, ownTroops) - desired,
+        );
+        const distB = Math.abs(
+          committedTroopRatio(b.action, ownTroops) - desired,
+        );
+        if (distA !== distB) {
+          return distA - distB;
+        }
+        return (
+          b.totalScore - a.totalScore || a.action.id.localeCompare(b.action.id)
+        );
+      }
+      return (
+        committedTroopRatio(b.action, ownTroops) -
+          committedTroopRatio(a.action, ownTroops) ||
+        b.totalScore - a.totalScore ||
+        a.action.id.localeCompare(b.action.id)
+      );
+    })[0];
+}
+
+/**
+ * Naval-war candidate (v13, PROXYWAR_TUNE_NAVAL_WAR — the 15,600-turn-freeze
+ * fix). Regime: NO bordered non-allied rival, at least one alive non-allied
+ * rival somewhere, own troops plentiful. In that regime "no executor-ready
+ * pressure target" is a false peace — the war has to go to sea. Forces the
+ * best offered PLAYER-targeting boat; when none is offered and the recent
+ * neutral-expansion picks changed nothing (own tiles flat across recent
+ * memory), returns the best non-expansion, non-social candidate instead so a
+ * no-op expand can no longer win the wire primary forever. Offered
+ * `LegalAction.id`s only.
+ */
+export function navalWarCandidate(
+  input: AgentBrainInput,
+  scored: readonly FrontierRankedAction[],
+): FrontierRankedAction | undefined {
+  if (!navalWarEnabled() || input.observation.phase === "spawn") {
+    return undefined;
+  }
+  const observation = input.observation;
+  const troopRatio =
+    observation.combat.troopRatio ?? observation.ownState?.troopRatio ?? 0;
+  if (troopRatio < navalWarTroopFloor()) {
+    return undefined;
+  }
+  const rivals = observation.visiblePlayers.filter(
+    (player) =>
+      player.isAlive &&
+      !player.isAllied &&
+      player.playerID !== observation.ownState?.playerID,
+  );
+  if (rivals.length === 0) {
+    return undefined;
+  }
+  if (rivals.some((player) => player.sharesBorder)) {
+    return undefined;
+  }
+  const rivalIDs = new Set(rivals.map((player) => player.playerID));
+  const playerBoat = scored
+    .filter((candidate) => {
+      if (candidate.action.kind !== "boat") {
+        return false;
+      }
+      const targetID = actionPlayerID(candidate.action);
+      return targetID !== null && rivalIDs.has(targetID);
+    })
+    .sort(
+      (a, b) =>
+        b.totalScore - a.totalScore || a.action.id.localeCompare(b.action.id),
+    )[0];
+  if (playerBoat !== undefined) {
+    return playerBoat;
+  }
+  // No invasion boat offered: if recent expansion picks changed nothing (tiles
+  // flat), stop feeding the no-op expand to the wire and take the best real
+  // alternative (build/upgrade/any boat) so the seat keeps developing toward a
+  // future invasion instead of freezing.
+  const recent = observation.memory.recentActions;
+  const tilesSeen = recent
+    .map((decision) => decision.ownTiles ?? 0)
+    .filter((tiles) => tiles > 0);
+  const recentExpands = recent.filter(
+    (decision) => decision.accepted === true && decision.actionKind === "attack",
+  ).length;
+  const tilesFlat =
+    tilesSeen.length >= 4 &&
+    recentExpands >= 3 &&
+    Math.max(...tilesSeen) === Math.min(...tilesSeen);
+  if (!tilesFlat) {
+    return undefined;
+  }
+  return scored
+    .filter((candidate) => {
+      const kind = candidate.action.kind;
+      if (kind === "build" || kind === "upgrade_structure" || kind === "boat") {
+        return true;
+      }
+      return false;
+    })
+    .sort(
+      (a, b) =>
+        // Boats FIRST while isolated (v15, hosted evidence: the planner
+        // demanded "bank into naval transports" for 4,000 turns while
+        // higher-scored builds won this sort and the island seat froze) —
+        // then score.
+        Number(b.action.kind === "boat") - Number(a.action.kind === "boat") ||
+        b.totalScore - a.totalScore ||
+        a.action.id.localeCompare(b.action.id),
+    )[0];
+}
+
+/**
+ * Attack-ladder step (v8, PROXYWAR_TUNE_ATTACK_LADDER). Desired troop commitment
+ * for the NEXT attack on `targetID`, from the count of attacks on that target in
+ * recent memory: 0 -> probe (~10%), 1 -> commit (~25%), 2+ -> kill (~40%). The
+ * league leader's measured pattern; keystone's flat 25% grind never cracks a
+ * defended core.
+ */
+function ladderDesiredTroopRatio(
+  observation: AgentBrainInput["observation"],
+  targetID: string,
+): number {
+  const recentOnTarget = observation.memory.recentActions.filter(
+    (decision) =>
+      decision.accepted === true &&
+      decision.actionKind === "attack" &&
+      decision.targetID === targetID,
+  ).length;
+  if (recentOnTarget === 0) {
+    return 0.1;
+  }
+  if (recentOnTarget === 1) {
+    return 0.25;
+  }
+  return 0.4;
+}
+
+/**
+ * War-mode counterstrike. Forces the single best OFFERED direct-conquest action
+ * (non-expansion attack / player boat — never a nuke, which keeps its own strategic
+ * gate) on an active invader or the duel leader. This is the one place the troop-
+ * edge requirement is deliberately relaxed to WAR_MIN_RATIO (default 0.8): in a
+ * defender-advantage endgame "no clear edge" is permanent, so demanding one converts
+ * parity into a slow loss. Guards that stay: the reserve-suicide penalty, a real
+ * troop commitment, and target restriction to the aggressor/leader only. Selects an
+ * offered `LegalAction.id`; fabricates nothing. Sits ABOVE the FM-2a strike (the
+ * invader outranks the juiciest bystander) and BELOW survival recoveries and every
+ * binding directive.
+ */
+export function warModeCounterstrikeCandidate(
+  input: AgentBrainInput,
+  scored: readonly FrontierRankedAction[],
+): FrontierRankedAction | undefined {
+  const targets = warModeInvaderIDs(input.observation);
+  if (targets.size === 0) {
+    return undefined;
+  }
+  const observation = input.observation;
+  const ownTroops =
+    observation.combat.ownTroops ?? observation.ownState?.troops ?? 0;
+  // Opening conservatism (v15): a marginal-ratio counterstrike during the land
+  // grab trades the opening for a coin-flip war (measured: t1400 strike at
+  // ~1.0 rr, penalized "attack lacks a clear troop edge", lost tiles AND the
+  // race). While the opening window is live and our tiles are not collapsing,
+  // hold the v7 standard (rr >= 1.0); the relaxed floor applies once the
+  // opening is over or we are genuinely being eaten.
+  const openingLive = observation.turnNumber <= 3_000;
+  const collapsing =
+    recentOwnTileLossRatio(
+      observation,
+      observation.ownState?.tilesOwned ?? 0,
+    ) >= 0.08;
+  const minRatio =
+    openingLive && !collapsing
+      ? Math.max(1, warModeMinStrikeRatio())
+      : warModeMinStrikeRatio();
+  // Set-level ladder gate: an ACTIVE invader anywhere in the target set means
+  // pure max-commit defense for this whole selection (see comment in sort).
+  const invaders = observation.combat.incomingAttackPlayerIDs;
+  const ladderActive =
+    attackLadderEnabled() &&
+    [...targets].every((targetID) => !invaders.includes(targetID));
+  return scored
+    .filter((candidate) => {
+      const action = candidate.action;
+      if (!isDirectConquestAction(action) || action.kind === "nuke") {
+        return false;
+      }
+      const targetID = actionPlayerID(action);
+      if (targetID === null || !targets.has(targetID)) {
+        return false;
+      }
+      if (metadataNumber(action, "relativeTroopRatio") < minRatio) {
+        return false;
+      }
+      if (
+        hasPolicyPenalty(
+          candidate,
+          "attack would deplete the reserve below competitive defense",
+        )
+      ) {
+        return false;
+      }
+      return committedTroopRatio(action, ownTroops) > 0;
+    })
+    .sort((a, b) => {
+      // Attack ladder (v8, flag-gated): prefer the commitment closest to the
+      // escalation step for that target (10% probe -> 25% -> 40% kill) instead
+      // of always the largest — flat max-commit grinding never cracks a
+      // defended core, and opening every exchange at 40% wastes the probe read.
+      // v9 carve-out (A/B games 1-2 fast collapses): NEVER ladder against an
+      // ACTIVE INVADER — answering a 40% invasion with a 10% probe is weaker
+      // defense than v7's max-commit counter. The ladder applies only to
+      // proactive strikes (the endgame-duel leader), where probing first is
+      // information, not under-defense. Decided SET-LEVEL (any invader among
+      // the targets disables the ladder for the whole call): a per-pair check
+      // is an inconsistent comparator in mixed invader/duel candidate sets
+      // (reviewer-found intransitivity — sort order would be
+      // implementation-defined and a 10% probe could win over defense).
+      if (ladderActive) {
+        const desiredA = ladderDesiredTroopRatio(
+          observation,
+          actionPlayerID(a.action) ?? "",
+        );
+        const desiredB = ladderDesiredTroopRatio(
+          observation,
+          actionPlayerID(b.action) ?? "",
+        );
+        const distA = Math.abs(committedTroopRatio(a.action, ownTroops) - desiredA);
+        const distB = Math.abs(committedTroopRatio(b.action, ownTroops) - desiredB);
+        if (distA !== distB) {
+          return distA - distB;
+        }
+        return (
+          b.totalScore - a.totalScore ||
+          a.action.id.localeCompare(b.action.id)
+        );
+      }
+      return (
+        committedTroopRatio(b.action, ownTroops) -
+          committedTroopRatio(a.action, ownTroops) ||
+        b.totalScore - a.totalScore ||
+        a.action.id.localeCompare(b.action.id)
+      );
+    })[0];
 }
 
 /**
@@ -20664,6 +21533,145 @@ function actionTargetsPlayer(action: LegalAction, playerID: string): boolean {
   );
 }
 
+/**
+ * Dominance-conversion window (keystone v6, PROXYWAR_TUNE_DOMINANCE_CONVERSION).
+ * Open when the agent's tile share is at least DOMINANCE_RATIO x the strongest
+ * bordered non-allied rival's share (and above the share floor) while an attackable
+ * bordered rival exists. Target = the WEAKEST attackable bordered rival by tile
+ * share (fastest elimination; kill-confirmation logic), tie-broken by fewer troops.
+ * Derivation only — consumed by the control gate and the prompt, never by executor
+ * scoring, so the flag OFF path is byte-identical to shipped behavior.
+ */
+interface PlannerDominanceWindow {
+  ownTileShare: number;
+  strongestBorderedRivalShare: number;
+  strongestBorderedRivalName: string;
+  targetPlayerId: string;
+  targetName: string;
+  targetTileShare: number;
+  /** Own troops / target troops (>= 1 means the agent is stronger). */
+  targetRelativeTroopRatio: number | null;
+}
+
+function plannerDominanceWindow(
+  observation: AgentObservation,
+  homeDanger: string,
+  neutralGrowthActionCount: number,
+): PlannerDominanceWindow | null {
+  if (!dominanceConversionEnabled() || homeDanger === "high") {
+    return null;
+  }
+  if (observation.phase === "spawn") {
+    return null;
+  }
+  // Land-grab guard (v7, hosted A/B game2): opening the window mid-land-grab made
+  // the agent start an unprovoked war at t1500 while ~40% of the map was neutral —
+  // it burned the whole opening on 10-25% probes while the eventual winner took the
+  // free land at 16k tiles per decision. Being ahead is not a reason to stop
+  // grabbing free territory: the window stays closed while the opening window is
+  // live AND neutral growth is still offered.
+  if (
+    observation.turnNumber <= tunedNumber("DOMINANCE_OPENING_TURNS", 3_000) &&
+    neutralGrowthActionCount > 0
+  ) {
+    return null;
+  }
+  // Coalition precedence (v8): while a runaway leader exists, converting the
+  // weakest bordered rival is exactly kill-feeding — the leader inherits the
+  // board. The COALITION MODE block owns targeting in that regime.
+  if (coalitionRunawayLeader(observation) !== null) {
+    return null;
+  }
+  const ownTileShare =
+    observation.ownState?.tileShare ?? observation.endgame?.ownTileShare ?? 0;
+  if (ownTileShare < dominanceConversionShareFloor()) {
+    return null;
+  }
+  const borderedRivals = observation.visiblePlayers.filter(
+    (player) =>
+      player.isAlive === true &&
+      player.sharesBorder === true &&
+      player.isAllied !== true,
+  );
+  if (borderedRivals.length === 0) {
+    return null;
+  }
+  const strongest = borderedRivals.reduce((best, player) =>
+    (player.tileShare ?? 0) > (best.tileShare ?? 0) ? player : best,
+  );
+  if (ownTileShare < dominanceConversionRatio() * (strongest.tileShare ?? 0)) {
+    return null;
+  }
+  const attackable = borderedRivals.filter(
+    (player) => player.canAttack === true,
+  );
+  if (attackable.length === 0) {
+    return null;
+  }
+  const target = attackable.reduce((best, player) => {
+    const bestShare = best.tileShare ?? 0;
+    const share = player.tileShare ?? 0;
+    if (share !== bestShare) {
+      return share < bestShare ? player : best;
+    }
+    return (player.troops ?? 0) < (best.troops ?? 0) ? player : best;
+  });
+  return {
+    ownTileShare,
+    strongestBorderedRivalShare: strongest.tileShare ?? 0,
+    // Rival display names are untrusted free text; the window is serialized into
+    // the planner prompt (brief JSON + DOMINANCE block), so sanitize at the source.
+    strongestBorderedRivalName: sanitizeUntrustedDisplayString(
+      strongest.name,
+      40,
+    ),
+    targetPlayerId: target.playerID,
+    targetName: sanitizeUntrustedDisplayString(target.name, 40),
+    targetTileShare: target.tileShare ?? 0,
+    targetRelativeTroopRatio: target.relativeTroopRatio ?? null,
+  };
+}
+
+/** Percent formatting for the strategic-picture prompt line ("34%", "0.8%"). */
+function pictureShare(share: number | null | undefined): string {
+  const value = (share ?? 0) * 100;
+  return `${value >= 10 ? Math.round(value) : Math.round(value * 10) / 10}%`;
+}
+
+/**
+ * STRATEGIC_PICTURE — one derived plain-English situation line per plan (keystone
+ * v6). The raw numbers were always in the observation JSON; this surfaces the
+ * comparative read ("we hold X%, border Y who has only Z%") that league evidence
+ * shows the Commander otherwise fails to derive under a growth-hint directive.
+ */
+function plannerStrategicPicture(observation: AgentObservation): string | null {
+  if (!dominanceConversionEnabled() || observation.phase === "spawn") {
+    return null;
+  }
+  const ownTileShare =
+    observation.ownState?.tileShare ?? observation.endgame?.ownTileShare ?? 0;
+  const bordered = observation.visiblePlayers
+    .filter((player) => player.isAlive === true && player.sharesBorder === true)
+    .sort((a, b) => (b.tileShare ?? 0) - (a.tileShare ?? 0))
+    .slice(0, 5);
+  const rivalSummaries = bordered.map((player) => {
+    const ratio = player.relativeTroopRatio;
+    const troopNote =
+      ratio === undefined || ratio === null
+        ? ""
+        : `, our troops ${ratio.toFixed(2)}x theirs`;
+    const allianceNote = player.isAllied === true ? ", ALLIED" : "";
+    return `${sanitizeUntrustedDisplayString(player.name, 40)} holds ${pictureShare(
+      player.tileShare,
+    )}${troopNote}${allianceNote}`;
+  });
+  const borderText =
+    rivalSummaries.length > 0
+      ? `Bordered players (largest first): ${rivalSummaries.join("; ")}.`
+      : "No bordered rivals are visible.";
+  return `We hold ${pictureShare(ownTileShare)} of the map at turn ${observation.turnNumber}. ${borderText}`;
+}
+
 function plannerDecisionBrief(
   input: AgentBrainInput,
   previousPlan: StrategicPlan | null,
@@ -20712,6 +21720,12 @@ function plannerDecisionBrief(
     buildActions.length === 0 &&
     (previousPlan?.objective === "secure_economy" ||
       observation.strategic.priority === "build_economy");
+  const dominanceWindow = plannerDominanceWindow(
+    observation,
+    homeDanger,
+    neutralGrowthActions.length,
+  );
+  const coalitionLeader = coalitionRunawayLeader(observation);
   const recommendedControls = plannerRecommendedControls({
     observation,
     neutralGrowthActionCount: neutralGrowthActions.length,
@@ -20721,6 +21735,7 @@ function plannerDecisionBrief(
     buildActionCount: buildActions.length,
     economicBuildActionCount: economicBuildActions.length,
     homeDanger,
+    dominanceWindow,
   });
 
   return {
@@ -20826,6 +21841,10 @@ function plannerDecisionBrief(
     },
     plannerGuidance: {
       recommendedControls,
+      // Conditional spread: the brief is JSON.stringify'd into the prompt, and a
+      // null-valued key would break flag-OFF byte-identity with shipped prompts.
+      ...(dominanceWindow !== null ? { dominanceWindow } : {}),
+      ...(coalitionLeader !== null ? { coalitionLeader } : {}),
       recommendedPosture: plannerPostureHints({
         observation,
         growthSafe,
@@ -20859,6 +21878,7 @@ function plannerRecommendedControls(input: {
   buildActionCount: number;
   economicBuildActionCount: number;
   homeDanger: string;
+  dominanceWindow: PlannerDominanceWindow | null;
 }) {
   const ownTileShare =
     input.observation.ownState?.tileShare ??
@@ -20897,7 +21917,13 @@ function plannerRecommendedControls(input: {
   if (
     ownTileShare < tunedNumber("BASE_TILESHARE_FLOOR", 0.1) &&
     input.neutralGrowthActionCount > 0 &&
-    input.homeDanger !== "high"
+    input.homeDanger !== "high" &&
+    // Invasion carve-out (v13, rides WAR_MODE): the measured death trap — a
+    // small seat under active invasion kept receiving MUST-FOLLOW "expand into
+    // neutral" while its own telemetry screamed threat=1/urgency=high, so the
+    // Commander could never author a war/survive plan. While the war-mode
+    // invasion regime is live, base-building is not a mandate.
+    !(warModeEnabled() && warModeInvaderIDs(input.observation).size > 0)
   ) {
     return {
       strength: "must_follow",
@@ -20914,6 +21940,50 @@ function plannerRecommendedControls(input: {
       reason:
         "no territorial base yet (tile share below base floor): claim neutral land and weak tribes before pressuring comparable rivals",
     };
+  }
+  // Opening leader-war guard (v10, flag-gated under OPENING_TEMPO): in THREE
+  // consecutive A/B rounds (v7/v8/v9, same slot each time) the pressure-ready
+  // hint fired at ~t1500 against the TOP-SHARE rival and the resulting war
+  // forfeited the land grab and the game. Early wars on the WEAKEST rival are
+  // expansion (the league leader kills the weakest at t1600); early wars on the
+  // STRONGEST are suicide. While the opening is live and neutral growth is
+  // offered, suppress the pressure hint only when its target is the strongest
+  // visible rival — weak-target conversion stays available.
+  if (
+    input.pressureReady &&
+    input.pressureReadyTargetID !== null &&
+    openingTempoEnabled() &&
+    input.observation.turnNumber <= 3_000 &&
+    input.neutralGrowthActionCount > 0
+  ) {
+    const rivals = input.observation.visiblePlayers.filter(
+      (player) => player.isAlive && !player.isAllied,
+    );
+    const strongest = rivals.reduce(
+      (best, player) =>
+        (player.tileShare ?? 0) > (best?.tileShare ?? 0) ? player : best,
+      undefined as (typeof rivals)[number] | undefined,
+    );
+    if (
+      strongest !== undefined &&
+      strongest.playerID === input.pressureReadyTargetID
+    ) {
+      return {
+        strength: "strong_hint",
+        objective: "expand_territory",
+        turnIntent: "growth",
+        targetPlayerId: null,
+        preferredActionKinds: input.hasBoatAction
+          ? ["attack", "boat", "hold"]
+          : ["attack", "hold"],
+        enabledModules: input.hasBoatAction
+          ? ["expansion", "economy", "defense", "naval"]
+          : ["expansion", "economy", "defense"],
+        maxDecisionCycles: 3,
+        reason:
+          "opening leader-war guard: the pressure-ready target is the strongest rival and the land grab is live; out-grow them instead of charging",
+      };
+    }
   }
   if (input.pressureReady && input.pressureReadyTargetID !== null) {
     return {
@@ -20952,6 +22022,27 @@ function plannerRecommendedControls(input: {
       maxDecisionCycles: 1,
       reason:
         "low-share hard-nation run has legal economic build after sustained expansion; take economy before attack loop repeats",
+    };
+  }
+  // Dominance conversion (keystone v6, flag-gated): when the agent is the clearly
+  // strongest bordered power, "neutral land remains" is no longer a reason to keep
+  // growing — the measured league failure mode is a dominant agent expanding into
+  // neutral for hundreds of decisions while rivals recover (R.189). Fires ABOVE the
+  // growth hint and BELOW spawn/survive/base-floor/pressure-ready/economy-window, so
+  // proven opening and economy discipline is untouched. Strong hint, not must_follow:
+  // the Commander owns the strategy call (2026-06-19 lesson) — the binding teeth come
+  // from the commitment the DOMINANCE WINDOW prompt block asks it to emit.
+  if (input.dominanceWindow !== null && input.homeDanger !== "high") {
+    return {
+      strength: "strong_hint",
+      objective: "pressure_rival",
+      turnIntent: "pressure",
+      targetPlayerId: input.dominanceWindow.targetPlayerId,
+      preferredActionKinds: ["attack", "target_player", "embargo", "hold"],
+      enabledModules: ["combat", "defense", "economy"],
+      maxDecisionCycles: 1,
+      reason:
+        "dominance window open: we are the strongest bordered power; convert the lead into eliminations instead of neutral growth",
     };
   }
   if (input.neutralGrowthActionCount > 0 && input.homeDanger !== "high") {
@@ -21192,19 +22283,62 @@ function plannerPrompt(
   decisionBrief = plannerDecisionBrief(input, previousPlan),
   playerDoctrine = "",
 ): string {
+  const strategicPicture = plannerStrategicPicture(input.observation);
+  const dominanceWindow = decisionBrief.plannerGuidance.dominanceWindow;
+  const coalitionLeader = decisionBrief.plannerGuidance.coalitionLeader;
+  const promptOwnShare =
+    input.observation.ownState?.tileShare ??
+    input.observation.endgame?.ownTileShare ??
+    0;
   return [
     "You are the slow planner for an AI Nations League agent.",
     "Return JSON only. Do not select a LegalAction.id and do not output game intents.",
     UNTRUSTED_DISPLAY_RULE,
     "Read PLANNER_DECISION_BRIEF first. It is the compact tactical summary; use the full observation only to verify details.",
+    ...(strategicPicture !== null
+      ? [`STRATEGIC_PICTURE: ${strategicPicture}`]
+      : []),
+    ...(dominanceWindow !== null && dominanceWindow !== undefined
+      ? [
+          `DOMINANCE WINDOW OPEN: we hold ${pictureShare(dominanceWindow.ownTileShare)} of the map — the strongest bordered rival (${dominanceWindow.strongestBorderedRivalName}) holds only ${pictureShare(dominanceWindow.strongestBorderedRivalShare)}. Games are won by eliminating rivals, not by owning neutral land; neutral expansion from a dominant position forfeits tempo and lets rivals recover. Unless the full observation shows a real survival threat, set objective=pressure_rival and turnIntent=pressure on ${dominanceWindow.targetName} (targetPlayerId ${dominanceWindow.targetPlayerId}, ${pictureShare(dominanceWindow.targetTileShare)} of the map${
+            dominanceWindow.targetRelativeTroopRatio !== null
+              ? `, our troops ${dominanceWindow.targetRelativeTroopRatio.toFixed(2)}x theirs`
+              : ""
+          })${
+            directiveCommitmentEnabled()
+              ? ", and add a binding commitment on that target so the executor sustains the attack instead of drifting back to neutral growth"
+              : ""
+          }.`,
+        ]
+      : []),
+    ...(coalitionLeader !== null && coalitionLeader !== undefined
+      ? [
+          `COALITION MODE — RUNAWAY LEADER: ${coalitionLeader.name} (${coalitionLeader.playerID}) holds ${pictureShare(coalitionLeader.tileShare)} of the map; we hold ${pictureShare(promptOwnShare)}. In an FFA the field contains the leader together or dies alone. RULES: (1) Do NOT attack the other non-leader players — every tile they lose feeds the leader's snowball; they are your buffer and your coalition. (2) ACCEPT their alliances: sending alliance_request to a player whose hasIncomingAllianceRequest is true IS the acceptance — alliances form on mutual request. Prefer allianceDirective {"stance":"seek_alliance","targetPlayerId":"<a non-leader id>"} to lock the coalition in. NEVER request an alliance with the leader — courting the player you must contain wastes the request and confuses the coalition. ${
+            input.observation.turnNumber <= 3_000 &&
+            decisionBrief.legalActionMix.neutralGrowthActionCount > 0
+              ? `(3) The land grab is still live: do NOT start a war now — not even against the leader; a premature charge at the strongest player is suicide. Secure alliances, keep expanding into neutral land, and out-grow them until the map is claimed or you are attacked.`
+              : `(3) Aim ALL pressure — and any commitment — at the leader (${coalitionLeader.playerID}) only.`
+          }`,
+        ]
+      : []),
     "If PLANNER_DECISION_BRIEF.plannerGuidance.recommendedControls.strength is must_follow, follow that objective/turnIntent/target/modules unless the full observation directly contradicts it.",
     "CURRENT_CONTROL_DIRECTIVE:",
     plannerControlDirective(decisionBrief.plannerGuidance.recommendedControls),
     "END_CURRENT_CONTROL_DIRECTIVE",
+    ...(thinExecutorEnabled()
+      ? [
+          "THIN EXECUTOR ACTIVE: the executor executes YOUR named intent each cycle with minimal reinterpretation — a pressure plan with a targetPlayerId attacks that target every decision it legally can; a growth plan expands into neutral land. Your binding directives (commitment, allianceDirective, buildDirective) always pre-empt the named intent, and invasion defense pre-empts everything. That makes your target choice the whole game: name it precisely, update it the moment the situation changes, and NEVER camp a dead target — if your named pressure target has produced no executed attack for several cycles (they out-troop you and every strike is gated), RETARGET to the best rival you can actually hit or switch to growth/economy; a pressure plan that executes nothing is a forfeit. Own the build cadence yourself (emit buildDirective when economy or deterrence needs a turn) and diplomacy (allianceDirective).",
+          "KILL-CHAIN DISCIPLINE (thin executor): commit to ONE target and stay on it until they are broken (tiles collapsing) or dead — switching targets mid-fight forfeits every prior exchange. Sequence your kills: when opening hostilities take the WEAKEST reachable rival first (fast eliminations snowball your land and economy), then the next weakest; fight the strongest player only with a coalition at your back or when they come for you. Expand while you have free land; the moment your frontier meets a rival you cannot avoid, the kill-chain starts.",
+        ]
+      : []),
     "Choose one objective from: choose_spawn, expand_territory, secure_economy, fortify_border, pressure_rival, build_alliance, survive.",
     "Choose one turnIntent from: spawn, growth, build, fortify, pressure, survive, diplomacy, naval. turnIntent is the category the executor should prioritize this cycle if a matching legal action is safe.",
-    "Treat tacticalAffordances as executor-readiness signals, not generic encouragement to fight. Keep growth/build/fortify unless a pressure affordance is explicitly ready.",
-    "Only switch from growth to pressure for frontierConversionTiming when recommended=true, executorReady=true, bestExecutorReadyTargetID is present, and homeDanger is not high. Otherwise keep growth or economy tempo.",
+    dominanceWindow !== null && dominanceWindow !== undefined
+      ? "Treat tacticalAffordances as executor-readiness signals, not generic encouragement to fight. Keep growth/build/fortify unless a pressure affordance is explicitly ready or the DOMINANCE WINDOW above is open."
+      : "Treat tacticalAffordances as executor-readiness signals, not generic encouragement to fight. Keep growth/build/fortify unless a pressure affordance is explicitly ready.",
+    dominanceWindow !== null && dominanceWindow !== undefined
+      ? "Only switch from growth to pressure for frontierConversionTiming when recommended=true, executorReady=true, bestExecutorReadyTargetID is present, and homeDanger is not high — OR when the DOMINANCE WINDOW above is open, which justifies pressure on its own. Otherwise keep growth or economy tempo."
+      : "Only switch from growth to pressure for frontierConversionTiming when recommended=true, executorReady=true, bestExecutorReadyTargetID is present, and homeDanger is not high. Otherwise keep growth or economy tempo.",
     "Only switch to finish pressure when frontierFinishPressure.recommended=true and decisiveAttackActionCount is positive. Avoid repeated 10% probes when no decisive executor-ready attack exists.",
     "For growth/economy plans, set targetPlayerId to null unless the brief says a specific target is needed now.",
     "For safe opening growth, do not enable diplomacy unless a specific alliance is needed for survival or the objective is build_alliance.",
@@ -21301,6 +22435,7 @@ function plannerPrompt(
         canStopEmbargo: player.canStopEmbargo,
         incomingAttack: player.incomingAttack,
         outgoingAttack: player.outgoingAttack,
+        ...(player.underSiege === true ? { underSiege: true } : {}),
         canDonateGold: player.canDonateGold,
         canDonateTroops: player.canDonateTroops,
         canTarget: player.canTarget,
