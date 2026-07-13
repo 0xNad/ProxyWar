@@ -12,6 +12,7 @@ resources/.DS_Store
 .clinic/
 NOTES.md
 .claude/
+.codex/
 .idea/
 AGENTS.md
 docs/project-state/
