@@ -2169,7 +2169,7 @@ function servePublicRunArtifact(
     return;
   }
   res.sendFile(filePath, (error) => {
-    if (error !== undefined) {
+    if (error !== undefined && error !== null) {
       res.status(404).send("artifact not found");
     }
   });
@@ -2194,7 +2194,7 @@ function servePublicTournamentArtifact(
     return;
   }
   res.sendFile(filePath, (error) => {
-    if (error !== undefined) {
+    if (error !== undefined && error !== null) {
       res.status(404).send("artifact not found");
     }
   });
@@ -2210,7 +2210,7 @@ function servePublicDoc(req: express.Request, res: express.Response): void {
     return;
   }
   res.sendFile(path.join(docsRootDir, artifact), (error) => {
-    if (error !== undefined) {
+    if (error !== undefined && error !== null) {
       res.status(404).send("doc not found");
     }
   });
@@ -2224,7 +2224,7 @@ function serveProxyWarAgentBootstrapScript(
   res.sendFile(
     path.join(externalAgentExampleRootDir, "bootstrap.sh"),
     (error) => {
-      if (error !== undefined) {
+      if (error !== undefined && error !== null) {
         res.status(404).send("bootstrap script not found");
       }
     },
@@ -2247,7 +2247,7 @@ function servePublicExternalAgentExample(
     path.join(externalAgentExampleRootDir, artifact),
     { dotfiles: "allow" },
     (error) => {
-      if (error !== undefined) {
+      if (error !== undefined && error !== null) {
         res.status(404).send("example not found");
       }
     },
