@@ -32,6 +32,11 @@ import {
   goldPressureEnabled,
   goldPressureFloor,
   goldPressureMirvBankFloor,
+  navalWarEnabled,
+  navalWarTroopFloor,
+  openingCommitEnabled,
+  openingCommitRatio,
+  openingCommitTroopFloor,
   openingTempoEnabled,
   primaryArgmaxEnabled,
   thinExecutorEnabled,
@@ -1403,6 +1408,66 @@ export class FrontierPolicyExecutor implements AgentExecutor {
         ];
       }
     }
+    // Opening-commitment enforcement (v13, flag-gated): whichever selector chose
+    // the primary, if it is a NEUTRAL LAND expand below the commitment floor
+    // while troops idle high and share is small, swap in the offered expand
+    // whose commitment is closest to the floor. This is the wire-level
+    // guarantee behind the desired-commitment floors — the measured loss was a
+    // fixed 10% grind with a near-cap troop stack, out-expanded 5:1.
+    let openingCommitText = "";
+    if (
+      openingCommitEnabled() &&
+      (input.observation.combat.troopRatio ??
+        input.observation.ownState?.troopRatio ??
+        0) >= openingCommitTroopFloor() &&
+      (input.observation.ownState?.tileShare ?? 0) < 0.26
+    ) {
+      const primaryAction = selectedBatch[0]?.action ?? scored[0]?.action;
+      const primaryIsLowExpand =
+        primaryAction !== undefined &&
+        primaryAction.kind === "attack" &&
+        primaryAction.metadata?.expansion === true &&
+        committedTroopRatio(
+          primaryAction,
+          input.observation.combat.ownTroops ??
+            input.observation.ownState?.troops ??
+            0,
+        ) <
+          openingCommitRatio() - 0.05;
+      if (primaryIsLowExpand) {
+        const ownTroopsNow =
+          input.observation.combat.ownTroops ??
+          input.observation.ownState?.troops ??
+          0;
+        const better = scored
+          .filter(
+            (candidate) =>
+              candidate.action.kind === "attack" &&
+              candidate.action.metadata?.expansion === true &&
+              candidate.action.risk.level !== "high",
+          )
+          .sort(
+            (a, b) =>
+              Math.abs(
+                committedTroopRatio(a.action, ownTroopsNow) -
+                  openingCommitRatio(),
+              ) -
+                Math.abs(
+                  committedTroopRatio(b.action, ownTroopsNow) -
+                    openingCommitRatio(),
+                ) ||
+              b.totalScore - a.totalScore ||
+              a.action.id.localeCompare(b.action.id),
+          )[0];
+        if (better !== undefined && better.action !== primaryAction) {
+          openingCommitText = ` openingCommit=escalated(${better.action.id})`;
+          selectedBatch = [
+            better,
+            ...selectedBatch.filter((candidate) => candidate !== better),
+          ];
+        }
+      }
+    }
     // Wire-primary argmax (v7, flag-gated): reorder so the best-scored promotable
     // action leads the batch — on single-action wires only the primary executes.
     // Applied after every selector so batch membership is already final.
@@ -1477,7 +1542,7 @@ export class FrontierPolicyExecutor implements AgentExecutor {
       ...(selectedBatch.length > 1
         ? { actionIDs: selectedBatch.map((candidate) => candidate.action.id) }
         : {}),
-      reason: `Frontier module scheduler queued ${selectedBatch.length} action(s), primary ${selected.action.label} total=${selected.totalScore} schedule=${topContributions}${skillText}${penalties}${contextText}${goldPressureText}${warModeText}${primaryArgmaxText}${openingTempoText}`,
+      reason: `Frontier module scheduler queued ${selectedBatch.length} action(s), primary ${selected.action.label} total=${selected.totalScore} schedule=${topContributions}${skillText}${penalties}${contextText}${goldPressureText}${warModeText}${primaryArgmaxText}${openingTempoText}${openingCommitText}`,
       planFollowed: selectedBatch.some((candidate) =>
         actionAlignsPlan(candidate.action, plan),
       ),
@@ -2821,6 +2886,16 @@ function selectFrontierActionBatch(input: {
   const coalitionAccept = coalitionAllianceAcceptCandidate(input.input, scored);
   if (coalitionAccept !== undefined) {
     return [coalitionAccept];
+  }
+  // Naval war (v13, PROXYWAR_TUNE_NAVAL_WAR, default OFF): with no land border
+  // to any rival, "no pressure target" is a false peace — force the best
+  // offered player-targeting boat (or, when expansion has stopped changing the
+  // tile count, the best real development action) so the seat can never freeze
+  // for thousands of turns banking capped troops while a leader walks to
+  // domination. Below war-mode/coalition (disjoint regimes) and above FM-2a.
+  const navalWar = navalWarCandidate(input.input, scored);
+  if (navalWar !== undefined) {
+    return [navalWar];
   }
   // FM-2a ("trade or die"): when behind-and-falling, force the single best
   // controlled strike before the neutral-territory / banking / hold paths below,
@@ -5890,6 +5965,16 @@ function desiredStandingNeutralLandCommitment(
     observation.combat.troopRatio ?? observation.ownState?.troopRatio ?? 0;
   const ownTileShare =
     observation.ownState?.tileShare ?? observation.endgame?.ownTileShare ?? 0;
+  // Opening-commitment floor (v13, flag-gated): same idle-troops-buy-land rule
+  // as the opening path — while troops are plentiful and share is small, the
+  // standing neutral grind must not trickle at 10-20%.
+  if (
+    openingCommitEnabled() &&
+    troopRatio >= openingCommitTroopFloor() &&
+    ownTileShare < 0.26
+  ) {
+    return Math.max(openingCommitRatio(), 0.2);
+  }
   if (troopRatio <= settings.retreatThreshold * 0.5) {
     return 0.1;
   }
@@ -5946,6 +6031,36 @@ function desiredOpeningExpansionCommitment(
   const troopRatio =
     observation.combat.troopRatio ?? observation.ownState?.troopRatio ?? 1;
   const recentExpansionCount = observation.memory.recentExpansionCount;
+  // Opening-commitment floor (v13, flag-gated): idle troops buy land. The
+  // measured league loss: a fixed-10% grind with troopRatio 0.67 and 900k
+  // banked was out-expanded 5:1 by an opponent holding 35%. While troops are
+  // plentiful the recentExpansionCount de-escalation must not starve the
+  // land race — it exists to protect a SCARCE troop pool, not a full one.
+  if (openingCommitEnabled() && troopRatio >= openingCommitTroopFloor()) {
+    return Math.max(
+      openingCommitRatio(),
+      desiredOpeningExpansionCommitmentShipped(
+        ownTiles,
+        troopRatio,
+        recentExpansionCount,
+        settings,
+      ),
+    );
+  }
+  return desiredOpeningExpansionCommitmentShipped(
+    ownTiles,
+    troopRatio,
+    recentExpansionCount,
+    settings,
+  );
+}
+
+function desiredOpeningExpansionCommitmentShipped(
+  ownTiles: number,
+  troopRatio: number,
+  recentExpansionCount: number,
+  settings: AgentSettings,
+): number {
   if (
     recentExpansionCount >= 6 ||
     (recentExpansionCount >= 3 && troopRatio < 0.4)
@@ -6287,6 +6402,90 @@ export function thinPlanExecutionCandidate(
         a.action.id.localeCompare(b.action.id)
       );
     })[0];
+}
+
+/**
+ * Naval-war candidate (v13, PROXYWAR_TUNE_NAVAL_WAR — the 15,600-turn-freeze
+ * fix). Regime: NO bordered non-allied rival, at least one alive non-allied
+ * rival somewhere, own troops plentiful. In that regime "no executor-ready
+ * pressure target" is a false peace — the war has to go to sea. Forces the
+ * best offered PLAYER-targeting boat; when none is offered and the recent
+ * neutral-expansion picks changed nothing (own tiles flat across recent
+ * memory), returns the best non-expansion, non-social candidate instead so a
+ * no-op expand can no longer win the wire primary forever. Offered
+ * `LegalAction.id`s only.
+ */
+export function navalWarCandidate(
+  input: AgentBrainInput,
+  scored: readonly FrontierRankedAction[],
+): FrontierRankedAction | undefined {
+  if (!navalWarEnabled() || input.observation.phase === "spawn") {
+    return undefined;
+  }
+  const observation = input.observation;
+  const troopRatio =
+    observation.combat.troopRatio ?? observation.ownState?.troopRatio ?? 0;
+  if (troopRatio < navalWarTroopFloor()) {
+    return undefined;
+  }
+  const rivals = observation.visiblePlayers.filter(
+    (player) =>
+      player.isAlive &&
+      !player.isAllied &&
+      player.playerID !== observation.ownState?.playerID,
+  );
+  if (rivals.length === 0) {
+    return undefined;
+  }
+  if (rivals.some((player) => player.sharesBorder)) {
+    return undefined;
+  }
+  const rivalIDs = new Set(rivals.map((player) => player.playerID));
+  const playerBoat = scored
+    .filter((candidate) => {
+      if (candidate.action.kind !== "boat") {
+        return false;
+      }
+      const targetID = actionPlayerID(candidate.action);
+      return targetID !== null && rivalIDs.has(targetID);
+    })
+    .sort(
+      (a, b) =>
+        b.totalScore - a.totalScore || a.action.id.localeCompare(b.action.id),
+    )[0];
+  if (playerBoat !== undefined) {
+    return playerBoat;
+  }
+  // No invasion boat offered: if recent expansion picks changed nothing (tiles
+  // flat), stop feeding the no-op expand to the wire and take the best real
+  // alternative (build/upgrade/any boat) so the seat keeps developing toward a
+  // future invasion instead of freezing.
+  const recent = observation.memory.recentActions;
+  const tilesSeen = recent
+    .map((decision) => decision.ownTiles ?? 0)
+    .filter((tiles) => tiles > 0);
+  const recentExpands = recent.filter(
+    (decision) => decision.accepted === true && decision.actionKind === "attack",
+  ).length;
+  const tilesFlat =
+    tilesSeen.length >= 4 &&
+    recentExpands >= 3 &&
+    Math.max(...tilesSeen) === Math.min(...tilesSeen);
+  if (!tilesFlat) {
+    return undefined;
+  }
+  return scored
+    .filter((candidate) => {
+      const kind = candidate.action.kind;
+      if (kind === "build" || kind === "upgrade_structure" || kind === "boat") {
+        return true;
+      }
+      return false;
+    })
+    .sort(
+      (a, b) =>
+        b.totalScore - a.totalScore || a.action.id.localeCompare(b.action.id),
+    )[0];
 }
 
 /**
@@ -21623,7 +21822,13 @@ function plannerRecommendedControls(input: {
   if (
     ownTileShare < tunedNumber("BASE_TILESHARE_FLOOR", 0.1) &&
     input.neutralGrowthActionCount > 0 &&
-    input.homeDanger !== "high"
+    input.homeDanger !== "high" &&
+    // Invasion carve-out (v13, rides WAR_MODE): the measured death trap — a
+    // small seat under active invasion kept receiving MUST-FOLLOW "expand into
+    // neutral" while its own telemetry screamed threat=1/urgency=high, so the
+    // Commander could never author a war/survive plan. While the war-mode
+    // invasion regime is live, base-building is not a mandate.
+    !(warModeEnabled() && warModeInvaderIDs(input.observation).size > 0)
   ) {
     return {
       strength: "must_follow",

@@ -324,6 +324,56 @@ export function openingTempoEnabled(): boolean {
 }
 
 /**
+ * Opening-commitment flag (keystone v13, qd1n forensics 2026-07-13). Reads the
+ * EXACT env var `PROXYWAR_TUNE_OPENING_COMMIT` (A/B arms "0"/"1"). DEFAULT OFF.
+ * Measured: the league's new leader ramps neutral-expansion troop commitment
+ * 10->20->35% by t700 and holds 35%; keystone pins 10% while sitting on a
+ * near-cap idle stack (900k troops, troopRatio 0.67 at t600) and loses the
+ * land race 5:1 by t2000 — every later failure is downstream of being the
+ * smallest seat. When ON, the neutral-expansion commitment is FLOORED at
+ * OPENING_COMMIT_RATIO (default 0.35) whenever own troopRatio >=
+ * OPENING_COMMIT_TROOP_FLOOR (default 0.55) — idle troops buy land; the
+ * recentExpansionCount de-escalation applies only when troops are actually
+ * scarce.
+ */
+export function openingCommitEnabled(): boolean {
+  return tunedNumber("OPENING_COMMIT", 0) >= 1;
+}
+
+/** Floored expansion commitment when troops idle high (default 0.35, clamped 0.1-0.5). */
+export function openingCommitRatio(): number {
+  return Math.max(0.1, Math.min(0.5, tunedNumber("OPENING_COMMIT_RATIO", 0.35)));
+}
+
+/** Own troopRatio above which the commitment floor applies (default 0.55). */
+export function openingCommitTroopFloor(): number {
+  return Math.max(0.2, Math.min(0.95, tunedNumber("OPENING_COMMIT_TROOP_FLOOR", 0.55)));
+}
+
+/**
+ * Naval-war flag (keystone v13, qd1n forensics 2026-07-13). Reads the EXACT env
+ * var `PROXYWAR_TUNE_NAVAL_WAR` (A/B arms "0"/"1"). DEFAULT OFF. Measured (the
+ * 15,600-turn freeze): with NO bordered rivals the planner brief said "no
+ * executor-ready pressure target" forever, the seat banked 10.3M troops (100%
+ * cap) + 67M gold, spent 105 consecutive primaries on no-op neutral expansions
+ * (own tiles never changed), launched 3 boats all game, and watched the leader
+ * walk to an 84.9% domination win. When ON: if no bordered non-allied rival
+ * exists, at least one rival is alive, and own troopRatio >=
+ * NAVAL_WAR_TROOP_FLOOR (default 0.7), the best offered PLAYER-targeting boat
+ * becomes the forced primary (war goes to sea); and a neutral-expansion primary
+ * whose recent picks changed nothing (own tiles flat) is suppressed in favor of
+ * the best non-expansion candidate.
+ */
+export function navalWarEnabled(): boolean {
+  return tunedNumber("NAVAL_WAR", 0) >= 1;
+}
+
+/** Own troopRatio above which the naval war trips (default 0.7). */
+export function navalWarTroopFloor(): number {
+  return Math.max(0.3, Math.min(0.95, tunedNumber("NAVAL_WAR_TROOP_FLOOR", 0.7)));
+}
+
+/**
  * Thin-executor flag (keystone v11, architectural experiment 2026-07-12). Reads
  * the EXACT env var `PROXYWAR_TUNE_THIN_EXECUTOR` (A/B arms set "0"/"1").
  * DEFAULT OFF. Five A/B cycles established mechanical parity with the league
