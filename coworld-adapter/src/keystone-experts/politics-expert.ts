@@ -9,6 +9,7 @@ import type {
 type PoliticsReaction =
   | "embargo_repair"
   | "hostile_request_rejection"
+  | "break_to_bound_conquest"
   | "alliance_extension";
 
 export type KeystonePoliticsProposal = KeystoneExpertProposal & {
@@ -21,6 +22,9 @@ interface PoliticsCandidate {
   readonly reaction: PoliticsReaction;
   readonly priority: number;
 }
+
+const MIN_BREAK_CONQUEST_RELATIVE_TROOPS_BP = 11_500;
+const MIN_BREAK_CONQUEST_OWN_READINESS_BP = 5_000;
 
 const reactionScores: Readonly<
   Record<PoliticsReaction, Omit<KeystoneBidComponents, "riskBP">>
@@ -37,6 +41,12 @@ const reactionScores: Readonly<
     confidenceBP: 9_300,
     opportunityCostBP: 1_000,
   }),
+  break_to_bound_conquest: Object.freeze({
+    expectedValueBP: 9_000,
+    urgencyBP: 8_500,
+    confidenceBP: 9_500,
+    opportunityCostBP: 800,
+  }),
   alliance_extension: Object.freeze({
     expectedValueBP: 6_500,
     urgencyBP: 6_000,
@@ -47,10 +57,14 @@ const reactionScores: Readonly<
 
 /**
  * Proposes at most one evidence-gated diplomatic reaction. The initial
- * Politics expert intentionally has no proactive policy: it may repair an
- * embargo against a friendly player, reject an alliance request from a player
- * actively attacking us, or preserve an observable alliance that is already
- * in its extension window. Every other political action is an abstention.
+ * Politics expert intentionally has no free-standing proactive policy: it may
+ * repair an embargo against a friendly player, reject an alliance request
+ * from a player actively attacking us, preserve an observable alliance that
+ * is already in its extension window, or execute the political half of an
+ * exact Commander-bound break -> conquest macro. Every other political action
+ * is an abstention. A break may also be admitted by the existing reviewed
+ * backstab affordance after neutral expansion is exhausted; both paths bind
+ * the same target for the transaction layer to verify on acceptance.
  */
 export function proposeKeystonePolitics(
   world: KeystoneWorldModel,
@@ -79,7 +93,7 @@ export function proposeKeystonePolitics(
     if (target === undefined || target.isAlive !== true) {
       continue;
     }
-    const candidate = reactionFor(action, target, incomingAggressorIDs);
+    const candidate = reactionFor(world, action, target, incomingAggressorIDs);
     if (candidate !== null) {
       candidates.push(candidate);
     }
@@ -105,6 +119,7 @@ export function proposeKeystonePolitics(
 }
 
 function reactionFor(
+  world: KeystoneWorldModel,
   action: KeystoneActionFacts,
   target: KeystonePlayerFacts,
   incomingAggressorIDs: ReadonlySet<string>,
@@ -120,6 +135,31 @@ function reactionFor(
       target,
       reaction: "embargo_repair",
       priority: 0,
+    });
+  }
+
+  if (
+    action.kind === "break_alliance" &&
+    action.targetsFriendlyOrTeam === true &&
+    target.isAllied === true &&
+    target.isTeammate === false &&
+    target.sameTeam === false &&
+    target.sharesBorder === true &&
+    target.incomingAttack === false &&
+    world.incomingAggressorIDs.length === 0 &&
+    target.relativeTroopRatioBP !== null &&
+    target.relativeTroopRatioBP >= MIN_BREAK_CONQUEST_RELATIVE_TROOPS_BP &&
+    world.own !== null &&
+    world.own.troopRatioBP !== null &&
+    world.own.troopRatioBP >= MIN_BREAK_CONQUEST_OWN_READINESS_BP &&
+    (commanderBindsConquest(world, target.playerID) ||
+      recommendedBackstabBindsConquest(world, target.playerID))
+  ) {
+    return Object.freeze({
+      action,
+      target,
+      reaction: "break_to_bound_conquest",
+      priority: 2,
     });
   }
 
@@ -153,11 +193,32 @@ function reactionFor(
       action,
       target,
       reaction: "alliance_extension",
-      priority: 2,
+      priority: 3,
     });
   }
 
   return null;
+}
+
+function commanderBindsConquest(
+  world: KeystoneWorldModel,
+  targetPlayerID: string,
+): boolean {
+  return (
+    world.commander.binding?.kind === "attack_target" &&
+    world.commander.binding.targetPlayerID === targetPlayerID
+  );
+}
+
+function recommendedBackstabBindsConquest(
+  world: KeystoneWorldModel,
+  targetPlayerID: string,
+): boolean {
+  return (
+    world.recommendedBackstabTargetID === targetPlayerID &&
+    world.canExpandIntoNeutral === false &&
+    world.incomingAggressorIDs.length === 0
+  );
 }
 
 function isCommonlyEligible(action: KeystoneActionFacts): boolean {
@@ -228,6 +289,8 @@ function rationaleFor(
       return `repair embargo against observed friendly target ${targetPlayerID}`;
     case "hostile_request_rejection":
       return `reject incoming alliance request from active aggressor ${targetPlayerID}`;
+    case "break_to_bound_conquest":
+      return `break alliance only to unlock evidence-bound conquest of ${targetPlayerID}`;
     case "alliance_extension":
       return `extend existing alliance in observed extension window with ${targetPlayerID}`;
   }

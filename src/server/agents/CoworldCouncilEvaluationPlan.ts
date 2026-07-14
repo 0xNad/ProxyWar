@@ -32,6 +32,7 @@ const councilArmOwnedEnvironmentKeys = new Set([
   "PROXYWAR_KEYSTONE_SINGLE_ACTION",
   "PROXYWAR_KEYSTONE_EXPERT_COUNCIL_SHADOW",
   "PROXYWAR_KEYSTONE_COUNCIL_POLITICS_GUARD",
+  "PROXYWAR_KEYSTONE_COUNCIL_DIPLOMACY_ADJUDICATOR",
   "PROXYWAR_KEYSTONE_EXPERT_MASK",
 ]);
 const councilEnvironmentKeyPattern = /^[A-Za-z_][A-Za-z0-9_]*$/;
@@ -441,7 +442,8 @@ function councilArm(
     kind !== "a1" &&
     kind !== "v16-shadow" &&
     kind !== "a1-shadow" &&
-    kind !== "v16-politics-guard"
+    kind !== "v16-politics-guard" &&
+    kind !== "v16-diplomacy-adjudicator"
   ) {
     throw new Error(`${context}.kind is unsupported`);
   }
@@ -452,11 +454,17 @@ function councilArm(
   );
   const shadow = kind === "v16-shadow" || kind === "a1-shadow";
   const politicsGuard = kind === "v16-politics-guard";
+  const diplomacyAdjudicator = kind === "v16-diplomacy-adjudicator";
   const base = kind === "a1" || kind === "a1-shadow" ? "a1" : "v16";
   if (politicsGuard && expertMask !== 15) {
     throw new Error(`${context}.expertMask must be 15 for politics guard`);
   }
-  if (!shadow && !politicsGuard && expertMask !== 0) {
+  if (diplomacyAdjudicator && expertMask !== 15) {
+    throw new Error(
+      `${context}.expertMask must be 15 for diplomacy adjudicator`,
+    );
+  }
+  if (!shadow && !politicsGuard && !diplomacyAdjudicator && expertMask !== 0) {
     throw new Error(`${context}.expertMask must be 0 for non-shadow arms`);
   }
   const armID = shadow ? `${kind}-m${expertMask}` : kind;
@@ -464,7 +472,10 @@ function councilArm(
     PROXYWAR_KEYSTONE_SINGLE_ACTION: base === "a1" ? "1" : "0",
     PROXYWAR_KEYSTONE_EXPERT_COUNCIL_SHADOW: shadow ? "1" : "0",
     ...(politicsGuard ? { PROXYWAR_KEYSTONE_COUNCIL_POLITICS_GUARD: "1" } : {}),
-    ...(shadow || politicsGuard
+    ...(diplomacyAdjudicator
+      ? { PROXYWAR_KEYSTONE_COUNCIL_DIPLOMACY_ADJUDICATOR: "1" }
+      : {}),
+    ...(shadow || politicsGuard || diplomacyAdjudicator
       ? { PROXYWAR_KEYSTONE_EXPERT_MASK: String(expertMask) }
       : {}),
   };
@@ -573,6 +584,8 @@ function councilArmRank(arm: CoworldCouncilEvaluationArm): number {
       return 3;
     case "v16-politics-guard":
       return 4;
+    case "v16-diplomacy-adjudicator":
+      return 5;
   }
 }
 
@@ -1273,8 +1286,13 @@ function councilAssignment(
     pairID: job.pairID,
     jobID: job.jobID,
     arm: job.arm,
-    intentionToTreat: job.arm.shadow || job.arm.kind === "v16-politics-guard",
-    actualTreatmentExposure: job.arm.kind === "v16-politics-guard",
+    intentionToTreat:
+      job.arm.shadow ||
+      job.arm.kind === "v16-politics-guard" ||
+      job.arm.kind === "v16-diplomacy-adjudicator",
+    actualTreatmentExposure:
+      job.arm.kind === "v16-politics-guard" ||
+      job.arm.kind === "v16-diplomacy-adjudicator",
     expertMask: job.expertMask,
     variantID: job.variantID,
     seed: job.seed,

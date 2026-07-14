@@ -152,6 +152,7 @@ async function writeCouncilPlanFixture(
     }>;
     replayDirectory?: boolean;
     includePoliticsGuard?: boolean;
+    includeDiplomacyAdjudicator?: boolean;
   } = {},
 ): Promise<{
   planPath: string;
@@ -211,6 +212,23 @@ async function writeCouncilPlanFixture(
               PROXYWAR_KEYSTONE_SINGLE_ACTION: "0",
               PROXYWAR_KEYSTONE_EXPERT_COUNCIL_SHADOW: "0",
               PROXYWAR_KEYSTONE_COUNCIL_POLITICS_GUARD: "1",
+              PROXYWAR_KEYSTONE_EXPERT_MASK: "15",
+            },
+          },
+        ]
+      : []),
+    ...(input.includeDiplomacyAdjudicator === true
+      ? [
+          {
+            armID: "v16-diplomacy-adjudicator",
+            kind: "v16-diplomacy-adjudicator",
+            base: "v16",
+            shadow: false,
+            expertMask: 15,
+            env: {
+              PROXYWAR_KEYSTONE_SINGLE_ACTION: "0",
+              PROXYWAR_KEYSTONE_EXPERT_COUNCIL_SHADOW: "0",
+              PROXYWAR_KEYSTONE_COUNCIL_DIPLOMACY_ADJUDICATOR: "1",
               PROXYWAR_KEYSTONE_EXPERT_MASK: "15",
             },
           },
@@ -339,7 +357,10 @@ async function writeCouncilPlanFixture(
         continue;
       }
       await fs.mkdir(outputDir, { recursive: true });
-      const treatment = arm.shadow || arm.kind === "v16-politics-guard";
+      const treatment =
+        arm.shadow ||
+        arm.kind === "v16-politics-guard" ||
+        arm.kind === "v16-diplomacy-adjudicator";
       const scores = treatment ? [0.7, 0.3] : [0, 0];
       const winnerSlot = treatment ? 0 : null;
       const players = [{ name: "Auri" }, { name: "Opponent" }];
@@ -951,6 +972,45 @@ describe("Coworld evaluation dataset", () => {
     expect(dataset.councilEvaluation).toMatchObject({
       intentionToTreatJobIDs: expect.arrayContaining([guardJobID]),
       actualTreatmentExposureJobIDs: [guardJobID],
+    });
+  });
+
+  test("identifies the named diplomacy-adjudicator arm as real default-off treatment exposure", async () => {
+    const fixture = await writeCouncilPlanFixture({
+      includeDiplomacyAdjudicator: true,
+    });
+    const loaded = await loadCoworldEvaluationEpisodes([], [fixture.planPath]);
+    const dataset = buildCoworldEvaluationDataset({
+      episodes: loaded.episodes,
+      selector: { seat: 0, policyVersionId: null, playerName: null },
+      councilEvaluationPlan: loaded.councilEvaluationPlan,
+    });
+    const adjudicatorJobID = `${fixture.blocks[0].blockID}-v16-diplomacy-adjudicator`;
+    const adjudicatorRow = dataset.rows.find(
+      (row) => row.councilEvaluation?.jobID === adjudicatorJobID,
+    );
+
+    expect(adjudicatorRow?.councilEvaluation).toMatchObject({
+      arm: {
+        armID: "v16-diplomacy-adjudicator",
+        kind: "v16-diplomacy-adjudicator",
+        base: "v16",
+        shadow: false,
+        expertMask: 15,
+        env: {
+          PROXYWAR_KEYSTONE_SINGLE_ACTION: "0",
+          PROXYWAR_KEYSTONE_EXPERT_COUNCIL_SHADOW: "0",
+          PROXYWAR_KEYSTONE_COUNCIL_DIPLOMACY_ADJUDICATOR: "1",
+          PROXYWAR_KEYSTONE_EXPERT_MASK: "15",
+        },
+      },
+      intentionToTreat: true,
+      actualTreatmentExposure: true,
+      expertMask: 15,
+    });
+    expect(dataset.councilEvaluation).toMatchObject({
+      intentionToTreatJobIDs: expect.arrayContaining([adjudicatorJobID]),
+      actualTreatmentExposureJobIDs: [adjudicatorJobID],
     });
   });
 

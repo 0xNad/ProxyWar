@@ -66,9 +66,20 @@ export function buildKeystoneWorldModel(
     players,
     incomingAggressorIDs,
     canExpandIntoNeutral: input.observation.combat.canExpandIntoNeutral,
+    recommendedBackstabTargetID: recommendedBackstabTargetID(input),
     actions: classification.actions,
     ambiguousOfferedActionIDs: classification.ambiguousOfferedActionIDs,
   });
+}
+
+function recommendedBackstabTargetID(input: AgentBrainInput): string | null {
+  const affordance = input.observation.tacticalAffordances?.backstabAlly;
+  const targetID = affordance?.backstabTargetID;
+  return affordance?.recommended === true &&
+    typeof targetID === "string" &&
+    targetID.trim().length > 0
+    ? targetID
+    : null;
 }
 
 function ownFacts(input: AgentBrainInput): KeystoneOwnFacts | null {
@@ -105,6 +116,7 @@ function playerFacts(
       player.isAllied || player.isFriendly || isTeammate || sameTeam,
     sharesBorder: player.sharesBorder,
     incomingAttack: player.incomingAttack,
+    hasOutgoingAllianceRequest: player.hasOutgoingAllianceRequest === true,
     hasIncomingAllianceRequest: player.hasIncomingAllianceRequest === true,
     hasEmbargoAgainst: player.hasEmbargoAgainst === true,
     canExtendAlliance: player.canExtendAlliance === true,

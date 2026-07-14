@@ -11,7 +11,10 @@ export {
   type KeystoneBindingDirectiveStatus,
 } from "./binding-directive";
 export { normalizeKeystoneCommanderContext } from "./commander-context";
-export { proposeKeystoneConquest } from "./conquest-expert";
+export {
+  proposeKeystoneConquest,
+  proposeKeystoneConquestForTarget,
+} from "./conquest-expert";
 export type { KeystoneConquestProposal } from "./conquest-expert";
 export { proposeKeystoneEconomy } from "./economy-expert";
 export type { KeystoneEconomyProposal } from "./economy-expert";

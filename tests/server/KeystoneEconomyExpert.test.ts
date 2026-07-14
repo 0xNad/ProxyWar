@@ -119,6 +119,7 @@ function world(
     players: [],
     incomingAggressorIDs: [],
     canExpandIntoNeutral: actions.some((action) => action.isNeutralExpansion),
+    recommendedBackstabTargetID: null,
     actions,
     ambiguousOfferedActionIDs: [],
     ...overrides,

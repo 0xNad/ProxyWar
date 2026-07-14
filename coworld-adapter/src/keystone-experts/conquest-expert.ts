@@ -48,6 +48,14 @@ interface ScoredConquestAction {
   readonly targetPlayerID: string | null;
 }
 
+interface ConquestScoringContext {
+  readonly ownReadinessBP: number;
+  readonly playerByID: ReadonlyMap<string, KeystonePlayerFacts>;
+  readonly incomingAggressorIDs: ReadonlySet<string>;
+  readonly timing: ConquestTiming;
+  readonly eligible: readonly ConquestAction[];
+}
+
 const MIN_OWN_READINESS_BP = 3_500;
 const MIN_STRENGTH_RATIO_BP = 11_500;
 const FINISH_TILE_SHARE_BP = 200;
@@ -78,46 +86,21 @@ const kindPreference: Readonly<Record<ConquestActionKind, number>> =
 export function proposeKeystoneConquest(
   world: KeystoneWorldModel,
 ): KeystoneConquestProposal | null {
-  const ownReadinessBP = ownReadinessBasisPoints(world);
-  if (
-    world.phase !== "active" ||
-    world.own === null ||
-    ownReadinessBP === null ||
-    ownReadinessBP < MIN_OWN_READINESS_BP
-  ) {
+  const context = conquestScoringContext(world);
+  if (context === null) {
     return null;
   }
 
-  const playerByID = uniquePlayerMap(world.players);
-  const incomingAggressorIDs = new Set(world.incomingAggressorIDs);
-  const ambiguousIDs = new Set(world.ambiguousOfferedActionIDs);
-  const timing = conquestTiming(world);
-  const eligible = world.actions.filter((action): action is ConquestAction =>
-    isEligibleConquestAction(action, ambiguousIDs),
+  const conventional = scoreConventionalActions(
+    world,
+    context.eligible,
+    context,
   );
 
-  const conventional: ScoredConquestAction[] = [];
-  for (const action of eligible) {
-    if (!isConventionalAction(action)) {
-      continue;
-    }
-    const candidate = scoreConventionalAction(
-      world,
-      action,
-      playerByID,
-      incomingAggressorIDs,
-      ownReadinessBP,
-      timing,
-    );
-    if (candidate !== null) {
-      conventional.push(candidate);
-    }
-  }
-
   const scored = [...conventional];
-  for (const action of eligible) {
+  for (const action of context.eligible) {
     if (isNavalAction(action)) {
-      const candidate = scoreNavalAction(world, action, timing);
+      const candidate = scoreNavalAction(world, action, context.timing);
       if (candidate !== null) {
         scored.push(candidate);
       }
@@ -125,10 +108,10 @@ export function proposeKeystoneConquest(
       const candidate = scoreNukeAction(
         world,
         action,
-        playerByID,
-        incomingAggressorIDs,
-        ownReadinessBP,
-        timing,
+        context.playerByID,
+        context.incomingAggressorIDs,
+        context.ownReadinessBP,
+        context.timing,
         conventional.length > 0,
       );
       if (candidate !== null) {
@@ -139,6 +122,82 @@ export function proposeKeystoneConquest(
 
   scored.sort(compareScoredConquestActions);
   return scored[0]?.proposal ?? null;
+}
+
+/**
+ * Proposes the best evidence-backed conventional conquest action against one
+ * exact player. Target binding never broadens to another player or weapon kind.
+ */
+export function proposeKeystoneConquestForTarget(
+  world: KeystoneWorldModel,
+  targetPlayerID: string,
+): KeystoneConquestProposal | null {
+  if (targetPlayerID.trim().length === 0) {
+    return null;
+  }
+
+  const context = conquestScoringContext(world);
+  if (context === null || !context.playerByID.has(targetPlayerID)) {
+    return null;
+  }
+
+  const targetedConventional = context.eligible.filter(
+    (action): action is ConquestAction & { readonly kind: ConventionalKind } =>
+      isConventionalAction(action) && action.targetPlayerID === targetPlayerID,
+  );
+  const scored = scoreConventionalActions(world, targetedConventional, context);
+  scored.sort(compareScoredConquestActions);
+  return scored[0]?.proposal ?? null;
+}
+
+function conquestScoringContext(
+  world: KeystoneWorldModel,
+): ConquestScoringContext | null {
+  const ownReadinessBP = ownReadinessBasisPoints(world);
+  if (
+    world.phase !== "active" ||
+    world.own === null ||
+    ownReadinessBP === null ||
+    ownReadinessBP < MIN_OWN_READINESS_BP
+  ) {
+    return null;
+  }
+
+  const ambiguousIDs = new Set(world.ambiguousOfferedActionIDs);
+  return {
+    ownReadinessBP,
+    playerByID: uniquePlayerMap(world.players),
+    incomingAggressorIDs: new Set(world.incomingAggressorIDs),
+    timing: conquestTiming(world),
+    eligible: world.actions.filter((action): action is ConquestAction =>
+      isEligibleConquestAction(action, ambiguousIDs),
+    ),
+  };
+}
+
+function scoreConventionalActions(
+  world: KeystoneWorldModel,
+  actions: readonly ConquestAction[],
+  context: ConquestScoringContext,
+): ScoredConquestAction[] {
+  const scored: ScoredConquestAction[] = [];
+  for (const action of actions) {
+    if (!isConventionalAction(action)) {
+      continue;
+    }
+    const candidate = scoreConventionalAction(
+      world,
+      action,
+      context.playerByID,
+      context.incomingAggressorIDs,
+      context.ownReadinessBP,
+      context.timing,
+    );
+    if (candidate !== null) {
+      scored.push(candidate);
+    }
+  }
+  return scored;
 }
 
 function scoreConventionalAction(

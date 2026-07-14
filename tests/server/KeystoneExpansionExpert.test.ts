@@ -98,6 +98,7 @@ function world(
     canExpandIntoNeutral: actions.some(
       (action) => action.kind === "attack" && action.isNeutralExpansion,
     ),
+    recommendedBackstabTargetID: null,
     actions,
     ambiguousOfferedActionIDs: [],
     ...overrides,

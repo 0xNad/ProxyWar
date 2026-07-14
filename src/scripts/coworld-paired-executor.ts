@@ -35,6 +35,7 @@ const ARM_OWNED_ENV_KEYS = new Set([
   "PROXYWAR_KEYSTONE_SINGLE_ACTION",
   "PROXYWAR_KEYSTONE_EXPERT_COUNCIL_SHADOW",
   "PROXYWAR_KEYSTONE_COUNCIL_POLITICS_GUARD",
+  "PROXYWAR_KEYSTONE_COUNCIL_DIPLOMACY_ADJUDICATOR",
   "PROXYWAR_KEYSTONE_EXPERT_MASK",
 ]);
 const MAX_ARMS = 35;
@@ -738,7 +739,8 @@ function validateResolvedArm(arm: CoworldResolvedArm): void {
     arm.kind !== "a1" &&
     arm.kind !== "v16-shadow" &&
     arm.kind !== "a1-shadow" &&
-    arm.kind !== "v16-politics-guard"
+    arm.kind !== "v16-politics-guard" &&
+    arm.kind !== "v16-diplomacy-adjudicator"
   ) {
     throw new Error(`Unsupported resolved arm ${String(arm.kind)}`);
   }
@@ -757,6 +759,7 @@ function expectedArm(
 ): CoworldResolvedArm {
   const shadow = kind === "v16-shadow" || kind === "a1-shadow";
   const politicsGuard = kind === "v16-politics-guard";
+  const diplomacyAdjudicator = kind === "v16-diplomacy-adjudicator";
   const base = kind === "a1" || kind === "a1-shadow" ? "a1" : "v16";
   if (!Number.isInteger(expertMask) || expertMask < 0 || expertMask > 15) {
     throw new Error("Expert mask must be an integer in 0..15");
@@ -764,7 +767,12 @@ function expectedArm(
   if (politicsGuard && expertMask !== 15) {
     throw new Error("Politics-guard arm must use the reviewed expert mask 15");
   }
-  if (!shadow && !politicsGuard && expertMask !== 0) {
+  if (diplomacyAdjudicator && expertMask !== 15) {
+    throw new Error(
+      "Diplomacy-adjudicator arm must use the reviewed expert mask 15",
+    );
+  }
+  if (!shadow && !politicsGuard && !diplomacyAdjudicator && expertMask !== 0) {
     throw new Error("Non-shadow arms must have expertMask 0");
   }
   return {
@@ -779,7 +787,10 @@ function expectedArm(
       ...(politicsGuard
         ? { PROXYWAR_KEYSTONE_COUNCIL_POLITICS_GUARD: "1" }
         : {}),
-      ...(shadow || politicsGuard
+      ...(diplomacyAdjudicator
+        ? { PROXYWAR_KEYSTONE_COUNCIL_DIPLOMACY_ADJUDICATOR: "1" }
+        : {}),
+      ...(shadow || politicsGuard || diplomacyAdjudicator
         ? { PROXYWAR_KEYSTONE_EXPERT_MASK: String(expertMask) }
         : {}),
     },
@@ -1361,6 +1372,8 @@ function compareResolvedArms(
         return 3;
       case "v16-politics-guard":
         return 4;
+      case "v16-diplomacy-adjudicator":
+        return 5;
     }
   };
   return (

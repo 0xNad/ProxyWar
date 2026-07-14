@@ -152,6 +152,7 @@ export interface KeystonePlayerFacts {
   readonly friendlyOrTeam: boolean;
   readonly sharesBorder: boolean;
   readonly incomingAttack: boolean;
+  readonly hasOutgoingAllianceRequest?: boolean;
   readonly hasIncomingAllianceRequest?: boolean;
   readonly hasEmbargoAgainst?: boolean;
   readonly canExtendAlliance?: boolean;
@@ -217,6 +218,8 @@ export interface KeystoneWorldModel {
   readonly players: readonly KeystonePlayerFacts[];
   readonly incomingAggressorIDs: readonly string[];
   readonly canExpandIntoNeutral: boolean;
+  /** Existing deterministic backstab affordance, copied without its free text. */
+  readonly recommendedBackstabTargetID: string | null;
   readonly actions: readonly KeystoneActionFacts[];
   readonly ambiguousOfferedActionIDs: readonly string[];
 }

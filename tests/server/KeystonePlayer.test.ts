@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 
+import { KEYSTONE_DIPLOMACY_ADJUDICATOR_MARKER } from "../../coworld-adapter/src/keystone-diplomacy-adjudicator";
 import {
   bedrockModelCandidates,
   CommanderTelemetryAgentBrain,
@@ -8,6 +9,7 @@ import {
   DeferredAgentPlanner,
   isModelUnavailableError,
   KEYSTONE_EXECUTOR_SETTINGS,
+  keystoneCouncilDiplomacyAdjudicatorFromEnv,
   keystoneCouncilPoliticsGuardFromEnv,
   keystoneExpertCouncilShadowFromEnv,
   keystoneExpertMaskFromEnv,
@@ -298,6 +300,7 @@ describe("Coworld keystone player", () => {
       profile: "aggressive",
       expertCouncilShadow: false,
       councilPoliticsGuard: false,
+      councilDiplomacyAdjudicator: false,
     });
 
     expect(implicitOff).not.toBeInstanceOf(
@@ -307,6 +310,31 @@ describe("Coworld keystone player", () => {
       KeystoneShadowCouncilTelemetryAgentBrain,
     );
     expect(implicitOff.constructor).toBe(explicitOff.constructor);
+  });
+
+  it("keeps frontier executor identity on ordinary DTA decisions", async () => {
+    const baseline = createKeystoneBrain(modules, {
+      mode: "mock",
+      profile: "aggressive",
+    });
+    const treatment = createKeystoneBrain(modules, {
+      mode: "mock",
+      profile: "aggressive",
+      councilDiplomacyAdjudicator: true,
+    });
+
+    const baselineDecision = await baseline.decide(spawnBrainInput());
+    const treatmentDecision = await treatment.decide(spawnBrainInput());
+
+    expect(treatmentDecision.actionID).toBe(baselineDecision.actionID);
+    expect(treatmentDecision.reason).toBe(baselineDecision.reason);
+    expect(treatmentDecision.metadata).toMatchObject({
+      executorSource: "frontier-policy-executor",
+      actionSelectionSource: baselineDecision.metadata?.actionSelectionSource,
+    });
+    expect(treatmentDecision.metadata?.executorSource).not.toBe(
+      "custom-agent-executor",
+    );
   });
 
   it("constructs the guard wrapper but skips all Council work on non-triggers", async () => {
@@ -397,6 +425,84 @@ describe("Coworld keystone player", () => {
         councilPoliticsGuard: true,
       }),
     ).toThrow(/cannot be combined with the single-action executor treatment/);
+  });
+
+  it("wires accepted request state into the isolated diplomacy adjudicator", async () => {
+    const authoritative = Object.freeze({
+      actionID: "alliance_request:RIVAL",
+      actionIDs: ["alliance_request:RIVAL", "hold:wait"],
+      reason: "scripted v16 repeated request",
+      planFollowed: false,
+    });
+    class ScriptedFrontierPolicyExecutor {
+      decide() {
+        return authoritative;
+      }
+    }
+    const instrumentedModules = {
+      ...modules,
+      plannerExecutor: {
+        ...plannerExecutorModule,
+        FrontierPolicyExecutor: ScriptedFrontierPolicyExecutor,
+      },
+    } as unknown as KeystoneModules;
+    const brain = createKeystoneBrain(instrumentedModules, {
+      mode: "mock",
+      profile: "aggressive",
+      councilDiplomacyAdjudicator: true,
+    });
+    const current = activePoliticsBrainInput();
+    const withAcceptedRequest: AgentBrainInput = {
+      ...current,
+      observation: {
+        ...current.observation,
+        recentDecisions: [
+          {
+            sequence: 1,
+            actionID: "alliance_request:RIVAL",
+            actionKind: "alliance_request",
+            reason: "accepted fixture",
+            accepted: true,
+            targetID: "RIVAL",
+          },
+        ],
+      },
+    };
+
+    const decision = await brain.decide(withAcceptedRequest);
+    const response = decisionToResponse("req_dta", decision);
+
+    expect(decision).toMatchObject({
+      actionID: "expand:neutral:35",
+      actionIDs: ["expand:neutral:35"],
+      metadata: {
+        executorSource: "keystone-diplomacy-adjudicator",
+        actionSelectionSource: "keystone-diplomacy-adjudicator:expansion",
+      },
+    });
+    expect(response.selectedLegalActionId).toBe("expand:neutral:35");
+    expect(String(response.reason)).toContain(
+      `[${KEYSTONE_DIPLOMACY_ADJUDICATOR_MARKER} request_repeat_suppressed]`,
+    );
+  });
+
+  it("keeps the two diplomacy experiments mutually exclusive and pins DTA mask 15", () => {
+    expect(() =>
+      createKeystoneBrain(modules, {
+        mode: "mock",
+        profile: "aggressive",
+        councilPoliticsGuard: true,
+        councilDiplomacyAdjudicator: true,
+      }),
+    ).toThrow(/mutually exclusive treatments/);
+    expect(() =>
+      createKeystoneBrain(modules, {
+        mode: "mock",
+        profile: "aggressive",
+        councilDiplomacyAdjudicator: true,
+        expertMask: 7,
+      }),
+    ).toThrow(/requires the reviewed expert mask 15/);
   });
 
   it.each([false, true])(
@@ -1041,6 +1147,35 @@ describe("Coworld keystone player", () => {
     expect(() =>
       keystoneCouncilPoliticsGuardFromEnv({
         PROXYWAR_KEYSTONE_COUNCIL_POLITICS_GUARD: "yes",
+      }),
+    ).toThrow(/expected 0\|1\|false\|true/);
+  });
+
+  it("parses the diplomacy-adjudicator flag strictly and defaults it off", () => {
+    expect(keystoneCouncilDiplomacyAdjudicatorFromEnv({})).toBe(false);
+    expect(
+      keystoneCouncilDiplomacyAdjudicatorFromEnv({
+        PROXYWAR_KEYSTONE_COUNCIL_DIPLOMACY_ADJUDICATOR: "0",
+      }),
+    ).toBe(false);
+    expect(
+      keystoneCouncilDiplomacyAdjudicatorFromEnv({
+        PROXYWAR_KEYSTONE_COUNCIL_DIPLOMACY_ADJUDICATOR: " FALSE ",
+      }),
+    ).toBe(false);
+    expect(
+      keystoneCouncilDiplomacyAdjudicatorFromEnv({
+        PROXYWAR_KEYSTONE_COUNCIL_DIPLOMACY_ADJUDICATOR: "1",
+      }),
+    ).toBe(true);
+    expect(
+      keystoneCouncilDiplomacyAdjudicatorFromEnv({
+        PROXYWAR_KEYSTONE_COUNCIL_DIPLOMACY_ADJUDICATOR: " true ",
+      }),
+    ).toBe(true);
+    expect(() =>
+      keystoneCouncilDiplomacyAdjudicatorFromEnv({
+        PROXYWAR_KEYSTONE_COUNCIL_DIPLOMACY_ADJUDICATOR: "yes",
       }),
     ).toThrow(/expected 0\|1\|false\|true/);
   });

@@ -135,8 +135,11 @@ function brainInput(args: {
   };
 }
 
-function world(args: Parameters<typeof brainInput>[0]): KeystoneWorldModel {
-  return buildKeystoneWorldModel(brainInput(args));
+function world(
+  args: Parameters<typeof brainInput>[0],
+  options: Parameters<typeof buildKeystoneWorldModel>[1] = {},
+): KeystoneWorldModel {
+  return buildKeystoneWorldModel(brainInput(args), options);
 }
 
 describe("Keystone Politics expert", () => {
@@ -166,6 +169,177 @@ describe("Keystone Politics expert", () => {
         world({ actions, players: [rival], turnNumber: 100 }),
       ),
     ).toBeNull();
+  });
+
+  it("executes only the political half of an exact Commander-bound conquest", () => {
+    const ally = player("ALLY", {
+      isAllied: true,
+      isFriendly: true,
+      relation: Relation.Friendly,
+      canAttack: false,
+      relativeTroopRatio: 1.25,
+    });
+    const breakAlliance = action(
+      "break_alliance:ALLY",
+      "break_alliance",
+      "ALLY",
+    );
+    const proposal = proposeKeystonePolitics(
+      world(
+        { actions: [breakAlliance], players: [ally], turnNumber: 8_000 },
+        {
+          commander: {
+            planID: "attack-ally-after-break",
+            binding: {
+              kind: "attack_target",
+              domain: "conquest",
+              targetPlayerID: "ALLY",
+              minCommitmentBP: 2_500,
+            },
+          },
+        },
+      ),
+    );
+
+    expect(proposal).toMatchObject({
+      actionID: breakAlliance.id,
+      source: "politics",
+      proposalID: "politics:break_to_bound_conquest:break_alliance:ALLY",
+      expectedValueBP: 9_000,
+      urgencyBP: 8_500,
+      confidenceBP: 9_500,
+      opportunityCostBP: 800,
+    });
+  });
+
+  it("admits a reviewed border backstab only after neutral growth is exhausted", () => {
+    const ally = player("ALLY", {
+      isAllied: true,
+      isFriendly: true,
+      relation: Relation.Friendly,
+      canAttack: false,
+      relativeTroopRatio: 1.25,
+    });
+    const breakAlliance = action(
+      "break_alliance:ALLY",
+      "break_alliance",
+      "ALLY",
+    );
+    const base = world({ actions: [breakAlliance], players: [ally] });
+    const backed: KeystoneWorldModel = Object.freeze({
+      ...base,
+      canExpandIntoNeutral: false,
+      recommendedBackstabTargetID: "ALLY",
+    });
+
+    expect(proposeKeystonePolitics(backed)?.actionID).toBe(breakAlliance.id);
+    expect(
+      proposeKeystonePolitics(
+        Object.freeze({ ...backed, canExpandIntoNeutral: true }),
+      ),
+    ).toBeNull();
+    expect(
+      proposeKeystonePolitics(
+        Object.freeze({
+          ...backed,
+          incomingAggressorIDs: Object.freeze(["AGGRESSOR"]),
+        }),
+      ),
+    ).toBeNull();
+  });
+
+  it("rejects remote, weak, teammate, or unbound alliance breaks", () => {
+    const breakAlliance = action(
+      "break_alliance:ALLY",
+      "break_alliance",
+      "ALLY",
+    );
+    const commander = {
+      planID: "attack-ally-after-break",
+      binding: {
+        kind: "attack_target" as const,
+        domain: "conquest" as const,
+        targetPlayerID: "ALLY",
+        minCommitmentBP: 2_500,
+      },
+    };
+    const unsafeTargets = [
+      player("ALLY", {
+        isAllied: true,
+        isFriendly: true,
+        relation: Relation.Friendly,
+        sharesBorder: false,
+      }),
+      player("ALLY", {
+        isAllied: true,
+        isFriendly: true,
+        relation: Relation.Friendly,
+        relativeTroopRatio: 1.05,
+      }),
+      player("ALLY", {
+        isAllied: true,
+        isFriendly: true,
+        isTeammate: true,
+        team: "TEAM-A",
+        relation: Relation.Friendly,
+      }),
+      player("ALLY", {
+        isAllied: true,
+        isFriendly: true,
+        relation: Relation.Friendly,
+        incomingAttack: true,
+      }),
+    ];
+
+    for (const unsafeTarget of unsafeTargets) {
+      expect(
+        proposeKeystonePolitics(
+          world(
+            { actions: [breakAlliance], players: [unsafeTarget] },
+            { commander },
+          ),
+        ),
+      ).toBeNull();
+    }
+    expect(
+      proposeKeystonePolitics(
+        world({ actions: [breakAlliance], players: [unsafeTargets[0]!] }),
+      ),
+    ).toBeNull();
+  });
+
+  it("preserves pending-request and reviewed-backstab facts in the shared world", () => {
+    const current = brainInput({
+      actions: [],
+      players: [
+        player("ALLY", {
+          isAllied: true,
+          hasOutgoingAllianceRequest: true,
+        }),
+      ],
+    });
+    const withBackstab = {
+      ...current,
+      observation: {
+        ...current.observation,
+        tacticalAffordances: {
+          ...current.observation.tacticalAffordances!,
+          backstabAlly: {
+            tacticID: "backstab_ally" as const,
+            recommended: true,
+            turnNumber: current.observation.turnNumber,
+            backstabTargetID: "ALLY",
+            backstabTargetName: "ALLY",
+            ownTileShare: 0.3,
+            reason: "reviewed fixture",
+          },
+        },
+      },
+    };
+    const built = buildKeystoneWorldModel(withBackstab);
+
+    expect(built.players[0]?.hasOutgoingAllianceRequest).toBe(true);
+    expect(built.recommendedBackstabTargetID).toBe("ALLY");
   });
 
   it("rejects only an observed incoming request from an active aggressor", () => {
