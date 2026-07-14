@@ -269,7 +269,7 @@ export interface KeystoneArbitrationResult {
   readonly selection: KeystoneActionSelection | null;
   /** The next eligible, distinct action in the selected tier, when one exists. */
   readonly runnerUp: KeystoneActionSelection | null;
-  /** Selected raw bid minus runner-up raw bid; may be negative when hysteresis retains. */
+  /** Selected effective auction score minus runner-up; negative only when hysteresis retains. */
   readonly bidMarginBP: number | null;
   /** Populated only after the discretionary expert auction is evaluated. */
   readonly auction: KeystoneAuctionTrace | null;

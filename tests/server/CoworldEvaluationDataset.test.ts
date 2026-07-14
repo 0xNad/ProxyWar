@@ -41,13 +41,13 @@ function compactShadowCouncil(
     g: 2,
     x: 0,
     h: "h",
-    p: 19,
-    e: 4,
+    p: 127,
+    e: 64,
     j: 8,
     w: "0123456789abcdef",
     r: "fedcba9876543210",
     d: "0123456789abcdef",
-    m: 125,
+    m: -499,
     a: "a",
     s: 1,
     k: 15,
@@ -687,13 +687,13 @@ describe("Coworld evaluation dataset", () => {
         resetOrdinal: 2,
         reset: false,
         health: "healthy",
-        proposalMask: 19,
-        errorMask: 4,
+        proposalMask: 127,
+        errorMask: 64,
         rejectionMask: 8,
         diagnosticWinnerFingerprint: "0123456789abcdef",
         runnerUpFingerprint: "fedcba9876543210",
         authoritativeFingerprint: "0123456789abcdef",
-        bidMarginBP: 125,
+        bidMarginBP: -499,
         agreement: "agree",
         diagnosticWinnerSource: "expansion",
         diagnosticWinnerTier: "expert_auction",
@@ -742,8 +742,8 @@ describe("Coworld evaluation dataset", () => {
       validTelemetryDecisionCount: 1,
       diagnosticWinnerDecisionCount: 1,
       counterfactualAgreementDecisionCount: 1,
-      proposalMaskUnion: 19,
-      errorMaskUnion: 4,
+      proposalMaskUnion: 127,
+      errorMaskUnion: 64,
       rejectionMaskUnion: 8,
       enabledExpertMaskUnion: 15,
       sourceCounts: { expansion: 1 },
@@ -775,11 +775,15 @@ describe("Coworld evaluation dataset", () => {
     ["unsafe ordinal", compactShadowCouncil({ o: 9_007_199_254_740_992 })],
     ["invalid reset", compactShadowCouncil({ x: 2 })],
     ["invalid health", compactShadowCouncil({ h: "healthy" })],
-    ["proposal mask overflow", compactShadowCouncil({ p: 64 })],
-    ["error mask overflow", compactShadowCouncil({ e: 64 })],
+    ["proposal mask overflow", compactShadowCouncil({ p: 128 })],
+    ["proposal mask fraction", compactShadowCouncil({ p: 64.5 })],
+    ["error mask overflow", compactShadowCouncil({ e: 128 })],
+    ["error mask fraction", compactShadowCouncil({ e: 64.5 })],
     ["rejection mask overflow", compactShadowCouncil({ j: 2_048 })],
     ["invalid fingerprint", compactShadowCouncil({ w: "ABCDEF" })],
-    ["negative margin", compactShadowCouncil({ m: -1 })],
+    ["margin below floor", compactShadowCouncil({ m: -20_001 })],
+    ["margin above ceiling", compactShadowCouncil({ m: 20_001 })],
+    ["margin fraction", compactShadowCouncil({ m: -499.5 })],
     ["invalid agreement", compactShadowCouncil({ a: "agree" })],
     ["invalid source", compactShadowCouncil({ s: 9 })],
     ["enabled mask overflow", compactShadowCouncil({ k: 16 })],
@@ -793,6 +797,18 @@ describe("Coworld evaluation dataset", () => {
       }),
     ).toThrow(/shadowCouncil/);
   });
+
+  test.each([null, -20_000, 20_000])(
+    "accepts bounded compact shadow margin %s",
+    (margin) => {
+      const fragment = parseCoworldEvaluationDocument({
+        value: shadowDecisionDocument(compactShadowCouncil({ m: margin })),
+        sourcePath: "/artifacts/bounded-shadow-council.replay",
+        fallbackId: "bounded-shadow-council",
+      })[0];
+      expect(fragment.decisions[0]?.shadowCouncil?.bidMarginBP).toBe(margin);
+    },
+  );
 
   test("joins a schemaVersion 3 council plan without claiming shadow authority", async () => {
     const fixture = await writeCouncilPlanFixture();

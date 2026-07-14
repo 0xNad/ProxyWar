@@ -585,13 +585,13 @@ describe("Coworld keystone player", () => {
       g: 1,
       x: 0,
       h: "h",
-      p: 5,
-      e: 0,
+      p: 127,
+      e: 64,
       j: 0,
       w: "0123456789abcdef",
       r: "-",
       d: "fedcba9876543210",
-      m: 125,
+      m: -499,
       a: "d",
       s: 3,
       k: 15,
@@ -607,6 +607,19 @@ describe("Coworld keystone player", () => {
 
     expect(response.shadowCouncil).toBe(compact);
     expect(JSON.stringify(response).length).toBeLessThan(1_000);
+
+    for (const margin of [null, -20_000, 20_000]) {
+      const bounded = JSON.stringify({ ...JSON.parse(compact), m: margin });
+      expect(
+        decisionToResponse(`req_shadow_margin_${String(margin)}`, {
+          actionID: "hold:wait",
+          reason: "hold",
+          metadata: {
+            [KEYSTONE_SHADOW_COUNCIL_METADATA_KEY]: bounded,
+          },
+        }).shadowCouncil,
+      ).toBe(bounded);
+    }
 
     const unexpected = decisionToResponse("req_shadow_bad", {
       actionID: "hold:wait",
@@ -631,8 +644,13 @@ describe("Coworld keystone player", () => {
     expect(oversized).not.toHaveProperty("shadowCouncil");
 
     for (const [key, value] of [
-      ["p", 64],
-      ["e", 64],
+      ["p", 128],
+      ["p", 64.5],
+      ["e", 128],
+      ["e", 64.5],
+      ["m", -20_001],
+      ["m", 20_001],
+      ["m", -499.5],
       ["j", 2_048],
       ["k", 16],
       ["s", 9],
@@ -698,13 +716,13 @@ describe("Coworld keystone player", () => {
       g: Number.MAX_SAFE_INTEGER,
       x: 1,
       h: "u",
-      p: 15,
-      e: 63,
+      p: 127,
+      e: 127,
       j: 2_047,
       w: "0123456789abcdef",
       r: "fedcba9876543210",
       d: "0011223344556677",
-      m: Number.MAX_SAFE_INTEGER,
+      m: 20_000,
       a: "d",
       s: 6,
       k: 15,

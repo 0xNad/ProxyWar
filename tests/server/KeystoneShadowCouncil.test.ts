@@ -901,7 +901,83 @@ describe("Keystone shadow expert council", () => {
     ]);
   });
 
-  it("reports runner-up and raw margin after soft plan bonus and action dedupe", () => {
+  it("latches a new-game reset until one valid observation clears the old ledger", () => {
+    const authoritative = Object.freeze({
+      actionID: "hold:wait",
+      reason: "v16 authority",
+      planFollowed: false,
+    });
+    const shadow = new KeystoneShadowCouncilExecutor({
+      delegate: delegate(authoritative),
+      actionFollowsCanonicalPlan: () => false,
+      experts: experts({
+        expansion: () =>
+          proposal("expansion", "expand:neutral:35", {
+            commitmentKey: "expansion:neutral-land",
+            horizonDecisions: 2,
+          }),
+        economy: (world) =>
+          proposal("economy", "build:city", {
+            expectedValueBP: world.gameID === "A" ? 7_000 : 8_998,
+            commitmentKey: "economy:city-foundation",
+            horizonDecisions: 2,
+          }),
+      }),
+      logLine: () => undefined,
+    });
+
+    expect(
+      shadow.decide(
+        ownedInput(domainActions(), { gameID: "A", turn: 2_000 }),
+        plan,
+      ),
+    ).toBe(authoritative);
+    expect(shadow.latestTelemetry()).toMatchObject({
+      winner: { actionID: "expand:neutral:35" },
+      operational: {
+        record: { reason: "armed", after: { source: "expansion" } },
+      },
+    });
+
+    expect(
+      shadow.decide(
+        ownedInput([action("", "hold")], { gameID: "B", turn: 1 }),
+        plan,
+      ),
+    ).toBe(authoritative);
+    expect(shadow.latestTelemetry()).toMatchObject({
+      ordinal: 1,
+      reset: true,
+      resetOrdinal: 2,
+      winner: null,
+      health: "unavailable",
+      operational: { preparation: null, record: null },
+    });
+
+    expect(
+      shadow.decide(
+        ownedInput(domainActions(), { gameID: "B", turn: 2 }),
+        plan,
+      ),
+    ).toBe(authoritative);
+    expect(shadow.latestTelemetry()).toMatchObject({
+      ordinal: 2,
+      reset: true,
+      resetOrdinal: 2,
+      winner: { actionID: "build:city" },
+      auction: { status: "inactive" },
+      operational: {
+        preparation: {
+          reason: "reset",
+          before: { source: "expansion" },
+          after: { source: null, remainingDecisions: 0 },
+        },
+        record: { reason: "armed", after: { source: "economy" } },
+      },
+    });
+  });
+
+  it("reports runner-up and effective margin after soft plan bonus and action dedupe", () => {
     const actions = domainActions();
     const unaligned = proposal("expansion", "expand:neutral:35", {
       expectedValueBP: 9_000,
@@ -922,7 +998,7 @@ describe("Keystone shadow expert council", () => {
     );
     expect(filtered.selection?.actionID).toBe("expand:neutral:35");
     expect(filtered.runnerUp?.actionID).toBe("build:city");
-    expect(filtered.bidMarginBP).toBe(1_000);
+    expect(filtered.bidMarginBP).toBe(500);
     expect(filtered.auction).toMatchObject({
       status: "inactive",
       planAlignmentBonusBP: 500,
@@ -992,6 +1068,7 @@ describe("Keystone shadow expert council", () => {
     expect(shadow.decide(input(), plan)).toBe(authoritative);
     expect(shadow.latestTelemetry()).toMatchObject({
       winner: { actionID: "build:city" },
+      bidMarginBP: 400,
       auction: {
         status: "inactive",
         planAlignmentBonusBP: 500,

@@ -110,7 +110,9 @@ export function arbitrateKeystoneAction(
         runnerUp:
           runnerUp === undefined ? null : selectionFor(spec.tier, runnerUp),
         bidMarginBP:
-          runnerUp === undefined ? null : selected.rawBidBP - runnerUp.rawBidBP,
+          runnerUp === undefined
+            ? null
+            : selected.auctionScoreBP - runnerUp.auctionScoreBP,
         auction,
         rejections,
       });
@@ -242,7 +244,9 @@ function ownerMatches(
         action.actionOwner === "expansion" ||
         action.actionOwner === "economy" ||
         action.actionOwner === "conquest" ||
-        action.actionOwner === "politics"
+        action.actionOwner === "politics" ||
+        (action.actionOwner === "survival" &&
+          (action.kind === "attack" || action.kind === "boat"))
       );
     case "expert_auction":
       return action.actionOwner === proposal.source;

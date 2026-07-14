@@ -795,17 +795,27 @@ describe("Keystone expert council infrastructure", () => {
         bindingDirective: [
           directive("binding_directive", "binding-hold", "hold"),
           directive("binding_directive", "binding-counter", "counter"),
+          directive("binding_directive", "binding-retreat", "retreat"),
           directive("binding_directive", "binding-unowned", "unowned"),
           directive("binding_directive", "binding-build", "build"),
         ],
       }),
     );
     expect(binding.selection?.actionID).toBe("build");
-    expect(
-      binding.rejections.filter(
-        (rejection) => rejection.reason === "action_ownership_mismatch",
-      ),
-    ).toHaveLength(3);
+    const bindingOwnershipRejections = binding.rejections.filter(
+      (rejection) => rejection.reason === "action_ownership_mismatch",
+    );
+    expect(bindingOwnershipRejections).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ proposalID: "binding-hold" }),
+        expect.objectContaining({ proposalID: "binding-retreat" }),
+        expect.objectContaining({ proposalID: "binding-unowned" }),
+      ]),
+    );
+    expect(bindingOwnershipRejections).toHaveLength(3);
+    expect(binding.rejections).not.toContainEqual(
+      expect.objectContaining({ proposalID: "binding-counter" }),
+    );
   });
 
   it("filters non-offered proposals and falls through to a valid lower tier", () => {
@@ -1270,6 +1280,7 @@ describe("Keystone expert council infrastructure", () => {
       selectedPlanBonusBP: 500,
       selectedAuctionScoreBP: 7_625,
     });
+    expect(closeResult.bidMarginBP).toBe(400);
   });
 
   it("is order invariant and uses action id as the fixed cross-action tie break", () => {

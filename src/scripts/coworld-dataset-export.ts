@@ -2118,11 +2118,20 @@ function shadowInteger(
   key: string,
   maximum = Number.MAX_SAFE_INTEGER,
 ): number {
+  return shadowIntegerInRange(record, key, 0, maximum);
+}
+
+function shadowIntegerInRange(
+  record: Record<string, unknown>,
+  key: string,
+  minimum: number,
+  maximum: number,
+): number {
   const value = record[key];
   if (
     typeof value !== "number" ||
     !Number.isSafeInteger(value) ||
-    value < 0 ||
+    value < minimum ||
     value > maximum
   ) {
     throw new Error(`Invalid decision_response.shadowCouncil.${key}`);
@@ -2182,13 +2191,16 @@ function shadowCouncilDecisionTelemetry(
   if (health === undefined) {
     throw new Error("Invalid decision_response.shadowCouncil.h");
   }
-  const proposalMask = shadowInteger(record, "p", 63);
-  const errorMask = shadowInteger(record, "e", 63);
+  const proposalMask = shadowInteger(record, "p", 127);
+  const errorMask = shadowInteger(record, "e", 127);
   const rejectionMask = shadowInteger(record, "j", 2_047);
   const diagnosticWinnerFingerprint = shadowFingerprint(record, "w");
   const runnerUpFingerprint = shadowFingerprint(record, "r");
   const authoritativeFingerprint = shadowFingerprint(record, "d");
-  const bidMarginBP = record.m === null ? null : shadowInteger(record, "m");
+  const bidMarginBP =
+    record.m === null
+      ? null
+      : shadowIntegerInRange(record, "m", -20_000, 20_000);
   const agreement =
     typeof record.a === "string"
       ? shadowCouncilAgreementCodes[record.a]

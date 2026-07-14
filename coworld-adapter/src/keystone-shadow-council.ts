@@ -295,6 +295,7 @@ export class KeystoneShadowCouncilExecutor implements AgentExecutor {
   private lastTurn: number | null = null;
   private ordinal = 0;
   private resetOrdinal = 0;
+  private pendingReset = false;
   private latest: KeystoneShadowCouncilTelemetry | null = null;
 
   constructor(private readonly options: KeystoneShadowCouncilExecutorOptions) {
@@ -326,6 +327,9 @@ export class KeystoneShadowCouncilExecutor implements AgentExecutor {
         input.observation.turnNumber,
       );
       draft = this.observeCouncil(input, plan, sequence);
+      if (sequence.reset && draft.ledgerPreparation !== null) {
+        this.pendingReset = false;
+      }
     } catch {
       // The authoritative executor must still run even if shadow state or its
       // injectable diagnostic clock is malformed.
@@ -354,20 +358,21 @@ export class KeystoneShadowCouncilExecutor implements AgentExecutor {
   }
 
   private advanceSequence(gameID: string, turn: number): ShadowSequence {
-    const reset =
+    const boundary =
       this.gameID === null ||
       gameID !== this.gameID ||
       (this.lastTurn !== null && turn < this.lastTurn);
-    if (reset) {
+    if (boundary) {
       this.ordinal = 0;
       this.resetOrdinal += 1;
+      this.pendingReset = true;
     }
     this.gameID = gameID;
     this.lastTurn = turn;
     this.ordinal += 1;
     return Object.freeze({
       ordinal: this.ordinal,
-      reset,
+      reset: this.pendingReset,
       resetOrdinal: this.resetOrdinal,
     });
   }

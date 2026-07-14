@@ -81,7 +81,8 @@ function attackBindingAction(
   }
   const targeted = actions.filter(
     (action) =>
-      action.actionOwner === "conquest" &&
+      (action.actionOwner === "conquest" ||
+        action.actionOwner === "survival") &&
       action.targetPlayerID === binding.targetPlayerID &&
       !action.targetsSelf &&
       !action.targetsFriendlyOrTeam &&

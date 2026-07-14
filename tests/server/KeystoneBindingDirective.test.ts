@@ -5,6 +5,7 @@ import {
   buildKeystoneWorldModel,
   KeystoneOperationalCommitmentLedger,
   normalizeKeystoneCommanderContext,
+  proposeKeystoneSurvival,
   resolveKeystoneBindingDirective,
   type KeystoneAuctionContext,
   type KeystoneCommanderBinding,
@@ -589,6 +590,82 @@ describe("Keystone exact offered-action binding", () => {
       tier: "binding_directive",
     });
   });
+
+  it.each([
+    {
+      name: "30% attack",
+      offered: action("counter:30", "attack", {
+        targetID: "AGGRESSOR",
+        troopPercent: 30,
+      }),
+    },
+    {
+      name: "boat invasion",
+      offered: action("counter:boat", "boat", {
+        targetID: "AGGRESSOR",
+      }),
+    },
+  ])(
+    "binds an incoming aggressor through the only offered noncanonical $name",
+    ({ offered }) => {
+      const current = world(
+        {
+          kind: "attack_target",
+          domain: "conquest",
+          targetPlayerID: "AGGRESSOR",
+          minCommitmentBP: 2_500,
+        },
+        [offered],
+        [player("AGGRESSOR", { incomingAttack: true })],
+        { incomingAttackPlayerIDs: ["AGGRESSOR"] },
+      );
+      expect(proposeKeystoneSurvival(current)).toBeNull();
+      const binding = resolveKeystoneBindingDirective(current).proposal;
+      expect(binding).toMatchObject({ actionID: offered.id });
+      expect(
+        arbitrateKeystoneAction(
+          current,
+          tiers([], binding === null ? [] : [binding]),
+        ).selection,
+      ).toMatchObject({
+        actionID: offered.id,
+        tier: "binding_directive",
+      });
+    },
+  );
+
+  it("keeps a qualifying canonical survival counter ahead of the same binding", () => {
+    const current = world(
+      {
+        kind: "attack_target",
+        domain: "conquest",
+        targetPlayerID: "AGGRESSOR",
+        minCommitmentBP: 2_500,
+      },
+      [
+        action("counter:25", "attack", {
+          targetID: "AGGRESSOR",
+          troopPercent: 25,
+        }),
+      ],
+      [player("AGGRESSOR", { incomingAttack: true })],
+      { incomingAttackPlayerIDs: ["AGGRESSOR"] },
+    );
+    const survival = proposeKeystoneSurvival(current);
+    const binding = resolveKeystoneBindingDirective(current).proposal;
+    expect(survival).toMatchObject({ actionID: "counter:25" });
+    expect(binding).toMatchObject({ actionID: "counter:25" });
+    expect(
+      arbitrateKeystoneAction(
+        current,
+        tiers(
+          [],
+          binding === null ? [] : [binding],
+          survival === null ? [] : [survival],
+        ),
+      ).selection,
+    ).toMatchObject({ actionID: "counter:25", tier: "survival" });
+  });
 });
 
 describe("Keystone bounded operational hysteresis", () => {
@@ -748,6 +825,7 @@ describe("Keystone bounded operational hysteresis", () => {
       status: "switched",
       challengerAdvantageBP: 500,
     });
+    expect(result.bidMarginBP).toBe(500);
     expect(
       ledger.record({
         world: current,

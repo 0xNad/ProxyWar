@@ -384,12 +384,12 @@ function shadowCouncilTelemetryForWire(
       !nonNegativeInteger(parsed.o) ||
       !nonNegativeInteger(parsed.g) ||
       (parsed.x !== 0 && parsed.x !== 1) ||
-      !integerInRange(parsed.p, 0, 63) ||
-      !integerInRange(parsed.e, 0, 63) ||
+      !integerInRange(parsed.p, 0, 127) ||
+      !integerInRange(parsed.e, 0, 127) ||
       !integerInRange(parsed.j, 0, 2_047) ||
       !integerInRange(parsed.k, 0, 15) ||
       !nonNegativeInteger(parsed.u) ||
-      !(parsed.m === null || nonNegativeInteger(parsed.m)) ||
+      !(parsed.m === null || integerInRange(parsed.m, -20_000, 20_000)) ||
       !["h", "p", "f", "u"].includes(String(parsed.h)) ||
       !["a", "d", "b", "u"].includes(String(parsed.a)) ||
       !integerInRange(parsed.s, 0, 8) ||
