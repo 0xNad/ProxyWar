@@ -65,5 +65,11 @@
     "tournament-4p-europe"
   ],
   "candidateSeats": [0, 1, 2, 3],
-  "seeds": [7]
+  "seeds": [7],
+  "arms": [
+    { "kind": "v16" },
+    { "kind": "a1" },
+    { "kind": "v16-shadow", "expertMask": 15 },
+    { "kind": "a1-shadow", "expertMask": 15 }
+  ]
 }

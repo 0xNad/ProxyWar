@@ -4,6 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import { describe, expect, test, vi } from "vitest";
 import {
+  coworldCanonicalSha256,
   materializeCoworldPairedMatrix,
   type CoworldMatrixSchemaValidator,
   type CoworldPairedMatrixSpec,
@@ -185,17 +186,54 @@ describe("Coworld paired matrix planner", () => {
     });
 
     expect(validationObserved).toBe(true);
-    expect(plan.schemaVersion).toBe(2);
+    expect(plan.schemaVersion).toBe(3);
     expect(plan.coworldVersion).toBe("0.1.30");
     expect(plan.matrixID).toMatch(/^matrix-[0-9a-f]{32}$/);
+    expect(plan.matrixID).toBe(
+      `matrix-${coworldCanonicalSha256(plan.matrixIdentity).slice(7, 39)}`,
+    );
+    expect(plan.matrixIdentity).toMatchObject({
+      contract: "proxywar-coworld-paired-matrix-v3",
+      manifestSha256: plan.manifestSha256,
+      gameImage: plan.gameImage,
+      candidate: {
+        reference: plan.candidateImage.reference,
+        image: plan.candidateImage,
+      },
+      opponents: plan.opponentImages.map((image) => ({
+        reference: image.reference,
+        image,
+      })),
+      variantIDs: spec.variantIDs,
+      candidateSeats: spec.candidateSeats,
+      seeds: spec.seeds,
+      arms: plan.arms,
+    });
     expect(plan.manifestSha256).toMatch(/^sha256:[0-9a-f]{64}$/);
+    expect(plan.blocks).toHaveLength(2);
     expect(plan.jobs).toHaveLength(4);
-    expect(plan.jobs.map((job) => job.arm)).toEqual([
-      "control",
-      "treatment",
-      "treatment",
-      "control",
+    expect(plan.arms.map((arm) => arm.armID)).toEqual(["v16", "a1"]);
+    expect(plan.jobs.map((job) => job.arm.armID)).toEqual([
+      "v16",
+      "a1",
+      "a1",
+      "v16",
     ]);
+    expect(plan.blocks.map((block) => block.armOrder)).toEqual([
+      ["v16", "a1"],
+      ["a1", "v16"],
+    ]);
+    expect(plan.blocks.map((block) => block.blockIndex)).toEqual([0, 1]);
+    expect(
+      plan.jobs.every(
+        (job) =>
+          job.matrixID === plan.matrixID &&
+          job.blockID ===
+            plan.blocks.find((block) => block.pairID === job.pairID)?.blockID &&
+          job.rosterOrderID.startsWith("roster-") &&
+          job.completionPath.endsWith("completion.json"),
+      ),
+    ).toBe(true);
     expect(new Set(plan.jobs.map((job) => job.jobID)).size).toBe(4);
     expect(new Set(plan.jobs.map((job) => job.requestPath)).size).toBe(4);
     expect(plan.candidateImage).toEqual({
@@ -240,10 +278,12 @@ describe("Coworld paired matrix planner", () => {
       {
         PROXYWAR_KEYSTONE_MODE: "mock",
         PROXYWAR_KEYSTONE_SINGLE_ACTION: "0",
+        PROXYWAR_KEYSTONE_EXPERT_COUNCIL_SHADOW: "0",
       },
       {
         PROXYWAR_KEYSTONE_MODE: "mock",
         PROXYWAR_KEYSTONE_SINGLE_ACTION: "1",
+        PROXYWAR_KEYSTONE_EXPERT_COUNCIL_SHADOW: "0",
       },
     ]);
     const scrubTreatment = (request: Record<string, any>) => ({
@@ -269,6 +309,61 @@ describe("Coworld paired matrix planner", () => {
         entry.includes(".matrix.staging-"),
       ),
     ).toEqual([]);
+  });
+
+  test("materializes allowlisted N-arm blocks with deterministic balanced order", async () => {
+    const { directory, spec } = await fixture();
+    const plan = await materializeCoworldPairedMatrix({
+      spec: {
+        ...spec,
+        candidateSeats: [0, 1, 2, 3],
+        arms: [
+          { kind: "a1-shadow", expertMask: 15 },
+          { kind: "v16-shadow", expertMask: 5 },
+          { kind: "a1" },
+          { kind: "v16" },
+        ],
+      },
+      specDirectory: directory,
+      resolveImageID: fakeImageID,
+      validateCoworld: acceptSchema,
+    });
+
+    const armIDs = ["v16", "a1", "v16-shadow-m5", "a1-shadow-m15"];
+    expect(plan.arms.map((arm) => arm.armID)).toEqual(armIDs);
+    expect(plan.blocks.map((block) => block.armOrder)).toEqual([
+      armIDs,
+      ["a1", "v16-shadow-m5", "a1-shadow-m15", "v16"],
+      ["v16-shadow-m5", "a1-shadow-m15", "v16", "a1"],
+      ["a1-shadow-m15", "v16", "a1", "v16-shadow-m5"],
+    ]);
+    expect(plan.jobs).toHaveLength(16);
+    for (let position = 0; position < armIDs.length; position += 1) {
+      expect(
+        plan.blocks.map((block) => block.armOrder[position]).sort(),
+      ).toEqual([...armIDs].sort());
+    }
+
+    const shadow = plan.jobs.find((job) => job.arm.armID === "v16-shadow-m5")!;
+    expect(shadow.expertMask).toBe(5);
+    expect(shadow.arm).toEqual({
+      armID: "v16-shadow-m5",
+      kind: "v16-shadow",
+      base: "v16",
+      shadow: true,
+      expertMask: 5,
+      env: {
+        PROXYWAR_KEYSTONE_SINGLE_ACTION: "0",
+        PROXYWAR_KEYSTONE_EXPERT_COUNCIL_SHADOW: "1",
+        PROXYWAR_KEYSTONE_EXPERT_MASK: "5",
+      },
+    });
+    expect(shadow.roster[shadow.candidateSeat]!.env).toMatchObject(
+      shadow.arm.env,
+    );
+    expect(
+      plan.blocks[0]!.roster[plan.blocks[0]!.candidateSeat]!.env,
+    ).not.toHaveProperty("PROXYWAR_KEYSTONE_SINGLE_ACTION");
   });
 
   test("resolved image identities participate in matrix and pair IDs", async () => {
@@ -475,9 +570,16 @@ describe("Coworld paired matrix planner", () => {
     });
   });
 
-  test("rejects implicit latest, mutable latest, malformed specs, and treatment contamination", async () => {
+  test("rejects mutable images, malformed specs, and arm-owned environment contamination", async () => {
     const { directory, spec } = await fixture();
     const cases: Array<[CoworldPairedMatrixSpec, string]> = [
+      [
+        {
+          ...spec,
+          opponents: Array.from({ length: 12 }, () => spec.opponents[0]!),
+        },
+        "opponents must contain 1..11 runnables",
+      ],
       [
         {
           ...spec,
@@ -500,7 +602,7 @@ describe("Coworld paired matrix planner", () => {
           ...spec,
           candidate: { ...spec.candidate, name: "" },
         },
-        "candidate.name must be a nonempty string",
+        "candidate.name must be a bounded nonempty string",
       ],
       [
         {
@@ -521,7 +623,17 @@ describe("Coworld paired matrix planner", () => {
               : opponent,
           ),
         },
-        "matrix owns the treatment flag",
+        "must not set arm-owned key",
+      ],
+      [
+        {
+          ...spec,
+          candidate: {
+            ...spec.candidate,
+            env: { PROXYWAR_KEYSTONE_EXPERT_MASK: "15" },
+          },
+        },
+        "must not set arm-owned key",
       ],
       [
         {
@@ -536,6 +648,81 @@ describe("Coworld paired matrix planner", () => {
           ),
         },
         "must not be empty or whitespace",
+      ],
+    ];
+    for (const [invalidSpec, message] of cases) {
+      await expect(
+        materializeCoworldPairedMatrix({
+          spec: invalidSpec,
+          specDirectory: directory,
+          resolveImageID: fakeImageID,
+          validateCoworld: acceptSchema,
+        }),
+      ).rejects.toThrow(message);
+    }
+  });
+
+  test("rejects non-unique, invalid, unknown, and reserved authority arms", async () => {
+    const { directory, spec } = await fixture();
+    const cases: Array<[CoworldPairedMatrixSpec["arms"], string]> = [
+      [[{ kind: "v16" }], "at least two"],
+      [[{ kind: "v16" }, { kind: "v16" }], "unique arm identities"],
+      [
+        [{ kind: "v16" }, { kind: "v16-shadow", expertMask: 16 }],
+        "integer in 0..15",
+      ],
+      [
+        [{ kind: "v16" }, { kind: "council-authoritative" }],
+        "reserved until a reviewed authoritative council runtime exists",
+      ],
+      [[{ kind: "v16" }, { kind: "unknown" } as never], "not allowlisted"],
+    ];
+    for (const [arms, message] of cases) {
+      await expect(
+        materializeCoworldPairedMatrix({
+          spec: { ...spec, arms },
+          specDirectory: directory,
+          resolveImageID: fakeImageID,
+          validateCoworld: acceptSchema,
+        }),
+      ).rejects.toThrow(message);
+    }
+  });
+
+  test("shares executor bounds and rejects unexecutable runnable identities", async () => {
+    const { directory, spec } = await fixture();
+    const cases: Array<[CoworldPairedMatrixSpec, string]> = [
+      [
+        {
+          ...spec,
+          candidate: { ...spec.candidate, name: "n".repeat(257) },
+        },
+        "name exceeds the paired name limit",
+      ],
+      [
+        {
+          ...spec,
+          candidate: {
+            ...spec.candidate,
+            run: Array.from({ length: 129 }, () => "argument"),
+          },
+        },
+        "bounded nonempty argv array",
+      ],
+      [
+        {
+          ...spec,
+          candidate: {
+            ...spec.candidate,
+            env: Object.fromEntries(
+              Array.from({ length: 126 }, (_, index) => [
+                `PUBLIC_${index}`,
+                "value",
+              ]),
+            ),
+          },
+        },
+        "env exceeds the paired entry limit",
       ],
     ];
     for (const [invalidSpec, message] of cases) {
@@ -611,7 +798,7 @@ describe("Coworld paired matrix planner", () => {
     }
   });
 
-  test("validates the real 24-request example with pinned Coworld 0.1.30", async () => {
+  test("validates the real 48-request N-arm example with pinned Coworld 0.1.30", async () => {
     const specPath = path.resolve(
       "coworld-adapter/coworld/paired-matrix.example.json",
     );
@@ -632,9 +819,9 @@ describe("Coworld paired matrix planner", () => {
       now: new Date("2026-07-14T00:00:00.000Z"),
     });
 
-    expect(plan.jobs).toHaveLength(24);
+    expect(plan.jobs).toHaveLength(48);
     expect(new Set(plan.jobs.map((job) => job.pairID)).size).toBe(12);
-    expect(new Set(plan.jobs.map((job) => job.jobID)).size).toBe(24);
+    expect(new Set(plan.jobs.map((job) => job.jobID)).size).toBe(48);
     for (const job of plan.jobs) {
       await expect(fs.lstat(job.requestPath)).resolves.toBeDefined();
     }

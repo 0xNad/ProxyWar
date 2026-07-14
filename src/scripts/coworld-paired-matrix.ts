@@ -5,9 +5,28 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 const MAX_SEED = 308_915_775;
-const MAX_JOBS = 1_000;
+export const COWORLD_PAIRED_BOUNDS = Object.freeze({
+  maxJobs: 1_000,
+  maxRoster: 12,
+  maxRunArguments: 128,
+  maxIdentityString: 4_096,
+  maxName: 256,
+  maxEnvironmentEntries: 128,
+  maxEnvironmentKey: 128,
+  maxEnvironmentValue: 65_536,
+  maxJsonBytes: 10_000_000,
+  maxValidationPayloadBytes: 50_000_000,
+});
+const MAX_JOBS = COWORLD_PAIRED_BOUNDS.maxJobs;
 const COMMAND_TIMEOUT_MS = 60_000;
 const TREATMENT_ENV = "PROXYWAR_KEYSTONE_SINGLE_ACTION";
+const SHADOW_ENV = "PROXYWAR_KEYSTONE_EXPERT_COUNCIL_SHADOW";
+const EXPERT_MASK_ENV = "PROXYWAR_KEYSTONE_EXPERT_MASK";
+const ARM_OWNED_ENV_KEYS = new Set([
+  TREATMENT_ENV,
+  SHADOW_ENV,
+  EXPERT_MASK_ENV,
+]);
 const COWORLD_VERSION = "0.1.30";
 const IMAGE_ID_PATTERN = /^sha256:[0-9a-f]{64}$/i;
 const ENV_KEY_PATTERN = /^[A-Za-z_][A-Za-z0-9_]*$/;
@@ -33,6 +52,29 @@ export interface CoworldPairedMatrixSpec {
   variantIDs: string[];
   candidateSeats: number[];
   seeds: number[];
+  /** Defaults to the legacy v16/A1 pair when omitted. */
+  arms?: CoworldArmSpec[];
+}
+
+export type CoworldArmSpec =
+  | { kind: "v16" }
+  | { kind: "a1" }
+  | { kind: "v16-shadow"; expertMask: number }
+  | { kind: "a1-shadow"; expertMask: number }
+  | { kind: "council-authoritative" }
+  | {
+      kind: "expert-mask-authoritative";
+      base: "v16" | "a1";
+      expertMask: number;
+    };
+
+export interface CoworldResolvedArm {
+  armID: string;
+  kind: "v16" | "a1" | "v16-shadow" | "a1-shadow";
+  base: "v16" | "a1";
+  shadow: boolean;
+  expertMask: number;
+  env: Record<string, string>;
 }
 
 export interface CoworldResolvedImage {
@@ -40,28 +82,77 @@ export interface CoworldResolvedImage {
   imageID: string;
 }
 
-export interface CoworldPairedJob {
-  jobID: string;
+export interface CoworldMatrixRunnableIdentity {
+  reference: string;
+  run: string[];
+  env: Record<string, string>;
+  name: string | null;
+  image: CoworldResolvedImage;
+}
+
+export interface CoworldMatrixIdentity {
+  contract: "proxywar-coworld-paired-matrix-v3";
+  manifestSha256: string;
+  gameImage: CoworldResolvedImage;
+  candidate: CoworldMatrixRunnableIdentity;
+  opponents: CoworldMatrixRunnableIdentity[];
+  variantIDs: string[];
+  candidateSeats: number[];
+  seeds: number[];
+  arms: CoworldResolvedArm[];
+}
+
+export interface CoworldRosterSeatIdentity {
+  seat: number;
+  role: "candidate" | "opponent";
+  name: string;
+  image: CoworldResolvedImage;
+  run: string[];
+  env: Record<string, string>;
+}
+
+export interface CoworldPairedBlock {
+  blockID: string;
   pairID: string;
-  pairOrder: number;
-  arm: "control" | "treatment";
-  treatmentValue: "0" | "1";
+  blockIndex: number;
   variantID: string;
   map: string;
   candidateSeat: number;
   seed: number;
+  rosterOrderID: string;
+  armOrder: string[];
+  roster: CoworldRosterSeatIdentity[];
+}
+
+export interface CoworldPairedJob {
+  jobID: string;
+  matrixID: string;
+  blockID: string;
+  pairID: string;
+  blockOrder: number;
+  pairOrder: number;
+  arm: CoworldResolvedArm;
+  expertMask: number;
+  variantID: string;
+  map: string;
+  candidateSeat: number;
+  seed: number;
+  rosterOrderID: string;
+  roster: CoworldRosterSeatIdentity[];
   requestPath: string;
   outputDir: string;
+  completionPath: string;
   candidateImage: CoworldResolvedImage;
   gameImage: CoworldResolvedImage;
   opponentImages: CoworldResolvedImage[];
 }
 
 export interface CoworldPairedPlan {
-  schemaVersion: 2;
+  schemaVersion: 3;
   coworldVersion: typeof COWORLD_VERSION;
   generatedAt: string;
   matrixID: string;
+  matrixIdentity: CoworldMatrixIdentity;
   manifestSha256: string;
   manifestPath: string;
   planPath: string;
@@ -69,6 +160,8 @@ export interface CoworldPairedPlan {
   candidateImage: CoworldResolvedImage;
   gameImage: CoworldResolvedImage;
   opponentImages: CoworldResolvedImage[];
+  arms: CoworldResolvedArm[];
+  blocks: CoworldPairedBlock[];
   jobs: CoworldPairedJob[];
 }
 
@@ -187,7 +280,7 @@ export async function materializeCoworldPairedMatrix(input: {
   await assertPathAbsent(outputRoot, "outputRoot");
 
   const manifest = requirePlainObject(
-    JSON.parse(await fs.readFile(manifestPath, "utf8")),
+    await readBoundedJson(manifestPath, "manifest"),
     "manifest",
   );
   const game = requirePlainObject(manifest.game, "manifest.game");
@@ -205,14 +298,15 @@ export async function materializeCoworldPairedMatrix(input: {
   );
   gameRunnable.image = gameImageReference;
 
+  const arms = resolveArmSpecs(input.spec.arms);
   const preparedVariants = prepareVariants(manifest, input.spec);
-  const pairCount =
+  const blockCount =
     preparedVariants.length *
     input.spec.candidateSeats.length *
     input.spec.seeds.length;
-  if (pairCount * 2 > MAX_JOBS) {
+  if (blockCount * arms.length > MAX_JOBS) {
     throw new Error(
-      `Matrix would create ${pairCount * 2} jobs; maximum is ${MAX_JOBS}`,
+      `Matrix would create ${blockCount * arms.length} jobs; maximum is ${MAX_JOBS}`,
     );
   }
 
@@ -240,7 +334,24 @@ export async function materializeCoworldPairedMatrix(input: {
     candidateImage,
     gameImage,
     opponentImages,
+    arms,
     now: input.now,
+  });
+  let validationPayloadBytes = assertBoundedJson(
+    prepared.manifest,
+    "materialized manifest",
+  );
+  assertBoundedJson(prepared.plan, "paired plan");
+  prepared.requests.forEach((request, index) => {
+    validationPayloadBytes += assertBoundedJson(
+      request,
+      `episode request ${index}`,
+    );
+    if (
+      validationPayloadBytes > COWORLD_PAIRED_BOUNDS.maxValidationPayloadBytes
+    ) {
+      throw new Error("Coworld validation payload exceeds the paired limit");
+    }
   });
 
   const validateCoworld =
@@ -259,6 +370,93 @@ export async function materializeCoworldPairedMatrix(input: {
     },
   });
   return prepared.plan;
+}
+
+function resolveArmSpecs(
+  authored: CoworldArmSpec[] | undefined,
+): CoworldResolvedArm[] {
+  const specs = authored ?? [{ kind: "v16" }, { kind: "a1" }];
+  if (!Array.isArray(specs) || specs.length < 2) {
+    throw new Error("arms must contain at least two allowlisted arm specs");
+  }
+  const resolved = specs.map((value, index) => {
+    const object = requirePlainObject(value, `arms[${index}]`);
+    const kind = requireNonemptyString(object.kind, `arms[${index}].kind`);
+    if (
+      kind === "council-authoritative" ||
+      kind === "expert-mask-authoritative"
+    ) {
+      throw new Error(
+        `arms[${index}] kind ${JSON.stringify(kind)} is reserved until a reviewed authoritative council runtime exists`,
+      );
+    }
+    if (kind === "v16" || kind === "a1") {
+      rejectUnknownKeys(object, ["kind"], `arms[${index}]`);
+      const base = kind;
+      return Object.freeze({
+        armID: kind,
+        kind,
+        base,
+        shadow: false,
+        expertMask: 0,
+        env: Object.freeze({
+          [TREATMENT_ENV]: base === "a1" ? "1" : "0",
+          [SHADOW_ENV]: "0",
+        }),
+      }) satisfies CoworldResolvedArm;
+    }
+    if (kind === "v16-shadow" || kind === "a1-shadow") {
+      rejectUnknownKeys(object, ["kind", "expertMask"], `arms[${index}]`);
+      const expertMask = requireIntegerInRange(
+        object.expertMask,
+        `arms[${index}].expertMask`,
+        0,
+        15,
+      );
+      const base = kind === "a1-shadow" ? "a1" : "v16";
+      return Object.freeze({
+        armID: `${kind}-m${expertMask}`,
+        kind,
+        base,
+        shadow: true,
+        expertMask,
+        env: Object.freeze({
+          [TREATMENT_ENV]: base === "a1" ? "1" : "0",
+          [SHADOW_ENV]: "1",
+          [EXPERT_MASK_ENV]: String(expertMask),
+        }),
+      }) satisfies CoworldResolvedArm;
+    }
+    throw new Error(
+      `arms[${index}].kind is not allowlisted: ${JSON.stringify(kind)}`,
+    );
+  });
+  resolved.sort(compareArms);
+  const armIDs = resolved.map((arm) => arm.armID);
+  if (new Set(armIDs).size !== armIDs.length) {
+    throw new Error("arms must resolve to unique arm identities");
+  }
+  return resolved;
+}
+
+function compareArms(a: CoworldResolvedArm, b: CoworldResolvedArm): number {
+  const rank = (arm: CoworldResolvedArm): number => {
+    switch (arm.kind) {
+      case "v16":
+        return 0;
+      case "a1":
+        return 1;
+      case "v16-shadow":
+        return 2;
+      case "a1-shadow":
+        return 3;
+    }
+  };
+  return (
+    rank(a) - rank(b) ||
+    a.expertMask - b.expertMask ||
+    compareText(a.armID, b.armID)
+  );
 }
 
 function prepareVariants(
@@ -296,8 +494,10 @@ function prepareVariants(
       `variant ${variantID}.game_config.players`,
     );
     const seatCount = players.length;
-    if (seatCount < 2) {
-      throw new Error(`Variant ${variantID} must have at least two seats`);
+    if (seatCount < 2 || seatCount > COWORLD_PAIRED_BOUNDS.maxRoster) {
+      throw new Error(
+        `Variant ${variantID} must have 2..${COWORLD_PAIRED_BOUNDS.maxRoster} seats`,
+      );
     }
     if (spec.opponents.length !== seatCount - 1) {
       throw new Error(
@@ -331,53 +531,83 @@ function prepareMatrix(input: {
   candidateImage: CoworldResolvedImage;
   gameImage: CoworldResolvedImage;
   opponentImages: CoworldResolvedImage[];
+  arms: CoworldResolvedArm[];
   now?: Date;
 }): PreparedMatrix {
   const manifestHex = hashCanonicalJson(input.manifest);
   const manifestSha256 = `sha256:${manifestHex}`;
-  const matrixHex = hashCanonicalJson({
-    contract: "proxywar-coworld-paired-matrix-v2",
+  const matrixIdentity: CoworldMatrixIdentity = {
+    contract: "proxywar-coworld-paired-matrix-v3",
     manifestSha256,
     gameImage: input.gameImage,
-    candidate: {
-      ...runnableIdentity(input.spec.candidate),
-      image: input.candidateImage,
-    },
+    candidate: matrixRunnableIdentity(
+      input.spec.candidate,
+      input.candidateImage,
+    ),
     opponents: input.spec.opponents.map((opponent, index) => ({
-      ...runnableIdentity(opponent),
-      image: input.opponentImages[index],
+      ...matrixRunnableIdentity(opponent, input.opponentImages[index]!),
     })),
-    variantIDs: input.spec.variantIDs,
-    candidateSeats: input.spec.candidateSeats,
-    seeds: input.spec.seeds,
-  });
+    variantIDs: [...input.spec.variantIDs],
+    candidateSeats: [...input.spec.candidateSeats],
+    seeds: [...input.spec.seeds],
+    arms: input.arms,
+  };
+  const matrixHex = hashCanonicalJson(matrixIdentity);
   const matrixID = `matrix-${matrixHex.slice(0, 32)}`;
+  const blocks: CoworldPairedBlock[] = [];
   const jobs: CoworldPairedJob[] = [];
   const requests: JsonObject[] = [];
+  const blockIDs = new Set<string>();
   const pairIDs = new Set<string>();
   const jobIDs = new Set<string>();
   const requestPaths = new Set<string>();
   const outputDirs = new Set<string>();
-  let pairIndex = 0;
+  let blockIndex = 0;
 
   for (const variant of input.variants) {
     for (const candidateSeat of input.spec.candidateSeats) {
       for (const seed of input.spec.seeds) {
+        const blockRoster = rosterIdentity({
+          candidate: input.spec.candidate,
+          opponents: input.spec.opponents,
+          candidateSeat,
+          candidateImage: input.candidateImage,
+          opponentImages: input.opponentImages,
+        });
+        const rosterOrderID = `roster-${coworldCanonicalSha256(blockRoster).slice(7, 39)}`;
+        const blockID = stableID(
+          "block",
+          matrixID,
+          variant.id,
+          candidateSeat,
+          seed,
+          rosterOrderID,
+        );
         const pairID = stableID(
           "pair",
           matrixID,
           variant.id,
           candidateSeat,
           seed,
+          rosterOrderID,
         );
+        assertUnique(blockIDs, blockID, "block id");
         assertUnique(pairIDs, pairID, "pair id");
-        const armOrder: Array<"control" | "treatment"> =
-          pairIndex % 2 === 0
-            ? ["control", "treatment"]
-            : ["treatment", "control"];
-        for (const [pairOrder, arm] of armOrder.entries()) {
-          const treatmentValue = arm === "treatment" ? "1" : "0";
-          const jobID = `${pairID}-${arm}`;
+        const armOrder = rotateArms(input.arms, blockIndex);
+        blocks.push({
+          blockID,
+          pairID,
+          blockIndex,
+          variantID: variant.id,
+          map: variant.map,
+          candidateSeat,
+          seed,
+          rosterOrderID,
+          armOrder: armOrder.map((arm) => arm.armID),
+          roster: blockRoster,
+        });
+        for (const [blockOrder, arm] of armOrder.entries()) {
+          const jobID = `${blockID}-${arm.armID}`;
           assertUnique(jobIDs, jobID, "job id");
           const requestPath = path.join(
             input.outputRoot,
@@ -393,21 +623,25 @@ function prepareMatrix(input: {
             jobID,
             "episode",
           );
+          const completionPath = path.join(
+            input.outputRoot,
+            "payload",
+            "jobs",
+            jobID,
+            "completion.json",
+          );
           assertUnique(requestPaths, requestPath, "request path");
           assertUnique(outputDirs, outputDir, "episode output path");
-          const players = playerRunnables({
+          const roster = rosterIdentity({
             candidate: input.spec.candidate,
             opponents: input.spec.opponents,
             candidateSeat,
-            treatmentValue,
+            candidateImage: input.candidateImage,
+            opponentImages: input.opponentImages,
+            arm,
           });
-          const names = players.map((_player, seat) => ({
-            name:
-              seat === candidateSeat
-                ? (input.spec.candidate.name ?? `Candidate seat ${seat}`)
-                : (input.spec.opponents[seat < candidateSeat ? seat : seat - 1]!
-                    .name ?? `Opponent seat ${seat}`),
-          }));
+          const players = roster.map(runnableFromRoster);
+          const names = roster.map(({ name }) => ({ name }));
           requests.push({
             manifest: input.manifest,
             game_config: {
@@ -418,28 +652,36 @@ function prepareMatrix(input: {
             players,
             episode_tags: {
               proxywar_matrix: matrixID,
+              proxywar_block_id: blockID,
               proxywar_pair_id: pairID,
-              proxywar_arm: arm,
+              proxywar_arm: arm.armID,
+              proxywar_expert_mask: String(arm.expertMask),
             },
           });
           jobs.push({
             jobID,
+            matrixID,
+            blockID,
             pairID,
-            pairOrder,
+            blockOrder,
+            pairOrder: blockOrder,
             arm,
-            treatmentValue,
+            expertMask: arm.expertMask,
             variantID: variant.id,
             map: variant.map,
             candidateSeat,
             seed,
+            rosterOrderID,
+            roster,
             requestPath,
             outputDir,
+            completionPath,
             candidateImage: input.candidateImage,
             gameImage: input.gameImage,
             opponentImages: input.opponentImages,
           });
         }
-        pairIndex += 1;
+        blockIndex += 1;
       }
     }
   }
@@ -454,10 +696,11 @@ function prepareMatrix(input: {
     "manifest.json",
   );
   const plan: CoworldPairedPlan = {
-    schemaVersion: 2,
+    schemaVersion: 3,
     coworldVersion: COWORLD_VERSION,
     generatedAt,
     matrixID,
+    matrixIdentity,
     manifestSha256,
     manifestPath: input.manifestPath,
     planPath: path.join(input.outputRoot, "plan.json"),
@@ -465,6 +708,8 @@ function prepareMatrix(input: {
     candidateImage: input.candidateImage,
     gameImage: input.gameImage,
     opponentImages: input.opponentImages,
+    arms: input.arms,
+    blocks,
     jobs,
   };
   return {
@@ -475,46 +720,70 @@ function prepareMatrix(input: {
   };
 }
 
-function playerRunnables(input: {
+function rosterIdentity(input: {
   candidate: PairedRunnableSpec;
   opponents: PairedRunnableSpec[];
   candidateSeat: number;
-  treatmentValue: "0" | "1";
-}): JsonObject[] {
+  candidateImage: CoworldResolvedImage;
+  opponentImages: CoworldResolvedImage[];
+  arm?: CoworldResolvedArm;
+}): CoworldRosterSeatIdentity[] {
   const seatCount = input.opponents.length + 1;
   let opponentIndex = 0;
   return Array.from({ length: seatCount }, (_, seat) => {
     if (seat === input.candidateSeat) {
-      return runnable(input.candidate, {
-        [TREATMENT_ENV]: input.treatmentValue,
-      });
+      return {
+        seat,
+        role: "candidate",
+        name: input.candidate.name ?? `Candidate seat ${seat}`,
+        image: input.candidateImage,
+        run: [...(input.candidate.run ?? [])],
+        env: {
+          ...(input.candidate.env ?? {}),
+          ...(input.arm?.env ?? {}),
+        },
+      };
     }
-    return runnable(input.opponents[opponentIndex++]!);
+    const index = opponentIndex++;
+    const opponent = input.opponents[index]!;
+    return {
+      seat,
+      role: "opponent",
+      name: opponent.name ?? `Opponent seat ${seat}`,
+      image: input.opponentImages[index]!,
+      run: [...(opponent.run ?? [])],
+      env: { ...(opponent.env ?? {}) },
+    };
   });
 }
 
-function runnable(
-  spec: PairedRunnableSpec,
-  envOverride: Record<string, string> = {},
-): JsonObject {
-  const env = Object.fromEntries([
-    ...Object.entries(spec.env ?? {}),
-    ...Object.entries(envOverride),
-  ]);
+function runnableFromRoster(seat: CoworldRosterSeatIdentity): JsonObject {
   return {
     type: "player",
-    image: spec.image,
-    ...(spec.run === undefined ? {} : { run: [...spec.run] }),
-    env,
+    image: seat.image.reference,
+    ...(seat.run.length === 0 ? {} : { run: [...seat.run] }),
+    env: { ...seat.env },
   };
 }
 
-function runnableIdentity(spec: PairedRunnableSpec): JsonObject {
+function rotateArms(
+  arms: CoworldResolvedArm[],
+  blockIndex: number,
+): CoworldResolvedArm[] {
+  const offset = blockIndex % arms.length;
+  return [...arms.slice(offset), ...arms.slice(0, offset)];
+}
+
+function matrixRunnableIdentity(
+  spec: PairedRunnableSpec,
+  image: CoworldResolvedImage,
+): CoworldMatrixRunnableIdentity {
   return {
     reference: spec.image,
     run: spec.run ?? [],
     env: spec.env ?? {},
     name: spec.name ?? null,
+    image,
   };
 }
 
@@ -530,19 +799,21 @@ function validateMatrixSpec(spec: CoworldPairedMatrixSpec): void {
       "variantIDs",
       "candidateSeats",
       "seeds",
+      "arms",
     ],
     "matrix spec",
   );
   requireNonemptyString(spec.manifestPath, "manifestPath");
   requireNonemptyString(spec.outputRoot, "outputRoot");
   validateRunnable(spec.candidate, "candidate");
-  if (spec.candidate.env?.[TREATMENT_ENV] !== undefined) {
+  if (
+    !Array.isArray(spec.opponents) ||
+    spec.opponents.length === 0 ||
+    spec.opponents.length >= COWORLD_PAIRED_BOUNDS.maxRoster
+  ) {
     throw new Error(
-      `candidate.env must not set ${TREATMENT_ENV}; the matrix owns the treatment flag`,
+      `opponents must contain 1..${COWORLD_PAIRED_BOUNDS.maxRoster - 1} runnables`,
     );
-  }
-  if (!Array.isArray(spec.opponents) || spec.opponents.length === 0) {
-    throw new Error("opponents must contain at least one runnable");
   }
   spec.opponents.forEach((opponent, index) =>
     validateRunnable(opponent, `opponents[${index}]`),
@@ -558,11 +829,18 @@ function validateRunnable(spec: PairedRunnableSpec, label: string): void {
   validateImageReference(spec.image, `${label}.image`);
   if (spec.name !== undefined) {
     requireNonemptyString(spec.name, `${label}.name`);
+    if (spec.name.length > COWORLD_PAIRED_BOUNDS.maxName) {
+      throw new Error(`${label}.name exceeds the paired name limit`);
+    }
   }
   if (spec.run !== undefined) {
-    if (!Array.isArray(spec.run) || spec.run.length === 0) {
+    if (
+      !Array.isArray(spec.run) ||
+      spec.run.length === 0 ||
+      spec.run.length > COWORLD_PAIRED_BOUNDS.maxRunArguments
+    ) {
       throw new Error(
-        `${label}.run must be a nonempty argv array when supplied`,
+        `${label}.run must be a bounded nonempty argv array when supplied`,
       );
     }
     for (const [index, value] of spec.run.entries()) {
@@ -573,13 +851,23 @@ function validateRunnable(spec: PairedRunnableSpec, label: string): void {
     return;
   }
   const env = requirePlainObject(spec.env, `${label}.env`);
+  const reservedArmEntries = label === "candidate" ? 3 : 0;
+  if (
+    Object.keys(env).length >
+    COWORLD_PAIRED_BOUNDS.maxEnvironmentEntries - reservedArmEntries
+  ) {
+    throw new Error(`${label}.env exceeds the paired entry limit`);
+  }
   for (const [key, value] of Object.entries(env)) {
-    if (!ENV_KEY_PATTERN.test(key)) {
+    if (
+      !ENV_KEY_PATTERN.test(key) ||
+      key.length > COWORLD_PAIRED_BOUNDS.maxEnvironmentKey
+    ) {
       throw new Error(`${label}.env key ${JSON.stringify(key)} is invalid`);
     }
-    if (key === TREATMENT_ENV) {
+    if (ARM_OWNED_ENV_KEYS.has(key)) {
       throw new Error(
-        `${label}.env must not set ${TREATMENT_ENV}; the matrix owns the treatment flag`,
+        `${label}.env must not set arm-owned key ${key}; the matrix derives all arm environment fields`,
       );
     }
     if (isReservedOrSecretEnvKey(key)) {
@@ -587,7 +875,10 @@ function validateRunnable(spec: PairedRunnableSpec, label: string): void {
         `${label}.env key ${JSON.stringify(key)} is reserved or secret-looking; only public configuration is allowed`,
       );
     }
-    if (typeof value !== "string") {
+    if (
+      typeof value !== "string" ||
+      value.length > COWORLD_PAIRED_BOUNDS.maxEnvironmentValue
+    ) {
       throw new Error(`${label}.env.${key} must be a public string`);
     }
     if (value.trim().length === 0) {
@@ -864,7 +1155,46 @@ async function publishPreparedMatrix(
 }
 
 async function writeJson(filePath: string, value: unknown): Promise<void> {
-  await fs.writeFile(filePath, `${JSON.stringify(value, null, 2)}\n`, "utf8");
+  await fs.writeFile(
+    filePath,
+    `${serializeBoundedJson(value, filePath)}\n`,
+    "utf8",
+  );
+}
+
+async function readBoundedJson(
+  filePath: string,
+  label: string,
+): Promise<unknown> {
+  const stat = await fs.lstat(filePath);
+  if (
+    !stat.isFile() ||
+    stat.isSymbolicLink() ||
+    stat.size > COWORLD_PAIRED_BOUNDS.maxJsonBytes
+  ) {
+    throw new Error(`${label} must be a bounded regular JSON file`);
+  }
+  try {
+    return JSON.parse(await fs.readFile(filePath, "utf8"));
+  } catch {
+    throw new Error(`${label} is not valid JSON`);
+  }
+}
+
+function assertBoundedJson(value: unknown, label: string): number {
+  return Buffer.byteLength(serializeBoundedJson(value, label), "utf8") + 1;
+}
+
+function serializeBoundedJson(value: unknown, label: string): string {
+  const serialized = JSON.stringify(value, null, 2);
+  if (
+    typeof serialized !== "string" ||
+    Buffer.byteLength(serialized, "utf8") + 1 >
+      COWORLD_PAIRED_BOUNDS.maxJsonBytes
+  ) {
+    throw new Error(`${label} exceeds the paired JSON size limit`);
+  }
+  return serialized;
 }
 
 function assertOutputDoesNotOverlapSources(
@@ -980,10 +1310,31 @@ function requireArray(value: unknown, label: string): unknown[] {
 }
 
 function requireNonemptyString(value: unknown, label: string): string {
-  if (typeof value !== "string" || value.trim().length === 0) {
-    throw new Error(`${label} must be a nonempty string`);
+  if (
+    typeof value !== "string" ||
+    value.trim().length === 0 ||
+    value.length > COWORLD_PAIRED_BOUNDS.maxIdentityString ||
+    value.includes("\0")
+  ) {
+    throw new Error(`${label} must be a bounded nonempty string`);
   }
   return value;
+}
+
+function requireIntegerInRange(
+  value: unknown,
+  label: string,
+  min: number,
+  max: number,
+): number {
+  if (
+    !Number.isInteger(value) ||
+    (value as number) < min ||
+    (value as number) > max
+  ) {
+    throw new Error(`${label} must be an integer in ${min}..${max}`);
+  }
+  return value as number;
 }
 
 function resolveFrom(directory: string, value: string): string {
@@ -999,6 +1350,10 @@ function stableID(prefix: string, ...parts: unknown[]): string {
 
 function hashCanonicalJson(value: unknown): string {
   return createHash("sha256").update(canonicalJson(value)).digest("hex");
+}
+
+export function coworldCanonicalSha256(value: unknown): string {
+  return `sha256:${hashCanonicalJson(value)}`;
 }
 
 function canonicalJson(value: unknown): string {
@@ -1028,6 +1383,10 @@ function assertUnique(set: Set<string>, value: string, label: string): void {
 
 function isNodeError(error: unknown): error is NodeJS.ErrnoException {
   return error instanceof Error && "code" in error;
+}
+
+function compareText(a: string, b: string): number {
+  return a < b ? -1 : a > b ? 1 : 0;
 }
 
 function parseArguments(argv: string[]): ParsedArguments {
@@ -1081,7 +1440,7 @@ function requireArgumentValue(
   if (value === undefined || value.startsWith("--")) {
     throw new Error(`${argument} requires a value`);
   }
-  return value;
+  return requireNonemptyString(value, argument);
 }
 
 async function main(): Promise<void> {
@@ -1092,9 +1451,10 @@ async function main(): Promise<void> {
     );
   }
   const absoluteSpecPath = path.resolve(args.specPath);
-  const spec = JSON.parse(
-    await fs.readFile(absoluteSpecPath, "utf8"),
-  ) as CoworldPairedMatrixSpec;
+  const spec = (await readBoundedJson(
+    absoluteSpecPath,
+    "matrix spec",
+  )) as CoworldPairedMatrixSpec;
   const plan = await materializeCoworldPairedMatrix({
     spec,
     specDirectory: path.dirname(absoluteSpecPath),
