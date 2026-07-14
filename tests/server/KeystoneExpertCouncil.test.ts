@@ -4,8 +4,10 @@ import {
   arbitrateKeystoneAction,
   buildKeystoneWorldModel,
   computeKeystoneBidBP,
+  type KeystoneActionOwner,
   type KeystoneCouncilTiers,
   type KeystoneDirectiveProposal,
+  type KeystoneExpertDomain,
   type KeystoneExpertProposal,
 } from "../../coworld-adapter/src/keystone-experts";
 import { PlayerType, Relation } from "../../src/core/game/Game";
@@ -44,6 +46,14 @@ function neutral(id = "expand:neutral:35"): LegalAction {
     ...action(id, "attack", null),
     metadata: { targetID: null, expansion: true, troopPercent: 35 },
   };
+}
+
+function metadataAction(
+  id: string,
+  kind: LegalActionKind,
+  metadata: NonNullable<LegalAction["metadata"]>,
+): LegalAction {
+  return { ...action(id, kind), metadata };
 }
 
 function player(
@@ -103,7 +113,7 @@ function brainInput(args: {
   return {
     observation: {
       ...base,
-      gameMode: args.ownTeam === null ? "FFA" : "Team",
+      gameMode: (args.ownTeam ?? null) === null ? "FFA" : "Team",
       ownState: {
         playerID: "ME",
         clientID: null,
@@ -243,23 +253,91 @@ describe("Keystone expert council infrastructure", () => {
       isNeutralExpansion: true,
       isHostileTargetAction: false,
       safetyBlocked: false,
+      actionOwner: "expansion",
     });
     expect(world.incomingAggressorIDs).toEqual(["ENEMY"]);
   });
 
-  it("rejects empty and duplicate ids in the offered LegalAction set", () => {
+  it("rejects an empty id in the offered LegalAction set", () => {
     expect(() =>
       buildKeystoneWorldModel(
         brainInput({ actions: [action("", "hold", null, 0)] }),
       ),
     ).toThrow(/empty offered action id/);
-    expect(() =>
+  });
+
+  it("quarantines colliding Coworld quick-chat ids and keeps unrelated actions selectable", () => {
+    const collidingID = "quick_chat:ALLY:attack.focus";
+    const chats = [
+      metadataAction(collidingID, "quick_chat", {
+        recipientID: "ALLY",
+        targetID: "A",
+        quickChatKey: "attack.focus",
+      }),
+      metadataAction(collidingID, "quick_chat", {
+        recipientID: "ALLY",
+        targetID: "B",
+        quickChatKey: "attack.focus",
+      }),
+    ];
+    const world = buildKeystoneWorldModel(
+      brainInput({
+        actions: [...chats, action("build:city", "build")],
+      }),
+    );
+
+    expect(world.ambiguousOfferedActionIDs).toEqual([collidingID]);
+    expect(world.actions.map((candidate) => candidate.id)).toEqual([
+      "build:city",
+    ]);
+
+    const result = arbitrateKeystoneAction(
+      world,
+      tiers({
+        expertAuction: [
+          expert("ambiguous-chat", collidingID, { source: "politics" }),
+          expert("unique-city", "build:city", { source: "economy" }),
+        ],
+      }),
+    );
+    expect(result.selection?.actionID).toBe("build:city");
+    expect(result.rejections).toContainEqual(
+      expect.objectContaining({
+        proposalID: "ambiguous-chat",
+        reason: "ambiguous_offered_action",
+      }),
+    );
+
+    const held = arbitrateKeystoneAction(
       buildKeystoneWorldModel(
         brainInput({
-          actions: [action("same", "hold"), action("same", "attack", "A")],
+          actions: [...chats, action("hold", "hold", null, 0)],
         }),
       ),
-    ).toThrow(/duplicate offered action id: same/);
+      tiers(),
+    );
+    expect(held).toMatchObject({
+      disposition: "hold",
+      selection: { actionID: "hold", tier: "hold" },
+    });
+
+    const nothingUnique = buildKeystoneWorldModel(
+      brainInput({ actions: [...chats].reverse() }),
+    );
+    const abstained = arbitrateKeystoneAction(
+      nothingUnique,
+      tiers({
+        expertAuction: [
+          expert("ambiguous-only", collidingID, { source: "politics" }),
+        ],
+      }),
+    );
+    expect(nothingUnique.ambiguousOfferedActionIDs).toEqual([collidingID]);
+    expect(nothingUnique.actions).toEqual([]);
+    expect(abstained).toMatchObject({
+      disposition: "abstain",
+      selection: null,
+    });
   });
 
   it("uses an integer common bid formula with the action risk as a floor", () => {
@@ -278,6 +356,239 @@ describe("Keystone expert council infrastructure", () => {
     expect(() =>
       computeKeystoneBidBP({ ...defaultBid, confidenceBP: 0.5 }),
     ).toThrow(/integer from 0 to 10000/);
+  });
+
+  it("assigns every action family to one expert or protected system owner", () => {
+    const owned: Array<{ action: LegalAction; owner: KeystoneActionOwner }> = [
+      { action: action("spawn", "spawn"), owner: "arbiter" },
+      { action: action("hold", "hold", null, 0), owner: "arbiter" },
+      { action: neutral("neutral:attack"), owner: "expansion" },
+      {
+        action: metadataAction("neutral:boat", "boat", {
+          targetID: null,
+          targetName: "Terra Nullius",
+          expansion: true,
+        }),
+        owner: "expansion",
+      },
+      {
+        action: metadataAction("hostile:spoofed-neutral", "attack", {
+          targetID: "ENEMY",
+          expansion: true,
+        }),
+        owner: "conquest",
+      },
+      {
+        action: action("hostile:attack", "attack", "ENEMY"),
+        owner: "conquest",
+      },
+      { action: action("hostile:boat", "boat", "ENEMY"), owner: "conquest" },
+      { action: action("hostile:nuke", "nuke", "ENEMY"), owner: "conquest" },
+      { action: action("warship", "warship"), owner: "conquest" },
+      { action: action("move:warship", "move_warship"), owner: "conquest" },
+      { action: action("build", "build"), owner: "economy" },
+      { action: action("upgrade", "upgrade_structure"), owner: "economy" },
+      { action: action("delete", "delete_unit"), owner: "economy" },
+      {
+        action: action("alliance:request", "alliance_request", "ENEMY"),
+        owner: "politics",
+      },
+      {
+        action: action("alliance:reject", "alliance_reject", "ENEMY"),
+        owner: "politics",
+      },
+      {
+        action: action("alliance:extend", "alliance_extend", "ENEMY"),
+        owner: "politics",
+      },
+      {
+        action: action("alliance:break", "break_alliance", "ENEMY"),
+        owner: "politics",
+      },
+      { action: action("target", "target_player", "ENEMY"), owner: "politics" },
+      { action: action("embargo", "embargo", "ENEMY"), owner: "politics" },
+      {
+        action: action("embargo:stop", "embargo_stop", "ENEMY"),
+        owner: "politics",
+      },
+      { action: action("embargo:all", "embargo_all"), owner: "politics" },
+      {
+        action: action("donate:gold", "donate_gold", "ENEMY"),
+        owner: "politics",
+      },
+      {
+        action: action("donate:troops", "donate_troops", "ENEMY"),
+        owner: "politics",
+      },
+      { action: action("chat", "quick_chat", "ENEMY"), owner: "politics" },
+      { action: action("emoji", "emoji", "ENEMY"), owner: "politics" },
+      { action: action("retreat", "retreat"), owner: "survival" },
+      { action: action("boat:retreat", "boat_retreat"), owner: "survival" },
+      {
+        action: action("counter:attack", "attack", "AGGRESSOR"),
+        owner: "survival",
+      },
+      {
+        action: action("counter:boat", "boat", "AGGRESSOR"),
+        owner: "survival",
+      },
+      {
+        action: action("counter:nuke", "nuke", "AGGRESSOR"),
+        owner: "survival",
+      },
+      { action: action("unowned:attack", "attack"), owner: null },
+      { action: action("unowned:boat", "boat"), owner: null },
+      { action: action("unowned:nuke", "nuke"), owner: null },
+    ];
+    const world = buildKeystoneWorldModel(
+      brainInput({
+        actions: owned.map((entry) => entry.action),
+        players: [
+          player("ENEMY"),
+          player("AGGRESSOR", { incomingAttack: true }),
+        ],
+      }),
+    );
+
+    expect(world.actions).toHaveLength(owned.length);
+    for (const expected of owned) {
+      expect(
+        world.actions.find((candidate) => candidate.id === expected.action.id),
+        expected.action.id,
+      ).toMatchObject({ actionOwner: expected.owner });
+    }
+  });
+
+  it("enforces a complete non-overlapping expert ownership matrix", () => {
+    const sources: KeystoneExpertDomain[] = [
+      "expansion",
+      "economy",
+      "conquest",
+      "politics",
+    ];
+    const cases: Array<{
+      owner: KeystoneExpertDomain;
+      candidate: LegalAction;
+    }> = [
+      { owner: "expansion", candidate: neutral("owned:expansion") },
+      { owner: "economy", candidate: action("owned:economy", "build") },
+      {
+        owner: "conquest",
+        candidate: action("owned:conquest", "attack", "ENEMY"),
+      },
+      {
+        owner: "politics",
+        candidate: metadataAction("owned:politics", "quick_chat", {
+          recipientID: "ENEMY",
+          quickChatKey: "attack.focus",
+        }),
+      },
+    ];
+
+    for (const ownershipCase of cases) {
+      const world = buildKeystoneWorldModel(
+        brainInput({ actions: [ownershipCase.candidate] }),
+      );
+      for (const source of sources) {
+        const result = arbitrateKeystoneAction(
+          world,
+          tiers({
+            expertAuction: [
+              expert(
+                `${ownershipCase.owner}-from-${source}`,
+                ownershipCase.candidate.id,
+                { source },
+              ),
+            ],
+          }),
+        );
+        if (source === ownershipCase.owner) {
+          expect(result.selection?.actionID).toBe(ownershipCase.candidate.id);
+        } else {
+          expect(result).toMatchObject({
+            disposition: "abstain",
+            selection: null,
+          });
+          expect(result.rejections).toContainEqual(
+            expect.objectContaining({
+              reason: "action_ownership_mismatch",
+            }),
+          );
+        }
+      }
+    }
+  });
+
+  it("keeps arbiter, survival, and unowned actions outside every expert domain", () => {
+    const actions = [
+      action("spawn", "spawn"),
+      action("hold", "hold", null, 0),
+      action("retreat", "retreat"),
+      action("counter", "attack", "AGGRESSOR"),
+      action("ordinary-attack", "attack", "ENEMY"),
+      action("unowned", "attack"),
+      action("build", "build"),
+    ];
+    const world = buildKeystoneWorldModel(
+      brainInput({
+        actions,
+        players: [
+          player("AGGRESSOR", { incomingAttack: true }),
+          player("ENEMY"),
+        ],
+      }),
+    );
+
+    for (const actionID of ["spawn", "hold", "retreat", "counter", "unowned"]) {
+      const result = arbitrateKeystoneAction(
+        world,
+        tiers({ expertAuction: [expert(`expert-${actionID}`, actionID)] }),
+      );
+      expect(result.rejections).toContainEqual(
+        expect.objectContaining({
+          proposalID: `expert-${actionID}`,
+          reason: "action_ownership_mismatch",
+        }),
+      );
+    }
+
+    const survival = arbitrateKeystoneAction(
+      world,
+      tiers({
+        survival: [
+          directive("survival", "not-survival", "ordinary-attack"),
+          directive("survival", "verified-counter", "counter"),
+        ],
+      }),
+    );
+    expect(survival.selection).toMatchObject({
+      actionID: "counter",
+      tier: "survival",
+    });
+    expect(survival.rejections).toContainEqual(
+      expect.objectContaining({
+        proposalID: "not-survival",
+        reason: "action_ownership_mismatch",
+      }),
+    );
+
+    const binding = arbitrateKeystoneAction(
+      world,
+      tiers({
+        bindingDirective: [
+          directive("binding_directive", "binding-hold", "hold"),
+          directive("binding_directive", "binding-counter", "counter"),
+          directive("binding_directive", "binding-unowned", "unowned"),
+          directive("binding_directive", "binding-build", "build"),
+        ],
+      }),
+    );
+    expect(binding.selection?.actionID).toBe("build");
+    expect(
+      binding.rejections.filter(
+        (rejection) => rejection.reason === "action_ownership_mismatch",
+      ),
+    ).toHaveLength(3);
   });
 
   it("filters non-offered proposals and falls through to a valid lower tier", () => {
@@ -315,7 +626,7 @@ describe("Keystone expert council infrastructure", () => {
       tiers({
         expertAuction: [
           expert("weak", "attack:A", {
-            source: "politics",
+            source: "conquest",
             expectedValueBP: 3_000,
           }),
           expert("strong", "attack:A", {
@@ -481,7 +792,10 @@ describe("Keystone expert council infrastructure", () => {
   it("is order invariant and uses action id as the fixed cross-action tie break", () => {
     const a = action("a-action", "build");
     const b = action("b-action", "build");
-    const proposals = [expert("b", b.id), expert("a", a.id)];
+    const proposals = [
+      expert("b", b.id, { source: "economy" }),
+      expert("a", a.id, { source: "economy" }),
+    ];
     const forward = arbitrateKeystoneAction(
       buildKeystoneWorldModel(brainInput({ actions: [b, a] })),
       tiers({ expertAuction: proposals }),

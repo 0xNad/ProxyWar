@@ -40,13 +40,14 @@ export function buildKeystoneWorldModel(
       ]),
     ).sort(compareText),
   );
-  const actions = classifyKeystoneActions({
+  const classification = classifyKeystoneActions({
     legalActions: input.legalActions,
     visiblePlayers: input.observation.visiblePlayers,
     ownPlayerID: own?.playerID ?? null,
     ownTeam: own?.team ?? null,
     forbiddenActionKinds: options.forbiddenActionKinds ?? [],
     planAlignedActionIDs: options.planAlignedActionIDs ?? [],
+    incomingAggressorIDs,
   });
 
   return Object.freeze({
@@ -57,7 +58,8 @@ export function buildKeystoneWorldModel(
     players,
     incomingAggressorIDs,
     canExpandIntoNeutral: input.observation.combat.canExpandIntoNeutral,
-    actions,
+    actions: classification.actions,
+    ambiguousOfferedActionIDs: classification.ambiguousOfferedActionIDs,
   });
 }
 

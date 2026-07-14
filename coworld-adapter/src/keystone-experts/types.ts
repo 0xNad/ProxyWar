@@ -12,6 +12,12 @@ export const keystoneExpertDomains = [
 
 export type KeystoneExpertDomain = (typeof keystoneExpertDomains)[number];
 
+export type KeystoneActionOwner =
+  | KeystoneExpertDomain
+  | "survival"
+  | "arbiter"
+  | null;
+
 /** All proposal scoring inputs are integer basis points in [0, 10_000]. */
 export interface KeystoneBidComponents {
   readonly expectedValueBP: number;
@@ -93,6 +99,14 @@ export interface KeystoneActionFacts {
   readonly forbidden: boolean;
   readonly planAligned: boolean;
   readonly actionRiskBP: number;
+  /** Exactly one expert domain, a protected system tier, or null when unsafe to classify. */
+  readonly actionOwner: KeystoneActionOwner;
+}
+
+export interface KeystoneActionClassification {
+  readonly actions: readonly KeystoneActionFacts[];
+  /** Every colliding offered id is dropped; ids are unique and code-point sorted. */
+  readonly ambiguousOfferedActionIDs: readonly string[];
 }
 
 export interface KeystoneWorldModel {
@@ -104,6 +118,7 @@ export interface KeystoneWorldModel {
   readonly incomingAggressorIDs: readonly string[];
   readonly canExpandIntoNeutral: boolean;
   readonly actions: readonly KeystoneActionFacts[];
+  readonly ambiguousOfferedActionIDs: readonly string[];
 }
 
 export type KeystoneArbitrationTier =
@@ -129,12 +144,14 @@ export interface KeystoneActionSelection {
 }
 
 export type KeystoneProposalRejectionReason =
+  | "ambiguous_offered_action"
   | "non_offered_action"
   | "forbidden_action"
   | "friendly_or_team_target"
   | "spawn_phase_mismatch"
   | "not_spawn_action"
   | "source_tier_mismatch"
+  | "action_ownership_mismatch"
   | "invalid_proposal"
   | "non_positive_bid"
   | "duplicate_action_proposal";

@@ -39,6 +39,7 @@ export function arbitrateKeystoneAction(
   const actionByID = new Map(
     world.actions.map((action) => [action.id, action]),
   );
+  const ambiguousOfferedActionIDs = new Set(world.ambiguousOfferedActionIDs);
   const tierSpecs: readonly TierSpec[] = [
     { tier: "spawn", source: "spawn", proposals: tiers.spawn },
     { tier: "survival", source: "survival", proposals: tiers.survival },
@@ -63,7 +64,12 @@ export function arbitrateKeystoneAction(
       continue;
     }
 
-    const scored = scoreTier(spec, actionByID, rejections);
+    const scored = scoreTier(
+      spec,
+      actionByID,
+      ambiguousOfferedActionIDs,
+      rejections,
+    );
     // Spawn/survival/binding inputs already encode hard policy. Plan alignment
     // is therefore a pool preference only for the discretionary expert auction.
     const eligible =
@@ -110,11 +116,17 @@ export function arbitrateKeystoneAction(
 function scoreTier(
   spec: TierSpec,
   actionByID: ReadonlyMap<string, KeystoneActionFacts>,
+  ambiguousOfferedActionIDs: ReadonlySet<string>,
   rejections: KeystoneProposalRejection[],
 ): ScoredProposal[] {
   const scored: ScoredProposal[] = [];
   for (const proposal of spec.proposals) {
-    const rejection = baseRejection(spec, proposal, actionByID);
+    const rejection = baseRejection(
+      spec,
+      proposal,
+      actionByID,
+      ambiguousOfferedActionIDs,
+    );
     if (rejection !== null) {
       rejections.push(rejection);
       continue;
@@ -141,9 +153,13 @@ function baseRejection(
   spec: TierSpec,
   proposal: CouncilProposal,
   actionByID: ReadonlyMap<string, KeystoneActionFacts>,
+  ambiguousOfferedActionIDs: ReadonlySet<string>,
 ): KeystoneProposalRejection | null {
   if (!sourceMatches(spec, proposal.source)) {
     return rejectionFor(spec.tier, proposal, "source_tier_mismatch");
+  }
+  if (ambiguousOfferedActionIDs.has(proposal.actionID)) {
+    return rejectionFor(spec.tier, proposal, "ambiguous_offered_action");
   }
   const action = actionByID.get(proposal.actionID);
   if (action === undefined) {
@@ -158,7 +174,32 @@ function baseRejection(
   if (spec.tier === "spawn" && !action.isSpawn) {
     return rejectionFor(spec.tier, proposal, "not_spawn_action");
   }
+  if (!ownerMatches(spec, proposal, action)) {
+    return rejectionFor(spec.tier, proposal, "action_ownership_mismatch");
+  }
   return null;
+}
+
+function ownerMatches(
+  spec: TierSpec,
+  proposal: CouncilProposal,
+  action: KeystoneActionFacts,
+): boolean {
+  switch (spec.tier) {
+    case "spawn":
+      return action.actionOwner === "arbiter" && action.isSpawn;
+    case "survival":
+      return action.actionOwner === "survival";
+    case "binding_directive":
+      return (
+        action.actionOwner === "expansion" ||
+        action.actionOwner === "economy" ||
+        action.actionOwner === "conquest" ||
+        action.actionOwner === "politics"
+      );
+    case "expert_auction":
+      return action.actionOwner === proposal.source;
+  }
 }
 
 function sourceMatches(
