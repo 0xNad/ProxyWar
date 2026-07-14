@@ -38,6 +38,7 @@
 //   PROXYWAR_KEYSTONE_PLAN_EVERY Commander cadence in decision steps (default 3)
 //   PROXYWAR_KEYSTONE_SINGLE_ACTION  1/true arms Coworld sequential conversion
 //   PROXYWAR_KEYSTONE_EXPERT_COUNCIL_SHADOW  1/true observes four-expert council
+//   PROXYWAR_KEYSTONE_EXPERT_MASK  shadow-only expert bitmask 0..15 (default 15)
 //   PROXYWAR_LLM_MODEL_ID / AWS_REGION / PROXYWAR_LLM_TIMEOUT_MS  bedrock mode
 
 import { createRequire } from "node:module";
@@ -97,6 +98,8 @@ export interface KeystoneBrainOptions {
   singleActionExecutor?: boolean;
   /** Coworld-only, default-off four-expert shadow telemetry. */
   expertCouncilShadow?: boolean;
+  /** Shadow-only expansion/economy/conquest/politics bitmask; default 15. */
+  expertMask?: number;
 }
 
 // Mirrors the league-smoke planner-claude-cli executor settings so local play
@@ -195,6 +198,21 @@ export function keystoneExpertCouncilShadowFromEnv(
   throw new Error(
     `Unknown PROXYWAR_KEYSTONE_EXPERT_COUNCIL_SHADOW "${raw}" (expected 0|1|false|true)`,
   );
+}
+
+export function keystoneExpertMaskFromEnv(
+  env: NodeJS.ProcessEnv = process.env,
+): number {
+  const raw = env.PROXYWAR_KEYSTONE_EXPERT_MASK?.trim() ?? "";
+  if (raw === "") {
+    return 15;
+  }
+  if (!/^(?:[0-9]|1[0-5])$/.test(raw)) {
+    throw new Error(
+      `Invalid PROXYWAR_KEYSTONE_EXPERT_MASK "${raw}" (expected decimal integer 0..15)`,
+    );
+  }
+  return Number(raw);
 }
 
 /**
@@ -338,6 +356,8 @@ const SHADOW_COUNCIL_COMPACT_KEYS = new Set([
   "d",
   "m",
   "a",
+  "s",
+  "k",
   "u",
 ]);
 
@@ -364,17 +384,15 @@ function shadowCouncilTelemetryForWire(
       !nonNegativeInteger(parsed.o) ||
       !nonNegativeInteger(parsed.g) ||
       (parsed.x !== 0 && parsed.x !== 1) ||
-      !nonNegativeInteger(parsed.p) ||
-      !nonNegativeInteger(parsed.e) ||
-      !nonNegativeInteger(parsed.j) ||
+      !integerInRange(parsed.p, 0, 63) ||
+      !integerInRange(parsed.e, 0, 63) ||
+      !integerInRange(parsed.j, 0, 2_047) ||
+      !integerInRange(parsed.k, 0, 15) ||
       !nonNegativeInteger(parsed.u) ||
       !(parsed.m === null || nonNegativeInteger(parsed.m)) ||
-      !["healthy", "partial", "failed", "unavailable"].includes(
-        String(parsed.h),
-      ) ||
-      !["agree", "disagree", "abstain", "unavailable"].includes(
-        String(parsed.a),
-      ) ||
+      !["h", "p", "f", "u"].includes(String(parsed.h)) ||
+      !["a", "d", "b", "u"].includes(String(parsed.a)) ||
+      !integerInRange(parsed.s, 0, 8) ||
       !safeCompactFingerprint(parsed.w) ||
       !safeCompactFingerprint(parsed.r) ||
       !safeCompactFingerprint(parsed.d)
@@ -389,6 +407,19 @@ function shadowCouncilTelemetryForWire(
 
 function nonNegativeInteger(value: unknown): boolean {
   return typeof value === "number" && Number.isInteger(value) && value >= 0;
+}
+
+function integerInRange(
+  value: unknown,
+  minimum: number,
+  maximum: number,
+): boolean {
+  return (
+    typeof value === "number" &&
+    Number.isInteger(value) &&
+    value >= minimum &&
+    value <= maximum
+  );
 }
 
 function safeCompactFingerprint(value: unknown): boolean {
@@ -968,6 +999,7 @@ export function createKeystoneBrain(
     shadowCouncilExecutor = new KeystoneShadowCouncilExecutor({
       delegate: authoritativeExecutor,
       actionFollowsCanonicalPlan,
+      enabledExpertMask: options.expertMask ?? 15,
     });
     executor = shadowCouncilExecutor;
   }
@@ -1050,6 +1082,7 @@ async function main(): Promise<void> {
   const mode = keystoneModeFromEnv();
   const singleActionExecutor = keystoneSingleActionFromEnv();
   const expertCouncilShadow = keystoneExpertCouncilShadowFromEnv();
+  const expertMask = keystoneExpertMaskFromEnv();
   const profile = (process.env.PROXYWAR_KEYSTONE_PROFILE?.trim() ||
     "aggressive") as AgentStrategyProfile;
   const blocking =
@@ -1072,6 +1105,7 @@ async function main(): Promise<void> {
     blocking,
     singleActionExecutor,
     expertCouncilShadow,
+    expertMask,
   });
 
   // Optional one-shot Bedrock diagnostic (gated; OFF in production). The pod
@@ -1107,7 +1141,7 @@ async function main(): Promise<void> {
 
   socket.on("open", () => {
     console.log(
-      `keystone connected ${redactPlayerUrl(url)} (mode=${mode}, profile=${profile}, planEvery=${planEveryDecisionSteps}, blocking=${blocking}, executor=${singleActionExecutor ? "coworld-single-action" : "frontier"}, shadowCouncil=${expertCouncilShadow}, ${keystoneTunableFlagSummary()})`,
+      `keystone connected ${redactPlayerUrl(url)} (mode=${mode}, profile=${profile}, planEvery=${planEveryDecisionSteps}, blocking=${blocking}, executor=${singleActionExecutor ? "coworld-single-action" : "frontier"}, shadowCouncil=${expertCouncilShadow}, shadowExpertMask=${expertMask}, ${keystoneTunableFlagSummary()})`,
     );
   });
 

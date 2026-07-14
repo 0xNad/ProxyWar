@@ -18,6 +18,7 @@ import {
   type KeystoneShadowCouncilTelemetry,
   type KeystoneShadowExperts,
 } from "../../coworld-adapter/src/keystone-shadow-council";
+import { PlayerType } from "../../src/core/game/Game";
 import { AgentObservationBuilder } from "../../src/server/agents/AgentObservationBuilder";
 import type {
   AgentExecutionDecision,
@@ -26,6 +27,7 @@ import type {
 } from "../../src/server/agents/AgentPlannerExecutor";
 import type {
   AgentBrainInput,
+  AgentGamePhase,
   LegalAction,
   LegalActionKind,
 } from "../../src/server/agents/AgentTypes";
@@ -87,7 +89,11 @@ function domainActions(): LegalAction[] {
 
 function input(
   actions: LegalAction[] = domainActions(),
-  options: { gameID?: string; turn?: number } = {},
+  options: {
+    gameID?: string;
+    turn?: number;
+    phase?: AgentGamePhase;
+  } = {},
 ): AgentBrainInput {
   const observation = new AgentObservationBuilder().build({
     agentID: "keystone",
@@ -96,7 +102,7 @@ function input(
     profile: "aggressive",
     gameID: options.gameID ?? "SHADOW-A",
     turnNumber: options.turn ?? 2_000,
-    phaseOverride: "active",
+    phaseOverride: options.phase ?? "active",
   });
   return {
     observation: {
@@ -106,6 +112,46 @@ function input(
         canExpandIntoNeutral: actions.some(
           (candidate) => candidate.metadata?.expansion === true,
         ),
+      },
+    },
+    legalActions: actions,
+  };
+}
+
+function pressuredInput(actions: LegalAction[]): AgentBrainInput {
+  const current = input(actions);
+  return {
+    observation: {
+      ...current.observation,
+      ownState: {
+        playerID: "ME",
+        clientID: null,
+        smallID: 1,
+        name: "Keystone",
+        type: PlayerType.Nation,
+        isAlive: true,
+        isDisconnected: false,
+        isTraitor: false,
+        hasSpawned: true,
+        troops: 75_000,
+        maxTroops: 100_000,
+        troopRatio: 0.75,
+        gold: "250000",
+        tilesOwned: 80,
+        tileShare: 0.3,
+        borderTiles: 12,
+        outgoingAttacks: 0,
+        incomingAttacks: 1,
+        outgoingAllianceRequests: 0,
+        incomingAllianceRequests: 0,
+        team: null,
+      },
+      combat: {
+        ...current.observation.combat,
+        ownTroops: 75_000,
+        maxTroops: 100_000,
+        troopRatio: 0.75,
+        incomingAttackPlayerIDs: ["AGGRESSOR"],
       },
     },
     legalActions: actions,
@@ -157,6 +203,135 @@ function tiers(
 }
 
 describe("Keystone shadow expert council", () => {
+  it("routes the real spawn proposer through the spawn tier without changing authority", () => {
+    const actions = [
+      {
+        ...action("spawn:risky", "spawn"),
+        risk: { level: "high" as const, score: 0.8 },
+      },
+      {
+        ...action("spawn:safe", "spawn"),
+        risk: { level: "low" as const, score: 0.2 },
+      },
+      action("hold:wait", "hold"),
+    ];
+    const authoritative = Object.freeze({
+      actionID: "spawn:risky",
+      actionIDs: ["spawn:risky"],
+      reason: "v16 spawn authority",
+      planFollowed: true,
+      executorSource: "frontier-policy",
+    });
+    const authority = delegate(authoritative);
+    const shadow = new KeystoneShadowCouncilExecutor({
+      delegate: authority,
+      actionFollowsCanonicalPlan: () => false,
+      experts: experts(),
+      logLine: () => undefined,
+    });
+
+    expect(
+      shadow.decide(input(actions, { phase: "spawn", turn: 0 }), plan),
+    ).toBe(authoritative);
+    expect(authority.decide).toHaveBeenCalledOnce();
+    expect(shadow.latestTelemetry()).toMatchObject({
+      winner: {
+        tier: "spawn",
+        source: "spawn",
+        actionID: "spawn:safe",
+      },
+      agreement: "disagree",
+      proposals: [
+        {
+          domain: null,
+          source: "spawn",
+          actionID: "spawn:safe",
+        },
+      ],
+      exposure: {
+        proposalMask: 16,
+        proposalCount: 1,
+        enabledExpertMask: 15,
+      },
+    });
+  });
+
+  it("routes the real survival proposer ahead of experts without changing authority", () => {
+    const actions = [
+      action("retreat:land", "retreat"),
+      action("expand:neutral:35", "attack", {
+        targetID: null,
+        expansion: true,
+        troopPercent: 35,
+      }),
+      action("hold:wait", "hold"),
+    ];
+    const authoritative = Object.freeze({
+      actionID: "expand:neutral:35",
+      actionIDs: ["expand:neutral:35", "hold:wait"],
+      reason: "v16 pressure authority",
+      planFollowed: true,
+      executorSource: "frontier-policy",
+    });
+    const authority = delegate(authoritative);
+    const shadow = new KeystoneShadowCouncilExecutor({
+      delegate: authority,
+      actionFollowsCanonicalPlan: () => false,
+      logLine: () => undefined,
+    });
+
+    expect(shadow.decide(pressuredInput(actions), plan)).toBe(authoritative);
+    expect(authority.decide).toHaveBeenCalledOnce();
+    expect(shadow.latestTelemetry()).toMatchObject({
+      winner: {
+        tier: "survival",
+        source: "survival",
+        actionID: "retreat:land",
+      },
+      agreement: "disagree",
+    });
+    expect(shadow.latestTelemetry()?.proposals).toContainEqual(
+      expect.objectContaining({
+        domain: null,
+        source: "survival",
+        actionID: "retreat:land",
+      }),
+    );
+    expect(shadow.latestTelemetry()!.exposure.proposalMask & 32).toBe(32);
+  });
+
+  it("keeps no-proposal hold fallback diagnostic-only", () => {
+    const actions = [
+      action("quick-chat:authoritative", "quick_chat"),
+      action("hold:diagnostic", "hold"),
+    ];
+    const authoritative = Object.freeze({
+      actionID: "quick-chat:authoritative",
+      actionIDs: ["quick-chat:authoritative"],
+      reason: "v16 communication authority",
+      planFollowed: false,
+      executorSource: "frontier-policy",
+    });
+    const shadow = new KeystoneShadowCouncilExecutor({
+      delegate: delegate(authoritative),
+      actionFollowsCanonicalPlan: () => false,
+      experts: experts(),
+      logLine: () => undefined,
+    });
+
+    expect(shadow.decide(input(actions), plan)).toBe(authoritative);
+    expect(shadow.latestTelemetry()).toMatchObject({
+      proposals: [],
+      winner: {
+        tier: "hold",
+        source: "fallback",
+        actionID: "hold:diagnostic",
+      },
+      agreement: "disagree",
+      exposure: { proposalMask: 0, proposalCount: 0 },
+    });
+  });
+
   it("builds one frozen world and calls every expert once in fixed order", () => {
     const calls: KeystoneExpertDomain[] = [];
     const worlds: unknown[] = [];
@@ -339,6 +514,105 @@ describe("Keystone shadow expert council", () => {
     expect(logs[0]).not.toMatch(/SUPER_SECRET|private\.invalid|token=/);
   });
 
+  it("isolates a system proposer failure without suppressing experts or authority", () => {
+    const logs: string[] = [];
+    const authoritative = Object.freeze({
+      actionID: "hold:wait",
+      actionIDs: ["hold:wait"],
+      reason: "exact authority under system failure",
+      planFollowed: false,
+      executorSource: "frontier-policy",
+    });
+    const authority = delegate(authoritative);
+    const shadow = new KeystoneShadowCouncilExecutor({
+      delegate: authority,
+      actionFollowsCanonicalPlan: () => false,
+      experts: experts({
+        economy: () => proposal("economy", "build:city"),
+      }),
+      systemProposers: {
+        spawn: () => null,
+        survival: () => {
+          throw new Error("token=SYSTEM_SECRET https://system.invalid");
+        },
+      },
+      logLine: (line) => logs.push(line),
+    });
+
+    expect(shadow.decide(input(), plan)).toBe(authoritative);
+    expect(authority.decide).toHaveBeenCalledOnce();
+    expect(shadow.latestTelemetry()).toMatchObject({
+      health: "partial",
+      systemErrorSources: ["survival"],
+      winner: { source: "economy", actionID: "build:city" },
+      exposure: {
+        proposalMask: 2,
+        errorMask: 0,
+        systemErrorMask: 2,
+      },
+    });
+    expect(logs).toHaveLength(1);
+    expect(logs[0]).not.toMatch(/SYSTEM_SECRET|system\.invalid|token=/);
+  });
+
+  it("invokes only enabled expert-mask domains and does not count disabled failures", () => {
+    const expansion = vi.fn(() => proposal("expansion", "expand:neutral:35"));
+    const economy = vi.fn(() => {
+      throw new Error("disabled economy must not run");
+    });
+    const conquest = vi.fn(() => {
+      throw new Error("enabled conquest failure");
+    });
+    const politics = vi.fn(() => {
+      throw new Error("disabled politics must not run");
+    });
+    const shadow = new KeystoneShadowCouncilExecutor({
+      delegate: delegate({
+        actionID: "hold:wait",
+        reason: "authority",
+        planFollowed: false,
+      }),
+      actionFollowsCanonicalPlan: () => false,
+      enabledExpertMask: 5,
+      experts: { expansion, economy, conquest, politics },
+      logLine: () => undefined,
+    });
+
+    shadow.decide(input(), plan);
+
+    expect(expansion).toHaveBeenCalledOnce();
+    expect(conquest).toHaveBeenCalledOnce();
+    expect(economy).not.toHaveBeenCalled();
+    expect(politics).not.toHaveBeenCalled();
+    expect(shadow.latestTelemetry()).toMatchObject({
+      health: "partial",
+      errorDomains: ["conquest"],
+      exposure: {
+        enabledExpertMask: 5,
+        proposalMask: 1,
+        errorMask: 4,
+      },
+    });
+  });
+
+  it.each([-1, 16, 1.5, Number.NaN])(
+    "rejects invalid shadow expert mask %s at construction",
+    (enabledExpertMask) => {
+      expect(
+        () =>
+          new KeystoneShadowCouncilExecutor({
+            delegate: delegate({
+              actionID: "hold:wait",
+              reason: "unused",
+              planFollowed: false,
+            }),
+            actionFollowsCanonicalPlan: () => false,
+            enabledExpertMask,
+          }),
+      ).toThrow(/integer from 0 to 15/);
+    },
+  );
+
   it("cannot turn alignment or logger failures into fallback behavior", () => {
     const authoritative = Object.freeze({
       actionID: "hold:wait",
@@ -473,15 +747,10 @@ describe("Keystone shadow expert council", () => {
       type: "attack",
       targetID: "RAW_INTENT_MUST_NOT_APPEAR",
     } as unknown as LegalAction["intent"];
-    const current = input([
-      action(
-        unsafeID,
-        "attack",
-        { expansion: true, targetID: null },
-        rawIntent,
-      ),
-      action("hold:wait", "hold"),
-    ]);
+    const current = input(
+      [action(unsafeID, "spawn", {}, rawIntent), action("hold:wait", "hold")],
+      { phase: "spawn", turn: 0 },
+    );
     const shadow = new KeystoneShadowCouncilExecutor({
       delegate: delegate({
         actionID: unsafeID,
@@ -489,10 +758,7 @@ describe("Keystone shadow expert council", () => {
         planFollowed: true,
       }),
       actionFollowsCanonicalPlan: () => false,
-      experts: experts({
-        expansion: () =>
-          proposal("expansion", unsafeID, { proposalID: unsafeID }),
-      }),
+      experts: experts(),
       logLine: (line) => logs.push(line),
     });
 
@@ -512,9 +778,16 @@ describe("Keystone shadow expert council", () => {
       line.slice(KEYSTONE_SHADOW_COUNCIL_LOG_PREFIX.length),
     ) as KeystoneShadowCouncilTelemetry;
     expect(decoded.proposals[0]).toMatchObject({
-      domain: "expansion",
-      bidBP: 7_125,
-      bid,
+      domain: null,
+      source: "spawn",
+      bidBP: 9_125,
+      bid: {
+        expectedValueBP: 9_000,
+        urgencyBP: 10_000,
+        confidenceBP: 9_500,
+        riskBP: 1_000,
+        opportunityCostBP: 0,
+      },
     });
     expect(decoded.proposals[0]?.actionID).toMatch(/^hash:[0-9a-f]{16}$/);
 
@@ -587,6 +860,14 @@ describe("Keystone shadow expert council", () => {
     expect(Buffer.byteLength(String(compact), "utf8")).toBeLessThanOrEqual(
       KEYSTONE_SHADOW_COUNCIL_METADATA_MAX_BYTES,
     );
+    expect(JSON.parse(String(compact))).toMatchObject({
+      p: 1,
+      e: 0,
+      h: "h",
+      a: "d",
+      s: 1,
+      k: 15,
+    });
     expect(decision.metadata).not.toHaveProperty("fallbackUsed");
     expect(decision.metadata).not.toHaveProperty("plannerFallbackUsed");
     expect(decision.metadata).not.toHaveProperty("llmPlannerDegraded");

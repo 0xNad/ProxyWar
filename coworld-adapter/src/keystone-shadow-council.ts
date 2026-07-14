@@ -20,8 +20,12 @@ import {
   proposeKeystoneEconomy,
   proposeKeystoneExpansion,
   proposeKeystonePolitics,
+  proposeKeystoneSpawn,
+  proposeKeystoneSurvival,
   type KeystoneActionSelection,
   type KeystoneArbitrationResult,
+  type KeystoneBidComponents,
+  type KeystoneDirectiveProposal,
   type KeystoneExpertDomain,
   type KeystoneExpertProposal,
   type KeystoneProposalRejection,
@@ -40,6 +44,25 @@ const EXPERT_ERROR_BITS: Readonly<Record<KeystoneExpertDomain, number>> =
     conquest: 1 << 2,
     politics: 1 << 3,
   });
+
+type KeystoneShadowSystemSource = "spawn" | "survival";
+type KeystoneShadowProposalSource =
+  | KeystoneExpertDomain
+  | KeystoneShadowSystemSource;
+type KeystoneShadowProposal =
+  | KeystoneExpertProposal
+  | KeystoneDirectiveProposal<KeystoneShadowSystemSource>;
+
+const PROPOSAL_SOURCE_BITS: Readonly<
+  Record<KeystoneShadowProposalSource, number>
+> = Object.freeze({
+  expansion: 1 << 0,
+  economy: 1 << 1,
+  conquest: 1 << 2,
+  politics: 1 << 3,
+  spawn: 1 << 4,
+  survival: 1 << 5,
+});
 
 const REJECTION_BITS: Readonly<
   Record<KeystoneProposalRejection["reason"], number>
@@ -68,6 +91,15 @@ export type KeystoneShadowExperts = Readonly<
   Record<KeystoneExpertDomain, KeystoneShadowExpert>
 >;
 
+export interface KeystoneShadowSystemProposers {
+  readonly spawn: (
+    world: KeystoneWorldModel,
+  ) => KeystoneDirectiveProposal<"spawn"> | null;
+  readonly survival: (
+    world: KeystoneWorldModel,
+  ) => KeystoneDirectiveProposal<"survival"> | null;
+}
+
 export type KeystonePlanAlignment = (args: {
   input: AgentBrainInput;
   plan: StrategicPlan;
@@ -78,6 +110,10 @@ export interface KeystoneShadowCouncilExecutorOptions {
   readonly delegate: AgentExecutor;
   readonly actionFollowsCanonicalPlan: KeystonePlanAlignment;
   readonly experts?: KeystoneShadowExperts;
+  /** Bitset over expansion/economy/conquest/politics; defaults to all four. */
+  readonly enabledExpertMask?: number;
+  /** Test seam only. Production always uses the reviewed system proposers. */
+  readonly systemProposers?: KeystoneShadowSystemProposers;
   /** Test seam only. Production emits one bounded line to stdout. */
   readonly logLine?: (line: string) => void;
   /** Monotonic nanosecond clock; injectable for deterministic focused tests. */
@@ -85,14 +121,18 @@ export interface KeystoneShadowCouncilExecutorOptions {
 }
 
 interface ShadowProposalRecord {
-  readonly domain: KeystoneExpertDomain;
-  readonly proposal: KeystoneExpertProposal;
+  /** Expert slot, or null for a protected system-tier proposal. */
+  readonly domain: KeystoneExpertDomain | null;
+  readonly source: KeystoneShadowProposalSource;
+  readonly proposal: KeystoneShadowProposal;
   readonly bidBP: number | null;
 }
 
 interface ShadowCouncilDraft {
   readonly proposals: readonly ShadowProposalRecord[];
   readonly errorDomains: readonly KeystoneExpertDomain[];
+  readonly systemErrorSources: readonly KeystoneShadowSystemSource[];
+  readonly enabledExpertMask: number;
   readonly result: KeystoneArbitrationResult | null;
   readonly infrastructureFailure: boolean;
   readonly elapsedUs: number;
@@ -113,7 +153,8 @@ interface ShadowBidTelemetry {
 }
 
 interface ShadowProposalTelemetry {
-  readonly domain: KeystoneExpertDomain;
+  readonly domain: KeystoneExpertDomain | null;
+  readonly source: KeystoneShadowProposalSource;
   readonly proposalID: string;
   readonly actionID: string;
   readonly bidBP: number | null;
@@ -137,6 +178,7 @@ export interface KeystoneShadowCouncilTelemetry {
   readonly resetOrdinal: number;
   readonly proposals: readonly ShadowProposalTelemetry[];
   readonly errorDomains: readonly KeystoneExpertDomain[];
+  readonly systemErrorSources: readonly KeystoneShadowSystemSource[];
   readonly rejections: readonly {
     readonly proposalID: string;
     readonly actionID: string;
@@ -154,6 +196,8 @@ export interface KeystoneShadowCouncilTelemetry {
     readonly rejectionMask: number;
     readonly proposalCount: number;
     readonly rejectionCount: number;
+    readonly enabledExpertMask: number;
+    readonly systemErrorMask: number;
   };
   readonly elapsedUs: number;
 }
@@ -165,12 +209,19 @@ const defaultExperts: KeystoneShadowExperts = Object.freeze({
   politics: proposeKeystonePolitics,
 });
 
+const defaultSystemProposers: KeystoneShadowSystemProposers = Object.freeze({
+  spawn: proposeKeystoneSpawn,
+  survival: proposeKeystoneSurvival,
+});
+
 /**
  * Observes the four-expert council without changing authoritative execution.
  * The delegate's exact AgentExecutionDecision object is always returned.
  */
 export class KeystoneShadowCouncilExecutor implements AgentExecutor {
   private readonly experts: KeystoneShadowExperts;
+  private readonly enabledExpertMask: number;
+  private readonly systemProposers: KeystoneShadowSystemProposers;
   private readonly logLine: (line: string) => void;
   private readonly nowNanos: () => bigint;
   private gameID: string | null = null;
@@ -181,6 +232,8 @@ export class KeystoneShadowCouncilExecutor implements AgentExecutor {
 
   constructor(private readonly options: KeystoneShadowCouncilExecutorOptions) {
     this.experts = options.experts ?? defaultExperts;
+    this.enabledExpertMask = validExpertMask(options.enabledExpertMask ?? 15);
+    this.systemProposers = options.systemProposers ?? defaultSystemProposers;
     this.logLine = options.logLine ?? ((line) => console.log(line));
     this.nowNanos = options.nowNanos ?? (() => process.hrtime.bigint());
   }
@@ -191,7 +244,7 @@ export class KeystoneShadowCouncilExecutor implements AgentExecutor {
       reset: false,
       resetOrdinal: this.resetOrdinal,
     });
-    let draft: ShadowCouncilDraft = unavailableDraft();
+    let draft: ShadowCouncilDraft = unavailableDraft(this.enabledExpertMask);
     try {
       sequence = this.advanceSequence(
         input.observation.gameID,
@@ -271,17 +324,46 @@ export class KeystoneShadowCouncilExecutor implements AgentExecutor {
         planAlignedActionIDs,
       });
       const proposals: ShadowProposalRecord[] = [];
+      const systemErrorSources: KeystoneShadowSystemSource[] = [];
+      let spawnProposal: KeystoneDirectiveProposal<"spawn"> | null = null;
+      let survivalProposal: KeystoneDirectiveProposal<"survival"> | null = null;
+      try {
+        spawnProposal = this.systemProposers.spawn(world);
+      } catch {
+        systemErrorSources.push("spawn");
+      }
+      try {
+        survivalProposal = this.systemProposers.survival(world);
+      } catch {
+        systemErrorSources.push("survival");
+      }
+      if (spawnProposal !== null) {
+        proposals.push(
+          proposalRecord(world, null, spawnProposal.source, spawnProposal),
+        );
+      }
+      if (survivalProposal !== null) {
+        proposals.push(
+          proposalRecord(
+            world,
+            null,
+            survivalProposal.source,
+            survivalProposal,
+          ),
+        );
+      }
       const errorDomains: KeystoneExpertDomain[] = [];
+      const expertProposals: KeystoneExpertProposal[] = [];
       for (const domain of keystoneExpertDomains) {
+        if ((this.enabledExpertMask & EXPERT_ERROR_BITS[domain]) === 0) {
+          continue;
+        }
         try {
           const proposal = this.experts[domain](world);
           if (proposal !== null) {
+            expertProposals.push(proposal);
             proposals.push(
-              Object.freeze({
-                domain,
-                proposal,
-                bidBP: proposalBidBP(world, proposal),
-              }),
+              proposalRecord(world, domain, proposal.source, proposal),
             );
           }
         } catch {
@@ -291,14 +373,16 @@ export class KeystoneShadowCouncilExecutor implements AgentExecutor {
       }
 
       const result = arbitrateKeystoneAction(world, {
-        spawn: [],
-        survival: [],
+        spawn: spawnProposal === null ? [] : [spawnProposal],
+        survival: survivalProposal === null ? [] : [survivalProposal],
         bindingDirective: [],
-        expertAuction: proposals.map(({ proposal }) => proposal),
+        expertAuction: expertProposals,
       });
       return Object.freeze({
         proposals: Object.freeze(proposals),
         errorDomains: Object.freeze(errorDomains),
+        systemErrorSources: Object.freeze(systemErrorSources),
+        enabledExpertMask: this.enabledExpertMask,
         result,
         infrastructureFailure,
         elapsedUs: elapsedMicroseconds(startedAt, this.nowNanos()),
@@ -307,6 +391,8 @@ export class KeystoneShadowCouncilExecutor implements AgentExecutor {
       return Object.freeze({
         proposals: Object.freeze([]),
         errorDomains: Object.freeze([]),
+        systemErrorSources: Object.freeze([]),
+        enabledExpertMask: this.enabledExpertMask,
         result: null,
         infrastructureFailure: true,
         elapsedUs: elapsedMicroseconds(startedAt, this.nowNanos()),
@@ -324,10 +410,12 @@ export class KeystoneShadowCouncilExecutor implements AgentExecutor {
   }
 }
 
-function unavailableDraft(): ShadowCouncilDraft {
+function unavailableDraft(enabledExpertMask: number): ShadowCouncilDraft {
   return Object.freeze({
     proposals: Object.freeze([]),
     errorDomains: Object.freeze([]),
+    systemErrorSources: Object.freeze([]),
+    enabledExpertMask,
     result: null,
     infrastructureFailure: true,
     elapsedUs: 0,
@@ -378,7 +466,11 @@ function telemetryFor(
     0,
   );
   const proposalMask = draft.proposals.reduce(
-    (mask, record) => mask | EXPERT_ERROR_BITS[record.domain],
+    (mask, record) => mask | PROPOSAL_SOURCE_BITS[record.source],
+    0,
+  );
+  const systemErrorMask = draft.systemErrorSources.reduce(
+    (mask, source) => mask | (source === "spawn" ? 1 : 2),
     0,
   );
   const rejections = draft.result?.rejections ?? [];
@@ -397,9 +489,9 @@ function telemetryFor(
           : "disagree";
   const health: ShadowHealth = draft.infrastructureFailure
     ? "unavailable"
-    : errorMask === 0
+    : errorMask === 0 && systemErrorMask === 0
       ? "healthy"
-      : errorMask === 15
+      : draft.enabledExpertMask !== 0 && errorMask === draft.enabledExpertMask
         ? "failed"
         : "partial";
 
@@ -411,9 +503,10 @@ function telemetryFor(
     reset: sequence.reset,
     resetOrdinal: sequence.resetOrdinal,
     proposals: Object.freeze(
-      draft.proposals.map(({ domain, proposal, bidBP }) =>
+      draft.proposals.map(({ domain, source, proposal, bidBP }) =>
         Object.freeze({
           domain,
+          source,
           proposalID: safeTelemetryID(proposal.proposalID),
           actionID: safeTelemetryID(proposal.actionID),
           bidBP: telemetryNumber(bidBP),
@@ -428,6 +521,7 @@ function telemetryFor(
       ),
     ),
     errorDomains: Object.freeze([...draft.errorDomains]),
+    systemErrorSources: Object.freeze([...draft.systemErrorSources]),
     rejections: Object.freeze(
       rejections.map((rejection) =>
         Object.freeze({
@@ -449,6 +543,8 @@ function telemetryFor(
       rejectionMask,
       proposalCount: draft.proposals.length,
       rejectionCount: rejections.length,
+      enabledExpertMask: draft.enabledExpertMask,
+      systemErrorMask,
     }),
     elapsedUs: draft.elapsedUs,
   });
@@ -474,7 +570,7 @@ function selectionTelemetry(
 
 function proposalBidBP(
   world: KeystoneWorldModel,
-  proposal: KeystoneExpertProposal,
+  proposal: KeystoneBidComponents & { readonly actionID: string },
 ): number | null {
   try {
     const actionRiskFloorBP =
@@ -484,6 +580,20 @@ function proposalBidBP(
   } catch {
     return null;
   }
+}
+
+function proposalRecord(
+  world: KeystoneWorldModel,
+  domain: KeystoneExpertDomain | null,
+  source: KeystoneShadowProposalSource,
+  proposal: KeystoneShadowProposal,
+): ShadowProposalRecord {
+  return Object.freeze({
+    domain,
+    source,
+    proposal,
+    bidBP: proposalBidBP(world, proposal),
+  });
 }
 
 export function boundedKeystoneShadowCouncilTelemetryLine(
@@ -506,6 +616,7 @@ export function boundedKeystoneShadowCouncilTelemetryLine(
     resetOrdinal: telemetry.resetOrdinal,
     proposals: [],
     errorDomains: telemetry.errorDomains,
+    systemErrorSources: telemetry.systemErrorSources,
     rejections: [],
     winner: telemetry.winner,
     runnerUp: telemetry.runnerUp,
@@ -525,15 +636,17 @@ function compactMetadata(telemetry: KeystoneShadowCouncilTelemetry): string {
     o: telemetry.ordinal,
     g: telemetry.resetOrdinal,
     x: telemetry.reset ? 1 : 0,
-    h: telemetry.health,
+    h: compactHealth(telemetry.health),
     p: telemetry.exposure.proposalMask,
-    e: telemetry.exposure.errorMask,
+    e: telemetry.exposure.errorMask | (telemetry.exposure.systemErrorMask << 4),
     j: telemetry.exposure.rejectionMask,
     w: fingerprint(telemetry.winner?.actionID ?? ""),
     r: fingerprint(telemetry.runnerUp?.actionID ?? ""),
     d: fingerprint(telemetry.authoritativeActionID),
     m: telemetry.bidMarginBP,
-    a: telemetry.agreement,
+    a: compactAgreement(telemetry.agreement),
+    s: compactSource(telemetry.winner?.source),
+    k: telemetry.exposure.enabledExpertMask,
     u: telemetry.elapsedUs,
   });
   if (
@@ -548,15 +661,17 @@ function compactMetadata(telemetry: KeystoneShadowCouncilTelemetry): string {
     o: telemetry.ordinal,
     g: telemetry.resetOrdinal,
     x: telemetry.reset ? 1 : 0,
-    h: "unavailable",
+    h: "u",
     p: telemetry.exposure.proposalMask,
-    e: telemetry.exposure.errorMask,
+    e: telemetry.exposure.errorMask | (telemetry.exposure.systemErrorMask << 4),
     j: telemetry.exposure.rejectionMask,
     w: "-",
     r: "-",
     d: "-",
     m: null,
-    a: "unavailable",
+    a: "u",
+    s: 0,
+    k: telemetry.exposure.enabledExpertMask,
     u: telemetry.elapsedUs,
   });
 }
@@ -577,6 +692,57 @@ function safeTelemetryID(value: unknown): string {
     return value;
   }
   return `hash:${fingerprint(value)}`;
+}
+
+function compactSource(
+  source: KeystoneActionSelection["source"] | undefined,
+): number {
+  switch (source) {
+    case "expansion":
+      return 1;
+    case "economy":
+      return 2;
+    case "conquest":
+      return 3;
+    case "politics":
+      return 4;
+    case "spawn":
+      return 5;
+    case "survival":
+      return 6;
+    case "binding_directive":
+      return 7;
+    case "fallback":
+      return 8;
+    case undefined:
+      return 0;
+  }
+}
+
+function compactHealth(health: ShadowHealth): "h" | "p" | "f" | "u" {
+  switch (health) {
+    case "healthy":
+      return "h";
+    case "partial":
+      return "p";
+    case "failed":
+      return "f";
+    case "unavailable":
+      return "u";
+  }
+}
+
+function compactAgreement(agreement: ShadowAgreement): "a" | "d" | "b" | "u" {
+  switch (agreement) {
+    case "agree":
+      return "a";
+    case "disagree":
+      return "d";
+    case "abstain":
+      return "b";
+    case "unavailable":
+      return "u";
+  }
 }
 
 function fingerprint(value: string): string {
@@ -604,4 +770,13 @@ function elapsedMicroseconds(startedAt: bigint, endedAt: bigint): number {
   return elapsed > BigInt(Number.MAX_SAFE_INTEGER)
     ? Number.MAX_SAFE_INTEGER
     : Number(elapsed);
+}
+
+function validExpertMask(value: number): number {
+  if (!Number.isInteger(value) || value < 0 || value > 15) {
+    throw new RangeError(
+      "Keystone shadow expert mask must be an integer from 0 to 15",
+    );
+  }
+  return value;
 }

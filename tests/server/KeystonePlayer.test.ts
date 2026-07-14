@@ -9,6 +9,7 @@ import {
   isModelUnavailableError,
   KEYSTONE_EXECUTOR_SETTINGS,
   keystoneExpertCouncilShadowFromEnv,
+  keystoneExpertMaskFromEnv,
   keystoneModeFromEnv,
   keystoneSingleActionFromEnv,
   requestToBrainInput,
@@ -248,6 +249,34 @@ describe("Coworld keystone player", () => {
       }
     },
   );
+
+  it("wires a zero expert mask into shadow telemetry without changing authority", async () => {
+    const baseline = createKeystoneBrain(modules, {
+      mode: "mock",
+      profile: "aggressive",
+    });
+    const shadow = createKeystoneBrain(modules, {
+      mode: "mock",
+      profile: "aggressive",
+      expertCouncilShadow: true,
+      expertMask: 0,
+    });
+    const log = vi.spyOn(console, "log").mockImplementation(() => undefined);
+    try {
+      const baselineDecision = await baseline.decide(spawnBrainInput());
+      const shadowDecision = await shadow.decide(spawnBrainInput());
+      const compact = JSON.parse(
+        String(shadowDecision.metadata?.[KEYSTONE_SHADOW_COUNCIL_METADATA_KEY]),
+      ) as Record<string, unknown>;
+
+      expect(shadowDecision.actionID).toBe(baselineDecision.actionID);
+      expect(shadowDecision.actionIDs).toEqual(baselineDecision.actionIDs);
+      expect(shadowDecision.reason).toBe(baselineDecision.reason);
+      expect(compact).toMatchObject({ k: 0, p: 16, e: 0, s: 5 });
+    } finally {
+      log.mockRestore();
+    }
+  });
 
   it("arms the Coworld treatment in the same image with exact Keystone settings", async () => {
     const ranker = vi.fn(plannerExecutorModule.rankLegalActionsForExecution);
@@ -555,7 +584,7 @@ describe("Coworld keystone player", () => {
       o: 2,
       g: 1,
       x: 0,
-      h: "healthy",
+      h: "h",
       p: 5,
       e: 0,
       j: 0,
@@ -563,7 +592,9 @@ describe("Coworld keystone player", () => {
       r: "-",
       d: "fedcba9876543210",
       m: 125,
-      a: "disagree",
+      a: "d",
+      s: 3,
+      k: 15,
       u: 450,
     });
     const response = decisionToResponse("req_shadow", {
@@ -598,6 +629,28 @@ describe("Coworld keystone player", () => {
       },
     });
     expect(oversized).not.toHaveProperty("shadowCouncil");
+
+    for (const [key, value] of [
+      ["p", 64],
+      ["e", 64],
+      ["j", 2_048],
+      ["k", 16],
+      ["s", 9],
+      ["h", "healthy"],
+      ["a", "agree"],
+    ] as const) {
+      const invalid = decisionToResponse(`req_shadow_invalid_${key}`, {
+        actionID: "hold:wait",
+        reason: "hold",
+        metadata: {
+          [KEYSTONE_SHADOW_COUNCIL_METADATA_KEY]: JSON.stringify({
+            ...JSON.parse(compact),
+            [key]: value,
+          }),
+        },
+      });
+      expect(invalid).not.toHaveProperty("shadowCouncil");
+    }
   });
 
   it("adds Commander telemetry without changing the delegated decision", async () => {
@@ -644,15 +697,17 @@ describe("Coworld keystone player", () => {
       o: Number.MAX_SAFE_INTEGER,
       g: Number.MAX_SAFE_INTEGER,
       x: 1,
-      h: "unavailable",
+      h: "u",
       p: 15,
-      e: 15,
+      e: 63,
       j: 2_047,
       w: "0123456789abcdef",
       r: "fedcba9876543210",
       d: "0011223344556677",
       m: Number.MAX_SAFE_INTEGER,
-      a: "disagree",
+      a: "d",
+      s: 6,
+      k: 15,
       u: Number.MAX_SAFE_INTEGER,
     });
     const response = decisionToResponse(requestID, {
@@ -749,6 +804,26 @@ describe("Coworld keystone player", () => {
         PROXYWAR_KEYSTONE_EXPERT_COUNCIL_SHADOW: "yes",
       }),
     ).toThrow(/expected 0\|1\|false\|true/);
+  });
+
+  it("parses the shadow expert mask strictly and defaults to all experts", () => {
+    expect(keystoneExpertMaskFromEnv({})).toBe(15);
+    expect(
+      keystoneExpertMaskFromEnv({ PROXYWAR_KEYSTONE_EXPERT_MASK: "0" }),
+    ).toBe(0);
+    expect(
+      keystoneExpertMaskFromEnv({ PROXYWAR_KEYSTONE_EXPERT_MASK: " 9 " }),
+    ).toBe(9);
+    expect(
+      keystoneExpertMaskFromEnv({ PROXYWAR_KEYSTONE_EXPERT_MASK: "15" }),
+    ).toBe(15);
+    for (const invalid of ["-1", "16", "01", "1.0", "all", "+1"]) {
+      expect(() =>
+        keystoneExpertMaskFromEnv({
+          PROXYWAR_KEYSTONE_EXPERT_MASK: invalid,
+        }),
+      ).toThrow(/expected decimal integer 0\.\.15/);
+    }
   });
 
   it("single-action env defaults off and rejects ambiguous treatment values", () => {
