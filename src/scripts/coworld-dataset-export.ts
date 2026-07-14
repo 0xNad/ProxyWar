@@ -4,8 +4,15 @@ import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { isDeepStrictEqual } from "node:util";
 import {
+  joinCouncilEvaluationPlans,
+  loadCouncilEvaluationPlans,
+  pathIsWithin,
+  type CompletedCouncilPlanJob,
+} from "../server/agents/CoworldCouncilEvaluationPlan";
+import {
   buildCoworldEvaluationDataset,
   conciseCoworldDatasetSummary,
+  type CoworldCouncilEvaluationPlanEvidence,
   type CoworldDatasetSelector,
   type CoworldEpisodeReportedTelemetry,
   type CoworldEvaluationDecision,
@@ -24,6 +31,7 @@ import {
 
 export interface CoworldDatasetExporterOptions {
   inputPaths: string[];
+  councilPlanPaths: string[];
   outputPath: string | null;
   selector: CoworldDatasetSelector;
   treatmentMarkers: CoworldTreatmentMarker[];
@@ -61,11 +69,13 @@ export interface LoadedCoworldEvaluationEpisodes {
   episodes: CoworldEvaluationEpisode[];
   warnings: string[];
   stats: CoworldEvaluationLoadStats;
+  councilEvaluationPlan?: CoworldCouncilEvaluationPlanEvidence;
 }
 
 const usage =
   "Usage: npm run league:dataset-export -- <artifact-path>... " +
   "[--policy-version-id ID | --player-name NAME | --seat N] " +
+  "[--council-plan PLAN] " +
   "[--treatment-marker ID=TEXT] [--spawn-phase-turns N] " +
   "[--spawn-settle-threshold 0..1] [--output FILE]";
 
@@ -278,6 +288,7 @@ export function parseCoworldDatasetExporterOptions(
   argv: string[],
 ): CoworldDatasetExporterOptions {
   const inputPaths: string[] = [];
+  const councilPlanPaths: string[] = [];
   let outputPath: string | null = null;
   let seat: number | null = null;
   let policyVersionId: string | null = null;
@@ -291,6 +302,10 @@ export function parseCoworldDatasetExporterOptions(
     if (argument === "--output") {
       if (!value) throw new Error("--output needs a path");
       outputPath = value;
+      index += 1;
+    } else if (argument === "--council-plan") {
+      if (!value) throw new Error("--council-plan needs a path");
+      councilPlanPaths.push(value);
       index += 1;
     } else if (argument === "--seat") {
       seat = parseNonNegativeInteger(value, "--seat");
@@ -324,7 +339,7 @@ export function parseCoworldDatasetExporterOptions(
       inputPaths.push(argument);
     }
   }
-  if (inputPaths.length === 0) {
+  if (inputPaths.length === 0 && councilPlanPaths.length === 0) {
     throw new Error(usage);
   }
   const selectorCount = [seat, policyVersionId, playerName].filter(
@@ -343,6 +358,7 @@ export function parseCoworldDatasetExporterOptions(
   }
   return {
     inputPaths,
+    councilPlanPaths,
     outputPath,
     selector: { seat, policyVersionId, playerName },
     treatmentMarkers,
@@ -3022,8 +3038,54 @@ function addMergedFragment(
   groups.push(merged);
 }
 
+async function parseEvaluationArtifactFile(input: {
+  filePath: string;
+  explicitFiles: ReadonlySet<string>;
+  warnings: string[];
+  stats: CoworldEvaluationLoadStats;
+}): Promise<EpisodeFragment[]> {
+  const skippedBefore = input.stats.skippedNonCompletedEntries;
+  const fallbackIdentity = await fallbackEpisodeIdentity(input.filePath);
+  let parsed: unknown;
+  if (path.basename(input.filePath) !== "match-summary.json") {
+    try {
+      parsed = JSON.parse(await fs.readFile(input.filePath, "utf8")) as unknown;
+    } catch {
+      throw new Error(`${input.filePath} contains invalid JSON`);
+    }
+  }
+  const fragments =
+    path.basename(input.filePath) === "match-summary.json"
+      ? await parseSidecarBundle(
+          input.filePath,
+          fallbackIdentity,
+          input.warnings,
+          input.stats,
+        )
+      : parseCoworldEvaluationDocument({
+          value: parsed,
+          sourcePath: input.filePath,
+          fallbackId: fallbackIdentity.id,
+          identityAliases: fallbackIdentity.aliases,
+          warnings: input.warnings,
+          stats: input.stats,
+        });
+  if (fragments.length > 0) {
+    return fragments;
+  }
+  if (input.stats.skippedNonCompletedEntries > skippedBefore) {
+    return [];
+  }
+  if (input.explicitFiles.has(input.filePath)) {
+    throw new Error(`${input.filePath} contains no Coworld episode evidence`);
+  }
+  input.warnings.push(`${input.filePath}: ignored unrelated discovered file`);
+  return [];
+}
+
 export async function loadCoworldEvaluationEpisodes(
   inputPaths: readonly string[],
+  councilPlanPaths: readonly string[] = [],
 ): Promise<LoadedCoworldEvaluationEpisodes> {
   const warnings: string[] = [];
   const stats: CoworldEvaluationLoadStats = {
@@ -3037,44 +3099,99 @@ export async function loadCoworldEvaluationEpisodes(
       explicitFiles.add(resolved);
     }
   }
-  const files = await discoverInputFiles(inputPaths);
+  const normalizedCouncilPlanPaths = [
+    ...new Set(
+      councilPlanPaths.map((planPath) => {
+        const resolved = path.resolve(planPath);
+        if (path.basename(resolved).startsWith(".env")) {
+          throw new Error("Refusing to read an environment file");
+        }
+        return resolved;
+      }),
+    ),
+  ].sort();
+  const councilPlans = await loadCouncilEvaluationPlans(
+    normalizedCouncilPlanPaths,
+  );
+  const discoveredFiles = await discoverInputFiles(inputPaths);
+  const completedOutputDirs = new Set(
+    councilPlans?.completedJobs.map((job) => path.resolve(job.outputDir)) ?? [],
+  );
+  const completedDiscoveredFiles = (
+    await Promise.all(
+      [...completedOutputDirs].map((outputDir) =>
+        discoverInDirectory(outputDir),
+      ),
+    )
+  ).flat();
+  const unownedDiscoveredFiles = discoveredFiles.filter((filePath) =>
+    (councilPlans?.plannedJobRoots ?? []).every(
+      (jobRoot) => !pathIsWithin(path.resolve(jobRoot), path.resolve(filePath)),
+    ),
+  );
+  const files = [
+    ...new Set([...unownedDiscoveredFiles, ...completedDiscoveredFiles]),
+  ].sort();
   if (files.length === 0) {
-    throw new Error("No Coworld episode artifacts were discovered");
+    throw new Error("No completed Coworld episode artifacts were discovered");
   }
   const merged: EpisodeFragment[] = [];
+  const ownedFiles = new Map<CompletedCouncilPlanJob, string[]>();
+  const unownedFiles: string[] = [];
   for (const filePath of files) {
-    const skippedBefore = stats.skippedNonCompletedEntries;
-    const fallbackIdentity = await fallbackEpisodeIdentity(filePath);
-    let parsed: unknown;
-    if (path.basename(filePath) !== "match-summary.json") {
-      try {
-        parsed = JSON.parse(await fs.readFile(filePath, "utf8")) as unknown;
-      } catch {
-        throw new Error(`${filePath} contains invalid JSON`);
-      }
+    const owners = (councilPlans?.completedJobs ?? []).filter((job) =>
+      pathIsWithin(path.resolve(job.outputDir), path.resolve(filePath)),
+    );
+    if (owners.length > 1) {
+      throw new Error(`${filePath} belongs to multiple council plan jobs`);
     }
-    const fragments =
-      path.basename(filePath) === "match-summary.json"
-        ? await parseSidecarBundle(filePath, fallbackIdentity, warnings, stats)
-        : parseCoworldEvaluationDocument({
-            value: parsed,
-            sourcePath: filePath,
-            fallbackId: fallbackIdentity.id,
-            identityAliases: fallbackIdentity.aliases,
-            warnings,
-            stats,
-          });
-    if (fragments.length === 0) {
-      if (stats.skippedNonCompletedEntries > skippedBefore) {
-        continue;
+    const owner = owners[0];
+    if (owner === undefined) {
+      unownedFiles.push(filePath);
+    } else {
+      const jobFiles = ownedFiles.get(owner) ?? [];
+      jobFiles.push(filePath);
+      ownedFiles.set(owner, jobFiles);
+    }
+  }
+  for (const filePath of unownedFiles) {
+    const fragments = await parseEvaluationArtifactFile({
+      filePath,
+      explicitFiles,
+      warnings,
+      stats,
+    });
+    for (const fragment of fragments) {
+      addMergedFragment(merged, fragment);
+    }
+  }
+  for (const completed of councilPlans?.completedJobs ?? []) {
+    const staged: EpisodeFragment[] = [];
+    try {
+      for (const filePath of ownedFiles.get(completed) ?? []) {
+        const fragments = await parseEvaluationArtifactFile({
+          filePath,
+          explicitFiles,
+          warnings,
+          stats,
+        });
+        for (const fragment of fragments) {
+          addMergedFragment(staged, fragment);
+        }
       }
-      if (explicitFiles.has(filePath)) {
-        throw new Error(`${filePath} contains no Coworld episode evidence`);
-      }
-      warnings.push(`${filePath}: ignored unrelated discovered file`);
+    } catch (error) {
+      completed.evidence.status = "invalid";
+      completed.evidence.invalidReason =
+        error instanceof Error ? error.message : String(error);
       continue;
     }
-    for (const fragment of fragments) {
+    if (staged.length === 0) {
+      completed.evidence.status = "invalid";
+      completed.evidence.invalidReason =
+        "completed artifacts contain no Coworld episode evidence";
+      continue;
+    }
+    for (const fragment of staged) {
       addMergedFragment(merged, fragment);
     }
   }
@@ -3108,7 +3225,15 @@ export async function loadCoworldEvaluationEpisodes(
   if (episodes.length === 0) {
     throw new Error("No completed Coworld episodes with scores were loaded");
   }
-  return { episodes, warnings, stats };
+  await joinCouncilEvaluationPlans(episodes, councilPlans);
+  return {
+    episodes,
+    warnings,
+    stats,
+    ...(councilPlans === undefined
+      ? {}
+      : { councilEvaluationPlan: councilPlans.evidence }),
+  };
 }
 
 export async function writeCoworldEvaluationDatasetFile(input: {
@@ -3167,7 +3292,10 @@ export async function writeCoworldEvaluationDatasetFile(input: {
 
 async function main(): Promise<void> {
   const options = parseCoworldDatasetExporterOptions(process.argv.slice(2));
-  const loaded = await loadCoworldEvaluationEpisodes(options.inputPaths);
+  const loaded = await loadCoworldEvaluationEpisodes(
+    options.inputPaths,
+    options.councilPlanPaths,
+  );
   const dataset = buildCoworldEvaluationDataset({
     episodes: loaded.episodes,
     selector: options.selector,
@@ -3177,6 +3305,7 @@ async function main(): Promise<void> {
     warnings: loaded.warnings,
     skippedNonCompletedEntries: loaded.stats.skippedNonCompletedEntries,
     skippedByStatus: loaded.stats.skippedByStatus,
+    councilEvaluationPlan: loaded.councilEvaluationPlan,
   });
   if (dataset.rows.length === 0) {
     throw new Error(
@@ -3190,7 +3319,10 @@ async function main(): Promise<void> {
     await writeCoworldEvaluationDatasetFile({
       outputPath: options.outputPath,
       output,
-      sourcePaths: loaded.episodes.flatMap((episode) => episode.sourcePaths),
+      sourcePaths: [
+        ...loaded.episodes.flatMap((episode) => episode.sourcePaths),
+        ...(loaded.councilEvaluationPlan?.planPaths ?? []),
+      ],
     });
   }
   console.error(conciseCoworldDatasetSummary(dataset));

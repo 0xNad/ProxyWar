@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { promises as fs } from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -79,6 +80,340 @@ function shadowDecisionDocument(
         }),
       },
     ],
+  };
+}
+
+type CouncilCompletionStatus =
+  | "complete"
+  | "missing"
+  | "invalid"
+  | "non-production";
+
+function canonicalize(value: unknown): unknown {
+  if (Array.isArray(value)) {
+    return value.map(canonicalize);
+  }
+  if (typeof value === "object" && value !== null) {
+    const record = value as Record<string, unknown>;
+    return Object.fromEntries(
+      Object.keys(record)
+        .sort()
+        .map((key) => [key, canonicalize(record[key])]),
+    );
+  }
+  return value;
+}
+
+function canonicalSha256(value: unknown): string {
+  return `sha256:${createHash("sha256")
+    .update(JSON.stringify(canonicalize(value)))
+    .digest("hex")}`;
+}
+
+async function artifactSha256(artifactPath: string): Promise<string> {
+  const hash = createHash("sha256");
+  const stat = await fs.lstat(artifactPath);
+  if (stat.isFile()) {
+    hash.update(await fs.readFile(artifactPath));
+  } else {
+    const files: string[] = [];
+    const collect = async (directory: string): Promise<void> => {
+      const entries = await fs.readdir(directory, { withFileTypes: true });
+      entries.sort((left, right) =>
+        left.name < right.name ? -1 : left.name > right.name ? 1 : 0,
+      );
+      for (const entry of entries) {
+        const current = path.join(directory, entry.name);
+        if (entry.isDirectory()) {
+          await collect(current);
+        } else {
+          files.push(current);
+        }
+      }
+    };
+    await collect(artifactPath);
+    for (const filePath of files) {
+      hash.update(
+        path.relative(artifactPath, filePath).split(path.sep).join("/"),
+      );
+      hash.update("\0");
+      hash.update(await fs.readFile(filePath));
+      hash.update("\0");
+    }
+  }
+  return `sha256:${hash.digest("hex")}`;
+}
+
+async function writeCouncilPlanFixture(
+  input: {
+    blocks?: Array<{
+      base: CouncilCompletionStatus;
+      shadow: CouncilCompletionStatus;
+    }>;
+    replayDirectory?: boolean;
+  } = {},
+): Promise<{
+  planPath: string;
+  matrixID: string;
+  blocks: Array<{ blockID: string; pairID: string }>;
+  jobs: Array<{ jobID: string; armID: string; completionPath: string }>;
+}> {
+  const root = await temporaryDirectory();
+  const planPath = path.join(root, "plan.json");
+  const candidateImage = {
+    reference: "candidate:test",
+    imageID: `sha256:${"a".repeat(64)}`,
+  };
+  const gameImage = {
+    reference: "game:test",
+    imageID: `sha256:${"b".repeat(64)}`,
+  };
+  const opponentImages = [
+    {
+      reference: "opponent:test",
+      imageID: `sha256:${"c".repeat(64)}`,
+    },
+  ];
+  const arms = [
+    {
+      armID: "v16",
+      kind: "v16",
+      base: "v16",
+      shadow: false,
+      expertMask: 0,
+      env: {
+        PROXYWAR_KEYSTONE_SINGLE_ACTION: "0",
+        PROXYWAR_KEYSTONE_EXPERT_COUNCIL_SHADOW: "0",
+      },
+    },
+    {
+      armID: "v16-shadow-m15",
+      kind: "v16-shadow",
+      base: "v16",
+      shadow: true,
+      expertMask: 15,
+      env: {
+        PROXYWAR_KEYSTONE_SINGLE_ACTION: "0",
+        PROXYWAR_KEYSTONE_EXPERT_COUNCIL_SHADOW: "1",
+        PROXYWAR_KEYSTONE_EXPERT_MASK: "15",
+      },
+    },
+  ];
+  const statuses = input.blocks ?? [{ base: "complete", shadow: "complete" }];
+  const materializedManifest = {
+    game: { runnable: { image: gameImage.reference } },
+  };
+  const manifestSha256 = canonicalSha256(materializedManifest);
+  const matrixIdentity = {
+    contract: "proxywar-coworld-paired-matrix-v3",
+    manifestSha256,
+    gameImage,
+    candidate: {
+      reference: candidateImage.reference,
+      run: [],
+      env: {},
+      name: "Auri",
+      image: candidateImage,
+    },
+    opponents: [
+      {
+        reference: opponentImages[0].reference,
+        run: [],
+        env: {},
+        name: "Opponent",
+        image: opponentImages[0],
+      },
+    ],
+    variantIDs: statuses.map((_status, index) => `variant-${index}`),
+    candidateSeats: [0],
+    seeds: [100],
+    arms,
+  };
+  const matrixID = `matrix-${canonicalSha256(matrixIdentity).slice(7, 39)}`;
+  const materializedManifestPath = path.join(root, "payload", "manifest.json");
+  await fs.mkdir(path.dirname(materializedManifestPath), { recursive: true });
+  await fs.writeFile(
+    materializedManifestPath,
+    JSON.stringify(materializedManifest),
+  );
+  const blocks: Array<Record<string, unknown>> = [];
+  const jobs: Array<Record<string, unknown>> = [];
+  const returnedJobs: Array<{
+    jobID: string;
+    armID: string;
+    completionPath: string;
+  }> = [];
+  for (const [blockIndex, status] of statuses.entries()) {
+    const blockRoster = [
+      {
+        seat: 0,
+        role: "candidate",
+        name: "Auri",
+        image: candidateImage,
+        run: [],
+        env: {},
+      },
+      {
+        seat: 1,
+        role: "opponent",
+        name: "Opponent",
+        image: opponentImages[0],
+        run: [],
+        env: {},
+      },
+    ];
+    const rosterOrderID = `roster-${canonicalSha256(blockRoster).slice(7, 39)}`;
+    const variantID = `variant-${blockIndex}`;
+    const seed = 100;
+    const identityParts = [matrixID, variantID, 0, seed, rosterOrderID];
+    const blockID = `block-${canonicalSha256(identityParts).slice(7, 39)}`;
+    const pairID = `pair-${canonicalSha256(identityParts).slice(7, 39)}`;
+    const armOrder = blockIndex % 2 === 0 ? arms : [arms[1], arms[0]];
+    blocks.push({
+      blockID,
+      pairID,
+      blockIndex,
+      variantID,
+      map: "Europe",
+      candidateSeat: 0,
+      seed,
+      rosterOrderID,
+      armOrder: armOrder.map((arm) => arm.armID),
+      roster: blockRoster,
+    });
+    for (const [blockOrder, arm] of armOrder.entries()) {
+      const jobID = `${blockID}-${arm.armID}`;
+      const jobRoot = path.join(root, "payload", "jobs", jobID);
+      const outputDir = path.join(jobRoot, "episode");
+      const completionPath = path.join(jobRoot, "completion.json");
+      const roster = blockRoster.map((seat) => ({
+        ...seat,
+        env: seat.role === "candidate" ? { ...seat.env, ...arm.env } : seat.env,
+      }));
+      const job = {
+        jobID,
+        matrixID,
+        blockID,
+        pairID,
+        blockOrder,
+        pairOrder: blockOrder,
+        arm,
+        expertMask: arm.expertMask,
+        variantID,
+        map: "Europe",
+        candidateSeat: 0,
+        seed,
+        rosterOrderID,
+        roster,
+        requestPath: path.join(jobRoot, "episode_request.json"),
+        outputDir,
+        completionPath,
+        candidateImage,
+        gameImage,
+        opponentImages,
+      };
+      jobs.push(job);
+      returnedJobs.push({ jobID, armID: arm.armID, completionPath });
+      const completionStatus = arm.shadow ? status.shadow : status.base;
+      if (completionStatus === "missing") {
+        continue;
+      }
+      await fs.mkdir(outputDir, { recursive: true });
+      const scores = arm.shadow ? [0.7, 0.3] : [0, 0];
+      const winnerSlot = arm.shadow ? 0 : null;
+      const players = [{ name: "Auri" }, { name: "Opponent" }];
+      const resultsPath = path.join(outputDir, "results.json");
+      const replayPath = path.join(outputDir, "replay");
+      await fs.writeFile(
+        resultsPath,
+        JSON.stringify({ scores, winner_slot: winnerSlot, players }),
+      );
+      const replay = JSON.stringify({
+        runID: `coworld-${blockIndex}-${arm.armID}`,
+        config: { map: "Europe", players },
+        results: { scores, winner_slot: winnerSlot, players },
+      });
+      if (input.replayDirectory === true) {
+        await fs.mkdir(replayPath);
+        await fs.writeFile(path.join(replayPath, "episode.replay"), replay);
+        await fs.writeFile(path.join(replayPath, "Z.bin"), "upper");
+        await fs.writeFile(path.join(replayPath, "a.bin"), "lower");
+      } else {
+        await fs.writeFile(replayPath, replay);
+      }
+      await fs.writeFile(
+        completionPath,
+        JSON.stringify({
+          schemaVersion: 1,
+          status: "complete",
+          matrixID,
+          blockID,
+          pairID,
+          jobID,
+          rosterOrderID,
+          arm,
+          expertMask: arm.expertMask,
+          variantID,
+          seed,
+          map: "Europe",
+          candidateSeat: 0,
+          roster,
+          candidateImage,
+          gameImage,
+          opponentImages,
+          resultsPath,
+          replayPath,
+          resultsSha256:
+            completionStatus === "invalid"
+              ? `sha256:${"0".repeat(64)}`
+              : await artifactSha256(resultsPath),
+          replaySha256: await artifactSha256(replayPath),
+          validation:
+            completionStatus === "non-production"
+              ? {
+                  coworldVersion: "0.1.30",
+                  episodeRunner: "injected",
+                  resultsValidator: "injected",
+                  replayValidator: "injected-unverified",
+                }
+              : {
+                  coworldVersion: "0.1.30",
+                  episodeRunner: "pinned-coworld-cli",
+                  resultsValidator: "pinned-coworld-results-schema",
+                  replayValidator: "pinned-coworld-verify-replay",
+                },
+        }),
+      );
+    }
+  }
+  await fs.writeFile(
+    planPath,
+    JSON.stringify({
+      schemaVersion: 3,
+      coworldVersion: "0.1.30",
+      generatedAt: "2026-07-14T12:00:00.000Z",
+      matrixID,
+      matrixIdentity,
+      manifestSha256,
+      manifestPath: path.join(root, "source-manifest.json"),
+      planPath,
+      materializedManifestPath,
+      candidateImage,
+      gameImage,
+      opponentImages,
+      arms,
+      blocks,
+      jobs,
+    }),
+  );
+  return {
+    planPath,
+    matrixID,
+    blocks: blocks.map((block) => ({
+      blockID: String(block.blockID),
+      pairID: String(block.pairID),
+    })),
+    jobs: returnedJobs,
   };
 }
 
@@ -458,6 +793,240 @@ describe("Coworld evaluation dataset", () => {
     ).toThrow(/shadowCouncil/);
   });
 
+  test("joins a schemaVersion 3 council plan without claiming shadow authority", async () => {
+    const fixture = await writeCouncilPlanFixture();
+    const loaded = await loadCoworldEvaluationEpisodes([], [fixture.planPath]);
+    const dataset = buildCoworldEvaluationDataset({
+      episodes: loaded.episodes,
+      selector: { seat: 0, policyVersionId: null, playerName: null },
+      councilEvaluationPlan: loaded.councilEvaluationPlan,
+    });
+
+    expect(dataset.rows).toHaveLength(2);
+    expect(dataset.rows.map((row) => row.councilEvaluation)).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          matrixID: fixture.matrixID,
+          blockID: fixture.blocks[0].blockID,
+          pairID: fixture.blocks[0].pairID,
+          arm: expect.objectContaining({ armID: "v16", shadow: false }),
+          intentionToTreat: false,
+          actualTreatmentExposure: false,
+          expertMask: 0,
+          seed: 100,
+          map: "Europe",
+          candidateSeat: 0,
+          candidateImageID: `sha256:${"a".repeat(64)}`,
+          gameImageID: `sha256:${"b".repeat(64)}`,
+          opponentImageIDs: [`sha256:${"c".repeat(64)}`],
+        }),
+        expect.objectContaining({
+          arm: expect.objectContaining({
+            armID: "v16-shadow-m15",
+            shadow: true,
+          }),
+          intentionToTreat: true,
+          actualTreatmentExposure: false,
+          expertMask: 15,
+        }),
+      ]),
+    );
+    expect(dataset.councilEvaluation).toMatchObject({
+      available: true,
+      planPaths: [fixture.planPath],
+      matrixIDs: [fixture.matrixID],
+      plannedBlockCount: 1,
+      plannedJobCount: 2,
+      joinedJobCount: 2,
+      completeBlockIDs: [fixture.blocks[0].blockID],
+      missingJobIDs: [],
+      invalidJobIDs: [],
+      unjoinedJobIDs: [],
+      missingBlockIDs: [],
+      invalidBlockIDs: [],
+      incompleteBlockIDs: [],
+      intentionToTreatJobIDs: [`${fixture.blocks[0].blockID}-v16-shadow-m15`],
+      actualTreatmentExposureJobIDs: [],
+    });
+    const baseTie = dataset.councilEvaluation.tieAudits.find(
+      (audit) => audit.armID === "v16",
+    );
+    expect(baseTie).toMatchObject({
+      topScoreSlots: [0, 1],
+      topScoreMultiplicity: 2,
+      tiedTopScore: true,
+      soleTopScoreWin: false,
+      positiveTopScore: false,
+      allZeroTie: true,
+      commissionerTopScoreWin: true,
+      outrightWin: false,
+      outcome: "shared-top-score",
+    });
+    expect(dataset.councilEvaluation.pairedShadowOverheadDeltas).toEqual([
+      expect.objectContaining({
+        comparisonKind: "descriptive-shadow-overhead",
+        blockID: fixture.blocks[0].blockID,
+        baseArmID: "v16",
+        treatmentArmID: "v16-shadow-m15",
+        expertMask: 15,
+        baseTiedTopScore: true,
+        treatmentTiedTopScore: false,
+        scoreShareDelta: 0.7,
+        commissionerTopScoreWinDelta: 0,
+        outrightWinDelta: 1,
+      }),
+    ]);
+  });
+
+  test("accepts producer-compatible replay directory hashes", async () => {
+    const fixture = await writeCouncilPlanFixture({ replayDirectory: true });
+    const loaded = await loadCoworldEvaluationEpisodes([], [fixture.planPath]);
+    const dataset = buildCoworldEvaluationDataset({
+      episodes: loaded.episodes,
+      selector: { seat: 0, policyVersionId: null, playerName: null },
+      councilEvaluationPlan: loaded.councilEvaluationPlan,
+    });
+
+    expect(dataset.rows).toHaveLength(2);
+    expect(dataset.councilEvaluation).toMatchObject({
+      joinedJobCount: 2,
+      completeBlockIDs: [fixture.blocks[0].blockID],
+      invalidJobIDs: [],
+    });
+  });
+
+  test("audits missing, invalid, and incomplete council blocks separately", async () => {
+    const fixture = await writeCouncilPlanFixture({
+      blocks: [
+        { base: "missing", shadow: "missing" },
+        { base: "complete", shadow: "invalid" },
+      ],
+    });
+    const loaded = await loadCoworldEvaluationEpisodes([], [fixture.planPath]);
+    const dataset = buildCoworldEvaluationDataset({
+      episodes: loaded.episodes,
+      selector: { seat: 0, policyVersionId: null, playerName: null },
+      councilEvaluationPlan: loaded.councilEvaluationPlan,
+    });
+
+    expect(dataset.councilEvaluation).toMatchObject({
+      plannedBlockCount: 2,
+      plannedJobCount: 4,
+      joinedJobCount: 1,
+      completeBlockIDs: [],
+      missingBlockIDs: [fixture.blocks[0].blockID],
+      invalidBlockIDs: [fixture.blocks[1].blockID],
+      incompleteBlockIDs: [
+        fixture.blocks[0].blockID,
+        fixture.blocks[1].blockID,
+      ].sort(),
+      missingJobIDs: expect.arrayContaining([
+        `${fixture.blocks[0].blockID}-v16`,
+        `${fixture.blocks[0].blockID}-v16-shadow-m15`,
+      ]),
+      invalidJobIDs: [`${fixture.blocks[1].blockID}-v16-shadow-m15`],
+      pairedShadowOverheadDeltas: [],
+    });
+  });
+
+  test("rejects a council plan whose jobs are reordered", async () => {
+    const fixture = await writeCouncilPlanFixture();
+    const plan = JSON.parse(await fs.readFile(fixture.planPath, "utf8")) as {
+      jobs: unknown[];
+    };
+    plan.jobs.reverse();
+    await fs.writeFile(fixture.planPath, JSON.stringify(plan));
+
+    await expect(
+      loadCoworldEvaluationEpisodes([], [fixture.planPath]),
+    ).rejects.toThrow("exact block/arm order");
+  });
+
+  test("recomputes matrix identity instead of trusting a claimed matrixID", async () => {
+    const fixture = await writeCouncilPlanFixture();
+    const plan = JSON.parse(await fs.readFile(fixture.planPath, "utf8")) as {
+      matrixIdentity: { seeds: number[] };
+    };
+    plan.matrixIdentity.seeds = [101];
+    await fs.writeFile(fixture.planPath, JSON.stringify(plan));
+
+    await expect(
+      loadCoworldEvaluationEpisodes([], [fixture.planPath]),
+    ).rejects.toThrow("matrixID or matrix identity is inconsistent");
+  });
+
+  test("rejects a materialized manifest that no longer matches its plan hash", async () => {
+    const fixture = await writeCouncilPlanFixture();
+    const plan = JSON.parse(await fs.readFile(fixture.planPath, "utf8")) as {
+      materializedManifestPath: string;
+    };
+    await fs.writeFile(
+      plan.materializedManifestPath,
+      JSON.stringify({ game: { runnable: { image: "game:tampered" } } }),
+    );
+
+    await expect(
+      loadCoworldEvaluationEpisodes([], [fixture.planPath]),
+    ).rejects.toThrow("materialized manifest hash is invalid");
+  });
+
+  test("audits injected completion validation as non-production evidence", async () => {
+    const fixture = await writeCouncilPlanFixture({
+      blocks: [{ base: "complete", shadow: "non-production" }],
+    });
+    const loaded = await loadCoworldEvaluationEpisodes([], [fixture.planPath]);
+    const dataset = buildCoworldEvaluationDataset({
+      episodes: loaded.episodes,
+      selector: { seat: 0, policyVersionId: null, playerName: null },
+      councilEvaluationPlan: loaded.councilEvaluationPlan,
+    });
+    const shadowJobID = `${fixture.blocks[0].blockID}-v16-shadow-m15`;
+
+    expect(dataset.rows).toHaveLength(1);
+    expect(dataset.councilEvaluation).toMatchObject({
+      joinedJobCount: 1,
+      completeBlockIDs: [],
+      invalidJobIDs: [shadowJobID],
+      invalidBlockIDs: [fixture.blocks[0].blockID],
+      incompleteBlockIDs: [fixture.blocks[0].blockID],
+      pairedShadowOverheadDeltas: [],
+      invalidJobs: [
+        {
+          jobID: shadowJobID,
+          blockID: fixture.blocks[0].blockID,
+          reason: expect.stringContaining("non-production evidence"),
+        },
+      ],
+    });
+  });
+
+  test("rejects a hash-matching artifact symlink", async () => {
+    const fixture = await writeCouncilPlanFixture();
+    const baseJob = fixture.jobs.find((job) => job.armID === "v16")!;
+    const completion = JSON.parse(
+      await fs.readFile(baseJob.completionPath, "utf8"),
+    ) as { resultsPath: string };
+    const original = await fs.readFile(completion.resultsPath);
+    const outside = path.join(await temporaryDirectory(), "results.json");
+    await fs.writeFile(outside, original);
+    await fs.rm(completion.resultsPath);
+    await fs.symlink(outside, completion.resultsPath);
+
+    const loaded = await loadCoworldEvaluationEpisodes([], [fixture.planPath]);
+    const dataset = buildCoworldEvaluationDataset({
+      episodes: loaded.episodes,
+      selector: { seat: 0, policyVersionId: null, playerName: null },
+      councilEvaluationPlan: loaded.councilEvaluationPlan,
+    });
+
+    expect(dataset.councilEvaluation.invalidJobs).toEqual([
+      expect.objectContaining({
+        jobID: baseJob.jobID,
+        reason: expect.stringContaining("not a regular file"),
+      }),
+    ]);
+  });
+
   test("aligns score pairs when the same policy ID occupies repeated seats", () => {
     const fragments = parseCoworldEvaluationDocument({
       sourcePath: "/artifacts/episodes.json",
@@ -664,6 +1233,10 @@ describe("Coworld evaluation dataset", () => {
   test("prefers a complete local replay over its sibling results file", async () => {
     const directory = await temporaryDirectory();
     await fs.writeFile(
+      path.join(directory, "plan.json"),
+      JSON.stringify({ unrelated: "legacy artifact plan" }),
+    );
+    await fs.writeFile(
       path.join(directory, "results.json"),
       JSON.stringify({ scores: [1, 0], winner_slot: 0 }),
     );
@@ -681,6 +1254,7 @@ describe("Coworld evaluation dataset", () => {
     expect(loaded.episodes[0].sourcePaths).toEqual([
       path.join(directory, "replay"),
     ]);
+    expect(loaded.councilEvaluationPlan).toBeUndefined();
   });
 
   test("keeps sibling control and treatment episode bundles distinct", async () => {
@@ -1055,6 +1629,8 @@ describe("Coworld evaluation dataset", () => {
         "artifacts",
         "--seat",
         "0",
+        "--council-plan",
+        "matrix/plan.json",
         "--treatment-marker",
         "land_race=opening-land-race",
         "--spawn-phase-turns",
@@ -1064,6 +1640,7 @@ describe("Coworld evaluation dataset", () => {
       ]),
     ).toMatchObject({
       inputPaths: ["artifacts"],
+      councilPlanPaths: ["matrix/plan.json"],
       selector: { seat: 0, policyVersionId: null, playerName: null },
       treatmentMarkers: [{ id: "land_race", needle: "opening-land-race" }],
       spawnPhaseTurns: 300,

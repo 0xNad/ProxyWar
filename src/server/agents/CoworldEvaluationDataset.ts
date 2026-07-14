@@ -2,6 +2,61 @@ import { commissionerTopScoreSlots } from "./CoworldScoreSemantics";
 
 export type CoworldTelemetryPrimitive = string | number | boolean | null;
 
+export type CoworldCouncilEvaluationArmKind =
+  | "v16"
+  | "a1"
+  | "v16-shadow"
+  | "a1-shadow";
+
+export interface CoworldCouncilEvaluationArm {
+  armID: string;
+  kind: CoworldCouncilEvaluationArmKind;
+  base: "v16" | "a1";
+  shadow: boolean;
+  expertMask: number;
+  env: Record<string, string>;
+}
+
+export interface CoworldCouncilEvaluationAssignment {
+  matrixID: string;
+  blockID: string;
+  pairID: string;
+  jobID: string;
+  arm: CoworldCouncilEvaluationArm;
+  intentionToTreat: boolean;
+  /** Locked plan v3 contains observational shadow arms, never council authority. */
+  actualTreatmentExposure: false;
+  expertMask: number;
+  variantID: string;
+  seed: number;
+  map: string;
+  candidateSeat: number;
+  rosterOrderID: string;
+  candidateImageID: string;
+  gameImageID: string;
+  opponentImageIDs: string[];
+}
+
+export interface CoworldCouncilEvaluationPlanBlockEvidence {
+  matrixID: string;
+  blockID: string;
+  pairID: string;
+  jobIDs: string[];
+}
+
+export interface CoworldCouncilEvaluationPlanJobEvidence {
+  assignment: CoworldCouncilEvaluationAssignment;
+  status: "missing" | "invalid" | "joined";
+  invalidReason: string | null;
+  episodeId: string | null;
+}
+
+export interface CoworldCouncilEvaluationPlanEvidence {
+  planPaths: string[];
+  blocks: CoworldCouncilEvaluationPlanBlockEvidence[];
+  jobs: CoworldCouncilEvaluationPlanJobEvidence[];
+}
+
 export type CoworldShadowCouncilHealth =
   | "healthy"
   | "partial"
@@ -131,6 +186,7 @@ export interface CoworldEvaluationEpisode {
   decisions: CoworldEvaluationDecision[];
   snapshots: CoworldEvaluationSnapshot[];
   episodeReportedTelemetry: CoworldEpisodeReportedTelemetry;
+  councilEvaluation?: CoworldCouncilEvaluationAssignment | null;
 }
 
 export interface CoworldDatasetSelector {
@@ -240,6 +296,69 @@ export interface CoworldEvaluationDatasetRow {
   telemetry: CoworldSeatTelemetry;
   spawnDiagnostics: CoworldSpawnDiagnostics;
   phaseSnapshots: CoworldEvaluationPhaseSnapshotRow[];
+  councilEvaluation: CoworldCouncilEvaluationAssignment | null;
+}
+
+export interface CoworldCouncilEvaluationTieAudit {
+  rowId: string;
+  episodeId: string;
+  matrixID: string;
+  blockID: string;
+  pairID: string;
+  jobID: string;
+  armID: string;
+  candidateSeat: number;
+  topScoreSlots: number[];
+  topScoreMultiplicity: number;
+  tiedTopScore: boolean;
+  soleTopScoreWin: boolean;
+  positiveTopScore: boolean;
+  allZeroTie: boolean;
+  commissionerTopScoreWin: boolean;
+  outrightWin: boolean;
+  outcome: "outright" | "sole-top-score" | "shared-top-score" | "not-top-score";
+}
+
+export interface CoworldCouncilEvaluationShadowOverheadDelta {
+  comparisonKind: "descriptive-shadow-overhead";
+  matrixID: string;
+  blockID: string;
+  pairID: string;
+  map: string;
+  seed: number;
+  candidateSeat: number;
+  rosterOrderID: string;
+  baseArmID: string;
+  treatmentArmID: string;
+  expertMask: number;
+  baseRowId: string;
+  treatmentRowId: string;
+  baseTiedTopScore: boolean;
+  treatmentTiedTopScore: boolean;
+  scoreShareDelta: number;
+  commissionerTopScoreWinDelta: number;
+  outrightWinDelta: number;
+}
+
+export interface CoworldCouncilEvaluationAudit {
+  available: boolean;
+  planPaths: string[];
+  matrixIDs: string[];
+  plannedBlockCount: number;
+  plannedJobCount: number;
+  joinedJobCount: number;
+  intentionToTreatJobIDs: string[];
+  actualTreatmentExposureJobIDs: string[];
+  completeBlockIDs: string[];
+  missingJobIDs: string[];
+  invalidJobIDs: string[];
+  invalidJobs: Array<{ jobID: string; blockID: string; reason: string }>;
+  unjoinedJobIDs: string[];
+  missingBlockIDs: string[];
+  invalidBlockIDs: string[];
+  incompleteBlockIDs: string[];
+  tieAudits: CoworldCouncilEvaluationTieAudit[];
+  pairedShadowOverheadDeltas: CoworldCouncilEvaluationShadowOverheadDelta[];
 }
 
 export interface CoworldSpawnSelection {
@@ -315,6 +434,7 @@ export interface CoworldEvaluationDataset {
     skippedByStatus: Record<string, number>;
   };
   warnings: string[];
+  councilEvaluation: CoworldCouncilEvaluationAudit;
   rows: CoworldEvaluationDatasetRow[];
   aggregate: CoworldEvaluationAggregate;
   byMap: Record<string, CoworldEvaluationAggregate>;
@@ -994,6 +1114,230 @@ function aggregateBy(
   );
 }
 
+function councilEvaluationAudit(
+  rows: readonly CoworldEvaluationDatasetRow[],
+  evidence: CoworldCouncilEvaluationPlanEvidence | undefined,
+): CoworldCouncilEvaluationAudit {
+  if (evidence === undefined) {
+    return {
+      available: false,
+      planPaths: [],
+      matrixIDs: [],
+      plannedBlockCount: 0,
+      plannedJobCount: 0,
+      joinedJobCount: 0,
+      intentionToTreatJobIDs: [],
+      actualTreatmentExposureJobIDs: [],
+      completeBlockIDs: [],
+      missingJobIDs: [],
+      invalidJobIDs: [],
+      invalidJobs: [],
+      unjoinedJobIDs: [],
+      missingBlockIDs: [],
+      invalidBlockIDs: [],
+      incompleteBlockIDs: [],
+      tieAudits: [],
+      pairedShadowOverheadDeltas: [],
+    };
+  }
+  const jobsByBlock = new Map<
+    string,
+    CoworldCouncilEvaluationPlanJobEvidence[]
+  >();
+  for (const job of evidence.jobs) {
+    const jobs = jobsByBlock.get(job.assignment.blockID) ?? [];
+    jobs.push(job);
+    jobsByBlock.set(job.assignment.blockID, jobs);
+  }
+  const completeBlockIDs: string[] = [];
+  const missingBlockIDs: string[] = [];
+  const invalidBlockIDs: string[] = [];
+  const incompleteBlockIDs: string[] = [];
+  for (const block of evidence.blocks) {
+    const jobs = jobsByBlock.get(block.blockID) ?? [];
+    const expectedJobIDs = [...block.jobIDs].sort();
+    const actualJobIDs = jobs
+      .map((job) => job.assignment.jobID)
+      .sort((left, right) => left.localeCompare(right));
+    const hasExactJobs =
+      jobs.length === expectedJobIDs.length &&
+      new Set(actualJobIDs).size === expectedJobIDs.length &&
+      expectedJobIDs.every((jobID, index) => jobID === actualJobIDs[index]);
+    if (hasExactJobs && jobs.every((job) => job.status === "joined")) {
+      completeBlockIDs.push(block.blockID);
+    }
+    if (jobs.length > 0 && jobs.every((job) => job.status === "missing")) {
+      missingBlockIDs.push(block.blockID);
+    }
+    if (jobs.some((job) => job.status === "invalid")) {
+      invalidBlockIDs.push(block.blockID);
+    }
+    if (!hasExactJobs || jobs.some((job) => job.status !== "joined")) {
+      incompleteBlockIDs.push(block.blockID);
+    }
+  }
+  const candidateRows = rows.filter(
+    (row) =>
+      row.councilEvaluation !== null &&
+      row.seat === row.councilEvaluation.candidateSeat,
+  );
+  const tieAudits = candidateRows.map((row) => {
+    const assignment = row.councilEvaluation!;
+    const topScoreSlots = commissionerTopScoreSlots(row.scores);
+    return {
+      rowId: row.rowId,
+      episodeId: row.episodeId,
+      matrixID: assignment.matrixID,
+      blockID: assignment.blockID,
+      pairID: assignment.pairID,
+      jobID: assignment.jobID,
+      armID: assignment.arm.armID,
+      candidateSeat: assignment.candidateSeat,
+      topScoreSlots,
+      topScoreMultiplicity: topScoreSlots.length,
+      tiedTopScore: topScoreSlots.length > 1,
+      soleTopScoreWin:
+        row.commissionerTopScoreWin && topScoreSlots.length === 1,
+      positiveTopScore: Math.max(...row.scores) > 0,
+      allZeroTie:
+        topScoreSlots.length > 1 && row.scores.every((score) => score === 0),
+      commissionerTopScoreWin: row.commissionerTopScoreWin,
+      outrightWin: row.outrightWin,
+      outcome: row.outrightWin
+        ? "outright"
+        : row.commissionerTopScoreWin
+          ? topScoreSlots.length > 1
+            ? "shared-top-score"
+            : "sole-top-score"
+          : "not-top-score",
+    } satisfies CoworldCouncilEvaluationTieAudit;
+  });
+  const rowByJobID = new Map(
+    candidateRows.map((row) => [row.councilEvaluation!.jobID, row]),
+  );
+  const completeBlocks = new Set(completeBlockIDs);
+  const pairedShadowOverheadDeltas: CoworldCouncilEvaluationShadowOverheadDelta[] =
+    [];
+  for (const treatment of evidence.jobs) {
+    const assignment = treatment.assignment;
+    if (
+      treatment.status !== "joined" ||
+      !assignment.arm.shadow ||
+      !completeBlocks.has(assignment.blockID)
+    ) {
+      continue;
+    }
+    const base = evidence.jobs.find(
+      (candidate) =>
+        candidate.status === "joined" &&
+        candidate.assignment.blockID === assignment.blockID &&
+        !candidate.assignment.arm.shadow &&
+        candidate.assignment.arm.kind === assignment.arm.base,
+    );
+    const baseRow =
+      base === undefined ? undefined : rowByJobID.get(base.assignment.jobID);
+    const treatmentRow = rowByJobID.get(assignment.jobID);
+    if (
+      base === undefined ||
+      baseRow === undefined ||
+      treatmentRow === undefined
+    ) {
+      continue;
+    }
+    const baseTopScoreSlots = commissionerTopScoreSlots(baseRow.scores);
+    const treatmentTopScoreSlots = commissionerTopScoreSlots(
+      treatmentRow.scores,
+    );
+    pairedShadowOverheadDeltas.push({
+      comparisonKind: "descriptive-shadow-overhead",
+      matrixID: assignment.matrixID,
+      blockID: assignment.blockID,
+      pairID: assignment.pairID,
+      map: assignment.map,
+      seed: assignment.seed,
+      candidateSeat: assignment.candidateSeat,
+      rosterOrderID: assignment.rosterOrderID,
+      baseArmID: base.assignment.arm.armID,
+      treatmentArmID: assignment.arm.armID,
+      expertMask: assignment.expertMask,
+      baseRowId: baseRow.rowId,
+      treatmentRowId: treatmentRow.rowId,
+      baseTiedTopScore: baseTopScoreSlots.length > 1,
+      treatmentTiedTopScore: treatmentTopScoreSlots.length > 1,
+      scoreShareDelta: treatmentRow.scoreShare - baseRow.scoreShare,
+      commissionerTopScoreWinDelta:
+        Number(treatmentRow.commissionerTopScoreWin) -
+        Number(baseRow.commissionerTopScoreWin),
+      outrightWinDelta:
+        Number(treatmentRow.outrightWin) - Number(baseRow.outrightWin),
+    });
+  }
+  const sorted = (values: Iterable<string>): string[] =>
+    [...values].sort((left, right) => left.localeCompare(right));
+  return {
+    available: evidence.planPaths.length > 0,
+    planPaths: sorted(evidence.planPaths),
+    matrixIDs: sorted(
+      new Set(evidence.jobs.map((job) => job.assignment.matrixID)),
+    ),
+    plannedBlockCount: evidence.blocks.length,
+    plannedJobCount: evidence.jobs.length,
+    joinedJobCount: evidence.jobs.filter((job) => job.status === "joined")
+      .length,
+    intentionToTreatJobIDs: sorted(
+      evidence.jobs
+        .filter((job) => job.assignment.intentionToTreat)
+        .map((job) => job.assignment.jobID),
+    ),
+    actualTreatmentExposureJobIDs: sorted(
+      evidence.jobs
+        .filter((job) => job.assignment.actualTreatmentExposure)
+        .map((job) => job.assignment.jobID),
+    ),
+    completeBlockIDs: sorted(completeBlockIDs),
+    missingJobIDs: sorted(
+      evidence.jobs
+        .filter((job) => job.status === "missing")
+        .map((job) => job.assignment.jobID),
+    ),
+    invalidJobIDs: sorted(
+      evidence.jobs
+        .filter((job) => job.status === "invalid")
+        .map((job) => job.assignment.jobID),
+    ),
+    invalidJobs: evidence.jobs
+      .filter(
+        (
+          job,
+        ): job is CoworldCouncilEvaluationPlanJobEvidence & {
+          invalidReason: string;
+        } => job.status === "invalid" && job.invalidReason !== null,
+      )
+      .map((job) => ({
+        jobID: job.assignment.jobID,
+        blockID: job.assignment.blockID,
+        reason: job.invalidReason,
+      }))
+      .sort((left, right) => left.jobID.localeCompare(right.jobID)),
+    unjoinedJobIDs: sorted(
+      evidence.jobs
+        .filter((job) => job.status !== "joined")
+        .map((job) => job.assignment.jobID),
+    ),
+    missingBlockIDs: sorted(missingBlockIDs),
+    invalidBlockIDs: sorted(invalidBlockIDs),
+    incompleteBlockIDs: sorted(incompleteBlockIDs),
+    tieAudits: tieAudits.sort((left, right) =>
+      left.jobID.localeCompare(right.jobID),
+    ),
+    pairedShadowOverheadDeltas: pairedShadowOverheadDeltas.sort(
+      (left, right) =>
+        left.blockID.localeCompare(right.blockID) ||
+        left.treatmentArmID.localeCompare(right.treatmentArmID),
+    ),
+  };
+}
+
 export function buildCoworldEvaluationDataset(input: {
   episodes: readonly CoworldEvaluationEpisode[];
   selector: CoworldDatasetSelector;
@@ -1003,6 +1347,7 @@ export function buildCoworldEvaluationDataset(input: {
   warnings?: readonly string[];
   skippedNonCompletedEntries?: number;
   skippedByStatus?: Readonly<Record<string, number>>;
+  councilEvaluationPlan?: CoworldCouncilEvaluationPlanEvidence;
 }): CoworldEvaluationDataset {
   const treatmentMarkers = [...(input.treatmentMarkers ?? [])];
   const spawnPhaseTurns = input.spawnPhaseTurns ?? null;
@@ -1043,6 +1388,10 @@ export function buildCoworldEvaluationDataset(input: {
           spawnSettleThreshold,
         ),
         phaseSnapshots: phaseSnapshotsForSeat(episode, seat),
+        councilEvaluation:
+          episode.councilEvaluation?.candidateSeat === seat
+            ? episode.councilEvaluation
+            : null,
       } satisfies CoworldEvaluationDatasetRow;
     });
   });
@@ -1067,6 +1416,10 @@ export function buildCoworldEvaluationDataset(input: {
       skippedByStatus: sortedCounts({ ...(input.skippedByStatus ?? {}) }),
     },
     warnings: [...(input.warnings ?? [])],
+    councilEvaluation: councilEvaluationAudit(
+      rows,
+      input.councilEvaluationPlan,
+    ),
     rows,
     aggregate: aggregate(rows),
     byMap: aggregateBy(rows, (row) => row.map),
@@ -1094,5 +1447,10 @@ export function conciseCoworldDatasetSummary(
     `fallback/degraded/parse ${count(aggregate.fallbackCount)}/${count(aggregate.degradedCount)}/${count(aggregate.parseFailureCount)}`,
     `wire-dropped ${count(aggregate.wireDroppedFollowupCount)} across ${count(aggregate.multiActionDecisionCount)} multi-action decision(s)`,
     `treatment exposed ${aggregate.treatmentExposedRows}/${aggregate.rows}`,
+    ...(dataset.councilEvaluation.available
+      ? [
+          `council plan ${dataset.councilEvaluation.joinedJobCount}/${dataset.councilEvaluation.plannedJobCount} job(s), ${dataset.councilEvaluation.completeBlockIDs.length}/${dataset.councilEvaluation.plannedBlockCount} complete block(s)`,
+        ]
+      : []),
   ].join("; ");
 }
