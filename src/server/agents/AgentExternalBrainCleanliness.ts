@@ -22,12 +22,10 @@ export function externalBrainCleanlinessReport(input: {
   brainMode: ExternalBrainCleanlinessMode;
   records: AgentDecisionRecord[];
 }): ExternalBrainCleanlinessReport {
-  const externalCalls = input.records.filter(
-    (record) =>
-      record.decisionMetadata?.externalPlannerCall === true ||
-      record.decisionMetadata?.externalActionCall === true,
+  const externalCallRecords = input.records.filter(
+    (record) => externalCallCount(record) > 0,
   );
-  const cleanExternalCalls = externalCalls.filter(
+  const cleanExternalCallRecords = externalCallRecords.filter(
     (record) =>
       record.decisionMetadata?.parseSuccess !== false &&
       record.decisionMetadata?.plannerParseOk !== false &&
@@ -35,7 +33,8 @@ export function externalBrainCleanlinessReport(input: {
       record.decisionMetadata?.plannerFallbackUsed !== true,
   );
   const allowHousePlannerFallbacks =
-    input.brainMode === "planner-codex-cli" && cleanExternalCalls.length > 0;
+    input.brainMode === "planner-codex-cli" &&
+    cleanExternalCallRecords.length > 0;
   const parserFailures = input.records.filter(
     (record) =>
       record.decisionMetadata?.parseSuccess === false ||
@@ -64,18 +63,53 @@ export function externalBrainCleanlinessReport(input: {
     firstFailure?.decisionMetadata?.brainErrorReason ??
     firstFailure?.result.reason ??
     "external brain did not produce a clean accepted decision";
+  const externalCalls = externalCallRecords.reduce(
+    (count, record) => count + externalCallCount(record),
+    0,
+  );
+  const cleanExternalCalls = cleanExternalCallRecords.reduce(
+    (count, record) => count + externalCallCount(record),
+    0,
+  );
 
   return {
     ok:
-      cleanExternalCalls.length > 0 &&
+      cleanExternalCalls > 0 &&
       parserFailures.length === 0 &&
       fallbacks.length === 0 &&
       rejected.length === 0,
-    externalCalls: externalCalls.length,
-    cleanExternalCalls: cleanExternalCalls.length,
+    externalCalls,
+    cleanExternalCalls,
     parserFailures: parserFailures.length,
     fallbacks: fallbacks.length,
     rejectedIntents: rejected.length,
     firstFailureReason: String(firstFailureReason),
   };
+}
+
+function externalCallCount(record: AgentDecisionRecord): number {
+  return (
+    metadataCallCount(
+      record,
+      "externalPlannerCallCount",
+      "externalPlannerCall",
+    ) +
+    metadataCallCount(
+      record,
+      "externalActionCallCount",
+      "externalActionCall",
+    )
+  );
+}
+
+function metadataCallCount(
+  record: AgentDecisionRecord,
+  countKey: string,
+  booleanKey: string,
+): number {
+  const count = record.decisionMetadata?.[countKey];
+  if (typeof count === "number" && Number.isFinite(count) && count >= 0) {
+    return Math.floor(count);
+  }
+  return record.decisionMetadata?.[booleanKey] === true ? 1 : 0;
 }

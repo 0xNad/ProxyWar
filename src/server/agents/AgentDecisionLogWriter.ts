@@ -176,6 +176,49 @@ interface DecisionLogEntry {
   externalPlannerCall?: boolean;
   externalActionCall?: boolean;
   rawProviderOutputPresent?: boolean;
+  decisionAttemptCount?: number;
+  externalPlannerCallCount?: number;
+  externalActionCallCount?: number;
+  fallbackAttemptCount?: number;
+  llmPlannerDegradedAttemptCount?: number;
+  timedOutAttemptCount?: number;
+  offerRetryMode?: string;
+  llmPlannerDegraded?: boolean;
+  safetyFallbackUsed?: boolean;
+  brainTimedOut?: boolean;
+  localTimeoutFallbackUsed?: boolean;
+  firstAttemptFallbackUsed?: boolean;
+  firstAttemptPlannerFallbackUsed?: boolean;
+  firstAttemptLlmPlannerDegraded?: boolean;
+  firstAttemptExternalPlannerCallCount?: number;
+  firstAttemptExternalActionCallCount?: number;
+  firstAttemptBrainTimedOut?: boolean;
+  firstAttemptSafetyFallbackUsed?: boolean;
+  firstAttemptSelectedActionID?: string;
+  firstAttemptReason?: string;
+  firstAttemptParseSuccess?: boolean;
+  firstAttemptLlmParseOk?: boolean;
+  firstAttemptPlannerParseOk?: boolean;
+  firstAttemptBrainErrorReason?: string;
+  firstAttemptParseFailureReason?: string;
+  firstAttemptLlmParseFailureReason?: string;
+  firstAttemptPlannerParseFailureReason?: string;
+  retryAttemptFallbackUsed?: boolean;
+  retryAttemptPlannerFallbackUsed?: boolean;
+  retryAttemptLlmPlannerDegraded?: boolean;
+  retryAttemptExternalPlannerCallCount?: number;
+  retryAttemptExternalActionCallCount?: number;
+  retryAttemptBrainTimedOut?: boolean;
+  retryAttemptSafetyFallbackUsed?: boolean;
+  retryAttemptSelectedActionID?: string;
+  retryAttemptReason?: string;
+  retryAttemptParseSuccess?: boolean;
+  retryAttemptLlmParseOk?: boolean;
+  retryAttemptPlannerParseOk?: boolean;
+  retryAttemptBrainErrorReason?: string;
+  retryAttemptParseFailureReason?: string;
+  retryAttemptLlmParseFailureReason?: string;
+  retryAttemptPlannerParseFailureReason?: string;
   decisionLatencyMs: number;
   observationSummary: string;
   strategicPriority?: AgentDecisionRecord["strategicPriority"];
@@ -496,6 +539,120 @@ export async function writeAgentLeagueRunArtifacts(
   };
 }
 
+function decisionAttemptTelemetry(
+  metadata: NonNullable<AgentDecisionRecord["decisionMetadata"]>,
+): Partial<DecisionLogEntry> {
+  return {
+    ...(numberMetadata(metadata, "decisionAttemptCount") !== undefined
+      ? { decisionAttemptCount: numberMetadata(metadata, "decisionAttemptCount") }
+      : {}),
+    ...(numberMetadata(metadata, "externalPlannerCallCount") !== undefined
+      ? {
+          externalPlannerCallCount: numberMetadata(
+            metadata,
+            "externalPlannerCallCount",
+          ),
+        }
+      : {}),
+    ...(numberMetadata(metadata, "externalActionCallCount") !== undefined
+      ? {
+          externalActionCallCount: numberMetadata(
+            metadata,
+            "externalActionCallCount",
+          ),
+        }
+      : {}),
+    ...(numberMetadata(metadata, "fallbackAttemptCount") !== undefined
+      ? { fallbackAttemptCount: numberMetadata(metadata, "fallbackAttemptCount") }
+      : {}),
+    ...(numberMetadata(metadata, "llmPlannerDegradedAttemptCount") !== undefined
+      ? {
+          llmPlannerDegradedAttemptCount: numberMetadata(
+            metadata,
+            "llmPlannerDegradedAttemptCount",
+          ),
+        }
+      : {}),
+    ...(numberMetadata(metadata, "timedOutAttemptCount") !== undefined
+      ? { timedOutAttemptCount: numberMetadata(metadata, "timedOutAttemptCount") }
+      : {}),
+    ...(stringMetadata(metadata, "offerRetryMode") !== undefined
+      ? { offerRetryMode: stringMetadata(metadata, "offerRetryMode") }
+      : {}),
+    ...(booleanMetadata(metadata, "llmPlannerDegraded") !== undefined
+      ? {
+          llmPlannerDegraded: booleanMetadata(metadata, "llmPlannerDegraded"),
+        }
+      : {}),
+    ...(booleanMetadata(metadata, "safetyFallbackUsed") !== undefined
+      ? { safetyFallbackUsed: booleanMetadata(metadata, "safetyFallbackUsed") }
+      : {}),
+    ...(booleanMetadata(metadata, "brainTimedOut") !== undefined
+      ? { brainTimedOut: booleanMetadata(metadata, "brainTimedOut") }
+      : {}),
+    ...(booleanMetadata(metadata, "localTimeoutFallbackUsed") !== undefined
+      ? {
+          localTimeoutFallbackUsed: booleanMetadata(
+            metadata,
+            "localTimeoutFallbackUsed",
+          ),
+        }
+      : {}),
+    ...attemptSideTelemetry(metadata, "first"),
+    ...attemptSideTelemetry(metadata, "retry"),
+  };
+}
+
+function attemptSideTelemetry(
+  metadata: NonNullable<AgentDecisionRecord["decisionMetadata"]>,
+  side: "first" | "retry",
+): Partial<DecisionLogEntry> {
+  const prefix = side === "first" ? "firstAttempt" : "retryAttempt";
+  const output: Record<string, string | number | boolean> = {};
+  for (const suffix of [
+    "FallbackUsed",
+    "PlannerFallbackUsed",
+    "LlmPlannerDegraded",
+    "BrainTimedOut",
+    "SafetyFallbackUsed",
+    "ParseSuccess",
+    "LlmParseOk",
+    "PlannerParseOk",
+  ]) {
+    const value = booleanMetadata(metadata, `${prefix}${suffix}`);
+    if (value !== undefined) {
+      output[`${prefix}${suffix}`] = value;
+    }
+  }
+  for (const suffix of ["SelectedActionID", "Reason"]) {
+    const value = stringMetadata(metadata, `${prefix}${suffix}`);
+    if (value !== undefined) {
+      output[`${prefix}${suffix}`] = value;
+    }
+  }
+  for (const suffix of [
+    "ExternalPlannerCallCount",
+    "ExternalActionCallCount",
+  ]) {
+    const value = numberMetadata(metadata, `${prefix}${suffix}`);
+    if (value !== undefined) {
+      output[`${prefix}${suffix}`] = value;
+    }
+  }
+  for (const suffix of [
+    "BrainErrorReason",
+    "ParseFailureReason",
+    "LlmParseFailureReason",
+    "PlannerParseFailureReason",
+  ]) {
+    const value = stringMetadata(metadata, `${prefix}${suffix}`);
+    if (value !== undefined) {
+      output[`${prefix}${suffix}`] = value;
+    }
+  }
+  return output as Partial<DecisionLogEntry>;
+}
+
 function decisionLogEntry(
   input: WriteAgentLeagueRunArtifactsInput,
   record: AgentDecisionRecord,
@@ -550,6 +707,7 @@ function decisionLogEntry(
           ),
         }
       : {}),
+    ...decisionAttemptTelemetry(metadata),
     decisionLatencyMs: record.decisionLatencyMs,
     observationSummary: record.observationSummary,
     ...(record.strategicPriority !== undefined
@@ -729,11 +887,13 @@ function decisionLogEntry(
         }
       : {}),
     ...(stringMetadata(metadata, "llmParseFailureReason") !== undefined ||
-    stringMetadata(metadata, "externalFailureReason") !== undefined
+    stringMetadata(metadata, "externalFailureReason") !== undefined ||
+    stringMetadata(metadata, "parseFailureReason") !== undefined
       ? {
           parseFailureReason:
             stringMetadata(metadata, "llmParseFailureReason") ??
-            stringMetadata(metadata, "externalFailureReason"),
+            stringMetadata(metadata, "externalFailureReason") ??
+            stringMetadata(metadata, "parseFailureReason"),
         }
       : {}),
     fallbackUsed: booleanMetadata(metadata, "fallbackUsed") ?? false,
@@ -923,12 +1083,20 @@ function matchSummary(
       counts[mode] = (counts[mode] ?? 0) + 1;
       return counts;
     }, {}),
-    externalPlannerCallCount: entries.filter(
-      (entry) => entry.externalPlannerCall === true,
-    ).length,
-    externalActionCallCount: entries.filter(
-      (entry) => entry.externalActionCall === true,
-    ).length,
+    externalPlannerCallCount: entries.reduce(
+      (count, entry) =>
+        count +
+        (entry.externalPlannerCallCount ??
+          (entry.externalPlannerCall === true ? 1 : 0)),
+      0,
+    ),
+    externalActionCallCount: entries.reduce(
+      (count, entry) =>
+        count +
+        (entry.externalActionCallCount ??
+          (entry.externalActionCall === true ? 1 : 0)),
+      0,
+    ),
     rawProviderOutputRecordCount: entries.filter(
       (entry) => entry.rawProviderOutputPresent === true,
     ).length,

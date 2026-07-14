@@ -520,6 +520,232 @@ describe("AgentLeagueMatchRunner", () => {
     }
   });
 
+  it("preserves degraded first-attempt health and counts both external calls after a healthy retry", async () => {
+    const log = makeLogger();
+    const requestTarget = allianceRequestLegalAction("PLAYER_TARGET");
+    const boat = boatLegalAction(7_802);
+    const legalActions = [requestTarget, boat, holdLegalAction()];
+    const calls = [0, 0];
+    const participants = createAgentParticipants(
+      [
+        {
+          username: "Health Reserver",
+          profile: "diplomatic",
+          clientID: "HEALTH_RESERVER",
+        },
+        {
+          username: "Health Retry Agent",
+          profile: "opportunistic",
+          clientID: "HEALTH_RETRY",
+        },
+      ],
+      log,
+      {
+        brainFactory: (_spec, index) => ({
+          brainType: index === 0 ? "rule" : "external-http",
+          decide: (): AgentDecision => {
+            calls[index] += 1;
+            if (index === 0) {
+              return {
+                actionID: requestTarget.id,
+                reason: "reserve target",
+              };
+            }
+            if (calls[index] === 1) {
+              return {
+                actionID: requestTarget.id,
+                reason: "degraded first response selected offered target",
+                metadata: {
+                  externalActionCall: true,
+                  rawProviderOutputPresent: true,
+                  fallbackUsed: true,
+                  llmPlannerDegraded: true,
+                  parseSuccess: false,
+                  parseFailureReason: "first attempt degraded",
+                  brainErrorReason: "first provider degraded",
+                },
+              };
+            }
+            return {
+              actionID: boat.id,
+              reason: "healthy retry selected narrowed boat",
+              metadata: {
+                externalActionCall: true,
+                rawProviderOutputPresent: true,
+                fallbackUsed: false,
+                llmPlannerDegraded: false,
+                parseSuccess: true,
+              },
+            };
+          },
+        }),
+      },
+    );
+    const game = new GameServer(
+      "AGENT_HEALTH_RETRY",
+      log,
+      Date.now(),
+      serverConfig,
+      gameConfig,
+    );
+    const match = new AgentLeagueMatchRunner({
+      game,
+      participants,
+      spawnCandidates: [],
+      log,
+      observationBuilder: observationBuilderWithPlayerIDs({
+        HEALTH_RESERVER: "PLAYER_A",
+        HEALTH_RETRY: "PLAYER_B",
+      }),
+      legalActionBuilder: {
+        build: () => legalActions,
+      } as unknown as LegalActionBuilder,
+    });
+
+    try {
+      match.attachAgents();
+      const records = await match.runDecisionTurn({ turnNumber: 7_800 });
+      const retryRecord = records[1]!;
+
+      expect(calls).toEqual([1, 2]);
+      expect(retryRecord.chosenActionID).toBe(boat.id);
+      expect(retryRecord.result.accepted).toBe(true);
+      expect(retryRecord.decisionMetadata).toMatchObject({
+        decisionAttemptCount: 2,
+        externalActionCall: true,
+        externalActionCallCount: 2,
+        externalPlannerCallCount: 0,
+        fallbackUsed: true,
+        fallbackAttemptCount: 1,
+        llmPlannerDegraded: true,
+        llmPlannerDegradedAttemptCount: 1,
+        parseSuccess: false,
+        parseFailureReason: "first attempt degraded",
+        brainErrorReason: "first provider degraded",
+        firstAttemptFallbackUsed: true,
+        firstAttemptLlmPlannerDegraded: true,
+        firstAttemptExternalActionCallCount: 1,
+        firstAttemptParseSuccess: false,
+        firstAttemptBrainErrorReason: "first provider degraded",
+        retryAttemptFallbackUsed: false,
+        retryAttemptLlmPlannerDegraded: false,
+        retryAttemptExternalActionCallCount: 1,
+        retryAttemptParseSuccess: true,
+        offerRetryMode: "brain-retry",
+      });
+      expect(
+        externalBrainCleanlinessReport({
+          brainMode: "real-llm",
+          records: [retryRecord],
+        }),
+      ).toMatchObject({
+        ok: false,
+        externalCalls: 2,
+        cleanExternalCalls: 0,
+        parserFailures: 1,
+        fallbacks: 1,
+      });
+    } finally {
+      await game.end({ archive: false });
+    }
+  });
+
+  it("does not re-enter an unresolved timed-out brain when its fallback selection is withdrawn", async () => {
+    const log = makeLogger();
+    const requestTarget = allianceRequestLegalAction("PLAYER_TARGET");
+    const build = buildLegalAction(7_803);
+    const legalActions = [requestTarget, build, holdLegalAction()];
+    const firstDecide = vi.fn(() => ({
+      actionID: requestTarget.id,
+      reason: "reserve target before timed-out seat submits",
+    }));
+    const timedOutDecide = vi.fn(
+      () => new Promise<AgentDecision>(() => undefined),
+    );
+    const participants = createAgentParticipants(
+      [
+        {
+          username: "Timeout Reserver",
+          profile: "diplomatic",
+          clientID: "TIMEOUT_RESERVER",
+        },
+        {
+          username: "Timeout Retry Agent",
+          profile: "diplomatic",
+          clientID: "TIMEOUT_RETRY",
+        },
+      ],
+      log,
+      {
+        brainFactory: (_spec, index) => ({
+          brainType: index === 0 ? "rule" : "real-llm",
+          decide: index === 0 ? firstDecide : timedOutDecide,
+        }),
+      },
+    );
+    const game = new GameServer(
+      "AGENT_TIMEOUT_WITHDRAWAL",
+      log,
+      Date.now(),
+      serverConfig,
+      gameConfig,
+    );
+    const match = new AgentLeagueMatchRunner({
+      game,
+      participants,
+      spawnCandidates: [],
+      log,
+      observationBuilder: observationBuilderWithPlayerIDs({
+        TIMEOUT_RESERVER: "PLAYER_A",
+        TIMEOUT_RETRY: "PLAYER_B",
+      }),
+      legalActionBuilder: {
+        build: () => legalActions,
+      } as unknown as LegalActionBuilder,
+    });
+
+    try {
+      match.attachAgents();
+      const records = await match.runDecisionTurn({
+        turnNumber: 8_100,
+        maxDecisionMs: 5,
+      });
+      const retryRecord = records[1]!;
+
+      expect(firstDecide).toHaveBeenCalledTimes(1);
+      expect(timedOutDecide).toHaveBeenCalledTimes(1);
+      expect(retryRecord.chosenActionID).toBe(build.id);
+      expect(retryRecord.result.accepted).toBe(true);
+      expect(retryRecord.decisionMetadata).toMatchObject({
+        fallbackUsed: true,
+        llmPlannerDegraded: true,
+        safetyFallbackUsed: true,
+        brainTimedOut: true,
+        localTimeoutFallbackUsed: true,
+        decisionAttemptCount: 2,
+        externalActionCallCount: 1,
+        fallbackAttemptCount: 2,
+        llmPlannerDegradedAttemptCount: 1,
+        timedOutAttemptCount: 1,
+        firstAttemptFallbackUsed: true,
+        firstAttemptBrainTimedOut: true,
+        firstAttemptSafetyFallbackUsed: true,
+        firstAttemptSelectedActionID: requestTarget.id,
+        retryAttemptFallbackUsed: true,
+        retryAttemptBrainTimedOut: false,
+        retryAttemptSafetyFallbackUsed: true,
+        retryAttemptExternalActionCallCount: 0,
+        retryAttemptSelectedActionID: build.id,
+        offerRetryMode: "local-timeout-fallback",
+      });
+      expect(retryRecord.decisionMetadata).not.toHaveProperty(
+        "validationFallbackUsed",
+      );
+    } finally {
+      await game.end({ archive: false });
+    }
+  });
+
   it("retries once when the later seat is itself reserved as an earlier request target", async () => {
     const log = makeLogger();
     const firstRequest = allianceRequestLegalAction("PLAYER_B");
@@ -845,6 +1071,138 @@ describe("AgentLeagueMatchRunner", () => {
         batchActionIDs: `${requestTarget.id},hold`,
         batchRejectedActionIDs: requestTarget.id,
         offerRetryCount: 0,
+      });
+    } finally {
+      await game.end({ archive: false });
+    }
+  });
+
+  it("records retry counts and latency only on batch index zero after a multi-action retry", async () => {
+    const log = makeLogger();
+    const requestTarget = allianceRequestLegalAction("PLAYER_TARGET");
+    const boat = boatLegalAction(8_102);
+    const build = buildLegalAction(8_103);
+    const legalActions = [requestTarget, boat, build, holdLegalAction()];
+    const calls = [0, 0];
+    const participants = createAgentParticipants(
+      [
+        {
+          username: "Retry Batch Reserver",
+          profile: "diplomatic",
+          clientID: "RETRY_BATCH_RESERVER",
+        },
+        {
+          username: "Retry Batch Agent",
+          profile: "opportunistic",
+          clientID: "RETRY_BATCH_AGENT",
+        },
+      ],
+      log,
+      {
+        brainFactory: (_spec, index) => ({
+          brainType: index === 0 ? "rule" : "external-http",
+          decide: (): AgentDecision => {
+            calls[index] += 1;
+            if (index === 0 || calls[index] === 1) {
+              return {
+                actionID: requestTarget.id,
+                reason: "first pass selected shared target",
+                metadata:
+                  index === 0
+                    ? undefined
+                    : { externalActionCall: true, fallbackUsed: false },
+              };
+            }
+            return {
+              actionID: boat.id,
+              actionIDs: [boat.id, build.id],
+              reason: "retry selected two compatible narrowed actions",
+              metadata: {
+                externalActionCall: true,
+                fallbackUsed: false,
+              },
+            };
+          },
+        }),
+      },
+    );
+    const game = new GameServer(
+      "AGENT_RETRY_BATCH",
+      log,
+      Date.now(),
+      serverConfig,
+      gameConfig,
+    );
+    const match = new AgentLeagueMatchRunner({
+      game,
+      participants,
+      spawnCandidates: [],
+      log,
+      observationBuilder: observationBuilderWithPlayerIDs({
+        RETRY_BATCH_RESERVER: "PLAYER_A",
+        RETRY_BATCH_AGENT: "PLAYER_B",
+      }),
+      legalActionBuilder: {
+        build: () => legalActions,
+      } as unknown as LegalActionBuilder,
+    });
+
+    try {
+      match.attachAgents();
+      const records = await match.runDecisionTurn({ turnNumber: 8_100 });
+      const retryRecords = records.filter(
+        (record) => record.username === "Retry Batch Agent",
+      );
+      const [primary, continuation] = retryRecords;
+
+      expect(calls).toEqual([1, 2]);
+      expect(retryRecords.map((record) => record.chosenActionID)).toEqual([
+        boat.id,
+        build.id,
+      ]);
+      expect(retryRecords.every((record) => record.result.accepted)).toBe(true);
+      expect(primary).toMatchObject({
+        offerRetryCount: 1,
+        decisionMetadata: {
+          batchIndex: 0,
+          decisionAttemptCount: 2,
+          externalActionCallCount: 2,
+          offerRetryCount: 1,
+        },
+      });
+      expect(primary?.offerRetryLatencyMs).toBeGreaterThanOrEqual(0);
+      expect(primary?.decisionMetadata).toHaveProperty("offerRetryLatencyMs");
+      expect(continuation).toMatchObject({
+        decisionMetadata: {
+          batchIndex: 1,
+          externalActionCall: false,
+          originalRequestedActionIDs: requestTarget.id,
+          withdrawnRequestedActionIDs: requestTarget.id,
+        },
+      });
+      expect(continuation?.offerRetryCount).toBeUndefined();
+      expect(continuation?.offerRetryLatencyMs).toBeUndefined();
+      expect(continuation?.decisionMetadata).not.toHaveProperty(
+        "offerRetryCount",
+      );
+      expect(continuation?.decisionMetadata).not.toHaveProperty(
+        "offerRetryLatencyMs",
+      );
+      expect(continuation?.decisionMetadata).not.toHaveProperty(
+        "decisionAttemptCount",
+      );
+      expect(continuation?.decisionMetadata).not.toHaveProperty(
+        "externalActionCallCount",
+      );
+      expect(
+        externalBrainCleanlinessReport({
+          brainMode: "real-llm",
+          records: retryRecords,
+        }),
+      ).toMatchObject({
+        ok: true,
+        externalCalls: 2,
+        cleanExternalCalls: 2,
       });
     } finally {
       await game.end({ archive: false });

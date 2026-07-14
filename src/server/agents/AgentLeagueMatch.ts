@@ -434,16 +434,31 @@ export class AgentLeagueMatchRunner {
         withdrawnRequestedActionIDs.length > 0
       ) {
         const retryStartedAt = Date.now();
-        decision = await decideWithSafetyFallback({
-          brain: participant.brain,
-          fallbackProfile: participant.spec.profile,
-          observation,
-          legalActions: submissionLegalActions,
-          maxDecisionMs: options.maxDecisionMs,
-        });
+        const firstAttemptTimedOut =
+          originalDecision.metadata?.brainTimedOut === true;
+        const retryDecision = firstAttemptTimedOut
+          ? await decideWithTimeoutSafeLocalFallback({
+              fallbackProfile: participant.spec.profile,
+              observation,
+              legalActions: submissionLegalActions,
+            })
+          : await decideWithSafetyFallback({
+              brain: participant.brain,
+              fallbackProfile: participant.spec.profile,
+              observation,
+              legalActions: submissionLegalActions,
+              maxDecisionMs: options.maxDecisionMs,
+            });
         offerRetryLatencyMs = Date.now() - retryStartedAt;
         decisionLatencyMs += offerRetryLatencyMs;
         offerRetryCount = 1;
+        decision = mergeDecisionAttempts({
+          firstDecision: originalDecision,
+          retryDecision,
+          retryMode: firstAttemptTimedOut
+            ? "local-timeout-fallback"
+            : "brain-retry",
+        });
         selection = selectRequestedDecisionActions(
           decision,
           submissionLegalActions,
@@ -473,6 +488,7 @@ export class AgentLeagueMatchRunner {
       }
 
       selectedActions.forEach((selected, batchIndex) => {
+        const primaryBatchRecord = batchIndex === 0;
         const batchDecision: AgentDecision = {
           ...decision,
           actionID: selected.requestedActionID,
@@ -487,8 +503,9 @@ export class AgentLeagueMatchRunner {
               ? {
                   originalRequestedActionIDs,
                   withdrawnRequestedActionIDs,
-                  offerRetryCount,
-                  offerRetryLatencyMs,
+                  ...(primaryBatchRecord
+                    ? { offerRetryCount, offerRetryLatencyMs }
+                    : {}),
                 }
               : {}),
           }),
@@ -511,8 +528,9 @@ export class AgentLeagueMatchRunner {
             ? {
                 originalRequestedActionIDs,
                 withdrawnRequestedActionIDs,
-                offerRetryCount,
-                offerRetryLatencyMs,
+                ...(primaryBatchRecord
+                  ? { offerRetryCount, offerRetryLatencyMs }
+                  : {}),
               }
             : {}),
           chosenAction: selected.action,
@@ -1394,6 +1412,16 @@ const LLM_DEGRADABLE_BRAIN_TYPES = new Set<string>([
   "claude-cli",
   "llm",
 ]);
+const EXTERNAL_ACTION_BRAIN_TYPES = new Set<string>([
+  "real-llm",
+  "codex-cli",
+  "claude-cli",
+  "llm",
+  "external-http",
+  "external-relay",
+]);
+
+class AgentBrainDecisionTimeoutError extends Error {}
 
 async function decideWithSafetyFallback(input: {
   brain: AgentBrain;
@@ -1414,7 +1442,11 @@ async function decideWithSafetyFallback(input: {
     );
   } catch (error) {
     const reason = error instanceof Error ? error.message : String(error);
+    const brainTimedOut = error instanceof AgentBrainDecisionTimeoutError;
     const isLlmBrain = LLM_DEGRADABLE_BRAIN_TYPES.has(
+      input.brain.brainType ?? "",
+    );
+    const externalActionCall = EXTERNAL_ACTION_BRAIN_TYPES.has(
       input.brain.brainType ?? "",
     );
     const fallbackDecision = await new RuleAgentBrain(
@@ -1430,6 +1462,9 @@ async function decideWithSafetyFallback(input: {
         ...fallbackDecision.metadata,
         brainType: input.brain.brainType ?? "rule",
         brainErrorReason: reason,
+        safetyFallbackUsed: true,
+        brainTimedOut,
+        externalActionCall,
         fallbackUsed: true,
         // An LLM-backed brain that THREW degraded the LLM specifically — flag it
         // so auditors keyed on llmPlannerDegraded (Coworld result contract, the
@@ -1439,6 +1474,34 @@ async function decideWithSafetyFallback(input: {
       },
     };
   }
+}
+
+async function decideWithTimeoutSafeLocalFallback(input: {
+  fallbackProfile: AgentStrategyProfile;
+  observation: AgentObservation;
+  legalActions: LegalAction[];
+}): Promise<AgentDecision> {
+  const fallbackDecision = await new RuleAgentBrain(
+    input.fallbackProfile,
+  ).decide({
+    observation: input.observation,
+    legalActions: input.legalActions,
+  });
+  return {
+    ...fallbackDecision,
+    reason: `Timed-out brain not re-entered; narrowed local fallback: ${fallbackDecision.reason}`,
+    metadata: {
+      ...(fallbackDecision.metadata ?? {}),
+      fallbackUsed: true,
+      safetyFallbackUsed: true,
+      localTimeoutFallbackUsed: true,
+      brainTimedOut: false,
+      externalPlannerCall: false,
+      externalActionCall: false,
+      rawProviderOutputPresent: false,
+      fallbackActionID: fallbackDecision.actionID,
+    },
+  };
 }
 
 async function withOptionalTimeout<T>(
@@ -1459,7 +1522,12 @@ async function withOptionalTimeout<T>(
       promise,
       new Promise<T>((_resolve, reject) => {
         timeoutID = setTimeout(
-          () => reject(new Error(`Agent brain timed out after ${timeoutMs}ms`)),
+          () =>
+            reject(
+              new AgentBrainDecisionTimeoutError(
+                `Agent brain timed out after ${timeoutMs}ms`,
+              ),
+            ),
           timeoutMs,
         );
       }),
@@ -1585,6 +1653,191 @@ function selectRequestedDecisionActions(
   return { requestedActionIDs, rejectedActionIDs, selectedActions };
 }
 
+type OfferRetryMode = "brain-retry" | "local-timeout-fallback";
+type DecisionMetadata = NonNullable<AgentDecision["metadata"]>;
+
+function mergeDecisionAttempts(input: {
+  firstDecision: AgentDecision;
+  retryDecision: AgentDecision;
+  retryMode: OfferRetryMode;
+}): AgentDecision {
+  const first = input.firstDecision.metadata ?? {};
+  const retry = input.retryDecision.metadata ?? {};
+  const firstPlannerCalls = decisionAttemptCallCount(
+    first,
+    "externalPlannerCallCount",
+    "externalPlannerCall",
+  );
+  const retryPlannerCalls = decisionAttemptCallCount(
+    retry,
+    "externalPlannerCallCount",
+    "externalPlannerCall",
+  );
+  const firstActionCalls = decisionAttemptCallCount(
+    first,
+    "externalActionCallCount",
+    "externalActionCall",
+  );
+  const retryActionCalls = decisionAttemptCallCount(
+    retry,
+    "externalActionCallCount",
+    "externalActionCall",
+  );
+  const firstFallbackUsed = first.fallbackUsed === true;
+  const retryFallbackUsed = retry.fallbackUsed === true;
+  const firstPlannerFallbackUsed = first.plannerFallbackUsed === true;
+  const retryPlannerFallbackUsed = retry.plannerFallbackUsed === true;
+  const firstDegraded = first.llmPlannerDegraded === true;
+  const retryDegraded = retry.llmPlannerDegraded === true;
+  const firstTimedOut = first.brainTimedOut === true;
+  const retryTimedOut = retry.brainTimedOut === true;
+  const firstSafetyFallback = first.safetyFallbackUsed === true;
+  const retrySafetyFallback = retry.safetyFallbackUsed === true;
+
+  const metadata: DecisionMetadata = {
+    ...retry,
+    decisionAttemptCount: 2,
+    externalPlannerCallCount: firstPlannerCalls + retryPlannerCalls,
+    externalActionCallCount: firstActionCalls + retryActionCalls,
+    fallbackAttemptCount:
+      Number(firstFallbackUsed || firstPlannerFallbackUsed) +
+      Number(retryFallbackUsed || retryPlannerFallbackUsed),
+    llmPlannerDegradedAttemptCount:
+      Number(firstDegraded) + Number(retryDegraded),
+    timedOutAttemptCount: Number(firstTimedOut) + Number(retryTimedOut),
+    offerRetryMode: input.retryMode,
+    firstAttemptSelectedActionID:
+      boundedTelemetryActionIDs([input.firstDecision.actionID])[0] ?? "",
+    firstAttemptReason:
+      boundedTelemetryText(input.firstDecision.reason) ?? "",
+    firstAttemptFallbackUsed: firstFallbackUsed,
+    firstAttemptPlannerFallbackUsed: firstPlannerFallbackUsed,
+    firstAttemptLlmPlannerDegraded: firstDegraded,
+    firstAttemptExternalPlannerCallCount: firstPlannerCalls,
+    firstAttemptExternalActionCallCount: firstActionCalls,
+    firstAttemptBrainTimedOut: firstTimedOut,
+    firstAttemptSafetyFallbackUsed: firstSafetyFallback,
+    retryAttemptFallbackUsed: retryFallbackUsed,
+    retryAttemptPlannerFallbackUsed: retryPlannerFallbackUsed,
+    retryAttemptLlmPlannerDegraded: retryDegraded,
+    retryAttemptExternalPlannerCallCount: retryPlannerCalls,
+    retryAttemptExternalActionCallCount: retryActionCalls,
+    retryAttemptBrainTimedOut: retryTimedOut,
+    retryAttemptSafetyFallbackUsed: retrySafetyFallback,
+    retryAttemptSelectedActionID:
+      boundedTelemetryActionIDs([input.retryDecision.actionID])[0] ?? "",
+    retryAttemptReason:
+      boundedTelemetryText(input.retryDecision.reason) ?? "",
+    fallbackUsed: firstFallbackUsed || retryFallbackUsed,
+    plannerFallbackUsed:
+      firstPlannerFallbackUsed || retryPlannerFallbackUsed,
+    llmPlannerDegraded: firstDegraded || retryDegraded,
+    safetyFallbackUsed: firstSafetyFallback || retrySafetyFallback,
+    brainTimedOut: firstTimedOut || retryTimedOut,
+    externalPlannerCall: firstPlannerCalls + retryPlannerCalls > 0,
+    externalActionCall: firstActionCalls + retryActionCalls > 0,
+    rawProviderOutputPresent:
+      first.rawProviderOutputPresent === true ||
+      retry.rawProviderOutputPresent === true,
+    ...(first.localTimeoutFallbackUsed === true ||
+    retry.localTimeoutFallbackUsed === true
+      ? { localTimeoutFallbackUsed: true }
+      : {}),
+  };
+
+  if (metadata.brainType === undefined && first.brainType !== undefined) {
+    metadata.brainType = first.brainType;
+  }
+
+  preserveAttemptBooleans(first, retry, metadata);
+  preserveAttemptFailureReasons(first, retry, metadata);
+  return { ...input.retryDecision, metadata };
+}
+
+function decisionAttemptCallCount(
+  metadata: DecisionMetadata,
+  countKey: string,
+  booleanKey: string,
+): number {
+  const count = metadata[countKey];
+  if (typeof count === "number" && Number.isFinite(count) && count >= 0) {
+    return Math.floor(count);
+  }
+  return metadata[booleanKey] === true ? 1 : 0;
+}
+
+function preserveAttemptBooleans(
+  first: DecisionMetadata,
+  retry: DecisionMetadata,
+  output: DecisionMetadata,
+): void {
+  for (const key of ["parseSuccess", "llmParseOk", "plannerParseOk"] as const) {
+    const firstValue = first[key];
+    const retryValue = retry[key];
+    if (typeof firstValue === "boolean") {
+      output[`firstAttempt${capitalizeMetadataKey(key)}`] = firstValue;
+    }
+    if (typeof retryValue === "boolean") {
+      output[`retryAttempt${capitalizeMetadataKey(key)}`] = retryValue;
+    }
+    if (firstValue === false || retryValue === false) {
+      output[key] = false;
+    } else if (typeof retryValue === "boolean") {
+      output[key] = retryValue;
+    } else if (typeof firstValue === "boolean") {
+      output[key] = firstValue;
+    }
+  }
+}
+
+function preserveAttemptFailureReasons(
+  first: DecisionMetadata,
+  retry: DecisionMetadata,
+  output: DecisionMetadata,
+): void {
+  for (const key of [
+    "brainErrorReason",
+    "parseFailureReason",
+    "llmParseFailureReason",
+    "plannerParseFailureReason",
+  ] as const) {
+    const firstValue = boundedTelemetryText(first[key]);
+    const retryValue = boundedTelemetryText(retry[key]);
+    if (firstValue !== null) {
+      output[`firstAttempt${capitalizeMetadataKey(key)}`] = firstValue;
+    }
+    if (retryValue !== null) {
+      output[`retryAttempt${capitalizeMetadataKey(key)}`] = retryValue;
+    }
+    if (firstValue !== null || retryValue !== null) {
+      output[key] = firstValue ?? retryValue;
+    }
+  }
+}
+
+function capitalizeMetadataKey(key: string): string {
+  return `${key.charAt(0).toUpperCase()}${key.slice(1)}`;
+}
+
+const MAX_TELEMETRY_TEXT_LENGTH = 512;
+
+function boundedTelemetryText(value: unknown): string | null {
+  if (typeof value !== "string") {
+    return null;
+  }
+  let sanitized = "";
+  for (const character of value) {
+    const codePoint = character.codePointAt(0) ?? 0;
+    if (codePoint >= 32 && codePoint !== 127) {
+      sanitized += character;
+    }
+    if (sanitized.length >= MAX_TELEMETRY_TEXT_LENGTH) {
+      break;
+    }
+  }
+  return sanitized.slice(0, MAX_TELEMETRY_TEXT_LENGTH);
+}
+
 function legalActionSetsDiffer(
   offeredActions: LegalAction[],
   submissionActions: LegalAction[],
@@ -1707,15 +1960,19 @@ function batchDecisionMetadata(input: {
     batchRejectedActionIDs: input.rejectedActionIDs.join(","),
   };
 
+  if (input.originalRequestedActionIDs !== undefined) {
+    metadata.originalRequestedActionIDs = boundedTelemetryActionIDs(
+      input.originalRequestedActionIDs,
+    ).join(",");
+  }
+  if (input.withdrawnRequestedActionIDs !== undefined) {
+    metadata.withdrawnRequestedActionIDs = boundedTelemetryActionIDs(
+      input.withdrawnRequestedActionIDs,
+    ).join(",");
+  }
   if (input.offerRetryCount !== undefined) {
     metadata.offerRetryCount = input.offerRetryCount;
     metadata.offerRetryLatencyMs = input.offerRetryLatencyMs ?? 0;
-    metadata.originalRequestedActionIDs = boundedTelemetryActionIDs(
-      input.originalRequestedActionIDs ?? [],
-    ).join(",");
-    metadata.withdrawnRequestedActionIDs = boundedTelemetryActionIDs(
-      input.withdrawnRequestedActionIDs ?? [],
-    ).join(",");
   }
 
   if (input.validationFallbackUsed) {
@@ -1732,7 +1989,16 @@ function batchDecisionMetadata(input: {
     metadata.plannerFallbackUsed = false;
     metadata.plannerPromptLength = 0;
     metadata.externalPlannerCall = false;
+    metadata.externalActionCall = false;
     metadata.rawProviderOutputPresent = false;
+    delete metadata.decisionAttemptCount;
+    delete metadata.externalPlannerCallCount;
+    delete metadata.externalActionCallCount;
+    delete metadata.fallbackAttemptCount;
+    delete metadata.llmPlannerDegradedAttemptCount;
+    delete metadata.timedOutAttemptCount;
+    delete metadata.offerRetryCount;
+    delete metadata.offerRetryLatencyMs;
     if (typeof metadata.plannerRawOutput === "string") {
       metadata.plannerRawOutput = "[same planner decision as batch index 0]";
     }

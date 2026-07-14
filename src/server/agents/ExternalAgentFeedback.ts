@@ -404,10 +404,14 @@ function metricsFor(records: AgentDecisionRecord[]) {
     unknownAuditCount,
     failedAuditCount,
     notApplicableAuditCount,
-    externalActionCallCount: records.filter((record) => externalActionCall(record))
-      .length,
-    externalPlannerCallCount: records.filter((record) => externalPlannerCall(record))
-      .length,
+    externalActionCallCount: records.reduce(
+      (count, record) => count + externalActionCallCount(record),
+      0,
+    ),
+    externalPlannerCallCount: records.reduce(
+      (count, record) => count + externalPlannerCallCount(record),
+      0,
+    ),
     repeatedActionKindCount: repeated.kind,
     repeatedExactActionCount: repeated.exact,
     actionCounts,
@@ -806,17 +810,37 @@ function warningsFor(metrics: ReturnType<typeof metricsFor>): string[] {
 function isExternalRecord(record: AgentDecisionRecord): boolean {
   return (
     record.brainType === "external-http" ||
-    externalActionCall(record) ||
-    externalPlannerCall(record)
+    externalActionCallCount(record) > 0 ||
+    externalPlannerCallCount(record) > 0
   );
 }
 
-function externalActionCall(record: AgentDecisionRecord): boolean {
-  return record.decisionMetadata?.externalActionCall === true;
+function externalActionCallCount(record: AgentDecisionRecord): number {
+  return decisionMetadataCallCount(
+    record,
+    "externalActionCallCount",
+    "externalActionCall",
+  );
 }
 
-function externalPlannerCall(record: AgentDecisionRecord): boolean {
-  return record.decisionMetadata?.externalPlannerCall === true;
+function externalPlannerCallCount(record: AgentDecisionRecord): number {
+  return decisionMetadataCallCount(
+    record,
+    "externalPlannerCallCount",
+    "externalPlannerCall",
+  );
+}
+
+function decisionMetadataCallCount(
+  record: AgentDecisionRecord,
+  countKey: string,
+  booleanKey: string,
+): number {
+  const count = record.decisionMetadata?.[countKey];
+  if (typeof count === "number" && Number.isFinite(count) && count >= 0) {
+    return Math.floor(count);
+  }
+  return record.decisionMetadata?.[booleanKey] === true ? 1 : 0;
 }
 
 function fallbackUsed(record: AgentDecisionRecord): boolean {
