@@ -46,6 +46,7 @@ import {
 } from "../../src/core/game/TerrainMapLoader";
 import { GameConfig, StampedIntent } from "../../src/core/Schemas";
 import { externalBrainCleanlinessReport } from "../../src/server/agents/AgentExternalBrainCleanliness";
+import { ExternalHttpAgentBrain } from "../../src/server/agents/ExternalHttpAgentBrain";
 import {
   AgentLeagueMatchRunner,
   AgentSpec,
@@ -650,6 +651,109 @@ describe("AgentLeagueMatchRunner", () => {
     }
   });
 
+  it("preserves the bounded ExternalHttp failure reason from the first attempt after a healthy retry", async () => {
+    const log = makeLogger();
+    const requestTarget = allianceRequestLegalAction("PLAYER_TARGET");
+    const boat = boatLegalAction(7_804);
+    const legalActions = [requestTarget, boat, holdLegalAction()];
+    const expectedFailure =
+      "external agent request failed: HTTP 503: unavailable";
+    const externalFetch = vi
+      .fn<(url: string, init: RequestInit) => Promise<Response>>()
+      .mockResolvedValueOnce(new Response("unavailable", { status: 503 }))
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({
+            selectedLegalActionId: boat.id,
+            reason: "healthy narrowed retry",
+          }),
+          { status: 200 },
+        ),
+      );
+    const externalBrain = new ExternalHttpAgentBrain({
+      endpointUrl: "https://1.1.1.1/decide",
+      profile: "opportunistic",
+      maxRetries: 0,
+      fetchFn: externalFetch,
+      fallbackBrain: {
+        brainType: "rule",
+        decide: () => ({
+          actionID: requestTarget.id,
+          reason: "local fallback selected the offered target",
+        }),
+      },
+    });
+    const participants = createAgentParticipants(
+      [
+        {
+          username: "HTTP Reserver",
+          profile: "diplomatic",
+          clientID: "HTTP_RESERVER",
+        },
+        {
+          username: "HTTP Retry Agent",
+          profile: "opportunistic",
+          clientID: "HTTP_RETRY",
+        },
+      ],
+      log,
+      {
+        brainFactory: (_spec, index) =>
+          index === 0
+            ? {
+                brainType: "rule",
+                decide: () => ({
+                  actionID: requestTarget.id,
+                  reason: "reserve target",
+                }),
+              }
+            : externalBrain,
+      },
+    );
+    const game = new GameServer(
+      "AGENT_HTTP_FAILURE_RETRY",
+      log,
+      Date.now(),
+      serverConfig,
+      gameConfig,
+    );
+    const match = new AgentLeagueMatchRunner({
+      game,
+      participants,
+      spawnCandidates: [],
+      log,
+      observationBuilder: observationBuilderWithPlayerIDs({
+        HTTP_RESERVER: "PLAYER_A",
+        HTTP_RETRY: "PLAYER_B",
+      }),
+      legalActionBuilder: {
+        build: () => legalActions,
+      } as unknown as LegalActionBuilder,
+    });
+
+    try {
+      match.attachAgents();
+      const records = await match.runDecisionTurn({ turnNumber: 7_804 });
+      const retryRecord = records[1]!;
+
+      expect(externalFetch).toHaveBeenCalledTimes(2);
+      expect(retryRecord.chosenActionID).toBe(boat.id);
+      expect(retryRecord.result.accepted).toBe(true);
+      expect(retryRecord.decisionMetadata).toMatchObject({
+        decisionAttemptCount: 2,
+        externalActionCallCount: 2,
+        fallbackUsed: true,
+        parseSuccess: false,
+        externalFailureReason: expectedFailure,
+        firstAttemptExternalFailureReason: expectedFailure,
+        firstAttemptParseSuccess: false,
+        retryAttemptParseSuccess: true,
+      });
+    } finally {
+      await game.end({ archive: false });
+    }
+  });
+
   it("does not re-enter an unresolved timed-out brain when its fallback selection is withdrawn", async () => {
     const log = makeLogger();
     const requestTarget = allianceRequestLegalAction("PLAYER_TARGET");
@@ -721,6 +825,7 @@ describe("AgentLeagueMatchRunner", () => {
         llmPlannerDegraded: true,
         safetyFallbackUsed: true,
         brainTimedOut: true,
+        timedOutBrainCallMayStillBeInFlight: true,
         localTimeoutFallbackUsed: true,
         decisionAttemptCount: 2,
         externalActionCallCount: 1,
@@ -1077,7 +1182,7 @@ describe("AgentLeagueMatchRunner", () => {
     }
   });
 
-  it("records retry counts and latency only on batch index zero after a multi-action retry", async () => {
+  it("counts degraded first-attempt health only on batch zero after a healthy multi-action retry", async () => {
     const log = makeLogger();
     const requestTarget = allianceRequestLegalAction("PLAYER_TARGET");
     const boat = boatLegalAction(8_102);
@@ -1110,7 +1215,13 @@ describe("AgentLeagueMatchRunner", () => {
                 metadata:
                   index === 0
                     ? undefined
-                    : { externalActionCall: true, fallbackUsed: false },
+                    : {
+                        externalActionCall: true,
+                        fallbackUsed: true,
+                        llmPlannerDegraded: true,
+                        parseSuccess: false,
+                        externalFailureReason: "first batch attempt degraded",
+                      },
               };
             }
             return {
@@ -1120,6 +1231,8 @@ describe("AgentLeagueMatchRunner", () => {
               metadata: {
                 externalActionCall: true,
                 fallbackUsed: false,
+                llmPlannerDegraded: false,
+                parseSuccess: true,
               },
             };
           },
@@ -1167,6 +1280,9 @@ describe("AgentLeagueMatchRunner", () => {
           batchIndex: 0,
           decisionAttemptCount: 2,
           externalActionCallCount: 2,
+          fallbackUsed: true,
+          llmPlannerDegraded: true,
+          firstAttemptExternalFailureReason: "first batch attempt degraded",
           offerRetryCount: 1,
         },
       });
@@ -1176,6 +1292,9 @@ describe("AgentLeagueMatchRunner", () => {
         decisionMetadata: {
           batchIndex: 1,
           externalActionCall: false,
+          fallbackUsed: false,
+          llmPlannerDegraded: false,
+          parseSuccess: true,
           originalRequestedActionIDs: requestTarget.id,
           withdrawnRequestedActionIDs: requestTarget.id,
         },
@@ -1194,15 +1313,47 @@ describe("AgentLeagueMatchRunner", () => {
       expect(continuation?.decisionMetadata).not.toHaveProperty(
         "externalActionCallCount",
       );
+      expect(continuation?.decisionMetadata).not.toHaveProperty(
+        "externalFailureReason",
+      );
+      expect(continuation?.decisionMetadata).not.toHaveProperty(
+        "offerRetryMode",
+      );
+      expect(
+        Object.keys(continuation?.decisionMetadata ?? {}).some(
+          (key) =>
+            key.startsWith("firstAttempt") || key.startsWith("retryAttempt"),
+        ),
+      ).toBe(false);
+      expect(
+        retryRecords.filter(
+          (record) =>
+            record.decisionMetadata?.fallbackUsed === true ||
+            record.decisionMetadata?.llmPlannerDegraded === true,
+        ),
+      ).toHaveLength(1);
+      expect(
+        retryRecords.filter(
+          (record) => record.decisionMetadata?.llmPlannerDegraded === true,
+        ),
+      ).toHaveLength(1);
+      expect(
+        retryRecords.reduce(
+          (count, record) => count + (record.offerRetryCount ?? 0),
+          0,
+        ),
+      ).toBe(1);
       expect(
         externalBrainCleanlinessReport({
           brainMode: "real-llm",
           records: retryRecords,
         }),
       ).toMatchObject({
-        ok: true,
+        ok: false,
         externalCalls: 2,
-        cleanExternalCalls: 2,
+        cleanExternalCalls: 0,
+        parserFailures: 1,
+        fallbacks: 1,
       });
     } finally {
       await game.end({ archive: false });

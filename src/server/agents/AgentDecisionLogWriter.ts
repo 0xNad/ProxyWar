@@ -186,6 +186,7 @@ interface DecisionLogEntry {
   llmPlannerDegraded?: boolean;
   safetyFallbackUsed?: boolean;
   brainTimedOut?: boolean;
+  timedOutBrainCallMayStillBeInFlight?: boolean;
   localTimeoutFallbackUsed?: boolean;
   firstAttemptFallbackUsed?: boolean;
   firstAttemptPlannerFallbackUsed?: boolean;
@@ -203,6 +204,7 @@ interface DecisionLogEntry {
   firstAttemptParseFailureReason?: string;
   firstAttemptLlmParseFailureReason?: string;
   firstAttemptPlannerParseFailureReason?: string;
+  firstAttemptExternalFailureReason?: string;
   retryAttemptFallbackUsed?: boolean;
   retryAttemptPlannerFallbackUsed?: boolean;
   retryAttemptLlmPlannerDegraded?: boolean;
@@ -219,6 +221,7 @@ interface DecisionLogEntry {
   retryAttemptParseFailureReason?: string;
   retryAttemptLlmParseFailureReason?: string;
   retryAttemptPlannerParseFailureReason?: string;
+  retryAttemptExternalFailureReason?: string;
   decisionLatencyMs: number;
   observationSummary: string;
   strategicPriority?: AgentDecisionRecord["strategicPriority"];
@@ -590,6 +593,15 @@ function decisionAttemptTelemetry(
     ...(booleanMetadata(metadata, "brainTimedOut") !== undefined
       ? { brainTimedOut: booleanMetadata(metadata, "brainTimedOut") }
       : {}),
+    ...(booleanMetadata(metadata, "timedOutBrainCallMayStillBeInFlight") !==
+    undefined
+      ? {
+          timedOutBrainCallMayStillBeInFlight: booleanMetadata(
+            metadata,
+            "timedOutBrainCallMayStillBeInFlight",
+          ),
+        }
+      : {}),
     ...(booleanMetadata(metadata, "localTimeoutFallbackUsed") !== undefined
       ? {
           localTimeoutFallbackUsed: booleanMetadata(
@@ -644,6 +656,7 @@ function attemptSideTelemetry(
     "ParseFailureReason",
     "LlmParseFailureReason",
     "PlannerParseFailureReason",
+    "ExternalFailureReason",
   ]) {
     const value = stringMetadata(metadata, `${prefix}${suffix}`);
     if (value !== undefined) {

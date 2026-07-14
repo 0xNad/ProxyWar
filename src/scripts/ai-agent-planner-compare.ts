@@ -111,13 +111,16 @@ async function readBenchmarkSide(
 
 function summarizeSide(side: BenchmarkSide): SideSummary {
   const externalPlannerRecords = side.records.filter(
-    (record) => metadataBoolean(record, "externalPlannerCall") === true,
+    (record) => externalPlannerCallCount(record) > 0,
   );
   return {
     id: side.id,
     label: side.label,
     recordCount: side.records.length,
-    externalPlannerCalls: externalPlannerRecords.length,
+    externalPlannerCalls: externalPlannerRecords.reduce(
+      (count, record) => count + externalPlannerCallCount(record),
+      0,
+    ),
     rawProviderOutputs: side.records.filter(
       (record) => metadataString(record, "plannerRawOutput") !== "",
     ).length,
@@ -222,9 +225,10 @@ function recordsByTurnOccurrence(
 
 function plannerCallRows(side: BenchmarkSide) {
   return side.records
-    .filter((record) => metadataBoolean(record, "externalPlannerCall") === true)
+    .filter((record) => externalPlannerCallCount(record) > 0)
     .map((record) => ({
       turnNumber: record.turnNumber ?? null,
+      externalPlannerCallCount: externalPlannerCallCount(record),
       objective: metadataString(record, "planObjective"),
       turnIntent: metadataString(record, "planTurnIntent"),
       preferredActionKinds: metadataString(record, "planPreferredActionKinds"),
@@ -340,6 +344,14 @@ function metadataBoolean(record: DecisionRecord, key: string): boolean | null {
 function metadataNumber(record: DecisionRecord, key: string): number {
   const value = record.decisionMetadata?.[key];
   return typeof value === "number" && Number.isFinite(value) ? value : 0;
+}
+
+function externalPlannerCallCount(record: DecisionRecord): number {
+  const count = record.decisionMetadata?.externalPlannerCallCount;
+  if (typeof count === "number" && Number.isFinite(count) && count >= 0) {
+    return Math.floor(count);
+  }
+  return metadataBoolean(record, "externalPlannerCall") === true ? 1 : 0;
 }
 
 function splitMetadataList(value: string): string[] {

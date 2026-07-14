@@ -2403,17 +2403,26 @@ function mergeActionCounts(
 function estimateCost(runs: FrontierRunSummary[]) {
   const records = runs.flatMap((run) => run.records);
   const plannerRecords = records.filter(
-    (record) =>
-      record.decisionMetadata?.externalPlannerCall === true ||
-      (record.decisionMetadata?.plannerRan === true &&
-        record.decisionMetadata?.planPlannerSource === "codex-cli"),
+    (record) => externalPlannerCallCount(record) > 0,
   );
   const actionRecords = records.filter(
-    (record) => record.decisionMetadata?.externalActionCall === true,
+    (record) => externalActionCallCount(record) > 0,
   );
-  const externalRecords = [...plannerRecords, ...actionRecords];
-  if (plannerRecords.length === 0) {
-    if (actionRecords.length === 0) {
+  const plannerCallCount = sum(plannerRecords.map(externalPlannerCallCount));
+  const actionCallCount = sum(actionRecords.map(externalActionCallCount));
+  const externalRecordUses = [
+    ...plannerRecords.map((record) => ({
+      record,
+      callCount: externalPlannerCallCount(record),
+    })),
+    ...actionRecords.map((record) => ({
+      record,
+      callCount: externalActionCallCount(record),
+    })),
+  ];
+  const externalRecords = externalRecordUses.map(({ record }) => record);
+  if (plannerCallCount === 0) {
+    if (actionCallCount === 0) {
       return {
         model:
           process.env.AI_LEAGUE_CODEX_MODEL ??
@@ -2447,9 +2456,9 @@ function estimateCost(runs: FrontierRunSummary[]) {
     };
   }
   const inputChars = sum(
-    externalRecords.map((record) => {
+    externalRecordUses.map(({ record, callCount }) => {
       const metadata = record.decisionMetadata ?? {};
-      return (
+      return callCount * (
         numberMetadata(metadata, "plannerPromptLength") ||
         numberMetadata(metadata, "promptLength") ||
         numberMetadata(metadata, "llmPromptLength") ||
@@ -2458,7 +2467,7 @@ function estimateCost(runs: FrontierRunSummary[]) {
     }),
   );
   const outputChars = sum(
-    externalRecords.map((record) => {
+    externalRecordUses.map(({ record, callCount }) => {
       const metadata = record.decisionMetadata ?? {};
       // Prefer the length sentinels (the league trims the raw output blobs out of
       // the retained records to bound long-game memory — see AGENT-01 /
@@ -2472,17 +2481,17 @@ function estimateCost(runs: FrontierRunSummary[]) {
       const llmOutputChars =
         numberMetadata(metadata, "llmRawOutputLength") ||
         stringMetadata(metadata, "llmRawOutput").length;
-      return plannerOutputChars + llmOutputChars;
+      return callCount * (plannerOutputChars + llmOutputChars);
     }),
   );
   const estimatedInputChars =
     inputChars > 0
       ? inputChars
-      : plannerRecords.length * 18_000 + actionRecords.length * 16_000;
+      : plannerCallCount * 18_000 + actionCallCount * 16_000;
   const estimatedOutputChars =
     outputChars > 0
       ? outputChars
-      : plannerRecords.length * 450 + actionRecords.length * 350;
+      : plannerCallCount * 450 + actionCallCount * 350;
   const inputTokens = Math.ceil(estimatedInputChars / 4);
   const outputTokens = Math.ceil(estimatedOutputChars / 4);
   const model =
@@ -2492,9 +2501,9 @@ function estimateCost(runs: FrontierRunSummary[]) {
   const pricing = pricingForModel(model);
   return {
     model,
-    callCount: plannerRecords.length + actionRecords.length,
-    externalPlannerCallCount: plannerRecords.length,
-    externalActionCallCount: actionRecords.length,
+    callCount: plannerCallCount + actionCallCount,
+    externalPlannerCallCount: plannerCallCount,
+    externalActionCallCount: actionCallCount,
     rawProviderOutputRecordCount: externalRecords.filter(
       (record) =>
         record.decisionMetadata?.rawProviderOutputPresent === true ||
@@ -2713,12 +2722,8 @@ function runtimeAttribution(
     records,
     "actionSelectionSource",
   );
-  const externalPlannerCallCount = records.filter(
-    (record) => record.decisionMetadata?.externalPlannerCall === true,
-  ).length;
-  const externalActionCallCount = records.filter(
-    (record) => record.decisionMetadata?.externalActionCall === true,
-  ).length;
+  const externalPlannerCalls = sum(records.map(externalPlannerCallCount));
+  const externalActionCalls = sum(records.map(externalActionCallCount));
   const rawProviderOutputRecordCount = records.filter(
     (record) => record.decisionMetadata?.rawProviderOutputPresent === true,
   ).length;
@@ -2729,8 +2734,8 @@ function runtimeAttribution(
     plannerSources,
     executorSources,
     actionSelectionSources,
-    externalPlannerCallCount,
-    externalActionCallCount,
+    externalPlannerCallCount: externalPlannerCalls,
+    externalActionCallCount: externalActionCalls,
     rawProviderOutputRecordCount,
     localExecutorActionCount:
       actionSelectionSources["local-policy-executor"] ?? 0,
@@ -2963,6 +2968,38 @@ function numberMetadata(
 ): number {
   const value = metadata[key];
   return typeof value === "number" && Number.isFinite(value) ? value : 0;
+}
+
+function externalPlannerCallCount(record: AgentDecisionRecord): number {
+  return decisionMetadataCallCount(
+    record,
+    "externalPlannerCallCount",
+    "externalPlannerCall",
+    record.decisionMetadata?.plannerRan === true &&
+      record.decisionMetadata?.planPlannerSource === "codex-cli",
+  );
+}
+
+function externalActionCallCount(record: AgentDecisionRecord): number {
+  return decisionMetadataCallCount(
+    record,
+    "externalActionCallCount",
+    "externalActionCall",
+    false,
+  );
+}
+
+function decisionMetadataCallCount(
+  record: AgentDecisionRecord,
+  countKey: string,
+  booleanKey: string,
+  inferredCall: boolean,
+): number {
+  const count = record.decisionMetadata?.[countKey];
+  if (typeof count === "number" && Number.isFinite(count) && count >= 0) {
+    return Math.floor(count);
+  }
+  return record.decisionMetadata?.[booleanKey] === true || inferredCall ? 1 : 0;
 }
 
 function stringMetadata(

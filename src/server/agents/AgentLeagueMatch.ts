@@ -1464,6 +1464,11 @@ async function decideWithSafetyFallback(input: {
         brainErrorReason: reason,
         safetyFallbackUsed: true,
         brainTimedOut,
+        // Promise.race can stop waiting but cannot cancel an arbitrary brain
+        // promise. Keep that residual overlap risk loud for later-turn audits.
+        ...(brainTimedOut
+          ? { timedOutBrainCallMayStillBeInFlight: true }
+          : {}),
         externalActionCall,
         fallbackUsed: true,
         // An LLM-backed brain that THREW degraded the LLM specifically — flag it
@@ -1734,6 +1739,10 @@ function mergeDecisionAttempts(input: {
     llmPlannerDegraded: firstDegraded || retryDegraded,
     safetyFallbackUsed: firstSafetyFallback || retrySafetyFallback,
     brainTimedOut: firstTimedOut || retryTimedOut,
+    ...(first.timedOutBrainCallMayStillBeInFlight === true ||
+    retry.timedOutBrainCallMayStillBeInFlight === true
+      ? { timedOutBrainCallMayStillBeInFlight: true }
+      : {}),
     externalPlannerCall: firstPlannerCalls + retryPlannerCalls > 0,
     externalActionCall: firstActionCalls + retryActionCalls > 0,
     rawProviderOutputPresent:
@@ -1800,6 +1809,7 @@ function preserveAttemptFailureReasons(
     "parseFailureReason",
     "llmParseFailureReason",
     "plannerParseFailureReason",
+    "externalFailureReason",
   ] as const) {
     const firstValue = boundedTelemetryText(first[key]);
     const retryValue = boundedTelemetryText(retry[key]);
@@ -1959,6 +1969,8 @@ function batchDecisionMetadata(input: {
     batchActionIDs: input.requestedActionIDs.join(","),
     batchRejectedActionIDs: input.rejectedActionIDs.join(","),
   };
+  const isOfferRetryContinuation =
+    input.batchIndex > 0 && metadata.decisionAttemptCount === 2;
 
   if (input.originalRequestedActionIDs !== undefined) {
     metadata.originalRequestedActionIDs = boundedTelemetryActionIDs(
@@ -1991,6 +2003,9 @@ function batchDecisionMetadata(input: {
     metadata.externalPlannerCall = false;
     metadata.externalActionCall = false;
     metadata.rawProviderOutputPresent = false;
+    if (isOfferRetryContinuation) {
+      projectOfferRetryContinuationHealth(metadata);
+    }
     delete metadata.decisionAttemptCount;
     delete metadata.externalPlannerCallCount;
     delete metadata.externalActionCallCount;
@@ -1999,11 +2014,70 @@ function batchDecisionMetadata(input: {
     delete metadata.timedOutAttemptCount;
     delete metadata.offerRetryCount;
     delete metadata.offerRetryLatencyMs;
+    delete metadata.offerRetryMode;
     if (typeof metadata.plannerRawOutput === "string") {
       metadata.plannerRawOutput = "[same planner decision as batch index 0]";
     }
   }
   return metadata;
+}
+
+function projectOfferRetryContinuationHealth(
+  metadata: NonNullable<AgentDecision["metadata"]>,
+): void {
+  // The primary action record owns monotonic health for both attempts. A
+  // continuation action must not inherit a failed first attempt after a healthy
+  // retry, or Coworld's record-level fallback/degraded counts multiply it by the
+  // retry batch size. Keep only the retry attempt's health on continuations.
+  for (const [targetKey, retryKey] of [
+    ["fallbackUsed", "retryAttemptFallbackUsed"],
+    ["llmPlannerDegraded", "retryAttemptLlmPlannerDegraded"],
+    ["safetyFallbackUsed", "retryAttemptSafetyFallbackUsed"],
+    ["brainTimedOut", "retryAttemptBrainTimedOut"],
+    ["parseSuccess", "retryAttemptParseSuccess"],
+    ["llmParseOk", "retryAttemptLlmParseOk"],
+    ["plannerParseOk", "retryAttemptPlannerParseOk"],
+  ] as const) {
+    const retryValue = metadata[retryKey];
+    if (typeof retryValue === "boolean") {
+      metadata[targetKey] = retryValue;
+    } else {
+      delete metadata[targetKey];
+    }
+  }
+
+  for (const [targetKey, retryKey] of [
+    ["brainErrorReason", "retryAttemptBrainErrorReason"],
+    ["parseFailureReason", "retryAttemptParseFailureReason"],
+    ["llmParseFailureReason", "retryAttemptLlmParseFailureReason"],
+    ["plannerParseFailureReason", "retryAttemptPlannerParseFailureReason"],
+    ["externalFailureReason", "retryAttemptExternalFailureReason"],
+  ] as const) {
+    const retryValue = metadata[retryKey];
+    if (typeof retryValue === "string") {
+      metadata[targetKey] = retryValue;
+    } else {
+      delete metadata[targetKey];
+    }
+  }
+
+  if (metadata.retryAttemptBrainTimedOut === true) {
+    metadata.timedOutBrainCallMayStillBeInFlight = true;
+  } else {
+    delete metadata.timedOutBrainCallMayStillBeInFlight;
+  }
+  if (metadata.offerRetryMode !== "local-timeout-fallback") {
+    delete metadata.localTimeoutFallbackUsed;
+  }
+  if (metadata.retryAttemptFallbackUsed !== true) {
+    delete metadata.fallbackActionID;
+  }
+
+  for (const key of Object.keys(metadata)) {
+    if (key.startsWith("firstAttempt") || key.startsWith("retryAttempt")) {
+      delete metadata[key];
+    }
+  }
 }
 
 function actionFromValidation(
