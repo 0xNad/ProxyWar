@@ -1019,6 +1019,7 @@ function parseEpisodeFragment(input: {
     : [];
   const normalizedDecisions = mergeDecisions(
     episodeId,
+    roster,
     [],
     rawDecisions.map((record) => normalizeDecision(record, roster)),
   );
@@ -1272,27 +1273,76 @@ function mergePrimitiveRecord(
   return merged;
 }
 
+interface MergeIdentity {
+  seat: number | null;
+  playerName: string | null;
+  agentID: string | null;
+}
+
+function rosterSeatForIdentity(
+  identity: MergeIdentity,
+  roster: readonly CoworldEvaluationRosterSeat[],
+): number | null {
+  if (identity.seat !== null) {
+    return identity.seat;
+  }
+  if (identity.agentID !== null) {
+    const matches = roster.filter(
+      (entry) => entry.agentID === identity.agentID,
+    );
+    return matches.length === 1 ? matches[0].seat : null;
+  }
+  if (identity.playerName !== null) {
+    const matches = roster.filter(
+      (entry) => entry.playerName === identity.playerName,
+    );
+    return matches.length === 1 ? matches[0].seat : null;
+  }
+  return null;
+}
+
+function mergeIdentitiesMatch(
+  left: MergeIdentity,
+  right: MergeIdentity,
+  roster: readonly CoworldEvaluationRosterSeat[],
+): boolean {
+  if (left.seat !== null && right.seat !== null) {
+    return left.seat === right.seat;
+  }
+  const leftSeat = rosterSeatForIdentity(left, roster);
+  const rightSeat = rosterSeatForIdentity(right, roster);
+  if (leftSeat !== null || rightSeat !== null) {
+    return leftSeat !== null && rightSeat !== null && leftSeat === rightSeat;
+  }
+  if (left.agentID !== null || right.agentID !== null) {
+    return (
+      left.agentID !== null &&
+      right.agentID !== null &&
+      left.agentID === right.agentID
+    );
+  }
+  if (left.playerName === null || right.playerName === null) {
+    return false;
+  }
+  if (left.playerName !== right.playerName) {
+    return false;
+  }
+  const nameMatches = roster.filter(
+    (entry) => entry.playerName === left.playerName,
+  );
+  return nameMatches.length === 1;
+}
+
 function decisionsMatch(
   left: CoworldEvaluationDecision,
   right: CoworldEvaluationDecision,
+  roster: readonly CoworldEvaluationRosterSeat[],
 ): boolean {
   if (isDeepStrictEqual(left, right)) return true;
   if (left.turnNumber === null || left.turnNumber !== right.turnNumber) {
     return false;
   }
-  if (left.seat !== null && right.seat !== null) {
-    return left.seat === right.seat;
-  }
-  if (left.agentID !== null && right.agentID !== null) {
-    return left.agentID === right.agentID;
-  }
-  if (left.agentID !== null || right.agentID !== null) {
-    return false;
-  }
-  if (left.playerName !== null && right.playerName !== null) {
-    return left.playerName === right.playerName;
-  }
-  return false;
+  return mergeIdentitiesMatch(left, right, roster);
 }
 
 function mergeDecision(
@@ -1408,13 +1458,14 @@ function mergeDecision(
 
 function mergeDecisions(
   episodeId: string,
+  roster: readonly CoworldEvaluationRosterSeat[],
   current: readonly CoworldEvaluationDecision[],
   incoming: readonly CoworldEvaluationDecision[],
 ): CoworldEvaluationDecision[] {
   const merged = [...current];
   for (const decision of incoming) {
     const matchingIndexes = merged.flatMap((candidate, index) =>
-      decisionsMatch(candidate, decision) ? [index] : [],
+      decisionsMatch(candidate, decision, roster) ? [index] : [],
     );
     if (matchingIndexes.length > 1) {
       throw new Error(`Ambiguous decision identity for episode ${episodeId}`);
@@ -1441,21 +1492,10 @@ function mergeDecisions(
 function snapshotPlayersMatch(
   left: CoworldEvaluationSnapshotPlayer,
   right: CoworldEvaluationSnapshotPlayer,
+  roster: readonly CoworldEvaluationRosterSeat[],
 ): boolean {
   if (isDeepStrictEqual(left, right)) return true;
-  if (left.seat !== null && right.seat !== null)
-    return left.seat === right.seat;
-  if (left.agentID !== null && right.agentID !== null) {
-    return left.agentID === right.agentID;
-  }
-  if (left.agentID !== null || right.agentID !== null) {
-    return false;
-  }
-  return (
-    left.playerName !== null &&
-    right.playerName !== null &&
-    left.playerName === right.playerName
-  );
+  return mergeIdentitiesMatch(left, right, roster);
 }
 
 function mergeSnapshotPlayer(
@@ -1508,6 +1548,7 @@ function snapshotsMatch(
 
 function mergeSnapshots(
   episodeId: string,
+  roster: readonly CoworldEvaluationRosterSeat[],
   current: readonly CoworldEvaluationSnapshot[],
   incoming: readonly CoworldEvaluationSnapshot[],
 ): CoworldEvaluationSnapshot[] {
@@ -1552,7 +1593,7 @@ function mergeSnapshots(
     );
     for (const player of snapshot.players) {
       const playerIndexes = existing.players.flatMap((candidate, index) =>
-        snapshotPlayersMatch(candidate, player) ? [index] : [],
+        snapshotPlayersMatch(candidate, player, roster) ? [index] : [],
       );
       if (playerIndexes.length > 1) {
         throw new Error(`Ambiguous snapshot player for episode ${episodeId}`);
@@ -1597,6 +1638,7 @@ function mergeFragment(
     : incoming.episodeId;
   const currentMap = current.map === "Unknown map" ? undefined : current.map;
   const incomingMap = incoming.map === "Unknown map" ? undefined : incoming.map;
+  const roster = mergeRoster(current.roster, incoming.roster, episodeId);
   return {
     episodeId,
     episodeIdIsExplicit:
@@ -1632,9 +1674,19 @@ function mergeFragment(
       current.outrightWinnerSlot,
       incoming.outrightWinnerSlot,
     ),
-    roster: mergeRoster(current.roster, incoming.roster, episodeId),
-    decisions: mergeDecisions(episodeId, current.decisions, incoming.decisions),
-    snapshots: mergeSnapshots(episodeId, current.snapshots, incoming.snapshots),
+    roster,
+    decisions: mergeDecisions(
+      episodeId,
+      roster,
+      current.decisions,
+      incoming.decisions,
+    ),
+    snapshots: mergeSnapshots(
+      episodeId,
+      roster,
+      current.snapshots,
+      incoming.snapshots,
+    ),
     episodeReportedTelemetry: {
       result: mergeReportedTelemetry(
         episodeId,

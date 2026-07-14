@@ -1252,6 +1252,148 @@ describe("Coworld evaluation dataset", () => {
     expect(dataset.rows[1].phaseSnapshots[0].tilesOwned).toBe(30);
   });
 
+  test("keeps ambiguous seatless repeated-name evidence separate across fragments", async () => {
+    const directory = await temporaryDirectory();
+    const sourcePath = path.join(directory, "episodes.json");
+    const participants = [
+      {
+        position: 0,
+        player_name: "Auri",
+        policy_version_id: "candidate:v1",
+        label: "Candidate left",
+      },
+      {
+        position: 1,
+        player_name: "Opponent",
+        policy_version_id: "opponent:v1",
+        label: "Opponent",
+      },
+      {
+        position: 2,
+        player_name: "Auri",
+        policy_version_id: "candidate:v1",
+        label: "Candidate right",
+      },
+    ];
+    await fs.writeFile(
+      sourcePath,
+      JSON.stringify({
+        episodes: [
+          {
+            id: "ereq_repeated_name_fragments",
+            runID: "run_repeated_name_fragments",
+            scores: [0.4, 0.2, 0.4],
+            participants,
+            decisions: [
+              {
+                seat: 0,
+                username: "Auri",
+                turnNumber: 100,
+                selectedLegalActionId: "hold",
+                selectedActionKind: "hold",
+              },
+              {
+                seat: 1,
+                username: "Opponent",
+                turnNumber: 200,
+                selectedLegalActionId: "hold",
+                selectedActionKind: "hold",
+              },
+            ],
+            spectatorReplay: {
+              snapshots: [
+                {
+                  label: "active",
+                  turnNumber: 100,
+                  tick: 100,
+                  phase: "active",
+                  players: [
+                    { seat: 0, username: "Auri", tilesOwned: 10 },
+                    { seat: 1, username: "Opponent", tilesOwned: 20 },
+                  ],
+                },
+              ],
+            },
+          },
+          {
+            id: "ereq_repeated_name_fragments",
+            runID: "run_repeated_name_fragments",
+            scores: [0.4, 0.2, 0.4],
+            participants,
+            decisions: [
+              {
+                username: "Auri",
+                turnNumber: 100,
+                fallbackUsed: true,
+              },
+              {
+                username: "Opponent",
+                turnNumber: 200,
+                fallbackUsed: false,
+              },
+            ],
+            spectatorReplay: {
+              snapshots: [
+                {
+                  label: "active",
+                  turnNumber: 100,
+                  tick: 100,
+                  phase: "active",
+                  players: [
+                    { username: "Auri", troops: 999 },
+                    { username: "Opponent", troops: 200 },
+                  ],
+                },
+              ],
+            },
+          },
+        ],
+      }),
+    );
+
+    const loaded = await loadCoworldEvaluationEpisodes([sourcePath]);
+    expect(loaded.episodes).toHaveLength(1);
+    expect(loaded.episodes[0].decisions).toHaveLength(3);
+    expect(
+      loaded.episodes[0].decisions.map((decision) => ({
+        seat: decision.seat,
+        fallback: decision.fallback,
+      })),
+    ).toEqual([
+      { seat: 0, fallback: null },
+      { seat: null, fallback: true },
+      { seat: 1, fallback: false },
+    ]);
+    expect(loaded.episodes[0].snapshots).toHaveLength(1);
+    expect(loaded.episodes[0].snapshots[0].players).toHaveLength(3);
+    expect(
+      loaded.episodes[0].snapshots[0].players.find(
+        (player) => player.seat === 0,
+      ),
+    ).toMatchObject({ tilesOwned: 10, troops: null });
+    expect(
+      loaded.episodes[0].snapshots[0].players.find(
+        (player) => player.seat === null,
+      ),
+    ).toMatchObject({ tilesOwned: null, troops: 999 });
+    expect(
+      loaded.episodes[0].snapshots[0].players.find(
+        (player) => player.seat === 1,
+      ),
+    ).toMatchObject({ tilesOwned: 20, troops: 200 });
+
+    const dataset = buildCoworldEvaluationDataset({
+      episodes: loaded.episodes,
+      selector: { seat: 0, policyVersionId: null, playerName: null },
+    });
+    expect(dataset.rows[0].telemetry.actionMix).toEqual({ hold: 1 });
+    expect(dataset.rows[0].telemetry.fallbackSampleCount).toBe(0);
+    expect(dataset.rows[0].phaseSnapshots[0]).toMatchObject({
+      tilesOwned: 10,
+      troops: null,
+    });
+  });
+
   test("merges direct and inline decisions within one fragment and rejects conflicts", () => {
     const base = {
       id: "ereq_inline_merge",
