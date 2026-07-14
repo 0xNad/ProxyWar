@@ -10,7 +10,7 @@
       "/app/integration/src/keystone-player.ts"
     ],
     "env": {
-      "PROXYWAR_KEYSTONE_MODE": "mock-llm",
+      "PROXYWAR_KEYSTONE_MODE": "mock",
       "PROXYWAR_KEYSTONE_PROFILE": "aggressive"
     },
     "name": "Auri"
@@ -25,7 +25,7 @@
         "/app/integration/src/keystone-player.ts"
       ],
       "env": {
-        "PROXYWAR_KEYSTONE_MODE": "mock-llm",
+        "PROXYWAR_KEYSTONE_MODE": "mock",
         "PROXYWAR_KEYSTONE_PROFILE": "opportunistic"
       },
       "name": "Opponent 1"
@@ -39,7 +39,7 @@
         "/app/integration/src/keystone-player.ts"
       ],
       "env": {
-        "PROXYWAR_KEYSTONE_MODE": "mock-llm",
+        "PROXYWAR_KEYSTONE_MODE": "mock",
         "PROXYWAR_KEYSTONE_PROFILE": "defensive"
       },
       "name": "Opponent 2"
@@ -53,7 +53,7 @@
         "/app/integration/src/keystone-player.ts"
       ],
       "env": {
-        "PROXYWAR_KEYSTONE_MODE": "mock-llm",
+        "PROXYWAR_KEYSTONE_MODE": "mock",
         "PROXYWAR_KEYSTONE_PROFILE": "diplomatic"
       },
       "name": "Opponent 3"
