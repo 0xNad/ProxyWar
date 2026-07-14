@@ -1,10 +1,11 @@
 import { promises as fs } from "node:fs";
+import { pathToFileURL } from "node:url";
 import {
   evaluateSavedCoworldEpisodes,
   type SavedCoworldEpisodeScore,
 } from "../server/agents/CoworldScoreSemantics";
 
-interface Options {
+export interface CoworldScoreEvaluatorOptions {
   inputPath: string;
   seat: number | null;
   policyVersionId: string | null;
@@ -33,7 +34,9 @@ function asStrings(value: unknown): string[] {
     : [];
 }
 
-function parseOptions(argv: string[]): Options {
+export function parseCoworldScoreEvaluatorOptions(
+  argv: string[],
+): CoworldScoreEvaluatorOptions {
   let inputPath: string | null = null;
   let seat: number | null = null;
   let policyVersionId: string | null = null;
@@ -58,6 +61,9 @@ function parseOptions(argv: string[]): Options {
     }
   }
   if (inputPath === null) throw new Error(usage);
+  if (seat !== null && policyVersionId !== null) {
+    throw new Error("--seat and --policy-version-id are mutually exclusive");
+  }
   return { inputPath, seat, policyVersionId };
 }
 
@@ -89,11 +95,15 @@ function parseScores(
   });
   const seatOrder = asStrings(episode.policy_version_ids);
   if (seatOrder.length === pairs.length) {
-    const byPolicy = new Map(
-      pairs.map((pair) => [pair.policyVersionId, pair.score]),
-    );
+    const byPolicy = new Map<string, number[]>();
+    for (const pair of pairs) {
+      const scores = byPolicy.get(pair.policyVersionId) ?? [];
+      scores.push(pair.score);
+      byPolicy.set(pair.policyVersionId, scores);
+    }
     return seatOrder.map((policyVersionId) => {
-      const score = byPolicy.get(policyVersionId);
+      const scores = byPolicy.get(policyVersionId);
+      const score = scores?.shift();
       if (score === undefined) {
         throw new Error(`Episode ${index} is missing a policy score`);
       }
@@ -114,7 +124,7 @@ function oneHotWinnerSlot(scores: readonly number[]): number | null {
 function parseEpisode(
   value: unknown,
   index: number,
-  options: Options,
+  options: CoworldScoreEvaluatorOptions,
 ): SavedCoworldEpisodeScore {
   const episode = asRecord(value);
   if (episode === null) throw new Error(`Episode ${index} is not an object`);
@@ -128,12 +138,13 @@ function parseEpisode(
             options.policyVersionId,
           ),
         );
-  const seat =
+  const embeddedSeat =
     asSeat(episode.seat) ??
     asSeat(episode.target_slot) ??
-    asSeat(episode.policy_slot) ??
-    policySeat ??
-    options.seat;
+    asSeat(episode.policy_slot);
+  const seat =
+    options.seat ??
+    (options.policyVersionId !== null ? policySeat : embeddedSeat);
   if (seat === null || scores[seat] === undefined) {
     throw new Error(`Episode ${index} has no matching target seat`);
   }
@@ -159,11 +170,10 @@ function parseEpisode(
   return { map, seat, scores, outrightWinnerSlot };
 }
 
-async function main(): Promise<void> {
-  const options = parseOptions(process.argv.slice(2));
-  const saved = JSON.parse(
-    await fs.readFile(options.inputPath, "utf8"),
-  ) as unknown;
+export function parseSavedCoworldScoreEpisodes(
+  saved: unknown,
+  options: CoworldScoreEvaluatorOptions,
+): SavedCoworldEpisodeScore[] {
   const root = asRecord(saved);
   const entries = Array.isArray(saved)
     ? saved
@@ -171,13 +181,25 @@ async function main(): Promise<void> {
       ? root.episodes
       : [];
   if (entries.length === 0) throw new Error("Input has no episodes");
-  const episodes = entries.map((entry, index) =>
-    parseEpisode(entry, index, options),
-  );
+  return entries.map((entry, index) => parseEpisode(entry, index, options));
+}
+
+async function main(): Promise<void> {
+  const options = parseCoworldScoreEvaluatorOptions(process.argv.slice(2));
+  const saved = JSON.parse(
+    await fs.readFile(options.inputPath, "utf8"),
+  ) as unknown;
+  const episodes = parseSavedCoworldScoreEpisodes(saved, options);
   console.log(JSON.stringify(evaluateSavedCoworldEpisodes(episodes), null, 2));
 }
 
-main().catch((error: unknown) => {
-  console.error(error instanceof Error ? error.message : String(error));
-  process.exitCode = 1;
-});
+const entrypoint = process.argv[1];
+if (
+  entrypoint !== undefined &&
+  import.meta.url === pathToFileURL(entrypoint).href
+) {
+  main().catch((error: unknown) => {
+    console.error(error instanceof Error ? error.message : String(error));
+    process.exitCode = 1;
+  });
+}
