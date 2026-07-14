@@ -11,6 +11,7 @@ import {
 import {
   coworldCanonicalSha256,
   materializeCoworldPairedMatrix,
+  type CoworldArmSpec,
   type CoworldPairedJob,
   type CoworldPairedMatrixSpec,
   type CoworldPairedPlan,
@@ -22,6 +23,7 @@ async function fakeImageID(reference: string): Promise<string> {
 
 async function fixture(input?: {
   candidateSeats?: number[];
+  arms?: CoworldArmSpec[];
 }): Promise<CoworldPairedPlan> {
   const specPath = path.resolve(
     "coworld-adapter/coworld/paired-matrix.example.json",
@@ -39,7 +41,7 @@ async function fixture(input?: {
       variantIDs: ["tournament-4p-asia"],
       candidateSeats: input?.candidateSeats ?? [0],
       seeds: [7],
-      arms: [
+      arms: input?.arms ?? [
         { kind: "v16" },
         { kind: "a1" },
         { kind: "v16-shadow", expertMask: 5 },
@@ -195,6 +197,29 @@ describe("Coworld paired sequential executor", () => {
         validateResults: async () => {},
       }),
     ).rejects.toThrow("completion identity or artifact hash is invalid");
+  });
+
+  test("validates and executes the dedicated politics-guard arm identity", async () => {
+    const plan = await fixture({
+      arms: [{ kind: "v16" }, { kind: "v16-politics-guard" }],
+    });
+    const seen: string[] = [];
+
+    const summary = await execute(plan, {
+      runEpisode: successfulRunner(seen),
+    });
+
+    expect(summary).toMatchObject({ totalJobs: 2, executedJobs: 2 });
+    expect(seen).toEqual(plan.jobs.map(({ jobID }) => jobID));
+    const guard = plan.jobs.find(
+      (job) => job.arm.kind === "v16-politics-guard",
+    )!;
+    expect(guard.arm.env).toEqual({
+      PROXYWAR_KEYSTONE_SINGLE_ACTION: "0",
+      PROXYWAR_KEYSTONE_EXPERT_COUNCIL_SHADOW: "0",
+      PROXYWAR_KEYSTONE_COUNCIL_POLITICS_GUARD: "1",
+      PROXYWAR_KEYSTONE_EXPERT_MASK: "15",
+    });
   });
 
   test("keeps completed jobs resumable after a later runner interruption", async () => {

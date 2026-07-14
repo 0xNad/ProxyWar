@@ -8,6 +8,7 @@ import {
   DeferredAgentPlanner,
   isModelUnavailableError,
   KEYSTONE_EXECUTOR_SETTINGS,
+  keystoneCouncilPoliticsGuardFromEnv,
   keystoneExpertCouncilShadowFromEnv,
   keystoneExpertMaskFromEnv,
   keystoneModeFromEnv,
@@ -20,6 +21,7 @@ import {
   KEYSTONE_SHADOW_COUNCIL_METADATA_KEY,
   KeystoneShadowCouncilTelemetryAgentBrain,
 } from "../../coworld-adapter/src/keystone-shadow-council";
+import { PlayerType, Relation } from "../../src/core/game/Game";
 import { AgentObservationBuilder } from "../../src/server/agents/AgentObservationBuilder";
 import type {
   AgentPlanDecision,
@@ -70,6 +72,105 @@ function spawnBrainInput(): AgentBrainInput {
     phaseOverride: "spawn",
   });
   return { observation, legalActions: spawnLegalActions() };
+}
+
+function activePoliticsBrainInput(): AgentBrainInput {
+  const observation = new AgentObservationBuilder().build({
+    agentID: "agent-1",
+    clientID: null,
+    username: "Keystone Agent",
+    profile: "aggressive",
+    gameID: "KEYSTONE-GUARD",
+    turnNumber: 2_000,
+    phaseOverride: "active",
+  });
+  return {
+    observation: {
+      ...observation,
+      ownState: {
+        playerID: "ME",
+        clientID: null,
+        smallID: 1,
+        name: "Keystone",
+        type: PlayerType.Nation,
+        isAlive: true,
+        isDisconnected: false,
+        isTraitor: false,
+        hasSpawned: true,
+        troops: 75_000,
+        maxTroops: 100_000,
+        troopRatio: 0.75,
+        gold: "250000",
+        tilesOwned: 80,
+        tileShare: 0.3,
+        borderTiles: 12,
+        outgoingAttacks: 0,
+        incomingAttacks: 0,
+        outgoingAllianceRequests: 0,
+        incomingAllianceRequests: 0,
+        team: null,
+      },
+      visiblePlayers: [
+        {
+          playerID: "RIVAL",
+          clientID: null,
+          smallID: 2,
+          name: "Rival",
+          type: PlayerType.Human,
+          isAlive: true,
+          isDisconnected: false,
+          hasSpawned: true,
+          troops: 40_000,
+          maxTroops: 80_000,
+          troopRatio: 0.5,
+          gold: "100000",
+          tilesOwned: 50,
+          tileShare: 0.2,
+          sharesBorder: true,
+          isAllied: false,
+          isFriendly: false,
+          relation: Relation.Hostile,
+          canAttack: true,
+          canRequestAlliance: true,
+          canDonateGold: true,
+          canDonateTroops: true,
+          canEmbargo: true,
+          hasEmbargoAgainst: false,
+          outgoingAttack: false,
+          incomingAttack: false,
+          hasOutgoingAllianceRequest: false,
+          hasIncomingAllianceRequest: false,
+          relativeTroopRatio: 1.25,
+        },
+      ],
+      combat: { ...observation.combat, canExpandIntoNeutral: true },
+    },
+    legalActions: [
+      {
+        id: "alliance_request:RIVAL",
+        kind: "alliance_request",
+        label: "Request alliance",
+        intent: null,
+        risk: { level: "low", score: 0.1 },
+        metadata: { recipientID: "RIVAL" },
+      },
+      {
+        id: "expand:neutral:35",
+        kind: "attack",
+        label: "Expand",
+        intent: null,
+        risk: { level: "low", score: 0.1 },
+        metadata: { targetID: null, expansion: true, troopPercent: 35 },
+      },
+      {
+        id: "hold:wait",
+        kind: "hold",
+        label: "Hold",
+        intent: null,
+        risk: { level: "low", score: 0.1 },
+      },
+    ],
+  };
 }
 
 function brainInputAt(
@@ -196,6 +297,7 @@ describe("Coworld keystone player", () => {
       mode: "mock",
       profile: "aggressive",
       expertCouncilShadow: false,
+      councilPoliticsGuard: false,
     });
 
     expect(implicitOff).not.toBeInstanceOf(
@@ -205,6 +307,96 @@ describe("Coworld keystone player", () => {
       KeystoneShadowCouncilTelemetryAgentBrain,
     );
     expect(implicitOff.constructor).toBe(explicitOff.constructor);
+  });
+
+  it("constructs the guard wrapper but skips all Council work on non-triggers", async () => {
+    const baseline = createKeystoneBrain(modules, {
+      mode: "mock",
+      profile: "aggressive",
+    });
+    const guard = createKeystoneBrain(modules, {
+      mode: "mock",
+      profile: "aggressive",
+      councilPoliticsGuard: true,
+    });
+
+    expect(guard).toBeInstanceOf(KeystoneShadowCouncilTelemetryAgentBrain);
+    const guardDecision = await guard.decide(spawnBrainInput());
+    const baselineDecision = await baseline.decide(spawnBrainInput());
+    expect(guardDecision.actionID).toBe(baselineDecision.actionID);
+    expect(guardDecision.actionIDs).toEqual(baselineDecision.actionIDs);
+    expect(guardDecision.reason).toBe(baselineDecision.reason);
+    expect(guardDecision.metadata).toMatchObject({
+      executorSource: baselineDecision.metadata?.executorSource,
+      actionSelectionSource: baselineDecision.metadata?.actionSelectionSource,
+      planFollowed: baselineDecision.metadata?.planFollowed,
+    });
+    expect(guardDecision.metadata).not.toHaveProperty(
+      KEYSTONE_SHADOW_COUNCIL_METADATA_KEY,
+    );
+  });
+
+  it("applies an active trigger through createKeystoneBrain with truthful final metadata and wire marker", async () => {
+    const authoritative = Object.freeze({
+      actionID: "alliance_request:RIVAL",
+      actionIDs: ["alliance_request:RIVAL", "hold:wait"],
+      reason: "scripted v16 proactive request",
+      planFollowed: false,
+      selectedSkill: "stale-diplomacy-skill",
+    });
+    class ScriptedFrontierPolicyExecutor {
+      decide() {
+        return authoritative;
+      }
+    }
+    const instrumentedModules = {
+      ...modules,
+      plannerExecutor: {
+        ...plannerExecutorModule,
+        FrontierPolicyExecutor: ScriptedFrontierPolicyExecutor,
+      },
+    } as unknown as KeystoneModules;
+    const brain = createKeystoneBrain(instrumentedModules, {
+      mode: "mock",
+      profile: "aggressive",
+      councilPoliticsGuard: true,
+    });
+    const log = vi.spyOn(console, "log").mockImplementation(() => undefined);
+    try {
+      const decision = await brain.decide(activePoliticsBrainInput());
+      const response = decisionToResponse("req_guard", decision);
+
+      expect(decision).toMatchObject({
+        actionID: "expand:neutral:35",
+        actionIDs: ["expand:neutral:35"],
+        metadata: {
+          executorSource: "keystone-council-politics-guard",
+          actionSelectionSource: "keystone-council-politics-guard:expansion",
+          scheduledActionIDs: "expand:neutral:35",
+          planFollowed: expect.any(Boolean),
+        },
+      });
+      expect(decision.metadata).not.toHaveProperty("selectedSkill");
+      expect(response).toMatchObject({
+        selectedLegalActionId: "expand:neutral:35",
+      });
+      expect(String(response.reason)).toMatch(
+        /^\[keystone-politics-guard:v1 proactive_alliance_request\]/,
+      );
+    } finally {
+      log.mockRestore();
+    }
+  });
+
+  it("rejects combining the politics guard with the independent single-action treatment", () => {
+    expect(() =>
+      createKeystoneBrain(modules, {
+        mode: "mock",
+        profile: "aggressive",
+        singleActionExecutor: true,
+        councilPoliticsGuard: true,
+      }),
+    ).toThrow(/cannot be combined with the single-action executor treatment/);
   });
 
   it.each([false, true])(
@@ -820,6 +1012,35 @@ describe("Coworld keystone player", () => {
     expect(() =>
       keystoneExpertCouncilShadowFromEnv({
         PROXYWAR_KEYSTONE_EXPERT_COUNCIL_SHADOW: "yes",
+      }),
+    ).toThrow(/expected 0\|1\|false\|true/);
+  });
+
+  it("parses the Council politics guard flag strictly and defaults it off", () => {
+    expect(keystoneCouncilPoliticsGuardFromEnv({})).toBe(false);
+    expect(
+      keystoneCouncilPoliticsGuardFromEnv({
+        PROXYWAR_KEYSTONE_COUNCIL_POLITICS_GUARD: "0",
+      }),
+    ).toBe(false);
+    expect(
+      keystoneCouncilPoliticsGuardFromEnv({
+        PROXYWAR_KEYSTONE_COUNCIL_POLITICS_GUARD: " FALSE ",
+      }),
+    ).toBe(false);
+    expect(
+      keystoneCouncilPoliticsGuardFromEnv({
+        PROXYWAR_KEYSTONE_COUNCIL_POLITICS_GUARD: "1",
+      }),
+    ).toBe(true);
+    expect(
+      keystoneCouncilPoliticsGuardFromEnv({
+        PROXYWAR_KEYSTONE_COUNCIL_POLITICS_GUARD: " true ",
+      }),
+    ).toBe(true);
+    expect(() =>
+      keystoneCouncilPoliticsGuardFromEnv({
+        PROXYWAR_KEYSTONE_COUNCIL_POLITICS_GUARD: "yes",
       }),
     ).toThrow(/expected 0\|1\|false\|true/);
   });

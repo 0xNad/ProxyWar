@@ -21,10 +21,12 @@ const MAX_JOBS = COWORLD_PAIRED_BOUNDS.maxJobs;
 const COMMAND_TIMEOUT_MS = 60_000;
 const TREATMENT_ENV = "PROXYWAR_KEYSTONE_SINGLE_ACTION";
 const SHADOW_ENV = "PROXYWAR_KEYSTONE_EXPERT_COUNCIL_SHADOW";
+const POLITICS_GUARD_ENV = "PROXYWAR_KEYSTONE_COUNCIL_POLITICS_GUARD";
 const EXPERT_MASK_ENV = "PROXYWAR_KEYSTONE_EXPERT_MASK";
 const ARM_OWNED_ENV_KEYS = new Set([
   TREATMENT_ENV,
   SHADOW_ENV,
+  POLITICS_GUARD_ENV,
   EXPERT_MASK_ENV,
 ]);
 const COWORLD_VERSION = "0.1.30";
@@ -61,6 +63,8 @@ export type CoworldArmSpec =
   | { kind: "a1" }
   | { kind: "v16-shadow"; expertMask: number }
   | { kind: "a1-shadow"; expertMask: number }
+  /** Broad all-break suppression experiment; never implied by v16 controls. */
+  | { kind: "v16-politics-guard" }
   | { kind: "council-authoritative" }
   | {
       kind: "expert-mask-authoritative";
@@ -70,7 +74,7 @@ export type CoworldArmSpec =
 
 export interface CoworldResolvedArm {
   armID: string;
-  kind: "v16" | "a1" | "v16-shadow" | "a1-shadow";
+  kind: "v16" | "a1" | "v16-shadow" | "a1-shadow" | "v16-politics-guard";
   base: "v16" | "a1";
   shadow: boolean;
   expertMask: number;
@@ -427,6 +431,22 @@ function resolveArmSpecs(
         }),
       }) satisfies CoworldResolvedArm;
     }
+    if (kind === "v16-politics-guard") {
+      rejectUnknownKeys(object, ["kind"], `arms[${index}]`);
+      return Object.freeze({
+        armID: kind,
+        kind,
+        base: "v16",
+        shadow: false,
+        expertMask: 15,
+        env: Object.freeze({
+          [TREATMENT_ENV]: "0",
+          [SHADOW_ENV]: "0",
+          [POLITICS_GUARD_ENV]: "1",
+          [EXPERT_MASK_ENV]: "15",
+        }),
+      }) satisfies CoworldResolvedArm;
+    }
     throw new Error(
       `arms[${index}].kind is not allowlisted: ${JSON.stringify(kind)}`,
     );
@@ -450,6 +470,8 @@ function compareArms(a: CoworldResolvedArm, b: CoworldResolvedArm): number {
         return 2;
       case "a1-shadow":
         return 3;
+      case "v16-politics-guard":
+        return 4;
     }
   };
   return (
@@ -851,7 +873,7 @@ function validateRunnable(spec: PairedRunnableSpec, label: string): void {
     return;
   }
   const env = requirePlainObject(spec.env, `${label}.env`);
-  const reservedArmEntries = label === "candidate" ? 3 : 0;
+  const reservedArmEntries = label === "candidate" ? 4 : 0;
   if (
     Object.keys(env).length >
     COWORLD_PAIRED_BOUNDS.maxEnvironmentEntries - reservedArmEntries

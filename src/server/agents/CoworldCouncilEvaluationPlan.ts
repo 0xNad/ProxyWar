@@ -19,7 +19,7 @@ function asRecord(value: unknown): Record<string, unknown> | null {
 
 const COUNCIL_PLAN_MAX_BYTES = 10_000_000;
 const COUNCIL_MAX_JOBS = 1_000;
-const COUNCIL_MAX_ARMS = 34;
+const COUNCIL_MAX_ARMS = 35;
 const COUNCIL_MAX_ROSTER = 12;
 const COUNCIL_MAX_RUN_ARGUMENTS = 128;
 const COUNCIL_MAX_IDENTITY_STRING = 4_096;
@@ -31,6 +31,7 @@ const COUNCIL_MAX_SEED = 308_915_775;
 const councilArmOwnedEnvironmentKeys = new Set([
   "PROXYWAR_KEYSTONE_SINGLE_ACTION",
   "PROXYWAR_KEYSTONE_EXPERT_COUNCIL_SHADOW",
+  "PROXYWAR_KEYSTONE_COUNCIL_POLITICS_GUARD",
   "PROXYWAR_KEYSTONE_EXPERT_MASK",
 ]);
 const councilEnvironmentKeyPattern = /^[A-Za-z_][A-Za-z0-9_]*$/;
@@ -439,7 +440,8 @@ function councilArm(
     kind !== "v16" &&
     kind !== "a1" &&
     kind !== "v16-shadow" &&
-    kind !== "a1-shadow"
+    kind !== "a1-shadow" &&
+    kind !== "v16-politics-guard"
   ) {
     throw new Error(`${context}.kind is unsupported`);
   }
@@ -449,12 +451,22 @@ function councilArm(
     15,
   );
   const shadow = kind === "v16-shadow" || kind === "a1-shadow";
+  const politicsGuard = kind === "v16-politics-guard";
   const base = kind === "a1" || kind === "a1-shadow" ? "a1" : "v16";
+  if (politicsGuard && expertMask !== 15) {
+    throw new Error(`${context}.expertMask must be 15 for politics guard`);
+  }
+  if (!shadow && !politicsGuard && expertMask !== 0) {
+    throw new Error(`${context}.expertMask must be 0 for non-shadow arms`);
+  }
   const armID = shadow ? `${kind}-m${expertMask}` : kind;
   const env = {
     PROXYWAR_KEYSTONE_SINGLE_ACTION: base === "a1" ? "1" : "0",
     PROXYWAR_KEYSTONE_EXPERT_COUNCIL_SHADOW: shadow ? "1" : "0",
-    ...(shadow ? { PROXYWAR_KEYSTONE_EXPERT_MASK: String(expertMask) } : {}),
+    ...(politicsGuard ? { PROXYWAR_KEYSTONE_COUNCIL_POLITICS_GUARD: "1" } : {}),
+    ...(shadow || politicsGuard
+      ? { PROXYWAR_KEYSTONE_EXPERT_MASK: String(expertMask) }
+      : {}),
   };
   const parsed: CoworldCouncilEvaluationArm = {
     armID: councilString(record.armID, `${context}.armID`),
@@ -559,6 +571,8 @@ function councilArmRank(arm: CoworldCouncilEvaluationArm): number {
       return 2;
     case "a1-shadow":
       return 3;
+    case "v16-politics-guard":
+      return 4;
   }
 }
 
@@ -1259,8 +1273,8 @@ function councilAssignment(
     pairID: job.pairID,
     jobID: job.jobID,
     arm: job.arm,
-    intentionToTreat: job.arm.shadow,
-    actualTreatmentExposure: false,
+    intentionToTreat: job.arm.shadow || job.arm.kind === "v16-politics-guard",
+    actualTreatmentExposure: job.arm.kind === "v16-politics-guard",
     expertMask: job.expertMask,
     variantID: job.variantID,
     seed: job.seed,

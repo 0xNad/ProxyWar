@@ -29,6 +29,12 @@ export {
   type KeystonePoliticsProposal,
 } from "./politics-expert";
 export {
+  arbitrateKeystonePoliticsGuard,
+  keystonePoliticsGuardSelection,
+  type KeystonePoliticsGuardReplacementSource,
+  type KeystonePoliticsGuardSelection,
+} from "./politics-guard";
+export {
   proposeKeystoneSpawn,
   proposeKeystoneSurvival,
   type KeystoneSpawnProposal,

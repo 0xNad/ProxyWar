@@ -38,7 +38,8 @@
 //   PROXYWAR_KEYSTONE_PLAN_EVERY Commander cadence in decision steps (default 3)
 //   PROXYWAR_KEYSTONE_SINGLE_ACTION  1/true arms Coworld sequential conversion
 //   PROXYWAR_KEYSTONE_EXPERT_COUNCIL_SHADOW  1/true observes four-expert council
-//   PROXYWAR_KEYSTONE_EXPERT_MASK  shadow-only expert bitmask 0..15 (default 15)
+//   PROXYWAR_KEYSTONE_COUNCIL_POLITICS_GUARD  1/true arms narrow politics guard
+//   PROXYWAR_KEYSTONE_EXPERT_MASK  Council expert bitmask 0..15 (default 15)
 //   PROXYWAR_LLM_MODEL_ID / AWS_REGION / PROXYWAR_LLM_TIMEOUT_MS  bedrock mode
 
 import { createRequire } from "node:module";
@@ -98,7 +99,9 @@ export interface KeystoneBrainOptions {
   singleActionExecutor?: boolean;
   /** Coworld-only, default-off four-expert shadow telemetry. */
   expertCouncilShadow?: boolean;
-  /** Shadow-only expansion/economy/conquest/politics bitmask; default 15. */
+  /** Coworld-only, default-off proactive alliance churn treatment. */
+  councilPoliticsGuard?: boolean;
+  /** Council expansion/economy/conquest/politics bitmask; default 15. */
   expertMask?: number;
 }
 
@@ -197,6 +200,22 @@ export function keystoneExpertCouncilShadowFromEnv(
   }
   throw new Error(
     `Unknown PROXYWAR_KEYSTONE_EXPERT_COUNCIL_SHADOW "${raw}" (expected 0|1|false|true)`,
+  );
+}
+
+export function keystoneCouncilPoliticsGuardFromEnv(
+  env: NodeJS.ProcessEnv = process.env,
+): boolean {
+  const raw =
+    env.PROXYWAR_KEYSTONE_COUNCIL_POLITICS_GUARD?.trim().toLowerCase() ?? "";
+  if (raw === "" || raw === "0" || raw === "false") {
+    return false;
+  }
+  if (raw === "1" || raw === "true") {
+    return true;
+  }
+  throw new Error(
+    `Unknown PROXYWAR_KEYSTONE_COUNCIL_POLITICS_GUARD "${raw}" (expected 0|1|false|true)`,
   );
 }
 
@@ -973,6 +992,14 @@ export function createKeystoneBrain(
   modules: KeystoneModules,
   options: KeystoneBrainOptions,
 ): AgentBrain {
+  if (
+    options.singleActionExecutor === true &&
+    options.councilPoliticsGuard === true
+  ) {
+    throw new Error(
+      "Keystone Council politics guard cannot be combined with the single-action executor treatment",
+    );
+  }
   const {
     PlannerExecutorAgentBrain,
     RuleAgentPlanner,
@@ -995,11 +1022,16 @@ export function createKeystoneBrain(
       });
   let shadowCouncilExecutor: KeystoneShadowCouncilExecutor | null = null;
   let executor: AgentExecutor = authoritativeExecutor;
-  if (options.expertCouncilShadow === true) {
+  if (
+    options.expertCouncilShadow === true ||
+    options.councilPoliticsGuard === true
+  ) {
     shadowCouncilExecutor = new KeystoneShadowCouncilExecutor({
       delegate: authoritativeExecutor,
       actionFollowsCanonicalPlan,
       enabledExpertMask: options.expertMask ?? 15,
+      observeAllDecisions: options.expertCouncilShadow === true,
+      politicsGuardEnabled: options.councilPoliticsGuard === true,
     });
     executor = shadowCouncilExecutor;
   }
@@ -1082,6 +1114,7 @@ async function main(): Promise<void> {
   const mode = keystoneModeFromEnv();
   const singleActionExecutor = keystoneSingleActionFromEnv();
   const expertCouncilShadow = keystoneExpertCouncilShadowFromEnv();
+  const councilPoliticsGuard = keystoneCouncilPoliticsGuardFromEnv();
   const expertMask = keystoneExpertMaskFromEnv();
   const profile = (process.env.PROXYWAR_KEYSTONE_PROFILE?.trim() ||
     "aggressive") as AgentStrategyProfile;
@@ -1105,6 +1138,7 @@ async function main(): Promise<void> {
     blocking,
     singleActionExecutor,
     expertCouncilShadow,
+    councilPoliticsGuard,
     expertMask,
   });
 
@@ -1141,7 +1175,7 @@ async function main(): Promise<void> {
 
   socket.on("open", () => {
     console.log(
-      `keystone connected ${redactPlayerUrl(url)} (mode=${mode}, profile=${profile}, planEvery=${planEveryDecisionSteps}, blocking=${blocking}, executor=${singleActionExecutor ? "coworld-single-action" : "frontier"}, shadowCouncil=${expertCouncilShadow}, shadowExpertMask=${expertMask}, ${keystoneTunableFlagSummary()})`,
+      `keystone connected ${redactPlayerUrl(url)} (mode=${mode}, profile=${profile}, planEvery=${planEveryDecisionSteps}, blocking=${blocking}, executor=${singleActionExecutor ? "coworld-single-action" : "frontier"}, shadowCouncil=${expertCouncilShadow}, politicsGuard=${councilPoliticsGuard}, councilExpertMask=${expertMask}, ${keystoneTunableFlagSummary()})`,
     );
   });
 

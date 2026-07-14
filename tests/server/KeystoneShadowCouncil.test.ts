@@ -9,6 +9,8 @@ import {
 } from "../../coworld-adapter/src/keystone-experts";
 import {
   boundedKeystoneShadowCouncilTelemetryLine,
+  KEYSTONE_POLITICS_GUARD_LOG_MAX_BYTES,
+  KEYSTONE_POLITICS_GUARD_LOG_PREFIX,
   KEYSTONE_SHADOW_COUNCIL_LOG_MAX_BYTES,
   KEYSTONE_SHADOW_COUNCIL_LOG_PREFIX,
   KEYSTONE_SHADOW_COUNCIL_METADATA_KEY,
@@ -121,7 +123,10 @@ function input(
   };
 }
 
-function visiblePlayer(playerID: string): AgentVisiblePlayer {
+function visiblePlayer(
+  playerID: string,
+  overrides: Partial<AgentVisiblePlayer> = {},
+): AgentVisiblePlayer {
   return {
     playerID,
     clientID: null,
@@ -152,6 +157,7 @@ function visiblePlayer(playerID: string): AgentVisiblePlayer {
     hasOutgoingAllianceRequest: false,
     hasIncomingAllianceRequest: false,
     relativeTroopRatio: 1.25,
+    ...overrides,
   };
 }
 
@@ -196,8 +202,11 @@ function ownedInput(
   };
 }
 
-function pressuredInput(actions: LegalAction[]): AgentBrainInput {
-  const current = input(actions);
+function pressuredInput(
+  actions: LegalAction[],
+  players: readonly AgentVisiblePlayer[] = [],
+): AgentBrainInput {
+  const current = input(actions, { players });
   return {
     observation: {
       ...current.observation,
@@ -1324,6 +1333,677 @@ describe("Keystone shadow expert council", () => {
     expect(decision.metadata).not.toHaveProperty("fallbackUsed");
     expect(decision.metadata).not.toHaveProperty("plannerFallbackUsed");
     expect(decision.metadata).not.toHaveProperty("llmPlannerDegraded");
+  });
+
+  describe("default-off Council politics guard", () => {
+    it("replaces a proactive alliance request with one original expansion offer", () => {
+      const request = action("alliance_request:RIVAL", "alliance_request", {
+        recipientID: "RIVAL",
+      });
+      const expand = action("expand:neutral:35", "attack", {
+        targetID: null,
+        expansion: true,
+        troopPercent: 35,
+      });
+      const authoritative = Object.freeze({
+        actionID: request.id,
+        actionIDs: [request.id, "hold:wait"],
+        reason: "v16 diplomacy cascade",
+        planFollowed: false,
+        executorSource: "frontier-policy-executor",
+        actionSelectionSource: "frontier-policy-executor:diplomacy",
+        selectedSkill: "stale-v16-skill",
+        selectedModules: "diplomacy,expansion",
+        holdReasonCategory: "stale-hold-field",
+      });
+      const seenOfferIDs: string[][] = [];
+      const logs: string[] = [];
+      const shadow = new KeystoneShadowCouncilExecutor({
+        delegate: delegate(authoritative),
+        actionFollowsCanonicalPlan: ({ action: candidate }) =>
+          candidate.id === expand.id,
+        experts: experts({
+          expansion: (world) => {
+            seenOfferIDs.push(world.actions.map(({ id }) => id));
+            return proposal("expansion", expand.id);
+          },
+        }),
+        observeAllDecisions: false,
+        politicsGuardEnabled: true,
+        logLine: (line) => logs.push(line),
+      });
+
+      const replacement = shadow.decide(
+        input([request, expand, action("hold:wait", "hold")], {
+          players: [visiblePlayer("RIVAL")],
+        }),
+        plan,
+      );
+
+      expect(seenOfferIDs).toEqual([[request.id, expand.id, "hold:wait"]]);
+      expect(replacement).not.toBe(authoritative);
+      expect(replacement).toEqual({
+        actionID: expand.id,
+        actionIDs: [expand.id],
+        reason:
+          "[keystone-politics-guard:v1 proactive_alliance_request] Council selected expansion over proactive diplomacy",
+        planFollowed: true,
+        executorSource: "keystone-council-politics-guard",
+        actionSelectionSource: "keystone-council-politics-guard:expansion",
+      });
+      expect(replacement).not.toHaveProperty("selectedSkill");
+      expect(replacement).not.toHaveProperty("selectedModules");
+      expect(replacement).not.toHaveProperty("holdReasonCategory");
+      expect(shadow.latestTelemetry()).toMatchObject({
+        authoritativeActionID: request.id,
+        politicsGuard: {
+          enabled: true,
+          trigger: "proactive_alliance_request",
+          delegateActionID: request.id,
+          replacementActionID: expand.id,
+          replacementSource: "expansion",
+          abstention: null,
+        },
+      });
+      expect(logs).toHaveLength(2);
+      const guardLine = logs.find((line) =>
+        line.startsWith(KEYSTONE_POLITICS_GUARD_LOG_PREFIX),
+      );
+      expect(guardLine).toBeDefined();
+      expect(Buffer.byteLength(guardLine!, "utf8")).toBeLessThanOrEqual(
+        KEYSTONE_POLITICS_GUARD_LOG_MAX_BYTES,
+      );
+      expect(
+        JSON.parse(guardLine!.slice(KEYSTONE_POLITICS_GUARD_LOG_PREFIX.length)),
+      ).toMatchObject({
+        schema: "keystone-politics-guard",
+        version: 1,
+        outcome: "applied",
+        trigger: "proactive_alliance_request",
+        delegateActionID: request.id,
+        replacementActionID: expand.id,
+        replacementSource: "expansion",
+        abstention: null,
+      });
+    });
+
+    it("replaces break-alliance with a truthful economy decision", () => {
+      const breakAlliance = action("break_alliance:ALLY", "break_alliance", {
+        targetID: "ALLY",
+      });
+      const build = action("build:city", "build", {
+        unit: "City",
+        role: "economic",
+      });
+      const authoritative = Object.freeze({
+        actionID: breakAlliance.id,
+        actionIDs: [breakAlliance.id, build.id],
+        reason: "v16 breaks first",
+        planFollowed: true,
+        selectedSkillScore: 99,
+      });
+      const shadow = new KeystoneShadowCouncilExecutor({
+        delegate: delegate(authoritative),
+        actionFollowsCanonicalPlan: () => false,
+        experts: experts({ economy: () => proposal("economy", build.id) }),
+        observeAllDecisions: false,
+        politicsGuardEnabled: true,
+        logLine: () => undefined,
+      });
+
+      expect(
+        shadow.decide(
+          input([breakAlliance, build, action("hold:wait", "hold")]),
+          plan,
+        ),
+      ).toEqual({
+        actionID: build.id,
+        actionIDs: [build.id],
+        reason:
+          "[keystone-politics-guard:v1 break_alliance] Council selected economy over proactive diplomacy",
+        planFollowed: false,
+        executorSource: "keystone-council-politics-guard",
+        actionSelectionSource: "keystone-council-politics-guard:economy",
+      });
+      expect(shadow.latestTelemetry()?.politicsGuard).toMatchObject({
+        trigger: "break_alliance",
+        delegateActionID: breakAlliance.id,
+        replacementActionID: build.id,
+        replacementSource: "economy",
+        abstention: null,
+      });
+    });
+
+    it.each([
+      "forced backstab conversion",
+      "hard-nation endgame conversion",
+      "front-opening conversion",
+    ])(
+      "explicitly suppresses a standalone %s break in the named experimental arm",
+      (reason) => {
+        const breakAlliance = action("break_alliance:ALLY", "break_alliance", {
+          targetID: "ALLY",
+        });
+        const expand = action("expand:neutral:35", "attack", {
+          targetID: null,
+          expansion: true,
+        });
+        const authoritative = Object.freeze({
+          actionID: breakAlliance.id,
+          reason: `v16 ${reason}`,
+          planFollowed: true,
+        });
+        const shadow = new KeystoneShadowCouncilExecutor({
+          delegate: delegate(authoritative),
+          actionFollowsCanonicalPlan: () => false,
+          experts: experts({
+            expansion: () => proposal("expansion", expand.id),
+          }),
+          observeAllDecisions: false,
+          politicsGuardEnabled: true,
+          logLine: () => undefined,
+        });
+
+        const selected = shadow.decide(
+          input([breakAlliance, expand, action("hold:wait", "hold")]),
+          plan,
+        );
+
+        expect(selected).not.toBe(authoritative);
+        expect(selected).toMatchObject({
+          actionID: expand.id,
+          actionIDs: [expand.id],
+          actionSelectionSource: "keystone-council-politics-guard:expansion",
+        });
+      },
+    );
+
+    it("retains survival precedence over productive experts", () => {
+      const request = action("alliance_request:RIVAL", "alliance_request", {
+        recipientID: "RIVAL",
+      });
+      const retreat = action("retreat:land", "retreat");
+      const expand = action("expand:neutral:35", "attack", {
+        targetID: null,
+        expansion: true,
+        troopPercent: 35,
+      });
+      const shadow = new KeystoneShadowCouncilExecutor({
+        delegate: delegate({
+          actionID: request.id,
+          reason: "v16 asks under pressure",
+          planFollowed: false,
+        }),
+        actionFollowsCanonicalPlan: () => false,
+        experts: experts({
+          expansion: () => proposal("expansion", expand.id),
+        }),
+        observeAllDecisions: false,
+        politicsGuardEnabled: true,
+        logLine: () => undefined,
+      });
+
+      const result = shadow.decide(
+        pressuredInput(
+          [request, retreat, expand, action("hold:wait", "hold")],
+          [visiblePlayer("RIVAL")],
+        ),
+        plan,
+      );
+
+      expect(result).toMatchObject({
+        actionID: retreat.id,
+        actionIDs: [retreat.id],
+        planFollowed: false,
+        actionSelectionSource: "keystone-council-politics-guard:survival",
+      });
+      expect(shadow.latestTelemetry()?.politicsGuard).toMatchObject({
+        replacementActionID: retreat.id,
+        replacementSource: "survival",
+      });
+    });
+
+    it.each([
+      "alliance_reject",
+      "alliance_extend",
+      "embargo_stop",
+      "attack",
+    ] as const)(
+      "returns the exact delegate and skips Council work for non-trigger %s",
+      (kind) => {
+        const selected = action(`selected:${kind}`, kind);
+        const authoritative = Object.freeze({
+          actionID: selected.id,
+          actionIDs: [selected.id, "hold:wait"],
+          reason: `v16 ${kind}`,
+          planFollowed: false,
+          selectedSkill: "must-survive",
+        });
+        const expansion = vi.fn(() =>
+          proposal("expansion", "expand:neutral:35"),
+        );
+        const shadow = new KeystoneShadowCouncilExecutor({
+          delegate: delegate(authoritative),
+          actionFollowsCanonicalPlan: () => false,
+          experts: experts({ expansion }),
+          observeAllDecisions: false,
+          politicsGuardEnabled: true,
+          logLine: () => undefined,
+        });
+
+        expect(
+          shadow.decide(input([selected, action("hold:wait", "hold")]), plan),
+        ).toBe(authoritative);
+        expect(expansion).not.toHaveBeenCalled();
+        expect(shadow.latestTelemetry()).toBeNull();
+      },
+    );
+
+    it("preserves the reactive counter-request that accepts an incoming alliance", () => {
+      const request = action("alliance_request:RIVAL", "alliance_request", {
+        recipientID: "RIVAL",
+      });
+      const authoritative = Object.freeze({
+        actionID: request.id,
+        actionIDs: [request.id],
+        reason: "v16 accepts incoming request",
+        planFollowed: true,
+      });
+      const expansion = vi.fn(() => proposal("expansion", "expand:neutral:35"));
+      const shadow = new KeystoneShadowCouncilExecutor({
+        delegate: delegate(authoritative),
+        actionFollowsCanonicalPlan: () => false,
+        experts: experts({ expansion }),
+        observeAllDecisions: false,
+        politicsGuardEnabled: true,
+        logLine: () => undefined,
+      });
+
+      expect(
+        shadow.decide(
+          input([request, action("hold:wait", "hold")], {
+            players: [
+              visiblePlayer("RIVAL", { hasIncomingAllianceRequest: true }),
+            ],
+          }),
+          plan,
+        ),
+      ).toBe(authoritative);
+      expect(expansion).not.toHaveBeenCalled();
+      expect(shadow.latestTelemetry()).toBeNull();
+    });
+
+    it("fails closed when alliance-request target state is ambiguous", () => {
+      const request = action("alliance_request:RIVAL", "alliance_request", {
+        targetID: "RIVAL",
+        recipientID: "OTHER",
+      });
+      const authoritative = Object.freeze({
+        actionID: request.id,
+        reason: "v16 request with ambiguous wire metadata",
+        planFollowed: false,
+      });
+      const expert = vi.fn(() => proposal("expansion", "expand:neutral:35"));
+      const shadow = new KeystoneShadowCouncilExecutor({
+        delegate: delegate(authoritative),
+        actionFollowsCanonicalPlan: () => false,
+        experts: experts({ expansion: expert }),
+        observeAllDecisions: true,
+        politicsGuardEnabled: true,
+        logLine: () => undefined,
+      });
+
+      expect(
+        shadow.decide(
+          input([request, action("hold:wait", "hold")], {
+            players: [visiblePlayer("RIVAL"), visiblePlayer("OTHER")],
+          }),
+          plan,
+        ),
+      ).toBe(authoritative);
+      expect(expert).toHaveBeenCalledOnce();
+      expect(shadow.latestTelemetry()?.politicsGuard).toMatchObject({
+        trigger: null,
+        delegateActionID: request.id,
+        replacementActionID: null,
+        abstention: "request_state_ambiguous",
+      });
+    });
+
+    it("abstains when only politics, binding, or hold could replace the delegate", () => {
+      const request = action("alliance_request:RIVAL", "alliance_request", {
+        recipientID: "RIVAL",
+      });
+      const authoritative = Object.freeze({
+        actionID: request.id,
+        actionIDs: [request.id],
+        reason: "v16 proactive request",
+        planFollowed: true,
+      });
+      const shadow = new KeystoneShadowCouncilExecutor({
+        delegate: delegate(authoritative),
+        actionFollowsCanonicalPlan: () => false,
+        experts: experts({
+          politics: () => proposal("politics", request.id),
+        }),
+        observeAllDecisions: false,
+        politicsGuardEnabled: true,
+        logLine: () => undefined,
+      });
+
+      expect(
+        shadow.decide(
+          input([request, action("hold:wait", "hold")], {
+            players: [visiblePlayer("RIVAL")],
+          }),
+          {
+            ...plan,
+            allianceDirective: {
+              stance: "seek_alliance",
+              targetPlayerId: "RIVAL",
+            },
+          },
+        ),
+      ).toBe(authoritative);
+      expect(shadow.latestTelemetry()).toMatchObject({
+        winner: {
+          tier: "binding_directive",
+          source: "binding_directive",
+          actionID: request.id,
+        },
+        politicsGuard: {
+          trigger: "proactive_alliance_request",
+          replacementActionID: null,
+          replacementSource: null,
+          abstention: "council_abstained",
+        },
+      });
+    });
+
+    it("lets a productive expert override a Commander alliance binding inside the experimental guard", () => {
+      const request = action("alliance_request:RIVAL", "alliance_request", {
+        recipientID: "RIVAL",
+      });
+      const expand = action("expand:neutral:35", "attack", {
+        targetID: null,
+        expansion: true,
+      });
+      const shadow = new KeystoneShadowCouncilExecutor({
+        delegate: delegate({
+          actionID: request.id,
+          actionIDs: [request.id],
+          reason: "v16 follows Commander alliance binding",
+          planFollowed: true,
+        }),
+        actionFollowsCanonicalPlan: () => false,
+        experts: experts({
+          expansion: () => proposal("expansion", expand.id),
+        }),
+        observeAllDecisions: false,
+        politicsGuardEnabled: true,
+        logLine: () => undefined,
+      });
+
+      const selected = shadow.decide(
+        input([request, expand, action("hold:wait", "hold")], {
+          players: [visiblePlayer("RIVAL")],
+        }),
+        {
+          ...plan,
+          allianceDirective: {
+            stance: "seek_alliance",
+            targetPlayerId: "RIVAL",
+          },
+        },
+      );
+
+      expect(selected).toMatchObject({
+        actionID: expand.id,
+        actionIDs: [expand.id],
+        planFollowed: false,
+        actionSelectionSource: "keystone-council-politics-guard:expansion",
+      });
+      expect(shadow.latestTelemetry()).toMatchObject({
+        winner: {
+          tier: "binding_directive",
+          actionID: request.id,
+        },
+        politicsGuard: {
+          trigger: "proactive_alliance_request",
+          replacementActionID: expand.id,
+          replacementSource: "expansion",
+          abstention: null,
+        },
+      });
+    });
+
+    it("fails closed on expert errors and ambiguous or missing replacement offers", () => {
+      const request = action("alliance_request:RIVAL", "alliance_request", {
+        recipientID: "RIVAL",
+      });
+      const authoritative = Object.freeze({
+        actionID: request.id,
+        reason: "exact v16 object",
+        planFollowed: false,
+      });
+      const current = (actions: LegalAction[]) =>
+        input(actions, { players: [visiblePlayer("RIVAL")] });
+
+      const errorLogs: string[] = [];
+      const errorGuard = new KeystoneShadowCouncilExecutor({
+        delegate: delegate(authoritative),
+        actionFollowsCanonicalPlan: () => false,
+        experts: experts({
+          expansion: () => {
+            throw new Error("guard expert failure");
+          },
+        }),
+        observeAllDecisions: false,
+        politicsGuardEnabled: true,
+        logLine: (line) => errorLogs.push(line),
+      });
+      expect(
+        errorGuard.decide(
+          current([request, action("hold:wait", "hold")]),
+          plan,
+        ),
+      ).toBe(authoritative);
+      expect(errorGuard.latestTelemetry()?.politicsGuard.abstention).toBe(
+        "council_error",
+      );
+      const abstentionLine = errorLogs.find((line) =>
+        line.startsWith(KEYSTONE_POLITICS_GUARD_LOG_PREFIX),
+      );
+      expect(
+        JSON.parse(
+          abstentionLine!.slice(KEYSTONE_POLITICS_GUARD_LOG_PREFIX.length),
+        ),
+      ).toMatchObject({
+        outcome: "abstained",
+        trigger: "proactive_alliance_request",
+        replacementActionID: null,
+        replacementSource: null,
+        abstention: "council_error",
+      });
+
+      const spoofedExpand = action("expand:spoofed", "attack", {
+        targetID: null,
+        expansion: true,
+      });
+      const spoofedOwnerGuard = new KeystoneShadowCouncilExecutor({
+        delegate: delegate(authoritative),
+        actionFollowsCanonicalPlan: () => false,
+        experts: experts({
+          politics: () => proposal("expansion", spoofedExpand.id),
+        }),
+        observeAllDecisions: false,
+        politicsGuardEnabled: true,
+        logLine: () => undefined,
+      });
+      expect(
+        spoofedOwnerGuard.decide(
+          current([request, spoofedExpand, action("hold:wait", "hold")]),
+          plan,
+        ),
+      ).toBe(authoritative);
+      expect(
+        spoofedOwnerGuard.latestTelemetry()?.politicsGuard.abstention,
+      ).toBe("council_error");
+
+      const duplicate = action("expand:duplicate", "attack", {
+        targetID: null,
+        expansion: true,
+      });
+      const ambiguousGuard = new KeystoneShadowCouncilExecutor({
+        delegate: delegate(authoritative),
+        actionFollowsCanonicalPlan: () => false,
+        experts: experts({
+          expansion: () => proposal("expansion", duplicate.id),
+        }),
+        observeAllDecisions: false,
+        politicsGuardEnabled: true,
+        logLine: () => undefined,
+      });
+      expect(
+        ambiguousGuard.decide(
+          current([
+            request,
+            duplicate,
+            { ...duplicate },
+            action("hold:wait", "hold"),
+          ]),
+          plan,
+        ),
+      ).toBe(authoritative);
+      expect(ambiguousGuard.latestTelemetry()?.politicsGuard.abstention).toBe(
+        "council_ambiguous_or_missing",
+      );
+
+      const missingGuard = new KeystoneShadowCouncilExecutor({
+        delegate: delegate(authoritative),
+        actionFollowsCanonicalPlan: () => false,
+        experts: experts({
+          expansion: () => proposal("expansion", "expand:not-offered"),
+        }),
+        observeAllDecisions: false,
+        politicsGuardEnabled: true,
+        logLine: () => undefined,
+      });
+      expect(
+        missingGuard.decide(
+          current([request, action("hold:wait", "hold")]),
+          plan,
+        ),
+      ).toBe(authoritative);
+      expect(missingGuard.latestTelemetry()?.politicsGuard.abstention).toBe(
+        "council_ambiguous_or_missing",
+      );
+    });
+
+    it("fails closed when the delegate offer is missing or ambiguous", () => {
+      const request = action("alliance_request:RIVAL", "alliance_request", {
+        recipientID: "RIVAL",
+      });
+      const authoritative = Object.freeze({
+        actionID: request.id,
+        reason: "exact malformed-offer authority",
+        planFollowed: false,
+      });
+      const expert = vi.fn(() => proposal("expansion", "expand:neutral:35"));
+      const shadow = new KeystoneShadowCouncilExecutor({
+        delegate: delegate(authoritative),
+        actionFollowsCanonicalPlan: () => false,
+        experts: experts({ expansion: expert }),
+        observeAllDecisions: false,
+        politicsGuardEnabled: true,
+        logLine: () => undefined,
+      });
+
+      expect(
+        shadow.decide(
+          input([action("hold:wait", "hold")], {
+            players: [visiblePlayer("RIVAL")],
+          }),
+          plan,
+        ),
+      ).toBe(authoritative);
+      expect(shadow.latestTelemetry()).toBeNull();
+      expect(
+        shadow.decide(
+          input([request, { ...request }, action("hold:wait", "hold")], {
+            players: [visiblePlayer("RIVAL")],
+          }),
+          plan,
+        ),
+      ).toBe(authoritative);
+      expect(shadow.latestTelemetry()).toBeNull();
+      expect(expert).not.toHaveBeenCalled();
+    });
+
+    it("breaks a request-break loop without carrying shadow incumbent state", () => {
+      const request = action("alliance_request:RIVAL", "alliance_request", {
+        recipientID: "RIVAL",
+      });
+      const breakAlliance = action("break_alliance:RIVAL", "break_alliance", {
+        targetID: "RIVAL",
+      });
+      const expand = action("expand:neutral:35", "attack", {
+        targetID: null,
+        expansion: true,
+      });
+      const decisions = vi
+        .fn()
+        .mockReturnValueOnce({
+          actionID: request.id,
+          reason: "request",
+          planFollowed: false,
+        })
+        .mockReturnValueOnce({
+          actionID: breakAlliance.id,
+          reason: "break",
+          planFollowed: false,
+        });
+      const shadow = new KeystoneShadowCouncilExecutor({
+        delegate: { decide: decisions },
+        actionFollowsCanonicalPlan: () => false,
+        experts: experts({
+          expansion: () =>
+            proposal("expansion", expand.id, {
+              commitmentKey: "expansion:neutral-land",
+              horizonDecisions: 4,
+            }),
+        }),
+        observeAllDecisions: false,
+        politicsGuardEnabled: true,
+        logLine: () => undefined,
+      });
+
+      const first = shadow.decide(
+        input([request, expand, action("hold:wait", "hold")], {
+          turn: 2_000,
+          players: [visiblePlayer("RIVAL")],
+        }),
+        plan,
+      );
+      const second = shadow.decide(
+        input([breakAlliance, expand, action("hold:wait", "hold")], {
+          turn: 2_001,
+          players: [visiblePlayer("RIVAL")],
+        }),
+        plan,
+      );
+
+      expect([first.actionID, second.actionID]).toEqual([expand.id, expand.id]);
+      expect(first.actionIDs).toEqual([expand.id]);
+      expect(second.actionIDs).toEqual([expand.id]);
+      expect([first.actionID, second.actionID]).not.toContain(request.id);
+      expect([first.actionID, second.actionID]).not.toContain(breakAlliance.id);
+      expect(shadow.latestTelemetry()?.politicsGuard).toMatchObject({
+        trigger: "break_alliance",
+        replacementActionID: expand.id,
+        replacementSource: "expansion",
+      });
+    });
   });
 
   it("keeps p99 shadow overhead <=5ms and every sample <25ms at 512 actions", () => {

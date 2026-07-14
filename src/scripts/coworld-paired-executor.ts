@@ -34,9 +34,10 @@ const SECRET_ENV_COMPACT_PATTERN =
 const ARM_OWNED_ENV_KEYS = new Set([
   "PROXYWAR_KEYSTONE_SINGLE_ACTION",
   "PROXYWAR_KEYSTONE_EXPERT_COUNCIL_SHADOW",
+  "PROXYWAR_KEYSTONE_COUNCIL_POLITICS_GUARD",
   "PROXYWAR_KEYSTONE_EXPERT_MASK",
 ]);
-const MAX_ARMS = 34;
+const MAX_ARMS = 35;
 const EPISODE_TIMEOUT_SECONDS = 3_600;
 const EPISODE_PROCESS_TIMEOUT_MS = 3_700_000;
 const VALIDATOR_PROCESS_TIMEOUT_MS = 60_000;
@@ -264,7 +265,7 @@ function validatePlan(plan: CoworldPairedPlan, planPath: string): void {
     plan.arms.length < 2 ||
     plan.arms.length > MAX_ARMS
   ) {
-    throw new Error("Plan must contain 2..34 resolved arms");
+    throw new Error("Plan must contain 2..35 resolved arms");
   }
   const armByID = new Map<string, CoworldResolvedArm>();
   for (const arm of plan.arms) {
@@ -736,7 +737,8 @@ function validateResolvedArm(arm: CoworldResolvedArm): void {
     arm.kind !== "v16" &&
     arm.kind !== "a1" &&
     arm.kind !== "v16-shadow" &&
-    arm.kind !== "a1-shadow"
+    arm.kind !== "a1-shadow" &&
+    arm.kind !== "v16-politics-guard"
   ) {
     throw new Error(`Unsupported resolved arm ${String(arm.kind)}`);
   }
@@ -754,11 +756,15 @@ function expectedArm(
   expertMask: number,
 ): CoworldResolvedArm {
   const shadow = kind === "v16-shadow" || kind === "a1-shadow";
+  const politicsGuard = kind === "v16-politics-guard";
   const base = kind === "a1" || kind === "a1-shadow" ? "a1" : "v16";
   if (!Number.isInteger(expertMask) || expertMask < 0 || expertMask > 15) {
     throw new Error("Expert mask must be an integer in 0..15");
   }
-  if (!shadow && expertMask !== 0) {
+  if (politicsGuard && expertMask !== 15) {
+    throw new Error("Politics-guard arm must use the reviewed expert mask 15");
+  }
+  if (!shadow && !politicsGuard && expertMask !== 0) {
     throw new Error("Non-shadow arms must have expertMask 0");
   }
   return {
@@ -770,7 +776,12 @@ function expectedArm(
     env: {
       PROXYWAR_KEYSTONE_SINGLE_ACTION: base === "a1" ? "1" : "0",
       PROXYWAR_KEYSTONE_EXPERT_COUNCIL_SHADOW: shadow ? "1" : "0",
-      ...(shadow ? { PROXYWAR_KEYSTONE_EXPERT_MASK: String(expertMask) } : {}),
+      ...(politicsGuard
+        ? { PROXYWAR_KEYSTONE_COUNCIL_POLITICS_GUARD: "1" }
+        : {}),
+      ...(shadow || politicsGuard
+        ? { PROXYWAR_KEYSTONE_EXPERT_MASK: String(expertMask) }
+        : {}),
     },
   };
 }
@@ -1348,6 +1359,8 @@ function compareResolvedArms(
         return 2;
       case "a1-shadow":
         return 3;
+      case "v16-politics-guard":
+        return 4;
     }
   };
   return (

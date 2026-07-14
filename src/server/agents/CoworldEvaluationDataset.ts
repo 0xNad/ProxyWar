@@ -6,7 +6,8 @@ export type CoworldCouncilEvaluationArmKind =
   | "v16"
   | "a1"
   | "v16-shadow"
-  | "a1-shadow";
+  | "a1-shadow"
+  | "v16-politics-guard";
 
 export interface CoworldCouncilEvaluationArm {
   armID: string;
@@ -24,8 +25,8 @@ export interface CoworldCouncilEvaluationAssignment {
   jobID: string;
   arm: CoworldCouncilEvaluationArm;
   intentionToTreat: boolean;
-  /** Locked plan v3 contains observational shadow arms, never council authority. */
-  actualTreatmentExposure: false;
+  /** True only for a locked arm that can replace the v16 delegate at runtime. */
+  actualTreatmentExposure: boolean;
   expertMask: number;
   variantID: string;
   seed: number;

@@ -50,10 +50,17 @@ The loader accepts only the frozen Coworld `0.1.30` paired-matrix plan
 
 Every joined candidate row preserves `matrixID`, `blockID`, `pairID`, `jobID`,
 arm and expert mask, variant, seed, map, candidate seat, roster-order ID, and
-candidate/game/opponent image IDs. `intentionToTreat` is derived only from the
-locked plan arm's `shadow` flag. `actualTreatmentExposure` is always `false`
-because plan v3 has observational shadow arms and no reviewed authoritative
-Council runtime. `[repo/file verified]`
+candidate/game/opponent image IDs. Plan v3 additionally admits one reviewed,
+default-off `v16-politics-guard` arm; it is not generic Council authority.
+`intentionToTreat` is true for locked shadow arms and for that named guard arm.
+`actualTreatmentExposure` is true only for the guard arm, whose runtime may
+replace a proactive alliance request or any active `break_alliance`; shadow
+arms remain observational. `[repo/file verified]`
+
+The all-break policy is deliberately broad: it can suppress v16 backstab,
+hard-nation endgame, and front-opening conversions. It is isolated to the
+named arm so paired outcomes can decide whether to retain it, narrow it to
+request/break churn, or replace it with a request-only guard. `[repo/file verified]`
 
 The top-level Council audit separates missing, invalid, and unjoined jobs and
 blocks. A block is complete only when it contains the exact planned job IDs
@@ -64,8 +71,9 @@ ties. Paired base-versus-shadow differences are labeled
 effects. `[repo/file verified]`
 
 This contract does not show that any expert proposal improved play and does
-not authorize a Council action. That requires a later reviewed authoritative
-runtime and separately powered evaluation. `[repo/file verified]`
+not authorize generic Council action selection. The named politics guard is a
+bounded exception that still requires separately powered paired evaluation
+before any hosted rollout. `[repo/file verified]`
 
 ## Verification contract
 

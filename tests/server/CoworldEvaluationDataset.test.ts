@@ -151,6 +151,7 @@ async function writeCouncilPlanFixture(
       shadow: CouncilCompletionStatus;
     }>;
     replayDirectory?: boolean;
+    includePoliticsGuard?: boolean;
   } = {},
 ): Promise<{
   planPath: string;
@@ -198,6 +199,23 @@ async function writeCouncilPlanFixture(
         PROXYWAR_KEYSTONE_EXPERT_MASK: "15",
       },
     },
+    ...(input.includePoliticsGuard === true
+      ? [
+          {
+            armID: "v16-politics-guard",
+            kind: "v16-politics-guard",
+            base: "v16",
+            shadow: false,
+            expertMask: 15,
+            env: {
+              PROXYWAR_KEYSTONE_SINGLE_ACTION: "0",
+              PROXYWAR_KEYSTONE_EXPERT_COUNCIL_SHADOW: "0",
+              PROXYWAR_KEYSTONE_COUNCIL_POLITICS_GUARD: "1",
+              PROXYWAR_KEYSTONE_EXPERT_MASK: "15",
+            },
+          },
+        ]
+      : []),
   ];
   const statuses = input.blocks ?? [{ base: "complete", shadow: "complete" }];
   const materializedManifest = {
@@ -268,7 +286,8 @@ async function writeCouncilPlanFixture(
     const identityParts = [matrixID, variantID, 0, seed, rosterOrderID];
     const blockID = `block-${canonicalSha256(identityParts).slice(7, 39)}`;
     const pairID = `pair-${canonicalSha256(identityParts).slice(7, 39)}`;
-    const armOrder = blockIndex % 2 === 0 ? arms : [arms[1], arms[0]];
+    const offset = blockIndex % arms.length;
+    const armOrder = [...arms.slice(offset), ...arms.slice(0, offset)];
     blocks.push({
       blockID,
       pairID,
@@ -320,8 +339,9 @@ async function writeCouncilPlanFixture(
         continue;
       }
       await fs.mkdir(outputDir, { recursive: true });
-      const scores = arm.shadow ? [0.7, 0.3] : [0, 0];
-      const winnerSlot = arm.shadow ? 0 : null;
+      const treatment = arm.shadow || arm.kind === "v16-politics-guard";
+      const scores = treatment ? [0.7, 0.3] : [0, 0];
+      const winnerSlot = treatment ? 0 : null;
       const players = [{ name: "Auri" }, { name: "Opponent" }];
       const resultsPath = path.join(outputDir, "results.json");
       const replayPath = path.join(outputDir, "replay");
@@ -893,6 +913,45 @@ describe("Coworld evaluation dataset", () => {
         outrightWinDelta: 1,
       }),
     ]);
+  });
+
+  test("identifies the named politics-guard arm as real default-off treatment exposure", async () => {
+    const fixture = await writeCouncilPlanFixture({
+      includePoliticsGuard: true,
+    });
+    const loaded = await loadCoworldEvaluationEpisodes([], [fixture.planPath]);
+    const dataset = buildCoworldEvaluationDataset({
+      episodes: loaded.episodes,
+      selector: { seat: 0, policyVersionId: null, playerName: null },
+      councilEvaluationPlan: loaded.councilEvaluationPlan,
+    });
+    const guardJobID = `${fixture.blocks[0].blockID}-v16-politics-guard`;
+    const guardRow = dataset.rows.find(
+      (row) => row.councilEvaluation?.jobID === guardJobID,
+    );
+
+    expect(guardRow?.councilEvaluation).toMatchObject({
+      arm: {
+        armID: "v16-politics-guard",
+        kind: "v16-politics-guard",
+        base: "v16",
+        shadow: false,
+        expertMask: 15,
+        env: {
+          PROXYWAR_KEYSTONE_SINGLE_ACTION: "0",
+          PROXYWAR_KEYSTONE_EXPERT_COUNCIL_SHADOW: "0",
+          PROXYWAR_KEYSTONE_COUNCIL_POLITICS_GUARD: "1",
+          PROXYWAR_KEYSTONE_EXPERT_MASK: "15",
+        },
+      },
+      intentionToTreat: true,
+      actualTreatmentExposure: true,
+      expertMask: 15,
+    });
+    expect(dataset.councilEvaluation).toMatchObject({
+      intentionToTreatJobIDs: expect.arrayContaining([guardJobID]),
+      actualTreatmentExposureJobIDs: [guardJobID],
+    });
   });
 
   test("accepts producer-compatible replay directory hashes", async () => {

@@ -13,12 +13,14 @@ import type {
 } from "../../src/server/agents/AgentTypes";
 import {
   arbitrateKeystoneAction,
+  arbitrateKeystonePoliticsGuard,
   buildKeystoneWorldModel,
   computeKeystoneBidBP,
   DEFAULT_KEYSTONE_PLAN_ALIGNMENT_BONUS_BP,
   DEFAULT_KEYSTONE_SWITCH_MARGIN_BP,
   keystoneExpertDomains,
   KeystoneOperationalCommitmentLedger,
+  keystonePoliticsGuardSelection,
   normalizeKeystoneCommanderContext,
   proposeKeystoneConquest,
   proposeKeystoneEconomy,
@@ -36,12 +38,15 @@ import {
   type KeystoneExpertDomain,
   type KeystoneExpertProposal,
   type KeystoneOperationalLedgerTransition,
+  type KeystonePoliticsGuardReplacementSource,
   type KeystoneProposalRejection,
   type KeystoneWorldModel,
 } from "./keystone-experts";
 
 export const KEYSTONE_SHADOW_COUNCIL_LOG_PREFIX = "keystone-shadow-council ";
 export const KEYSTONE_SHADOW_COUNCIL_LOG_MAX_BYTES = 4_096;
+export const KEYSTONE_POLITICS_GUARD_LOG_PREFIX = "keystone-politics-guard ";
+export const KEYSTONE_POLITICS_GUARD_LOG_MAX_BYTES = 512;
 export const KEYSTONE_SHADOW_COUNCIL_METADATA_MAX_BYTES = 300;
 export const KEYSTONE_SHADOW_COUNCIL_METADATA_KEY = "keystoneShadowCouncil";
 
@@ -131,6 +136,10 @@ export interface KeystoneShadowCouncilExecutorOptions {
   readonly planAlignmentBonusBP?: number;
   /** Minimum challenger advantage required to leave a live objective. */
   readonly switchMarginBP?: number;
+  /** Observe all decisions. False is used by the trigger-only treatment. */
+  readonly observeAllDecisions?: boolean;
+  /** Default-off treatment for proactive alliance churn only. */
+  readonly politicsGuardEnabled?: boolean;
 }
 
 interface ShadowProposalRecord {
@@ -150,6 +159,7 @@ interface ShadowCouncilDraft {
   readonly systemErrorSources: readonly KeystoneShadowSystemSource[];
   readonly enabledExpertMask: number;
   readonly result: KeystoneArbitrationResult | null;
+  readonly politicsGuardResult: KeystoneArbitrationResult | null;
   readonly directiveStatus:
     | KeystoneBindingDirectiveStatus
     | "error"
@@ -159,6 +169,41 @@ interface ShadowCouncilDraft {
   readonly ledgerRecord: KeystoneOperationalLedgerTransition | null;
   readonly infrastructureFailure: boolean;
   readonly elapsedUs: number;
+}
+
+export type KeystonePoliticsGuardTrigger =
+  | "proactive_alliance_request"
+  | "break_alliance";
+
+export type KeystonePoliticsGuardAbstention =
+  | "disabled"
+  | "not_triggered"
+  | "reactive_alliance_request"
+  | "delegate_action_missing"
+  | "delegate_action_ambiguous"
+  | "request_state_ambiguous"
+  | "council_unavailable"
+  | "council_error"
+  | "council_ambiguous_or_missing"
+  | "council_abstained";
+
+interface KeystonePoliticsGuardAssessment {
+  readonly trigger: KeystonePoliticsGuardTrigger | null;
+  readonly abstention: KeystonePoliticsGuardAbstention | null;
+}
+
+interface KeystonePoliticsGuardTelemetry {
+  readonly enabled: boolean;
+  readonly trigger: KeystonePoliticsGuardTrigger | null;
+  readonly delegateActionID: string;
+  readonly replacementActionID: string | null;
+  readonly replacementSource: KeystonePoliticsGuardReplacementSource | null;
+  readonly abstention: KeystonePoliticsGuardAbstention | null;
+}
+
+interface KeystonePoliticsGuardApplication {
+  readonly decision: AgentExecutionDecision;
+  readonly telemetry: KeystonePoliticsGuardTelemetry;
 }
 
 interface ShadowSequence {
@@ -250,6 +295,7 @@ export interface KeystoneShadowCouncilTelemetry {
     readonly preparation: ShadowLedgerTransitionTelemetry | null;
     readonly record: ShadowLedgerTransitionTelemetry | null;
   };
+  readonly politicsGuard: KeystonePoliticsGuardTelemetry;
   readonly authoritativeActionID: string;
   readonly agreement: ShadowAgreement;
   readonly health: ShadowHealth;
@@ -278,8 +324,9 @@ const defaultSystemProposers: KeystoneShadowSystemProposers = Object.freeze({
 });
 
 /**
- * Observes the four-expert council without changing authoritative execution.
- * The delegate's exact AgentExecutionDecision object is always returned.
+ * Observes the four-expert Council. By default the exact delegate object is
+ * returned; the explicit politics-guard treatment may replace only its two
+ * reviewed proactive diplomacy triggers.
  */
 export class KeystoneShadowCouncilExecutor implements AgentExecutor {
   private readonly experts: KeystoneShadowExperts;
@@ -289,6 +336,8 @@ export class KeystoneShadowCouncilExecutor implements AgentExecutor {
   private readonly nowNanos: () => bigint;
   private readonly planAlignmentBonusBP: number;
   private readonly switchMarginBP: number;
+  private readonly observeAllDecisions: boolean;
+  private readonly politicsGuardEnabled: boolean;
   private readonly operationalLedger =
     new KeystoneOperationalCommitmentLedger();
   private gameID: string | null = null;
@@ -312,9 +361,29 @@ export class KeystoneShadowCouncilExecutor implements AgentExecutor {
       "switch margin",
       options.switchMarginBP ?? DEFAULT_KEYSTONE_SWITCH_MARGIN_BP,
     );
+    this.observeAllDecisions = options.observeAllDecisions ?? true;
+    this.politicsGuardEnabled = options.politicsGuardEnabled === true;
   }
 
   decide(input: AgentBrainInput, plan: StrategicPlan): AgentExecutionDecision {
+    const authoritative = this.options.delegate.decide(input, plan);
+    let guardAssessment: KeystonePoliticsGuardAssessment = Object.freeze({
+      trigger: null,
+      abstention: this.politicsGuardEnabled
+        ? "delegate_action_ambiguous"
+        : "disabled",
+    });
+    try {
+      guardAssessment = assessPoliticsGuardTrigger(
+        this.politicsGuardEnabled,
+        input,
+        authoritative.actionID,
+      );
+    } catch {
+      // Trigger parsing is treatment behavior. Malformed observations must
+      // therefore fail closed to the exact delegate object.
+    }
+    this.latest = null;
     let sequence: ShadowSequence = Object.freeze({
       ordinal: this.ordinal + 1,
       reset: false,
@@ -326,31 +395,44 @@ export class KeystoneShadowCouncilExecutor implements AgentExecutor {
         input.observation.gameID,
         input.observation.turnNumber,
       );
-      draft = this.observeCouncil(input, plan, sequence);
+      if (!this.observeAllDecisions && guardAssessment.trigger === null) {
+        return authoritative;
+      }
+      draft = this.observeCouncil(
+        input,
+        plan,
+        sequence,
+        guardAssessment.trigger,
+      );
       if (sequence.reset && draft.ledgerPreparation !== null) {
         this.pendingReset = false;
       }
     } catch {
-      // The authoritative executor must still run even if shadow state or its
-      // injectable diagnostic clock is malformed.
+      // A malformed Council observation cannot displace the delegate action.
     }
 
-    // Authority is deliberately isolated after the shadow work: no council
-    // result, abstention, rejection, or expert failure can alter this call.
-    const authoritative = this.options.delegate.decide(input, plan);
+    let application: KeystonePoliticsGuardApplication;
     try {
+      application = applyPoliticsGuard(
+        this.politicsGuardEnabled,
+        input,
+        authoritative,
+        guardAssessment,
+        draft,
+      );
       const telemetry = telemetryFor(
         input.observation.turnNumber,
         sequence,
         draft,
-        authoritative.actionID,
+        application.telemetry,
       );
       this.latest = telemetry;
       this.emitTelemetry(telemetry);
     } catch {
-      // Post-decision telemetry serialization is equally non-authoritative.
+      // Guard and telemetry failures both fail closed to the exact delegate.
+      return authoritative;
     }
-    return authoritative;
+    return application.decision;
   }
 
   latestTelemetry(): KeystoneShadowCouncilTelemetry | null {
@@ -381,6 +463,7 @@ export class KeystoneShadowCouncilExecutor implements AgentExecutor {
     input: AgentBrainInput,
     plan: StrategicPlan,
     sequence: ShadowSequence,
+    guardTrigger: KeystonePoliticsGuardTrigger | null,
   ): ShadowCouncilDraft {
     const startedAt = this.nowNanos();
     try {
@@ -467,6 +550,7 @@ export class KeystoneShadowCouncilExecutor implements AgentExecutor {
       }
       const errorDomains: KeystoneExpertDomain[] = [];
       const expertProposals: KeystoneExpertProposal[] = [];
+      const politicsGuardExpertProposals: KeystoneExpertProposal[] = [];
       for (const domain of keystoneExpertDomains) {
         if ((this.enabledExpertMask & EXPERT_ERROR_BITS[domain]) === 0) {
           continue;
@@ -475,6 +559,14 @@ export class KeystoneShadowCouncilExecutor implements AgentExecutor {
           const proposal = this.experts[domain](world);
           if (proposal !== null) {
             expertProposals.push(proposal);
+            if (proposal.source !== domain) {
+              // Expert-slot attribution is part of the guard's ownership
+              // boundary. Normal shadow arbitration still records the
+              // proposal, but treatment fails closed on this inconsistency.
+              infrastructureFailure = true;
+            } else if (domain !== "politics") {
+              politicsGuardExpertProposals.push(proposal);
+            }
             proposals.push(
               proposalRecord(
                 world,
@@ -509,6 +601,14 @@ export class KeystoneShadowCouncilExecutor implements AgentExecutor {
         },
         ledgerPreparation.auctionContext,
       );
+      const politicsGuardResult =
+        guardTrigger === null
+          ? null
+          : arbitrateKeystonePoliticsGuard(world, {
+              survivalProposal,
+              eligibleExpertProposals: politicsGuardExpertProposals,
+              auctionContext: ledgerPreparation.auctionContext,
+            });
       const ledgerRecord = this.operationalLedger.record({
         world,
         ordinal: sequence.ordinal,
@@ -521,6 +621,7 @@ export class KeystoneShadowCouncilExecutor implements AgentExecutor {
         systemErrorSources: Object.freeze(systemErrorSources),
         enabledExpertMask: this.enabledExpertMask,
         result,
+        politicsGuardResult,
         directiveStatus,
         directiveKind: commander.binding?.kind ?? null,
         ledgerPreparation: ledgerPreparation.transition,
@@ -535,6 +636,7 @@ export class KeystoneShadowCouncilExecutor implements AgentExecutor {
         systemErrorSources: Object.freeze([]),
         enabledExpertMask: this.enabledExpertMask,
         result: null,
+        politicsGuardResult: null,
         directiveStatus: "error",
         directiveKind: null,
         ledgerPreparation: null,
@@ -552,6 +654,14 @@ export class KeystoneShadowCouncilExecutor implements AgentExecutor {
     } catch {
       // Observability cannot become action-selection behavior.
     }
+    try {
+      const guardLine = boundedKeystonePoliticsGuardTelemetryLine(telemetry);
+      if (guardLine !== null) {
+        this.logLine(guardLine);
+      }
+    } catch {
+      // The dedicated treatment event is equally non-authoritative.
+    }
   }
 }
 
@@ -562,12 +672,201 @@ function unavailableDraft(enabledExpertMask: number): ShadowCouncilDraft {
     systemErrorSources: Object.freeze([]),
     enabledExpertMask,
     result: null,
+    politicsGuardResult: null,
     directiveStatus: "unavailable",
     directiveKind: null,
     ledgerPreparation: null,
     ledgerRecord: null,
     infrastructureFailure: true,
     elapsedUs: 0,
+  });
+}
+
+function assessPoliticsGuardTrigger(
+  enabled: boolean,
+  input: AgentBrainInput,
+  delegateActionID: string,
+): KeystonePoliticsGuardAssessment {
+  if (!enabled) {
+    return Object.freeze({ trigger: null, abstention: "disabled" });
+  }
+  if (input.observation.phase !== "active") {
+    return Object.freeze({ trigger: null, abstention: "not_triggered" });
+  }
+  const matchingActions = input.legalActions.filter(
+    (action) => action.id === delegateActionID,
+  );
+  if (matchingActions.length === 0) {
+    return Object.freeze({
+      trigger: null,
+      abstention: "delegate_action_missing",
+    });
+  }
+  if (matchingActions.length !== 1) {
+    return Object.freeze({
+      trigger: null,
+      abstention: "delegate_action_ambiguous",
+    });
+  }
+  const action = matchingActions[0]!;
+  if (action.kind === "break_alliance") {
+    // Deliberately broad experimental policy: this suppresses every active
+    // break, including v16 backstab, hard-nation endgame, and front-opening
+    // conversions. It is armed only by the named default-off paired arm; live
+    // outcomes decide whether a later request-only/churn guard should replace it.
+    return Object.freeze({ trigger: "break_alliance", abstention: null });
+  }
+  if (action.kind !== "alliance_request") {
+    return Object.freeze({ trigger: null, abstention: "not_triggered" });
+  }
+
+  const targetID = politicsTargetID(action);
+  if (targetID === null) {
+    return Object.freeze({
+      trigger: null,
+      abstention: "request_state_ambiguous",
+    });
+  }
+  const targets = input.observation.visiblePlayers.filter(
+    (player) => player.playerID === targetID,
+  );
+  if (targets.length !== 1) {
+    return Object.freeze({
+      trigger: null,
+      abstention: "request_state_ambiguous",
+    });
+  }
+  const hasIncomingAllianceRequest = targets[0]!.hasIncomingAllianceRequest;
+  if (hasIncomingAllianceRequest === true) {
+    // A counter-request accepts an incoming alliance in OpenFront. That is
+    // reactive politics, explicitly outside this anti-churn treatment.
+    return Object.freeze({
+      trigger: null,
+      abstention: "reactive_alliance_request",
+    });
+  }
+  if (hasIncomingAllianceRequest !== false) {
+    return Object.freeze({
+      trigger: null,
+      abstention: "request_state_ambiguous",
+    });
+  }
+  return Object.freeze({
+    trigger: "proactive_alliance_request",
+    abstention: null,
+  });
+}
+
+function politicsTargetID(action: LegalAction): string | null {
+  const targetID = action.metadata?.targetID;
+  const recipientID = action.metadata?.recipientID;
+  const valid = (value: unknown): value is string =>
+    typeof value === "string" && value.length > 0;
+  if (targetID !== undefined && targetID !== null && !valid(targetID)) {
+    return null;
+  }
+  if (
+    recipientID !== undefined &&
+    recipientID !== null &&
+    !valid(recipientID)
+  ) {
+    return null;
+  }
+  if (valid(targetID) && valid(recipientID) && targetID !== recipientID) {
+    return null;
+  }
+  if (valid(targetID)) {
+    return targetID;
+  }
+  return valid(recipientID) ? recipientID : null;
+}
+
+function unchangedPoliticsGuardApplication(
+  enabled: boolean,
+  authoritative: AgentExecutionDecision,
+  assessment: KeystonePoliticsGuardAssessment,
+): KeystonePoliticsGuardApplication {
+  return Object.freeze({
+    decision: authoritative,
+    telemetry: Object.freeze({
+      enabled,
+      trigger: assessment.trigger,
+      delegateActionID: authoritative.actionID,
+      replacementActionID: null,
+      replacementSource: null,
+      abstention: assessment.abstention,
+    }),
+  });
+}
+
+function applyPoliticsGuard(
+  enabled: boolean,
+  input: AgentBrainInput,
+  authoritative: AgentExecutionDecision,
+  assessment: KeystonePoliticsGuardAssessment,
+  draft: ShadowCouncilDraft,
+): KeystonePoliticsGuardApplication {
+  const unchanged = (abstention: KeystonePoliticsGuardAbstention | null) =>
+    unchangedPoliticsGuardApplication(enabled, authoritative, {
+      trigger: assessment.trigger,
+      abstention,
+    });
+  if (!enabled || assessment.trigger === null) {
+    return unchanged(assessment.abstention);
+  }
+  if (draft.infrastructureFailure || draft.politicsGuardResult === null) {
+    return unchanged(
+      draft.politicsGuardResult === null && !draft.infrastructureFailure
+        ? "council_unavailable"
+        : "council_error",
+    );
+  }
+  if (draft.errorDomains.length > 0 || draft.systemErrorSources.length > 0) {
+    return unchanged("council_error");
+  }
+
+  const ambiguousOrMissing = draft.politicsGuardResult.rejections.some(
+    (rejection) =>
+      rejection.reason === "ambiguous_offered_action" ||
+      rejection.reason === "non_offered_action",
+  );
+  if (ambiguousOrMissing) {
+    return unchanged("council_ambiguous_or_missing");
+  }
+  if (draft.politicsGuardResult.rejections.length > 0) {
+    return unchanged("council_error");
+  }
+  const replacement = keystonePoliticsGuardSelection(draft.politicsGuardResult);
+  if (replacement === null) {
+    return unchanged("council_abstained");
+  }
+  const exactOffers = input.legalActions.filter(
+    (action) => action.id === replacement.actionID,
+  );
+  if (exactOffers.length !== 1) {
+    return unchanged("council_ambiguous_or_missing");
+  }
+
+  const decision: AgentExecutionDecision = Object.freeze({
+    actionID: replacement.actionID,
+    actionIDs: [replacement.actionID],
+    reason:
+      `[keystone-politics-guard:v1 ${assessment.trigger}] ` +
+      `Council selected ${replacement.source} over proactive diplomacy`,
+    planFollowed: replacement.planAligned,
+    executorSource: "keystone-council-politics-guard",
+    actionSelectionSource: `keystone-council-politics-guard:${replacement.source}`,
+  });
+  return Object.freeze({
+    decision,
+    telemetry: Object.freeze({
+      enabled: true,
+      trigger: assessment.trigger,
+      delegateActionID: authoritative.actionID,
+      replacementActionID: replacement.actionID,
+      replacementSource: replacement.source,
+      abstention: null,
+    }),
   });
 }
 
@@ -608,7 +907,7 @@ function telemetryFor(
   turn: number,
   sequence: ShadowSequence,
   draft: ShadowCouncilDraft,
-  authoritativeActionID: string,
+  politicsGuard: KeystonePoliticsGuardTelemetry,
 ): KeystoneShadowCouncilTelemetry {
   const errorMask = draft.errorDomains.reduce(
     (mask, domain) => mask | EXPERT_ERROR_BITS[domain],
@@ -634,7 +933,7 @@ function telemetryFor(
       ? "unavailable"
       : winner === null
         ? "abstain"
-        : winner.actionID === authoritativeActionID
+        : winner.actionID === politicsGuard.delegateActionID
           ? "agree"
           : "disagree";
   const health: ShadowHealth = draft.infrastructureFailure
@@ -696,7 +995,15 @@ function telemetryFor(
       preparation: ledgerTransitionTelemetry(draft.ledgerPreparation),
       record: ledgerTransitionTelemetry(draft.ledgerRecord),
     }),
-    authoritativeActionID: safeTelemetryID(authoritativeActionID),
+    politicsGuard: Object.freeze({
+      ...politicsGuard,
+      delegateActionID: safeTelemetryID(politicsGuard.delegateActionID),
+      replacementActionID:
+        politicsGuard.replacementActionID === null
+          ? null
+          : safeTelemetryID(politicsGuard.replacementActionID),
+    }),
+    authoritativeActionID: safeTelemetryID(politicsGuard.delegateActionID),
     agreement,
     health,
     exposure: Object.freeze({
@@ -861,6 +1168,7 @@ export function boundedKeystoneShadowCouncilTelemetryLine(
     directive: telemetry.directive,
     auction: telemetry.auction,
     operational: telemetry.operational,
+    politicsGuard: telemetry.politicsGuard,
     authoritativeActionID: telemetry.authoritativeActionID,
     agreement: telemetry.agreement,
     health: "unavailable",
@@ -868,6 +1176,40 @@ export function boundedKeystoneShadowCouncilTelemetryLine(
     elapsedUs: telemetry.elapsedUs,
   } as const;
   return `${KEYSTONE_SHADOW_COUNCIL_LOG_PREFIX}${JSON.stringify(compact)}`;
+}
+
+/**
+ * Dedicated, bounded treatment evidence. It is emitted only after a trigger,
+ * so guard-only non-triggers stay free of Council work and log noise while an
+ * applied or abstained intervention remains independently extractable.
+ */
+export function boundedKeystonePoliticsGuardTelemetryLine(
+  telemetry: KeystoneShadowCouncilTelemetry,
+): string | null {
+  const guard = telemetry.politicsGuard;
+  if (guard.trigger === null) {
+    return null;
+  }
+  const event = Object.freeze({
+    schema: "keystone-politics-guard",
+    version: 1,
+    turn: telemetry.turn,
+    ordinal: telemetry.ordinal,
+    outcome: guard.replacementActionID === null ? "abstained" : "applied",
+    trigger: guard.trigger,
+    delegateActionID: safeTelemetryID(guard.delegateActionID),
+    replacementActionID:
+      guard.replacementActionID === null
+        ? null
+        : safeTelemetryID(guard.replacementActionID),
+    replacementSource: guard.replacementSource,
+    abstention: guard.abstention,
+  });
+  const line = `${KEYSTONE_POLITICS_GUARD_LOG_PREFIX}${JSON.stringify(event)}`;
+  if (Buffer.byteLength(line, "utf8") > KEYSTONE_POLITICS_GUARD_LOG_MAX_BYTES) {
+    throw new Error("Keystone politics guard telemetry exceeded its budget");
+  }
+  return line;
 }
 
 function compactMetadata(telemetry: KeystoneShadowCouncilTelemetry): string {
