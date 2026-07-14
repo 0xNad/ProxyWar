@@ -89,6 +89,10 @@ export interface KeystonePlayerFacts {
   readonly friendlyOrTeam: boolean;
   readonly sharesBorder: boolean;
   readonly incomingAttack: boolean;
+  readonly hasIncomingAllianceRequest: boolean;
+  readonly hasEmbargoAgainst: boolean;
+  readonly canExtendAlliance: boolean;
+  readonly allianceInExtensionWindow: boolean;
   readonly troops: number;
   readonly troopRatioBP: number | null;
   readonly tileShareBP: number | null;

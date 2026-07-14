@@ -1,0 +1,238 @@
+import type {
+  KeystoneActionFacts,
+  KeystoneBidComponents,
+  KeystoneExpertProposal,
+  KeystonePlayerFacts,
+  KeystoneWorldModel,
+} from "./types";
+
+type PoliticsReaction =
+  | "embargo_repair"
+  | "hostile_request_rejection"
+  | "alliance_extension";
+
+export type KeystonePoliticsProposal = KeystoneExpertProposal & {
+  readonly source: "politics";
+};
+
+interface PoliticsCandidate {
+  readonly action: KeystoneActionFacts;
+  readonly target: KeystonePlayerFacts;
+  readonly reaction: PoliticsReaction;
+  readonly priority: number;
+}
+
+const reactionScores: Readonly<
+  Record<PoliticsReaction, Omit<KeystoneBidComponents, "riskBP">>
+> = Object.freeze({
+  embargo_repair: Object.freeze({
+    expectedValueBP: 8_500,
+    urgencyBP: 9_500,
+    confidenceBP: 9_700,
+    opportunityCostBP: 300,
+  }),
+  hostile_request_rejection: Object.freeze({
+    expectedValueBP: 6_000,
+    urgencyBP: 8_500,
+    confidenceBP: 9_300,
+    opportunityCostBP: 1_000,
+  }),
+  alliance_extension: Object.freeze({
+    expectedValueBP: 6_500,
+    urgencyBP: 6_000,
+    confidenceBP: 9_000,
+    opportunityCostBP: 1_500,
+  }),
+});
+
+/**
+ * Proposes at most one evidence-gated diplomatic reaction. The initial
+ * Politics expert intentionally has no proactive policy: it may repair an
+ * embargo against a friendly player, reject an alliance request from a player
+ * actively attacking us, or preserve an observable alliance that is already
+ * in its extension window. Every other political action is an abstention.
+ */
+export function proposeKeystonePolitics(
+  world: KeystoneWorldModel,
+): KeystonePoliticsProposal | null {
+  if (world.phase !== "active" || world.own === null) {
+    return null;
+  }
+
+  const ambiguousActionIDs = new Set(world.ambiguousOfferedActionIDs);
+  const actionIDCounts = countActionIDs(world.actions);
+  const { playerByID, ambiguousPlayerIDs } = indexUniquePlayers(world.players);
+  const incomingAggressorIDs = new Set(world.incomingAggressorIDs);
+  const candidates: PoliticsCandidate[] = [];
+
+  for (const action of world.actions) {
+    if (
+      !isCommonlyEligible(action) ||
+      actionIDCounts.get(action.id) !== 1 ||
+      ambiguousActionIDs.has(action.id) ||
+      action.targetPlayerID === null ||
+      ambiguousPlayerIDs.has(action.targetPlayerID)
+    ) {
+      continue;
+    }
+    const target = playerByID.get(action.targetPlayerID);
+    if (target === undefined || target.isAlive !== true) {
+      continue;
+    }
+    const candidate = reactionFor(action, target, incomingAggressorIDs);
+    if (candidate !== null) {
+      candidates.push(candidate);
+    }
+  }
+
+  candidates.sort(comparePoliticsCandidates);
+  const selected = candidates[0];
+  if (selected === undefined) {
+    return null;
+  }
+  const scores = reactionScores[selected.reaction];
+  return Object.freeze({
+    proposalID: `politics:${selected.reaction}:${selected.action.id}`,
+    actionID: selected.action.id,
+    source: "politics",
+    rationale: rationaleFor(selected.reaction, selected.target.playerID),
+    expectedValueBP: scores.expectedValueBP,
+    urgencyBP: scores.urgencyBP,
+    confidenceBP: scores.confidenceBP,
+    riskBP: selected.action.actionRiskBP,
+    opportunityCostBP: scores.opportunityCostBP,
+  });
+}
+
+function reactionFor(
+  action: KeystoneActionFacts,
+  target: KeystonePlayerFacts,
+  incomingAggressorIDs: ReadonlySet<string>,
+): PoliticsCandidate | null {
+  if (
+    action.kind === "embargo_stop" &&
+    action.targetsFriendlyOrTeam === true &&
+    target.friendlyOrTeam === true &&
+    target.hasEmbargoAgainst === true
+  ) {
+    return Object.freeze({
+      action,
+      target,
+      reaction: "embargo_repair",
+      priority: 0,
+    });
+  }
+
+  if (
+    action.kind === "alliance_reject" &&
+    action.targetsFriendlyOrTeam === false &&
+    target.friendlyOrTeam === false &&
+    target.hasIncomingAllianceRequest === true &&
+    (target.incomingAttack === true ||
+      incomingAggressorIDs.has(target.playerID))
+  ) {
+    return Object.freeze({
+      action,
+      target,
+      reaction: "hostile_request_rejection",
+      priority: 1,
+    });
+  }
+
+  if (
+    action.kind === "alliance_extend" &&
+    action.targetsFriendlyOrTeam === true &&
+    target.isAllied === true &&
+    target.friendlyOrTeam === true &&
+    target.canExtendAlliance === true &&
+    target.allianceInExtensionWindow === true &&
+    target.incomingAttack === false &&
+    !incomingAggressorIDs.has(target.playerID)
+  ) {
+    return Object.freeze({
+      action,
+      target,
+      reaction: "alliance_extension",
+      priority: 2,
+    });
+  }
+
+  return null;
+}
+
+function isCommonlyEligible(action: KeystoneActionFacts): boolean {
+  return (
+    action.id.trim().length > 0 &&
+    action.actionOwner === "politics" &&
+    action.forbidden === false &&
+    action.safetyBlocked === false &&
+    action.targetsSelf === false &&
+    action.isHostileTargetAction === false &&
+    action.isSpawn === false &&
+    action.isHold === false &&
+    Number.isInteger(action.actionRiskBP) &&
+    action.actionRiskBP >= 0 &&
+    action.actionRiskBP <= 10_000
+  );
+}
+
+function countActionIDs(
+  actions: readonly KeystoneActionFacts[],
+): ReadonlyMap<string, number> {
+  const counts = new Map<string, number>();
+  for (const action of actions) {
+    counts.set(action.id, (counts.get(action.id) ?? 0) + 1);
+  }
+  return counts;
+}
+
+function indexUniquePlayers(players: readonly KeystonePlayerFacts[]): {
+  readonly playerByID: ReadonlyMap<string, KeystonePlayerFacts>;
+  readonly ambiguousPlayerIDs: ReadonlySet<string>;
+} {
+  const playerByID = new Map<string, KeystonePlayerFacts>();
+  const ambiguousPlayerIDs = new Set<string>();
+  for (const player of players) {
+    if (
+      player.playerID.trim().length === 0 ||
+      playerByID.has(player.playerID)
+    ) {
+      ambiguousPlayerIDs.add(player.playerID);
+      playerByID.delete(player.playerID);
+      continue;
+    }
+    if (!ambiguousPlayerIDs.has(player.playerID)) {
+      playerByID.set(player.playerID, player);
+    }
+  }
+  return { playerByID, ambiguousPlayerIDs };
+}
+
+function comparePoliticsCandidates(
+  a: PoliticsCandidate,
+  b: PoliticsCandidate,
+): number {
+  return (
+    a.priority - b.priority ||
+    a.action.actionRiskBP - b.action.actionRiskBP ||
+    compareText(a.action.id, b.action.id)
+  );
+}
+
+function rationaleFor(
+  reaction: PoliticsReaction,
+  targetPlayerID: string,
+): string {
+  switch (reaction) {
+    case "embargo_repair":
+      return `repair embargo against observed friendly target ${targetPlayerID}`;
+    case "hostile_request_rejection":
+      return `reject incoming alliance request from active aggressor ${targetPlayerID}`;
+    case "alliance_extension":
+      return `extend existing alliance in observed extension window with ${targetPlayerID}`;
+  }
+}
+
+function compareText(a: string, b: string): number {
+  return a < b ? -1 : a > b ? 1 : 0;
+}
