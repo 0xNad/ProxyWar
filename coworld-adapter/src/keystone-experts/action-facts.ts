@@ -140,6 +140,7 @@ export function classifyKeystoneActions(
           forbidden: forbiddenKinds.has(action.kind),
           planAligned: planAlignedIDs.has(action.id),
           actionRiskBP: actionRiskBasisPoints(action),
+          troopCommitmentBP: troopCommitmentBasisPoints(action),
           actionOwner: actionOwner({
             action,
             targetPlayerID,
@@ -261,6 +262,64 @@ function normalizeMetadataLabel(value: unknown): string | null {
     .toLowerCase()
     .replace(/[\s_-]+/g, " ");
   return normalized.length > 0 ? normalized : null;
+}
+
+/**
+ * Reads only canonical metadata fields. If either present field is malformed,
+ * or the two canonical representations disagree, the commitment is unknown.
+ */
+export function troopCommitmentBasisPoints(action: LegalAction): number | null {
+  const metadata = action.metadata;
+  if (metadata === undefined) {
+    return null;
+  }
+  const hasPercent = Object.prototype.hasOwnProperty.call(
+    metadata,
+    "troopPercent",
+  );
+  const hasPercentage = Object.prototype.hasOwnProperty.call(
+    metadata,
+    "troopPercentage",
+  );
+  if (!hasPercent && !hasPercentage) {
+    return null;
+  }
+
+  const percentBP = hasPercent
+    ? normalizedCommitmentBP(metadata.troopPercent, 100)
+    : null;
+  const percentageBP = hasPercentage
+    ? normalizedCommitmentBP(metadata.troopPercentage, 10_000)
+    : null;
+  if (
+    (hasPercent && percentBP === null) ||
+    (hasPercentage && percentageBP === null)
+  ) {
+    return null;
+  }
+  if (
+    percentBP !== null &&
+    percentageBP !== null &&
+    percentBP !== percentageBP
+  ) {
+    return null;
+  }
+  return percentBP ?? percentageBP;
+}
+
+function normalizedCommitmentBP(
+  value: string | number | boolean | null | undefined,
+  scale: number,
+): number | null {
+  if (
+    typeof value !== "number" ||
+    !Number.isFinite(value) ||
+    value < 0 ||
+    value * scale > 10_000
+  ) {
+    return null;
+  }
+  return Math.round(value * scale);
 }
 
 function compareText(a: string, b: string): number {

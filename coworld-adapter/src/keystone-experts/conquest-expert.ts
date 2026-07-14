@@ -13,19 +13,50 @@ type ConquestActionKind =
   | "nuke"
   | "warship"
   | "move_warship";
+type ConventionalKind = "attack" | "boat";
+type NavalKind = "warship" | "move_warship";
+type ConquestEvidence =
+  | "strength"
+  | "finish"
+  | "leader-pressure"
+  | "hostile-contact"
+  | "leader-strike";
 
 export type KeystoneConquestProposal = KeystoneExpertProposal & {
   readonly source: "conquest";
 };
 
+type ConquestAction = KeystoneActionFacts & {
+  readonly kind: ConquestActionKind;
+};
+
+interface ConquestTiming {
+  readonly hostileContact: boolean;
+  readonly turnWindowBP: number;
+}
+
+interface TargetContext {
+  readonly target: KeystonePlayerFacts;
+  readonly relativeTroopRatioBP: number;
+  readonly targetTileShareBP: number | null;
+}
+
 interface ScoredConquestAction {
-  readonly action: KeystoneActionFacts & {
-    readonly kind: ConquestActionKind;
-  };
+  readonly action: ConquestAction;
   readonly proposal: KeystoneConquestProposal;
   readonly bidBP: number;
   readonly targetPlayerID: string | null;
 }
+
+const MIN_OWN_READINESS_BP = 3_500;
+const MIN_STRENGTH_RATIO_BP = 11_500;
+const FINISH_TILE_SHARE_BP = 200;
+const LEADER_TILE_SHARE_BP = 3_500;
+const REMOTE_NUKE_LEADER_SHARE_BP = 4_500;
+const MIN_LEADER_PRESSURE_RATIO_BP = 8_000;
+const MIN_LEADER_PRESSURE_OWN_BP = 6_000;
+const MAX_LEADER_PRESSURE_RISK_BP = 5_000;
+const MAX_TURN_WINDOW_BP = 1_500;
 
 const kindPreference: Readonly<Record<ConquestActionKind, number>> =
   Object.freeze({
@@ -37,48 +68,68 @@ const kindPreference: Readonly<Record<ConquestActionKind, number>> =
   });
 
 /**
- * Proposes one risk-adjusted conquest action from the shared council model.
- * The proposer only sees centrally classified facts and can never manufacture
- * an intent or an action id that was not offered by the canonical action path.
+ * Proposes one evidence-backed conquest action from canonical offered ids.
+ * Time can adjust a justified bid, but never creates conquest evidence.
  */
 export function proposeKeystoneConquest(
   world: KeystoneWorldModel,
 ): KeystoneConquestProposal | null {
-  if (world.phase !== "active" || world.own === null) {
+  const ownReadinessBP = ownReadinessBasisPoints(world);
+  if (
+    world.phase !== "active" ||
+    world.own === null ||
+    ownReadinessBP === null ||
+    ownReadinessBP < MIN_OWN_READINESS_BP
+  ) {
     return null;
   }
 
-  const playerByID = new Map(
-    world.players.map((player) => [player.playerID, player]),
-  );
+  const playerByID = uniquePlayerMap(world.players);
   const incomingAggressorIDs = new Set(world.incomingAggressorIDs);
   const ambiguousIDs = new Set(world.ambiguousOfferedActionIDs);
-  const scored: ScoredConquestAction[] = [];
+  const timing = conquestTiming(world);
+  const eligible = world.actions.filter((action): action is ConquestAction =>
+    isEligibleConquestAction(action, ambiguousIDs),
+  );
 
-  for (const action of world.actions) {
-    if (
-      !isConquestAction(action) ||
-      action.actionOwner !== "conquest" ||
-      action.forbidden ||
-      action.safetyBlocked ||
-      action.targetsSelf ||
-      action.targetsFriendlyOrTeam ||
-      action.isNeutralExpansion ||
-      action.isSpawn ||
-      action.isHold ||
-      ambiguousIDs.has(action.id)
-    ) {
+  const conventional: ScoredConquestAction[] = [];
+  for (const action of eligible) {
+    if (!isConventionalAction(action)) {
       continue;
     }
-
-    const candidate = scoreAction(
+    const candidate = scoreConventionalAction(
       world,
       action,
       playerByID,
       incomingAggressorIDs,
+      ownReadinessBP,
+      timing,
     );
     if (candidate !== null) {
-      scored.push(candidate);
+      conventional.push(candidate);
+    }
+  }
+
+  const scored = [...conventional];
+  for (const action of eligible) {
+    if (isNavalAction(action)) {
+      const candidate = scoreNavalAction(world, action, timing);
+      if (candidate !== null) {
+        scored.push(candidate);
+      }
+    } else if (isNukeAction(action)) {
+      const candidate = scoreNukeAction(
+        world,
+        action,
+        playerByID,
+        incomingAggressorIDs,
+        ownReadinessBP,
+        timing,
+        conventional.length > 0,
+      );
+      if (candidate !== null) {
+        scored.push(candidate);
+      }
     }
   }
 
@@ -86,64 +137,280 @@ export function proposeKeystoneConquest(
   return scored[0]?.proposal ?? null;
 }
 
-function scoreAction(
+function scoreConventionalAction(
   world: KeystoneWorldModel,
-  action: KeystoneActionFacts & { readonly kind: ConquestActionKind },
+  action: ConquestAction & { readonly kind: ConventionalKind },
   playerByID: ReadonlyMap<string, KeystonePlayerFacts>,
   incomingAggressorIDs: ReadonlySet<string>,
+  ownReadinessBP: number,
+  timing: ConquestTiming,
 ): ScoredConquestAction | null {
-  let target: KeystonePlayerFacts | null = null;
-  if (isTargetedConquestKind(action.kind)) {
-    if (action.targetPlayerID === null) {
-      return null;
-    }
-    target = playerByID.get(action.targetPlayerID) ?? null;
-    if (
-      target === null ||
-      !target.isAlive ||
-      target.friendlyOrTeam ||
-      target.incomingAttack ||
-      incomingAggressorIDs.has(target.playerID)
-    ) {
-      return null;
-    }
-  } else if (action.targetPlayerID !== null) {
+  const target = targetContext(world, action, playerByID, incomingAggressorIDs);
+  if (target === null) {
+    return null;
+  }
+  const evidence = conventionalEvidence(action, target, ownReadinessBP);
+  if (evidence === null) {
     return null;
   }
 
-  const timing = conquestTiming(world);
-  const relativeTroopRatioBP =
-    target === null ? null : targetRelativeTroopRatioBP(world, target);
-  const targetTileShareBP =
-    target === null ? null : clampBP(target.tileShareBP ?? 0);
-  const baseComponents =
-    target === null && isNavalConquestKind(action.kind)
-      ? scoreNavalAction(world, action.kind, timing)
-      : target !== null && isTargetedConquestKind(action.kind)
-        ? scoreTargetedAction(
-            world,
-            action.kind,
-            target,
-            relativeTroopRatioBP!,
-            targetTileShareBP!,
-            timing,
-          )
-        : null;
-  if (baseComponents === null) {
-    return null;
-  }
-  const components = freezeComponents({
-    ...baseComponents,
-    riskBP: action.actionRiskBP,
-  });
-  const proposal = proposalFor(
+  const commitmentQualityBP = commitmentQualityBasisPoints(
+    action.troopCommitmentBP,
+    evidence,
+  );
+  const components = conventionalComponents(
+    world,
     action,
     target,
-    relativeTroopRatioBP,
-    targetTileShareBP,
+    evidence,
     timing,
-    components,
+    commitmentQualityBP,
   );
+  return scoredAction(action, target, evidence, timing, components);
+}
+
+function conventionalEvidence(
+  action: ConquestAction & { readonly kind: ConventionalKind },
+  target: TargetContext,
+  ownReadinessBP: number,
+): Exclude<ConquestEvidence, "hostile-contact" | "leader-strike"> | null {
+  if (isFinishTarget(target)) {
+    return "finish";
+  }
+  if (target.relativeTroopRatioBP >= MIN_STRENGTH_RATIO_BP) {
+    return "strength";
+  }
+  if (
+    target.targetTileShareBP !== null &&
+    target.targetTileShareBP >= LEADER_TILE_SHARE_BP &&
+    target.relativeTroopRatioBP >= MIN_LEADER_PRESSURE_RATIO_BP &&
+    ownReadinessBP >= MIN_LEADER_PRESSURE_OWN_BP &&
+    action.actionRiskBP <= MAX_LEADER_PRESSURE_RISK_BP &&
+    (target.target.sharesBorder || action.kind === "boat")
+  ) {
+    return "leader-pressure";
+  }
+  return null;
+}
+
+function conventionalComponents(
+  world: KeystoneWorldModel,
+  action: ConquestAction & { readonly kind: ConventionalKind },
+  target: TargetContext,
+  evidence: Exclude<ConquestEvidence, "hostile-contact" | "leader-strike">,
+  timing: ConquestTiming,
+  commitmentQualityBP: number,
+): KeystoneBidComponents {
+  const advantageBP = clampRange(
+    Math.trunc(((target.relativeTroopRatioBP - 7_500) * 2) / 5),
+    0,
+    5_000,
+  );
+  const disadvantageBP = clampRange(
+    Math.trunc((10_000 - target.relativeTroopRatioBP) / 2),
+    0,
+    2_500,
+  );
+  const tilePayoffBP = clampRange(
+    Math.trunc(((target.targetTileShareBP ?? 0) * 3) / 4),
+    0,
+    2_000,
+  );
+  const finishUrgencyBP = evidence === "finish" ? 2_000 : 0;
+  const leaderUrgencyBP = evidence === "leader-pressure" ? 800 : 0;
+  const contactUrgencyBP = timing.hostileContact ? 400 : 0;
+  const neutralOpportunityCostBP = world.canExpandIntoNeutral ? 1_200 : 0;
+  const commitmentValueBP = Math.trunc(commitmentQualityBP / 4);
+  const commitmentConfidenceBP = Math.trunc(commitmentQualityBP / 5);
+  const commitmentOpportunityCostBP = Math.trunc(
+    (10_000 - commitmentQualityBP) / 4,
+  );
+
+  if (action.kind === "attack") {
+    return freezeComponents({
+      expectedValueBP: clampBP(
+        2_600 +
+          advantageBP +
+          tilePayoffBP +
+          (target.target.sharesBorder ? 1_200 : 0) +
+          commitmentValueBP,
+      ),
+      urgencyBP: clampBP(
+        1_200 +
+          timing.turnWindowBP +
+          (target.target.sharesBorder ? 1_800 : 0) +
+          contactUrgencyBP +
+          finishUrgencyBP +
+          leaderUrgencyBP,
+      ),
+      confidenceBP: clampBP(
+        3_200 +
+          Math.trunc((advantageBP * 3) / 4) +
+          (target.target.sharesBorder ? 1_200 : 0) +
+          commitmentConfidenceBP -
+          disadvantageBP,
+      ),
+      riskBP: action.actionRiskBP,
+      opportunityCostBP: clampBP(
+        2_200 +
+          disadvantageBP +
+          neutralOpportunityCostBP +
+          commitmentOpportunityCostBP,
+      ),
+    });
+  }
+  return freezeComponents({
+    expectedValueBP: clampBP(
+      2_100 +
+        advantageBP +
+        tilePayoffBP +
+        (target.target.sharesBorder ? 100 : 600) +
+        commitmentValueBP,
+    ),
+    urgencyBP: clampBP(
+      1_000 +
+        timing.turnWindowBP +
+        contactUrgencyBP +
+        finishUrgencyBP +
+        leaderUrgencyBP,
+    ),
+    confidenceBP: clampBP(
+      3_000 +
+        Math.trunc((advantageBP * 2) / 3) +
+        (target.target.sharesBorder ? 0 : 800) +
+        commitmentConfidenceBP -
+        disadvantageBP,
+    ),
+    riskBP: action.actionRiskBP,
+    opportunityCostBP: clampBP(
+      3_000 +
+        disadvantageBP +
+        neutralOpportunityCostBP +
+        commitmentOpportunityCostBP,
+    ),
+  });
+}
+
+function scoreNavalAction(
+  world: KeystoneWorldModel,
+  action: ConquestAction & { readonly kind: NavalKind },
+  timing: ConquestTiming,
+): ScoredConquestAction | null {
+  if (!timing.hostileContact || action.targetPlayerID !== null) {
+    return null;
+  }
+  const neutralOpportunityCostBP = world.canExpandIntoNeutral ? 1_000 : 0;
+  const components =
+    action.kind === "warship"
+      ? freezeComponents({
+          expectedValueBP: 4_200 + timing.turnWindowBP,
+          urgencyBP: 2_800 + Math.trunc(timing.turnWindowBP / 2),
+          confidenceBP: 5_800,
+          riskBP: action.actionRiskBP,
+          opportunityCostBP: 4_500 + neutralOpportunityCostBP,
+        })
+      : freezeComponents({
+          expectedValueBP: 3_800 + timing.turnWindowBP,
+          urgencyBP: 3_000 + Math.trunc(timing.turnWindowBP / 2),
+          confidenceBP: 5_500,
+          riskBP: action.actionRiskBP,
+          opportunityCostBP: 3_200 + neutralOpportunityCostBP,
+        });
+  return scoredAction(action, null, "hostile-contact", timing, components);
+}
+
+function scoreNukeAction(
+  world: KeystoneWorldModel,
+  action: ConquestAction & { readonly kind: "nuke" },
+  playerByID: ReadonlyMap<string, KeystonePlayerFacts>,
+  incomingAggressorIDs: ReadonlySet<string>,
+  ownReadinessBP: number,
+  timing: ConquestTiming,
+  conventionalAvailable: boolean,
+): ScoredConquestAction | null {
+  const target = targetContext(world, action, playerByID, incomingAggressorIDs);
+  if (
+    target === null ||
+    conventionalAvailable ||
+    world.canExpandIntoNeutral ||
+    ownReadinessBP < MIN_LEADER_PRESSURE_OWN_BP ||
+    action.actionRiskBP > MAX_LEADER_PRESSURE_RISK_BP ||
+    isFinishTarget(target) ||
+    target.targetTileShareBP === null ||
+    target.targetTileShareBP < LEADER_TILE_SHARE_BP ||
+    target.relativeTroopRatioBP < MIN_LEADER_PRESSURE_RATIO_BP ||
+    (!target.target.sharesBorder &&
+      !timing.hostileContact &&
+      target.targetTileShareBP < REMOTE_NUKE_LEADER_SHARE_BP)
+  ) {
+    return null;
+  }
+
+  const tileValueBP = clampRange(target.targetTileShareBP, 0, 3_500);
+  const ratioConfidenceBP = clampRange(
+    Math.trunc((target.relativeTroopRatioBP - 8_000) / 2),
+    0,
+    2_000,
+  );
+  return scoredAction(
+    action,
+    target,
+    "leader-strike",
+    timing,
+    freezeComponents({
+      expectedValueBP: 2_600 + tileValueBP + timing.turnWindowBP,
+      urgencyBP:
+        1_600 + timing.turnWindowBP + (timing.hostileContact ? 800 : 0),
+      confidenceBP: 4_000 + ratioConfidenceBP,
+      riskBP: action.actionRiskBP,
+      opportunityCostBP: 5_200,
+    }),
+  );
+}
+
+function targetContext(
+  world: KeystoneWorldModel,
+  action: ConquestAction,
+  playerByID: ReadonlyMap<string, KeystonePlayerFacts>,
+  incomingAggressorIDs: ReadonlySet<string>,
+): TargetContext | null {
+  if (action.targetPlayerID === null) {
+    return null;
+  }
+  const target = playerByID.get(action.targetPlayerID) ?? null;
+  if (
+    target === null ||
+    !target.isAlive ||
+    target.friendlyOrTeam ||
+    target.incomingAttack ||
+    incomingAggressorIDs.has(target.playerID)
+  ) {
+    return null;
+  }
+  return Object.freeze({
+    target,
+    relativeTroopRatioBP: targetRelativeTroopRatioBP(world, target),
+    targetTileShareBP:
+      target.tileShareBP === null ? null : clampBP(target.tileShareBP),
+  });
+}
+
+function isFinishTarget(target: TargetContext): boolean {
+  return (
+    target.target.troops === 0 ||
+    (target.targetTileShareBP !== null &&
+      target.targetTileShareBP <= FINISH_TILE_SHARE_BP)
+  );
+}
+
+function scoredAction(
+  action: ConquestAction,
+  target: TargetContext | null,
+  evidence: ConquestEvidence,
+  timing: ConquestTiming,
+  components: KeystoneBidComponents,
+): ScoredConquestAction | null {
+  const proposal = proposalFor(action, target, evidence, timing, components);
   const bidBP = computeKeystoneBidBP(proposal, action.actionRiskBP);
   if (bidBP <= 0) {
     return null;
@@ -152,13 +419,86 @@ function scoreAction(
     action,
     proposal,
     bidBP,
-    targetPlayerID: target?.playerID ?? null,
+    targetPlayerID: target?.target.playerID ?? null,
   });
 }
 
-interface ConquestTiming {
-  readonly hostileContact: boolean;
-  readonly turnWindowBP: number;
+function proposalFor(
+  action: ConquestAction,
+  target: TargetContext | null,
+  evidence: ConquestEvidence,
+  timing: ConquestTiming,
+  components: KeystoneBidComponents,
+): KeystoneConquestProposal {
+  const mode = action.kind === "move_warship" ? "move-warship" : action.kind;
+  const commitment = action.troopCommitmentBP ?? "unknown";
+  const targetRationale =
+    target === null
+      ? `contact=1 turnWindowBP=${timing.turnWindowBP}`
+      : `target=${target.target.playerID} border=${target.target.sharesBorder ? 1 : 0} relativeBP=${target.relativeTroopRatioBP} shareBP=${target.targetTileShareBP ?? "unknown"}`;
+  return Object.freeze({
+    proposalID: `conquest:${mode}:${action.id}`,
+    actionID: action.id,
+    source: "conquest",
+    rationale: `conquest ${mode}; evidence=${evidence} ${targetRationale} commitmentBP=${commitment} riskBP=${components.riskBP}`,
+    ...components,
+    commitmentKey:
+      target === null
+        ? "conquest:naval-control"
+        : `conquest:target:${target.target.playerID}`,
+    horizonDecisions:
+      action.kind === "attack"
+        ? 3
+        : action.kind === "boat" || action.kind === "warship"
+          ? 2
+          : 1,
+  });
+}
+
+function commitmentQualityBasisPoints(
+  commitmentBP: number | null,
+  evidence: Exclude<ConquestEvidence, "hostile-contact" | "leader-strike">,
+): number {
+  if (commitmentBP === null) {
+    return evidence === "finish" ? 5_000 : 2_500;
+  }
+  const preferredBP = evidence === "finish" ? 1_000 : 3_500;
+  return clampBP(9_000 - 2 * Math.abs(commitmentBP - preferredBP));
+}
+
+function targetRelativeTroopRatioBP(
+  world: KeystoneWorldModel,
+  target: KeystonePlayerFacts,
+): number {
+  if (target.troops === 0) {
+    return 30_000;
+  }
+  if (target.relativeTroopRatioBP !== null) {
+    return clampRange(target.relativeTroopRatioBP, 0, 30_000);
+  }
+  if (world.own !== null) {
+    return clampRange(
+      Math.trunc((world.own.troops * 10_000) / target.troops),
+      0,
+      30_000,
+    );
+  }
+  return 0;
+}
+
+function ownReadinessBasisPoints(world: KeystoneWorldModel): number | null {
+  if (world.own === null || world.own.troops <= 0) {
+    return 0;
+  }
+  if (world.own.troopRatioBP !== null) {
+    return clampBP(world.own.troopRatioBP);
+  }
+  if (world.own.maxTroops !== null && world.own.maxTroops > 0) {
+    return clampBP(
+      Math.trunc((world.own.troops * 10_000) / world.own.maxTroops),
+    );
+  }
+  return null;
 }
 
 function conquestTiming(world: KeystoneWorldModel): ConquestTiming {
@@ -170,184 +510,42 @@ function conquestTiming(world: KeystoneWorldModel): ConquestTiming {
     );
   return Object.freeze({
     hostileContact,
-    turnWindowBP: clampBP((world.turnNumber - 800) * 2),
+    turnWindowBP: clampRange(world.turnNumber - 800, 0, MAX_TURN_WINDOW_BP),
   });
 }
 
-function scoreTargetedAction(
-  world: KeystoneWorldModel,
-  kind: "attack" | "boat" | "nuke",
-  target: KeystonePlayerFacts,
-  relativeTroopRatioBP: number,
-  targetTileShareBP: number,
-  timing: ConquestTiming,
-): KeystoneBidComponents {
-  const advantageBP = clampBP(
-    Math.trunc(((relativeTroopRatioBP - 7_500) * 2) / 5),
-  );
-  const disadvantageBP = clampRange(
-    Math.trunc((10_000 - relativeTroopRatioBP) / 2),
-    0,
-    2_500,
-  );
-  const tilePayoffBP = clampRange(
-    Math.trunc((targetTileShareBP * 3) / 4),
-    0,
-    2_000,
-  );
-  const borderBP = target.sharesBorder ? 1_400 : 0;
-  const contactUrgencyBP = timing.hostileContact ? 600 : 0;
-  const neutralOpportunityCostBP = world.canExpandIntoNeutral ? 1_200 : 0;
-
-  switch (kind) {
-    case "attack":
-      return freezeComponents({
-        expectedValueBP: clampBP(3_200 + advantageBP + tilePayoffBP + borderBP),
-        urgencyBP: clampBP(
-          2_000 +
-            timing.turnWindowBP +
-            (target.sharesBorder ? 2_400 : 0) +
-            contactUrgencyBP,
-        ),
-        confidenceBP: clampBP(
-          4_200 +
-            Math.trunc((advantageBP * 3) / 4) +
-            (target.sharesBorder ? 1_800 : 0) -
-            disadvantageBP,
-        ),
-        riskBP: 0,
-        opportunityCostBP: clampBP(
-          1_800 + disadvantageBP + neutralOpportunityCostBP,
-        ),
-      });
-    case "boat":
-      return freezeComponents({
-        expectedValueBP: clampBP(
-          2_600 +
-            advantageBP +
-            tilePayoffBP +
-            (target.sharesBorder ? 200 : 700),
-        ),
-        urgencyBP: clampBP(1_600 + timing.turnWindowBP + contactUrgencyBP),
-        confidenceBP: clampBP(
-          3_600 +
-            Math.trunc((advantageBP * 2) / 3) +
-            (target.sharesBorder ? 0 : 1_000) -
-            disadvantageBP,
-        ),
-        riskBP: 0,
-        opportunityCostBP: clampBP(
-          2_800 + disadvantageBP + neutralOpportunityCostBP,
-        ),
-      });
-    case "nuke":
-      return freezeComponents({
-        expectedValueBP: clampBP(
-          1_200 +
-            tilePayoffBP +
-            timing.turnWindowBP +
-            Math.trunc(advantageBP / 2),
-        ),
-        urgencyBP: clampBP(
-          1_000 +
-            timing.turnWindowBP +
-            (target.sharesBorder ? 800 : 0) +
-            contactUrgencyBP,
-        ),
-        confidenceBP: clampBP(
-          2_800 +
-            Math.trunc(advantageBP / 2) +
-            (target.sharesBorder ? 500 : 0) -
-            disadvantageBP,
-        ),
-        riskBP: 0,
-        opportunityCostBP: clampBP(
-          4_800 + disadvantageBP + neutralOpportunityCostBP,
-        ),
-      });
+function uniquePlayerMap(
+  players: readonly KeystonePlayerFacts[],
+): ReadonlyMap<string, KeystonePlayerFacts> {
+  const byID = new Map<string, KeystonePlayerFacts>();
+  const ambiguous = new Set<string>();
+  for (const player of players) {
+    if (byID.has(player.playerID)) {
+      byID.delete(player.playerID);
+      ambiguous.add(player.playerID);
+    } else if (!ambiguous.has(player.playerID)) {
+      byID.set(player.playerID, player);
+    }
   }
+  return byID;
 }
 
-function scoreNavalAction(
-  world: KeystoneWorldModel,
-  kind: "warship" | "move_warship",
-  timing: ConquestTiming,
-): KeystoneBidComponents {
-  const contactValueBP = timing.hostileContact ? 1_500 : 0;
-  const neutralOpportunityCostBP = world.canExpandIntoNeutral ? 1_000 : 0;
-  if (kind === "warship") {
-    return freezeComponents({
-      expectedValueBP: clampBP(2_400 + timing.turnWindowBP + contactValueBP),
-      urgencyBP: clampBP(
-        1_000 +
-          Math.trunc(timing.turnWindowBP / 2) +
-          (timing.hostileContact ? 1_800 : 0),
-      ),
-      confidenceBP: timing.hostileContact ? 5_800 : 4_500,
-      riskBP: 0,
-      opportunityCostBP: clampBP(4_500 + neutralOpportunityCostBP),
-    });
-  }
-  return freezeComponents({
-    expectedValueBP: clampBP(1_800 + timing.turnWindowBP + contactValueBP),
-    urgencyBP: clampBP(
-      1_800 +
-        Math.trunc(timing.turnWindowBP / 2) +
-        (timing.hostileContact ? 1_500 : 0),
-    ),
-    confidenceBP: timing.hostileContact ? 5_500 : 4_200,
-    riskBP: 0,
-    opportunityCostBP: clampBP(3_000 + neutralOpportunityCostBP),
-  });
-}
-
-function proposalFor(
-  action: KeystoneActionFacts & { readonly kind: ConquestActionKind },
-  target: KeystonePlayerFacts | null,
-  relativeTroopRatioBP: number | null,
-  targetTileShareBP: number | null,
-  timing: ConquestTiming,
-  components: KeystoneBidComponents,
-): KeystoneConquestProposal {
-  const mode = action.kind === "move_warship" ? "move-warship" : action.kind;
-  const targetRationale =
-    target === null
-      ? `contact=${timing.hostileContact ? 1 : 0} turnWindowBP=${timing.turnWindowBP}`
-      : `target=${target.playerID} border=${target.sharesBorder ? 1 : 0} relativeBP=${relativeTroopRatioBP} shareBP=${targetTileShareBP}`;
-  return Object.freeze({
-    proposalID: `conquest:${mode}:${action.id}`,
-    actionID: action.id,
-    source: "conquest",
-    rationale: `conquest ${mode}; ${targetRationale} riskBP=${components.riskBP}`,
-    ...components,
-    commitmentKey:
-      target === null
-        ? "conquest:naval-control"
-        : `conquest:target:${target.playerID}`,
-    horizonDecisions:
-      action.kind === "attack"
-        ? 3
-        : action.kind === "boat" || action.kind === "warship"
-          ? 2
-          : 1,
-  });
-}
-
-function targetRelativeTroopRatioBP(
-  world: KeystoneWorldModel,
-  target: KeystonePlayerFacts,
-): number {
-  if (target.relativeTroopRatioBP !== null) {
-    return clampRange(target.relativeTroopRatioBP, 0, 30_000);
-  }
-  if (target.troops > 0 && world.own !== null) {
-    return clampRange(
-      Math.trunc((world.own.troops * 10_000) / target.troops),
-      0,
-      30_000,
-    );
-  }
-  return 10_000;
+function isEligibleConquestAction(
+  action: KeystoneActionFacts,
+  ambiguousIDs: ReadonlySet<string>,
+): action is ConquestAction {
+  return (
+    isConquestActionKind(action.kind) &&
+    action.actionOwner === "conquest" &&
+    !action.forbidden &&
+    !action.safetyBlocked &&
+    !action.targetsSelf &&
+    !action.targetsFriendlyOrTeam &&
+    !action.isNeutralExpansion &&
+    !action.isSpawn &&
+    !action.isHold &&
+    !ambiguousIDs.has(action.id)
+  );
 }
 
 function compareScoredConquestActions(
@@ -374,22 +572,22 @@ function isConquestActionKind(
   );
 }
 
-function isConquestAction(
-  action: KeystoneActionFacts,
-): action is KeystoneActionFacts & { readonly kind: ConquestActionKind } {
-  return isConquestActionKind(action.kind);
+function isConventionalAction(
+  action: ConquestAction,
+): action is ConquestAction & { readonly kind: ConventionalKind } {
+  return action.kind === "attack" || action.kind === "boat";
 }
 
-function isTargetedConquestKind(
-  kind: ConquestActionKind,
-): kind is "attack" | "boat" | "nuke" {
-  return kind === "attack" || kind === "boat" || kind === "nuke";
+function isNavalAction(
+  action: ConquestAction,
+): action is ConquestAction & { readonly kind: NavalKind } {
+  return action.kind === "warship" || action.kind === "move_warship";
 }
 
-function isNavalConquestKind(
-  kind: ConquestActionKind,
-): kind is "warship" | "move_warship" {
-  return kind === "warship" || kind === "move_warship";
+function isNukeAction(
+  action: ConquestAction,
+): action is ConquestAction & { readonly kind: "nuke" } {
+  return action.kind === "nuke";
 }
 
 function freezeComponents(

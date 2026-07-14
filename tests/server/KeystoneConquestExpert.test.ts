@@ -53,6 +53,22 @@ function neutral(id = "expand:neutral:35"): LegalAction {
   };
 }
 
+function committedAttack(
+  id: string,
+  targetPlayerID: string,
+  troopPercent: number,
+  riskScore = troopPercent / 100,
+): LegalAction {
+  return {
+    ...action(id, "attack", targetPlayerID, riskScore),
+    metadata: {
+      targetID: targetPlayerID,
+      troopPercent,
+      troopPercentage: troopPercent / 100,
+    },
+  };
+}
+
 function player(
   playerID: string,
   overrides: Partial<AgentVisiblePlayer> = {},
@@ -97,6 +113,9 @@ function brainInput(args: {
   ownTeam?: string | null;
   phase?: AgentGamePhase;
   turnNumber?: number;
+  ownTroops?: number;
+  ownMaxTroops?: number;
+  ownTroopRatio?: number;
 }): AgentBrainInput {
   const base = new AgentObservationBuilder().build({
     agentID: "keystone",
@@ -108,6 +127,9 @@ function brainInput(args: {
     phaseOverride: args.phase ?? "active",
   });
   const players = args.players ?? [];
+  const ownTroops = args.ownTroops ?? 75_000;
+  const ownMaxTroops = args.ownMaxTroops ?? 100_000;
+  const ownTroopRatio = args.ownTroopRatio ?? ownTroops / ownMaxTroops;
   return {
     observation: {
       ...base,
@@ -122,9 +144,9 @@ function brainInput(args: {
         isDisconnected: false,
         isTraitor: false,
         hasSpawned: true,
-        troops: 75_000,
-        maxTroops: 100_000,
-        troopRatio: 0.75,
+        troops: ownTroops,
+        maxTroops: ownMaxTroops,
+        troopRatio: ownTroopRatio,
         gold: "250000",
         tilesOwned: 80,
         tileShare: 0.3,
@@ -139,9 +161,9 @@ function brainInput(args: {
       visiblePlayers: players,
       combat: {
         ...base.combat,
-        ownTroops: 75_000,
-        maxTroops: 100_000,
-        troopRatio: 0.75,
+        ownTroops,
+        maxTroops: ownMaxTroops,
+        troopRatio: ownTroopRatio,
         borderedPlayerIDs: players
           .filter((candidate) => candidate.sharesBorder)
           .map((candidate) => candidate.playerID),
@@ -308,6 +330,160 @@ describe("Keystone Conquest expert", () => {
     expect(proposeKeystoneConquest(unjustified)).toBeNull();
   });
 
+  it("does not manufacture naval evidence from a very late turn", () => {
+    const model = world({
+      actions: [
+        action("warship:late", "warship", null, 0.1),
+        action("move-warship:late", "move_warship", null, 0.1),
+      ],
+      turnNumber: 99_999,
+    });
+
+    expect(proposeKeystoneConquest(model)).toBeNull();
+  });
+
+  it("rejects a remote overwhelmingly stronger nuke target and keeps a safe land attack", () => {
+    const model = world({
+      actions: [
+        action("nuke:remote-leader", "nuke", "REMOTE_LEADER", 0.1),
+        committedAttack("attack:safe", "SAFE", 25, 0.1),
+      ],
+      players: [
+        player("REMOTE_LEADER", {
+          relativeTroopRatio: 0.1,
+          tileShare: 0.6,
+          sharesBorder: false,
+        }),
+        player("SAFE", {
+          relativeTroopRatio: 1.4,
+          tileShare: 0.12,
+        }),
+      ],
+      turnNumber: 99_999,
+    });
+
+    expect(proposeKeystoneConquest(model)?.actionID).toBe("attack:safe");
+  });
+
+  it("requires minimum strength, finish, or bounded leader evidence", () => {
+    const reckless = world({
+      actions: [action("attack:reckless", "attack", "STRONG", 0.9)],
+      players: [
+        player("STRONG", {
+          relativeTroopRatio: 0.1,
+          tileShare: 0.2,
+        }),
+      ],
+      turnNumber: 100,
+    });
+    const depleted = world({
+      actions: [committedAttack("attack:depleted", "WEAK", 35, 0.1)],
+      players: [player("WEAK", { relativeTroopRatio: 2 })],
+      ownTroops: 10_000,
+      ownMaxTroops: 100_000,
+      ownTroopRatio: 0.1,
+    });
+
+    expect(proposeKeystoneConquest(reckless)).toBeNull();
+    expect(proposeKeystoneConquest(depleted)).toBeNull();
+  });
+
+  it("prefers meaningful canonical commitments over an automatic 10 percent probe", () => {
+    const model = world({
+      actions: [
+        committedAttack("attack:10", "ENEMY", 10),
+        committedAttack("attack:25", "ENEMY", 25),
+        committedAttack("attack:40", "ENEMY", 40),
+      ],
+      players: [player("ENEMY", { relativeTroopRatio: 1.4 })],
+    });
+
+    expect(
+      model.actions.map((candidate) => [
+        candidate.id,
+        candidate.troopCommitmentBP,
+      ]),
+    ).toEqual([
+      ["attack:10", 1_000],
+      ["attack:25", 2_500],
+      ["attack:40", 4_000],
+    ]);
+    expect(proposeKeystoneConquest(model)?.actionID).toBe("attack:25");
+  });
+
+  it("prefers 35 percent when the full meaningful commitment family is offered", () => {
+    const model = world({
+      actions: [
+        committedAttack("attack:10", "ENEMY", 10),
+        committedAttack("attack:25", "ENEMY", 25),
+        committedAttack("attack:35", "ENEMY", 35),
+        committedAttack("attack:40", "ENEMY", 40),
+      ],
+      players: [player("ENEMY", { relativeTroopRatio: 1.4 })],
+    });
+
+    expect(proposeKeystoneConquest(model)?.actionID).toBe("attack:35");
+  });
+
+  it("treats zero target troops as maximum weakness and uses a cheap finish", () => {
+    const model = world({
+      actions: [
+        committedAttack("finish:10", "ZERO", 10),
+        committedAttack("finish:25", "ZERO", 25),
+        committedAttack("finish:40", "ZERO", 40),
+      ],
+      players: [
+        player("ZERO", {
+          troops: 0,
+          relativeTroopRatio: undefined,
+          tileShare: 0.01,
+        }),
+      ],
+    });
+    const proposal = proposeKeystoneConquest(model);
+
+    expect(proposal?.actionID).toBe("finish:10");
+    expect(proposal?.rationale).toContain("evidence=finish");
+    expect(proposal?.rationale).toContain("relativeBP=30000");
+    expect(proposal?.rationale).toContain("commitmentBP=1000");
+  });
+
+  it("allows a bounded leader strike only when conventional conquest is unavailable", () => {
+    const leader = player("LEADER", {
+      relativeTroopRatio: 1.1,
+      tileShare: 0.5,
+      sharesBorder: false,
+    });
+    const model = world({
+      actions: [action("nuke:leader", "nuke", "LEADER", 0.2)],
+      players: [leader],
+      turnNumber: 2_400,
+    });
+
+    expect(proposeKeystoneConquest(model)).toMatchObject({
+      actionID: "nuke:leader",
+      commitmentKey: "conquest:target:LEADER",
+    });
+    expect(proposeKeystoneConquest(model)?.rationale).toContain(
+      "evidence=leader-strike",
+    );
+
+    const conventionalAvailable = world({
+      actions: [
+        action("nuke:leader", "nuke", "LEADER", 0.2),
+        committedAttack("attack:safe", "SAFE", 25),
+      ],
+      players: [
+        leader,
+        player("SAFE", { relativeTroopRatio: 1.5, tileShare: 0.1 }),
+      ],
+      turnNumber: 2_400,
+    });
+    expect(proposeKeystoneConquest(conventionalAvailable)?.actionID).toBe(
+      "attack:safe",
+    );
+  });
+
   it("is order invariant with deterministic telemetry and tie-breaking", () => {
     const actions = [
       action("attack:z", "attack", "ZED"),
@@ -332,7 +508,7 @@ describe("Keystone Conquest expert", () => {
       actionID: "attack:alpha",
       proposalID: "conquest:attack:attack:alpha",
       rationale:
-        "conquest attack; target=ALPHA border=1 relativeBP=14000 shareBP=1500 riskBP=1000",
+        "conquest attack; evidence=strength target=ALPHA border=1 relativeBP=14000 shareBP=1500 commitmentBP=unknown riskBP=1000",
       commitmentKey: "conquest:target:ALPHA",
     });
   });

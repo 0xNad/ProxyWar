@@ -358,6 +358,57 @@ describe("Keystone expert council infrastructure", () => {
     ).toThrow(/integer from 0 to 10000/);
   });
 
+  it("normalizes canonical troop commitments and fails closed on malformed or conflicting metadata", () => {
+    const actions = [
+      metadataAction("commit:10", "attack", {
+        targetID: "ENEMY",
+        troopPercent: 10,
+      }),
+      metadataAction("commit:25", "attack", {
+        targetID: "ENEMY",
+        troopPercentage: 0.25,
+      }),
+      metadataAction("commit:40", "attack", {
+        targetID: "ENEMY",
+        troopPercent: 40,
+        troopPercentage: 0.4,
+      }),
+      metadataAction("commit:conflict", "attack", {
+        targetID: "ENEMY",
+        troopPercent: 25,
+        troopPercentage: 0.4,
+      }),
+      metadataAction("commit:string", "attack", {
+        targetID: "ENEMY",
+        troopPercent: "35",
+      }),
+      metadataAction("commit:range", "attack", {
+        targetID: "ENEMY",
+        troopPercentage: 1.01,
+      }),
+      action("attack:ENEMY:40", "attack", "ENEMY"),
+    ];
+    const model = buildKeystoneWorldModel(
+      brainInput({ actions, players: [player("ENEMY")] }),
+    );
+    const commitmentByID = Object.fromEntries(
+      model.actions.map((candidate) => [
+        candidate.id,
+        candidate.troopCommitmentBP,
+      ]),
+    );
+
+    expect(commitmentByID).toEqual({
+      "commit:10": 1_000,
+      "commit:25": 2_500,
+      "commit:40": 4_000,
+      "attack:ENEMY:40": null,
+      "commit:conflict": null,
+      "commit:range": null,
+      "commit:string": null,
+    });
+  });
+
   it("assigns every action family to one expert or protected system owner", () => {
     const owned: Array<{ action: LegalAction; owner: KeystoneActionOwner }> = [
       { action: action("spawn", "spawn"), owner: "arbiter" },
