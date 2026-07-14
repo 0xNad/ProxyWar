@@ -138,7 +138,7 @@ export interface KeystoneShadowCouncilExecutorOptions {
   readonly switchMarginBP?: number;
   /** Observe all decisions. False is used by the trigger-only treatment. */
   readonly observeAllDecisions?: boolean;
-  /** Default-off treatment for proactive alliance churn only. */
+  /** Default-off treatment for proactive alliance requests and every active break. */
   readonly politicsGuardEnabled?: boolean;
 }
 

@@ -38,7 +38,7 @@
 //   PROXYWAR_KEYSTONE_PLAN_EVERY Commander cadence in decision steps (default 3)
 //   PROXYWAR_KEYSTONE_SINGLE_ACTION  1/true arms Coworld sequential conversion
 //   PROXYWAR_KEYSTONE_EXPERT_COUNCIL_SHADOW  1/true observes four-expert council
-//   PROXYWAR_KEYSTONE_COUNCIL_POLITICS_GUARD  1/true arms narrow politics guard
+//   PROXYWAR_KEYSTONE_COUNCIL_POLITICS_GUARD  1/true arms request/all-break treatment
 //   PROXYWAR_KEYSTONE_EXPERT_MASK  Council expert bitmask 0..15 (default 15)
 //   PROXYWAR_LLM_MODEL_ID / AWS_REGION / PROXYWAR_LLM_TIMEOUT_MS  bedrock mode
 
@@ -99,7 +99,7 @@ export interface KeystoneBrainOptions {
   singleActionExecutor?: boolean;
   /** Coworld-only, default-off four-expert shadow telemetry. */
   expertCouncilShadow?: boolean;
-  /** Coworld-only, default-off proactive alliance churn treatment. */
+  /** Coworld-only, default-off proactive-request and all-break treatment. */
   councilPoliticsGuard?: boolean;
   /** Council expansion/economy/conquest/politics bitmask; default 15. */
   expertMask?: number;
