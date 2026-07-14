@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import {
   bedrockModelCandidates,
@@ -7,7 +7,9 @@ import {
   decisionToResponse,
   DeferredAgentPlanner,
   isModelUnavailableError,
+  KEYSTONE_EXECUTOR_SETTINGS,
   keystoneModeFromEnv,
+  keystoneSingleActionFromEnv,
   requestToBrainInput,
   transportFallbackResponse,
   type KeystoneModules,
@@ -160,6 +162,50 @@ describe("Coworld keystone player", () => {
 
     expect(["spawn:10", "hold:wait"]).toContain(decision.actionID);
     expect(elapsedMs).toBeLessThan(2000);
+  });
+
+  it("keeps the exact v16 FrontierPolicyExecutor path when single-action is off", async () => {
+    const implicitOff = createKeystoneBrain(modules, {
+      mode: "mock",
+      profile: "aggressive",
+    });
+    const explicitOff = createKeystoneBrain(modules, {
+      mode: "mock",
+      profile: "aggressive",
+      singleActionExecutor: false,
+    });
+    const current = spawnBrainInput();
+
+    expect(await implicitOff.decide(current)).toEqual(
+      await explicitOff.decide(spawnBrainInput()),
+    );
+  });
+
+  it("arms the Coworld treatment in the same image with exact Keystone settings", async () => {
+    const ranker = vi.fn(plannerExecutorModule.rankLegalActionsForExecution);
+    const instrumentedModules = {
+      ...modules,
+      plannerExecutor: {
+        ...plannerExecutorModule,
+        rankLegalActionsForExecution: ranker,
+      },
+    } as KeystoneModules;
+    const brain = createKeystoneBrain(instrumentedModules, {
+      mode: "mock",
+      profile: "aggressive",
+      singleActionExecutor: true,
+    });
+
+    const decision = await brain.decide(spawnBrainInput());
+
+    expect(decision.metadata).toMatchObject({
+      executorSource: "coworld-single-action-v1",
+      actionSelectionSource: "coworld-single-action-v1:opening",
+    });
+    expect(ranker).toHaveBeenCalledOnce();
+    expect(ranker.mock.calls[0]![0].settings).toEqual(
+      KEYSTONE_EXECUTOR_SETTINGS,
+    );
   });
 
   it("DeferredAgentPlanner answers in-clock while the Commander refresh is in flight", async () => {
@@ -536,6 +582,21 @@ describe("Coworld keystone player", () => {
     expect(() =>
       keystoneModeFromEnv({ PROXYWAR_KEYSTONE_MODE: "warp-drive" }),
     ).toThrow(/Unknown PROXYWAR_KEYSTONE_MODE/);
+  });
+
+  it("single-action env defaults off and rejects ambiguous treatment values", () => {
+    expect(keystoneSingleActionFromEnv({})).toBe(false);
+    expect(
+      keystoneSingleActionFromEnv({ PROXYWAR_KEYSTONE_SINGLE_ACTION: "0" }),
+    ).toBe(false);
+    expect(
+      keystoneSingleActionFromEnv({ PROXYWAR_KEYSTONE_SINGLE_ACTION: "true" }),
+    ).toBe(true);
+    expect(() =>
+      keystoneSingleActionFromEnv({
+        PROXYWAR_KEYSTONE_SINGLE_ACTION: "enabled-ish",
+      }),
+    ).toThrow(/expected 0\|1\|false\|true/);
   });
 
   it("bedrock model autodetect: env pin first, unavailable-errors classified", () => {

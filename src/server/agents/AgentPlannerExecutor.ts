@@ -1254,6 +1254,55 @@ export interface RankedActionForPrompt {
   topSkill: string | undefined;
 }
 
+function flattenRankedFrontierActions(
+  scored: readonly FrontierRankedAction[],
+): RankedActionForPrompt[] {
+  return scored.map((candidate) => ({
+    id: candidate.action.id,
+    kind: candidate.action.kind,
+    totalScore: candidate.totalScore,
+    policyScore: candidate.policy.totalScore,
+    skillScore: candidate.skill?.totalScore ?? 0,
+    module: candidate.primaryModule,
+    schedulerSlot: candidate.schedulerSlot,
+    penalties: candidate.policy.penalties,
+    topSkill: candidate.skill?.topSkill,
+  }));
+}
+
+/**
+ * Rank every offered action for a runtime executor without exposing intents or
+ * server-only scorer internals. Coworld injects this function into its adapter
+ * because the integration and repository live in separate runtime roots.
+ */
+export function rankLegalActionsForExecution(args: {
+  input: AgentBrainInput;
+  profile: AgentStrategyProfile;
+  plan: StrategicPlan;
+  settings: Partial<AgentSettings>;
+}): RankedActionForPrompt[] {
+  if (args.input.legalActions.length === 0) {
+    return [];
+  }
+  const baseSettings = resolveAgentSettings(
+    args.profile,
+    args.settings,
+    args.settings.seed ?? args.profile,
+  );
+  const settings = applyTacticalSettings(
+    baseSettings,
+    args.plan.tacticalSettings,
+  );
+  return flattenRankedFrontierActions(
+    rankFrontierActions({
+      input: args.input,
+      plan: args.plan,
+      settings,
+      profile: args.profile,
+    }).scored,
+  );
+}
+
 /**
  * Rank the offered legal actions with the executor's real scorer, for use as the LLM agent's
  * candidate shortlist. When no plan is supplied (the pure action-selector has no planner), a
@@ -1281,17 +1330,7 @@ export function rankLegalActionsForPrompt(args: {
     profile,
   });
   const limit = args.limit ?? 12;
-  return scored.slice(0, limit).map((candidate) => ({
-    id: candidate.action.id,
-    kind: candidate.action.kind,
-    totalScore: candidate.totalScore,
-    policyScore: candidate.policy.totalScore,
-    skillScore: candidate.skill?.totalScore ?? 0,
-    module: candidate.primaryModule,
-    schedulerSlot: candidate.schedulerSlot,
-    penalties: candidate.policy.penalties,
-    topSkill: candidate.skill?.topSkill,
-  }));
+  return flattenRankedFrontierActions(scored).slice(0, limit);
 }
 
 export class FrontierPolicyExecutor implements AgentExecutor {
@@ -20946,6 +20985,24 @@ function choosePlanTurnIntent(input: {
     return "build";
   }
   return "growth";
+}
+
+/**
+ * Canonical single-action adherence audit. An action follows a strategic plan
+ * only when it matches both the objective contract and the currently resolved
+ * per-turn intent; same-kind actions with different target semantics (for
+ * example neutral expansion under pressure_rival) must not report adherence.
+ */
+export function actionFollowsCanonicalPlan(args: {
+  input: AgentBrainInput;
+  plan: StrategicPlan;
+  action: LegalAction;
+}): boolean {
+  const turnIntent = resolvedPlanTurnIntent(args.input, args.plan);
+  return (
+    actionAlignsPlan(args.action, args.plan) &&
+    actionMatchesPlanTurnIntent(args.action, turnIntent)
+  );
 }
 
 function actionAlignsPlan(action: LegalAction, plan: StrategicPlan): boolean {

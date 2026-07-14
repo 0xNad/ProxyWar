@@ -3,11 +3,13 @@ import { PlayerType, Relation, UnitType } from "../../src/core/game/Game";
 import { AgentMemoryBuilder } from "../../src/server/agents/AgentMemoryBuilder";
 import { AgentObservationBuilder } from "../../src/server/agents/AgentObservationBuilder";
 import {
+  actionFollowsCanonicalPlan,
   FrontierPolicyExecutor,
   LlmAgentPlanner,
   MockLlmPlanner,
   OpponentModelLedger,
   PlannerExecutorAgentBrain,
+  rankLegalActionsForExecution,
   rankLegalActionsForPrompt,
   RuleAgentExecutor,
   RuleAgentPlanner,
@@ -15385,6 +15387,198 @@ describe("rankLegalActionsForPrompt (unified LLM shortlist ranker)", () => {
         profile: "opportunistic",
       }),
     ).toEqual([]);
+  });
+
+  it("preserves the prompt ranker's pre-extraction output", () => {
+    const ranked = rankLegalActionsForPrompt({
+      input: {
+        observation: activeObservation("expand_territory"),
+        legalActions: buildLegalActions(),
+      },
+      profile: "opportunistic",
+    });
+
+    expect(ranked).toEqual([
+      {
+        id: "expand:terra-nullius:10",
+        kind: "attack",
+        totalScore: 100,
+        policyScore: 100,
+        skillScore: 100,
+        module: "expansion",
+        schedulerSlot: "neutral_expansion",
+        penalties: [],
+        topSkill: "expansion",
+      },
+      {
+        id: "build:City:100",
+        kind: "build",
+        totalScore: 100,
+        policyScore: 81,
+        skillScore: 100,
+        module: "economy",
+        schedulerSlot: "economic_structure",
+        penalties: ["medium-risk legal action"],
+        topSkill: "economy_building",
+      },
+      {
+        id: "hold",
+        kind: "hold",
+        totalScore: 16,
+        policyScore: 0,
+        skillScore: 56,
+        module: "utility_social",
+        schedulerSlot: "utility_social",
+        penalties: [
+          "opening tempo cannot stall while neutral growth is legal",
+          "unexplained hold while useful non-hold actions exist",
+        ],
+        topSkill: "troop_conservation",
+      },
+    ]);
+  });
+
+  it("gives runtime executors the same flattened ranking with explicit settings", () => {
+    const input = {
+      observation: activeObservation("expand_territory"),
+      legalActions: buildLegalActions(),
+    };
+    const currentPlan = pressurePlan(input.observation, "RIVAL02");
+    const expected = rankLegalActionsForPrompt({
+      input,
+      profile: "opportunistic",
+      plan: currentPlan,
+    });
+
+    expect(
+      rankLegalActionsForExecution({
+        input,
+        profile: "opportunistic",
+        plan: currentPlan,
+        settings: {},
+      }),
+    ).toEqual(expected);
+  });
+});
+
+describe("actionFollowsCanonicalPlan", () => {
+  const neutralAttack = buildLegalActions()[0]!;
+  const economyBuild = buildLegalActions()[1]!;
+  const hostileAttack = hardNationAttackAction(
+    "RIVAL02",
+    "Rival",
+    35,
+    350,
+    1.4,
+    0.2,
+  );
+
+  it.each([
+    {
+      label: "neutral attack under pressure",
+      objective: "pressure_rival" as const,
+      turnIntent: "pressure" as const,
+      action: neutralAttack,
+      preferred: ["attack", "hold"] as LegalAction["kind"][],
+      target: "RIVAL02",
+    },
+    {
+      label: "hostile attack under growth",
+      objective: "expand_territory" as const,
+      turnIntent: "growth" as const,
+      action: hostileAttack,
+      preferred: ["attack", "hold"] as LegalAction["kind"][],
+      target: null,
+    },
+    {
+      label: "neutral attack under economy",
+      objective: "secure_economy" as const,
+      turnIntent: "build" as const,
+      action: neutralAttack,
+      preferred: ["attack", "build", "hold"] as LegalAction["kind"][],
+      target: null,
+    },
+    {
+      label: "economic build under fortify",
+      objective: "fortify_border" as const,
+      turnIntent: "fortify" as const,
+      action: economyBuild,
+      preferred: ["build", "hold"] as LegalAction["kind"][],
+      target: null,
+    },
+    {
+      label: "hold under diplomacy",
+      objective: "build_alliance" as const,
+      turnIntent: "diplomacy" as const,
+      action: hold(),
+      preferred: ["alliance_request", "hold"] as LegalAction["kind"][],
+      target: null,
+    },
+    {
+      label: "attack under survive",
+      objective: "survive" as const,
+      turnIntent: "survive" as const,
+      action: hostileAttack,
+      preferred: ["attack", "hold"] as LegalAction["kind"][],
+      target: null,
+    },
+  ])("rejects $label despite a preferred same-kind surface", (testCase) => {
+    const observation = activeObservation(testCase.objective);
+    const currentPlan: StrategicPlan = {
+      ...pressurePlan(observation, "RIVAL02"),
+      objective: testCase.objective,
+      turnIntent: testCase.turnIntent,
+      targetPlayerId: testCase.target,
+      preferredActionKinds: testCase.preferred,
+    };
+
+    expect(
+      actionFollowsCanonicalPlan({
+        input: {
+          observation,
+          legalActions: [testCase.action, hold()],
+        },
+        plan: currentPlan,
+        action: testCase.action,
+      }),
+    ).toBe(false);
+  });
+
+  it.each([
+    {
+      objective: "pressure_rival" as const,
+      turnIntent: "pressure" as const,
+      action: hostileAttack,
+      target: "RIVAL02",
+    },
+    {
+      objective: "expand_territory" as const,
+      turnIntent: "growth" as const,
+      action: neutralAttack,
+      target: null,
+    },
+    {
+      objective: "secure_economy" as const,
+      turnIntent: "build" as const,
+      action: economyBuild,
+      target: null,
+    },
+  ])("accepts canonical $objective/$turnIntent alignment", (testCase) => {
+    const observation = activeObservation(testCase.objective);
+    const currentPlan: StrategicPlan = {
+      ...pressurePlan(observation, "RIVAL02"),
+      objective: testCase.objective,
+      turnIntent: testCase.turnIntent,
+      targetPlayerId: testCase.target,
+      preferredActionKinds: [testCase.action.kind, "hold"],
+    };
+    expect(
+      actionFollowsCanonicalPlan({
+        input: { observation, legalActions: [testCase.action, hold()] },
+        plan: currentPlan,
+        action: testCase.action,
+      }),
+    ).toBe(true);
   });
 });
 

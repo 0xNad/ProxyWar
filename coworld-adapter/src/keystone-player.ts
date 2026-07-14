@@ -12,9 +12,9 @@
 // refreshes run in the background between decisions (DeferredAgentPlanner), so
 // Coworld's max_decision_ms reject-on-timeout is structurally satisfied.
 //
-// Known v1 limitation: the Coworld wire protocol carries ONE
-// selectedLegalActionId per decision, so executor cascade batches
-// (AgentDecision.actionIDs) degrade to their primary action here.
+// Coworld's wire carries ONE selectedLegalActionId per decision. The default
+// remains the v16 frontier executor; a same-image treatment can opt into the
+// sequential single-action conversion executor instead of dropping batch tails.
 //
 // Modes (PROXYWAR_KEYSTONE_MODE; DEFAULT = the LLM Commander — bedrock when
 // USE_BEDROCK=true, otherwise claude-cli; "the agent" IS the LLM brain):
@@ -36,6 +36,7 @@
 //   PROXYWAR_KEYSTONE_MODE       see above (default: LLM Commander)
 //   PROXYWAR_KEYSTONE_PROFILE    strategy profile (default "aggressive")
 //   PROXYWAR_KEYSTONE_PLAN_EVERY Commander cadence in decision steps (default 3)
+//   PROXYWAR_KEYSTONE_SINGLE_ACTION  1/true arms Coworld sequential conversion
 //   PROXYWAR_LLM_MODEL_ID / AWS_REGION / PROXYWAR_LLM_TIMEOUT_MS  bedrock mode
 
 import { createRequire } from "node:module";
@@ -56,6 +57,7 @@ import type {
   LegalAction,
 } from "../../src/server/agents/AgentTypes";
 import type { LlmProvider } from "../../src/server/agents/LlmProvider";
+import { KeystoneSingleActionExecutor } from "./keystone-single-action-executor";
 
 type PlannerExecutorModule =
   typeof import("../../src/server/agents/AgentPlannerExecutor");
@@ -83,11 +85,13 @@ export interface KeystoneBrainOptions {
    * definitively validate the LLM transport. Pair with planEveryDecisionSteps=1.
    */
   blocking?: boolean;
+  /** Coworld-only, default-off sequential conversion treatment. */
+  singleActionExecutor?: boolean;
 }
 
 // Mirrors the league-smoke planner-claude-cli executor settings so local play
 // and the Coworld seat run the same tuned executor.
-const KEYSTONE_EXECUTOR_SETTINGS = {
+export const KEYSTONE_EXECUTOR_SETTINGS = {
   territoryFirstNeutralLandEnabled: true,
   maxActionsPerDecision: 5,
   siloTileShareRatio: 0.14,
@@ -150,6 +154,21 @@ export function keystoneModeFromEnv(
   // Softmax's service account, payer confirmed 2026-06-10); everywhere else
   // the Claude CLI subscription is the default and fails loud if unavailable.
   return env.USE_BEDROCK === "true" ? "bedrock" : "claude-cli";
+}
+
+export function keystoneSingleActionFromEnv(
+  env: NodeJS.ProcessEnv = process.env,
+): boolean {
+  const raw = env.PROXYWAR_KEYSTONE_SINGLE_ACTION?.trim().toLowerCase() ?? "";
+  if (raw === "" || raw === "0" || raw === "false") {
+    return false;
+  }
+  if (raw === "1" || raw === "true") {
+    return true;
+  }
+  throw new Error(
+    `Unknown PROXYWAR_KEYSTONE_SINGLE_ACTION "${raw}" (expected 0|1|false|true)`,
+  );
 }
 
 /**
@@ -826,11 +845,20 @@ export function createKeystoneBrain(
     MockLlmPlanner,
     LlmAgentPlanner,
     FrontierPolicyExecutor,
+    actionFollowsCanonicalPlan,
+    rankLegalActionsForExecution,
   } = modules.plannerExecutor;
   const planEveryDecisionSteps = options.planEveryDecisionSteps ?? 3;
-  const executor = new FrontierPolicyExecutor(options.profile, {
-    settings: { ...KEYSTONE_EXECUTOR_SETTINGS },
-  });
+  const executor = options.singleActionExecutor
+    ? new KeystoneSingleActionExecutor({
+        profile: options.profile,
+        settings: { ...KEYSTONE_EXECUTOR_SETTINGS },
+        rankActions: rankLegalActionsForExecution,
+        actionFollowsCanonicalPlan,
+      })
+    : new FrontierPolicyExecutor(options.profile, {
+        settings: { ...KEYSTONE_EXECUTOR_SETTINGS },
+      });
 
   let planner: AgentPlanner;
   let deferredPlanner: DeferredAgentPlanner | null = null;
@@ -892,6 +920,7 @@ async function main(): Promise<void> {
   }
   const repoRoot = process.env.PROXYWAR_REPO ?? "/app/proxywar";
   const mode = keystoneModeFromEnv();
+  const singleActionExecutor = keystoneSingleActionFromEnv();
   const profile = (process.env.PROXYWAR_KEYSTONE_PROFILE?.trim() ||
     "aggressive") as AgentStrategyProfile;
   const blocking =
@@ -912,6 +941,7 @@ async function main(): Promise<void> {
     profile,
     planEveryDecisionSteps,
     blocking,
+    singleActionExecutor,
   });
 
   // Optional one-shot Bedrock diagnostic (gated; OFF in production). The pod
@@ -947,7 +977,7 @@ async function main(): Promise<void> {
 
   socket.on("open", () => {
     console.log(
-      `keystone connected ${redactPlayerUrl(url)} (mode=${mode}, profile=${profile}, planEvery=${planEveryDecisionSteps}, blocking=${blocking}, ${keystoneTunableFlagSummary()})`,
+      `keystone connected ${redactPlayerUrl(url)} (mode=${mode}, profile=${profile}, planEvery=${planEveryDecisionSteps}, blocking=${blocking}, executor=${singleActionExecutor ? "coworld-single-action" : "frontier"}, ${keystoneTunableFlagSummary()})`,
     );
   });
 
