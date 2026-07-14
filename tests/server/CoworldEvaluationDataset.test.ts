@@ -36,7 +36,8 @@ function normalizedEpisode(): CoworldEvaluationEpisode {
     episodeId: "ereq_repeated",
     sourcePaths: ["/artifacts/ereq_repeated.replay"],
     runID: "run_repeated",
-    completedAt: "2026-07-14T12:00:00Z",
+    platformCompletedAt: "2026-07-14T12:00:30Z",
+    runtimeCompletedAt: "2026-07-14T12:00:00Z",
     map: "Europe",
     mapSize: "Compact",
     scores: [0.4, 0.2, 0.4],
@@ -204,10 +205,18 @@ function normalizedEpisode(): CoworldEvaluationEpisode {
       },
     ],
     episodeReportedTelemetry: {
-      decisionCount: 5,
-      fallbackCount: 2,
-      degradedCount: 1,
-      parseFailureCount: 1,
+      result: {
+        decisionCount: 5,
+        fallbackCount: 2,
+        degradedCount: 1,
+        parseFailureCount: 1,
+      },
+      summary: {
+        decisionCount: 5,
+        fallbackCount: 2,
+        degradedCount: 1,
+        parseFailureCount: 1,
+      },
     },
   };
 }
@@ -313,7 +322,7 @@ describe("Coworld evaluation dataset", () => {
         episodes: [
           {
             id: "ereq_merge",
-            completed_at: "2026-07-14T10:00:00Z",
+            completed_at: "2026-07-14T12:34:24.817967Z",
             game_config: { map: "Pangaea", map_size: "Compact" },
             policy_version_ids: ["opponent:v1", "candidate:v16"],
             participants: [
@@ -346,16 +355,19 @@ describe("Coworld evaluation dataset", () => {
         results: {
           scores: [0.7, 0.3],
           winner_slot: null,
-          decision_count: 2,
-          fallback_count: 1,
-          degraded_count: 1,
+          decision_count: 347,
+          fallback_count: 94,
+          degraded_count: 94,
           players: [
             { slot: 0, name: "Opponent" },
             { slot: 1, name: "Auri" },
           ],
         },
         inlineRunArtifacts: {
-          "match-summary.json": JSON.stringify({ parseFailureCount: 0 }),
+          "match-summary.json": JSON.stringify({
+            completedAt: "2026-07-14T12:33:57.516Z",
+            parseFailureCount: 0,
+          }),
           "decisions.jsonl": [
             JSON.stringify({
               username: "Auri",
@@ -431,6 +443,8 @@ describe("Coworld evaluation dataset", () => {
       map: "Pangaea",
       scores: [0.7, 0.3],
       outrightWinnerSlot: null,
+      platformCompletedAt: "2026-07-14T12:34:24.817967Z",
+      runtimeCompletedAt: "2026-07-14T12:33:57.516Z",
     });
     expect(loaded.episodes[0].sourcePaths).toHaveLength(2);
     expect(loaded.episodes[0].roster[1]).toMatchObject({
@@ -463,6 +477,14 @@ describe("Coworld evaluation dataset", () => {
         stale: true,
         v: 1,
       },
+    });
+    const dataset = buildCoworldEvaluationDataset({
+      episodes: loaded.episodes,
+      selector: { seat: 1, policyVersionId: null, playerName: null },
+    });
+    expect(dataset.rows[0]).toMatchObject({
+      platformCompletedAt: "2026-07-14T12:34:24.817967Z",
+      runtimeCompletedAt: "2026-07-14T12:33:57.516Z",
     });
   });
 
@@ -519,9 +541,9 @@ describe("Coworld evaluation dataset", () => {
         results: {
           scores: [0.25, 0.75],
           winner_slot: null,
-          decision_count: 2,
-          fallback_count: 1,
-          degraded_count: 1,
+          decision_count: 347,
+          fallback_count: 94,
+          degraded_count: 94,
           players: [
             { slot: 0, name: "Opponent" },
             { slot: 1, name: "Auri" },
@@ -534,8 +556,8 @@ describe("Coworld evaluation dataset", () => {
       JSON.stringify({
         runID: "coworld-sidecar-run",
         completedAt: "2026-07-14T11:04:24.380Z",
-        decisionCount: 2,
-        fallbackCount: 1,
+        decisionCount: 347,
+        fallbackCount: 93,
         parseFailureCount: 0,
         runnerConfig: { map: "Asia", mapSize: "Compact" },
         roster: [
@@ -604,6 +626,20 @@ describe("Coworld evaluation dataset", () => {
       agentID: "agent-1",
     });
     expect(loaded.episodes[0].decisions).toHaveLength(2);
+    expect(loaded.episodes[0].episodeReportedTelemetry).toEqual({
+      result: {
+        decisionCount: 347,
+        fallbackCount: 94,
+        degradedCount: 94,
+        parseFailureCount: null,
+      },
+      summary: {
+        decisionCount: 347,
+        fallbackCount: 93,
+        degradedCount: null,
+        parseFailureCount: 0,
+      },
+    });
     expect(loaded.episodes[0].decisions[1]).toMatchObject({
       seat: 1,
       actionKind: "alliance_request",
@@ -1048,6 +1084,404 @@ describe("Coworld evaluation dataset", () => {
     ]);
     expect(loaded.warnings).toEqual([
       expect.stringContaining("ignored unrelated discovered file"),
+    ]);
+  });
+
+  test("counts explicitly non-completed rows while requiring scored completed rows", async () => {
+    const directory = await temporaryDirectory();
+    const sourcePath = path.join(directory, "league-episodes.json");
+    await fs.writeFile(
+      sourcePath,
+      JSON.stringify({
+        episodes: [
+          {
+            id: "ereq_completed",
+            status: "completed",
+            map: "Asia",
+            scores: [1, 0],
+          },
+          { id: "ereq_failed", status: "failed", scores: [] },
+          { id: "ereq_running", status: "running", scores: [] },
+          { id: "ereq_submitted", status: "submitted", scores: [] },
+        ],
+      }),
+    );
+
+    const loaded = await loadCoworldEvaluationEpisodes([sourcePath]);
+    expect(loaded.episodes.map((episode) => episode.episodeId)).toEqual([
+      "ereq_completed",
+    ]);
+    expect(loaded.stats).toEqual({
+      skippedNonCompletedEntries: 3,
+      skippedByStatus: { failed: 1, running: 1, submitted: 1 },
+    });
+    expect(loaded.warnings).toContain(
+      "Skipped 3 explicitly non-completed episode entries (failed=1, running=1, submitted=1)",
+    );
+    const dataset = buildCoworldEvaluationDataset({
+      episodes: loaded.episodes,
+      selector: { seat: 0, policyVersionId: null, playerName: null },
+      warnings: loaded.warnings,
+      skippedNonCompletedEntries: loaded.stats.skippedNonCompletedEntries,
+      skippedByStatus: loaded.stats.skippedByStatus,
+    });
+    expect(dataset.ingestion).toEqual(loaded.stats);
+  });
+
+  test.each([
+    [
+      "completed row without scores",
+      { id: "ereq_no_scores", status: "completed", scores: [] },
+      "invalid scores",
+    ],
+    [
+      "completed row with absent scores",
+      { id: "ereq_absent_scores", status: "completed" },
+      "completed episode has no scores",
+    ],
+    [
+      "unknown status",
+      { id: "ereq_unknown_status", status: "mystery", scores: [] },
+      "unknown episode status mystery",
+    ],
+    [
+      "status-less empty scores",
+      { id: "ereq_statusless", scores: [] },
+      "invalid scores",
+    ],
+  ])("fails closed for %s", async (_name, episode, message) => {
+    const directory = await temporaryDirectory();
+    const sourcePath = path.join(directory, "episodes.json");
+    await fs.writeFile(sourcePath, JSON.stringify({ episodes: [episode] }));
+
+    await expect(loadCoworldEvaluationEpisodes([sourcePath])).rejects.toThrow(
+      message,
+    );
+  });
+
+  test("keeps repeated player names isolated by seat and agent identity", async () => {
+    const directory = await temporaryDirectory();
+    const sourcePath = path.join(directory, "episodes.json");
+    await fs.writeFile(
+      sourcePath,
+      JSON.stringify({
+        id: "ereq_repeated_names",
+        scores: [0.4, 0.2, 0.4],
+        participants: [
+          {
+            position: 0,
+            player_name: "Auri",
+            policy_version_id: "candidate:v1",
+            label: "Candidate left",
+          },
+          {
+            position: 1,
+            player_name: "Opponent",
+            policy_version_id: "opponent:v1",
+            label: "Opponent",
+          },
+          {
+            position: 2,
+            player_name: "Auri",
+            policy_version_id: "candidate:v1",
+            label: "Candidate right",
+          },
+        ],
+        decisions: [
+          {
+            username: "Auri",
+            agentID: "agent-0",
+            turnNumber: 100,
+            selectedLegalActionId: "attack:rival:40",
+            selectedActionKind: "attack",
+          },
+          {
+            username: "Auri",
+            agentID: "agent-2",
+            turnNumber: 100,
+            selectedLegalActionId: "hold",
+            selectedActionKind: "hold",
+          },
+          {
+            username: "Auri",
+            agentID: "agent-not-in-roster",
+            turnNumber: 100,
+            selectedLegalActionId: "build:city:1",
+            selectedActionKind: "build",
+          },
+        ],
+        spectatorReplay: {
+          roster: [
+            { agentID: "agent-0", username: "Auri" },
+            { agentID: "agent-1", username: "Opponent" },
+            { agentID: "agent-2", username: "Auri" },
+          ],
+          snapshots: [
+            {
+              label: "active",
+              turnNumber: 100,
+              tick: 100,
+              phase: "active",
+              players: [
+                { agentID: "agent-0", username: "Auri", tilesOwned: 10 },
+                { agentID: "agent-1", username: "Opponent", tilesOwned: 20 },
+                { agentID: "agent-2", username: "Auri", tilesOwned: 30 },
+              ],
+            },
+          ],
+        },
+      }),
+    );
+
+    const loaded = await loadCoworldEvaluationEpisodes([sourcePath]);
+    expect(
+      loaded.episodes[0].decisions.map((decision) => decision.seat),
+    ).toEqual([0, 2, null]);
+    const dataset = buildCoworldEvaluationDataset({
+      episodes: loaded.episodes,
+      selector: {
+        seat: null,
+        policyVersionId: "candidate:v1",
+        playerName: null,
+      },
+    });
+    expect(dataset.rows.map((row) => row.seat)).toEqual([0, 2]);
+    expect(dataset.rows[0].telemetry.actionMix).toEqual({ attack: 1 });
+    expect(dataset.rows[1].telemetry.actionMix).toEqual({ hold: 1 });
+    expect(dataset.rows[0].phaseSnapshots[0].tilesOwned).toBe(10);
+    expect(dataset.rows[1].phaseSnapshots[0].tilesOwned).toBe(30);
+  });
+
+  test("merges direct and inline decisions within one fragment and rejects conflicts", () => {
+    const base = {
+      id: "ereq_inline_merge",
+      scores: [1, 0],
+      decisions: [
+        {
+          seat: 0,
+          turnNumber: 100,
+          selectedLegalActionId: "hold",
+          selectedActionKind: "hold",
+        },
+      ],
+    };
+    const fragments = parseCoworldEvaluationDocument({
+      sourcePath: "/artifacts/inline-merge.replay",
+      fallbackId: "inline-merge",
+      value: {
+        ...base,
+        inlineRunArtifacts: {
+          "decisions.jsonl": [
+            JSON.stringify({ seat: 0, turnNumber: 100, fallbackUsed: false }),
+            JSON.stringify({
+              seat: 0,
+              turnNumber: 200,
+              selectedLegalActionId: "build:city:1",
+              selectedActionKind: "build",
+            }),
+          ].join("\n"),
+        },
+      },
+    });
+    expect(fragments[0].decisions).toHaveLength(2);
+    expect(fragments[0].decisions[0]).toMatchObject({
+      turnNumber: 100,
+      selectedLegalActionId: "hold",
+      fallback: false,
+    });
+
+    expect(() =>
+      parseCoworldEvaluationDocument({
+        sourcePath: "/artifacts/inline-conflict.replay",
+        fallbackId: "inline-conflict",
+        value: {
+          ...base,
+          inlineRunArtifacts: {
+            "decisions.jsonl": JSON.stringify({
+              seat: 0,
+              turnNumber: 100,
+              selectedLegalActionId: "attack:rival:40",
+              selectedActionKind: "attack",
+            }),
+          },
+        },
+      }),
+    ).toThrow("Conflicting decision turn 100");
+  });
+
+  test.each([
+    [
+      "runID",
+      {
+        id: "ereq_source_conflict",
+        runID: "run-a",
+        scores: [1, 0],
+        inlineRunArtifacts: {
+          "match-summary.json": JSON.stringify({ runID: "run-b" }),
+        },
+      },
+    ],
+    [
+      "map",
+      {
+        id: "ereq_source_conflict",
+        map: "Europe",
+        game_config: { map: "Asia" },
+        scores: [1, 0],
+      },
+    ],
+    [
+      "mapSize",
+      {
+        id: "ereq_source_conflict",
+        map_size: "Compact",
+        game_config: { map_size: "Large" },
+        scores: [1, 0],
+      },
+    ],
+  ])("rejects conflicting within-fragment %s sources", (field, value) => {
+    expect(() =>
+      parseCoworldEvaluationDocument({
+        sourcePath: "/artifacts/source-conflict.json",
+        fallbackId: "source-conflict",
+        value,
+      }),
+    ).toThrow(`conflicting ${field}`);
+  });
+
+  test("requires explicit score/order cardinality and infers roster IDs only without order", () => {
+    expect(() =>
+      parseCoworldEvaluationDocument({
+        sourcePath: "/artifacts/order-mismatch.json",
+        fallbackId: "order-mismatch",
+        value: {
+          id: "ereq_order_mismatch",
+          policy_version_ids: ["candidate:v1", "opponent:v1"],
+          scores: [
+            { policy_version_id: "candidate:v1", score: 0.5 },
+            { policy_version_id: "opponent:v1", score: 0.3 },
+            { policy_version_id: "third:v1", score: 0.2 },
+          ],
+        },
+      }),
+    ).toThrow("score/order cardinality mismatch");
+    expect(() =>
+      parseCoworldEvaluationDocument({
+        sourcePath: "/artifacts/incomplete-order.json",
+        fallbackId: "incomplete-order",
+        value: {
+          id: "ereq_incomplete_order",
+          participants: [{ position: 0 }, { position: 1 }],
+          scores: [
+            { policy_version_id: "candidate:v1", score: 0.75 },
+            { policy_version_id: "opponent:v1", score: 0.25 },
+          ],
+        },
+      }),
+    ).toThrow("incomplete explicit policy order for pair scores");
+
+    const fragments = parseCoworldEvaluationDocument({
+      sourcePath: "/artifacts/pair-order.json",
+      fallbackId: "pair-order",
+      value: {
+        id: "ereq_pair_order",
+        scores: [
+          { policy_version_id: "candidate:v1", score: 0.75 },
+          { policy_version_id: "opponent:v1", score: 0.25 },
+        ],
+      },
+    });
+    expect(fragments[0].scores).toEqual([0.75, 0.25]);
+    expect(fragments[0].roster.map((seat) => seat.policyVersionId)).toEqual([
+      "candidate:v1",
+      "opponent:v1",
+    ]);
+  });
+
+  test.each([
+    [
+      "participant policy_version_id",
+      {
+        id: "ereq_bad_participant_policy",
+        scores: [1],
+        participants: [{ position: 0, policy_version_id: 7 }],
+      },
+    ],
+    [
+      "participant player_name",
+      {
+        id: "ereq_bad_participant_name",
+        scores: [1],
+        participants: [{ position: 0, player_name: "" }],
+      },
+    ],
+    [
+      "participant label",
+      {
+        id: "ereq_bad_participant_label",
+        scores: [1],
+        participants: [{ position: 0, label: null }],
+      },
+    ],
+    [
+      "policy_versions entry",
+      {
+        id: "ereq_bad_policy_versions",
+        scores: [1],
+        policy_versions: [{}],
+      },
+    ],
+    [
+      "roster entry",
+      {
+        id: "ereq_bad_roster",
+        scores: [1],
+        roster: ["not-an-object"],
+      },
+    ],
+    [
+      "roster policy field",
+      {
+        id: "ereq_bad_roster_policy",
+        scores: [1],
+        roster: [{ policy_version_id: 7 }],
+      },
+    ],
+  ])("rejects malformed explicit %s", (_name, value) => {
+    expect(() =>
+      parseCoworldEvaluationDocument({
+        sourcePath: "/artifacts/malformed-identity.json",
+        fallbackId: "malformed-identity",
+        value,
+      }),
+    ).toThrow();
+  });
+
+  test("allows absent optional participant identity fields to remain unknown", () => {
+    const fragments = parseCoworldEvaluationDocument({
+      sourcePath: "/artifacts/optional-participant-fields.json",
+      fallbackId: "optional-participant-fields",
+      value: {
+        id: "ereq_optional_participant_fields",
+        scores: [1, 0],
+        participants: [{ position: 0 }, { position: 1 }],
+      },
+    });
+    expect(fragments[0].roster).toEqual([
+      {
+        seat: 0,
+        policyVersionId: null,
+        playerName: null,
+        label: null,
+        agentID: null,
+      },
+      {
+        seat: 1,
+        policyVersionId: null,
+        playerName: null,
+        label: null,
+        agentID: null,
+      },
     ]);
   });
 

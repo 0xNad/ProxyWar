@@ -49,18 +49,24 @@ export interface CoworldEvaluationSnapshot {
   players: CoworldEvaluationSnapshotPlayer[];
 }
 
-export interface CoworldEpisodeReportedTelemetry {
+export interface CoworldReportedTelemetry {
   decisionCount: number | null;
   fallbackCount: number | null;
   degradedCount: number | null;
   parseFailureCount: number | null;
 }
 
+export interface CoworldEpisodeReportedTelemetry {
+  result: CoworldReportedTelemetry;
+  summary: CoworldReportedTelemetry;
+}
+
 export interface CoworldEvaluationEpisode {
   episodeId: string;
   sourcePaths: string[];
   runID: string | null;
-  completedAt: string | null;
+  platformCompletedAt: string | null;
+  runtimeCompletedAt: string | null;
   map: string;
   mapSize: string | null;
   scores: number[];
@@ -145,7 +151,8 @@ export interface CoworldEvaluationDatasetRow {
   episodeId: string;
   sourcePaths: string[];
   runID: string | null;
-  completedAt: string | null;
+  platformCompletedAt: string | null;
+  runtimeCompletedAt: string | null;
   map: string;
   mapSize: string | null;
   seat: number;
@@ -221,7 +228,7 @@ export interface CoworldEvaluationAggregate {
 }
 
 export interface CoworldEvaluationDataset {
-  schemaVersion: 2;
+  schemaVersion: 3;
   selector: CoworldDatasetSelector;
   treatmentMarkers: CoworldTreatmentMarker[];
   spawnDiagnosticsConfig: {
@@ -229,6 +236,10 @@ export interface CoworldEvaluationDataset {
     settleThreshold: number;
   };
   sourceCount: number;
+  ingestion: {
+    skippedNonCompletedEntries: number;
+    skippedByStatus: Record<string, number>;
+  };
   warnings: string[];
   rows: CoworldEvaluationDatasetRow[];
   aggregate: CoworldEvaluationAggregate;
@@ -386,18 +397,16 @@ function decisionsForSeat(
     if (decision.seat !== null) {
       return decision.seat === seat;
     }
-    if (
-      rosterSeat?.agentID !== null &&
-      rosterSeat?.agentID !== undefined &&
-      decision.agentID === rosterSeat.agentID
-    ) {
-      return true;
+    if (decision.agentID !== null) {
+      return decision.agentID === rosterSeat?.agentID;
     }
-    return (
-      rosterSeat?.playerName !== null &&
-      rosterSeat?.playerName !== undefined &&
-      decision.playerName === rosterSeat.playerName
+    if (decision.playerName === null) {
+      return false;
+    }
+    const nameMatches = episode.roster.filter(
+      (entry) => entry.playerName === decision.playerName,
     );
+    return nameMatches.length === 1 && nameMatches[0].seat === seat;
   });
 }
 
@@ -588,34 +597,32 @@ function spawnDiagnostics(
 
 function playerMatchesSeat(
   player: CoworldEvaluationSnapshotPlayer,
-  rosterSeat: CoworldEvaluationRosterSeat | undefined,
+  roster: readonly CoworldEvaluationRosterSeat[],
   seat: number,
 ): boolean {
   if (player.seat !== null) {
     return player.seat === seat;
   }
-  if (
-    rosterSeat?.agentID !== null &&
-    rosterSeat?.agentID !== undefined &&
-    player.agentID === rosterSeat.agentID
-  ) {
-    return true;
+  const rosterSeat = roster.find((entry) => entry.seat === seat);
+  if (player.agentID !== null) {
+    return player.agentID === rosterSeat?.agentID;
   }
-  return (
-    rosterSeat?.playerName !== null &&
-    rosterSeat?.playerName !== undefined &&
-    player.playerName === rosterSeat.playerName
+  if (player.playerName === null) {
+    return false;
+  }
+  const nameMatches = roster.filter(
+    (entry) => entry.playerName === player.playerName,
   );
+  return nameMatches.length === 1 && nameMatches[0].seat === seat;
 }
 
 function phaseSnapshotsForSeat(
   episode: CoworldEvaluationEpisode,
   seat: number,
 ): CoworldEvaluationPhaseSnapshotRow[] {
-  const rosterSeat = episode.roster.find((entry) => entry.seat === seat);
   const snapshots = episode.snapshots.flatMap((snapshot) => {
     const player = snapshot.players.find((entry) =>
-      playerMatchesSeat(entry, rosterSeat, seat),
+      playerMatchesSeat(entry, episode.roster, seat),
     );
     return player === undefined
       ? []
@@ -798,6 +805,8 @@ export function buildCoworldEvaluationDataset(input: {
   spawnPhaseTurns?: number | null;
   spawnSettleThreshold?: number;
   warnings?: readonly string[];
+  skippedNonCompletedEntries?: number;
+  skippedByStatus?: Readonly<Record<string, number>>;
 }): CoworldEvaluationDataset {
   const treatmentMarkers = [...(input.treatmentMarkers ?? [])];
   const spawnPhaseTurns = input.spawnPhaseTurns ?? null;
@@ -817,7 +826,8 @@ export function buildCoworldEvaluationDataset(input: {
         episodeId: episode.episodeId,
         sourcePaths: [...episode.sourcePaths].sort(),
         runID: episode.runID,
-        completedAt: episode.completedAt,
+        platformCompletedAt: episode.platformCompletedAt,
+        runtimeCompletedAt: episode.runtimeCompletedAt,
         map: episode.map,
         mapSize: episode.mapSize,
         seat,
@@ -848,7 +858,7 @@ export function buildCoworldEvaluationDataset(input: {
     input.episodes.flatMap((episode) => episode.sourcePaths),
   ).size;
   return {
-    schemaVersion: 2,
+    schemaVersion: 3,
     selector: input.selector,
     treatmentMarkers,
     spawnDiagnosticsConfig: {
@@ -856,6 +866,10 @@ export function buildCoworldEvaluationDataset(input: {
       settleThreshold: spawnSettleThreshold,
     },
     sourceCount,
+    ingestion: {
+      skippedNonCompletedEntries: input.skippedNonCompletedEntries ?? 0,
+      skippedByStatus: sortedCounts({ ...(input.skippedByStatus ?? {}) }),
+    },
     warnings: [...(input.warnings ?? [])],
     rows,
     aggregate: aggregate(rows),

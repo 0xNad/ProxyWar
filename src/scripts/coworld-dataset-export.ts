@@ -31,7 +31,8 @@ interface EpisodeFragment {
   episodeIdIsExplicit: boolean;
   sourcePaths: string[];
   runID?: string | null;
-  completedAt?: string | null;
+  platformCompletedAt?: string | null;
+  runtimeCompletedAt?: string | null;
   map?: string;
   mapSize?: string | null;
   scores?: number[];
@@ -39,12 +40,21 @@ interface EpisodeFragment {
   roster: CoworldEvaluationRosterSeat[];
   decisions: CoworldEvaluationDecision[];
   snapshots: CoworldEvaluationSnapshot[];
-  episodeReportedTelemetry: Partial<CoworldEpisodeReportedTelemetry>;
+  episodeReportedTelemetry: {
+    result: Partial<CoworldEpisodeReportedTelemetry["result"]>;
+    summary: Partial<CoworldEpisodeReportedTelemetry["summary"]>;
+  };
+}
+
+export interface CoworldEvaluationLoadStats {
+  skippedNonCompletedEntries: number;
+  skippedByStatus: Record<string, number>;
 }
 
 export interface LoadedCoworldEvaluationEpisodes {
   episodes: CoworldEvaluationEpisode[];
   warnings: string[];
+  stats: CoworldEvaluationLoadStats;
 }
 
 const usage =
@@ -63,6 +73,34 @@ function asString(value: unknown): string | null {
   return typeof value === "string" && value.length > 0 ? value : null;
 }
 
+function optionalStringField(
+  record: Record<string, unknown>,
+  key: string,
+  sourcePath: string,
+  context: string,
+): string | null {
+  if (!Object.hasOwn(record, key)) return null;
+  const value = asString(record[key]);
+  if (value === null) {
+    throw new Error(`${sourcePath} has invalid ${context}.${key}`);
+  }
+  return value;
+}
+
+function consistentString(
+  sourcePath: string,
+  field: string,
+  ...values: unknown[]
+): string | null {
+  const present = [
+    ...new Set(values.map(asString).filter((value) => value !== null)),
+  ];
+  if (present.length > 1) {
+    throw new Error(`${sourcePath} has conflicting ${field}`);
+  }
+  return present[0] ?? null;
+}
+
 function asNumber(value: unknown): number | null {
   return typeof value === "number" && Number.isFinite(value) ? value : null;
 }
@@ -72,6 +110,21 @@ function asCount(value: unknown): number | null {
   return number !== null && Number.isInteger(number) && number >= 0
     ? number
     : null;
+}
+
+function optionalCountField(
+  record: Record<string, unknown> | null,
+  key: string,
+  sourcePath: string,
+  context: string,
+): number | null | undefined {
+  if (record === null || !Object.hasOwn(record, key)) return undefined;
+  if (record[key] === null) return null;
+  const value = asCount(record[key]);
+  if (value === null) {
+    throw new Error(`${sourcePath} has invalid ${context}.${key}`);
+  }
+  return value;
 }
 
 function asSeat(value: unknown): number | null {
@@ -287,21 +340,40 @@ function participantRoster(
     positionBase = oneBased ? 1 : 0;
   }
   return participants
-    .map(({ record, index, position }) => ({
-      seat: (position ?? index) - positionBase,
-      policyVersionId: asString(record.policy_version_id),
-      playerName: asString(record.player_name),
-      label: asString(record.label),
-      agentID: null,
-    }))
+    .map(({ record, index, position }) => {
+      const context = `participant ${index + 1}`;
+      return {
+        seat: (position ?? index) - positionBase,
+        policyVersionId: optionalStringField(
+          record,
+          "policy_version_id",
+          sourcePath,
+          context,
+        ),
+        playerName: optionalStringField(
+          record,
+          "player_name",
+          sourcePath,
+          context,
+        ),
+        label: optionalStringField(record, "label", sourcePath, context),
+        agentID: null,
+      };
+    })
     .sort((left, right) => left.seat - right.seat);
 }
 
-function policyVersionIds(
+interface PolicyVersionOrder {
+  explicit: boolean;
+  ids: Array<string | null>;
+}
+
+function policyVersionOrder(
   entry: Record<string, unknown>,
   participants: readonly CoworldEvaluationRosterSeat[],
   sourcePath: string,
-): string[] {
+): PolicyVersionOrder {
+  const sources: Array<{ label: string; ids: Array<string | null> }> = [];
   if (
     Object.hasOwn(entry, "policy_version_ids") &&
     (!Array.isArray(entry.policy_version_ids) ||
@@ -310,21 +382,11 @@ function policyVersionIds(
   ) {
     throw new Error(`${sourcePath} has invalid policy_version_ids`);
   }
-  const direct = asStringArray(entry.policy_version_ids);
-  if (direct.length > 0) {
-    for (const participant of participants) {
-      const directPolicy = direct[participant.seat];
-      if (
-        directPolicy !== undefined &&
-        participant.policyVersionId !== null &&
-        directPolicy !== participant.policyVersionId
-      ) {
-        throw new Error(
-          `${sourcePath} has conflicting policy IDs for seat ${participant.seat}`,
-        );
-      }
-    }
-    return direct;
+  if (Object.hasOwn(entry, "policy_version_ids")) {
+    sources.push({
+      label: "policy_version_ids",
+      ids: asStringArray(entry.policy_version_ids),
+    });
   }
   if (
     Object.hasOwn(entry, "policy_versions") &&
@@ -333,39 +395,131 @@ function policyVersionIds(
     throw new Error(`${sourcePath} has invalid policy_versions`);
   }
   if (Array.isArray(entry.policy_versions)) {
-    const values = entry.policy_versions.map((value) => {
+    const values = entry.policy_versions.map((value, index) => {
       const record = asRecord(value);
-      return firstString(record?.policy_version_id, record?.id);
+      if (record === null) {
+        throw new Error(
+          `${sourcePath} policy_versions entry ${index + 1} is not an object`,
+        );
+      }
+      const context = `policy_versions entry ${index + 1}`;
+      const policyVersionId = optionalStringField(
+        record,
+        "policy_version_id",
+        sourcePath,
+        context,
+      );
+      const id = optionalStringField(record, "id", sourcePath, context);
+      const resolved = consistentString(
+        sourcePath,
+        `${context} policy ID`,
+        policyVersionId,
+        id,
+      );
+      if (resolved === null) {
+        throw new Error(`${sourcePath} ${context} has no policy ID`);
+      }
+      return resolved;
     });
-    if (values.every((value) => value !== null)) {
-      return values as string[];
-    }
+    sources.push({ label: "policy_versions", ids: values });
   }
   if (Object.hasOwn(entry, "roster") && !Array.isArray(entry.roster)) {
     throw new Error(`${sourcePath} has invalid roster`);
   }
   if (Array.isArray(entry.roster)) {
-    const values = entry.roster.map((value) => {
+    const values = entry.roster.map((value, index) => {
       const record = asRecord(value);
-      const player = asRecord(record?.player);
-      return firstString(
-        record?.policy_version_id,
-        record?.policy_ref,
-        player?.policy_version_id,
-        player?.policy_ref,
-      );
+      if (record === null) {
+        throw new Error(
+          `${sourcePath} roster entry ${index + 1} is not an object`,
+        );
+      }
+      const context = `roster entry ${index + 1}`;
+      const rawPlayer = record.player;
+      const player = asRecord(rawPlayer);
+      if (Object.hasOwn(record, "player") && player === null) {
+        throw new Error(`${sourcePath} has invalid ${context}.player`);
+      }
+      for (const key of [
+        "player_name",
+        "name",
+        "username",
+        "label",
+        "agentID",
+        "agent_id",
+      ]) {
+        optionalStringField(record, key, sourcePath, context);
+      }
+      if (player !== null) {
+        for (const key of [
+          "player_name",
+          "name",
+          "username",
+          "label",
+          "agentID",
+          "agent_id",
+        ]) {
+          optionalStringField(player, key, sourcePath, `${context}.player`);
+        }
+      }
+      const values = [
+        optionalStringField(record, "policy_version_id", sourcePath, context),
+        optionalStringField(record, "policy_ref", sourcePath, context),
+        ...(player === null
+          ? []
+          : [
+              optionalStringField(
+                player,
+                "policy_version_id",
+                sourcePath,
+                `${context}.player`,
+              ),
+              optionalStringField(
+                player,
+                "policy_ref",
+                sourcePath,
+                `${context}.player`,
+              ),
+            ]),
+      ];
+      return consistentString(sourcePath, `${context} policy ID`, ...values);
     });
-    if (values.length > 0 && values.every((value) => value !== null)) {
-      return values as string[];
-    }
+    sources.push({ label: "roster", ids: values });
   }
-  if (
-    participants.length > 0 &&
-    participants.every((entry) => entry.policyVersionId !== null)
-  ) {
-    return participants.map((entry) => entry.policyVersionId as string);
+  if (Object.hasOwn(entry, "participants")) {
+    sources.push({
+      label: "participants",
+      ids: participants.map((entry) => entry.policyVersionId),
+    });
   }
-  return [];
+  if (sources.length === 0) {
+    return { explicit: false, ids: [] };
+  }
+  const cardinalities = new Set(sources.map((source) => source.ids.length));
+  if (cardinalities.size > 1) {
+    throw new Error(
+      `${sourcePath} has conflicting policy/seat order cardinality`,
+    );
+  }
+  const seatCount = sources[0].ids.length;
+  return {
+    explicit: true,
+    ids: Array.from({ length: seatCount }, (_, seat) => {
+      const values = sources
+        .map((source) => source.ids[seat])
+        .filter((value): value is string => value !== null);
+      return consistentString(
+        sourcePath,
+        `policy ID for seat ${seat}`,
+        ...values,
+      );
+    }),
+  };
+}
+
+interface ParsedScores {
+  scores: number[] | undefined;
+  policyVersionIds: string[];
 }
 
 function parseScores(
@@ -373,15 +527,19 @@ function parseScores(
   entry: Record<string, unknown>,
   participants: readonly CoworldEvaluationRosterSeat[],
   sourcePath: string,
-): number[] | undefined {
+): ParsedScores {
+  const order = policyVersionOrder(entry, participants, sourcePath);
   if (raw === undefined) {
-    return undefined;
+    return { scores: undefined, policyVersionIds: [] };
   }
   if (!Array.isArray(raw) || raw.length === 0) {
     throw new Error(`${sourcePath} has invalid scores`);
   }
+  if (order.explicit && order.ids.length !== raw.length) {
+    throw new Error(`${sourcePath} has score/order cardinality mismatch`);
+  }
   if (raw.every((score) => asNumber(score) !== null)) {
-    return raw as number[];
+    return { scores: raw as number[], policyVersionIds: [] };
   }
   const pairs = raw.map((value) => {
     const record = asRecord(value);
@@ -392,9 +550,16 @@ function parseScores(
     }
     return { policyVersionId, score };
   });
-  const order = policyVersionIds(entry, participants, sourcePath);
-  if (order.length !== pairs.length) {
-    return pairs.map((pair) => pair.score);
+  if (!order.explicit) {
+    return {
+      scores: pairs.map((pair) => pair.score),
+      policyVersionIds: pairs.map((pair) => pair.policyVersionId),
+    };
+  }
+  if (order.ids.some((policyVersionId) => policyVersionId === null)) {
+    throw new Error(
+      `${sourcePath} has incomplete explicit policy order for pair scores`,
+    );
   }
   const byPolicy = new Map<string, number[]>();
   for (const pair of pairs) {
@@ -402,13 +567,20 @@ function parseScores(
     scores.push(pair.score);
     byPolicy.set(pair.policyVersionId, scores);
   }
-  return order.map((policyVersionId) => {
+  const alignedScores = order.ids.map((policyVersionId) => {
+    if (policyVersionId === null) {
+      throw new Error(`${sourcePath} has incomplete policy order`);
+    }
     const score = byPolicy.get(policyVersionId)?.shift();
     if (score === undefined) {
       throw new Error(`${sourcePath} is missing a repeated-policy seat score`);
     }
     return score;
   });
+  return {
+    scores: alignedScores,
+    policyVersionIds: order.ids as string[],
+  };
 }
 
 function parseJsonArtifact(
@@ -437,46 +609,55 @@ function parseDecisionRows(
   entry: Record<string, unknown>,
   sourcePath: string,
 ): Record<string, unknown>[] {
+  const rows: Record<string, unknown>[] = [];
   if (Array.isArray(entry.decisions)) {
-    return entry.decisions.map((value, index) => {
-      const record = asRecord(value);
-      if (record === null) {
-        throw new Error(`${sourcePath} decision ${index + 1} is not an object`);
-      }
-      return record;
-    });
-  }
-  if (
+    rows.push(
+      ...entry.decisions.map((value, index) => {
+        const record = asRecord(value);
+        if (record === null) {
+          throw new Error(
+            `${sourcePath} decision ${index + 1} is not an object`,
+          );
+        }
+        return record;
+      }),
+    );
+  } else if (
     Object.hasOwn(entry, "decisions") &&
     typeof entry.decisions !== "string"
   ) {
     throw new Error(`${sourcePath} has invalid decisions`);
   }
   const inline = asRecord(entry.inlineRunArtifacts);
-  const raw =
-    typeof entry.decisions === "string"
-      ? entry.decisions
-      : inline?.["decisions.jsonl"];
-  if (typeof raw !== "string" || raw.trim() === "") {
-    return [];
-  }
-  const rows: Record<string, unknown>[] = [];
-  for (const [index, line] of raw.split("\n").entries()) {
-    if (line.trim() === "") {
-      continue;
+  const jsonlSources = [
+    ...(typeof entry.decisions === "string"
+      ? [{ label: "decisions", value: entry.decisions }]
+      : []),
+    ...(inline !== null && Object.hasOwn(inline, "decisions.jsonl")
+      ? [{ label: "inline decisions.jsonl", value: inline["decisions.jsonl"] }]
+      : []),
+  ];
+  for (const source of jsonlSources) {
+    if (typeof source.value !== "string") {
+      throw new Error(`${sourcePath} has invalid ${source.label}`);
     }
-    try {
-      const record = asRecord(JSON.parse(line));
-      if (record === null) {
+    for (const [index, line] of source.value.split("\n").entries()) {
+      if (line.trim() === "") {
+        continue;
+      }
+      try {
+        const record = asRecord(JSON.parse(line));
+        if (record === null) {
+          throw new Error(
+            `${sourcePath} ${source.label} line ${index + 1} is not an object`,
+          );
+        }
+        rows.push(record);
+      } catch {
         throw new Error(
-          `${sourcePath} decision line ${index + 1} is not an object`,
+          `${sourcePath} contains invalid ${source.label} line ${index + 1}`,
         );
       }
-      rows.push(record);
-    } catch {
-      throw new Error(
-        `${sourcePath} contains invalid decision line ${index + 1}`,
-      );
     }
   }
   return rows;
@@ -488,28 +669,91 @@ function rosterSeats(input: {
   spectator: Record<string, unknown> | null;
   summary: Record<string, unknown> | null;
   scores: readonly number[] | undefined;
+  scorePolicyVersionIds: readonly string[];
   participants: readonly CoworldEvaluationRosterSeat[];
   sourcePath: string;
 }): CoworldEvaluationRosterSeat[] {
-  const versionIds = policyVersionIds(
+  const versionOrder = policyVersionOrder(
     input.entry,
     input.participants,
     input.sourcePath,
   );
+  const versionIds = versionOrder.ids;
+  if (
+    input.results !== null &&
+    Object.hasOwn(input.results, "players") &&
+    !Array.isArray(input.results.players)
+  ) {
+    throw new Error(`${input.sourcePath} has invalid results.players`);
+  }
   const resultPlayers = Array.isArray(input.results?.players)
     ? input.results.players
     : [];
   const config = asRecord(input.entry.config);
+  if (Object.hasOwn(input.entry, "config") && config === null) {
+    throw new Error(`${input.sourcePath} has invalid config`);
+  }
+  if (
+    config !== null &&
+    Object.hasOwn(config, "players") &&
+    !Array.isArray(config.players)
+  ) {
+    throw new Error(`${input.sourcePath} has invalid config.players`);
+  }
   const configPlayers = Array.isArray(config?.players) ? config.players : [];
+  if (
+    input.spectator !== null &&
+    Object.hasOwn(input.spectator, "roster") &&
+    !Array.isArray(input.spectator.roster)
+  ) {
+    throw new Error(`${input.sourcePath} has invalid spectator roster`);
+  }
   const spectatorRoster = Array.isArray(input.spectator?.roster)
     ? input.spectator.roster
     : [];
+  if (
+    input.summary !== null &&
+    Object.hasOwn(input.summary, "roster") &&
+    !Array.isArray(input.summary.roster)
+  ) {
+    throw new Error(`${input.sourcePath} has invalid summary roster`);
+  }
   const summaryRoster = Array.isArray(input.summary?.roster)
     ? input.summary.roster
     : [];
+  const explicitOrders = [
+    ...(versionOrder.explicit
+      ? [{ label: "policy order", length: versionIds.length }]
+      : []),
+    ...(input.results !== null && Object.hasOwn(input.results, "players")
+      ? [{ label: "results.players", length: resultPlayers.length }]
+      : []),
+    ...(config !== null && Object.hasOwn(config, "players")
+      ? [{ label: "config.players", length: configPlayers.length }]
+      : []),
+    ...(input.spectator !== null && Object.hasOwn(input.spectator, "roster")
+      ? [{ label: "spectator roster", length: spectatorRoster.length }]
+      : []),
+    ...(input.summary !== null && Object.hasOwn(input.summary, "roster")
+      ? [{ label: "summary roster", length: summaryRoster.length }]
+      : []),
+  ];
+  const expectedSeatCount = input.scores?.length;
+  if (
+    expectedSeatCount !== undefined &&
+    explicitOrders.some((order) => order.length !== expectedSeatCount)
+  ) {
+    throw new Error(`${input.sourcePath} has score/order cardinality mismatch`);
+  }
+  if (new Set(explicitOrders.map((order) => order.length)).size > 1) {
+    throw new Error(
+      `${input.sourcePath} has conflicting seat order cardinality`,
+    );
+  }
   const seatCount = Math.max(
     input.scores?.length ?? 0,
     versionIds.length,
+    input.scorePolicyVersionIds.length,
     resultPlayers.length,
     configPlayers.length,
     spectatorRoster.length,
@@ -518,6 +762,11 @@ function rosterSeats(input: {
   );
   return Array.from({ length: seatCount }, (_, seat) => {
     const resultPlayer = asRecord(resultPlayers[seat]);
+    if (seat < resultPlayers.length && resultPlayer === null) {
+      throw new Error(
+        `${input.sourcePath} results.players entry ${seat + 1} is not an object`,
+      );
+    }
     const resultSlot = asSeat(resultPlayer?.slot);
     const slottedResult =
       resultSlot === null
@@ -530,6 +779,21 @@ function rosterSeats(input: {
     const configPlayer = asRecord(configPlayers[seat]);
     const spectatorPlayer = asRecord(spectatorRoster[seat]);
     const summaryPlayer = asRecord(summaryRoster[seat]);
+    if (seat < configPlayers.length && configPlayer === null) {
+      throw new Error(
+        `${input.sourcePath} config.players entry ${seat + 1} is not an object`,
+      );
+    }
+    if (seat < spectatorRoster.length && spectatorPlayer === null) {
+      throw new Error(
+        `${input.sourcePath} spectator roster entry ${seat + 1} is not an object`,
+      );
+    }
+    if (seat < summaryRoster.length && summaryPlayer === null) {
+      throw new Error(
+        `${input.sourcePath} summary roster entry ${seat + 1} is not an object`,
+      );
+    }
     const participant = input.participants.find((entry) => entry.seat === seat);
     const mergeIdentity = (
       field: string,
@@ -547,6 +811,7 @@ function rosterSeats(input: {
       seat,
       policyVersionId: mergeIdentity("policyVersionId", [
         versionIds[seat] ?? null,
+        input.scorePolicyVersionIds[seat] ?? null,
         participant?.policyVersionId ?? null,
       ]),
       playerName: mergeIdentity("playerName", [
@@ -579,15 +844,48 @@ function episodeIdentifier(
     : { id: explicit, explicit: true };
 }
 
+const explicitlyNonCompletedStatuses = new Set([
+  "failed",
+  "running",
+  "submitted",
+]);
+
+function recordSkippedStatus(
+  stats: CoworldEvaluationLoadStats,
+  status: string,
+): void {
+  stats.skippedNonCompletedEntries += 1;
+  stats.skippedByStatus[status] = (stats.skippedByStatus[status] ?? 0) + 1;
+}
+
 function parseEpisodeFragment(input: {
   value: unknown;
   sourcePath: string;
   fallbackId: string;
   warnings: string[];
+  stats: CoworldEvaluationLoadStats;
 }): EpisodeFragment | null {
   const entry = asRecord(input.value);
   if (entry === null) {
     return null;
+  }
+  let explicitStatus: string | null = null;
+  if (Object.hasOwn(entry, "status")) {
+    const rawStatus = asString(entry.status);
+    if (rawStatus === null) {
+      throw new Error(`${input.sourcePath} has invalid episode status`);
+    }
+    const status = rawStatus.toLowerCase();
+    explicitStatus = status;
+    if (status !== "completed") {
+      if (!explicitlyNonCompletedStatuses.has(status)) {
+        throw new Error(
+          `${input.sourcePath} has unknown episode status ${rawStatus}`,
+        );
+      }
+      recordSkippedStatus(input.stats, status);
+      return null;
+    }
   }
   const participants = participantRoster(entry, input.sourcePath);
   const results =
@@ -595,12 +893,16 @@ function parseEpisodeFragment(input: {
   if (Object.hasOwn(entry, "results") && asRecord(entry.results) === null) {
     throw new Error(`${input.sourcePath} has invalid results`);
   }
-  const scores = parseScores(
+  const parsedScores = parseScores(
     results?.scores,
     entry,
     participants,
     input.sourcePath,
   );
+  const scores = parsedScores.scores;
+  if (explicitStatus === "completed" && scores === undefined) {
+    throw new Error(`${input.sourcePath} completed episode has no scores`);
+  }
   const episodeIdentifierResult = episodeIdentifier(entry, input.fallbackId);
   const episodeId = episodeIdentifierResult.id;
   const hasEpisodeIdentity =
@@ -624,20 +926,53 @@ function parseEpisodeFragment(input: {
   if (Object.hasOwn(entry, "spectatorReplay") && spectator === null) {
     throw new Error(`${input.sourcePath} has invalid spectatorReplay`);
   }
-  const gameConfig = asRecord(entry.game_config) ?? asRecord(entry.gameConfig);
+  const gameConfigSnake = asRecord(entry.game_config);
+  const gameConfigCamel = asRecord(entry.gameConfig);
+  if (Object.hasOwn(entry, "game_config") && gameConfigSnake === null) {
+    throw new Error(`${input.sourcePath} has invalid game_config`);
+  }
+  if (Object.hasOwn(entry, "gameConfig") && gameConfigCamel === null) {
+    throw new Error(`${input.sourcePath} has invalid gameConfig`);
+  }
   const config = asRecord(entry.config);
+  if (Object.hasOwn(entry, "config") && config === null) {
+    throw new Error(`${input.sourcePath} has invalid config`);
+  }
   const spectatorMap = asRecord(spectator?.map);
+  if (
+    spectator !== null &&
+    Object.hasOwn(spectator, "map") &&
+    spectatorMap === null
+  ) {
+    throw new Error(`${input.sourcePath} has invalid spectator map`);
+  }
   const runnerConfig = asRecord(summary?.runnerConfig);
-  const map = firstString(
+  if (
+    summary !== null &&
+    Object.hasOwn(summary, "runnerConfig") &&
+    runnerConfig === null
+  ) {
+    throw new Error(`${input.sourcePath} has invalid summary runnerConfig`);
+  }
+  const map = consistentString(
+    input.sourcePath,
+    "map",
     entry.map,
-    gameConfig?.map,
+    gameConfigSnake?.map,
+    gameConfigCamel?.map,
     config?.map,
     spectatorMap?.gameMap,
     runnerConfig?.map,
   );
-  const mapSize = firstString(
+  const mapSize = consistentString(
+    input.sourcePath,
+    "mapSize",
     entry.map_size,
-    gameConfig?.map_size,
+    entry.mapSize,
+    gameConfigSnake?.map_size,
+    gameConfigSnake?.mapSize,
+    gameConfigCamel?.map_size,
+    gameConfigCamel?.mapSize,
     config?.map_size,
     config?.mapSize,
     spectatorMap?.gameMapSize,
@@ -659,6 +994,7 @@ function parseEpisodeFragment(input: {
     spectator,
     summary,
     scores,
+    scorePolicyVersionIds: parsedScores.policyVersionIds,
     participants,
     sourcePath: input.sourcePath,
   });
@@ -681,16 +1017,51 @@ function parseEpisodeFragment(input: {
         return record;
       })
     : [];
+  const normalizedDecisions = mergeDecisions(
+    episodeId,
+    [],
+    rawDecisions.map((record) => normalizeDecision(record, roster)),
+  );
+  const runID = consistentString(
+    input.sourcePath,
+    "runID",
+    entry.runID,
+    summary?.runID,
+  );
+  const platformCompletedAt = optionalStringField(
+    entry,
+    "completed_at",
+    input.sourcePath,
+    "episode",
+  );
+  const entryRuntimeCompletedAt = optionalStringField(
+    entry,
+    "completedAt",
+    input.sourcePath,
+    "episode",
+  );
+  const summaryRuntimeCompletedAt =
+    summary === null
+      ? null
+      : optionalStringField(
+          summary,
+          "completedAt",
+          input.sourcePath,
+          "match-summary",
+        );
+  const runtimeCompletedAt = consistentString(
+    input.sourcePath,
+    "runtime completedAt",
+    entryRuntimeCompletedAt,
+    summaryRuntimeCompletedAt,
+  );
   return {
     episodeId,
     episodeIdIsExplicit: episodeIdentifierResult.explicit,
     sourcePaths: [input.sourcePath],
-    runID: firstString(entry.runID, summary?.runID),
-    completedAt: firstString(
-      entry.completed_at,
-      entry.completedAt,
-      summary?.completedAt,
-    ),
+    runID,
+    platformCompletedAt,
+    runtimeCompletedAt,
     map: map ?? "Unknown map",
     mapSize,
     scores,
@@ -701,16 +1072,61 @@ function parseEpisodeFragment(input: {
           ? winnerSlot
           : oneHotWinnerSlot(scores),
     roster,
-    decisions: rawDecisions.map((record) => normalizeDecision(record, roster)),
+    decisions: normalizedDecisions,
     snapshots: rawSnapshots.map((record) => normalizeSnapshot(record, roster)),
     episodeReportedTelemetry: {
-      decisionCount:
-        asCount(results?.decision_count) ?? asCount(summary?.decisionCount),
-      fallbackCount:
-        asCount(results?.fallback_count) ?? asCount(summary?.fallbackCount),
-      degradedCount:
-        asCount(results?.degraded_count) ?? asCount(summary?.degradedCount),
-      parseFailureCount: asCount(summary?.parseFailureCount),
+      result: {
+        decisionCount: optionalCountField(
+          results,
+          "decision_count",
+          input.sourcePath,
+          "results",
+        ),
+        fallbackCount: optionalCountField(
+          results,
+          "fallback_count",
+          input.sourcePath,
+          "results",
+        ),
+        degradedCount: optionalCountField(
+          results,
+          "degraded_count",
+          input.sourcePath,
+          "results",
+        ),
+        parseFailureCount: optionalCountField(
+          results,
+          "parse_failure_count",
+          input.sourcePath,
+          "results",
+        ),
+      },
+      summary: {
+        decisionCount: optionalCountField(
+          summary,
+          "decisionCount",
+          input.sourcePath,
+          "match-summary",
+        ),
+        fallbackCount: optionalCountField(
+          summary,
+          "fallbackCount",
+          input.sourcePath,
+          "match-summary",
+        ),
+        degradedCount: optionalCountField(
+          summary,
+          "degradedCount",
+          input.sourcePath,
+          "match-summary",
+        ),
+        parseFailureCount: optionalCountField(
+          summary,
+          "parseFailureCount",
+          input.sourcePath,
+          "match-summary",
+        ),
+      },
     },
   };
 }
@@ -720,8 +1136,13 @@ export function parseCoworldEvaluationDocument(input: {
   sourcePath: string;
   fallbackId: string;
   warnings?: string[];
+  stats?: CoworldEvaluationLoadStats;
 }): EpisodeFragment[] {
   const warnings = input.warnings ?? [];
+  const stats = input.stats ?? {
+    skippedNonCompletedEntries: 0,
+    skippedByStatus: {},
+  };
   const root = asRecord(input.value);
   if (!Array.isArray(input.value) && root === null) {
     throw new Error(`${input.sourcePath} is not a JSON object or array`);
@@ -761,6 +1182,7 @@ export function parseCoworldEvaluationDocument(input: {
           ? input.fallbackId
           : `${input.fallbackId}:${index}`,
       warnings,
+      stats,
     });
     return fragment === null ? [] : [fragment];
   });
@@ -863,6 +1285,9 @@ function decisionsMatch(
   }
   if (left.agentID !== null && right.agentID !== null) {
     return left.agentID === right.agentID;
+  }
+  if (left.agentID !== null || right.agentID !== null) {
+    return false;
   }
   if (left.playerName !== null && right.playerName !== null) {
     return left.playerName === right.playerName;
@@ -1023,6 +1448,9 @@ function snapshotPlayersMatch(
   if (left.agentID !== null && right.agentID !== null) {
     return left.agentID === right.agentID;
   }
+  if (left.agentID !== null || right.agentID !== null) {
+    return false;
+  }
   return (
     left.playerName !== null &&
     right.playerName !== null &&
@@ -1177,11 +1605,17 @@ function mergeFragment(
       ...new Set([...current.sourcePaths, ...incoming.sourcePaths]),
     ],
     runID: mergeNullable(episodeId, "runID", current.runID, incoming.runID),
-    completedAt: mergeNullable(
+    platformCompletedAt: mergeNullable(
       episodeId,
-      "completedAt",
-      current.completedAt,
-      incoming.completedAt,
+      "platformCompletedAt",
+      current.platformCompletedAt,
+      incoming.platformCompletedAt,
+    ),
+    runtimeCompletedAt: mergeNullable(
+      episodeId,
+      "runtimeCompletedAt",
+      current.runtimeCompletedAt,
+      incoming.runtimeCompletedAt,
     ),
     map:
       mergeOptional(episodeId, "map", currentMap, incomingMap) ?? "Unknown map",
@@ -1202,31 +1636,53 @@ function mergeFragment(
     decisions: mergeDecisions(episodeId, current.decisions, incoming.decisions),
     snapshots: mergeSnapshots(episodeId, current.snapshots, incoming.snapshots),
     episodeReportedTelemetry: {
-      decisionCount: mergeOptional(
+      result: mergeReportedTelemetry(
         episodeId,
-        "reported decisionCount",
-        current.episodeReportedTelemetry.decisionCount ?? undefined,
-        incoming.episodeReportedTelemetry.decisionCount ?? undefined,
+        "result",
+        current.episodeReportedTelemetry.result,
+        incoming.episodeReportedTelemetry.result,
       ),
-      fallbackCount: mergeOptional(
+      summary: mergeReportedTelemetry(
         episodeId,
-        "reported fallbackCount",
-        current.episodeReportedTelemetry.fallbackCount ?? undefined,
-        incoming.episodeReportedTelemetry.fallbackCount ?? undefined,
-      ),
-      degradedCount: mergeOptional(
-        episodeId,
-        "reported degradedCount",
-        current.episodeReportedTelemetry.degradedCount ?? undefined,
-        incoming.episodeReportedTelemetry.degradedCount ?? undefined,
-      ),
-      parseFailureCount: mergeOptional(
-        episodeId,
-        "reported parseFailureCount",
-        current.episodeReportedTelemetry.parseFailureCount ?? undefined,
-        incoming.episodeReportedTelemetry.parseFailureCount ?? undefined,
+        "summary",
+        current.episodeReportedTelemetry.summary,
+        incoming.episodeReportedTelemetry.summary,
       ),
     },
+  };
+}
+
+function mergeReportedTelemetry(
+  episodeId: string,
+  provenance: string,
+  current: Partial<CoworldEpisodeReportedTelemetry["result"]>,
+  incoming: Partial<CoworldEpisodeReportedTelemetry["result"]>,
+): Partial<CoworldEpisodeReportedTelemetry["result"]> {
+  return {
+    decisionCount: mergeOptional(
+      episodeId,
+      `${provenance}-reported decisionCount`,
+      current.decisionCount ?? undefined,
+      incoming.decisionCount ?? undefined,
+    ),
+    fallbackCount: mergeOptional(
+      episodeId,
+      `${provenance}-reported fallbackCount`,
+      current.fallbackCount ?? undefined,
+      incoming.fallbackCount ?? undefined,
+    ),
+    degradedCount: mergeOptional(
+      episodeId,
+      `${provenance}-reported degradedCount`,
+      current.degradedCount ?? undefined,
+      incoming.degradedCount ?? undefined,
+    ),
+    parseFailureCount: mergeOptional(
+      episodeId,
+      `${provenance}-reported parseFailureCount`,
+      current.parseFailureCount ?? undefined,
+      incoming.parseFailureCount ?? undefined,
+    ),
   };
 }
 
@@ -1428,11 +1884,12 @@ function matchingSeat(
     record.name,
   );
   const agentID = firstString(record.agentID, record.agent_id);
-  const matches = roster.filter(
-    (entry) =>
-      (agentID !== null && entry.agentID === agentID) ||
-      (playerName !== null && entry.playerName === playerName),
-  );
+  const matches =
+    agentID !== null
+      ? roster.filter((entry) => entry.agentID === agentID)
+      : playerName !== null
+        ? roster.filter((entry) => entry.playerName === playerName)
+        : [];
   return matches.length === 1 ? matches[0].seat : null;
 }
 
@@ -1522,16 +1979,19 @@ function normalizeSnapshotPlayer(input: {
   const playerName = firstString(player.username, player.name);
   const agentID = firstString(player.agentID, player.agent_id);
   const directSeat = asSeat(player.seat ?? player.slot);
-  const matches = input.roster.filter(
-    (entry) =>
-      (agentID !== null && entry.agentID === agentID) ||
-      (playerName !== null && entry.playerName === playerName),
-  );
+  const matches =
+    agentID !== null
+      ? input.roster.filter((entry) => entry.agentID === agentID)
+      : playerName !== null
+        ? input.roster.filter((entry) => entry.playerName === playerName)
+        : [];
   const seat =
     directSeat ??
     (matches.length === 1
       ? matches[0].seat
-      : input.index < input.roster.length
+      : agentID === null &&
+          playerName === null &&
+          input.index < input.roster.length
         ? input.index
         : null);
   const gold = player.gold;
@@ -1596,7 +2056,8 @@ function normalizeEpisode(fragment: EpisodeFragment): CoworldEvaluationEpisode {
     episodeId: fragment.episodeId,
     sourcePaths: fragment.sourcePaths,
     runID: fragment.runID ?? null,
-    completedAt: fragment.completedAt ?? null,
+    platformCompletedAt: fragment.platformCompletedAt ?? null,
+    runtimeCompletedAt: fragment.runtimeCompletedAt ?? null,
     map: fragment.map ?? "Unknown map",
     mapSize: fragment.mapSize ?? null,
     scores: fragment.scores,
@@ -1605,12 +2066,24 @@ function normalizeEpisode(fragment: EpisodeFragment): CoworldEvaluationEpisode {
     decisions: fragment.decisions,
     snapshots: fragment.snapshots,
     episodeReportedTelemetry: {
-      decisionCount: fragment.episodeReportedTelemetry.decisionCount ?? null,
-      fallbackCount: fragment.episodeReportedTelemetry.fallbackCount ?? null,
-      degradedCount: fragment.episodeReportedTelemetry.degradedCount ?? null,
-      parseFailureCount:
-        fragment.episodeReportedTelemetry.parseFailureCount ?? null,
+      result: normalizeReportedTelemetry(
+        fragment.episodeReportedTelemetry.result,
+      ),
+      summary: normalizeReportedTelemetry(
+        fragment.episodeReportedTelemetry.summary,
+      ),
     },
+  };
+}
+
+function normalizeReportedTelemetry(
+  telemetry: Partial<CoworldEpisodeReportedTelemetry["result"]>,
+): CoworldEpisodeReportedTelemetry["result"] {
+  return {
+    decisionCount: telemetry.decisionCount ?? null,
+    fallbackCount: telemetry.fallbackCount ?? null,
+    degradedCount: telemetry.degradedCount ?? null,
+    parseFailureCount: telemetry.parseFailureCount ?? null,
   };
 }
 
@@ -1696,6 +2169,7 @@ async function readOptionalText(filePath: string): Promise<string | null> {
 async function parseSidecarBundle(
   summaryPath: string,
   warnings: string[],
+  stats: CoworldEvaluationLoadStats,
 ): Promise<EpisodeFragment[]> {
   const directory = path.dirname(summaryPath);
   const summaryText = await fs.readFile(summaryPath, "utf8");
@@ -1733,6 +2207,7 @@ async function parseSidecarBundle(
     sourcePath: summaryPath,
     fallbackId: runID,
     warnings,
+    stats,
   });
   const sourcePaths = [
     summaryPath,
@@ -1785,6 +2260,10 @@ export async function loadCoworldEvaluationEpisodes(
   inputPaths: readonly string[],
 ): Promise<LoadedCoworldEvaluationEpisodes> {
   const warnings: string[] = [];
+  const stats: CoworldEvaluationLoadStats = {
+    skippedNonCompletedEntries: 0,
+    skippedByStatus: {},
+  };
   const explicitFiles = new Set<string>();
   for (const inputPath of inputPaths) {
     const resolved = path.resolve(inputPath);
@@ -1798,6 +2277,7 @@ export async function loadCoworldEvaluationEpisodes(
   }
   const merged: EpisodeFragment[] = [];
   for (const filePath of files) {
+    const skippedBefore = stats.skippedNonCompletedEntries;
     let parsed: unknown;
     if (path.basename(filePath) !== "match-summary.json") {
       try {
@@ -1808,14 +2288,18 @@ export async function loadCoworldEvaluationEpisodes(
     }
     const fragments =
       path.basename(filePath) === "match-summary.json"
-        ? await parseSidecarBundle(filePath, warnings)
+        ? await parseSidecarBundle(filePath, warnings, stats)
         : parseCoworldEvaluationDocument({
             value: parsed,
             sourcePath: filePath,
             fallbackId: fallbackEpisodeId(filePath),
             warnings,
+            stats,
           });
     if (fragments.length === 0) {
+      if (stats.skippedNonCompletedEntries > skippedBefore) {
+        continue;
+      }
       if (explicitFiles.has(filePath)) {
         throw new Error(`${filePath} contains no Coworld episode evidence`);
       }
@@ -1825,6 +2309,15 @@ export async function loadCoworldEvaluationEpisodes(
     for (const fragment of fragments) {
       addMergedFragment(merged, fragment);
     }
+  }
+  if (stats.skippedNonCompletedEntries > 0) {
+    const statusSummary = Object.entries(stats.skippedByStatus)
+      .sort(([left], [right]) => left.localeCompare(right))
+      .map(([status, count]) => `${status}=${count}`)
+      .join(", ");
+    warnings.push(
+      `Skipped ${stats.skippedNonCompletedEntries} explicitly non-completed episode entr${stats.skippedNonCompletedEntries === 1 ? "y" : "ies"} (${statusSummary})`,
+    );
   }
   const episodes: CoworldEvaluationEpisode[] = [];
   for (const fragment of merged) {
@@ -1847,7 +2340,7 @@ export async function loadCoworldEvaluationEpisodes(
   if (episodes.length === 0) {
     throw new Error("No completed Coworld episodes with scores were loaded");
   }
-  return { episodes, warnings };
+  return { episodes, warnings, stats };
 }
 
 export async function writeCoworldEvaluationDatasetFile(input: {
@@ -1914,6 +2407,8 @@ async function main(): Promise<void> {
     spawnPhaseTurns: options.spawnPhaseTurns,
     spawnSettleThreshold: options.spawnSettleThreshold,
     warnings: loaded.warnings,
+    skippedNonCompletedEntries: loaded.stats.skippedNonCompletedEntries,
+    skippedByStatus: loaded.stats.skippedByStatus,
   });
   if (dataset.rows.length === 0) {
     throw new Error(
