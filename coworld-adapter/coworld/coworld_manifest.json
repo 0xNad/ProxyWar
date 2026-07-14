@@ -243,7 +243,7 @@
     },
     "runnable": {
       "type": "game",
-      "image": "proxywar-coworld-local:coworld-3e7e218fc73f",
+      "image": "proxywar-coworld-local:council-ede2909bd",
       "run": [
         "node",
         "--max-old-space-size=640",
@@ -274,7 +274,7 @@
   "player": [
     {
       "type": "player",
-      "image": "proxywar-coworld-local:coworld-3e7e218fc73f",
+      "image": "proxywar-coworld-local:council-ede2909bd",
       "run": [
         "node",
         "/app/integration/src/starter-player.mjs"
@@ -302,7 +302,7 @@
   "optimizer": [
     {
       "type": "optimizer",
-      "image": "proxywar-coworld-local:coworld-3e7e218fc73f",
+      "image": "proxywar-coworld-local:council-ede2909bd",
       "run": [
         "node",
         "/app/integration/src/proxywar-optimizer-plan.mjs"
