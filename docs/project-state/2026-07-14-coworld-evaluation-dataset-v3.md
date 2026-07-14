@@ -33,7 +33,10 @@ Schema-v3 migrations:
   rather than being attached to arbitrary seats. A decision or snapshot whose
   explicit seat contradicts its roster-backed name or agent ID fails closed.
   Normalized evidence is revalidated whenever cross-fragment merging enriches
-  the roster.
+  the roster. Seats inferred only from a name or agent ID are tracked
+  internally and demoted back to unattributed when the enriched roster makes
+  that identity ambiguous; explicit seats and validated complete-order
+  snapshot seats retain their authority.
 - Anonymous snapshot rows use array position only when every row is anonymous
   and the snapshot contains a complete roster-sized player array. Partial or
   mixed-identity anonymous rows remain unattributed, and resolved snapshot

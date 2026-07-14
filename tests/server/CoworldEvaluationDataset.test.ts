@@ -1394,6 +1394,163 @@ describe("Coworld evaluation dataset", () => {
     });
   });
 
+  test("demotes identity-inferred seats when later roster evidence makes the name ambiguous", async () => {
+    const directory = await temporaryDirectory();
+    const sourcePath = path.join(directory, "episodes.json");
+    const base = {
+      id: "ereq_late_repeated_name",
+      runID: "run_late_repeated_name",
+      scores: [0.5, 0.3, 0.2],
+    };
+    const initialEvidence = {
+      ...base,
+      participants: [
+        {
+          position: 0,
+          player_name: "Auri",
+          policy_version_id: "candidate:v1",
+        },
+        { position: 1 },
+        { position: 2 },
+      ],
+      decisions: [
+        {
+          username: "Auri",
+          turnNumber: 100,
+          selectedActionKind: "hold",
+          fallbackUsed: true,
+        },
+      ],
+      spectatorReplay: {
+        snapshots: [
+          {
+            label: "active",
+            turnNumber: 100,
+            tick: 100,
+            phase: "active",
+            players: [{ username: "Auri", tilesOwned: 999 }],
+          },
+        ],
+      },
+    };
+    const enrichment = {
+      ...base,
+      participants: [
+        {
+          position: 0,
+          player_name: "Auri",
+          policy_version_id: "candidate:v1",
+        },
+        {
+          position: 1,
+          player_name: "Opponent",
+          policy_version_id: "opponent:v1",
+        },
+        {
+          position: 2,
+          player_name: "Auri",
+          policy_version_id: "candidate:v1",
+        },
+      ],
+    };
+    const initialFragment = parseCoworldEvaluationDocument({
+      value: initialEvidence,
+      sourcePath: "/artifacts/late-repeated-name-initial.replay",
+      fallbackId: "late-repeated-name-initial",
+    })[0];
+    expect(initialFragment.decisions[0].seat).toBe(0);
+    expect(initialFragment.snapshots[0].players[0].seat).toBe(0);
+
+    await fs.writeFile(
+      sourcePath,
+      JSON.stringify({
+        episodes: [initialEvidence, enrichment],
+      }),
+    );
+
+    const loaded = await loadCoworldEvaluationEpisodes([sourcePath]);
+    expect(loaded.episodes[0].decisions[0]).toMatchObject({
+      seat: null,
+      playerName: "Auri",
+      fallback: true,
+    });
+    expect(loaded.episodes[0].snapshots[0].players[0]).toMatchObject({
+      seat: null,
+      playerName: "Auri",
+      tilesOwned: 999,
+    });
+
+    const dataset = buildCoworldEvaluationDataset({
+      episodes: loaded.episodes,
+      selector: {
+        seat: null,
+        policyVersionId: "candidate:v1",
+        playerName: null,
+      },
+    });
+    expect(dataset.rows.map((row) => row.telemetry.decisionCount)).toEqual([
+      null,
+      null,
+    ]);
+    expect(dataset.rows.map((row) => row.phaseSnapshots)).toEqual([[], []]);
+  });
+
+  test("retains explicit seats when later roster evidence repeats the player name", async () => {
+    const directory = await temporaryDirectory();
+    const sourcePath = path.join(directory, "episodes.json");
+    const base = {
+      id: "ereq_late_repeated_name_explicit",
+      runID: "run_late_repeated_name_explicit",
+      scores: [0.5, 0.3, 0.2],
+    };
+    await fs.writeFile(
+      sourcePath,
+      JSON.stringify({
+        episodes: [
+          {
+            ...base,
+            participants: [
+              { position: 0, player_name: "Auri" },
+              { position: 1 },
+              { position: 2 },
+            ],
+            decisions: [
+              {
+                seat: 0,
+                username: "Auri",
+                turnNumber: 100,
+                selectedActionKind: "hold",
+              },
+            ],
+            spectatorReplay: {
+              snapshots: [
+                {
+                  label: "active",
+                  turnNumber: 100,
+                  tick: 100,
+                  phase: "active",
+                  players: [{ seat: 0, username: "Auri", tilesOwned: 999 }],
+                },
+              ],
+            },
+          },
+          {
+            ...base,
+            participants: [
+              { position: 0, player_name: "Auri" },
+              { position: 1, player_name: "Opponent" },
+              { position: 2, player_name: "Auri" },
+            ],
+          },
+        ],
+      }),
+    );
+
+    const loaded = await loadCoworldEvaluationEpisodes([sourcePath]);
+    expect(loaded.episodes[0].decisions[0].seat).toBe(0);
+    expect(loaded.episodes[0].snapshots[0].players[0].seat).toBe(0);
+  });
+
   test("keeps repeated-agent-ID evidence unattributed", async () => {
     const directory = await temporaryDirectory();
     const sourcePath = path.join(directory, "episodes.json");
@@ -1678,9 +1835,7 @@ describe("Coworld evaluation dataset", () => {
           snapshots: [
             {
               turnNumber: 100,
-              players: [
-                { seat: 0, username: "Opponent", tilesOwned: 999 },
-              ],
+              players: [{ seat: 0, username: "Opponent", tilesOwned: 999 }],
             },
           ],
         },

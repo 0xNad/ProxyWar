@@ -1316,6 +1316,67 @@ interface MergeIdentity {
   agentID: string | null;
 }
 
+type CoworldSeatProvenance = "explicit" | "identity" | "ordered";
+type CoworldAuthoritativeSeatProvenance = Exclude<
+  CoworldSeatProvenance,
+  "identity"
+>;
+
+interface ResolvedMergeIdentity extends MergeIdentity {
+  seatProvenance: CoworldSeatProvenance | null;
+}
+
+// Keep merge-only provenance out of the persisted episode and dataset schemas.
+// Every evidence-record constructor below re-registers provenance after copying.
+const seatProvenanceByEvidence = new WeakMap<object, CoworldSeatProvenance>();
+
+function evidenceSeatProvenance(
+  evidence: MergeIdentity,
+): CoworldSeatProvenance | null {
+  return (
+    seatProvenanceByEvidence.get(evidence) ??
+    (evidence.seat === null ? null : "explicit")
+  );
+}
+
+function rememberSeatProvenance<T extends MergeIdentity>(
+  evidence: T,
+  provenance: CoworldSeatProvenance | null,
+): T {
+  if (provenance === null) {
+    seatProvenanceByEvidence.delete(evidence);
+  } else {
+    seatProvenanceByEvidence.set(evidence, provenance);
+  }
+  return evidence;
+}
+
+function mergedSeatProvenance(
+  left: MergeIdentity,
+  right: MergeIdentity,
+  seat: number | null,
+): CoworldSeatProvenance | null {
+  if (seat === null) return null;
+  const rank: Record<CoworldSeatProvenance, number> = {
+    explicit: 3,
+    ordered: 2,
+    identity: 1,
+  };
+  return (
+    [left, right]
+      .filter((evidence) => evidence.seat === seat)
+      .map(evidenceSeatProvenance)
+      .filter(
+        (provenance): provenance is CoworldSeatProvenance =>
+          provenance !== null,
+      )
+      .sort(
+        (leftProvenance, rightProvenance) =>
+          rank[rightProvenance] - rank[leftProvenance],
+      )[0] ?? "explicit"
+  );
+}
+
 function rosterSeatForIdentity(
   identity: MergeIdentity,
   roster: readonly CoworldEvaluationRosterSeat[],
@@ -1399,13 +1460,14 @@ function mergeDecision(
     left.reason === "" ? null : left.reason,
     right.reason === "" ? null : right.reason,
   );
-  return {
-    seat: mergeNullable(
-      episodeId,
-      `decision turn ${left.turnNumber ?? "unknown"} seat`,
-      left.seat,
-      right.seat,
-    ),
+  const seat = mergeNullable(
+    episodeId,
+    `decision turn ${left.turnNumber ?? "unknown"} seat`,
+    left.seat,
+    right.seat,
+  );
+  const merged: CoworldEvaluationDecision = {
+    seat,
     playerName: mergeNullable(
       episodeId,
       `decision turn ${left.turnNumber ?? "unknown"} playerName`,
@@ -1491,6 +1553,10 @@ function mergeDecision(
         ? left.searchableText
         : `${left.searchableText}\n${right.searchableText}`,
   };
+  return rememberSeatProvenance(
+    merged,
+    mergedSeatProvenance(left, right, seat),
+  );
 }
 
 function mergeDecisions(
@@ -1552,8 +1618,9 @@ function mergeSnapshotPlayer(
       leftValue,
       rightValue,
     );
-  return {
-    seat: merge("seat", left.seat, right.seat),
+  const seat = merge("seat", left.seat, right.seat);
+  const merged: CoworldEvaluationSnapshotPlayer = {
+    seat,
     playerName: merge("playerName", left.playerName, right.playerName),
     agentID: merge("agentID", left.agentID, right.agentID),
     tilesOwned: merge("tilesOwned", left.tilesOwned, right.tilesOwned),
@@ -1562,6 +1629,10 @@ function mergeSnapshotPlayer(
     isAlive: merge("isAlive", left.isAlive, right.isAlive),
     hasSpawned: merge("hasSpawned", left.hasSpawned, right.hasSpawned),
   };
+  return rememberSeatProvenance(
+    merged,
+    mergedSeatProvenance(left, right, seat),
+  );
 }
 
 function snapshotsMatch(
@@ -2017,7 +2088,8 @@ function resolveIdentityAgainstRoster(input: {
   roster: readonly CoworldEvaluationRosterSeat[];
   context: string;
   fallbackSeat?: number | null;
-}): MergeIdentity {
+  directSeatProvenance?: CoworldAuthoritativeSeatProvenance;
+}): ResolvedMergeIdentity {
   const directSeat = input.identity.seat;
   const playerName = input.identity.playerName;
   const agentID = input.identity.agentID;
@@ -2065,7 +2137,12 @@ function resolveIdentityAgainstRoster(input: {
     if (conflictsWithSeat(directSeat)) {
       throw new Error(`Conflicting ${input.context} identity`);
     }
-    return { seat: directSeat, playerName, agentID };
+    return {
+      seat: directSeat,
+      playerName,
+      agentID,
+      seatProvenance: input.directSeatProvenance ?? "explicit",
+    };
   }
   const uniqueAgentSeat =
     agentMatches.length === 1 ? agentMatches[0].seat : null;
@@ -2081,24 +2158,36 @@ function resolveIdentityAgainstRoster(input: {
     if (conflictsWithSeat(uniqueAgentSeat)) {
       throw new Error(`Conflicting ${input.context} identity`);
     }
-    return { seat: uniqueAgentSeat, playerName, agentID };
+    return {
+      seat: uniqueAgentSeat,
+      playerName,
+      agentID,
+      seatProvenance: "identity",
+    };
   }
   if (agentID !== null) {
     if (uniqueNameSeat !== null && conflictsWithSeat(uniqueNameSeat)) {
       throw new Error(`Conflicting ${input.context} identity`);
     }
-    return { seat: null, playerName, agentID };
+    return { seat: null, playerName, agentID, seatProvenance: null };
   }
   if (uniqueNameSeat !== null) {
-    return { seat: uniqueNameSeat, playerName, agentID };
+    return {
+      seat: uniqueNameSeat,
+      playerName,
+      agentID,
+      seatProvenance: "identity",
+    };
   }
+  const fallbackSeat =
+    playerName === null && agentID === null
+      ? (input.fallbackSeat ?? null)
+      : null;
   return {
-    seat:
-      playerName === null && agentID === null
-        ? (input.fallbackSeat ?? null)
-        : null,
+    seat: fallbackSeat,
     playerName,
     agentID,
+    seatProvenance: fallbackSeat === null ? null : "ordered",
   };
 }
 
@@ -2110,7 +2199,7 @@ function resolveRecordIdentity(input: {
   playerNameKeys: readonly string[];
   agentIDKeys: readonly string[];
   fallbackSeat?: number | null;
-}): MergeIdentity {
+}): ResolvedMergeIdentity {
   return resolveIdentityAgainstRoster({
     identity: {
       seat: identitySeat(input.record, input.seatKeys, input.context),
@@ -2178,7 +2267,7 @@ function normalizeDecision(
       (value): value is boolean => value !== null,
     ),
   );
-  return {
+  const decision: CoworldEvaluationDecision = {
     seat: identity.seat,
     playerName: identity.playerName,
     agentID: identity.agentID,
@@ -2207,6 +2296,7 @@ function normalizeDecision(
       treatmentMarkers: record.treatmentMarkers,
     }),
   };
+  return rememberSeatProvenance(decision, identity.seatProvenance);
 }
 
 function revalidateDecisionsForRoster(
@@ -2214,17 +2304,25 @@ function revalidateDecisionsForRoster(
   roster: readonly CoworldEvaluationRosterSeat[],
 ): CoworldEvaluationDecision[] {
   return decisions.map((decision) => {
+    const priorProvenance = evidenceSeatProvenance(decision);
     const identity = resolveIdentityAgainstRoster({
-      identity: decision,
+      identity: {
+        seat: priorProvenance === "identity" ? null : decision.seat,
+        playerName: decision.playerName,
+        agentID: decision.agentID,
+      },
       roster,
       context: "decision",
+      directSeatProvenance:
+        priorProvenance === "ordered" ? "ordered" : "explicit",
     });
-    return {
+    const revalidated: CoworldEvaluationDecision = {
       ...decision,
       seat: identity.seat,
       playerName: identity.playerName,
       agentID: identity.agentID,
     };
+    return rememberSeatProvenance(revalidated, identity.seatProvenance);
   });
 }
 
@@ -2251,17 +2349,25 @@ function revalidateSnapshotsForRoster(
 ): CoworldEvaluationSnapshot[] {
   return snapshots.map((snapshot) => {
     const players = snapshot.players.map((player) => {
+      const priorProvenance = evidenceSeatProvenance(player);
       const identity = resolveIdentityAgainstRoster({
-        identity: player,
+        identity: {
+          seat: priorProvenance === "identity" ? null : player.seat,
+          playerName: player.playerName,
+          agentID: player.agentID,
+        },
         roster,
         context: "snapshot player",
+        directSeatProvenance:
+          priorProvenance === "ordered" ? "ordered" : "explicit",
       });
-      return {
+      const revalidated: CoworldEvaluationSnapshotPlayer = {
         ...player,
         seat: identity.seat,
         playerName: identity.playerName,
         agentID: identity.agentID,
       };
+      return rememberSeatProvenance(revalidated, identity.seatProvenance);
     });
     validateUniqueSnapshotSeats(
       players,
@@ -2291,7 +2397,7 @@ function normalizeSnapshotPlayer(input: {
     fallbackSeat: input.allowIndexFallback ? input.index : null,
   });
   const gold = player.gold;
-  return {
+  const normalized: CoworldEvaluationSnapshotPlayer = {
     seat: identity.seat,
     playerName: identity.playerName,
     agentID: identity.agentID,
@@ -2310,6 +2416,7 @@ function normalizeSnapshotPlayer(input: {
     hasSpawned:
       typeof player.hasSpawned === "boolean" ? player.hasSpawned : null,
   };
+  return rememberSeatProvenance(normalized, identity.seatProvenance);
 }
 
 function hasExplicitSnapshotIdentity(value: unknown): boolean {
