@@ -933,6 +933,24 @@ describe("Keystone Coworld single-action conversion executor", () => {
     ]);
   });
 
+  it("does not let a mutating ranker reintroduce an ambiguous offered id", () => {
+    const duplicate = neutral(35);
+    const originalActions = [duplicate, { ...duplicate }, hold];
+    const rankActions = vi.fn<KeystoneActionRanker>(({ input: current }) => {
+      current.legalActions[0]!.id = duplicate.id;
+      current.legalActions.push(duplicate);
+      return ranked(current.legalActions);
+    });
+
+    const decision = executor(rankActions).decide(
+      input({ turn: 400, actions: originalActions, neutral: true }),
+      plan(),
+    );
+
+    expect(decision.actionID).toBe(hold.id);
+    expect(originalActions).toEqual([duplicate, { ...duplicate }, hold]);
+  });
+
   it("fails closed when every offered action id is ambiguous", () => {
     const rankActions = vi.fn<KeystoneActionRanker>(() => []);
 

@@ -125,9 +125,9 @@ export class KeystoneSingleActionExecutor implements AgentExecutor {
     // collide on the same id, selecting it cannot identify which intent the
     // validator will resolve. Drop only those ambiguous rows so an unrelated
     // social-action collision cannot force the whole competitive turn to hold.
-    const unambiguousOffered = input.legalActions.filter(
-      (action) => offeredIDCounts.get(action.id) === 1,
-    );
+    const unambiguousOffered = input.legalActions
+      .filter((action) => offeredIDCounts.get(action.id) === 1)
+      .map(cloneLegalAction);
     const offeredByID = new Map(
       unambiguousOffered.map((action) => [action.id, action]),
     );
@@ -142,10 +142,13 @@ export class KeystoneSingleActionExecutor implements AgentExecutor {
       );
     }
 
-    const rankerInput =
-      unambiguousOffered.length === input.legalActions.length
-        ? input
-        : { ...input, legalActions: unambiguousOffered };
+    // The repository ranker is injected code. Give it a separate deep copy so
+    // sorting, appending, or rewriting its input cannot reintroduce a rejected
+    // collision into the executor-owned selection snapshot.
+    const rankerInput: AgentBrainInput = {
+      ...input,
+      legalActions: unambiguousOffered.map(cloneLegalAction),
+    };
 
     const ranked = sanitizeRankedActions(
       this.rankActions({
@@ -768,6 +771,10 @@ function appendUnrankedOffered(
       return true;
     }),
   ];
+}
+
+function cloneLegalAction(action: LegalAction): LegalAction {
+  return structuredClone(action);
 }
 
 function conversionCandidates(actions: readonly LegalAction[]): LegalAction[] {
