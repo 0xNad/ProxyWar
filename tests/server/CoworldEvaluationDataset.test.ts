@@ -284,6 +284,7 @@ async function writeCouncilPlanFixture(
     for (const [blockOrder, arm] of armOrder.entries()) {
       const jobID = `${blockID}-${arm.armID}`;
       const jobRoot = path.join(root, "payload", "jobs", jobID);
+      await fs.mkdir(jobRoot, { recursive: true });
       const outputDir = path.join(jobRoot, "episode");
       const completionPath = path.join(jobRoot, "completion.json");
       const roster = blockRoster.map((seat) => ({
@@ -955,6 +956,33 @@ describe("Coworld evaluation dataset", () => {
     ).rejects.toThrow("matrixID or matrix identity is inconsistent");
   });
 
+  test("bounds matrix axes before materializing their Cartesian product", async () => {
+    const fixture = await writeCouncilPlanFixture();
+    const plan = JSON.parse(await fs.readFile(fixture.planPath, "utf8")) as {
+      matrixID: string;
+      matrixIdentity: {
+        variantIDs: string[];
+        candidateSeats: number[];
+        seeds: number[];
+      };
+    };
+    plan.matrixIdentity.variantIDs = Array.from(
+      { length: 500 },
+      (_value, index) => `variant-${index}`,
+    );
+    plan.matrixIdentity.candidateSeats = [0, 1];
+    plan.matrixIdentity.seeds = Array.from(
+      { length: 500 },
+      (_value, index) => index,
+    );
+    plan.matrixID = `matrix-${canonicalSha256(plan.matrixIdentity).slice(7, 39)}`;
+    await fs.writeFile(fixture.planPath, JSON.stringify(plan));
+
+    await expect(
+      loadCoworldEvaluationEpisodes([], [fixture.planPath]),
+    ).rejects.toThrow("matrix axes do not match the bounded block count");
+  });
+
   test("rejects a materialized manifest that no longer matches its plan hash", async () => {
     const fixture = await writeCouncilPlanFixture();
     const plan = JSON.parse(await fs.readFile(fixture.planPath, "utf8")) as {
@@ -1025,6 +1053,21 @@ describe("Coworld evaluation dataset", () => {
         reason: expect.stringContaining("not a regular file"),
       }),
     ]);
+  });
+
+  test("rejects a symlinked job root outside the materialized plan tree", async () => {
+    const fixture = await writeCouncilPlanFixture();
+    const jobRoot = path.dirname(fixture.jobs[0].completionPath);
+    const relocatedRoot = path.join(
+      await temporaryDirectory(),
+      path.basename(jobRoot),
+    );
+    await fs.rename(jobRoot, relocatedRoot);
+    await fs.symlink(relocatedRoot, jobRoot, "dir");
+
+    await expect(
+      loadCoworldEvaluationEpisodes([], [fixture.planPath]),
+    ).rejects.toThrow("root must be a real directory");
   });
 
   test("aligns score pairs when the same policy ID occupies repeated seats", () => {

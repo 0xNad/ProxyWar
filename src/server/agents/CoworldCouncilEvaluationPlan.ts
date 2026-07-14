@@ -915,6 +915,18 @@ function parseCouncilPlan(value: unknown, sourcePath: string): CouncilPlan {
   ) {
     throw new Error(`${sourcePath} repeats a block or pair identity`);
   }
+  const matrixBlockCount =
+    matrixIdentity.variantIDs.length *
+    matrixIdentity.candidateSeats.length *
+    matrixIdentity.seeds.length;
+  if (
+    matrixBlockCount !== blocks.length ||
+    matrixBlockCount * arms.length > COUNCIL_MAX_JOBS
+  ) {
+    throw new Error(
+      `${sourcePath} matrix axes do not match the bounded block count`,
+    );
+  }
   const matrixAxisCombinations = matrixIdentity.variantIDs.flatMap(
     (variantID) =>
       matrixIdentity.candidateSeats.flatMap((candidateSeat) =>
@@ -1428,6 +1440,47 @@ async function validateCouncilMaterializedManifest(
   }
 }
 
+async function validateCouncilRealDirectory(
+  directory: string,
+  expectedRealPath: string,
+  context: string,
+): Promise<void> {
+  const stat = await fs.lstat(directory);
+  if (!stat.isDirectory() || stat.isSymbolicLink()) {
+    throw new Error(`${context} must be a real directory`);
+  }
+  const realPath = await fs.realpath(directory);
+  if (path.resolve(realPath) !== path.resolve(expectedRealPath)) {
+    throw new Error(`${context} escapes the materialized plan root`);
+  }
+}
+
+async function validateCouncilPlanFilesystem(plan: CouncilPlan): Promise<void> {
+  const root = path.dirname(plan.sourcePath);
+  const rootStat = await fs.lstat(root);
+  if (!rootStat.isDirectory() || rootStat.isSymbolicLink()) {
+    throw new Error(`${plan.sourcePath} plan root must be a real directory`);
+  }
+  const realRoot = await fs.realpath(root);
+  await validateCouncilRealDirectory(
+    path.join(root, "payload"),
+    path.join(realRoot, "payload"),
+    `${plan.sourcePath} plan payload`,
+  );
+  await validateCouncilRealDirectory(
+    path.join(root, "payload", "jobs"),
+    path.join(realRoot, "payload", "jobs"),
+    `${plan.sourcePath} plan jobs`,
+  );
+  for (const job of plan.jobs) {
+    await validateCouncilRealDirectory(
+      path.dirname(job.requestPath),
+      path.join(realRoot, "payload", "jobs", job.jobID),
+      `job ${job.jobID} root`,
+    );
+  }
+}
+
 export async function loadCouncilEvaluationPlans(
   planPaths: readonly string[],
 ): Promise<LoadedCouncilEvaluationPlans | undefined> {
@@ -1442,6 +1495,7 @@ export async function loadCouncilEvaluationPlans(
       ),
     ),
   );
+  await Promise.all(plans.map(validateCouncilPlanFilesystem));
   await Promise.all(plans.map(validateCouncilMaterializedManifest));
   const allJobs = plans.flatMap((plan) => plan.jobs);
   const allBlocks = plans.flatMap((plan) =>
