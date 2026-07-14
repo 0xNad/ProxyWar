@@ -2,6 +2,58 @@ import { commissionerTopScoreSlots } from "./CoworldScoreSemantics";
 
 export type CoworldTelemetryPrimitive = string | number | boolean | null;
 
+export type CoworldShadowCouncilHealth =
+  | "healthy"
+  | "partial"
+  | "failed"
+  | "unavailable";
+
+export type CoworldShadowCouncilAgreement =
+  | "agree"
+  | "disagree"
+  | "abstain"
+  | "unavailable";
+
+export type CoworldShadowCouncilSource =
+  | "-"
+  | "expansion"
+  | "economy"
+  | "conquest"
+  | "politics"
+  | "spawn"
+  | "survival"
+  | "binding_directive"
+  | "fallback";
+
+export type CoworldShadowCouncilTier =
+  | "-"
+  | "spawn"
+  | "survival"
+  | "binding_directive"
+  | "expert_auction"
+  | "hold";
+
+/** Expanded, validated form of decision_response.shadowCouncil compact v1. */
+export interface CoworldShadowCouncilDecisionTelemetry {
+  version: 1;
+  ordinal: number;
+  resetOrdinal: number;
+  reset: boolean;
+  health: CoworldShadowCouncilHealth;
+  proposalMask: number;
+  errorMask: number;
+  rejectionMask: number;
+  diagnosticWinnerFingerprint: string;
+  runnerUpFingerprint: string;
+  authoritativeFingerprint: string;
+  bidMarginBP: number | null;
+  agreement: CoworldShadowCouncilAgreement;
+  diagnosticWinnerSource: CoworldShadowCouncilSource;
+  diagnosticWinnerTier: CoworldShadowCouncilTier;
+  enabledExpertMask: number;
+  elapsedUs: number;
+}
+
 export interface CoworldEvaluationRosterSeat {
   seat: number;
   policyVersionId: string | null;
@@ -26,6 +78,10 @@ export interface CoworldEvaluationDecision {
   wireDroppedFollowupCount: number | null;
   multiAction: boolean | null;
   commanderTelemetry: Record<string, CoworldTelemetryPrimitive>;
+  /** Null/undefined means the decision artifact did not expose a response. */
+  decisionResponseAvailable?: boolean | null;
+  /** Null/undefined means no valid compact telemetry was present. */
+  shadowCouncil?: CoworldShadowCouncilDecisionTelemetry | null;
   explicitTreatmentMarkers: string[];
   searchableText: string;
 }
@@ -118,6 +174,7 @@ export interface CoworldSeatTelemetry {
   multiActionSampleCount: number;
   multiActionDecisionCount: number | null;
   commanderTelemetry: CoworldCommanderTelemetryAggregate;
+  shadowCouncil: CoworldShadowCouncilTelemetryAggregate;
   fallbackRate: number | null;
   fallbackOrDegradedRate: number | null;
   degradationRate: number | null;
@@ -125,6 +182,22 @@ export interface CoworldSeatTelemetry {
   treatmentExposed: boolean;
   treatmentMarkerCounts: Record<string, number>;
   episodeReported: CoworldEpisodeReportedTelemetry;
+}
+
+export interface CoworldShadowCouncilTelemetryAggregate {
+  available: boolean;
+  decisionResponseSampleCount: number;
+  validTelemetryDecisionCount: number;
+  diagnosticWinnerDecisionCount: number;
+  counterfactualAgreementDecisionCount: number;
+  proposalMaskUnion: number;
+  errorMaskUnion: number;
+  rejectionMaskUnion: number;
+  enabledExpertMaskUnion: number;
+  sourceCounts: Record<string, number>;
+  tierCounts: Record<string, number>;
+  healthCounts: Record<string, number>;
+  agreementCounts: Record<string, number>;
 }
 
 export interface CoworldPrimitiveTelemetryAggregate {
@@ -225,10 +298,11 @@ export interface CoworldEvaluationAggregate {
   attackTargetMix: Record<string, number>;
   treatmentMarkerCounts: Record<string, number>;
   commanderTelemetry: CoworldCommanderTelemetryAggregate;
+  shadowCouncil: CoworldShadowCouncilTelemetryAggregate;
 }
 
 export interface CoworldEvaluationDataset {
-  schemaVersion: 3;
+  schemaVersion: 4;
   selector: CoworldDatasetSelector;
   treatmentMarkers: CoworldTreatmentMarker[];
   spawnDiagnosticsConfig: {
@@ -388,6 +462,120 @@ function mergeCommanderTelemetry(
   };
 }
 
+const shadowDiagnosticWinnerSources = new Set<CoworldShadowCouncilSource>([
+  "expansion",
+  "economy",
+  "conquest",
+  "politics",
+  "spawn",
+  "survival",
+  "binding_directive",
+  "fallback",
+]);
+
+function shadowCouncilTelemetryAggregate(
+  decisions: readonly CoworldEvaluationDecision[],
+): CoworldShadowCouncilTelemetryAggregate {
+  const telemetry = decisions.flatMap((decision) =>
+    decision.shadowCouncil === null || decision.shadowCouncil === undefined
+      ? []
+      : [decision.shadowCouncil],
+  );
+  const decisionResponseSampleCount = decisions.filter(
+    (decision) => decision.decisionResponseAvailable === true,
+  ).length;
+  const sourceCounts: Record<string, number> = {};
+  const tierCounts: Record<string, number> = {};
+  const healthCounts: Record<string, number> = {};
+  const agreementCounts: Record<string, number> = {};
+  let proposalMaskUnion = 0;
+  let errorMaskUnion = 0;
+  let rejectionMaskUnion = 0;
+  let enabledExpertMaskUnion = 0;
+  let diagnosticWinnerDecisionCount = 0;
+  let counterfactualAgreementDecisionCount = 0;
+
+  for (const entry of telemetry) {
+    proposalMaskUnion |= entry.proposalMask;
+    errorMaskUnion |= entry.errorMask;
+    rejectionMaskUnion |= entry.rejectionMask;
+    enabledExpertMaskUnion |= entry.enabledExpertMask;
+    increment(sourceCounts, entry.diagnosticWinnerSource);
+    increment(tierCounts, entry.diagnosticWinnerTier);
+    increment(healthCounts, entry.health);
+    increment(agreementCounts, entry.agreement);
+    if (shadowDiagnosticWinnerSources.has(entry.diagnosticWinnerSource)) {
+      diagnosticWinnerDecisionCount += 1;
+      if (entry.agreement === "agree") {
+        counterfactualAgreementDecisionCount += 1;
+      }
+    }
+  }
+
+  return {
+    available: telemetry.length > 0,
+    decisionResponseSampleCount,
+    validTelemetryDecisionCount: telemetry.length,
+    diagnosticWinnerDecisionCount,
+    counterfactualAgreementDecisionCount,
+    proposalMaskUnion,
+    errorMaskUnion,
+    rejectionMaskUnion,
+    enabledExpertMaskUnion,
+    sourceCounts: sortedCounts(sourceCounts),
+    tierCounts: sortedCounts(tierCounts),
+    healthCounts: sortedCounts(healthCounts),
+    agreementCounts: sortedCounts(agreementCounts),
+  };
+}
+
+function mergeShadowCouncilTelemetry(
+  aggregates: readonly CoworldShadowCouncilTelemetryAggregate[],
+): CoworldShadowCouncilTelemetryAggregate {
+  const sourceCounts: Record<string, number> = {};
+  const tierCounts: Record<string, number> = {};
+  const healthCounts: Record<string, number> = {};
+  const agreementCounts: Record<string, number> = {};
+  let decisionResponseSampleCount = 0;
+  let validTelemetryDecisionCount = 0;
+  let diagnosticWinnerDecisionCount = 0;
+  let counterfactualAgreementDecisionCount = 0;
+  let proposalMaskUnion = 0;
+  let errorMaskUnion = 0;
+  let rejectionMaskUnion = 0;
+  let enabledExpertMaskUnion = 0;
+  for (const aggregate of aggregates) {
+    decisionResponseSampleCount += aggregate.decisionResponseSampleCount;
+    validTelemetryDecisionCount += aggregate.validTelemetryDecisionCount;
+    diagnosticWinnerDecisionCount += aggregate.diagnosticWinnerDecisionCount;
+    counterfactualAgreementDecisionCount +=
+      aggregate.counterfactualAgreementDecisionCount;
+    proposalMaskUnion |= aggregate.proposalMaskUnion;
+    errorMaskUnion |= aggregate.errorMaskUnion;
+    rejectionMaskUnion |= aggregate.rejectionMaskUnion;
+    enabledExpertMaskUnion |= aggregate.enabledExpertMaskUnion;
+    mergeCounts(sourceCounts, aggregate.sourceCounts);
+    mergeCounts(tierCounts, aggregate.tierCounts);
+    mergeCounts(healthCounts, aggregate.healthCounts);
+    mergeCounts(agreementCounts, aggregate.agreementCounts);
+  }
+  return {
+    available: validTelemetryDecisionCount > 0,
+    decisionResponseSampleCount,
+    validTelemetryDecisionCount,
+    diagnosticWinnerDecisionCount,
+    counterfactualAgreementDecisionCount,
+    proposalMaskUnion,
+    errorMaskUnion,
+    rejectionMaskUnion,
+    enabledExpertMaskUnion,
+    sourceCounts: sortedCounts(sourceCounts),
+    tierCounts: sortedCounts(tierCounts),
+    healthCounts: sortedCounts(healthCounts),
+    agreementCounts: sortedCounts(agreementCounts),
+  };
+}
+
 function decisionsForSeat(
   episode: CoworldEvaluationEpisode,
   seat: number,
@@ -516,6 +704,7 @@ function seatTelemetry(
     multiActionDecisionCount:
       multiActionSamples.length > 0 ? multiActionDecisionCount : null,
     commanderTelemetry: commanderTelemetryAggregate(decisions),
+    shadowCouncil: shadowCouncilTelemetryAggregate(decisions),
     fallbackRate: rate(fallbackCount, fallbackSamples.length),
     fallbackOrDegradedRate: rate(
       fallbackOrDegradedCount,
@@ -781,6 +970,9 @@ function aggregate(
     commanderTelemetry: mergeCommanderTelemetry(
       rows.map((row) => row.telemetry.commanderTelemetry),
     ),
+    shadowCouncil: mergeShadowCouncilTelemetry(
+      rows.map((row) => row.telemetry.shadowCouncil),
+    ),
   };
 }
 
@@ -862,7 +1054,7 @@ export function buildCoworldEvaluationDataset(input: {
     input.episodes.flatMap((episode) => episode.sourcePaths),
   ).size;
   return {
-    schemaVersion: 3,
+    schemaVersion: 4,
     selector: input.selector,
     treatmentMarkers,
     spawnDiagnosticsConfig: {

@@ -13,6 +13,11 @@ import {
   type CoworldEvaluationRosterSeat,
   type CoworldEvaluationSnapshot,
   type CoworldEvaluationSnapshotPlayer,
+  type CoworldShadowCouncilAgreement,
+  type CoworldShadowCouncilDecisionTelemetry,
+  type CoworldShadowCouncilHealth,
+  type CoworldShadowCouncilSource,
+  type CoworldShadowCouncilTier,
   type CoworldTelemetryPrimitive,
   type CoworldTreatmentMarker,
 } from "../server/agents/CoworldEvaluationDataset";
@@ -63,6 +68,68 @@ const usage =
   "[--policy-version-id ID | --player-name NAME | --seat N] " +
   "[--treatment-marker ID=TEXT] [--spawn-phase-turns N] " +
   "[--spawn-settle-threshold 0..1] [--output FILE]";
+
+const SHADOW_COUNCIL_MAX_BYTES = 300;
+const shadowCouncilCompactKeys = new Set([
+  "v",
+  "o",
+  "g",
+  "x",
+  "h",
+  "p",
+  "e",
+  "j",
+  "w",
+  "r",
+  "d",
+  "m",
+  "a",
+  "s",
+  "k",
+  "u",
+]);
+const shadowCouncilHealthCodes: Readonly<
+  Record<string, CoworldShadowCouncilHealth>
+> = Object.freeze({
+  h: "healthy",
+  p: "partial",
+  f: "failed",
+  u: "unavailable",
+});
+const shadowCouncilAgreementCodes: Readonly<
+  Record<string, CoworldShadowCouncilAgreement>
+> = Object.freeze({
+  a: "agree",
+  d: "disagree",
+  b: "abstain",
+  u: "unavailable",
+});
+const shadowCouncilSourceCodes: Readonly<
+  Record<number, CoworldShadowCouncilSource>
+> = Object.freeze({
+  0: "-",
+  1: "expansion",
+  2: "economy",
+  3: "conquest",
+  4: "politics",
+  5: "spawn",
+  6: "survival",
+  7: "binding_directive",
+  8: "fallback",
+});
+const shadowSourceTier: Readonly<
+  Record<CoworldShadowCouncilSource, CoworldShadowCouncilTier>
+> = Object.freeze({
+  "-": "-",
+  expansion: "expert_auction",
+  economy: "expert_auction",
+  conquest: "expert_auction",
+  politics: "expert_auction",
+  spawn: "spawn",
+  survival: "survival",
+  binding_directive: "binding_directive",
+  fallback: "hold",
+});
 
 function asRecord(value: unknown): Record<string, unknown> | null {
   return typeof value === "object" && value !== null && !Array.isArray(value)
@@ -1583,6 +1650,18 @@ function mergeDecision(
       left.commanderTelemetry,
       right.commanderTelemetry,
     ),
+    decisionResponseAvailable: mergeNullable(
+      episodeId,
+      `decision turn ${left.turnNumber ?? "unknown"} decisionResponseAvailable`,
+      left.decisionResponseAvailable,
+      right.decisionResponseAvailable,
+    ),
+    shadowCouncil: mergeNullable(
+      episodeId,
+      `decision turn ${left.turnNumber ?? "unknown"} shadowCouncil`,
+      left.shadowCouncil,
+      right.shadowCouncil,
+    ),
     explicitTreatmentMarkers: [
       ...new Set([
         ...left.explicitTreatmentMarkers,
@@ -2013,6 +2092,155 @@ function commanderTelemetry(
   );
 }
 
+interface ParsedDecisionResponseTelemetry {
+  available: boolean | null;
+  shadowCouncil: CoworldShadowCouncilDecisionTelemetry | null;
+}
+
+function shadowInteger(
+  record: Record<string, unknown>,
+  key: string,
+  maximum = Number.MAX_SAFE_INTEGER,
+): number {
+  const value = record[key];
+  if (
+    typeof value !== "number" ||
+    !Number.isSafeInteger(value) ||
+    value < 0 ||
+    value > maximum
+  ) {
+    throw new Error(`Invalid decision_response.shadowCouncil.${key}`);
+  }
+  return value;
+}
+
+function shadowFingerprint(
+  record: Record<string, unknown>,
+  key: string,
+): string {
+  const value = record[key];
+  if (
+    typeof value !== "string" ||
+    (value !== "-" && !/^[0-9a-f]{16}$/.test(value))
+  ) {
+    throw new Error(`Invalid decision_response.shadowCouncil.${key}`);
+  }
+  return value;
+}
+
+function shadowCouncilDecisionTelemetry(
+  value: unknown,
+): CoworldShadowCouncilDecisionTelemetry {
+  if (
+    typeof value !== "string" ||
+    value.length === 0 ||
+    Buffer.byteLength(value, "utf8") > SHADOW_COUNCIL_MAX_BYTES
+  ) {
+    throw new Error("Invalid decision_response.shadowCouncil compact payload");
+  }
+  let decoded: unknown;
+  try {
+    decoded = JSON.parse(value);
+  } catch {
+    throw new Error("Invalid decision_response.shadowCouncil JSON");
+  }
+  const record = asRecord(decoded);
+  const keys = record === null ? [] : Object.keys(record);
+  if (
+    record === null ||
+    keys.length !== shadowCouncilCompactKeys.size ||
+    keys.some((key) => !shadowCouncilCompactKeys.has(key))
+  ) {
+    throw new Error("Invalid decision_response.shadowCouncil keys");
+  }
+  if (record.v !== 1) {
+    throw new Error("Invalid decision_response.shadowCouncil.v");
+  }
+  const ordinal = shadowInteger(record, "o");
+  const resetOrdinal = shadowInteger(record, "g");
+  const resetCode = shadowInteger(record, "x", 1);
+  const health =
+    typeof record.h === "string"
+      ? shadowCouncilHealthCodes[record.h]
+      : undefined;
+  if (health === undefined) {
+    throw new Error("Invalid decision_response.shadowCouncil.h");
+  }
+  const proposalMask = shadowInteger(record, "p", 63);
+  const errorMask = shadowInteger(record, "e", 63);
+  const rejectionMask = shadowInteger(record, "j", 2_047);
+  const diagnosticWinnerFingerprint = shadowFingerprint(record, "w");
+  const runnerUpFingerprint = shadowFingerprint(record, "r");
+  const authoritativeFingerprint = shadowFingerprint(record, "d");
+  const bidMarginBP = record.m === null ? null : shadowInteger(record, "m");
+  const agreement =
+    typeof record.a === "string"
+      ? shadowCouncilAgreementCodes[record.a]
+      : undefined;
+  if (agreement === undefined) {
+    throw new Error("Invalid decision_response.shadowCouncil.a");
+  }
+  const sourceCode = shadowInteger(record, "s", 8);
+  const diagnosticWinnerSource = shadowCouncilSourceCodes[sourceCode];
+  if (diagnosticWinnerSource === undefined) {
+    throw new Error("Invalid decision_response.shadowCouncil.s");
+  }
+  const enabledExpertMask = shadowInteger(record, "k", 15);
+  const elapsedUs = shadowInteger(record, "u");
+  return {
+    version: 1,
+    ordinal,
+    resetOrdinal,
+    reset: resetCode === 1,
+    health,
+    proposalMask,
+    errorMask,
+    rejectionMask,
+    diagnosticWinnerFingerprint,
+    runnerUpFingerprint,
+    authoritativeFingerprint,
+    bidMarginBP,
+    agreement,
+    diagnosticWinnerSource,
+    diagnosticWinnerTier: shadowSourceTier[diagnosticWinnerSource],
+    enabledExpertMask,
+    elapsedUs,
+  };
+}
+
+function decisionResponseTelemetry(
+  record: Record<string, unknown>,
+): ParsedDecisionResponseTelemetry {
+  if (!Object.hasOwn(record, "rawLlmOutput")) {
+    return { available: null, shadowCouncil: null };
+  }
+  const raw = record.rawLlmOutput;
+  if (typeof raw !== "string" || raw.trim() === "") {
+    return { available: false, shadowCouncil: null };
+  }
+  let decoded: unknown;
+  try {
+    decoded = JSON.parse(raw);
+  } catch {
+    return { available: false, shadowCouncil: null };
+  }
+  const response = asRecord(decoded);
+  if (response?.type !== "decision_response") {
+    if (response !== null && Object.hasOwn(response, "shadowCouncil")) {
+      throw new Error(
+        "Invalid shadowCouncil outside a decision_response payload",
+      );
+    }
+    return { available: null, shadowCouncil: null };
+  }
+  return {
+    available: true,
+    shadowCouncil: Object.hasOwn(response, "shadowCouncil")
+      ? shadowCouncilDecisionTelemetry(response.shadowCouncil)
+      : null,
+  };
+}
+
 function attackTargetType(
   actionKind: string,
   record: Record<string, unknown>,
@@ -2327,6 +2555,7 @@ function normalizeDecision(
       (value): value is boolean => value !== null,
     ),
   );
+  const responseTelemetry = decisionResponseTelemetry(record);
   const decision: CoworldEvaluationDecision = {
     seat: identity.seat,
     playerName: identity.playerName,
@@ -2346,6 +2575,8 @@ function normalizeDecision(
     wireDroppedFollowupCount: droppedFollowups,
     multiAction,
     commanderTelemetry: commanderTelemetry(record),
+    decisionResponseAvailable: responseTelemetry.available,
+    shadowCouncil: responseTelemetry.shadowCouncil,
     explicitTreatmentMarkers: explicitTreatmentMarkers(record),
     searchableText: JSON.stringify({
       selectedLegalActionId: record.selectedLegalActionId,

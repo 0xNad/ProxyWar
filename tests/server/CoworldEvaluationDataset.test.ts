@@ -31,6 +31,57 @@ async function temporaryDirectory(): Promise<string> {
   return directory;
 }
 
+function compactShadowCouncil(
+  overrides: Partial<Record<string, unknown>> = {},
+): string {
+  return JSON.stringify({
+    v: 1,
+    o: 7,
+    g: 2,
+    x: 0,
+    h: "h",
+    p: 19,
+    e: 4,
+    j: 8,
+    w: "0123456789abcdef",
+    r: "fedcba9876543210",
+    d: "0123456789abcdef",
+    m: 125,
+    a: "a",
+    s: 1,
+    k: 15,
+    u: 850,
+    ...overrides,
+  });
+}
+
+function shadowDecisionDocument(
+  shadowCouncil: unknown,
+): Record<string, unknown> {
+  return {
+    runID: "shadow-council-run",
+    config: { map: "Europe", players: [{ name: "Auri" }] },
+    results: { scores: [1], winner_slot: 0 },
+    decisions: [
+      {
+        username: "Auri",
+        turnNumber: 400,
+        selectedLegalActionId: "attack:rival:40",
+        selectedActionKind: "attack",
+        reason: "authoritative v16 decision",
+        fallbackUsed: false,
+        rawLlmOutput: JSON.stringify({
+          type: "decision_response",
+          requestID: "request-1",
+          selectedLegalActionId: "attack:rival:40",
+          reason: "authoritative v16 decision",
+          shadowCouncil,
+        }),
+      },
+    ],
+  };
+}
+
 function normalizedEpisode(): CoworldEvaluationEpisode {
   return {
     episodeId: "ereq_repeated",
@@ -283,6 +334,128 @@ describe("Coworld evaluation dataset", () => {
     });
     expect(dataset.rows[0].phaseSnapshots).toHaveLength(2);
     expect(dataset.rows[0].opponents).toHaveLength(2);
+  });
+
+  test("expands bounded shadow-council diagnostics without treating them as authority", () => {
+    const fragment = parseCoworldEvaluationDocument({
+      value: shadowDecisionDocument(compactShadowCouncil()),
+      sourcePath: "/artifacts/shadow-council.replay",
+      fallbackId: "shadow-council",
+    })[0];
+
+    expect(fragment.decisions[0]).toMatchObject({
+      decisionResponseAvailable: true,
+      shadowCouncil: {
+        version: 1,
+        ordinal: 7,
+        resetOrdinal: 2,
+        reset: false,
+        health: "healthy",
+        proposalMask: 19,
+        errorMask: 4,
+        rejectionMask: 8,
+        diagnosticWinnerFingerprint: "0123456789abcdef",
+        runnerUpFingerprint: "fedcba9876543210",
+        authoritativeFingerprint: "0123456789abcdef",
+        bidMarginBP: 125,
+        agreement: "agree",
+        diagnosticWinnerSource: "expansion",
+        diagnosticWinnerTier: "expert_auction",
+        enabledExpertMask: 15,
+        elapsedUs: 850,
+      },
+    });
+
+    const episode: CoworldEvaluationEpisode = {
+      episodeId: fragment.episodeId,
+      sourcePaths: fragment.sourcePaths,
+      runID: fragment.runID ?? null,
+      platformCompletedAt: fragment.platformCompletedAt ?? null,
+      runtimeCompletedAt: fragment.runtimeCompletedAt ?? null,
+      map: fragment.map ?? "Unknown map",
+      mapSize: fragment.mapSize ?? null,
+      scores: fragment.scores ?? [],
+      outrightWinnerSlot: fragment.outrightWinnerSlot ?? null,
+      roster: fragment.roster,
+      decisions: fragment.decisions,
+      snapshots: fragment.snapshots,
+      episodeReportedTelemetry: {
+        result: {
+          decisionCount: null,
+          fallbackCount: null,
+          degradedCount: null,
+          parseFailureCount: null,
+        },
+        summary: {
+          decisionCount: null,
+          fallbackCount: null,
+          degradedCount: null,
+          parseFailureCount: null,
+        },
+      },
+    };
+    const dataset = buildCoworldEvaluationDataset({
+      episodes: [episode],
+      selector: { seat: 0, policyVersionId: null, playerName: null },
+    });
+
+    expect(dataset.schemaVersion).toBe(4);
+    expect(dataset.rows[0].telemetry.shadowCouncil).toEqual({
+      available: true,
+      decisionResponseSampleCount: 1,
+      validTelemetryDecisionCount: 1,
+      diagnosticWinnerDecisionCount: 1,
+      counterfactualAgreementDecisionCount: 1,
+      proposalMaskUnion: 19,
+      errorMaskUnion: 4,
+      rejectionMaskUnion: 8,
+      enabledExpertMaskUnion: 15,
+      sourceCounts: { expansion: 1 },
+      tierCounts: { expert_auction: 1 },
+      healthCounts: { healthy: 1 },
+      agreementCounts: { agree: 1 },
+    });
+    expect(dataset.rows[0].telemetry.shadowCouncil).not.toHaveProperty(
+      "actualExposure",
+    );
+  });
+
+  test.each([
+    ["non-string", { v: 1 }],
+    ["over byte budget", "x".repeat(301)],
+    ["malformed JSON", "{"],
+    ["extra key", compactShadowCouncil({ q: 0 })],
+    [
+      "missing key",
+      JSON.stringify(
+        Object.fromEntries(
+          Object.entries(JSON.parse(compactShadowCouncil())).filter(
+            ([key]) => key !== "u",
+          ),
+        ),
+      ),
+    ],
+    ["wrong version", compactShadowCouncil({ v: 2 })],
+    ["unsafe ordinal", compactShadowCouncil({ o: 9_007_199_254_740_992 })],
+    ["invalid reset", compactShadowCouncil({ x: 2 })],
+    ["invalid health", compactShadowCouncil({ h: "healthy" })],
+    ["proposal mask overflow", compactShadowCouncil({ p: 64 })],
+    ["error mask overflow", compactShadowCouncil({ e: 64 })],
+    ["rejection mask overflow", compactShadowCouncil({ j: 2_048 })],
+    ["invalid fingerprint", compactShadowCouncil({ w: "ABCDEF" })],
+    ["negative margin", compactShadowCouncil({ m: -1 })],
+    ["invalid agreement", compactShadowCouncil({ a: "agree" })],
+    ["invalid source", compactShadowCouncil({ s: 9 })],
+    ["enabled mask overflow", compactShadowCouncil({ k: 16 })],
+    ["negative elapsed time", compactShadowCouncil({ u: -1 })],
+  ])("rejects %s in compact shadow-council telemetry", (_label, compact) => {
+    expect(() =>
+      parseCoworldEvaluationDocument({
+        value: shadowDecisionDocument(compact),
+        sourcePath: "/artifacts/invalid-shadow-council.replay",
+        fallbackId: "invalid-shadow-council",
+      }),
+    ).toThrow(/shadowCouncil/);
   });
 
   test("aligns score pairs when the same policy ID occupies repeated seats", () => {
