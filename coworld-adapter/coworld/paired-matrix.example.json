@@ -1,0 +1,69 @@
+{
+  "manifestPath": "coworld_manifest.json",
+  "outputRoot": "../tmp/keystone-paired-matrix",
+  "candidate": {
+    "image": "proxywar-keystone-reset:a1",
+    "run": [
+      "node",
+      "--import",
+      "tsx/esm",
+      "/app/integration/src/keystone-player.ts"
+    ],
+    "env": {
+      "PROXYWAR_KEYSTONE_MODE": "mock-llm",
+      "PROXYWAR_KEYSTONE_PROFILE": "aggressive"
+    },
+    "name": "Auri"
+  },
+  "opponents": [
+    {
+      "image": "proxywar-keystone-reset:a1",
+      "run": [
+        "node",
+        "--import",
+        "tsx/esm",
+        "/app/integration/src/keystone-player.ts"
+      ],
+      "env": {
+        "PROXYWAR_KEYSTONE_MODE": "mock-llm",
+        "PROXYWAR_KEYSTONE_PROFILE": "opportunistic"
+      },
+      "name": "Opponent 1"
+    },
+    {
+      "image": "proxywar-keystone-reset:a1",
+      "run": [
+        "node",
+        "--import",
+        "tsx/esm",
+        "/app/integration/src/keystone-player.ts"
+      ],
+      "env": {
+        "PROXYWAR_KEYSTONE_MODE": "mock-llm",
+        "PROXYWAR_KEYSTONE_PROFILE": "defensive"
+      },
+      "name": "Opponent 2"
+    },
+    {
+      "image": "proxywar-keystone-reset:a1",
+      "run": [
+        "node",
+        "--import",
+        "tsx/esm",
+        "/app/integration/src/keystone-player.ts"
+      ],
+      "env": {
+        "PROXYWAR_KEYSTONE_MODE": "mock-llm",
+        "PROXYWAR_KEYSTONE_PROFILE": "diplomatic"
+      },
+      "name": "Opponent 3"
+    }
+  ],
+  "variantIDs": [
+    "tournament-4p-pangaea",
+    "tournament-4p-asia",
+    "tournament-4p-europe"
+  ],
+  "candidateSeats": [0, 1, 2, 3],
+  "seeds": [7]
+}
