@@ -18,6 +18,26 @@ export type KeystoneActionOwner =
   | "arbiter"
   | null;
 
+export const keystoneStructureUnitTypes = [
+  "city",
+  "port",
+  "factory",
+  "defense_post",
+  "sam_launcher",
+  "missile_silo",
+] as const;
+
+export type KeystoneStructureUnitType =
+  (typeof keystoneStructureUnitTypes)[number];
+
+export const keystoneBuildRoles = [
+  "economic",
+  "defensive",
+  "infrastructure",
+] as const;
+
+export type KeystoneBuildRole = (typeof keystoneBuildRoles)[number];
+
 /** All proposal scoring inputs are integer basis points in [0, 10_000]. */
 export interface KeystoneBidComponents {
   readonly expectedValueBP: number;
@@ -88,6 +108,10 @@ export interface KeystoneOwnFacts {
 export interface KeystoneActionFacts {
   readonly id: string;
   readonly kind: LegalActionKind;
+  /** Canonical structure metadata for offered build/upgrade actions only. */
+  readonly unitType?: KeystoneStructureUnitType | null;
+  /** Canonical role metadata for offered build actions only. */
+  readonly buildRole?: KeystoneBuildRole | null;
   readonly targetPlayerID: string | null;
   readonly isSpawn: boolean;
   readonly isHold: boolean;

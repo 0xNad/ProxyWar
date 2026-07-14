@@ -8,6 +8,8 @@ import type {
   KeystoneActionClassification,
   KeystoneActionFacts,
   KeystoneActionOwner,
+  KeystoneBuildRole,
+  KeystoneStructureUnitType,
 } from "./types";
 
 export interface ClassifyKeystoneActionsInput {
@@ -50,6 +52,23 @@ const politicsKinds = new Set<LegalActionKind>([
   "quick_chat",
   "emoji",
 ]);
+
+const structureUnitByMetadata = Object.freeze<
+  Record<string, KeystoneStructureUnitType>
+>({
+  city: "city",
+  port: "port",
+  factory: "factory",
+  "defense post": "defense_post",
+  "sam launcher": "sam_launcher",
+  "missile silo": "missile_silo",
+});
+
+const buildRoleByMetadata = Object.freeze<Record<string, KeystoneBuildRole>>({
+  economic: "economic",
+  defensive: "defensive",
+  infrastructure: "infrastructure",
+});
 
 export function classifyKeystoneActions(
   input: ClassifyKeystoneActionsInput,
@@ -102,10 +121,14 @@ export function classifyKeystoneActions(
         const neutralExpansion = isNeutralExpansion(action);
         const hostileTargetAction =
           hostileTargetKinds.has(action.kind) && !neutralExpansion;
+        const unitType = actionStructureUnitType(action);
+        const buildRole = actionBuildRole(action);
 
         return Object.freeze({
           id: action.id,
           kind: action.kind,
+          unitType,
+          buildRole,
           targetPlayerID,
           isSpawn: action.kind === "spawn",
           isHold: action.kind === "hold",
@@ -209,6 +232,35 @@ export function actionRiskBasisPoints(action: LegalAction): number {
     case "high":
       return 7_500;
   }
+}
+
+function actionStructureUnitType(
+  action: LegalAction,
+): KeystoneStructureUnitType | null {
+  if (action.kind !== "build" && action.kind !== "upgrade_structure") {
+    return null;
+  }
+  const unit = normalizeMetadataLabel(action.metadata?.unit);
+  return unit === null ? null : (structureUnitByMetadata[unit] ?? null);
+}
+
+function actionBuildRole(action: LegalAction): KeystoneBuildRole | null {
+  if (action.kind !== "build") {
+    return null;
+  }
+  const role = normalizeMetadataLabel(action.metadata?.role);
+  return role === null ? null : (buildRoleByMetadata[role] ?? null);
+}
+
+function normalizeMetadataLabel(value: unknown): string | null {
+  if (typeof value !== "string") {
+    return null;
+  }
+  const normalized = value
+    .trim()
+    .toLowerCase()
+    .replace(/[\s_-]+/g, " ");
+  return normalized.length > 0 ? normalized : null;
 }
 
 function compareText(a: string, b: string): number {
