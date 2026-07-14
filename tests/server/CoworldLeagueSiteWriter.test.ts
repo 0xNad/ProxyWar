@@ -136,6 +136,17 @@ describe("coworldLeagueIndexHtml", () => {
     expect(html).not.toContain("⚠ 0 degraded");
   });
 
+  test("marks commissioner timeout leaders without claiming an outright win", () => {
+    const data = sampleData();
+    const leader = data.episodes[0].players[0];
+    leader.isWinner = false;
+    leader.isCommissionerWinner = true;
+    data.episodes[0].winnerName = null;
+    data.episodes[0].commissionerWinnerNames = [leader.name];
+    const html = coworldLeagueIndexHtml(data);
+    expect(html).toContain('daveey <span class="win">★</span>');
+  });
+
   test("links the full render as the single replay button", () => {
     const html = coworldLeagueIndexHtml(sampleData());
     expect(html).toContain('href="/ai-league-replay/coworld-run"');

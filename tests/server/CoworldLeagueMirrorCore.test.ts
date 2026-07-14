@@ -106,6 +106,7 @@ const replayPayloadFixture = {
   replayKind: "proxywar-coworld-local-poc",
   runID: "coworld-2026-07-13T10-40-45-699Z-9ed769ef",
   results: {
+    scores: [0, 0, 1, 0],
     winner_slot: 2,
     turn_count: 6000,
     decision_count: 236,
@@ -200,6 +201,9 @@ describe("CoworldLeagueMirrorCore", () => {
     expect(replay).not.toBeNull();
     expect(replay?.turnCount).toBe(6000);
     expect(replay?.degradedCount).toBe(33);
+    expect(replay?.scores).toEqual([0, 0, 1, 0]);
+    expect(replay?.commissionerWinnerSlots).toEqual([2]);
+    expect(replay?.outrightWinnerSlot).toBe(2);
     expect(replay?.winnerSlot).toBe(2);
     expect(replay?.players).toHaveLength(4);
     expect(Object.keys(replay?.inlineRunArtifacts ?? {})).toEqual([
@@ -226,11 +230,80 @@ describe("CoworldLeagueMirrorCore", () => {
     expect(row.players[0].name).toBe("daveey");
     expect(row.players[0].color).toBe("#16a34a");
     expect(row.players[0].isWinner).toBe(true);
+    expect(row.players[0].isCommissionerWinner).toBe(true);
+    expect(row.players[0].isOutrightWinner).toBe(true);
+    expect(row.players[0].score).toBe(1);
+    expect(row.commissionerWinnerNames).toEqual(["daveey"]);
+    expect(row.outrightWinnerName).toBe("daveey");
     const boggs = row.players.find((player) => player.name === "James Boggs");
     expect(boggs?.isAlive).toBe(false);
     expect(boggs?.color).toBe("#2563eb");
     expect(row.degradedCount).toBe(33);
     expect(row.roundNumber).toBe(267);
+  });
+
+  test("shows a fractional timeout leader without inventing an outright winner", () => {
+    const timeoutReplay = parseHostedReplayPayload({
+      ...replayPayloadFixture,
+      results: {
+        ...replayPayloadFixture.results,
+        scores: [0.667169, 0.1, 0.132831, 0.1],
+        winner_slot: null,
+      },
+    });
+    expect(timeoutReplay).not.toBeNull();
+    if (timeoutReplay === null) {
+      return;
+    }
+    expect(timeoutReplay.commissionerWinnerSlots).toEqual([0]);
+    expect(timeoutReplay.outrightWinnerSlot).toBeNull();
+    expect(timeoutReplay.winnerSlot).toBeNull();
+
+    const row = buildEpisodeRow({
+      meta: parseCompletedEpisodeMetaList(replayMetaFixture)[1],
+      replay: timeoutReplay,
+      roundNumber: 267,
+      watchHref: null,
+      fullRenderHref: null,
+    });
+    const timeoutLeader = row.players.find((player) => player.slot === 0);
+    expect(row.winnerName).toBeNull();
+    expect(row.commissionerWinnerNames).toEqual(["odin free"]);
+    expect(row.outrightWinnerName).toBeNull();
+    expect(timeoutLeader?.isWinner).toBe(false);
+    expect(timeoutLeader?.isCommissionerWinner).toBe(true);
+    expect(timeoutLeader?.isOutrightWinner).toBe(false);
+    expect(timeoutLeader?.score).toBe(0.667169);
+  });
+
+  test("keeps winner_slot display compatibility for older payloads without scores", () => {
+    const legacyReplay = parseHostedReplayPayload({
+      ...replayPayloadFixture,
+      results: {
+        ...replayPayloadFixture.results,
+        scores: undefined,
+      },
+    });
+    expect(legacyReplay).not.toBeNull();
+    if (legacyReplay === null) {
+      return;
+    }
+    expect(legacyReplay.scores).toEqual([]);
+    expect(legacyReplay.commissionerWinnerSlots).toEqual([]);
+    expect(legacyReplay.winnerSlot).toBe(2);
+
+    const row = buildEpisodeRow({
+      meta: parseCompletedEpisodeMetaList(replayMetaFixture)[1],
+      replay: legacyReplay,
+      roundNumber: 267,
+      watchHref: null,
+      fullRenderHref: null,
+    });
+    expect(row.winnerName).toBe("daveey");
+    expect(row.outrightWinnerName).toBe("daveey");
+    expect(row.players.find((player) => player.slot === 2)?.isWinner).toBe(
+      true,
+    );
   });
 
   test("shortEpisodeId strips the prefix and sanitizes", () => {

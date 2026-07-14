@@ -25,7 +25,11 @@ export interface CoworldLeagueEpisodePlayerRow {
   name: string;
   tilesOwned: number;
   isAlive: boolean;
+  /** Compatibility flag for the decisive results.winner_slot winner. */
   isWinner: boolean;
+  score?: number | null;
+  isCommissionerWinner?: boolean;
+  isOutrightWinner?: boolean;
   color: string;
 }
 
@@ -40,7 +44,10 @@ export interface CoworldLeagueEpisodeRow {
   turnCount: number | null;
   decisionCount: number | null;
   degradedCount: number | null;
+  /** Compatibility name for the decisive results.winner_slot winner. */
   winnerName: string | null;
+  commissionerWinnerNames?: string[];
+  outrightWinnerName?: string | null;
   players: CoworldLeagueEpisodePlayerRow[];
   /** Relative href from the league index to a self-contained spectator page. */
   watchHref: string | null;
@@ -215,11 +222,15 @@ export function coworldLeagueIndexHtml(data: CoworldLeagueMirrorData): string {
     </div>
     <div class="metric-grid">
       <div class="metric"><span>Current round</span><strong>${
-        league.currentRoundNumber === null ? "—" : escapeHtml(String(league.currentRoundNumber))
+        league.currentRoundNumber === null
+          ? "—"
+          : escapeHtml(String(league.currentRoundNumber))
       }</strong></div>
       <div class="metric"><span>Warlords</span><strong>${escapeHtml(String(data.standings.length))}</strong></div>
       <div class="metric"><span>Round cadence</span><strong>${
-        league.roundIntervalMinutes === null ? "—" : `${escapeHtml(String(league.roundIntervalMinutes))}m`
+        league.roundIntervalMinutes === null
+          ? "—"
+          : `${escapeHtml(String(league.roundIntervalMinutes))}m`
       }</strong></div>
       <div class="metric"><span>Battles rendered</span><strong>${escapeHtml(
         String(
@@ -309,7 +320,9 @@ function battleCard(episode: CoworldLeagueEpisodeRow): string {
         <div class="combatant">
           <span class="dot" style="background:${escapeHtml(player.color)}"></span>
           <span class="name${player.isAlive ? "" : " dead"}">${escapeHtml(player.name)}${
-            player.isWinner ? ` <span class="win">★</span>` : ""
+            (player.isCommissionerWinner ?? player.isWinner)
+              ? ` <span class="win">★</span>`
+              : ""
           }</span>
           <span class="tiles">${escapeHtml(formatTiles(player.tilesOwned))}</span>
           <span class="bar"><i style="width:${(share * 100).toFixed(1)}%;background:${escapeHtml(
@@ -333,10 +346,14 @@ function battleCard(episode: CoworldLeagueEpisodeRow): string {
     <article class="battle">
       <div class="battle-head">
         <b>${escapeHtml(episode.map)}${
-          episode.roundNumber === null ? "" : ` · Round ${escapeHtml(String(episode.roundNumber))}`
+          episode.roundNumber === null
+            ? ""
+            : ` · Round ${escapeHtml(String(episode.roundNumber))}`
         }</b>
         <span data-utc="${escapeHtml(episode.completedAt ?? "")}">${escapeHtml(
-          episode.completedAt === null ? "in progress" : shortUtc(episode.completedAt),
+          episode.completedAt === null
+            ? "in progress"
+            : shortUtc(episode.completedAt),
         )}</span>
       </div>
       ${combatants}

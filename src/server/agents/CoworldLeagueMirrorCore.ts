@@ -5,6 +5,7 @@ import type {
   CoworldLeagueRoundRow,
   CoworldLeagueStandingRow,
 } from "./CoworldLeagueSiteWriter";
+import { commissionerTopScoreSlots } from "./CoworldScoreSemantics";
 
 /**
  * Pure transforms from Coworld Observatory read-API JSON (as emitted by the
@@ -51,6 +52,16 @@ function asNumber(value: unknown): number | null {
   return typeof value === "number" && Number.isFinite(value) ? value : null;
 }
 
+function asNumberArray(value: unknown): number[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  const numbers = value.map(asNumber);
+  return numbers.every((number) => number !== null)
+    ? (numbers as number[])
+    : [];
+}
+
 export interface CoworldLeagueSummary {
   id: string;
   name: string;
@@ -59,7 +70,9 @@ export interface CoworldLeagueSummary {
   episodesPerRound: number | null;
 }
 
-export function parseLeagueSummary(value: unknown): CoworldLeagueSummary | null {
+export function parseLeagueSummary(
+  value: unknown,
+): CoworldLeagueSummary | null {
   const league = asRecord(value);
   if (!league) {
     return null;
@@ -75,7 +88,9 @@ export function parseLeagueSummary(value: unknown): CoworldLeagueSummary | null 
     id,
     name: asString(league.name) ?? "Coworld league",
     description: asString(league.description),
-    roundIntervalMinutes: asNumber(commissionerConfig?.schedule_interval_minutes),
+    roundIntervalMinutes: asNumber(
+      commissionerConfig?.schedule_interval_minutes,
+    ),
     episodesPerRound: asNumber(firstStage?.num_episodes),
   };
 }
@@ -188,7 +203,9 @@ export interface HostedEpisodeMeta {
   difficulty: string;
 }
 
-export function parseCompletedEpisodeMetaList(value: unknown): HostedEpisodeMeta[] {
+export function parseCompletedEpisodeMetaList(
+  value: unknown,
+): HostedEpisodeMeta[] {
   const episodes: HostedEpisodeMeta[] = [];
   for (const entry of asArray(value)) {
     const episode = asRecord(entry);
@@ -223,6 +240,10 @@ export interface ParsedHostedReplay {
   turnCount: number | null;
   decisionCount: number | null;
   degradedCount: number | null;
+  scores: number[];
+  commissionerWinnerSlots: number[];
+  outrightWinnerSlot: number | null;
+  /** Compatibility alias for outrightWinnerSlot. */
   winnerSlot: number | null;
   players: Array<{
     slot: number;
@@ -232,7 +253,9 @@ export interface ParsedHostedReplay {
   }>;
 }
 
-export function parseHostedReplayPayload(value: unknown): ParsedHostedReplay | null {
+export function parseHostedReplayPayload(
+  value: unknown,
+): ParsedHostedReplay | null {
   const payload = asRecord(value);
   if (!payload) {
     return null;
@@ -265,6 +288,8 @@ export function parseHostedReplayPayload(value: unknown): ParsedHostedReplay | n
     }
   }
   const spectator = asRecord(payload.spectatorReplay);
+  const scores = asNumberArray(results?.scores);
+  const outrightWinnerSlot = asNumber(results?.winner_slot);
   return {
     runID,
     spectatorReplay:
@@ -275,7 +300,10 @@ export function parseHostedReplayPayload(value: unknown): ParsedHostedReplay | n
     turnCount: asNumber(results?.turn_count),
     decisionCount: asNumber(results?.decision_count),
     degradedCount: asNumber(results?.degraded_count),
-    winnerSlot: asNumber(results?.winner_slot),
+    scores,
+    commissionerWinnerSlots: commissionerTopScoreSlots(scores),
+    outrightWinnerSlot,
+    winnerSlot: outrightWinnerSlot,
     players,
   };
 }
@@ -305,23 +333,42 @@ export function buildEpisodeRow(input: {
 }): CoworldLeagueEpisodeRow {
   const { meta, replay } = input;
   const colors = playerColorsFromSpectatorReplay(replay.spectatorReplay);
+  const commissionerWinnerSlots = new Set(
+    replay.commissionerWinnerSlots.length > 0
+      ? replay.commissionerWinnerSlots
+      : replay.winnerSlot === null
+        ? []
+        : [replay.winnerSlot],
+  );
   const players: CoworldLeagueEpisodePlayerRow[] = replay.players
-    .map((player) => ({
-      slot: player.slot,
-      name: player.name,
-      tilesOwned: player.tilesOwned,
-      isAlive: player.isAlive,
-      isWinner: replay.winnerSlot !== null && player.slot === replay.winnerSlot,
-      color:
-        colors.get(player.name) ??
-        fallbackPlayerColors[
-          ((player.slot % fallbackPlayerColors.length) +
-            fallbackPlayerColors.length) %
-            fallbackPlayerColors.length
-        ],
-    }))
+    .map((player) => {
+      const isCommissionerWinner = commissionerWinnerSlots.has(player.slot);
+      const isOutrightWinner =
+        replay.outrightWinnerSlot !== null &&
+        player.slot === replay.outrightWinnerSlot;
+      return {
+        slot: player.slot,
+        name: player.name,
+        tilesOwned: player.tilesOwned,
+        isAlive: player.isAlive,
+        score: replay.scores[player.slot] ?? null,
+        isWinner: isOutrightWinner,
+        isCommissionerWinner,
+        isOutrightWinner,
+        color:
+          colors.get(player.name) ??
+          fallbackPlayerColors[
+            ((player.slot % fallbackPlayerColors.length) +
+              fallbackPlayerColors.length) %
+              fallbackPlayerColors.length
+          ],
+      };
+    })
     .sort((a, b) => b.tilesOwned - a.tilesOwned);
-  const winner = players.find((player) => player.isWinner);
+  const commissionerWinners = players.filter(
+    (player) => player.isCommissionerWinner,
+  );
+  const outrightWinner = players.find((player) => player.isOutrightWinner);
   return {
     episodeRequestId: meta.episodeRequestId,
     shortId: shortEpisodeId(meta.episodeRequestId),
@@ -333,7 +380,9 @@ export function buildEpisodeRow(input: {
     turnCount: replay.turnCount,
     decisionCount: replay.decisionCount,
     degradedCount: replay.degradedCount,
-    winnerName: winner?.name ?? null,
+    winnerName: outrightWinner?.name ?? null,
+    commissionerWinnerNames: commissionerWinners.map((player) => player.name),
+    outrightWinnerName: outrightWinner?.name ?? null,
     players,
     watchHref: input.watchHref,
     fullRenderHref: input.fullRenderHref,
