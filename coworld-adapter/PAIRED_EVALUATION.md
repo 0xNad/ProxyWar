@@ -12,6 +12,9 @@ Supported authored arms are:
 - `{ "kind": "a1" }`
 - `{ "kind": "v16-shadow", "expertMask": 0..15 }`
 - `{ "kind": "a1-shadow", "expertMask": 0..15 }`
+- `{ "kind": "v16-politics-guard" }`
+- `{ "kind": "v16-diplomacy-adjudicator" }`
+- `{ "kind": "v16-survival-shield" }`
 
 The planner derives all policy environment fields from the arm kind. Candidate
 and opponent specs cannot supply those fields directly. Shadow observations are
@@ -37,6 +40,15 @@ last as the atomic planner-completion marker. Invalid images, seats, seeds,
 names, run arguments, environment maps, opponent counts, Coworld schemas,
 reserved runtime variables, and secret-looking environment keys fail closed.
 Credentials never belong in the matrix spec.
+
+The named authoritative arms record that treatment authority was assigned; that
+assignment alone does not prove the runtime changed a decision. Promotion
+evidence must also inspect decision telemetry for the arm's adjudication-specific
+marker. For the survival shield, require at least one `survival_preempted`
+decision, count `survival_confirmed` separately, and require zero
+`infrastructure_error` decisions. A generic `keystone-survival-shield:v1`
+marker count is insufficient because the fail-closed error path uses the same
+namespace.
 
 Inspect `plan.json`, `payload/manifest.json`, and each
 `payload/jobs/*/episode_request.json` before execution. The plan records

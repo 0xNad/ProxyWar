@@ -1,11 +1,12 @@
 # Keystone modular Council reset — 2026-07-14
 
-Status: experimental and default off. The exact candidate image has been
+Status: experimental and default off. The exact DTA candidate image has been
 certified and uploaded as two private evaluation-only policy versions, but has
-not been submitted to the league. The corrected image is also available as the
-evaluation-only Coworld 0.1.8 package; the live league remains bound to 0.1.7.
-Keystone v16 remains the live champion until a challenger clears the paired
-evaluation gates below.
+not been submitted to the league. The corrected DTA image is also Coworld 0.1.8.
+Uploading that canonical version automatically rebound subsequent live league
+rounds from 0.1.7 to 0.1.8; no experimental policy flag was enabled and v16
+remains the champion until a challenger clears the paired evaluation gates
+below.
 
 ## Evidence that caused the reset
 
@@ -28,14 +29,19 @@ evaluation gates below.
   expansion, economy, conquest, and politics proposals, but its first broad
   politics guard suppressed every break. That treatment cannot distinguish
   destructive churn from a useful betrayal and is not a promotion candidate.
-- `[live hosted truth]` The hosted Coworld game image predates the reviewed
-  offered-action retry. Policy-only upload cannot fix the stale-offer race; a
-  new game package and league binding are required after certification.
-- `[live hosted truth, 2026-07-14T20:27Z refresh]` Keystone v16 won 1/12,
-  4/24, and 10/48 of its newest valid completed Competition episodes. Its mean
-  raw score shares over those windows were 0.041917, 0.124909, and 0.189540.
+- `[live hosted truth]` Rounds through 335 used the old Coworld 0.1.7 game image,
+  which predates the reviewed offered-action retry. Uploading certified 0.1.8
+  automatically changed the league game binding beginning with round 336.
+- `[live hosted truth, 2026-07-14T22:12:16Z refresh]` Keystone v16 won 1/12,
+  2/24, and 8/48 of its newest valid completed Competition episodes. Its mean
+  raw score shares over those windows were 0.085993, 0.063955, and 0.158949.
   The live league is running four eight-player episodes per round despite older
   nominal metadata, so four-player-only evaluation is not representative.
+- `[live hosted truth, replay verified]` In the newest completed 0.1.8 round,
+  all 657 Auri decisions were accepted, with zero parse failures, but 279
+  (42.47%) carried planner-degradation telemetry and 172 (26.18%) used a
+  fallback. The corrected one-action wire is healthy; Commander reliability and
+  selector authority remain the active failures.
 
 ## Runtime architecture
 
@@ -113,8 +119,15 @@ with the old broad politics guard and the separate single-action treatment.
   `sha256:1c8a8d3420eb78c736930dcfe5d12a6386b20a0c2be5e7e0369ce3b01395e71c`)
   passed its five hosted smoke episodes and is available for corrected-contract
   evaluation. It intentionally pins the reviewed DTA image above; it does not
-  contain the later survival-shield experiment and is not the live league
-  binding.
+  contain the later survival-shield experiment. Contrary to the initial
+  eval-only assumption, the Coworld upload automatically became the live league
+  game binding beginning with round 336; the champion policy and its flags did
+  not change.
+- `[live hosted truth, 2026-07-14T22:12:16Z refresh]` v16 remains the active
+  champion at rank 4. It won 1/12, 2/24, and 8/48 newest valid completed
+  Competition episodes, with mean raw score shares 0.085993, 0.063955, and
+  0.158949. The fully complete 0.1.8 rounds 336 (Asia) and 337 (Pangaea) were
+  both 0/4 for v16.
 - `[local artifact truth]` The first corrected-runner structural pair completed
   with the same slot-zero win in both arms, 302/302 accepted decisions, and zero
   fallback or degradation. Candidate boot isolation is confirmed. The aggregate
@@ -164,6 +177,34 @@ This arm is mutually exclusive with DTA, the broad politics guard, and the
 single-action experiment so its effect remains attributable. It requires a new
 immutable image and a separate corrected-contract evaluation before upload as a
 policy or Coworld package.
+
+- `[repository truth]` Commit `ec6c48847` implements the default-off shield. The
+  hosted-target image `proxywar-coworld-local:survival-ec6c48847` is Linux/AMD64
+  `sha256:3b76e692b0b84c66817079804f3d72aa52899cfcc91af4da01346cf42e537cdb`;
+  worktree and image source hashes match.
+- `[local artifact truth]` The temporary Coworld 0.1.9 candidate manifest passed
+  all ten certification stages in `coworld-adapter/tmp/coworld-cert-kohi5ksq`.
+  It was not uploaded, and the canonical manifest remains 0.1.8 after the
+  treatment failed its local causal smoke.
+- `[local artifact truth]` Two AMD64-on-ARM attempts completed the control game
+  with 275/275 accepted decisions and zero fallback/degradation, then failed in
+  Coworld's separate replay-verifier launch with the known transient
+  `tsx`/esbuild EPIPE. Neither attempt was admitted as completion evidence.
+  A source-hash-identical native ARM64 smoke image then completed both jobs with
+  pinned Coworld 0.1.30 runner, results-schema, and replay-verifier provenance.
+- `[local artifact truth]` Matrix
+  `matrix-71de438927337bba3ffc96e880c6ed8b` produced one real preemption and one
+  confirmation with zero infrastructure errors: at turn 2,400 and 27.2%
+  incoming pressure, the shield replaced v16's 10% neutral expansion with an
+  accepted nearby Defense Post. Both arms still scored zero; shield Auri died at
+  turn 6,800 versus control at 7,300. The candidate therefore failed its first
+  causal gate and is held locally. No shield policy or Coworld package was
+  uploaded or submitted.
+- `[local artifact truth]` The same paired dataset recorded 106 dropped
+  follow-up actions across 71 multi-action decisions. These are not wire
+  rejections; they show that the selector still reasons in batches despite a
+  one-action runtime. The next structural candidate must fix global authority,
+  not add another narrow post-selector exception.
 
 ## Promotion gates
 

@@ -395,6 +395,21 @@ describe("Coworld paired sequential executor", () => {
     );
     expect((contaminationError as Error).message).not.toContain(secretValue);
 
+    const survivalContaminated = await fixture({
+      arms: [{ kind: "v16" }, { kind: "v16-survival-shield" }],
+    });
+    survivalContaminated.blocks[0]!.roster.find(
+      (seat) => seat.role === "opponent",
+    )!.env.PROXYWAR_KEYSTONE_COUNCIL_SURVIVAL_SHIELD = "1";
+    await savePlan(survivalContaminated);
+    const survivalContaminatedRunner = vi.fn<CoworldEpisodeRunner>();
+    await expect(
+      execute(survivalContaminated, {
+        runEpisode: survivalContaminatedRunner,
+      }),
+    ).rejects.toThrow("unexpected arm-owned field");
+    expect(survivalContaminatedRunner).not.toHaveBeenCalled();
+
     const drifted = await fixture();
     const driftRunner = vi.fn<CoworldEpisodeRunner>();
     await expect(
