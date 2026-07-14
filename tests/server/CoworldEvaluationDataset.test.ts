@@ -6,6 +6,7 @@ import {
   loadCoworldEvaluationEpisodes,
   parseCoworldDatasetExporterOptions,
   parseCoworldEvaluationDocument,
+  writeCoworldEvaluationDatasetFile,
 } from "../../src/scripts/coworld-dataset-export";
 import {
   buildCoworldEvaluationDataset,
@@ -45,18 +46,21 @@ function normalizedEpisode(): CoworldEvaluationEpisode {
         seat: 0,
         policyVersionId: "candidate:v1",
         playerName: "Candidate A",
+        label: "Candidate",
         agentID: "agent-0",
       },
       {
         seat: 1,
         policyVersionId: "opponent:v2",
         playerName: "Opponent",
+        label: "Opponent",
         agentID: "agent-1",
       },
       {
         seat: 2,
         policyVersionId: "candidate:v1",
         playerName: "Candidate B",
+        label: "Candidate",
         agentID: "agent-2",
       },
     ],
@@ -312,6 +316,20 @@ describe("Coworld evaluation dataset", () => {
             completed_at: "2026-07-14T10:00:00Z",
             game_config: { map: "Pangaea", map_size: "Compact" },
             policy_version_ids: ["opponent:v1", "candidate:v16"],
+            participants: [
+              {
+                position: 0,
+                player_name: "Opponent",
+                policy_version_id: "opponent:v1",
+                label: "Opponent v1",
+              },
+              {
+                position: 1,
+                player_name: "Auri",
+                policy_version_id: "candidate:v16",
+                label: "Keystone v16",
+              },
+            ],
           },
         ],
       }),
@@ -418,6 +436,7 @@ describe("Coworld evaluation dataset", () => {
     expect(loaded.episodes[0].roster[1]).toMatchObject({
       policyVersionId: "candidate:v16",
       playerName: "Auri",
+      label: "Keystone v16",
       agentID: "agent-1",
     });
     expect(loaded.episodes[0].decisions[1]).toMatchObject({
@@ -624,5 +643,445 @@ describe("Coworld evaluation dataset", () => {
         "Auri",
       ]),
     ).toThrow("mutually exclusive");
+  });
+
+  test("uses positioned live participants for roster identity and policy seat selection", async () => {
+    const directory = await temporaryDirectory();
+    const sourcePath = path.join(directory, "league-episodes.json");
+    await fs.writeFile(
+      sourcePath,
+      JSON.stringify({
+        episodes: [
+          {
+            id: "ereq_participants",
+            map: "Europe",
+            scores: [0.25, 0.75],
+            participants: [
+              {
+                position: 2,
+                player_name: "Candidate Owner",
+                policy_version_id: "candidate:v16",
+                label: "Keystone v16",
+              },
+              {
+                position: 1,
+                player_name: "Opponent Owner",
+                policy_version_id: "opponent:v2",
+                label: "Opponent v2",
+              },
+            ],
+          },
+        ],
+      }),
+    );
+
+    const loaded = await loadCoworldEvaluationEpisodes([sourcePath]);
+    expect(loaded.episodes[0].roster).toEqual([
+      {
+        seat: 0,
+        policyVersionId: "opponent:v2",
+        playerName: "Opponent Owner",
+        label: "Opponent v2",
+        agentID: null,
+      },
+      {
+        seat: 1,
+        policyVersionId: "candidate:v16",
+        playerName: "Candidate Owner",
+        label: "Keystone v16",
+        agentID: null,
+      },
+    ]);
+    const dataset = buildCoworldEvaluationDataset({
+      episodes: loaded.episodes,
+      selector: {
+        seat: null,
+        policyVersionId: "candidate:v16",
+        playerName: null,
+      },
+    });
+    expect(dataset.rows).toHaveLength(1);
+    expect(dataset.rows[0]).toMatchObject({ seat: 1, scoreShare: 0.75 });
+  });
+
+  test("keeps absent decision telemetry unknown with per-signal denominators", async () => {
+    const directory = await temporaryDirectory();
+    const sourcePath = path.join(directory, "episodes.json");
+    await fs.writeFile(
+      sourcePath,
+      JSON.stringify({
+        episodes: [
+          {
+            id: "ereq_unknown_telemetry",
+            map: "Asia",
+            scores: [1, 0],
+            participants: [
+              {
+                position: 0,
+                player_name: "Candidate",
+                policy_version_id: "candidate:v1",
+                label: "Candidate",
+              },
+              {
+                position: 1,
+                player_name: "Opponent",
+                policy_version_id: "opponent:v1",
+                label: "Opponent",
+              },
+            ],
+            decisions: [
+              {
+                seat: 0,
+                turnNumber: 100,
+                selectedLegalActionId: "hold",
+                selectedActionKind: "hold",
+              },
+              {
+                seat: 0,
+                turnNumber: 200,
+                selectedLegalActionId: "build:city:1",
+                selectedActionKind: "build",
+                fallbackUsed: false,
+              },
+            ],
+          },
+        ],
+      }),
+    );
+
+    const loaded = await loadCoworldEvaluationEpisodes([sourcePath]);
+    const dataset = buildCoworldEvaluationDataset({
+      episodes: loaded.episodes,
+      selector: { seat: 0, policyVersionId: null, playerName: null },
+    });
+    expect(loaded.episodes[0].decisions[0]).toMatchObject({
+      fallback: null,
+      degraded: null,
+      parseFailure: null,
+      wireDroppedFollowupCount: null,
+      multiAction: null,
+    });
+    expect(dataset.rows[0].telemetry).toMatchObject({
+      decisionCount: 2,
+      fallbackSampleCount: 1,
+      fallbackCount: 0,
+      fallbackRate: 0,
+      fallbackOrDegradedSampleCount: 0,
+      fallbackOrDegradedCount: null,
+      degradedSampleCount: 0,
+      degradedCount: null,
+      parseFailureSampleCount: 0,
+      parseFailureCount: null,
+      wireDroppedFollowupSampleCount: 0,
+      wireDroppedFollowupCount: null,
+      multiActionSampleCount: 0,
+      multiActionDecisionCount: null,
+    });
+    expect(dataset.aggregate).toMatchObject({
+      fallbackSampleCount: 1,
+      fallbackCount: 0,
+      degradedSampleCount: 0,
+      degradedCount: null,
+      parseFailureSampleCount: 0,
+      parseFailureCount: null,
+    });
+  });
+
+  test("requires explicit neutral evidence when a named attack target has a null ID", () => {
+    const fragments = parseCoworldEvaluationDocument({
+      sourcePath: "/artifacts/target-types.json",
+      fallbackId: "target-types",
+      value: {
+        id: "ereq_target_types",
+        scores: [1, 0],
+        decisions: [
+          {
+            seat: 0,
+            turnNumber: 100,
+            selectedActionKind: "attack",
+            selectedActionMetadata: {
+              targetID: null,
+              targetName: "Named Rival",
+            },
+          },
+          {
+            seat: 0,
+            turnNumber: 200,
+            selectedActionKind: "attack",
+            selectedActionMetadata: { targetID: null, expansion: true },
+          },
+        ],
+      },
+    });
+
+    expect(
+      fragments[0].decisions.map((decision) => decision.attackTargetType),
+    ).toEqual(["hostile", "neutral"]);
+  });
+
+  test("merges complementary decisions and snapshot players by stable identity", async () => {
+    const directory = await temporaryDirectory();
+    const sourcePath = path.join(directory, "league-episodes.json");
+    const participants = [
+      {
+        position: 0,
+        player_name: "Candidate",
+        policy_version_id: "candidate:v1",
+        label: "Candidate",
+      },
+      {
+        position: 1,
+        player_name: "Opponent",
+        policy_version_id: "opponent:v1",
+        label: "Opponent",
+      },
+    ];
+    await fs.writeFile(
+      sourcePath,
+      JSON.stringify({
+        episodes: [
+          {
+            id: "ereq_complementary",
+            runID: "run_complementary",
+            map: "Pangaea",
+            scores: [0.6, 0.4],
+            participants,
+            decisions: [
+              {
+                seat: 0,
+                turnNumber: 100,
+                selectedLegalActionId: "hold",
+                selectedActionKind: "hold",
+              },
+            ],
+            spectatorReplay: {
+              snapshots: [
+                {
+                  label: "active",
+                  turnNumber: 100,
+                  tick: 100,
+                  phase: "active",
+                  players: [{ seat: 0, username: "Candidate", tilesOwned: 10 }],
+                },
+              ],
+            },
+          },
+          {
+            id: "ereq_complementary",
+            runID: "run_complementary",
+            map: "Pangaea",
+            scores: [0.6, 0.4],
+            participants,
+            decisions: [
+              {
+                seat: 0,
+                turnNumber: 100,
+                fallbackUsed: false,
+              },
+              {
+                seat: 0,
+                turnNumber: 200,
+                selectedLegalActionId: "build:city:1",
+                selectedActionKind: "build",
+              },
+            ],
+            spectatorReplay: {
+              snapshots: [
+                {
+                  label: "active",
+                  turnNumber: 100,
+                  players: [{ seat: 1, username: "Opponent", tilesOwned: 20 }],
+                },
+                {
+                  label: "late",
+                  turnNumber: 200,
+                  tick: 200,
+                  phase: "active",
+                  players: [{ seat: 0, username: "Candidate", tilesOwned: 30 }],
+                },
+              ],
+            },
+          },
+        ],
+      }),
+    );
+
+    const loaded = await loadCoworldEvaluationEpisodes([sourcePath]);
+    expect(loaded.episodes).toHaveLength(1);
+    expect(
+      loaded.episodes[0].decisions.map((decision) => decision.turnNumber),
+    ).toEqual([100, 200]);
+    expect(loaded.episodes[0].decisions[0]).toMatchObject({
+      selectedLegalActionId: "hold",
+      actionKind: "hold",
+      fallback: false,
+    });
+    expect(loaded.episodes[0].snapshots).toHaveLength(2);
+    expect(loaded.episodes[0].snapshots[0]).toMatchObject({
+      tick: 100,
+      phase: "active",
+    });
+    expect(loaded.episodes[0].snapshots[0].players).toHaveLength(2);
+  });
+
+  test.each([
+    [
+      "runID",
+      { runID: "run-a", map: "Europe" },
+      { runID: "run-b", map: "Europe" },
+      "Conflicting runID",
+    ],
+    [
+      "map",
+      { runID: "run-a", map: "Europe" },
+      { runID: "run-a", map: "Asia" },
+      "Conflicting map",
+    ],
+    [
+      "roster",
+      { runID: "run-a", map: "Europe", policyVersionId: "candidate:v1" },
+      { runID: "run-a", map: "Europe", policyVersionId: "candidate:v2" },
+      "Conflicting roster seat 0 policyVersionId",
+    ],
+  ])(
+    "fails closed on conflicting %s evidence",
+    async (_name, left, right, message) => {
+      const directory = await temporaryDirectory();
+      const sourcePath = path.join(directory, "episodes.json");
+      const episode = (value: typeof left) => ({
+        id: "ereq_conflict",
+        runID: value.runID,
+        map: value.map,
+        scores: [1, 0],
+        participants: [
+          {
+            position: 0,
+            player_name: "Candidate",
+            policy_version_id:
+              "policyVersionId" in value
+                ? value.policyVersionId
+                : "candidate:v1",
+            label: "Candidate",
+          },
+          {
+            position: 1,
+            player_name: "Opponent",
+            policy_version_id: "opponent:v1",
+            label: "Opponent",
+          },
+        ],
+      });
+      await fs.writeFile(
+        sourcePath,
+        JSON.stringify({ episodes: [episode(left), episode(right)] }),
+      );
+
+      await expect(loadCoworldEvaluationEpisodes([sourcePath])).rejects.toThrow(
+        message,
+      );
+    },
+  );
+
+  test("fails closed on malformed and schema-invalid explicit inputs", async () => {
+    const directory = await temporaryDirectory();
+    const malformedPath = path.join(directory, "malformed.json");
+    const schemaPath = path.join(directory, "schema.json");
+    await fs.writeFile(malformedPath, "{not-json");
+    await fs.writeFile(
+      schemaPath,
+      JSON.stringify({ id: "ereq_schema", scores: ["invalid", 0] }),
+    );
+
+    await expect(
+      loadCoworldEvaluationEpisodes([malformedPath]),
+    ).rejects.toThrow("contains invalid JSON");
+    await expect(loadCoworldEvaluationEpisodes([schemaPath])).rejects.toThrow(
+      "invalid score entry",
+    );
+  });
+
+  test("rejects conflicting decisions at the same stable identity", async () => {
+    const directory = await temporaryDirectory();
+    const sourcePath = path.join(directory, "episodes.json");
+    const episode = (selectedLegalActionId: string) => ({
+      id: "ereq_decision_conflict",
+      runID: "run_decision_conflict",
+      map: "Europe",
+      scores: [1, 0],
+      decisions: [
+        {
+          seat: 0,
+          turnNumber: 100,
+          selectedLegalActionId,
+          selectedActionKind: "attack",
+        },
+      ],
+    });
+    await fs.writeFile(
+      sourcePath,
+      JSON.stringify({
+        episodes: [episode("attack:a:40"), episode("attack:b:40")],
+      }),
+    );
+
+    await expect(loadCoworldEvaluationEpisodes([sourcePath])).rejects.toThrow(
+      "Conflicting decision turn 100 selectedLegalActionId",
+    );
+  });
+
+  test("discovers league-episodes.json while warning only for an unrelated discovered file", async () => {
+    const directory = await temporaryDirectory();
+    await fs.writeFile(
+      path.join(directory, "league-episodes.json"),
+      JSON.stringify({
+        episodes: [{ id: "ereq_discovered", map: "Asia", scores: [1, 0] }],
+      }),
+    );
+    await fs.writeFile(
+      path.join(directory, "metadata.json"),
+      JSON.stringify({ generatedBy: "unrelated-tool" }),
+    );
+
+    const loaded = await loadCoworldEvaluationEpisodes([directory]);
+    expect(loaded.episodes.map((episode) => episode.episodeId)).toEqual([
+      "ereq_discovered",
+    ]);
+    expect(loaded.warnings).toEqual([
+      expect.stringContaining("ignored unrelated discovered file"),
+    ]);
+  });
+
+  test("refuses source collisions and existing outputs, then publishes atomically", async () => {
+    const directory = await temporaryDirectory();
+    const sourcePath = path.join(directory, "episodes.json");
+    const existingPath = path.join(directory, "existing.json");
+    const outputPath = path.join(directory, "dataset.json");
+    await fs.writeFile(sourcePath, "source");
+    await fs.writeFile(existingPath, "existing");
+
+    await expect(
+      writeCoworldEvaluationDatasetFile({
+        outputPath: sourcePath,
+        output: "replacement",
+        sourcePaths: [sourcePath],
+      }),
+    ).rejects.toThrow("Refusing to replace source artifact");
+    await expect(
+      writeCoworldEvaluationDatasetFile({
+        outputPath: existingPath,
+        output: "replacement",
+        sourcePaths: [sourcePath],
+      }),
+    ).rejects.toThrow("Refusing to overwrite existing output");
+
+    await writeCoworldEvaluationDatasetFile({
+      outputPath,
+      output: "published\n",
+      sourcePaths: [sourcePath],
+    });
+    expect(await fs.readFile(outputPath, "utf8")).toBe("published\n");
+    expect(
+      (await fs.readdir(directory)).filter((name) => name.endsWith(".tmp")),
+    ).toEqual([]);
   });
 });

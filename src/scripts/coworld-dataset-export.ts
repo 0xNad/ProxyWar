@@ -1,6 +1,8 @@
+import { randomUUID } from "node:crypto";
 import { promises as fs } from "node:fs";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
+import { isDeepStrictEqual } from "node:util";
 import {
   buildCoworldEvaluationDataset,
   conciseCoworldDatasetSummary,
@@ -236,10 +238,99 @@ function oneHotWinnerSlot(scores: readonly number[]): number | null {
     : null;
 }
 
-function policyVersionIds(entry: Record<string, unknown>): string[] {
+function participantRoster(
+  entry: Record<string, unknown>,
+  sourcePath: string,
+): CoworldEvaluationRosterSeat[] {
+  if (!Object.hasOwn(entry, "participants")) {
+    return [];
+  }
+  if (!Array.isArray(entry.participants)) {
+    throw new Error(`${sourcePath} has invalid participants`);
+  }
+  const participants = entry.participants.map((value, index) => {
+    const record = asRecord(value);
+    if (record === null) {
+      throw new Error(
+        `${sourcePath} participant ${index + 1} is not an object`,
+      );
+    }
+    const rawPosition = record.position;
+    const position = rawPosition === undefined ? null : asSeat(rawPosition);
+    if (rawPosition !== undefined && position === null) {
+      throw new Error(
+        `${sourcePath} participant ${index + 1} has invalid position`,
+      );
+    }
+    return { record, index, position };
+  });
+  const positioned = participants.filter(({ position }) => position !== null);
+  if (positioned.length !== 0 && positioned.length !== participants.length) {
+    throw new Error(
+      `${sourcePath} participants mix positioned and unpositioned entries`,
+    );
+  }
+  let positionBase = 0;
+  if (positioned.length > 0) {
+    const positions = positioned
+      .map(({ position }) => position as number)
+      .sort((left, right) => left - right);
+    const zeroBased = positions.every((position, index) => position === index);
+    const oneBased = positions.every(
+      (position, index) => position === index + 1,
+    );
+    if (!zeroBased && !oneBased) {
+      throw new Error(
+        `${sourcePath} participant positions must be contiguous and zero- or one-based`,
+      );
+    }
+    positionBase = oneBased ? 1 : 0;
+  }
+  return participants
+    .map(({ record, index, position }) => ({
+      seat: (position ?? index) - positionBase,
+      policyVersionId: asString(record.policy_version_id),
+      playerName: asString(record.player_name),
+      label: asString(record.label),
+      agentID: null,
+    }))
+    .sort((left, right) => left.seat - right.seat);
+}
+
+function policyVersionIds(
+  entry: Record<string, unknown>,
+  participants: readonly CoworldEvaluationRosterSeat[],
+  sourcePath: string,
+): string[] {
+  if (
+    Object.hasOwn(entry, "policy_version_ids") &&
+    (!Array.isArray(entry.policy_version_ids) ||
+      entry.policy_version_ids.length === 0 ||
+      entry.policy_version_ids.some((value) => asString(value) === null))
+  ) {
+    throw new Error(`${sourcePath} has invalid policy_version_ids`);
+  }
   const direct = asStringArray(entry.policy_version_ids);
   if (direct.length > 0) {
+    for (const participant of participants) {
+      const directPolicy = direct[participant.seat];
+      if (
+        directPolicy !== undefined &&
+        participant.policyVersionId !== null &&
+        directPolicy !== participant.policyVersionId
+      ) {
+        throw new Error(
+          `${sourcePath} has conflicting policy IDs for seat ${participant.seat}`,
+        );
+      }
+    }
     return direct;
+  }
+  if (
+    Object.hasOwn(entry, "policy_versions") &&
+    !Array.isArray(entry.policy_versions)
+  ) {
+    throw new Error(`${sourcePath} has invalid policy_versions`);
   }
   if (Array.isArray(entry.policy_versions)) {
     const values = entry.policy_versions.map((value) => {
@@ -249,6 +340,9 @@ function policyVersionIds(entry: Record<string, unknown>): string[] {
     if (values.every((value) => value !== null)) {
       return values as string[];
     }
+  }
+  if (Object.hasOwn(entry, "roster") && !Array.isArray(entry.roster)) {
+    throw new Error(`${sourcePath} has invalid roster`);
   }
   if (Array.isArray(entry.roster)) {
     const values = entry.roster.map((value) => {
@@ -265,16 +359,26 @@ function policyVersionIds(entry: Record<string, unknown>): string[] {
       return values as string[];
     }
   }
+  if (
+    participants.length > 0 &&
+    participants.every((entry) => entry.policyVersionId !== null)
+  ) {
+    return participants.map((entry) => entry.policyVersionId as string);
+  }
   return [];
 }
 
 function parseScores(
   raw: unknown,
   entry: Record<string, unknown>,
+  participants: readonly CoworldEvaluationRosterSeat[],
   sourcePath: string,
 ): number[] | undefined {
-  if (!Array.isArray(raw) || raw.length === 0) {
+  if (raw === undefined) {
     return undefined;
+  }
+  if (!Array.isArray(raw) || raw.length === 0) {
+    throw new Error(`${sourcePath} has invalid scores`);
   }
   if (raw.every((score) => asNumber(score) !== null)) {
     return raw as number[];
@@ -288,7 +392,7 @@ function parseScores(
     }
     return { policyVersionId, score };
   });
-  const order = policyVersionIds(entry);
+  const order = policyVersionIds(entry, participants, sourcePath);
   if (order.length !== pairs.length) {
     return pairs.map((pair) => pair.score);
   }
@@ -311,29 +415,42 @@ function parseJsonArtifact(
   value: unknown,
   sourcePath: string,
   artifactName: string,
-  warnings: string[],
 ): Record<string, unknown> | null {
-  if (typeof value !== "string" || value.trim() === "") {
+  if (value === undefined) {
     return null;
   }
+  if (typeof value !== "string" || value.trim() === "") {
+    throw new Error(`${sourcePath} contains invalid ${artifactName}`);
+  }
   try {
-    return asRecord(JSON.parse(value));
+    const parsed = asRecord(JSON.parse(value));
+    if (parsed === null) {
+      throw new Error(`${sourcePath} contains non-object ${artifactName}`);
+    }
+    return parsed;
   } catch {
-    warnings.push(`${sourcePath}: ignored invalid ${artifactName}`);
-    return null;
+    throw new Error(`${sourcePath} contains invalid ${artifactName}`);
   }
 }
 
 function parseDecisionRows(
   entry: Record<string, unknown>,
   sourcePath: string,
-  warnings: string[],
 ): Record<string, unknown>[] {
   if (Array.isArray(entry.decisions)) {
-    return entry.decisions.flatMap((value) => {
+    return entry.decisions.map((value, index) => {
       const record = asRecord(value);
-      return record === null ? [] : [record];
+      if (record === null) {
+        throw new Error(`${sourcePath} decision ${index + 1} is not an object`);
+      }
+      return record;
     });
+  }
+  if (
+    Object.hasOwn(entry, "decisions") &&
+    typeof entry.decisions !== "string"
+  ) {
+    throw new Error(`${sourcePath} has invalid decisions`);
   }
   const inline = asRecord(entry.inlineRunArtifacts);
   const raw =
@@ -351,15 +468,14 @@ function parseDecisionRows(
     try {
       const record = asRecord(JSON.parse(line));
       if (record === null) {
-        warnings.push(
-          `${sourcePath}: decision line ${index + 1} is not an object`,
+        throw new Error(
+          `${sourcePath} decision line ${index + 1} is not an object`,
         );
-      } else {
-        rows.push(record);
       }
+      rows.push(record);
     } catch {
-      warnings.push(
-        `${sourcePath}: ignored invalid decision line ${index + 1}`,
+      throw new Error(
+        `${sourcePath} contains invalid decision line ${index + 1}`,
       );
     }
   }
@@ -372,8 +488,14 @@ function rosterSeats(input: {
   spectator: Record<string, unknown> | null;
   summary: Record<string, unknown> | null;
   scores: readonly number[] | undefined;
+  participants: readonly CoworldEvaluationRosterSeat[];
+  sourcePath: string;
 }): CoworldEvaluationRosterSeat[] {
-  const versionIds = policyVersionIds(input.entry);
+  const versionIds = policyVersionIds(
+    input.entry,
+    input.participants,
+    input.sourcePath,
+  );
   const resultPlayers = Array.isArray(input.results?.players)
     ? input.results.players
     : [];
@@ -392,6 +514,7 @@ function rosterSeats(input: {
     configPlayers.length,
     spectatorRoster.length,
     summaryRoster.length,
+    input.participants.length,
   );
   return Array.from({ length: seatCount }, (_, seat) => {
     const resultPlayer = asRecord(resultPlayers[seat]);
@@ -407,20 +530,37 @@ function rosterSeats(input: {
     const configPlayer = asRecord(configPlayers[seat]);
     const spectatorPlayer = asRecord(spectatorRoster[seat]);
     const summaryPlayer = asRecord(summaryRoster[seat]);
+    const participant = input.participants.find((entry) => entry.seat === seat);
+    const mergeIdentity = (
+      field: string,
+      values: Array<string | null>,
+    ): string | null => {
+      const present = [...new Set(values.filter((value) => value !== null))];
+      if (present.length > 1) {
+        throw new Error(
+          `${input.sourcePath} has conflicting roster ${field} for seat ${seat}`,
+        );
+      }
+      return present[0] ?? null;
+    };
     return {
       seat,
-      policyVersionId: versionIds[seat] ?? null,
-      playerName: firstString(
-        slottedResult?.name,
-        slottedResult?.username,
-        configPlayer?.name,
-        configPlayer?.username,
-        spectatorPlayer?.username,
-        spectatorPlayer?.name,
-        summaryPlayer?.username,
-        summaryPlayer?.name,
-      ),
-      agentID: firstString(spectatorPlayer?.agentID, summaryPlayer?.agentID),
+      policyVersionId: mergeIdentity("policyVersionId", [
+        versionIds[seat] ?? null,
+        participant?.policyVersionId ?? null,
+      ]),
+      playerName: mergeIdentity("playerName", [
+        participant?.playerName ?? null,
+        firstString(slottedResult?.name, slottedResult?.username),
+        firstString(configPlayer?.name, configPlayer?.username),
+        firstString(spectatorPlayer?.username, spectatorPlayer?.name),
+        firstString(summaryPlayer?.username, summaryPlayer?.name),
+      ]),
+      label: participant?.label ?? null,
+      agentID: mergeIdentity("agentID", [
+        firstString(spectatorPlayer?.agentID, spectatorPlayer?.agent_id),
+        firstString(summaryPlayer?.agentID, summaryPlayer?.agent_id),
+      ]),
     };
   });
 }
@@ -449,9 +589,18 @@ function parseEpisodeFragment(input: {
   if (entry === null) {
     return null;
   }
+  const participants = participantRoster(entry, input.sourcePath);
   const results =
     asRecord(entry.results) ?? (Array.isArray(entry.scores) ? entry : null);
-  const scores = parseScores(results?.scores, entry, input.sourcePath);
+  if (Object.hasOwn(entry, "results") && asRecord(entry.results) === null) {
+    throw new Error(`${input.sourcePath} has invalid results`);
+  }
+  const scores = parseScores(
+    results?.scores,
+    entry,
+    participants,
+    input.sourcePath,
+  );
   const episodeIdentifierResult = episodeIdentifier(entry, input.fallbackId);
   const episodeId = episodeIdentifierResult.id;
   const hasEpisodeIdentity =
@@ -463,13 +612,18 @@ function parseEpisodeFragment(input: {
     return null;
   }
   const inline = asRecord(entry.inlineRunArtifacts);
+  if (Object.hasOwn(entry, "inlineRunArtifacts") && inline === null) {
+    throw new Error(`${input.sourcePath} has invalid inlineRunArtifacts`);
+  }
   const summary = parseJsonArtifact(
     inline?.["match-summary.json"],
     input.sourcePath,
     "match-summary.json",
-    input.warnings,
   );
   const spectator = asRecord(entry.spectatorReplay);
+  if (Object.hasOwn(entry, "spectatorReplay") && spectator === null) {
+    throw new Error(`${input.sourcePath} has invalid spectatorReplay`);
+  }
   const gameConfig = asRecord(entry.game_config) ?? asRecord(entry.gameConfig);
   const config = asRecord(entry.config);
   const spectatorMap = asRecord(spectator?.map);
@@ -499,16 +653,32 @@ function parseEpisodeFragment(input: {
   ) {
     throw new Error(`${input.sourcePath} has an invalid winner_slot`);
   }
-  const roster = rosterSeats({ entry, results, spectator, summary, scores });
-  const rawDecisions = parseDecisionRows(
+  const roster = rosterSeats({
     entry,
-    input.sourcePath,
-    input.warnings,
-  );
+    results,
+    spectator,
+    summary,
+    scores,
+    participants,
+    sourcePath: input.sourcePath,
+  });
+  const rawDecisions = parseDecisionRows(entry, input.sourcePath);
+  if (
+    spectator !== null &&
+    Object.hasOwn(spectator, "snapshots") &&
+    !Array.isArray(spectator.snapshots)
+  ) {
+    throw new Error(`${input.sourcePath} has invalid spectator snapshots`);
+  }
   const rawSnapshots = Array.isArray(spectator?.snapshots)
-    ? spectator.snapshots.flatMap((value) => {
+    ? spectator.snapshots.map((value, index) => {
         const record = asRecord(value);
-        return record === null ? [] : [record];
+        if (record === null) {
+          throw new Error(
+            `${input.sourcePath} snapshot ${index + 1} is not an object`,
+          );
+        }
+        return record;
       })
     : [];
   return {
@@ -553,6 +723,23 @@ export function parseCoworldEvaluationDocument(input: {
 }): EpisodeFragment[] {
   const warnings = input.warnings ?? [];
   const root = asRecord(input.value);
+  if (!Array.isArray(input.value) && root === null) {
+    throw new Error(`${input.sourcePath} is not a JSON object or array`);
+  }
+  if (
+    root !== null &&
+    Object.hasOwn(root, "episodes") &&
+    !Array.isArray(root.episodes)
+  ) {
+    throw new Error(`${input.sourcePath} has invalid episodes`);
+  }
+  if (
+    root !== null &&
+    Object.hasOwn(root, "entries") &&
+    !Array.isArray(root.entries)
+  ) {
+    throw new Error(`${input.sourcePath} has invalid entries`);
+  }
   const entries = Array.isArray(input.value)
     ? input.value
     : Array.isArray(root?.episodes)
@@ -561,6 +748,11 @@ export function parseCoworldEvaluationDocument(input: {
         ? root.entries
         : [input.value];
   return entries.flatMap((value, index) => {
+    if (asRecord(value) === null) {
+      throw new Error(
+        `${input.sourcePath} entry ${index + 1} is not an object`,
+      );
+    }
     const fragment = parseEpisodeFragment({
       value,
       sourcePath: input.sourcePath,
@@ -577,6 +769,7 @@ export function parseCoworldEvaluationDocument(input: {
 function mergeRoster(
   current: readonly CoworldEvaluationRosterSeat[],
   incoming: readonly CoworldEvaluationRosterSeat[],
+  episodeId: string,
 ): CoworldEvaluationRosterSeat[] {
   const seatCount = Math.max(current.length, incoming.length);
   return Array.from({ length: seatCount }, (_, seat) => {
@@ -584,20 +777,377 @@ function mergeRoster(
     const right = incoming.find((entry) => entry.seat === seat);
     return {
       seat,
-      policyVersionId: left?.policyVersionId ?? right?.policyVersionId ?? null,
-      playerName: left?.playerName ?? right?.playerName ?? null,
-      agentID: left?.agentID ?? right?.agentID ?? null,
+      policyVersionId: mergeNullable(
+        episodeId,
+        `roster seat ${seat} policyVersionId`,
+        left?.policyVersionId,
+        right?.policyVersionId,
+      ),
+      playerName: mergeNullable(
+        episodeId,
+        `roster seat ${seat} playerName`,
+        left?.playerName,
+        right?.playerName,
+      ),
+      label: mergeNullable(
+        episodeId,
+        `roster seat ${seat} label`,
+        left?.label,
+        right?.label,
+      ),
+      agentID: mergeNullable(
+        episodeId,
+        `roster seat ${seat} agentID`,
+        left?.agentID,
+        right?.agentID,
+      ),
     };
   });
 }
 
-function equalNumbers(
-  left: readonly number[],
-  right: readonly number[],
+function mergeOptional<T>(
+  episodeId: string,
+  field: string,
+  left: T | undefined,
+  right: T | undefined,
+): T | undefined {
+  if (left === undefined) return right;
+  if (right === undefined) return left;
+  if (!isDeepStrictEqual(left, right)) {
+    throw new Error(`Conflicting ${field} for episode ${episodeId}`);
+  }
+  return left;
+}
+
+function mergeNullable<T>(
+  episodeId: string,
+  field: string,
+  left: T | null | undefined,
+  right: T | null | undefined,
+): T | null {
+  const merged = mergeOptional(
+    episodeId,
+    field,
+    left ?? undefined,
+    right ?? undefined,
+  );
+  return merged ?? null;
+}
+
+function mergePrimitiveRecord(
+  episodeId: string,
+  field: string,
+  left: Readonly<Record<string, CoworldTelemetryPrimitive>>,
+  right: Readonly<Record<string, CoworldTelemetryPrimitive>>,
+): Record<string, CoworldTelemetryPrimitive> {
+  const merged: Record<string, CoworldTelemetryPrimitive> = { ...left };
+  for (const [key, value] of Object.entries(right)) {
+    if (Object.hasOwn(merged, key) && merged[key] !== value) {
+      throw new Error(`Conflicting ${field}.${key} for episode ${episodeId}`);
+    }
+    merged[key] = value;
+  }
+  return merged;
+}
+
+function decisionsMatch(
+  left: CoworldEvaluationDecision,
+  right: CoworldEvaluationDecision,
 ): boolean {
+  if (isDeepStrictEqual(left, right)) return true;
+  if (left.turnNumber === null || left.turnNumber !== right.turnNumber) {
+    return false;
+  }
+  if (left.seat !== null && right.seat !== null) {
+    return left.seat === right.seat;
+  }
+  if (left.agentID !== null && right.agentID !== null) {
+    return left.agentID === right.agentID;
+  }
+  if (left.playerName !== null && right.playerName !== null) {
+    return left.playerName === right.playerName;
+  }
+  return false;
+}
+
+function mergeDecision(
+  episodeId: string,
+  left: CoworldEvaluationDecision,
+  right: CoworldEvaluationDecision,
+): CoworldEvaluationDecision {
+  const actionKind = mergeNullable(
+    episodeId,
+    `decision turn ${left.turnNumber ?? "unknown"} actionKind`,
+    left.actionKind === "unknown" ? null : left.actionKind,
+    right.actionKind === "unknown" ? null : right.actionKind,
+  );
+  const reason = mergeNullable(
+    episodeId,
+    `decision turn ${left.turnNumber ?? "unknown"} reason`,
+    left.reason === "" ? null : left.reason,
+    right.reason === "" ? null : right.reason,
+  );
+  return {
+    seat: mergeNullable(
+      episodeId,
+      `decision turn ${left.turnNumber ?? "unknown"} seat`,
+      left.seat,
+      right.seat,
+    ),
+    playerName: mergeNullable(
+      episodeId,
+      `decision turn ${left.turnNumber ?? "unknown"} playerName`,
+      left.playerName,
+      right.playerName,
+    ),
+    agentID: mergeNullable(
+      episodeId,
+      `decision turn ${left.turnNumber ?? "unknown"} agentID`,
+      left.agentID,
+      right.agentID,
+    ),
+    turnNumber: mergeNullable(
+      episodeId,
+      "decision turnNumber",
+      left.turnNumber,
+      right.turnNumber,
+    ),
+    selectedLegalActionId: mergeNullable(
+      episodeId,
+      `decision turn ${left.turnNumber ?? "unknown"} selectedLegalActionId`,
+      left.selectedLegalActionId,
+      right.selectedLegalActionId,
+    ),
+    actionKind: actionKind ?? "unknown",
+    attackTargetType: mergeNullable(
+      episodeId,
+      `decision turn ${left.turnNumber ?? "unknown"} attackTargetType`,
+      left.attackTargetType,
+      right.attackTargetType,
+    ),
+    reason: reason ?? "",
+    selectedActionMetadata: mergePrimitiveRecord(
+      episodeId,
+      `decision turn ${left.turnNumber ?? "unknown"} selectedActionMetadata`,
+      left.selectedActionMetadata,
+      right.selectedActionMetadata,
+    ),
+    fallback: mergeNullable(
+      episodeId,
+      `decision turn ${left.turnNumber ?? "unknown"} fallback`,
+      left.fallback,
+      right.fallback,
+    ),
+    degraded: mergeNullable(
+      episodeId,
+      `decision turn ${left.turnNumber ?? "unknown"} degraded`,
+      left.degraded,
+      right.degraded,
+    ),
+    parseFailure: mergeNullable(
+      episodeId,
+      `decision turn ${left.turnNumber ?? "unknown"} parseFailure`,
+      left.parseFailure,
+      right.parseFailure,
+    ),
+    wireDroppedFollowupCount: mergeNullable(
+      episodeId,
+      `decision turn ${left.turnNumber ?? "unknown"} wireDroppedFollowupCount`,
+      left.wireDroppedFollowupCount,
+      right.wireDroppedFollowupCount,
+    ),
+    multiAction: mergeNullable(
+      episodeId,
+      `decision turn ${left.turnNumber ?? "unknown"} multiAction`,
+      left.multiAction,
+      right.multiAction,
+    ),
+    commanderTelemetry: mergePrimitiveRecord(
+      episodeId,
+      `decision turn ${left.turnNumber ?? "unknown"} commanderTelemetry`,
+      left.commanderTelemetry,
+      right.commanderTelemetry,
+    ),
+    explicitTreatmentMarkers: [
+      ...new Set([
+        ...left.explicitTreatmentMarkers,
+        ...right.explicitTreatmentMarkers,
+      ]),
+    ].sort(),
+    searchableText:
+      left.searchableText === right.searchableText
+        ? left.searchableText
+        : `${left.searchableText}\n${right.searchableText}`,
+  };
+}
+
+function mergeDecisions(
+  episodeId: string,
+  current: readonly CoworldEvaluationDecision[],
+  incoming: readonly CoworldEvaluationDecision[],
+): CoworldEvaluationDecision[] {
+  const merged = [...current];
+  for (const decision of incoming) {
+    const matchingIndexes = merged.flatMap((candidate, index) =>
+      decisionsMatch(candidate, decision) ? [index] : [],
+    );
+    if (matchingIndexes.length > 1) {
+      throw new Error(`Ambiguous decision identity for episode ${episodeId}`);
+    }
+    if (matchingIndexes.length === 0) {
+      merged.push(decision);
+    } else {
+      merged[matchingIndexes[0]] = mergeDecision(
+        episodeId,
+        merged[matchingIndexes[0]],
+        decision,
+      );
+    }
+  }
+  return merged.sort(
+    (left, right) =>
+      (left.turnNumber ?? Number.MAX_SAFE_INTEGER) -
+        (right.turnNumber ?? Number.MAX_SAFE_INTEGER) ||
+      (left.seat ?? Number.MAX_SAFE_INTEGER) -
+        (right.seat ?? Number.MAX_SAFE_INTEGER),
+  );
+}
+
+function snapshotPlayersMatch(
+  left: CoworldEvaluationSnapshotPlayer,
+  right: CoworldEvaluationSnapshotPlayer,
+): boolean {
+  if (isDeepStrictEqual(left, right)) return true;
+  if (left.seat !== null && right.seat !== null)
+    return left.seat === right.seat;
+  if (left.agentID !== null && right.agentID !== null) {
+    return left.agentID === right.agentID;
+  }
   return (
-    left.length === right.length &&
-    left.every((value, index) => value === right[index])
+    left.playerName !== null &&
+    right.playerName !== null &&
+    left.playerName === right.playerName
+  );
+}
+
+function mergeSnapshotPlayer(
+  episodeId: string,
+  label: string,
+  left: CoworldEvaluationSnapshotPlayer,
+  right: CoworldEvaluationSnapshotPlayer,
+): CoworldEvaluationSnapshotPlayer {
+  const merge = <T>(
+    field: string,
+    leftValue: T | null,
+    rightValue: T | null,
+  ): T | null =>
+    mergeNullable(
+      episodeId,
+      `snapshot ${label} player ${field}`,
+      leftValue,
+      rightValue,
+    );
+  return {
+    seat: merge("seat", left.seat, right.seat),
+    playerName: merge("playerName", left.playerName, right.playerName),
+    agentID: merge("agentID", left.agentID, right.agentID),
+    tilesOwned: merge("tilesOwned", left.tilesOwned, right.tilesOwned),
+    troops: merge("troops", left.troops, right.troops),
+    gold: merge("gold", left.gold, right.gold),
+    isAlive: merge("isAlive", left.isAlive, right.isAlive),
+    hasSpawned: merge("hasSpawned", left.hasSpawned, right.hasSpawned),
+  };
+}
+
+function snapshotsMatch(
+  left: CoworldEvaluationSnapshot,
+  right: CoworldEvaluationSnapshot,
+): boolean {
+  if (isDeepStrictEqual(left, right)) return true;
+  const sharedTurn =
+    left.turnNumber !== null && left.turnNumber === right.turnNumber;
+  const sharedTick = left.tick !== null && left.tick === right.tick;
+  if (sharedTurn || sharedTick) return true;
+  return (
+    left.turnNumber === null &&
+    right.turnNumber === null &&
+    left.tick === null &&
+    right.tick === null &&
+    left.label === right.label &&
+    left.phase === right.phase
+  );
+}
+
+function mergeSnapshots(
+  episodeId: string,
+  current: readonly CoworldEvaluationSnapshot[],
+  incoming: readonly CoworldEvaluationSnapshot[],
+): CoworldEvaluationSnapshot[] {
+  const merged = current.map((snapshot) => ({
+    ...snapshot,
+    players: [...snapshot.players],
+  }));
+  for (const snapshot of incoming) {
+    const existingIndex = merged.findIndex((candidate) =>
+      snapshotsMatch(candidate, snapshot),
+    );
+    if (existingIndex < 0) {
+      merged.push(snapshot);
+      continue;
+    }
+    const existing = merged[existingIndex];
+    const label = mergeNullable(
+      episodeId,
+      "snapshot label",
+      existing.label === "snapshot" ? null : existing.label,
+      snapshot.label === "snapshot" ? null : snapshot.label,
+    );
+    const phase = mergeNullable(
+      episodeId,
+      `snapshot ${label ?? "snapshot"} phase`,
+      existing.phase === "unknown" ? null : existing.phase,
+      snapshot.phase === "unknown" ? null : snapshot.phase,
+    );
+    existing.label = label ?? "snapshot";
+    existing.phase = phase ?? "unknown";
+    existing.turnNumber = mergeNullable(
+      episodeId,
+      `snapshot ${existing.label} turnNumber`,
+      existing.turnNumber,
+      snapshot.turnNumber,
+    );
+    existing.tick = mergeNullable(
+      episodeId,
+      `snapshot ${existing.label} tick`,
+      existing.tick,
+      snapshot.tick,
+    );
+    for (const player of snapshot.players) {
+      const playerIndexes = existing.players.flatMap((candidate, index) =>
+        snapshotPlayersMatch(candidate, player) ? [index] : [],
+      );
+      if (playerIndexes.length > 1) {
+        throw new Error(`Ambiguous snapshot player for episode ${episodeId}`);
+      }
+      if (playerIndexes.length === 0) {
+        existing.players.push(player);
+      } else {
+        existing.players[playerIndexes[0]] = mergeSnapshotPlayer(
+          episodeId,
+          snapshot.label,
+          existing.players[playerIndexes[0]],
+          player,
+        );
+      }
+    }
+  }
+  return merged.sort(
+    (left, right) =>
+      (left.turnNumber ?? Number.MAX_SAFE_INTEGER) -
+        (right.turnNumber ?? Number.MAX_SAFE_INTEGER) ||
+      (left.tick ?? Number.MAX_SAFE_INTEGER) -
+        (right.tick ?? Number.MAX_SAFE_INTEGER) ||
+      left.label.localeCompare(right.label),
   );
 }
 
@@ -606,90 +1156,129 @@ function mergeFragment(
   incoming: EpisodeFragment,
 ): EpisodeFragment {
   if (
-    current.scores !== undefined &&
-    incoming.scores !== undefined &&
-    !equalNumbers(current.scores, incoming.scores)
+    current.episodeIdIsExplicit &&
+    incoming.episodeIdIsExplicit &&
+    current.episodeId !== incoming.episodeId
   ) {
-    throw new Error(`Conflicting scores for episode ${current.episodeId}`);
+    throw new Error(
+      `Conflicting episode IDs ${current.episodeId} and ${incoming.episodeId}`,
+    );
   }
+  const episodeId = current.episodeIdIsExplicit
+    ? current.episodeId
+    : incoming.episodeId;
+  const currentMap = current.map === "Unknown map" ? undefined : current.map;
+  const incomingMap = incoming.map === "Unknown map" ? undefined : incoming.map;
   return {
-    episodeId: current.episodeIdIsExplicit
-      ? current.episodeId
-      : incoming.episodeId,
+    episodeId,
     episodeIdIsExplicit:
       current.episodeIdIsExplicit || incoming.episodeIdIsExplicit,
     sourcePaths: [
       ...new Set([...current.sourcePaths, ...incoming.sourcePaths]),
     ],
-    runID: current.runID ?? incoming.runID,
-    completedAt: current.completedAt ?? incoming.completedAt,
+    runID: mergeNullable(episodeId, "runID", current.runID, incoming.runID),
+    completedAt: mergeNullable(
+      episodeId,
+      "completedAt",
+      current.completedAt,
+      incoming.completedAt,
+    ),
     map:
-      current.map !== undefined && current.map !== "Unknown map"
-        ? current.map
-        : incoming.map,
-    mapSize: current.mapSize ?? incoming.mapSize,
-    scores: current.scores ?? incoming.scores,
-    outrightWinnerSlot:
-      current.outrightWinnerSlot !== undefined
-        ? current.outrightWinnerSlot
-        : incoming.outrightWinnerSlot,
-    roster: mergeRoster(current.roster, incoming.roster),
-    decisions:
-      current.decisions.length > 0 ? current.decisions : incoming.decisions,
-    snapshots:
-      current.snapshots.length > 0 ? current.snapshots : incoming.snapshots,
+      mergeOptional(episodeId, "map", currentMap, incomingMap) ?? "Unknown map",
+    mapSize: mergeNullable(
+      episodeId,
+      "mapSize",
+      current.mapSize,
+      incoming.mapSize,
+    ),
+    scores: mergeOptional(episodeId, "scores", current.scores, incoming.scores),
+    outrightWinnerSlot: mergeOptional(
+      episodeId,
+      "outrightWinnerSlot",
+      current.outrightWinnerSlot,
+      incoming.outrightWinnerSlot,
+    ),
+    roster: mergeRoster(current.roster, incoming.roster, episodeId),
+    decisions: mergeDecisions(episodeId, current.decisions, incoming.decisions),
+    snapshots: mergeSnapshots(episodeId, current.snapshots, incoming.snapshots),
     episodeReportedTelemetry: {
-      decisionCount: maxCount(
-        current.episodeReportedTelemetry.decisionCount,
-        incoming.episodeReportedTelemetry.decisionCount,
+      decisionCount: mergeOptional(
+        episodeId,
+        "reported decisionCount",
+        current.episodeReportedTelemetry.decisionCount ?? undefined,
+        incoming.episodeReportedTelemetry.decisionCount ?? undefined,
       ),
-      fallbackCount: maxCount(
-        current.episodeReportedTelemetry.fallbackCount,
-        incoming.episodeReportedTelemetry.fallbackCount,
+      fallbackCount: mergeOptional(
+        episodeId,
+        "reported fallbackCount",
+        current.episodeReportedTelemetry.fallbackCount ?? undefined,
+        incoming.episodeReportedTelemetry.fallbackCount ?? undefined,
       ),
-      degradedCount: maxCount(
-        current.episodeReportedTelemetry.degradedCount,
-        incoming.episodeReportedTelemetry.degradedCount,
+      degradedCount: mergeOptional(
+        episodeId,
+        "reported degradedCount",
+        current.episodeReportedTelemetry.degradedCount ?? undefined,
+        incoming.episodeReportedTelemetry.degradedCount ?? undefined,
       ),
-      parseFailureCount: maxCount(
-        current.episodeReportedTelemetry.parseFailureCount,
-        incoming.episodeReportedTelemetry.parseFailureCount,
+      parseFailureCount: mergeOptional(
+        episodeId,
+        "reported parseFailureCount",
+        current.episodeReportedTelemetry.parseFailureCount ?? undefined,
+        incoming.episodeReportedTelemetry.parseFailureCount ?? undefined,
       ),
     },
   };
 }
 
-function maxCount(
-  left: number | null | undefined,
-  right: number | null | undefined,
-): number | null | undefined {
-  if (left === undefined && right === undefined) return undefined;
-  if (left === null && right === null) return null;
-  return Math.max(left ?? 0, right ?? 0);
+function consistentBoolean(
+  field: string,
+  values: readonly boolean[],
+): boolean | null {
+  if (values.length === 0) return null;
+  if (values.some((value) => value !== values[0])) {
+    throw new Error(`Conflicting ${field} decision telemetry`);
+  }
+  return values[0];
 }
 
-function embeddedDegraded(record: Record<string, unknown>): boolean {
-  const direct =
-    record.llmPlannerDegraded === true ||
-    record.llm_planner_degraded === true ||
-    record.degraded === true;
-  if (direct) {
-    return true;
-  }
+function booleanFields(
+  record: Record<string, unknown>,
+  field: string,
+  keys: readonly string[],
+): boolean[] {
+  return keys.flatMap((key) => {
+    if (!Object.hasOwn(record, key)) return [];
+    const value = record[key];
+    if (typeof value !== "boolean") {
+      throw new Error(`Invalid ${field} decision telemetry`);
+    }
+    return [value];
+  });
+}
+
+function embeddedDegraded(record: Record<string, unknown>): boolean | null {
+  const values = booleanFields(record, "degraded", [
+    "llmPlannerDegraded",
+    "llm_planner_degraded",
+    "degraded",
+  ]);
   const metadata = asRecord(record.decisionMetadata);
-  if (metadata?.llmPlannerDegraded === true) {
-    return true;
+  if (metadata !== null) {
+    values.push(...booleanFields(metadata, "degraded", ["llmPlannerDegraded"]));
   }
   const raw = record.rawLlmOutput;
   if (typeof raw !== "string" || raw.trim() === "") {
-    return false;
+    return consistentBoolean("degraded", values);
   }
   try {
     const parsed = asRecord(JSON.parse(raw));
-    return parsed?.llmPlannerDegraded === true;
+    if (parsed !== null) {
+      values.push(...booleanFields(parsed, "degraded", ["llmPlannerDegraded"]));
+    }
   } catch {
-    return false;
+    // A malformed provider payload says nothing about the degradation signal.
   }
+  return consistentBoolean("degraded", values);
 }
 
 function isTelemetryPrimitive(
@@ -751,7 +1340,8 @@ function attackTargetType(
   const targetName = asString(metadata?.targetName);
   if (
     metadata?.expansion === true ||
-    targetID === null ||
+    metadata?.isNeutral === true ||
+    metadata?.targetType === "neutral" ||
     (targetName !== null && /terra nullius/i.test(targetName))
   ) {
     return "neutral";
@@ -772,16 +1362,33 @@ function explicitTreatmentMarkers(record: Record<string, unknown>): string[] {
   ].filter((value): value is string => value !== null);
 }
 
-function wireDroppedFollowupCount(record: Record<string, unknown>): number {
+function wireDroppedFollowupCount(
+  record: Record<string, unknown>,
+): number | null {
   const metadata = asRecord(record.selectedActionMetadata);
-  const explicit = asCount(
-    record.wireDroppedFollowupCount ??
-      record.wire_dropped_followup_count ??
-      record.droppedFollowupCount ??
-      metadata?.wireDroppedFollowupCount,
-  );
-  if (explicit !== null) {
-    return explicit;
+  const explicitSources: Array<[Record<string, unknown> | null, string]> = [
+    [record, "wireDroppedFollowupCount"],
+    [record, "wire_dropped_followup_count"],
+    [record, "droppedFollowupCount"],
+    [metadata, "wireDroppedFollowupCount"],
+  ];
+  const explicitValues = explicitSources.flatMap(([source, key]) => {
+    if (source === null || !Object.hasOwn(source, key)) return [];
+    const value = asCount(source[key]);
+    if (value === null) {
+      throw new Error("Invalid wireDroppedFollowupCount decision telemetry");
+    }
+    return [value];
+  });
+  if (explicitValues.some((value) => value !== explicitValues[0])) {
+    throw new Error("Conflicting wireDroppedFollowupCount decision telemetry");
+  }
+  if (explicitValues.length > 0) {
+    return explicitValues[0];
+  }
+  const hasBatchActionIDs = Object.hasOwn(record, "batchActionIDs");
+  if (hasBatchActionIDs && !Array.isArray(record.batchActionIDs)) {
+    throw new Error("Invalid batchActionIDs decision telemetry");
   }
   if (
     Array.isArray(record.batchActionIDs) &&
@@ -797,10 +1404,13 @@ function wireDroppedFollowupCount(record: Record<string, unknown>): number {
     return Number(wireMarker[1]);
   }
   if (!/wire carries primary only/i.test(reason)) {
-    return 0;
+    return null;
   }
   const queueMarker = reason.match(/\bqueued\s+(\d+)\s+action\(s\)/i);
-  return queueMarker === null ? 0 : Math.max(0, Number(queueMarker[1]) - 1);
+  if (queueMarker !== null) {
+    return Math.max(0, Number(queueMarker[1]) - 1);
+  }
+  return hasBatchActionIDs ? 0 : null;
 }
 
 function matchingSeat(
@@ -840,6 +1450,35 @@ function normalizeDecision(
   const actionKind =
     firstString(record.selectedActionKind, record.selected_action_kind) ??
     "unknown";
+  const fallback = consistentBoolean(
+    "fallback",
+    booleanFields(record, "fallback", ["fallbackUsed", "fallback_used"]),
+  );
+  const parseFailureValues = booleanFields(record, "parse failure", [
+    "parse_failure",
+  ]);
+  parseFailureValues.push(
+    ...booleanFields(record, "parse success", [
+      "parseSuccess",
+      "plannerParseSuccess",
+    ]).map((value) => !value),
+  );
+  const explicitMultiAction = consistentBoolean(
+    "multiAction",
+    booleanFields(record, "multiAction", ["multiAction", "multi_action"]),
+  );
+  const inferredMultiAction =
+    droppedFollowups !== null && droppedFollowups > 0
+      ? true
+      : Array.isArray(record.batchActionIDs)
+        ? record.batchActionIDs.length > 1
+        : null;
+  const multiAction = consistentBoolean(
+    "multiAction",
+    [explicitMultiAction, inferredMultiAction].filter(
+      (value): value is boolean => value !== null,
+    ),
+  );
   return {
     seat: matchingSeat(record, roster),
     playerName,
@@ -853,19 +1492,11 @@ function normalizeDecision(
     attackTargetType: attackTargetType(actionKind, record),
     reason: asString(record.reason) ?? "",
     selectedActionMetadata: primitiveRecord(record.selectedActionMetadata),
-    fallback: record.fallbackUsed === true || record.fallback_used === true,
+    fallback,
     degraded: embeddedDegraded(record),
-    parseFailure:
-      record.parseSuccess === false ||
-      record.plannerParseSuccess === false ||
-      record.parse_failure === true,
+    parseFailure: consistentBoolean("parse failure", parseFailureValues),
     wireDroppedFollowupCount: droppedFollowups,
-    multiAction:
-      record.multiAction === true ||
-      record.multi_action === true ||
-      droppedFollowups > 0 ||
-      (Array.isArray(record.batchActionIDs) &&
-        record.batchActionIDs.length > 1),
+    multiAction,
     commanderTelemetry: commanderTelemetry(record),
     explicitTreatmentMarkers: explicitTreatmentMarkers(record),
     searchableText: JSON.stringify({
@@ -956,8 +1587,10 @@ function normalizeEpisode(fragment: EpisodeFragment): CoworldEvaluationEpisode {
       seat,
       policyVersionId: null,
       playerName: null,
+      label: null,
       agentID: null,
     })),
+    fragment.episodeId,
   );
   return {
     episodeId: fragment.episodeId,
@@ -992,6 +1625,7 @@ function fallbackEpisodeId(filePath: string): string {
 function isDirectoryJsonCandidate(fileName: string): boolean {
   return (
     /^episodes?(?:[-_.].*)?\.json$/i.test(fileName) ||
+    /^league[-_.]episodes\.json$/i.test(fileName) ||
     /^(?:league[-_.])?episode[-_.].*\.json$/i.test(fileName) ||
     /^metadata\.json$/i.test(fileName)
   );
@@ -1078,7 +1712,7 @@ async function parseSidecarBundle(
     try {
       spectatorReplay = JSON.parse(spectatorText) as unknown;
     } catch {
-      warnings.push(`${spectatorPath}: ignored invalid spectator replay`);
+      throw new Error(`${spectatorPath} contains invalid JSON`);
     }
   }
   const runID = asString(summary.runID) ?? path.basename(directory);
@@ -1151,34 +1785,57 @@ export async function loadCoworldEvaluationEpisodes(
   inputPaths: readonly string[],
 ): Promise<LoadedCoworldEvaluationEpisodes> {
   const warnings: string[] = [];
+  const explicitFiles = new Set<string>();
+  for (const inputPath of inputPaths) {
+    const resolved = path.resolve(inputPath);
+    if ((await fs.stat(resolved)).isFile()) {
+      explicitFiles.add(resolved);
+    }
+  }
   const files = await discoverInputFiles(inputPaths);
   if (files.length === 0) {
     throw new Error("No Coworld episode artifacts were discovered");
   }
   const merged: EpisodeFragment[] = [];
   for (const filePath of files) {
-    try {
-      const fragments =
-        path.basename(filePath) === "match-summary.json"
-          ? await parseSidecarBundle(filePath, warnings)
-          : parseCoworldEvaluationDocument({
-              value: JSON.parse(await fs.readFile(filePath, "utf8")) as unknown,
-              sourcePath: filePath,
-              fallbackId: fallbackEpisodeId(filePath),
-              warnings,
-            });
-      for (const fragment of fragments) {
-        addMergedFragment(merged, fragment);
+    let parsed: unknown;
+    if (path.basename(filePath) !== "match-summary.json") {
+      try {
+        parsed = JSON.parse(await fs.readFile(filePath, "utf8")) as unknown;
+      } catch {
+        throw new Error(`${filePath} contains invalid JSON`);
       }
-    } catch (error) {
-      warnings.push(
-        `${filePath}: ${error instanceof Error ? error.message : String(error)}`,
-      );
+    }
+    const fragments =
+      path.basename(filePath) === "match-summary.json"
+        ? await parseSidecarBundle(filePath, warnings)
+        : parseCoworldEvaluationDocument({
+            value: parsed,
+            sourcePath: filePath,
+            fallbackId: fallbackEpisodeId(filePath),
+            warnings,
+          });
+    if (fragments.length === 0) {
+      if (explicitFiles.has(filePath)) {
+        throw new Error(`${filePath} contains no Coworld episode evidence`);
+      }
+      warnings.push(`${filePath}: ignored unrelated discovered file`);
+      continue;
+    }
+    for (const fragment of fragments) {
+      addMergedFragment(merged, fragment);
     }
   }
   const episodes: CoworldEvaluationEpisode[] = [];
   for (const fragment of merged) {
     if (fragment.scores === undefined) {
+      if (
+        fragment.sourcePaths.some((sourcePath) => explicitFiles.has(sourcePath))
+      ) {
+        throw new Error(
+          `${fragment.episodeId}: explicit input had no matching scored artifact`,
+        );
+      }
       warnings.push(
         `${fragment.episodeId}: metadata had no matching result/replay artifact`,
       );
@@ -1191,6 +1848,60 @@ export async function loadCoworldEvaluationEpisodes(
     throw new Error("No completed Coworld episodes with scores were loaded");
   }
   return { episodes, warnings };
+}
+
+export async function writeCoworldEvaluationDatasetFile(input: {
+  outputPath: string;
+  output: string;
+  sourcePaths: readonly string[];
+}): Promise<void> {
+  const outputPath = path.resolve(input.outputPath);
+  const sourcePaths = new Set(
+    input.sourcePaths.map((value) => path.resolve(value)),
+  );
+  if (sourcePaths.has(outputPath)) {
+    throw new Error(`Refusing to replace source artifact ${outputPath}`);
+  }
+  await fs.mkdir(path.dirname(outputPath), { recursive: true });
+  try {
+    await fs.lstat(outputPath);
+    throw new Error(`Refusing to overwrite existing output ${outputPath}`);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+      throw error;
+    }
+  }
+  const temporaryPath = path.join(
+    path.dirname(outputPath),
+    `.${path.basename(outputPath)}.${process.pid}.${randomUUID()}.tmp`,
+  );
+  let temporaryCreated = false;
+  try {
+    const handle = await fs.open(temporaryPath, "wx");
+    temporaryCreated = true;
+    try {
+      await handle.writeFile(input.output);
+      await handle.sync();
+    } finally {
+      await handle.close();
+    }
+    try {
+      await fs.link(temporaryPath, outputPath);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "EEXIST") {
+        throw new Error(`Refusing to overwrite existing output ${outputPath}`, {
+          cause: error,
+        });
+      }
+      throw error;
+    }
+  } finally {
+    if (temporaryCreated) {
+      await fs.unlink(temporaryPath).catch((error: NodeJS.ErrnoException) => {
+        if (error.code !== "ENOENT") throw error;
+      });
+    }
+  }
 }
 
 async function main(): Promise<void> {
@@ -1213,9 +1924,11 @@ async function main(): Promise<void> {
   if (options.outputPath === null) {
     process.stdout.write(output);
   } else {
-    const outputPath = path.resolve(options.outputPath);
-    await fs.mkdir(path.dirname(outputPath), { recursive: true });
-    await fs.writeFile(outputPath, output);
+    await writeCoworldEvaluationDatasetFile({
+      outputPath: options.outputPath,
+      output,
+      sourcePaths: loaded.episodes.flatMap((episode) => episode.sourcePaths),
+    });
   }
   console.error(conciseCoworldDatasetSummary(dataset));
 }

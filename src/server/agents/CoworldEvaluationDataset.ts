@@ -6,6 +6,7 @@ export interface CoworldEvaluationRosterSeat {
   seat: number;
   policyVersionId: string | null;
   playerName: string | null;
+  label: string | null;
   agentID: string | null;
 }
 
@@ -19,11 +20,11 @@ export interface CoworldEvaluationDecision {
   attackTargetType: "neutral" | "hostile" | "unknown" | null;
   reason: string;
   selectedActionMetadata: Record<string, string | number | boolean | null>;
-  fallback: boolean;
-  degraded: boolean;
-  parseFailure: boolean;
-  wireDroppedFollowupCount: number;
-  multiAction: boolean;
+  fallback: boolean | null;
+  degraded: boolean | null;
+  parseFailure: boolean | null;
+  wireDroppedFollowupCount: number | null;
+  multiAction: boolean | null;
   commanderTelemetry: Record<string, CoworldTelemetryPrimitive>;
   explicitTreatmentMarkers: string[];
   searchableText: string;
@@ -98,11 +99,17 @@ export interface CoworldSeatTelemetry {
   decisionCount: number | null;
   actionMix: Record<string, number>;
   attackTargetMix: Record<string, number>;
+  fallbackSampleCount: number;
   fallbackCount: number | null;
+  fallbackOrDegradedSampleCount: number;
   fallbackOrDegradedCount: number | null;
+  degradedSampleCount: number;
   degradedCount: number | null;
+  parseFailureSampleCount: number;
   parseFailureCount: number | null;
+  wireDroppedFollowupSampleCount: number;
   wireDroppedFollowupCount: number | null;
+  multiActionSampleCount: number;
   multiActionDecisionCount: number | null;
   commanderTelemetry: CoworldCommanderTelemetryAggregate;
   fallbackRate: number | null;
@@ -190,12 +197,22 @@ export interface CoworldEvaluationAggregate {
   scoreShareMean: number | null;
   rowsWithDecisionTelemetry: number;
   decisionCount: number;
-  fallbackCount: number;
-  fallbackOrDegradedCount: number;
-  degradedCount: number;
-  parseFailureCount: number;
-  wireDroppedFollowupCount: number;
-  multiActionDecisionCount: number;
+  fallbackSampleCount: number;
+  fallbackCount: number | null;
+  fallbackRate: number | null;
+  fallbackOrDegradedSampleCount: number;
+  fallbackOrDegradedCount: number | null;
+  fallbackOrDegradedRate: number | null;
+  degradedSampleCount: number;
+  degradedCount: number | null;
+  degradationRate: number | null;
+  parseFailureSampleCount: number;
+  parseFailureCount: number | null;
+  parseFailureRate: number | null;
+  wireDroppedFollowupSampleCount: number;
+  wireDroppedFollowupCount: number | null;
+  multiActionSampleCount: number;
+  multiActionDecisionCount: number | null;
   treatmentExposedRows: number;
   actionMix: Record<string, number>;
   attackTargetMix: Record<string, number>;
@@ -204,7 +221,7 @@ export interface CoworldEvaluationAggregate {
 }
 
 export interface CoworldEvaluationDataset {
-  schemaVersion: 1;
+  schemaVersion: 2;
   selector: CoworldDatasetSelector;
   treatmentMarkers: CoworldTreatmentMarker[];
   spawnDiagnosticsConfig: {
@@ -422,24 +439,48 @@ function seatTelemetry(
       increment(attackTargetMix, decision.attackTargetType);
     }
   }
-  const fallbackCount = decisions.filter(
-    (decision) => decision.fallback,
+  const fallbackSamples = decisions.filter(
+    (decision) => decision.fallback !== null,
+  );
+  const degradedSamples = decisions.filter(
+    (decision) => decision.degraded !== null,
+  );
+  const fallbackOrDegradedSignals = decisions.map((decision) =>
+    decision.fallback === true || decision.degraded === true
+      ? true
+      : decision.fallback === false && decision.degraded === false
+        ? false
+        : null,
+  );
+  const fallbackOrDegradedSamples = fallbackOrDegradedSignals.filter(
+    (value): value is boolean => value !== null,
+  );
+  const parseFailureSamples = decisions.filter(
+    (decision) => decision.parseFailure !== null,
+  );
+  const wireDroppedFollowupSamples = decisions.filter(
+    (decision) => decision.wireDroppedFollowupCount !== null,
+  );
+  const multiActionSamples = decisions.filter(
+    (decision) => decision.multiAction !== null,
+  );
+  const fallbackCount = fallbackSamples.filter(
+    (decision) => decision.fallback === true,
   ).length;
-  const degradedCount = decisions.filter(
-    (decision) => decision.degraded,
+  const degradedCount = degradedSamples.filter(
+    (decision) => decision.degraded === true,
   ).length;
-  const fallbackOrDegradedCount = decisions.filter(
-    (decision) => decision.fallback || decision.degraded,
+  const fallbackOrDegradedCount =
+    fallbackOrDegradedSamples.filter(Boolean).length;
+  const parseFailureCount = parseFailureSamples.filter(
+    (decision) => decision.parseFailure === true,
   ).length;
-  const parseFailureCount = decisions.filter(
-    (decision) => decision.parseFailure,
-  ).length;
-  const wireDroppedFollowupCount = decisions.reduce(
-    (sum, decision) => sum + decision.wireDroppedFollowupCount,
+  const wireDroppedFollowupCount = wireDroppedFollowupSamples.reduce(
+    (sum, decision) => sum + (decision.wireDroppedFollowupCount ?? 0),
     0,
   );
-  const multiActionDecisionCount = decisions.filter(
-    (decision) => decision.multiAction,
+  const multiActionDecisionCount = multiActionSamples.filter(
+    (decision) => decision.multiAction === true,
   ).length;
   const treatmentMarkerCounts = markerCounts(decisions, markers);
   return {
@@ -447,21 +488,30 @@ function seatTelemetry(
     decisionCount: available ? decisions.length : null,
     actionMix: sortedCounts(actionMix),
     attackTargetMix: sortedCounts(attackTargetMix),
-    fallbackCount: available ? fallbackCount : null,
-    fallbackOrDegradedCount: available ? fallbackOrDegradedCount : null,
-    degradedCount: available ? degradedCount : null,
-    parseFailureCount: available ? parseFailureCount : null,
-    wireDroppedFollowupCount: available ? wireDroppedFollowupCount : null,
-    multiActionDecisionCount: available ? multiActionDecisionCount : null,
+    fallbackSampleCount: fallbackSamples.length,
+    fallbackCount: fallbackSamples.length > 0 ? fallbackCount : null,
+    fallbackOrDegradedSampleCount: fallbackOrDegradedSamples.length,
+    fallbackOrDegradedCount:
+      fallbackOrDegradedSamples.length > 0 ? fallbackOrDegradedCount : null,
+    degradedSampleCount: degradedSamples.length,
+    degradedCount: degradedSamples.length > 0 ? degradedCount : null,
+    parseFailureSampleCount: parseFailureSamples.length,
+    parseFailureCount:
+      parseFailureSamples.length > 0 ? parseFailureCount : null,
+    wireDroppedFollowupSampleCount: wireDroppedFollowupSamples.length,
+    wireDroppedFollowupCount:
+      wireDroppedFollowupSamples.length > 0 ? wireDroppedFollowupCount : null,
+    multiActionSampleCount: multiActionSamples.length,
+    multiActionDecisionCount:
+      multiActionSamples.length > 0 ? multiActionDecisionCount : null,
     commanderTelemetry: commanderTelemetryAggregate(decisions),
-    fallbackRate: available ? rate(fallbackCount, decisions.length) : null,
-    fallbackOrDegradedRate: available
-      ? rate(fallbackOrDegradedCount, decisions.length)
-      : null,
-    degradationRate: available ? rate(degradedCount, decisions.length) : null,
-    parseFailureRate: available
-      ? rate(parseFailureCount, decisions.length)
-      : null,
+    fallbackRate: rate(fallbackCount, fallbackSamples.length),
+    fallbackOrDegradedRate: rate(
+      fallbackOrDegradedCount,
+      fallbackOrDegradedSamples.length,
+    ),
+    degradationRate: rate(degradedCount, degradedSamples.length),
+    parseFailureRate: rate(parseFailureCount, parseFailureSamples.length),
     treatmentExposed: Object.values(treatmentMarkerCounts).some(
       (count) => count > 0,
     ),
@@ -639,20 +689,34 @@ function aggregate(
   const attackTargetMix: Record<string, number> = {};
   const treatmentMarkerCounts: Record<string, number> = {};
   let decisionCount = 0;
+  let fallbackSampleCount = 0;
   let fallbackCount = 0;
+  let fallbackOrDegradedSampleCount = 0;
   let fallbackOrDegradedCount = 0;
+  let degradedSampleCount = 0;
   let degradedCount = 0;
+  let parseFailureSampleCount = 0;
   let parseFailureCount = 0;
+  let wireDroppedFollowupSampleCount = 0;
   let wireDroppedFollowupCount = 0;
+  let multiActionSampleCount = 0;
   let multiActionDecisionCount = 0;
   for (const row of rows) {
     if (row.telemetry.available) {
       decisionCount += row.telemetry.decisionCount ?? 0;
+      fallbackSampleCount += row.telemetry.fallbackSampleCount;
       fallbackCount += row.telemetry.fallbackCount ?? 0;
+      fallbackOrDegradedSampleCount +=
+        row.telemetry.fallbackOrDegradedSampleCount;
       fallbackOrDegradedCount += row.telemetry.fallbackOrDegradedCount ?? 0;
+      degradedSampleCount += row.telemetry.degradedSampleCount;
       degradedCount += row.telemetry.degradedCount ?? 0;
+      parseFailureSampleCount += row.telemetry.parseFailureSampleCount;
       parseFailureCount += row.telemetry.parseFailureCount ?? 0;
+      wireDroppedFollowupSampleCount +=
+        row.telemetry.wireDroppedFollowupSampleCount;
       wireDroppedFollowupCount += row.telemetry.wireDroppedFollowupCount ?? 0;
+      multiActionSampleCount += row.telemetry.multiActionSampleCount;
       multiActionDecisionCount += row.telemetry.multiActionDecisionCount ?? 0;
     }
     mergeCounts(actionMix, row.telemetry.actionMix);
@@ -676,12 +740,28 @@ function aggregate(
     rowsWithDecisionTelemetry: rows.filter((row) => row.telemetry.available)
       .length,
     decisionCount,
-    fallbackCount,
-    fallbackOrDegradedCount,
-    degradedCount,
-    parseFailureCount,
-    wireDroppedFollowupCount,
-    multiActionDecisionCount,
+    fallbackSampleCount,
+    fallbackCount: fallbackSampleCount > 0 ? fallbackCount : null,
+    fallbackRate: rate(fallbackCount, fallbackSampleCount),
+    fallbackOrDegradedSampleCount,
+    fallbackOrDegradedCount:
+      fallbackOrDegradedSampleCount > 0 ? fallbackOrDegradedCount : null,
+    fallbackOrDegradedRate: rate(
+      fallbackOrDegradedCount,
+      fallbackOrDegradedSampleCount,
+    ),
+    degradedSampleCount,
+    degradedCount: degradedSampleCount > 0 ? degradedCount : null,
+    degradationRate: rate(degradedCount, degradedSampleCount),
+    parseFailureSampleCount,
+    parseFailureCount: parseFailureSampleCount > 0 ? parseFailureCount : null,
+    parseFailureRate: rate(parseFailureCount, parseFailureSampleCount),
+    wireDroppedFollowupSampleCount,
+    wireDroppedFollowupCount:
+      wireDroppedFollowupSampleCount > 0 ? wireDroppedFollowupCount : null,
+    multiActionSampleCount,
+    multiActionDecisionCount:
+      multiActionSampleCount > 0 ? multiActionDecisionCount : null,
     treatmentExposedRows: rows.filter((row) => row.telemetry.treatmentExposed)
       .length,
     actionMix: sortedCounts(actionMix),
@@ -768,7 +848,7 @@ export function buildCoworldEvaluationDataset(input: {
     input.episodes.flatMap((episode) => episode.sourcePaths),
   ).size;
   return {
-    schemaVersion: 1,
+    schemaVersion: 2,
     selector: input.selector,
     treatmentMarkers,
     spawnDiagnosticsConfig: {
@@ -794,13 +874,15 @@ export function conciseCoworldDatasetSummary(
   const aggregate = dataset.aggregate;
   const percent = (value: number | null): string =>
     value === null ? "n/a" : `${(value * 100).toFixed(2)}%`;
+  const count = (value: number | null): string =>
+    value === null ? "n/a" : String(value);
   return [
     `${aggregate.rows} seat-row(s) across ${aggregate.episodes} episode(s)`,
     `top-score ${aggregate.commissionerTopScoreWins}/${aggregate.rows} (${percent(aggregate.commissionerTopScoreWinRate)})`,
     `score share ${percent(aggregate.scoreShareMean)}`,
     `telemetry ${aggregate.rowsWithDecisionTelemetry}/${aggregate.rows} row(s)`,
-    `fallback/degraded/parse ${aggregate.fallbackCount}/${aggregate.degradedCount}/${aggregate.parseFailureCount}`,
-    `wire-dropped ${aggregate.wireDroppedFollowupCount} across ${aggregate.multiActionDecisionCount} multi-action decision(s)`,
+    `fallback/degraded/parse ${count(aggregate.fallbackCount)}/${count(aggregate.degradedCount)}/${count(aggregate.parseFailureCount)}`,
+    `wire-dropped ${count(aggregate.wireDroppedFollowupCount)} across ${count(aggregate.multiActionDecisionCount)} multi-action decision(s)`,
     `treatment exposed ${aggregate.treatmentExposedRows}/${aggregate.rows}`,
   ].join("; ");
 }
