@@ -11,6 +11,7 @@ import {
   KEYSTONE_EXECUTOR_SETTINGS,
   keystoneCouncilDiplomacyAdjudicatorFromEnv,
   keystoneCouncilPoliticsGuardFromEnv,
+  keystoneCouncilSurvivalShieldFromEnv,
   keystoneExpertCouncilShadowFromEnv,
   keystoneExpertMaskFromEnv,
   keystoneModeFromEnv,
@@ -301,6 +302,7 @@ describe("Coworld keystone player", () => {
       expertCouncilShadow: false,
       councilPoliticsGuard: false,
       councilDiplomacyAdjudicator: false,
+      councilSurvivalShield: false,
     });
 
     expect(implicitOff).not.toBeInstanceOf(
@@ -486,7 +488,7 @@ describe("Coworld keystone player", () => {
     );
   });
 
-  it("keeps the two diplomacy experiments mutually exclusive and pins DTA mask 15", () => {
+  it("keeps Council treatments mutually exclusive and pins DTA mask 15", () => {
     expect(() =>
       createKeystoneBrain(modules, {
         mode: "mock",
@@ -500,9 +502,101 @@ describe("Coworld keystone player", () => {
         mode: "mock",
         profile: "aggressive",
         councilDiplomacyAdjudicator: true,
+        councilSurvivalShield: true,
+      }),
+    ).toThrow(/mutually exclusive treatments/);
+    expect(() =>
+      createKeystoneBrain(modules, {
+        mode: "mock",
+        profile: "aggressive",
+        councilDiplomacyAdjudicator: true,
         expertMask: 7,
       }),
     ).toThrow(/requires the reviewed expert mask 15/);
+  });
+
+  it("wires the isolated survival shield above an ordinary v16 build", async () => {
+    const authoritative = Object.freeze({
+      actionID: "build:Factory:10",
+      actionIDs: ["build:Factory:10"],
+      reason: "scripted stale economy decision",
+      planFollowed: true,
+    });
+    class ScriptedFrontierPolicyExecutor {
+      decide() {
+        return authoritative;
+      }
+    }
+    const instrumentedModules = {
+      ...modules,
+      plannerExecutor: {
+        ...plannerExecutorModule,
+        FrontierPolicyExecutor: ScriptedFrontierPolicyExecutor,
+      },
+    } as unknown as KeystoneModules;
+    const base = activePoliticsBrainInput();
+    const rival = { ...base.observation.visiblePlayers[0]!, incomingAttack: true };
+    const current: AgentBrainInput = {
+      ...base,
+      observation: {
+        ...base.observation,
+        visiblePlayers: [rival],
+        combat: {
+          ...base.observation.combat,
+          incomingAttackPlayerIDs: [rival.playerID],
+          incomingAttacks: [
+            {
+              attackID: "incoming:RIVAL",
+              targetID: rival.playerID,
+              targetName: rival.name,
+              troops: 20_000,
+              retreating: false,
+              sourceTile: null,
+              borderSize: 10,
+            },
+          ],
+        },
+      },
+      legalActions: [
+        {
+          id: "build:Factory:10",
+          kind: "build",
+          label: "Build Factory",
+          intent: null,
+          risk: { level: "low", score: 0.1 },
+          metadata: { unit: "Factory", role: "economic" },
+        },
+        {
+          id: "build:Defense Post:11",
+          kind: "build",
+          label: "Build Defense Post",
+          intent: null,
+          risk: { level: "low", score: 0.1 },
+          metadata: {
+            unit: "Defense Post",
+            role: "defensive",
+            nearbyIncomingAttack: true,
+            defensiveValue: 0.9,
+            hostileBorderDistance: 4,
+          },
+        },
+      ],
+    };
+    const brain = createKeystoneBrain(instrumentedModules, {
+      mode: "mock",
+      profile: "aggressive",
+      councilSurvivalShield: true,
+    });
+
+    const selected = await brain.decide(current);
+
+    expect(selected).toMatchObject({
+      actionID: "build:Defense Post:11",
+      metadata: {
+        executorSource: "keystone-survival-shield",
+        actionSelectionSource: "keystone-survival-shield:survival",
+      },
+    });
   });
 
   it.each([false, true])(
@@ -1176,6 +1270,35 @@ describe("Coworld keystone player", () => {
     expect(() =>
       keystoneCouncilDiplomacyAdjudicatorFromEnv({
         PROXYWAR_KEYSTONE_COUNCIL_DIPLOMACY_ADJUDICATOR: "yes",
+      }),
+    ).toThrow(/expected 0\|1\|false\|true/);
+  });
+
+  it("parses the survival-shield flag strictly and defaults it off", () => {
+    expect(keystoneCouncilSurvivalShieldFromEnv({})).toBe(false);
+    expect(
+      keystoneCouncilSurvivalShieldFromEnv({
+        PROXYWAR_KEYSTONE_COUNCIL_SURVIVAL_SHIELD: "0",
+      }),
+    ).toBe(false);
+    expect(
+      keystoneCouncilSurvivalShieldFromEnv({
+        PROXYWAR_KEYSTONE_COUNCIL_SURVIVAL_SHIELD: " FALSE ",
+      }),
+    ).toBe(false);
+    expect(
+      keystoneCouncilSurvivalShieldFromEnv({
+        PROXYWAR_KEYSTONE_COUNCIL_SURVIVAL_SHIELD: "1",
+      }),
+    ).toBe(true);
+    expect(
+      keystoneCouncilSurvivalShieldFromEnv({
+        PROXYWAR_KEYSTONE_COUNCIL_SURVIVAL_SHIELD: " true ",
+      }),
+    ).toBe(true);
+    expect(() =>
+      keystoneCouncilSurvivalShieldFromEnv({
+        PROXYWAR_KEYSTONE_COUNCIL_SURVIVAL_SHIELD: "yes",
       }),
     ).toThrow(/expected 0\|1\|false\|true/);
   });

@@ -1,7 +1,11 @@
 # Keystone modular Council reset — 2026-07-14
 
-Status: experimental, default off, not uploaded. Keystone v16 remains the live
-champion until a challenger clears the paired evaluation gates below.
+Status: experimental and default off. The exact candidate image has been
+certified and uploaded as two private evaluation-only policy versions, but has
+not been submitted to the league. The corrected image is also available as the
+evaluation-only Coworld 0.1.8 package; the live league remains bound to 0.1.7.
+Keystone v16 remains the live champion until a challenger clears the paired
+evaluation gates below.
 
 ## Evidence that caused the reset
 
@@ -27,6 +31,11 @@ champion until a challenger clears the paired evaluation gates below.
 - `[live hosted truth]` The hosted Coworld game image predates the reviewed
   offered-action retry. Policy-only upload cannot fix the stale-offer race; a
   new game package and league binding are required after certification.
+- `[live hosted truth, 2026-07-14T20:27Z refresh]` Keystone v16 won 1/12,
+  4/24, and 10/48 of its newest valid completed Competition episodes. Its mean
+  raw score shares over those windows were 0.041917, 0.124909, and 0.189540.
+  The live league is running four eight-player episodes per round despite older
+  nominal metadata, so four-player-only evaluation is not representative.
 
 ## Runtime architecture
 
@@ -85,23 +94,98 @@ The paired arm is named `v16-diplomacy-adjudicator` and is controlled only by
 `PROXYWAR_KEYSTONE_COUNCIL_DIPLOMACY_ADJUDICATOR=1`. It is mutually exclusive
 with the old broad politics guard and the separate single-action treatment.
 
+## Current candidate and evaluation state
+
+- `[repository truth]` The reviewed implementation is commit `bfc5cd427`; commit
+  `238fe3877` pins the Coworld manifest to immutable image
+  `sha256:2c09c7a2bfec06401b98040ae2c7404cb15c410c2f3199293b309b04c58fb81c`
+  (`proxywar-coworld-local:dta-bfc5cd427`).
+- `[local artifact truth]` Ten focused suites pass 218/218 tests. Root and
+  adapter typechecks pass, lint reports zero errors, and Coworld 0.1.30
+  certification passes all ten stages in `coworld-adapter/tmp/coworld-cert-o821omx4`.
+- `[hosted truth]` Private policy `proxywar-keystone-dta-eval:v1`
+  (`b2a4f83f-3aab-444d-834d-9b54d9829be9`) is the control and `:v2`
+  (`249f82f3-fdf0-4f1a-89d8-05aefb90ea5c`) is the challenger. They use the
+  same image and v16 configuration; only the adjudicator flag differs. Neither
+  version is a league submission.
+- `[hosted truth]` Coworld `proxywar:0.1.8`
+  (`cow_15c39dab-eac1-4284-bf3e-bd723d4c2755`, manifest
+  `sha256:1c8a8d3420eb78c736930dcfe5d12a6386b20a0c2be5e7e0369ce3b01395e71c`)
+  passed its five hosted smoke episodes and is available for corrected-contract
+  evaluation. It intentionally pins the reviewed DTA image above; it does not
+  contain the later survival-shield experiment and is not the live league
+  binding.
+- `[local artifact truth]` The first corrected-runner structural pair completed
+  with the same slot-zero win in both arms, 302/302 accepted decisions, and zero
+  fallback or degradation. Candidate boot isolation is confirmed. The aggregate
+  decision artifact contains all four seats despite a misleading hard-coded
+  `opportunistic` profile label, but neither arm selected an alliance request or
+  break and the challenger emitted no adjudicator marker. The pair therefore
+  had zero treatment activation and cannot establish efficacy.
+- `[local artifact truth]` The obsolete shadow stratum stopped after seven
+  complete pairs. Its outcomes were byte-identical and Council telemetry was
+  healthy, but it lacked the corrected retry telemetry, Europe coverage, fresh
+  seeds, and the required zero-fallback result. It is preserved as diagnostic
+  evidence and is closed rather than mixed into the candidate stratum.
+- `[hosted truth]` A four-player hosted boot smoke on Coworld 0.1.7 confirmed
+  the challenger model, v16 tunables, and adjudicator flag, but Auri was
+  eliminated by turn 2,200 and qd1n won. Reconstructed spectator decisions show
+  Auri itself had zero fallback, zero political selections, and zero adjudicator
+  activation; the result's 59 aggregate fallbacks belonged primarily to qd1n.
+  Two opponents attacked Auri from turn 1,600 onward while Auri continued
+  neutral expansion and economy builds. This is not a DTA result; it is direct
+  evidence for a separately gated always-on survival preemption treatment.
+
+## Second isolated treatment: survival shield
+
+The hosted smoke exposed a failure outside diplomacy. The threat model switched
+to `build_defense/high` at turn 1,700 and exact Defense Post actions remained
+offered, but the ordinary scheduler kept neutral expansion/economy authority as
+two opponents removed Auri. The default-off `v16-survival-shield` treatment puts
+the already-reviewed survival proposer above that scheduler:
+
+- require detailed, non-retreating pressure from a live non-friendly attacker;
+  ignore a single un-escalated probe below 10% of own troops;
+- under verified moderate pressure, preempt only a stale neutral expansion,
+  economy, hold, or social decision with an exact nearby Defense Post;
+- apply a three-decision cooldown after an accepted Defense Post and delegate
+  during that cooldown unless pressure is severe;
+- admit retreats or bounded counters only at severe pressure (35% incoming,
+  or 25% recent territory loss), while
+  preserving any authoritative hostile attack or boat campaign;
+- exclude SAM and generic border-only placements from this land-pressure arm;
+- keep friendly/team safety, unique-target, readiness, commitment, placement,
+  and risk checks in the shared world model and survival proposer;
+- emit `keystone-survival-shield:v1` only when survival is confirmed,
+  preempted, or the treatment itself fails;
+- fail closed to the unchanged v16 decision on malformed treatment state.
+
+This arm is mutually exclusive with DTA, the broad politics guard, and the
+single-action experiment so its effect remains attributable. It requires a new
+immutable image and a separate corrected-contract evaluation before upload as a
+policy or Coworld package.
+
 ## Promotion gates
 
 1. Focused module, player-wire, reset/retry, matrix-plan, and dataset tests pass;
    root and adapter typechecks pass; lint has no errors.
-2. The frozen v16/shadow diagnostic matrix completes without changing the v16
-   action outcome and exposes enough module decisions to audit the world model.
-3. Run paired `v16` versus `v16-diplomacy-adjudicator` matches on the current
-   opponent class, every supported map and candidate seat, with identical seeds
-   and roster order.
-4. Separate the old hosted contract from the corrected game-runner contract;
-   no result may mix the two strata.
-5. Require zero unexplained timeouts, fallbacks, unknown actions, parse failures,
-   and missing jobs. Require actual treatment markers in the candidate rows.
+2. Treat the frozen v16/shadow diagnostic matrix as audited but
+   promotion-ineligible; do not finish or mix its old-runner jobs with corrected
+   results.
+3. Require a corrected-runner structural pair with exact image identity, arm
+   isolation, valid result/replay hashes, and no fallback or degradation. This
+   gate is complete, but does not substitute for treatment-exposure evidence.
+4. Run matched hosted `v16` versus each isolated challenger against the current
+   eight-player champion roster on Pangaea, Asia, and World, with
+   candidate seat rotation and the same roster order per matched block.
+5. Separate old hosted, corrected local, and hosted candidate strata; no result
+   may mix contracts. Require zero unexplained timeouts, fallbacks, unknown
+   actions, parse failures, and missing jobs, plus auditable treatment markers
+   in candidate artifacts.
 6. Inspect every discordant pair and require improvement in both episode win
-   rate and score share over a meaningful sample before upload.
-7. Upload and submit only a gate-clearing immutable image/package. Live v16 is
-   unchanged until then.
+   rate and score share over a meaningful sample before league submission.
+7. Upload the corrected Coworld package and submit/rebind only a gate-clearing
+   immutable challenger. Live v16 remains unchanged until then.
 
 This treatment is deliberately narrower than making the full Council
 authoritative. Expansion, economy, and broader conquest treatments will be

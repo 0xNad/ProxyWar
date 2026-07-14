@@ -10,6 +10,14 @@ import type {
 export type KeystoneSpawnProposal = KeystoneDirectiveProposal<"spawn">;
 export type KeystoneSurvivalProposal = KeystoneDirectiveProposal<"survival">;
 
+export interface KeystoneSurvivalProposalOptions {
+  readonly allowRetreats?: boolean;
+  readonly allowDefensiveBuilds?: boolean;
+  readonly allowCounters?: boolean;
+  readonly defensePostOnly?: boolean;
+  readonly requireNearbyIncomingAttackForDefensiveBuild?: boolean;
+}
+
 interface SurvivalCandidate {
   readonly action: KeystoneActionFacts;
   readonly proposal: KeystoneSurvivalProposal;
@@ -72,6 +80,7 @@ export function proposeKeystoneSpawn(
  */
 export function proposeKeystoneSurvival(
   world: KeystoneWorldModel,
+  options: KeystoneSurvivalProposalOptions = {},
 ): KeystoneSurvivalProposal | null {
   if (
     world.phase !== "active" ||
@@ -97,27 +106,33 @@ export function proposeKeystoneSurvival(
       continue;
     }
 
-    const retreat = retreatCandidate(action);
-    if (retreat !== null) {
-      candidates.push(retreat);
-      continue;
+    if (options.allowRetreats !== false) {
+      const retreat = retreatCandidate(action);
+      if (retreat !== null) {
+        candidates.push(retreat);
+        continue;
+      }
     }
 
-    const defensiveBuild = defensiveBuildCandidate(action);
-    if (defensiveBuild !== null) {
-      candidates.push(defensiveBuild);
-      continue;
+    if (options.allowDefensiveBuilds !== false) {
+      const defensiveBuild = defensiveBuildCandidate(action, options);
+      if (defensiveBuild !== null) {
+        candidates.push(defensiveBuild);
+        continue;
+      }
     }
 
-    const counter = counterCandidate({
-      action,
-      ownReadinessBP: world.own.troopRatioBP,
-      playerByID,
-      ambiguousPlayerIDs,
-      incomingAggressorIDs,
-    });
-    if (counter !== null) {
-      candidates.push(counter);
+    if (options.allowCounters !== false) {
+      const counter = counterCandidate({
+        action,
+        ownReadinessBP: world.own.troopRatioBP,
+        playerByID,
+        ambiguousPlayerIDs,
+        incomingAggressorIDs,
+      });
+      if (counter !== null) {
+        candidates.push(counter);
+      }
     }
   }
 
@@ -153,12 +168,17 @@ function retreatCandidate(
 
 function defensiveBuildCandidate(
   action: KeystoneActionFacts,
+  options: KeystoneSurvivalProposalOptions,
 ): SurvivalCandidate | null {
   if (
     action.kind !== "build" ||
     action.buildRole !== "defensive" ||
     (action.unitType !== "defense_post" &&
       action.unitType !== "sam_launcher") ||
+    (options.defensePostOnly === true &&
+      action.unitType !== "defense_post") ||
+    (options.requireNearbyIncomingAttackForDefensiveBuild === true &&
+      action.nearbyIncomingAttack !== true) ||
     action.targetPlayerID !== null ||
     !hasCanonicalDefensivePlacementEvidence(action)
   ) {

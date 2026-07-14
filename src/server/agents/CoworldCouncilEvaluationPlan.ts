@@ -443,7 +443,8 @@ function councilArm(
     kind !== "v16-shadow" &&
     kind !== "a1-shadow" &&
     kind !== "v16-politics-guard" &&
-    kind !== "v16-diplomacy-adjudicator"
+    kind !== "v16-diplomacy-adjudicator" &&
+    kind !== "v16-survival-shield"
   ) {
     throw new Error(`${context}.kind is unsupported`);
   }
@@ -455,6 +456,7 @@ function councilArm(
   const shadow = kind === "v16-shadow" || kind === "a1-shadow";
   const politicsGuard = kind === "v16-politics-guard";
   const diplomacyAdjudicator = kind === "v16-diplomacy-adjudicator";
+  const survivalShield = kind === "v16-survival-shield";
   const base = kind === "a1" || kind === "a1-shadow" ? "a1" : "v16";
   if (politicsGuard && expertMask !== 15) {
     throw new Error(`${context}.expertMask must be 15 for politics guard`);
@@ -464,7 +466,18 @@ function councilArm(
       `${context}.expertMask must be 15 for diplomacy adjudicator`,
     );
   }
-  if (!shadow && !politicsGuard && !diplomacyAdjudicator && expertMask !== 0) {
+  if (survivalShield && expertMask !== 15) {
+    throw new Error(
+      `${context}.expertMask must be 15 for survival shield`,
+    );
+  }
+  if (
+    !shadow &&
+    !politicsGuard &&
+    !diplomacyAdjudicator &&
+    !survivalShield &&
+    expertMask !== 0
+  ) {
     throw new Error(`${context}.expertMask must be 0 for non-shadow arms`);
   }
   const armID = shadow ? `${kind}-m${expertMask}` : kind;
@@ -475,7 +488,10 @@ function councilArm(
     ...(diplomacyAdjudicator
       ? { PROXYWAR_KEYSTONE_COUNCIL_DIPLOMACY_ADJUDICATOR: "1" }
       : {}),
-    ...(shadow || politicsGuard || diplomacyAdjudicator
+    ...(survivalShield
+      ? { PROXYWAR_KEYSTONE_COUNCIL_SURVIVAL_SHIELD: "1" }
+      : {}),
+    ...(shadow || politicsGuard || diplomacyAdjudicator || survivalShield
       ? { PROXYWAR_KEYSTONE_EXPERT_MASK: String(expertMask) }
       : {}),
   };
@@ -586,6 +602,8 @@ function councilArmRank(arm: CoworldCouncilEvaluationArm): number {
       return 4;
     case "v16-diplomacy-adjudicator":
       return 5;
+    case "v16-survival-shield":
+      return 6;
   }
 }
 
@@ -1289,10 +1307,12 @@ function councilAssignment(
     intentionToTreat:
       job.arm.shadow ||
       job.arm.kind === "v16-politics-guard" ||
-      job.arm.kind === "v16-diplomacy-adjudicator",
+      job.arm.kind === "v16-diplomacy-adjudicator" ||
+      job.arm.kind === "v16-survival-shield",
     actualTreatmentExposure:
       job.arm.kind === "v16-politics-guard" ||
-      job.arm.kind === "v16-diplomacy-adjudicator",
+      job.arm.kind === "v16-diplomacy-adjudicator" ||
+      job.arm.kind === "v16-survival-shield",
     expertMask: job.expertMask,
     variantID: job.variantID,
     seed: job.seed,

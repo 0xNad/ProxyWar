@@ -40,6 +40,7 @@
 //   PROXYWAR_KEYSTONE_EXPERT_COUNCIL_SHADOW  1/true observes four-expert council
 //   PROXYWAR_KEYSTONE_COUNCIL_POLITICS_GUARD  1/true arms request/all-break treatment
 //   PROXYWAR_KEYSTONE_COUNCIL_DIPLOMACY_ADJUDICATOR  1/true arms transactional diplomacy
+//   PROXYWAR_KEYSTONE_COUNCIL_SURVIVAL_SHIELD  1/true arms verified-pressure survival preemption
 //   PROXYWAR_KEYSTONE_EXPERT_MASK  Council expert bitmask 0..15 (default 15)
 //   PROXYWAR_LLM_MODEL_ID / AWS_REGION / PROXYWAR_LLM_TIMEOUT_MS  bedrock mode
 
@@ -63,6 +64,7 @@ import type {
 } from "../../src/server/agents/AgentTypes";
 import type { LlmProvider } from "../../src/server/agents/LlmProvider";
 import { KeystoneDiplomacyAdjudicatorExecutor } from "./keystone-diplomacy-adjudicator";
+import { KeystoneSurvivalShieldExecutor } from "./keystone-survival-shield";
 import {
   KEYSTONE_SHADOW_COUNCIL_METADATA_KEY,
   KEYSTONE_SHADOW_COUNCIL_METADATA_MAX_BYTES,
@@ -105,6 +107,8 @@ export interface KeystoneBrainOptions {
   councilPoliticsGuard?: boolean;
   /** Coworld-only, default-off accepted-state diplomacy transaction treatment. */
   councilDiplomacyAdjudicator?: boolean;
+  /** Coworld-only, default-off verified incoming-pressure survival treatment. */
+  councilSurvivalShield?: boolean;
   /** Council expansion/economy/conquest/politics bitmask; default 15. */
   expertMask?: number;
 }
@@ -237,6 +241,22 @@ export function keystoneCouncilDiplomacyAdjudicatorFromEnv(
   }
   throw new Error(
     `Unknown PROXYWAR_KEYSTONE_COUNCIL_DIPLOMACY_ADJUDICATOR "${raw}" (expected 0|1|false|true)`,
+  );
+}
+
+export function keystoneCouncilSurvivalShieldFromEnv(
+  env: NodeJS.ProcessEnv = process.env,
+): boolean {
+  const raw =
+    env.PROXYWAR_KEYSTONE_COUNCIL_SURVIVAL_SHIELD?.trim().toLowerCase() ?? "";
+  if (raw === "" || raw === "0" || raw === "false") {
+    return false;
+  }
+  if (raw === "1" || raw === "true") {
+    return true;
+  }
+  throw new Error(
+    `Unknown PROXYWAR_KEYSTONE_COUNCIL_SURVIVAL_SHIELD "${raw}" (expected 0|1|false|true)`,
   );
 }
 
@@ -1016,18 +1036,22 @@ export function createKeystoneBrain(
   if (
     options.singleActionExecutor === true &&
     (options.councilPoliticsGuard === true ||
-      options.councilDiplomacyAdjudicator === true)
+      options.councilDiplomacyAdjudicator === true ||
+      options.councilSurvivalShield === true)
   ) {
     throw new Error(
       "Keystone Council diplomacy treatments cannot be combined with the single-action executor treatment",
     );
   }
   if (
-    options.councilPoliticsGuard === true &&
-    options.councilDiplomacyAdjudicator === true
+    [
+      options.councilPoliticsGuard === true,
+      options.councilDiplomacyAdjudicator === true,
+      options.councilSurvivalShield === true,
+    ].filter(Boolean).length > 1
   ) {
     throw new Error(
-      "Keystone broad politics guard and diplomacy adjudicator are mutually exclusive treatments",
+      "Keystone Council politics, diplomacy, and survival are mutually exclusive treatments",
     );
   }
   if (
@@ -1064,7 +1088,12 @@ export function createKeystoneBrain(
           delegate: baseAuthoritativeExecutor,
           actionFollowsCanonicalPlan,
         })
-      : baseAuthoritativeExecutor;
+      : options.councilSurvivalShield === true
+        ? new KeystoneSurvivalShieldExecutor({
+            delegate: baseAuthoritativeExecutor,
+            actionFollowsCanonicalPlan,
+          })
+        : baseAuthoritativeExecutor;
   let shadowCouncilExecutor: KeystoneShadowCouncilExecutor | null = null;
   let executor: AgentExecutor = authoritativeExecutor;
   if (
@@ -1117,7 +1146,8 @@ export function createKeystoneBrain(
     executor,
     planEveryDecisionSteps,
     ...(shadowCouncilExecutor !== null ||
-    options.councilDiplomacyAdjudicator === true
+    options.councilDiplomacyAdjudicator === true ||
+    options.councilSurvivalShield === true
       ? {
           // PlannerExecutor normally derives this with instanceof. Preserve
           // the wrapped base executor's exact identity in shadow or DTA mode.
@@ -1163,6 +1193,7 @@ async function main(): Promise<void> {
   const councilPoliticsGuard = keystoneCouncilPoliticsGuardFromEnv();
   const councilDiplomacyAdjudicator =
     keystoneCouncilDiplomacyAdjudicatorFromEnv();
+  const councilSurvivalShield = keystoneCouncilSurvivalShieldFromEnv();
   const expertMask = keystoneExpertMaskFromEnv();
   const profile = (process.env.PROXYWAR_KEYSTONE_PROFILE?.trim() ||
     "aggressive") as AgentStrategyProfile;
@@ -1188,6 +1219,7 @@ async function main(): Promise<void> {
     expertCouncilShadow,
     councilPoliticsGuard,
     councilDiplomacyAdjudicator,
+    councilSurvivalShield,
     expertMask,
   });
 
@@ -1224,7 +1256,7 @@ async function main(): Promise<void> {
 
   socket.on("open", () => {
     console.log(
-      `keystone connected ${redactPlayerUrl(url)} (mode=${mode}, profile=${profile}, planEvery=${planEveryDecisionSteps}, blocking=${blocking}, executor=${singleActionExecutor ? "coworld-single-action" : "frontier"}, shadowCouncil=${expertCouncilShadow}, politicsGuard=${councilPoliticsGuard}, diplomacyAdjudicator=${councilDiplomacyAdjudicator}, councilExpertMask=${expertMask}, ${keystoneTunableFlagSummary()})`,
+      `keystone connected ${redactPlayerUrl(url)} (mode=${mode}, profile=${profile}, planEvery=${planEveryDecisionSteps}, blocking=${blocking}, executor=${singleActionExecutor ? "coworld-single-action" : "frontier"}, shadowCouncil=${expertCouncilShadow}, politicsGuard=${councilPoliticsGuard}, diplomacyAdjudicator=${councilDiplomacyAdjudicator}, survivalShield=${councilSurvivalShield}, councilExpertMask=${expertMask}, ${keystoneTunableFlagSummary()})`,
     );
   });
 

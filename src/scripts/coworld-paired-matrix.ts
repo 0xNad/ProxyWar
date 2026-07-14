@@ -24,12 +24,14 @@ const SHADOW_ENV = "PROXYWAR_KEYSTONE_EXPERT_COUNCIL_SHADOW";
 const POLITICS_GUARD_ENV = "PROXYWAR_KEYSTONE_COUNCIL_POLITICS_GUARD";
 const DIPLOMACY_ADJUDICATOR_ENV =
   "PROXYWAR_KEYSTONE_COUNCIL_DIPLOMACY_ADJUDICATOR";
+const SURVIVAL_SHIELD_ENV = "PROXYWAR_KEYSTONE_COUNCIL_SURVIVAL_SHIELD";
 const EXPERT_MASK_ENV = "PROXYWAR_KEYSTONE_EXPERT_MASK";
 const ARM_OWNED_ENV_KEYS = new Set([
   TREATMENT_ENV,
   SHADOW_ENV,
   POLITICS_GUARD_ENV,
   DIPLOMACY_ADJUDICATOR_ENV,
+  SURVIVAL_SHIELD_ENV,
   EXPERT_MASK_ENV,
 ]);
 const COWORLD_VERSION = "0.1.30";
@@ -70,6 +72,8 @@ export type CoworldArmSpec =
   | { kind: "v16-politics-guard" }
   /** Transactional diplomacy experiment; never implied by v16 controls. */
   | { kind: "v16-diplomacy-adjudicator" }
+  /** Verified-pressure survival experiment; never implied by v16 controls. */
+  | { kind: "v16-survival-shield" }
   | { kind: "council-authoritative" }
   | {
       kind: "expert-mask-authoritative";
@@ -85,7 +89,8 @@ export interface CoworldResolvedArm {
     | "v16-shadow"
     | "a1-shadow"
     | "v16-politics-guard"
-    | "v16-diplomacy-adjudicator";
+    | "v16-diplomacy-adjudicator"
+    | "v16-survival-shield";
   base: "v16" | "a1";
   shadow: boolean;
   expertMask: number;
@@ -474,6 +479,22 @@ function resolveArmSpecs(
         }),
       }) satisfies CoworldResolvedArm;
     }
+    if (kind === "v16-survival-shield") {
+      rejectUnknownKeys(object, ["kind"], `arms[${index}]`);
+      return Object.freeze({
+        armID: kind,
+        kind,
+        base: "v16",
+        shadow: false,
+        expertMask: 15,
+        env: Object.freeze({
+          [TREATMENT_ENV]: "0",
+          [SHADOW_ENV]: "0",
+          [SURVIVAL_SHIELD_ENV]: "1",
+          [EXPERT_MASK_ENV]: "15",
+        }),
+      }) satisfies CoworldResolvedArm;
+    }
     throw new Error(
       `arms[${index}].kind is not allowlisted: ${JSON.stringify(kind)}`,
     );
@@ -501,6 +522,8 @@ function compareArms(a: CoworldResolvedArm, b: CoworldResolvedArm): number {
         return 4;
       case "v16-diplomacy-adjudicator":
         return 5;
+      case "v16-survival-shield":
+        return 6;
     }
   };
   return (

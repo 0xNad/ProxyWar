@@ -451,6 +451,51 @@ describe("Coworld paired matrix planner", () => {
     );
   });
 
+  test("materializes a dedicated v16 survival-shield arm without contaminating control", async () => {
+    const { directory, spec } = await fixture();
+    const plan = await materializeCoworldPairedMatrix({
+      spec: {
+        ...spec,
+        candidateSeats: [0],
+        arms: [{ kind: "v16" }, { kind: "v16-survival-shield" }],
+      },
+      specDirectory: directory,
+      resolveImageID: fakeImageID,
+      validateCoworld: acceptSchema,
+    });
+
+    expect(plan.arms.map(({ armID }) => armID)).toEqual([
+      "v16",
+      "v16-survival-shield",
+    ]);
+    const control = plan.jobs.find((job) => job.arm.armID === "v16")!;
+    const shield = plan.jobs.find(
+      (job) => job.arm.armID === "v16-survival-shield",
+    )!;
+    expect(control.arm.env).not.toHaveProperty(
+      "PROXYWAR_KEYSTONE_COUNCIL_SURVIVAL_SHIELD",
+    );
+    expect(shield.arm).toEqual({
+      armID: "v16-survival-shield",
+      kind: "v16-survival-shield",
+      base: "v16",
+      shadow: false,
+      expertMask: 15,
+      env: {
+        PROXYWAR_KEYSTONE_SINGLE_ACTION: "0",
+        PROXYWAR_KEYSTONE_EXPERT_COUNCIL_SHADOW: "0",
+        PROXYWAR_KEYSTONE_COUNCIL_SURVIVAL_SHIELD: "1",
+        PROXYWAR_KEYSTONE_EXPERT_MASK: "15",
+      },
+    });
+    expect(shield.arm.env).not.toHaveProperty(
+      "PROXYWAR_KEYSTONE_COUNCIL_DIPLOMACY_ADJUDICATOR",
+    );
+    expect(shield.roster[shield.candidateSeat]!.env).toMatchObject(
+      shield.arm.env,
+    );
+  });
+
   test("resolved image identities participate in matrix and pair IDs", async () => {
     const first = await fixture();
     const second = await fixture();

@@ -245,6 +245,29 @@ describe("Coworld paired sequential executor", () => {
     });
   });
 
+  test("validates and executes the dedicated survival-shield arm identity", async () => {
+    const plan = await fixture({
+      arms: [{ kind: "v16" }, { kind: "v16-survival-shield" }],
+    });
+    const seen: string[] = [];
+
+    const summary = await execute(plan, {
+      runEpisode: successfulRunner(seen),
+    });
+
+    expect(summary).toMatchObject({ totalJobs: 2, executedJobs: 2 });
+    expect(seen).toEqual(plan.jobs.map(({ jobID }) => jobID));
+    const shield = plan.jobs.find(
+      (job) => job.arm.kind === "v16-survival-shield",
+    )!;
+    expect(shield.arm.env).toEqual({
+      PROXYWAR_KEYSTONE_SINGLE_ACTION: "0",
+      PROXYWAR_KEYSTONE_EXPERT_COUNCIL_SHADOW: "0",
+      PROXYWAR_KEYSTONE_COUNCIL_SURVIVAL_SHIELD: "1",
+      PROXYWAR_KEYSTONE_EXPERT_MASK: "15",
+    });
+  });
+
   test("keeps completed jobs resumable after a later runner interruption", async () => {
     const plan = await fixture();
     let calls = 0;

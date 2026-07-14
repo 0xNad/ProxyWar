@@ -8,7 +8,8 @@ export type CoworldCouncilEvaluationArmKind =
   | "v16-shadow"
   | "a1-shadow"
   | "v16-politics-guard"
-  | "v16-diplomacy-adjudicator";
+  | "v16-diplomacy-adjudicator"
+  | "v16-survival-shield";
 
 export interface CoworldCouncilEvaluationArm {
   armID: string;

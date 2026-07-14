@@ -740,7 +740,8 @@ function validateResolvedArm(arm: CoworldResolvedArm): void {
     arm.kind !== "v16-shadow" &&
     arm.kind !== "a1-shadow" &&
     arm.kind !== "v16-politics-guard" &&
-    arm.kind !== "v16-diplomacy-adjudicator"
+    arm.kind !== "v16-diplomacy-adjudicator" &&
+    arm.kind !== "v16-survival-shield"
   ) {
     throw new Error(`Unsupported resolved arm ${String(arm.kind)}`);
   }
@@ -760,6 +761,7 @@ function expectedArm(
   const shadow = kind === "v16-shadow" || kind === "a1-shadow";
   const politicsGuard = kind === "v16-politics-guard";
   const diplomacyAdjudicator = kind === "v16-diplomacy-adjudicator";
+  const survivalShield = kind === "v16-survival-shield";
   const base = kind === "a1" || kind === "a1-shadow" ? "a1" : "v16";
   if (!Number.isInteger(expertMask) || expertMask < 0 || expertMask > 15) {
     throw new Error("Expert mask must be an integer in 0..15");
@@ -772,7 +774,16 @@ function expectedArm(
       "Diplomacy-adjudicator arm must use the reviewed expert mask 15",
     );
   }
-  if (!shadow && !politicsGuard && !diplomacyAdjudicator && expertMask !== 0) {
+  if (survivalShield && expertMask !== 15) {
+    throw new Error("Survival-shield arm must use the reviewed expert mask 15");
+  }
+  if (
+    !shadow &&
+    !politicsGuard &&
+    !diplomacyAdjudicator &&
+    !survivalShield &&
+    expertMask !== 0
+  ) {
     throw new Error("Non-shadow arms must have expertMask 0");
   }
   return {
@@ -790,7 +801,10 @@ function expectedArm(
       ...(diplomacyAdjudicator
         ? { PROXYWAR_KEYSTONE_COUNCIL_DIPLOMACY_ADJUDICATOR: "1" }
         : {}),
-      ...(shadow || politicsGuard || diplomacyAdjudicator
+      ...(survivalShield
+        ? { PROXYWAR_KEYSTONE_COUNCIL_SURVIVAL_SHIELD: "1" }
+        : {}),
+      ...(shadow || politicsGuard || diplomacyAdjudicator || survivalShield
         ? { PROXYWAR_KEYSTONE_EXPERT_MASK: String(expertMask) }
         : {}),
     },
@@ -1374,6 +1388,8 @@ function compareResolvedArms(
         return 4;
       case "v16-diplomacy-adjudicator":
         return 5;
+      case "v16-survival-shield":
+        return 6;
     }
   };
   return (
