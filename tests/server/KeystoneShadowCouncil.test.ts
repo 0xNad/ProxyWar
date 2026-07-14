@@ -18,7 +18,7 @@ import {
   type KeystoneShadowCouncilTelemetry,
   type KeystoneShadowExperts,
 } from "../../coworld-adapter/src/keystone-shadow-council";
-import { PlayerType } from "../../src/core/game/Game";
+import { PlayerType, Relation } from "../../src/core/game/Game";
 import { AgentObservationBuilder } from "../../src/server/agents/AgentObservationBuilder";
 import type {
   AgentExecutionDecision,
@@ -28,6 +28,7 @@ import type {
 import type {
   AgentBrainInput,
   AgentGamePhase,
+  AgentVisiblePlayer,
   LegalAction,
   LegalActionKind,
 } from "../../src/server/agents/AgentTypes";
@@ -93,6 +94,7 @@ function input(
     gameID?: string;
     turn?: number;
     phase?: AgentGamePhase;
+    players?: readonly AgentVisiblePlayer[];
   } = {},
 ): AgentBrainInput {
   const observation = new AgentObservationBuilder().build({
@@ -107,6 +109,7 @@ function input(
   return {
     observation: {
       ...observation,
+      visiblePlayers: [...(options.players ?? observation.visiblePlayers)],
       combat: {
         ...observation.combat,
         canExpandIntoNeutral: actions.some(
@@ -115,6 +118,81 @@ function input(
       },
     },
     legalActions: actions,
+  };
+}
+
+function visiblePlayer(playerID: string): AgentVisiblePlayer {
+  return {
+    playerID,
+    clientID: null,
+    smallID: playerID.charCodeAt(0),
+    name: playerID,
+    type: PlayerType.Human,
+    isAlive: true,
+    isDisconnected: false,
+    hasSpawned: true,
+    troops: 40_000,
+    maxTroops: 80_000,
+    troopRatio: 0.5,
+    gold: "100000",
+    tilesOwned: 50,
+    tileShare: 0.2,
+    sharesBorder: true,
+    isAllied: false,
+    isFriendly: false,
+    relation: Relation.Hostile,
+    canAttack: true,
+    canRequestAlliance: true,
+    canDonateGold: true,
+    canDonateTroops: true,
+    canEmbargo: true,
+    hasEmbargoAgainst: false,
+    outgoingAttack: false,
+    incomingAttack: false,
+    hasOutgoingAllianceRequest: false,
+    hasIncomingAllianceRequest: false,
+    relativeTroopRatio: 1.25,
+  };
+}
+
+function ownedInput(
+  actions: LegalAction[] = domainActions(),
+  options: {
+    gameID?: string;
+    turn?: number;
+    phase?: AgentGamePhase;
+    players?: readonly AgentVisiblePlayer[];
+  } = {},
+): AgentBrainInput {
+  const current = input(actions, options);
+  return {
+    observation: {
+      ...current.observation,
+      ownState: {
+        playerID: "ME",
+        clientID: null,
+        smallID: 1,
+        name: "Keystone",
+        type: PlayerType.Nation,
+        isAlive: true,
+        isDisconnected: false,
+        isTraitor: false,
+        hasSpawned: true,
+        troops: 75_000,
+        maxTroops: 100_000,
+        troopRatio: 0.75,
+        gold: "250000",
+        tilesOwned: 80,
+        tileShare: 0.3,
+        borderTiles: 12,
+        outgoingAttacks: 0,
+        incomingAttacks: 0,
+        outgoingAllianceRequests: 0,
+        incomingAllianceRequests: 0,
+        team: null,
+      },
+    },
+    legalActions: current.legalActions,
   };
 }
 
@@ -300,6 +378,139 @@ describe("Keystone shadow expert council", () => {
     expect(shadow.latestTelemetry()!.exposure.proposalMask & 32).toBe(32);
   });
 
+  it.each([
+    {
+      name: "attack",
+      currentPlan: {
+        ...plan,
+        commitment: { targetPlayerId: "RIVAL", minAttackRatio: 0.25 },
+      } satisfies StrategicPlan,
+      exactAction: action("attack:RIVAL:30", "attack", {
+        targetID: "RIVAL",
+        troopPercent: 30,
+      }),
+      exactActionID: "attack:RIVAL:30",
+      players: [visiblePlayer("RIVAL")],
+    },
+    {
+      name: "alliance",
+      currentPlan: {
+        ...plan,
+        allianceDirective: {
+          stance: "seek_alliance" as const,
+          targetPlayerId: "ALLY",
+        },
+      } satisfies StrategicPlan,
+      exactAction: action("alliance_request:ALLY", "alliance_request", {
+        targetID: "ALLY",
+      }),
+      exactActionID: "alliance_request:ALLY",
+      players: [visiblePlayer("ALLY")],
+    },
+    {
+      name: "build",
+      currentPlan: {
+        ...plan,
+        buildDirective: { unit: "City" as const },
+      } satisfies StrategicPlan,
+      exactAction: action("build:city", "build", {
+        unit: "City",
+        role: "economic",
+      }),
+      exactActionID: "build:city",
+      players: [] as AgentVisiblePlayer[],
+    },
+  ])(
+    "binds only an offered $name id, then records unavailable and falls through when it disappears",
+    ({ currentPlan, exactAction, exactActionID, players }) => {
+      const fallbackActions = [
+        action("expand:neutral:35", "attack", {
+          targetID: null,
+          expansion: true,
+          troopPercent: 35,
+        }),
+        action("hold:wait", "hold"),
+      ];
+      const authoritative = Object.freeze({
+        actionID: "hold:wait",
+        actionIDs: ["hold:wait"],
+        reason: "v16 remains authoritative",
+        planFollowed: false,
+        executorSource: "frontier-policy",
+      });
+      const shadow = new KeystoneShadowCouncilExecutor({
+        delegate: delegate(authoritative),
+        actionFollowsCanonicalPlan: () => false,
+        experts: experts({
+          expansion: () =>
+            proposal("expansion", "expand:neutral:35", {
+              commitmentKey: "expansion:neutral-land",
+              horizonDecisions: 2,
+            }),
+        }),
+        logLine: () => undefined,
+      });
+
+      expect(
+        shadow.decide(
+          ownedInput([...fallbackActions, exactAction], {
+            turn: 2_000,
+            players,
+          }),
+          currentPlan,
+        ),
+      ).toBe(authoritative);
+      expect(shadow.latestTelemetry()).toMatchObject({
+        directive: { status: "proposed" },
+        winner: {
+          tier: "binding_directive",
+          source: "binding_directive",
+          actionID: exactActionID,
+        },
+        operational: {
+          record: {
+            reason: "higher_tier_selected",
+            after: { key: null, remainingDecisions: 0 },
+          },
+        },
+      });
+      expect(shadow.latestTelemetry()!.exposure.proposalMask & 64).toBe(64);
+
+      const absentInput = ownedInput(fallbackActions, {
+        turn: 2_001,
+        players,
+      });
+      expect(shadow.decide(absentInput, currentPlan)).toBe(authoritative);
+      const absent = shadow.latestTelemetry()!;
+      expect(absent).toMatchObject({
+        directive: { status: "unavailable" },
+        winner: {
+          tier: "expert_auction",
+          source: "expansion",
+          actionID: "expand:neutral:35",
+        },
+        operational: {
+          preparation: {
+            reason: "commander_binding",
+            after: { key: null, remainingDecisions: 0 },
+          },
+          record: {
+            reason: "commander_binding",
+            after: { key: null, remainingDecisions: 0 },
+          },
+        },
+      });
+      const offeredIDs = new Set(absentInput.legalActions.map(({ id }) => id));
+      expect(
+        absent.proposals.every(({ actionID }) => offeredIDs.has(actionID)),
+      ).toBe(true);
+      expect(
+        absent.proposals.some(({ actionID }) => actionID === exactActionID),
+      ).toBe(false);
+      expect(absent.exposure.proposalMask & 64).toBe(0);
+    },
+  );
+
   it("keeps no-proposal hold fallback diagnostic-only", () => {
     const actions = [
       action("quick-chat:authoritative", "quick_chat"),
@@ -365,13 +576,25 @@ describe("Keystone shadow expert council", () => {
       logLine: () => undefined,
     });
 
-    const selected = shadow.decide(input(), plan);
+    const selected = shadow.decide(input(), {
+      ...plan,
+      buildDirective: { unit: "Port" },
+    });
 
     expect(selected).toBe(authoritative);
     expect(authority.decide).toHaveBeenCalledOnce();
     expect(calls).toEqual(["expansion", "economy", "conquest", "politics"]);
     expect(worlds).toHaveLength(4);
     expect(worlds.every((world) => world === worlds[0])).toBe(true);
+    const sharedWorld = worlds[0] as Parameters<
+      KeystoneShadowExperts["expansion"]
+    >[0];
+    expect(sharedWorld.commander).toEqual({
+      planID: "shadow-plan",
+      binding: { kind: "build", domain: "economy", unit: "port" },
+    });
+    expect(Object.isFrozen(sharedWorld.commander)).toBe(true);
+    expect(Object.isFrozen(sharedWorld.commander.binding)).toBe(true);
     expect(shadow.latestTelemetry()).toMatchObject({
       health: "healthy",
       exposure: { proposalMask: 15, errorMask: 0, proposalCount: 4 },
@@ -678,7 +901,7 @@ describe("Keystone shadow expert council", () => {
     ]);
   });
 
-  it("reports runner-up and margin only after plan alignment and action dedupe", () => {
+  it("reports runner-up and raw margin after soft plan bonus and action dedupe", () => {
     const actions = domainActions();
     const unaligned = proposal("expansion", "expand:neutral:35", {
       expectedValueBP: 9_000,
@@ -697,9 +920,16 @@ describe("Keystone shadow expert council", () => {
       filteredWorld,
       tiers([unaligned, aligned, duplicate]),
     );
-    expect(filtered.selection?.actionID).toBe("build:city");
-    expect(filtered.runnerUp).toBeNull();
-    expect(filtered.bidMarginBP).toBeNull();
+    expect(filtered.selection?.actionID).toBe("expand:neutral:35");
+    expect(filtered.runnerUp?.actionID).toBe("build:city");
+    expect(filtered.bidMarginBP).toBe(1_000);
+    expect(filtered.auction).toMatchObject({
+      status: "inactive",
+      planAlignmentBonusBP: 500,
+      selectedRawBidBP: 7_625,
+      selectedPlanBonusBP: 0,
+      selectedAuctionScoreBP: 7_625,
+    });
     expect(filtered.rejections).toContainEqual(
       expect.objectContaining({ reason: "duplicate_action_proposal" }),
     );
@@ -737,6 +967,152 @@ describe("Keystone shadow expert council", () => {
     expect(abstained.disposition).toBe("abstain");
     expect(abstained.runnerUp).toBeNull();
     expect(abstained.bidMarginBP).toBeNull();
+  });
+
+  it("separates raw bid, plan bonus, and auction score in shadow telemetry", () => {
+    const authoritative = Object.freeze({
+      actionID: "hold:wait",
+      reason: "v16 authority",
+      planFollowed: false,
+    });
+    const shadow = new KeystoneShadowCouncilExecutor({
+      delegate: delegate(authoritative),
+      actionFollowsCanonicalPlan: ({ action: candidate }) =>
+        candidate.id === "build:city",
+      experts: experts({
+        expansion: () =>
+          proposal("expansion", "expand:neutral:35", {
+            expectedValueBP: 8_200,
+          }),
+        economy: () => proposal("economy", "build:city"),
+      }),
+      logLine: () => undefined,
+    });
+
+    expect(shadow.decide(input(), plan)).toBe(authoritative);
+    expect(shadow.latestTelemetry()).toMatchObject({
+      winner: { actionID: "build:city" },
+      auction: {
+        status: "inactive",
+        planAlignmentBonusBP: 500,
+        selectedRawBidBP: 7_125,
+        selectedPlanBonusBP: 500,
+        selectedAuctionScoreBP: 7_625,
+      },
+    });
+    expect(shadow.latestTelemetry()?.proposals).toContainEqual(
+      expect.objectContaining({
+        actionID: "build:city",
+        bidBP: 7_125,
+        planBonusBP: 500,
+        auctionScoreBP: 7_625,
+      }),
+    );
+  });
+
+  it("reports bounded objective retention without extending its expiry", () => {
+    const authoritative = Object.freeze({
+      actionID: "hold:wait",
+      reason: "v16 authority",
+      planFollowed: false,
+    });
+    const shadow = new KeystoneShadowCouncilExecutor({
+      delegate: delegate(authoritative),
+      actionFollowsCanonicalPlan: () => false,
+      experts: experts({
+        expansion: () =>
+          proposal("expansion", "expand:neutral:35", {
+            commitmentKey: "expansion:neutral-land",
+            horizonDecisions: 2,
+          }),
+        economy: (world) =>
+          proposal("economy", "build:city", {
+            expectedValueBP: world.turnNumber === 2_000 ? 7_000 : 8_998,
+            commitmentKey: "economy:city-foundation",
+            horizonDecisions: 2,
+          }),
+      }),
+      logLine: () => undefined,
+    });
+
+    expect(
+      shadow.decide(ownedInput(domainActions(), { turn: 2_000 }), plan),
+    ).toBe(authoritative);
+    expect(shadow.latestTelemetry()).toMatchObject({
+      winner: { actionID: "expand:neutral:35" },
+      operational: {
+        record: {
+          reason: "armed",
+          after: {
+            source: "expansion",
+            startedOrdinal: 1,
+            expiresAfterOrdinal: 2,
+            remainingDecisions: 2,
+          },
+        },
+      },
+    });
+
+    expect(
+      shadow.decide(ownedInput(domainActions(), { turn: 2_001 }), plan),
+    ).toBe(authoritative);
+    expect(shadow.latestTelemetry()).toMatchObject({
+      winner: { actionID: "expand:neutral:35" },
+      runnerUp: { actionID: "build:city" },
+      bidMarginBP: -499,
+      auction: {
+        status: "retained",
+        incumbentSource: "expansion",
+        challengerAdvantageBP: 499,
+        switchMarginBP: 500,
+        selectedRawBidBP: 7_125,
+        selectedPlanBonusBP: 0,
+        selectedAuctionScoreBP: 7_125,
+      },
+      operational: {
+        preparation: {
+          reason: "none",
+          after: { source: "expansion", remainingDecisions: 1 },
+        },
+        record: {
+          reason: "retained",
+          after: {
+            source: "expansion",
+            expiresAfterOrdinal: 2,
+            remainingDecisions: 1,
+          },
+        },
+      },
+    });
+    expect(shadow.latestTelemetry()?.auction?.incumbentKey).toMatch(
+      /^hash:[0-9a-f]{16}$/,
+    );
+  });
+
+  it("rejects out-of-range soft bonus and switch-margin configuration", () => {
+    const options = {
+      delegate: delegate({
+        actionID: "hold:wait",
+        reason: "v16 authority",
+        planFollowed: false,
+      }),
+      actionFollowsCanonicalPlan: () => false,
+      logLine: () => undefined,
+    };
+    expect(
+      () =>
+        new KeystoneShadowCouncilExecutor({
+          ...options,
+          planAlignmentBonusBP: -1,
+        }),
+    ).toThrow(/plan alignment bonus/);
+    expect(
+      () =>
+        new KeystoneShadowCouncilExecutor({
+          ...options,
+          switchMarginBP: 500.5,
+        }),
+    ).toThrow(/switch margin/);
   });
 
   it("emits one bounded redacted line with exact safe IDs and no raw intents", () => {

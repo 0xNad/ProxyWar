@@ -1169,13 +1169,19 @@ describe("Keystone expert council infrastructure", () => {
       "expansion",
       "politics",
     ]);
-    expect(
-      arbitrateKeystoneAction(expertWorld, tiersFromRealProposers(expertWorld))
-        .selection,
-    ).toMatchObject({
-      actionID: "opaque-politics",
+    const expertResult = arbitrateKeystoneAction(
+      expertWorld,
+      tiersFromRealProposers(expertWorld),
+    );
+    expect(expertResult.selection).toMatchObject({
+      actionID: "opaque-city",
       tier: "expert_auction",
-      planAligned: true,
+      planAligned: false,
+    });
+    expect(expertResult.auction).toMatchObject({
+      status: "inactive",
+      planAlignmentBonusBP: 500,
+      selectedPlanBonusBP: 0,
     });
 
     const pressuredWorld = buildKeystoneWorldModel(
@@ -1206,7 +1212,7 @@ describe("Keystone expert council infrastructure", () => {
     ).toMatchObject({ actionID: "opaque-spawn", tier: "spawn" });
   });
 
-  it("prefers the plan-aligned expert pool before comparing bids", () => {
+  it("treats plan alignment as a soft auction bonus instead of a hard pool", () => {
     const world = buildKeystoneWorldModel(
       brainInput({
         actions: [
@@ -1230,8 +1236,39 @@ describe("Keystone expert council infrastructure", () => {
     );
 
     expect(result.selection).toMatchObject({
+      actionID: "attack:A",
+      planAligned: false,
+    });
+    expect(result.runnerUp).toMatchObject({
       actionID: "build:city",
       planAligned: true,
+    });
+    expect(result.auction).toMatchObject({
+      selectedRawBidBP: 8_125,
+      selectedPlanBonusBP: 0,
+      selectedAuctionScoreBP: 8_125,
+    });
+
+    const closeResult = arbitrateKeystoneAction(
+      world,
+      tiers({
+        expertAuction: [
+          expert("attack-close", "attack:A", { expectedValueBP: 8_200 }),
+          expert("city-close", "build:city", {
+            source: "economy",
+            expectedValueBP: 8_000,
+          }),
+        ],
+      }),
+    );
+    expect(closeResult.selection).toMatchObject({
+      actionID: "build:city",
+      planAligned: true,
+    });
+    expect(closeResult.auction).toMatchObject({
+      selectedRawBidBP: 7_125,
+      selectedPlanBonusBP: 500,
+      selectedAuctionScoreBP: 7_625,
     });
   });
 

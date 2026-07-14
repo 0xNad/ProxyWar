@@ -4,7 +4,10 @@ import type {
   KeystoneActionSelection,
   KeystoneArbitrationResult,
   KeystoneArbitrationTier,
+  KeystoneAuctionContext,
+  KeystoneAuctionTrace,
   KeystoneCouncilTiers,
+  KeystoneExpertDomain,
   KeystoneExpertProposal,
   KeystoneProposalRejection,
   KeystoneProposalSource,
@@ -22,7 +25,9 @@ type ProposalTier = Exclude<KeystoneArbitrationTier, "hold">;
 interface ScoredProposal {
   proposal: CouncilProposal;
   action: KeystoneActionFacts;
-  bidBP: number;
+  rawBidBP: number;
+  planBonusBP: number;
+  auctionScoreBP: number;
 }
 
 interface TierSpec {
@@ -31,11 +36,27 @@ interface TierSpec {
   proposals: readonly CouncilProposal[];
 }
 
+export const DEFAULT_KEYSTONE_PLAN_ALIGNMENT_BONUS_BP = 500;
+export const DEFAULT_KEYSTONE_SWITCH_MARGIN_BP = 500;
+
+const DEFAULT_AUCTION_CONTEXT: KeystoneAuctionContext = Object.freeze({
+  incumbent: null,
+  planAlignmentBonusBP: DEFAULT_KEYSTONE_PLAN_ALIGNMENT_BONUS_BP,
+  switchMarginBP: DEFAULT_KEYSTONE_SWITCH_MARGIN_BP,
+});
+
 export function arbitrateKeystoneAction(
   world: KeystoneWorldModel,
   tiers: KeystoneCouncilTiers,
+  auctionContext: KeystoneAuctionContext = DEFAULT_AUCTION_CONTEXT,
 ): KeystoneArbitrationResult {
+  assertBasisPoints(
+    "planAlignmentBonusBP",
+    auctionContext.planAlignmentBonusBP,
+  );
+  assertBasisPoints("switchMarginBP", auctionContext.switchMarginBP);
   const rejections: KeystoneProposalRejection[] = [];
+  let auction: KeystoneAuctionTrace | null = null;
   const actionByID = new Map(
     world.actions.map((action) => [action.id, action]),
   );
@@ -69,25 +90,28 @@ export function arbitrateKeystoneAction(
       actionByID,
       ambiguousOfferedActionIDs,
       rejections,
+      auctionContext.planAlignmentBonusBP,
     );
-    // Spawn/survival/binding inputs already encode hard policy. Plan alignment
-    // is therefore a pool preference only for the discretionary expert auction.
-    const eligible =
-      spec.tier === "expert_auction" && scored.some(planAligned)
-        ? scored.filter(planAligned)
-        : scored;
-    const unique = deduplicateActions(eligible, spec.tier, rejections);
+    const unique = deduplicateActions(scored, spec.tier, rejections);
     const ranked = unique.sort(compareScoredProposals);
-    const selected = ranked[0];
+    const ordered =
+      spec.tier === "expert_auction"
+        ? rankExpertAuction(ranked, auctionContext)
+        : { ranked, trace: null };
+    if (spec.tier === "expert_auction") {
+      auction = ordered.trace;
+    }
+    const selected = ordered.ranked[0];
     if (selected !== undefined) {
-      const runnerUp = ranked[1];
+      const runnerUp = ordered.ranked[1];
       return freezeResult({
         disposition: "proposal",
         selection: selectionFor(spec.tier, selected),
         runnerUp:
           runnerUp === undefined ? null : selectionFor(spec.tier, runnerUp),
         bidMarginBP:
-          runnerUp === undefined ? null : selected.bidBP - runnerUp.bidBP,
+          runnerUp === undefined ? null : selected.rawBidBP - runnerUp.rawBidBP,
+        auction,
         rejections,
       });
     }
@@ -110,6 +134,7 @@ export function arbitrateKeystoneAction(
       }),
       runnerUp: null,
       bidMarginBP: null,
+      auction,
       rejections,
     });
   }
@@ -119,6 +144,7 @@ export function arbitrateKeystoneAction(
     selection: null,
     runnerUp: null,
     bidMarginBP: null,
+    auction,
     rejections,
   });
 }
@@ -128,6 +154,7 @@ function scoreTier(
   actionByID: ReadonlyMap<string, KeystoneActionFacts>,
   ambiguousOfferedActionIDs: ReadonlySet<string>,
   rejections: KeystoneProposalRejection[],
+  planAlignmentBonusBP: number,
 ): ScoredProposal[] {
   const scored: ScoredProposal[] = [];
   for (const proposal of spec.proposals) {
@@ -142,19 +169,29 @@ function scoreTier(
       continue;
     }
     const action = actionByID.get(proposal.actionID)!;
-    let bidBP: number;
+    let rawBidBP: number;
     try {
-      bidBP = computeKeystoneBidBP(proposal, action.actionRiskBP);
+      rawBidBP = computeKeystoneBidBP(proposal, action.actionRiskBP);
       validateProposalText(proposal);
     } catch {
       rejections.push(rejectionFor(spec.tier, proposal, "invalid_proposal"));
       continue;
     }
-    if (spec.tier === "expert_auction" && bidBP <= 0) {
+    if (spec.tier === "expert_auction" && rawBidBP <= 0) {
       rejections.push(rejectionFor(spec.tier, proposal, "non_positive_bid"));
       continue;
     }
-    scored.push({ proposal, action, bidBP });
+    const planBonusBP =
+      spec.tier === "expert_auction" && action.planAligned
+        ? planAlignmentBonusBP
+        : 0;
+    scored.push({
+      proposal,
+      action,
+      rawBidBP,
+      planBonusBP,
+      auctionScoreBP: rawBidBP + planBonusBP,
+    });
   }
   return scored;
 }
@@ -270,7 +307,8 @@ function deduplicateActions(
 
 function compareScoredProposals(a: ScoredProposal, b: ScoredProposal): number {
   return (
-    b.bidBP - a.bidBP ||
+    b.auctionScoreBP - a.auctionScoreBP ||
+    b.rawBidBP - a.rawBidBP ||
     compareText(a.action.id, b.action.id) ||
     compareSameActionProposals(a, b)
   );
@@ -281,14 +319,11 @@ function compareSameActionProposals(
   b: ScoredProposal,
 ): number {
   return (
-    b.bidBP - a.bidBP ||
+    b.auctionScoreBP - a.auctionScoreBP ||
+    b.rawBidBP - a.rawBidBP ||
     compareText(a.proposal.source, b.proposal.source) ||
     compareText(a.proposal.proposalID, b.proposal.proposalID)
   );
-}
-
-function planAligned(candidate: ScoredProposal): boolean {
-  return candidate.action.planAligned;
 }
 
 function selectionFor(
@@ -301,9 +336,115 @@ function selectionFor(
     tier,
     source: candidate.proposal.source,
     proposalID: candidate.proposal.proposalID,
-    bidBP: candidate.bidBP,
+    bidBP: candidate.rawBidBP,
     planAligned: candidate.action.planAligned,
   });
+}
+
+function rankExpertAuction(
+  ranked: readonly ScoredProposal[],
+  context: KeystoneAuctionContext,
+): {
+  readonly ranked: readonly ScoredProposal[];
+  readonly trace: KeystoneAuctionTrace;
+} {
+  const baselineWinner = ranked[0] ?? null;
+  const incumbent =
+    context.incumbent === null
+      ? null
+      : (ranked.find((candidate) =>
+          matchesIncumbent(candidate, context.incumbent!),
+        ) ?? null);
+  let selected = baselineWinner;
+  let challenger: ScoredProposal | null = null;
+  let challengerAdvantageBP: number | null = null;
+  let status: KeystoneAuctionTrace["status"];
+
+  if (context.incumbent === null) {
+    status = "inactive";
+  } else if (incumbent === null) {
+    status = "incumbent_unavailable";
+  } else if (baselineWinner === incumbent) {
+    challenger =
+      ranked.find((candidate) => !sameCommitment(candidate, incumbent)) ?? null;
+    challengerAdvantageBP =
+      challenger === null
+        ? null
+        : challenger.auctionScoreBP - incumbent.auctionScoreBP;
+    status = "incumbent_leading";
+  } else {
+    challenger = baselineWinner;
+    challengerAdvantageBP =
+      challenger === null
+        ? null
+        : challenger.auctionScoreBP - incumbent.auctionScoreBP;
+    if (
+      challengerAdvantageBP !== null &&
+      challengerAdvantageBP >= context.switchMarginBP
+    ) {
+      status = "switched";
+    } else {
+      selected = incumbent;
+      status = "retained";
+    }
+  }
+
+  const ordered =
+    selected === null
+      ? []
+      : [selected, ...ranked.filter((candidate) => candidate !== selected)];
+  return Object.freeze({
+    ranked: ordered,
+    trace: Object.freeze({
+      status,
+      incumbentKey: context.incumbent?.key ?? null,
+      incumbentSource: context.incumbent?.source ?? null,
+      baselineWinnerProposalID: baselineWinner?.proposal.proposalID ?? null,
+      selectedProposalID: selected?.proposal.proposalID ?? null,
+      challengerProposalID: challenger?.proposal.proposalID ?? null,
+      challengerAdvantageBP,
+      switchMarginBP: context.switchMarginBP,
+      planAlignmentBonusBP: context.planAlignmentBonusBP,
+      selectedRawBidBP: selected?.rawBidBP ?? null,
+      selectedPlanBonusBP: selected?.planBonusBP ?? null,
+      selectedAuctionScoreBP: selected?.auctionScoreBP ?? null,
+    }),
+  });
+}
+
+function matchesIncumbent(
+  candidate: ScoredProposal,
+  incumbent: NonNullable<KeystoneAuctionContext["incumbent"]>,
+): boolean {
+  return (
+    isExpertSource(candidate.proposal.source) &&
+    "commitmentKey" in candidate.proposal &&
+    candidate.proposal.source === incumbent.source &&
+    candidate.proposal.commitmentKey === incumbent.key
+  );
+}
+
+function sameCommitment(a: ScoredProposal, b: ScoredProposal): boolean {
+  return (
+    isExpertSource(a.proposal.source) &&
+    isExpertSource(b.proposal.source) &&
+    "commitmentKey" in a.proposal &&
+    "commitmentKey" in b.proposal &&
+    a.proposal.source === b.proposal.source &&
+    a.proposal.commitmentKey !== undefined &&
+    a.proposal.commitmentKey === b.proposal.commitmentKey
+  );
+}
+
+function isExpertSource(
+  source: KeystoneProposalSource,
+): source is KeystoneExpertDomain {
+  return (
+    source === "expansion" ||
+    source === "economy" ||
+    source === "conquest" ||
+    source === "politics"
+  );
 }
 
 function rejectAll(
@@ -334,6 +475,7 @@ function freezeResult(result: {
   selection: KeystoneActionSelection | null;
   runnerUp: KeystoneActionSelection | null;
   bidMarginBP: number | null;
+  auction: KeystoneAuctionTrace | null;
   rejections: KeystoneProposalRejection[];
 }): KeystoneArbitrationResult {
   return Object.freeze({
@@ -341,8 +483,15 @@ function freezeResult(result: {
     selection: result.selection,
     runnerUp: result.runnerUp,
     bidMarginBP: result.bidMarginBP,
+    auction: result.auction,
     rejections: Object.freeze([...result.rejections]),
   });
+}
+
+function assertBasisPoints(label: string, value: number): void {
+  if (!Number.isInteger(value) || value < 0 || value > 10_000) {
+    throw new RangeError(`${label} must be an integer from 0 to 10000`);
+  }
 }
 
 function compareText(a: string, b: string): number {

@@ -61,6 +61,69 @@ export interface KeystoneExpertProposal extends KeystoneProposalBase {
   readonly horizonDecisions?: number;
 }
 
+export type KeystoneCommanderBinding =
+  | Readonly<{
+      readonly kind: "attack_target";
+      readonly domain: "conquest";
+      readonly targetPlayerID: string;
+      readonly minCommitmentBP: number;
+    }>
+  | Readonly<{
+      readonly kind: "alliance";
+      readonly domain: "politics";
+      readonly stance: "seek_alliance" | "hold_alliance";
+      readonly targetPlayerID: string | null;
+    }>
+  | Readonly<{
+      readonly kind: "build";
+      readonly domain: "economy";
+      readonly unit: KeystoneStructureUnitType | "any";
+    }>;
+
+/** Immutable strategic context shared by every deterministic expert. */
+export interface KeystoneCommanderContext {
+  readonly planID: string;
+  readonly binding: KeystoneCommanderBinding | null;
+}
+
+export interface KeystoneOperationalCommitment {
+  /** Stable objective identity. Never a LegalAction.id. */
+  readonly key: string;
+  readonly source: KeystoneExpertDomain;
+  readonly startedOrdinal: number;
+  /** Inclusive: the horizon includes the decision that established the objective. */
+  readonly expiresAfterOrdinal: number;
+}
+
+export interface KeystoneAuctionContext {
+  readonly incumbent: KeystoneOperationalCommitment | null;
+  readonly planAlignmentBonusBP: number;
+  readonly switchMarginBP: number;
+}
+
+export type KeystoneHysteresisStatus =
+  | "inactive"
+  | "incumbent_unavailable"
+  | "incumbent_leading"
+  | "retained"
+  | "switched";
+
+/** Honest auction trace: raw utility, plan bonus, and persistence stay separate. */
+export interface KeystoneAuctionTrace {
+  readonly status: KeystoneHysteresisStatus;
+  readonly incumbentKey: string | null;
+  readonly incumbentSource: KeystoneExpertDomain | null;
+  readonly baselineWinnerProposalID: string | null;
+  readonly selectedProposalID: string | null;
+  readonly challengerProposalID: string | null;
+  readonly challengerAdvantageBP: number | null;
+  readonly switchMarginBP: number;
+  readonly planAlignmentBonusBP: number;
+  readonly selectedRawBidBP: number | null;
+  readonly selectedPlanBonusBP: number | null;
+  readonly selectedAuctionScoreBP: number | null;
+}
+
 export type KeystoneDirectiveSource =
   | "spawn"
   | "survival"
@@ -149,6 +212,7 @@ export interface KeystoneWorldModel {
   readonly gameID: string;
   readonly phase: AgentGamePhase;
   readonly turnNumber: number;
+  readonly commander: KeystoneCommanderContext;
   readonly own: KeystoneOwnFacts | null;
   readonly players: readonly KeystonePlayerFacts[];
   readonly incomingAggressorIDs: readonly string[];
@@ -205,7 +269,9 @@ export interface KeystoneArbitrationResult {
   readonly selection: KeystoneActionSelection | null;
   /** The next eligible, distinct action in the selected tier, when one exists. */
   readonly runnerUp: KeystoneActionSelection | null;
-  /** Winner bid minus runner-up bid. Null unless both are scored proposals. */
+  /** Selected raw bid minus runner-up raw bid; may be negative when hysteresis retains. */
   readonly bidMarginBP: number | null;
+  /** Populated only after the discretionary expert auction is evaluated. */
+  readonly auction: KeystoneAuctionTrace | null;
   readonly rejections: readonly KeystoneProposalRejection[];
 }

@@ -6,6 +6,7 @@ import type {
 
 import { classifyKeystoneActions } from "./action-facts";
 import type {
+  KeystoneCommanderContext,
   KeystoneOwnFacts,
   KeystonePlayerFacts,
   KeystoneWorldModel,
@@ -14,7 +15,13 @@ import type {
 export interface BuildKeystoneWorldModelOptions {
   forbiddenActionKinds?: readonly LegalActionKind[];
   planAlignedActionIDs?: readonly string[];
+  commander?: KeystoneCommanderContext;
 }
+
+const EMPTY_COMMANDER_CONTEXT: KeystoneCommanderContext = Object.freeze({
+  planID: "",
+  binding: null,
+});
 
 /**
  * Builds the shared, immutable view consumed by every expert. It intentionally
@@ -54,6 +61,7 @@ export function buildKeystoneWorldModel(
     gameID: input.observation.gameID,
     phase: input.observation.phase,
     turnNumber: input.observation.turnNumber,
+    commander: options.commander ?? EMPTY_COMMANDER_CONTEXT,
     own,
     players,
     incomingAggressorIDs,

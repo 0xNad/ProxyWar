@@ -83,6 +83,7 @@ function world(
     gameID: "EXPANSION-EXPERT",
     phase: "active",
     turnNumber: 800,
+    commander: Object.freeze({ planID: "", binding: null }),
     own: {
       playerID: "ME",
       team: null,

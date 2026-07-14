@@ -106,6 +106,7 @@ function world(
     gameID: "ECONOMY-EXPERT",
     phase: "active",
     turnNumber: 2_000,
+    commander: Object.freeze({ planID: "", binding: null }),
     own: {
       playerID: "ME",
       team: null,
