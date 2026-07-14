@@ -1394,6 +1394,263 @@ describe("Coworld evaluation dataset", () => {
     });
   });
 
+  test("keeps repeated-agent-ID evidence unattributed", async () => {
+    const directory = await temporaryDirectory();
+    const sourcePath = path.join(directory, "episodes.json");
+    await fs.writeFile(
+      sourcePath,
+      JSON.stringify({
+        id: "ereq_repeated_agent_id",
+        scores: [0.5, 0.5],
+        participants: [
+          {
+            position: 0,
+            player_name: "Auri left",
+            policy_version_id: "candidate:v1",
+          },
+          {
+            position: 1,
+            player_name: "Auri right",
+            policy_version_id: "candidate:v1",
+          },
+        ],
+        decisions: [
+          {
+            agentID: "shared-agent",
+            turnNumber: 100,
+            selectedActionKind: "hold",
+            fallbackUsed: true,
+          },
+        ],
+        spectatorReplay: {
+          roster: [
+            { agentID: "shared-agent", username: "Auri left" },
+            { agentID: "shared-agent", username: "Auri right" },
+          ],
+          snapshots: [
+            {
+              label: "active",
+              turnNumber: 100,
+              tick: 100,
+              phase: "active",
+              players: [{ agentID: "shared-agent", tilesOwned: 999 }],
+            },
+          ],
+        },
+      }),
+    );
+
+    const loaded = await loadCoworldEvaluationEpisodes([sourcePath]);
+    expect(loaded.episodes[0].decisions[0].seat).toBeNull();
+    expect(loaded.episodes[0].snapshots[0].players[0].seat).toBeNull();
+    const dataset = buildCoworldEvaluationDataset({
+      episodes: loaded.episodes,
+      selector: {
+        seat: null,
+        policyVersionId: "candidate:v1",
+        playerName: null,
+      },
+    });
+    expect(dataset.rows.map((row) => row.telemetry.decisionCount)).toEqual([
+      null,
+      null,
+    ]);
+    expect(dataset.rows.map((row) => row.phaseSnapshots)).toEqual([[], []]);
+  });
+
+  test("does not infer a seat from a partial anonymous snapshot order", async () => {
+    const directory = await temporaryDirectory();
+    const sourcePath = path.join(directory, "episodes.json");
+    await fs.writeFile(
+      sourcePath,
+      JSON.stringify({
+        id: "ereq_partial_anonymous_snapshot",
+        scores: [0.75, 0.25],
+        participants: [
+          { position: 0, player_name: "Auri" },
+          { position: 1, player_name: "Opponent" },
+        ],
+        spectatorReplay: {
+          snapshots: [
+            {
+              label: "active",
+              turnNumber: 100,
+              phase: "active",
+              players: [{ tilesOwned: 999 }],
+            },
+          ],
+        },
+      }),
+    );
+
+    const loaded = await loadCoworldEvaluationEpisodes([sourcePath]);
+    expect(loaded.episodes[0].snapshots[0].players[0]).toMatchObject({
+      seat: null,
+      tilesOwned: 999,
+    });
+    const dataset = buildCoworldEvaluationDataset({
+      episodes: loaded.episodes,
+      selector: { seat: 0, policyVersionId: null, playerName: null },
+    });
+    expect(dataset.rows[0].phaseSnapshots).toEqual([]);
+  });
+
+  test("uses snapshot order only for a complete anonymous roster", () => {
+    const fragments = parseCoworldEvaluationDocument({
+      sourcePath: "/artifacts/complete-anonymous-snapshot.replay",
+      fallbackId: "complete-anonymous-snapshot",
+      value: {
+        id: "ereq_complete_anonymous_snapshot",
+        scores: [0.75, 0.25],
+        spectatorReplay: {
+          snapshots: [
+            {
+              turnNumber: 100,
+              players: [{ tilesOwned: 100 }, { tilesOwned: 50 }],
+            },
+          ],
+        },
+      },
+    });
+
+    expect(
+      fragments[0].snapshots[0].players.map((player) => player.seat),
+    ).toEqual([0, 1]);
+  });
+
+  test.each([
+    [
+      "decision name",
+      {
+        decisions: [
+          {
+            seat: 0,
+            username: "Opponent",
+            turnNumber: 100,
+            selectedActionKind: "hold",
+          },
+        ],
+      },
+    ],
+    [
+      "decision agent ID",
+      {
+        decisions: [
+          {
+            seat: 0,
+            username: "Auri",
+            agentID: "agent-1",
+            turnNumber: 100,
+            selectedActionKind: "hold",
+          },
+        ],
+      },
+    ],
+    [
+      "snapshot name",
+      {
+        spectatorReplay: {
+          roster: [
+            { agentID: "agent-0", username: "Auri" },
+            { agentID: "agent-1", username: "Opponent" },
+          ],
+          snapshots: [
+            {
+              turnNumber: 100,
+              players: [{ seat: 0, username: "Opponent", tilesOwned: 999 }],
+            },
+          ],
+        },
+      },
+    ],
+  ])("rejects a same-record %s contradiction", (_name, evidence) => {
+    const spectatorReplay = {
+      roster: [
+        { agentID: "agent-0", username: "Auri" },
+        { agentID: "agent-1", username: "Opponent" },
+      ],
+      ...("spectatorReplay" in evidence ? evidence.spectatorReplay : {}),
+    };
+    expect(() =>
+      parseCoworldEvaluationDocument({
+        sourcePath: "/artifacts/contradictory-identity.replay",
+        fallbackId: "contradictory-identity",
+        value: {
+          id: "ereq_contradictory_identity",
+          scores: [1, 0],
+          participants: [
+            { position: 0, player_name: "Auri" },
+            { position: 1, player_name: "Opponent" },
+          ],
+          ...evidence,
+          spectatorReplay,
+        },
+      }),
+    ).toThrow("Conflicting");
+  });
+
+  test.each([
+    [
+      "mixed slotted and ordered result players",
+      [{ name: "Opponent" }, { slot: 0, name: "Auri" }],
+      "mix slotted and ordered",
+    ],
+    [
+      "duplicate result slots",
+      [
+        { slot: 0, name: "Auri" },
+        { slot: 0, name: "Opponent" },
+      ],
+      "slots must be unique",
+    ],
+  ])("rejects %s", (_name, players, message) => {
+    expect(() =>
+      parseCoworldEvaluationDocument({
+        sourcePath: "/artifacts/invalid-result-order.replay",
+        fallbackId: "invalid-result-order",
+        value: {
+          id: "ereq_invalid_result_order",
+          results: { scores: [0.75, 0.25], players },
+        },
+      }),
+    ).toThrow(message);
+  });
+
+  test("aligns a complete explicitly slotted result roster", () => {
+    const fragments = parseCoworldEvaluationDocument({
+      sourcePath: "/artifacts/slotted-result-order.replay",
+      fallbackId: "slotted-result-order",
+      value: {
+        id: "ereq_slotted_result_order",
+        results: {
+          scores: [0.75, 0.25],
+          players: [
+            { slot: 1, name: "Opponent" },
+            { slot: 0, name: "Auri" },
+          ],
+        },
+      },
+    });
+    expect(fragments[0].roster.map((seat) => seat.playerName)).toEqual([
+      "Auri",
+      "Opponent",
+    ]);
+  });
+
+  test("rejects an outright winner slot outside the score order", () => {
+    expect(() =>
+      parseCoworldEvaluationDocument({
+        sourcePath: "/artifacts/out-of-range-winner.replay",
+        fallbackId: "out-of-range-winner",
+        value: {
+          id: "ereq_out_of_range_winner",
+          scores: [1, 0],
+          winner_slot: 9,
+        },
+      }),
+    ).toThrow("invalid winner_slot");
+  });
+
   test("merges direct and inline decisions within one fragment and rejects conflicts", () => {
     const base = {
       id: "ereq_inline_merge",

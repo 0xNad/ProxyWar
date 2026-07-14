@@ -392,13 +392,15 @@ function decisionsForSeat(
   episode: CoworldEvaluationEpisode,
   seat: number,
 ): CoworldEvaluationDecision[] {
-  const rosterSeat = episode.roster.find((entry) => entry.seat === seat);
   return episode.decisions.filter((decision) => {
     if (decision.seat !== null) {
       return decision.seat === seat;
     }
     if (decision.agentID !== null) {
-      return decision.agentID === rosterSeat?.agentID;
+      const agentMatches = episode.roster.filter(
+        (entry) => entry.agentID === decision.agentID,
+      );
+      return agentMatches.length === 1 && agentMatches[0].seat === seat;
     }
     if (decision.playerName === null) {
       return false;
@@ -603,9 +605,11 @@ function playerMatchesSeat(
   if (player.seat !== null) {
     return player.seat === seat;
   }
-  const rosterSeat = roster.find((entry) => entry.seat === seat);
   if (player.agentID !== null) {
-    return player.agentID === rosterSeat?.agentID;
+    const agentMatches = roster.filter(
+      (entry) => entry.agentID === player.agentID,
+    );
+    return agentMatches.length === 1 && agentMatches[0].seat === seat;
   }
   if (player.playerName === null) {
     return false;

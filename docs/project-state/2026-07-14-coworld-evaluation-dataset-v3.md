@@ -29,8 +29,18 @@ Schema-v3 migrations:
   unknown statuses and completed entries without valid scores fail closed.
 - Cross-artifact identity merging follows seat, then agent ID, then a player
   name only when that name identifies exactly one roster seat. Ambiguous
-  seatless repeated-name evidence remains unattributed rather than being
-  attached to an arbitrary seat.
+  seatless repeated-name or repeated-agent-ID evidence remains unattributed
+  rather than being attached to arbitrary seats. A decision or snapshot whose
+  explicit seat contradicts its roster-backed name or agent ID fails closed.
+- Anonymous snapshot rows use array position only when the snapshot contains a
+  complete roster-sized player array. Partial anonymous snapshots remain
+  unattributed.
+- Explicit `results.players.slot` values must form a complete, unique,
+  zero-based order; mixed ordered/slotted and duplicate-slot evidence fails
+  closed. A non-null `winner_slot` must be inside the score order.
+- The saved-score evaluator applies the same cardinality rule as the dataset
+  exporter: an explicit `policy_version_ids` order must have exactly one entry
+  for every score and never falls back to score-pair input order on mismatch.
 
 There is no automatic schema-v2 compatibility alias. Any consumer of persisted
 dataset JSON must check `schemaVersion` and migrate the field paths above before

@@ -663,6 +663,55 @@ function parseDecisionRows(
   return rows;
 }
 
+function orderedResultPlayers(
+  values: readonly unknown[],
+  sourcePath: string,
+): Record<string, unknown>[] {
+  const players = values.map((value, index) => {
+    const player = asRecord(value);
+    if (player === null) {
+      throw new Error(
+        `${sourcePath} results.players entry ${index + 1} is not an object`,
+      );
+    }
+    return player;
+  });
+  const slots = players.map((player, index) => {
+    if (!Object.hasOwn(player, "slot") || player.slot === null) {
+      return null;
+    }
+    const slot = asSeat(player.slot);
+    if (slot === null) {
+      throw new Error(
+        `${sourcePath} results.players entry ${index + 1} has invalid slot`,
+      );
+    }
+    return slot;
+  });
+  const slottedCount = slots.filter((slot) => slot !== null).length;
+  if (slottedCount === 0) {
+    return players;
+  }
+  if (slottedCount !== players.length) {
+    throw new Error(
+      `${sourcePath} results.players mix slotted and ordered entries`,
+    );
+  }
+  if (
+    new Set(slots).size !== players.length ||
+    slots.some((slot) => slot === null || slot >= players.length)
+  ) {
+    throw new Error(
+      `${sourcePath} results.players slots must be unique, contiguous, and zero-based`,
+    );
+  }
+  const ordered = new Array<Record<string, unknown>>(players.length);
+  for (let index = 0; index < players.length; index += 1) {
+    ordered[slots[index] as number] = players[index];
+  }
+  return ordered;
+}
+
 function rosterSeats(input: {
   entry: Record<string, unknown>;
   results: Record<string, unknown> | null;
@@ -686,9 +735,10 @@ function rosterSeats(input: {
   ) {
     throw new Error(`${input.sourcePath} has invalid results.players`);
   }
-  const resultPlayers = Array.isArray(input.results?.players)
-    ? input.results.players
-    : [];
+  const resultPlayers = orderedResultPlayers(
+    Array.isArray(input.results?.players) ? input.results.players : [],
+    input.sourcePath,
+  );
   const config = asRecord(input.entry.config);
   if (Object.hasOwn(input.entry, "config") && config === null) {
     throw new Error(`${input.sourcePath} has invalid config`);
@@ -761,21 +811,7 @@ function rosterSeats(input: {
     input.participants.length,
   );
   return Array.from({ length: seatCount }, (_, seat) => {
-    const resultPlayer = asRecord(resultPlayers[seat]);
-    if (seat < resultPlayers.length && resultPlayer === null) {
-      throw new Error(
-        `${input.sourcePath} results.players entry ${seat + 1} is not an object`,
-      );
-    }
-    const resultSlot = asSeat(resultPlayer?.slot);
-    const slottedResult =
-      resultSlot === null
-        ? resultPlayer
-        : asRecord(
-            resultPlayers.find(
-              (value) => asSeat(asRecord(value)?.slot) === seat,
-            ),
-          );
+    const slottedResult = resultPlayers[seat] ?? null;
     const configPlayer = asRecord(configPlayers[seat]);
     const spectatorPlayer = asRecord(spectatorRoster[seat]);
     const summaryPlayer = asRecord(summaryRoster[seat]);
@@ -984,7 +1020,8 @@ function parseEpisodeFragment(input: {
   if (
     winnerSlotPresent &&
     results?.winner_slot !== null &&
-    winnerSlot === null
+    (winnerSlot === null ||
+      (scores !== undefined && winnerSlot >= scores.length))
   ) {
     throw new Error(`${input.sourcePath} has an invalid winner_slot`);
   }
@@ -1921,40 +1958,166 @@ function wireDroppedFollowupCount(
   return hasBatchActionIDs ? 0 : null;
 }
 
-function matchingSeat(
+function identityString(
   record: Record<string, unknown>,
-  roster: readonly CoworldEvaluationRosterSeat[],
-): number | null {
-  const direct =
-    asSeat(record.seat) ?? asSeat(record.slot) ?? asSeat(record.policy_slot);
-  if (direct !== null) {
-    return direct;
+  keys: readonly string[],
+  context: string,
+  field: string,
+): string | null {
+  const values = keys.flatMap((key) => {
+    if (!Object.hasOwn(record, key) || record[key] === null) {
+      return [];
+    }
+    const value = asString(record[key]);
+    if (value === null) {
+      throw new Error(`Invalid ${context} ${field}`);
+    }
+    return [value];
+  });
+  const unique = [...new Set(values)];
+  if (unique.length > 1) {
+    throw new Error(`Conflicting ${context} identity`);
   }
-  const playerName = firstString(
-    record.username,
-    record.playerName,
-    record.name,
+  return unique[0] ?? null;
+}
+
+function identitySeat(
+  record: Record<string, unknown>,
+  keys: readonly string[],
+  context: string,
+): number | null {
+  const values = keys.flatMap((key) => {
+    if (!Object.hasOwn(record, key) || record[key] === null) {
+      return [];
+    }
+    const value = asSeat(record[key]);
+    if (value === null) {
+      throw new Error(`Invalid ${context} seat`);
+    }
+    return [value];
+  });
+  const unique = [...new Set(values)];
+  if (unique.length > 1) {
+    throw new Error(`Conflicting ${context} identity`);
+  }
+  return unique[0] ?? null;
+}
+
+function resolveRecordIdentity(input: {
+  record: Record<string, unknown>;
+  roster: readonly CoworldEvaluationRosterSeat[];
+  context: string;
+  seatKeys: readonly string[];
+  playerNameKeys: readonly string[];
+  agentIDKeys: readonly string[];
+  fallbackSeat?: number | null;
+}): MergeIdentity {
+  const directSeat = identitySeat(input.record, input.seatKeys, input.context);
+  const playerName = identityString(
+    input.record,
+    input.playerNameKeys,
+    input.context,
+    "player name",
   );
-  const agentID = firstString(record.agentID, record.agent_id);
-  const matches =
-    agentID !== null
-      ? roster.filter((entry) => entry.agentID === agentID)
-      : playerName !== null
-        ? roster.filter((entry) => entry.playerName === playerName)
-        : [];
-  return matches.length === 1 ? matches[0].seat : null;
+  const agentID = identityString(
+    input.record,
+    input.agentIDKeys,
+    input.context,
+    "agent ID",
+  );
+  const agentMatches =
+    agentID === null
+      ? []
+      : input.roster.filter((entry) => entry.agentID === agentID);
+  const nameMatches =
+    playerName === null
+      ? []
+      : input.roster.filter((entry) => entry.playerName === playerName);
+  const conflictsWithSeat = (seat: number): boolean => {
+    const rosterSeat = input.roster.find((entry) => entry.seat === seat);
+    if (input.roster.length > 0 && rosterSeat === undefined) {
+      return true;
+    }
+    if (
+      playerName !== null &&
+      rosterSeat?.playerName !== null &&
+      rosterSeat?.playerName !== undefined &&
+      rosterSeat.playerName !== playerName
+    ) {
+      return true;
+    }
+    if (
+      agentID !== null &&
+      rosterSeat?.agentID !== null &&
+      rosterSeat?.agentID !== undefined &&
+      rosterSeat.agentID !== agentID
+    ) {
+      return true;
+    }
+    if (
+      agentMatches.length > 0 &&
+      !agentMatches.some((entry) => entry.seat === seat)
+    ) {
+      return true;
+    }
+    return (
+      nameMatches.length > 0 &&
+      !nameMatches.some((entry) => entry.seat === seat)
+    );
+  };
+  if (directSeat !== null) {
+    if (conflictsWithSeat(directSeat)) {
+      throw new Error(`Conflicting ${input.context} identity`);
+    }
+    return { seat: directSeat, playerName, agentID };
+  }
+  const uniqueAgentSeat =
+    agentMatches.length === 1 ? agentMatches[0].seat : null;
+  const uniqueNameSeat = nameMatches.length === 1 ? nameMatches[0].seat : null;
+  if (
+    uniqueAgentSeat !== null &&
+    uniqueNameSeat !== null &&
+    uniqueAgentSeat !== uniqueNameSeat
+  ) {
+    throw new Error(`Conflicting ${input.context} identity`);
+  }
+  if (uniqueAgentSeat !== null) {
+    if (conflictsWithSeat(uniqueAgentSeat)) {
+      throw new Error(`Conflicting ${input.context} identity`);
+    }
+    return { seat: uniqueAgentSeat, playerName, agentID };
+  }
+  if (agentID !== null) {
+    if (uniqueNameSeat !== null && conflictsWithSeat(uniqueNameSeat)) {
+      throw new Error(`Conflicting ${input.context} identity`);
+    }
+    return { seat: null, playerName, agentID };
+  }
+  if (uniqueNameSeat !== null) {
+    return { seat: uniqueNameSeat, playerName, agentID };
+  }
+  return {
+    seat:
+      playerName === null && agentID === null
+        ? (input.fallbackSeat ?? null)
+        : null,
+    playerName,
+    agentID,
+  };
 }
 
 function normalizeDecision(
   record: Record<string, unknown>,
   roster: readonly CoworldEvaluationRosterSeat[],
 ): CoworldEvaluationDecision {
-  const playerName = firstString(
-    record.username,
-    record.playerName,
-    record.name,
-  );
-  const agentID = firstString(record.agentID, record.agent_id);
+  const identity = resolveRecordIdentity({
+    record,
+    roster,
+    context: "decision",
+    seatKeys: ["seat", "slot", "policy_slot"],
+    playerNameKeys: ["username", "playerName", "name"],
+    agentIDKeys: ["agentID", "agent_id"],
+  });
   const droppedFollowups = wireDroppedFollowupCount(record);
   const actionKind =
     firstString(record.selectedActionKind, record.selected_action_kind) ??
@@ -1989,9 +2152,9 @@ function normalizeDecision(
     ),
   );
   return {
-    seat: matchingSeat(record, roster),
-    playerName,
-    agentID,
+    seat: identity.seat,
+    playerName: identity.playerName,
+    agentID: identity.agentID,
     turnNumber: asCount(record.turnNumber ?? record.turn_number),
     selectedLegalActionId: firstString(
       record.selectedLegalActionId,
@@ -2023,34 +2186,26 @@ function normalizeSnapshotPlayer(input: {
   value: unknown;
   index: number;
   roster: readonly CoworldEvaluationRosterSeat[];
-}): CoworldEvaluationSnapshotPlayer | null {
+  allowIndexFallback: boolean;
+}): CoworldEvaluationSnapshotPlayer {
   const player = asRecord(input.value);
   if (player === null) {
-    return null;
+    throw new Error("Invalid snapshot player");
   }
-  const playerName = firstString(player.username, player.name);
-  const agentID = firstString(player.agentID, player.agent_id);
-  const directSeat = asSeat(player.seat ?? player.slot);
-  const matches =
-    agentID !== null
-      ? input.roster.filter((entry) => entry.agentID === agentID)
-      : playerName !== null
-        ? input.roster.filter((entry) => entry.playerName === playerName)
-        : [];
-  const seat =
-    directSeat ??
-    (matches.length === 1
-      ? matches[0].seat
-      : agentID === null &&
-          playerName === null &&
-          input.index < input.roster.length
-        ? input.index
-        : null);
+  const identity = resolveRecordIdentity({
+    record: player,
+    roster: input.roster,
+    context: "snapshot player",
+    seatKeys: ["seat", "slot"],
+    playerNameKeys: ["username", "name"],
+    agentIDKeys: ["agentID", "agent_id"],
+    fallbackSeat: input.allowIndexFallback ? input.index : null,
+  });
   const gold = player.gold;
   return {
-    seat,
-    playerName,
-    agentID,
+    seat: identity.seat,
+    playerName: identity.playerName,
+    agentID: identity.agentID,
     tilesOwned: asNumber(player.tilesOwned ?? player.tiles_owned),
     troops: asNumber(player.troops),
     gold:
@@ -2072,17 +2227,25 @@ function normalizeSnapshot(
   record: Record<string, unknown>,
   roster: readonly CoworldEvaluationRosterSeat[],
 ): CoworldEvaluationSnapshot {
+  if (Object.hasOwn(record, "players") && !Array.isArray(record.players)) {
+    throw new Error("Invalid snapshot players");
+  }
+  const players = Array.isArray(record.players) ? record.players : [];
+  const allowIndexFallback =
+    players.length > 0 && players.length === roster.length;
   return {
     label: asString(record.label) ?? "snapshot",
     turnNumber: asCount(record.turnNumber ?? record.turn_number),
     tick: asCount(record.tick),
     phase: asString(record.phase) ?? "unknown",
-    players: Array.isArray(record.players)
-      ? record.players.flatMap((value, index) => {
-          const player = normalizeSnapshotPlayer({ value, index, roster });
-          return player === null ? [] : [player];
-        })
-      : [],
+    players: players.map((value, index) =>
+      normalizeSnapshotPlayer({
+        value,
+        index,
+        roster,
+        allowIndexFallback,
+      }),
+    ),
   };
 }
 
@@ -2092,6 +2255,13 @@ function normalizeEpisode(fragment: EpisodeFragment): CoworldEvaluationEpisode {
   }
   if (!fragment.scores.every((score) => Number.isFinite(score))) {
     throw new Error(`Episode ${fragment.episodeId} has non-finite scores`);
+  }
+  if (
+    fragment.outrightWinnerSlot !== undefined &&
+    fragment.outrightWinnerSlot !== null &&
+    fragment.outrightWinnerSlot >= fragment.scores.length
+  ) {
+    throw new Error(`Episode ${fragment.episodeId} has an invalid winner_slot`);
   }
   const roster = mergeRoster(
     fragment.roster,

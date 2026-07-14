@@ -68,6 +68,30 @@ describe("Coworld saved-score evaluator CLI", () => {
     });
   });
 
+  test("rejects score pairs when explicit policy order cardinality disagrees", () => {
+    const options = parseCoworldScoreEvaluatorOptions([
+      "episodes.json",
+      "--policy-version-id",
+      "candidate",
+    ]);
+
+    expect(() =>
+      parseSavedCoworldScoreEpisodes(
+        [
+          {
+            policy_version_ids: ["candidate", "opponent"],
+            scores: [
+              { policy_version_id: "opponent", score: 0.9 },
+              { policy_version_id: "candidate", score: 0.1 },
+              { policy_version_id: "third", score: 0 },
+            ],
+          },
+        ],
+        options,
+      ),
+    ).toThrow("score/order cardinality mismatch");
+  });
+
   test("explicit CLI seat overrides embedded episode metadata", () => {
     const options = parseCoworldScoreEvaluatorOptions([
       "episodes.json",
@@ -102,5 +126,14 @@ describe("Coworld saved-score evaluator CLI", () => {
         "1",
       ]),
     ).toThrow("--seat and --policy-version-id are mutually exclusive");
+  });
+
+  test("rejects an outright winner slot outside the score order", () => {
+    expect(() =>
+      parseSavedCoworldScoreEpisodes(
+        [{ seat: 0, scores: [1, 0], winner_slot: 9 }],
+        { inputPath: "episodes.json", seat: null, policyVersionId: null },
+      ),
+    ).toThrow("invalid winner_slot");
   });
 });

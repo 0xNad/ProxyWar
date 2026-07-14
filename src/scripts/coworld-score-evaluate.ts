@@ -27,11 +27,22 @@ function asSeat(value: unknown): number | null {
     : null;
 }
 
-function asStrings(value: unknown): string[] {
-  return Array.isArray(value) &&
-    value.every((entry) => typeof entry === "string" && entry.length > 0)
-    ? value
-    : [];
+function explicitPolicyVersionOrder(
+  episode: Record<string, unknown>,
+  index: number,
+): string[] | null {
+  if (!Object.hasOwn(episode, "policy_version_ids")) {
+    return null;
+  }
+  const value = episode.policy_version_ids;
+  if (
+    !Array.isArray(value) ||
+    value.length === 0 ||
+    !value.every((entry) => typeof entry === "string" && entry.length > 0)
+  ) {
+    throw new Error(`Episode ${index} has invalid policy_version_ids`);
+  }
+  return value;
 }
 
 export function parseCoworldScoreEvaluatorOptions(
@@ -69,11 +80,14 @@ export function parseCoworldScoreEvaluatorOptions(
 
 function parseScores(
   raw: unknown,
-  episode: Record<string, unknown>,
+  policyVersionOrder: readonly string[] | null,
   index: number,
 ): number[] {
   if (!Array.isArray(raw) || raw.length === 0) {
     throw new Error(`Episode ${index} has no scores array`);
+  }
+  if (policyVersionOrder !== null && policyVersionOrder.length !== raw.length) {
+    throw new Error(`Episode ${index} has score/order cardinality mismatch`);
   }
   if (
     raw.every((score) => typeof score === "number" && Number.isFinite(score))
@@ -93,15 +107,14 @@ function parseScores(
     }
     return { policyVersionId, score };
   });
-  const seatOrder = asStrings(episode.policy_version_ids);
-  if (seatOrder.length === pairs.length) {
+  if (policyVersionOrder !== null) {
     const byPolicy = new Map<string, number[]>();
     for (const pair of pairs) {
       const scores = byPolicy.get(pair.policyVersionId) ?? [];
       scores.push(pair.score);
       byPolicy.set(pair.policyVersionId, scores);
     }
-    return seatOrder.map((policyVersionId) => {
+    return policyVersionOrder.map((policyVersionId) => {
       const scores = byPolicy.get(policyVersionId);
       const score = scores?.shift();
       if (score === undefined) {
@@ -129,7 +142,8 @@ function parseEpisode(
   const episode = asRecord(value);
   if (episode === null) throw new Error(`Episode ${index} is not an object`);
   const results = asRecord(episode.results) ?? episode;
-  const scores = parseScores(results.scores, episode, index);
+  const policyVersionOrder = explicitPolicyVersionOrder(episode, index);
+  const scores = parseScores(results.scores, policyVersionOrder, index);
   const embeddedSeat =
     asSeat(episode.seat) ??
     asSeat(episode.target_slot) ??
@@ -138,9 +152,8 @@ function parseEpisode(
     options.seat !== null
       ? [options.seat]
       : options.policyVersionId !== null
-        ? asStrings(episode.policy_version_ids).flatMap(
-            (policyVersionId, seat) =>
-              policyVersionId === options.policyVersionId ? [seat] : [],
+        ? (policyVersionOrder ?? []).flatMap((policyVersionId, seat) =>
+            policyVersionId === options.policyVersionId ? [seat] : [],
           )
         : embeddedSeat === null
           ? []
@@ -157,7 +170,7 @@ function parseEpisode(
   if (
     winnerSlotPresent &&
     results.winner_slot !== null &&
-    outrightWinnerSlot === null
+    (outrightWinnerSlot === null || outrightWinnerSlot >= scores.length)
   ) {
     throw new Error(`Episode ${index} has an invalid winner_slot`);
   }
