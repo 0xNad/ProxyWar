@@ -11,15 +11,10 @@ const TREATMENT_ENV = "PROXYWAR_KEYSTONE_SINGLE_ACTION";
 const COWORLD_VERSION = "0.1.30";
 const IMAGE_ID_PATTERN = /^sha256:[0-9a-f]{64}$/i;
 const ENV_KEY_PATTERN = /^[A-Za-z_][A-Za-z0-9_]*$/;
-const SECRET_ENV_SEGMENTS = new Set([
-  "AWS",
-  "TOKEN",
-  "SECRET",
-  "PASSWORD",
-  "CREDENTIAL",
-  "CREDENTIALS",
-  "PRIVATE",
-]);
+const SECRET_ENV_TOKEN_PATTERN =
+  /^(?:ACCESS|AUTH|AUTHORIZATION|BEARER|CREDENTIALS?|KEY|OAUTH|PASS|PASSWD|PASSWORD|PAT|PRIVATE|SECRET|SESSION|TOKEN)$/;
+const SECRET_ENV_COMPACT_PATTERN =
+  /(?:ACCESSKEY|APIKEY|AUTHORIZATION|BEARER|CLIENTSECRET|CREDENTIAL|PASSWORD|PASSWD|PRIVATEKEY|SECRET|TOKEN|PAT$)/;
 
 type JsonObject = Record<string, unknown>;
 
@@ -69,6 +64,7 @@ export interface CoworldPairedPlan {
   matrixID: string;
   manifestSha256: string;
   manifestPath: string;
+  planPath: string;
   materializedManifestPath: string;
   candidateImage: CoworldResolvedImage;
   gameImage: CoworldResolvedImage;
@@ -173,6 +169,7 @@ export async function materializeCoworldPairedMatrix(input: {
   now?: Date;
   resolveImageID?: CoworldImageResolver;
   validateCoworld?: CoworldMatrixSchemaValidator;
+  beforeOutputReservation?: () => Promise<void>;
 }): Promise<CoworldPairedPlan> {
   validateMatrixSpec(input.spec);
   const manifestPath = resolveFrom(
@@ -253,9 +250,14 @@ export async function materializeCoworldPairedMatrix(input: {
     requests: prepared.requests,
   });
 
-  // Recheck after the potentially slow Docker and Coworld validation gates.
+  // Recheck after the potentially slow Coworld validation gate.
   await assertPathAbsent(outputRoot, "outputRoot");
-  await publishPreparedMatrix(prepared);
+  await publishPreparedMatrix(prepared, {
+    beforeOutputReservation: input.beforeOutputReservation,
+    verifyImages: async () => {
+      await assertResolvedImagesUnchanged(imageIdentities, resolveImageID);
+    },
+  });
   return prepared.plan;
 }
 
@@ -379,12 +381,14 @@ function prepareMatrix(input: {
           assertUnique(jobIDs, jobID, "job id");
           const requestPath = path.join(
             input.outputRoot,
+            "payload",
             "jobs",
             jobID,
             "episode_request.json",
           );
           const outputDir = path.join(
             input.outputRoot,
+            "payload",
             "jobs",
             jobID,
             "episode",
@@ -444,7 +448,11 @@ function prepareMatrix(input: {
     throw new Error("Internal matrix error: job/request cardinality differs");
   }
   const generatedAt = (input.now ?? new Date()).toISOString();
-  const materializedManifestPath = path.join(input.outputRoot, "manifest.json");
+  const materializedManifestPath = path.join(
+    input.outputRoot,
+    "payload",
+    "manifest.json",
+  );
   const plan: CoworldPairedPlan = {
     schemaVersion: 2,
     coworldVersion: COWORLD_VERSION,
@@ -452,6 +460,7 @@ function prepareMatrix(input: {
     matrixID,
     manifestSha256,
     manifestPath: input.manifestPath,
+    planPath: path.join(input.outputRoot, "plan.json"),
     materializedManifestPath,
     candidateImage: input.candidateImage,
     gameImage: input.gameImage,
@@ -581,6 +590,9 @@ function validateRunnable(spec: PairedRunnableSpec, label: string): void {
     if (typeof value !== "string") {
       throw new Error(`${label}.env.${key} must be a public string`);
     }
+    if (value.trim().length === 0) {
+      throw new Error(`${label}.env.${key} must not be empty or whitespace`);
+    }
     if (value.includes("\0")) {
       throw new Error(`${label}.env.${key} must not contain NUL bytes`);
     }
@@ -588,25 +600,22 @@ function validateRunnable(spec: PairedRunnableSpec, label: string): void {
 }
 
 function isReservedOrSecretEnvKey(key: string): boolean {
-  const upper = key.toUpperCase();
+  const upper = key.replace(/([a-z0-9])([A-Z])/g, "$1_$2").toUpperCase();
+  const tokens = upper.split(/_+/).filter((token) => token.length > 0);
+  const compact = tokens.join("");
   if (
     upper.startsWith("COWORLD_") ||
-    upper.includes("API_KEY") ||
-    upper.includes("APIKEY") ||
-    upper.startsWith("AWS") ||
-    upper.includes("_AWS") ||
-    upper.includes("TOKEN") ||
-    upper.includes("SECRET") ||
-    upper.includes("PASSWORD") ||
-    upper.includes("CREDENTIAL") ||
-    upper.includes("PRIVATE") ||
+    tokens.includes("AWS") ||
+    compact.startsWith("AWS") ||
+    tokens.some((token) => SECRET_ENV_TOKEN_PATTERN.test(token)) ||
+    SECRET_ENV_COMPACT_PATTERN.test(compact) ||
     upper === "__PROTO__" ||
     upper === "PROTOTYPE" ||
     upper === "CONSTRUCTOR"
   ) {
     return true;
   }
-  return upper.split("_").some((segment) => SECRET_ENV_SEGMENTS.has(segment));
+  return false;
 }
 
 function validateImageReference(value: unknown, label: string): string {
@@ -656,6 +665,20 @@ async function resolveImages(
     }),
   );
   return new Map(identities.map((identity) => [identity.reference, identity]));
+}
+
+async function assertResolvedImagesUnchanged(
+  expected: Map<string, CoworldResolvedImage>,
+  resolver: CoworldImageResolver,
+): Promise<void> {
+  const current = await resolveImages([...expected.keys()], resolver);
+  for (const [reference, expectedIdentity] of expected) {
+    if (current.get(reference)?.imageID !== expectedIdentity.imageID) {
+      throw new Error(
+        `Local Docker image changed while planning: ${JSON.stringify(reference)}`,
+      );
+    }
+  }
 }
 
 export async function resolveLocalDockerImageID(
@@ -774,18 +797,29 @@ async function runCommand(
   });
 }
 
-async function publishPreparedMatrix(prepared: PreparedMatrix): Promise<void> {
+async function publishPreparedMatrix(
+  prepared: PreparedMatrix,
+  input: {
+    verifyImages: () => Promise<void>;
+    beforeOutputReservation?: () => Promise<void>;
+  },
+): Promise<void> {
   const parent = path.dirname(prepared.outputRoot);
   await fs.mkdir(parent, { recursive: true });
   const stagingRoot = path.join(
     parent,
     `.${path.basename(prepared.outputRoot)}.staging-${process.pid}-${randomUUID()}`,
   );
-  await fs.mkdir(stagingRoot, { recursive: false });
+  await fs.mkdir(stagingRoot, { recursive: false, mode: 0o700 });
   try {
-    await writeJson(path.join(stagingRoot, "manifest.json"), prepared.manifest);
+    const stagingPayload = path.join(stagingRoot, "payload");
+    await fs.mkdir(stagingPayload, { recursive: false });
+    await writeJson(
+      path.join(stagingPayload, "manifest.json"),
+      prepared.manifest,
+    );
     for (const [index, job] of prepared.plan.jobs.entries()) {
-      const jobDirectory = path.join(stagingRoot, "jobs", job.jobID);
+      const jobDirectory = path.join(stagingPayload, "jobs", job.jobID);
       await fs.mkdir(jobDirectory, { recursive: true });
       await writeJson(
         path.join(jobDirectory, "episode_request.json"),
@@ -793,8 +827,31 @@ async function publishPreparedMatrix(prepared: PreparedMatrix): Promise<void> {
       );
     }
     await writeJson(path.join(stagingRoot, "plan.json"), prepared.plan);
-    await assertPathAbsent(prepared.outputRoot, "outputRoot");
-    await fs.rename(stagingRoot, prepared.outputRoot);
+    await input.verifyImages();
+    await input.beforeOutputReservation?.();
+    try {
+      await fs.mkdir(prepared.outputRoot, { recursive: false, mode: 0o700 });
+    } catch (error) {
+      if (isNodeError(error) && error.code === "EEXIST") {
+        throw new Error(
+          `outputRoot appeared before publication; refusing to replace it: ${JSON.stringify(prepared.outputRoot)}`,
+          { cause: error },
+        );
+      }
+      throw error;
+    }
+
+    // The exclusive mkdir above is the no-replace reservation. The payload is
+    // complete before it moves under that reservation, and plan.json is linked
+    // last as the atomic publication marker. Consumers must ignore a directory
+    // without plan.json.
+    await fs.rename(stagingPayload, path.join(prepared.outputRoot, "payload"));
+    await fs.link(
+      path.join(stagingRoot, "plan.json"),
+      path.join(prepared.outputRoot, "plan.json"),
+    );
+    await fs.unlink(path.join(stagingRoot, "plan.json"));
+    await fs.rmdir(stagingRoot).catch(() => undefined);
   } catch (error) {
     await fs.rm(stagingRoot, { recursive: true, force: true });
     throw error;
@@ -1041,7 +1098,7 @@ async function main(): Promise<void> {
     sourcePaths: [absoluteSpecPath],
   });
   process.stdout.write(
-    `${JSON.stringify({ plan: path.join(path.dirname(plan.materializedManifestPath), "plan.json"), jobs: plan.jobs.length, matrixID: plan.matrixID })}\n`,
+    `${JSON.stringify({ plan: plan.planPath, jobs: plan.jobs.length, matrixID: plan.matrixID })}\n`,
   );
 }
 

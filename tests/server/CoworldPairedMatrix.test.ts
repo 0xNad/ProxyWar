@@ -206,6 +206,10 @@ describe("Coworld paired matrix planner", () => {
       reference: "game:v2",
       imageID: await fakeImageID("game:v2"),
     });
+    expect(plan.materializedManifestPath).toBe(
+      path.join(outputRoot, "payload", "manifest.json"),
+    );
+    expect(plan.planPath).toBe(path.join(outputRoot, "plan.json"));
     expect(plan.opponentImages).toEqual(
       await Promise.all(
         [0, 1, 2].map(async (index) => ({
@@ -288,6 +292,36 @@ describe("Coworld paired matrix planner", () => {
     expect(planA.jobs[0]!.pairID).not.toBe(planB.jobs[0]!.pairID);
   });
 
+  test("rejects mutable image drift immediately before publication", async () => {
+    const { directory, outputRoot, spec } = await fixture();
+    const calls = new Map<string, number>();
+    await expect(
+      materializeCoworldPairedMatrix({
+        spec,
+        specDirectory: directory,
+        resolveImageID: async (reference) => {
+          const count = (calls.get(reference) ?? 0) + 1;
+          calls.set(reference, count);
+          return fakeImageID(
+            reference === "candidate:v1" && count > 1
+              ? `${reference}-drifted`
+              : reference,
+          );
+        },
+        validateCoworld: acceptSchema,
+      }),
+    ).rejects.toThrow("Local Docker image changed while planning");
+    await expect(fs.lstat(outputRoot)).rejects.toMatchObject({
+      code: "ENOENT",
+    });
+    expect(calls.get("candidate:v1")).toBe(2);
+    expect(
+      (await fs.readdir(directory)).filter((entry) =>
+        entry.includes(".matrix.staging-"),
+      ),
+    ).toEqual([]);
+  });
+
   test("rejects existing or source-overlapping output without touching sources", async () => {
     const existing = await fixture();
     await fs.mkdir(existing.outputRoot);
@@ -317,6 +351,31 @@ describe("Coworld paired matrix planner", () => {
       }),
     ).rejects.toThrow("must not overlap source path");
     expect(await fs.readFile(overlap.manifestPath, "utf8")).toBe(before);
+  });
+
+  test("an output path created during publication is never replaced", async () => {
+    const { directory, outputRoot, spec } = await fixture();
+    const sentinel = path.join(outputRoot, "racer-owned.txt");
+    await expect(
+      materializeCoworldPairedMatrix({
+        spec,
+        specDirectory: directory,
+        resolveImageID: fakeImageID,
+        validateCoworld: acceptSchema,
+        beforeOutputReservation: async () => {
+          await fs.mkdir(outputRoot);
+          await fs.writeFile(sentinel, "leave-this-untouched");
+        },
+      }),
+    ).rejects.toThrow("appeared before publication; refusing to replace it");
+
+    expect(await fs.readFile(sentinel, "utf8")).toBe("leave-this-untouched");
+    expect(await fs.readdir(outputRoot)).toEqual(["racer-owned.txt"]);
+    expect(
+      (await fs.readdir(directory)).filter((entry) =>
+        entry.includes(".matrix.staging-"),
+      ),
+    ).toEqual([]);
   });
 
   test("schema or later-variant failure leaves no partial or stale output", async () => {
@@ -405,6 +464,20 @@ describe("Coworld paired matrix planner", () => {
         },
         "matrix owns the treatment flag",
       ],
+      [
+        {
+          ...spec,
+          opponents: spec.opponents.map((opponent, index) =>
+            index === 0
+              ? {
+                  ...opponent,
+                  env: { PROFILE: "   " },
+                }
+              : opponent,
+          ),
+        },
+        "must not be empty or whitespace",
+      ],
     ];
     for (const [invalidSpec, message] of cases) {
       await expect(
@@ -427,6 +500,11 @@ describe("Coworld paired matrix planner", () => {
       "DATABASE_PASSWORD",
       "PRIVATE_KEY",
       "SERVICE_API_KEY",
+      "GITHUB_PAT",
+      "GITHUBPAT",
+      "AUTH_HEADER",
+      "ACCESS_KEY",
+      "PUBLIC_KEY",
       "myToken",
       "AWSACCESSKEY",
       "COWORLD_PLAYER_WS_URL",

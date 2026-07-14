@@ -24,18 +24,22 @@ re-resolve every reference and refuse to launch if any ID has changed.
 
 The planner validates the complete materialized manifest and every request in
 memory with pinned Coworld 0.1.30. It then writes a complete sibling staging
-directory and atomically renames it into place. The requested output path must
-not already exist or overlap the matrix spec or source manifest. Invalid image
+directory, re-resolves every image ID to catch tag drift, and exclusively
+reserves the final directory without replacing anything already there. The
+complete payload moves under that reservation and `plan.json` is linked last as
+the atomic completion marker; consumers must ignore an output directory without
+`plan.json`. The requested output path must not already exist or overlap the
+matrix spec or source manifest. Invalid image
 references, seats, seeds, names, environment maps, opponent counts, schema
 violations, reserved runtime variables, and secret-looking environment keys all
 fail before output is published. Public environment variables are written to
 the requests, so credentials never belong in the matrix spec.
 
-Inspect the generated `plan.json`, materialized `manifest.json`, and each
-`jobs/*/episode_request.json`. The embedded manifest is sourced from the exact
-same materialized object passed to every request. Pair and job IDs use at least
-128 bits of a matrix identity that includes the manifest and all resolved image
-identities; duplicate IDs or paths fail closed.
+Inspect the generated `plan.json`, `payload/manifest.json`, and each
+`payload/jobs/*/episode_request.json`. The embedded manifest is sourced from the
+exact same materialized object passed to every request. Pair and job IDs use at
+least 128 bits of a matrix identity that includes the manifest and all resolved
+image identities; duplicate IDs or paths fail closed.
 
 This checkpoint is intentionally dry-run only. `--execute` fails loudly. Local
 execution, image-ID drift checks, resume, and result/replay artifact validation
