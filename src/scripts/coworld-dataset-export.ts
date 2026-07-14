@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { promises as fs } from "node:fs";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
@@ -29,6 +29,7 @@ export interface CoworldDatasetExporterOptions {
 interface EpisodeFragment {
   episodeId: string;
   episodeIdIsExplicit: boolean;
+  episodeIdentityKeys: string[];
   sourcePaths: string[];
   runID?: string | null;
   platformCompletedAt?: string | null;
@@ -868,6 +869,7 @@ function rosterSeats(input: {
 
 function episodeIdentifier(
   entry: Record<string, unknown>,
+  runID: string | null,
   fallbackId: string,
 ): { id: string; explicit: boolean } {
   const explicit = firstString(
@@ -875,9 +877,29 @@ function episodeIdentifier(
     entry.episodeRequestId,
     entry.id,
   );
-  return explicit === null
-    ? { id: fallbackId, explicit: fallbackId.startsWith("ereq_") }
-    : { id: explicit, explicit: true };
+  if (explicit !== null) {
+    return { id: explicit, explicit: true };
+  }
+  return { id: runID ?? fallbackId, explicit: false };
+}
+
+function episodeIdentityKeys(input: {
+  entry: Record<string, unknown>;
+  runID: string | null;
+  fallbackId: string;
+  aliases: readonly string[];
+}): string[] {
+  const explicit = firstString(
+    input.entry.episode_request_id,
+    input.entry.episodeRequestId,
+    input.entry.id,
+  );
+  return [
+    ...(explicit === null ? [] : [`episode:${explicit}`]),
+    ...(input.runID === null ? [] : [`run:${input.runID}`]),
+    `source:${input.fallbackId}`,
+    ...input.aliases.map((alias) => `episode:${alias}`),
+  ].filter((value, index, values) => values.indexOf(value) === index);
 }
 
 const explicitlyNonCompletedStatuses = new Set([
@@ -898,6 +920,8 @@ function parseEpisodeFragment(input: {
   value: unknown;
   sourcePath: string;
   fallbackId: string;
+  identityAliases: readonly string[];
+  allowFallbackIdentity: boolean;
   warnings: string[];
   stats: CoworldEvaluationLoadStats;
 }): EpisodeFragment | null {
@@ -939,16 +963,6 @@ function parseEpisodeFragment(input: {
   if (explicitStatus === "completed" && scores === undefined) {
     throw new Error(`${input.sourcePath} completed episode has no scores`);
   }
-  const episodeIdentifierResult = episodeIdentifier(entry, input.fallbackId);
-  const episodeId = episodeIdentifierResult.id;
-  const hasEpisodeIdentity =
-    firstString(entry.episode_request_id, entry.episodeRequestId, entry.id) !==
-      null ||
-    scores !== undefined ||
-    asString(entry.runID) !== null;
-  if (!hasEpisodeIdentity) {
-    return null;
-  }
   const inline = asRecord(entry.inlineRunArtifacts);
   if (Object.hasOwn(entry, "inlineRunArtifacts") && inline === null) {
     throw new Error(`${input.sourcePath} has invalid inlineRunArtifacts`);
@@ -958,6 +972,27 @@ function parseEpisodeFragment(input: {
     input.sourcePath,
     "match-summary.json",
   );
+  const runID = consistentString(
+    input.sourcePath,
+    "runID",
+    entry.runID,
+    summary?.runID,
+  );
+  const episodeIdentifierResult = episodeIdentifier(
+    entry,
+    runID,
+    input.fallbackId,
+  );
+  const episodeId = episodeIdentifierResult.id;
+  const hasEpisodeIdentity =
+    firstString(entry.episode_request_id, entry.episodeRequestId, entry.id) !==
+      null ||
+    scores !== undefined ||
+    runID !== null ||
+    input.allowFallbackIdentity;
+  if (!hasEpisodeIdentity) {
+    return null;
+  }
   const spectator = asRecord(entry.spectatorReplay);
   if (Object.hasOwn(entry, "spectatorReplay") && spectator === null) {
     throw new Error(`${input.sourcePath} has invalid spectatorReplay`);
@@ -1060,12 +1095,6 @@ function parseEpisodeFragment(input: {
     [],
     rawDecisions.map((record) => normalizeDecision(record, roster)),
   );
-  const runID = consistentString(
-    input.sourcePath,
-    "runID",
-    entry.runID,
-    summary?.runID,
-  );
   const platformCompletedAt = optionalStringField(
     entry,
     "completed_at",
@@ -1096,6 +1125,12 @@ function parseEpisodeFragment(input: {
   return {
     episodeId,
     episodeIdIsExplicit: episodeIdentifierResult.explicit,
+    episodeIdentityKeys: episodeIdentityKeys({
+      entry,
+      runID,
+      fallbackId: input.fallbackId,
+      aliases: input.identityAliases,
+    }),
     sourcePaths: [input.sourcePath],
     runID,
     platformCompletedAt,
@@ -1173,6 +1208,8 @@ export function parseCoworldEvaluationDocument(input: {
   value: unknown;
   sourcePath: string;
   fallbackId: string;
+  identityAliases?: readonly string[];
+  allowFallbackIdentity?: boolean;
   warnings?: string[];
   stats?: CoworldEvaluationLoadStats;
 }): EpisodeFragment[] {
@@ -1219,6 +1256,10 @@ export function parseCoworldEvaluationDocument(input: {
         entries.length === 1
           ? input.fallbackId
           : `${input.fallbackId}:${index}`,
+      identityAliases: (input.identityAliases ?? []).map((alias) =>
+        entries.length === 1 ? alias : `${alias}:${index}`,
+      ),
+      allowFallbackIdentity: input.allowFallbackIdentity ?? false,
       warnings,
       stats,
     });
@@ -1741,9 +1782,22 @@ function mergeFragment(
       `Conflicting episode IDs ${current.episodeId} and ${incoming.episodeId}`,
     );
   }
+  const identityContext = current.episodeIdIsExplicit
+    ? current.episodeId
+    : incoming.episodeIdIsExplicit
+      ? incoming.episodeId
+      : [current.episodeId, incoming.episodeId].sort()[0];
+  const runID = mergeNullable(
+    identityContext,
+    "runID",
+    current.runID,
+    incoming.runID,
+  );
   const episodeId = current.episodeIdIsExplicit
     ? current.episodeId
-    : incoming.episodeId;
+    : incoming.episodeIdIsExplicit
+      ? incoming.episodeId
+      : (runID ?? identityContext);
   const currentMap = current.map === "Unknown map" ? undefined : current.map;
   const incomingMap = incoming.map === "Unknown map" ? undefined : incoming.map;
   const roster = mergeRoster(current.roster, incoming.roster, episodeId);
@@ -1770,10 +1824,16 @@ function mergeFragment(
     episodeId,
     episodeIdIsExplicit:
       current.episodeIdIsExplicit || incoming.episodeIdIsExplicit,
+    episodeIdentityKeys: [
+      ...new Set([
+        ...current.episodeIdentityKeys,
+        ...incoming.episodeIdentityKeys,
+      ]),
+    ],
     sourcePaths: [
       ...new Set([...current.sourcePaths, ...incoming.sourcePaths]),
     ],
-    runID: mergeNullable(episodeId, "runID", current.runID, incoming.runID),
+    runID,
     platformCompletedAt: mergeNullable(
       episodeId,
       "platformCompletedAt",
@@ -2525,12 +2585,47 @@ function normalizeReportedTelemetry(
   };
 }
 
-function fallbackEpisodeId(filePath: string): string {
-  const base = path.basename(filePath);
+interface FallbackEpisodeIdentity {
+  id: string;
+  aliases: string[];
+}
+
+function artifactSourceRoot(filePath: string): string {
+  const resolved = path.resolve(filePath);
+  const base = path.basename(resolved);
   if (base === "replay" || base === "results.json") {
-    return path.basename(path.dirname(filePath));
+    return path.dirname(resolved);
   }
-  return base.replace(/\.replay$/i, "").replace(/\.json$/i, "");
+  if (base === "match-summary.json") {
+    const segments = resolved.split(path.sep);
+    const proxyWarRunsIndex = segments.lastIndexOf("proxywar-runs");
+    if (proxyWarRunsIndex > 0) {
+      return segments.slice(0, proxyWarRunsIndex).join(path.sep) || path.sep;
+    }
+    return path.dirname(resolved);
+  }
+  return resolved;
+}
+
+async function fallbackEpisodeIdentity(
+  filePath: string,
+): Promise<FallbackEpisodeIdentity> {
+  const sourceRoot = await fs.realpath(artifactSourceRoot(filePath));
+  const label =
+    path
+      .basename(sourceRoot)
+      .replace(/[^A-Za-z0-9_.-]+/g, "-")
+      .slice(0, 48) || "root";
+  const digest = createHash("sha256").update(sourceRoot).digest("hex");
+  const base = path.basename(filePath);
+  const replayAlias = base.endsWith(".replay")
+    ? base.replace(/\.replay$/i, "")
+    : null;
+  return {
+    id: `source_${label}_${digest}`,
+    aliases:
+      replayAlias === null || !/^ereq_/i.test(replayAlias) ? [] : [replayAlias],
+  };
 }
 
 function isDirectoryJsonCandidate(fileName: string): boolean {
@@ -2606,6 +2701,7 @@ async function readOptionalText(filePath: string): Promise<string | null> {
 
 async function parseSidecarBundle(
   summaryPath: string,
+  fallbackIdentity: FallbackEpisodeIdentity,
   warnings: string[],
   stats: CoworldEvaluationLoadStats,
 ): Promise<EpisodeFragment[]> {
@@ -2627,23 +2723,26 @@ async function parseSidecarBundle(
       throw new Error(`${spectatorPath} contains invalid JSON`);
     }
   }
-  const runID = asString(summary.runID) ?? path.basename(directory);
-  if (summary.scenario !== "coworld" && !/coworld/i.test(runID)) {
+  const runID = asString(summary.runID);
+  const bundleIdentity = runID ?? path.basename(directory);
+  if (summary.scenario !== "coworld" && !/coworld/i.test(bundleIdentity)) {
     return [];
   }
   const fragments = parseCoworldEvaluationDocument({
     value: {
-      runID,
+      ...(runID === null ? {} : { runID }),
       completedAt: summary.completedAt,
       config: asRecord(summary.runnerConfig),
-      spectatorReplay,
+      ...(spectatorReplay === undefined ? {} : { spectatorReplay }),
       inlineRunArtifacts: {
         "match-summary.json": summaryText,
         ...(decisions === null ? {} : { "decisions.jsonl": decisions }),
       },
     },
     sourcePath: summaryPath,
-    fallbackId: runID,
+    fallbackId: fallbackIdentity.id,
+    identityAliases: fallbackIdentity.aliases,
+    allowFallbackIdentity: true,
     warnings,
     stats,
   });
@@ -2666,11 +2765,8 @@ function fragmentsMatch(
   ) {
     return true;
   }
-  return (
-    left.episodeIdIsExplicit &&
-    right.episodeIdIsExplicit &&
-    left.episodeId === right.episodeId
-  );
+  const rightKeys = new Set(right.episodeIdentityKeys);
+  return left.episodeIdentityKeys.some((key) => rightKeys.has(key));
 }
 
 function addMergedFragment(
@@ -2716,6 +2812,7 @@ export async function loadCoworldEvaluationEpisodes(
   const merged: EpisodeFragment[] = [];
   for (const filePath of files) {
     const skippedBefore = stats.skippedNonCompletedEntries;
+    const fallbackIdentity = await fallbackEpisodeIdentity(filePath);
     let parsed: unknown;
     if (path.basename(filePath) !== "match-summary.json") {
       try {
@@ -2726,11 +2823,12 @@ export async function loadCoworldEvaluationEpisodes(
     }
     const fragments =
       path.basename(filePath) === "match-summary.json"
-        ? await parseSidecarBundle(filePath, warnings, stats)
+        ? await parseSidecarBundle(filePath, fallbackIdentity, warnings, stats)
         : parseCoworldEvaluationDocument({
             value: parsed,
             sourcePath: filePath,
-            fallbackId: fallbackEpisodeId(filePath),
+            fallbackId: fallbackIdentity.id,
+            identityAliases: fallbackIdentity.aliases,
             warnings,
             stats,
           });

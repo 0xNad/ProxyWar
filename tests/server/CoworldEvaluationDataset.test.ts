@@ -510,6 +510,139 @@ describe("Coworld evaluation dataset", () => {
     ]);
   });
 
+  test("keeps sibling control and treatment episode bundles distinct", async () => {
+    const directory = await temporaryDirectory();
+    const writeEpisodeBundle = async (input: {
+      arm: "control" | "treatment";
+      runID: string;
+      scores: [number, number];
+    }): Promise<string> => {
+      const episodeRoot = path.join(directory, input.arm, "episode");
+      const runRoot = path.join(episodeRoot, "proxywar-runs", input.runID);
+      await fs.mkdir(runRoot, { recursive: true });
+      const players = [{ name: "Auri" }, { name: "Opponent" }];
+      await fs.writeFile(
+        path.join(episodeRoot, "results.json"),
+        JSON.stringify({
+          scores: input.scores,
+          winner_slot: null,
+          players,
+        }),
+      );
+      await fs.writeFile(
+        path.join(episodeRoot, "replay"),
+        JSON.stringify({
+          runID: input.runID,
+          config: { map: "Asia", players },
+          results: {
+            scores: input.scores,
+            winner_slot: null,
+            players,
+          },
+        }),
+      );
+      await fs.writeFile(
+        path.join(runRoot, "match-summary.json"),
+        JSON.stringify({
+          scenario: "coworld",
+          runID: input.runID,
+          completedAt: `2026-07-14T12:00:0${input.arm === "control" ? "1" : "2"}Z`,
+          runnerConfig: { map: "Asia" },
+          roster: [{ username: "Auri" }, { username: "Opponent" }],
+        }),
+      );
+      await fs.writeFile(
+        path.join(runRoot, "spectator-replay.json"),
+        JSON.stringify({
+          roster: [{ username: "Auri" }, { username: "Opponent" }],
+          snapshots: [],
+        }),
+      );
+      return episodeRoot;
+    };
+    const controlRoot = await writeEpisodeBundle({
+      arm: "control",
+      runID: "coworld-control-run",
+      scores: [0.7, 0.3],
+    });
+    const treatmentRoot = await writeEpisodeBundle({
+      arm: "treatment",
+      runID: "coworld-treatment-run",
+      scores: [0.8, 0.2],
+    });
+
+    const loaded = await loadCoworldEvaluationEpisodes([
+      controlRoot,
+      treatmentRoot,
+    ]);
+    expect(loaded.episodes.map((episode) => episode.episodeId)).toEqual([
+      "coworld-control-run",
+      "coworld-treatment-run",
+    ]);
+    expect(loaded.episodes.map((episode) => episode.runID)).toEqual([
+      "coworld-control-run",
+      "coworld-treatment-run",
+    ]);
+    expect(
+      loaded.episodes.map((episode) => episode.sourcePaths.length),
+    ).toEqual([3, 3]);
+
+    const dataset = buildCoworldEvaluationDataset({
+      episodes: loaded.episodes,
+      selector: { seat: null, policyVersionId: null, playerName: "Auri" },
+    });
+    expect(dataset.rows.map((row) => row.rowId)).toEqual([
+      "coworld-control-run:seat:0",
+      "coworld-treatment-run:seat:0",
+    ]);
+    expect(new Set(dataset.rows.map((row) => row.rowId)).size).toBe(2);
+    expect(dataset.aggregate).toMatchObject({ episodes: 2, rows: 2 });
+  });
+
+  test("uses a stable source-root identity when a bundle has no run ID", async () => {
+    const directory = await temporaryDirectory();
+    const roots = await Promise.all(
+      ["control", "treatment"].map(async (arm) => {
+        const episodeRoot = path.join(directory, arm, "episode");
+        await fs.mkdir(episodeRoot, { recursive: true });
+        await fs.writeFile(
+          path.join(episodeRoot, "results.json"),
+          JSON.stringify({
+            scores: [1, 0],
+            winner_slot: 0,
+            players: [{ name: "Auri" }, { name: "Opponent" }],
+          }),
+        );
+        await fs.writeFile(
+          path.join(episodeRoot, "match-summary.json"),
+          JSON.stringify({
+            scenario: "coworld",
+            completedAt: "2026-07-14T12:00:00Z",
+            runnerConfig: { map: "Asia" },
+            roster: [{ username: "Auri" }, { username: "Opponent" }],
+          }),
+        );
+        return episodeRoot;
+      }),
+    );
+
+    const first = await loadCoworldEvaluationEpisodes(roots);
+    const second = await loadCoworldEvaluationEpisodes([...roots].reverse());
+    const firstIds = first.episodes.map((episode) => episode.episodeId);
+    expect(firstIds).toHaveLength(2);
+    expect(new Set(firstIds).size).toBe(2);
+    expect(firstIds).toEqual(
+      second.episodes.map((episode) => episode.episodeId),
+    );
+    expect(firstIds).toEqual([
+      expect.stringMatching(/^source_episode_[a-f0-9]{64}$/),
+      expect.stringMatching(/^source_episode_[a-f0-9]{64}$/),
+    ]);
+    expect(first.episodes.map((episode) => episode.sourcePaths.length)).toEqual(
+      [2, 2],
+    );
+  });
+
   test("joins extracted mirror sidecars to metadata and results by runID", async () => {
     const directory = await temporaryDirectory();
     const bundle = path.join(
