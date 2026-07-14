@@ -1,20 +1,8 @@
 import { describe, expect, it } from "vitest";
 
-import * as plannerExecutorModule from "../../src/server/agents/AgentPlannerExecutor";
-import * as claudeCliModule from "../../src/server/agents/ClaudeCliLlmProvider";
-import { AgentObservationBuilder } from "../../src/server/agents/AgentObservationBuilder";
-import { buildExternalAgentRequestPayload } from "../../src/server/agents/ExternalHttpAgentBrain";
-import type {
-  AgentPlanDecision,
-  AgentPlanner,
-  StrategicPlan,
-} from "../../src/server/agents/AgentPlannerExecutor";
-import type {
-  AgentBrainInput,
-  LegalAction,
-} from "../../src/server/agents/AgentTypes";
 import {
   bedrockModelCandidates,
+  CommanderTelemetryAgentBrain,
   createKeystoneBrain,
   decisionToResponse,
   DeferredAgentPlanner,
@@ -24,6 +12,19 @@ import {
   transportFallbackResponse,
   type KeystoneModules,
 } from "../../coworld-adapter/src/keystone-player";
+import { AgentObservationBuilder } from "../../src/server/agents/AgentObservationBuilder";
+import type {
+  AgentPlanDecision,
+  AgentPlanner,
+  StrategicPlan,
+} from "../../src/server/agents/AgentPlannerExecutor";
+import * as plannerExecutorModule from "../../src/server/agents/AgentPlannerExecutor";
+import type {
+  AgentBrainInput,
+  LegalAction,
+} from "../../src/server/agents/AgentTypes";
+import * as claudeCliModule from "../../src/server/agents/ClaudeCliLlmProvider";
+import { buildExternalAgentRequestPayload } from "../../src/server/agents/ExternalHttpAgentBrain";
 
 const modules: KeystoneModules = {
   plannerExecutor: plannerExecutorModule,
@@ -61,6 +62,17 @@ function spawnBrainInput(): AgentBrainInput {
     phaseOverride: "spawn",
   });
   return { observation, legalActions: spawnLegalActions() };
+}
+
+function brainInputAt(
+  input: AgentBrainInput,
+  turnNumber: number,
+  phase: AgentBrainInput["observation"]["phase"] = input.observation.phase,
+): AgentBrainInput {
+  return {
+    ...input,
+    observation: { ...input.observation, turnNumber, phase },
+  };
 }
 
 /** Simulates the Coworld wire: the game serializes the canonical payload and
@@ -171,10 +183,112 @@ describe("Coworld keystone player", () => {
     // Bootstrap rule plan, returned without waiting on the 100ms inner call.
     expect(elapsedMs).toBeLessThan(60);
     expect(first.plan.plannerSource).toBe("rule");
+    expect(deferred.telemetrySnapshot(input)).toMatchObject({
+      commanderTelemetryVersion: 1,
+      commanderRefreshAttempts: 1,
+      commanderRefreshCompletions: 0,
+      commanderRefreshInFlight: true,
+      commanderLastOutcome: "none",
+    });
+
+    // A second executor call while the same refresh is pending must remain
+    // in-clock and be measured as coalesced, not as another provider attempt.
+    const carried = await deferred.plan(input, first.plan);
+    expect(carried.plan).toEqual(first.plan);
+    expect(deferred.telemetrySnapshot(input)).toMatchObject({
+      commanderRefreshAttempts: 1,
+      commanderCoalescedRefreshes: 1,
+      commanderRefreshInFlight: true,
+    });
 
     await new Promise((resolve) => setTimeout(resolve, 150));
     const second = await deferred.plan(input, first.plan);
     expect(second.plan.planID).toBe("llm-plan-1");
+    expect(deferred.telemetrySnapshot(input)).toMatchObject({
+      commanderRefreshAttempts: 2,
+      commanderRefreshCompletions: 1,
+      commanderHealthyCompletions: 1,
+      commanderPlansDelivered: 1,
+      commanderLastOutcome: "healthy",
+      commanderActivePlanGeneratedAtTurn: 0,
+      commanderActivePlanAgeTurns: 0,
+      commanderDeliveredPlanCriticalEpochChanged: false,
+    });
+  });
+
+  it("classifies resolved Commander invalid-output fallbacks instead of hiding them as healthy", async () => {
+    const input = spawnBrainInput();
+    let calls = 0;
+    const fallbackInner: AgentPlanner = {
+      plannerType: "real-llm",
+      plan: () => {
+        calls += 1;
+        return calls === 1
+          ? Promise.resolve({
+              ...makePlanDecision("parse-fallback"),
+              fallbackUsed: true,
+              llmPlannerDegraded: true,
+              parseOk: false,
+              parseFailureReason: "malformed directive",
+              rawPlannerOutput: "{not-json",
+            })
+          : new Promise<AgentPlanDecision>(() => undefined);
+      },
+    };
+    const deferred = new DeferredAgentPlanner(
+      fallbackInner,
+      new plannerExecutorModule.RuleAgentPlanner("aggressive"),
+    );
+
+    const bootstrap = await deferred.plan(input, null);
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    await deferred.plan(input, bootstrap.plan);
+
+    expect(deferred.telemetrySnapshot(input)).toMatchObject({
+      commanderRefreshCompletions: 1,
+      commanderHealthyCompletions: 0,
+      commanderFallbackCompletions: 1,
+      commanderInvalidOutputCompletions: 1,
+      commanderNoOutputFailureCompletions: 0,
+      commanderRejectedCompletions: 0,
+      commanderLastOutcome: "invalid_output",
+    });
+  });
+
+  it("keeps resolved no-output failures broad when the provider cause is unknowable", async () => {
+    const input = spawnBrainInput();
+    let calls = 0;
+    const fallbackInner: AgentPlanner = {
+      plannerType: "real-llm",
+      plan: () => {
+        calls += 1;
+        return calls === 1
+          ? Promise.resolve({
+              ...makePlanDecision("no-output-fallback"),
+              fallbackUsed: true,
+              llmPlannerDegraded: true,
+              parseOk: false,
+              parseFailureReason: "provider timed out",
+            })
+          : new Promise<AgentPlanDecision>(() => undefined);
+      },
+    };
+    const deferred = new DeferredAgentPlanner(
+      fallbackInner,
+      new plannerExecutorModule.RuleAgentPlanner("aggressive"),
+    );
+
+    const bootstrap = await deferred.plan(input, null);
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    await deferred.plan(input, bootstrap.plan);
+
+    expect(deferred.telemetrySnapshot(input)).toMatchObject({
+      commanderRefreshCompletions: 1,
+      commanderFallbackCompletions: 1,
+      commanderInvalidOutputCompletions: 0,
+      commanderNoOutputFailureCompletions: 1,
+      commanderLastOutcome: "failure_no_output",
+    });
   });
 
   it("DeferredAgentPlanner keeps the full Commander cadence: consuming a landed plan arms the next refresh", async () => {
@@ -230,6 +344,79 @@ describe("Coworld keystone player", () => {
     expect(second.reason).toContain("quota exhausted");
   });
 
+  it("preserves standing-plan provenance when a Commander refresh rejects", async () => {
+    const input = spawnBrainInput();
+    let calls = 0;
+    const sequencedInner: AgentPlanner = {
+      plannerType: "real-llm",
+      plan: () => {
+        calls += 1;
+        if (calls === 1) {
+          return Promise.resolve(makePlanDecision("healthy-at-turn-zero"));
+        }
+        if (calls === 2) {
+          return Promise.reject(new Error("refresh rejected"));
+        }
+        return new Promise<AgentPlanDecision>(() => undefined);
+      },
+    };
+    const deferred = new DeferredAgentPlanner(
+      sequencedInner,
+      new plannerExecutorModule.RuleAgentPlanner("aggressive"),
+    );
+
+    const bootstrap = await deferred.plan(input, null);
+    await new Promise((resolve) => setTimeout(resolve, 5));
+
+    const atTurn100 = brainInputAt(input, 100);
+    const healthy = await deferred.plan(atTurn100, bootstrap.plan);
+    expect(healthy.plan.planID).toBe("healthy-at-turn-zero");
+    expect(deferred.telemetrySnapshot(atTurn100)).toMatchObject({
+      commanderActivePlanGeneratedAtTurn: 0,
+      commanderActivePlanAgeTurns: 100,
+      commanderDeliveredPlanCriticalEpochChanged: false,
+    });
+
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    const atTurn200 = brainInputAt(input, 200);
+    const degraded = await deferred.plan(atTurn200, healthy.plan);
+
+    expect(degraded.llmPlannerDegraded).toBe(true);
+    expect(deferred.telemetrySnapshot(atTurn200)).toMatchObject({
+      commanderRefreshAttempts: 3,
+      commanderRefreshCompletions: 2,
+      commanderHealthyCompletions: 1,
+      commanderRejectedCompletions: 1,
+      commanderPlansDelivered: 2,
+      commanderLastOutcome: "rejected",
+      commanderActivePlanGeneratedAtTurn: 0,
+      commanderActivePlanAgeTurns: 200,
+      commanderDeliveredPlanCriticalEpochChanged: false,
+    });
+  });
+
+  it("reports when a delivered plan was authored before a critical observation epoch change", async () => {
+    const input = spawnBrainInput();
+    const deferred = new DeferredAgentPlanner(
+      {
+        plannerType: "real-llm",
+        plan: () => Promise.resolve(makePlanDecision("spawn-era-plan")),
+      },
+      new plannerExecutorModule.RuleAgentPlanner("aggressive"),
+    );
+
+    const bootstrap = await deferred.plan(input, null);
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    const activeInput = brainInputAt(input, 100, "active");
+    await deferred.plan(activeInput, bootstrap.plan);
+
+    expect(deferred.telemetrySnapshot(activeInput)).toMatchObject({
+      commanderActivePlanGeneratedAtTurn: 0,
+      commanderActivePlanAgeTurns: 100,
+      commanderDeliveredPlanCriticalEpochChanged: true,
+    });
+  });
+
   it("decisionToResponse maps the decision onto the wire contract", () => {
     const longReason = "x".repeat(600);
     const response = decisionToResponse("req_1", {
@@ -245,6 +432,93 @@ describe("Coworld keystone player", () => {
       confidence: 0.85,
     });
     expect((response.reason as string).length).toBe(500);
+  });
+
+  it("adds Commander telemetry without changing the delegated decision", async () => {
+    const input = spawnBrainInput();
+    const deferred = new DeferredAgentPlanner(
+      {
+        plannerType: "real-llm",
+        plan: () => Promise.resolve(makePlanDecision("unused")),
+      },
+      new plannerExecutorModule.RuleAgentPlanner("aggressive"),
+    );
+    const delegated = {
+      actionID: "spawn:10",
+      actionIDs: ["spawn:10", "hold:wait"],
+      reason: "scripted behavior identity",
+      metadata: { confidence: 0.61 },
+    };
+    const wrapped = new CommanderTelemetryAgentBrain(
+      {
+        brainType: "planner-executor",
+        decide: () => delegated,
+      },
+      deferred,
+    );
+
+    const decision = await wrapped.decide(input);
+
+    expect(decision.actionID).toBe(delegated.actionID);
+    expect(decision.actionIDs).toEqual(delegated.actionIDs);
+    expect(decision.reason).toBe(delegated.reason);
+    expect(decision.metadata).toMatchObject({
+      confidence: 0.61,
+      commanderTelemetryVersion: 1,
+      commanderRefreshAttempts: 0,
+      commanderRefreshCompletions: 0,
+    });
+  });
+
+  it("places bounded Commander telemetry before a worst-case wire reason", () => {
+    const requestID = `req_${"r".repeat(24)}`;
+    const actionID = `attack:rival:${"9".repeat(37)}`;
+    const response = decisionToResponse(requestID, {
+      actionID,
+      actionIDs: [actionID, "hold:wait"],
+      // Quotes, newlines, and backslashes all expand under JSON.stringify.
+      reason: '"\n\\'.repeat(200),
+      metadata: {
+        commanderTelemetryVersion: 1,
+        commanderRefreshAttempts: Number.MAX_SAFE_INTEGER,
+        commanderRefreshCompletions: Number.MAX_SAFE_INTEGER,
+        commanderHealthyCompletions: Number.MAX_SAFE_INTEGER,
+        commanderFallbackCompletions: Number.MAX_SAFE_INTEGER,
+        commanderInvalidOutputCompletions: Number.MAX_SAFE_INTEGER,
+        commanderNoOutputFailureCompletions: Number.MAX_SAFE_INTEGER,
+        commanderRejectedCompletions: Number.MAX_SAFE_INTEGER,
+        commanderCoalescedRefreshes: Number.MAX_SAFE_INTEGER,
+        commanderPlansDelivered: Number.MAX_SAFE_INTEGER,
+        commanderRefreshInFlight: true,
+        commanderLastOutcome: "invalid_output",
+        commanderActivePlanGeneratedAtTurn: Number.MAX_SAFE_INTEGER,
+        commanderActivePlanAgeTurns: Number.MAX_SAFE_INTEGER,
+        commanderDeliveredPlanCriticalEpochChanged: true,
+        llmPlannerDegraded: true,
+        plannerFallbackUsed: true,
+      },
+    });
+    const serialized = JSON.stringify(response);
+
+    expect(response.selectedLegalActionId).toBe(actionID);
+    expect(response.requestID).toBe(requestID);
+    expect(response.llmPlannerDegraded).toBe(true);
+    expect(response.fallbackUsed).toBe(true);
+    expect(response.reason as string).toMatch(
+      /\[wire carries primary only; 1 batched follow-up\(s\) not executed\]$/,
+    );
+    expect(response.commanderTelemetry).toMatchObject({
+      v: 1,
+      attempts: Number.MAX_SAFE_INTEGER,
+      completions: Number.MAX_SAFE_INTEGER,
+      lastOutcome: "invalid_output",
+      criticalEpochChanged: true,
+    });
+    expect(serialized.length).toBeLessThan(1_000);
+    expect(serialized.indexOf('"commanderTelemetry"')).toBeLessThan(1_000);
+    expect(serialized.indexOf('"reason"')).toBeGreaterThan(
+      serialized.indexOf('"commanderTelemetry"'),
+    );
   });
 
   it("keystoneModeFromEnv defaults to the LLM Commander; no deterministic mode exists", () => {
@@ -326,8 +600,8 @@ describe("Coworld keystone player", () => {
     // on a silent fallback because this branch had no loudness channel.
     const request = wireRequest(spawnBrainInput());
     const offeredIDs = (
-      (request as { legalActions: Array<{ id: string }> }).legalActions
-    ).map((action) => action.id);
+      request as { legalActions: Array<{ id: string }> }
+    ).legalActions.map((action) => action.id);
 
     const response = transportFallbackResponse(
       "req_fallback",

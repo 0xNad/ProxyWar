@@ -43,6 +43,11 @@ import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 import type {
+  AgentPlanDecision,
+  AgentPlanner,
+  StrategicPlan,
+} from "../../src/server/agents/AgentPlannerExecutor";
+import type {
   AgentBrain,
   AgentBrainInput,
   AgentDecision,
@@ -50,11 +55,6 @@ import type {
   AgentStrategyProfile,
   LegalAction,
 } from "../../src/server/agents/AgentTypes";
-import type {
-  AgentPlanDecision,
-  AgentPlanner,
-  StrategicPlan,
-} from "../../src/server/agents/AgentPlannerExecutor";
 import type { LlmProvider } from "../../src/server/agents/LlmProvider";
 
 type PlannerExecutorModule =
@@ -125,6 +125,11 @@ export function keystoneTunableFlagSummary(
 }
 
 const RESPONSE_REASON_MAX_LENGTH = 500;
+// The hosted game-side mirror retains the first 1,000 serialized characters.
+// Keep the complete decision response below that boundary for schema-valid
+// Coworld request/action IDs so health flags and Commander telemetry cannot be
+// separated from the selected action by JSON escaping or a long reason.
+const RESPONSE_SERIALIZED_MAX_LENGTH = 999;
 
 export function keystoneModeFromEnv(
   env: NodeJS.ProcessEnv = process.env,
@@ -212,8 +217,7 @@ export function requestToBrainInput(
   // config, not game state: pin it to OUR configured profile so behavior is
   // slot-invariant. Game state is untouched.
   const observation =
-    pinnedProfile !== undefined &&
-    record.observation.profile !== pinnedProfile
+    pinnedProfile !== undefined && record.observation.profile !== pinnedProfile
       ? { ...record.observation, profile: pinnedProfile }
       : record.observation;
   return { observation, legalActions };
@@ -247,21 +251,126 @@ export function decisionToResponse(
     droppedBatchActions > 0
       ? ` [wire carries primary only; ${droppedBatchActions} batched follow-up(s) not executed]`
       : "";
-  // Truncate the base reason, never the truth note.
-  const wireReason =
-    decision.reason.slice(
-      0,
-      Math.max(0, RESPONSE_REASON_MAX_LENGTH - wireNote.length),
-    ) + wireNote;
-  return {
+  const commanderTelemetry = commanderTelemetryForWire(decision.metadata);
+  const responsePrefix = {
     type: "decision_response",
     requestID,
     selectedLegalActionId: decision.actionID,
-    reason: wireReason,
+    ...commanderTelemetry,
     confidence,
     ...(llmPlannerDegraded ? { llmPlannerDegraded: true } : {}),
     ...(plannerFallbackUsed ? { fallbackUsed: true } : {}),
   };
+  const wireReason = boundedWireReason(
+    responsePrefix,
+    decision.reason,
+    wireNote,
+  );
+  return {
+    // Keep every protocol/health/telemetry field before `reason`. The hosted
+    // game-side mirror retains only the first 1,000 serialized characters, and
+    // the reason is the only field that may be shortened to fit that contract.
+    ...responsePrefix,
+    reason: wireReason,
+  };
+}
+
+function boundedWireReason(
+  responsePrefix: Record<string, unknown>,
+  reason: string,
+  truthNote: string,
+): string {
+  const prefixLimit = Math.max(
+    0,
+    RESPONSE_REASON_MAX_LENGTH - truthNote.length,
+  );
+  const candidatePrefix = reason.slice(0, prefixLimit);
+  const serializedLength = (value: string) =>
+    JSON.stringify({ ...responsePrefix, reason: value }).length;
+
+  if (
+    serializedLength(candidatePrefix + truthNote) <=
+    RESPONSE_SERIALIZED_MAX_LENGTH
+  ) {
+    return candidatePrefix + truthNote;
+  }
+
+  // JSON escaping is data-dependent, so raw string length is not a safe
+  // budget. Binary-search the longest source prefix whose serialized response
+  // fits, keeping the truthful dropped-batch suffix intact.
+  if (serializedLength(truthNote) <= RESPONSE_SERIALIZED_MAX_LENGTH) {
+    let low = 0;
+    let high = candidatePrefix.length;
+    while (low < high) {
+      const middle = Math.ceil((low + high) / 2);
+      if (
+        serializedLength(candidatePrefix.slice(0, middle) + truthNote) <=
+        RESPONSE_SERIALIZED_MAX_LENGTH
+      ) {
+        low = middle;
+      } else {
+        high = middle - 1;
+      }
+    }
+    return candidatePrefix.slice(0, low) + truthNote;
+  }
+
+  // Valid Coworld request/action IDs leave ample room for the short truth
+  // note. This defensive branch handles malformed oversized identifiers
+  // without throwing; protocol-critical fields still precede the reason.
+  let low = 0;
+  let high = truthNote.length;
+  while (low < high) {
+    const middle = Math.ceil((low + high) / 2);
+    if (
+      serializedLength(truthNote.slice(0, middle)) <=
+      RESPONSE_SERIALIZED_MAX_LENGTH
+    ) {
+      low = middle;
+    } else {
+      high = middle - 1;
+    }
+  }
+  return truthNote.slice(0, low);
+}
+
+const COMMANDER_TELEMETRY_WIRE_KEYS = [
+  ["commanderTelemetryVersion", "v"],
+  ["commanderRefreshAttempts", "attempts"],
+  ["commanderRefreshCompletions", "completions"],
+  ["commanderHealthyCompletions", "healthy"],
+  ["commanderFallbackCompletions", "fallback"],
+  ["commanderInvalidOutputCompletions", "invalidOutput"],
+  ["commanderNoOutputFailureCompletions", "noOutputFailure"],
+  ["commanderRejectedCompletions", "rejected"],
+  ["commanderCoalescedRefreshes", "coalesced"],
+  ["commanderPlansDelivered", "delivered"],
+  ["commanderRefreshInFlight", "inFlight"],
+  ["commanderLastOutcome", "lastOutcome"],
+  ["commanderActivePlanGeneratedAtTurn", "planTurn"],
+  ["commanderActivePlanAgeTurns", "planAge"],
+  ["commanderDeliveredPlanCriticalEpochChanged", "criticalEpochChanged"],
+] as const;
+
+function commanderTelemetryForWire(
+  metadata: AgentDecision["metadata"],
+): Record<string, unknown> {
+  if (metadata?.commanderTelemetryVersion !== 1) {
+    return {};
+  }
+  const telemetry: Record<string, string | number | boolean | null> = {};
+  for (const [metadataKey, wireKey] of COMMANDER_TELEMETRY_WIRE_KEYS) {
+    const value = metadata[metadataKey];
+    if (
+      value === null ||
+      typeof value === "string" ||
+      typeof value === "number" ||
+      typeof value === "boolean"
+    ) {
+      telemetry[wireKey] = value;
+    }
+  }
+  return { commanderTelemetry: telemetry };
 }
 
 /**
@@ -307,12 +416,25 @@ export function transportFallbackResponse(
 export class DeferredAgentPlanner implements AgentPlanner {
   readonly plannerType: StrategicPlan["plannerSource"];
   private inFlight = false;
-  private completed: AgentPlanDecision | null = null;
+  private completed: DeferredPlanEnvelope | null = null;
   private lastKnownPlan: StrategicPlan | null = null;
   // Set when a background Commander refresh failed but there was no plan to attach
   // the degraded flags to (no standing directive AND the bootstrap also failed).
   // The next plan() surfaces it so the degradation is never silent.
   private pendingDegradation: string | null = null;
+  private refreshAttempts = 0;
+  private refreshCompletions = 0;
+  private healthyCompletions = 0;
+  private fallbackCompletions = 0;
+  private invalidOutputCompletions = 0;
+  private noOutputFailureCompletions = 0;
+  private rejectedCompletions = 0;
+  private coalescedRefreshes = 0;
+  private plansDelivered = 0;
+  private lastOutcome: CommanderRefreshOutcome = "none";
+  private activePlanGeneratedAtTurn: number | null = null;
+  private activePlanObservationEpoch: string | null = null;
+  private deliveredPlanCriticalEpochChanged = false;
 
   constructor(
     private readonly inner: AgentPlanner,
@@ -328,13 +450,19 @@ export class DeferredAgentPlanner implements AgentPlanner {
     if (this.completed !== null) {
       const landed = this.completed;
       this.completed = null;
-      this.lastKnownPlan = landed.plan;
+      this.lastKnownPlan = landed.decision.plan;
+      this.plansDelivered += 1;
+      this.activePlanGeneratedAtTurn = landed.generatedAtTurn;
+      this.activePlanObservationEpoch = landed.observationEpoch;
+      this.deliveredPlanCriticalEpochChanged =
+        landed.observationEpoch !== null &&
+        landed.observationEpoch !== commanderObservationEpoch(input);
       // Arm the NEXT refresh against the current observation before returning.
       // Without this, refreshes only ever started on calls that arrived
       // empty-handed, which silently halved the Commander cadence to
       // 2x planEvery and executed every landed plan one interval stale.
-      this.startBackgroundRefresh(input, landed.plan);
-      return landed;
+      this.startBackgroundRefresh(input, landed.decision.plan);
+      return landed.decision;
     }
     // Surface (once) any degradation from a prior refresh failure that had no
     // plan to carry it.
@@ -367,20 +495,55 @@ export class DeferredAgentPlanner implements AgentPlanner {
     };
   }
 
+  telemetrySnapshot(input: AgentBrainInput): CommanderTelemetrySnapshot {
+    const currentTurn = input.observation.turnNumber;
+    return {
+      commanderTelemetryVersion: 1,
+      commanderRefreshAttempts: this.refreshAttempts,
+      commanderRefreshCompletions: this.refreshCompletions,
+      commanderHealthyCompletions: this.healthyCompletions,
+      commanderFallbackCompletions: this.fallbackCompletions,
+      commanderInvalidOutputCompletions: this.invalidOutputCompletions,
+      commanderNoOutputFailureCompletions: this.noOutputFailureCompletions,
+      commanderRejectedCompletions: this.rejectedCompletions,
+      commanderCoalescedRefreshes: this.coalescedRefreshes,
+      commanderPlansDelivered: this.plansDelivered,
+      commanderRefreshInFlight: this.inFlight,
+      commanderLastOutcome: this.lastOutcome,
+      commanderActivePlanGeneratedAtTurn: this.activePlanGeneratedAtTurn,
+      commanderActivePlanAgeTurns:
+        this.activePlanGeneratedAtTurn === null
+          ? null
+          : Math.max(0, currentTurn - this.activePlanGeneratedAtTurn),
+      commanderDeliveredPlanCriticalEpochChanged:
+        this.activePlanObservationEpoch === null
+          ? false
+          : this.deliveredPlanCriticalEpochChanged,
+    };
+  }
+
   private startBackgroundRefresh(
     input: AgentBrainInput,
     carriedPlan: StrategicPlan | null,
   ): void {
     if (this.inFlight) {
+      this.coalescedRefreshes += 1;
       return;
     }
+    const generatedAtTurn = input.observation.turnNumber;
+    const observationEpoch = commanderObservationEpoch(input);
+    this.refreshAttempts += 1;
     this.inFlight = true;
     void this.inner
       .plan(input, carriedPlan)
       .then((decision) => {
-        this.completed = decision;
+        this.recordResolvedCompletion(decision);
+        this.completed = { decision, generatedAtTurn, observationEpoch };
       })
       .catch(async (error: unknown) => {
+        this.refreshCompletions += 1;
+        this.rejectedCompletions += 1;
+        this.lastOutcome = "rejected";
         const message = error instanceof Error ? error.message : String(error);
         console.error(`keystone Commander refresh failed: ${message}`);
         const fallback =
@@ -389,15 +552,27 @@ export class DeferredAgentPlanner implements AgentPlanner {
             : await this.bootstrap.plan(input, null).catch(() => null);
         const plan = carriedPlan ?? fallback?.plan ?? null;
         if (plan !== null) {
+          const carriedPlanRetained = carriedPlan !== null;
           this.completed = {
-            // Mark the plan itself as degraded-origin: the executor then flags
-            // EVERY decision run under it (not just this refresh) until a
-            // healthy Commander refresh replaces it.
-            plan: { ...plan, degradedOrigin: true },
-            reason: `Commander refresh failed (${message}); continuing on the standing directive.`,
-            latencyMs: 0,
-            fallbackUsed: true,
-            llmPlannerDegraded: true,
+            decision: {
+              // Mark the plan itself as degraded-origin: the executor then flags
+              // EVERY decision run under it (not just this refresh) until a
+              // healthy Commander refresh replaces it.
+              plan: { ...plan, degradedOrigin: true },
+              reason: `Commander refresh failed (${message}); continuing on the standing directive.`,
+              latencyMs: 0,
+              fallbackUsed: true,
+              llmPlannerDegraded: true,
+            },
+            // A failed refresh does not author a new standing directive. When
+            // the old plan is retained, preserve its original observation
+            // provenance so plan age keeps increasing honestly.
+            generatedAtTurn: carriedPlanRetained
+              ? this.activePlanGeneratedAtTurn
+              : generatedAtTurn,
+            observationEpoch: carriedPlanRetained
+              ? this.activePlanObservationEpoch
+              : observationEpoch,
           };
         } else {
           // No standing directive and the bootstrap also failed: we cannot
@@ -409,6 +584,104 @@ export class DeferredAgentPlanner implements AgentPlanner {
       .finally(() => {
         this.inFlight = false;
       });
+  }
+
+  private recordResolvedCompletion(decision: AgentPlanDecision): void {
+    this.refreshCompletions += 1;
+    if (decision.fallbackUsed || decision.llmPlannerDegraded === true) {
+      this.fallbackCompletions += 1;
+      // LlmAgentPlanner uses parseOk=false for both malformed model output and
+      // provider/runtime failures. Raw output is the only honest discriminator
+      // available at this seam: non-empty output means invalid output; absence
+      // remains deliberately broad (provider, timeout, auth, runtime, or empty).
+      if (decision.parseOk === false) {
+        if ((decision.rawPlannerOutput?.trim().length ?? 0) > 0) {
+          this.invalidOutputCompletions += 1;
+          this.lastOutcome = "invalid_output";
+        } else {
+          this.noOutputFailureCompletions += 1;
+          this.lastOutcome = "failure_no_output";
+        }
+      } else {
+        this.lastOutcome = "fallback";
+      }
+      return;
+    }
+    this.healthyCompletions += 1;
+    this.lastOutcome = "healthy";
+  }
+}
+
+type CommanderRefreshOutcome =
+  | "none"
+  | "healthy"
+  | "fallback"
+  | "invalid_output"
+  | "failure_no_output"
+  | "rejected";
+
+interface DeferredPlanEnvelope {
+  decision: AgentPlanDecision;
+  generatedAtTurn: number | null;
+  observationEpoch: string | null;
+}
+
+export interface CommanderTelemetrySnapshot {
+  commanderTelemetryVersion: 1;
+  commanderRefreshAttempts: number;
+  commanderRefreshCompletions: number;
+  commanderHealthyCompletions: number;
+  commanderFallbackCompletions: number;
+  commanderInvalidOutputCompletions: number;
+  commanderNoOutputFailureCompletions: number;
+  commanderRejectedCompletions: number;
+  commanderCoalescedRefreshes: number;
+  commanderPlansDelivered: number;
+  commanderRefreshInFlight: boolean;
+  commanderLastOutcome: CommanderRefreshOutcome;
+  commanderActivePlanGeneratedAtTurn: number | null;
+  commanderActivePlanAgeTurns: number | null;
+  commanderDeliveredPlanCriticalEpochChanged: boolean;
+}
+
+function commanderObservationEpoch(input: AgentBrainInput): string {
+  const alivePlayerIDs = input.observation.visiblePlayers
+    .filter((player) => player.isAlive)
+    .map((player) => player.playerID)
+    .sort()
+    .join(",");
+  const incomingPlayerIDs = [
+    ...input.observation.combat.incomingAttackPlayerIDs,
+  ]
+    .sort()
+    .join(",");
+  return [
+    input.observation.phase,
+    input.observation.ownState?.isAlive === false ? "eliminated" : "alive",
+    `rivals=${alivePlayerIDs}`,
+    `incoming=${incomingPlayerIDs}`,
+  ].join("|");
+}
+
+export class CommanderTelemetryAgentBrain implements AgentBrain {
+  readonly brainType: AgentBrain["brainType"];
+
+  constructor(
+    private readonly delegate: AgentBrain,
+    private readonly deferredPlanner: DeferredAgentPlanner,
+  ) {
+    this.brainType = delegate.brainType;
+  }
+
+  async decide(input: AgentBrainInput): Promise<AgentDecision> {
+    const decision = await this.delegate.decide(input);
+    return {
+      ...decision,
+      metadata: {
+        ...(decision.metadata ?? {}),
+        ...this.deferredPlanner.telemetrySnapshot(input),
+      },
+    };
   }
 }
 
@@ -560,6 +833,7 @@ export function createKeystoneBrain(
   });
 
   let planner: AgentPlanner;
+  let deferredPlanner: DeferredAgentPlanner | null = null;
   if (options.mode === "mock") {
     planner = new MockLlmPlanner(options.profile);
   } else {
@@ -577,20 +851,26 @@ export function createKeystoneBrain(
     // Pure-blocking Commander: await the LLM planner directly so the bedrock call
     // sits on the wire critical path (visible latency, loud failures). Otherwise
     // the in-clock DeferredAgentPlanner refreshes it in the background.
-    planner = options.blocking
-      ? llmPlanner
-      : new DeferredAgentPlanner(
-          llmPlanner,
-          new RuleAgentPlanner(options.profile),
-        );
+    if (options.blocking) {
+      planner = llmPlanner;
+    } else {
+      deferredPlanner = new DeferredAgentPlanner(
+        llmPlanner,
+        new RuleAgentPlanner(options.profile),
+      );
+      planner = deferredPlanner;
+    }
   }
 
-  return new PlannerExecutorAgentBrain({
+  const brain = new PlannerExecutorAgentBrain({
     profile: options.profile,
     planner,
     executor,
     planEveryDecisionSteps,
   });
+  return deferredPlanner === null
+    ? brain
+    : new CommanderTelemetryAgentBrain(brain, deferredPlanner);
 }
 
 function redactPlayerUrl(url: string): string {
