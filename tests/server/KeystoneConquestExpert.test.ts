@@ -69,6 +69,13 @@ function committedAttack(
   };
 }
 
+function canonicalNuke(id: string, targetPlayerID: string | null): LegalAction {
+  return {
+    ...action(id, "nuke", targetPlayerID),
+    risk: { level: "high" },
+  };
+}
+
 function player(
   playerID: string,
   overrides: Partial<AgentVisiblePlayer> = {},
@@ -448,6 +455,44 @@ describe("Keystone Conquest expert", () => {
     expect(proposal?.rationale).toContain("commitmentBP=1000");
   });
 
+  it("does not call a tiny but overwhelmingly stronger target a finish", () => {
+    const model = world({
+      actions: [committedAttack("attack:tiny-strong", "TINY_STRONG", 10, 1)],
+      players: [
+        player("TINY_STRONG", {
+          troops: 750_000,
+          relativeTroopRatio: 0.1,
+          tileShare: 0.01,
+        }),
+      ],
+      turnNumber: 100,
+    });
+
+    expect(model.actions[0]?.actionRiskBP).toBe(10_000);
+    expect(proposeKeystoneConquest(model)).toBeNull();
+  });
+
+  it("uses a cheap finish for a low-share target only with bounded evidence", () => {
+    const model = world({
+      actions: [
+        committedAttack("finish:10", "SMALL", 10),
+        committedAttack("finish:25", "SMALL", 25),
+        committedAttack("finish:40", "SMALL", 40),
+      ],
+      players: [
+        player("SMALL", {
+          relativeTroopRatio: 0.9,
+          tileShare: 0.01,
+        }),
+      ],
+    });
+
+    expect(proposeKeystoneConquest(model)?.actionID).toBe("finish:10");
+    expect(proposeKeystoneConquest(model)?.rationale).toContain(
+      "evidence=finish",
+    );
+  });
+
   it("allows a bounded leader strike only when conventional conquest is unavailable", () => {
     const leader = player("LEADER", {
       relativeTroopRatio: 1.1,
@@ -455,11 +500,12 @@ describe("Keystone Conquest expert", () => {
       sharesBorder: false,
     });
     const model = world({
-      actions: [action("nuke:leader", "nuke", "LEADER", 0.2)],
+      actions: [canonicalNuke("nuke:leader", "LEADER")],
       players: [leader],
       turnNumber: 2_400,
     });
 
+    expect(model.actions[0]?.actionRiskBP).toBe(7_500);
     expect(proposeKeystoneConquest(model)).toMatchObject({
       actionID: "nuke:leader",
       commitmentKey: "conquest:target:LEADER",
@@ -470,7 +516,7 @@ describe("Keystone Conquest expert", () => {
 
     const conventionalAvailable = world({
       actions: [
-        action("nuke:leader", "nuke", "LEADER", 0.2),
+        canonicalNuke("nuke:leader", "LEADER"),
         committedAttack("attack:safe", "SAFE", 25),
       ],
       players: [
@@ -482,6 +528,36 @@ describe("Keystone Conquest expert", () => {
     expect(proposeKeystoneConquest(conventionalAvailable)?.actionID).toBe(
       "attack:safe",
     );
+  });
+
+  it("rejects over-canonical nuke risk, malformed targeting, and weak leader evidence", () => {
+    const leader = player("LEADER", {
+      relativeTroopRatio: 1.1,
+      tileShare: 0.5,
+      sharesBorder: false,
+    });
+    const overCanonical = world({
+      actions: [action("nuke:over-risk", "nuke", "LEADER", 0.76)],
+      players: [leader],
+    });
+    const malformed = world({
+      actions: [canonicalNuke("nuke:no-target", null)],
+      players: [leader],
+    });
+    const weakEvidence = world({
+      actions: [canonicalNuke("nuke:minor", "MINOR")],
+      players: [
+        player("MINOR", {
+          relativeTroopRatio: 1.1,
+          tileShare: 0.2,
+          sharesBorder: false,
+        }),
+      ],
+    });
+
+    expect(proposeKeystoneConquest(overCanonical)).toBeNull();
+    expect(proposeKeystoneConquest(malformed)).toBeNull();
+    expect(proposeKeystoneConquest(weakEvidence)).toBeNull();
   });
 
   it("is order invariant with deterministic telemetry and tie-breaking", () => {

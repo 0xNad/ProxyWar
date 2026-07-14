@@ -51,11 +51,15 @@ interface ScoredConquestAction {
 const MIN_OWN_READINESS_BP = 3_500;
 const MIN_STRENGTH_RATIO_BP = 11_500;
 const FINISH_TILE_SHARE_BP = 200;
+const MIN_LOW_SHARE_FINISH_RATIO_BP = 8_000;
+const MIN_LOW_SHARE_FINISH_OWN_BP = 6_000;
+const MAX_LOW_SHARE_FINISH_RISK_BP = 5_000;
 const LEADER_TILE_SHARE_BP = 3_500;
 const REMOTE_NUKE_LEADER_SHARE_BP = 4_500;
 const MIN_LEADER_PRESSURE_RATIO_BP = 8_000;
 const MIN_LEADER_PRESSURE_OWN_BP = 6_000;
 const MAX_LEADER_PRESSURE_RISK_BP = 5_000;
+const MAX_CANONICAL_NUKE_RISK_BP = 7_500;
 const MAX_TURN_WINDOW_BP = 1_500;
 
 const kindPreference: Readonly<Record<ConquestActionKind, number>> =
@@ -174,7 +178,10 @@ function conventionalEvidence(
   target: TargetContext,
   ownReadinessBP: number,
 ): Exclude<ConquestEvidence, "hostile-contact" | "leader-strike"> | null {
-  if (isFinishTarget(target)) {
+  if (
+    target.target.troops === 0 ||
+    isBoundedLowShareFinish(action, target, ownReadinessBP)
+  ) {
     return "finish";
   }
   if (target.relativeTroopRatioBP >= MIN_STRENGTH_RATIO_BP) {
@@ -334,8 +341,8 @@ function scoreNukeAction(
     conventionalAvailable ||
     world.canExpandIntoNeutral ||
     ownReadinessBP < MIN_LEADER_PRESSURE_OWN_BP ||
-    action.actionRiskBP > MAX_LEADER_PRESSURE_RISK_BP ||
-    isFinishTarget(target) ||
+    action.actionRiskBP > MAX_CANONICAL_NUKE_RISK_BP ||
+    target.target.troops === 0 ||
     target.targetTileShareBP === null ||
     target.targetTileShareBP < LEADER_TILE_SHARE_BP ||
     target.relativeTroopRatioBP < MIN_LEADER_PRESSURE_RATIO_BP ||
@@ -395,11 +402,17 @@ function targetContext(
   });
 }
 
-function isFinishTarget(target: TargetContext): boolean {
+function isBoundedLowShareFinish(
+  action: ConquestAction & { readonly kind: ConventionalKind },
+  target: TargetContext,
+  ownReadinessBP: number,
+): boolean {
   return (
-    target.target.troops === 0 ||
-    (target.targetTileShareBP !== null &&
-      target.targetTileShareBP <= FINISH_TILE_SHARE_BP)
+    target.targetTileShareBP !== null &&
+    target.targetTileShareBP <= FINISH_TILE_SHARE_BP &&
+    target.relativeTroopRatioBP >= MIN_LOW_SHARE_FINISH_RATIO_BP &&
+    ownReadinessBP >= MIN_LOW_SHARE_FINISH_OWN_BP &&
+    action.actionRiskBP <= MAX_LOW_SHARE_FINISH_RISK_BP
   );
 }
 
