@@ -98,6 +98,10 @@ export interface WriteAgentLeagueRunArtifactsInput {
   brainMode: AgentBrainType;
   runnerMode?: "realtime" | "step-locked";
   runnerConfig?: {
+    /** Optional deterministic episode seed; null means the legacy default. */
+    seed?: number | null;
+    /** Game id actually used to seed the simulation. */
+    gameID?: string | null;
     turnsPerDecisionStep?: number | null;
     turnsPerDecisionSchedule?: number[] | null;
     maxDecisionMs?: number | null;

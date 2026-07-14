@@ -90,6 +90,12 @@
             "Medium"
           ]
         },
+        "seed": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 308915775,
+          "description": "Optional deterministic episode seed. Encoded as six base-26 A-Z letters so OpenFront simpleHash remains injective over the supported range."
+        },
         "replay_tail_turns": {
           "type": "integer",
           "minimum": 0,
@@ -121,6 +127,8 @@
       "type": "object",
       "additionalProperties": false,
       "required": [
+        "seed",
+        "game_id",
         "scores",
         "winner_slot",
         "turn_count",
@@ -131,6 +139,18 @@
         "players"
       ],
       "properties": {
+        "seed": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0,
+          "maximum": 308915775
+        },
+        "game_id": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9]{8}$"
+        },
         "scores": {
           "type": "array",
           "minItems": 2,

@@ -13,8 +13,21 @@ import {
   injectCoworldSplash,
   type CoworldAppShellRoute,
 } from "./coworld-appshell.ts";
+import {
+  assembleCoworldReplay,
+  assembleCoworldResults,
+  assembleCoworldRunnerConfig,
+  publicCoworldConfig,
+  replayCoworldConfig,
+  type CoworldEpisodeConfig as CoworldConfig,
+} from "./coworld-episode-output.ts";
 import { resolveWinnerSlot, type WinnerRef } from "./coworld-results.ts";
 import { competitiveSeatSpecs } from "./coworld-seat-specs.ts";
+import {
+  coworldEpisodeSeedContract,
+  parseCoworldSeedConfig,
+  type CoworldEpisodeSeedContract,
+} from "./coworld-seed.ts";
 
 const localRoot = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
@@ -69,20 +82,9 @@ type PendingDecision = {
   legalActions: LegalActionView[];
 };
 
-type CoworldConfig = {
-  tokens: string[];
-  players: Array<{ name: string }>;
-  max_decision_steps: number;
-  turns_per_decision_step: number;
-  max_decision_ms: number;
-  map: string;
-  map_size: string;
-  difficulty: string;
-  replay_tail_turns?: number;
-  player_connect_timeout_seconds?: number;
-};
-
 type CoworldResults = {
+  seed: number | null;
+  game_id: string;
   scores: number[];
   winner_slot: number | null;
   turn_count: number | null;
@@ -743,7 +745,7 @@ async function runCoworldReplayContainer(): Promise<void> {
     requiredEnv("COGAME_LOAD_REPLAY_URI"),
   );
   const config =
-    replayConfig(replayPayload) ??
+    replayCoworldConfig(replayPayload) ??
     ({
       tokens: [],
       players: [],
@@ -807,14 +809,14 @@ async function runProxyWarEpisode(
     startingGold: 200000,
     maxPlayers: config.tokens.length,
   };
+  const seedContract = coworldEpisodeSeedContract(config);
   // NOTE: the 3rd GameServer arg is `createdAt` (a wall-clock game-start
-  // timestamp), NOT the RNG seed. The simulation RNG is seeded from the FIXED
-  // match id "COWRLD01" in GameRunner (simpleHash(gameID)), so the SCORED outcome
-  // and the winner are deterministic given the policies regardless of this
-  // timestamp. (A fixed tiny value would be a footgun for any future code that
-  // calls GameServer.phase(), so use a real now.)
+  // timestamp), NOT the RNG seed. GameRunner seeds the simulation from the game
+  // id (simpleHash(gameID)). A configured Coworld seed therefore maps to one
+  // stable valid game id; omitted seed keeps the legacy COWRLD01 id exactly.
+  // Keep a real createdAt value because GameServer.phase() depends on it.
   const game = new modules.GameServer(
-    "COWRLD01",
+    seedContract.gameID,
     log,
     Date.now(),
     {
@@ -962,21 +964,24 @@ async function runProxyWarEpisode(
       scenario: "coworld",
       brainMode: "external-http",
       runnerMode: "step-locked",
-      runnerConfig: {
-        turnsPerDecisionStep: stepResult.turnsPerDecisionStep,
-        maxDecisionMs: stepResult.maxDecisionMs,
-        maxSteps: config.max_decision_steps,
-        stepsCompleted: stepResult.stepsCompleted,
-        mirrorCatchupSucceeded: stepResult.mirrorCatchupSucceeded,
-        onlyHoldReason: stepResult.onlyHoldReason,
-        agents: specs.length,
-        bots: 0,
-        nations: "disabled",
-        map: selectedGameConfig.gameMap,
-        mapSize: selectedGameConfig.gameMapSize,
-        difficulty: selectedGameConfig.difficulty,
-        variedSpawns: false,
-      },
+      runnerConfig: assembleCoworldRunnerConfig(
+        {
+          turnsPerDecisionStep: stepResult.turnsPerDecisionStep,
+          maxDecisionMs: stepResult.maxDecisionMs,
+          maxSteps: config.max_decision_steps,
+          stepsCompleted: stepResult.stepsCompleted,
+          mirrorCatchupSucceeded: stepResult.mirrorCatchupSucceeded,
+          onlyHoldReason: stepResult.onlyHoldReason,
+          agents: specs.length,
+          bots: 0,
+          nations: "disabled",
+          map: selectedGameConfig.gameMap,
+          mapSize: selectedGameConfig.gameMapSize,
+          difficulty: selectedGameConfig.difficulty,
+          variedSpawns: false,
+        },
+        seedContract,
+      ),
       startedAt,
       completedAt,
       records: league.decisionRecords(),
@@ -995,33 +1000,40 @@ async function runProxyWarEpisode(
       config,
       finalState,
       records: league.decisionRecords(),
+      seedContract,
     });
     return {
       results,
-      replayPayload: {
-        schemaVersion: 1,
-        replayKind: "proxywar-coworld-local-poc",
-        runID,
-        matchID: game.id,
-        config: publicCoworldConfig(config),
-        results,
-        finalState,
-        proxyWarArtifacts: artifacts,
-        inlineRunArtifacts: {
-          "game-record.json": JSON.stringify(gameRecord),
-          "decisions.jsonl": await fs.readFile(artifacts.decisionsPath, "utf8"),
-          "match-summary.json": await fs.readFile(
-            artifacts.summaryPath,
-            "utf8",
-          ),
-          "spectator-telemetry.json": await fs.readFile(
-            artifacts.spectatorTelemetryPath,
-            "utf8",
-          ),
+      replayPayload: assembleCoworldReplay(
+        {
+          schemaVersion: 1,
+          replayKind: "proxywar-coworld-local-poc",
+          runID,
+          matchID: game.id,
+          config: publicCoworldConfig(config),
+          results,
+          finalState,
+          proxyWarArtifacts: artifacts,
+          inlineRunArtifacts: {
+            "game-record.json": JSON.stringify(gameRecord),
+            "decisions.jsonl": await fs.readFile(
+              artifacts.decisionsPath,
+              "utf8",
+            ),
+            "match-summary.json": await fs.readFile(
+              artifacts.summaryPath,
+              "utf8",
+            ),
+            "spectator-telemetry.json": await fs.readFile(
+              artifacts.spectatorTelemetryPath,
+              "utf8",
+            ),
+          },
+          spectatorReplay: compactSpectatorReplay,
+          spectatorSnapshotCount: spectatorSnapshots.length,
         },
-        spectatorReplay: compactSpectatorReplay,
-        spectatorSnapshotCount: spectatorSnapshots.length,
-      },
+        seedContract,
+      ),
       proxyWarArtifactDir: artifacts.directory,
     };
   } finally {
@@ -1244,7 +1256,7 @@ async function requireWebSocketMessage(url: string): Promise<string> {
 async function loadConfig(): Promise<CoworldConfig> {
   if (process.env.COGAME_CONFIG_URI) {
     const raw = await readUri(process.env.COGAME_CONFIG_URI);
-    return JSON.parse(raw);
+    return parseCoworldSeedConfig(JSON.parse(raw)) as CoworldConfig;
   }
   const manifest = JSON.parse(
     await fs.readFile(
@@ -1252,10 +1264,10 @@ async function loadConfig(): Promise<CoworldConfig> {
       "utf8",
     ),
   );
-  return {
+  return parseCoworldSeedConfig({
     ...manifest.certification.game_config,
     tokens: ["local-token-slot-0", "local-token-slot-1"],
-  };
+  }) as CoworldConfig;
 }
 
 async function readUri(uri: string): Promise<string> {
@@ -1309,21 +1321,6 @@ async function readReplayPayload(uri: string): Promise<unknown> {
   const raw = await readUriBuffer(uri);
   const inflated = uri.endsWith(".z") ? zlib.inflateSync(raw) : raw;
   return JSON.parse(inflated.toString("utf8"));
-}
-
-function publicCoworldConfig(config: CoworldConfig): Record<string, unknown> {
-  return {
-    players: config.players,
-    max_decision_steps: config.max_decision_steps,
-    turns_per_decision_step: config.turns_per_decision_step,
-    max_decision_ms: config.max_decision_ms,
-    map: config.map,
-    map_size: config.map_size,
-    difficulty: config.difficulty,
-    replay_tail_turns: config.replay_tail_turns,
-    player_connect_timeout_seconds: config.player_connect_timeout_seconds,
-    player_count: config.tokens.length,
-  };
 }
 
 function publicReplayPayload(payload: unknown): unknown {
@@ -1383,44 +1380,6 @@ function spectatorSnapshotsFromReplay(
   return Array.isArray(replay.snapshots) ? replay.snapshots : [];
 }
 
-function replayConfig(payload: unknown): CoworldConfig | null {
-  if (
-    payload !== null &&
-    typeof payload === "object" &&
-    "config" in payload &&
-    (payload as { config?: unknown }).config !== null &&
-    typeof (payload as { config?: unknown }).config === "object"
-  ) {
-    const config = (payload as { config: Record<string, unknown> }).config;
-    const players = Array.isArray(config.players)
-      ? (config.players as Array<{ name: string }>)
-      : [];
-    const playerCount =
-      typeof config.player_count === "number"
-        ? config.player_count
-        : players.length;
-    return {
-      tokens: Array.from({ length: playerCount }, () => ""),
-      players,
-      max_decision_steps: Number(config.max_decision_steps ?? 1),
-      turns_per_decision_step: Number(config.turns_per_decision_step ?? 1),
-      max_decision_ms: Number(config.max_decision_ms ?? 1000),
-      map: String(config.map ?? "Pangaea"),
-      map_size: String(config.map_size ?? "Compact"),
-      difficulty: String(config.difficulty ?? "Easy"),
-      replay_tail_turns:
-        typeof config.replay_tail_turns === "number"
-          ? config.replay_tail_turns
-          : undefined,
-      player_connect_timeout_seconds:
-        typeof config.player_connect_timeout_seconds === "number"
-          ? config.player_connect_timeout_seconds
-          : 1,
-    };
-  }
-  return null;
-}
-
 async function createWorkspace(kind: string): Promise<string> {
   const root = path.join(localRoot, "artifacts", kind);
   await fs.mkdir(root, { recursive: true });
@@ -1458,6 +1417,7 @@ function coworldResults(input: {
   config: CoworldConfig;
   finalState: ReturnType<typeof finalKnownState>;
   records: any[];
+  seedContract: CoworldEpisodeSeedContract;
 }): CoworldResults {
   const totalTiles = input.finalState.players.reduce(
     (sum, player) => sum + Math.max(0, player.tilesOwned ?? 0),
@@ -1474,34 +1434,37 @@ function coworldResults(input: {
     }
     return player.tilesOwned / totalTiles;
   });
-  return {
-    scores,
-    winner_slot,
-    turn_count: input.finalState.turnCount,
-    tick: input.finalState.tick,
-    decision_count: input.records.length,
-    accepted_decision_count: input.records.filter(
-      (record) => record.result.accepted,
-    ).length,
-    // A decision is a fallback if it fell back OR the LLM planner degraded —
-    // a degraded-but-not-fallback decision (e.g. the standing directive kept
-    // executing after a Commander failure) must not read as 0 fallbacks.
-    fallback_count: input.records.filter(
-      (record) =>
-        record.decisionMetadata?.fallbackUsed === true ||
-        record.decisionMetadata?.llmPlannerDegraded === true,
-    ).length,
-    degraded_count: input.records.filter(
-      (record) => record.decisionMetadata?.llmPlannerDegraded === true,
-    ).length,
-    players: input.finalState.players.map((player, slot) => ({
-      slot,
-      name: input.config.players[slot]?.name ?? player.username,
-      score: scores[slot] ?? 0,
-      tiles_owned: player.tilesOwned,
-      is_alive: player.isAlive,
-    })),
-  };
+  return assembleCoworldResults(
+    {
+      scores,
+      winner_slot,
+      turn_count: input.finalState.turnCount,
+      tick: input.finalState.tick,
+      decision_count: input.records.length,
+      accepted_decision_count: input.records.filter(
+        (record) => record.result.accepted,
+      ).length,
+      // A decision is a fallback if it fell back OR the LLM planner degraded —
+      // a degraded-but-not-fallback decision (e.g. the standing directive kept
+      // executing after a Commander failure) must not read as 0 fallbacks.
+      fallback_count: input.records.filter(
+        (record) =>
+          record.decisionMetadata?.fallbackUsed === true ||
+          record.decisionMetadata?.llmPlannerDegraded === true,
+      ).length,
+      degraded_count: input.records.filter(
+        (record) => record.decisionMetadata?.llmPlannerDegraded === true,
+      ).length,
+      players: input.finalState.players.map((player, slot) => ({
+        slot,
+        name: input.config.players[slot]?.name ?? player.username,
+        score: scores[slot] ?? 0,
+        tiles_owned: player.tilesOwned,
+        is_alive: player.isAlive,
+      })),
+    },
+    input.seedContract,
+  );
 }
 
 function finalKnownState(input: {
