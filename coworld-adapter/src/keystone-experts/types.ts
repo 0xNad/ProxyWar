@@ -128,7 +128,7 @@ export interface KeystoneActionFacts {
   readonly planAligned: boolean;
   readonly actionRiskBP: number;
   /** Canonical troopPercent/troopPercentage metadata normalized to [0, 10_000]. */
-  readonly troopCommitmentBP: number | null;
+  readonly troopCommitmentBP?: number | null;
   /** Exactly one expert domain, a protected system tier, or null when unsafe to classify. */
   readonly actionOwner: KeystoneActionOwner;
 }

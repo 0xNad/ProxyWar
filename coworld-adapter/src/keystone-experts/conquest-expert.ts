@@ -159,7 +159,7 @@ function scoreConventionalAction(
   }
 
   const commitmentQualityBP = commitmentQualityBasisPoints(
-    action.troopCommitmentBP,
+    action.troopCommitmentBP ?? null,
     evidence,
   );
   const components = conventionalComponents(
