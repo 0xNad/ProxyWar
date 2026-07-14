@@ -880,20 +880,68 @@ describe("Keystone Coworld single-action conversion executor", () => {
     ).toThrow(/empty offered action set/);
   });
 
-  it("fails closed on duplicate offered ids before invoking the ranker", () => {
-    const rankActions = vi.fn<KeystoneActionRanker>(() => []);
+  it("drops ambiguous duplicate ids without suppressing unrelated legal actions", () => {
+    const rankActions = vi.fn<KeystoneActionRanker>(({ input: current }) =>
+      ranked(current.legalActions),
+    );
     const duplicate = neutral(35);
+
+    const decision = executor(rankActions).decide(
+      input({
+        turn: 400,
+        actions: [duplicate, { ...duplicate }, hold],
+        neutral: true,
+      }),
+      plan(),
+    );
+
+    expect(decision.actionID).toBe(hold.id);
+    expect(rankActions).toHaveBeenCalledOnce();
+    expect(rankActions.mock.calls[0]![0].input.legalActions).toEqual([hold]);
+  });
+
+  it("keeps expanding when two quick-chat intents collide on one wire id", () => {
+    const rankActions = vi.fn<KeystoneActionRanker>(({ input: current }) =>
+      ranked(current.legalActions),
+    );
+    const expansion = neutral(35);
+    const chatID = "quick_chat:ALLY:attack.focus";
+    const chatOne = action(chatID, "quick_chat", {
+      recipientID: "ALLY",
+      targetID: "RIVAL-1",
+      quickChatKey: "attack.focus",
+    });
+    const chatTwo = action(chatID, "quick_chat", {
+      recipientID: "ALLY",
+      targetID: "RIVAL-2",
+      quickChatKey: "attack.focus",
+    });
+
+    const decision = executor(rankActions).decide(
+      input({
+        turn: 1_300,
+        actions: [expansion, chatOne, chatTwo, hold],
+        neutral: true,
+      }),
+      plan(),
+    );
+
+    expect(decision.actionID).toBe(expansion.id);
+    expect(rankActions.mock.calls[0]![0].input.legalActions).toEqual([
+      expansion,
+      hold,
+    ]);
+  });
+
+  it("fails closed when every offered action id is ambiguous", () => {
+    const rankActions = vi.fn<KeystoneActionRanker>(() => []);
 
     expect(() =>
       executor(rankActions).decide(
-        input({
-          turn: 400,
-          actions: [duplicate, { ...duplicate }, hold],
-          neutral: true,
-        }),
+        input({ turn: 400, actions: [hold, { ...hold }] }),
         plan(),
       ),
-    ).toThrow(/duplicate offered action ids/);
+    ).toThrow(/every offered action id is ambiguous/);
     expect(rankActions).not.toHaveBeenCalled();
   });
 

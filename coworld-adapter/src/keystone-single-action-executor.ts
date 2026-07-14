@@ -117,23 +117,39 @@ export class KeystoneSingleActionExecutor implements AgentExecutor {
         "Coworld single-action executor received an empty offered action id",
       );
     }
-    if (new Set(offeredIDs).size !== offeredIDs.length) {
-      throw new Error(
-        "Coworld single-action executor received duplicate offered action ids",
-      );
-    }
-    const offeredByID = new Map(
-      input.legalActions.map((action) => [action.id, action]),
+    const offeredIDCounts = offeredIDs.reduce((counts, id) => {
+      counts.set(id, (counts.get(id) ?? 0) + 1);
+      return counts;
+    }, new Map<string, number>());
+    // A LegalAction.id is the complete wire contract. If two offered actions
+    // collide on the same id, selecting it cannot identify which intent the
+    // validator will resolve. Drop only those ambiguous rows so an unrelated
+    // social-action collision cannot force the whole competitive turn to hold.
+    const unambiguousOffered = input.legalActions.filter(
+      (action) => offeredIDCounts.get(action.id) === 1,
     );
-    if (offeredByID.size === 0) {
+    const offeredByID = new Map(
+      unambiguousOffered.map((action) => [action.id, action]),
+    );
+    if (input.legalActions.length === 0) {
       throw new Error(
         "Coworld single-action executor cannot select from an empty offered action set",
       );
     }
+    if (offeredByID.size === 0) {
+      throw new Error(
+        "Coworld single-action executor cannot select when every offered action id is ambiguous",
+      );
+    }
+
+    const rankerInput =
+      unambiguousOffered.length === input.legalActions.length
+        ? input
+        : { ...input, legalActions: unambiguousOffered };
 
     const ranked = sanitizeRankedActions(
       this.rankActions({
-        input,
+        input: rankerInput,
         profile: this.profile,
         plan,
         settings: { ...this.settings },
@@ -143,7 +159,7 @@ export class KeystoneSingleActionExecutor implements AgentExecutor {
     const rankedActions = ranked
       .map((candidate) => offeredByID.get(candidate.id))
       .filter((action): action is LegalAction => action !== undefined);
-    const allActions = appendUnrankedOffered(rankedActions, input.legalActions);
+    const allActions = appendUnrankedOffered(rankedActions, unambiguousOffered);
     const previousState = this.state;
 
     if (input.observation.phase === "spawn") {
