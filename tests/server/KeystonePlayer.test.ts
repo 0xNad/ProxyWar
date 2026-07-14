@@ -8,12 +8,17 @@ import {
   DeferredAgentPlanner,
   isModelUnavailableError,
   KEYSTONE_EXECUTOR_SETTINGS,
+  keystoneExpertCouncilShadowFromEnv,
   keystoneModeFromEnv,
   keystoneSingleActionFromEnv,
   requestToBrainInput,
   transportFallbackResponse,
   type KeystoneModules,
 } from "../../coworld-adapter/src/keystone-player";
+import {
+  KEYSTONE_SHADOW_COUNCIL_METADATA_KEY,
+  KeystoneShadowCouncilTelemetryAgentBrain,
+} from "../../coworld-adapter/src/keystone-shadow-council";
 import { AgentObservationBuilder } from "../../src/server/agents/AgentObservationBuilder";
 import type {
   AgentPlanDecision,
@@ -180,6 +185,69 @@ describe("Coworld keystone player", () => {
       await explicitOff.decide(spawnBrainInput()),
     );
   });
+
+  it("constructs no shadow wrapper when the council flag is absent or false", () => {
+    const implicitOff = createKeystoneBrain(modules, {
+      mode: "mock",
+      profile: "aggressive",
+    });
+    const explicitOff = createKeystoneBrain(modules, {
+      mode: "mock",
+      profile: "aggressive",
+      expertCouncilShadow: false,
+    });
+
+    expect(implicitOff).not.toBeInstanceOf(
+      KeystoneShadowCouncilTelemetryAgentBrain,
+    );
+    expect(explicitOff).not.toBeInstanceOf(
+      KeystoneShadowCouncilTelemetryAgentBrain,
+    );
+    expect(implicitOff.constructor).toBe(explicitOff.constructor);
+  });
+
+  it.each([false, true])(
+    "keeps %s single-action authority exact when shadow observation is enabled",
+    async (singleActionExecutor) => {
+      const baseline = createKeystoneBrain(modules, {
+        mode: "mock",
+        profile: "aggressive",
+        singleActionExecutor,
+      });
+      const shadow = createKeystoneBrain(modules, {
+        mode: "mock",
+        profile: "aggressive",
+        singleActionExecutor,
+        expertCouncilShadow: true,
+      });
+      const log = vi.spyOn(console, "log").mockImplementation(() => undefined);
+      try {
+        const baselineDecision = await baseline.decide(spawnBrainInput());
+        const shadowDecision = await shadow.decide(spawnBrainInput());
+
+        expect(shadowDecision.actionID).toBe(baselineDecision.actionID);
+        expect(shadowDecision.actionIDs).toEqual(baselineDecision.actionIDs);
+        expect(shadowDecision.reason).toBe(baselineDecision.reason);
+        expect(shadowDecision.metadata?.executorSource).toBe(
+          baselineDecision.metadata?.executorSource,
+        );
+        expect(shadowDecision.metadata?.actionSelectionSource).toBe(
+          baselineDecision.metadata?.actionSelectionSource,
+        );
+        expect(
+          shadowDecision.metadata?.[KEYSTONE_SHADOW_COUNCIL_METADATA_KEY],
+        ).toEqual(expect.any(String));
+        expect(shadowDecision.metadata?.fallbackUsed).toBe(
+          baselineDecision.metadata?.fallbackUsed,
+        );
+        expect(shadowDecision.metadata?.llmPlannerDegraded).toBe(
+          baselineDecision.metadata?.llmPlannerDegraded,
+        );
+      } finally {
+        log.mockRestore();
+      }
+    },
+  );
 
   it("arms the Coworld treatment in the same image with exact Keystone settings", async () => {
     const ranker = vi.fn(plannerExecutorModule.rankLegalActionsForExecution);
@@ -478,6 +546,58 @@ describe("Coworld keystone player", () => {
       confidence: 0.85,
     });
     expect((response.reason as string).length).toBe(500);
+    expect(response).not.toHaveProperty("shadowCouncil");
+  });
+
+  it("places allowlisted bounded shadow telemetry on the Coworld wire", () => {
+    const compact = JSON.stringify({
+      v: 1,
+      o: 2,
+      g: 1,
+      x: 0,
+      h: "healthy",
+      p: 5,
+      e: 0,
+      j: 0,
+      w: "0123456789abcdef",
+      r: "-",
+      d: "fedcba9876543210",
+      m: 125,
+      a: "disagree",
+      u: 450,
+    });
+    const response = decisionToResponse("req_shadow", {
+      actionID: "hold:wait",
+      reason: '"\n\\'.repeat(200),
+      metadata: {
+        [KEYSTONE_SHADOW_COUNCIL_METADATA_KEY]: compact,
+      },
+    });
+
+    expect(response.shadowCouncil).toBe(compact);
+    expect(JSON.stringify(response).length).toBeLessThan(1_000);
+
+    const unexpected = decisionToResponse("req_shadow_bad", {
+      actionID: "hold:wait",
+      reason: "hold",
+      metadata: {
+        [KEYSTONE_SHADOW_COUNCIL_METADATA_KEY]: JSON.stringify({
+          ...JSON.parse(compact),
+          secret: "must-not-cross-wire",
+        }),
+      },
+    });
+    expect(unexpected).not.toHaveProperty("shadowCouncil");
+    expect(JSON.stringify(unexpected)).not.toContain("must-not-cross-wire");
+
+    const oversized = decisionToResponse("req_shadow_large", {
+      actionID: "hold:wait",
+      reason: "hold",
+      metadata: {
+        [KEYSTONE_SHADOW_COUNCIL_METADATA_KEY]: "x".repeat(301),
+      },
+    });
+    expect(oversized).not.toHaveProperty("shadowCouncil");
   });
 
   it("adds Commander telemetry without changing the delegated decision", async () => {
@@ -519,6 +639,22 @@ describe("Coworld keystone player", () => {
   it("places bounded Commander telemetry before a worst-case wire reason", () => {
     const requestID = `req_${"r".repeat(24)}`;
     const actionID = `attack:rival:${"9".repeat(37)}`;
+    const shadowCouncil = JSON.stringify({
+      v: 1,
+      o: Number.MAX_SAFE_INTEGER,
+      g: Number.MAX_SAFE_INTEGER,
+      x: 1,
+      h: "unavailable",
+      p: 15,
+      e: 15,
+      j: 2_047,
+      w: "0123456789abcdef",
+      r: "fedcba9876543210",
+      d: "0011223344556677",
+      m: Number.MAX_SAFE_INTEGER,
+      a: "disagree",
+      u: Number.MAX_SAFE_INTEGER,
+    });
     const response = decisionToResponse(requestID, {
       actionID,
       actionIDs: [actionID, "hold:wait"],
@@ -542,6 +678,7 @@ describe("Coworld keystone player", () => {
         commanderDeliveredPlanCriticalEpochChanged: true,
         llmPlannerDegraded: true,
         plannerFallbackUsed: true,
+        [KEYSTONE_SHADOW_COUNCIL_METADATA_KEY]: shadowCouncil,
       },
     });
     const serialized = JSON.stringify(response);
@@ -550,6 +687,7 @@ describe("Coworld keystone player", () => {
     expect(response.requestID).toBe(requestID);
     expect(response.llmPlannerDegraded).toBe(true);
     expect(response.fallbackUsed).toBe(true);
+    expect(response.shadowCouncil).toBe(shadowCouncil);
     expect(response.reason as string).toMatch(
       /\[wire carries primary only; 1 batched follow-up\(s\) not executed\]$/,
     );
@@ -582,6 +720,35 @@ describe("Coworld keystone player", () => {
     expect(() =>
       keystoneModeFromEnv({ PROXYWAR_KEYSTONE_MODE: "warp-drive" }),
     ).toThrow(/Unknown PROXYWAR_KEYSTONE_MODE/);
+  });
+
+  it("parses the shadow-council flag strictly and defaults it off", () => {
+    expect(keystoneExpertCouncilShadowFromEnv({})).toBe(false);
+    expect(
+      keystoneExpertCouncilShadowFromEnv({
+        PROXYWAR_KEYSTONE_EXPERT_COUNCIL_SHADOW: "0",
+      }),
+    ).toBe(false);
+    expect(
+      keystoneExpertCouncilShadowFromEnv({
+        PROXYWAR_KEYSTONE_EXPERT_COUNCIL_SHADOW: " FALSE ",
+      }),
+    ).toBe(false);
+    expect(
+      keystoneExpertCouncilShadowFromEnv({
+        PROXYWAR_KEYSTONE_EXPERT_COUNCIL_SHADOW: "1",
+      }),
+    ).toBe(true);
+    expect(
+      keystoneExpertCouncilShadowFromEnv({
+        PROXYWAR_KEYSTONE_EXPERT_COUNCIL_SHADOW: " true ",
+      }),
+    ).toBe(true);
+    expect(() =>
+      keystoneExpertCouncilShadowFromEnv({
+        PROXYWAR_KEYSTONE_EXPERT_COUNCIL_SHADOW: "yes",
+      }),
+    ).toThrow(/expected 0\|1\|false\|true/);
   });
 
   it("single-action env defaults off and rejects ambiguous treatment values", () => {

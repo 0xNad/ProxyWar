@@ -77,11 +77,17 @@ export function arbitrateKeystoneAction(
         ? scored.filter(planAligned)
         : scored;
     const unique = deduplicateActions(eligible, spec.tier, rejections);
-    const selected = unique.sort(compareScoredProposals)[0];
+    const ranked = unique.sort(compareScoredProposals);
+    const selected = ranked[0];
     if (selected !== undefined) {
+      const runnerUp = ranked[1];
       return freezeResult({
         disposition: "proposal",
         selection: selectionFor(spec.tier, selected),
+        runnerUp:
+          runnerUp === undefined ? null : selectionFor(spec.tier, runnerUp),
+        bidMarginBP:
+          runnerUp === undefined ? null : selected.bidBP - runnerUp.bidBP,
         rejections,
       });
     }
@@ -102,6 +108,8 @@ export function arbitrateKeystoneAction(
         bidBP: null,
         planAligned: hold.planAligned,
       }),
+      runnerUp: null,
+      bidMarginBP: null,
       rejections,
     });
   }
@@ -109,6 +117,8 @@ export function arbitrateKeystoneAction(
   return freezeResult({
     disposition: "abstain",
     selection: null,
+    runnerUp: null,
+    bidMarginBP: null,
     rejections,
   });
 }
@@ -322,11 +332,15 @@ function rejectionFor(
 function freezeResult(result: {
   disposition: KeystoneArbitrationResult["disposition"];
   selection: KeystoneActionSelection | null;
+  runnerUp: KeystoneActionSelection | null;
+  bidMarginBP: number | null;
   rejections: KeystoneProposalRejection[];
 }): KeystoneArbitrationResult {
   return Object.freeze({
     disposition: result.disposition,
     selection: result.selection,
+    runnerUp: result.runnerUp,
+    bidMarginBP: result.bidMarginBP,
     rejections: Object.freeze([...result.rejections]),
   });
 }

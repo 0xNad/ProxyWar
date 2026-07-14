@@ -37,6 +37,7 @@
 //   PROXYWAR_KEYSTONE_PROFILE    strategy profile (default "aggressive")
 //   PROXYWAR_KEYSTONE_PLAN_EVERY Commander cadence in decision steps (default 3)
 //   PROXYWAR_KEYSTONE_SINGLE_ACTION  1/true arms Coworld sequential conversion
+//   PROXYWAR_KEYSTONE_EXPERT_COUNCIL_SHADOW  1/true observes four-expert council
 //   PROXYWAR_LLM_MODEL_ID / AWS_REGION / PROXYWAR_LLM_TIMEOUT_MS  bedrock mode
 
 import { createRequire } from "node:module";
@@ -44,6 +45,7 @@ import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 import type {
+  AgentExecutor,
   AgentPlanDecision,
   AgentPlanner,
   StrategicPlan,
@@ -57,6 +59,12 @@ import type {
   LegalAction,
 } from "../../src/server/agents/AgentTypes";
 import type { LlmProvider } from "../../src/server/agents/LlmProvider";
+import {
+  KEYSTONE_SHADOW_COUNCIL_METADATA_KEY,
+  KEYSTONE_SHADOW_COUNCIL_METADATA_MAX_BYTES,
+  KeystoneShadowCouncilExecutor,
+  KeystoneShadowCouncilTelemetryAgentBrain,
+} from "./keystone-shadow-council";
 import { KeystoneSingleActionExecutor } from "./keystone-single-action-executor";
 
 type PlannerExecutorModule =
@@ -87,6 +95,8 @@ export interface KeystoneBrainOptions {
   blocking?: boolean;
   /** Coworld-only, default-off sequential conversion treatment. */
   singleActionExecutor?: boolean;
+  /** Coworld-only, default-off four-expert shadow telemetry. */
+  expertCouncilShadow?: boolean;
 }
 
 // Mirrors the league-smoke planner-claude-cli executor settings so local play
@@ -168,6 +178,22 @@ export function keystoneSingleActionFromEnv(
   }
   throw new Error(
     `Unknown PROXYWAR_KEYSTONE_SINGLE_ACTION "${raw}" (expected 0|1|false|true)`,
+  );
+}
+
+export function keystoneExpertCouncilShadowFromEnv(
+  env: NodeJS.ProcessEnv = process.env,
+): boolean {
+  const raw =
+    env.PROXYWAR_KEYSTONE_EXPERT_COUNCIL_SHADOW?.trim().toLowerCase() ?? "";
+  if (raw === "" || raw === "0" || raw === "false") {
+    return false;
+  }
+  if (raw === "1" || raw === "true") {
+    return true;
+  }
+  throw new Error(
+    `Unknown PROXYWAR_KEYSTONE_EXPERT_COUNCIL_SHADOW "${raw}" (expected 0|1|false|true)`,
   );
 }
 
@@ -271,11 +297,15 @@ export function decisionToResponse(
       ? ` [wire carries primary only; ${droppedBatchActions} batched follow-up(s) not executed]`
       : "";
   const commanderTelemetry = commanderTelemetryForWire(decision.metadata);
+  const shadowCouncilTelemetry = shadowCouncilTelemetryForWire(
+    decision.metadata,
+  );
   const responsePrefix = {
     type: "decision_response",
     requestID,
     selectedLegalActionId: decision.actionID,
     ...commanderTelemetry,
+    ...shadowCouncilTelemetry,
     confidence,
     ...(llmPlannerDegraded ? { llmPlannerDegraded: true } : {}),
     ...(plannerFallbackUsed ? { fallbackUsed: true } : {}),
@@ -292,6 +322,79 @@ export function decisionToResponse(
     ...responsePrefix,
     reason: wireReason,
   };
+}
+
+const SHADOW_COUNCIL_COMPACT_KEYS = new Set([
+  "v",
+  "o",
+  "g",
+  "x",
+  "h",
+  "p",
+  "e",
+  "j",
+  "w",
+  "r",
+  "d",
+  "m",
+  "a",
+  "u",
+]);
+
+function shadowCouncilTelemetryForWire(
+  metadata: AgentDecision["metadata"],
+): Record<string, unknown> {
+  const raw = metadata?.[KEYSTONE_SHADOW_COUNCIL_METADATA_KEY];
+  if (
+    typeof raw !== "string" ||
+    Buffer.byteLength(raw, "utf8") > KEYSTONE_SHADOW_COUNCIL_METADATA_MAX_BYTES
+  ) {
+    return {};
+  }
+  try {
+    const parsed = JSON.parse(raw) as Record<string, unknown>;
+    if (
+      parsed === null ||
+      typeof parsed !== "object" ||
+      Array.isArray(parsed) ||
+      Object.keys(parsed).some(
+        (key) => !SHADOW_COUNCIL_COMPACT_KEYS.has(key),
+      ) ||
+      parsed.v !== 1 ||
+      !nonNegativeInteger(parsed.o) ||
+      !nonNegativeInteger(parsed.g) ||
+      (parsed.x !== 0 && parsed.x !== 1) ||
+      !nonNegativeInteger(parsed.p) ||
+      !nonNegativeInteger(parsed.e) ||
+      !nonNegativeInteger(parsed.j) ||
+      !nonNegativeInteger(parsed.u) ||
+      !(parsed.m === null || nonNegativeInteger(parsed.m)) ||
+      !["healthy", "partial", "failed", "unavailable"].includes(
+        String(parsed.h),
+      ) ||
+      !["agree", "disagree", "abstain", "unavailable"].includes(
+        String(parsed.a),
+      ) ||
+      !safeCompactFingerprint(parsed.w) ||
+      !safeCompactFingerprint(parsed.r) ||
+      !safeCompactFingerprint(parsed.d)
+    ) {
+      return {};
+    }
+    return { shadowCouncil: raw };
+  } catch {
+    return {};
+  }
+}
+
+function nonNegativeInteger(value: unknown): boolean {
+  return typeof value === "number" && Number.isInteger(value) && value >= 0;
+}
+
+function safeCompactFingerprint(value: unknown): boolean {
+  return (
+    typeof value === "string" && (value === "-" || /^[0-9a-f]{16}$/.test(value))
+  );
 }
 
 function boundedWireReason(
@@ -849,7 +952,7 @@ export function createKeystoneBrain(
     rankLegalActionsForExecution,
   } = modules.plannerExecutor;
   const planEveryDecisionSteps = options.planEveryDecisionSteps ?? 3;
-  const executor = options.singleActionExecutor
+  const authoritativeExecutor = options.singleActionExecutor
     ? new KeystoneSingleActionExecutor({
         profile: options.profile,
         settings: { ...KEYSTONE_EXECUTOR_SETTINGS },
@@ -859,6 +962,15 @@ export function createKeystoneBrain(
     : new FrontierPolicyExecutor(options.profile, {
         settings: { ...KEYSTONE_EXECUTOR_SETTINGS },
       });
+  let shadowCouncilExecutor: KeystoneShadowCouncilExecutor | null = null;
+  let executor: AgentExecutor = authoritativeExecutor;
+  if (options.expertCouncilShadow === true) {
+    shadowCouncilExecutor = new KeystoneShadowCouncilExecutor({
+      delegate: authoritativeExecutor,
+      actionFollowsCanonicalPlan,
+    });
+    executor = shadowCouncilExecutor;
+  }
 
   let planner: AgentPlanner;
   let deferredPlanner: DeferredAgentPlanner | null = null;
@@ -890,15 +1002,31 @@ export function createKeystoneBrain(
     }
   }
 
-  const brain = new PlannerExecutorAgentBrain({
+  const plannerExecutorBrain = new PlannerExecutorAgentBrain({
     profile: options.profile,
     planner,
     executor,
     planEveryDecisionSteps,
+    ...(shadowCouncilExecutor === null
+      ? {}
+      : {
+          // PlannerExecutor normally derives this with instanceof. Preserve
+          // the wrapped authoritative executor's exact identity in shadow mode.
+          executorSource: options.singleActionExecutor
+            ? "coworld-single-action-v1"
+            : "frontier-policy-executor",
+        }),
   });
-  return deferredPlanner === null
+  const brain: AgentBrain =
+    deferredPlanner === null
+      ? plannerExecutorBrain
+      : new CommanderTelemetryAgentBrain(plannerExecutorBrain, deferredPlanner);
+  return shadowCouncilExecutor === null
     ? brain
-    : new CommanderTelemetryAgentBrain(brain, deferredPlanner);
+    : new KeystoneShadowCouncilTelemetryAgentBrain(
+        brain,
+        shadowCouncilExecutor,
+      );
 }
 
 function redactPlayerUrl(url: string): string {
@@ -921,6 +1049,7 @@ async function main(): Promise<void> {
   const repoRoot = process.env.PROXYWAR_REPO ?? "/app/proxywar";
   const mode = keystoneModeFromEnv();
   const singleActionExecutor = keystoneSingleActionFromEnv();
+  const expertCouncilShadow = keystoneExpertCouncilShadowFromEnv();
   const profile = (process.env.PROXYWAR_KEYSTONE_PROFILE?.trim() ||
     "aggressive") as AgentStrategyProfile;
   const blocking =
@@ -942,6 +1071,7 @@ async function main(): Promise<void> {
     planEveryDecisionSteps,
     blocking,
     singleActionExecutor,
+    expertCouncilShadow,
   });
 
   // Optional one-shot Bedrock diagnostic (gated; OFF in production). The pod
@@ -977,7 +1107,7 @@ async function main(): Promise<void> {
 
   socket.on("open", () => {
     console.log(
-      `keystone connected ${redactPlayerUrl(url)} (mode=${mode}, profile=${profile}, planEvery=${planEveryDecisionSteps}, blocking=${blocking}, executor=${singleActionExecutor ? "coworld-single-action" : "frontier"}, ${keystoneTunableFlagSummary()})`,
+      `keystone connected ${redactPlayerUrl(url)} (mode=${mode}, profile=${profile}, planEvery=${planEveryDecisionSteps}, blocking=${blocking}, executor=${singleActionExecutor ? "coworld-single-action" : "frontier"}, shadowCouncil=${expertCouncilShadow}, ${keystoneTunableFlagSummary()})`,
     );
   });
 

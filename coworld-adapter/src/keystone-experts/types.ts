@@ -197,5 +197,9 @@ export interface KeystoneArbitrationResult {
   readonly disposition: "proposal" | "hold" | "abstain";
   /** Exactly one offered id or null; the council never returns an action batch. */
   readonly selection: KeystoneActionSelection | null;
+  /** The next eligible, distinct action in the selected tier, when one exists. */
+  readonly runnerUp: KeystoneActionSelection | null;
+  /** Winner bid minus runner-up bid. Null unless both are scored proposals. */
+  readonly bidMarginBP: number | null;
   readonly rejections: readonly KeystoneProposalRejection[];
 }

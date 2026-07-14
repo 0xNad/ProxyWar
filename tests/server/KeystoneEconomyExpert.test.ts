@@ -4,6 +4,7 @@ import {
   classifyKeystoneActions,
   proposeKeystoneEconomy,
   type KeystoneActionFacts,
+  type KeystoneEconomyProposal,
   type KeystonePlayerFacts,
   type KeystoneStructureUnitType,
   type KeystoneWorldModel,
@@ -139,6 +140,17 @@ function legalAction(
 }
 
 describe("Keystone Economy expert", () => {
+  it("exports its proposal contract through the council barrel", () => {
+    const proposal: KeystoneEconomyProposal | null = proposeKeystoneEconomy(
+      world([economyAction("build:city:barrel")]),
+    );
+
+    expect(proposal).toMatchObject({
+      actionID: "build:city:barrel",
+      source: "economy",
+    });
+  });
+
   it("normalizes only known build and upgrade metadata into shared facts", () => {
     const classified = classifyKeystoneActions({
       legalActions: [
