@@ -4,6 +4,12 @@ import {
   arbitrateKeystoneAction,
   buildKeystoneWorldModel,
   computeKeystoneBidBP,
+  proposeKeystoneConquest,
+  proposeKeystoneEconomy,
+  proposeKeystoneExpansion,
+  proposeKeystonePolitics,
+  proposeKeystoneSpawn,
+  proposeKeystoneSurvival,
   type KeystoneActionOwner,
   type KeystoneCouncilTiers,
   type KeystoneDirectiveProposal,
@@ -99,6 +105,7 @@ function brainInput(args: {
   phase?: AgentGamePhase;
   players?: AgentVisiblePlayer[];
   ownTeam?: string | null;
+  turnNumber?: number;
 }): AgentBrainInput {
   const base = new AgentObservationBuilder().build({
     agentID: "keystone",
@@ -106,7 +113,7 @@ function brainInput(args: {
     username: "Keystone",
     profile: "aggressive",
     gameID: "EXPERT-COUNCIL",
-    turnNumber: 1_500,
+    turnNumber: args.turnNumber ?? 1_500,
     phaseOverride: args.phase ?? "active",
   });
   const players = args.players ?? [];
@@ -210,6 +217,24 @@ function tiers(
     bindingDirective: [],
     expertAuction: [],
     ...overrides,
+  };
+}
+
+function tiersFromRealProposers(
+  world: ReturnType<typeof buildKeystoneWorldModel>,
+): KeystoneCouncilTiers {
+  const spawn = proposeKeystoneSpawn(world);
+  const survival = proposeKeystoneSurvival(world);
+  return {
+    spawn: spawn === null ? [] : [spawn],
+    survival: survival === null ? [] : [survival],
+    bindingDirective: [],
+    expertAuction: [
+      proposeKeystoneExpansion(world),
+      proposeKeystoneEconomy(world),
+      proposeKeystoneConquest(world),
+      proposeKeystonePolitics(world),
+    ].flatMap((proposal) => (proposal === null ? [] : [proposal])),
   };
 }
 
@@ -570,6 +595,147 @@ describe("Keystone expert council infrastructure", () => {
     }
   });
 
+  it("moves only recognized defensive builds into survival ownership during verified pressure", () => {
+    const defensive = metadataAction("build:defense", "build", {
+      unit: "Defense Post",
+      role: "defensive",
+      nearbyIncomingAttack: true,
+    });
+    const sam = metadataAction("build:sam", "build", {
+      unit: "SAM Launcher",
+      role: "defensive",
+      defensiveValue: 0.4,
+    });
+    const economic = metadataAction("build:city", "build", {
+      unit: "City",
+      role: "economic",
+    });
+    const malformed = metadataAction("build:unknown", "build", {
+      unit: "Treasury",
+      role: "defensive",
+      nearbyIncomingAttack: true,
+    });
+    const unsupported = metadataAction("build:unsupported", "build", {
+      unit: "Defense Post",
+      role: "defensive",
+    });
+    const malformedPlacement = metadataAction(
+      "build:malformed-placement",
+      "build",
+      {
+        unit: "Defense Post",
+        role: "defensive",
+        nearbyIncomingAttack: "true",
+        defensiveValue: 2,
+        hostileBorderDistance: 1.5,
+      },
+    );
+    const nearBorder = metadataAction("build:near-border", "build", {
+      unit: "Defense Post",
+      role: "defensive",
+      hostileBorderDistance: 60,
+    });
+
+    const calm = buildKeystoneWorldModel(
+      brainInput({
+        actions: [
+          defensive,
+          sam,
+          economic,
+          malformed,
+          unsupported,
+          malformedPlacement,
+          nearBorder,
+        ],
+      }),
+    );
+    expect(
+      Object.fromEntries(
+        calm.actions.map((candidate) => [candidate.id, candidate.actionOwner]),
+      ),
+    ).toEqual({
+      "build:city": "economy",
+      "build:defense": "economy",
+      "build:malformed-placement": "economy",
+      "build:near-border": "economy",
+      "build:sam": "economy",
+      "build:unsupported": "economy",
+      "build:unknown": "economy",
+    });
+
+    const pressured = buildKeystoneWorldModel(
+      brainInput({
+        actions: [
+          defensive,
+          sam,
+          economic,
+          malformed,
+          unsupported,
+          malformedPlacement,
+          nearBorder,
+        ],
+        players: [player("AGGRESSOR", { incomingAttack: true })],
+      }),
+    );
+    expect(
+      Object.fromEntries(
+        pressured.actions.map((candidate) => [
+          candidate.id,
+          candidate.actionOwner,
+        ]),
+      ),
+    ).toEqual({
+      "build:city": "economy",
+      "build:defense": "survival",
+      "build:malformed-placement": "economy",
+      "build:near-border": "survival",
+      "build:sam": "survival",
+      "build:unsupported": "economy",
+      "build:unknown": "economy",
+    });
+    expect(
+      pressured.actions.find((candidate) => candidate.id === "build:defense"),
+    ).toMatchObject({
+      nearbyIncomingAttack: true,
+      defensiveValueBP: null,
+      hostileBorderDistance: null,
+    });
+    expect(
+      pressured.actions.find((candidate) => candidate.id === "build:sam"),
+    ).toMatchObject({
+      nearbyIncomingAttack: null,
+      defensiveValueBP: 4_000,
+      hostileBorderDistance: null,
+    });
+    expect(
+      pressured.actions.find(
+        (candidate) => candidate.id === "build:malformed-placement",
+      ),
+    ).toMatchObject({
+      nearbyIncomingAttack: null,
+      defensiveValueBP: null,
+      hostileBorderDistance: null,
+    });
+
+    const ownershipResult = arbitrateKeystoneAction(
+      pressured,
+      tiers({
+        expertAuction: [
+          expert("economy-cannot-bypass-survival", "build:defense", {
+            source: "economy",
+          }),
+        ],
+      }),
+    );
+    expect(ownershipResult.selection).toBeNull();
+    expect(ownershipResult.rejections).toContainEqual(
+      expect.objectContaining({
+        proposalID: "economy-cannot-bypass-survival",
+        reason: "action_ownership_mismatch",
+      }),
+    );
+  });
+
   it("keeps arbiter, survival, and unowned actions outside every expert domain", () => {
     const actions = [
       action("spawn", "spawn"),
@@ -809,6 +975,235 @@ describe("Keystone expert council infrastructure", () => {
       actionID: "build:city",
       tier: "binding_directive",
     });
+  });
+
+  it("fills the spawn tier with the safest exact offered non-ambiguous id", () => {
+    const spawnWorld = buildKeystoneWorldModel(
+      brainInput({
+        phase: "spawn",
+        actions: [
+          action("spawn:risky", "spawn", null, 0.8),
+          action("spawn:safe", "spawn", null, 0.2),
+          action("hold", "hold", null, 0),
+        ],
+      }),
+    );
+    const proposal = proposeKeystoneSpawn(spawnWorld);
+    expect(proposal).toMatchObject({
+      source: "spawn",
+      actionID: "spawn:safe",
+    });
+    expect(
+      arbitrateKeystoneAction(
+        spawnWorld,
+        tiers({ spawn: proposal === null ? [] : [proposal] }),
+      ).selection,
+    ).toMatchObject({ actionID: "spawn:safe", tier: "spawn" });
+
+    const duplicateWorld = buildKeystoneWorldModel(
+      brainInput({
+        phase: "spawn",
+        actions: [
+          action("spawn:collision", "spawn", null, 0.1),
+          action("spawn:collision", "spawn", null, 0.2),
+        ],
+      }),
+    );
+    expect(proposeKeystoneSpawn(duplicateWorld)).toBeNull();
+
+    const forbiddenWorld = buildKeystoneWorldModel(
+      brainInput({
+        phase: "spawn",
+        actions: [action("spawn:forbidden", "spawn", null, 0.1)],
+      }),
+      { forbiddenActionKinds: ["spawn"] },
+    );
+    expect(proposeKeystoneSpawn(forbiddenWorld)).toBeNull();
+  });
+
+  it("produces bounded survival recovery, defensive-build, and counter proposals only under verified pressure", () => {
+    const aggressor = player("AGGRESSOR", {
+      incomingAttack: true,
+      relativeTroopRatio: 1,
+    });
+    const counterActions = [10, 25, 40].map((percent) =>
+      metadataAction(`opaque-counter-${percent}`, "attack", {
+        targetID: "AGGRESSOR",
+        troopPercent: percent,
+      }),
+    );
+    const defense = metadataAction("opaque-defense", "build", {
+      unit: "Defense Post",
+      role: "defensive",
+      nearbyIncomingAttack: true,
+    });
+
+    const calm = buildKeystoneWorldModel(
+      brainInput({
+        actions: [...counterActions, defense],
+        players: [
+          player("AGGRESSOR", {
+            incomingAttack: false,
+            relativeTroopRatio: 1,
+          }),
+        ],
+      }),
+    );
+    expect(proposeKeystoneSurvival(calm)).toBeNull();
+
+    const counterWorld = buildKeystoneWorldModel(
+      brainInput({ actions: counterActions, players: [aggressor] }),
+    );
+    expect(proposeKeystoneSurvival(counterWorld)).toMatchObject({
+      source: "survival",
+      actionID: "opaque-counter-25",
+    });
+
+    const defenseWorld = buildKeystoneWorldModel(
+      brainInput({
+        actions: [...counterActions, defense],
+        players: [aggressor],
+      }),
+    );
+    expect(proposeKeystoneSurvival(defenseWorld)).toMatchObject({
+      source: "survival",
+      actionID: "opaque-defense",
+    });
+
+    const boatRetreatWorld = buildKeystoneWorldModel(
+      brainInput({
+        actions: [action("opaque-boat-retreat", "boat_retreat")],
+        players: [aggressor],
+      }),
+    );
+    expect(proposeKeystoneSurvival(boatRetreatWorld)).toMatchObject({
+      actionID: "opaque-boat-retreat",
+    });
+
+    const landRetreatWorld = buildKeystoneWorldModel(
+      brainInput({
+        actions: [
+          action("opaque-boat-retreat", "boat_retreat"),
+          action("opaque-land-retreat", "retreat"),
+        ],
+        players: [aggressor],
+      }),
+    );
+    expect(proposeKeystoneSurvival(landRetreatWorld)).toMatchObject({
+      actionID: "opaque-land-retreat",
+    });
+  });
+
+  it("keeps survival counters friendly-safe and fails closed on unknown commitment metadata", () => {
+    const friendlyAggressor = player("FRIEND", {
+      incomingAttack: true,
+      isFriendly: true,
+      relation: Relation.Friendly,
+    });
+    const friendlyWorld = buildKeystoneWorldModel(
+      brainInput({
+        actions: [
+          metadataAction("counter-friendly", "attack", {
+            targetID: "FRIEND",
+            troopPercent: 25,
+          }),
+        ],
+        players: [friendlyAggressor],
+      }),
+    );
+    expect(proposeKeystoneSurvival(friendlyWorld)).toBeNull();
+
+    const aggressor = player("AGGRESSOR", { incomingAttack: true });
+    const unknownWorld = buildKeystoneWorldModel(
+      brainInput({
+        actions: [action("looks-like-counter-40", "attack", "AGGRESSOR")],
+        players: [aggressor],
+      }),
+    );
+    expect(proposeKeystoneSurvival(unknownWorld)).toBeNull();
+  });
+
+  it("arbitrates all four expert domains and protected system tiers through one ownership boundary", () => {
+    const rival = player("RIVAL", {
+      relativeTroopRatio: 1.5,
+      tileShare: 0.25,
+    });
+    const ally = player("ALLY", {
+      isAllied: true,
+      isFriendly: true,
+      relation: Relation.Friendly,
+      canExtendAlliance: true,
+      allianceInExtensionWindow: true,
+    });
+    const expertActions = [
+      neutral("opaque-neutral-35"),
+      metadataAction("opaque-city", "build", {
+        unit: "City",
+        role: "economic",
+      }),
+      metadataAction("opaque-conquest", "attack", {
+        targetID: "RIVAL",
+        troopPercent: 25,
+      }),
+      metadataAction("opaque-politics", "alliance_extend", {
+        targetID: "ALLY",
+      }),
+    ];
+    const expertWorld = buildKeystoneWorldModel(
+      brainInput({
+        turnNumber: 2_000,
+        actions: expertActions,
+        players: [rival, ally],
+      }),
+      { planAlignedActionIDs: ["opaque-politics"] },
+    );
+    const expertProposals = [
+      proposeKeystoneExpansion(expertWorld),
+      proposeKeystoneEconomy(expertWorld),
+      proposeKeystoneConquest(expertWorld),
+      proposeKeystonePolitics(expertWorld),
+    ].flatMap((proposal) => (proposal === null ? [] : [proposal]));
+    expect(expertProposals.map((proposal) => proposal.source).sort()).toEqual([
+      "conquest",
+      "economy",
+      "expansion",
+      "politics",
+    ]);
+    expect(
+      arbitrateKeystoneAction(expertWorld, tiersFromRealProposers(expertWorld))
+        .selection,
+    ).toMatchObject({
+      actionID: "opaque-politics",
+      tier: "expert_auction",
+      planAligned: true,
+    });
+
+    const pressuredWorld = buildKeystoneWorldModel(
+      brainInput({
+        turnNumber: 2_000,
+        actions: [...expertActions, action("opaque-retreat", "retreat")],
+        players: [rival, ally, player("AGGRESSOR", { incomingAttack: true })],
+      }),
+    );
+    const survival = proposeKeystoneSurvival(pressuredWorld);
+    expect(survival).not.toBeNull();
+    expect(
+      arbitrateKeystoneAction(
+        pressuredWorld,
+        tiersFromRealProposers(pressuredWorld),
+      ).selection,
+    ).toMatchObject({ actionID: "opaque-retreat", tier: "survival" });
+
+    const spawnWorld = buildKeystoneWorldModel(
+      brainInput({
+        phase: "spawn",
+        actions: [action("opaque-spawn", "spawn", null, 0.2)],
+      }),
+    );
+    expect(
+      arbitrateKeystoneAction(spawnWorld, tiersFromRealProposers(spawnWorld))
+        .selection,
+    ).toMatchObject({ actionID: "opaque-spawn", tier: "spawn" });
   });
 
   it("prefers the plan-aligned expert pool before comparing bids", () => {

@@ -70,6 +70,9 @@ const buildRoleByMetadata = Object.freeze<Record<string, KeystoneBuildRole>>({
   infrastructure: "infrastructure",
 });
 
+const MIN_DEFENSIVE_VALUE_BP = 2_800;
+const MAX_HOSTILE_BORDER_DISTANCE = 60;
+
 export function classifyKeystoneActions(
   input: ClassifyKeystoneActionsInput,
 ): KeystoneActionClassification {
@@ -123,12 +126,18 @@ export function classifyKeystoneActions(
           hostileTargetKinds.has(action.kind) && !neutralExpansion;
         const unitType = actionStructureUnitType(action);
         const buildRole = actionBuildRole(action);
+        const nearbyIncomingAttack = actionNearbyIncomingAttack(action);
+        const defensiveValueBP = actionDefensiveValueBP(action);
+        const hostileBorderDistance = actionHostileBorderDistance(action);
 
         return Object.freeze({
           id: action.id,
           kind: action.kind,
           unitType,
           buildRole,
+          nearbyIncomingAttack,
+          defensiveValueBP,
+          hostileBorderDistance,
           targetPlayerID,
           isSpawn: action.kind === "spawn",
           isHold: action.kind === "hold",
@@ -146,6 +155,11 @@ export function classifyKeystoneActions(
             targetPlayerID,
             neutralExpansion,
             incomingAggressorIDs,
+            unitType,
+            buildRole,
+            nearbyIncomingAttack,
+            defensiveValueBP,
+            hostileBorderDistance,
           }),
         });
       })
@@ -159,6 +173,11 @@ export function actionOwner(input: {
   targetPlayerID: string | null;
   neutralExpansion: boolean;
   incomingAggressorIDs: ReadonlySet<string>;
+  unitType?: KeystoneStructureUnitType | null;
+  buildRole?: KeystoneBuildRole | null;
+  nearbyIncomingAttack?: boolean | null;
+  defensiveValueBP?: number | null;
+  hostileBorderDistance?: number | null;
 }): KeystoneActionOwner {
   if (input.action.kind === "spawn" || input.action.kind === "hold") {
     return "arbiter";
@@ -181,6 +200,15 @@ export function actionOwner(input: {
       ? "survival"
       : "conquest";
   }
+  if (
+    input.action.kind === "build" &&
+    input.buildRole === "defensive" &&
+    (input.unitType === "defense_post" || input.unitType === "sam_launcher") &&
+    hasCanonicalDefensivePlacementEvidence(input) &&
+    input.incomingAggressorIDs.size > 0
+  ) {
+    return "survival";
+  }
   if (economyKinds.has(input.action.kind)) {
     return "economy";
   }
@@ -191,6 +219,26 @@ export function actionOwner(input: {
     return "politics";
   }
   return null;
+}
+
+export function hasCanonicalDefensivePlacementEvidence(input: {
+  nearbyIncomingAttack?: boolean | null;
+  defensiveValueBP?: number | null;
+  hostileBorderDistance?: number | null;
+}): boolean {
+  return (
+    input.nearbyIncomingAttack === true ||
+    (input.defensiveValueBP !== null &&
+      input.defensiveValueBP !== undefined &&
+      Number.isInteger(input.defensiveValueBP) &&
+      input.defensiveValueBP >= MIN_DEFENSIVE_VALUE_BP &&
+      input.defensiveValueBP <= 10_000) ||
+    (input.hostileBorderDistance !== null &&
+      input.hostileBorderDistance !== undefined &&
+      Number.isInteger(input.hostileBorderDistance) &&
+      input.hostileBorderDistance > 0 &&
+      input.hostileBorderDistance <= MAX_HOSTILE_BORDER_DISTANCE)
+  );
 }
 
 export function actionTargetPlayerID(action: LegalAction): string | null {
@@ -251,6 +299,43 @@ function actionBuildRole(action: LegalAction): KeystoneBuildRole | null {
   }
   const role = normalizeMetadataLabel(action.metadata?.role);
   return role === null ? null : (buildRoleByMetadata[role] ?? null);
+}
+
+function actionNearbyIncomingAttack(action: LegalAction): boolean | null {
+  if (action.kind !== "build") {
+    return null;
+  }
+  const value = action.metadata?.nearbyIncomingAttack;
+  return typeof value === "boolean" ? value : null;
+}
+
+function actionDefensiveValueBP(action: LegalAction): number | null {
+  if (action.kind !== "build") {
+    return null;
+  }
+  const value = action.metadata?.defensiveValue;
+  if (
+    typeof value !== "number" ||
+    !Number.isFinite(value) ||
+    value < 0 ||
+    value > 1
+  ) {
+    return null;
+  }
+  return Math.round(value * 10_000);
+}
+
+function actionHostileBorderDistance(action: LegalAction): number | null {
+  if (action.kind !== "build") {
+    return null;
+  }
+  const value = action.metadata?.hostileBorderDistance;
+  return typeof value === "number" &&
+    Number.isInteger(value) &&
+    value >= 0 &&
+    value <= Number.MAX_SAFE_INTEGER
+    ? value
+    : null;
 }
 
 function normalizeMetadataLabel(value: unknown): string | null {

@@ -11,6 +11,12 @@ export {
   proposeKeystonePolitics,
   type KeystonePoliticsProposal,
 } from "./politics-expert";
+export {
+  proposeKeystoneSpawn,
+  proposeKeystoneSurvival,
+  type KeystoneSpawnProposal,
+  type KeystoneSurvivalProposal,
+} from "./system-proposals";
 export type * from "./types";
 export { keystoneExpertDomains } from "./types";
 export { buildKeystoneWorldModel } from "./world-model";

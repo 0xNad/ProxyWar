@@ -116,6 +116,12 @@ export interface KeystoneActionFacts {
   readonly unitType?: KeystoneStructureUnitType | null;
   /** Canonical role metadata for offered build actions only. */
   readonly buildRole?: KeystoneBuildRole | null;
+  /** Canonical defensive-placement metadata for offered build actions only. */
+  readonly nearbyIncomingAttack?: boolean | null;
+  /** Canonical unit-interval defensiveValue normalized to [0, 10_000]. */
+  readonly defensiveValueBP?: number | null;
+  /** Canonical non-negative integer distance for offered build actions only. */
+  readonly hostileBorderDistance?: number | null;
   readonly targetPlayerID: string | null;
   readonly isSpawn: boolean;
   readonly isHold: boolean;

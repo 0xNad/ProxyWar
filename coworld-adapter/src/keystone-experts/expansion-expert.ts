@@ -5,6 +5,13 @@ import type {
 } from "./types";
 
 const OPENING_END_TURN = 1_400;
+const HIGH_CAP_PRESSURE_BP = 8_500;
+
+const ROUTINE_OPENING_COMMITMENT_BP = 3_500;
+const HIGH_CAP_OPENING_COMMITMENT_BP = 4_000;
+const CONTACT_COMMITMENT_BP = 2_000;
+const MIN_MEANINGFUL_COMMITMENT_BP = 2_000;
+const MAX_MEANINGFUL_COMMITMENT_BP = 4_000;
 
 type ExpansionOpportunity = "opening" | "frontier" | "contact";
 type ExpansionMode = "land" | "boat";
@@ -74,23 +81,28 @@ export function proposeKeystoneExpansion(
       !action.safetyBlocked &&
       action.targetPlayerID === null &&
       !ambiguousIDs.has(action.id) &&
+      isMeaningfulCanonicalCommitment(action) &&
       (action.kind === "attack" || action.kind === "boat"),
   );
+  const opportunity = expansionOpportunity(world);
+  const desiredCommitmentBP = desiredExpansionCommitmentBP(world, opportunity);
   const land = chooseDeterministically(
     eligible.filter((action) => action.kind === "attack"),
+    desiredCommitmentBP,
   );
   const selected = neutralLandOffered
     ? land
     : chooseDeterministically(
         eligible.filter((action) => action.kind === "boat"),
+        CONTACT_COMMITMENT_BP,
       );
   if (selected === null) {
     return null;
   }
 
   const mode: ExpansionMode = selected.kind === "attack" ? "land" : "boat";
-  const opportunity = expansionOpportunity(world);
   const score = scoreExpansion(opportunity, mode);
+  const commitmentPercent = Math.trunc(selected.troopCommitmentBP! / 100);
 
   return Object.freeze({
     proposalID: `expansion:${opportunity}:${mode}:${selected.id}`,
@@ -98,8 +110,8 @@ export function proposeKeystoneExpansion(
     source: "expansion",
     rationale:
       mode === "land"
-        ? `${opportunity} neutral land expansion; land frontier preferred`
-        : `${opportunity} neutral boat expansion; land frontier exhausted`,
+        ? `${opportunity} neutral land expansion at ${commitmentPercent}% canonical commitment; land frontier preferred`
+        : `${opportunity} neutral boat expansion at ${commitmentPercent}% canonical commitment; land frontier exhausted`,
     expectedValueBP: score.expectedValueBP,
     urgencyBP: score.urgencyBP,
     confidenceBP: score.confidenceBP,
@@ -112,10 +124,14 @@ export function proposeKeystoneExpansion(
 
 function chooseDeterministically(
   actions: readonly KeystoneActionFacts[],
+  desiredCommitmentBP: number,
 ): KeystoneActionFacts | null {
   let selected: KeystoneActionFacts | null = null;
   for (const action of actions) {
-    if (selected === null || compareExpansionActions(action, selected) < 0) {
+    if (
+      selected === null ||
+      compareExpansionActions(action, selected, desiredCommitmentBP) < 0
+    ) {
       selected = action;
     }
   }
@@ -125,11 +141,39 @@ function chooseDeterministically(
 function compareExpansionActions(
   a: KeystoneActionFacts,
   b: KeystoneActionFacts,
+  desiredCommitmentBP: number,
 ): number {
   return (
+    Math.abs(a.troopCommitmentBP! - desiredCommitmentBP) -
+      Math.abs(b.troopCommitmentBP! - desiredCommitmentBP) ||
+    b.troopCommitmentBP! - a.troopCommitmentBP! ||
     basisPoints(a.actionRiskBP) - basisPoints(b.actionRiskBP) ||
     compareText(a.id, b.id)
   );
+}
+
+function isMeaningfulCanonicalCommitment(action: KeystoneActionFacts): boolean {
+  return (
+    action.troopCommitmentBP !== null &&
+    action.troopCommitmentBP !== undefined &&
+    Number.isInteger(action.troopCommitmentBP) &&
+    action.troopCommitmentBP >= MIN_MEANINGFUL_COMMITMENT_BP &&
+    action.troopCommitmentBP <= MAX_MEANINGFUL_COMMITMENT_BP
+  );
+}
+
+function desiredExpansionCommitmentBP(
+  world: KeystoneWorldModel,
+  opportunity: ExpansionOpportunity,
+): number {
+  if (opportunity === "contact") {
+    return CONTACT_COMMITMENT_BP;
+  }
+  return world.own?.troopRatioBP !== null &&
+    world.own?.troopRatioBP !== undefined &&
+    world.own.troopRatioBP >= HIGH_CAP_PRESSURE_BP
+    ? HIGH_CAP_OPENING_COMMITMENT_BP
+    : ROUTINE_OPENING_COMMITMENT_BP;
 }
 
 function expansionOpportunity(world: KeystoneWorldModel): ExpansionOpportunity {

@@ -27,6 +27,7 @@ function expansionAction(
     forbidden: false,
     planAligned: false,
     actionRiskBP: 1_000,
+    troopCommitmentBP: 3_500,
     actionOwner: "expansion",
     ...overrides,
   };
@@ -141,15 +142,84 @@ describe("Keystone Expansion expert", () => {
 
   it("chooses independently of offered-action order", () => {
     const actions = [
-      expansionAction("neutral:z", "attack", { actionRiskBP: 500 }),
-      expansionAction("neutral:b", "attack", { actionRiskBP: 100 }),
-      expansionAction("neutral:a", "attack", { actionRiskBP: 100 }),
+      expansionAction("neutral:z", "attack", {
+        actionRiskBP: 500,
+        troopCommitmentBP: 2_000,
+      }),
+      expansionAction("neutral:b", "attack", {
+        actionRiskBP: 100,
+        troopCommitmentBP: 3_500,
+      }),
+      expansionAction("neutral:a", "attack", {
+        actionRiskBP: 100,
+        troopCommitmentBP: 3_500,
+      }),
     ];
     const forward = proposeKeystoneExpansion(world(actions));
     const reverse = proposeKeystoneExpansion(world([...actions].reverse()));
 
     expect(forward).toEqual(reverse);
     expect(forward?.actionID).toBe("neutral:a");
+  });
+
+  it("chooses meaningful canonical commitment sizes from state instead of minimizing risk", () => {
+    const actions = [
+      expansionAction("opaque-ten", "attack", {
+        actionRiskBP: 50,
+        troopCommitmentBP: 1_000,
+      }),
+      expansionAction("opaque-twenty", "attack", {
+        actionRiskBP: 5_000,
+        troopCommitmentBP: 2_000,
+      }),
+      expansionAction("opaque-thirty-five", "attack", {
+        actionRiskBP: 7_500,
+        troopCommitmentBP: 3_500,
+      }),
+      expansionAction("opaque-forty", "attack", {
+        actionRiskBP: 9_000,
+        troopCommitmentBP: 4_000,
+      }),
+    ];
+
+    expect(proposeKeystoneExpansion(world(actions))?.actionID).toBe(
+      "opaque-thirty-five",
+    );
+    expect(
+      proposeKeystoneExpansion(
+        world(actions, {
+          own: {
+            playerID: "ME",
+            team: null,
+            troops: 90_000,
+            maxTroops: 100_000,
+            troopRatioBP: 9_000,
+            tileShareBP: 1_500,
+            tilesOwned: 80,
+          },
+        }),
+      )?.actionID,
+    ).toBe("opaque-forty");
+    expect(
+      proposeKeystoneExpansion(
+        world(actions, { players: [hostilePlayer()], turnNumber: 2_000 }),
+      )?.actionID,
+    ).toBe("opaque-twenty");
+  });
+
+  it("fails closed when only 10 percent or unknown canonical commitments are offered", () => {
+    const proposal = proposeKeystoneExpansion(
+      world([
+        expansionAction("misleading-high-id", "attack", {
+          troopCommitmentBP: 1_000,
+        }),
+        expansionAction("looks-like-40", "attack", {
+          troopCommitmentBP: null,
+        }),
+      ]),
+    );
+
+    expect(proposal).toBeNull();
   });
 
   it("never leaks hostile, social, build, survival, spawn, or hold actions", () => {
@@ -219,10 +289,10 @@ describe("Keystone Expansion expert", () => {
 
     expect(opening?.actionID).toBe("neutral:exact-offered-id");
     expect(opening?.rationale).toBe(
-      "opening neutral land expansion; land frontier preferred",
+      "opening neutral land expansion at 35% canonical commitment; land frontier preferred",
     );
     expect(contact?.rationale).toBe(
-      "contact neutral land expansion; land frontier preferred",
+      "contact neutral land expansion at 35% canonical commitment; land frontier preferred",
     );
     expect(opening!.urgencyBP).toBeGreaterThan(contact!.urgencyBP);
     expect(opening!.expectedValueBP).toBeGreaterThan(contact!.expectedValueBP);
