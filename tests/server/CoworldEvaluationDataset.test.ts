@@ -643,6 +643,99 @@ describe("Coworld evaluation dataset", () => {
     );
   });
 
+  test.each(["replay", "results.json", "match-summary.json"] as const)(
+    "canonicalizes a direct %s file symlink before deriving fallback identity",
+    async (artifactName) => {
+      const directory = await temporaryDirectory();
+      const episodeRoot = path.join(directory, "canonical", "episode");
+      const aliasRoot = path.join(directory, "alias");
+      await fs.mkdir(episodeRoot, { recursive: true });
+      await fs.mkdir(aliasRoot, { recursive: true });
+      const players = [{ name: "Auri" }, { name: "Opponent" }];
+      const results = {
+        scores: [1, 0],
+        winner_slot: 0,
+        players,
+      };
+      const canonicalArtifact = path.join(episodeRoot, artifactName);
+      if (artifactName === "replay") {
+        await fs.writeFile(
+          canonicalArtifact,
+          JSON.stringify({ config: { map: "Asia", players }, results }),
+        );
+      } else if (artifactName === "results.json") {
+        await fs.writeFile(canonicalArtifact, JSON.stringify(results));
+      } else {
+        await fs.writeFile(
+          path.join(episodeRoot, "results.json"),
+          JSON.stringify(results),
+        );
+        await fs.writeFile(
+          canonicalArtifact,
+          JSON.stringify({
+            scenario: "coworld",
+            completedAt: "2026-07-14T12:00:00Z",
+            runnerConfig: { map: "Asia" },
+            roster: [{ username: "Auri" }, { username: "Opponent" }],
+          }),
+        );
+      }
+      const aliasArtifact = path.join(aliasRoot, artifactName);
+      await fs.symlink(canonicalArtifact, aliasArtifact);
+      const supportingInputs =
+        artifactName === "match-summary.json"
+          ? [path.join(episodeRoot, "results.json")]
+          : [];
+
+      const canonical = await loadCoworldEvaluationEpisodes([
+        ...supportingInputs,
+        canonicalArtifact,
+      ]);
+      const aliased = await loadCoworldEvaluationEpisodes([
+        ...supportingInputs,
+        aliasArtifact,
+      ]);
+      const combined = await loadCoworldEvaluationEpisodes([
+        ...supportingInputs,
+        canonicalArtifact,
+        aliasArtifact,
+      ]);
+
+      expect(aliased.episodes.map((episode) => episode.episodeId)).toEqual(
+        canonical.episodes.map((episode) => episode.episodeId),
+      );
+      expect(combined.episodes).toHaveLength(1);
+      expect(combined.episodes[0].episodeId).toBe(
+        canonical.episodes[0].episodeId,
+      );
+      expect(combined.episodes[0].sourcePaths).toHaveLength(
+        artifactName === "match-summary.json" ? 3 : 2,
+      );
+    },
+  );
+
+  test("keeps directory-symlink fallback identity canonical", async () => {
+    const directory = await temporaryDirectory();
+    const episodeRoot = path.join(directory, "canonical", "episode");
+    const aliasRoot = path.join(directory, "episode-alias");
+    await fs.mkdir(episodeRoot, { recursive: true });
+    await fs.writeFile(
+      path.join(episodeRoot, "results.json"),
+      JSON.stringify({
+        scores: [1, 0],
+        winner_slot: 0,
+        players: [{ name: "Auri" }, { name: "Opponent" }],
+      }),
+    );
+    await fs.symlink(episodeRoot, aliasRoot, "dir");
+
+    const canonical = await loadCoworldEvaluationEpisodes([episodeRoot]);
+    const aliased = await loadCoworldEvaluationEpisodes([aliasRoot]);
+    expect(aliased.episodes.map((episode) => episode.episodeId)).toEqual(
+      canonical.episodes.map((episode) => episode.episodeId),
+    );
+  });
+
   test("joins extracted mirror sidecars to metadata and results by runID", async () => {
     const directory = await temporaryDirectory();
     const bundle = path.join(

@@ -2610,14 +2610,15 @@ function artifactSourceRoot(filePath: string): string {
 async function fallbackEpisodeIdentity(
   filePath: string,
 ): Promise<FallbackEpisodeIdentity> {
-  const sourceRoot = await fs.realpath(artifactSourceRoot(filePath));
+  const canonicalFilePath = await fs.realpath(path.resolve(filePath));
+  const sourceRoot = artifactSourceRoot(canonicalFilePath);
   const label =
     path
       .basename(sourceRoot)
       .replace(/[^A-Za-z0-9_.-]+/g, "-")
       .slice(0, 48) || "root";
   const digest = createHash("sha256").update(sourceRoot).digest("hex");
-  const base = path.basename(filePath);
+  const base = path.basename(canonicalFilePath);
   const replayAlias = base.endsWith(".replay")
     ? base.replace(/\.replay$/i, "")
     : null;
