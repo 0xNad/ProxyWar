@@ -39,6 +39,35 @@ describe("Coworld saved-score evaluator CLI", () => {
     });
   });
 
+  test("evaluates every seat occupied by the selected repeated policy", () => {
+    const options = parseCoworldScoreEvaluatorOptions([
+      "episodes.json",
+      "--policy-version-id",
+      "candidate",
+    ]);
+    const episodes = parseSavedCoworldScoreEpisodes(
+      [
+        {
+          game_config: { map: "Pangaea" },
+          policy_version_ids: ["candidate", "opponent", "candidate"],
+          scores: [
+            { policy_version_id: "candidate", score: 0.45 },
+            { policy_version_id: "opponent", score: 0.1 },
+            { policy_version_id: "candidate", score: 0.45 },
+          ],
+        },
+      ],
+      options,
+    );
+
+    expect(episodes.map((episode) => episode.seat)).toEqual([0, 2]);
+    expect(evaluateSavedCoworldEpisodes(episodes).summary).toMatchObject({
+      episodes: 2,
+      topScoreWins: 2,
+      rawScoreSum: 0.9,
+    });
+  });
+
   test("explicit CLI seat overrides embedded episode metadata", () => {
     const options = parseCoworldScoreEvaluatorOptions([
       "episodes.json",

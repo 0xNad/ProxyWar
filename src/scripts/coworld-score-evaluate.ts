@@ -125,27 +125,27 @@ function parseEpisode(
   value: unknown,
   index: number,
   options: CoworldScoreEvaluatorOptions,
-): SavedCoworldEpisodeScore {
+): SavedCoworldEpisodeScore[] {
   const episode = asRecord(value);
   if (episode === null) throw new Error(`Episode ${index} is not an object`);
   const results = asRecord(episode.results) ?? episode;
   const scores = parseScores(results.scores, episode, index);
-  const policySeat =
-    options.policyVersionId === null
-      ? null
-      : asSeat(
-          asStrings(episode.policy_version_ids).indexOf(
-            options.policyVersionId,
-          ),
-        );
   const embeddedSeat =
     asSeat(episode.seat) ??
     asSeat(episode.target_slot) ??
     asSeat(episode.policy_slot);
-  const seat =
-    options.seat ??
-    (options.policyVersionId !== null ? policySeat : embeddedSeat);
-  if (seat === null || scores[seat] === undefined) {
+  const seats =
+    options.seat !== null
+      ? [options.seat]
+      : options.policyVersionId !== null
+        ? asStrings(episode.policy_version_ids).flatMap(
+            (policyVersionId, seat) =>
+              policyVersionId === options.policyVersionId ? [seat] : [],
+          )
+        : embeddedSeat === null
+          ? []
+          : [embeddedSeat];
+  if (seats.length === 0 || seats.some((seat) => scores[seat] === undefined)) {
     throw new Error(`Episode ${index} has no matching target seat`);
   }
   const winnerSlotPresent = Object.hasOwn(results, "winner_slot");
@@ -167,7 +167,7 @@ function parseEpisode(
     (typeof episode.map === "string" ? episode.map : null) ??
     (typeof gameConfig?.map === "string" ? gameConfig.map : null) ??
     "Unknown map";
-  return { map, seat, scores, outrightWinnerSlot };
+  return seats.map((seat) => ({ map, seat, scores, outrightWinnerSlot }));
 }
 
 export function parseSavedCoworldScoreEpisodes(
@@ -181,7 +181,7 @@ export function parseSavedCoworldScoreEpisodes(
       ? root.episodes
       : [];
   if (entries.length === 0) throw new Error("Input has no episodes");
-  return entries.map((entry, index) => parseEpisode(entry, index, options));
+  return entries.flatMap((entry, index) => parseEpisode(entry, index, options));
 }
 
 async function main(): Promise<void> {
