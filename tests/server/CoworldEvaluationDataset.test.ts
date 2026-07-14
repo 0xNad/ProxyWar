@@ -1495,6 +1495,45 @@ describe("Coworld evaluation dataset", () => {
     expect(dataset.rows[0].phaseSnapshots).toEqual([]);
   });
 
+  test("keeps an anonymous row unattributed in a roster-sized mixed snapshot", async () => {
+    const directory = await temporaryDirectory();
+    const sourcePath = path.join(directory, "episodes.json");
+    await fs.writeFile(
+      sourcePath,
+      JSON.stringify({
+        id: "ereq_mixed_snapshot_identity",
+        scores: [0.75, 0.25],
+        participants: [
+          { position: 0, player_name: "Auri" },
+          { position: 1, player_name: "Opponent" },
+        ],
+        spectatorReplay: {
+          snapshots: [
+            {
+              label: "active",
+              turnNumber: 100,
+              phase: "active",
+              players: [
+                { tilesOwned: 999 },
+                { seat: 0, username: "Auri", tilesOwned: 20 },
+              ],
+            },
+          ],
+        },
+      }),
+    );
+
+    const loaded = await loadCoworldEvaluationEpisodes([sourcePath]);
+    expect(
+      loaded.episodes[0].snapshots[0].players.map((player) => player.seat),
+    ).toEqual([null, 0]);
+    const dataset = buildCoworldEvaluationDataset({
+      episodes: loaded.episodes,
+      selector: { seat: 0, policyVersionId: null, playerName: null },
+    });
+    expect(dataset.rows[0].phaseSnapshots[0].tilesOwned).toBe(20);
+  });
+
   test("uses snapshot order only for a complete anonymous roster", () => {
     const fragments = parseCoworldEvaluationDocument({
       sourcePath: "/artifacts/complete-anonymous-snapshot.replay",
@@ -1587,6 +1626,142 @@ describe("Coworld evaluation dataset", () => {
         },
       }),
     ).toThrow("Conflicting");
+  });
+
+  test.each([
+    [
+      "name",
+      {
+        decisions: [
+          {
+            seat: 0,
+            username: "Opponent",
+            turnNumber: 100,
+            selectedActionKind: "hold",
+          },
+        ],
+      },
+      {
+        participants: [
+          { position: 0, player_name: "Auri" },
+          { position: 1, player_name: "Opponent" },
+        ],
+      },
+      "Conflicting decision identity",
+    ],
+    [
+      "agent ID",
+      {
+        decisions: [
+          {
+            seat: 0,
+            agentID: "agent-1",
+            turnNumber: 100,
+            selectedActionKind: "hold",
+          },
+        ],
+      },
+      {
+        spectatorReplay: {
+          roster: [
+            { agentID: "agent-0", username: "Auri" },
+            { agentID: "agent-1", username: "Opponent" },
+          ],
+        },
+      },
+      "Conflicting decision identity",
+    ],
+    [
+      "snapshot name",
+      {
+        spectatorReplay: {
+          snapshots: [
+            {
+              turnNumber: 100,
+              players: [
+                { seat: 0, username: "Opponent", tilesOwned: 999 },
+              ],
+            },
+          ],
+        },
+      },
+      {
+        participants: [
+          { position: 0, player_name: "Auri" },
+          { position: 1, player_name: "Opponent" },
+        ],
+      },
+      "Conflicting snapshot player identity",
+    ],
+  ])(
+    "revalidates a cross-fragment %s contradiction after roster enrichment",
+    async (_name, evidence, enrichment, expectedError) => {
+      const directory = await temporaryDirectory();
+      const sourcePath = path.join(directory, "episodes.json");
+      const base = {
+        id: "ereq_enriched_identity_conflict",
+        runID: "run_enriched_identity_conflict",
+        scores: [1, 0],
+      };
+      await fs.writeFile(
+        sourcePath,
+        JSON.stringify({
+          episodes: [
+            { ...base, ...evidence },
+            { ...base, ...enrichment },
+          ],
+        }),
+      );
+
+      await expect(loadCoworldEvaluationEpisodes([sourcePath])).rejects.toThrow(
+        expectedError,
+      );
+    },
+  );
+
+  test("rejects snapshot identities that converge on one seat after roster enrichment", async () => {
+    const directory = await temporaryDirectory();
+    const sourcePath = path.join(directory, "episodes.json");
+    const base = {
+      id: "ereq_enriched_snapshot_conflict",
+      runID: "run_enriched_snapshot_conflict",
+      scores: [1, 0],
+    };
+    await fs.writeFile(
+      sourcePath,
+      JSON.stringify({
+        episodes: [
+          {
+            ...base,
+            spectatorReplay: {
+              snapshots: [
+                {
+                  label: "active",
+                  turnNumber: 100,
+                  players: [
+                    { username: "Auri", tilesOwned: 100 },
+                    { agentID: "agent-0", troops: 200 },
+                  ],
+                },
+              ],
+            },
+          },
+          {
+            ...base,
+            spectatorReplay: {
+              roster: [
+                { agentID: "agent-0", username: "Auri" },
+                { agentID: "agent-1", username: "Opponent" },
+              ],
+            },
+          },
+        ],
+      }),
+    );
+
+    await expect(loadCoworldEvaluationEpisodes([sourcePath])).rejects.toThrow(
+      "Ambiguous snapshot player seat",
+    );
   });
 
   test.each([

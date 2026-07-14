@@ -32,9 +32,12 @@ Schema-v3 migrations:
   seatless repeated-name or repeated-agent-ID evidence remains unattributed
   rather than being attached to arbitrary seats. A decision or snapshot whose
   explicit seat contradicts its roster-backed name or agent ID fails closed.
-- Anonymous snapshot rows use array position only when the snapshot contains a
-  complete roster-sized player array. Partial anonymous snapshots remain
-  unattributed.
+  Normalized evidence is revalidated whenever cross-fragment merging enriches
+  the roster.
+- Anonymous snapshot rows use array position only when every row is anonymous
+  and the snapshot contains a complete roster-sized player array. Partial or
+  mixed-identity anonymous rows remain unattributed, and resolved snapshot
+  seats must be unique.
 - Explicit `results.players.slot` values must form a complete, unique,
   zero-based order; mixed ordered/slotted and duplicate-slot evidence fails
   closed. A non-null `winner_slot` must be inside the score order.

@@ -1676,6 +1676,25 @@ function mergeFragment(
   const currentMap = current.map === "Unknown map" ? undefined : current.map;
   const incomingMap = incoming.map === "Unknown map" ? undefined : incoming.map;
   const roster = mergeRoster(current.roster, incoming.roster, episodeId);
+  const decisions = revalidateDecisionsForRoster(
+    mergeDecisions(
+      episodeId,
+      roster,
+      revalidateDecisionsForRoster(current.decisions, roster),
+      revalidateDecisionsForRoster(incoming.decisions, roster),
+    ),
+    roster,
+  );
+  const snapshots = revalidateSnapshotsForRoster(
+    mergeSnapshots(
+      episodeId,
+      roster,
+      revalidateSnapshotsForRoster(current.snapshots, roster, episodeId),
+      revalidateSnapshotsForRoster(incoming.snapshots, roster, episodeId),
+    ),
+    roster,
+    episodeId,
+  );
   return {
     episodeId,
     episodeIdIsExplicit:
@@ -1712,18 +1731,8 @@ function mergeFragment(
       incoming.outrightWinnerSlot,
     ),
     roster,
-    decisions: mergeDecisions(
-      episodeId,
-      roster,
-      current.decisions,
-      incoming.decisions,
-    ),
-    snapshots: mergeSnapshots(
-      episodeId,
-      roster,
-      current.snapshots,
-      incoming.snapshots,
-    ),
+    decisions,
+    snapshots,
     episodeReportedTelemetry: {
       result: mergeReportedTelemetry(
         episodeId,
@@ -2003,28 +2012,15 @@ function identitySeat(
   return unique[0] ?? null;
 }
 
-function resolveRecordIdentity(input: {
-  record: Record<string, unknown>;
+function resolveIdentityAgainstRoster(input: {
+  identity: MergeIdentity;
   roster: readonly CoworldEvaluationRosterSeat[];
   context: string;
-  seatKeys: readonly string[];
-  playerNameKeys: readonly string[];
-  agentIDKeys: readonly string[];
   fallbackSeat?: number | null;
 }): MergeIdentity {
-  const directSeat = identitySeat(input.record, input.seatKeys, input.context);
-  const playerName = identityString(
-    input.record,
-    input.playerNameKeys,
-    input.context,
-    "player name",
-  );
-  const agentID = identityString(
-    input.record,
-    input.agentIDKeys,
-    input.context,
-    "agent ID",
-  );
+  const directSeat = input.identity.seat;
+  const playerName = input.identity.playerName;
+  const agentID = input.identity.agentID;
   const agentMatches =
     agentID === null
       ? []
@@ -2106,6 +2102,37 @@ function resolveRecordIdentity(input: {
   };
 }
 
+function resolveRecordIdentity(input: {
+  record: Record<string, unknown>;
+  roster: readonly CoworldEvaluationRosterSeat[];
+  context: string;
+  seatKeys: readonly string[];
+  playerNameKeys: readonly string[];
+  agentIDKeys: readonly string[];
+  fallbackSeat?: number | null;
+}): MergeIdentity {
+  return resolveIdentityAgainstRoster({
+    identity: {
+      seat: identitySeat(input.record, input.seatKeys, input.context),
+      playerName: identityString(
+        input.record,
+        input.playerNameKeys,
+        input.context,
+        "player name",
+      ),
+      agentID: identityString(
+        input.record,
+        input.agentIDKeys,
+        input.context,
+        "agent ID",
+      ),
+    },
+    roster: input.roster,
+    context: input.context,
+    fallbackSeat: input.fallbackSeat,
+  });
+}
+
 function normalizeDecision(
   record: Record<string, unknown>,
   roster: readonly CoworldEvaluationRosterSeat[],
@@ -2182,6 +2209,68 @@ function normalizeDecision(
   };
 }
 
+function revalidateDecisionsForRoster(
+  decisions: readonly CoworldEvaluationDecision[],
+  roster: readonly CoworldEvaluationRosterSeat[],
+): CoworldEvaluationDecision[] {
+  return decisions.map((decision) => {
+    const identity = resolveIdentityAgainstRoster({
+      identity: decision,
+      roster,
+      context: "decision",
+    });
+    return {
+      ...decision,
+      seat: identity.seat,
+      playerName: identity.playerName,
+      agentID: identity.agentID,
+    };
+  });
+}
+
+function validateUniqueSnapshotSeats(
+  players: readonly CoworldEvaluationSnapshotPlayer[],
+  context: string,
+): void {
+  const seen = new Set<number>();
+  for (const player of players) {
+    if (player.seat === null) {
+      continue;
+    }
+    if (seen.has(player.seat)) {
+      throw new Error(`Ambiguous snapshot player seat in ${context}`);
+    }
+    seen.add(player.seat);
+  }
+}
+
+function revalidateSnapshotsForRoster(
+  snapshots: readonly CoworldEvaluationSnapshot[],
+  roster: readonly CoworldEvaluationRosterSeat[],
+  episodeId: string,
+): CoworldEvaluationSnapshot[] {
+  return snapshots.map((snapshot) => {
+    const players = snapshot.players.map((player) => {
+      const identity = resolveIdentityAgainstRoster({
+        identity: player,
+        roster,
+        context: "snapshot player",
+      });
+      return {
+        ...player,
+        seat: identity.seat,
+        playerName: identity.playerName,
+        agentID: identity.agentID,
+      };
+    });
+    validateUniqueSnapshotSeats(
+      players,
+      `episode ${episodeId} snapshot ${snapshot.label}`,
+    );
+    return { ...snapshot, players };
+  });
+}
+
 function normalizeSnapshotPlayer(input: {
   value: unknown;
   index: number;
@@ -2223,6 +2312,16 @@ function normalizeSnapshotPlayer(input: {
   };
 }
 
+function hasExplicitSnapshotIdentity(value: unknown): boolean {
+  const player = asRecord(value);
+  if (player === null) {
+    throw new Error("Invalid snapshot player");
+  }
+  return ["seat", "slot", "username", "name", "agentID", "agent_id"].some(
+    (key) => Object.hasOwn(player, key),
+  );
+}
+
 function normalizeSnapshot(
   record: Record<string, unknown>,
   roster: readonly CoworldEvaluationRosterSeat[],
@@ -2232,20 +2331,24 @@ function normalizeSnapshot(
   }
   const players = Array.isArray(record.players) ? record.players : [];
   const allowIndexFallback =
-    players.length > 0 && players.length === roster.length;
+    players.length > 0 &&
+    players.length === roster.length &&
+    players.every((player) => !hasExplicitSnapshotIdentity(player));
+  const normalizedPlayers = players.map((value, index) =>
+    normalizeSnapshotPlayer({
+      value,
+      index,
+      roster,
+      allowIndexFallback,
+    }),
+  );
+  validateUniqueSnapshotSeats(normalizedPlayers, "snapshot");
   return {
     label: asString(record.label) ?? "snapshot",
     turnNumber: asCount(record.turnNumber ?? record.turn_number),
     tick: asCount(record.tick),
     phase: asString(record.phase) ?? "unknown",
-    players: players.map((value, index) =>
-      normalizeSnapshotPlayer({
-        value,
-        index,
-        roster,
-        allowIndexFallback,
-      }),
-    ),
+    players: normalizedPlayers,
   };
 }
 
@@ -2274,6 +2377,12 @@ function normalizeEpisode(fragment: EpisodeFragment): CoworldEvaluationEpisode {
     })),
     fragment.episodeId,
   );
+  const decisions = revalidateDecisionsForRoster(fragment.decisions, roster);
+  const snapshots = revalidateSnapshotsForRoster(
+    fragment.snapshots,
+    roster,
+    fragment.episodeId,
+  );
   return {
     episodeId: fragment.episodeId,
     sourcePaths: fragment.sourcePaths,
@@ -2285,8 +2394,8 @@ function normalizeEpisode(fragment: EpisodeFragment): CoworldEvaluationEpisode {
     scores: fragment.scores,
     outrightWinnerSlot: fragment.outrightWinnerSlot ?? null,
     roster,
-    decisions: fragment.decisions,
-    snapshots: fragment.snapshots,
+    decisions,
+    snapshots,
     episodeReportedTelemetry: {
       result: normalizeReportedTelemetry(
         fragment.episodeReportedTelemetry.result,
