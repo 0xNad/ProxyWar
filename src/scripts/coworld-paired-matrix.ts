@@ -850,8 +850,13 @@ async function publishPreparedMatrix(
       path.join(stagingRoot, "plan.json"),
       path.join(prepared.outputRoot, "plan.json"),
     );
-    await fs.unlink(path.join(stagingRoot, "plan.json"));
-    await fs.rmdir(stagingRoot).catch(() => undefined);
+    // plan.json is the documented completion marker. Once its no-replace link
+    // succeeds, publication succeeded; cleanup can never turn that success into
+    // a caller-visible failure. A later run still refuses the completed output.
+    await fs.unlink(path.join(stagingRoot, "plan.json")).catch(() => undefined);
+    await fs
+      .rm(stagingRoot, { recursive: true, force: true })
+      .catch(() => undefined);
   } catch (error) {
     await fs.rm(stagingRoot, { recursive: true, force: true });
     throw error;

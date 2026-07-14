@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { promises as fs } from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { describe, expect, test } from "vitest";
+import { describe, expect, test, vi } from "vitest";
 import {
   materializeCoworldPairedMatrix,
   type CoworldMatrixSchemaValidator,
@@ -376,6 +376,65 @@ describe("Coworld paired matrix planner", () => {
         entry.includes(".matrix.staging-"),
       ),
     ).toEqual([]);
+  });
+
+  test("post-marker unlink failure remains a successful complete publication", async () => {
+    const { directory, outputRoot, spec } = await fixture();
+    const unlink = vi
+      .spyOn(fs, "unlink")
+      .mockRejectedValueOnce(new Error("synthetic post-marker unlink failure"));
+    try {
+      const plan = await materializeCoworldPairedMatrix({
+        spec,
+        specDirectory: directory,
+        resolveImageID: fakeImageID,
+        validateCoworld: acceptSchema,
+      });
+
+      await expect(fs.lstat(plan.planPath)).resolves.toBeDefined();
+      await expect(
+        fs.lstat(plan.materializedManifestPath),
+      ).resolves.toBeDefined();
+      for (const job of plan.jobs) {
+        await expect(fs.lstat(job.requestPath)).resolves.toBeDefined();
+      }
+      expect(
+        (await fs.readdir(directory)).filter((entry) =>
+          entry.includes(".matrix.staging-"),
+        ),
+      ).toEqual([]);
+      expect((await fs.readdir(outputRoot)).sort()).toEqual([
+        "payload",
+        "plan.json",
+      ]);
+    } finally {
+      unlink.mockRestore();
+    }
+  });
+
+  test("pre-marker link failure throws and leaves no completion marker", async () => {
+    const { directory, outputRoot, spec } = await fixture();
+    const link = vi
+      .spyOn(fs, "link")
+      .mockRejectedValueOnce(new Error("synthetic pre-marker link failure"));
+    try {
+      await expect(
+        materializeCoworldPairedMatrix({
+          spec,
+          specDirectory: directory,
+          resolveImageID: fakeImageID,
+          validateCoworld: acceptSchema,
+        }),
+      ).rejects.toThrow("synthetic pre-marker link failure");
+      await expect(
+        fs.lstat(path.join(outputRoot, "plan.json")),
+      ).rejects.toMatchObject({ code: "ENOENT" });
+      await expect(
+        fs.lstat(path.join(outputRoot, "payload", "manifest.json")),
+      ).resolves.toBeDefined();
+    } finally {
+      link.mockRestore();
+    }
   });
 
   test("schema or later-variant failure leaves no partial or stale output", async () => {
