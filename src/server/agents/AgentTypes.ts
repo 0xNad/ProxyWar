@@ -875,8 +875,24 @@ export interface AgentDecisionRecord {
   objectiveKind?: AgentObjectiveKind;
   objectiveSummary?: string;
   objectiveAligned?: boolean;
+  /** LegalAction.id values presented to the first brain call for this turn. */
   legalActionIDs: string[];
   legalActionIDsByKind: Partial<Record<LegalActionKind, string[]>>;
+  /**
+   * Roster-order reservation can narrow the first offer before submission. These
+   * fields are present only when that submission set differs from the offer.
+   */
+  submissionLegalActionIDs?: string[];
+  submissionLegalActionIDsByKind?: Partial<Record<LegalActionKind, string[]>>;
+  /** Bounded, sanitized telemetry from the first brain response. */
+  originalRequestedActionIDs?: string[];
+  originalRequestedActionIDCount?: number;
+  /** First-response ids that were offered but removed before submission. */
+  withdrawnRequestedActionIDs?: string[];
+  withdrawnRequestedActionIDCount?: number;
+  /** At most one retry is permitted after an offered id is withdrawn. */
+  offerRetryCount?: number;
+  offerRetryLatencyMs?: number;
   attackActionIDs: string[];
   chosenActionID: string;
   chosenActionKind: LegalActionKind;

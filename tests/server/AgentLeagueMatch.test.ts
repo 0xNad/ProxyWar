@@ -56,6 +56,7 @@ import {
   createDefaultAgentSpecs,
 } from "../../src/server/agents/AgentLeagueMatch";
 import { AgentLocalGameMirror } from "../../src/server/agents/AgentLocalGameMirror";
+import { AgentObservationBuilder } from "../../src/server/agents/AgentObservationBuilder";
 import { SPAWN_CONVERGE_PROGRESS } from "../../src/server/agents/AgentSpawnExplorer";
 import { runAgentStepLockedLeague } from "../../src/server/agents/AgentStepLockedLeague";
 import { LlmAgentBrain } from "../../src/server/agents/LlmAgentBrain";
@@ -63,6 +64,7 @@ import { LegalActionBuilder } from "../../src/server/agents/LegalActionBuilder";
 import { MockLlmProvider } from "../../src/server/agents/MockLlmProvider";
 import {
   AgentDecision,
+  AgentObservation,
   LegalAction,
 } from "../../src/server/agents/AgentTypes";
 import { GameServer } from "../../src/server/GameServer";
@@ -91,6 +93,94 @@ function deferredDecision(
     }),
     resolve: () => resolvePromise({ actionID, reason }),
   };
+}
+
+function holdLegalAction(): LegalAction {
+  return {
+    id: "hold",
+    kind: "hold",
+    label: "Hold",
+    intent: null,
+    risk: { level: "none", score: 0 },
+  };
+}
+
+function allianceRequestLegalAction(recipientID: string): LegalAction {
+  return {
+    id: `alliance:request:${recipientID}`,
+    kind: "alliance_request",
+    label: `Request alliance with ${recipientID}`,
+    intent: null,
+    risk: { level: "low", score: 0.1 },
+    metadata: { recipientID },
+  };
+}
+
+function boatLegalAction(tile: number): LegalAction {
+  return {
+    id: `boat:${tile}:25000`,
+    kind: "boat",
+    label: `Launch boat to ${tile}`,
+    intent: { type: "boat", troops: 25_000, dst: tile },
+    risk: { level: "low", score: 0.1 },
+    metadata: { targetTile: tile, troops: 25_000 },
+  };
+}
+
+function buildLegalAction(tile: number): LegalAction {
+  return {
+    id: `build:City:${tile}`,
+    kind: "build",
+    label: `Build City at ${tile}`,
+    intent: { type: "build_unit", unit: UnitType.City, tile },
+    risk: { level: "low", score: 0.1 },
+    metadata: {
+      buildTile: tile,
+      unit: UnitType.City,
+      role: "economic",
+    },
+  };
+}
+
+function observationBuilderWithPlayerIDs(
+  playerIDByClientID: Readonly<Record<string, string>>,
+): AgentObservationBuilder {
+  const delegate = new AgentObservationBuilder();
+  return {
+    build: (input) => {
+      const observation = delegate.build(input);
+      const playerID =
+        input.clientID === null
+          ? undefined
+          : playerIDByClientID[input.clientID];
+      if (playerID === undefined) {
+        return observation;
+      }
+      return {
+        ...observation,
+        ownState: {
+          playerID,
+          clientID: input.clientID,
+          smallID: 1,
+          name: input.username,
+          type: PlayerType.Human,
+          isAlive: true,
+          isDisconnected: false,
+          isTraitor: false,
+          hasSpawned: true,
+          troops: 100_000,
+          gold: "100000",
+          tilesOwned: 1_000,
+          borderTiles: 100,
+          outgoingAttacks: 0,
+          incomingAttacks: 0,
+          outgoingAllianceRequests: 0,
+          incomingAllianceRequests: 0,
+        },
+      } satisfies AgentObservation;
+    },
+    summarize: (observation) => delegate.summarize(observation),
+  } as AgentObservationBuilder;
 }
 
 const serverConfig = {
@@ -309,6 +399,453 @@ describe("AgentLeagueMatchRunner", () => {
         "hold",
         "hold",
       ]);
+    } finally {
+      await game.end({ archive: false });
+    }
+  });
+
+  it("retries once when an originally offered target becomes reserved before submission", async () => {
+    const log = makeLogger();
+    const requestTarget = allianceRequestLegalAction("PLAYER_TARGET");
+    const boat = boatLegalAction(7_801);
+    const legalActions = [requestTarget, boat, holdLegalAction()];
+    const firstDecide = vi.fn(() => ({
+      actionID: requestTarget.id,
+      reason: "reserve the shared target",
+    }));
+    let secondCall = 0;
+    const secondDecide = vi.fn(
+      ({ legalActions: offered }: { legalActions: LegalAction[] }) => {
+        secondCall += 1;
+        return secondCall === 1
+          ? {
+              actionID: requestTarget.id,
+              reason: "use the target offered in parallel",
+            }
+          : {
+              actionID: offered.find((action) => action.kind === "boat")!.id,
+              reason: "recover from the roster-order withdrawal",
+            };
+      },
+    );
+    const participants = createAgentParticipants(
+      [
+        {
+          username: "Target Reserving Agent",
+          profile: "diplomatic",
+          clientID: "TARGET_RESERVER",
+        },
+        {
+          username: "Target Retry Agent",
+          profile: "opportunistic",
+          clientID: "TARGET_RETRY",
+        },
+      ],
+      log,
+      {
+        brainFactory: (_spec, index) => ({
+          brainType: "rule",
+          decide: index === 0 ? firstDecide : secondDecide,
+        }),
+      },
+    );
+    const game = new GameServer(
+      "AGENT_TARGET_RETRY",
+      log,
+      Date.now(),
+      serverConfig,
+      gameConfig,
+    );
+    const match = new AgentLeagueMatchRunner({
+      game,
+      participants,
+      spawnCandidates: [],
+      log,
+      observationBuilder: observationBuilderWithPlayerIDs({
+        TARGET_RESERVER: "PLAYER_A",
+        TARGET_RETRY: "PLAYER_B",
+      }),
+      legalActionBuilder: {
+        build: () => legalActions,
+      } as unknown as LegalActionBuilder,
+    });
+
+    try {
+      match.attachAgents();
+      const records = await match.runDecisionTurn({ turnNumber: 7_800 });
+      const retryRecord = records[1]!;
+
+      expect(firstDecide).toHaveBeenCalledTimes(1);
+      expect(secondDecide).toHaveBeenCalledTimes(2);
+      expect(
+        secondDecide.mock.calls.map(([input]) =>
+          input.legalActions.map((action) => action.id),
+        ),
+      ).toEqual([
+        [requestTarget.id, boat.id, "hold"],
+        [boat.id, "hold"],
+      ]);
+      expect(retryRecord.chosenActionID).toBe(boat.id);
+      expect(retryRecord.result.accepted).toBe(true);
+      expect(retryRecord.intent).toMatchObject({ type: "boat", dst: 7_801 });
+      expect(retryRecord.legalActionIDs).toEqual([
+        requestTarget.id,
+        boat.id,
+        "hold",
+      ]);
+      expect(retryRecord.submissionLegalActionIDs).toEqual([boat.id, "hold"]);
+      expect(retryRecord.submissionLegalActionIDsByKind).toEqual({
+        boat: [boat.id],
+        hold: ["hold"],
+      });
+      expect(retryRecord.originalRequestedActionIDs).toEqual([
+        requestTarget.id,
+      ]);
+      expect(retryRecord.withdrawnRequestedActionIDs).toEqual([
+        requestTarget.id,
+      ]);
+      expect(retryRecord.offerRetryCount).toBe(1);
+      expect(retryRecord.offerRetryLatencyMs).toBeGreaterThanOrEqual(0);
+      expect(retryRecord.decisionMetadata).toMatchObject({
+        originalRequestedActionIDs: requestTarget.id,
+        withdrawnRequestedActionIDs: requestTarget.id,
+        offerRetryCount: 1,
+        batchActionIDs: boat.id,
+      });
+      expect(retryRecord.decisionMetadata).not.toHaveProperty(
+        "validationFallbackUsed",
+      );
+    } finally {
+      await game.end({ archive: false });
+    }
+  });
+
+  it("retries once when the later seat is itself reserved as an earlier request target", async () => {
+    const log = makeLogger();
+    const firstRequest = allianceRequestLegalAction("PLAYER_B");
+    const secondRequest = allianceRequestLegalAction("PLAYER_C");
+    const build = buildLegalAction(8_101);
+    const calls = [0, 0];
+    const secondOffers: string[][] = [];
+    const participants = createAgentParticipants(
+      [
+        {
+          username: "Requestor Reserving Agent",
+          profile: "diplomatic",
+          clientID: "REQUESTOR_RESERVER",
+        },
+        {
+          username: "Requestor Retry Agent",
+          profile: "opportunistic",
+          clientID: "REQUESTOR_RETRY",
+        },
+      ],
+      log,
+      {
+        brainFactory: (_spec, index) => ({
+          brainType: "rule",
+          decide: ({ legalActions }) => {
+            calls[index] += 1;
+            if (index === 1) {
+              secondOffers.push(legalActions.map((action) => action.id));
+            }
+            const request = legalActions.find(
+              (action) => action.kind === "alliance_request",
+            );
+            const productive = legalActions.find(
+              (action) => action.kind === "build",
+            );
+            return {
+              actionID: request?.id ?? productive?.id ?? "hold",
+              reason: request
+                ? "request alliance"
+                : "use narrowed productive action",
+            };
+          },
+        }),
+      },
+    );
+    const game = new GameServer(
+      "AGENT_REQUESTOR_RETRY",
+      log,
+      Date.now(),
+      serverConfig,
+      gameConfig,
+    );
+    const match = new AgentLeagueMatchRunner({
+      game,
+      participants,
+      spawnCandidates: [],
+      log,
+      observationBuilder: observationBuilderWithPlayerIDs({
+        REQUESTOR_RESERVER: "PLAYER_A",
+        REQUESTOR_RETRY: "PLAYER_B",
+      }),
+      legalActionBuilder: {
+        build: ({ observation }: { observation: AgentObservation }) =>
+          observation.ownState?.playerID === "PLAYER_A"
+            ? [firstRequest, holdLegalAction()]
+            : [secondRequest, build, holdLegalAction()],
+      } as unknown as LegalActionBuilder,
+    });
+
+    try {
+      match.attachAgents();
+      const records = await match.runDecisionTurn({ turnNumber: 8_100 });
+      const retryRecord = records[1]!;
+
+      expect(calls).toEqual([1, 2]);
+      expect(secondOffers).toEqual([
+        [secondRequest.id, build.id, "hold"],
+        [build.id, "hold"],
+      ]);
+      expect(retryRecord.chosenActionID).toBe(build.id);
+      expect(retryRecord.result.accepted).toBe(true);
+      expect(retryRecord.intent).toMatchObject({
+        type: "build_unit",
+        unit: UnitType.City,
+        tile: 8_101,
+      });
+      expect(retryRecord.legalActionIDs).toEqual([
+        secondRequest.id,
+        build.id,
+        "hold",
+      ]);
+      expect(retryRecord.submissionLegalActionIDs).toEqual([build.id, "hold"]);
+      expect(retryRecord.withdrawnRequestedActionIDs).toEqual([
+        secondRequest.id,
+      ]);
+      expect(retryRecord.offerRetryCount).toBe(1);
+      expect(retryRecord.decisionMetadata).not.toHaveProperty(
+        "validationFallbackUsed",
+      );
+    } finally {
+      await game.end({ archive: false });
+    }
+  });
+
+  it("does not retry a genuinely unknown id that was never offered", async () => {
+    const log = makeLogger();
+    const decide = vi.fn(() => ({
+      actionID: "invented:never-offered",
+      reason: "invent a ghost id",
+    }));
+    const participants = createAgentParticipants(
+      [
+        {
+          username: "Ghost Agent",
+          profile: "opportunistic",
+          clientID: "GHOST_AGENT",
+        },
+      ],
+      log,
+      {
+        brainFactory: () => ({ brainType: "rule", decide }),
+      },
+    );
+    const game = new GameServer(
+      "AGENT_GHOST_NO_RETRY",
+      log,
+      Date.now(),
+      serverConfig,
+      gameConfig,
+    );
+    const match = new AgentLeagueMatchRunner({
+      game,
+      participants,
+      spawnCandidates: [],
+      log,
+      legalActionBuilder: {
+        build: () => [holdLegalAction()],
+      } as unknown as LegalActionBuilder,
+    });
+
+    try {
+      const records = await match.runDecisionTurn({ turnNumber: 7_800 });
+
+      expect(decide).toHaveBeenCalledTimes(1);
+      expect(records).toHaveLength(1);
+      expect(records[0]).toMatchObject({
+        chosenActionID: "hold",
+        legalActionIDs: ["hold"],
+      });
+      expect(records[0]!.submissionLegalActionIDs).toBeUndefined();
+      expect(records[0]!.offerRetryCount).toBeUndefined();
+      expect(records[0]!.decisionMetadata).toMatchObject({
+        batchActionIDs: "invented:never-offered",
+        validationFallbackUsed: true,
+        fallbackUsed: true,
+      });
+    } finally {
+      await game.end({ archive: false });
+    }
+  });
+
+  it("holds loudly after the single withdrawal retry also returns an invalid id", async () => {
+    const log = makeLogger();
+    const requestTarget = allianceRequestLegalAction("PLAYER_TARGET");
+    const legalActions = [requestTarget, holdLegalAction()];
+    const calls = [0, 0];
+    const participants = createAgentParticipants(
+      [
+        {
+          username: "Retry Invalid Reserver",
+          profile: "diplomatic",
+          clientID: "RETRY_INVALID_RESERVER",
+        },
+        {
+          username: "Retry Invalid Agent",
+          profile: "opportunistic",
+          clientID: "RETRY_INVALID_AGENT",
+        },
+      ],
+      log,
+      {
+        brainFactory: (_spec, index) => ({
+          brainType: "rule",
+          decide: () => {
+            calls[index] += 1;
+            if (index === 0 || calls[index] === 1) {
+              return {
+                actionID: requestTarget.id,
+                reason: "select the offered target",
+              };
+            }
+            return {
+              actionID: "invented:retry-ghost",
+              reason: "retry is still invalid",
+            };
+          },
+        }),
+      },
+    );
+    const game = new GameServer(
+      "AGENT_RETRY_INVALID",
+      log,
+      Date.now(),
+      serverConfig,
+      gameConfig,
+    );
+    const match = new AgentLeagueMatchRunner({
+      game,
+      participants,
+      spawnCandidates: [],
+      log,
+      observationBuilder: observationBuilderWithPlayerIDs({
+        RETRY_INVALID_RESERVER: "PLAYER_A",
+        RETRY_INVALID_AGENT: "PLAYER_B",
+      }),
+      legalActionBuilder: {
+        build: () => legalActions,
+      } as unknown as LegalActionBuilder,
+    });
+
+    try {
+      match.attachAgents();
+      const records = await match.runDecisionTurn({ turnNumber: 8_100 });
+      const retryRecord = records[1]!;
+
+      expect(calls).toEqual([1, 2]);
+      expect(retryRecord.chosenActionID).toBe("hold");
+      expect(retryRecord.offerRetryCount).toBe(1);
+      expect(retryRecord.originalRequestedActionIDs).toEqual([
+        requestTarget.id,
+      ]);
+      expect(retryRecord.withdrawnRequestedActionIDs).toEqual([
+        requestTarget.id,
+      ]);
+      expect(retryRecord.decisionMetadata).toMatchObject({
+        batchActionIDs: "invented:retry-ghost",
+        batchRejectedActionIDs: "invented:retry-ghost",
+        validationFallbackUsed: true,
+        fallbackUsed: true,
+        offerRetryCount: 1,
+      });
+    } finally {
+      await game.end({ archive: false });
+    }
+  });
+
+  it("keeps surviving multi-action requests and does not retry a withdrawn sibling", async () => {
+    const log = makeLogger();
+    const requestTarget = allianceRequestLegalAction("PLAYER_TARGET");
+    const legalActions = [requestTarget, holdLegalAction()];
+    const calls = [0, 0];
+    const participants = createAgentParticipants(
+      [
+        {
+          username: "Batch Reserver",
+          profile: "diplomatic",
+          clientID: "BATCH_RESERVER",
+        },
+        {
+          username: "Batch Survivor",
+          profile: "opportunistic",
+          clientID: "BATCH_SURVIVOR",
+        },
+      ],
+      log,
+      {
+        brainFactory: (_spec, index) => ({
+          brainType: "planner-executor",
+          decide: () => {
+            calls[index] += 1;
+            return index === 0
+              ? {
+                  actionID: requestTarget.id,
+                  reason: "reserve the target",
+                }
+              : {
+                  actionID: requestTarget.id,
+                  actionIDs: [requestTarget.id, "hold"],
+                  reason: "retain the valid sibling",
+                };
+          },
+        }),
+      },
+    );
+    const game = new GameServer(
+      "AGENT_BATCH_WITHDRAWAL",
+      log,
+      Date.now(),
+      serverConfig,
+      gameConfig,
+    );
+    const match = new AgentLeagueMatchRunner({
+      game,
+      participants,
+      spawnCandidates: [],
+      log,
+      observationBuilder: observationBuilderWithPlayerIDs({
+        BATCH_RESERVER: "PLAYER_A",
+        BATCH_SURVIVOR: "PLAYER_B",
+      }),
+      legalActionBuilder: {
+        build: () => legalActions,
+      } as unknown as LegalActionBuilder,
+    });
+
+    try {
+      match.attachAgents();
+      const records = await match.runDecisionTurn({ turnNumber: 8_100 });
+      const survivorRecord = records[1]!;
+
+      expect(calls).toEqual([1, 1]);
+      expect(survivorRecord.chosenActionID).toBe("hold");
+      expect(survivorRecord.submissionLegalActionIDs).toEqual(["hold"]);
+      expect(survivorRecord.originalRequestedActionIDs).toEqual([
+        requestTarget.id,
+        "hold",
+      ]);
+      expect(survivorRecord.withdrawnRequestedActionIDs).toEqual([
+        requestTarget.id,
+      ]);
+      expect(survivorRecord.offerRetryCount).toBe(0);
+      expect(survivorRecord.decisionMetadata).toMatchObject({
+        batchActionIDs: `${requestTarget.id},hold`,
+        batchRejectedActionIDs: requestTarget.id,
+        offerRetryCount: 0,
+      });
     } finally {
       await game.end({ archive: false });
     }

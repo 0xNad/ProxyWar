@@ -201,7 +201,18 @@ interface DecisionLogEntry {
   alternativesConsidered?: string;
   blockedHostileAttackSummary?: string;
   holdReasonCategory?: string;
+  /** Exact LegalAction.id offer presented to the first brain call. */
+  legalActionIDs: string[];
   legalActionIDsByKind: Partial<Record<LegalActionKind, string[]>>;
+  /** Roster-order narrowed set; absent when identical to the first offer. */
+  submissionLegalActionIDs?: string[];
+  submissionLegalActionIDsByKind?: Partial<Record<LegalActionKind, string[]>>;
+  originalRequestedActionIDs?: string[];
+  originalRequestedActionIDCount?: number;
+  withdrawnRequestedActionIDs?: string[];
+  withdrawnRequestedActionIDCount?: number;
+  offerRetryCount?: number;
+  offerRetryLatencyMs?: number;
   batchActionIDs?: string[];
   batchIndex?: number;
   selectedLegalActionId: string;
@@ -636,7 +647,39 @@ function decisionLogEntry(
     ...(stringMetadata(metadata, "holdReasonCategory") !== undefined
       ? { holdReasonCategory: stringMetadata(metadata, "holdReasonCategory") }
       : {}),
+    legalActionIDs: record.legalActionIDs,
     legalActionIDsByKind: record.legalActionIDsByKind,
+    ...(record.submissionLegalActionIDs !== undefined
+      ? { submissionLegalActionIDs: record.submissionLegalActionIDs }
+      : {}),
+    ...(record.submissionLegalActionIDsByKind !== undefined
+      ? {
+          submissionLegalActionIDsByKind: record.submissionLegalActionIDsByKind,
+        }
+      : {}),
+    ...(record.originalRequestedActionIDs !== undefined
+      ? { originalRequestedActionIDs: record.originalRequestedActionIDs }
+      : {}),
+    ...(record.originalRequestedActionIDCount !== undefined
+      ? {
+          originalRequestedActionIDCount: record.originalRequestedActionIDCount,
+        }
+      : {}),
+    ...(record.withdrawnRequestedActionIDs !== undefined
+      ? { withdrawnRequestedActionIDs: record.withdrawnRequestedActionIDs }
+      : {}),
+    ...(record.withdrawnRequestedActionIDCount !== undefined
+      ? {
+          withdrawnRequestedActionIDCount:
+            record.withdrawnRequestedActionIDCount,
+        }
+      : {}),
+    ...(record.offerRetryCount !== undefined
+      ? { offerRetryCount: record.offerRetryCount }
+      : {}),
+    ...(record.offerRetryLatencyMs !== undefined
+      ? { offerRetryLatencyMs: record.offerRetryLatencyMs }
+      : {}),
     ...(stringMetadata(metadata, "batchActionIDs") !== undefined
       ? {
           batchActionIDs:

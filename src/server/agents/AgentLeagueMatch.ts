@@ -396,31 +396,63 @@ export class AgentLeagueMatchRunner {
           sameTurnBuildTiles,
         ),
       );
-      const { participant, observation, decision, decisionLatencyMs } = input;
-      const requestedActionIDs = requestedDecisionActionIDs(decision);
-      const rejectedActionIDs: string[] = [];
-      const selectedActions: Array<{
-        action: LegalAction | null;
-        requestedActionID: string;
-        reason: string;
-      }> = [];
+      const { participant, observation } = input;
+      const originalDecision = input.decision;
+      const originalRequestedActionIDs =
+        requestedDecisionActionIDs(originalDecision);
+      const offeredActionIDs = new Set(
+        input.legalActions.map((action) => action.id),
+      );
+      const submissionActionIDs = new Set(
+        submissionLegalActions.map((action) => action.id),
+      );
+      const withdrawnRequestedActionIDs = originalRequestedActionIDs.filter(
+        (actionID) =>
+          offeredActionIDs.has(actionID) && !submissionActionIDs.has(actionID),
+      );
+      const submissionSetNarrowed = legalActionSetsDiffer(
+        input.legalActions,
+        submissionLegalActions,
+      );
 
-      for (const actionID of requestedActionIDs) {
-        const actionDecision: AgentDecision = { ...decision, actionID };
-        const validation = this.decisionValidator(
-          actionDecision,
+      let decision = originalDecision;
+      let decisionLatencyMs = input.decisionLatencyMs;
+      let offerRetryCount = 0;
+      let offerRetryLatencyMs = 0;
+      let selection = selectRequestedDecisionActions(
+        decision,
+        submissionLegalActions,
+        this.decisionValidator,
+      );
+
+      // Brains are first called in parallel against a common per-seat offer.
+      // Roster-order reservations can withdraw an action before that seat is
+      // submitted. Only that offer/submit race earns one re-call. A genuinely
+      // invented id was never offered and therefore never earns a retry.
+      if (
+        selection.selectedActions.length === 0 &&
+        withdrawnRequestedActionIDs.length > 0
+      ) {
+        const retryStartedAt = Date.now();
+        decision = await decideWithSafetyFallback({
+          brain: participant.brain,
+          fallbackProfile: participant.spec.profile,
+          observation,
+          legalActions: submissionLegalActions,
+          maxDecisionMs: options.maxDecisionMs,
+        });
+        offerRetryLatencyMs = Date.now() - retryStartedAt;
+        decisionLatencyMs += offerRetryLatencyMs;
+        offerRetryCount = 1;
+        selection = selectRequestedDecisionActions(
+          decision,
           submissionLegalActions,
+          this.decisionValidator,
         );
-        if (validation.ok) {
-          selectedActions.push({
-            action: validation.action,
-            requestedActionID: actionID,
-            reason: decision.reason,
-          });
-        } else {
-          rejectedActionIDs.push(actionID);
-        }
       }
+
+      const { requestedActionIDs, rejectedActionIDs, selectedActions } =
+        selection;
 
       let validationFallbackUsed = false;
       if (selectedActions.length === 0) {
@@ -451,6 +483,14 @@ export class AgentLeagueMatchRunner {
             requestedActionIDs,
             rejectedActionIDs,
             validationFallbackUsed: validationFallbackUsed && batchIndex === 0,
+            ...(submissionSetNarrowed
+              ? {
+                  originalRequestedActionIDs,
+                  withdrawnRequestedActionIDs,
+                  offerRetryCount,
+                  offerRetryLatencyMs,
+                }
+              : {}),
           }),
         };
         const result = selected.action
@@ -465,7 +505,16 @@ export class AgentLeagueMatchRunner {
           turnNumber: observation.turnNumber,
           observationSummary: input.observationSummary,
           observation,
-          legalActions: submissionLegalActions,
+          legalActions: input.legalActions,
+          ...(submissionSetNarrowed ? { submissionLegalActions } : {}),
+          ...(submissionSetNarrowed
+            ? {
+                originalRequestedActionIDs,
+                withdrawnRequestedActionIDs,
+                offerRetryCount,
+                offerRetryLatencyMs,
+              }
+            : {}),
           chosenAction: selected.action,
           decision: batchDecision,
           decisionLatencyMs,
@@ -496,6 +545,11 @@ export class AgentLeagueMatchRunner {
           objectiveAligned: record.objectiveAligned,
           legalActionIDs: record.legalActionIDs,
           legalActionIDsByKind: record.legalActionIDsByKind,
+          submissionLegalActionIDs: record.submissionLegalActionIDs,
+          originalRequestedActionIDs: record.originalRequestedActionIDs,
+          withdrawnRequestedActionIDs: record.withdrawnRequestedActionIDs,
+          offerRetryCount: record.offerRetryCount,
+          offerRetryLatencyMs: record.offerRetryLatencyMs,
           chosenActionID: record.chosenActionID,
           chosenActionKind: record.chosenActionKind,
           chosenActionMetadata: record.chosenActionMetadata,
@@ -877,6 +931,11 @@ export class AgentLeagueMatchRunner {
     observationSummary: string;
     observation: AgentObservation;
     legalActions: LegalAction[];
+    submissionLegalActions?: LegalAction[];
+    originalRequestedActionIDs?: string[];
+    withdrawnRequestedActionIDs?: string[];
+    offerRetryCount?: number;
+    offerRetryLatencyMs?: number;
     chosenAction: LegalAction | null;
     decision: AgentDecision;
     decisionLatencyMs: number;
@@ -909,8 +968,45 @@ export class AgentLeagueMatchRunner {
             ),
           }
         : {}),
+      // This is deliberately the first-brain offer, not the later roster-order
+      // submission subset. Without that distinction an offered-then-withdrawn
+      // LegalAction.id looked like a brain hallucination in decisions.jsonl.
       legalActionIDs: input.legalActions.map((action) => action.id),
       legalActionIDsByKind: groupLegalActionsByKind(input.legalActions),
+      ...(input.submissionLegalActions !== undefined
+        ? {
+            submissionLegalActionIDs: input.submissionLegalActions.map(
+              (action) => action.id,
+            ),
+            submissionLegalActionIDsByKind: groupLegalActionsByKind(
+              input.submissionLegalActions,
+            ),
+          }
+        : {}),
+      ...(input.originalRequestedActionIDs !== undefined
+        ? {
+            originalRequestedActionIDs: boundedTelemetryActionIDs(
+              input.originalRequestedActionIDs,
+            ),
+            originalRequestedActionIDCount:
+              input.originalRequestedActionIDs.length,
+          }
+        : {}),
+      ...(input.withdrawnRequestedActionIDs !== undefined
+        ? {
+            withdrawnRequestedActionIDs: boundedTelemetryActionIDs(
+              input.withdrawnRequestedActionIDs,
+            ),
+            withdrawnRequestedActionIDCount:
+              input.withdrawnRequestedActionIDs.length,
+          }
+        : {}),
+      ...(input.offerRetryCount !== undefined
+        ? { offerRetryCount: input.offerRetryCount }
+        : {}),
+      ...(input.offerRetryLatencyMs !== undefined
+        ? { offerRetryLatencyMs: input.offerRetryLatencyMs }
+        : {}),
       attackActionIDs: input.legalActions
         .filter((action) => action.kind === "attack")
         .map((action) => action.id),
@@ -1449,6 +1545,81 @@ function requestedDecisionActionIDs(decision: AgentDecision): string[] {
   return deduplicated.length > 0 ? deduplicated : [decision.actionID];
 }
 
+function selectRequestedDecisionActions(
+  decision: AgentDecision,
+  legalActions: LegalAction[],
+  decisionValidator: typeof validateAgentDecision,
+): {
+  requestedActionIDs: string[];
+  rejectedActionIDs: string[];
+  selectedActions: Array<{
+    action: LegalAction | null;
+    requestedActionID: string;
+    reason: string;
+  }>;
+} {
+  const requestedActionIDs = requestedDecisionActionIDs(decision);
+  const rejectedActionIDs: string[] = [];
+  const selectedActions: Array<{
+    action: LegalAction | null;
+    requestedActionID: string;
+    reason: string;
+  }> = [];
+
+  for (const actionID of requestedActionIDs) {
+    const validation = decisionValidator(
+      { ...decision, actionID },
+      legalActions,
+    );
+    if (validation.ok) {
+      selectedActions.push({
+        action: validation.action,
+        requestedActionID: actionID,
+        reason: decision.reason,
+      });
+    } else {
+      rejectedActionIDs.push(actionID);
+    }
+  }
+
+  return { requestedActionIDs, rejectedActionIDs, selectedActions };
+}
+
+function legalActionSetsDiffer(
+  offeredActions: LegalAction[],
+  submissionActions: LegalAction[],
+): boolean {
+  return (
+    offeredActions.length !== submissionActions.length ||
+    offeredActions.some(
+      (action, index) => action.id !== submissionActions[index]?.id,
+    )
+  );
+}
+
+const MAX_TELEMETRY_ACTION_IDS = 32;
+const MAX_TELEMETRY_ACTION_ID_LENGTH = 256;
+
+function boundedTelemetryActionIDs(actionIDs: string[]): string[] {
+  return actionIDs
+    .slice(0, MAX_TELEMETRY_ACTION_IDS)
+    .map(sanitizedTelemetryActionID);
+}
+
+function sanitizedTelemetryActionID(actionID: string): string {
+  let sanitized = "";
+  for (const character of actionID) {
+    const codePoint = character.codePointAt(0) ?? 0;
+    if (codePoint >= 32 && codePoint !== 127) {
+      sanitized += character;
+    }
+    if (sanitized.length >= MAX_TELEMETRY_ACTION_ID_LENGTH) {
+      break;
+    }
+  }
+  return sanitized.slice(0, MAX_TELEMETRY_ACTION_ID_LENGTH);
+}
+
 function isCommunicationRecord(record: AgentDecisionRecord): boolean {
   return (
     record.chosenActionKind === "quick_chat" ||
@@ -1523,6 +1694,10 @@ function batchDecisionMetadata(input: {
   requestedActionIDs: string[];
   rejectedActionIDs: string[];
   validationFallbackUsed?: boolean;
+  originalRequestedActionIDs?: string[];
+  withdrawnRequestedActionIDs?: string[];
+  offerRetryCount?: number;
+  offerRetryLatencyMs?: number;
 }): AgentDecision["metadata"] {
   const metadata: AgentDecision["metadata"] = {
     ...(input.metadata ?? {}),
@@ -1531,6 +1706,17 @@ function batchDecisionMetadata(input: {
     batchActionIDs: input.requestedActionIDs.join(","),
     batchRejectedActionIDs: input.rejectedActionIDs.join(","),
   };
+
+  if (input.offerRetryCount !== undefined) {
+    metadata.offerRetryCount = input.offerRetryCount;
+    metadata.offerRetryLatencyMs = input.offerRetryLatencyMs ?? 0;
+    metadata.originalRequestedActionIDs = boundedTelemetryActionIDs(
+      input.originalRequestedActionIDs ?? [],
+    ).join(",");
+    metadata.withdrawnRequestedActionIDs = boundedTelemetryActionIDs(
+      input.withdrawnRequestedActionIDs ?? [],
+    ).join(",");
+  }
 
   if (input.validationFallbackUsed) {
     // Every offered action the policy selected was invalid, so the validator
