@@ -14,8 +14,7 @@ import {
   type KeystoneWorldModel,
 } from "./keystone-experts";
 
-export const KEYSTONE_SURVIVAL_SHIELD_MARKER =
-  "keystone-survival-shield:v1";
+export const KEYSTONE_SURVIVAL_SHIELD_MARKER = "keystone-survival-shield:v2";
 
 export type KeystoneSurvivalShieldAdjudication =
   | "survival_preempted"
@@ -38,27 +37,29 @@ const defensiveUnits = new Set(["defense post"]);
 
 /**
  * Default-off shield around v16. Ordinary decisions remain byte-for-byte
- * delegated. Under verified incoming pressure, the existing reviewed survival
- * proposer may preempt stale growth/economy with one exact nearby Defense Post;
- * retreats and bounded counters are admitted only during severe collapse. It
- * never invents an intent, never displaces a hostile campaign, and fails closed
- * to v16.
+ * delegated. Only severe observed pressure or accepted recent territory loss
+ * may preempt stale growth/economy with an exact retreat, nearby Defense Post,
+ * or bounded counter. Moderate pressure delegates after the v1 Defense-Post
+ * treatment regressed its causal smoke. The shield never invents an intent,
+ * never displaces a hostile campaign, and fails closed to v16.
  */
 export class KeystoneSurvivalShieldExecutor implements AgentExecutor {
-  constructor(private readonly options: KeystoneSurvivalShieldExecutorOptions) {}
+  constructor(
+    private readonly options: KeystoneSurvivalShieldExecutorOptions,
+  ) {}
 
   decide(input: AgentBrainInput, plan: StrategicPlan): AgentExecutionDecision {
     const authoritative = this.options.delegate.decide(input, plan);
     try {
       const world = this.world(input, plan);
       const pressure = survivalPressure(input);
-      if (!pressure.verified) {
+      if (!pressure.severe) {
         return authoritative;
       }
       const survival = proposeKeystoneSurvival(world, {
-        allowRetreats: pressure.severe,
+        allowRetreats: true,
         allowDefensiveBuilds: !recentDefensiveBuild(input),
-        allowCounters: pressure.severe,
+        allowCounters: true,
         defensePostOnly: true,
         requireNearbyIncomingAttackForDefensiveBuild: true,
       });
@@ -193,7 +194,10 @@ function recentDefensiveBuild(input: AgentBrainInput): boolean {
         decision.actionKind === "build" &&
         typeof decision.unit === "string" &&
         defensiveUnits.has(
-          decision.unit.trim().toLowerCase().replace(/[\s_-]+/g, " "),
+          decision.unit
+            .trim()
+            .toLowerCase()
+            .replace(/[\s_-]+/g, " "),
         ),
     );
 }

@@ -184,9 +184,7 @@ function decision(actionID: string): AgentExecutionDecision {
   });
 }
 
-function shield(
-  selectedActionID: string,
-): KeystoneSurvivalShieldExecutor {
+function shield(selectedActionID: string): KeystoneSurvivalShieldExecutor {
   const delegate: AgentExecutor = {
     decide() {
       return decision(selectedActionID);
@@ -240,7 +238,7 @@ describe("Keystone survival shield", () => {
     expect(selected.reason).toContain("survival_preempted");
   });
 
-  it("preempts a stale Factory with a canonical defensive post", () => {
+  it("delegates the failed 26.9% moderate Defense Post treatment", () => {
     const factory = action("build:Factory:10", "build", {
       unit: "Factory",
       role: "economic",
@@ -262,11 +260,10 @@ describe("Keystone survival shield", () => {
       plan,
     );
 
-    expect(selected.actionID).toBe(defense.id);
-    expect(selected.reason).toContain("survival_preempted");
+    expect(selected).toEqual(decision(factory.id));
   });
 
-  it("treats two simultaneous hostile attackers as verified pressure below 10% total", () => {
+  it("delegates two low-volume attackers until pressure becomes severe", () => {
     const factory = action("build:Factory:10", "build", {
       unit: "Factory",
       role: "economic",
@@ -291,7 +288,9 @@ describe("Keystone survival shield", () => {
       borderSize: 10,
     });
 
-    expect(shield(factory.id).decide(current, plan).actionID).toBe(defense.id);
+    expect(shield(factory.id).decide(current, plan)).toEqual(
+      decision(factory.id),
+    );
   });
 
   it("uses only a bounded canonical counter against the observed aggressor", () => {
@@ -318,6 +317,42 @@ describe("Keystone survival shield", () => {
 
     expect(selected.actionID).toBe(counter.id);
     expect(selected.actionIDs).toEqual([counter.id]);
+  });
+
+  it("uses accepted recent territory loss to rescue a moderate-pressure collapse", () => {
+    const factory = action("build:Factory:10", "build", {
+      unit: "Factory",
+      role: "economic",
+    });
+    const counter = action("attack:ENEMY:25", "attack", {
+      targetID: "ENEMY",
+      troopPercent: 25,
+    });
+    const selected = shield(factory.id).decide(
+      input({
+        actions: [factory, counter],
+        players: [aggressor()],
+        threatRatio: 0.199,
+        recentDecisions: [
+          {
+            sequence: 1,
+            actionID: "expand:neutral:35",
+            actionKind: "attack",
+            reason: "accepted before collapse",
+            accepted: true,
+            ownTiles: 57_000,
+            expansion: true,
+          },
+        ],
+      }),
+      plan,
+    );
+
+    expect(selected).toMatchObject({
+      actionID: counter.id,
+      actionIDs: [counter.id],
+      actionSelectionSource: "keystone-survival-shield:survival",
+    });
   });
 
   it("marks exposure when v16 already chose the survival action", () => {

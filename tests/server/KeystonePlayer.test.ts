@@ -535,7 +535,10 @@ describe("Coworld keystone player", () => {
       },
     } as unknown as KeystoneModules;
     const base = activePoliticsBrainInput();
-    const rival = { ...base.observation.visiblePlayers[0]!, incomingAttack: true };
+    const rival = {
+      ...base.observation.visiblePlayers[0]!,
+      incomingAttack: true,
+    };
     const current: AgentBrainInput = {
       ...base,
       observation: {
@@ -549,7 +552,7 @@ describe("Coworld keystone player", () => {
               attackID: "incoming:RIVAL",
               targetID: rival.playerID,
               targetName: rival.name,
-              troops: 20_000,
+              troops: 42_075,
               retreating: false,
               sourceTile: null,
               borderSize: 10,

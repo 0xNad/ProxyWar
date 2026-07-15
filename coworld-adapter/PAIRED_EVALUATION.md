@@ -46,7 +46,7 @@ assignment alone does not prove the runtime changed a decision. Promotion
 evidence must also inspect decision telemetry for the arm's adjudication-specific
 marker. For the survival shield, require at least one `survival_preempted`
 decision, count `survival_confirmed` separately, and require zero
-`infrastructure_error` decisions. A generic `keystone-survival-shield:v1`
+`infrastructure_error` decisions. A generic `keystone-survival-shield:v2`
 marker count is insufficient because the fail-closed error path uses the same
 namespace.
 
