@@ -221,7 +221,7 @@ function shield(
 }
 
 describe("Keystone survival shield", () => {
-  it("preempts a canonical no-edge side war with the exact offered hold", () => {
+  it("preserves a no-edge campaign outside verified cross-target collapse", () => {
     const attack = action("attack:RIVAL:25", "attack", {
       targetID: "RIVAL",
       troopPercent: 25,
@@ -244,14 +244,7 @@ describe("Keystone survival shield", () => {
       plan,
     );
 
-    expect(selected).toMatchObject({
-      actionID: hold.id,
-      actionIDs: [hold.id],
-      executorSource: "keystone-survival-shield",
-      actionSelectionSource: "keystone-defense-authority:reserve",
-    });
-    expect(selected.reason).toContain(KEYSTONE_DEFENSE_AUTHORITY_MARKER);
-    expect(selected.reason).toContain("no_edge_conquest_preempted");
+    expect(selected).toEqual(decision(attack.id));
   });
 
   it("preserves counters against the current aggressor", () => {
@@ -380,6 +373,49 @@ describe("Keystone survival shield", () => {
     });
     expect(selected.reason).toContain(KEYSTONE_DEFENSE_AUTHORITY_MARKER);
     expect(selected.reason).toContain("cross_target_collapse_preempted");
+    expect(selected.reason).toContain(`preempted=${attack.id}`);
+  });
+
+  it("preempts a forbidden side attack selected during cross-target collapse", () => {
+    const attack = action("attack:RIVAL:10", "attack", {
+      targetID: "RIVAL",
+      troopPercent: 10,
+    });
+    const hold = action("hold:wait", "hold");
+    const selected = shield(attack.id, true).decide(
+      input({
+        actions: [attack, hold],
+        players: [
+          aggressor("INVADER"),
+          aggressor("RIVAL", {
+            incomingAttack: false,
+            outgoingAttack: false,
+            relativeTroopRatio: 1.2,
+          }),
+        ],
+        defensePriority: true,
+        threatRatio: 0.2,
+        recentDecisions: [
+          {
+            sequence: 1,
+            actionID: "build:Factory:1",
+            actionKind: "build",
+            reason: "accepted before forbidden side attack",
+            accepted: true,
+            ownTiles: 9_000,
+          },
+        ],
+        conversionReady: false,
+        finishRecommended: false,
+      }),
+      { ...plan, forbiddenActionKinds: ["attack"] },
+    );
+
+    expect(selected.actionID).toBe(hold.id);
+    expect(selected.actionIDs).toEqual([hold.id]);
+    expect(selected.reason).toContain(KEYSTONE_DEFENSE_AUTHORITY_MARKER);
+    expect(selected.reason).toContain("cross_target_collapse_preempted");
+    expect(selected.reason).toContain(`preempted=${attack.id}`);
   });
 
   it("retreats only the preempted campaign when several retreats are offered", () => {
@@ -611,13 +647,26 @@ describe("Keystone survival shield", () => {
       input({
         actions: [attack],
         players: [
+          aggressor("INVADER"),
           aggressor("RIVAL", {
             incomingAttack: false,
-            relativeTroopRatio: 1.1,
+            outgoingAttack: false,
+            relativeTroopRatio: 2.1,
           }),
         ],
         defensePriority: true,
-        conversionReady: false,
+        threatRatio: 0.2,
+        recentDecisions: [
+          {
+            sequence: 1,
+            actionID: "build:Factory:1",
+            actionKind: "build",
+            reason: "accepted before fail-closed fixture",
+            accepted: true,
+            ownTiles: 9_000,
+          },
+        ],
+        conversionReady: true,
         finishRecommended: false,
       }),
       plan,

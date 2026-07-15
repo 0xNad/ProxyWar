@@ -16,16 +16,14 @@ import {
 
 export const KEYSTONE_SURVIVAL_SHIELD_MARKER = "keystone-survival-shield:v2";
 export const KEYSTONE_DEFENSE_AUTHORITY_MARKER =
-  "keystone-defense-authority:v2";
+  "keystone-defense-authority:v3";
 
 export type KeystoneSurvivalShieldAdjudication =
   | "survival_preempted"
   | "survival_confirmed"
   | "infrastructure_error";
 
-type KeystoneDefenseAuthorityAdjudication =
-  | "no_edge_conquest_preempted"
-  | "cross_target_collapse_preempted";
+type KeystoneDefenseAuthorityAdjudication = "cross_target_collapse_preempted";
 
 export interface KeystoneSurvivalShieldExecutorOptions {
   readonly delegate: AgentExecutor;
@@ -42,7 +40,6 @@ const SEVERE_THREAT_RATIO = 0.35;
 const SEVERE_TILE_LOSS_RATIO = 0.25;
 const CROSS_TARGET_THREAT_RATIO = 0.1;
 const CROSS_TARGET_TILE_LOSS_RATIO = 0.08;
-const NO_EDGE_RELATIVE_TROOP_RATIO_BP = 12_500;
 const DEFENSIVE_BUILD_COOLDOWN_DECISIONS = 3;
 const defensiveUnits = new Set(["defense post"]);
 
@@ -53,8 +50,8 @@ const defensiveUnits = new Set(["defense post"]);
  * or bounded counter. Moderate pressure delegates after the v1 Defense-Post
  * treatment regressed its causal smoke. The base shield never displaces a
  * hostile campaign; the optional defense-authority treatment may stop only a
- * canonical no-edge or verified cross-target collapse. Both paths choose exact
- * offered actions, never invent an intent, and fail closed to v16.
+ * verified cross-target collapse. Both paths choose exact offered actions,
+ * never invent an intent, and fail closed to v16.
  */
 export class KeystoneSurvivalShieldExecutor implements AgentExecutor {
   constructor(
@@ -147,7 +144,6 @@ function adjudicateUnsafeConquest(
     action.actionOwner !== "conquest" ||
     action.targetPlayerID === null ||
     action.targetsFriendlyOrTeam ||
-    action.forbidden ||
     action.safetyBlocked
   ) {
     return null;
@@ -159,22 +155,7 @@ function adjudicateUnsafeConquest(
     return null;
   }
 
-  const conversion =
-    input.observation.tacticalAffordances?.frontierConversionTiming;
   const finish = input.observation.tacticalAffordances?.frontierFinishPressure;
-  const relativeTroopRatioBP = target?.relativeTroopRatioBP;
-  if (
-    !target.incomingAttack &&
-    conversion?.executorReady === false &&
-    finish?.recommended === false &&
-    relativeTroopRatioBP !== null &&
-    relativeTroopRatioBP !== undefined &&
-    relativeTroopRatioBP > 0 &&
-    relativeTroopRatioBP < NO_EDGE_RELATIVE_TROOP_RATIO_BP
-  ) {
-    return "no_edge_conquest_preempted";
-  }
-
   const exactCanonicalFinish =
     finish?.recommended === true &&
     finish.bestTargetID === action.targetPlayerID &&
@@ -216,7 +197,7 @@ function defenseAuthorityDecision(
     return defenseAuthorityReplacement(
       world,
       campaignRetreats[0]!.id,
-      "retreated the preempted campaign before defending the home front",
+      `preempted=${authoritativeAction.id}; retreated the campaign before defending the home front`,
       "survival",
       adjudication,
     );
@@ -237,7 +218,7 @@ function defenseAuthorityDecision(
     return defenseAuthorityReplacement(
       world,
       survival.actionID,
-      `redirected to ${survival.source}`,
+      `preempted=${authoritativeAction.id}; redirected to ${survival.source}`,
       "survival",
       adjudication,
     );
@@ -249,9 +230,7 @@ function defenseAuthorityDecision(
   return defenseAuthorityReplacement(
     world,
     holds[0]!.id,
-    adjudication === "cross_target_collapse_preempted"
-      ? "conserved the home front instead of continuing a different war"
-      : "conserved reserves instead of opening a no-edge side war",
+    `preempted=${authoritativeAction.id}; conserved the home front instead of continuing a different war`,
     "reserve",
     adjudication,
   );
