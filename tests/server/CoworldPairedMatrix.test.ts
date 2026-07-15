@@ -496,6 +496,67 @@ describe("Coworld paired matrix planner", () => {
     );
   });
 
+  test("materializes mutually isolated same-image v39 treatment arms", async () => {
+    const { directory, spec } = await fixture();
+    const plan = await materializeCoworldPairedMatrix({
+      spec: {
+        ...spec,
+        candidateSeats: [0],
+        arms: [
+          { kind: "v39" },
+          { kind: "v39-commander-retention" },
+          { kind: "v39-defense-authority" },
+        ],
+      },
+      specDirectory: directory,
+      resolveImageID: fakeImageID,
+      validateCoworld: acceptSchema,
+    });
+
+    expect(plan.arms.map(({ armID }) => armID)).toEqual([
+      "v39",
+      "v39-commander-retention",
+      "v39-defense-authority",
+    ]);
+    const [control, commander, defense] = plan.arms;
+    expect(control).toEqual({
+      armID: "v39",
+      kind: "v39",
+      base: "v16",
+      shadow: false,
+      expertMask: 15,
+      env: {
+        PROXYWAR_KEYSTONE_SINGLE_ACTION: "0",
+        PROXYWAR_KEYSTONE_EXPERT_COUNCIL_SHADOW: "0",
+        PROXYWAR_KEYSTONE_COUNCIL_SURVIVAL_SHIELD: "1",
+        PROXYWAR_KEYSTONE_COMMANDER_RETENTION: "0",
+        PROXYWAR_KEYSTONE_DEFENSE_AUTHORITY: "0",
+        PROXYWAR_KEYSTONE_EXPERT_MASK: "15",
+      },
+    });
+    expect(commander?.env).toEqual({
+      ...control?.env,
+      PROXYWAR_KEYSTONE_COMMANDER_RETENTION: "1",
+    });
+    expect(defense?.env).toEqual({
+      ...control?.env,
+      PROXYWAR_KEYSTONE_DEFENSE_AUTHORITY: "1",
+    });
+    expect(
+      Object.keys(control!.env).filter(
+        (key) => control!.env[key] !== commander!.env[key],
+      ),
+    ).toEqual(["PROXYWAR_KEYSTONE_COMMANDER_RETENTION"]);
+    expect(
+      Object.keys(control!.env).filter(
+        (key) => control!.env[key] !== defense!.env[key],
+      ),
+    ).toEqual(["PROXYWAR_KEYSTONE_DEFENSE_AUTHORITY"]);
+    for (const job of plan.jobs) {
+      expect(job.roster[job.candidateSeat]!.env).toMatchObject(job.arm.env);
+    }
+  });
+
   test("resolved image identities participate in matrix and pair IDs", async () => {
     const first = await fixture();
     const second = await fixture();
@@ -752,6 +813,26 @@ describe("Coworld paired matrix planner", () => {
                 }
               : opponent,
           ),
+        },
+        "must not set arm-owned key",
+      ],
+      [
+        {
+          ...spec,
+          candidate: {
+            ...spec.candidate,
+            env: { PROXYWAR_KEYSTONE_COMMANDER_RETENTION: "1" },
+          },
+        },
+        "must not set arm-owned key",
+      ],
+      [
+        {
+          ...spec,
+          candidate: {
+            ...spec.candidate,
+            env: { PROXYWAR_KEYSTONE_DEFENSE_AUTHORITY: "1" },
+          },
         },
         "must not set arm-owned key",
       ],

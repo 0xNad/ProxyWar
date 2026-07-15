@@ -33,6 +33,9 @@ const councilArmOwnedEnvironmentKeys = new Set([
   "PROXYWAR_KEYSTONE_EXPERT_COUNCIL_SHADOW",
   "PROXYWAR_KEYSTONE_COUNCIL_POLITICS_GUARD",
   "PROXYWAR_KEYSTONE_COUNCIL_DIPLOMACY_ADJUDICATOR",
+  "PROXYWAR_KEYSTONE_COUNCIL_SURVIVAL_SHIELD",
+  "PROXYWAR_KEYSTONE_COMMANDER_RETENTION",
+  "PROXYWAR_KEYSTONE_DEFENSE_AUTHORITY",
   "PROXYWAR_KEYSTONE_EXPERT_MASK",
 ]);
 const councilEnvironmentKeyPattern = /^[A-Za-z_][A-Za-z0-9_]*$/;
@@ -444,7 +447,10 @@ function councilArm(
     kind !== "a1-shadow" &&
     kind !== "v16-politics-guard" &&
     kind !== "v16-diplomacy-adjudicator" &&
-    kind !== "v16-survival-shield"
+    kind !== "v16-survival-shield" &&
+    kind !== "v39" &&
+    kind !== "v39-commander-retention" &&
+    kind !== "v39-defense-authority"
   ) {
     throw new Error(`${context}.kind is unsupported`);
   }
@@ -456,7 +462,13 @@ function councilArm(
   const shadow = kind === "v16-shadow" || kind === "a1-shadow";
   const politicsGuard = kind === "v16-politics-guard";
   const diplomacyAdjudicator = kind === "v16-diplomacy-adjudicator";
-  const survivalShield = kind === "v16-survival-shield";
+  const v39Family =
+    kind === "v39" ||
+    kind === "v39-commander-retention" ||
+    kind === "v39-defense-authority";
+  const survivalShield = kind === "v16-survival-shield" || v39Family;
+  const commanderRetention = kind === "v39-commander-retention";
+  const defenseAuthority = kind === "v39-defense-authority";
   const base = kind === "a1" || kind === "a1-shadow" ? "a1" : "v16";
   if (politicsGuard && expertMask !== 15) {
     throw new Error(`${context}.expertMask must be 15 for politics guard`);
@@ -490,6 +502,14 @@ function councilArm(
       : {}),
     ...(survivalShield
       ? { PROXYWAR_KEYSTONE_COUNCIL_SURVIVAL_SHIELD: "1" }
+      : {}),
+    ...(v39Family
+      ? {
+          PROXYWAR_KEYSTONE_COMMANDER_RETENTION: commanderRetention
+            ? "1"
+            : "0",
+          PROXYWAR_KEYSTONE_DEFENSE_AUTHORITY: defenseAuthority ? "1" : "0",
+        }
       : {}),
     ...(shadow || politicsGuard || diplomacyAdjudicator || survivalShield
       ? { PROXYWAR_KEYSTONE_EXPERT_MASK: String(expertMask) }
@@ -604,6 +624,12 @@ function councilArmRank(arm: CoworldCouncilEvaluationArm): number {
       return 5;
     case "v16-survival-shield":
       return 6;
+    case "v39":
+      return 7;
+    case "v39-commander-retention":
+      return 8;
+    case "v39-defense-authority":
+      return 9;
   }
 }
 
@@ -1308,11 +1334,15 @@ function councilAssignment(
       job.arm.shadow ||
       job.arm.kind === "v16-politics-guard" ||
       job.arm.kind === "v16-diplomacy-adjudicator" ||
-      job.arm.kind === "v16-survival-shield",
+      job.arm.kind === "v16-survival-shield" ||
+      job.arm.kind === "v39-commander-retention" ||
+      job.arm.kind === "v39-defense-authority",
     actualTreatmentExposure:
       job.arm.kind === "v16-politics-guard" ||
       job.arm.kind === "v16-diplomacy-adjudicator" ||
-      job.arm.kind === "v16-survival-shield",
+      job.arm.kind === "v16-survival-shield" ||
+      job.arm.kind === "v39-commander-retention" ||
+      job.arm.kind === "v39-defense-authority",
     expertMask: job.expertMask,
     variantID: job.variantID,
     seed: job.seed,

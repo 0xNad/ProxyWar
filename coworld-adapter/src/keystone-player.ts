@@ -41,6 +41,8 @@
 //   PROXYWAR_KEYSTONE_COUNCIL_POLITICS_GUARD  1/true arms request/all-break treatment
 //   PROXYWAR_KEYSTONE_COUNCIL_DIPLOMACY_ADJUDICATOR  1/true arms transactional diplomacy
 //   PROXYWAR_KEYSTONE_COUNCIL_SURVIVAL_SHIELD  1/true arms verified-pressure survival preemption
+//   PROXYWAR_KEYSTONE_COMMANDER_RETENTION  1/true retains a healthy directive across degraded refreshes
+//   PROXYWAR_KEYSTONE_DEFENSE_AUTHORITY  1/true vetoes canonical no-edge side wars (requires survival shield)
 //   PROXYWAR_KEYSTONE_EXPERT_MASK  Council expert bitmask 0..15 (default 15)
 //   PROXYWAR_LLM_MODEL_ID / AWS_REGION / PROXYWAR_LLM_TIMEOUT_MS  bedrock mode
 
@@ -109,6 +111,10 @@ export interface KeystoneBrainOptions {
   councilDiplomacyAdjudicator?: boolean;
   /** Coworld-only, default-off verified incoming-pressure survival treatment. */
   councilSurvivalShield?: boolean;
+  /** Coworld-only, default-off healthy Commander directive retention treatment. */
+  commanderRetention?: boolean;
+  /** Coworld-only, default-off canonical no-edge conquest veto treatment. */
+  defenseAuthority?: boolean;
   /** Council expansion/economy/conquest/politics bitmask; default 15. */
   expertMask?: number;
 }
@@ -257,6 +263,38 @@ export function keystoneCouncilSurvivalShieldFromEnv(
   }
   throw new Error(
     `Unknown PROXYWAR_KEYSTONE_COUNCIL_SURVIVAL_SHIELD "${raw}" (expected 0|1|false|true)`,
+  );
+}
+
+export function keystoneCommanderRetentionFromEnv(
+  env: NodeJS.ProcessEnv = process.env,
+): boolean {
+  const raw =
+    env.PROXYWAR_KEYSTONE_COMMANDER_RETENTION?.trim().toLowerCase() ?? "";
+  if (raw === "" || raw === "0" || raw === "false") {
+    return false;
+  }
+  if (raw === "1" || raw === "true") {
+    return true;
+  }
+  throw new Error(
+    `Unknown PROXYWAR_KEYSTONE_COMMANDER_RETENTION "${raw}" (expected 0|1|false|true)`,
+  );
+}
+
+export function keystoneDefenseAuthorityFromEnv(
+  env: NodeJS.ProcessEnv = process.env,
+): boolean {
+  const raw =
+    env.PROXYWAR_KEYSTONE_DEFENSE_AUTHORITY?.trim().toLowerCase() ?? "";
+  if (raw === "" || raw === "0" || raw === "false") {
+    return false;
+  }
+  if (raw === "1" || raw === "true") {
+    return true;
+  }
+  throw new Error(
+    `Unknown PROXYWAR_KEYSTONE_DEFENSE_AUTHORITY "${raw}" (expected 0|1|false|true)`,
   );
 }
 
@@ -558,8 +596,10 @@ const COMMANDER_TELEMETRY_WIRE_KEYS = [
   ["commanderRejectedCompletions", "rejected"],
   ["commanderCoalescedRefreshes", "coalesced"],
   ["commanderPlansDelivered", "delivered"],
+  ["commanderRetainedFallbacksDelivered", "retained"],
   ["commanderRefreshInFlight", "inFlight"],
   ["commanderLastOutcome", "lastOutcome"],
+  ["commanderLastRetentionOutcome", "lastRetention"],
   ["commanderActivePlanGeneratedAtTurn", "planTurn"],
   ["commanderActivePlanAgeTurns", "planAge"],
   ["commanderDeliveredPlanCriticalEpochChanged", "criticalEpochChanged"],
@@ -644,7 +684,10 @@ export class DeferredAgentPlanner implements AgentPlanner {
   private rejectedCompletions = 0;
   private coalescedRefreshes = 0;
   private plansDelivered = 0;
+  private retainedFallbacksDelivered = 0;
   private lastOutcome: CommanderRefreshOutcome = "none";
+  private lastRetentionOutcome: CommanderRetentionOutcome = "none";
+  private retentionUsedSinceHealthy = false;
   private activePlanGeneratedAtTurn: number | null = null;
   private activePlanObservationEpoch: string | null = null;
   private deliveredPlanCriticalEpochChanged = false;
@@ -652,6 +695,7 @@ export class DeferredAgentPlanner implements AgentPlanner {
   constructor(
     private readonly inner: AgentPlanner,
     private readonly bootstrap: AgentPlanner,
+    private readonly options: DeferredAgentPlannerOptions = {},
   ) {
     this.plannerType = inner.plannerType;
   }
@@ -661,8 +705,21 @@ export class DeferredAgentPlanner implements AgentPlanner {
     previousPlan: StrategicPlan | null,
   ): Promise<AgentPlanDecision> {
     if (this.completed !== null) {
-      const landed = this.completed;
+      let landed = this.completed;
       this.completed = null;
+      if (landed.retentionFallback !== undefined) {
+        if (
+          landed.observationEpoch !== null &&
+          landed.observationEpoch === commanderObservationEpoch(input)
+        ) {
+          this.retentionUsedSinceHealthy = true;
+          this.retainedFallbacksDelivered += 1;
+          this.lastRetentionOutcome = "retained_resolved_fallback";
+        } else {
+          landed = landed.retentionFallback;
+          this.lastRetentionOutcome = "critical_epoch_rejected";
+        }
+      }
       this.lastKnownPlan = landed.decision.plan;
       this.plansDelivered += 1;
       this.activePlanGeneratedAtTurn = landed.generatedAtTurn;
@@ -721,8 +778,10 @@ export class DeferredAgentPlanner implements AgentPlanner {
       commanderRejectedCompletions: this.rejectedCompletions,
       commanderCoalescedRefreshes: this.coalescedRefreshes,
       commanderPlansDelivered: this.plansDelivered,
+      commanderRetainedFallbacksDelivered: this.retainedFallbacksDelivered,
       commanderRefreshInFlight: this.inFlight,
       commanderLastOutcome: this.lastOutcome,
+      commanderLastRetentionOutcome: this.lastRetentionOutcome,
       commanderActivePlanGeneratedAtTurn: this.activePlanGeneratedAtTurn,
       commanderActivePlanAgeTurns:
         this.activePlanGeneratedAtTurn === null
@@ -750,7 +809,36 @@ export class DeferredAgentPlanner implements AgentPlanner {
     void this.inner
       .plan(input, carriedPlan)
       .then((decision) => {
-        this.recordResolvedCompletion(decision);
+        const degraded = this.recordResolvedCompletion(decision);
+        if (
+          degraded &&
+          this.options.retainHealthyDirectiveOnDegradedCompletion === true &&
+          carriedPlan !== null &&
+          carriedPlan.plannerSource === this.plannerType &&
+          carriedPlan.degradedOrigin !== true &&
+          !this.retentionUsedSinceHealthy &&
+          this.activePlanObservationEpoch !== null &&
+          this.activePlanObservationEpoch === observationEpoch
+        ) {
+          this.completed = {
+            decision: retainedHealthyDirectiveDecision(carriedPlan, decision),
+            generatedAtTurn: this.activePlanGeneratedAtTurn,
+            observationEpoch: this.activePlanObservationEpoch,
+            retentionFallback: {
+              decision,
+              generatedAtTurn,
+              observationEpoch,
+            },
+          };
+          return;
+        }
+        if (
+          degraded &&
+          this.options.retainHealthyDirectiveOnDegradedCompletion === true &&
+          this.retentionUsedSinceHealthy
+        ) {
+          this.lastRetentionOutcome = "bound_exhausted";
+        }
         this.completed = { decision, generatedAtTurn, observationEpoch };
       })
       .catch(async (error: unknown) => {
@@ -799,7 +887,7 @@ export class DeferredAgentPlanner implements AgentPlanner {
       });
   }
 
-  private recordResolvedCompletion(decision: AgentPlanDecision): void {
+  private recordResolvedCompletion(decision: AgentPlanDecision): boolean {
     this.refreshCompletions += 1;
     if (decision.fallbackUsed || decision.llmPlannerDegraded === true) {
       this.fallbackCompletions += 1;
@@ -818,11 +906,48 @@ export class DeferredAgentPlanner implements AgentPlanner {
       } else {
         this.lastOutcome = "fallback";
       }
-      return;
+      return true;
     }
     this.healthyCompletions += 1;
     this.lastOutcome = "healthy";
+    this.retentionUsedSinceHealthy = false;
+    return false;
   }
+}
+
+export const KEYSTONE_COMMANDER_RETENTION_MARKER =
+  "keystone-commander-retention:v1";
+
+export interface DeferredAgentPlannerOptions {
+  readonly retainHealthyDirectiveOnDegradedCompletion?: boolean;
+}
+
+function retainedHealthyDirectiveDecision(
+  healthyPlan: StrategicPlan,
+  degradedDecision: AgentPlanDecision,
+): AgentPlanDecision {
+  const marker = `[${KEYSTONE_COMMANDER_RETENTION_MARKER} retained_resolved_fallback]`;
+  const rationale = healthyPlan.rationale.includes(
+    KEYSTONE_COMMANDER_RETENTION_MARKER,
+  )
+    ? healthyPlan.rationale
+    : `${marker} ${healthyPlan.rationale}`;
+  const retained: AgentPlanDecision = {
+    ...degradedDecision,
+    plan: {
+      ...healthyPlan,
+      rationale,
+      degradedOrigin: true,
+    },
+    reason: `${marker} Retained the last healthy Commander directive after a degraded refresh: ${degradedDecision.reason}`,
+    fallbackUsed: true,
+    llmPlannerDegraded: true,
+  };
+  // The rule fallback was discarded, so it did not drop a healthy plan's
+  // commitment. Keep the provider degradation loud without emitting a false
+  // commitment-drop audit event.
+  delete retained.commitmentDroppedOnFallback;
+  return retained;
 }
 
 type CommanderRefreshOutcome =
@@ -833,10 +958,18 @@ type CommanderRefreshOutcome =
   | "failure_no_output"
   | "rejected";
 
+type CommanderRetentionOutcome =
+  | "none"
+  | "retained_resolved_fallback"
+  | "critical_epoch_rejected"
+  | "bound_exhausted";
+
 interface DeferredPlanEnvelope {
   decision: AgentPlanDecision;
   generatedAtTurn: number | null;
   observationEpoch: string | null;
+  /** Original resolved fallback, used if the critical epoch changes before delivery. */
+  retentionFallback?: DeferredPlanEnvelope;
 }
 
 export interface CommanderTelemetrySnapshot {
@@ -850,8 +983,10 @@ export interface CommanderTelemetrySnapshot {
   commanderRejectedCompletions: number;
   commanderCoalescedRefreshes: number;
   commanderPlansDelivered: number;
+  commanderRetainedFallbacksDelivered: number;
   commanderRefreshInFlight: boolean;
   commanderLastOutcome: CommanderRefreshOutcome;
+  commanderLastRetentionOutcome: CommanderRetentionOutcome;
   commanderActivePlanGeneratedAtTurn: number | null;
   commanderActivePlanAgeTurns: number | null;
   commanderDeliveredPlanCriticalEpochChanged: boolean;
@@ -1034,6 +1169,27 @@ export function createKeystoneBrain(
   options: KeystoneBrainOptions,
 ): AgentBrain {
   if (
+    options.defenseAuthority === true &&
+    options.councilSurvivalShield !== true
+  ) {
+    throw new Error(
+      "Keystone defense authority requires the Council survival shield",
+    );
+  }
+  if (
+    options.defenseAuthority === true &&
+    options.commanderRetention === true
+  ) {
+    throw new Error(
+      "Keystone defense authority and Commander retention are mutually exclusive treatments",
+    );
+  }
+  if (options.commanderRetention === true && options.blocking === true) {
+    throw new Error(
+      "Keystone Commander retention requires the deferred non-blocking Commander",
+    );
+  }
+  if (
     options.singleActionExecutor === true &&
     (options.councilPoliticsGuard === true ||
       options.councilDiplomacyAdjudicator === true ||
@@ -1092,6 +1248,7 @@ export function createKeystoneBrain(
         ? new KeystoneSurvivalShieldExecutor({
             delegate: baseAuthoritativeExecutor,
             actionFollowsCanonicalPlan,
+            defenseAuthorityEnabled: options.defenseAuthority === true,
           })
         : baseAuthoritativeExecutor;
   let shadowCouncilExecutor: KeystoneShadowCouncilExecutor | null = null;
@@ -1135,6 +1292,10 @@ export function createKeystoneBrain(
       deferredPlanner = new DeferredAgentPlanner(
         llmPlanner,
         new RuleAgentPlanner(options.profile),
+        {
+          retainHealthyDirectiveOnDegradedCompletion:
+            options.commanderRetention === true,
+        },
       );
       planner = deferredPlanner;
     }
@@ -1194,6 +1355,8 @@ async function main(): Promise<void> {
   const councilDiplomacyAdjudicator =
     keystoneCouncilDiplomacyAdjudicatorFromEnv();
   const councilSurvivalShield = keystoneCouncilSurvivalShieldFromEnv();
+  const commanderRetention = keystoneCommanderRetentionFromEnv();
+  const defenseAuthority = keystoneDefenseAuthorityFromEnv();
   const expertMask = keystoneExpertMaskFromEnv();
   const profile = (process.env.PROXYWAR_KEYSTONE_PROFILE?.trim() ||
     "aggressive") as AgentStrategyProfile;
@@ -1220,6 +1383,8 @@ async function main(): Promise<void> {
     councilPoliticsGuard,
     councilDiplomacyAdjudicator,
     councilSurvivalShield,
+    commanderRetention,
+    defenseAuthority,
     expertMask,
   });
 
@@ -1256,7 +1421,7 @@ async function main(): Promise<void> {
 
   socket.on("open", () => {
     console.log(
-      `keystone connected ${redactPlayerUrl(url)} (mode=${mode}, profile=${profile}, planEvery=${planEveryDecisionSteps}, blocking=${blocking}, executor=${singleActionExecutor ? "coworld-single-action" : "frontier"}, shadowCouncil=${expertCouncilShadow}, politicsGuard=${councilPoliticsGuard}, diplomacyAdjudicator=${councilDiplomacyAdjudicator}, survivalShield=${councilSurvivalShield}, councilExpertMask=${expertMask}, ${keystoneTunableFlagSummary()})`,
+      `keystone connected ${redactPlayerUrl(url)} (mode=${mode}, profile=${profile}, planEvery=${planEveryDecisionSteps}, blocking=${blocking}, executor=${singleActionExecutor ? "coworld-single-action" : "frontier"}, shadowCouncil=${expertCouncilShadow}, politicsGuard=${councilPoliticsGuard}, diplomacyAdjudicator=${councilDiplomacyAdjudicator}, survivalShield=${councilSurvivalShield}, commanderRetention=${commanderRetention}, defenseAuthority=${defenseAuthority}, councilExpertMask=${expertMask}, ${keystoneTunableFlagSummary()})`,
     );
   });
 

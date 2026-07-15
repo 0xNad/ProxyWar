@@ -15,6 +15,14 @@ Supported authored arms are:
 - `{ "kind": "v16-politics-guard" }`
 - `{ "kind": "v16-diplomacy-adjudicator" }`
 - `{ "kind": "v16-survival-shield" }`
+- `{ "kind": "v39" }`
+- `{ "kind": "v39-commander-retention" }`
+- `{ "kind": "v39-defense-authority" }`
+
+The three v39 arms are a same-image causal family. Every arm enables the exact
+v39 survival shield and reviewed expert mask. The control explicitly disables
+both new flags; each treatment changes exactly one of those values, so Commander
+retention and defense authority cannot contaminate one another.
 
 The planner derives all policy environment fields from the arm kind. Candidate
 and opponent specs cannot supply those fields directly. Shadow observations are

@@ -268,6 +268,47 @@ describe("Coworld paired sequential executor", () => {
     });
   });
 
+  test("validates and executes the isolated v39 control and treatment identities", async () => {
+    const plan = await fixture({
+      arms: [
+        { kind: "v39" },
+        { kind: "v39-commander-retention" },
+        { kind: "v39-defense-authority" },
+      ],
+    });
+    const seen: string[] = [];
+
+    const summary = await execute(plan, {
+      runEpisode: successfulRunner(seen),
+    });
+
+    expect(summary).toMatchObject({ totalJobs: 3, executedJobs: 3 });
+    expect(seen).toEqual(plan.jobs.map(({ jobID }) => jobID));
+    const control = plan.jobs.find((job) => job.arm.kind === "v39")!.arm;
+    const commander = plan.jobs.find(
+      (job) => job.arm.kind === "v39-commander-retention",
+    )!.arm;
+    const defense = plan.jobs.find(
+      (job) => job.arm.kind === "v39-defense-authority",
+    )!.arm;
+    expect(control.env).toEqual({
+      PROXYWAR_KEYSTONE_SINGLE_ACTION: "0",
+      PROXYWAR_KEYSTONE_EXPERT_COUNCIL_SHADOW: "0",
+      PROXYWAR_KEYSTONE_COUNCIL_SURVIVAL_SHIELD: "1",
+      PROXYWAR_KEYSTONE_COMMANDER_RETENTION: "0",
+      PROXYWAR_KEYSTONE_DEFENSE_AUTHORITY: "0",
+      PROXYWAR_KEYSTONE_EXPERT_MASK: "15",
+    });
+    expect(commander.env).toEqual({
+      ...control.env,
+      PROXYWAR_KEYSTONE_COMMANDER_RETENTION: "1",
+    });
+    expect(defense.env).toEqual({
+      ...control.env,
+      PROXYWAR_KEYSTONE_DEFENSE_AUTHORITY: "1",
+    });
+  });
+
   test("keeps completed jobs resumable after a later runner interruption", async () => {
     const plan = await fixture();
     let calls = 0;
@@ -409,6 +450,21 @@ describe("Coworld paired sequential executor", () => {
       }),
     ).rejects.toThrow("unexpected arm-owned field");
     expect(survivalContaminatedRunner).not.toHaveBeenCalled();
+
+    const v39Contaminated = await fixture({
+      arms: [{ kind: "v39" }, { kind: "v39-commander-retention" }],
+    });
+    v39Contaminated.blocks[0]!.roster.find(
+      (seat) => seat.role === "opponent",
+    )!.env.PROXYWAR_KEYSTONE_COMMANDER_RETENTION = "1";
+    await savePlan(v39Contaminated);
+    const v39ContaminatedRunner = vi.fn<CoworldEpisodeRunner>();
+    await expect(
+      execute(v39Contaminated, {
+        runEpisode: v39ContaminatedRunner,
+      }),
+    ).rejects.toThrow("unexpected arm-owned field");
+    expect(v39ContaminatedRunner).not.toHaveBeenCalled();
 
     const drifted = await fixture();
     const driftRunner = vi.fn<CoworldEpisodeRunner>();

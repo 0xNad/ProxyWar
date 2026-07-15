@@ -154,6 +154,7 @@ async function writeCouncilPlanFixture(
     includePoliticsGuard?: boolean;
     includeDiplomacyAdjudicator?: boolean;
     includeSurvivalShield?: boolean;
+    includeV39Arms?: boolean;
   } = {},
 ): Promise<{
   planPath: string;
@@ -247,6 +248,55 @@ async function writeCouncilPlanFixture(
               PROXYWAR_KEYSTONE_SINGLE_ACTION: "0",
               PROXYWAR_KEYSTONE_EXPERT_COUNCIL_SHADOW: "0",
               PROXYWAR_KEYSTONE_COUNCIL_SURVIVAL_SHIELD: "1",
+              PROXYWAR_KEYSTONE_EXPERT_MASK: "15",
+            },
+          },
+        ]
+      : []),
+    ...(input.includeV39Arms === true
+      ? [
+          {
+            armID: "v39",
+            kind: "v39",
+            base: "v16",
+            shadow: false,
+            expertMask: 15,
+            env: {
+              PROXYWAR_KEYSTONE_SINGLE_ACTION: "0",
+              PROXYWAR_KEYSTONE_EXPERT_COUNCIL_SHADOW: "0",
+              PROXYWAR_KEYSTONE_COUNCIL_SURVIVAL_SHIELD: "1",
+              PROXYWAR_KEYSTONE_COMMANDER_RETENTION: "0",
+              PROXYWAR_KEYSTONE_DEFENSE_AUTHORITY: "0",
+              PROXYWAR_KEYSTONE_EXPERT_MASK: "15",
+            },
+          },
+          {
+            armID: "v39-commander-retention",
+            kind: "v39-commander-retention",
+            base: "v16",
+            shadow: false,
+            expertMask: 15,
+            env: {
+              PROXYWAR_KEYSTONE_SINGLE_ACTION: "0",
+              PROXYWAR_KEYSTONE_EXPERT_COUNCIL_SHADOW: "0",
+              PROXYWAR_KEYSTONE_COUNCIL_SURVIVAL_SHIELD: "1",
+              PROXYWAR_KEYSTONE_COMMANDER_RETENTION: "1",
+              PROXYWAR_KEYSTONE_DEFENSE_AUTHORITY: "0",
+              PROXYWAR_KEYSTONE_EXPERT_MASK: "15",
+            },
+          },
+          {
+            armID: "v39-defense-authority",
+            kind: "v39-defense-authority",
+            base: "v16",
+            shadow: false,
+            expertMask: 15,
+            env: {
+              PROXYWAR_KEYSTONE_SINGLE_ACTION: "0",
+              PROXYWAR_KEYSTONE_EXPERT_COUNCIL_SHADOW: "0",
+              PROXYWAR_KEYSTONE_COUNCIL_SURVIVAL_SHIELD: "1",
+              PROXYWAR_KEYSTONE_COMMANDER_RETENTION: "0",
+              PROXYWAR_KEYSTONE_DEFENSE_AUTHORITY: "1",
               PROXYWAR_KEYSTONE_EXPERT_MASK: "15",
             },
           },
@@ -379,7 +429,9 @@ async function writeCouncilPlanFixture(
         arm.shadow ||
         arm.kind === "v16-politics-guard" ||
         arm.kind === "v16-diplomacy-adjudicator" ||
-        arm.kind === "v16-survival-shield";
+        arm.kind === "v16-survival-shield" ||
+        arm.kind === "v39-commander-retention" ||
+        arm.kind === "v39-defense-authority";
       const scores = treatment ? [0.7, 0.3] : [0, 0];
       const winnerSlot = treatment ? 0 : null;
       const players = [{ name: "Auri" }, { name: "Opponent" }];
@@ -1068,6 +1120,76 @@ describe("Coworld evaluation dataset", () => {
       intentionToTreatJobIDs: expect.arrayContaining([shieldJobID]),
       actualTreatmentExposureJobIDs: [shieldJobID],
     });
+  });
+
+  test("classifies v39 as control and its isolated challengers as treatments", async () => {
+    const fixture = await writeCouncilPlanFixture({ includeV39Arms: true });
+    const loaded = await loadCoworldEvaluationEpisodes([], [fixture.planPath]);
+    const dataset = buildCoworldEvaluationDataset({
+      episodes: loaded.episodes,
+      selector: { seat: 0, policyVersionId: null, playerName: null },
+      councilEvaluationPlan: loaded.councilEvaluationPlan,
+    });
+    const jobID = (armID: string) =>
+      `${fixture.blocks[0].blockID}-${armID}`;
+    const assignment = (armID: string) =>
+      dataset.rows.find(
+        (row) => row.councilEvaluation?.jobID === jobID(armID),
+      )?.councilEvaluation;
+
+    expect(assignment("v39")).toMatchObject({
+      arm: {
+        armID: "v39",
+        kind: "v39",
+        base: "v16",
+        shadow: false,
+        expertMask: 15,
+        env: {
+          PROXYWAR_KEYSTONE_SINGLE_ACTION: "0",
+          PROXYWAR_KEYSTONE_EXPERT_COUNCIL_SHADOW: "0",
+          PROXYWAR_KEYSTONE_COUNCIL_SURVIVAL_SHIELD: "1",
+          PROXYWAR_KEYSTONE_COMMANDER_RETENTION: "0",
+          PROXYWAR_KEYSTONE_DEFENSE_AUTHORITY: "0",
+          PROXYWAR_KEYSTONE_EXPERT_MASK: "15",
+        },
+      },
+      intentionToTreat: false,
+      actualTreatmentExposure: false,
+    });
+    expect(assignment("v39-commander-retention")).toMatchObject({
+      arm: {
+        kind: "v39-commander-retention",
+        env: {
+          PROXYWAR_KEYSTONE_COUNCIL_SURVIVAL_SHIELD: "1",
+          PROXYWAR_KEYSTONE_COMMANDER_RETENTION: "1",
+          PROXYWAR_KEYSTONE_DEFENSE_AUTHORITY: "0",
+        },
+      },
+      intentionToTreat: true,
+      actualTreatmentExposure: true,
+    });
+    expect(assignment("v39-defense-authority")).toMatchObject({
+      arm: {
+        kind: "v39-defense-authority",
+        env: {
+          PROXYWAR_KEYSTONE_COUNCIL_SURVIVAL_SHIELD: "1",
+          PROXYWAR_KEYSTONE_COMMANDER_RETENTION: "0",
+          PROXYWAR_KEYSTONE_DEFENSE_AUTHORITY: "1",
+        },
+      },
+      intentionToTreat: true,
+      actualTreatmentExposure: true,
+    });
+    expect(dataset.councilEvaluation.intentionToTreatJobIDs).toEqual(
+      expect.arrayContaining([
+        jobID("v39-commander-retention"),
+        jobID("v39-defense-authority"),
+      ]),
+    );
+    expect(dataset.councilEvaluation.actualTreatmentExposureJobIDs).toEqual([
+      jobID("v39-commander-retention"),
+      jobID("v39-defense-authority"),
+    ]);
   });
 
   test("accepts producer-compatible replay directory hashes", async () => {

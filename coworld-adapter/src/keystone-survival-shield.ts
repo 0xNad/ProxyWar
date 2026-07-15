@@ -15,6 +15,8 @@ import {
 } from "./keystone-experts";
 
 export const KEYSTONE_SURVIVAL_SHIELD_MARKER = "keystone-survival-shield:v2";
+export const KEYSTONE_DEFENSE_AUTHORITY_MARKER =
+  "keystone-defense-authority:v1";
 
 export type KeystoneSurvivalShieldAdjudication =
   | "survival_preempted"
@@ -28,10 +30,13 @@ export interface KeystoneSurvivalShieldExecutorOptions {
     plan: StrategicPlan;
     action: LegalAction;
   }) => boolean;
+  /** Same-image v39 treatment; default off. */
+  readonly defenseAuthorityEnabled?: boolean;
 }
 
 const SEVERE_THREAT_RATIO = 0.35;
 const SEVERE_TILE_LOSS_RATIO = 0.25;
+const NO_EDGE_RELATIVE_TROOP_RATIO_BP = 12_500;
 const DEFENSIVE_BUILD_COOLDOWN_DECISIONS = 3;
 const defensiveUnits = new Set(["defense post"]);
 
@@ -52,6 +57,12 @@ export class KeystoneSurvivalShieldExecutor implements AgentExecutor {
     const authoritative = this.options.delegate.decide(input, plan);
     try {
       const world = this.world(input, plan);
+      if (
+        this.options.defenseAuthorityEnabled === true &&
+        unsafeNoEdgeConquest(input, world, authoritative.actionID)
+      ) {
+        return defenseAuthorityDecision(input, world);
+      }
       const pressure = survivalPressure(input);
       if (!pressure.severe) {
         return authoritative;
@@ -80,6 +91,9 @@ export class KeystoneSurvivalShieldExecutor implements AgentExecutor {
       }
       return replacementDecision(world, survival.actionID, survival.source);
     } catch {
+      if (this.options.defenseAuthorityEnabled === true) {
+        return markedDefenseAuthorityError(authoritative);
+      }
       return markedUnchanged(authoritative, "infrastructure_error");
     }
   }
@@ -100,6 +114,114 @@ export class KeystoneSurvivalShieldExecutor implements AgentExecutor {
       commander: normalizeKeystoneCommanderContext(plan),
     });
   }
+}
+
+function unsafeNoEdgeConquest(
+  input: AgentBrainInput,
+  world: KeystoneWorldModel,
+  authoritativeActionID: string,
+): boolean {
+  if (input.observation.strategic.priority !== "build_defense") {
+    return false;
+  }
+  const conversion =
+    input.observation.tacticalAffordances?.frontierConversionTiming;
+  const finish = input.observation.tacticalAffordances?.frontierFinishPressure;
+  if (conversion?.executorReady !== false || finish?.recommended !== false) {
+    return false;
+  }
+  const action = world.actions.find(
+    (candidate) => candidate.id === authoritativeActionID,
+  );
+  if (
+    action === undefined ||
+    action.kind !== "attack" ||
+    !action.isHostileTargetAction ||
+    action.actionOwner !== "conquest" ||
+    action.targetPlayerID === null ||
+    action.forbidden ||
+    action.safetyBlocked
+  ) {
+    return false;
+  }
+  const target = world.players.find(
+    (candidate) => candidate.playerID === action.targetPlayerID,
+  );
+  const relativeTroopRatioBP = target?.relativeTroopRatioBP;
+  return (
+    target !== undefined &&
+    target.isAlive &&
+    !target.incomingAttack &&
+    relativeTroopRatioBP !== null &&
+    relativeTroopRatioBP !== undefined &&
+    relativeTroopRatioBP > 0 &&
+    relativeTroopRatioBP < NO_EDGE_RELATIVE_TROOP_RATIO_BP
+  );
+}
+
+function defenseAuthorityDecision(
+  input: AgentBrainInput,
+  world: KeystoneWorldModel,
+): AgentExecutionDecision {
+  const survival = proposeKeystoneSurvival(world, {
+    allowRetreats: true,
+    // The failed v1 experiment showed that moderate-pressure Defense Posts are
+    // not a safe default. This arm can redirect to a retreat/counter, otherwise
+    // it conserves the reserve with hold.
+    allowDefensiveBuilds: false,
+    allowCounters: true,
+    defensePostOnly: true,
+    requireNearbyIncomingAttackForDefensiveBuild: true,
+  });
+  if (survival !== null) {
+    return defenseAuthorityReplacement(
+      world,
+      survival.actionID,
+      `redirected to ${survival.source}`,
+      "survival",
+    );
+  }
+  const holds = world.actions.filter((action) => action.isHold);
+  if (holds.length !== 1) {
+    throw new Error("Defense authority hold is not uniquely offered");
+  }
+  return defenseAuthorityReplacement(
+    world,
+    holds[0]!.id,
+    "conserved reserves instead of opening a no-edge side war",
+    "reserve",
+  );
+}
+
+function defenseAuthorityReplacement(
+  world: KeystoneWorldModel,
+  actionID: string,
+  detail: string,
+  source: "survival" | "reserve",
+): AgentExecutionDecision {
+  const actions = world.actions.filter((action) => action.id === actionID);
+  if (actions.length !== 1) {
+    throw new Error("Defense authority replacement is not uniquely offered");
+  }
+  return Object.freeze({
+    actionID,
+    actionIDs: [actionID],
+    reason: `[${KEYSTONE_DEFENSE_AUTHORITY_MARKER} unsafe_conquest_preempted] ${detail}`,
+    planFollowed: actions[0]!.planAligned,
+    executorSource: "keystone-survival-shield",
+    actionSelectionSource: `keystone-defense-authority:${source}`,
+  });
+}
+
+function markedDefenseAuthorityError(
+  authoritative: AgentExecutionDecision,
+): AgentExecutionDecision {
+  return Object.freeze({
+    ...authoritative,
+    reason: `[${KEYSTONE_DEFENSE_AUTHORITY_MARKER} infrastructure_error] ${authoritative.reason}`,
+    executorSource: "keystone-survival-shield",
+    actionSelectionSource: "keystone-defense-authority:infrastructure_error",
+  });
 }
 
 function survivalPressure(input: AgentBrainInput): {

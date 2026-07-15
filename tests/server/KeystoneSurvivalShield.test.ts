@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  KEYSTONE_DEFENSE_AUTHORITY_MARKER,
   KEYSTONE_SURVIVAL_SHIELD_MARKER,
   KeystoneSurvivalShieldExecutor,
 } from "../../coworld-adapter/src/keystone-survival-shield";
@@ -79,6 +80,8 @@ function input(args: {
   defensePriority?: boolean;
   threatRatio?: number;
   recentDecisions?: RecentAgentDecision[];
+  conversionReady?: boolean;
+  finishRecommended?: boolean;
 }): AgentBrainInput {
   const players = args.players ?? [];
   const turn = args.turn ?? 2_000;
@@ -151,6 +154,15 @@ function input(args: {
         frontierConversionTiming: {
           ...base.tacticalAffordances!.frontierConversionTiming!,
           incomingThreatRatio: args.threatRatio ?? 0,
+          ...(args.conversionReady === undefined
+            ? {}
+            : { executorReady: args.conversionReady }),
+        },
+        frontierFinishPressure: {
+          ...base.tacticalAffordances!.frontierFinishPressure!,
+          ...(args.finishRecommended === undefined
+            ? {}
+            : { recommended: args.finishRecommended }),
         },
       },
       recentDecisions: args.recentDecisions ?? [],
@@ -184,7 +196,10 @@ function decision(actionID: string): AgentExecutionDecision {
   });
 }
 
-function shield(selectedActionID: string): KeystoneSurvivalShieldExecutor {
+function shield(
+  selectedActionID: string,
+  defenseAuthorityEnabled = false,
+): KeystoneSurvivalShieldExecutor {
   const delegate: AgentExecutor = {
     decide() {
       return decision(selectedActionID);
@@ -193,10 +208,148 @@ function shield(selectedActionID: string): KeystoneSurvivalShieldExecutor {
   return new KeystoneSurvivalShieldExecutor({
     delegate,
     actionFollowsCanonicalPlan: () => false,
+    defenseAuthorityEnabled,
   });
 }
 
 describe("Keystone survival shield", () => {
+  it("preempts a canonical no-edge side war with the exact offered hold", () => {
+    const attack = action("attack:RIVAL:25", "attack", {
+      targetID: "RIVAL",
+      troopPercent: 25,
+    });
+    const hold = action("hold:wait", "hold");
+    const selected = shield(attack.id, true).decide(
+      input({
+        actions: [attack, hold],
+        players: [
+          aggressor("RIVAL", {
+            incomingAttack: false,
+            outgoingAttack: false,
+            relativeTroopRatio: 1.1,
+          }),
+        ],
+        defensePriority: true,
+        conversionReady: false,
+        finishRecommended: false,
+      }),
+      plan,
+    );
+
+    expect(selected).toMatchObject({
+      actionID: hold.id,
+      actionIDs: [hold.id],
+      executorSource: "keystone-survival-shield",
+      actionSelectionSource: "keystone-defense-authority:reserve",
+    });
+    expect(selected.reason).toContain(KEYSTONE_DEFENSE_AUTHORITY_MARKER);
+    expect(selected.reason).toContain("unsafe_conquest_preempted");
+  });
+
+  it("preserves counters against the current aggressor", () => {
+    const counter = action("attack:ENEMY:25", "attack", {
+      targetID: "ENEMY",
+      troopPercent: 25,
+    });
+    const hold = action("hold:wait", "hold");
+    const selected = shield(counter.id, true).decide(
+      input({
+        actions: [counter, hold],
+        players: [aggressor("ENEMY", { relativeTroopRatio: 1.1 })],
+        defensePriority: true,
+        conversionReady: false,
+        finishRecommended: false,
+      }),
+      plan,
+    );
+
+    expect(selected).toEqual(decision(counter.id));
+  });
+
+  it.each([
+    ["conversion-ready", true, false, 1.1],
+    ["finish-ready", false, true, 1.1],
+    ["strength-edge", false, false, 1.25],
+  ])(
+    "preserves a hostile campaign with a %s edge",
+    (_label, conversionReady, finishRecommended, relativeTroopRatio) => {
+      const attack = action("attack:RIVAL:25", "attack", {
+        targetID: "RIVAL",
+        troopPercent: 25,
+      });
+      const hold = action("hold:wait", "hold");
+      const selected = shield(attack.id, true).decide(
+        input({
+          actions: [attack, hold],
+          players: [
+            aggressor("RIVAL", {
+              incomingAttack: false,
+              outgoingAttack: false,
+              relativeTroopRatio,
+            }),
+          ],
+          defensePriority: true,
+          conversionReady,
+          finishRecommended,
+        }),
+        plan,
+      );
+
+      expect(selected).toEqual(decision(attack.id));
+    },
+  );
+
+  it("does not revive the moderate Defense Post treatment", () => {
+    const factory = action("build:Factory:10", "build", {
+      unit: "Factory",
+      role: "economic",
+    });
+    const defense = action("build:Defense Post:11", "build", {
+      unit: "Defense Post",
+      role: "defensive",
+      nearbyIncomingAttack: true,
+    });
+    const selected = shield(factory.id, true).decide(
+      input({
+        actions: [factory, defense],
+        players: [aggressor()],
+        defensePriority: true,
+        threatRatio: 0.269,
+        conversionReady: false,
+        finishRecommended: false,
+      }),
+      plan,
+    );
+
+    expect(selected).toEqual(decision(factory.id));
+  });
+
+  it("fails closed and exposes a defense-authority infrastructure error", () => {
+    const attack = action("attack:RIVAL:25", "attack", {
+      targetID: "RIVAL",
+      troopPercent: 25,
+    });
+    const selected = shield(attack.id, true).decide(
+      input({
+        actions: [attack],
+        players: [
+          aggressor("RIVAL", {
+            incomingAttack: false,
+            relativeTroopRatio: 1.1,
+          }),
+        ],
+        defensePriority: true,
+        conversionReady: false,
+        finishRecommended: false,
+      }),
+      plan,
+    );
+
+    expect(selected.actionID).toBe(attack.id);
+    expect(selected.reason).toContain(KEYSTONE_DEFENSE_AUTHORITY_MARKER);
+    expect(selected.reason).toContain("infrastructure_error");
+  });
+
   it("leaves calm v16 decisions exactly unchanged", () => {
     const expand = action("expand:neutral:35", "attack", {
       expansion: true,

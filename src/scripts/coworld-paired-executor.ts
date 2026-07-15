@@ -37,6 +37,8 @@ const ARM_OWNED_ENV_KEYS = new Set([
   "PROXYWAR_KEYSTONE_COUNCIL_POLITICS_GUARD",
   "PROXYWAR_KEYSTONE_COUNCIL_DIPLOMACY_ADJUDICATOR",
   "PROXYWAR_KEYSTONE_COUNCIL_SURVIVAL_SHIELD",
+  "PROXYWAR_KEYSTONE_COMMANDER_RETENTION",
+  "PROXYWAR_KEYSTONE_DEFENSE_AUTHORITY",
   "PROXYWAR_KEYSTONE_EXPERT_MASK",
 ]);
 const MAX_ARMS = 35;
@@ -742,7 +744,10 @@ function validateResolvedArm(arm: CoworldResolvedArm): void {
     arm.kind !== "a1-shadow" &&
     arm.kind !== "v16-politics-guard" &&
     arm.kind !== "v16-diplomacy-adjudicator" &&
-    arm.kind !== "v16-survival-shield"
+    arm.kind !== "v16-survival-shield" &&
+    arm.kind !== "v39" &&
+    arm.kind !== "v39-commander-retention" &&
+    arm.kind !== "v39-defense-authority"
   ) {
     throw new Error(`Unsupported resolved arm ${String(arm.kind)}`);
   }
@@ -762,7 +767,13 @@ function expectedArm(
   const shadow = kind === "v16-shadow" || kind === "a1-shadow";
   const politicsGuard = kind === "v16-politics-guard";
   const diplomacyAdjudicator = kind === "v16-diplomacy-adjudicator";
-  const survivalShield = kind === "v16-survival-shield";
+  const v39Family =
+    kind === "v39" ||
+    kind === "v39-commander-retention" ||
+    kind === "v39-defense-authority";
+  const survivalShield = kind === "v16-survival-shield" || v39Family;
+  const commanderRetention = kind === "v39-commander-retention";
+  const defenseAuthority = kind === "v39-defense-authority";
   const base = kind === "a1" || kind === "a1-shadow" ? "a1" : "v16";
   if (!Number.isInteger(expertMask) || expertMask < 0 || expertMask > 15) {
     throw new Error("Expert mask must be an integer in 0..15");
@@ -804,6 +815,14 @@ function expectedArm(
         : {}),
       ...(survivalShield
         ? { PROXYWAR_KEYSTONE_COUNCIL_SURVIVAL_SHIELD: "1" }
+        : {}),
+      ...(v39Family
+        ? {
+            PROXYWAR_KEYSTONE_COMMANDER_RETENTION: commanderRetention
+              ? "1"
+              : "0",
+            PROXYWAR_KEYSTONE_DEFENSE_AUTHORITY: defenseAuthority ? "1" : "0",
+          }
         : {}),
       ...(shadow || politicsGuard || diplomacyAdjudicator || survivalShield
         ? { PROXYWAR_KEYSTONE_EXPERT_MASK: String(expertMask) }
@@ -1391,6 +1410,12 @@ function compareResolvedArms(
         return 5;
       case "v16-survival-shield":
         return 6;
+      case "v39":
+        return 7;
+      case "v39-commander-retention":
+        return 8;
+      case "v39-defense-authority":
+        return 9;
     }
   };
   return (

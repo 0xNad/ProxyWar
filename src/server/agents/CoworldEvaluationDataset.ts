@@ -9,7 +9,10 @@ export type CoworldCouncilEvaluationArmKind =
   | "a1-shadow"
   | "v16-politics-guard"
   | "v16-diplomacy-adjudicator"
-  | "v16-survival-shield";
+  | "v16-survival-shield"
+  | "v39"
+  | "v39-commander-retention"
+  | "v39-defense-authority";
 
 export interface CoworldCouncilEvaluationArm {
   armID: string;

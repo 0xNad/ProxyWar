@@ -8,10 +8,13 @@ import {
   decisionToResponse,
   DeferredAgentPlanner,
   isModelUnavailableError,
+  KEYSTONE_COMMANDER_RETENTION_MARKER,
   KEYSTONE_EXECUTOR_SETTINGS,
+  keystoneCommanderRetentionFromEnv,
   keystoneCouncilDiplomacyAdjudicatorFromEnv,
   keystoneCouncilPoliticsGuardFromEnv,
   keystoneCouncilSurvivalShieldFromEnv,
+  keystoneDefenseAuthorityFromEnv,
   keystoneExpertCouncilShadowFromEnv,
   keystoneExpertMaskFromEnv,
   keystoneModeFromEnv,
@@ -215,6 +218,21 @@ function makePlanDecision(planID: string): AgentPlanDecision {
     reason: "llm plan",
     latencyMs: 5,
     fallbackUsed: false,
+  };
+}
+
+function makeResolvedFallback(planID: string): AgentPlanDecision {
+  return {
+    ...makePlanDecision(planID),
+    plan: {
+      ...makePlan(planID),
+      degradedOrigin: true,
+    },
+    reason: `resolved fallback ${planID}`,
+    fallbackUsed: true,
+    llmPlannerDegraded: true,
+    parseOk: false,
+    parseFailureReason: "provider returned no output",
   };
 }
 
@@ -513,6 +531,34 @@ describe("Coworld keystone player", () => {
         expertMask: 7,
       }),
     ).toThrow(/requires the reviewed expert mask 15/);
+  });
+
+  it("requires and isolates the default-off candidate treatments", () => {
+    expect(() =>
+      createKeystoneBrain(modules, {
+        mode: "mock",
+        profile: "aggressive",
+        defenseAuthority: true,
+      }),
+    ).toThrow(/requires the Council survival shield/);
+    expect(() =>
+      createKeystoneBrain(modules, {
+        mode: "mock",
+        profile: "aggressive",
+        councilSurvivalShield: true,
+        defenseAuthority: true,
+        commanderRetention: true,
+      }),
+    ).toThrow(/mutually exclusive treatments/);
+    expect(() =>
+      createKeystoneBrain(modules, {
+        mode: "bedrock",
+        profile: "aggressive",
+        blocking: true,
+        commanderRetention: true,
+        provider: { complete: async () => "unused" },
+      }),
+    ).toThrow(/requires the deferred non-blocking Commander/);
   });
 
   it("wires the isolated survival shield above an ordinary v16 build", async () => {
@@ -826,6 +872,201 @@ describe("Coworld keystone player", () => {
       commanderInvalidOutputCompletions: 0,
       commanderNoOutputFailureCompletions: 1,
       commanderLastOutcome: "failure_no_output",
+    });
+  });
+
+  it("adopts a resolved Commander fallback when retention is off", async () => {
+    const input = spawnBrainInput();
+    let calls = 0;
+    const deferred = new DeferredAgentPlanner(
+      {
+        plannerType: "real-llm",
+        plan: () => {
+          calls += 1;
+          if (calls === 1) {
+            return Promise.resolve(makePlanDecision("healthy"));
+          }
+          if (calls === 2) {
+            return Promise.resolve(makeResolvedFallback("fallback"));
+          }
+          return new Promise<AgentPlanDecision>(() => undefined);
+        },
+      },
+      new plannerExecutorModule.RuleAgentPlanner("aggressive"),
+    );
+
+    const bootstrap = await deferred.plan(input, null);
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    const healthy = await deferred.plan(input, bootstrap.plan);
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    const fallback = await deferred.plan(input, healthy.plan);
+
+    expect(fallback.plan.planID).toBe("fallback");
+    expect(fallback.reason).not.toContain(KEYSTONE_COMMANDER_RETENTION_MARKER);
+    expect(deferred.telemetrySnapshot(input)).toMatchObject({
+      commanderRetainedFallbacksDelivered: 0,
+      commanderLastRetentionOutcome: "none",
+    });
+  });
+
+  it("retains one healthy same-epoch directive, then accepts the next resolved fallback", async () => {
+    const input = spawnBrainInput();
+    let calls = 0;
+    let resolveSecondFallback!: (decision: AgentPlanDecision) => void;
+    const deferred = new DeferredAgentPlanner(
+      {
+        plannerType: "real-llm",
+        plan: () => {
+          calls += 1;
+          if (calls === 1) {
+            const healthy = makePlanDecision("healthy");
+            return Promise.resolve({
+              ...healthy,
+              plan: {
+                ...healthy.plan,
+                commitment: {
+                  targetPlayerId: "RIVAL",
+                  minAttackRatio: 0.25,
+                },
+              },
+            });
+          }
+          if (calls === 2) {
+            return Promise.resolve({
+              ...makeResolvedFallback("fallback-one"),
+              commitmentDroppedOnFallback: true,
+            });
+          }
+          if (calls === 3) {
+            return new Promise<AgentPlanDecision>((resolve) => {
+              resolveSecondFallback = resolve;
+            });
+          }
+          return new Promise<AgentPlanDecision>(() => undefined);
+        },
+      },
+      new plannerExecutorModule.RuleAgentPlanner("aggressive"),
+      { retainHealthyDirectiveOnDegradedCompletion: true },
+    );
+
+    const bootstrap = await deferred.plan(input, null);
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    const healthy = await deferred.plan(input, bootstrap.plan);
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    const retained = await deferred.plan(input, healthy.plan);
+
+    expect(retained).toMatchObject({
+      plan: {
+        planID: "healthy",
+        objective: healthy.plan.objective,
+        targetPlayerId: healthy.plan.targetPlayerId,
+        commitment: healthy.plan.commitment,
+        degradedOrigin: true,
+      },
+      fallbackUsed: true,
+      llmPlannerDegraded: true,
+    });
+    expect(retained.reason).toContain(
+      `[${KEYSTONE_COMMANDER_RETENTION_MARKER} retained_resolved_fallback]`,
+    );
+    expect(retained.plan.rationale).toContain(
+      KEYSTONE_COMMANDER_RETENTION_MARKER,
+    );
+    expect(retained.commitmentDroppedOnFallback).toBeUndefined();
+    expect(deferred.telemetrySnapshot(input)).toMatchObject({
+      commanderRetainedFallbacksDelivered: 1,
+      commanderLastRetentionOutcome: "retained_resolved_fallback",
+      commanderActivePlanGeneratedAtTurn: 0,
+    });
+
+    resolveSecondFallback(makeResolvedFallback("fallback-two"));
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    const boundedFallback = await deferred.plan(input, retained.plan);
+    expect(boundedFallback.plan.planID).toBe("fallback-two");
+    expect(boundedFallback.reason).not.toContain(
+      KEYSTONE_COMMANDER_RETENTION_MARKER,
+    );
+    expect(deferred.telemetrySnapshot(input)).toMatchObject({
+      commanderRetainedFallbacksDelivered: 1,
+      commanderLastRetentionOutcome: "bound_exhausted",
+    });
+  });
+
+  it("a healthy Commander recovery re-arms one bounded retention", async () => {
+    const input = spawnBrainInput();
+    let calls = 0;
+    const decisions = [
+      makePlanDecision("healthy-one"),
+      makeResolvedFallback("fallback-one"),
+      makePlanDecision("healthy-two"),
+      makeResolvedFallback("fallback-two"),
+    ];
+    const deferred = new DeferredAgentPlanner(
+      {
+        plannerType: "real-llm",
+        plan: () => {
+          const decision = decisions[calls];
+          calls += 1;
+          return decision === undefined
+            ? new Promise<AgentPlanDecision>(() => undefined)
+            : Promise.resolve(decision);
+        },
+      },
+      new plannerExecutorModule.RuleAgentPlanner("aggressive"),
+      { retainHealthyDirectiveOnDegradedCompletion: true },
+    );
+
+    let current = await deferred.plan(input, null);
+    for (let index = 0; index < decisions.length; index += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      current = await deferred.plan(input, current.plan);
+    }
+
+    expect(current.plan.planID).toBe("healthy-two");
+    expect(current.llmPlannerDegraded).toBe(true);
+    expect(current.reason).toContain(KEYSTONE_COMMANDER_RETENTION_MARKER);
+    expect(deferred.telemetrySnapshot(input)).toMatchObject({
+      commanderHealthyCompletions: 2,
+      commanderFallbackCompletions: 2,
+      commanderRetainedFallbacksDelivered: 2,
+      commanderLastRetentionOutcome: "retained_resolved_fallback",
+    });
+  });
+
+  it("rejects a pending retention when the critical observation epoch changes", async () => {
+    const input = spawnBrainInput();
+    let calls = 0;
+    const deferred = new DeferredAgentPlanner(
+      {
+        plannerType: "real-llm",
+        plan: () => {
+          calls += 1;
+          if (calls === 1) {
+            return Promise.resolve(makePlanDecision("spawn-healthy"));
+          }
+          if (calls === 2) {
+            return Promise.resolve(makeResolvedFallback("active-fallback"));
+          }
+          return new Promise<AgentPlanDecision>(() => undefined);
+        },
+      },
+      new plannerExecutorModule.RuleAgentPlanner("aggressive"),
+      { retainHealthyDirectiveOnDegradedCompletion: true },
+    );
+
+    const bootstrap = await deferred.plan(input, null);
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    const healthy = await deferred.plan(input, bootstrap.plan);
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    const activeInput = brainInputAt(input, 100, "active");
+    const fallback = await deferred.plan(activeInput, healthy.plan);
+
+    expect(fallback.plan.planID).toBe("active-fallback");
+    expect(fallback.reason).not.toContain(KEYSTONE_COMMANDER_RETENTION_MARKER);
+    expect(deferred.telemetrySnapshot(activeInput)).toMatchObject({
+      commanderRetainedFallbacksDelivered: 0,
+      commanderLastRetentionOutcome: "critical_epoch_rejected",
+      commanderDeliveredPlanCriticalEpochChanged: true,
     });
   });
 
@@ -1304,6 +1545,20 @@ describe("Coworld keystone player", () => {
         PROXYWAR_KEYSTONE_COUNCIL_SURVIVAL_SHIELD: "yes",
       }),
     ).toThrow(/expected 0\|1\|false\|true/);
+  });
+
+  it.each([
+    [keystoneCommanderRetentionFromEnv, "PROXYWAR_KEYSTONE_COMMANDER_RETENTION"],
+    [keystoneDefenseAuthorityFromEnv, "PROXYWAR_KEYSTONE_DEFENSE_AUTHORITY"],
+  ] as const)("parses %s strictly and defaults it off", (parse, key) => {
+    expect(parse({})).toBe(false);
+    expect(parse({ [key]: "0" })).toBe(false);
+    expect(parse({ [key]: " FALSE " })).toBe(false);
+    expect(parse({ [key]: "1" })).toBe(true);
+    expect(parse({ [key]: " true " })).toBe(true);
+    expect(() => parse({ [key]: "yes" })).toThrow(
+      /expected 0\|1\|false\|true/,
+    );
   });
 
   it("parses the shadow expert mask strictly and defaults to all experts", () => {

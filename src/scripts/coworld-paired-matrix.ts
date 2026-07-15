@@ -25,6 +25,8 @@ const POLITICS_GUARD_ENV = "PROXYWAR_KEYSTONE_COUNCIL_POLITICS_GUARD";
 const DIPLOMACY_ADJUDICATOR_ENV =
   "PROXYWAR_KEYSTONE_COUNCIL_DIPLOMACY_ADJUDICATOR";
 const SURVIVAL_SHIELD_ENV = "PROXYWAR_KEYSTONE_COUNCIL_SURVIVAL_SHIELD";
+const COMMANDER_RETENTION_ENV = "PROXYWAR_KEYSTONE_COMMANDER_RETENTION";
+const DEFENSE_AUTHORITY_ENV = "PROXYWAR_KEYSTONE_DEFENSE_AUTHORITY";
 const EXPERT_MASK_ENV = "PROXYWAR_KEYSTONE_EXPERT_MASK";
 const ARM_OWNED_ENV_KEYS = new Set([
   TREATMENT_ENV,
@@ -32,6 +34,8 @@ const ARM_OWNED_ENV_KEYS = new Set([
   POLITICS_GUARD_ENV,
   DIPLOMACY_ADJUDICATOR_ENV,
   SURVIVAL_SHIELD_ENV,
+  COMMANDER_RETENTION_ENV,
+  DEFENSE_AUTHORITY_ENV,
   EXPERT_MASK_ENV,
 ]);
 const COWORLD_VERSION = "0.1.30";
@@ -74,6 +78,12 @@ export type CoworldArmSpec =
   | { kind: "v16-diplomacy-adjudicator" }
   /** Verified-pressure survival experiment; never implied by v16 controls. */
   | { kind: "v16-survival-shield" }
+  /** Exact promoted v39 severe-rescue behavior. */
+  | { kind: "v39" }
+  /** v39 plus healthy Commander directive retention after degraded refreshes. */
+  | { kind: "v39-commander-retention" }
+  /** v39 plus bounded defense authority over unsafe no-edge conquest. */
+  | { kind: "v39-defense-authority" }
   | { kind: "council-authoritative" }
   | {
       kind: "expert-mask-authoritative";
@@ -90,7 +100,10 @@ export interface CoworldResolvedArm {
     | "a1-shadow"
     | "v16-politics-guard"
     | "v16-diplomacy-adjudicator"
-    | "v16-survival-shield";
+    | "v16-survival-shield"
+    | "v39"
+    | "v39-commander-retention"
+    | "v39-defense-authority";
   base: "v16" | "a1";
   shadow: boolean;
   expertMask: number;
@@ -495,6 +508,30 @@ function resolveArmSpecs(
         }),
       }) satisfies CoworldResolvedArm;
     }
+    if (
+      kind === "v39" ||
+      kind === "v39-commander-retention" ||
+      kind === "v39-defense-authority"
+    ) {
+      rejectUnknownKeys(object, ["kind"], `arms[${index}]`);
+      return Object.freeze({
+        armID: kind,
+        kind,
+        base: "v16",
+        shadow: false,
+        expertMask: 15,
+        env: Object.freeze({
+          [TREATMENT_ENV]: "0",
+          [SHADOW_ENV]: "0",
+          [SURVIVAL_SHIELD_ENV]: "1",
+          [COMMANDER_RETENTION_ENV]:
+            kind === "v39-commander-retention" ? "1" : "0",
+          [DEFENSE_AUTHORITY_ENV]:
+            kind === "v39-defense-authority" ? "1" : "0",
+          [EXPERT_MASK_ENV]: "15",
+        }),
+      }) satisfies CoworldResolvedArm;
+    }
     throw new Error(
       `arms[${index}].kind is not allowlisted: ${JSON.stringify(kind)}`,
     );
@@ -524,6 +561,12 @@ function compareArms(a: CoworldResolvedArm, b: CoworldResolvedArm): number {
         return 5;
       case "v16-survival-shield":
         return 6;
+      case "v39":
+        return 7;
+      case "v39-commander-retention":
+        return 8;
+      case "v39-defense-authority":
+        return 9;
     }
   };
   return (
@@ -925,7 +968,7 @@ function validateRunnable(spec: PairedRunnableSpec, label: string): void {
     return;
   }
   const env = requirePlainObject(spec.env, `${label}.env`);
-  const reservedArmEntries = label === "candidate" ? 4 : 0;
+  const reservedArmEntries = label === "candidate" ? 6 : 0;
   if (
     Object.keys(env).length >
     COWORLD_PAIRED_BOUNDS.maxEnvironmentEntries - reservedArmEntries
