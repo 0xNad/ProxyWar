@@ -1,9 +1,9 @@
 # Keystone v39 severe-rescue release — 2026-07-15
 
-Status: submitted and qualifying. This record supersedes the earlier continuous
-95%-for-seven-days optimization objective. The operator retired that goal and
-authorized a conservative incremental release followed by evidence-driven
-iteration.
+Status: promoted to active Competition champion. This record supersedes the
+earlier continuous 95%-for-seven-days optimization objective. The operator
+retired that goal and authorized a conservative incremental release followed by
+evidence-driven iteration.
 
 ## Decision
 
@@ -65,11 +65,15 @@ control. v2 therefore delegates that entire moderate regime.
   `lpm_2c8eec29-4f24-4e23-90f3-767de99e739b`.
 - The submission uses the Bedrock Commander and enables only
   `PROXYWAR_KEYSTONE_COUNCIL_SURVIVAL_SHIELD=1` plus the existing full expert
-  mask. Submission status is `placed`; membership status is `qualifying` in
-  `Qualifiers`; auto-champion mode is `always`.
-- `[hosted truth, same refresh]` v16
-  (`3ec3e986-08be-406a-b853-592bf50b7607`) remains the active Competition
-  champion until v39 clears qualification. It was not retired or deleted.
+  mask. Submission status is `placed`; auto-champion mode is `always`.
+- `[hosted truth, 2026-07-15T13:55Z]` Both hosted crash/connect qualifier
+  episodes completed with valid replay URLs, no episode error, and aggregate
+  self-play score `0.5`. Qualifier round
+  `round_4d61257a-e9bd-46ad-bef2-0051fe07c76e` completed successfully.
+- `[hosted truth, same refresh]` v39 membership is `competing/champion` in
+  Competition. v16 (`3ec3e986-08be-406a-b853-592bf50b7607`) was automatically
+  changed to `competing/benched`; it was not retired or deleted and remains an
+  immutable rollback point.
 
 ## Honest release claim and next loop
 
