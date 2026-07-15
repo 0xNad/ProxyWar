@@ -6,6 +6,7 @@ import type {
 
 import { classifyKeystoneActions } from "./action-facts";
 import type {
+  KeystoneBalanceOfPowerFacts,
   KeystoneCommanderContext,
   KeystoneOwnFacts,
   KeystonePlayerFacts,
@@ -16,7 +17,14 @@ export interface BuildKeystoneWorldModelOptions {
   forbiddenActionKinds?: readonly LegalActionKind[];
   planAlignedActionIDs?: readonly string[];
   commander?: KeystoneCommanderContext;
+  /** Default-off Council-native runaway-leader treatment. */
+  balanceOfPowerEnabled?: boolean;
 }
+
+const MIN_BALANCE_ALIVE_POWERS = 4;
+const MIN_BALANCE_LEADER_SHARE_BP = 3_200;
+const BALANCE_LEADER_RATIO_NUMERATOR = 135;
+const BALANCE_LEADER_RATIO_DENOMINATOR = 100;
 
 const EMPTY_COMMANDER_CONTEXT: KeystoneCommanderContext = Object.freeze({
   planID: "",
@@ -66,9 +74,133 @@ export function buildKeystoneWorldModel(
     players,
     incomingAggressorIDs,
     canExpandIntoNeutral: input.observation.combat.canExpandIntoNeutral,
+    ...(options.balanceOfPowerEnabled === true
+      ? { balanceOfPower: balanceOfPowerFacts(input, own, players) }
+      : {}),
     recommendedBackstabTargetID: recommendedBackstabTargetID(input),
     actions: classification.actions,
     ambiguousOfferedActionIDs: classification.ambiguousOfferedActionIDs,
+  });
+}
+
+function balanceOfPowerFacts(
+  input: AgentBrainInput,
+  own: KeystoneOwnFacts | null,
+  players: readonly KeystonePlayerFacts[],
+): KeystoneBalanceOfPowerFacts | null {
+  const observedOwn = input.observation.ownState;
+  if (
+    input.observation.phase !== "active" ||
+    input.observation.gameMode !== "FFA" ||
+    own === null ||
+    observedOwn === null ||
+    !observedOwn.isAlive ||
+    !observedOwn.hasSpawned ||
+    own.playerID.trim().length === 0 ||
+    own.team !== null
+  ) {
+    return null;
+  }
+
+  const ownShareBP = strictShareBasisPoints(observedOwn.tileShare);
+  if (ownShareBP === null) {
+    return null;
+  }
+
+  const seenPlayerIDs = new Set<string>([own.playerID]);
+  const playerFactsByID = new Map(
+    players.map((player) => [player.playerID, player]),
+  );
+  const powers: Array<{
+    readonly playerID: string;
+    readonly tileShareBP: number;
+    readonly isOwn: boolean;
+  }> = [
+    Object.freeze({
+      playerID: own.playerID,
+      tileShareBP: ownShareBP,
+      isOwn: true,
+    }),
+  ];
+
+  for (const observed of input.observation.visiblePlayers) {
+    if (
+      observed.playerID.trim().length === 0 ||
+      seenPlayerIDs.has(observed.playerID)
+    ) {
+      return null;
+    }
+    seenPlayerIDs.add(observed.playerID);
+    if (!observed.isAlive) {
+      continue;
+    }
+    const facts = playerFactsByID.get(observed.playerID);
+    const shareBP = strictShareBasisPoints(observed.tileShare);
+    if (
+      facts === undefined ||
+      shareBP === null ||
+      observed.isTeammate === true ||
+      (observed.team !== null && observed.team !== undefined)
+    ) {
+      return null;
+    }
+    powers.push(
+      Object.freeze({
+        playerID: observed.playerID,
+        tileShareBP: shareBP,
+        isOwn: false,
+      }),
+    );
+  }
+
+  if (powers.length < MIN_BALANCE_ALIVE_POWERS) {
+    return null;
+  }
+  powers.sort(
+    (a, b) =>
+      b.tileShareBP - a.tileShareBP || compareText(a.playerID, b.playerID),
+  );
+  const leader = powers[0]!;
+  const runnerUp = powers[1]!;
+  if (
+    leader.isOwn ||
+    leader.tileShareBP === runnerUp.tileShareBP ||
+    leader.tileShareBP < MIN_BALANCE_LEADER_SHARE_BP ||
+    leader.tileShareBP * BALANCE_LEADER_RATIO_DENOMINATOR <
+      runnerUp.tileShareBP * BALANCE_LEADER_RATIO_NUMERATOR
+  ) {
+    return null;
+  }
+
+  const reportedLeaderID = input.observation.endgame?.leaderID ?? null;
+  if (reportedLeaderID !== null && reportedLeaderID !== leader.playerID) {
+    return null;
+  }
+
+  const otherNonLeaders = powers.filter(
+    (power) => !power.isOwn && power.playerID !== leader.playerID,
+  );
+  const strongestOther = otherNonLeaders[0] ?? null;
+  const strongestOtherIsUnique =
+    strongestOther !== null &&
+    (otherNonLeaders[1] === undefined ||
+      strongestOther.tileShareBP !== otherNonLeaders[1]!.tileShareBP);
+
+  return Object.freeze({
+    leaderPlayerID: leader.playerID,
+    leaderTileShareBP: leader.tileShareBP,
+    runnerUpPlayerID: runnerUp.playerID,
+    runnerUpTileShareBP: runnerUp.tileShareBP,
+    strongestOtherNonLeaderPlayerID: strongestOtherIsUnique
+      ? strongestOther!.playerID
+      : null,
+    strongestOtherNonLeaderTileShareBP: strongestOtherIsUnique
+      ? strongestOther!.tileShareBP
+      : null,
+    ownTileShareBP: ownShareBP,
+    leaderOwnGapBP: leader.tileShareBP - ownShareBP,
+    leaderFieldGapBP: leader.tileShareBP - runnerUp.tileShareBP,
+    alivePowerCount: powers.length,
   });
 }
 
@@ -133,6 +265,18 @@ function shareBasisPoints(value: number | undefined): number | null {
     return null;
   }
   return Math.round(Math.min(1, Math.max(0, value)) * 10_000);
+}
+
+function strictShareBasisPoints(value: number | undefined): number | null {
+  if (
+    value === undefined ||
+    !Number.isFinite(value) ||
+    value < 0 ||
+    value > 1
+  ) {
+    return null;
+  }
+  return Math.round(value * 10_000);
 }
 
 function ratioBasisPoints(value: number | undefined): number | null {

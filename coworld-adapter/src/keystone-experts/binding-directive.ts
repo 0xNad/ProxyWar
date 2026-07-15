@@ -75,6 +75,14 @@ function attackBindingAction(
     { readonly kind: "attack_target" }
   >,
 ): KeystoneActionFacts | null {
+  const balance = world.balanceOfPower ?? null;
+  // During the balance treatment, every military replacement must pass the
+  // Conquest expert's explicit readiness/ratio/risk/border gates. Commander
+  // bindings are a protected arbiter tier, so even a leader binding would
+  // otherwise bypass those checks.
+  if (balance !== null) {
+    return null;
+  }
   const target = uniquePlayer(world, binding.targetPlayerID);
   if (target === null || !target.isAlive || target.friendlyOrTeam) {
     return null;
@@ -132,7 +140,21 @@ function allianceBindingAction(
       return false;
     }
     const target = uniquePlayer(world, action.targetPlayerID);
-    return target !== null && target.isAlive;
+    if (target === null || !target.isAlive) {
+      return false;
+    }
+    const balance = world.balanceOfPower ?? null;
+    if (balance === null) {
+      return true;
+    }
+    if (target.playerID === balance.leaderPlayerID) {
+      return false;
+    }
+    return action.kind === "alliance_extend"
+      ? target.isAllied && target.friendlyOrTeam
+      : target.hasIncomingAllianceRequest === true &&
+          target.incomingAttack === false &&
+          !world.incomingAggressorIDs.includes(target.playerID);
   });
   const preferredKind =
     binding.stance === "hold_alliance" ? "alliance_extend" : "alliance_request";

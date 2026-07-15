@@ -19,6 +19,7 @@ type ConquestEvidence =
   | "strength"
   | "finish"
   | "leader-pressure"
+  | "balance-leader"
   | "hostile-contact"
   | "leader-strike";
 
@@ -39,6 +40,7 @@ interface TargetContext {
   readonly target: KeystonePlayerFacts;
   readonly relativeTroopRatioBP: number;
   readonly targetTileShareBP: number | null;
+  readonly isBalanceLeader: boolean;
 }
 
 interface ScoredConquestAction {
@@ -237,6 +239,14 @@ function conventionalEvidence(
   target: TargetContext,
   ownReadinessBP: number,
 ): Exclude<ConquestEvidence, "hostile-contact" | "leader-strike"> | null {
+  if (target.isBalanceLeader) {
+    return target.relativeTroopRatioBP >= MIN_LEADER_PRESSURE_RATIO_BP &&
+      ownReadinessBP >= MIN_LEADER_PRESSURE_OWN_BP &&
+      action.actionRiskBP <= MAX_LEADER_PRESSURE_RISK_BP &&
+      (target.target.sharesBorder || action.kind === "boat")
+      ? "balance-leader"
+      : null;
+  }
   if (
     target.target.troops === 0 ||
     isBoundedLowShareFinish(action, target, ownReadinessBP)
@@ -283,7 +293,12 @@ function conventionalComponents(
     2_000,
   );
   const finishUrgencyBP = evidence === "finish" ? 2_000 : 0;
-  const leaderUrgencyBP = evidence === "leader-pressure" ? 800 : 0;
+  const leaderUrgencyBP =
+    evidence === "balance-leader"
+      ? 1_200
+      : evidence === "leader-pressure"
+        ? 800
+        : 0;
   const contactUrgencyBP = timing.hostileContact ? 400 : 0;
   const neutralOpportunityCostBP = world.canExpandIntoNeutral ? 1_200 : 0;
   const commitmentValueBP = Math.trunc(commitmentQualityBP / 4);
@@ -362,7 +377,11 @@ function scoreNavalAction(
   action: ConquestAction & { readonly kind: NavalKind },
   timing: ConquestTiming,
 ): ScoredConquestAction | null {
-  if (!timing.hostileContact || action.targetPlayerID !== null) {
+  if (
+    (world.balanceOfPower ?? null) !== null ||
+    !timing.hostileContact ||
+    action.targetPlayerID !== null
+  ) {
     return null;
   }
   const neutralOpportunityCostBP = world.canExpandIntoNeutral ? 1_000 : 0;
@@ -394,6 +413,9 @@ function scoreNukeAction(
   timing: ConquestTiming,
   conventionalAvailable: boolean,
 ): ScoredConquestAction | null {
+  if ((world.balanceOfPower ?? null) !== null) {
+    return null;
+  }
   const target = targetContext(world, action, playerByID, incomingAggressorIDs);
   if (
     target === null ||
@@ -453,11 +475,17 @@ function targetContext(
   ) {
     return null;
   }
+  const balanceLeaderID = world.balanceOfPower?.leaderPlayerID ?? null;
+  if (balanceLeaderID !== null && target.playerID !== balanceLeaderID) {
+    return null;
+  }
   return Object.freeze({
     target,
     relativeTroopRatioBP: targetRelativeTroopRatioBP(world, target),
     targetTileShareBP:
       target.tileShareBP === null ? null : clampBP(target.tileShareBP),
+    isBalanceLeader:
+      balanceLeaderID !== null && target.playerID === balanceLeaderID,
   });
 }
 

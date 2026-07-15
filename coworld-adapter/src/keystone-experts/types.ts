@@ -173,6 +173,24 @@ export interface KeystoneOwnFacts {
   readonly tilesOwned: number;
 }
 
+/**
+ * Conservative, current-snapshot FFA imbalance evidence. `runnerUpPlayerID`
+ * may be our own id; `strongestOtherNonLeaderPlayerID` never is. The router
+ * owns cross-decision stability, so these facts remain pure observation truth.
+ */
+export interface KeystoneBalanceOfPowerFacts {
+  readonly leaderPlayerID: string;
+  readonly leaderTileShareBP: number;
+  readonly runnerUpPlayerID: string;
+  readonly runnerUpTileShareBP: number;
+  readonly strongestOtherNonLeaderPlayerID: string | null;
+  readonly strongestOtherNonLeaderTileShareBP: number | null;
+  readonly ownTileShareBP: number;
+  readonly leaderOwnGapBP: number;
+  readonly leaderFieldGapBP: number;
+  readonly alivePowerCount: number;
+}
+
 export interface KeystoneActionFacts {
   readonly id: string;
   readonly kind: LegalActionKind;
@@ -218,6 +236,8 @@ export interface KeystoneWorldModel {
   readonly players: readonly KeystonePlayerFacts[];
   readonly incomingAggressorIDs: readonly string[];
   readonly canExpandIntoNeutral: boolean;
+  /** Null unless the named default-off treatment has exact current evidence. */
+  readonly balanceOfPower?: KeystoneBalanceOfPowerFacts | null;
   /** Existing deterministic backstab affordance, copied without its free text. */
   readonly recommendedBackstabTargetID: string | null;
   readonly actions: readonly KeystoneActionFacts[];

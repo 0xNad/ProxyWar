@@ -11,6 +11,7 @@ import {
   KEYSTONE_COMMANDER_RETENTION_MARKER,
   KEYSTONE_EXECUTOR_SETTINGS,
   keystoneCommanderRetentionFromEnv,
+  keystoneCouncilBalanceOfPowerFromEnv,
   keystoneCouncilDiplomacyAdjudicatorFromEnv,
   keystoneCouncilPoliticsGuardFromEnv,
   keystoneCouncilSurvivalShieldFromEnv,
@@ -534,6 +535,31 @@ describe("Coworld keystone player", () => {
   });
 
   it("requires and isolates the default-off candidate treatments", () => {
+    expect(() =>
+      createKeystoneBrain(modules, {
+        mode: "mock",
+        profile: "aggressive",
+        balanceOfPower: true,
+      }),
+    ).toThrow(/requires the Council survival shield/);
+    expect(() =>
+      createKeystoneBrain(modules, {
+        mode: "mock",
+        profile: "aggressive",
+        councilSurvivalShield: true,
+        balanceOfPower: true,
+        defenseAuthority: true,
+      }),
+    ).toThrow(/incompatible/);
+    expect(() =>
+      createKeystoneBrain(modules, {
+        mode: "mock",
+        profile: "aggressive",
+        councilSurvivalShield: true,
+        balanceOfPower: true,
+        expertMask: 7,
+      }),
+    ).toThrow(/requires the reviewed expert mask 15/);
     expect(() =>
       createKeystoneBrain(modules, {
         mode: "mock",
@@ -1548,7 +1574,14 @@ describe("Coworld keystone player", () => {
   });
 
   it.each([
-    [keystoneCommanderRetentionFromEnv, "PROXYWAR_KEYSTONE_COMMANDER_RETENTION"],
+    [
+      keystoneCouncilBalanceOfPowerFromEnv,
+      "PROXYWAR_KEYSTONE_COUNCIL_BALANCE_OF_POWER",
+    ],
+    [
+      keystoneCommanderRetentionFromEnv,
+      "PROXYWAR_KEYSTONE_COMMANDER_RETENTION",
+    ],
     [keystoneDefenseAuthorityFromEnv, "PROXYWAR_KEYSTONE_DEFENSE_AUTHORITY"],
   ] as const)("parses %s strictly and defaults it off", (parse, key) => {
     expect(parse({})).toBe(false);
@@ -1556,9 +1589,7 @@ describe("Coworld keystone player", () => {
     expect(parse({ [key]: " FALSE " })).toBe(false);
     expect(parse({ [key]: "1" })).toBe(true);
     expect(parse({ [key]: " true " })).toBe(true);
-    expect(() => parse({ [key]: "yes" })).toThrow(
-      /expected 0\|1\|false\|true/,
-    );
+    expect(() => parse({ [key]: "yes" })).toThrow(/expected 0\|1\|false\|true/);
   });
 
   it("parses the shadow expert mask strictly and defaults to all experts", () => {

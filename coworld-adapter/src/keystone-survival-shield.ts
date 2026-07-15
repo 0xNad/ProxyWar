@@ -99,7 +99,12 @@ export class KeystoneSurvivalShieldExecutor implements AgentExecutor {
       ) {
         return authoritative;
       }
-      return replacementDecision(world, survival.actionID, survival.source);
+      return replacementDecision(
+        world,
+        survival.actionID,
+        survival.source,
+        authoritative,
+      );
     } catch {
       if (this.options.defenseAuthorityEnabled === true) {
         return markedDefenseAuthorityError(authoritative);
@@ -363,15 +368,22 @@ function replacementDecision(
   world: KeystoneWorldModel,
   actionID: string,
   source: string,
+  authoritative: AgentExecutionDecision,
 ): AgentExecutionDecision {
   const actions = world.actions.filter((action) => action.id === actionID);
   if (actions.length !== 1) {
     throw new Error("Survival shield replacement is not uniquely offered");
   }
+  const nestedTreatmentReason =
+    authoritative.executorSource === "keystone-balance-of-power"
+      ? ` ${authoritative.reason}`
+      : "";
   return Object.freeze({
     actionID,
     actionIDs: [actionID],
-    reason: `[${KEYSTONE_SURVIVAL_SHIELD_MARKER} survival_preempted] selected ${source}`,
+    reason:
+      `[${KEYSTONE_SURVIVAL_SHIELD_MARKER} survival_preempted] selected ${source}` +
+      nestedTreatmentReason,
     planFollowed: actions[0]!.planAligned,
     executorSource: "keystone-survival-shield",
     actionSelectionSource: "keystone-survival-shield:survival",

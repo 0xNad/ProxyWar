@@ -41,6 +41,7 @@
 //   PROXYWAR_KEYSTONE_COUNCIL_POLITICS_GUARD  1/true arms request/all-break treatment
 //   PROXYWAR_KEYSTONE_COUNCIL_DIPLOMACY_ADJUDICATOR  1/true arms transactional diplomacy
 //   PROXYWAR_KEYSTONE_COUNCIL_SURVIVAL_SHIELD  1/true arms verified-pressure survival preemption
+//   PROXYWAR_KEYSTONE_COUNCIL_BALANCE_OF_POWER  1/true arms stable runaway-leader authority
 //   PROXYWAR_KEYSTONE_COMMANDER_RETENTION  1/true retains a healthy directive across degraded refreshes
 //   PROXYWAR_KEYSTONE_DEFENSE_AUTHORITY  1/true vetoes canonical no-edge side wars (requires survival shield)
 //   PROXYWAR_KEYSTONE_EXPERT_MASK  Council expert bitmask 0..15 (default 15)
@@ -65,8 +66,8 @@ import type {
   LegalAction,
 } from "../../src/server/agents/AgentTypes";
 import type { LlmProvider } from "../../src/server/agents/LlmProvider";
+import { KeystoneBalanceOfPowerExecutor } from "./keystone-balance-of-power";
 import { KeystoneDiplomacyAdjudicatorExecutor } from "./keystone-diplomacy-adjudicator";
-import { KeystoneSurvivalShieldExecutor } from "./keystone-survival-shield";
 import {
   KEYSTONE_SHADOW_COUNCIL_METADATA_KEY,
   KEYSTONE_SHADOW_COUNCIL_METADATA_MAX_BYTES,
@@ -74,6 +75,7 @@ import {
   KeystoneShadowCouncilTelemetryAgentBrain,
 } from "./keystone-shadow-council";
 import { KeystoneSingleActionExecutor } from "./keystone-single-action-executor";
+import { KeystoneSurvivalShieldExecutor } from "./keystone-survival-shield";
 
 type PlannerExecutorModule =
   typeof import("../../src/server/agents/AgentPlannerExecutor");
@@ -111,6 +113,8 @@ export interface KeystoneBrainOptions {
   councilDiplomacyAdjudicator?: boolean;
   /** Coworld-only, default-off verified incoming-pressure survival treatment. */
   councilSurvivalShield?: boolean;
+  /** Coworld-only, default-off stable runaway-leader Council authority. */
+  balanceOfPower?: boolean;
   /** Coworld-only, default-off healthy Commander directive retention treatment. */
   commanderRetention?: boolean;
   /** Coworld-only, default-off canonical no-edge conquest veto treatment. */
@@ -263,6 +267,22 @@ export function keystoneCouncilSurvivalShieldFromEnv(
   }
   throw new Error(
     `Unknown PROXYWAR_KEYSTONE_COUNCIL_SURVIVAL_SHIELD "${raw}" (expected 0|1|false|true)`,
+  );
+}
+
+export function keystoneCouncilBalanceOfPowerFromEnv(
+  env: NodeJS.ProcessEnv = process.env,
+): boolean {
+  const raw =
+    env.PROXYWAR_KEYSTONE_COUNCIL_BALANCE_OF_POWER?.trim().toLowerCase() ?? "";
+  if (raw === "" || raw === "0" || raw === "false") {
+    return false;
+  }
+  if (raw === "1" || raw === "true") {
+    return true;
+  }
+  throw new Error(
+    `Unknown PROXYWAR_KEYSTONE_COUNCIL_BALANCE_OF_POWER "${raw}" (expected 0|1|false|true)`,
   );
 }
 
@@ -1177,6 +1197,30 @@ export function createKeystoneBrain(
     );
   }
   if (
+    options.balanceOfPower === true &&
+    options.councilSurvivalShield !== true
+  ) {
+    throw new Error(
+      "Keystone balance of power requires the Council survival shield",
+    );
+  }
+  if (
+    options.balanceOfPower === true &&
+    (options.singleActionExecutor === true ||
+      options.councilPoliticsGuard === true ||
+      options.councilDiplomacyAdjudicator === true ||
+      options.defenseAuthority === true)
+  ) {
+    throw new Error(
+      "Keystone balance of power is incompatible with single-action, politics-guard, diplomacy-adjudicator, and defense-authority treatments",
+    );
+  }
+  if (options.balanceOfPower === true && (options.expertMask ?? 15) !== 15) {
+    throw new Error(
+      "Keystone balance of power requires the reviewed expert mask 15",
+    );
+  }
+  if (
     options.defenseAuthority === true &&
     options.commanderRetention === true
   ) {
@@ -1238,6 +1282,13 @@ export function createKeystoneBrain(
     : new FrontierPolicyExecutor(options.profile, {
         settings: { ...KEYSTONE_EXECUTOR_SETTINGS },
       });
+  const balanceAuthoritativeExecutor: AgentExecutor =
+    options.balanceOfPower === true
+      ? new KeystoneBalanceOfPowerExecutor({
+          delegate: baseAuthoritativeExecutor,
+          actionFollowsCanonicalPlan,
+        })
+      : baseAuthoritativeExecutor;
   const authoritativeExecutor: AgentExecutor =
     options.councilDiplomacyAdjudicator === true
       ? new KeystoneDiplomacyAdjudicatorExecutor({
@@ -1246,11 +1297,11 @@ export function createKeystoneBrain(
         })
       : options.councilSurvivalShield === true
         ? new KeystoneSurvivalShieldExecutor({
-            delegate: baseAuthoritativeExecutor,
+            delegate: balanceAuthoritativeExecutor,
             actionFollowsCanonicalPlan,
             defenseAuthorityEnabled: options.defenseAuthority === true,
           })
-        : baseAuthoritativeExecutor;
+        : balanceAuthoritativeExecutor;
   let shadowCouncilExecutor: KeystoneShadowCouncilExecutor | null = null;
   let executor: AgentExecutor = authoritativeExecutor;
   if (
@@ -1308,7 +1359,8 @@ export function createKeystoneBrain(
     planEveryDecisionSteps,
     ...(shadowCouncilExecutor !== null ||
     options.councilDiplomacyAdjudicator === true ||
-    options.councilSurvivalShield === true
+    options.councilSurvivalShield === true ||
+    options.balanceOfPower === true
       ? {
           // PlannerExecutor normally derives this with instanceof. Preserve
           // the wrapped base executor's exact identity in shadow or DTA mode.
@@ -1355,6 +1407,7 @@ async function main(): Promise<void> {
   const councilDiplomacyAdjudicator =
     keystoneCouncilDiplomacyAdjudicatorFromEnv();
   const councilSurvivalShield = keystoneCouncilSurvivalShieldFromEnv();
+  const balanceOfPower = keystoneCouncilBalanceOfPowerFromEnv();
   const commanderRetention = keystoneCommanderRetentionFromEnv();
   const defenseAuthority = keystoneDefenseAuthorityFromEnv();
   const expertMask = keystoneExpertMaskFromEnv();
@@ -1383,6 +1436,7 @@ async function main(): Promise<void> {
     councilPoliticsGuard,
     councilDiplomacyAdjudicator,
     councilSurvivalShield,
+    balanceOfPower,
     commanderRetention,
     defenseAuthority,
     expertMask,
@@ -1421,7 +1475,7 @@ async function main(): Promise<void> {
 
   socket.on("open", () => {
     console.log(
-      `keystone connected ${redactPlayerUrl(url)} (mode=${mode}, profile=${profile}, planEvery=${planEveryDecisionSteps}, blocking=${blocking}, executor=${singleActionExecutor ? "coworld-single-action" : "frontier"}, shadowCouncil=${expertCouncilShadow}, politicsGuard=${councilPoliticsGuard}, diplomacyAdjudicator=${councilDiplomacyAdjudicator}, survivalShield=${councilSurvivalShield}, commanderRetention=${commanderRetention}, defenseAuthority=${defenseAuthority}, councilExpertMask=${expertMask}, ${keystoneTunableFlagSummary()})`,
+      `keystone connected ${redactPlayerUrl(url)} (mode=${mode}, profile=${profile}, planEvery=${planEveryDecisionSteps}, blocking=${blocking}, executor=${singleActionExecutor ? "coworld-single-action" : "frontier"}, shadowCouncil=${expertCouncilShadow}, politicsGuard=${councilPoliticsGuard}, diplomacyAdjudicator=${councilDiplomacyAdjudicator}, survivalShield=${councilSurvivalShield}, balanceOfPower=${balanceOfPower}, commanderRetention=${commanderRetention}, defenseAuthority=${defenseAuthority}, councilExpertMask=${expertMask}, ${keystoneTunableFlagSummary()})`,
     );
   });
 

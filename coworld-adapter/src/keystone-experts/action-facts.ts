@@ -242,23 +242,49 @@ export function hasCanonicalDefensivePlacementEvidence(input: {
 }
 
 export function actionTargetPlayerID(action: LegalAction): string | null {
+  const identity = actionTargetIdentity(action);
+  return identity.valid ? identity.playerID : null;
+}
+
+function actionTargetIdentity(action: LegalAction): {
+  readonly valid: boolean;
+  readonly playerID: string | null;
+} {
   const targetID = action.metadata?.targetID;
-  if (typeof targetID === "string" && targetID.length > 0) {
-    return targetID;
-  }
   const recipientID = action.metadata?.recipientID;
-  return typeof recipientID === "string" && recipientID.length > 0
-    ? recipientID
-    : null;
+  const targetPresent = targetID !== undefined && targetID !== null;
+  const recipientPresent = recipientID !== undefined && recipientID !== null;
+  const validID = (value: unknown): value is string =>
+    typeof value === "string" && value.trim().length > 0;
+  if (
+    (targetPresent && !validID(targetID)) ||
+    (recipientPresent && !validID(recipientID)) ||
+    (validID(targetID) &&
+      validID(recipientID) &&
+      targetID !== recipientID &&
+      action.kind !== "quick_chat")
+  ) {
+    return Object.freeze({ valid: false, playerID: null });
+  }
+  return Object.freeze({
+    valid: true,
+    playerID: validID(targetID)
+      ? targetID
+      : validID(recipientID)
+        ? recipientID
+        : null,
+  });
 }
 
 export function isNeutralExpansion(action: LegalAction): boolean {
+  const identity = actionTargetIdentity(action);
   const targetName = String(action.metadata?.targetName ?? "")
     .trim()
     .toLowerCase();
   return (
+    identity.valid &&
     (action.kind === "attack" || action.kind === "boat") &&
-    actionTargetPlayerID(action) === null &&
+    identity.playerID === null &&
     (action.metadata?.expansion === true ||
       action.metadata?.isNeutral === true ||
       action.metadata?.targetType === "neutral" ||

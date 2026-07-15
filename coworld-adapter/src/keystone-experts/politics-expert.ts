@@ -7,6 +7,7 @@ import type {
 } from "./types";
 
 type PoliticsReaction =
+  | "balance_alliance_accept"
   | "embargo_repair"
   | "hostile_request_rejection"
   | "break_to_bound_conquest"
@@ -29,6 +30,12 @@ const MIN_BREAK_CONQUEST_OWN_READINESS_BP = 5_000;
 const reactionScores: Readonly<
   Record<PoliticsReaction, Omit<KeystoneBidComponents, "riskBP">>
 > = Object.freeze({
+  balance_alliance_accept: Object.freeze({
+    expectedValueBP: 8_200,
+    urgencyBP: 9_000,
+    confidenceBP: 9_500,
+    opportunityCostBP: 500,
+  }),
   embargo_repair: Object.freeze({
     expectedValueBP: 8_500,
     urgencyBP: 9_500,
@@ -124,8 +131,29 @@ function reactionFor(
   target: KeystonePlayerFacts,
   incomingAggressorIDs: ReadonlySet<string>,
 ): PoliticsCandidate | null {
+  const balanceLeaderID = world.balanceOfPower?.leaderPlayerID ?? null;
+  const isBalanceLeader = target.playerID === balanceLeaderID;
+  if (
+    balanceLeaderID !== null &&
+    action.kind === "alliance_request" &&
+    !isBalanceLeader &&
+    action.targetsFriendlyOrTeam === false &&
+    target.friendlyOrTeam === false &&
+    target.hasIncomingAllianceRequest === true &&
+    target.incomingAttack === false &&
+    !incomingAggressorIDs.has(target.playerID)
+  ) {
+    return Object.freeze({
+      action,
+      target,
+      reaction: "balance_alliance_accept",
+      priority: 0,
+    });
+  }
+
   if (
     action.kind === "embargo_stop" &&
+    !isBalanceLeader &&
     action.targetsFriendlyOrTeam === true &&
     target.friendlyOrTeam === true &&
     target.hasEmbargoAgainst === true
@@ -140,6 +168,7 @@ function reactionFor(
 
   if (
     action.kind === "break_alliance" &&
+    (balanceLeaderID === null || isBalanceLeader) &&
     action.targetsFriendlyOrTeam === true &&
     target.isAllied === true &&
     target.isTeammate === false &&
@@ -181,6 +210,7 @@ function reactionFor(
 
   if (
     action.kind === "alliance_extend" &&
+    !isBalanceLeader &&
     action.targetsFriendlyOrTeam === true &&
     target.isAllied === true &&
     target.friendlyOrTeam === true &&
@@ -285,6 +315,8 @@ function rationaleFor(
   targetPlayerID: string,
 ): string {
   switch (reaction) {
+    case "balance_alliance_accept":
+      return `accept observed alliance request from nonleader ${targetPlayerID} during runaway-leader pressure`;
     case "embargo_repair":
       return `repair embargo against observed friendly target ${targetPlayerID}`;
     case "hostile_request_rejection":
