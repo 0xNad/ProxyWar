@@ -1035,6 +1035,10 @@
     "game_speed": "Game speed",
     "fastest_game_speed": "Max"
   },
+  "coworld_league": {
+    "update_unavailable": "Update check unavailable — showing this snapshot; retrying automatically.",
+    "update_cadence": "Checks for updates every 30 seconds"
+  },
   "ai_league_replay": {
     "standings_title": "Standings",
     "standings_waiting": "Waiting for the first replay frame…",

@@ -20,7 +20,7 @@ import {
   type ParsedHostedReplay,
 } from "../server/agents/CoworldLeagueMirrorCore";
 import {
-  coworldLeagueIndexHtml,
+  markCoworldLeagueSiteStale,
   writeCoworldLeagueSite,
   type CoworldLeagueEpisodeRow,
   type CoworldLeagueMirrorData,
@@ -344,18 +344,9 @@ async function syncOnce(options: MirrorOptions): Promise<void> {
 }
 
 async function regenerateStaleSite(options: MirrorOptions): Promise<boolean> {
-  const dataPath = path.join(options.siteDir, "data.json");
   try {
-    const previous = JSON.parse(
-      await fs.readFile(dataPath, "utf8"),
-    ) as CoworldLeagueMirrorData;
-    previous.stale = true;
-    previous.generatedAt = new Date().toISOString();
-    await writeFileAtomic(
-      path.join(options.siteDir, "index.html"),
-      coworldLeagueIndexHtml(previous),
-    );
-    log("sync failed — regenerated index from last good data (stale banner)");
+    await markCoworldLeagueSiteStale(options.siteDir);
+    log("sync failed — regenerated site from last good data (stale banner)");
     return true;
   } catch {
     return false;

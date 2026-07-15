@@ -10,6 +10,7 @@ import {
   isSafeProxyWarArtifactSegment,
   proxyWarPublicDocs,
   proxyWarPublicExternalAgentExamples,
+  proxyWarLeagueContentSecurityPolicy,
   proxyWarPublicRunArtifacts,
   proxyWarPublicTournamentArtifacts,
 } from "../../src/server/agents/ProxyWarPublicArtifacts";
@@ -108,9 +109,21 @@ describe("ProxyWarPublicArtifacts", () => {
 
   it("allows only the league site files as league artifacts", () => {
     expect(isProxyWarPublicLeagueArtifact("index.html")).toBe(true);
+    expect(isProxyWarPublicLeagueArtifact("client.js")).toBe(true);
     expect(isProxyWarPublicLeagueArtifact("data.json")).toBe(true);
     expect(isProxyWarPublicLeagueArtifact("secrets.json")).toBe(false);
     expect(isProxyWarPublicLeagueArtifact("spectator.html")).toBe(false);
+  });
+
+  it("allows the external league client without permitting inline scripts", () => {
+    const policy = proxyWarLeagueContentSecurityPolicy();
+    const scriptDirective = policy
+      .split("; ")
+      .find((directive) => directive.startsWith("script-src"));
+    expect(scriptDirective).toBe("script-src 'self'");
+    expect(scriptDirective).not.toContain("unsafe-inline");
+    expect(scriptDirective).not.toContain("unsafe-eval");
+    expect(policy).toContain("connect-src 'self'");
   });
 
   it("lets only league mirror paths through the beta gate anonymously", () => {
@@ -119,6 +132,9 @@ describe("ProxyWarPublicArtifacts", () => {
       true,
     );
     expect(isProxyWarPublicLeaguePath("/ai-league-runs/league/data.json")).toBe(
+      true,
+    );
+    expect(isProxyWarPublicLeaguePath("/ai-league-runs/league/client.js")).toBe(
       true,
     );
     expect(

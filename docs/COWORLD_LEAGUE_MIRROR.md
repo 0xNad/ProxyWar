@@ -17,9 +17,18 @@ replay downloads. It never uploads, submits, or creates hosted work.
 
 ## Output
 
-- `artifacts/ai-league-runs/league/index.html` — the league page (plus
-  `data.json` for programmatic use). Regenerated atomically each sync; if a
-  sync fails the page keeps the last good data and shows a stale banner.
+- `artifacts/ai-league-runs/league/index.html` — the league page.
+- `artifacts/ai-league-runs/league/client.js` — the same-origin update client.
+- `artifacts/ai-league-runs/league/data.json` — the machine-readable snapshot.
+  Each file is replaced atomically in `client.js` → `index.html` → `data.json`
+  order, so `data.json` is the publication barrier. A sibling filesystem lock
+  serializes the complete three-file publication across scheduled, manual, and
+  watch-mode mirror processes; an abandoned owner is reclaimed after its
+  process exits. Byte-identical files are not replaced, preserving their ETags.
+  If a sync fails, all three artifacts retain the last good league data and
+  expose a stale state. Repeated failures keep the first stale transition
+  timestamp so open pages do not reload or redownload the same last-good
+  snapshot every mirror cycle.
 - `artifacts/ai-league-runs/<runID>/` — one standard run bundle per mirrored
   episode: self-contained `spectator.html`, `spectator-replay.json`, and the
   inline artifacts (`game-record.json`, `decisions.jsonl`, `match-summary.json`,
@@ -40,6 +49,24 @@ On a beta-gated server, `/league`, the mirror-written `league-<runID>`
 bundles, and their real-client renders are viewable anonymously (the invite
 gate lets exactly those paths through — see `isProxyWarPublicLeaguePath`);
 all other run directories and pages stay behind the gate.
+
+The loaded page revalidates `data.json` immediately and every 30 seconds,
+using its ETag so unchanged checks return `304` instead of downloading the
+snapshot again. It reloads only for a newer snapshot or a stale-state change,
+checks immediately when a hidden tab becomes visible or the browser reconnects,
+and aborts a hung check after 10 seconds. Two consecutive failures expose an
+automatic-retry warning. A five-minute meta refresh protects script-disabled or
+failed-client loads and is removed only after the update client confirms the
+required browser capabilities and installs its polling/event handlers.
+
+The league page's Content Security Policy must keep `script-src 'self'` and
+`connect-src 'self'` so `client.js` can load and revalidate `data.json`. Do not
+add `unsafe-inline` or `unsafe-eval`. The server binds this policy to the actual
+league HTML response, including `/league` route aliases and static directory or
+extension aliases. The mirror process and serving process should run from the
+same clean release checkout while sharing the explicit live artifact root;
+running the mirror from a mutable development checkout makes branch edits an
+implicit publish path.
 
 `PROXYWAR_LEAGUE_WRAPPER_ONLY=true` goes further: the server serves ONLY the
 league mirror and its replay renders. Everything else — beta login, hub,

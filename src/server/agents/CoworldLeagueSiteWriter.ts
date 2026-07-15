@@ -1,5 +1,7 @@
+import { randomUUID } from "node:crypto";
 import { promises as fs } from "node:fs";
 import path from "node:path";
+import englishTranslations from "../../../resources/lang/en.json";
 
 /**
  * Static league-site writer for the hosted Coworld Proxywar league.
@@ -81,19 +83,248 @@ export interface CoworldLeagueMirrorData {
 
 export interface CoworldLeagueSitePaths {
   indexPath: string;
+  clientPath: string;
   dataPath: string;
+}
+
+export const COWORLD_LEAGUE_POLL_INTERVAL_MS = 30_000;
+export const COWORLD_LEAGUE_POLL_TIMEOUT_MS = 10_000;
+const COWORLD_LEAGUE_FAILURES_BEFORE_WARNING = 2;
+export const COWORLD_LEAGUE_CLIENT_PATH = "/ai-league-runs/league/client.js";
+export const COWORLD_LEAGUE_DATA_PATH = "/ai-league-runs/league/data.json";
+const COWORLD_LEAGUE_WRITE_LOCK_RETRY_MS = 50;
+const COWORLD_LEAGUE_WRITE_LOCK_TIMEOUT_MS = 60_000;
+const COWORLD_LEAGUE_WRITE_LOCK_OWNER_GRACE_MS = 30_000;
+
+type CoworldLeagueTranslationKey =
+  keyof typeof englishTranslations.coworld_league;
+
+function translateText(key: CoworldLeagueTranslationKey): string {
+  return englishTranslations.coworld_league[key];
+}
+
+function errorCode(error: unknown): string | null {
+  return error !== null &&
+    typeof error === "object" &&
+    "code" in error &&
+    typeof error.code === "string"
+    ? error.code
+    : null;
+}
+
+function processIsAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return errorCode(error) !== "ESRCH";
+  }
+}
+
+interface CoworldLeagueWriteLockOwner {
+  pid: number;
+  token: string;
+  createdAt: string;
+}
+
+function parseWriteLockOwner(value: string): CoworldLeagueWriteLockOwner | null {
+  try {
+    const candidate = JSON.parse(value) as Partial<CoworldLeagueWriteLockOwner>;
+    return Number.isInteger(candidate.pid) &&
+      Number(candidate.pid) > 0 &&
+      typeof candidate.token === "string" &&
+      candidate.token.length > 0 &&
+      typeof candidate.createdAt === "string"
+      ? {
+          pid: Number(candidate.pid),
+          token: candidate.token,
+          createdAt: candidate.createdAt,
+        }
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+async function reclaimAbandonedWriteLock(lockPath: string): Promise<void> {
+  const ownerPath = path.join(lockPath, "owner.json");
+  let owner: CoworldLeagueWriteLockOwner | null = null;
+  try {
+    owner = parseWriteLockOwner(await fs.readFile(ownerPath, "utf8"));
+  } catch (error) {
+    if (errorCode(error) !== "ENOENT") {
+      return;
+    }
+  }
+
+  if (owner !== null && processIsAlive(owner.pid)) {
+    return;
+  }
+  if (owner === null) {
+    try {
+      const lockStat = await fs.stat(lockPath);
+      if (
+        Date.now() - lockStat.mtimeMs <
+        COWORLD_LEAGUE_WRITE_LOCK_OWNER_GRACE_MS
+      ) {
+        return;
+      }
+    } catch {
+      return;
+    }
+  } else {
+    try {
+      const latestOwner = parseWriteLockOwner(
+        await fs.readFile(ownerPath, "utf8"),
+      );
+      if (latestOwner?.token !== owner.token) {
+        return;
+      }
+    } catch {
+      return;
+    }
+  }
+
+  const abandonedPath = `${lockPath}.abandoned.${randomUUID()}`;
+  try {
+    await fs.rename(lockPath, abandonedPath);
+    await fs.rm(abandonedPath, { recursive: true, force: true });
+  } catch (error) {
+    if (errorCode(error) !== "ENOENT") {
+      throw error;
+    }
+  }
+}
+
+async function acquireCoworldLeagueWriteLock(
+  siteDir: string,
+): Promise<() => Promise<void>> {
+  const lockPath = `${path.resolve(siteDir)}.write-lock`;
+  const ownerPath = path.join(lockPath, "owner.json");
+  const owner: CoworldLeagueWriteLockOwner = {
+    pid: process.pid,
+    token: randomUUID(),
+    createdAt: new Date().toISOString(),
+  };
+  const deadline = Date.now() + COWORLD_LEAGUE_WRITE_LOCK_TIMEOUT_MS;
+  await fs.mkdir(path.dirname(lockPath), { recursive: true });
+
+  for (;;) {
+    try {
+      await fs.mkdir(lockPath);
+      try {
+        await fs.writeFile(ownerPath, `${JSON.stringify(owner)}\n`, "utf8");
+      } catch (error) {
+        await fs.rm(lockPath, { recursive: true, force: true });
+        throw error;
+      }
+      return async () => {
+        try {
+          const currentOwner = parseWriteLockOwner(
+            await fs.readFile(ownerPath, "utf8"),
+          );
+          if (currentOwner?.token === owner.token) {
+            await fs.rm(lockPath, { recursive: true, force: true });
+          }
+        } catch (error) {
+          if (errorCode(error) !== "ENOENT") {
+            throw error;
+          }
+        }
+      };
+    } catch (error) {
+      if (errorCode(error) !== "EEXIST") {
+        throw error;
+      }
+      await reclaimAbandonedWriteLock(lockPath);
+      if (Date.now() >= deadline) {
+        throw new Error(
+          `Timed out waiting for Coworld league site writer lock: ${lockPath}`,
+          { cause: error },
+        );
+      }
+      await new Promise((resolve) =>
+        setTimeout(resolve, COWORLD_LEAGUE_WRITE_LOCK_RETRY_MS),
+      );
+    }
+  }
+}
+
+export async function withCoworldLeagueSiteWriteLock<T>(
+  siteDir: string,
+  operation: () => Promise<T>,
+): Promise<T> {
+  const release = await acquireCoworldLeagueWriteLock(siteDir);
+  try {
+    return await operation();
+  } finally {
+    await release();
+  }
+}
+
+async function writeFileAtomic(
+  destinationPath: string,
+  contents: string,
+): Promise<void> {
+  try {
+    if ((await fs.readFile(destinationPath, "utf8")) === contents) {
+      return;
+    }
+  } catch (error) {
+    if (errorCode(error) !== "ENOENT") {
+      throw error;
+    }
+  }
+  const temporaryPath = `${destinationPath}.${process.pid}.${randomUUID()}.tmp`;
+  try {
+    await fs.writeFile(temporaryPath, contents);
+    await fs.rename(temporaryPath, destinationPath);
+  } catch (error) {
+    await fs.rm(temporaryPath, { force: true }).catch(() => undefined);
+    throw error;
+  }
+}
+
+async function writeCoworldLeagueSiteUnlocked(
+  siteDir: string,
+  data: CoworldLeagueMirrorData,
+): Promise<CoworldLeagueSitePaths> {
+  await fs.mkdir(siteDir, { recursive: true });
+  const indexPath = path.join(siteDir, "index.html");
+  const clientPath = path.join(siteDir, "client.js");
+  const dataPath = path.join(siteDir, "data.json");
+  // Publish data.json last. Existing pages only reload after observing a newer
+  // snapshot, so they cannot race ahead of either the client or the HTML.
+  await writeFileAtomic(clientPath, coworldLeagueClientJavaScript());
+  await writeFileAtomic(indexPath, coworldLeagueIndexHtml(data));
+  await writeFileAtomic(dataPath, `${JSON.stringify(data, null, 2)}\n`);
+  return { indexPath, clientPath, dataPath };
 }
 
 export async function writeCoworldLeagueSite(
   siteDir: string,
   data: CoworldLeagueMirrorData,
 ): Promise<CoworldLeagueSitePaths> {
-  await fs.mkdir(siteDir, { recursive: true });
-  const indexPath = path.join(siteDir, "index.html");
-  const dataPath = path.join(siteDir, "data.json");
-  await fs.writeFile(indexPath, coworldLeagueIndexHtml(data));
-  await fs.writeFile(dataPath, `${JSON.stringify(data, null, 2)}\n`);
-  return { indexPath, dataPath };
+  return withCoworldLeagueSiteWriteLock(siteDir, () =>
+    writeCoworldLeagueSiteUnlocked(siteDir, data),
+  );
+}
+
+export async function markCoworldLeagueSiteStale(
+  siteDir: string,
+  generatedAt = new Date().toISOString(),
+): Promise<CoworldLeagueSitePaths> {
+  return withCoworldLeagueSiteWriteLock(siteDir, async () => {
+    const dataPath = path.join(siteDir, "data.json");
+    const previous = JSON.parse(
+      await fs.readFile(dataPath, "utf8"),
+    ) as CoworldLeagueMirrorData;
+    return writeCoworldLeagueSiteUnlocked(siteDir, {
+      ...previous,
+      generatedAt: previous.stale ? previous.generatedAt : generatedAt,
+      stale: true,
+    });
+  });
 }
 
 export function coworldLeagueIndexHtml(data: CoworldLeagueMirrorData): string {
@@ -111,11 +342,11 @@ export function coworldLeagueIndexHtml(data: CoworldLeagueMirrorData): string {
     : "";
   const watchLatest = data.episodes.find((episode) => episode.fullRenderHref);
   return `<!doctype html>
-<html lang="en">
+<html lang="en" data-generated-at="${escapeHtml(data.generatedAt)}" data-stale="${data.stale ? "true" : "false"}">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta http-equiv="refresh" content="300">
+  <meta id="league-refresh-fallback" http-equiv="refresh" content="300">
   <title>Proxy War — Live League</title>
   <style>
     :root { color-scheme: dark; --bg:#080b10; --surface:#111720; --surface2:#18202b; --line:#2a3442; --text:#edf1f7; --muted:#a4afbf; --amber:#f4a64a; --cyan:#7ad7f0; --good:#7ee0a8; --bad:#ff9b8f; }
@@ -131,6 +362,7 @@ export function coworldLeagueIndexHtml(data: CoworldLeagueMirrorData): string {
     .chip { border:1px solid var(--line); background:var(--surface); border-radius:999px; padding:7px 12px; font:800 12px ui-monospace, SFMono-Regular, Menlo, monospace; color:var(--muted); }
     .chip.live { border-color:rgba(126,224,168,.5); color:var(--good); }
     .stale-banner { border:1px solid rgba(244,166,74,.5); background:rgba(244,166,74,.08); color:var(--amber); border-radius:6px; padding:10px 12px; margin-bottom:14px; font-weight:800; }
+    .sync-status { border:1px solid rgba(255,155,143,.5); background:rgba(255,155,143,.08); color:var(--bad); border-radius:6px; padding:10px 12px; margin-bottom:14px; font-weight:800; }
     .hero { border-top:1px solid var(--line); border-bottom:1px solid var(--line); padding:24px 0 20px; margin-bottom:18px; }
     h1 { margin:8px 0 10px; font-size:clamp(34px, 5vw, 56px); line-height:1; }
     .lede { max-width:760px; color:#cbd3df; font-size:16px; margin:0 0 16px; }
@@ -195,6 +427,9 @@ export function coworldLeagueIndexHtml(data: CoworldLeagueMirrorData): string {
       </div>
     </header>
     ${staleBanner}
+  <div id="live-update-status" class="sync-status" role="status" aria-live="polite" hidden>${escapeHtml(
+    translateText("update_unavailable"),
+  )}</div>
     <div class="hero">
       <h1>Agents are fighting a war right now.</h1>
       <p class="lede">Autonomous agents wage full territorial wars on the ${escapeHtml(
@@ -254,10 +489,19 @@ export function coworldLeagueIndexHtml(data: CoworldLeagueMirrorData): string {
       <div>Runs on ${escapeHtml(data.links.platformLabel)} · read-only mirror · league <code>${escapeHtml(
         league.id,
       )}</code></div>
-      <div>Auto-refreshes every 5 minutes</div>
+      <div>${escapeHtml(translateText("update_cadence"))}</div>
     </footer>
   </div>
-  <script>
+  <script src="${COWORLD_LEAGUE_CLIENT_PATH}"></script>
+</body>
+</html>
+`;
+}
+
+export function coworldLeagueClientJavaScript(): string {
+  return `(() => {
+  "use strict";
+
     for (const el of document.querySelectorAll("[data-utc]")) {
       const value = el.getAttribute("data-utc");
       const time = value === null ? NaN : Date.parse(value);
@@ -265,9 +509,112 @@ export function coworldLeagueIndexHtml(data: CoworldLeagueMirrorData): string {
         el.textContent = new Date(time).toLocaleString();
       }
     }
-  </script>
-</body>
-</html>
+
+    const root = document.documentElement;
+    const updateStatus = document.getElementById("live-update-status");
+    const fallbackRefresh = document.getElementById("league-refresh-fallback");
+    const currentGeneratedAt = Date.parse(root.dataset.generatedAt ?? "");
+    const currentStale = root.dataset.stale === "true";
+    let updateCheckInFlight = false;
+    let reloadRequested = false;
+    let consecutiveFailures = 0;
+
+    if (
+      typeof fetch !== "function" ||
+      typeof AbortController !== "function" ||
+      typeof window.setInterval !== "function" ||
+      typeof window.setTimeout !== "function" ||
+      typeof window.clearTimeout !== "function" ||
+      typeof window.addEventListener !== "function" ||
+      typeof document.addEventListener !== "function"
+    ) {
+      return;
+    }
+
+    function setUpdateError(visible) {
+      root.dataset.updateState = visible ? "retrying" : "current";
+      if (updateStatus !== null) {
+        updateStatus.hidden = !visible;
+      }
+    }
+
+    async function checkForUpdates() {
+      if (updateCheckInFlight || reloadRequested || document.hidden) {
+        return;
+      }
+      updateCheckInFlight = true;
+      let timeout = null;
+      try {
+        const controller = new AbortController();
+        timeout = window.setTimeout(
+          () => controller.abort(),
+          ${COWORLD_LEAGUE_POLL_TIMEOUT_MS},
+        );
+        const response = await fetch("${COWORLD_LEAGUE_DATA_PATH}", {
+          cache: "no-cache",
+          headers: { Accept: "application/json" },
+          signal: controller.signal,
+        });
+        if (!response.ok) {
+          throw new Error("League update check failed");
+        }
+        const next = await response.json();
+        if (typeof next !== "object" || next === null) {
+          throw new Error("League update payload is invalid");
+        }
+        const nextGeneratedAt = Date.parse(
+          typeof next.generatedAt === "string" ? next.generatedAt : "",
+        );
+        if (!Number.isFinite(nextGeneratedAt)) {
+          throw new Error("League update timestamp is invalid");
+        }
+        const nextStale = next.stale === true;
+        consecutiveFailures = 0;
+        setUpdateError(false);
+        const nextSnapshotIsNewer = Number.isFinite(currentGeneratedAt)
+          ? nextGeneratedAt > currentGeneratedAt ||
+            (nextGeneratedAt === currentGeneratedAt &&
+              nextStale !== currentStale)
+          : true;
+        if (nextSnapshotIsNewer) {
+          reloadRequested = true;
+          root.dataset.updateState = "reloading";
+          window.location.reload();
+        }
+      } catch {
+        consecutiveFailures += 1;
+        if (consecutiveFailures >= ${COWORLD_LEAGUE_FAILURES_BEFORE_WARNING}) {
+          setUpdateError(true);
+        }
+      } finally {
+        updateCheckInFlight = false;
+        if (timeout !== null) {
+          try {
+            window.clearTimeout(timeout);
+          } catch {
+            // The page fallback remains available if browser timers fail.
+          }
+        }
+      }
+    }
+
+    try {
+      window.setInterval(
+        () => void checkForUpdates(),
+        ${COWORLD_LEAGUE_POLL_INTERVAL_MS},
+      );
+      document.addEventListener("visibilitychange", () => {
+        if (!document.hidden) {
+          void checkForUpdates();
+        }
+      });
+      window.addEventListener("online", () => void checkForUpdates());
+      fallbackRefresh?.remove();
+    } catch {
+      return;
+    }
+    void checkForUpdates();
+})();
 `;
 }
 

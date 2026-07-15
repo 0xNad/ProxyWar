@@ -47,6 +47,7 @@ export const proxyWarPublicExternalAgentExamples = [
 
 export const proxyWarPublicLeagueArtifacts = [
   "index.html",
+  "client.js",
   "data.json",
 ] as const;
 
@@ -90,6 +91,25 @@ export function isProxyWarPublicLeagueArtifact(fileName: string): boolean {
   return (proxyWarPublicLeagueArtifacts as readonly string[]).includes(
     fileName,
   );
+}
+
+export function proxyWarLeagueContentSecurityPolicy(): string {
+  return [
+    "default-src 'self'",
+    "script-src 'self'",
+    "style-src 'self' 'unsafe-inline'",
+    "img-src 'self' data: blob:",
+    "font-src 'self' data:",
+    "connect-src 'self'",
+    "worker-src 'self' blob:",
+    "media-src 'self' blob:",
+    "manifest-src 'self'",
+    "object-src 'none'",
+    "frame-src 'none'",
+    "frame-ancestors 'none'",
+    "base-uri 'self'",
+    "form-action 'none'",
+  ].join("; ");
 }
 
 /**

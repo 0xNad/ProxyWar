@@ -66,6 +66,7 @@ import {
   isProxyWarPublicRunArtifact,
   isProxyWarPublicTournamentArtifact,
   isSafeProxyWarArtifactSegment,
+  proxyWarLeagueContentSecurityPolicy,
   proxyWarPublicRendererAssetPrefixes,
 } from "../server/agents/ProxyWarPublicArtifacts";
 import {
@@ -455,7 +456,7 @@ app.use((req, res, next) => {
     return;
   }
   if (
-    req.method === "GET" &&
+    (req.method === "GET" || req.method === "HEAD") &&
     (isProxyWarPublicLeaguePath(req.path) ||
       isProxyWarPublicRendererAssetPath(req.path))
   ) {
@@ -470,6 +471,10 @@ app.use((req, res, next) => {
 });
 
 app.get("/league", (_req, res) => {
+  res.setHeader(
+    "Content-Security-Policy",
+    proxyWarLeagueContentSecurityPolicy(),
+  );
   res.sendFile(
     path.join("league", "index.html"),
     { root: runsRootDir },
@@ -492,12 +497,38 @@ if (betaAccess.enabled) {
     servePublicTournamentArtifact,
   );
 } else {
+  const leagueIndexRelativePath = path
+    .join("league", "index.html")
+    .toLocaleLowerCase("en-US");
+  const setRunArtifactHeaders = (
+    res: Response,
+    filePath: string,
+  ): void => {
+    const relativePath = path
+      .relative(runsRootDir, path.resolve(filePath))
+      .toLocaleLowerCase("en-US");
+    if (relativePath === leagueIndexRelativePath) {
+      res.setHeader(
+        "Content-Security-Policy",
+        proxyWarLeagueContentSecurityPolicy(),
+      );
+    }
+  };
   app.get("/docs/:artifact", servePublicDoc);
   app.get("/examples/external-agent/:artifact", servePublicExternalAgentExample);
-  app.use("/runs", express.static(runsRootDir, { extensions: ["html"] }));
+  app.use(
+    "/runs",
+    express.static(runsRootDir, {
+      extensions: ["html"],
+      setHeaders: setRunArtifactHeaders,
+    }),
+  );
   app.use(
     "/ai-league-runs",
-    express.static(runsRootDir, { extensions: ["html"] }),
+    express.static(runsRootDir, {
+      extensions: ["html"],
+      setHeaders: setRunArtifactHeaders,
+    }),
   );
   app.use(
     "/tournaments",
@@ -2171,6 +2202,12 @@ function servePublicRunArtifact(
   if (!isInsideRoot(filePath, runsRootDir)) {
     res.status(404).send("artifact not available");
     return;
+  }
+  if (runID === "league" && artifact === "index.html") {
+    res.setHeader(
+      "Content-Security-Policy",
+      proxyWarLeagueContentSecurityPolicy(),
+    );
   }
   res.sendFile(filePath, (error) => {
     if (error !== undefined && error !== null) {

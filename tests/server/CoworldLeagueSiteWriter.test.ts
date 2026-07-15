@@ -1,9 +1,14 @@
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdtemp, readFile, readdir, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, test } from "vitest";
 import {
+  COWORLD_LEAGUE_CLIENT_PATH,
+  COWORLD_LEAGUE_POLL_INTERVAL_MS,
+  coworldLeagueClientJavaScript,
   coworldLeagueIndexHtml,
+  markCoworldLeagueSiteStale,
+  withCoworldLeagueSiteWriteLock,
   writeCoworldLeagueSite,
   type CoworldLeagueMirrorData,
 } from "../../src/server/agents/CoworldLeagueSiteWriter";
@@ -157,6 +162,32 @@ describe("coworldLeagueIndexHtml", () => {
     expect(html).toContain("ROUND 268 · LIVE");
     expect(html).toContain("every 30 minutes");
   });
+
+  test("loads the same-origin update client and keeps a timed fallback", () => {
+    const html = coworldLeagueIndexHtml(sampleData());
+    expect(html).toContain(
+      'data-generated-at="2026-07-13T12:00:00.000Z" data-stale="false"',
+    );
+    expect(html).toContain(
+      '<meta id="league-refresh-fallback" http-equiv="refresh" content="300">',
+    );
+    expect(html).toContain(
+      `<script src="${COWORLD_LEAGUE_CLIENT_PATH}"></script>`,
+    );
+    expect(html).not.toContain("async function checkForUpdates");
+    expect(html).toContain(
+      "Update check unavailable — showing this snapshot; retrying automatically.",
+    );
+    expect(html).toContain("Checks for updates every 30 seconds");
+
+    const client = coworldLeagueClientJavaScript();
+    expect(client).toContain('fetch("/ai-league-runs/league/data.json", {');
+    expect(client).toContain('cache: "no-cache"');
+    expect(client).toContain(
+      "fallbackRefresh?.remove()",
+    );
+    expect(client).toContain(`${COWORLD_LEAGUE_POLL_INTERVAL_MS},`);
+  });
 });
 
 describe("writeCoworldLeagueSite", () => {
@@ -178,5 +209,78 @@ describe("writeCoworldLeagueSite", () => {
     const roundTrip = JSON.parse(await readFile(paths.dataPath, "utf8"));
     expect(roundTrip.league.id).toBe("league_test");
     expect(roundTrip.standings).toHaveLength(3);
+  });
+
+  test("marks both artifacts stale while retaining the last good sync", async () => {
+    siteDir = await mkdtemp(path.join(tmpdir(), "league-site-"));
+    const data = sampleData();
+    await writeCoworldLeagueSite(siteDir, data);
+
+    const paths = await markCoworldLeagueSiteStale(
+      siteDir,
+      "2026-07-13T12:05:00.000Z",
+    );
+    const staleHtml = await readFile(paths.indexPath, "utf8");
+    const staleData = JSON.parse(await readFile(paths.dataPath, "utf8"));
+
+    expect(staleHtml).toContain("Live sync degraded");
+    expect(staleHtml).toContain('data-stale="true"');
+    expect(staleData.generatedAt).toBe("2026-07-13T12:05:00.000Z");
+    expect(staleData.lastGoodSyncAt).toBe(data.lastGoodSyncAt);
+    expect(staleData.stale).toBe(true);
+
+    const inodeBefore = (await stat(paths.dataPath)).ino;
+
+    await markCoworldLeagueSiteStale(
+      siteDir,
+      "2026-07-13T12:10:00.000Z",
+    );
+    const stillStaleData = JSON.parse(await readFile(paths.dataPath, "utf8"));
+    expect(stillStaleData.generatedAt).toBe("2026-07-13T12:05:00.000Z");
+    expect((await stat(paths.dataPath)).ino).toBe(inodeBefore);
+
+    expect((await readdir(siteDir)).sort()).toEqual([
+      "client.js",
+      "data.json",
+      "index.html",
+    ]);
+  });
+
+  test("serializes complete publications through a filesystem lock", async () => {
+    siteDir = await mkdtemp(path.join(tmpdir(), "league-site-"));
+    const order: string[] = [];
+    let releaseFirst: (() => void) | undefined;
+    let firstEntered: (() => void) | undefined;
+    const entered = new Promise<void>((resolve) => {
+      firstEntered = resolve;
+    });
+    const held = new Promise<void>((resolve) => {
+      releaseFirst = resolve;
+    });
+
+    const first = withCoworldLeagueSiteWriteLock(siteDir, async () => {
+      order.push("first-entered");
+      firstEntered?.();
+      await held;
+      order.push("first-released");
+    });
+    await entered;
+    const second = withCoworldLeagueSiteWriteLock(siteDir, async () => {
+      order.push("second-entered");
+    });
+
+    await new Promise((resolve) => setTimeout(resolve, 75));
+    expect(order).toEqual(["first-entered"]);
+    releaseFirst?.();
+    await Promise.all([first, second]);
+
+    expect(order).toEqual([
+      "first-entered",
+      "first-released",
+      "second-entered",
+    ]);
+    await expect(stat(`${path.resolve(siteDir)}.write-lock`)).rejects.toMatchObject(
+      { code: "ENOENT" },
+    );
   });
 });
