@@ -1,5 +1,6 @@
 import { describe, expect, test } from "vitest";
 import {
+  activeChampionPolicyLabelsByPlayerId,
   buildEpisodeRow,
   buildRoundRows,
   buildStandingRows,
@@ -53,7 +54,37 @@ const standingsFixture = [
     score: 9.04,
     rounds_played: 2,
     score_label: "Score",
-    policy_label: "proxywar-keystone:v14",
+    policy_label: "proxywar-keystone:v7",
+  },
+];
+
+const championMembershipsFixture = [
+  {
+    status: "competing",
+    is_champion: true,
+    end_time: null,
+    policy_version: {
+      player_id: "ply_a",
+      label: "qd1n:v2",
+    },
+  },
+  {
+    status: "competing",
+    is_champion: true,
+    end_time: null,
+    policy_version: {
+      player_id: "ply_house",
+      label: "proxywar-keystone:v40",
+    },
+  },
+  {
+    status: "competing",
+    is_champion: false,
+    end_time: null,
+    policy_version: {
+      player_id: "ply_house",
+      label: "proxywar-keystone:v39",
+    },
   },
 ];
 
@@ -160,13 +191,48 @@ describe("CoworldLeagueMirrorCore", () => {
     expect(division?.name).toBe("Competition");
   });
 
-  test("buildStandingRows sorts by rank and flags the house seat", () => {
-    const rows = buildStandingRows(standingsFixture);
+  test("maps only active competing champion memberships by player", () => {
+    const labels = activeChampionPolicyLabelsByPlayerId([
+      ...championMembershipsFixture,
+      {
+        status: "competing",
+        is_champion: true,
+        end_time: "2026-07-15T16:00:00Z",
+        player: { id: "ply_b" },
+        policy_version: { label: "retired:v1" },
+      },
+    ]);
+    expect(Object.fromEntries(labels)).toEqual({
+      ply_a: "qd1n:v2",
+      ply_house: "proxywar-keystone:v40",
+    });
+  });
+
+  test("buildStandingRows keeps rating provenance and adds the active champion", () => {
+    const rows = buildStandingRows(
+      standingsFixture,
+      championMembershipsFixture,
+    );
     expect(rows.map((row) => row.rank)).toEqual([1, 2, 3]);
     expect(rows[0].playerName).toBe("odin free");
+    expect(rows[0].ratingPolicyLabel).toBe("qd1n:v2");
+    expect(rows[0].activeChampionPolicyLabel).toBe("qd1n:v2");
     const house = rows.find((row) => row.isHouse);
     expect(house?.playerName).toBe("Auri");
+    expect(house?.ratingPolicyLabel).toBe("proxywar-keystone:v7");
+    expect(house?.activeChampionPolicyLabel).toBe("proxywar-keystone:v40");
+    expect(house?.policyLabel).toBe("proxywar-keystone:v7");
     expect(rows.filter((row) => row.isHouse)).toHaveLength(1);
+  });
+
+  test("keeps publishing rating provenance when champion memberships are unavailable", () => {
+    const rows = buildStandingRows(standingsFixture);
+    const house = rows.find((row) => row.isHouse);
+    expect(house).toMatchObject({
+      ratingPolicyLabel: "proxywar-keystone:v7",
+      activeChampionPolicyLabel: null,
+      policyLabel: "proxywar-keystone:v7",
+    });
   });
 
   test("scoreLabelFromStandings falls back to Score", () => {

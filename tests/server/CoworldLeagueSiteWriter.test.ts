@@ -33,6 +33,8 @@ function sampleData(): CoworldLeagueMirrorData {
       {
         rank: 1,
         playerName: "odin free",
+        ratingPolicyLabel: "qd1n:v2",
+        activeChampionPolicyLabel: "qd1n:v2",
         policyLabel: "qd1n:v2",
         score: 31.05,
         roundsPlayed: 27,
@@ -41,6 +43,8 @@ function sampleData(): CoworldLeagueMirrorData {
       {
         rank: 2,
         playerName: '<script>alert("x")</script>',
+        ratingPolicyLabel: "evil:v1",
+        activeChampionPolicyLabel: null,
         policyLabel: "evil:v1",
         score: 24.13,
         roundsPlayed: 40,
@@ -49,7 +53,9 @@ function sampleData(): CoworldLeagueMirrorData {
       {
         rank: 3,
         playerName: "Auri",
-        policyLabel: "proxywar-keystone:v14",
+        ratingPolicyLabel: "proxywar-keystone:v7",
+        activeChampionPolicyLabel: "proxywar-keystone:v40",
+        policyLabel: "proxywar-keystone:v7",
         score: 9.04,
         roundsPlayed: 2,
         isHouse: true,
@@ -132,7 +138,16 @@ describe("coworldLeagueIndexHtml", () => {
     const html = coworldLeagueIndexHtml(sampleData());
     expect(html).toContain('class="house"');
     expect(html).toContain("HOUSE");
-    expect(html).toContain("proxywar-keystone:v14");
+    expect(html).toContain("proxywar-keystone:v40");
+  });
+
+  test("separates the active champion from its historical rating row", () => {
+    const html = coworldLeagueIndexHtml(sampleData());
+    expect(html).toContain("Active champion");
+    expect(html).toContain("proxywar-keystone:v40");
+    expect(html).toContain("Rating row");
+    expect(html).toContain("proxywar-keystone:v7");
+    expect(html).toContain('class="badge champion">Champion</span>');
   });
 
   test("renders degraded chip only for degraded battles", () => {

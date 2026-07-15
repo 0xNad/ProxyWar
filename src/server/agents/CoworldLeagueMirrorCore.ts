@@ -111,21 +111,66 @@ export function pickCompetitionDivision(
   return { id: best.id, name: best.name };
 }
 
-export function buildStandingRows(value: unknown): CoworldLeagueStandingRow[] {
+/**
+ * Maps player ids to the policy label currently marked as their champion.
+ * Memberships are read separately from results because a leaderboard rating
+ * row can intentionally retain an older policy label after champion promotion.
+ */
+export function activeChampionPolicyLabelsByPlayerId(
+  value: unknown,
+): Map<string, string> {
+  const labels = new Map<string, string>();
+  for (const entry of asArray(value)) {
+    const membership = asRecord(entry);
+    if (
+      !membership ||
+      membership.status !== "competing" ||
+      membership.is_champion !== true ||
+      asString(membership.end_time) !== null
+    ) {
+      continue;
+    }
+    const policyVersion = asRecord(membership.policy_version);
+    const player = asRecord(membership.player);
+    const playerId = asString(policyVersion?.player_id) ?? asString(player?.id);
+    const policyLabel = asString(policyVersion?.label);
+    if (playerId !== null && policyLabel !== null) {
+      labels.set(playerId, policyLabel);
+    }
+  }
+  return labels;
+}
+
+export function buildStandingRows(
+  value: unknown,
+  activeChampionMemberships: unknown = [],
+): CoworldLeagueStandingRow[] {
+  const activeChampionLabels = activeChampionPolicyLabelsByPlayerId(
+    activeChampionMemberships,
+  );
   const rows: CoworldLeagueStandingRow[] = [];
   for (const entry of asArray(value)) {
     const row = asRecord(entry);
     if (!row) {
       continue;
     }
-    const policyLabel = asString(row.policy_label) ?? "unknown policy";
+    const ratingPolicyLabel = asString(row.policy_label) ?? "unknown policy";
+    const playerId = asString(row.player_id);
+    const activeChampionPolicyLabel =
+      playerId === null ? null : (activeChampionLabels.get(playerId) ?? null);
     rows.push({
       rank: asNumber(row.rank) ?? rows.length + 1,
       playerName: asString(row.player_name) ?? "unknown player",
-      policyLabel,
+      ratingPolicyLabel,
+      activeChampionPolicyLabel,
+      // Preserve the original public data.json contract while exposing the
+      // rating/champion distinction through the two explicit fields above.
+      policyLabel: ratingPolicyLabel,
       score: asNumber(row.score),
       roundsPlayed: asNumber(row.rounds_played),
-      isHouse: policyLabel.startsWith(housePolicyPrefix),
+      isHouse:
+        ratingPolicyLabel.startsWith(housePolicyPrefix) ||
+        activeChampionPolicyLabel?.startsWith(housePolicyPrefix) === true,
     });
   }
   rows.sort((a, b) => a.rank - b.rank);
