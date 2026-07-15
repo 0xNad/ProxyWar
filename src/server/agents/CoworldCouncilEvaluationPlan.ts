@@ -36,6 +36,7 @@ const councilArmOwnedEnvironmentKeys = new Set([
   "PROXYWAR_KEYSTONE_COUNCIL_SURVIVAL_SHIELD",
   "PROXYWAR_KEYSTONE_COMMANDER_RETENTION",
   "PROXYWAR_KEYSTONE_DEFENSE_AUTHORITY",
+  "PROXYWAR_KEYSTONE_COUNCIL_BALANCE_OF_POWER",
   "PROXYWAR_KEYSTONE_EXPERT_MASK",
 ]);
 const councilEnvironmentKeyPattern = /^[A-Za-z_][A-Za-z0-9_]*$/;
@@ -450,7 +451,9 @@ function councilArm(
     kind !== "v16-survival-shield" &&
     kind !== "v39" &&
     kind !== "v39-commander-retention" &&
-    kind !== "v39-defense-authority"
+    kind !== "v39-defense-authority" &&
+    kind !== "v40" &&
+    kind !== "v40-balance-of-power"
   ) {
     throw new Error(`${context}.kind is unsupported`);
   }
@@ -466,9 +469,12 @@ function councilArm(
     kind === "v39" ||
     kind === "v39-commander-retention" ||
     kind === "v39-defense-authority";
-  const survivalShield = kind === "v16-survival-shield" || v39Family;
-  const commanderRetention = kind === "v39-commander-retention";
+  const v40Family = kind === "v40" || kind === "v40-balance-of-power";
+  const survivalShield =
+    kind === "v16-survival-shield" || v39Family || v40Family;
+  const commanderRetention = kind === "v39-commander-retention" || v40Family;
   const defenseAuthority = kind === "v39-defense-authority";
+  const balanceOfPower = kind === "v40-balance-of-power";
   const base = kind === "a1" || kind === "a1-shadow" ? "a1" : "v16";
   if (politicsGuard && expertMask !== 15) {
     throw new Error(`${context}.expertMask must be 15 for politics guard`);
@@ -479,9 +485,7 @@ function councilArm(
     );
   }
   if (survivalShield && expertMask !== 15) {
-    throw new Error(
-      `${context}.expertMask must be 15 for survival shield`,
-    );
+    throw new Error(`${context}.expertMask must be 15 for survival shield`);
   }
   if (
     !shadow &&
@@ -503,12 +507,17 @@ function councilArm(
     ...(survivalShield
       ? { PROXYWAR_KEYSTONE_COUNCIL_SURVIVAL_SHIELD: "1" }
       : {}),
-    ...(v39Family
+    ...(v39Family || v40Family
       ? {
-          PROXYWAR_KEYSTONE_COMMANDER_RETENTION: commanderRetention
+          PROXYWAR_KEYSTONE_COMMANDER_RETENTION: commanderRetention ? "1" : "0",
+          PROXYWAR_KEYSTONE_DEFENSE_AUTHORITY: defenseAuthority ? "1" : "0",
+        }
+      : {}),
+    ...(v40Family
+      ? {
+          PROXYWAR_KEYSTONE_COUNCIL_BALANCE_OF_POWER: balanceOfPower
             ? "1"
             : "0",
-          PROXYWAR_KEYSTONE_DEFENSE_AUTHORITY: defenseAuthority ? "1" : "0",
         }
       : {}),
     ...(shadow || politicsGuard || diplomacyAdjudicator || survivalShield
@@ -630,6 +639,10 @@ function councilArmRank(arm: CoworldCouncilEvaluationArm): number {
       return 8;
     case "v39-defense-authority":
       return 9;
+    case "v40":
+      return 10;
+    case "v40-balance-of-power":
+      return 11;
   }
 }
 
@@ -1336,7 +1349,8 @@ function councilAssignment(
       job.arm.kind === "v16-diplomacy-adjudicator" ||
       job.arm.kind === "v16-survival-shield" ||
       job.arm.kind === "v39-commander-retention" ||
-      job.arm.kind === "v39-defense-authority",
+      job.arm.kind === "v39-defense-authority" ||
+      job.arm.kind === "v40-balance-of-power",
     actualTreatmentExposure:
       job.arm.kind === "v16-politics-guard" ||
       job.arm.kind === "v16-diplomacy-adjudicator" ||

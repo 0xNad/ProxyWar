@@ -155,6 +155,7 @@ async function writeCouncilPlanFixture(
     includeDiplomacyAdjudicator?: boolean;
     includeSurvivalShield?: boolean;
     includeV39Arms?: boolean;
+    includeV40Arms?: boolean;
   } = {},
 ): Promise<{
   planPath: string;
@@ -302,6 +303,42 @@ async function writeCouncilPlanFixture(
           },
         ]
       : []),
+    ...(input.includeV40Arms === true
+      ? [
+          {
+            armID: "v40",
+            kind: "v40",
+            base: "v16",
+            shadow: false,
+            expertMask: 15,
+            env: {
+              PROXYWAR_KEYSTONE_SINGLE_ACTION: "0",
+              PROXYWAR_KEYSTONE_EXPERT_COUNCIL_SHADOW: "0",
+              PROXYWAR_KEYSTONE_COUNCIL_SURVIVAL_SHIELD: "1",
+              PROXYWAR_KEYSTONE_COMMANDER_RETENTION: "1",
+              PROXYWAR_KEYSTONE_DEFENSE_AUTHORITY: "0",
+              PROXYWAR_KEYSTONE_COUNCIL_BALANCE_OF_POWER: "0",
+              PROXYWAR_KEYSTONE_EXPERT_MASK: "15",
+            },
+          },
+          {
+            armID: "v40-balance-of-power",
+            kind: "v40-balance-of-power",
+            base: "v16",
+            shadow: false,
+            expertMask: 15,
+            env: {
+              PROXYWAR_KEYSTONE_SINGLE_ACTION: "0",
+              PROXYWAR_KEYSTONE_EXPERT_COUNCIL_SHADOW: "0",
+              PROXYWAR_KEYSTONE_COUNCIL_SURVIVAL_SHIELD: "1",
+              PROXYWAR_KEYSTONE_COMMANDER_RETENTION: "1",
+              PROXYWAR_KEYSTONE_DEFENSE_AUTHORITY: "0",
+              PROXYWAR_KEYSTONE_COUNCIL_BALANCE_OF_POWER: "1",
+              PROXYWAR_KEYSTONE_EXPERT_MASK: "15",
+            },
+          },
+        ]
+      : []),
   ];
   const statuses = input.blocks ?? [{ base: "complete", shadow: "complete" }];
   const materializedManifest = {
@@ -431,7 +468,8 @@ async function writeCouncilPlanFixture(
         arm.kind === "v16-diplomacy-adjudicator" ||
         arm.kind === "v16-survival-shield" ||
         arm.kind === "v39-commander-retention" ||
-        arm.kind === "v39-defense-authority";
+        arm.kind === "v39-defense-authority" ||
+        arm.kind === "v40-balance-of-power";
       const scores = treatment ? [0.7, 0.3] : [0, 0];
       const winnerSlot = treatment ? 0 : null;
       const players = [{ name: "Auri" }, { name: "Opponent" }];
@@ -1086,7 +1124,9 @@ describe("Coworld evaluation dataset", () => {
   });
 
   test("identifies the named survival-shield arm as real default-off treatment exposure", async () => {
-    const fixture = await writeCouncilPlanFixture({ includeSurvivalShield: true });
+    const fixture = await writeCouncilPlanFixture({
+      includeSurvivalShield: true,
+    });
     const loaded = await loadCoworldEvaluationEpisodes([], [fixture.planPath]);
     const dataset = buildCoworldEvaluationDataset({
       episodes: loaded.episodes,
@@ -1130,12 +1170,10 @@ describe("Coworld evaluation dataset", () => {
       selector: { seat: 0, policyVersionId: null, playerName: null },
       councilEvaluationPlan: loaded.councilEvaluationPlan,
     });
-    const jobID = (armID: string) =>
-      `${fixture.blocks[0].blockID}-${armID}`;
+    const jobID = (armID: string) => `${fixture.blocks[0].blockID}-${armID}`;
     const assignment = (armID: string) =>
-      dataset.rows.find(
-        (row) => row.councilEvaluation?.jobID === jobID(armID),
-      )?.councilEvaluation;
+      dataset.rows.find((row) => row.councilEvaluation?.jobID === jobID(armID))
+        ?.councilEvaluation;
 
     expect(assignment("v39")).toMatchObject({
       arm: {
@@ -1190,6 +1228,62 @@ describe("Coworld evaluation dataset", () => {
       jobID("v39-commander-retention"),
       jobID("v39-defense-authority"),
     ]);
+  });
+
+  test("classifies exact v40 as control and only balance-of-power as treatment", async () => {
+    const fixture = await writeCouncilPlanFixture({ includeV40Arms: true });
+    const loaded = await loadCoworldEvaluationEpisodes([], [fixture.planPath]);
+    const dataset = buildCoworldEvaluationDataset({
+      episodes: loaded.episodes,
+      selector: { seat: 0, policyVersionId: null, playerName: null },
+      councilEvaluationPlan: loaded.councilEvaluationPlan,
+    });
+    const jobID = (armID: string) => `${fixture.blocks[0].blockID}-${armID}`;
+    const assignment = (armID: string) =>
+      dataset.rows.find((row) => row.councilEvaluation?.jobID === jobID(armID))
+        ?.councilEvaluation;
+
+    expect(assignment("v40")).toMatchObject({
+      arm: {
+        armID: "v40",
+        kind: "v40",
+        base: "v16",
+        shadow: false,
+        expertMask: 15,
+        env: {
+          PROXYWAR_KEYSTONE_SINGLE_ACTION: "0",
+          PROXYWAR_KEYSTONE_EXPERT_COUNCIL_SHADOW: "0",
+          PROXYWAR_KEYSTONE_COUNCIL_SURVIVAL_SHIELD: "1",
+          PROXYWAR_KEYSTONE_COMMANDER_RETENTION: "1",
+          PROXYWAR_KEYSTONE_DEFENSE_AUTHORITY: "0",
+          PROXYWAR_KEYSTONE_COUNCIL_BALANCE_OF_POWER: "0",
+          PROXYWAR_KEYSTONE_EXPERT_MASK: "15",
+        },
+      },
+      intentionToTreat: false,
+      actualTreatmentExposure: false,
+    });
+    expect(assignment("v40-balance-of-power")).toMatchObject({
+      arm: {
+        armID: "v40-balance-of-power",
+        kind: "v40-balance-of-power",
+        env: {
+          PROXYWAR_KEYSTONE_COUNCIL_SURVIVAL_SHIELD: "1",
+          PROXYWAR_KEYSTONE_COMMANDER_RETENTION: "1",
+          PROXYWAR_KEYSTONE_DEFENSE_AUTHORITY: "0",
+          PROXYWAR_KEYSTONE_COUNCIL_BALANCE_OF_POWER: "1",
+        },
+      },
+      intentionToTreat: true,
+      actualTreatmentExposure: false,
+    });
+    expect(dataset.councilEvaluation.intentionToTreatJobIDs).toContain(
+      jobID("v40-balance-of-power"),
+    );
+    expect(dataset.councilEvaluation.intentionToTreatJobIDs).not.toContain(
+      jobID("v40"),
+    );
+    expect(dataset.councilEvaluation.actualTreatmentExposureJobIDs).toEqual([]);
   });
 
   test("accepts producer-compatible replay directory hashes", async () => {

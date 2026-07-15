@@ -557,6 +557,54 @@ describe("Coworld paired matrix planner", () => {
     }
   });
 
+  test("materializes an exact v40 control and isolated balance-of-power treatment", async () => {
+    const { directory, spec } = await fixture();
+    const plan = await materializeCoworldPairedMatrix({
+      spec: {
+        ...spec,
+        candidateSeats: [0],
+        arms: [{ kind: "v40" }, { kind: "v40-balance-of-power" }],
+      },
+      specDirectory: directory,
+      resolveImageID: fakeImageID,
+      validateCoworld: acceptSchema,
+    });
+
+    expect(plan.arms.map(({ armID }) => armID)).toEqual([
+      "v40",
+      "v40-balance-of-power",
+    ]);
+    const [control, balance] = plan.arms;
+    expect(control).toEqual({
+      armID: "v40",
+      kind: "v40",
+      base: "v16",
+      shadow: false,
+      expertMask: 15,
+      env: {
+        PROXYWAR_KEYSTONE_SINGLE_ACTION: "0",
+        PROXYWAR_KEYSTONE_EXPERT_COUNCIL_SHADOW: "0",
+        PROXYWAR_KEYSTONE_COUNCIL_SURVIVAL_SHIELD: "1",
+        PROXYWAR_KEYSTONE_COMMANDER_RETENTION: "1",
+        PROXYWAR_KEYSTONE_DEFENSE_AUTHORITY: "0",
+        PROXYWAR_KEYSTONE_COUNCIL_BALANCE_OF_POWER: "0",
+        PROXYWAR_KEYSTONE_EXPERT_MASK: "15",
+      },
+    });
+    expect(balance?.env).toEqual({
+      ...control?.env,
+      PROXYWAR_KEYSTONE_COUNCIL_BALANCE_OF_POWER: "1",
+    });
+    expect(
+      Object.keys(control!.env).filter(
+        (key) => control!.env[key] !== balance!.env[key],
+      ),
+    ).toEqual(["PROXYWAR_KEYSTONE_COUNCIL_BALANCE_OF_POWER"]);
+    for (const job of plan.jobs) {
+      expect(job.roster[job.candidateSeat]!.env).toMatchObject(job.arm.env);
+    }
+  });
+
   test("resolved image identities participate in matrix and pair IDs", async () => {
     const first = await fixture();
     const second = await fixture();
@@ -841,6 +889,16 @@ describe("Coworld paired matrix planner", () => {
           ...spec,
           candidate: {
             ...spec.candidate,
+            env: { PROXYWAR_KEYSTONE_COUNCIL_BALANCE_OF_POWER: "1" },
+          },
+        },
+        "must not set arm-owned key",
+      ],
+      [
+        {
+          ...spec,
+          candidate: {
+            ...spec.candidate,
             env: { PROXYWAR_KEYSTONE_EXPERT_MASK: "15" },
           },
         },
@@ -968,6 +1026,41 @@ describe("Coworld paired matrix planner", () => {
         }),
       ).rejects.toThrow(message);
     }
+  });
+
+  test("preserves the old candidate environment limit while accounting for the larger v40 identity", async () => {
+    const publicEnv = Object.fromEntries(
+      Array.from({ length: 122 }, (_, index) => [`PUBLIC_${index}`, "value"]),
+    );
+    const oldFixture = await fixture();
+    await expect(
+      materializeCoworldPairedMatrix({
+        spec: {
+          ...oldFixture.spec,
+          candidate: { ...oldFixture.spec.candidate, env: publicEnv },
+          arms: [{ kind: "v16" }, { kind: "a1" }],
+        },
+        specDirectory: oldFixture.directory,
+        resolveImageID: fakeImageID,
+        validateCoworld: acceptSchema,
+      }),
+    ).resolves.toBeDefined();
+
+    const v40Fixture = await fixture();
+    await expect(
+      materializeCoworldPairedMatrix({
+        spec: {
+          ...v40Fixture.spec,
+          candidate: { ...v40Fixture.spec.candidate, env: publicEnv },
+          arms: [{ kind: "v40" }, { kind: "v40-balance-of-power" }],
+        },
+        specDirectory: v40Fixture.directory,
+        resolveImageID: fakeImageID,
+        validateCoworld: acceptSchema,
+      }),
+    ).rejects.toThrow(
+      "candidate.env plus the selected arm identity exceeds the paired entry limit",
+    );
   });
 
   test("rejects secret-looking and reserved environment keys without exposing values", async () => {

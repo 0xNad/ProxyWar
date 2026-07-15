@@ -309,6 +309,37 @@ describe("Coworld paired sequential executor", () => {
     });
   });
 
+  test("validates and executes the exact v40 control and balance-of-power identities", async () => {
+    const plan = await fixture({
+      arms: [{ kind: "v40" }, { kind: "v40-balance-of-power" }],
+    });
+    const seen: string[] = [];
+
+    const summary = await execute(plan, {
+      runEpisode: successfulRunner(seen),
+    });
+
+    expect(summary).toMatchObject({ totalJobs: 2, executedJobs: 2 });
+    expect(seen).toEqual(plan.jobs.map(({ jobID }) => jobID));
+    const control = plan.jobs.find((job) => job.arm.kind === "v40")!.arm;
+    const balance = plan.jobs.find(
+      (job) => job.arm.kind === "v40-balance-of-power",
+    )!.arm;
+    expect(control.env).toEqual({
+      PROXYWAR_KEYSTONE_SINGLE_ACTION: "0",
+      PROXYWAR_KEYSTONE_EXPERT_COUNCIL_SHADOW: "0",
+      PROXYWAR_KEYSTONE_COUNCIL_SURVIVAL_SHIELD: "1",
+      PROXYWAR_KEYSTONE_COMMANDER_RETENTION: "1",
+      PROXYWAR_KEYSTONE_DEFENSE_AUTHORITY: "0",
+      PROXYWAR_KEYSTONE_COUNCIL_BALANCE_OF_POWER: "0",
+      PROXYWAR_KEYSTONE_EXPERT_MASK: "15",
+    });
+    expect(balance.env).toEqual({
+      ...control.env,
+      PROXYWAR_KEYSTONE_COUNCIL_BALANCE_OF_POWER: "1",
+    });
+  });
+
   test("keeps completed jobs resumable after a later runner interruption", async () => {
     const plan = await fixture();
     let calls = 0;
@@ -465,6 +496,21 @@ describe("Coworld paired sequential executor", () => {
       }),
     ).rejects.toThrow("unexpected arm-owned field");
     expect(v39ContaminatedRunner).not.toHaveBeenCalled();
+
+    const balanceContaminated = await fixture({
+      arms: [{ kind: "v40" }, { kind: "v40-balance-of-power" }],
+    });
+    balanceContaminated.blocks[0]!.roster.find(
+      (seat) => seat.role === "opponent",
+    )!.env.PROXYWAR_KEYSTONE_COUNCIL_BALANCE_OF_POWER = "1";
+    await savePlan(balanceContaminated);
+    const balanceContaminatedRunner = vi.fn<CoworldEpisodeRunner>();
+    await expect(
+      execute(balanceContaminated, {
+        runEpisode: balanceContaminatedRunner,
+      }),
+    ).rejects.toThrow("unexpected arm-owned field");
+    expect(balanceContaminatedRunner).not.toHaveBeenCalled();
 
     const drifted = await fixture();
     const driftRunner = vi.fn<CoworldEpisodeRunner>();

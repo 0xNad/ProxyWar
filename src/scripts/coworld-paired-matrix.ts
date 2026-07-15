@@ -27,6 +27,7 @@ const DIPLOMACY_ADJUDICATOR_ENV =
 const SURVIVAL_SHIELD_ENV = "PROXYWAR_KEYSTONE_COUNCIL_SURVIVAL_SHIELD";
 const COMMANDER_RETENTION_ENV = "PROXYWAR_KEYSTONE_COMMANDER_RETENTION";
 const DEFENSE_AUTHORITY_ENV = "PROXYWAR_KEYSTONE_DEFENSE_AUTHORITY";
+const BALANCE_OF_POWER_ENV = "PROXYWAR_KEYSTONE_COUNCIL_BALANCE_OF_POWER";
 const EXPERT_MASK_ENV = "PROXYWAR_KEYSTONE_EXPERT_MASK";
 const ARM_OWNED_ENV_KEYS = new Set([
   TREATMENT_ENV,
@@ -36,6 +37,7 @@ const ARM_OWNED_ENV_KEYS = new Set([
   SURVIVAL_SHIELD_ENV,
   COMMANDER_RETENTION_ENV,
   DEFENSE_AUTHORITY_ENV,
+  BALANCE_OF_POWER_ENV,
   EXPERT_MASK_ENV,
 ]);
 const COWORLD_VERSION = "0.1.30";
@@ -84,6 +86,10 @@ export type CoworldArmSpec =
   | { kind: "v39-commander-retention" }
   /** v39 plus bounded defense authority over unsafe no-edge conquest. */
   | { kind: "v39-defense-authority" }
+  /** Exact promoted v40 severe rescue plus Commander retention. */
+  | { kind: "v40" }
+  /** v40 plus isolated anti-runaway balance-of-power authority. */
+  | { kind: "v40-balance-of-power" }
   | { kind: "council-authoritative" }
   | {
       kind: "expert-mask-authoritative";
@@ -103,7 +109,9 @@ export interface CoworldResolvedArm {
     | "v16-survival-shield"
     | "v39"
     | "v39-commander-retention"
-    | "v39-defense-authority";
+    | "v39-defense-authority"
+    | "v40"
+    | "v40-balance-of-power";
   base: "v16" | "a1";
   shadow: boolean;
   expertMask: number;
@@ -332,6 +340,7 @@ export async function materializeCoworldPairedMatrix(input: {
   gameRunnable.image = gameImageReference;
 
   const arms = resolveArmSpecs(input.spec.arms);
+  validateCandidateArmEnvironmentCapacity(input.spec.candidate, arms);
   const preparedVariants = prepareVariants(manifest, input.spec);
   const blockCount =
     preparedVariants.length *
@@ -526,8 +535,26 @@ function resolveArmSpecs(
           [SURVIVAL_SHIELD_ENV]: "1",
           [COMMANDER_RETENTION_ENV]:
             kind === "v39-commander-retention" ? "1" : "0",
-          [DEFENSE_AUTHORITY_ENV]:
-            kind === "v39-defense-authority" ? "1" : "0",
+          [DEFENSE_AUTHORITY_ENV]: kind === "v39-defense-authority" ? "1" : "0",
+          [EXPERT_MASK_ENV]: "15",
+        }),
+      }) satisfies CoworldResolvedArm;
+    }
+    if (kind === "v40" || kind === "v40-balance-of-power") {
+      rejectUnknownKeys(object, ["kind"], `arms[${index}]`);
+      return Object.freeze({
+        armID: kind,
+        kind,
+        base: "v16",
+        shadow: false,
+        expertMask: 15,
+        env: Object.freeze({
+          [TREATMENT_ENV]: "0",
+          [SHADOW_ENV]: "0",
+          [SURVIVAL_SHIELD_ENV]: "1",
+          [COMMANDER_RETENTION_ENV]: "1",
+          [DEFENSE_AUTHORITY_ENV]: "0",
+          [BALANCE_OF_POWER_ENV]: kind === "v40-balance-of-power" ? "1" : "0",
           [EXPERT_MASK_ENV]: "15",
         }),
       }) satisfies CoworldResolvedArm;
@@ -567,6 +594,10 @@ function compareArms(a: CoworldResolvedArm, b: CoworldResolvedArm): number {
         return 8;
       case "v39-defense-authority":
         return 9;
+      case "v40":
+        return 10;
+      case "v40-balance-of-power":
+        return 11;
     }
   };
   return (
@@ -968,6 +999,9 @@ function validateRunnable(spec: PairedRunnableSpec, label: string): void {
     return;
   }
   const env = requirePlainObject(spec.env, `${label}.env`);
+  // Preserve the historical six-entry candidate reservation for existing arm
+  // families. New arms with a larger exact identity are checked after arm
+  // resolution by validateCandidateArmEnvironmentCapacity().
   const reservedArmEntries = label === "candidate" ? 6 : 0;
   if (
     Object.keys(env).length >
@@ -1004,6 +1038,25 @@ function validateRunnable(spec: PairedRunnableSpec, label: string): void {
     if (value.includes("\0")) {
       throw new Error(`${label}.env.${key} must not contain NUL bytes`);
     }
+  }
+}
+
+function validateCandidateArmEnvironmentCapacity(
+  candidate: PairedRunnableSpec,
+  arms: readonly CoworldResolvedArm[],
+): void {
+  const authoredEntryCount = Object.keys(candidate.env ?? {}).length;
+  const largestResolvedArm = Math.max(
+    0,
+    ...arms.map((arm) => Object.keys(arm.env).length),
+  );
+  if (
+    authoredEntryCount + largestResolvedArm >
+    COWORLD_PAIRED_BOUNDS.maxEnvironmentEntries
+  ) {
+    throw new Error(
+      "candidate.env plus the selected arm identity exceeds the paired entry limit",
+    );
   }
 }
 

@@ -12,7 +12,9 @@ export type CoworldCouncilEvaluationArmKind =
   | "v16-survival-shield"
   | "v39"
   | "v39-commander-retention"
-  | "v39-defense-authority";
+  | "v39-defense-authority"
+  | "v40"
+  | "v40-balance-of-power";
 
 export interface CoworldCouncilEvaluationArm {
   armID: string;

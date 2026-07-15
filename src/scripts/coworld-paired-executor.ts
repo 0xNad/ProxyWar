@@ -39,6 +39,7 @@ const ARM_OWNED_ENV_KEYS = new Set([
   "PROXYWAR_KEYSTONE_COUNCIL_SURVIVAL_SHIELD",
   "PROXYWAR_KEYSTONE_COMMANDER_RETENTION",
   "PROXYWAR_KEYSTONE_DEFENSE_AUTHORITY",
+  "PROXYWAR_KEYSTONE_COUNCIL_BALANCE_OF_POWER",
   "PROXYWAR_KEYSTONE_EXPERT_MASK",
 ]);
 const MAX_ARMS = 35;
@@ -747,7 +748,9 @@ function validateResolvedArm(arm: CoworldResolvedArm): void {
     arm.kind !== "v16-survival-shield" &&
     arm.kind !== "v39" &&
     arm.kind !== "v39-commander-retention" &&
-    arm.kind !== "v39-defense-authority"
+    arm.kind !== "v39-defense-authority" &&
+    arm.kind !== "v40" &&
+    arm.kind !== "v40-balance-of-power"
   ) {
     throw new Error(`Unsupported resolved arm ${String(arm.kind)}`);
   }
@@ -771,9 +774,12 @@ function expectedArm(
     kind === "v39" ||
     kind === "v39-commander-retention" ||
     kind === "v39-defense-authority";
-  const survivalShield = kind === "v16-survival-shield" || v39Family;
-  const commanderRetention = kind === "v39-commander-retention";
+  const v40Family = kind === "v40" || kind === "v40-balance-of-power";
+  const survivalShield =
+    kind === "v16-survival-shield" || v39Family || v40Family;
+  const commanderRetention = kind === "v39-commander-retention" || v40Family;
   const defenseAuthority = kind === "v39-defense-authority";
+  const balanceOfPower = kind === "v40-balance-of-power";
   const base = kind === "a1" || kind === "a1-shadow" ? "a1" : "v16";
   if (!Number.isInteger(expertMask) || expertMask < 0 || expertMask > 15) {
     throw new Error("Expert mask must be an integer in 0..15");
@@ -816,12 +822,19 @@ function expectedArm(
       ...(survivalShield
         ? { PROXYWAR_KEYSTONE_COUNCIL_SURVIVAL_SHIELD: "1" }
         : {}),
-      ...(v39Family
+      ...(v39Family || v40Family
         ? {
             PROXYWAR_KEYSTONE_COMMANDER_RETENTION: commanderRetention
               ? "1"
               : "0",
             PROXYWAR_KEYSTONE_DEFENSE_AUTHORITY: defenseAuthority ? "1" : "0",
+          }
+        : {}),
+      ...(v40Family
+        ? {
+            PROXYWAR_KEYSTONE_COUNCIL_BALANCE_OF_POWER: balanceOfPower
+              ? "1"
+              : "0",
           }
         : {}),
       ...(shadow || politicsGuard || diplomacyAdjudicator || survivalShield
@@ -1416,6 +1429,10 @@ function compareResolvedArms(
         return 8;
       case "v39-defense-authority":
         return 9;
+      case "v40":
+        return 10;
+      case "v40-balance-of-power":
+        return 11;
     }
   };
   return (
