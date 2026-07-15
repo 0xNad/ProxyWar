@@ -129,7 +129,13 @@ function parseOptions(argv: string[]): MirrorOptions {
   return options;
 }
 
-const readVerbs = new Set(["leagues", "results", "rounds", "replays"]);
+const readVerbs = new Set([
+  "leagues",
+  "results",
+  "memberships",
+  "rounds",
+  "replays",
+]);
 
 async function coworldJson(args: string[]): Promise<unknown> {
   const verb = args[0];
@@ -260,8 +266,26 @@ async function syncOnce(options: MirrorOptions): Promise<void> {
   if (division === null) {
     throw new Error(`League ${options.leagueId} has no readable division`);
   }
-  const [standingsRaw, replaysRaw] = await Promise.all([
+  const [standingsRaw, championMembershipsRaw, replaysRaw] = await Promise.all([
     coworldJson(["results", division.id]),
+    // Results retain the policy label that owns the historical rating. Fetch
+    // current champion memberships separately instead of relabeling that score.
+    coworldJson([
+      "memberships",
+      "-d",
+      division.id,
+      "--active-only",
+      "--champions-only",
+      "--limit",
+      "1000",
+    ]).catch((error: unknown) => {
+      log(
+        `champion memberships unavailable; publishing rating provenance only: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+      return [];
+    }),
     coworldJson([
       "replays",
       "-d",
@@ -271,7 +295,7 @@ async function syncOnce(options: MirrorOptions): Promise<void> {
     ]),
   ]);
 
-  const standings = buildStandingRows(standingsRaw);
+  const standings = buildStandingRows(standingsRaw, championMembershipsRaw);
   const rounds = buildRoundRows(roundsRaw, options.roundsShown);
   const roundNumbers = roundNumberByRoundId(roundsRaw);
   const episodeMetas = parseCompletedEpisodeMetaList(replaysRaw);

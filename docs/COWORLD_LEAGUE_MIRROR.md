@@ -12,8 +12,14 @@ npm run league:mirror:watch   # sync every 5 minutes (Ctrl-C to stop)
 ```
 
 Requires a logged-in `coworld` CLI (`uvx coworld status`). The mirror only ever
-calls read verbs (`leagues`, `results`, `rounds`, `replays`) plus public S3
+calls read verbs (`leagues`, `results`, `memberships`, `rounds`, `replays`) plus public S3
 replay downloads. It never uploads, submits, or creates hosted work.
+
+The standings preserve the policy label returned by `results` as the rating-row
+provenance, then show the player's current active champion from the read-only
+membership list. When those labels differ (for example, a promoted `v40` whose
+inherited rating row still names `v7`), the page shows both instead of assigning
+the older score to the newer policy.
 
 ## Output
 

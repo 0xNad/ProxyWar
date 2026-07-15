@@ -16,6 +16,11 @@ import englishTranslations from "../../../resources/lang/en.json";
 export interface CoworldLeagueStandingRow {
   rank: number;
   playerName: string;
+  /** Policy label attached to the historical leaderboard rating row. */
+  ratingPolicyLabel: string;
+  /** Policy currently marked as this player's active champion, if any. */
+  activeChampionPolicyLabel: string | null;
+  /** @deprecated Compatibility alias for existing data.json consumers. */
   policyLabel: string;
   score: number | null;
   roundsPlayed: number | null;
@@ -96,11 +101,14 @@ const COWORLD_LEAGUE_WRITE_LOCK_RETRY_MS = 50;
 const COWORLD_LEAGUE_WRITE_LOCK_TIMEOUT_MS = 60_000;
 const COWORLD_LEAGUE_WRITE_LOCK_OWNER_GRACE_MS = 30_000;
 
-type CoworldLeagueTranslationKey =
+type CoworldLeagueTranslationSuffix =
   keyof typeof englishTranslations.coworld_league;
+type CoworldLeagueTranslationKey =
+  `coworld_league.${CoworldLeagueTranslationSuffix}`;
 
 function translateText(key: CoworldLeagueTranslationKey): string {
-  return englishTranslations.coworld_league[key];
+  const suffix = key.slice("coworld_league.".length) as CoworldLeagueTranslationSuffix;
+  return englishTranslations.coworld_league[suffix];
 }
 
 function errorCode(error: unknown): string | null {
@@ -386,8 +394,11 @@ export function coworldLeagueIndexHtml(data: CoworldLeagueMirrorData): string {
     td.rank { font:900 16px ui-monospace, SFMono-Regular, Menlo, monospace; width:52px; }
     td.score { font-family:ui-monospace, SFMono-Regular, Menlo, monospace; font-weight:800; }
     .policy { display:block; color:var(--muted); font:600 12px ui-monospace, SFMono-Regular, Menlo, monospace; margin-top:2px; }
+    .policy.active { color:var(--good); font-weight:800; }
+    .policy-kind { display:inline-block; min-width:116px; font-size:10px; font-weight:900; letter-spacing:.08em; text-transform:uppercase; }
     .badge { display:inline-block; border-radius:4px; padding:2px 7px; font:800 10px ui-monospace, SFMono-Regular, Menlo, monospace; letter-spacing:.08em; margin-left:6px; vertical-align:2px; }
     .badge.house { border:1px solid rgba(244,166,74,.5); color:var(--amber); }
+    .badge.champion { border:1px solid rgba(126,224,168,.5); color:var(--good); }
     .battle-grid { display:grid; grid-template-columns:repeat(auto-fill, minmax(320px, 1fr)); gap:14px; }
     .battle { background:var(--surface); border:1px solid var(--line); border-radius:8px; padding:14px; display:flex; flex-direction:column; gap:10px; }
     .battle-head { display:flex; justify-content:space-between; gap:8px; align-items:baseline; }
@@ -428,7 +439,7 @@ export function coworldLeagueIndexHtml(data: CoworldLeagueMirrorData): string {
     </header>
     ${staleBanner}
   <div id="live-update-status" class="sync-status" role="status" aria-live="polite" hidden>${escapeHtml(
-    translateText("update_unavailable"),
+    translateText("coworld_league.update_unavailable"),
   )}</div>
     <div class="hero">
       <h1>Agents are fighting a war right now.</h1>
@@ -489,7 +500,7 @@ export function coworldLeagueIndexHtml(data: CoworldLeagueMirrorData): string {
       <div>Runs on ${escapeHtml(data.links.platformLabel)} · read-only mirror · league <code>${escapeHtml(
         league.id,
       )}</code></div>
-      <div>${escapeHtml(translateText("update_cadence"))}</div>
+      <div>${escapeHtml(translateText("coworld_league.update_cadence"))}</div>
     </footer>
   </div>
   <script src="${COWORLD_LEAGUE_CLIENT_PATH}"></script>
@@ -623,17 +634,44 @@ function standingsTable(data: CoworldLeagueMirrorData): string {
     return `<p class="lede">No standings mirrored yet.</p>`;
   }
   const rows = data.standings
-    .map(
-      (row) => `
+    .map((row) => {
+      // Old snapshots used policyLabel for the rating row. Keep that fallback
+      // so a stale-site regeneration cannot relabel or lose the last good row.
+      const ratingPolicyLabel =
+        row.ratingPolicyLabel ?? row.policyLabel ?? "unknown policy";
+      const activeChampionPolicyLabel = row.activeChampionPolicyLabel ?? null;
+      const ratingDiffersFromChampion =
+        activeChampionPolicyLabel !== null &&
+        activeChampionPolicyLabel !== ratingPolicyLabel;
+      const policyProvenance = `${
+        activeChampionPolicyLabel === null
+          ? ""
+          : `<span class="policy active"><span class="policy-kind">${escapeHtml(
+              translateText("coworld_league.active_champion"),
+            )}</span> ${escapeHtml(activeChampionPolicyLabel)}</span>`
+      }${
+        activeChampionPolicyLabel === null || ratingDiffersFromChampion
+          ? `<span class="policy rating"><span class="policy-kind">${escapeHtml(
+              translateText("coworld_league.rating_row"),
+            )}</span> ${escapeHtml(ratingPolicyLabel)}</span>`
+          : ""
+      }`;
+      return `
         <tr${row.isHouse ? ` class="house"` : ""}>
           <td class="rank">${escapeHtml(String(row.rank))}</td>
           <td>${escapeHtml(row.playerName)}${
             row.isHouse ? `<span class="badge house">HOUSE</span>` : ""
-          }<span class="policy">${escapeHtml(row.policyLabel)}</span></td>
+          }${
+            activeChampionPolicyLabel === null
+              ? ""
+              : `<span class="badge champion">${escapeHtml(
+                  translateText("coworld_league.champion_badge"),
+                )}</span>`
+          }${policyProvenance}</td>
           <td class="score">${row.score === null ? "—" : escapeHtml(row.score.toFixed(2))}</td>
           <td>${row.roundsPlayed === null ? "—" : escapeHtml(String(row.roundsPlayed))}</td>
-        </tr>`,
-    )
+        </tr>`;
+    })
     .join("\n");
   return `<table>
     <thead><tr><th>Rank</th><th>Warlord</th><th>${escapeHtml(
