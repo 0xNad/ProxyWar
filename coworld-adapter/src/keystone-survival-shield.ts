@@ -16,7 +16,7 @@ import {
 
 export const KEYSTONE_SURVIVAL_SHIELD_MARKER = "keystone-survival-shield:v2";
 export const KEYSTONE_DEFENSE_AUTHORITY_MARKER =
-  "keystone-defense-authority:v3";
+  "keystone-defense-authority:v4";
 
 export type KeystoneSurvivalShieldAdjudication =
   | "survival_preempted"
@@ -202,27 +202,9 @@ function defenseAuthorityDecision(
       adjudication,
     );
   }
-  const survival = proposeKeystoneSurvival(world, {
-    // Only an exact retreat from the preempted campaign may outrank a counter.
-    // A generic retreat could cancel a different defensive operation.
-    allowRetreats: false,
-    // The failed v1 experiment showed that moderate-pressure Defense Posts are
-    // not a safe default. This arm can redirect to a retreat/counter, otherwise
-    // it conserves the reserve with hold.
-    allowDefensiveBuilds: false,
-    allowCounters: true,
-    defensePostOnly: true,
-    requireNearbyIncomingAttackForDefensiveBuild: true,
-  });
-  if (survival !== null) {
-    return defenseAuthorityReplacement(
-      world,
-      survival.actionID,
-      `preempted=${authoritativeAction.id}; redirected to ${survival.source}`,
-      "survival",
-      adjudication,
-    );
-  }
+  // The deterministic v3 treatment showed that replacing a 10% side attack
+  // with a 25% counter can accelerate collapse. Only an exact campaign retreat
+  // may spend the action; otherwise conserve troops with the canonical hold.
   const holds = world.actions.filter((action) => action.isHold);
   if (holds.length !== 1) {
     throw new Error("Defense authority hold is not uniquely offered");

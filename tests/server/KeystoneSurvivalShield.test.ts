@@ -472,7 +472,7 @@ describe("Keystone survival shield", () => {
     expect(selected.reason).toContain("cross_target_collapse_preempted");
   });
 
-  it("uses a bounded counter when the preempted campaign has ambiguous retreats", () => {
+  it("holds reserves when the preempted campaign has ambiguous retreats", () => {
     const attack = action("attack:RIVAL:25", "attack", {
       targetID: "RIVAL",
       troopPercent: 25,
@@ -517,8 +517,8 @@ describe("Keystone survival shield", () => {
       plan,
     );
 
-    expect(selected.actionID).toBe(invaderCounter.id);
-    expect(selected.actionIDs).toEqual([invaderCounter.id]);
+    expect(selected.actionID).toBe(hold.id);
+    expect(selected.actionIDs).toEqual([hold.id]);
     expect(selected.reason).toContain("cross_target_collapse_preempted");
   });
 
