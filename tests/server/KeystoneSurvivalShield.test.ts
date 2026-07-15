@@ -82,6 +82,8 @@ function input(args: {
   recentDecisions?: RecentAgentDecision[];
   conversionReady?: boolean;
   finishRecommended?: boolean;
+  finishTargetID?: string;
+  finishActionID?: string;
 }): AgentBrainInput {
   const players = args.players ?? [];
   const turn = args.turn ?? 2_000;
@@ -163,6 +165,12 @@ function input(args: {
           ...(args.finishRecommended === undefined
             ? {}
             : { recommended: args.finishRecommended }),
+          ...(args.finishTargetID === undefined
+            ? {}
+            : { bestTargetID: args.finishTargetID }),
+          ...(args.finishActionID === undefined
+            ? {}
+            : { bestAttackID: args.finishActionID }),
         },
       },
       recentDecisions: args.recentDecisions ?? [],
@@ -243,7 +251,7 @@ describe("Keystone survival shield", () => {
       actionSelectionSource: "keystone-defense-authority:reserve",
     });
     expect(selected.reason).toContain(KEYSTONE_DEFENSE_AUTHORITY_MARKER);
-    expect(selected.reason).toContain("unsafe_conquest_preempted");
+    expect(selected.reason).toContain("no_edge_conquest_preempted");
   });
 
   it("preserves counters against the current aggressor", () => {
@@ -257,6 +265,37 @@ describe("Keystone survival shield", () => {
         actions: [counter, hold],
         players: [aggressor("ENEMY", { relativeTroopRatio: 1.1 })],
         defensePriority: true,
+        conversionReady: false,
+        finishRecommended: false,
+      }),
+      plan,
+    );
+
+    expect(selected).toEqual(decision(counter.id));
+  });
+
+  it("preserves a current-aggressor counter across the collapse boundaries", () => {
+    const counter = action("attack:ENEMY:25", "attack", {
+      targetID: "ENEMY",
+      troopPercent: 25,
+    });
+    const hold = action("hold:wait", "hold");
+    const selected = shield(counter.id, true).decide(
+      input({
+        actions: [counter, hold],
+        players: [aggressor("ENEMY", { relativeTroopRatio: 1.1 })],
+        defensePriority: true,
+        threatRatio: 0.2,
+        recentDecisions: [
+          {
+            sequence: 1,
+            actionID: "build:Factory:1",
+            actionKind: "build",
+            reason: "accepted before counter boundary fixture",
+            accepted: true,
+            ownTiles: 9_000,
+          },
+        ],
         conversionReady: false,
         finishRecommended: false,
       }),
@@ -298,6 +337,245 @@ describe("Keystone survival shield", () => {
       expect(selected).toEqual(decision(attack.id));
     },
   );
+
+  it("preempts a different conquest during verified cross-target collapse", () => {
+    const attack = action("attack:RIVAL:25", "attack", {
+      targetID: "RIVAL",
+      troopPercent: 25,
+    });
+    const hold = action("hold:wait", "hold");
+    const selected = shield(attack.id, true).decide(
+      input({
+        actions: [attack, hold],
+        players: [
+          aggressor("INVADER", { relativeTroopRatio: 1.4 }),
+          aggressor("RIVAL", {
+            incomingAttack: false,
+            outgoingAttack: false,
+            relativeTroopRatio: 2.1,
+          }),
+        ],
+        defensePriority: true,
+        threatRatio: 0.1,
+        recentDecisions: [
+          {
+            sequence: 1,
+            actionID: "build:Factory:1",
+            actionKind: "build",
+            reason: "accepted before cross-target collapse",
+            accepted: true,
+            ownTiles: 8_700,
+          },
+        ],
+        conversionReady: true,
+        finishRecommended: false,
+      }),
+      plan,
+    );
+
+    expect(selected).toMatchObject({
+      actionID: hold.id,
+      actionIDs: [hold.id],
+      actionSelectionSource: "keystone-defense-authority:reserve",
+    });
+    expect(selected.reason).toContain(KEYSTONE_DEFENSE_AUTHORITY_MARKER);
+    expect(selected.reason).toContain("cross_target_collapse_preempted");
+  });
+
+  it("retreats only the preempted campaign when several retreats are offered", () => {
+    const attack = action("attack:RIVAL:25", "attack", {
+      targetID: "RIVAL",
+      troopPercent: 25,
+    });
+    const rivalRetreat = action("retreat:rival-campaign", "retreat", {
+      targetID: "RIVAL",
+    });
+    const otherRetreat = action("retreat:other-campaign", "retreat", {
+      targetID: "OTHER",
+    });
+    const invaderCounter = action("attack:INVADER:25", "attack", {
+      targetID: "INVADER",
+      troopPercent: 25,
+    });
+    const hold = action("hold:wait", "hold");
+    const selected = shield(attack.id, true).decide(
+      input({
+        actions: [attack, rivalRetreat, otherRetreat, invaderCounter, hold],
+        players: [
+          aggressor("INVADER", { relativeTroopRatio: 1.4 }),
+          aggressor("RIVAL", {
+            incomingAttack: false,
+            outgoingAttack: false,
+            relativeTroopRatio: 2.1,
+          }),
+          aggressor("OTHER", {
+            incomingAttack: false,
+            outgoingAttack: false,
+          }),
+        ],
+        defensePriority: true,
+        threatRatio: 0.2,
+        recentDecisions: [
+          {
+            sequence: 1,
+            actionID: "build:Factory:1",
+            actionKind: "build",
+            reason: "accepted before multi-retreat fixture",
+            accepted: true,
+            ownTiles: 9_000,
+          },
+        ],
+        conversionReady: true,
+        finishRecommended: false,
+      }),
+      plan,
+    );
+
+    expect(selected.actionID).toBe(rivalRetreat.id);
+    expect(selected.actionIDs).toEqual([rivalRetreat.id]);
+    expect(selected.reason).toContain("cross_target_collapse_preempted");
+  });
+
+  it("uses a bounded counter when the preempted campaign has ambiguous retreats", () => {
+    const attack = action("attack:RIVAL:25", "attack", {
+      targetID: "RIVAL",
+      troopPercent: 25,
+    });
+    const rivalRetreatA = action("retreat:rival-campaign-a", "retreat", {
+      targetID: "RIVAL",
+    });
+    const rivalRetreatB = action("retreat:rival-campaign-b", "retreat", {
+      targetID: "RIVAL",
+    });
+    const invaderCounter = action("attack:INVADER:25", "attack", {
+      targetID: "INVADER",
+      troopPercent: 25,
+    });
+    const hold = action("hold:wait", "hold");
+    const selected = shield(attack.id, true).decide(
+      input({
+        actions: [attack, rivalRetreatA, rivalRetreatB, invaderCounter, hold],
+        players: [
+          aggressor("INVADER", { relativeTroopRatio: 1.4 }),
+          aggressor("RIVAL", {
+            incomingAttack: false,
+            outgoingAttack: false,
+            relativeTroopRatio: 2.1,
+          }),
+        ],
+        defensePriority: true,
+        threatRatio: 0.2,
+        recentDecisions: [
+          {
+            sequence: 1,
+            actionID: "build:Factory:1",
+            actionKind: "build",
+            reason: "accepted before ambiguous retreat fixture",
+            accepted: true,
+            ownTiles: 9_000,
+          },
+        ],
+        conversionReady: true,
+        finishRecommended: false,
+      }),
+      plan,
+    );
+
+    expect(selected.actionID).toBe(invaderCounter.id);
+    expect(selected.actionIDs).toEqual([invaderCounter.id]);
+    expect(selected.reason).toContain("cross_target_collapse_preempted");
+  });
+
+  it.each([
+    ["incoming pressure is below 10%", 0.099, 8_700, true],
+    ["accepted tile loss is below 8%", 0.1, 8_695, true],
+    ["the high-water decision was rejected", 0.1, 9_000, false],
+  ])(
+    "preserves a strong side campaign when %s",
+    (_label, threatRatio, priorTiles, accepted) => {
+      const attack = action("attack:RIVAL:25", "attack", {
+        targetID: "RIVAL",
+        troopPercent: 25,
+      });
+      const hold = action("hold:wait", "hold");
+      const selected = shield(attack.id, true).decide(
+        input({
+          actions: [attack, hold],
+          players: [
+            aggressor("INVADER"),
+            aggressor("RIVAL", {
+              incomingAttack: false,
+              outgoingAttack: false,
+              relativeTroopRatio: 2.1,
+            }),
+          ],
+          defensePriority: true,
+          threatRatio,
+          recentDecisions: [
+            {
+              sequence: 1,
+              actionID: "build:Factory:1",
+              actionKind: "build",
+              reason: "cross-target boundary fixture",
+              accepted,
+              ownTiles: priorTiles,
+            },
+          ],
+          conversionReady: true,
+          finishRecommended: false,
+        }),
+        plan,
+      );
+
+      expect(selected).toEqual(decision(attack.id));
+    },
+  );
+
+  it("preserves only the exact canonical finish during cross-target collapse", () => {
+    const attack = action("attack:RIVAL:25", "attack", {
+      targetID: "RIVAL",
+      troopPercent: 25,
+    });
+    const hold = action("hold:wait", "hold");
+    const collapseInput = (finishActionID: string) =>
+      input({
+        actions: [attack, hold],
+        players: [
+          aggressor("INVADER"),
+          aggressor("RIVAL", {
+            incomingAttack: false,
+            outgoingAttack: false,
+            relativeTroopRatio: 2.1,
+          }),
+        ],
+        defensePriority: true,
+        threatRatio: 0.2,
+        recentDecisions: [
+          {
+            sequence: 1,
+            actionID: "build:Factory:1",
+            actionKind: "build",
+            reason: "accepted before exact finish",
+            accepted: true,
+            ownTiles: 9_000,
+          },
+        ],
+        conversionReady: true,
+        finishRecommended: true,
+        finishTargetID: "RIVAL",
+        finishActionID,
+      });
+
+    expect(
+      shield(attack.id, true).decide(collapseInput(attack.id), plan),
+    ).toEqual(decision(attack.id));
+    const unrelatedFinish = shield(attack.id, true).decide(
+      collapseInput("attack:RIVAL:40"),
+      plan,
+    );
+    expect(unrelatedFinish.actionID).toBe(hold.id);
+    expect(unrelatedFinish.reason).toContain("cross_target_collapse_preempted");
+  });
 
   it("does not revive the moderate Defense Post treatment", () => {
     const factory = action("build:Factory:10", "build", {
