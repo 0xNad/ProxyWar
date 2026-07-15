@@ -10,6 +10,7 @@ import {
   buildEpisodeRow,
   buildRoundRows,
   buildStandingRows,
+  mergeEpisodeRows,
   parseCompletedEpisodeMetaList,
   parseHostedReplayPayload,
   parseLeagueSummary,
@@ -159,7 +160,9 @@ async function downloadReplay(
   }
   const response = await fetch(replayUrl);
   if (!response.ok) {
-    throw new Error(`Replay download failed (${response.status}): ${replayUrl}`);
+    throw new Error(
+      `Replay download failed (${response.status}): ${replayUrl}`,
+    );
   }
   const body = Buffer.from(await response.arrayBuffer());
   await writeFileAtomic(destinationPath, body);
@@ -180,6 +183,26 @@ async function fileExists(candidate: string): Promise<boolean> {
     return true;
   } catch {
     return false;
+  }
+}
+
+async function readPreviousMirrorData(
+  siteDir: string,
+): Promise<CoworldLeagueMirrorData | null> {
+  try {
+    const value: unknown = JSON.parse(
+      await fs.readFile(path.join(siteDir, "data.json"), "utf8"),
+    );
+    if (
+      typeof value !== "object" ||
+      value === null ||
+      !Array.isArray((value as { episodes?: unknown }).episodes)
+    ) {
+      return null;
+    }
+    return value as CoworldLeagueMirrorData;
+  } catch {
+    return null;
   }
 }
 
@@ -266,7 +289,7 @@ async function syncOnce(options: MirrorOptions): Promise<void> {
   if (division === null) {
     throw new Error(`League ${options.leagueId} has no readable division`);
   }
-  const [standingsRaw, championMembershipsRaw, replaysRaw] = await Promise.all([
+  const [standingsRaw, championMembershipRead, replayRead] = await Promise.all([
     coworldJson(["results", division.id]),
     // Results retain the policy label that owns the historical rating. Fetch
     // current champion memberships separately instead of relabeling that score.
@@ -278,45 +301,71 @@ async function syncOnce(options: MirrorOptions): Promise<void> {
       "--champions-only",
       "--limit",
       "1000",
-    ]).catch((error: unknown) => {
-      log(
-        `champion memberships unavailable; publishing rating provenance only: ${
-          error instanceof Error ? error.message : String(error)
-        }`,
-      );
-      return [];
-    }),
+    ])
+      .then((value) => ({ ok: true as const, value }))
+      .catch((error: unknown) => {
+        log(
+          `champion memberships unavailable; publishing qualified rating rows only: ${
+            error instanceof Error ? error.message : String(error)
+          }`,
+        );
+        return { ok: false as const };
+      }),
     coworldJson([
       "replays",
       "-d",
       division.id,
       "--limit",
       String(options.episodeMetaLimit),
-    ]),
+    ])
+      .then((value) => ({ ok: true as const, value }))
+      .catch((error: unknown) => {
+        log(
+          `replay feed unavailable; retaining last published battles: ${
+            error instanceof Error ? error.message : String(error)
+          }`,
+        );
+        return { ok: false as const };
+      }),
   ]);
 
-  const standings = buildStandingRows(standingsRaw, championMembershipsRaw);
+  const standings = buildStandingRows(
+    standingsRaw,
+    championMembershipRead.ok ? championMembershipRead.value : [],
+  );
   const rounds = buildRoundRows(roundsRaw, options.roundsShown);
   const roundNumbers = roundNumberByRoundId(roundsRaw);
-  const episodeMetas = parseCompletedEpisodeMetaList(replaysRaw);
+  const previousData = await readPreviousMirrorData(options.siteDir);
+  const episodeMetas = replayRead.ok
+    ? parseCompletedEpisodeMetaList(replayRead.value)
+    : [];
 
-  const episodes: CoworldLeagueEpisodeRow[] = [];
+  const freshEpisodes: CoworldLeagueEpisodeRow[] = [];
+  let replayEpisodeFailures = 0;
   for (const meta of episodeMetas.slice(0, options.maxRenderedEpisodes)) {
     try {
-      const cachedPath = await ensureEpisodeReplayCached(meta, options.cacheDir);
+      const cachedPath = await ensureEpisodeReplayCached(
+        meta,
+        options.cacheDir,
+      );
       if (cachedPath === null) {
+        replayEpisodeFailures += 1;
+        log(`episode ${meta.episodeRequestId} has no replay URL yet`);
         continue;
       }
-      const payload: unknown = JSON.parse(await fs.readFile(cachedPath, "utf8"));
+      const payload: unknown = JSON.parse(
+        await fs.readFile(cachedPath, "utf8"),
+      );
       const replay = parseHostedReplayPayload(payload);
       if (replay === null) {
+        replayEpisodeFailures += 1;
         log(`skipping ${meta.episodeRequestId}: unrecognized replay payload`);
         continue;
       }
       const unpacked = options.unpackRunDirs
         ? await unpackEpisodeRunDir(replay, options.runsRootDir)
         : null;
-      episodes.push(
+      freshEpisodes.push(
         buildEpisodeRow({
           meta,
           replay,
@@ -329,6 +378,7 @@ async function syncOnce(options: MirrorOptions): Promise<void> {
         }),
       );
     } catch (error) {
+      replayEpisodeFailures += 1;
       log(
         `episode ${meta.episodeRequestId} failed: ${
           error instanceof Error ? error.message : String(error)
@@ -337,11 +387,34 @@ async function syncOnce(options: MirrorOptions): Promise<void> {
     }
   }
 
+  const replayFeedStale = !replayRead.ok || replayEpisodeFailures > 0;
+  const episodes = replayRead.ok
+    ? replayFeedStale
+      ? mergeEpisodeRows(
+          freshEpisodes,
+          previousData?.episodes ?? [],
+          options.maxRenderedEpisodes,
+        )
+      : freshEpisodes
+    : (previousData?.episodes ?? []).slice(0, options.maxRenderedEpisodes);
+  if (replayEpisodeFailures > 0) {
+    log(
+      `${replayEpisodeFailures} replay episode(s) failed; retaining available previous battle cards`,
+    );
+  }
+
   const now = new Date().toISOString();
   const data: CoworldLeagueMirrorData = {
     generatedAt: now,
     lastGoodSyncAt: now,
     stale: false,
+    championFeedStale: !championMembershipRead.ok,
+    replayFeedStale,
+    lastGoodReplaySyncAt: replayFeedStale
+      ? (previousData?.lastGoodReplaySyncAt ??
+        previousData?.lastGoodSyncAt ??
+        null)
+      : now,
     league: {
       id: league.id,
       name: league.name,

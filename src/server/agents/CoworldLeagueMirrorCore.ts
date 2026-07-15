@@ -12,7 +12,7 @@ import type {
  * mirror's site data. No IO here — the mirror script owns fetching.
  */
 
-const housePolicyPrefix = "proxywar-keystone";
+const housePolicyName = "proxywar-keystone";
 
 const fallbackPlayerColors = [
   "#ef4444",
@@ -59,7 +59,9 @@ export interface CoworldLeagueSummary {
   episodesPerRound: number | null;
 }
 
-export function parseLeagueSummary(value: unknown): CoworldLeagueSummary | null {
+export function parseLeagueSummary(
+  value: unknown,
+): CoworldLeagueSummary | null {
   const league = asRecord(value);
   if (!league) {
     return null;
@@ -75,7 +77,9 @@ export function parseLeagueSummary(value: unknown): CoworldLeagueSummary | null 
     id,
     name: asString(league.name) ?? "Coworld league",
     description: asString(league.description),
-    roundIntervalMinutes: asNumber(commissionerConfig?.schedule_interval_minutes),
+    roundIntervalMinutes: asNumber(
+      commissionerConfig?.schedule_interval_minutes,
+    ),
     episodesPerRound: asNumber(firstStage?.num_episodes),
   };
 }
@@ -119,12 +123,17 @@ export function pickCompetitionDivision(
 export function activeChampionPolicyLabelsByPlayerId(
   value: unknown,
 ): Map<string, string> {
-  const labels = new Map<string, string>();
+  const champions = new Map<
+    string,
+    { policyLabel: string; startedAt: number }
+  >();
   for (const entry of asArray(value)) {
     const membership = asRecord(entry);
+    const substatus = asString(membership?.substatus);
     if (
       !membership ||
       membership.status !== "competing" ||
+      (substatus !== null && substatus !== "active") ||
       membership.is_champion !== true ||
       asString(membership.end_time) !== null
     ) {
@@ -132,13 +141,39 @@ export function activeChampionPolicyLabelsByPlayerId(
     }
     const policyVersion = asRecord(membership.policy_version);
     const player = asRecord(membership.player);
-    const playerId = asString(policyVersion?.player_id) ?? asString(player?.id);
+    const policyPlayerId = asString(policyVersion?.player_id);
+    const membershipPlayerId = asString(player?.id);
+    if (
+      policyPlayerId !== null &&
+      membershipPlayerId !== null &&
+      policyPlayerId !== membershipPlayerId
+    ) {
+      continue;
+    }
+    const playerId = policyPlayerId ?? membershipPlayerId;
     const policyLabel = asString(policyVersion?.label);
     if (playerId !== null && policyLabel !== null) {
-      labels.set(playerId, policyLabel);
+      const parsedStartedAt = Date.parse(asString(membership.start_time) ?? "");
+      const startedAt = Number.isFinite(parsedStartedAt)
+        ? parsedStartedAt
+        : Number.NEGATIVE_INFINITY;
+      const existing = champions.get(playerId);
+      if (existing === undefined || startedAt > existing.startedAt) {
+        champions.set(playerId, { policyLabel, startedAt });
+      }
     }
   }
-  return labels;
+  return new Map(
+    [...champions].map(([playerId, champion]) => [
+      playerId,
+      champion.policyLabel,
+    ]),
+  );
+}
+
+function isHousePolicyLabel(value: string): boolean {
+  const match = /^(.*):v\d+$/.exec(value);
+  return match?.[1] === housePolicyName;
 }
 
 export function buildStandingRows(
@@ -168,9 +203,11 @@ export function buildStandingRows(
       policyLabel: ratingPolicyLabel,
       score: asNumber(row.score),
       roundsPlayed: asNumber(row.rounds_played),
+      // Ownership comes from the current champion membership, never from a
+      // historical rating label or a lookalike prefix.
       isHouse:
-        ratingPolicyLabel.startsWith(housePolicyPrefix) ||
-        activeChampionPolicyLabel?.startsWith(housePolicyPrefix) === true,
+        activeChampionPolicyLabel !== null &&
+        isHousePolicyLabel(activeChampionPolicyLabel),
     });
   }
   rows.sort((a, b) => a.rank - b.rank);
@@ -180,6 +217,28 @@ export function buildStandingRows(
 export function scoreLabelFromStandings(value: unknown): string {
   const first = asRecord(asArray(value)[0]);
   return asString(first?.score_label) ?? "Score";
+}
+
+export function mergeEpisodeRows(
+  freshEpisodes: CoworldLeagueEpisodeRow[],
+  previousEpisodes: CoworldLeagueEpisodeRow[],
+  limit: number,
+): CoworldLeagueEpisodeRow[] {
+  const byId = new Map<string, CoworldLeagueEpisodeRow>();
+  for (const episode of previousEpisodes) {
+    byId.set(episode.episodeRequestId, episode);
+  }
+  for (const episode of freshEpisodes) {
+    byId.set(episode.episodeRequestId, episode);
+  }
+  return [...byId.values()]
+    .sort((a, b) => episodeCompletedAt(b) - episodeCompletedAt(a))
+    .slice(0, limit);
+}
+
+function episodeCompletedAt(episode: CoworldLeagueEpisodeRow): number {
+  const completedAt = Date.parse(episode.completedAt ?? "");
+  return Number.isFinite(completedAt) ? completedAt : Number.NEGATIVE_INFINITY;
 }
 
 export function buildRoundRows(
@@ -233,7 +292,9 @@ export interface HostedEpisodeMeta {
   difficulty: string;
 }
 
-export function parseCompletedEpisodeMetaList(value: unknown): HostedEpisodeMeta[] {
+export function parseCompletedEpisodeMetaList(
+  value: unknown,
+): HostedEpisodeMeta[] {
   const episodes: HostedEpisodeMeta[] = [];
   for (const entry of asArray(value)) {
     const episode = asRecord(entry);
@@ -277,7 +338,9 @@ export interface ParsedHostedReplay {
   }>;
 }
 
-export function parseHostedReplayPayload(value: unknown): ParsedHostedReplay | null {
+export function parseHostedReplayPayload(
+  value: unknown,
+): ParsedHostedReplay | null {
   const payload = asRecord(value);
   if (!payload) {
     return null;

@@ -4,6 +4,7 @@ import {
   buildEpisodeRow,
   buildRoundRows,
   buildStandingRows,
+  mergeEpisodeRows,
   parseCompletedEpisodeMetaList,
   parseHostedReplayPayload,
   parseLeagueSummary,
@@ -61,8 +62,10 @@ const standingsFixture = [
 const championMembershipsFixture = [
   {
     status: "competing",
+    substatus: "active",
     is_champion: true,
     end_time: null,
+    start_time: "2026-07-15T18:00:00Z",
     policy_version: {
       player_id: "ply_a",
       label: "qd1n:v2",
@@ -70,8 +73,10 @@ const championMembershipsFixture = [
   },
   {
     status: "competing",
+    substatus: "active",
     is_champion: true,
     end_time: null,
+    start_time: "2026-07-15T19:00:00Z",
     policy_version: {
       player_id: "ply_house",
       label: "proxywar-keystone:v40",
@@ -79,6 +84,7 @@ const championMembershipsFixture = [
   },
   {
     status: "competing",
+    substatus: "benched",
     is_champion: false,
     end_time: null,
     policy_version: {
@@ -196,6 +202,19 @@ describe("CoworldLeagueMirrorCore", () => {
       ...championMembershipsFixture,
       {
         status: "competing",
+        substatus: "active",
+        is_champion: true,
+        end_time: null,
+        start_time: "2026-07-15T17:00:00Z",
+        player: { id: "ply_house" },
+        policy_version: {
+          player_id: "ply_house",
+          label: "proxywar-keystone:v39",
+        },
+      },
+      {
+        status: "competing",
+        substatus: "inactive",
         is_champion: true,
         end_time: "2026-07-15T16:00:00Z",
         player: { id: "ply_b" },
@@ -227,12 +246,30 @@ describe("CoworldLeagueMirrorCore", () => {
 
   test("keeps publishing rating provenance when champion memberships are unavailable", () => {
     const rows = buildStandingRows(standingsFixture);
-    const house = rows.find((row) => row.isHouse);
-    expect(house).toMatchObject({
+    const ratingRow = rows.find((row) => row.playerName === "Auri");
+    expect(ratingRow).toMatchObject({
       ratingPolicyLabel: "proxywar-keystone:v7",
       activeChampionPolicyLabel: null,
       policyLabel: "proxywar-keystone:v7",
+      isHouse: false,
     });
+  });
+
+  test("does not treat a Keystone lookalike prefix as the house policy", () => {
+    const rows = buildStandingRows(standingsFixture, [
+      {
+        status: "competing",
+        substatus: "active",
+        is_champion: true,
+        end_time: null,
+        player: { id: "ply_house" },
+        policy_version: {
+          player_id: "ply_house",
+          label: "proxywar-keystone-copy:v1",
+        },
+      },
+    ]);
+    expect(rows.find((row) => row.playerName === "Auri")?.isHouse).toBe(false);
   });
 
   test("scoreLabelFromStandings falls back to Score", () => {
@@ -297,6 +334,55 @@ describe("CoworldLeagueMirrorCore", () => {
     expect(boggs?.color).toBe("#2563eb");
     expect(row.degradedCount).toBe(33);
     expect(row.roundNumber).toBe(267);
+  });
+
+  test("fills replay gaps chronologically while preferring fresh duplicate rows", () => {
+    const replay = parseHostedReplayPayload(replayPayloadFixture);
+    expect(replay).not.toBeNull();
+    if (replay === null) {
+      return;
+    }
+    const base = buildEpisodeRow({
+      meta: parseCompletedEpisodeMetaList(replayMetaFixture)[1],
+      replay,
+      roundNumber: 267,
+      watchHref: "../coworld-run/spectator.html",
+      fullRenderHref: "/ai-league-replay/coworld-run",
+    });
+    const freshNewest = {
+      ...base,
+      episodeRequestId: "newest",
+      completedAt: "2026-07-13T12:00:00Z",
+    };
+    const freshOlder = {
+      ...base,
+      episodeRequestId: "older",
+      completedAt: "2026-07-13T10:00:00Z",
+    };
+    const previousDuplicate = {
+      ...base,
+      episodeRequestId: "newest",
+      completedAt: "2026-07-13T12:00:00Z",
+      map: "stale duplicate",
+    };
+    const previousFallback = {
+      ...base,
+      episodeRequestId: "middle",
+      completedAt: "2026-07-13T11:00:00Z",
+    };
+
+    const rows = mergeEpisodeRows(
+      [freshNewest, freshOlder],
+      [previousDuplicate, previousFallback],
+      3,
+    );
+
+    expect(rows.map((row) => row.episodeRequestId)).toEqual([
+      "newest",
+      "middle",
+      "older",
+    ]);
+    expect(rows[0].map).toBe(freshNewest.map);
   });
 
   test("shortEpisodeId strips the prefix and sanitizes", () => {

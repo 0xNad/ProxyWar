@@ -1040,7 +1040,10 @@
     "update_cadence": "Checks for updates every 30 seconds",
     "active_champion": "Active champion",
     "rating_row": "Rating row",
-    "champion_badge": "Champion"
+    "rated_rounds": "Rated rounds",
+    "standings_provenance": "Rank, score, and rated rounds come from Coworld's rating row; the active champion is shown separately when it differs.",
+    "champion_feed_delayed": "Champion status delayed — standings show rating rows only.",
+    "replay_feed_delayed": "Replay feed delayed — standings and rounds are current; showing the last available battles."
   },
   "ai_league_replay": {
     "standings_title": "Standings",

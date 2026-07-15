@@ -7,19 +7,21 @@ going through the Observatory UI.
 ## Commands
 
 ```bash
-npm run league:mirror         # one sync
-npm run league:mirror:watch   # sync every 5 minutes (Ctrl-C to stop)
+npm run league:mirror       # one sync
+npm run league:mirror:watch # sync every 5 minutes (Ctrl-C to stop)
 ```
 
 Requires a logged-in `coworld` CLI (`uvx coworld status`). The mirror only ever
-calls read verbs (`leagues`, `results`, `memberships`, `rounds`, `replays`) plus public S3
-replay downloads. It never uploads, submits, or creates hosted work.
+calls read verbs (`leagues`, `results`, `memberships`, `rounds`, `replays`) plus
+public S3 replay downloads. It never uploads, submits, or creates hosted work.
 
 The standings preserve the policy label returned by `results` as the rating-row
 provenance, then show the player's current active champion from the read-only
-membership list. When those labels differ (for example, a promoted `v40` whose
-inherited rating row still names `v7`), the page shows both instead of assigning
-the older score to the newer policy.
+membership list. When those labels differ (for example, a promoted champion
+whose inherited rating row still names `v7`), the page shows both. Rank, score,
+and **rated rounds** remain explicitly attached to the rating row instead of
+being assigned to the newer policy. House ownership is shown only when a current
+champion has the exact `proxywar-keystone:vN` policy name.
 
 ## Output
 
@@ -31,10 +33,15 @@ the older score to the newer policy.
   serializes the complete three-file publication across scheduled, manual, and
   watch-mode mirror processes; an abandoned owner is reclaimed after its
   process exits. Byte-identical files are not replaced, preserving their ETags.
-  If a sync fails, all three artifacts retain the last good league data and
-  expose a stale state. Repeated failures keep the first stale transition
-  timestamp so open pages do not reload or redownload the same last-good
-  snapshot every mirror cycle.
+  If a required league, standings, or rounds read fails, all three
+  artifacts retain the last good league data and expose a stale state. Repeated
+  failures keep the first stale transition timestamp so open pages do not
+  reload or redownload the same last-good snapshot every mirror cycle. Champion
+  memberships and replay processing are fail-soft: a membership failure
+  publishes explicitly qualified rating rows without claiming house ownership,
+  while a replay-list, download, or parse failure publishes fresh standings and
+  rounds, retains available last-good battle cards, and shows a component-level
+  warning.
 - `artifacts/ai-league-runs/<runID>/` — one standard run bundle per mirrored
   episode: self-contained `spectator.html`, `spectator-replay.json`, and the
   inline artifacts (`game-record.json`, `decisions.jsonl`, `match-summary.json`,
@@ -56,14 +63,18 @@ bundles, and their real-client renders are viewable anonymously (the invite
 gate lets exactly those paths through — see `isProxyWarPublicLeaguePath`);
 all other run directories and pages stay behind the gate.
 
-The loaded page revalidates `data.json` immediately and every 30 seconds,
-using its ETag so unchanged checks return `304` instead of downloading the
-snapshot again. It reloads only for a newer snapshot or a stale-state change,
-checks immediately when a hidden tab becomes visible or the browser reconnects,
-and aborts a hung check after 10 seconds. Two consecutive failures expose an
-automatic-retry warning. A five-minute meta refresh protects script-disabled or
-failed-client loads and is removed only after the update client confirms the
-required browser capabilities and installs its polling/event handlers.
+The loaded page revalidates `data.json` immediately and every 30 seconds, using
+its ETag so unchanged checks return `304` instead of downloading the snapshot
+again. It reloads only for a newer snapshot or a stale-state change, checks
+immediately when a hidden tab becomes visible or the browser reconnects, and
+aborts a hung check after 10 seconds. It rejects a mismatched league id or a
+payload missing the standings, rounds, or episodes arrays. For one rollout
+compatibility window, legacy HTML without a league-id marker accepts the fixed
+same-origin data endpoint after validating its non-empty league id. Two consecutive
+failures expose an automatic-retry warning. A five-minute meta refresh protects
+script-disabled or failed-client loads and is removed only after the first
+validated polling response. The script URL carries a content hash so an older
+Cloudflare-cached client cannot survive a frontend release.
 
 The league page's Content Security Policy must keep `script-src 'self'` and
 `connect-src 'self'` so `client.js` can load and revalidate `data.json`. Do not

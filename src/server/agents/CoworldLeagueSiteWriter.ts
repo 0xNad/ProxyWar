@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { promises as fs } from "node:fs";
 import path from "node:path";
 import englishTranslations from "../../../resources/lang/en.json";
@@ -66,6 +66,11 @@ export interface CoworldLeagueMirrorData {
   generatedAt: string;
   lastGoodSyncAt: string;
   stale: boolean;
+  /** True when current champion memberships could not be read. */
+  championFeedStale?: boolean;
+  /** True when standings are current but the optional replay feed is delayed. */
+  replayFeedStale?: boolean;
+  lastGoodReplaySyncAt?: string | null;
   league: {
     id: string;
     name: string;
@@ -107,7 +112,9 @@ type CoworldLeagueTranslationKey =
   `coworld_league.${CoworldLeagueTranslationSuffix}`;
 
 function translateText(key: CoworldLeagueTranslationKey): string {
-  const suffix = key.slice("coworld_league.".length) as CoworldLeagueTranslationSuffix;
+  const suffix = key.slice(
+    "coworld_league.".length,
+  ) as CoworldLeagueTranslationSuffix;
   return englishTranslations.coworld_league[suffix];
 }
 
@@ -135,7 +142,9 @@ interface CoworldLeagueWriteLockOwner {
   createdAt: string;
 }
 
-function parseWriteLockOwner(value: string): CoworldLeagueWriteLockOwner | null {
+function parseWriteLockOwner(
+  value: string,
+): CoworldLeagueWriteLockOwner | null {
   try {
     const candidate = JSON.parse(value) as Partial<CoworldLeagueWriteLockOwner>;
     return Number.isInteger(candidate.pid) &&
@@ -348,9 +357,21 @@ export function coworldLeagueIndexHtml(data: CoworldLeagueMirrorData): string {
         data.lastGoodSyncAt,
       )}">${escapeHtml(data.lastGoodSyncAt)}</span>.</div>`
     : "";
+  const replayFeedBanner =
+    !data.stale && data.replayFeedStale === true
+      ? `<div class="stale-banner">${escapeHtml(
+          translateText("coworld_league.replay_feed_delayed"),
+        )}</div>`
+      : "";
+  const championFeedBanner =
+    !data.stale && data.championFeedStale === true
+      ? `<div class="stale-banner">${escapeHtml(
+          translateText("coworld_league.champion_feed_delayed"),
+        )}</div>`
+      : "";
   const watchLatest = data.episodes.find((episode) => episode.fullRenderHref);
   return `<!doctype html>
-<html lang="en" data-generated-at="${escapeHtml(data.generatedAt)}" data-stale="${data.stale ? "true" : "false"}">
+<html lang="en" data-generated-at="${escapeHtml(data.generatedAt)}" data-stale="${data.stale ? "true" : "false"}" data-league-id="${escapeHtml(league.id)}">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -384,6 +405,7 @@ export function coworldLeagueIndexHtml(data: CoworldLeagueMirrorData): string {
     .metric span { color:var(--muted); font:800 11px/1 ui-monospace, SFMono-Regular, Menlo, monospace; text-transform:uppercase; letter-spacing:.12em; }
     .metric strong { display:block; font-size:26px; margin-top:6px; font-family:ui-monospace, SFMono-Regular, Menlo, monospace; }
     h2 { margin:0 0 10px; font-size:20px; }
+    .standings-note { max-width:820px; color:var(--muted); font-size:13px; margin:-2px 0 10px; }
     section { margin-bottom:26px; }
     table { width:100%; border-collapse:collapse; background:var(--surface); border:1px solid var(--line); border-radius:8px; overflow:hidden; }
     th, td { padding:10px 12px; border-bottom:1px solid var(--line); text-align:left; vertical-align:middle; }
@@ -398,7 +420,6 @@ export function coworldLeagueIndexHtml(data: CoworldLeagueMirrorData): string {
     .policy-kind { display:inline-block; min-width:116px; font-size:10px; font-weight:900; letter-spacing:.08em; text-transform:uppercase; }
     .badge { display:inline-block; border-radius:4px; padding:2px 7px; font:800 10px ui-monospace, SFMono-Regular, Menlo, monospace; letter-spacing:.08em; margin-left:6px; vertical-align:2px; }
     .badge.house { border:1px solid rgba(244,166,74,.5); color:var(--amber); }
-    .badge.champion { border:1px solid rgba(126,224,168,.5); color:var(--good); }
     .battle-grid { display:grid; grid-template-columns:repeat(auto-fill, minmax(320px, 1fr)); gap:14px; }
     .battle { background:var(--surface); border:1px solid var(--line); border-radius:8px; padding:14px; display:flex; flex-direction:column; gap:10px; }
     .battle-head { display:flex; justify-content:space-between; gap:8px; align-items:baseline; }
@@ -438,6 +459,8 @@ export function coworldLeagueIndexHtml(data: CoworldLeagueMirrorData): string {
       </div>
     </header>
     ${staleBanner}
+    ${championFeedBanner}
+    ${replayFeedBanner}
   <div id="live-update-status" class="sync-status" role="status" aria-live="polite" hidden>${escapeHtml(
     translateText("coworld_league.update_unavailable"),
   )}</div>
@@ -461,11 +484,15 @@ export function coworldLeagueIndexHtml(data: CoworldLeagueMirrorData): string {
     </div>
     <div class="metric-grid">
       <div class="metric"><span>Current round</span><strong>${
-        league.currentRoundNumber === null ? "—" : escapeHtml(String(league.currentRoundNumber))
+        league.currentRoundNumber === null
+          ? "—"
+          : escapeHtml(String(league.currentRoundNumber))
       }</strong></div>
       <div class="metric"><span>Warlords</span><strong>${escapeHtml(String(data.standings.length))}</strong></div>
       <div class="metric"><span>Round cadence</span><strong>${
-        league.roundIntervalMinutes === null ? "—" : `${escapeHtml(String(league.roundIntervalMinutes))}m`
+        league.roundIntervalMinutes === null
+          ? "—"
+          : `${escapeHtml(String(league.roundIntervalMinutes))}m`
       }</strong></div>
       <div class="metric"><span>Battles rendered</span><strong>${escapeHtml(
         String(
@@ -474,7 +501,10 @@ export function coworldLeagueIndexHtml(data: CoworldLeagueMirrorData): string {
       )}</strong></div>
     </div>
     <section>
-      <h2>Standings</h2>
+      <h2 id="standings-title">Standings</h2>
+      <p id="standings-provenance" class="standings-note">${escapeHtml(
+        translateText("coworld_league.standings_provenance"),
+      )}</p>
       ${standingsTable(data)}
     </section>
     <section>
@@ -503,7 +533,7 @@ export function coworldLeagueIndexHtml(data: CoworldLeagueMirrorData): string {
       <div>${escapeHtml(translateText("coworld_league.update_cadence"))}</div>
     </footer>
   </div>
-  <script src="${COWORLD_LEAGUE_CLIENT_PATH}"></script>
+  <script src="${coworldLeagueClientAssetPath()}"></script>
 </body>
 </html>
 `;
@@ -526,6 +556,7 @@ export function coworldLeagueClientJavaScript(): string {
     const fallbackRefresh = document.getElementById("league-refresh-fallback");
     const currentGeneratedAt = Date.parse(root.dataset.generatedAt ?? "");
     const currentStale = root.dataset.stale === "true";
+    const currentLeagueId = root.dataset.leagueId ?? "";
     let updateCheckInFlight = false;
     let reloadRequested = false;
     let consecutiveFailures = 0;
@@ -573,6 +604,22 @@ export function coworldLeagueClientJavaScript(): string {
         if (typeof next !== "object" || next === null) {
           throw new Error("League update payload is invalid");
         }
+        const nextLeague =
+          typeof next.league === "object" && next.league !== null
+            ? next.league
+            : null;
+        if (
+          nextLeague === null ||
+          typeof nextLeague.id !== "string" ||
+          nextLeague.id.length === 0 ||
+          (currentLeagueId !== "" && nextLeague.id !== currentLeagueId) ||
+          !Array.isArray(next.standings) ||
+          !Array.isArray(next.rounds) ||
+          !Array.isArray(next.episodes) ||
+          typeof next.stale !== "boolean"
+        ) {
+          throw new Error("League update payload contract is invalid");
+        }
         const nextGeneratedAt = Date.parse(
           typeof next.generatedAt === "string" ? next.generatedAt : "",
         );
@@ -582,6 +629,7 @@ export function coworldLeagueClientJavaScript(): string {
         const nextStale = next.stale === true;
         consecutiveFailures = 0;
         setUpdateError(false);
+        fallbackRefresh?.remove();
         const nextSnapshotIsNewer = Number.isFinite(currentGeneratedAt)
           ? nextGeneratedAt > currentGeneratedAt ||
             (nextGeneratedAt === currentGeneratedAt &&
@@ -620,13 +668,20 @@ export function coworldLeagueClientJavaScript(): string {
         }
       });
       window.addEventListener("online", () => void checkForUpdates());
-      fallbackRefresh?.remove();
     } catch {
       return;
     }
     void checkForUpdates();
 })();
 `;
+}
+
+export function coworldLeagueClientAssetPath(): string {
+  const digest = createHash("sha256")
+    .update(coworldLeagueClientJavaScript())
+    .digest("hex")
+    .slice(0, 16);
+  return `${COWORLD_LEAGUE_CLIENT_PATH}?v=${digest}`;
 }
 
 function standingsTable(data: CoworldLeagueMirrorData): string {
@@ -643,40 +698,35 @@ function standingsTable(data: CoworldLeagueMirrorData): string {
       const ratingDiffersFromChampion =
         activeChampionPolicyLabel !== null &&
         activeChampionPolicyLabel !== ratingPolicyLabel;
-      const policyProvenance = `${
-        activeChampionPolicyLabel === null
-          ? ""
-          : `<span class="policy active"><span class="policy-kind">${escapeHtml(
-              translateText("coworld_league.active_champion"),
-            )}</span> ${escapeHtml(activeChampionPolicyLabel)}</span>`
-      }${
-        activeChampionPolicyLabel === null || ratingDiffersFromChampion
+      const policyProvenance = ratingDiffersFromChampion
+        ? `<span class="policy active"><span class="policy-kind">${escapeHtml(
+            translateText("coworld_league.active_champion"),
+          )}</span> ${escapeHtml(activeChampionPolicyLabel ?? "")}</span>
+          <span class="policy rating"><span class="policy-kind">${escapeHtml(
+            translateText("coworld_league.rating_row"),
+          )}</span> ${escapeHtml(ratingPolicyLabel)}</span>`
+        : activeChampionPolicyLabel === null
           ? `<span class="policy rating"><span class="policy-kind">${escapeHtml(
               translateText("coworld_league.rating_row"),
             )}</span> ${escapeHtml(ratingPolicyLabel)}</span>`
-          : ""
-      }`;
+          : `<span class="policy">${escapeHtml(ratingPolicyLabel)}</span>`;
       return `
         <tr${row.isHouse ? ` class="house"` : ""}>
           <td class="rank">${escapeHtml(String(row.rank))}</td>
           <td>${escapeHtml(row.playerName)}${
             row.isHouse ? `<span class="badge house">HOUSE</span>` : ""
-          }${
-            activeChampionPolicyLabel === null
-              ? ""
-              : `<span class="badge champion">${escapeHtml(
-                  translateText("coworld_league.champion_badge"),
-                )}</span>`
           }${policyProvenance}</td>
           <td class="score">${row.score === null ? "—" : escapeHtml(row.score.toFixed(2))}</td>
           <td>${row.roundsPlayed === null ? "—" : escapeHtml(String(row.roundsPlayed))}</td>
         </tr>`;
     })
     .join("\n");
-  return `<table>
+  return `<table aria-labelledby="standings-title" aria-describedby="standings-provenance">
     <thead><tr><th>Rank</th><th>Warlord</th><th>${escapeHtml(
       data.league.scoreLabel,
-    )}</th><th>Rounds</th></tr></thead>
+    )}</th><th>${escapeHtml(
+      translateText("coworld_league.rated_rounds"),
+    )}</th></tr></thead>
     <tbody>${rows}</tbody>
   </table>`;
 }
@@ -718,10 +768,14 @@ function battleCard(episode: CoworldLeagueEpisodeRow): string {
     <article class="battle">
       <div class="battle-head">
         <b>${escapeHtml(episode.map)}${
-          episode.roundNumber === null ? "" : ` · Round ${escapeHtml(String(episode.roundNumber))}`
+          episode.roundNumber === null
+            ? ""
+            : ` · Round ${escapeHtml(String(episode.roundNumber))}`
         }</b>
         <span data-utc="${escapeHtml(episode.completedAt ?? "")}">${escapeHtml(
-          episode.completedAt === null ? "in progress" : shortUtc(episode.completedAt),
+          episode.completedAt === null
+            ? "in progress"
+            : shortUtc(episode.completedAt),
         )}</span>
       </div>
       ${combatants}

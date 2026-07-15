@@ -8,6 +8,24 @@ import {
 } from "../../src/server/agents/CoworldLeagueSiteWriter";
 
 const generatedAt = "2026-07-15T15:00:00.000Z";
+const leagueId = "league_test";
+
+function validSnapshot(
+  overrides: Partial<{
+    generatedAt: string;
+    stale: boolean;
+  }> = {},
+) {
+  return {
+    generatedAt,
+    stale: false,
+    league: { id: leagueId },
+    standings: [],
+    rounds: [],
+    episodes: [],
+    ...overrides,
+  };
+}
 
 function startLeagueClient(
   fetchMock: ReturnType<typeof vi.fn>,
@@ -15,12 +33,16 @@ function startLeagueClient(
     hidden?: boolean;
     includeAbortController?: boolean;
     includeFetch?: boolean;
+    includeLeagueId?: boolean;
   } = {},
 ) {
   const dataset: Record<string, string> = {
     generatedAt,
     stale: "false",
   };
+  if (options.includeLeagueId !== false) {
+    dataset.leagueId = leagueId;
+  }
   const status = {
     hidden: true,
     textContent:
@@ -99,7 +121,7 @@ describe("coworldLeagueClientJavaScript", () => {
     await flushMicrotasks();
 
     expect(fetchMock).toHaveBeenCalledTimes(1);
-    expect(client.fallbackRefresh.remove).toHaveBeenCalledOnce();
+    expect(client.fallbackRefresh.remove).not.toHaveBeenCalled();
     expect(fetchMock).toHaveBeenCalledWith(
       COWORLD_LEAGUE_DATA_PATH,
       expect.objectContaining({ cache: "no-cache" }),
@@ -136,7 +158,7 @@ describe("coworldLeagueClientJavaScript", () => {
       .mockRejectedValueOnce(new Error("offline"))
       .mockResolvedValue({
         ok: true,
-        json: async () => ({ generatedAt, stale: false }),
+        json: async () => validSnapshot(),
       });
     const client = startLeagueClient(fetchMock);
 
@@ -148,16 +170,17 @@ describe("coworldLeagueClientJavaScript", () => {
     expect(fetchMock).toHaveBeenCalledTimes(3);
     expect(client.status.hidden).toBe(true);
     expect(client.dataset.updateState).toBe("current");
+    expect(client.fallbackRefresh.remove).toHaveBeenCalledOnce();
     expect(client.reload).not.toHaveBeenCalled();
   });
 
   test("reloads immediately when a newer snapshot appears", async () => {
     const fetchMock = vi.fn().mockResolvedValue({
       ok: true,
-      json: async () => ({
-        generatedAt: "2026-07-15T15:05:00.000Z",
-        stale: false,
-      }),
+      json: async () =>
+        validSnapshot({
+          generatedAt: "2026-07-15T15:05:00.000Z",
+        }),
     });
     const client = startLeagueClient(fetchMock);
 
@@ -176,10 +199,28 @@ describe("coworldLeagueClientJavaScript", () => {
     expect(client.reload).toHaveBeenCalledOnce();
   });
 
+  test("accepts a validated snapshot during legacy HTML rollout", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () =>
+        validSnapshot({
+          generatedAt: "2026-07-15T15:05:00.000Z",
+        }),
+    });
+    const client = startLeagueClient(fetchMock, { includeLeagueId: false });
+
+    await flushMicrotasks();
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(client.fallbackRefresh.remove).toHaveBeenCalledOnce();
+    expect(client.dataset.updateState).toBe("reloading");
+    expect(client.reload).toHaveBeenCalledOnce();
+  });
+
   test("reloads when stale state changes at the same snapshot timestamp", async () => {
     const fetchMock = vi.fn().mockResolvedValue({
       ok: true,
-      json: async () => ({ generatedAt, stale: true }),
+      json: async () => validSnapshot({ stale: true }),
     });
     const client = startLeagueClient(fetchMock);
 
@@ -193,10 +234,10 @@ describe("coworldLeagueClientJavaScript", () => {
   test("does not reload for an older snapshot", async () => {
     const fetchMock = vi.fn().mockResolvedValue({
       ok: true,
-      json: async () => ({
-        generatedAt: "2026-07-15T14:55:00.000Z",
-        stale: false,
-      }),
+      json: async () =>
+        validSnapshot({
+          generatedAt: "2026-07-15T14:55:00.000Z",
+        }),
     });
     const client = startLeagueClient(fetchMock);
 
@@ -210,7 +251,7 @@ describe("coworldLeagueClientJavaScript", () => {
   test("skips hidden-tab polling and checks immediately when visible", async () => {
     const fetchMock = vi.fn().mockResolvedValue({
       ok: true,
-      json: async () => ({ generatedAt, stale: false }),
+      json: async () => validSnapshot(),
     });
     const client = startLeagueClient(fetchMock, { hidden: true });
 
@@ -242,7 +283,7 @@ describe("coworldLeagueClientJavaScript", () => {
 
     resolveFetch?.({
       ok: true,
-      json: async () => ({ generatedAt, stale: false }),
+      json: async () => validSnapshot(),
     });
     await flushMicrotasks();
     expect(client.dataset.updateState).toBe("current");
@@ -270,5 +311,39 @@ describe("coworldLeagueClientJavaScript", () => {
     expect(fetchMock).toHaveBeenCalledTimes(2);
     expect(client.status.hidden).toBe(false);
     expect(client.dataset.updateState).toBe("retrying");
+    expect(client.fallbackRefresh.remove).not.toHaveBeenCalled();
   });
+
+  test.each([
+    {
+      ...validSnapshot({ generatedAt: "2026-07-15T15:05:00.000Z" }),
+      standings: "invalid",
+    },
+    {
+      ...validSnapshot({ generatedAt: "2026-07-15T15:05:00.000Z" }),
+      league: { id: "different_league" },
+    },
+    {
+      generatedAt: "2026-07-15T15:05:00.000Z",
+      stale: false,
+      league: { id: leagueId },
+    },
+  ])(
+    "rejects malformed or mismatched update payloads without reloading",
+    async (payload) => {
+      const fetchMock = vi.fn().mockResolvedValue({
+        ok: true,
+        json: async () => payload,
+      });
+      const client = startLeagueClient(fetchMock);
+
+      await flushMicrotasks();
+      await vi.advanceTimersByTimeAsync(COWORLD_LEAGUE_POLL_INTERVAL_MS);
+
+      expect(client.reload).not.toHaveBeenCalled();
+      expect(client.fallbackRefresh.remove).not.toHaveBeenCalled();
+      expect(client.status.hidden).toBe(false);
+      expect(client.dataset.updateState).toBe("retrying");
+    },
+  );
 });

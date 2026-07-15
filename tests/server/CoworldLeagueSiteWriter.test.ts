@@ -3,8 +3,8 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, test } from "vitest";
 import {
-  COWORLD_LEAGUE_CLIENT_PATH,
   COWORLD_LEAGUE_POLL_INTERVAL_MS,
+  coworldLeagueClientAssetPath,
   coworldLeagueClientJavaScript,
   coworldLeagueIndexHtml,
   markCoworldLeagueSiteStale,
@@ -18,6 +18,9 @@ function sampleData(): CoworldLeagueMirrorData {
     generatedAt: "2026-07-13T12:00:00.000Z",
     lastGoodSyncAt: "2026-07-13T12:00:00.000Z",
     stale: false,
+    championFeedStale: false,
+    replayFeedStale: false,
+    lastGoodReplaySyncAt: "2026-07-13T12:00:00.000Z",
     league: {
       id: "league_test",
       name: "Proxywar",
@@ -147,7 +150,25 @@ describe("coworldLeagueIndexHtml", () => {
     expect(html).toContain("proxywar-keystone:v40");
     expect(html).toContain("Rating row");
     expect(html).toContain("proxywar-keystone:v7");
-    expect(html).toContain('class="badge champion">Champion</span>');
+    expect(html).toContain(
+      '<span class="policy rating"><span class="policy-kind">Rating row</span> evil:v1</span>',
+    );
+    expect(html).not.toContain('class="badge champion"');
+    expect(html.match(/Active champion/g)).toHaveLength(1);
+  });
+
+  test("binds score and rounds to rating provenance", () => {
+    const html = coworldLeagueIndexHtml(sampleData());
+    expect(html).toContain("Rated rounds");
+    expect(html).toContain(
+      "Rank, score, and rated rounds come from Coworld&#39;s rating row; the active champion is shown separately when it differs.",
+    );
+    expect(html).toContain('aria-describedby="standings-provenance"');
+  });
+
+  test("preserves the compact policy row when champion and rating labels match", () => {
+    const html = coworldLeagueIndexHtml(sampleData());
+    expect(html).toContain('<span class="policy">qd1n:v2</span>');
   });
 
   test("renders degraded chip only for degraded battles", () => {
@@ -172,6 +193,37 @@ describe("coworldLeagueIndexHtml", () => {
     expect(stale).toContain("Live sync degraded");
   });
 
+  test("qualifies a delayed replay feed without marking standings stale", () => {
+    const html = coworldLeagueIndexHtml({
+      ...sampleData(),
+      replayFeedStale: true,
+    });
+    expect(html).toContain(
+      "Replay feed delayed — standings and rounds are current; showing the last available battles.",
+    );
+    expect(html).not.toContain("Live sync degraded");
+  });
+
+  test("qualifies rating rows when current champion status is unavailable", () => {
+    const data = sampleData();
+    const html = coworldLeagueIndexHtml({
+      ...data,
+      championFeedStale: true,
+      standings: data.standings.map((row) => ({
+        ...row,
+        activeChampionPolicyLabel: null,
+        isHouse: false,
+      })),
+    });
+    expect(html).toContain(
+      "Champion status delayed — standings show rating rows only.",
+    );
+    expect(html).toContain(
+      '<span class="policy rating"><span class="policy-kind">Rating row</span> proxywar-keystone:v7</span>',
+    );
+    expect(html).not.toContain("HOUSE");
+  });
+
   test("shows live round chip and cadence", () => {
     const html = coworldLeagueIndexHtml(sampleData());
     expect(html).toContain("ROUND 268 · LIVE");
@@ -181,14 +233,16 @@ describe("coworldLeagueIndexHtml", () => {
   test("loads the same-origin update client and keeps a timed fallback", () => {
     const html = coworldLeagueIndexHtml(sampleData());
     expect(html).toContain(
-      'data-generated-at="2026-07-13T12:00:00.000Z" data-stale="false"',
+      'data-generated-at="2026-07-13T12:00:00.000Z" data-stale="false" data-league-id="league_test"',
     );
     expect(html).toContain(
       '<meta id="league-refresh-fallback" http-equiv="refresh" content="300">',
     );
-    expect(html).toContain(
-      `<script src="${COWORLD_LEAGUE_CLIENT_PATH}"></script>`,
+    const clientAssetPath = coworldLeagueClientAssetPath();
+    expect(clientAssetPath).toMatch(
+      /^\/ai-league-runs\/league\/client\.js\?v=[a-f0-9]{16}$/,
     );
+    expect(html).toContain(`<script src="${clientAssetPath}"></script>`);
     expect(html).not.toContain("async function checkForUpdates");
     expect(html).toContain(
       "Update check unavailable — showing this snapshot; retrying automatically.",
@@ -199,7 +253,13 @@ describe("coworldLeagueIndexHtml", () => {
     expect(client).toContain('fetch("/ai-league-runs/league/data.json", {');
     expect(client).toContain('cache: "no-cache"');
     expect(client).toContain(
-      "fallbackRefresh?.remove()",
+      '(currentLeagueId !== "" && nextLeague.id !== currentLeagueId)',
+    );
+    expect(client).toContain("!Array.isArray(next.standings)");
+    expect(client).toContain("!Array.isArray(next.rounds)");
+    expect(client).toContain("!Array.isArray(next.episodes)");
+    expect(client.indexOf("fallbackRefresh?.remove()")).toBeGreaterThan(
+      client.indexOf('currentLeagueId !== ""'),
     );
     expect(client).toContain(`${COWORLD_LEAGUE_POLL_INTERVAL_MS},`);
   });
@@ -246,10 +306,7 @@ describe("writeCoworldLeagueSite", () => {
 
     const inodeBefore = (await stat(paths.dataPath)).ino;
 
-    await markCoworldLeagueSiteStale(
-      siteDir,
-      "2026-07-13T12:10:00.000Z",
-    );
+    await markCoworldLeagueSiteStale(siteDir, "2026-07-13T12:10:00.000Z");
     const stillStaleData = JSON.parse(await readFile(paths.dataPath, "utf8"));
     expect(stillStaleData.generatedAt).toBe("2026-07-13T12:05:00.000Z");
     expect((await stat(paths.dataPath)).ino).toBe(inodeBefore);
@@ -294,8 +351,8 @@ describe("writeCoworldLeagueSite", () => {
       "first-released",
       "second-entered",
     ]);
-    await expect(stat(`${path.resolve(siteDir)}.write-lock`)).rejects.toMatchObject(
-      { code: "ENOENT" },
-    );
+    await expect(
+      stat(`${path.resolve(siteDir)}.write-lock`),
+    ).rejects.toMatchObject({ code: "ENOENT" });
   });
 });
