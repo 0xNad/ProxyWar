@@ -1,9 +1,9 @@
 # Keystone v40 Commander-retention release — 2026-07-15
 
-Status: uploaded and placed in Qualifiers with automatic champion promotion
-requested. v39 remains the active Competition champion until v40 clears the
-hosted qualifier. This is a conservative incremental release under the
-operator's replacement objective: ship a slightly improved agent, then continue
+Status: promoted to active Competition champion after both hosted qualifiers
+completed successfully. v39 is benched and remains the immediate rollback
+point. This is a conservative incremental release under the operator's
+replacement objective: ship a slightly improved agent, then continue
 evidence-driven iteration. It does not claim a proven win-rate increase.
 
 ## Decision
@@ -79,15 +79,23 @@ because it is the current attacker.
   `accbfb59-27d5-4239-804e-02bf6ffbaea7`.
 - Submission UUID: `sub_b30be5f7-798c-45c9-9188-303dd877a923`.
 - Qualifier membership UUID: `lpm_3d5efddc-0429-4925-bc74-81f298025c28`.
-- Submission status is `placed`; membership is currently
-  `qualifying/non-champion` in Qualifiers. Auto-champion mode is `always`.
+- Submission status is `placed`; auto-champion mode is `always`.
+- `[hosted truth, 2026-07-15T16:41Z]` Qualifier round
+  `round_29dd63e0-08b8-47d1-b11f-c46f9851cc22` completed both crash/connect
+  episodes (`ereq_aa5f7779-3e74-4257-b4f8-49d7e4dd42e6` and
+  `ereq_ae873af7-2338-437d-b9d9-2e5b5d6334c4`) with valid replays, no episode
+  error, and aggregate self-play score `0.5`. Both policy boot logs confirm
+  `survivalShield=true`, `commanderRetention=true`,
+  `defenseAuthority=false`, expert mask 15, Bedrock mode, and nonblocking
+  Commander execution.
+- `[hosted truth, same refresh]` v40 membership is
+  `competing/champion` in Competition. v39 membership
+  `lpm_2c8eec29-4f24-4e23-90f3-767de99e739b` is
+  `competing/benched`; it was not retired or deleted.
 
 ## Next evidence loop
 
-1. Verify qualifier completion and the resulting Competition champion binding;
-   retain v39 as the immediate rollback point.
-2. Inspect v40's first completed live episodes for retention exposure, plan age,
+1. Inspect v40's first completed live episodes for retention exposure, plan age,
    degradation, survival duration, score share, and top-score outcome.
-3. Keep the next candidate isolated to politics/balance-of-power behavior; do
+2. Keep the next candidate isolated to politics/balance-of-power behavior; do
    not re-enable the rejected defense authority.
-
