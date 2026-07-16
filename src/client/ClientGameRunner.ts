@@ -33,6 +33,7 @@ import { GameView, PlayerView } from "../core/game/GameView";
 import { loadTerrainMap, TerrainMapData } from "../core/game/TerrainMapLoader";
 import { UserSettings } from "../core/game/UserSettings";
 import { WorkerClient } from "../core/worker/WorkerClient";
+import { isAiLeagueReplayRoute } from "./AiLeagueReplayMode";
 import { getPersistentID } from "./Auth";
 import {
   AutoUpgradeEvent,
@@ -48,7 +49,6 @@ import {
 } from "./InputHandler";
 import { endGame, startGame, startTime } from "./LocalPersistantStats";
 import { terrainMapFileLoader } from "./TerrainMapFileLoader";
-import { isAiLeagueReplayRoute } from "./AiLeagueReplayMode";
 import {
   SendAllianceRequestIntentEvent,
   SendAttackIntentEvent,
@@ -428,43 +428,56 @@ export class ClientGameRunner {
     this.renderer.initialize();
     this.input.initialize();
     this.worker.start((gu: GameUpdateViewData | ErrorUpdate) => {
-      if (this.lobby.gameStartInfo === undefined) {
-        throw new Error("missing gameStartInfo");
-      }
-      if ("errMsg" in gu) {
+      try {
+        if (this.lobby.gameStartInfo === undefined) {
+          throw new Error("missing gameStartInfo");
+        }
+        if ("errMsg" in gu) {
+          showErrorModal(
+            gu.errMsg,
+            gu.stack ?? "missing",
+            this.lobby.gameStartInfo.gameID,
+            this.clientID,
+          );
+          console.error(gu.stack);
+          this.stop();
+          return;
+        }
+        this.transport.turnComplete();
+        gu.updates[GameUpdateType.Hash].forEach((hu: HashUpdate) => {
+          this.eventBus.emit(new SendHashEvent(hu.tick, hu.hash));
+        });
+        this.gameView.update(gu);
+        if (this.shouldLockFullMapReplayView()) {
+          this.renderer.transformHandler.centerAll(0.94);
+        } else {
+          this.focusReplaySpectatorOnce();
+        }
+        this.renderer.tick();
+        this.dispatchAiLeagueReplayFrame(gu);
+
+        // Emit tick metrics event for performance overlay
+        this.eventBus.emit(
+          new TickMetricsEvent(gu.tickExecutionDuration, this.currentTickDelay),
+        );
+
+        // Reset tick delay for next measurement
+        this.currentTickDelay = undefined;
+
+        if (gu.updates[GameUpdateType.Win].length > 0) {
+          this.saveGame(gu.updates[GameUpdateType.Win][0]);
+        }
+      } catch (error) {
+        const replayError =
+          error instanceof Error ? error : new Error(String(error));
+        console.error("Error processing game update", replayError);
         showErrorModal(
-          gu.errMsg,
-          gu.stack ?? "missing",
-          this.lobby.gameStartInfo.gameID,
+          replayError.message,
+          replayError.stack,
+          this.lobby.gameID,
           this.clientID,
         );
-        console.error(gu.stack);
         this.stop();
-        return;
-      }
-      this.transport.turnComplete();
-      gu.updates[GameUpdateType.Hash].forEach((hu: HashUpdate) => {
-        this.eventBus.emit(new SendHashEvent(hu.tick, hu.hash));
-      });
-      this.gameView.update(gu);
-      if (this.shouldLockFullMapReplayView()) {
-        this.renderer.transformHandler.centerAll(0.94);
-      } else {
-        this.focusReplaySpectatorOnce();
-      }
-      this.renderer.tick();
-      this.dispatchAiLeagueReplayFrame(gu);
-
-      // Emit tick metrics event for performance overlay
-      this.eventBus.emit(
-        new TickMetricsEvent(gu.tickExecutionDuration, this.currentTickDelay),
-      );
-
-      // Reset tick delay for next measurement
-      this.currentTickDelay = undefined;
-
-      if (gu.updates[GameUpdateType.Win].length > 0) {
-        this.saveGame(gu.updates[GameUpdateType.Win][0]);
       }
     });
 
@@ -1065,6 +1078,10 @@ function showErrorModal(
   showDiscord = true,
   heading = "error_modal.crashed",
 ) {
+  if (isAiLeagueReplayRoute()) {
+    document.dispatchEvent(new CustomEvent("ai-league-replay-load-error"));
+  }
+
   if (document.querySelector("#error-modal")) {
     return;
   }

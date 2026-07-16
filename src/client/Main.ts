@@ -50,6 +50,13 @@ import { MatchmakingModal } from "./Matchmaking";
 import { initNavigation } from "./Navigation";
 import "./NewsModal";
 import "./PatternInput";
+import {
+  holdReplayLoadingScreenUntilFirstFrame,
+  REPLAY_LOADING_SLOW_TIMEOUT_MS,
+  runReplayStartup,
+  showReplayLoadingFailure,
+  showReplayLoadingScreen,
+} from "./ReplayLoadingScreen";
 import "./SinglePlayerModal";
 import { StoreModal } from "./Store";
 import "./TerritoryPatternsModal";
@@ -73,6 +80,7 @@ import {
 import { ReplaySpeedMultiplier } from "./utilities/ReplaySpeedMultiplier";
 
 import {
+  isAiLeagueReplayRoute,
   isCoworldPlayerRoute,
   isCoworldReplayRoute,
 } from "./AiLeagueReplayMode";
@@ -265,6 +273,7 @@ export interface JoinLobbyEvent {
 class Client {
   private lobbyHandle: JoinLobbyResult | null = null;
   private eventBus: EventBus = new EventBus();
+  private replayLoadingCleanup: (() => void) | null = null;
 
   private currentUrl: string | null = null;
 
@@ -347,7 +356,26 @@ class Client {
       }
     });
 
-    document.addEventListener("join-lobby", this.handleJoinLobby.bind(this));
+    document.addEventListener("join-lobby", (event) => {
+      if (event.detail.gameRecord === undefined || !isAiLeagueReplayRoute()) {
+        void this.handleJoinLobby(event);
+        return;
+      }
+
+      void runReplayStartup(
+        () => this.handleJoinLobby(event),
+        (error) => {
+          this.failReplayLoading(
+            event.detail.aiLeagueRunID ?? event.detail.gameID,
+            event.detail.source === "coworld-replay"
+              ? "coworld-replay"
+              : "ai-league-replay",
+            "Replay failed to start",
+            error,
+          );
+        },
+      );
+    });
     document.addEventListener("leave-lobby", this.handleLeaveLobby.bind(this));
     document.addEventListener("kick-player", this.handleKickPlayer.bind(this));
     document.addEventListener("start-game", this.handleStartGame.bind(this));
@@ -740,7 +768,7 @@ class Client {
       /^\/(?:w\d+\/)?game\/([^/]+)/,
     );
     const aiLeagueReplayMatch = window.location.pathname.match(
-      /^\/ai-league-replay\/([^/]+)/,
+      /^\/(?:ai-league-replay|proxywar-replay|openfront-replay)\/([^/]+)/,
     );
     if (aiLeagueReplayMatch) {
       await this.openAiLeagueReplay(decodeURIComponent(aiLeagueReplayMatch[1]));
@@ -802,59 +830,120 @@ class Client {
       artifactBasePath?: string;
     } = {},
   ) {
+    this.replayLoadingCleanup?.();
+    this.replayLoadingCleanup = holdReplayLoadingScreenUntilFirstFrame();
+
     const artifactBasePath =
-      options.artifactBasePath ?? `/ai-league-runs/${encodeURIComponent(runID)}`;
+      options.artifactBasePath ??
+      `/ai-league-runs/${encodeURIComponent(runID)}`;
     const [
-      recordResponse,
-      decisionsResponse,
-      summaryResponse,
-      spectatorTelemetryResponse,
-    ] = await Promise.all([
+      recordResult,
+      decisionsResult,
+      summaryResult,
+      spectatorTelemetryResult,
+    ] = await Promise.allSettled([
       fetch(`${artifactBasePath}/game-record.json`),
       fetch(`${artifactBasePath}/decisions.jsonl`),
       fetch(`${artifactBasePath}/match-summary.json`),
       fetch(`${artifactBasePath}/spectator-telemetry.json`),
     ]);
 
-    if (!recordResponse.ok) {
-      const spectatorResponse = await fetch(
-        `${artifactBasePath}/spectator.html`,
-        {
-          method: "HEAD",
-        },
-      );
-      if (spectatorResponse.ok) {
-        alert(
-          `Rendered replay record is missing for run ${runID}. Opening the read-only timeline replay instead.`,
-        );
-        window.location.href = `${artifactBasePath}/spectator.html`;
-        return;
-      }
-      alert(
-        `Proxy War replay artifacts are missing for run ${runID}. Try a newer completed match from the Recent Matches list.`,
+    if (recordResult.status === "rejected") {
+      this.failReplayLoading(
+        runID,
+        options.source,
+        "Replay record request failed",
+        recordResult.reason,
       );
       return;
     }
 
-    const recordJson = await recordResponse.json();
+    const recordResponse = recordResult.value;
+    const decisionsResponse =
+      decisionsResult.status === "fulfilled" ? decisionsResult.value : null;
+    const summaryResponse =
+      summaryResult.status === "fulfilled" ? summaryResult.value : null;
+    const spectatorTelemetryResponse =
+      spectatorTelemetryResult.status === "fulfilled"
+        ? spectatorTelemetryResult.value
+        : null;
+
+    if (!recordResponse.ok) {
+      try {
+        const spectatorResponse = await fetch(
+          `${artifactBasePath}/spectator.html`,
+          {
+            method: "HEAD",
+          },
+        );
+        if (spectatorResponse.ok) {
+          window.location.replace(`${artifactBasePath}/spectator.html`);
+          return;
+        }
+      } catch (error) {
+        console.warn("Replay timeline fallback request failed", error);
+      }
+
+      this.failReplayLoading(
+        runID,
+        options.source,
+        `Replay record returned HTTP ${recordResponse.status}`,
+      );
+      return;
+    }
+
+    let recordJson: unknown;
+    try {
+      recordJson = await recordResponse.json();
+    } catch (error) {
+      this.failReplayLoading(
+        runID,
+        options.source,
+        "Replay record is not valid JSON",
+        error,
+      );
+      return;
+    }
+
     const parsed = GameRecordSchema.safeParse(recordJson);
     if (!parsed.success) {
-      console.error("Invalid AI league game record", parsed.error);
-      alert(`AI league replay record is invalid for run ${runID}`);
+      this.failReplayLoading(
+        runID,
+        options.source,
+        "Replay record failed schema validation",
+        parsed.error,
+      );
       return;
     }
 
-    const decisionsText = decisionsResponse.ok
-      ? await decisionsResponse.text()
-      : "";
+    let decisionsText = "";
+    if (decisionsResponse?.ok) {
+      try {
+        decisionsText = await decisionsResponse.text();
+      } catch (error) {
+        console.warn("Failed to read AI league decisions", error);
+      }
+    }
     const decisions = decisionsText
       .split("\n")
       .map((line) => line.trim())
       .filter(Boolean)
-      .map((line) => JSON.parse(line));
-    const summary = summaryResponse.ok ? await summaryResponse.json() : null;
+      .flatMap((line) => {
+        try {
+          return [JSON.parse(line)];
+        } catch (error) {
+          console.warn("Ignoring invalid AI league decision", error);
+          return [];
+        }
+      });
+    const summary = summaryResponse?.ok
+      ? await summaryResponse.json().catch((error) => {
+          console.warn("Invalid AI league match summary", error);
+          return null;
+        })
+      : null;
     let spectatorTelemetry: unknown = null;
-    if (spectatorTelemetryResponse.ok) {
+    if (spectatorTelemetryResponse?.ok) {
       try {
         spectatorTelemetry = await spectatorTelemetryResponse.json();
       } catch (error) {
@@ -862,16 +951,26 @@ class Client {
       }
     }
 
-    mountAiLeagueReplayOverlay({
-      runID,
-      decisions,
-      summary,
-      spectatorTelemetry,
-      artifactBasePath,
-      onReplaySpeedChange: (speed) => {
-        this.eventBus.emit(new ReplaySpeedChangeEvent(speed));
-      },
-    });
+    try {
+      mountAiLeagueReplayOverlay({
+        runID,
+        decisions,
+        summary,
+        spectatorTelemetry,
+        artifactBasePath,
+        onReplaySpeedChange: (speed) => {
+          this.eventBus.emit(new ReplaySpeedChangeEvent(speed));
+        },
+      });
+    } catch (error) {
+      this.failReplayLoading(
+        runID,
+        options.source,
+        "Replay overlay failed to initialize",
+        error,
+      );
+      return;
+    }
     document.addEventListener("ai-league-replay-jump-turn", (event) => {
       const turnNumber = (event as CustomEvent<{ turnNumber?: number }>).detail
         ?.turnNumber;
@@ -915,55 +1014,51 @@ class Client {
 
   private async openCoworldReplay() {
     const coworldReplayPath = window.location.pathname + window.location.search;
-    const loading = document.createElement("div");
-    loading.id = "coworld-replay-loading";
-    loading.textContent = "Waiting for Proxy War replay...";
-    loading.setAttribute(
-      "style",
-      [
-        "position:fixed",
-        "inset:0",
-        "z-index:100000",
-        "display:grid",
-        "place-items:center",
-        "background:#070b12",
-        "color:white",
-        "font:600 18px system-ui,sans-serif",
-      ].join(";"),
+    showReplayLoadingScreen("ai_league_replay.waiting_for_replay");
+    const slowTimer = setTimeout(
+      () => showReplayLoadingScreen("ai_league_replay.loading_slow"),
+      REPLAY_LOADING_SLOW_TIMEOUT_MS,
     );
-    document.body.appendChild(loading);
-    // Hand off from the server-injected first-paint splash (the adapter's
-    // injectCoworldSplash in coworld-adapter/src/coworld-appshell.ts — keep
-    // the id in sync) now that our own overlay covers the page.
-    document.getElementById("proxywar-coworld-splash")?.remove();
+
     while (true) {
-      const response = await fetch("../coworld/replay-info", {
-        cache: "no-store",
-      });
-      if (response.ok) {
-        const info = await response.json();
-        if (info.ready === true && typeof info.runID === "string") {
-          // Straight into the match: keep the branded overlay up until the
-          // first replay frame renders, so the game-start/credits modal
-          // never flashes on Observatory surfaces. Safety timeout so a
-          // failed load can never trap the viewer behind the overlay.
-          loading.textContent = "Loading replay...";
-          const removeLoading = () => loading.remove();
-          document.addEventListener("ai-league-replay-frame", removeLoading, {
-            once: true,
-          });
-          setTimeout(removeLoading, 45_000);
-          await this.openAiLeagueReplay(info.runID, {
-            source: "coworld-replay",
-            coworldReplayPath,
-            artifactBasePath: `../ai-league-runs/${encodeURIComponent(
-              info.runID,
-            )}`,
-          });
-          return;
+      try {
+        const response = await fetch("../coworld/replay-info", {
+          cache: "no-store",
+        });
+        if (response.ok) {
+          const info = await response.json();
+          if (info.ready === true && typeof info.runID === "string") {
+            clearTimeout(slowTimer);
+            showReplayLoadingScreen("ai_league_replay.loading_replay");
+            await this.openAiLeagueReplay(info.runID, {
+              source: "coworld-replay",
+              coworldReplayPath,
+              artifactBasePath: `../ai-league-runs/${encodeURIComponent(
+                info.runID,
+              )}`,
+            });
+            return;
+          }
         }
+      } catch (error) {
+        console.warn("Coworld replay status request failed", error);
       }
       await new Promise((resolve) => setTimeout(resolve, 250));
+    }
+  }
+
+  private failReplayLoading(
+    runID: string,
+    source: "ai-league-replay" | "coworld-replay" | undefined,
+    message: string,
+    error?: unknown,
+  ): void {
+    this.replayLoadingCleanup?.();
+    this.replayLoadingCleanup = null;
+    showReplayLoadingFailure();
+    console.error(`${message} for run ${runID}`, error);
+    if (source !== "coworld-replay") {
+      window.location.replace("/league");
     }
   }
 

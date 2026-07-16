@@ -1046,6 +1046,11 @@
     "replay_feed_delayed": "Replay feed delayed — standings and rounds are current; showing the last available battles."
   },
   "ai_league_replay": {
+    "loading_replay": "Loading replay…",
+    "waiting_for_replay": "Waiting for Proxy War replay…",
+    "loading_slow": "Replay is taking longer than expected…",
+    "loading_failed": "Replay unavailable.",
+    "retry": "Retry",
     "standings_title": "Standings",
     "standings_waiting": "Waiting for the first replay frame…",
     "metric_moves": "Moves",

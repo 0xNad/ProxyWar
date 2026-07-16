@@ -18,6 +18,109 @@
         transition: opacity 0.5s ease-out;
       }
 
+      #proxywar-replay-loading {
+        display: none;
+      }
+
+      html.proxywar-replay-route {
+        background: #070b12;
+        color: #f8fafc;
+      }
+
+      html.preload.proxywar-replay-route {
+        visibility: visible;
+        opacity: 1;
+        transition: none;
+      }
+
+      html.proxywar-replay-booting body > :not(#proxywar-replay-loading) {
+        visibility: hidden !important;
+        opacity: 0 !important;
+        pointer-events: none !important;
+      }
+
+      html.proxywar-replay-route #proxywar-replay-loading {
+        position: fixed;
+        inset: 0;
+        z-index: 2147483647;
+        display: grid;
+        box-sizing: border-box;
+        place-items: center;
+        padding: max(24px, env(safe-area-inset-top))
+          max(24px, env(safe-area-inset-right))
+          max(24px, env(safe-area-inset-bottom))
+          max(24px, env(safe-area-inset-left));
+        overflow: hidden;
+        background: #070b12;
+        color: #f8fafc;
+        font-family: Inter, ui-sans-serif, system-ui, sans-serif;
+        text-align: center;
+      }
+
+      .proxywar-replay-loading-content {
+        display: grid;
+        max-width: min(32rem, 100%);
+        justify-items: center;
+        gap: 18px;
+      }
+
+      .proxywar-replay-loading-spinner {
+        width: 44px;
+        height: 44px;
+        box-sizing: border-box;
+        border: 3px solid rgba(56, 189, 248, 0.22);
+        border-top-color: #38bdf8;
+        border-radius: 9999px;
+        animation: proxywar-replay-spin 0.9s linear infinite;
+      }
+
+      #proxywar-replay-loading[aria-busy="false"]
+        .proxywar-replay-loading-spinner {
+        display: none;
+      }
+
+      #proxywar-replay-loading p {
+        min-height: 1.5em;
+        margin: 0;
+        color: #e2e8f0;
+        font-size: clamp(16px, 2.4vw, 19px);
+        font-weight: 600;
+        letter-spacing: 0.01em;
+      }
+
+      #proxywar-replay-loading button {
+        min-height: 44px;
+        padding: 10px 18px;
+        border: 1px solid rgba(125, 211, 252, 0.5);
+        border-radius: 10px;
+        background: #0c4a6e;
+        color: #f8fafc;
+        font: inherit;
+        font-weight: 700;
+        cursor: pointer;
+      }
+
+      #proxywar-replay-loading button[hidden] {
+        display: none;
+      }
+
+      #proxywar-replay-loading button:focus-visible {
+        outline: 3px solid #7dd3fc;
+        outline-offset: 3px;
+      }
+
+      @keyframes proxywar-replay-spin {
+        to {
+          transform: rotate(360deg);
+        }
+      }
+
+      @media (prefers-reduced-motion: reduce) {
+        .proxywar-replay-loading-spinner {
+          animation: none;
+        }
+      }
+
       /* iOS safe area support */
       body {
         padding-top: env(safe-area-inset-top);
@@ -79,6 +182,12 @@
         isCoworldRoute("/client/global") ||
         isCoworldRoute("/client/replay") ||
         isCoworldRoute("/client/player");
+      if (window.__PROXYWAR_AI_REPLAY__) {
+        document.documentElement.classList.add(
+          "proxywar-replay-route",
+          "proxywar-replay-booting",
+        );
+      }
       window.GIT_COMMIT = <%- gitCommit %>;
       window.ASSET_MANIFEST = <%- assetManifest %>;
       window.CDN_BASE =
@@ -162,6 +271,28 @@
   <body
     class="h-full select-none font-sans min-h-screen bg-neutral-800 transition-opacity duration-300 ease-in-out flex flex-row overflow-hidden"
   >
+    <div
+      id="proxywar-replay-loading"
+      role="status"
+      aria-live="polite"
+      aria-atomic="true"
+      aria-busy="true"
+    >
+      <div class="proxywar-replay-loading-content">
+        <div class="proxywar-replay-loading-spinner" aria-hidden="true"></div>
+        <p
+          data-replay-loading-message
+          data-i18n="ai_league_replay.loading_replay"
+        ></p>
+        <button
+          type="button"
+          data-replay-loading-retry
+          data-i18n="ai_league_replay.retry"
+          hidden
+        ></button>
+      </div>
+    </div>
+
     <div id="hex-grid" class="fixed inset-0 -z-50 pointer-events-none">
       <div
         id="background-layer"

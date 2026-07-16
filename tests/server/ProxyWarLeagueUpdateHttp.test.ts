@@ -1,5 +1,12 @@
 import { spawn, type ChildProcess } from "node:child_process";
-import { mkdir, mkdtemp, rm, stat } from "node:fs/promises";
+import {
+  copyFile,
+  mkdir,
+  mkdtemp,
+  rm,
+  stat,
+  writeFile,
+} from "node:fs/promises";
 import http from "node:http";
 import { createRequire } from "node:module";
 import net from "node:net";
@@ -29,6 +36,7 @@ describe("league update HTTP contract", () => {
   let serverOutput = "";
   let openServerOutput = "";
   let caseInsensitiveFixturePaths = false;
+  let validReplayRecordPath = "";
 
   beforeAll(async () => {
     fixtureRoot = await mkdtemp(path.join(tmpdir(), "proxywar-league-http-"));
@@ -38,14 +46,45 @@ describe("league update HTTP contract", () => {
     const openHomeRoot = path.join(fixtureRoot, "home-open");
     const nationsRoot = path.join(fixtureRoot, "nations-gated");
     const openNationsRoot = path.join(fixtureRoot, "nations-open");
+    const staticRoot = path.join(fixtureRoot, "static");
+    const validReplayRoot = path.join(
+      artifactsRoot,
+      "ai-league-runs",
+      "league-valid",
+    );
+    const compactedReplayRoot = path.join(
+      artifactsRoot,
+      "ai-league-runs",
+      "league-compacted",
+    );
+    validReplayRecordPath = path.join(validReplayRoot, "game-record.json");
     await Promise.all([
       mkdir(leagueRoot, { recursive: true }),
       mkdir(homeRoot, { recursive: true }),
       mkdir(openHomeRoot, { recursive: true }),
       mkdir(nationsRoot, { recursive: true }),
       mkdir(openNationsRoot, { recursive: true }),
+      mkdir(staticRoot, { recursive: true }),
+      mkdir(validReplayRoot, { recursive: true }),
+      mkdir(compactedReplayRoot, { recursive: true }),
     ]);
-    await writeCoworldLeagueSite(leagueRoot, fixtureLeagueData());
+    await Promise.all([
+      writeCoworldLeagueSite(leagueRoot, fixtureLeagueData()),
+      copyFile(
+        path.join(projectRoot, "index.html"),
+        path.join(staticRoot, "index.html"),
+      ),
+      writeFile(
+        validReplayRecordPath,
+        JSON.stringify({ turns: [] }),
+        "utf8",
+      ),
+      writeFile(
+        path.join(compactedReplayRoot, "game-record.json"),
+        JSON.stringify({ compacted: true }),
+        "utf8",
+      ),
+    ]);
     try {
       await stat(
         path.join(artifactsRoot, "ai-league-runs", "League"),
@@ -234,6 +273,57 @@ describe("league update HTTP contract", () => {
       expect(blocked.status).toBe(302);
       expect(blocked.headers.location).toBe("/league");
     }
+  });
+
+  test("serves the replay shell only for a renderable public league record", async () => {
+    const replayResponses = await Promise.all(
+      Array.from({ length: 6 }, (_, index) =>
+        rawRequest(origin, "/ai-league-replay/league-valid", {
+          method: index % 2 === 0 ? "GET" : "HEAD",
+        }),
+      ),
+    );
+    const replay = replayResponses[0];
+    const replayHead = replayResponses[1];
+
+    expect(replayResponses.map((response) => response.status)).toEqual(
+      Array(6).fill(200),
+    );
+    expect(replayHead.body).toHaveLength(0);
+    const shell = replay.body.toString();
+    expect(shell).toContain('id="proxywar-replay-loading"');
+    expect(shell).toContain('data-i18n="ai_league_replay.loading_replay"');
+    expect(shell).toContain('"proxywar-replay-booting"');
+    expect(shell.indexOf('id="proxywar-replay-loading"')).toBeLessThan(
+      shell.indexOf('id="hex-grid"'),
+    );
+
+    for (const runID of ["league-missing", "league-compacted"]) {
+      for (const method of ["GET", "HEAD"] as const) {
+        const response = await rawRequest(
+          origin,
+          `/ai-league-replay/${runID}`,
+          { method },
+        );
+        expect(response.status, `${method} ${runID}`).toBe(302);
+        expect(response.headers.location).toBe("/league");
+        expect(response.body.toString(), `${method} ${runID}`).not.toContain(
+          'id="proxywar-replay-loading"',
+        );
+      }
+    }
+
+    await writeFile(
+      validReplayRecordPath,
+      JSON.stringify({ compacted: true, reason: "cache invalidation" }),
+      "utf8",
+    );
+    const invalidated = await rawRequest(
+      origin,
+      "/ai-league-replay/league-valid",
+    );
+    expect(invalidated.status).toBe(302);
+    expect(invalidated.headers.location).toBe("/league");
   });
 });
 

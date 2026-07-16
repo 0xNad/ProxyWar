@@ -127,6 +127,11 @@ const artifactsRootDir =
     ? path.join(process.cwd(), "artifacts")
     : path.resolve(configuredArtifactsRootDir);
 const runsRootDir = path.join(artifactsRootDir, "ai-league-runs");
+const publicReplayRenderabilityCache = new Map<
+  string,
+  { fingerprint: string; verdict: Promise<boolean> }
+>();
+const publicReplayRenderabilityCacheMaxEntries = 256;
 const tournamentsRootDir = path.join(
   artifactsRootDir,
   "ai-league-tournaments",
@@ -544,6 +549,19 @@ if (leagueWrapperOnly) {
   app.get("/ai-league-replay/:runID", async (req, res) => {
     if (!isProxyWarPublicLeaguePath(req.path)) {
       res.status(404).send("AI league replay record not found.");
+      return;
+    }
+    const runID = stringParam(req.params.runID);
+    const gameRecordPath = path.resolve(
+      runsRootDir,
+      runID,
+      "game-record.json",
+    );
+    if (
+      !isInsideRoot(gameRecordPath, runsRootDir) ||
+      !(await publicReplayRecordIsRenderable(gameRecordPath))
+    ) {
+      res.redirect("/league");
       return;
     }
     try {
@@ -2749,6 +2767,60 @@ async function fileExists(filePath: string): Promise<boolean> {
     const stat = await fs.stat(filePath);
     return stat.isFile();
   } catch {
+    return false;
+  }
+}
+
+async function publicReplayRecordIsRenderable(
+  filePath: string,
+): Promise<boolean> {
+  let fileStat: Awaited<ReturnType<typeof fs.stat>>;
+  try {
+    fileStat = await fs.stat(filePath);
+  } catch {
+    publicReplayRenderabilityCache.delete(filePath);
+    return false;
+  }
+  if (!fileStat.isFile()) {
+    publicReplayRenderabilityCache.delete(filePath);
+    return false;
+  }
+
+  const fingerprint = [
+    fileStat.dev,
+    fileStat.ino,
+    fileStat.size,
+    fileStat.mtimeMs,
+  ].join(":");
+  const cached = publicReplayRenderabilityCache.get(filePath);
+  if (cached?.fingerprint === fingerprint) {
+    publicReplayRenderabilityCache.delete(filePath);
+    publicReplayRenderabilityCache.set(filePath, cached);
+    return cached.verdict;
+  }
+
+  if (
+    !publicReplayRenderabilityCache.has(filePath) &&
+    publicReplayRenderabilityCache.size >=
+      publicReplayRenderabilityCacheMaxEntries
+  ) {
+    const oldest = publicReplayRenderabilityCache.keys().next().value;
+    if (oldest !== undefined) {
+      publicReplayRenderabilityCache.delete(oldest);
+    }
+  }
+
+  const entry = {
+    fingerprint,
+    verdict: gameRecordFileIsRenderable(filePath),
+  };
+  publicReplayRenderabilityCache.set(filePath, entry);
+  try {
+    return await entry.verdict;
+  } catch {
+    if (publicReplayRenderabilityCache.get(filePath) === entry) {
+      publicReplayRenderabilityCache.delete(filePath);
+    }
     return false;
   }
 }
