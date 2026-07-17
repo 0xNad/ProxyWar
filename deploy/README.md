@@ -68,6 +68,11 @@ Use this for a small macOS-hosted beta:
    launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.proxywar.beta-backup.plist
    ```
 
+   The macOS app wrapper runs the production process through
+   `/usr/bin/caffeinate -s`. While the app is alive and the host is on AC power,
+   this keeps the machine and Cloudflare Tunnel online without preventing
+   display sleep or changing global power settings.
+
 5. Before sharing the URL, run the readiness gate with the same private env:
 
    ```bash

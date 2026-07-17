@@ -292,6 +292,10 @@ export interface HostedEpisodeMeta {
   difficulty: string;
 }
 
+export function isSafeCoworldEpisodeRequestId(value: string): boolean {
+  return /^ereq_[A-Za-z0-9_-]+$/.test(value);
+}
+
 export function parseCompletedEpisodeMetaList(
   value: unknown,
 ): HostedEpisodeMeta[] {
@@ -302,7 +306,10 @@ export function parseCompletedEpisodeMetaList(
       continue;
     }
     const episodeRequestId = asString(episode.id);
-    if (episodeRequestId === null) {
+    if (
+      episodeRequestId === null ||
+      !isSafeCoworldEpisodeRequestId(episodeRequestId)
+    ) {
       continue;
     }
     const gameConfig = asRecord(episode.game_config);
@@ -346,7 +353,7 @@ export function parseHostedReplayPayload(
     return null;
   }
   const runID = asString(payload.runID);
-  if (runID === null) {
+  if (runID === null || !/^coworld-[A-Za-z0-9-]+$/.test(runID)) {
     return null;
   }
   const results = asRecord(payload.results);

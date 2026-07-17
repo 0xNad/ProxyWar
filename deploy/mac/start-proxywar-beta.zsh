@@ -20,4 +20,4 @@ source "$ENV_FILE"
 set +a
 
 cd "$PROJECT_DIR"
-exec npm run agent:closed-beta:prod
+exec /usr/bin/caffeinate -s npm run agent:closed-beta:prod

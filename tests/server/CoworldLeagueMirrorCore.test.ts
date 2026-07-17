@@ -298,6 +298,22 @@ describe("CoworldLeagueMirrorCore", () => {
     expect(episodes[1].replayUrl).toBe("https://example.com/replays/a.replay");
   });
 
+  test("parseCompletedEpisodeMetaList rejects unsafe episode request ids", () => {
+    const episodes = parseCompletedEpisodeMetaList([
+      ...replayMetaFixture,
+      {
+        ...replayMetaFixture[0],
+        id: "ereq_../../victim",
+        completed_at: "2026-07-13T12:00:00Z",
+      },
+    ]);
+
+    expect(episodes.map((entry) => entry.episodeRequestId)).toEqual([
+      "ereq_bbbb1111-2222",
+      "ereq_aaaa1111-2222",
+    ]);
+  });
+
   test("parseHostedReplayPayload extracts results and filters artifact names", () => {
     const replay = parseHostedReplayPayload(replayPayloadFixture);
     expect(replay).not.toBeNull();
@@ -310,6 +326,20 @@ describe("CoworldLeagueMirrorCore", () => {
       "decisions.jsonl",
     ]);
     expect(replay?.spectatorReplay).not.toBeNull();
+  });
+
+  test.each([
+    "../../victim",
+    "/tmp/victim",
+    "coworld-../victim",
+    "coworld-..\\victim",
+    "coworld-%2Fvictim",
+    ".",
+    "..",
+  ])("rejects unsafe hosted replay run id %s", (runID) => {
+    expect(
+      parseHostedReplayPayload({ ...replayPayloadFixture, runID }),
+    ).toBeNull();
   });
 
   test("buildEpisodeRow marks the winner, uses snapshot colors, sorts by tiles", () => {
