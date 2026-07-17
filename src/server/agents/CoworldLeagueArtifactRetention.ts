@@ -1,5 +1,7 @@
+import { createHash, randomUUID } from "node:crypto";
 import { promises as fs } from "node:fs";
 import path from "node:path";
+import { gzipSync } from "node:zlib";
 import { isSafeCoworldEpisodeRequestId } from "./CoworldLeagueMirrorCore";
 import type { CoworldLeagueEpisodeRow } from "./CoworldLeagueSiteWriter";
 
@@ -9,24 +11,27 @@ const managedReplayPattern = /^ereq_[A-Za-z0-9_-]+\.replay$/;
 export interface CoworldLeagueRetentionReferences {
   episodeRequestIds: Set<string>;
   publicRunKeys: Set<string>;
+  publicRunKeyByEpisodeRequestId: Map<string, string>;
 }
 
 export interface CoworldLeagueArtifactRetentionOptions {
   cacheDir: string;
   runsRootDir: string;
+  summaryArchiveDir: string;
   protectedEpisodeRequestIds: ReadonlySet<string>;
   protectedPublicRunKeys: ReadonlySet<string>;
-  maxRetainedArtifacts: number;
-  minimumRetentionAgeMs: number;
-  nowMs?: number;
+  maxRetainedCacheFiles: number;
+  maxRetainedRunDirectories: number;
   dryRun?: boolean;
 }
 
 export interface CoworldLeagueArtifactRetentionResult {
   cacheFilesFound: number;
   cacheFilesPruned: number;
+  cacheFileCandidates: string[];
   runDirectoriesFound: number;
   runDirectoriesPruned: number;
+  runDirectoryCandidates: string[];
 }
 
 export class CoworldLeagueDiskReserveError extends Error {}
@@ -34,6 +39,32 @@ export class CoworldLeagueDiskReserveError extends Error {}
 interface ManagedEntry {
   name: string;
   modifiedAtMs: number;
+  semanticTimestampMs: number | null;
+}
+
+interface ArchivePlan {
+  targetName: string;
+  materialize: () => Promise<Buffer>;
+}
+
+interface StagedArchive {
+  finalPath: string;
+  temporaryPath: string;
+}
+
+interface JsonObject {
+  [key: string]: unknown;
+}
+
+export interface CoworldLeagueRetentionPin {
+  episodeRequestId: string;
+  publicRunKey: string;
+  reason: string;
+}
+
+export interface CoworldLeagueRetentionPinManifest {
+  schemaVersion: 1;
+  pins: CoworldLeagueRetentionPin[];
 }
 
 export function publicRunKeyFromFullRenderHref(
@@ -92,6 +123,7 @@ export function retentionReferencesFromEpisodes(
 ): CoworldLeagueRetentionReferences {
   const episodeRequestIds = new Set<string>();
   const publicRunKeys = new Set<string>();
+  const publicRunKeyByEpisodeRequestId = new Map<string, string>();
   for (const episode of episodes) {
     if (!isSafeCoworldEpisodeRequestId(episode.episodeRequestId)) {
       throw new Error(
@@ -121,160 +153,515 @@ export function retentionReferencesFromEpisodes(
     for (const runKey of [fullRenderRunKey, watchRunKey]) {
       if (runKey !== null) {
         publicRunKeys.add(runKey);
+        publicRunKeyByEpisodeRequestId.set(episode.episodeRequestId, runKey);
       }
     }
   }
-  return { episodeRequestIds, publicRunKeys };
+  return {
+    episodeRequestIds,
+    publicRunKeys,
+    publicRunKeyByEpisodeRequestId,
+  };
 }
 
-async function managedEntries(
-  rootDir: string,
-  include: (entry: {
-    isDirectory(): boolean;
-    isFile(): boolean;
-    name: string;
-  }) => boolean,
-): Promise<ManagedEntry[]> {
-  let entries;
+export function parseCoworldLeagueRetentionPins(
+  value: unknown,
+  source = "Coworld league retention pin manifest",
+): CoworldLeagueRetentionReferences {
+  if (!isJsonObject(value)) {
+    throw new Error(`${source} must be a JSON object`);
+  }
+  requireExactKeys(value, ["pins", "schemaVersion"], source);
+  if (value.schemaVersion !== 1) {
+    throw new Error(`${source} schemaVersion must be 1`);
+  }
+  if (!Array.isArray(value.pins)) {
+    throw new Error(`${source} pins must be an array`);
+  }
+
+  const episodeRequestIds = new Set<string>();
+  const publicRunKeys = new Set<string>();
+  const publicRunKeyByEpisodeRequestId = new Map<string, string>();
+  for (const [index, candidate] of value.pins.entries()) {
+    const pinSource = `${source} pins[${index}]`;
+    if (!isJsonObject(candidate)) {
+      throw new Error(`${pinSource} must be a JSON object`);
+    }
+    requireExactKeys(
+      candidate,
+      ["episodeRequestId", "publicRunKey", "reason"],
+      pinSource,
+    );
+    if (
+      typeof candidate.episodeRequestId !== "string" ||
+      !isSafeCoworldEpisodeRequestId(candidate.episodeRequestId)
+    ) {
+      throw new Error(`${pinSource} has an unsafe episodeRequestId`);
+    }
+    if (
+      typeof candidate.publicRunKey !== "string" ||
+      !managedRunPattern.test(candidate.publicRunKey) ||
+      candidate.publicRunKey.includes("/") ||
+      candidate.publicRunKey.includes("\\")
+    ) {
+      throw new Error(`${pinSource} has an unsafe publicRunKey`);
+    }
+    if (
+      typeof candidate.reason !== "string" ||
+      candidate.reason.trim().length === 0
+    ) {
+      throw new Error(`${pinSource} reason must be a non-empty string`);
+    }
+    if (episodeRequestIds.has(candidate.episodeRequestId)) {
+      throw new Error(`${pinSource} duplicates an episodeRequestId`);
+    }
+    if (publicRunKeys.has(candidate.publicRunKey)) {
+      throw new Error(`${pinSource} duplicates a publicRunKey`);
+    }
+    episodeRequestIds.add(candidate.episodeRequestId);
+    publicRunKeys.add(candidate.publicRunKey);
+    publicRunKeyByEpisodeRequestId.set(
+      candidate.episodeRequestId,
+      candidate.publicRunKey,
+    );
+  }
+  return {
+    episodeRequestIds,
+    publicRunKeys,
+    publicRunKeyByEpisodeRequestId,
+  };
+}
+
+export async function readCoworldLeagueRetentionPins(
+  pinManifestPath: string,
+): Promise<CoworldLeagueRetentionReferences> {
+  const contents = await fs.readFile(pinManifestPath, "utf8");
+  let value: unknown;
   try {
-    entries = await fs.readdir(rootDir, { withFileTypes: true });
+    value = JSON.parse(contents);
+  } catch (error) {
+    throw new Error(
+      `Coworld league retention pin manifest is not valid JSON: ${pinManifestPath}`,
+      { cause: error },
+    );
+  }
+  return parseCoworldLeagueRetentionPins(value, pinManifestPath);
+}
+
+function isJsonObject(value: unknown): value is JsonObject {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+function requireExactKeys(
+  value: JsonObject,
+  expectedKeys: readonly string[],
+  source: string,
+): void {
+  const actual = Object.keys(value).sort();
+  const expected = [...expectedKeys].sort();
+  if (
+    actual.length !== expected.length ||
+    actual.some((key, index) => key !== expected[index])
+  ) {
+    throw new Error(`${source} must contain exactly: ${expected.join(", ")}`);
+  }
+}
+
+async function directoryEntries(rootDir: string) {
+  try {
+    return await fs.readdir(rootDir, { withFileTypes: true });
   } catch (error) {
     if (errorCode(error) === "ENOENT") {
       return [];
     }
     throw error;
   }
+}
+
+async function managedCacheEntries(cacheDir: string): Promise<ManagedEntry[]> {
   const managed: ManagedEntry[] = [];
-  for (const entry of entries) {
-    if (!include(entry)) {
+  for (const entry of await directoryEntries(cacheDir)) {
+    if (!entry.isFile() || !managedReplayPattern.test(entry.name)) {
       continue;
     }
+    const replayPath = path.join(cacheDir, entry.name);
     try {
-      const stat = await fs.lstat(path.join(rootDir, entry.name));
-      managed.push({ name: entry.name, modifiedAtMs: stat.mtimeMs });
+      const stat = await fs.lstat(replayPath);
+      if (!stat.isFile() || stat.isSymbolicLink()) {
+        continue;
+      }
+      const runID = await coworldRunIDFromReplayHeader(replayPath);
+      managed.push({
+        name: entry.name,
+        modifiedAtMs: stat.mtimeMs,
+        semanticTimestampMs:
+          runID === null ? null : coworldRunTimestampMs(runID),
+      });
     } catch (error) {
       if (errorCode(error) !== "ENOENT") {
         throw error;
       }
     }
   }
-  return managed.sort(
-    (a, b) => b.modifiedAtMs - a.modifiedAtMs || a.name.localeCompare(b.name),
-  );
+  return sortManagedEntries(managed);
 }
 
-function namesToKeep(
+async function managedRunEntries(runsRootDir: string): Promise<ManagedEntry[]> {
+  const managed: ManagedEntry[] = [];
+  for (const entry of await directoryEntries(runsRootDir)) {
+    if (!entry.isDirectory() || !managedRunPattern.test(entry.name)) {
+      continue;
+    }
+    const runDir = path.join(runsRootDir, entry.name);
+    try {
+      const stat = await fs.lstat(runDir);
+      if (
+        !stat.isDirectory() ||
+        stat.isSymbolicLink() ||
+        !(await hasManagedBundleMarker(runDir))
+      ) {
+        continue;
+      }
+      managed.push({
+        name: entry.name,
+        modifiedAtMs: stat.mtimeMs,
+        semanticTimestampMs: coworldRunTimestampMs(entry.name),
+      });
+    } catch (error) {
+      if (errorCode(error) !== "ENOENT") {
+        throw error;
+      }
+    }
+  }
+  return sortManagedEntries(managed);
+}
+
+function sortManagedEntries(entries: ManagedEntry[]): ManagedEntry[] {
+  return entries.sort((a, b) => {
+    const aTimestamp = a.semanticTimestampMs ?? a.modifiedAtMs;
+    const bTimestamp = b.semanticTimestampMs ?? b.modifiedAtMs;
+    return (
+      bTimestamp - aTimestamp ||
+      b.modifiedAtMs - a.modifiedAtMs ||
+      a.name.localeCompare(b.name)
+    );
+  });
+}
+
+async function coworldRunIDFromReplayHeader(
+  replayPath: string,
+): Promise<string | null> {
+  const file = await fs.open(replayPath, "r");
+  try {
+    const buffer = Buffer.alloc(16 * 1024);
+    const { bytesRead } = await file.read(buffer, 0, buffer.length, 0);
+    const match = /"runID"\s*:\s*"([^"]+)"/.exec(
+      buffer.subarray(0, bytesRead).toString("utf8"),
+    );
+    return match?.[1] ?? null;
+  } finally {
+    await file.close();
+  }
+}
+
+function coworldRunTimestampMs(runID: string): number | null {
+  const match =
+    /^(?:league-)?coworld-(\d{4}-\d{2}-\d{2})T(\d{2})-(\d{2})-(\d{2})-(\d{3})Z-[A-Za-z0-9_-]+$/.exec(
+      runID,
+    );
+  if (match === null) {
+    return null;
+  }
+  const isoTimestamp = `${match[1]}T${match[2]}:${match[3]}:${match[4]}.${match[5]}Z`;
+  const timestampMs = Date.parse(isoTimestamp);
+  return Number.isFinite(timestampMs) &&
+    new Date(timestampMs).toISOString() === isoTimestamp
+    ? timestampMs
+    : null;
+}
+
+async function hasManagedBundleMarker(runDir: string): Promise<boolean> {
+  const markerPath = path.join(runDir, ".mirror-bundle-version");
+  try {
+    const markerStat = await fs.lstat(markerPath);
+    if (!markerStat.isFile() || markerStat.isSymbolicLink()) {
+      return false;
+    }
+    return /^[1-9]\d*$/.test((await fs.readFile(markerPath, "utf8")).trim());
+  } catch (error) {
+    if (errorCode(error) === "ENOENT") {
+      return false;
+    }
+    throw error;
+  }
+}
+
+function pruneCandidates(
   entries: ManagedEntry[],
   protectedNames: ReadonlySet<string>,
-  maxRetainedArtifacts: number,
-  minimumModifiedAtMs: number,
-): Set<string> {
+  maximumRetained: number,
+): ManagedEntry[] {
   const availableNames = new Set(entries.map((entry) => entry.name));
   const kept = new Set(
     [...protectedNames].filter((name) => availableNames.has(name)),
   );
-  for (const entry of entries.slice(0, maxRetainedArtifacts)) {
+  for (const entry of entries.slice(0, maximumRetained)) {
     kept.add(entry.name);
   }
-  for (const entry of entries) {
-    if (entry.modifiedAtMs >= minimumModifiedAtMs) {
-      kept.add(entry.name);
-    }
-  }
-  return kept;
+  return entries.filter((entry) => !kept.has(entry.name));
 }
 
-async function pruneEntries(options: {
-  rootDir: string;
-  entries: ManagedEntry[];
-  protectedNames: ReadonlySet<string>;
-  maxRetainedArtifacts: number;
-  minimumModifiedAtMs: number;
-  recursive: boolean;
-  dryRun: boolean;
-}): Promise<number> {
-  const kept = namesToKeep(
-    options.entries,
-    options.protectedNames,
-    options.maxRetainedArtifacts,
-    options.minimumModifiedAtMs,
-  );
-  const obsolete = options.entries.filter((entry) => !kept.has(entry.name));
-  if (!options.dryRun) {
-    for (const entry of obsolete) {
-      await fs.rm(path.join(options.rootDir, entry.name), {
-        force: true,
-        recursive: options.recursive,
+function requirePositiveInteger(value: number, name: string): void {
+  if (!Number.isInteger(value) || value < 1) {
+    throw new Error(`${name} must be a positive integer`);
+  }
+}
+
+function archivePlans(options: {
+  cacheDir: string;
+  cacheCandidates: ManagedEntry[];
+  runsRootDir: string;
+  runCandidates: ManagedEntry[];
+}): ArchivePlan[] {
+  const plans: ArchivePlan[] = [];
+  for (const candidate of options.cacheCandidates) {
+    const episodeRequestId = candidate.name.slice(0, -".replay".length);
+    const replayPath = path.join(options.cacheDir, candidate.name);
+    plans.push({
+      targetName: `${episodeRequestId}.replay-summary.json.gz`,
+      materialize: () => compactReplayArchive(replayPath, episodeRequestId),
+    });
+  }
+  for (const candidate of options.runCandidates) {
+    const runDir = path.join(options.runsRootDir, candidate.name);
+    for (const sourceName of [
+      "match-summary.json",
+      "game-record.json",
+      "spectator-telemetry.json",
+    ]) {
+      plans.push({
+        targetName: `${candidate.name}.${sourceName}.gz`,
+        materialize: () => byteFidelityArchive(path.join(runDir, sourceName)),
       });
     }
   }
-  return obsolete.length;
+  return plans;
+}
+
+async function compactReplayArchive(
+  replayPath: string,
+  episodeRequestId: string,
+): Promise<Buffer> {
+  const replayBytes = await readRegularFile(replayPath);
+  let replay: unknown;
+  try {
+    replay = JSON.parse(replayBytes.toString("utf8"));
+  } catch (error) {
+    throw new Error(`Cannot archive invalid Coworld replay: ${replayPath}`, {
+      cause: error,
+    });
+  }
+  if (!isJsonObject(replay)) {
+    throw new Error(`Cannot archive non-object Coworld replay: ${replayPath}`);
+  }
+  const spectatorReplay = isJsonObject(replay.spectatorReplay)
+    ? replay.spectatorReplay
+    : null;
+  const snapshots = spectatorReplay?.snapshots;
+  const spectatorSnapshotCount =
+    typeof replay.spectatorSnapshotCount === "number" &&
+    Number.isInteger(replay.spectatorSnapshotCount)
+      ? replay.spectatorSnapshotCount
+      : Array.isArray(snapshots)
+        ? snapshots.length
+        : null;
+  const compactRecord = {
+    episodeRequestId,
+    sha256: createHash("sha256").update(replayBytes).digest("hex"),
+    bytes: replayBytes.byteLength,
+    schemaVersion: jsonField(replay, "schemaVersion"),
+    replayKind: jsonField(replay, "replayKind"),
+    runID: jsonField(replay, "runID"),
+    matchID: jsonField(replay, "matchID"),
+    gameID: jsonField(replay, "gameID"),
+    seed: jsonField(replay, "seed"),
+    config: jsonField(replay, "config"),
+    results: jsonField(replay, "results"),
+    finalState: jsonField(replay, "finalState"),
+    spectatorSnapshotCount,
+  };
+  return gzipSync(`${JSON.stringify(compactRecord, null, 2)}\n`);
+}
+
+function jsonField(value: JsonObject, key: string): unknown {
+  return Object.prototype.hasOwnProperty.call(value, key) ? value[key] : null;
+}
+
+async function byteFidelityArchive(sourcePath: string): Promise<Buffer> {
+  return gzipSync(await readRegularFile(sourcePath));
+}
+
+async function readRegularFile(sourcePath: string): Promise<Buffer> {
+  await requireRegularFile(sourcePath);
+  return fs.readFile(sourcePath);
+}
+
+async function requireRegularFile(sourcePath: string): Promise<void> {
+  const stat = await fs.lstat(sourcePath);
+  if (!stat.isFile() || stat.isSymbolicLink()) {
+    throw new Error(
+      `Coworld retention source is not a regular file: ${sourcePath}`,
+    );
+  }
+}
+
+async function writeArchivePlans(
+  summaryArchiveDir: string,
+  plans: ArchivePlan[],
+): Promise<void> {
+  if (plans.length === 0) {
+    return;
+  }
+  const resolvedArchiveDir = path.resolve(summaryArchiveDir);
+  await fs.mkdir(resolvedArchiveDir, { recursive: true });
+  const archiveStat = await fs.lstat(resolvedArchiveDir);
+  if (!archiveStat.isDirectory() || archiveStat.isSymbolicLink()) {
+    throw new Error(
+      `Coworld summary archive is not a safe directory: ${resolvedArchiveDir}`,
+    );
+  }
+
+  const staged: StagedArchive[] = [];
+  try {
+    for (const plan of plans) {
+      const finalPath = path.resolve(resolvedArchiveDir, plan.targetName);
+      if (path.dirname(finalPath) !== resolvedArchiveDir) {
+        throw new Error(
+          `Unsafe Coworld summary archive name: ${plan.targetName}`,
+        );
+      }
+      const temporaryPath = path.join(
+        resolvedArchiveDir,
+        `.${plan.targetName}.${process.pid}.${randomUUID()}.tmp`,
+      );
+      const contents = await plan.materialize();
+      await fs.writeFile(temporaryPath, contents, { flag: "wx", mode: 0o600 });
+      staged.push({ finalPath, temporaryPath });
+    }
+    for (const archive of staged) {
+      await fs.rename(archive.temporaryPath, archive.finalPath);
+    }
+  } catch (error) {
+    await Promise.all(
+      staged.map((archive) =>
+        fs.rm(archive.temporaryPath, { force: true }).catch(() => undefined),
+      ),
+    );
+    throw error;
+  }
+}
+
+async function validateDeletionTargets(options: {
+  cacheDir: string;
+  cacheCandidates: ManagedEntry[];
+  runsRootDir: string;
+  runCandidates: ManagedEntry[];
+}): Promise<void> {
+  for (const candidate of options.cacheCandidates) {
+    await requireRegularFile(path.join(options.cacheDir, candidate.name));
+  }
+  for (const candidate of options.runCandidates) {
+    const runDir = path.join(options.runsRootDir, candidate.name);
+    const stat = await fs.lstat(runDir);
+    if (
+      !stat.isDirectory() ||
+      stat.isSymbolicLink() ||
+      !(await hasManagedBundleMarker(runDir))
+    ) {
+      throw new Error(`Unsafe Coworld run deletion target: ${runDir}`);
+    }
+  }
 }
 
 export async function pruneCoworldLeagueMirrorArtifacts(
   options: CoworldLeagueArtifactRetentionOptions,
 ): Promise<CoworldLeagueArtifactRetentionResult> {
-  if (
-    !Number.isInteger(options.maxRetainedArtifacts) ||
-    options.maxRetainedArtifacts < 1
-  ) {
-    throw new Error("maxRetainedArtifacts must be a positive integer");
+  requirePositiveInteger(
+    options.maxRetainedCacheFiles,
+    "maxRetainedCacheFiles",
+  );
+  requirePositiveInteger(
+    options.maxRetainedRunDirectories,
+    "maxRetainedRunDirectories",
+  );
+  for (const episodeRequestId of options.protectedEpisodeRequestIds) {
+    if (!isSafeCoworldEpisodeRequestId(episodeRequestId)) {
+      throw new Error(
+        `Unsafe protected Coworld episode request id: ${episodeRequestId}`,
+      );
+    }
   }
-  if (
-    !Number.isFinite(options.minimumRetentionAgeMs) ||
-    options.minimumRetentionAgeMs < 0
-  ) {
-    throw new Error("minimumRetentionAgeMs must be a non-negative number");
+  for (const publicRunKey of options.protectedPublicRunKeys) {
+    if (!managedRunPattern.test(publicRunKey)) {
+      throw new Error(
+        `Unsafe protected Coworld public run key: ${publicRunKey}`,
+      );
+    }
   }
-  const nowMs = options.nowMs ?? Date.now();
-  const minimumModifiedAtMs = nowMs - options.minimumRetentionAgeMs;
   const [runDirectories, cacheFiles] = await Promise.all([
-    managedEntries(
-      options.runsRootDir,
-      (entry) => entry.isDirectory() && managedRunPattern.test(entry.name),
-    ),
-    managedEntries(
-      options.cacheDir,
-      (entry) => entry.isFile() && managedReplayPattern.test(entry.name),
-    ),
+    managedRunEntries(options.runsRootDir),
+    managedCacheEntries(options.cacheDir),
   ]);
   const protectedCacheFiles = new Set(
     [...options.protectedEpisodeRequestIds].map(
       (episodeRequestId) => `${episodeRequestId}.replay`,
     ),
   );
+  const cacheCandidates = pruneCandidates(
+    cacheFiles,
+    protectedCacheFiles,
+    options.maxRetainedCacheFiles,
+  );
+  const runCandidates = pruneCandidates(
+    runDirectories,
+    options.protectedPublicRunKeys,
+    options.maxRetainedRunDirectories,
+  );
   const dryRun = options.dryRun === true;
-  const [runDirectoriesPruned, cacheFilesPruned] = await Promise.all([
-    pruneEntries({
-      rootDir: options.runsRootDir,
-      entries: runDirectories,
-      protectedNames: options.protectedPublicRunKeys,
-      maxRetainedArtifacts: options.maxRetainedArtifacts,
-      minimumModifiedAtMs,
-      recursive: true,
-      dryRun,
-    }),
-    pruneEntries({
-      rootDir: options.cacheDir,
-      entries: cacheFiles,
-      protectedNames: protectedCacheFiles,
-      maxRetainedArtifacts: options.maxRetainedArtifacts,
-      minimumModifiedAtMs,
-      recursive: false,
-      dryRun,
-    }),
-  ]);
+  if (!dryRun) {
+    const planOptions = {
+      cacheDir: options.cacheDir,
+      cacheCandidates,
+      runsRootDir: options.runsRootDir,
+      runCandidates,
+    };
+    const plans = archivePlans(planOptions);
+    await writeArchivePlans(options.summaryArchiveDir, plans);
+    await validateDeletionTargets(planOptions);
+    for (const candidate of cacheCandidates) {
+      await fs.rm(path.join(options.cacheDir, candidate.name));
+    }
+    for (const candidate of runCandidates) {
+      await fs.rm(path.join(options.runsRootDir, candidate.name), {
+        recursive: true,
+      });
+    }
+  }
   return {
     cacheFilesFound: cacheFiles.length,
-    cacheFilesPruned,
+    cacheFilesPruned: cacheCandidates.length,
+    cacheFileCandidates: cacheCandidates.map((entry) => entry.name),
     runDirectoriesFound: runDirectories.length,
-    runDirectoriesPruned,
+    runDirectoriesPruned: runCandidates.length,
+    runDirectoryCandidates: runCandidates.map((entry) => entry.name),
   };
 }
 
 export function requireSafeCoworldLeagueRetentionLayout(
   siteDir: string,
   runsRootDir: string,
+  cacheDir?: string,
+  summaryArchiveDir?: string,
 ): void {
   const resolvedRunsRoot = path.resolve(runsRootDir);
   const resolvedSiteDir = path.resolve(siteDir);
@@ -284,6 +671,26 @@ export function requireSafeCoworldLeagueRetentionLayout(
   ) {
     throw new Error(
       "Coworld league retention requires siteDir to be the direct league child of runsRootDir",
+    );
+  }
+  if (cacheDir === undefined && summaryArchiveDir === undefined) {
+    return;
+  }
+  if (cacheDir === undefined || summaryArchiveDir === undefined) {
+    throw new Error(
+      "Coworld league retention requires cacheDir and summaryArchiveDir together",
+    );
+  }
+  const artifactRoot = path.dirname(resolvedRunsRoot);
+  const expectedRunsRoot = path.join(artifactRoot, "ai-league-runs");
+  const mirrorRoot = path.join(artifactRoot, "coworld-league-mirror");
+  if (
+    resolvedRunsRoot !== expectedRunsRoot ||
+    path.resolve(cacheDir) !== path.join(mirrorRoot, "replays") ||
+    path.resolve(summaryArchiveDir) !== path.join(mirrorRoot, "summaries")
+  ) {
+    throw new Error(
+      "Coworld league retention storage must use the canonical artifact layout",
     );
   }
 }

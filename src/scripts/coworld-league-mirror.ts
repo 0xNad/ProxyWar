@@ -13,6 +13,7 @@ import {
   ensureSafeCoworldLeagueRunDirectory,
   minimumAvailableDiskBytes,
   pruneCoworldLeagueMirrorArtifacts,
+  readCoworldLeagueRetentionPins,
   requireMinimumDiskSpace,
   requireSafeCoworldLeagueRetentionLayout,
   retentionReferencesFromEpisodes,
@@ -65,11 +66,14 @@ interface MirrorOptions {
   maxRenderedEpisodes: number;
   episodeMetaLimit: number;
   roundsShown: number;
-  maxRetainedArtifacts: number;
-  minimumRetentionAgeMs: number;
+  maxRetainedCacheFiles: number;
+  maxRetainedRunDirectories: number;
+  summaryArchiveDir: string;
+  retentionPinManifestPath: string;
   minimumFreeBytes: number;
   unpackRunDirs: boolean;
   starterUrl: string;
+  recoverPinnedArtifacts: boolean;
   watch: boolean;
   intervalSeconds: number;
 }
@@ -85,13 +89,20 @@ function parseOptions(argv: string[]): MirrorOptions {
     maxRenderedEpisodes: 12,
     episodeMetaLimit: 24,
     roundsShown: 10,
-    maxRetainedArtifacts: Number(
-      process.env.PROXYWAR_LEAGUE_RETAIN_REPLAYS ?? "48",
+    maxRetainedCacheFiles: Number(
+      process.env.PROXYWAR_LEAGUE_RETAIN_RAW_REPLAYS ?? "24",
     ),
-    minimumRetentionAgeMs:
-      Number(process.env.PROXYWAR_LEAGUE_RETAIN_HOURS ?? "6") * 60 * 60 * 1000,
+    maxRetainedRunDirectories: Number(
+      process.env.PROXYWAR_LEAGUE_RETAIN_RUN_BUNDLES ?? "96",
+    ),
+    summaryArchiveDir:
+      process.env.PROXYWAR_LEAGUE_SUMMARY_ARCHIVE_DIR ??
+      path.join("artifacts", "coworld-league-mirror", "summaries"),
+    retentionPinManifestPath:
+      process.env.PROXYWAR_LEAGUE_RETENTION_PINS ??
+      path.join("deploy", "coworld-league-retention-pins.json"),
     minimumFreeBytes:
-      Number(process.env.PROXYWAR_LEAGUE_MIN_FREE_GIB ?? "5") *
+      Number(process.env.PROXYWAR_LEAGUE_MIN_FREE_GIB ?? "10") *
       1024 *
       1024 *
       1024,
@@ -99,6 +110,7 @@ function parseOptions(argv: string[]): MirrorOptions {
     starterUrl:
       process.env.PROXYWAR_LEAGUE_STARTER_URL ??
       "https://github.com/0xNad/proxywar-coworld-starter",
+    recoverPinnedArtifacts: false,
     watch: false,
     intervalSeconds: 300,
   };
@@ -131,17 +143,26 @@ function parseOptions(argv: string[]): MirrorOptions {
       case "--meta-limit":
         options.episodeMetaLimit = Number(next());
         break;
-      case "--retain-replays":
-        options.maxRetainedArtifacts = Number(next());
+      case "--retain-raw":
+        options.maxRetainedCacheFiles = Number(next());
         break;
-      case "--retain-hours":
-        options.minimumRetentionAgeMs = Number(next()) * 60 * 60 * 1000;
+      case "--retain-bundles":
+        options.maxRetainedRunDirectories = Number(next());
+        break;
+      case "--summary-archive":
+        options.summaryArchiveDir = next();
+        break;
+      case "--pin-manifest":
+        options.retentionPinManifestPath = next();
         break;
       case "--min-free-gib":
         options.minimumFreeBytes = Number(next()) * 1024 * 1024 * 1024;
         break;
       case "--no-unpack":
         options.unpackRunDirs = false;
+        break;
+      case "--recover-pins-only":
+        options.recoverPinnedArtifacts = true;
         break;
       case "--watch":
         options.watch = true;
@@ -158,16 +179,24 @@ function parseOptions(argv: string[]): MirrorOptions {
     options.maxRenderedEpisodes < 1 ||
     !Number.isFinite(options.episodeMetaLimit) ||
     options.episodeMetaLimit < 1 ||
-    !Number.isInteger(options.maxRetainedArtifacts) ||
-    options.maxRetainedArtifacts < options.maxRenderedEpisodes ||
-    !Number.isFinite(options.minimumRetentionAgeMs) ||
-    options.minimumRetentionAgeMs < 0 ||
+    !Number.isInteger(options.maxRetainedCacheFiles) ||
+    options.maxRetainedCacheFiles < options.maxRenderedEpisodes ||
+    !Number.isInteger(options.maxRetainedRunDirectories) ||
+    options.maxRetainedRunDirectories < options.maxRenderedEpisodes ||
     !Number.isFinite(options.minimumFreeBytes) ||
-    options.minimumFreeBytes <= 0 ||
+    options.minimumFreeBytes < 10 * 1024 * 1024 * 1024 ||
     !Number.isFinite(options.intervalSeconds)
   ) {
     throw new Error(
-      "Numeric flags must be positive; retained replays must cover rendered episodes",
+      "Numeric flags must be positive; retention must cover rendered episodes and preserve at least 10 GiB free",
+    );
+  }
+  if (
+    options.recoverPinnedArtifacts &&
+    (options.watch || !options.unpackRunDirs)
+  ) {
+    throw new Error(
+      "--recover-pins-only requires bundle unpacking and cannot run in watch mode",
     );
   }
   return options;
@@ -372,18 +401,29 @@ async function pruneMirrorArtifacts(
   options: MirrorOptions,
   protectedEpisodes: CoworldLeagueEpisodeRow[],
 ): Promise<void> {
-  const references = retentionReferencesFromEpisodes(protectedEpisodes);
+  const publishedReferences =
+    retentionReferencesFromEpisodes(protectedEpisodes);
+  const pinnedReferences = await readCoworldLeagueRetentionPins(
+    options.retentionPinManifestPath,
+  );
   const result = await pruneCoworldLeagueMirrorArtifacts({
     cacheDir: options.cacheDir,
     runsRootDir: options.runsRootDir,
-    protectedEpisodeRequestIds: references.episodeRequestIds,
-    protectedPublicRunKeys: references.publicRunKeys,
-    maxRetainedArtifacts: options.maxRetainedArtifacts,
-    minimumRetentionAgeMs: options.minimumRetentionAgeMs,
+    summaryArchiveDir: options.summaryArchiveDir,
+    protectedEpisodeRequestIds: new Set([
+      ...publishedReferences.episodeRequestIds,
+      ...pinnedReferences.episodeRequestIds,
+    ]),
+    protectedPublicRunKeys: new Set([
+      ...publishedReferences.publicRunKeys,
+      ...pinnedReferences.publicRunKeys,
+    ]),
+    maxRetainedCacheFiles: options.maxRetainedCacheFiles,
+    maxRetainedRunDirectories: options.maxRetainedRunDirectories,
   });
   if (result.cacheFilesPruned > 0 || result.runDirectoriesPruned > 0) {
     log(
-      `pruned ${result.cacheFilesPruned} cached replay(s) and ${result.runDirectoriesPruned} rendered run bundle(s); retaining the newest ${options.maxRetainedArtifacts} plus the safety window`,
+      `pruned ${result.cacheFilesPruned} cached replay(s) and ${result.runDirectoriesPruned} rendered run bundle(s); retaining newest ${options.maxRetainedCacheFiles} raw replay(s), newest ${options.maxRetainedRunDirectories} bundle(s), published battles, and durable pins`,
     );
   }
 }
@@ -434,7 +474,7 @@ async function syncOnce(options: MirrorOptions): Promise<void> {
       "-d",
       division.id,
       "--limit",
-      String(options.episodeMetaLimit),
+      String(options.recoverPinnedArtifacts ? 1000 : options.episodeMetaLimit),
     ])
       .then((value) => ({ ok: true as const, value }))
       .catch((error: unknown) => {
@@ -467,10 +507,20 @@ async function syncOnce(options: MirrorOptions): Promise<void> {
     replayRead.ok && replayStorageAvailable
       ? parseCompletedEpisodeMetaList(replayRead.value)
       : [];
+  const recoveryReferences = options.recoverPinnedArtifacts
+    ? await readCoworldLeagueRetentionPins(options.retentionPinManifestPath)
+    : null;
+  const episodeMetasToProcess =
+    recoveryReferences === null
+      ? episodeMetas.slice(0, options.maxRenderedEpisodes)
+      : episodeMetas.filter((meta) =>
+          recoveryReferences.episodeRequestIds.has(meta.episodeRequestId),
+        );
 
   const freshEpisodes: CoworldLeagueEpisodeRow[] = [];
+  const recoveredEpisodeRequestIds = new Set<string>();
   let replayEpisodeFailures = 0;
-  for (const meta of episodeMetas.slice(0, options.maxRenderedEpisodes)) {
+  for (const meta of episodeMetasToProcess) {
     try {
       if (
         (await minimumAvailableDiskBytes([
@@ -510,6 +560,17 @@ async function syncOnce(options: MirrorOptions): Promise<void> {
             options.minimumFreeBytes,
           )
         : null;
+      if (
+        recoveryReferences !== null &&
+        (unpacked === null ||
+          recoveryReferences.publicRunKeyByEpisodeRequestId.get(
+            meta.episodeRequestId,
+          ) !== `league-${replay.runID}`)
+      ) {
+        throw new Error(
+          `Pinned replay ${meta.episodeRequestId} did not produce its declared run bundle`,
+        );
+      }
       freshEpisodes.push(
         buildEpisodeRow({
           meta,
@@ -522,6 +583,7 @@ async function syncOnce(options: MirrorOptions): Promise<void> {
           fullRenderHref: unpacked?.fullRenderHref ?? null,
         }),
       );
+      recoveredEpisodeRequestIds.add(meta.episodeRequestId);
     } catch (error) {
       if (error instanceof CoworldLeagueDiskReserveError) {
         replayStorageAvailable = false;
@@ -535,6 +597,19 @@ async function syncOnce(options: MirrorOptions): Promise<void> {
         }`,
       );
     }
+  }
+
+  if (recoveryReferences !== null) {
+    const missing = [...recoveryReferences.episodeRequestIds].filter(
+      (episodeRequestId) => !recoveredEpisodeRequestIds.has(episodeRequestId),
+    );
+    if (missing.length > 0 || replayEpisodeFailures > 0) {
+      throw new Error(
+        `Pinned replay recovery incomplete; missing ${missing.join(", ") || "none"}; failures ${replayEpisodeFailures}`,
+      );
+    }
+    log(`recovered ${recoveredEpisodeRequestIds.size} pinned replay bundle(s)`);
+    return;
   }
 
   const replayFeedStale =
@@ -632,7 +707,12 @@ async function runSyncIteration(options: MirrorOptions): Promise<boolean> {
 
 async function main(): Promise<void> {
   const options = parseOptions(process.argv.slice(2));
-  requireSafeCoworldLeagueRetentionLayout(options.siteDir, options.runsRootDir);
+  requireSafeCoworldLeagueRetentionLayout(
+    options.siteDir,
+    options.runsRootDir,
+    options.cacheDir,
+    options.summaryArchiveDir,
+  );
   if (!options.watch) {
     if (!(await runSyncIteration(options))) {
       process.exitCode = 1;

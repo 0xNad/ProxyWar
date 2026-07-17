@@ -7,9 +7,11 @@ going through the Observatory UI.
 ## Commands
 
 ```bash
-npm run league:mirror             # one sync
-npm run league:mirror:watch       # sync every 5 minutes (Ctrl-C to stop)
-npm run league:prune -- --dry-run # report obsolete mirror-owned artifacts
+npm run league:mirror                        # one sync
+npm run league:mirror:watch                  # sync every 5 minutes (Ctrl-C to stop)
+npm run league:mirror -- --recover-pins-only # restore missing pinned evidence
+npm run league:prune                         # safe plan only; reports prune candidates
+npm run league:prune -- --apply              # archive summaries, then delete candidates
 ```
 
 Requires a logged-in `coworld` CLI (`uvx coworld status`). The mirror only ever
@@ -49,18 +51,27 @@ champion has the exact `proxywar-keystone:vN` policy name.
   `spectator-telemetry.json`) that the real-client renderer needs.
 - `artifacts/coworld-league-mirror/replays/` — raw hosted replay cache
   (downloads are incremental by episode-request id).
+- `artifacts/coworld-league-mirror/summaries/` — indefinite compact evidence:
+  gzip-compressed hosted result records plus byte-faithful `match-summary.json`
+  `game-record.json`, and `spectator-telemetry.json` copies made before heavy
+  artifacts are removed.
 
 The mirror owns only direct `league-coworld-*` run directories and
 `ereq_*.replay` cache files. A whole-cycle filesystem lock serializes fetch,
 download, unpack, publication, stale fallback, and pruning. Every artifact
 referenced by the published `data.json` is protected. By default, retention also
-keeps the newest 48 artifacts and everything younger than six hours; unrelated
-runs, files, temporary files, symlinks, and the `league/` site directory are
-never candidates. A 5 GiB free-space reserve pauses replay downloads and keeps
-the last published battle cards while standings and rounds continue updating.
-Use `league:prune -- --dry-run` before a manual cleanup; the real prune command
-uses the same whole-cycle lock and fails closed if the published references are
-missing or unsafe.
+keeps the newest 24 raw replays and newest 96 rendered bundles. Ordering comes
+from each replay's validated embedded run timestamp, not filesystem mtime.
+The durable pin manifest at `deploy/coworld-league-retention-pins.json` protects
+explicitly cited evidence in addition to the current published battles.
+Unrelated runs, files, temporary files, symlinks, unmarked directories, and the
+`league/` site directory are never candidates. Before deletion, the pruner
+atomically archives compact results and the three small evidence files; any archive
+failure aborts deletion. A hard 10 GiB free-space reserve pauses replay writes
+and keeps the last published battle cards while standings and rounds continue
+updating. `league:prune` is plan-only by default and requires `--apply` to delete;
+both modes use the same whole-cycle lock and fail closed if published or pinned
+reference data is unavailable, malformed, or unsafe.
 
 ## Viewing
 
@@ -112,10 +123,16 @@ full beta server back.
                          env PROXYWAR_LEAGUE_ID)
 --max-rendered <n>       battles to render on the page (default 12)
 --meta-limit <n>         episode metadata rows to fetch (default 24)
---retain-replays <n>     newest mirror artifacts retained (default 48)
---retain-hours <n>       always retain artifacts newer than this (default 6)
---min-free-gib <n>       reserve below which replay writes pause (default 5)
+--retain-raw <n>         newest raw replay files retained (default 24)
+--retain-bundles <n>     newest rendered bundles retained (default 96)
+--min-free-gib <n>       reserve below which replay writes pause (minimum 10)
+--pin-manifest <path>    durable evidence pins (default deploy manifest)
+--summary-archive <path> compact indefinite evidence archive
+--recover-pins-only      restore every manifest pin without republishing the site
 --site-dir / --cache-dir / --runs-root
 --no-unpack              skip writing per-episode run bundles
 --watch / --interval-seconds <s>
 ```
+
+The standalone prune command accepts the same retention, pin, archive, and path
+flags. It prints a plan by default; pass `--apply` only after reviewing that plan.

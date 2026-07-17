@@ -1,0 +1,30 @@
+{
+  "schemaVersion": 1,
+  "pins": [
+    {
+      "episodeRequestId": "ereq_58f9b82c-2f0a-4715-ae15-766ea897a13c",
+      "publicRunKey": "league-coworld-2026-07-14T16-58-11-547Z-a67f0574",
+      "reason": "modular-council-incident"
+    },
+    {
+      "episodeRequestId": "ereq_a264676d-8379-4619-823f-25a331c31b7b",
+      "publicRunKey": "league-coworld-2026-07-16T23-10-01-057Z-81b3ec91",
+      "reason": "rci-cycle-01-causal-evidence"
+    },
+    {
+      "episodeRequestId": "ereq_78c67d80-d049-4d27-bebe-7bbcc308fe3c",
+      "publicRunKey": "league-coworld-2026-07-16T23-13-25-611Z-828daf47",
+      "reason": "rci-cycle-01-causal-evidence"
+    },
+    {
+      "episodeRequestId": "ereq_8da0f97a-45d1-4a23-b061-3ccee6be79fa",
+      "publicRunKey": "league-coworld-2026-07-16T23-44-10-926Z-ebdde5fd",
+      "reason": "rci-cycle-01-causal-evidence"
+    },
+    {
+      "episodeRequestId": "ereq_ac14074f-03c6-4d45-b408-e68f9200e169",
+      "publicRunKey": "league-coworld-2026-07-16T23-46-41-861Z-197d3bf3",
+      "reason": "rci-cycle-01-causal-evidence"
+    }
+  ]
+}
