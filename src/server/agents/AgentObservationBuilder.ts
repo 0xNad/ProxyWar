@@ -1117,11 +1117,13 @@ export class AgentObservationBuilder {
     const seen = new Set<string>();
     return options
       .filter((option) => {
-        const key = [
-          option.recipientID,
-          option.quickChatKey,
-          option.targetID ?? "",
-        ].join(":");
+        // LegalActionBuilder's public quick-chat wire id is derived from the
+        // recipient and quick-chat key. A different target changes the intent,
+        // but not that id, so retaining both would make the selected id
+        // ambiguous at AgentDecisionValidator. Keep the first option in the
+        // deterministic assembly order (coordination options precede the
+        // per-player fallback).
+        const key = [option.recipientID, option.quickChatKey].join(":");
         if (seen.has(key)) {
           return false;
         }

@@ -107,3 +107,24 @@ describe("AgentObservationBuilder rival-rival coalition graph", () => {
     expect(seenA?.incomingAttack).toBe(false);
   });
 });
+
+describe("AgentObservationBuilder quick-chat wire identities", () => {
+  it("does not expose two quick-chat intents through one LegalAction.id", async () => {
+    const game = await threePlayerGame();
+    const quickChats = observe(game).nonCombat.quickChatOptions ?? [];
+    const wireIDs = quickChats.map(
+      (chat) => `quick_chat:${chat.recipientID}:${chat.quickChatKey}`,
+    );
+
+    expect(new Set(wireIDs).size).toBe(wireIDs.length);
+    expect(quickChats).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          recipientID: "P_A",
+          quickChatKey: "attack.focus",
+          targetID: "P_B",
+        }),
+      ]),
+    );
+  });
+});

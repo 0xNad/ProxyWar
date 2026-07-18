@@ -120,6 +120,42 @@ describe("FrontierAgent expanded legal action surface", () => {
     expect(actions.map((action) => action.kind)).toEqual(["hold"]);
   });
 
+  it("emits globally unique ids when distinct quick-chat intents share a wire id", () => {
+    const observation = expandedObservation();
+    observation.nonCombat.quickChatOptions = [
+      {
+        recipientID: "ALLY0001",
+        recipientName: "Ally",
+        quickChatKey: "attack.focus",
+        targetID: "RIVAL001",
+        targetName: "Rival",
+        legalReason: "coordinate against Rival",
+      },
+      {
+        recipientID: "ALLY0001",
+        recipientName: "Ally",
+        quickChatKey: "attack.focus",
+        targetID: "REQ00001",
+        targetName: "Requester",
+        legalReason: "coordinate against Requester",
+      },
+    ];
+
+    const actions = new LegalActionBuilder().build({
+      observation,
+      maxPostSpawnActions: 120,
+    });
+    const ids = actions.map((action) => action.id);
+    const quickChats = actions.filter((action) => action.kind === "quick_chat");
+
+    expect(new Set(ids).size).toBe(ids.length);
+    expect(quickChats).toHaveLength(1);
+    expect(quickChats[0]).toMatchObject({
+      id: "quick_chat:ALLY0001:attack.focus",
+      metadata: { targetID: "RIVAL001" },
+    });
+  });
+
   it("submits land structure builds at the proven build tile", () => {
     const observation = expandedObservation();
     observation.nonCombat.buildOptions = [

@@ -63,7 +63,11 @@ export class LegalActionBuilder {
       },
     });
 
-    return actions;
+    // LegalAction.id is the complete public selection contract. Preserve the
+    // deterministic first occurrence and never expose two intents through one
+    // id, even if a malformed or synthetic observation bypasses the upstream
+    // option-level deduplication.
+    return uniqueActionsByID(actions);
   }
 
   private spawnAction(candidate: SpawnCandidate): LegalAction {
@@ -682,6 +686,17 @@ export class LegalActionBuilder {
     }
     return actions.slice(0, capActions);
   }
+}
+
+function uniqueActionsByID(actions: readonly LegalAction[]): LegalAction[] {
+  const seen = new Set<string>();
+  return actions.filter((action) => {
+    if (seen.has(action.id)) {
+      return false;
+    }
+    seen.add(action.id);
+    return true;
+  });
 }
 
 function shouldOfferNationOpeningForceExpansion(
