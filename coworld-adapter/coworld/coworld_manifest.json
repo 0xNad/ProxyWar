@@ -1,8 +1,13 @@
 {
   "$schema": "https://raw.githubusercontent.com/Metta-AI/coworld/main/src/coworld/coworld_manifest_schema.json",
+  "tags": [
+    "strategy",
+    "multiplayer",
+    "ai-agents"
+  ],
   "game": {
     "name": "proxywar",
-    "version": "0.1.8",
+    "version": "0.1.10",
     "description": "Hosted Proxy War Coworld adapter that preserves the LegalAction.id decision path.",
     "owner": "proxywar",
     "config_schema": {
@@ -243,7 +248,7 @@
     },
     "runnable": {
       "type": "game",
-      "image": "proxywar-coworld-local:dta-bfc5cd427",
+      "image": "proxywar-coworld-local:coworld-0.1.10-idfix-r2",
       "run": [
         "node",
         "--max-old-space-size=640",
@@ -274,7 +279,7 @@
   "player": [
     {
       "type": "player",
-      "image": "proxywar-coworld-local:dta-bfc5cd427",
+      "image": "proxywar-coworld-local:coworld-0.1.10-idfix-r2",
       "run": [
         "node",
         "/app/integration/src/starter-player.mjs"
@@ -289,12 +294,12 @@
   "commissioner": [
     {
       "type": "commissioner",
-      "image": "proxywar-commissioner-local:coworld-712f3ec10f3b",
+      "image": "proxywar-commissioner-local:coworld-bfd49adf8272",
       "run": [],
       "env": {},
       "id": "proxywar-ladder-commissioner",
       "name": "ProxyWar Ladder Commissioner",
-      "description": "Config-driven ruleset_strategy commissioner (Qualifiers self-play crash check -> Competition), with one custom override: each Competition round counts the real distinct champions currently in the league and routes to the largest declared seat count (2/4/8/12) that fits them, then rotates that rung's map pool (Pangaea/Asia/World/Europe) by round number - so the league runs today at 2p, scales up as more committed policies join, and sweeps every map across a season, with no re-publish required. Scoring is win-rate per episode aggregated into an OpenSkill (MMR) rating, since the same league runs episodes of varying size over time and only a placement-based rating is comparable across match sizes."
+      "description": "Config-driven ruleset_strategy commissioner (Qualifiers self-play crash check -> Competition), with one custom override: each Competition round counts the real distinct champions currently in the league and routes to the largest declared seat count (2/4/8/12) that fits them, then rotates that rung's map pool (Pangaea/Asia/World/Europe) by round number - so the league runs today at 2p, scales up as more committed policies join, and sweeps every map across a season, with no re-publish required. Competition ranks current form as 100 times each player's exponentially weighted mean round win rate, with a 24-completed-round half-life across the continuous population ladder. Players with fewer than five valid scored rounds remain provisional and list after established players; form history follows the player across policy-version upgrades."
     }
   ],
   "grader": [],
@@ -302,7 +307,7 @@
   "optimizer": [
     {
       "type": "optimizer",
-      "image": "proxywar-coworld-local:dta-bfc5cd427",
+      "image": "proxywar-coworld-local:coworld-0.1.10-idfix-r2",
       "run": [
         "node",
         "/app/integration/src/proxywar-optimizer-plan.mjs"
