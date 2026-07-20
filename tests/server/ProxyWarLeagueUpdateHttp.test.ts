@@ -3,6 +3,7 @@ import {
   copyFile,
   mkdir,
   mkdtemp,
+  realpath,
   rm,
   stat,
   writeFile,
@@ -37,9 +38,21 @@ describe("league update HTTP contract", () => {
   let openServerOutput = "";
   let caseInsensitiveFixturePaths = false;
   let validReplayRecordPath = "";
+  let privateStateRoot = "";
+  let openPrivateStateRoot = "";
 
   beforeAll(async () => {
-    fixtureRoot = await mkdtemp(path.join(tmpdir(), "proxywar-league-http-"));
+    fixtureRoot = await realpath(
+      await mkdtemp(path.join(tmpdir(), "proxywar-league-http-")),
+    );
+    privateStateRoot = path.join(
+      path.dirname(fixtureRoot),
+      `${path.basename(fixtureRoot)}-premiere-gated`,
+    );
+    openPrivateStateRoot = path.join(
+      path.dirname(fixtureRoot),
+      `${path.basename(fixtureRoot)}-premiere-open`,
+    );
     const artifactsRoot = path.join(fixtureRoot, "artifacts");
     const leagueRoot = path.join(artifactsRoot, "ai-league-runs", "league");
     const homeRoot = path.join(fixtureRoot, "home-gated");
@@ -103,6 +116,7 @@ describe("league update HTTP contract", () => {
       fixtureRoot,
       homeRoot,
       nationsRoot,
+      privateStateRoot,
       port,
       betaEnabled: true,
       wrapperOnly: true,
@@ -112,6 +126,7 @@ describe("league update HTTP contract", () => {
       fixtureRoot,
       homeRoot: openHomeRoot,
       nationsRoot: openNationsRoot,
+      privateStateRoot: openPrivateStateRoot,
       port: openPort,
       betaEnabled: false,
       wrapperOnly: false,
@@ -141,6 +156,11 @@ describe("league update HTTP contract", () => {
     if (fixtureRoot !== "") {
       await rm(fixtureRoot, { recursive: true, force: true });
     }
+    await Promise.all(
+      [privateStateRoot, openPrivateStateRoot]
+        .filter((root) => root !== "")
+        .map((root) => rm(root, { recursive: true, force: true })),
+    );
   });
 
   test("serves the league page with a CSP that permits only same-origin scripts", async () => {
@@ -358,6 +378,7 @@ function spawnLeagueServer(options: {
   fixtureRoot: string;
   homeRoot: string;
   nationsRoot: string;
+  privateStateRoot: string;
   port: number;
   betaEnabled: boolean;
   wrapperOnly: boolean;
@@ -366,6 +387,8 @@ function spawnLeagueServer(options: {
     process.execPath,
     [
       require.resolve("tsx/cli"),
+      "--tsconfig",
+      path.join(projectRoot, "tsconfig.json"),
       path.join(projectRoot, "src", "scripts", "ai-agent-demo-server.ts"),
     ],
     {
@@ -383,6 +406,7 @@ function spawnLeagueServer(options: {
         PROXYWAR_LEAGUE_WRAPPER_ONLY: String(options.wrapperOnly),
         PROXYWAR_ARTIFACTS_ROOT: options.artifactsRoot,
         PROXYWAR_NATIONS_DIR: options.nationsRoot,
+        PROXYWAR_REPLAY_PREMIERE_STATE_ROOT: options.privateStateRoot,
       },
       stdio: ["ignore", "pipe", "pipe"],
     },

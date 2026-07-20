@@ -52,12 +52,18 @@ import { initNavigation } from "./Navigation";
 import "./NewsModal";
 import "./PatternInput";
 import {
+  finishReplayLoadingScreen,
   holdReplayLoadingScreenUntilFirstFrame,
   REPLAY_LOADING_SLOW_TIMEOUT_MS,
   runReplayStartup,
   showReplayLoadingFailure,
   showReplayLoadingScreen,
 } from "./ReplayLoadingScreen";
+import type { ReplayPremiereProgressiveReplayConfig } from "./ReplayPremierePlayback";
+import {
+  parseReplayPremiereRoute,
+  ReplayPremiereRuntimeController,
+} from "./ReplayPremiereRuntime";
 import "./SinglePlayerModal";
 import { StoreModal } from "./Store";
 import "./TerritoryPatternsModal";
@@ -258,7 +264,10 @@ export interface JoinLobbyEvent {
   gameStartInfo?: GameStartInfo;
   // GameRecord exists when replaying an archived game.
   gameRecord?: GameRecord;
+  // A Premiere receives only released, hash-verified turns.
+  progressiveReplay?: ReplayPremiereProgressiveReplayConfig;
   aiLeagueRunID?: string;
+  premiereId?: string;
   source?:
     | "public"
     | "private"
@@ -266,7 +275,8 @@ export interface JoinLobbyEvent {
     | "matchmaking"
     | "singleplayer"
     | "ai-league-replay"
-    | "coworld-replay";
+    | "coworld-replay"
+    | "replay-premiere";
   coworldReplayPath?: string;
   publicLobbyInfo?: GameInfo | PublicGameInfo;
 }
@@ -276,6 +286,7 @@ class Client {
   private eventBus: EventBus = new EventBus();
   private replayLoadingCleanup: (() => void) | null = null;
   private replayAttemptCleanup: (() => void) | null = null;
+  private replayPremiereRuntime: ReplayPremiereRuntimeController | null = null;
 
   private currentUrl: string | null = null;
 
@@ -352,6 +363,7 @@ class Client {
 
     window.addEventListener("beforeunload", async () => {
       console.log("Browser is closing");
+      this.replayAttemptCleanup?.();
       if (this.lobbyHandle !== null) {
         this.lobbyHandle.stop(true);
         await crazyGamesSDK.gameplayStop();
@@ -359,7 +371,10 @@ class Client {
     });
 
     document.addEventListener("join-lobby", (event) => {
-      if (event.detail.gameRecord === undefined || !isAiLeagueReplayRoute()) {
+      const isReplayJoin =
+        event.detail.gameRecord !== undefined ||
+        event.detail.progressiveReplay !== undefined;
+      if (!isReplayJoin || !isAiLeagueReplayRoute()) {
         void this.handleJoinLobby(event);
         return;
       }
@@ -371,7 +386,9 @@ class Client {
             event.detail.aiLeagueRunID ?? event.detail.gameID,
             event.detail.source === "coworld-replay"
               ? "coworld-replay"
-              : "ai-league-replay",
+              : event.detail.source === "replay-premiere"
+                ? "replay-premiere"
+                : "ai-league-replay",
             "Replay failed to start",
             error,
           );
@@ -652,6 +669,11 @@ class Client {
 
     // Coworld surfaces (Observatory replays / browser player) go straight
     // into the match — never run landing-page hash/SDK logic for them.
+    const premiereId = parseReplayPremiereRoute(window.location.pathname);
+    if (premiereId !== null) {
+      await this.openReplayPremiere(premiereId);
+      return;
+    }
     if (isCoworldPlayerRoute()) {
       await this.openCoworldPlayer();
       return;
@@ -818,6 +840,80 @@ class Client {
           );
         }
       });
+    }
+  }
+
+  private async openReplayPremiere(premiereId: string): Promise<void> {
+    this.replayAttemptCleanup?.();
+    this.replayLoadingCleanup?.();
+    this.replayLoadingCleanup = holdReplayLoadingScreenUntilFirstFrame();
+
+    let active = true;
+    let projectionMounted = false;
+    const runtime = new ReplayPremiereRuntimeController({
+      premiereId,
+      onProjectionReady: () => {
+        if (!active || this.replayPremiereRuntime !== runtime) return;
+        projectionMounted = true;
+        this.replayLoadingCleanup?.();
+        this.replayLoadingCleanup = null;
+        finishReplayLoadingScreen();
+      },
+      onJoinReady: (request) => {
+        if (
+          !active ||
+          this.replayPremiereRuntime !== runtime ||
+          request.premiereId !== premiereId
+        ) {
+          return;
+        }
+        document.dispatchEvent(
+          new CustomEvent("join-lobby", {
+            detail: {
+              gameID: request.gameID,
+              gameStartInfo: request.gameStartInfo,
+              progressiveReplay: request.progressiveReplay,
+              source: "replay-premiere",
+              premiereId,
+            } satisfies JoinLobbyEvent,
+            bubbles: true,
+            composed: true,
+          }),
+        );
+      },
+      onRevealSeek: (turn) => {
+        if (!active || this.replayPremiereRuntime !== runtime) return;
+        this.eventBus.emit(new ReplayJumpToTurnEvent(turn));
+      },
+    });
+    const cleanupAttempt = () => {
+      if (!active) return;
+      active = false;
+      runtime.dispose();
+      if (this.replayPremiereRuntime === runtime) {
+        this.replayPremiereRuntime = null;
+      }
+      if (this.replayAttemptCleanup === cleanupAttempt) {
+        this.replayAttemptCleanup = null;
+      }
+    };
+    this.replayPremiereRuntime = runtime;
+    this.replayAttemptCleanup = cleanupAttempt;
+
+    try {
+      await runtime.start();
+    } catch (error) {
+      if (!active || this.replayPremiereRuntime !== runtime) return;
+      if (projectionMounted) {
+        console.error("Replay Premiere runtime stopped", error);
+        return;
+      }
+      this.failReplayLoading(
+        premiereId,
+        "replay-premiere",
+        "Replay Premiere failed to start",
+        error,
+      );
     }
   }
 
@@ -1106,7 +1202,11 @@ class Client {
 
   private failReplayLoading(
     runID: string,
-    _source: "ai-league-replay" | "coworld-replay" | undefined,
+    _source:
+      | "ai-league-replay"
+      | "coworld-replay"
+      | "replay-premiere"
+      | undefined,
     message: string,
     error?: unknown,
   ): void {
@@ -1124,9 +1224,16 @@ class Client {
 
   private async handleJoinLobby(event: CustomEvent<JoinLobbyEvent>) {
     const lobby = event.detail;
+    if (
+      lobby.source !== "replay-premiere" &&
+      this.replayPremiereRuntime !== null
+    ) {
+      this.replayAttemptCleanup?.();
+    }
     this.mostRecentJoinEvent = event.timeStamp;
     if (
       lobby.gameRecord === undefined &&
+      lobby.progressiveReplay === undefined &&
       this.usernameInput &&
       !this.usernameInput.validateOrShowError()
     ) {
@@ -1144,7 +1251,11 @@ class Client {
     }
     const config = await getRuntimeClientServerConfig();
     // Only update URL immediately for private lobbies, not public ones
-    if (lobby.source !== "public" && lobby.gameRecord === undefined) {
+    if (
+      lobby.source !== "public" &&
+      lobby.gameRecord === undefined &&
+      lobby.progressiveReplay === undefined
+    ) {
       this.updateJoinUrlForShare(lobby.gameID, config);
     }
     const auth = await userAuth();
@@ -1159,6 +1270,7 @@ class Client {
       playerRole,
       gameStartInfo: lobby.gameStartInfo ?? lobby.gameRecord?.info,
       gameRecord: lobby.gameRecord,
+      progressiveReplay: lobby.progressiveReplay,
     });
 
     if (this.mostRecentJoinEvent !== event.timeStamp) {
@@ -1239,6 +1351,7 @@ class Client {
       if (
         lobby.source !== "ai-league-replay" &&
         lobby.source !== "coworld-replay" &&
+        lobby.source !== "replay-premiere" &&
         window.PageOS?.session?.newPageView
       ) {
         window.PageOS.session.newPageView();
@@ -1256,7 +1369,16 @@ class Client {
         history.replaceState(null, "", window.location.origin + "#refresh");
       }
       const lobbyIdHidden = !this.userSettings.lobbyIdVisibility();
-      if (lobby.gameRecord !== undefined && lobby.aiLeagueRunID) {
+      if (lobby.progressiveReplay !== undefined && lobby.premiereId) {
+        const premierePath = `/premiere/${encodeURIComponent(lobby.premiereId)}`;
+        if (window.location.pathname !== premierePath) {
+          history.replaceState(
+            null,
+            "",
+            `${premierePath}${window.location.search}`,
+          );
+        }
+      } else if (lobby.gameRecord !== undefined && lobby.aiLeagueRunID) {
         if (!preserveCoworldReplayUrl) {
           history.pushState(
             null,
@@ -1377,6 +1499,7 @@ class Client {
     const config = await getRuntimeClientServerConfig();
     if (
       lobby.gameRecord !== undefined ||
+      lobby.progressiveReplay !== undefined ||
       config.env() === GameEnv.Dev ||
       lobby.gameStartInfo?.config.gameType === GameType.Singleplayer
     ) {

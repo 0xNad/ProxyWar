@@ -48,6 +48,7 @@ import {
   TickMetricsEvent,
 } from "./InputHandler";
 import { endGame, startGame, startTime } from "./LocalPersistantStats";
+import { ReplayPremiereProgressiveReplayConfig } from "./ReplayPremierePlayback";
 import { terrainMapFileLoader } from "./TerrainMapFileLoader";
 import {
   SendAllianceRequestIntentEvent,
@@ -88,6 +89,18 @@ export interface LobbyConfig {
   gameStartInfo?: GameStartInfo;
   // GameRecord exists when replaying an archived game.
   gameRecord?: GameRecord;
+  // Progressive replay starts from sanitized GameStartInfo and receives only
+  // hash-verified, released turns through its controller.
+  progressiveReplay?: ReplayPremiereProgressiveReplayConfig;
+}
+
+export function isReplayLobby(
+  lobbyConfig: Pick<LobbyConfig, "gameRecord" | "progressiveReplay">,
+): boolean {
+  return (
+    lobbyConfig.gameRecord !== undefined ||
+    lobbyConfig.progressiveReplay !== undefined
+  );
 }
 
 export interface JoinLobbyResult {
@@ -255,7 +268,7 @@ async function createClientGame(
   const config = await getGameLogicConfig(
     lobbyConfig.gameStartInfo.config,
     userSettings,
-    lobbyConfig.gameRecord !== undefined,
+    isReplayLobby(lobbyConfig),
   );
   let gameMap: TerrainMapData;
 
@@ -610,7 +623,10 @@ export class ClientGameRunner {
   }
 
   private dispatchAiLeagueReplayFrame(gu: GameUpdateViewData) {
-    if (this.lobby.gameRecord === undefined || !isAiLeagueReplayRoute()) {
+    if (
+      this.lobby.progressiveReplay === undefined &&
+      (this.lobby.gameRecord === undefined || !isAiLeagueReplayRoute())
+    ) {
       return;
     }
     const players = this.gameView.players().flatMap((player) => {
@@ -679,7 +695,7 @@ export class ClientGameRunner {
   private focusReplaySpectatorOnce() {
     if (
       this.hasFocusedReplaySpectator ||
-      this.lobby.gameRecord === undefined ||
+      !isReplayLobby(this.lobby) ||
       this.shouldLockFullMapReplayView()
     ) {
       return;

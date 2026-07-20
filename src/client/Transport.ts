@@ -192,10 +192,11 @@ export class Transport {
     private lobbyConfig: LobbyConfig,
     private eventBus: EventBus,
   ) {
-    // If gameRecord is not null, we are replaying an archived game.
+    // Archived and progressive replays both run through the local transport.
     // For multiplayer games, GameConfig is not known until game starts.
     this.isLocal =
       lobbyConfig.gameRecord !== undefined ||
+      lobbyConfig.progressiveReplay !== undefined ||
       lobbyConfig.gameStartInfo?.config.gameType === GameType.Singleplayer;
 
     this.eventBus.on(SendAllianceRequestIntentEvent, (e) =>
@@ -315,7 +316,8 @@ export class Transport {
   ) {
     this.localServer = new LocalServer(
       this.lobbyConfig,
-      this.lobbyConfig.gameRecord !== undefined,
+      this.lobbyConfig.gameRecord !== undefined ||
+        this.lobbyConfig.progressiveReplay !== undefined,
       this.eventBus,
     );
     this.localServer.updateCallback(onconnect, onmessage);

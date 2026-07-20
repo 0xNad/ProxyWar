@@ -8,74 +8,45 @@ import {
   loadAgentDemoHubModel,
   proxyWarAgentProtocolSchema,
   proxyWarAgentStartJson,
-  renderProxyWarAgentStartHtml,
-  renderProxyWarPublicHtml,
   renderAgentDemoHubHtml,
   renderProxyWarAdminHtml,
+  renderProxyWarAgentStartHtml,
+  renderProxyWarPublicHtml,
   renderProxyWarTesterDashboardHtml,
 } from "../server/agents/AgentDemoHub";
-import { renderQuickStartPlayHtml } from "../server/agents/QuickStartPlayPage";
 import {
   buildAgentDemoJobCommand,
-  proxyWarTesterSavedRosterJobDefaults,
-  type AgentDemoJobRequest,
-  type AgentDemoJobRecord,
   loadProxyWarHouseAgentBrain,
   normalizeAgentDemoJobRequest,
+  proxyWarTesterSavedRosterJobDefaults,
+  type AgentDemoJobRecord,
+  type AgentDemoJobRequest,
 } from "../server/agents/AgentDemoServerJobs";
-import {
-  parsePlayerStrategySpec,
-  PlayerStrategySpec,
-} from "../server/agents/PlayerStrategySpec";
-import {
-  defaultProxyWarNationsDir,
-  deleteProxyWarNation,
-  listProxyWarNations,
-  saveProxyWarNation,
-  syncProxyWarActiveRoster,
-} from "../server/agents/ProxyWarNationRegistry";
-import type { ProxyWarDoctrine } from "../server/agents/ProxyWarNationRegistry";
-import {
-  ExternalAgentRelayError,
-  ExternalAgentRelayStore,
-} from "../server/agents/ExternalAgentRelay";
 import { AgentRelayRateGuard } from "../server/agents/AgentRelayRateGuard";
-import type { ExternalAgentRequest } from "../server/agents/ExternalHttpAgentBrain";
+import { gameRecordFileIsRenderable } from "../server/agents/AgentSpectatorReplay";
 import {
   agentStrategyProfiles,
   type AgentStrategyProfile,
 } from "../server/agents/AgentTypes";
 import {
-  betaSessionCookieHeader,
-  clearBetaSessionCookieHeader,
-  createProxyWarBetaSessionToken,
-  loadProxyWarBetaAccessConfig,
-  normalizeProxyWarBetaReturnTo,
-  normalizeProxyWarBetaFeedback,
-  parseCookieHeader,
-  renderProxyWarBetaLoginHtml,
-  verifyProxyWarBetaInviteCode,
-  verifyProxyWarBetaSessionToken,
-} from "../server/agents/ProxyWarBetaAccess";
-import {
-  isProxyWarPublicDoc,
-  isProxyWarPublicExternalAgentExample,
-  isProxyWarPublicLeagueArtifact,
-  isProxyWarPublicLeaguePath,
-  isProxyWarPublicRendererAssetPath,
-  isProxyWarPublicRunArtifact,
-  isProxyWarPublicTournamentArtifact,
-  isSafeProxyWarArtifactSegment,
-  proxyWarLeagueContentSecurityPolicy,
-  proxyWarPublicRendererAssetPrefixes,
-} from "../server/agents/ProxyWarPublicArtifacts";
-import {
   checkExternalAgentEndpoint,
   normalizeExternalAgentHealthCheckInput,
 } from "../server/agents/ExternalAgentHealthCheck";
-import { resolveExternalAgentToken } from "../server/agents/ExternalAgentSecrets";
 import { assertExternalAgentEndpointAllowed } from "../server/agents/ExternalAgentNetworkPolicy";
-import { gameRecordFileIsRenderable } from "../server/agents/AgentSpectatorReplay";
+import {
+  ExternalAgentRelayError,
+  ExternalAgentRelayStore,
+} from "../server/agents/ExternalAgentRelay";
+import {
+  normalizeExternalAgentReplaySandboxInput,
+  replayExternalAgentDecision,
+} from "../server/agents/ExternalAgentReplaySandbox";
+import { resolveExternalAgentToken } from "../server/agents/ExternalAgentSecrets";
+import type { ExternalAgentRequest } from "../server/agents/ExternalHttpAgentBrain";
+import {
+  parsePlayerStrategySpec,
+  PlayerStrategySpec,
+} from "../server/agents/PlayerStrategySpec";
 import {
   assertProxyWarActiveRosterExternalEndpointsHealthy,
   checkProxyWarActiveRosterExternalEndpoints,
@@ -87,13 +58,43 @@ import {
   normalizeProxyWarAgentCardInput,
 } from "../server/agents/ProxyWarAgentCard";
 import {
-  normalizeExternalAgentReplaySandboxInput,
-  replayExternalAgentDecision,
-} from "../server/agents/ExternalAgentReplaySandbox";
+  betaSessionCookieHeader,
+  clearBetaSessionCookieHeader,
+  createProxyWarBetaSessionToken,
+  loadProxyWarBetaAccessConfig,
+  normalizeProxyWarBetaFeedback,
+  normalizeProxyWarBetaReturnTo,
+  parseCookieHeader,
+  renderProxyWarBetaLoginHtml,
+  verifyProxyWarBetaInviteCode,
+  verifyProxyWarBetaSessionToken,
+} from "../server/agents/ProxyWarBetaAccess";
 import {
   buildProxyWarDemoServerUrls,
   loadProxyWarDemoServerNetworkConfig,
 } from "../server/agents/ProxyWarDemoServerConfig";
+import type { ProxyWarDoctrine } from "../server/agents/ProxyWarNationRegistry";
+import {
+  defaultProxyWarNationsDir,
+  deleteProxyWarNation,
+  listProxyWarNations,
+  saveProxyWarNation,
+  syncProxyWarActiveRoster,
+} from "../server/agents/ProxyWarNationRegistry";
+import {
+  isProxyWarPublicDoc,
+  isProxyWarPublicExternalAgentExample,
+  isProxyWarPublicLeagueArtifact,
+  isProxyWarPublicLeaguePath,
+  isProxyWarPublicPremiereReadPath,
+  isProxyWarPublicPremiereWritePath,
+  isProxyWarPublicRendererAssetPath,
+  isProxyWarPublicRunArtifact,
+  isProxyWarPublicTournamentArtifact,
+  isSafeProxyWarArtifactSegment,
+  proxyWarLeagueContentSecurityPolicy,
+  proxyWarPublicRendererAssetPrefixes,
+} from "../server/agents/ProxyWarPublicArtifacts";
 import {
   buildProxyWarPublicReadinessReport,
   type ProxyWarPublicReadinessReport,
@@ -103,10 +104,25 @@ import {
   ProxyWarRateLimiter,
   type ProxyWarRateLimitSnapshot,
 } from "../server/agents/ProxyWarRateLimit";
+import { renderQuickStartPlayHtml } from "../server/agents/QuickStartPlayPage";
 import {
   getAppShellContent,
   setHtmlNoCacheHeaders,
 } from "../server/RenderHtml";
+import { ReplayPremiereAnonymousWriteLimiter } from "../server/replay-premiere/ReplayPremiereAnonymousWriteLimiter";
+import { ReplayPremiereGuestSecurity } from "../server/replay-premiere/ReplayPremiereGuestSecurity";
+import {
+  createReplayPremiereRouter,
+  ReplayPremiereHttpRegistry,
+} from "../server/replay-premiere/ReplayPremiereHttp";
+import { createReplayPremierePublicPageRouter } from "../server/replay-premiere/ReplayPremierePublicPage";
+import { ReplayPremiereRuntimeRegistry } from "../server/replay-premiere/ReplayPremiereRuntimeCoordinator";
+import {
+  loadOrCreateReplayPremiereGuestHmacKey,
+  REPLAY_PREMIERE_HMAC_HEX_ENV,
+  resolveReplayPremierePrivateStateRoot,
+} from "../server/replay-premiere/ReplayPremiereSecrets";
+import { startReplayPremiereProduction } from "../server/replay-premiere/ReplayPremiereStartup";
 import { applyStaticAssetCacheControl } from "../server/StaticAssetCache";
 
 const app = express();
@@ -114,6 +130,16 @@ const networkConfig = loadProxyWarDemoServerNetworkConfig();
 const serverUrls = buildProxyWarDemoServerUrls(networkConfig);
 const port = networkConfig.port;
 const host = networkConfig.host;
+const replayPremierePublicOrigin = new URL(
+  serverUrls.publicUrl ?? serverUrls.localUrl,
+).origin;
+export const replayPremierePrivateStateRoot =
+  resolveReplayPremierePrivateStateRoot();
+const replayPremiereAnonymousWriteLimiter =
+  new ReplayPremiereAnonymousWriteLimiter();
+export const replayPremiereHttpRegistry = new ReplayPremiereHttpRegistry(
+  replayPremiereAnonymousWriteLimiter.admit,
+);
 const rendererPort = Number(process.env.AI_LEAGUE_RENDERER_PORT ?? "9000");
 const rendererListenHost = process.env.AI_LEAGUE_RENDERER_HOST ?? "127.0.0.1";
 const rendererBaseUrl =
@@ -132,10 +158,7 @@ const publicReplayRenderabilityCache = new Map<
   { fingerprint: string; verdict: Promise<boolean> }
 >();
 const publicReplayRenderabilityCacheMaxEntries = 256;
-const tournamentsRootDir = path.join(
-  artifactsRootDir,
-  "ai-league-tournaments",
-);
+const tournamentsRootDir = path.join(artifactsRootDir, "ai-league-tournaments");
 const evaluationsRootDir = path.join(artifactsRootDir, "ai-league-evals");
 const jobsRootDir = path.join(artifactsRootDir, "ai-league-demo-jobs");
 const jobsPath = path.join(jobsRootDir, "jobs.json");
@@ -150,6 +173,42 @@ const externalAgentExampleRootDir = path.join(
   "examples",
   "external-agent",
 );
+const replayPremiereGuestSecurity = new ReplayPremiereGuestSecurity({
+  hmacKey: await loadOrCreateReplayPremiereGuestHmacKey({
+    privateStateRoot: replayPremierePrivateStateRoot,
+    servedRoots: [
+      process.cwd(),
+      staticRootDir,
+      artifactsRootDir,
+      docsRootDir,
+      externalAgentExampleRootDir,
+    ],
+    configuredHex: firstConfiguredEnv(REPLAY_PREMIERE_HMAC_HEX_ENV),
+  }),
+  expectedOrigin: replayPremierePublicOrigin,
+  production: replayPremierePublicOrigin.startsWith("https://"),
+});
+export const replayPremiereRuntimeRegistry =
+  new ReplayPremiereRuntimeRegistry();
+const replayPremiereProduction = await startReplayPremiereProduction({
+  privateStateRoot: replayPremierePrivateStateRoot,
+  servedRoots: [
+    process.cwd(),
+    staticRootDir,
+    artifactsRootDir,
+    docsRootDir,
+    externalAgentExampleRootDir,
+  ],
+  publicOrigin: replayPremierePublicOrigin,
+  security: replayPremiereGuestSecurity,
+  httpRegistry: replayPremiereHttpRegistry,
+  runtimeRegistry: replayPremiereRuntimeRegistry,
+  onDiagnostic: (diagnostic) => {
+    console.error(
+      `Replay Premiere recovery rejected ${diagnostic.target}: ${diagnostic.operatorCode}`,
+    );
+  },
+});
 const betaAccess = loadProxyWarBetaAccessConfig();
 const betaFeedbackRootDir = path.join(
   artifactsRootDir,
@@ -184,22 +243,13 @@ const rateLimits = {
     firstConfiguredEnv("PROXYWAR_RATE_LIMIT_BETA_LOGIN"),
     20,
   ),
-  jobs: positiveInt(
-    firstConfiguredEnv("PROXYWAR_RATE_LIMIT_JOBS"),
-    12,
-  ),
-  nations: positiveInt(
-    firstConfiguredEnv("PROXYWAR_RATE_LIMIT_NATIONS"),
-    30,
-  ),
+  jobs: positiveInt(firstConfiguredEnv("PROXYWAR_RATE_LIMIT_JOBS"), 12),
+  nations: positiveInt(firstConfiguredEnv("PROXYWAR_RATE_LIMIT_NATIONS"), 30),
   externalCheck: positiveInt(
     firstConfiguredEnv("PROXYWAR_RATE_LIMIT_EXTERNAL_CHECK"),
     60,
   ),
-  feedback: positiveInt(
-    firstConfiguredEnv("PROXYWAR_RATE_LIMIT_FEEDBACK"),
-    30,
-  ),
+  feedback: positiveInt(firstConfiguredEnv("PROXYWAR_RATE_LIMIT_FEEDBACK"), 30),
   // Managed-relay routes are polled by automated workers (~1 long poll / 25s
   // steady, faster during active play), so this scope is far more generous than
   // the human-initiated scopes above. It only caps tunnelled external callers;
@@ -255,6 +305,23 @@ if (interruptedJobsReset > 0) {
   await persistJobs();
 }
 
+// Mount before the generic parser so Premiere's stricter 32 KiB body ceiling
+// applies to both declared-length and chunked requests.
+app.use(
+  createReplayPremiereRouter({
+    registry: replayPremiereHttpRegistry,
+    security: replayPremiereGuestSecurity,
+  }),
+);
+app.use(
+  createReplayPremierePublicPageRouter({
+    registry: replayPremiereHttpRegistry,
+    loadAppShell: () =>
+      getAppShellContent(path.resolve(staticRootDir, "index.html")),
+    publicOrigin: replayPremierePublicOrigin,
+    pageContentSecurityPolicy: proxyWarLeagueContentSecurityPolicy(),
+  }),
+);
 app.use(express.json({ limit: "256kb" }));
 app.use(express.urlencoded({ extended: false }));
 app.use((_req, res, next) => {
@@ -268,19 +335,23 @@ app.use((_req, res, next) => {
 // its replay renders. Every other surface — beta login, hub, /play, tester
 // dashboard, admin, relay, job APIs (anything that could start a match on
 // the operator's account) — is unreachable. Reversible via env flag.
-const leagueWrapperOnly =
-  process.env.PROXYWAR_LEAGUE_WRAPPER_ONLY === "true";
+const leagueWrapperOnly = process.env.PROXYWAR_LEAGUE_WRAPPER_ONLY === "true";
 if (leagueWrapperOnly) {
   app.use((req, res, next) => {
     if (req.method === "GET" || req.method === "HEAD") {
       if (
         isProxyWarPublicLeaguePath(req.path) ||
+        isProxyWarPublicPremiereReadPath(req.path) ||
         isProxyWarPublicRendererAssetPath(req.path)
       ) {
         next();
         return;
       }
       res.redirect("/league");
+      return;
+    }
+    if (req.method === "POST" && isProxyWarPublicPremiereWritePath(req.path)) {
+      next();
       return;
     }
     res.status(404).send("not available in league wrapper mode");
@@ -400,7 +471,10 @@ app.get("/api/agent-relay/sessions/:sessionID/poll", async (req, res) => {
     return;
   }
   try {
-    await restoreSavedRelaySessionIfPossible(req.params.sessionID, bearerToken(req));
+    await restoreSavedRelaySessionIfPossible(
+      req.params.sessionID,
+      bearerToken(req),
+    );
     const result = await agentRelay.poll({
       sessionID: req.params.sessionID,
       token: bearerToken(req),
@@ -437,7 +511,10 @@ app.post("/api/agent-relay/sessions/:sessionID/requests", async (req, res) => {
     return;
   }
   try {
-    await restoreSavedRelaySessionIfPossible(req.params.sessionID, bearerToken(req));
+    await restoreSavedRelaySessionIfPossible(
+      req.params.sessionID,
+      bearerToken(req),
+    );
     const body = req.body as Record<string, unknown>;
     const result = await agentRelay.requestDecision({
       sessionID: req.params.sessionID,
@@ -463,8 +540,13 @@ app.use((req, res, next) => {
   if (
     (req.method === "GET" || req.method === "HEAD") &&
     (isProxyWarPublicLeaguePath(req.path) ||
+      isProxyWarPublicPremiereReadPath(req.path) ||
       isProxyWarPublicRendererAssetPath(req.path))
   ) {
+    next();
+    return;
+  }
+  if (req.method === "POST" && isProxyWarPublicPremiereWritePath(req.path)) {
     next();
     return;
   }
@@ -494,7 +576,10 @@ app.get("/league", (_req, res) => {
 
 if (betaAccess.enabled) {
   app.get("/docs/:artifact", servePublicDoc);
-  app.get("/examples/external-agent/:artifact", servePublicExternalAgentExample);
+  app.get(
+    "/examples/external-agent/:artifact",
+    servePublicExternalAgentExample,
+  );
   app.get("/runs/:runID/:artifact", servePublicRunArtifact);
   app.get("/ai-league-runs/:runID/:artifact", servePublicRunArtifact);
   app.get(
@@ -505,10 +590,7 @@ if (betaAccess.enabled) {
   const leagueIndexRelativePath = path
     .join("league", "index.html")
     .toLocaleLowerCase("en-US");
-  const setRunArtifactHeaders = (
-    res: Response,
-    filePath: string,
-  ): void => {
+  const setRunArtifactHeaders = (res: Response, filePath: string): void => {
     const relativePath = path
       .relative(runsRootDir, path.resolve(filePath))
       .toLocaleLowerCase("en-US");
@@ -520,7 +602,10 @@ if (betaAccess.enabled) {
     }
   };
   app.get("/docs/:artifact", servePublicDoc);
-  app.get("/examples/external-agent/:artifact", servePublicExternalAgentExample);
+  app.get(
+    "/examples/external-agent/:artifact",
+    servePublicExternalAgentExample,
+  );
   app.use(
     "/runs",
     express.static(runsRootDir, {
@@ -552,11 +637,7 @@ if (leagueWrapperOnly) {
       return;
     }
     const runID = stringParam(req.params.runID);
-    const gameRecordPath = path.resolve(
-      runsRootDir,
-      runID,
-      "game-record.json",
-    );
+    const gameRecordPath = path.resolve(runsRootDir, runID, "game-record.json");
     if (
       !isInsideRoot(gameRecordPath, runsRootDir) ||
       !(await publicReplayRecordIsRenderable(gameRecordPath))
@@ -770,16 +851,18 @@ app.get("/api/tester-dashboard", async (_req, res, next) => {
         ? { enabled: true, label: betaAccess.label }
         : undefined,
     });
-    const latestRun = model.runs.find((run) => run.hasOpenFrontReplay) ?? model.runs[0];
+    const latestRun =
+      model.runs.find((run) => run.hasOpenFrontReplay) ?? model.runs[0];
     res.json({
       ok: true,
       queue: {
         running: runningJobID !== null,
         queuedJobCount: queuedJobIDs.length,
         maxQueuedJobs,
-        activeJob: recentJobs().find(
-          (job) => job.status === "running" || job.status === "queued",
-        ) ?? null,
+        activeJob:
+          recentJobs().find(
+            (job) => job.status === "running" || job.status === "queued",
+          ) ?? null,
       },
       latestRun:
         latestRun === undefined
@@ -798,7 +881,8 @@ app.get("/api/tester-dashboard", async (_req, res, next) => {
               decisionCount: latestRun.decisionCount,
               acceptedCount: latestRun.acceptedCount,
               rejectedCount: latestRun.rejectedCount,
-              postSpawnNonHoldActionCount: latestRun.postSpawnNonHoldActionCount,
+              postSpawnNonHoldActionCount:
+                latestRun.postSpawnNonHoldActionCount,
             },
       savedAgents: model.savedNations.map((nation) => ({
         nationID: nation.nationID,
@@ -815,7 +899,14 @@ app.get("/api/tester-dashboard", async (_req, res, next) => {
 });
 
 app.post("/api/tester-dashboard/endpoint-health", async (req, res) => {
-  if (!enforceRateLimit("external-agent-check", rateLimits.externalCheck, req, res)) {
+  if (
+    !enforceRateLimit(
+      "external-agent-check",
+      rateLimits.externalCheck,
+      req,
+      res,
+    )
+  ) {
     return;
   }
   try {
@@ -838,7 +929,10 @@ app.post("/api/tester-dashboard/endpoint-health", async (req, res) => {
           agentName: nation.agentName,
           profile: nation.profile,
           ok: live,
-          endpoint: relaySessionLabel(provider.relayBaseUrl, provider.sessionID),
+          endpoint: relaySessionLabel(
+            provider.relayBaseUrl,
+            provider.sessionID,
+          ),
           latencyMs: 0,
           ...(live
             ? {
@@ -962,18 +1056,18 @@ app.post("/api/agent-relay/sessions", async (req, res) => {
     });
     const queued = queueMatch ? enqueueProxyWarJob(request) : null;
     if (queued?.ok === false) {
-        agentRelay.closeSession({
-          sessionID: relay.sessionID,
-          token: relay.sessionToken,
-        });
-        res.status(429).json({
-          ok: false,
-          error: queued.error,
-          runningJobID,
-          queuedJobCount: queuedJobIDs.length,
-        });
-        return;
-      }
+      agentRelay.closeSession({
+        sessionID: relay.sessionID,
+        token: relay.sessionToken,
+      });
+      res.status(429).json({
+        ok: false,
+        error: queued.error,
+        runningJobID,
+        queuedJobCount: queuedJobIDs.length,
+      });
+      return;
+    }
 
     res.status(queueMatch ? 202 : 201).json({
       ok: true,
@@ -1005,7 +1099,9 @@ app.post("/api/jobs", async (req, res) => {
     return;
   }
   try {
-    const request = normalizeAgentDemoJobRequest(req.body as Record<string, unknown>);
+    const request = normalizeAgentDemoJobRequest(
+      req.body as Record<string, unknown>,
+    );
     if (request.roster === "saved") {
       const activeRoster = await syncProxyWarActiveRoster({
         nationsDir: nationsRootDir,
@@ -1034,13 +1130,15 @@ app.post("/api/jobs", async (req, res) => {
       status: queued.job.status,
     });
   } catch (error) {
-    res.status(error instanceof ProxyWarActiveRosterHealthError ? 422 : 400).json({
-      ok: false,
-      error: error instanceof Error ? error.message : "invalid job request",
-      ...(error instanceof ProxyWarActiveRosterHealthError
-        ? { health: error.report }
-        : {}),
-    });
+    res
+      .status(error instanceof ProxyWarActiveRosterHealthError ? 422 : 400)
+      .json({
+        ok: false,
+        error: error instanceof Error ? error.message : "invalid job request",
+        ...(error instanceof ProxyWarActiveRosterHealthError
+          ? { health: error.report }
+          : {}),
+      });
   }
 });
 
@@ -1068,9 +1166,7 @@ app.post("/api/quick-start", async (req, res) => {
   }
   try {
     const body = (req.body ?? {}) as Record<string, unknown>;
-    const maxSteps = Number(
-      process.env.PROXYWAR_QUICK_START_MAX_STEPS ?? "40",
-    );
+    const maxSteps = Number(process.env.PROXYWAR_QUICK_START_MAX_STEPS ?? "40");
     const request = normalizeAgentDemoJobRequest({
       kind: "demo",
       brain: "planner-openrouter",
@@ -1153,35 +1249,36 @@ interface ProxyWarLobby {
 // beat; the /play result card detects it by this exact name (keep them in sync).
 const HOUSE_CHAMPION_NAME = "Proxy Champion";
 const LOBBY_GRACE_MS = Number(process.env.PROXYWAR_LOBBY_GRACE_MS ?? "25000");
-const HOUSE_AGENTS: { agentName: string; strategySpec: PlayerStrategySpec }[] = [
-  {
-    agentName: HOUSE_CHAMPION_NAME,
-    strategySpec: {
-      posture: "aggressive",
-      objectiveBias: "expand",
-      doctrine:
-        "Expand relentlessly into open land and take territory from the weakest neighbor you can reach. Never sit idle — always be expanding or pressing an attack. Hold at most ONE alliance of convenience and break it the moment you can seize the ally's land; do not over-ally or you will be ganged up on. Avoid fighting two strong powers at once: pick off the weak first, then turn on the strong.",
+const HOUSE_AGENTS: { agentName: string; strategySpec: PlayerStrategySpec }[] =
+  [
+    {
+      agentName: HOUSE_CHAMPION_NAME,
+      strategySpec: {
+        posture: "aggressive",
+        objectiveBias: "expand",
+        doctrine:
+          "Expand relentlessly into open land and take territory from the weakest neighbor you can reach. Never sit idle — always be expanding or pressing an attack. Hold at most ONE alliance of convenience and break it the moment you can seize the ally's land; do not over-ally or you will be ganged up on. Avoid fighting two strong powers at once: pick off the weak first, then turn on the strong.",
+      },
     },
-  },
-  {
-    agentName: "Ironwall",
-    strategySpec: {
-      posture: "defensive",
-      objectiveBias: "economy",
-      doctrine:
-        "Build a dominant economy — cities first, then factories and ports. Fortify borders and only fight when attacked or when a neighbor is clearly weaker on your border. Win on production and late-game troop mass.",
+    {
+      agentName: "Ironwall",
+      strategySpec: {
+        posture: "defensive",
+        objectiveBias: "economy",
+        doctrine:
+          "Build a dominant economy — cities first, then factories and ports. Fortify borders and only fight when attacked or when a neighbor is clearly weaker on your border. Win on production and late-game troop mass.",
+      },
     },
-  },
-  {
-    agentName: "Coalition",
-    strategySpec: {
-      posture: "diplomatic",
-      objectiveBias: "diplomacy",
-      doctrine:
-        "Ally widely and early, back allies with gold, and turn the lobby against whoever is in the lead. Avoid first strikes; let rivals bleed each other, then take the spoils.",
+    {
+      agentName: "Coalition",
+      strategySpec: {
+        posture: "diplomatic",
+        objectiveBias: "diplomacy",
+        doctrine:
+          "Ally widely and early, back allies with gold, and turn the lobby against whoever is in the lead. Avoid first strikes; let rivals bleed each other, then take the spoils.",
+      },
     },
-  },
-];
+  ];
 let formingLobby: ProxyWarLobby | null = null;
 const lobbiesById = new Map<string, ProxyWarLobby>();
 
@@ -1313,7 +1410,8 @@ app.post("/api/lobby/join", (req, res) => {
     });
     return;
   }
-  const rawName = typeof body.agentName === "string" ? body.agentName.trim() : "";
+  const rawName =
+    typeof body.agentName === "string" ? body.agentName.trim() : "";
   const agentName = (rawName === "" ? "Agent" : rawName).slice(0, 27);
   const lobby = currentFormingLobby();
   const token = randomUUID();
@@ -1471,7 +1569,9 @@ app.post("/api/nations", async (req, res) => {
   try {
     const body = req.body as Record<string, unknown>;
     await assertExternalEndpointInputAllowed(body);
-    const result = await saveProxyWarNation(body, { nationsDir: nationsRootDir });
+    const result = await saveProxyWarNation(body, {
+      nationsDir: nationsRootDir,
+    });
     res.status(201).json({
       nation: {
         nationID: result.nation.nationID,
@@ -1600,7 +1700,9 @@ app.post("/api/agent-cards/import-and-run", async (req, res) => {
       const healthMessage = [
         health.failureReason ?? "external agent health check failed",
         health.fixHint,
-      ].filter(Boolean).join(" Fix: ");
+      ]
+        .filter(Boolean)
+        .join(" Fix: ");
       res.status(422).json({
         ok: false,
         error: healthMessage,
@@ -1802,11 +1904,19 @@ const server = app.listen(port, host, () => {
   console.log("Press Ctrl-C to stop.");
 });
 
+let shutdownStarted = false;
 for (const signal of ["SIGINT", "SIGTERM"] as const) {
   process.on(signal, () => {
+    if (shutdownStarted) return;
+    shutdownStarted = true;
     runningChild?.kill(signal);
     renderer?.kill(signal);
-    server.close(() => process.exit(0));
+    server.close(() => {
+      void replayPremiereProduction.service.close().then(
+        () => process.exit(0),
+        () => process.exit(1),
+      );
+    });
   });
 }
 
@@ -1904,7 +2014,11 @@ async function restoreSavedRelaySessionIfPossible(
   sessionID: string,
   bearer: string | undefined,
 ): Promise<void> {
-  if (agentRelay.hasSession(sessionID) || bearer === undefined || bearer === "") {
+  if (
+    agentRelay.hasSession(sessionID) ||
+    bearer === undefined ||
+    bearer === ""
+  ) {
     return;
   }
   const nations = await listProxyWarNations(nationsRootDir);
@@ -1956,7 +2070,8 @@ function sendRelayError(res: Response, error: unknown): void {
   }
   res.status(400).json({
     ok: false,
-    error: error instanceof Error ? error.message : "invalid managed relay request",
+    error:
+      error instanceof Error ? error.message : "invalid managed relay request",
   });
 }
 
@@ -2004,7 +2119,8 @@ function cleanRelayDoctrine(value: unknown): ProxyWarDoctrine {
     "diplomatic",
     "pressure",
   ] as const;
-  return typeof value === "string" && doctrines.includes(value as ProxyWarDoctrine)
+  return typeof value === "string" &&
+    doctrines.includes(value as ProxyWarDoctrine)
     ? (value as ProxyWarDoctrine)
     : "balanced";
 }
@@ -2035,7 +2151,10 @@ function normalizeRelayDecisionRequest(value: unknown): ExternalAgentRequest {
       "Use protocolVersion proxywar-agent-v1.",
     );
   }
-  if (!Array.isArray(request.legalActions) || request.legalActions.length === 0) {
+  if (
+    !Array.isArray(request.legalActions) ||
+    request.legalActions.length === 0
+  ) {
     throw new ExternalAgentRelayError(
       "Managed relay request must include legalActions.",
       400,
@@ -2049,7 +2168,10 @@ function normalizeRelayDecisionRequest(value: unknown): ExternalAgentRequest {
 async function assertExternalEndpointInputAllowed(
   input: Record<string, unknown>,
 ): Promise<void> {
-  if (typeof input.endpointUrl !== "string" || input.endpointUrl.trim() === "") {
+  if (
+    typeof input.endpointUrl !== "string" ||
+    input.endpointUrl.trim() === ""
+  ) {
     return;
   }
   await assertExternalAgentEndpointAllowed(input.endpointUrl, {
@@ -2148,11 +2270,7 @@ function isLoopbackAddress(value: string): boolean {
 }
 
 function rendererProxyPrefixes(): string[] {
-  return [
-    "/ai-league-replay",
-    "/@fs",
-    ...proxyWarPublicRendererAssetPrefixes,
-  ];
+  return ["/ai-league-replay", "/@fs", ...proxyWarPublicRendererAssetPrefixes];
 }
 
 function proxyRendererRequest(
@@ -2160,17 +2278,23 @@ function proxyRendererRequest(
   res: express.Response,
 ): void {
   if (process.env.AI_LEAGUE_DEMO_RENDERER === "false") {
-    res.status(503).send("Proxy War renderer is not running for this demo server.");
+    res
+      .status(503)
+      .send("Proxy War renderer is not running for this demo server.");
     return;
   }
   if (!isLoopbackRendererBaseUrl(rendererBaseUrl)) {
     res
       .status(503)
-      .send("Proxy War renderer proxy is restricted to a loopback renderer URL.");
+      .send(
+        "Proxy War renderer proxy is restricted to a loopback renderer URL.",
+      );
     return;
   }
   if (betaAccess.enabled && req.originalUrl.startsWith("/@fs")) {
-    res.status(404).send("renderer file-system route is not exposed in beta mode");
+    res
+      .status(404)
+      .send("renderer file-system route is not exposed in beta mode");
     return;
   }
   if (req.method !== "GET" && req.method !== "HEAD") {
@@ -2196,9 +2320,7 @@ function proxyRendererRequest(
     },
   );
   proxyReq.on("error", (error) => {
-    res
-      .status(502)
-      .send(`Proxy War renderer is unavailable: ${error.message}`);
+    res.status(502).send(`Proxy War renderer is unavailable: ${error.message}`);
   });
   proxyReq.end();
 }
@@ -2313,9 +2435,7 @@ function servePublicExternalAgentExample(
   );
 }
 
-function jobResponse(
-  job: AgentDemoJobRecord,
-): AgentDemoJobRecord & {
+function jobResponse(job: AgentDemoJobRecord): AgentDemoJobRecord & {
   replayUrl?: string;
   reportUrl?: string;
   tournamentUrl?: string;
@@ -2370,11 +2490,13 @@ function redactLocalPaths(value: string): string {
 
 function isInsideRoot(filePath: string, rootDir: string): boolean {
   const relative = path.relative(path.resolve(rootDir), filePath);
-  return relative !== "" && !relative.startsWith("..") && !path.isAbsolute(relative);
+  return (
+    relative !== "" && !relative.startsWith("..") && !path.isAbsolute(relative)
+  );
 }
 
 function stringParam(value: string | string[]): string {
-  return Array.isArray(value) ? value[0] ?? "" : value;
+  return Array.isArray(value) ? (value[0] ?? "") : value;
 }
 
 function isLoopbackRendererBaseUrl(value: string): boolean {
@@ -2411,30 +2533,31 @@ function rendererProxyHeaders(
 }
 
 function maybeStartRenderer(): ChildProcess | null {
-  if (
-    leagueWrapperOnly ||
-    process.env.AI_LEAGUE_DEMO_RENDERER === "false"
-  ) {
+  if (leagueWrapperOnly || process.env.AI_LEAGUE_DEMO_RENDERER === "false") {
     return null;
   }
-  const child = spawn(localBin("vite"), [
-    "--host",
-    rendererListenHost,
-    "--port",
-    String(rendererPort),
-    "--strictPort",
-  ], {
-    cwd: process.cwd(),
-    env: {
-      ...process.env,
-      GAME_ENV: "dev",
-      AI_LEAGUE_DEMO_HMR_DIRECT: "true",
-      AI_LEAGUE_RENDERER_PORT: String(rendererPort),
-      SKIP_BROWSER_OPEN: "true",
+  const child = spawn(
+    localBin("vite"),
+    [
+      "--host",
+      rendererListenHost,
+      "--port",
+      String(rendererPort),
+      "--strictPort",
+    ],
+    {
+      cwd: process.cwd(),
+      env: {
+        ...process.env,
+        GAME_ENV: "dev",
+        AI_LEAGUE_DEMO_HMR_DIRECT: "true",
+        AI_LEAGUE_RENDERER_PORT: String(rendererPort),
+        SKIP_BROWSER_OPEN: "true",
+      },
+      stdio: ["ignore", "pipe", "pipe"],
+      windowsHide: true,
     },
-    stdio: ["ignore", "pipe", "pipe"],
-    windowsHide: true,
-  });
+  );
   child.stdout.on("data", (chunk: Buffer) => process.stdout.write(chunk));
   child.stderr.on("data", (chunk: Buffer) => process.stderr.write(chunk));
   child.on("error", (error) => {
@@ -2637,7 +2760,9 @@ async function attachExactArtifact(
 ): Promise<boolean> {
   if (job.request.kind === "demo") {
     const runDir = path.join(runsRootDir, artifactID);
-    const summary = await readJsonRecord(path.join(runDir, "match-summary.json"));
+    const summary = await readJsonRecord(
+      path.join(runDir, "match-summary.json"),
+    );
     if (summary?.runID === artifactID) {
       const hasReplayRecord = await gameRecordFileIsRenderable(
         path.join(runDir, "game-record.json"),
@@ -2722,7 +2847,11 @@ async function latestArtifactID(input: {
       dirents
         .filter((dirent) => dirent.isDirectory())
         .map(async (dirent) => {
-          const summaryPath = path.join(input.rootDir, dirent.name, input.summaryFile);
+          const summaryPath = path.join(
+            input.rootDir,
+            dirent.name,
+            input.summaryFile,
+          );
           const summary = await readJsonRecord(summaryPath);
           if (summary === null) return null;
           const completedAt = Date.parse(String(summary.completedAt ?? ""));
@@ -2754,7 +2883,9 @@ async function readJsonRecord(
 ): Promise<Record<string, unknown> | null> {
   try {
     const parsed = JSON.parse(await fs.readFile(filePath, "utf8")) as unknown;
-    return parsed !== null && typeof parsed === "object" && !Array.isArray(parsed)
+    return parsed !== null &&
+      typeof parsed === "object" &&
+      !Array.isArray(parsed)
       ? (parsed as Record<string, unknown>)
       : null;
   } catch {

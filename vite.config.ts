@@ -190,9 +190,9 @@ export default defineConfig(({ mode }) => {
       // vitest REPLACES its default `exclude` when this is set, so the
       // defaults (node_modules, dist, …) are restated here, plus artifacts/
       // and outputs/ so archived test copies under artifacts/ (pre-rename
-      // cleanup snapshots) are not scanned as live tests, and .claude/ so test
-      // copies inside sibling-session git worktrees (.claude/worktrees/<id>/)
-      // are not scanned as live tests of this checkout.
+      // cleanup snapshots) are not scanned as live tests, and .claude/ plus
+      // .codex/ so test copies inside sibling-session git worktrees are not
+      // scanned as live tests of this checkout.
       exclude: [
         "**/node_modules/**",
         "**/dist/**",
@@ -202,6 +202,7 @@ export default defineConfig(({ mode }) => {
         "**/artifacts/**",
         "**/outputs/**",
         "**/.claude/**",
+        "**/.codex/**",
       ],
     },
     root: "./",

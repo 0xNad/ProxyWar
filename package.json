@@ -14,6 +14,8 @@
     "test": "vitest run && vitest run tests/server",
     "agent:smoke": "tsx src/scripts/ai-agent-smoke.ts",
     "agent:league-smoke": "cross-env GAME_ENV=dev tsx src/scripts/ai-agent-league-smoke.ts",
+    "premiere:controlled-exhibition": "cross-env GAME_ENV=dev tsx src/scripts/replay-premiere-controlled-exhibition.ts",
+    "premiere:admit": "tsx src/scripts/replay-premiere-admit.ts",
     "agent:league-smoke:mock-llm": "cross-env GAME_ENV=dev tsx src/scripts/ai-agent-league-smoke.ts --brain=mock-llm",
     "agent:league-smoke:mock-llm:stepped": "cross-env GAME_ENV=dev tsx src/scripts/ai-agent-league-smoke.ts --brain=mock-llm --runner=step-locked",
     "agent:league-smoke:real-llm": "cross-env GAME_ENV=dev tsx src/scripts/ai-agent-league-smoke.ts --brain=real-llm --runner=step-locked --scenario=actions --disable-alliance-actions --max-decision-ms=120000",

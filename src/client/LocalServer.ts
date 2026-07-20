@@ -5,6 +5,7 @@ import {
   ClientID,
   ClientMessage,
   ClientSendWinnerMessage,
+  GameStartInfoSchema,
   PartialGameRecordSchema,
   PlayerRecord,
   ServerMessage,
@@ -26,6 +27,10 @@ import {
   ReplaySpeedChangeEvent,
 } from "./InputHandler";
 import {
+  ReplayPremierePlaybackEvent,
+  ReplayPremiereReleasedTurn,
+} from "./ReplayPremierePlayback";
+import {
   defaultReplaySpeedMultiplier,
   ReplaySpeedMultiplier,
 } from "./utilities/ReplaySpeedMultiplier";
@@ -40,6 +45,12 @@ const SPEED_ORDER: ReplaySpeedMultiplier[] = [
 
 // build a small backlog so MAX can catch up.
 const MAX_REPLAY_BACKLOG_TURNS = 60;
+// A late-join catch-up must never enqueue an unbounded replay in one main-
+// thread loop. Worker acknowledgements refill this bounded window one turn at
+// a time, providing backpressure while still allowing the simulation worker to
+// catch up faster than wall-clock playback.
+const MAX_PROGRESSIVE_CATCH_UP_IN_FLIGHT_TURNS = 64;
+const StrictGameStartInfoSchema = GameStartInfoSchema.strict();
 
 export class LocalServer {
   // All turns from the game record on replay.
@@ -51,7 +62,15 @@ export class LocalServer {
   private startedAt: number;
 
   private paused = false;
-  private replaySpeedMultiplier = defaultReplaySpeedMultiplier;
+  private replaySpeedMultiplier: number = defaultReplaySpeedMultiplier;
+
+  private progressiveReplayTurns: Readonly<ReplayPremiereReleasedTurn>[] = [];
+  private progressiveReplayTurnsByTurnNumber = new Map<number, Turn>();
+  private progressiveReplayFinalized = false;
+  private progressiveReplayPendingCatchUp: number | null = null;
+  private progressiveReplayUnsubscribe: (() => void) | null = null;
+  private progressiveReplayPlaybackComplete = false;
+  private running = false;
 
   private clientID: ClientID | undefined;
   private winner: ClientSendWinnerMessage | null = null;
@@ -80,10 +99,24 @@ export class LocalServer {
 
   start() {
     console.log("local server starting");
+    const progressiveReplay = this.lobbyConfig.progressiveReplay;
+    if (progressiveReplay) {
+      const safeStartInfo = StrictGameStartInfoSchema.safeParse(
+        this.lobbyConfig.gameStartInfo,
+      );
+      if (!safeStartInfo.success) {
+        throw new Error("invalid progressive replay gameStartInfo");
+      }
+      // Use the parsed clone so unknown/outcome-bearing fields supplied by an
+      // untrusted public response never cross into the real game client.
+      this.lobbyConfig.gameStartInfo = safeStartInfo.data;
+      this.progressiveReplayUnsubscribe =
+        progressiveReplay.controller.subscribe((event) =>
+          this.onProgressiveReplayEvent(event),
+        );
+    }
     this.turnCheckInterval = setInterval(() => {
-      const turnIntervalMs =
-        this.lobbyConfig.serverConfig.turnIntervalMs() *
-        this.replaySpeedMultiplier;
+      const turnIntervalMs = this.progressiveReplayDelayForNextTurn();
       const backlog = Math.max(0, this.turns.length - this.turnsExecuted);
       const allowReplayBacklog =
         this.replaySpeedMultiplier === ReplaySpeedMultiplier.fastest &&
@@ -94,7 +127,8 @@ export class LocalServer {
         backlog === 0 || (maxBacklog > 0 && backlog < maxBacklog);
       if (
         canQueueNextTurn &&
-        Date.now() > this.turnStartTime + turnIntervalMs
+        turnIntervalMs !== null &&
+        Date.now() >= this.turnStartTime + turnIntervalMs
       ) {
         this.turnStartTime = Date.now();
         // End turn on the server means the client will start processing the turn.
@@ -103,6 +137,12 @@ export class LocalServer {
     }, 5);
 
     this.eventBus.on(ReplaySpeedChangeEvent, (event) => {
+      if (
+        this.lobbyConfig.progressiveReplay &&
+        !this.progressiveReplayFinalized
+      ) {
+        return;
+      }
       this.replaySpeedMultiplier = event.replaySpeedMultiplier;
     });
     this.eventBus.on(ReplayJumpToTurnEvent, (event) => {
@@ -130,6 +170,9 @@ export class LocalServer {
     }
 
     this.startedAt = Date.now();
+    if (progressiveReplay) {
+      this.turnStartTime = this.startedAt;
+    }
     this.clientConnect();
     if (this.lobbyConfig.gameRecord) {
       this.replayTurns = decompressGameRecord(
@@ -149,8 +192,10 @@ export class LocalServer {
       turns: [],
       lobbyCreatedAt: this.lobbyConfig.gameStartInfo.lobbyCreatedAt,
       // Don't send myClientID for replays — viewer has no player identity.
-      myClientID: this.lobbyConfig.gameRecord ? undefined : this.clientID,
+      myClientID: this.isReplay ? undefined : this.clientID,
     } satisfies ServerStartGameMessage);
+    this.running = true;
+    this.runPendingProgressiveCatchUp();
   }
 
   onMessage(clientMsg: ClientMessage) {
@@ -163,10 +208,16 @@ export class LocalServer {
         gameStartInfo: this.lobbyConfig.gameStartInfo!,
         turns: this.turns,
         lobbyCreatedAt: this.lobbyConfig.gameStartInfo!.lobbyCreatedAt,
-        myClientID: this.lobbyConfig.gameRecord ? undefined : this.clientID,
+        myClientID: this.isReplay ? undefined : this.clientID,
       } satisfies ServerStartGameMessage);
     }
     if (clientMsg.type === "intent") {
+      // A premiere is controlled only by the authoritative release stream.
+      // Local pause/action intents must never add a synthetic turn at a
+      // checkpoint boundary.
+      if (this.lobbyConfig.progressiveReplay) {
+        return;
+      }
       // Server stamps clientID - client doesn't send it
       const stampedIntent = {
         ...clientMsg.intent,
@@ -187,14 +238,14 @@ export class LocalServer {
         return;
       }
       // Don't process non-pause intents during replays or while paused
-      if (this.lobbyConfig.gameRecord || this.paused) {
+      if (this.isReplay || this.paused) {
         return;
       }
 
       this.intents.push(stampedIntent);
     }
     if (clientMsg.type === "hash") {
-      if (!this.lobbyConfig.gameRecord) {
+      if (!this.isReplay) {
         if (clientMsg.turnNumber % 100 === 0) {
           // In singleplayer, only store hash every 100 turns to reduce size of game record.
           const turn = this.turns[clientMsg.turnNumber];
@@ -205,8 +256,11 @@ export class LocalServer {
         return;
       }
       // If we are replaying a game then verify hash.
-      const archivedHash = this.replayTurns[clientMsg.turnNumber].hash;
-      if (!archivedHash) {
+      const archivedHash = this.lobbyConfig.progressiveReplay
+        ? this.progressiveReplayTurnsByTurnNumber.get(clientMsg.turnNumber)
+            ?.hash
+        : this.replayTurns[clientMsg.turnNumber]?.hash;
+      if (archivedHash === undefined || archivedHash === null) {
         console.warn(
           `no archived hash found for turn ${clientMsg.turnNumber}, client hash: ${clientMsg.hash}`,
         );
@@ -239,12 +293,18 @@ export class LocalServer {
   // This is so the client can tell us when it finished processing the turn.
   public turnComplete() {
     this.turnsExecuted++;
+    this.runPendingProgressiveCatchUp();
+    this.finishProgressiveReplayIfReady();
   }
 
   // endTurn in this context means the server has collected all the intents
   // and will send the turn to the client.
   private endTurn(force = false) {
     if (this.paused && !force) {
+      return;
+    }
+    if (this.lobbyConfig.progressiveReplay) {
+      this.endProgressiveReplayTurn();
       return;
     }
     if (this.replayTurns.length > 0) {
@@ -266,7 +326,148 @@ export class LocalServer {
     });
   }
 
+  private onProgressiveReplayEvent(event: ReplayPremierePlaybackEvent) {
+    if (event.type === "batch") {
+      const expectedSequence =
+        this.progressiveReplayTurns.at(-1)?.sequence === undefined
+          ? 0
+          : this.progressiveReplayTurns.at(-1)!.sequence + 1;
+      const expectedTurnNumber = this.progressiveReplayTurns.length;
+      for (const [offset, record] of event.batch.records.entries()) {
+        if (
+          record.sequence !== expectedSequence + offset ||
+          record.turn.turnNumber !== expectedTurnNumber + offset
+        ) {
+          throw new Error("invalid progressive replay batch order");
+        }
+        this.progressiveReplayTurnsByTurnNumber.set(
+          record.turn.turnNumber,
+          record.turn,
+        );
+        this.progressiveReplayTurns.push(record);
+      }
+      return;
+    }
+    if (event.type === "catch-up") {
+      this.progressiveReplayPendingCatchUp = Math.max(
+        this.progressiveReplayPendingCatchUp ?? event.targetSequence,
+        event.targetSequence,
+      );
+      this.runPendingProgressiveCatchUp();
+      return;
+    }
+    if (event.type === "finalized") {
+      this.progressiveReplayFinalized = true;
+      this.finishProgressiveReplayIfReady();
+    }
+  }
+
+  private endProgressiveReplayTurn() {
+    const record = this.progressiveReplayTurns[this.turns.length];
+    if (!record) {
+      // An unreleased boundary is a wait state, not replay completion.
+      this.finishProgressiveReplayIfReady();
+      return;
+    }
+    this.turns.push(record.turn);
+    this.clientMessage({
+      type: "turn",
+      turn: record.turn,
+    });
+    this.lobbyConfig.progressiveReplay!.controller.acknowledgeDispatchedRecord(
+      record,
+    );
+  }
+
+  private progressiveReplayDelayForNextTurn(): number | null {
+    if (!this.lobbyConfig.progressiveReplay) {
+      return (
+        this.lobbyConfig.serverConfig.turnIntervalMs() *
+        this.replaySpeedMultiplier
+      );
+    }
+    const next = this.progressiveReplayTurns[this.turns.length];
+    if (next === undefined) return null;
+    const previousOffset =
+      this.turns.length === 0
+        ? 0
+        : this.progressiveReplayTurns[this.turns.length - 1]
+            .presentationOffsetMs;
+    return Math.max(0, next.presentationOffsetMs - previousOffset);
+  }
+
+  private runPendingProgressiveCatchUp() {
+    if (
+      !this.running ||
+      this.progressiveReplayPendingCatchUp === null ||
+      !this.lobbyConfig.progressiveReplay
+    ) {
+      return;
+    }
+    const targetSequence = this.progressiveReplayPendingCatchUp;
+    let availableWindow = Math.max(
+      0,
+      MAX_PROGRESSIVE_CATCH_UP_IN_FLIGHT_TURNS -
+        (this.turns.length - this.turnsExecuted),
+    );
+    while (availableWindow > 0) {
+      const nextRecord = this.progressiveReplayTurns[this.turns.length];
+      if (!nextRecord || nextRecord.sequence > targetSequence) {
+        break;
+      }
+      this.endProgressiveReplayTurn();
+      availableWindow -= 1;
+    }
+    const lastDispatchedSequence =
+      this.progressiveReplayTurns[this.turns.length - 1]?.sequence ?? -1;
+    if (lastDispatchedSequence >= targetSequence) {
+      this.progressiveReplayPendingCatchUp = null;
+    }
+    this.turnStartTime = Date.now();
+    this.finishProgressiveReplayIfReady();
+  }
+
+  private finishProgressiveReplayIfReady() {
+    if (
+      !this.lobbyConfig.progressiveReplay ||
+      !this.progressiveReplayFinalized ||
+      this.progressiveReplayPlaybackComplete ||
+      this.turns.length !== this.progressiveReplayTurns.length ||
+      this.turnsExecuted < this.turns.length
+    ) {
+      return;
+    }
+    this.progressiveReplayPlaybackComplete = true;
+    clearInterval(this.turnCheckInterval);
+    this.lobbyConfig.progressiveReplay.controller.markPlaybackComplete();
+    this.progressiveReplayUnsubscribe?.();
+    this.progressiveReplayUnsubscribe = null;
+  }
+
   private jumpReplayForward(turnNumber: number) {
+    if (this.lobbyConfig.progressiveReplay) {
+      // Before reveal, only the authoritative release stream may advance the
+      // client. Once the complete chain is verified, match the ordinary replay
+      // behavior and allow forward-only seeking through already accepted turns.
+      if (
+        !this.progressiveReplayFinalized ||
+        this.progressiveReplayTurns.length === 0
+      ) {
+        return;
+      }
+      const targetTurn = Math.max(
+        this.turns.length,
+        Math.min(
+          this.progressiveReplayTurns.length,
+          Math.floor(turnNumber),
+        ),
+      );
+      while (this.turns.length < targetTurn) {
+        this.endProgressiveReplayTurn();
+      }
+      this.turnStartTime = Date.now();
+      return;
+    }
     if (!this.lobbyConfig.gameRecord || this.replayTurns.length === 0) {
       return;
     }
@@ -282,7 +483,10 @@ export class LocalServer {
 
   public endGame() {
     console.log("local server ending game");
+    this.running = false;
     clearInterval(this.turnCheckInterval);
+    this.progressiveReplayUnsubscribe?.();
+    this.progressiveReplayUnsubscribe = null;
     if (this.isReplay) {
       return;
     }

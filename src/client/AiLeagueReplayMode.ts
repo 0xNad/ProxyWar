@@ -2,6 +2,7 @@ export function isAiLeagueReplayRoute(
   pathname = window.location.pathname,
 ): boolean {
   return (
+    isReplayPremiereRoute(pathname) ||
     pathname.startsWith("/ai-league-replay/") ||
     pathname.startsWith("/proxywar-replay/") ||
     // Legacy path — previously published replay links must keep working.
@@ -9,6 +10,16 @@ export function isAiLeagueReplayRoute(
     isCoworldReplayRoute(pathname) ||
     isCoworldPlayerRoute(pathname)
   );
+}
+
+/**
+ * A Premiere uses the real replay renderer, but its progressive transport is
+ * intentionally separate from the ordinary artifact-backed replay routes.
+ */
+export function isReplayPremiereRoute(
+  pathname = window.location.pathname,
+): boolean {
+  return /^\/premiere\/prem_[a-z0-9]{16,32}$/.test(pathname);
 }
 
 export function isCoworldReplayRoute(

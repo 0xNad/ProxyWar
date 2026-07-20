@@ -1,4 +1,4 @@
-import { randomUUID } from "crypto";
+import { createHash, randomUUID } from "crypto";
 import fs from "fs";
 import os from "os";
 import path from "path";
@@ -15,11 +15,12 @@ import {
 } from "../core/game/Game";
 import { GameMapLoader, MapData } from "../core/game/GameMapLoader";
 import { loadTerrainMap, MapManifest } from "../core/game/TerrainMapLoader";
-import { GameConfig, ServerMessage } from "../core/Schemas";
+import { GameConfig, ServerMessage, Winner } from "../core/Schemas";
 import { auditDecisionEffects } from "../server/agents/AgentActionAuditor";
 import {
   AgentRunRosterEntry,
   AgentRunFinalState,
+  WriteAgentLeagueRunArtifactsInput,
   writeAgentLeagueRunArtifacts,
 } from "../server/agents/AgentDecisionLogWriter";
 import { writeAgentDemoIndex } from "../server/agents/AgentDemoIndexWriter";
@@ -115,9 +116,83 @@ const gameConfig: GameConfig = {
   maxPlayers: 4,
 };
 
-async function run() {
-  const startedAt = Date.now();
-  const args = process.argv.slice(2);
+export interface AgentLeagueSmokeArtifactWriterInput {
+  artifactInput: WriteAgentLeagueRunArtifactsInput;
+  winner: Winner;
+  turnCount: number;
+  playbackTurnIntervalMs: number;
+  executionConfig: AgentLeagueSmokeExecutionConfig;
+}
+
+export type AgentLeagueSmokeArtifactWriter = (
+  input: AgentLeagueSmokeArtifactWriterInput,
+) => Promise<unknown>;
+
+export interface AgentLeagueSmokeInjectedManifest {
+  sourceName: string;
+  rawManifestBase64: string;
+  manifestSha256: string;
+  contentSha256: string;
+  manifest: Readonly<AgentManifest>;
+}
+
+export interface AgentLeagueSmokeExecutionConfig {
+  schemaVersion: 1;
+  scenario: "league" | "attack" | "actions";
+  brainMode: string;
+  runnerMode: "realtime" | "step-locked";
+  planEveryDecisionSteps: number;
+  runner: {
+    turnsPerDecisionStep: number;
+    turnsPerDecisionSchedule: number[] | null;
+    maxDecisionMs: number;
+    maxSteps: number;
+    maxSpawnAdvanceTurns: number;
+    requireWinner: boolean;
+    waitForMirrorCatchup: boolean;
+    autopilotEndgameSteps: number;
+    replayTailTurns: number;
+  };
+  game: {
+    bots: number;
+    nations: number | string;
+    map: string;
+    mapSize: string;
+    difficulty: string;
+    varySpawns: boolean;
+  };
+  disabledActionKinds: LegalActionKind[];
+}
+
+export interface AgentLeagueSmokeRunOptions {
+  args?: string[];
+  artifactWriter?: AgentLeagueSmokeArtifactWriter;
+  injectedManifests?: readonly AgentLeagueSmokeInjectedManifest[];
+  manifestLimits?: {
+    minAgents: number;
+    maxAgents: number;
+  };
+  planEveryDecisionSteps?: number;
+  allowEnvironmentStrategySpec?: boolean;
+  deterministicSource?: {
+    seed: string;
+    createdAtMs: number;
+    playbackTurnIntervalMs: number;
+  };
+}
+
+export function agentLeagueSmokeOutputMode(
+  options: AgentLeagueSmokeRunOptions = {},
+): "standard" | "private-writer" {
+  return options.artifactWriter === undefined ? "standard" : "private-writer";
+}
+
+export async function runAgentLeagueSmoke(
+  options: AgentLeagueSmokeRunOptions = {},
+) {
+  validateAgentLeagueSmokeRunOptions(options);
+  const startedAt = options.deterministicSource?.createdAtMs ?? Date.now();
+  const args = options.args ?? process.argv.slice(2);
   const scenario = scenarioFromArgs(args);
   const brainMode = brainModeFromArgs(args, scenario);
   // --opponent-brain=<mode>: seat 0 (the subject) uses --brain; seats 1+ use this.
@@ -131,6 +206,10 @@ async function run() {
     : null;
   const runnerMode = runnerModeFromArgs(args);
   const stepLockedConfig = stepLockedConfigFromArgs(args);
+  const planEveryDecisionSteps = resolvePlanEveryDecisionSteps(
+    brainMode,
+    options.planEveryDecisionSteps,
+  );
   const externalAgentMaxDecisionMs = positiveIntegerArg(
     args,
     "--external-agent-max-decision-ms=",
@@ -195,13 +274,22 @@ async function run() {
   // project's CLAUDE.md/.claude settings (slow + would bias the model toward "coding
   // agent" instead of game-player).
   const claudeCleanCwd = path.join(os.tmpdir(), "proxywar-claude-cli-cwd");
-  fs.mkdirSync(claudeCleanCwd, { recursive: true });
-  const claudeBaseConfig = {
-    ...loadClaudeCliLlmProviderConfig(),
-    cwd: claudeCleanCwd,
-  };
+  const initializeClaudePromoSupport =
+    options.artifactWriter === undefined || promoModels !== null;
+  if (initializeClaudePromoSupport) {
+    fs.mkdirSync(claudeCleanCwd, { recursive: true });
+  }
+  const claudeBaseConfig = initializeClaudePromoSupport
+    ? {
+        ...loadClaudeCliLlmProviderConfig(),
+        cwd: claudeCleanCwd,
+      }
+    : null;
   const claudeProviderCache = new Map<number, ClaudeCliLlmProvider>();
   const claudeProviderForIndex = (index: number): ClaudeCliLlmProvider => {
+    if (claudeBaseConfig === null) {
+      throw new Error("Claude promo support is unavailable for this smoke run");
+    }
     let provider = claudeProviderCache.get(index);
     if (!provider) {
       provider = new ClaudeCliLlmProvider({
@@ -219,12 +307,25 @@ async function run() {
         ? codexCliConfig?.timeoutMs
         : realLlmConfig?.timeoutMs;
   const manifests =
-    manifestDir === null
-      ? null
-      : await loadAgentManifestsFromDirectory(manifestDir, {
-          minAgents: explicitAgentCount ? 1 : 3,
-          maxAgents: explicitAgentCount ? Math.max(1, 8 - agentCount) : 8,
-        });
+    options.injectedManifests !== undefined
+      ? options.injectedManifests.map((entry) => entry.manifest)
+      : manifestDir === null
+        ? null
+        : await loadAgentManifestsFromDirectory(manifestDir, {
+            minAgents:
+              options.manifestLimits?.minAgents ??
+              (explicitAgentCount ? 1 : 3),
+            maxAgents:
+              options.manifestLimits?.maxAgents ??
+              (explicitAgentCount ? Math.max(1, 8 - agentCount) : 8),
+          });
+  if (
+    manifests !== null &&
+    (manifests.length < (options.manifestLimits?.minAgents ?? 1) ||
+      manifests.length > (options.manifestLimits?.maxAgents ?? 8))
+  ) {
+    throw new Error("injected agent manifests do not meet manifest limits");
+  }
   const manifestSpecs = manifests?.map(agentManifestToSpec) ?? [];
   const houseSpecs =
     manifests === null || explicitAgentCount ? createDefaultAgentSpecs(agentCount) : [];
@@ -244,7 +345,24 @@ async function run() {
   if (playerAgentName && explicitAgentCount && houseSpecs.length > 0) {
     houseSpecs[0].username = playerAgentName.slice(0, 27);
   }
-  const specs = manifests === null ? houseSpecs : [...manifestSpecs, ...houseSpecs];
+  const unresolvedSpecs =
+    manifests === null ? houseSpecs : [...manifestSpecs, ...houseSpecs];
+  const specs =
+    options.deterministicSource === undefined
+      ? unresolvedSpecs
+      : unresolvedSpecs.map((spec, index) => ({
+          ...spec,
+          clientID: deterministicLocalID(
+            options.deterministicSource!.seed,
+            "client",
+            index,
+          ),
+          persistentID: deterministicLocalUUID(
+            options.deterministicSource!.seed,
+            "persistent",
+            index,
+          ),
+        }));
   if (specs.length > 8) {
     throw new Error("AI league matches support 1 to 8 agent participants");
   }
@@ -255,10 +373,21 @@ async function run() {
     nations: nationCount,
     maxPlayers: Math.max(baseGameConfig.maxPlayers ?? 4, specs.length),
   };
+  const executionConfig = buildAgentLeagueSmokeExecutionConfig({
+    scenario,
+    brainMode,
+    runnerMode,
+    planEveryDecisionSteps,
+    stepLockedConfig,
+    replayTailTurns,
+    selectedGameConfig,
+    disabledActionKinds,
+    varySpawns: args.includes("--vary-spawns"),
+  });
   const game = new GameServer(
     "AGENT002",
     log,
-    Date.now(),
+    options.deterministicSource?.createdAtMs ?? Date.now(),
     serverConfigForRunnerMode(runnerMode),
     selectedGameConfig,
   );
@@ -326,6 +455,8 @@ async function run() {
               providerForBrainMode(mode, index),
               decisionTimeoutMs,
               externalAgentMaxDecisionMs,
+              planEveryDecisionSteps,
+              options.allowEnvironmentStrategySpec !== false,
             );
           },
   });
@@ -437,7 +568,11 @@ async function run() {
         gameState: finalGameState,
         turnCount: mirror.turnCount(),
       });
-      const completedAt = Date.now();
+      const completedAt = completedAtForSmokeRun(
+        options,
+        startedAt,
+        mirror.turnCount(),
+      );
       const gameRecord = buildGameRecordFromServerMessages({
         messages: mirrorMessages(),
         startedAt,
@@ -454,7 +589,7 @@ async function run() {
         snapshots: spectatorSnapshots,
         notes: artifactNotes(scenario, brainMode, runnerMode),
       });
-      const artifacts = await writeAgentLeagueRunArtifacts({
+      const artifactInput: WriteAgentLeagueRunArtifactsInput = {
         runID,
         matchID: game.id,
         scenario,
@@ -487,13 +622,24 @@ async function run() {
         spectatorReplay,
         gameRecord,
         notes: artifactNotes(scenario, brainMode, runnerMode),
+      };
+      const artifacts = await writeSmokeRunArtifacts(options, {
+        artifactInput,
+        winner: winnerFromGame(finalGameState),
+        turnCount: mirror.turnCount(),
+        playbackTurnIntervalMs:
+          options.deterministicSource?.playbackTurnIntervalMs ?? 1,
+        executionConfig,
       });
       // Skip the global demo-index rebuild by default: writeAgentDemoIndex()
       // readdir+reads every historical run in artifacts/ai-league-runs (tens of
       // thousands of files / tens of GB), which is wasteful on automated
       // smoke/dry-run matches. The live beta server writes its index elsewhere,
       // so only rebuild here when explicitly requested.
-      if (process.env.PROXYWAR_WRITE_DEMO_INDEX === "1") {
+      if (
+        options.artifactWriter === undefined &&
+        process.env.PROXYWAR_WRITE_DEMO_INDEX === "1"
+      ) {
         await writeAgentDemoIndex();
       }
 
@@ -527,7 +673,11 @@ async function run() {
         opening: summarizeRecords(stepResult.openingRecords),
         postSpawn: summarizeRecords(stepResult.postSpawnRecords),
         artifacts,
-        openFrontReplayUrl: `http://localhost:9000/ai-league-replay/${encodeURIComponent(runID)}`,
+        ...(options.artifactWriter === undefined
+          ? {
+              openFrontReplayUrl: `http://localhost:9000/ai-league-replay/${encodeURIComponent(runID)}`,
+            }
+          : {}),
       });
       return;
     }
@@ -625,7 +775,11 @@ async function run() {
       gameState: finalGameState,
       turnCount: mirror.turnCount(),
     });
-    const completedAt = Date.now();
+    const completedAt = completedAtForSmokeRun(
+      options,
+      startedAt,
+      mirror.turnCount(),
+    );
     const gameRecord = buildGameRecordFromServerMessages({
       messages: mirrorMessages(),
       startedAt,
@@ -642,7 +796,7 @@ async function run() {
       snapshots: spectatorSnapshots,
       notes: artifactNotes(scenario, brainMode, runnerMode),
     });
-    const artifacts = await writeAgentLeagueRunArtifacts({
+    const artifactInput: WriteAgentLeagueRunArtifactsInput = {
       runID,
       matchID: game.id,
       scenario,
@@ -666,13 +820,24 @@ async function run() {
       spectatorReplay,
       gameRecord,
       notes: artifactNotes(scenario, brainMode, runnerMode),
+    };
+    const artifacts = await writeSmokeRunArtifacts(options, {
+      artifactInput,
+      winner: winnerFromGame(finalGameState),
+      turnCount: mirror.turnCount(),
+      playbackTurnIntervalMs:
+        options.deterministicSource?.playbackTurnIntervalMs ?? 1,
+      executionConfig,
     });
     // Skip the global demo-index rebuild by default: writeAgentDemoIndex()
     // readdir+reads every historical run in artifacts/ai-league-runs (tens of
     // thousands of files / tens of GB), which is wasteful on automated
     // smoke/dry-run matches. The live beta server writes its index elsewhere,
     // so only rebuild here when explicitly requested.
-    if (process.env.PROXYWAR_WRITE_DEMO_INDEX === "1") {
+    if (
+      options.artifactWriter === undefined &&
+      process.env.PROXYWAR_WRITE_DEMO_INDEX === "1"
+    ) {
       await writeAgentDemoIndex();
     }
     assertRequiredExternalBrainSucceeded({
@@ -700,12 +865,195 @@ async function run() {
       postSpawn: summarizeRecords(postSpawnRecords),
       artifacts,
       replayTailTurns,
-      openFrontReplayUrl: `http://localhost:9000/ai-league-replay/${encodeURIComponent(runID)}`,
+      ...(options.artifactWriter === undefined
+        ? {
+            openFrontReplayUrl: `http://localhost:9000/ai-league-replay/${encodeURIComponent(runID)}`,
+          }
+        : {}),
     });
   } finally {
     codexCliProvider?.close();
     await game.end({ archive: false });
   }
+}
+
+async function writeSmokeRunArtifacts(
+  options: AgentLeagueSmokeRunOptions,
+  input: AgentLeagueSmokeArtifactWriterInput,
+): Promise<unknown> {
+  if (options.artifactWriter !== undefined) {
+    return options.artifactWriter(input);
+  }
+  return writeAgentLeagueRunArtifacts(input.artifactInput);
+}
+
+function winnerFromGame(game: Game): Winner {
+  const winner = game.getWinner();
+  if (winner === null) {
+    return undefined;
+  }
+  if (typeof winner === "string") {
+    return [
+      "team",
+      winner,
+      ...game
+        .players()
+        .filter(
+          (player) => player.team() === winner && player.clientID() !== null,
+        )
+        .map((player) => player.clientID()!),
+    ];
+  }
+  const clientID = winner.clientID();
+  return clientID === null ? ["nation", winner.name()] : ["player", clientID];
+}
+
+function completedAtForSmokeRun(
+  options: AgentLeagueSmokeRunOptions,
+  startedAt: number,
+  turnCount: number,
+): number {
+  const turnIntervalMs = options.deterministicSource?.playbackTurnIntervalMs;
+  return turnIntervalMs === undefined
+    ? Date.now()
+    : startedAt + turnCount * turnIntervalMs;
+}
+
+function deterministicLocalID(
+  seed: string,
+  namespace: string,
+  index: number,
+): string {
+  return createHash("sha256")
+    .update(`proxywar-agent-smoke-v1\0${seed}\0${namespace}\0${index}`)
+    .digest("hex")
+    .slice(0, 24);
+}
+
+function deterministicLocalUUID(
+  seed: string,
+  namespace: string,
+  index: number,
+): string {
+  const hex = createHash("sha256")
+    .update(`proxywar-agent-smoke-v1\0${seed}\0${namespace}\0${index}`)
+    .digest("hex");
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-4${hex.slice(
+    13,
+    16,
+  )}-8${hex.slice(17, 20)}-${hex.slice(20, 32)}`;
+}
+
+function validateAgentLeagueSmokeRunOptions(
+  options: AgentLeagueSmokeRunOptions,
+): void {
+  if (
+    options.injectedManifests !== undefined &&
+    (options.args ?? process.argv.slice(2)).some((arg) =>
+      arg.startsWith("--agent-manifest-dir="),
+    )
+  ) {
+    throw new Error(
+      "injected agent manifests cannot be combined with a manifest directory",
+    );
+  }
+  if (
+    options.planEveryDecisionSteps !== undefined &&
+    (!Number.isSafeInteger(options.planEveryDecisionSteps) ||
+      options.planEveryDecisionSteps < 1 ||
+      options.planEveryDecisionSteps > 10)
+  ) {
+    throw new Error("agent league smoke planner cadence must be from 1 to 10");
+  }
+  if (options.injectedManifests !== undefined) {
+    for (const entry of options.injectedManifests) {
+      const rawManifest = Buffer.from(entry.rawManifestBase64, "base64");
+      if (
+        entry.sourceName.trim() === "" ||
+        !/^[a-f0-9]{64}$/.test(entry.manifestSha256) ||
+        !/^[a-f0-9]{64}$/.test(entry.contentSha256) ||
+        entry.rawManifestBase64.trim() === "" ||
+        rawManifest.toString("base64") !== entry.rawManifestBase64 ||
+        createHash("sha256").update(rawManifest).digest("hex") !==
+          entry.manifestSha256
+      ) {
+        throw new Error("invalid injected agent manifest identity");
+      }
+    }
+  }
+  if (options.manifestLimits !== undefined) {
+    const { minAgents, maxAgents } = options.manifestLimits;
+    if (
+      !Number.isSafeInteger(minAgents) ||
+      !Number.isSafeInteger(maxAgents) ||
+      minAgents < 1 ||
+      maxAgents > 8 ||
+      minAgents > maxAgents
+    ) {
+      throw new Error(
+        "agent league smoke manifest limits must be between 1 and 8",
+      );
+    }
+  }
+  const deterministic = options.deterministicSource;
+  if (deterministic === undefined) {
+    return;
+  }
+  if (
+    deterministic.seed.trim() === "" ||
+    !Number.isSafeInteger(deterministic.createdAtMs) ||
+    deterministic.createdAtMs <= 0 ||
+    !Number.isSafeInteger(deterministic.playbackTurnIntervalMs) ||
+    deterministic.playbackTurnIntervalMs <= 0 ||
+    deterministic.playbackTurnIntervalMs > 60_000
+  ) {
+    throw new Error("invalid deterministic agent league smoke source options");
+  }
+}
+
+function buildAgentLeagueSmokeExecutionConfig(input: {
+  scenario: SmokeScenario;
+  brainMode: SmokeBrainMode;
+  runnerMode: SmokeRunnerMode;
+  planEveryDecisionSteps: number;
+  stepLockedConfig: AgentStepLockedLeagueConfig;
+  replayTailTurns: number;
+  selectedGameConfig: GameConfig;
+  disabledActionKinds: LegalActionKind[];
+  varySpawns: boolean;
+}): AgentLeagueSmokeExecutionConfig {
+  return {
+    schemaVersion: 1,
+    scenario: input.scenario,
+    brainMode: input.brainMode,
+    runnerMode: input.runnerMode,
+    planEveryDecisionSteps: input.planEveryDecisionSteps,
+    runner: {
+      turnsPerDecisionStep: input.stepLockedConfig.turnsPerDecisionStep,
+      turnsPerDecisionSchedule:
+        input.stepLockedConfig.turnsPerDecisionSchedule === undefined
+          ? null
+          : [...input.stepLockedConfig.turnsPerDecisionSchedule],
+      maxDecisionMs: input.stepLockedConfig.maxDecisionMs,
+      maxSteps: input.stepLockedConfig.maxSteps,
+      maxSpawnAdvanceTurns: input.stepLockedConfig.maxSpawnAdvanceTurns,
+      requireWinner: input.stepLockedConfig.requireWinner,
+      waitForMirrorCatchup: input.stepLockedConfig.waitForMirrorCatchup,
+      autopilotEndgameSteps: input.stepLockedConfig.autopilotExtraSteps,
+      replayTailTurns: input.replayTailTurns,
+    },
+    game: {
+      bots: input.selectedGameConfig.bots ?? 0,
+      nations: input.selectedGameConfig.nations ?? "disabled",
+      map: String(input.selectedGameConfig.gameMap),
+      mapSize: String(input.selectedGameConfig.gameMapSize),
+      difficulty: String(input.selectedGameConfig.difficulty),
+      varySpawns: input.varySpawns,
+    },
+    disabledActionKinds: [
+      ...new Set(input.disabledActionKinds),
+    ].sort() as LegalActionKind[],
+  };
 }
 
 async function advanceReplayTail(input: {
@@ -1095,6 +1443,8 @@ function createBrainForManifestOrMode(
   provider: LlmProvider | null,
   providerTimeoutMs: number | undefined,
   externalAgentMaxDecisionMs: number,
+  planEveryDecisionSteps: number,
+  allowEnvironmentStrategySpec: boolean,
 ): AgentBrain {
   if (manifest?.provider?.provider === "external-http") {
     return new ExternalHttpAgentBrain({
@@ -1140,8 +1490,10 @@ function createBrainForManifestOrMode(
   }
   // Player strategy spec: per-seat from the manifest, else a single spec from env
   // (AI_LEAGUE_PLAYER_STRATEGY_SPEC) for the sponsored single-seat path.
-  const playerStrategySpec =
-    manifest?.strategySpec ?? loadPlayerStrategySpecFromEnv();
+  const playerStrategySpec = resolveAgentLeagueSmokePlayerStrategySpec(
+    manifest?.strategySpec,
+    allowEnvironmentStrategySpec,
+  );
   return createBrainForMode(
     spec,
     scenario,
@@ -1149,6 +1501,7 @@ function createBrainForManifestOrMode(
     provider,
     providerTimeoutMs,
     playerStrategySpec,
+    planEveryDecisionSteps,
   );
 }
 
@@ -1176,6 +1529,18 @@ function manifestHasBrainOverride(manifest: AgentManifest): boolean {
 
 // Beta seats can tighten the replan cadence (default 3) so a player's strategy is
 // re-expressed more often. Env-overridable via PROXYWAR_PLAN_EVERY_DECISION_STEPS.
+function resolvePlanEveryDecisionSteps(
+  brainMode: SmokeBrainMode,
+  explicitValue: number | undefined,
+): number {
+  if (explicitValue !== undefined) {
+    return explicitValue;
+  }
+  return brainMode === "planner-openrouter"
+    ? planEveryDecisionStepsFromEnv()
+    : 3;
+}
+
 function planEveryDecisionStepsFromEnv(): number {
   const raw = process.env.PROXYWAR_PLAN_EVERY_DECISION_STEPS?.trim();
   const parsed = raw === undefined || raw === "" ? NaN : Number(raw);
@@ -1185,6 +1550,18 @@ function planEveryDecisionStepsFromEnv(): number {
   return 3;
 }
 
+export function resolveAgentLeagueSmokePlayerStrategySpec(
+  manifestStrategySpec: PlayerStrategySpec | undefined,
+  allowEnvironmentStrategySpec: boolean,
+  loadEnvironmentStrategySpec: () => PlayerStrategySpec | null =
+    loadPlayerStrategySpecFromEnv,
+): PlayerStrategySpec | null {
+  if (manifestStrategySpec !== undefined) {
+    return manifestStrategySpec;
+  }
+  return allowEnvironmentStrategySpec ? loadEnvironmentStrategySpec() : null;
+}
+
 function createBrainForMode(
   spec: AgentSpec,
   scenario: SmokeScenario,
@@ -1192,6 +1569,7 @@ function createBrainForMode(
   provider: LlmProvider | null,
   providerTimeoutMs: number | undefined,
   playerStrategySpec: PlayerStrategySpec | null = null,
+  planEveryDecisionSteps?: number,
 ): AgentBrain {
   if (brainMode === "mock-llm") {
     return createMockLlmBrain(spec, scenario, providerTimeoutMs);
@@ -1208,7 +1586,7 @@ function createBrainForMode(
           samTileShareRatio: 0.14,
         },
       }),
-      planEveryDecisionSteps: 3,
+      planEveryDecisionSteps: planEveryDecisionSteps ?? 3,
     });
   }
   if (brainMode === "planner-codex-cli") {
@@ -1233,7 +1611,7 @@ function createBrainForMode(
           samTileShareRatio: 0.14,
         },
       }),
-      planEveryDecisionSteps: 3,
+      planEveryDecisionSteps: planEveryDecisionSteps ?? 3,
     });
   }
   if (brainMode === "planner-claude-cli") {
@@ -1258,7 +1636,7 @@ function createBrainForMode(
           samTileShareRatio: 0.14,
         },
       }),
-      planEveryDecisionSteps: 3,
+      planEveryDecisionSteps: planEveryDecisionSteps ?? 3,
     });
   }
   if (brainMode === "planner-openrouter") {
@@ -1287,7 +1665,8 @@ function createBrainForMode(
           samTileShareRatio: 0.14,
         },
       }),
-      planEveryDecisionSteps: planEveryDecisionStepsFromEnv(),
+      planEveryDecisionSteps:
+        planEveryDecisionSteps ?? planEveryDecisionStepsFromEnv(),
     });
   }
   if (brainMode === "real-llm" || brainMode === "codex-cli") {
@@ -1726,13 +2105,18 @@ class StaticMapLoader implements GameMapLoader {
   }
 }
 
-try {
-  await run();
-} catch (error) {
-  if (error instanceof LlmProviderConfigError) {
-    console.error(error.message);
-    process.exitCode = 1;
-  } else {
-    throw error;
+if (
+  process.argv[1] !== undefined &&
+  path.resolve(process.argv[1]) === path.resolve(fileURLToPath(import.meta.url))
+) {
+  try {
+    await runAgentLeagueSmoke();
+  } catch (error) {
+    if (error instanceof LlmProviderConfigError) {
+      console.error(error.message);
+      process.exitCode = 1;
+    } else {
+      throw error;
+    }
   }
 }

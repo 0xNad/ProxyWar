@@ -94,6 +94,127 @@ export function isProxyWarPublicLeagueArtifact(fileName: string): boolean {
   );
 }
 
+const proxyWarPremiereIdSource = "prem_[a-z0-9]{16,32}";
+const proxyWarPremierePagePattern = new RegExp(
+  `^/premiere/(${proxyWarPremiereIdSource})$`,
+);
+const proxyWarPremiereManifestPattern = new RegExp(
+  `^/api/premieres/(${proxyWarPremiereIdSource})/manifest$`,
+);
+const proxyWarPremiereBootstrapPattern = new RegExp(
+  `^/api/premieres/(${proxyWarPremiereIdSource})/bootstrap$`,
+);
+const proxyWarPremiereChunkPattern = new RegExp(
+  `^/api/premieres/(${proxyWarPremiereIdSource})/chunks/(0|[1-9][0-9]{0,8})$`,
+);
+const proxyWarPremiereRevealPattern = new RegExp(
+  `^/api/premieres/(${proxyWarPremiereIdSource})/reveal$`,
+);
+const proxyWarPremiereCardPattern = new RegExp(
+  `^/premiere/(${proxyWarPremiereIdSource})/card-v1\\.svg$`,
+);
+const proxyWarPremierePredictionPattern = new RegExp(
+  `^/api/premieres/(${proxyWarPremiereIdSource})/predictions$`,
+);
+const proxyWarPremiereReactionPattern = new RegExp(
+  `^/api/premieres/(${proxyWarPremiereIdSource})/reactions$`,
+);
+const proxyWarPremiereSharePattern = new RegExp(
+  `^/api/premieres/(${proxyWarPremiereIdSource})/shares$`,
+);
+const proxyWarPremiereSessionPattern = new RegExp(
+  `^/api/premieres/(${proxyWarPremiereIdSource})/sessions$`,
+);
+const proxyWarPremiereHeartbeatPattern = new RegExp(
+  `^/api/premieres/(${proxyWarPremiereIdSource})/sessions/(sess_[a-z0-9]{16,32})/heartbeat$`,
+);
+
+export type ProxyWarPublicPremiereReadRoute =
+  | { kind: "page"; premiereId: string }
+  | { kind: "bootstrap"; premiereId: string }
+  | { kind: "manifest"; premiereId: string }
+  | { kind: "chunk"; premiereId: string; chunkIndex: number }
+  | { kind: "reveal"; premiereId: string }
+  | { kind: "card"; premiereId: string };
+
+export type ProxyWarPublicPremiereWriteRoute =
+  | { kind: "prediction"; premiereId: string }
+  | { kind: "reaction"; premiereId: string }
+  | { kind: "share"; premiereId: string }
+  | { kind: "session"; premiereId: string }
+  | { kind: "heartbeat"; premiereId: string; sessionId: string };
+
+/**
+ * Exact anonymous Premiere read surface. The private source bundle and
+ * ordinary outcome-bearing replay artifacts are intentionally absent.
+ */
+export function matchProxyWarPublicPremiereReadPath(
+  pathname: string,
+): ProxyWarPublicPremiereReadRoute | null {
+  const page = proxyWarPremierePagePattern.exec(pathname);
+  if (page !== null) return { kind: "page", premiereId: page[1] };
+  const bootstrap = proxyWarPremiereBootstrapPattern.exec(pathname);
+  if (bootstrap !== null) {
+    return { kind: "bootstrap", premiereId: bootstrap[1] };
+  }
+  const manifest = proxyWarPremiereManifestPattern.exec(pathname);
+  if (manifest !== null) {
+    return { kind: "manifest", premiereId: manifest[1] };
+  }
+  const chunk = proxyWarPremiereChunkPattern.exec(pathname);
+  if (chunk !== null) {
+    return {
+      kind: "chunk",
+      premiereId: chunk[1],
+      chunkIndex: Number(chunk[2]),
+    };
+  }
+  const reveal = proxyWarPremiereRevealPattern.exec(pathname);
+  if (reveal !== null) return { kind: "reveal", premiereId: reveal[1] };
+  const card = proxyWarPremiereCardPattern.exec(pathname);
+  if (card !== null) return { kind: "card", premiereId: card[1] };
+  return null;
+}
+
+export function isProxyWarPublicPremiereReadPath(pathname: string): boolean {
+  return matchProxyWarPublicPremiereReadPath(pathname) !== null;
+}
+
+/**
+ * Exact guest write surface. Publisher/admin transitions are never anonymous.
+ * Route handlers must still enforce signed participant cookies, CSRF, Origin,
+ * state, idempotency, and rate limits.
+ */
+export function matchProxyWarPublicPremiereWritePath(
+  pathname: string,
+): ProxyWarPublicPremiereWriteRoute | null {
+  const prediction = proxyWarPremierePredictionPattern.exec(pathname);
+  if (prediction !== null) {
+    return { kind: "prediction", premiereId: prediction[1] };
+  }
+  const reaction = proxyWarPremiereReactionPattern.exec(pathname);
+  if (reaction !== null) {
+    return { kind: "reaction", premiereId: reaction[1] };
+  }
+  const share = proxyWarPremiereSharePattern.exec(pathname);
+  if (share !== null) return { kind: "share", premiereId: share[1] };
+  const session = proxyWarPremiereSessionPattern.exec(pathname);
+  if (session !== null) return { kind: "session", premiereId: session[1] };
+  const heartbeat = proxyWarPremiereHeartbeatPattern.exec(pathname);
+  if (heartbeat !== null) {
+    return {
+      kind: "heartbeat",
+      premiereId: heartbeat[1],
+      sessionId: heartbeat[2],
+    };
+  }
+  return null;
+}
+
+export function isProxyWarPublicPremiereWritePath(pathname: string): boolean {
+  return matchProxyWarPublicPremiereWritePath(pathname) !== null;
+}
+
 export function proxyWarLeagueContentSecurityPolicy(): string {
   return [
     "default-src 'self'",

@@ -4,10 +4,14 @@ import {
   isProxyWarPublicExternalAgentExample,
   isProxyWarPublicLeagueArtifact,
   isProxyWarPublicLeaguePath,
+  isProxyWarPublicPremiereReadPath,
+  isProxyWarPublicPremiereWritePath,
   isProxyWarPublicRendererAssetPath,
   isProxyWarPublicRunArtifact,
   isProxyWarPublicTournamentArtifact,
   isSafeProxyWarArtifactSegment,
+  matchProxyWarPublicPremiereReadPath,
+  matchProxyWarPublicPremiereWritePath,
   proxyWarLeagueContentSecurityPolicy,
   proxyWarPublicDocs,
   proxyWarPublicExternalAgentExamples,
@@ -193,5 +197,80 @@ describe("ProxyWarPublicArtifacts", () => {
     expect(isProxyWarPublicRendererAssetPath("/srcs/evil.js")).toBe(false);
     expect(isProxyWarPublicRendererAssetPath("/public")).toBe(false);
     expect(isProxyWarPublicRendererAssetPath("/tester-dashboard")).toBe(false);
+  });
+
+  it("allowlists only the narrow progressive Premiere read surface", () => {
+    const id = "prem_0123456789abcdef";
+    expect(matchProxyWarPublicPremiereReadPath(`/premiere/${id}`)).toEqual({
+      kind: "page",
+      premiereId: id,
+    });
+    expect(
+      matchProxyWarPublicPremiereReadPath(`/api/premieres/${id}/bootstrap`),
+    ).toEqual({ kind: "bootstrap", premiereId: id });
+    expect(
+      matchProxyWarPublicPremiereReadPath(`/api/premieres/${id}/manifest`),
+    ).toEqual({ kind: "manifest", premiereId: id });
+    expect(
+      matchProxyWarPublicPremiereReadPath(`/api/premieres/${id}/chunks/12`),
+    ).toEqual({ kind: "chunk", premiereId: id, chunkIndex: 12 });
+    expect(
+      isProxyWarPublicPremiereReadPath(`/api/premieres/${id}/reveal`),
+    ).toBe(true);
+    expect(
+      isProxyWarPublicPremiereReadPath(`/premiere/${id}/card-v1.svg`),
+    ).toBe(true);
+
+    for (const forbidden of [
+      `/api/premieres/${id}/source`,
+      `/api/premieres/${id}/game-record.json`,
+      `/api/premieres/${id}/chunks/01`,
+      `/api/premieres/${id}/chunks/-1`,
+      `/api/premieres/${id}/chunks/1000000000`,
+      `/api/premieres/${id}/chunks/0.json`,
+      `/premiere/${id}/result.json`,
+      `/premiere/${id}%2fsource`,
+      `/premiere/${id}/../source`,
+      "/premiere/prem_0123456789ABCDEF",
+    ]) {
+      expect(isProxyWarPublicPremiereReadPath(forbidden)).toBe(false);
+    }
+  });
+
+  it("allowlists only guest Premiere writes, never publisher transitions", () => {
+    const id = "prem_0123456789abcdef";
+    expect(
+      matchProxyWarPublicPremiereWritePath(`/api/premieres/${id}/predictions`),
+    ).toEqual({ kind: "prediction", premiereId: id });
+    expect(
+      matchProxyWarPublicPremiereWritePath(`/api/premieres/${id}/reactions`),
+    ).toEqual({ kind: "reaction", premiereId: id });
+    expect(
+      matchProxyWarPublicPremiereWritePath(`/api/premieres/${id}/shares`),
+    ).toEqual({ kind: "share", premiereId: id });
+    expect(
+      matchProxyWarPublicPremiereWritePath(`/api/premieres/${id}/sessions`),
+    ).toEqual({ kind: "session", premiereId: id });
+    expect(
+      matchProxyWarPublicPremiereWritePath(
+        `/api/premieres/${id}/sessions/sess_0123456789abcdef/heartbeat`,
+      ),
+    ).toEqual({
+      kind: "heartbeat",
+      premiereId: id,
+      sessionId: "sess_0123456789abcdef",
+    });
+
+    for (const forbidden of [
+      `/api/premieres/${id}/publish`,
+      `/api/premieres/${id}/start`,
+      `/api/premieres/${id}/reveal`,
+      `/api/premieres/${id}/archive`,
+      `/api/premieres/${id}/predictions/extra`,
+      `/api/premieres/${id}/sessions/../../admin/heartbeat`,
+      `/api/premieres/${id}/sessions/sess_0123456789ABCDEF/heartbeat`,
+    ]) {
+      expect(isProxyWarPublicPremiereWritePath(forbidden)).toBe(false);
+    }
   });
 });
