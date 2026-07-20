@@ -110,6 +110,10 @@ import {
   setHtmlNoCacheHeaders,
 } from "../server/RenderHtml";
 import { ReplayPremiereAnonymousWriteLimiter } from "../server/replay-premiere/ReplayPremiereAnonymousWriteLimiter";
+import {
+  createReplayPremiereTrustedProxyAddressResolver,
+  REPLAY_PREMIERE_LOOPBACK_PROXY_ADDRESSES,
+} from "../server/replay-premiere/ReplayPremiereClientAddress";
 import { ReplayPremiereGuestSecurity } from "../server/replay-premiere/ReplayPremiereGuestSecurity";
 import {
   createReplayPremiereRouter,
@@ -311,6 +315,11 @@ app.use(
   createReplayPremiereRouter({
     registry: replayPremiereHttpRegistry,
     security: replayPremiereGuestSecurity,
+    resolveClientAddress: createReplayPremiereTrustedProxyAddressResolver({
+      // The managed Cloudflare tunnel reaches this process over loopback. Do
+      // not trust forwarding headers from LAN or directly exposed peers.
+      trustedProxyAddresses: REPLAY_PREMIERE_LOOPBACK_PROXY_ADDRESSES,
+    }),
   }),
 );
 app.use(

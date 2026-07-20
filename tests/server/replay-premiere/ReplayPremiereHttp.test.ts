@@ -3,6 +3,11 @@ import { promises as fs } from "node:fs";
 import http from "node:http";
 import os from "node:os";
 import path from "node:path";
+import {
+  createReplayPremiereTrustedProxyAddressResolver,
+  REPLAY_PREMIERE_LOOPBACK_PROXY_ADDRESSES,
+  type ReplayPremiereClientAddressResolver,
+} from "../../../src/server/replay-premiere/ReplayPremiereClientAddress";
 import type { PremiereState } from "../../../src/server/replay-premiere/ReplayPremiereContracts";
 import type {
   ReplayPremiereSnapshot,
@@ -272,6 +277,52 @@ describe("ReplayPremiere HTTP adapter", () => {
     });
   });
 
+  test("uses the trusted edge address for buckets and fails closed before admission", async () => {
+    const resolveClientAddress =
+      createReplayPremiereTrustedProxyAddressResolver({
+        trustedProxyAddresses: REPLAY_PREMIERE_LOOPBACK_PROXY_ADDRESSES,
+      });
+    const harness = await httpHarness(root, true, { resolveClientAddress });
+    await harness.run(async (baseUrl) => {
+      const sessionUrl = `${baseUrl}/api/premieres/${PREMIERE_ID}/sessions`;
+      for (const [index, address] of [
+        "198.51.100.11",
+        "198.51.100.12",
+      ].entries()) {
+        const response = await fetch(sessionUrl, {
+          method: "POST",
+          headers: {
+            ...writeHeaders(`edge_session_request_00000${index}`),
+            "CF-Connecting-IP": address,
+          },
+          body: JSON.stringify({ visible: true, observedSequence: 5 }),
+        });
+        expect(response.status).toBe(201);
+        expect(harness.admissions[index]?.requesterBucketId).toBe(
+          harness.security.deriveRequesterBucketId(address),
+        );
+      }
+      expect(harness.admissions[0]?.requesterBucketId).not.toBe(
+        harness.admissions[1]?.requesterBucketId,
+      );
+
+      const admissionCount = harness.admissions.length;
+      const rejected = await fetch(sessionUrl, {
+        method: "POST",
+        headers: {
+          ...writeHeaders("edge_session_request_reject1"),
+          "CF-Connecting-IP": "ambiguous, 198.51.100.13",
+        },
+        body: JSON.stringify({ visible: true, observedSequence: 5 }),
+      });
+      expect(rejected.status).toBe(400);
+      expect(await rejected.json()).toEqual({
+        error: { code: "PREMIERE_INVALID_REQUEST" },
+      });
+      expect(harness.admissions).toHaveLength(admissionCount);
+    });
+  });
+
   test("bounds declared and chunked bodies and sanitizes parser/runtime failures", async () => {
     const harness = await httpHarness(root, true, { bodyLimitBytes: 1_024 });
     await harness.run(async (baseUrl) => {
@@ -421,6 +472,7 @@ async function httpHarness(
     hangPersistence?: boolean;
     persistenceDelayMs?: number;
     operationTimeoutMs?: number;
+    resolveClientAddress?: ReplayPremiereClientAddressResolver;
     throwOperatorSink?: boolean;
   } = {},
 ) {
@@ -492,7 +544,8 @@ async function httpHarness(
       security,
       bodyLimitBytes: httpOptions.bodyLimitBytes,
       operationTimeoutMs: httpOptions.operationTimeoutMs,
-      remoteAddress: () => "127.0.0.1",
+      resolveClientAddress:
+        httpOptions.resolveClientAddress ?? (() => "127.0.0.1"),
       onOperatorError: (error) => {
         operatorErrors.push(error);
         if (httpOptions.throwOperatorSink === true) {

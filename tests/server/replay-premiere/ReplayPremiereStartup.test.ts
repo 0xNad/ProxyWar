@@ -164,7 +164,7 @@ describe("ReplayPremiere production startup", () => {
       createReplayPremiereRouter({
         registry: context.httpRegistry,
         security: context.security,
-        remoteAddress: () => "127.0.0.1",
+        resolveClientAddress: () => "127.0.0.1",
       }),
       async (baseUrl) => {
         const response = await fetch(

@@ -8,6 +8,7 @@ import {
   matchProxyWarPublicPremiereReadPath,
   matchProxyWarPublicPremiereWritePath,
 } from "../agents/ProxyWarPublicArtifacts";
+import type { ReplayPremiereClientAddressResolver } from "./ReplayPremiereClientAddress";
 import type { PremiereState } from "./ReplayPremiereContracts";
 import {
   ReplayPremiereError,
@@ -100,8 +101,8 @@ export interface ReplayPremiereHttpOptions {
   security: ReplayPremiereGuestSecurity;
   bodyLimitBytes?: number;
   operationTimeoutMs?: number;
-  /** Must return a trusted transport-normalized peer address, never XFF. */
-  remoteAddress?: (request: Request) => string | null;
+  /** Must return a validated client address across any trusted proxy boundary. */
+  resolveClientAddress?: ReplayPremiereClientAddressResolver;
   /** Operator-only diagnostics sink; never serialized into the response. */
   onOperatorError?: (error: unknown) => void;
 }
@@ -264,7 +265,7 @@ async function handlePremiereApiRequest(
       throw invalidRequest("invalid_idempotency_key", 400);
     }
     const requesterBucketId = options.security.deriveRequesterBucketId(
-      trustedRemoteAddress(request, options.remoteAddress),
+      trustedClientAddress(request, options.resolveClientAddress),
     );
     if (writeRoute.kind === "session") {
       await handleSessionWrite({
@@ -560,11 +561,14 @@ function resolveIncomingMoment(
   return { shareId: share.id, sequence: share.sequence, turn: share.turn };
 }
 
-function trustedRemoteAddress(
+function trustedClientAddress(
   request: Request,
-  resolver: ReplayPremiereHttpOptions["remoteAddress"],
+  resolver: ReplayPremiereHttpOptions["resolveClientAddress"],
 ): string {
-  const address = resolver?.(request) ?? request.socket.remoteAddress ?? null;
+  const address =
+    resolver === undefined
+      ? (request.socket.remoteAddress ?? null)
+      : resolver(request);
   if (address === null) throw invalidRequest("remote_address_unavailable", 400);
   return address;
 }
