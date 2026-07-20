@@ -18,7 +18,6 @@ import { loadTerrainMap, MapManifest } from "../core/game/TerrainMapLoader";
 import { GameConfig, ServerMessage, Winner } from "../core/Schemas";
 import { auditDecisionEffects } from "../server/agents/AgentActionAuditor";
 import {
-  AgentRunRosterEntry,
   AgentRunFinalState,
   WriteAgentLeagueRunArtifactsInput,
   writeAgentLeagueRunArtifacts,
@@ -67,6 +66,7 @@ import {
   PlannerExecutorAgentBrain,
   FrontierPolicyExecutor,
 } from "../server/agents/AgentPlannerExecutor";
+import { buildAttachedAgentRunRoster } from "../server/agents/AgentRunRoster";
 import {
   agentManifestToSpec,
   loadAgentManifestsFromDirectory,
@@ -461,7 +461,6 @@ export async function runAgentLeagueSmoke(
             );
           },
   });
-  const roster = agentRunRoster(participants);
   const spectatorSnapshots: AgentSpectatorSnapshot[] = [];
   const mirror = new AgentLocalGameMirror(mapLoader, log);
   const mirrorMessages = () => participants[0]?.runner.serverMessages() ?? [];
@@ -476,6 +475,7 @@ export async function runAgentLeagueSmoke(
 
   try {
     league.attachAgents();
+    const roster = buildAttachedAgentRunRoster(participants);
     league.startGame();
     if (runnerMode === "step-locked") {
       const stepResult = await runAgentStepLockedLeague({
@@ -1840,18 +1840,6 @@ function compactDecisionMetadata(
     llmPromptLength:
       typeof metadata.llmPrompt === "string" ? metadata.llmPrompt.length : null,
   };
-}
-
-function agentRunRoster(
-  participants: ReturnType<typeof createAgentParticipants>,
-): AgentRunRosterEntry[] {
-  return participants.map((participant) => ({
-    agentID: participant.runner.agentID,
-    username: participant.spec.username,
-    profile: participant.spec.profile,
-    clientID: participant.runner.clientID(),
-    brainType: participant.brain.brainType ?? "rule",
-  }));
 }
 
 function finalKnownState(input: {
