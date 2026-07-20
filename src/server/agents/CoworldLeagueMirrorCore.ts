@@ -13,6 +13,8 @@ import type {
  */
 
 const housePolicyName = "proxywar-keystone";
+const replayUiRecentDecisionLimit = 60;
+const replayUiTextLimit = 1_000;
 
 const fallbackPlayerColors = [
   "#ef4444",
@@ -49,6 +51,18 @@ function asString(value: unknown): string | null {
 
 function asNumber(value: unknown): number | null {
   return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
+
+function asBoolean(value: unknown): boolean | null {
+  return typeof value === "boolean" ? value : null;
+}
+
+function boundedString(
+  value: unknown,
+  limit = replayUiTextLimit,
+): string | null {
+  const text = asString(value);
+  return text === null ? null : text.slice(0, limit);
 }
 
 export interface CoworldLeagueSummary {
@@ -343,6 +357,179 @@ export interface ParsedHostedReplay {
     tilesOwned: number;
     isAlive: boolean;
   }>;
+}
+
+export interface CoworldReplayUiDecision {
+  sequence: number;
+  turnNumber: number;
+  username: string;
+  profile: string;
+  brainType: string;
+  selectedActionKind: string;
+  selectedLegalActionId: string;
+  selectedActionMetadata?: Record<string, unknown>;
+  socialText?: string;
+  socialTargetName?: string;
+  reason: string;
+  planObjective?: string;
+  decisionLatencyMs: number;
+  fallbackUsed: boolean;
+  parseSuccess?: boolean;
+  result: {
+    accepted: boolean;
+    reason: string;
+  };
+  auditStatus?: string;
+}
+
+export interface CoworldReplayUiArtifact {
+  version: 1;
+  decisionCount: number;
+  rejectedCount: number;
+  fallbackCount: number;
+  actionCounts: Record<string, number>;
+  recentDecisions: CoworldReplayUiDecision[];
+  artifacts: {
+    visualReport: boolean;
+    spectatorTelemetry: boolean;
+    decisions: boolean;
+    summary: boolean;
+  };
+}
+
+/**
+ * Builds the bounded payload consumed by the rendered replay overlay. Hosted
+ * decision logs can be tens of megabytes; the frontend needs totals and a
+ * short recent window, not raw provider output or every historical card.
+ */
+export function buildCoworldReplayUiArtifact(
+  inlineRunArtifacts: Record<string, string>,
+): CoworldReplayUiArtifact {
+  const decisions: CoworldReplayUiDecision[] = [];
+  const actionCounts: Record<string, number> = {};
+  let rejectedCount = 0;
+  let fallbackCount = 0;
+  const rawDecisions = inlineRunArtifacts["decisions.jsonl"];
+  if (typeof rawDecisions === "string") {
+    for (const rawLine of rawDecisions.split("\n")) {
+      const line = rawLine.trim();
+      if (line.length === 0) continue;
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(line);
+      } catch {
+        continue;
+      }
+      const decision = projectCoworldReplayUiDecision(parsed);
+      if (decision === null) continue;
+      decisions.push(decision);
+      actionCounts[decision.selectedActionKind] =
+        (actionCounts[decision.selectedActionKind] ?? 0) + 1;
+      if (!decision.result.accepted) rejectedCount += 1;
+      if (decision.fallbackUsed) fallbackCount += 1;
+    }
+  }
+  return {
+    version: 1,
+    decisionCount: decisions.length,
+    rejectedCount,
+    fallbackCount,
+    actionCounts,
+    recentDecisions: decisions.slice(-replayUiRecentDecisionLimit),
+    artifacts: {
+      visualReport: Object.hasOwn(inlineRunArtifacts, "visual-report.html"),
+      spectatorTelemetry: Object.hasOwn(
+        inlineRunArtifacts,
+        "spectator-telemetry.json",
+      ),
+      decisions: Object.hasOwn(inlineRunArtifacts, "decisions.jsonl"),
+      summary: Object.hasOwn(inlineRunArtifacts, "match-summary.json"),
+    },
+  };
+}
+
+function projectCoworldReplayUiDecision(
+  value: unknown,
+): CoworldReplayUiDecision | null {
+  const decision = asRecord(value);
+  const result = asRecord(decision?.result);
+  const sequence = asNumber(decision?.sequence);
+  const turnNumber = asNumber(decision?.turnNumber);
+  const username = boundedString(decision?.username, 160);
+  const selectedActionKind = boundedString(decision?.selectedActionKind, 120);
+  const selectedLegalActionId = boundedString(
+    decision?.selectedLegalActionId,
+    500,
+  );
+  if (
+    decision === null ||
+    result === null ||
+    sequence === null ||
+    turnNumber === null ||
+    username === null ||
+    selectedActionKind === null ||
+    selectedLegalActionId === null
+  ) {
+    return null;
+  }
+  const projected: CoworldReplayUiDecision = {
+    sequence,
+    turnNumber,
+    username,
+    profile: boundedString(decision.profile, 120) ?? "unknown",
+    brainType: boundedString(decision.brainType, 120) ?? "unknown",
+    selectedActionKind,
+    selectedLegalActionId,
+    reason: boundedString(decision.reason) ?? "",
+    decisionLatencyMs: asNumber(decision.decisionLatencyMs) ?? 0,
+    fallbackUsed: decision.fallbackUsed === true,
+    result: {
+      accepted: result.accepted === true,
+      reason: boundedString(result.reason) ?? "",
+    },
+  };
+  const metadata = projectCoworldReplayUiMetadata(
+    asRecord(decision.selectedActionMetadata),
+  );
+  if (metadata !== undefined) projected.selectedActionMetadata = metadata;
+  const socialText = boundedString(decision.socialText);
+  if (socialText !== null) projected.socialText = socialText;
+  const socialTargetName = boundedString(decision.socialTargetName, 160);
+  if (socialTargetName !== null) {
+    projected.socialTargetName = socialTargetName;
+  }
+  const planObjective = boundedString(decision.planObjective, 500);
+  if (planObjective !== null) projected.planObjective = planObjective;
+  const parseSuccess = asBoolean(decision.parseSuccess);
+  if (parseSuccess !== null) projected.parseSuccess = parseSuccess;
+  const auditStatus = boundedString(decision.auditStatus, 120);
+  if (auditStatus !== null) projected.auditStatus = auditStatus;
+  return projected;
+}
+
+function projectCoworldReplayUiMetadata(
+  metadata: Record<string, unknown> | null,
+): Record<string, unknown> | undefined {
+  if (metadata === null) return undefined;
+  const projected: Record<string, unknown> = {};
+  for (const key of [
+    "message",
+    "quickChatKey",
+    "emojiText",
+    "recipientName",
+    "targetName",
+    "emojiContext",
+  ]) {
+    const value = boundedString(metadata[key], 500);
+    if (value !== null) projected[key] = value;
+  }
+  if (typeof metadata.emoji === "number" && Number.isFinite(metadata.emoji)) {
+    projected.emoji = metadata.emoji;
+  }
+  if (typeof metadata.expansion === "boolean") {
+    projected.expansion = metadata.expansion;
+  }
+  return Object.keys(projected).length > 0 ? projected : undefined;
 }
 
 export function parseHostedReplayPayload(

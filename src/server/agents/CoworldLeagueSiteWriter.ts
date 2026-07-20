@@ -382,6 +382,8 @@ export function coworldLeagueIndexHtml(data: CoworldLeagueMirrorData): string {
     * { box-sizing:border-box; }
     html, body { max-width:100%; overflow-x:hidden; }
     body { margin:0; background:linear-gradient(rgba(255,255,255,.018) 1px, transparent 1px), linear-gradient(90deg, rgba(255,255,255,.018) 1px, transparent 1px), var(--bg); background-size:48px 48px,48px 48px,auto; color:var(--text); font:15px/1.55 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+    .skip-link { position:fixed; z-index:100; top:8px; left:8px; padding:10px 14px; border-radius:5px; background:var(--amber); color:#1a1206; transform:translateY(-150%); }
+    .skip-link:focus { transform:translateY(0); }
     .shell { width:100%; max-width:1180px; margin:0 auto; padding:24px 18px 56px; }
     header { display:flex; justify-content:space-between; gap:16px; align-items:center; margin-bottom:14px; flex-wrap:wrap; }
     .brand { display:flex; gap:10px; align-items:center; font-weight:900; }
@@ -407,7 +409,9 @@ export function coworldLeagueIndexHtml(data: CoworldLeagueMirrorData): string {
     h2 { margin:0 0 10px; font-size:20px; }
     .standings-note { max-width:820px; color:var(--muted); font-size:13px; margin:-2px 0 10px; }
     section { margin-bottom:26px; }
-    table { width:100%; border-collapse:collapse; background:var(--surface); border:1px solid var(--line); border-radius:8px; overflow:hidden; }
+    .standings-scroll { width:100%; overflow-x:auto; border:1px solid var(--line); border-radius:8px; -webkit-overflow-scrolling:touch; }
+    .standings-scroll:focus-visible { outline:2px solid var(--cyan); outline-offset:3px; }
+    table { width:100%; min-width:600px; border-collapse:collapse; background:var(--surface); }
     th, td { padding:10px 12px; border-bottom:1px solid var(--line); text-align:left; vertical-align:middle; }
     th { background:var(--surface2); font-size:11px; text-transform:uppercase; letter-spacing:.08em; color:var(--muted); }
     tr:last-child td { border-bottom:0; }
@@ -423,8 +427,9 @@ export function coworldLeagueIndexHtml(data: CoworldLeagueMirrorData): string {
     .battle-grid { display:grid; grid-template-columns:repeat(auto-fill, minmax(320px, 1fr)); gap:14px; }
     .battle { background:var(--surface); border:1px solid var(--line); border-radius:8px; padding:14px; display:flex; flex-direction:column; gap:10px; }
     .battle-head { display:flex; justify-content:space-between; gap:8px; align-items:baseline; }
-    .battle-head b { font-size:15px; }
+    .battle-head h3 { margin:0; font-size:15px; }
     .battle-head span { color:var(--muted); font:700 11px ui-monospace, SFMono-Regular, Menlo, monospace; }
+    .combatants, .combatant-extra-group { display:flex; flex-direction:column; gap:10px; }
     .combatant { display:grid; grid-template-columns:12px minmax(0,1fr) 62px; gap:8px; align-items:center; }
     .dot { width:10px; height:10px; border-radius:3px; }
     .combatant .name { white-space:nowrap; overflow:hidden; text-overflow:ellipsis; font-weight:700; }
@@ -433,18 +438,38 @@ export function coworldLeagueIndexHtml(data: CoworldLeagueMirrorData): string {
     .tiles { color:var(--muted); font:700 11px ui-monospace, SFMono-Regular, Menlo, monospace; text-align:right; }
     .bar { grid-column:2 / 4; height:4px; background:var(--surface2); border-radius:2px; overflow:hidden; }
     .bar i { display:block; height:100%; }
-    .battle-foot { display:flex; justify-content:space-between; align-items:center; gap:8px; border-top:1px solid var(--line); padding-top:10px; margin-top:2px; }
+    .sr-only { position:absolute; width:1px; height:1px; padding:0; margin:-1px; overflow:hidden; clip:rect(0, 0, 0, 0); white-space:nowrap; border:0; }
+    .roster-toggle { display:none; align-self:flex-start; min-height:40px; border:1px solid var(--line); border-radius:5px; padding:8px 10px; background:var(--surface2); color:var(--cyan); font:800 12px/1 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; cursor:pointer; }
+    .roster-toggle:focus-visible { outline:2px solid var(--cyan); outline-offset:2px; }
+    .roster-toggle .when-expanded { display:none; }
+    .battle[data-roster-expanded="true"] .roster-toggle .when-collapsed { display:none; }
+    .battle[data-roster-expanded="true"] .roster-toggle .when-expanded { display:inline; }
+    .battle-foot { display:flex; justify-content:space-between; align-items:center; gap:8px; flex-wrap:wrap; border-top:1px solid var(--line); padding-top:10px; margin-top:2px; }
     .battle-foot .meta { color:var(--muted); font:700 11px ui-monospace, SFMono-Regular, Menlo, monospace; }
+    .battle-foot .links { margin-left:auto; }
     .degraded { border:1px solid rgba(244,166,74,.5); color:var(--amber); border-radius:4px; padding:2px 7px; font:800 10px ui-monospace, SFMono-Regular, Menlo, monospace; }
     .rounds-strip { display:flex; gap:8px; flex-wrap:wrap; }
     .round-pill { border:1px solid var(--line); background:var(--surface); border-radius:6px; padding:8px 10px; font:700 12px ui-monospace, SFMono-Regular, Menlo, monospace; color:var(--muted); }
     .round-pill.running { border-color:rgba(126,224,168,.5); color:var(--good); }
     footer { border-top:1px solid var(--line); padding-top:16px; color:var(--muted); font-size:13px; display:flex; justify-content:space-between; gap:12px; flex-wrap:wrap; }
-    @media (max-width:640px) { .battle-grid { grid-template-columns:1fr; } }
+    @media (max-width:640px) {
+      .shell { padding-left:12px; padding-right:12px; }
+      .battle-grid { grid-template-columns:minmax(0, 1fr); }
+      .battle { padding:12px; }
+      .roster-disclosure-ready .battle[data-roster-expanded="false"] .combatant-extra-group { display:none; }
+      .roster-disclosure-ready .roster-toggle { display:inline-flex; align-items:center; justify-content:center; min-height:44px; }
+      .battle-foot { align-items:flex-start; }
+      .battle-foot > .meta { flex:1 1 100%; }
+      .battle-foot .links { margin-left:0; }
+      .battle-foot .links a { display:inline-flex; align-items:center; min-height:44px; }
+    }
   </style>
 </head>
 <body>
-  <div class="shell">
+  <a class="skip-link" href="#league-main">${escapeHtml(
+    translateText("coworld_league.skip_to_content"),
+  )}</a>
+  <main id="league-main" class="shell" tabindex="-1">
     <header>
       <div class="brand">
         <div class="mark">PW</div>
@@ -532,7 +557,7 @@ export function coworldLeagueIndexHtml(data: CoworldLeagueMirrorData): string {
       )}</code></div>
       <div>${escapeHtml(translateText("coworld_league.update_cadence"))}</div>
     </footer>
-  </div>
+  </main>
   <script src="${coworldLeagueClientAssetPath()}"></script>
 </body>
 </html>
@@ -549,6 +574,24 @@ export function coworldLeagueClientJavaScript(): string {
       if (Number.isFinite(time)) {
         el.textContent = new Date(time).toLocaleString();
       }
+    }
+
+    for (const toggle of document.querySelectorAll("[data-roster-toggle]")) {
+      if (!(toggle instanceof HTMLButtonElement)) {
+        continue;
+      }
+      toggle.addEventListener("click", () => {
+        const battle = toggle.closest(".battle");
+        if (!(battle instanceof HTMLElement)) {
+          return;
+        }
+        const expanded = battle.dataset.rosterExpanded !== "true";
+        battle.dataset.rosterExpanded = String(expanded);
+        toggle.setAttribute("aria-expanded", String(expanded));
+      });
+    }
+    if (document.documentElement.classList) {
+      document.documentElement.classList.add("roster-disclosure-ready");
     }
 
     const root = document.documentElement;
@@ -721,14 +764,16 @@ function standingsTable(data: CoworldLeagueMirrorData): string {
         </tr>`;
     })
     .join("\n");
-  return `<table aria-labelledby="standings-title" aria-describedby="standings-provenance">
+  return `<div class="standings-scroll" role="region" aria-describedby="standings-provenance" aria-label="${escapeHtml(
+    translateText("coworld_league.standings_scroll_label"),
+  )}" tabindex="0"><table aria-labelledby="standings-title" aria-describedby="standings-provenance">
     <thead><tr><th>Rank</th><th>Warlord</th><th>${escapeHtml(
       data.league.scoreLabel,
     )}</th><th>${escapeHtml(
       translateText("coworld_league.rated_rounds"),
     )}</th></tr></thead>
     <tbody>${rows}</tbody>
-  </table>`;
+  </table></div>`;
 }
 
 function battleCard(episode: CoworldLeagueEpisodeRow): string {
@@ -736,23 +781,49 @@ function battleCard(episode: CoworldLeagueEpisodeRow): string {
     (sum, player) => sum + Math.max(0, player.tilesOwned),
     0,
   );
-  const combatants = episode.players
-    .map((player) => {
-      const share =
-        totalTiles > 0 ? Math.max(0, player.tilesOwned) / totalTiles : 0;
-      return `
-        <div class="combatant">
-          <span class="dot" style="background:${escapeHtml(player.color)}"></span>
+  const rankedPlayers = [...episode.players].sort(
+    (left, right) =>
+      Number(right.isWinner) - Number(left.isWinner) ||
+      right.tilesOwned - left.tilesOwned ||
+      left.slot - right.slot,
+  );
+  const combatantMarkup = (player: CoworldLeagueEpisodePlayerRow): string => {
+    const share =
+      totalTiles > 0 ? Math.max(0, player.tilesOwned) / totalTiles : 0;
+    return `
+        <div class="combatant" role="listitem">
+          <span class="dot" aria-hidden="true" style="background:${escapeHtml(player.color)}"></span>
           <span class="name${player.isAlive ? "" : " dead"}">${escapeHtml(player.name)}${
-            player.isWinner ? ` <span class="win">★</span>` : ""
+            player.isWinner
+              ? ` <span class="win" aria-hidden="true">★</span><span class="sr-only"> (${escapeHtml(
+                  translateText("coworld_league.winner"),
+                )})</span>`
+              : ""
+          }${
+            player.isAlive
+              ? ""
+              : `<span class="sr-only"> (${escapeHtml(
+                  translateText("coworld_league.eliminated"),
+                )})</span>`
           }</span>
           <span class="tiles">${escapeHtml(formatTiles(player.tilesOwned))}</span>
-          <span class="bar"><i style="width:${(share * 100).toFixed(1)}%;background:${escapeHtml(
+          <span class="bar" aria-hidden="true"><i style="width:${(share * 100).toFixed(1)}%;background:${escapeHtml(
             player.color,
           )}"></i></span>
         </div>`;
-    })
+  };
+  const primaryCombatants = rankedPlayers
+    .slice(0, 3)
+    .map(combatantMarkup)
     .join("\n");
+  const extraCombatants = rankedPlayers
+    .slice(3)
+    .map(combatantMarkup)
+    .join("\n");
+  const rosterId = `battle-roster-${createHash("sha256")
+    .update(episode.episodeRequestId)
+    .digest("hex")
+    .slice(0, 12)}`;
   const meta: string[] = [];
   if (episode.turnCount !== null) {
     meta.push(`${formatTiles(episode.turnCount)} turns`);
@@ -765,20 +836,36 @@ function battleCard(episode: CoworldLeagueEpisodeRow): string {
       ? `<span class="degraded">⚠ ${escapeHtml(String(episode.degradedCount))} degraded</span>`
       : "";
   return `
-    <article class="battle">
+    <article class="battle" data-roster-expanded="false">
       <div class="battle-head">
-        <b>${escapeHtml(episode.map)}${
+        <h3>${escapeHtml(episode.map)}${
           episode.roundNumber === null
             ? ""
             : ` · Round ${escapeHtml(String(episode.roundNumber))}`
-        }</b>
+        }</h3>
         <span data-utc="${escapeHtml(episode.completedAt ?? "")}">${escapeHtml(
           episode.completedAt === null
             ? "in progress"
             : shortUtc(episode.completedAt),
         )}</span>
       </div>
-      ${combatants}
+      <div class="combatants" role="list">
+        ${primaryCombatants}
+        ${
+          extraCombatants.length === 0
+            ? ""
+            : `<div id="${rosterId}" class="combatant-extra-group" role="presentation">${extraCombatants}</div>`
+        }
+      </div>
+      ${
+        extraCombatants.length === 0
+          ? ""
+          : `<button class="roster-toggle" type="button" data-roster-toggle aria-expanded="false" aria-controls="${rosterId}"><span class="when-collapsed">${escapeHtml(
+              translateText("coworld_league.show_full_roster"),
+            )}</span><span class="when-expanded">${escapeHtml(
+              translateText("coworld_league.show_top_three"),
+            )}</span></button>`
+      }
       <div class="battle-foot">
         <span class="meta">${escapeHtml(meta.join(" · "))}</span>
         ${degraded}

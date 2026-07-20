@@ -19,6 +19,7 @@ import {
   retentionReferencesFromEpisodes,
 } from "../server/agents/CoworldLeagueArtifactRetention";
 import {
+  buildCoworldReplayUiArtifact,
   buildEpisodeRow,
   buildRoundRows,
   buildStandingRows,
@@ -335,7 +336,7 @@ async function ensureEpisodeReplayCached(
 
 // Bump when bundle contents change shape so existing directories regenerate
 // in place on the next sync (files are overwritten, never deleted).
-const bundleVersion = "2";
+const bundleVersion = "3";
 
 async function unpackEpisodeRunDir(
   replay: ParsedHostedReplay,
@@ -366,6 +367,10 @@ async function unpackEpisodeRunDir(
     } as AgentSpectatorReplay;
     const generatedFiles = [
       ...Object.entries(replay.inlineRunArtifacts),
+      [
+        "replay-ui.json",
+        `${JSON.stringify(buildCoworldReplayUiArtifact(replay.inlineRunArtifacts))}\n`,
+      ],
       [
         "spectator-replay.json",
         `${JSON.stringify(publicSpectatorReplay, null, 2)}\n`,

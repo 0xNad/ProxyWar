@@ -19,6 +19,7 @@ import {
   UserSettings,
 } from "../core/game/UserSettings";
 import "./AccountModal";
+import { loadAiLeagueReplayDetails } from "./AiLeagueReplayArtifacts";
 import { mountAiLeagueReplayOverlay } from "./AiLeagueReplayOverlay";
 import { getUserMe } from "./Api";
 import { userAuth } from "./Auth";
@@ -274,6 +275,7 @@ class Client {
   private lobbyHandle: JoinLobbyResult | null = null;
   private eventBus: EventBus = new EventBus();
   private replayLoadingCleanup: (() => void) | null = null;
+  private replayAttemptCleanup: (() => void) | null = null;
 
   private currentUrl: string | null = null;
 
@@ -830,53 +832,55 @@ class Client {
       artifactBasePath?: string;
     } = {},
   ) {
+    this.replayAttemptCleanup?.();
     this.replayLoadingCleanup?.();
     this.replayLoadingCleanup = holdReplayLoadingScreenUntilFirstFrame();
 
     const artifactBasePath =
       options.artifactBasePath ??
       `/ai-league-runs/${encodeURIComponent(runID)}`;
-    const [
-      recordResult,
-      decisionsResult,
-      summaryResult,
-      spectatorTelemetryResult,
-    ] = await Promise.allSettled([
-      fetch(`${artifactBasePath}/game-record.json`),
-      fetch(`${artifactBasePath}/decisions.jsonl`),
-      fetch(`${artifactBasePath}/match-summary.json`),
-      fetch(`${artifactBasePath}/spectator-telemetry.json`),
-    ]);
+    const attemptController = new AbortController();
+    const attemptCleanups: Array<() => void> = [];
+    const cleanupAttempt = () => {
+      attemptController.abort();
+      for (const cleanup of attemptCleanups.splice(0)) cleanup();
+      if (this.replayAttemptCleanup === cleanupAttempt) {
+        this.replayAttemptCleanup = null;
+      }
+    };
+    this.replayAttemptCleanup = cleanupAttempt;
+    const recordTimeout = setTimeout(
+      () => attemptController.abort("Replay record request timed out"),
+      REPLAY_LOADING_SLOW_TIMEOUT_MS,
+    );
+    attemptCleanups.push(() => clearTimeout(recordTimeout));
 
-    if (recordResult.status === "rejected") {
+    let recordResponse: Response;
+    try {
+      recordResponse = await fetch(`${artifactBasePath}/game-record.json`, {
+        signal: attemptController.signal,
+      });
+    } catch (error) {
+      if (this.replayAttemptCleanup !== cleanupAttempt) return;
       this.failReplayLoading(
         runID,
         options.source,
         "Replay record request failed",
-        recordResult.reason,
+        error,
       );
       return;
     }
-
-    const recordResponse = recordResult.value;
-    const decisionsResponse =
-      decisionsResult.status === "fulfilled" ? decisionsResult.value : null;
-    const summaryResponse =
-      summaryResult.status === "fulfilled" ? summaryResult.value : null;
-    const spectatorTelemetryResponse =
-      spectatorTelemetryResult.status === "fulfilled"
-        ? spectatorTelemetryResult.value
-        : null;
-
     if (!recordResponse.ok) {
       try {
         const spectatorResponse = await fetch(
           `${artifactBasePath}/spectator.html`,
           {
             method: "HEAD",
+            signal: attemptController.signal,
           },
         );
         if (spectatorResponse.ok) {
+          cleanupAttempt();
           window.location.replace(`${artifactBasePath}/spectator.html`);
           return;
         }
@@ -915,49 +919,23 @@ class Client {
       );
       return;
     }
+    clearTimeout(recordTimeout);
 
-    let decisionsText = "";
-    if (decisionsResponse?.ok) {
-      try {
-        decisionsText = await decisionsResponse.text();
-      } catch (error) {
-        console.warn("Failed to read AI league decisions", error);
-      }
-    }
-    const decisions = decisionsText
-      .split("\n")
-      .map((line) => line.trim())
-      .filter(Boolean)
-      .flatMap((line) => {
-        try {
-          return [JSON.parse(line)];
-        } catch (error) {
-          console.warn("Ignoring invalid AI league decision", error);
-          return [];
-        }
-      });
-    const summary = summaryResponse?.ok
-      ? await summaryResponse.json().catch((error) => {
-          console.warn("Invalid AI league match summary", error);
-          return null;
-        })
-      : null;
-    let spectatorTelemetry: unknown = null;
-    if (spectatorTelemetryResponse?.ok) {
-      try {
-        spectatorTelemetry = await spectatorTelemetryResponse.json();
-      } catch (error) {
-        console.warn("Invalid AI league spectator telemetry", error);
-      }
-    }
-
+    let replayOverlay: ReturnType<typeof mountAiLeagueReplayOverlay>;
     try {
-      mountAiLeagueReplayOverlay({
+      replayOverlay = mountAiLeagueReplayOverlay({
         runID,
-        decisions,
-        summary,
-        spectatorTelemetry,
+        decisions: [],
+        summary: null,
+        spectatorTelemetry: null,
         artifactBasePath,
+        detailsLoading: true,
+        artifactAvailability: {
+          visualReport: false,
+          spectatorTelemetry: false,
+          decisions: false,
+          summary: false,
+        },
         onReplaySpeedChange: (speed) => {
           this.eventBus.emit(new ReplaySpeedChangeEvent(speed));
         },
@@ -971,18 +949,27 @@ class Client {
       );
       return;
     }
-    document.addEventListener("ai-league-replay-jump-turn", (event) => {
+    attemptCleanups.push(() => replayOverlay.dispose());
+
+    const onReplayJump = (event: Event) => {
       const turnNumber = (event as CustomEvent<{ turnNumber?: number }>).detail
         ?.turnNumber;
       if (typeof turnNumber === "number" && Number.isFinite(turnNumber)) {
         this.eventBus.emit(new ReplayJumpToTurnEvent(turnNumber));
       }
-    });
-    document.addEventListener("ai-league-replay-pause", (event) => {
+    };
+    const onReplayPause = (event: Event) => {
       const paused = (event as CustomEvent<{ paused?: boolean }>).detail
         ?.paused;
       this.eventBus.emit(new PauseGameIntentEvent(paused !== false));
+    };
+    document.addEventListener("ai-league-replay-jump-turn", onReplayJump);
+    document.addEventListener("ai-league-replay-pause", onReplayPause);
+    attemptCleanups.push(() => {
+      document.removeEventListener("ai-league-replay-jump-turn", onReplayJump);
+      document.removeEventListener("ai-league-replay-pause", onReplayPause);
     });
+
     const requestedTurn = Number(
       new URLSearchParams(window.location.search).get("turn"),
     );
@@ -995,7 +982,77 @@ class Client {
         );
       };
       document.addEventListener("ai-league-replay-frame", jumpAfterFirstFrame);
+      attemptCleanups.push(() =>
+        document.removeEventListener(
+          "ai-league-replay-frame",
+          jumpAfterFirstFrame,
+        ),
+      );
     }
+
+    const hydrateAfterFirstFrame = () => {
+      document.removeEventListener(
+        "ai-league-replay-frame",
+        hydrateAfterFirstFrame,
+      );
+      if (this.replayAttemptCleanup !== cleanupAttempt) return;
+      const detailsController = new AbortController();
+      const abortDetails = () => detailsController.abort();
+      attemptController.signal.addEventListener("abort", abortDetails, {
+        once: true,
+      });
+      const detailsTimeout = setTimeout(
+        () => detailsController.abort("Replay details request timed out"),
+        15_000,
+      );
+      void loadAiLeagueReplayDetails(artifactBasePath, {
+        signal: detailsController.signal,
+        onPartial: (details) => {
+          if (this.replayAttemptCleanup !== cleanupAttempt) {
+            return;
+          }
+          replayOverlay.hydrate({
+            decisions: details.recentDecisions,
+            summary: details.summary,
+            spectatorTelemetry: details.spectatorTelemetry,
+            detailsLoading: false,
+            artifactAvailability: details.artifactAvailability,
+          });
+        },
+      })
+        .then((details) => {
+          if (this.replayAttemptCleanup !== cleanupAttempt) {
+            return;
+          }
+          replayOverlay.hydrate({
+            decisions: details.recentDecisions,
+            summary: details.summary,
+            spectatorTelemetry: details.spectatorTelemetry,
+            detailsLoading: false,
+            artifactAvailability: details.artifactAvailability,
+          });
+        })
+        .catch((error) => {
+          if (!detailsController.signal.aborted) {
+            console.warn("Replay details unavailable", error);
+          }
+        })
+        .finally(() => {
+          clearTimeout(detailsTimeout);
+          attemptController.signal.removeEventListener("abort", abortDetails);
+        });
+    };
+    document.addEventListener(
+      "ai-league-replay-frame",
+      hydrateAfterFirstFrame,
+      { once: true },
+    );
+    attemptCleanups.push(() =>
+      document.removeEventListener(
+        "ai-league-replay-frame",
+        hydrateAfterFirstFrame,
+      ),
+    );
 
     document.dispatchEvent(
       new CustomEvent("join-lobby", {
@@ -1049,17 +1106,15 @@ class Client {
 
   private failReplayLoading(
     runID: string,
-    source: "ai-league-replay" | "coworld-replay" | undefined,
+    _source: "ai-league-replay" | "coworld-replay" | undefined,
     message: string,
     error?: unknown,
   ): void {
     this.replayLoadingCleanup?.();
     this.replayLoadingCleanup = null;
+    this.replayAttemptCleanup?.();
     showReplayLoadingFailure();
     console.error(`${message} for run ${runID}`, error);
-    if (source !== "coworld-replay") {
-      window.location.replace("/league");
-    }
   }
 
   private async openCoworldPlayer() {
@@ -1252,6 +1307,8 @@ class Client {
   }
 
   private async handleLeaveLobby(event?: CustomEvent) {
+    this.replayAttemptCleanup?.();
+    this.replayAttemptCleanup = null;
     if (this.lobbyHandle === null) {
       return;
     }

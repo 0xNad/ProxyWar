@@ -24,6 +24,7 @@ export function showReplayLoadingScreen(
   );
 
   const screen = ensureReplayLoadingScreen();
+  screen.setAttribute("role", "status");
   screen.setAttribute("aria-busy", String(busy));
   updateReplayLoadingMessage(screen, messageKey);
 
@@ -32,6 +33,10 @@ export function showReplayLoadingScreen(
   );
   if (retry !== null) {
     retry.hidden = true;
+  }
+  const back = screen.querySelector<HTMLElement>("[data-replay-loading-back]");
+  if (back !== null) {
+    back.hidden = true;
   }
 
   document.getElementById("proxywar-coworld-splash")?.remove();
@@ -97,12 +102,24 @@ export function showReplayLoadingFailure(): HTMLElement {
   const retry = screen.querySelector<HTMLButtonElement>(
     "[data-replay-loading-retry]",
   );
+  screen.setAttribute("role", "alert");
   if (retry !== null) {
     retry.hidden = false;
     retry.dataset.i18n = "ai_league_replay.retry";
     const translated = translateText("ai_league_replay.retry");
     retry.textContent =
       translated === "ai_league_replay.retry" ? "" : translated;
+    retry.focus();
+  }
+  const back = screen.querySelector<HTMLAnchorElement>(
+    "[data-replay-loading-back]",
+  );
+  if (back !== null) {
+    back.hidden = false;
+    back.dataset.i18n = "ai_league_replay.back_to_league";
+    const translated = translateText("ai_league_replay.back_to_league");
+    back.textContent =
+      translated === "ai_league_replay.back_to_league" ? "" : translated;
   }
   return screen;
 }
@@ -141,7 +158,16 @@ function ensureReplayLoadingScreen(): HTMLElement {
   retry.dataset.replayLoadingRetry = "";
   retry.hidden = true;
 
-  content.append(spinner, message, retry);
+  const actions = document.createElement("div");
+  actions.className = "proxywar-replay-loading-actions";
+
+  const back = document.createElement("a");
+  back.href = "/league";
+  back.dataset.replayLoadingBack = "";
+  back.hidden = true;
+
+  actions.append(retry, back);
+  content.append(spinner, message, actions);
   screen.append(content);
   document.body.prepend(screen);
   bindRetry(screen);

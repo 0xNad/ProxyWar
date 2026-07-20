@@ -48,7 +48,12 @@ champion has the exact `proxywar-keystone:vN` policy name.
 - `artifacts/ai-league-runs/<runID>/` — one standard run bundle per mirrored
   episode: self-contained `spectator.html`, `spectator-replay.json`, and the
   inline artifacts (`game-record.json`, `decisions.jsonl`, `match-summary.json`,
-  `spectator-telemetry.json`) that the real-client renderer needs.
+  `spectator-telemetry.json`) that the real-client renderer needs. The mirror
+  also generates `replay-ui.json`, a bounded projection containing aggregate
+  decision counts and the newest 60 display-safe decisions. The real renderer
+  loads only `game-record.json` before its first frame, then hydrates the panel
+  from these smaller evidence artifacts; it does not download the raw JSONL as
+  part of replay startup.
 - `artifacts/coworld-league-mirror/replays/` — raw hosted replay cache
   (downloads are incremental by episode-request id).
 - `artifacts/coworld-league-mirror/summaries/` — indefinite compact evidence:

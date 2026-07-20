@@ -2,6 +2,7 @@ export const proxyWarPublicRunArtifacts = [
   "game-record.json",
   "decisions.jsonl",
   "match-summary.json",
+  "replay-ui.json",
   "match-package.json",
   "match-package.html",
   "match-package.md",
@@ -128,9 +129,10 @@ export function isProxyWarPublicLeaguePath(pathname: string): boolean {
   if (renderMatch !== null) {
     return isSafeProxyWarArtifactSegment(renderMatch[1]);
   }
-  const match = /^\/ai-league-runs\/(league(?:-[a-zA-Z0-9._:-]+)?)\/([a-zA-Z0-9._:-]+)$/.exec(
-    pathname,
-  );
+  const match =
+    /^\/ai-league-runs\/(league(?:-[a-zA-Z0-9._:-]+)?)\/([a-zA-Z0-9._:-]+)$/.exec(
+      pathname,
+    );
   if (match === null) {
     return false;
   }
@@ -157,9 +159,9 @@ export function isProxyWarPublicDoc(fileName: string): boolean {
 export function isProxyWarPublicExternalAgentExample(
   fileName: string,
 ): boolean {
-  return (
-    proxyWarPublicExternalAgentExamples as readonly string[]
-  ).includes(fileName);
+  return (proxyWarPublicExternalAgentExamples as readonly string[]).includes(
+    fileName,
+  );
 }
 
 export function isSafeProxyWarArtifactSegment(value: string): boolean {

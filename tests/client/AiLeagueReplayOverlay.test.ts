@@ -3,6 +3,14 @@ import { mountAiLeagueReplayOverlay } from "../../src/client/AiLeagueReplayOverl
 
 describe("AiLeagueReplayOverlay", () => {
   beforeEach(() => {
+    Object.defineProperty(window, "innerWidth", {
+      configurable: true,
+      value: 1024,
+    });
+    Object.defineProperty(window, "innerHeight", {
+      configurable: true,
+      value: 768,
+    });
     document.body.innerHTML = "";
     localStorage.clear();
   });
@@ -113,7 +121,7 @@ describe("AiLeagueReplayOverlay", () => {
 
     const overlay = document.getElementById("ai-league-replay-overlay");
     expect(overlay).not.toBeNull();
-    expect(overlay?.textContent).toContain("Proxy War Replay");
+    expect(overlay?.textContent).toContain("ai_league_replay.title");
     expect(overlay?.textContent).toContain("build:Defense Post:10");
     expect(overlay?.textContent).toContain(
       "1 Proxy War agents vs 10 built-in opponents",
@@ -161,9 +169,7 @@ describe("AiLeagueReplayOverlay", () => {
 
     // Floating map message bubbles were removed: no bubble layer is mounted.
     expect(document.getElementById("ai-league-social-map-bubbles")).toBeNull();
-    expect(
-      document.querySelector(".ai-league-map-social-bubble"),
-    ).toBeNull();
+    expect(document.querySelector(".ai-league-map-social-bubble")).toBeNull();
     // The political-radio transcript stays and now carries the social line
     // (speaker + text) that used to render in the bubble.
     const transcript = document.getElementById("ai-league-social-transcript");
@@ -297,7 +303,9 @@ describe("AiLeagueReplayOverlay", () => {
   it("surfaces a headline lower-third for promotable events and toggles talks", () => {
     const jumps: number[] = [];
     document.addEventListener("ai-league-replay-jump-turn", (event) => {
-      jumps.push((event as CustomEvent<{ turnNumber: number }>).detail.turnNumber);
+      jumps.push(
+        (event as CustomEvent<{ turnNumber: number }>).detail.turnNumber,
+      );
     });
 
     mountAiLeagueReplayOverlay({
@@ -332,7 +340,9 @@ describe("AiLeagueReplayOverlay", () => {
       }),
     );
     expect(headline?.hidden).toBe(false);
-    expect(headline?.textContent).toContain("ai_league_replay.headline_betrayal");
+    expect(headline?.textContent).toContain(
+      "ai_league_replay.headline_betrayal",
+    );
 
     // Replay jump still works from the comm-thread turn buttons.
     const jump = overlay?.querySelector<HTMLButtonElement>(
@@ -419,7 +429,9 @@ describe("AiLeagueReplayOverlay", () => {
     });
 
     const overlay = document.getElementById("ai-league-replay-overlay")!;
-    const dragHandle = overlay.querySelector<HTMLElement>("[data-ai-league-drag]")!;
+    const dragHandle = overlay.querySelector<HTMLElement>(
+      "[data-ai-league-drag]",
+    )!;
     dragHandle.dispatchEvent(
       new MouseEvent("mousedown", {
         bubbles: true,
@@ -445,6 +457,325 @@ describe("AiLeagueReplayOverlay", () => {
     expect(overlay.getAttribute("style")).toBeNull();
   });
 
+  it("starts as an accessible compact bottom sheet on narrow screens", () => {
+    Object.defineProperty(window, "innerWidth", {
+      configurable: true,
+      value: 390,
+    });
+    localStorage.setItem(
+      "ai-league-spectator-layout-v1",
+      JSON.stringify({
+        left: "900px",
+        top: "600px",
+        right: "auto",
+        width: "700px",
+        height: "600px",
+        maxHeight: "none",
+      }),
+    );
+
+    mountAiLeagueReplayOverlay({
+      runID: "mobile-panel",
+      artifactBasePath: "/ai-league-runs/mobile-panel",
+      decisions: [],
+      spectatorTelemetry: spectatorTelemetryFixture(),
+    });
+
+    const overlay = document.getElementById("ai-league-replay-overlay")!;
+    const toggle = overlay.querySelector<HTMLButtonElement>(
+      "[data-ai-league-toggle]",
+    )!;
+    const body = document.getElementById("ai-league-replay-panel-body");
+    expect(overlay.classList.contains("mobile-bottom-sheet")).toBe(true);
+    expect(overlay.classList.contains("collapsed")).toBe(true);
+    expect(overlay.getAttribute("style")).toBeNull();
+    expect(toggle.getAttribute("aria-expanded")).toBe("false");
+    expect(toggle.getAttribute("aria-controls")).toBe(body?.id);
+
+    toggle.click();
+    expect(overlay.classList.contains("collapsed")).toBe(false);
+    expect(toggle.getAttribute("aria-expanded")).toBe("true");
+    toggle.click();
+    expect(overlay.classList.contains("collapsed")).toBe(true);
+    expect(toggle.getAttribute("aria-expanded")).toBe("false");
+
+    document.dispatchEvent(
+      new CustomEvent("ai-league-replay-frame", {
+        detail: { tick: 505, turnNumber: 505, players: [] },
+      }),
+    );
+    const headline = document.getElementById("ai-league-headline-event");
+    expect(headline?.hidden).toBe(false);
+    expect(headline?.querySelector(".ai-league-headline-text")).not.toBeNull();
+    const styles = overlay.querySelector("style")?.textContent ?? "";
+    expect(styles).toContain("min-height: 44px");
+    expect(styles).toContain(".ai-league-headline-text");
+    expect(styles).toContain("white-space: nowrap");
+  });
+
+  it("renders only known-existing artifact links when availability is provided", () => {
+    mountAiLeagueReplayOverlay({
+      runID: "artifact-links",
+      artifactBasePath: "/ai-league-runs/artifact-links",
+      decisions: [],
+      artifactAvailability: {
+        visualReport: false,
+        spectatorTelemetry: false,
+        decisions: true,
+        summary: true,
+      },
+    });
+
+    const hrefs = Array.from(
+      document.querySelectorAll<HTMLAnchorElement>(
+        "#ai-league-replay-overlay a",
+      ),
+      (link) => link.getAttribute("href"),
+    );
+    expect(hrefs).toEqual([
+      "/ai-league-runs/artifact-links/decisions.jsonl",
+      "/ai-league-runs/artifact-links/match-summary.json",
+    ]);
+  });
+
+  it("shows honest loading placeholders before optional match details arrive", () => {
+    mountAiLeagueReplayOverlay({
+      runID: "progressive-details",
+      artifactBasePath: "/ai-league-runs/progressive-details",
+      decisions: [],
+      detailsLoading: true,
+      artifactAvailability: {},
+    });
+
+    const overlay = document.getElementById("ai-league-replay-overlay")!;
+    expect(
+      Array.from(
+        overlay.querySelectorAll(".ai-league-metric b"),
+        (metric) => metric.textContent,
+      ),
+    ).toEqual(["—", "—", "—"]);
+    expect(
+      overlay.querySelector("[data-ai-league-details-loading]")?.textContent,
+    ).toContain("ai_league_replay.loading_details");
+    expect(overlay.querySelector(".ai-league-playstyle")).toBeNull();
+    expect(
+      overlay.querySelector(".ai-league-match-setup")?.textContent,
+    ).not.toContain("Proxy War agents");
+  });
+
+  it("ends optional-detail loading honestly when no evidence is available", () => {
+    mountAiLeagueReplayOverlay({
+      runID: "unavailable-details",
+      artifactBasePath: "/ai-league-runs/unavailable-details",
+      decisions: [],
+      summary: null,
+      spectatorTelemetry: null,
+      detailsLoading: false,
+      artifactAvailability: {},
+    });
+
+    const overlay = document.getElementById("ai-league-replay-overlay")!;
+    expect(
+      Array.from(
+        overlay.querySelectorAll(".ai-league-metric b"),
+        (metric) => metric.textContent,
+      ),
+    ).toEqual(["—", "—", "—"]);
+    expect(
+      overlay.querySelector("[data-ai-league-details-unavailable]")
+        ?.textContent,
+    ).toContain("ai_league_replay.details_unavailable");
+    expect(
+      overlay.querySelector("[data-ai-league-details-loading]"),
+    ).toBeNull();
+  });
+
+  it("hydrates match details without resetting panel or live standings state", () => {
+    const handle = mountAiLeagueReplayOverlay({
+      runID: "hydrated-details",
+      artifactBasePath: "/ai-league-runs/hydrated-details",
+      decisions: [],
+      detailsLoading: true,
+      artifactAvailability: {},
+    });
+    const overlay = document.getElementById("ai-league-replay-overlay")!;
+    const body = document.getElementById("ai-league-replay-panel-body")!;
+    const toggle = overlay.querySelector<HTMLButtonElement>(
+      "[data-ai-league-toggle]",
+    )!;
+    document.dispatchEvent(
+      new CustomEvent("ai-league-replay-frame", {
+        detail: {
+          tick: 100,
+          turnNumber: 100,
+          players: [
+            {
+              playerID: "p1",
+              smallID: 1,
+              clientID: "c1",
+              username: "Agent One",
+              displayName: "Agent One",
+              x: 100,
+              y: 100,
+              tilesOwned: 50,
+              allies: [],
+              embargoes: [],
+              alliances: [],
+            },
+          ],
+        },
+      }),
+    );
+    toggle.click();
+    overlay.style.left = "42px";
+    body.scrollTop = 123;
+
+    handle.hydrate({
+      decisions: [decisionFixture(1)],
+      detailsLoading: false,
+      summary: {
+        decisionCount: 12,
+        rejectedCount: 1,
+        fallbackCount: 2,
+        actionCounts: { build: 12 },
+      },
+      artifactAvailability: { summary: true },
+    });
+
+    expect(document.getElementById("ai-league-replay-overlay")).toBe(overlay);
+    expect(overlay.classList.contains("collapsed")).toBe(true);
+    expect(toggle.getAttribute("aria-expanded")).toBe("false");
+    expect(overlay.style.left).toBe("42px");
+    expect(body.scrollTop).toBe(123);
+    expect(
+      overlay.querySelector("[data-ai-league-diplomacy-rows]")?.textContent,
+    ).toContain("Agent One");
+    expect(
+      Array.from(
+        overlay.querySelectorAll(".ai-league-metric b"),
+        (metric) => metric.textContent,
+      ),
+    ).toEqual(["12", "1", "2"]);
+    expect(
+      overlay.querySelector("[data-ai-league-details-loading]"),
+    ).toBeNull();
+    expect(overlay.querySelectorAll(".ai-league-decision")).toHaveLength(1);
+  });
+
+  it("disposes replay DOM, listeners, and replay-scoped body classes", () => {
+    const handle = mountAiLeagueReplayOverlay({
+      runID: "dispose-replay",
+      artifactBasePath: "/ai-league-runs/dispose-replay",
+      decisions: [],
+      spectatorTelemetry: spectatorTelemetryFixture(),
+    });
+    expect(document.getElementById("ai-league-replay-overlay")).not.toBeNull();
+    expect(
+      document.getElementById("ai-league-social-transcript"),
+    ).not.toBeNull();
+    expect(document.getElementById("ai-league-headline-event")).not.toBeNull();
+    expect(document.body.classList.contains("ai-league-replay-mode")).toBe(
+      true,
+    );
+
+    handle.dispose();
+    handle.dispose();
+
+    expect(document.getElementById("ai-league-replay-overlay")).toBeNull();
+    expect(document.getElementById("ai-league-social-transcript")).toBeNull();
+    expect(document.getElementById("ai-league-headline-event")).toBeNull();
+    expect(document.body.classList.contains("ai-league-replay-mode")).toBe(
+      false,
+    );
+    expect(
+      document.body.classList.contains("ai-league-native-spectator-ui"),
+    ).toBe(false);
+
+    document.dispatchEvent(
+      new CustomEvent("ai-league-replay-frame", {
+        detail: { tick: 505, turnNumber: 505, players: [] },
+      }),
+    );
+    expect(document.getElementById("ai-league-headline-event")).toBeNull();
+  });
+
+  it("prefers complete summary metrics over a bounded recent decision list", () => {
+    mountAiLeagueReplayOverlay({
+      runID: "summary-metrics",
+      artifactBasePath: "/ai-league-runs/summary-metrics",
+      decisions: [decisionFixture(200)],
+      summary: {
+        decisionCount: 200,
+        rejectedCount: 3,
+        fallbackCount: 7,
+        actionCounts: {
+          hold: 150,
+          nuke: 12,
+          quick_chat: 10,
+          build: 8,
+        },
+      },
+    });
+
+    const overlay = document.getElementById("ai-league-replay-overlay")!;
+    expect(
+      Array.from(
+        overlay.querySelectorAll(".ai-league-metric b"),
+        (metric) => metric.textContent,
+      ),
+    ).toEqual(["200", "3", "7"]);
+    const playstyle = overlay.querySelector(
+      ".ai-league-playstyle",
+    )?.textContent;
+    expect(playstyle).toContain("nuke");
+    expect(playstyle).toContain("chat");
+    expect(playstyle).toContain("build");
+    expect(playstyle).not.toContain("hold");
+  });
+
+  it("hydrates older decisions in bounded pages instead of building hidden cards", () => {
+    mountAiLeagueReplayOverlay({
+      runID: "incremental-decisions",
+      artifactBasePath: "/ai-league-runs/incremental-decisions",
+      decisions: Array.from({ length: 40 }, (_, index) =>
+        decisionFixture(index + 1),
+      ),
+    });
+
+    const overlay = document.getElementById("ai-league-replay-overlay")!;
+    const expander = overlay.querySelector<HTMLButtonElement>(
+      "[data-ai-league-decision-expander]",
+    )!;
+    const pages = overlay.querySelector<HTMLElement>(
+      "[data-ai-league-decision-pages]",
+    )!;
+    expect(overlay.querySelectorAll(".ai-league-decision")).toHaveLength(15);
+    expect(pages.childElementCount).toBe(0);
+    expect(expander.textContent).toContain(
+      "ai_league_replay.decisions_show_older",
+    );
+
+    expander.click();
+    expect(pages.querySelectorAll(".ai-league-decision")).toHaveLength(15);
+    expect(overlay.querySelectorAll(".ai-league-decision")).toHaveLength(30);
+    expect(expander.getAttribute("aria-expanded")).toBe("true");
+    expect(expander.textContent).toContain(
+      "ai_league_replay.decisions_show_older",
+    );
+
+    expander.click();
+    expect(pages.querySelectorAll(".ai-league-decision")).toHaveLength(25);
+    expect(overlay.querySelectorAll(".ai-league-decision")).toHaveLength(40);
+    expect(expander.textContent).toContain(
+      "ai_league_replay.decisions_show_recent",
+    );
+
+    expander.click();
+    expect(pages.childElementCount).toBe(0);
+    expect(overlay.querySelectorAll(".ai-league-decision")).toHaveLength(15);
+    expect(expander.getAttribute("aria-expanded")).toBe("false");
+  });
+
   it("enters read-only replay mode without mutating OpenFront-owned prompt DOM or adding a replay-mode banner", () => {
     document.body.innerHTML =
       '<div id="prompt">Choose a starting location</div>';
@@ -465,6 +796,25 @@ describe("AiLeagueReplayOverlay", () => {
     expect(document.getElementById("ai-league-replay-mode-banner")).toBeNull();
   });
 });
+
+function decisionFixture(sequence: number) {
+  return {
+    sequence,
+    turnNumber: sequence * 10,
+    username: `Agent ${sequence}`,
+    profile: "balanced",
+    brainType: "planner",
+    selectedActionKind: "build",
+    selectedLegalActionId: `build:${sequence}`,
+    reason: `Decision ${sequence}`,
+    decisionLatencyMs: 10,
+    fallbackUsed: false,
+    result: {
+      accepted: true,
+      reason: "accepted",
+    },
+  };
+}
 
 function spectatorTelemetryFixture() {
   return {
@@ -512,9 +862,39 @@ function spectatorTelemetryFixture() {
       relationship("a3", "a2", "target", 40, 60, 65),
     ],
     events: [
-      event(1, 500, "alliance_break", "betrayal", "a2", "Blitz", "a1", "Atlas", "Blitz says the pact is over."),
-      event(2, 505, "chat", "pact", "a1", "Atlas", "a2", "Blitz", "Atlas asks for a quiet border."),
-      event(3, 506, "target_call", "threat", "a3", "Civic", "a2", "Blitz", "Civic calls for pressure on Blitz."),
+      event(
+        1,
+        500,
+        "alliance_break",
+        "betrayal",
+        "a2",
+        "Blitz",
+        "a1",
+        "Atlas",
+        "Blitz says the pact is over.",
+      ),
+      event(
+        2,
+        505,
+        "chat",
+        "pact",
+        "a1",
+        "Atlas",
+        "a2",
+        "Blitz",
+        "Atlas asks for a quiet border.",
+      ),
+      event(
+        3,
+        506,
+        "target_call",
+        "threat",
+        "a3",
+        "Civic",
+        "a2",
+        "Blitz",
+        "Civic calls for pressure on Blitz.",
+      ),
     ],
     communicationThreads: [
       {
@@ -524,8 +904,28 @@ function spectatorTelemetryFixture() {
         latestTurn: 505,
         tone: "betrayal",
         messages: [
-          event(1, 500, "alliance_break", "betrayal", "a2", "Blitz", "a1", "Atlas", "Blitz says the pact is over."),
-          event(2, 505, "chat", "pact", "a1", "Atlas", "a2", "Blitz", "Atlas asks for a quiet border."),
+          event(
+            1,
+            500,
+            "alliance_break",
+            "betrayal",
+            "a2",
+            "Blitz",
+            "a1",
+            "Atlas",
+            "Blitz says the pact is over.",
+          ),
+          event(
+            2,
+            505,
+            "chat",
+            "pact",
+            "a1",
+            "Atlas",
+            "a2",
+            "Blitz",
+            "Atlas asks for a quiet border.",
+          ),
         ],
       },
       {
@@ -535,7 +935,17 @@ function spectatorTelemetryFixture() {
         latestTurn: 506,
         tone: "threat",
         messages: [
-          event(3, 506, "target_call", "threat", "a3", "Civic", "a2", "Blitz", "Civic calls for pressure on Blitz."),
+          event(
+            3,
+            506,
+            "target_call",
+            "threat",
+            "a3",
+            "Civic",
+            "a2",
+            "Blitz",
+            "Civic calls for pressure on Blitz.",
+          ),
         ],
       },
     ],
@@ -544,8 +954,28 @@ function spectatorTelemetryFixture() {
         startTurn: 0,
         endTurn: 999,
         events: [
-          event(1, 500, "alliance_break", "betrayal", "a2", "Blitz", "a1", "Atlas", "Blitz says the pact is over."),
-          event(3, 506, "target_call", "threat", "a3", "Civic", "a2", "Blitz", "Civic calls for pressure on Blitz."),
+          event(
+            1,
+            500,
+            "alliance_break",
+            "betrayal",
+            "a2",
+            "Blitz",
+            "a1",
+            "Atlas",
+            "Blitz says the pact is over.",
+          ),
+          event(
+            3,
+            506,
+            "target_call",
+            "threat",
+            "a3",
+            "Civic",
+            "a2",
+            "Blitz",
+            "Civic calls for pressure on Blitz.",
+          ),
         ],
       },
     ],

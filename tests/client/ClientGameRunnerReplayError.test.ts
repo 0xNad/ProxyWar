@@ -62,4 +62,72 @@ describe("ClientGameRunner replay startup errors", () => {
     expect(worker.cleanup).toHaveBeenCalledOnce();
     expect(transport.leaveGame).toHaveBeenCalledOnce();
   });
+
+  it("skips spawned players whose replay name location is not ready", () => {
+    const replayFrame = vi.fn();
+    document.addEventListener("ai-league-replay-frame", replayFrame, {
+      once: true,
+    });
+    const missingLocationPlayer = {
+      isAlive: () => true,
+      hasSpawned: () => true,
+      nameLocation: () => undefined,
+    };
+    const readyPlayer = {
+      isAlive: () => true,
+      hasSpawned: () => true,
+      nameLocation: () => ({ x: 12, y: 34 }),
+      id: () => "player-ready",
+      smallID: () => 7,
+      clientID: () => "client-ready",
+      name: () => "Ready Agent",
+      displayName: () => "Ready Agent",
+      territoryColor: () => ({ toRgbString: () => "rgb(1, 2, 3)" }),
+      numTilesOwned: () => 42,
+      allies: () => [],
+      targets: () => [],
+      alliances: () => [],
+      data: { embargoes: new Set<number>() },
+    };
+    const renderer = {
+      transformHandler: {
+        worldToScreenCoordinates: vi.fn(() => ({ x: 120, y: 340 })),
+      },
+    };
+    const runner = new ClientGameRunner(
+      { gameID: "REPLAY02", gameRecord: {} } as never,
+      undefined,
+      {} as never,
+      renderer as never,
+      {} as never,
+      {} as never,
+      {} as never,
+      {
+        players: () => [missingLocationPlayer, readyPlayer],
+      } as never,
+      {} as never,
+    );
+
+    expect(() =>
+      (
+        runner as unknown as {
+          dispatchAiLeagueReplayFrame(update: { tick: number }): void;
+        }
+      ).dispatchAiLeagueReplayFrame({ tick: 9 }),
+    ).not.toThrow();
+    expect(replayFrame).toHaveBeenCalledOnce();
+    expect(
+      (replayFrame.mock.calls[0]?.[0] as CustomEvent).detail,
+    ).toMatchObject({
+      tick: 9,
+      players: [
+        {
+          playerID: "player-ready",
+          username: "Ready Agent",
+          x: 120,
+          y: 340,
+        },
+      ],
+    });
+  });
 });

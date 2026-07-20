@@ -1,6 +1,7 @@
 import { describe, expect, test } from "vitest";
 import {
   activeChampionPolicyLabelsByPlayerId,
+  buildCoworldReplayUiArtifact,
   buildEpisodeRow,
   buildRoundRows,
   buildStandingRows,
@@ -326,6 +327,60 @@ describe("CoworldLeagueMirrorCore", () => {
       "decisions.jsonl",
     ]);
     expect(replay?.spectatorReplay).not.toBeNull();
+  });
+
+  test("buildCoworldReplayUiArtifact keeps bounded recent decisions and artifact truth", () => {
+    const decisions = Array.from({ length: 65 }, (_, index) =>
+      JSON.stringify({
+        sequence: index + 1,
+        turnNumber: (index + 1) * 100,
+        username: `Agent ${index % 3}`,
+        profile: "opportunistic",
+        brainType: "external-http",
+        selectedActionKind: index % 2 === 0 ? "attack" : "hold",
+        selectedLegalActionId: `action:${index + 1}`,
+        selectedActionMetadata: {
+          targetName: "Rival",
+          expansion: index % 2 === 0,
+          ignoredLargeField: "x".repeat(5_000),
+        },
+        reason: `reason ${index + 1}`,
+        decisionLatencyMs: 10,
+        fallbackUsed: index % 10 === 0,
+        parseSuccess: true,
+        result: {
+          accepted: index % 7 !== 0,
+          reason: "accepted",
+        },
+        rawProviderOutput: `private-debug-${index}`,
+      }),
+    ).join("\n");
+
+    const artifact = buildCoworldReplayUiArtifact({
+      "decisions.jsonl": `${decisions}\nnot-json\n`,
+      "match-summary.json": "{}",
+      "spectator-telemetry.json": "{}",
+    });
+
+    expect(artifact.version).toBe(1);
+    expect(artifact.decisionCount).toBe(65);
+    expect(artifact.recentDecisions).toHaveLength(60);
+    expect(artifact.recentDecisions[0]?.sequence).toBe(6);
+    expect(artifact.recentDecisions.at(-1)?.sequence).toBe(65);
+    expect(artifact.fallbackCount).toBe(7);
+    expect(artifact.rejectedCount).toBe(10);
+    expect(artifact.actionCounts).toEqual({ attack: 33, hold: 32 });
+    expect(artifact.artifacts).toEqual({
+      visualReport: false,
+      spectatorTelemetry: true,
+      decisions: true,
+      summary: true,
+    });
+    expect(JSON.stringify(artifact)).not.toContain("rawProviderOutput");
+    expect(JSON.stringify(artifact)).not.toContain("private-debug");
+    expect(
+      artifact.recentDecisions[0]?.selectedActionMetadata,
+    ).not.toHaveProperty("ignoredLargeField");
   });
 
   test.each([

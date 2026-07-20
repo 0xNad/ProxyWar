@@ -613,15 +613,21 @@ export class ClientGameRunner {
     if (this.lobby.gameRecord === undefined || !isAiLeagueReplayRoute()) {
       return;
     }
-    const players = this.gameView
-      .players()
-      .filter((player) => player.isAlive() && player.hasSpawned())
-      .map((player) => {
-        const nameLocation = player.nameLocation();
-        const screen = this.renderer.transformHandler.worldToScreenCoordinates(
-          new Cell(nameLocation.x, nameLocation.y),
-        );
-        return {
+    const players = this.gameView.players().flatMap((player) => {
+      if (!player.isAlive() || !player.hasSpawned()) {
+        return [];
+      }
+      const nameLocation = player.nameLocation();
+      // Name locations are calculated asynchronously after spawn and can be
+      // absent for a few replay updates despite the non-null view type.
+      if (!nameLocation) {
+        return [];
+      }
+      const screen = this.renderer.transformHandler.worldToScreenCoordinates(
+        new Cell(nameLocation.x, nameLocation.y),
+      );
+      return [
+        {
           playerID: player.id(),
           smallID: player.smallID(),
           clientID: player.clientID(),
@@ -639,8 +645,9 @@ export class ClientGameRunner {
             expiresAt: alliance.expiresAt,
             hasExtensionRequest: alliance.hasExtensionRequest,
           })),
-        };
-      });
+        },
+      ];
+    });
     document.dispatchEvent(
       new CustomEvent("ai-league-replay-frame", {
         detail: {

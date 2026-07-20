@@ -102,6 +102,22 @@ function sampleData(): CoworldLeagueMirrorData {
             isWinner: false,
             color: "#d97706",
           },
+          {
+            slot: 4,
+            name: "Loki",
+            tilesOwned: 8300,
+            isAlive: false,
+            isWinner: false,
+            color: "#2563eb",
+          },
+          {
+            slot: 5,
+            name: "Athena",
+            tilesOwned: 4200,
+            isAlive: false,
+            isWinner: false,
+            color: "#9333ea",
+          },
         ],
         watchHref: "/ai-league-runs/coworld-run/spectator.html",
         fullRenderHref: "/ai-league-replay/coworld-run",
@@ -175,6 +191,54 @@ describe("coworldLeagueIndexHtml", () => {
     const html = coworldLeagueIndexHtml(sampleData());
     expect(html).toContain("⚠ 33 degraded");
     expect(html).not.toContain("⚠ 0 degraded");
+  });
+
+  test("renders compact mobile rosters with an accessible disclosure", () => {
+    const html = coworldLeagueIndexHtml(sampleData());
+    expect(html).toContain('data-roster-expanded="false"');
+    expect(html).toContain('class="combatant-extra-group"');
+    expect(html).toContain("data-roster-toggle");
+    expect(html).toContain('aria-expanded="false"');
+    expect(html).toMatch(/aria-controls="battle-roster-[a-f0-9]{12}"/);
+    expect(html).toContain("Show full roster");
+    expect(html).toContain("Show top three");
+    expect(html).toContain(
+      '.roster-disclosure-ready .battle[data-roster-expanded="false"] .combatant-extra-group { display:none; }',
+    );
+
+    const client = coworldLeagueClientJavaScript();
+    expect(client).toContain("[data-roster-toggle]");
+    expect(client).toContain(
+      'document.documentElement.classList.add("roster-disclosure-ready")',
+    );
+    expect(client).toContain(
+      'toggle.setAttribute("aria-expanded", String(expanded))',
+    );
+  });
+
+  test("exposes winner and elimination states to screen readers", () => {
+    const html = coworldLeagueIndexHtml(sampleData());
+    expect(html).toContain('<span class="win" aria-hidden="true">★</span>');
+    expect(html).toContain('<span class="sr-only"> (Winner)</span>');
+    expect(html).toContain('<span class="sr-only"> (Eliminated)</span>');
+    expect(html).toContain('class="bar" aria-hidden="true"');
+  });
+
+  test("provides a main landmark, skip link, and scrollable standings", () => {
+    const html = coworldLeagueIndexHtml(sampleData());
+    expect(html).toContain(
+      '<a class="skip-link" href="#league-main">Skip to league content</a>',
+    );
+    expect(html).toContain(
+      '<main id="league-main" class="shell" tabindex="-1">',
+    );
+    expect(html).toContain(
+      'class="standings-scroll" role="region" aria-describedby="standings-provenance"',
+    );
+    expect(html).toContain(
+      'aria-label="Scrollable league standings" tabindex="0"',
+    );
+    expect(html).toContain("min-width:600px");
   });
 
   test("links the full render as the single replay button", () => {
