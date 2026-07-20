@@ -11,7 +11,15 @@ import {
   GameMode,
   GameType,
 } from "../../src/core/game/Game";
-import { GameRecordSchema, type GameRecord } from "../../src/core/Schemas";
+import {
+  GAME_ID_REGEX,
+  GameRecordSchema,
+  type GameRecord,
+} from "../../src/core/Schemas";
+import type {
+  AgentLeagueSmokeExecutionConfig,
+  AgentLeagueSmokeRunOptions,
+} from "../../src/scripts/ai-agent-league-smoke";
 import {
   assertControlledBehaviorEnvironment,
   controlledExhibitionMinimumFreeBytes,
@@ -24,10 +32,7 @@ import {
   type ControlledExhibitionBuildProvenance,
   type ControlledPolicyProvenance,
 } from "../../src/scripts/replay-premiere-controlled-exhibition";
-import type {
-  AgentLeagueSmokeExecutionConfig,
-  AgentLeagueSmokeRunOptions,
-} from "../../src/scripts/ai-agent-league-smoke";
+import { deterministicAgentClientID } from "../../src/server/agents/AgentDeterministicIdentity";
 import {
   hashReplayPremiereJson,
   sha256Hex,
@@ -37,6 +42,25 @@ const execFileAsync = promisify(execFile);
 const GIB = 1024 * 1024 * 1024;
 
 describe("Replay Premiere controlled exhibition source", () => {
+  it("derives deterministic client IDs accepted by the replay schema", () => {
+    const ids = Array.from({ length: 8 }, (_, index) =>
+      deterministicAgentClientID(
+        "premiere-phase0-pilot-20260721-a",
+        "client",
+        index,
+      ),
+    );
+    const retry = deterministicAgentClientID(
+      "premiere-phase0-pilot-20260721-a",
+      "client",
+      0,
+    );
+
+    expect(ids.every((id) => GAME_ID_REGEX.test(id))).toBe(true);
+    expect(new Set(ids).size).toBe(ids.length);
+    expect(retry).toBe(ids[0]);
+  });
+
   it("writes one strict private bundle without touching a served root", async () => {
     const root = await fs.mkdtemp(
       path.join(os.tmpdir(), "premiere-controlled-"),

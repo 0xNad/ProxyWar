@@ -24,6 +24,7 @@ import {
   writeAgentLeagueRunArtifacts,
 } from "../server/agents/AgentDecisionLogWriter";
 import { writeAgentDemoIndex } from "../server/agents/AgentDemoIndexWriter";
+import { deterministicAgentClientID } from "../server/agents/AgentDeterministicIdentity";
 import {
   AgentSpectatorSnapshot,
   buildAgentSpectatorReplay,
@@ -352,7 +353,7 @@ export async function runAgentLeagueSmoke(
       ? unresolvedSpecs
       : unresolvedSpecs.map((spec, index) => ({
           ...spec,
-          clientID: deterministicLocalID(
+          clientID: deterministicAgentClientID(
             options.deterministicSource!.seed,
             "client",
             index,
@@ -917,17 +918,6 @@ function completedAtForSmokeRun(
   return turnIntervalMs === undefined
     ? Date.now()
     : startedAt + turnCount * turnIntervalMs;
-}
-
-function deterministicLocalID(
-  seed: string,
-  namespace: string,
-  index: number,
-): string {
-  return createHash("sha256")
-    .update(`proxywar-agent-smoke-v1\0${seed}\0${namespace}\0${index}`)
-    .digest("hex")
-    .slice(0, 24);
 }
 
 function deterministicLocalUUID(
