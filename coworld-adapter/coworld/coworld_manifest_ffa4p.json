@@ -1,5 +1,6 @@
 {
   "$schema": "https://raw.githubusercontent.com/Metta-AI/coworld/main/src/coworld/coworld_manifest_schema.json",
+  "tags": ["strategy", "multiplayer", "ai-agents"],
   "game": {
     "name": "proxywar-ffa-4p",
     "version": "0.0.8",

@@ -1,5 +1,6 @@
 {
   "$schema": "https://raw.githubusercontent.com/Metta-AI/coworld/main/src/coworld/coworld_manifest_schema.json",
+  "tags": ["strategy", "multiplayer", "ai-agents"],
   "game": {
     "name": "proxywar",
     "description": "Hosted Proxy War Coworld adapter that preserves the LegalAction.id decision path.",
