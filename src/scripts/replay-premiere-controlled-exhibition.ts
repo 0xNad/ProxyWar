@@ -158,7 +158,7 @@ export interface ControlledExhibitionSourceBundle {
   seats: PremiereSeatIdentity[];
   provenance: {
     generator: "replay-premiere-controlled-exhibition/v1";
-    brainMode: string;
+    brainMode: AgentLeagueSmokeExecutionConfig["brainMode"];
     runnerMode: string;
     executionConfig: AgentLeagueSmokeExecutionConfig;
     executionConfigSha256: string;
@@ -285,7 +285,7 @@ export async function writeControlledExhibitionBundle(
     seats,
     provenance: {
       generator: "replay-premiere-controlled-exhibition/v1",
-      brainMode: options.artifact.artifactInput.brainMode,
+      brainMode: executionConfig.brainMode,
       runnerMode: options.artifact.artifactInput.runnerMode ?? "realtime",
       executionConfig,
       executionConfigSha256,

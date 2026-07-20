@@ -155,6 +155,54 @@ describe("Replay Premiere controlled exhibition source", () => {
     }
   });
 
+  it("records the canonical planner mode instead of the smoke artifact label", async () => {
+    const root = await fs.mkdtemp(
+      path.join(os.tmpdir(), "premiere-planner-provenance-"),
+    );
+    const privateRoot = path.join(root, "private");
+    const servedRoot = path.join(root, "served");
+    const executionConfig = {
+      ...executionConfigFixture(),
+      brainMode: "planner" as const,
+    };
+    const artifact = artifactFixture();
+
+    try {
+      await fs.mkdir(servedRoot);
+      const result = await writeControlledExhibitionBundle({
+        sourceRunId: "controlled-run-001",
+        artifact: {
+          ...artifact,
+          artifactInput: {
+            ...artifact.artifactInput,
+            brainMode: "planner-executor",
+          },
+          executionConfig,
+        },
+        policies: policyFixtures(),
+        expectedExecutionConfig: executionConfig,
+        build: buildFixture(),
+        output: {
+          privateOutputRoot: privateRoot,
+          servedRoots: [servedRoot],
+          maxBundleBytes: 2 * 1024 * 1024,
+          minFreeBytes: 25 * GIB,
+        },
+        statfs: statfsWithFreeBytes(30 * GIB),
+      });
+      const bundle = JSON.parse(
+        await fs.readFile(result.bundlePath, "utf8"),
+      ) as Record<string, any>;
+
+      expect(bundle.provenance.brainMode).toBe("planner");
+      expect(bundle.provenance.brainMode).toBe(
+        bundle.provenance.executionConfig.brainMode,
+      );
+    } finally {
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  });
+
   it("rejects a private output root inside a served root", async () => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), "premiere-overlap-"));
     const servedRoot = path.join(root, "served");
