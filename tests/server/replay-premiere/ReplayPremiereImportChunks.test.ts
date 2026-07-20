@@ -150,13 +150,12 @@ describe("ReplayPremiere import and chunks", () => {
     for (const chunk of first) {
       const records = chunk.payload.records;
       expect(
-        records.at(-1)!.presentationOffsetMs -
-          records[0].presentationOffsetMs,
+        records.at(-1)!.presentationOffsetMs - records[0].presentationOffsetMs,
       ).toBeLessThanOrEqual(100);
     }
-    expect(() => buildPremiereChunks({ ...options, maxPresentationSpanMs: 1_001 })).toThrow(
-      /hard_maximum/,
-    );
+    expect(() =>
+      buildPremiereChunks({ ...options, maxPresentationSpanMs: 1_001 }),
+    ).toThrow(/hard_maximum/);
   });
 
   test("releases only after chunk end and severs mutable caller references", async () => {

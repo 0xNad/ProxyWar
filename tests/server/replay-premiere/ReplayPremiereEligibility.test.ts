@@ -1,13 +1,13 @@
 import { describe, expect, test } from "vitest";
 import {
+  isProxyWarPublicLeaguePath,
+  proxyWarPublicRunArtifacts,
+} from "../../../src/server/agents/ProxyWarPublicArtifacts";
+import {
   assessPremiereEligibility,
   computeEligibilityRecordCommitment,
   createHashedPremiereEligibility,
 } from "../../../src/server/replay-premiere/ReplayPremiereEligibility";
-import {
-  isProxyWarPublicLeaguePath,
-  proxyWarPublicRunArtifacts,
-} from "../../../src/server/agents/ProxyWarPublicArtifacts";
 import { toPublicReplayPremiereFailure } from "../../../src/server/replay-premiere/ReplayPremiereErrors";
 import { sha256Hex } from "../../../src/server/replay-premiere/ReplayPremiereIntegrity";
 import {
@@ -114,7 +114,9 @@ describe("ReplayPremiereEligibility", () => {
       ).toBeGreaterThanOrEqual(2);
     }
     for (const checkId of ["league-data", "battle-card-data"]) {
-      const target = manifest.targets.find((entry) => entry.checkId === checkId)!;
+      const target = manifest.targets.find(
+        (entry) => entry.checkId === checkId,
+      )!;
       expect(isProxyWarPublicLeaguePath(new URL(target.target).pathname)).toBe(
         true,
       );

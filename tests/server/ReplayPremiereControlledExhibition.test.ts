@@ -23,8 +23,8 @@ import type {
 import {
   assertControlledBehaviorEnvironment,
   controlledExhibitionMinimumFreeBytes,
-  loadControlledPolicySet,
   loadControlledPolicyProvenance,
+  loadControlledPolicySet,
   prepareControlledExhibitionOutput,
   resolveControlledExhibitionBuildProvenance,
   runControlledExhibition,
@@ -429,9 +429,7 @@ describe("Replay Premiere controlled exhibition source", () => {
         executionConfigFixture({ disabledActionKinds: ["quick_chat"] }),
       );
 
-      expect(repeat.executionConfigSha256).toBe(
-        baseline.executionConfigSha256,
-      );
+      expect(repeat.executionConfigSha256).toBe(baseline.executionConfigSha256);
       expect(repeat.policies[0].policyIdentity.contentSha256).toBe(
         baseline.policies[0].policyIdentity.contentSha256,
       );
@@ -492,7 +490,10 @@ describe("Replay Premiere controlled exhibition source", () => {
           path.join(root, "package.json"),
           '{"name":"premiere-build-fixture","version":"1.0.0"}\n',
         ),
-        fs.writeFile(path.join(scripts, "ai-agent-league-smoke.ts"), "export {};\n"),
+        fs.writeFile(
+          path.join(scripts, "ai-agent-league-smoke.ts"),
+          "export {};\n",
+        ),
         fs.writeFile(
           path.join(scripts, "replay-premiere-controlled-exhibition.ts"),
           "export {};\n",
@@ -518,13 +519,19 @@ describe("Replay Premiere controlled exhibition source", () => {
         resolveControlledExhibitionBuildProvenance(root),
       ).resolves.toMatchObject({ trackedWorktreeClean: true });
 
-      await fs.writeFile(path.join(root, "untracked-source.ts"), "export {};\n");
+      await fs.writeFile(
+        path.join(root, "untracked-source.ts"),
+        "export {};\n",
+      );
       await expect(
         resolveControlledExhibitionBuildProvenance(root),
       ).rejects.toThrow("clean committed source checkout");
       await fs.rm(path.join(root, "untracked-source.ts"));
 
-      await fs.appendFile(path.join(scripts, "ai-agent-league-smoke.ts"), "// drift\n");
+      await fs.appendFile(
+        path.join(scripts, "ai-agent-league-smoke.ts"),
+        "// drift\n",
+      );
       await expect(
         resolveControlledExhibitionBuildProvenance(root),
       ).rejects.toThrow("clean committed source checkout");
@@ -569,8 +576,7 @@ function artifactFixture() {
       brainMode: "rule" as const,
       runnerMode: "step-locked" as const,
       runnerConfig: {
-        turnsPerDecisionStep:
-          executionConfig.runner.turnsPerDecisionStep,
+        turnsPerDecisionStep: executionConfig.runner.turnsPerDecisionStep,
         turnsPerDecisionSchedule:
           executionConfig.runner.turnsPerDecisionSchedule,
         maxDecisionMs: executionConfig.runner.maxDecisionMs,
@@ -578,8 +584,7 @@ function artifactFixture() {
         stepsCompleted: 1,
         mirrorCatchupSucceeded: true,
         onlyHoldReason: null,
-        autopilotEndgameSteps:
-          executionConfig.runner.autopilotEndgameSteps,
+        autopilotEndgameSteps: executionConfig.runner.autopilotEndgameSteps,
         autopilotEngagedAtStep: null,
         replayTailTurns: executionConfig.runner.replayTailTurns,
         agents: 2,

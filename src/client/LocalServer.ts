@@ -457,10 +457,7 @@ export class LocalServer {
       }
       const targetTurn = Math.max(
         this.turns.length,
-        Math.min(
-          this.progressiveReplayTurns.length,
-          Math.floor(turnNumber),
-        ),
+        Math.min(this.progressiveReplayTurns.length, Math.floor(turnNumber)),
       );
       while (this.turns.length < targetTurn) {
         this.endProgressiveReplayTurn();

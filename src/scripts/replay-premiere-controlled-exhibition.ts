@@ -737,11 +737,7 @@ function parseControlledExhibitionCli(
   const minimumFreeBytes = controlledExhibitionMinimumFreeBytes(environment);
   const minFreeBytes = Math.max(
     minimumFreeBytes,
-    optionalNonNegativeIntegerArg(
-      args,
-      "--min-free-bytes=",
-      minimumFreeBytes,
-    ),
+    optionalNonNegativeIntegerArg(args, "--min-free-bytes=", minimumFreeBytes),
   );
   const maxSteps = optionalPositiveIntegerArg(args, "--max-steps=", 120, 500);
   const turnsPerDecisionStep = optionalPositiveIntegerArg(

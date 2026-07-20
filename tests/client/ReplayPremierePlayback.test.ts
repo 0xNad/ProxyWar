@@ -109,9 +109,7 @@ describe("ReplayPremierePlaybackController", () => {
       payloadHash: HASH_3,
       startSequence: 2,
       endSequence: 2,
-      records: [
-        { sequence: 2, presentationOffsetMs: 200, turn: turn(2, 300) },
-      ],
+      records: [{ sequence: 2, presentationOffsetMs: 200, turn: turn(2, 300) }],
     });
     expect(controller.appendVerifiedBatch(second).status).toBe("appended");
     expect(controller.state()).toMatchObject({

@@ -3,8 +3,10 @@ import { constants, promises as fs } from "node:fs";
 import path from "node:path";
 import type { StagedPremiereSource } from "./ReplayPremiereContracts";
 import { ReplayPremiereError } from "./ReplayPremiereErrors";
-import { sha256Hex } from "./ReplayPremiereIntegrity";
-import { cloneAndFreezeReplayPremiereValue } from "./ReplayPremiereIntegrity";
+import {
+  cloneAndFreezeReplayPremiereValue,
+  sha256Hex,
+} from "./ReplayPremiereIntegrity";
 
 const issuedVerifiedSourceReads = new WeakSet<object>();
 const verifiedSourceIssueToken = Symbol("verified-staged-premiere-source");
@@ -200,13 +202,16 @@ export async function stagePremiereSource(
     `${sourceReplaySha256}.replay`,
   );
   if (await verifyExistingContent(destinationPath, contents)) {
-    return cloneAndFreezeReplayPremiereValue({
-      schemaVersion: 1,
-      sourceReplaySha256,
-      byteLength: contents.byteLength,
-      privatePath: destinationPath,
-      reused: true,
-    }, "reused staged premiere source");
+    return cloneAndFreezeReplayPremiereValue(
+      {
+        schemaVersion: 1,
+        sourceReplaySha256,
+        byteLength: contents.byteLength,
+        privatePath: destinationPath,
+        reused: true,
+      },
+      "reused staged premiere source",
+    );
   }
   const temporaryPath = path.join(
     contentDirectory,
@@ -263,13 +268,16 @@ export async function stagePremiereSource(
   } finally {
     await directoryHandle.close();
   }
-  return cloneAndFreezeReplayPremiereValue({
-    schemaVersion: 1,
-    sourceReplaySha256,
-    byteLength: contents.byteLength,
-    privatePath: destinationPath,
-    reused: false,
-  }, "staged premiere source");
+  return cloneAndFreezeReplayPremiereValue(
+    {
+      schemaVersion: 1,
+      sourceReplaySha256,
+      byteLength: contents.byteLength,
+      privatePath: destinationPath,
+      reused: false,
+    },
+    "staged premiere source",
+  );
 }
 
 export const PREMIERE_BOUNDED_WRITE_FLOOR_BYTES = 15 * 1024 ** 3;

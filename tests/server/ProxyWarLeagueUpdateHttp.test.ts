@@ -87,11 +87,7 @@ describe("league update HTTP contract", () => {
         path.join(projectRoot, "index.html"),
         path.join(staticRoot, "index.html"),
       ),
-      writeFile(
-        validReplayRecordPath,
-        JSON.stringify({ turns: [] }),
-        "utf8",
-      ),
+      writeFile(validReplayRecordPath, JSON.stringify({ turns: [] }), "utf8"),
       writeFile(
         path.join(compactedReplayRoot, "game-record.json"),
         JSON.stringify({ compacted: true }),
@@ -99,9 +95,7 @@ describe("league update HTTP contract", () => {
       ),
     ]);
     try {
-      await stat(
-        path.join(artifactsRoot, "ai-league-runs", "League"),
-      );
+      await stat(path.join(artifactsRoot, "ai-league-runs", "League"));
       caseInsensitiveFixturePaths = true;
     } catch {
       caseInsensitiveFixturePaths = false;
@@ -249,10 +243,7 @@ describe("league update HTTP contract", () => {
   });
 
   test("serves and revalidates only the allowlisted update artifacts", async () => {
-    const client = await rawRequest(
-      origin,
-      "/ai-league-runs/league/client.js",
-    );
+    const client = await rawRequest(origin, "/ai-league-runs/league/client.js");
     expect(client.status).toBe(200);
     expect(client.headers["content-type"]).toMatch(/javascript/);
     expect(client.headers["x-content-type-options"]).toBe("nosniff");
@@ -266,10 +257,7 @@ describe("league update HTTP contract", () => {
     expect(clientHead.status).toBe(200);
     expect(clientHead.body).toHaveLength(0);
 
-    const data = await rawRequest(
-      origin,
-      "/ai-league-runs/league/data.json",
-    );
+    const data = await rawRequest(origin, "/ai-league-runs/league/data.json");
     expect(data.status).toBe(200);
     expect(data.headers.etag).toBeDefined();
     expect(data.headers["cache-control"]).toContain("max-age=0");

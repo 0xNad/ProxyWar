@@ -14,7 +14,7 @@ import {
   GameType,
 } from "../core/game/Game";
 import { GameMapLoader, MapData } from "../core/game/GameMapLoader";
-import { loadTerrainMap, MapManifest } from "../core/game/TerrainMapLoader";
+import { MapManifest, loadTerrainMap } from "../core/game/TerrainMapLoader";
 import { GameConfig, ServerMessage, Winner } from "../core/Schemas";
 import { auditDecisionEffects } from "../server/agents/AgentActionAuditor";
 import {
@@ -24,21 +24,8 @@ import {
 } from "../server/agents/AgentDecisionLogWriter";
 import { writeAgentDemoIndex } from "../server/agents/AgentDemoIndexWriter";
 import { deterministicAgentClientID } from "../server/agents/AgentDeterministicIdentity";
-import {
-  AgentSpectatorSnapshot,
-  buildAgentSpectatorReplay,
-  buildAgentSpectatorSnapshot,
-  buildGameRecordFromServerMessages,
-} from "../server/agents/AgentSpectatorReplay";
-import {
-  CodexCliLlmProvider,
-  loadCodexCliLlmProviderConfig,
-} from "../server/agents/CodexCliLlmProvider";
-import {
-  ClaudeCliLlmProvider,
-  createClaudeCliLlmProviderFromEnv,
-  loadClaudeCliLlmProviderConfig,
-} from "../server/agents/ClaudeCliLlmProvider";
+import { externalBrainCleanlinessReport } from "../server/agents/AgentExternalBrainCleanliness";
+import type { SpawnCandidate } from "../server/agents/AgentLeagueMatch";
 import {
   AgentLeagueMatchRunner,
   AgentSpec,
@@ -47,34 +34,32 @@ import {
   createAgentParticipants,
   createDefaultAgentSpecs,
 } from "../server/agents/AgentLeagueMatch";
-import type { SpawnCandidate } from "../server/agents/AgentLeagueMatch";
-import { externalBrainCleanlinessReport } from "../server/agents/AgentExternalBrainCleanliness";
 import {
   AgentLocalGameMirror,
   waitForMirrorState,
 } from "../server/agents/AgentLocalGameMirror";
-import {
-  AgentStepLockedLeagueConfig,
-  runAgentStepLockedLeague,
-} from "../server/agents/AgentStepLockedLeague";
-import { LlmAgentBrain } from "../server/agents/LlmAgentBrain";
-import { LlmProvider } from "../server/agents/LlmProvider";
-import { MockLlmProvider } from "../server/agents/MockLlmProvider";
-import {
-  LlmAgentPlanner,
-  MockLlmPlanner,
-  PlannerExecutorAgentBrain,
-  FrontierPolicyExecutor,
-} from "../server/agents/AgentPlannerExecutor";
-import { buildAttachedAgentRunRoster } from "../server/agents/AgentRunRoster";
+import type { AgentManifest } from "../server/agents/AgentManifest";
 import {
   agentManifestToSpec,
   loadAgentManifestsFromDirectory,
 } from "../server/agents/AgentManifest";
-import type { AgentManifest } from "../server/agents/AgentManifest";
-import { resolveExternalAgentToken } from "../server/agents/ExternalAgentSecrets";
-import { ExternalHttpAgentBrain } from "../server/agents/ExternalHttpAgentBrain";
-import { ExternalRelayAgentBrain } from "../server/agents/ExternalRelayAgentBrain";
+import {
+  FrontierPolicyExecutor,
+  LlmAgentPlanner,
+  MockLlmPlanner,
+  PlannerExecutorAgentBrain,
+} from "../server/agents/AgentPlannerExecutor";
+import { buildAttachedAgentRunRoster } from "../server/agents/AgentRunRoster";
+import {
+  AgentSpectatorSnapshot,
+  buildAgentSpectatorReplay,
+  buildAgentSpectatorSnapshot,
+  buildGameRecordFromServerMessages,
+} from "../server/agents/AgentSpectatorReplay";
+import {
+  AgentStepLockedLeagueConfig,
+  runAgentStepLockedLeague,
+} from "../server/agents/AgentStepLockedLeague";
 import type {
   AgentBrain,
   AgentBrainType,
@@ -82,13 +67,28 @@ import type {
   LegalActionKind,
 } from "../server/agents/AgentTypes";
 import {
+  ClaudeCliLlmProvider,
+  createClaudeCliLlmProviderFromEnv,
+  loadClaudeCliLlmProviderConfig,
+} from "../server/agents/ClaudeCliLlmProvider";
+import {
+  CodexCliLlmProvider,
+  loadCodexCliLlmProviderConfig,
+} from "../server/agents/CodexCliLlmProvider";
+import { resolveExternalAgentToken } from "../server/agents/ExternalAgentSecrets";
+import { ExternalHttpAgentBrain } from "../server/agents/ExternalHttpAgentBrain";
+import { ExternalRelayAgentBrain } from "../server/agents/ExternalRelayAgentBrain";
+import { LlmAgentBrain } from "../server/agents/LlmAgentBrain";
+import { LlmProvider } from "../server/agents/LlmProvider";
+import { MockLlmProvider } from "../server/agents/MockLlmProvider";
+import {
   LlmProviderConfigError,
   OpenAiLlmProvider,
   loadOpenAiLlmProviderConfig,
 } from "../server/agents/OpenAiLlmProvider";
 import { createOpenRouterLlmProviderFromEnv } from "../server/agents/OpenRouterLlmProvider";
-import { loadPlayerStrategySpecFromEnv } from "../server/agents/PlayerStrategySpec";
 import type { PlayerStrategySpec } from "../server/agents/PlayerStrategySpec";
+import { loadPlayerStrategySpecFromEnv } from "../server/agents/PlayerStrategySpec";
 import { RuleAgentBrain } from "../server/agents/RuleAgentBrain";
 import { StarterBotAgentBrain } from "../server/agents/StarterBotAgentBrain";
 import { GameServer } from "../server/GameServer";
@@ -221,7 +221,11 @@ export async function runAgentLeagueSmoke(
   const nationCount = nationsArg(args, "disabled");
   const explicitAgentCount = args.some((arg) => arg.startsWith("--agents="));
   const agentCount = positiveIntegerArg(args, "--agents=", 4);
-  const replayTailTurns = nonNegativeIntegerArg(args, "--replay-tail-turns=", 0);
+  const replayTailTurns = nonNegativeIntegerArg(
+    args,
+    "--replay-tail-turns=",
+    0,
+  );
   const manifestDir =
     args
       .find((arg) => arg.startsWith("--agent-manifest-dir="))
@@ -241,7 +245,8 @@ export async function runAgentLeagueSmoke(
       ? null
       : new CodexCliLlmProvider({
           ...codexCliConfig,
-          outputSchema: brainMode === "planner-codex-cli" ? "planner" : "decision",
+          outputSchema:
+            brainMode === "planner-codex-cli" ? "planner" : "decision",
         });
   const usesClaudeCli =
     brainMode === "planner-claude-cli" || brainMode === "action-claude-cli";
@@ -314,8 +319,7 @@ export async function runAgentLeagueSmoke(
         ? null
         : await loadAgentManifestsFromDirectory(manifestDir, {
             minAgents:
-              options.manifestLimits?.minAgents ??
-              (explicitAgentCount ? 1 : 3),
+              options.manifestLimits?.minAgents ?? (explicitAgentCount ? 1 : 3),
             maxAgents:
               options.manifestLimits?.maxAgents ??
               (explicitAgentCount ? Math.max(1, 8 - agentCount) : 8),
@@ -329,7 +333,9 @@ export async function runAgentLeagueSmoke(
   }
   const manifestSpecs = manifests?.map(agentManifestToSpec) ?? [];
   const houseSpecs =
-    manifests === null || explicitAgentCount ? createDefaultAgentSpecs(agentCount) : [];
+    manifests === null || explicitAgentCount
+      ? createDefaultAgentSpecs(agentCount)
+      : [];
   // Promo: name each agent after its model and give them an identical profile so the only
   // variable is the model driving the LLM planner (a genuine model-vs-model showcase).
   if (promoModels) {
@@ -666,8 +672,7 @@ export async function runAgentLeagueSmoke(
           maxDecisionMs: stepResult.maxDecisionMs,
           replayTailTurns,
           actionCountsByKind: actionCountsByKind(allRecords),
-          postSpawnNonHoldActionCount:
-            stepResult.postSpawnNonHoldActionCount,
+          postSpawnNonHoldActionCount: stepResult.postSpawnNonHoldActionCount,
           fallbackCount: fallbackCount(allRecords),
           onlyHoldReason: stepResult.onlyHoldReason,
         },
@@ -746,10 +751,7 @@ export async function runAgentLeagueSmoke(
       assertAttackSmokeSucceeded(postSpawnRecords, afterPostSpawnGame);
     }
     if (scenario === "actions") {
-      assertActionDiversitySmokeSucceeded(
-        postSpawnRecords,
-        afterPostSpawnGame,
-      );
+      assertActionDiversitySmokeSucceeded(postSpawnRecords, afterPostSpawnGame);
     }
 
     const artifactFinalGameState = await advanceReplayTail({
@@ -1108,9 +1110,7 @@ function runnerModeFromArgs(args: string[]): SmokeRunnerMode {
   return "realtime";
 }
 
-function stepLockedConfigFromArgs(
-  args: string[],
-): AgentStepLockedLeagueConfig {
+function stepLockedConfigFromArgs(args: string[]): AgentStepLockedLeagueConfig {
   return {
     turnsPerDecisionStep: positiveIntegerArg(
       args,
@@ -1137,7 +1137,9 @@ function stepLockedConfigFromArgs(
   };
 }
 
-function turnsPerDecisionScheduleFromArgs(args: string[]): number[] | undefined {
+function turnsPerDecisionScheduleFromArgs(
+  args: string[],
+): number[] | undefined {
   const prefix = "--turns-per-decision-schedule=";
   const raw = args.find((arg) => arg.startsWith(prefix))?.slice(prefix.length);
   if (raw === undefined || raw.trim() === "") {
@@ -1204,8 +1206,13 @@ function nonNegativeIntegerArg(
   return value;
 }
 
-function nationsArg(args: string[], defaultValue: GameConfig["nations"]): GameConfig["nations"] {
-  const raw = args.find((arg) => arg.startsWith("--nations="))?.slice("--nations=".length);
+function nationsArg(
+  args: string[],
+  defaultValue: GameConfig["nations"],
+): GameConfig["nations"] {
+  const raw = args
+    .find((arg) => arg.startsWith("--nations="))
+    ?.slice("--nations=".length);
   if (raw === undefined || raw === "") {
     return defaultValue;
   }
@@ -1214,7 +1221,9 @@ function nationsArg(args: string[], defaultValue: GameConfig["nations"]): GameCo
   }
   const value = Number(raw);
   if (!Number.isInteger(value) || value < 1 || value > 400) {
-    throw new Error(`--nations=${raw} must be a positive integer, default, or disabled`);
+    throw new Error(
+      `--nations=${raw} must be a positive integer, default, or disabled`,
+    );
   }
   return value;
 }
@@ -1281,9 +1290,7 @@ function disabledActionKindsFromArgs(args: string[]): LegalActionKind[] {
     disabled.push("quick_chat", "emoji");
   }
   // Generic escape hatch: --disable-action-kinds=quick_chat,emoji,target_player
-  const generic = args.find((arg) =>
-    arg.startsWith("--disable-action-kinds="),
-  );
+  const generic = args.find((arg) => arg.startsWith("--disable-action-kinds="));
   if (generic) {
     for (const kind of generic
       .slice("--disable-action-kinds=".length)
@@ -1309,7 +1316,12 @@ function gameConfigForScenario(
       GameMapSize,
       gameConfig.gameMapSize,
     ),
-    difficulty: enumArg(args, "--difficulty=", Difficulty, gameConfig.difficulty),
+    difficulty: enumArg(
+      args,
+      "--difficulty=",
+      Difficulty,
+      gameConfig.difficulty,
+    ),
   };
   if (scenario === "attack") {
     return { ...baseConfig, spawnImmunityDuration: 0 };
@@ -1350,8 +1362,8 @@ function enumArg<T extends Record<string, string | number>>(
   if (raw === undefined || raw === "") {
     return defaultValue;
   }
-  const entries = Object.entries(values).filter(([, value]) =>
-    typeof value === "string"
+  const entries = Object.entries(values).filter(
+    ([, value]) => typeof value === "string",
   );
   const match = entries.find(
     ([key, value]) => key === raw || String(value) === raw,
@@ -1501,11 +1513,10 @@ function externalAgentTimeoutMs(input: {
   externalAgentMaxDecisionMs: number;
 }): number {
   const requested =
-    input.manifestTimeoutMs ?? input.providerTimeoutMs ?? input.externalAgentMaxDecisionMs;
-  return Math.max(
-    250,
-    Math.min(requested, input.externalAgentMaxDecisionMs),
-  );
+    input.manifestTimeoutMs ??
+    input.providerTimeoutMs ??
+    input.externalAgentMaxDecisionMs;
+  return Math.max(250, Math.min(requested, input.externalAgentMaxDecisionMs));
 }
 
 function manifestHasBrainOverride(manifest: AgentManifest): boolean {
@@ -1543,8 +1554,7 @@ function planEveryDecisionStepsFromEnv(): number {
 export function resolveAgentLeagueSmokePlayerStrategySpec(
   manifestStrategySpec: PlayerStrategySpec | undefined,
   allowEnvironmentStrategySpec: boolean,
-  loadEnvironmentStrategySpec: () => PlayerStrategySpec | null =
-    loadPlayerStrategySpecFromEnv,
+  loadEnvironmentStrategySpec: () => PlayerStrategySpec | null = loadPlayerStrategySpecFromEnv,
 ): PlayerStrategySpec | null {
   if (manifestStrategySpec !== undefined) {
     return manifestStrategySpec;
@@ -2029,9 +2039,7 @@ function requiresExternalBrainSuccess(brainMode: SmokeBrainMode): boolean {
   if (brainMode !== "codex-cli" && brainMode !== "planner-codex-cli") {
     return false;
   }
-  return (
-    process.env.AI_LEAGUE_REQUIRE_CODEX_SUCCESS === "true"
-  );
+  return process.env.AI_LEAGUE_REQUIRE_CODEX_SUCCESS === "true";
 }
 
 class StaticMapLoader implements GameMapLoader {
@@ -2040,7 +2048,10 @@ class StaticMapLoader implements GameMapLoader {
 
   constructor() {
     const currentFile = fileURLToPath(import.meta.url);
-    this.rootDir = path.resolve(path.dirname(currentFile), "../../resources/maps");
+    this.rootDir = path.resolve(
+      path.dirname(currentFile),
+      "../../resources/maps",
+    );
   }
 
   getMapData(map: GameMapType): MapData {

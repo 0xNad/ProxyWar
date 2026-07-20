@@ -53,7 +53,8 @@ export function verifyPremiereAuthoritativeResultBytes(options: {
   if (
     bytes.byteLength === 0 ||
     bytes.byteLength > 1_000_000 ||
-    sha256Hex(bytes) !== options.eligibilityRecord.authoritativeResult.resultHash
+    sha256Hex(bytes) !==
+      options.eligibilityRecord.authoritativeResult.resultHash
   ) {
     throw resultIntegrity("authoritative_result_hash_mismatch");
   }
@@ -112,7 +113,8 @@ function validateResultObject(
   value: ReplayPremiereJsonValue,
   eligibility: PremiereEligibility,
 ): void {
-  if (!isRecord(value)) throw resultIntegrity("authoritative_result_not_object");
+  if (!isRecord(value))
+    throw resultIntegrity("authoritative_result_not_object");
   assertExactKeys(value, [
     "schemaVersion",
     "sourceKind",
@@ -150,10 +152,13 @@ function validateResultSeats(
   if (value.length !== expectedSeats.length) {
     throw resultIntegrity("authoritative_result_seat_count_mismatch");
   }
-  const expectedById = new Map(expectedSeats.map((seat) => [seat.seatId, seat]));
+  const expectedById = new Map(
+    expectedSeats.map((seat) => [seat.seatId, seat]),
+  );
   const actualIds = new Set<string>();
   for (const entry of value) {
-    if (!isRecord(entry)) throw resultIntegrity("authoritative_result_invalid_seat");
+    if (!isRecord(entry))
+      throw resultIntegrity("authoritative_result_invalid_seat");
     assertExactKeys(entry, ["seatId", "displayName", "won"]);
     if (
       typeof entry.seatId !== "string" ||

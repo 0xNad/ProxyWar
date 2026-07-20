@@ -111,16 +111,26 @@ export function buildRequiredProxyWarLeakAuditManifest(
   };
   const targets: PremiereLeakAuditTarget[] = [
     target("league-page", "league_page", `${origin}/league`, bodyAbsent),
-    target("league-data", "league_data", `${origin}/ai-league-runs/league/data.json`, {
-      kind: "structured_absent",
-      requiredHttpStatus: 200,
-      forbiddenText,
-    }),
-    target("battle-card-data", "battle_card", `${origin}/ai-league-runs/league/data.json`, {
-      kind: "structured_absent",
-      requiredHttpStatus: 200,
-      forbiddenText,
-    }),
+    target(
+      "league-data",
+      "league_data",
+      `${origin}/ai-league-runs/league/data.json`,
+      {
+        kind: "structured_absent",
+        requiredHttpStatus: 200,
+        forbiddenText,
+      },
+    ),
+    target(
+      "battle-card-data",
+      "battle_card",
+      `${origin}/ai-league-runs/league/data.json`,
+      {
+        kind: "structured_absent",
+        requiredHttpStatus: 200,
+        forbiddenText,
+      },
+    ),
     target(
       "public-replay-route",
       "public_replay_allowlist",

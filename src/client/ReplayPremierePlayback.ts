@@ -183,8 +183,7 @@ export class ReplayPremierePlaybackController {
       releasedThroughSequence: this.releasedThroughSequence,
       lastDispatchedSequence: this.lastDispatchedSequence,
       lastDispatchedTurnNumber: this.lastDispatchedTurnNumber,
-      lastAcceptedPresentationOffsetMs:
-        this.lastAcceptedPresentationOffsetMs,
+      lastAcceptedPresentationOffsetMs: this.lastAcceptedPresentationOffsetMs,
       lastChunkHash: this.lastChunkHash,
       finalized: this.finalization !== null,
       playbackComplete: this.playbackComplete,

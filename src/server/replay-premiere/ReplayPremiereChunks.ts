@@ -303,14 +303,17 @@ function createChunk(
   const prepublicationHash = hashReplayPremiereJson(
     descriptorWithoutPrepublicationHash as unknown as ReplayPremiereJsonValue,
   );
-  return cloneAndFreezeReplayPremiereValue({
-    descriptor: {
-      ...descriptorWithoutPrepublicationHash,
-      prepublicationHash,
-      releasedAt: null,
+  return cloneAndFreezeReplayPremiereValue(
+    {
+      descriptor: {
+        ...descriptorWithoutPrepublicationHash,
+        prepublicationHash,
+        releasedAt: null,
+      },
+      payload,
     },
-    payload,
-  }, "premiere chunk draft");
+    "premiere chunk draft",
+  );
 }
 
 function descriptorHashInput(
@@ -553,7 +556,9 @@ function validateChunkPayloadAgainstDescriptor(
   assertPresentationSpan(payload.records, maxPresentationSpanMs);
 }
 
-function presentationSpanMs(records: readonly PremiereReleasedRecord[]): number {
+function presentationSpanMs(
+  records: readonly PremiereReleasedRecord[],
+): number {
   if (records.length === 0) return 0;
   return (
     records[records.length - 1].presentationOffsetMs -

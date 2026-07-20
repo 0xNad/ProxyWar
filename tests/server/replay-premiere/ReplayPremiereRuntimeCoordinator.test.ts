@@ -2,12 +2,12 @@ import { promises as fs } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, test } from "vitest";
-import { ReplayPremiereEventStore } from "../../../src/server/replay-premiere/ReplayPremiereEventStore";
 import type {
   ReplayPremiereEventRecovery,
   ReplayPremiereSnapshot,
   StoredReplayPremiereEvent,
 } from "../../../src/server/replay-premiere/ReplayPremiereEventStore";
+import { ReplayPremiereEventStore } from "../../../src/server/replay-premiere/ReplayPremiereEventStore";
 import {
   hashReplayPremiereJson,
   type ReplayPremiereJsonValue,
@@ -336,9 +336,10 @@ describe("ReplayPremiereRuntimeCoordinator", () => {
       interactions: createInteractions(gate, clock),
     });
     const event = store.recovered.events.at(-1)!;
-    const contradictory = structuredClone(
-      event.payload,
-    ) as unknown as Record<string, any>;
+    const contradictory = structuredClone(event.payload) as unknown as Record<
+      string,
+      any
+    >;
     contradictory.scheduleShiftMs = 1;
     const state = contradictory as ReplayPremiereJsonValue;
     const stateHash = hashReplayPremiereJson(state);
@@ -409,8 +410,13 @@ function mutatedRuntimePersistence(
   recovered: ReplayPremiereEventRecovery,
   mutate: (state: Record<string, any>) => void,
 ): ReplayPremiereRuntimePersistence {
-  const event = structuredClone(recovered.events.at(-1)!) as StoredReplayPremiereEvent;
-  const state = structuredClone(event.payload) as unknown as Record<string, any>;
+  const event = structuredClone(
+    recovered.events.at(-1)!,
+  ) as StoredReplayPremiereEvent;
+  const state = structuredClone(event.payload) as unknown as Record<
+    string,
+    any
+  >;
   mutate(state);
   event.payload = state as ReplayPremiereJsonValue;
   event.idempotencyStateHash = hashReplayPremiereJson(event.payload);

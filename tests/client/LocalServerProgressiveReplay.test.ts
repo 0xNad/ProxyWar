@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { LobbyConfig } from "../../src/client/ClientGameRunner";
+import { ReplayJumpToTurnEvent } from "../../src/client/InputHandler";
 import { LocalServer } from "../../src/client/LocalServer";
 import {
   ReplayPremiereFinalizationSignal,
@@ -20,7 +21,6 @@ import {
   ServerMessage,
   Turn,
 } from "../../src/core/Schemas";
-import { ReplayJumpToTurnEvent } from "../../src/client/InputHandler";
 
 const HASH_0 = "0".repeat(64);
 const HASH_1 = "1".repeat(64);
@@ -273,49 +273,45 @@ describe("LocalServer progressive replay", () => {
     server.endGame();
   });
 
-  it(
-    "hydrates a 10,000-chunk late join in linear time",
-    () => {
-      vi.useRealTimers();
-      const controller = new ReplayPremierePlaybackController(
-        "prem_0123456789abcdef",
-      );
-      let previousChunkHash: string | null = null;
-      for (let index = 0; index < 10_000; index += 1) {
-        const chunkHash = index.toString(16).padStart(64, "0");
-        controller.appendVerifiedBatch({
-          premiereId: "prem_0123456789abcdef",
-          chunkIndex: index,
-          chunkHash,
-          previousChunkHash,
-          payloadHash: HASH_0,
-          startSequence: index,
-          endSequence: index,
-          verification: {
-            payloadHashVerified: true,
-            chunkHashVerified: true,
+  it("hydrates a 10,000-chunk late join in linear time", () => {
+    vi.useRealTimers();
+    const controller = new ReplayPremierePlaybackController(
+      "prem_0123456789abcdef",
+    );
+    let previousChunkHash: string | null = null;
+    for (let index = 0; index < 10_000; index += 1) {
+      const chunkHash = index.toString(16).padStart(64, "0");
+      controller.appendVerifiedBatch({
+        premiereId: "prem_0123456789abcdef",
+        chunkIndex: index,
+        chunkHash,
+        previousChunkHash,
+        payloadHash: HASH_0,
+        startSequence: index,
+        endSequence: index,
+        verification: {
+          payloadHashVerified: true,
+          chunkHashVerified: true,
+        },
+        records: [
+          {
+            sequence: index,
+            presentationOffsetMs: index,
+            turn: { turnNumber: index, intents: [] },
           },
-          records: [
-            {
-              sequence: index,
-              presentationOffsetMs: index,
-              turn: { turnNumber: index, intents: [] },
-            },
-          ],
-        });
-        previousChunkHash = chunkHash;
-      }
+        ],
+      });
+      previousChunkHash = chunkHash;
+    }
 
-      const startedAt = performance.now();
-      const { server, messages } = startServer(lobbyConfig(controller));
-      const elapsedMs = performance.now() - startedAt;
-      expect(elapsedMs).toBeLessThan(5_000);
-      controller.requestForwardCatchUp(9_999);
-      expect(turnMessages(messages)).toHaveLength(64);
-      server.endGame();
-    },
-    10_000,
-  );
+    const startedAt = performance.now();
+    const { server, messages } = startServer(lobbyConfig(controller));
+    const elapsedMs = performance.now() - startedAt;
+    expect(elapsedMs).toBeLessThan(5_000);
+    controller.requestForwardCatchUp(9_999);
+    expect(turnMessages(messages)).toHaveLength(64);
+    server.endGame();
+  }, 10_000);
 
   it("verifies released archived hashes when present", () => {
     const controller = new ReplayPremierePlaybackController(

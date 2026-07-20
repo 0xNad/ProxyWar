@@ -189,8 +189,10 @@ export function verifyStoredReplayPremiereLeakAuditReceipt(options: {
     !Array.isArray(material.evidence) ||
     !Array.isArray(material.transfers) ||
     material.evidence.length !== material.transfers.length ||
-    hashReplayPremiereJson(asJson(material.manifest)) !== material.manifestHash ||
-    hashReplayPremiereJson(asJson(material.evidence)) !== material.evidenceHash ||
+    hashReplayPremiereJson(asJson(material.manifest)) !==
+      material.manifestHash ||
+    hashReplayPremiereJson(asJson(material.evidence)) !==
+      material.evidenceHash ||
     hashReplayPremiereJson(asJson(material.transfers)) !==
       material.transferEvidenceHash
   ) {
@@ -204,8 +206,9 @@ export function verifyStoredReplayPremiereLeakAuditReceipt(options: {
   if (
     assessment.status !== "passed" ||
     assessment.checkedAt !== material.checkedAt ||
-    material.evidence.some((evidence, index) =>
-      !validStoredTransferBinding(evidence, material.transfers[index]),
+    material.evidence.some(
+      (evidence, index) =>
+        !validStoredTransferBinding(evidence, material.transfers[index]),
     )
   ) {
     throw collectorIntegrity("stored_leak_audit_receipt_binding_mismatch");
@@ -344,7 +347,8 @@ async function collectTarget(options: {
     const contentEncoding = response.headers.get("content-encoding");
     if (
       declaredLength !== null &&
-      (contentEncoding === null || contentEncoding.toLowerCase() === "identity") &&
+      (contentEncoding === null ||
+        contentEncoding.toLowerCase() === "identity") &&
       declaredLength !== bytes.byteLength
     ) {
       throw collectorIneligible("collector_content_length_mismatch");
@@ -581,7 +585,8 @@ function validStoredTransferBinding(
   evidence: PremiereLeakCheckEvidence,
   transfer: ReplayPremiereLeakAuditTransferEvidence | undefined,
 ): boolean {
-  if (transfer === undefined || evidence.observedBodyText === null) return false;
+  if (transfer === undefined || evidence.observedBodyText === null)
+    return false;
   const bytes = Buffer.from(evidence.observedBodyText, "utf8");
   const contentEncoding = transfer.contentEncodingHeader?.toLowerCase() ?? null;
   const declaredLength = transfer.wireContentLengthHeader;

@@ -154,9 +154,7 @@ describe("ReplayPremierePrivateStaging", () => {
     expect(
       isContainedPath("/private/caf\u00e9", "/private/cafe\u0301/source"),
     ).toBe(false);
-    expect(isContainedPath("/private/root", "/private/root/source")).toBe(
-      true,
-    );
+    expect(isContainedPath("/private/root", "/private/root/source")).toBe(true);
   });
 
   test("fails durable staging below the bounded-write floor", async () => {
