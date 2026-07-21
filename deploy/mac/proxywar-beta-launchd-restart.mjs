@@ -15,8 +15,10 @@ const TARGET = `gui/${process.getuid()}/${LABEL}`;
 const DEFAULT_PLIST = path.join(os.homedir(), "Library", "LaunchAgents", `${LABEL}.plist`);
 // prettier-ignore
 const DEFAULT_WRITER_LOCK = path.join(os.homedir(), "Library", "Application Support", "ProxyWar", "storage", "replay-premiere", "event-store-v1", "write-owner.json");
+// esbuild is tsx's persistent transform service: on a cold-cache start after a
+// source change it appears as a direct child of the server and stays alive.
 // prettier-ignore
-const ALLOWED_EXECUTABLES = new Set(["bash", "caffeinate", "claude", "node", "npm", "sh", "zsh"]);
+const ALLOWED_EXECUTABLES = new Set(["bash", "caffeinate", "claude", "esbuild", "node", "npm", "sh", "zsh"]);
 
 export function validateDirectServer(managed) {
   const command = managed.command?.trim() ?? "";
