@@ -483,6 +483,160 @@ describe("ReplayPremiereRuntimeController", () => {
 
   it.each([
     {
+      label: "first",
+      checkpointIndex: 0,
+      checkpointId: "cp_12345678",
+      checkpointSequence: 10,
+    },
+    {
+      label: "second",
+      checkpointIndex: 1,
+      checkpointId: "cp_abcdef12",
+      checkpointSequence: 20,
+    },
+  ])(
+    "keeps $label checkpoint catch-up in playing recovery until its rendered boundary",
+    async ({ checkpointIndex, checkpointId, checkpointSequence }) => {
+      vi.useFakeTimers();
+      vi.setSystemTime(new Date(STARTED_AT));
+      const closesAt = "2026-07-20T18:00:30.000Z";
+      const interaction = sessionResponse("checkpoint");
+      interaction.checkpoints[checkpointIndex] = {
+        ...checkpoint(checkpointId, checkpointSequence),
+        opensAt: STARTED_AT,
+        closesAt,
+        optionSeatIds: ["seat_a", "seat_b"],
+        state: "open",
+      };
+      const harness = runtimeHarness({
+        state: "checkpoint",
+        service: { startSession: vi.fn(async () => interaction) },
+      });
+
+      const started = harness.runtime.start();
+      await harness.callbacks.onReady?.(projection("checkpoint"));
+      await started;
+      expect(harness.models.at(-1)).toMatchObject({
+        state: "playing",
+        activeCheckpointId: null,
+      });
+
+      await harness.callbacks.onRecovering?.({
+        code: "request_failed",
+        attempt: 1,
+        retryInMs: 250,
+      });
+      expect(harness.models.at(-1)).toMatchObject({
+        state: "playing",
+        activeCheckpointId: null,
+        recovery: { attempt: 1, retryInMs: 250 },
+      });
+
+      await harness.callbacks.onManifest?.(
+        checkpointManifest(
+          STARTED_AT,
+          closesAt,
+          checkpointId,
+          checkpointSequence,
+        ),
+      );
+      const records = Array.from(
+        { length: checkpointSequence + 1 },
+        (_, sequence) => ({
+          sequence,
+          presentationOffsetMs: sequence * 10,
+          turn: { turnNumber: sequence, intents: [] },
+        }),
+      );
+      harness.runtime.playback.appendVerifiedBatch({
+        premiereId: PREMIERE_ID,
+        chunkIndex: 0,
+        chunkHash: HASH_A,
+        previousChunkHash: null,
+        payloadHash: HASH_B,
+        startSequence: 0,
+        endSequence: checkpointSequence,
+        verification: {
+          payloadHashVerified: true,
+          chunkHashVerified: true,
+        },
+        records,
+      });
+      for (const record of records) {
+        harness.runtime.playback.acknowledgeDispatchedRecord(record);
+      }
+
+      document.dispatchEvent(
+        new CustomEvent("ai-league-replay-frame", {
+          detail: {
+            sequence: checkpointSequence - 1,
+            turnNumber: checkpointSequence - 1,
+            players: [],
+          },
+        }),
+      );
+      expect(harness.models.at(-1)).toMatchObject({
+        state: "playing",
+        activeCheckpointId: null,
+      });
+
+      document.dispatchEvent(
+        new CustomEvent("ai-league-replay-frame", {
+          detail: {
+            sequence: checkpointSequence,
+            turnNumber: checkpointSequence,
+            players: [],
+          },
+        }),
+      );
+      expect(harness.models.at(-1)).toMatchObject({
+        state: "checkpoint",
+        activeCheckpointId: checkpointId,
+        checkpoints: expect.arrayContaining([
+          expect.objectContaining({
+            id: checkpointId,
+            state: "open",
+          }),
+        ]),
+      });
+      harness.runtime.dispose();
+    },
+  );
+
+  it("keeps a mismatched active checkpoint fail-closed instead of projecting catch-up", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date(STARTED_AT));
+    const closesAt = "2026-07-20T18:00:30.000Z";
+    const interaction = sessionResponse("checkpoint");
+    interaction.checkpoints[0] = {
+      ...checkpoint("cp_12345678", 10),
+      opensAt: STARTED_AT,
+      closesAt,
+      optionSeatIds: ["seat_a", "seat_b"],
+      state: "open",
+    };
+    const harness = runtimeHarness({
+      state: "checkpoint",
+      service: { startSession: vi.fn(async () => interaction) },
+    });
+
+    const started = harness.runtime.start();
+    await harness.callbacks.onReady?.(projection("checkpoint"));
+    await started;
+    await harness.callbacks.onManifest?.(
+      checkpointManifest(STARTED_AT, closesAt, "cp_deadbeef", 10),
+    );
+
+    expect(harness.models.at(-1)).toMatchObject({
+      state: "checkpoint",
+      activeCheckpointId: null,
+      failureCode: null,
+    });
+    harness.runtime.dispose();
+  });
+
+  it.each([
+    {
       label: "structured service error",
       failure: Object.assign(
         new ReplayPremiereServiceError(
@@ -1775,16 +1929,18 @@ function playingManifest(): ReplayPremierePreRevealManifest {
 function checkpointManifest(
   serverNow: string,
   closesAt: string,
+  checkpointId = "cp_12345678",
+  checkpointSequence = 10,
 ): ReplayPremierePreRevealManifest {
   return {
     ...playingManifest(),
     state: "checkpoint",
     serverNow,
     authoritativeElapsedMs: 10_000,
-    releasedThroughSequence: 10,
+    releasedThroughSequence: checkpointSequence,
     activeCheckpoint: {
-      id: "cp_12345678",
-      sequence: 10,
+      id: checkpointId,
+      sequence: checkpointSequence,
       opensAt: STARTED_AT,
       closesAt,
       questionKind: "winner_from_here",

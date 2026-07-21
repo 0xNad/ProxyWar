@@ -1992,10 +1992,6 @@ export class ReplayPremiereRuntimeController {
             : revealPending
               ? "playing"
               : presentationState(this.servicePremiereState, networkState);
-    const state =
-      checkpointDeadlineElapsed && unprojectedState === "checkpoint"
-        ? "playing"
-        : unprojectedState;
     const policies = this.projection.provenance.seats.map(
       (seat): ReplayPremierePolicyView => ({
         seatId: seat.seatId,
@@ -2025,6 +2021,17 @@ export class ReplayPremiereRuntimeController {
         : this.projection.publicDefinition.checkpoints.find(
             (checkpoint) => checkpoint.id === projectedActiveCheckpointId,
           );
+    // Soften only a checkpoint bound to the immutable public definition.
+    // Unknown/mismatched checkpoint ids stay fail-closed in the overlay.
+    const checkpointBoundaryPending =
+      unprojectedState === "checkpoint" &&
+      projectedActiveCheckpoint !== undefined &&
+      projectedActiveCheckpoint.sequence > viewedSequence;
+    const state =
+      (checkpointDeadlineElapsed || checkpointBoundaryPending) &&
+      unprojectedState === "checkpoint"
+        ? "playing"
+        : unprojectedState;
     return {
       premiereId: this.options.premiereId,
       state,
