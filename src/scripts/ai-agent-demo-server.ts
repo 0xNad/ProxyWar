@@ -213,6 +213,8 @@ const replayPremiereProduction = await startReplayPremiereProduction({
   checkpointProjector: new DeterministicReplayPremiereCheckpointProjector(
     path.join(process.cwd(), "resources", "maps"),
   ),
+  // Leave bounded launch headroom for the remaining initialization and bind.
+  maxStartupMs: 8_000,
   onDiagnostic: (diagnostic) => {
     console.error(
       `Replay Premiere recovery rejected ${diagnostic.target}: ${diagnostic.operatorCode}`,

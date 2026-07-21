@@ -42,6 +42,7 @@ import {
 } from "./ReplayPremiereFixtures";
 
 const ORIGIN = "https://beta.proxywar.xyz";
+const DEMO_SERVER_STARTUP_BUDGET_MS = 8_000;
 const CHUNK_LIMITS = {
   maxChunkBytes: 100_000,
   maxTotalBytes: 1_000_000,
@@ -76,6 +77,20 @@ describe("ReplayPremiere production startup", () => {
     vi.useRealTimers();
     vi.restoreAllMocks();
     await fs.rm(root, { recursive: true, force: true });
+  });
+
+  test("reserves bounded demo-server launch headroom at the sole production startup call", async () => {
+    const source = await fs.readFile(
+      path.join(process.cwd(), "src", "scripts", "ai-agent-demo-server.ts"),
+      "utf8",
+    );
+    const callMarker = "startReplayPremiereProduction({";
+    expect(source.match(/startReplayPremiereProduction\(\{/g)).toHaveLength(1);
+    const callStart = source.indexOf(callMarker);
+    const callEnd = source.indexOf("\n});", callStart);
+    expect(callStart).toBeGreaterThanOrEqual(0);
+    expect(callEnd).toBeGreaterThan(callStart);
+    expect(source.slice(callStart, callEnd)).toContain("maxStartupMs: 8_000,");
   });
 
   test("reconstructs, synchronizes, and registers a clean admission", async () => {
@@ -577,6 +592,140 @@ describe("ReplayPremiere production startup", () => {
     expect(secondContext.httpRegistry.get(scheduledPremiereId)).toBeNull();
     expect(secondContext.runtimeRegistry.get(scheduledPremiereId)).toBeNull();
     expect((await fs.stat(eventsPath)).size).toBe(bytesAtReturn);
+  });
+
+  test("recovers the active and newest terminal targets before the demo-server budget stops legacy probing", async () => {
+    const premiereIds = await writeTwoAdmissions(root);
+    const blockingLegacyPremiereId = "prem_89abcdef01234567";
+    const remainingLegacyPremiereId = "prem_456789abcdef0123";
+    await writeAlternateAdmission(root, blockingLegacyPremiereId);
+    await writeAlternateAdmission(root, remainingLegacyPremiereId);
+    let clockNowMs = NOW.getTime() - 120_000;
+    const firstContext = startupContext(() => new Date(clockNowMs));
+    const first = await startReplayPremiereProduction({
+      ...firstContext,
+      privateStateRoot: path.join(root, "private"),
+      servedRoots: [path.join(root, "served")],
+    });
+    services.push(first.service);
+    expect(first.registeredPremiereIds).toHaveLength(4);
+
+    clockNowMs = NOW.getTime();
+    const active = firstContext.runtimeRegistry.get(premiereIds.primary)!;
+    await active.synchronize();
+    expect(active.readLifecycleState()).toBe("playing");
+    const remainingLegacy = firstContext.runtimeRegistry.get(
+      remainingLegacyPremiereId,
+    )!;
+    await remainingLegacy.cancel();
+    await remainingLegacy.archive();
+    const blockingLegacy = firstContext.runtimeRegistry.get(
+      blockingLegacyPremiereId,
+    )!;
+    await blockingLegacy.cancel();
+    await blockingLegacy.archive();
+    const newestTerminal = firstContext.runtimeRegistry.get(
+      premiereIds.alternate,
+    )!;
+    await newestTerminal.cancel();
+    await newestTerminal.archive();
+    await first.service.close();
+    services.splice(services.indexOf(first.service), 1);
+
+    vi.useFakeTimers({ now: NOW });
+    const secondContext = startupContext(() => new Date());
+    const attempts: string[] = [];
+    let releaseLegacy: (() => void) | undefined;
+    let resolveLegacyEntered: (() => void) | undefined;
+    const legacyBarrier = new Promise<void>((resolve) => {
+      releaseLegacy = resolve;
+    });
+    const legacyEntered = new Promise<void>((resolve) => {
+      resolveLegacyEntered = resolve;
+    });
+    const starting = startReplayPremiereProduction({
+      ...secondContext,
+      privateStateRoot: path.join(root, "private"),
+      servedRoots: [path.join(root, "served")],
+      maxStartupMs: DEMO_SERVER_STARTUP_BUDGET_MS,
+      beforeTargetRecovery: async ({ record }) => {
+        attempts.push(record.premiereId);
+        if (record.premiereId === blockingLegacyPremiereId) {
+          resolveLegacyEntered?.();
+          await legacyBarrier;
+        }
+      },
+    });
+    await legacyEntered;
+    expect(attempts).toEqual([
+      premiereIds.primary,
+      premiereIds.alternate,
+      blockingLegacyPremiereId,
+    ]);
+    await vi.advanceTimersByTimeAsync(DEMO_SERVER_STARTUP_BUDGET_MS);
+    const second = await starting;
+    services.push(second.service);
+
+    expect(second.registeredPremiereIds).toEqual([
+      premiereIds.primary,
+      premiereIds.alternate,
+    ]);
+    expect(second.diagnostics).toEqual([
+      {
+        target: `${blockingLegacyPremiereId}.admission.json`,
+        premiereId: blockingLegacyPremiereId,
+        operatorCode: "startup_deadline_exceeded",
+      },
+      {
+        target: `${remainingLegacyPremiereId}.admission.json`,
+        premiereId: remainingLegacyPremiereId,
+        operatorCode: "startup_deadline_exceeded",
+      },
+    ]);
+    expect(
+      secondContext.runtimeRegistry
+        .get(premiereIds.primary)
+        ?.readLifecycleState(),
+    ).toBe("playing");
+    expect(
+      secondContext.runtimeRegistry
+        .get(premiereIds.alternate)
+        ?.readLifecycleState(),
+    ).toBe("archived");
+    expect(
+      secondContext.runtimeRegistry.get(blockingLegacyPremiereId),
+    ).toBeNull();
+    expect(
+      secondContext.runtimeRegistry.get(remainingLegacyPremiereId),
+    ).toBeNull();
+    const bytesAtReturn = (
+      await fs.stat(
+        path.join(root, "private", "event-store-v1", "events.jsonl"),
+      )
+    ).size;
+    const timersAtReturn = second.service.readActiveTimerCount();
+
+    releaseLegacy?.();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(
+      secondContext.runtimeRegistry.get(blockingLegacyPremiereId),
+    ).toBeNull();
+    expect(
+      secondContext.runtimeRegistry.get(remainingLegacyPremiereId),
+    ).toBeNull();
+    expect(second.service.readActiveTimerCount()).toBe(timersAtReturn);
+    expect(
+      (
+        await fs.stat(
+          path.join(root, "private", "event-store-v1", "events.jsonl"),
+        )
+      ).size,
+    ).toBe(bytesAtReturn);
+    await second.service.close();
+    services.splice(services.indexOf(second.service), 1);
+    expect(
+      secondContext.runtimeRegistry.get(blockingLegacyPremiereId),
+    ).toBeNull();
   });
 
   test("quarantines an invalid lifecycle projection without starving a valid target", async () => {
