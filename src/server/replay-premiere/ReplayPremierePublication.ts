@@ -182,14 +182,18 @@ export interface VerifyPremierePublicationOptions {
   maxPresentationSpanMs: number;
 }
 
-/** Rebuilds the canonical dense replay from strict controlled-source bytes. */
+/**
+ * Rebuilds the canonical dense replay from strict hash-bound source bytes.
+ * Supports both strict source kinds: controlled exhibitions and rated Coworld
+ * league episodes. Every path ends in the single validated import boundary.
+ */
 export function importControlledPremiereSourceForPublication(options: {
   sourceBytes: Uint8Array;
   eligibilityRecord: PremiereEligibility;
   authoritativeResultBytes: Uint8Array;
   replayImportLimits: PremiereReplayImportLimits;
 }): ImportedPremiereReplay {
-  return decodeControlledSource(
+  return decodeStrictPremiereSource(
     options.sourceBytes,
     options.eligibilityRecord,
     options.authoritativeResultBytes,
@@ -307,7 +311,7 @@ export class VerifiedPremiereEligibilityGate {
         "Replay premiere source failed full eligibility assessment",
       );
     }
-    const source = decodeControlledSource(
+    const source = decodeStrictPremiereSource(
       sourceBytes,
       options.eligibilityRecord,
       options.authoritativeResultBytes,
@@ -338,17 +342,34 @@ export class VerifiedPremiereEligibilityGate {
     ) {
       throw publicationFailure("result_game_record_completed_at_mismatch");
     }
-    assertLeakFingerprintsBound(options.eligibilityRecord, [
-      options.eligibilityRecord.sourceRunId,
-      options.eligibilityRecord.sourceReplaySha256,
-      options.eligibilityRecord.authoritativeResult.resultHash,
-      options.eligibilityRecord.authoritativeResult.sourceId,
-      canonicalResult.gameId,
-      ...options.eligibilityRecord.seats.flatMap((seat) => [
-        seat.seatId,
-        seat.displayName,
-      ]),
-    ]);
+    // Rated Coworld sources bind only episode-scoped identities: league
+    // player display names and the constant adapter game id are legitimately
+    // public on league surfaces and are not spoilers for a single episode.
+    assertLeakFingerprintsBound(
+      options.eligibilityRecord,
+      options.eligibilityRecord.sourceKind === "rated_coworld"
+        ? [
+            options.eligibilityRecord.sourceRunId,
+            options.eligibilityRecord.sourceReplaySha256,
+            options.eligibilityRecord.authoritativeResult.resultHash,
+            options.eligibilityRecord.authoritativeResult.sourceId,
+            ...(options.eligibilityRecord.coworld === null
+              ? []
+              : [options.eligibilityRecord.coworld.episodeId]),
+            ...options.eligibilityRecord.seats.map((seat) => seat.seatId),
+          ]
+        : [
+            options.eligibilityRecord.sourceRunId,
+            options.eligibilityRecord.sourceReplaySha256,
+            options.eligibilityRecord.authoritativeResult.resultHash,
+            options.eligibilityRecord.authoritativeResult.sourceId,
+            canonicalResult.gameId,
+            ...options.eligibilityRecord.seats.flatMap((seat) => [
+              seat.seatId,
+              seat.displayName,
+            ]),
+          ],
+    );
     if (
       canonicalResult.turnCount !== source.turnCount ||
       !replayPremiereRecordsMatchDrafts(
@@ -1046,6 +1067,208 @@ function copySeat(seat: PremiereSeatIdentity): PremiereSeatIdentity {
   };
 }
 
+function decodeStrictPremiereSource(
+  sourceBytes: Uint8Array,
+  eligibility: PremiereEligibility,
+  authoritativeResultBytes: Uint8Array,
+  importLimits: PremiereReplayImportLimits,
+): {
+  replay: ReturnType<typeof importPremiereReplay>;
+  turnCount: number;
+  authoritativeOutcome: {
+    winner: ReplayPremiereJsonValue;
+    completedAt: string;
+  };
+} {
+  if (eligibility.sourceKind === "controlled_exhibition") {
+    return decodeControlledSource(
+      sourceBytes,
+      eligibility,
+      authoritativeResultBytes,
+      importLimits,
+    );
+  }
+  if (eligibility.sourceKind === "rated_coworld") {
+    return decodeRatedCoworldSource(
+      sourceBytes,
+      eligibility,
+      authoritativeResultBytes,
+      importLimits,
+    );
+  }
+  throw publicationFailure("unsupported_strict_source_kind");
+}
+
+/**
+ * Decodes a hash-bound rated Coworld league source bundle. Mirrors the
+ * controlled-exhibition decoder's fail-closed posture exactly: every source
+ * fact (record, seats, result, Coworld episode identity) is derived from the
+ * staged bytes and cross-checked against the eligibility record; nothing is
+ * accepted from the caller.
+ */
+function decodeRatedCoworldSource(
+  sourceBytes: Uint8Array,
+  eligibility: PremiereEligibility,
+  authoritativeResultBytes: Uint8Array,
+  importLimits: PremiereReplayImportLimits,
+): {
+  replay: ReturnType<typeof importPremiereReplay>;
+  turnCount: number;
+  authoritativeOutcome: {
+    winner: ReplayPremiereJsonValue;
+    completedAt: string;
+  };
+} {
+  if (
+    eligibility.sourceKind !== "rated_coworld" ||
+    eligibility.coworld === null
+  ) {
+    throw publicationFailure("unsupported_strict_source_kind");
+  }
+  let value: unknown;
+  try {
+    value = JSON.parse(Buffer.from(sourceBytes).toString("utf8"));
+  } catch (error) {
+    throw publicationFailure("staged_source_invalid_json", error);
+  }
+  if (value === null || typeof value !== "object" || Array.isArray(value)) {
+    throw publicationFailure("staged_source_not_object");
+  }
+  const source = value as Record<string, unknown>;
+  assertExactObjectKeys(source, [
+    "schemaVersion",
+    "bundleKind",
+    "sourceRunId",
+    "createdAt",
+    "gameRecord",
+    "replay",
+    "authoritativeResult",
+    "seats",
+    "coworld",
+    "provenance",
+  ]);
+  if (
+    source.schemaVersion !== 1 ||
+    source.bundleKind !== "proxywar_rated_coworld_source" ||
+    source.sourceRunId !== eligibility.sourceRunId ||
+    !isCanonicalTimestamp(source.createdAt) ||
+    !sameJson(source.seats, eligibility.seats) ||
+    source.replay === null ||
+    typeof source.replay !== "object" ||
+    Array.isArray(source.replay) ||
+    source.authoritativeResult === null ||
+    typeof source.authoritativeResult !== "object" ||
+    Array.isArray(source.authoritativeResult) ||
+    source.coworld === null ||
+    typeof source.coworld !== "object" ||
+    Array.isArray(source.coworld)
+  ) {
+    throw publicationFailure("staged_source_contract_mismatch");
+  }
+  const coworld = source.coworld as Record<string, unknown>;
+  assertExactObjectKeys(coworld, [
+    "episodeId",
+    "leagueId",
+    "divisionId",
+    "roundId",
+  ]);
+  if (!sameJson(coworld, eligibility.coworld)) {
+    throw publicationFailure("staged_source_coworld_binding_mismatch");
+  }
+  const replay = source.replay as Record<string, unknown>;
+  const result = source.authoritativeResult as Record<string, unknown>;
+  assertExactObjectKeys(replay, ["turnCount", "turnIntervalMs"]);
+  assertExactObjectKeys(result, ["sourceId", "encoding", "bytes", "sha256"]);
+  if (
+    !Number.isSafeInteger(replay.turnCount) ||
+    Number(replay.turnCount) < 4 ||
+    !Number.isSafeInteger(replay.turnIntervalMs) ||
+    Number(replay.turnIntervalMs) <= 0 ||
+    result.sourceId !== eligibility.authoritativeResult.sourceId ||
+    result.encoding !== "base64" ||
+    typeof result.bytes !== "string" ||
+    typeof result.sha256 !== "string" ||
+    result.sha256 !== eligibility.authoritativeResult.resultHash
+  ) {
+    throw publicationFailure("staged_source_replay_or_result_mismatch");
+  }
+  const embeddedResult = Buffer.from(result.bytes, "base64");
+  if (
+    embeddedResult.toString("base64") !== result.bytes ||
+    sha256Hex(embeddedResult) !== result.sha256 ||
+    !embeddedResult.equals(Buffer.from(authoritativeResultBytes))
+  ) {
+    throw publicationFailure("staged_source_embedded_result_mismatch");
+  }
+  const parsedRecord = GameRecordSchema.strict().safeParse(source.gameRecord);
+  if (!parsedRecord.success) {
+    throw publicationFailure(
+      "staged_source_invalid_game_record",
+      parsedRecord.error,
+    );
+  }
+  if (
+    parsedRecord.data.info.num_turns !== replay.turnCount ||
+    parsedRecord.data.turns.some(
+      (turn, index, turns) =>
+        turn.turnNumber >= Number(replay.turnCount) ||
+        (index > 0 && turn.turnNumber <= turns[index - 1].turnNumber),
+    )
+  ) {
+    throw publicationFailure("staged_source_turn_count_mismatch");
+  }
+  validateControlledSourceSeats(
+    source.seats,
+    parsedRecord.data.info.players,
+    eligibility.seats,
+  );
+  const info = parsedRecord.data.info;
+  const completedAt = canonicalGameRecordCompletion(info.end);
+  const winner =
+    info.winner === undefined
+      ? null
+      : jsonValueForPublication(info.winner, "rated GameRecord winner");
+  validateRatedCoworldProvenance({
+    value: source.provenance,
+    gameRecord: parsedRecord.data,
+    turnCount: Number(replay.turnCount),
+    coworld,
+    sourceRunId: eligibility.sourceRunId,
+    seatCount: eligibility.seats.length,
+  });
+  const gameStartInfo = {
+    gameID: info.gameID,
+    lobbyCreatedAt: info.lobbyCreatedAt,
+    ...(info.visibleAt === undefined ? {} : { visibleAt: info.visibleAt }),
+    config: info.config,
+    players: info.players.map((player) => ({
+      clientID: player.clientID,
+      username: player.username,
+      clanTag: player.clanTag,
+      ...(player.cosmetics === undefined
+        ? {}
+        : { cosmetics: player.cosmetics }),
+      ...(player.isLobbyCreator === undefined
+        ? {}
+        : { isLobbyCreator: player.isLobbyCreator }),
+    })),
+  };
+  const imported = importPremiereReplay(
+    {
+      gameStartInfo,
+      turns: parsedRecord.data.turns.map((turn) => ({ turn })),
+      turnCount: Number(replay.turnCount),
+      turnIntervalMs: Number(replay.turnIntervalMs),
+    },
+    importLimits,
+  );
+  return {
+    replay: imported,
+    turnCount: Number(replay.turnCount),
+    authoritativeOutcome: { winner, completedAt },
+  };
+}
+
 function decodeControlledSource(
   sourceBytes: Uint8Array,
   eligibility: PremiereEligibility,
@@ -1453,6 +1676,167 @@ function validateControlledSourceProvenance(
     !isDisplayText(build.architecture, 128)
   ) {
     throw publicationFailure("controlled_source_build_provenance_mismatch");
+  }
+}
+
+function validateRatedCoworldProvenance(options: {
+  value: unknown;
+  gameRecord: {
+    info: {
+      gameID: string;
+      start: number;
+      end: number;
+      num_turns: number;
+      config: Record<string, unknown>;
+    };
+  };
+  turnCount: number;
+  coworld: Record<string, unknown>;
+  sourceRunId: string;
+  seatCount: number;
+}): void {
+  const { value, gameRecord, turnCount, coworld } = options;
+  if (value === null || typeof value !== "object" || Array.isArray(value)) {
+    throw publicationFailure("rated_source_missing_provenance");
+  }
+  const provenance = value as Record<string, unknown>;
+  assertExactObjectKeys(provenance, [
+    "generator",
+    "observatory",
+    "rawReplay",
+    "participants",
+    "game",
+    "build",
+  ]);
+  if (
+    provenance.generator !== "replay-premiere-rated-coworld-ingest/v1" ||
+    provenance.observatory === null ||
+    typeof provenance.observatory !== "object" ||
+    Array.isArray(provenance.observatory) ||
+    provenance.rawReplay === null ||
+    typeof provenance.rawReplay !== "object" ||
+    Array.isArray(provenance.rawReplay) ||
+    !Array.isArray(provenance.participants) ||
+    provenance.game === null ||
+    typeof provenance.game !== "object" ||
+    Array.isArray(provenance.game) ||
+    provenance.build === null ||
+    typeof provenance.build !== "object" ||
+    Array.isArray(provenance.build)
+  ) {
+    throw publicationFailure("rated_source_invalid_provenance");
+  }
+  const observatory = provenance.observatory as Record<string, unknown>;
+  const rawReplay = provenance.rawReplay as Record<string, unknown>;
+  const game = provenance.game as Record<string, unknown>;
+  const build = provenance.build as Record<string, unknown>;
+  assertExactObjectKeys(observatory, [
+    "episodeRequestId",
+    "episodeId",
+    "roundId",
+    "leagueId",
+    "divisionId",
+    "coworldId",
+    "coworldName",
+    "coworldVersion",
+    "variantName",
+    "replayUrl",
+    "requesterUserId",
+    "episodeCreatedAt",
+    "episodeCompletedAt",
+  ]);
+  assertExactObjectKeys(rawReplay, [
+    "sha256",
+    "byteLength",
+    "replayKind",
+    "runId",
+  ]);
+  assertExactObjectKeys(game, [
+    "gameId",
+    "startedAt",
+    "completedAt",
+    "turnCount",
+    "map",
+    "mapSize",
+    "mode",
+    "gameType",
+  ]);
+  assertExactObjectKeys(build, [
+    "generatorSha256",
+    "nodeVersion",
+    "platform",
+    "architecture",
+  ]);
+  if (
+    observatory.episodeId !== coworld.episodeId ||
+    observatory.roundId !== coworld.roundId ||
+    observatory.leagueId !== coworld.leagueId ||
+    observatory.divisionId !== coworld.divisionId ||
+    !isDisplayText(observatory.episodeRequestId, 160) ||
+    !isDisplayText(observatory.coworldId, 160) ||
+    !isDisplayText(observatory.coworldName, 160) ||
+    !isDisplayText(observatory.coworldVersion, 64) ||
+    (observatory.variantName !== null &&
+      !isDisplayText(observatory.variantName, 160)) ||
+    !isDisplayText(observatory.replayUrl, 512) ||
+    !isDisplayText(observatory.requesterUserId, 160) ||
+    !isCanonicalTimestamp(observatory.episodeCreatedAt) ||
+    !isCanonicalTimestamp(observatory.episodeCompletedAt)
+  ) {
+    throw publicationFailure("rated_source_observatory_provenance_mismatch");
+  }
+  if (
+    !isSha256Hex(rawReplay.sha256) ||
+    !Number.isSafeInteger(rawReplay.byteLength) ||
+    Number(rawReplay.byteLength) <= 0 ||
+    rawReplay.replayKind !== "proxywar-coworld-local-poc" ||
+    rawReplay.runId !== options.sourceRunId
+  ) {
+    throw publicationFailure("rated_source_raw_replay_provenance_mismatch");
+  }
+  if (
+    provenance.participants.length !== options.seatCount ||
+    provenance.participants.some((entry, index) => {
+      if (entry === null || typeof entry !== "object" || Array.isArray(entry)) {
+        return true;
+      }
+      const participant = entry as Record<string, unknown>;
+      const keys = Object.keys(participant).sort();
+      return (
+        keys.length !== 4 ||
+        keys[0] !== "label" ||
+        keys[1] !== "playerId" ||
+        keys[2] !== "playerName" ||
+        keys[3] !== "position" ||
+        participant.position !== index ||
+        !isDisplayText(participant.label, 160) ||
+        !isDisplayText(participant.playerId, 160) ||
+        !isDisplayText(participant.playerName, 160)
+      );
+    })
+  ) {
+    throw publicationFailure("rated_source_participant_provenance_mismatch");
+  }
+  const completedAt = new Date(gameRecord.info.end).toISOString();
+  if (
+    game.gameId !== gameRecord.info.gameID ||
+    game.startedAt !== new Date(gameRecord.info.start).toISOString() ||
+    game.completedAt !== completedAt ||
+    game.turnCount !== turnCount ||
+    game.map !== String(gameRecord.info.config.gameMap) ||
+    game.mapSize !== String(gameRecord.info.config.gameMapSize) ||
+    game.mode !== String(gameRecord.info.config.gameMode) ||
+    game.gameType !== String(gameRecord.info.config.gameType)
+  ) {
+    throw publicationFailure("rated_source_game_provenance_mismatch");
+  }
+  if (
+    !isSha256Hex(build.generatorSha256) ||
+    !isDisplayText(build.nodeVersion, 128) ||
+    !isDisplayText(build.platform, 128) ||
+    !isDisplayText(build.architecture, 128)
+  ) {
+    throw publicationFailure("rated_source_build_provenance_mismatch");
   }
 }
 

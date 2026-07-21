@@ -11,11 +11,13 @@ import {
 import { buildPremiereChunks } from "../server/replay-premiere/ReplayPremiereChunks";
 import {
   isPremiereId,
+  type CoworldPremiereSourceIds,
   type PolicyIdentity,
   type PremiereEligibility,
   type PremiereExternalEmbargoEvidence,
   type PremierePublicLabel,
   type PremiereSeatIdentity,
+  type PremiereSourceKind,
 } from "../server/replay-premiere/ReplayPremiereContracts";
 import {
   assessPremiereEligibility,
@@ -115,10 +117,12 @@ interface SpoilerNeutralDefinitionInput extends Omit<
   schemaVersion: 1;
 }
 
-interface ControlledBundleAdmissionMaterial {
+interface StrictBundleAdmissionMaterial {
+  sourceKind: PremiereSourceKind;
   sourceRunId: string;
   seats: PremiereSeatIdentity[];
   gameId: string;
+  coworld: CoworldPremiereSourceIds | null;
   authoritativeResultSourceId: string;
   authoritativeResultHash: string;
   authoritativeResultBytes: Buffer;
@@ -201,11 +205,20 @@ export async function runReplayPremiereAdmission(
       maxSourceBytes: MAX_SOURCE_BYTES,
     });
     const sourceBytes = verifiedSource.copyBytes();
-    const source = deriveControlledBundleAdmissionMaterial(sourceBytes);
+    const source = deriveStrictBundleAdmissionMaterial(sourceBytes);
+    if (
+      source.sourceKind === "rated_coworld" &&
+      operatorInput.externalOutcomeMayBePublic !== true
+    ) {
+      // League standings make every rated episode outcome externally public;
+      // an operator claim to the contrary is a false embargo claim.
+      throw cliFailure("admission_rated_outcome_must_be_public");
+    }
     const manifest = buildRequiredProxyWarLeakAuditManifest({
       origin: deploymentOrigin,
       sourceRunId: source.sourceRunId,
       createdAt: now.toISOString(),
+      sourceKind: source.sourceKind,
       fingerprintBinding: {
         sourceReplaySha256: stagedSource.sourceReplaySha256,
         authoritativeResultSha256: source.authoritativeResultHash,
@@ -213,15 +226,18 @@ export async function runReplayPremiereAdmission(
         gameIds: [source.gameId],
         seatIds: source.seats.map((seat) => seat.seatId),
         seatDisplayNames: source.seats.map((seat) => seat.displayName),
+        ...(source.coworld === null
+          ? {}
+          : { coworldEpisodeId: source.coworld.episodeId }),
       },
     });
     const baseEligibility: PremiereEligibility = {
       schemaVersion: 1,
       eligibilityCheckVersion: operatorInput.eligibilityCheckVersion,
       createdAt: now.toISOString(),
-      sourceKind: "controlled_exhibition",
+      sourceKind: source.sourceKind,
       sourceRunId: source.sourceRunId,
-      coworld: null,
+      coworld: source.coworld,
       sourceReplaySha256: stagedSource.sourceReplaySha256,
       sourceBundleOutsideServedRoots: true,
       proxyWarLeakAuditManifest: manifest,
@@ -230,7 +246,10 @@ export async function runReplayPremiereAdmission(
       externalOutcomeMayBePublic: operatorInput.externalOutcomeMayBePublic,
       seats: source.seats,
       authoritativeResult: {
-        sourceKind: "controlled_result",
+        sourceKind:
+          source.sourceKind === "rated_coworld"
+            ? "coworld_result"
+            : "controlled_result",
         sourceId: source.authoritativeResultSourceId,
         resultHash: source.authoritativeResultHash,
       },
@@ -559,9 +578,9 @@ async function readSpoilerNeutralDefinitionInput(
   };
 }
 
-function deriveControlledBundleAdmissionMaterial(
+function deriveStrictBundleAdmissionMaterial(
   bytes: Uint8Array,
-): ControlledBundleAdmissionMaterial {
+): StrictBundleAdmissionMaterial {
   let value: unknown;
   try {
     value = JSON.parse(Buffer.from(bytes).toString("utf8"));
@@ -569,6 +588,14 @@ function deriveControlledBundleAdmissionMaterial(
     throw cliFailure("admission_source_invalid_json");
   }
   assertReplayPremiereJsonValue(value, "operator admission source");
+  if (value === null || typeof value !== "object" || Array.isArray(value)) {
+    throw cliFailure("admission_source_contract_invalid");
+  }
+  const bundleKind = (value as Record<string, unknown>).bundleKind;
+  const rated = bundleKind === "proxywar_rated_coworld_source";
+  if (!rated && bundleKind !== "proxywar_controlled_exhibition_source") {
+    throw cliFailure("admission_source_contract_invalid");
+  }
   const source = exactRecord(
     value,
     [
@@ -580,17 +607,39 @@ function deriveControlledBundleAdmissionMaterial(
       "replay",
       "authoritativeResult",
       "seats",
+      ...(rated ? ["coworld"] : []),
       "provenance",
     ],
     "admission_source_contract_invalid",
   );
   if (
     source.schemaVersion !== 1 ||
-    source.bundleKind !== "proxywar_controlled_exhibition_source" ||
     typeof source.sourceRunId !== "string" ||
     !Array.isArray(source.seats)
   ) {
     throw cliFailure("admission_source_contract_invalid");
+  }
+  let coworld: CoworldPremiereSourceIds | null = null;
+  if (rated) {
+    const coworldRecord = exactRecord(
+      source.coworld,
+      ["episodeId", "leagueId", "divisionId", "roundId"],
+      "admission_source_coworld_invalid",
+    );
+    if (
+      typeof coworldRecord.episodeId !== "string" ||
+      typeof coworldRecord.leagueId !== "string" ||
+      typeof coworldRecord.divisionId !== "string" ||
+      typeof coworldRecord.roundId !== "string"
+    ) {
+      throw cliFailure("admission_source_coworld_invalid");
+    }
+    coworld = {
+      episodeId: coworldRecord.episodeId,
+      leagueId: coworldRecord.leagueId,
+      divisionId: coworldRecord.divisionId,
+      roundId: coworldRecord.roundId,
+    };
   }
   const parsedGameRecord = GameRecordSchema.strict().safeParse(
     source.gameRecord,
@@ -623,9 +672,11 @@ function deriveControlledBundleAdmissionMaterial(
     throw cliFailure("admission_source_result_invalid");
   }
   return {
+    sourceKind: rated ? "rated_coworld" : "controlled_exhibition",
     sourceRunId: source.sourceRunId,
     seats,
     gameId: parsedGameRecord.data.info.gameID,
+    coworld,
     authoritativeResultSourceId: result.sourceId,
     authoritativeResultHash: result.sha256,
     authoritativeResultBytes: resultBytes,

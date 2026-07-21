@@ -678,6 +678,235 @@ export async function verifiedLongPublicationFixture(
   };
 }
 
+export const RATED_PREMIERE_ID = "prem_rated0123456789ab";
+export const RATED_RUN_ID = "coworld-2026-07-20T17-00-00-000Z-feedface";
+export const RATED_EPISODE_REQUEST_ID = "ereq_fixture-0001";
+export const RATED_EPISODE_ID = "e51fa9fixture0001";
+export const RATED_ROUND_ID = "round_fixture-0001";
+export const RATED_LEAGUE_ID = "league_fixture-0001";
+export const RATED_DIVISION_ID = "div_fixture-0001";
+export const RATED_COWORLD_ID = "cow_fixture-0001";
+
+export function ratedCoworldGameRecordValue(): Record<string, unknown> {
+  const start = gameStartInfo();
+  return {
+    version: "v0.0.2",
+    gitCommit: "DEV",
+    subdomain: "local",
+    domain: "ai-league-demo",
+    info: {
+      ...start,
+      gameID: "RATE0001",
+      players: [
+        {
+          clientID: "RSEATA01",
+          username: "AlphaCog",
+          clanTag: null,
+          persistentID: null,
+        },
+        {
+          clientID: "RSEATA02",
+          username: "BetaCog",
+          clanTag: null,
+          persistentID: null,
+        },
+      ],
+      start: Date.parse("2026-07-20T17:00:00.000Z"),
+      end: Date.parse("2026-07-20T17:00:00.800Z"),
+      duration: 800,
+      num_turns: 8,
+      lobbyFillTime: 0,
+    },
+    turns: [
+      { turnNumber: 0, intents: [] },
+      { turnNumber: 2, intents: [] },
+      { turnNumber: 5, intents: [] },
+    ],
+  };
+}
+
+export function ratedCoworldRawReplayValue(): Record<string, unknown> {
+  return {
+    schemaVersion: 1,
+    replayKind: "proxywar-coworld-local-poc",
+    runID: RATED_RUN_ID,
+    matchID: "RATE0001",
+    config: { player_count: 2 },
+    results: {
+      turn_count: 8,
+      winner_slot: 1,
+      // Raw account names: slot 0 exercises the OpenFront username
+      // sanitization gap ("Alpha-Cog" is recorded in-game as "AlphaCog").
+      players: [
+        { slot: 0, name: "Alpha-Cog", score: 0 },
+        { slot: 1, name: "BetaCog", score: 1 },
+      ],
+    },
+    finalState: { winnerSlot: 1 },
+    inlineRunArtifacts: {
+      "game-record.json": JSON.stringify(ratedCoworldGameRecordValue()),
+    },
+  };
+}
+
+export function ratedCoworldEpisodeRows(): Array<Record<string, unknown>> {
+  return [
+    {
+      id: RATED_EPISODE_REQUEST_ID,
+      status: "completed",
+      episode_id: RATED_EPISODE_ID,
+      round_id: RATED_ROUND_ID,
+      coworld_id: RATED_COWORLD_ID,
+      coworld_name: "proxywar",
+      coworld_version: "0.1.10",
+      variant_name: "Tournament 2P - Asia",
+      replay_url:
+        "https://softmax-public.s3.amazonaws.com/replays/fixture-0001.replay",
+      requester_user_id: "commissioner",
+      created_at: "2026-07-20T16:30:00.000Z",
+      completed_at: "2026-07-20T17:00:01.000Z",
+      game_config: {
+        map: String(GameMapType.Asia),
+        map_size: String(GameMapSize.Normal),
+        difficulty: String(Difficulty.Medium),
+        num_agents: 2,
+      },
+      participants: [
+        {
+          position: 0,
+          policy_version_id: "9f000000-0000-4000-8000-000000000001",
+          policy_id: "82000000-0000-4000-8000-000000000001",
+          policy_name: "alpha-cog",
+          version: 3,
+          player_id: "ply_alpha-0001",
+          player_name: "Alpha-Cog",
+          is_filler: false,
+          label: "alpha-cog:v3",
+        },
+        {
+          position: 1,
+          policy_version_id: "9f000000-0000-4000-8000-000000000002",
+          policy_id: "82000000-0000-4000-8000-000000000002",
+          policy_name: "beta-cog",
+          version: 7,
+          player_id: "ply_beta-0001",
+          player_name: "BetaCog",
+          is_filler: false,
+          label: "beta-cog:v7",
+        },
+      ],
+    },
+  ];
+}
+
+export function ratedCoworldDivisionRows(): Array<Record<string, unknown>> {
+  return [
+    {
+      id: RATED_DIVISION_ID,
+      name: "Competition",
+      league: {
+        id: RATED_LEAGUE_ID,
+        name: "Proxywar",
+        game: { coworld_id: RATED_COWORLD_ID, coworld_name: "proxywar" },
+      },
+    },
+    {
+      id: "div_other-0001",
+      name: "Other",
+      league: {
+        id: "league_other-0001",
+        name: "Other",
+        game: { coworld_id: "cow_other-0001", coworld_name: "other" },
+      },
+    },
+  ];
+}
+
+export function ratedEligibilityFixture(material: {
+  sourceBytes: Buffer;
+  origin?: string;
+}): PremiereEligibility {
+  const bundle = JSON.parse(material.sourceBytes.toString("utf8")) as {
+    sourceRunId: string;
+    gameRecord: { info: { gameID: string } };
+    authoritativeResult: { sourceId: string; sha256: string };
+    seats: PremiereSeatIdentity[];
+    coworld: {
+      episodeId: string;
+      leagueId: string;
+      divisionId: string;
+      roundId: string;
+    };
+  };
+  const manifest = buildRequiredProxyWarLeakAuditManifest({
+    origin: material.origin ?? "https://beta.proxywar.xyz",
+    sourceRunId: bundle.sourceRunId,
+    createdAt: NOW.toISOString(),
+    sourceKind: "rated_coworld",
+    fingerprintBinding: {
+      sourceReplaySha256: sha256Hex(material.sourceBytes),
+      authoritativeResultSha256: bundle.authoritativeResult.sha256,
+      authoritativeResultSourceId: bundle.authoritativeResult.sourceId,
+      gameIds: [bundle.gameRecord.info.gameID],
+      seatIds: bundle.seats.map((seat) => seat.seatId),
+      seatDisplayNames: bundle.seats.map((seat) => seat.displayName),
+      coworldEpisodeId: bundle.coworld.episodeId,
+    },
+  });
+  const proxyWarLeakChecks: PremiereLeakCheckEvidence[] = manifest.targets.map(
+    (target) => {
+      let observedHttpStatus: number;
+      let observedBodyText: string;
+      if (target.expectation.kind === "body_absent") {
+        observedHttpStatus = target.expectation.requiredHttpStatus;
+        observedBodyText = "current public page without the private source";
+      } else if (target.expectation.kind === "structured_absent") {
+        observedHttpStatus = target.expectation.requiredHttpStatus;
+        observedBodyText = '{"matches":[]}';
+      } else {
+        observedHttpStatus = target.expectation.allowedHttpStatuses[0];
+        observedBodyText = "not found";
+      }
+      return {
+        checkId: target.checkId,
+        target: target.target,
+        method: target.method,
+        observedHttpStatus,
+        observedContentHash: sha256Hex(observedBodyText),
+        observedBodyText,
+        observedHeaders: {
+          age: null,
+          cacheControl: "no-store",
+          cdnCacheStatus: null,
+        },
+        checkedAt: NOW.toISOString(),
+        checkerVersion: "phase0-audit/v1",
+      };
+    },
+  );
+  return {
+    schemaVersion: 1,
+    eligibilityCheckVersion: "phase0/v1",
+    createdAt: NOW.toISOString(),
+    sourceKind: "rated_coworld",
+    sourceRunId: bundle.sourceRunId,
+    coworld: { ...bundle.coworld },
+    sourceReplaySha256: sha256Hex(material.sourceBytes),
+    sourceBundleOutsideServedRoots: true,
+    proxyWarLeakAuditManifest: manifest,
+    proxyWarLeakChecks,
+    externalEmbargoEvidence: [],
+    externalOutcomeMayBePublic: true,
+    seats: bundle.seats,
+    authoritativeResult: {
+      sourceKind: "coworld_result",
+      sourceId: bundle.authoritativeResult.sourceId,
+      resultHash: bundle.authoritativeResult.sha256,
+    },
+    publicLabel: "spoiler_resistant_premiere",
+  };
+}
+
 export async function collectFixtureLeakAudit(
   eligibility: PremiereEligibility,
   assessmentOptions: PremiereEligibilityAssessmentOptions,

@@ -66,6 +66,16 @@ export interface BuildRequiredLeakAuditManifestOptions {
   origin: string;
   sourceRunId: string;
   createdAt: string;
+  /**
+   * Selects which bound identities become forbidden leak fingerprints.
+   * "controlled_exhibition" (the default) binds every identity including seat
+   * display names and game ids. "rated_coworld" binds only episode-scoped
+   * identities (run id, hashes, result source id, Coworld episode id, seat
+   * client ids): league player display names and the constant adapter game id
+   * are legitimately public on the league surfaces and would make every rated
+   * admission fail on non-spoiler content.
+   */
+  sourceKind?: "controlled_exhibition" | "rated_coworld";
   fingerprintBinding: {
     sourceReplaySha256: string;
     authoritativeResultSha256: string;
@@ -73,6 +83,8 @@ export interface BuildRequiredLeakAuditManifestOptions {
     gameIds: string[];
     seatIds: string[];
     seatDisplayNames: string[];
+    /** Required when sourceKind is "rated_coworld". */
+    coworldEpisodeId?: string;
   };
   alternateUrls?: string[];
 }
@@ -823,6 +835,7 @@ function deriveBoundLeakFingerprints(
   options: BuildRequiredLeakAuditManifestOptions,
 ): string[] {
   const binding = options.fingerprintBinding;
+  const sourceKind = options.sourceKind ?? "controlled_exhibition";
   if (
     !isSha256Hex(binding.sourceReplaySha256) ||
     !isSha256Hex(binding.authoritativeResultSha256) ||
@@ -831,19 +844,31 @@ function deriveBoundLeakFingerprints(
     !Array.isArray(binding.seatIds) ||
     binding.seatIds.length < 2 ||
     !Array.isArray(binding.seatDisplayNames) ||
-    binding.seatDisplayNames.length !== binding.seatIds.length
+    binding.seatDisplayNames.length !== binding.seatIds.length ||
+    (sourceKind === "rated_coworld" &&
+      !isOpaqueSourceId(binding.coworldEpisodeId))
   ) {
     throw invalidRequest("invalid_leak_fingerprint_binding");
   }
-  const values = [
-    options.sourceRunId,
-    binding.sourceReplaySha256,
-    binding.authoritativeResultSha256,
-    binding.authoritativeResultSourceId,
-    ...binding.gameIds,
-    ...binding.seatIds,
-    ...binding.seatDisplayNames,
-  ];
+  const values =
+    sourceKind === "rated_coworld"
+      ? [
+          options.sourceRunId,
+          binding.sourceReplaySha256,
+          binding.authoritativeResultSha256,
+          binding.authoritativeResultSourceId,
+          String(binding.coworldEpisodeId),
+          ...binding.seatIds,
+        ]
+      : [
+          options.sourceRunId,
+          binding.sourceReplaySha256,
+          binding.authoritativeResultSha256,
+          binding.authoritativeResultSourceId,
+          ...binding.gameIds,
+          ...binding.seatIds,
+          ...binding.seatDisplayNames,
+        ];
   if (
     values.some(
       (value) => !isDisplayText(value, 512) || value.trim().length < 4,
