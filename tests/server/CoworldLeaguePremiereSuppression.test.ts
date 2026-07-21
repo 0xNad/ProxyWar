@@ -4,6 +4,7 @@ import path from "node:path";
 import { afterEach, describe, expect, test } from "vitest";
 import {
   PREMIERE_SUPPRESSION_DEFAULT_QUARANTINE_MS,
+  PREMIERE_SUPPRESSION_MAX_CLOCK_SKEW_MS,
   PREMIERE_SUPPRESSION_SCHEMA_VERSION,
   PREMIERE_SUPPRESSION_STALE_MS,
   buildPremiereSiteBlock,
@@ -165,6 +166,28 @@ describe("parsePremiereSuppressionContract fail-open reasons", () => {
   test("a generatedAt just inside 15 minutes stays active", () => {
     const generatedAt = new Date(
       NOW.getTime() - (PREMIERE_SUPPRESSION_STALE_MS - 1000),
+    ).toISOString();
+    const state = parsePremiereSuppressionContract(
+      JSON.stringify(contract({ generatedAt })),
+      NOW,
+    );
+    expect(state.status).toBe("active");
+  });
+
+  test("a generatedAt beyond the future skew bound is stale future_generated_at", () => {
+    const generatedAt = new Date(
+      NOW.getTime() + PREMIERE_SUPPRESSION_MAX_CLOCK_SKEW_MS + 1000,
+    ).toISOString();
+    const state = parsePremiereSuppressionContract(
+      JSON.stringify(contract({ generatedAt })),
+      NOW,
+    );
+    expect(state).toEqual({ status: "stale", reason: "future_generated_at" });
+  });
+
+  test("a generatedAt within the future skew bound stays active", () => {
+    const generatedAt = new Date(
+      NOW.getTime() + PREMIERE_SUPPRESSION_MAX_CLOCK_SKEW_MS - 1000,
     ).toISOString();
     const state = parsePremiereSuppressionContract(
       JSON.stringify(contract({ generatedAt })),

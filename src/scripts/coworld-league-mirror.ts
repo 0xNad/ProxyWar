@@ -555,8 +555,10 @@ async function syncOnce(options: MirrorOptions): Promise<void> {
   const recoveryReferences = options.recoverPinnedArtifacts
     ? await readCoworldLeagueRetentionPins(options.retentionPinManifestPath)
     : null;
-  // Read the contract at cycle start. Suppression never applies to the
-  // operator-driven pinned-artifact recovery path.
+  // Read the contract at cycle start to log/observe suppression status. Only
+  // the cycle-start OBSERVATION is skipped during operator-driven pinned-artifact
+  // recovery; the final-defense filter below still runs unconditionally, so a
+  // held/quarantined episode is spoiler-shielded even on the recovery path.
   const suppressionAtCycleStart =
     recoveryReferences === null ? await readSuppressionState(options) : null;
   if (

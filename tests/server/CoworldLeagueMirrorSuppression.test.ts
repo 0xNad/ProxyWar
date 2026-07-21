@@ -191,15 +191,16 @@ function hold(
 
 function activeContract(
   overrides: Partial<PremiereSuppressionContract> = {},
+  now: Date = NOW,
 ): PremiereSuppressionState {
   const raw = JSON.stringify({
     schemaVersion: PREMIERE_SUPPRESSION_SCHEMA_VERSION,
-    generatedAt: NOW.toISOString(),
+    generatedAt: now.toISOString(),
     quarantineMs: 12 * 60 * 1000,
     holds: [hold()],
     ...overrides,
   });
-  const state = parsePremiereSuppressionContract(raw, NOW);
+  const state = parsePremiereSuppressionContract(raw, now);
   if (state.status !== "active") {
     throw new Error(`expected active contract, got ${state.reason}`);
   }
@@ -329,10 +330,13 @@ describe("mirror suppression — quarantine defers then publishes", () => {
     // 11 minutes later the same contract is still fresh, but the episode has
     // aged out of the quarantine window and publishes.
     const later = new Date(NOW.getTime() + 11 * 60 * 1000);
-    const laterState = activeContract({
-      generatedAt: new Date(later.getTime() - 60 * 1000).toISOString(),
-      holds: [],
-    });
+    const laterState = activeContract(
+      {
+        generatedAt: new Date(later.getTime() - 60 * 1000).toISOString(),
+        holds: [],
+      },
+      later,
+    );
     const outside = render(assemble(baseline, laterState, later));
     expect(containsForbiddenText(outside.html, [FRESH])).toBe(true);
   });

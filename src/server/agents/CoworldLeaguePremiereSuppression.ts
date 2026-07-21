@@ -36,6 +36,16 @@ export const PREMIERE_SUPPRESSION_SCHEMA_VERSION = 1 as const;
 export const PREMIERE_SUPPRESSION_STALE_MS = 15 * 60 * 1000;
 
 /**
+ * A contract whose `generatedAt` is further in the FUTURE than this is also
+ * treated as stale (fail open). The staleness bound above only catches old
+ * timestamps; without this a hung loop that wrote a future/clock-skewed
+ * `generatedAt` and then stopped refreshing would keep suppressing until real
+ * time crossed `generatedAt + STALE_MS`, defeating the safety net. A small skew
+ * tolerates benign host/loop clock drift.
+ */
+export const PREMIERE_SUPPRESSION_MAX_CLOCK_SKEW_MS = 2 * 60 * 1000;
+
+/**
  * Default blanket quarantine window a producer should write. Freshly-completed
  * episodes are deferred (not published) for this long so a premiere claim has
  * time to land before the episode is ever shown.
@@ -71,6 +81,7 @@ export type PremiereSuppressionStaleReason =
   | "unknown_schema_version"
   | "invalid_generated_at"
   | "stale_generated_at"
+  | "future_generated_at"
   | "invalid_quarantine_ms"
   | "invalid_holds";
 
@@ -205,6 +216,9 @@ export function parsePremiereSuppressionContract(
   }
   if (now.getTime() - generatedAtMs >= PREMIERE_SUPPRESSION_STALE_MS) {
     return staleState("stale_generated_at");
+  }
+  if (generatedAtMs - now.getTime() > PREMIERE_SUPPRESSION_MAX_CLOCK_SKEW_MS) {
+    return staleState("future_generated_at");
   }
   if (
     typeof value.quarantineMs !== "number" ||
