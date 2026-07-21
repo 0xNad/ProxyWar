@@ -1056,6 +1056,7 @@ export class ReplayPremiereRuntimeController {
   private terminalFailure: "integrity_failure" | "runtime_failure" | null =
     null;
   private sessionBootstrapInput: ReplayPremiereSessionInput | null = null;
+  private fencedSessionReadyForVerifiedReveal = false;
   private interactionReady = false;
   private sessionBootstrapInFlight = false;
   private heartbeatInFlight = false;
@@ -1269,6 +1270,8 @@ export class ReplayPremiereRuntimeController {
       this.clearInteractionTimers();
       this.service.dispose();
       this.dispatchJoinAfterBootstrap();
+    } else if (this.fencedSessionReadyForVerifiedReveal) {
+      this.activateFencedSessionAfterReveal();
     } else if (!this.interactionReady) {
       void this.bootstrapInteractions();
     }
@@ -1379,6 +1382,7 @@ export class ReplayPremiereRuntimeController {
       this.sessionRetryTimer = null;
     }
     this.sessionBootstrapInput ??= this.createSessionBootstrapInput();
+    const networkStateAtRequest = this.currentNetworkState();
     this.sessionBootstrapInFlight = true;
     try {
       const response = await this.service.startSession(
@@ -1391,8 +1395,26 @@ export class ReplayPremiereRuntimeController {
       ) {
         return;
       }
-      this.applyServiceProjection(response);
+      const staleAcrossReveal = isStalePreRevealServiceProjection(
+        networkStateAtRequest,
+        this.currentNetworkState(),
+        response.premiereState,
+        response.checkpoints,
+      );
+      if (!staleAcrossReveal) {
+        this.applyServiceProjection(response);
+      }
       if (this.terminalFailure !== null) return;
+      if (staleAcrossReveal || this.isRevealVerificationPending()) {
+        if (staleAcrossReveal) {
+          this.incomingMoment = response.incomingMoment;
+        }
+        this.fencedSessionReadyForVerifiedReveal = true;
+        if (this.reveal !== null) {
+          this.activateFencedSessionAfterReveal();
+        }
+        return;
+      }
       this.interactionReady = !this.isReadOnlyLifecycle();
       this.hydrateOverlay();
       this.dispatchJoinAfterBootstrap();
@@ -1432,6 +1454,44 @@ export class ReplayPremiereRuntimeController {
     }
   }
 
+  private activateFencedSessionAfterReveal(): void {
+    if (
+      !this.fencedSessionReadyForVerifiedReveal ||
+      this.reveal === null ||
+      this.disposed ||
+      this.terminalFailure !== null ||
+      this.service.session() === null
+    ) {
+      return;
+    }
+    if (this.isReadOnlyLifecycle()) {
+      if (
+        this.servicePremiereState !== "archived" ||
+        this.currentNetworkState() !== "revealed"
+      ) {
+        return;
+      }
+      this.fencedSessionReadyForVerifiedReveal = false;
+      this.interactionReady = false;
+      this.clearInteractionTimers();
+      this.dispatchJoinAfterBootstrap();
+      this.service.dispose();
+      return;
+    }
+    this.fencedSessionReadyForVerifiedReveal = false;
+    this.interactionReady = true;
+    this.hydrateOverlay();
+    if (this.incomingMoment !== null && !this.revealSeekApplied) {
+      this.revealSeekApplied = true;
+      this.options.onRevealSeek?.(this.incomingMoment.turn);
+    }
+    this.dispatchJoinAfterBootstrap();
+    this.heartbeatTimer ??= setInterval(
+      () => void this.sendHeartbeat(),
+      HEARTBEAT_INTERVAL_MS,
+    );
+  }
+
   private async sendHeartbeat(): Promise<void> {
     if (
       this.disposed ||
@@ -1442,6 +1502,7 @@ export class ReplayPremiereRuntimeController {
     ) {
       return;
     }
+    const networkStateAtRequest = this.currentNetworkState();
     this.heartbeatInFlight = true;
     try {
       const response = await this.service.heartbeat({
@@ -1452,6 +1513,16 @@ export class ReplayPremiereRuntimeController {
         this.disposed ||
         this.terminalFailure !== null ||
         this.isReadOnlyLifecycle()
+      ) {
+        return;
+      }
+      if (
+        isStalePreRevealServiceProjection(
+          networkStateAtRequest,
+          this.currentNetworkState(),
+          response.premiereState,
+          response.checkpoints,
+        )
       ) {
         return;
       }
@@ -1564,6 +1635,14 @@ export class ReplayPremiereRuntimeController {
     );
   }
 
+  private isRevealVerificationPending(): boolean {
+    const networkState = this.currentNetworkState();
+    return (
+      this.reveal === null &&
+      (networkState === "revealed" || networkState === "archived")
+    );
+  }
+
   private dispatchJoinAfterBootstrap(): void {
     const verifiedArchived =
       this.projection !== null &&
@@ -1578,11 +1657,7 @@ export class ReplayPremiereRuntimeController {
     ) {
       return;
     }
-    if (
-      (this.projection.state === "revealed" ||
-        this.projection.state === "archived") &&
-      this.reveal === null
-    ) {
+    if (this.isRevealVerificationPending()) {
       return;
     }
     if (
@@ -2193,6 +2268,30 @@ function isLifecycleCompatible(
     case "cancelled":
       return serviceState === "cancelled" || serviceState === "archived";
   }
+}
+
+function isStalePreRevealServiceProjection(
+  networkStateAtRequest: ReplayPremiereReadyProjection["state"],
+  currentNetworkState: ReplayPremiereReadyProjection["state"],
+  serviceState: ReplayPremiereLifecycleState,
+  checkpoints: readonly ReplayPremiereServiceCheckpoint[],
+): boolean {
+  // The interaction response is a snapshot taken when its request began. A
+  // reveal pointer may become visible while that request is in flight. Fence
+  // only an outcome-free response that was valid for the request's pre-reveal
+  // phase; responses already invalid at request time still fail closed.
+  const requestWasPreReveal =
+    networkStateAtRequest === "playing" ||
+    networkStateAtRequest === "checkpoint";
+  const responseIsPreReveal =
+    serviceState === "playing" || serviceState === "checkpoint";
+  return (
+    requestWasPreReveal &&
+    currentNetworkState === "revealed" &&
+    responseIsPreReveal &&
+    isLifecycleCompatible(networkStateAtRequest, serviceState) &&
+    !hasOutcomeProjection(checkpoints)
+  );
 }
 
 function presentationState(

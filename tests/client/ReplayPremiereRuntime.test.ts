@@ -19,6 +19,7 @@ import {
   type ReplayPremierePreRevealManifest,
   type ReplayPremiereReadyProjection,
   type ReplayPremiereReveal,
+  type ReplayPremiereRevealPointer,
 } from "../../src/client/ReplayPremiereNetwork";
 import type {
   ReplayPremiereOverlayCallbacks,
@@ -395,6 +396,227 @@ describe("ReplayPremiereRuntimeController", () => {
     },
   );
 
+  it("fences a stale playing heartbeat across the reveal pointer transition", async () => {
+    vi.useFakeTimers();
+    const heartbeatDeferred =
+      deferred<ReplayPremiereServiceHeartbeatResponse>();
+    const harness = runtimeHarness({
+      state: "playing",
+      service: {
+        heartbeat: vi.fn(() => heartbeatDeferred.promise),
+      },
+    });
+    const started = harness.runtime.start();
+    await harness.callbacks.onReady?.(projection("playing"));
+    await started;
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(harness.service.heartbeat).toHaveBeenCalledOnce();
+
+    await harness.callbacks.onManifest?.(revealedPointer());
+    heartbeatDeferred.resolve(heartbeatResponse("playing"));
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(harness.network.dispose).not.toHaveBeenCalled();
+    expect(harness.service.dispose).not.toHaveBeenCalled();
+    expect(harness.models.at(-1)?.failureCode).toBeNull();
+
+    await harness.callbacks.onReveal?.(verifiedReveal());
+    await harness.callbacks.onTerminal?.("revealed");
+    expect(harness.network.dispose).not.toHaveBeenCalled();
+    expect(harness.models.at(-1)?.failureCode).toBeNull();
+    harness.runtime.dispose();
+  });
+
+  it("fences a stale session bootstrap projection across the reveal pointer transition", async () => {
+    const sessionDeferred = deferred<ReplayPremiereServiceSessionResponse>();
+    const harness = runtimeHarness({
+      state: "playing",
+      service: {
+        startSession: vi.fn(() => sessionDeferred.promise),
+      },
+    });
+    const started = harness.runtime.start();
+    await harness.callbacks.onReady?.(projection("playing"));
+    await vi.waitFor(() =>
+      expect(harness.service.startSession).toHaveBeenCalledOnce(),
+    );
+
+    await harness.callbacks.onManifest?.(revealedPointer());
+    sessionDeferred.resolve(sessionResponseWithIncomingMoment("playing"));
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(harness.network.dispose).not.toHaveBeenCalled();
+    expect(harness.service.dispose).not.toHaveBeenCalled();
+    expect(harness.models.at(-1)?.failureCode).toBeNull();
+    expect(harness.onJoin).not.toHaveBeenCalled();
+    expect(harness.models.at(-1)?.canPredict).toBe(false);
+    expect(harness.onRevealSeek).not.toHaveBeenCalled();
+
+    await harness.callbacks.onReveal?.(verifiedReveal());
+    await harness.callbacks.onTerminal?.("revealed");
+    await started;
+    expect(harness.network.dispose).not.toHaveBeenCalled();
+    expect(harness.models.at(-1)?.failureCode).toBeNull();
+    expect(harness.onJoin).toHaveBeenCalledOnce();
+    expect(harness.onRevealSeek).toHaveBeenCalledOnce();
+    expect(harness.onRevealSeek).toHaveBeenCalledWith(12);
+    harness.runtime.dispose();
+  });
+
+  it("holds a current revealed session projection until the reveal body is verified", async () => {
+    const sessionDeferred = deferred<ReplayPremiereServiceSessionResponse>();
+    const harness = runtimeHarness({
+      state: "playing",
+      service: {
+        startSession: vi.fn(() => sessionDeferred.promise),
+      },
+    });
+    const started = harness.runtime.start();
+    await harness.callbacks.onReady?.(projection("playing"));
+    await vi.waitFor(() =>
+      expect(harness.service.startSession).toHaveBeenCalledOnce(),
+    );
+
+    await harness.callbacks.onManifest?.(revealedPointer());
+    sessionDeferred.resolve(sessionResponse("revealed"));
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(harness.network.dispose).not.toHaveBeenCalled();
+    expect(harness.onJoin).not.toHaveBeenCalled();
+    expect(harness.models.at(-1)?.canPredict).toBe(false);
+
+    await harness.callbacks.onReveal?.(verifiedReveal());
+    await harness.callbacks.onTerminal?.("revealed");
+    await started;
+    expect(harness.onJoin).toHaveBeenCalledOnce();
+    expect(harness.models.at(-1)?.failureCode).toBeNull();
+    harness.runtime.dispose();
+  });
+
+  it("joins read-only after an archived session projection outruns reveal verification", async () => {
+    const sessionDeferred = deferred<ReplayPremiereServiceSessionResponse>();
+    const harness = runtimeHarness({
+      state: "playing",
+      service: {
+        startSession: vi.fn(() => sessionDeferred.promise),
+      },
+    });
+    const started = harness.runtime.start();
+    await harness.callbacks.onReady?.(projection("playing"));
+    await vi.waitFor(() =>
+      expect(harness.service.startSession).toHaveBeenCalledOnce(),
+    );
+
+    await harness.callbacks.onManifest?.(revealedPointer());
+    sessionDeferred.resolve(sessionResponse("archived"));
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(harness.onJoin).not.toHaveBeenCalled();
+    expect(harness.models.at(-1)?.canPredict).toBe(false);
+
+    await harness.callbacks.onReveal?.(verifiedReveal());
+    await harness.callbacks.onTerminal?.("revealed");
+    await started;
+    expect(harness.onJoin).toHaveBeenCalledOnce();
+    expect(harness.service.dispose).toHaveBeenCalledOnce();
+    expect(harness.models.at(-1)).toMatchObject({
+      state: "archived",
+      canPredict: false,
+      canMark: false,
+      canShare: false,
+      failureCode: null,
+    });
+    harness.runtime.dispose();
+  });
+
+  it("activates a fenced session once its stale response lands after reveal verification", async () => {
+    const sessionDeferred = deferred<ReplayPremiereServiceSessionResponse>();
+    const harness = runtimeHarness({
+      state: "playing",
+      service: {
+        startSession: vi.fn(() => sessionDeferred.promise),
+      },
+    });
+    const started = harness.runtime.start();
+    await harness.callbacks.onReady?.(projection("playing"));
+    await vi.waitFor(() =>
+      expect(harness.service.startSession).toHaveBeenCalledOnce(),
+    );
+
+    await harness.callbacks.onManifest?.(revealedPointer());
+    await harness.callbacks.onReveal?.(verifiedReveal());
+    await harness.callbacks.onTerminal?.("revealed");
+    expect(harness.onJoin).not.toHaveBeenCalled();
+
+    sessionDeferred.resolve(sessionResponseWithIncomingMoment("playing"));
+    await started;
+
+    expect(harness.network.dispose).not.toHaveBeenCalled();
+    expect(harness.service.dispose).not.toHaveBeenCalled();
+    expect(harness.models.at(-1)?.failureCode).toBeNull();
+    expect(harness.onJoin).toHaveBeenCalledOnce();
+    expect(harness.onRevealSeek).toHaveBeenCalledOnce();
+    expect(harness.onRevealSeek).toHaveBeenCalledWith(12);
+    harness.runtime.dispose();
+  });
+
+  it.each([
+    {
+      label: "lifecycle regression",
+      response: () => heartbeatResponse("draft"),
+    },
+    {
+      label: "pre-verification outcome projection",
+      response: () => {
+        const response = heartbeatResponse("playing");
+        response.checkpoints[0].resolution = {
+          kind: "winner" as const,
+          winnerSeatId: "seat_a",
+          resolvedAt: STARTED_AT,
+        };
+        response.checkpoints[0].crowdAccuracy = {
+          correctPredictions: 0,
+          totalPredictions: 0,
+        };
+        return response;
+      },
+    },
+  ])(
+    "does not fence a $label behind a reveal pointer",
+    async ({ response }) => {
+      vi.useFakeTimers();
+      const heartbeatDeferred =
+        deferred<ReplayPremiereServiceHeartbeatResponse>();
+      const harness = runtimeHarness({
+        state: "playing",
+        service: {
+          heartbeat: vi.fn(() => heartbeatDeferred.promise),
+        },
+      });
+      const started = harness.runtime.start();
+      await harness.callbacks.onReady?.(projection("playing"));
+      await started;
+      await vi.advanceTimersByTimeAsync(10_000);
+
+      await harness.callbacks.onManifest?.(revealedPointer());
+      heartbeatDeferred.resolve(response());
+      await Promise.resolve();
+      await Promise.resolve();
+
+      expect(harness.network.dispose).toHaveBeenCalledOnce();
+      expect(harness.service.dispose).toHaveBeenCalledOnce();
+      expect(harness.models.at(-1)).toMatchObject({
+        state: "failed",
+        failureCode: "integrity_failure",
+      });
+      harness.runtime.dispose();
+    },
+  );
+
   it("fails closed when interaction outcomes arrive before a verified reveal", async () => {
     const leaked = sessionResponse("playing");
     leaked.checkpoints[0].resolution = {
@@ -566,6 +788,7 @@ function runtimeHarness(options: {
     onBind?: () => void;
   };
   onJoin?: () => void;
+  onRevealSeek?: (turn: number) => void;
 }) {
   let callbacks!: ReplayPremiereNetworkCallbacks;
   let overlayCallbacks!: ReplayPremiereOverlayCallbacks;
@@ -597,9 +820,11 @@ function runtimeHarness(options: {
     dispose: vi.fn(),
   };
   const onJoin = vi.fn(options.onJoin);
+  const onRevealSeek = vi.fn(options.onRevealSeek);
   const runtime = new ReplayPremiereRuntimeController({
     premiereId: PREMIERE_ID,
     onJoinReady: onJoin,
+    onRevealSeek,
     dependencies: {
       windowRef: window,
       documentRef: document,
@@ -633,6 +858,7 @@ function runtimeHarness(options: {
     network,
     service,
     onJoin,
+    onRevealSeek,
   };
 }
 
@@ -787,6 +1013,26 @@ function sessionResponse(
   };
 }
 
+function sessionResponseWithIncomingMoment(
+  premiereState: ReplayPremiereServiceSessionResponse["premiereState"],
+): ReplayPremiereServiceSessionResponse {
+  const response = sessionResponse(premiereState);
+  const shareId = `share_${"6".repeat(32)}`;
+  response.session.incomingAttribution = {
+    attributionId: PARTICIPANT_ID,
+    shareId,
+    premiereId: PREMIERE_ID,
+    issuedAt: STARTED_AT,
+    expiresAt: "2026-07-20T18:10:00.000Z",
+  };
+  response.incomingMoment = {
+    shareId,
+    sequence: 12,
+    turn: 12,
+  };
+  return response;
+}
+
 function heartbeatResponse(
   premiereState: ReplayPremiereServiceHeartbeatResponse["premiereState"],
   sessionOverrides: Partial<ReplayPremiereServiceSession> = {},
@@ -801,7 +1047,7 @@ function heartbeatResponse(
   };
 }
 
-function archivedPointer(): ReplayPremiereManifest {
+function archivedPointer(): ReplayPremiereRevealPointer {
   const current = projection("archived");
   return {
     schemaVersion: 1,
@@ -811,6 +1057,13 @@ function archivedPointer(): ReplayPremiereManifest {
     revealedAt: STARTED_AT,
     revealCommitHash: HASH_A,
     provenance: current.provenance,
+  };
+}
+
+function revealedPointer(): ReplayPremiereRevealPointer {
+  return {
+    ...archivedPointer(),
+    state: "revealed",
   };
 }
 
