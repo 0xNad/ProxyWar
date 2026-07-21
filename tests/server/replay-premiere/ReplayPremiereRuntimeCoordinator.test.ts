@@ -2,6 +2,7 @@ import { promises as fs } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, test } from "vitest";
+import { freezeReplayPremiereCheckpointProjection } from "../../../src/server/replay-premiere/ReplayPremiereCheckpointProjection";
 import type {
   ReplayPremiereEventRecovery,
   ReplayPremiereSnapshot,
@@ -14,12 +15,28 @@ import {
 } from "../../../src/server/replay-premiere/ReplayPremiereIntegrity";
 import { ReplayPremiereInteractions } from "../../../src/server/replay-premiere/ReplayPremiereInteractions";
 import {
+  ReplayPremiereRuntimeCoordinator as ProductionReplayPremiereRuntimeCoordinator,
   REPLAY_PREMIERE_CHECKPOINT_PAUSE_MS,
-  ReplayPremiereRuntimeCoordinator,
   type ReplayPremiereRuntimeClock,
   type ReplayPremiereRuntimePersistence,
 } from "../../../src/server/replay-premiere/ReplayPremiereRuntimeCoordinator";
 import { NOW, verifiedPublicationFixture } from "./ReplayPremiereFixtures";
+
+const ReplayPremiereRuntimeCoordinator = {
+  createOrRecover(
+    options: Omit<
+      Parameters<
+        typeof ProductionReplayPremiereRuntimeCoordinator.createOrRecover
+      >[0],
+      "checkpointProjection"
+    >,
+  ) {
+    return ProductionReplayPremiereRuntimeCoordinator.createOrRecover({
+      ...options,
+      checkpointProjection: allSeatsProjection(options.gate),
+    });
+  },
+};
 
 class FakeClock implements ReplayPremiereRuntimeClock {
   constructor(private value: Date) {}
@@ -55,16 +72,27 @@ describe("ReplayPremiereRuntimeCoordinator", () => {
     const clock = new FakeClock(NOW);
     const store = await openStore(root);
     stores.push(store);
+    const interactions = createInteractions(gate, clock);
     const runtime = await ReplayPremiereRuntimeCoordinator.createOrRecover({
       gate,
       drafts,
       persistence: store,
       clock,
-      interactions: createInteractions(gate, clock),
+      interactions,
     });
 
     expect(runtime.readLifecycleState()).toBe("scheduled");
     expect(runtime.readChunk(0)).toBeNull();
+    expect(
+      interactions.readState().checkpoints.map((entry) => entry.optionSeatIds),
+    ).toEqual([[], []]);
+    expect(
+      (
+        store.recovered.events[0].payload as unknown as {
+          interactionCheckpoints: Array<{ optionSeatIds: string[] }>;
+        }
+      ).interactionCheckpoints.map((entry) => entry.optionSeatIds),
+    ).toEqual([[], []]);
     await runtime.synchronize();
     expect(runtime.readLifecycleState()).toBe("playing");
 
@@ -86,6 +114,12 @@ describe("ReplayPremiereRuntimeCoordinator", () => {
     expect(runtime.readChunk(1)).toBeNull();
     const checkpoint = runtime.readActiveCheckpoint();
     expect(checkpoint).not.toBeNull();
+    expect(checkpoint!.optionSeatIds).toEqual(["SEAT0001", "SEAT0002"]);
+    expect(interactions.readState().checkpoints[0].optionSeatIds).toEqual([
+      "SEAT0001",
+      "SEAT0002",
+    ]);
+    expect(interactions.readState().checkpoints[1].optionSeatIds).toEqual([]);
     expect(
       Date.parse(checkpoint!.closesAt) - Date.parse(checkpoint!.opensAt),
     ).toBe(REPLAY_PREMIERE_CHECKPOINT_PAUSE_MS);
@@ -225,6 +259,9 @@ describe("ReplayPremiereRuntimeCoordinator", () => {
     clock.advance(120_001);
     await runtime.endOutage();
     expect(runtime.readLifecycleState()).toBe("scheduled");
+    await expect(runtime.beginOutage()).rejects.toMatchObject({
+      operatorCode: "premiere_runtime_outage_transition_limit_exceeded",
+    });
     clock.advance(120_000);
     await runtime.synchronize();
     expect(runtime.readLifecycleState()).toBe("playing");
@@ -238,6 +275,120 @@ describe("ReplayPremiereRuntimeCoordinator", () => {
       state: "failed",
       releasedThroughSequence: -1,
     });
+    await runtime.archive();
+    expect(runtime.readLifecycleState()).toBe("archived");
+    expect(runtime.readManifest()).toMatchObject({
+      state: "failed",
+      releasedThroughSequence: -1,
+    });
+  });
+
+  test("recovers an automatic playing gap and accepts a same-clock restart without a duplicate event", async () => {
+    const { gate, drafts } = await verifiedPublicationFixture(root);
+    const clock = new FakeClock(NOW);
+    const firstStore = await openStore(root);
+    stores.push(firstStore);
+    const interactions = createInteractions(gate, clock);
+    const first = await ReplayPremiereRuntimeCoordinator.createOrRecover({
+      gate,
+      drafts,
+      persistence: firstStore,
+      clock,
+      interactions,
+    });
+    await first.synchronize();
+    await closeTrackedStore(firstStore, stores);
+
+    clock.advance(150);
+    const recoveredStore = await openStore(root);
+    stores.push(recoveredStore);
+    const recovered = await ReplayPremiereRuntimeCoordinator.createOrRecover({
+      gate,
+      drafts,
+      persistence: recoveredStore,
+      clock,
+      interactions: createInteractions(gate, clock, interactions.readState()),
+    });
+    expect(recovered.readLifecycleState()).toBe("playing");
+    expect(
+      recoveredStore.recovered.events.filter(
+        (event) => event.eventType === "premiere_runtime_outage_recovered",
+      ),
+    ).toHaveLength(1);
+    const eventCount = recoveredStore.recovered.events.length;
+    await closeTrackedStore(recoveredStore, stores);
+
+    const restartedStore = await openStore(root);
+    stores.push(restartedStore);
+    const restarted = await ReplayPremiereRuntimeCoordinator.createOrRecover({
+      gate,
+      drafts,
+      persistence: restartedStore,
+      clock,
+      interactions: createInteractions(gate, clock, interactions.readState()),
+    });
+    expect(restarted.readLifecycleState()).toBe("playing");
+    expect(restartedStore.recovered.events).toHaveLength(eventCount);
+  });
+
+  test("durably cancels a scheduled premiere and archives it without fabricating a reveal", async () => {
+    const { gate, drafts } = await verifiedPublicationFixture(root);
+    const clock = new FakeClock(NOW);
+    const firstStore = await openStore(root);
+    stores.push(firstStore);
+    const firstInteractions = createInteractions(gate, clock);
+    const runtime = await ReplayPremiereRuntimeCoordinator.createOrRecover({
+      gate,
+      drafts,
+      persistence: firstStore,
+      clock,
+      interactions: firstInteractions,
+    });
+
+    await runtime.cancel();
+    expect(runtime.readLifecycleState()).toBe("cancelled");
+    expect(runtime.readManifest()).toMatchObject({
+      state: "cancelled",
+      actualStartAt: null,
+      releasedThroughSequence: -1,
+    });
+    await runtime.archive();
+    expect(runtime.readLifecycleState()).toBe("archived");
+    expect(runtime.readManifest()).toMatchObject({
+      state: "cancelled",
+      actualStartAt: null,
+      releasedThroughSequence: -1,
+    });
+    expect(runtime.readReveal()).toBeNull();
+    expect(firstStore.recovered.events.map((event) => event.eventType)).toEqual(
+      [
+        "premiere_runtime_initialized",
+        "premiere_runtime_cancelled",
+        "premiere_runtime_terminal_archived",
+      ],
+    );
+    await expect(runtime.beginOutage()).rejects.toMatchObject({
+      operatorCode: "premiere_runtime_outage_cannot_start_in_current_state",
+    });
+
+    await firstStore.close();
+    stores.splice(stores.indexOf(firstStore), 1);
+    const restartedStore = await openStore(root);
+    stores.push(restartedStore);
+    const restarted = await ReplayPremiereRuntimeCoordinator.createOrRecover({
+      gate,
+      drafts,
+      persistence: restartedStore,
+      clock,
+      interactions: createInteractions(
+        gate,
+        clock,
+        firstInteractions.readState(),
+      ),
+    });
+    expect(restarted.readLifecycleState()).toBe("archived");
+    expect(restarted.readManifest()).toMatchObject({ state: "cancelled" });
+    expect(restarted.readReveal()).toBeNull();
   });
 
   test("recovers the durable reveal without rollback or duplicate release", async () => {
@@ -285,6 +436,63 @@ describe("ReplayPremiereRuntimeCoordinator", () => {
     expect(restartedStore.recovered.events).toHaveLength(eventCount);
   });
 
+  test("repairs a stale snapshot after the reveal event is fsynced", async () => {
+    const { gate, drafts } = await verifiedPublicationFixture(root);
+    const clock = new FakeClock(NOW);
+    let failSnapshot = false;
+    let armedSnapshotWrites = 0;
+    const firstStore = await openStore(root, {
+      snapshotWrite: async (handle, buffer, offset, length) => {
+        if (failSnapshot && (armedSnapshotWrites += 1) === 2) {
+          failSnapshot = false;
+          throw new Error("simulated reveal snapshot crash");
+        }
+        return handle.write(buffer, offset, length, null);
+      },
+    });
+    stores.push(firstStore);
+    const interactions = createInteractions(gate, clock);
+    const runtime = await ReplayPremiereRuntimeCoordinator.createOrRecover({
+      gate,
+      drafts,
+      persistence: firstStore,
+      clock,
+      interactions,
+    });
+    await runtime.synchronize();
+    clock.advance(100);
+    await runtime.synchronize();
+    clock.advance(15_100);
+    await runtime.synchronize();
+    failSnapshot = true;
+    clock.advance(15_050);
+    await expect(runtime.synchronize()).rejects.toThrow(
+      /simulated reveal snapshot crash/,
+    );
+    expect(firstStore.recovered.events.at(-1)?.eventType).toBe(
+      "premiere_reveal_committed",
+    );
+    const eventCount = firstStore.recovered.events.length;
+    await closeTrackedStore(firstStore, stores);
+
+    const restartedStore = await openStore(root);
+    stores.push(restartedStore);
+    const restarted = await ReplayPremiereRuntimeCoordinator.createOrRecover({
+      gate,
+      drafts,
+      persistence: restartedStore,
+      clock,
+      interactions: createInteractions(gate, clock, interactions.readState()),
+    });
+    expect(restarted.readLifecycleState()).toBe("revealed");
+    expect(restartedStore.recovered.events).toHaveLength(eventCount);
+    const repairedSnapshot = await restartedStore.readSnapshot(gate.premiereId);
+    expect(repairedSnapshot).toMatchObject({
+      lastEventSequence: restartedStore.recovered.events.at(-1)?.eventSequence,
+      lastEventHash: restartedStore.recovered.events.at(-1)?.eventHash,
+    });
+  });
+
   test.each([
     {
       name: "an unknown lifecycle state",
@@ -321,6 +529,97 @@ describe("ReplayPremiereRuntimeCoordinator", () => {
         interactions: createInteractions(gate, clock),
       }),
     ).rejects.toBeDefined();
+  });
+
+  test("rejects a hash-valid relabelled initialization event", async () => {
+    const { gate, drafts } = await verifiedPublicationFixture(root);
+    const clock = new FakeClock(NOW);
+    const store = await openStore(root);
+    stores.push(store);
+    await ReplayPremiereRuntimeCoordinator.createOrRecover({
+      gate,
+      drafts,
+      persistence: store,
+      clock,
+      interactions: createInteractions(gate, clock),
+    });
+    const event = structuredClone(store.recovered.events[0]);
+    event.eventType = "premiere_runtime_cancelled";
+    rehashStoredEvent(event);
+    const persistence = persistenceForEvents(store.recovered, [event]);
+
+    await expect(
+      ReplayPremiereRuntimeCoordinator.createOrRecover({
+        gate,
+        drafts,
+        persistence,
+        clock,
+        interactions: createInteractions(gate, clock),
+      }),
+    ).rejects.toMatchObject({
+      operatorCode: "premiere_runtime_cancel_event_transition_mismatch",
+    });
+  });
+
+  test("rejects a hash-valid scheduled-to-archived recovery jump", async () => {
+    const { gate, drafts } = await verifiedPublicationFixture(root);
+    const clock = new FakeClock(NOW);
+    const store = await openStore(root);
+    stores.push(store);
+    await ReplayPremiereRuntimeCoordinator.createOrRecover({
+      gate,
+      drafts,
+      persistence: store,
+      clock,
+      interactions: createInteractions(gate, clock),
+    });
+    const initialized = structuredClone(store.recovered.events[0]);
+    const occurredAt = new Date(NOW.getTime() + 1_000).toISOString();
+    const archivedState = structuredClone(initialized.payload) as unknown as {
+      lifecycle: {
+        state: string;
+        terminalReasonCode: string | null;
+        version: number;
+        updatedAt: string;
+      };
+      lastObservedAt: string;
+    };
+    archivedState.lifecycle.state = "archived";
+    archivedState.lifecycle.terminalReasonCode = "cancelled_by_operator";
+    archivedState.lifecycle.version += 1;
+    archivedState.lifecycle.updatedAt = occurredAt;
+    archivedState.lastObservedAt = occurredAt;
+    const archived: StoredReplayPremiereEvent = {
+      ...initialized,
+      eventSequence: initialized.eventSequence + 1,
+      eventId: "00000000-0000-4000-8000-000000000001",
+      eventType: "premiere_runtime_terminal_archived",
+      occurredAt,
+      payload: archivedState as unknown as ReplayPremiereJsonValue,
+      idempotencyKey: `runtime:archive:${gate.publicationCommitmentHash}`,
+      idempotencyStateHash: hashReplayPremiereJson(
+        archivedState as unknown as ReplayPremiereJsonValue,
+      ),
+      previousEventHash: initialized.eventHash,
+      eventHash: "",
+    };
+    rehashStoredEvent(archived);
+    const persistence = persistenceForEvents(store.recovered, [
+      initialized,
+      archived,
+    ]);
+
+    await expect(
+      ReplayPremiereRuntimeCoordinator.createOrRecover({
+        gate,
+        drafts,
+        persistence,
+        clock,
+        interactions: createInteractions(gate, clock),
+      }),
+    ).rejects.toMatchObject({
+      operatorCode: "premiere_runtime_archive_event_transition_mismatch",
+    });
   });
 
   test("rejects a self-consistent snapshot that contradicts its anchored event", async () => {
@@ -369,7 +668,12 @@ describe("ReplayPremiereRuntimeCoordinator", () => {
   });
 });
 
-async function openStore(root: string): Promise<ReplayPremiereEventStore> {
+async function openStore(
+  root: string,
+  overrides: Partial<
+    Pick<Parameters<typeof ReplayPremiereEventStore.open>[0], "snapshotWrite">
+  > = {},
+): Promise<ReplayPremiereEventStore> {
   const servedRoot = path.join(root, "served");
   await fs.mkdir(servedRoot, { recursive: true });
   return ReplayPremiereEventStore.open({
@@ -382,7 +686,16 @@ async function openStore(root: string): Promise<ReplayPremiereEventStore> {
       maxSnapshotBytes: 5_000_000,
       maxPrivateStateBytes: 50_000_000,
     },
+    ...overrides,
   });
+}
+
+async function closeTrackedStore(
+  store: ReplayPremiereEventStore,
+  stores: ReplayPremiereEventStore[],
+): Promise<void> {
+  await store.close();
+  stores.splice(stores.indexOf(store), 1);
 }
 
 function createInteractions(
@@ -403,6 +716,21 @@ function createInteractions(
     now: () => clock.now(),
     admitAnonymousWrite: () => undefined,
     initialState,
+  });
+}
+
+function allSeatsProjection(
+  gate: Awaited<ReturnType<typeof verifiedPublicationFixture>>["gate"],
+) {
+  const definition = gate.publicDefinition();
+  const optionSeatIds = definition.provenance.seats.map((seat) => seat.seatId);
+  return freezeReplayPremiereCheckpointProjection({
+    premiereId: gate.premiereId,
+    publicationCommitmentHash: gate.publicationCommitmentHash,
+    checkpoints: [
+      { ...definition.checkpoints[0], optionSeatIds },
+      { ...definition.checkpoints[1], optionSeatIds },
+    ],
   });
 }
 
@@ -455,4 +783,37 @@ function readOnlyRuntimePersistence(
       throw new Error("unexpected recovery write");
     },
   };
+}
+
+function rehashStoredEvent(event: StoredReplayPremiereEvent): void {
+  const { eventHash: _discarded, ...preimage } = event;
+  event.eventHash = hashReplayPremiereJson(
+    preimage as unknown as ReplayPremiereJsonValue,
+  );
+}
+
+function persistenceForEvents(
+  original: ReplayPremiereEventRecovery,
+  events: StoredReplayPremiereEvent[],
+): ReplayPremiereRuntimePersistence {
+  const latest = events.at(-1)!;
+  const snapshot: ReplayPremiereSnapshot = {
+    schemaVersion: 1,
+    snapshotKind: "replay_premiere_aggregate",
+    aggregateId: latest.aggregateId,
+    lastEventSequence: latest.eventSequence,
+    lastEventHash: latest.eventHash,
+    state: latest.payload,
+    stateHash: hashReplayPremiereJson(latest.payload),
+    writtenAt: latest.occurredAt,
+  };
+  return readOnlyRuntimePersistence(
+    {
+      ...original,
+      events,
+      lastEventSequence: latest.eventSequence,
+      lastEventHash: latest.eventHash,
+    },
+    snapshot,
+  );
 }

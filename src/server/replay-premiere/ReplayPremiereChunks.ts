@@ -20,6 +20,12 @@ import {
   type ReplayPremiereJsonValue,
 } from "./ReplayPremiereIntegrity";
 
+// Runtime events retain the released descriptor prefix for append-only
+// recovery. Keep the V1 ceiling conservative enough for the 64 MiB
+// per-premiere journal even when every permitted lifecycle version records an
+// outage begin/recovery pair with the full descriptor prefix.
+export const REPLAY_PREMIERE_MAX_CHUNK_COUNT = 128;
+
 export interface BuildPremiereChunksOptions {
   premiereId: string;
   records: PremiereSourceRecord[];
@@ -36,16 +42,19 @@ export function buildPremiereChunks(
 ): PremiereChunkDraft[] {
   validateBuildOptions(options);
   const checkpointSequences = new Set(options.checkpointSequences);
-  const releasedRecords = options.records.map((record) =>
-    normalizeSourceRecord(record, options.playbackRate),
-  );
   const chunks: PremiereChunkDraft[] = [];
   let pending: PremiereReleasedRecord[] = [];
+  const emptyPayloadBytes = payloadBytes({
+    schemaVersion: 1,
+    records: [],
+  }).byteLength;
+  let pendingPayloadBytes = emptyPayloadBytes;
   let previousPrepublicationHash: string | null = null;
   let totalBytes = 0;
 
   const flush = (terminal = false): void => {
     if (pending.length === 0) return;
+    assertChunkCountWithinCeiling(chunks.length + 1);
     const chunk = createChunk(
       options.premiereId,
       chunks.length,
@@ -63,30 +72,28 @@ export function buildPremiereChunks(
     chunks.push(chunk);
     previousPrepublicationHash = chunk.descriptor.prepublicationHash;
     pending = [];
+    pendingPayloadBytes = emptyPayloadBytes;
   };
 
-  for (const record of releasedRecords) {
-    const candidate = [...pending, record];
-    const candidateBytes = payloadBytes({
-      schemaVersion: 1,
-      records: candidate,
-    }).byteLength;
+  for (const sourceRecord of options.records) {
+    const record = normalizeSourceRecord(sourceRecord, options.playbackRate);
+    const recordBytes = canonicalReleasedRecordByteLength(record);
+    const candidateBytes =
+      pendingPayloadBytes + recordBytes + (pending.length === 0 ? 0 : 1);
     if (
       pending.length > 0 &&
-      (candidate.length > options.maxRecordsPerChunk ||
+      (pending.length + 1 > options.maxRecordsPerChunk ||
         candidateBytes > options.maxChunkBytes ||
-        presentationSpanMs(candidate) > options.maxPresentationSpanMs)
+        record.presentationOffsetMs - pending[0].presentationOffsetMs >
+          options.maxPresentationSpanMs)
     ) {
       flush();
     }
     pending.push(record);
-    const singleOrPendingBytes = payloadBytes({
-      schemaVersion: 1,
-      records: pending,
-    }).byteLength;
+    pendingPayloadBytes += recordBytes + (pending.length === 1 ? 0 : 1);
     if (
       pending.length > options.maxRecordsPerChunk ||
-      singleOrPendingBytes > options.maxChunkBytes ||
+      pendingPayloadBytes > options.maxChunkBytes ||
       presentationSpanMs(pending) > options.maxPresentationSpanMs
     ) {
       throw capacityError("single_record_exceeds_chunk_ceiling");
@@ -112,6 +119,7 @@ export function verifyPremiereChunkChain(
     maxPresentationSpanMs?: number;
   } = {},
 ): void {
+  assertChunkCountWithinCeiling(chunks.length);
   let previousDescriptor: PremiereChunkDescriptor | null = null;
   for (const chunk of chunks) {
     const { descriptor, payload } = chunk;
@@ -206,6 +214,7 @@ export function verifyPremiereChunkDraftChain(
     maxPresentationSpanMs?: number;
   } = {},
 ): void {
+  assertChunkCountWithinCeiling(chunks.length);
   let previousDescriptor: PremiereChunkDraft["descriptor"] | null = null;
   for (const chunk of chunks) {
     const { descriptor, payload } = chunk;
@@ -247,6 +256,12 @@ export function verifyPremiereChunkDraftChain(
     checkpointSequences,
     options.allowPartialChain === true,
   );
+}
+
+function assertChunkCountWithinCeiling(count: number): void {
+  if (count > REPLAY_PREMIERE_MAX_CHUNK_COUNT) {
+    throw capacityError("chunk_count_ceiling_exceeded");
+  }
 }
 
 export function premiereChunkContentPath(chunkHash: string): string {
@@ -361,7 +376,6 @@ function normalizeSourceRecord(
   record: PremiereSourceRecord,
   playbackRate: PremierePlaybackRate,
 ): PremiereReleasedRecord {
-  assertReplayPremiereJsonValue(record.payload, "premiere replay record");
   assertNoOutcomeBearingReplayFields(record.payload);
   return {
     sequence: record.sequence,
@@ -372,6 +386,23 @@ function normalizeSourceRecord(
       "premiere replay record payload",
     ),
   };
+}
+
+/**
+ * Canonical payload JSON is `{"records":[...],"schemaVersion":1}`. Measuring
+ * each accepted record once plus the exact comma delimiters is therefore
+ * byte-for-byte equivalent to serializing the growing candidate array, while
+ * avoiding quadratic work for long dense replays. `createChunk` still
+ * canonicalizes the complete payload and binds the resulting bytes to the
+ * descriptor hash before any draft can leave this module.
+ */
+function canonicalReleasedRecordByteLength(
+  record: PremiereReleasedRecord,
+): number {
+  return Buffer.byteLength(
+    canonicalReplayPremiereJson(record as unknown as ReplayPremiereJsonValue),
+    "utf8",
+  );
 }
 
 function validateBuildOptions(options: BuildPremiereChunksOptions): void {

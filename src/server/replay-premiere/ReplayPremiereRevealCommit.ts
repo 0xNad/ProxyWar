@@ -1,5 +1,8 @@
 import { verifyPremiereChunkChain } from "./ReplayPremiereChunks";
-import type { ReleasedPremiereChunk } from "./ReplayPremiereContracts";
+import type {
+  PremiereChunkDraft,
+  ReleasedPremiereChunk,
+} from "./ReplayPremiereContracts";
 import { ReplayPremiereError } from "./ReplayPremiereErrors";
 import type {
   ReplayPremiereEventInput,
@@ -76,7 +79,8 @@ interface RevealCommitPayload {
   publicationCommitmentHash: string;
   lifecycle: PremiereLifecycleSnapshot;
   transitionAuditEvent: PremiereTransitionAuditEvent;
-  releasedPrefix: PremierePublicChunkResponse[];
+  releasedPrefixChunkCount: number;
+  releasedPrefixLastChunkHash: string | null;
   terminalChunk: PremierePublicChunkResponse;
   reveal: PremiereRevealResponse;
 }
@@ -194,7 +198,9 @@ export class ReplayPremiereAtomicPublication {
           publicationCommitmentHash: this.gate.publicationCommitmentHash,
           lifecycle: transition.snapshot,
           transitionAuditEvent: transition.auditEvent,
-          releasedPrefix: publishedChunks,
+          releasedPrefixChunkCount: publishedChunks.length,
+          releasedPrefixLastChunkHash:
+            publishedChunks.at(-1)?.chunkHash ?? null,
           terminalChunk,
           reveal,
         } satisfies RevealCommitPayload,
@@ -239,10 +245,13 @@ export function recoverCommittedReveal(
   events: readonly StoredReplayPremiereEvent[],
   premiereId: string,
   gate: VerifiedPremiereEligibilityGate,
+  lockedLifecycle: PremiereLifecycleSnapshot,
+  releasedPrefixDescriptors: readonly PremierePublicChunkDescriptor[],
+  drafts: readonly PremiereChunkDraft[],
 ): {
   lifecycle: PremiereLifecycleSnapshot;
   terminalChunk: PremierePublicChunkResponse;
-  releasedChunks: PremierePublicChunkResponse[];
+  releasedChunks: readonly PremierePublicChunkResponse[];
   reveal: PremiereRevealResponse;
   pointer: PremiereRevealPointerResponse;
 } | null {
@@ -261,10 +270,20 @@ export function recoverCommittedReveal(
   if (candidates.length !== 1) {
     throw integrityCommit("duplicate_reveal_commit_events");
   }
+  assertValidPremiereLifecycleSnapshot(lockedLifecycle);
+  if (
+    lockedLifecycle.state !== "playing" ||
+    !gate.matchesLifecycleBinding(lockedLifecycle)
+  ) {
+    throw integrityCommit("recovery_locked_lifecycle_mismatch");
+  }
   const event = candidates[0];
   validateStoredRevealEvent(event);
   const payload = parseRevealCommitPayload(event.payload);
-  const releasedPrefix = payload.releasedPrefix.map(releasedChunkFromPublic);
+  const releasedPrefix = recoverReleasedPrefixFromDescriptors(
+    releasedPrefixDescriptors,
+    drafts,
+  );
   const terminal = releasedChunkFromPublic(payload.terminalChunk);
   gate.recoverReleasedChainForReveal([...releasedPrefix, terminal]);
   gate.assertReleasedChunk(terminal);
@@ -284,18 +303,24 @@ export function recoverCommittedReveal(
     payload.publicationCommitmentHash !== gate.publicationCommitmentHash ||
     !gate.matchesLifecycleBinding(payload.lifecycle) ||
     payload.lifecycle.state !== "revealed" ||
+    payload.lifecycle.version !== lockedLifecycle.version + 1 ||
+    payload.lifecycle.createdAt !== lockedLifecycle.createdAt ||
+    payload.lifecycle.eligibilityRecordHash !==
+      lockedLifecycle.eligibilityRecordHash ||
+    payload.lifecycle.publicationCommitmentHash !==
+      lockedLifecycle.publicationCommitmentHash ||
+    payload.lifecycle.sourceRunId !== lockedLifecycle.sourceRunId ||
+    payload.lifecycle.sourceReplaySha256 !==
+      lockedLifecycle.sourceReplaySha256 ||
     payload.lifecycle.lastSafeReleasedSequence !== gate.finalSequence ||
     payload.terminalChunk.premiereId !== premiereId ||
     !payload.terminalChunk.terminal ||
     payload.terminalChunk.endSequence !== gate.finalSequence ||
     payload.reveal.finalChunkHash !== payload.terminalChunk.chunkHash ||
     payload.reveal.finalChunkIndex !== payload.terminalChunk.index ||
-    payload.releasedPrefix.some(
-      (chunk, index) =>
-        chunk.terminal ||
-        chunk.index !== index ||
-        !sameJson(chunk.provenance, createPremierePublicProvenance(gate)),
-    ) ||
+    payload.releasedPrefixChunkCount !== releasedPrefixDescriptors.length ||
+    payload.releasedPrefixLastChunkHash !==
+      (releasedPrefixDescriptors.at(-1)?.chunkHash ?? null) ||
     !sameJson(
       payload.terminalChunk.provenance,
       createPremierePublicProvenance(gate),
@@ -310,16 +335,70 @@ export function recoverCommittedReveal(
   ) {
     throw integrityCommit("invalid_recovered_reveal_commit");
   }
-  return immutable(
-    {
-      lifecycle: payload.lifecycle,
-      terminalChunk: payload.terminalChunk,
-      releasedChunks: [...payload.releasedPrefix, payload.terminalChunk],
-      reveal: payload.reveal,
-      pointer: createPremiereRevealPointer(payload.reveal),
-    },
-    "recovered reveal",
-  );
+  const releasedChunks = Object.freeze([
+    ...releasedPrefix.map((chunk) =>
+      toPremierePublicChunkResponse(chunk, gate),
+    ),
+    payload.terminalChunk,
+  ]);
+  return Object.freeze({
+    lifecycle: payload.lifecycle,
+    terminalChunk: payload.terminalChunk,
+    releasedChunks,
+    reveal: payload.reveal,
+    pointer: createPremiereRevealPointer(payload.reveal),
+  });
+}
+
+function recoverReleasedPrefixFromDescriptors(
+  descriptors: readonly PremierePublicChunkDescriptor[],
+  drafts: readonly PremiereChunkDraft[],
+): ReleasedPremiereChunk[] {
+  return descriptors.map((descriptor, index) => {
+    assertExactKeys(descriptor as unknown as Record<string, unknown>, [
+      "premiereId",
+      "index",
+      "startSequence",
+      "endSequence",
+      "startTurn",
+      "endTurn",
+      "presentationOffsetMs",
+      "previousChunkHash",
+      "payloadHash",
+      "chunkHash",
+      "byteLength",
+      "terminal",
+      "releasedAt",
+    ]);
+    const draft = drafts[index];
+    if (
+      draft === undefined ||
+      descriptor.index !== index ||
+      descriptor.terminal ||
+      draft.descriptor.index !== index ||
+      draft.descriptor.terminal
+    ) {
+      throw integrityCommit("invalid_recovered_prefix_descriptor");
+    }
+    return {
+      descriptor: {
+        premiereId: descriptor.premiereId,
+        index: descriptor.index,
+        startSequence: descriptor.startSequence,
+        endSequence: descriptor.endSequence,
+        startTurn: descriptor.startTurn,
+        endTurn: descriptor.endTurn,
+        presentationOffsetMs: descriptor.presentationOffsetMs,
+        previousChunkHash: descriptor.previousChunkHash,
+        payloadHash: descriptor.payloadHash,
+        chunkHash: descriptor.chunkHash,
+        byteLength: descriptor.byteLength,
+        terminal: false,
+        releasedAt: descriptor.releasedAt,
+      },
+      payload: draft.payload,
+    };
+  });
 }
 
 function validateInitialPublicationView(
@@ -536,7 +615,8 @@ function parseRevealCommitPayload(
     "publicationCommitmentHash",
     "lifecycle",
     "transitionAuditEvent",
-    "releasedPrefix",
+    "releasedPrefixChunkCount",
+    "releasedPrefixLastChunkHash",
     "terminalChunk",
     "reveal",
   ]);
@@ -546,7 +626,11 @@ function parseRevealCommitPayload(
     !isSha256Hex(value.publicationCommitmentHash) ||
     !isRecord(value.lifecycle) ||
     !isRecord(value.transitionAuditEvent) ||
-    !Array.isArray(value.releasedPrefix) ||
+    typeof value.releasedPrefixChunkCount !== "number" ||
+    !Number.isSafeInteger(value.releasedPrefixChunkCount) ||
+    value.releasedPrefixChunkCount < 0 ||
+    (value.releasedPrefixLastChunkHash !== null &&
+      !isSha256Hex(value.releasedPrefixLastChunkHash)) ||
     !isRecord(value.terminalChunk) ||
     !isRecord(value.reveal)
   ) {

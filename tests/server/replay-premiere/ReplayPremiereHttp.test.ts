@@ -368,15 +368,21 @@ describe("ReplayPremiere HTTP adapter", () => {
     });
   });
 
-  test("uses authoritative archive state to reject every anonymous write with sanitized 410", async () => {
+  test("exposes a revealed archive pointer and rejects every anonymous write with sanitized 410", async () => {
     const harness = await httpHarness(root, true, {
       lifecycleState: "archived",
     });
     await harness.run(async (baseUrl) => {
+      expect(harness.runtime.readLifecycleState()).toBe("archived");
       const manifest = await fetch(
         `${baseUrl}/api/premieres/${PREMIERE_ID}/manifest`,
       ).then((response) => response.json());
       expect(manifest.state).toBe("archived");
+      const reveal = await fetch(
+        `${baseUrl}/api/premieres/${PREMIERE_ID}/reveal`,
+      );
+      expect(reveal.status).toBe(200);
+      expect(await reveal.json()).toMatchObject({ state: "revealed" });
       const paths = [
         "sessions",
         "predictions",
@@ -560,6 +566,7 @@ async function httpHarness(
     admissions,
     operatorErrors,
     interactions,
+    runtime: target.runtime,
     async run(action: (baseUrl: string) => Promise<void>): Promise<void> {
       const server = http.createServer(app);
       await new Promise<void>((resolve) =>

@@ -6,6 +6,7 @@ import {
   type ReplayPremiereAdmissionRecordV1,
   type ReplayPremiereCatalogLimits,
 } from "./ReplayPremiereCatalog";
+import type { ReplayPremiereCheckpointProjector } from "./ReplayPremiereCheckpointProjection";
 import { buildPremiereChunks } from "./ReplayPremiereChunks";
 import type {
   PremiereChunkDraft,
@@ -41,6 +42,7 @@ import {
   importControlledPremiereSourceForPublication,
   VerifiedPremiereEligibilityGate,
 } from "./ReplayPremierePublication";
+import { REPLAY_PREMIERE_V1_MAX_REVEAL_STORED_EVENT_BYTES } from "./ReplayPremiereRevealEnvelopeCapacity";
 import {
   ReplayPremiereRuntimeCoordinator,
   ReplayPremiereRuntimeRegistry,
@@ -58,7 +60,7 @@ const SAFE_DIAGNOSTIC_TARGET = /^[A-Za-z0-9._:-]+$/;
 
 export const DEFAULT_REPLAY_PREMIERE_EVENT_STORE_LIMITS: ReplayPremiereEventStoreLimits =
   Object.freeze({
-    maxEventBytes: 2 * 1024 * 1024,
+    maxEventBytes: REPLAY_PREMIERE_V1_MAX_REVEAL_STORED_EVENT_BYTES,
     maxAggregateEventBytes: 64 * 1024 * 1024,
     maxEventLogBytes: 128 * 1024 * 1024,
     maxSnapshotBytes: 16 * 1024 * 1024,
@@ -78,6 +80,7 @@ export interface ReplayPremiereProductionStartupOptions {
   security: ReplayPremiereGuestSecurity;
   httpRegistry: ReplayPremiereHttpRegistry;
   runtimeRegistry: ReplayPremiereRuntimeRegistry;
+  checkpointProjector: ReplayPremiereCheckpointProjector;
   catalogLimits?: ReplayPremiereCatalogLimits;
   eventStoreLimits?: ReplayPremiereEventStoreLimits;
   interactionLimits?: Partial<ReplayPremiereInteractionLimits>;
@@ -203,6 +206,8 @@ export async function startReplayPremiereProduction(
     emitDiagnostic(sanitizeDiagnostic(diagnostic));
   const catalogLimits =
     options.catalogLimits ?? DEFAULT_REPLAY_PREMIERE_CATALOG_LIMITS;
+  const eventStoreLimits =
+    options.eventStoreLimits ?? DEFAULT_REPLAY_PREMIERE_EVENT_STORE_LIMITS;
   const catalog = await ReplayPremiereAdmissionCatalog.open({
     privateStateRoot: options.privateStateRoot,
     servedRoots: options.servedRoots,
@@ -213,8 +218,7 @@ export async function startReplayPremiereProduction(
     eventStore = await ReplayPremiereEventStore.open({
       privateStateRoot: options.privateStateRoot,
       servedRoots: options.servedRoots,
-      limits:
-        options.eventStoreLimits ?? DEFAULT_REPLAY_PREMIERE_EVENT_STORE_LIMITS,
+      limits: eventStoreLimits,
       now: () => clock.now(),
     });
     const activeEventStore = eventStore;
@@ -265,7 +269,9 @@ export async function startReplayPremiereProduction(
             security: options.security,
             httpRegistry: options.httpRegistry,
             eventStore: activeEventStore,
+            eventStoreLimits,
             clock,
+            checkpointProjector: options.checkpointProjector,
             interactionLimits: options.interactionLimits,
             fence,
           });
@@ -338,7 +344,9 @@ async function assemblePremiereTarget(options: {
   security: ReplayPremiereGuestSecurity;
   httpRegistry: ReplayPremiereHttpRegistry;
   eventStore: ReplayPremiereEventStore;
+  eventStoreLimits: ReplayPremiereEventStoreLimits;
   clock: ReplayPremiereRuntimeClock;
+  checkpointProjector: ReplayPremiereCheckpointProjector;
   interactionLimits?: Partial<ReplayPremiereInteractionLimits>;
   fence: ReplayPremiereStartupOperationFence;
 }): Promise<AssembledPremiereTarget> {
@@ -408,6 +416,18 @@ async function assemblePremiereTarget(options: {
   ) {
     throw startupIntegrity("startup_publication_commitment_mismatch");
   }
+  if (
+    gate.requiredRevealEventBytes > options.eventStoreLimits.maxEventBytes ||
+    gate.requiredRevealEventBytes > options.eventStoreLimits.maxSnapshotBytes
+  ) {
+    throw startupCapacity("startup_reveal_capacity_incompatible");
+  }
+  assertStartupActive(options.fence.signal);
+  const checkpointProjection = await options.checkpointProjector.project({
+    gate,
+    drafts,
+    signal: options.fence.signal,
+  });
   assertStartupActive(options.fence.signal);
 
   const projection = recoveryProjection(
@@ -444,6 +464,7 @@ async function assemblePremiereTarget(options: {
   runtime = await ReplayPremiereRuntimeCoordinator.createOrRecover({
     gate,
     drafts,
+    checkpointProjection,
     persistence: options.eventStore,
     clock: options.clock,
     interactions: recoveredInteractions.interactions,
@@ -831,6 +852,15 @@ function startupIntegrity(
     409,
     "Replay Premiere startup target failed integrity validation",
     cause === undefined ? undefined : { cause },
+  );
+}
+
+function startupCapacity(operatorCodeValue: string): ReplayPremiereError {
+  return new ReplayPremiereError(
+    operatorCodeValue,
+    "PREMIERE_CAPACITY_EXCEEDED",
+    413,
+    "Replay Premiere startup capacity is incompatible with the admitted target",
   );
 }
 

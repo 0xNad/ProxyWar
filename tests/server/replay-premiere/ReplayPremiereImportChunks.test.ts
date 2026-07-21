@@ -6,10 +6,12 @@ import {
   buildPremiereChunks,
   isPremiereChunkReleaseDue,
   premiereChunkContentPath,
+  REPLAY_PREMIERE_MAX_CHUNK_COUNT,
   verifyPremiereChunkChain,
   verifyPremiereChunkDraftChain,
 } from "../../../src/server/replay-premiere/ReplayPremiereChunks";
 import { importPremiereReplay } from "../../../src/server/replay-premiere/ReplayPremiereImport";
+import { canonicalReplayPremiereJson } from "../../../src/server/replay-premiere/ReplayPremiereIntegrity";
 import {
   createPremierePublicBootstrap,
   toPremierePublicChunkResponse,
@@ -156,6 +158,105 @@ describe("ReplayPremiere import and chunks", () => {
     expect(() =>
       buildPremiereChunks({ ...options, maxPresentationSpanMs: 1_001 }),
     ).toThrow(/hard_maximum/);
+  });
+
+  test("preserves exact canonical byte boundaries for multibyte records", () => {
+    const records = Array.from({ length: 6 }, (_, sequence) => ({
+      sequence,
+      turn: sequence,
+      nominalOffsetMs: sequence,
+      payload: {
+        turnNumber: sequence,
+        intents: [],
+        hash: `${sequence}-界界`,
+      },
+    }));
+    const firstTwoPayload = {
+      schemaVersion: 1,
+      records: records.slice(0, 2).map((record) => ({
+        sequence: record.sequence,
+        turn: record.turn,
+        presentationOffsetMs: record.nominalOffsetMs,
+        payload: record.payload,
+      })),
+    };
+    const exactFirstTwoBytes = Buffer.byteLength(
+      canonicalReplayPremiereJson(firstTwoPayload),
+      "utf8",
+    );
+
+    const chunks = buildPremiereChunks({
+      premiereId: PREMIERE_ID,
+      records,
+      playbackRate: 1,
+      checkpointSequences: [2, 4],
+      maxChunkBytes: exactFirstTwoBytes,
+      maxTotalBytes: 1_000_000,
+      maxRecordsPerChunk: 20,
+      maxPresentationSpanMs: 1_000,
+    });
+
+    expect(chunks.map((chunk) => chunk.descriptor.endSequence)).toEqual([
+      1, 2, 4, 5,
+    ]);
+    expect(chunks[0].descriptor.byteLength).toBe(exactFirstTwoBytes);
+    verifyPremiereChunkDraftChain(chunks, [2, 4]);
+  });
+
+  test("builds a 57,000-turn dense source class comfortably inside the startup fence", () => {
+    const records = Array.from({ length: 57_000 }, (_, sequence) => ({
+      sequence,
+      turn: sequence,
+      nominalOffsetMs: sequence,
+      payload: { turnNumber: sequence, intents: [] },
+    }));
+    const startedAt = performance.now();
+    const chunks = buildPremiereChunks({
+      premiereId: PREMIERE_ID,
+      records,
+      playbackRate: 1,
+      checkpointSequences: [19_950, 37_050],
+      maxChunkBytes: 1_048_576,
+      maxTotalBytes: 128 * 1_048_576,
+      maxRecordsPerChunk: 1_000,
+      maxPresentationSpanMs: 1_000,
+    });
+    const elapsedMs = performance.now() - startedAt;
+
+    expect(chunks).toHaveLength(58);
+    expect(
+      chunks.some((chunk) => chunk.descriptor.endSequence === 19_950),
+    ).toBe(true);
+    expect(
+      chunks.some((chunk) => chunk.descriptor.endSequence === 37_050),
+    ).toBe(true);
+    expect(chunks.at(-1)?.descriptor.endSequence).toBe(56_999);
+    expect(elapsedMs).toBeLessThan(5_000);
+  }, 10_000);
+
+  test("rejects a draft manifest above the bounded chunk-count ceiling", () => {
+    const records = Array.from(
+      { length: REPLAY_PREMIERE_MAX_CHUNK_COUNT + 1 },
+      (_, sequence) => ({
+        sequence,
+        turn: sequence,
+        nominalOffsetMs: sequence,
+        payload: { turnNumber: sequence, intents: [] },
+      }),
+    );
+
+    expect(() =>
+      buildPremiereChunks({
+        premiereId: PREMIERE_ID,
+        records,
+        playbackRate: 1,
+        checkpointSequences: [1, 2],
+        maxChunkBytes: 1_000_000,
+        maxTotalBytes: 128_000_000,
+        maxRecordsPerChunk: 1,
+        maxPresentationSpanMs: 1_000,
+      }),
+    ).toThrow(/chunk_count_ceiling_exceeded/);
   });
 
   test("releases only after chunk end and severs mutable caller references", async () => {

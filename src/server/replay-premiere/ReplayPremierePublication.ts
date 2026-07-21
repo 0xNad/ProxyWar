@@ -9,6 +9,7 @@ import {
   type PremiereAuthoritativeResultBytes,
 } from "./ReplayPremiereAuthoritativeResult";
 import {
+  REPLAY_PREMIERE_MAX_CHUNK_COUNT,
   verifyPremiereChunkChain,
   verifyPremiereChunkDraftChain,
 } from "./ReplayPremiereChunks";
@@ -51,6 +52,7 @@ import {
 } from "./ReplayPremiereIntegrity";
 import { VerifiedReplayPremiereLeakAuditReceipt } from "./ReplayPremiereLeakAuditCollector";
 import { VerifiedStagedPremiereSourceBytes } from "./ReplayPremierePrivateStaging";
+import { assertReplayPremiereRevealEnvelopeCapacity } from "./ReplayPremiereRevealEnvelopeCapacity";
 
 const issuedEligibilityGates = new WeakSet<object>();
 const issuedTerminalChunks = new WeakSet<object>();
@@ -150,6 +152,7 @@ export function verifyPremierePublicationCommitment(
     commitment.finalSequence < 0 ||
     !Number.isSafeInteger(commitment.chunkCount) ||
     commitment.chunkCount < 1 ||
+    commitment.chunkCount > REPLAY_PREMIERE_MAX_CHUNK_COUNT ||
     !isSha256Hex(commitment.eligibilityRecordHash) ||
     !isSha256Hex(commitment.sourceReplaySha256) ||
     !isSha256Hex(commitment.gameStartInfoHash) ||
@@ -217,6 +220,7 @@ export function verifyPremiereRevealedDraftManifest(
   verifyPremierePublicationCommitment(commitment);
   const last = descriptors.at(-1);
   if (
+    descriptors.length > REPLAY_PREMIERE_MAX_CHUNK_COUNT ||
     descriptors.length !== commitment.chunkCount ||
     last === undefined ||
     last.terminal !== true ||
@@ -251,6 +255,7 @@ export class VerifiedPremiereEligibilityGate {
     private readonly commitmentValue: PremierePublicationCommitment,
     private readonly drafts: readonly PremiereChunkDraft[],
     private readonly result: PremiereAuthoritativeResultBytes,
+    private readonly revealEventByteRequirementValue: number,
   ) {
     issuedEligibilityGates.add(this);
     Object.freeze(this);
@@ -428,6 +433,18 @@ export class VerifiedPremiereEligibilityGate {
       },
       "premiere publication commitment",
     );
+    const authoritativeResult = encodePremiereAuthoritativeResult(
+      options.authoritativeResultBytes,
+    );
+    const revealEventByteRequirement =
+      assertReplayPremiereRevealEnvelopeCapacity({
+        eligibilityRecord: options.eligibilityRecord,
+        authoritativeResult,
+        publicationCommitment: commitment,
+        publicationDraftManifest: draftDescriptors,
+        terminalDraft: frozenDrafts[frozenDrafts.length - 1],
+        publicProvenance: provenance,
+      });
     return new VerifiedPremiereEligibilityGate(
       cloneAndFreezeReplayPremiereValue(
         options.eligibilityRecord,
@@ -440,7 +457,8 @@ export class VerifiedPremiereEligibilityGate {
       publicDefinition,
       commitment,
       frozenDrafts,
-      encodePremiereAuthoritativeResult(options.authoritativeResultBytes),
+      authoritativeResult,
+      revealEventByteRequirement,
     );
   }
 
@@ -482,6 +500,12 @@ export class VerifiedPremiereEligibilityGate {
   get maxPresentationSpanMs(): number {
     this.assertAuthentic();
     return this.commitmentValue.maxPresentationSpanMs;
+  }
+
+  /** Conservative full StoredReplayPremiereEvent JSONL bytes for reveal. */
+  get requiredRevealEventBytes(): number {
+    this.assertAuthentic();
+    return this.revealEventByteRequirementValue;
   }
 
   publicDefinition(): PremierePublicDefinition {

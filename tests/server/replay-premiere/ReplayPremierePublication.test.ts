@@ -22,6 +22,7 @@ import {
   VerifiedPremiereEligibilityGate,
   verifyPremierePublicationCommitment,
 } from "../../../src/server/replay-premiere/ReplayPremierePublication";
+import { REPLAY_PREMIERE_V1_MAX_REVEAL_STORED_EVENT_BYTES } from "../../../src/server/replay-premiere/ReplayPremiereRevealEnvelopeCapacity";
 import {
   authoritativeResultBytes,
   authoritativeResultValue,
@@ -45,6 +46,14 @@ describe("ReplayPremiere publication commitment", () => {
 
   afterEach(async () => {
     await fs.rm(root, { recursive: true, force: true });
+  });
+
+  test("exposes the admitted reveal event byte requirement", async () => {
+    const { gate } = await verifiedPublicationFixture(root);
+    expect(gate.requiredRevealEventBytes).toBeGreaterThan(0);
+    expect(gate.requiredRevealEventBytes).toBeLessThanOrEqual(
+      REPLAY_PREMIERE_V1_MAX_REVEAL_STORED_EVENT_BYTES,
+    );
   });
 
   test("rejects a separately valid A/B tail after the publication is frozen", async () => {
@@ -81,7 +90,7 @@ describe("ReplayPremiere publication commitment", () => {
   });
 
   test("binds long replay drafts record by record within the JSON node ceiling", () => {
-    const records = Array.from({ length: 13_000 }, (_, sequence) => ({
+    const records = Array.from({ length: 12_000 }, (_, sequence) => ({
       sequence,
       turn: sequence,
       nominalOffsetMs: sequence,
@@ -91,7 +100,7 @@ describe("ReplayPremiere publication commitment", () => {
       premiereId: PREMIERE_ID,
       records,
       playbackRate: 1,
-      checkpointSequences: [4_333, 8_666],
+      checkpointSequences: [3_999, 7_999],
       maxChunkBytes: 1_000_000,
       maxTotalBytes: 20_000_000,
       maxRecordsPerChunk: 100,
@@ -108,6 +117,128 @@ describe("ReplayPremiere publication commitment", () => {
     expect(replayPremiereDraftChunksMatch(drafts, altered)).toBe(false);
     expect(replayPremiereRecordsMatchDrafts(records, 1, altered)).toBe(false);
   });
+
+  test("verifies a 57,000-turn sparse-source publication gate comfortably inside the startup fence", async () => {
+    const turnCount = 57_000;
+    const checkpointSequences = [19_950, 37_050] as const;
+    const completedAt = new Date("2026-07-20T18:00:00.000Z");
+    const startedAt = new Date(completedAt.getTime() - turnCount);
+    const resultBytes = Buffer.from(
+      canonicalReplayPremiereJson(
+        authoritativeResultValue({
+          completedAt: completedAt.toISOString(),
+          turnCount,
+        }),
+      ),
+      "utf8",
+    );
+    const source = JSON.parse(
+      controlledSourceBytes().toString("utf8"),
+    ) as Record<string, any>;
+    const sparseTurns = [
+      { turnNumber: 0, intents: [] },
+      { turnNumber: 2, intents: [] },
+      { turnNumber: turnCount - 1, intents: [] },
+    ];
+    source.createdAt = completedAt.toISOString();
+    source.gameRecord.info.start = startedAt.getTime();
+    source.gameRecord.info.end = completedAt.getTime();
+    source.gameRecord.info.duration = turnCount;
+    source.gameRecord.info.num_turns = turnCount;
+    source.gameRecord.turns = sparseTurns;
+    source.replay = { turnCount, turnIntervalMs: 1 };
+    source.authoritativeResult.bytes = resultBytes.toString("base64");
+    source.authoritativeResult.sha256 = sha256Hex(resultBytes);
+    source.provenance.game.startedAt = startedAt.toISOString();
+    source.provenance.game.completedAt = completedAt.toISOString();
+    source.provenance.game.turnCount = turnCount;
+    const sourceBytes = Buffer.from(
+      canonicalReplayPremiereJson(source as ReplayPremiereJsonValue),
+      "utf8",
+    );
+    let eligibility = eligibilityFixture({ sourceBytes, resultBytes });
+    const assessmentOptions = eligibilityOptions(Buffer.alloc(32, 9));
+    const collectedLeakAudit = await collectFixtureLeakAudit(
+      eligibility,
+      assessmentOptions,
+    );
+    eligibility = collectedLeakAudit.eligibility;
+    const privateRoot = path.join(root, "private-source-class");
+    const servedRoot = path.join(root, "served-source-class");
+    const sourcePath = path.join(root, "controlled-source-class.source.json");
+    await fs.mkdir(servedRoot, { recursive: true });
+    await fs.writeFile(sourcePath, sourceBytes, { mode: 0o600 });
+    const staged = await stagePremiereSource({
+      sourceFilePath: sourcePath,
+      privateStateRoot: privateRoot,
+      servedRoots: [servedRoot],
+      maxSourceBytes: 2_000_000,
+      expectedSourceReplaySha256: eligibility.sourceReplaySha256,
+    });
+    const verifiedSource = await readVerifiedStagedPremiereSource({
+      stagedSource: staged,
+      privateStateRoot: privateRoot,
+      servedRoots: [servedRoot],
+      maxSourceBytes: 2_000_000,
+    });
+    const replayImportLimits = {
+      maxBootstrapBytes: 100_000,
+      maxTurnBytes: 100_000,
+      maxTurnRecords: turnCount,
+      maxTotalTurnBytes: 4_000_000,
+    };
+    const imported = importPremiereReplay(
+      {
+        gameStartInfo: gameStartInfo(),
+        turnCount,
+        turnIntervalMs: 1,
+        turns: sparseTurns.map((turn) => ({ turn })),
+      },
+      replayImportLimits,
+    );
+    const drafts = buildPremiereChunks({
+      premiereId: PREMIERE_ID,
+      records: imported.records,
+      playbackRate: 1,
+      checkpointSequences,
+      maxChunkBytes: 1_048_576,
+      maxTotalBytes: 128 * 1_048_576,
+      maxRecordsPerChunk: 1_000,
+      maxPresentationSpanMs: 1_000,
+    });
+    const eligibilityRecordHash = assessPremiereEligibility(
+      eligibility,
+      assessmentOptions,
+    ).eligibilityRecordHash;
+    const publicDefinition: ReturnType<typeof publicDefinitionFixture> = {
+      ...publicDefinitionFixture(eligibilityRecordHash, eligibility),
+      playbackRate: 1,
+      checkpoints: [
+        { id: "cp_00000001", sequence: checkpointSequences[0] },
+        { id: "cp_00000002", sequence: checkpointSequences[1] },
+      ],
+    };
+
+    const startedVerificationAt = performance.now();
+    const gate = VerifiedPremiereEligibilityGate.verify({
+      premiereId: PREMIERE_ID,
+      eligibilityRecord: eligibility,
+      eligibilityOptions: assessmentOptions,
+      leakAuditReceipt: collectedLeakAudit.receipt,
+      verifiedSource,
+      authoritativeResultBytes: resultBytes,
+      replayImportLimits,
+      publicDefinition,
+      draftChunks: drafts,
+      maxPresentationSpanMs: 1_000,
+    });
+    const verificationElapsedMs = performance.now() - startedVerificationAt;
+
+    expect(gate.finalSequence).toBe(turnCount - 1);
+    expect(gate.chunkCount).toBe(58);
+    expect(gate.requiredRevealEventBytes).toBeGreaterThan(0);
+    expect(verificationElapsedMs).toBeLessThan(5_000);
+  }, 10_000);
 
   test("rejects a verified but different staged source and commitment preimage mutation", async () => {
     const { gate, verificationOptions } =
@@ -388,5 +519,264 @@ describe("ReplayPremiere publication commitment", () => {
         /outside_allowlist|provenance|seat_player_binding|unknown_or_missing/,
       );
     }
+  });
+
+  test("rejects an independently admissible eligibility record and terminal chunk whose reveal envelope exceeds canonical JSON capacity", async () => {
+    const externalEvidenceCount = 7_500;
+    const terminalIntentCount = 19_000;
+    const terminalIntents = Array.from({ length: terminalIntentCount }, () => ({
+      type: "start_game" as const,
+      clientID: "SEAT0001",
+    }));
+    const source = JSON.parse(
+      controlledSourceBytes().toString("utf8"),
+    ) as Record<string, any>;
+    source.gameRecord.turns[2].intents = terminalIntents;
+    const sourceBytes = Buffer.from(
+      canonicalReplayPremiereJson(source as ReplayPremiereJsonValue),
+      "utf8",
+    );
+    let eligibility = eligibilityFixture({ sourceBytes });
+    const assessmentOptions = eligibilityOptions(Buffer.alloc(32, 9));
+    eligibility.externalEmbargoEvidence = Array.from(
+      { length: externalEvidenceCount },
+      () => ({
+        source: "controlled runner",
+        scope: "source and outcome",
+        observedAt: assessmentOptions.now.toISOString(),
+        verifier: "operator",
+        embargoConfirmed: true,
+      }),
+    );
+    const collectedLeakAudit = await collectFixtureLeakAudit(
+      eligibility,
+      assessmentOptions,
+    );
+    eligibility = collectedLeakAudit.eligibility;
+    const eligibilityAssessment = assessPremiereEligibility(
+      eligibility,
+      assessmentOptions,
+    );
+    expect(eligibilityAssessment.eligible).toBe(true);
+    const eligibilityRecordHash = eligibilityAssessment.eligibilityRecordHash;
+    const privateRoot = path.join(root, "private-capacity");
+    const servedRoot = path.join(root, "served-capacity");
+    const sourcePath = path.join(root, "controlled-capacity.source.json");
+    await fs.mkdir(servedRoot, { recursive: true });
+    await fs.writeFile(sourcePath, sourceBytes, { mode: 0o600 });
+    const staged = await stagePremiereSource({
+      sourceFilePath: sourcePath,
+      privateStateRoot: privateRoot,
+      servedRoots: [servedRoot],
+      maxSourceBytes: 4_000_000,
+      expectedSourceReplaySha256: eligibility.sourceReplaySha256,
+    });
+    const verifiedSource = await readVerifiedStagedPremiereSource({
+      stagedSource: staged,
+      privateStateRoot: privateRoot,
+      servedRoots: [servedRoot],
+      maxSourceBytes: 4_000_000,
+    });
+    const replayImportLimits = {
+      ...IMPORT_LIMITS,
+      maxTurnBytes: 2_000_000,
+      maxTotalTurnBytes: 4_000_000,
+    };
+    const imported = importPremiereReplay(
+      {
+        gameStartInfo: gameStartInfo(),
+        turnCount: 6,
+        turnIntervalMs: 100,
+        turns: [
+          { turn: { turnNumber: 0, intents: [] } },
+          { turn: { turnNumber: 2, intents: [] } },
+          { turn: { turnNumber: 5, intents: terminalIntents } },
+        ],
+      },
+      replayImportLimits,
+    );
+    const drafts = buildPremiereChunks({
+      premiereId: PREMIERE_ID,
+      records: imported.records,
+      playbackRate: 2,
+      checkpointSequences: [2, 4],
+      maxChunkBytes: 2_000_000,
+      maxTotalBytes: 4_000_000,
+      maxRecordsPerChunk: 20,
+      maxPresentationSpanMs: 1_000,
+    });
+    const terminalDraft = drafts.at(-1)!;
+    expect(terminalDraft.descriptor.terminal).toBe(true);
+
+    const eligibilityJson = canonicalReplayPremiereJson(
+      eligibility as unknown as ReplayPremiereJsonValue,
+    );
+    const terminalDraftJson = canonicalReplayPremiereJson(
+      terminalDraft as unknown as ReplayPremiereJsonValue,
+    );
+    expect(Buffer.byteLength(eligibilityJson, "utf8")).toBeGreaterThan(750_000);
+    expect(Buffer.byteLength(terminalDraftJson, "utf8")).toBeGreaterThan(
+      750_000,
+    );
+    expect(Buffer.byteLength(eligibilityJson, "utf8")).toBeLessThan(
+      REPLAY_PREMIERE_V1_MAX_REVEAL_STORED_EVENT_BYTES,
+    );
+    expect(Buffer.byteLength(terminalDraftJson, "utf8")).toBeLessThan(
+      REPLAY_PREMIERE_V1_MAX_REVEAL_STORED_EVENT_BYTES,
+    );
+
+    let rejected: unknown;
+    try {
+      VerifiedPremiereEligibilityGate.verify({
+        premiereId: PREMIERE_ID,
+        eligibilityRecord: eligibility,
+        eligibilityOptions: assessmentOptions,
+        leakAuditReceipt: collectedLeakAudit.receipt,
+        verifiedSource,
+        authoritativeResultBytes: authoritativeResultBytes(),
+        replayImportLimits,
+        publicDefinition: publicDefinitionFixture(
+          eligibilityRecordHash,
+          eligibility,
+        ),
+        draftChunks: drafts,
+        maxPresentationSpanMs: 1_000,
+      });
+    } catch (error) {
+      rejected = error;
+    }
+    expect(rejected).toMatchObject({
+      operatorCode: "reveal_envelope_json_complexity_exceeded",
+      publicCode: "PREMIERE_CAPACITY_EXCEEDED",
+      httpStatus: 413,
+    });
+  });
+
+  test("rejects a low-node reveal whose stored event exceeds the V1 byte ceiling", async () => {
+    const largeDisplayText = "界".repeat(256);
+    const largeAttackId = "界".repeat(64);
+    const terminalIntents = Array.from({ length: 4_500 }, () => ({
+      type: "cancel_attack" as const,
+      attackID: largeAttackId,
+      clientID: "SEAT0001",
+    }));
+    const source = JSON.parse(
+      controlledSourceBytes().toString("utf8"),
+    ) as Record<string, any>;
+    source.gameRecord.turns[2].intents = terminalIntents;
+    const sourceBytes = Buffer.from(
+      canonicalReplayPremiereJson(source as ReplayPremiereJsonValue),
+      "utf8",
+    );
+    let eligibility = eligibilityFixture({ sourceBytes });
+    const assessmentOptions = eligibilityOptions(Buffer.alloc(32, 9));
+    eligibility.externalEmbargoEvidence = Array.from({ length: 400 }, () => ({
+      source: largeDisplayText,
+      scope: largeDisplayText,
+      observedAt: assessmentOptions.now.toISOString(),
+      verifier: largeDisplayText,
+      embargoConfirmed: true,
+    }));
+    const collectedLeakAudit = await collectFixtureLeakAudit(
+      eligibility,
+      assessmentOptions,
+    );
+    eligibility = collectedLeakAudit.eligibility;
+    const eligibilityAssessment = assessPremiereEligibility(
+      eligibility,
+      assessmentOptions,
+    );
+    expect(eligibilityAssessment.eligible).toBe(true);
+    const privateRoot = path.join(root, "private-byte-capacity");
+    const servedRoot = path.join(root, "served-byte-capacity");
+    const sourcePath = path.join(root, "controlled-byte-capacity.source.json");
+    await fs.mkdir(servedRoot, { recursive: true });
+    await fs.writeFile(sourcePath, sourceBytes, { mode: 0o600 });
+    const staged = await stagePremiereSource({
+      sourceFilePath: sourcePath,
+      privateStateRoot: privateRoot,
+      servedRoots: [servedRoot],
+      maxSourceBytes: 4_000_000,
+      expectedSourceReplaySha256: eligibility.sourceReplaySha256,
+    });
+    const verifiedSource = await readVerifiedStagedPremiereSource({
+      stagedSource: staged,
+      privateStateRoot: privateRoot,
+      servedRoots: [servedRoot],
+      maxSourceBytes: 4_000_000,
+    });
+    const replayImportLimits = {
+      ...IMPORT_LIMITS,
+      maxTurnBytes: 4_000_000,
+      maxTotalTurnBytes: 6_000_000,
+    };
+    const imported = importPremiereReplay(
+      {
+        gameStartInfo: gameStartInfo(),
+        turnCount: 6,
+        turnIntervalMs: 100,
+        turns: [
+          { turn: { turnNumber: 0, intents: [] } },
+          { turn: { turnNumber: 2, intents: [] } },
+          { turn: { turnNumber: 5, intents: terminalIntents } },
+        ],
+      },
+      replayImportLimits,
+    );
+    const drafts = buildPremiereChunks({
+      premiereId: PREMIERE_ID,
+      records: imported.records,
+      playbackRate: 2,
+      checkpointSequences: [2, 4],
+      maxChunkBytes: 4_000_000,
+      maxTotalBytes: 6_000_000,
+      maxRecordsPerChunk: 20,
+      maxPresentationSpanMs: 1_000,
+    });
+    const terminalDraft = drafts.at(-1)!;
+    expect(terminalDraft.descriptor.terminal).toBe(true);
+
+    const eligibilityJson = canonicalReplayPremiereJson(
+      eligibility as unknown as ReplayPremiereJsonValue,
+    );
+    const terminalDraftJson = canonicalReplayPremiereJson(
+      terminalDraft as unknown as ReplayPremiereJsonValue,
+    );
+    expect(Buffer.byteLength(eligibilityJson, "utf8")).toBeGreaterThan(750_000);
+    expect(Buffer.byteLength(terminalDraftJson, "utf8")).toBeGreaterThan(
+      750_000,
+    );
+    expect(Buffer.byteLength(eligibilityJson, "utf8")).toBeLessThan(
+      REPLAY_PREMIERE_V1_MAX_REVEAL_STORED_EVENT_BYTES,
+    );
+    expect(Buffer.byteLength(terminalDraftJson, "utf8")).toBeLessThan(
+      REPLAY_PREMIERE_V1_MAX_REVEAL_STORED_EVENT_BYTES,
+    );
+
+    let rejected: unknown;
+    try {
+      VerifiedPremiereEligibilityGate.verify({
+        premiereId: PREMIERE_ID,
+        eligibilityRecord: eligibility,
+        eligibilityOptions: assessmentOptions,
+        leakAuditReceipt: collectedLeakAudit.receipt,
+        verifiedSource,
+        authoritativeResultBytes: authoritativeResultBytes(),
+        replayImportLimits,
+        publicDefinition: publicDefinitionFixture(
+          eligibilityAssessment.eligibilityRecordHash,
+          eligibility,
+        ),
+        draftChunks: drafts,
+        maxPresentationSpanMs: 1_000,
+      });
+    } catch (error) {
+      rejected = error;
+    }
+    expect(rejected).toMatchObject({
+      operatorCode: "reveal_event_byte_ceiling_exceeded",
+      publicCode: "PREMIERE_CAPACITY_EXCEEDED",
+      httpStatus: 413,
+    });
   });
 });

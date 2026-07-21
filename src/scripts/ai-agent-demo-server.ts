@@ -111,6 +111,7 @@ import {
   setHtmlNoCacheHeaders,
 } from "../server/RenderHtml";
 import { ReplayPremiereAnonymousWriteLimiter } from "../server/replay-premiere/ReplayPremiereAnonymousWriteLimiter";
+import { DeterministicReplayPremiereCheckpointProjector } from "../server/replay-premiere/ReplayPremiereCheckpointProjection";
 import {
   createReplayPremiereTrustedProxyAddressResolver,
   REPLAY_PREMIERE_LOOPBACK_PROXY_ADDRESSES,
@@ -208,6 +209,9 @@ const replayPremiereProduction = await startReplayPremiereProduction({
   security: replayPremiereGuestSecurity,
   httpRegistry: replayPremiereHttpRegistry,
   runtimeRegistry: replayPremiereRuntimeRegistry,
+  checkpointProjector: new DeterministicReplayPremiereCheckpointProjector(
+    path.join(process.cwd(), "resources", "maps"),
+  ),
   onDiagnostic: (diagnostic) => {
     console.error(
       `Replay Premiere recovery rejected ${diagnostic.target}: ${diagnostic.operatorCode}`,

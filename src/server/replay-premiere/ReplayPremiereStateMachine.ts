@@ -237,6 +237,7 @@ export function transitionPremiereLifecycle(
   if (occurredAtMs < Date.parse(current.updatedAt)) {
     throw invalidStateRequest("non_monotonic_transition_time");
   }
+  validateTransitionActor(request);
   const nextState = allowedTransitions[current.state][request.action];
   if (nextState === undefined) {
     throw invalidStateRequest(
@@ -274,6 +275,7 @@ export function transitionPremiereLifecycle(
     version: current.version + 1,
     updatedAt: request.occurredAt,
   };
+  validateLifecycleSnapshot(snapshot);
   return {
     snapshot,
     auditEvent: {
@@ -294,6 +296,18 @@ export function transitionPremiereLifecycle(
       lastSafeReleasedSequence: snapshot.lastSafeReleasedSequence,
     },
   };
+}
+
+function validateTransitionActor(request: PremiereTransitionRequest): void {
+  const actorPermitted =
+    request.action === "fail" || request.action === "archive"
+      ? request.actor === "operator" || request.actor === "service"
+      : request.action === "publish" || request.action === "cancel"
+        ? request.actor === "operator"
+        : request.actor === "service";
+  if (!actorPermitted) {
+    throw invalidStateRequest(`unauthorized_${request.action}_actor`);
+  }
 }
 
 export function recordSafeReleasedSequence(
@@ -366,7 +380,28 @@ function validateTransitionPreconditions(
       }
       return;
     case "fail":
+      if (
+        request.reasonCode !== "integrity_failure" &&
+        request.reasonCode !== "outage_exceeded" &&
+        request.reasonCode !== "runtime_failure"
+      ) {
+        throw invalidStateRequest("invalid_failure_reason");
+      }
+      return;
     case "cancel":
+      if (
+        request.reasonCode !== "cancelled_by_operator" &&
+        request.reasonCode !== "source_ineligible"
+      ) {
+        throw invalidStateRequest("invalid_cancellation_reason");
+      }
+      if (
+        request.reasonCode === "source_ineligible" &&
+        current.state !== "draft"
+      ) {
+        throw invalidStateRequest("source_ineligible_after_publish");
+      }
+      return;
     case "open_checkpoint":
     case "resume":
     case "archive":
@@ -478,24 +513,48 @@ function validateLifecycleSnapshot(snapshot: PremiereLifecycleSnapshot): void {
       (snapshot.terminalReasonCode === null ||
         !failureReasons.includes(snapshot.terminalReasonCode))) ||
     (snapshot.state === "cancelled" &&
-      (hasBinding ||
-        snapshot.lastSafeReleasedSequence !== -1 ||
+      (snapshot.lastSafeReleasedSequence !== -1 ||
         snapshot.terminalReasonCode === null ||
-        !cancellationReasons.includes(snapshot.terminalReasonCode))) ||
+        !cancellationReasons.includes(snapshot.terminalReasonCode) ||
+        (snapshot.terminalReasonCode === "source_ineligible" && hasBinding))) ||
     ((snapshot.state === "playing" || snapshot.state === "checkpoint") &&
       snapshot.terminalReasonCode !== null) ||
     (snapshot.state === "archived" &&
-      !(
-        (hasCompleteBinding &&
-          (snapshot.terminalReasonCode === null ||
-            failureReasons.includes(snapshot.terminalReasonCode))) ||
-        (!hasBinding &&
-          snapshot.terminalReasonCode !== null &&
-          cancellationReasons.includes(snapshot.terminalReasonCode))
-      ))
+      !isValidArchivedSemantics({
+        hasBinding,
+        hasCompleteBinding,
+        lastSafeReleasedSequence: snapshot.lastSafeReleasedSequence,
+        terminalReasonCode: snapshot.terminalReasonCode,
+        failureReasons,
+      }))
   ) {
     throw invalidStateRequest("invalid_lifecycle_state_semantics");
   }
+}
+
+function isValidArchivedSemantics(options: {
+  hasBinding: boolean;
+  hasCompleteBinding: boolean;
+  lastSafeReleasedSequence: number;
+  terminalReasonCode: PremiereTerminalReasonCode | null;
+  failureReasons: readonly PremiereTerminalReasonCode[];
+}): boolean {
+  if (options.terminalReasonCode === null) {
+    return options.hasCompleteBinding && options.lastSafeReleasedSequence >= 0;
+  }
+  if (options.failureReasons.includes(options.terminalReasonCode)) {
+    return options.hasCompleteBinding;
+  }
+  if (options.terminalReasonCode === "source_ineligible") {
+    return !options.hasBinding && options.lastSafeReleasedSequence === -1;
+  }
+  if (options.terminalReasonCode === "cancelled_by_operator") {
+    return (
+      (!options.hasBinding || options.hasCompleteBinding) &&
+      options.lastSafeReleasedSequence === -1
+    );
+  }
+  return false;
 }
 
 export function assertValidPremiereLifecycleSnapshot(

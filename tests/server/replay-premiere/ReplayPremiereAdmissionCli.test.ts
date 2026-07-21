@@ -157,6 +157,11 @@ describe("Replay Premiere operator admission command", () => {
       }),
       httpRegistry,
       runtimeRegistry,
+      checkpointProjector: {
+        async project() {
+          throw new Error("unexpected projection without an admission");
+        },
+      },
       clock: { now: () => NOW },
     });
     try {

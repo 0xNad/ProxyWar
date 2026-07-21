@@ -177,8 +177,50 @@ recorded. Local green tests do not grant release authority.
   and reconnect proof, public-edge leak checks, mobile/ambient evidence, exact
   release commit identity, deployment, and rollback verification are still
   missing. The live site remains on the pre-Premiere release.
-- Storage remains below release admission: after deleting only rebuildable UV
-  cache and verified no-handle temporary build residue, available space is about
-  19 GiB. No replay, artifact, output, Docker state, branch, worktree, or active
-  runtime was deleted. A new managed worktree remains prohibited below the
-  fixed 27 GiB threshold.
+- Archive presentation is now an explicit contract rather than an inferred UI
+  behavior. A revealed archive exposes an `archived` reveal pointer. Failed or
+  cancelled archives keep their sanitized pre-reveal terminal presentation and
+  no reveal, while the authoritative lifecycle is `archived` for append-only
+  audit and early `410` rejection of prediction, marker, and other anonymous
+  writes. Focused production-startup/HTTP and coordinator tests cover both
+  branches.
+- Storage remains below release admission: the current verified available space
+  is 27,252,664 KiB (about 26.0 GiB). No replay, artifact, output, Docker state,
+  branch, worktree, or active runtime was deleted. A new managed worktree
+  remains prohibited below the fixed 27 GiB threshold.
+
+### 2026-07-21 03:13 Europe/Lisbon — release hardening and source-B startup
+
+- Runtime persistence now retains immutable chunk descriptors rather than full
+  released payloads, reconstructs and authenticates chunks from the verified
+  admission, bounds outage history to one begin/recovery pair per lifecycle
+  version, repairs an event-durable stale snapshot on restart, and validates
+  exact event type, transition, lifecycle, idempotency, and terminal ordering.
+- The V1 chunk ceiling is 128. A production-JSONL worst-case model exercises
+  395 events on both terminal branches with 64 maximum-length seats, both
+  checkpoints, and every permitted outage pair. The larger reveal/archive
+  history consumes 21,376,436 bytes, leaving 45,732,428 bytes below the 64 MiB
+  aggregate ceiling; its largest stored reveal event is exactly 2 MiB.
+- Checkpoint options are projected from the real deterministic `GameRunner` and
+  tracked filesystem maps, preserve provenance order, require at least two
+  spawned/alive seats, verify archived hashes, and honor the startup abort
+  fence. The exact host is a launchd Node/tsx service with `GAME_ENV=dev` and
+  repository maps present; the Docker image remains a future portability risk.
+- An authentic disposable run of controlled source B, SHA-256
+  `951757aa3768de64437ea23eb47f661631db5faaa677c943e017b91adc7fd95a`,
+  initially exposed quadratic growing-chunk serialization: admission took
+  172,689 ms and startup took 86,862 ms and quarantined on the 10-second fence.
+  Exact incremental canonical byte accounting reduced admission to 2,131 ms
+  and production-equivalent startup to 2,309 ms; the real projector registered
+  the premiere with zero diagnostics. Direct checkpoint projection took
+  633.9 ms with two eligible options at both checkpoints.
+- Current verification passes: Replay Premiere 23 files and 189 tests; full
+  root 228 files and 2,275 tests; dedicated server 119 files and 1,173 tests;
+  TypeScript; production build; Prettier; and full lint with zero errors and 110
+  inherited warnings. `git diff --check` is clean and no `src/core/**` file
+  changed.
+- The exact live private journal is zero bytes and has no prior admission or
+  snapshot, so this cutover has no older V1 runtime/reveal payload to migrate.
+  Admission, commit identity, live restart, public-edge checks, two-browser UX,
+  reveal, and archive proof remain pending and are not implied by these local
+  results.

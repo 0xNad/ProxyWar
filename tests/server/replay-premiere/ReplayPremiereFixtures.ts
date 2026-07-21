@@ -44,6 +44,47 @@ export const IMPORT_LIMITS = {
   maxTotalTurnBytes: 1_000_000,
 };
 
+export const LONG_REPLAY_TURN_COUNT = 15_000;
+export const LONG_REPLAY_TURN_INTERVAL_MS = 1;
+export const LONG_REPLAY_CHECKPOINT_SEQUENCES = [5_000, 10_000] as const;
+export const LONG_REPLAY_IMPORT_LIMITS = {
+  maxBootstrapBytes: 100_000,
+  maxTurnBytes: 100_000,
+  maxTurnRecords: LONG_REPLAY_TURN_COUNT,
+  maxTotalTurnBytes: 1_000_000,
+} as const;
+export const LONG_REPLAY_CHUNK_LIMITS = {
+  maxChunkBytes: 100_000,
+  maxTotalBytes: 2_000_000,
+  maxRecordsPerChunk: 200,
+  maxPresentationSpanMs: 200,
+} as const;
+
+interface MutableControlledSourceFixture {
+  createdAt: string;
+  gameRecord: {
+    info: {
+      start: number;
+      end: number;
+      duration: number;
+      num_turns: number;
+    };
+    turns: Array<{ turnNumber: number; intents: [] }>;
+  };
+  replay: { turnCount: number; turnIntervalMs: number };
+  authoritativeResult: {
+    bytes: string;
+    sha256: string;
+  };
+  provenance: {
+    game: {
+      startedAt: string;
+      completedAt: string;
+      turnCount: number;
+    };
+  };
+}
+
 export function gameStartInfo(): Record<string, unknown> {
   return {
     gameID: "PREM0001",
@@ -226,6 +267,60 @@ export function controlledSourceBytes(): Buffer {
     },
   };
   return Buffer.from(canonicalReplayPremiereJson(bundle), "utf8");
+}
+
+function longControlledSourceMaterial(): {
+  sourceBytes: Buffer;
+  resultBytes: Buffer;
+  sparseTurns: Array<{ turn: { turnNumber: number; intents: [] } }>;
+} {
+  const completedAt = NOW.toISOString();
+  const startedAt = new Date(
+    NOW.getTime() - LONG_REPLAY_TURN_COUNT * LONG_REPLAY_TURN_INTERVAL_MS,
+  ).toISOString();
+  const resultBytes = Buffer.from(
+    canonicalReplayPremiereJson(
+      authoritativeResultValue({
+        completedAt,
+        turnCount: LONG_REPLAY_TURN_COUNT,
+      }),
+    ),
+    "utf8",
+  );
+  const source = JSON.parse(
+    controlledSourceBytes().toString("utf8"),
+  ) as MutableControlledSourceFixture;
+  const turns = [
+    { turnNumber: 0, intents: [] as [] },
+    { turnNumber: 2, intents: [] as [] },
+    { turnNumber: LONG_REPLAY_TURN_COUNT - 1, intents: [] as [] },
+  ];
+
+  source.createdAt = completedAt;
+  source.gameRecord.info.start = Date.parse(startedAt);
+  source.gameRecord.info.end = NOW.getTime();
+  source.gameRecord.info.duration =
+    LONG_REPLAY_TURN_COUNT * LONG_REPLAY_TURN_INTERVAL_MS;
+  source.gameRecord.info.num_turns = LONG_REPLAY_TURN_COUNT;
+  source.gameRecord.turns = turns;
+  source.replay = {
+    turnCount: LONG_REPLAY_TURN_COUNT,
+    turnIntervalMs: LONG_REPLAY_TURN_INTERVAL_MS,
+  };
+  source.authoritativeResult.bytes = resultBytes.toString("base64");
+  source.authoritativeResult.sha256 = sha256Hex(resultBytes);
+  source.provenance.game.startedAt = startedAt;
+  source.provenance.game.completedAt = completedAt;
+  source.provenance.game.turnCount = LONG_REPLAY_TURN_COUNT;
+
+  return {
+    sourceBytes: Buffer.from(
+      canonicalReplayPremiereJson(source as unknown as ReplayPremiereJsonValue),
+      "utf8",
+    ),
+    resultBytes,
+    sparseTurns: turns.map((turn) => ({ turn })),
+  };
 }
 
 export function eligibilityFixture(
@@ -440,6 +535,103 @@ export async function verifiedPublicationFixture(
   } satisfies Parameters<typeof VerifiedPremiereEligibilityGate.verify>[0];
   const gate = VerifiedPremiereEligibilityGate.verify(verificationOptions);
   return { gate, drafts, verificationOptions };
+}
+
+export async function verifiedLongPublicationFixture(
+  root: string,
+  options: { origin?: string } = {},
+): Promise<{
+  gate: VerifiedPremiereEligibilityGate;
+  drafts: ReturnType<typeof buildPremiereChunks>;
+  verificationOptions: Parameters<
+    typeof VerifiedPremiereEligibilityGate.verify
+  >[0];
+  chunkBuildLimits: typeof LONG_REPLAY_CHUNK_LIMITS;
+}> {
+  const privateRoot = path.join(root, "private");
+  const servedRoot = path.join(root, "served");
+  const sourcePath = path.join(root, "controlled-long.source.json");
+  const material = longControlledSourceMaterial();
+  await fs.mkdir(servedRoot, { recursive: true });
+  await fs.writeFile(sourcePath, material.sourceBytes, { mode: 0o600 });
+  let eligibility = eligibilityFixture({
+    sourceBytes: material.sourceBytes,
+    resultBytes: material.resultBytes,
+    origin: options.origin,
+  });
+  const eligibilityAssessmentOptions = eligibilityOptions(Buffer.alloc(32, 9));
+  const collectedLeakAudit = await collectFixtureLeakAudit(
+    eligibility,
+    eligibilityAssessmentOptions,
+    options.origin,
+  );
+  eligibility = collectedLeakAudit.eligibility;
+  const staged = await stagePremiereSource({
+    sourceFilePath: sourcePath,
+    privateStateRoot: privateRoot,
+    servedRoots: [servedRoot],
+    maxSourceBytes: 2_000_000,
+    expectedSourceReplaySha256: eligibility.sourceReplaySha256,
+  });
+  const verifiedSource = await readVerifiedStagedPremiereSource({
+    stagedSource: staged,
+    privateStateRoot: privateRoot,
+    servedRoots: [servedRoot],
+    maxSourceBytes: 2_000_000,
+  });
+  const imported = importPremiereReplay(
+    {
+      gameStartInfo: gameStartInfo(),
+      turnCount: LONG_REPLAY_TURN_COUNT,
+      turnIntervalMs: LONG_REPLAY_TURN_INTERVAL_MS,
+      turns: material.sparseTurns,
+    },
+    LONG_REPLAY_IMPORT_LIMITS,
+  );
+  const drafts = buildPremiereChunks({
+    premiereId: PREMIERE_ID,
+    records: imported.records,
+    playbackRate: 1,
+    checkpointSequences: LONG_REPLAY_CHECKPOINT_SEQUENCES,
+    ...LONG_REPLAY_CHUNK_LIMITS,
+  });
+  const eligibilityRecordHash = assessPremiereEligibility(
+    eligibility,
+    eligibilityAssessmentOptions,
+  ).eligibilityRecordHash;
+  const publicDefinition: PremierePublicDefinition = {
+    ...publicDefinitionFixture(eligibilityRecordHash, eligibility),
+    playbackRate: 1,
+    checkpoints: [
+      {
+        id: "cp_00000001",
+        sequence: LONG_REPLAY_CHECKPOINT_SEQUENCES[0],
+      },
+      {
+        id: "cp_00000002",
+        sequence: LONG_REPLAY_CHECKPOINT_SEQUENCES[1],
+      },
+    ],
+  };
+  const verificationOptions = {
+    premiereId: PREMIERE_ID,
+    eligibilityRecord: eligibility,
+    eligibilityOptions: eligibilityAssessmentOptions,
+    leakAuditReceipt: collectedLeakAudit.receipt,
+    verifiedSource,
+    authoritativeResultBytes: material.resultBytes,
+    replayImportLimits: LONG_REPLAY_IMPORT_LIMITS,
+    publicDefinition,
+    draftChunks: drafts,
+    maxPresentationSpanMs: LONG_REPLAY_CHUNK_LIMITS.maxPresentationSpanMs,
+  } satisfies Parameters<typeof VerifiedPremiereEligibilityGate.verify>[0];
+  const gate = VerifiedPremiereEligibilityGate.verify(verificationOptions);
+  return {
+    gate,
+    drafts,
+    verificationOptions,
+    chunkBuildLimits: LONG_REPLAY_CHUNK_LIMITS,
+  };
 }
 
 export async function collectFixtureLeakAudit(

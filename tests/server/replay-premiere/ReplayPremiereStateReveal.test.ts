@@ -288,6 +288,11 @@ describe("ReplayPremiere state and atomic reveal", () => {
 
     releasePersistence(durableResult(captured!));
     const result = await commit;
+    expect(captured?.event.payload).toMatchObject({
+      releasedPrefixChunkCount: 2,
+      releasedPrefixLastChunkHash: state.publishedChunks[1].chunkHash,
+    });
+    expect(captured?.event.payload).not.toHaveProperty("releasedPrefix");
     expect(publication.readManifest().state).toBe("revealed");
     expect(publication.readChunk(result.terminalChunk.index)?.terminal).toBe(
       true,
@@ -325,6 +330,9 @@ describe("ReplayPremiere state and atomic reveal", () => {
       [committedEvent!],
       PREMIERE_ID,
       restarted.gate,
+      state.lifecycle,
+      state.manifest.releasedChunks,
+      restarted.drafts,
     );
     expect(recovered).toMatchObject({
       lifecycle: { state: "revealed" },
@@ -338,6 +346,19 @@ describe("ReplayPremiere state and atomic reveal", () => {
       },
       (payload) => {
         payload.transitionAuditEvent.lifecycleVersion += 1;
+      },
+      (payload) => {
+        payload.lifecycle.version += 1;
+        payload.transitionAuditEvent.lifecycleVersion += 1;
+      },
+      (payload) => {
+        payload.lifecycle.createdAt = "2026-07-20T17:59:59.000Z";
+      },
+      (payload) => {
+        payload.releasedPrefixChunkCount += 1;
+      },
+      (payload) => {
+        payload.releasedPrefixLastChunkHash = "f".repeat(64);
       },
       (payload) => {
         payload.terminalChunk.records[0].turn += 1;
@@ -375,6 +396,9 @@ describe("ReplayPremiere state and atomic reveal", () => {
           [rehashEvent(corrupt)],
           PREMIERE_ID,
           corruptGate,
+          state.lifecycle,
+          state.manifest.releasedChunks,
+          state.drafts,
         ),
       ).toThrow();
     }
@@ -389,6 +413,9 @@ describe("ReplayPremiere state and atomic reveal", () => {
         [rehashEvent(wrongIdempotency)],
         PREMIERE_ID,
         wrongIdempotencyGate,
+        state.lifecycle,
+        state.manifest.releasedChunks,
+        state.drafts,
       ),
     ).toThrow(/invalid_recovered_reveal_commit/);
 
@@ -406,6 +433,9 @@ describe("ReplayPremiere state and atomic reveal", () => {
         [rehashEvent(shiftedTimestamp)],
         PREMIERE_ID,
         shiftedTimestampGate,
+        state.lifecycle,
+        state.manifest.releasedChunks,
+        state.drafts,
       ),
     ).toThrow(/invalid_recovered_reveal_commit/);
   });

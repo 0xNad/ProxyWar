@@ -351,6 +351,12 @@ Rules:
 - A mid-premiere runtime or integrity failure moves to `failed`, freezes the
   last safe released sequence, rejects new predictions, and never reveals
   future content automatically.
+- Archive has two deliberate public projections. `revealed -> archived` exposes
+  an `archived` reveal pointer. `failed -> archived` and
+  `cancelled -> archived` retain the sanitized `failed` or `cancelled`
+  pre-reveal manifest, keep reveal unavailable, and expose `archived` only as
+  the authoritative lifecycle used for append-only audit and `410` write
+  rejection. Archiving an unrevealed premiere must never fabricate a reveal.
 - Public cancellation/failure copy is a fixed sanitized reason code. Raw paths,
   stack traces, platform errors, and validation details remain operator-only.
 - Publish, start, reveal, fail, cancel, and archive transitions are append-only

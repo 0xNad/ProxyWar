@@ -6,6 +6,10 @@ import path from "node:path";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import { ReplayPremiereAnonymousWriteLimiter } from "../../../src/server/replay-premiere/ReplayPremiereAnonymousWriteLimiter";
 import { ReplayPremiereAdmissionCatalog } from "../../../src/server/replay-premiere/ReplayPremiereCatalog";
+import {
+  freezeReplayPremiereCheckpointProjection,
+  type ReplayPremiereCheckpointProjector,
+} from "../../../src/server/replay-premiere/ReplayPremiereCheckpointProjection";
 import { buildPremiereChunks } from "../../../src/server/replay-premiere/ReplayPremiereChunks";
 import { ReplayPremiereError } from "../../../src/server/replay-premiere/ReplayPremiereErrors";
 import { ReplayPremiereEventStore } from "../../../src/server/replay-premiere/ReplayPremiereEventStore";
@@ -27,6 +31,7 @@ import {
 } from "../../../src/server/replay-premiere/ReplayPremierePublication";
 import { ReplayPremiereRuntimeRegistry } from "../../../src/server/replay-premiere/ReplayPremiereRuntimeCoordinator";
 import {
+  DEFAULT_REPLAY_PREMIERE_EVENT_STORE_LIMITS,
   startReplayPremiereProduction,
   type ReplayPremiereProductionService,
 } from "../../../src/server/replay-premiere/ReplayPremiereStartup";
@@ -90,6 +95,34 @@ describe("ReplayPremiere production startup", () => {
     expect(context.httpRegistry.get(PREMIERE_ID)).toBeNull();
     expect(context.runtimeRegistry.get(PREMIERE_ID)).toBeNull();
   });
+
+  test.each(["maxEventBytes", "maxSnapshotBytes"] as const)(
+    "quarantines an admission when %s cannot hold its reveal envelope",
+    async (limitedField) => {
+      const caseRoot = path.join(root, limitedField);
+      await writeAdmission(caseRoot);
+      const context = startupContext();
+      const started = await startReplayPremiereProduction({
+        ...context,
+        privateStateRoot: path.join(caseRoot, "private"),
+        servedRoots: [path.join(caseRoot, "served")],
+        eventStoreLimits: {
+          ...DEFAULT_REPLAY_PREMIERE_EVENT_STORE_LIMITS,
+          [limitedField]: 1,
+        },
+      });
+      services.push(started.service);
+
+      expect(started.registeredPremiereIds).toEqual([]);
+      expect(started.diagnostics).toEqual([
+        {
+          target: `${PREMIERE_ID}.admission.json`,
+          premiereId: PREMIERE_ID,
+          operatorCode: "startup_reveal_capacity_incompatible",
+        },
+      ]);
+    },
+  );
 
   test("releases the catalog writer after bootstrap while the registered runtime remains live", async () => {
     await writeAdmission(root);
@@ -177,6 +210,77 @@ describe("ReplayPremiere production startup", () => {
       },
     );
   });
+
+  test.each(["failed", "cancelled"] as const)(
+    "routes a real archived %s runtime as its sanitized terminal presentation and rejects writes",
+    async (terminalPresentationState) => {
+      await writeAdmission(root);
+      let nowMs = NOW.getTime() - 120_000;
+      const context = startupContext(() => new Date(nowMs));
+      const started = await startReplayPremiereProduction({
+        ...context,
+        privateStateRoot: path.join(root, "private"),
+        servedRoots: [path.join(root, "served")],
+      });
+      services.push(started.service);
+      const runtime = context.runtimeRegistry.get(PREMIERE_ID)!;
+      expect(runtime.readLifecycleState()).toBe("scheduled");
+
+      if (terminalPresentationState === "cancelled") {
+        await runtime.cancel();
+      } else {
+        nowMs = NOW.getTime();
+        await runtime.synchronize();
+        expect(runtime.readLifecycleState()).toBe("playing");
+        await runtime.beginOutage();
+        nowMs += 60_001;
+        await runtime.synchronize();
+      }
+      expect(runtime.readLifecycleState()).toBe(terminalPresentationState);
+      await runtime.archive();
+      expect(runtime.readLifecycleState()).toBe("archived");
+
+      await withHttpApp(
+        createReplayPremiereRouter({
+          registry: context.httpRegistry,
+          security: context.security,
+          resolveClientAddress: () => "127.0.0.1",
+        }),
+        async (baseUrl) => {
+          const manifest = await fetch(
+            `${baseUrl}/api/premieres/${PREMIERE_ID}/manifest`,
+          );
+          expect(manifest.status).toBe(200);
+          expect(await manifest.json()).toMatchObject({
+            state: terminalPresentationState,
+          });
+
+          const reveal = await fetch(
+            `${baseUrl}/api/premieres/${PREMIERE_ID}/reveal`,
+          );
+          expect(reveal.status).toBe(404);
+          expect(await reveal.json()).toEqual({
+            error: { code: "PREMIERE_UNAVAILABLE" },
+          });
+
+          for (const suffix of ["predictions", "reactions"]) {
+            const response = await fetch(
+              `${baseUrl}/api/premieres/${PREMIERE_ID}/${suffix}`,
+              {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: "{}",
+              },
+            );
+            expect(response.status).toBe(410);
+            expect(await response.json()).toEqual({
+              error: { code: "PREMIERE_INVALID_REQUEST" },
+            });
+          }
+        },
+      );
+    },
+  );
 
   test("quarantines one self-consistent commitment mismatch without registration", async () => {
     await writeAdmission(root);
@@ -689,7 +793,7 @@ describe("ReplayPremiere production startup", () => {
 
     expect(second.registeredPremiereIds).toEqual([]);
     expect(second.diagnostics[0].operatorCode).toBe(
-      "premiere_runtime_runtime_snapshot_anchor_mismatch",
+      "premiere_runtime_snapshot_anchor_mismatch",
     );
     expect(secondContext.httpRegistry.get(PREMIERE_ID)).toBeNull();
     expect(secondContext.runtimeRegistry.get(PREMIERE_ID)).toBeNull();
@@ -814,6 +918,7 @@ function startupContext(now: () => Date = () => new Date(NOW)): {
   security: ReplayPremiereGuestSecurity;
   httpRegistry: ReplayPremiereHttpRegistry;
   runtimeRegistry: ReplayPremiereRuntimeRegistry;
+  checkpointProjector: ReplayPremiereCheckpointProjector;
   publicOrigin: string;
   clock: { now(): Date };
 } {
@@ -830,6 +935,22 @@ function startupContext(now: () => Date = () => new Date(NOW)): {
     security,
     httpRegistry: new ReplayPremiereHttpRegistry(limiter.admit),
     runtimeRegistry: new ReplayPremiereRuntimeRegistry(),
+    checkpointProjector: {
+      async project({ gate }) {
+        const definition = gate.publicDefinition();
+        const optionSeatIds = definition.provenance.seats.map(
+          (seat) => seat.seatId,
+        );
+        return freezeReplayPremiereCheckpointProjection({
+          premiereId: gate.premiereId,
+          publicationCommitmentHash: gate.publicationCommitmentHash,
+          checkpoints: [
+            { ...definition.checkpoints[0], optionSeatIds },
+            { ...definition.checkpoints[1], optionSeatIds },
+          ],
+        });
+      },
+    },
     publicOrigin: ORIGIN,
     clock: { now },
   };
