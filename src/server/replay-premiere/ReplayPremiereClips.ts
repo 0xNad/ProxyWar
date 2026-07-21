@@ -941,11 +941,11 @@ function sendClipDocumentFailure(response: Response, status: number): void {
 // ---------------------------------------------------------------------------
 
 function cacheKey(premiereId: string, bucket: number): string {
-  return `${premiereId} ${bucket} ${PREMIERE_CLIP_VERSION}`;
+  return `${premiereId}\x00${bucket}\x00${PREMIERE_CLIP_VERSION}`;
 }
 
 function participantKey(premiereId: string, participantId: string): string {
-  return `${premiereId} ${participantId}`;
+  return `${premiereId}\x00${participantId}`;
 }
 
 function sidecarPath(clipPath: string): string {

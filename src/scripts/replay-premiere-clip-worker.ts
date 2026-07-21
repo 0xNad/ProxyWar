@@ -73,7 +73,7 @@ const REPO_ROOT = path.resolve(SCRIPT_DIR, "../..");
 const CAPTURE_LEAD_TICKS = 50;
 const CAPTURE_TAIL_TICKS = 150;
 const TICK_STEP_ENCODED_FRAMES_PER_TICK = 3;
-const WATERMARK_TEXT = "beta.proxywar.xyz/league";
+const WATERMARK_TEXT = "proxywar.xyz";
 const SLATE_TITLE = "Proxy War";
 
 /** Third-party script hosts referenced by index.html; blocked for hermetic renders. */
