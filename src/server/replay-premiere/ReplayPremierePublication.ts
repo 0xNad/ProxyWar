@@ -1467,7 +1467,8 @@ function validateControlledExecutionGameBinding(
     game.map !== String(gameConfig.gameMap) ||
     game.mapSize !== String(gameConfig.gameMapSize) ||
     game.difficulty !== String(gameConfig.difficulty) ||
-    game.varySpawns !== Boolean(gameConfig.randomSpawn)
+    game.varySpawns !== false ||
+    gameConfig.randomSpawn !== false
   ) {
     throw publicationFailure("controlled_source_execution_game_mismatch");
   }

@@ -60,7 +60,15 @@ describe("Replay Premiere operator admission command", () => {
     expect(await admissionEntries(harness.privateStateRoot)).toEqual([]);
   });
 
-  test("runs the authentic collector, gate, and catalog path with sanitized hash-and-id output", async () => {
+  test("admits a legitimate non-varied source with sanitized hash-and-id output", async () => {
+    const source = JSON.parse(controlledSourceBytes().toString("utf8")) as {
+      gameRecord: { info: { config: { randomSpawn: boolean } } };
+      provenance: {
+        executionConfig: { game: { varySpawns: boolean } };
+      };
+    };
+    expect(source.provenance.executionConfig.game.varySpawns).toBe(false);
+    expect(source.gameRecord.info.config.randomSpawn).toBe(false);
     const harness = await createHarness(root);
     const capture = cliCapture();
     const exitCode = await executeReplayPremiereAdmissionCli(

@@ -632,8 +632,12 @@ function parseControlledExhibitionCli(
   args: string[],
   environment: ControlledExhibitionEnvironment,
 ): ControlledExhibitionCliConfig {
+  if (args.includes("--vary-spawns")) {
+    throw new Error(
+      "controlled exhibitions do not support varied spawn candidate ordering",
+    );
+  }
   const allowedExactArguments = new Set([
-    "--vary-spawns",
     "--disable-alliance-actions",
     "--disable-social",
   ]);
@@ -783,7 +787,6 @@ function parseControlledExhibitionCli(
     Difficulty,
     Difficulty.Medium,
   );
-  const varySpawns = args.includes("--vary-spawns");
   const disabledActionKinds = controlledDisabledActionKinds(args);
   const executionConfig = deepFreeze({
     schemaVersion: 1 as const,
@@ -808,7 +811,7 @@ function parseControlledExhibitionCli(
       map: String(map),
       mapSize: String(mapSize),
       difficulty: String(difficulty),
-      varySpawns,
+      varySpawns: false,
     },
     disabledActionKinds,
   }) satisfies AgentLeagueSmokeExecutionConfig;
@@ -827,7 +830,6 @@ function parseControlledExhibitionCli(
     `--map=${String(map)}`,
     `--map-size=${String(mapSize)}`,
     `--difficulty=${String(difficulty)}`,
-    ...(varySpawns ? ["--vary-spawns"] : []),
     ...(disabledActionKinds.length > 0
       ? [`--disable-action-kinds=${disabledActionKinds.join(",")}`]
       : []),
@@ -1087,7 +1089,8 @@ function validateGameRecordExecutionConfig(
     String(game.difficulty) !== executionConfig.game.difficulty ||
     (game.bots ?? 0) !== executionConfig.game.bots ||
     (game.nations ?? "disabled") !== executionConfig.game.nations ||
-    Boolean(game.randomSpawn) !== executionConfig.game.varySpawns
+    executionConfig.game.varySpawns !== false ||
+    game.randomSpawn !== false
   ) {
     throw new Error(
       "controlled GameRecord config does not match execution provenance",

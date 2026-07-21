@@ -17,6 +17,7 @@ import {
 } from "../../../src/server/replay-premiere/ReplayPremierePrivateStaging";
 import {
   cloneAndFreezePremiereDraftChunks,
+  importControlledPremiereSourceForPublication,
   replayPremiereDraftChunksMatch,
   replayPremiereRecordsMatchDrafts,
   VerifiedPremiereEligibilityGate,
@@ -54,6 +55,58 @@ describe("ReplayPremiere publication commitment", () => {
     expect(gate.requiredRevealEventBytes).toBeLessThanOrEqual(
       REPLAY_PREMIERE_V1_MAX_REVEAL_STORED_EVENT_BYTES,
     );
+  });
+
+  test("accepts non-varied sources and rejects both spawn flags independently", () => {
+    const sourceBytes = controlledSourceBytes();
+    expect(() =>
+      importControlledPremiereSourceForPublication({
+        sourceBytes,
+        eligibilityRecord: eligibilityFixture({ sourceBytes }),
+        authoritativeResultBytes: authoritativeResultBytes(),
+        replayImportLimits: IMPORT_LIMITS,
+      }),
+    ).not.toThrow();
+
+    const mutations: Array<(source: Record<string, any>) => void> = [
+      (source) => {
+        const execution = source.provenance.executionConfig;
+        execution.game.varySpawns = true;
+        source.provenance.executionConfigSha256 = sha256Hex(
+          canonicalReplayPremiereJson(execution),
+        );
+      },
+      (source) => {
+        source.gameRecord.info.config.randomSpawn = true;
+      },
+      (source) => {
+        const execution = source.provenance.executionConfig;
+        execution.game.varySpawns = true;
+        source.gameRecord.info.config.randomSpawn = true;
+        source.provenance.executionConfigSha256 = sha256Hex(
+          canonicalReplayPremiereJson(execution),
+        );
+      },
+    ];
+    for (const mutate of mutations) {
+      const source = JSON.parse(sourceBytes.toString("utf8")) as Record<
+        string,
+        any
+      >;
+      mutate(source);
+      const mutatedBytes = Buffer.from(
+        canonicalReplayPremiereJson(source as ReplayPremiereJsonValue),
+        "utf8",
+      );
+      expect(() =>
+        importControlledPremiereSourceForPublication({
+          sourceBytes: mutatedBytes,
+          eligibilityRecord: eligibilityFixture({ sourceBytes: mutatedBytes }),
+          authoritativeResultBytes: authoritativeResultBytes(),
+          replayImportLimits: IMPORT_LIMITS,
+        }),
+      ).toThrow(/controlled_source_execution_game_mismatch/);
+    }
   });
 
   test("rejects a separately valid A/B tail after the publication is frozen", async () => {

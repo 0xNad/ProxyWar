@@ -155,52 +155,38 @@ describe("Replay Premiere controlled exhibition source", () => {
     }
   });
 
-  it("rejects spawn variance omitted from the GameRecord before writing", async () => {
+  it("rejects varied spawn ordering before match execution or private writes", async () => {
     const root = await fs.mkdtemp(
       path.join(os.tmpdir(), "premiere-spawn-binding-"),
     );
+    const manifestRoot = path.join(root, "manifests");
     const servedRoot = path.join(root, "served");
     const privateRoot = path.join(root, "private");
-    const artifact = artifactFixture();
-    const executionConfig: AgentLeagueSmokeExecutionConfig = {
-      ...executionConfigFixture(),
-      game: {
-        ...executionConfigFixture().game,
-        varySpawns: true,
-      },
-    };
-    await fs.mkdir(servedRoot, { recursive: true });
+    let smokeCalls = 0;
 
     try {
       await expect(
-        writeControlledExhibitionBundle({
-          sourceRunId: "controlled-run-001",
-          artifact: {
-            ...artifact,
-            artifactInput: {
-              ...artifact.artifactInput,
-              runnerConfig: {
-                ...artifact.artifactInput.runnerConfig,
-                variedSpawns: true,
-              },
+        runControlledExhibition(
+          controlledCliArgs({
+            manifestRoot,
+            servedRoot,
+            privateRoot,
+            extra: ["--brain=rule", "--vary-spawns"],
+          }),
+          {
+            environment: {},
+            runAgentLeagueSmoke: async () => {
+              smokeCalls += 1;
             },
-            executionConfig,
           },
-          policies: policyFixtures(),
-          expectedExecutionConfig: executionConfig,
-          build: buildFixture(),
-          output: {
-            privateOutputRoot: privateRoot,
-            servedRoots: [servedRoot],
-            maxBundleBytes: 2 * 1024 * 1024,
-            minFreeBytes: 25 * GIB,
-          },
-          statfs: statfsWithFreeBytes(30 * GIB),
-        }),
+        ),
       ).rejects.toThrow(
-        "controlled GameRecord config does not match execution provenance",
+        "controlled exhibitions do not support varied spawn candidate ordering",
       );
-      expect(await fs.readdir(privateRoot)).toEqual([]);
+      expect(smokeCalls).toBe(0);
+      await expect(fs.stat(privateRoot)).rejects.toMatchObject({
+        code: "ENOENT",
+      });
     } finally {
       await fs.rm(root, { recursive: true, force: true });
     }
