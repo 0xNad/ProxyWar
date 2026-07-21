@@ -30,6 +30,7 @@ import {
 const PUBLIC_ORIGIN = "https://beta.proxywar.xyz";
 const PAGE_CSP =
   "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; object-src 'none'; frame-ancestors 'none'; base-uri 'self'";
+const TEST_SCRIPT_NONCE = "A".repeat(32);
 
 describe("ReplayPremiere public page and card", () => {
   let root: string;
@@ -53,7 +54,7 @@ describe("ReplayPremiere public page and card", () => {
     await fs.rm(root, { recursive: true, force: true });
   });
 
-  test("serves byte-stable spoiler-neutral page metadata and SVG before and after reveal", async () => {
+  test("serves spoiler-neutral page metadata and SVG before and after reveal", async () => {
     const harness = await createHarness(root);
     await harness.run(async (baseUrl) => {
       const routes = [
@@ -112,10 +113,127 @@ describe("ReplayPremiere public page and card", () => {
       ]) {
         const response = await fetch(`${baseUrl}${route}`);
         expect(response.status).toBe(200);
-        expect(await response.text()).toBe(before.get(route));
+        const after = await response.text();
+        expect(
+          route.startsWith("/premiere/") && !route.endsWith(".svg")
+            ? normalizeScriptNonce(after)
+            : after,
+        ).toBe(
+          route.startsWith("/premiere/") && !route.endsWith(".svg")
+            ? normalizeScriptNonce(before.get(route)!)
+            : before.get(route),
+        );
       }
       expect(harness.revealReads()).toBe(0);
     });
+  });
+
+  test("binds every inline app-shell script to a fresh CSP nonce", async () => {
+    const harness = await createHarness(root);
+    await harness.run(async (baseUrl) => {
+      const first = await fetch(`${baseUrl}/premiere/${PREMIERE_ID}`);
+      const firstBody = await first.text();
+      const firstNonce = scriptNonceFromResponse(first);
+      const firstScripts = startTags(firstBody, "script");
+      const inlineScripts = firstScripts.filter(
+        (tag) => !hasTagAttribute(tag, "src"),
+      );
+      const externalScripts = firstScripts.filter((tag) =>
+        hasTagAttribute(tag, "src"),
+      );
+
+      expect(inlineScripts.length).toBeGreaterThan(0);
+      expect(
+        inlineScripts.every((tag) => tagAttribute(tag, "nonce") === firstNonce),
+      ).toBe(true);
+      expect(externalScripts.length).toBeGreaterThan(0);
+      expect(
+        externalScripts.every((tag) => tagAttribute(tag, "nonce") === null),
+      ).toBe(true);
+
+      const scriptDirective = first.headers
+        .get("content-security-policy")!
+        .split(";")
+        .map((directive) => directive.trim())
+        .find((directive) => directive.startsWith("script-src "))!;
+      expect(scriptDirective).toBe(`script-src 'self' 'nonce-${firstNonce}'`);
+      expect(scriptDirective).not.toContain("'unsafe-inline'");
+      expect(scriptDirective).not.toContain("'unsafe-eval'");
+
+      const second = await fetch(`${baseUrl}/premiere/${PREMIERE_ID}`);
+      const secondBody = await second.text();
+      const secondNonce = scriptNonceFromResponse(second);
+      expect(secondNonce).not.toBe(firstNonce);
+      expect(normalizeScriptNonce(secondBody)).toBe(
+        normalizeScriptNonce(firstBody),
+      );
+    });
+  });
+
+  test("rejects missing or unsafe script CSP directives at startup", () => {
+    const registry = {
+      get: () => null,
+    } as unknown as ReplayPremiereHttpRegistry;
+    const create = (pageContentSecurityPolicy: string) =>
+      createReplayPremierePublicPageRouter({
+        registry,
+        loadAppShell: async () => "<html><head></head><body></body></html>",
+        publicOrigin: PUBLIC_ORIGIN,
+        pageContentSecurityPolicy,
+      });
+
+    expect(() => create("default-src 'self'")).toThrow(/requires script-src/);
+    expect(() =>
+      create("default-src 'self'; script-src 'self' 'unsafe-inline'"),
+    ).toThrow(/unsafe script source/);
+    expect(() =>
+      create("default-src 'self'; script-src 'self' 'unsafe-eval'"),
+    ).toThrow(/unsafe script source/);
+    expect(() =>
+      create("default-src 'self'; script-src 'self' 'nonce-stale'"),
+    ).toThrow(/unsafe script source/);
+    expect(() => create("script-src 'self'; SCRIPT-SRC 'self'")).toThrow(
+      /malformed/,
+    );
+    expect(() => create(`${PAGE_CSP}\nconnect-src 'self'`)).toThrow(
+      /control character/,
+    );
+  });
+
+  test("rejects preset or invalid nonces and never nonces src scripts", async () => {
+    const { gate } = await verifiedPublicationFixture(root);
+    const bootstrap = createPremierePublicBootstrap({ gate });
+    const render = (appShell: string, scriptNonce = TEST_SCRIPT_NONCE) =>
+      renderReplayPremierePageHtml({
+        appShell,
+        bootstrap,
+        publicOrigin: PUBLIC_ORIGIN,
+        scriptNonce,
+      });
+
+    const page = render(
+      "<html><head><script src></script><script>window.BOOTSTRAP_CONFIG={}</script></head><body></body></html>",
+    );
+    const scripts = startTags(page, "script");
+    expect(scripts[0]).toBe("<script src>");
+    expect(tagAttribute(scripts[0], "nonce")).toBeNull();
+    expect(tagAttribute(scripts[1], "nonce")).toBe(TEST_SCRIPT_NONCE);
+    expect(() =>
+      render(
+        '<html><head><script nonce="preset">window.BOOTSTRAP_CONFIG={}</script></head><body></body></html>',
+      ),
+    ).toThrow(/preset nonce/);
+    expect(() =>
+      render(
+        "<html><head><script>window.BOOTSTRAP_CONFIG={}</script></head><body></body></html>",
+        "not-a-valid-nonce",
+      ),
+    ).toThrow(/nonce is invalid/);
+    expect(() =>
+      render(
+        '<html><head><script src="/assets/app.js"></script></head><body></body></html>',
+      ),
+    ).toThrow(/no inline bootstrap script/);
   });
 
   test("replaces every social tag in the actual production app shell exactly once", async () => {
@@ -129,6 +247,7 @@ describe("ReplayPremiere public page and card", () => {
       appShell: productionShell,
       bootstrap,
       publicOrigin: PUBLIC_ORIGIN,
+      scriptNonce: TEST_SCRIPT_NONCE,
     });
     const card = renderReplayPremiereCardSvg(bootstrap);
     const canonicalUrl = `${PUBLIC_ORIGIN}/premiere/${PREMIERE_ID}`;
@@ -170,6 +289,17 @@ describe("ReplayPremiere public page and card", () => {
     );
     expect(metaContent(page, "name", "twitter:image")).toBe(cardUrl);
     expect(page).not.toContain("Proxy War - Battle Royale");
+    const scripts = startTags(page, "script");
+    expect(
+      scripts
+        .filter((tag) => !hasTagAttribute(tag, "src"))
+        .every((tag) => tagAttribute(tag, "nonce") === TEST_SCRIPT_NONCE),
+    ).toBe(true);
+    expect(
+      scripts
+        .filter((tag) => hasTagAttribute(tag, "src"))
+        .every((tag) => tagAttribute(tag, "nonce") === null),
+    ).toBe(true);
     assertExactPublicProvenance(page, card, bootstrap);
   });
 
@@ -188,9 +318,11 @@ describe("ReplayPremiere public page and card", () => {
     bootstrap.publicDefinition.provenance.coworld = { ...coworld };
 
     const page = renderReplayPremierePageHtml({
-      appShell: "<!doctype html><html><head></head><body></body></html>",
+      appShell:
+        "<!doctype html><html><head><script>window.BOOTSTRAP_CONFIG={}</script></head><body></body></html>",
       bootstrap,
       publicOrigin: PUBLIC_ORIGIN,
+      scriptNonce: TEST_SCRIPT_NONCE,
     });
     const card = renderReplayPremiereCardSvg(bootstrap);
     assertExactPublicProvenance(page, card, bootstrap);
@@ -267,9 +399,10 @@ describe("ReplayPremiere public page and card", () => {
     bootstrap.publicDefinition.spoilerNeutralDescription = `A & B <img src=x onerror=alert(1)>`;
     const page = renderReplayPremierePageHtml({
       appShell:
-        "<!doctype html><html><head><title>Old</title></head><body></body></html>",
+        "<!doctype html><html><head><title>Old</title><script>window.BOOTSTRAP_CONFIG={}</script></head><body></body></html>",
       bootstrap,
       publicOrigin: PUBLIC_ORIGIN,
+      scriptNonce: TEST_SCRIPT_NONCE,
     });
     const card = renderReplayPremiereCardSvg(bootstrap);
     expect(page).not.toContain("<script>alert(1)</script>");
@@ -335,7 +468,7 @@ describe("ReplayPremiere public page and card", () => {
       createReplayPremierePublicPageRouter({
         registry,
         loadAppShell: async () =>
-          "<!doctype html><html><head><title>Proxy War</title></head><body><main id=app></main></body></html>",
+          '<!doctype html><html><head><title>Proxy War</title><script>window.BOOTSTRAP_CONFIG={gameEnv:"dev"}</script><script type="module" src="/assets/app.js"></script></head><body><main id=app></main></body></html>',
         publicOrigin: PUBLIC_ORIGIN,
         pageContentSecurityPolicy: PAGE_CSP,
       }),
@@ -374,6 +507,21 @@ function assertNoStore(response: Response): void {
   expect(response.headers.get("surrogate-control")).toBe("no-store");
   expect(response.headers.get("pragma")).toBe("no-cache");
   expect(response.headers.get("etag")).toBeNull();
+}
+
+function scriptNonceFromResponse(response: Response): string {
+  const policy = response.headers.get("content-security-policy");
+  expect(policy).not.toBeNull();
+  const matches = [...policy!.matchAll(/'nonce-([A-Za-z0-9+/]{32})'/g)];
+  expect(matches).toHaveLength(1);
+  return matches[0][1];
+}
+
+function normalizeScriptNonce(markup: string): string {
+  return markup.replace(
+    /\snonce="[A-Za-z0-9+/]{32}"/g,
+    ' nonce="<request-nonce>"',
+  );
 }
 
 function assertExactPublicProvenance(
@@ -545,6 +693,10 @@ function tagAttribute(tag: string, name: string): string | null {
     "i",
   ).exec(tag);
   return match?.[1] ?? match?.[2] ?? match?.[3] ?? null;
+}
+
+function hasTagAttribute(tag: string, name: string): boolean {
+  return new RegExp(`\\s${name}(?:\\s*=|\\s|/?>)`, "i").test(tag);
 }
 
 function escapeAttribute(value: string): string {

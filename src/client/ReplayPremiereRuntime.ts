@@ -603,7 +603,8 @@ export class ReplayPremiereServiceClient {
             headers: {
               Accept: "application/json",
               "Content-Type": "application/json",
-              Origin: this.origin,
+              // Origin is user-agent controlled. A relative same-origin POST
+              // lets the browser supply the actual page origin.
               "x-idempotency-key": idempotencyKey,
               ...(requireCsrf && this.csrfToken !== null
                 ? { "x-csrf-token": this.csrfToken }

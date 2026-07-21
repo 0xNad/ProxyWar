@@ -1,4 +1,5 @@
 import express, { type Request, type Response, type Router } from "express";
+import { randomBytes } from "node:crypto";
 import englishTranslations from "../../../resources/lang/en.json";
 import { matchProxyWarPublicPremiereReadPath } from "../agents/ProxyWarPublicArtifacts";
 import type { PolicyIdentity } from "./ReplayPremiereContracts";
@@ -10,6 +11,7 @@ const JSON_DOCUMENT_CSP =
 const SVG_DOCUMENT_CSP =
   "default-src 'none'; style-src 'unsafe-inline'; frame-ancestors 'none'; base-uri 'none'; sandbox";
 const HASH_PATTERN = /^[a-f0-9]{64}$/;
+const SCRIPT_NONCE_PATTERN = /^[A-Za-z0-9+/]{32}$/;
 
 type ReplayPremiereTranslationSuffix =
   keyof typeof englishTranslations.replay_premiere;
@@ -35,6 +37,7 @@ export function createReplayPremierePublicPageRouter(
   ) {
     throw new Error("Replay Premiere page CSP is required");
   }
+  parsePageContentSecurityPolicy(options.pageContentSecurityPolicy);
 
   router.use((request, response, next) => {
     const route = matchProxyWarPublicPremiereReadPath(request.path);
@@ -68,6 +71,7 @@ export function renderReplayPremierePageHtml(options: {
   appShell: string;
   bootstrap: PremierePublicBootstrapResponse;
   publicOrigin: string;
+  scriptNonce: string;
 }): string {
   const model = spoilerNeutralModel(options.bootstrap);
   const origin = exactPublicOrigin(options.publicOrigin);
@@ -110,10 +114,11 @@ export function renderReplayPremierePageHtml(options: {
   const withoutExistingSocialMetadata = stripShellSocialMetadata(
     options.appShell,
   );
-  return withoutExistingSocialMetadata.replace(
+  const withPremiereMetadata = withoutExistingSocialMetadata.replace(
     /<head(?:\s[^>]*)?>/i,
     (head) => `${head}\n${metadata}`,
   );
+  return nonceInlineScripts(withPremiereMetadata, options.scriptNonce);
 }
 
 export function renderReplayPremiereCardSvg(
@@ -210,6 +215,7 @@ async function handlePublicDocumentRequest(options: {
     return;
   }
   const appShell = await options.options.loadAppShell();
+  const scriptNonce = randomBytes(24).toString("base64");
   sendDocument(
     response,
     request.method,
@@ -218,12 +224,91 @@ async function handlePublicDocumentRequest(options: {
       appShell,
       bootstrap,
       publicOrigin: options.publicOrigin,
+      scriptNonce,
     }),
     {
       contentType: "text/html; charset=utf-8",
-      contentSecurityPolicy: options.options.pageContentSecurityPolicy,
+      contentSecurityPolicy: pageContentSecurityPolicyWithNonce(
+        options.options.pageContentSecurityPolicy,
+        scriptNonce,
+      ),
     },
   );
+}
+
+function nonceInlineScripts(appShell: string, scriptNonce: string): string {
+  assertScriptNonce(scriptNonce);
+  let inlineScriptCount = 0;
+  const rendered = appShell.replace(/<script\b[^>]*>/gi, (tag) => {
+    if (hasTagAttribute(tag, "nonce")) {
+      throw new Error("Replay Premiere app shell contains a preset nonce");
+    }
+    if (hasTagAttribute(tag, "src")) return tag;
+    inlineScriptCount += 1;
+    return `${tag.slice(0, -1)} nonce="${scriptNonce}">`;
+  });
+  if (inlineScriptCount === 0) {
+    throw new Error("Replay Premiere app shell has no inline bootstrap script");
+  }
+  return rendered;
+}
+
+function pageContentSecurityPolicyWithNonce(
+  policy: string,
+  scriptNonce: string,
+): string {
+  assertScriptNonce(scriptNonce);
+  return parsePageContentSecurityPolicy(policy)
+    .map((directive) => {
+      const name = directive.split(/\s+/, 1)[0].toLocaleLowerCase("en-US");
+      return name === "script-src" || name === "script-src-elem"
+        ? `${directive} 'nonce-${scriptNonce}'`
+        : directive;
+    })
+    .join("; ");
+}
+
+function parsePageContentSecurityPolicy(policy: string): string[] {
+  if (hasControlCharacter(policy)) {
+    throw new Error("Replay Premiere page CSP contains a control character");
+  }
+  const directives = policy
+    .split(";")
+    .map((directive) => directive.trim())
+    .filter((directive) => directive !== "");
+  const seen = new Set<string>();
+  for (const directive of directives) {
+    const [rawName, ...sources] = directive.split(/\s+/);
+    const name = rawName.toLocaleLowerCase("en-US");
+    if (!/^[a-z][a-z0-9-]*$/.test(name) || seen.has(name)) {
+      throw new Error("Replay Premiere page CSP is malformed");
+    }
+    seen.add(name);
+    if (name === "script-src" || name === "script-src-elem") {
+      if (
+        sources.some((source) => {
+          const normalized = source.toLocaleLowerCase("en-US");
+          return (
+            normalized === "'unsafe-inline'" ||
+            normalized === "'unsafe-eval'" ||
+            normalized.startsWith("'nonce-")
+          );
+        })
+      ) {
+        throw new Error("Replay Premiere page CSP has an unsafe script source");
+      }
+    }
+  }
+  if (!seen.has("script-src")) {
+    throw new Error("Replay Premiere page CSP requires script-src");
+  }
+  return directives;
+}
+
+function assertScriptNonce(scriptNonce: string): void {
+  if (!SCRIPT_NONCE_PATTERN.test(scriptNonce)) {
+    throw new Error("Replay Premiere script nonce is invalid");
+  }
 }
 
 function spoilerNeutralModel(bootstrap: PremierePublicBootstrapResponse): {
@@ -362,6 +447,10 @@ function tagAttribute(tag: string, name: string): string | null {
     "i",
   ).exec(tag);
   return match?.[1] ?? match?.[2] ?? match?.[3] ?? null;
+}
+
+function hasTagAttribute(tag: string, name: string): boolean {
+  return new RegExp(`\\s${name}(?:\\s*=|\\s|/?>)`, "i").test(tag);
 }
 
 function seatMetadata(

@@ -363,7 +363,9 @@ describe("ReplayPremiereServiceClient", () => {
       credentials: "same-origin",
       redirect: "error",
     });
-    expect(firstHeaders.get("origin")).toBe("https://proxywar.example");
+    // Origin is user-agent controlled; the browser supplies it for the real
+    // same-origin POST.
+    expect(firstHeaders.has("origin")).toBe(false);
     expect(firstHeaders.get("x-idempotency-key")).toMatch(
       /^idem_[a-f0-9]{32}$/,
     );
