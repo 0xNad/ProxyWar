@@ -66,6 +66,11 @@ export interface PremiereRevealCommitResult {
   snapshot: ReplayPremiereSnapshot;
 }
 
+export interface ReplayPremierePreparedPublicationAdvance {
+  commit(): void;
+  abort(): void;
+}
+
 interface PublishedPremiereView {
   lifecycle: PremiereLifecycleSnapshot;
   manifest: PremiereManifestResponse;
@@ -170,6 +175,70 @@ export class ReplayPremiereAtomicPublication {
       : immutable(this.published.reveal, "public reveal read view");
   }
 
+  /**
+   * Prepares one already-validated runtime transition without rebuilding the
+   * full released replay prefix. The returned view becomes visible only after
+   * its caller has durably committed the matching runtime event.
+   */
+  preparePreRevealAdvance(options: {
+    lifecycle: PremiereLifecycleSnapshot;
+    manifest: PremierePreRevealManifestResponse;
+    releasedChunk?: PremierePublicChunkResponse;
+  }): ReplayPremierePreparedPublicationAdvance {
+    if (this.commitInFlight || this.published.reveal !== null) {
+      throw integrityCommit("publication_advance_not_available");
+    }
+    const previous = this.published;
+    const lifecycle = immutable(
+      options.lifecycle,
+      "advanced publication lifecycle",
+    );
+    const manifest = immutable(
+      options.manifest,
+      "advanced publication manifest",
+    );
+    const releasedChunk =
+      options.releasedChunk === undefined
+        ? null
+        : immutable(
+            options.releasedChunk,
+            "advanced publication released chunk",
+          );
+    validateIncrementalPublicationAdvance(
+      this.gate,
+      previous,
+      lifecycle,
+      manifest,
+      releasedChunk,
+    );
+    const chunks = new Map(previous.chunks);
+    if (releasedChunk !== null) chunks.set(releasedChunk.index, releasedChunk);
+    const next: PublishedPremiereView = {
+      lifecycle,
+      manifest,
+      chunks,
+      reveal: null,
+    };
+    let settled = false;
+    return Object.freeze({
+      commit: () => {
+        if (
+          settled ||
+          this.commitInFlight ||
+          this.published !== previous ||
+          this.published.reveal !== null
+        ) {
+          throw integrityCommit("stale_prepared_publication_advance");
+        }
+        settled = true;
+        this.published = next;
+      },
+      abort: () => {
+        settled = true;
+      },
+    });
+  }
+
   async commitReveal(
     persistence: PremiereRevealPersistence,
     options: PremiereRevealCommitOptions,
@@ -261,6 +330,171 @@ export class ReplayPremiereAtomicPublication {
       this.commitInFlight = false;
     }
   }
+}
+
+function validateIncrementalPublicationAdvance(
+  gate: VerifiedPremiereEligibilityGate,
+  previous: PublishedPremiereView,
+  lifecycle: PremiereLifecycleSnapshot,
+  manifest: PremierePreRevealManifestResponse,
+  releasedChunk: PremierePublicChunkResponse | null,
+): void {
+  if (!("releasedChunks" in previous.manifest) || previous.reveal !== null) {
+    throw integrityCommit("publication_advance_after_reveal");
+  }
+  assertExactKeys(manifest as unknown as Record<string, unknown>, [
+    "schemaVersion",
+    "premiereId",
+    "state",
+    "serverNow",
+    "scheduledAt",
+    "actualStartAt",
+    "playbackRate",
+    "authoritativeElapsedMs",
+    "accumulatedPauseMs",
+    "releasedThroughSequence",
+    "lastReleasedChunkIndex",
+    "activeCheckpoint",
+    "provenance",
+    "releasedChunks",
+  ]);
+  validateRecoveredLifecycle(lifecycle);
+  const priorManifest = previous.manifest;
+  const definition = gate.publicDefinition();
+  const allowedState = allowedPreRevealPublicationTransition(
+    priorManifest.state,
+    manifest.state,
+  );
+  const expectedLifecycleVersion = incrementalLifecycleVersion(
+    previous.lifecycle,
+    lifecycle,
+    releasedChunk,
+  );
+  if (
+    !allowedState ||
+    manifest.schemaVersion !== 1 ||
+    manifest.premiereId !== gate.premiereId ||
+    lifecycle.premiereId !== gate.premiereId ||
+    lifecycle.state !== manifest.state ||
+    !gate.matchesLifecycleBinding(lifecycle) ||
+    lifecycle.version !== expectedLifecycleVersion ||
+    lifecycle.createdAt !== previous.lifecycle.createdAt ||
+    Date.parse(lifecycle.updatedAt) <
+      Date.parse(previous.lifecycle.updatedAt) ||
+    manifest.playbackRate !== definition.playbackRate ||
+    manifest.scheduledAt !== definition.scheduledAt ||
+    !sameJson(manifest.provenance, priorManifest.provenance) ||
+    !sameJson(manifest.provenance, createPremierePublicProvenance(gate)) ||
+    !isTimestamp(manifest.serverNow) ||
+    Date.parse(manifest.serverNow) < Date.parse(priorManifest.serverNow) ||
+    (manifest.actualStartAt !== null && !isTimestamp(manifest.actualStartAt)) ||
+    (priorManifest.actualStartAt !== null &&
+      manifest.actualStartAt !== priorManifest.actualStartAt) ||
+    !Number.isSafeInteger(manifest.authoritativeElapsedMs) ||
+    manifest.authoritativeElapsedMs < priorManifest.authoritativeElapsedMs ||
+    !Number.isSafeInteger(manifest.accumulatedPauseMs) ||
+    manifest.accumulatedPauseMs < priorManifest.accumulatedPauseMs ||
+    (manifest.state === "checkpoint") !==
+      (manifest.activeCheckpoint !== null) ||
+    !Array.isArray(manifest.releasedChunks) ||
+    manifest.releasedChunks.length >= gate.chunkCount
+  ) {
+    throw integrityCommit("invalid_incremental_publication_view");
+  }
+  if (manifest.activeCheckpoint !== null) {
+    const checkpoint = manifest.activeCheckpoint;
+    if (
+      checkpoint.state !== "open" ||
+      !isTimestamp(checkpoint.opensAt) ||
+      !isTimestamp(checkpoint.closesAt) ||
+      Date.parse(checkpoint.opensAt) >= Date.parse(checkpoint.closesAt) ||
+      checkpoint.sequence > manifest.releasedThroughSequence ||
+      !definition.checkpoints.some(
+        (candidate) =>
+          candidate.id === checkpoint.id &&
+          candidate.sequence === checkpoint.sequence,
+      )
+    ) {
+      throw integrityCommit("invalid_incremental_checkpoint_view");
+    }
+  }
+
+  const expectedLength =
+    priorManifest.releasedChunks.length + (releasedChunk === null ? 0 : 1);
+  if (manifest.releasedChunks.length !== expectedLength) {
+    throw integrityCommit("incremental_publication_chunk_count_mismatch");
+  }
+  for (const [index, descriptor] of priorManifest.releasedChunks.entries()) {
+    if (!sameJson(descriptor, manifest.releasedChunks[index])) {
+      throw integrityCommit("incremental_publication_prefix_mutated");
+    }
+  }
+  if (releasedChunk !== null) {
+    if (
+      releasedChunk.terminal ||
+      releasedChunk.index !== priorManifest.releasedChunks.length ||
+      releasedChunk.previousChunkHash !==
+        (priorManifest.releasedChunks.at(-1)?.chunkHash ?? null) ||
+      releasedChunk.presentationOffsetMs > manifest.authoritativeElapsedMs ||
+      !sameJson(
+        descriptorFromPublic(releasedChunk),
+        manifest.releasedChunks.at(-1),
+      )
+    ) {
+      throw integrityCommit("invalid_incremental_publication_chunk");
+    }
+    gate.assertReleasedChunk(releasedChunkFromPublic(releasedChunk));
+  }
+  const last = manifest.releasedChunks.at(-1) ?? null;
+  if (
+    manifest.lastReleasedChunkIndex !== (last?.index ?? -1) ||
+    manifest.releasedThroughSequence !== (last?.endSequence ?? -1) ||
+    lifecycle.lastSafeReleasedSequence !== manifest.releasedThroughSequence ||
+    previous.chunks.size + (releasedChunk === null ? 0 : 1) !== expectedLength
+  ) {
+    throw integrityCommit("incremental_publication_prefix_mismatch");
+  }
+}
+
+function incrementalLifecycleVersion(
+  previous: PremiereLifecycleSnapshot,
+  next: PremiereLifecycleSnapshot,
+  releasedChunk: PremierePublicChunkResponse | null,
+): number {
+  if (releasedChunk !== null) {
+    return (
+      previous.version +
+      (releasedChunk.endSequence - releasedChunk.startSequence + 1) +
+      (next.state === "checkpoint" ? 1 : 0)
+    );
+  }
+  if (previous.state !== next.state) return previous.version + 1;
+  if (
+    (next.state === "failed" || next.state === "cancelled") &&
+    next.version === previous.version + 1
+  ) {
+    return previous.version + 1;
+  }
+  return previous.version;
+}
+
+function allowedPreRevealPublicationTransition(
+  from: PremierePreRevealManifestResponse["state"],
+  to: PremierePreRevealManifestResponse["state"],
+): boolean {
+  const allowed: Readonly<
+    Record<
+      PremierePreRevealManifestResponse["state"],
+      readonly PremierePreRevealManifestResponse["state"][]
+    >
+  > = {
+    scheduled: ["scheduled", "playing", "cancelled"],
+    playing: ["playing", "checkpoint", "failed"],
+    checkpoint: ["checkpoint", "playing", "failed"],
+    failed: ["failed"],
+    cancelled: ["cancelled"],
+  };
+  return allowed[from].includes(to);
 }
 
 export function recoverCommittedReveal(

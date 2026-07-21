@@ -3,6 +3,7 @@ import { promises as fs } from "node:fs";
 import http from "node:http";
 import os from "node:os";
 import path from "node:path";
+import { freezeReplayPremiereCheckpointProjection } from "../../../src/server/replay-premiere/ReplayPremiereCheckpointProjection";
 import {
   createReplayPremiereTrustedProxyAddressResolver,
   REPLAY_PREMIERE_LOOPBACK_PROXY_ADDRESSES,
@@ -11,9 +12,11 @@ import {
 import type { PremiereState } from "../../../src/server/replay-premiere/ReplayPremiereContracts";
 import { ReplayPremiereError } from "../../../src/server/replay-premiere/ReplayPremiereErrors";
 import type {
+  ReplayPremiereEventRecovery,
   ReplayPremiereSnapshot,
   StoredReplayPremiereEvent,
 } from "../../../src/server/replay-premiere/ReplayPremiereEventStore";
+import { ReplayPremiereEventStore } from "../../../src/server/replay-premiere/ReplayPremiereEventStore";
 import { ReplayPremiereGuestSecurity } from "../../../src/server/replay-premiere/ReplayPremiereGuestSecurity";
 import {
   createReplayPremiereRouter,
@@ -33,6 +36,11 @@ import {
   ReplayPremiereAtomicPublication,
   type PremiereRevealPersistence,
 } from "../../../src/server/replay-premiere/ReplayPremiereRevealCommit";
+import {
+  ReplayPremiereRuntimeCoordinator,
+  type ReplayPremiereRuntimeClock,
+  type ReplayPremiereRuntimePersistence,
+} from "../../../src/server/replay-premiere/ReplayPremiereRuntimeCoordinator";
 import {
   createDraftPremiereLifecycle,
   recordSafeReleasedSequence,
@@ -196,6 +204,157 @@ describe("ReplayPremiere HTTP adapter", () => {
         expect(response.status).toBe(404);
       }
     });
+  });
+
+  test("projects checkpoint close through HTTP at the exact deadline while durable resume is pending", async () => {
+    const harness = await liveRuntimeHttpHarness(root);
+    try {
+      await harness.runtime.synchronize();
+      harness.clock.advance(100);
+      await harness.runtime.synchronize();
+      const checkpoint = harness.runtime.readActiveCheckpoint();
+      expect(checkpoint).not.toBeNull();
+      const eventCountAtOpen = harness.store.recovered.events.length;
+
+      await harness.run(async (baseUrl) => {
+        harness.clock.advance(14_999);
+        const beforeClose = await readJson(
+          `${baseUrl}/api/premieres/${PREMIERE_ID}/manifest`,
+        );
+        expect(beforeClose).toMatchObject({
+          status: 200,
+          body: {
+            state: "checkpoint",
+            activeCheckpoint: { id: checkpoint!.id, state: "open" },
+            releasedThroughSequence: 2,
+          },
+        });
+
+        const blockedResume = harness.persistence.blockNext(
+          "premiere_runtime_checkpoint_resumed",
+        );
+        harness.clock.advance(1);
+        const resume = harness.runtime.synchronize();
+        await blockedResume.started;
+
+        const atClose = await readJson(
+          `${baseUrl}/api/premieres/${PREMIERE_ID}/manifest`,
+        );
+        expect(atClose).toMatchObject({
+          status: 200,
+          body: {
+            state: "playing",
+            serverNow: checkpoint!.closesAt,
+            authoritativeElapsedMs: 100,
+            accumulatedPauseMs: 15_000,
+            activeCheckpoint: null,
+            releasedThroughSequence: 2,
+          },
+        });
+        expect(harness.runtime.readLifecycleState()).toBe("checkpoint");
+        expect(harness.store.recovered.events).toHaveLength(eventCountAtOpen);
+        expect(
+          await readJson(`${baseUrl}/api/premieres/${PREMIERE_ID}/chunks/1`),
+        ).toEqual({
+          status: 404,
+          body: { error: { code: "PREMIERE_UNAVAILABLE" } },
+        });
+        expect(
+          await readJson(`${baseUrl}/api/premieres/${PREMIERE_ID}/manifest`),
+        ).toMatchObject({ status: 200, body: { state: "playing" } });
+        expect(harness.store.recovered.events).toHaveLength(eventCountAtOpen);
+
+        blockedResume.release();
+        await resume;
+        expect(harness.runtime.readLifecycleState()).toBe("playing");
+        expect(
+          harness.store.recovered.events.filter(
+            (event) =>
+              event.eventType === "premiere_runtime_checkpoint_resumed",
+          ),
+        ).toHaveLength(1);
+      });
+    } finally {
+      await harness.close();
+    }
+  });
+
+  test("keeps reveal and terminal chunk unavailable until the atomic reveal event is durable", async () => {
+    const harness = await liveRuntimeHttpHarness(root);
+    try {
+      await harness.runtime.synchronize();
+      harness.clock.advance(100);
+      await harness.runtime.synchronize();
+      harness.clock.advance(15_000);
+      await harness.runtime.synchronize();
+      harness.clock.advance(100);
+      await harness.runtime.synchronize();
+      harness.clock.advance(15_000);
+      await harness.runtime.synchronize();
+
+      await harness.run(async (baseUrl) => {
+        harness.clock.advance(49);
+        expect(
+          await readJson(`${baseUrl}/api/premieres/${PREMIERE_ID}/manifest`),
+        ).toMatchObject({ status: 200, body: { state: "playing" } });
+        expect(
+          await readJson(`${baseUrl}/api/premieres/${PREMIERE_ID}/reveal`),
+        ).toEqual({
+          status: 404,
+          body: { error: { code: "PREMIERE_UNAVAILABLE" } },
+        });
+
+        const blockedReveal = harness.persistence.blockNext(
+          "premiere_reveal_committed",
+        );
+        harness.clock.advance(1);
+        const reveal = harness.runtime.synchronize();
+        await blockedReveal.started;
+        expect(
+          await readJson(`${baseUrl}/api/premieres/${PREMIERE_ID}/manifest`),
+        ).toMatchObject({ status: 200, body: { state: "playing" } });
+        expect(
+          await readJson(`${baseUrl}/api/premieres/${PREMIERE_ID}/reveal`),
+        ).toEqual({
+          status: 404,
+          body: { error: { code: "PREMIERE_UNAVAILABLE" } },
+        });
+        expect(
+          await readJson(`${baseUrl}/api/premieres/${PREMIERE_ID}/chunks/2`),
+        ).toEqual({
+          status: 404,
+          body: { error: { code: "PREMIERE_UNAVAILABLE" } },
+        });
+
+        blockedReveal.release();
+        await reveal;
+        expect(
+          await readJson(`${baseUrl}/api/premieres/${PREMIERE_ID}/manifest`),
+        ).toMatchObject({
+          status: 200,
+          body: {
+            state: "revealed",
+            revealedAt: harness.clock.now().toISOString(),
+          },
+        });
+        expect(
+          await readJson(`${baseUrl}/api/premieres/${PREMIERE_ID}/reveal`),
+        ).toMatchObject({ status: 200, body: { state: "revealed" } });
+        expect(
+          await readJson(`${baseUrl}/api/premieres/${PREMIERE_ID}/chunks/2`),
+        ).toMatchObject({
+          status: 200,
+          body: { index: 2, terminal: true },
+        });
+        expect(
+          harness.store.recovered.events.filter(
+            (event) => event.eventType === "premiere_reveal_committed",
+          ),
+        ).toHaveLength(1);
+      });
+    } finally {
+      await harness.close();
+    }
   });
 
   test("bootstraps reload-safe CSRF and requires cookie, Origin, and token on every later write", async () => {
@@ -528,6 +687,183 @@ describe("ReplayPremiere HTTP adapter", () => {
     });
   });
 });
+
+class FakeHttpRuntimeClock implements ReplayPremiereRuntimeClock {
+  constructor(private value: Date) {}
+
+  now(): Date {
+    return new Date(this.value);
+  }
+
+  advance(milliseconds: number): void {
+    this.value = new Date(this.value.getTime() + milliseconds);
+  }
+}
+
+class GateableRuntimePersistence implements ReplayPremiereRuntimePersistence {
+  readonly recovered: ReplayPremiereEventRecovery;
+  private blocked: {
+    eventType: string;
+    started: () => void;
+    wait: Promise<void>;
+    release: () => void;
+  } | null = null;
+
+  constructor(private readonly store: ReplayPremiereEventStore) {
+    this.recovered = store.recovered;
+  }
+
+  readSnapshot(aggregateId: string): Promise<ReplayPremiereSnapshot | null> {
+    return this.store.readSnapshot(aggregateId);
+  }
+
+  async appendAndSnapshot(
+    options: Parameters<
+      ReplayPremiereRuntimePersistence["appendAndSnapshot"]
+    >[0],
+  ): ReturnType<ReplayPremiereRuntimePersistence["appendAndSnapshot"]> {
+    const blocked = this.blocked;
+    if (blocked?.eventType === options.event.eventType) {
+      blocked.started();
+      await blocked.wait;
+      if (this.blocked === blocked) this.blocked = null;
+    }
+    return this.store.appendAndSnapshot(options);
+  }
+
+  blockNext(eventType: string): {
+    started: Promise<void>;
+    release: () => void;
+  } {
+    if (this.blocked !== null) throw new Error("persistence already blocked");
+    let markStarted!: () => void;
+    let release!: () => void;
+    const started = new Promise<void>((resolve) => {
+      markStarted = resolve;
+    });
+    const wait = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    this.blocked = {
+      eventType,
+      started: markStarted,
+      wait,
+      release,
+    };
+    return { started, release };
+  }
+
+  releaseBlocked(): void {
+    this.blocked?.release();
+    this.blocked = null;
+  }
+}
+
+async function liveRuntimeHttpHarness(root: string) {
+  const { gate, drafts } = await verifiedPublicationFixture(root);
+  const clock = new FakeHttpRuntimeClock(NOW);
+  const servedRoot = path.join(root, "live-runtime-served");
+  await fs.mkdir(servedRoot, { recursive: true });
+  const store = await ReplayPremiereEventStore.open({
+    privateStateRoot: path.join(root, "live-runtime-private"),
+    servedRoots: [servedRoot],
+    limits: {
+      maxEventBytes: 2_000_000,
+      maxAggregateEventBytes: 20_000_000,
+      maxEventLogBytes: 30_000_000,
+      maxSnapshotBytes: 5_000_000,
+      maxPrivateStateBytes: 50_000_000,
+    },
+  });
+  const persistence = new GateableRuntimePersistence(store);
+  const admitAnonymousWrite: ConstructorParameters<
+    typeof ReplayPremiereInteractions
+  >[0]["admitAnonymousWrite"] = () => undefined;
+  let runtime: ReplayPremiereRuntimeCoordinator | null = null;
+  const definition = gate.publicDefinition();
+  const interactions = new ReplayPremiereInteractions({
+    premiereId: PREMIERE_ID,
+    checkpointDescriptors: definition.checkpoints,
+    seats: definition.provenance.seats,
+    getPremiereState: () => runtime?.readLifecycleState() ?? "scheduled",
+    getReleasedContext: (sequence) =>
+      runtime?.readReleasedContext(sequence) ?? null,
+    persistence: { persist: async () => undefined },
+    signAttribution: () => "a".repeat(64),
+    canonicalPremiereUrl: `${EXPECTED_ORIGIN}/premieres/${PREMIERE_ID}`,
+    now: () => clock.now(),
+    admitAnonymousWrite,
+  });
+  const optionSeatIds = definition.provenance.seats.map((seat) => seat.seatId);
+  runtime = await ReplayPremiereRuntimeCoordinator.createOrRecover({
+    gate,
+    drafts,
+    checkpointProjection: freezeReplayPremiereCheckpointProjection({
+      premiereId: PREMIERE_ID,
+      publicationCommitmentHash: gate.publicationCommitmentHash,
+      checkpoints: [
+        { ...definition.checkpoints[0], optionSeatIds },
+        { ...definition.checkpoints[1], optionSeatIds },
+      ],
+    }),
+    persistence,
+    clock,
+    interactions,
+  });
+  const registry = new ReplayPremiereHttpRegistry(admitAnonymousWrite);
+  registry.register({ runtime, interactions });
+  const security = new ReplayPremiereGuestSecurity({
+    hmacKey: Buffer.alloc(32, 7),
+    expectedOrigin: EXPECTED_ORIGIN,
+    production: true,
+    now: () => clock.now(),
+  });
+  const app = express();
+  app.use(
+    createReplayPremiereRouter({
+      registry,
+      security,
+      resolveClientAddress: () => "127.0.0.1",
+    }),
+  );
+  app.use((_request, response) => response.status(599).end());
+  return {
+    clock,
+    persistence,
+    runtime,
+    store,
+    async run(action: (baseUrl: string) => Promise<void>): Promise<void> {
+      const server = http.createServer(app);
+      await new Promise<void>((resolve) =>
+        server.listen(0, "127.0.0.1", resolve),
+      );
+      const address = server.address();
+      if (address === null || typeof address === "string") {
+        throw new Error("test server address unavailable");
+      }
+      try {
+        await action(`http://127.0.0.1:${address.port}`);
+      } finally {
+        await new Promise<void>((resolve, reject) =>
+          server.close((error) =>
+            error === undefined ? resolve() : reject(error),
+          ),
+        );
+      }
+    },
+    async close(): Promise<void> {
+      persistence.releaseBlocked();
+      await store.close();
+    },
+  };
+}
+
+async function readJson(
+  url: string,
+): Promise<{ status: number; body: unknown }> {
+  const response = await fetch(url);
+  return { status: response.status, body: await response.json() };
+}
 
 async function httpHarness(
   root: string,

@@ -231,6 +231,7 @@ export class ReplayPremiereRuntimeCoordinator {
         "current premiere manifest projection",
       ),
       this.gate,
+      { projectExpiredCheckpoint: true },
     );
   }
 
@@ -822,6 +823,7 @@ export class ReplayPremiereRuntimeCoordinator {
         `runtime:release:${this.gate.publicationCommitmentHash}:${publicChunk.index}`,
         now,
         preparedInteraction,
+        publicChunk,
       );
       operations.push("chunk_released");
       if (activeCheckpoint !== null) {
@@ -1039,18 +1041,23 @@ export class ReplayPremiereRuntimeCoordinator {
     idempotencyKey: string,
     occurredAt: string,
     preparedInteraction?: ReplayPremierePreparedInteractionTransition<unknown>,
+    releasedChunk?: PremierePublicChunkResponse,
   ): Promise<void> {
     validateRuntimeSnapshot(
       next,
       this.gate,
       this.drafts,
       this.checkpointProjection,
+      { recoverReleasedPrefix: false },
     );
-    const nextPublication = publicationFromRuntimeState(
-      this.gate,
-      next,
-      this.drafts,
-    );
+    if (this.publication === null) {
+      throw runtimeIntegrity("missing_atomic_publication_for_advance");
+    }
+    const preparedPublication = this.publication.preparePreRevealAdvance({
+      lifecycle: publicationLifecycleFromRuntimeState(next),
+      manifest: manifestFromRuntimeState(next, this.gate),
+      ...(releasedChunk === undefined ? {} : { releasedChunk }),
+    });
     const outageEventCount =
       eventType === "premiere_runtime_outage_started" ||
       eventType === "premiere_runtime_outage_recovered"
@@ -1081,8 +1088,10 @@ export class ReplayPremiereRuntimeCoordinator {
         idempotencyKey,
       });
       preparedInteraction?.commit();
+      preparedPublication.commit();
     } catch (error) {
       preparedInteraction?.abort();
+      preparedPublication.abort();
       throw error;
     }
     if (outageEventCount !== null) {
@@ -1092,7 +1101,6 @@ export class ReplayPremiereRuntimeCoordinator {
       );
     }
     this.state = immutable(next, "durable premiere runtime state");
-    this.publication = nextPublication;
   }
 
   private nextCheckpoint(): { id: string; sequence: number } | null {
@@ -1225,13 +1233,24 @@ function publicationFromRuntimeState(
 function manifestFromRuntimeState(
   state: ReplayPremiereRuntimeSnapshotV1,
   gate: VerifiedPremiereEligibilityGate,
+  options: { projectExpiredCheckpoint?: boolean } = {},
 ): PremierePreRevealManifestResponse {
   const last = state.releasedChunks.at(-1) ?? null;
+  const activeCheckpoint = projectedActiveCheckpoint(
+    state,
+    state.lastObservedAt,
+  );
+  const durableState = preRevealStateFromRuntimeState(state);
+  const checkpointExpired =
+    options.projectExpiredCheckpoint === true &&
+    durableState === "checkpoint" &&
+    activeCheckpoint !== null &&
+    Date.parse(state.lastObservedAt) >= Date.parse(activeCheckpoint.closesAt);
   return immutable(
     {
       schemaVersion: 1,
       premiereId: state.premiereId,
-      state: preRevealStateFromRuntimeState(state),
+      state: checkpointExpired ? "playing" : durableState,
       serverNow: state.lastObservedAt,
       scheduledAt: gate.publicDefinition().scheduledAt,
       actualStartAt: state.actualStartAt,
@@ -1243,7 +1262,7 @@ function manifestFromRuntimeState(
       accumulatedPauseMs: totalPausedAt(state, state.lastObservedAt),
       releasedThroughSequence: last?.endSequence ?? -1,
       lastReleasedChunkIndex: last?.index ?? -1,
-      activeCheckpoint: projectedActiveCheckpoint(state, state.lastObservedAt),
+      activeCheckpoint: checkpointExpired ? null : activeCheckpoint,
       provenance: createPremierePublicProvenance(gate),
       releasedChunks: state.releasedChunks,
     },

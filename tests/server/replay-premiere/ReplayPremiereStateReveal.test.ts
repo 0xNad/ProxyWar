@@ -304,6 +304,75 @@ describe("ReplayPremiere state and atomic reveal", () => {
     );
   });
 
+  test("atomically advances only an authentic immutable pre-reveal view", async () => {
+    const state = await prepared(root);
+    const publication = new ReplayPremiereAtomicPublication({
+      gate: state.gate,
+      lifecycle: state.lifecycle,
+      manifest: state.manifest,
+      releasedChunks: state.publishedChunks,
+    });
+    const nextServerNow = "2026-07-20T18:00:00.001Z";
+    const nextManifest = {
+      ...state.manifest,
+      serverNow: nextServerNow,
+      authoritativeElapsedMs: state.manifest.authoritativeElapsedMs + 1,
+    };
+
+    const aborted = publication.preparePreRevealAdvance({
+      lifecycle: state.lifecycle,
+      manifest: nextManifest,
+    });
+    expect(publication.readManifest()).toMatchObject({
+      serverNow: NOW.toISOString(),
+    });
+    aborted.abort();
+    expect(() => aborted.commit()).toThrow(
+      /stale_prepared_publication_advance/,
+    );
+    expect(publication.readManifest()).toMatchObject({
+      serverNow: NOW.toISOString(),
+    });
+
+    const committed = publication.preparePreRevealAdvance({
+      lifecycle: state.lifecycle,
+      manifest: nextManifest,
+    });
+    const stale = publication.preparePreRevealAdvance({
+      lifecycle: state.lifecycle,
+      manifest: nextManifest,
+    });
+    committed.commit();
+    expect(publication.readManifest()).toMatchObject({
+      serverNow: nextServerNow,
+    });
+    expect(() => stale.commit()).toThrow(/stale_prepared_publication_advance/);
+
+    expect(() =>
+      publication.preparePreRevealAdvance({
+        lifecycle: state.lifecycle,
+        manifest: {
+          ...nextManifest,
+          releasedChunks: nextManifest.releasedChunks.map(
+            (descriptor, index) =>
+              index === 0
+                ? { ...descriptor, endSequence: descriptor.endSequence + 1 }
+                : descriptor,
+          ),
+        },
+      }),
+    ).toThrow(/incremental_publication_prefix_mutated/);
+    expect(() =>
+      publication.preparePreRevealAdvance({
+        lifecycle: {
+          ...state.lifecycle,
+          version: state.lifecycle.version + 1,
+        },
+        manifest: nextManifest,
+      }),
+    ).toThrow(/invalid_incremental_publication_view/);
+  });
+
   test("strictly recovers one hash-valid reveal and rejects counterfeit provenance", async () => {
     const state = await prepared(root);
     const publication = new ReplayPremiereAtomicPublication({

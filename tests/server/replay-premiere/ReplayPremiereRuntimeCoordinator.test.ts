@@ -1,7 +1,7 @@
 import { promises as fs } from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { afterEach, beforeEach, describe, expect, test } from "vitest";
+import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import { freezeReplayPremiereCheckpointProjection } from "../../../src/server/replay-premiere/ReplayPremiereCheckpointProjection";
 import type {
   ReplayPremiereEventRecovery,
@@ -63,6 +63,7 @@ describe("ReplayPremiereRuntimeCoordinator", () => {
   });
 
   afterEach(async () => {
+    vi.restoreAllMocks();
     for (const store of stores.splice(0)) await store.close();
     await fs.rm(root, { recursive: true, force: true });
   });
@@ -177,6 +178,65 @@ describe("ReplayPremiereRuntimeCoordinator", () => {
     expect(runtime.readChunk(0)).toBeNull();
     clock.advance(-1);
     expect(() => runtime.readManifest()).toThrow(/integrity/i);
+  });
+
+  test("projects a committed checkpoint deadline immediately while its durable resume remains pending", async () => {
+    const { gate, drafts } = await verifiedPublicationFixture(root);
+    const recoverPrefix = vi.spyOn(
+      Object.getPrototypeOf(gate),
+      "recoverReleasedPrefix",
+    );
+    const clock = new FakeClock(NOW);
+    const store = await openStore(root);
+    stores.push(store);
+    const runtime = await ReplayPremiereRuntimeCoordinator.createOrRecover({
+      gate,
+      drafts,
+      persistence: store,
+      clock,
+      interactions: createInteractions(gate, clock),
+    });
+    recoverPrefix.mockClear();
+
+    await runtime.synchronize();
+    clock.advance(100);
+    await runtime.synchronize();
+    const eventCountAtOpen = store.recovered.events.length;
+
+    clock.advance(REPLAY_PREMIERE_CHECKPOINT_PAUSE_MS - 1);
+    expect(runtime.readManifest()).toMatchObject({
+      state: "checkpoint",
+      authoritativeElapsedMs: 100,
+      accumulatedPauseMs: REPLAY_PREMIERE_CHECKPOINT_PAUSE_MS - 1,
+      activeCheckpoint: { state: "open" },
+      releasedThroughSequence: 2,
+    });
+
+    clock.advance(1);
+    expect(runtime.readLifecycleState()).toBe("checkpoint");
+    expect(runtime.readManifest()).toMatchObject({
+      state: "playing",
+      serverNow: clock.now().toISOString(),
+      authoritativeElapsedMs: 100,
+      accumulatedPauseMs: REPLAY_PREMIERE_CHECKPOINT_PAUSE_MS,
+      activeCheckpoint: null,
+      releasedThroughSequence: 2,
+    });
+    expect(runtime.readChunk(1)).toBeNull();
+    expect(store.recovered.events).toHaveLength(eventCountAtOpen);
+    expect(runtime.readManifest().state).toBe("playing");
+    expect(store.recovered.events).toHaveLength(eventCountAtOpen);
+
+    await runtime.synchronize();
+    expect(runtime.readLifecycleState()).toBe("playing");
+    expect(runtime.readChunk(1)).toBeNull();
+    expect(store.recovered.events).toHaveLength(eventCountAtOpen + 1);
+    expect(
+      store.recovered.events.filter(
+        (event) => event.eventType === "premiere_runtime_checkpoint_resumed",
+      ),
+    ).toHaveLength(1);
+    expect(recoverPrefix).not.toHaveBeenCalled();
   });
 
   test("recovers a checkpoint outage with a shifted close and no elapsed double-count", async () => {
