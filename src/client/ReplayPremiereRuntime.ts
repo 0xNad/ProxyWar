@@ -1,8 +1,11 @@
 import { z } from "zod";
 import type { GameStartInfo } from "../core/Schemas";
 import {
+  premiereClipStatusResponseSchema,
   ReplayPremiereNetworkController,
   ReplayPremiereNetworkError,
+  type ReplayPremiereClipReadyPayload,
+  type ReplayPremiereClipStatusResponse,
   type ReplayPremiereManifest,
   type ReplayPremiereNetworkCallbacks,
   type ReplayPremiereNetworkOptions,
@@ -16,6 +19,9 @@ import {
   type ReplayPremiereCaptionRequest,
   type ReplayPremiereCheckpointPair,
   type ReplayPremiereCheckpointView,
+  type ReplayPremiereClipCopyRequest,
+  type ReplayPremiereClipRequest,
+  type ReplayPremiereClipView,
   type ReplayPremiereCounterChallengeRequest,
   type ReplayPremiereHighlightedMomentView,
   type ReplayPremiereMarkerRequest,
@@ -51,6 +57,16 @@ const HEARTBEAT_INTERVAL_MS = 10_000;
 const INTERACTION_RECOVERY_RETRY_MS = 1_000;
 const MAX_CLIPBOARD_TEXT_LENGTH = 16_384;
 const PRE_REVEAL_BODY_CLASS = "replay-premiere-pre-reveal";
+// Bounded clip render poll: after a POST returns pending, poll the status GET
+// with capped backoff. A hard attempt/time cap guarantees the loop terminates
+// (never a cold poll of an unknown bucket — 404 is indistinguishable from a
+// nonexistent premiere, so we only poll a bucket a POST already reported).
+const CLIP_POLL_INITIAL_MS = 1_500;
+const CLIP_POLL_MAX_MS = 6_000;
+const CLIP_POLL_BACKOFF = 1.5;
+const CLIP_POLL_MAX_ATTEMPTS = 20;
+const CLIP_POLL_MAX_ELAPSED_MS = 120_000;
+const CLIP_MAX_BUCKET = 999_999_999;
 
 const premiereLifecycleStateSchema = z.enum([
   "draft",
@@ -611,6 +627,69 @@ export class ReplayPremiereServiceClient {
     return response;
   }
 
+  /**
+   * Request a social clip anchored on a released moment. Requires an active
+   * CSRF-bound session (same as share/reaction). The server floors the anchor
+   * turn into a 10-turn bucket and returns a `ready` or `pending` status. A
+   * pending status must be polled with {@link readClipStatus} on the returned
+   * bucket — never a cold bucket, since an absent clip returns an
+   * indistinguishable 404.
+   */
+  async requestClip(input: {
+    sequence: number;
+    turn: number;
+  }): Promise<ReplayPremiereClipStatusResponse> {
+    this.requireSession();
+    if (
+      !Number.isSafeInteger(input.sequence) ||
+      input.sequence < 0 ||
+      !Number.isSafeInteger(input.turn) ||
+      input.turn < 0
+    ) {
+      throw serviceError("invalid_configuration");
+    }
+    const body = { sequence: input.sequence, turn: input.turn };
+    const response = await this.postJson(
+      "clips",
+      body,
+      this.semanticKey(`clip:${input.sequence}:${input.turn}`),
+      premiereClipStatusResponseSchema,
+      200,
+      true,
+    );
+    this.assertClipStatusBound(response);
+    return response;
+  }
+
+  /**
+   * Read a clip's render status by bucket. Public read (no CSRF); only poll a
+   * bucket a prior {@link requestClip} reported as pending or ready. An absent
+   * clip is a 404 that surfaces as a rejected request the caller treats as a
+   * terminal failure.
+   */
+  async readClipStatus(
+    bucket: number,
+  ): Promise<ReplayPremiereClipStatusResponse> {
+    this.assertActive();
+    if (
+      !Number.isSafeInteger(bucket) ||
+      bucket < 0 ||
+      bucket > CLIP_MAX_BUCKET
+    ) {
+      throw serviceError("invalid_configuration");
+    }
+    const response = await this.getJson(
+      `clips/${bucket}`,
+      premiereClipStatusResponseSchema,
+      200,
+    );
+    if (response.bucket !== bucket) {
+      throw serviceError("invalid_response");
+    }
+    this.assertClipStatusBound(response);
+    return response;
+  }
+
   dispose(): void {
     if (this.disposed) return;
     this.disposed = true;
@@ -688,6 +767,134 @@ export class ReplayPremiereServiceClient {
       // state. Reject it before touching an untrusted (often HTML) body. A
       // valid no-store JSON error envelope still crosses the ordinary strict
       // application-error boundary below.
+      if (transientStatus && !hasJsonContentType) {
+        throw serviceError(
+          "request_failed",
+          response.status,
+          null,
+          "response_status",
+        );
+      }
+      if (!responseHasApplicationPolicy) {
+        throw serviceError(
+          "invalid_response",
+          response.status,
+          null,
+          "response_policy",
+        );
+      }
+      let value: unknown;
+      try {
+        value = await readBoundedJsonResponse(
+          response,
+          this.maxResponseBytes,
+          requestController.signal,
+        );
+      } catch (error) {
+        if (transientStatus) {
+          throw serviceError(
+            "request_failed",
+            response.status,
+            null,
+            "response_status",
+          );
+        }
+        throw error;
+      }
+      if (response.status !== expectedStatus) {
+        const publicFailure = publicErrorResponseSchema.safeParse(value);
+        if (!publicFailure.success) {
+          if (transientStatus) {
+            throw serviceError(
+              "request_failed",
+              response.status,
+              null,
+              "response_status",
+            );
+          }
+          throw serviceError(
+            "invalid_response",
+            response.status,
+            null,
+            "response_schema",
+          );
+        }
+        throw serviceError(
+          "request_rejected",
+          response.status,
+          publicFailure.data.error.code,
+          "response_status",
+        );
+      }
+      const parsed = schema.safeParse(value);
+      if (!parsed.success) {
+        throw serviceError(
+          "invalid_response",
+          response.status,
+          null,
+          "response_schema",
+        );
+      }
+      return parsed.data;
+    } finally {
+      clearTimeout(timeout);
+      this.abortController.signal.removeEventListener("abort", abortRequest);
+    }
+  }
+
+  /**
+   * Bounded same-origin GET with the identical transient-status, no-store
+   * application-policy, response-size, and timeout discipline as
+   * {@link postJson}. No CSRF or body — used for public clip status reads.
+   */
+  private async getJson<T>(
+    route: string,
+    schema: z.ZodType<T>,
+    expectedStatus: number,
+  ): Promise<T> {
+    this.assertActive();
+    const requestController = new AbortController();
+    const abortRequest = () => requestController.abort();
+    this.abortController.signal.addEventListener("abort", abortRequest, {
+      once: true,
+    });
+    let timedOut = false;
+    const timeout = setTimeout(() => {
+      timedOut = true;
+      requestController.abort();
+    }, this.requestTimeoutMs);
+    try {
+      let response: Response;
+      try {
+        response = await this.fetchImpl(
+          `/api/premieres/${this.options.premiereId}/${route}`,
+          {
+            method: "GET",
+            headers: { Accept: "application/json" },
+            cache: "no-store",
+            credentials: "same-origin",
+            redirect: "error",
+            signal: requestController.signal,
+          },
+        );
+      } catch {
+        if (this.disposed) {
+          throw serviceError("disposed", null, null, "fetch_rejection");
+        }
+        throw serviceError(
+          "request_failed",
+          null,
+          null,
+          timedOut ? "timeout" : "fetch_rejection",
+        );
+      }
+      const transientStatus = isTransientInteractionStatus(response.status);
+      const contentType = response.headers.get("content-type") ?? "";
+      const hasJsonContentType = JSON_CONTENT_TYPE_PATTERN.test(
+        contentType.trim(),
+      );
+      const responseHasApplicationPolicy =
+        hasJsonContentType && hasNoStoreCachePolicy(response.headers);
       if (transientStatus && !hasJsonContentType) {
         throw serviceError(
           "request_failed",
@@ -917,6 +1124,32 @@ export class ReplayPremiereServiceClient {
     }
   }
 
+  private assertClipStatusBound(
+    response: ReplayPremiereClipStatusResponse,
+  ): void {
+    if (response.premiereId !== this.options.premiereId) {
+      throw serviceError("invalid_response");
+    }
+    // A `ready` payload exists iff the state is ready.
+    if ((response.state === "ready") !== (response.ready !== null)) {
+      throw serviceError("invalid_response");
+    }
+    if (response.ready !== null) {
+      const ready = response.ready;
+      const expectedClipUrl = `/premiere/${this.options.premiereId}/clip-v1-${response.bucket}.mp4`;
+      // The deep link belongs ONLY in the reply; the caption carries the
+      // license lines and must never contain the premiere watch path.
+      const watchPath = `/premiere/${this.options.premiereId}`;
+      if (
+        ready.clipUrl !== expectedClipUrl ||
+        !ready.social.firstReply.includes(watchPath) ||
+        ready.social.caption.includes(watchPath)
+      ) {
+        throw serviceError("invalid_response");
+      }
+    }
+  }
+
   private assertCheckpointsBound(
     checkpoints: readonly [
       ReplayPremiereServiceCheckpoint,
@@ -1050,6 +1283,11 @@ interface ReplayPremiereServiceLike {
     sequence: number;
     sourceReactionId?: string | null;
   }): Promise<ReplayPremiereServiceShareResponse>;
+  requestClip(input: {
+    sequence: number;
+    turn: number;
+  }): Promise<ReplayPremiereClipStatusResponse>;
+  readClipStatus(bucket: number): Promise<ReplayPremiereClipStatusResponse>;
   dispose(): void;
 }
 
@@ -1134,6 +1372,15 @@ export class ReplayPremiereRuntimeController {
   private heartbeatRetryTimer: ReturnType<typeof setTimeout> | null = null;
   private checkpointDeadlineTimer: ReturnType<typeof setTimeout> | null = null;
   private locallyClosedCheckpointId: string | null = null;
+  // Social-clip state (revealed-only). `clipStatus` drives the overlay clip
+  // block; `clipReady` holds the verbatim server-composed download + social
+  // text. The poll loop is bounded by attempt/time caps.
+  private clipStatus: ReplayPremiereClipView["status"] = "idle";
+  private clipReady: ReplayPremiereClipReadyPayload | null = null;
+  private clipPollTimer: ReturnType<typeof setTimeout> | null = null;
+  private clipPollBucket: number | null = null;
+  private clipPollAttempts = 0;
+  private clipPollStartedMs = 0;
 
   constructor(private readonly options: ReplayPremiereRuntimeOptions) {
     if (
@@ -1220,6 +1467,7 @@ export class ReplayPremiereRuntimeController {
     this.overlay = null;
     this.clearInteractionTimers();
     this.clearCheckpointDeadline();
+    this.clearClipPoll();
     this.documentRef.removeEventListener(
       "ai-league-replay-frame",
       this.onFrameEvent,
@@ -1332,6 +1580,7 @@ export class ReplayPremiereRuntimeController {
       this.servicePremiereState = "archived";
       this.interactionReady = false;
       this.clearInteractionTimers();
+      this.clearClipPoll();
       this.service.dispose();
       this.dispatchJoinAfterBootstrap();
     } else if (this.fencedSessionReadyForVerifiedReveal) {
@@ -1697,6 +1946,7 @@ export class ReplayPremiereRuntimeController {
     this.networkTerminalState ??= state;
     this.interactionReady = false;
     this.clearInteractionTimers();
+    this.clearClipPoll();
     if (this.projection !== null) {
       this.service.dispose();
       if (state === "failed" || state === "cancelled") {
@@ -1789,6 +2039,7 @@ export class ReplayPremiereRuntimeController {
     this.interactionReady = false;
     this.clearInteractionTimers();
     this.clearCheckpointDeadline();
+    this.clearClipPoll();
     this.network.dispose();
     this.service.dispose();
     this.hydrateOverlay();
@@ -1878,6 +2129,8 @@ export class ReplayPremiereRuntimeController {
       onShare: (request) => this.share(request),
       onCopySuggestedCaption: (request) => this.copyCaption(request),
       onExportCounterChallenge: (request) => this.copyCounterChallenge(request),
+      onRequestClip: (request) => this.requestClip(request),
+      onCopyClipText: (request) => this.copyClipText(request),
     };
   }
 
@@ -1942,6 +2195,210 @@ export class ReplayPremiereRuntimeController {
       policies,
     });
     await this.copyText(text);
+  }
+
+  /**
+   * Request a downloadable clip for the moment currently on screen. Only the
+   * `revealed` lifecycle admits a clip request (archived is server-410'd and
+   * the interaction session is already disposed). Failures surface on the clip
+   * status line — a clip is a non-authoritative cache, so a bad clip response
+   * never latches a page-level integrity failure.
+   */
+  private async requestClip(request: ReplayPremiereClipRequest): Promise<void> {
+    if (request.premiereId !== this.options.premiereId) {
+      throw serviceError("invalid_configuration");
+    }
+    this.assertInteractionWriteAllowed();
+    if (this.currentNetworkState() !== "revealed") {
+      throw serviceError("request_rejected");
+    }
+    const frame = this.latestFrame;
+    if (frame === null || frame.sequence === null) {
+      throw serviceError("request_rejected");
+    }
+    // Anchor on the runtime's own observed frame so sequence and turn are a
+    // consistent pair (the server cross-checks turn against the released
+    // context for the sequence).
+    const anchor = { sequence: frame.sequence, turn: frame.turnNumber };
+    this.clearClipPoll();
+    this.clipStatus = "preparing";
+    this.clipReady = null;
+    this.hydrateOverlay();
+    let status: ReplayPremiereClipStatusResponse;
+    try {
+      status = await this.service.requestClip(anchor);
+    } catch (error) {
+      this.applyClipFailure(error);
+      return;
+    }
+    if (this.disposed || this.terminalFailure !== null) return;
+    this.applyClipStatus(status);
+  }
+
+  private async copyClipText(
+    request: ReplayPremiereClipCopyRequest,
+  ): Promise<void> {
+    if (
+      request.premiereId !== this.options.premiereId ||
+      this.clipReady === null
+    ) {
+      throw serviceError("invalid_configuration");
+    }
+    // Copy the exact server-composed text: the reply carries the watch url;
+    // the caption carries the license lines and no url.
+    const text =
+      request.part === "reply"
+        ? this.clipReady.social.firstReply
+        : this.clipReady.social.caption;
+    await this.copyText(text);
+  }
+
+  private applyClipStatus(status: ReplayPremiereClipStatusResponse): void {
+    if (status.state === "ready" && status.ready !== null) {
+      this.clipStatus = "ready";
+      this.clipReady = status.ready;
+      this.clearClipPoll();
+      this.hydrateOverlay();
+      return;
+    }
+    if (status.state === "pending") {
+      this.clipStatus = "preparing";
+      this.clipReady = null;
+      this.clipPollBucket = status.bucket;
+      this.clipPollAttempts = 0;
+      this.clipPollStartedMs = Date.now();
+      this.scheduleClipPoll(CLIP_POLL_INITIAL_MS);
+      this.hydrateOverlay();
+      return;
+    }
+    // "absent" is never a 200 body from the server; fail closed defensively.
+    this.failClip();
+  }
+
+  private applyClipFailure(error: unknown): void {
+    if (this.disposed) return;
+    if (
+      error instanceof ReplayPremiereServiceError &&
+      (error.code === "request_failed" ||
+        (error.code === "request_rejected" &&
+          (error.publicCode === "PREMIERE_CAPACITY_EXCEEDED" ||
+            error.publicCode === "PREMIERE_UNAVAILABLE")))
+    ) {
+      // 429/503/transport (busy, disk, quota) or a 404 that means the clip
+      // service is unavailable: recoverable, "try again later".
+      this.clipStatus = "busy";
+    } else {
+      this.clipStatus = "failed";
+    }
+    this.clipReady = null;
+    this.clearClipPoll();
+    this.hydrateOverlay();
+  }
+
+  private failClip(): void {
+    this.clipStatus = "failed";
+    this.clipReady = null;
+    this.clearClipPoll();
+    this.hydrateOverlay();
+  }
+
+  private scheduleClipPoll(delayMs: number): void {
+    this.clearClipPollTimer();
+    this.clipPollTimer = setTimeout(() => void this.pollClipStatus(), delayMs);
+  }
+
+  private async pollClipStatus(): Promise<void> {
+    this.clipPollTimer = null;
+    if (
+      this.disposed ||
+      this.terminalFailure !== null ||
+      this.clipPollBucket === null
+    ) {
+      return;
+    }
+    // Leaving the revealed window (archived/failed) disposes the session and
+    // ends clip availability; stop polling.
+    if (
+      this.currentNetworkState() !== "revealed" ||
+      this.isReadOnlyLifecycle()
+    ) {
+      this.clearClipPoll();
+      return;
+    }
+    const bucket = this.clipPollBucket;
+    this.clipPollAttempts += 1;
+    let status: ReplayPremiereClipStatusResponse;
+    try {
+      status = await this.service.readClipStatus(bucket);
+    } catch (error) {
+      if (this.disposed || this.terminalFailure !== null) return;
+      if (
+        error instanceof ReplayPremiereServiceError &&
+        error.code === "request_failed"
+      ) {
+        // Transient transport (timeout/gateway): keep polling under the caps.
+        this.continueClipPollOrTimeout();
+        return;
+      }
+      // A 404 (absent — the render finished without producing a clip) or any
+      // other rejection while the bucket was already pending is terminal.
+      this.failClip();
+      return;
+    }
+    if (this.disposed || this.terminalFailure !== null) return;
+    if (status.state === "ready" && status.ready !== null) {
+      this.clipStatus = "ready";
+      this.clipReady = status.ready;
+      this.clearClipPoll();
+      this.hydrateOverlay();
+      return;
+    }
+    if (status.state === "pending") {
+      this.continueClipPollOrTimeout();
+      return;
+    }
+    this.failClip();
+  }
+
+  private continueClipPollOrTimeout(): void {
+    const elapsed = Date.now() - this.clipPollStartedMs;
+    if (
+      this.clipPollAttempts >= CLIP_POLL_MAX_ATTEMPTS ||
+      elapsed >= CLIP_POLL_MAX_ELAPSED_MS
+    ) {
+      this.failClip();
+      return;
+    }
+    const delay = Math.min(
+      CLIP_POLL_MAX_MS,
+      Math.round(
+        CLIP_POLL_INITIAL_MS * CLIP_POLL_BACKOFF ** this.clipPollAttempts,
+      ),
+    );
+    this.scheduleClipPoll(delay);
+  }
+
+  private clearClipPollTimer(): void {
+    if (this.clipPollTimer !== null) {
+      clearTimeout(this.clipPollTimer);
+      this.clipPollTimer = null;
+    }
+  }
+
+  private clearClipPoll(): void {
+    this.clearClipPollTimer();
+    this.clipPollBucket = null;
+    this.clipPollAttempts = 0;
+  }
+
+  private clipView(): ReplayPremiereClipView {
+    return {
+      status: this.clipStatus,
+      ready:
+        this.clipReady === null
+          ? null
+          : { downloadUrl: this.clipReady.clipUrl },
+    };
   }
 
   private replaceServiceCheckpoint(
@@ -2097,6 +2554,16 @@ export class ReplayPremiereRuntimeController {
         this.reveal !== null &&
         networkState !== "failed" &&
         networkState !== "cancelled",
+      // Clips exist only on the revealed/archived surface. The request button is
+      // live only while `revealed` with an active interaction session (archived
+      // disposes the session and is server-410'd); a previously rendered clip
+      // stays downloadable through archived.
+      clip:
+        state === "revealed" || state === "archived" ? this.clipView() : null,
+      canRequestClip:
+        state === "revealed" &&
+        this.interactionReady &&
+        !this.isReadOnlyLifecycle(),
     };
   }
 

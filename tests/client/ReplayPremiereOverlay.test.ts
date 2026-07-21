@@ -411,6 +411,149 @@ describe("ReplayPremiereOverlay", () => {
     );
     expect(handle.element.querySelector(".rp-prediction-button")).toBeNull();
   });
+
+  it("keeps the clip control absent from the DOM before reveal", () => {
+    const handle = mount(
+      makeModel({
+        state: "playing",
+        releasedSequence: 418,
+        currentTurn: 700,
+        clip: { status: "idle", ready: null },
+        canRequestClip: true,
+      }),
+      { onShare: vi.fn(), onRequestClip: vi.fn(), onMarker: vi.fn() },
+    );
+
+    expect(
+      handle.element.querySelector("[data-focus-key=timestamp-share]"),
+    ).not.toBeNull();
+    expect(handle.element.querySelector(".rp-clip")).toBeNull();
+    expect(
+      handle.element.querySelector("[data-focus-key=clip-request]"),
+    ).toBeNull();
+  });
+
+  it("anchors a clip download request to the current moment once revealed", async () => {
+    const onRequestClip = vi.fn();
+    const handle = mount(
+      makeModel({
+        state: "revealed",
+        reveal: { outcome: "winner", winnerSeatId: "seat-a" },
+        releasedSequence: 999,
+        currentTurn: 1600,
+        clip: { status: "idle", ready: null },
+        canRequestClip: true,
+      }),
+      { onRequestClip, onShare: vi.fn() },
+    );
+
+    const request = handle.element.querySelector<HTMLButtonElement>(
+      "[data-focus-key=clip-request]",
+    );
+    expect(request).not.toBeNull();
+    expect(request?.disabled).toBe(false);
+    request?.click();
+    await vi.waitFor(() =>
+      expect(onRequestClip).toHaveBeenCalledWith({
+        premiereId: "premiere-test",
+        sequence: 999,
+        turn: 1600,
+      }),
+    );
+  });
+
+  it("disables the clip request and shows a busy status when not permitted", () => {
+    const handle = mount(
+      makeModel({
+        state: "revealed",
+        reveal: { outcome: "winner", winnerSeatId: "seat-a" },
+        releasedSequence: 999,
+        currentTurn: 1600,
+        clip: { status: "busy", ready: null },
+        canRequestClip: false,
+      }),
+      { onRequestClip: vi.fn() },
+    );
+
+    expect(
+      handle.element.querySelector<HTMLButtonElement>(
+        "[data-focus-key=clip-request]",
+      )?.disabled,
+    ).toBe(true);
+    expect(
+      handle.element.querySelector('.rp-clip-status[data-clip-status="busy"]'),
+    ).not.toBeNull();
+    expect(handle.element.textContent).toContain("replay_premiere.clip_busy");
+  });
+
+  it("offers a download link and verbatim caption/reply copy once the clip is ready", async () => {
+    const onCopyClipText = vi.fn();
+    const handle = mount(
+      makeModel({
+        state: "revealed",
+        reveal: { outcome: "winner", winnerSeatId: "seat-a" },
+        releasedSequence: 999,
+        currentTurn: 1600,
+        clip: {
+          status: "ready",
+          ready: { downloadUrl: "/premiere/premiere-test/clip-v1-6.mp4" },
+        },
+        canRequestClip: true,
+      }),
+      { onCopyClipText, onRequestClip: vi.fn() },
+    );
+
+    const download = handle.element.querySelector<HTMLAnchorElement>(
+      "[data-focus-key=clip-download]",
+    );
+    expect(download?.getAttribute("href")).toBe(
+      "/premiere/premiere-test/clip-v1-6.mp4",
+    );
+    expect(download?.hasAttribute("download")).toBe(true);
+    expect(handle.element.textContent).toContain("replay_premiere.clip_ready");
+
+    handle.element
+      .querySelector<HTMLButtonElement>("[data-focus-key=clip-copy-caption]")
+      ?.click();
+    handle.element
+      .querySelector<HTMLButtonElement>("[data-focus-key=clip-copy-reply]")
+      ?.click();
+    await vi.waitFor(() => {
+      expect(onCopyClipText).toHaveBeenCalledWith({
+        premiereId: "premiere-test",
+        part: "caption",
+      });
+      expect(onCopyClipText).toHaveBeenCalledWith({
+        premiereId: "premiere-test",
+        part: "reply",
+      });
+    });
+  });
+
+  it("keeps a ready clip downloadable on the archived surface with the request disabled", () => {
+    const handle = mount(
+      makeModel({
+        state: "archived",
+        releasedSequence: 999,
+        reveal: { outcome: "winner", winnerSeatId: "seat-b" },
+        clip: {
+          status: "ready",
+          ready: { downloadUrl: "/premiere/premiere-test/clip-v1-6.mp4" },
+        },
+        canRequestClip: false,
+      }),
+      { onCopyClipText: vi.fn(), onRequestClip: vi.fn(), onShare: vi.fn() },
+    );
+
+    expect(
+      handle.element.querySelector("[data-focus-key=clip-download]"),
+    ).not.toBeNull();
+    expect(
+      handle.element.querySelector<HTMLButtonElement>(
+        "[data-focus-key=clip-request]",
+      )?.disabled,
+    ).toBe(true);
+  });
 });
 
 function mount(

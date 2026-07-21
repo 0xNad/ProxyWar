@@ -14,6 +14,7 @@ vi.mock("../../src/client/Utils", () => ({
 
 import {
   ReplayPremiereNetworkError,
+  type ReplayPremiereClipStatusResponse,
   type ReplayPremiereManifest,
   type ReplayPremiereNetworkCallbacks,
   type ReplayPremierePreRevealManifest,
@@ -55,6 +56,14 @@ const HASH_B = "b".repeat(64);
 const HASH_C = "c".repeat(64);
 const STARTED_AT = "2026-07-20T18:00:00.000Z";
 const CSRF_TOKEN = `v1.abc.${"4".repeat(32)}.${"5".repeat(64)}`;
+const CLIP_WATCH_URL = `https://proxywar.example/premiere/${PREMIERE_ID}`;
+// The caption carries the license lines and NO premiere watch url; the reply
+// carries the watch url. Mirrors the server's composePremiereClipSocialText.
+const CLIP_CAPTION =
+  "AI agents, no humans — a Proxy War league premiere moment.\n\n" +
+  "Game art from OpenFront (openfront.io), CC BY-SA 4.0.\n" +
+  "Proxy War is an independent fork — not affiliated with OpenFront.";
+const CLIP_REPLY = `Watch the full premiere: ${CLIP_WATCH_URL}`;
 
 afterEach(() => {
   document.body.innerHTML = "";
@@ -1304,6 +1313,202 @@ describe("ReplayPremiereRuntimeController", () => {
     });
     harness.runtime.dispose();
   });
+
+  it("keeps the clip control out of the pre-reveal model and exposes it only after reveal", async () => {
+    const harness = runtimeHarness({ state: "playing" });
+    await bootstrapPlayingWithFrame(harness);
+    expect(harness.models.at(-1)?.state).toBe("playing");
+    expect(harness.models.at(-1)?.clip ?? null).toBeNull();
+    expect(harness.models.at(-1)?.canRequestClip ?? false).toBe(false);
+
+    await revealAfter(harness);
+    const revealed = harness.models.at(-1);
+    expect(revealed?.state).toBe("revealed");
+    expect(revealed?.clip).toEqual({ status: "idle", ready: null });
+    expect(revealed?.canRequestClip).toBe(true);
+    harness.runtime.dispose();
+  });
+
+  it("renders a downloadable clip after a pending render is polled to ready", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date(STARTED_AT));
+    const readClipStatus = vi
+      .fn<(bucket: number) => Promise<ReplayPremiereClipStatusResponse>>()
+      .mockResolvedValueOnce(clipStatus("pending"))
+      .mockResolvedValueOnce(clipStatus("ready"));
+    const harness = runtimeHarness({
+      state: "playing",
+      service: {
+        requestClip: async () => clipStatus("pending"),
+        readClipStatus,
+      },
+    });
+    await bootstrapPlayingWithFrame(harness);
+    await revealAfter(harness);
+
+    await harness.overlayCallbacks.onRequestClip?.({
+      premiereId: PREMIERE_ID,
+      sequence: 0,
+      turn: 0,
+    });
+    expect(harness.service.requestClip).toHaveBeenCalledWith({
+      sequence: 0,
+      turn: 0,
+    });
+    expect(harness.models.at(-1)?.clip).toEqual({
+      status: "preparing",
+      ready: null,
+    });
+
+    await vi.advanceTimersByTimeAsync(1_500);
+    expect(readClipStatus).toHaveBeenCalledWith(6);
+    expect(harness.models.at(-1)?.clip?.status).toBe("preparing");
+    await vi.advanceTimersByTimeAsync(2_250);
+
+    expect(readClipStatus).toHaveBeenCalledTimes(2);
+    expect(harness.models.at(-1)?.clip).toEqual({
+      status: "ready",
+      ready: { downloadUrl: `/premiere/${PREMIERE_ID}/clip-v1-6.mp4` },
+    });
+    harness.runtime.dispose();
+  });
+
+  it("surfaces a busy clip status without hanging when the render service is at capacity", async () => {
+    const harness = runtimeHarness({
+      state: "playing",
+      service: {
+        requestClip: async () => {
+          throw new ReplayPremiereServiceError(
+            "request_rejected",
+            429,
+            "PREMIERE_CAPACITY_EXCEEDED",
+            "response_status",
+          );
+        },
+      },
+    });
+    await bootstrapPlayingWithFrame(harness);
+    await revealAfter(harness);
+
+    await expect(
+      harness.overlayCallbacks.onRequestClip?.({
+        premiereId: PREMIERE_ID,
+        sequence: 0,
+        turn: 0,
+      }),
+    ).resolves.toBeUndefined();
+
+    expect(harness.service.readClipStatus).not.toHaveBeenCalled();
+    expect(harness.models.at(-1)?.clip?.status).toBe("busy");
+    expect(harness.models.at(-1)?.failureCode).toBeNull();
+    harness.runtime.dispose();
+  });
+
+  it("ends in a terminal failed clip status when a pending render is evicted (404)", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date(STARTED_AT));
+    const readClipStatus = vi
+      .fn<(bucket: number) => Promise<ReplayPremiereClipStatusResponse>>()
+      .mockRejectedValue(
+        new ReplayPremiereServiceError(
+          "request_rejected",
+          404,
+          "PREMIERE_UNAVAILABLE",
+          "response_status",
+        ),
+      );
+    const harness = runtimeHarness({
+      state: "playing",
+      service: {
+        requestClip: async () => clipStatus("pending"),
+        readClipStatus,
+      },
+    });
+    await bootstrapPlayingWithFrame(harness);
+    await revealAfter(harness);
+    await harness.overlayCallbacks.onRequestClip?.({
+      premiereId: PREMIERE_ID,
+      sequence: 0,
+      turn: 0,
+    });
+    await vi.advanceTimersByTimeAsync(1_500);
+
+    expect(readClipStatus).toHaveBeenCalledOnce();
+    expect(harness.models.at(-1)?.clip?.status).toBe("failed");
+    // No further polls scheduled: advancing well past the cap adds no calls.
+    await vi.advanceTimersByTimeAsync(200_000);
+    expect(readClipStatus).toHaveBeenCalledOnce();
+    harness.runtime.dispose();
+  });
+
+  it("bounds the clip poll loop and fails closed instead of polling forever", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date(STARTED_AT));
+    const readClipStatus = vi
+      .fn<(bucket: number) => Promise<ReplayPremiereClipStatusResponse>>()
+      .mockResolvedValue(clipStatus("pending"));
+    const harness = runtimeHarness({
+      state: "playing",
+      service: {
+        // Post-reveal heartbeats report the revealed lifecycle (as the server
+        // does); the default harness heartbeat reports "playing".
+        heartbeat: async () => heartbeatResponse("revealed"),
+        requestClip: async () => clipStatus("pending"),
+        readClipStatus,
+      },
+    });
+    await bootstrapPlayingWithFrame(harness);
+    await revealAfter(harness);
+    await harness.overlayCallbacks.onRequestClip?.({
+      premiereId: PREMIERE_ID,
+      sequence: 0,
+      turn: 0,
+    });
+
+    await vi.advanceTimersByTimeAsync(200_000);
+    expect(harness.models.at(-1)?.clip?.status).toBe("failed");
+    expect(readClipStatus.mock.calls.length).toBeLessThanOrEqual(20);
+    const settledCalls = readClipStatus.mock.calls.length;
+    // The loop is terminated: no timer keeps firing after the cap.
+    await vi.advanceTimersByTimeAsync(200_000);
+    expect(readClipStatus.mock.calls.length).toBe(settledCalls);
+    harness.runtime.dispose();
+  });
+
+  it("copies the clip caption and reply verbatim with the deep link only in the reply", async () => {
+    const harness = runtimeHarness({
+      state: "playing",
+      service: {
+        requestClip: async () => clipStatus("ready"),
+      },
+    });
+    await bootstrapPlayingWithFrame(harness);
+    await revealAfter(harness);
+    await harness.overlayCallbacks.onRequestClip?.({
+      premiereId: PREMIERE_ID,
+      sequence: 0,
+      turn: 0,
+    });
+    expect(harness.models.at(-1)?.clip).toEqual({
+      status: "ready",
+      ready: { downloadUrl: `/premiere/${PREMIERE_ID}/clip-v1-6.mp4` },
+    });
+
+    await harness.overlayCallbacks.onCopyClipText?.({
+      premiereId: PREMIERE_ID,
+      part: "caption",
+    });
+    await harness.overlayCallbacks.onCopyClipText?.({
+      premiereId: PREMIERE_ID,
+      part: "reply",
+    });
+
+    expect(harness.copyText).toHaveBeenNthCalledWith(1, CLIP_CAPTION);
+    expect(harness.copyText).toHaveBeenNthCalledWith(2, CLIP_REPLY);
+    expect(CLIP_CAPTION).not.toContain(`/premiere/${PREMIERE_ID}`);
+    expect(CLIP_REPLY).toContain(`/premiere/${PREMIERE_ID}`);
+    harness.runtime.dispose();
+  });
 });
 
 describe("ReplayPremiereServiceClient", () => {
@@ -1595,6 +1800,157 @@ describe("ReplayPremiereServiceClient", () => {
     expect(client.session()).toBeNull();
     client.dispose();
   });
+
+  it("posts a clip anchor with the csrf and idempotency envelope and returns pending", async () => {
+    const fetchMock = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(jsonResponse(sessionResponse("playing"), 201))
+      .mockResolvedValueOnce(jsonResponse(clipStatus("pending", 6), 200));
+    const client = new ReplayPremiereServiceClient({
+      premiereId: PREMIERE_ID,
+      origin: "https://proxywar.example",
+      fetchImpl: fetchMock,
+      randomBytes: () => new Uint8Array(16).fill(1),
+    });
+    client.bindVerifiedProjection(projection("playing"));
+    await client.startSession({ visible: true, observedSequence: -1 });
+
+    const status = await client.requestClip({ sequence: 60, turn: 60 });
+    expect(status.state).toBe("pending");
+    expect(status.bucket).toBe(6);
+
+    const clipCall = fetchMock.mock.calls[1];
+    expect(clipCall[0]).toBe(`/api/premieres/${PREMIERE_ID}/clips`);
+    expect(clipCall[1]?.method).toBe("POST");
+    expect(clipCall[1]?.credentials).toBe("same-origin");
+    expect(JSON.parse(String(clipCall[1]?.body))).toEqual({
+      sequence: 60,
+      turn: 60,
+    });
+    const headers = new Headers(clipCall[1]?.headers);
+    expect(headers.get("x-csrf-token")).toBe(CSRF_TOKEN);
+    expect(headers.get("x-idempotency-key")).toMatch(/^idem_[0-9a-f]{32}$/);
+    client.dispose();
+  });
+
+  it("reads a ready clip status by bucket with verbatim social text over GET", async () => {
+    const fetchMock = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(jsonResponse(clipStatus("ready", 6), 200));
+    const client = new ReplayPremiereServiceClient({
+      premiereId: PREMIERE_ID,
+      origin: "https://proxywar.example",
+      fetchImpl: fetchMock,
+      randomBytes: () => new Uint8Array(16).fill(1),
+    });
+
+    const status = await client.readClipStatus(6);
+    expect(status.state).toBe("ready");
+    expect(status.ready?.clipUrl).toBe(
+      `/premiere/${PREMIERE_ID}/clip-v1-6.mp4`,
+    );
+    expect(status.ready?.social.caption).toBe(CLIP_CAPTION);
+    expect(status.ready?.social.firstReply).toBe(CLIP_REPLY);
+
+    const readCall = fetchMock.mock.calls[0];
+    expect(readCall[0]).toBe(`/api/premieres/${PREMIERE_ID}/clips/6`);
+    expect(readCall[1]?.method).toBe("GET");
+    expect(readCall[1]?.body).toBeUndefined();
+    client.dispose();
+  });
+
+  it.each([
+    [429, "PREMIERE_CAPACITY_EXCEEDED"],
+    [503, "PREMIERE_UNAVAILABLE"],
+  ])(
+    "rejects a %i clip render as a typed capacity error without hanging",
+    async (httpStatus, publicCode) => {
+      const fetchMock = vi
+        .fn<typeof fetch>()
+        .mockResolvedValueOnce(jsonResponse(sessionResponse("playing"), 201))
+        .mockResolvedValueOnce(
+          jsonResponse({ error: { code: publicCode } }, httpStatus),
+        );
+      const client = new ReplayPremiereServiceClient({
+        premiereId: PREMIERE_ID,
+        origin: "https://proxywar.example",
+        fetchImpl: fetchMock,
+        randomBytes: () => new Uint8Array(16).fill(1),
+      });
+      client.bindVerifiedProjection(projection("playing"));
+      await client.startSession({ visible: true, observedSequence: -1 });
+
+      await expect(
+        client.requestClip({ sequence: 60, turn: 60 }),
+      ).rejects.toMatchObject({
+        code: "request_rejected",
+        status: httpStatus,
+        publicCode,
+      });
+      client.dispose();
+    },
+  );
+
+  it("classifies a malformed gateway clip-status read as retryable transport", async () => {
+    const client = new ReplayPremiereServiceClient({
+      premiereId: PREMIERE_ID,
+      origin: "https://proxywar.example",
+      fetchImpl: vi.fn(async () => malformedGatewayResponse(503)),
+      randomBytes: () => new Uint8Array(16).fill(1),
+    });
+
+    await expect(client.readClipStatus(6)).rejects.toMatchObject({
+      code: "request_failed",
+      status: 503,
+      phase: "response_status",
+    });
+    client.dispose();
+  });
+
+  it("rejects clip social text that leaks the deep link into the caption", async () => {
+    const leaked = clipStatus("ready", 6);
+    leaked.ready!.social.caption = `Spoiler: /premiere/${PREMIERE_ID} winner`;
+    const client = new ReplayPremiereServiceClient({
+      premiereId: PREMIERE_ID,
+      origin: "https://proxywar.example",
+      fetchImpl: vi.fn(async () => jsonResponse(leaked, 200)),
+      randomBytes: () => new Uint8Array(16).fill(1),
+    });
+    await expect(client.readClipStatus(6)).rejects.toMatchObject({
+      code: "invalid_response",
+    });
+    client.dispose();
+  });
+
+  it("rejects a clip reply that omits the premiere deep link", async () => {
+    const missing = clipStatus("ready", 6);
+    missing.ready!.social.firstReply = "Watch the full premiere.";
+    const client = new ReplayPremiereServiceClient({
+      premiereId: PREMIERE_ID,
+      origin: "https://proxywar.example",
+      fetchImpl: vi.fn(async () => jsonResponse(missing, 200)),
+      randomBytes: () => new Uint8Array(16).fill(1),
+    });
+    await expect(client.readClipStatus(6)).rejects.toMatchObject({
+      code: "invalid_response",
+    });
+    client.dispose();
+  });
+
+  it("rejects a clip whose file url disagrees with the status bucket", async () => {
+    const mismatch = clipStatus("ready", 6);
+    mismatch.ready!.clipUrl = `/premiere/${PREMIERE_ID}/clip-v1-7.mp4`;
+    const client = new ReplayPremiereServiceClient({
+      premiereId: PREMIERE_ID,
+      origin: "https://proxywar.example",
+      fetchImpl: vi.fn(async () => jsonResponse(mismatch, 200)),
+      randomBytes: () => new Uint8Array(16).fill(1),
+    });
+    await expect(client.readClipStatus(6)).rejects.toMatchObject({
+      code: "invalid_response",
+    });
+    client.dispose();
+  });
 });
 
 function runtimeHarness(options: {
@@ -1603,6 +1959,13 @@ function runtimeHarness(options: {
     startSession?: () => Promise<ReplayPremiereServiceSessionResponse>;
     heartbeat?: () => Promise<ReplayPremiereServiceHeartbeatResponse>;
     submitReaction?: () => Promise<ReplayPremiereServiceReactionResponse>;
+    requestClip?: (input: {
+      sequence: number;
+      turn: number;
+    }) => Promise<ReplayPremiereClipStatusResponse>;
+    readClipStatus?: (
+      bucket: number,
+    ) => Promise<ReplayPremiereClipStatusResponse>;
     onBind?: () => void;
   };
   onJoin?: () => void;
@@ -1611,6 +1974,7 @@ function runtimeHarness(options: {
   let callbacks!: ReplayPremiereNetworkCallbacks;
   let overlayCallbacks!: ReplayPremiereOverlayCallbacks;
   const models: ReplayPremiereOverlayModel[] = [];
+  const copyText = vi.fn(async () => undefined);
   const network = {
     start: vi.fn(async () => ({ status: "active" })),
     syncOnce: vi.fn(async () => ({ status: "active" })),
@@ -1638,6 +2002,14 @@ function runtimeHarness(options: {
         ? vi.fn()
         : vi.fn(options.service.submitReaction),
     createShare: vi.fn(),
+    requestClip:
+      options.service?.requestClip === undefined
+        ? vi.fn(async () => clipStatus("pending"))
+        : vi.fn(options.service.requestClip),
+    readClipStatus:
+      options.service?.readClipStatus === undefined
+        ? vi.fn(async () => clipStatus("ready"))
+        : vi.fn(options.service.readClipStatus),
     dispose: vi.fn(),
   };
   const onJoin = vi.fn(options.onJoin);
@@ -1665,7 +2037,7 @@ function runtimeHarness(options: {
           dispose: vi.fn(),
         };
       },
-      copyText: vi.fn(async () => undefined),
+      copyText,
       downloadReminder: vi.fn(),
     },
   });
@@ -1678,9 +2050,48 @@ function runtimeHarness(options: {
     models,
     network,
     service,
+    copyText,
     onJoin,
     onRevealSeek,
   };
+}
+
+async function bootstrapPlayingWithFrame(
+  harness: ReturnType<typeof runtimeHarness>,
+): Promise<void> {
+  const record = {
+    sequence: 0,
+    presentationOffsetMs: 0,
+    turn: { turnNumber: 0, intents: [] },
+  };
+  harness.runtime.playback.appendVerifiedBatch({
+    premiereId: PREMIERE_ID,
+    chunkIndex: 0,
+    chunkHash: HASH_A,
+    previousChunkHash: null,
+    payloadHash: HASH_B,
+    startSequence: 0,
+    endSequence: 0,
+    verification: { payloadHashVerified: true, chunkHashVerified: true },
+    records: [record],
+  });
+  harness.runtime.playback.acknowledgeDispatchedRecord(record);
+  const started = harness.runtime.start();
+  await harness.callbacks.onReady?.(projection("playing"));
+  await started;
+  document.dispatchEvent(
+    new CustomEvent("ai-league-replay-frame", {
+      detail: { sequence: 0, turnNumber: 0, players: [] },
+    }),
+  );
+}
+
+async function revealAfter(
+  harness: ReturnType<typeof runtimeHarness>,
+): Promise<void> {
+  await harness.callbacks.onManifest?.(revealedPointer());
+  await harness.callbacks.onReveal?.(verifiedReveal());
+  await harness.callbacks.onTerminal?.("revealed");
 }
 
 function projection(
@@ -2009,6 +2420,29 @@ function verifiedReveal(): ReplayPremiereReveal {
       ],
     },
   } as unknown as ReplayPremiereReveal;
+}
+
+function clipStatus(
+  state: "ready" | "pending" | "absent",
+  bucket = 6,
+): ReplayPremiereClipStatusResponse {
+  return {
+    schemaVersion: 1,
+    premiereId: PREMIERE_ID,
+    bucket,
+    clipVersion: 1,
+    state,
+    ready:
+      state === "ready"
+        ? {
+            clipUrl: `/premiere/${PREMIERE_ID}/clip-v1-${bucket}.mp4`,
+            byteLength: 2_048,
+            sha256: HASH_A,
+            anchorTurn: 60,
+            social: { caption: CLIP_CAPTION, firstReply: CLIP_REPLY },
+          }
+        : null,
+  };
 }
 
 function jsonResponse(value: unknown, status: number): Response {

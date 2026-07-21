@@ -81,6 +81,23 @@ export interface ReplayPremiereShareView {
   suggestedCaption: string;
 }
 
+export type ReplayPremiereClipStatus =
+  | "idle"
+  | "preparing"
+  | "ready"
+  | "failed"
+  | "busy";
+
+export interface ReplayPremiereClipReadyView {
+  /** Same-origin attachment route for the rendered mp4. */
+  downloadUrl: string;
+}
+
+export interface ReplayPremiereClipView {
+  status: ReplayPremiereClipStatus;
+  ready?: ReplayPremiereClipReadyView | null;
+}
+
 export interface ReplayPremiereRevealView {
   outcome: "winner" | "void";
   winnerSeatId?: string | null;
@@ -129,6 +146,9 @@ export interface ReplayPremiereOverlayModel {
   canMark?: boolean;
   canShare?: boolean;
   canExportCounterChallenge?: boolean;
+  /** Present only on the revealed/archived surface; absent otherwise. */
+  clip?: ReplayPremiereClipView | null;
+  canRequestClip?: boolean;
 }
 
 export interface ReplayPremierePredictionRequest {
@@ -183,6 +203,18 @@ export interface ReplayPremiereCounterChallengeRequest {
   policies: readonly ReplayPremierePolicyView[];
 }
 
+export interface ReplayPremiereClipRequest {
+  premiereId: string;
+  sequence: number;
+  turn: number | null;
+}
+
+export interface ReplayPremiereClipCopyRequest {
+  premiereId: string;
+  /** "caption" (license lines, no url) or "reply" (the watch url). */
+  part: "caption" | "reply";
+}
+
 type ReplayPremiereCallbackResult = void | Promise<void>;
 
 export interface ReplayPremiereOverlayCallbacks {
@@ -206,6 +238,12 @@ export interface ReplayPremiereOverlayCallbacks {
   ) => ReplayPremiereCallbackResult;
   onExportCounterChallenge?: (
     request: ReplayPremiereCounterChallengeRequest,
+  ) => ReplayPremiereCallbackResult;
+  onRequestClip?: (
+    request: ReplayPremiereClipRequest,
+  ) => ReplayPremiereCallbackResult;
+  onCopyClipText?: (
+    request: ReplayPremiereClipCopyRequest,
   ) => ReplayPremiereCallbackResult;
 }
 
@@ -1115,7 +1153,138 @@ function renderShare(
     );
   });
   section.append(heading, timestamp, captionLabel, caption, copyCaption);
+  // The clip block lives in the revealed/archived share section only. It is
+  // never constructed on the scheduled/playing/checkpoint surface, so the
+  // download button and social-copy controls are absent from the DOM before
+  // reveal.
+  if (model.state === "revealed" || model.state === "archived") {
+    const clip = renderClip(model, callbacks, safeRun);
+    if (clip !== null) {
+      section.append(clip);
+    }
+  }
   return section;
+}
+
+function renderClip(
+  model: ReplayPremiereOverlayModel,
+  callbacks: ReplayPremiereOverlayCallbacks,
+  safeRun: (
+    button: HTMLButtonElement,
+    action: (() => ReplayPremiereCallbackResult) | undefined,
+  ) => void,
+): HTMLElement | null {
+  const clip = model.clip;
+  if (clip === null || clip === undefined) {
+    return null;
+  }
+  const wrapper = element("div", "rp-clip");
+  wrapper.append(
+    element(
+      "h4",
+      "rp-subheading rp-clip-heading",
+      translateText("replay_premiere.clip_heading"),
+    ),
+  );
+  const anchorTurn = finiteIntegerOrNull(model.currentTurn);
+  const request = button(
+    "replay_premiere.clip_download_button",
+    "rp-button rp-button-primary rp-clip-request",
+  );
+  request.dataset.focusKey = "clip-request";
+  const canRequest =
+    callbacks.onRequestClip !== undefined &&
+    model.canRequestClip === true &&
+    anchorTurn !== null;
+  request.disabled = !canRequest;
+  request.addEventListener("click", () => {
+    safeRun(
+      request,
+      !canRequest || callbacks.onRequestClip === undefined
+        ? undefined
+        : () =>
+            callbacks.onRequestClip?.({
+              premiereId: model.premiereId,
+              sequence: model.releasedSequence,
+              turn: anchorTurn,
+            }),
+    );
+  });
+  wrapper.append(request);
+
+  const statusKey = clipStatusText(clip.status);
+  if (statusKey !== null) {
+    const status = element("p", "rp-clip-status", translateText(statusKey));
+    status.setAttribute("role", "status");
+    status.setAttribute("aria-live", "polite");
+    status.dataset.clipStatus = clip.status;
+    wrapper.append(status);
+  }
+
+  if (clip.ready !== null && clip.ready !== undefined) {
+    const download = element(
+      "a",
+      "rp-button rp-button-quiet rp-clip-download",
+    ) as HTMLAnchorElement;
+    download.textContent = translateText("replay_premiere.clip_download_file");
+    download.href = clip.ready.downloadUrl;
+    download.setAttribute("download", "");
+    download.rel = "noopener";
+    download.dataset.focusKey = "clip-download";
+    const copyCaption = button(
+      "replay_premiere.clip_copy_caption",
+      "rp-button rp-button-quiet rp-clip-copy-caption",
+    );
+    copyCaption.dataset.focusKey = "clip-copy-caption";
+    copyCaption.disabled = callbacks.onCopyClipText === undefined;
+    copyCaption.addEventListener("click", () => {
+      safeRun(
+        copyCaption,
+        callbacks.onCopyClipText === undefined
+          ? undefined
+          : () =>
+              callbacks.onCopyClipText?.({
+                premiereId: model.premiereId,
+                part: "caption",
+              }),
+      );
+    });
+    const copyReply = button(
+      "replay_premiere.clip_copy_reply",
+      "rp-button rp-button-quiet rp-clip-copy-reply",
+    );
+    copyReply.dataset.focusKey = "clip-copy-reply";
+    copyReply.disabled = callbacks.onCopyClipText === undefined;
+    copyReply.addEventListener("click", () => {
+      safeRun(
+        copyReply,
+        callbacks.onCopyClipText === undefined
+          ? undefined
+          : () =>
+              callbacks.onCopyClipText?.({
+                premiereId: model.premiereId,
+                part: "reply",
+              }),
+      );
+    });
+    wrapper.append(download, copyCaption, copyReply);
+  }
+  return wrapper;
+}
+
+function clipStatusText(status: ReplayPremiereClipStatus): string | null {
+  switch (status) {
+    case "preparing":
+      return "replay_premiere.clip_preparing";
+    case "ready":
+      return "replay_premiere.clip_ready";
+    case "failed":
+      return "replay_premiere.clip_failed";
+    case "busy":
+      return "replay_premiere.clip_busy";
+    case "idle":
+      return null;
+  }
 }
 
 function renderReveal(
@@ -1813,6 +1982,23 @@ const OVERLAY_CSS = `
     border-radius: 8px;
     background: rgba(2, 6, 23, 0.72);
     color: #f8fafc;
+  }
+  #${OVERLAY_ID} .rp-clip {
+    display: grid;
+    gap: 8px;
+    margin-top: 4px;
+    padding-top: 10px;
+    border-top: 1px solid rgba(148, 163, 184, 0.2);
+  }
+  #${OVERLAY_ID} .rp-clip-heading { margin: 0; }
+  #${OVERLAY_ID} .rp-clip-status { margin: 0; color: #bae6fd; font-size: 12px; }
+  #${OVERLAY_ID} .rp-clip-status[data-clip-status="failed"] { color: #fecaca; }
+  #${OVERLAY_ID} .rp-clip-status[data-clip-status="busy"] { color: #fde68a; }
+  #${OVERLAY_ID} .rp-clip-download {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    text-decoration: none;
   }
   #${OVERLAY_ID} .rp-reveal { border-color: rgba(34, 197, 94, 0.54); background: rgba(20, 83, 45, 0.42); }
   #${OVERLAY_ID} .rp-winner { color: #bbf7d0; font-size: 20px; font-weight: 850; }

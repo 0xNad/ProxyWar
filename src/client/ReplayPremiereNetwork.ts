@@ -566,6 +566,52 @@ const revealSchema = z
   })
   .strict();
 
+// ---------------------------------------------------------------------------
+// Social clip status (rendered mp4 cache; never event-store evidence). Mirrors
+// the server `PremiereClipStatusResponse`. The mp4 path is same-origin and of a
+// single fixed shape; caption/reply carry the exact server-composed social text
+// (license lines ride the caption; the watch url rides ONLY the reply).
+// ---------------------------------------------------------------------------
+const PREMIERE_CLIP_FILE_PATH_PATTERN =
+  /^\/premiere\/prem_[a-z0-9]{16,32}\/clip-v1-(?:0|[1-9][0-9]{0,8})\.mp4$/;
+const CLIP_SOCIAL_TEXT_MAX_LENGTH = 2_000;
+const CLIP_MAX_BUCKET = 999_999_999;
+
+const premiereClipSocialTextSchema = z
+  .object({
+    caption: z.string().min(1).max(CLIP_SOCIAL_TEXT_MAX_LENGTH),
+    firstReply: z.string().min(1).max(CLIP_SOCIAL_TEXT_MAX_LENGTH),
+  })
+  .strict();
+
+const premiereClipReadySchema = z
+  .object({
+    clipUrl: z.string().regex(PREMIERE_CLIP_FILE_PATH_PATTERN),
+    byteLength: z.number().int().positive().safe(),
+    sha256: sha256Schema,
+    anchorTurn: nonNegativeIntegerSchema,
+    social: premiereClipSocialTextSchema,
+  })
+  .strict();
+
+export const premiereClipStatusResponseSchema = z
+  .object({
+    schemaVersion: z.literal(1),
+    premiereId: premiereIdSchema,
+    bucket: z.number().int().min(0).max(CLIP_MAX_BUCKET).safe(),
+    clipVersion: z.literal(1),
+    state: z.enum(["ready", "pending", "absent"]),
+    ready: premiereClipReadySchema.nullable(),
+  })
+  .strict();
+
+export type ReplayPremiereClipStatusResponse = z.infer<
+  typeof premiereClipStatusResponseSchema
+>;
+export type ReplayPremiereClipReadyPayload = z.infer<
+  typeof premiereClipReadySchema
+>;
+
 export type ReplayPremiereProvenance = z.infer<typeof provenanceSchema>;
 export type ReplayPremiereChunkDescriptor = z.infer<
   typeof releasedChunkDescriptorSchema
