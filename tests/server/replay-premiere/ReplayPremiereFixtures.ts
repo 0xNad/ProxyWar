@@ -56,7 +56,9 @@ export const LONG_REPLAY_IMPORT_LIMITS = {
 export const LONG_REPLAY_CHUNK_LIMITS = {
   maxChunkBytes: 100_000,
   maxTotalBytes: 2_000_000,
-  maxRecordsPerChunk: 200,
+  // 5,001 / 5,000 / 4,999 record checkpoint segments each produce 40
+  // chunks, matching the production 120-chunk recovery envelope.
+  maxRecordsPerChunk: 126,
   maxPresentationSpanMs: 200,
 } as const;
 

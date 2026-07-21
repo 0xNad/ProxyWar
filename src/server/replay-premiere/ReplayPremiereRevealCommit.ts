@@ -119,6 +119,28 @@ export class ReplayPremiereAtomicPublication {
     };
   }
 
+  /**
+   * Rebuilds a pre-reveal publication from private runtime recovery material.
+   * The raw chunks are projected without assuming that the gate has already
+   * accepted them; the constructor then performs the single authoritative
+   * chain, frozen-draft, manifest, lifecycle, and timing validation.
+   */
+  static recover(options: {
+    gate: VerifiedPremiereEligibilityGate;
+    lifecycle: PremiereLifecycleSnapshot;
+    manifest: PremierePreRevealManifestResponse;
+    releasedChunks: readonly ReleasedPremiereChunk[];
+  }): ReplayPremiereAtomicPublication {
+    return new ReplayPremiereAtomicPublication({
+      gate: options.gate,
+      lifecycle: options.lifecycle,
+      manifest: options.manifest,
+      releasedChunks: options.releasedChunks.map((chunk) =>
+        recoveredPublicChunkResponse(chunk, options.gate),
+      ),
+    });
+  }
+
   readManifest(): PremiereManifestResponse {
     return immutable(this.published.manifest, "public manifest view");
   }
@@ -533,6 +555,36 @@ function releasedChunkFromPublic(
     allowPartialChain: true,
   });
   return chunk;
+}
+
+function recoveredPublicChunkResponse(
+  chunk: ReleasedPremiereChunk,
+  gate: VerifiedPremiereEligibilityGate,
+): PremierePublicChunkResponse {
+  if (!VerifiedPremiereEligibilityGate.isAuthentic(gate)) {
+    throw integrityCommit("fabricated_publication_gate");
+  }
+  return immutable(
+    {
+      schemaVersion: 1,
+      premiereId: chunk.descriptor.premiereId,
+      index: chunk.descriptor.index,
+      startSequence: chunk.descriptor.startSequence,
+      endSequence: chunk.descriptor.endSequence,
+      startTurn: chunk.descriptor.startTurn,
+      endTurn: chunk.descriptor.endTurn,
+      presentationOffsetMs: chunk.descriptor.presentationOffsetMs,
+      previousChunkHash: chunk.descriptor.previousChunkHash,
+      payloadHash: chunk.descriptor.payloadHash,
+      chunkHash: chunk.descriptor.chunkHash,
+      byteLength: chunk.descriptor.byteLength,
+      terminal: chunk.descriptor.terminal,
+      releasedAt: chunk.descriptor.releasedAt,
+      provenance: createPremierePublicProvenance(gate),
+      records: chunk.payload.records,
+    },
+    "recovered premiere public chunk response",
+  );
 }
 
 function descriptorFromPublic(

@@ -3,8 +3,9 @@ import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, test } from "vitest";
 import {
-  ReplayPremiereEventStore,
+  readAuthenticReplayPremiereEventRecoveryEvents,
   recoverReplayPremiereEventLog,
+  ReplayPremiereEventStore,
   type ReplayPremiereEventStoreLimits,
 } from "../../../src/server/replay-premiere/ReplayPremiereEventStore";
 import { PREMIERE_ID } from "./ReplayPremiereFixtures";
@@ -95,6 +96,37 @@ describe("ReplayPremiereEventStore", () => {
     ).rejects.toThrow(/partial_trailing_event_line/);
   });
 
+  test("rejects an on-disk payload whose retained event hash no longer matches", async () => {
+    const store = await ReplayPremiereEventStore.open({
+      privateStateRoot: privateRoot,
+      servedRoots: [servedRoot],
+      limits,
+    });
+    await store.append({
+      aggregateId: PREMIERE_ID,
+      eventType: "premiere_published",
+      occurredAt: "2026-07-20T18:00:00.000Z",
+      payload: { state: "scheduled" },
+    });
+    const eventsPath = store.eventsPath;
+    await store.close();
+    const event = JSON.parse(
+      (await fs.readFile(eventsPath, "utf8")).trim(),
+    ) as Record<string, unknown>;
+    event.payload = { state: "forged" };
+    await fs.writeFile(eventsPath, `${JSON.stringify(event)}\n`, {
+      mode: 0o600,
+    });
+
+    await expect(
+      ReplayPremiereEventStore.open({
+        privateStateRoot: privateRoot,
+        servedRoots: [servedRoot],
+        limits,
+      }),
+    ).rejects.toThrow(/event_hash_mismatch/);
+  });
+
   test("rejects event and aggregate byte ceilings before writing", async () => {
     const store = await ReplayPremiereEventStore.open({
       privateStateRoot: privateRoot,
@@ -161,13 +193,23 @@ describe("ReplayPremiereEventStore", () => {
 
     const first = store.recovered;
     const second = store.recovered;
+    expect(
+      readAuthenticReplayPremiereEventRecoveryEvents(first),
+    ).not.toBeNull();
+    expect(
+      readAuthenticReplayPremiereEventRecoveryEvents(second),
+    ).not.toBeNull();
     expect(first.events).not.toBe(second.events);
     expect(first.events[0]).toBe(second.events[0]);
     expect(Object.isFrozen(first.events[0])).toBe(true);
     expect(Object.isFrozen(first.events[0].payload)).toBe(true);
 
     first.events.length = 0;
+    expect(readAuthenticReplayPremiereEventRecoveryEvents(first)).toBeNull();
     expect(second.events).toHaveLength(1);
+    expect(
+      readAuthenticReplayPremiereEventRecoveryEvents(second),
+    ).not.toBeNull();
     expect(store.recovered.events).toHaveLength(1);
     const nested = (second.events[0].payload as { nested: { value: string } })
       .nested;
@@ -175,6 +217,25 @@ describe("ReplayPremiereEventStore", () => {
     expect(store.recovered.events[0].payload).toEqual({
       nested: { value: "accepted" },
     });
+
+    const getterView = store.recovered;
+    const issuedEvents = getterView.events;
+    let eventReads = 0;
+    Object.defineProperty(getterView, "events", {
+      get: () => {
+        eventReads += 1;
+        return eventReads === 1 ? issuedEvents : [];
+      },
+    });
+    const authenticated =
+      readAuthenticReplayPremiereEventRecoveryEvents(getterView);
+    expect(eventReads).toBe(1);
+    expect(authenticated).not.toBe(issuedEvents);
+    expect(authenticated).toEqual(issuedEvents);
+    expect(Object.isFrozen(authenticated)).toBe(true);
+
+    const proxied = new Proxy(store.recovered, {});
+    expect(readAuthenticReplayPremiereEventRecoveryEvents(proxied)).toBeNull();
     await store.close();
   });
 

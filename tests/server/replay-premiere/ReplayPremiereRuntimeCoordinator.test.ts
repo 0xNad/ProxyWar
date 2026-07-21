@@ -561,6 +561,117 @@ describe("ReplayPremiereRuntimeCoordinator", () => {
     });
   });
 
+  test("revalidates the full event chain for untrusted custom persistence", async () => {
+    const { gate, drafts } = await verifiedPublicationFixture(root);
+    const clock = new FakeClock(NOW);
+    const store = await openStore(root);
+    stores.push(store);
+    await ReplayPremiereRuntimeCoordinator.createOrRecover({
+      gate,
+      drafts,
+      persistence: store,
+      clock,
+      interactions: createInteractions(gate, clock),
+    });
+    await store.append({
+      aggregateId: "prem_fedcba9876543210",
+      eventType: "custom_auxiliary_event",
+      occurredAt: new Date(NOW.getTime() + 1).toISOString(),
+      payload: { accepted: true },
+    });
+    const global = store.recovered;
+    const validEvents = global.events;
+    const events = structuredClone(global.events);
+    events[1].eventHash = "f".repeat(64);
+    const persistence = persistenceForEvents(global, events);
+    const untrustedRecovery = persistence.recovered;
+    let eventReads = 0;
+    Object.defineProperty(untrustedRecovery, "events", {
+      get: () => {
+        eventReads += 1;
+        return eventReads === 1 ? events : validEvents;
+      },
+    });
+
+    await expect(
+      ReplayPremiereRuntimeCoordinator.createOrRecover({
+        gate,
+        drafts,
+        persistence,
+        clock,
+        interactions: createInteractions(gate, clock),
+      }),
+    ).rejects.toMatchObject({
+      operatorCode: "premiere_runtime_runtime_event_hash_chain_mismatch",
+    });
+    expect(eventReads).toBe(1);
+  });
+
+  test("rejects a hash-valid historical chunk released before its authoritative time", async () => {
+    const { gate, drafts } = await verifiedPublicationFixture(root);
+    const clock = new FakeClock(NOW);
+    const store = await openStore(root);
+    stores.push(store);
+    const interactions = createInteractions(gate, clock);
+    const runtime = await ReplayPremiereRuntimeCoordinator.createOrRecover({
+      gate,
+      drafts,
+      persistence: store,
+      clock,
+      interactions,
+    });
+    await runtime.synchronize();
+    clock.advance(100);
+    await runtime.synchronize();
+    clock.advance(REPLAY_PREMIERE_CHECKPOINT_PAUSE_MS);
+    await runtime.synchronize();
+
+    const original = store.recovered;
+    const events = structuredClone(original.events);
+    const released = events.find(
+      (event) => event.eventType === "premiere_runtime_chunk_released",
+    );
+    expect(released).toBeDefined();
+    const releasedState = released!.payload as unknown as {
+      actualStartAt: string;
+      lastObservedAt: string;
+    };
+    releasedState.actualStartAt = releasedState.lastObservedAt;
+    rehashStoredEventChain(events);
+    const latest = events.at(-1)!;
+    const snapshot: ReplayPremiereSnapshot = {
+      schemaVersion: 1,
+      snapshotKind: "replay_premiere_aggregate",
+      aggregateId: gate.premiereId,
+      lastEventSequence: latest.eventSequence,
+      lastEventHash: latest.eventHash,
+      state: latest.payload,
+      stateHash: hashReplayPremiereJson(latest.payload),
+      writtenAt: latest.occurredAt,
+    };
+    const persistence = readOnlyRuntimePersistence(
+      {
+        ...original,
+        events,
+        lastEventSequence: latest.eventSequence,
+        lastEventHash: latest.eventHash,
+      },
+      snapshot,
+    );
+
+    await expect(
+      ReplayPremiereRuntimeCoordinator.createOrRecover({
+        gate,
+        drafts,
+        persistence,
+        clock,
+        interactions: createInteractions(gate, clock, interactions.readState()),
+      }),
+    ).rejects.toMatchObject({
+      operatorCode: "premiere_runtime_runtime_released_prefix_mismatch",
+    });
+  });
+
   test("rejects a hash-valid scheduled-to-archived recovery jump", async () => {
     const { gate, drafts } = await verifiedPublicationFixture(root);
     const clock = new FakeClock(NOW);
@@ -790,6 +901,18 @@ function rehashStoredEvent(event: StoredReplayPremiereEvent): void {
   event.eventHash = hashReplayPremiereJson(
     preimage as unknown as ReplayPremiereJsonValue,
   );
+}
+
+function rehashStoredEventChain(events: StoredReplayPremiereEvent[]): void {
+  let previousEventHash: string | null = null;
+  for (const event of events) {
+    event.previousEventHash = previousEventHash;
+    if (event.idempotencyKey !== null) {
+      event.idempotencyStateHash = hashReplayPremiereJson(event.payload);
+    }
+    rehashStoredEvent(event);
+    previousEventHash = event.eventHash;
+  }
 }
 
 function persistenceForEvents(

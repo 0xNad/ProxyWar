@@ -1,7 +1,7 @@
 import { promises as fs } from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { afterEach, beforeEach, describe, expect, test } from "vitest";
+import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import { freezeReplayPremiereCheckpointProjection } from "../../../src/server/replay-premiere/ReplayPremiereCheckpointProjection";
 import {
   ReplayPremiereEventStore,
@@ -75,6 +75,7 @@ describe("ReplayPremiere long runtime persistence", () => {
   });
 
   afterEach(async () => {
+    vi.restoreAllMocks();
     for (const store of stores.splice(0)) await store.close();
     await fs.rm(root, { recursive: true, force: true });
   });
@@ -83,7 +84,7 @@ describe("ReplayPremiere long runtime persistence", () => {
     const { gate, drafts } = await verifiedLongPublicationFixture(root);
     expect(VerifiedPremiereEligibilityGate.isAuthentic(gate)).toBe(true);
     expect(gate.finalSequence + 1).toBe(LONG_REPLAY_TURN_COUNT);
-    expect(drafts).toHaveLength(76);
+    expect(drafts).toHaveLength(120);
     expect(() =>
       canonicalReplayPremiereJson(drafts as unknown as ReplayPremiereJsonValue),
     ).toThrow(/JSON complexity ceiling exceeded/);
@@ -120,6 +121,14 @@ describe("ReplayPremiere long runtime persistence", () => {
       clock,
       firstInteractionState,
     );
+    const recoverPrefix = vi.spyOn(
+      VerifiedPremiereEligibilityGate.prototype,
+      "recoverReleasedPrefix",
+    );
+    const recoverRevealChain = vi.spyOn(
+      VerifiedPremiereEligibilityGate.prototype,
+      "recoverReleasedChainForReveal",
+    );
     const second = await ReplayPremiereRuntimeCoordinator.createOrRecover({
       gate,
       drafts,
@@ -127,6 +136,8 @@ describe("ReplayPremiere long runtime persistence", () => {
       clock,
       interactions: secondInteractions,
     });
+    expect(recoverPrefix).toHaveBeenCalledTimes(1);
+    expect(recoverRevealChain).not.toHaveBeenCalled();
     expect(secondStore.recovered.events).toHaveLength(firstEventCount);
     expect(second.readManifest()).toMatchObject({
       state: "checkpoint",
@@ -169,6 +180,9 @@ describe("ReplayPremiere long runtime persistence", () => {
     const revealedInteractionState = secondInteractions.readState();
     await closeTracked(secondStore, stores);
 
+    recoverPrefix.mockClear();
+    recoverRevealChain.mockClear();
+    const revealedRecoveryStartedAt = performance.now();
     const recoveredStore = await openStore(root);
     stores.push(recoveredStore);
     const recovered = await ReplayPremiereRuntimeCoordinator.createOrRecover({
@@ -178,6 +192,10 @@ describe("ReplayPremiere long runtime persistence", () => {
       clock,
       interactions: createInteractions(gate, clock, revealedInteractionState),
     });
+    const revealedRecoveryMs = performance.now() - revealedRecoveryStartedAt;
+    expect(revealedRecoveryMs).toBeLessThan(10_000);
+    expect(recoverPrefix).not.toHaveBeenCalled();
+    expect(recoverRevealChain).toHaveBeenCalledTimes(1);
     expect(recoveredStore.recovered.events).toHaveLength(revealedEventCount);
     expect(recovered.readLifecycleState()).toBe("revealed");
     expect(recovered.readManifest()).toMatchObject({ state: "revealed" });

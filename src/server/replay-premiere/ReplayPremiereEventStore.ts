@@ -19,6 +19,14 @@ const aggregateIdPattern = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 const eventTypePattern = /^[a-z][a-z0-9_]{0,63}$/;
 const idempotencyKeyPattern = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,191}$/;
 const activeWriterRoots = new Set<string>();
+const authenticRecoveryViews = new WeakMap<
+  ReplayPremiereEventRecovery,
+  {
+    events: ReadonlyArray<StoredReplayPremiereEvent>;
+    lastEventSequence: number;
+    lastEventHash: string | null;
+  }
+>();
 
 export interface ReplayPremiereEventStoreLimits {
   maxEventBytes: number;
@@ -97,6 +105,29 @@ export interface ReplayPremiereEventRecoveryView {
   snapshot: ReplayPremiereSnapshot | null;
 }
 
+/**
+ * Proves that a recovery view still contains the exact immutable event
+ * objects accepted by ReplayPremiereEventStore's disk-recovery boundary.
+ * Caller-owned arrays remain mutable, so authenticity is revoked if their
+ * membership or tip metadata changes after the view is issued.
+ */
+export function readAuthenticReplayPremiereEventRecoveryEvents(
+  recovery: ReplayPremiereEventRecovery,
+): readonly StoredReplayPremiereEvent[] | null {
+  const authentic = authenticRecoveryViews.get(recovery);
+  if (authentic === undefined) return null;
+  const events = recovery.events;
+  if (
+    recovery.lastEventSequence !== authentic.lastEventSequence ||
+    recovery.lastEventHash !== authentic.lastEventHash ||
+    events.length !== authentic.events.length ||
+    events.some((event, index) => event !== authentic.events[index])
+  ) {
+    return null;
+  }
+  return authentic.events;
+}
+
 export class ReplayPremiereEventStore {
   readonly privateStateRoot: string;
   readonly eventsPath: string;
@@ -161,7 +192,7 @@ export class ReplayPremiereEventStore {
   }
 
   get recovered(): ReplayPremiereEventRecovery {
-    return {
+    const recovery = {
       // Stored events are cloned and recursively frozen when they cross the
       // append/recovery trust boundary. Return a caller-owned array while
       // reusing those immutable event objects; re-canonicalizing a large reveal
@@ -173,6 +204,12 @@ export class ReplayPremiereEventStore {
       eventLogBytes: this.recoveryState.eventLogBytes,
       aggregateBytes: new Map(this.recoveryState.aggregateBytes),
     };
+    authenticRecoveryViews.set(recovery, {
+      events: Object.freeze([...recovery.events]),
+      lastEventSequence: recovery.lastEventSequence,
+      lastEventHash: recovery.lastEventHash,
+    });
+    return recovery;
   }
 
   static async open(

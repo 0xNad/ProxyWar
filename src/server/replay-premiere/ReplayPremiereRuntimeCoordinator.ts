@@ -8,10 +8,11 @@ import type {
   ReleasedPremiereChunk,
 } from "./ReplayPremiereContracts";
 import { ReplayPremiereError } from "./ReplayPremiereErrors";
-import type {
-  ReplayPremiereEventRecovery,
-  ReplayPremiereSnapshot,
-  StoredReplayPremiereEvent,
+import {
+  readAuthenticReplayPremiereEventRecoveryEvents,
+  type ReplayPremiereEventRecovery,
+  type ReplayPremiereSnapshot,
+  type StoredReplayPremiereEvent,
 } from "./ReplayPremiereEventStore";
 import {
   assertReplayPremiereJsonValue,
@@ -187,8 +188,13 @@ export class ReplayPremiereRuntimeCoordinator {
       options.checkpointProjection,
     );
     const recovered = options.persistence.recovered;
-    assertStoredEventHashChain(recovered.events);
-    const aggregateEvents = recovered.events.filter(
+    const authenticEvents =
+      readAuthenticReplayPremiereEventRecoveryEvents(recovered);
+    const events = authenticEvents ?? [...recovered.events];
+    if (authenticEvents === null) {
+      assertStoredEventHashChain(events);
+    }
+    const aggregateEvents = events.filter(
       (event) => event.aggregateId === options.gate.premiereId,
     );
     if (aggregateEvents.length === 0) {
@@ -534,6 +540,7 @@ export class ReplayPremiereRuntimeCoordinator {
         options.gate,
         options.drafts,
         options.checkpointProjection,
+        { recoverReleasedPrefix: false },
       );
       validateRuntimeEventEnvelope(event, recovered);
       validateRuntimeEventSemantics(
@@ -1205,12 +1212,8 @@ function publicationFromRuntimeState(
   state: ReplayPremiereRuntimeSnapshotV1,
   drafts: readonly PremiereChunkDraft[],
 ): ReplayPremiereAtomicPublication {
-  const releasedChunks = recoverReleasedPrefixFromRuntimeState(
-    state,
-    gate,
-    drafts,
-  ).map((chunk) => toPremierePublicChunkResponse(chunk, gate));
-  return new ReplayPremiereAtomicPublication({
+  const releasedChunks = releasedPrefixFromRuntimeState(state, drafts);
+  return ReplayPremiereAtomicPublication.recover({
     gate,
     lifecycle: publicationLifecycleFromRuntimeState(state),
     manifest: manifestFromRuntimeState(state, gate),
@@ -1367,6 +1370,7 @@ function validateRuntimeSnapshot(
   gate: VerifiedPremiereEligibilityGate,
   drafts: readonly PremiereChunkDraft[],
   checkpointProjection: ReplayPremiereCheckpointProjection,
+  options: { recoverReleasedPrefix?: boolean } = {},
 ): void {
   assertReplayPremiereCheckpointProjection({
     projection: checkpointProjection,
@@ -1418,6 +1422,10 @@ function validateRuntimeSnapshot(
   }
   const checkpoints = gate.publicDefinition().checkpoints;
   const interactionCheckpoints = state.interactionCheckpoints;
+  const authoritativeElapsedMs = authoritativeElapsedAt(
+    state,
+    state.lastObservedAt,
+  );
   if (
     state.completedCheckpointIds.some(
       (id, index) => id !== checkpoints[index]?.id,
@@ -1485,7 +1493,9 @@ function validateRuntimeSnapshot(
       throw runtimeIntegrity("runtime_interaction_checkpoint_mismatch");
     }
   }
-  recoverReleasedPrefixFromRuntimeState(state, gate, drafts);
+  if (options.recoverReleasedPrefix !== false) {
+    recoverReleasedPrefixFromRuntimeState(state, gate, drafts);
+  }
   const lastSequence = state.releasedChunks.at(-1)?.endSequence ?? -1;
   if (state.lifecycle.lastSafeReleasedSequence !== lastSequence) {
     throw runtimeIntegrity("runtime_lifecycle_prefix_mismatch");
@@ -1497,7 +1507,8 @@ function validateRuntimeSnapshot(
       chunk.index !== index ||
       chunk.startSequence !== draft.descriptor.startSequence ||
       chunk.endSequence !== draft.descriptor.endSequence ||
-      chunk.presentationOffsetMs !== draft.descriptor.presentationOffsetMs
+      chunk.presentationOffsetMs !== draft.descriptor.presentationOffsetMs ||
+      chunk.presentationOffsetMs > authoritativeElapsedMs
     ) {
       throw runtimeIntegrity("runtime_released_prefix_mismatch");
     }
@@ -1899,6 +1910,18 @@ function recoverReleasedPrefixFromRuntimeState(
   gate: VerifiedPremiereEligibilityGate,
   drafts: readonly PremiereChunkDraft[],
 ): ReleasedPremiereChunk[] {
+  const released = releasedPrefixFromRuntimeState(state, drafts);
+  gate.recoverReleasedPrefix(
+    released,
+    authoritativeElapsedAt(state, state.lastObservedAt),
+  );
+  return released;
+}
+
+function releasedPrefixFromRuntimeState(
+  state: ReplayPremiereRuntimeSnapshotV1,
+  drafts: readonly PremiereChunkDraft[],
+): ReleasedPremiereChunk[] {
   const released = state.releasedChunks.map((descriptor, index) => {
     assertExactKeys(descriptor as unknown as Record<string, unknown>, [
       "premiereId",
@@ -1938,10 +1961,6 @@ function recoverReleasedPrefixFromRuntimeState(
       payload: draft.payload,
     } satisfies ReleasedPremiereChunk;
   });
-  gate.recoverReleasedPrefix(
-    released,
-    authoritativeElapsedAt(state, state.lastObservedAt),
-  );
   return released;
 }
 
