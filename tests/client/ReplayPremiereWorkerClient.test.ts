@@ -3,6 +3,10 @@ import {
   REPLAY_PREMIERE_TURN_BATCH_SIZE,
   ReplayPremiereWorkerClient,
 } from "../../src/client/ReplayPremiereWorkerClient";
+import {
+  REPLAY_PREMIERE_MAX_TICKS_PER_CATCH_UP_UPDATE,
+  REPLAY_PREMIERE_MAX_TICKS_PER_WORKER_SLICE,
+} from "../../src/client/ReplayPremiereWorkerProtocol";
 import { Turn } from "../../src/core/Schemas";
 
 class FakeReplayWorker {
@@ -57,11 +61,13 @@ describe("ReplayPremiereWorkerClient", () => {
     const batches = worker.posted.slice(1) as Array<{
       type: string;
       turns: Turn[];
+      delivery: string;
     }>;
     expect(batches).toHaveLength(
       Math.ceil(59_100 / REPLAY_PREMIERE_TURN_BATCH_SIZE),
     );
     expect(batches.every((batch) => batch.type === "turn_batch")).toBe(true);
+    expect(batches.every((batch) => batch.delivery === "catch_up")).toBe(true);
     expect(
       batches.every(
         (batch) =>
@@ -105,6 +111,82 @@ describe("ReplayPremiereWorkerClient", () => {
     ]);
     expect(client.completedTurnsForCurrentUpdate()).toBe(1);
     expect(client.tickExecutionDurationsForCurrentUpdate()).toBeUndefined();
+    expect(client.processedSequence()).toBe(2);
+    client.cleanup();
+  });
+
+  it("marks only genuinely backlogged ingress as catch-up delivery", async () => {
+    const worker = new FakeReplayWorker();
+    const microtasks: Array<() => void> = [];
+    const client = new ReplayPremiereWorkerClient({} as never, undefined, {
+      workerFactory: () => worker as never,
+      enqueueMicrotask: (callback) => microtasks.push(callback),
+    });
+    const initialized = client.initialize();
+    worker.emit({ type: "initialized", id: initializationId(worker) });
+    await initialized;
+
+    client.sendTurn({ turnNumber: 0, intents: [] } as Turn);
+    microtasks.shift()?.();
+    expect(worker.posted.at(-1)).toMatchObject({
+      type: "turn_batch",
+      delivery: "live",
+      turns: [{ turnNumber: 0 }],
+    });
+
+    for (
+      let turnNumber = 1;
+      turnNumber <= REPLAY_PREMIERE_MAX_TICKS_PER_WORKER_SLICE + 1;
+      turnNumber += 1
+    ) {
+      client.sendTurn({ turnNumber, intents: [] } as Turn);
+    }
+    microtasks.shift()?.();
+    expect(worker.posted.at(-1)).toMatchObject({
+      type: "turn_batch",
+      delivery: "catch_up",
+    });
+    client.cleanup();
+  });
+
+  it("accepts one bounded catch-up update and rejects an oversized worker count", async () => {
+    const worker = new FakeReplayWorker();
+    const client = new ReplayPremiereWorkerClient({} as never, undefined, {
+      workerFactory: () => worker as never,
+    });
+    const initialized = client.initialize();
+    worker.emit({ type: "initialized", id: initializationId(worker) });
+    await initialized;
+
+    const received: unknown[] = [];
+    client.start((update) => received.push(update));
+    worker.emit({
+      type: "game_update_batch",
+      gameUpdates: [{}],
+      completedTurns: REPLAY_PREMIERE_MAX_TICKS_PER_CATCH_UP_UPDATE,
+      tickExecutionDurations: Array(
+        REPLAY_PREMIERE_MAX_TICKS_PER_CATCH_UP_UPDATE,
+      ).fill(0),
+    });
+    expect(client.processedSequence()).toBe(
+      REPLAY_PREMIERE_MAX_TICKS_PER_CATCH_UP_UPDATE - 1,
+    );
+
+    worker.emit({
+      type: "game_update_batch",
+      gameUpdates: [{}],
+      completedTurns: REPLAY_PREMIERE_MAX_TICKS_PER_CATCH_UP_UPDATE + 1,
+      tickExecutionDurations: Array(
+        REPLAY_PREMIERE_MAX_TICKS_PER_CATCH_UP_UPDATE + 1,
+      ).fill(0),
+    });
+    expect(received.at(-1)).toEqual({
+      errMsg: "Replay worker failed",
+      stack: "unavailable",
+    });
+    expect(client.processedSequence()).toBe(
+      REPLAY_PREMIERE_MAX_TICKS_PER_CATCH_UP_UPDATE - 1,
+    );
     client.cleanup();
   });
 

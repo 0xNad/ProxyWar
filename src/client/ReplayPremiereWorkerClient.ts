@@ -15,6 +15,7 @@ import { generateID } from "../core/Util";
 import { WorkerMessage } from "../core/worker/WorkerMessages";
 import ReplayPremiereWorker from "./ReplayPremiereWorker.worker.ts?worker&inline";
 import {
+  REPLAY_PREMIERE_MAX_TICKS_PER_CATCH_UP_UPDATE,
   REPLAY_PREMIERE_MAX_TICKS_PER_WORKER_SLICE,
   ReplayPremiereWorkerInboundMessage,
 } from "./ReplayPremiereWorkerProtocol";
@@ -62,6 +63,7 @@ export class ReplayPremiereWorkerClient {
   private flushScheduled = false;
   private currentCompletedTurns = 1;
   private currentTickExecutionDurations: readonly number[] | undefined;
+  private processedTurns = 0;
   private initialized = false;
   private disposed = false;
 
@@ -225,6 +227,11 @@ export class ReplayPremiereWorkerClient {
     return this.currentTickExecutionDurations;
   }
 
+  /** Last replay sequence whose coalesced state has reached the main thread. */
+  processedSequence(): number {
+    return this.processedTurns - 1;
+  }
+
   cleanup(): void {
     this.disposeWorker(new Error("Replay worker is unavailable"));
   }
@@ -273,7 +280,8 @@ export class ReplayPremiereWorkerClient {
       message.gameUpdates.length !== 1 ||
       !Number.isSafeInteger(message.completedTurns) ||
       message.completedTurns < 1 ||
-      message.completedTurns > REPLAY_PREMIERE_MAX_TICKS_PER_WORKER_SLICE ||
+      message.completedTurns > REPLAY_PREMIERE_MAX_TICKS_PER_CATCH_UP_UPDATE ||
+      !Number.isSafeInteger(this.processedTurns + message.completedTurns) ||
       message.tickExecutionDurations.length !== message.completedTurns ||
       message.tickExecutionDurations.some(
         (duration) => !Number.isFinite(duration) || duration < 0,
@@ -282,6 +290,7 @@ export class ReplayPremiereWorkerClient {
       callback({ errMsg: "Replay worker failed", stack: "unavailable" });
       return;
     }
+    this.processedTurns += message.completedTurns;
     this.currentCompletedTurns = message.completedTurns;
     this.currentTickExecutionDurations = message.tickExecutionDurations;
     try {
@@ -296,9 +305,17 @@ export class ReplayPremiereWorkerClient {
     this.flushScheduled = false;
     if (this.disposed || this.pendingTurns.length === 0) return;
     while (this.pendingTurns.length > 0) {
+      const turns = this.pendingTurns.splice(
+        0,
+        REPLAY_PREMIERE_TURN_BATCH_SIZE,
+      );
       this.worker.postMessage({
         type: "turn_batch",
-        turns: this.pendingTurns.splice(0, REPLAY_PREMIERE_TURN_BATCH_SIZE),
+        turns,
+        delivery:
+          turns.length > REPLAY_PREMIERE_MAX_TICKS_PER_WORKER_SLICE
+            ? "catch_up"
+            : "live",
       });
     }
   }

@@ -6,6 +6,7 @@ import type {
 } from "../core/worker/WorkerMessages";
 
 export const REPLAY_PREMIERE_MAX_TICKS_PER_WORKER_SLICE = 128;
+export const REPLAY_PREMIERE_MAX_TICKS_PER_CATCH_UP_UPDATE = 4_096;
 
 export type ReplayPremiereWorkerCommand =
   | {
@@ -18,6 +19,7 @@ export type ReplayPremiereWorkerCommand =
   | {
       type: "turn_batch";
       turns: Turn[];
+      delivery: "live" | "catch_up";
     }
   | Exclude<MainThreadMessage, { type: "init" } | { type: "turn" }>;
 

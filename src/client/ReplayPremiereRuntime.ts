@@ -1336,6 +1336,20 @@ export class ReplayPremiereRuntimeController {
       (event as CustomEvent<unknown>).detail,
     );
     if (frame === null) return;
+    const playbackState = this.playback.state();
+    if (
+      frame.sequence === null ||
+      playbackState.releasedThroughSequence === null ||
+      playbackState.lastDispatchedSequence === null ||
+      frame.sequence > playbackState.releasedThroughSequence ||
+      frame.sequence > playbackState.lastDispatchedSequence ||
+      (this.latestFrame?.sequence !== null &&
+        this.latestFrame?.sequence !== undefined &&
+        frame.sequence < this.latestFrame.sequence)
+    ) {
+      this.latchFailure("integrity_failure");
+      return;
+    }
     const leaders = [...frame.players].sort(
       (left, right) =>
         right.tilesOwned - left.tilesOwned ||
@@ -1742,6 +1756,15 @@ export class ReplayPremiereRuntimeController {
       },
       onPrediction: async (request) => {
         this.assertInteractionWriteAllowed();
+        const checkpoint = this.projection?.publicDefinition.checkpoints.find(
+          (candidate) => candidate.id === request.checkpointId,
+        );
+        if (
+          checkpoint === undefined ||
+          checkpoint.sequence > this.observedSequence()
+        ) {
+          throw serviceError("request_rejected");
+        }
         const response = await this.service.submitPrediction(request);
         if (
           this.reveal === null &&
@@ -1755,6 +1778,12 @@ export class ReplayPremiereRuntimeController {
       },
       onMarker: async (request) => {
         this.assertInteractionWriteAllowed();
+        if (
+          request.premiereId !== this.options.premiereId ||
+          request.sequence > this.observedSequence()
+        ) {
+          throw serviceError("request_rejected");
+        }
         await this.service.submitReaction(request);
       },
       onShare: (request) => this.share(request),
@@ -1772,6 +1801,9 @@ export class ReplayPremiereRuntimeController {
       return;
     }
     this.assertInteractionWriteAllowed();
+    if (request.sequence > this.observedSequence()) {
+      throw serviceError("request_rejected");
+    }
     const response = await this.service.createShare({
       sequence: request.sequence,
     });
@@ -1881,6 +1913,20 @@ export class ReplayPremiereRuntimeController {
     );
     const viewedSequence = this.observedSequence();
     const currentTurn = this.latestFrame?.turnNumber ?? null;
+    const projectedActiveCheckpointId =
+      manifest?.activeCheckpoint?.id ??
+      this.serviceCheckpoints?.find(
+        (checkpoint) =>
+          checkpoint.state === "open" &&
+          checkpoint.id !== this.locallyClosedCheckpointId,
+      )?.id ??
+      null;
+    const projectedActiveCheckpoint =
+      projectedActiveCheckpointId === null
+        ? undefined
+        : this.projection.publicDefinition.checkpoints.find(
+            (checkpoint) => checkpoint.id === projectedActiveCheckpointId,
+          );
     return {
       premiereId: this.options.premiereId,
       state,
@@ -1905,13 +1951,10 @@ export class ReplayPremiereRuntimeController {
       checkpoints: this.overlayCheckpoints(policies, manifest),
       activeCheckpointId: checkpointDeadlineElapsed
         ? null
-        : (manifest?.activeCheckpoint?.id ??
-          this.serviceCheckpoints?.find(
-            (checkpoint) =>
-              checkpoint.state === "open" &&
-              checkpoint.id !== this.locallyClosedCheckpointId,
-          )?.id ??
-          null),
+        : projectedActiveCheckpoint !== undefined &&
+            projectedActiveCheckpoint.sequence <= viewedSequence
+          ? projectedActiveCheckpoint.id
+          : null,
       leaders: frameLeaders(this.latestFrame),
       headlineEvent: this.headlineEvent,
       markerPolicySeatId: null,
@@ -1974,36 +2017,46 @@ export class ReplayPremiereRuntimeController {
       const distribution = serviceView?.distribution;
       const total = serviceView?.totalPredictions ?? 0;
       const deadlineElapsed = definition.id === this.locallyClosedCheckpointId;
+      const observed = definition.sequence <= this.observedSequence();
       return {
         id: definition.id,
         sequence: definition.sequence,
-        state: deadlineElapsed
-          ? "closed"
-          : serviceView?.state === "open"
-            ? selectedSeatId === null
-              ? "open"
-              : "submitted"
-            : serviceView?.state === "closed"
-              ? "closed"
-              : active?.state === "open"
+        state: !observed
+          ? "pending"
+          : deadlineElapsed
+            ? "closed"
+            : serviceView?.state === "open"
+              ? selectedSeatId === null
                 ? "open"
-                : active?.state === "closed" ||
-                    (manifest !== null &&
-                      manifest.releasedThroughSequence >= definition.sequence)
-                  ? "closed"
-                  : "pending",
-        closesAt: serviceView?.closesAt ?? active?.closesAt ?? null,
-        options: optionSeatIds.flatMap((seatId) => {
-          const policy = policies.find(
-            (candidate) => candidate.seatId === seatId,
-          );
-          return policy === undefined
-            ? []
-            : [{ seatId, displayName: policy.displayName }];
-        }),
-        selectedSeatId,
+                : "submitted"
+              : serviceView?.state === "closed"
+                ? "closed"
+                : active?.state === "open"
+                  ? "open"
+                  : active?.state === "closed" ||
+                      (manifest !== null &&
+                        manifest.releasedThroughSequence >= definition.sequence)
+                    ? "closed"
+                    : "pending",
+        closesAt: observed
+          ? (serviceView?.closesAt ?? active?.closesAt ?? null)
+          : null,
+        options: observed
+          ? optionSeatIds.flatMap((seatId) => {
+              const policy = policies.find(
+                (candidate) => candidate.seatId === seatId,
+              );
+              return policy === undefined
+                ? []
+                : [{ seatId, displayName: policy.displayName }];
+            })
+          : [],
+        selectedSeatId: observed ? selectedSeatId : null,
         distribution:
-          distribution === null || distribution === undefined || total <= 0
+          !observed ||
+          distribution === null ||
+          distribution === undefined ||
+          total <= 0
             ? undefined
             : Object.entries(distribution).map(([seatId, count]) => ({
                 seatId,
@@ -2025,11 +2078,9 @@ export class ReplayPremiereRuntimeController {
   }
 
   private observedSequence(): number {
-    return (
-      this.playback.state().lastDispatchedSequence ??
-      this.latestFrame?.sequence ??
-      -1
-    );
+    // Dispatch may run thousands of turns ahead of the simulation during a
+    // reload. Only a frame emitted after GameView/render is viewer-observed.
+    return this.latestFrame?.sequence ?? -1;
   }
 
   private canonicalUrl(): string {
@@ -2439,9 +2490,12 @@ function preRevealManifest(
 
 function parseReplayPremiereFrame(value: unknown): ReplayPremiereFrame | null {
   if (!isRecord(value)) return null;
+  const sequence = value.sequence;
   const turnNumber = value.turnNumber;
   const players = value.players;
   if (
+    (sequence !== null &&
+      (!Number.isSafeInteger(sequence) || Number(sequence) < 0)) ||
     !Number.isSafeInteger(turnNumber) ||
     Number(turnNumber) < 0 ||
     !Array.isArray(players) ||
@@ -2470,7 +2524,7 @@ function parseReplayPremiereFrame(value: unknown): ReplayPremiereFrame | null {
     });
   }
   return {
-    sequence: null,
+    sequence: sequence === null ? null : Number(sequence),
     turnNumber: Number(turnNumber),
     players: parsedPlayers,
   };

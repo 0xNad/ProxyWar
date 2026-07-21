@@ -4,6 +4,7 @@ import { ErrorUpdate, GameUpdateViewData } from "../core/game/GameUpdates";
 import { createGameRunner, GameRunner } from "../core/GameRunner";
 import { coalesceReplayPremiereGameUpdates } from "./ReplayPremiereUpdateBatch";
 import {
+  REPLAY_PREMIERE_MAX_TICKS_PER_CATCH_UP_UPDATE,
   REPLAY_PREMIERE_MAX_TICKS_PER_WORKER_SLICE,
   ReplayPremiereWorkerCommand,
 } from "./ReplayPremiereWorkerProtocol";
@@ -19,6 +20,24 @@ let tickUpdateSink:
 let drainScheduled = false;
 let draining = false;
 let drainRequested = false;
+let catchUpDelivery = false;
+let catchUpSlices: GameUpdateViewData[] = [];
+let catchUpCompletedTurns = 0;
+let catchUpTickExecutionDurations: number[] = [];
+
+// Timer callbacks are clamped in background tabs. A MessageChannel task still
+// yields after every bounded simulation slice without turning a reconnect into
+// one approximately-one-second delay per 128 historical turns.
+const drainChannel = new MessageChannel();
+drainChannel.port1.onmessage = () => {
+  void drain().catch(() => {
+    clearCatchUpAccumulator();
+    postMessage({
+      type: "game_error",
+      error: { errMsg: "Replay worker failed", stack: "unavailable" },
+    });
+  });
+};
 
 function postMessage(message: unknown, transfers: Transferable[] = []): void {
   ctx.postMessage(message, transfers);
@@ -28,14 +47,52 @@ function scheduleDrain(): void {
   drainRequested = true;
   if (drainScheduled || draining) return;
   drainScheduled = true;
-  setTimeout(() => {
-    void drain().catch(() => {
-      postMessage({
-        type: "game_error",
-        error: { errMsg: "Replay worker failed", stack: "unavailable" },
-      });
-    });
-  }, 0);
+  drainChannel.port2.postMessage(null);
+}
+
+function postCoalescedUpdate(
+  update: GameUpdateViewData,
+  completedTurns: number,
+  tickExecutionDurations: number[],
+): void {
+  const transfers: Transferable[] = [update.packedTileUpdates.buffer];
+  if (update.packedMotionPlans) {
+    transfers.push(update.packedMotionPlans.buffer);
+  }
+  postMessage(
+    {
+      type: "game_update_batch",
+      gameUpdates: [update],
+      completedTurns,
+      tickExecutionDurations,
+    },
+    transfers,
+  );
+}
+
+function clearCatchUpAccumulator(): void {
+  catchUpSlices = [];
+  catchUpCompletedTurns = 0;
+  catchUpTickExecutionDurations = [];
+  catchUpDelivery = false;
+}
+
+function flushCatchUpAccumulator(): void {
+  if (catchUpSlices.length === 0 || catchUpCompletedTurns === 0) return;
+  const coalesced = coalesceReplayPremiereGameUpdates(catchUpSlices);
+  if (catchUpTickExecutionDurations.length > 0) {
+    coalesced.update.tickExecutionDuration =
+      catchUpTickExecutionDurations.reduce(
+        (sum, duration) => sum + duration,
+        0,
+      ) / catchUpTickExecutionDurations.length;
+  }
+  const completedTurns = catchUpCompletedTurns;
+  const tickExecutionDurations = catchUpTickExecutionDurations;
+  catchUpSlices = [];
+  catchUpCompletedTurns = 0;
+  catchUpTickExecutionDurations = [];
+  postCoalescedUpdate(coalesced.update, completedTurns, tickExecutionDurations);
 }
 
 async function drain(): Promise<void> {
@@ -64,23 +121,33 @@ async function drain(): Promise<void> {
     tickUpdateSink = null;
     if (updates.length > 0) {
       const coalesced = coalesceReplayPremiereGameUpdates(updates);
-      const transfers: Transferable[] = [];
-      transfers.push(coalesced.update.packedTileUpdates.buffer);
-      if (coalesced.update.packedMotionPlans) {
-        transfers.push(coalesced.update.packedMotionPlans.buffer);
+      if (catchUpDelivery) {
+        catchUpSlices.push(coalesced.update);
+        catchUpCompletedTurns += coalesced.completedTurns;
+        catchUpTickExecutionDurations.push(...coalesced.tickExecutionDurations);
+        if (
+          catchUpCompletedTurns >=
+            REPLAY_PREMIERE_MAX_TICKS_PER_CATCH_UP_UPDATE ||
+          runner.pendingTurns() === 0
+        ) {
+          flushCatchUpAccumulator();
+        }
+      } else {
+        postCoalescedUpdate(
+          coalesced.update,
+          coalesced.completedTurns,
+          coalesced.tickExecutionDurations,
+        );
       }
-      postMessage(
-        {
-          type: "game_update_batch",
-          gameUpdates: [coalesced.update],
-          completedTurns: coalesced.completedTurns,
-          tickExecutionDurations: coalesced.tickExecutionDurations,
-        },
-        transfers,
-      );
     }
-    if (error !== null) postMessage({ type: "game_error", error });
+    if (error !== null) {
+      clearCatchUpAccumulator();
+      postMessage({ type: "game_error", error });
+    }
     shouldContinue = error === null && runner.pendingTurns() > 0;
+    if (!shouldContinue && catchUpCompletedTurns === 0) {
+      catchUpDelivery = false;
+    }
   } finally {
     tickUpdateSink = null;
     draining = false;
@@ -133,6 +200,7 @@ ctx.addEventListener(
         switch (message.type) {
           case "turn_batch":
             for (const turn of message.turns) runner.addTurn(turn);
+            catchUpDelivery ||= message.delivery === "catch_up";
             scheduleDrain();
             return;
           case "player_actions":

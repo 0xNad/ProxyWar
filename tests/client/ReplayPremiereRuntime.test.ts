@@ -121,6 +121,101 @@ describe("ReplayPremiereRuntimeController", () => {
     harness.runtime.dispose();
   });
 
+  it("never reports a 4,096-turn dispatch window as observed before its rendered frame", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date(STARTED_AT));
+    const harness = runtimeHarness({ state: "checkpoint" });
+    const records = Array.from({ length: 4_096 }, (_, sequence) => ({
+      sequence,
+      presentationOffsetMs: sequence * 10,
+      turn: { turnNumber: sequence, intents: [] },
+    }));
+    harness.runtime.playback.appendVerifiedBatch({
+      premiereId: PREMIERE_ID,
+      chunkIndex: 0,
+      chunkHash: HASH_A,
+      previousChunkHash: null,
+      payloadHash: HASH_B,
+      startSequence: 0,
+      endSequence: 4_095,
+      verification: {
+        payloadHashVerified: true,
+        chunkHashVerified: true,
+      },
+      records,
+    });
+    for (const record of records) {
+      harness.runtime.playback.acknowledgeDispatchedRecord(record);
+    }
+    expect(harness.runtime.playback.state().lastDispatchedSequence).toBe(4_095);
+
+    const started = harness.runtime.start();
+    await harness.callbacks.onReady?.(projection("checkpoint"));
+    await started;
+    expect(harness.service.startSession).toHaveBeenCalledWith(
+      expect.objectContaining({ observedSequence: -1 }),
+    );
+
+    await harness.callbacks.onManifest?.(
+      checkpointManifest(STARTED_AT, "2026-07-20T18:00:30.000Z"),
+    );
+    expect(harness.models.at(-1)).toMatchObject({
+      releasedSequence: -1,
+      activeCheckpointId: null,
+      checkpoints: [
+        expect.objectContaining({
+          id: "cp_12345678",
+          state: "pending",
+          options: [],
+        }),
+        expect.anything(),
+      ],
+    });
+    await expect(
+      harness.overlayCallbacks.onMarker?.({
+        premiereId: PREMIERE_ID,
+        kind: "smart",
+        sequence: 10,
+        turn: 11,
+        policySeatId: null,
+      }),
+    ).rejects.toBeInstanceOf(ReplayPremiereServiceError);
+    expect(harness.service.submitReaction).not.toHaveBeenCalled();
+
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(harness.service.heartbeat).toHaveBeenLastCalledWith(
+      expect.objectContaining({ observedSequence: -1 }),
+    );
+
+    document.dispatchEvent(
+      new CustomEvent("ai-league-replay-frame", {
+        detail: { sequence: 10, turnNumber: 11, players: [] },
+      }),
+    );
+    expect(harness.models.at(-1)).toMatchObject({
+      releasedSequence: 10,
+      activeCheckpointId: "cp_12345678",
+      checkpoints: [
+        expect.objectContaining({ id: "cp_12345678", state: "open" }),
+        expect.anything(),
+      ],
+    });
+    await harness.overlayCallbacks.onMarker?.({
+      premiereId: PREMIERE_ID,
+      kind: "smart",
+      sequence: 10,
+      turn: 11,
+      policySeatId: null,
+    });
+    expect(harness.service.submitReaction).toHaveBeenCalledOnce();
+
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(harness.service.heartbeat).toHaveBeenLastCalledWith(
+      expect.objectContaining({ observedSequence: 10 }),
+    );
+    harness.runtime.dispose();
+  });
+
   it.each([
     {
       label: "structured service error",
@@ -665,6 +760,33 @@ describe("ReplayPremiereRuntimeController", () => {
     const started = harness.runtime.start();
     await harness.callbacks.onReady?.(projection("checkpoint"));
     await started;
+    const observedRecords = Array.from({ length: 11 }, (_, sequence) => ({
+      sequence,
+      presentationOffsetMs: sequence * 10,
+      turn: { turnNumber: sequence, intents: [] },
+    }));
+    harness.runtime.playback.appendVerifiedBatch({
+      premiereId: PREMIERE_ID,
+      chunkIndex: 0,
+      chunkHash: HASH_A,
+      previousChunkHash: null,
+      payloadHash: HASH_B,
+      startSequence: 0,
+      endSequence: 10,
+      verification: {
+        payloadHashVerified: true,
+        chunkHashVerified: true,
+      },
+      records: observedRecords,
+    });
+    for (const record of observedRecords) {
+      harness.runtime.playback.acknowledgeDispatchedRecord(record);
+    }
+    document.dispatchEvent(
+      new CustomEvent("ai-league-replay-frame", {
+        detail: { sequence: 10, turnNumber: 11, players: [] },
+      }),
+    );
     const manifest = checkpointManifest("2026-07-20T18:00:14.600Z", closesAt);
     await harness.callbacks.onManifest?.(manifest);
 

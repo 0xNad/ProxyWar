@@ -396,8 +396,12 @@ export class Transport {
   }
 
   public turnComplete() {
+    this.turnsComplete(1);
+  }
+
+  public turnsComplete(completedTurns: number) {
     if (this.isLocal) {
-      this.localServer.turnComplete();
+      this.localServer.turnsComplete(completedTurns);
     }
   }
 

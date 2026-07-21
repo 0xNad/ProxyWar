@@ -138,6 +138,10 @@ describe("ClientGameRunner replay startup errors", () => {
 
   it("renders a coalesced premiere update once and acknowledges every logical turn", () => {
     history.replaceState(null, "", "/premiere/prem_0123456789abcdef");
+    const replayFrame = vi.fn();
+    document.addEventListener("ai-league-replay-frame", replayFrame, {
+      once: true,
+    });
     let updateCallback: (update: never) => void = () => {
       throw new Error("Replay worker callback was not registered");
     };
@@ -153,6 +157,7 @@ describe("ClientGameRunner replay startup errors", () => {
       rejoinGame: vi.fn(),
       leaveGame: vi.fn(),
       turnComplete: vi.fn(),
+      turnsComplete: vi.fn(),
     };
     const worker = Object.assign(
       Object.create(ReplayPremiereWorkerClient.prototype),
@@ -163,6 +168,7 @@ describe("ClientGameRunner replay startup errors", () => {
         cleanup: vi.fn(),
         completedTurnsForCurrentUpdate: () => 128,
         tickExecutionDurationsForCurrentUpdate: () => [4, 8, 12],
+        processedSequence: () => 127,
       },
     );
     const gameView = {
@@ -204,9 +210,17 @@ describe("ClientGameRunner replay startup errors", () => {
       tickExecutionDuration: 12,
     } as never);
 
-    expect(transport.turnComplete).toHaveBeenCalledTimes(128);
+    expect(transport.turnComplete).not.toHaveBeenCalled();
+    expect(transport.turnsComplete).toHaveBeenCalledOnce();
+    expect(transport.turnsComplete).toHaveBeenCalledWith(128);
     expect(gameView.update).toHaveBeenCalledOnce();
     expect(renderer.tick).toHaveBeenCalledOnce();
+    expect(renderer.tick.mock.invocationCallOrder[0]).toBeLessThan(
+      transport.turnsComplete.mock.invocationCallOrder[0],
+    );
+    expect(
+      (replayFrame.mock.calls[0]?.[0] as CustomEvent).detail,
+    ).toMatchObject({ sequence: 127, turnNumber: 128 });
     expect(eventBus.emit).toHaveBeenCalledWith(
       expect.objectContaining<TickMetricsEvent>({
         completedTicks: 128,

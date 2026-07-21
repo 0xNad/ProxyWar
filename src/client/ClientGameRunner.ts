@@ -467,11 +467,14 @@ export class ClientGameRunner {
           this.stop();
           return;
         }
-        const completedTurns =
+        const premiereWorker =
           this.worker instanceof ReplayPremiereWorkerClient
-            ? this.worker.completedTurnsForCurrentUpdate()
-            : 1;
-        for (let completed = 0; completed < completedTurns; completed += 1) {
+            ? this.worker
+            : null;
+        const completedTurns = premiereWorker
+          ? premiereWorker.completedTurnsForCurrentUpdate()
+          : 1;
+        if (premiereWorker === null) {
           this.transport.turnComplete();
         }
         gu.updates[GameUpdateType.Hash].forEach((hu: HashUpdate) => {
@@ -485,6 +488,13 @@ export class ClientGameRunner {
         }
         this.renderer.tick();
         this.dispatchAiLeagueReplayFrame(gu);
+
+        // A premiere completion is observable only after its coalesced state
+        // has entered GameView and the renderer. This also prevents the final
+        // playback-complete signal from racing ahead of the visible frame.
+        if (premiereWorker !== null) {
+          this.transport.turnsComplete(completedTurns);
+        }
 
         this.eventBus.emit(
           new TickMetricsEvent(
@@ -687,11 +697,19 @@ export class ClientGameRunner {
         },
       ];
     });
+    const premiereProcessedSequence =
+      this.worker instanceof ReplayPremiereWorkerClient
+        ? this.worker.processedSequence()
+        : null;
     document.dispatchEvent(
       new CustomEvent("ai-league-replay-frame", {
         detail: {
           tick: gu.tick,
-          turnNumber: this.turnsSeen,
+          sequence: premiereProcessedSequence,
+          turnNumber:
+            premiereProcessedSequence === null
+              ? this.turnsSeen
+              : premiereProcessedSequence + 1,
           players,
         },
       }),

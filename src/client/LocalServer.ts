@@ -293,7 +293,20 @@ export class LocalServer {
 
   // This is so the client can tell us when it finished processing the turn.
   public turnComplete() {
-    this.turnsExecuted++;
+    this.turnsComplete(1);
+  }
+
+  public turnsComplete(completedTurns: number) {
+    const outstandingTurns = this.turns.length - this.turnsExecuted;
+    if (
+      !Number.isSafeInteger(completedTurns) ||
+      completedTurns < 1 ||
+      completedTurns > MAX_PROGRESSIVE_CATCH_UP_IN_FLIGHT_TURNS ||
+      completedTurns > outstandingTurns
+    ) {
+      throw new Error("invalid completed replay turn count");
+    }
+    this.turnsExecuted += completedTurns;
     this.runPendingProgressiveCatchUp();
     this.finishProgressiveReplayIfReady();
   }

@@ -10,6 +10,11 @@ import {
   ReplayPremierePlaybackController,
   VerifiedReplayPremiereBatch,
 } from "../../src/client/ReplayPremierePlayback";
+import { ReplayPremiereWorkerClient } from "../../src/client/ReplayPremiereWorkerClient";
+import {
+  REPLAY_PREMIERE_MAX_TICKS_PER_CATCH_UP_UPDATE,
+  REPLAY_PREMIERE_MAX_TICKS_PER_WORKER_SLICE,
+} from "../../src/client/ReplayPremiereWorkerProtocol";
 import { EventBus } from "../../src/core/EventBus";
 import {
   Difficulty,
@@ -27,6 +32,86 @@ import {
 
 const HASH_0 = "0".repeat(64);
 const HASH_1 = "1".repeat(64);
+
+class DeterministicCatchUpWorker {
+  readonly posted: unknown[] = [];
+  readonly terminate = vi.fn();
+  taskCount = 0;
+  updateCount = 0;
+  processedTurns = 0;
+
+  private listener:
+    | ((event: MessageEvent<Record<string, unknown>>) => void)
+    | null = null;
+  private pendingTurns: Turn[] = [];
+  private taskScheduled = false;
+  private catchUpDelivery = false;
+  private catchUpCompletedTurns = 0;
+
+  addEventListener(
+    _type: "message",
+    listener: (event: MessageEvent<Record<string, unknown>>) => void,
+  ): void {
+    this.listener = listener;
+  }
+
+  postMessage(message: unknown): void {
+    this.posted.push(message);
+    const command = message as {
+      type: string;
+      turns?: Turn[];
+      delivery?: "live" | "catch_up";
+    };
+    if (command.type !== "turn_batch" || command.turns === undefined) return;
+    this.pendingTurns.push(...command.turns);
+    this.catchUpDelivery ||= command.delivery === "catch_up";
+    this.taskScheduled = true;
+  }
+
+  initialize(): void {
+    const init = this.posted[0] as { id: string };
+    this.emit({ type: "initialized", id: init.id });
+  }
+
+  runNextTask(): boolean {
+    if (!this.taskScheduled) return false;
+    this.taskScheduled = false;
+    this.taskCount += 1;
+    const completedTurns = Math.min(
+      REPLAY_PREMIERE_MAX_TICKS_PER_WORKER_SLICE,
+      this.pendingTurns.length,
+    );
+    this.pendingTurns.splice(0, completedTurns);
+    this.processedTurns += completedTurns;
+    this.catchUpCompletedTurns += completedTurns;
+    const flush =
+      !this.catchUpDelivery ||
+      this.catchUpCompletedTurns >=
+        REPLAY_PREMIERE_MAX_TICKS_PER_CATCH_UP_UPDATE ||
+      this.pendingTurns.length === 0;
+    if (flush && this.catchUpCompletedTurns > 0) {
+      const coalescedTurns = this.catchUpCompletedTurns;
+      this.catchUpCompletedTurns = 0;
+      this.updateCount += 1;
+      this.emit({
+        type: "game_update_batch",
+        gameUpdates: [{}],
+        completedTurns: coalescedTurns,
+        tickExecutionDurations: Array(coalescedTurns).fill(0),
+      });
+    }
+    if (this.pendingTurns.length > 0) {
+      this.taskScheduled = true;
+    } else if (this.catchUpCompletedTurns === 0) {
+      this.catchUpDelivery = false;
+    }
+    return true;
+  }
+
+  private emit(message: Record<string, unknown>): void {
+    this.listener?.({ data: message } as MessageEvent<Record<string, unknown>>);
+  }
+}
 
 function gameStartInfo(): GameStartInfo {
   return {
@@ -279,13 +364,20 @@ describe("LocalServer progressive replay", () => {
       MAX_PROGRESSIVE_CATCH_UP_IN_FLIGHT_TURNS - 1,
     );
 
-    // Each worker acknowledgement opens one slot. The main thread never emits
-    // the remaining 66 turns without worker backpressure.
-    for (let completed = 0; completed < 66; completed += 1) {
-      server.turnComplete();
-    }
+    // One validated worker batch opens the exact number of slots without 66
+    // repeated completion/refill control-path traversals.
+    server.turnsComplete(66);
     expect(turnMessages(messages)).toHaveLength(totalTurns);
     expect(controller.state().lastDispatchedSequence).toBe(totalTurns - 1);
+    expect(() => server.turnsComplete(0)).toThrow(
+      "invalid completed replay turn count",
+    );
+    expect(() =>
+      server.turnsComplete(MAX_PROGRESSIVE_CATCH_UP_IN_FLIGHT_TURNS + 1),
+    ).toThrow("invalid completed replay turn count");
+    expect(() => server.turnsComplete(totalTurns)).toThrow(
+      "invalid completed replay turn count",
+    );
     server.endGame();
   });
 
@@ -407,6 +499,103 @@ describe("LocalServer progressive replay", () => {
     },
     20_000,
   );
+
+  it("integrates 59,100 verified records through worker/client backpressure within the five-second reload budget", async () => {
+    vi.useRealTimers();
+    const controller = new ReplayPremierePlaybackController(
+      "prem_0123456789abcdef",
+    );
+    const finalChunkHash = appendProductionLengthReplay(controller);
+    const worker = new DeterministicCatchUpWorker();
+    const mainTasks: Array<() => void> = [];
+    const client = new ReplayPremiereWorkerClient({} as never, undefined, {
+      workerFactory: () => worker as never,
+      enqueueMicrotask: (callback) => mainTasks.push(callback),
+    });
+    const initialized = client.initialize();
+    worker.initialize();
+    await initialized;
+
+    const server = new LocalServer(
+      lobbyConfig(controller),
+      true,
+      new EventBus(),
+    );
+    const renderedSequences: number[] = [];
+    client.start(() => {
+      renderedSequences.push(client.processedSequence());
+      const completedTurns = client.completedTurnsForCurrentUpdate();
+      server.turnsComplete(completedTurns);
+    });
+    server.updateCallback(
+      () => {},
+      (message) => {
+        if (message.type === "turn") client.sendTurn(message.turn);
+      },
+    );
+    server.start();
+
+    const reloadTarget = 49_999;
+    const startedAt = performance.now();
+    controller.requestForwardCatchUp(reloadTarget);
+    let guard = 0;
+    while (client.processedSequence() < reloadTarget) {
+      while (mainTasks.length > 0) mainTasks.shift()?.();
+      if (!worker.runNextTask()) {
+        throw new Error("catch-up worker starved before the released target");
+      }
+      guard += 1;
+      if (guard > 10_000) throw new Error("catch-up worker did not converge");
+    }
+    const reloadElapsedMs = performance.now() - startedAt;
+
+    expect(client.processedSequence()).toBe(reloadTarget);
+    expect(renderedSequences.at(-1)).toBe(reloadTarget);
+    expect(reloadElapsedMs).toBeLessThan(5_000);
+    expect(worker.updateCount).toBeLessThanOrEqual(
+      Math.ceil(
+        (reloadTarget + 1) / REPLAY_PREMIERE_MAX_TICKS_PER_CATCH_UP_UPDATE,
+      ),
+    );
+
+    controller.finalize(finalization(59_099, finalChunkHash));
+    controller.requestForwardCatchUp(59_099);
+    while (client.processedSequence() < 59_099) {
+      while (mainTasks.length > 0) mainTasks.shift()?.();
+      if (!worker.runNextTask()) {
+        throw new Error("catch-up worker starved before reveal completion");
+      }
+      guard += 1;
+      if (guard > 10_000) throw new Error("catch-up worker did not converge");
+    }
+
+    expect(client.processedSequence()).toBe(59_099);
+    expect(controller.state()).toMatchObject({
+      lastDispatchedSequence: 59_099,
+      finalized: true,
+      playbackComplete: true,
+    });
+    expect(worker.taskCount).toBe(
+      Math.ceil(
+        (reloadTarget + 1) / REPLAY_PREMIERE_MAX_TICKS_PER_WORKER_SLICE,
+      ) +
+        Math.ceil(
+          (59_100 - (reloadTarget + 1)) /
+            REPLAY_PREMIERE_MAX_TICKS_PER_WORKER_SLICE,
+        ),
+    );
+    expect(worker.updateCount).toBe(
+      Math.ceil(
+        (reloadTarget + 1) / REPLAY_PREMIERE_MAX_TICKS_PER_CATCH_UP_UPDATE,
+      ) +
+        Math.ceil(
+          (59_100 - (reloadTarget + 1)) /
+            REPLAY_PREMIERE_MAX_TICKS_PER_CATCH_UP_UPDATE,
+        ),
+    );
+    server.endGame();
+    client.cleanup();
+  }, 20_000);
 
   it("verifies released archived hashes when present", () => {
     const controller = new ReplayPremierePlaybackController(
