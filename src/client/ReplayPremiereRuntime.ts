@@ -323,11 +323,24 @@ export type ReplayPremiereServiceErrorCode =
   | "invalid_response"
   | "disposed";
 
+export type ReplayPremiereServiceErrorPhase =
+  | "constructor"
+  | "input"
+  | "fetch_rejection"
+  | "timeout"
+  | "response_policy"
+  | "response_read"
+  | "response_schema"
+  | "response_status"
+  | "response_binding"
+  | "unspecified";
+
 export class ReplayPremiereServiceError extends Error {
   constructor(
     public readonly code: ReplayPremiereServiceErrorCode,
     public readonly status: number | null = null,
     public readonly publicCode: ReplayPremierePublicErrorCode | null = null,
+    public readonly phase: ReplayPremiereServiceErrorPhase = "unspecified",
   ) {
     super(code);
     this.name = "ReplayPremiereServiceError";
@@ -407,12 +420,16 @@ export class ReplayPremiereServiceClient {
   async startSession(
     input: ReplayPremiereSessionInput,
   ): Promise<ReplayPremiereServiceSessionResponse> {
-    this.assertActive();
-    const parsedInput = parseSessionInput(input);
-    if (this.sessionBootstrapBody === null) {
-      this.sessionBootstrapBody = parsedInput;
-    } else if (!sameSessionInput(this.sessionBootstrapBody, parsedInput)) {
-      throw serviceError("invalid_configuration");
+    try {
+      this.assertActive();
+      const parsedInput = parseSessionInput(input);
+      if (this.sessionBootstrapBody === null) {
+        this.sessionBootstrapBody = parsedInput;
+      } else if (!sameSessionInput(this.sessionBootstrapBody, parsedInput)) {
+        throw serviceError("invalid_configuration");
+      }
+    } catch (error) {
+      throw serviceErrorWithPhase(error, "input");
     }
     const response = await this.postJson(
       "sessions",
@@ -422,11 +439,15 @@ export class ReplayPremiereServiceClient {
       201,
       false,
     );
-    this.assertSessionResponseBound(
-      response,
-      this.sessionBootstrapBody,
-      this.sessionIdempotencyKey,
-    );
+    try {
+      this.assertSessionResponseBound(
+        response,
+        this.sessionBootstrapBody,
+        this.sessionIdempotencyKey,
+      );
+    } catch (error) {
+      throw serviceErrorWithPhase(error, "response_binding");
+    }
     this.csrfToken = response.csrfToken;
     this.currentSession = response.session;
     return response;
@@ -589,10 +610,11 @@ export class ReplayPremiereServiceClient {
     this.abortController.signal.addEventListener("abort", abortRequest, {
       once: true,
     });
-    const timeout = setTimeout(
-      () => requestController.abort(),
-      this.requestTimeoutMs,
-    );
+    let timedOut = false;
+    const timeout = setTimeout(() => {
+      timedOut = true;
+      requestController.abort();
+    }, this.requestTimeoutMs);
     try {
       let response: Response;
       try {
@@ -618,15 +640,27 @@ export class ReplayPremiereServiceClient {
           },
         );
       } catch {
-        if (this.disposed) throw serviceError("disposed");
-        throw serviceError("request_failed");
+        if (this.disposed) {
+          throw serviceError("disposed", null, null, "fetch_rejection");
+        }
+        throw serviceError(
+          "request_failed",
+          null,
+          null,
+          timedOut ? "timeout" : "fetch_rejection",
+        );
       }
       const contentType = response.headers.get("content-type") ?? "";
       if (
         !JSON_CONTENT_TYPE_PATTERN.test(contentType.trim()) ||
         !hasNoStoreCachePolicy(response.headers)
       ) {
-        throw serviceError("invalid_response", response.status);
+        throw serviceError(
+          "invalid_response",
+          response.status,
+          null,
+          "response_policy",
+        );
       }
       const value = await readBoundedJsonResponse(
         response,
@@ -636,17 +670,28 @@ export class ReplayPremiereServiceClient {
       if (response.status !== expectedStatus) {
         const publicFailure = publicErrorResponseSchema.safeParse(value);
         if (!publicFailure.success) {
-          throw serviceError("invalid_response", response.status);
+          throw serviceError(
+            "invalid_response",
+            response.status,
+            null,
+            "response_schema",
+          );
         }
         throw serviceError(
           "request_rejected",
           response.status,
           publicFailure.data.error.code,
+          "response_status",
         );
       }
       const parsed = schema.safeParse(value);
       if (!parsed.success) {
-        throw serviceError("invalid_response", response.status);
+        throw serviceError(
+          "invalid_response",
+          response.status,
+          null,
+          "response_schema",
+        );
       }
       return parsed.data;
     } finally {
@@ -2104,15 +2149,62 @@ function isRetryableServiceFailure(error: unknown): boolean {
 }
 
 function logInteractionBootstrapFailure(error: unknown): void {
-  const diagnostic =
-    error instanceof ReplayPremiereServiceError
-      ? {
-          code: error.code,
-          status: error.status,
-          publicCode: error.publicCode,
-        }
-      : { code: "unexpected_failure", status: null, publicCode: null };
-  console.error("Replay Premiere interaction bootstrap failed", diagnostic);
+  let code = "unexpected_failure";
+  let status = "none";
+  let publicCode = "none";
+  let phase = "unexpected";
+  try {
+    if (error instanceof ReplayPremiereServiceError) {
+      code = isServiceErrorCode(error.code) ? error.code : "unexpected_failure";
+      status = isHttpStatus(error.status) ? String(error.status) : "none";
+      publicCode = publicErrorCodeSchema.safeParse(error.publicCode).success
+        ? String(error.publicCode)
+        : "none";
+      phase = isServiceErrorPhase(error.phase) ? error.phase : "unspecified";
+    }
+  } catch {
+    code = "unexpected_failure";
+    status = "none";
+    publicCode = "none";
+    phase = "unexpected";
+  }
+  console.error(
+    `Replay Premiere interaction bootstrap failed code=${code} status=${status} publicCode=${publicCode} phase=${phase}`,
+  );
+}
+
+function isServiceErrorCode(
+  value: unknown,
+): value is ReplayPremiereServiceErrorCode {
+  return (
+    value === "invalid_configuration" ||
+    value === "session_required" ||
+    value === "request_failed" ||
+    value === "request_rejected" ||
+    value === "invalid_response" ||
+    value === "disposed"
+  );
+}
+
+function isServiceErrorPhase(
+  value: unknown,
+): value is ReplayPremiereServiceErrorPhase {
+  return (
+    value === "constructor" ||
+    value === "input" ||
+    value === "fetch_rejection" ||
+    value === "timeout" ||
+    value === "response_policy" ||
+    value === "response_read" ||
+    value === "response_schema" ||
+    value === "response_status" ||
+    value === "response_binding" ||
+    value === "unspecified"
+  );
+}
+
+function isHttpStatus(value: unknown): value is number {
+  return Number.isInteger(value) && Number(value) >= 100 && Number(value) <= 599;
 }
 
 export function parseReplayPremiereRoute(pathname: string): string | null {
@@ -2287,10 +2379,20 @@ async function readBoundedJsonResponse(
 ): Promise<unknown> {
   const declaredLength = Number(response.headers.get("content-length"));
   if (Number.isFinite(declaredLength) && declaredLength > maxBytes) {
-    throw serviceError("invalid_response", response.status);
+    throw serviceError(
+      "invalid_response",
+      response.status,
+      null,
+      "response_read",
+    );
   }
   if (response.body === null) {
-    throw serviceError("invalid_response", response.status);
+    throw serviceError(
+      "invalid_response",
+      response.status,
+      null,
+      "response_read",
+    );
   }
   const reader = response.body.getReader();
   const decoder = new TextDecoder();
@@ -2298,25 +2400,37 @@ async function readBoundedJsonResponse(
   let bytes = 0;
   try {
     while (true) {
-      if (signal.aborted) throw serviceError("request_failed");
+      if (signal.aborted) {
+        throw serviceError("request_failed", null, null, "response_read");
+      }
       const next = await reader.read();
       if (next.done) break;
       bytes += next.value.byteLength;
       if (bytes > maxBytes) {
         void reader.cancel();
-        throw serviceError("invalid_response", response.status);
+        throw serviceError(
+          "invalid_response",
+          response.status,
+          null,
+          "response_read",
+        );
       }
       chunks.push(decoder.decode(next.value, { stream: true }));
     }
     chunks.push(decoder.decode());
   } catch (error) {
     if (error instanceof ReplayPremiereServiceError) throw error;
-    throw serviceError("request_failed");
+    throw serviceError("request_failed", null, null, "response_read");
   }
   try {
     return JSON.parse(chunks.join("")) as unknown;
   } catch {
-    throw serviceError("invalid_response", response.status);
+    throw serviceError(
+      "invalid_response",
+      response.status,
+      null,
+      "response_read",
+    );
   }
 }
 
@@ -2396,8 +2510,18 @@ function serviceError(
   code: ReplayPremiereServiceErrorCode,
   status: number | null = null,
   publicCode: ReplayPremierePublicErrorCode | null = null,
+  phase: ReplayPremiereServiceErrorPhase = "unspecified",
 ): ReplayPremiereServiceError {
-  return new ReplayPremiereServiceError(code, status, publicCode);
+  return new ReplayPremiereServiceError(code, status, publicCode, phase);
+}
+
+function serviceErrorWithPhase(
+  error: unknown,
+  phase: ReplayPremiereServiceErrorPhase,
+): ReplayPremiereServiceError {
+  return error instanceof ReplayPremiereServiceError
+    ? serviceError(error.code, error.status, error.publicCode, phase)
+    : serviceError("invalid_configuration", null, null, phase);
 }
 
 async function defaultCopyText(text: string): Promise<void> {

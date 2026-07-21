@@ -128,25 +128,20 @@ describe("ReplayPremiereRuntimeController", () => {
           "request_rejected",
           403,
           "PREMIERE_INVALID_REQUEST",
+          "response_status",
         ),
         { privateUpstreamBody: "token=/private/operator/path" },
       ),
-      expected: {
-        code: "request_rejected",
-        status: 403,
-        publicCode: "PREMIERE_INVALID_REQUEST",
-      },
+      expected:
+        "Replay Premiere interaction bootstrap failed code=request_rejected status=403 publicCode=PREMIERE_INVALID_REQUEST phase=response_status",
     },
     {
       label: "arbitrary exception",
       failure: Object.assign(new Error("token=/private/operator/path"), {
         responseBody: "secret upstream response",
       }),
-      expected: {
-        code: "unexpected_failure",
-        status: null,
-        publicCode: null,
-      },
+      expected:
+        "Replay Premiere interaction bootstrap failed code=unexpected_failure status=none publicCode=none phase=unexpected",
     },
   ])(
     "logs only bounded bootstrap diagnostics for a $label",
@@ -165,10 +160,8 @@ describe("ReplayPremiereRuntimeController", () => {
       await harness.callbacks.onReady?.(projection("playing"));
       await expect(started).rejects.toBeInstanceOf(ReplayPremiereNetworkError);
 
-      expect(errorLog).toHaveBeenCalledWith(
-        "Replay Premiere interaction bootstrap failed",
-        testCase.expected,
-      );
+      expect(errorLog).toHaveBeenCalledWith(testCase.expected);
+      expect(errorLog.mock.calls[0]).toHaveLength(1);
       const serializedLog = JSON.stringify(errorLog.mock.calls);
       expect(serializedLog).not.toContain("private/operator");
       expect(serializedLog).not.toContain("secret upstream");
