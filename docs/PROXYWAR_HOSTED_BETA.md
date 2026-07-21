@@ -75,6 +75,20 @@ Edit both copied files with the real subdomain, tunnel credentials path, backup
 path, and invite code. Then install the launchd examples from `deploy/mac/` into
 `~/Library/LaunchAgents/`.
 
+Install `start-proxywar-beta.zsh` under
+`~/Library/Application Support/ProxyWar/bin/`, matching the plist. The direct
+Node launch is a safety invariant: launchd must own the process holding the
+Replay Premiere writer lock. Never restart this service with
+`launchctl kickstart -k`; use `deploy/mac/proxywar-beta-launchd-restart.mjs`
+after its dry run passes. When `AI_LEAGUE_DEMO_PORT` differs from the 8787
+default, pass `--ready-url=http://127.0.0.1:<port>/league` to both the dry run
+and the real run; the helper refuses to signal a server that fails that
+readiness preflight unless `--allow-unready-current` is explicitly given for
+hang recovery. For the one-time migration from the older npm-parent
+shape, follow the exact-hash activation and rollback transaction in
+`deploy/README.md`. Matching restored hashes alone is not rollback success; the
+restored managed group, writer ownership, and loopback HTTP 200 must also pass.
+
 ### Safety Defaults
 
 For hosted testers:
