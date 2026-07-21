@@ -32,6 +32,7 @@ import {
   ReplayPremiereServiceError,
   type ReplayPremiereServiceCheckpoint,
   type ReplayPremiereServiceHeartbeatResponse,
+  type ReplayPremiereServiceReactionResponse,
   type ReplayPremiereServiceSession,
   type ReplayPremiereServiceSessionResponse,
 } from "../../src/client/ReplayPremiereRuntime";
@@ -117,6 +118,270 @@ describe("ReplayPremiereRuntimeController", () => {
       canPredict: true,
       canMark: true,
       canShare: true,
+    });
+    harness.runtime.dispose();
+  });
+
+  it("retries a transient session bootstrap without latching a fatal state", async () => {
+    vi.useFakeTimers();
+    const startSession = vi
+      .fn<() => Promise<ReplayPremiereServiceSessionResponse>>()
+      .mockRejectedValueOnce(
+        new ReplayPremiereServiceError(
+          "request_failed",
+          502,
+          null,
+          "response_status",
+        ),
+      )
+      .mockResolvedValueOnce(sessionResponse("playing"));
+    const harness = runtimeHarness({
+      state: "playing",
+      service: { startSession },
+    });
+
+    const started = harness.runtime.start();
+    await harness.callbacks.onReady?.(projection("playing"));
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(startSession).toHaveBeenCalledOnce();
+    expect(harness.onJoin).not.toHaveBeenCalled();
+    expect(harness.models.at(-1)?.failureCode).toBeNull();
+    await vi.advanceTimersByTimeAsync(999);
+    expect(startSession).toHaveBeenCalledOnce();
+    await vi.advanceTimersByTimeAsync(1);
+    await started;
+
+    expect(startSession).toHaveBeenCalledTimes(2);
+    expect(harness.onJoin).toHaveBeenCalledOnce();
+    expect(harness.models.at(-1)).toMatchObject({
+      state: "playing",
+      failureCode: null,
+    });
+    harness.runtime.dispose();
+  });
+
+  it("recovers a session-gated join within five seconds when a hung production request spans restoration", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date(STARTED_AT));
+    let available = false;
+    let requestNumber = 0;
+    const fetchMock = vi.fn(
+      (_input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+        requestNumber += 1;
+        if (requestNumber === 1) {
+          return new Promise<Response>((_resolve, reject) => {
+            init?.signal?.addEventListener(
+              "abort",
+              () => reject(new DOMException("aborted", "AbortError")),
+              { once: true },
+            );
+          });
+        }
+        if (!available) return Promise.reject(new TypeError("unavailable"));
+        return Promise.resolve(jsonResponse(sessionResponse("playing"), 201));
+      },
+    );
+    const service = new ReplayPremiereServiceClient({
+      premiereId: PREMIERE_ID,
+      origin: window.location.origin,
+      fetchImpl: fetchMock as unknown as typeof fetch,
+      randomBytes: () => new Uint8Array(16).fill(1),
+    });
+    let callbacks!: ReplayPremiereNetworkCallbacks;
+    const onJoin = vi.fn();
+    const models: ReplayPremiereOverlayModel[] = [];
+    const runtime = new ReplayPremiereRuntimeController({
+      premiereId: PREMIERE_ID,
+      onJoinReady: onJoin,
+      dependencies: {
+        windowRef: window,
+        documentRef: document,
+        serviceFactory: () => service,
+        networkFactory: (options) => {
+          callbacks = options.callbacks;
+          return {
+            start: vi.fn(async () => ({ status: "active" })),
+            syncOnce: vi.fn(async () => ({ status: "active" })),
+            dispose: vi.fn(),
+          };
+        },
+        overlayFactory: (model) => {
+          models.push(model);
+          return {
+            element: document.createElement("aside"),
+            hydrate(nextModel) {
+              models.push(nextModel);
+            },
+            dispose: vi.fn(),
+          };
+        },
+      },
+    });
+
+    const started = runtime.start();
+    await callbacks.onReady?.(projection("playing"));
+    await Promise.resolve();
+    expect(fetchMock).toHaveBeenCalledOnce();
+    await vi.advanceTimersByTimeAsync(1);
+    available = true;
+    const restoredAt = Date.now();
+    await vi.advanceTimersByTimeAsync(2_998);
+    expect(onJoin).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(1);
+    await started;
+
+    expect(onJoin).toHaveBeenCalledOnce();
+    expect(Date.now() - restoredAt).toBe(2_999);
+    expect(models.at(-1)).toMatchObject({
+      state: "playing",
+      failureCode: null,
+    });
+    runtime.dispose();
+  });
+
+  it("retries a transient heartbeat within one second without latching a fatal state", async () => {
+    vi.useFakeTimers();
+    const heartbeat = vi
+      .fn<() => Promise<ReplayPremiereServiceHeartbeatResponse>>()
+      .mockRejectedValueOnce(
+        new ReplayPremiereServiceError(
+          "request_failed",
+          502,
+          null,
+          "response_status",
+        ),
+      )
+      .mockResolvedValueOnce(heartbeatResponse("playing"));
+    const harness = runtimeHarness({
+      state: "playing",
+      service: { heartbeat },
+    });
+
+    const started = harness.runtime.start();
+    await harness.callbacks.onReady?.(projection("playing"));
+    await started;
+    await vi.advanceTimersByTimeAsync(10_000);
+
+    expect(heartbeat).toHaveBeenCalledOnce();
+    expect(harness.models.at(-1)?.failureCode).toBeNull();
+    await vi.advanceTimersByTimeAsync(999);
+    expect(heartbeat).toHaveBeenCalledOnce();
+    await vi.advanceTimersByTimeAsync(1);
+
+    expect(heartbeat).toHaveBeenCalledTimes(2);
+    expect(harness.models.at(-1)).toMatchObject({
+      state: "playing",
+      failureCode: null,
+    });
+    harness.runtime.dispose();
+  });
+
+  it("maintains one bounded heartbeat retry loop across a persistent outage", async () => {
+    vi.useFakeTimers();
+    const heartbeat = vi.fn(async () => {
+      throw new ReplayPremiereServiceError(
+        "request_failed",
+        502,
+        null,
+        "response_status",
+      );
+    });
+    const harness = runtimeHarness({
+      state: "playing",
+      service: { heartbeat },
+    });
+
+    const started = harness.runtime.start();
+    await harness.callbacks.onReady?.(projection("playing"));
+    await started;
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(heartbeat).toHaveBeenCalledOnce();
+
+    await vi.advanceTimersByTimeAsync(4_000);
+    expect(heartbeat).toHaveBeenCalledTimes(5);
+    expect(harness.models.at(-1)).toMatchObject({
+      state: "playing",
+      failureCode: null,
+    });
+    harness.runtime.dispose();
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(heartbeat).toHaveBeenCalledTimes(5);
+  });
+
+  it("keeps transient marker failure recoverable but latches a strict marker response failure", async () => {
+    const submitReaction = vi
+      .fn<() => Promise<ReplayPremiereServiceReactionResponse>>()
+      .mockRejectedValueOnce(
+        new ReplayPremiereServiceError(
+          "request_failed",
+          502,
+          null,
+          "response_status",
+        ),
+      )
+      .mockRejectedValueOnce(
+        new ReplayPremiereServiceError(
+          "invalid_response",
+          200,
+          null,
+          "response_binding",
+        ),
+      );
+    const harness = runtimeHarness({
+      state: "playing",
+      service: { submitReaction },
+    });
+    const record = {
+      sequence: 0,
+      presentationOffsetMs: 0,
+      turn: { turnNumber: 0, intents: [] },
+    };
+    harness.runtime.playback.appendVerifiedBatch({
+      premiereId: PREMIERE_ID,
+      chunkIndex: 0,
+      chunkHash: HASH_A,
+      previousChunkHash: null,
+      payloadHash: HASH_B,
+      startSequence: 0,
+      endSequence: 0,
+      verification: {
+        payloadHashVerified: true,
+        chunkHashVerified: true,
+      },
+      records: [record],
+    });
+    harness.runtime.playback.acknowledgeDispatchedRecord(record);
+    const started = harness.runtime.start();
+    await harness.callbacks.onReady?.(projection("playing"));
+    await started;
+    document.dispatchEvent(
+      new CustomEvent("ai-league-replay-frame", {
+        detail: { sequence: 0, turnNumber: 0, players: [] },
+      }),
+    );
+    const marker = {
+      premiereId: PREMIERE_ID,
+      kind: "smart" as const,
+      sequence: 0,
+      turn: 0,
+      policySeatId: null,
+    };
+
+    await expect(
+      harness.overlayCallbacks.onMarker?.(marker),
+    ).rejects.toMatchObject({ code: "request_failed" });
+    expect(harness.models.at(-1)).toMatchObject({
+      state: "playing",
+      failureCode: null,
+    });
+    await expect(
+      harness.overlayCallbacks.onMarker?.(marker),
+    ).rejects.toMatchObject({ code: "invalid_response" });
+    expect(harness.models.at(-1)).toMatchObject({
+      state: "failed",
+      failureCode: "integrity_failure",
     });
     harness.runtime.dispose();
   });
@@ -888,6 +1153,233 @@ describe("ReplayPremiereRuntimeController", () => {
 });
 
 describe("ReplayPremiereServiceClient", () => {
+  it("retries malformed gateway failures with the exact session and heartbeat idempotency envelopes", async () => {
+    const fetchMock = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(malformedGatewayResponse(502))
+      .mockResolvedValueOnce(jsonResponse(sessionResponse("playing"), 201))
+      .mockResolvedValueOnce(malformedGatewayResponse(502))
+      .mockResolvedValueOnce(jsonResponse(heartbeatResponse("playing"), 200))
+      .mockResolvedValueOnce(malformedGatewayResponse(502))
+      .mockResolvedValueOnce(jsonResponse(reactionResponse(), 200));
+    let randomByte = 1;
+    const randomBytes = vi.fn(() => new Uint8Array(16).fill(randomByte++));
+    const client = new ReplayPremiereServiceClient({
+      premiereId: PREMIERE_ID,
+      origin: "https://proxywar.example",
+      fetchImpl: fetchMock,
+      randomBytes,
+    });
+    client.bindVerifiedProjection(projection("playing"));
+    const sessionInput = { visible: true, observedSequence: -1 };
+
+    await expect(client.startSession(sessionInput)).rejects.toMatchObject({
+      code: "request_failed",
+      status: 502,
+      phase: "response_status",
+    });
+    expect(client.session()).toBeNull();
+    await expect(client.startSession(sessionInput)).resolves.toMatchObject({
+      session: { id: SESSION_ID },
+    });
+
+    const firstSessionRequest = fetchMock.mock.calls[0][1];
+    const retriedSessionRequest = fetchMock.mock.calls[1][1];
+    expect(retriedSessionRequest?.body).toBe(firstSessionRequest?.body);
+    expect(
+      new Headers(retriedSessionRequest?.headers).get("x-idempotency-key"),
+    ).toBe(new Headers(firstSessionRequest?.headers).get("x-idempotency-key"));
+
+    await expect(
+      client.heartbeat({ visible: true, observedSequence: -1 }),
+    ).rejects.toMatchObject({
+      code: "request_failed",
+      status: 502,
+      phase: "response_status",
+    });
+    expect(client.session()?.id).toBe(SESSION_ID);
+    await expect(
+      client.heartbeat({ visible: false, observedSequence: 7 }),
+    ).resolves.toMatchObject({ session: { id: SESSION_ID } });
+
+    const firstHeartbeatRequest = fetchMock.mock.calls[2][1];
+    const retriedHeartbeatRequest = fetchMock.mock.calls[3][1];
+    expect(retriedHeartbeatRequest?.body).toBe(firstHeartbeatRequest?.body);
+    expect(JSON.parse(String(retriedHeartbeatRequest?.body))).toEqual({
+      visible: true,
+      observedSequence: -1,
+    });
+    expect(
+      new Headers(retriedHeartbeatRequest?.headers).get("x-idempotency-key"),
+    ).toBe(
+      new Headers(firstHeartbeatRequest?.headers).get("x-idempotency-key"),
+    );
+
+    const marker = {
+      premiereId: PREMIERE_ID,
+      kind: "smart" as const,
+      sequence: 0,
+      turn: 0,
+      policySeatId: null,
+    };
+    await expect(client.submitReaction(marker)).rejects.toMatchObject({
+      code: "request_failed",
+      status: 502,
+      phase: "response_status",
+    });
+    await expect(client.submitReaction(marker)).resolves.toMatchObject({
+      reaction: { id: `react_${"7".repeat(32)}` },
+    });
+    const firstReactionRequest = fetchMock.mock.calls[4][1];
+    const retriedReactionRequest = fetchMock.mock.calls[5][1];
+    expect(retriedReactionRequest?.body).toBe(firstReactionRequest?.body);
+    expect(
+      new Headers(retriedReactionRequest?.headers).get("x-idempotency-key"),
+    ).toBe(new Headers(firstReactionRequest?.headers).get("x-idempotency-key"));
+    expect(randomBytes).toHaveBeenCalledTimes(3);
+    client.dispose();
+  });
+
+  it.each([408, 425, 429, 500, 502, 503, 599])(
+    "classifies malformed HTTP %i as retryable transport evidence before parsing",
+    async (status) => {
+      const client = new ReplayPremiereServiceClient({
+        premiereId: PREMIERE_ID,
+        origin: "https://proxywar.example",
+        fetchImpl: vi.fn(async () => malformedGatewayResponse(status)),
+        randomBytes: () => new Uint8Array(16).fill(1),
+      });
+      client.bindVerifiedProjection(projection("playing"));
+
+      await expect(
+        client.startSession({ visible: true, observedSequence: -1 }),
+      ).rejects.toMatchObject({
+        code: "request_failed",
+        status,
+        phase: "response_status",
+      });
+      expect(client.session()).toBeNull();
+      client.dispose();
+    },
+  );
+
+  it("classifies an HTML 502 without touching its response body", async () => {
+    const bodyAccess = vi.fn(() => {
+      throw new Error("gateway body must not be read");
+    });
+    const response = new Response(null, {
+      status: 502,
+      headers: { "content-type": "text/html; charset=utf-8" },
+    });
+    Object.defineProperty(response, "body", { get: bodyAccess });
+    const client = new ReplayPremiereServiceClient({
+      premiereId: PREMIERE_ID,
+      origin: "https://proxywar.example",
+      fetchImpl: vi.fn(async () => response),
+      randomBytes: () => new Uint8Array(16).fill(1),
+    });
+    client.bindVerifiedProjection(projection("playing"));
+
+    await expect(
+      client.startSession({ visible: true, observedSequence: -1 }),
+    ).rejects.toMatchObject({
+      code: "request_failed",
+      status: 502,
+      phase: "response_status",
+    });
+    expect(bodyAccess).not.toHaveBeenCalled();
+    client.dispose();
+  });
+
+  it("keeps malformed non-transient 4xx and cache-policy failures fatal", async () => {
+    const fetchMock = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(malformedGatewayResponse(400))
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify(sessionResponse("playing")), {
+          status: 201,
+          headers: { "content-type": "application/json" },
+        }),
+      );
+    const client = new ReplayPremiereServiceClient({
+      premiereId: PREMIERE_ID,
+      origin: "https://proxywar.example",
+      fetchImpl: fetchMock,
+      randomBytes: () => new Uint8Array(16).fill(1),
+    });
+    client.bindVerifiedProjection(projection("playing"));
+
+    await expect(
+      client.startSession({ visible: true, observedSequence: -1 }),
+    ).rejects.toMatchObject({
+      code: "invalid_response",
+      status: 400,
+      phase: "response_policy",
+    });
+    await expect(
+      client.startSession({ visible: true, observedSequence: -1 }),
+    ).rejects.toMatchObject({
+      code: "invalid_response",
+      status: 201,
+      phase: "response_policy",
+    });
+    expect(client.session()).toBeNull();
+    client.dispose();
+  });
+
+  it("keeps a JSON 502 without no-store fatal as a cache-policy failure", async () => {
+    const response = new Response(
+      JSON.stringify({ error: { code: "PREMIERE_UNAVAILABLE" } }),
+      {
+        status: 502,
+        headers: { "content-type": "application/json" },
+      },
+    );
+    const client = new ReplayPremiereServiceClient({
+      premiereId: PREMIERE_ID,
+      origin: "https://proxywar.example",
+      fetchImpl: vi.fn(async () => response),
+      randomBytes: () => new Uint8Array(16).fill(1),
+    });
+    client.bindVerifiedProjection(projection("playing"));
+
+    await expect(
+      client.startSession({ visible: true, observedSequence: -1 }),
+    ).rejects.toMatchObject({
+      code: "invalid_response",
+      status: 502,
+      phase: "response_policy",
+    });
+    expect(client.session()).toBeNull();
+    client.dispose();
+  });
+
+  it("preserves strict application-error semantics for valid transient-status JSON envelopes", async () => {
+    const fetchMock = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(
+        jsonResponse({ error: { code: "PREMIERE_INTEGRITY_FAILURE" } }, 500),
+      );
+    const client = new ReplayPremiereServiceClient({
+      premiereId: PREMIERE_ID,
+      origin: "https://proxywar.example",
+      fetchImpl: fetchMock,
+      randomBytes: () => new Uint8Array(16).fill(1),
+    });
+    client.bindVerifiedProjection(projection("playing"));
+
+    await expect(
+      client.startSession({ visible: true, observedSequence: -1 }),
+    ).rejects.toMatchObject({
+      code: "request_rejected",
+      status: 500,
+      publicCode: "PREMIERE_INTEGRITY_FAILURE",
+      phase: "response_status",
+    });
+    expect(client.session()).toBeNull();
+    client.dispose();
+  });
+
   it("uses the exact same-origin write envelope and rejects a cross-session heartbeat without poisoning the session", async () => {
     const session = sessionResponse("playing");
     const heartbeat = heartbeatResponse("playing", {
@@ -956,6 +1448,7 @@ function runtimeHarness(options: {
   service?: {
     startSession?: () => Promise<ReplayPremiereServiceSessionResponse>;
     heartbeat?: () => Promise<ReplayPremiereServiceHeartbeatResponse>;
+    submitReaction?: () => Promise<ReplayPremiereServiceReactionResponse>;
     onBind?: () => void;
   };
   onJoin?: () => void;
@@ -986,7 +1479,10 @@ function runtimeHarness(options: {
         ? vi.fn(async () => heartbeatResponse("playing"))
         : vi.fn(options.service.heartbeat),
     submitPrediction: vi.fn(),
-    submitReaction: vi.fn(),
+    submitReaction:
+      options.service?.submitReaction === undefined
+        ? vi.fn()
+        : vi.fn(options.service.submitReaction),
     createShare: vi.fn(),
     dispose: vi.fn(),
   };
@@ -1218,6 +1714,24 @@ function heartbeatResponse(
   };
 }
 
+function reactionResponse() {
+  return {
+    schemaVersion: 1 as const,
+    reaction: {
+      id: `react_${"7".repeat(32)}`,
+      premiereId: PREMIERE_ID,
+      participantId: PARTICIPANT_ID,
+      sequence: 0,
+      turn: 0,
+      kind: "smart" as const,
+      policyIdentity: null,
+      eventContext: {},
+      createdAt: STARTED_AT,
+    },
+    idempotent: false,
+  };
+}
+
 function archivedPointer(): ReplayPremiereRevealPointer {
   const current = projection("archived");
   return {
@@ -1347,6 +1861,16 @@ function jsonResponse(value: unknown, status: number): Response {
     headers: {
       "content-type": "application/json",
       "cache-control": "no-store, max-age=0",
+    },
+  });
+}
+
+function malformedGatewayResponse(status: number): Response {
+  return new Response("<html><body>temporary gateway failure</body></html>", {
+    status,
+    headers: {
+      "content-type": "text/html; charset=utf-8",
+      "cache-control": "public, max-age=60",
     },
   });
 }

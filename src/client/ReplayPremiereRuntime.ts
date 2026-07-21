@@ -46,9 +46,9 @@ const CSRF_PATTERN = /^v1\.[0-9a-z]{1,16}\.[a-f0-9]{32}\.[a-f0-9]{64}$/;
 const ATTRIBUTION_PATTERN = /^[A-Za-z0-9_-]{16,512}\.[A-Za-z0-9_-]{16,128}$/;
 const JSON_CONTENT_TYPE_PATTERN = /^(?:application\/json|[^;]+\+json)(?:;|$)/i;
 const MAX_INTERACTION_RESPONSE_BYTES = 256 * 1024;
-const INTERACTION_REQUEST_TIMEOUT_MS = 8_000;
+const INTERACTION_REQUEST_TIMEOUT_MS = 2_000;
 const HEARTBEAT_INTERVAL_MS = 10_000;
-const SESSION_RETRY_MS = 5_000;
+const INTERACTION_RECOVERY_RETRY_MS = 1_000;
 const MAX_CLIPBOARD_TEXT_LENGTH = 16_384;
 const PRE_REVEAL_BODY_CLASS = "replay-premiere-pre-reveal";
 
@@ -369,6 +369,11 @@ export class ReplayPremiereServiceClient {
   private readonly sessionIdempotencyKey: string;
   private verifiedBinding: ReplayPremiereVerifiedBinding | null = null;
   private sessionBootstrapBody: ReplayPremiereSessionInput | null = null;
+  private pendingHeartbeat: {
+    sessionId: string;
+    body: { visible: boolean; observedSequence: number };
+    idempotencyKey: string;
+  } | null = null;
   private csrfToken: string | null = null;
   private currentSession: ReplayPremiereServiceSession | null = null;
   private disposed = false;
@@ -389,7 +394,7 @@ export class ReplayPremiereServiceClient {
     this.requestTimeoutMs = boundedPositiveInteger(
       options.requestTimeoutMs,
       INTERACTION_REQUEST_TIMEOUT_MS,
-      30_000,
+      INTERACTION_REQUEST_TIMEOUT_MS,
     );
     this.maxResponseBytes = boundedPositiveInteger(
       options.maxResponseBytes,
@@ -465,21 +470,42 @@ export class ReplayPremiereServiceClient {
     observedSequence: number;
   }): Promise<ReplayPremiereServiceHeartbeatResponse> {
     const session = this.requireSession();
-    const body = {
+    const requestedBody = {
       visible: input.visible === true,
       observedSequence: parseObservedSequence(input.observedSequence),
     };
-    const response = await this.postJson(
-      `sessions/${session.id}/heartbeat`,
-      body,
-      this.createIdempotencyKey(),
-      heartbeatResponseSchema,
-      200,
-      true,
-    );
-    this.assertHeartbeatResponseBound(response, session);
-    this.currentSession = response.session;
-    return response;
+    if (
+      this.pendingHeartbeat !== null &&
+      this.pendingHeartbeat.sessionId !== session.id
+    ) {
+      this.pendingHeartbeat = null;
+      throw serviceError("invalid_response");
+    }
+    this.pendingHeartbeat ??= {
+      sessionId: session.id,
+      body: requestedBody,
+      idempotencyKey: this.createIdempotencyKey(),
+    };
+    const pending = this.pendingHeartbeat;
+    try {
+      const response = await this.postJson(
+        `sessions/${session.id}/heartbeat`,
+        pending.body,
+        pending.idempotencyKey,
+        heartbeatResponseSchema,
+        200,
+        true,
+      );
+      this.assertHeartbeatResponseBound(response, session);
+      this.currentSession = response.session;
+      this.pendingHeartbeat = null;
+      return response;
+    } catch (error) {
+      if (!isRetryableServiceFailure(error)) {
+        this.pendingHeartbeat = null;
+      }
+      throw error;
+    }
   }
 
   async submitPrediction(
@@ -589,6 +615,7 @@ export class ReplayPremiereServiceClient {
     if (this.disposed) return;
     this.disposed = true;
     this.abortController.abort();
+    this.pendingHeartbeat = null;
     this.csrfToken = null;
     this.currentSession = null;
   }
@@ -650,11 +677,26 @@ export class ReplayPremiereServiceClient {
           timedOut ? "timeout" : "fetch_rejection",
         );
       }
+      const transientStatus = isTransientInteractionStatus(response.status);
       const contentType = response.headers.get("content-type") ?? "";
-      if (
-        !JSON_CONTENT_TYPE_PATTERN.test(contentType.trim()) ||
-        !hasNoStoreCachePolicy(response.headers)
-      ) {
+      const hasJsonContentType = JSON_CONTENT_TYPE_PATTERN.test(
+        contentType.trim(),
+      );
+      const responseHasApplicationPolicy =
+        hasJsonContentType && hasNoStoreCachePolicy(response.headers);
+      // An intermediary response is transport evidence, never application
+      // state. Reject it before touching an untrusted (often HTML) body. A
+      // valid no-store JSON error envelope still crosses the ordinary strict
+      // application-error boundary below.
+      if (transientStatus && !hasJsonContentType) {
+        throw serviceError(
+          "request_failed",
+          response.status,
+          null,
+          "response_status",
+        );
+      }
+      if (!responseHasApplicationPolicy) {
         throw serviceError(
           "invalid_response",
           response.status,
@@ -662,14 +704,35 @@ export class ReplayPremiereServiceClient {
           "response_policy",
         );
       }
-      const value = await readBoundedJsonResponse(
-        response,
-        this.maxResponseBytes,
-        requestController.signal,
-      );
+      let value: unknown;
+      try {
+        value = await readBoundedJsonResponse(
+          response,
+          this.maxResponseBytes,
+          requestController.signal,
+        );
+      } catch (error) {
+        if (transientStatus) {
+          throw serviceError(
+            "request_failed",
+            response.status,
+            null,
+            "response_status",
+          );
+        }
+        throw error;
+      }
       if (response.status !== expectedStatus) {
         const publicFailure = publicErrorResponseSchema.safeParse(value);
         if (!publicFailure.success) {
+          if (transientStatus) {
+            throw serviceError(
+              "request_failed",
+              response.status,
+              null,
+              "response_status",
+            );
+          }
           throw serviceError(
             "invalid_response",
             response.status,
@@ -1068,6 +1131,7 @@ export class ReplayPremiereRuntimeController {
   private disposed = false;
   private heartbeatTimer: ReturnType<typeof setInterval> | null = null;
   private sessionRetryTimer: ReturnType<typeof setTimeout> | null = null;
+  private heartbeatRetryTimer: ReturnType<typeof setTimeout> | null = null;
   private checkpointDeadlineTimer: ReturnType<typeof setTimeout> | null = null;
   private locallyClosedCheckpointId: string | null = null;
 
@@ -1451,7 +1515,7 @@ export class ReplayPremiereRuntimeController {
       if (isRetryableServiceFailure(error)) {
         this.sessionRetryTimer = setTimeout(
           () => void this.bootstrapInteractions(),
-          SESSION_RETRY_MS,
+          INTERACTION_RECOVERY_RETRY_MS,
         );
       } else {
         logInteractionBootstrapFailure(error);
@@ -1542,6 +1606,10 @@ export class ReplayPremiereRuntimeController {
       }
       this.applyServiceProjection(response);
       this.hydrateOverlay();
+      if (this.heartbeatRetryTimer !== null) {
+        clearTimeout(this.heartbeatRetryTimer);
+        this.heartbeatRetryTimer = null;
+      }
     } catch (error) {
       if (
         this.disposed ||
@@ -1552,11 +1620,14 @@ export class ReplayPremiereRuntimeController {
       }
       if (
         error instanceof ReplayPremiereServiceError &&
+        error.code === "request_rejected" &&
         (error.status === 401 || error.status === 403)
       ) {
         this.interactionReady = false;
         this.clearInteractionTimers();
         void this.bootstrapInteractions();
+      } else if (isRetryableServiceFailure(error)) {
+        this.scheduleHeartbeatRetry();
       } else if (
         error instanceof ReplayPremiereServiceError &&
         error.code === "invalid_response"
@@ -1747,6 +1818,20 @@ export class ReplayPremiereRuntimeController {
     }
   }
 
+  private async strictInteractionWrite<T>(write: () => Promise<T>): Promise<T> {
+    try {
+      return await write();
+    } catch (error) {
+      if (
+        error instanceof ReplayPremiereServiceError &&
+        error.code === "invalid_response"
+      ) {
+        this.latchFailure("integrity_failure", error);
+      }
+      throw error;
+    }
+  }
+
   private overlayCallbacks(): ReplayPremiereOverlayCallbacks {
     return {
       onAddReminder: (request) => this.downloadReminder(request),
@@ -1765,7 +1850,9 @@ export class ReplayPremiereRuntimeController {
         ) {
           throw serviceError("request_rejected");
         }
-        const response = await this.service.submitPrediction(request);
+        const response = await this.strictInteractionWrite(() =>
+          this.service.submitPrediction(request),
+        );
         if (
           this.reveal === null &&
           hasOutcomeProjection([response.checkpoint])
@@ -1784,7 +1871,9 @@ export class ReplayPremiereRuntimeController {
         ) {
           throw serviceError("request_rejected");
         }
-        await this.service.submitReaction(request);
+        await this.strictInteractionWrite(() =>
+          this.service.submitReaction(request),
+        );
       },
       onShare: (request) => this.share(request),
       onCopySuggestedCaption: (request) => this.copyCaption(request),
@@ -1804,9 +1893,12 @@ export class ReplayPremiereRuntimeController {
     if (request.sequence > this.observedSequence()) {
       throw serviceError("request_rejected");
     }
-    const response = await this.service.createShare({
-      sequence: request.sequence,
-    });
+    const sequence = request.sequence;
+    const response = await this.strictInteractionWrite(() =>
+      this.service.createShare({
+        sequence,
+      }),
+    );
     if (
       !isSafeShareUrl(response.url, this.options.premiereId, this.windowRef)
     ) {
@@ -2105,6 +2197,26 @@ export class ReplayPremiereRuntimeController {
       clearTimeout(this.sessionRetryTimer);
       this.sessionRetryTimer = null;
     }
+    if (this.heartbeatRetryTimer !== null) {
+      clearTimeout(this.heartbeatRetryTimer);
+      this.heartbeatRetryTimer = null;
+    }
+  }
+
+  private scheduleHeartbeatRetry(): void {
+    if (
+      this.heartbeatRetryTimer !== null ||
+      this.disposed ||
+      !this.interactionReady ||
+      this.terminalFailure !== null ||
+      this.isReadOnlyLifecycle()
+    ) {
+      return;
+    }
+    this.heartbeatRetryTimer = setTimeout(() => {
+      this.heartbeatRetryTimer = null;
+      void this.sendHeartbeat();
+    }, INTERACTION_RECOVERY_RETRY_MS);
   }
 
   private reconcileCheckpointDeadline(
@@ -2375,10 +2487,17 @@ function isRetryableServiceFailure(error: unknown): boolean {
     error instanceof ReplayPremiereServiceError &&
     (error.code === "request_failed" ||
       (error.code === "request_rejected" &&
-        (error.status === 429 ||
-          error.status === 503 ||
-          error.publicCode === "PREMIERE_CAPACITY_EXCEEDED" ||
+        (error.publicCode === "PREMIERE_CAPACITY_EXCEEDED" ||
           error.publicCode === "PREMIERE_UNAVAILABLE")))
+  );
+}
+
+function isTransientInteractionStatus(status: number): boolean {
+  return (
+    status === 408 ||
+    status === 425 ||
+    status === 429 ||
+    (status >= 500 && status <= 599)
   );
 }
 

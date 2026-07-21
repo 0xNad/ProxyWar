@@ -54,6 +54,7 @@ beforeEach(async () => {
 });
 
 afterEach(async () => {
+  vi.useRealTimers();
   await fs.rm(fixtureRoot, { recursive: true, force: true });
 });
 
@@ -815,9 +816,85 @@ describe("ReplayPremiereNetwork", () => {
           playback: new ReplayPremierePlaybackController(PREMIERE_ID),
           callbacks: { onReady: vi.fn() },
           fetchImpl: fetchMock as unknown as typeof fetch,
-          maxRetryMs: 5_001,
+          maxRetryMs: 1_001,
         }),
     ).toThrowError(ReplayPremiereNetworkError);
+    expect(
+      () =>
+        new ReplayPremiereNetworkController({
+          premiereId: PREMIERE_ID,
+          playback: new ReplayPremierePlaybackController(PREMIERE_ID),
+          callbacks: { onReady: vi.fn() },
+          fetchImpl: fetchMock as unknown as typeof fetch,
+          requestTimeoutMs: 2_001,
+        }),
+    ).toThrowError(ReplayPremiereNetworkError);
+  });
+
+  it("catches up within five seconds after restoration at the production timeout and retry ceilings", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-07-20T18:00:00.000Z"));
+    const cancelled = await manifest([], {
+      state: "cancelled",
+      actualStartAt: null,
+      authoritativeElapsedMs: 0,
+    });
+    let available = false;
+    let requestNumber = 0;
+    const readyAt: number[] = [];
+    const recovering = vi.fn();
+    const fetchMock = vi.fn((pathname: RequestInfo | URL) => {
+      requestNumber += 1;
+      if (requestNumber <= 3) {
+        return Promise.reject(new TypeError("gateway unavailable"));
+      }
+      if (requestNumber === 4) {
+        // Model an intermediary request that remains hung even after the
+        // origin is restored; the production request timeout must fence it.
+        return new Promise<Response>(() => undefined);
+      }
+      if (!available) {
+        return Promise.reject(new TypeError("gateway unavailable"));
+      }
+      return Promise.resolve(
+        String(pathname).endsWith("/bootstrap")
+          ? jsonResponse(awaitedBootstrap)
+          : jsonResponse(cancelled),
+      );
+    });
+    const awaitedBootstrap = await bootstrap();
+    const network = new ReplayPremiereNetworkController({
+      premiereId: PREMIERE_ID,
+      playback: new ReplayPremierePlaybackController(PREMIERE_ID),
+      callbacks: {
+        onReady: () => {
+          readyAt.push(Date.now());
+        },
+        onRecovering: recovering,
+      },
+      fetchImpl: fetchMock as unknown as typeof fetch,
+    });
+
+    const started = network.start();
+    await Promise.resolve();
+    await vi.advanceTimersByTimeAsync(1_750);
+    expect(fetchMock).toHaveBeenCalledTimes(4);
+
+    available = true;
+    const restoredAt = Date.now();
+    await vi.advanceTimersByTimeAsync(2_999);
+    expect(readyAt).toEqual([]);
+    await vi.advanceTimersByTimeAsync(1);
+
+    await expect(started).resolves.toMatchObject({ status: "cancelled" });
+    expect(readyAt).toHaveLength(1);
+    expect(readyAt[0] - restoredAt).toBeLessThanOrEqual(5_000);
+    expect(readyAt[0] - restoredAt).toBe(3_000);
+    expect(recovering).toHaveBeenLastCalledWith({
+      code: "request_failed",
+      attempt: 4,
+      retryInMs: 1_000,
+    });
   });
 
   it("aborts an in-flight request on dispose", async () => {
@@ -997,6 +1074,19 @@ describe("ReplayPremiereNetwork", () => {
       releasedThroughSequence: material.nonTerminal[0].endSequence,
       finalized: false,
     });
+    expect(
+      fetchMock.mock.calls.slice(0, 4).map(([pathname]) => pathname),
+    ).toEqual([
+      `/api/premieres/${PREMIERE_ID}/bootstrap`,
+      `/api/premieres/${PREMIERE_ID}/manifest`,
+      `/api/premieres/${PREMIERE_ID}/chunks/0`,
+      `/api/premieres/${PREMIERE_ID}/chunks/1`,
+    ]);
+    expect(
+      fetchMock.mock.calls
+        .slice(0, 4)
+        .some(([pathname]) => String(pathname).endsWith("/chunks/2")),
+    ).toBe(false);
 
     await expect(network.syncOnce()).resolves.toMatchObject({
       status: "revealed",
