@@ -267,6 +267,24 @@ export function isProxyWarPublicLeaguePath(pathname: string): boolean {
     : isProxyWarPublicRunArtifact(artifact);
 }
 
+const proxyWarReplayOrRunPrefixes = [
+  "/ai-league-replay/",
+  "/proxywar-replay/",
+  "/openfront-replay/",
+  "/ai-league-runs/",
+  "/runs/",
+] as const;
+
+/**
+ * Identifies replay-shaped paths so the wrapper can fail closed with 404
+ * instead of redirecting a private or unknown source into the public league.
+ */
+export function isProxyWarReplayOrRunPath(pathname: string): boolean {
+  return proxyWarReplayOrRunPrefixes.some(
+    (prefix) => pathname.startsWith(prefix) && pathname.length > prefix.length,
+  );
+}
+
 export function isProxyWarPublicTournamentArtifact(fileName: string): boolean {
   return (proxyWarPublicTournamentArtifacts as readonly string[]).includes(
     fileName,

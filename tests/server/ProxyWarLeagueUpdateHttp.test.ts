@@ -278,8 +278,20 @@ describe("league update HTTP contract", () => {
         "/ai-league-runs/league/untrusted.js",
         { method },
       );
-      expect(blocked.status).toBe(302);
-      expect(blocked.headers.location).toBe("/league");
+      expect(blocked.status).toBe(404);
+      expect(blocked.headers.location).toBeUndefined();
+    }
+
+    for (const route of [
+      "/ai-league-replay/controlled-source-1",
+      "/ai-league-runs/controlled-source-1/game-record.json",
+      "/proxywar-replay/controlled-source-1",
+    ]) {
+      for (const method of ["GET", "HEAD"] as const) {
+        const blocked = await rawRequest(origin, route, { method });
+        expect(blocked.status, `${method} ${route}`).toBe(404);
+        expect(blocked.headers.location).toBeUndefined();
+      }
     }
   });
 

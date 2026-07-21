@@ -91,6 +91,7 @@ import {
   isProxyWarPublicRendererAssetPath,
   isProxyWarPublicRunArtifact,
   isProxyWarPublicTournamentArtifact,
+  isProxyWarReplayOrRunPath,
   isSafeProxyWarArtifactSegment,
   proxyWarLeagueContentSecurityPolicy,
   proxyWarPublicRendererAssetPrefixes,
@@ -354,6 +355,10 @@ if (leagueWrapperOnly) {
         isProxyWarPublicRendererAssetPath(req.path)
       ) {
         next();
+        return;
+      }
+      if (isProxyWarReplayOrRunPath(req.path)) {
+        res.status(404).send("AI league replay record not found.");
         return;
       }
       res.redirect("/league");

@@ -9,6 +9,7 @@ import {
   isProxyWarPublicRendererAssetPath,
   isProxyWarPublicRunArtifact,
   isProxyWarPublicTournamentArtifact,
+  isProxyWarReplayOrRunPath,
   isSafeProxyWarArtifactSegment,
   matchProxyWarPublicPremiereReadPath,
   matchProxyWarPublicPremiereWritePath,
@@ -181,6 +182,22 @@ describe("ProxyWarPublicArtifacts", () => {
       false,
     );
     expect(isProxyWarPublicLeaguePath("/ai-league-replay/")).toBe(false);
+  });
+
+  it("recognizes replay-shaped paths that must fail closed", () => {
+    expect(
+      isProxyWarReplayOrRunPath("/ai-league-replay/controlled-source-1"),
+    ).toBe(true);
+    expect(
+      isProxyWarReplayOrRunPath(
+        "/ai-league-runs/controlled-source-1/game-record.json",
+      ),
+    ).toBe(true);
+    expect(
+      isProxyWarReplayOrRunPath("/proxywar-replay/controlled-source-1"),
+    ).toBe(true);
+    expect(isProxyWarReplayOrRunPath("/league")).toBe(false);
+    expect(isProxyWarReplayOrRunPath("/ai-league-replay/")).toBe(false);
   });
 
   it("marks renderer asset prefixes as anonymously fetchable", () => {
