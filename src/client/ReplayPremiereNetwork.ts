@@ -1146,9 +1146,6 @@ export class ReplayPremiereNetworkController {
     if (
       !this.bootstrap ||
       pointer.revealUrl !== expectedRevealPath ||
-      (this.lastManifest !== null &&
-        Date.parse(pointer.revealedAt) <
-          Date.parse(this.lastManifest.serverNow)) ||
       this.lastManifest?.state === "failed" ||
       this.lastManifest?.state === "cancelled"
     ) {
@@ -1220,6 +1217,10 @@ export class ReplayPremiereNetworkController {
       if (
         !draft ||
         !publishedDescriptorMatchesDraft(released, draft) ||
+        !releasedDescriptorMatchesRevealCausality(
+          released,
+          reveal.revealedAt,
+        ) ||
         startOffset === undefined ||
         endOffset === undefined ||
         endOffset - startOffset >
@@ -1337,6 +1338,14 @@ export class ReplayPremiereNetworkController {
           descriptor,
           reveal.publicationCommitment.maxPresentationSpanMs,
         );
+        if (
+          !releasedDescriptorMatchesRevealCausality(
+            descriptor,
+            reveal.revealedAt,
+          )
+        ) {
+          throw networkError("reveal_integrity_failure");
+        }
         try {
           this.options.playback.appendVerifiedBatch(batch);
         } catch {
@@ -1982,6 +1991,15 @@ function publishedDescriptorMatchesDraft(
     released.byteLength === draft.byteLength &&
     released.terminal === draft.terminal
   );
+}
+
+function releasedDescriptorMatchesRevealCausality(
+  descriptor: ReplayPremiereChunkDescriptor,
+  revealedAt: string,
+): boolean {
+  return descriptor.terminal
+    ? descriptor.releasedAt === revealedAt
+    : Date.parse(descriptor.releasedAt) <= Date.parse(revealedAt);
 }
 
 export async function verifyReplayPremiereAuthoritativeResult(

@@ -439,6 +439,17 @@ async function resealReveal(
   return { reveal, pointer };
 }
 
+async function resealChunkReleasedAt(
+  input: PublicChunk,
+  releasedAt: string,
+): Promise<PublicChunk> {
+  const chunk = structuredClone(input);
+  chunk.releasedAt = releasedAt;
+  const { chunkHash: _chunkHash, ...hashInput } = descriptor(chunk);
+  chunk.chunkHash = await hashCanonicalJson(hashInput);
+  return chunk;
+}
+
 async function withCanonicalResultMutation(
   input: ReplayPremiereRevealWire,
   mutate: (result: Record<string, unknown>) => void,
@@ -860,6 +871,97 @@ describe("ReplayPremiereNetwork", () => {
       finalized: true,
     });
     expect(onReveal).toHaveBeenCalledTimes(1);
+  });
+
+  it("accepts a reveal observed after a stale playing response whose server clock is later than revealedAt", async () => {
+    const material = await revealMaterial();
+    const preManifest = await manifest(material.nonTerminal, {
+      provenance: material.bootstrap.provenance,
+      scheduledAt: material.bootstrap.publicDefinition.scheduledAt,
+      playbackRate: material.bootstrap.publicDefinition.playbackRate,
+      serverNow: new Date(
+        Date.parse(material.pointer.revealedAt) + 77,
+      ).toISOString(),
+      actualStartAt: material.bootstrap.publicDefinition.scheduledAt,
+      authoritativeElapsedMs: 250,
+    });
+    const { network, playback } = controller(
+      queuedFetch(
+        jsonResponse(material.bootstrap),
+        jsonResponse(preManifest),
+        ...material.nonTerminal.map((chunk) => jsonResponse(chunk)),
+        jsonResponse(material.pointer),
+        jsonResponse(material.reveal),
+        jsonResponse(material.terminal),
+      ) as unknown as typeof fetch,
+    );
+
+    await expect(network.syncOnce()).resolves.toMatchObject({
+      status: "active",
+    });
+    await expect(network.syncOnce()).resolves.toMatchObject({
+      status: "revealed",
+    });
+    expect(playback.state()).toMatchObject({
+      finalized: true,
+      releasedThroughSequence: material.reveal.finalSequence,
+    });
+  });
+
+  it("rejects a reveal timestamp earlier than an authenticated prefix chunk release", async () => {
+    const material = await revealMaterial();
+    const futurePrefix = await resealChunkReleasedAt(
+      material.nonTerminal[0],
+      new Date(Date.parse(material.pointer.revealedAt) + 1).toISOString(),
+    );
+    const preManifest = await manifest([futurePrefix], {
+      provenance: material.bootstrap.provenance,
+      scheduledAt: material.bootstrap.publicDefinition.scheduledAt,
+      playbackRate: material.bootstrap.publicDefinition.playbackRate,
+      serverNow: new Date(
+        Date.parse(material.pointer.revealedAt) + 77,
+      ).toISOString(),
+      actualStartAt: material.bootstrap.publicDefinition.scheduledAt,
+      authoritativeElapsedMs: 250,
+    });
+    const { network, playback } = controller(
+      queuedFetch(
+        jsonResponse(material.bootstrap),
+        jsonResponse(preManifest),
+        jsonResponse(futurePrefix),
+        jsonResponse(material.pointer),
+        jsonResponse(material.reveal),
+      ) as unknown as typeof fetch,
+    );
+
+    await expect(network.syncOnce()).resolves.toMatchObject({
+      status: "active",
+    });
+    await expectNetworkError(network.syncOnce(), "reveal_integrity_failure");
+    expect(playback.state().finalized).toBe(false);
+  });
+
+  it("rejects a coherently resealed terminal chunk whose release time differs from revealedAt", async () => {
+    const material = await revealMaterial();
+    const terminal = await resealChunkReleasedAt(
+      material.terminal,
+      new Date(Date.parse(material.pointer.revealedAt) + 1).toISOString(),
+    );
+    const reveal = structuredClone(material.reveal) as ReplayPremiereRevealWire;
+    reveal.finalChunkHash = terminal.chunkHash;
+    const sealed = await resealReveal(reveal, material.pointer);
+    const { network, playback } = controller(
+      queuedFetch(
+        jsonResponse(material.bootstrap),
+        jsonResponse(sealed.pointer),
+        jsonResponse(sealed.reveal),
+        ...material.nonTerminal.map((chunk) => jsonResponse(chunk)),
+        jsonResponse(terminal),
+      ) as unknown as typeof fetch,
+    );
+
+    await expectNetworkError(network.syncOnce(), "reveal_integrity_failure");
+    expect(playback.state().finalized).toBe(false);
   });
 
   it("recovers an advertised but unaccepted chunk when reveal follows a transport interruption", async () => {
