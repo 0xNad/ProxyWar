@@ -13,6 +13,7 @@ import type { PremiereState } from "./ReplayPremiereContracts";
 import {
   ReplayPremiereError,
   toPublicReplayPremiereFailure,
+  type ReplayPremierePublicErrorCode,
 } from "./ReplayPremiereErrors";
 import {
   isReplayPremiereBotUserAgent,
@@ -105,6 +106,26 @@ export interface ReplayPremiereHttpOptions {
   resolveClientAddress?: ReplayPremiereClientAddressResolver;
   /** Operator-only diagnostics sink; never serialized into the response. */
   onOperatorError?: (error: unknown) => void;
+}
+
+export function formatReplayPremiereHttpOperatorError(error: unknown): string {
+  const operatorCode =
+    error instanceof ReplayPremiereError &&
+    /^[A-Za-z][A-Za-z0-9_]{0,127}$/.test(error.operatorCode)
+      ? error.operatorCode
+      : "unexpected_failure";
+  const status =
+    error instanceof ReplayPremiereError &&
+    Number.isInteger(error.httpStatus) &&
+    error.httpStatus >= 100 &&
+    error.httpStatus <= 599
+      ? String(error.httpStatus)
+      : "none";
+  const publicCode =
+    error instanceof ReplayPremiereError && isPublicErrorCode(error.publicCode)
+      ? error.publicCode
+      : "none";
+  return `Replay Premiere HTTP rejected operatorCode=${operatorCode} status=${status} publicCode=${publicCode}`;
 }
 
 /**
@@ -733,6 +754,18 @@ function normalizeHttpError(error: unknown): unknown {
   if (error instanceof SyntaxError)
     return invalidRequest("invalid_json_body", 400);
   return error;
+}
+
+function isPublicErrorCode(
+  value: unknown,
+): value is ReplayPremierePublicErrorCode {
+  return (
+    value === "PREMIERE_CAPACITY_EXCEEDED" ||
+    value === "PREMIERE_INTEGRITY_FAILURE" ||
+    value === "PREMIERE_INVALID_REQUEST" ||
+    value === "PREMIERE_SOURCE_INELIGIBLE" ||
+    value === "PREMIERE_UNAVAILABLE"
+  );
 }
 
 function boundedInteger(

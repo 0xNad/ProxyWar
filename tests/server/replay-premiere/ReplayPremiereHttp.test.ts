@@ -9,6 +9,7 @@ import {
   type ReplayPremiereClientAddressResolver,
 } from "../../../src/server/replay-premiere/ReplayPremiereClientAddress";
 import type { PremiereState } from "../../../src/server/replay-premiere/ReplayPremiereContracts";
+import { ReplayPremiereError } from "../../../src/server/replay-premiere/ReplayPremiereErrors";
 import type {
   ReplayPremiereSnapshot,
   StoredReplayPremiereEvent,
@@ -16,6 +17,7 @@ import type {
 import { ReplayPremiereGuestSecurity } from "../../../src/server/replay-premiere/ReplayPremiereGuestSecurity";
 import {
   createReplayPremiereRouter,
+  formatReplayPremiereHttpOperatorError,
   ReplayPremiereHttpRegistry,
   type ReplayPremiereHttpTarget,
 } from "../../../src/server/replay-premiere/ReplayPremiereHttp";
@@ -59,6 +61,39 @@ describe("ReplayPremiere HTTP adapter", () => {
 
   afterEach(async () => {
     await fs.rm(root, { recursive: true, force: true });
+  });
+
+  test("formats only bounded scalar operator diagnostics", () => {
+    const rejection = Object.assign(
+      new ReplayPremiereError(
+        "invalid_observedSequence",
+        "PREMIERE_INVALID_REQUEST",
+        400,
+        "private body, cookie, address, and path details",
+      ),
+      {
+        requestBody: "secret body",
+        cookie: "secret cookie",
+        remoteAddress: "secret address",
+      },
+    );
+    expect(formatReplayPremiereHttpOperatorError(rejection)).toBe(
+      "Replay Premiere HTTP rejected operatorCode=invalid_observedSequence status=400 publicCode=PREMIERE_INVALID_REQUEST",
+    );
+
+    const unsafe = new ReplayPremiereError(
+      "token=/private/path",
+      "PREMIERE_INVALID_REQUEST",
+      400,
+      "secret exception text",
+    );
+    const rendered = formatReplayPremiereHttpOperatorError(unsafe);
+    expect(rendered).toBe(
+      "Replay Premiere HTTP rejected operatorCode=unexpected_failure status=400 publicCode=PREMIERE_INVALID_REQUEST",
+    );
+    expect(rendered).not.toContain("token");
+    expect(rendered).not.toContain("private");
+    expect(rendered).not.toContain("secret");
   });
 
   test("serves authentic Wire bootstrap, manifest, chunk, and reveal with no-store", async () => {

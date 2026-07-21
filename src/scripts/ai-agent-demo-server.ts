@@ -119,6 +119,7 @@ import {
 import { ReplayPremiereGuestSecurity } from "../server/replay-premiere/ReplayPremiereGuestSecurity";
 import {
   createReplayPremiereRouter,
+  formatReplayPremiereHttpOperatorError,
   ReplayPremiereHttpRegistry,
 } from "../server/replay-premiere/ReplayPremiereHttp";
 import { createReplayPremierePublicPageRouter } from "../server/replay-premiere/ReplayPremierePublicPage";
@@ -325,6 +326,9 @@ app.use(
       // not trust forwarding headers from LAN or directly exposed peers.
       trustedProxyAddresses: REPLAY_PREMIERE_LOOPBACK_PROXY_ADDRESSES,
     }),
+    onOperatorError: (error) => {
+      console.error(formatReplayPremiereHttpOperatorError(error));
+    },
   }),
 );
 app.use(
