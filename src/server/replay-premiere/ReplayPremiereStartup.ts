@@ -329,13 +329,14 @@ export async function startReplayPremiereProduction(
     startupPlans.sort((left, right) =>
       compareStartupPlans(left, right, startupOrderingNowMs),
     );
+    const criticalPlans = selectCriticalStartupPlans(startupPlans);
     const registered: string[] = [];
-    for (let index = 0; index < startupPlans.length; index += 1) {
-      const plan = startupPlans[index];
+    for (let index = 0; index < criticalPlans.length; index += 1) {
+      const plan = criticalPlans[index];
       const record = plan.record;
       const remainingMs = maxStartupMs - (Date.now() - startedAt);
       if (remainingMs <= 0) {
-        reportDeadlineForRemainder(startupPlans, index, report);
+        reportDeadlineForRemainder(criticalPlans, index, report);
         break;
       }
       const deadline = await assembleBeforeDeadline({
@@ -371,7 +372,7 @@ export async function startReplayPremiereProduction(
           premiereId: record.premiereId,
           operatorCode: "startup_deadline_exceeded",
         });
-        reportDeadlineForRemainder(startupPlans, index + 1, report);
+        reportDeadlineForRemainder(criticalPlans, index + 1, report);
         break;
       }
       if (deadline.status === "rejected") {
@@ -389,7 +390,7 @@ export async function startReplayPremiereProduction(
           premiereId: record.premiereId,
           operatorCode: "startup_deadline_exceeded",
         });
-        reportDeadlineForRemainder(startupPlans, index + 1, report);
+        reportDeadlineForRemainder(criticalPlans, index + 1, report);
         break;
       }
       try {
@@ -1040,6 +1041,25 @@ function compareStartupPlans(
   }
 
   return left.record.premiereId.localeCompare(right.record.premiereId);
+}
+
+function selectCriticalStartupPlans(
+  plans: readonly ReplayPremiereStartupPlan[],
+): ReplayPremiereStartupPlan[] {
+  const activePlans = plans.filter(
+    (plan) =>
+      plan.projection.state === "playing" ||
+      plan.projection.state === "checkpoint",
+  );
+  if (activePlans.length > 0) return activePlans;
+  const nearestScheduled = plans.find(
+    (plan) =>
+      plan.projection.state === "scheduled" ||
+      plan.projection.state === "draft",
+  );
+  return nearestScheduled === undefined
+    ? plans.slice(0, 1)
+    : [nearestScheduled];
 }
 
 function startupStatePriority(state: PremiereState): number {

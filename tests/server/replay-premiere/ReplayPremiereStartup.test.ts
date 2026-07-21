@@ -42,7 +42,6 @@ import {
 } from "./ReplayPremiereFixtures";
 
 const ORIGIN = "https://beta.proxywar.xyz";
-const DEMO_SERVER_STARTUP_BUDGET_MS = 8_000;
 const CHUNK_LIMITS = {
   maxChunkBytes: 100_000,
   maxTotalBytes: 1_000_000,
@@ -79,7 +78,7 @@ describe("ReplayPremiere production startup", () => {
     await fs.rm(root, { recursive: true, force: true });
   });
 
-  test("reserves bounded demo-server launch headroom at the sole production startup call", async () => {
+  test("keeps the sole bounded production recovery before demo-server listen", async () => {
     const source = await fs.readFile(
       path.join(process.cwd(), "src", "scripts", "ai-agent-demo-server.ts"),
       "utf8",
@@ -91,6 +90,9 @@ describe("ReplayPremiere production startup", () => {
     expect(callStart).toBeGreaterThanOrEqual(0);
     expect(callEnd).toBeGreaterThan(callStart);
     expect(source.slice(callStart, callEnd)).toContain("maxStartupMs: 8_000,");
+    const listenStart = source.indexOf("const server = app.listen(");
+    expect(callStart).toBeLessThan(listenStart);
+    expect(source).not.toContain("startDeferredHydration");
   });
 
   test("reconstructs, synchronizes, and registers a clean admission", async () => {
@@ -495,8 +497,9 @@ describe("ReplayPremiere production startup", () => {
     },
   );
 
-  test("prioritizes a scheduled target and contains a later shared-budget timeout", async () => {
-    const premiereIds = await writeTwoAdmissions(root);
+  test("recovers the nearest scheduled target without probing retained terminal history", async () => {
+    const terminalPremiereId = "prem_fedcba9876543210";
+    await writeAlternateAdmission(root, terminalPremiereId);
     const beforeSchedule = NOW.getTime() - 120_000;
     const firstContext = startupContext(() => new Date(beforeSchedule));
     const first = await startReplayPremiereProduction({
@@ -505,70 +508,224 @@ describe("ReplayPremiere production startup", () => {
       servedRoots: [path.join(root, "served")],
     });
     services.push(first.service);
-    expect(first.registeredPremiereIds).toEqual([
-      premiereIds.primary,
-      premiereIds.alternate,
-    ]);
-    for (const premiereId of [premiereIds.primary, premiereIds.alternate]) {
-      const terminal = firstContext.runtimeRegistry.get(premiereId)!;
-      expect(terminal.readLifecycleState()).toBe("scheduled");
-      await terminal.cancel();
-      await terminal.archive();
-      expect(terminal.readLifecycleState()).toBe("archived");
-    }
+    const terminal = firstContext.runtimeRegistry.get(terminalPremiereId)!;
+    await terminal.cancel();
+    await terminal.archive();
     await first.service.close();
     services.splice(services.indexOf(first.service), 1);
 
-    const scheduledPremiereId = "prem_89abcdef01234567";
-    await writeAlternateAdmission(root, scheduledPremiereId);
-    vi.useFakeTimers({ now: beforeSchedule });
-    const secondContext = startupContext(() => new Date());
+    await writeAdmission(root);
     const attempts: string[] = [];
-    let releaseBarrier: (() => void) | undefined;
-    let resolveBarrierEntered: (() => void) | undefined;
-    const barrier = new Promise<void>((resolve) => {
-      releaseBarrier = resolve;
+    const context = startupContext(() => new Date(beforeSchedule));
+    const started = await startReplayPremiereProduction({
+      ...context,
+      privateStateRoot: path.join(root, "private"),
+      servedRoots: [path.join(root, "served")],
+      beforeTargetRecovery: async ({ record }) => {
+        attempts.push(record.premiereId);
+      },
     });
-    const barrierEntered = new Promise<void>((resolve) => {
-      resolveBarrierEntered = resolve;
-    });
+    services.push(started.service);
 
+    expect(attempts).toEqual([PREMIERE_ID]);
+    expect(started.registeredPremiereIds).toEqual([PREMIERE_ID]);
+    expect(context.runtimeRegistry.get(PREMIERE_ID)).not.toBeNull();
+    expect(context.runtimeRegistry.get(terminalPremiereId)).toBeNull();
+    expect(context.httpRegistry.get(terminalPremiereId)).toBeNull();
+    expect(started.diagnostics).toEqual([]);
+  });
+
+  test("recovers exactly the newest terminal when every admitted target is terminal", async () => {
+    vi.useFakeTimers({ now: NOW.getTime() - 120_000 });
+    const olderPremiereId = "prem_fedcba9876543210";
+    await writeAlternateAdmission(root, olderPremiereId);
+    const olderContext = startupContext(() => new Date());
+    const older = await startReplayPremiereProduction({
+      ...olderContext,
+      privateStateRoot: path.join(root, "private"),
+      servedRoots: [path.join(root, "served")],
+    });
+    services.push(older.service);
+    const olderRuntime = olderContext.runtimeRegistry.get(olderPremiereId)!;
+    await olderRuntime.cancel();
+    await olderRuntime.archive();
+    await older.service.close();
+    services.splice(services.indexOf(older.service), 1);
+
+    await writeAdmission(root);
+    vi.setSystemTime(NOW.getTime());
+    const latestContext = startupContext(() => new Date());
+    const latest = await startReplayPremiereProduction({
+      ...latestContext,
+      privateStateRoot: path.join(root, "private"),
+      servedRoots: [path.join(root, "served")],
+    });
+    services.push(latest.service);
+    const latestRuntime = latestContext.runtimeRegistry.get(PREMIERE_ID)!;
+    expect(latestRuntime.readLifecycleState()).toBe("playing");
+    await driveRuntimeToReveal(latestRuntime);
+    await latestRuntime.archive();
+    await latest.service.close();
+    services.splice(services.indexOf(latest.service), 1);
+
+    const attempts: string[] = [];
+    const restartedContext = startupContext(() => new Date());
+    const restarted = await startReplayPremiereProduction({
+      ...restartedContext,
+      privateStateRoot: path.join(root, "private"),
+      servedRoots: [path.join(root, "served")],
+      beforeTargetRecovery: async ({ record }) => {
+        attempts.push(record.premiereId);
+      },
+    });
+    services.push(restarted.service);
+
+    expect(attempts).toEqual([PREMIERE_ID]);
+    expect(restarted.registeredPremiereIds).toEqual([PREMIERE_ID]);
+    expect(
+      restartedContext.runtimeRegistry.get(PREMIERE_ID)?.readLifecycleState(),
+    ).toBe("archived");
+    expect(restartedContext.httpRegistry.get(PREMIERE_ID)).not.toBeNull();
+    expect(restartedContext.runtimeRegistry.get(olderPremiereId)).toBeNull();
+    expect(restartedContext.httpRegistry.get(olderPremiereId)).toBeNull();
+  });
+
+  test("does not probe a second scheduled target before listen", async () => {
+    const premiereIds = await writeTwoAdmissions(root);
+    const beforeSchedule = NOW.getTime() - 120_000;
+    const context = startupContext(() => new Date(beforeSchedule));
+    const attempts: string[] = [];
+    const started = await startReplayPremiereProduction({
+      ...context,
+      privateStateRoot: path.join(root, "private"),
+      servedRoots: [path.join(root, "served")],
+      beforeTargetRecovery: async ({ record }) => {
+        attempts.push(record.premiereId);
+      },
+    });
+    services.push(started.service);
+
+    expect(attempts).toEqual([premiereIds.primary]);
+    expect(started.registeredPremiereIds).toEqual([premiereIds.primary]);
+    expect(context.runtimeRegistry.get(premiereIds.primary)).not.toBeNull();
+    expect(context.runtimeRegistry.get(premiereIds.alternate)).toBeNull();
+    expect(context.httpRegistry.get(premiereIds.alternate)).toBeNull();
+  });
+
+  test("recovers every active target and globally fences the remainder after an active timeout", async () => {
+    const alternatePremiereId = "prem_fedcba9876543210";
+    await writeAdmission(root);
+    const primaryContext = startupContext(() => new Date(NOW));
+    const primary = await startReplayPremiereProduction({
+      ...primaryContext,
+      privateStateRoot: path.join(root, "private"),
+      servedRoots: [path.join(root, "served")],
+    });
+    services.push(primary.service);
+    expect(
+      primaryContext.runtimeRegistry.get(PREMIERE_ID)?.readLifecycleState(),
+    ).toMatch(/^(playing|checkpoint)$/);
+    await primary.service.close();
+    services.splice(services.indexOf(primary.service), 1);
+
+    const primaryAdmissionPath = admissionPath(root, PREMIERE_ID);
+    const heldPrimaryAdmissionPath = path.join(
+      root,
+      "held-primary-admission.json",
+    );
+    await fs.rename(primaryAdmissionPath, heldPrimaryAdmissionPath);
+    try {
+      await writeAlternateAdmission(root, alternatePremiereId);
+      const alternateContext = startupContext(() => new Date(NOW));
+      const alternate = await startReplayPremiereProduction({
+        ...alternateContext,
+        privateStateRoot: path.join(root, "private"),
+        servedRoots: [path.join(root, "served")],
+      });
+      services.push(alternate.service);
+      expect(
+        alternateContext.runtimeRegistry
+          .get(alternatePremiereId)
+          ?.readLifecycleState(),
+      ).toMatch(/^(playing|checkpoint)$/);
+      await alternate.service.close();
+      services.splice(services.indexOf(alternate.service), 1);
+    } finally {
+      await fs.rename(heldPrimaryAdmissionPath, primaryAdmissionPath);
+    }
+
+    const allActiveContext = startupContext(() => new Date(NOW));
+    const allActiveAttempts: string[] = [];
+    const allActive = await startReplayPremiereProduction({
+      ...allActiveContext,
+      privateStateRoot: path.join(root, "private"),
+      servedRoots: [path.join(root, "served")],
+      beforeTargetRecovery: async ({ record }) => {
+        allActiveAttempts.push(record.premiereId);
+      },
+    });
+    services.push(allActive.service);
+    expect(new Set(allActiveAttempts)).toEqual(
+      new Set([PREMIERE_ID, alternatePremiereId]),
+    );
+    expect(new Set(allActive.registeredPremiereIds)).toEqual(
+      new Set([PREMIERE_ID, alternatePremiereId]),
+    );
+    for (const premiereId of [PREMIERE_ID, alternatePremiereId]) {
+      expect(
+        allActiveContext.runtimeRegistry.get(premiereId)?.readLifecycleState(),
+      ).toMatch(/^(playing|checkpoint)$/);
+    }
+    await allActive.service.close();
+    services.splice(services.indexOf(allActive.service), 1);
+
+    vi.useFakeTimers({ now: NOW });
+    const timeoutContext = startupContext(() => new Date());
+    const timeoutAttempts: string[] = [];
+    let releaseBlockedActive: (() => void) | undefined;
+    let markBlockedActiveEntered: (() => void) | undefined;
+    const blockedActive = new Promise<void>((resolve) => {
+      releaseBlockedActive = resolve;
+    });
+    const blockedActiveEntered = new Promise<void>((resolve) => {
+      markBlockedActiveEntered = resolve;
+    });
     const starting = startReplayPremiereProduction({
-      ...secondContext,
+      ...timeoutContext,
       privateStateRoot: path.join(root, "private"),
       servedRoots: [path.join(root, "served")],
       maxStartupMs: 100,
       beforeTargetRecovery: async ({ record }) => {
-        attempts.push(record.premiereId);
-        if (record.premiereId === premiereIds.alternate) {
-          resolveBarrierEntered?.();
-          await barrier;
-        }
+        timeoutAttempts.push(record.premiereId);
+        markBlockedActiveEntered?.();
+        await blockedActive;
       },
     });
-    await barrierEntered;
-    expect(attempts).toEqual([scheduledPremiereId, premiereIds.alternate]);
+    await blockedActiveEntered;
+    expect(timeoutAttempts).toHaveLength(1);
     await vi.advanceTimersByTimeAsync(100);
-    const second = await starting;
-    services.push(second.service);
+    const timedOut = await starting;
+    services.push(timedOut.service);
+    const blockedPremiereId = timeoutAttempts[0];
+    const remainingPremiereId = [PREMIERE_ID, alternatePremiereId].find(
+      (premiereId) => premiereId !== blockedPremiereId,
+    )!;
 
-    expect(second.registeredPremiereIds).toEqual([scheduledPremiereId]);
-    expect(second.diagnostics).toEqual([
+    expect(timedOut.registeredPremiereIds).toEqual([]);
+    expect(timedOut.diagnostics).toEqual([
       {
-        target: `${premiereIds.alternate}.admission.json`,
-        premiereId: premiereIds.alternate,
+        target: `${blockedPremiereId}.admission.json`,
+        premiereId: blockedPremiereId,
         operatorCode: "startup_deadline_exceeded",
       },
       {
-        target: `${premiereIds.primary}.admission.json`,
-        premiereId: premiereIds.primary,
+        target: `${remainingPremiereId}.admission.json`,
+        premiereId: remainingPremiereId,
         operatorCode: "startup_deadline_exceeded",
       },
     ]);
-    expect(secondContext.httpRegistry.get(scheduledPremiereId)).not.toBeNull();
-    expect(secondContext.httpRegistry.get(premiereIds.alternate)).toBeNull();
-    expect(secondContext.httpRegistry.get(premiereIds.primary)).toBeNull();
-
+    expect(timeoutContext.runtimeRegistry.get(PREMIERE_ID)).toBeNull();
+    expect(timeoutContext.runtimeRegistry.get(alternatePremiereId)).toBeNull();
     const eventsPath = path.join(
       root,
       "private",
@@ -576,156 +733,13 @@ describe("ReplayPremiere production startup", () => {
       "events.jsonl",
     );
     const bytesAtReturn = (await fs.stat(eventsPath)).size;
-    const timersAtReturn = second.service.readActiveTimerCount();
-    releaseBarrier?.();
+    releaseBlockedActive?.();
     await vi.advanceTimersByTimeAsync(1_000);
-    expect(attempts).toEqual([scheduledPremiereId, premiereIds.alternate]);
-    expect(secondContext.httpRegistry.get(scheduledPremiereId)).not.toBeNull();
-    expect(secondContext.httpRegistry.get(premiereIds.alternate)).toBeNull();
-    expect(secondContext.runtimeRegistry.get(premiereIds.alternate)).toBeNull();
-    expect(second.service.readActiveTimerCount()).toBe(timersAtReturn);
+    expect(timeoutAttempts).toHaveLength(1);
+    expect(timeoutContext.runtimeRegistry.get(PREMIERE_ID)).toBeNull();
+    expect(timeoutContext.runtimeRegistry.get(alternatePremiereId)).toBeNull();
     expect((await fs.stat(eventsPath)).size).toBe(bytesAtReturn);
-
-    await second.service.close();
-    services.splice(services.indexOf(second.service), 1);
-    expect(second.service.readActiveTimerCount()).toBe(0);
-    expect(secondContext.httpRegistry.get(scheduledPremiereId)).toBeNull();
-    expect(secondContext.runtimeRegistry.get(scheduledPremiereId)).toBeNull();
-    expect((await fs.stat(eventsPath)).size).toBe(bytesAtReturn);
-  });
-
-  test("recovers the active and newest terminal targets before the demo-server budget stops legacy probing", async () => {
-    const premiereIds = await writeTwoAdmissions(root);
-    const blockingLegacyPremiereId = "prem_89abcdef01234567";
-    const remainingLegacyPremiereId = "prem_456789abcdef0123";
-    await writeAlternateAdmission(root, blockingLegacyPremiereId);
-    await writeAlternateAdmission(root, remainingLegacyPremiereId);
-    let clockNowMs = NOW.getTime() - 120_000;
-    const firstContext = startupContext(() => new Date(clockNowMs));
-    const first = await startReplayPremiereProduction({
-      ...firstContext,
-      privateStateRoot: path.join(root, "private"),
-      servedRoots: [path.join(root, "served")],
-    });
-    services.push(first.service);
-    expect(first.registeredPremiereIds).toHaveLength(4);
-
-    clockNowMs = NOW.getTime();
-    const active = firstContext.runtimeRegistry.get(premiereIds.primary)!;
-    await active.synchronize();
-    expect(active.readLifecycleState()).toBe("playing");
-    const remainingLegacy = firstContext.runtimeRegistry.get(
-      remainingLegacyPremiereId,
-    )!;
-    await remainingLegacy.cancel();
-    await remainingLegacy.archive();
-    const blockingLegacy = firstContext.runtimeRegistry.get(
-      blockingLegacyPremiereId,
-    )!;
-    await blockingLegacy.cancel();
-    await blockingLegacy.archive();
-    const newestTerminal = firstContext.runtimeRegistry.get(
-      premiereIds.alternate,
-    )!;
-    await newestTerminal.cancel();
-    await newestTerminal.archive();
-    await first.service.close();
-    services.splice(services.indexOf(first.service), 1);
-
-    vi.useFakeTimers({ now: NOW });
-    const secondContext = startupContext(() => new Date());
-    const attempts: string[] = [];
-    let releaseLegacy: (() => void) | undefined;
-    let resolveLegacyEntered: (() => void) | undefined;
-    const legacyBarrier = new Promise<void>((resolve) => {
-      releaseLegacy = resolve;
-    });
-    const legacyEntered = new Promise<void>((resolve) => {
-      resolveLegacyEntered = resolve;
-    });
-    const starting = startReplayPremiereProduction({
-      ...secondContext,
-      privateStateRoot: path.join(root, "private"),
-      servedRoots: [path.join(root, "served")],
-      maxStartupMs: DEMO_SERVER_STARTUP_BUDGET_MS,
-      beforeTargetRecovery: async ({ record }) => {
-        attempts.push(record.premiereId);
-        if (record.premiereId === blockingLegacyPremiereId) {
-          resolveLegacyEntered?.();
-          await legacyBarrier;
-        }
-      },
-    });
-    await legacyEntered;
-    expect(attempts).toEqual([
-      premiereIds.primary,
-      premiereIds.alternate,
-      blockingLegacyPremiereId,
-    ]);
-    await vi.advanceTimersByTimeAsync(DEMO_SERVER_STARTUP_BUDGET_MS);
-    const second = await starting;
-    services.push(second.service);
-
-    expect(second.registeredPremiereIds).toEqual([
-      premiereIds.primary,
-      premiereIds.alternate,
-    ]);
-    expect(second.diagnostics).toEqual([
-      {
-        target: `${blockingLegacyPremiereId}.admission.json`,
-        premiereId: blockingLegacyPremiereId,
-        operatorCode: "startup_deadline_exceeded",
-      },
-      {
-        target: `${remainingLegacyPremiereId}.admission.json`,
-        premiereId: remainingLegacyPremiereId,
-        operatorCode: "startup_deadline_exceeded",
-      },
-    ]);
-    expect(
-      secondContext.runtimeRegistry
-        .get(premiereIds.primary)
-        ?.readLifecycleState(),
-    ).toBe("playing");
-    expect(
-      secondContext.runtimeRegistry
-        .get(premiereIds.alternate)
-        ?.readLifecycleState(),
-    ).toBe("archived");
-    expect(
-      secondContext.runtimeRegistry.get(blockingLegacyPremiereId),
-    ).toBeNull();
-    expect(
-      secondContext.runtimeRegistry.get(remainingLegacyPremiereId),
-    ).toBeNull();
-    const bytesAtReturn = (
-      await fs.stat(
-        path.join(root, "private", "event-store-v1", "events.jsonl"),
-      )
-    ).size;
-    const timersAtReturn = second.service.readActiveTimerCount();
-
-    releaseLegacy?.();
-    await vi.advanceTimersByTimeAsync(0);
-    expect(
-      secondContext.runtimeRegistry.get(blockingLegacyPremiereId),
-    ).toBeNull();
-    expect(
-      secondContext.runtimeRegistry.get(remainingLegacyPremiereId),
-    ).toBeNull();
-    expect(second.service.readActiveTimerCount()).toBe(timersAtReturn);
-    expect(
-      (
-        await fs.stat(
-          path.join(root, "private", "event-store-v1", "events.jsonl"),
-        )
-      ).size,
-    ).toBe(bytesAtReturn);
-    await second.service.close();
-    services.splice(services.indexOf(second.service), 1);
-    expect(
-      secondContext.runtimeRegistry.get(blockingLegacyPremiereId),
-    ).toBeNull();
+    expect(timedOut.service.readActiveTimerCount()).toBe(0);
   });
 
   test("quarantines an invalid lifecycle projection without starving a valid target", async () => {
@@ -764,7 +778,11 @@ describe("ReplayPremiere production startup", () => {
   });
 
   test("quarantines a commitment-mismatched active envelope before priority recovery", async () => {
-    const premiereIds = await writeTwoAdmissions(root);
+    const premiereIds = {
+      primary: PREMIERE_ID,
+      alternate: "prem_fedcba9876543210",
+    };
+    await writeAlternateAdmission(root, premiereIds.alternate);
     const beforeSchedule = NOW.getTime() - 120_000;
     const firstContext = startupContext(() => new Date(beforeSchedule));
     const first = await startReplayPremiereProduction({
@@ -775,6 +793,7 @@ describe("ReplayPremiere production startup", () => {
     services.push(first.service);
     await first.service.close();
     services.splice(services.indexOf(first.service), 1);
+    await writeAdmission(root);
 
     const store = await ReplayPremiereEventStore.open({
       privateStateRoot: path.join(root, "private"),
@@ -1054,9 +1073,9 @@ describe("ReplayPremiere production startup", () => {
     expect(started.service.readActiveTimerCount()).toBe(0);
   });
 
-  test("isolates one bad target while registering a separately valid target", async () => {
+  test("fails a bad nearest target closed without probing another scheduled target", async () => {
     const premiereIds = await writeTwoAdmissions(root);
-    const badPath = admissionPath(root, premiereIds.alternate);
+    const badPath = admissionPath(root, premiereIds.primary);
     const badRecord = JSON.parse(await fs.readFile(badPath, "utf8")) as Record<
       string,
       unknown
@@ -1073,16 +1092,16 @@ describe("ReplayPremiere production startup", () => {
     });
     services.push(started.service);
 
-    expect(started.registeredPremiereIds).toEqual([premiereIds.primary]);
+    expect(started.registeredPremiereIds).toEqual([]);
     expect(started.diagnostics).toEqual([
       {
-        target: `${premiereIds.alternate}.admission.json`,
-        premiereId: premiereIds.alternate,
+        target: `${premiereIds.primary}.admission.json`,
+        premiereId: premiereIds.primary,
         operatorCode: "startup_publication_commitment_mismatch",
       },
     ]);
-    expect(context.httpRegistry.get(premiereIds.primary)).not.toBeNull();
-    expect(context.runtimeRegistry.get(premiereIds.primary)).not.toBeNull();
+    expect(context.httpRegistry.get(premiereIds.primary)).toBeNull();
+    expect(context.runtimeRegistry.get(premiereIds.primary)).toBeNull();
     expect(context.httpRegistry.get(premiereIds.alternate)).toBeNull();
     expect(context.runtimeRegistry.get(premiereIds.alternate)).toBeNull();
   });
