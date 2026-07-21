@@ -1912,6 +1912,12 @@ export class ReplayPremiereRuntimeController {
       }),
     );
     const viewedSequence = this.observedSequence();
+    const authoritativeTerminalSequence =
+      this.terminalFailure === null &&
+      manifest !== null &&
+      (manifest.state === "failed" || manifest.state === "cancelled")
+        ? manifest.releasedThroughSequence
+        : null;
     const currentTurn = this.latestFrame?.turnNumber ?? null;
     const projectedActiveCheckpointId =
       manifest?.activeCheckpoint?.id ??
@@ -1946,7 +1952,7 @@ export class ReplayPremiereRuntimeController {
       mapName: this.projection.publicDefinition.map.label,
       matchFormat: this.projection.publicDefinition.matchFormat.label,
       policies,
-      releasedSequence: viewedSequence,
+      releasedSequence: authoritativeTerminalSequence ?? viewedSequence,
       currentTurn,
       checkpoints: this.overlayCheckpoints(policies, manifest),
       activeCheckpointId: checkpointDeadlineElapsed

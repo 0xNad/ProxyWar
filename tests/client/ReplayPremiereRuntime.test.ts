@@ -425,6 +425,55 @@ describe("ReplayPremiereRuntimeController", () => {
     harness.runtime.dispose();
   });
 
+  it("projects the verified server failure boundary before any replay frame is observed", async () => {
+    const harness = runtimeHarness({ state: "failed" });
+    const started = harness.runtime.start();
+
+    await harness.callbacks.onManifest?.(releasedFailedManifest());
+    await harness.callbacks.onReady?.(projection("failed"));
+    await started;
+
+    expect(harness.models.at(-1)).toMatchObject({
+      state: "failed",
+      releasedSequence: 2,
+      failureCode: null,
+      canPredict: false,
+      canMark: false,
+      canShare: false,
+    });
+    expect(harness.onJoin).not.toHaveBeenCalled();
+    harness.runtime.dispose();
+  });
+
+  it.each(["integrity", "runtime"] as const)(
+    "keeps a client-originated %s failure on the observed frame boundary",
+    async (failureKind) => {
+      const harness = runtimeHarness({ state: "failed" });
+      const started = harness.runtime.start();
+
+      await harness.callbacks.onManifest?.(releasedFailedManifest());
+      await harness.callbacks.onReady?.(projection("failed"));
+      await started;
+      expect(harness.models.at(-1)?.releasedSequence).toBe(2);
+
+      if (failureKind === "integrity") {
+        await harness.callbacks.onFatalError?.(
+          new ReplayPremiereNetworkError("invalid_schema", false),
+        );
+      } else {
+        document.dispatchEvent(new CustomEvent("ai-league-replay-load-error"));
+      }
+
+      expect(harness.models.at(-1)).toMatchObject({
+        state: "failed",
+        releasedSequence: -1,
+        failureCode:
+          failureKind === "integrity" ? "integrity_failure" : "runtime_failure",
+      });
+      harness.runtime.dispose();
+    },
+  );
+
   it.each(["failed", "cancelled"] as const)(
     "makes a %s terminal pointer outrank a stale playing heartbeat and permanently disables writes",
     async (terminalState) => {
@@ -1237,6 +1286,34 @@ function terminalManifest(
   return {
     ...playingManifest(),
     state,
+  };
+}
+
+function releasedFailedManifest(): ReplayPremierePreRevealManifest {
+  return {
+    ...playingManifest(),
+    state: "failed",
+    serverNow: "2026-07-20T18:00:00.100Z",
+    authoritativeElapsedMs: 100,
+    releasedThroughSequence: 2,
+    lastReleasedChunkIndex: 0,
+    releasedChunks: [
+      {
+        premiereId: PREMIERE_ID,
+        index: 0,
+        startSequence: 0,
+        endSequence: 2,
+        startTurn: 0,
+        endTurn: 2,
+        presentationOffsetMs: 100,
+        previousChunkHash: null,
+        payloadHash: HASH_A,
+        chunkHash: HASH_B,
+        byteLength: 128,
+        terminal: false,
+        releasedAt: "2026-07-20T18:00:00.100Z",
+      },
+    ],
   };
 }
 
