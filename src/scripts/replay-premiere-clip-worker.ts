@@ -12,7 +12,9 @@
  *   "clipVersion": number,
  *   "outDir": string,                // clip.mp4 + render-manifest.json + frame dumps
  *   "staticDir": string,             // built client (served read-only over loopback)
- *   "captureMode"?: "screencast" | "tick-step"
+ *   "captureMode"?: "screencast" | "tick-step",
+ *   "frameShape"?: "square" | "landscape",   // default "square" (1080x1080)
+ *   "cameraFit"?: "fill" | "whole-map"       // default "fill"
  * }
  *
  * Pipeline: verify bundle sha256 -> stage embedded gameRecord -> ephemeral
@@ -41,20 +43,27 @@ import {
   buildSlateArgs,
   CdpClient,
   CLIP_FPS,
-  CLIP_HEIGHT,
-  CLIP_WIDTH,
+  CLIP_MAX_DEAD_SPACE_PER_SIDE,
+  computeClipCameraGeometry,
+  DEFAULT_CLIP_CAMERA_FIT,
+  DEFAULT_CLIP_FRAME_SHAPE,
   durationsFromTimestamps,
   FONT_ARIAL,
   FONT_ARIAL_BLACK,
   FONT_ARIAL_BOLD,
   frameFileName,
+  isClipCameraFit,
+  isClipFrameShape,
   launchHeadlessChrome,
+  resolveClipFrameProfile,
   resolveFfmpegBinary,
   runFfmpeg,
   ScreencastCollector,
   sha256OfBuffer,
   sha256OfFile,
   verifyFfmpeg,
+  type ClipCameraFit,
+  type ClipFrameShape,
   type LaunchedChrome,
 } from "./replay-premiere-clip-render-lib";
 
@@ -84,6 +93,8 @@ interface ClipJobSpec {
   outDir: string;
   staticDir: string;
   captureMode?: "screencast" | "tick-step";
+  frameShape: ClipFrameShape;
+  cameraFit: ClipCameraFit;
 }
 
 interface Timings {
@@ -141,6 +152,14 @@ async function readJobSpec(specPath: string): Promise<ClipJobSpec> {
   ) {
     fail(`job spec field "captureMode" must be "screencast" or "tick-step"`);
   }
+  const frameShapeRaw = raw["frameShape"];
+  if (frameShapeRaw !== undefined && !isClipFrameShape(frameShapeRaw)) {
+    fail(`job spec field "frameShape" must be "square" or "landscape"`);
+  }
+  const cameraFitRaw = raw["cameraFit"];
+  if (cameraFitRaw !== undefined && !isClipCameraFit(cameraFitRaw)) {
+    fail(`job spec field "cameraFit" must be "fill" or "whole-map"`);
+  }
   const anchorTurn = requireNumber("anchorTurn");
   if (anchorTurn <= CAPTURE_LEAD_TICKS) {
     fail(`anchorTurn must be > ${CAPTURE_LEAD_TICKS}`);
@@ -154,6 +173,10 @@ async function readJobSpec(specPath: string): Promise<ClipJobSpec> {
     outDir: requireString("outDir"),
     staticDir: requireString("staticDir"),
     captureMode: captureMode as ClipJobSpec["captureMode"],
+    frameShape:
+      (frameShapeRaw as ClipFrameShape | undefined) ?? DEFAULT_CLIP_FRAME_SHAPE,
+    cameraFit:
+      (cameraFitRaw as ClipCameraFit | undefined) ?? DEFAULT_CLIP_CAMERA_FIT,
   };
 }
 
@@ -341,11 +364,14 @@ async function startStaticHost(options: {
  *      while jump-turn force-queues to an exact turn — LocalServer.ts),
  *  (b) the promo native-spectator flag (__openFrontPromoNativeUi) so the
  *      always-visible top-left leaderboard mounts, plus CSS hiding the replay
- *      overlay, story timeline, social/headline chrome, top-right HUD and the
- *      player panel — KEEPING the leaderboard (licensing requires
- *      recognizable in-game frames; the June-era "Replay mode" banner no
- *      longer exists in the client),
- *  (c) a per-frame centerAll() camera lock (zoom drifts otherwise).
+ *      overlay, story timeline, social/headline chrome, top-right HUD, the
+ *      player panel, the whole left sidebar (its chevron/leaderboard toggle),
+ *      and the leaderboard's own "+" expand button — KEEPING the standalone
+ *      native leaderboard (licensing requires recognizable in-game frames; the
+ *      June-era "Replay mode" banner no longer exists in the client),
+ *  (c) a per-frame centerAll(fit) camera lock. `fit` starts at 1 (whole-map
+ *      contain) and is overwritten with the frame-shape-aware fill value
+ *      (window.__pwClip.cameraFitArg) once the worker has read the map dims.
  */
 function preInjectSource(): string {
   return `(() => {
@@ -358,6 +384,7 @@ function preInjectSource(): string {
     pauseSpam: null,
     hashWarnings: 0,
     consoleErrors: 0,
+    cameraFitArg: 1,
   };
   window.__pwClip = state;
   document.addEventListener("ai-league-replay-frame", (event) => {
@@ -396,7 +423,12 @@ function preInjectSource(): string {
   style.textContent =
     "#ai-league-replay-overlay, #ai-league-story-timeline, " +
     "#ai-league-social-transcript, #ai-league-headline-event, " +
-    "game-right-sidebar, replay-panel, player-panel { display: none !important; }";
+    "game-right-sidebar, game-left-sidebar, replay-panel, player-panel " +
+    "{ display: none !important; }" +
+    // The leaderboard's own expand toggle is the last direct <button> child of
+    // the light-DOM <leader-board>; hide it on every leader-board instance
+    // (the standalone native one and any hidden sidebar copy).
+    " leader-board > button { display: none !important; }";
   const attach = () => {
     (document.head || document.documentElement).appendChild(style);
   };
@@ -407,7 +439,10 @@ function preInjectSource(): string {
   }
   const cameraLock = () => {
     try {
-      if (window.__proxywarTransform) window.__proxywarTransform.centerAll();
+      if (window.__proxywarTransform) {
+        const fit = typeof state.cameraFitArg === "number" ? state.cameraFitArg : 1;
+        window.__proxywarTransform.centerAll(fit);
+      }
     } catch (e) {}
     window.requestAnimationFrame(cameraLock);
   };
@@ -415,11 +450,20 @@ function preInjectSource(): string {
 })();`;
 }
 
+interface ClipMapView {
+  mapWidth: number;
+  mapHeight: number;
+  viewportWidth: number;
+  viewportHeight: number;
+}
+
 interface PageDriver {
   evalValue<T>(expression: string): Promise<T>;
   lastTick(): Promise<number | null>;
   dispatchJump(turnNumber: number): Promise<void>;
   setPaused(paused: boolean): Promise<void>;
+  readMapView(): Promise<ClipMapView>;
+  setCameraFit(fit: number): Promise<void>;
   waitForTick(
     minTick: number,
     timeoutMs: number,
@@ -458,6 +502,48 @@ function makePageDriver(cdp: CdpClient, sessionId: string): PageDriver {
           document.dispatchEvent(
             new CustomEvent("ai-league-replay-pause", { detail: { paused: ${paused} } }),
           );
+          return true;
+        })()`,
+      );
+    },
+    readMapView: async () => {
+      // The transform handler is exposed as window.__proxywarTransform and holds
+      // the GameView (`.game`), whose width()/height() are the map tile dims.
+      const view = await evalValue<ClipMapView | null>(
+        `(() => {
+          const t = window.__proxywarTransform;
+          if (!t || !t.game) return null;
+          return {
+            mapWidth: t.game.width(),
+            mapHeight: t.game.height(),
+            viewportWidth: window.innerWidth,
+            viewportHeight: window.innerHeight,
+          };
+        })()`,
+      );
+      if (
+        view === null ||
+        !Number.isFinite(view.mapWidth) ||
+        !Number.isFinite(view.mapHeight) ||
+        !Number.isFinite(view.viewportWidth) ||
+        !Number.isFinite(view.viewportHeight) ||
+        view.mapWidth <= 0 ||
+        view.mapHeight <= 0 ||
+        view.viewportWidth <= 0 ||
+        view.viewportHeight <= 0
+      ) {
+        fail("could not read map/viewport dimensions from the page");
+      }
+      return view;
+    },
+    setCameraFit: async (fit: number) => {
+      if (!Number.isFinite(fit) || fit <= 0) fail(`invalid camera fit ${fit}`);
+      await evalValue(
+        `(() => {
+          if (window.__pwClip) window.__pwClip.cameraFitArg = ${fit};
+          try {
+            if (window.__proxywarTransform) window.__proxywarTransform.centerAll(${fit});
+          } catch (e) {}
           return true;
         })()`,
       );
@@ -503,12 +589,13 @@ async function captureScreencast(
   sessionId: string,
   framesDir: string,
   endTick: number,
+  frame: { width: number; height: number },
 ): Promise<CaptureResult> {
   const collector = new ScreencastCollector(cdp, sessionId, framesDir);
   await collector.start({
     quality: 90,
-    maxWidth: CLIP_WIDTH,
-    maxHeight: CLIP_HEIGHT,
+    maxWidth: frame.width,
+    maxHeight: frame.height,
   });
   const tickStart = (await driver.lastTick()) ?? fail("no tick before capture");
   const captureStartedAt = Date.now();
@@ -591,6 +678,7 @@ async function assembleClip(options: {
   outDir: string;
   frameDurations: number[];
   licenseStrings: { attribution: string; noEndorsement: string };
+  frame: { width: number; height: number };
 }): Promise<{
   outSha256: string;
   outBytes: number;
@@ -611,6 +699,8 @@ async function assembleClip(options: {
       concatPath,
       outPath: bodyPath,
       watermarkText: WATERMARK_TEXT,
+      width: options.frame.width,
+      height: options.frame.height,
     }),
   );
   await runFfmpeg(
@@ -622,6 +712,8 @@ async function assembleClip(options: {
       attributionText: options.licenseStrings.attribution,
       noEndorsementText: options.licenseStrings.noEndorsement,
       seconds: 2,
+      width: options.frame.width,
+      height: options.frame.height,
     }),
   );
   const listPath = path.join(options.scratchDir, "final-list.txt");
@@ -680,7 +772,11 @@ async function main(): Promise<void> {
   }
   const spec = await readJobSpec(specPath);
   const captureMode = spec.captureMode ?? "screencast";
-  for (const font of [FONT_ARIAL, FONT_ARIAL_BOLD, FONT_ARIAL_BLACK]) {
+  const frameProfile = resolveClipFrameProfile(spec.frameShape);
+  log(
+    `frame ${frameProfile.shape} ${frameProfile.width}x${frameProfile.height}, camera ${spec.cameraFit}`,
+  );
+  for (const font of [FONT_ARIAL, FONT_ARIAL_BLACK, FONT_ARIAL_BOLD]) {
     await fs.access(font).catch(() => fail(`required font missing: ${font}`));
   }
   const licenseStrings = await readLicenseStrings();
@@ -722,6 +818,8 @@ async function main(): Promise<void> {
     const chromeLaunchStartedAt = Date.now();
     chrome = await launchHeadlessChrome({
       userDataDir: path.join(scratchDir, "chrome-profile"),
+      windowWidth: frameProfile.width,
+      windowHeight: frameProfile.height,
     });
     cdp = await CdpClient.connect(chrome.browserWsUrl);
     const chromeLaunchMs = Date.now() - chromeLaunchStartedAt;
@@ -746,11 +844,15 @@ async function main(): Promise<void> {
       { urls: BLOCKED_URL_PATTERNS },
       sessionId,
     );
+    // Set the render viewport to the target frame shape BEFORE the camera lock
+    // so the client's centerAll() fits the map into these dimensions (square by
+    // default). Cropping is done by the camera, never in ffmpeg — the
+    // leaderboard/watermark overlays must stay whole.
     await cdp.send(
       "Emulation.setDeviceMetricsOverride",
       {
-        width: CLIP_WIDTH,
-        height: CLIP_HEIGHT,
+        width: frameProfile.width,
+        height: frameProfile.height,
         deviceScaleFactor: 1,
         mobile: false,
       },
@@ -770,6 +872,38 @@ async function main(): Promise<void> {
     await driver.waitForTick(0, 120_000, 200, "first-frame");
     const pageLoadToFirstFrameMs = Date.now() - navigateStartedAt;
     log(`first frame after ${pageLoadToFirstFrameMs}ms`);
+
+    // Now that the map is initialized, read its dimensions (via the exposed
+    // transform handler) and the live viewport, compute the fill zoom for this
+    // frame shape, and push it to the per-frame camera lock. centerAll(fit)
+    // scales by min(vp/map) * fit and centers, so `fit` is exactly what the
+    // Node-side geometry model computes.
+    const mapView = await driver.readMapView();
+    const framing = computeClipCameraGeometry({
+      viewportWidth: mapView.viewportWidth,
+      viewportHeight: mapView.viewportHeight,
+      mapWidth: mapView.mapWidth,
+      mapHeight: mapView.mapHeight,
+      cameraFit: spec.cameraFit,
+    });
+    await driver.setCameraFit(framing.fit);
+    log(
+      `map ${mapView.mapWidth}x${mapView.mapHeight} in ${mapView.viewportWidth}x${mapView.viewportHeight}: ` +
+        `fit=${framing.fit.toFixed(3)} deadSpace=${(framing.deadSpacePerSideFraction * 100).toFixed(1)}%/side` +
+        `${framing.overscanCapped ? " (overscan-capped)" : ""}`,
+    );
+    if (
+      spec.cameraFit === "fill" &&
+      framing.deadSpacePerSideFraction > CLIP_MAX_DEAD_SPACE_PER_SIDE + 1e-6
+    ) {
+      fail(
+        `dead space ${(framing.deadSpacePerSideFraction * 100).toFixed(1)}% per side ` +
+          `exceeds ${(CLIP_MAX_DEAD_SPACE_PER_SIDE * 100).toFixed(0)}% budget for a ` +
+          `${mapView.mapWidth}x${mapView.mapHeight} map in a ${frameProfile.shape} frame`,
+      );
+    }
+    // Let the camera-lock rAF apply the new fit before parking/capture.
+    await sleep(120);
 
     const parkTick = spec.anchorTurn - CAPTURE_LEAD_TICKS;
     const endTick = spec.anchorTurn + CAPTURE_TAIL_TICKS;
@@ -791,7 +925,14 @@ async function main(): Promise<void> {
 
     const capture =
       captureMode === "screencast"
-        ? await captureScreencast(driver, cdp, sessionId, framesDir, endTick)
+        ? await captureScreencast(
+            driver,
+            cdp,
+            sessionId,
+            framesDir,
+            endTick,
+            frameProfile,
+          )
         : await captureTickStep(
             driver,
             cdp,
@@ -828,6 +969,7 @@ async function main(): Promise<void> {
       outDir: spec.outDir,
       frameDurations: capture.frameDurations,
       licenseStrings,
+      frame: frameProfile,
     });
 
     const timings: Timings = {
@@ -866,6 +1008,21 @@ async function main(): Promise<void> {
       anchorTurn: spec.anchorTurn,
       clipVersion: spec.clipVersion,
       captureMode,
+      frameShape: frameProfile.shape,
+      frameWidth: frameProfile.width,
+      frameHeight: frameProfile.height,
+      cameraFit: spec.cameraFit,
+      framing: {
+        mapWidth: mapView.mapWidth,
+        mapHeight: mapView.mapHeight,
+        viewportWidth: mapView.viewportWidth,
+        viewportHeight: mapView.viewportHeight,
+        cameraFitArg: framing.fit,
+        deadSpacePerSideFraction: framing.deadSpacePerSideFraction,
+        deadSpaceHorizontalPx: framing.deadSpaceHorizontalPx,
+        deadSpaceVerticalPx: framing.deadSpaceVerticalPx,
+        overscanCapped: framing.overscanCapped,
+      },
       tickStart: capture.tickStart,
       tickEnd: capture.tickEnd,
       frameCount: capture.frameCount,

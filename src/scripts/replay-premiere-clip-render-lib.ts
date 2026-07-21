@@ -45,12 +45,185 @@ export const SLATE_BACKGROUND = "0x0e0e12";
 /** Gold accent, ported from assemble.py's endcard line color. */
 export const SLATE_ACCENT = "0xF8D530";
 
-export const CLIP_WIDTH = 1280;
-export const CLIP_HEIGHT = 720;
 export const CLIP_FPS = 30;
 export const CLIP_CRF = 21;
 /** Shared mp4 track timescale so the slate concat (-c copy) stays clean. */
 export const CLIP_TIMESCALE = 15360;
+
+// ---------------------------------------------------------------------------
+// Frame shape
+// ---------------------------------------------------------------------------
+
+/**
+ * Output geometry. `square` is the default: X/mobile-optimal, and the near
+ * square maps the league actually plays (Pangaea is exactly 1000x1000) fill it
+ * without letterboxing. `landscape` keeps the 16:9 geometry for embeds.
+ */
+export type ClipFrameShape = "square" | "landscape";
+
+/**
+ * Camera policy. `fill` zooms past whole-map fit (cropping the map's long axis)
+ * until the empty-canvas margin is within budget; `whole-map` is the plain
+ * `centerAll(1)` contain fit, which letterboxes whenever the map aspect does
+ * not match the frame aspect.
+ */
+export type ClipCameraFit = "fill" | "whole-map";
+
+export interface ClipFrameProfile {
+  shape: ClipFrameShape;
+  width: number;
+  height: number;
+}
+
+export const CLIP_FRAME_PROFILES: Readonly<
+  Record<ClipFrameShape, ClipFrameProfile>
+> = {
+  // The native spectator leaderboard keeps its client-set 360px width at both
+  // shapes; at 1080 that is a legible ~1/3 of the frame (verified in renders),
+  // so no clip-side rescale is applied.
+  square: {
+    shape: "square",
+    width: 1080,
+    height: 1080,
+  },
+  landscape: {
+    shape: "landscape",
+    width: 1280,
+    height: 720,
+  },
+};
+
+export const DEFAULT_CLIP_FRAME_SHAPE: ClipFrameShape = "square";
+export const DEFAULT_CLIP_CAMERA_FIT: ClipCameraFit = "fill";
+
+/** Empty-canvas budget per side, as a fraction of the frame's own dimension. */
+export const CLIP_MAX_DEAD_SPACE_PER_SIDE = 0.12;
+/**
+ * Hard cap on how far the camera may zoom past whole-map fit. 1.6 covers every
+ * map up to ~2.1:1 (which includes world/oceania/mars at 2.0); ribbon maps such
+ * as `amazonriver` (20:1) cannot be framed without discarding almost the whole
+ * board, so they fail the dead-space check loudly instead of shipping a clip
+ * that is mostly empty canvas.
+ */
+export const CLIP_MAX_CAMERA_OVERSCAN = 1.6;
+
+export function isClipFrameShape(value: unknown): value is ClipFrameShape {
+  return value === "square" || value === "landscape";
+}
+
+export function isClipCameraFit(value: unknown): value is ClipCameraFit {
+  return value === "fill" || value === "whole-map";
+}
+
+export function resolveClipFrameProfile(
+  shape: ClipFrameShape = DEFAULT_CLIP_FRAME_SHAPE,
+): ClipFrameProfile {
+  return CLIP_FRAME_PROFILES[shape];
+}
+
+export interface ClipCameraGeometry {
+  /** Argument for the client's `centerAll(fit)`; 1 is plain whole-map fit. */
+  fit: number;
+  scale: number;
+  mapScreenWidth: number;
+  mapScreenHeight: number;
+  /** Empty canvas on each side in device pixels (left === right, top === bottom). */
+  deadSpaceHorizontalPx: number;
+  deadSpaceVerticalPx: number;
+  /** Worst per-side empty-canvas margin as a fraction of that frame dimension. */
+  deadSpacePerSideFraction: number;
+  /** True when the overscan cap, not the map, prevented reaching the budget. */
+  overscanCapped: boolean;
+}
+
+/**
+ * Resolve the camera zoom for one frame/map pair.
+ *
+ * `centerAll(fit)` scales by `min(vpW/mapW, vpH/mapH) * fit` and centers the
+ * map, so the empty margin per side is `(vp - map * scale) / 2` on whichever
+ * axis is loose. For a square map in a square frame the loose axis does not
+ * exist and `fit` stays exactly 1 (identical framing to a plain `centerAll()`).
+ */
+export function computeClipCameraGeometry(options: {
+  viewportWidth: number;
+  viewportHeight: number;
+  mapWidth: number;
+  mapHeight: number;
+  cameraFit?: ClipCameraFit;
+  maxDeadSpacePerSide?: number;
+  maxOverscan?: number;
+}): ClipCameraGeometry {
+  const viewportWidth = positiveFinite(options.viewportWidth, "viewportWidth");
+  const viewportHeight = positiveFinite(
+    options.viewportHeight,
+    "viewportHeight",
+  );
+  const mapWidth = positiveFinite(options.mapWidth, "mapWidth");
+  const mapHeight = positiveFinite(options.mapHeight, "mapHeight");
+  const cameraFit = options.cameraFit ?? DEFAULT_CLIP_CAMERA_FIT;
+  const maxDeadSpacePerSide =
+    options.maxDeadSpacePerSide ?? CLIP_MAX_DEAD_SPACE_PER_SIDE;
+  const maxOverscan = options.maxOverscan ?? CLIP_MAX_CAMERA_OVERSCAN;
+  if (maxDeadSpacePerSide < 0 || maxDeadSpacePerSide >= 0.5) {
+    throw new Error(
+      `maxDeadSpacePerSide must be in [0, 0.5): ${maxDeadSpacePerSide}`,
+    );
+  }
+  if (!(maxOverscan >= 1)) {
+    throw new Error(`maxOverscan must be >= 1: ${maxOverscan}`);
+  }
+
+  const containScale = Math.min(
+    viewportWidth / mapWidth,
+    viewportHeight / mapHeight,
+  );
+  const coverScale = Math.max(
+    viewportWidth / mapWidth,
+    viewportHeight / mapHeight,
+  );
+  const coverRatio = coverScale / containScale;
+
+  let fit = 1;
+  let overscanCapped = false;
+  if (cameraFit === "fill" && coverRatio > 1) {
+    const needed = (1 - 2 * maxDeadSpacePerSide) * coverRatio;
+    const cap = Math.min(coverRatio, maxOverscan);
+    fit = Math.min(Math.max(1, needed), cap);
+    overscanCapped = needed > cap + 1e-9;
+  }
+
+  const scale = containScale * fit;
+  const mapScreenWidth = mapWidth * scale;
+  const mapScreenHeight = mapHeight * scale;
+  const deadSpaceHorizontalPx = Math.max(
+    0,
+    (viewportWidth - mapScreenWidth) / 2,
+  );
+  const deadSpaceVerticalPx = Math.max(
+    0,
+    (viewportHeight - mapScreenHeight) / 2,
+  );
+  return {
+    fit,
+    scale,
+    mapScreenWidth,
+    mapScreenHeight,
+    deadSpaceHorizontalPx,
+    deadSpaceVerticalPx,
+    deadSpacePerSideFraction: Math.max(
+      deadSpaceHorizontalPx / viewportWidth,
+      deadSpaceVerticalPx / viewportHeight,
+    ),
+    overscanCapped,
+  };
+}
+
+function positiveFinite(value: number, label: string): number {
+  if (!Number.isFinite(value) || value <= 0) {
+    throw new Error(`${label} must be a positive finite number: ${value}`);
+  }
+  return value;
+}
 
 // ---------------------------------------------------------------------------
 // Small helpers
@@ -206,20 +379,24 @@ export function buildClipEncodeArgs(options: {
   concatPath: string;
   outPath: string;
   watermarkText: string;
+  width?: number;
+  height?: number;
 }): string[] {
+  const { width, height } = frameSize(options);
   const watermark = drawtext({
     fontFile: FONT_ARIAL_BOLD,
+    // Scales with the frame: 20 at 720p tall, 30 at 1080 square.
     text: options.watermarkText,
     fontColor: "white@0.85",
-    fontSize: 20,
-    x: "w-text_w-14",
-    y: "h-text_h-10",
+    fontSize: Math.round(height * 0.0278),
+    x: `w-text_w-${Math.round(width * 0.011)}`,
+    y: `h-text_h-${Math.round(height * 0.0139)}`,
     box: true,
   });
   // in_range=jpeg/out_range=mpeg: screencast JPEG frames are full range;
   // convert to limited range so the output is plain yuv420p (tv), matching
   // the slate and the "h264 High yuv420p" contract.
-  const vf = `fps=${CLIP_FPS},scale=${CLIP_WIDTH}:${CLIP_HEIGHT}:in_range=jpeg:out_range=mpeg,setsar=1,${watermark}`;
+  const vf = `fps=${CLIP_FPS},scale=${width}:${height}:in_range=jpeg:out_range=mpeg,setsar=1,${watermark}`;
   return [
     "-y",
     "-f",
@@ -249,7 +426,9 @@ export function buildClipEncodeArgs(options: {
 /**
  * Build the 2s end slate: dark background, "Proxy War" wordmark, CTA, and the
  * exact `replay_premiere.asset_attribution` / `replay_premiere.no_endorsement`
- * strings (passed in verbatim from resources/lang/en.json).
+ * strings (passed in verbatim from resources/lang/en.json). The layout is
+ * re-derived from the target dimensions so both license lines stay fully inside
+ * the frame at 1080x1080 (square) and 1280x720 (landscape).
  */
 export function buildSlateArgs(options: {
   outPath: string;
@@ -258,40 +437,57 @@ export function buildSlateArgs(options: {
   attributionText: string;
   noEndorsementText: string;
   seconds?: number;
+  width?: number;
+  height?: number;
 }): string[] {
   const seconds = options.seconds ?? 2;
+  const { width, height } = frameSize(options);
+  // Title/CTA sit above vertical center; the two license lines are pinned to
+  // the bottom margin (measured up from the frame bottom, not down from the
+  // top) so they never overflow whatever the frame height is. The license font
+  // is capped so the longer attribution line fits within the frame width with a
+  // safe margin at either aspect.
+  const titleSize = Math.round(height * 0.089);
+  const ctaSize = Math.round(height * 0.055);
+  const licenseSize = Math.min(
+    Math.round(height * 0.024),
+    // ~0.9 px per character for Arial at the widths we use; keep the longest
+    // license line inside 92% of the frame width.
+    Math.floor((width * 0.92) / (longestLicenseChars(options) * 0.52)),
+  );
+  const licenseLineGap = Math.round(licenseSize * 1.7);
   const drawtexts = [
     drawtext({
       fontFile: FONT_ARIAL_BLACK,
       text: options.title,
       fontColor: "white",
-      fontSize: 64,
+      fontSize: titleSize,
       x: "(w-text_w)/2",
-      y: "200",
+      y: `${(height * 0.5 - titleSize - height * 0.03).toFixed(0)}`,
     }),
     drawtext({
       fontFile: FONT_ARIAL_BOLD,
       text: options.ctaText,
       fontColor: SLATE_ACCENT,
-      fontSize: 40,
+      fontSize: ctaSize,
       x: "(w-text_w)/2",
-      y: "330",
+      y: `${(height * 0.5 + height * 0.02).toFixed(0)}`,
     }),
     drawtext({
       fontFile: FONT_ARIAL,
       text: options.attributionText,
       fontColor: "white@0.85",
-      fontSize: 17,
+      fontSize: licenseSize,
       x: "(w-text_w)/2",
-      y: "600",
+      y: `h-${(height * 0.07 + licenseLineGap).toFixed(0)}`,
     }),
     drawtext({
       fontFile: FONT_ARIAL,
       text: options.noEndorsementText,
       fontColor: "white@0.85",
-      fontSize: 17,
+      fontSize: licenseSize,
       x: "(w-text_w)/2",
-      y: "632",
+      y: `h-${(height * 0.07).toFixed(0)}`,
     }),
   ];
   return [
@@ -299,7 +495,7 @@ export function buildSlateArgs(options: {
     "-f",
     "lavfi",
     "-i",
-    `color=c=${SLATE_BACKGROUND}:s=${CLIP_WIDTH}x${CLIP_HEIGHT}:d=${seconds}`,
+    `color=c=${SLATE_BACKGROUND}:s=${width}x${height}:d=${seconds}`,
     "-vf",
     drawtexts.join(","),
     "-c:v",
@@ -318,6 +514,37 @@ export function buildSlateArgs(options: {
     String(CLIP_TIMESCALE),
     options.outPath,
   ];
+}
+
+function longestLicenseChars(options: {
+  attributionText: string;
+  noEndorsementText: string;
+}): number {
+  return Math.max(
+    1,
+    options.attributionText.length,
+    options.noEndorsementText.length,
+  );
+}
+
+function frameSize(options: { width?: number; height?: number }): {
+  width: number;
+  height: number;
+} {
+  const profile = CLIP_FRAME_PROFILES[DEFAULT_CLIP_FRAME_SHAPE];
+  const width = options.width ?? profile.width;
+  const height = options.height ?? profile.height;
+  if (
+    !Number.isInteger(width) ||
+    !Number.isInteger(height) ||
+    width < 16 ||
+    height < 16 ||
+    width % 2 !== 0 ||
+    height % 2 !== 0
+  ) {
+    throw new Error(`invalid clip frame size ${width}x${height}`);
+  }
+  return { width, height };
 }
 
 /** Concat list (absolute paths) for the final body+slate mux. */
@@ -591,8 +818,8 @@ export async function launchHeadlessChrome(options: {
   timeoutMs?: number;
 }): Promise<LaunchedChrome> {
   const chromeBinary = options.chromeBinary ?? DEFAULT_CHROME_BINARY;
-  const width = options.windowWidth ?? CLIP_WIDTH;
-  const height = options.windowHeight ?? CLIP_HEIGHT;
+  const width = options.windowWidth ?? CLIP_FRAME_PROFILES.landscape.width;
+  const height = options.windowHeight ?? CLIP_FRAME_PROFILES.landscape.height;
   const timeoutMs = options.timeoutMs ?? 30_000;
   await fs.mkdir(options.userDataDir, { recursive: true, mode: 0o700 });
   const portFile = path.join(options.userDataDir, "DevToolsActivePort");
@@ -760,8 +987,8 @@ export class ScreencastCollector {
       {
         format: "jpeg",
         quality: options.quality ?? 90,
-        maxWidth: options.maxWidth ?? CLIP_WIDTH,
-        maxHeight: options.maxHeight ?? CLIP_HEIGHT,
+        maxWidth: options.maxWidth ?? CLIP_FRAME_PROFILES.landscape.width,
+        maxHeight: options.maxHeight ?? CLIP_FRAME_PROFILES.landscape.height,
         everyNthFrame: 1,
       },
       this.sessionId,
