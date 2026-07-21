@@ -144,11 +144,23 @@ describe("ReplayPremiereGuestSecurity", () => {
     ).toThrow(ReplayPremiereError);
   });
 
-  it("classifies missing and crawler user agents as non-qualified", () => {
-    expect(isReplayPremiereBotUserAgent(undefined)).toBe(true);
-    expect(isReplayPremiereBotUserAgent("Twitterbot/1.0")).toBe(true);
-    expect(isReplayPremiereBotUserAgent("Mozilla/5.0 Safari/605.1.15")).toBe(
-      false,
-    );
+  it("accepts normal comma-bearing browser user agents and fails closed on unclassifiable values", () => {
+    const browserUserAgent =
+      "Mozilla/5.0 AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36";
+    expect(isReplayPremiereBotUserAgent(browserUserAgent)).toBe(false);
+    expect(
+      isReplayPremiereBotUserAgent(`${browserUserAgent} Twitterbot/1.0`),
+    ).toBe(true);
+    for (const unclassifiable of [
+      undefined,
+      [],
+      [browserUserAgent],
+      "",
+      "   ",
+      "Mozilla/5.0\u0000Safari/537.36",
+      "x".repeat(1_025),
+    ]) {
+      expect(isReplayPremiereBotUserAgent(unclassifiable)).toBe(true);
+    }
   });
 });

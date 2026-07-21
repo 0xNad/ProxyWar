@@ -371,10 +371,19 @@ export class ReplayPremiereGuestSecurity {
 }
 
 export function isReplayPremiereBotUserAgent(
-  userAgent: string | undefined,
+  userAgent: string | readonly string[] | undefined,
 ): boolean {
-  if (userAgent === undefined) return true;
-  if (userAgent.length > 1_024) return true;
+  if (
+    typeof userAgent !== "string" ||
+    userAgent.trim().length === 0 ||
+    userAgent.length > 1_024 ||
+    [...userAgent].some((character) => {
+      const code = character.charCodeAt(0);
+      return code <= 31 || code === 127;
+    })
+  ) {
+    return true;
+  }
   return /\b(bot|crawler|spider|slurp|preview|facebookexternalhit|twitterbot)\b/i.test(
     userAgent,
   );

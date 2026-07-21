@@ -312,6 +312,31 @@ describe("ReplayPremiere HTTP adapter", () => {
     });
   });
 
+  test("accepts a comma-bearing browser User-Agent and persists a non-bot session", async () => {
+    const harness = await httpHarness(root, true);
+    await harness.run(async (baseUrl) => {
+      const response = await fetch(
+        `${baseUrl}/api/premieres/${PREMIERE_ID}/sessions`,
+        {
+          method: "POST",
+          headers: {
+            ...writeHeaders("browser_session_request_0001"),
+            "User-Agent":
+              "Mozilla/5.0 AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36",
+          },
+          body: JSON.stringify({ visible: true, observedSequence: 5 }),
+        },
+      );
+
+      expect(response.status).toBe(201);
+      expect(await response.json()).toMatchObject({
+        session: { excludedAsBot: false },
+      });
+      expect(harness.interactions.readState().sessions).toHaveLength(1);
+      expect(harness.operatorErrors).toEqual([]);
+    });
+  });
+
   test("uses the trusted edge address for buckets and fails closed before admission", async () => {
     const resolveClientAddress =
       createReplayPremiereTrustedProxyAddressResolver({

@@ -425,8 +425,7 @@ async function handleSessionWrite(options: {
       observedSequence: body.observedSequence,
       excludedAsOperator: false,
       excludedAsBot: isReplayPremiereBotUserAgent(
-        optionalSingleHeader(options.request.headers["user-agent"]) ??
-          undefined,
+        options.request.headers["user-agent"],
       ),
       incomingAttribution: attribution,
     }),
