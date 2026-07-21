@@ -38,6 +38,7 @@
     "league:mirror": "tsx src/scripts/coworld-league-mirror.ts",
     "league:mirror:watch": "tsx src/scripts/coworld-league-mirror.ts --watch",
     "league:prune": "tsx src/scripts/coworld-league-prune.ts",
+    "storage:runs-retention": "tsx src/scripts/ai-league-runs-retention.ts",
     "agent:closed-beta": "cross-env GAME_ENV=dev PROXYWAR_BETA_ENABLED=true PROXYWAR_AGENT_RELAY_REDELIVERY_MS=5000 PROXYWAR_HOUSE_AGENT_BRAIN=planner-claude-cli AI_LEAGUE_REQUIRE_EXTERNAL_BRAIN_SUCCESS=true AI_LEAGUE_CLAUDE_TIMEOUT_MS=60000 tsx src/scripts/ai-agent-demo-server.ts",
     "agent:closed-beta:codex": "cross-env GAME_ENV=dev PROXYWAR_BETA_ENABLED=true PROXYWAR_AGENT_RELAY_REDELIVERY_MS=5000 PROXYWAR_HOUSE_AGENT_BRAIN=planner-codex-cli AI_LEAGUE_LLM_PROVIDER=codex-cli AI_LEAGUE_REQUIRE_EXTERNAL_BRAIN_SUCCESS=true AI_LEAGUE_CODEX_TIMEOUT_MS=45000 AI_LEAGUE_CODEX_APP_SERVER_FALLBACK=false tsx src/scripts/ai-agent-demo-server.ts",
     "agent:beta": "cross-env GAME_ENV=dev PROXYWAR_BETA_ENABLED=true PROXYWAR_AGENT_RELAY_REDELIVERY_MS=5000 PROXYWAR_HOUSE_AGENT_BRAIN=planner-claude-cli AI_LEAGUE_REQUIRE_EXTERNAL_BRAIN_SUCCESS=true AI_LEAGUE_CLAUDE_TIMEOUT_MS=60000 tsx src/scripts/ai-agent-demo-server.ts",
