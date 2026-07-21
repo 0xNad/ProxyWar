@@ -36,6 +36,7 @@ import {
 } from "./ReplayPremierePrivateStaging";
 import {
   importControlledPremiereSourceForPublication,
+  replayPremiereDraftChunksMatch,
   VerifiedPremiereEligibilityGate,
   type PremierePublicDefinition,
   type VerifyPremierePublicationOptions,
@@ -458,8 +459,10 @@ async function createAdmissionRecord(
     ...options.chunkBuildLimits,
   });
   if (
-    hashReplayPremiereJson(asJson(rebuiltDrafts)) !==
-    hashReplayPremiereJson(asJson(options.verification.draftChunks))
+    !replayPremiereDraftChunksMatch(
+      rebuiltDrafts,
+      options.verification.draftChunks,
+    )
   ) {
     throw catalogIntegrity("catalog_rebuilt_draft_mismatch");
   }

@@ -23,6 +23,7 @@ import {
   type PremierePublicLabel,
   type PremiereSeatIdentity,
   type PremiereSourceKind,
+  type PremiereSourceRecord,
   type ReleasedPremiereChunk,
 } from "./ReplayPremiereContracts";
 import {
@@ -345,12 +346,10 @@ export class VerifiedPremiereEligibilityGate {
     ]);
     if (
       canonicalResult.turnCount !== source.turnCount ||
-      !sameJson(
-        normalizeImportedRecords(
-          source.replay.records,
-          options.publicDefinition.playbackRate,
-        ),
-        flattenDraftRecords(options.draftChunks),
+      !replayPremiereRecordsMatchDrafts(
+        source.replay.records,
+        options.publicDefinition.playbackRate,
+        options.draftChunks,
       )
     ) {
       throw publicationFailure("source_replay_draft_binding_mismatch");
@@ -385,10 +384,7 @@ export class VerifiedPremiereEligibilityGate {
     ) {
       throw publicationFailure("draft_premiere_binding_mismatch");
     }
-    const frozenDrafts = cloneAndFreezeReplayPremiereValue(
-      options.draftChunks,
-      "premiere frozen draft chunks",
-    );
+    const frozenDrafts = cloneAndFreezePremiereDraftChunks(options.draftChunks);
     const draftDescriptors = frozenDrafts.map((chunk) =>
       frozenDescriptor(chunk.descriptor),
     );
@@ -1181,24 +1177,58 @@ function canonicalGameRecordCompletion(end: number): string {
   return completedAt.toISOString();
 }
 
-function normalizeImportedRecords(
-  records: ReturnType<typeof importPremiereReplay>["records"],
+export function replayPremiereRecordsMatchDrafts(
+  records: readonly PremiereSourceRecord[],
   playbackRate: PremierePlaybackRate,
-): ReplayPremiereJsonValue {
-  return records.map((record) => ({
-    sequence: record.sequence,
-    turn: record.turn,
-    presentationOffsetMs: Math.floor(record.nominalOffsetMs / playbackRate),
-    payload: record.payload,
-  }));
+  chunks: readonly PremiereChunkDraft[],
+): boolean {
+  let sourceIndex = 0;
+  for (const chunk of chunks) {
+    for (const draftRecord of chunk.payload.records) {
+      const sourceRecord = records[sourceIndex];
+      if (
+        sourceRecord === undefined ||
+        !sameJson(
+          {
+            sequence: sourceRecord.sequence,
+            turn: sourceRecord.turn,
+            presentationOffsetMs: Math.floor(
+              sourceRecord.nominalOffsetMs / playbackRate,
+            ),
+            payload: sourceRecord.payload,
+          },
+          draftRecord,
+        )
+      ) {
+        return false;
+      }
+      sourceIndex += 1;
+    }
+  }
+  return sourceIndex === records.length;
 }
 
-function flattenDraftRecords(
+export function cloneAndFreezePremiereDraftChunks(
   chunks: readonly PremiereChunkDraft[],
-): ReplayPremiereJsonValue {
-  const records: unknown = chunks.flatMap((chunk) => chunk.payload.records);
-  assertReplayPremiereJsonValue(records, "flattened draft records");
-  return records;
+): readonly PremiereChunkDraft[] {
+  return Object.freeze(
+    chunks.map((chunk, index) =>
+      cloneAndFreezeReplayPremiereValue(
+        chunk,
+        `premiere frozen draft chunk ${index}`,
+      ),
+    ),
+  );
+}
+
+export function replayPremiereDraftChunksMatch(
+  left: readonly PremiereChunkDraft[],
+  right: readonly PremiereChunkDraft[],
+): boolean {
+  return (
+    left.length === right.length &&
+    left.every((chunk, index) => sameJson(chunk, right[index]))
+  );
 }
 
 function assertExactObjectKeys(

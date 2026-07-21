@@ -16,6 +16,9 @@ import {
   stagePremiereSource,
 } from "../../../src/server/replay-premiere/ReplayPremierePrivateStaging";
 import {
+  cloneAndFreezePremiereDraftChunks,
+  replayPremiereDraftChunksMatch,
+  replayPremiereRecordsMatchDrafts,
   VerifiedPremiereEligibilityGate,
   verifyPremierePublicationCommitment,
 } from "../../../src/server/replay-premiere/ReplayPremierePublication";
@@ -75,6 +78,35 @@ describe("ReplayPremiere publication commitment", () => {
         draftChunks: alternateTail,
       }),
     ).toThrow(/source_replay_draft_binding_mismatch/);
+  });
+
+  test("binds long replay drafts record by record within the JSON node ceiling", () => {
+    const records = Array.from({ length: 13_000 }, (_, sequence) => ({
+      sequence,
+      turn: sequence,
+      nominalOffsetMs: sequence,
+      payload: { turnNumber: sequence, intents: [] },
+    }));
+    const drafts = buildPremiereChunks({
+      premiereId: PREMIERE_ID,
+      records,
+      playbackRate: 1,
+      checkpointSequences: [4_333, 8_666],
+      maxChunkBytes: 1_000_000,
+      maxTotalBytes: 20_000_000,
+      maxRecordsPerChunk: 100,
+      maxPresentationSpanMs: 100,
+    });
+
+    const frozen = cloneAndFreezePremiereDraftChunks(drafts);
+    expect(Object.isFrozen(frozen)).toBe(true);
+    expect(Object.isFrozen(frozen[0])).toBe(true);
+    expect(replayPremiereDraftChunksMatch(drafts, frozen)).toBe(true);
+    expect(replayPremiereRecordsMatchDrafts(records, 1, frozen)).toBe(true);
+    const altered = structuredClone(drafts);
+    altered.at(-1)!.payload.records.at(-1)!.turn += 1;
+    expect(replayPremiereDraftChunksMatch(drafts, altered)).toBe(false);
+    expect(replayPremiereRecordsMatchDrafts(records, 1, altered)).toBe(false);
   });
 
   test("rejects a verified but different staged source and commitment preimage mutation", async () => {
