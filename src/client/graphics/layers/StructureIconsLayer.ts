@@ -1,3 +1,5 @@
+import "pixi.js/unsafe-eval";
+
 import { extend } from "colord";
 import a11yPlugin from "colord/plugins/a11y";
 import { OutlineFilter } from "pixi-filters";
