@@ -1,5 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ClientGameRunner } from "../../src/client/ClientGameRunner";
+import { TickMetricsEvent } from "../../src/client/InputHandler";
+import { ReplayPremiereWorkerClient } from "../../src/client/ReplayPremiereWorkerClient";
+import { GameUpdateType } from "../../src/core/game/GameUpdates";
 
 describe("ClientGameRunner replay startup errors", () => {
   beforeEach(() => {
@@ -15,7 +18,9 @@ describe("ClientGameRunner replay startup errors", () => {
   });
 
   it("signals the loading screen when a game update throws before a frame", () => {
-    let updateCallback: ((update: never) => void) | null = null;
+    let updateCallback: (update: never) => void = () => {
+      throw new Error("Replay worker callback was not registered");
+    };
     const eventBus = { on: vi.fn(), emit: vi.fn() };
     const renderer = { initialize: vi.fn() };
     const input = { initialize: vi.fn() };
@@ -129,5 +134,85 @@ describe("ClientGameRunner replay startup errors", () => {
         },
       ],
     });
+  });
+
+  it("renders a coalesced premiere update once and acknowledges every logical turn", () => {
+    history.replaceState(null, "", "/premiere/prem_0123456789abcdef");
+    let updateCallback: (update: never) => void = () => {
+      throw new Error("Replay worker callback was not registered");
+    };
+    const eventBus = { on: vi.fn(), emit: vi.fn() };
+    const renderer = {
+      initialize: vi.fn(),
+      tick: vi.fn(),
+      transformHandler: { centerAll: vi.fn() },
+    };
+    const input = { initialize: vi.fn() };
+    const transport = {
+      updateCallback: vi.fn(),
+      rejoinGame: vi.fn(),
+      leaveGame: vi.fn(),
+      turnComplete: vi.fn(),
+    };
+    const worker = Object.assign(
+      Object.create(ReplayPremiereWorkerClient.prototype),
+      {
+        start: vi.fn((callback: (update: never) => void) => {
+          updateCallback = callback;
+        }),
+        cleanup: vi.fn(),
+        completedTurnsForCurrentUpdate: () => 128,
+        tickExecutionDurationsForCurrentUpdate: () => [4, 8, 12],
+      },
+    );
+    const gameView = {
+      update: vi.fn(),
+      inSpawnPhase: () => false,
+      players: () => [],
+    };
+    const soundManager = {
+      playBackgroundMusic: vi.fn(),
+      dispose: vi.fn(),
+    };
+    const updates = Object.fromEntries(
+      Object.values(GameUpdateType)
+        .filter((value) => typeof value === "number")
+        .map((type) => [type, []]),
+    );
+    const runner = new ClientGameRunner(
+      {
+        gameID: "PREM0001",
+        gameStartInfo: { gameID: "PREM0001" },
+        progressiveReplay: {},
+      } as never,
+      undefined,
+      eventBus as never,
+      renderer as never,
+      input as never,
+      transport as never,
+      worker as never,
+      gameView as never,
+      soundManager as never,
+    );
+    runner.start();
+
+    updateCallback({
+      tick: 128,
+      updates,
+      packedTileUpdates: new Uint32Array(),
+      playerNameViewData: {},
+      tickExecutionDuration: 12,
+    } as never);
+
+    expect(transport.turnComplete).toHaveBeenCalledTimes(128);
+    expect(gameView.update).toHaveBeenCalledOnce();
+    expect(renderer.tick).toHaveBeenCalledOnce();
+    expect(eventBus.emit).toHaveBeenCalledWith(
+      expect.objectContaining<TickMetricsEvent>({
+        completedTicks: 128,
+        tickExecutionDurations: [4, 8, 12],
+      }),
+    );
+    runner.stop();
   });
 });

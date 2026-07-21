@@ -196,6 +196,8 @@ export class TickMetricsEvent implements GameEvent {
   constructor(
     public readonly tickExecutionDuration?: number,
     public readonly tickDelay?: number,
+    public readonly completedTicks: number = 1,
+    public readonly tickExecutionDurations?: readonly number[],
   ) {}
 }
 

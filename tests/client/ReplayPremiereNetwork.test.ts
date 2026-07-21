@@ -6,6 +6,7 @@ import {
   canonicalJsonBytes,
   canonicalReplayPremiereJson,
   hashCanonicalJson,
+  REPLAY_PREMIERE_REVEAL_FETCH_CONCURRENCY,
   ReplayPremiereNetworkController,
   ReplayPremiereNetworkError,
   sha256Hex,
@@ -31,7 +32,10 @@ import {
   createPremiereRevealResponse,
   toPremierePublicChunkResponse,
 } from "../../src/server/replay-premiere/ReplayPremiereWire";
-import { verifiedPublicationFixture } from "../server/replay-premiere/ReplayPremiereFixtures";
+import {
+  verifiedLongPublicationFixture,
+  verifiedPublicationFixture,
+} from "../server/replay-premiere/ReplayPremiereFixtures";
 
 const PREMIERE_ID = "prem_0123456789abcdef";
 const ZERO_HASH = "0".repeat(64);
@@ -339,12 +343,23 @@ async function expectNetworkError(
 }
 
 async function revealMaterial(
-  options: { leakEvidenceBodyBytes?: number } = {},
+  options: {
+    leakEvidenceBodyBytes?: number;
+    leakEvidenceBodyBytesByCheckId?: Readonly<Record<string, number>>;
+  } = {},
 ) {
-  const { gate, drafts } = await verifiedPublicationFixture(
-    fixtureRoot,
-    options,
+  return releasedRevealMaterial(
+    await verifiedPublicationFixture(fixtureRoot, options),
   );
+}
+
+function releasedRevealMaterial(
+  publication: Pick<
+    Awaited<ReturnType<typeof verifiedPublicationFixture>>,
+    "gate" | "drafts"
+  >,
+) {
+  const { gate, drafts } = publication;
   const wireBootstrap = createPremierePublicBootstrap({ gate });
   const released: ReleasedPremiereChunk[] = [];
   let terminalGate: ReturnType<typeof gate.prepareTerminalChunk> | null = null;
@@ -391,6 +406,12 @@ async function revealMaterial(
     reveal,
     pointer,
   };
+}
+
+async function longRevealMaterial() {
+  return releasedRevealMaterial(
+    await verifiedLongPublicationFixture(fixtureRoot),
+  );
 }
 
 async function resealReveal(
@@ -921,14 +942,25 @@ describe("ReplayPremiereNetwork", () => {
     });
   });
 
-  it("accepts a valid reveal whose leak evidence body exceeds 16 KiB", async () => {
-    const material = await revealMaterial({ leakEvidenceBodyBytes: 20_000 });
-    const observedBodyText =
-      material.reveal.eligibilityRecord.proxyWarLeakChecks.find(
-        (evidence) => evidence.checkId === "league-page",
-      )?.observedBodyText;
-    expect(observedBodyText).not.toBeNull();
-    expect(new TextEncoder().encode(observedBodyText!).byteLength).toBe(20_000);
+  it("accepts the exact large committed leak-evidence bodies seen by a live reveal", async () => {
+    const expectedSizes = {
+      "league-page": 61_137,
+      "league-data": 40_660,
+      "battle-card-data": 40_660,
+    } as const;
+    const material = await revealMaterial({
+      leakEvidenceBodyBytesByCheckId: expectedSizes,
+    });
+    for (const [checkId, expectedBytes] of Object.entries(expectedSizes)) {
+      const observedBodyText =
+        material.reveal.eligibilityRecord.proxyWarLeakChecks.find(
+          (evidence) => evidence.checkId === checkId,
+        )?.observedBodyText;
+      expect(observedBodyText).not.toBeNull();
+      expect(new TextEncoder().encode(observedBodyText!).byteLength).toBe(
+        expectedBytes,
+      );
+    }
 
     const fetchMock = queuedFetch(
       jsonResponse(material.bootstrap),
@@ -952,6 +984,178 @@ describe("ReplayPremiereNetwork", () => {
     });
     expect(onReveal).toHaveBeenCalledOnce();
   });
+
+  it("retries a transient reveal fetch without weakening final integrity checks", async () => {
+    const material = await revealMaterial({
+      leakEvidenceBodyBytesByCheckId: {
+        "league-page": 61_137,
+        "league-data": 40_660,
+        "battle-card-data": 40_660,
+      },
+    });
+    const fetchMock = queuedFetch(
+      jsonResponse(material.bootstrap),
+      jsonResponse(material.pointer),
+      new TypeError("transient reveal transport failure"),
+      jsonResponse(material.pointer),
+      jsonResponse(material.reveal),
+      ...material.chunks.map((chunk) => jsonResponse(chunk)),
+    );
+    const onReveal = vi.fn();
+    const { network, playback } = controller(
+      fetchMock as unknown as typeof fetch,
+      { onReady: vi.fn(), onReveal },
+    );
+
+    await expect(network.syncOnce()).rejects.toMatchObject({
+      code: "request_failed",
+      recoverable: true,
+    });
+    expect(playback.state().finalized).toBe(false);
+
+    await expect(network.syncOnce()).resolves.toMatchObject({
+      status: "revealed",
+    });
+    expect(playback.state()).toMatchObject({
+      releasedThroughSequence: material.reveal.finalSequence,
+      finalized: true,
+    });
+    expect(onReveal).toHaveBeenCalledOnce();
+  });
+
+  it("prefetches a revealed suffix concurrently but accepts it in chain order", async () => {
+    const material = await revealMaterial();
+    const pendingChunks = new Map<number, (response: Response) => void>();
+    const fetchMock = vi.fn((input: RequestInfo | URL) => {
+      const pathname = String(input);
+      if (pathname.endsWith("/bootstrap")) {
+        return Promise.resolve(jsonResponse(material.bootstrap));
+      }
+      if (pathname.endsWith("/manifest")) {
+        return Promise.resolve(jsonResponse(material.pointer));
+      }
+      if (pathname.endsWith("/reveal")) {
+        return Promise.resolve(jsonResponse(material.reveal));
+      }
+      const chunkIndex = Number(pathname.match(/\/chunks\/(\d+)$/)?.[1]);
+      if (!Number.isSafeInteger(chunkIndex)) {
+        return Promise.reject(new Error("unexpected request"));
+      }
+      return new Promise<Response>((resolve) => {
+        pendingChunks.set(chunkIndex, resolve);
+      });
+    });
+    const { network, playback } = controller(
+      fetchMock as unknown as typeof fetch,
+    );
+
+    const syncing = network.syncOnce();
+    await vi.waitFor(() => {
+      expect(pendingChunks.size).toBe(material.chunks.length);
+    });
+    expect(pendingChunks.size).toBeLessThanOrEqual(
+      REPLAY_PREMIERE_REVEAL_FETCH_CONCURRENCY,
+    );
+    for (let index = material.chunks.length - 1; index >= 0; index -= 1) {
+      pendingChunks.get(index)!(jsonResponse(material.chunks[index]));
+    }
+
+    await expect(syncing).resolves.toMatchObject({ status: "revealed" });
+    expect(playback.state()).toMatchObject({
+      nextChunkIndex: material.chunks.length,
+      releasedThroughSequence: material.reveal.finalSequence,
+      finalized: true,
+    });
+  });
+
+  it("verifies the production 120-chunk recovery envelope with bounded parallel fetches in under five seconds", async () => {
+    const material = await longRevealMaterial();
+    expect(material.chunks).toHaveLength(120);
+    let activeChunkFetches = 0;
+    let maximumActiveChunkFetches = 0;
+    let revealFetches = 0;
+    let abortedSiblingFetches = 0;
+    const fetchMock = vi.fn(
+      async (input: RequestInfo | URL, init?: RequestInit) => {
+        const pathname = String(input);
+        if (pathname.endsWith("/bootstrap")) {
+          return jsonResponse(material.bootstrap);
+        }
+        if (pathname.endsWith("/manifest")) {
+          return jsonResponse(material.pointer);
+        }
+        if (pathname.endsWith("/reveal")) {
+          revealFetches += 1;
+          return jsonResponse(material.reveal);
+        }
+        const chunkIndex = Number(pathname.match(/\/chunks\/(\d+)$/)?.[1]);
+        if (!Number.isSafeInteger(chunkIndex)) {
+          throw new Error("unexpected request");
+        }
+        activeChunkFetches += 1;
+        maximumActiveChunkFetches = Math.max(
+          maximumActiveChunkFetches,
+          activeChunkFetches,
+        );
+        if (revealFetches === 1) {
+          if (chunkIndex === 0) {
+            await Promise.resolve();
+            activeChunkFetches -= 1;
+            throw new TypeError("first reveal chunk failed");
+          }
+          return new Promise<Response>((_resolve, reject) => {
+            init?.signal?.addEventListener(
+              "abort",
+              () => {
+                activeChunkFetches -= 1;
+                abortedSiblingFetches += 1;
+                reject(new DOMException("aborted", "AbortError"));
+              },
+              { once: true },
+            );
+          });
+        }
+        await new Promise((resolve) => setTimeout(resolve, 5));
+        activeChunkFetches -= 1;
+        return jsonResponse(material.chunks[chunkIndex]);
+      },
+    );
+    const { network, playback } = controller(
+      fetchMock as unknown as typeof fetch,
+    );
+
+    await expect(network.syncOnce()).rejects.toMatchObject({
+      code: "request_failed",
+      recoverable: true,
+    });
+    expect(activeChunkFetches).toBe(0);
+    expect(abortedSiblingFetches).toBe(
+      REPLAY_PREMIERE_REVEAL_FETCH_CONCURRENCY - 1,
+    );
+    expect(playback.state()).toMatchObject({
+      nextChunkIndex: 0,
+      finalized: false,
+    });
+
+    const startedAt = performance.now();
+    await expect(network.syncOnce()).resolves.toMatchObject({
+      status: "revealed",
+    });
+    const elapsedMs = performance.now() - startedAt;
+
+    expect(maximumActiveChunkFetches).toBe(
+      REPLAY_PREMIERE_REVEAL_FETCH_CONCURRENCY,
+    );
+    expect(maximumActiveChunkFetches).toBeLessThanOrEqual(
+      REPLAY_PREMIERE_REVEAL_FETCH_CONCURRENCY,
+    );
+    expect(playback.state()).toMatchObject({
+      nextChunkIndex: 120,
+      releasedThroughSequence: material.reveal.finalSequence,
+      finalized: true,
+    });
+    expect(elapsedMs).toBeLessThan(5_000);
+  }, 20_000);
 
   it("anchors an archived visitor through bootstrap provenance and emits archived terminal state", async () => {
     const material = await revealMaterial();

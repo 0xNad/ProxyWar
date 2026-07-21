@@ -960,6 +960,7 @@ export interface ReplayPremiereJoinRequest {
 
 interface ReplayPremiereNetworkLike {
   start(): Promise<unknown>;
+  syncOnce(): Promise<unknown>;
   dispose(): void;
 }
 
@@ -1066,6 +1067,8 @@ export class ReplayPremiereRuntimeController {
   private disposed = false;
   private heartbeatTimer: ReturnType<typeof setInterval> | null = null;
   private sessionRetryTimer: ReturnType<typeof setTimeout> | null = null;
+  private checkpointDeadlineTimer: ReturnType<typeof setTimeout> | null = null;
+  private locallyClosedCheckpointId: string | null = null;
 
   constructor(private readonly options: ReplayPremiereRuntimeOptions) {
     if (
@@ -1151,6 +1154,7 @@ export class ReplayPremiereRuntimeController {
     this.overlay?.dispose();
     this.overlay = null;
     this.clearInteractionTimers();
+    this.clearCheckpointDeadline();
     this.documentRef.removeEventListener(
       "ai-league-replay-frame",
       this.onFrameEvent,
@@ -1227,6 +1231,7 @@ export class ReplayPremiereRuntimeController {
       return;
     }
     this.latestManifest = manifest;
+    this.reconcileCheckpointDeadline(manifest);
     this.recovery = null;
     if (
       manifest.state === "archived" ||
@@ -1623,6 +1628,7 @@ export class ReplayPremiereRuntimeController {
     this.recovery = null;
     this.interactionReady = false;
     this.clearInteractionTimers();
+    this.clearCheckpointDeadline();
     this.network.dispose();
     this.service.dispose();
     this.hydrateOverlay();
@@ -1768,7 +1774,12 @@ export class ReplayPremiereRuntimeController {
         this.latestManifest?.state === "archived") &&
       this.reveal === null;
     const networkState = this.currentNetworkState();
-    const state = this.terminalFailure
+    const checkpointDeadlineElapsed =
+      this.locallyClosedCheckpointId !== null &&
+      (manifest?.state === "playing" ||
+        (manifest?.state === "checkpoint" &&
+          manifest.activeCheckpoint?.id === this.locallyClosedCheckpointId));
+    const unprojectedState = this.terminalFailure
       ? "failed"
       : networkState === "failed" || networkState === "cancelled"
         ? networkState
@@ -1782,6 +1793,10 @@ export class ReplayPremiereRuntimeController {
             : revealPending
               ? "playing"
               : presentationState(this.servicePremiereState, networkState);
+    const state =
+      checkpointDeadlineElapsed && unprojectedState === "checkpoint"
+        ? "playing"
+        : unprojectedState;
     const policies = this.projection.provenance.seats.map(
       (seat): ReplayPremierePolicyView => ({
         seatId: seat.seatId,
@@ -1813,12 +1828,15 @@ export class ReplayPremiereRuntimeController {
       releasedSequence: viewedSequence,
       currentTurn,
       checkpoints: this.overlayCheckpoints(policies, manifest),
-      activeCheckpointId:
-        manifest?.activeCheckpoint?.id ??
-        this.serviceCheckpoints?.find(
-          (checkpoint) => checkpoint.state === "open",
-        )?.id ??
-        null,
+      activeCheckpointId: checkpointDeadlineElapsed
+        ? null
+        : (manifest?.activeCheckpoint?.id ??
+          this.serviceCheckpoints?.find(
+            (checkpoint) =>
+              checkpoint.state === "open" &&
+              checkpoint.id !== this.locallyClosedCheckpointId,
+          )?.id ??
+          null),
       leaders: frameLeaders(this.latestFrame),
       headlineEvent: this.headlineEvent,
       markerPolicySeatId: null,
@@ -1880,11 +1898,13 @@ export class ReplayPremiereRuntimeController {
         serviceView?.participantPrediction?.selectedSeatId ?? null;
       const distribution = serviceView?.distribution;
       const total = serviceView?.totalPredictions ?? 0;
+      const deadlineElapsed = definition.id === this.locallyClosedCheckpointId;
       return {
         id: definition.id,
         sequence: definition.sequence,
-        state:
-          serviceView?.state === "open"
+        state: deadlineElapsed
+          ? "closed"
+          : serviceView?.state === "open"
             ? selectedSeatId === null
               ? "open"
               : "submitted"
@@ -1952,6 +1972,64 @@ export class ReplayPremiereRuntimeController {
     if (this.sessionRetryTimer !== null) {
       clearTimeout(this.sessionRetryTimer);
       this.sessionRetryTimer = null;
+    }
+  }
+
+  private reconcileCheckpointDeadline(
+    manifest: Readonly<ReplayPremiereManifest>,
+  ): void {
+    this.clearCheckpointDeadline();
+    if (!("serverNow" in manifest)) {
+      this.locallyClosedCheckpointId = null;
+      return;
+    }
+    if (manifest.state !== "checkpoint") {
+      // Keep the just-closed checkpoint latched while the interaction service
+      // catches up with the verified playing manifest. The next checkpoint or
+      // any terminal state replaces this local projection.
+      if (
+        manifest.state === "playing" &&
+        this.locallyClosedCheckpointId !== null
+      ) {
+        return;
+      }
+      this.locallyClosedCheckpointId = null;
+      return;
+    }
+    if (manifest.activeCheckpoint === null) {
+      this.locallyClosedCheckpointId = null;
+      return;
+    }
+    const checkpoint = manifest.activeCheckpoint;
+    if (this.locallyClosedCheckpointId === checkpoint.id) return;
+    this.locallyClosedCheckpointId = null;
+    const remainingMs = Math.max(
+      0,
+      Date.parse(checkpoint.closesAt) - Date.parse(manifest.serverNow),
+    );
+    this.checkpointDeadlineTimer = setTimeout(() => {
+      this.checkpointDeadlineTimer = null;
+      if (this.disposed || this.terminalFailure !== null) return;
+      const latest = preRevealManifest(this.latestManifest);
+      if (
+        latest?.state !== "checkpoint" ||
+        latest.activeCheckpoint?.id !== checkpoint.id
+      ) {
+        return;
+      }
+      this.locallyClosedCheckpointId = checkpoint.id;
+      this.hydrateOverlay();
+      // syncOnce deduplicates with an in-flight poll. A failed prompt is left
+      // to the network controller's bounded retry loop and never opens a
+      // second polling loop.
+      void this.network.syncOnce().catch(() => undefined);
+    }, remainingMs);
+  }
+
+  private clearCheckpointDeadline(): void {
+    if (this.checkpointDeadlineTimer !== null) {
+      clearTimeout(this.checkpointDeadlineTimer);
+      this.checkpointDeadlineTimer = null;
     }
   }
 }
@@ -2204,7 +2282,9 @@ function isServiceErrorPhase(
 }
 
 function isHttpStatus(value: unknown): value is number {
-  return Number.isInteger(value) && Number(value) >= 100 && Number(value) <= 599;
+  return (
+    Number.isInteger(value) && Number(value) >= 100 && Number(value) <= 599
+  );
 }
 
 export function parseReplayPremiereRoute(pathname: string): string | null {

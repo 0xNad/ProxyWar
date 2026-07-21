@@ -422,6 +422,76 @@ describe("ReplayPremiereRuntimeController", () => {
     });
     harness.runtime.dispose();
   });
+
+  it("projects a checkpoint closed at the server-authoritative deadline and prompts one deduplicated verification", async () => {
+    vi.useFakeTimers();
+    const closesAt = "2026-07-20T18:00:15.000Z";
+    const interaction = sessionResponse("checkpoint");
+    interaction.checkpoints[0] = {
+      ...checkpoint("cp_12345678", 10),
+      opensAt: STARTED_AT,
+      closesAt,
+      optionSeatIds: ["seat_a", "seat_b"],
+      state: "open",
+    };
+    const harness = runtimeHarness({
+      state: "checkpoint",
+      service: {
+        startSession: vi.fn(async () => interaction),
+      },
+    });
+    const started = harness.runtime.start();
+    await harness.callbacks.onReady?.(projection("checkpoint"));
+    await started;
+    const manifest = checkpointManifest("2026-07-20T18:00:14.600Z", closesAt);
+    await harness.callbacks.onManifest?.(manifest);
+
+    expect(harness.models.at(-1)).toMatchObject({
+      state: "checkpoint",
+      activeCheckpointId: "cp_12345678",
+    });
+    expect(harness.models.at(-1)?.checkpoints[0]).toMatchObject({
+      id: "cp_12345678",
+      state: "open",
+    });
+    await vi.advanceTimersByTimeAsync(399);
+    expect(harness.network.syncOnce).not.toHaveBeenCalled();
+    expect(harness.models.at(-1)?.activeCheckpointId).toBe("cp_12345678");
+
+    await vi.advanceTimersByTimeAsync(1);
+    expect(harness.models.at(-1)).toMatchObject({
+      state: "playing",
+      activeCheckpointId: null,
+    });
+    expect(harness.models.at(-1)?.checkpoints[0]).toMatchObject({
+      id: "cp_12345678",
+      state: "closed",
+    });
+    expect(harness.network.syncOnce).toHaveBeenCalledOnce();
+
+    await harness.callbacks.onManifest?.({
+      ...manifest,
+      serverNow: "2026-07-20T18:00:15.100Z",
+    });
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(harness.network.syncOnce).toHaveBeenCalledOnce();
+
+    await harness.callbacks.onManifest?.({
+      ...playingManifest(),
+      serverNow: "2026-07-20T18:00:15.200Z",
+      authoritativeElapsedMs: 15_200,
+      releasedThroughSequence: 10,
+    });
+    expect(harness.models.at(-1)).toMatchObject({
+      state: "playing",
+      activeCheckpointId: null,
+    });
+    expect(harness.models.at(-1)?.checkpoints[0]).toMatchObject({
+      id: "cp_12345678",
+      state: "closed",
+    });
+    harness.runtime.dispose();
+  });
 });
 
 describe("ReplayPremiereServiceClient", () => {
@@ -502,6 +572,7 @@ function runtimeHarness(options: {
   const models: ReplayPremiereOverlayModel[] = [];
   const network = {
     start: vi.fn(async () => ({ status: "active" })),
+    syncOnce: vi.fn(async () => ({ status: "active" })),
     dispose: vi.fn(),
   };
   const service = {
@@ -760,6 +831,28 @@ function playingManifest(): ReplayPremierePreRevealManifest {
     activeCheckpoint: null,
     provenance: current.provenance,
     releasedChunks: [],
+  };
+}
+
+function checkpointManifest(
+  serverNow: string,
+  closesAt: string,
+): ReplayPremierePreRevealManifest {
+  return {
+    ...playingManifest(),
+    state: "checkpoint",
+    serverNow,
+    authoritativeElapsedMs: 10_000,
+    releasedThroughSequence: 10,
+    activeCheckpoint: {
+      id: "cp_12345678",
+      sequence: 10,
+      opensAt: STARTED_AT,
+      closesAt,
+      questionKind: "winner_from_here",
+      optionSeatIds: ["seat_a", "seat_b"],
+      state: "open",
+    },
   };
 }
 

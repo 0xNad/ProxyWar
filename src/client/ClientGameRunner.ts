@@ -49,6 +49,7 @@ import {
 } from "./InputHandler";
 import { endGame, startGame, startTime } from "./LocalPersistantStats";
 import { ReplayPremiereProgressiveReplayConfig } from "./ReplayPremierePlayback";
+import { ReplayPremiereWorkerClient } from "./ReplayPremiereWorkerClient";
 import { terrainMapFileLoader } from "./TerrainMapFileLoader";
 import {
   SendAllianceRequestIntentEvent,
@@ -281,22 +282,31 @@ async function createClientGame(
       mapLoader,
     );
   }
-  const worker = new WorkerClient(lobbyConfig.gameStartInfo, clientID);
-  await worker.initialize();
-  const gameView = new GameView(
-    worker,
-    config,
-    gameMap,
-    clientID,
-    lobbyConfig.playerName,
-    lobbyConfig.playerClanTag,
-    lobbyConfig.gameStartInfo.gameID,
-    lobbyConfig.gameStartInfo.players,
-  );
-
-  const canvas = createCanvas();
-  const soundManager = new SoundManager(eventBus, userSettings);
+  const worker = lobbyConfig.progressiveReplay
+    ? new ReplayPremiereWorkerClient(lobbyConfig.gameStartInfo, clientID)
+    : new WorkerClient(lobbyConfig.gameStartInfo, clientID);
   try {
+    await worker.initialize();
+  } catch (error) {
+    worker.cleanup();
+    throw error;
+  }
+  let soundManager: SoundManager | null = null;
+  try {
+    const gameView = new GameView(
+      // ReplayPremiereWorkerClient implements WorkerClient's full public query
+      // surface, but WorkerClient's private fields make TypeScript nominal here.
+      worker as WorkerClient,
+      config,
+      gameMap,
+      clientID,
+      lobbyConfig.playerName,
+      lobbyConfig.playerClanTag,
+      lobbyConfig.gameStartInfo.gameID,
+      lobbyConfig.gameStartInfo.players,
+    );
+    const canvas = createCanvas();
+    soundManager = new SoundManager(eventBus, userSettings);
     const gameRenderer = createRenderer(
       canvas,
       gameView,
@@ -320,7 +330,8 @@ async function createClientGame(
       soundManager,
     );
   } catch (err) {
-    soundManager.dispose();
+    soundManager?.dispose();
+    worker.cleanup();
     throw err;
   }
 }
@@ -347,7 +358,7 @@ export class ClientGameRunner {
     private renderer: GameRenderer,
     private input: InputHandler,
     private transport: Transport,
-    private worker: WorkerClient,
+    private worker: WorkerClient | ReplayPremiereWorkerClient,
     private gameView: GameView,
     private soundManager: SoundManager,
   ) {
@@ -456,7 +467,13 @@ export class ClientGameRunner {
           this.stop();
           return;
         }
-        this.transport.turnComplete();
+        const completedTurns =
+          this.worker instanceof ReplayPremiereWorkerClient
+            ? this.worker.completedTurnsForCurrentUpdate()
+            : 1;
+        for (let completed = 0; completed < completedTurns; completed += 1) {
+          this.transport.turnComplete();
+        }
         gu.updates[GameUpdateType.Hash].forEach((hu: HashUpdate) => {
           this.eventBus.emit(new SendHashEvent(hu.tick, hu.hash));
         });
@@ -469,9 +486,15 @@ export class ClientGameRunner {
         this.renderer.tick();
         this.dispatchAiLeagueReplayFrame(gu);
 
-        // Emit tick metrics event for performance overlay
         this.eventBus.emit(
-          new TickMetricsEvent(gu.tickExecutionDuration, this.currentTickDelay),
+          new TickMetricsEvent(
+            gu.tickExecutionDuration,
+            this.currentTickDelay,
+            completedTurns,
+            this.worker instanceof ReplayPremiereWorkerClient
+              ? this.worker.tickExecutionDurationsForCurrentUpdate()
+              : undefined,
+          ),
         );
 
         // Reset tick delay for next measurement

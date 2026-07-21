@@ -456,7 +456,11 @@ export function publicDefinitionFixture(
 
 export async function verifiedPublicationFixture(
   root: string,
-  options: { origin?: string; leakEvidenceBodyBytes?: number } = {},
+  options: {
+    origin?: string;
+    leakEvidenceBodyBytes?: number;
+    leakEvidenceBodyBytesByCheckId?: Readonly<Record<string, number>>;
+  } = {},
 ): Promise<{
   gate: VerifiedPremiereEligibilityGate;
   drafts: ReturnType<typeof buildPremiereChunks>;
@@ -470,23 +474,42 @@ export async function verifiedPublicationFixture(
   await fs.mkdir(servedRoot, { recursive: true });
   await fs.writeFile(sourcePath, controlledSourceBytes(), { mode: 0o600 });
   let eligibility = eligibilityFixture({ origin: options.origin });
-  if (options.leakEvidenceBodyBytes !== undefined) {
+  const evidenceBodySizes = {
+    ...(options.leakEvidenceBodyBytes === undefined
+      ? {}
+      : { "league-page": options.leakEvidenceBodyBytes }),
+    ...(options.leakEvidenceBodyBytesByCheckId ?? {}),
+  };
+  for (const [checkId, expectedBytes] of Object.entries(evidenceBodySizes)) {
     const evidence = eligibility.proxyWarLeakChecks.find(
-      (candidate) => candidate.checkId === "league-page",
+      (candidate) => candidate.checkId === checkId,
     );
     if (evidence === undefined || evidence.observedBodyText === null) {
-      throw new Error("missing league-page leak evidence fixture");
+      throw new Error(`missing ${checkId} leak evidence fixture`);
+    }
+    const target = eligibility.proxyWarLeakAuditManifest.targets.find(
+      (candidate) => candidate.checkId === checkId,
+    );
+    if (target === undefined) {
+      throw new Error(`missing ${checkId} leak target fixture`);
     }
     const currentBytes = Buffer.byteLength(evidence.observedBodyText, "utf8");
-    if (
-      !Number.isSafeInteger(options.leakEvidenceBodyBytes) ||
-      options.leakEvidenceBodyBytes < currentBytes
-    ) {
+    if (!Number.isSafeInteger(expectedBytes) || expectedBytes < currentBytes) {
       throw new Error("invalid leak evidence body fixture size");
     }
-    evidence.observedBodyText += "x".repeat(
-      options.leakEvidenceBodyBytes - currentBytes,
-    );
+    if (target.expectation.kind === "structured_absent") {
+      const emptyStructuredBody = JSON.stringify({ padding: "" });
+      if (expectedBytes < Buffer.byteLength(emptyStructuredBody, "utf8")) {
+        throw new Error("structured leak evidence fixture is too small");
+      }
+      evidence.observedBodyText = JSON.stringify({
+        padding: "x".repeat(
+          expectedBytes - Buffer.byteLength(emptyStructuredBody, "utf8"),
+        ),
+      });
+    } else {
+      evidence.observedBodyText += "x".repeat(expectedBytes - currentBytes);
+    }
     evidence.observedContentHash = sha256Hex(evidence.observedBodyText);
   }
   const eligibilityAssessmentOptions = eligibilityOptions(Buffer.alloc(32, 9));

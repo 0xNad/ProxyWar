@@ -46,10 +46,11 @@ const SPEED_ORDER: ReplaySpeedMultiplier[] = [
 // build a small backlog so MAX can catch up.
 const MAX_REPLAY_BACKLOG_TURNS = 60;
 // A late-join catch-up must never enqueue an unbounded replay in one main-
-// thread loop. Worker acknowledgements refill this bounded window one turn at
-// a time, providing backpressure while still allowing the simulation worker to
-// catch up faster than wall-clock playback.
-const MAX_PROGRESSIVE_CATCH_UP_IN_FLIGHT_TURNS = 64;
+// thread loop. The premiere-only worker accepts turns in bounded batches and
+// drains them without rendering every intermediate frame, so keep enough work
+// in flight to avoid starving that worker while acknowledgements refill the
+// window one turn at a time.
+export const MAX_PROGRESSIVE_CATCH_UP_IN_FLIGHT_TURNS = 4_096;
 const StrictGameStartInfoSchema = GameStartInfoSchema.strict();
 
 export class LocalServer {

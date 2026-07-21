@@ -1,7 +1,10 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { LobbyConfig } from "../../src/client/ClientGameRunner";
 import { ReplayJumpToTurnEvent } from "../../src/client/InputHandler";
-import { LocalServer } from "../../src/client/LocalServer";
+import {
+  LocalServer,
+  MAX_PROGRESSIVE_CATCH_UP_IN_FLIGHT_TURNS,
+} from "../../src/client/LocalServer";
 import {
   ReplayPremiereFinalizationSignal,
   ReplayPremierePlaybackController,
@@ -97,11 +100,14 @@ function batch(
   };
 }
 
-function finalization(finalSequence: number): ReplayPremiereFinalizationSignal {
+function finalization(
+  finalSequence: number,
+  finalChunkHash = HASH_1,
+): ReplayPremiereFinalizationSignal {
   return {
     premiereId: "prem_0123456789abcdef",
     finalSequence,
-    finalChunkHash: HASH_1,
+    finalChunkHash,
     revealedAt: 1_000,
     verification: {
       releaseChainVerified: true,
@@ -116,6 +122,49 @@ function finalization(finalSequence: number): ReplayPremiereFinalizationSignal {
       revealCommitmentVerified: true,
     },
   };
+}
+
+function appendProductionLengthReplay(
+  controller: ReplayPremierePlaybackController,
+): string {
+  const totalTurns = 59_100;
+  const chunkCount = 120;
+  let nextSequence = 0;
+  let previousChunkHash: string | null = null;
+  for (let chunkIndex = 0; chunkIndex < chunkCount; chunkIndex += 1) {
+    const remainingChunks = chunkCount - chunkIndex;
+    const chunkLength = Math.ceil(
+      (totalTurns - nextSequence) / remainingChunks,
+    );
+    const startSequence = nextSequence;
+    const endSequence = startSequence + chunkLength - 1;
+    const chunkHash = (chunkIndex + 1).toString(16).padStart(64, "0");
+    controller.appendVerifiedBatch({
+      premiereId: "prem_0123456789abcdef",
+      chunkIndex,
+      chunkHash,
+      previousChunkHash,
+      payloadHash: HASH_0,
+      startSequence,
+      endSequence,
+      verification: {
+        payloadHashVerified: true,
+        chunkHashVerified: true,
+      },
+      records: Array.from({ length: chunkLength }, (_, offset) => {
+        const sequence = startSequence + offset;
+        return {
+          sequence,
+          presentationOffsetMs: sequence * 25,
+          turn: { turnNumber: sequence, intents: [] },
+        };
+      }),
+    });
+    nextSequence = endSequence + 1;
+    previousChunkHash = chunkHash;
+  }
+  expect(nextSequence).toBe(totalTurns);
+  return previousChunkHash!;
 }
 
 function startServer(config: LobbyConfig, isReplay = true) {
@@ -215,23 +264,28 @@ describe("LocalServer progressive replay", () => {
       "prem_0123456789abcdef",
     );
     const { server, messages } = startServer(lobbyConfig(controller));
-    const turns = Array.from({ length: 130 }, (_, turnNumber) => ({
+    const totalTurns = MAX_PROGRESSIVE_CATCH_UP_IN_FLIGHT_TURNS + 66;
+    const turns = Array.from({ length: totalTurns }, (_, turnNumber) => ({
       turnNumber,
       intents: [],
     }));
     controller.appendVerifiedBatch(batch(turns));
 
-    controller.requestForwardCatchUp(129);
-    expect(turnMessages(messages)).toHaveLength(64);
-    expect(controller.state().lastDispatchedSequence).toBe(63);
+    controller.requestForwardCatchUp(totalTurns - 1);
+    expect(turnMessages(messages)).toHaveLength(
+      MAX_PROGRESSIVE_CATCH_UP_IN_FLIGHT_TURNS,
+    );
+    expect(controller.state().lastDispatchedSequence).toBe(
+      MAX_PROGRESSIVE_CATCH_UP_IN_FLIGHT_TURNS - 1,
+    );
 
     // Each worker acknowledgement opens one slot. The main thread never emits
-    // the remaining 66 turns in one unbounded loop.
+    // the remaining 66 turns without worker backpressure.
     for (let completed = 0; completed < 66; completed += 1) {
       server.turnComplete();
     }
-    expect(turnMessages(messages)).toHaveLength(130);
-    expect(controller.state().lastDispatchedSequence).toBe(129);
+    expect(turnMessages(messages)).toHaveLength(totalTurns);
+    expect(controller.state().lastDispatchedSequence).toBe(totalTurns - 1);
     server.endGame();
   });
 
@@ -309,9 +363,50 @@ describe("LocalServer progressive replay", () => {
     const elapsedMs = performance.now() - startedAt;
     expect(elapsedMs).toBeLessThan(5_000);
     controller.requestForwardCatchUp(9_999);
-    expect(turnMessages(messages)).toHaveLength(64);
+    expect(turnMessages(messages)).toHaveLength(
+      MAX_PROGRESSIVE_CATCH_UP_IN_FLIGHT_TURNS,
+    );
     server.endGame();
   }, 10_000);
+
+  it.each([34_212, 49_437])(
+    "catches a 59,100-sequence client from the observed %i prefix through reveal in under five seconds",
+    (observedPrefix) => {
+      vi.useRealTimers();
+      const controller = new ReplayPremierePlaybackController(
+        "prem_0123456789abcdef",
+      );
+      const finalChunkHash = appendProductionLengthReplay(controller);
+      const { server, messages } = startServer(lobbyConfig(controller));
+      controller.requestForwardCatchUp(observedPrefix);
+
+      let completedTurns = 0;
+      while (controller.state().lastDispatchedSequence! < observedPrefix) {
+        server.turnComplete();
+        completedTurns += 1;
+      }
+      expect(controller.state().lastDispatchedSequence).toBe(observedPrefix);
+
+      controller.finalize(finalization(59_099, finalChunkHash));
+      const startedAt = performance.now();
+      controller.requestForwardCatchUp(59_099);
+      while (completedTurns < 59_100) {
+        server.turnComplete();
+        completedTurns += 1;
+      }
+      const elapsedMs = performance.now() - startedAt;
+
+      expect(turnMessages(messages)).toHaveLength(59_100);
+      expect(controller.state()).toMatchObject({
+        lastDispatchedSequence: 59_099,
+        finalized: true,
+        playbackComplete: true,
+      });
+      expect(elapsedMs).toBeLessThan(5_000);
+      server.endGame();
+    },
+    20_000,
+  );
 
   it("verifies released archived hashes when present", () => {
     const controller = new ReplayPremierePlaybackController(

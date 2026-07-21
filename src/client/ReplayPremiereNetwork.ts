@@ -29,6 +29,12 @@ const DEFAULT_CATCH_UP_THRESHOLD_MS = 2_000;
 const DEFAULT_REQUEST_TIMEOUT_MS = 5_000;
 const MAX_REQUEST_TIMEOUT_MS = 30_000;
 const MAX_AUTHORITATIVE_RESULT_BYTES = 1_000_000;
+export const REPLAY_PREMIERE_REVEAL_FETCH_CONCURRENCY = 8;
+// Admission collects at most 1 MiB of UTF-8 response body per leak target.
+// Reveal must carry the exact nonce-committed eligibility preimage, so the
+// client accepts that same explicit ceiling rather than a smaller character
+// cap or an unbounded string.
+const MAX_LEAK_EVIDENCE_BODY_BYTES = 1 * 1024 * 1024;
 
 const OUTCOME_BEARING_KEYS = new Set([
   "allplayersstats",
@@ -439,11 +445,14 @@ const leakEvidenceSchema = z
     method: z.enum(["GET", "HEAD"]),
     observedHttpStatus: z.number().int().min(100).max(599).nullable(),
     observedContentHash: sha256Schema.nullable(),
-    // The admission collector bounds each body before it enters the reveal.
-    // Keep the browser contract aligned by relying on the controller's
-    // response-byte and JSON-complexity ceilings instead of a divergent
-    // JavaScript character-count limit.
-    observedBodyText: z.string().nullable(),
+    observedBodyText: z
+      .string()
+      .refine(
+        (value) =>
+          new TextEncoder().encode(value).byteLength <=
+          MAX_LEAK_EVIDENCE_BODY_BYTES,
+      )
+      .nullable(),
     observedHeaders: z
       .object({
         age: z.string().max(256).nullable(),
@@ -662,6 +671,15 @@ interface JsonFetchOptions {
   noStoreRequired: boolean;
   maxBytes: number;
 }
+
+interface ReplayPremiereFetchedRevealChunk {
+  chunk: z.infer<typeof publicChunkSchema>;
+  descriptor: ReplayPremiereChunkDescriptor;
+}
+
+type ReplayPremiereSettledFetch<T> =
+  | { ok: true; value: T }
+  | { ok: false; error: unknown };
 
 /**
  * Browser-side integrity and polling boundary for progressive Premiere replay.
@@ -1261,48 +1279,80 @@ export class ReplayPremiereNetworkController {
       Readonly<ReplayPremiereFrozenDraftDescriptor>
     >,
   ): Promise<void> {
+    const attemptController = new AbortController();
     let nextIndex = this.options.playback.state().nextChunkIndex;
     if (nextIndex > reveal.finalChunkIndex) {
       throw networkError("reveal_integrity_failure");
     }
-    while (nextIndex <= reveal.finalChunkIndex) {
-      const value = await this.fetchJson(this.chunkPath(nextIndex), {
-        noStoreRequired: false,
-        maxBytes: this.maxResponseBytes,
-      });
-      const parsed = publicChunkSchema.safeParse(value);
-      if (!parsed.success) throw networkError("invalid_schema");
-      this.assertProvenance(parsed.data.provenance);
-      const descriptor = descriptorFromChunk(parsed.data);
-      const draft = draftManifest.get(nextIndex);
-      const advertised = this.advertisedDescriptors.get(nextIndex);
-      if (
-        !draft ||
-        (advertised !== undefined &&
-          !canonicalJsonEqual(advertised, descriptor)) ||
-        !publishedDescriptorMatchesDraft(descriptor, draft) ||
-        descriptor.index !== nextIndex ||
-        descriptor.terminal !== (nextIndex === reveal.finalChunkIndex) ||
-        (nextIndex === reveal.finalChunkIndex &&
-          (descriptor.chunkHash !== reveal.finalChunkHash ||
-            descriptor.endSequence !== reveal.finalSequence))
+    let nextFetchIndex = nextIndex;
+    const prefetched = new Map<
+      number,
+      Promise<ReplayPremiereSettledFetch<ReplayPremiereFetchedRevealChunk>>
+    >();
+    const fillPrefetchWindow = (): void => {
+      while (
+        prefetched.size < REPLAY_PREMIERE_REVEAL_FETCH_CONCURRENCY &&
+        nextFetchIndex <= reveal.finalChunkIndex
       ) {
-        throw networkError("reveal_integrity_failure");
+        const index = nextFetchIndex;
+        nextFetchIndex += 1;
+        prefetched.set(
+          index,
+          this.fetchRevealedChunk(
+            index,
+            reveal,
+            draftManifest,
+            attemptController.signal,
+          ).then(
+            (
+              value,
+            ): ReplayPremiereSettledFetch<ReplayPremiereFetchedRevealChunk> => ({
+              ok: true,
+              value,
+            }),
+            (
+              error,
+            ): ReplayPremiereSettledFetch<ReplayPremiereFetchedRevealChunk> => ({
+              ok: false,
+              error,
+            }),
+          ),
+        );
       }
-      const batch = await this.verifyChunk(
-        parsed.data,
-        descriptor,
-        reveal.publicationCommitment.maxPresentationSpanMs,
-      );
-      try {
-        this.options.playback.appendVerifiedBatch(batch);
-      } catch {
-        throw networkError("reveal_integrity_failure");
+    };
+    fillPrefetchWindow();
+    try {
+      while (nextIndex <= reveal.finalChunkIndex) {
+        const pending = prefetched.get(nextIndex);
+        if (pending === undefined) {
+          throw networkError("reveal_integrity_failure");
+        }
+        const fetched = await pending;
+        prefetched.delete(nextIndex);
+        if (!fetched.ok) throw fetched.error;
+        fillPrefetchWindow();
+        const { chunk, descriptor } = fetched.value;
+        const batch = await this.verifyChunk(
+          chunk,
+          descriptor,
+          reveal.publicationCommitment.maxPresentationSpanMs,
+        );
+        try {
+          this.options.playback.appendVerifiedBatch(batch);
+        } catch {
+          throw networkError("reveal_integrity_failure");
+        }
+        const accepted = deepFreeze(descriptor);
+        this.advertisedDescriptors.set(nextIndex, accepted);
+        this.acceptedDescriptors.set(nextIndex, accepted);
+        nextIndex += 1;
       }
-      const accepted = deepFreeze(descriptor);
-      this.advertisedDescriptors.set(nextIndex, accepted);
-      this.acceptedDescriptors.set(nextIndex, accepted);
-      nextIndex += 1;
+    } catch (error) {
+      attemptController.abort();
+      // Every prefetched promise settles into a value, so draining siblings is
+      // bounded and prevents a retry from stacking another fetch window.
+      await Promise.all(prefetched.values());
+      throw error;
     }
     if (
       this.advertisedDescriptors.size >
@@ -1318,16 +1368,61 @@ export class ReplayPremiereNetworkController {
     }
   }
 
+  private async fetchRevealedChunk(
+    index: number,
+    reveal: ReplayPremiereRevealWire,
+    draftManifest: ReadonlyMap<
+      number,
+      Readonly<ReplayPremiereFrozenDraftDescriptor>
+    >,
+    signal: AbortSignal,
+  ): Promise<ReplayPremiereFetchedRevealChunk> {
+    const value = await this.fetchJson(
+      this.chunkPath(index),
+      {
+        noStoreRequired: false,
+        maxBytes: this.maxResponseBytes,
+      },
+      signal,
+    );
+    const parsed = publicChunkSchema.safeParse(value);
+    if (!parsed.success) throw networkError("invalid_schema");
+    this.assertProvenance(parsed.data.provenance);
+    const descriptor = descriptorFromChunk(parsed.data);
+    const draft = draftManifest.get(index);
+    const advertised = this.advertisedDescriptors.get(index);
+    if (
+      !draft ||
+      (advertised !== undefined &&
+        !canonicalJsonEqual(advertised, descriptor)) ||
+      !publishedDescriptorMatchesDraft(descriptor, draft) ||
+      descriptor.index !== index ||
+      descriptor.terminal !== (index === reveal.finalChunkIndex) ||
+      (index === reveal.finalChunkIndex &&
+        (descriptor.chunkHash !== reveal.finalChunkHash ||
+          descriptor.endSequence !== reveal.finalSequence))
+    ) {
+      throw networkError("reveal_integrity_failure");
+    }
+    return { chunk: parsed.data, descriptor };
+  }
+
   private async fetchJson(
     pathname: string,
     options: JsonFetchOptions,
+    attemptSignal?: AbortSignal,
   ): Promise<unknown> {
     this.assertActive();
     const requestController = new AbortController();
     const abortFromController = (): void => requestController.abort();
+    const abortFromAttempt = (): void => requestController.abort();
     this.abortController.signal.addEventListener("abort", abortFromController, {
       once: true,
     });
+    attemptSignal?.addEventListener("abort", abortFromAttempt, { once: true });
+    if (this.abortController.signal.aborted || attemptSignal?.aborted) {
+      requestController.abort();
+    }
     let rejectTimedOut: ((reason: ReplayPremiereNetworkError) => void) | null =
       null;
     const timedOut = new Promise<never>((_resolve, reject) => {
@@ -1407,6 +1502,7 @@ export class ReplayPremiereNetworkController {
         "abort",
         abortFromController,
       );
+      attemptSignal?.removeEventListener("abort", abortFromAttempt);
     }
   }
 
