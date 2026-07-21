@@ -816,10 +816,15 @@ async function main(): Promise<void> {
     log(`static host on 127.0.0.1:${host.port} (runId ${runId})`);
 
     const chromeLaunchStartedAt = Date.now();
+    const configuredChromeBinary = process.env.PROXYWAR_CLIP_CHROME_BIN?.trim();
     chrome = await launchHeadlessChrome({
       userDataDir: path.join(scratchDir, "chrome-profile"),
       windowWidth: frameProfile.width,
       windowHeight: frameProfile.height,
+      chromeBinary:
+        configuredChromeBinary !== undefined && configuredChromeBinary !== ""
+          ? configuredChromeBinary
+          : undefined,
     });
     cdp = await CdpClient.connect(chrome.browserWsUrl);
     const chromeLaunchMs = Date.now() - chromeLaunchStartedAt;

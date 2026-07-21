@@ -143,6 +143,7 @@ function target(
     },
     readChunk: () => null,
     readReveal: () => null,
+    readReleasedContext: () => null,
   } as ReplayPremiereRuntimeReader;
   return { runtime, interactions };
 }

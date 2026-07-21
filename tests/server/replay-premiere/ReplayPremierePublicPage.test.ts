@@ -448,6 +448,7 @@ describe("ReplayPremiere public page and card", () => {
         if (rejectRevealRead) throw new Error("outcome access forbidden");
         return null;
       },
+      readReleasedContext: () => null,
     };
     const target = { runtime } as ReplayPremiereHttpTarget;
     const registry = {

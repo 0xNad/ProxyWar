@@ -116,6 +116,10 @@ import {
   createReplayPremiereTrustedProxyAddressResolver,
   REPLAY_PREMIERE_LOOPBACK_PROXY_ADDRESSES,
 } from "../server/replay-premiere/ReplayPremiereClientAddress";
+import {
+  createReplayPremiereClipDocumentRouter,
+  ReplayPremiereClips,
+} from "../server/replay-premiere/ReplayPremiereClips";
 import { ReplayPremiereGuestSecurity } from "../server/replay-premiere/ReplayPremiereGuestSecurity";
 import {
   createReplayPremiereRouter,
@@ -221,6 +225,54 @@ const replayPremiereProduction = await startReplayPremiereProduction({
     );
   },
 });
+// Premiere social-clip cache service. Clips are cache, never event-store
+// evidence. Gated ON unless PROXYWAR_CLIPS_ENABLED is exactly "false".
+// Construction is best-effort: if the license strings (or index rebuild) fail
+// — e.g. a minimal test checkout with no resources/lang/en.json — clips are
+// disabled with a warning rather than crashing the whole server.
+const replayPremiereClipsEnabled =
+  process.env.PROXYWAR_CLIPS_ENABLED !== "false";
+let replayPremiereClips: ReplayPremiereClips | null = null;
+if (replayPremiereClipsEnabled) {
+  try {
+    replayPremiereClips = new ReplayPremiereClips({
+      clipsRoot: path.join(replayPremierePrivateStateRoot, "clips-v1"),
+      sourceBundleRoot: replayPremierePrivateStateRoot,
+      staticDir: staticRootDir,
+      workerModulePath: path.join(
+        process.cwd(),
+        "src",
+        "scripts",
+        "replay-premiere-clip-worker.ts",
+      ),
+      publicOrigin: replayPremierePublicOrigin,
+      licenseStrings: await loadReplayPremiereClipLicenseStrings(),
+      storageStatePath: path.join(
+        path.dirname(replayPremierePrivateStateRoot),
+        "state.json",
+      ),
+      clipFfmpegBin: firstConfiguredEnv("PROXYWAR_CLIP_FFMPEG_BIN"),
+      clipChromeBin: firstConfiguredEnv("PROXYWAR_CLIP_CHROME_BIN"),
+      logger: (message) => console.log(`[premiere-clips] ${message}`),
+    });
+    // Rebuild the disk-scan cache index before binding; a partial cache costs
+    // only render time, so a rebuild failure is logged, not fatal.
+    await replayPremiereClips.rebuildIndex().catch((error: unknown) => {
+      console.error(
+        `Replay Premiere clip index rebuild failed: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+    });
+  } catch (error) {
+    replayPremiereClips = null;
+    console.error(
+      `Replay Premiere clips disabled: ${
+        error instanceof Error ? error.message : String(error)
+      }`,
+    );
+  }
+}
 const betaAccess = loadProxyWarBetaAccessConfig();
 const betaFeedbackRootDir = path.join(
   artifactsRootDir,
@@ -323,6 +375,7 @@ app.use(
   createReplayPremiereRouter({
     registry: replayPremiereHttpRegistry,
     security: replayPremiereGuestSecurity,
+    clips: replayPremiereClips ?? undefined,
     resolveClientAddress: createReplayPremiereTrustedProxyAddressResolver({
       // The managed Cloudflare tunnel reaches this process over loopback. Do
       // not trust forwarding headers from LAN or directly exposed peers.
@@ -333,6 +386,19 @@ app.use(
     },
   }),
 );
+if (replayPremiereClips !== null) {
+  // The mp4 file is a document route (like the SVG card), not an /api route.
+  app.use(
+    createReplayPremiereClipDocumentRouter({
+      clips: replayPremiereClips,
+      resolveLifecycle: (premiereId) =>
+        replayPremiereHttpRegistry.get(premiereId)?.runtime ?? null,
+      onOperatorError: (error) => {
+        console.error(formatReplayPremiereHttpOperatorError(error));
+      },
+    }),
+  );
+}
 app.use(
   createReplayPremierePublicPageRouter({
     registry: replayPremiereHttpRegistry,
@@ -1935,6 +2001,7 @@ for (const signal of ["SIGINT", "SIGTERM"] as const) {
     shutdownStarted = true;
     runningChild?.kill(signal);
     renderer?.kill(signal);
+    void replayPremiereClips?.close();
     server.close(() => {
       void replayPremiereProduction.service.close().then(
         () => process.exit(0),
@@ -3076,6 +3143,27 @@ function firstConfiguredEnv(...names: string[]): string | undefined {
     if (value !== undefined && value.trim() !== "") return value.trim();
   }
   return undefined;
+}
+
+/** The exact CC BY-SA attribution + no-endorsement lines used in clip captions. */
+async function loadReplayPremiereClipLicenseStrings(): Promise<{
+  attribution: string;
+  noEndorsement: string;
+}> {
+  const raw = JSON.parse(
+    await fs.readFile(
+      path.join(process.cwd(), "resources", "lang", "en.json"),
+      "utf8",
+    ),
+  ) as { replay_premiere?: Record<string, unknown> };
+  const attribution = raw.replay_premiere?.["asset_attribution"];
+  const noEndorsement = raw.replay_premiere?.["no_endorsement"];
+  if (typeof attribution !== "string" || typeof noEndorsement !== "string") {
+    throw new Error(
+      "resources/lang/en.json is missing replay_premiere.asset_attribution / .no_endorsement",
+    );
+  }
+  return { attribution, noEndorsement };
 }
 
 function envFlag(name: string): boolean {

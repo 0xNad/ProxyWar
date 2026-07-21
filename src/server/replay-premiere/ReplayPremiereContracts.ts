@@ -241,3 +241,129 @@ export interface StagedPremiereSource {
 export function isPremiereId(value: unknown): value is PremiereId {
   return typeof value === "string" && PREMIERE_ID_PATTERN.test(value);
 }
+
+// ---------------------------------------------------------------------------
+// Premiere social clips (rendered mp4 cache; never event-store evidence)
+// ---------------------------------------------------------------------------
+
+/**
+ * The clip render format version. It is baked into the on-disk filename
+ * (`clip-v1-<bucket>.mp4`) and the public file route, so a render-format change
+ * (new overlay, new dimensions) bumps this and invalidates old caches by key.
+ */
+export const PREMIERE_CLIP_VERSION = 1 as const;
+export type PremiereClipVersion = typeof PREMIERE_CLIP_VERSION;
+
+/**
+ * Anchor bucket granularity. Every anchor turn is floored into a 10-turn
+ * bucket; all anchors in one bucket share a single cached clip, since the clip
+ * body spans a ~200-turn window and a ±5-turn anchor shift is imperceptible.
+ * This bounds the render fan-out and makes the cache key coarse and stable.
+ */
+export const PREMIERE_CLIP_ANCHOR_BUCKET_TURNS = 10;
+
+/**
+ * The clip worker parks the camera at `anchor - 50` and captures to
+ * `anchor + 150`, and fails closed for `anchor <= 50`. A bucket's representative
+ * anchor is its center (`bucket*10 + 5`), so bucket 5 (turns 50-59, center 55)
+ * is the earliest renderable bucket. Requests for earlier turns are rejected.
+ */
+export const PREMIERE_CLIP_MIN_ANCHOR_TURN = 50;
+
+/** Upper bound on the bucket index encoded in routes/filenames (9 digits). */
+export const PREMIERE_CLIP_MAX_BUCKET = 999_999_999;
+
+export type PremiereClipState = "ready" | "pending" | "absent";
+
+export interface PremiereClipSocialText {
+  /**
+   * The post body. Carries BOTH exact license lines and NO url (the CC BY-SA
+   * attribution + no-endorsement must ride on the post itself; links live in
+   * the first reply for reach).
+   */
+  caption: string;
+  /** The first reply: the watch url and nothing license-bearing. */
+  firstReply: string;
+}
+
+export interface PremiereClipReady {
+  clipUrl: string;
+  byteLength: number;
+  sha256: string;
+  anchorTurn: number;
+  social: PremiereClipSocialText;
+}
+
+export interface PremiereClipStatusResponse {
+  schemaVersion: 1;
+  premiereId: PremiereId;
+  bucket: number;
+  clipVersion: PremiereClipVersion;
+  state: PremiereClipState;
+  ready: PremiereClipReady | null;
+}
+
+/** The exact JSON the clip service writes for the tsx worker subprocess. */
+export interface PremiereClipJobSpec {
+  premiereId: string;
+  bundlePath: string;
+  expectedBundleSha256: string;
+  anchorTurn: number;
+  clipVersion: number;
+  outDir: string;
+  staticDir: string;
+  captureMode?: "screencast" | "tick-step";
+  frameShape?: "square" | "landscape";
+  cameraFit?: "fill" | "whole-map";
+}
+
+/**
+ * The subset of the worker's `render-manifest.json` the clip service depends on
+ * when rebuilding its cache index from disk. Extra fields are tolerated.
+ */
+export interface PremiereClipRenderManifest {
+  premiereId: string;
+  sourceReplaySha256: string;
+  anchorTurn: number;
+  clipVersion: number;
+  frameShape: string;
+  frameWidth: number;
+  frameHeight: number;
+  outSha256: string;
+  outBytes: number;
+  generatedAt: string;
+}
+
+export function premiereClipBucketForTurn(turn: number): number {
+  if (!Number.isSafeInteger(turn) || turn < 0) {
+    throw new Error(`invalid clip anchor turn: ${turn}`);
+  }
+  return Math.floor(turn / PREMIERE_CLIP_ANCHOR_BUCKET_TURNS);
+}
+
+export function premiereClipRepresentativeAnchorTurn(bucket: number): number {
+  if (!isPremiereClipBucket(bucket)) {
+    throw new Error(`invalid clip bucket: ${bucket}`);
+  }
+  return (
+    bucket * PREMIERE_CLIP_ANCHOR_BUCKET_TURNS +
+    Math.floor(PREMIERE_CLIP_ANCHOR_BUCKET_TURNS / 2)
+  );
+}
+
+export function isPremiereClipBucket(value: unknown): value is number {
+  return (
+    typeof value === "number" &&
+    Number.isSafeInteger(value) &&
+    value >= 0 &&
+    value <= PREMIERE_CLIP_MAX_BUCKET
+  );
+}
+
+/** True when the bucket's representative anchor is late enough to render. */
+export function isRenderablePremiereClipBucket(bucket: number): boolean {
+  return (
+    isPremiereClipBucket(bucket) &&
+    premiereClipRepresentativeAnchorTurn(bucket) > PREMIERE_CLIP_MIN_ANCHOR_TURN
+  );
+}

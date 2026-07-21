@@ -194,7 +194,7 @@ export interface ReplayPremiereInteractionLimits {
 }
 
 export interface ReplayPremiereAnonymousWriteAdmissionRequest {
-  route: "session" | "heartbeat" | "prediction" | "reaction" | "share";
+  route: "session" | "heartbeat" | "prediction" | "reaction" | "share" | "clip";
   premiereId: string;
   participantId: string;
   sessionId: string | null;

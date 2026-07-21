@@ -113,6 +113,18 @@ const proxyWarPremiereRevealPattern = new RegExp(
 const proxyWarPremiereCardPattern = new RegExp(
   `^/premiere/(${proxyWarPremiereIdSource})/card-v1\\.svg$`,
 );
+// Clip cache surface. Bucket is a bounded non-negative integer (10-turn anchor
+// bucket); clip-v1 is the render-format version baked into the filename.
+const proxyWarPremiereClipBucketSource = "0|[1-9][0-9]{0,8}";
+const proxyWarPremiereClipFilePattern = new RegExp(
+  `^/premiere/(${proxyWarPremiereIdSource})/clip-v1-(${proxyWarPremiereClipBucketSource})\\.mp4$`,
+);
+const proxyWarPremiereClipStatusPattern = new RegExp(
+  `^/api/premieres/(${proxyWarPremiereIdSource})/clips/(${proxyWarPremiereClipBucketSource})$`,
+);
+const proxyWarPremiereClipCreatePattern = new RegExp(
+  `^/api/premieres/(${proxyWarPremiereIdSource})/clips$`,
+);
 const proxyWarPremierePredictionPattern = new RegExp(
   `^/api/premieres/(${proxyWarPremiereIdSource})/predictions$`,
 );
@@ -135,14 +147,17 @@ export type ProxyWarPublicPremiereReadRoute =
   | { kind: "manifest"; premiereId: string }
   | { kind: "chunk"; premiereId: string; chunkIndex: number }
   | { kind: "reveal"; premiereId: string }
-  | { kind: "card"; premiereId: string };
+  | { kind: "card"; premiereId: string }
+  | { kind: "clip_status"; premiereId: string; bucket: number }
+  | { kind: "clip_file"; premiereId: string; bucket: number };
 
 export type ProxyWarPublicPremiereWriteRoute =
   | { kind: "prediction"; premiereId: string }
   | { kind: "reaction"; premiereId: string }
   | { kind: "share"; premiereId: string }
   | { kind: "session"; premiereId: string }
-  | { kind: "heartbeat"; premiereId: string; sessionId: string };
+  | { kind: "heartbeat"; premiereId: string; sessionId: string }
+  | { kind: "clip"; premiereId: string };
 
 /**
  * Exact anonymous Premiere read surface. The private source bundle and
@@ -173,6 +188,22 @@ export function matchProxyWarPublicPremiereReadPath(
   if (reveal !== null) return { kind: "reveal", premiereId: reveal[1] };
   const card = proxyWarPremiereCardPattern.exec(pathname);
   if (card !== null) return { kind: "card", premiereId: card[1] };
+  const clipStatus = proxyWarPremiereClipStatusPattern.exec(pathname);
+  if (clipStatus !== null) {
+    return {
+      kind: "clip_status",
+      premiereId: clipStatus[1],
+      bucket: Number(clipStatus[2]),
+    };
+  }
+  const clipFile = proxyWarPremiereClipFilePattern.exec(pathname);
+  if (clipFile !== null) {
+    return {
+      kind: "clip_file",
+      premiereId: clipFile[1],
+      bucket: Number(clipFile[2]),
+    };
+  }
   return null;
 }
 
@@ -208,6 +239,8 @@ export function matchProxyWarPublicPremiereWritePath(
       sessionId: heartbeat[2],
     };
   }
+  const clip = proxyWarPremiereClipCreatePattern.exec(pathname);
+  if (clip !== null) return { kind: "clip", premiereId: clip[1] };
   return null;
 }
 

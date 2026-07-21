@@ -9,6 +9,7 @@ import {
   matchProxyWarPublicPremiereWritePath,
 } from "../agents/ProxyWarPublicArtifacts";
 import type { ReplayPremiereClientAddressResolver } from "./ReplayPremiereClientAddress";
+import type { ReplayPremiereClips } from "./ReplayPremiereClips";
 import type { PremiereState } from "./ReplayPremiereContracts";
 import {
   ReplayPremiereError,
@@ -23,6 +24,7 @@ import {
 import type {
   ReplayPremiereAnonymousWriteAdmission,
   ReplayPremiereReactionKind,
+  ReplayPremiereReleasedContext,
 } from "./ReplayPremiereInteractions";
 import {
   REPLAY_PREMIERE_REACTION_KINDS,
@@ -59,6 +61,12 @@ export interface ReplayPremiereRuntimeReader {
   readManifest(): Promise<PremiereManifestResponse>;
   readChunk(index: number): PremierePublicChunkResponse | null;
   readReveal(): PremiereRevealResponse | null;
+  /**
+   * Released context for a sequence, or null if not yet released. Used to
+   * resolve clip anchors exactly like share moments (sequence <=
+   * releasedThroughSequence). Already implemented by the runtime coordinator.
+   */
+  readReleasedContext(sequence: number): ReplayPremiereReleasedContext | null;
 }
 
 export interface ReplayPremiereHttpTarget {
@@ -104,6 +112,12 @@ export interface ReplayPremiereHttpOptions {
   operationTimeoutMs?: number;
   /** Must return a validated client address across any trusted proxy boundary. */
   resolveClientAddress?: ReplayPremiereClientAddressResolver;
+  /**
+   * Clip cache service. When absent, clip routes fail closed with a bare 404
+   * (the PROXYWAR_CLIPS_ENABLED gate is off), indistinguishable from a
+   * nonexistent premiere.
+   */
+  clips?: ReplayPremiereClips;
   /** Operator-only diagnostics sink; never serialized into the response. */
   onOperatorError?: (error: unknown) => void;
 }
@@ -275,6 +289,26 @@ async function handlePremiereApiRequest(
         sendJson(response, 200, reveal);
         return;
       }
+      case "clip_status": {
+        // Fail closed exactly like a nonexistent premiere when clips are
+        // disabled or the premiere is pre-reveal / has no cached artifact.
+        if (options.clips === undefined) {
+          throw unavailable("premiere_clips_disabled", 404);
+        }
+        const status = options.clips.readStatus({
+          premiereId: readRoute.premiereId,
+          lifecycleState: runtime.readLifecycleState(),
+          bucket: readRoute.bucket,
+        });
+        if (status.state === "absent") {
+          throw unavailable("premiere_clip_absent", 404);
+        }
+        sendJson(response, 200, status);
+        return;
+      }
+      case "clip_file":
+        // The mp4 is served by the document router, not this API adapter.
+        throw unavailable("premiere_non_api_route_reached_api_adapter", 404);
     }
   }
   if (request.method === "POST" && writeRoute !== null) {
@@ -376,6 +410,46 @@ async function handlePremiereApiRequest(
           operationTimeoutMs,
         );
         sendJson(response, 200, { schemaVersion: 1, ...result });
+        return;
+      }
+      case "clip": {
+        // Fail closed like a nonexistent premiere when clips are disabled or
+        // the premiere is pre-reveal (archived was already 410'd above).
+        if (options.clips === undefined) {
+          throw unavailable("premiere_clips_disabled", 404);
+        }
+        const state = target.runtime.readLifecycleState();
+        if (state !== "revealed") {
+          throw unavailable("premiere_clip_unavailable", 404);
+        }
+        const reveal = target.runtime.readReveal();
+        if (reveal === null) {
+          throw unavailable("premiere_clip_unavailable", 404);
+        }
+        // Shared anonymous-write admission, exactly like reaction/share writes
+        // (which admit inside the interactions layer). Clips have no session.
+        options.registry.admitAnonymousWrite({
+          route: "clip",
+          premiereId: writeRoute.premiereId,
+          participantId,
+          sessionId: null,
+          requesterBucketId,
+          idempotencyKey,
+          occurredAt: new Date().toISOString(),
+          currentPremiereRecordCount: 0,
+        });
+        const anchor = resolveClipAnchor(target, parseClipBody(request.body));
+        const status = await withTimeout(
+          options.clips.requestClip({
+            premiereId: writeRoute.premiereId,
+            lifecycleState: state,
+            anchorTurn: anchor.turn,
+            participantId,
+            sourceReplaySha256: reveal.sourceReplaySha256,
+          }),
+          operationTimeoutMs,
+        );
+        sendJson(response, 200, status);
         return;
       }
     }
@@ -547,6 +621,60 @@ function parseShareBody(value: unknown): {
     throw invalidRequest("invalid_share_body", 400);
   }
   return { sessionId, sourceReactionId, sequence };
+}
+
+function parseClipBody(value: unknown): {
+  sourceReactionId: string | null;
+  sequence: number | null;
+  turn: number | null;
+} {
+  const body = exactObject(value, [], ["sourceReactionId", "sequence", "turn"]);
+  const sourceReactionId = nullableStringField(body, "sourceReactionId", 64);
+  const sequence = nullableSequenceField(body, "sequence");
+  const turn = nullableSequenceField(body, "turn");
+  const hasReaction = sourceReactionId !== null;
+  const hasSequenceTurn = sequence !== null && turn !== null;
+  // Exactly one anchor form: a source reaction, or a full sequence+turn pair.
+  if (
+    (hasReaction && (sequence !== null || turn !== null)) ||
+    (!hasReaction && !hasSequenceTurn) ||
+    (sourceReactionId !== null && !REACTION_ID_PATTERN.test(sourceReactionId))
+  ) {
+    throw invalidRequest("invalid_clip_body", 400);
+  }
+  return { sourceReactionId, sequence, turn };
+}
+
+/**
+ * Resolve a clip anchor to a canonical released turn, validated exactly like
+ * share moments (sequence <= releasedThroughSequence via readReleasedContext).
+ */
+function resolveClipAnchor(
+  target: ReplayPremiereHttpTarget,
+  body: {
+    sourceReactionId: string | null;
+    sequence: number | null;
+    turn: number | null;
+  },
+): { sequence: number; turn: number } {
+  if (body.sourceReactionId !== null) {
+    const reaction = target.interactions
+      .readState()
+      .reactions.find((entry) => entry.id === body.sourceReactionId);
+    if (reaction === undefined) {
+      throw invalidRequest("clip_reaction_not_found", 400);
+    }
+    const context = target.runtime.readReleasedContext(reaction.sequence);
+    if (context === null) throw invalidRequest("clip_reaction_unreleased", 410);
+    return { sequence: reaction.sequence, turn: context.turn };
+  }
+  const sequence = body.sequence as number;
+  const context = target.runtime.readReleasedContext(sequence);
+  if (context === null) throw invalidRequest("clip_sequence_unreleased", 410);
+  if (context.turn !== body.turn) {
+    throw invalidRequest("clip_turn_mismatch", 400);
+  }
+  return { sequence, turn: context.turn };
 }
 
 function requestSecurityHeaders(request: Request): {

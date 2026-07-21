@@ -1122,6 +1122,12 @@ async function publicationTarget(
     },
     readChunk: (index) => publication.readChunk(index),
     readReveal: () => publication.readReveal(),
+    readReleasedContext: (sequence) => {
+      const releasedThroughSequence = revealed ? 5 : 4;
+      return sequence >= 0 && sequence <= releasedThroughSequence
+        ? { releasedThroughSequence, turn: sequence, eventContext: null }
+        : null;
+    },
   };
   return { gate, runtime };
 }
