@@ -607,6 +607,45 @@ describe("ReplayPremiereRuntimeCoordinator", () => {
     expect(eventReads).toBe(1);
   });
 
+  test("consumes one immutable event snapshot when custom persistence mutates its source", async () => {
+    const { gate, drafts } = await verifiedPublicationFixture(root);
+    const clock = new FakeClock(NOW);
+    const store = await openStore(root);
+    stores.push(store);
+    await ReplayPremiereRuntimeCoordinator.createOrRecover({
+      gate,
+      drafts,
+      persistence: store,
+      clock,
+      interactions: createInteractions(gate, clock),
+    });
+    const sourceEvents = structuredClone(store.recovered.events);
+    const base = persistenceForEvents(store.recovered, sourceEvents);
+    const persistence: ReplayPremiereRuntimePersistence = {
+      ...base,
+      readSnapshot: async (aggregateId) => {
+        const snapshot = await base.readSnapshot(aggregateId);
+        sourceEvents[0].eventType = "premiere_runtime_cancelled";
+        sourceEvents[0].payload = { forged: true };
+        return snapshot;
+      },
+    };
+
+    const recovered = await ReplayPremiereRuntimeCoordinator.createOrRecover({
+      gate,
+      drafts,
+      persistence,
+      clock,
+      interactions: createInteractions(gate, clock),
+    });
+
+    expect(sourceEvents[0]).toMatchObject({
+      eventType: "premiere_runtime_cancelled",
+      payload: { forged: true },
+    });
+    expect(recovered.readLifecycleState()).toBe("scheduled");
+  });
+
   test("rejects a hash-valid historical chunk released before its authoritative time", async () => {
     const { gate, drafts } = await verifiedPublicationFixture(root);
     const clock = new FakeClock(NOW);

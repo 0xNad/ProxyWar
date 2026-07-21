@@ -190,7 +190,8 @@ export class ReplayPremiereRuntimeCoordinator {
     const recovered = options.persistence.recovered;
     const authenticEvents =
       readAuthenticReplayPremiereEventRecoveryEvents(recovered);
-    const events = authenticEvents ?? [...recovered.events];
+    const events =
+      authenticEvents ?? snapshotUntrustedStoredEvents(recovered.events);
     if (authenticEvents === null) {
       assertStoredEventHashChain(events);
     }
@@ -1867,9 +1868,9 @@ function assertStoredEventHashChain(
     const { eventHash, ...preimage } = event;
     const value = asJson(preimage);
     if (
-      event.schemaVersion !== 1 ||
-      event.eventSequence !== index ||
-      event.previousEventHash !== previousHash ||
+      preimage.schemaVersion !== 1 ||
+      preimage.eventSequence !== index ||
+      preimage.previousEventHash !== previousHash ||
       !isSha256Hex(eventHash) ||
       hashReplayPremiereJson(value) !== eventHash
     ) {
@@ -1877,6 +1878,18 @@ function assertStoredEventHashChain(
     }
     previousHash = eventHash;
   }
+}
+
+function snapshotUntrustedStoredEvents(
+  source: readonly StoredReplayPremiereEvent[],
+): readonly StoredReplayPremiereEvent[] {
+  const events = [...source].map((event, index) =>
+    cloneAndFreezeReplayPremiereValue(
+      event,
+      `untrusted premiere recovery event ${index}`,
+    ),
+  );
+  return Object.freeze(events);
 }
 
 function releasedChunkFromPublic(
