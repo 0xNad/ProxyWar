@@ -162,9 +162,12 @@ export class ReplayPremiereEventStore {
 
   get recovered(): ReplayPremiereEventRecovery {
     return {
-      events: this.recoveryState.events.map((event) =>
-        immutable(event, "event recovery view"),
-      ),
+      // Stored events are cloned and recursively frozen when they cross the
+      // append/recovery trust boundary. Return a caller-owned array while
+      // reusing those immutable event objects; re-canonicalizing a large reveal
+      // payload on every recovery read makes multi-target startup scale with
+      // targets x journal bytes without adding isolation.
+      events: [...this.recoveryState.events],
       lastEventSequence: this.recoveryState.lastEventSequence,
       lastEventHash: this.recoveryState.lastEventHash,
       eventLogBytes: this.recoveryState.eventLogBytes,

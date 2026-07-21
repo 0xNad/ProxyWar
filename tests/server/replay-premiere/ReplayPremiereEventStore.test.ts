@@ -146,6 +146,38 @@ describe("ReplayPremiereEventStore", () => {
     await store.close();
   });
 
+  test("returns caller-owned recovery arrays while reusing immutable stored events", async () => {
+    const store = await ReplayPremiereEventStore.open({
+      privateStateRoot: privateRoot,
+      servedRoots: [servedRoot],
+      limits,
+    });
+    await store.append({
+      aggregateId: PREMIERE_ID,
+      eventType: "premiere_published",
+      occurredAt: "2026-07-20T18:00:00.000Z",
+      payload: { nested: { value: "accepted" } },
+    });
+
+    const first = store.recovered;
+    const second = store.recovered;
+    expect(first.events).not.toBe(second.events);
+    expect(first.events[0]).toBe(second.events[0]);
+    expect(Object.isFrozen(first.events[0])).toBe(true);
+    expect(Object.isFrozen(first.events[0].payload)).toBe(true);
+
+    first.events.length = 0;
+    expect(second.events).toHaveLength(1);
+    expect(store.recovered.events).toHaveLength(1);
+    const nested = (second.events[0].payload as { nested: { value: string } })
+      .nested;
+    expect(Reflect.set(nested, "value", "mutated")).toBe(false);
+    expect(store.recovered.events[0].payload).toEqual({
+      nested: { value: "accepted" },
+    });
+    await store.close();
+  });
+
   test("poisons the writer after an ambiguous partial event write", async () => {
     let writes = 0;
     const store = await ReplayPremiereEventStore.open({

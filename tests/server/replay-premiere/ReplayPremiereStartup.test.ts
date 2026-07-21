@@ -48,6 +48,10 @@ const CHUNK_LIMITS = {
   maxRecordsPerChunk: 20,
   maxPresentationSpanMs: 1_000,
 } as const;
+const PLAYING_CHUNK_LIMITS = {
+  ...CHUNK_LIMITS,
+  maxRecordsPerChunk: 1,
+} as const;
 const COLLECTOR_LIMITS = {
   maxTargets: 256,
   maxTargetUrlBytes: 4_096,
@@ -362,7 +366,9 @@ describe("ReplayPremiere production startup", () => {
       privateStateRoot: path.join(root, "private"),
       servedRoots: [path.join(root, "served")],
     });
+    services.push(first.service);
     await first.service.close();
+    services.splice(services.indexOf(first.service), 1);
 
     const secondContext = startupContext();
     const second = await startReplayPremiereProduction({
@@ -376,6 +382,373 @@ describe("ReplayPremiere production startup", () => {
     expect(second.registeredPremiereIds).toEqual([PREMIERE_ID]);
     expect(secondContext.httpRegistry.get(PREMIERE_ID)).not.toBeNull();
   });
+
+  test.each([
+    ["initialized", "premiere_runtime_initialized", "scheduled"],
+    ["started", "premiere_runtime_started", "playing"],
+    ["chunk-playing", "premiere_runtime_chunk_released", "playing"],
+    ["chunk-checkpoint", "premiere_runtime_chunk_released", "checkpoint"],
+    ["checkpoint-resumed", "premiere_runtime_checkpoint_resumed", "playing"],
+    ["outage-started", "premiere_runtime_outage_started", "playing"],
+    ["outage-recovered", "premiere_runtime_outage_recovered", "playing"],
+    ["failed", "premiere_runtime_failed", "failed"],
+    ["cancelled", "premiere_runtime_cancelled", "cancelled"],
+    ["terminal-archived", "premiere_runtime_terminal_archived", "archived"],
+    ["revealed", "premiere_reveal_committed", "revealed"],
+    ["revealed-archived", "premiere_runtime_archived", "archived"],
+  ] as const)(
+    "accepts the canonical %s latest-event envelope on restart",
+    async (scenario, expectedEventType, expectedState) => {
+      if (scenario === "chunk-playing") {
+        await writeAdmissionWithChunkLimits(root, PLAYING_CHUNK_LIMITS);
+      } else {
+        await writeAdmission(root);
+      }
+      const beforeSchedule = NOW.getTime() - 120_000;
+      const startsBeforeSchedule =
+        scenario === "initialized" ||
+        scenario === "cancelled" ||
+        scenario === "terminal-archived";
+      vi.useFakeTimers({
+        now: startsBeforeSchedule ? beforeSchedule : NOW.getTime(),
+      });
+      const firstContext = startupContext(() => new Date());
+      const first = await startReplayPremiereProduction({
+        ...firstContext,
+        privateStateRoot: path.join(root, "private"),
+        servedRoots: [path.join(root, "served")],
+      });
+      services.push(first.service);
+      const runtime = firstContext.runtimeRegistry.get(PREMIERE_ID)!;
+
+      if (scenario === "chunk-checkpoint") {
+        vi.setSystemTime(NOW.getTime() + 100);
+        await runtime.synchronize();
+      } else if (scenario === "checkpoint-resumed") {
+        vi.setSystemTime(NOW.getTime() + 100);
+        await runtime.synchronize();
+        vi.setSystemTime(NOW.getTime() + 15_100);
+        await runtime.synchronize();
+      } else if (scenario === "outage-started") {
+        await runtime.beginOutage();
+      } else if (scenario === "outage-recovered") {
+        await runtime.beginOutage();
+        vi.setSystemTime(NOW.getTime() + 1);
+        await runtime.endOutage();
+      } else if (scenario === "failed") {
+        await runtime.beginOutage();
+        vi.setSystemTime(NOW.getTime() + 60_001);
+        await runtime.synchronize();
+      } else if (scenario === "cancelled") {
+        await runtime.cancel();
+      } else if (scenario === "terminal-archived") {
+        await runtime.cancel();
+        await runtime.archive();
+      } else if (scenario === "revealed" || scenario === "revealed-archived") {
+        await driveRuntimeToReveal(runtime);
+        if (scenario === "revealed-archived") await runtime.archive();
+      }
+      expect(runtime.readLifecycleState()).toBe(expectedState);
+      await first.service.close();
+      services.splice(services.indexOf(first.service), 1);
+
+      const store = await ReplayPremiereEventStore.open({
+        privateStateRoot: path.join(root, "private"),
+        servedRoots: [path.join(root, "served")],
+        limits: DEFAULT_REPLAY_PREMIERE_EVENT_STORE_LIMITS,
+      });
+      const latest = store.recovered.events
+        .filter((event) => event.aggregateId === PREMIERE_ID)
+        .at(-1);
+      expect(latest?.eventType).toBe(expectedEventType);
+      expect(
+        (latest?.payload as { lifecycle?: { state?: unknown } }).lifecycle
+          ?.state,
+      ).toBe(expectedState);
+      await store.close();
+
+      const recoveredContext = startupContext(() => new Date());
+      const recovered = await startReplayPremiereProduction({
+        ...recoveredContext,
+        privateStateRoot: path.join(root, "private"),
+        servedRoots: [path.join(root, "served")],
+      });
+      services.push(recovered.service);
+      expect(recovered.diagnostics).toEqual([]);
+      expect(recovered.registeredPremiereIds).toEqual([PREMIERE_ID]);
+      expect(recoveredContext.httpRegistry.get(PREMIERE_ID)).not.toBeNull();
+    },
+  );
+
+  test("prioritizes a scheduled target and contains a later shared-budget timeout", async () => {
+    const premiereIds = await writeTwoAdmissions(root);
+    const beforeSchedule = NOW.getTime() - 120_000;
+    const firstContext = startupContext(() => new Date(beforeSchedule));
+    const first = await startReplayPremiereProduction({
+      ...firstContext,
+      privateStateRoot: path.join(root, "private"),
+      servedRoots: [path.join(root, "served")],
+    });
+    services.push(first.service);
+    expect(first.registeredPremiereIds).toEqual([
+      premiereIds.primary,
+      premiereIds.alternate,
+    ]);
+    for (const premiereId of [premiereIds.primary, premiereIds.alternate]) {
+      const terminal = firstContext.runtimeRegistry.get(premiereId)!;
+      expect(terminal.readLifecycleState()).toBe("scheduled");
+      await terminal.cancel();
+      await terminal.archive();
+      expect(terminal.readLifecycleState()).toBe("archived");
+    }
+    await first.service.close();
+    services.splice(services.indexOf(first.service), 1);
+
+    const scheduledPremiereId = "prem_89abcdef01234567";
+    await writeAlternateAdmission(root, scheduledPremiereId);
+    vi.useFakeTimers({ now: beforeSchedule });
+    const secondContext = startupContext(() => new Date());
+    const attempts: string[] = [];
+    let releaseBarrier: (() => void) | undefined;
+    let resolveBarrierEntered: (() => void) | undefined;
+    const barrier = new Promise<void>((resolve) => {
+      releaseBarrier = resolve;
+    });
+    const barrierEntered = new Promise<void>((resolve) => {
+      resolveBarrierEntered = resolve;
+    });
+
+    const starting = startReplayPremiereProduction({
+      ...secondContext,
+      privateStateRoot: path.join(root, "private"),
+      servedRoots: [path.join(root, "served")],
+      maxStartupMs: 100,
+      beforeTargetRecovery: async ({ record }) => {
+        attempts.push(record.premiereId);
+        if (record.premiereId === premiereIds.alternate) {
+          resolveBarrierEntered?.();
+          await barrier;
+        }
+      },
+    });
+    await barrierEntered;
+    expect(attempts).toEqual([scheduledPremiereId, premiereIds.alternate]);
+    await vi.advanceTimersByTimeAsync(100);
+    const second = await starting;
+    services.push(second.service);
+
+    expect(second.registeredPremiereIds).toEqual([scheduledPremiereId]);
+    expect(second.diagnostics).toEqual([
+      {
+        target: `${premiereIds.alternate}.admission.json`,
+        premiereId: premiereIds.alternate,
+        operatorCode: "startup_deadline_exceeded",
+      },
+      {
+        target: `${premiereIds.primary}.admission.json`,
+        premiereId: premiereIds.primary,
+        operatorCode: "startup_deadline_exceeded",
+      },
+    ]);
+    expect(secondContext.httpRegistry.get(scheduledPremiereId)).not.toBeNull();
+    expect(secondContext.httpRegistry.get(premiereIds.alternate)).toBeNull();
+    expect(secondContext.httpRegistry.get(premiereIds.primary)).toBeNull();
+
+    const eventsPath = path.join(
+      root,
+      "private",
+      "event-store-v1",
+      "events.jsonl",
+    );
+    const bytesAtReturn = (await fs.stat(eventsPath)).size;
+    const timersAtReturn = second.service.readActiveTimerCount();
+    releaseBarrier?.();
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(attempts).toEqual([scheduledPremiereId, premiereIds.alternate]);
+    expect(secondContext.httpRegistry.get(scheduledPremiereId)).not.toBeNull();
+    expect(secondContext.httpRegistry.get(premiereIds.alternate)).toBeNull();
+    expect(secondContext.runtimeRegistry.get(premiereIds.alternate)).toBeNull();
+    expect(second.service.readActiveTimerCount()).toBe(timersAtReturn);
+    expect((await fs.stat(eventsPath)).size).toBe(bytesAtReturn);
+
+    await second.service.close();
+    services.splice(services.indexOf(second.service), 1);
+    expect(second.service.readActiveTimerCount()).toBe(0);
+    expect(secondContext.httpRegistry.get(scheduledPremiereId)).toBeNull();
+    expect(secondContext.runtimeRegistry.get(scheduledPremiereId)).toBeNull();
+    expect((await fs.stat(eventsPath)).size).toBe(bytesAtReturn);
+  });
+
+  test("quarantines an invalid lifecycle projection without starving a valid target", async () => {
+    const premiereIds = await writeTwoAdmissions(root);
+    const store = await ReplayPremiereEventStore.open({
+      privateStateRoot: path.join(root, "private"),
+      servedRoots: [path.join(root, "served")],
+      limits: DEFAULT_REPLAY_PREMIERE_EVENT_STORE_LIMITS,
+    });
+    await store.append({
+      aggregateId: premiereIds.alternate,
+      eventType: "premiere_runtime_initialized",
+      occurredAt: NOW.toISOString(),
+      payload: { forged: true },
+    });
+    await store.close();
+    const context = startupContext();
+
+    const started = await startReplayPremiereProduction({
+      ...context,
+      privateStateRoot: path.join(root, "private"),
+      servedRoots: [path.join(root, "served")],
+    });
+    services.push(started.service);
+
+    expect(started.registeredPremiereIds).toEqual([premiereIds.primary]);
+    expect(started.diagnostics).toEqual([
+      {
+        target: `${premiereIds.alternate}.admission.json`,
+        premiereId: premiereIds.alternate,
+        operatorCode: "startup_runtime_projection_missing_lifecycle",
+      },
+    ]);
+    expect(context.runtimeRegistry.get(premiereIds.primary)).not.toBeNull();
+    expect(context.runtimeRegistry.get(premiereIds.alternate)).toBeNull();
+  });
+
+  test("quarantines a commitment-mismatched active envelope before priority recovery", async () => {
+    const premiereIds = await writeTwoAdmissions(root);
+    const beforeSchedule = NOW.getTime() - 120_000;
+    const firstContext = startupContext(() => new Date(beforeSchedule));
+    const first = await startReplayPremiereProduction({
+      ...firstContext,
+      privateStateRoot: path.join(root, "private"),
+      servedRoots: [path.join(root, "served")],
+    });
+    services.push(first.service);
+    await first.service.close();
+    services.splice(services.indexOf(first.service), 1);
+
+    const store = await ReplayPremiereEventStore.open({
+      privateStateRoot: path.join(root, "private"),
+      servedRoots: [path.join(root, "served")],
+      limits: DEFAULT_REPLAY_PREMIERE_EVENT_STORE_LIMITS,
+    });
+    const initialized = store.recovered.events.find(
+      (event) =>
+        event.aggregateId === premiereIds.alternate &&
+        event.eventType === "premiere_runtime_initialized",
+    );
+    expect(initialized).toBeDefined();
+    const forged = structuredClone(initialized!.payload) as Record<
+      string,
+      unknown
+    >;
+    const forgedLifecycle = forged.lifecycle as Record<string, unknown>;
+    const wrongCommitment = "f".repeat(64);
+    forged.publicationCommitmentHash = wrongCommitment;
+    forged.actualStartAt = NOW.toISOString();
+    forged.lastObservedAt = NOW.toISOString();
+    forgedLifecycle.state = "playing";
+    forgedLifecycle.publicationCommitmentHash = wrongCommitment;
+    forgedLifecycle.version = Number(forgedLifecycle.version) + 1;
+    forgedLifecycle.updatedAt = NOW.toISOString();
+    const forgedJson = forged as unknown as ReplayPremiereJsonValue;
+    await store.appendAndSnapshot({
+      event: {
+        aggregateId: premiereIds.alternate,
+        eventType: "premiere_runtime_started",
+        occurredAt: NOW.toISOString(),
+        payload: forgedJson,
+      },
+      state: forgedJson,
+      idempotencyKey: `runtime:start:${wrongCommitment}`,
+    });
+    await store.close();
+
+    const context = startupContext(() => new Date(beforeSchedule));
+    const started = await startReplayPremiereProduction({
+      ...context,
+      privateStateRoot: path.join(root, "private"),
+      servedRoots: [path.join(root, "served")],
+    });
+    services.push(started.service);
+
+    expect(started.registeredPremiereIds).toEqual([premiereIds.primary]);
+    expect(started.diagnostics).toEqual([
+      {
+        target: `${premiereIds.alternate}.admission.json`,
+        premiereId: premiereIds.alternate,
+        operatorCode: "startup_runtime_projection_envelope_invalid",
+      },
+    ]);
+    expect(context.httpRegistry.get(premiereIds.primary)).not.toBeNull();
+    expect(context.httpRegistry.get(premiereIds.alternate)).toBeNull();
+    expect(context.runtimeRegistry.get(premiereIds.alternate)).toBeNull();
+  });
+
+  test.each([
+    ["unknown type", "premiere_runtime_future", "runtime:future:"],
+    ["type/state mismatch", "premiere_runtime_started", "runtime:start:"],
+  ] as const)(
+    "quarantines a hash-consistent %s projection envelope",
+    async (_scenario, eventType, idempotencyPrefix) => {
+      await writeAdmission(root);
+      const beforeSchedule = NOW.getTime() - 120_000;
+      const firstContext = startupContext(() => new Date(beforeSchedule));
+      const first = await startReplayPremiereProduction({
+        ...firstContext,
+        privateStateRoot: path.join(root, "private"),
+        servedRoots: [path.join(root, "served")],
+      });
+      services.push(first.service);
+      await first.service.close();
+      services.splice(services.indexOf(first.service), 1);
+
+      const store = await ReplayPremiereEventStore.open({
+        privateStateRoot: path.join(root, "private"),
+        servedRoots: [path.join(root, "served")],
+        limits: DEFAULT_REPLAY_PREMIERE_EVENT_STORE_LIMITS,
+      });
+      const initialized = store.recovered.events.at(-1)!;
+      const forged = structuredClone(initialized.payload) as Record<
+        string,
+        unknown
+      >;
+      const lifecycle = forged.lifecycle as Record<string, unknown>;
+      forged.lastObservedAt = NOW.toISOString();
+      lifecycle.updatedAt = NOW.toISOString();
+      const commitment = String(forged.publicationCommitmentHash);
+      const forgedJson = forged as unknown as ReplayPremiereJsonValue;
+      await store.appendAndSnapshot({
+        event: {
+          aggregateId: PREMIERE_ID,
+          eventType,
+          occurredAt: NOW.toISOString(),
+          payload: forgedJson,
+        },
+        state: forgedJson,
+        idempotencyKey: `${idempotencyPrefix}${commitment}`,
+      });
+      await store.close();
+
+      const context = startupContext(() => new Date(beforeSchedule));
+      const started = await startReplayPremiereProduction({
+        ...context,
+        privateStateRoot: path.join(root, "private"),
+        servedRoots: [path.join(root, "served")],
+      });
+      services.push(started.service);
+      expect(started.registeredPremiereIds).toEqual([]);
+      expect(started.diagnostics).toEqual([
+        {
+          target: `${PREMIERE_ID}.admission.json`,
+          premiereId: PREMIERE_ID,
+          operatorCode: "startup_runtime_projection_envelope_invalid",
+        },
+      ]);
+      expect(context.httpRegistry.get(PREMIERE_ID)).toBeNull();
+      expect(context.runtimeRegistry.get(PREMIERE_ID)).toBeNull();
+    },
+  );
 
   test("aborts a delayed recovery at the deadline without late registration or timers", async () => {
     await writeAdmission(root);
@@ -893,6 +1266,36 @@ describe("ReplayPremiere production startup", () => {
     expect(runtime.readLifecycleState()).toBe("revealed");
     expect(runtime.readReveal()).not.toBeNull();
     expect(started.service.readActiveTimerCount()).toBe(0);
+
+    await started.service.close();
+    services.splice(services.indexOf(started.service), 1);
+    const revealedContext = startupContext(() => new Date());
+    const revealed = await startReplayPremiereProduction({
+      ...revealedContext,
+      privateStateRoot: path.join(root, "private"),
+      servedRoots: [path.join(root, "served")],
+    });
+    services.push(revealed.service);
+    expect(revealed.diagnostics).toEqual([]);
+    expect(revealed.registeredPremiereIds).toEqual([PREMIERE_ID]);
+    const revealedRuntime = revealedContext.runtimeRegistry.get(PREMIERE_ID)!;
+    expect(revealedRuntime.readLifecycleState()).toBe("revealed");
+
+    await revealedRuntime.archive();
+    await revealed.service.close();
+    services.splice(services.indexOf(revealed.service), 1);
+    const archivedContext = startupContext(() => new Date());
+    const archived = await startReplayPremiereProduction({
+      ...archivedContext,
+      privateStateRoot: path.join(root, "private"),
+      servedRoots: [path.join(root, "served")],
+    });
+    services.push(archived.service);
+    expect(archived.diagnostics).toEqual([]);
+    expect(archived.registeredPremiereIds).toEqual([PREMIERE_ID]);
+    expect(
+      archivedContext.runtimeRegistry.get(PREMIERE_ID)?.readLifecycleState(),
+    ).toBe("archived");
   });
 });
 
@@ -912,6 +1315,64 @@ async function writeAdmission(root: string, origin?: string): Promise<void> {
   } finally {
     await catalog.close();
   }
+}
+
+async function writeAdmissionWithChunkLimits(
+  root: string,
+  chunkLimits: typeof PLAYING_CHUNK_LIMITS,
+): Promise<void> {
+  const fixture = await verifiedPublicationFixture(root);
+  const imported = importControlledPremiereSourceForPublication({
+    sourceBytes: fixture.verificationOptions.verifiedSource.copyBytes(),
+    eligibilityRecord: fixture.verificationOptions.eligibilityRecord,
+    authoritativeResultBytes:
+      fixture.verificationOptions.authoritativeResultBytes,
+    replayImportLimits: fixture.verificationOptions.replayImportLimits,
+  });
+  const drafts = buildPremiereChunks({
+    premiereId: PREMIERE_ID,
+    records: imported.records,
+    playbackRate: fixture.verificationOptions.publicDefinition.playbackRate,
+    checkpointSequences:
+      fixture.verificationOptions.publicDefinition.checkpoints.map(
+        (checkpoint) => checkpoint.sequence,
+      ),
+    ...chunkLimits,
+  });
+  const verification = {
+    ...fixture.verificationOptions,
+    draftChunks: drafts,
+  };
+  const gate = VerifiedPremiereEligibilityGate.verify(verification);
+  const catalog = await ReplayPremiereAdmissionCatalog.open({
+    privateStateRoot: path.join(root, "private"),
+    servedRoots: [path.join(root, "served")],
+  });
+  try {
+    await catalog.writeVerifiedAdmission({
+      gate,
+      verification,
+      chunkBuildLimits: chunkLimits,
+      collectorLimits: COLLECTOR_LIMITS,
+    });
+  } finally {
+    await catalog.close();
+  }
+}
+
+async function driveRuntimeToReveal(
+  runtime: NonNullable<ReturnType<ReplayPremiereRuntimeRegistry["get"]>>,
+): Promise<void> {
+  vi.setSystemTime(NOW.getTime() + 100);
+  await runtime.synchronize();
+  vi.setSystemTime(NOW.getTime() + 15_100);
+  await runtime.synchronize();
+  vi.setSystemTime(NOW.getTime() + 15_200);
+  await runtime.synchronize();
+  vi.setSystemTime(NOW.getTime() + 30_200);
+  await runtime.synchronize();
+  vi.setSystemTime(NOW.getTime() + 30_250);
+  await runtime.synchronize();
 }
 
 function startupContext(now: () => Date = () => new Date(NOW)): {
@@ -1042,6 +1503,52 @@ async function writeTwoAdmissions(root: string): Promise<{
     await catalog.close();
   }
   return { primary: PREMIERE_ID, alternate: alternatePremiereId };
+}
+
+async function writeAlternateAdmission(
+  root: string,
+  alternatePremiereId: string,
+): Promise<void> {
+  const fixture = await verifiedPublicationFixture(root);
+  const imported = importControlledPremiereSourceForPublication({
+    sourceBytes: fixture.verificationOptions.verifiedSource.copyBytes(),
+    eligibilityRecord: fixture.verificationOptions.eligibilityRecord,
+    authoritativeResultBytes:
+      fixture.verificationOptions.authoritativeResultBytes,
+    replayImportLimits: fixture.verificationOptions.replayImportLimits,
+  });
+  const alternateDrafts = buildPremiereChunks({
+    premiereId: alternatePremiereId,
+    records: imported.records,
+    playbackRate: fixture.verificationOptions.publicDefinition.playbackRate,
+    checkpointSequences:
+      fixture.verificationOptions.publicDefinition.checkpoints.map(
+        (checkpoint) => checkpoint.sequence,
+      ),
+    ...CHUNK_LIMITS,
+  });
+  const alternateVerification = {
+    ...fixture.verificationOptions,
+    premiereId: alternatePremiereId,
+    draftChunks: alternateDrafts,
+  };
+  const alternateGate = VerifiedPremiereEligibilityGate.verify(
+    alternateVerification,
+  );
+  const catalog = await ReplayPremiereAdmissionCatalog.open({
+    privateStateRoot: path.join(root, "private"),
+    servedRoots: [path.join(root, "served")],
+  });
+  try {
+    await catalog.writeVerifiedAdmission({
+      gate: alternateGate,
+      verification: alternateVerification,
+      chunkBuildLimits: CHUNK_LIMITS,
+      collectorLimits: COLLECTOR_LIMITS,
+    });
+  } finally {
+    await catalog.close();
+  }
 }
 
 function admissionPath(root: string, premiereId: string): string {

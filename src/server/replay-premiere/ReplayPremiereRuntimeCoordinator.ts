@@ -186,8 +186,9 @@ export class ReplayPremiereRuntimeCoordinator {
       options.drafts,
       options.checkpointProjection,
     );
-    assertStoredEventHashChain(options.persistence.recovered.events);
-    const aggregateEvents = options.persistence.recovered.events.filter(
+    const recovered = options.persistence.recovered;
+    assertStoredEventHashChain(recovered.events);
+    const aggregateEvents = recovered.events.filter(
       (event) => event.aggregateId === options.gate.premiereId,
     );
     if (aggregateEvents.length === 0) {

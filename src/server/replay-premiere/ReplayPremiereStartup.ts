@@ -26,6 +26,7 @@ import {
 import {
   assertReplayPremiereJsonValue,
   hashReplayPremiereJson,
+  isSha256Hex,
   sha256Hex,
   type ReplayPremiereJsonValue,
 } from "./ReplayPremiereIntegrity";
@@ -48,6 +49,10 @@ import {
   ReplayPremiereRuntimeRegistry,
   type ReplayPremiereRuntimeClock,
 } from "./ReplayPremiereRuntimeCoordinator";
+import {
+  assertValidPremiereLifecycleSnapshot,
+  type PremiereLifecycleSnapshot,
+} from "./ReplayPremiereStateMachine";
 
 const DEFAULT_STARTUP_DEADLINE_MS = 10_000;
 const MAX_STARTUP_DEADLINE_MS = 10_000;
@@ -57,6 +62,53 @@ const RUNTIME_RETRY_MAX_MS = 60_000;
 const MAX_RUNTIME_REPORTS_PER_INCIDENT = 4;
 const MAX_DIAGNOSTIC_TARGET_BYTES = 160;
 const SAFE_DIAGNOSTIC_TARGET = /^[A-Za-z0-9._:-]+$/;
+const RUNTIME_PROJECTION_EVENT_TYPES = new Set([
+  "premiere_runtime_initialized",
+  "premiere_runtime_started",
+  "premiere_runtime_chunk_released",
+  "premiere_runtime_checkpoint_resumed",
+  "premiere_runtime_outage_started",
+  "premiere_runtime_outage_recovered",
+  "premiere_runtime_failed",
+  "premiere_runtime_cancelled",
+  "premiere_runtime_terminal_archived",
+]);
+const RUNTIME_PROJECTION_KEYS = [
+  "schemaVersion",
+  "runtimeKind",
+  "premiereId",
+  "publicationCommitmentHash",
+  "lifecycle",
+  "actualStartAt",
+  "scheduleShiftMs",
+  "accumulatedPauseMs",
+  "activeCheckpoint",
+  "completedCheckpointIds",
+  "outageStartedAt",
+  "lastObservedAt",
+  "nextDraftIndex",
+  "releasedChunks",
+  "interactionCheckpoints",
+] as const;
+const REVEAL_PROJECTION_KEYS = [
+  "schemaVersion",
+  "commitKind",
+  "publicationCommitmentHash",
+  "lifecycle",
+  "transitionAuditEvent",
+  "releasedPrefixChunkCount",
+  "releasedPrefixLastChunkHash",
+  "terminalChunk",
+  "reveal",
+] as const;
+const ARCHIVE_PROJECTION_KEYS = [
+  "schemaVersion",
+  "runtimeKind",
+  "premiereId",
+  "publicationCommitmentHash",
+  "revealCommitHash",
+  "lifecycle",
+] as const;
 
 export const DEFAULT_REPLAY_PREMIERE_EVENT_STORE_LIMITS: ReplayPremiereEventStoreLimits =
   Object.freeze({
@@ -108,6 +160,12 @@ interface AssembledPremiereTarget {
 interface RecoveryProjection {
   state: PremiereState;
   releasedThroughSequence: number;
+  latestEventSequence: number;
+}
+
+interface ReplayPremiereStartupPlan {
+  record: ReplayPremiereAdmissionRecordV1;
+  projection: RecoveryProjection;
 }
 
 interface ReplayPremiereStartupOperationFence {
@@ -224,6 +282,10 @@ export async function startReplayPremiereProduction(
     const activeEventStore = eventStore;
     const read = await catalog.readAll();
     await catalog.close();
+    const recoveredAtStartup = activeEventStore.recovered;
+    const latestEventsByAggregate = indexLatestEventsByAggregate(
+      recoveredAtStartup.events,
+    );
     const supervisor = new ReplayPremiereRuntimeSupervisor(
       clock,
       reportRuntime,
@@ -245,12 +307,35 @@ export async function startReplayPremiereProduction(
         operatorCode: failure.operatorCode,
       });
     }
+    const startupPlans: ReplayPremiereStartupPlan[] = [];
+    for (const record of read.entries) {
+      try {
+        startupPlans.push({
+          record,
+          projection: recoveryProjection(
+            latestEventsByAggregate.get(record.premiereId),
+            record,
+          ),
+        });
+      } catch (error) {
+        report({
+          target: `${record.premiereId}.admission.json`,
+          premiereId: record.premiereId,
+          operatorCode: operatorCode(error),
+        });
+      }
+    }
+    const startupOrderingNowMs = clock.now().getTime();
+    startupPlans.sort((left, right) =>
+      compareStartupPlans(left, right, startupOrderingNowMs),
+    );
     const registered: string[] = [];
-    for (let index = 0; index < read.entries.length; index += 1) {
-      const record = read.entries[index];
+    for (let index = 0; index < startupPlans.length; index += 1) {
+      const plan = startupPlans[index];
+      const record = plan.record;
       const remainingMs = maxStartupMs - (Date.now() - startedAt);
       if (remainingMs <= 0) {
-        reportDeadlineForRemainder(read.entries, index, report);
+        reportDeadlineForRemainder(startupPlans, index, report);
         break;
       }
       const deadline = await assembleBeforeDeadline({
@@ -273,6 +358,7 @@ export async function startReplayPremiereProduction(
             clock,
             checkpointProjector: options.checkpointProjector,
             interactionLimits: options.interactionLimits,
+            recoveryProjection: plan.projection,
             fence,
           });
         },
@@ -285,7 +371,7 @@ export async function startReplayPremiereProduction(
           premiereId: record.premiereId,
           operatorCode: "startup_deadline_exceeded",
         });
-        reportDeadlineForRemainder(read.entries, index + 1, report);
+        reportDeadlineForRemainder(startupPlans, index + 1, report);
         break;
       }
       if (deadline.status === "rejected") {
@@ -303,7 +389,7 @@ export async function startReplayPremiereProduction(
           premiereId: record.premiereId,
           operatorCode: "startup_deadline_exceeded",
         });
-        reportDeadlineForRemainder(read.entries, index + 1, report);
+        reportDeadlineForRemainder(startupPlans, index + 1, report);
         break;
       }
       try {
@@ -348,6 +434,7 @@ async function assemblePremiereTarget(options: {
   clock: ReplayPremiereRuntimeClock;
   checkpointProjector: ReplayPremiereCheckpointProjector;
   interactionLimits?: Partial<ReplayPremiereInteractionLimits>;
+  recoveryProjection: RecoveryProjection;
   fence: ReplayPremiereStartupOperationFence;
 }): Promise<AssembledPremiereTarget> {
   assertStartupActive(options.fence.signal);
@@ -430,10 +517,7 @@ async function assemblePremiereTarget(options: {
   });
   assertStartupActive(options.fence.signal);
 
-  const projection = recoveryProjection(
-    options.eventStore.recovered.events,
-    options.record.premiereId,
-  );
+  const projection = options.recoveryProjection;
   let runtime: ReplayPremiereRuntimeCoordinator | null = null;
   const recoveredInteractions = await loadReplayPremiereInteractions({
     eventStore: options.eventStore,
@@ -676,21 +760,60 @@ function assertStartupActive(signal: AbortSignal): void {
   if (signal.aborted) throw startupUnavailable("startup_recovery_aborted");
 }
 
-function recoveryProjection(
+function indexLatestEventsByAggregate(
   events: readonly StoredReplayPremiereEvent[],
-  premiereId: string,
+): Map<string, StoredReplayPremiereEvent> {
+  const latest = new Map<string, StoredReplayPremiereEvent>();
+  for (const event of events) latest.set(event.aggregateId, event);
+  return latest;
+}
+
+function recoveryProjection(
+  latest: StoredReplayPremiereEvent | undefined,
+  record: ReplayPremiereAdmissionRecordV1,
 ): RecoveryProjection {
-  const latest = events
-    .filter((event) => event.aggregateId === premiereId)
-    .at(-1);
   if (latest === undefined)
-    return { state: "scheduled", releasedThroughSequence: -1 };
+    return {
+      state: "scheduled",
+      releasedThroughSequence: -1,
+      latestEventSequence: -1,
+    };
   if (!isRecord(latest.payload) || !isRecord(latest.payload.lifecycle)) {
     throw startupIntegrity("startup_runtime_projection_missing_lifecycle");
   }
-  const state = latest.payload.lifecycle.state;
-  const releasedThroughSequence =
-    latest.payload.lifecycle.lastSafeReleasedSequence;
+  const payload = latest.payload;
+  const lifecycle = payload.lifecycle as unknown as PremiereLifecycleSnapshot;
+  try {
+    assertValidPremiereLifecycleSnapshot(lifecycle);
+  } catch (error) {
+    throw startupIntegrity("startup_runtime_projection_invalid", error);
+  }
+  if (
+    latest.schemaVersion !== 1 ||
+    latest.aggregateId !== record.premiereId ||
+    latest.idempotencyKey === null ||
+    latest.idempotencyStateHash === null ||
+    latest.idempotencyStateHash !== hashReplayPremiereJson(latest.payload) ||
+    lifecycle.premiereId !== record.premiereId ||
+    lifecycle.eligibilityRecordHash !== record.expectedEligibilityRecordHash ||
+    lifecycle.publicationCommitmentHash !==
+      record.expectedPublicationCommitmentHash ||
+    lifecycle.sourceRunId !== record.eligibilityRecord.sourceRunId ||
+    lifecycle.sourceReplaySha256 !== record.eligibilityRecord.sourceReplaySha256
+  ) {
+    throw startupIntegrity("startup_runtime_projection_envelope_invalid");
+  }
+  if (RUNTIME_PROJECTION_EVENT_TYPES.has(latest.eventType)) {
+    assertRuntimeProjectionEnvelope(latest, payload, lifecycle, record);
+  } else if (latest.eventType === "premiere_reveal_committed") {
+    assertRevealProjectionEnvelope(latest, payload, lifecycle, record);
+  } else if (latest.eventType === "premiere_runtime_archived") {
+    assertArchiveProjectionEnvelope(latest, payload, lifecycle, record);
+  } else {
+    throw startupIntegrity("startup_runtime_projection_envelope_invalid");
+  }
+  const state = lifecycle.state;
+  const releasedThroughSequence = lifecycle.lastSafeReleasedSequence;
   if (
     !isPremiereState(state) ||
     !Number.isSafeInteger(releasedThroughSequence) ||
@@ -698,7 +821,238 @@ function recoveryProjection(
   ) {
     throw startupIntegrity("startup_runtime_projection_invalid");
   }
-  return { state, releasedThroughSequence: Number(releasedThroughSequence) };
+  return {
+    state,
+    releasedThroughSequence: Number(releasedThroughSequence),
+    latestEventSequence: latest.eventSequence,
+  };
+}
+
+function assertRuntimeProjectionEnvelope(
+  event: StoredReplayPremiereEvent,
+  payload: Record<string, unknown>,
+  lifecycle: PremiereLifecycleSnapshot,
+  record: ReplayPremiereAdmissionRecordV1,
+): void {
+  if (
+    !hasExactKeys(payload, RUNTIME_PROJECTION_KEYS) ||
+    payload.schemaVersion !== 1 ||
+    payload.runtimeKind !== "replay_premiere_runtime_v1" ||
+    payload.premiereId !== record.premiereId ||
+    payload.publicationCommitmentHash !==
+      record.expectedPublicationCommitmentHash ||
+    payload.lastObservedAt !== event.occurredAt ||
+    (!isRuntimeOutageEvent(event.eventType) &&
+      lifecycle.updatedAt !== event.occurredAt) ||
+    !runtimeProjectionStateMatches(event.eventType, lifecycle.state) ||
+    !runtimeProjectionIdempotencyMatches(event, payload, lifecycle)
+  ) {
+    throw startupIntegrity("startup_runtime_projection_envelope_invalid");
+  }
+}
+
+function isRuntimeOutageEvent(eventType: string): boolean {
+  return (
+    eventType === "premiere_runtime_outage_started" ||
+    eventType === "premiere_runtime_outage_recovered"
+  );
+}
+
+function assertRevealProjectionEnvelope(
+  event: StoredReplayPremiereEvent,
+  payload: Record<string, unknown>,
+  lifecycle: PremiereLifecycleSnapshot,
+  record: ReplayPremiereAdmissionRecordV1,
+): void {
+  const transition = payload.transitionAuditEvent;
+  const terminalChunk = payload.terminalChunk;
+  const reveal = payload.reveal;
+  if (
+    !hasExactKeys(payload, REVEAL_PROJECTION_KEYS) ||
+    payload.schemaVersion !== 1 ||
+    payload.commitKind !== "terminal_chunk_and_reveal" ||
+    payload.publicationCommitmentHash !==
+      record.expectedPublicationCommitmentHash ||
+    lifecycle.state !== "revealed" ||
+    lifecycle.updatedAt !== event.occurredAt ||
+    event.idempotencyKey !==
+      `reveal:${record.expectedPublicationCommitmentHash}` ||
+    !isRecord(transition) ||
+    transition.premiereId !== record.premiereId ||
+    transition.toState !== "revealed" ||
+    transition.occurredAt !== event.occurredAt ||
+    !isRecord(terminalChunk) ||
+    terminalChunk.premiereId !== record.premiereId ||
+    terminalChunk.terminal !== true ||
+    terminalChunk.releasedAt !== event.occurredAt ||
+    !isRecord(reveal) ||
+    reveal.premiereId !== record.premiereId ||
+    reveal.state !== "revealed" ||
+    reveal.publicationCommitmentHash !==
+      record.expectedPublicationCommitmentHash ||
+    reveal.revealedAt !== event.occurredAt
+  ) {
+    throw startupIntegrity("startup_runtime_projection_envelope_invalid");
+  }
+}
+
+function assertArchiveProjectionEnvelope(
+  event: StoredReplayPremiereEvent,
+  payload: Record<string, unknown>,
+  lifecycle: PremiereLifecycleSnapshot,
+  record: ReplayPremiereAdmissionRecordV1,
+): void {
+  if (
+    !hasExactKeys(payload, ARCHIVE_PROJECTION_KEYS) ||
+    payload.schemaVersion !== 1 ||
+    payload.runtimeKind !== "replay_premiere_archive_v1" ||
+    payload.premiereId !== record.premiereId ||
+    payload.publicationCommitmentHash !==
+      record.expectedPublicationCommitmentHash ||
+    !isSha256Hex(payload.revealCommitHash) ||
+    lifecycle.state !== "archived" ||
+    lifecycle.updatedAt !== event.occurredAt ||
+    event.idempotencyKey !==
+      `runtime:archive:${record.expectedPublicationCommitmentHash}`
+  ) {
+    throw startupIntegrity("startup_runtime_projection_envelope_invalid");
+  }
+}
+
+function runtimeProjectionStateMatches(
+  eventType: string,
+  state: PremiereState,
+): boolean {
+  switch (eventType) {
+    case "premiere_runtime_initialized":
+      return state === "scheduled";
+    case "premiere_runtime_started":
+    case "premiere_runtime_checkpoint_resumed":
+      return state === "playing";
+    case "premiere_runtime_chunk_released":
+      return state === "playing" || state === "checkpoint";
+    case "premiere_runtime_outage_started":
+    case "premiere_runtime_outage_recovered":
+      return (
+        state === "scheduled" || state === "playing" || state === "checkpoint"
+      );
+    case "premiere_runtime_failed":
+      return state === "failed";
+    case "premiere_runtime_cancelled":
+      return state === "cancelled";
+    case "premiere_runtime_terminal_archived":
+      return state === "archived";
+    default:
+      return false;
+  }
+}
+
+function runtimeProjectionIdempotencyMatches(
+  event: StoredReplayPremiereEvent,
+  payload: Record<string, unknown>,
+  lifecycle: PremiereLifecycleSnapshot,
+): boolean {
+  const key = event.idempotencyKey;
+  if (key === null) return false;
+  const commitment = String(payload.publicationCommitmentHash);
+  switch (event.eventType) {
+    case "premiere_runtime_initialized":
+      return key === `runtime:init:${commitment}`;
+    case "premiere_runtime_started":
+      return key === `runtime:start:${commitment}`;
+    case "premiere_runtime_chunk_released":
+      return (
+        Number.isSafeInteger(payload.nextDraftIndex) &&
+        Number(payload.nextDraftIndex) > 0 &&
+        key ===
+          `runtime:release:${commitment}:${Number(payload.nextDraftIndex) - 1}`
+      );
+    case "premiere_runtime_checkpoint_resumed": {
+      const checkpointIds = payload.completedCheckpointIds;
+      const checkpointId = Array.isArray(checkpointIds)
+        ? checkpointIds.at(-1)
+        : undefined;
+      return (
+        typeof checkpointId === "string" &&
+        key === `runtime:checkpoint:${checkpointId}:resume`
+      );
+    }
+    case "premiere_runtime_outage_started":
+      return (
+        payload.outageStartedAt === event.occurredAt &&
+        key === `runtime:outage:${commitment}:begin:${lifecycle.version}`
+      );
+    case "premiere_runtime_outage_recovered": {
+      const prefix = `runtime:outage:${commitment}:recover:${lifecycle.version}:`;
+      return (
+        payload.outageStartedAt === null &&
+        key.startsWith(prefix) &&
+        /^-?\d+$/.test(key.slice(prefix.length))
+      );
+    }
+    case "premiere_runtime_failed":
+      return key === `runtime:fail:${commitment}:${lifecycle.version}`;
+    case "premiere_runtime_cancelled":
+      return key === `runtime:cancel:${commitment}`;
+    case "premiere_runtime_terminal_archived":
+      return key === `runtime:archive:${commitment}`;
+    default:
+      return false;
+  }
+}
+
+function hasExactKeys(
+  value: Record<string, unknown>,
+  expected: readonly string[],
+): boolean {
+  const actual = Object.keys(value);
+  return (
+    actual.length === expected.length &&
+    expected.every((key) => Object.prototype.hasOwnProperty.call(value, key))
+  );
+}
+
+function compareStartupPlans(
+  left: ReplayPremiereStartupPlan,
+  right: ReplayPremiereStartupPlan,
+  nowMs: number,
+): number {
+  const leftPriority = startupStatePriority(left.projection.state);
+  const rightPriority = startupStatePriority(right.projection.state);
+  if (leftPriority !== rightPriority) return leftPriority - rightPriority;
+
+  if (leftPriority === 1) {
+    const leftDistance = scheduledDistanceMs(
+      left.record.publicDefinition.scheduledAt,
+      nowMs,
+    );
+    const rightDistance = scheduledDistanceMs(
+      right.record.publicDefinition.scheduledAt,
+      nowMs,
+    );
+    if (leftDistance !== rightDistance) return leftDistance - rightDistance;
+  } else if (
+    left.projection.latestEventSequence !== right.projection.latestEventSequence
+  ) {
+    return (
+      right.projection.latestEventSequence - left.projection.latestEventSequence
+    );
+  }
+
+  return left.record.premiereId.localeCompare(right.record.premiereId);
+}
+
+function startupStatePriority(state: PremiereState): number {
+  if (state === "playing" || state === "checkpoint") return 0;
+  if (state === "draft" || state === "scheduled") return 1;
+  return 2;
+}
+
+function scheduledDistanceMs(scheduledAt: string, nowMs: number): number {
+  const scheduledAtMs = Date.parse(scheduledAt);
+  return Number.isFinite(scheduledAtMs) && Number.isFinite(nowMs)
+    ? Math.abs(scheduledAtMs - nowMs)
+    : Number.MAX_SAFE_INTEGER;
 }
 
 function releasedContextFromDrafts(
@@ -729,14 +1083,15 @@ function releasedContextFromDrafts(
 }
 
 function reportDeadlineForRemainder(
-  entries: readonly ReplayPremiereAdmissionRecordV1[],
+  plans: readonly ReplayPremiereStartupPlan[],
   startIndex: number,
   report: (diagnostic: ReplayPremiereStartupDiagnostic) => void,
 ): void {
-  for (let index = startIndex; index < entries.length; index += 1) {
+  for (let index = startIndex; index < plans.length; index += 1) {
+    const record = plans[index].record;
     report({
-      target: `${entries[index].premiereId}.admission.json`,
-      premiereId: entries[index].premiereId,
+      target: `${record.premiereId}.admission.json`,
+      premiereId: record.premiereId,
       operatorCode: "startup_deadline_exceeded",
     });
   }
