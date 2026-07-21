@@ -806,14 +806,20 @@ function validForbiddenText(values: string[]): boolean {
   );
 }
 
-function containsForbiddenText(body: string, forbiddenText: string[]): boolean {
+// Exported so tests (and other admission surfaces) can reuse the exact leak
+// matchers as an oracle: case-insensitive substring for HTML/text bodies, and
+// exact string-leaf equality for structured JSON.
+export function containsForbiddenText(
+  body: string,
+  forbiddenText: string[],
+): boolean {
   const normalizedBody = body.toLocaleLowerCase("en-US");
   return forbiddenText.some((needle) =>
     normalizedBody.includes(needle.toLocaleLowerCase("en-US")),
   );
 }
 
-function containsExactStructuredIdentity(
+export function containsExactStructuredIdentity(
   value: unknown,
   identities: readonly string[],
 ): boolean {

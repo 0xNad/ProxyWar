@@ -62,6 +62,21 @@ export interface CoworldLeagueRoundRow {
   completedAt: string | null;
 }
 
+/**
+ * Spoiler-safe premiere card data. Built ONLY from the suppression contract, so
+ * it carries no episodeRequestId, run id, player name, or match outcome. The
+ * premiere leak audit scans `/league` HTML for forbidden substrings and
+ * `data.json` for exact JSON leaves; keeping this shape to these five fields is
+ * what guarantees the league page can never spoil a held premiere.
+ */
+export interface CoworldLeaguePremiereCard {
+  premiereId: string;
+  roundNumber: number | null;
+  mapLabel: string;
+  scheduledAt: string;
+  premierePageLive: boolean;
+}
+
 export interface CoworldLeagueMirrorData {
   generatedAt: string;
   lastGoodSyncAt: string;
@@ -85,6 +100,12 @@ export interface CoworldLeagueMirrorData {
   standings: CoworldLeagueStandingRow[];
   rounds: CoworldLeagueRoundRow[];
   episodes: CoworldLeagueEpisodeRow[];
+  /**
+   * Optional spoiler-safe premiere card. Omitted whenever nothing is currently
+   * premiering (including every stale/absent-contract case), which keeps the
+   * mirror output byte-identical to pre-premiere behavior.
+   */
+  premiere?: CoworldLeaguePremiereCard;
   links: {
     enterTheLeagueUrl: string;
     platformLabel: string;
@@ -370,6 +391,26 @@ export function coworldLeagueIndexHtml(data: CoworldLeagueMirrorData): string {
         )}</div>`
       : "";
   const watchLatest = data.episodes.find((episode) => episode.fullRenderHref);
+  const premiereSection = premiereCard(data.premiere);
+  // Premiere-only CSS, emitted ONLY when a premiere card is present. Keeping it
+  // out of the static <style> block when absent is what makes the mirror's
+  // index.html byte-identical to pre-premiere output for a stale/absent
+  // contract. Leading "\n    " with no trailing newline so it slots between two
+  // existing style rules without shifting any bytes when empty.
+  const premiereStyles =
+    data.premiere === undefined
+      ? ""
+      : "\n    " +
+        [
+          ".round-pill.premiering { border-color:rgba(122,215,240,.6); color:var(--cyan); box-shadow:inset 0 0 0 1px rgba(122,215,240,.25); }",
+          ".premiere-card { border:1px solid rgba(122,215,240,.5); background:linear-gradient(180deg, rgba(122,215,240,.09), rgba(122,215,240,.02)), var(--surface); border-radius:10px; padding:18px; display:flex; flex-direction:column; gap:10px; }",
+          ".premiere-card .premiere-eyebrow { color:var(--cyan); font:800 11px/1 ui-monospace, SFMono-Regular, Menlo, monospace; text-transform:uppercase; letter-spacing:.14em; }",
+          ".premiere-card h2 { margin:0; font-size:20px; }",
+          ".premiere-card .premiere-body { margin:0; color:#cbd3df; max-width:640px; }",
+          ".premiere-card .premiere-meta { display:flex; gap:8px; flex-wrap:wrap; color:var(--muted); font:700 12px ui-monospace, SFMono-Regular, Menlo, monospace; }",
+          ".premiere-card .premiere-meta span { border:1px solid var(--line); background:var(--surface2); border-radius:999px; padding:4px 10px; }",
+          ".premiere-card .actions { margin-top:2px; }",
+        ].join("\n    ");
   return `<!doctype html>
 <html lang="en" data-generated-at="${escapeHtml(data.generatedAt)}" data-stale="${data.stale ? "true" : "false"}" data-league-id="${escapeHtml(league.id)}">
 <head>
@@ -450,7 +491,7 @@ export function coworldLeagueIndexHtml(data: CoworldLeagueMirrorData): string {
     .degraded { border:1px solid rgba(244,166,74,.5); color:var(--amber); border-radius:4px; padding:2px 7px; font:800 10px ui-monospace, SFMono-Regular, Menlo, monospace; }
     .rounds-strip { display:flex; gap:8px; flex-wrap:wrap; }
     .round-pill { border:1px solid var(--line); background:var(--surface); border-radius:6px; padding:8px 10px; font:700 12px ui-monospace, SFMono-Regular, Menlo, monospace; color:var(--muted); }
-    .round-pill.running { border-color:rgba(126,224,168,.5); color:var(--good); }
+    .round-pill.running { border-color:rgba(126,224,168,.5); color:var(--good); }${premiereStyles}
     footer { border-top:1px solid var(--line); padding-top:16px; color:var(--muted); font-size:13px; display:flex; justify-content:space-between; gap:12px; flex-wrap:wrap; }
     @media (max-width:640px) {
       .shell { padding-left:12px; padding-right:12px; }
@@ -524,7 +565,7 @@ export function coworldLeagueIndexHtml(data: CoworldLeagueMirrorData): string {
           data.episodes.filter((episode) => episode.fullRenderHref).length,
         ),
       )}</strong></div>
-    </div>
+    </div>${premiereSection}
     <section>
       <h2 id="standings-title">Standings</h2>
       <p id="standings-provenance" class="standings-note">${escapeHtml(
@@ -543,12 +584,18 @@ export function coworldLeagueIndexHtml(data: CoworldLeagueMirrorData): string {
     <section>
       <h2>Recent rounds</h2>
       <div class="rounds-strip">${data.rounds
-        .map(
-          (round) =>
-            `<span class="round-pill${round.status === "running" ? " running" : ""}">#${escapeHtml(
-              String(round.roundNumber),
-            )} ${escapeHtml(round.status)}</span>`,
-        )
+        .map((round) => {
+          const premiering =
+            data.premiere !== undefined &&
+            data.premiere.roundNumber !== null &&
+            data.premiere.roundNumber === round.roundNumber;
+          const classes = `round-pill${round.status === "running" ? " running" : ""}${
+            premiering ? " premiering" : ""
+          }`;
+          return `<span class="${classes}">#${escapeHtml(
+            String(round.roundNumber),
+          )} ${escapeHtml(round.status)}</span>`;
+        })
         .join("\n")}</div>
     </section>
     <footer>
@@ -876,6 +923,58 @@ function battleCard(episode: CoworldLeagueEpisodeRow): string {
         }</span>
       </div>
     </article>`;
+}
+
+function premiereCard(premiere: CoworldLeaguePremiereCard | undefined): string {
+  if (premiere === undefined) {
+    return "";
+  }
+  // Built ONLY from the five contract fields below. Never reference episode
+  // rows, run ids, player names, or outcomes here — the premiere leak audit
+  // fails every future admission if any forbidden fingerprint appears on
+  // `/league`.
+  const eyebrow = premiere.premierePageLive
+    ? translateText("coworld_league.premiere_now_eyebrow")
+    : translateText("coworld_league.premiere_scheduled_eyebrow");
+  const body = premiere.premierePageLive
+    ? translateText("coworld_league.premiere_now_body")
+    : translateText("coworld_league.premiere_scheduled_body");
+  const metaPills: string[] = [];
+  if (premiere.roundNumber !== null) {
+    metaPills.push(
+      `<span>Round ${escapeHtml(String(premiere.roundNumber))}</span>`,
+    );
+  }
+  if (premiere.mapLabel.length > 0) {
+    metaPills.push(`<span>${escapeHtml(premiere.mapLabel)}</span>`);
+  }
+  metaPills.push(
+    `<span data-utc="${escapeHtml(premiere.scheduledAt)}">${escapeHtml(
+      shortUtc(premiere.scheduledAt),
+    )}</span>`,
+  );
+  // Link to the premiere page only once it is actually live; a scheduled
+  // premiere has no public page to reveal yet.
+  const link = premiere.premierePageLive
+    ? `<div class="actions"><a class="button primary premiere-link" href="/premiere/${encodeURIComponent(
+        premiere.premiereId,
+      )}">${escapeHtml(translateText("coworld_league.premiere_watch"))}</a></div>`
+    : "";
+  // Leading "\n    " so the caller can append this to the metric-grid's closing
+  // </div> with no standalone template line; when premiere is undefined the
+  // caller sees "" and the page is byte-identical to the pre-premiere layout.
+  return `
+    <section class="premiere-section">
+      <article class="premiere-card" data-premiere-live="${
+        premiere.premierePageLive ? "true" : "false"
+      }">
+        <div class="premiere-eyebrow">${escapeHtml(eyebrow)}</div>
+        <h2>${escapeHtml(translateText("coworld_league.premiere_heading"))}</h2>
+        <p class="premiere-body">${escapeHtml(body)}</p>
+        <div class="premiere-meta">${metaPills.join("")}</div>
+        ${link}
+      </article>
+    </section>`;
 }
 
 function formatTiles(value: number): string {
