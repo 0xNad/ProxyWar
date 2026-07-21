@@ -1259,10 +1259,10 @@ export class ReplayPremiereRuntimeController {
   }
 
   private async onFatalError(
-    _error: Readonly<ReplayPremiereNetworkError>,
+    error: Readonly<ReplayPremiereNetworkError>,
   ): Promise<void> {
     if (this.disposed) return;
-    this.latchFailure("integrity_failure");
+    this.latchFailure("integrity_failure", error);
   }
 
   private handleNetworkRejection(error: unknown): void {

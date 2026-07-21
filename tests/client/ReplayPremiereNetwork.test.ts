@@ -338,8 +338,13 @@ async function expectNetworkError(
   }
 }
 
-async function revealMaterial() {
-  const { gate, drafts } = await verifiedPublicationFixture(fixtureRoot);
+async function revealMaterial(
+  options: { leakEvidenceBodyBytes?: number } = {},
+) {
+  const { gate, drafts } = await verifiedPublicationFixture(
+    fixtureRoot,
+    options,
+  );
   const wireBootstrap = createPremierePublicBootstrap({ gate });
   const released: ReleasedPremiereChunk[] = [];
   let terminalGate: ReturnType<typeof gate.prepareTerminalChunk> | null = null;
@@ -834,6 +839,38 @@ describe("ReplayPremiereNetwork", () => {
       finalized: true,
     });
     expect(onReveal).toHaveBeenCalledTimes(1);
+  });
+
+  it("accepts a valid reveal whose leak evidence body exceeds 16 KiB", async () => {
+    const material = await revealMaterial({ leakEvidenceBodyBytes: 20_000 });
+    const observedBodyText =
+      material.reveal.eligibilityRecord.proxyWarLeakChecks.find(
+        (evidence) => evidence.checkId === "league-page",
+      )?.observedBodyText;
+    expect(observedBodyText).not.toBeNull();
+    expect(new TextEncoder().encode(observedBodyText!).byteLength).toBe(20_000);
+
+    const fetchMock = queuedFetch(
+      jsonResponse(material.bootstrap),
+      jsonResponse(material.pointer),
+      jsonResponse(material.reveal),
+      ...material.chunks.map((chunk) => jsonResponse(chunk)),
+    );
+    const onReveal = vi.fn();
+    const { network, playback } = controller(
+      fetchMock as unknown as typeof fetch,
+      { onReady: vi.fn(), onReveal },
+    );
+
+    await expect(network.syncOnce()).resolves.toMatchObject({
+      status: "revealed",
+    });
+    expect(playback.state()).toMatchObject({
+      nextChunkIndex: material.chunks.length,
+      releasedThroughSequence: material.reveal.finalSequence,
+      finalized: true,
+    });
+    expect(onReveal).toHaveBeenCalledOnce();
   });
 
   it("anchors an archived visitor through bootstrap provenance and emits archived terminal state", async () => {

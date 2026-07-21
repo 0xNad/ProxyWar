@@ -439,7 +439,11 @@ const leakEvidenceSchema = z
     method: z.enum(["GET", "HEAD"]),
     observedHttpStatus: z.number().int().min(100).max(599).nullable(),
     observedContentHash: sha256Schema.nullable(),
-    observedBodyText: z.string().max(16_384).nullable(),
+    // The admission collector bounds each body before it enters the reveal.
+    // Keep the browser contract aligned by relying on the controller's
+    // response-byte and JSON-complexity ceilings instead of a divergent
+    // JavaScript character-count limit.
+    observedBodyText: z.string().nullable(),
     observedHeaders: z
       .object({
         age: z.string().max(256).nullable(),

@@ -298,6 +298,44 @@ describe("ReplayPremiereRuntimeController", () => {
     harness.runtime.dispose();
   });
 
+  it("preserves the original sanitized fatal error before readiness and keeps the failure sticky", async () => {
+    const harness = runtimeHarness({ state: "revealed" });
+    const originalError = new ReplayPremiereNetworkError(
+      "invalid_schema",
+      false,
+    );
+    const started = harness.runtime.start();
+    const rejected = expect(started).rejects.toBe(originalError);
+    await harness.callbacks.onReady?.(projection("revealed"));
+
+    await harness.callbacks.onFatalError?.(originalError);
+    await rejected;
+    const fatalModelIndex = harness.models.length - 1;
+    expect(harness.models[fatalModelIndex]).toMatchObject({
+      state: "failed",
+      failureCode: "integrity_failure",
+    });
+    expect(harness.network.dispose).toHaveBeenCalledOnce();
+    expect(harness.service.dispose).toHaveBeenCalledOnce();
+
+    await harness.callbacks.onRecovering?.({
+      code: "request_failed",
+      attempt: 2,
+      retryInMs: 500,
+    });
+    await harness.callbacks.onManifest?.(playingManifest());
+    expect(
+      harness.models
+        .slice(fatalModelIndex)
+        .every(
+          (model) =>
+            model.state === "failed" &&
+            model.failureCode === "integrity_failure",
+        ),
+    ).toBe(true);
+    harness.runtime.dispose();
+  });
+
   it.each(["failed", "cancelled"] as const)(
     "makes a %s terminal pointer outrank a stale playing heartbeat and permanently disables writes",
     async (terminalState) => {

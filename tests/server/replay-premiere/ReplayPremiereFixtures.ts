@@ -454,7 +454,7 @@ export function publicDefinitionFixture(
 
 export async function verifiedPublicationFixture(
   root: string,
-  options: { origin?: string } = {},
+  options: { origin?: string; leakEvidenceBodyBytes?: number } = {},
 ): Promise<{
   gate: VerifiedPremiereEligibilityGate;
   drafts: ReturnType<typeof buildPremiereChunks>;
@@ -468,6 +468,25 @@ export async function verifiedPublicationFixture(
   await fs.mkdir(servedRoot, { recursive: true });
   await fs.writeFile(sourcePath, controlledSourceBytes(), { mode: 0o600 });
   let eligibility = eligibilityFixture({ origin: options.origin });
+  if (options.leakEvidenceBodyBytes !== undefined) {
+    const evidence = eligibility.proxyWarLeakChecks.find(
+      (candidate) => candidate.checkId === "league-page",
+    );
+    if (evidence === undefined || evidence.observedBodyText === null) {
+      throw new Error("missing league-page leak evidence fixture");
+    }
+    const currentBytes = Buffer.byteLength(evidence.observedBodyText, "utf8");
+    if (
+      !Number.isSafeInteger(options.leakEvidenceBodyBytes) ||
+      options.leakEvidenceBodyBytes < currentBytes
+    ) {
+      throw new Error("invalid leak evidence body fixture size");
+    }
+    evidence.observedBodyText += "x".repeat(
+      options.leakEvidenceBodyBytes - currentBytes,
+    );
+    evidence.observedContentHash = sha256Hex(evidence.observedBodyText);
+  }
   const eligibilityAssessmentOptions = eligibilityOptions(Buffer.alloc(32, 9));
   const collectedLeakAudit = await collectFixtureLeakAudit(
     eligibility,
