@@ -1368,6 +1368,7 @@ export class ReplayPremiereRuntimeController {
           SESSION_RETRY_MS,
         );
       } else {
+        logInteractionBootstrapFailure(error);
         this.latchFailure(
           error instanceof ReplayPremiereServiceError &&
             error.code === "invalid_response"
@@ -2100,6 +2101,18 @@ function isRetryableServiceFailure(error: unknown): boolean {
           error.publicCode === "PREMIERE_CAPACITY_EXCEEDED" ||
           error.publicCode === "PREMIERE_UNAVAILABLE")))
   );
+}
+
+function logInteractionBootstrapFailure(error: unknown): void {
+  const diagnostic =
+    error instanceof ReplayPremiereServiceError
+      ? {
+          code: error.code,
+          status: error.status,
+          publicCode: error.publicCode,
+        }
+      : { code: "unexpected_failure", status: null, publicCode: null };
+  console.error("Replay Premiere interaction bootstrap failed", diagnostic);
 }
 
 export function parseReplayPremiereRoute(pathname: string): string | null {

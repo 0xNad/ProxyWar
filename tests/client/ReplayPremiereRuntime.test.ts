@@ -120,6 +120,64 @@ describe("ReplayPremiereRuntimeController", () => {
     harness.runtime.dispose();
   });
 
+  it.each([
+    {
+      label: "structured service error",
+      failure: Object.assign(
+        new ReplayPremiereServiceError(
+          "request_rejected",
+          403,
+          "PREMIERE_INVALID_REQUEST",
+        ),
+        { privateUpstreamBody: "token=/private/operator/path" },
+      ),
+      expected: {
+        code: "request_rejected",
+        status: 403,
+        publicCode: "PREMIERE_INVALID_REQUEST",
+      },
+    },
+    {
+      label: "arbitrary exception",
+      failure: Object.assign(new Error("token=/private/operator/path"), {
+        responseBody: "secret upstream response",
+      }),
+      expected: {
+        code: "unexpected_failure",
+        status: null,
+        publicCode: null,
+      },
+    },
+  ])(
+    "logs only bounded bootstrap diagnostics for a $label",
+    async (testCase) => {
+      const errorLog = vi.spyOn(console, "error").mockImplementation(() => {});
+      const harness = runtimeHarness({
+        state: "playing",
+        service: {
+          startSession: vi.fn(async () => {
+            throw testCase.failure;
+          }),
+        },
+      });
+
+      const started = harness.runtime.start();
+      await harness.callbacks.onReady?.(projection("playing"));
+      await expect(started).rejects.toBeInstanceOf(ReplayPremiereNetworkError);
+
+      expect(errorLog).toHaveBeenCalledWith(
+        "Replay Premiere interaction bootstrap failed",
+        testCase.expected,
+      );
+      const serializedLog = JSON.stringify(errorLog.mock.calls);
+      expect(serializedLog).not.toContain("private/operator");
+      expect(serializedLog).not.toContain("secret upstream");
+      expect(serializedLog).not.toContain("privateUpstreamBody");
+      expect(serializedLog).not.toContain("responseBody");
+      harness.runtime.dispose();
+    },
+  );
+
   it("joins a verified archive read-only without any POST capability or session bootstrap", async () => {
     vi.useFakeTimers();
     const harness = runtimeHarness({ state: "archived" });
