@@ -403,6 +403,8 @@ describe("mirror suppression — inert when the contract is stale or absent", ()
         '</div>\n    <section>\n      <h2 id="standings-title">Standings',
       );
       expect(html).not.toContain("premiere-section");
+      // No LIVE-badge markup or its scoped CSS leaks into the inert path.
+      expect(html).not.toContain("premiere-badge");
       expect(html).not.toContain("premiering");
     },
   );
@@ -416,6 +418,9 @@ describe("premiere card render + en.json keys", () => {
     "premiere_now_body",
     "premiere_scheduled_body",
     "premiere_watch",
+    "premiere_live",
+    "premiere_label",
+    "premiere_starts",
   ];
 
   test("all premiere card en.json keys are present", () => {
@@ -428,20 +433,41 @@ describe("premiere card render + en.json keys", () => {
     }
   });
 
-  test("a live premiere renders the card, the /premiere link, and the round-pill accent", () => {
-    const data = assemble(mirrorData([episodeRow()]), activeContract(), NOW);
+  test("a live premiere renders the loud LIVE badge, the /premiere link, and the round-pill accent without leaking a held match", () => {
+    // A held secret episode sits in the baseline, so this doubles as a
+    // spoiler-clean proof: the loud LIVE badge must add no forbidden fingerprint.
+    const data = assemble(
+      mirrorData([secretHeldEpisode(), episodeRow()]),
+      activeContract(),
+      NOW,
+    );
     const html = coworldLeagueIndexHtml(data);
     expect(html).toContain("premiere-card");
+    // The loudest element: a red LIVE pill (dot + the LIVE word). Assert the
+    // rendered element, not the scoped CSS selector text of the same name.
+    expect(html).toContain(
+      `<div class="premiere-badge live"><span class="premiere-badge-dot" aria-hidden="true"></span>${englishTranslations.coworld_league.premiere_live}</div>`,
+    );
     expect(html).toContain(
       englishTranslations.coworld_league.premiere_now_eyebrow,
     );
     expect(html).toContain(englishTranslations.coworld_league.premiere_heading);
+    // Clear watch CTA to the live premiere page.
     expect(html).toContain('href="/premiere/prem_live_test"');
+    expect(html).toContain(englishTranslations.coworld_league.premiere_watch);
     // Round 512 pill gains the "premiering" accent.
     expect(html).toMatch(/round-pill[^"]*premiering">#512\b/);
+    // The leak audit's own oracle: the loud badge introduced no held-match leak.
+    expect(containsForbiddenText(html, SECRET_HTML_FINGERPRINTS)).toBe(false);
+    expect(
+      containsExactStructuredIdentity(
+        JSON.parse(`${JSON.stringify(data, null, 2)}\n`),
+        SECRET_JSON_LEAVES,
+      ),
+    ).toBe(false);
   });
 
-  test("a scheduled (not-live) premiere renders no /premiere link", () => {
+  test("a scheduled (not-live) premiere renders a calmer Premiere label and start time with no LIVE badge or /premiere link", () => {
     const state = activeContract({
       holds: [hold({ premierePageLive: false })],
     });
@@ -450,6 +476,21 @@ describe("premiere card render + en.json keys", () => {
     expect(html).toContain(
       englishTranslations.coworld_league.premiere_scheduled_eyebrow,
     );
+    // Calmer badge: a "Premiere" label plus the localized start time. The time
+    // sits in its own [data-utc] span so the client localizer rewrites just the
+    // time while the "Starts" prefix survives.
+    const startsPrefix =
+      englishTranslations.coworld_league.premiere_starts.replace("{time}", "");
+    expect(html).toContain(
+      `<div class="premiere-badge scheduled"><span>${englishTranslations.coworld_league.premiere_label}</span>`,
+    );
+    expect(html).toContain(
+      `<span class="premiere-starts">${startsPrefix}<span data-utc="2026-07-21T12:05:00.000Z">`,
+    );
+    // Not yet live: no loud red badge element, no red dot element, no watch link.
+    // (The scoped CSS names still appear in <style>; assert on rendered markup.)
+    expect(html).not.toContain('class="premiere-badge live"');
+    expect(html).not.toContain('<span class="premiere-badge-dot"');
     expect(html).not.toContain('href="/premiere/');
   });
 });

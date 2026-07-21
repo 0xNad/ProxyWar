@@ -720,6 +720,33 @@ function renderPolicies(
   return section;
 }
 
+// A prominent LIVE indicator for the only two truly-live lifecycle states.
+// This helper is rendered exclusively from `renderPlaying`, which `renderStateBody`
+// invokes ONLY for the `playing` and `checkpoint` cases — so the badge is
+// structurally gated to live states and can never appear for `scheduled`
+// (still counting down), `revealed`/`archived` (the live moment has passed), or
+// any failure/cancel state. It reflects the authoritative lifecycle state the
+// page already renders; nothing about live-ness is invented here.
+function renderLiveNowBadge(): HTMLElement {
+  const badge = element("div", "rp-live-now");
+  // role=img + aria-label exposes a single, stable accessible name ("Premiere is
+  // live") without live-region churn, while sighted users still read "LIVE".
+  badge.setAttribute("role", "img");
+  badge.setAttribute(
+    "aria-label",
+    translateText("replay_premiere.live_status"),
+  );
+  const dot = element("span", "rp-live-now-dot");
+  dot.setAttribute("aria-hidden", "true");
+  const text = element(
+    "span",
+    "rp-live-now-text",
+    translateText("replay_premiere.live_badge"),
+  );
+  badge.append(dot, text);
+  return badge;
+}
+
 function renderPlaying(model: ReplayPremiereOverlayModel): HTMLElement {
   const section = element("section", "rp-section rp-playing-status");
   const liveRow = element("div", "rp-live-row");
@@ -746,7 +773,13 @@ function renderPlaying(model: ReplayPremiereOverlayModel): HTMLElement {
     "rp-position",
     positionLabel(model.currentTurn, model.releasedSequence),
   );
-  section.append(liveRow, status, position, renderCheckpointProgress(model));
+  section.append(
+    renderLiveNowBadge(),
+    liveRow,
+    status,
+    position,
+    renderCheckpointProgress(model),
+  );
   return section;
 }
 
@@ -1724,6 +1757,34 @@ const OVERLAY_CSS = `
     background: rgba(30, 41, 59, 0.82);
     color: #f8fafc;
   }
+  #${OVERLAY_ID} .rp-live-now {
+    display: inline-flex;
+    align-items: center;
+    gap: 7px;
+    margin-bottom: 8px;
+    padding: 3px 11px 3px 9px;
+    border: 1px solid rgba(248, 113, 113, 0.6);
+    border-radius: 999px;
+    background: rgba(239, 68, 68, 0.18);
+    color: #fecaca;
+    font-size: 11px;
+    font-weight: 850;
+    letter-spacing: 0.16em;
+    text-transform: uppercase;
+  }
+  #${OVERLAY_ID} .rp-live-now-dot {
+    width: 9px;
+    height: 9px;
+    border-radius: 999px;
+    background: #ef4444;
+    box-shadow: 0 0 0 0 rgba(239, 68, 68, 0.7);
+    animation: rp-live-now-pulse 1.6s ease-out infinite;
+  }
+  @keyframes rp-live-now-pulse {
+    0% { box-shadow: 0 0 0 0 rgba(239, 68, 68, 0.55); }
+    70% { box-shadow: 0 0 0 7px rgba(239, 68, 68, 0); }
+    100% { box-shadow: 0 0 0 0 rgba(239, 68, 68, 0); }
+  }
   #${OVERLAY_ID} .rp-live-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
   #${OVERLAY_ID} .rp-live-badge {
     display: inline-flex;
@@ -1874,6 +1935,7 @@ const OVERLAY_CSS = `
   }
   @media (prefers-reduced-motion: reduce) {
     #${OVERLAY_ID} * { scroll-behavior: auto !important; transition: none !important; }
+    #${OVERLAY_ID} .rp-live-now-dot { animation: none !important; }
   }
   body.replay-premiere-pre-reveal replay-panel,
   body.replay-premiere-pre-reveal game-right-sidebar div:has(> img[alt="replay"]),

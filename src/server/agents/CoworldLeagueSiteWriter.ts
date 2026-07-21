@@ -404,6 +404,11 @@ export function coworldLeagueIndexHtml(data: CoworldLeagueMirrorData): string {
         [
           ".round-pill.premiering { border-color:rgba(122,215,240,.6); color:var(--cyan); box-shadow:inset 0 0 0 1px rgba(122,215,240,.25); }",
           ".premiere-card { border:1px solid rgba(122,215,240,.5); background:linear-gradient(180deg, rgba(122,215,240,.09), rgba(122,215,240,.02)), var(--surface); border-radius:10px; padding:18px; display:flex; flex-direction:column; gap:10px; }",
+          ".premiere-card .premiere-badge { align-self:flex-start; display:inline-flex; align-items:center; gap:8px; padding:5px 13px; border-radius:999px; font:900 13px/1 ui-monospace, SFMono-Regular, Menlo, monospace; letter-spacing:.14em; text-transform:uppercase; }",
+          ".premiere-card .premiere-badge.live { border:1px solid rgba(239,68,68,.75); background:rgba(239,68,68,.18); color:#ffd7d2; }",
+          ".premiere-card .premiere-badge.scheduled { gap:10px; border:1px solid var(--line); background:var(--surface2); color:var(--muted); font-weight:800; }",
+          ".premiere-card .premiere-badge-dot { width:10px; height:10px; border-radius:999px; background:#ef4444; box-shadow:0 0 0 3px rgba(239,68,68,.3); }",
+          ".premiere-card .premiere-badge .premiere-starts { color:var(--muted); font-weight:700; letter-spacing:.02em; text-transform:none; }",
           ".premiere-card .premiere-eyebrow { color:var(--cyan); font:800 11px/1 ui-monospace, SFMono-Regular, Menlo, monospace; text-transform:uppercase; letter-spacing:.14em; }",
           ".premiere-card h2 { margin:0; font-size:20px; }",
           ".premiere-card .premiere-body { margin:0; color:#cbd3df; max-width:640px; }",
@@ -960,6 +965,17 @@ function premiereCard(premiere: CoworldLeaguePremiereCard | undefined): string {
         premiere.premiereId,
       )}">${escapeHtml(translateText("coworld_league.premiere_watch"))}</a></div>`
     : "";
+  // Prominent LIVE/PREMIERE badge — the loudest signal on the card. When the
+  // premiere page is actually live (premierePageLive), it is a red "LIVE" pill
+  // that, with the primary Watch CTA, dominates the card; otherwise it is a
+  // calmer "Premiere" pill carrying the localized start time and NO watch link.
+  // Built ONLY from premierePageLive + scheduledAt (already used above), so it
+  // adds no new data source and the spoiler invariant is unchanged.
+  const badge = premiere.premierePageLive
+    ? `<div class="premiere-badge live"><span class="premiere-badge-dot" aria-hidden="true"></span>${escapeHtml(
+        translateText("coworld_league.premiere_live"),
+      )}</div>`
+    : premiereScheduledBadge(premiere.scheduledAt);
   // Leading "\n    " so the caller can append this to the metric-grid's closing
   // </div> with no standalone template line; when premiere is undefined the
   // caller sees "" and the page is byte-identical to the pre-premiere layout.
@@ -968,6 +984,7 @@ function premiereCard(premiere: CoworldLeaguePremiereCard | undefined): string {
       <article class="premiere-card" data-premiere-live="${
         premiere.premierePageLive ? "true" : "false"
       }">
+        ${badge}
         <div class="premiere-eyebrow">${escapeHtml(eyebrow)}</div>
         <h2>${escapeHtml(translateText("coworld_league.premiere_heading"))}</h2>
         <p class="premiere-body">${escapeHtml(body)}</p>
@@ -975,6 +992,25 @@ function premiereCard(premiere: CoworldLeaguePremiereCard | undefined): string {
         ${link}
       </article>
     </section>`;
+}
+
+// The calmer scheduled-state badge: a "Premiere" pill plus the localized start
+// time. The timestamp lives in its own [data-utc] span so the page's existing
+// localizer rewrites just the time (it replaces the full textContent of any
+// [data-utc] element), while the "Starts" prefix around the {time} placeholder
+// is preserved. Uses only the scheduledAt contract field — no new data source.
+function premiereScheduledBadge(scheduledAt: string): string {
+  const [before, after = ""] = translateText(
+    "coworld_league.premiere_starts",
+  ).split("{time}");
+  const startsTime = `<span data-utc="${escapeHtml(scheduledAt)}">${escapeHtml(
+    shortUtc(scheduledAt),
+  )}</span>`;
+  return `<div class="premiere-badge scheduled"><span>${escapeHtml(
+    translateText("coworld_league.premiere_label"),
+  )}</span><span class="premiere-starts">${escapeHtml(
+    before,
+  )}${startsTime}${escapeHtml(after)}</span></div>`;
 }
 
 function formatTiles(value: number): string {
