@@ -208,31 +208,36 @@ export class ReplayPremiereRuntimeCoordinator {
     return createPremierePublicBootstrap({ gate: this.gate });
   }
 
-  readManifest(): PremiereManifestResponse {
-    if (this.recoveredReveal !== null) {
-      return immutable(
-        {
-          ...this.recoveredReveal.pointer,
-          state:
-            this.recoveredReveal.lifecycle.state === "archived"
-              ? "archived"
-              : "revealed",
-        },
-        "premiere runtime reveal pointer",
+  async readManifest(): Promise<PremiereManifestResponse> {
+    // A transition publishes its in-memory state only after the journal append.
+    // Queue the clock projection with that transition so a reader cannot
+    // observe a later playing clock followed by an earlier checkpoint clock.
+    return this.runExclusive(async () => {
+      if (this.recoveredReveal !== null) {
+        return immutable(
+          {
+            ...this.recoveredReveal.pointer,
+            state:
+              this.recoveredReveal.lifecycle.state === "archived"
+                ? "archived"
+                : "revealed",
+          },
+          "premiere runtime reveal pointer",
+        );
+      }
+      if (this.publication === null) {
+        throw runtimeIntegrity("missing_publication_view");
+      }
+      const now = this.clockTimestamp();
+      return manifestFromRuntimeState(
+        immutable(
+          { ...this.state, lastObservedAt: now },
+          "current premiere manifest projection",
+        ),
+        this.gate,
+        { projectExpiredCheckpoint: true },
       );
-    }
-    if (this.publication === null) {
-      throw runtimeIntegrity("missing_publication_view");
-    }
-    const now = this.clockTimestamp();
-    return manifestFromRuntimeState(
-      immutable(
-        { ...this.state, lastObservedAt: now },
-        "current premiere manifest projection",
-      ),
-      this.gate,
-      { projectExpiredCheckpoint: true },
-    );
+    });
   }
 
   readChunk(index: number): PremierePublicChunkResponse | null {

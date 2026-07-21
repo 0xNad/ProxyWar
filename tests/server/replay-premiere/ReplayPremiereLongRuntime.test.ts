@@ -106,7 +106,7 @@ describe("ReplayPremiere long runtime persistence", () => {
     expect(first.readLifecycleState()).toBe("playing");
     clock.advance(LONG_REPLAY_CHECKPOINT_SEQUENCES[0]);
     await first.synchronize();
-    expect(first.readManifest()).toMatchObject({
+    expect(await first.readManifest()).toMatchObject({
       state: "checkpoint",
       releasedThroughSequence: LONG_REPLAY_CHECKPOINT_SEQUENCES[0],
     });
@@ -139,7 +139,7 @@ describe("ReplayPremiere long runtime persistence", () => {
     expect(recoverPrefix).toHaveBeenCalledTimes(1);
     expect(recoverRevealChain).not.toHaveBeenCalled();
     expect(secondStore.recovered.events).toHaveLength(firstEventCount);
-    expect(second.readManifest()).toMatchObject({
+    expect(await second.readManifest()).toMatchObject({
       state: "checkpoint",
       releasedThroughSequence: LONG_REPLAY_CHECKPOINT_SEQUENCES[0],
     });
@@ -154,7 +154,7 @@ describe("ReplayPremiere long runtime persistence", () => {
       LONG_REPLAY_CHECKPOINT_SEQUENCES[1] - LONG_REPLAY_CHECKPOINT_SEQUENCES[0],
     );
     await second.synchronize();
-    expect(second.readManifest()).toMatchObject({
+    expect(await second.readManifest()).toMatchObject({
       state: "checkpoint",
       releasedThroughSequence: LONG_REPLAY_CHECKPOINT_SEQUENCES[1],
     });
@@ -168,7 +168,7 @@ describe("ReplayPremiere long runtime persistence", () => {
     const terminalAdvance = await second.synchronize();
     expect(terminalAdvance.operations).toContain("revealed");
     expect(second.readLifecycleState()).toBe("revealed");
-    expect(second.readManifest()).toMatchObject({ state: "revealed" });
+    expect(await second.readManifest()).toMatchObject({ state: "revealed" });
     expect(second.readChunk(drafts.length - 1)).toMatchObject({
       index: drafts.length - 1,
       terminal: true,
@@ -198,7 +198,7 @@ describe("ReplayPremiere long runtime persistence", () => {
     expect(recoverRevealChain).toHaveBeenCalledTimes(1);
     expect(recoveredStore.recovered.events).toHaveLength(revealedEventCount);
     expect(recovered.readLifecycleState()).toBe("revealed");
-    expect(recovered.readManifest()).toMatchObject({ state: "revealed" });
+    expect(await recovered.readManifest()).toMatchObject({ state: "revealed" });
     expect(recovered.readChunk(0)?.records).toHaveLength(
       LONG_REPLAY_CHUNK_LIMITS.maxRecordsPerChunk,
     );

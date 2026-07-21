@@ -437,7 +437,7 @@ describe("ReplayPremiere public page and card", () => {
       premiereId: PREMIERE_ID,
       readLifecycleState: () => lifecycle,
       readBootstrap: () => bootstrap,
-      readManifest: () =>
+      readManifest: async () =>
         ({
           ...manifest,
           state: lifecycle === "revealed" ? "playing" : lifecycle,

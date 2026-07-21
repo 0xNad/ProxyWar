@@ -206,7 +206,7 @@ describe("ReplayPremiere HTTP adapter", () => {
     });
   });
 
-  test("projects checkpoint close through HTTP at the exact deadline while durable resume is pending", async () => {
+  test("linearizes the checkpoint-close manifest through HTTP while durable resume is pending", async () => {
     const harness = await liveRuntimeHttpHarness(root);
     try {
       await harness.runtime.synchronize();
@@ -237,10 +237,22 @@ describe("ReplayPremiere HTTP adapter", () => {
         const resume = harness.runtime.synchronize();
         await blockedResume.started;
 
-        const atClose = await readJson(
+        const atClose = readJson(
           `${baseUrl}/api/premieres/${PREMIERE_ID}/manifest`,
         );
-        expect(atClose).toMatchObject({
+        expect(harness.runtime.readLifecycleState()).toBe("checkpoint");
+        expect(harness.store.recovered.events).toHaveLength(eventCountAtOpen);
+        expect(
+          await readJson(`${baseUrl}/api/premieres/${PREMIERE_ID}/chunks/1`),
+        ).toEqual({
+          status: 404,
+          body: { error: { code: "PREMIERE_UNAVAILABLE" } },
+        });
+        expect(harness.store.recovered.events).toHaveLength(eventCountAtOpen);
+
+        blockedResume.release();
+        await resume;
+        expect(await atClose).toMatchObject({
           status: 200,
           body: {
             state: "playing",
@@ -251,21 +263,6 @@ describe("ReplayPremiere HTTP adapter", () => {
             releasedThroughSequence: 2,
           },
         });
-        expect(harness.runtime.readLifecycleState()).toBe("checkpoint");
-        expect(harness.store.recovered.events).toHaveLength(eventCountAtOpen);
-        expect(
-          await readJson(`${baseUrl}/api/premieres/${PREMIERE_ID}/chunks/1`),
-        ).toEqual({
-          status: 404,
-          body: { error: { code: "PREMIERE_UNAVAILABLE" } },
-        });
-        expect(
-          await readJson(`${baseUrl}/api/premieres/${PREMIERE_ID}/manifest`),
-        ).toMatchObject({ status: 200, body: { state: "playing" } });
-        expect(harness.store.recovered.events).toHaveLength(eventCountAtOpen);
-
-        blockedResume.release();
-        await resume;
         expect(harness.runtime.readLifecycleState()).toBe("playing");
         expect(
           harness.store.recovered.events.filter(
@@ -310,9 +307,9 @@ describe("ReplayPremiere HTTP adapter", () => {
         harness.clock.advance(1);
         const reveal = harness.runtime.synchronize();
         await blockedReveal.started;
-        expect(
-          await readJson(`${baseUrl}/api/premieres/${PREMIERE_ID}/manifest`),
-        ).toMatchObject({ status: 200, body: { state: "playing" } });
+        const manifestDuringCommit = readJson(
+          `${baseUrl}/api/premieres/${PREMIERE_ID}/manifest`,
+        );
         expect(
           await readJson(`${baseUrl}/api/premieres/${PREMIERE_ID}/reveal`),
         ).toEqual({
@@ -328,6 +325,13 @@ describe("ReplayPremiere HTTP adapter", () => {
 
         blockedReveal.release();
         await reveal;
+        expect(await manifestDuringCommit).toMatchObject({
+          status: 200,
+          body: {
+            state: "revealed",
+            revealedAt: harness.clock.now().toISOString(),
+          },
+        });
         expect(
           await readJson(`${baseUrl}/api/premieres/${PREMIERE_ID}/manifest`),
         ).toMatchObject({
@@ -651,6 +655,26 @@ describe("ReplayPremiere HTTP adapter", () => {
     });
   });
 
+  test("times out a stalled manifest read barrier with a sanitized failure", async () => {
+    const harness = await httpHarness(root, false, {
+      hangManifest: true,
+      operationTimeoutMs: 100,
+      throwOperatorSink: true,
+    });
+    await harness.run(async (baseUrl) => {
+      const response = await fetch(
+        `${baseUrl}/api/premieres/${PREMIERE_ID}/manifest`,
+      );
+      expect(response.status).toBe(503);
+      const body = await response.text();
+      expect(JSON.parse(body)).toEqual({
+        error: { code: "PREMIERE_UNAVAILABLE" },
+      });
+      expect(body).not.toContain(root);
+      expect(body).not.toContain("premiere_operation_timeout");
+    });
+  });
+
   test("carries the guest cookie through a timeout so a late commit retry is idempotent", async () => {
     const harness = await httpHarness(root, true, {
       persistenceDelayMs: 175,
@@ -871,6 +895,7 @@ async function httpHarness(
   httpOptions: {
     bodyLimitBytes?: number;
     lifecycleState?: PremiereState;
+    hangManifest?: boolean;
     hangPersistence?: boolean;
     persistenceDelayMs?: number;
     operationTimeoutMs?: number;
@@ -883,6 +908,10 @@ async function httpHarness(
     revealed,
     httpOptions.lifecycleState,
   );
+  if (httpOptions.hangManifest === true) {
+    target.runtime.readManifest = async () =>
+      new Promise<never>(() => undefined);
+  }
   const admissions: Parameters<
     ConstructorParameters<
       typeof ReplayPremiereInteractions
@@ -1085,7 +1114,7 @@ async function publicationTarget(
     readLifecycleState: () =>
       lifecycleState ?? (revealed ? "revealed" : "playing"),
     readBootstrap: () => createPremierePublicBootstrap({ gate }),
-    readManifest: () => {
+    readManifest: async () => {
       const manifest = publication.readManifest();
       return lifecycleState === "archived" && manifest.state === "revealed"
         ? { ...manifest, state: "archived" }

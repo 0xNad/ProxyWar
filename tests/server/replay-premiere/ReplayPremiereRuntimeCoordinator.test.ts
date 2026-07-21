@@ -107,7 +107,7 @@ describe("ReplayPremiereRuntimeCoordinator", () => {
       "checkpoint_opened",
     ]);
     expect(runtime.readLifecycleState()).toBe("checkpoint");
-    expect(runtime.readManifest()).toMatchObject({
+    expect(await runtime.readManifest()).toMatchObject({
       state: "checkpoint",
       releasedThroughSequence: 2,
       lastReleasedChunkIndex: 0,
@@ -138,7 +138,7 @@ describe("ReplayPremiereRuntimeCoordinator", () => {
     clock.advance(1);
     await runtime.synchronize();
     expect(runtime.readLifecycleState()).toBe("checkpoint");
-    expect(runtime.readManifest()).toMatchObject({
+    expect(await runtime.readManifest()).toMatchObject({
       releasedThroughSequence: 4,
       lastReleasedChunkIndex: 1,
     });
@@ -170,14 +170,14 @@ describe("ReplayPremiereRuntimeCoordinator", () => {
       interactions: createInteractions(gate, clock),
     });
     clock.advance(50);
-    expect(runtime.readManifest()).toMatchObject({
+    expect(await runtime.readManifest()).toMatchObject({
       state: "scheduled",
       serverNow: clock.now().toISOString(),
       authoritativeElapsedMs: 0,
     });
     expect(runtime.readChunk(0)).toBeNull();
     clock.advance(-1);
-    expect(() => runtime.readManifest()).toThrow(/integrity/i);
+    await expect(runtime.readManifest()).rejects.toThrow(/integrity/i);
   });
 
   test("projects a committed checkpoint deadline immediately while its durable resume remains pending", async () => {
@@ -204,7 +204,7 @@ describe("ReplayPremiereRuntimeCoordinator", () => {
     const eventCountAtOpen = store.recovered.events.length;
 
     clock.advance(REPLAY_PREMIERE_CHECKPOINT_PAUSE_MS - 1);
-    expect(runtime.readManifest()).toMatchObject({
+    expect(await runtime.readManifest()).toMatchObject({
       state: "checkpoint",
       authoritativeElapsedMs: 100,
       accumulatedPauseMs: REPLAY_PREMIERE_CHECKPOINT_PAUSE_MS - 1,
@@ -214,7 +214,7 @@ describe("ReplayPremiereRuntimeCoordinator", () => {
 
     clock.advance(1);
     expect(runtime.readLifecycleState()).toBe("checkpoint");
-    expect(runtime.readManifest()).toMatchObject({
+    expect(await runtime.readManifest()).toMatchObject({
       state: "playing",
       serverNow: clock.now().toISOString(),
       authoritativeElapsedMs: 100,
@@ -224,7 +224,7 @@ describe("ReplayPremiereRuntimeCoordinator", () => {
     });
     expect(runtime.readChunk(1)).toBeNull();
     expect(store.recovered.events).toHaveLength(eventCountAtOpen);
-    expect(runtime.readManifest().state).toBe("playing");
+    expect((await runtime.readManifest()).state).toBe("playing");
     expect(store.recovered.events).toHaveLength(eventCountAtOpen);
 
     await runtime.synchronize();
@@ -237,6 +237,95 @@ describe("ReplayPremiereRuntimeCoordinator", () => {
       ),
     ).toHaveLength(1);
     expect(recoverPrefix).not.toHaveBeenCalled();
+  });
+
+  test("linearizes manifest reads behind a durable playing-to-checkpoint transition", async () => {
+    const { gate, drafts } = await verifiedPublicationFixture(root);
+    const clock = new FakeClock(NOW);
+    const store = await openStore(root);
+    stores.push(store);
+    let armCheckpointWrite = false;
+    let checkpointWriteEntered!: () => void;
+    let releaseCheckpointWrite!: () => void;
+    const checkpointWriteStarted = new Promise<void>((resolve) => {
+      checkpointWriteEntered = resolve;
+    });
+    const checkpointWriteReleased = new Promise<void>((resolve) => {
+      releaseCheckpointWrite = resolve;
+    });
+    const persistence: ReplayPremiereRuntimePersistence = {
+      get recovered() {
+        return store.recovered;
+      },
+      readSnapshot: (aggregateId) => store.readSnapshot(aggregateId),
+      appendAndSnapshot: async (input) => {
+        if (
+          armCheckpointWrite &&
+          input.event.eventType === "premiere_runtime_chunk_released"
+        ) {
+          armCheckpointWrite = false;
+          checkpointWriteEntered();
+          await checkpointWriteReleased;
+        }
+        return store.appendAndSnapshot(input);
+      },
+    };
+    const runtime = await ReplayPremiereRuntimeCoordinator.createOrRecover({
+      gate,
+      drafts,
+      persistence,
+      clock,
+      interactions: createInteractions(gate, clock),
+    });
+
+    await runtime.synchronize();
+    clock.advance(99);
+    const beforeTransition = await runtime.readManifest();
+    expect(beforeTransition).toMatchObject({
+      state: "playing",
+      authoritativeElapsedMs: 99,
+      releasedThroughSequence: -1,
+    });
+
+    clock.advance(1);
+    armCheckpointWrite = true;
+    const transition = runtime.synchronize();
+    await checkpointWriteStarted;
+    clock.advance(25);
+    let racedReadSettled = false;
+    const racedRead = runtime.readManifest().then((manifest) => {
+      racedReadSettled = true;
+      return manifest;
+    });
+    await Promise.resolve();
+    const settledBeforeCommit = racedReadSettled;
+    releaseCheckpointWrite();
+
+    await transition;
+    const atCheckpoint = await racedRead;
+    const afterTransition = await runtime.readManifest();
+    expect(settledBeforeCommit).toBe(false);
+    expect(atCheckpoint).toMatchObject({
+      state: "checkpoint",
+      serverNow: clock.now().toISOString(),
+      authoritativeElapsedMs: 100,
+      accumulatedPauseMs: 25,
+      releasedThroughSequence: 2,
+      activeCheckpoint: { state: "open" },
+    });
+    expect(afterTransition).toMatchObject({
+      state: "checkpoint",
+      authoritativeElapsedMs: 100,
+      accumulatedPauseMs: 25,
+      releasedThroughSequence: 2,
+    });
+    expect(
+      [beforeTransition, atCheckpoint, afterTransition].map((manifest) =>
+        "authoritativeElapsedMs" in manifest
+          ? manifest.authoritativeElapsedMs
+          : null,
+      ),
+    ).toEqual([99, 100, 100]);
   });
 
   test("recovers a checkpoint outage with a shifted close and no elapsed double-count", async () => {
@@ -258,7 +347,7 @@ describe("ReplayPremiereRuntimeCoordinator", () => {
     clock.advance(5_000);
     await first.beginOutage();
     clock.advance(30_000);
-    expect(first.readManifest()).toMatchObject({
+    expect(await first.readManifest()).toMatchObject({
       state: "checkpoint",
       authoritativeElapsedMs: 100,
       accumulatedPauseMs: 35_000,
@@ -281,7 +370,7 @@ describe("ReplayPremiereRuntimeCoordinator", () => {
         firstInteractions.readState(),
       ),
     });
-    expect(restarted.readManifest()).toMatchObject({
+    expect(await restarted.readManifest()).toMatchObject({
       state: "checkpoint",
       authoritativeElapsedMs: 100,
       accumulatedPauseMs: 35_000,
@@ -295,7 +384,7 @@ describe("ReplayPremiereRuntimeCoordinator", () => {
     expect(restarted.readChunk(1)).toBeNull();
     clock.advance(1);
     await restarted.synchronize();
-    expect(restarted.readManifest()).toMatchObject({
+    expect(await restarted.readManifest()).toMatchObject({
       state: "playing",
       authoritativeElapsedMs: 100,
       accumulatedPauseMs: 45_000,
@@ -331,13 +420,13 @@ describe("ReplayPremiereRuntimeCoordinator", () => {
     clock.advance(60_001);
     await runtime.synchronize();
     expect(runtime.readLifecycleState()).toBe("failed");
-    expect(runtime.readManifest()).toMatchObject({
+    expect(await runtime.readManifest()).toMatchObject({
       state: "failed",
       releasedThroughSequence: -1,
     });
     await runtime.archive();
     expect(runtime.readLifecycleState()).toBe("archived");
-    expect(runtime.readManifest()).toMatchObject({
+    expect(await runtime.readManifest()).toMatchObject({
       state: "failed",
       releasedThroughSequence: -1,
     });
@@ -407,14 +496,14 @@ describe("ReplayPremiereRuntimeCoordinator", () => {
 
     await runtime.cancel();
     expect(runtime.readLifecycleState()).toBe("cancelled");
-    expect(runtime.readManifest()).toMatchObject({
+    expect(await runtime.readManifest()).toMatchObject({
       state: "cancelled",
       actualStartAt: null,
       releasedThroughSequence: -1,
     });
     await runtime.archive();
     expect(runtime.readLifecycleState()).toBe("archived");
-    expect(runtime.readManifest()).toMatchObject({
+    expect(await runtime.readManifest()).toMatchObject({
       state: "cancelled",
       actualStartAt: null,
       releasedThroughSequence: -1,
@@ -447,7 +536,9 @@ describe("ReplayPremiereRuntimeCoordinator", () => {
       ),
     });
     expect(restarted.readLifecycleState()).toBe("archived");
-    expect(restarted.readManifest()).toMatchObject({ state: "cancelled" });
+    expect(await restarted.readManifest()).toMatchObject({
+      state: "cancelled",
+    });
     expect(restarted.readReveal()).toBeNull();
   });
 
@@ -490,7 +581,7 @@ describe("ReplayPremiereRuntimeCoordinator", () => {
       ),
     });
     expect(restarted.readLifecycleState()).toBe("revealed");
-    expect(restarted.readManifest()).toMatchObject({ state: "revealed" });
+    expect(await restarted.readManifest()).toMatchObject({ state: "revealed" });
     expect(restarted.readChunk(2)).toMatchObject({ terminal: true });
     await restarted.synchronize();
     expect(restartedStore.recovered.events).toHaveLength(eventCount);

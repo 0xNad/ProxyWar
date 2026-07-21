@@ -56,7 +56,7 @@ export interface ReplayPremiereRuntimeReader {
   readonly premiereId: string;
   readLifecycleState(): PremiereState;
   readBootstrap(): PremierePublicBootstrapResponse;
-  readManifest(): PremiereManifestResponse;
+  readManifest(): Promise<PremiereManifestResponse>;
   readChunk(index: number): PremierePublicChunkResponse | null;
   readReveal(): PremiereRevealResponse | null;
 }
@@ -255,7 +255,11 @@ async function handlePremiereApiRequest(
         sendJson(response, 200, runtime.readBootstrap());
         return;
       case "manifest":
-        sendJson(response, 200, runtime.readManifest());
+        sendJson(
+          response,
+          200,
+          await withTimeout(runtime.readManifest(), operationTimeoutMs),
+        );
         return;
       case "chunk": {
         const chunk = runtime.readChunk(readRoute.chunkIndex);
