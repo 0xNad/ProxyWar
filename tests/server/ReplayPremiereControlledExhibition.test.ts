@@ -155,6 +155,57 @@ describe("Replay Premiere controlled exhibition source", () => {
     }
   });
 
+  it("rejects spawn variance omitted from the GameRecord before writing", async () => {
+    const root = await fs.mkdtemp(
+      path.join(os.tmpdir(), "premiere-spawn-binding-"),
+    );
+    const servedRoot = path.join(root, "served");
+    const privateRoot = path.join(root, "private");
+    const artifact = artifactFixture();
+    const executionConfig: AgentLeagueSmokeExecutionConfig = {
+      ...executionConfigFixture(),
+      game: {
+        ...executionConfigFixture().game,
+        varySpawns: true,
+      },
+    };
+    await fs.mkdir(servedRoot, { recursive: true });
+
+    try {
+      await expect(
+        writeControlledExhibitionBundle({
+          sourceRunId: "controlled-run-001",
+          artifact: {
+            ...artifact,
+            artifactInput: {
+              ...artifact.artifactInput,
+              runnerConfig: {
+                ...artifact.artifactInput.runnerConfig,
+                variedSpawns: true,
+              },
+            },
+            executionConfig,
+          },
+          policies: policyFixtures(),
+          expectedExecutionConfig: executionConfig,
+          build: buildFixture(),
+          output: {
+            privateOutputRoot: privateRoot,
+            servedRoots: [servedRoot],
+            maxBundleBytes: 2 * 1024 * 1024,
+            minFreeBytes: 25 * GIB,
+          },
+          statfs: statfsWithFreeBytes(30 * GIB),
+        }),
+      ).rejects.toThrow(
+        "controlled GameRecord config does not match execution provenance",
+      );
+      expect(await fs.readdir(privateRoot)).toEqual([]);
+    } finally {
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  });
+
   it("records the canonical planner mode instead of the smoke artifact label", async () => {
     const root = await fs.mkdtemp(
       path.join(os.tmpdir(), "premiere-planner-provenance-"),

@@ -1086,7 +1086,8 @@ function validateGameRecordExecutionConfig(
     String(game.gameMapSize) !== executionConfig.game.mapSize ||
     String(game.difficulty) !== executionConfig.game.difficulty ||
     (game.bots ?? 0) !== executionConfig.game.bots ||
-    (game.nations ?? "disabled") !== executionConfig.game.nations
+    (game.nations ?? "disabled") !== executionConfig.game.nations ||
+    Boolean(game.randomSpawn) !== executionConfig.game.varySpawns
   ) {
     throw new Error(
       "controlled GameRecord config does not match execution provenance",
