@@ -670,7 +670,13 @@ interface JsonFetchOptions {
 export class ReplayPremiereNetworkController {
   private readonly fetchImpl: typeof fetch;
   private readonly abortController = new AbortController();
-  private readonly descriptors = new Map<
+  // Advertisements remain immutable across retries, but only descriptors whose
+  // chunks reached playback may participate in accepted-prefix verification.
+  private readonly advertisedDescriptors = new Map<
+    number,
+    Readonly<ReplayPremiereChunkDescriptor>
+  >();
+  private readonly acceptedDescriptors = new Map<
     number,
     Readonly<ReplayPremiereChunkDescriptor>
   >();
@@ -933,12 +939,15 @@ export class ReplayPremiereNetworkController {
     manifest: ReplayPremierePreRevealManifest,
   ): Promise<void> {
     for (const descriptor of manifest.releasedChunks) {
-      const existing = this.descriptors.get(descriptor.index);
+      const existing = this.advertisedDescriptors.get(descriptor.index);
       if (existing && !canonicalJsonEqual(existing, descriptor)) {
         throw networkError("manifest_integrity_failure");
       }
       if (!existing)
-        this.descriptors.set(descriptor.index, deepFreeze(descriptor));
+        this.advertisedDescriptors.set(
+          descriptor.index,
+          deepFreeze(descriptor),
+        );
     }
     const initialPlaybackState = this.options.playback.state();
     let nextIndex = initialPlaybackState.nextChunkIndex;
@@ -946,7 +955,7 @@ export class ReplayPremiereNetworkController {
       throw networkError("manifest_integrity_failure");
     }
     if (nextIndex > 0) {
-      const acceptedTail = this.descriptors.get(nextIndex - 1);
+      const acceptedTail = this.acceptedDescriptors.get(nextIndex - 1);
       if (
         !acceptedTail ||
         acceptedTail.chunkHash !== initialPlaybackState.lastChunkHash ||
@@ -957,7 +966,7 @@ export class ReplayPremiereNetworkController {
       }
     }
     while (nextIndex <= manifest.lastReleasedChunkIndex) {
-      const descriptor = this.descriptors.get(nextIndex);
+      const descriptor = this.advertisedDescriptors.get(nextIndex);
       if (!descriptor) throw networkError("chunk_not_advertised");
       const batch = await this.fetchAndVerifyChunk(descriptor, false);
       try {
@@ -965,6 +974,7 @@ export class ReplayPremiereNetworkController {
       } catch {
         throw networkError("chunk_integrity_failure");
       }
+      this.acceptedDescriptors.set(nextIndex, descriptor);
       nextIndex += 1;
     }
   }
@@ -973,7 +983,7 @@ export class ReplayPremiereNetworkController {
     advertised: ReplayPremiereChunkDescriptor,
     afterReveal: boolean,
   ): Promise<VerifiedReplayPremiereBatch> {
-    if (!afterReveal && !this.descriptors.has(advertised.index)) {
+    if (!afterReveal && !this.advertisedDescriptors.has(advertised.index)) {
       throw networkError("chunk_not_advertised");
     }
     const value = await this.fetchJson(this.chunkPath(advertised.index), {
@@ -1182,7 +1192,10 @@ export class ReplayPremiereNetworkController {
       reveal,
       this.bootstrap,
     );
-    for (const [index, released] of this.descriptors) {
+    const acceptedChunkCount = this.options.playback.state().nextChunkIndex;
+    for (let index = 0; index < acceptedChunkCount; index += 1) {
+      const released = this.acceptedDescriptors.get(index);
+      if (!released) throw networkError("reveal_integrity_failure");
       const draft = draftManifest.get(index);
       const startOffset = this.presentationOffsets.get(released.startSequence);
       const endOffset = this.presentationOffsets.get(released.endSequence);
@@ -1262,8 +1275,11 @@ export class ReplayPremiereNetworkController {
       this.assertProvenance(parsed.data.provenance);
       const descriptor = descriptorFromChunk(parsed.data);
       const draft = draftManifest.get(nextIndex);
+      const advertised = this.advertisedDescriptors.get(nextIndex);
       if (
         !draft ||
+        (advertised !== undefined &&
+          !canonicalJsonEqual(advertised, descriptor)) ||
         !publishedDescriptorMatchesDraft(descriptor, draft) ||
         descriptor.index !== nextIndex ||
         descriptor.terminal !== (nextIndex === reveal.finalChunkIndex) ||
@@ -1283,13 +1299,18 @@ export class ReplayPremiereNetworkController {
       } catch {
         throw networkError("reveal_integrity_failure");
       }
-      this.descriptors.set(nextIndex, deepFreeze(descriptor));
+      const accepted = deepFreeze(descriptor);
+      this.advertisedDescriptors.set(nextIndex, accepted);
+      this.acceptedDescriptors.set(nextIndex, accepted);
       nextIndex += 1;
     }
     if (
-      this.descriptors.size !== reveal.publicationCommitment.chunkCount ||
+      this.advertisedDescriptors.size >
+        reveal.publicationCommitment.chunkCount ||
+      this.acceptedDescriptors.size !==
+        reveal.publicationCommitment.chunkCount ||
       [...draftManifest].some(([index, draft]) => {
-        const released = this.descriptors.get(index);
+        const released = this.acceptedDescriptors.get(index);
         return !released || !publishedDescriptorMatchesDraft(released, draft);
       })
     ) {

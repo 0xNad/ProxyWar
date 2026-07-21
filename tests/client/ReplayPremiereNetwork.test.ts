@@ -841,6 +841,86 @@ describe("ReplayPremiereNetwork", () => {
     expect(onReveal).toHaveBeenCalledTimes(1);
   });
 
+  it("recovers an advertised but unaccepted chunk when reveal follows a transport interruption", async () => {
+    const material = await revealMaterial();
+    const preManifest = await manifest(material.nonTerminal, {
+      provenance: material.bootstrap.provenance,
+      scheduledAt: material.bootstrap.publicDefinition.scheduledAt,
+      playbackRate: material.bootstrap.publicDefinition.playbackRate,
+      serverNow: material.pointer.revealedAt,
+      actualStartAt: material.bootstrap.publicDefinition.scheduledAt,
+      authoritativeElapsedMs: 250,
+    });
+    const fetchMock = queuedFetch(
+      jsonResponse(material.bootstrap),
+      jsonResponse(preManifest),
+      jsonResponse(material.nonTerminal[0]),
+      new TypeError("transient chunk transport failure"),
+      jsonResponse(material.pointer),
+      jsonResponse(material.reveal),
+      jsonResponse(material.nonTerminal[1]),
+      jsonResponse(material.terminal),
+    );
+    const { network, playback } = controller(
+      fetchMock as unknown as typeof fetch,
+    );
+
+    await expect(network.syncOnce()).rejects.toMatchObject({
+      code: "request_failed",
+      recoverable: true,
+    });
+    expect(playback.state()).toMatchObject({
+      nextChunkIndex: 1,
+      releasedThroughSequence: material.nonTerminal[0].endSequence,
+      finalized: false,
+    });
+
+    await expect(network.syncOnce()).resolves.toMatchObject({
+      status: "revealed",
+    });
+    expect(playback.state()).toMatchObject({
+      nextChunkIndex: material.chunks.length,
+      releasedThroughSequence: material.reveal.finalSequence,
+      lastChunkHash: material.terminal.chunkHash,
+      finalized: true,
+    });
+  });
+
+  it("rejects a revealed suffix that changes an earlier advertised descriptor", async () => {
+    const material = await revealMaterial();
+    const preManifest = await manifest(material.nonTerminal, {
+      provenance: material.bootstrap.provenance,
+      scheduledAt: material.bootstrap.publicDefinition.scheduledAt,
+      playbackRate: material.bootstrap.publicDefinition.playbackRate,
+      serverNow: material.pointer.revealedAt,
+      actualStartAt: material.bootstrap.publicDefinition.scheduledAt,
+      authoritativeElapsedMs: 250,
+    });
+    preManifest.releasedChunks[1].releasedAt = SERVER_NOW;
+    const fetchMock = queuedFetch(
+      jsonResponse(material.bootstrap),
+      jsonResponse(preManifest),
+      jsonResponse(material.nonTerminal[0]),
+      new TypeError("transient chunk transport failure"),
+      jsonResponse(material.pointer),
+      jsonResponse(material.reveal),
+      jsonResponse(material.nonTerminal[1]),
+    );
+    const { network, playback } = controller(
+      fetchMock as unknown as typeof fetch,
+    );
+
+    await expect(network.syncOnce()).rejects.toMatchObject({
+      code: "request_failed",
+      recoverable: true,
+    });
+    await expectNetworkError(network.syncOnce(), "reveal_integrity_failure");
+    expect(playback.state()).toMatchObject({
+      nextChunkIndex: 1,
+      finalized: false,
+    });
+  });
+
   it("accepts a valid reveal whose leak evidence body exceeds 16 KiB", async () => {
     const material = await revealMaterial({ leakEvidenceBodyBytes: 20_000 });
     const observedBodyText =
