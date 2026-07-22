@@ -13,7 +13,8 @@ export type ReplayLoadingMessageKey =
   | "ai_league_replay.waiting_for_replay"
   | "ai_league_replay.loading_slow"
   | "ai_league_replay.loading_failed"
-  | "replay_premiere.loading_premiere";
+  | "replay_premiere.loading_premiere"
+  | "replay_premiere.joining_live";
 
 export function showReplayLoadingScreen(
   messageKey: ReplayLoadingMessageKey = "ai_league_replay.loading_replay",
@@ -39,9 +40,30 @@ export function showReplayLoadingScreen(
   if (back !== null) {
     back.hidden = true;
   }
+  setReplayLoadingProgress(null);
 
   document.getElementById("proxywar-coworld-splash")?.remove();
   return screen;
+}
+
+/**
+ * Live-updating subline under the veil message (join-sync progress:
+ * "Syncing to turn {n}…"). Pass null to clear/hide. No aria-live: it updates
+ * many times per second during a catch-up; the headline message carries the
+ * announced state.
+ */
+export function setReplayLoadingProgress(text: string | null): void {
+  const progress = document.querySelector<HTMLElement>(
+    "[data-replay-loading-progress]",
+  );
+  if (progress === null) return;
+  if (text === null || text.length === 0) {
+    progress.hidden = true;
+    progress.textContent = "";
+    return;
+  }
+  progress.hidden = false;
+  progress.textContent = text;
 }
 
 export function holdReplayLoadingScreenUntilFirstFrame(
@@ -136,6 +158,7 @@ function ensureReplayLoadingScreen(): HTMLElement {
   const existing = document.getElementById(REPLAY_LOADING_ID);
   if (existing !== null) {
     bindRetry(existing);
+    ensureProgressElement(existing);
     return existing;
   }
 
@@ -155,6 +178,11 @@ function ensureReplayLoadingScreen(): HTMLElement {
   const message = document.createElement("p");
   message.dataset.replayLoadingMessage = "";
 
+  const progress = document.createElement("p");
+  progress.dataset.replayLoadingProgress = "";
+  progress.className = "proxywar-replay-loading-progress";
+  progress.hidden = true;
+
   const retry = document.createElement("button");
   retry.type = "button";
   retry.dataset.replayLoadingRetry = "";
@@ -169,11 +197,29 @@ function ensureReplayLoadingScreen(): HTMLElement {
   back.hidden = true;
 
   actions.append(retry, back);
-  content.append(spinner, message, actions);
+  content.append(spinner, message, progress, actions);
   screen.append(content);
   document.body.prepend(screen);
   bindRetry(screen);
   return screen;
+}
+
+// The static first-paint veil may come from a cached app shell that predates
+// the join-sync progress line; owning the screen adds it when missing.
+function ensureProgressElement(screen: HTMLElement): void {
+  if (screen.querySelector("[data-replay-loading-progress]") !== null) {
+    return;
+  }
+  const progress = document.createElement("p");
+  progress.dataset.replayLoadingProgress = "";
+  progress.className = "proxywar-replay-loading-progress";
+  progress.hidden = true;
+  const message = screen.querySelector("[data-replay-loading-message]");
+  if (message?.parentElement) {
+    message.after(progress);
+  } else {
+    screen.append(progress);
+  }
 }
 
 function bindRetry(screen: HTMLElement): void {

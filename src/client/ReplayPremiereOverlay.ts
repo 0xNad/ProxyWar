@@ -212,6 +212,8 @@ export interface ReplayPremiereOverlayModel {
   revealPending?: boolean;
   failureCode?: ReplayPremiereFailureCode | string | null;
   ambient: boolean;
+  /** Dispatcher starved of released content (frontier stall / network). */
+  buffering?: boolean;
   canPredict?: boolean;
   canMark?: boolean;
   canShare?: boolean;
@@ -1066,6 +1068,18 @@ function renderPlaying(model: ReplayPremiereOverlayModel): HTMLElement {
   );
   liveHeader.append(renderLiveNowBadge(), rate);
   section.append(liveHeader);
+  // Starvation is a visible state, never a silently frozen canvas: while the
+  // dispatcher waits for the next release, say so quietly and keep the LIVE
+  // surface intact. Auto-clears when dispatch resumes.
+  if (model.buffering === true) {
+    const buffering = element("p", "rp-buffering");
+    buffering.setAttribute("role", "status");
+    buffering.setAttribute("aria-live", "polite");
+    const dot = element("span", "rp-buffering-dot");
+    dot.setAttribute("aria-hidden", "true");
+    buffering.append(dot, translateText("replay_premiere.buffering_live"));
+    section.append(buffering);
+  }
   // Only during the opening sequences: the "Shared playback / everyone is
   // watching the same moment" first-contact explainer. Past that it retires so
   // it is not a permanent status line, while the LIVE pill and the turn below
@@ -3275,6 +3289,28 @@ const OVERLAY_CSS = `
   }
   #${OVERLAY_ID} .rp-leader-share { color: var(--rp-accent); font-variant-numeric: tabular-nums; font-weight: 750; }
 
+  /* ---- Buffering ---- */
+  #${OVERLAY_ID} .rp-buffering {
+    display: inline-flex;
+    align-items: center;
+    gap: 7px;
+    margin: 8px 0 0;
+    padding: 4px 10px;
+    border: 1px solid rgba(56, 189, 248, 0.36);
+    border-radius: var(--rp-r-pill);
+    background: var(--rp-accent-soft);
+    color: var(--rp-accent);
+    font-size: 11.5px;
+    font-weight: 700;
+  }
+  #${OVERLAY_ID} .rp-buffering-dot {
+    width: 7px;
+    height: 7px;
+    border-radius: var(--rp-r-pill);
+    background: var(--rp-accent);
+    animation: rp-live-now-pulse 1.6s ease-out infinite;
+  }
+
   /* ---- Battle feed ---- */
   #${OVERLAY_ID} .rp-war-feed-list {
     display: grid;
@@ -3655,6 +3691,7 @@ const OVERLAY_CSS = `
     #${OVERLAY_ID} * { scroll-behavior: auto !important; transition: none !important; }
     #${OVERLAY_ID} .rp-live-now-dot,
     #${OVERLAY_ID} .rp-live-chip-dot,
+    #${OVERLAY_ID} .rp-buffering-dot,
     #${OVERLAY_ID} .rp-checkpoint-timer::before,
     #${OVERLAY_ID} .rp-clip-dot,
     #${OVERLAY_ID} .rp-reveal,

@@ -638,6 +638,19 @@ describe("ReplayPremiereOverlay", () => {
     ).toContain("turn=512");
   });
 
+  it("shows the buffering chip as a polite status only while starved", () => {
+    const model = makeModel({ state: "playing", buffering: true });
+    const handle = mount(model);
+    const chip = handle.element.querySelector(".rp-buffering");
+    expect(chip).not.toBeNull();
+    expect(chip?.getAttribute("role")).toBe("status");
+    expect(chip?.getAttribute("aria-live")).toBe("polite");
+    expect(chip?.textContent).toContain("replay_premiere.buffering_live");
+
+    handle.hydrate({ ...model, buffering: false });
+    expect(handle.element.querySelector(".rp-buffering")).toBeNull();
+  });
+
   it("never anchors the reveal or results panels at an invisible base state", () => {
     // Regression for the real-page "empty black panel": the entrance
     // animations own their pre-state (keyframes + fill-mode) — the BASE rules

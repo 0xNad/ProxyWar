@@ -25,7 +25,29 @@ const DEFAULT_MAX_RESPONSE_BYTES = 8 * 1024 * 1024;
 const DEFAULT_POLL_INTERVAL_MS = 500;
 const DEFAULT_INITIAL_RETRY_MS = 250;
 const DEFAULT_MAX_RETRY_MS = 1_000;
-const DEFAULT_CATCH_UP_THRESHOLD_MS = 2_000;
+/**
+ * The presentation trail every viewer converges to. A chunk releases only at
+ * its LAST record's presentation time (anti-spoiler release semantics), so a
+ * from-start viewer inherently trails the release clock by up to one chunk
+ * presentation span — 45 s at admission's build span. Late joiners are caught
+ * up to frontier-minus-this-trail (never the bare frontier edge), so every
+ * viewer lands with the same runway of buffered presentation and does not
+ * gate on the next release. Mirrors the 45 s admission build span
+ * (`MAX_PRESENTATION_SPAN_MS` in replay-premiere-admit.ts); must stay at or
+ * below REPLAY_PREMIERE_MAX_PRESENTATION_SPAN_MS (60 s) — a test pins both.
+ */
+export const PREMIERE_PRESENTATION_TRAIL_MS = 45_000;
+/**
+ * How far behind the authoritative clock a viewer must fall before the
+ * network requests a forward catch-up. The steady-state trail above is a
+ * DESIGNED lag, so the threshold must sit clearly beyond it or smooth
+ * playback trips catch-up on every manifest poll and rides the frontier in
+ * freeze/burst cycles (the 2026-07-22 live regression: this was 2 s from the
+ * ~1 ms/turn era while real-speed chunks span 45 s). Two spans of slack keeps
+ * catch-up reserved for genuine gaps: late joins, long-hidden tabs, network
+ * stalls.
+ */
+const DEFAULT_CATCH_UP_THRESHOLD_MS = 2 * PREMIERE_PRESENTATION_TRAIL_MS;
 const DEFAULT_REQUEST_TIMEOUT_MS = 2_000;
 const MAX_REQUEST_TIMEOUT_MS = 2_000;
 const MAX_AUTHORITATIVE_RESULT_BYTES = 1_000_000;
@@ -1165,10 +1187,10 @@ export class ReplayPremiereNetworkController {
     manifest: ReplayPremierePreRevealManifest,
   ): void {
     const playbackState = this.options.playback.state();
-    const target = playbackState.releasedThroughSequence;
-    if (target === null) return;
+    const frontier = playbackState.releasedThroughSequence;
+    if (frontier === null) return;
     const dispatched = playbackState.lastDispatchedSequence;
-    if (dispatched !== null && dispatched >= target) {
+    if (dispatched !== null && dispatched >= frontier) {
       this.lastCatchUpTarget = null;
       return;
     }
@@ -1176,7 +1198,24 @@ export class ReplayPremiereNetworkController {
       dispatched === null ? 0 : (this.presentationOffsets.get(dispatched) ?? 0);
     if (
       manifest.authoritativeElapsedMs - dispatchedOffset <=
-        this.catchUpThresholdMs ||
+      this.catchUpThresholdMs
+    ) {
+      return;
+    }
+    // Catch up to the frontier MINUS the standard presentation trail, never
+    // the bare frontier edge: landing at the edge leaves zero runway, so the
+    // player starves until the next release (up to a full chunk span) —
+    // the mid-join "teleport then freeze". Landing trail-deep gives the
+    // late joiner the exact same buffered runway a from-start viewer has.
+    //
+    // Catch-up itself may free-run the simulation: everything it replays is
+    // ALREADY RELEASED content, and playback is bounded by released chunks
+    // regardless of pacing, so there is no spoiler surface beyond what any
+    // client could already read from the release stream.
+    const target = this.trailedCatchUpTarget(frontier);
+    if (
+      target === null ||
+      target <= (dispatched ?? -1) ||
       this.lastCatchUpTarget === target
     ) {
       return;
@@ -1187,6 +1226,41 @@ export class ReplayPremiereNetworkController {
       throw networkError("manifest_integrity_failure");
     }
     this.lastCatchUpTarget = target;
+  }
+
+  /**
+   * The greatest released sequence whose presentation offset is at least
+   * {@link PREMIERE_PRESENTATION_TRAIL_MS} behind the frontier record's
+   * offset, or null when the released stream is younger than the trail (an
+   * early join simply starts from 0 and is already within the trail).
+   */
+  private trailedCatchUpTarget(frontier: number): number | null {
+    const frontierOffset = this.presentationOffsets.get(frontier);
+    if (frontierOffset === undefined) return null;
+    const trailedOffset = frontierOffset - PREMIERE_PRESENTATION_TRAIL_MS;
+    if (trailedOffset <= 0) return null;
+    // Records are dense (one per sequence) with uniform presentation deltas,
+    // so estimate then correct — bounded to a few steps either side.
+    let candidate = frontier;
+    const previousOffset = this.presentationOffsets.get(frontier - 1);
+    if (previousOffset !== undefined && previousOffset < frontierOffset) {
+      const perRecordMs = frontierOffset - previousOffset;
+      candidate = Math.max(
+        0,
+        frontier - Math.ceil(PREMIERE_PRESENTATION_TRAIL_MS / perRecordMs),
+      );
+    }
+    while (candidate > 0) {
+      const offset = this.presentationOffsets.get(candidate);
+      if (offset === undefined || offset <= trailedOffset) break;
+      candidate -= 1;
+    }
+    while (candidate < frontier) {
+      const nextOffset = this.presentationOffsets.get(candidate + 1);
+      if (nextOffset === undefined || nextOffset > trailedOffset) break;
+      candidate += 1;
+    }
+    return candidate > 0 ? candidate : null;
   }
 
   private async completeReveal(

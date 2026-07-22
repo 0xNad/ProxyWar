@@ -56,6 +56,7 @@ import {
   holdReplayLoadingScreenUntilFirstFrame,
   REPLAY_LOADING_SLOW_TIMEOUT_MS,
   runReplayStartup,
+  setReplayLoadingProgress,
   showReplayLoadingFailure,
   showReplayLoadingScreen,
 } from "./ReplayLoadingScreen";
@@ -889,21 +890,117 @@ class Client {
   private async openReplayPremiere(premiereId: string): Promise<void> {
     this.replayAttemptCleanup?.();
     this.replayLoadingCleanup?.();
-    this.replayLoadingCleanup = holdReplayLoadingScreenUntilFirstFrame(
-      undefined,
-      "replay_premiere.loading_premiere",
+
+    // Premiere-specific veil hold. Unlike ordinary replays this must NOT lift
+    // on the first rendered frame: a live join first renders turn 0 and then
+    // free-runs to the entry position — the veil covers that entire sync so
+    // the viewer never sees the turn-0 map, the catch-up blur, or the
+    // teleport. It lifts per lifecycle state below.
+    showReplayLoadingScreen("replay_premiere.loading_premiere");
+    let veilFinished = false;
+    let veilSlowTimer: ReturnType<typeof setTimeout> | null = setTimeout(() => {
+      if (!veilFinished) {
+        showReplayLoadingScreen("ai_league_replay.loading_slow");
+      }
+    }, REPLAY_LOADING_SLOW_TIMEOUT_MS);
+    const clearVeilSlowTimer = () => {
+      if (veilSlowTimer !== null) {
+        clearTimeout(veilSlowTimer);
+        veilSlowTimer = null;
+      }
+    };
+    const onVeilReplayError = () => {
+      if (veilFinished) return;
+      veilFinished = true;
+      clearVeilSlowTimer();
+      showReplayLoadingFailure();
+    };
+    document.addEventListener(
+      "ai-league-replay-load-error",
+      onVeilReplayError,
+      {
+        once: true,
+      },
     );
+    const releaseVeilHold = () => {
+      clearVeilSlowTimer();
+      document.removeEventListener(
+        "ai-league-replay-load-error",
+        onVeilReplayError,
+      );
+    };
+    const finishVeil = () => {
+      if (veilFinished) return;
+      veilFinished = true;
+      releaseVeilHold();
+      setReplayLoadingProgress(null);
+      finishReplayLoadingScreen();
+      if (this.replayLoadingCleanup === releaseVeilHold) {
+        this.replayLoadingCleanup = null;
+      }
+    };
+    this.replayLoadingCleanup = releaseVeilHold;
 
     let active = true;
     let projectionMounted = false;
     const runtime = new ReplayPremiereRuntimeController({
       premiereId,
-      onProjectionReady: () => {
+      onProjectionReady: (projection) => {
         if (!active || this.replayPremiereRuntime !== runtime) return;
         projectionMounted = true;
-        this.replayLoadingCleanup?.();
-        this.replayLoadingCleanup = null;
-        finishReplayLoadingScreen();
+        if (
+          projection.state === "playing" ||
+          projection.state === "checkpoint"
+        ) {
+          // Live join: keep the veil up with join-sync messaging until the
+          // runtime reports the trail-buffered entry position is reached
+          // (onJoinSync "complete" below).
+          if (!veilFinished) {
+            clearVeilSlowTimer();
+            showReplayLoadingScreen("replay_premiere.joining_live");
+          }
+          return;
+        }
+        if (
+          projection.state === "revealed" ||
+          projection.state === "archived"
+        ) {
+          // Post-reveal pages intentionally replay from the start; lift on
+          // the first rendered frame like an ordinary replay.
+          const onFirstFrame = () => finishVeil();
+          document.addEventListener("ai-league-replay-frame", onFirstFrame, {
+            once: true,
+          });
+          return;
+        }
+        // Scheduled countdown and terminal failure/cancel pages have no game
+        // playback to wait for.
+        finishVeil();
+      },
+      onJoinSync: (update) => {
+        if (!active || this.replayPremiereRuntime !== runtime) return;
+        if (update.state === "complete") {
+          finishVeil();
+          return;
+        }
+        if (veilFinished) return;
+        setReplayLoadingProgress(
+          update.currentTurn === null
+            ? translateText("replay_premiere.join_sync_target", {
+                target: update.targetTurn,
+              })
+            : translateText("replay_premiere.join_sync_progress", {
+                current: update.currentTurn,
+                target: update.targetTurn,
+                percent: Math.min(
+                  100,
+                  Math.max(
+                    0,
+                    Math.floor((update.currentTurn / update.targetTurn) * 100),
+                  ),
+                ),
+              }),
+        );
       },
       onJoinReady: (request) => {
         if (
