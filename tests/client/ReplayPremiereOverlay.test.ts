@@ -80,7 +80,7 @@ describe("ReplayPremiereOverlay", () => {
     ).not.toBeNull();
   });
 
-  it("shows exactly one open 15-second checkpoint and locks one prediction", async () => {
+  it("shows exactly one open checkpoint window and locks one prediction", async () => {
     const onPrediction = vi.fn();
     const now = "2026-07-20T20:00:00.000Z";
     const model = makeModel({
