@@ -54,9 +54,18 @@ describe("ReplayPremiereOverlay", () => {
     expect(handle.element.textContent).toContain(
       "replay_premiere.policy_version_id:id=policy-version-atlas",
     );
+    // Provenance is collapsed behind a "Verification details" disclosure, and
+    // long hashes render truncated with the full value preserved in `title`.
     expect(handle.element.textContent).toContain(
-      `replay_premiere.content_sha:hash=${"b".repeat(64)}`,
+      "replay_premiere.verification_details",
     );
+    expect(handle.element.textContent).toContain(
+      `replay_premiere.content_sha:hash=${"b".repeat(12)}…`,
+    );
+    const contentShaLine = [
+      ...handle.element.querySelectorAll<HTMLElement>(".rp-policy-reference"),
+    ].find((line) => line.title.includes("b".repeat(64)));
+    expect(contentShaLine).not.toBeUndefined();
     expect(handle.element.textContent).toContain(
       "replay_premiere.label_controlled",
     );

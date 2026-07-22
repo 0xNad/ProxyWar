@@ -366,6 +366,7 @@ export function mountReplayPremiereOverlay(
   let captionDraft = initialModel.share?.suggestedCaption ?? "";
   let captionTouched = false;
   let lastSuggestedCaption = captionDraft;
+  let lastWindowPhase: ReplayPremiereWindowPhase | null = null;
 
   const safeRun = (
     button: HTMLButtonElement,
@@ -401,7 +402,9 @@ export function mountReplayPremiereOverlay(
     if (disposed) {
       return;
     }
-    updateCountdowns(overlay, model, authoritativeTime());
+    const nowMs = authoritativeTime();
+    updateCountdowns(overlay, model, nowMs);
+    announceWindowTransition(nowMs);
   };
 
   const authoritativeTime = () => {
@@ -409,6 +412,23 @@ export function mountReplayPremiereOverlay(
       return null;
     }
     return serverClockMs + Math.max(0, Date.now() - localClockMs);
+  };
+
+  // Announces prediction-window and start transitions once each, on change.
+  const announceWindowTransition = (nowMs: number | null) => {
+    const region = overlay.querySelector<HTMLElement>(
+      "[data-premiere-window-status]",
+    );
+    if (region === null) {
+      return;
+    }
+    const phase = premiereWindowPhase(model, nowMs);
+    if (phase === lastWindowPhase) {
+      return;
+    }
+    lastWindowPhase = phase;
+    const key = windowPhaseAnnouncementKey(phase);
+    region.textContent = key === null ? "" : translateText(key);
   };
 
   const render = () => {
@@ -498,6 +518,15 @@ function renderOverlay(
   actionStatus.setAttribute("role", "status");
   actionStatus.setAttribute("aria-live", "polite");
   shell.append(actionStatus);
+  // A visually-hidden live region that announces only meaningful lifecycle
+  // transitions (prediction window open/close, "starting when ready") exactly
+  // once. It replaces the per-tick aria-live on the countdown elements, which
+  // spammed screen readers.
+  const windowStatus = element("p", "rp-sr-only");
+  windowStatus.dataset.premiereWindowStatus = "";
+  windowStatus.setAttribute("role", "status");
+  windowStatus.setAttribute("aria-live", "polite");
+  shell.append(windowStatus);
   return shell;
 }
 
@@ -527,6 +556,9 @@ function renderHeader(
   );
   ambient.dataset.focusKey = "ambient";
   ambient.setAttribute("aria-pressed", String(model.ambient));
+  // Mirror every other control: when the host wires no ambient handler the
+  // toggle is a visible no-op, so disable it instead of looking live-but-dead.
+  ambient.disabled = callbacks.onAmbientChange === undefined;
   ambient.addEventListener("click", () => {
     safeRun(
       ambient,
@@ -582,8 +614,12 @@ function renderStateBody(
       body.append(renderShare(model, callbacks, safeRun, captionState));
       break;
     case "checkpoint":
-      body.append(renderPlaying(model));
+      // The prediction card is the interactive beat, so it leads. On the tight
+      // mobile sheet the playing-status card is hidden via CSS in this state,
+      // guaranteeing the question/options land above the fold. The LIVE pulse
+      // still reads through the checkpoint timer pill.
       body.append(renderCheckpoint(model, callbacks, safeRun));
+      body.append(renderPlaying(model));
       body.append(renderAmbientEvidence(model));
       body.append(renderMarkers(model, callbacks, safeRun));
       body.append(renderShare(model, callbacks, safeRun, captionState));
@@ -594,9 +630,12 @@ function renderStateBody(
         body.append(renderFrozenPosition(model));
         break;
       }
+      // Post-reveal, the final standings are the truth; the mid-game leader
+      // scoreboard (renderAmbientEvidence) is intentionally dropped so stale
+      // "current leaders" percentages cannot sit under and contradict the
+      // final results.
       body.append(renderReveal(model, model.reveal));
       body.append(renderResultsSummary(model.reveal));
-      body.append(renderAmbientEvidence(model));
       body.append(renderMarkers(model, callbacks, safeRun));
       body.append(renderShare(model, callbacks, safeRun, captionState));
       body.append(renderCounterChallenge(model, callbacks, safeRun));
@@ -643,7 +682,9 @@ function renderScheduled(
   heading.id = "replay-premiere-scheduled-heading";
   const countdown = element("p", "rp-countdown");
   countdown.dataset.premiereCountdown = "start";
-  countdown.setAttribute("aria-live", "polite");
+  // No aria-live here: updateCountdowns rewrites this element every 250ms, which
+  // would spam a screen reader. Meaningful transitions ("Starting when ready")
+  // are announced once through the dedicated window-status live region instead.
   const start = element(
     "p",
     "rp-start-time",
@@ -674,7 +715,7 @@ function renderScheduled(
       rate: model.playbackRate,
     }),
   );
-  section.append(metadata, renderPolicies(model.policies));
+  section.append(metadata);
 
   const actions = element("div", "rp-actions rp-secondary");
   const reminder = button(
@@ -722,7 +763,10 @@ function renderScheduled(
     });
     actions.append(copyLink);
   }
-  section.append(actions);
+  // The reminder / copy-link CTAs sit ABOVE the participant roster so they never
+  // depend on roster length — with a 12-agent field the provenance list would
+  // otherwise push the CTAs far below the fold.
+  section.append(actions, renderPolicies(model.policies));
   return section;
 }
 
@@ -759,46 +803,56 @@ function renderPolicies(
           : "replay_premiere.identity_local",
       ),
     );
-    const identityName = element(
-      "span",
-      "rp-policy-reference",
-      policy.policyIdentity.namespace === "softmax_policy_version"
-        ? translateText("replay_premiere.softmax_policy_name", {
-            name: safeDisplay(policy.policyIdentity.policyName),
-          })
-        : translateText("replay_premiere.manifest_name", {
-            name: safeDisplay(policy.policyIdentity.manifestName),
-          }),
+    item.append(name, version, kind);
+    // Full-length provenance (long IDs + 64-char SHA-256 hashes) is collapsed
+    // behind a "Verification details" disclosure so the roster stays scannable
+    // even with a 12-agent field. Hashes render truncated with the full value
+    // preserved in the title attribute for verification-minded viewers.
+    const details = element("details", "rp-policy-details");
+    details.append(
+      element(
+        "summary",
+        "rp-policy-summary",
+        translateText("replay_premiere.verification_details"),
+      ),
     );
-    item.append(name, version, kind, identityName);
     if (policy.policyIdentity.namespace === "softmax_policy_version") {
-      item.append(
-        element(
-          "span",
-          "rp-policy-reference",
+      details.append(
+        policyReferenceLine(
+          translateText("replay_premiere.softmax_policy_name", {
+            name: safeDisplay(policy.policyIdentity.policyName),
+          }),
+        ),
+        policyReferenceLine(
           translateText("replay_premiere.policy_version_id", {
             id: safeDisplay(policy.policyIdentity.policyVersionId),
           }),
         ),
       );
     } else {
-      item.append(
-        element(
-          "span",
-          "rp-policy-reference",
-          translateText("replay_premiere.manifest_sha", {
-            hash: safeDisplay(policy.policyIdentity.manifestSha256),
+      const manifestSha = safeDisplay(policy.policyIdentity.manifestSha256);
+      const contentSha = safeDisplay(policy.policyIdentity.contentSha256);
+      details.append(
+        policyReferenceLine(
+          translateText("replay_premiere.manifest_name", {
+            name: safeDisplay(policy.policyIdentity.manifestName),
           }),
         ),
-        element(
-          "span",
-          "rp-policy-reference",
-          translateText("replay_premiere.content_sha", {
-            hash: safeDisplay(policy.policyIdentity.contentSha256),
+        policyReferenceLine(
+          translateText("replay_premiere.manifest_sha", {
+            hash: truncateHash(manifestSha),
           }),
+          translateText("replay_premiere.manifest_sha", { hash: manifestSha }),
+        ),
+        policyReferenceLine(
+          translateText("replay_premiere.content_sha", {
+            hash: truncateHash(contentSha),
+          }),
+          translateText("replay_premiere.content_sha", { hash: contentSha }),
         ),
       );
     }
+    item.append(details);
     list.append(item);
   }
   section.append(heading, list);
@@ -922,7 +976,8 @@ function renderCheckpoint(
   const timer = element("p", "rp-checkpoint-timer");
   timer.dataset.premiereCountdown = "checkpoint";
   timer.dataset.checkpointId = checkpoint.id;
-  timer.setAttribute("aria-live", "polite");
+  // No aria-live here (see renderScheduled): the per-tick countdown must not be
+  // announced. Window open/close is announced once via the window-status region.
   section.append(eyebrow, question, timer);
 
   if (checkpoint.options.length === 0) {
@@ -954,9 +1009,9 @@ function renderCheckpoint(
     optionButton.type = "button";
     optionButton.textContent = safeDisplay(option.displayName);
     optionButton.dataset.focusKey = `prediction-${option.seatId}`;
-    optionButton.dataset.selected = String(
-      checkpoint.selectedSeatId === option.seatId,
-    );
+    const selected = checkpoint.selectedSeatId === option.seatId;
+    optionButton.dataset.selected = String(selected);
+    optionButton.setAttribute("aria-pressed", String(selected));
     optionButton.disabled =
       !isOpen ||
       model.canPredict === false ||
@@ -1188,9 +1243,16 @@ function renderShare(
     "rp-subheading",
     translateText("replay_premiere.share_moment"),
   );
+  // Post-reveal, the clip download is the single loudest action, so the
+  // timestamp-share button demotes to quiet on the revealed/archived surface.
+  // While live it remains the primary share affordance.
+  const timestampPrimary =
+    model.state !== "revealed" && model.state !== "archived";
   const timestamp = button(
     "replay_premiere.copy_timestamp",
-    "rp-button rp-button-primary rp-timestamp-share",
+    `rp-button ${
+      timestampPrimary ? "rp-button-primary" : "rp-button-quiet"
+    } rp-timestamp-share`,
   );
   timestamp.dataset.focusKey = "timestamp-share";
   const timestampUrl = model.share.timestampUrl;
@@ -1283,16 +1345,26 @@ function renderClip(
     ),
   );
   const anchorTurn = finiteIntegerOrNull(model.currentTurn);
+  const ready = clip.ready ?? null;
+  const isReady = clip.status === "ready" && ready !== null;
+  // Once the rendered file exists, the download anchor below becomes the loud
+  // payoff and this button demotes to a quiet "Re-render clip" so it can never
+  // be mistaken for the download and trigger an accidental re-render.
   const request = button(
-    "replay_premiere.clip_download_button",
-    "rp-button rp-button-primary rp-clip-request",
+    isReady
+      ? "replay_premiere.clip_rerender"
+      : "replay_premiere.clip_download_button",
+    `rp-button ${
+      isReady ? "rp-button-quiet" : "rp-button-primary"
+    } rp-clip-request`,
   );
   request.dataset.focusKey = "clip-request";
   const canRequest =
     callbacks.onRequestClip !== undefined &&
     model.canRequestClip === true &&
     anchorTurn !== null;
-  request.disabled = !canRequest;
+  // A render already in flight must not accept another request.
+  request.disabled = !canRequest || clip.status === "preparing";
   request.addEventListener("click", () => {
     safeRun(
       request,
@@ -1310,20 +1382,27 @@ function renderClip(
 
   const statusKey = clipStatusText(clip.status);
   if (statusKey !== null) {
-    const status = element("p", "rp-clip-status", translateText(statusKey));
+    const status = element("p", "rp-clip-status");
     status.setAttribute("role", "status");
     status.setAttribute("aria-live", "polite");
     status.dataset.clipStatus = clip.status;
+    // A pulsing dot signals an in-flight render (static under reduced motion).
+    if (clip.status === "preparing") {
+      const dot = element("span", "rp-clip-dot");
+      dot.setAttribute("aria-hidden", "true");
+      status.append(dot);
+    }
+    status.append(translateText(statusKey));
     wrapper.append(status);
   }
 
-  if (clip.ready !== null && clip.ready !== undefined) {
+  if (ready !== null) {
     const download = element(
       "a",
-      "rp-button rp-button-quiet rp-clip-download",
+      "rp-button rp-button-primary rp-clip-download",
     ) as HTMLAnchorElement;
     download.textContent = translateText("replay_premiere.clip_download_file");
-    download.href = clip.ready.downloadUrl;
+    download.href = ready.downloadUrl;
     download.setAttribute("download", "");
     download.rel = "noopener";
     download.dataset.focusKey = "clip-download";
@@ -1534,7 +1613,9 @@ function renderCancelled(
   return section;
 }
 
-const RESULTS_STANDINGS_LIMIT = 10;
+// The two-column standings grid keeps the full 12-seat FFA field compact, so we
+// show the whole field rather than truncating it to a "+N more agents" tail.
+const RESULTS_STANDINGS_LIMIT = 12;
 const RESULTS_MARKERS_LIMIT = 12;
 
 /**
@@ -1789,6 +1870,19 @@ function renderArchive(model: ReplayPremiereOverlayModel): HTMLElement {
     ),
     element("p", "", translateText("replay_premiere.archived_description")),
   );
+  // A dated identity line so the durable archived page isn't a generic header.
+  // Falls back silently when the timestamp is unparseable.
+  if (parseTime(model.scheduledAt) !== null) {
+    section.append(
+      element(
+        "p",
+        "rp-archived-premiered",
+        translateText("replay_premiere.archived_premiered", {
+          date: formatDateTime(model.scheduledAt),
+        }),
+      ),
+    );
+  }
   wrapper.append(section);
   if (isVerifiedRevealView(model)) {
     wrapper.append(renderReveal(model, model.reveal));
@@ -1921,6 +2015,52 @@ function updateCountdowns(
   }
 }
 
+type ReplayPremiereWindowPhase = "open" | "closed" | "starting" | "idle";
+
+// Derives the announcement-worthy lifecycle phase from the authoritative model.
+// Prediction-window open/close reads the active checkpoint's own state; the
+// scheduled "starting" phase fires once the scheduled instant has passed.
+function premiereWindowPhase(
+  model: ReplayPremiereOverlayModel,
+  nowMs: number | null,
+): ReplayPremiereWindowPhase {
+  if (model.state === "checkpoint") {
+    const checkpoint = model.checkpoints.find(
+      (entry) => entry.id === model.activeCheckpointId,
+    );
+    if (checkpoint?.state === "open") {
+      return "open";
+    }
+    if (checkpoint?.state === "closed") {
+      return "closed";
+    }
+    return "idle";
+  }
+  if (model.state === "scheduled") {
+    const scheduledMs = parseTime(model.scheduledAt);
+    if (nowMs !== null && scheduledMs !== null && scheduledMs <= nowMs) {
+      return "starting";
+    }
+    return "idle";
+  }
+  return "idle";
+}
+
+function windowPhaseAnnouncementKey(
+  phase: ReplayPremiereWindowPhase,
+): string | null {
+  switch (phase) {
+    case "open":
+      return "replay_premiere.window_open";
+    case "closed":
+      return "replay_premiere.window_closed";
+    case "starting":
+      return "replay_premiere.starting_when_ready";
+    case "idle":
+      return null;
+  }
+}
+
 function createStyle(): HTMLStyleElement {
   const style = document.createElement("style");
   style.textContent = OVERLAY_CSS;
@@ -1969,6 +2109,27 @@ function policyVersion(policy: ReplayPremierePolicyView): string {
       ? policy.policyIdentity.serverAssignedVersion
       : policy.policyIdentity.declaredVersion,
   );
+}
+
+const POLICY_HASH_DISPLAY_LENGTH = 12;
+
+// Truncate a long provenance hash to a scannable prefix + ellipsis. The caller
+// carries the full value in a title attribute so nothing is lost.
+function truncateHash(hash: string): string {
+  if (hash.length <= POLICY_HASH_DISPLAY_LENGTH + 1) {
+    return hash;
+  }
+  return `${hash.slice(0, POLICY_HASH_DISPLAY_LENGTH)}…`;
+}
+
+// A collapsed provenance line. `fullText`, when it differs from the visible
+// text (i.e. a hash was truncated), is exposed via the title attribute.
+function policyReferenceLine(text: string, fullText?: string): HTMLElement {
+  const line = element("span", "rp-policy-reference", text);
+  if (fullText !== undefined && fullText !== text) {
+    line.title = fullText;
+  }
+  return line;
 }
 
 function appendDefinition(
@@ -2107,7 +2268,7 @@ const OVERLAY_CSS = `
     --rp-line-strong: rgba(148, 163, 184, 0.34);
     --rp-text: #f1f5f9;
     --rp-text-dim: #cbd5e1;
-    --rp-muted: #94a3b8;
+    --rp-muted: #9fb0c3;
     --rp-accent: #56c7f5;
     --rp-accent-strong: #0ea5e9;
     --rp-accent-soft: rgba(56, 189, 248, 0.16);
@@ -2207,6 +2368,18 @@ const OVERLAY_CSS = `
 
   #${OVERLAY_ID} * { box-sizing: border-box; }
   #${OVERLAY_ID} [hidden] { display: none !important; }
+  #${OVERLAY_ID} .rp-sr-only {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    padding: 0;
+    margin: -1px;
+    overflow: hidden;
+    clip: rect(0 0 0 0);
+    clip-path: inset(50%);
+    white-space: nowrap;
+    border: 0;
+  }
   #${OVERLAY_ID} button,
   #${OVERLAY_ID} textarea { font: inherit; }
   #${OVERLAY_ID} button { transition: transform 0.12s ease, border-color 0.12s ease, background 0.12s ease, box-shadow 0.12s ease; }
@@ -2357,7 +2530,32 @@ const OVERLAY_CSS = `
   #${OVERLAY_ID} .rp-policy-name { min-width: 0; overflow-wrap: anywhere; font-weight: 750; }
   #${OVERLAY_ID} .rp-policy-version { color: var(--rp-accent); font-weight: 700; font-size: 12px; text-align: right; }
   #${OVERLAY_ID} .rp-policy-kind { grid-column: 1 / -1; margin-top: 2px; color: var(--rp-muted); font-size: 10px; font-weight: 700; letter-spacing: 0.04em; text-transform: uppercase; }
-  #${OVERLAY_ID} .rp-policy-reference { grid-column: 1 / -1; color: var(--rp-muted); overflow-wrap: anywhere; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 10px; line-height: 1.35; }
+  #${OVERLAY_ID} .rp-policy-reference { display: block; color: var(--rp-muted); overflow-wrap: anywhere; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 10px; line-height: 1.35; }
+  #${OVERLAY_ID} .rp-policy-details { grid-column: 1 / -1; margin-top: 3px; }
+  #${OVERLAY_ID} .rp-policy-details > .rp-policy-reference { margin-top: 5px; }
+  #${OVERLAY_ID} .rp-policy-summary {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    width: max-content;
+    color: var(--rp-muted);
+    font-size: 10px;
+    font-weight: 700;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+    cursor: pointer;
+    list-style: none;
+  }
+  #${OVERLAY_ID} .rp-policy-summary::-webkit-details-marker { display: none; }
+  #${OVERLAY_ID} .rp-policy-summary::before {
+    content: "›";
+    display: inline-block;
+    font-size: 12px;
+    line-height: 1;
+    transition: transform 0.12s ease;
+  }
+  #${OVERLAY_ID} .rp-policy-details[open] .rp-policy-summary::before { transform: rotate(90deg); }
+  #${OVERLAY_ID} .rp-policy-summary:focus-visible { outline: 3px solid var(--rp-focus); outline-offset: 2px; border-radius: var(--rp-r-xs); }
 
   /* ---- Buttons ---- */
   #${OVERLAY_ID} .rp-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 13px; }
@@ -2656,10 +2854,22 @@ const OVERLAY_CSS = `
   #${OVERLAY_ID} .rp-clip-request { grid-column: 1 / -1; }
   #${OVERLAY_ID} .rp-clip-status {
     grid-column: 1 / -1;
+    display: flex;
+    align-items: center;
+    gap: 7px;
     margin: 0;
     color: var(--rp-accent);
     font-size: 12px;
     font-weight: 600;
+  }
+  #${OVERLAY_ID} .rp-clip-dot {
+    flex: none;
+    width: 8px;
+    height: 8px;
+    border-radius: var(--rp-r-pill);
+    background: var(--rp-accent);
+    box-shadow: 0 0 0 0 rgba(56, 199, 245, 0.6);
+    animation: rp-live-now-pulse 1.6s ease-out infinite;
   }
   #${OVERLAY_ID} .rp-clip-status[data-clip-status="failed"] { color: var(--rp-danger); }
   #${OVERLAY_ID} .rp-clip-status[data-clip-status="busy"] { color: var(--rp-caution-text); }
@@ -2715,7 +2925,8 @@ const OVERLAY_CSS = `
   #${OVERLAY_ID} .rp-results { display: grid; gap: 12px; animation: rp-results-rise 0.4s cubic-bezier(0.22, 1, 0.36, 1) both; }
   #${OVERLAY_ID} .rp-results-meta { margin: 0; color: var(--rp-text-dim); font-weight: 650; }
   #${OVERLAY_ID} .rp-results-group { display: grid; gap: 7px; }
-  #${OVERLAY_ID} .rp-results-standings { list-style: none; margin: 0; padding: 0; display: grid; gap: 5px; }
+  #${OVERLAY_ID} .rp-results-standings { list-style: none; margin: 0; padding: 0; display: grid; grid-template-columns: 1fr 1fr; gap: 5px; }
+  #${OVERLAY_ID} .rp-results-standing.rp-results-win { grid-column: 1 / -1; }
   #${OVERLAY_ID} .rp-results-standing {
     display: flex;
     justify-content: space-between;
@@ -2790,7 +3001,7 @@ const OVERLAY_CSS = `
     right: 10px;
     bottom: 10px;
     width: min(320px, calc(100vw - 20px));
-    max-height: min(232px, calc(100vh - 20px));
+    max-height: min(288px, calc(100vh - 20px));
   }
   #${OVERLAY_ID}[data-ambient="true"] .rp-header { padding: 9px 10px; }
   #${OVERLAY_ID}[data-ambient="true"] .rp-title { max-width: 190px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-size: 14px; }
@@ -2800,16 +3011,26 @@ const OVERLAY_CSS = `
   #${OVERLAY_ID}[data-ambient="true"] .rp-checkpoint-progress,
   #${OVERLAY_ID}[data-ambient="true"] .rp-secondary,
   #${OVERLAY_ID}[data-ambient="true"] .rp-marker-heading { display: none; }
-  #${OVERLAY_ID}[data-ambient="true"] .rp-body { grid-template-columns: 1fr auto; gap: 7px; padding: 8px; }
+  /* Ambient stacks in a single column so the leaders and the full 5-reaction
+     row are never clipped by the compact pane. */
+  #${OVERLAY_ID}[data-ambient="true"] .rp-body { grid-template-columns: 1fr; gap: 7px; padding: 8px; }
   #${OVERLAY_ID}[data-ambient="true"] .rp-playing-status,
   #${OVERLAY_ID}[data-ambient="true"] .rp-ambient-evidence,
-  #${OVERLAY_ID}[data-ambient="true"] .rp-markers { padding: 9px; }
+  #${OVERLAY_ID}[data-ambient="true"] .rp-markers { padding: 8px 9px; }
   #${OVERLAY_ID}[data-ambient="true"] .rp-playing-status { grid-column: 1 / -1; }
-  #${OVERLAY_ID}[data-ambient="true"] .rp-ambient-evidence { grid-column: 1; grid-template-columns: 1fr; }
-  #${OVERLAY_ID}[data-ambient="true"] .rp-markers { grid-column: 2; }
-  #${OVERLAY_ID}[data-ambient="true"] .rp-marker-list { grid-template-columns: repeat(2, 36px); gap: 5px; margin: 0; }
-  #${OVERLAY_ID}[data-ambient="true"] .rp-marker-button { min-height: 32px; height: 32px; padding: 1px; box-shadow: inset 0 2px 0 var(--rp-mk); }
-  #${OVERLAY_ID}[data-ambient="true"] .rp-marker-symbol { font-size: 15px; }
+  #${OVERLAY_ID}[data-ambient="true"] .rp-position { margin-top: 5px; }
+  #${OVERLAY_ID}[data-ambient="true"] .rp-ambient-evidence { grid-column: 1 / -1; grid-template-columns: 1fr; gap: 0; }
+  /* Compact the leader scoreboard so the full 5-reaction row still fits the
+     pane underneath it. */
+  #${OVERLAY_ID}[data-ambient="true"] .rp-leaders .rp-subheading { font-size: 10px; }
+  #${OVERLAY_ID}[data-ambient="true"] .rp-leader-list { gap: 3px; margin-top: 5px; }
+  #${OVERLAY_ID}[data-ambient="true"] .rp-leader { padding: 1px 0 5px; font-size: 13px; }
+  #${OVERLAY_ID}[data-ambient="true"] .rp-headline { display: none; }
+  #${OVERLAY_ID}[data-ambient="true"] .rp-leader:nth-child(n + 3) { display: none; }
+  #${OVERLAY_ID}[data-ambient="true"] .rp-markers { grid-column: 1 / -1; }
+  #${OVERLAY_ID}[data-ambient="true"] .rp-marker-list { grid-template-columns: repeat(5, 30px); gap: 5px; margin: 0; justify-content: space-between; }
+  #${OVERLAY_ID}[data-ambient="true"] .rp-marker-button { min-height: 30px; height: 30px; width: 30px; padding: 1px; box-shadow: inset 0 2px 0 var(--rp-mk); }
+  #${OVERLAY_ID}[data-ambient="true"] .rp-marker-symbol { font-size: 14px; }
   #${OVERLAY_ID}[data-ambient="true"] .rp-marker-label {
     position: absolute;
     width: 1px;
@@ -2824,6 +3045,8 @@ const OVERLAY_CSS = `
     max-height: 188px;
     overflow: auto;
   }
+  #${OVERLAY_ID}[data-ambient="true"] .rp-checkpoint .rp-eyebrow { display: none; }
+  #${OVERLAY_ID}[data-ambient="true"] .rp-checkpoint .rp-question { font-size: 16px; }
 
   /* ---- Mobile ---- */
   @media (max-width: 700px), (max-height: 430px) {
@@ -2836,6 +3059,29 @@ const OVERLAY_CSS = `
       max-height: min(58vh, 380px);
       border-radius: var(--rp-r-lg);
     }
+    /* During the 15s prediction window, hide the playing-status card so the
+       (reordered) prediction card is guaranteed above the fold on the tight
+       sheet. LIVE still reads through the checkpoint timer pill. */
+    #${OVERLAY_ID}:not([data-ambient="true"])[data-state="checkpoint"] .rp-playing-status { display: none; }
+    /* Terminal + scheduled states carry the payoff/results and the CTAs, so give
+       them a taller sheet. playing/checkpoint keep 58vh so the game canvas stays
+       visible behind the overlay. */
+    #${OVERLAY_ID}:not([data-ambient="true"])[data-state="scheduled"],
+    #${OVERLAY_ID}:not([data-ambient="true"])[data-state="revealed"],
+    #${OVERLAY_ID}:not([data-ambient="true"])[data-state="archived"],
+    #${OVERLAY_ID}:not([data-ambient="true"])[data-state="failed"],
+    #${OVERLAY_ID}:not([data-ambient="true"])[data-state="cancelled"] { max-height: min(82vh, 660px); }
+    /* A sticky bottom fade scrim as a "more below" affordance when the sheet
+       content overflows. */
+    #${OVERLAY_ID}:not([data-ambient="true"]) .rp-shell::after {
+      content: "";
+      position: sticky;
+      bottom: 0;
+      height: 28px;
+      margin-top: -28px;
+      background: linear-gradient(transparent, var(--rp-bg-solid));
+      pointer-events: none;
+    }
     #${OVERLAY_ID} .rp-marker-label { font-size: 9px; }
   }
 
@@ -2844,6 +3090,7 @@ const OVERLAY_CSS = `
     #${OVERLAY_ID} * { scroll-behavior: auto !important; transition: none !important; }
     #${OVERLAY_ID} .rp-live-now-dot,
     #${OVERLAY_ID} .rp-checkpoint-timer::before,
+    #${OVERLAY_ID} .rp-clip-dot,
     #${OVERLAY_ID} .rp-reveal,
     #${OVERLAY_ID} .rp-results,
     #${OVERLAY_ID} .rp-reveal-crest { animation: none !important; }

@@ -563,7 +563,7 @@ export function coworldLeagueIndexHtml(data: CoworldLeagueMirrorData): string {
             : ""
         }
       </div>
-    </div>
+    </div>${premiereSection}
     <div class="metric-grid">
       <div class="metric"><span>Current round</span><strong>${
         league.currentRoundNumber === null
@@ -581,7 +581,7 @@ export function coworldLeagueIndexHtml(data: CoworldLeagueMirrorData): string {
           data.episodes.filter((episode) => episode.fullRenderHref).length,
         ),
       )}</strong></div>
-    </div>${premiereSection}
+    </div>
     <section>
       <h2 id="standings-title">Standings</h2>
       <p id="standings-provenance" class="standings-note">${escapeHtml(

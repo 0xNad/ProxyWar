@@ -96,8 +96,18 @@ export function readReplayPremiereArchivePayload(
 
 export function mountArchivedReplayPremiereOverlay(
   payload: ReplayPremiereArchivePayload,
+  ambient = false,
 ): ReplayPremiereOverlayHandle {
-  return mountReplayPremiereOverlay(buildArchivedOverlayModel(payload), {});
+  const model = { ...buildArchivedOverlayModel(payload), ambient };
+  return mountReplayPremiereOverlay(model, {
+    // The archived page is read-only, but the ambient toggle must still work:
+    // re-mount the same summary with the ambient flag flipped. This gives the
+    // archived surface a real compact mode so the league replay behind it is
+    // watchable, instead of a live-looking button that silently no-ops.
+    onAmbientChange: (request): void => {
+      mountArchivedReplayPremiereOverlay(payload, request.ambient);
+    },
+  });
 }
 
 function buildArchivedOverlayModel(
