@@ -51,7 +51,16 @@ const MAX_SOURCE_BYTES = 256 * MIB;
 const MAX_RESULT_BYTES = 2 * MIB;
 const MAX_INPUT_JSON_BYTES = 1 * MIB;
 const MAX_SERVED_ROOTS = 16;
-const MAX_PRESENTATION_SPAN_MS = 1_000;
+/**
+ * Chunk build span. At real-speed pacing (100 ms/turn nominal offsets) the
+ * worst admitted show is 3,600 s of presentation (36k turns @1x), so 45 s
+ * chunks keep the count at ~80-82 — well inside the 128-chunk journal-budget
+ * cap — while bounding the viewer's presentation trail (a chunk releases at
+ * its LAST record's time) to 45 s. Must stay at or below the
+ * REPLAY_PREMIERE_MAX_PRESENTATION_SPAN_MS validation ceiling (60 s).
+ * History: 1,000 ms while nominal offsets were ~1 ms/turn.
+ */
+const MAX_PRESENTATION_SPAN_MS = 45_000;
 
 const REPLAY_IMPORT_LIMITS: PremiereReplayImportLimits = Object.freeze({
   maxBootstrapBytes: 1 * MIB,

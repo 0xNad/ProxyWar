@@ -15,6 +15,7 @@ import {
 } from "./ReplayPremiereChunks";
 import {
   isPremiereId,
+  REPLAY_PREMIERE_MAX_PRESENTATION_SPAN_MS,
   type CoworldPremiereSourceIds,
   type PolicyIdentity,
   type PremiereChunkDescriptor,
@@ -162,7 +163,8 @@ export function verifyPremierePublicationCommitment(
     !isSha256Hex(commitment.publicationCommitmentHash) ||
     !Number.isSafeInteger(commitment.maxPresentationSpanMs) ||
     commitment.maxPresentationSpanMs < 1 ||
-    commitment.maxPresentationSpanMs > 1_000 ||
+    commitment.maxPresentationSpanMs >
+      REPLAY_PREMIERE_MAX_PRESENTATION_SPAN_MS ||
     jsonHash(preimage) !== publicationCommitmentHash
   ) {
     throw publicationFailure("invalid_publication_commitment");
@@ -392,7 +394,7 @@ export class VerifiedPremiereEligibilityGate {
     if (
       !Number.isSafeInteger(options.maxPresentationSpanMs) ||
       options.maxPresentationSpanMs <= 0 ||
-      options.maxPresentationSpanMs > 1_000
+      options.maxPresentationSpanMs > REPLAY_PREMIERE_MAX_PRESENTATION_SPAN_MS
     ) {
       throw publicationFailure("invalid_max_presentation_span");
     }

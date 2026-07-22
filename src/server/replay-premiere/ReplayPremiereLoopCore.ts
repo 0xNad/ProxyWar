@@ -37,23 +37,40 @@ export const PREMIERE_LOOP_DIVISION_ID =
 export const PREMIERE_LOOP_SCHEDULE_LEAD_MS = 5 * 60_000;
 /**
  * Hard per-episode availability valve: an episode auto-publishes at
- * scheduledAt + this, even if the premiere never revealed. Must stay below the
- * round interval (~30 min) and above the maximum play time. Never extended.
+ * scheduledAt + this, even if the premiere never revealed. Never extended.
+ *
+ * Derivation (2026-07-22 real-speed retune): the 5-minute schedule lead sits
+ * BEFORE scheduledAt, so this window must cover the worst admitted show plus
+ * margin — 60 min of playback (36,000 turns at 1x real speed; the 60,000-turn
+ * cap at 2x is 50 min) + ~2 min of checkpoint intermissions + up to a minute
+ * of client presentation trail + reveal/publication margin ≈ 75 minutes.
+ *
+ * History: 35 min while premieres free-ran at ~1 ms/turn nominal offsets and
+ * the whole show fit inside one 30-minute round. At real speed a premiere
+ * intentionally spans multiple rounds: while one plays, newly-completed rounds
+ * publish ordinarily at quarantine expiry (skipped_busy) and the loop claims
+ * the next fresh round after release.
  */
-export const PREMIERE_LOOP_HOLD_WINDOW_MS = 35 * 60_000;
+export const PREMIERE_LOOP_HOLD_WINDOW_MS = 75 * 60_000;
 
 /**
  * Coarse cold-start / gap-recovery seal window. A completed round older than
  * this can no longer be sealed: the mirror publishes a completed round on its
- * next cycle (~5 min) unless a suppression contract already covers it, so once a
- * round is older than the loop's own hold window its outcome is long public.
- * Claiming such a round wastes a download and, worse, drives the admission leak
- * collector to fetch the multi-MB public replay and abort it mid-stream. This
- * is the deterministic no-network fast path; the precise "is it actually public
- * right now" decision is the per-episode deployment-origin probe in the loop
- * orchestrator. Fresh rounds (completed within the window) are never affected.
+ * next cycle (~5 min) unless a suppression contract already covers it, so once
+ * a round is that old its outcome is long public. Claiming such a round wastes
+ * a download and, worse, drives the admission leak collector to fetch the
+ * multi-MB public replay and abort it mid-stream. This is the deterministic
+ * no-network fast path; the precise "is it actually public right now" decision
+ * is the per-episode deployment-origin probe in the loop orchestrator. Fresh
+ * rounds (completed within the window) are never affected.
+ *
+ * Deliberately NOT aliased to PREMIERE_LOOP_HOLD_WINDOW_MS: claim freshness
+ * (how stale a completed round may be and still be worth sealing) is governed
+ * by the mirror publish cadence and quarantine, and stays ~35 min; the hold
+ * window above is playback duration and grew to 75 min with real-speed
+ * playback.
  */
-export const PREMIERE_LOOP_SEAL_WINDOW_MS = PREMIERE_LOOP_HOLD_WINDOW_MS;
+export const PREMIERE_LOOP_SEAL_WINDOW_MS = 35 * 60_000;
 
 /**
  * Startup projection budget: episodes longer than this are skipped (the loop
@@ -158,19 +175,24 @@ export function deriveCheckpointId(
  * Playback-rate heuristic keyed on turn count. Admission only accepts 1, 2, or
  * 4; longer games play faster so the reveal window stays bounded.
  *
- * 2026-07-22 retune (operator): premieres ARE the live product surface, so
- * maximize the on-air window instead of minimizing it. Measured throughput at
- * 2× is ~60 released turns/s (round 651: 17,000 turns live 12:22→12:28; round
- * 637: 22,600 turns ≈ 6.5 min), i.e. ~30 turns/s at 1×. Playing typical
- * rounds (≤32k turns) at 1× keeps a premiere on /league for ~8-18 minutes of
- * every ~30-minute round instead of ~5, while the worst admitted case
- * (60k-turn cap at 2× ≈ 17 min + ~5 min lead) still reveals well inside the
- * 35-minute hold valve and clears before the next round needs the slot.
+ * 2026-07-22 retune #3 (real match speed): premieres now pace from the real
+ * 100 ms game turn interval (PREMIERE_REAL_TURN_INTERVAL_MS), i.e. 10 turns/s
+ * at 1×. That makes 10,000 turns ≈ 16.7 min, 20k ≈ 33 min, 36k = 60 min at
+ * 1×; the 60,000-turn admission cap at 2× = 50 min. Typical rounds (≤36k)
+ * play at true match speed; only outsized shows compress to 2× so the worst
+ * case still reveals inside the 75-minute hold valve.
+ *
+ * History — retuned twice earlier on 2026-07-22 while nominal offsets were
+ * ~1 ms/turn and the sim free-ran: first to minimize the on-air window, then
+ * (operator: premieres ARE the live product surface) to maximize it with
+ * ≤32k → 1×. Those bands were calibrated to free-run throughput measurements
+ * (~30-60 released turns/s — round 651: 17,000 turns live in ~6 min; round
+ * 637: 22,600 ≈ 6.5 min) and are obsolete now that 1× means real speed.
  */
 export function playbackRateForTurnCount(
   turnCount: number,
 ): PremierePlaybackRate {
-  if (turnCount > 32_000) {
+  if (turnCount > 36_000) {
     return 2;
   }
   return 1;

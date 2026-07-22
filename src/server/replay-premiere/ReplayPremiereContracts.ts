@@ -178,6 +178,51 @@ export interface HashedPremiereEligibility {
   eligibilityRecordHash: string;
 }
 
+/**
+ * Real OpenFront match cadence: one game turn every 100 ms — the value
+ * `turnIntervalMs()` returns in `src/core/configuration/DefaultConfig.ts`.
+ * Premiere import paces `nominalOffsetMs` from the record's GAME TURN at this
+ * interval, so playback at rate 1 is exactly regular match speed. A unit test
+ * pins this constant against the live server config so the two cannot drift.
+ *
+ * History: until 2026-07-22 the ingest default was 1 ms/turn, which produced
+ * near-zero presentation deltas — the client simulation free-ran and premieres
+ * played absurdly fast (a 22,600-turn episode "premiered" in ~6.5 minutes).
+ */
+export const PREMIERE_REAL_TURN_INTERVAL_MS = 100;
+
+/**
+ * Ceiling for a single chunk's presentation-time span (validated at admission,
+ * in the publication commitment, and by the client wire schema).
+ *
+ * History: this was 1,000 ms while nominal offsets were ~1 ms/turn. At the
+ * real 100 ms turn cadence the worst admitted show is 36,000 turns @1x = 60
+ * minutes of presentation (60,000 @2x = 50 min), and the journal-budget proof
+ * caps a premiere at REPLAY_PREMIERE_MAX_CHUNK_COUNT (128) chunks — so chunks
+ * must be allowed to span up to a minute. Anti-spoiler release semantics are
+ * unchanged: a chunk still releases only once the authoritative clock reaches
+ * its LAST record, so a larger span never releases a record early — it only
+ * means the viewer's map trails the release clock by up to one span.
+ */
+export const REPLAY_PREMIERE_MAX_PRESENTATION_SPAN_MS = 60_000;
+
+/**
+ * Release pause AND interaction window at each prediction checkpoint (the two
+ * are deliberately the same value: no post-checkpoint content may be released
+ * while predictions are open, or a client could read ahead and vote
+ * informed). Derivation: the viewer's map trails the release clock by up to
+ * one chunk presentation span (45 s build spans at real-speed pacing), so the
+ * pause covers that trail PLUS a genuine 15 s window measured from when a
+ * steady-state viewer actually reaches the checkpoint moment: 45 + 15 = 60 s.
+ *
+ * History: 15 s while nominal offsets were ~1 ms/turn and the trail was
+ * sub-second. Durable snapshots recorded under that era validate against
+ * REPLAY_PREMIERE_LEGACY_CHECKPOINT_PAUSE_MS so archived journals stay
+ * readable.
+ */
+export const REPLAY_PREMIERE_CHECKPOINT_PAUSE_MS = 60_000;
+export const REPLAY_PREMIERE_LEGACY_CHECKPOINT_PAUSE_MS = 15_000;
+
 export interface PremiereSourceRecord {
   sequence: number;
   turn: number;

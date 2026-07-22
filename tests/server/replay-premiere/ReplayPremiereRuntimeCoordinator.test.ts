@@ -68,7 +68,7 @@ describe("ReplayPremiereRuntimeCoordinator", () => {
     await fs.rm(root, { recursive: true, force: true });
   });
 
-  test("releases only by authoritative time, pauses exactly 15s, and reveals without a viewer read", async () => {
+  test("releases only by authoritative time, pauses exactly one checkpoint window, and reveals without a viewer read", async () => {
     const { gate, drafts } = await verifiedPublicationFixture(root);
     const clock = new FakeClock(NOW);
     const store = await openStore(root);
@@ -375,10 +375,12 @@ describe("ReplayPremiereRuntimeCoordinator", () => {
       authoritativeElapsedMs: 100,
       accumulatedPauseMs: 35_000,
       activeCheckpoint: {
-        closesAt: new Date(NOW.getTime() + 45_100).toISOString(),
+        closesAt: new Date(
+          NOW.getTime() + 100 + REPLAY_PREMIERE_CHECKPOINT_PAUSE_MS + 30_000,
+        ).toISOString(),
       },
     });
-    clock.advance(9_999);
+    clock.advance(REPLAY_PREMIERE_CHECKPOINT_PAUSE_MS - 5_000 - 1);
     await restarted.synchronize();
     expect(restarted.readLifecycleState()).toBe("checkpoint");
     expect(restarted.readChunk(1)).toBeNull();
@@ -387,7 +389,7 @@ describe("ReplayPremiereRuntimeCoordinator", () => {
     expect(await restarted.readManifest()).toMatchObject({
       state: "playing",
       authoritativeElapsedMs: 100,
-      accumulatedPauseMs: 45_000,
+      accumulatedPauseMs: REPLAY_PREMIERE_CHECKPOINT_PAUSE_MS + 30_000,
       releasedThroughSequence: 2,
     });
   });
@@ -558,9 +560,9 @@ describe("ReplayPremiereRuntimeCoordinator", () => {
     await first.synchronize();
     clock.advance(100);
     await first.synchronize();
-    clock.advance(15_100);
+    clock.advance(REPLAY_PREMIERE_CHECKPOINT_PAUSE_MS + 100);
     await first.synchronize();
-    clock.advance(15_050);
+    clock.advance(REPLAY_PREMIERE_CHECKPOINT_PAUSE_MS + 50);
     await first.synchronize();
     expect(first.readLifecycleState()).toBe("revealed");
     const eventCount = firstStore.recovered.events.length;
@@ -613,10 +615,10 @@ describe("ReplayPremiereRuntimeCoordinator", () => {
     await runtime.synchronize();
     clock.advance(100);
     await runtime.synchronize();
-    clock.advance(15_100);
+    clock.advance(REPLAY_PREMIERE_CHECKPOINT_PAUSE_MS + 100);
     await runtime.synchronize();
     failSnapshot = true;
-    clock.advance(15_050);
+    clock.advance(REPLAY_PREMIERE_CHECKPOINT_PAUSE_MS + 50);
     await expect(runtime.synchronize()).rejects.toThrow(
       /simulated reveal snapshot crash/,
     );

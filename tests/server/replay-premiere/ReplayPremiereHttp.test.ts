@@ -36,6 +36,7 @@ import {
   ReplayPremiereAtomicPublication,
   type PremiereRevealPersistence,
 } from "../../../src/server/replay-premiere/ReplayPremiereRevealCommit";
+import { REPLAY_PREMIERE_CHECKPOINT_PAUSE_MS } from "../../../src/server/replay-premiere/ReplayPremiereContracts";
 import {
   ReplayPremiereRuntimeCoordinator,
   type ReplayPremiereRuntimeClock,
@@ -217,7 +218,7 @@ describe("ReplayPremiere HTTP adapter", () => {
       const eventCountAtOpen = harness.store.recovered.events.length;
 
       await harness.run(async (baseUrl) => {
-        harness.clock.advance(14_999);
+        harness.clock.advance(REPLAY_PREMIERE_CHECKPOINT_PAUSE_MS - 1);
         const beforeClose = await readJson(
           `${baseUrl}/api/premieres/${PREMIERE_ID}/manifest`,
         );
@@ -258,7 +259,7 @@ describe("ReplayPremiere HTTP adapter", () => {
             state: "playing",
             serverNow: checkpoint!.closesAt,
             authoritativeElapsedMs: 100,
-            accumulatedPauseMs: 15_000,
+            accumulatedPauseMs: REPLAY_PREMIERE_CHECKPOINT_PAUSE_MS,
             activeCheckpoint: null,
             releasedThroughSequence: 2,
           },
@@ -282,11 +283,11 @@ describe("ReplayPremiere HTTP adapter", () => {
       await harness.runtime.synchronize();
       harness.clock.advance(100);
       await harness.runtime.synchronize();
-      harness.clock.advance(15_000);
+      harness.clock.advance(REPLAY_PREMIERE_CHECKPOINT_PAUSE_MS);
       await harness.runtime.synchronize();
       harness.clock.advance(100);
       await harness.runtime.synchronize();
-      harness.clock.advance(15_000);
+      harness.clock.advance(REPLAY_PREMIERE_CHECKPOINT_PAUSE_MS);
       await harness.runtime.synchronize();
 
       await harness.run(async (baseUrl) => {

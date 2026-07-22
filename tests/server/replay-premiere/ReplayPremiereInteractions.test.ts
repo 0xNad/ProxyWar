@@ -1,5 +1,6 @@
 import type { PremiereCanonicalAuthoritativeResult } from "../../../src/server/replay-premiere/ReplayPremiereAuthoritativeResult";
 import type { PremiereState } from "../../../src/server/replay-premiere/ReplayPremiereContracts";
+import { REPLAY_PREMIERE_CHECKPOINT_PAUSE_MS } from "../../../src/server/replay-premiere/ReplayPremiereContracts";
 import { ReplayPremiereError } from "../../../src/server/replay-premiere/ReplayPremiereErrors";
 import {
   countRepeatQualifiedPremiereParticipants,
@@ -193,7 +194,7 @@ describe("ReplayPremiereInteractions", () => {
       await h.interactions.openCheckpoint({
         checkpointId,
         opensAt: h.now(),
-        closesAt: new Date(Date.parse(h.now()) + 15_000).toISOString(),
+        closesAt: new Date(Date.parse(h.now()) + REPLAY_PREMIERE_CHECKPOINT_PAUSE_MS).toISOString(),
         optionSeatIds: ["seat-1", "SEAT0001"],
       });
       if (sessionId !== undefined) {
@@ -204,7 +205,7 @@ describe("ReplayPremiereInteractions", () => {
           selectedSeatId: "seat-1",
         });
       }
-      h.advance(15_000);
+      h.advance(REPLAY_PREMIERE_CHECKPOINT_PAUSE_MS);
       await h.interactions.closeCheckpoint(checkpointId, h.now());
     }
   }
@@ -216,7 +217,7 @@ describe("ReplayPremiereInteractions", () => {
     await h.interactions.openCheckpoint({
       checkpointId: "cp_first0001",
       opensAt: h.now(),
-      closesAt: new Date(Date.parse(h.now()) + 15_000).toISOString(),
+      closesAt: new Date(Date.parse(h.now()) + REPLAY_PREMIERE_CHECKPOINT_PAUSE_MS).toISOString(),
       optionSeatIds: ["seat-1", "SEAT0001"],
     });
 
@@ -263,7 +264,7 @@ describe("ReplayPremiereInteractions", () => {
     expect(conflict).toBeInstanceOf(ReplayPremiereError);
     expect((conflict as ReplayPremiereError).httpStatus).toBe(409);
 
-    h.advance(15_000);
+    h.advance(REPLAY_PREMIERE_CHECKPOINT_PAUSE_MS);
     const late = await submitPrediction(h, {
       participantId: guestB,
       sessionId: sessionB.id,
@@ -464,7 +465,7 @@ describe("ReplayPremiereInteractions", () => {
     await h.interactions.openCheckpoint({
       checkpointId: "cp_first0001",
       opensAt: h.now(),
-      closesAt: new Date(Date.parse(h.now()) + 15_000).toISOString(),
+      closesAt: new Date(Date.parse(h.now()) + REPLAY_PREMIERE_CHECKPOINT_PAUSE_MS).toISOString(),
       optionSeatIds: ["seat-1", "SEAT0001"],
     });
     await h.interactions.shiftOpenCheckpointForOutage({
@@ -480,7 +481,7 @@ describe("ReplayPremiereInteractions", () => {
     expect(shifted.outageShiftMs).toBe(60_000);
     expect(
       Date.parse(shifted.closesAt ?? "") - Date.parse(shifted.opensAt ?? ""),
-    ).toBe(75_000);
+    ).toBe(REPLAY_PREMIERE_CHECKPOINT_PAUSE_MS + 60_000);
     await expect(
       h.interactions.shiftOpenCheckpointForOutage({
         checkpointId: "cp_first0001",
@@ -496,7 +497,7 @@ describe("ReplayPremiereInteractions", () => {
     const preparedOpen = h.interactions.prepareOpenCheckpoint({
       checkpointId: "cp_first0001",
       opensAt: h.now(),
-      closesAt: new Date(Date.parse(h.now()) + 15_000).toISOString(),
+      closesAt: new Date(Date.parse(h.now()) + REPLAY_PREMIERE_CHECKPOINT_PAUSE_MS).toISOString(),
       optionSeatIds: ["seat-1", "SEAT0001"],
     });
     expect(h.interactions.readCheckpoint("cp_first0001", null).state).toBe(
@@ -557,7 +558,7 @@ describe("ReplayPremiereInteractions", () => {
     await h.interactions.openCheckpoint({
       checkpointId: "cp_first0001",
       opensAt: h.now(),
-      closesAt: new Date(Date.parse(h.now()) + 15_000).toISOString(),
+      closesAt: new Date(Date.parse(h.now()) + REPLAY_PREMIERE_CHECKPOINT_PAUSE_MS).toISOString(),
       optionSeatIds: ["seat-1", "SEAT0001"],
     });
     await submitPrediction(h, {
@@ -913,7 +914,7 @@ describe("ReplayPremiereInteractions", () => {
     await h.interactions.openCheckpoint({
       checkpointId: "cp_first0001",
       opensAt: h.now(),
-      closesAt: new Date(Date.parse(h.now()) + 15_000).toISOString(),
+      closesAt: new Date(Date.parse(h.now()) + REPLAY_PREMIERE_CHECKPOINT_PAUSE_MS).toISOString(),
       optionSeatIds: ["seat-1", "SEAT0001"],
     });
     const persistedBeforeFlood = h.persisted.length;

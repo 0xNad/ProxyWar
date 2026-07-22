@@ -30,6 +30,7 @@ import {
   importControlledPremiereSourceForPublication,
   VerifiedPremiereEligibilityGate,
 } from "../../../src/server/replay-premiere/ReplayPremierePublication";
+import { REPLAY_PREMIERE_CHECKPOINT_PAUSE_MS } from "../../../src/server/replay-premiere/ReplayPremiereContracts";
 import { ReplayPremiereRuntimeRegistry } from "../../../src/server/replay-premiere/ReplayPremiereRuntimeCoordinator";
 import {
   DEFAULT_DEFERRED_FRESH_ASSEMBLY_BUDGET_MS,
@@ -449,7 +450,7 @@ describe("ReplayPremiere production startup", () => {
       } else if (scenario === "checkpoint-resumed") {
         vi.setSystemTime(NOW.getTime() + 100);
         await runtime.synchronize();
-        vi.setSystemTime(NOW.getTime() + 15_100);
+        vi.setSystemTime(NOW.getTime() + REPLAY_PREMIERE_CHECKPOINT_PAUSE_MS + 100);
         await runtime.synchronize();
       } else if (scenario === "outage-started") {
         await runtime.beginOutage();
@@ -1431,13 +1432,13 @@ describe("ReplayPremiere production startup", () => {
     await vi.advanceTimersByTimeAsync(100);
     await started.service.waitForRuntimeTimersIdle();
     expect(runtime.readLifecycleState()).toBe("checkpoint");
-    await vi.advanceTimersByTimeAsync(15_000);
+    await vi.advanceTimersByTimeAsync(REPLAY_PREMIERE_CHECKPOINT_PAUSE_MS);
     await started.service.waitForRuntimeTimersIdle();
     expect(runtime.readLifecycleState()).toBe("playing");
     await vi.advanceTimersByTimeAsync(100);
     await started.service.waitForRuntimeTimersIdle();
     expect(runtime.readLifecycleState()).toBe("checkpoint");
-    await vi.advanceTimersByTimeAsync(15_000);
+    await vi.advanceTimersByTimeAsync(REPLAY_PREMIERE_CHECKPOINT_PAUSE_MS);
     await started.service.waitForRuntimeTimersIdle();
     expect(runtime.readLifecycleState()).toBe("playing");
     await vi.advanceTimersByTimeAsync(50);
@@ -1896,13 +1897,13 @@ async function driveRuntimeToReveal(
 ): Promise<void> {
   vi.setSystemTime(NOW.getTime() + 100);
   await runtime.synchronize();
-  vi.setSystemTime(NOW.getTime() + 15_100);
+  vi.setSystemTime(NOW.getTime() + REPLAY_PREMIERE_CHECKPOINT_PAUSE_MS + 100);
   await runtime.synchronize();
-  vi.setSystemTime(NOW.getTime() + 15_200);
+  vi.setSystemTime(NOW.getTime() + REPLAY_PREMIERE_CHECKPOINT_PAUSE_MS + 200);
   await runtime.synchronize();
-  vi.setSystemTime(NOW.getTime() + 30_200);
+  vi.setSystemTime(NOW.getTime() + 2 * REPLAY_PREMIERE_CHECKPOINT_PAUSE_MS + 200);
   await runtime.synchronize();
-  vi.setSystemTime(NOW.getTime() + 30_250);
+  vi.setSystemTime(NOW.getTime() + 2 * REPLAY_PREMIERE_CHECKPOINT_PAUSE_MS + 250);
   await runtime.synchronize();
 }
 

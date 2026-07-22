@@ -59,7 +59,12 @@ import {
   type PremiereRevealResponse,
 } from "./ReplayPremiereWire";
 
-export const REPLAY_PREMIERE_CHECKPOINT_PAUSE_MS = 15_000;
+// Defined in ReplayPremiereContracts (shared with the interactions store,
+// which the coordinator imports — a local definition would create a cycle).
+// Re-exported here for the existing import sites.
+import { REPLAY_PREMIERE_CHECKPOINT_PAUSE_MS } from "./ReplayPremiereContracts";
+
+export { REPLAY_PREMIERE_CHECKPOINT_PAUSE_MS };
 export const REPLAY_PREMIERE_MAX_RECOVERABLE_OUTAGE_MS = 60_000;
 export const REPLAY_PREMIERE_MAX_OUTAGE_EVENTS_PER_LIFECYCLE_VERSION = 2;
 

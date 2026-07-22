@@ -1,3 +1,4 @@
+import { REPLAY_PREMIERE_CHECKPOINT_PAUSE_MS } from "../../../src/server/replay-premiere/ReplayPremiereContracts";
 import { promises as fs } from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -112,7 +113,7 @@ describe("ReplayPremiereInteractionRecovery", () => {
       excludedAsOperator: false,
       excludedAsBot: false,
     });
-    const closesAt = new Date(Date.parse(NOW) + 15_000).toISOString();
+    const closesAt = new Date(Date.parse(NOW) + REPLAY_PREMIERE_CHECKPOINT_PAUSE_MS).toISOString();
     const prepared = first.interactions.prepareOpenCheckpoint({
       checkpointId: "cp_first0001",
       opensAt: NOW,
@@ -167,7 +168,7 @@ describe("ReplayPremiereInteractionRecovery", () => {
       first.interactions.readState().checkpoints,
       "runtime:init:post-runtime-write",
     );
-    const closesAt = new Date(Date.parse(NOW) + 15_000).toISOString();
+    const closesAt = new Date(Date.parse(NOW) + REPLAY_PREMIERE_CHECKPOINT_PAUSE_MS).toISOString();
     const prepared = first.interactions.prepareOpenCheckpoint({
       checkpointId: "cp_first0001",
       opensAt: NOW,

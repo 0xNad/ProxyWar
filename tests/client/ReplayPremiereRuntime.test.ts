@@ -395,6 +395,80 @@ describe("ReplayPremiereRuntimeController", () => {
     harness.runtime.dispose();
   });
 
+  it("defers a live-watch reveal until the viewer's frame reaches the released end", async () => {
+    // Real-speed pacing: the map trails the release clock by up to one chunk
+    // span, so a reveal landing mid-trail must NOT name the winner while the
+    // ending is still playing. The overlay stays on the live surface (with
+    // the quiet reveal-pending status) until the viewer's own rendered frame
+    // reaches everything released, then the payoff lands.
+    const harness = runtimeHarness({ state: "playing" });
+    await bootstrapPlayingWithFrame(harness);
+    const trailing = [
+      {
+        sequence: 1,
+        presentationOffsetMs: 100,
+        turn: { turnNumber: 1, intents: [] },
+      },
+      {
+        sequence: 2,
+        presentationOffsetMs: 200,
+        turn: { turnNumber: 2, intents: [] },
+      },
+    ];
+    harness.runtime.playback.appendVerifiedBatch({
+      premiereId: PREMIERE_ID,
+      chunkIndex: 1,
+      chunkHash: HASH_B,
+      previousChunkHash: HASH_A,
+      payloadHash: HASH_C,
+      startSequence: 1,
+      endSequence: 2,
+      verification: { payloadHashVerified: true, chunkHashVerified: true },
+      records: trailing,
+    });
+    for (const record of trailing) {
+      harness.runtime.playback.acknowledgeDispatchedRecord(record);
+    }
+
+    // Viewer observed sequence 0; released through 2 -> reveal is deferred.
+    await revealAfter(harness);
+    expect(harness.models.at(-1)).toMatchObject({
+      state: "playing",
+      reveal: null,
+      revealPending: true,
+    });
+    expect(document.body.classList.contains("replay-premiere-pre-reveal")).toBe(
+      true,
+    );
+
+    // Still one sequence behind: stays deferred.
+    document.dispatchEvent(
+      new CustomEvent("ai-league-replay-frame", {
+        detail: { sequence: 1, turnNumber: 1, players: [] },
+      }),
+    );
+    expect(harness.models.at(-1)).toMatchObject({
+      state: "playing",
+      reveal: null,
+    });
+
+    // Caught up: the reveal displays and host suppression lifts.
+    document.dispatchEvent(
+      new CustomEvent("ai-league-replay-frame", {
+        detail: { sequence: 2, turnNumber: 2, players: [] },
+      }),
+    );
+    expect(harness.models.at(-1)).toMatchObject({
+      state: "revealed",
+      revealPending: false,
+    });
+    expect(harness.models.at(-1)?.reveal).not.toBeNull();
+    expect(document.body.classList.contains("replay-premiere-pre-reveal")).toBe(
+      false,
+    );
+    harness.runtime.dispose();
+  });
+
   it("never reports a 4,096-turn dispatch window as observed before its rendered frame", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date(STARTED_AT));
