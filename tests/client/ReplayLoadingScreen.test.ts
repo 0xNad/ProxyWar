@@ -73,7 +73,8 @@ describe("ReplayLoadingScreen", () => {
       "proxywar-replay-booting",
     );
     expect(
-      document.querySelector("[data-replay-loading-message]")?.dataset.i18n,
+      document.querySelector<HTMLElement>("[data-replay-loading-message]")
+        ?.dataset.i18n,
     ).toBe("replay_premiere.loading_premiere");
   });
 

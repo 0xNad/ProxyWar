@@ -300,6 +300,166 @@ describe("ReplayPremiereOverlay", () => {
     expect(handle.element.querySelector(".rp-headline")).not.toBeNull();
   });
 
+  it("keeps the ambient toggle functional and visibly responsive in every live and terminal state", async () => {
+    // Regression for "ambient mode doesn't work": the toggle must either work
+    // (callback fires, [data-ambient] flips, the compact pane rules engage) or
+    // be explicitly disabled with a reason — never a live-looking no-op.
+    const states = [
+      "playing",
+      "checkpoint",
+      "revealed",
+      "failed",
+      "cancelled",
+      "archived",
+    ] as const;
+    for (const state of states) {
+      const onAmbientChange = vi.fn();
+      const model = makeModel({
+        state,
+        ...(state === "checkpoint"
+          ? { activeCheckpointId: "checkpoint-1" }
+          : {}),
+        ...(state === "revealed" || state === "archived"
+          ? {
+              reveal: {
+                outcome: "winner" as const,
+                winnerSeatId: "seat-a",
+                summary: null,
+              },
+            }
+          : {}),
+      });
+      const handle = mount(model, { onAmbientChange });
+      const toggle = handle.element.querySelector<HTMLButtonElement>(
+        "[data-focus-key=ambient]",
+      );
+      expect(toggle, state).not.toBeNull();
+      expect(toggle?.disabled, state).toBe(false);
+      toggle?.click();
+      await vi.waitFor(() =>
+        expect(onAmbientChange).toHaveBeenCalledWith({
+          premiereId: "premiere-test",
+          ambient: true,
+        }),
+      );
+      handle.hydrate({ ...model, ambient: true });
+      expect(handle.element.dataset.ambient, state).toBe("true");
+      expect(document.body.classList).toContain(
+        "replay-premiere-ambient-mode",
+      );
+      // And back out again.
+      handle.element
+        .querySelector<HTMLButtonElement>("[data-focus-key=ambient]")
+        ?.click();
+      await vi.waitFor(() =>
+        expect(onAmbientChange).toHaveBeenCalledWith({
+          premiereId: "premiere-test",
+          ambient: false,
+        }),
+      );
+      handle.dispose();
+    }
+  });
+
+  it("disables the ambient toggle with a visible reason before the premiere starts", () => {
+    const onAmbientChange = vi.fn();
+    const handle = mount(makeModel({ state: "scheduled" }), {
+      onAmbientChange,
+    });
+    const toggle = handle.element.querySelector<HTMLButtonElement>(
+      "[data-focus-key=ambient]",
+    );
+    expect(toggle?.disabled).toBe(true);
+    expect(toggle?.title).toBe("replay_premiere.ambient_unavailable");
+    toggle?.click();
+    expect(onAmbientChange).not.toHaveBeenCalled();
+  });
+
+  it("patches volatile frame data in place so live hydrates cannot swallow clicks", async () => {
+    // Regression for the live render storm: frame-driven hydrates arrive many
+    // times per second; a full rebuild per frame replaced buttons between
+    // pointerdown and click, making ambient/reactions feel dead. Hydrates
+    // that only move volatile fields must keep the same DOM nodes alive AND
+    // handlers must read the LATEST sequence/turn at click time.
+    const onMarker = vi.fn();
+    const onAmbientChange = vi.fn();
+    const model = makeModel({
+      state: "playing",
+      canMark: true,
+      releasedSequence: 100,
+      currentTurn: 100,
+      leaders: [{ seatId: "seat-a", displayName: "Atlas Prime" }],
+    });
+    const handle = mount(model, { onMarker, onAmbientChange });
+    const markerBefore = handle.element.querySelector<HTMLButtonElement>(
+      '.rp-marker-button[data-kind="turning_point"]',
+    );
+    const ambientBefore = handle.element.querySelector<HTMLButtonElement>(
+      "[data-focus-key=ambient]",
+    );
+    expect(markerBefore).not.toBeNull();
+
+    // 60 volatile-only hydrates (one per simulated frame).
+    for (let frame = 1; frame <= 60; frame += 1) {
+      handle.hydrate({
+        ...model,
+        releasedSequence: 100 + frame,
+        currentTurn: 100 + frame,
+        leaders: [
+          {
+            seatId: "seat-a",
+            displayName: "Atlas Prime",
+            territoryPercent: frame,
+          },
+        ],
+        headlineEvent: `headline-${frame}`,
+      });
+    }
+
+    // Same DOM nodes — the buttons were never torn down.
+    expect(
+      handle.element.querySelector<HTMLButtonElement>(
+        '.rp-marker-button[data-kind="turning_point"]',
+      ),
+    ).toBe(markerBefore);
+    expect(
+      handle.element.querySelector<HTMLButtonElement>(
+        "[data-focus-key=ambient]",
+      ),
+    ).toBe(ambientBefore);
+    // The volatile regions still updated in place.
+    expect(
+      handle.element.querySelector(".rp-position")?.textContent,
+    ).toContain("turn=160");
+    expect(handle.element.textContent).toContain("headline-60");
+
+    // A click on the long-lived button reports the LATEST moment, not the
+    // one from when the button was built.
+    markerBefore?.click();
+    await vi.waitFor(() =>
+      expect(onMarker).toHaveBeenCalledWith(
+        expect.objectContaining({ sequence: 160, turn: 160 }),
+      ),
+    );
+
+    // A structural change (state flip) still rebuilds fully.
+    handle.hydrate({
+      ...model,
+      state: "revealed",
+      reveal: {
+        outcome: "winner",
+        winnerSeatId: "seat-a",
+        summary: null,
+      },
+    });
+    expect(handle.element.dataset.state).toBe("revealed");
+    expect(
+      handle.element.querySelector<HTMLButtonElement>(
+        '.rp-marker-button[data-kind="turning_point"]',
+      ),
+    ).not.toBe(markerBefore);
+  });
+
   it("maps unknown public failure input to fixed copy without rendering it", () => {
     const rawFailure =
       "/private/source/replay.json: token=secret Error: stack trace";

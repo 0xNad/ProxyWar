@@ -367,6 +367,12 @@ export function mountReplayPremiereOverlay(
   let captionTouched = false;
   let lastSuggestedCaption = captionDraft;
   let lastWindowPhase: ReplayPremiereWindowPhase | null = null;
+  let lastStructuralKey: string | null = null;
+  // Event handlers read the LATEST model through this accessor instead of the
+  // render-time snapshot: volatile-only hydrates keep the same DOM nodes (and
+  // therefore the same closures) alive across frames, so a click must see the
+  // current sequence/turn, not the ones from whenever the button was built.
+  const latestModel = () => model;
 
   const safeRun = (
     button: HTMLButtonElement,
@@ -439,9 +445,10 @@ export function mountReplayPremiereOverlay(
     overlay.dataset.state = model.state;
     overlay.dataset.ambient = String(model.ambient);
     document.body.classList.toggle(AMBIENT_BODY_CLASS, model.ambient);
+    lastStructuralKey = structuralModelKey(model);
     overlay.replaceChildren(
       createStyle(),
-      renderOverlay(model, callbacks, safeRun, {
+      renderOverlay(model, latestModel, callbacks, safeRun, {
         captionDraft,
         setCaptionDraft(nextCaption: string) {
           captionDraft = nextCaption;
@@ -470,6 +477,19 @@ export function mountReplayPremiereOverlay(
       model = nextModel;
       serverClockMs = parseTime(nextModel.authoritativeNow);
       localClockMs = Date.now();
+      // Frame-driven hydrates arrive many times per second during live
+      // playback. A full rebuild on each one tears the DOM down under the
+      // pointer — clicks between pointerdown and pointerup land on removed
+      // nodes and are silently swallowed, which made the ambient toggle and
+      // the reaction row feel dead on the real live page. When nothing
+      // structural changed, patch the volatile read-only regions in place
+      // and keep every interactive element (and its hover/focus/press state)
+      // alive.
+      if (structuralModelKey(nextModel) === lastStructuralKey) {
+        applyVolatileModelUpdates(overlay, nextModel);
+        updateClock();
+        return;
+      }
       render();
     },
     dispose() {
@@ -499,8 +519,63 @@ interface CaptionDraftState {
   setCaptionDraft(nextCaption: string): void;
 }
 
+/** Latest-model accessor for event handlers (see mountReplayPremiereOverlay). */
+type LatestModel = () => ReplayPremiereOverlayModel;
+
+/**
+ * Model fields that change on nearly every rendered frame during live
+ * playback. They are excluded from the structural key and patched in place by
+ * {@link applyVolatileModelUpdates}; anything else triggers a full rebuild.
+ */
+const VOLATILE_MODEL_KEYS = new Set([
+  "releasedSequence",
+  "currentTurn",
+  "leaders",
+  "headlineEvent",
+  "authoritativeNow",
+  "suggestedCaption",
+]);
+
+function structuralModelKey(model: ReplayPremiereOverlayModel): string {
+  const structural = JSON.stringify(model, (key: string, value: unknown) =>
+    VOLATILE_MODEL_KEYS.has(key) ? undefined : value,
+  );
+  // Derived structural facts of the volatile fields: crossing any of these
+  // boundaries changes what is rendered (explainer retirement, marker/share
+  // enablement, clip anchor availability), so they re-enter the key as
+  // booleans while the raw per-frame values stay out.
+  return [
+    structural,
+    Math.floor(model.releasedSequence) < SHARED_PLAYBACK_EXPLAINER_SEQUENCES,
+    model.releasedSequence >= 0,
+    finiteIntegerOrNull(model.currentTurn) !== null,
+    (model.share?.timestampUrl ?? null) === null,
+  ].join("|");
+}
+
+/** Patch the read-only per-frame regions without tearing down the DOM. */
+function applyVolatileModelUpdates(
+  overlay: HTMLElement,
+  model: ReplayPremiereOverlayModel,
+): void {
+  const position = overlay.querySelector<HTMLElement>(".rp-position");
+  if (position !== null) {
+    position.textContent = positionLabel(
+      model.currentTurn,
+      model.releasedSequence,
+    );
+  }
+  // The leaders/headline card is display-only (no interactive elements), so
+  // replacing the subtree per frame is safe and keeps it a live scoreboard.
+  const evidence = overlay.querySelector<HTMLElement>(".rp-ambient-evidence");
+  if (evidence !== null) {
+    evidence.replaceWith(renderAmbientEvidence(model));
+  }
+}
+
 function renderOverlay(
   model: ReplayPremiereOverlayModel,
+  latest: LatestModel,
   callbacks: ReplayPremiereOverlayCallbacks,
   safeRun: (
     button: HTMLButtonElement,
@@ -511,7 +586,7 @@ function renderOverlay(
   const shell = element("div", "rp-shell");
   shell.append(
     renderHeader(model, callbacks, safeRun),
-    renderStateBody(model, callbacks, safeRun, captionState),
+    renderStateBody(model, latest, callbacks, safeRun, captionState),
   );
   const actionStatus = element("p", "rp-action-status");
   actionStatus.dataset.premiereActionStatus = "";
@@ -556,9 +631,23 @@ function renderHeader(
   );
   ambient.dataset.focusKey = "ambient";
   ambient.setAttribute("aria-pressed", String(model.ambient));
-  // Mirror every other control: when the host wires no ambient handler the
-  // toggle is a visible no-op, so disable it instead of looking live-but-dead.
-  ambient.disabled = callbacks.onAmbientChange === undefined;
+  // Ambient collapses the overlay so the map fills the screen. Before the
+  // premiere starts there is no map behind the countdown, so the toggle is
+  // disabled WITH a visible reason instead of being a live-looking no-op.
+  // (Exception: if the host somehow left ambient on, the exit control stays
+  // usable.) When the host wires no handler at all it also disables.
+  const ambientUnavailable = model.state === "scheduled" && !model.ambient;
+  ambient.disabled =
+    callbacks.onAmbientChange === undefined || ambientUnavailable;
+  if (ambientUnavailable) {
+    ambient.title = translateText("replay_premiere.ambient_unavailable");
+    ambient.setAttribute(
+      "aria-label",
+      `${translateText("replay_premiere.enter_ambient")} — ${translateText(
+        "replay_premiere.ambient_unavailable",
+      )}`,
+    );
+  }
   ambient.addEventListener("click", () => {
     safeRun(
       ambient,
@@ -577,6 +666,7 @@ function renderHeader(
 
 function renderStateBody(
   model: ReplayPremiereOverlayModel,
+  latest: LatestModel,
   callbacks: ReplayPremiereOverlayCallbacks,
   safeRun: (
     button: HTMLButtonElement,
@@ -610,8 +700,8 @@ function renderStateBody(
     case "playing":
       body.append(renderPlaying(model));
       body.append(renderAmbientEvidence(model));
-      body.append(renderMarkers(model, callbacks, safeRun));
-      body.append(renderShare(model, callbacks, safeRun, captionState));
+      body.append(renderMarkers(model, latest, callbacks, safeRun));
+      body.append(renderShare(model, latest, callbacks, safeRun, captionState));
       break;
     case "checkpoint":
       // The prediction card is the interactive beat, so it leads. On the tight
@@ -621,8 +711,8 @@ function renderStateBody(
       body.append(renderCheckpoint(model, callbacks, safeRun));
       body.append(renderPlaying(model));
       body.append(renderAmbientEvidence(model));
-      body.append(renderMarkers(model, callbacks, safeRun));
-      body.append(renderShare(model, callbacks, safeRun, captionState));
+      body.append(renderMarkers(model, latest, callbacks, safeRun));
+      body.append(renderShare(model, latest, callbacks, safeRun, captionState));
       break;
     case "revealed":
       if (!isVerifiedRevealView(model)) {
@@ -638,9 +728,9 @@ function renderStateBody(
       body.append(
         renderResultsSummary(model.reveal, model.mapName, model.matchFormat),
       );
-      body.append(renderMarkers(model, callbacks, safeRun));
-      body.append(renderShare(model, callbacks, safeRun, captionState));
-      body.append(renderCounterChallenge(model, callbacks, safeRun));
+      body.append(renderMarkers(model, latest, callbacks, safeRun));
+      body.append(renderShare(model, latest, callbacks, safeRun, captionState));
+      body.append(renderCounterChallenge(model, latest, callbacks, safeRun));
       break;
     case "failed":
       body.append(renderSanitizedFailure(model.failureCode));
@@ -658,8 +748,8 @@ function renderStateBody(
       body.append(
         renderResultsSummary(model.reveal, model.mapName, model.matchFormat),
       );
-      body.append(renderShare(model, callbacks, safeRun, captionState));
-      body.append(renderCounterChallenge(model, callbacks, safeRun));
+      body.append(renderShare(model, latest, callbacks, safeRun, captionState));
+      body.append(renderCounterChallenge(model, latest, callbacks, safeRun));
       break;
     default:
       body.append(renderSanitizedFailure("integrity_failure"));
@@ -1183,6 +1273,7 @@ function renderAmbientEvidence(model: ReplayPremiereOverlayModel): HTMLElement {
 
 function renderMarkers(
   model: ReplayPremiereOverlayModel,
+  latest: LatestModel,
   callbacks: ReplayPremiereOverlayCallbacks,
   safeRun: (
     button: HTMLButtonElement,
@@ -1231,14 +1322,19 @@ function renderMarkers(
         markerButton,
         callbacks.onMarker === undefined
           ? undefined
-          : () =>
-              callbacks.onMarker?.({
-                premiereId: model.premiereId,
+          : () => {
+              // Read the LATEST model: volatile hydrates keep this button
+              // alive across frames, so the render-time snapshot's sequence
+              // and turn would be stale by click time.
+              const current = latest();
+              return callbacks.onMarker?.({
+                premiereId: current.premiereId,
                 kind: marker.kind,
-                sequence: model.releasedSequence,
-                turn: finiteIntegerOrNull(model.currentTurn),
-                policySeatId: model.markerPolicySeatId ?? null,
-              }),
+                sequence: current.releasedSequence,
+                turn: finiteIntegerOrNull(current.currentTurn),
+                policySeatId: current.markerPolicySeatId ?? null,
+              });
+            },
       );
     });
     list.append(markerButton);
@@ -1249,6 +1345,7 @@ function renderMarkers(
 
 function renderShare(
   model: ReplayPremiereOverlayModel,
+  latest: LatestModel,
   callbacks: ReplayPremiereOverlayCallbacks,
   safeRun: (
     button: HTMLButtonElement,
@@ -1288,14 +1385,16 @@ function renderShare(
       timestamp,
       callbacks.onShare === undefined || !timestampUrl
         ? undefined
-        : () =>
-            callbacks.onShare?.({
-              premiereId: model.premiereId,
+        : () => {
+            const current = latest();
+            return callbacks.onShare?.({
+              premiereId: current.premiereId,
               kind: "timestamp",
-              url: timestampUrl,
-              sequence: model.releasedSequence,
-              turn: finiteIntegerOrNull(model.currentTurn),
-            }),
+              url: current.share?.timestampUrl ?? timestampUrl,
+              sequence: current.releasedSequence,
+              turn: finiteIntegerOrNull(current.currentTurn),
+            });
+          },
     );
   });
   const captionLabel = element(
@@ -1324,13 +1423,15 @@ function renderShare(
       copyCaption,
       callbacks.onCopySuggestedCaption === undefined
         ? undefined
-        : () =>
-            callbacks.onCopySuggestedCaption?.({
-              premiereId: model.premiereId,
+        : () => {
+            const current = latest();
+            return callbacks.onCopySuggestedCaption?.({
+              premiereId: current.premiereId,
               caption: caption.value,
-              sequence: model.releasedSequence,
-              turn: finiteIntegerOrNull(model.currentTurn),
-            }),
+              sequence: current.releasedSequence,
+              turn: finiteIntegerOrNull(current.currentTurn),
+            });
+          },
     );
   });
   section.append(heading, timestamp, captionLabel, caption, copyCaption);
@@ -1339,7 +1440,7 @@ function renderShare(
   // download button and social-copy controls are absent from the DOM before
   // reveal.
   if (model.state === "revealed" || model.state === "archived") {
-    const clip = renderClip(model, callbacks, safeRun);
+    const clip = renderClip(model, latest, callbacks, safeRun);
     if (clip !== null) {
       section.append(clip);
     }
@@ -1349,6 +1450,7 @@ function renderShare(
 
 function renderClip(
   model: ReplayPremiereOverlayModel,
+  latest: LatestModel,
   callbacks: ReplayPremiereOverlayCallbacks,
   safeRun: (
     button: HTMLButtonElement,
@@ -1391,12 +1493,14 @@ function renderClip(
       request,
       !canRequest || callbacks.onRequestClip === undefined
         ? undefined
-        : () =>
-            callbacks.onRequestClip?.({
-              premiereId: model.premiereId,
-              sequence: model.releasedSequence,
-              turn: anchorTurn,
-            }),
+        : () => {
+            const current = latest();
+            return callbacks.onRequestClip?.({
+              premiereId: current.premiereId,
+              sequence: current.releasedSequence,
+              turn: finiteIntegerOrNull(current.currentTurn) ?? anchorTurn,
+            });
+          },
     );
   });
 
@@ -2016,6 +2120,7 @@ function isVerifiedRevealView(
 
 function renderCounterChallenge(
   model: ReplayPremiereOverlayModel,
+  latest: LatestModel,
   callbacks: ReplayPremiereOverlayCallbacks,
   safeRun: (
     button: HTMLButtonElement,
@@ -2044,17 +2149,19 @@ function renderCounterChallenge(
       exportButton,
       callbacks.onExportCounterChallenge === undefined
         ? undefined
-        : () =>
-            callbacks.onExportCounterChallenge?.({
-              premiereId: model.premiereId,
-              replayUrl: model.share?.canonicalUrl ?? "",
-              sequence: model.releasedSequence,
-              turn: finiteIntegerOrNull(model.currentTurn),
-              policySeatId: model.markerPolicySeatId ?? null,
-              mapName: model.mapName,
-              matchFormat: model.matchFormat,
-              policies: model.policies,
-            }),
+        : () => {
+            const current = latest();
+            return callbacks.onExportCounterChallenge?.({
+              premiereId: current.premiereId,
+              replayUrl: current.share?.canonicalUrl ?? "",
+              sequence: current.releasedSequence,
+              turn: finiteIntegerOrNull(current.currentTurn),
+              policySeatId: current.markerPolicySeatId ?? null,
+              mapName: current.mapName,
+              matchFormat: current.matchFormat,
+              policies: current.policies,
+            });
+          },
     );
   });
   // A quiet bordered group so the counter-challenge copy + button read as one

@@ -1063,6 +1063,7 @@
   "replay_premiere": {
     "overlay_label": "Replay Premiere controls",
     "loading_premiere": "Loading premiere…",
+    "ambient_unavailable": "Ambient mode is available once the premiere starts",
     "label_premiere": "Replay Premiere",
     "label_controlled": "Controlled replay premiere",
     "label_spoiler_resistant": "Sealed rated replay",
