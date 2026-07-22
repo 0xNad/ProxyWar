@@ -16,6 +16,7 @@ import {
   revealedPremiereIdsFromArchiveIndex,
   roundNumberByRoundId,
   scoreLabelFromStandings,
+  selectServingLatestPremiere,
   shortEpisodeId,
   summarizePremiereArchiveIndex,
 } from "../../src/server/agents/CoworldLeagueMirrorCore";
@@ -942,5 +943,85 @@ describe("latest-premiere resolution (the persistent premiere slot's revealed st
         ),
       ),
     ).toBeNull();
+  });
+});
+
+describe("selectServingLatestPremiere (probe belt — never link a dead page)", () => {
+  const pointerId = "prem_54d299b874f0adc7654fd1cc";
+  const indexEpisode = "ereq_00000000-0000-0000-0000-0000000000aa";
+  const indexId = derivePremiereId(indexEpisode);
+  const ptr: LatestPremierePointer = {
+    schemaVersion: 1,
+    premiereId: pointerId,
+    roundNumber: 651,
+    mapLabel: "Pangaea",
+    revealedAt: "2026-07-22T08:45:13.000Z",
+  };
+  const index = summarizePremiereArchiveIndex(
+    JSON.stringify({
+      schemaVersion: 1,
+      premiereId: indexId,
+      sourceRunId: "coworld-2026-07-22T04-44-01-038Z-55ad38ae",
+      sourceKind: "rated_coworld",
+      terminalState: "revealed",
+      revealedAt: "2026-07-22T04:51:41.304Z",
+      publicationCommitmentHash: "a".repeat(64),
+      sourceReplaySha256: "b".repeat(64),
+      summaryHash: "c".repeat(64),
+      summaryRelPath: `summaries/${indexId}.summary.json`,
+      reclaimedAt: "2026-07-22T05:22:20.478Z",
+    }),
+  );
+  const probeAllowing =
+    (...serving: string[]) =>
+    async (id: string) =>
+      serving.includes(id);
+
+  test("pointer candidate serves -> pointer card", async () => {
+    const card = await selectServingLatestPremiere(
+      ptr,
+      index,
+      probeAllowing(pointerId),
+    );
+    expect(card?.premiereId).toBe(pointerId);
+    expect(card?.roundNumber).toBe(651);
+  });
+
+  test("pointer 404s -> falls back to the archive-index newest revealed", async () => {
+    const card = await selectServingLatestPremiere(
+      ptr,
+      index,
+      probeAllowing(indexId),
+    );
+    expect(card?.premiereId).toBe(indexId);
+    expect(card?.roundNumber).toBeNull();
+  });
+
+  test("pointer and fallback both dead -> no card (2026-07-22 orphan incident)", async () => {
+    const card = await selectServingLatestPremiere(
+      ptr,
+      index,
+      async () => false,
+    );
+    expect(card).toBeNull();
+  });
+
+  test("index-sourced candidate that 404s -> no card, no re-probe loop", async () => {
+    let calls = 0;
+    const card = await selectServingLatestPremiere(null, index, async () => {
+      calls += 1;
+      return false;
+    });
+    expect(card).toBeNull();
+    expect(calls).toBe(1);
+  });
+
+  test("always-true probe preserves legacy behavior exactly", async () => {
+    const card = await selectServingLatestPremiere(
+      ptr,
+      index,
+      async () => true,
+    );
+    expect(card).toEqual(resolveLatestRevealedPremiere(ptr, index));
   });
 });

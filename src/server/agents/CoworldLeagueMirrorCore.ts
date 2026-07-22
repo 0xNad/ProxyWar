@@ -864,6 +864,46 @@ export function resolveLatestRevealedPremiere(
 }
 
 /**
+ * Probe-checked variant of {@link resolveLatestRevealedPremiere}: never hand
+ * the site writer a card whose target page does not actually serve.
+ *
+ * 2026-07-22 orphan incident: a premiere that reveals but whose ~30-minute
+ * reclamation grace spans a beta restart can end up neither live-registered
+ * nor archived — its /premiere page 404s — while the loop-written pointer
+ * still names it, so the "Watch now" card linked a dead page. The pointer's
+ * freshness-over-index design is correct (the index lags reveal by design),
+ * so the only honest check is asking the serving origin. `probe` returns
+ * true when the candidate's page serves; candidates that fail are dropped:
+ * pointer candidate first, then the archive-index fallback, then no card.
+ * Fail-open on the probe itself is the CALLER's choice: pass an
+ * always-true probe to keep the unprobed behavior (flag off / origin down
+ * should not blank the card for a page that may well be fine).
+ */
+export async function selectServingLatestPremiere(
+  pointer: LatestPremierePointer | null,
+  archiveIndex: PremiereArchiveIndexSummary | null,
+  probe: (premiereId: string) => Promise<boolean>,
+): Promise<CoworldLeagueLatestPremiereCard | null> {
+  const primary = resolveLatestRevealedPremiere(pointer, archiveIndex);
+  if (primary === null) {
+    return null;
+  }
+  if (await probe(primary.premiereId)) {
+    return primary;
+  }
+  const pointerSourced =
+    pointer !== null && primary.premiereId === pointer.premiereId;
+  if (!pointerSourced) {
+    return null;
+  }
+  const fallback = resolveLatestRevealedPremiere(null, archiveIndex);
+  if (fallback === null || fallback.premiereId === primary.premiereId) {
+    return null;
+  }
+  return (await probe(fallback.premiereId)) ? fallback : null;
+}
+
+/**
  * The battle-card premiere link for an episode, or null when the episode has
  * no REVEALED premiere. The join is the premiere loop's own deterministic id
  * derivation (premiereId = derivePremiereId(episodeRequestId)), so no mapping

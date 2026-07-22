@@ -32,6 +32,7 @@ import {
   resolveLatestRevealedPremiere,
   roundNumberByRoundId,
   scoreLabelFromStandings,
+  selectServingLatestPremiere,
   summarizePremiereArchiveIndex,
   type HostedEpisodeMeta,
   type ParsedHostedReplay,
@@ -130,6 +131,16 @@ interface MirrorOptions {
    * exactly as before.
    */
   latestPremierePointerPath: string | null;
+  /**
+   * Origin to probe (`--premiere-probe-origin`, e.g. `http://127.0.0.1:8788`)
+   * before linking a "Latest premiere" card: a candidate whose
+   * `/premiere/<id>` page does not return 200 is dropped in favor of the
+   * archive-index fallback (or no card). Null (default) skips probing —
+   * candidates are trusted as before. 2026-07-22 orphan incident: a pointer
+   * can name a revealed premiere that is neither live-registered nor archived
+   * after restart churn; without the probe the card links a 404.
+   */
+  premiereProbeOrigin: string | null;
 }
 
 function parseOptions(argv: string[]): MirrorOptions {
@@ -170,6 +181,7 @@ function parseOptions(argv: string[]): MirrorOptions {
     suppressionContractPath: null,
     premiereArchiveIndexPath: null,
     latestPremierePointerPath: null,
+    premiereProbeOrigin: null,
   };
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i];
@@ -255,6 +267,16 @@ function parseOptions(argv: string[]): MirrorOptions {
           );
         }
         options.latestPremierePointerPath = value;
+        break;
+      }
+      case "--premiere-probe-origin": {
+        const value = next();
+        if (!/^https?:\/\/[^/\s]+$/.test(value)) {
+          throw new Error(
+            `--premiere-probe-origin must be a bare http(s) origin: ${value}`,
+          );
+        }
+        options.premiereProbeOrigin = value;
         break;
       }
       default:
@@ -577,7 +599,11 @@ async function readLatestPremiereCard(
   const pointer = await loadLatestPremierePointer(
     options.latestPremierePointerPath,
   );
-  const latest = resolveLatestRevealedPremiere(pointer, archiveIndex);
+  const latest = await selectServingLatestPremiere(
+    pointer,
+    archiveIndex,
+    latestPremiereProbe(options),
+  );
   if (latest !== null) {
     log(
       `latest premiere card: ${latest.premiereId} (${
@@ -586,8 +612,45 @@ async function readLatestPremiereCard(
           : "archive-index fallback"
       })`,
     );
+  } else if (pointer !== null) {
+    log(
+      `latest premiere card omitted: no candidate page is serving (pointer ${pointer.premiereId})`,
+    );
   }
   return latest;
+}
+
+/**
+ * Bounded page probe for latest-premiere candidates. With no
+ * `--premiere-probe-origin` the probe trusts every candidate (legacy
+ * behavior). With an origin, a candidate must answer 200 on its
+ * `/premiere/<id>` page within 2.5 s; any error, timeout, or non-200 drops
+ * it. Probe failures never fail the cycle — worst case the card is omitted
+ * for this cycle and returns when the page serves.
+ */
+function latestPremiereProbe(
+  options: MirrorOptions,
+): (premiereId: string) => Promise<boolean> {
+  const origin = options.premiereProbeOrigin;
+  if (origin === null) {
+    return async () => true;
+  }
+  return async (premiereId: string) => {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 2_500);
+    try {
+      const response = await fetch(
+        `${origin}/premiere/${encodeURIComponent(premiereId)}`,
+        { method: "GET", redirect: "manual", signal: controller.signal },
+      );
+      await response.body?.cancel().catch(() => undefined);
+      return response.status === 200;
+    } catch {
+      return false;
+    } finally {
+      clearTimeout(timer);
+    }
+  };
 }
 
 async function pruneMirrorArtifacts(
