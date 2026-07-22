@@ -19,6 +19,7 @@ import {
   isPremiereId,
 } from "../../../src/server/replay-premiere/ReplayPremiereContracts";
 import {
+  PREMIERE_LOOP_ACTIVATION_BACKOFF_MS,
   PREMIERE_LOOP_ACTIVATION_VERIFY_MS,
   PREMIERE_LOOP_HOLD_WINDOW_MS,
   PREMIERE_LOOP_MAX_PIPELINE_ATTEMPTS,
@@ -37,6 +38,7 @@ import {
   derivePremiereId,
   foldLoopJournal,
   holdExpiresAtForScheduled,
+  isActivationBackoffActive,
   isCompletedTooOldToSeal,
   isHoldExpired,
   isManagedPublicRunKey,
@@ -87,6 +89,7 @@ function hold(overrides: Partial<LoopHoldState> = {}): LoopHoldState {
     playbackRate: 2,
     phase: "claimed",
     activationAttempts: 0,
+    activationBackoffUntil: null,
     activatedAt: null,
     reactivationAttempts: 0,
     createdAt: NOW.toISOString(),
@@ -906,6 +909,54 @@ describe("admission input builders (exact shapes the admit CLI validates)", () =
     for (const spoiler of ["winner", "won", "defeat", "eliminat"]) {
       expect(serialized.includes(spoiler)).toBe(false);
     }
+  });
+});
+
+describe("helper-refusal activation backoff (2026-07-22 round-649 outage)", () => {
+  const backoffUntil = new Date(
+    NOW.getTime() + PREMIERE_LOOP_ACTIVATION_BACKOFF_MS,
+  ).toISOString();
+
+  test("an armed backoff holds activation until its stamp elapses", () => {
+    const armed = hold({
+      phase: "admitted",
+      activationAttempts: 1,
+      activationBackoffUntil: backoffUntil,
+    });
+    expect(isActivationBackoffActive(armed, NOW)).toBe(true);
+    expect(
+      isActivationBackoffActive(armed, new Date(Date.parse(backoffUntil))),
+    ).toBe(false);
+  });
+
+  test("no stamp or an invalid stamp never blocks an attempt (fail-open)", () => {
+    expect(
+      isActivationBackoffActive(hold({ activationBackoffUntil: null }), NOW),
+    ).toBe(false);
+    expect(
+      isActivationBackoffActive(
+        hold({ activationBackoffUntil: "not-a-timestamp" }),
+        NOW,
+      ),
+    ).toBe(false);
+  });
+
+  test("fold normalizes pre-backoff journal records to an unarmed state", () => {
+    const legacy = hold({ phase: "admitted" });
+    const legacyShape = { ...legacy } as Record<string, unknown>;
+    delete legacyShape.activationBackoffUntil;
+    const folded = foldLoopJournal([
+      {
+        kind: "hold_update",
+        ts: NOW.toISOString(),
+        hold: legacyShape as unknown as LoopHoldState,
+      },
+    ]);
+    expect(folded.activeHold?.activationBackoffUntil).toBeNull();
+    const garbage = normalizeLoopHoldState(
+      hold({ activationBackoffUntil: "garbage" }),
+    );
+    expect(garbage.activationBackoffUntil).toBeNull();
   });
 });
 

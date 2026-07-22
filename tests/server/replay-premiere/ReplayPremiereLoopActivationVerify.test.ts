@@ -3,12 +3,15 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import {
+  activateHold,
   trackHold,
   type JournalWriter,
   type LoopConfig,
 } from "../../../src/scripts/replay-premiere-loop";
 import {
+  PREMIERE_LOOP_ACTIVATION_BACKOFF_MS,
   PREMIERE_LOOP_ACTIVATION_VERIFY_MS,
+  PREMIERE_LOOP_MAX_ACTIVATION_ATTEMPTS,
   derivePremiereId,
   holdExpiresAtForScheduled,
   type LoopHoldState,
@@ -93,6 +96,7 @@ function hold(overrides: Partial<LoopHoldState> = {}): LoopHoldState {
     playbackRate: 2,
     phase: "activated",
     activationAttempts: 0,
+    activationBackoffUntil: null,
     activatedAt: NOW.toISOString(),
     reactivationAttempts: 0,
     createdAt: NOW.toISOString(),
@@ -257,5 +261,98 @@ describe("trackHold — post-activation registration verification", () => {
     expect(restart).not.toHaveBeenCalled();
     expect(journal.released).toHaveLength(0);
     expect(journal.holdUpdates).toHaveLength(0);
+  });
+});
+
+describe("activateHold — helper-refusal backoff (2026-07-22 round-649 outage)", () => {
+  test("a refusal arms the backoff and consumes an attempt (journaled)", async () => {
+    stubPremiereState(null);
+    const journal = captureJournal();
+    const restart = vi.fn(async () => false);
+    const result = await activateHold(
+      hold({ phase: "admitted", activatedAt: null }),
+      config(),
+      journal.writer,
+      NOW,
+      restart,
+    );
+    expect(restart).toHaveBeenCalledTimes(1);
+    expect(result.kind).toBe("retry");
+    expect(journal.holdUpdates).toHaveLength(1);
+    expect(journal.holdUpdates[0].activationAttempts).toBe(1);
+    expect(journal.holdUpdates[0].activationBackoffUntil).toBe(
+      new Date(
+        NOW.getTime() + PREMIERE_LOOP_ACTIVATION_BACKOFF_MS,
+      ).toISOString(),
+    );
+  });
+
+  test("while backing off, the helper is NOT re-fired (no per-tick restart hammering)", async () => {
+    stubPremiereState(null);
+    const journal = captureJournal();
+    const restart = vi.fn(async () => true);
+    const armed = hold({
+      phase: "admitted",
+      activatedAt: null,
+      activationAttempts: 1,
+      activationBackoffUntil: new Date(NOW.getTime() + 60_000).toISOString(),
+    });
+    const result = await activateHold(
+      armed,
+      config(),
+      journal.writer,
+      NOW,
+      restart,
+    );
+    expect(restart).not.toHaveBeenCalled();
+    expect(result.kind).toBe("retry");
+    expect(journal.holdUpdates).toHaveLength(0);
+  });
+
+  test("after the backoff elapses the attempt fires again", async () => {
+    stubPremiereState(null);
+    const journal = captureJournal();
+    const restart = vi.fn(async () => true);
+    const past = hold({
+      phase: "admitted",
+      activatedAt: null,
+      activationAttempts: 1,
+      activationBackoffUntil: new Date(NOW.getTime() - 1_000).toISOString(),
+    });
+    const result = await activateHold(
+      past,
+      config(),
+      journal.writer,
+      NOW,
+      restart,
+    );
+    expect(restart).toHaveBeenCalledTimes(1);
+    expect(result.kind).toBe("activated");
+    expect(journal.holdUpdates[0].phase).toBe("activated");
+    expect(journal.holdUpdates[0].activatedAt).toBe(NOW.toISOString());
+  });
+
+  test("the attempt ceiling still releases activation_refused terminally", async () => {
+    stubPremiereState(null);
+    const journal = captureJournal();
+    const restart = vi.fn(async () => false);
+    const nearCeiling = hold({
+      phase: "admitted",
+      activatedAt: null,
+      activationAttempts: PREMIERE_LOOP_MAX_ACTIVATION_ATTEMPTS - 1,
+      activationBackoffUntil: new Date(NOW.getTime() - 1_000).toISOString(),
+    });
+    const result = await activateHold(
+      nearCeiling,
+      config(),
+      journal.writer,
+      NOW,
+      restart,
+    );
+    expect(restart).toHaveBeenCalledTimes(1);
+    expect(result.kind).toBe("released");
+    expect(journal.released).toHaveLength(1);
+    expect(journal.released[0].outcome).toBe("activation_refused");
+    expect(journal.released[0].terminal).toBe(true);
   });
 });

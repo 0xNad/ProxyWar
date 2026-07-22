@@ -21,6 +21,7 @@ import {
 } from "../server/agents/ProxyWarDemoServerConfig";
 import { ReplayPremiereError } from "../server/replay-premiere/ReplayPremiereErrors";
 import {
+  PREMIERE_LOOP_ACTIVATION_BACKOFF_MS,
   PREMIERE_LOOP_DIVISION_ID,
   PREMIERE_LOOP_LEAGUE_ID,
   PREMIERE_LOOP_MAX_ACTIVATION_ATTEMPTS,
@@ -34,6 +35,7 @@ import {
   derivePremiereId,
   foldLoopJournal,
   holdExpiresAtForScheduled,
+  isActivationBackoffActive,
   isCompletedTooOldToSeal,
   isHoldExpired,
   isManagedPublicRunKey,
@@ -956,6 +958,7 @@ async function activateHold(
   config: LoopConfig,
   journal: JournalWriter,
   now: Date,
+  restart: () => Promise<boolean> = () => fireRestartHelper(config),
 ): Promise<ActivateResult> {
   const liveState = await readPremiereState(config, hold.premiereId);
   if (liveState !== null) {
@@ -969,10 +972,21 @@ async function activateHold(
     await journal.appendHoldUpdate(activated);
     return { kind: "activated", hold: activated };
   }
+  // Helper-refusal backoff (2026-07-22 round-649 outage): while a refusal
+  // window is armed, do NOT re-fire the restart — a crash-looping beta must
+  // not be re-killed every 60s tick. The contract stays fresh; the attempt
+  // ceiling below still bounds the total.
+  if (isActivationBackoffActive(hold, now)) {
+    log(
+      `activation for ${hold.premiereId} backing off until ${hold.activationBackoffUntil ?? "?"}`,
+    );
+    await writeContractForHold(hold, config, now);
+    return { kind: "retry", hold };
+  }
   // Fire the reviewed helper. It runs its own readiness preflight and we never
   // pass --allow-unready-current. On non-launchd hosts it exits non-zero, which
   // is treated as a retriable activation failure (fail-open on availability).
-  const restarted = await fireRestartHelper(config);
+  const restarted = await restart();
   if (restarted) {
     log(`activated premiere ${hold.premiereId} via controlled restart`);
     // `activatedAt` starts the bounded registration verification window; the
@@ -1000,10 +1014,19 @@ async function activateHold(
     );
     return { kind: "released" };
   }
-  const retried = { ...hold, activationAttempts: attempts };
+  const retried = {
+    ...hold,
+    activationAttempts: attempts,
+    activationBackoffUntil: new Date(
+      now.getTime() + PREMIERE_LOOP_ACTIVATION_BACKOFF_MS,
+    ).toISOString(),
+  };
   await journal.appendHoldUpdate(retried);
-  // Keep the contract fresh across ticks while activation is retried.
+  // Keep the contract fresh across ticks while activation backs off.
   await writeContractForHold(retried, config, now);
+  log(
+    `activation refused for ${hold.premiereId} (attempt ${attempts}); backing off until ${retried.activationBackoffUntil}`,
+  );
   return { kind: "retry", hold: retried };
 }
 
@@ -1343,6 +1366,7 @@ async function claimRound(
     playbackRate: playbackRateForTurnCount(selected.facts.turnCount),
     phase: "claimed",
     activationAttempts: 0,
+    activationBackoffUntil: null,
     activatedAt: null,
     reactivationAttempts: 0,
     createdAt: now.toISOString(),
@@ -1752,5 +1776,11 @@ if (invokedDirectly) {
   });
 }
 
-export { isEpisodeAlreadyPublic, main, resolveLoopConfig, trackHold };
+export {
+  activateHold,
+  isEpisodeAlreadyPublic,
+  main,
+  resolveLoopConfig,
+  trackHold,
+};
 export type { JournalWriter, LoopConfig };

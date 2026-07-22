@@ -98,6 +98,16 @@ export const PREMIERE_LOOP_ACTIVATION_VERIFY_MS = 120_000;
  * to `holdExpiresAt`.
  */
 export const PREMIERE_LOOP_MAX_REACTIVATION_ATTEMPTS = 1;
+/**
+ * Minimum spacing between controlled-restart activation attempts after a
+ * helper REFUSAL (~2 ticks). 2026-07-22 round-649 outage: while the beta was
+ * crash-looping on a poisoned catalog, the loop re-fired the refused restart
+ * every 60s tick, killing each just-booted process again and deepening the
+ * public outage. A refusal now arms a backoff window; the attempt ceiling
+ * (`PREMIERE_LOOP_MAX_ACTIVATION_ATTEMPTS`) is unchanged, so the worst case
+ * is the same bounded release — just spaced instead of hammered.
+ */
+export const PREMIERE_LOOP_ACTIVATION_BACKOFF_MS = 120_000;
 
 /**
  * The public run key the mirror derives for a Coworld episode bundle:
@@ -373,6 +383,12 @@ export interface LoopHoldState {
   phase: LoopHoldPhase;
   activationAttempts: number;
   /**
+   * Earliest instant the next activation attempt may fire after a helper
+   * refusal. Null when no backoff is armed — and on records journaled before
+   * this field existed; {@link foldLoopJournal} normalizes those.
+   */
+  activationBackoffUntil: string | null;
+  /**
    * When the loop last confirmed a controlled restart for this hold (initial
    * activation or the single re-activation). Starts the bounded registration
    * verification window. Null until activated — and on records journaled
@@ -459,6 +475,10 @@ export function normalizeLoopHoldState(hold: LoopHoldState): LoopHoldState {
     typeof hold.activatedAt === "string"
       ? Date.parse(hold.activatedAt)
       : Number.NaN;
+  const backoffUntilMs =
+    typeof hold.activationBackoffUntil === "string"
+      ? Date.parse(hold.activationBackoffUntil)
+      : Number.NaN;
   const reactivationAttempts =
     typeof hold.reactivationAttempts === "number" &&
     Number.isSafeInteger(hold.reactivationAttempts) &&
@@ -468,8 +488,25 @@ export function normalizeLoopHoldState(hold: LoopHoldState): LoopHoldState {
   return {
     ...hold,
     activatedAt: Number.isFinite(activatedAtMs) ? hold.activatedAt : null,
+    activationBackoffUntil: Number.isFinite(backoffUntilMs)
+      ? hold.activationBackoffUntil
+      : null,
     reactivationAttempts,
   };
+}
+
+/**
+ * Whether a helper-refusal backoff is still holding activation attempts.
+ * Fail-open: no stamp or an invalid stamp means no backoff (the attempt
+ * ceiling still bounds total attempts either way).
+ */
+export function isActivationBackoffActive(
+  hold: LoopHoldState,
+  now: Date,
+): boolean {
+  if (typeof hold.activationBackoffUntil !== "string") return false;
+  const untilMs = Date.parse(hold.activationBackoffUntil);
+  return Number.isFinite(untilMs) && now.getTime() < untilMs;
 }
 
 /**
