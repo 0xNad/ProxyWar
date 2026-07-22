@@ -21,9 +21,14 @@ import type { CoworldLeaguePremiereCard } from "./CoworldLeagueSiteWriter";
  * to `{ status: "stale", reason }` with a machine-readable reason for logging,
  * and every predicate returns the non-suppressing answer for a stale state.
  *
- * The contract file itself is INERT in production during Phase 1: nothing writes
- * it yet, so the mirror keeps behaving byte-for-byte as before until a real
- * contract exists.
+ * Since 2026-07-22 ("every round is premiere" operator directive) the loop
+ * heartbeats a STANDING contract every live tick — zero holds is valid — so the
+ * blanket `quarantineMs` defers every freshly-completed episode until the loop
+ * has decided whether to premiere it. The operator explicitly accepted the
+ * ~12-minute battle-card lag this creates, reversing the earlier suppression
+ * reviewer requirement #4 ("never write a zero-hold active contract"). The
+ * fail-open availability invariant above is unchanged and remains the load-
+ * bearing safety property.
  */
 
 export const PREMIERE_SUPPRESSION_SCHEMA_VERSION = 1 as const;

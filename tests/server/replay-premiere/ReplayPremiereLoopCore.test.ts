@@ -3,9 +3,16 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { describe, expect, test } from "vitest";
 import {
+  PREMIERE_SUPPRESSION_DEFAULT_QUARANTINE_MS,
+  PREMIERE_SUPPRESSION_STALE_MS,
+  buildPremiereSiteBlock,
+  classifyEpisodeSuppression,
+  filterSuppressedEpisodeRows,
   loadPremiereSuppressionContract,
   parsePremiereSuppressionContract,
   premiereSuppressionContractPath,
+  type PremiereSuppressionContract,
+  type PremiereSuppressionState,
 } from "../../../src/server/agents/CoworldLeaguePremiereSuppression";
 import {
   PREMIERE_ID_PATTERN,
@@ -440,15 +447,18 @@ describe("foldLoopJournal — hold lifecycle, retry ceiling, terminality", () =>
   });
 });
 
-describe("suppression contract construction (requirements #1 and #4)", () => {
-  test("null for zero holds — never a blanket-quarantine contract", () => {
-    expect(buildLoopSuppressionContract([], NOW)).toBeNull();
+describe("suppression contract construction (requirement #1 + standing quarantine)", () => {
+  test("zero holds now builds the STANDING quarantine contract (2026-07-22 operator reversal of requirement #4)", () => {
+    const contract = buildLoopSuppressionContract([], NOW);
+    expect(contract.holds).toEqual([]);
+    expect(contract.quarantineMs).toBe(
+      PREMIERE_SUPPRESSION_DEFAULT_QUARANTINE_MS,
+    );
+    expect(contract.generatedAt).toBe(NOW.toISOString());
   });
 
   test("single-hold contract uses now as generatedAt (never future)", () => {
     const contract = buildLoopSuppressionContract([hold()], NOW);
-    expect(contract).not.toBeNull();
-    if (contract === null) return;
     expect(contract.generatedAt).toBe(NOW.toISOString());
     expect(Date.parse(contract.generatedAt)).toBeLessThanOrEqual(NOW.getTime());
     expect(contract.holds).toHaveLength(1);
@@ -470,7 +480,6 @@ describe("suppression contract construction (requirements #1 and #4)", () => {
       [hold({ premierePageLive: true })],
       NOW,
     );
-    if (contract === null) throw new Error("expected a contract");
     const state = parsePremiereSuppressionContract(
       JSON.stringify(contract),
       NOW,
@@ -481,12 +490,42 @@ describe("suppression contract construction (requirements #1 and #4)", () => {
     expect(state.contract.holds[0].mapLabel).toBe("Pangaea");
   });
 
+  test("the zero-hold standing contract round-trips as active: quarantines fresh, publishes old, shows no premiere card", () => {
+    const state = parsePremiereSuppressionContract(
+      JSON.stringify(buildLoopSuppressionContract([], NOW)),
+      NOW,
+    );
+    expect(state.status).toBe("active");
+    // Fresh (1 min old) is deferred; old (20 min) publishes.
+    expect(
+      classifyEpisodeSuppression(
+        state,
+        {
+          episodeRequestId: "ereq_fresh",
+          completedAt: new Date(NOW.getTime() - 60_000).toISOString(),
+        },
+        NOW,
+      ),
+    ).toBe("quarantined");
+    expect(
+      classifyEpisodeSuppression(
+        state,
+        {
+          episodeRequestId: "ereq_old",
+          completedAt: new Date(NOW.getTime() - 20 * 60_000).toISOString(),
+        },
+        NOW,
+      ),
+    ).toBe("publish");
+    // Zero holds means no league-page premiere card.
+    expect(buildPremiereSiteBlock(state, NOW)).toBeNull();
+  });
+
   test("written contract is readable at the canonical path", async () => {
     const dir = await mkdtemp(path.join(tmpdir(), "premiere-loop-contract-"));
     try {
       const contractPath = premiereSuppressionContractPath(dir);
       const contract = buildLoopSuppressionContract([hold()], NOW);
-      if (contract === null) throw new Error("expected a contract");
       const fs = await import("node:fs/promises");
       await fs.mkdir(path.dirname(contractPath), { recursive: true });
       await writeFile(contractPath, `${JSON.stringify(contract, null, 2)}\n`);
@@ -494,6 +533,158 @@ describe("suppression contract construction (requirements #1 and #4)", () => {
       expect(state.status).toBe("active");
     } finally {
       await rm(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("every round premieres — the standing-quarantine decision table (2026-07-22)", () => {
+  // One timeline, exercised through the exact production path at every stage:
+  // buildLoopSuppressionContract -> JSON -> parsePremiereSuppressionContract
+  // (the mirror's tolerant parser) -> classify/filter (the mirror's gates).
+  const COMPLETED_AT = "2026-07-22T12:00:00.000Z";
+  const T0 = Date.parse(COMPLETED_AT);
+  const EPISODE = {
+    episodeRequestId: "ereq_00000000-0000-0000-0000-00000000dead",
+    completedAt: COMPLETED_AT,
+  };
+  const at = (offsetMs: number) => new Date(T0 + offsetMs);
+  const parsedAt = (
+    contract: PremiereSuppressionContract,
+    now: Date,
+  ): PremiereSuppressionState =>
+    parsePremiereSuppressionContract(JSON.stringify(contract), now);
+  const heldFor = (scheduledAt: string) =>
+    hold({
+      episodeRequestId: EPISODE.episodeRequestId,
+      premiereId: derivePremiereId(EPISODE.episodeRequestId),
+      scheduledAt,
+      holdExpiresAt: holdExpiresAtForScheduled(scheduledAt),
+    });
+
+  test("stage 1 — freshly completed, no hold yet: the standing contract quarantines it (loop wins the race)", () => {
+    const tick = at(60_000); // first loop tick after completion
+    const state = parsedAt(buildLoopSuppressionContract([], tick), tick);
+    expect(classifyEpisodeSuppression(state, EPISODE, tick)).toBe(
+      "quarantined",
+    );
+    // The mirror's final-defense filter drops it from the merged list too.
+    expect(filterSuppressedEpisodeRows(state, [EPISODE], tick)).toEqual([]);
+  });
+
+  test("stage 2 — claimed: the specific hold takes over", () => {
+    const tick = at(70_000);
+    const scheduledAt = scheduledAtForClaim(tick);
+    const state = parsedAt(
+      buildLoopSuppressionContract([heldFor(scheduledAt)], tick),
+      tick,
+    );
+    expect(classifyEpisodeSuppression(state, EPISODE, tick)).toBe("held");
+  });
+
+  test("stage 3 — a premiere running past the 12-minute quarantine is carried by the HOLD, never the window", () => {
+    const scheduledAt = scheduledAtForClaim(at(70_000));
+    const midPlay = at(20 * 60_000); // beyond quarantineMs, inside the hold
+    expect(20 * 60_000).toBeGreaterThan(
+      PREMIERE_SUPPRESSION_DEFAULT_QUARANTINE_MS,
+    );
+    const withHold = parsedAt(
+      buildLoopSuppressionContract(
+        [{ ...heldFor(scheduledAt), premierePageLive: true }],
+        midPlay,
+      ),
+      midPlay,
+    );
+    expect(classifyEpisodeSuppression(withHold, EPISODE, midPlay)).toBe("held");
+    // Counterfactual: the standing contract alone would already publish it —
+    // proving the hold (not the quarantine window) shields a long premiere.
+    const withoutHold = parsedAt(
+      buildLoopSuppressionContract([], midPlay),
+      midPlay,
+    );
+    expect(classifyEpisodeSuppression(withoutHold, EPISODE, midPlay)).toBe(
+      "publish",
+    );
+  });
+
+  test("stage 4 — revealed + released: back to the standing contract; publishes at quarantine expiry", () => {
+    // Typical premiere: revealed ~9 minutes after completion. Release swaps the
+    // hold contract for the zero-hold standing contract.
+    const releaseTick = at(9 * 60_000);
+    const released = parsedAt(
+      buildLoopSuppressionContract([], releaseTick),
+      releaseTick,
+    );
+    expect(classifyEpisodeSuppression(released, EPISODE, releaseTick)).toBe(
+      "quarantined", // still inside its own 12-minute window
+    );
+    const afterQuarantine = at(
+      PREMIERE_SUPPRESSION_DEFAULT_QUARANTINE_MS + 60_000,
+    );
+    const laterState = parsedAt(
+      buildLoopSuppressionContract([], afterQuarantine),
+      afterQuarantine,
+    );
+    expect(
+      classifyEpisodeSuppression(laterState, EPISODE, afterQuarantine),
+    ).toBe("publish");
+    expect(
+      filterSuppressedEpisodeRows(laterState, [EPISODE], afterQuarantine),
+    ).toEqual([EPISODE]);
+  });
+
+  test("stage 4b — declined episode (over budget / ingest failure): no hold, publishes at quarantine expiry", () => {
+    // The loop never claims it, so only the standing contract applies: deferred
+    // inside the window, published after — pathological rounds still publish.
+    const inside = at(5 * 60_000);
+    expect(
+      classifyEpisodeSuppression(
+        parsedAt(buildLoopSuppressionContract([], inside), inside),
+        EPISODE,
+        inside,
+      ),
+    ).toBe("quarantined");
+    const outside = at(PREMIERE_SUPPRESSION_DEFAULT_QUARANTINE_MS + 1_000);
+    expect(
+      classifyEpisodeSuppression(
+        parsedAt(buildLoopSuppressionContract([], outside), outside),
+        EPISODE,
+        outside,
+      ),
+    ).toBe("publish");
+  });
+
+  test("stage 5 — dead loop: the heartbeat stops and EVERYTHING publishes within the stale bound (fail-open)", () => {
+    const lastHeartbeat = at(70_000);
+    const scheduledAt = scheduledAtForClaim(lastHeartbeat);
+    const holdContract = buildLoopSuppressionContract(
+      [heldFor(scheduledAt)],
+      lastHeartbeat,
+    );
+    const standingContract = buildLoopSuppressionContract([], lastHeartbeat);
+    const afterStale = new Date(
+      lastHeartbeat.getTime() + PREMIERE_SUPPRESSION_STALE_MS,
+    );
+    for (const contract of [holdContract, standingContract]) {
+      const state = parsedAt(contract, afterStale);
+      expect(state.status).toBe("stale");
+      // Even an episode completed seconds ago publishes: availability first.
+      const justCompleted = {
+        episodeRequestId: "ereq_justnow",
+        completedAt: new Date(afterStale.getTime() - 1_000).toISOString(),
+      };
+      expect(classifyEpisodeSuppression(state, EPISODE, afterStale)).toBe(
+        "publish",
+      );
+      expect(classifyEpisodeSuppression(state, justCompleted, afterStale)).toBe(
+        "publish",
+      );
+      expect(
+        filterSuppressedEpisodeRows(
+          state,
+          [EPISODE, justCompleted],
+          afterStale,
+        ),
+      ).toEqual([EPISODE, justCompleted]);
     }
   });
 });
@@ -539,6 +730,10 @@ describe("admission input builders (exact shapes the admit CLI validates)", () =
 
 describe("shadow-mode side-effect gate (safety proof)", () => {
   test("shadow permits ingest only; no suppress/pin/admit/restart", () => {
+    // `writeSuppressionContract: false` covers BOTH contract writers — the
+    // per-hold refresh AND the zero-hold standing heartbeat added by the
+    // 2026-07-22 every-round directive. A shadow run writes no contract at
+    // all, so it can never quarantine the live league feed.
     expect(loopSideEffectPlan(true)).toEqual({
       ingest: true,
       writeSuppressionContract: false,

@@ -65,6 +65,15 @@ import { runReplayPremiereCoworldIngest } from "./replay-premiere-ingest-coworld
  * controlled server restart, tracks it to reveal, then releases the hold so the
  * episode publishes ordinarily.
  *
+ * EVERY ROUND IS PREMIERE (2026-07-22 operator directive): each live tick also
+ * heartbeats a STANDING suppression contract — zero holds when nothing is
+ * claimed — whose blanket quarantine defers every freshly-completed episode
+ * from the league page until the loop has decided, so the loop wins the
+ * publish race against the 300s mirror for every round. The operator
+ * explicitly accepted the ~12-minute battle-card lag this creates (reversing
+ * suppression reviewer requirement #4). Fail-open is untouched: a dead loop
+ * stops heartbeating and the mirror ignores the contract after 15 minutes.
+ *
  * Read-only toward Softmax (coworld `rounds`/`replays`/`divisions` reads plus
  * public S3 replay downloads); the only local mutations are the suppression
  * contract, the retention pin, the private premiere catalog (via the reviewed
@@ -663,16 +672,33 @@ async function writeContractForHold(
   config: LoopConfig,
   now: Date,
 ): Promise<void> {
-  const contract = buildLoopSuppressionContract([hold], now);
-  if (contract === null) {
-    return;
-  }
-  await writePremiereSuppressionContract(config.contractPath, contract);
+  await writePremiereSuppressionContract(
+    config.contractPath,
+    buildLoopSuppressionContract([hold], now),
+  );
 }
 
-async function deleteContract(config: LoopConfig): Promise<void> {
-  // No zero-hold contract is ever left active (requirement #4).
-  await fs.rm(config.contractPath, { force: true });
+/**
+ * The zero-hold STANDING contract. Its blanket `quarantineMs` defers every
+ * freshly-completed episode until the loop has had its chance to claim it, so
+ * the loop wins the publish race against the mirror for every round.
+ *
+ * 2026-07-22 operator reversal of suppression reviewer requirement #4 ("never
+ * write a zero-hold active contract"): the operator directed EVERY NEW ROUND
+ * IS PREMIERE and explicitly accepted the ~12-minute battle-card lag the
+ * standing quarantine creates. The former `deleteContract` release path is
+ * gone; releasing a hold now falls back to this standing contract instead.
+ * Fail-open is unchanged — a dead loop stops refreshing `generatedAt` and the
+ * mirror ignores the contract entirely after 15 minutes.
+ */
+async function writeStandingContract(
+  config: LoopConfig,
+  now: Date,
+): Promise<void> {
+  await writePremiereSuppressionContract(
+    config.contractPath,
+    buildLoopSuppressionContract([], now),
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -947,6 +973,7 @@ async function activateHold(
       true,
       config,
       journal,
+      now,
     );
     return { kind: "released" };
   }
@@ -983,11 +1010,11 @@ async function trackHold(
 ): Promise<void> {
   const state = await readPremiereState(config, hold.premiereId);
   if (state === "revealed" || state === "archived") {
-    await releaseHold(hold, "revealed", true, config, journal);
+    await releaseHold(hold, "revealed", true, config, journal, now);
     return;
   }
   if (state === "failed" || state === "cancelled") {
-    await releaseHold(hold, "failed_or_cancelled", true, config, journal);
+    await releaseHold(hold, "failed_or_cancelled", true, config, journal, now);
     return;
   }
   if (
@@ -1011,13 +1038,21 @@ async function releaseHold(
   terminal: boolean,
   config: LoopConfig,
   journal: JournalWriter,
+  now: Date,
 ): Promise<void> {
-  // ONLY-LATEST: this is the sole hold, so removing it means no active contract
-  // (requirement #4) — delete the contract so the episode publishes ordinarily.
-  await deleteContract(config);
+  // ONLY-LATEST: this is the sole hold, so removing it leaves the zero-hold
+  // STANDING contract (2026-07-22 operator reversal of requirement #4 — the
+  // release path used to DELETE the contract here). The released episode
+  // publishes once its own blanket quarantine window (completedAt +
+  // quarantineMs) expires — immediately on the next mirror cycle if it is
+  // already older than that — while every other fresh episode stays deferred
+  // so the loop keeps winning the publish race for the next round.
+  await writeStandingContract(config, now);
   await unpinHoldArtifacts(hold, config);
   await journal.appendHoldReleased(hold, outcome, terminal);
-  log(`released ${hold.premiereId} (${outcome}); episode publishes ordinarily`);
+  log(
+    `released ${hold.premiereId} (${outcome}); episode publishes at quarantine expiry`,
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -1034,7 +1069,7 @@ async function progressHold(
   // Refresh generatedAt every cycle (requirement #1), regardless of phase.
   await writeContractForHold(hold, config, now);
   if (isHoldExpired(hold, now)) {
-    await releaseHold(hold, "expired", true, config, journal);
+    await releaseHold(hold, "expired", true, config, journal, now);
     return;
   }
 
@@ -1045,7 +1080,7 @@ async function progressHold(
     if (materials === null) {
       // Cannot reconstruct ingest inputs (episode aged out of the feed); count
       // a retriable attempt and let it publish.
-      await releaseHold(current, "ingest_failed", false, config, journal);
+      await releaseHold(current, "ingest_failed", false, config, journal, now);
       return;
     }
     const result = await ingestAndAdmit(current, materials, config);
@@ -1056,6 +1091,7 @@ async function progressHold(
         result.terminal,
         config,
         journal,
+        now,
       );
       return;
     }
@@ -1441,16 +1477,25 @@ async function runLiveIteration(config: LoopConfig): Promise<void> {
   const folded = foldLoopJournal(records);
   const now = new Date();
 
-  // Refresh an active hold's contract BEFORE the coworld reads that can flake,
-  // so a transient Softmax outage never lets suppression go stale (and spoil a
-  // live premiere) within the 15-minute stale bound. Best-effort: a refresh
-  // failure must not abort the tick.
-  if (folded.activeHold !== null && !isHoldExpired(folded.activeHold, now)) {
-    try {
+  // Standing-quarantine heartbeat (2026-07-22 "every round is premiere"
+  // operator directive): refresh the contract EVERY live tick — with the
+  // active hold when one exists, otherwise as the zero-hold standing contract
+  // whose blanket quarantine defers every freshly-completed episode until the
+  // loop has had its chance to claim it. Written BEFORE the coworld reads that
+  // can flake, so a transient Softmax outage never lets suppression go stale
+  // (and spoil a live premiere) within the 15-minute stale bound. The 60s tick
+  // against the 15-minute staleness bound leaves a wide refresh margin, and
+  // fail-open is preserved: if this process stops, the contract goes stale and
+  // everything publishes. Best-effort: a refresh failure must not abort the
+  // tick.
+  try {
+    if (folded.activeHold !== null && !isHoldExpired(folded.activeHold, now)) {
       await writeContractForHold(folded.activeHold, config, now);
-    } catch (error) {
-      log(`early contract refresh warning: ${errorMessage(error)}`);
+    } else {
+      await writeStandingContract(config, now);
     }
+  } catch (error) {
+    log(`contract heartbeat warning: ${errorMessage(error)}`);
   }
 
   const roundsRaw = await coworldRead(

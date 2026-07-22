@@ -19,7 +19,11 @@ import type { PremierePlaybackRate } from "./ReplayPremiereContracts";
  *
  * The single hard invariant this module encodes is ONLY-LATEST: at most one
  * episode is ever held at a time, and only the freshest completed unpremiered
- * round is ever claimed. Everything else publishes ordinarily.
+ * round is ever claimed. Everything else publishes once its blanket
+ * quarantine window expires (see {@link buildLoopSuppressionContract} — since
+ * the 2026-07-22 "every round is premiere" operator directive the loop keeps
+ * a STANDING contract active even with zero holds, so freshly-completed
+ * episodes always wait out `quarantineMs` before the mirror publishes them).
  */
 
 /** Public league the loop watches (read-only). */
@@ -512,7 +516,7 @@ function roundRank(round: LoopRound): number {
 }
 
 // ---------------------------------------------------------------------------
-// Suppression contract construction (requirements #1 and #4)
+// Suppression contract construction (requirement #1 + the standing quarantine)
 // ---------------------------------------------------------------------------
 
 function toSuppressionHold(hold: LoopHoldState): PremiereSuppressionHold {
@@ -529,19 +533,28 @@ function toSuppressionHold(hold: LoopHoldState): PremiereSuppressionHold {
 }
 
 /**
- * Build the suppression contract for the current holds, or null when there are
- * none. Returning null (rather than a zero-hold contract) is requirement #4:
- * an active zero-hold contract would blanket-quarantine every fresh card. The
- * `generatedAt` is always the caller's `now` — never a future/skewed value —
- * and the loop rewrites it every cycle, satisfying requirement #1.
+ * Build the suppression contract for the current holds. ZERO HOLDS IS VALID:
+ * the resulting contract carries only the blanket `quarantineMs`, which defers
+ * every freshly-completed episode until the loop has had its chance to claim
+ * it — the STANDING QUARANTINE that makes the loop win the publish race
+ * against the mirror for every round.
+ *
+ * HISTORY — suppression reviewer requirement #4 REVERSED (2026-07-22): the
+ * original review required "never write a zero-hold active contract" so an
+ * idle loop could not blanket-quarantine fresh cards, and this function
+ * returned null for zero holds. On 2026-07-22 the operator directed EVERY NEW
+ * ROUND IS PREMIERE and explicitly accepted the resulting ~12-minute
+ * battle-card lag, so the zero-hold standing contract is now the intended
+ * behavior. Fail-open is unchanged: if the loop dies, the contract goes stale
+ * within PREMIERE_SUPPRESSION_STALE_MS (15 min) and everything publishes.
+ *
+ * The `generatedAt` is always the caller's `now` — never a future/skewed
+ * value — and the loop rewrites it every tick, satisfying requirement #1.
  */
 export function buildLoopSuppressionContract(
   holds: readonly LoopHoldState[],
   now: Date,
-): PremiereSuppressionContract | null {
-  if (holds.length === 0) {
-    return null;
-  }
+): PremiereSuppressionContract {
   return createPremiereSuppressionContract({
     generatedAt: now.toISOString(),
     holds: holds.map(toSuppressionHold),
