@@ -35,6 +35,13 @@ import {
 } from "../server/agents/CoworldLeagueMirrorCore";
 import { withCoworldLeagueMirrorOperationLock } from "../server/agents/CoworldLeagueMirrorOperationLock";
 import {
+  buildPremiereSiteBlock,
+  classifyEpisodeSuppression,
+  filterSuppressedEpisodeRows,
+  loadPremiereSuppressionContract,
+  type PremiereSuppressionState,
+} from "../server/agents/CoworldLeaguePremiereSuppression";
+import {
   markCoworldLeagueSiteStale,
   writeCoworldLeagueSite,
   type CoworldLeagueEpisodeRow,
@@ -77,6 +84,11 @@ interface MirrorOptions {
   recoverPinnedArtifacts: boolean;
   watch: boolean;
   intervalSeconds: number;
+  /**
+   * Absolute path to the premiere-suppression contract, or null (default) to
+   * run with suppression disabled — the mirror then behaves exactly as before.
+   */
+  suppressionContractPath: string | null;
 }
 
 function parseOptions(argv: string[]): MirrorOptions {
@@ -114,6 +126,7 @@ function parseOptions(argv: string[]): MirrorOptions {
     recoverPinnedArtifacts: false,
     watch: false,
     intervalSeconds: 300,
+    suppressionContractPath: null,
   };
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i];
@@ -171,6 +184,16 @@ function parseOptions(argv: string[]): MirrorOptions {
       case "--interval-seconds":
         options.intervalSeconds = Math.max(60, Number(next()));
         break;
+      case "--suppression-contract": {
+        const value = next();
+        if (!path.isAbsolute(value)) {
+          throw new Error(
+            `--suppression-contract must be an absolute path: ${value}`,
+          );
+        }
+        options.suppressionContractPath = value;
+        break;
+      }
       default:
         throw new Error(`Unknown flag: ${arg}`);
     }
@@ -402,6 +425,23 @@ function log(message: string): void {
   console.log(`[league-mirror ${new Date().toISOString()}] ${message}`);
 }
 
+/**
+ * Read the premiere-suppression contract, or resolve to a stale (non-
+ * suppressing) state when no contract path is configured. Fail-open: any
+ * unreadable/corrupt/stale contract also resolves to a stale state inside
+ * {@link loadPremiereSuppressionContract}, so this never throws and never
+ * blocks publication.
+ */
+async function readSuppressionState(
+  options: MirrorOptions,
+  now: Date = new Date(),
+): Promise<PremiereSuppressionState> {
+  if (options.suppressionContractPath === null) {
+    return { status: "stale", reason: "not_configured" };
+  }
+  return loadPremiereSuppressionContract(options.suppressionContractPath, now);
+}
+
 async function pruneMirrorArtifacts(
   options: MirrorOptions,
   protectedEpisodes: CoworldLeagueEpisodeRow[],
@@ -515,18 +555,72 @@ async function syncOnce(options: MirrorOptions): Promise<void> {
   const recoveryReferences = options.recoverPinnedArtifacts
     ? await readCoworldLeagueRetentionPins(options.retentionPinManifestPath)
     : null;
-  const episodeMetasToProcess =
+  // Read the contract at cycle start to log/observe suppression status. Only
+  // the cycle-start OBSERVATION is skipped during operator-driven pinned-artifact
+  // recovery; the final-defense filter below still runs unconditionally, so a
+  // held/quarantined episode is spoiler-shielded even on the recovery path.
+  const suppressionAtCycleStart =
+    recoveryReferences === null ? await readSuppressionState(options) : null;
+  if (
+    options.suppressionContractPath !== null &&
+    suppressionAtCycleStart !== null
+  ) {
+    log(
+      suppressionAtCycleStart.status === "active"
+        ? `premiere suppression active (${suppressionAtCycleStart.contract.holds.length} hold(s))`
+        : `premiere suppression inactive (contract ${suppressionAtCycleStart.reason})`,
+    );
+  }
+  const episodeMetasToProcess = (
     recoveryReferences === null
       ? episodeMetas.slice(0, options.maxRenderedEpisodes)
       : episodeMetas.filter((meta) =>
           recoveryReferences.episodeRequestIds.has(meta.episodeRequestId),
-        );
+        )
+  ).filter((meta) => {
+    if (suppressionAtCycleStart === null) {
+      return true;
+    }
+    const decision = classifyEpisodeSuppression(
+      suppressionAtCycleStart,
+      meta,
+      new Date(),
+    );
+    if (decision !== "publish") {
+      log(
+        `episode ${meta.episodeRequestId} ${
+          decision === "held"
+            ? "held for premiere — excluded"
+            : "deferred this cycle (premiere quarantine)"
+        }`,
+      );
+    }
+    return decision === "publish";
+  });
 
   const freshEpisodes: CoworldLeagueEpisodeRow[] = [];
   const recoveredEpisodeRequestIds = new Set<string>();
   let replayEpisodeFailures = 0;
   for (const meta of episodeMetasToProcess) {
     try {
+      // Re-read the contract immediately before unpack/card build so a claim
+      // that lands mid-cycle still suppresses this episode (shrinks the
+      // in-flight race). Stale/absent contract keeps this a no-op.
+      if (recoveryReferences === null) {
+        const decision = classifyEpisodeSuppression(
+          await readSuppressionState(options),
+          meta,
+          new Date(),
+        );
+        if (decision !== "publish") {
+          log(
+            `episode ${meta.episodeRequestId} suppressed before unpack (${
+              decision === "held" ? "premiere hold" : "premiere quarantine"
+            })`,
+          );
+          continue;
+        }
+      }
       if (
         (await minimumAvailableDiskBytes([
           options.cacheDir,
@@ -635,6 +729,26 @@ async function syncOnce(options: MirrorOptions): Promise<void> {
     );
   }
 
+  // Final defense: mergeEpisodeRows retains previously-published cards, so a
+  // card published before a premiere claim can still be in `episodes`. Re-read
+  // the contract and filter held/quarantined episodes out of the MERGED list
+  // before it reaches data.json. Stale/absent contract returns the list
+  // unchanged, so the mirror output stays byte-identical to today.
+  const finalSuppression = await readSuppressionState(options);
+  const publishedEpisodes = filterSuppressedEpisodeRows(
+    finalSuppression,
+    episodes,
+    new Date(),
+  );
+  if (publishedEpisodes.length !== episodes.length) {
+    log(
+      `premiere suppression removed ${
+        episodes.length - publishedEpisodes.length
+      } card(s) from the merged episode list`,
+    );
+  }
+  const premiere = buildPremiereSiteBlock(finalSuppression, new Date());
+
   const now = new Date().toISOString();
   const data: CoworldLeagueMirrorData = {
     generatedAt: now,
@@ -660,7 +774,10 @@ async function syncOnce(options: MirrorOptions): Promise<void> {
     },
     standings,
     rounds,
-    episodes,
+    episodes: publishedEpisodes,
+    // Only present when a premiere is currently claimed; omitting the key keeps
+    // stale/absent-contract output byte-identical to pre-premiere behavior.
+    ...(premiere !== null ? { premiere } : {}),
     links: {
       enterTheLeagueUrl: options.starterUrl,
       platformLabel: "Softmax Coworld",
@@ -668,7 +785,7 @@ async function syncOnce(options: MirrorOptions): Promise<void> {
   };
   const paths = await writeCoworldLeagueSite(options.siteDir, data);
   log(
-    `site updated: ${paths.indexPath} (${standings.length} standings, ${episodes.length} battles)`,
+    `site updated: ${paths.indexPath} (${standings.length} standings, ${publishedEpisodes.length} battles)`,
   );
   await pruneMirrorArtifacts(options, data.episodes);
 }

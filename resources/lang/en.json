@@ -1049,7 +1049,16 @@
     "rated_rounds": "Rated rounds",
     "standings_provenance": "Rank, score, and rated rounds come from Coworld's rating row; the active champion is shown separately when it differs.",
     "champion_feed_delayed": "Champion status delayed — standings show rating rows only.",
-    "replay_feed_delayed": "Replay feed delayed — standings and rounds are current; showing the last available battles."
+    "replay_feed_delayed": "Replay feed delayed — standings and rounds are current; showing the last available battles.",
+    "premiere_now_eyebrow": "Premiering now",
+    "premiere_scheduled_eyebrow": "Premiere scheduled",
+    "premiere_heading": "Sealed premiere",
+    "premiere_now_body": "A claimed battle is premiering now. Its result stays sealed on the league page until the reveal.",
+    "premiere_scheduled_body": "A battle has been claimed for a sealed premiere. Its result stays hidden here until it reveals.",
+    "premiere_watch": "Watch the premiere",
+    "premiere_live": "LIVE",
+    "premiere_label": "Premiere",
+    "premiere_starts": "Starts {time}"
   },
   "replay_premiere": {
     "overlay_label": "Replay Premiere controls",
@@ -1084,6 +1093,8 @@
     "copy_link": "Copy premiere link",
     "enter_ambient": "Ambient mode",
     "exit_ambient": "Exit ambient",
+    "live_badge": "LIVE",
+    "live_status": "Premiere is live",
     "shared_playback": "Shared playback",
     "shared_status": "You are watching the server-authoritative premiere position.",
     "sequence_position": "Released sequence {sequence}",

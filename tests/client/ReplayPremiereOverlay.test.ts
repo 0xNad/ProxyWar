@@ -399,6 +399,79 @@ describe("ReplayPremiereOverlay", () => {
     ).toBeNull();
   });
 
+  it("renders a prominent LIVE badge only during the live playing and checkpoint states", () => {
+    const playing = mount(makeModel({ state: "playing" }), {
+      onMarker: vi.fn(),
+    });
+    const playingBadge = playing.element.querySelector(".rp-live-now");
+    expect(playingBadge).not.toBeNull();
+    // A dedicated red dot plus the uppercase LIVE word, with a spoiler-free
+    // accessible label — nothing about live-ness is invented, it mirrors state.
+    expect(playingBadge?.querySelector(".rp-live-now-dot")).not.toBeNull();
+    expect(playingBadge?.textContent).toContain("replay_premiere.live_badge");
+    expect(playingBadge?.getAttribute("aria-label")).toBe(
+      "replay_premiere.live_status",
+    );
+    // The decorative dot is hidden from assistive tech.
+    expect(
+      playingBadge
+        ?.querySelector(".rp-live-now-dot")
+        ?.getAttribute("aria-hidden"),
+    ).toBe("true");
+    // It sits above the existing green "Shared playback" heading.
+    const sharedPlayback = playing.element.querySelector(".rp-live-badge");
+    expect(sharedPlayback).not.toBeNull();
+    const relativePosition = playingBadge!.compareDocumentPosition(
+      sharedPlayback as Node,
+    );
+    expect(relativePosition & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+
+    const checkpointView = mount(
+      makeModel({
+        state: "checkpoint",
+        activeCheckpointId: "checkpoint-1",
+        checkpoints: [
+          {
+            id: "checkpoint-1",
+            sequence: 350,
+            state: "open",
+            closesAt: "2026-07-20T20:00:15.000Z",
+            options: [
+              { seatId: "seat-a", displayName: "Atlas Prime" },
+              { seatId: "seat-b", displayName: "Borealis" },
+            ],
+          },
+          checkpoint("checkpoint-2", 650),
+        ],
+      }),
+      { onPrediction: vi.fn() },
+    );
+    expect(checkpointView.element.querySelector(".rp-live-now")).not.toBeNull();
+  });
+
+  it("omits the LIVE badge for scheduled, revealed, and archived states", () => {
+    const scheduled = mount(makeModel({ state: "scheduled" }));
+    expect(scheduled.element.querySelector(".rp-live-now")).toBeNull();
+
+    const revealed = mount(
+      makeModel({
+        state: "revealed",
+        releasedSequence: 999,
+        reveal: { outcome: "winner", winnerSeatId: "seat-a" },
+      }),
+    );
+    expect(revealed.element.querySelector(".rp-live-now")).toBeNull();
+
+    const archived = mount(
+      makeModel({
+        state: "archived",
+        releasedSequence: 999,
+        reveal: { outcome: "winner", winnerSeatId: "seat-b" },
+      }),
+    );
+    expect(archived.element.querySelector(".rp-live-now")).toBeNull();
+  });
+
   it("fails closed when a runtime payload does not contain exactly two checkpoints", () => {
     const invalid = {
       ...makeModel(),

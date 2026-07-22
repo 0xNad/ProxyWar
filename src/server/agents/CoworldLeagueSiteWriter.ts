@@ -62,6 +62,21 @@ export interface CoworldLeagueRoundRow {
   completedAt: string | null;
 }
 
+/**
+ * Spoiler-safe premiere card data. Built ONLY from the suppression contract, so
+ * it carries no episodeRequestId, run id, player name, or match outcome. The
+ * premiere leak audit scans `/league` HTML for forbidden substrings and
+ * `data.json` for exact JSON leaves; keeping this shape to these five fields is
+ * what guarantees the league page can never spoil a held premiere.
+ */
+export interface CoworldLeaguePremiereCard {
+  premiereId: string;
+  roundNumber: number | null;
+  mapLabel: string;
+  scheduledAt: string;
+  premierePageLive: boolean;
+}
+
 export interface CoworldLeagueMirrorData {
   generatedAt: string;
   lastGoodSyncAt: string;
@@ -85,6 +100,12 @@ export interface CoworldLeagueMirrorData {
   standings: CoworldLeagueStandingRow[];
   rounds: CoworldLeagueRoundRow[];
   episodes: CoworldLeagueEpisodeRow[];
+  /**
+   * Optional spoiler-safe premiere card. Omitted whenever nothing is currently
+   * premiering (including every stale/absent-contract case), which keeps the
+   * mirror output byte-identical to pre-premiere behavior.
+   */
+  premiere?: CoworldLeaguePremiereCard;
   links: {
     enterTheLeagueUrl: string;
     platformLabel: string;
@@ -370,6 +391,38 @@ export function coworldLeagueIndexHtml(data: CoworldLeagueMirrorData): string {
         )}</div>`
       : "";
   const watchLatest = data.episodes.find((episode) => episode.fullRenderHref);
+  const premiereSection = premiereCard(data.premiere);
+  // Premiere-only CSS, emitted ONLY when a premiere card is present. Keeping it
+  // out of the static <style> block when absent is what makes the mirror's
+  // index.html byte-identical to pre-premiere output for a stale/absent
+  // contract. Leading "\n    " with no trailing newline so it slots between two
+  // existing style rules without shifting any bytes when empty.
+  const premiereStyles =
+    data.premiere === undefined
+      ? ""
+      : "\n    " +
+        [
+          ".round-pill.premiering { border-color:rgba(122,215,240,.6); color:var(--cyan); box-shadow:inset 0 0 0 1px rgba(122,215,240,.25); }",
+          ".premiere-card { position:relative; overflow:hidden; border:1px solid rgba(122,215,240,.5); background:linear-gradient(180deg, rgba(122,215,240,.1), rgba(122,215,240,.02) 60%), var(--surface); border-radius:12px; padding:20px; display:flex; flex-direction:column; gap:11px; box-shadow:0 18px 44px rgba(4,10,18,.5); }",
+          ".premiere-card::before { content:''; position:absolute; inset:0 0 auto 0; height:2px; background:linear-gradient(90deg, transparent, rgba(122,215,240,.65), transparent); }",
+          '.premiere-card[data-premiere-live="true"] { border-color:rgba(239,68,68,.45); background:radial-gradient(120% 130% at 0% 0%, rgba(239,68,68,.14), transparent 42%), linear-gradient(180deg, rgba(122,215,240,.08), rgba(122,215,240,.015) 60%), var(--surface); }',
+          '.premiere-card[data-premiere-live="true"]::before { background:linear-gradient(90deg, rgba(239,68,68,.75), rgba(122,215,240,.5), transparent); }',
+          ".premiere-card .premiere-badge { align-self:flex-start; display:inline-flex; align-items:center; gap:8px; padding:6px 14px; border-radius:999px; font:900 13px/1 ui-monospace, SFMono-Regular, Menlo, monospace; letter-spacing:.14em; text-transform:uppercase; }",
+          ".premiere-card .premiere-badge.live { border:1px solid rgba(239,68,68,.75); background:rgba(239,68,68,.18); color:#ffd7d2; box-shadow:0 0 22px rgba(239,68,68,.22); }",
+          ".premiere-card .premiere-badge.scheduled { gap:10px; border:1px solid var(--line); background:var(--surface2); color:var(--muted); font-weight:800; }",
+          ".premiere-card .premiere-badge-dot { width:10px; height:10px; border-radius:999px; background:#ef4444; box-shadow:0 0 0 0 rgba(239,68,68,.55); animation:pw-premiere-pulse 1.6s ease-out infinite; }",
+          "@keyframes pw-premiere-pulse { 0% { box-shadow:0 0 0 0 rgba(239,68,68,.55); } 70% { box-shadow:0 0 0 7px rgba(239,68,68,0); } 100% { box-shadow:0 0 0 0 rgba(239,68,68,0); } }",
+          ".premiere-card .premiere-badge .premiere-starts { color:var(--muted); font-weight:700; letter-spacing:.02em; text-transform:none; }",
+          ".premiere-card .premiere-eyebrow { color:var(--cyan); font:800 11px/1 ui-monospace, SFMono-Regular, Menlo, monospace; text-transform:uppercase; letter-spacing:.14em; }",
+          ".premiere-card h2 { margin:0; font-size:21px; letter-spacing:-.01em; }",
+          ".premiere-card .premiere-body { margin:0; color:#cbd3df; max-width:640px; }",
+          ".premiere-card .premiere-meta { display:flex; gap:8px; flex-wrap:wrap; color:var(--muted); font:700 12px ui-monospace, SFMono-Regular, Menlo, monospace; }",
+          ".premiere-card .premiere-meta span { border:1px solid var(--line); background:var(--surface2); border-radius:999px; padding:5px 11px; }",
+          ".premiere-card .actions { margin-top:4px; }",
+          ".premiere-card .premiere-link { gap:9px; }",
+          ".premiere-card .premiere-link::before { content:''; width:0; height:0; border-style:solid; border-width:5px 0 5px 8px; border-color:transparent transparent transparent currentColor; }",
+          "@media (prefers-reduced-motion: reduce) { .premiere-card .premiere-badge-dot { animation:none; } }",
+        ].join("\n    ");
   return `<!doctype html>
 <html lang="en" data-generated-at="${escapeHtml(data.generatedAt)}" data-stale="${data.stale ? "true" : "false"}" data-league-id="${escapeHtml(league.id)}">
 <head>
@@ -450,7 +503,7 @@ export function coworldLeagueIndexHtml(data: CoworldLeagueMirrorData): string {
     .degraded { border:1px solid rgba(244,166,74,.5); color:var(--amber); border-radius:4px; padding:2px 7px; font:800 10px ui-monospace, SFMono-Regular, Menlo, monospace; }
     .rounds-strip { display:flex; gap:8px; flex-wrap:wrap; }
     .round-pill { border:1px solid var(--line); background:var(--surface); border-radius:6px; padding:8px 10px; font:700 12px ui-monospace, SFMono-Regular, Menlo, monospace; color:var(--muted); }
-    .round-pill.running { border-color:rgba(126,224,168,.5); color:var(--good); }
+    .round-pill.running { border-color:rgba(126,224,168,.5); color:var(--good); }${premiereStyles}
     footer { border-top:1px solid var(--line); padding-top:16px; color:var(--muted); font-size:13px; display:flex; justify-content:space-between; gap:12px; flex-wrap:wrap; }
     @media (max-width:640px) {
       .shell { padding-left:12px; padding-right:12px; }
@@ -524,7 +577,7 @@ export function coworldLeagueIndexHtml(data: CoworldLeagueMirrorData): string {
           data.episodes.filter((episode) => episode.fullRenderHref).length,
         ),
       )}</strong></div>
-    </div>
+    </div>${premiereSection}
     <section>
       <h2 id="standings-title">Standings</h2>
       <p id="standings-provenance" class="standings-note">${escapeHtml(
@@ -543,12 +596,18 @@ export function coworldLeagueIndexHtml(data: CoworldLeagueMirrorData): string {
     <section>
       <h2>Recent rounds</h2>
       <div class="rounds-strip">${data.rounds
-        .map(
-          (round) =>
-            `<span class="round-pill${round.status === "running" ? " running" : ""}">#${escapeHtml(
-              String(round.roundNumber),
-            )} ${escapeHtml(round.status)}</span>`,
-        )
+        .map((round) => {
+          const premiering =
+            data.premiere !== undefined &&
+            data.premiere.roundNumber !== null &&
+            data.premiere.roundNumber === round.roundNumber;
+          const classes = `round-pill${round.status === "running" ? " running" : ""}${
+            premiering ? " premiering" : ""
+          }`;
+          return `<span class="${classes}">#${escapeHtml(
+            String(round.roundNumber),
+          )} ${escapeHtml(round.status)}</span>`;
+        })
         .join("\n")}</div>
     </section>
     <footer>
@@ -876,6 +935,89 @@ function battleCard(episode: CoworldLeagueEpisodeRow): string {
         }</span>
       </div>
     </article>`;
+}
+
+function premiereCard(premiere: CoworldLeaguePremiereCard | undefined): string {
+  if (premiere === undefined) {
+    return "";
+  }
+  // Built ONLY from the five contract fields below. Never reference episode
+  // rows, run ids, player names, or outcomes here — the premiere leak audit
+  // fails every future admission if any forbidden fingerprint appears on
+  // `/league`.
+  const eyebrow = premiere.premierePageLive
+    ? translateText("coworld_league.premiere_now_eyebrow")
+    : translateText("coworld_league.premiere_scheduled_eyebrow");
+  const body = premiere.premierePageLive
+    ? translateText("coworld_league.premiere_now_body")
+    : translateText("coworld_league.premiere_scheduled_body");
+  const metaPills: string[] = [];
+  if (premiere.roundNumber !== null) {
+    metaPills.push(
+      `<span>Round ${escapeHtml(String(premiere.roundNumber))}</span>`,
+    );
+  }
+  if (premiere.mapLabel.length > 0) {
+    metaPills.push(`<span>${escapeHtml(premiere.mapLabel)}</span>`);
+  }
+  metaPills.push(
+    `<span data-utc="${escapeHtml(premiere.scheduledAt)}">${escapeHtml(
+      shortUtc(premiere.scheduledAt),
+    )}</span>`,
+  );
+  // Link to the premiere page only once it is actually live; a scheduled
+  // premiere has no public page to reveal yet.
+  const link = premiere.premierePageLive
+    ? `<div class="actions"><a class="button primary premiere-link" href="/premiere/${encodeURIComponent(
+        premiere.premiereId,
+      )}">${escapeHtml(translateText("coworld_league.premiere_watch"))}</a></div>`
+    : "";
+  // Prominent LIVE/PREMIERE badge — the loudest signal on the card. When the
+  // premiere page is actually live (premierePageLive), it is a red "LIVE" pill
+  // that, with the primary Watch CTA, dominates the card; otherwise it is a
+  // calmer "Premiere" pill carrying the localized start time and NO watch link.
+  // Built ONLY from premierePageLive + scheduledAt (already used above), so it
+  // adds no new data source and the spoiler invariant is unchanged.
+  const badge = premiere.premierePageLive
+    ? `<div class="premiere-badge live"><span class="premiere-badge-dot" aria-hidden="true"></span>${escapeHtml(
+        translateText("coworld_league.premiere_live"),
+      )}</div>`
+    : premiereScheduledBadge(premiere.scheduledAt);
+  // Leading "\n    " so the caller can append this to the metric-grid's closing
+  // </div> with no standalone template line; when premiere is undefined the
+  // caller sees "" and the page is byte-identical to the pre-premiere layout.
+  return `
+    <section class="premiere-section">
+      <article class="premiere-card" data-premiere-live="${
+        premiere.premierePageLive ? "true" : "false"
+      }">
+        ${badge}
+        <div class="premiere-eyebrow">${escapeHtml(eyebrow)}</div>
+        <h2>${escapeHtml(translateText("coworld_league.premiere_heading"))}</h2>
+        <p class="premiere-body">${escapeHtml(body)}</p>
+        <div class="premiere-meta">${metaPills.join("")}</div>
+        ${link}
+      </article>
+    </section>`;
+}
+
+// The calmer scheduled-state badge: a "Premiere" pill plus the localized start
+// time. The timestamp lives in its own [data-utc] span so the page's existing
+// localizer rewrites just the time (it replaces the full textContent of any
+// [data-utc] element), while the "Starts" prefix around the {time} placeholder
+// is preserved. Uses only the scheduledAt contract field — no new data source.
+function premiereScheduledBadge(scheduledAt: string): string {
+  const [before, after = ""] = translateText(
+    "coworld_league.premiere_starts",
+  ).split("{time}");
+  const startsTime = `<span data-utc="${escapeHtml(scheduledAt)}">${escapeHtml(
+    shortUtc(scheduledAt),
+  )}</span>`;
+  return `<div class="premiere-badge scheduled"><span>${escapeHtml(
+    translateText("coworld_league.premiere_label"),
+  )}</span><span class="premiere-starts">${escapeHtml(
+    before,
+  )}${startsTime}${escapeHtml(after)}</span></div>`;
 }
 
 function formatTiles(value: number): string {
