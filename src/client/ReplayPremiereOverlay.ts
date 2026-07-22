@@ -635,7 +635,9 @@ function renderStateBody(
       // "current leaders" percentages cannot sit under and contradict the
       // final results.
       body.append(renderReveal(model, model.reveal));
-      body.append(renderResultsSummary(model.reveal));
+      body.append(
+        renderResultsSummary(model.reveal, model.mapName, model.matchFormat),
+      );
       body.append(renderMarkers(model, callbacks, safeRun));
       body.append(renderShare(model, callbacks, safeRun, captionState));
       body.append(renderCounterChallenge(model, callbacks, safeRun));
@@ -653,7 +655,9 @@ function renderStateBody(
         body.append(renderSanitizedFailure("integrity_failure"));
         break;
       }
-      body.append(renderResultsSummary(model.reveal));
+      body.append(
+        renderResultsSummary(model.reveal, model.mapName, model.matchFormat),
+      );
       body.append(renderShare(model, callbacks, safeRun, captionState));
       body.append(renderCounterChallenge(model, callbacks, safeRun));
       break;
@@ -954,6 +958,11 @@ function renderCheckpointProgress(
     item.textContent = translateText("replay_premiere.checkpoint_number", {
       number: index + 1,
     });
+    // A quiet expectation-setting cue on the still-to-come prediction so viewers
+    // know a second window is coming, without faking an exact turn.
+    if (checkpoint.state === "pending") {
+      item.title = translateText("replay_premiere.prediction_upcoming_hint");
+    }
     list.append(item);
   });
   return list;
@@ -1691,7 +1700,11 @@ const RESULTS_MARKERS_LIMIT = 12;
  * prediction accuracy, and notable community markers. It renders nothing when
  * no results summary is attached, so it stays fail-closed on an absent reveal.
  */
-function renderResultsSummary(reveal: ReplayPremiereRevealView): HTMLElement {
+function renderResultsSummary(
+  reveal: ReplayPremiereRevealView,
+  mapLabel: string,
+  formatLabel: string,
+): HTMLElement {
   const section = element("section", "rp-section rp-results");
   const results = reveal.results;
   if (results === null || results === undefined) {
@@ -1707,20 +1720,31 @@ function renderResultsSummary(reveal: ReplayPremiereRevealView): HTMLElement {
   );
   heading.id = titleId;
   section.append(heading);
+  // One-line match context under the heading: "{map} · {format} · {n} turns".
+  // Each segment is dropped when its label is absent so a legacy summary (empty
+  // map/format) never renders a bare "·" or "undefined".
+  const metaParts: string[] = [];
+  const mapText = safeDisplay(mapLabel);
+  if (mapText.length > 0) {
+    metaParts.push(mapText);
+  }
+  const formatText = safeDisplay(formatLabel);
+  if (formatText.length > 0) {
+    metaParts.push(formatText);
+  }
   if (
     typeof results.turnCount === "number" &&
     Number.isFinite(results.turnCount) &&
     results.turnCount > 0
   ) {
-    section.append(
-      element(
-        "p",
-        "rp-results-meta",
-        translateText("replay_premiere.results_turn_count", {
-          turns: Math.trunc(results.turnCount),
-        }),
-      ),
+    metaParts.push(
+      translateText("replay_premiere.results_turn_count", {
+        turns: Math.trunc(results.turnCount),
+      }),
     );
+  }
+  if (metaParts.length > 0) {
+    section.append(element("p", "rp-results-meta", metaParts.join(" · ")));
   }
   const winnerSeatIds = new Set(
     results.standings
@@ -1938,9 +1962,16 @@ function renderArchive(model: ReplayPremiereOverlayModel): HTMLElement {
     ),
     element("p", "", translateText("replay_premiere.archived_description")),
   );
-  // A dated identity line so the durable archived page isn't a generic header.
-  // Falls back silently when the timestamp is unparseable.
-  if (parseTime(model.scheduledAt) !== null) {
+  // The honest identity subline (map · agents · Premiered {date}) is composed by
+  // the archive-view model builder and carried in model.description. Render it so
+  // the durable archived page shows real match context, not just a generic
+  // sentence. It already includes the premiered date, so the separate
+  // "Premiered {date}" line is dropped to avoid duplicating it; if the subline is
+  // ever absent, fall back to the dated line.
+  const identitySubline = safeDisplay(model.description);
+  if (identitySubline.length > 0) {
+    section.append(element("p", "rp-archived-premiered", identitySubline));
+  } else if (parseTime(model.scheduledAt) !== null) {
     section.append(
       element(
         "p",
@@ -2026,7 +2057,11 @@ function renderCounterChallenge(
             }),
     );
   });
-  section.append(
+  // A quiet bordered group so the counter-challenge copy + button read as one
+  // deliberate card instead of an orphaned helper line floating under the share
+  // controls.
+  const group = element("div", "rp-quiet-group");
+  group.append(
     element(
       "p",
       "rp-counter-copy",
@@ -2034,6 +2069,7 @@ function renderCounterChallenge(
     ),
     exportButton,
   );
+  section.append(group);
   return section;
 }
 
@@ -2845,6 +2881,12 @@ const OVERLAY_CSS = `
   }
   #${OVERLAY_ID} .rp-distribution-row.rp-distribution-mine { box-shadow: inset 0 0 0 1px var(--rp-positive); }
   #${OVERLAY_ID} .rp-distribution-row.rp-distribution-mine::before { background: var(--rp-positive-soft); }
+  /* Light theme only: the crowd-share fill sits at the soft-token alpha (0.12),
+     which is nearly invisible over the light row surface, so the minority option
+     reads as empty. Deepen both fills just enough that both rows read; the text
+     stays above the fill (z-index) and dark theme keeps its brighter tokens. */
+  :root[data-theme="light"] #${OVERLAY_ID} .rp-distribution-row::before { background: rgba(2, 132, 199, 0.22); }
+  :root[data-theme="light"] #${OVERLAY_ID} .rp-distribution-row.rp-distribution-mine::before { background: rgba(5, 150, 105, 0.2); }
   #${OVERLAY_ID} .rp-distribution-name,
   #${OVERLAY_ID} .rp-distribution-pct { position: relative; z-index: 1; }
   #${OVERLAY_ID} .rp-distribution-pct { font-variant-numeric: tabular-nums; font-weight: 750; }
@@ -2897,7 +2939,7 @@ const OVERLAY_CSS = `
   #${OVERLAY_ID} .rp-marker-button:hover:not(:disabled) { transform: translateY(-1px); border-color: var(--rp-mk); background: var(--rp-mk-soft); }
   #${OVERLAY_ID} .rp-marker-button:active:not(:disabled) { transform: translateY(0); }
   #${OVERLAY_ID} .rp-marker-symbol { display: block; color: var(--rp-mk); font-size: 19px; font-weight: 850; line-height: 1; }
-  #${OVERLAY_ID} .rp-marker-label { display: block; margin-top: 4px; overflow-wrap: anywhere; font-size: 10px; font-weight: 650; line-height: 1.12; }
+  #${OVERLAY_ID} .rp-marker-label { display: block; margin-top: 4px; overflow-wrap: break-word; hyphens: manual; font-size: 10px; font-weight: 650; line-height: 1.12; }
 
   /* ---- Share ---- */
   #${OVERLAY_ID} .rp-share { display: grid; gap: 9px; }
@@ -2986,7 +3028,7 @@ const OVERLAY_CSS = `
   #${OVERLAY_ID} .rp-reveal-crest {
     margin: 8px auto 2px;
     color: #fcd34d;
-    font-size: 30px;
+    font-size: 34px;
     line-height: 1;
     text-shadow: 0 3px 16px rgba(252, 211, 77, 0.45);
     animation: rp-crest-rise 0.5s cubic-bezier(0.22, 1, 0.36, 1) both;
@@ -2995,7 +3037,7 @@ const OVERLAY_CSS = `
     0% { opacity: 0; transform: translateY(6px) scale(0.7); }
     100% { opacity: 1; transform: none; }
   }
-  #${OVERLAY_ID} .rp-winner { margin: 6px 0 0; color: var(--rp-positive-text); font-size: 22px; font-weight: 850; line-height: 1.15; letter-spacing: -0.01em; }
+  #${OVERLAY_ID} .rp-winner { margin: 6px 0 0; color: var(--rp-positive-text); font-size: 26px; font-weight: 850; line-height: 1.15; letter-spacing: -0.01em; }
   #${OVERLAY_ID} .rp-reveal-void .rp-winner { color: var(--rp-text); font-size: 17px; }
   #${OVERLAY_ID} .rp-reveal-summary { color: var(--rp-text-dim); }
 
@@ -3079,6 +3121,14 @@ const OVERLAY_CSS = `
   }
   #${OVERLAY_ID} .rp-frozen-position { margin: 8px 0 0; padding: 6px 9px; border-radius: var(--rp-r-xs); background: var(--rp-surface-2); color: var(--rp-text-dim); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; }
   #${OVERLAY_ID} .rp-counter { display: grid; gap: 9px; }
+  #${OVERLAY_ID} .rp-quiet-group {
+    display: grid;
+    gap: 9px;
+    padding: 11px 12px;
+    border: 1px solid var(--rp-line);
+    border-radius: var(--rp-r-md);
+    background: var(--rp-surface-2);
+  }
   #${OVERLAY_ID} .rp-counter-copy { margin: 0; color: var(--rp-text-dim); font-size: 12.5px; }
   #${OVERLAY_ID} .rp-action-status { min-height: 0; margin: 0; padding: 0 12px 10px; color: var(--rp-danger); font-weight: 600; }
   #${OVERLAY_ID} .rp-action-status:empty { display: none; }
@@ -3106,6 +3156,10 @@ const OVERLAY_CSS = `
   #${OVERLAY_ID}[data-ambient="true"] .rp-ambient-evidence,
   #${OVERLAY_ID}[data-ambient="true"] .rp-markers { padding: 8px 9px; }
   #${OVERLAY_ID}[data-ambient="true"] .rp-playing-status { grid-column: 1 / -1; }
+  /* In an ambient checkpoint the compact pane belongs to the vote card; the LIVE
+     playing-status row would otherwise clip against the pane's bottom edge, so
+     it is dropped the same way the mobile sheet drops it during a checkpoint. */
+  #${OVERLAY_ID}[data-ambient="true"][data-state="checkpoint"] .rp-playing-status { display: none; }
   #${OVERLAY_ID}[data-ambient="true"] .rp-position { margin-top: 5px; }
   #${OVERLAY_ID}[data-ambient="true"] .rp-ambient-evidence { grid-column: 1 / -1; grid-template-columns: 1fr; gap: 0; }
   /* Compact the leader scoreboard so the full 5-reaction row still fits the
