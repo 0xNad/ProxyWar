@@ -308,15 +308,26 @@ describe("ReplayPremiereOverlay", () => {
         state: "failed",
         failureCode: rawFailure,
         releasedSequence: 412,
+        currentTurn: 730,
       }),
     );
 
     expect(handle.element.textContent).toContain(
       "replay_premiere.failure_generic",
     );
+    // The frozen marker now speaks in viewer turns, not the internal sequence.
     expect(handle.element.textContent).toContain(
-      "replay_premiere.frozen_position:sequence=412",
+      "replay_premiere.playback_stopped_at_turn:turn=730",
     );
+    // A terminal premiere is not a dead end: it reassures the outcome stays
+    // sealed and offers a route back to the league.
+    expect(handle.element.textContent).toContain(
+      "replay_premiere.outcome_still_sealed",
+    );
+    const back = handle.element.querySelector<HTMLAnchorElement>(
+      "[data-focus-key=back-to-league]",
+    );
+    expect(back?.getAttribute("href")).toBe("/league");
     expect(handle.element.textContent).not.toContain(rawFailure);
     expect(handle.element.textContent).not.toContain("token=secret");
   });

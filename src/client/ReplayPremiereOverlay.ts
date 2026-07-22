@@ -627,7 +627,7 @@ function renderStateBody(
     case "revealed":
       if (!isVerifiedRevealView(model)) {
         body.append(renderSanitizedFailure("integrity_failure"));
-        body.append(renderFrozenPosition(model));
+        appendOptional(body, renderFrozenPosition(model));
         break;
       }
       // Post-reveal, the final standings are the truth; the mid-game leader
@@ -642,7 +642,7 @@ function renderStateBody(
       break;
     case "failed":
       body.append(renderSanitizedFailure(model.failureCode));
-      body.append(renderFrozenPosition(model));
+      appendOptional(body, renderFrozenPosition(model));
       break;
     case "cancelled":
       body.append(renderCancelled(model.failureCode));
@@ -674,9 +674,12 @@ function renderScheduled(
 ): HTMLElement {
   const section = element("section", "rp-section rp-scheduled");
   section.setAttribute("aria-labelledby", "replay-premiere-scheduled-heading");
+  // The heading demotes to the small eyebrow treatment so the countdown below
+  // is the hero of the card; it stays an <h3> with the id the section is
+  // labelled by, preserving the accessible name and heading semantics.
   const heading = element(
     "h3",
-    "rp-section-title",
+    "rp-eyebrow rp-scheduled-eyebrow",
     translateText("replay_premiere.scheduled_heading"),
   );
   heading.id = "replay-premiere-scheduled-heading";
@@ -886,12 +889,16 @@ function renderLiveNowBadge(): HTMLElement {
   return badge;
 }
 
+// The "shared playback" explainer is a first-contact orientation, so it only
+// rides the opening stretch of released sequences and then retires. Gating on
+// the released-sequence count keeps it deterministic (no per-tick churn, no
+// per-mount flag) and identical for everyone watching the same moment.
+const SHARED_PLAYBACK_EXPLAINER_SEQUENCES = 60;
+
 function renderPlaying(model: ReplayPremiereOverlayModel): HTMLElement {
   const section = element("section", "rp-section rp-playing-status");
   // The red LIVE pill is the single hero live signal; the playback rate rides
-  // the same row as a quiet chip. "Shared playback" drops to a plain subheading
-  // (its old competing green dot is gone) so there is one clear live indicator,
-  // not two. The LIVE badge stays first, before the shared-playback heading.
+  // the same row as a quiet chip. The LIVE badge stays first.
   const liveHeader = element("div", "rp-live-header");
   const rate = element(
     "span",
@@ -901,26 +908,33 @@ function renderPlaying(model: ReplayPremiereOverlayModel): HTMLElement {
     }),
   );
   liveHeader.append(renderLiveNowBadge(), rate);
-  const shared = element(
-    "span",
-    "rp-live-badge",
-    translateText("replay_premiere.shared_playback"),
-  );
-  const status = element(
-    "p",
-    "rp-shared-status",
-    translateText("replay_premiere.shared_status"),
-  );
-  const position = element(
-    "p",
-    "rp-position",
-    positionLabel(model.currentTurn, model.releasedSequence),
-  );
+  section.append(liveHeader);
+  // Only during the opening sequences: the "Shared playback / everyone is
+  // watching the same moment" first-contact explainer. Past that it retires so
+  // it is not a permanent status line, while the LIVE pill and the turn below
+  // stay for the whole premiere.
+  if (
+    Math.floor(model.releasedSequence) < SHARED_PLAYBACK_EXPLAINER_SEQUENCES
+  ) {
+    section.append(
+      element(
+        "span",
+        "rp-live-badge",
+        translateText("replay_premiere.shared_playback"),
+      ),
+      element(
+        "p",
+        "rp-shared-status",
+        translateText("replay_premiere.shared_status"),
+      ),
+    );
+  }
   section.append(
-    liveHeader,
-    shared,
-    status,
-    position,
+    element(
+      "p",
+      "rp-position",
+      positionLabel(model.currentTurn, model.releasedSequence),
+    ),
     renderCheckpointProgress(model),
   );
   return section;
@@ -1337,12 +1351,10 @@ function renderClip(
     return null;
   }
   const wrapper = element("div", "rp-clip");
-  wrapper.append(
-    element(
-      "h4",
-      "rp-subheading rp-clip-heading",
-      translateText("replay_premiere.clip_heading"),
-    ),
+  const heading = element(
+    "h4",
+    "rp-subheading rp-clip-heading",
+    translateText("replay_premiere.clip_heading"),
   );
   const anchorTurn = finiteIntegerOrNull(model.currentTurn);
   const ready = clip.ready ?? null;
@@ -1378,11 +1390,11 @@ function renderClip(
             }),
     );
   });
-  wrapper.append(request);
 
   const statusKey = clipStatusText(clip.status);
+  let status: HTMLElement | null = null;
   if (statusKey !== null) {
-    const status = element("p", "rp-clip-status");
+    status = element("p", "rp-clip-status");
     status.setAttribute("role", "status");
     status.setAttribute("aria-live", "polite");
     status.dataset.clipStatus = clip.status;
@@ -1393,9 +1405,9 @@ function renderClip(
       status.append(dot);
     }
     status.append(translateText(statusKey));
-    wrapper.append(status);
   }
 
+  let downloadRow: HTMLElement[] | null = null;
   if (ready !== null) {
     const download = element(
       "a",
@@ -1442,7 +1454,31 @@ function renderClip(
               }),
       );
     });
-    wrapper.append(download, copyCaption, copyReply);
+    downloadRow = [download, copyCaption, copyReply];
+  }
+
+  wrapper.append(heading);
+  if (isReady) {
+    // Ready payoff order: the "clip is ready" status line, then the loud
+    // Download MP4 button, the copy-caption / copy-watch-link row, and finally
+    // the quiet "Re-render clip" so the download is unmistakably the primary.
+    if (status !== null) {
+      wrapper.append(status);
+    }
+    if (downloadRow !== null) {
+      wrapper.append(...downloadRow);
+    }
+    wrapper.append(request);
+  } else {
+    // Idle/preparing states keep the request (download) button first as the
+    // primary call to action, above any status line or retained download.
+    wrapper.append(request);
+    if (status !== null) {
+      wrapper.append(status);
+    }
+    if (downloadRow !== null) {
+      wrapper.append(...downloadRow);
+    }
   }
   return wrapper;
 }
@@ -1512,6 +1548,29 @@ function renderReveal(
   return section;
 }
 
+// Shared terminal-state reassurance. The product's core promise is that nothing
+// was spoiled, and a stopped/cancelled premiere should not be a dead end — so
+// both the failure and cancelled renderers (which also back the archived
+// no-outcome page) state the outcome stays sealed and offer a way back to the
+// league.
+function appendSealedExit(section: HTMLElement): void {
+  section.append(
+    element(
+      "p",
+      "rp-sealed",
+      translateText("replay_premiere.outcome_still_sealed"),
+    ),
+  );
+  const back = element(
+    "a",
+    "rp-button rp-button-quiet rp-back-to-league",
+  ) as HTMLAnchorElement;
+  back.href = "/league";
+  back.textContent = translateText("replay_premiere.back_to_league");
+  back.dataset.focusKey = "back-to-league";
+  section.append(back);
+}
+
 function renderSanitizedFailure(
   code: ReplayPremiereFailureCode | string | null | undefined,
 ): HTMLElement {
@@ -1534,6 +1593,7 @@ function renderSanitizedFailure(
       ),
     ),
   );
+  appendSealedExit(section);
   return section;
 }
 
@@ -1579,13 +1639,20 @@ function renderHighlightedMoment(
   return status;
 }
 
-function renderFrozenPosition(model: ReplayPremiereOverlayModel): HTMLElement {
+// The frozen marker now speaks in viewer language (the turn playback stopped on)
+// rather than the internal released-sequence counter. When no turn is known
+// there is nothing meaningful to say, so nothing is rendered.
+function renderFrozenPosition(
+  model: ReplayPremiereOverlayModel,
+): HTMLElement | null {
+  const turn = finiteIntegerOrNull(model.currentTurn);
+  if (turn === null) {
+    return null;
+  }
   return element(
     "p",
     "rp-frozen-position",
-    translateText("replay_premiere.frozen_position", {
-      sequence: Math.max(0, Math.floor(model.releasedSequence)),
-    }),
+    translateText("replay_premiere.playback_stopped_at_turn", { turn }),
   );
 }
 
@@ -1610,6 +1677,7 @@ function renderCancelled(
       ),
     ),
   );
+  appendSealedExit(section);
   return section;
 }
 
@@ -2140,6 +2208,12 @@ function appendDefinition(
   list.append(element("dt", "", term), element("dd", "", value));
 }
 
+function appendOptional(parent: HTMLElement, child: HTMLElement | null): void {
+  if (child !== null) {
+    parent.append(child);
+  }
+}
+
 function button(translationKey: string, className: string): HTMLButtonElement {
   const result = element("button", className) as HTMLButtonElement;
   result.type = "button";
@@ -2492,8 +2566,8 @@ const OVERLAY_CSS = `
   #${OVERLAY_ID} .rp-countdown {
     margin-top: 8px;
     color: var(--rp-accent);
-    font-size: 30px;
-    font-weight: 850;
+    font-size: 40px;
+    font-weight: 900;
     line-height: 1.05;
     letter-spacing: -0.01em;
   }
@@ -2678,7 +2752,7 @@ const OVERLAY_CSS = `
     box-shadow: 0 0 0 1px rgba(56, 189, 248, 0.12), 0 12px 30px rgba(8, 47, 73, 0.4);
   }
   :root[data-theme="light"] #${OVERLAY_ID} .rp-checkpoint { background: linear-gradient(150deg, rgba(2, 132, 199, 0.12), var(--rp-surface) 62%); }
-  #${OVERLAY_ID} .rp-eyebrow { color: var(--rp-accent); font-size: 11px; font-weight: 850; letter-spacing: 0.08em; text-transform: uppercase; }
+  #${OVERLAY_ID} .rp-eyebrow { margin: 0; color: var(--rp-accent); font-size: 11px; font-weight: 850; letter-spacing: 0.08em; text-transform: uppercase; }
   #${OVERLAY_ID} .rp-question { margin-top: 6px; font-size: 20px; line-height: 1.15; letter-spacing: -0.01em; }
   #${OVERLAY_ID} .rp-checkpoint-timer {
     display: inline-flex;
@@ -2744,6 +2818,10 @@ const OVERLAY_CSS = `
     font-weight: 900;
     color: var(--rp-on-positive);
   }
+  /* Once the pick is locked every option disables, but the just-confirmed choice
+     must stay full-strength (the global button:disabled fade would otherwise dim
+     the confirmation as much as the rejected options). */
+  #${OVERLAY_ID} .rp-prediction-button:disabled[data-selected="true"] { opacity: 1; }
   #${OVERLAY_ID} .rp-locked { display: inline-flex; align-items: center; gap: 6px; margin-top: 10px; color: var(--rp-positive-text); font-weight: 700; font-size: 12.5px; }
   #${OVERLAY_ID} .rp-locked::before { content: "✓"; color: var(--rp-positive); font-weight: 900; }
   #${OVERLAY_ID} .rp-distribution { margin-top: 13px; }
@@ -2989,6 +3067,16 @@ const OVERLAY_CSS = `
   #${OVERLAY_ID} .rp-failure { border-color: rgba(248, 113, 113, 0.5); background: var(--rp-danger-soft); }
   #${OVERLAY_ID} .rp-failure .rp-section-title { color: var(--rp-danger); }
   #${OVERLAY_ID} .rp-cancelled { border-color: rgba(251, 191, 36, 0.46); background: var(--rp-caution-soft); }
+  #${OVERLAY_ID} .rp-sealed { color: var(--rp-text-dim); font-weight: 600; }
+  /* Anchor styled as a quiet button (mirrors .rp-clip-download) so the terminal
+     states offer a real way back to the league instead of dead-ending. */
+  #${OVERLAY_ID} .rp-back-to-league {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    margin-top: 12px;
+    text-decoration: none;
+  }
   #${OVERLAY_ID} .rp-frozen-position { margin: 8px 0 0; padding: 6px 9px; border-radius: var(--rp-r-xs); background: var(--rp-surface-2); color: var(--rp-text-dim); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; }
   #${OVERLAY_ID} .rp-counter { display: grid; gap: 9px; }
   #${OVERLAY_ID} .rp-counter-copy { margin: 0; color: var(--rp-text-dim); font-size: 12.5px; }
@@ -3083,6 +3171,8 @@ const OVERLAY_CSS = `
       pointer-events: none;
     }
     #${OVERLAY_ID} .rp-marker-label { font-size: 9px; }
+    /* The hero countdown eases down one step on the narrow sheet. */
+    #${OVERLAY_ID} .rp-countdown { font-size: 36px; }
   }
 
   /* ---- Reduced motion ---- */
