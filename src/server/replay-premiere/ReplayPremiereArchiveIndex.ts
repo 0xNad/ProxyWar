@@ -30,6 +30,13 @@ export interface PremiereArchivePointerV1 {
   terminalState: PremiereResultTerminalState;
   revealedAt: string | null;
   publicationCommitmentHash: string;
+  /**
+   * The content-addressed source hash. Retained so the shared `.replay` bundle
+   * can be garbage-collected at startup (no live writer) rather than in the
+   * concurrent live sweep, where a lock-free catalog read could race a
+   * concurrent admission that reuses the same-sha source.
+   */
+  sourceReplaySha256: string;
   summaryHash: string;
   summaryRelPath: string;
   reclaimedAt: string;
@@ -37,6 +44,25 @@ export interface PremiereArchivePointerV1 {
 
 function summaryRelativePath(premiereId: string): string {
   return `${SUMMARY_DIRECTORY}/${premiereId}.summary.json`;
+}
+
+function pointerForSummary(
+  summary: PremiereResultSummaryV1,
+  sourceReplaySha256: string,
+): PremiereArchivePointerV1 {
+  return {
+    schemaVersion: 1,
+    premiereId: summary.premiereId,
+    sourceRunId: summary.sourceRunId,
+    sourceKind: summary.sourceKind,
+    terminalState: summary.terminalState,
+    revealedAt: summary.revealedAt,
+    publicationCommitmentHash: summary.publicationCommitmentHash,
+    sourceReplaySha256,
+    summaryHash: summary.summaryHash,
+    summaryRelPath: summaryRelativePath(summary.premiereId),
+    reclaimedAt: summary.reclaimedAt,
+  };
 }
 
 /**
@@ -100,32 +126,73 @@ export class ReplayPremiereArchiveStore {
   }
 
   /**
+   * Every reclaimed premiere's content-addressed source hash, for startup-time
+   * shared-source garbage collection.
+   */
+  reclaimedSources(): ReadonlyArray<{
+    premiereId: string;
+    sourceReplaySha256: string;
+  }> {
+    return [...this.pointers.values()].map((pointer) => ({
+      premiereId: pointer.premiereId,
+      sourceReplaySha256: pointer.sourceReplaySha256,
+    }));
+  }
+
+  /**
    * Durably records a reclaimed premiere: writes the summary artifact
    * (write-then-atomic-rename) BEFORE appending the pointer, then registers the
-   * pointer in memory. Idempotent — an identical summary re-write is accepted
-   * and a duplicate pointer append is tolerated (the index is deduped on load).
+   * pointer in memory.
+   *
+   * Crash-window idempotency: a crash after the summary artifact is durable but
+   * before the pointer append leaves an orphan summary with no pointer. On the
+   * retry the store finds no pointer and the caller rebuilds a fresh summary,
+   * which can differ in non-deterministic fields (the wall-clock `reclaimedAt`,
+   * or markers that arrived after the first build). Rather than reject that as an
+   * immutable-artifact conflict (which would strand the premiere), the durable
+   * first-written artifact is ADOPTED verbatim and the pointer is derived from
+   * it — so the retry always converges on the first write.
    */
   async recordReclaimed(
     summary: PremiereResultSummaryV1,
+    sourceReplaySha256: string,
   ): Promise<PremiereArchivePointerV1> {
-    const pointer: PremiereArchivePointerV1 = {
-      schemaVersion: 1,
-      premiereId: summary.premiereId,
-      sourceRunId: summary.sourceRunId,
-      sourceKind: summary.sourceKind,
-      terminalState: summary.terminalState,
-      revealedAt: summary.revealedAt,
-      publicationCommitmentHash: summary.publicationCommitmentHash,
-      summaryHash: summary.summaryHash,
-      summaryRelPath: summaryRelativePath(summary.premiereId),
-      reclaimedAt: summary.reclaimedAt,
-    };
+    if (!isSha256Hex(sourceReplaySha256)) {
+      throw archiveIntegrity("archive_pointer_invalid_source_hash");
+    }
     return this.runExclusive(async () => {
-      await this.writeSummaryArtifact(summary);
+      const adopted = await this.readSummaryArtifact(summary.premiereId);
+      const effective = adopted ?? summary;
+      const pointer = pointerForSummary(effective, sourceReplaySha256);
+      if (adopted === null) await this.writeSummaryArtifact(summary);
       await this.appendPointer(pointer);
       this.pointers.set(pointer.premiereId, pointer);
       return pointer;
     });
+  }
+
+  private async readSummaryArtifact(
+    premiereId: string,
+  ): Promise<PremiereResultSummaryV1 | null> {
+    if (!PREMIERE_ID_PATTERN.test(premiereId)) {
+      throw archiveIntegrity("archive_summary_invalid_premiere_id");
+    }
+    const summaryPath = path.join(
+      this.summaryDirectory,
+      `${premiereId}.summary.json`,
+    );
+    let bytes: Buffer;
+    try {
+      bytes = await readBoundedRegularFile(summaryPath, MAX_SUMMARY_BYTES);
+    } catch (error) {
+      if (isNodeError(error) && error.code === "ENOENT") return null;
+      throw error;
+    }
+    const summary = parsePremiereResultSummary(bytes);
+    if (summary.premiereId !== premiereId) {
+      throw archiveIntegrity("archive_summary_premiere_mismatch");
+    }
+    return summary;
   }
 
   async loadSummary(
@@ -347,6 +414,7 @@ function parseArchivePointer(line: string): PremiereArchivePointerV1 | null {
       "revealedAt",
       "schemaVersion",
       "sourceKind",
+      "sourceReplaySha256",
       "sourceRunId",
       "summaryHash",
       "summaryRelPath",
@@ -364,6 +432,7 @@ function parseArchivePointer(line: string): PremiereArchivePointerV1 | null {
     (pointer.revealedAt !== null &&
       canonicalTimestampOrNull(pointer.revealedAt) === null) ||
     !isSha256Hex(pointer.publicationCommitmentHash) ||
+    !isSha256Hex(pointer.sourceReplaySha256) ||
     !isSha256Hex(pointer.summaryHash) ||
     pointer.summaryRelPath !== summaryRelativePath(pointer.premiereId) ||
     canonicalTimestampOrNull(pointer.reclaimedAt) === null

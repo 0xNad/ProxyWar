@@ -78,6 +78,8 @@ export async function compactReplayPremiereEventJournal(options: {
   privateStateRoot: string;
   reclaimedPremiereIds: readonly string[];
   presentPremiereIds: readonly string[];
+  /** Premiere ids that must never be dropped, even if reclaimed and absent. */
+  excludedPremiereIds?: readonly string[];
   limits: ReplayPremiereEventStoreLimits;
 }): Promise<ReplayPremiereJournalCompactionResult> {
   const empty = (
@@ -90,10 +92,19 @@ export async function compactReplayPremiereEventJournal(options: {
     removedEventCount: 0,
   });
 
+  // `presentPremiereIds` is the set of successfully-parsed live admissions. A
+  // corrupt admission whose premiere is ALSO in the archive index would parse to
+  // neither `entries` nor here, so it would be treated as absent and dropped.
+  // That is unreachable in normal flow (a premiere reaches the archive index only
+  // after being durably summarized) and safe if it ever happened: the summary +
+  // pointer already persist, so dropping the orphaned events loses nothing.
   const present = new Set(options.presentPremiereIds);
+  // Excluded premieres are treated as present so their journal events survive,
+  // even if they were reclaimed before being excluded (reclaimed-then-excluded).
+  const excluded = new Set(options.excludedPremiereIds ?? []);
   const dropAggregateIds = new Set<string>();
   for (const premiereId of options.reclaimedPremiereIds) {
-    if (present.has(premiereId)) continue;
+    if (present.has(premiereId) || excluded.has(premiereId)) continue;
     dropAggregateIds.add(premiereId);
     dropAggregateIds.add(replayPremiereInteractionAggregateId(premiereId));
   }
@@ -173,9 +184,17 @@ export async function compactReplayPremiereEventJournal(options: {
   // Snapshots must be gone before the compacted journal goes live: a snapshot
   // whose anchor sequence no longer exists in the journal fails recovery. A
   // missing snapshot always self-heals, so deleting first is the safe order.
-  await deleteAllSnapshots(snapshotsDir);
-  await fs.rename(temporaryPath, eventsPath);
-  await syncDirectory(storeRoot);
+  // If this throws after validation, the validated temp is unlinked so it never
+  // orphans against maxPrivateStateBytes; the live journal stays intact (rename
+  // is atomic — the store still recovers the original).
+  try {
+    await deleteAllSnapshots(snapshotsDir);
+    await fs.rename(temporaryPath, eventsPath);
+    await syncDirectory(storeRoot);
+  } catch (error) {
+    await fs.unlink(temporaryPath).catch(() => undefined);
+    throw error;
+  }
 
   return {
     compacted: true,
@@ -184,6 +203,69 @@ export async function compactReplayPremiereEventJournal(options: {
     keptEventCount: survivors.length,
     removedEventCount: lines.length - survivors.length,
   };
+}
+
+export interface ReplayPremiereSourceGcResult {
+  removed: string[];
+}
+
+const SOURCE_SHA_PATTERN = /^[a-f0-9]{64}$/;
+
+/**
+ * Deletes the shared, content-addressed source `.replay` bundle for reclaimed
+ * premieres. This is the startup-time counterpart to terminal reclamation: it
+ * runs in the same no-active-writer window as journal compaction (before the
+ * event store opens), so it cannot race a concurrent admission that reuses the
+ * same-sha source.
+ *
+ * A source is deleted only when its hash is referenced by NO surviving admission
+ * (`presentSourceShas`, drawn from the parsed live catalog). That check makes it
+ * fail-closed: any still-referenced source is retained, and a premiere that is
+ * still admitted keeps its source (its own admission carries the hash). Deletion
+ * is idempotent (ENOENT is a no-op) and each hash is attempted at most once.
+ */
+export async function reclaimUnreferencedPremiereSources(options: {
+  privateStateRoot: string;
+  reclaimedSources: ReadonlyArray<{
+    premiereId: string;
+    sourceReplaySha256: string;
+  }>;
+  presentSourceShas: readonly string[];
+  /** Premiere ids whose shared source must never be deleted. */
+  excludedPremiereIds?: readonly string[];
+}): Promise<ReplayPremiereSourceGcResult> {
+  const present = new Set(options.presentSourceShas);
+  const excluded = new Set(options.excludedPremiereIds ?? []);
+  const sourcesRoot = path.join(
+    path.resolve(options.privateStateRoot),
+    "sources",
+    "sha256",
+  );
+  const removed: string[] = [];
+  const attempted = new Set<string>();
+  for (const { premiereId, sourceReplaySha256 } of options.reclaimedSources) {
+    if (
+      excluded.has(premiereId) ||
+      !SOURCE_SHA_PATTERN.test(sourceReplaySha256) ||
+      present.has(sourceReplaySha256) ||
+      attempted.has(sourceReplaySha256)
+    ) {
+      continue;
+    }
+    attempted.add(sourceReplaySha256);
+    const sourcePath = path.join(
+      sourcesRoot,
+      sourceReplaySha256.slice(0, 2),
+      `${sourceReplaySha256}.replay`,
+    );
+    try {
+      await fs.unlink(sourcePath);
+      removed.push(sourceReplaySha256);
+    } catch (error) {
+      if (!isNodeError(error) || error.code !== "ENOENT") throw error;
+    }
+  }
+  return { removed };
 }
 
 function serializeCompactedJournal(

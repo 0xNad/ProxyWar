@@ -13,7 +13,12 @@ import {
 /** Live viewers finish before bulk is deleted: default 30 minutes post-reveal. */
 export const DEFAULT_REPLAY_PREMIERE_RECLAMATION_GRACE_MS = 30 * 60 * 1000;
 
-const SHA256_HEX_PATTERN = /^[a-f0-9]{64}$/;
+/** Comma-separated premiere ids that must never be reclaimed. */
+export const REPLAY_PREMIERE_RECLAIM_EXCLUDE_ENV =
+  "PROXYWAR_PREMIERE_RECLAIM_EXCLUDE";
+/** Operator pin file under the private state root (one premiere id per line). */
+export const REPLAY_PREMIERE_RECLAIM_EXCLUDE_FILE = "reclaim-exclude.txt";
+
 const PREMIERE_ID_PATTERN = /^prem_[a-z0-9]{16,32}$/;
 const ADMISSION_SUFFIX = ".admission.json";
 
@@ -24,6 +29,7 @@ export interface ReplayPremiereReclamationEligibility {
   revealedAt: string | null;
   reason:
     | "eligible"
+    | "excluded"
     | "not_terminal"
     | "within_grace"
     | "revealed_time_unavailable";
@@ -35,6 +41,7 @@ export interface ReplayPremiereReclamationResult {
   reason:
     | "reclaimed"
     | "already_reclaimed"
+    | "excluded"
     | "not_terminal"
     | "within_grace"
     | "revealed_time_unavailable";
@@ -55,13 +62,15 @@ export class ReplayPremiereTerminalReclaimer {
   private readonly now: () => Date;
   private readonly catalogEntriesDir: string;
   private readonly snapshotsDir: string;
-  private readonly sourcesRoot: string;
+  private readonly excluded: ReadonlySet<string>;
 
   constructor(options: {
     privateStateRoot: string;
     store: ReplayPremiereArchiveStore;
     graceMs?: number;
     now?: () => Date;
+    /** Premiere ids that must never be reclaimed (e.g. release-proof premieres). */
+    excludedPremiereIds?: Iterable<string>;
   }) {
     const graceMs =
       options.graceMs ?? DEFAULT_REPLAY_PREMIERE_RECLAMATION_GRACE_MS;
@@ -72,6 +81,7 @@ export class ReplayPremiereTerminalReclaimer {
     this.store = options.store;
     this.graceMs = graceMs;
     this.now = options.now ?? (() => new Date());
+    this.excluded = new Set(options.excludedPremiereIds ?? []);
     this.catalogEntriesDir = path.join(
       this.privateStateRoot,
       "catalog-v1",
@@ -82,13 +92,23 @@ export class ReplayPremiereTerminalReclaimer {
       "event-store-v1",
       "snapshots",
     );
-    this.sourcesRoot = path.join(this.privateStateRoot, "sources", "sha256");
   }
 
   /** Pure eligibility check: terminal AND (post-grace for revealed/archived). */
   eligibility(
     target: ReplayPremiereHttpTarget,
   ): ReplayPremiereReclamationEligibility {
+    if (this.excluded.has(target.runtime.premiereId)) {
+      // Never reclaim an excluded premiere — it stays a fully-served live
+      // premiere (source, chunks, and replay intact), not a summary-only pointer.
+      return {
+        eligible: false,
+        terminal: false,
+        terminalState: null,
+        revealedAt: null,
+        reason: "excluded",
+      };
+    }
     const state = target.runtime.readLifecycleState();
     const reveal = target.runtime.readReveal();
     if (reveal !== null && (state === "revealed" || state === "archived")) {
@@ -139,6 +159,16 @@ export class ReplayPremiereTerminalReclaimer {
     target: ReplayPremiereHttpTarget,
   ): Promise<ReplayPremiereReclamationResult> {
     const premiereId = target.runtime.premiereId;
+    if (this.excluded.has(premiereId)) {
+      // Hard exclusion: never write a pointer, delete bulk, or de-register.
+      return {
+        premiereId,
+        reclaimed: false,
+        reason: "excluded",
+        pointer: this.store.lookup(premiereId),
+        deletedBulk: false,
+      };
+    }
     const already = this.store.lookup(premiereId);
     const eligibility = this.eligibility(target);
     if (already === null && !eligibility.eligible) {
@@ -165,11 +195,14 @@ export class ReplayPremiereTerminalReclaimer {
         terminalState: eligibility.terminalState,
         reclaimedAt: this.now().toISOString(),
       });
-      pointer = await this.store.recordReclaimed(summary);
+      // The content-addressed source hash rides on the pointer so the shared
+      // source bundle can be reclaimed at startup (no live writer) instead of in
+      // this concurrent sweep.
+      const sourceReplaySha256 =
+        target.runtime.readBootstrap().provenance.sourceReplaySha256;
+      pointer = await this.store.recordReclaimed(summary, sourceReplaySha256);
     }
-    const sourceReplaySha256 =
-      target.runtime.readBootstrap().provenance.sourceReplaySha256;
-    await this.deleteBulk(premiereId, sourceReplaySha256);
+    await this.deleteBulk(premiereId);
     return {
       premiereId,
       reclaimed: true,
@@ -180,34 +213,26 @@ export class ReplayPremiereTerminalReclaimer {
   }
 
   /**
-   * Deletes the admission entry, the staged source bundle (only when no other
-   * live admission still references it), and both per-premiere event-store
-   * snapshots. Every deletion tolerates a prior partial run (ENOENT is a no-op).
-   * The shared event-journal events for this premiere are compacted at the next
-   * startup, once the admission is gone — see ReplayPremiereJournalCompaction.
+   * Deletes the per-premiere-private bulk in the live sweep: the admission entry
+   * and both per-premiere event-store snapshots. Every deletion tolerates a
+   * prior partial run (ENOENT is a no-op).
+   *
+   * The SHARED, content-addressed source `.replay` bundle is deliberately NOT
+   * deleted here: the loop admits new premieres concurrently with this sweep, so
+   * a lock-free reference check could race a concurrent admission that reuses the
+   * same-sha source. It is instead reclaimed at startup — under the no-active-
+   * writer guarantee, after re-checking it is unreferenced by any surviving
+   * admission (see reclaimUnreferencedPremiereSources in
+   * ReplayPremiereJournalCompaction). The shared event-journal events for this
+   * premiere are compacted in that same startup window.
    */
-  private async deleteBulk(
-    premiereId: string,
-    sourceReplaySha256: string,
-  ): Promise<void> {
+  private async deleteBulk(premiereId: string): Promise<void> {
     if (!PREMIERE_ID_PATTERN.test(premiereId)) {
       throw reclamationRequest("reclamation_invalid_premiere_id");
     }
     await unlinkIfPresent(
       path.join(this.catalogEntriesDir, `${premiereId}${ADMISSION_SUFFIX}`),
     );
-    if (
-      SHA256_HEX_PATTERN.test(sourceReplaySha256) &&
-      !(await this.sourceStillReferenced(sourceReplaySha256))
-    ) {
-      await unlinkIfPresent(
-        path.join(
-          this.sourcesRoot,
-          sourceReplaySha256.slice(0, 2),
-          `${sourceReplaySha256}.replay`,
-        ),
-      );
-    }
     await unlinkIfPresent(
       path.join(this.snapshotsDir, `${premiereId}.snapshot.json`),
     );
@@ -218,52 +243,45 @@ export class ReplayPremiereTerminalReclaimer {
       ),
     );
   }
+}
 
-  /**
-   * Whether any remaining admission entry references the content-addressed
-   * source. The reclaimed premiere's own admission is deleted first, so it is
-   * never counted here.
-   */
-  private async sourceStillReferenced(
-    sourceReplaySha256: string,
-  ): Promise<boolean> {
-    let names: string[];
-    try {
-      names = await fs.readdir(this.catalogEntriesDir);
-    } catch (error) {
-      if (isNodeError(error) && error.code === "ENOENT") return false;
-      throw error;
+/**
+ * Loads the premiere-reclamation exclusion set from BOTH the
+ * `PROXYWAR_PREMIERE_RECLAIM_EXCLUDE` env (comma-separated premiere ids) and an
+ * operator pin file `<privateStateRoot>/reclaim-exclude.txt` (one id per line,
+ * `#` comments and blank lines ignored). Malformed ids are dropped; a missing
+ * pin file is not an error. Excluded premieres are never reclaimed, and their
+ * events/source survive startup compaction.
+ */
+export async function loadReplayPremiereReclamationExclusions(options: {
+  privateStateRoot: string;
+  env?: Record<string, string | undefined>;
+}): Promise<string[]> {
+  const excluded = new Set<string>();
+  const envValue = (options.env ?? process.env)[
+    REPLAY_PREMIERE_RECLAIM_EXCLUDE_ENV
+  ];
+  if (typeof envValue === "string") {
+    for (const raw of envValue.split(",")) {
+      const id = raw.trim();
+      if (PREMIERE_ID_PATTERN.test(id)) excluded.add(id);
     }
-    for (const name of names) {
-      if (!name.endsWith(ADMISSION_SUFFIX)) continue;
-      let raw: string;
-      try {
-        raw = await fs.readFile(
-          path.join(this.catalogEntriesDir, name),
-          "utf8",
-        );
-      } catch (error) {
-        if (isNodeError(error) && error.code === "ENOENT") continue;
-        throw error;
-      }
-      let value: unknown;
-      try {
-        value = JSON.parse(raw);
-      } catch {
-        // A malformed entry is treated as still referencing nothing here; the
-        // catalog reader rejects it separately. Fail closed toward retention.
-        return true;
-      }
-      if (
-        isRecord(value) &&
-        isRecord(value.stagedSource) &&
-        value.stagedSource.sourceReplaySha256 === sourceReplaySha256
-      ) {
-        return true;
-      }
-    }
-    return false;
   }
+  const pinPath = path.join(
+    path.resolve(options.privateStateRoot),
+    REPLAY_PREMIERE_RECLAIM_EXCLUDE_FILE,
+  );
+  try {
+    const raw = await fs.readFile(pinPath, "utf8");
+    for (const line of raw.split("\n")) {
+      const id = line.trim();
+      if (id.length === 0 || id.startsWith("#")) continue;
+      if (PREMIERE_ID_PATTERN.test(id)) excluded.add(id);
+    }
+  } catch (error) {
+    if (!isNodeError(error) || error.code !== "ENOENT") throw error;
+  }
+  return [...excluded].sort();
 }
 
 async function unlinkIfPresent(filePath: string): Promise<void> {
@@ -273,10 +291,6 @@ async function unlinkIfPresent(filePath: string): Promise<void> {
     if (isNodeError(error) && error.code === "ENOENT") return;
     throw error;
   }
-}
-
-function isRecord(value: unknown): value is Record<string, any> {
-  return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 
 function isNodeError(error: unknown): error is NodeJS.ErrnoException {

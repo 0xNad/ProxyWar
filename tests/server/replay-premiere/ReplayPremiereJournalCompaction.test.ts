@@ -104,6 +104,24 @@ describe("compactReplayPremiereEventJournal", () => {
     );
   });
 
+  it("keeps an excluded premiere's events (reclaimed-then-excluded)", async () => {
+    await seedJournal();
+    const result = await compactReplayPremiereEventJournal({
+      privateStateRoot: root,
+      reclaimedPremiereIds: [DROPPED],
+      presentPremiereIds: [SURVIVOR],
+      excludedPremiereIds: [DROPPED], // excluded ⇒ treated as present ⇒ survives
+      limits: LIMITS,
+    });
+    expect(result.compacted).toBe(false);
+    expect(result.reason).toBe("no_reclaimed_aggregates");
+    const raw = await fs.readFile(
+      path.join(root, "event-store-v1", "events.jsonl"),
+      "utf8",
+    );
+    expect(raw.trim().split("\n")).toHaveLength(3);
+  });
+
   it("does nothing when the reclaimed premiere still has an admission", async () => {
     await seedJournal();
     const result = await compactReplayPremiereEventJournal({

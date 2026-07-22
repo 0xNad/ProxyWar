@@ -64,6 +64,7 @@ async function harness(): Promise<{
       predictions: [],
       markers: [{ kind: "betrayal", turn: 3, count: 2 }],
     }),
+    sha256Hex(ARCHIVED_ID),
   );
 
   // A "live" premiere is registered but never in the archive index.

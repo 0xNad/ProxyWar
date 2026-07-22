@@ -40,7 +40,10 @@ import type {
   ReplayPremiereInteractionLimits,
   ReplayPremiereReleasedContext,
 } from "./ReplayPremiereInteractions";
-import { compactReplayPremiereEventJournal } from "./ReplayPremiereJournalCompaction";
+import {
+  compactReplayPremiereEventJournal,
+  reclaimUnreferencedPremiereSources,
+} from "./ReplayPremiereJournalCompaction";
 import { verifyStoredReplayPremiereLeakAuditReceipt } from "./ReplayPremiereLeakAuditCollector";
 import {
   importControlledPremiereSourceForPublication,
@@ -157,6 +160,8 @@ export interface ReplayPremiereProductionStartupOptions {
   archiveStore?: ReplayPremiereArchiveStore;
   reclamationGraceMs?: number;
   reclamationSweepMs?: number;
+  /** Premiere ids that must never be reclaimed nor compacted out at startup. */
+  reclamationExcludedPremiereIds?: readonly string[];
   onDiagnostic?: (diagnostic: ReplayPremiereStartupDiagnostic) => void;
   /** Bounded test/host barrier; abort is asserted again before journal writes. */
   beforeTargetRecovery?: (options: {
@@ -362,20 +367,42 @@ export async function startReplayPremiereProduction(
     await catalog.close().catch(() => undefined);
   }
   // Compact fully-reclaimed premieres out of the shared, hash-chained event
-  // journal before any writer opens it. This keeps the event-store byte ceiling
-  // unreachable across an unbounded premiere stream. Fail-closed: a failure here
-  // just leaves the journal intact for this cycle.
+  // journal before any writer opens it, and garbage-collect their shared,
+  // content-addressed source bundles. Both run in this no-active-writer window
+  // (the terminal-reclamation sweep deliberately defers the shared source here
+  // to avoid racing a concurrent admission). This keeps the event-store byte
+  // ceiling unreachable across an unbounded premiere stream. Fail-closed: a
+  // failure just leaves the journal/source intact for this cycle. Note the
+  // present sets are drawn from successfully-parsed admissions only.
   if (options.archiveStore !== undefined) {
+    const archiveStore = options.archiveStore;
     try {
       await compactReplayPremiereEventJournal({
         privateStateRoot,
-        reclaimedPremiereIds: options.archiveStore.reclaimedPremiereIds(),
+        reclaimedPremiereIds: archiveStore.reclaimedPremiereIds(),
         presentPremiereIds: read.entries.map((entry) => entry.premiereId),
+        excludedPremiereIds: options.reclamationExcludedPremiereIds,
         limits: eventStoreLimits,
       });
     } catch (error) {
       report({
         target: "event_store_journal",
+        premiereId: null,
+        operatorCode: operatorCode(error),
+      });
+    }
+    try {
+      await reclaimUnreferencedPremiereSources({
+        privateStateRoot,
+        reclaimedSources: archiveStore.reclaimedSources(),
+        presentSourceShas: read.entries.map(
+          (entry) => entry.stagedSource.sourceReplaySha256,
+        ),
+        excludedPremiereIds: options.reclamationExcludedPremiereIds,
+      });
+    } catch (error) {
+      report({
+        target: "premiere_source_gc",
         premiereId: null,
         operatorCode: operatorCode(error),
       });
@@ -411,6 +438,7 @@ export async function startReplayPremiereProduction(
                 options.reclamationGraceMs ??
                 DEFAULT_REPLAY_PREMIERE_RECLAMATION_GRACE_MS,
               now: () => clock.now(),
+              excludedPremiereIds: options.reclamationExcludedPremiereIds,
             }),
             sweepMs: boundedReclamationSweepMs(options.reclamationSweepMs),
             report: reportRuntime,

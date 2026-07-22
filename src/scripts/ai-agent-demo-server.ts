@@ -136,6 +136,7 @@ import {
   resolveReplayPremierePrivateStateRoot,
 } from "../server/replay-premiere/ReplayPremiereSecrets";
 import { startReplayPremiereProduction } from "../server/replay-premiere/ReplayPremiereStartup";
+import { loadReplayPremiereReclamationExclusions } from "../server/replay-premiere/ReplayPremiereTerminalReclamation";
 import { applyStaticAssetCacheControl } from "../server/StaticAssetCache";
 
 const app = express();
@@ -211,6 +212,12 @@ export const replayPremiereArchiveStore = await ReplayPremiereArchiveStore.open(
     privateStateRoot: replayPremierePrivateStateRoot,
   },
 );
+// Premiere ids that must never be reclaimed (release-proof premieres). Sourced
+// from PROXYWAR_PREMIERE_RECLAIM_EXCLUDE and the reclaim-exclude.txt pin file.
+const replayPremiereReclaimExclusions =
+  await loadReplayPremiereReclamationExclusions({
+    privateStateRoot: replayPremierePrivateStateRoot,
+  });
 const replayPremiereProduction = await startReplayPremiereProduction({
   privateStateRoot: replayPremierePrivateStateRoot,
   servedRoots: [
@@ -228,6 +235,7 @@ const replayPremiereProduction = await startReplayPremiereProduction({
     path.join(process.cwd(), "resources", "maps"),
   ),
   archiveStore: replayPremiereArchiveStore,
+  reclamationExcludedPremiereIds: replayPremiereReclaimExclusions,
   // Leave bounded launch headroom for the remaining initialization and bind.
   maxStartupMs: 8_000,
   onDiagnostic: (diagnostic) => {

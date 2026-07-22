@@ -7,7 +7,11 @@ import { encodePremiereAuthoritativeResult } from "../../../src/server/replay-pr
 import type { ReplayPremiereHttpTarget } from "../../../src/server/replay-premiere/ReplayPremiereHttp";
 import { sha256Hex } from "../../../src/server/replay-premiere/ReplayPremiereIntegrity";
 import { replayPremiereInteractionAggregateId } from "../../../src/server/replay-premiere/ReplayPremiereInteractionRecovery";
-import { ReplayPremiereTerminalReclaimer } from "../../../src/server/replay-premiere/ReplayPremiereTerminalReclamation";
+import { reclaimUnreferencedPremiereSources } from "../../../src/server/replay-premiere/ReplayPremiereJournalCompaction";
+import {
+  loadReplayPremiereReclamationExclusions,
+  ReplayPremiereTerminalReclaimer,
+} from "../../../src/server/replay-premiere/ReplayPremiereTerminalReclamation";
 import {
   authoritativeResultBytes,
   eligibilityFixture,
@@ -140,6 +144,30 @@ describe("ReplayPremiereTerminalReclaimer", () => {
     expect(await exists(sourcePath())).toBe(true);
   });
 
+  it("never reclaims an excluded premiere, even past grace", async () => {
+    await writeBulk();
+    const store = await ReplayPremiereArchiveStore.open({
+      privateStateRoot: root,
+    });
+    const reclaimer = new ReplayPremiereTerminalReclaimer({
+      privateStateRoot: root,
+      store,
+      graceMs: GRACE_MS,
+      now: () => new Date("2026-07-20T18:45:00.000Z"), // well past grace
+      excludedPremiereIds: [PREMIERE_ID],
+    });
+    const result = await reclaimer.reclaimIfEligible(target());
+    expect(result.reclaimed).toBe(false);
+    expect(result.reason).toBe("excluded");
+    // Nothing was touched: no pointer, and every bulk artifact is intact so the
+    // premiere stays fully served.
+    expect(store.lookup(PREMIERE_ID)).toBeNull();
+    expect(await exists(admissionPath(PREMIERE_ID))).toBe(true);
+    expect(await exists(sourcePath())).toBe(true);
+    expect(await exists(runtimeSnapshotPath(PREMIERE_ID))).toBe(true);
+    expect(await exists(interactionSnapshotPath(PREMIERE_ID))).toBe(true);
+  });
+
   it("writes the summary + pointer, then deletes the bulk, keeping the summary", async () => {
     await writeBulk();
     const { reclaimer, store } = await reclaimerWith(
@@ -164,29 +192,41 @@ describe("ReplayPremiereTerminalReclaimer", () => {
       ),
     ).toBe(true);
 
-    // Bulk is gone: admission, staged source, both snapshots.
+    // Per-premiere-private bulk is gone: admission + both snapshots. The SHARED,
+    // content-addressed source survives the concurrent live sweep and is
+    // reclaimed only at startup (no live writer) — see the startup-GC test below.
     expect(await exists(admissionPath(PREMIERE_ID))).toBe(false);
-    expect(await exists(sourcePath())).toBe(false);
+    expect(await exists(sourcePath())).toBe(true);
     expect(await exists(runtimeSnapshotPath(PREMIERE_ID))).toBe(false);
     expect(await exists(interactionSnapshotPath(PREMIERE_ID))).toBe(false);
   });
 
-  it("keeps a staged source that another live admission still references", async () => {
+  it("defers shared-source deletion to the startup GC (unreferenced only)", async () => {
     await writeBulk();
-    // A second, still-live premiere shares the same content-addressed source.
-    const other = "prem_reclaimtargetsib1";
-    await fs.writeFile(
-      admissionPath(other),
-      JSON.stringify({
-        premiereId: other,
-        stagedSource: { sourceReplaySha256: SOURCE_SHA },
-      }),
+    const { reclaimer, store } = await reclaimerWith(
+      "2026-07-20T18:45:00.000Z",
     );
-    const { reclaimer } = await reclaimerWith("2026-07-20T18:45:00.000Z");
     await reclaimer.reclaimIfEligible(target());
-    // Our admission is gone, but the shared source survives for the sibling.
-    expect(await exists(admissionPath(PREMIERE_ID))).toBe(false);
+    // The live sweep never deletes the shared source.
     expect(await exists(sourcePath())).toBe(true);
+
+    // Startup GC keeps a source a surviving admission still references...
+    const kept = await reclaimUnreferencedPremiereSources({
+      privateStateRoot: root,
+      reclaimedSources: store.reclaimedSources(),
+      presentSourceShas: [SOURCE_SHA],
+    });
+    expect(kept.removed).toEqual([]);
+    expect(await exists(sourcePath())).toBe(true);
+
+    // ...and deletes it once no admission references it.
+    const removed = await reclaimUnreferencedPremiereSources({
+      privateStateRoot: root,
+      reclaimedSources: store.reclaimedSources(),
+      presentSourceShas: [],
+    });
+    expect(removed.removed).toEqual([SOURCE_SHA]);
+    expect(await exists(sourcePath())).toBe(false);
   });
 
   it("is idempotent and finishes deletion after a crash between pointer and delete", async () => {
@@ -201,7 +241,7 @@ describe("ReplayPremiereTerminalReclaimer", () => {
       terminalState: "revealed",
       reclaimedAt: "2026-07-20T18:45:00.000Z",
     });
-    await store.recordReclaimed(summary);
+    await store.recordReclaimed(summary, SOURCE_SHA);
     expect(await exists(admissionPath(PREMIERE_ID))).toBe(true);
 
     // A restart re-assembles the (still-admitted) premiere; the sweep re-runs.
@@ -220,5 +260,37 @@ describe("ReplayPremiereTerminalReclaimer", () => {
     // Deletion completed on the retry; the summary is preserved throughout.
     expect(await exists(admissionPath(PREMIERE_ID))).toBe(false);
     expect(await reopened.loadSummary(PREMIERE_ID)).toEqual(summary);
+  });
+});
+
+describe("loadReplayPremiereReclamationExclusions", () => {
+  it("merges the env var and the pin file, dropping malformed ids", async () => {
+    await fs.writeFile(
+      path.join(root, "reclaim-exclude.txt"),
+      "# release-proof premieres\nprem_excludepin000001\n\nnot-a-premiere\n",
+    );
+    const excluded = await loadReplayPremiereReclamationExclusions({
+      privateStateRoot: root,
+      env: {
+        PROXYWAR_PREMIERE_RECLAIM_EXCLUDE:
+          "prem_excludeenv000001, prem_excludeenv000002 ,garbage",
+      },
+    });
+    expect(excluded).toEqual(
+      [
+        "prem_excludeenv000001",
+        "prem_excludeenv000002",
+        "prem_excludepin000001",
+      ].sort(),
+    );
+  });
+
+  it("returns an empty set with no env and no pin file", async () => {
+    expect(
+      await loadReplayPremiereReclamationExclusions({
+        privateStateRoot: root,
+        env: {},
+      }),
+    ).toEqual([]);
   });
 });
