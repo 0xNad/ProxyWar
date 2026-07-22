@@ -403,18 +403,25 @@ export function coworldLeagueIndexHtml(data: CoworldLeagueMirrorData): string {
       : "\n    " +
         [
           ".round-pill.premiering { border-color:rgba(122,215,240,.6); color:var(--cyan); box-shadow:inset 0 0 0 1px rgba(122,215,240,.25); }",
-          ".premiere-card { border:1px solid rgba(122,215,240,.5); background:linear-gradient(180deg, rgba(122,215,240,.09), rgba(122,215,240,.02)), var(--surface); border-radius:10px; padding:18px; display:flex; flex-direction:column; gap:10px; }",
-          ".premiere-card .premiere-badge { align-self:flex-start; display:inline-flex; align-items:center; gap:8px; padding:5px 13px; border-radius:999px; font:900 13px/1 ui-monospace, SFMono-Regular, Menlo, monospace; letter-spacing:.14em; text-transform:uppercase; }",
-          ".premiere-card .premiere-badge.live { border:1px solid rgba(239,68,68,.75); background:rgba(239,68,68,.18); color:#ffd7d2; }",
+          ".premiere-card { position:relative; overflow:hidden; border:1px solid rgba(122,215,240,.5); background:linear-gradient(180deg, rgba(122,215,240,.1), rgba(122,215,240,.02) 60%), var(--surface); border-radius:12px; padding:20px; display:flex; flex-direction:column; gap:11px; box-shadow:0 18px 44px rgba(4,10,18,.5); }",
+          ".premiere-card::before { content:''; position:absolute; inset:0 0 auto 0; height:2px; background:linear-gradient(90deg, transparent, rgba(122,215,240,.65), transparent); }",
+          '.premiere-card[data-premiere-live="true"] { border-color:rgba(239,68,68,.45); background:radial-gradient(120% 130% at 0% 0%, rgba(239,68,68,.14), transparent 42%), linear-gradient(180deg, rgba(122,215,240,.08), rgba(122,215,240,.015) 60%), var(--surface); }',
+          '.premiere-card[data-premiere-live="true"]::before { background:linear-gradient(90deg, rgba(239,68,68,.75), rgba(122,215,240,.5), transparent); }',
+          ".premiere-card .premiere-badge { align-self:flex-start; display:inline-flex; align-items:center; gap:8px; padding:6px 14px; border-radius:999px; font:900 13px/1 ui-monospace, SFMono-Regular, Menlo, monospace; letter-spacing:.14em; text-transform:uppercase; }",
+          ".premiere-card .premiere-badge.live { border:1px solid rgba(239,68,68,.75); background:rgba(239,68,68,.18); color:#ffd7d2; box-shadow:0 0 22px rgba(239,68,68,.22); }",
           ".premiere-card .premiere-badge.scheduled { gap:10px; border:1px solid var(--line); background:var(--surface2); color:var(--muted); font-weight:800; }",
-          ".premiere-card .premiere-badge-dot { width:10px; height:10px; border-radius:999px; background:#ef4444; box-shadow:0 0 0 3px rgba(239,68,68,.3); }",
+          ".premiere-card .premiere-badge-dot { width:10px; height:10px; border-radius:999px; background:#ef4444; box-shadow:0 0 0 0 rgba(239,68,68,.55); animation:pw-premiere-pulse 1.6s ease-out infinite; }",
+          "@keyframes pw-premiere-pulse { 0% { box-shadow:0 0 0 0 rgba(239,68,68,.55); } 70% { box-shadow:0 0 0 7px rgba(239,68,68,0); } 100% { box-shadow:0 0 0 0 rgba(239,68,68,0); } }",
           ".premiere-card .premiere-badge .premiere-starts { color:var(--muted); font-weight:700; letter-spacing:.02em; text-transform:none; }",
           ".premiere-card .premiere-eyebrow { color:var(--cyan); font:800 11px/1 ui-monospace, SFMono-Regular, Menlo, monospace; text-transform:uppercase; letter-spacing:.14em; }",
-          ".premiere-card h2 { margin:0; font-size:20px; }",
+          ".premiere-card h2 { margin:0; font-size:21px; letter-spacing:-.01em; }",
           ".premiere-card .premiere-body { margin:0; color:#cbd3df; max-width:640px; }",
           ".premiere-card .premiere-meta { display:flex; gap:8px; flex-wrap:wrap; color:var(--muted); font:700 12px ui-monospace, SFMono-Regular, Menlo, monospace; }",
-          ".premiere-card .premiere-meta span { border:1px solid var(--line); background:var(--surface2); border-radius:999px; padding:4px 10px; }",
-          ".premiere-card .actions { margin-top:2px; }",
+          ".premiere-card .premiere-meta span { border:1px solid var(--line); background:var(--surface2); border-radius:999px; padding:5px 11px; }",
+          ".premiere-card .actions { margin-top:4px; }",
+          ".premiere-card .premiere-link { gap:9px; }",
+          ".premiere-card .premiere-link::before { content:''; width:0; height:0; border-style:solid; border-width:5px 0 5px 8px; border-color:transparent transparent transparent currentColor; }",
+          "@media (prefers-reduced-motion: reduce) { .premiere-card .premiere-badge-dot { animation:none; } }",
         ].join("\n    ");
   return `<!doctype html>
 <html lang="en" data-generated-at="${escapeHtml(data.generatedAt)}" data-stale="${data.stale ? "true" : "false"}" data-league-id="${escapeHtml(league.id)}">
