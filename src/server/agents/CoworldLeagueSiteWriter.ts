@@ -57,6 +57,16 @@ export interface CoworldLeagueEpisodeRow {
   watchHref: string | null;
   /** Absolute path served by the Vite/demo stack for the real-client render. */
   fullRenderHref: string | null;
+  /**
+   * `/premiere/<premiereId>` when this episode's sealed premiere has REVEALED
+   * (terminal state "revealed" in the premiere archive index — outcome
+   * public). Never set for failed/cancelled premieres and never before
+   * reveal; a held/quarantined episode has no card at all, so this field can
+   * only ever appear on an outcome-public row. Optional and omitted when
+   * absent, keeping data.json purely additive for existing consumers (the
+   * polling client only checks that `episodes` is an array).
+   */
+  premiereHref?: string;
 }
 
 export interface CoworldLeagueRoundRow {
@@ -504,6 +514,7 @@ export function coworldLeagueIndexHtml(data: CoworldLeagueMirrorData): string {
     .battle-foot { display:flex; justify-content:space-between; align-items:center; gap:8px; flex-wrap:wrap; border-top:1px solid var(--line); padding-top:10px; margin-top:2px; }
     .battle-foot .meta { color:var(--muted); font:700 11px ui-monospace, SFMono-Regular, Menlo, monospace; }
     .battle-foot .links { margin-left:auto; }
+    .battle-foot .links .link-sep { color:var(--muted); }
     .degraded { border:1px solid rgba(244,166,74,.5); color:var(--amber); border-radius:4px; padding:2px 7px; font:800 10px ui-monospace, SFMono-Regular, Menlo, monospace; }
     .rounds-strip { display:flex; gap:8px; flex-wrap:wrap; }
     .round-pill { border:1px solid var(--line); background:var(--surface); border-radius:6px; padding:8px 10px; font:700 12px ui-monospace, SFMono-Regular, Menlo, monospace; color:var(--muted); }
@@ -898,6 +909,24 @@ function battleCard(episode: CoworldLeagueEpisodeRow): string {
     episode.degradedCount !== null && episode.degradedCount > 0
       ? `<span class="degraded">⚠ ${escapeHtml(String(episode.degradedCount))} degraded</span>`
       : "";
+  // Battle-card links. The premiere link is present ONLY when the mirror
+  // attached a revealed-premiere href (see CoworldLeagueEpisodeRow.premiereHref
+  // — outcome already public, never pre-reveal). The `typeof` guard also
+  // tolerates legacy merged data.json rows where the optional field is absent.
+  const cardLinks: string[] = [];
+  if (
+    typeof episode.premiereHref === "string" &&
+    episode.premiereHref.length > 0
+  ) {
+    cardLinks.push(
+      `<a href="${escapeHtml(episode.premiereHref)}">▶ Watch the premiere</a>`,
+    );
+  }
+  if (episode.fullRenderHref !== null) {
+    cardLinks.push(
+      `<a href="${escapeHtml(episode.fullRenderHref)}">▶ Watch replay</a>`,
+    );
+  }
   return `
     <article class="battle" data-roster-expanded="false">
       <div class="battle-head">
@@ -933,9 +962,9 @@ function battleCard(episode: CoworldLeagueEpisodeRow): string {
         <span class="meta">${escapeHtml(meta.join(" · "))}</span>
         ${degraded}
         <span class="links">${
-          episode.fullRenderHref === null
+          cardLinks.length === 0
             ? `<span class="meta">replay pending</span>`
-            : `<a href="${escapeHtml(episode.fullRenderHref)}">▶ Watch replay</a>`
+            : cardLinks.join(`<span class="link-sep"> · </span>`)
         }</span>
       </div>
     </article>`;

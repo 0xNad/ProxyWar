@@ -1,3 +1,5 @@
+import { PREMIERE_ID_PATTERN } from "../replay-premiere/ReplayPremiereContracts";
+import { derivePremiereId } from "../replay-premiere/ReplayPremiereLoopCore";
 import type { AgentSpectatorReplay } from "./AgentSpectatorReplay";
 import type {
   CoworldLeagueEpisodePlayerRow,
@@ -658,6 +660,13 @@ export function buildEpisodeRow(input: {
   roundNumber: number | null;
   watchHref: string | null;
   fullRenderHref: string | null;
+  /**
+   * `/premiere/<premiereId>` when this episode's premiere has REVEALED (see
+   * {@link premiereHrefForEpisode}); null/omitted otherwise. Optional so the
+   * field stays entirely absent from data.json rows without one — additive
+   * for every existing consumer.
+   */
+  premiereHref?: string | null;
 }): CoworldLeagueEpisodeRow {
   const { meta, replay } = input;
   const colors = playerColorsFromSpectatorReplay(replay.spectatorReplay);
@@ -700,6 +709,9 @@ export function buildEpisodeRow(input: {
     players,
     watchHref: input.watchHref,
     fullRenderHref: input.fullRenderHref,
+    ...(typeof input.premiereHref === "string" && input.premiereHref.length > 0
+      ? { premiereHref: input.premiereHref }
+      : {}),
   };
 }
 
@@ -707,4 +719,71 @@ export function shortEpisodeId(episodeRequestId: string): string {
   const cleaned = episodeRequestId.replace(/^ereq_/, "").toLowerCase();
   const safe = cleaned.replace(/[^a-z0-9-]/g, "");
   return safe.slice(0, 8) === "" ? "episode" : safe.slice(0, 8);
+}
+
+/**
+ * Parse the replay-premiere archive index (JSONL of terminal premiere
+ * pointers, `archive-v1/archive-index.jsonl` under the premiere private state
+ * root) into the set of premiere ids whose OUTCOME IS PUBLIC: terminal state
+ * exactly "revealed" with a reveal timestamp.
+ *
+ * Spoiler-safe by construction: a pre-reveal premiere never appears in the
+ * archive index at all (pointers are written only at post-terminal
+ * reclamation, ~30 minutes after reveal), and failed/cancelled/pre-reveal
+ * terminal pointers are filtered here — so no id this returns can name a
+ * premiere whose outcome is still sealed. Tolerant + fail-open: torn or
+ * invalid lines are skipped, a repeated premiere id keeps the LAST record
+ * (append-only index semantics), and any unreadable input simply yields fewer
+ * links — never a wrong one and never a publication stall.
+ */
+export function revealedPremiereIdsFromArchiveIndex(raw: string): Set<string> {
+  const revealedById = new Map<string, boolean>();
+  for (const line of raw.split("\n")) {
+    const trimmed = line.trim();
+    if (trimmed.length === 0) {
+      continue;
+    }
+    let value: unknown;
+    try {
+      value = JSON.parse(trimmed);
+    } catch {
+      continue;
+    }
+    const record = asRecord(value);
+    if (record === null) {
+      continue;
+    }
+    const premiereId = asString(record.premiereId);
+    if (premiereId === null || !PREMIERE_ID_PATTERN.test(premiereId)) {
+      continue;
+    }
+    revealedById.set(
+      premiereId,
+      record.terminalState === "revealed" &&
+        asString(record.revealedAt) !== null,
+    );
+  }
+  return new Set(
+    [...revealedById]
+      .filter(([, revealed]) => revealed)
+      .map(([premiereId]) => premiereId),
+  );
+}
+
+/**
+ * The battle-card premiere link for an episode, or null when the episode has
+ * no REVEALED premiere. The join is the premiere loop's own deterministic id
+ * derivation (premiereId = derivePremiereId(episodeRequestId)), so no mapping
+ * state is needed and — because {@link revealedPremiereIdsFromArchiveIndex}
+ * only ever returns post-reveal ids — a link can never point at a sealed
+ * premiere.
+ */
+export function premiereHrefForEpisode(
+  episodeRequestId: string,
+  revealedPremiereIds: ReadonlySet<string>,
+): string | null {
+  const premiereId = derivePremiereId(episodeRequestId);
+  return revealedPremiereIds.has(premiereId)
+    ? `/premiere/${encodeURIComponent(premiereId)}`
+    : null;
 }

@@ -11,10 +11,13 @@ import {
   parseHostedReplayPayload,
   parseLeagueSummary,
   pickCompetitionDivision,
+  premiereHrefForEpisode,
+  revealedPremiereIdsFromArchiveIndex,
   roundNumberByRoundId,
   scoreLabelFromStandings,
   shortEpisodeId,
 } from "../../src/server/agents/CoworldLeagueMirrorCore";
+import { derivePremiereId } from "../../src/server/replay-premiere/ReplayPremiereLoopCore";
 
 const leagueFixture = {
   id: "league_test",
@@ -641,5 +644,135 @@ describe("CoworldLeagueMirrorCore", () => {
     // Recovered from the authoritative replay config.
     expect(row.map).toBe("Britannia");
     expect(row.mapSize).toBe("Normal");
+  });
+});
+
+describe("revealed-premiere battle-card links (every round premieres, 2026-07-22)", () => {
+  const revealedEpisodeId = "ereq_00000000-0000-0000-0000-0000000000aa";
+  const revealedPremiereId = derivePremiereId(revealedEpisodeId);
+  // A production-shaped archive pointer line (see ReplayPremiereArchiveIndex).
+  const pointerLine = (overrides: Record<string, unknown> = {}): string =>
+    JSON.stringify({
+      schemaVersion: 1,
+      premiereId: revealedPremiereId,
+      sourceRunId: "coworld-2026-07-22T04-44-01-038Z-55ad38ae",
+      sourceKind: "rated_coworld",
+      terminalState: "revealed",
+      revealedAt: "2026-07-22T04:51:41.304Z",
+      publicationCommitmentHash: "a".repeat(64),
+      sourceReplaySha256: "b".repeat(64),
+      summaryHash: "c".repeat(64),
+      summaryRelPath: `summaries/${revealedPremiereId}.summary.json`,
+      reclaimedAt: "2026-07-22T05:22:20.478Z",
+      ...overrides,
+    });
+
+  test("collects revealed pointers and filters failed/cancelled/reveal-less ones", () => {
+    const raw = [
+      pointerLine(),
+      pointerLine({
+        premiereId: "prem_failedfailedfailed1",
+        terminalState: "failed",
+        revealedAt: null,
+      }),
+      pointerLine({
+        premiereId: "prem_cancelledcancelled1",
+        terminalState: "cancelled",
+        revealedAt: null,
+      }),
+      // Defensive: a "revealed" pointer without a reveal timestamp is not
+      // linkable — reveal time is what proves the outcome went public.
+      pointerLine({
+        premiereId: "prem_norevealtimestamp1",
+        revealedAt: null,
+      }),
+      // Defensive: "archived" is a distinct terminal state; the directive
+      // links terminalState === "revealed" only.
+      pointerLine({
+        premiereId: "prem_archivedarchived11",
+        terminalState: "archived",
+      }),
+    ].join("\n");
+    expect(revealedPremiereIdsFromArchiveIndex(raw)).toEqual(
+      new Set([revealedPremiereId]),
+    );
+  });
+
+  test("tolerates torn lines, junk, blank lines, and invalid premiere ids", () => {
+    const raw = [
+      "",
+      "not json at all",
+      '["an", "array"]',
+      '{"premiereId": 42}',
+      '{"premiereId": "prem_UPPERCASE-invalid", "terminalState": "revealed", "revealedAt": "2026-07-22T04:51:41.304Z"}',
+      pointerLine(),
+      '{"premiereId": "prem_short", "terminalState": "revealed", "revealedAt": "2026-07-22T04:51:41.304Z"}',
+      pointerLine().slice(0, 40), // torn final line (crash mid-append)
+    ].join("\n");
+    expect(revealedPremiereIdsFromArchiveIndex(raw)).toEqual(
+      new Set([revealedPremiereId]),
+    );
+    expect(revealedPremiereIdsFromArchiveIndex("")).toEqual(new Set());
+  });
+
+  test("a repeated premiere id keeps the LAST record (append-only semantics)", () => {
+    const flippedOff = [
+      pointerLine(),
+      pointerLine({ terminalState: "failed", revealedAt: null }),
+    ].join("\n");
+    expect(revealedPremiereIdsFromArchiveIndex(flippedOff)).toEqual(new Set());
+    const flippedOn = [
+      pointerLine({ terminalState: "failed", revealedAt: null }),
+      pointerLine(),
+    ].join("\n");
+    expect(revealedPremiereIdsFromArchiveIndex(flippedOn)).toEqual(
+      new Set([revealedPremiereId]),
+    );
+  });
+
+  test("premiereHrefForEpisode joins by the loop's own derived premiere id", () => {
+    const revealed = new Set([revealedPremiereId]);
+    expect(premiereHrefForEpisode(revealedEpisodeId, revealed)).toBe(
+      `/premiere/${revealedPremiereId}`,
+    );
+    // A different episode derives a different id: no link.
+    expect(
+      premiereHrefForEpisode(
+        "ereq_ffffffff-0000-0000-0000-000000000000",
+        revealed,
+      ),
+    ).toBeNull();
+    expect(premiereHrefForEpisode(revealedEpisodeId, new Set())).toBeNull();
+  });
+
+  test("buildEpisodeRow carries premiereHref only when one is attached (additive data.json)", () => {
+    const replay = parseHostedReplayPayload(replayPayloadFixture);
+    expect(replay).not.toBeNull();
+    if (replay === null) {
+      return;
+    }
+    const meta = parseCompletedEpisodeMetaList(replayMetaFixture)[1];
+    const base = {
+      meta,
+      replay,
+      roundNumber: 267,
+      watchHref: null,
+      fullRenderHref: "/ai-league-replay/coworld-run",
+    };
+    const linked = buildEpisodeRow({
+      ...base,
+      premiereHref: `/premiere/${revealedPremiereId}`,
+    });
+    expect(linked.premiereHref).toBe(`/premiere/${revealedPremiereId}`);
+    // Absent, null, or empty input leaves the field entirely OFF the row, so
+    // rows without a revealed premiere serialize byte-identically to before.
+    for (const row of [
+      buildEpisodeRow(base),
+      buildEpisodeRow({ ...base, premiereHref: null }),
+      buildEpisodeRow({ ...base, premiereHref: "" }),
+    ]) {
+      expect(row).not.toHaveProperty("premiereHref");
+      expect(JSON.stringify(row)).not.toContain("premiere");
+    }
   });
 });

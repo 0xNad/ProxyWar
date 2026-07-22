@@ -255,6 +255,39 @@ describe("coworldLeagueIndexHtml", () => {
     expect(html).not.toContain("spectator.html");
   });
 
+  test("a revealed premiere adds a Watch-the-premiere link beside the replay link", () => {
+    const data = sampleData();
+    data.episodes[0].premiereHref = "/premiere/prem_54d299b874f0adc7654fd1cc";
+    const html = coworldLeagueIndexHtml(data);
+    expect(html).toContain(
+      '<a href="/premiere/prem_54d299b874f0adc7654fd1cc">▶ Watch the premiere</a>',
+    );
+    // Both links render on the same card, premiere first, dot-separated.
+    expect(html).toContain(
+      '▶ Watch the premiere</a><span class="link-sep"> · </span><a href="/ai-league-replay/coworld-run">▶ Watch replay</a>',
+    );
+    // The second (linkless) card still reads "replay pending".
+    expect(html).toContain("replay pending");
+  });
+
+  test("without a premiereHref no premiere link or separator is emitted", () => {
+    const html = coworldLeagueIndexHtml(sampleData());
+    expect(html).not.toContain("Watch the premiere");
+    expect(html).not.toContain('class="link-sep"');
+  });
+
+  test("a premiere link renders even when the replay bundle is still pending", () => {
+    const data = sampleData();
+    data.episodes[1].premiereHref = "/premiere/prem_0579c9b1e839847e2a50f216";
+    const html = coworldLeagueIndexHtml(data);
+    expect(html).toContain(
+      '<a href="/premiere/prem_0579c9b1e839847e2a50f216">▶ Watch the premiere</a>',
+    );
+    // The premiere link replaces "replay pending" on that card (the first
+    // card keeps its replay link and the page has no pending placeholder).
+    expect(html).not.toContain("replay pending");
+  });
+
   test("shows the stale banner only when stale", () => {
     const fresh = coworldLeagueIndexHtml(sampleData());
     expect(fresh).not.toContain("Live sync degraded");
@@ -357,6 +390,26 @@ describe("writeCoworldLeagueSite", () => {
     // Map size is retained in the data model; difficulty is gone end-to-end.
     expect(roundTrip.episodes[0].mapSize).toBe("Compact");
     expect(roundTrip.episodes[0]).not.toHaveProperty("difficulty");
+  });
+
+  test("premiereHref round-trips through data.json additively (absent rows stay unchanged)", async () => {
+    siteDir = await mkdtemp(path.join(tmpdir(), "league-site-"));
+    const data = sampleData();
+    data.episodes[0].premiereHref = "/premiere/prem_54d299b874f0adc7654fd1cc";
+    const paths = await writeCoworldLeagueSite(siteDir, data);
+    const roundTrip = JSON.parse(await readFile(paths.dataPath, "utf8"));
+    expect(roundTrip.episodes[0].premiereHref).toBe(
+      "/premiere/prem_54d299b874f0adc7654fd1cc",
+    );
+    // Additive-only: the field is entirely absent on rows without a revealed
+    // premiere (never null), and the old polling-client contract fields the
+    // deployed client validates are untouched.
+    expect(roundTrip.episodes[1]).not.toHaveProperty("premiereHref");
+    expect(Array.isArray(roundTrip.standings)).toBe(true);
+    expect(Array.isArray(roundTrip.rounds)).toBe(true);
+    expect(Array.isArray(roundTrip.episodes)).toBe(true);
+    expect(typeof roundTrip.stale).toBe("boolean");
+    expect(typeof roundTrip.generatedAt).toBe("string");
   });
 
   test("marks both artifacts stale while retaining the last good sync", async () => {

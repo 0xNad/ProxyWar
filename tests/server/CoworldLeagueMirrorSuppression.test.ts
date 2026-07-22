@@ -493,3 +493,53 @@ describe("premiere card render + en.json keys", () => {
     expect(html).not.toContain('href="/premiere/');
   });
 });
+
+describe("revealed-premiere links never bypass suppression", () => {
+  test("a held or quarantined row is dropped WHOLE — an attached premiereHref never reaches HTML or data.json", () => {
+    // Defensive impossibility drill: by construction the mirror only attaches
+    // premiereHref for REVEALED premieres (archive-index pointers exist only
+    // post-terminal reclamation), so a held/quarantined episode can never
+    // legitimately carry one. Even if a row somehow did, suppression drops the
+    // entire row — the link goes with it.
+    const heldWithLink = {
+      ...secretHeldEpisode(),
+      premiereHref: "/premiere/prem_live_test",
+    };
+    const quarantinedWithLink = {
+      ...episodeRow({
+        episodeRequestId: "ereq_freshlinked",
+        shortId: "freshlinked",
+        completedAt: "2026-07-21T11:59:30.000Z", // 30s before NOW
+      }),
+      premiereHref: "/premiere/prem_quarantinedfresh1",
+    };
+    const oldRevealed = {
+      ...episodeRow(),
+      premiereHref: "/premiere/prem_oldrevealedok0001",
+    };
+    const data = assemble(
+      mirrorData([heldWithLink, quarantinedWithLink, oldRevealed]),
+      activeContract(),
+      NOW,
+    );
+    const html = coworldLeagueIndexHtml(data);
+    const json = JSON.parse(`${JSON.stringify(data, null, 2)}\n`) as {
+      episodes: CoworldLeagueEpisodeRow[];
+    };
+    // The held card (and its link) is gone; the fresh card (and its link) is
+    // deferred; the old revealed card keeps its premiere link.
+    expect(html).not.toContain("prem_quarantinedfresh1");
+    expect(json.episodes.map((row) => row.episodeRequestId)).toEqual([
+      episodeRow().episodeRequestId,
+    ]);
+    expect(html).toContain(
+      '<a href="/premiere/prem_oldrevealedok0001">▶ Watch the premiere</a>',
+    );
+    // The held premiere id appears ONLY as the live premiere card's own
+    // /premiere link (contract-derived), never via the suppressed battle row.
+    expect(containsForbiddenText(html, SECRET_HTML_FINGERPRINTS)).toBe(false);
+    expect(containsExactStructuredIdentity(json, SECRET_JSON_LEAVES)).toBe(
+      false,
+    );
+  });
+});

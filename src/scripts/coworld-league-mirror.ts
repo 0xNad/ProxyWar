@@ -28,6 +28,8 @@ import {
   parseHostedReplayPayload,
   parseLeagueSummary,
   pickCompetitionDivision,
+  premiereHrefForEpisode,
+  revealedPremiereIdsFromArchiveIndex,
   roundNumberByRoundId,
   scoreLabelFromStandings,
   type HostedEpisodeMeta,
@@ -61,6 +63,15 @@ import {
  * This script never mutates hosted state: no upload, submit, publish, or
  * experience-request creation. Keep it that way — hosted mutations are
  * operator-gated.
+ *
+ * Premiere links (`--premiere-archive-index <absolute path>`): when pointed at
+ * the replay-premiere archive index (production:
+ * `$PROXYWAR_STORAGE_STATE_DIR/replay-premiere/archive-v1/archive-index.jsonl`,
+ * wired in `start-proxywar-league-mirror.zsh` exactly like
+ * `--suppression-contract`), each battle card whose episode has a REVEALED
+ * premiere gains a `/premiere/<premiereId>` link. The index is READ-ONLY here,
+ * only reveal-public facts are extracted, and every failure mode fails open to
+ * "no links". Default off: without the flag the mirror output is unchanged.
  */
 
 const execFileAsync = promisify(execFile);
@@ -89,6 +100,12 @@ interface MirrorOptions {
    * run with suppression disabled — the mirror then behaves exactly as before.
    */
   suppressionContractPath: string | null;
+  /**
+   * Absolute path to the replay-premiere archive index
+   * (`archive-v1/archive-index.jsonl`), or null (default) to publish battle
+   * cards without premiere links — the mirror then behaves exactly as before.
+   */
+  premiereArchiveIndexPath: string | null;
 }
 
 function parseOptions(argv: string[]): MirrorOptions {
@@ -127,6 +144,7 @@ function parseOptions(argv: string[]): MirrorOptions {
     watch: false,
     intervalSeconds: 300,
     suppressionContractPath: null,
+    premiereArchiveIndexPath: null,
   };
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i];
@@ -192,6 +210,16 @@ function parseOptions(argv: string[]): MirrorOptions {
           );
         }
         options.suppressionContractPath = value;
+        break;
+      }
+      case "--premiere-archive-index": {
+        const value = next();
+        if (!path.isAbsolute(value)) {
+          throw new Error(
+            `--premiere-archive-index must be an absolute path: ${value}`,
+          );
+        }
+        options.premiereArchiveIndexPath = value;
         break;
       }
       default:
@@ -442,6 +470,56 @@ async function readSuppressionState(
   return loadPremiereSuppressionContract(options.suppressionContractPath, now);
 }
 
+const maximumPremiereArchiveIndexBytes = 64 * 1024 * 1024;
+
+/**
+ * Read the replay-premiere archive index and extract the ids of REVEALED
+ * premieres for battle-card links. Fail-open on every failure mode — not
+ * configured, missing (the normal pre-first-premiere state), unreadable, not
+ * a regular file, or oversized — the mirror then publishes without premiere
+ * links rather than degrading the feed. A link appears on the first mirror
+ * cycle after the premiere's terminal reclamation (≤ ~30 minutes after
+ * reveal); revealed-but-not-yet-reclaimed premieres are intentionally not
+ * linked, so this reader never has to touch the live premiere catalog.
+ */
+async function readRevealedPremiereIds(
+  options: MirrorOptions,
+): Promise<ReadonlySet<string>> {
+  if (options.premiereArchiveIndexPath === null) {
+    return new Set();
+  }
+  try {
+    const indexStat = await fs.stat(options.premiereArchiveIndexPath);
+    if (
+      !indexStat.isFile() ||
+      indexStat.size > maximumPremiereArchiveIndexBytes
+    ) {
+      log(
+        "premiere archive index skipped (not a regular file or over the byte ceiling); publishing without premiere links",
+      );
+      return new Set();
+    }
+    const revealed = revealedPremiereIdsFromArchiveIndex(
+      await fs.readFile(options.premiereArchiveIndexPath, "utf8"),
+    );
+    log(`premiere archive index: ${revealed.size} revealed premiere(s)`);
+    return revealed;
+  } catch (error) {
+    const code =
+      error !== null && typeof error === "object" && "code" in error
+        ? (error as { code?: unknown }).code
+        : null;
+    if (code !== "ENOENT") {
+      log(
+        `premiere archive index unreadable; publishing without premiere links: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+    }
+    return new Set();
+  }
+}
+
 async function pruneMirrorArtifacts(
   options: MirrorOptions,
   protectedEpisodes: CoworldLeagueEpisodeRow[],
@@ -555,6 +633,9 @@ async function syncOnce(options: MirrorOptions): Promise<void> {
   const recoveryReferences = options.recoverPinnedArtifacts
     ? await readCoworldLeagueRetentionPins(options.retentionPinManifestPath)
     : null;
+  // Revealed premieres, for spoiler-safe battle-card links. Read once per
+  // cycle; fail-open to an empty set (cards simply carry no premiere link).
+  const revealedPremiereIds = await readRevealedPremiereIds(options);
   // Read the contract at cycle start to log/observe suppression status. Only
   // the cycle-start OBSERVATION is skipped during operator-driven pinned-artifact
   // recovery; the final-defense filter below still runs unconditionally, so a
@@ -680,6 +761,10 @@ async function syncOnce(options: MirrorOptions): Promise<void> {
               : (roundNumbers.get(meta.roundId) ?? null),
           watchHref: unpacked?.watchHref ?? null,
           fullRenderHref: unpacked?.fullRenderHref ?? null,
+          premiereHref: premiereHrefForEpisode(
+            meta.episodeRequestId,
+            revealedPremiereIds,
+          ),
         }),
       );
       recoveredEpisodeRequestIds.add(meta.episodeRequestId);
