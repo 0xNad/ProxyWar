@@ -1061,7 +1061,7 @@
     "premiere_starts": "Starts {time}",
     "latest_premiere_eyebrow": "Latest premiere",
     "latest_premiere_revealed": "Revealed {time}",
-    "latest_premiere_watch": "Watch the premiere"
+    "latest_premiere_watch": "Watch now"
   },
   "replay_premiere": {
     "overlay_label": "Replay Premiere controls",

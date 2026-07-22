@@ -521,7 +521,7 @@ describe("persistent premiere slot — latest revealed card", () => {
       'Revealed <span data-utc="2026-07-22T08:45:13.000Z">2026-07-22 08:45Z</span>',
     );
     expect(html).toContain(
-      '<a class="button primary premiere-link" href="/premiere/prem_54d299b874f0adc7654fd1cc">Watch the premiere</a>',
+      '<a class="button primary premiere-link" href="/premiere/prem_54d299b874f0adc7654fd1cc">Watch now</a>',
     );
     // The full premiere-card visual language ships with the latest-only state.
     expect(html).toContain(".premiere-card {");
