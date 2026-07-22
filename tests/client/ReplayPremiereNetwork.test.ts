@@ -6,6 +6,7 @@ import {
   canonicalJsonBytes,
   canonicalReplayPremiereJson,
   hashCanonicalJson,
+  PREMIERE_PRESENTATION_TRAIL_MS,
   REPLAY_PREMIERE_REVEAL_FETCH_CONCURRENCY,
   ReplayPremiereNetworkController,
   ReplayPremiereNetworkError,
@@ -25,7 +26,10 @@ import {
   GameType,
 } from "../../src/core/game/Game";
 import type { GameStartInfo, Turn } from "../../src/core/Schemas";
-import type { ReleasedPremiereChunk } from "../../src/server/replay-premiere/ReplayPremiereContracts";
+import {
+  REPLAY_PREMIERE_MAX_PRESENTATION_SPAN_MS,
+  type ReleasedPremiereChunk,
+} from "../../src/server/replay-premiere/ReplayPremiereContracts";
 import {
   createPremierePublicBootstrap,
   createPremiereRevealPointer,
@@ -758,10 +762,63 @@ describe("ReplayPremiereNetwork", () => {
     expect(fetchMock).toHaveBeenCalledTimes(3);
   });
 
-  it("requests forward-only catch-up when the accepted replay is over two seconds behind", async () => {
+  it("pins the presentation trail to the admission chunk-span geometry", async () => {
+    // The trail mirrors the 45s admission build span and must never exceed
+    // the contracts presentation-span cap (chunks release at their LAST
+    // record, so the trail == the worst-case release lag).
+    expect(PREMIERE_PRESENTATION_TRAIL_MS).toBe(45_000);
+    expect(PREMIERE_PRESENTATION_TRAIL_MS).toBeLessThanOrEqual(
+      REPLAY_PREMIERE_MAX_PRESENTATION_SPAN_MS,
+    );
+  });
+
+  it("requests forward catch-up to the frontier minus the presentation trail", async () => {
+    // 200 records at 500ms presentation spacing: frontier offset 99,500ms.
+    // Elapsed far beyond the threshold -> catch up, but to the record ~45s
+    // of presentation BEHIND the frontier (sequence 109 at offset 54,500ms),
+    // never the bare frontier edge — the mid-join teleport-then-starve fix.
     const chunk = await buildChunk({
       index: 0,
-      records: records(0, 1),
+      records: records(...Array.from({ length: 200 }, (_, index) => index)),
+      previousChunkHash: null,
+    });
+    const playback = new ReplayPremierePlaybackController(PREMIERE_ID);
+    const catchUps: number[] = [];
+    playback.subscribe((event) => {
+      if (event.type === "catch-up") catchUps.push(event.targetSequence);
+    });
+    const { network } = controller(
+      queuedFetch(
+        jsonResponse(await bootstrap()),
+        jsonResponse(
+          await manifest([chunk], {
+            authoritativeElapsedMs: 200_000,
+            serverNow: new Date(
+              Date.parse(STARTED_AT) + 200_000 + 5_000,
+            ).toISOString(),
+          }),
+        ),
+        jsonResponse(chunk),
+      ) as unknown as typeof fetch,
+      { onReady: vi.fn() },
+      playback,
+    );
+    await network.syncOnce();
+    const frontierOffset = 199 * 500;
+    const expectedTarget = Math.floor(
+      (frontierOffset - PREMIERE_PRESENTATION_TRAIL_MS) / 500,
+    );
+    expect(catchUps).toEqual([expectedTarget]);
+    expect(expectedTarget).toBeLessThan(199);
+  });
+
+  it("never trips catch-up inside the designed presentation trail", async () => {
+    // The steady-state trail (one chunk span, 45s) is intentional lag; a
+    // viewer within the threshold must keep smooth pacing — this was the
+    // 2026-07-22 freeze/burst regression (2s threshold vs 45s spans).
+    const chunk = await buildChunk({
+      index: 0,
+      records: records(...Array.from({ length: 200 }, (_, index) => index)),
       previousChunkHash: null,
     });
     const playback = new ReplayPremierePlaybackController(PREMIERE_ID);
@@ -771,7 +828,12 @@ describe("ReplayPremiereNetwork", () => {
       queuedFetch(
         jsonResponse(await bootstrap()),
         jsonResponse(
-          await manifest([chunk], { authoritativeElapsedMs: 5_000 }),
+          await manifest([chunk], {
+            authoritativeElapsedMs: 80_000,
+            serverNow: new Date(
+              Date.parse(STARTED_AT) + 80_000 + 5_000,
+            ).toISOString(),
+          }),
         ),
         jsonResponse(chunk),
       ) as unknown as typeof fetch,
@@ -779,7 +841,36 @@ describe("ReplayPremiereNetwork", () => {
       playback,
     );
     await network.syncOnce();
-    expect(eventTypes).toEqual(["batch", "catch-up"]);
+    expect(eventTypes).toEqual(["batch"]);
+  });
+
+  it("skips catch-up entirely while the released stream is younger than the trail", async () => {
+    const chunk = await buildChunk({
+      index: 0,
+      records: records(0, 1, 2, 3, 4, 5),
+      previousChunkHash: null,
+    });
+    const playback = new ReplayPremierePlaybackController(PREMIERE_ID);
+    const eventTypes: string[] = [];
+    playback.subscribe((event) => eventTypes.push(event.type));
+    const { network } = controller(
+      queuedFetch(
+        jsonResponse(await bootstrap()),
+        jsonResponse(
+          await manifest([chunk], {
+            authoritativeElapsedMs: 500_000,
+            serverNow: new Date(
+              Date.parse(STARTED_AT) + 500_000 + 5_000,
+            ).toISOString(),
+          }),
+        ),
+        jsonResponse(chunk),
+      ) as unknown as typeof fetch,
+      { onReady: vi.fn() },
+      playback,
+    );
+    await network.syncOnce();
+    expect(eventTypes).toEqual(["batch"]);
   });
 
   it("retries a reconnectable request with a bounded sanitized notice", async () => {
