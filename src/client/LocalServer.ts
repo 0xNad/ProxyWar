@@ -118,6 +118,16 @@ export class LocalServer {
     }
     this.turnCheckInterval = setInterval(() => {
       const turnIntervalMs = this.progressiveReplayDelayForNextTurn();
+      // Starvation is a visible state, not a silent freeze: a null delay on
+      // an unfinalized progressive replay means the dispatcher has exhausted
+      // released content (frontier stall / network hiccup). Report it so the
+      // premiere overlay can show "Buffering live…"; the next released batch
+      // resumes dispatch automatically and clears the flag on this same tick.
+      if (this.lobbyConfig.progressiveReplay) {
+        this.lobbyConfig.progressiveReplay.controller.reportDispatchStarvation(
+          turnIntervalMs === null && !this.progressiveReplayFinalized,
+        );
+      }
       const backlog = Math.max(0, this.turns.length - this.turnsExecuted);
       const allowReplayBacklog =
         this.replaySpeedMultiplier === ReplaySpeedMultiplier.fastest &&

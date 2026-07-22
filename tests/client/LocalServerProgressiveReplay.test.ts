@@ -321,6 +321,62 @@ describe("LocalServer progressive replay", () => {
     server.endGame();
   });
 
+  it("reports dispatcher starvation as a visible buffering state, then auto-resumes", () => {
+    // A frontier stall must never be a silently frozen canvas: while the
+    // dispatcher has exhausted released content the controller reports
+    // buffering (the overlay renders "Buffering live…"), and the next
+    // released batch resumes dispatch and clears it automatically.
+    const controller = new ReplayPremierePlaybackController(
+      "prem_0123456789abcdef",
+    );
+    const bufferingEvents: boolean[] = [];
+    controller.subscribe((event) => {
+      if (event.type === "buffering") bufferingEvents.push(event.buffering);
+    });
+    const { server, messages } = startServer(lobbyConfig(controller));
+    controller.appendVerifiedBatch(batch([{ turnNumber: 0, intents: [] }]));
+
+    vi.advanceTimersByTime(15);
+    server.turnComplete();
+    expect(turnMessages(messages).map((turn) => turn.turnNumber)).toEqual([0]);
+
+    // Released content exhausted, not finalized -> starved.
+    vi.advanceTimersByTime(200);
+    expect(controller.state().buffering).toBe(true);
+    expect(bufferingEvents.at(-1)).toBe(true);
+
+    // A fresh release resumes dispatch and clears the state.
+    controller.appendVerifiedBatch({
+      premiereId: "prem_0123456789abcdef",
+      chunkIndex: 1,
+      chunkHash: "2".repeat(64),
+      previousChunkHash: HASH_1,
+      payloadHash: HASH_0,
+      startSequence: 1,
+      endSequence: 1,
+      verification: {
+        payloadHashVerified: true,
+        chunkHashVerified: true,
+      },
+      records: [
+        {
+          sequence: 1,
+          presentationOffsetMs: 10,
+          turn: { turnNumber: 1, intents: [] },
+        },
+      ],
+    });
+    vi.advanceTimersByTime(200);
+    expect(turnMessages(messages).map((turn) => turn.turnNumber)).toEqual([
+      0, 1,
+    ]);
+    // Full cycle: starved -> resumed (buffering cleared while dispatching the
+    // fresh release) -> starved again at the NEW frontier once it too is
+    // consumed. The chip therefore tracks the dispatcher truthfully.
+    expect(bufferingEvents).toEqual([true, false, true]);
+    server.endGame();
+  });
+
   it("catches up only to an explicitly requested released sequence", () => {
     const controller = new ReplayPremierePlaybackController(
       "prem_0123456789abcdef",

@@ -98,6 +98,8 @@ export interface ReplayPremierePlaybackState {
   lastChunkHash: string | null;
   finalized: boolean;
   playbackComplete: boolean;
+  /** True while the dispatcher is starved of released content. */
+  buffering: boolean;
 }
 
 export type ReplayPremierePlaybackEvent =
@@ -116,6 +118,16 @@ export type ReplayPremierePlaybackEvent =
   | {
       type: "playback-complete";
       finalSequence: number;
+    }
+  | {
+      /**
+       * The dispatcher wanted the next record and none was released yet
+       * (frontier stall or network hiccup). Surfaced so the overlay can show
+       * a "Buffering live…" state instead of a silently frozen canvas;
+       * clears automatically when dispatch resumes.
+       */
+      type: "buffering";
+      buffering: boolean;
     };
 
 export type ReplayPremierePlaybackListener = (
@@ -164,6 +176,7 @@ export class ReplayPremierePlaybackController {
     null;
   private pendingCatchUpTarget: number | null = null;
   private playbackComplete = false;
+  private dispatchStarved = false;
 
   constructor(public readonly premiereId: string) {
     if (!PREMIERE_ID.test(premiereId)) {
@@ -187,6 +200,7 @@ export class ReplayPremierePlaybackController {
       lastChunkHash: this.lastChunkHash,
       finalized: this.finalization !== null,
       playbackComplete: this.playbackComplete,
+      buffering: this.dispatchStarved,
     });
   }
 
@@ -214,7 +228,23 @@ export class ReplayPremierePlaybackController {
         finalSequence: this.finalization.finalSequence,
       });
     }
+    if (this.dispatchStarved) {
+      listener({ type: "buffering", buffering: true });
+    }
     return () => this.listeners.delete(listener);
+  }
+
+  /**
+   * Dispatcher starvation signal (LocalServer). Idempotent; a completed
+   * playback is never "buffering" — the stream simply ended.
+   */
+  public reportDispatchStarvation(starved: boolean): void {
+    const next = starved && !this.playbackComplete;
+    if (next === this.dispatchStarved) {
+      return;
+    }
+    this.dispatchStarved = next;
+    this.emit({ type: "buffering", buffering: next });
   }
 
   public appendVerifiedBatch(
@@ -449,6 +479,7 @@ export class ReplayPremierePlaybackController {
       return;
     }
     this.playbackComplete = true;
+    this.reportDispatchStarvation(false);
     this.emit({
       type: "playback-complete",
       finalSequence: this.finalization.finalSequence,
