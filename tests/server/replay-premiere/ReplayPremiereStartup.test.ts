@@ -1499,8 +1499,10 @@ describe("ReplayPremiere production startup", () => {
     // Not revealed at registration: no observation yet.
     expect(observed).toEqual([]);
 
-    // Walk the supervisor's own timers through both checkpoints to the reveal.
-    for (const advanceMs of [100, 15_000, 100, 15_000, 50]) {
+    // Walk the supervisor's own timers through both checkpoints to the
+    // reveal. Checkpoint pauses follow REPLAY_PREMIERE_CHECKPOINT_PAUSE_MS
+    // (60 s since the real-speed pacing retune; was 15 s).
+    for (const advanceMs of [100, 60_000, 100, 60_000, 50]) {
       await vi.advanceTimersByTimeAsync(advanceMs);
       await started.service.waitForRuntimeTimersIdle();
     }
