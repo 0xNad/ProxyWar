@@ -69,6 +69,32 @@ const MAX_RECLAMATION_SWEEP_MS = 3_600_000;
 
 const DEFAULT_STARTUP_DEADLINE_MS = 10_000;
 const MAX_STARTUP_DEADLINE_MS = 10_000;
+/**
+ * DEFERRED FRESH-ADMISSION ASSEMBLY (2026-07-22 activation zombie, rounds
+ * 644/646): the shared `maxStartupMs` boot budget (8s in production) cannot
+ * assemble every legitimate premiere — a 32,300-turn World target measurably
+ * exceeds it — and a fresh admission that misses the budget was previously
+ * unreachable forever in that process (`startup_deadline_exceeded` at every
+ * boot) while the premiere loop zombie-tracked it. A deadline-missed critical
+ * plan whose admission is FRESH (hash-covered `admittedAt` within the window
+ * below) now gets exactly ONE bounded background assembly after startup
+ * returns; on success it registers through the normal atomic path.
+ *
+ * This deliberately does NOT resurrect the rejected "startDeferredHydration"
+ * design: stale/terminal backlog (e.g. prem_live20260721aaan) is never
+ * hydrated — freshness is keyed exclusively on the admission record's own
+ * `admittedAt`, so a stale premiere can never self-activate after a restart —
+ * and the boot path itself stays bounded exactly as before. The default
+ * budget stays under the premiere loop's 120s activation-verify window so the
+ * loop observes the registration (or its absence) before firing its single
+ * re-activation restart.
+ */
+const DEFAULT_DEFERRED_FRESH_ASSEMBLY_BUDGET_MS = 90_000;
+const MAX_DEFERRED_FRESH_ASSEMBLY_BUDGET_MS = 300_000;
+const DEFAULT_FRESH_ADMISSION_WINDOW_MS = 600_000;
+const MAX_FRESH_ADMISSION_WINDOW_MS = 3_600_000;
+/** Tolerated forward clock skew between the admitting process and this one. */
+const MAX_FUTURE_ADMISSION_SKEW_MS = 60_000;
 const MAX_TIMER_DELAY_MS = 2_147_483_647;
 const RUNTIME_RETRY_BASE_MS = 1_000;
 const RUNTIME_RETRY_MAX_MS = 60_000;
@@ -151,6 +177,15 @@ export interface ReplayPremiereProductionStartupOptions {
   interactionLimits?: Partial<ReplayPremiereInteractionLimits>;
   clock?: ReplayPremiereRuntimeClock;
   maxStartupMs?: number;
+  /**
+   * Wall-clock budget for the single deferred background assembly a
+   * deadline-missed FRESH admission receives after startup returns. `0`
+   * disables deferral entirely. Defaults to 90s — deliberately below the
+   * premiere loop's 120s activation-verify window.
+   */
+  deferredFreshAssemblyBudgetMs?: number;
+  /** How recent a record's `admittedAt` must be to qualify for deferral. */
+  freshAdmissionWindowMs?: number;
   /**
    * When provided, terminal premieres are reclaimed (durable summary + pointer,
    * then bulk deletion) after a grace window, and fully-reclaimed premieres are
@@ -258,6 +293,23 @@ export class ReplayPremiereProductionService {
   }
 
   /**
+   * Atomically register a target assembled AFTER startup (the deferred
+   * fresh-admission lane). Refused once close() has begun so a late assembly
+   * can never leak a registration into a torn-down service.
+   */
+  registerDeferredTarget(assembled: AssembledPremiereTarget): boolean {
+    if (this.closing || this.closePromise !== null) return false;
+    registerTargetAtomically(
+      this.runtimeRegistry,
+      this.httpRegistry,
+      assembled,
+      () => this.supervisor.add(assembled.runtime),
+    );
+    this.ownedTargets.push(assembled);
+    return true;
+  }
+
+  /**
    * Reclaims every currently-eligible terminal premiere: writes its durable
    * summary + pointer, deletes its bulk, and de-registers it so the archive
    * router takes over `/premiere/<id>`. Exposed for direct invocation in tests;
@@ -315,6 +367,12 @@ export async function startReplayPremiereProduction(
   options: ReplayPremiereProductionStartupOptions,
 ): Promise<ReplayPremiereProductionStartupResult> {
   const maxStartupMs = boundedStartupDeadline(options.maxStartupMs);
+  const deferredBudgetMs = boundedDeferredFreshAssemblyBudget(
+    options.deferredFreshAssemblyBudgetMs,
+  );
+  const freshWindowMs = boundedFreshAdmissionWindow(
+    options.freshAdmissionWindowMs,
+  );
   const startedAt = Date.now();
   const clock = options.clock ?? { now: () => new Date() };
   const publicOrigin = exactPublicOrigin(options.publicOrigin);
@@ -483,12 +541,22 @@ export async function startReplayPremiereProduction(
     );
     const criticalPlans = selectCriticalStartupPlans(startupPlans);
     const registered: string[] = [];
+    // Plans the shared boot budget could not fit: reported (unchanged) AND
+    // collected so a FRESH admission among them can get its single deferred
+    // background assembly after startup returns.
+    const deadlineMissedPlans: ReplayPremiereStartupPlan[] = [];
+    const deadlineMiss = (startIndex: number): void => {
+      for (let i = startIndex; i < criticalPlans.length; i += 1) {
+        deadlineMissedPlans.push(criticalPlans[i]);
+      }
+      reportDeadlineForRemainder(criticalPlans, startIndex, report);
+    };
     for (let index = 0; index < criticalPlans.length; index += 1) {
       const plan = criticalPlans[index];
       const record = plan.record;
       const remainingMs = maxStartupMs - (Date.now() - startedAt);
       if (remainingMs <= 0) {
-        reportDeadlineForRemainder(criticalPlans, index, report);
+        deadlineMiss(index);
         break;
       }
       const deadline = await assembleBeforeDeadline({
@@ -519,12 +587,7 @@ export async function startReplayPremiereProduction(
         pendingAssemblies,
       });
       if (deadline.status === "timed_out") {
-        report({
-          target: `${record.premiereId}.admission.json`,
-          premiereId: record.premiereId,
-          operatorCode: "startup_deadline_exceeded",
-        });
-        reportDeadlineForRemainder(criticalPlans, index + 1, report);
+        deadlineMiss(index);
         break;
       }
       if (deadline.status === "rejected") {
@@ -537,12 +600,7 @@ export async function startReplayPremiereProduction(
       }
       const assembled = deadline.value;
       if (Date.now() - startedAt > maxStartupMs) {
-        report({
-          target: `${record.premiereId}.admission.json`,
-          premiereId: record.premiereId,
-          operatorCode: "startup_deadline_exceeded",
-        });
-        reportDeadlineForRemainder(criticalPlans, index + 1, report);
+        deadlineMiss(index);
         break;
       }
       try {
@@ -560,6 +618,86 @@ export async function startReplayPremiereProduction(
           premiereId: record.premiereId,
           operatorCode: operatorCode(error),
         });
+      }
+    }
+    // DEFERRED FRESH-ADMISSION ASSEMBLY (2026-07-22 activation zombie): give
+    // each deadline-missed plan whose admission is provably fresh exactly ONE
+    // bounded background assembly. Startup returns immediately (the boot path
+    // stays bounded exactly as before); on success the target registers
+    // through the same atomic path, guarded against a closing service. Stale
+    // admissions (e.g. prem_live20260721aaan) never qualify: freshness is
+    // keyed exclusively on the hash-covered `admittedAt`, so a stale premiere
+    // can never self-activate after a restart.
+    if (deferredBudgetMs > 0) {
+      const freshNowMs = clock.now().getTime();
+      for (const plan of deadlineMissedPlans) {
+        const record = plan.record;
+        if (!isFreshAdmission(record.admittedAt, freshNowMs, freshWindowMs)) {
+          continue;
+        }
+        report({
+          target: `${record.premiereId}.admission.json`,
+          premiereId: record.premiereId,
+          operatorCode: "deferred_assembly_scheduled",
+        });
+        const deferred = (async () => {
+          try {
+            const outcome = await assembleBeforeDeadline({
+              operation: async (fence) => {
+                await options.beforeTargetRecovery?.({
+                  record,
+                  signal: fence.signal,
+                });
+                assertStartupActive(fence.signal);
+                return assemblePremiereTarget({
+                  record,
+                  privateStateRoot: catalog.privateStateRoot,
+                  servedRoots: options.servedRoots,
+                  maxSourceBytes: catalogLimits.maxSourceBytes,
+                  publicOrigin,
+                  security: options.security,
+                  httpRegistry: options.httpRegistry,
+                  eventStore: activeEventStore,
+                  eventStoreLimits,
+                  clock,
+                  checkpointProjector: options.checkpointProjector,
+                  interactionLimits: options.interactionLimits,
+                  recoveryProjection: plan.projection,
+                  fence,
+                });
+              },
+              remainingMs: deferredBudgetMs,
+              pendingAssemblies,
+            });
+            if (outcome.status === "fulfilled") {
+              const accepted = service.registerDeferredTarget(outcome.value);
+              reportRuntime({
+                target: `${record.premiereId}.admission.json`,
+                premiereId: record.premiereId,
+                operatorCode: accepted
+                  ? "deferred_assembly_registered"
+                  : "deferred_assembly_abandoned_closing",
+              });
+              return;
+            }
+            reportRuntime({
+              target: `${record.premiereId}.admission.json`,
+              premiereId: record.premiereId,
+              operatorCode:
+                outcome.status === "timed_out"
+                  ? "deferred_assembly_deadline_exceeded"
+                  : `deferred_assembly_rejected:${operatorCode(outcome.error)}`,
+            });
+          } catch (error) {
+            reportRuntime({
+              target: `${record.premiereId}.admission.json`,
+              premiereId: record.premiereId,
+              operatorCode: `deferred_assembly_failed:${operatorCode(error)}`,
+            });
+          }
+        })();
+        pendingAssemblies.add(deferred);
+        void deferred.finally(() => pendingAssemblies.delete(deferred));
       }
     }
     return {
@@ -1290,6 +1428,47 @@ function boundedStartupDeadline(value: number | undefined): number {
     throw startupUnavailable("invalid_startup_deadline");
   }
   return deadline;
+}
+
+function boundedDeferredFreshAssemblyBudget(value: number | undefined): number {
+  const budget = value ?? DEFAULT_DEFERRED_FRESH_ASSEMBLY_BUDGET_MS;
+  if (
+    !Number.isSafeInteger(budget) ||
+    budget < 0 ||
+    budget > MAX_DEFERRED_FRESH_ASSEMBLY_BUDGET_MS
+  ) {
+    throw startupUnavailable("invalid_deferred_assembly_budget");
+  }
+  return budget;
+}
+
+function boundedFreshAdmissionWindow(value: number | undefined): number {
+  const window = value ?? DEFAULT_FRESH_ADMISSION_WINDOW_MS;
+  if (
+    !Number.isSafeInteger(window) ||
+    window < 1 ||
+    window > MAX_FRESH_ADMISSION_WINDOW_MS
+  ) {
+    throw startupUnavailable("invalid_fresh_admission_window");
+  }
+  return window;
+}
+
+/**
+ * Whether an admission is fresh enough for the deferred assembly lane. Fail
+ * closed: an unparseable `admittedAt` or one outside [now - window, now +
+ * skew] never defers — the stale-premiere protection the startup deadline
+ * exists for is preserved exactly.
+ */
+function isFreshAdmission(
+  admittedAt: string,
+  nowMs: number,
+  windowMs: number,
+): boolean {
+  const admittedAtMs = Date.parse(admittedAt);
+  if (!Number.isFinite(admittedAtMs)) return false;
+  const ageMs = nowMs - admittedAtMs;
+  return ageMs <= windowMs && -ageMs <= MAX_FUTURE_ADMISSION_SKEW_MS;
 }
 
 function exactPublicOrigin(value: string): string {

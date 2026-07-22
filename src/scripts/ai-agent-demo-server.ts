@@ -240,9 +240,13 @@ const replayPremiereProduction = await startReplayPremiereProduction({
   // Leave bounded launch headroom for the remaining initialization and bind.
   maxStartupMs: 8_000,
   onDiagnostic: (diagnostic) => {
-    console.error(
-      `Replay Premiere recovery rejected ${diagnostic.target}: ${diagnostic.operatorCode}`,
-    );
+    // Deferred fresh-admission lane events are progress, not rejections; keep
+    // the historical "recovery rejected" wording for real rejections so
+    // existing operator greps stay valid.
+    const line = diagnostic.operatorCode.startsWith("deferred_assembly")
+      ? `Replay Premiere deferred recovery ${diagnostic.target}: ${diagnostic.operatorCode}`
+      : `Replay Premiere recovery rejected ${diagnostic.target}: ${diagnostic.operatorCode}`;
+    console.error(line);
   },
 });
 // Premiere social-clip cache service. Clips are cache, never event-store

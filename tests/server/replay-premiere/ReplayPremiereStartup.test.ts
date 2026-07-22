@@ -695,6 +695,9 @@ describe("ReplayPremiere production startup", () => {
       privateStateRoot: path.join(root, "private"),
       servedRoots: [path.join(root, "served")],
       maxStartupMs: 100,
+      // This test pins the BOOT loop's deadline fencing under fake timers;
+      // the deferred fresh-admission lane has its own dedicated tests.
+      deferredFreshAssemblyBudgetMs: 0,
       beforeTargetRecovery: async ({ record }) => {
         timeoutAttempts.push(record.premiereId);
         markBlockedActiveEntered?.();
@@ -931,6 +934,8 @@ describe("ReplayPremiere production startup", () => {
       privateStateRoot: path.join(root, "private"),
       servedRoots: [path.join(root, "served")],
       maxStartupMs: 100,
+      // Boot-deadline abort semantics only; the deferred lane is tested apart.
+      deferredFreshAssemblyBudgetMs: 0,
       beforeTargetRecovery: async () => barrier,
     });
 
@@ -1010,6 +1015,8 @@ describe("ReplayPremiere production startup", () => {
       privateStateRoot: path.join(root, "private"),
       servedRoots: [path.join(root, "served")],
       maxStartupMs: 100,
+      // Journal-commit wait semantics only; the deferred lane is tested apart.
+      deferredFreshAssemblyBudgetMs: 0,
     }).finally(() => {
       settled = true;
     });
@@ -1464,6 +1471,176 @@ describe("ReplayPremiere production startup", () => {
     expect(
       archivedContext.runtimeRegistry.get(PREMIERE_ID)?.readLifecycleState(),
     ).toBe("archived");
+  });
+
+  // -------------------------------------------------------------------------
+  // Deferred fresh-admission assembly (2026-07-22 activation zombie, rounds
+  // 644/646): a freshly admitted premiere that misses the shared boot budget
+  // gets exactly ONE bounded background assembly after startup returns; stale
+  // admissions (the AAAN class) never qualify, so the startup deadline's
+  // stale-premiere protection is untouched.
+  // -------------------------------------------------------------------------
+
+  test("fresh admission that misses the boot budget registers via the deferred lane", async () => {
+    await writeAdmission(root);
+    const context = startupContext();
+    const lines: string[] = [];
+    const started = await startReplayPremiereProduction({
+      ...context,
+      privateStateRoot: path.join(root, "private"),
+      servedRoots: [path.join(root, "served")],
+      // Guarantee the boot loop cannot fit the assembly: the catalog/event
+      // store I/O alone consumes the 1ms budget before the first attempt.
+      maxStartupMs: 1,
+      deferredFreshAssemblyBudgetMs: 10_000,
+      onDiagnostic: (diagnostic) => {
+        lines.push(`${diagnostic.target}:${diagnostic.operatorCode}`);
+      },
+    });
+    services.push(started.service);
+
+    // Startup itself registered nothing and reported the miss — exactly the
+    // pre-fix behavior — plus the deferral marker.
+    expect(started.registeredPremiereIds).toEqual([]);
+    expect(started.diagnostics.map((entry) => entry.operatorCode)).toEqual([
+      "startup_deadline_exceeded",
+      "deferred_assembly_scheduled",
+    ]);
+    expect(context.httpRegistry.get(PREMIERE_ID)).toBeNull();
+
+    // The deferred lane registers the premiere shortly after return.
+    await vi.waitFor(
+      () => {
+        expect(context.httpRegistry.get(PREMIERE_ID)).not.toBeNull();
+      },
+      { timeout: 8_000, interval: 25 },
+    );
+    expect(context.runtimeRegistry.get(PREMIERE_ID)).not.toBeNull();
+    await vi.waitFor(
+      () => {
+        expect(lines).toContain(
+          `${PREMIERE_ID}.admission.json:deferred_assembly_registered`,
+        );
+      },
+      { timeout: 2_000, interval: 25 },
+    );
+
+    // Close tears the deferred-registered target down like any other.
+    await started.service.close();
+    services.splice(services.indexOf(started.service), 1);
+    expect(context.httpRegistry.get(PREMIERE_ID)).toBeNull();
+    expect(context.runtimeRegistry.get(PREMIERE_ID)).toBeNull();
+  });
+
+  test("stale admission is never deferred — the AAAN class stays rejected", async () => {
+    await writeAdmission(root);
+    // A day after admission: far outside the fresh window, exactly like
+    // prem_live20260721aaan at every later boot.
+    const context = startupContext(
+      () => new Date(NOW.getTime() + 24 * 60 * 60_000),
+    );
+    const started = await startReplayPremiereProduction({
+      ...context,
+      privateStateRoot: path.join(root, "private"),
+      servedRoots: [path.join(root, "served")],
+      maxStartupMs: 1,
+      deferredFreshAssemblyBudgetMs: 10_000,
+    });
+    services.push(started.service);
+
+    expect(started.registeredPremiereIds).toEqual([]);
+    expect(started.diagnostics.map((entry) => entry.operatorCode)).toEqual([
+      "startup_deadline_exceeded",
+    ]);
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    expect(context.httpRegistry.get(PREMIERE_ID)).toBeNull();
+    expect(context.runtimeRegistry.get(PREMIERE_ID)).toBeNull();
+  });
+
+  test("deferred assembly is a single bounded attempt; a failure reports and never registers", async () => {
+    await writeAdmission(root);
+    const context = startupContext();
+    const lines: string[] = [];
+    const recoveryCalls = vi.fn(async () => {
+      throw new ReplayPremiereError(
+        "test_deferred_barrier_refused",
+        "PREMIERE_INTEGRITY_FAILURE",
+        409,
+        "test barrier",
+      );
+    });
+    const started = await startReplayPremiereProduction({
+      ...context,
+      privateStateRoot: path.join(root, "private"),
+      servedRoots: [path.join(root, "served")],
+      maxStartupMs: 1,
+      deferredFreshAssemblyBudgetMs: 10_000,
+      beforeTargetRecovery: recoveryCalls,
+      onDiagnostic: (diagnostic) => {
+        lines.push(diagnostic.operatorCode);
+      },
+    });
+    services.push(started.service);
+
+    await vi.waitFor(
+      () => {
+        expect(lines).toContain(
+          "deferred_assembly_rejected:test_deferred_barrier_refused",
+        );
+      },
+      { timeout: 5_000, interval: 25 },
+    );
+    // Exactly one deferred attempt — the boot loop never reached the barrier
+    // (its budget was exhausted pre-attempt) and there is no retry loop.
+    expect(recoveryCalls).toHaveBeenCalledTimes(1);
+    expect(context.httpRegistry.get(PREMIERE_ID)).toBeNull();
+    expect(context.runtimeRegistry.get(PREMIERE_ID)).toBeNull();
+  });
+
+  test("deferredFreshAssemblyBudgetMs: 0 disables the deferred lane entirely", async () => {
+    await writeAdmission(root);
+    const context = startupContext();
+    const started = await startReplayPremiereProduction({
+      ...context,
+      privateStateRoot: path.join(root, "private"),
+      servedRoots: [path.join(root, "served")],
+      maxStartupMs: 1,
+      deferredFreshAssemblyBudgetMs: 0,
+    });
+    services.push(started.service);
+
+    expect(started.diagnostics.map((entry) => entry.operatorCode)).toEqual([
+      "startup_deadline_exceeded",
+    ]);
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    expect(context.httpRegistry.get(PREMIERE_ID)).toBeNull();
+  });
+
+  test("a deferred registration arriving during close is refused — no leak into a torn-down service", async () => {
+    await writeAdmission(root);
+    const context = startupContext();
+    const lines: string[] = [];
+    const started = await startReplayPremiereProduction({
+      ...context,
+      privateStateRoot: path.join(root, "private"),
+      servedRoots: [path.join(root, "served")],
+      maxStartupMs: 1,
+      deferredFreshAssemblyBudgetMs: 10_000,
+      // Hold the deferred assembly long enough that close() begins first;
+      // close() then awaits the pending assembly, whose registration must be
+      // refused by the closing service.
+      beforeTargetRecovery: async () => {
+        await new Promise((resolve) => setTimeout(resolve, 400));
+      },
+      onDiagnostic: (diagnostic) => {
+        lines.push(diagnostic.operatorCode);
+      },
+    });
+
+    await started.service.close();
+    expect(lines).toContain("deferred_assembly_abandoned_closing");
+    expect(context.httpRegistry.get(PREMIERE_ID)).toBeNull();
+    expect(context.runtimeRegistry.get(PREMIERE_ID)).toBeNull();
   });
 });
 
