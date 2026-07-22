@@ -2,6 +2,7 @@ import { promises as fs } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, test } from "vitest";
+import { getServerConfig } from "../../../src/core/configuration/ConfigLoader";
 import {
   buildPremiereChunks,
   isPremiereChunkReleaseDue,
@@ -10,7 +11,6 @@ import {
   verifyPremiereChunkChain,
   verifyPremiereChunkDraftChain,
 } from "../../../src/server/replay-premiere/ReplayPremiereChunks";
-import { getServerConfig } from "../../../src/core/configuration/ConfigLoader";
 import {
   PREMIERE_REAL_TURN_INTERVAL_MS,
   REPLAY_PREMIERE_MAX_PRESENTATION_SPAN_MS,
@@ -113,8 +113,7 @@ describe("ReplayPremiere import and chunks", () => {
     }
     // Computed-duration sanity: a 17,000-turn episode at rate 1 plays for
     // 17,000 x 100ms = 1,700s ~= 28.3 minutes of presentation time.
-    const seventeenThousandTurnsMs =
-      17_000 * PREMIERE_REAL_TURN_INTERVAL_MS;
+    const seventeenThousandTurnsMs = 17_000 * PREMIERE_REAL_TURN_INTERVAL_MS;
     expect(seventeenThousandTurnsMs / 60_000).toBeCloseTo(28.33, 1);
   });
 

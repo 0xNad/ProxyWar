@@ -344,9 +344,7 @@ describe("ReplayPremiereOverlay", () => {
       );
       handle.hydrate({ ...model, ambient: true });
       expect(handle.element.dataset.ambient, state).toBe("true");
-      expect(document.body.classList).toContain(
-        "replay-premiere-ambient-mode",
-      );
+      expect(document.body.classList).toContain("replay-premiere-ambient-mode");
       // And back out again.
       handle.element
         .querySelector<HTMLButtonElement>("[data-focus-key=ambient]")
@@ -428,9 +426,9 @@ describe("ReplayPremiereOverlay", () => {
       ),
     ).toBe(ambientBefore);
     // The volatile regions still updated in place.
-    expect(
-      handle.element.querySelector(".rp-position")?.textContent,
-    ).toContain("turn=160");
+    expect(handle.element.querySelector(".rp-position")?.textContent).toContain(
+      "turn=160",
+    );
     expect(handle.element.textContent).toContain("headline-60");
 
     // A click on the long-lived button reports the LATEST moment, not the
@@ -605,10 +603,9 @@ describe("ReplayPremiereOverlay", () => {
   });
 
   it("explains a not-yet-connected reaction row instead of leaving it silently dead", () => {
-    const handle = mount(
-      makeModel({ state: "playing", canMark: false }),
-      { onMarker: vi.fn() },
-    );
+    const handle = mount(makeModel({ state: "playing", canMark: false }), {
+      onMarker: vi.fn(),
+    });
     const buttons = [
       ...handle.element.querySelectorAll<HTMLButtonElement>(
         ".rp-marker-button",

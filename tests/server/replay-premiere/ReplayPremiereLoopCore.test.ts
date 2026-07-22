@@ -168,7 +168,8 @@ describe("playback rate + checkpoint heuristics", () => {
     expect(minutesAtRate(36_000)).toBeCloseTo(60, 5);
     expect(minutesAtRate(60_000)).toBeCloseTo(50, 5);
     expect(
-      PREMIERE_LOOP_SCHEDULE_LEAD_MS + 60 * 60_000 < PREMIERE_LOOP_HOLD_WINDOW_MS,
+      PREMIERE_LOOP_SCHEDULE_LEAD_MS + 60 * 60_000 <
+        PREMIERE_LOOP_HOLD_WINDOW_MS,
     ).toBe(true);
   });
 

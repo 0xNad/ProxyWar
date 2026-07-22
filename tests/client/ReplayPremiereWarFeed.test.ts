@@ -1,13 +1,13 @@
 import { describe, expect, it } from "vitest";
 import {
-  GameUpdateType,
-  type GameUpdateViewData,
-} from "../../src/core/game/GameUpdates";
-import {
   MAX_WAR_EVENTS_PER_BATCH,
   PremiereWarFeedTracker,
   type PremiereWarNameResolver,
 } from "../../src/client/ReplayPremiereWarFeed";
+import {
+  GameUpdateType,
+  type GameUpdateViewData,
+} from "../../src/core/game/GameUpdates";
 
 const NAMES_BY_SMALL_ID = new Map<number, string>([
   [1, "Iron Atlas"],

@@ -147,9 +147,7 @@ export class PremiereWarFeedTracker {
         kind: "chat",
         actor: senderName,
         target:
-          chat.target === undefined
-            ? null
-            : resolver.byPlayerId(chat.target),
+          chat.target === undefined ? null : resolver.byPlayerId(chat.target),
         detail: `${chat.category}.${chat.key}`,
         turn: turnNumber,
       });
@@ -180,7 +178,13 @@ export class PremiereWarFeedTracker {
       this.rememberNuke(unit.id);
       const actor = resolver.bySmallId(unit.ownerID);
       if (actor === null) continue;
-      push({ kind: "nuke", actor, target: null, detail: null, turn: turnNumber });
+      push({
+        kind: "nuke",
+        actor,
+        target: null,
+        detail: null,
+        turn: turnNumber,
+      });
     }
     return events;
   }

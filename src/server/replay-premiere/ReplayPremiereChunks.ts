@@ -426,7 +426,9 @@ function validateBuildOptions(options: BuildPremiereChunksOptions): void {
   if (options.maxTotalBytes < options.maxChunkBytes) {
     throw invalidRequest("total_ceiling_below_chunk_ceiling");
   }
-  if (options.maxPresentationSpanMs > REPLAY_PREMIERE_MAX_PRESENTATION_SPAN_MS) {
+  if (
+    options.maxPresentationSpanMs > REPLAY_PREMIERE_MAX_PRESENTATION_SPAN_MS
+  ) {
     throw invalidRequest("presentation_span_exceeds_hard_maximum");
   }
   if (!Array.isArray(options.records) || options.records.length < 4) {

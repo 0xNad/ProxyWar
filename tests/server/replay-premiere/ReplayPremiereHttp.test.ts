@@ -10,6 +10,7 @@ import {
   type ReplayPremiereClientAddressResolver,
 } from "../../../src/server/replay-premiere/ReplayPremiereClientAddress";
 import type { PremiereState } from "../../../src/server/replay-premiere/ReplayPremiereContracts";
+import { REPLAY_PREMIERE_CHECKPOINT_PAUSE_MS } from "../../../src/server/replay-premiere/ReplayPremiereContracts";
 import { ReplayPremiereError } from "../../../src/server/replay-premiere/ReplayPremiereErrors";
 import type {
   ReplayPremiereEventRecovery,
@@ -36,7 +37,6 @@ import {
   ReplayPremiereAtomicPublication,
   type PremiereRevealPersistence,
 } from "../../../src/server/replay-premiere/ReplayPremiereRevealCommit";
-import { REPLAY_PREMIERE_CHECKPOINT_PAUSE_MS } from "../../../src/server/replay-premiere/ReplayPremiereContracts";
 import {
   ReplayPremiereRuntimeCoordinator,
   type ReplayPremiereRuntimeClock,

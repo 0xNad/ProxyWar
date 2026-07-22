@@ -11,6 +11,7 @@ import {
   type ReplayPremiereCheckpointProjector,
 } from "../../../src/server/replay-premiere/ReplayPremiereCheckpointProjection";
 import { buildPremiereChunks } from "../../../src/server/replay-premiere/ReplayPremiereChunks";
+import { REPLAY_PREMIERE_CHECKPOINT_PAUSE_MS } from "../../../src/server/replay-premiere/ReplayPremiereContracts";
 import { ReplayPremiereError } from "../../../src/server/replay-premiere/ReplayPremiereErrors";
 import { ReplayPremiereEventStore } from "../../../src/server/replay-premiere/ReplayPremiereEventStore";
 import { ReplayPremiereGuestSecurity } from "../../../src/server/replay-premiere/ReplayPremiereGuestSecurity";
@@ -30,7 +31,6 @@ import {
   importControlledPremiereSourceForPublication,
   VerifiedPremiereEligibilityGate,
 } from "../../../src/server/replay-premiere/ReplayPremierePublication";
-import { REPLAY_PREMIERE_CHECKPOINT_PAUSE_MS } from "../../../src/server/replay-premiere/ReplayPremiereContracts";
 import { ReplayPremiereRuntimeRegistry } from "../../../src/server/replay-premiere/ReplayPremiereRuntimeCoordinator";
 import {
   DEFAULT_DEFERRED_FRESH_ASSEMBLY_BUDGET_MS,
@@ -450,7 +450,9 @@ describe("ReplayPremiere production startup", () => {
       } else if (scenario === "checkpoint-resumed") {
         vi.setSystemTime(NOW.getTime() + 100);
         await runtime.synchronize();
-        vi.setSystemTime(NOW.getTime() + REPLAY_PREMIERE_CHECKPOINT_PAUSE_MS + 100);
+        vi.setSystemTime(
+          NOW.getTime() + REPLAY_PREMIERE_CHECKPOINT_PAUSE_MS + 100,
+        );
         await runtime.synchronize();
       } else if (scenario === "outage-started") {
         await runtime.beginOutage();
@@ -1901,9 +1903,13 @@ async function driveRuntimeToReveal(
   await runtime.synchronize();
   vi.setSystemTime(NOW.getTime() + REPLAY_PREMIERE_CHECKPOINT_PAUSE_MS + 200);
   await runtime.synchronize();
-  vi.setSystemTime(NOW.getTime() + 2 * REPLAY_PREMIERE_CHECKPOINT_PAUSE_MS + 200);
+  vi.setSystemTime(
+    NOW.getTime() + 2 * REPLAY_PREMIERE_CHECKPOINT_PAUSE_MS + 200,
+  );
   await runtime.synchronize();
-  vi.setSystemTime(NOW.getTime() + 2 * REPLAY_PREMIERE_CHECKPOINT_PAUSE_MS + 250);
+  vi.setSystemTime(
+    NOW.getTime() + 2 * REPLAY_PREMIERE_CHECKPOINT_PAUSE_MS + 250,
+  );
   await runtime.synchronize();
 }
 
