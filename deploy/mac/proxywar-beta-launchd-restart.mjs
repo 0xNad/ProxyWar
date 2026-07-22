@@ -17,8 +17,12 @@ const DEFAULT_PLIST = path.join(os.homedir(), "Library", "LaunchAgents", `${LABE
 const DEFAULT_WRITER_LOCK = path.join(os.homedir(), "Library", "Application Support", "ProxyWar", "storage", "replay-premiere", "event-store-v1", "write-owner.json");
 // esbuild is tsx's persistent transform service: on a cold-cache start after a
 // source change it appears as a direct child of the server and stays alive.
+// The clip render pipeline (auto-clip at reveal + league-run clips) spawns
+// headless Chrome ("Google Chrome" / helpers, ucomm-truncated to 16 chars)
+// and ffmpeg inside the server's process group; renders are bounded (6-min
+// SIGKILL) and safe to terminate with the group on restart.
 // prettier-ignore
-const ALLOWED_EXECUTABLES = new Set(["bash", "caffeinate", "claude", "esbuild", "node", "npm", "sh", "zsh"]);
+const ALLOWED_EXECUTABLES = new Set(["bash", "caffeinate", "claude", "esbuild", "ffmpeg", "node", "npm", "sh", "zsh", "Google Chrome", "Google Chrome He", "Google Chrome Helper"]);
 
 export function validateDirectServer(managed) {
   const command = managed.command?.trim() ?? "";
