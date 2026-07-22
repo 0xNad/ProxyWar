@@ -270,15 +270,17 @@ const replayPremiereProduction = await startReplayPremiereProduction({
   // Leave bounded launch headroom for the remaining initialization and bind.
   maxStartupMs: 8_000,
   onDiagnostic: (diagnostic) => {
-    // Deferred fresh-admission lane events are progress, not rejections; keep
-    // the historical "recovery rejected" wording for real rejections so
-    // existing operator greps stay valid. Archived-clip promotion telemetry is
-    // likewise progress, not a rejection.
+    // Deferred fresh-admission lane, orphan-reclamation, and archived-clip
+    // promotion events are progress, not rejections; keep the historical
+    // "recovery rejected" wording for real rejections so existing operator
+    // greps stay valid.
     const line = diagnostic.operatorCode.startsWith("deferred_assembly")
       ? `Replay Premiere deferred recovery ${diagnostic.target}: ${diagnostic.operatorCode}`
-      : diagnostic.operatorCode.startsWith("archived_clip")
-        ? `Replay Premiere archived clips: ${diagnostic.operatorCode}`
-        : `Replay Premiere recovery rejected ${diagnostic.target}: ${diagnostic.operatorCode}`;
+      : diagnostic.operatorCode.startsWith("orphan_")
+        ? `Replay Premiere orphan reclamation ${diagnostic.target}: ${diagnostic.operatorCode}`
+        : diagnostic.operatorCode.startsWith("archived_clip")
+          ? `Replay Premiere archived clips: ${diagnostic.operatorCode}`
+          : `Replay Premiere recovery rejected ${diagnostic.target}: ${diagnostic.operatorCode}`;
     console.error(line);
   },
 }).catch((error: unknown) => {

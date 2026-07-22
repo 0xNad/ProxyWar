@@ -4,7 +4,10 @@ import {
   type PremiereCanonicalAuthoritativeResult,
   type PremiereWinnerTuple,
 } from "./ReplayPremiereAuthoritativeResult";
-import type { PremiereSourceKind } from "./ReplayPremiereContracts";
+import type {
+  PremiereEligibility,
+  PremiereSourceKind,
+} from "./ReplayPremiereContracts";
 import { ReplayPremiereError } from "./ReplayPremiereErrors";
 import type { ReplayPremiereHttpTarget } from "./ReplayPremiereHttp";
 import {
@@ -213,6 +216,82 @@ export function buildPremiereResultSummaryFromTarget(options: {
 /** Accepts a non-empty string label, otherwise omits the optional field. */
 function optionalPublicLabel(value: unknown): string | undefined {
   return typeof value === "string" && value.length > 0 ? value : undefined;
+}
+
+/**
+ * Builds the durable result summary for an ORPHANED terminal premiere — one
+ * whose terminal state is proven by durable evidence (event store + admission
+ * record) but which has no live registered runtime to read from (2026-07-22:
+ * a premiere that reveals and then spans a beta restart inside its
+ * reclamation grace is never re-registered, so the live-target reclamation
+ * path can never reach it).
+ *
+ * Outcome derivation is identical to the live path: the admission record's
+ * hash-covered authoritative result bytes are verified against its
+ * eligibility record — the exact bytes the reveal committed. Interaction
+ * aggregates (predictions/markers) require a live runtime's recovered
+ * interaction state and are deliberately EMPTY here: they are cosmetic
+ * engagement tallies, and reconstructing them without a runtime would drag
+ * the whole interaction-recovery machinery into the reclamation path.
+ *
+ * Spoiler safety is unchanged: an outcome is derived only for
+ * revealed/archived terminal states (with a required reveal timestamp);
+ * failed/cancelled orphans yield the same neutral null-outcome summary the
+ * live path produces, and `validateSummaryPreimage` enforces both.
+ */
+export function buildPremiereResultSummaryFromDurableEvidence(options: {
+  premiereId: string;
+  sourceRunId: string;
+  sourceKind: PremiereSourceKind;
+  publicationCommitmentHash: string;
+  terminalState: PremiereResultTerminalState;
+  /** Reveal instant from the reveal event; null only for failed/cancelled. */
+  revealedAt: string | null;
+  reclaimedAt: string;
+  eligibilityRecord: PremiereEligibility;
+  /** The admission's base64 authoritative-result payload. */
+  authoritativeResultBase64: string;
+  mapLabel?: unknown;
+  formatLabel?: unknown;
+}): PremiereResultSummaryV1 {
+  assertCanonicalTimestamp(options.reclaimedAt, "reclaimedAt");
+  const revealed =
+    options.terminalState === "revealed" ||
+    options.terminalState === "archived";
+  let outcome: PremiereResultSummaryOutcome | null = null;
+  let revealedAt: string | null = null;
+  if (revealed) {
+    if (
+      options.revealedAt === null ||
+      canonicalTimestampOrNull(options.revealedAt) === null
+    ) {
+      throw summaryIntegrity("summary_orphan_reveal_time_unavailable");
+    }
+    const resultBytes = Buffer.from(
+      options.authoritativeResultBase64,
+      "base64",
+    );
+    const canonical = verifyPremiereAuthoritativeResultBytes({
+      eligibilityRecord: options.eligibilityRecord,
+      resultBytes,
+    });
+    outcome = summarizeOutcome(canonical);
+    revealedAt = options.revealedAt;
+  }
+  return buildPremiereResultSummary({
+    premiereId: options.premiereId,
+    sourceRunId: options.sourceRunId,
+    sourceKind: options.sourceKind,
+    publicationCommitmentHash: options.publicationCommitmentHash,
+    terminalState: options.terminalState,
+    revealedAt,
+    reclaimedAt: options.reclaimedAt,
+    outcome,
+    predictions: [],
+    markers: [],
+    mapLabel: optionalPublicLabel(options.mapLabel),
+    formatLabel: optionalPublicLabel(options.formatLabel),
+  });
 }
 
 /** Pure builder: hashes and freezes an already-derived aggregate summary. */

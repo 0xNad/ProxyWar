@@ -3,6 +3,7 @@ import { promises as fs } from "node:fs";
 import path from "node:path";
 import type { PremiereArchivePointerV1 } from "./ReplayPremiereArchiveIndex";
 import { ReplayPremiereArchiveStore } from "./ReplayPremiereArchiveIndex";
+import type { ReplayPremiereAdmissionRecordV1 } from "./ReplayPremiereCatalog";
 import {
   archivedPremiereClipFileName,
   archivedPremiereClipManifestFileName,
@@ -14,6 +15,7 @@ import { ReplayPremiereError } from "./ReplayPremiereErrors";
 import type { ReplayPremiereHttpTarget } from "./ReplayPremiereHttp";
 import { replayPremiereInteractionAggregateId } from "./ReplayPremiereInteractionRecovery";
 import {
+  buildPremiereResultSummaryFromDurableEvidence,
   buildPremiereResultSummaryFromTarget,
   type PremiereResultTerminalState,
 } from "./ReplayPremiereResultSummary";
@@ -66,6 +68,26 @@ export interface ReplayPremiereReclamationResult {
     | "revealed_time_unavailable";
   pointer: PremiereArchivePointerV1 | null;
   deletedBulk: boolean;
+}
+
+/**
+ * A terminal premiere with durable evidence but NO live registered runtime
+ * (2026-07-22 orphan class: a premiere that reveals and then spans a beta
+ * restart inside its reclamation grace is never re-registered — fresh rounds
+ * own the critical startup slot — so the live-target sweep can never reach
+ * it and its page 404s forever). The candidate carries everything the
+ * durable-evidence reclamation path needs; the terminal state and reveal
+ * instant come from the event store's recovered evidence, the rest from the
+ * hash-covered admission record.
+ */
+export interface ReplayPremiereOrphanCandidate {
+  premiereId: string;
+  record: ReplayPremiereAdmissionRecordV1;
+  terminalState: PremiereResultTerminalState;
+  /** From the reveal event; null only for failed/cancelled orphans. */
+  revealedAt: string | null;
+  /** Sweep-side bounded retry counter (mutated by the sweep, not here). */
+  attempts: number;
 }
 
 /**
@@ -253,6 +275,118 @@ export class ReplayPremiereTerminalReclaimer {
     // is the last renderable copy). Best-effort: promotion failure is logged
     // and never blocks reclamation; the idempotent already-reclaimed retry
     // re-attempts it while the cache copy still exists.
+    await this.promoteDurableClip(premiereId, pointer).catch(
+      (error: unknown) => {
+        this.logger(
+          `archived_clip_promotion_failed ${premiereId}: ${
+            error instanceof Error ? error.message : String(error)
+          }`,
+        );
+      },
+    );
+    await this.deleteBulk(premiereId);
+    return {
+      premiereId,
+      reclaimed: true,
+      reason: already === null ? "reclaimed" : "already_reclaimed",
+      pointer,
+      deletedBulk: true,
+    };
+  }
+
+  /**
+   * Reclaims one ORPHANED terminal premiere from durable evidence — the same
+   * summary→pointer→clip→bulk sequence as {@link reclaimIfEligible}, with the
+   * summary built from the admission record + event-store reveal evidence
+   * instead of a live runtime. Idempotent exactly like the live path (an
+   * existing pointer short-circuits to clip promotion + bulk deletion).
+   *
+   * Spoiler safety: an outcome is only derived for revealed/archived states
+   * with a proven reveal instant; failed/cancelled orphans get the neutral
+   * null-outcome summary; a revealed/archived candidate WITHOUT a reveal
+   * instant is refused (`revealed_time_unavailable`) — a stale non-revealed
+   * admission can never become publishable through this path.
+   */
+  async reclaimOrphanIfEligible(
+    candidate: ReplayPremiereOrphanCandidate,
+  ): Promise<ReplayPremiereReclamationResult> {
+    const premiereId = candidate.premiereId;
+    if (
+      premiereId !== candidate.record.premiereId ||
+      !PREMIERE_ID_PATTERN.test(premiereId)
+    ) {
+      throw reclamationRequest("reclamation_invalid_premiere_id");
+    }
+    if (this.excluded.has(premiereId)) {
+      // Hard exclusion: never write a pointer, delete bulk, or de-register.
+      return {
+        premiereId,
+        reclaimed: false,
+        reason: "excluded",
+        pointer: this.store.lookup(premiereId),
+        deletedBulk: false,
+      };
+    }
+    const already = this.store.lookup(premiereId);
+    if (already === null) {
+      if (
+        candidate.terminalState === "revealed" ||
+        candidate.terminalState === "archived"
+      ) {
+        if (candidate.revealedAt === null) {
+          return {
+            premiereId,
+            reclaimed: false,
+            reason: "revealed_time_unavailable",
+            pointer: null,
+            deletedBulk: false,
+          };
+        }
+        const revealedAtMs = Date.parse(candidate.revealedAt);
+        if (!Number.isFinite(revealedAtMs)) {
+          return {
+            premiereId,
+            reclaimed: false,
+            reason: "revealed_time_unavailable",
+            pointer: null,
+            deletedBulk: false,
+          };
+        }
+        if (this.now().getTime() - revealedAtMs < this.graceMs) {
+          return {
+            premiereId,
+            reclaimed: false,
+            reason: "within_grace",
+            pointer: null,
+            deletedBulk: false,
+          };
+        }
+      }
+      // failed/cancelled orphans: no reveal ever occurred, so there are no
+      // live viewers to protect — immediately eligible, like the live path.
+    }
+    let pointer = already;
+    if (pointer === null) {
+      const record = candidate.record;
+      const summary = buildPremiereResultSummaryFromDurableEvidence({
+        premiereId,
+        sourceRunId: record.eligibilityRecord.sourceRunId,
+        sourceKind:
+          record.eligibilityRecord.sourceKind ?? "controlled_exhibition",
+        publicationCommitmentHash: record.expectedPublicationCommitmentHash,
+        terminalState: candidate.terminalState,
+        revealedAt: candidate.revealedAt,
+        reclaimedAt: this.now().toISOString(),
+        eligibilityRecord: record.eligibilityRecord,
+        authoritativeResultBase64: record.authoritativeResult.bytes,
+        mapLabel: record.publicDefinition.map.label,
+        formatLabel: record.publicDefinition.matchFormat.label,
+      });
+      pointer = await this.store.recordReclaimed(
+        summary,
+        record.stagedSource.sourceReplaySha256,
+      );
+    }
     await this.promoteDurableClip(premiereId, pointer).catch(
       (error: unknown) => {
         this.logger(
