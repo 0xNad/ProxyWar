@@ -141,11 +141,14 @@ describe("premiere id derivation and opacity (requirement #3)", () => {
 
 describe("playback rate + checkpoint heuristics", () => {
   test("playback rate bands (admit accepts only 1/2/4)", () => {
+    // 2026-07-22 retune: premieres are the live product surface — typical
+    // rounds play at 1x (~8-18 min on air), only >32k-turn episodes at 2x.
     expect(playbackRateForTurnCount(9_999)).toBe(1);
-    expect(playbackRateForTurnCount(10_000)).toBe(2);
-    expect(playbackRateForTurnCount(30_000)).toBe(2);
-    expect(playbackRateForTurnCount(30_001)).toBe(4);
-    expect(playbackRateForTurnCount(50_000)).toBe(4);
+    expect(playbackRateForTurnCount(17_000)).toBe(1);
+    expect(playbackRateForTurnCount(32_000)).toBe(1);
+    expect(playbackRateForTurnCount(32_001)).toBe(2);
+    expect(playbackRateForTurnCount(50_400)).toBe(2);
+    expect(playbackRateForTurnCount(60_000)).toBe(2);
   });
 
   test("checkpoints at 0.35x/0.65x rounded", () => {

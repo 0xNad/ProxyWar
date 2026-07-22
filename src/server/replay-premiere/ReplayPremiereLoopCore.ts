@@ -157,14 +157,20 @@ export function deriveCheckpointId(
 /**
  * Playback-rate heuristic keyed on turn count. Admission only accepts 1, 2, or
  * 4; longer games play faster so the reveal window stays bounded.
+ *
+ * 2026-07-22 retune (operator): premieres ARE the live product surface, so
+ * maximize the on-air window instead of minimizing it. Measured throughput at
+ * 2× is ~60 released turns/s (round 651: 17,000 turns live 12:22→12:28; round
+ * 637: 22,600 turns ≈ 6.5 min), i.e. ~30 turns/s at 1×. Playing typical
+ * rounds (≤32k turns) at 1× keeps a premiere on /league for ~8-18 minutes of
+ * every ~30-minute round instead of ~5, while the worst admitted case
+ * (60k-turn cap at 2× ≈ 17 min + ~5 min lead) still reveals well inside the
+ * 35-minute hold valve and clears before the next round needs the slot.
  */
 export function playbackRateForTurnCount(
   turnCount: number,
 ): PremierePlaybackRate {
-  if (turnCount > 30_000) {
-    return 4;
-  }
-  if (turnCount >= 10_000) {
+  if (turnCount > 32_000) {
     return 2;
   }
   return 1;
