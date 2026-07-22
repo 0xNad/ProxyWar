@@ -162,9 +162,10 @@ describe("startup budget bound", () => {
     expect(
       isTurnCountWithinStartupBudget(PREMIERE_LOOP_TURN_STARTUP_BUDGET + 1),
     ).toBe(false);
-    // 2026-07-22 production calibration boundary: 32,300 turns exceeded the
-    // server's 8 s registration budget (round 646 zombie); must stay skipped.
-    expect(isTurnCountWithinStartupBudget(32_300)).toBe(false);
+    // 2026-07-22: with the deferred 90 s assembly lane, the real league's
+    // large World episodes (observed up to 50,400 turns) must be admitted —
+    // the 8 s-boot-era 24k calibration no longer binds.
+    expect(isTurnCountWithinStartupBudget(50_400)).toBe(true);
     expect(isTurnCountWithinStartupBudget(0)).toBe(false);
     expect(isTurnCountWithinStartupBudget(Number.NaN)).toBe(false);
   });
