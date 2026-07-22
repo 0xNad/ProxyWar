@@ -280,10 +280,23 @@ export class ReplayPremiereAdmissionCatalog {
         accepted.push(record);
       }
     }
-    return immutable(
-      { entries: accepted, failures },
-      "replay premiere catalog read result",
-    );
+    // 2026-07-22 PRODUCTION OUTAGE (round-649 boot crash): this return used to
+    // be `immutable({entries, failures})`, which canonicalizes EVERY accepted
+    // admission again under ONE shared 100k-node budget. Each record is
+    // individually bounded (per-entry canonicalize + clone + freeze inside
+    // parseAdmissionRecord, within the per-entry try/catch above), but the
+    // catalog accumulates admissions (~7.6k nodes each), so the 16th admission
+    // pushed the AGGREGATE over the ceiling — an uncaught
+    // json_complexity_exceeded from a fully valid catalog, before the event
+    // store's writer lock existed, crash-looping every boot. The aggregate is
+    // therefore assembled from the already-validated, already-frozen records
+    // with plain container freezing: no shared canonicalize budget exists at
+    // any catalog size (maxEntries caps the count; per-record ceilings still
+    // guard every trust boundary).
+    for (const failure of failures) Object.freeze(failure);
+    Object.freeze(accepted);
+    Object.freeze(failures);
+    return Object.freeze({ entries: accepted, failures });
   }
 
   async writeVerifiedAdmission(

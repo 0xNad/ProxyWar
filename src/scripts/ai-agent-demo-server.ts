@@ -123,6 +123,7 @@ import {
   createReplayPremiereClipDocumentRouter,
   ReplayPremiereClips,
 } from "../server/replay-premiere/ReplayPremiereClips";
+import { ReplayPremiereError } from "../server/replay-premiere/ReplayPremiereErrors";
 import { ReplayPremiereGuestSecurity } from "../server/replay-premiere/ReplayPremiereGuestSecurity";
 import {
   createReplayPremiereRouter,
@@ -219,6 +220,12 @@ const replayPremiereReclaimExclusions =
   await loadReplayPremiereReclamationExclusions({
     privateStateRoot: replayPremierePrivateStateRoot,
   });
+// Premiere recovery must never take the whole beta down: the league, demo,
+// and replay surfaces do not depend on it. 2026-07-22 round-649 outage: an
+// over-ceiling catalog AGGREGATE threw json_complexity_exceeded out of this
+// top-level await and crash-looped every boot (public 502s, ~10 min) until
+// the admission was quarantined by hand. On failure, premieres are disabled
+// for this process (premiere routes 404) and everything else serves.
 const replayPremiereProduction = await startReplayPremiereProduction({
   privateStateRoot: replayPremierePrivateStateRoot,
   servedRoots: [
@@ -248,6 +255,17 @@ const replayPremiereProduction = await startReplayPremiereProduction({
       : `Replay Premiere recovery rejected ${diagnostic.target}: ${diagnostic.operatorCode}`;
     console.error(line);
   },
+}).catch((error: unknown) => {
+  console.error(
+    `Replay Premiere production recovery failed; premieres disabled for this process: ${
+      error instanceof ReplayPremiereError
+        ? error.operatorCode
+        : error instanceof Error
+          ? error.message
+          : String(error)
+    }`,
+  );
+  return null;
 });
 // Premiere social-clip cache service. Clips are cache, never event-store
 // evidence. Gated ON unless PROXYWAR_CLIPS_ENABLED is exactly "false".
@@ -2041,7 +2059,9 @@ for (const signal of ["SIGINT", "SIGTERM"] as const) {
     renderer?.kill(signal);
     void replayPremiereClips?.close();
     server.close(() => {
-      void replayPremiereProduction.service.close().then(
+      void (
+        replayPremiereProduction?.service.close() ?? Promise.resolve()
+      ).then(
         () => process.exit(0),
         () => process.exit(1),
       );

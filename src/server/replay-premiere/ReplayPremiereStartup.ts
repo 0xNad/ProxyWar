@@ -89,7 +89,7 @@ const MAX_STARTUP_DEADLINE_MS = 10_000;
  * loop observes the registration (or its absence) before firing its single
  * re-activation restart.
  */
-const DEFAULT_DEFERRED_FRESH_ASSEMBLY_BUDGET_MS = 90_000;
+export const DEFAULT_DEFERRED_FRESH_ASSEMBLY_BUDGET_MS = 90_000;
 const MAX_DEFERRED_FRESH_ASSEMBLY_BUDGET_MS = 300_000;
 const DEFAULT_FRESH_ADMISSION_WINDOW_MS = 600_000;
 const MAX_FRESH_ADMISSION_WINDOW_MS = 3_600_000;
@@ -536,10 +536,27 @@ export async function startReplayPremiereProduction(
       }
     }
     const startupOrderingNowMs = clock.now().getTime();
-    startupPlans.sort((left, right) =>
-      compareStartupPlans(left, right, startupOrderingNowMs),
-    );
-    const criticalPlans = selectCriticalStartupPlans(startupPlans);
+    // Belt-and-suspenders (2026-07-22 round-649 outage class): ordering and
+    // selection are pure and should never throw, but no admission may crash
+    // the process — a failure here registers nothing this boot and reports,
+    // instead of rejecting the whole startup.
+    let criticalPlans: ReplayPremiereStartupPlan[];
+    try {
+      startupPlans.sort((left, right) =>
+        compareStartupPlans(left, right, startupOrderingNowMs),
+      );
+      criticalPlans = selectCriticalStartupPlans(
+        startupPlans,
+        options.reclamationExcludedPremiereIds ?? [],
+      );
+    } catch (error) {
+      report({
+        target: "startup_plan_selection",
+        premiereId: null,
+        operatorCode: operatorCode(error),
+      });
+      criticalPlans = [];
+    }
     const registered: string[] = [];
     // Plans the shared boot budget could not fit: reported (unchanged) AND
     // collected so a FRESH admission among them can get its single deferred
@@ -1346,6 +1363,7 @@ function compareStartupPlans(
 
 function selectCriticalStartupPlans(
   plans: readonly ReplayPremiereStartupPlan[],
+  reclamationExcludedPremiereIds: readonly string[],
 ): ReplayPremiereStartupPlan[] {
   const activePlans = plans.filter(
     (plan) =>
@@ -1358,9 +1376,16 @@ function selectCriticalStartupPlans(
       plan.projection.state === "scheduled" ||
       plan.projection.state === "draft",
   );
-  return nearestScheduled === undefined
-    ? plans.slice(0, 1)
-    : [nearestScheduled];
+  if (nearestScheduled !== undefined) return [nearestScheduled];
+  // Terminal-only fallback. Reclaim-EXCLUDED terminal plans are skipped: they
+  // are retained forever, their assembly re-simulates the entire game and
+  // measurably burns the whole boot budget at every quiet boot
+  // (prem_live20260721aaan: sim churn + startup_deadline_exceeded at every
+  // selection since 2026-07-21), and skipping cannot regress availability —
+  // a plan that always exceeds the budget never registered anyway.
+  const excluded = new Set(reclamationExcludedPremiereIds);
+  const fallback = plans.find((plan) => !excluded.has(plan.record.premiereId));
+  return fallback === undefined ? [] : [fallback];
 }
 
 function startupStatePriority(state: PremiereState): number {

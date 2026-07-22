@@ -25,12 +25,14 @@ import {
   sha256Hex,
   type ReplayPremiereJsonValue,
 } from "../../../src/server/replay-premiere/ReplayPremiereIntegrity";
+import { PREMIERE_LOOP_ACTIVATION_VERIFY_MS } from "../../../src/server/replay-premiere/ReplayPremiereLoopCore";
 import {
   importControlledPremiereSourceForPublication,
   VerifiedPremiereEligibilityGate,
 } from "../../../src/server/replay-premiere/ReplayPremierePublication";
 import { ReplayPremiereRuntimeRegistry } from "../../../src/server/replay-premiere/ReplayPremiereRuntimeCoordinator";
 import {
+  DEFAULT_DEFERRED_FRESH_ASSEMBLY_BUDGET_MS,
   DEFAULT_REPLAY_PREMIERE_EVENT_STORE_LIMITS,
   startReplayPremiereProduction,
   type ReplayPremiereProductionService,
@@ -93,6 +95,9 @@ describe("ReplayPremiere production startup", () => {
     const listenStart = source.indexOf("const server = app.listen(");
     expect(callStart).toBeLessThan(listenStart);
     expect(source).not.toContain("startDeferredHydration");
+    // 2026-07-22 round-649 outage: premiere recovery failure must degrade to
+    // premieres-disabled, never crash the beta's top-level await.
+    expect(source).toContain("premieres disabled for this process");
   });
 
   test("reconstructs, synchronizes, and registers a clean admission", async () => {
@@ -1614,6 +1619,187 @@ describe("ReplayPremiere production startup", () => {
     ]);
     await new Promise((resolve) => setTimeout(resolve, 300));
     expect(context.httpRegistry.get(PREMIERE_ID)).toBeNull();
+  });
+
+  // -------------------------------------------------------------------------
+  // Containment (2026-07-22 round-649 full outage): no admission — valid or
+  // poisoned — may crash the process. The outage's exact escape path was the
+  // catalog readAll AGGREGATE re-canonicalization: every accepted admission
+  // shared ONE 100k-node budget, so the 16th admission made a fully valid
+  // catalog throw json_complexity_exceeded straight through the demo server's
+  // top-level await, before the event-store writer lock existed.
+  // -------------------------------------------------------------------------
+
+  test("a catalog whose COMBINED admissions exceed the per-value node ceiling boots without crashing", async () => {
+    await writeAdmission(root);
+    const entriesRoot = path.join(root, "private", "catalog-v1", "entries");
+    const [entryName] = await fs.readdir(entriesRoot);
+    const original = JSON.parse(
+      await fs.readFile(path.join(entriesRoot, entryName), "utf8"),
+    ) as Record<string, unknown> & { recordHash: string };
+
+    const countNodes = (value: unknown): number => {
+      let count = 1;
+      if (Array.isArray(value)) {
+        for (const entry of value) count += countNodes(entry);
+      } else if (value !== null && typeof value === "object") {
+        for (const entry of Object.values(value)) count += countNodes(entry);
+      }
+      return count;
+    };
+    const perRecordNodes = countNodes(original);
+    const siblingCount = Math.ceil(100_000 / perRecordNodes) + 2;
+
+    for (let index = 0; index < siblingCount; index += 1) {
+      const premiereId = `prem_agg${String(index).padStart(13, "0")}`;
+      const { recordHash: _dropped, ...preimage } = original;
+      const sibling = {
+        ...preimage,
+        premiereId,
+        // A distinct commitment hash per sibling so the duplicate-identity
+        // check accepts every entry; parse-level validation only requires a
+        // well-formed sha256.
+        expectedPublicationCommitmentHash: sha256Hex(`aggregate-${index}`),
+      };
+      const record = {
+        ...sibling,
+        recordHash: hashReplayPremiereJson(
+          sibling as unknown as ReplayPremiereJsonValue,
+        ),
+      };
+      await fs.writeFile(
+        path.join(entriesRoot, `${premiereId}.admission.json`),
+        `${canonicalReplayPremiereJson(record as unknown as ReplayPremiereJsonValue)}\n`,
+        { encoding: "utf8", mode: 0o400 },
+      );
+    }
+
+    // The regression only bites when the aggregate is genuinely over the
+    // per-value ceiling; keep the test honest if fixtures ever shrink.
+    expect(perRecordNodes * (siblingCount + 1)).toBeGreaterThan(100_000);
+
+    const context = startupContext();
+    const started = await startReplayPremiereProduction({
+      ...context,
+      privateStateRoot: path.join(root, "private"),
+      servedRoots: [path.join(root, "served")],
+      catalogLimits: {
+        maxEntries: siblingCount + 8,
+        maxEntryBytes: 8 * 1024 * 1024,
+        maxTotalEntryBytes: 256 * 1024 * 1024,
+        maxSourceBytes: 256 * 1024 * 1024,
+        maxAuthoritativeResultBytes: 2 * 1024 * 1024,
+      },
+      // Scan-only boot: this test pins the readAll aggregate, not assembly.
+      maxStartupMs: 1,
+      deferredFreshAssemblyBudgetMs: 0,
+    });
+    services.push(started.service);
+
+    // Every entry parsed and was accepted: the only diagnostic is the boot
+    // budget miss for the single critical plan — no catalog rejection, and
+    // decisively no uncaught json_complexity_exceeded (the old code crashed
+    // this exact scenario).
+    expect(started.diagnostics.map((entry) => entry.operatorCode)).toEqual([
+      "startup_deadline_exceeded",
+    ]);
+  });
+
+  test("a plan whose recovery barrier throws synchronously is rejected; the process stays alive", async () => {
+    await writeAdmission(root);
+    const context = startupContext();
+    const started = await startReplayPremiereProduction({
+      ...context,
+      privateStateRoot: path.join(root, "private"),
+      servedRoots: [path.join(root, "served")],
+      deferredFreshAssemblyBudgetMs: 0,
+      beforeTargetRecovery: () => {
+        throw new Error("synchronous recovery boom");
+      },
+    });
+    services.push(started.service);
+    expect(started.registeredPremiereIds).toEqual([]);
+    expect(started.diagnostics).toEqual([
+      {
+        target: `${PREMIERE_ID}.admission.json`,
+        premiereId: PREMIERE_ID,
+        operatorCode: "startup_target_recovery_failed",
+      },
+    ]);
+    expect(context.httpRegistry.get(PREMIERE_ID)).toBeNull();
+  });
+
+  test("a plan whose recovery rejects asynchronously is rejected; the process stays alive", async () => {
+    await writeAdmission(root);
+    const context = startupContext();
+    const started = await startReplayPremiereProduction({
+      ...context,
+      privateStateRoot: path.join(root, "private"),
+      servedRoots: [path.join(root, "served")],
+      deferredFreshAssemblyBudgetMs: 0,
+      beforeTargetRecovery: async () => {
+        await new Promise((resolve) => setTimeout(resolve, 10));
+        throw new ReplayPremiereError(
+          "test_async_recovery_refused",
+          "PREMIERE_INTEGRITY_FAILURE",
+          409,
+          "async recovery boom",
+        );
+      },
+    });
+    services.push(started.service);
+    expect(started.registeredPremiereIds).toEqual([]);
+    expect(started.diagnostics).toEqual([
+      {
+        target: `${PREMIERE_ID}.admission.json`,
+        premiereId: PREMIERE_ID,
+        operatorCode: "test_async_recovery_refused",
+      },
+    ]);
+    expect(context.httpRegistry.get(PREMIERE_ID)).toBeNull();
+  });
+
+  test("the deferred assembly budget stays inside the premiere loop's activation-verify window", () => {
+    // Reviewer finding #1: the loop only observes a deferred registration (or
+    // its absence) before firing its single re-activation restart because the
+    // deferred budget is strictly smaller than the verify window.
+    expect(DEFAULT_DEFERRED_FRESH_ASSEMBLY_BUDGET_MS).toBeLessThan(
+      PREMIERE_LOOP_ACTIVATION_VERIFY_MS,
+    );
+  });
+
+  test("a reclaim-excluded terminal admission is skipped instead of burning the boot budget", async () => {
+    await writeAdmission(root);
+    // Boot before the scheduled start so cancel() is a legal transition.
+    const firstContext = startupContext(
+      () => new Date(NOW.getTime() - 120_000),
+    );
+    const first = await startReplayPremiereProduction({
+      ...firstContext,
+      privateStateRoot: path.join(root, "private"),
+      servedRoots: [path.join(root, "served")],
+    });
+    services.push(first.service);
+    const runtime = firstContext.runtimeRegistry.get(PREMIERE_ID)!;
+    await runtime.cancel();
+    await runtime.archive();
+    await first.service.close();
+    services.splice(services.indexOf(first.service), 1);
+
+    // The prem_live20260721aaan pattern: terminal, permanently retained, and
+    // selected by the terminal-only fallback at every quiet boot where it
+    // burned the entire budget. Excluded ids are now skipped outright.
+    const excludedContext = startupContext();
+    const excluded = await startReplayPremiereProduction({
+      ...excludedContext,
+      privateStateRoot: path.join(root, "private"),
+      servedRoots: [path.join(root, "served")],
+      reclamationExcludedPremiereIds: [PREMIERE_ID],
+    });
+    services.push(excluded.service);
+    expect(excluded.registeredPremiereIds).toEqual([]);
+    expect(excluded.diagnostics).toEqual([]);
+    expect(excludedContext.httpRegistry.get(PREMIERE_ID)).toBeNull();
   });
 
   test("a deferred registration arriving during close is refused — no leak into a torn-down service", async () => {
