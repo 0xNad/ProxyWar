@@ -3,6 +3,7 @@ import {
   aiLeagueSpectatorText,
   isAiLeagueNativeSpectatorUiEnabled,
 } from "./AiLeagueReplayMode";
+import { readProxyWarClipGenerationCapabilities } from "./ClipGenerationCapabilities";
 import { ReplaySpeedMultiplier } from "./utilities/ReplaySpeedMultiplier";
 import { translateText } from "./Utils";
 
@@ -1389,6 +1390,7 @@ interface AiLeagueClipReadyView {
 interface AiLeagueClipState {
   runID: string;
   status: "idle" | "preparing" | "ready" | "failed" | "busy";
+  generationCapability: "unknown" | "loading" | "enabled" | "disabled";
   ready: AiLeagueClipReadyView | null;
   latestTurn: number;
   pollTimer: ReturnType<typeof setTimeout> | null;
@@ -1411,6 +1413,7 @@ function aiLeagueClipState(runID: string): AiLeagueClipState {
     win.__aiLeagueClipState = {
       runID,
       status: "idle",
+      generationCapability: "unknown",
       ready: null,
       latestTurn: 0,
       pollTimer: null,
@@ -1458,6 +1461,21 @@ function mountAiLeagueClipControls(
   win.__aiLeagueClipCleanup = () => {
     document.removeEventListener("ai-league-replay-frame", onFrame);
   };
+  if (state.generationCapability === "unknown") {
+    state.generationCapability = "loading";
+    void readProxyWarClipGenerationCapabilities().then((capabilities) => {
+      if (win.__aiLeagueClipState !== state) {
+        return;
+      }
+      state.generationCapability = capabilities.leagueGenerationEnabled
+        ? "enabled"
+        : "disabled";
+      if (state.generationCapability === "disabled") {
+        clearAiLeagueClipPoll(state);
+      }
+      renderAiLeagueClipSection(state);
+    });
+  }
   renderAiLeagueClipSection(state);
 }
 
@@ -1470,6 +1488,12 @@ function renderAiLeagueClipSection(state: AiLeagueClipState): void {
   if (section === null) {
     return;
   }
+  if (state.generationCapability !== "enabled") {
+    section.hidden = true;
+    section.replaceChildren();
+    return;
+  }
+  section.hidden = false;
   const heading = `<strong>${escapeHtml(translateText("ai_league_replay.clip_heading"))}</strong>`;
   if (state.status === "ready" && state.ready !== null) {
     section.innerHTML = `
@@ -1510,7 +1534,10 @@ function renderAiLeagueClipSection(state: AiLeagueClipState): void {
 }
 
 async function requestAiLeagueClip(state: AiLeagueClipState): Promise<void> {
-  if (state.status === "preparing") {
+  if (
+    state.generationCapability !== "enabled" ||
+    state.status === "preparing"
+  ) {
     return;
   }
   clearAiLeagueClipPoll(state);

@@ -59,6 +59,8 @@ export interface ReplayPremiereClipLimits {
   maxQueueDepth: number;
   /** Wall-clock ceiling for a single render before SIGKILL. */
   jobTimeoutMs: number;
+  /** Wait for the killed worker leader to report exit before forcing cleanup. */
+  workerExitGraceMs: number;
   /** Total bytes across all cached clips before global LRU eviction. */
   maxTotalBytes: number;
   /** Cached clips per premiere before per-premiere LRU eviction. */
@@ -75,6 +77,7 @@ const DEFAULT_LIMITS: ReplayPremiereClipLimits = {
   maxRendersGlobalPerHour: 12,
   maxQueueDepth: 4,
   jobTimeoutMs: 6 * 60 * 1_000,
+  workerExitGraceMs: 2_000,
   maxTotalBytes: 2 * 1024 ** 3,
   maxClipsPerPremiere: 40,
   minFreeBytes: 16 * 1024 ** 3,
@@ -190,6 +193,19 @@ interface QueuedJob {
   expectedBundleSha256: string;
 }
 
+interface WorkerCompletion {
+  promise: Promise<number | null>;
+  settleAfterKill(timeoutMs: number): Promise<boolean>;
+}
+
+interface WorkerOutputCapture {
+  formatForLog(): string;
+  dispose(): void;
+}
+
+const WORKER_OUTPUT_TAIL_CHARS = 4_096;
+const WORKER_STDIO_DRAIN_GRACE_MS = 250;
+
 // ---------------------------------------------------------------------------
 // Service
 // ---------------------------------------------------------------------------
@@ -199,6 +215,7 @@ export class ReplayPremiereClips {
   private readonly now: () => number;
   private readonly statfs: (path: string) => Promise<StatsFs>;
   private readonly spawnWorker: SpawnClipWorker;
+  private readonly usesDefaultDetachedWorker: boolean;
   private readonly logger: (message: string) => void;
 
   private readonly ready = new Map<string, ClipIndexEntry>();
@@ -207,6 +224,8 @@ export class ReplayPremiereClips {
   /** Reserved synchronously in pump() so concurrency stays 1 across awaits. */
   private runningJob: QueuedJob | null = null;
   private runningChild: ChildProcess | null = null;
+  private runningCompletion: WorkerCompletion | null = null;
+  private activeRunPromise: Promise<void> | null = null;
   private closed = false;
 
   // Quota accounting (accepted NEW renders only; not cache hits or joins).
@@ -218,6 +237,7 @@ export class ReplayPremiereClips {
     this.limits = { ...DEFAULT_LIMITS, ...(options.limits ?? {}) };
     this.now = options.now ?? (() => Date.now());
     this.statfs = options.statfs ?? ((p) => fs.statfs(p));
+    this.usesDefaultDetachedWorker = options.spawnWorker === undefined;
     this.spawnWorker =
       options.spawnWorker ?? this.defaultSpawnWorker.bind(this);
     this.logger = options.logger ?? (() => undefined);
@@ -390,6 +410,11 @@ export class ReplayPremiereClips {
       return this.statusFor(request.premiereId, bucket, "pending", null);
     }
 
+    const bundlePath = this.sourceBundlePath(
+      request.premiereId,
+      request.sourceReplaySha256,
+    );
+    await this.assertSourceBundleAvailable(bundlePath);
     this.admitNewRender(request.premiereId, request.participantId);
     await this.assertDiskFloor();
     if (this.queue.length >= this.limits.maxQueueDepth) {
@@ -403,10 +428,7 @@ export class ReplayPremiereClips {
       premiereId: request.premiereId,
       bucket,
       anchorTurn: premiereClipRepresentativeAnchorTurn(bucket),
-      bundlePath: this.sourceBundlePath(
-        request.premiereId,
-        request.sourceReplaySha256,
-      ),
+      bundlePath,
       expectedBundleSha256: request.sourceReplaySha256.toLowerCase(),
     });
     this.pump();
@@ -455,7 +477,11 @@ export class ReplayPremiereClips {
     if (job === undefined) return;
     // Reserve the single slot synchronously (runJob awaits before it spawns).
     this.runningJob = job;
-    void this.runJob(job);
+    const active = this.runJob(job);
+    this.activeRunPromise = active;
+    void active.finally(() => {
+      if (this.activeRunPromise === active) this.activeRunPromise = null;
+    });
   }
 
   private async runJob(job: QueuedJob): Promise<void> {
@@ -465,6 +491,7 @@ export class ReplayPremiereClips {
       `.render-${job.bucket}-${randomToken()}`,
     );
     let timedOut = false;
+    let workerOutput: WorkerOutputCapture | null = null;
     try {
       await fs.mkdir(renderDir, { recursive: true, mode: 0o700 });
       const specPath = path.join(renderDir, "jobspec.json");
@@ -492,29 +519,35 @@ export class ReplayPremiereClips {
       if (this.options.clipChromeBin !== undefined) {
         env.PROXYWAR_CLIP_CHROME_BIN = this.options.clipChromeBin;
       }
+      // close() may run while the async render-dir/spec prelude is in flight.
+      // Re-check at the last possible point so shutdown cannot resolve and
+      // then let a late worker escape supervision.
+      if (this.closed) return;
       const child = this.spawnWorker(specPath, env);
       this.runningChild = child;
-
-      const exitCode = await new Promise<number | null>((resolve) => {
-        const timer = setTimeout(() => {
-          timedOut = true;
-          killPremiereClipWorkerTree(child);
-        }, this.limits.jobTimeoutMs);
-        timer.unref?.();
-        child.once("error", () => {
-          clearTimeout(timer);
-          resolve(null);
-        });
-        child.once("exit", (code) => {
-          clearTimeout(timer);
-          resolve(code);
-        });
-      });
+      workerOutput = captureWorkerOutput(child);
+      const completion = createWorkerCompletion(
+        child,
+        this.usesDefaultDetachedWorker
+          ? () => reapDefaultDetachedWorkerGroupAfterExit(child)
+          : undefined,
+      );
+      this.runningCompletion = completion;
+      const timer = setTimeout(() => {
+        if (child.exitCode !== null || child.signalCode !== null) return;
+        timedOut = true;
+        killPremiereClipWorkerTree(child);
+        void completion.settleAfterKill(this.limits.workerExitGraceMs);
+      }, this.limits.jobTimeoutMs);
+      timer.unref?.();
+      const exitCode = await completion.promise;
+      clearTimeout(timer);
 
       if (timedOut || exitCode !== 0) {
         this.logger(
           `clip render failed premiere=${job.premiereId} bucket=${job.bucket} ` +
-            `${timedOut ? "timeout" : `exit=${exitCode}`}`,
+            `${timedOut ? "timeout" : `exit=${exitCode}`}` +
+            workerOutput.formatForLog(),
         );
       } else {
         await this.promoteRender(job, renderDir);
@@ -523,13 +556,15 @@ export class ReplayPremiereClips {
       this.logger(
         `clip render error premiere=${job.premiereId} bucket=${job.bucket}: ${
           error instanceof Error ? error.message : String(error)
-        }`,
+        }${workerOutput?.formatForLog() ?? ""}`,
       );
     } finally {
+      workerOutput?.dispose();
       await fs.rm(renderDir, { recursive: true, force: true }).catch(() => {});
       this.pending.delete(job.key);
       this.runningJob = null;
       this.runningChild = null;
+      this.runningCompletion = null;
       if (!this.closed) this.pump();
     }
   }
@@ -681,6 +716,19 @@ export class ReplayPremiereClips {
     }
   }
 
+  private async assertSourceBundleAvailable(bundlePath: string): Promise<void> {
+    try {
+      const stat = await fs.stat(bundlePath);
+      if (!stat.isFile()) {
+        throw new Error("source bundle is not a regular file");
+      }
+    } catch {
+      // Keep a missing operator-side source indistinguishable from an
+      // unavailable premiere on the public write route.
+      throw unavailable("clip_source_bundle_unavailable", 404);
+    }
+  }
+
   private async readWatermarkSeverity(): Promise<number> {
     try {
       const raw = JSON.parse(
@@ -784,7 +832,7 @@ export class ReplayPremiereClips {
     return spawn(
       process.execPath,
       ["--import", "tsx", this.options.workerModulePath, jobSpecPath],
-      { stdio: ["ignore", "ignore", "pipe"], env, detached: true },
+      { stdio: ["ignore", "pipe", "pipe"], env, detached: true },
     );
   }
 
@@ -793,10 +841,166 @@ export class ReplayPremiereClips {
   async close(): Promise<void> {
     this.closed = true;
     this.queue.length = 0;
+    const active = this.activeRunPromise;
+    if (active === null) return;
     const child = this.runningChild;
-    if (child !== null && child.exitCode === null) {
-      killPremiereClipWorkerTree(child);
+    if (child !== null) {
+      if (child.exitCode === null && child.signalCode === null) {
+        killPremiereClipWorkerTree(child);
+      }
+      const completion = this.runningCompletion;
+      if (completion !== null && child.exitCode === null) {
+        const observed = await completion.settleAfterKill(
+          this.limits.workerExitGraceMs,
+        );
+        if (!observed) {
+          this.logger(
+            `clip worker did not report exit within ${this.limits.workerExitGraceMs}ms after SIGKILL`,
+          );
+        }
+      }
     }
+    await active;
+  }
+}
+
+/** Drain both worker pipes continuously while retaining only bounded tails. */
+function captureWorkerOutput(child: ChildProcess): WorkerOutputCapture {
+  let stdoutTail = "";
+  let stderrTail = "";
+  const append = (previous: string, chunk: unknown): string => {
+    const text = Buffer.isBuffer(chunk)
+      ? chunk.toString("utf8")
+      : String(chunk);
+    return (previous + text).slice(-WORKER_OUTPUT_TAIL_CHARS);
+  };
+  const onStdout = (chunk: unknown) => {
+    stdoutTail = append(stdoutTail, chunk);
+  };
+  const onStderr = (chunk: unknown) => {
+    stderrTail = append(stderrTail, chunk);
+  };
+  child.stdout?.on("data", onStdout);
+  child.stderr?.on("data", onStderr);
+
+  const field = (name: string, value: string): string => {
+    const safe = value
+      .replace(/\r/g, "\n")
+      .replace(/[^\x20-\x7e\n\t]/g, "?")
+      .trim();
+    return safe === "" ? "" : ` ${name}=${JSON.stringify(safe)}`;
+  };
+  return {
+    formatForLog: () =>
+      field("stdout_tail", stdoutTail) + field("stderr_tail", stderrTail),
+    dispose: () => {
+      child.stdout?.off("data", onStdout);
+      child.stderr?.off("data", onStderr);
+    },
+  };
+}
+
+/**
+ * Wait for the worker leader and (when piped) a short stdio drain. After a
+ * SIGKILL, callers can force settlement after a bounded grace so shutdown and
+ * timeout handling never hang on a broken ChildProcess implementation.
+ */
+function createWorkerCompletion(
+  child: ChildProcess,
+  onWorkerExit?: () => void,
+): WorkerCompletion {
+  let settled = false;
+  let exitObserved = false;
+  let exitCode: number | null = null;
+  let drainTimer: ReturnType<typeof setTimeout> | null = null;
+  let resolvePromise!: (code: number | null) => void;
+  const promise = new Promise<number | null>((resolve) => {
+    resolvePromise = resolve;
+  });
+  const cleanup = (): void => {
+    if (drainTimer !== null) clearTimeout(drainTimer);
+    child.off("error", onError);
+    child.off("exit", onExit);
+    child.off("close", onClose);
+  };
+  const settle = (code: number | null): void => {
+    if (settled) return;
+    settled = true;
+    cleanup();
+    resolvePromise(code);
+  };
+  const onError = (): void => settle(null);
+  const onExit = (code: number | null): void => {
+    if (exitObserved) return;
+    exitObserved = true;
+    // The default worker leads a dedicated process group. Reap that group
+    // synchronously while the exit notification still binds PID -> PGID and
+    // before this completion can release the service's concurrency slot.
+    onWorkerExit?.();
+    exitCode = code;
+    if (
+      (child.stdout === null || child.stdout === undefined) &&
+      (child.stderr === null || child.stderr === undefined)
+    ) {
+      settle(code);
+      return;
+    }
+    // Real piped children emit `close` after both streams drain. Keep an exit
+    // fallback for incomplete test doubles or a broken pipe implementation.
+    drainTimer = setTimeout(
+      () => settle(exitCode),
+      WORKER_STDIO_DRAIN_GRACE_MS,
+    );
+  };
+  const onClose = (code: number | null): void => settle(code ?? exitCode);
+  child.once("error", onError);
+  child.once("exit", onExit);
+  child.once("close", onClose);
+  // A tiny worker can exit between spawn() and listener registration.
+  if (
+    child.exitCode !== null ||
+    (child.signalCode !== null && child.signalCode !== undefined)
+  ) {
+    onExit(child.exitCode);
+  }
+
+  return {
+    promise,
+    settleAfterKill: async (timeoutMs: number) => {
+      if (settled) return true;
+      let observed = false;
+      await new Promise<void>((resolve) => {
+        const graceTimer = setTimeout(resolve, timeoutMs);
+        void promise.then(() => {
+          observed = true;
+          clearTimeout(graceTimer);
+          resolve();
+        });
+      });
+      const observedBeforeForce = observed;
+      if (!settled) settle(null);
+      await promise;
+      return observedBeforeForce;
+    },
+  };
+}
+
+/**
+ * Final containment boundary for the service's OWN default detached worker.
+ *
+ * A Chrome/helper can outlive and be reparented away from its worker leader
+ * while retaining the worker's dedicated PGID. The worker's synchronous exit
+ * callback therefore signals the negative PGID even for an ordinary nonzero
+ * exit. Never use this for an injected `spawnWorker`: the service has no proof
+ * that an arbitrary injected child leads an isolated process group.
+ */
+function reapDefaultDetachedWorkerGroupAfterExit(child: ChildProcess): void {
+  const pid = child.pid;
+  if (typeof pid !== "number" || pid <= 0) return;
+  try {
+    process.kill(-pid, "SIGKILL");
+  } catch {
+    // No group remains (the normal clean-exit case).
   }
 }
 

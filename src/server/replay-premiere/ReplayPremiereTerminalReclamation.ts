@@ -1,5 +1,5 @@
-import { randomUUID } from "node:crypto";
-import { promises as fs } from "node:fs";
+import { createHash, randomUUID } from "node:crypto";
+import { createReadStream, promises as fs } from "node:fs";
 import path from "node:path";
 import type { PremiereArchivePointerV1 } from "./ReplayPremiereArchiveIndex";
 import { ReplayPremiereArchiveStore } from "./ReplayPremiereArchiveIndex";
@@ -470,7 +470,10 @@ export class ReplayPremiereTerminalReclaimer {
       archivedPremiereClipFileName(premiereId),
     );
     if (await fileExists(durableClipPath)) return;
-    const candidate = await this.selectBestCachedClip(premiereId);
+    const candidate = await this.selectBestCachedClip(
+      premiereId,
+      pointer.sourceReplaySha256,
+    );
     if (candidate === null) return;
     await fs.mkdir(this.archivedClipsDir, { recursive: true, mode: 0o700 });
     const durableManifestPath = path.join(
@@ -480,19 +483,30 @@ export class ReplayPremiereTerminalReclaimer {
     // Manifest first, mp4 last, both atomic renames: a crash can leave a
     // manifest without an mp4 (harmless — availability is stat(mp4)-based),
     // never a served mp4 without its provenance sidecar.
-    await copyFileAtomic(candidate.manifestPath, durableManifestPath);
-    await copyFileAtomic(candidate.clipPath, durableClipPath);
+    await copyFileAtomicVerified(
+      candidate.clipPath,
+      durableClipPath,
+      {
+        byteLength: candidate.byteLength,
+        sha256: candidate.outSha256,
+      },
+      () => writeFileAtomic(candidate.manifestRaw, durableManifestPath),
+    );
     this.logger(
       `archived_clip_promoted ${premiereId} anchorTurn=${candidate.anchorTurn} bytes=${candidate.byteLength}`,
     );
     await this.evictArchivedClipsOverBounds(premiereId);
   }
 
-  private async selectBestCachedClip(premiereId: string): Promise<{
+  private async selectBestCachedClip(
+    premiereId: string,
+    expectedSourceReplaySha256: string,
+  ): Promise<{
     clipPath: string;
-    manifestPath: string;
+    manifestRaw: string;
     anchorTurn: number;
     byteLength: number;
+    outSha256: string;
   } | null> {
     const cacheDir = path.join(this.clipCacheDir, premiereId);
     let files: string[];
@@ -503,9 +517,10 @@ export class ReplayPremiereTerminalReclaimer {
     }
     let best: {
       clipPath: string;
-      manifestPath: string;
+      manifestRaw: string;
       anchorTurn: number;
       byteLength: number;
+      outSha256: string;
     } | null = null;
     for (const file of files) {
       if (!CACHED_CLIP_FILE_PATTERN.test(file)) continue;
@@ -522,16 +537,22 @@ export class ReplayPremiereTerminalReclaimer {
         if (
           manifest === null ||
           manifest.premiereId !== premiereId ||
+          manifest.sourceReplaySha256 !== expectedSourceReplaySha256 ||
+          !stat.isFile() ||
           manifest.outBytes !== stat.size
         ) {
           continue; // Partial/foreign artifact; never promote it.
         }
+        if ((await sha256File(clipPath)) !== manifest.outSha256) {
+          continue; // Same-size corruption or swapped content; fail closed.
+        }
         if (best === null || manifest.anchorTurn > best.anchorTurn) {
           best = {
             clipPath,
-            manifestPath,
+            manifestRaw,
             anchorTurn: manifest.anchorTurn,
             byteLength: stat.size,
+            outSha256: manifest.outSha256,
           };
         }
       } catch {
@@ -618,10 +639,16 @@ async function fileExists(filePath: string): Promise<boolean> {
   }
 }
 
-/** Copy via a same-directory temp file + rename so readers never see a tear. */
-async function copyFileAtomic(
+/**
+ * Copies and re-validates a file through a same-directory temp path before the
+ * final rename. The validation closes the race between candidate selection and
+ * promotion: a cache file swapped after selection can never become durable.
+ */
+async function copyFileAtomicVerified(
   sourcePath: string,
   destinationPath: string,
+  expected: { byteLength: number; sha256: string },
+  beforeCommit: () => Promise<void>,
 ): Promise<void> {
   const temporary = path.join(
     path.dirname(destinationPath),
@@ -629,11 +656,46 @@ async function copyFileAtomic(
   );
   try {
     await fs.copyFile(sourcePath, temporary);
+    const stat = await fs.stat(temporary);
+    if (
+      !stat.isFile() ||
+      stat.size !== expected.byteLength ||
+      (await sha256File(temporary)) !== expected.sha256
+    ) {
+      throw reclamationIntegrity("archived_clip_copy_integrity_mismatch");
+    }
+    await beforeCommit();
     await fs.rename(temporary, destinationPath);
   } catch (error) {
     await fs.unlink(temporary).catch(() => undefined);
     throw error;
   }
+}
+
+/** Writes a validated manifest snapshot atomically beside the durable clip. */
+async function writeFileAtomic(
+  contents: string,
+  destinationPath: string,
+): Promise<void> {
+  const temporary = path.join(
+    path.dirname(destinationPath),
+    `.${path.basename(destinationPath)}.${randomUUID()}.tmp`,
+  );
+  try {
+    await fs.writeFile(temporary, contents, { mode: 0o600 });
+    await fs.rename(temporary, destinationPath);
+  } catch (error) {
+    await fs.unlink(temporary).catch(() => undefined);
+    throw error;
+  }
+}
+
+async function sha256File(filePath: string): Promise<string> {
+  const hash = createHash("sha256");
+  for await (const chunk of createReadStream(filePath)) {
+    hash.update(chunk);
+  }
+  return hash.digest("hex");
 }
 
 /**

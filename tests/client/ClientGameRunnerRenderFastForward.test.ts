@@ -1,24 +1,33 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ClientGameRunner } from "../../src/client/ClientGameRunner";
 import { REPLAY_RENDER_FAST_FORWARD_PARAM } from "../../src/client/ReplayRenderFastForward";
+import type { GameUpdates } from "../../src/core/game/Game";
 import { GameUpdateType } from "../../src/core/game/GameUpdates";
 
-function emptyUpdates() {
+function emptyUpdates(): GameUpdates {
   return Object.fromEntries(
     Object.values(GameUpdateType)
       .filter((value) => typeof value === "number")
       .map((type) => [type, []]),
-  );
+  ) as unknown as GameUpdates;
 }
 
-function gameUpdate(tick: number) {
-  return {
+function gameUpdate(tick: number, options: { terminal?: boolean } = {}) {
+  const update = {
     tick,
     updates: emptyUpdates(),
     packedTileUpdates: new Uint32Array(),
     playerNameViewData: {},
     tickExecutionDuration: 1,
   };
+  if (options.terminal === true) {
+    update.updates[GameUpdateType.Win].push({
+      type: GameUpdateType.Win,
+      winner: ["player", "must-not-leak"],
+      allPlayersStats: {},
+    });
+  }
+  return update;
 }
 
 interface Harness {
@@ -123,6 +132,37 @@ describe("ClientGameRunner render fast-forward gating", () => {
     expect(flushed.tick).toBe(5);
   });
 
+  it("emits a spoiler-neutral terminal frame when Win occurs below the target", () => {
+    history.replaceState(
+      null,
+      "",
+      `/ai-league-replay/league-terminal?${REPLAY_RENDER_FAST_FORWARD_PARAM}=100000`,
+    );
+    const terminalFrames: Array<Record<string, unknown>> = [];
+    document.addEventListener("ai-league-replay-frame", (event) => {
+      const detail = (event as CustomEvent<Record<string, unknown>>).detail;
+      if (detail.terminal === true) terminalFrames.push(detail);
+    });
+    const harness = mountRunner({
+      gameID: "TERM0001",
+      gameStartInfo: { gameID: "TERM0001" },
+      gameRecord: {},
+    });
+
+    harness.updateCallback(gameUpdate(32250) as never);
+    harness.updateCallback(gameUpdate(32251, { terminal: true }) as never);
+
+    expect(terminalFrames).toHaveLength(1);
+    expect(terminalFrames[0]).toMatchObject({
+      tick: 32251,
+      terminal: true,
+    });
+    expect(terminalFrames[0]).not.toHaveProperty("winner");
+    expect(JSON.stringify(terminalFrames[0])).not.toContain("must-not-leak");
+    expect(harness.gameView.update).toHaveBeenCalledTimes(1);
+    expect(harness.renderer.tick).toHaveBeenCalledTimes(1);
+  });
+
   it("ignores the parameter entirely without a plain gameRecord (premiere pages unaffected)", () => {
     history.replaceState(
       null,
@@ -144,6 +184,15 @@ describe("ClientGameRunner render fast-forward gating", () => {
 
   it("runs the ordinary per-turn pipeline when the parameter is absent", () => {
     history.replaceState(null, "", "/ai-league-replay/league-normal");
+    const frameDetails: Array<Record<string, unknown>> = [];
+    document.addEventListener(
+      "ai-league-replay-frame",
+      (event) =>
+        frameDetails.push(
+          (event as CustomEvent<Record<string, unknown>>).detail,
+        ),
+      { once: true },
+    );
     const harness = mountRunner({
       gameID: "PLAIN001",
       gameStartInfo: { gameID: "PLAIN001" },
@@ -153,5 +202,6 @@ describe("ClientGameRunner render fast-forward gating", () => {
     harness.updateCallback(gameUpdate(2) as never);
     expect(harness.gameView.update).toHaveBeenCalledTimes(2);
     expect(harness.renderer.tick).toHaveBeenCalledTimes(2);
+    expect(frameDetails[0]).toMatchObject({ tick: 1, terminal: false });
   });
 });

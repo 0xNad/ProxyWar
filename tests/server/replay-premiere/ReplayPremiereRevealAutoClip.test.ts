@@ -90,6 +90,15 @@ let root: string;
 
 beforeEach(async () => {
   root = await fs.mkdtemp(path.join(os.tmpdir(), "pw-auto-clip-"));
+  const sourcePath = path.join(
+    root,
+    "sources",
+    "sha256",
+    SHA.slice(0, 2),
+    `${SHA}.replay`,
+  );
+  await fs.mkdir(path.dirname(sourcePath), { recursive: true });
+  await fs.writeFile(sourcePath, "fixture replay");
 });
 
 afterEach(async () => {

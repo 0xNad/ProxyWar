@@ -1,14 +1,14 @@
 /**
  * Render-mode fast-forward for replay clip capture.
  *
- * PRODUCTION INCIDENT (2026-07-22): every premiere auto-clip render timed out.
- * The clip worker parks the replay page at `anchor - lead` via the jump event,
- * which force-queues every skipped turn — but the page then runs the FULL
- * per-turn presentation pipeline (GameView update + renderer tick + frame
- * dispatch + hash log) for each of the 17k-50k skipped turns. On World-scale
- * records the page main thread saturates for far longer than the 6-minute
- * render SIGKILL (measured: CDP evaluate stalls outright after ~700 applied
- * ticks), so end-anchor renders can never park in time.
+ * PRODUCTION INCIDENT (2026-07-22): multiple 50.4k-turn premiere auto-clips
+ * hit the six-minute service timeout, although the exact phase was not retained
+ * in production logs. Before this lane existed, the clip worker's jump to
+ * `anchor - lead` force-queued every skipped turn through the FULL per-turn
+ * presentation pipeline (GameView update + renderer tick + frame dispatch +
+ * hash log). That presentation cost was independently reproduced as a major
+ * late-anchor bottleneck. The core simulation still executes every turn, so
+ * this is a pacing optimization rather than a replay checkpoint or snapshot.
  *
  * Fix: while fast-forwarding toward the park turn, updates are BUFFERED and
  * coalesced through the premiere catch-up coalescer (final tile/unit/player
@@ -30,7 +30,10 @@
  *    reached through it.
  */
 
-import type { GameUpdateViewData } from "../core/game/GameUpdates";
+import {
+  GameUpdateType,
+  type GameUpdateViewData,
+} from "../core/game/GameUpdates";
 import { coalesceReplayPremiereGameUpdates } from "./ReplayPremiereUpdateBatch";
 
 /** Query parameter the clip worker appends to the replay page URL. */
@@ -102,7 +105,16 @@ export class ReplayRenderFastForward {
       return false;
     }
     this.buffer.push(update);
-    if (this.buffer.length >= this.coalesceTurns) this.flush();
+    // A winning record can stop producing core updates before the declared
+    // record length. Flush the terminal update immediately so the page emits
+    // its spoiler-neutral terminal signal even when no later update reaches
+    // the ordinary fast-forward boundary.
+    if (
+      update.updates[GameUpdateType.Win].length > 0 ||
+      this.buffer.length >= this.coalesceTurns
+    ) {
+      this.flush();
+    }
     return true;
   }
 

@@ -13,6 +13,10 @@ vi.mock("../../src/client/Utils", () => ({
 }));
 
 import {
+  readProxyWarClipGenerationCapabilities,
+  type ProxyWarClipGenerationCapabilities,
+} from "../../src/client/ClipGenerationCapabilities";
+import {
   ReplayPremiereNetworkError,
   type ReplayPremiereClipStatusResponse,
   type ReplayPremiereManifest,
@@ -85,6 +89,67 @@ describe("Replay Premiere route gate", () => {
     expect(
       parseReplayPremiereRoute(`/premiere/${PREMIERE_ID}%2fbootstrap`),
     ).toBeNull();
+  });
+});
+
+describe("ProxyWar clip-generation capability", () => {
+  it.each([
+    { premiereGenerationEnabled: true, leagueGenerationEnabled: true },
+    { premiereGenerationEnabled: false, leagueGenerationEnabled: false },
+  ])("strictly accepts the explicit process capability %#", async (flags) => {
+    const fetchImpl = vi.fn(
+      async () =>
+        new Response(JSON.stringify({ schemaVersion: 1, ...flags }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        }),
+    );
+
+    await expect(
+      readProxyWarClipGenerationCapabilities(fetchImpl),
+    ).resolves.toEqual({ schemaVersion: 1, ...flags });
+    expect(fetchImpl).toHaveBeenCalledWith(
+      "/api/clip-capabilities",
+      expect.objectContaining({
+        method: "GET",
+        credentials: "same-origin",
+        cache: "no-store",
+      }),
+    );
+  });
+
+  it.each([
+    {
+      name: "transport failure",
+      fetchImpl: vi.fn(async () => {
+        throw new TypeError("offline");
+      }),
+    },
+    {
+      name: "missing endpoint",
+      fetchImpl: vi.fn(async () => new Response("not found", { status: 404 })),
+    },
+    {
+      name: "malformed success",
+      fetchImpl: vi.fn(
+        async () =>
+          new Response(
+            JSON.stringify({
+              schemaVersion: 1,
+              premiereGenerationEnabled: true,
+            }),
+            { status: 200, headers: { "Content-Type": "application/json" } },
+          ),
+      ),
+    },
+  ])("fails closed on $name", async ({ fetchImpl }) => {
+    await expect(
+      readProxyWarClipGenerationCapabilities(fetchImpl),
+    ).resolves.toEqual({
+      schemaVersion: 1,
+      premiereGenerationEnabled: false,
+      leagueGenerationEnabled: false,
+    });
   });
 });
 
@@ -1593,6 +1658,33 @@ describe("ReplayPremiereRuntimeController", () => {
     harness.runtime.dispose();
   });
 
+  it("keeps the live clip block absent and rejects generation when the process capability is off", async () => {
+    const harness = runtimeHarness({
+      state: "playing",
+      clipCapabilities: async () => ({
+        schemaVersion: 1,
+        premiereGenerationEnabled: false,
+        leagueGenerationEnabled: false,
+      }),
+    });
+    await bootstrapPlayingWithFrame(harness);
+    await revealAfter(harness);
+    await vi.waitFor(() => {
+      expect(harness.models.at(-1)?.clip ?? null).toBeNull();
+      expect(harness.models.at(-1)?.canRequestClip ?? false).toBe(false);
+    });
+
+    await expect(
+      harness.overlayCallbacks.onRequestClip?.({
+        premiereId: PREMIERE_ID,
+        sequence: 0,
+        turn: 0,
+      }),
+    ).rejects.toMatchObject({ code: "request_rejected" });
+    expect(harness.service.requestClip).not.toHaveBeenCalled();
+    harness.runtime.dispose();
+  });
+
   it("renders a downloadable clip after a pending render is polled to ready", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date(STARTED_AT));
@@ -2219,6 +2311,7 @@ describe("ReplayPremiereServiceClient", () => {
 
 function runtimeHarness(options: {
   state: ReplayPremiereReadyProjection["state"];
+  clipCapabilities?: () => Promise<ProxyWarClipGenerationCapabilities>;
   service?: {
     startSession?: () => Promise<ReplayPremiereServiceSessionResponse>;
     heartbeat?: () => Promise<ReplayPremiereServiceHeartbeatResponse>;
@@ -2327,6 +2420,13 @@ function runtimeHarness(options: {
       },
       copyText,
       downloadReminder: vi.fn(),
+      readClipGenerationCapabilities:
+        options.clipCapabilities ??
+        (async () => ({
+          schemaVersion: 1,
+          premiereGenerationEnabled: true,
+          leagueGenerationEnabled: true,
+        })),
     },
   });
   return {

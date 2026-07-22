@@ -17,10 +17,11 @@ const DEFAULT_PLIST = path.join(os.homedir(), "Library", "LaunchAgents", `${LABE
 const DEFAULT_WRITER_LOCK = path.join(os.homedir(), "Library", "Application Support", "ProxyWar", "storage", "replay-premiere", "event-store-v1", "write-owner.json");
 // esbuild is tsx's persistent transform service: on a cold-cache start after a
 // source change it appears as a direct child of the server and stays alive.
-// The clip render pipeline (auto-clip at reveal + league-run clips) spawns
-// headless Chrome ("Google Chrome" / helpers, ucomm-truncated to 16 chars)
-// and ffmpeg inside the server's process group; renders are bounded (6-min
-// SIGKILL) and safe to terminate with the group on restart.
+// Current clip workers are detached process-group leaders, so their Chrome and
+// ffmpeg descendants must not normally appear in the beta server PGID. Keep
+// their executable names accepted here for restart compatibility with an
+// already-running older server; ancestry, cwd, uid, and identity checks still
+// have to prove that any such member belongs to the managed group.
 // prettier-ignore
 const ALLOWED_EXECUTABLES = new Set(["bash", "caffeinate", "claude", "esbuild", "ffmpeg", "node", "npm", "sh", "zsh", "Google Chrome", "Google Chrome He", "Google Chrome Helper"]);
 
@@ -80,15 +81,18 @@ export async function terminateOwnedGroup(
 ) {
   validateOwnedGroup(managed);
   if (await host.groupExists(managed.pgid)) {
-    assertCapturedMembers(managed, await host.snapshotGroup(managed.pgid));
+    assertCapturedMembers(
+      managed,
+      await host.snapshotGroup(managed.pgid, managed.pid, true),
+    );
     await host.signalGroup(managed.pgid, "SIGTERM");
   }
   if (await wait(host, graceMs, () => host.groupGone(managed.pgid))) {
     return { forced: false };
   }
-  const remaining = await host.snapshotGroup(managed.pgid);
+  const remaining = await host.snapshotGroup(managed.pgid, managed.pid, false);
   if (remaining.length === 0) return { forced: false };
-  assertCapturedMembers(managed, remaining);
+  assertCapturedMembers(managed, remaining, { allowPostTermReparent: true });
   await host.signalGroup(managed.pgid, "SIGKILL");
   if (!(await wait(host, forceWaitMs, () => host.groupGone(managed.pgid)))) {
     throw new Error(`PGID ${managed.pgid} survived SIGKILL`);
@@ -150,14 +154,26 @@ export async function restartBeta({
   };
 }
 
-function assertCapturedMembers(managed, current) {
+function assertCapturedMembers(
+  managed,
+  current,
+  { allowPostTermReparent = false } = {},
+) {
   const captured = new Map(
     managed.members.map((member) => [member.pid, member]),
   );
+  const currentPids = new Set(current.map((member) => member.pid));
   for (const member of current) {
     const before = captured.get(member.pid);
+    const sameParent = before?.ppid === member.ppid;
+    const safelyReparented =
+      allowPostTermReparent &&
+      before !== undefined &&
+      member.pid !== managed.pid &&
+      member.ppid === 1 &&
+      !currentPids.has(before.ppid);
     // prettier-ignore
-    if (before === undefined || before.uid !== member.uid || before.ppid !== member.ppid || before.pgid !== member.pgid ||
+    if (before === undefined || before.uid !== member.uid || (!sameParent && !safelyReparented) || before.pgid !== member.pgid ||
         before.start !== member.start || before.executable !== member.executable ||
         before.cwd !== member.cwd) {
       throw new Error("PGID membership changed before signal");
@@ -275,7 +291,7 @@ async function safeFile(filePath, executable) {
   }
 }
 
-export function hostController() {
+export function hostController({ exec = execFileAsync } = {}) {
   const launchctl = "/bin/launchctl";
   const ps = "/bin/ps";
   const lsof = "/usr/sbin/lsof";
@@ -284,39 +300,55 @@ export function hostController() {
     async readManaged(target) {
       let output;
       try {
-        output = (
-          await execFileAsync(launchctl, ["print", target], { maxBuffer: 4e6 })
-        ).stdout;
+        output = (await exec(launchctl, ["print", target], { maxBuffer: 4e6 }))
+          .stdout;
       } catch {
         return null;
       }
       const pid = Number(output.match(/^\s*pid = (\d+)\s*$/m)?.[1]);
       if (!Number.isSafeInteger(pid)) return null;
-      const pgid = Number(await psField(ps, pid, "pgid="));
-      const members = await host.snapshotGroup(pgid);
+      const pgid = Number(await psField(exec, ps, pid, "pgid="));
+      const members = await host.snapshotGroup(pgid, pid);
       const root = members.find((member) => member.pid === pid);
       if (!root) return null;
       // prettier-ignore
-      return { ...root, command: await psField(ps, pid, "command=", true), members };
+      return { ...root, command: await psField(exec, ps, pid, "command=", true), members };
     },
-    async snapshotGroup(pgid) {
-      const rows = (
-        await execFileAsync(ps, ["-axo", "pgid=,pid="], { maxBuffer: 4e6 })
-      ).stdout
-        .split("\n")
-        .map((line) => line.trim().match(/^(\d+)\s+(\d+)$/))
-        .filter(Boolean)
-        .filter((match) => Number(match[1]) === pgid);
-      return Promise.all(
-        rows.map(async (match) => {
-          const pid = Number(match[2]);
-          // prettier-ignore
-          return { uid: Number(await psField(ps, pid, "uid=")), pid,
-            ppid: Number(await psField(ps, pid, "ppid=")), pgid: Number(await psField(ps, pid, "pgid=")),
-            executable: await psField(ps, pid, "ucomm="), start: await psField(ps, pid, "lstart="),
-            cwd: await processCwd(lsof, pid) };
-        }),
-      );
+    async snapshotGroup(pgid, managedPid = pgid, requireManaged = true) {
+      const initial = await processTable(exec, ps);
+      if (requireManaged) assertManagedPresent(initial, pgid, managedPid);
+      try {
+        return await inspectLiveMembers(exec, lsof, initial, pgid, managedPid);
+      } catch (error) {
+        if (!(error instanceof CwdLookupFailure)) throw error;
+
+        // A process can exit between ps and lsof. Resample the whole table once
+        // so a newly joined live member cannot be hidden by that race.
+        const current = await processTable(exec, ps);
+        const before = error.process;
+        const after = current.get(before.pid);
+        if (requireManaged)
+          assertManagedPresent(current, pgid, managedPid, error);
+        if (after !== undefined) {
+          if (after.start !== before.start) {
+            throw new Error(
+              `process ${before.pid} was reused during cwd lookup`,
+              { cause: error },
+            );
+          }
+          if (after.pgid !== before.pgid) {
+            // prettier-ignore
+            throw new Error(`process ${before.pid} changed process group during cwd lookup`, { cause: error });
+          }
+          if (!isZombie(after)) {
+            throw new Error(`cwd unreadable for live process ${before.pid}`, {
+              cause: error,
+            });
+          }
+          refuseManagedZombie(after, managedPid);
+        }
+        return inspectLiveMembers(exec, lsof, current, pgid, managedPid, false);
+      }
     },
     async signalGroup(pgid, signal) {
       try {
@@ -355,7 +387,7 @@ export function hostController() {
     },
     async readPlist(filePath) {
       // prettier-ignore
-      const { stdout } = await execFileAsync(plutil, ["-convert", "json", "-o", "-", filePath], { maxBuffer: 1e6 });
+      const { stdout } = await exec(plutil, ["-convert", "json", "-o", "-", filePath], { maxBuffer: 1e6 });
       return JSON.parse(stdout);
     },
     async ready(url) {
@@ -375,17 +407,114 @@ export function hostController() {
   return host;
 }
 
-async function psField(ps, pid, name, wide = false) {
+class CwdLookupFailure extends Error {
+  constructor(process, cause) {
+    super(`cwd lookup failed for process ${process.pid}`, { cause });
+    this.process = process;
+  }
+}
+
+async function processTable(exec, ps) {
+  // STAT and lstart come from the same ps row, binding zombie classification
+  // to the PID/start identity used by every later ownership comparison.
+  // prettier-ignore
+  const { stdout } = await exec(ps, ["-axo", "uid=,pid=,ppid=,pgid=,stat=,lstart=,ucomm="], { maxBuffer: 4e6 });
+  const processes = new Map();
+  for (const line of stdout.split("\n")) {
+    if (!line.trim()) continue;
+    const fields = line.trim().split(/\s+/);
+    if (fields.length < 11) throw new Error(`malformed ps row: ${line.trim()}`);
+    const [uid, pid, ppid, pgid] = fields.slice(0, 4).map(Number);
+    const stat = fields[4];
+    const start = fields.slice(5, 10).join(" ");
+    const executable = fields.slice(10).join(" ");
+    if (
+      ![uid, pid, ppid, pgid].every(Number.isSafeInteger) ||
+      pid <= 0 ||
+      !stat ||
+      !start ||
+      !executable ||
+      processes.has(pid)
+    ) {
+      throw new Error(`malformed ps row: ${line.trim()}`);
+    }
+    processes.set(pid, {
+      uid,
+      pid,
+      ppid,
+      pgid,
+      stat,
+      start,
+      executable,
+    });
+  }
+  return processes;
+}
+
+async function inspectLiveMembers(
+  exec,
+  lsof,
+  processes,
+  pgid,
+  managedPid,
+  allowResnapshot = true,
+) {
+  const members = [];
+  for (const process of processes.values()) {
+    if (process.pgid !== pgid) continue;
+    if (isZombie(process)) {
+      refuseManagedZombie(process, managedPid);
+      continue;
+    }
+    let cwd;
+    try {
+      cwd = await processCwd(exec, lsof, process.pid);
+    } catch (error) {
+      if (allowResnapshot) throw new CwdLookupFailure(process, error);
+      throw new Error(`cwd unreadable for live process ${process.pid}`, {
+        cause: error,
+      });
+    }
+    members.push({ ...process, cwd });
+  }
+  return members;
+}
+
+function isZombie(process) {
+  return process.stat.startsWith("Z");
+}
+
+function refuseManagedZombie(process, managedPid) {
+  if (process.pid === managedPid) {
+    throw new Error(`managed PID ${managedPid} is a zombie`);
+  }
+}
+
+function assertManagedPresent(processes, pgid, managedPid, cause) {
+  const managed = processes.get(managedPid);
+  if (managed === undefined) {
+    throw new Error(`managed PID ${managedPid} disappeared during snapshot`, {
+      ...(cause === undefined ? {} : { cause }),
+    });
+  }
+  if (managed.pgid !== pgid) {
+    throw new Error(`managed PID ${managedPid} changed process group`, {
+      ...(cause === undefined ? {} : { cause }),
+    });
+  }
+}
+
+async function psField(exec, ps, pid, name, wide = false) {
   const args = [...(wide ? ["-ww"] : []), "-p", String(pid), "-o", name];
   // prettier-ignore
-  const value = (await execFileAsync(ps, args, { maxBuffer: 262144 })).stdout.trim();
+  const value = (await exec(ps, args, { maxBuffer: 262144 })).stdout.trim();
   if (!value) throw new Error(`process ${pid} disappeared`);
   return value;
 }
 
-async function processCwd(lsof, pid) {
+async function processCwd(exec, lsof, pid) {
   // prettier-ignore
-  const value = (await execFileAsync(lsof, ["-a", "-p", String(pid), "-d", "cwd", "-Fn"])).stdout
+  const value = (await exec(lsof, ["-a", "-p", String(pid), "-d", "cwd", "-Fn"])).stdout
     .split("\n")
     .find((line) => line.startsWith("n"))
     ?.slice(1);

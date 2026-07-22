@@ -765,6 +765,12 @@ export class ClientGameRunner {
       new CustomEvent("ai-league-replay-frame", {
         detail: {
           tick: gu.tick,
+          // Clip rendering needs to distinguish a record's declared turn
+          // upper bound from the actual tick where simulation terminates.
+          // Expose only the fact of terminality, mirroring the Win update the
+          // page is already presenting. Never expose winner identity or the
+          // Win payload through this replay-frame event.
+          terminal: gu.updates[GameUpdateType.Win].length > 0,
           sequence: premiereProcessedSequence,
           turnNumber,
           players,

@@ -50,6 +50,18 @@ export const CLIP_CRF = 21;
 /** Shared mp4 track timescale so the slate concat (-c copy) stays clean. */
 export const CLIP_TIMESCALE = 15360;
 
+/** One ffmpeg phase must fail before it can consume the parent 6-minute cap. */
+export const DEFAULT_FFMPEG_TIMEOUT_MS = 120_000;
+
+/** A wedged page/main thread must fail one CDP command, not the whole job. */
+export const DEFAULT_CDP_COMMAND_TIMEOUT_MS = 30_000;
+
+/** A TCP peer that never completes the WebSocket upgrade must fail promptly. */
+export const DEFAULT_CDP_CONNECT_TIMEOUT_MS = 10_000;
+
+/** Launcher failures must reap Chrome and its descendants before returning. */
+const CHROME_PROCESS_TREE_CLEANUP_TIMEOUT_MS = 5_000;
+
 // ---------------------------------------------------------------------------
 // Frame shape
 // ---------------------------------------------------------------------------
@@ -130,32 +142,75 @@ export function clipReplayPageUrl(options: {
 }
 
 /**
- * Resolves the capture window for an anchor against the record's actual end.
+ * Resolves the capture window for an anchor against the record's terminal tick.
  *
  * Auto-clips anchor on the FINAL released moment, so the naive
  * `[anchor - lead, anchor + tail]` window always overruns the record end —
  * the capture then waits for a tick that can never arrive and the render
  * dies on its own timeout (2026-07-22 incident, second failure mode). The
- * window is clamped to the final turn and shifted BACK so the payoff clip
+ * window is clamped to the post-execution terminal tick and shifted BACK so the payoff clip
  * keeps its full span whenever the record allows.
  */
 export function resolveClipCaptureWindow(options: {
   anchorTurn: number;
   leadTicks: number;
   tailTicks: number;
-  /** Last turn number present in the record, or null when unknown. */
-  finalTurnNumber: number | null;
+  /** Final visible page tick after all record turns execute, or null when unknown. */
+  terminalTick: number | null;
 }): { parkTick: number; endTick: number } {
   const span = options.leadTicks + options.tailTicks;
   let endTick = options.anchorTurn + options.tailTicks;
   if (
-    options.finalTurnNumber !== null &&
-    Number.isSafeInteger(options.finalTurnNumber) &&
-    options.finalTurnNumber > 0
+    options.terminalTick !== null &&
+    Number.isSafeInteger(options.terminalTick) &&
+    options.terminalTick > 0
   ) {
-    endTick = Math.min(endTick, options.finalTurnNumber);
+    endTick = Math.min(endTick, options.terminalTick);
   }
   return { parkTick: Math.max(1, endTick - span), endTick };
+}
+
+/**
+ * Resolve the validated replay turn upper bound without mistaking sparse
+ * storage for record length. This is NOT necessarily a winner's terminal tick:
+ * core execution can emit Win below `info.num_turns`, so winner-bearing records
+ * must discover that terminal event in-page. A record with
+ * `info.num_turns === 50_400` can execute at most through visible tick 50,400;
+ * stopping at 50,399 would omit replay turn 50,399.
+ *
+ * The stored-turn fallback is intentionally used only when canonical metadata
+ * is absent or invalid, so a compressed record can never lower its bound merely
+ * because an empty tail was omitted. Stored turn numbers are zero-based input
+ * indexes, so the fallback upper-bound tick is `last + 1`.
+ */
+export function resolveReplayRecordUpperBoundTick(
+  record: unknown,
+): number | null {
+  if (record === null || typeof record !== "object") return null;
+  const candidate = record as {
+    info?: { num_turns?: unknown } | null;
+    turns?: unknown;
+  };
+  const declaredTurnCount = candidate.info?.num_turns;
+  if (
+    typeof declaredTurnCount === "number" &&
+    Number.isSafeInteger(declaredTurnCount) &&
+    declaredTurnCount > 0
+  ) {
+    return declaredTurnCount;
+  }
+
+  if (!Array.isArray(candidate.turns)) return null;
+  const lastTurn = candidate.turns.at(-1) as
+    | { turnNumber?: unknown }
+    | undefined;
+  return lastTurn !== undefined &&
+    typeof lastTurn.turnNumber === "number" &&
+    Number.isSafeInteger(lastTurn.turnNumber) &&
+    lastTurn.turnNumber >= 0 &&
+    lastTurn.turnNumber < Number.MAX_SAFE_INTEGER
+    ? lastTurn.turnNumber + 1
+    : null;
 }
 
 export function isClipFrameShape(value: unknown): value is ClipFrameShape {
@@ -299,17 +354,29 @@ export function resolveFfmpegBinary(env: NodeJS.ProcessEnv = process.env) {
 export async function runFfmpeg(
   ffmpegBinary: string,
   args: string[],
+  options: { timeoutMs?: number } = {},
 ): Promise<{ stderr: string }> {
+  const timeoutMs = options.timeoutMs ?? DEFAULT_FFMPEG_TIMEOUT_MS;
+  if (!Number.isSafeInteger(timeoutMs) || timeoutMs <= 0) {
+    throw new Error(`ffmpeg timeout must be a positive integer: ${timeoutMs}`);
+  }
   return await new Promise((resolve, reject) => {
     execFile(
       ffmpegBinary,
       args,
-      { maxBuffer: 64 * 1024 * 1024 },
+      {
+        maxBuffer: 64 * 1024 * 1024,
+        timeout: timeoutMs,
+        killSignal: "SIGKILL",
+      },
       (error, _stdout, stderr) => {
         if (error) {
+          const timedOut =
+            "killed" in error &&
+            (error as { killed?: unknown }).killed === true;
           reject(
             new Error(
-              `ffmpeg failed (${error.message.split("\n")[0]}):\n${stderr.slice(-2000)}`,
+              `${timedOut ? `ffmpeg timed out after ${timeoutMs}ms` : `ffmpeg failed (${error.message.split("\n")[0]})`}:\n${stderr.slice(-2000)}`,
             ),
           );
           return;
@@ -323,17 +390,22 @@ export async function runFfmpeg(
 /** Verify the ffmpeg binary responds to -version; return the version line. */
 export async function verifyFfmpeg(ffmpegBinary: string): Promise<string> {
   const result = await new Promise<string>((resolve, reject) => {
-    execFile(ffmpegBinary, ["-version"], (error, stdout) => {
-      if (error) {
-        reject(
-          new Error(`ffmpeg binary is not runnable: ${ffmpegBinary}`, {
-            cause: error,
-          }),
-        );
-        return;
-      }
-      resolve(stdout);
-    });
+    execFile(
+      ffmpegBinary,
+      ["-version"],
+      { timeout: DEFAULT_FFMPEG_TIMEOUT_MS, killSignal: "SIGKILL" },
+      (error, stdout) => {
+        if (error) {
+          reject(
+            new Error(`ffmpeg binary is not runnable: ${ffmpegBinary}`, {
+              cause: error,
+            }),
+          );
+          return;
+        }
+        resolve(stdout);
+      },
+    );
   });
   const firstLine = result.split("\n")[0]?.trim() ?? "";
   if (!firstLine.startsWith("ffmpeg version")) {
@@ -674,8 +746,14 @@ export type CdpEventHandler = (
 
 interface PendingCommand {
   method: string;
+  timeout: ReturnType<typeof setTimeout>;
   resolve: (value: Record<string, unknown>) => void;
   reject: (error: Error) => void;
+}
+
+export interface CdpClientConnectOptions {
+  commandTimeoutMs?: number;
+  connectTimeoutMs?: number;
 }
 
 /**
@@ -689,7 +767,10 @@ export class CdpClient {
   private readonly handlers = new Map<string, Set<CdpEventHandler>>();
   private closed = false;
 
-  private constructor(private readonly ws: WebSocket) {
+  private constructor(
+    private readonly ws: WebSocket,
+    private readonly commandTimeoutMs: number,
+  ) {
     ws.on("message", (data) => this.onMessage(String(data)));
     ws.on("close", () => this.failAllPending(new Error("CDP socket closed")));
     ws.on("error", (error) =>
@@ -699,15 +780,69 @@ export class CdpClient {
     );
   }
 
-  static async connect(wsUrl: string): Promise<CdpClient> {
-    const ws = new WebSocket(wsUrl, { maxPayload: 64 * 1024 * 1024 });
-    await new Promise<void>((resolve, reject) => {
-      ws.once("open", () => resolve());
-      ws.once("error", (error) =>
-        reject(new Error(`CDP connect failed: ${String(error)}`)),
+  static async connect(
+    wsUrl: string,
+    options: CdpClientConnectOptions = {},
+  ): Promise<CdpClient> {
+    const commandTimeoutMs =
+      options.commandTimeoutMs ?? DEFAULT_CDP_COMMAND_TIMEOUT_MS;
+    const connectTimeoutMs =
+      options.connectTimeoutMs ?? DEFAULT_CDP_CONNECT_TIMEOUT_MS;
+    if (!Number.isSafeInteger(commandTimeoutMs) || commandTimeoutMs <= 0) {
+      throw new Error(
+        `CDP command timeout must be a positive integer: ${commandTimeoutMs}`,
       );
+    }
+    if (!Number.isSafeInteger(connectTimeoutMs) || connectTimeoutMs <= 0) {
+      throw new Error(
+        `CDP connect timeout must be a positive integer: ${connectTimeoutMs}`,
+      );
+    }
+    const ws = new WebSocket(wsUrl, { maxPayload: 64 * 1024 * 1024 });
+    return await new Promise<CdpClient>((resolve, reject) => {
+      let settled = false;
+      const timer = setTimeout(() => {
+        if (settled) return;
+        settled = true;
+        clearHandshakeListeners();
+        // `terminate()` while CONNECTING emits an error; retain a listener so
+        // the deliberately aborted socket cannot surface an unhandled event.
+        ws.once("error", () => undefined);
+        ws.terminate();
+        reject(new Error(`CDP connect timed out after ${connectTimeoutMs}ms`));
+      }, connectTimeoutMs);
+      timer.unref?.();
+
+      const clearHandshakeListeners = (): void => {
+        clearTimeout(timer);
+        ws.off("open", handleOpen);
+        ws.off("error", handleError);
+        ws.off("close", handleClose);
+      };
+      const handleOpen = (): void => {
+        if (settled) return;
+        settled = true;
+        clearHandshakeListeners();
+        // Install the long-lived listeners synchronously in the open handler,
+        // leaving no gap in which an immediate close could go unobserved.
+        resolve(new CdpClient(ws, commandTimeoutMs));
+      };
+      const handleError = (error: Error): void => {
+        if (settled) return;
+        settled = true;
+        clearHandshakeListeners();
+        reject(new Error(`CDP connect failed: ${String(error)}`));
+      };
+      const handleClose = (): void => {
+        if (settled) return;
+        settled = true;
+        clearHandshakeListeners();
+        reject(new Error("CDP connect failed: socket closed before open"));
+      };
+      ws.once("open", handleOpen);
+      ws.once("error", handleError);
+      ws.once("close", handleClose);
     });
-    return new CdpClient(ws);
   }
 
   private onMessage(raw: string): void {
@@ -728,6 +863,7 @@ export class CdpClient {
       const pending = this.pending.get(message.id);
       if (!pending) return;
       this.pending.delete(message.id);
+      clearTimeout(pending.timeout);
       if (message.error) {
         pending.reject(
           new Error(
@@ -755,6 +891,7 @@ export class CdpClient {
   private failAllPending(error: Error): void {
     this.closed = true;
     for (const pending of this.pending.values()) {
+      clearTimeout(pending.timeout);
       pending.reject(error);
     }
     this.pending.clear();
@@ -775,13 +912,32 @@ export class CdpClient {
         : { id, method, params, sessionId },
     );
     return await new Promise((resolve, reject) => {
-      this.pending.set(id, { method, resolve, reject });
-      this.ws.send(payload, (error) => {
-        if (error) {
-          this.pending.delete(id);
-          reject(error);
-        }
-      });
+      const timeout = setTimeout(() => {
+        const pending = this.pending.get(id);
+        if (pending === undefined) return;
+        this.pending.delete(id);
+        pending.reject(
+          new Error(`CDP ${method} timed out after ${this.commandTimeoutMs}ms`),
+        );
+      }, this.commandTimeoutMs);
+      timeout.unref?.();
+      this.pending.set(id, { method, timeout, resolve, reject });
+      const rejectSend = (error: unknown): void => {
+        const pending = this.pending.get(id);
+        if (pending === undefined) return;
+        this.pending.delete(id);
+        clearTimeout(pending.timeout);
+        pending.reject(
+          new Error(`CDP ${method} send failed: ${String(error)}`),
+        );
+      };
+      try {
+        this.ws.send(payload, (error) => {
+          if (error) rejectSend(error);
+        });
+      } catch (error) {
+        rejectSend(error);
+      }
     });
   }
 
@@ -853,6 +1009,225 @@ async function sleep(ms: number): Promise<void> {
   await new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+async function waitForResolutionOrTimeout(
+  promise: Promise<unknown>,
+  timeoutMs: number,
+): Promise<void> {
+  if (timeoutMs <= 0) return;
+  await new Promise<void>((resolve) => {
+    let settled = false;
+    const finish = (): void => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve();
+    };
+    const timer = setTimeout(finish, timeoutMs);
+    void promise.then(finish, finish);
+  });
+}
+
+interface ProcessTableRow {
+  pid: number;
+  parentPid: number;
+  processGroupId: number;
+  status: string;
+}
+
+interface ProcessTableSnapshot {
+  rows: ProcessTableRow[];
+  inspectorPid: number | null;
+}
+
+async function readProcessTable(): Promise<ProcessTableSnapshot> {
+  let inspectorPid: number | null = null;
+  const stdout = await new Promise<string>((resolve, reject) => {
+    const inspector = execFile(
+      "/bin/ps",
+      ["-axo", "pid=,ppid=,pgid=,stat="],
+      { timeout: 2_000, killSignal: "SIGKILL", maxBuffer: 8 * 1024 * 1024 },
+      (error, output) => {
+        if (error) {
+          reject(
+            new Error(
+              `could not inspect Chrome process tree: ${error.message}`,
+            ),
+          );
+          return;
+        }
+        resolve(output);
+      },
+    );
+    inspectorPid = inspector.pid ?? null;
+  });
+  const rows: ProcessTableRow[] = [];
+  for (const line of stdout.split("\n")) {
+    const match = /^\s*(\d+)\s+(\d+)\s+(\d+)\s+(\S+)\s*$/.exec(line);
+    if (match === null) continue;
+    const pid = Number.parseInt(match[1], 10);
+    const parentPid = Number.parseInt(match[2], 10);
+    const processGroupId = Number.parseInt(match[3], 10);
+    const status = match[4];
+    if (pid > 0 && parentPid >= 0 && processGroupId > 0) {
+      rows.push({ pid, parentPid, processGroupId, status });
+    }
+  }
+  return { rows, inspectorPid };
+}
+
+async function currentProcessGroupId(): Promise<number> {
+  const current = (await readProcessTable()).rows.find(
+    (row) => row.pid === process.pid,
+  );
+  if (current === undefined) {
+    throw new Error(
+      `could not resolve clip worker process group for PID ${process.pid}`,
+    );
+  }
+  return current.processGroupId;
+}
+
+function descendantsOf(
+  rootPid: number,
+  rows: readonly ProcessTableRow[],
+): Set<number> {
+  const childrenByParent = new Map<number, number[]>();
+  for (const row of rows) {
+    const children = childrenByParent.get(row.parentPid) ?? [];
+    children.push(row.pid);
+    childrenByParent.set(row.parentPid, children);
+  }
+  const descendants = new Set<number>();
+  const pending = [...(childrenByParent.get(rootPid) ?? [])];
+  while (pending.length > 0) {
+    const pid = pending.pop();
+    if (pid === undefined || descendants.has(pid)) continue;
+    descendants.add(pid);
+    pending.push(...(childrenByParent.get(pid) ?? []));
+  }
+  return descendants;
+}
+
+function signalProcessIfPresent(pid: number, signal: NodeJS.Signals): void {
+  try {
+    process.kill(pid, signal);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error;
+  }
+}
+
+/**
+ * Reap one spawned Chrome subtree without killing the worker that owns it.
+ *
+ * Chrome intentionally inherits the detached clip worker's process group so
+ * the server's outer timeout can kill that whole group. From inside the worker
+ * we cannot signal the negative PGID: that would kill the worker before it can
+ * report a launch error. Instead, use that dedicated PGID as the ownership
+ * boundary (excluding the worker and exact `ps` inspector), repeatedly stop
+ * every member until the group is stable, then SIGKILL and confirm every
+ * captured PID has disappeared. Non-detached callers fall back to a rooted
+ * subtree so a shared shell/test PGID is never signalled.
+ */
+async function terminateChromeProcessTree(
+  child: ChildProcess,
+  closePromise: Promise<void>,
+  workerProcessGroupId: number,
+): Promise<void> {
+  const rootPid = child.pid;
+  const deadline = Date.now() + CHROME_PROCESS_TREE_CLEANUP_TIMEOUT_MS;
+  const capturedPids = new Set<number>();
+  // ReplayPremiereClips spawns the worker detached, so its PID is also its
+  // PGID. That dedicated group is the durable ownership boundary even after a
+  // Chrome root/helper exits and its surviving children are reparented. In a
+  // non-detached test or ad-hoc caller, never touch the caller's shared group;
+  // use only the still-rooted Chrome subtree.
+  const ownsDedicatedWorkerGroup = workerProcessGroupId === process.pid;
+  const rootedChromeIsRunning =
+    rootPid !== undefined &&
+    child.exitCode === null &&
+    child.signalCode === null;
+  if (!ownsDedicatedWorkerGroup && rootedChromeIsRunning) {
+    capturedPids.add(rootPid);
+  }
+  let inspectionError: Error | null = null;
+  try {
+    if (!ownsDedicatedWorkerGroup && rootedChromeIsRunning) {
+      signalProcessIfPresent(rootPid, "SIGSTOP");
+    }
+    let stableSnapshots = 0;
+    while (Date.now() < deadline && stableSnapshots < 2) {
+      const before = capturedPids.size;
+      const snapshot = await readProcessTable();
+      const rows = snapshot.rows;
+      const ownedPids = ownsDedicatedWorkerGroup
+        ? rows
+            .filter(
+              (row) =>
+                row.processGroupId === workerProcessGroupId &&
+                row.pid !== process.pid &&
+                row.pid !== snapshot.inspectorPid,
+            )
+            .map((row) => row.pid)
+        : rootPid === undefined
+          ? []
+          : [...descendantsOf(rootPid, rows)];
+      for (const pid of ownedPids) {
+        capturedPids.add(pid);
+        signalProcessIfPresent(pid, "SIGSTOP");
+      }
+      stableSnapshots = capturedPids.size === before ? stableSnapshots + 1 : 0;
+      if (stableSnapshots < 2) await sleep(10);
+    }
+  } catch (error) {
+    inspectionError = error instanceof Error ? error : new Error(String(error));
+  } finally {
+    // Descendants first is mostly documentary because every captured process
+    // is stopped, but it also prevents a child from briefly outliving the root.
+    for (const pid of [...capturedPids].reverse()) {
+      signalProcessIfPresent(pid, "SIGKILL");
+    }
+  }
+
+  const closeRemainingMs = Math.max(0, deadline - Date.now());
+  await waitForResolutionOrTimeout(closePromise, closeRemainingMs);
+  let survivors = await liveCapturedProcessIds(
+    capturedPids,
+    ownsDedicatedWorkerGroup ? workerProcessGroupId : null,
+  );
+  while (survivors.length > 0 && Date.now() < deadline) {
+    await sleep(25);
+    survivors = await liveCapturedProcessIds(
+      new Set(survivors),
+      ownsDedicatedWorkerGroup ? workerProcessGroupId : null,
+    );
+  }
+  if (inspectionError !== null) throw inspectionError;
+  if (survivors.length > 0) {
+    throw new Error(
+      `Chrome process-tree cleanup timed out; surviving PIDs: ${survivors.join(",")}`,
+    );
+  }
+}
+
+async function liveCapturedProcessIds(
+  capturedPids: ReadonlySet<number>,
+  ownedProcessGroupId: number | null,
+): Promise<number[]> {
+  if (capturedPids.size === 0) return [];
+  const rowsByPid = new Map(
+    (await readProcessTable()).rows.map((row) => [row.pid, row]),
+  );
+  return [...capturedPids].filter((pid) => {
+    const row = rowsByPid.get(pid);
+    if (row === undefined || row.status.startsWith("Z")) return false;
+    // If a captured PID was already reaped and reused, never treat a process
+    // outside the dedicated worker group as owned Chrome state.
+    return (
+      ownedProcessGroupId === null || row.processGroupId === ownedProcessGroupId
+    );
+  });
+}
+
 /**
  * Spawn headless Chrome with an isolated profile and discover the DevTools
  * endpoint via the profile's DevToolsActivePort file (NOT a fixed-port
@@ -886,6 +1261,9 @@ export async function launchHeadlessChrome(options: {
     "--no-first-run",
     "--no-default-browser-check",
   ];
+  // Resolve the boundary before spawning. If ownership cannot be proven, fail
+  // before Chrome exists rather than creating a process we cannot safely reap.
+  const workerProcessGroupId = await currentProcessGroupId();
   const child = spawn(chromeBinary, args, {
     stdio: ["ignore", "ignore", "pipe"],
   });
@@ -894,74 +1272,101 @@ export async function launchHeadlessChrome(options: {
     stderrTail = (stderrTail + chunk.toString("utf8")).slice(-4000);
   });
   let exited = false;
-  const exitPromise = new Promise<void>((resolve) => {
+  const launchState: { spawnError: Error | null } = { spawnError: null };
+  child.once("error", (error) => {
+    launchState.spawnError = error;
+  });
+  const closePromise = new Promise<void>((resolve) => {
     child.once("exit", () => {
+      exited = true;
+    });
+    child.once("close", () => {
       exited = true;
       resolve();
     });
   });
 
-  const deadline = Date.now() + timeoutMs;
-  let devtoolsPort: number | null = null;
-  let versionInfo: Record<string, unknown> | null = null;
-  while (Date.now() < deadline) {
-    if (exited) {
+  try {
+    const deadline = Date.now() + timeoutMs;
+    let devtoolsPort: number | null = null;
+    let versionInfo: Record<string, unknown> | null = null;
+    while (Date.now() < deadline) {
+      if (exited) {
+        const spawnErrorSuffix =
+          launchState.spawnError === null
+            ? ""
+            : ` (${launchState.spawnError.message})`;
+        throw new Error(
+          `Chrome exited before DevTools became ready${spawnErrorSuffix}. stderr tail:\n${stderrTail}`,
+        );
+      }
+      if (devtoolsPort === null) {
+        try {
+          const contents = await fs.readFile(portFile, "utf8");
+          const parsed = Number.parseInt(contents.split("\n")[0] ?? "", 10);
+          if (Number.isFinite(parsed) && parsed > 0) {
+            devtoolsPort = parsed;
+          }
+        } catch {
+          // Port file not written yet.
+        }
+      }
+      if (devtoolsPort !== null) {
+        try {
+          versionInfo = await httpGetJson(
+            `http://127.0.0.1:${devtoolsPort}/json/version`,
+          );
+          break;
+        } catch {
+          // The port file can exist before the endpoint listens; keep polling.
+        }
+      }
+      await sleep(100);
+    }
+    if (devtoolsPort === null || versionInfo === null) {
       throw new Error(
-        `Chrome exited before DevTools became ready. stderr tail:\n${stderrTail}`,
+        `DevTools endpoint not ready within ${timeoutMs}ms (port=${devtoolsPort ?? "unknown"}). stderr tail:\n${stderrTail}`,
       );
     }
-    if (devtoolsPort === null) {
-      try {
-        const contents = await fs.readFile(portFile, "utf8");
-        const parsed = Number.parseInt(contents.split("\n")[0] ?? "", 10);
-        if (Number.isFinite(parsed) && parsed > 0) {
-          devtoolsPort = parsed;
-        }
-      } catch {
-        // Port file not written yet.
-      }
+    const browserWsUrl = versionInfo["webSocketDebuggerUrl"];
+    if (typeof browserWsUrl !== "string" || browserWsUrl === "") {
+      throw new Error("Chrome /json/version returned no webSocketDebuggerUrl");
     }
-    if (devtoolsPort !== null) {
-      try {
-        versionInfo = await httpGetJson(
-          `http://127.0.0.1:${devtoolsPort}/json/version`,
-        );
-        break;
-      } catch {
-        // The port file can exist before the endpoint listens; keep polling.
-      }
-    }
-    await sleep(100);
-  }
-  if (devtoolsPort === null || versionInfo === null) {
-    child.kill("SIGKILL");
-    throw new Error(
-      `DevTools endpoint not ready within ${timeoutMs}ms (port=${devtoolsPort ?? "unknown"}). stderr tail:\n${stderrTail}`,
-    );
-  }
-  const browserWsUrl = versionInfo["webSocketDebuggerUrl"];
-  if (typeof browserWsUrl !== "string" || browserWsUrl === "") {
-    child.kill("SIGKILL");
-    throw new Error("Chrome /json/version returned no webSocketDebuggerUrl");
-  }
-  const browserVersion =
-    typeof versionInfo["Browser"] === "string"
-      ? (versionInfo["Browser"] as string)
-      : "unknown";
+    const browserVersion =
+      typeof versionInfo["Browser"] === "string"
+        ? (versionInfo["Browser"] as string)
+        : "unknown";
 
-  return {
-    process: child,
-    userDataDir: options.userDataDir,
-    devtoolsPort,
-    browserWsUrl,
-    browserVersion,
-    dispose: async () => {
-      if (!exited) {
-        child.kill("SIGKILL");
-      }
-      await Promise.race([exitPromise, sleep(5000)]);
-    },
-  };
+    return {
+      process: child,
+      userDataDir: options.userDataDir,
+      devtoolsPort,
+      browserWsUrl,
+      browserVersion,
+      dispose: async () => {
+        await terminateChromeProcessTree(
+          child,
+          closePromise,
+          workerProcessGroupId,
+        );
+      },
+    };
+  } catch (launchError) {
+    try {
+      await terminateChromeProcessTree(
+        child,
+        closePromise,
+        workerProcessGroupId,
+      );
+    } catch (cleanupError) {
+      throw new AggregateError(
+        [launchError, cleanupError],
+        `Chrome launch failed and process-tree cleanup did not complete: ${String(launchError)}`,
+        { cause: cleanupError },
+      );
+    }
+    throw launchError;
+  }
 }
 
 // ---------------------------------------------------------------------------

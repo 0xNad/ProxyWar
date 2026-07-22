@@ -279,6 +279,11 @@ describe("durable archived-clip promotion", () => {
     bucket: number,
     anchorTurn: number,
     bytes: Buffer,
+    manifestOverrides: {
+      sourceReplaySha256?: string;
+      outSha256?: string;
+      outBytes?: number;
+    } = {},
   ): Promise<void> {
     const dir = path.join(root, "clips-v1", premiereId);
     await fs.mkdir(dir, { recursive: true });
@@ -288,14 +293,14 @@ describe("durable archived-clip promotion", () => {
       path.join(dir, `clip-v1-${bucket}.render-manifest.json`),
       JSON.stringify({
         premiereId,
-        sourceReplaySha256: SOURCE_SHA,
+        sourceReplaySha256: manifestOverrides.sourceReplaySha256 ?? SOURCE_SHA,
         anchorTurn,
         clipVersion: 1,
         frameShape: "square",
         frameWidth: 1080,
         frameHeight: 1080,
-        outSha256: sha256Hex(bytes),
-        outBytes: bytes.length,
+        outSha256: manifestOverrides.outSha256 ?? sha256Hex(bytes),
+        outBytes: manifestOverrides.outBytes ?? bytes.length,
         generatedAt: "2026-07-20T18:00:01.000Z",
       }),
     );
@@ -328,6 +333,34 @@ describe("durable archived-clip promotion", () => {
     expect(result.reclaimed).toBe(true);
     expect(await exists(archivedClipPath(PREMIERE_ID))).toBe(false);
     expect(await exists(admissionPath(PREMIERE_ID))).toBe(false);
+  });
+
+  it("never promotes a cached clip whose source hash disagrees with the archive pointer", async () => {
+    await writeBulk();
+    await writeCachedClip(PREMIERE_ID, 61, 615, Buffer.alloc(64, 3), {
+      sourceReplaySha256: sha256Hex("foreign-source-bundle"),
+    });
+    const { reclaimer } = await reclaimerWith("2026-07-20T18:45:00.000Z");
+    const result = await reclaimer.reclaimIfEligible(target());
+
+    expect(result.reclaimed).toBe(true);
+    expect(result.pointer?.sourceReplaySha256).toBe(SOURCE_SHA);
+    expect(await exists(archivedClipPath(PREMIERE_ID))).toBe(false);
+    expect(await exists(archivedClipManifestPath(PREMIERE_ID))).toBe(false);
+  });
+
+  it("never promotes same-size clip bytes whose hash disagrees with the manifest", async () => {
+    await writeBulk();
+    const bytes = Buffer.alloc(64, 4);
+    await writeCachedClip(PREMIERE_ID, 61, 615, bytes, {
+      outSha256: sha256Hex(Buffer.alloc(bytes.length, 5)),
+    });
+    const { reclaimer } = await reclaimerWith("2026-07-20T18:45:00.000Z");
+    const result = await reclaimer.reclaimIfEligible(target());
+
+    expect(result.reclaimed).toBe(true);
+    expect(await exists(archivedClipPath(PREMIERE_ID))).toBe(false);
+    expect(await exists(archivedClipManifestPath(PREMIERE_ID))).toBe(false);
   });
 
   it("never promotes a clip for a premiere that was not reveal-public", async () => {

@@ -2,7 +2,18 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ClientGameRunner } from "../../src/client/ClientGameRunner";
 import { TickMetricsEvent } from "../../src/client/InputHandler";
 import { ReplayPremiereWorkerClient } from "../../src/client/ReplayPremiereWorkerClient";
-import { GameUpdateType } from "../../src/core/game/GameUpdates";
+import {
+  GameUpdateType,
+  type GameUpdateViewData,
+} from "../../src/core/game/GameUpdates";
+
+function emptyUpdates(): GameUpdateViewData["updates"] {
+  return Object.fromEntries(
+    Object.values(GameUpdateType)
+      .filter((value) => typeof value === "number")
+      .map((type) => [type, []]),
+  ) as unknown as GameUpdateViewData["updates"];
+}
 
 describe("ClientGameRunner replay startup errors", () => {
   beforeEach(() => {
@@ -107,18 +118,26 @@ describe("ClientGameRunner replay startup errors", () => {
       } as never,
     );
 
+    const update: GameUpdateViewData = {
+      tick: 9,
+      updates: emptyUpdates(),
+      packedTileUpdates: new Uint32Array(),
+      playerNameViewData: {},
+    };
+
     expect(() =>
       (
         runner as unknown as {
-          dispatchAiLeagueReplayFrame(update: { tick: number }): void;
+          dispatchAiLeagueReplayFrame(update: GameUpdateViewData): void;
         }
-      ).dispatchAiLeagueReplayFrame({ tick: 9 }),
+      ).dispatchAiLeagueReplayFrame(update),
     ).not.toThrow();
     expect(replayFrame).toHaveBeenCalledOnce();
     expect(
       (replayFrame.mock.calls[0]?.[0] as CustomEvent).detail,
     ).toMatchObject({
       tick: 9,
+      terminal: false,
       players: [
         {
           playerID: "player-ready",
