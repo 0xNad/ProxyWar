@@ -29,17 +29,20 @@ import {
   parseLeagueSummary,
   pickCompetitionDivision,
   premiereHrefForEpisode,
-  revealedPremiereIdsFromArchiveIndex,
+  resolveLatestRevealedPremiere,
   roundNumberByRoundId,
   scoreLabelFromStandings,
+  summarizePremiereArchiveIndex,
   type HostedEpisodeMeta,
   type ParsedHostedReplay,
+  type PremiereArchiveIndexSummary,
 } from "../server/agents/CoworldLeagueMirrorCore";
 import { withCoworldLeagueMirrorOperationLock } from "../server/agents/CoworldLeagueMirrorOperationLock";
 import {
   buildPremiereSiteBlock,
   classifyEpisodeSuppression,
   filterSuppressedEpisodeRows,
+  loadLatestPremierePointer,
   loadPremiereSuppressionContract,
   type PremiereSuppressionState,
 } from "../server/agents/CoworldLeaguePremiereSuppression";
@@ -72,6 +75,20 @@ import {
  * premiere gains a `/premiere/<premiereId>` link. The index is READ-ONLY here,
  * only reveal-public facts are extracted, and every failure mode fails open to
  * "no links". Default off: without the flag the mirror output is unchanged.
+ *
+ * Latest-premiere card (`--latest-premiere <absolute path>`): when pointed at
+ * the loop-written latest-revealed pointer (production:
+ * `$PROXYWAR_STORAGE_STATE_DIR/premiere-suppression/latest-premiere.json`,
+ * next to the suppression contract), the league page's premiere slot becomes
+ * persistent: whenever no LIVE premiere card is showing it renders the most
+ * recent REVEALED premiere as a watchable card, replaced only when the next
+ * premiere activates — so once any premiere has revealed, the slot is never
+ * empty. The pointer is the freshness source (written at reveal, before the
+ * ~30-minute terminal reclamation), READ-ONLY here, carries reveal-public
+ * facts only, and is cross-checked against the archive index when that is
+ * also wired (with the index's newest revealed entry as the fallback). Every
+ * failure mode fails open to "no card". Default off: without the flag the
+ * mirror output is unchanged.
  */
 
 const execFileAsync = promisify(execFile);
@@ -106,6 +123,13 @@ interface MirrorOptions {
    * cards without premiere links — the mirror then behaves exactly as before.
    */
   premiereArchiveIndexPath: string | null;
+  /**
+   * Absolute path to the loop-written latest-revealed-premiere pointer
+   * (`premiere-suppression/latest-premiere.json`), or null (default) to
+   * publish without the "Latest premiere" card — the mirror then behaves
+   * exactly as before.
+   */
+  latestPremierePointerPath: string | null;
 }
 
 function parseOptions(argv: string[]): MirrorOptions {
@@ -145,6 +169,7 @@ function parseOptions(argv: string[]): MirrorOptions {
     intervalSeconds: 300,
     suppressionContractPath: null,
     premiereArchiveIndexPath: null,
+    latestPremierePointerPath: null,
   };
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i];
@@ -220,6 +245,16 @@ function parseOptions(argv: string[]): MirrorOptions {
           );
         }
         options.premiereArchiveIndexPath = value;
+        break;
+      }
+      case "--latest-premiere": {
+        const value = next();
+        if (!path.isAbsolute(value)) {
+          throw new Error(
+            `--latest-premiere must be an absolute path: ${value}`,
+          );
+        }
+        options.latestPremierePointerPath = value;
         break;
       }
       default:
@@ -473,20 +508,22 @@ async function readSuppressionState(
 const maximumPremiereArchiveIndexBytes = 64 * 1024 * 1024;
 
 /**
- * Read the replay-premiere archive index and extract the ids of REVEALED
- * premieres for battle-card links. Fail-open on every failure mode — not
- * configured, missing (the normal pre-first-premiere state), unreadable, not
- * a regular file, or oversized — the mirror then publishes without premiere
- * links rather than degrading the feed. A link appears on the first mirror
- * cycle after the premiere's terminal reclamation (≤ ~30 minutes after
- * reveal); revealed-but-not-yet-reclaimed premieres are intentionally not
- * linked, so this reader never has to touch the live premiere catalog.
+ * Read the replay-premiere archive index into its mirror projection: REVEALED
+ * premiere ids for battle-card links plus the known-id/newest-revealed view
+ * the latest-premiere card cross-checks against. Fail-open on every failure
+ * mode — not configured, missing (the normal pre-first-premiere state),
+ * unreadable, not a regular file, or oversized — the mirror then publishes
+ * without premiere links rather than degrading the feed. A link appears on
+ * the first mirror cycle after the premiere's terminal reclamation (≤ ~30
+ * minutes after reveal); revealed-but-not-yet-reclaimed premieres are
+ * intentionally not linked, so this reader never has to touch the live
+ * premiere catalog.
  */
-async function readRevealedPremiereIds(
+async function readPremiereArchiveIndex(
   options: MirrorOptions,
-): Promise<ReadonlySet<string>> {
+): Promise<PremiereArchiveIndexSummary | null> {
   if (options.premiereArchiveIndexPath === null) {
-    return new Set();
+    return null;
   }
   try {
     const indexStat = await fs.stat(options.premiereArchiveIndexPath);
@@ -497,13 +534,15 @@ async function readRevealedPremiereIds(
       log(
         "premiere archive index skipped (not a regular file or over the byte ceiling); publishing without premiere links",
       );
-      return new Set();
+      return null;
     }
-    const revealed = revealedPremiereIdsFromArchiveIndex(
+    const summary = summarizePremiereArchiveIndex(
       await fs.readFile(options.premiereArchiveIndexPath, "utf8"),
     );
-    log(`premiere archive index: ${revealed.size} revealed premiere(s)`);
-    return revealed;
+    log(
+      `premiere archive index: ${summary.revealedIds.size} revealed premiere(s)`,
+    );
+    return summary;
   } catch (error) {
     const code =
       error !== null && typeof error === "object" && "code" in error
@@ -516,8 +555,39 @@ async function readRevealedPremiereIds(
         }`,
       );
     }
-    return new Set();
+    return null;
   }
+}
+
+/**
+ * Resolve the "Latest premiere" card for this cycle, or null when the feature
+ * is off (`--latest-premiere` not passed) or nothing revealed is known.
+ * Fail-open end to end: the pointer read tolerates missing/unreadable/
+ * malformed/oversized files, the resolver drops a pointer the archive index
+ * contradicts and falls back to the index's newest revealed entry, and any
+ * failure here only costs the card — never the cycle.
+ */
+async function readLatestPremiereCard(
+  options: MirrorOptions,
+  archiveIndex: PremiereArchiveIndexSummary | null,
+): Promise<ReturnType<typeof resolveLatestRevealedPremiere>> {
+  if (options.latestPremierePointerPath === null) {
+    return null;
+  }
+  const pointer = await loadLatestPremierePointer(
+    options.latestPremierePointerPath,
+  );
+  const latest = resolveLatestRevealedPremiere(pointer, archiveIndex);
+  if (latest !== null) {
+    log(
+      `latest premiere card: ${latest.premiereId} (${
+        pointer !== null && pointer.premiereId === latest.premiereId
+          ? "pointer"
+          : "archive-index fallback"
+      })`,
+    );
+  }
+  return latest;
 }
 
 async function pruneMirrorArtifacts(
@@ -633,9 +703,13 @@ async function syncOnce(options: MirrorOptions): Promise<void> {
   const recoveryReferences = options.recoverPinnedArtifacts
     ? await readCoworldLeagueRetentionPins(options.retentionPinManifestPath)
     : null;
-  // Revealed premieres, for spoiler-safe battle-card links. Read once per
-  // cycle; fail-open to an empty set (cards simply carry no premiere link).
-  const revealedPremiereIds = await readRevealedPremiereIds(options);
+  // Revealed premieres, for spoiler-safe battle-card links and the latest-
+  // premiere card's cross-check/fallback. Read once per cycle; fail-open to an
+  // absent summary (cards simply carry no premiere link, no latest card
+  // fallback).
+  const premiereArchiveIndex = await readPremiereArchiveIndex(options);
+  const revealedPremiereIds =
+    premiereArchiveIndex?.revealedIds ?? new Set<string>();
   // Read the contract at cycle start to log/observe suppression status. Only
   // the cycle-start OBSERVATION is skipped during operator-driven pinned-artifact
   // recovery; the final-defense filter below still runs unconditionally, so a
@@ -833,6 +907,14 @@ async function syncOnce(options: MirrorOptions): Promise<void> {
     );
   }
   const premiere = buildPremiereSiteBlock(finalSuppression, new Date());
+  // Latest REVEALED premiere for the between-premieres card. Read late (after
+  // the final suppression read) so a reveal that lands mid-cycle is already
+  // visible. Feature-gated on --latest-premiere; the site writer gives the
+  // live card precedence, so data.json may carry both while only one renders.
+  const latestPremiere = await readLatestPremiereCard(
+    options,
+    premiereArchiveIndex,
+  );
 
   const now = new Date().toISOString();
   const data: CoworldLeagueMirrorData = {
@@ -863,6 +945,9 @@ async function syncOnce(options: MirrorOptions): Promise<void> {
     // Only present when a premiere is currently claimed; omitting the key keeps
     // stale/absent-contract output byte-identical to pre-premiere behavior.
     ...(premiere !== null ? { premiere } : {}),
+    // Additive: only present when --latest-premiere resolved a revealed
+    // premiere; omitted otherwise so existing consumers see identical output.
+    ...(latestPremiere !== null ? { latestPremiere } : {}),
     links: {
       enterTheLeagueUrl: options.starterUrl,
       platformLabel: "Softmax Coworld",

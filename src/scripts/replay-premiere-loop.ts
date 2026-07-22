@@ -11,8 +11,11 @@ import {
   type CoworldLeagueRetentionPinManifest,
 } from "../server/agents/CoworldLeagueArtifactRetention";
 import {
+  LATEST_PREMIERE_POINTER_SCHEMA_VERSION,
+  latestPremierePointerPath,
   premiereSuppressionContractPath,
   premiereSuppressionStorageStateDir,
+  writeLatestPremierePointer,
   writePremiereSuppressionContract,
 } from "../server/agents/CoworldLeaguePremiereSuppression";
 import {
@@ -109,6 +112,7 @@ interface LoopConfig {
   leagueId: string;
   divisionId: string;
   contractPath: string;
+  latestPremierePointerPath: string;
   privateStateRoot: string;
   servedRoots: string[];
   deploymentOrigin: string | null;
@@ -149,6 +153,7 @@ function resolveLoopConfig(env: NodeJS.ProcessEnv): LoopConfig {
     leagueId: env.PROXYWAR_LEAGUE_ID ?? PREMIERE_LOOP_LEAGUE_ID,
     divisionId: env.PROXYWAR_LEAGUE_DIVISION_ID ?? PREMIERE_LOOP_DIVISION_ID,
     contractPath: premiereSuppressionContractPath(storageStateDir),
+    latestPremierePointerPath: latestPremierePointerPath(storageStateDir),
     privateStateRoot: resolveReplayPremierePrivateStateRoot(env),
     // Mirror the demo server's served roots exactly so admission's private
     // layout validation and the catalog the server reads at startup agree.
@@ -1139,6 +1144,16 @@ async function releaseHold(
   journal: JournalWriter,
   now: Date,
 ): Promise<void> {
+  // Latest-premiere pointer: ONLY a `revealed` release rewrites it, so the
+  // league mirror's between-premieres card always names the most recent
+  // premiere whose outcome is already public. Every other outcome (expired,
+  // failed_or_cancelled, activation_*, ingest/admit failures, …) leaves the
+  // previous pointer untouched. releaseHold is reachable only from the live
+  // iteration (shadow asserts a plan with writeLatestPremierePointer=false and
+  // never holds), so shadow mode can never write it.
+  if (outcome === "revealed") {
+    await recordLatestRevealedPremiere(hold, config, now);
+  }
   // ONLY-LATEST: this is the sole hold, so removing it leaves the zero-hold
   // STANDING contract (2026-07-22 operator reversal of requirement #4 — the
   // release path used to DELETE the contract here). The released episode
@@ -1152,6 +1167,37 @@ async function releaseHold(
   log(
     `released ${hold.premiereId} (${outcome}); episode publishes at quarantine expiry`,
   );
+}
+
+/**
+ * Persist the reveal-public pointer (atomic temp+rename, same pattern as the
+ * suppression contract) that the league mirror renders as the compact "Latest
+ * premiere" card between live premieres. All fields are already public
+ * post-reveal: roundNumber/mapLabel were on the live league card, revealedAt
+ * is when the public reveal happened. Best-effort by design — losing the
+ * pointer only costs the league page its latest-premiere card, so a write
+ * failure must never fail the release itself (the release un-suppresses the
+ * feed and must always complete).
+ */
+async function recordLatestRevealedPremiere(
+  hold: LoopHoldState,
+  config: LoopConfig,
+  now: Date,
+): Promise<void> {
+  try {
+    await writeLatestPremierePointer(config.latestPremierePointerPath, {
+      schemaVersion: LATEST_PREMIERE_POINTER_SCHEMA_VERSION,
+      premiereId: hold.premiereId,
+      roundNumber: hold.roundNumber,
+      mapLabel: hold.mapLabel,
+      revealedAt: now.toISOString(),
+    });
+    log(`latest-premiere pointer -> ${hold.premiereId}`);
+  } catch (error) {
+    log(
+      `latest-premiere pointer write failed (non-fatal): ${errorMessage(error)}`,
+    );
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -1436,6 +1482,7 @@ async function runShadowIteration(config: LoopConfig): Promise<void> {
   const plan = loopSideEffectPlan(true);
   if (
     plan.writeSuppressionContract ||
+    plan.writeLatestPremierePointer ||
     plan.pinArtifacts ||
     plan.admit ||
     plan.restart

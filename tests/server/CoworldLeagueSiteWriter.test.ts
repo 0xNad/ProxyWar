@@ -482,3 +482,176 @@ describe("writeCoworldLeagueSite", () => {
     ).rejects.toMatchObject({ code: "ENOENT" });
   });
 });
+
+describe("persistent premiere slot — latest revealed card", () => {
+  function latestPremiereSample() {
+    return {
+      premiereId: "prem_54d299b874f0adc7654fd1cc",
+      roundNumber: 651,
+      mapLabel: "Pangaea",
+      revealedAt: "2026-07-22T08:45:13.000Z",
+      href: "/premiere/prem_54d299b874f0adc7654fd1cc",
+    };
+  }
+
+  function livePremiereSample() {
+    return {
+      premiereId: "prem_0579c9b1e839847e2a50f216",
+      roundNumber: 652,
+      mapLabel: "World",
+      scheduledAt: "2026-07-22T09:06:00.000Z",
+      premierePageLive: true,
+    };
+  }
+
+  test("renders the latest revealed card as a first-class watchable card when nothing is premiering", () => {
+    const html = coworldLeagueIndexHtml({
+      ...sampleData(),
+      latestPremiere: latestPremiereSample(),
+    });
+    expect(html).toContain(
+      '<article class="premiere-card latest-premiere-card">',
+    );
+    expect(html).toContain(
+      '<div class="premiere-eyebrow">Latest premiere</div>',
+    );
+    expect(html).toContain("<span>Round 651</span>");
+    expect(html).toContain("<span>Pangaea</span>");
+    expect(html).toContain(
+      'Revealed <span data-utc="2026-07-22T08:45:13.000Z">2026-07-22 08:45Z</span>',
+    );
+    expect(html).toContain(
+      '<a class="button primary premiere-link" href="/premiere/prem_54d299b874f0adc7654fd1cc">Watch the premiere</a>',
+    );
+    // The full premiere-card visual language ships with the latest-only state.
+    expect(html).toContain(".premiere-card {");
+    // …minus every live-state signal: no red pill, no pulsing dot, no live
+    // variant attribute on the article. (Scoped CSS selector names still
+    // appear in <style>; assert on rendered markup.)
+    expect(html).not.toContain('class="premiere-badge live"');
+    expect(html).not.toContain('<span class="premiere-badge-dot"');
+    expect(html).not.toContain(
+      '<article class="premiere-card" data-premiere-live',
+    );
+    // And no winner/outcome text can exist on the card by construction.
+    expect(html).not.toContain("Sealed premiere");
+  });
+
+  test("the LIVE card always wins the slot; the two never co-render", () => {
+    const html = coworldLeagueIndexHtml({
+      ...sampleData(),
+      premiere: livePremiereSample(),
+      latestPremiere: latestPremiereSample(),
+    });
+    expect(html).toContain('class="premiere-badge live"');
+    expect(html).toContain('href="/premiere/prem_0579c9b1e839847e2a50f216"');
+    expect(html).not.toContain("latest-premiere-card");
+    expect(html).not.toContain("Latest premiere");
+    expect(html).not.toContain("prem_54d299b874f0adc7654fd1cc");
+  });
+
+  test("slot never empty once a latest revealed exists: exactly one premiere card in every state", () => {
+    const latestOnly = coworldLeagueIndexHtml({
+      ...sampleData(),
+      latestPremiere: latestPremiereSample(),
+    });
+    expect(latestOnly.match(/<article class="premiere-card/g)).toHaveLength(1);
+    const liveAndLatest = coworldLeagueIndexHtml({
+      ...sampleData(),
+      premiere: livePremiereSample(),
+      latestPremiere: latestPremiereSample(),
+    });
+    expect(liveAndLatest.match(/<article class="premiere-card/g)).toHaveLength(
+      1,
+    );
+    const liveOnly = coworldLeagueIndexHtml({
+      ...sampleData(),
+      premiere: livePremiereSample(),
+    });
+    expect(liveOnly.match(/<article class="premiere-card/g)).toHaveLength(1);
+  });
+
+  test("before any premiere has revealed the page carries no premiere bytes at all (flag-off byte-identical)", () => {
+    const html = coworldLeagueIndexHtml(sampleData());
+    expect(html).not.toContain("premiere");
+    expect(html).not.toContain("premiere-section");
+    expect(html).toContain(
+      '</div>\n    <section>\n      <h2 id="standings-title">Standings',
+    );
+  });
+
+  test("archive-fallback shape (round and map unknown) renders the reveal time and link only", () => {
+    const html = coworldLeagueIndexHtml({
+      ...sampleData(),
+      latestPremiere: {
+        ...latestPremiereSample(),
+        roundNumber: null,
+        mapLabel: "",
+      },
+    });
+    expect(html).toContain("latest-premiere-card");
+    // The first (and only) meta pill is the Revealed pill: no Round pill, no
+    // map pill, no empty pill.
+    expect(html).toContain('<div class="premiere-meta"><span>Revealed ');
+    expect(html).not.toContain("<span>Round 651</span>");
+    expect(html).not.toContain("<span></span>");
+    expect(html).toContain(
+      'Revealed <span data-utc="2026-07-22T08:45:13.000Z">',
+    );
+    expect(html).toContain('href="/premiere/prem_54d299b874f0adc7654fd1cc"');
+  });
+
+  test("escapes hostile latest-premiere fields", () => {
+    const html = coworldLeagueIndexHtml({
+      ...sampleData(),
+      latestPremiere: {
+        ...latestPremiereSample(),
+        mapLabel: '<script>alert("map")</script>',
+        href: '/premiere/prem_54d299b874f0adc7654fd1cc" onclick="x',
+      },
+    });
+    expect(html).not.toContain('<script>alert("map")</script>');
+    expect(html).toContain("&lt;script&gt;");
+    expect(html).not.toContain('" onclick="');
+  });
+});
+
+describe("latestPremiere data.json round-trip", () => {
+  let siteDir: string | null = null;
+
+  afterEach(async () => {
+    if (siteDir !== null) {
+      await rm(siteDir, { recursive: true, force: true });
+      siteDir = null;
+    }
+  });
+
+  test("latestPremiere round-trips additively and is absent when unset", async () => {
+    siteDir = await mkdtemp(path.join(tmpdir(), "league-site-latest-"));
+    const latestPremiere = {
+      premiereId: "prem_54d299b874f0adc7654fd1cc",
+      roundNumber: 651,
+      mapLabel: "Pangaea",
+      revealedAt: "2026-07-22T08:45:13.000Z",
+      href: "/premiere/prem_54d299b874f0adc7654fd1cc",
+    };
+    const paths = await writeCoworldLeagueSite(siteDir, {
+      ...sampleData(),
+      latestPremiere,
+    });
+    const roundTrip = JSON.parse(await readFile(paths.dataPath, "utf8"));
+    expect(roundTrip.latestPremiere).toEqual(latestPremiere);
+    // The polling-client contract fields the deployed client validates are
+    // untouched (the client only compares generatedAt and reloads).
+    expect(Array.isArray(roundTrip.standings)).toBe(true);
+    expect(Array.isArray(roundTrip.rounds)).toBe(true);
+    expect(Array.isArray(roundTrip.episodes)).toBe(true);
+    expect(typeof roundTrip.stale).toBe("boolean");
+    expect(typeof roundTrip.generatedAt).toBe("string");
+
+    const plainPaths = await writeCoworldLeagueSite(siteDir, sampleData());
+    const plain = JSON.parse(await readFile(plainPaths.dataPath, "utf8"));
+    expect(plain).not.toHaveProperty("latestPremiere");
+    expect(JSON.stringify(plain)).not.toContain("premiere");
+  });
+});

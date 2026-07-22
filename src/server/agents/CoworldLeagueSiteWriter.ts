@@ -91,6 +91,26 @@ export interface CoworldLeaguePremiereCard {
   premierePageLive: boolean;
 }
 
+/**
+ * The persistent premiere slot's REVEALED state: once any premiere has ever
+ * revealed, this card fills the slot whenever no LIVE premiere card is
+ * rendered, and is only ever REPLACED when the next premiere activates —
+ * never removed on a timer — so the slot is never empty again. Carries
+ * reveal-public facts only — round, map, reveal time, and the
+ * `/premiere/<id>` link (that page is post-reveal public) — and by
+ * construction NO winner/outcome text, so it can never spoil anything: it is
+ * only ever built for a premiere whose outcome is already public.
+ */
+export interface CoworldLeagueLatestPremiereCard {
+  premiereId: string;
+  roundNumber: number | null;
+  mapLabel: string;
+  /** ISO timestamp of the public reveal. */
+  revealedAt: string;
+  /** `/premiere/<premiereId>` for the archived premiere page. */
+  href: string;
+}
+
 export interface CoworldLeagueMirrorData {
   generatedAt: string;
   lastGoodSyncAt: string;
@@ -120,6 +140,15 @@ export interface CoworldLeagueMirrorData {
    * mirror output byte-identical to pre-premiere behavior.
    */
   premiere?: CoworldLeaguePremiereCard;
+  /**
+   * Optional most-recent REVEALED premiere. Additive: omitted whenever the
+   * mirror runs without `--latest-premiere` (byte-identical output) or no
+   * premiere has ever revealed. Rendered only when the LIVE premiere card is
+   * not — the live card always takes precedence and the two never co-render —
+   * so once any premiere has revealed, the premiere slot is never empty:
+   * exactly one of the live/latest cards shows.
+   */
+  latestPremiere?: CoworldLeagueLatestPremiereCard;
   links: {
     enterTheLeagueUrl: string;
     platformLabel: string;
@@ -405,14 +434,23 @@ export function coworldLeagueIndexHtml(data: CoworldLeagueMirrorData): string {
         )}</div>`
       : "";
   const watchLatest = data.episodes.find((episode) => episode.fullRenderHref);
-  const premiereSection = premiereCard(data.premiere);
-  // Premiere-only CSS, emitted ONLY when a premiere card is present. Keeping it
-  // out of the static <style> block when absent is what makes the mirror's
-  // index.html byte-identical to pre-premiere output for a stale/absent
-  // contract. Leading "\n    " with no trailing newline so it slots between two
-  // existing style rules without shifting any bytes when empty.
+  // The LIVE premiere card always takes precedence; the compact latest-revealed
+  // card fills the same slot ONLY when nothing is currently premiering, so the
+  // two never co-render.
+  const latestPremiere =
+    data.premiere === undefined ? data.latestPremiere : undefined;
+  const premiereSection =
+    data.premiere !== undefined
+      ? premiereCard(data.premiere)
+      : latestPremiereCard(latestPremiere);
+  // Premiere-only CSS, emitted ONLY when a premiere card (live or latest) is
+  // present. Keeping it out of the static <style> block when absent is what
+  // makes the mirror's index.html byte-identical to pre-premiere output for a
+  // stale/absent contract (and for a mirror running without
+  // --latest-premiere). Leading "\n    " with no trailing newline so it slots
+  // between two existing style rules without shifting any bytes when empty.
   const premiereStyles =
-    data.premiere === undefined
+    data.premiere === undefined && latestPremiere === undefined
       ? ""
       : "\n    " +
         [
@@ -1051,6 +1089,59 @@ function premiereScheduledBadge(scheduledAt: string): string {
   )}</span><span class="premiere-starts">${escapeHtml(
     before,
   )}${startsTime}${escapeHtml(after)}</span></div>`;
+}
+
+/**
+ * The premiere slot's REVEALED state: the most recent revealed premiere as a
+ * first-class watchable card, rendered whenever nothing is currently
+ * premiering (the caller enforces live-card precedence) and replaced only
+ * when the next premiere activates. Full premiere-card visual weight minus
+ * the live-state signals — no red LIVE pill, no pulsing dot — just the
+ * eyebrow, the round/map/reveal-time pills, and the primary watch link.
+ * Built ONLY from reveal-public fields (round, map, reveal time,
+ * `/premiere/<id>` href) and NEVER any winner/outcome text.
+ */
+function latestPremiereCard(
+  latest: CoworldLeagueLatestPremiereCard | undefined,
+): string {
+  if (latest === undefined) {
+    return "";
+  }
+  const metaPills: string[] = [];
+  if (latest.roundNumber !== null) {
+    metaPills.push(
+      `<span>Round ${escapeHtml(String(latest.roundNumber))}</span>`,
+    );
+  }
+  if (latest.mapLabel.length > 0) {
+    metaPills.push(`<span>${escapeHtml(latest.mapLabel)}</span>`);
+  }
+  // "Revealed {time}" with the timestamp in its own [data-utc] span so the
+  // page's existing localizer rewrites just the time while the prefix around
+  // the {time} placeholder is preserved (same pattern as the scheduled badge).
+  const [before, after = ""] = translateText(
+    "coworld_league.latest_premiere_revealed",
+  ).split("{time}");
+  const revealedTime = `<span data-utc="${escapeHtml(
+    latest.revealedAt,
+  )}">${escapeHtml(shortUtc(latest.revealedAt))}</span>`;
+  metaPills.push(
+    `<span>${escapeHtml(before)}${revealedTime}${escapeHtml(after)}</span>`,
+  );
+  return `
+    <section class="premiere-section">
+      <article class="premiere-card latest-premiere-card">
+        <div class="premiere-eyebrow">${escapeHtml(
+          translateText("coworld_league.latest_premiere_eyebrow"),
+        )}</div>
+        <div class="premiere-meta">${metaPills.join("")}</div>
+        <div class="actions"><a class="button primary premiere-link" href="${escapeHtml(
+          latest.href,
+        )}">${escapeHtml(
+          translateText("coworld_league.latest_premiere_watch"),
+        )}</a></div>
+      </article>
+    </section>`;
 }
 
 function formatTiles(value: number): string {

@@ -1,8 +1,10 @@
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, test } from "vitest";
 import {
+  LATEST_PREMIERE_POINTER_MAX_BYTES,
+  LATEST_PREMIERE_POINTER_SCHEMA_VERSION,
   PREMIERE_SUPPRESSION_DEFAULT_QUARANTINE_MS,
   PREMIERE_SUPPRESSION_MAX_CLOCK_SKEW_MS,
   PREMIERE_SUPPRESSION_SCHEMA_VERSION,
@@ -13,11 +15,16 @@ import {
   filterSuppressedEpisodeRows,
   isHeld,
   isQuarantined,
+  latestPremierePointerPath,
+  loadLatestPremierePointer,
   loadPremiereSuppressionContract,
+  parseLatestPremierePointer,
   parsePremiereSuppressionContract,
   premiereSuppressionContractPath,
   selectDisplayHold,
+  writeLatestPremierePointer,
   writePremiereSuppressionContract,
+  type LatestPremierePointer,
   type PremiereSuppressionContract,
   type PremiereSuppressionHold,
   type PremiereSuppressionState,
@@ -465,5 +472,149 @@ describe("selectDisplayHold / buildPremiereSiteBlock", () => {
       reason: "missing_file",
     };
     expect(buildPremiereSiteBlock(stale, NOW)).toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Latest-revealed-premiere pointer (loop writes, mirror reads)
+// ---------------------------------------------------------------------------
+
+function pointer(
+  overrides: Partial<LatestPremierePointer> = {},
+): LatestPremierePointer {
+  return {
+    schemaVersion: LATEST_PREMIERE_POINTER_SCHEMA_VERSION,
+    premiereId: "prem_54d299b874f0adc7654fd1cc",
+    roundNumber: 651,
+    mapLabel: "Pangaea",
+    revealedAt: "2026-07-22T04:51:41.304Z",
+    ...overrides,
+  };
+}
+
+describe("latestPremierePointerPath", () => {
+  test("lives next to the suppression contract under the same state dir", () => {
+    expect(latestPremierePointerPath("/custom")).toBe(
+      "/custom/premiere-suppression/latest-premiere.json",
+    );
+    expect(path.dirname(latestPremierePointerPath("/custom"))).toBe(
+      path.dirname(premiereSuppressionContractPath("/custom")),
+    );
+  });
+
+  test("honors PROXYWAR_STORAGE_STATE_DIR override", () => {
+    process.env.PROXYWAR_STORAGE_STATE_DIR = "/var/state";
+    expect(latestPremierePointerPath()).toBe(
+      "/var/state/premiere-suppression/latest-premiere.json",
+    );
+  });
+});
+
+describe("parseLatestPremierePointer — tolerant, fail-open", () => {
+  test("parses a valid pointer", () => {
+    expect(parseLatestPremierePointer(JSON.stringify(pointer()))).toEqual(
+      pointer(),
+    );
+  });
+
+  test("allows a null roundNumber and an empty mapLabel (archive-fallback shape)", () => {
+    expect(
+      parseLatestPremierePointer(
+        JSON.stringify(pointer({ roundNumber: null, mapLabel: "" })),
+      ),
+    ).toEqual(pointer({ roundNumber: null, mapLabel: "" }));
+  });
+
+  test("rejects every malformed shape with null, never a throw", () => {
+    const rejected: string[] = [
+      "",
+      "not json",
+      "[]",
+      "42",
+      JSON.stringify({ ...pointer(), schemaVersion: 2 }),
+      JSON.stringify({ ...pointer(), premiereId: "prem_UPPER-invalid00" }),
+      JSON.stringify({ ...pointer(), premiereId: "prem_short" }),
+      JSON.stringify({ ...pointer(), premiereId: 42 }),
+      JSON.stringify({ ...pointer(), revealedAt: "not a timestamp" }),
+      JSON.stringify({ ...pointer(), revealedAt: null }),
+      // JSON.parse reads 1e999 as Infinity — the non-finite roundNumber case.
+      JSON.stringify({ ...pointer() }).replace(
+        '"roundNumber":651',
+        '"roundNumber":1e999',
+      ),
+      JSON.stringify({ ...pointer(), roundNumber: "651" }),
+      JSON.stringify({ ...pointer(), mapLabel: 7 }),
+      JSON.stringify({ ...pointer(), mapLabel: "x".repeat(201) }),
+    ];
+    for (const raw of rejected) {
+      expect(parseLatestPremierePointer(raw)).toBeNull();
+    }
+  });
+});
+
+describe("loadLatestPremierePointer / writeLatestPremierePointer", () => {
+  test("a missing file loads as null (the pre-first-reveal state)", async () => {
+    const dir = await mkdtemp(path.join(tmpdir(), "premiere-pointer-"));
+    tmpDirs.push(dir);
+    expect(
+      await loadLatestPremierePointer(path.join(dir, "missing.json")),
+    ).toBeNull();
+  });
+
+  test("atomic write round-trips through the loader with no temp residue", async () => {
+    const dir = await mkdtemp(path.join(tmpdir(), "premiere-pointer-"));
+    tmpDirs.push(dir);
+    const pointerPath = latestPremierePointerPath(dir);
+    await writeLatestPremierePointer(pointerPath, pointer());
+    expect(await loadLatestPremierePointer(pointerPath)).toEqual(pointer());
+    const residue = (await readdir(path.dirname(pointerPath))).filter((entry) =>
+      entry.includes(".tmp"),
+    );
+    expect(residue).toEqual([]);
+    // Overwrite keeps only-latest semantics.
+    await writeLatestPremierePointer(
+      pointerPath,
+      pointer({
+        premiereId: "prem_0579c9b1e839847e2a50f216",
+        roundNumber: 652,
+      }),
+    );
+    expect(await loadLatestPremierePointer(pointerPath)).toEqual(
+      pointer({
+        premiereId: "prem_0579c9b1e839847e2a50f216",
+        roundNumber: 652,
+      }),
+    );
+  });
+
+  test("malformed, oversized, and directory pointers all load as null", async () => {
+    const dir = await mkdtemp(path.join(tmpdir(), "premiere-pointer-"));
+    tmpDirs.push(dir);
+    const malformed = path.join(dir, "malformed.json");
+    await writeFile(malformed, "{ torn");
+    expect(await loadLatestPremierePointer(malformed)).toBeNull();
+    const oversized = path.join(dir, "oversized.json");
+    await writeFile(
+      oversized,
+      `${JSON.stringify(pointer())}${" ".repeat(LATEST_PREMIERE_POINTER_MAX_BYTES)}`,
+    );
+    expect(await loadLatestPremierePointer(oversized)).toBeNull();
+    // A directory at the pointer path is "not a regular file" — absent.
+    expect(await loadLatestPremierePointer(dir)).toBeNull();
+  });
+
+  test("the written file is exactly the reveal-public field set", async () => {
+    const dir = await mkdtemp(path.join(tmpdir(), "premiere-pointer-"));
+    tmpDirs.push(dir);
+    const pointerPath = latestPremierePointerPath(dir);
+    await writeLatestPremierePointer(pointerPath, pointer());
+    const raw = JSON.parse(await readFile(pointerPath, "utf8")) as object;
+    expect(Object.keys(raw).sort()).toEqual([
+      "mapLabel",
+      "premiereId",
+      "revealedAt",
+      "roundNumber",
+      "schemaVersion",
+    ]);
   });
 });

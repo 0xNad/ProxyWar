@@ -12,11 +12,14 @@ import {
   parseLeagueSummary,
   pickCompetitionDivision,
   premiereHrefForEpisode,
+  resolveLatestRevealedPremiere,
   revealedPremiereIdsFromArchiveIndex,
   roundNumberByRoundId,
   scoreLabelFromStandings,
   shortEpisodeId,
+  summarizePremiereArchiveIndex,
 } from "../../src/server/agents/CoworldLeagueMirrorCore";
+import type { LatestPremierePointer } from "../../src/server/agents/CoworldLeaguePremiereSuppression";
 import { derivePremiereId } from "../../src/server/replay-premiere/ReplayPremiereLoopCore";
 
 const leagueFixture = {
@@ -774,5 +777,170 @@ describe("revealed-premiere battle-card links (every round premieres, 2026-07-22
       expect(row).not.toHaveProperty("premiereHref");
       expect(JSON.stringify(row)).not.toContain("premiere");
     }
+  });
+});
+
+describe("latest-premiere resolution (the persistent premiere slot's revealed state)", () => {
+  const revealedEpisodeId = "ereq_00000000-0000-0000-0000-0000000000aa";
+  const revealedPremiereId = derivePremiereId(revealedEpisodeId);
+  const indexLine = (overrides: Record<string, unknown> = {}): string =>
+    JSON.stringify({
+      schemaVersion: 1,
+      premiereId: revealedPremiereId,
+      sourceRunId: "coworld-2026-07-22T04-44-01-038Z-55ad38ae",
+      sourceKind: "rated_coworld",
+      terminalState: "revealed",
+      revealedAt: "2026-07-22T04:51:41.304Z",
+      publicationCommitmentHash: "a".repeat(64),
+      sourceReplaySha256: "b".repeat(64),
+      summaryHash: "c".repeat(64),
+      summaryRelPath: `summaries/${revealedPremiereId}.summary.json`,
+      reclaimedAt: "2026-07-22T05:22:20.478Z",
+      ...overrides,
+    });
+
+  function pointer(
+    overrides: Partial<LatestPremierePointer> = {},
+  ): LatestPremierePointer {
+    return {
+      schemaVersion: 1,
+      premiereId: "prem_54d299b874f0adc7654fd1cc",
+      roundNumber: 651,
+      mapLabel: "Pangaea",
+      revealedAt: "2026-07-22T08:45:13.000Z",
+      ...overrides,
+    };
+  }
+
+  test("summarizePremiereArchiveIndex projects revealed/known ids and the newest revealed entry", () => {
+    const raw = [
+      indexLine({
+        premiereId: "prem_older00000000older",
+        revealedAt: "2026-07-21T10:00:00.000Z",
+      }),
+      indexLine(),
+      indexLine({
+        premiereId: "prem_failed0000000failed",
+        terminalState: "failed",
+        revealedAt: null,
+      }),
+      "torn { line",
+    ].join("\n");
+    const summary = summarizePremiereArchiveIndex(raw);
+    expect(summary.revealedIds).toEqual(
+      new Set([revealedPremiereId, "prem_older00000000older"]),
+    );
+    expect(summary.knownIds).toEqual(
+      new Set([
+        revealedPremiereId,
+        "prem_older00000000older",
+        "prem_failed0000000failed",
+      ]),
+    );
+    expect(summary.newestRevealed).toEqual({
+      premiereId: revealedPremiereId,
+      revealedAt: "2026-07-22T04:51:41.304Z",
+    });
+  });
+
+  test("summarize keeps the LAST record per id and matches the legacy revealed-id set", () => {
+    const flippedOff = [
+      indexLine(),
+      indexLine({ terminalState: "failed", revealedAt: null }),
+    ].join("\n");
+    const summary = summarizePremiereArchiveIndex(flippedOff);
+    expect(summary.revealedIds).toEqual(new Set());
+    expect(summary.knownIds).toEqual(new Set([revealedPremiereId]));
+    expect(summary.newestRevealed).toBeNull();
+    expect(revealedPremiereIdsFromArchiveIndex(flippedOff)).toEqual(
+      summary.revealedIds,
+    );
+  });
+
+  test("an unparseable revealedAt keeps the id linkable but never elects it newest", () => {
+    const raw = indexLine({ revealedAt: "not a timestamp" });
+    const summary = summarizePremiereArchiveIndex(raw);
+    expect(summary.revealedIds).toEqual(new Set([revealedPremiereId]));
+    expect(summary.newestRevealed).toBeNull();
+  });
+
+  test("the pointer wins outright when no archive index is wired", () => {
+    expect(resolveLatestRevealedPremiere(pointer(), null)).toEqual({
+      premiereId: "prem_54d299b874f0adc7654fd1cc",
+      roundNumber: 651,
+      mapLabel: "Pangaea",
+      revealedAt: "2026-07-22T08:45:13.000Z",
+      href: "/premiere/prem_54d299b874f0adc7654fd1cc",
+    });
+  });
+
+  test("a pointer the index does not know yet is kept (the index lags reveal by design)", () => {
+    const summary = summarizePremiereArchiveIndex(indexLine());
+    const resolved = resolveLatestRevealedPremiere(pointer(), summary);
+    expect(resolved?.premiereId).toBe("prem_54d299b874f0adc7654fd1cc");
+    expect(resolved?.roundNumber).toBe(651);
+  });
+
+  test("a pointer the index knows as revealed is kept with its richer fields", () => {
+    const summary = summarizePremiereArchiveIndex(indexLine());
+    const resolved = resolveLatestRevealedPremiere(
+      pointer({ premiereId: revealedPremiereId }),
+      summary,
+    );
+    expect(resolved).toEqual({
+      premiereId: revealedPremiereId,
+      roundNumber: 651,
+      mapLabel: "Pangaea",
+      revealedAt: "2026-07-22T08:45:13.000Z",
+      href: `/premiere/${revealedPremiereId}`,
+    });
+  });
+
+  test("a pointer the index contradicts (non-revealed) is dropped, falling back to newest revealed", () => {
+    const raw = [
+      indexLine({
+        premiereId: "prem_contradicted0000001",
+        terminalState: "failed",
+        revealedAt: null,
+      }),
+      indexLine(),
+    ].join("\n");
+    const summary = summarizePremiereArchiveIndex(raw);
+    const resolved = resolveLatestRevealedPremiere(
+      pointer({ premiereId: "prem_contradicted0000001" }),
+      summary,
+    );
+    // Fallback carries no round/map (the index does not know them).
+    expect(resolved).toEqual({
+      premiereId: revealedPremiereId,
+      roundNumber: null,
+      mapLabel: "",
+      revealedAt: "2026-07-22T04:51:41.304Z",
+      href: `/premiere/${revealedPremiereId}`,
+    });
+  });
+
+  test("slot never empty once anything revealed exists: pointer OR archive entry resolves a card", () => {
+    const summary = summarizePremiereArchiveIndex(indexLine());
+    // Pointer alone.
+    expect(resolveLatestRevealedPremiere(pointer(), null)).not.toBeNull();
+    // Archive alone (pointer missing or invalid).
+    expect(resolveLatestRevealedPremiere(null, summary)).toEqual({
+      premiereId: revealedPremiereId,
+      roundNumber: null,
+      mapLabel: "",
+      revealedAt: "2026-07-22T04:51:41.304Z",
+      href: `/premiere/${revealedPremiereId}`,
+    });
+    // Nothing revealed anywhere: the only case the slot may be empty.
+    expect(resolveLatestRevealedPremiere(null, null)).toBeNull();
+    expect(
+      resolveLatestRevealedPremiere(
+        null,
+        summarizePremiereArchiveIndex(
+          indexLine({ terminalState: "failed", revealedAt: null }),
+        ),
+      ),
+    ).toBeNull();
   });
 });

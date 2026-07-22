@@ -974,6 +974,7 @@ describe("shadow-mode side-effect gate (safety proof)", () => {
     expect(loopSideEffectPlan(true)).toEqual({
       ingest: true,
       writeSuppressionContract: false,
+      writeLatestPremierePointer: false,
       pinArtifacts: false,
       admit: false,
       restart: false,
@@ -984,6 +985,7 @@ describe("shadow-mode side-effect gate (safety proof)", () => {
     expect(loopSideEffectPlan(false)).toEqual({
       ingest: true,
       writeSuppressionContract: true,
+      writeLatestPremierePointer: true,
       pinArtifacts: true,
       admit: true,
       restart: true,

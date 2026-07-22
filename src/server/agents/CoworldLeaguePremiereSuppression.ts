@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { promises as fs } from "node:fs";
 import path from "node:path";
+import { PREMIERE_ID_PATTERN } from "../replay-premiere/ReplayPremiereContracts";
 import type { CoworldLeaguePremiereCard } from "./CoworldLeagueSiteWriter";
 
 /**
@@ -456,4 +457,140 @@ export function buildPremiereSiteBlock(
     scheduledAt: hold.scheduledAt,
     premierePageLive: hold.premierePageLive,
   };
+}
+
+// ---------------------------------------------------------------------------
+// Latest-revealed-premiere pointer (loop writes, mirror reads)
+// ---------------------------------------------------------------------------
+
+export const LATEST_PREMIERE_POINTER_SCHEMA_VERSION = 1 as const;
+
+/**
+ * Byte ceiling for tolerant pointer reads. A valid pointer is a few hundred
+ * bytes; anything larger is treated as absent rather than parsed.
+ */
+export const LATEST_PREMIERE_POINTER_MAX_BYTES = 64 * 1024;
+
+/** mapLabel values beyond this are treated as malformed (fail open). */
+const LATEST_PREMIERE_POINTER_MAX_MAP_LABEL_LENGTH = 200;
+
+/**
+ * Small pointer the premiere loop rewrites atomically each time a hold is
+ * released with outcome `revealed` — and ONLY then, so between premieres it
+ * always names the most recent premiere whose outcome is already public. The
+ * league mirror renders it as the compact "Latest premiere" card whenever no
+ * live premiere card is showing. Every field is reveal-public: roundNumber and
+ * mapLabel were on the live league card during the premiere, and revealedAt is
+ * when the public reveal happened. Deliberately NO winner/outcome fields.
+ */
+export interface LatestPremierePointer {
+  schemaVersion: typeof LATEST_PREMIERE_POINTER_SCHEMA_VERSION;
+  premiereId: string;
+  roundNumber: number | null;
+  mapLabel: string;
+  /** ISO timestamp of the public reveal. */
+  revealedAt: string;
+}
+
+/**
+ * Canonical pointer path — next to the suppression contract, resolved through
+ * the same storage-state-dir knob. Never hardcode this string elsewhere.
+ */
+export function latestPremierePointerPath(
+  stateDir: string = premiereSuppressionStorageStateDir(),
+): string {
+  return path.join(stateDir, "premiere-suppression", "latest-premiere.json");
+}
+
+/**
+ * Tolerant parse of a raw pointer file. Any structural or field problem —
+ * bad JSON, wrong schema version, malformed premiere id, unparseable
+ * revealedAt, non-finite roundNumber, non-string/oversized mapLabel — yields
+ * null (card simply absent), never a throw and never a partial pointer.
+ */
+export function parseLatestPremierePointer(
+  raw: string,
+): LatestPremierePointer | null {
+  let value: unknown;
+  try {
+    value = JSON.parse(raw);
+  } catch {
+    return null;
+  }
+  if (!isRecord(value)) {
+    return null;
+  }
+  if (value.schemaVersion !== LATEST_PREMIERE_POINTER_SCHEMA_VERSION) {
+    return null;
+  }
+  const { premiereId, roundNumber, mapLabel, revealedAt } = value;
+  if (typeof premiereId !== "string" || !PREMIERE_ID_PATTERN.test(premiereId)) {
+    return null;
+  }
+  if (typeof revealedAt !== "string" || parseIsoMs(revealedAt) === null) {
+    return null;
+  }
+  if (
+    roundNumber !== null &&
+    (typeof roundNumber !== "number" || !Number.isFinite(roundNumber))
+  ) {
+    return null;
+  }
+  if (
+    typeof mapLabel !== "string" ||
+    mapLabel.length > LATEST_PREMIERE_POINTER_MAX_MAP_LABEL_LENGTH
+  ) {
+    return null;
+  }
+  return {
+    schemaVersion: LATEST_PREMIERE_POINTER_SCHEMA_VERSION,
+    premiereId,
+    roundNumber: roundNumber ?? null,
+    mapLabel,
+    revealedAt,
+  };
+}
+
+/**
+ * Load the pointer file, resolving EVERY failure mode — missing (the normal
+ * pre-first-reveal state), unreadable, not a regular file, over the byte
+ * ceiling, malformed — to null. Fail-open: a bad pointer only costs the league
+ * page its latest-premiere card, never a publication stall.
+ */
+export async function loadLatestPremierePointer(
+  pointerPath: string,
+): Promise<LatestPremierePointer | null> {
+  try {
+    const pointerStat = await fs.stat(pointerPath);
+    if (
+      !pointerStat.isFile() ||
+      pointerStat.size > LATEST_PREMIERE_POINTER_MAX_BYTES
+    ) {
+      return null;
+    }
+    return parseLatestPremierePointer(await fs.readFile(pointerPath, "utf8"));
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Atomically write the pointer (mkdir -p + temp file + rename), the same
+ * pattern as {@link writePremiereSuppressionContract}. The premiere loop is
+ * the only writer; the mirror only reads.
+ */
+export async function writeLatestPremierePointer(
+  pointerPath: string,
+  pointer: LatestPremierePointer,
+): Promise<void> {
+  await fs.mkdir(path.dirname(pointerPath), { recursive: true });
+  const temporaryPath = `${pointerPath}.${process.pid}.${randomUUID()}.tmp`;
+  const contents = `${JSON.stringify(pointer, null, 2)}\n`;
+  try {
+    await fs.writeFile(temporaryPath, contents);
+    await fs.rename(temporaryPath, pointerPath);
+  } catch (error) {
+    await fs.rm(temporaryPath, { force: true }).catch(() => undefined);
+    throw error;
+  }
 }

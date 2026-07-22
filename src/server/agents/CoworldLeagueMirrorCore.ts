@@ -1,9 +1,11 @@
 import { PREMIERE_ID_PATTERN } from "../replay-premiere/ReplayPremiereContracts";
 import { derivePremiereId } from "../replay-premiere/ReplayPremiereLoopCore";
 import type { AgentSpectatorReplay } from "./AgentSpectatorReplay";
+import type { LatestPremierePointer } from "./CoworldLeaguePremiereSuppression";
 import type {
   CoworldLeagueEpisodePlayerRow,
   CoworldLeagueEpisodeRow,
+  CoworldLeagueLatestPremiereCard,
   CoworldLeagueRoundRow,
   CoworldLeagueStandingRow,
 } from "./CoworldLeagueSiteWriter";
@@ -737,7 +739,34 @@ export function shortEpisodeId(episodeRequestId: string): string {
  * links — never a wrong one and never a publication stall.
  */
 export function revealedPremiereIdsFromArchiveIndex(raw: string): Set<string> {
-  const revealedById = new Map<string, boolean>();
+  return summarizePremiereArchiveIndex(raw).revealedIds;
+}
+
+/**
+ * Tolerant projection of the replay-premiere archive index for the mirror's
+ * two premiere consumers: battle-card links ({@link revealedIds}) and the
+ * latest-premiere card's cross-check + fallback ({@link knownIds},
+ * {@link newestRevealed}). Same parse semantics as
+ * {@link revealedPremiereIdsFromArchiveIndex} (which is now built on top of
+ * this): torn/invalid lines are skipped and a repeated premiere id keeps the
+ * LAST record (append-only index semantics).
+ */
+export interface PremiereArchiveIndexSummary {
+  /** Ids whose OUTCOME IS PUBLIC: terminal "revealed" with a reveal time. */
+  revealedIds: Set<string>;
+  /** Every premiere id present in the index, whatever its terminal state. */
+  knownIds: Set<string>;
+  /** The revealed entry with the newest parseable revealedAt, if any. */
+  newestRevealed: { premiereId: string; revealedAt: string } | null;
+}
+
+export function summarizePremiereArchiveIndex(
+  raw: string,
+): PremiereArchiveIndexSummary {
+  const lastById = new Map<
+    string,
+    { revealed: boolean; revealedAt: string | null }
+  >();
   for (const line of raw.split("\n")) {
     const trimmed = line.trim();
     if (trimmed.length === 0) {
@@ -757,17 +786,81 @@ export function revealedPremiereIdsFromArchiveIndex(raw: string): Set<string> {
     if (premiereId === null || !PREMIERE_ID_PATTERN.test(premiereId)) {
       continue;
     }
-    revealedById.set(
-      premiereId,
-      record.terminalState === "revealed" &&
-        asString(record.revealedAt) !== null,
-    );
+    const revealedAt = asString(record.revealedAt);
+    lastById.set(premiereId, {
+      revealed: record.terminalState === "revealed" && revealedAt !== null,
+      revealedAt,
+    });
   }
-  return new Set(
-    [...revealedById]
-      .filter(([, revealed]) => revealed)
-      .map(([premiereId]) => premiereId),
-  );
+  const revealedIds = new Set<string>();
+  let newestRevealed: PremiereArchiveIndexSummary["newestRevealed"] = null;
+  let newestRevealedMs = Number.NEGATIVE_INFINITY;
+  for (const [premiereId, record] of lastById) {
+    if (!record.revealed) {
+      continue;
+    }
+    revealedIds.add(premiereId);
+    const revealedAtMs = Date.parse(record.revealedAt ?? "");
+    if (!Number.isFinite(revealedAtMs) || record.revealedAt === null) {
+      continue;
+    }
+    if (
+      revealedAtMs > newestRevealedMs ||
+      (revealedAtMs === newestRevealedMs &&
+        (newestRevealed === null ||
+          premiereId.localeCompare(newestRevealed.premiereId) > 0))
+    ) {
+      newestRevealedMs = revealedAtMs;
+      newestRevealed = { premiereId, revealedAt: record.revealedAt };
+    }
+  }
+  return { revealedIds, knownIds: new Set(lastById.keys()), newestRevealed };
+}
+
+/**
+ * Resolve the "Latest premiere" card shown between live premieres.
+ *
+ * The loop-written pointer is the primary source (it carries round + map and
+ * appears at reveal time, before the ~30-minute terminal reclamation adds the
+ * premiere to the archive index). It is cross-checked against the archive
+ * index when one is available: a pointer whose premiere the index knows as
+ * anything OTHER than revealed is dropped — never render a card for a
+ * premiere whose outcome is not public. A pointer the index does not know yet
+ * is fine (the index lags reveal by design). When the pointer is absent,
+ * invalid, or dropped, fall back to the index's newest revealed entry (round
+ * and map are unknown there, so the card renders without those pills). Pure
+ * and fail-open: null in, null out — the card is simply absent.
+ */
+export function resolveLatestRevealedPremiere(
+  pointer: LatestPremierePointer | null,
+  archiveIndex: PremiereArchiveIndexSummary | null,
+): CoworldLeagueLatestPremiereCard | null {
+  if (pointer !== null) {
+    const contradictedByIndex =
+      archiveIndex !== null &&
+      archiveIndex.knownIds.has(pointer.premiereId) &&
+      !archiveIndex.revealedIds.has(pointer.premiereId);
+    if (!contradictedByIndex) {
+      return {
+        premiereId: pointer.premiereId,
+        roundNumber: pointer.roundNumber,
+        mapLabel: pointer.mapLabel,
+        revealedAt: pointer.revealedAt,
+        href: `/premiere/${encodeURIComponent(pointer.premiereId)}`,
+      };
+    }
+  }
+  const fallback = archiveIndex?.newestRevealed ?? null;
+  if (fallback === null) {
+    return null;
+  }
+  return {
+    premiereId: fallback.premiereId,
+    roundNumber: null,
+    mapLabel: "",
+    revealedAt: fallback.revealedAt,
+    href: `/premiere/${encodeURIComponent(fallback.premiereId)}`,
+  };
 }
 
 /**

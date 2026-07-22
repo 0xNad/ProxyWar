@@ -1058,7 +1058,10 @@
     "premiere_watch": "Watch live",
     "premiere_live": "LIVE",
     "premiere_label": "Premiere",
-    "premiere_starts": "Starts {time}"
+    "premiere_starts": "Starts {time}",
+    "latest_premiere_eyebrow": "Latest premiere",
+    "latest_premiere_revealed": "Revealed {time}",
+    "latest_premiere_watch": "Watch the premiere"
   },
   "replay_premiere": {
     "overlay_label": "Replay Premiere controls",

@@ -771,6 +771,8 @@ export interface LoopSideEffectPlan {
   ingest: boolean;
   /** Writing the suppression contract (which suppresses cards). */
   writeSuppressionContract: boolean;
+  /** Writing the latest-revealed-premiere pointer the league mirror renders. */
+  writeLatestPremierePointer: boolean;
   /** Adding/removing retention pins. */
   pinArtifacts: boolean;
   /** In-process admission into the catalog. */
@@ -782,14 +784,16 @@ export interface LoopSideEffectPlan {
 /**
  * The permitted side effects for the current mode. `--shadow` runs INGEST only
  * for safe live observation: it never writes a suppressing contract, never
- * pins, never admits, and never restarts, so a shadow run is provably
- * side-effect free against production state.
+ * writes the latest-premiere pointer, never pins, never admits, and never
+ * restarts, so a shadow run is provably side-effect free against production
+ * state.
  */
 export function loopSideEffectPlan(shadow: boolean): LoopSideEffectPlan {
   return shadow
     ? {
         ingest: true,
         writeSuppressionContract: false,
+        writeLatestPremierePointer: false,
         pinArtifacts: false,
         admit: false,
         restart: false,
@@ -797,6 +801,7 @@ export function loopSideEffectPlan(shadow: boolean): LoopSideEffectPlan {
     : {
         ingest: true,
         writeSuppressionContract: true,
+        writeLatestPremierePointer: true,
         pinArtifacts: true,
         admit: true,
         restart: true,
