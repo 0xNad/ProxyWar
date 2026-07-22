@@ -156,6 +156,28 @@ export interface ReplayPremiereHighlightedMomentView {
   turn: number;
 }
 
+export type ReplayPremiereWarEventKindView =
+  | "attack"
+  | "alliance"
+  | "betrayal"
+  | "nuke"
+  | "conquest"
+  | "emote"
+  | "chat";
+
+/**
+ * One spoiler-safe live war-narrative entry (attack launched, alliance
+ * formed/broken, nuke flying, emote/quick-chat). Derived client-side from the
+ * simulation updates already on screen — carries no outcome information.
+ */
+export interface ReplayPremiereWarEventView {
+  kind: ReplayPremiereWarEventKindView;
+  actor: string;
+  target: string | null;
+  detail: string | null;
+  turn: number;
+}
+
 export interface ReplayPremiereOverlayModel {
   premiereId: string;
   state: ReplayPremierePublicState;
@@ -175,6 +197,8 @@ export interface ReplayPremiereOverlayModel {
   checkpoints: ReplayPremiereCheckpointPair;
   activeCheckpointId?: string | null;
   leaders?: readonly ReplayPremiereLeaderView[];
+  /** Newest-first live war narrative shown during sealed playback. */
+  warEvents?: readonly ReplayPremiereWarEventView[];
   headlineEvent?: string | null;
   markerPolicySeatId?: string | null;
   share?: ReplayPremiereShareView | null;
@@ -531,6 +555,7 @@ const VOLATILE_MODEL_KEYS = new Set([
   "releasedSequence",
   "currentTurn",
   "leaders",
+  "warEvents",
   "headlineEvent",
   "authoritativeNow",
   "suggestedCaption",
@@ -570,6 +595,11 @@ function applyVolatileModelUpdates(
   const evidence = overlay.querySelector<HTMLElement>(".rp-ambient-evidence");
   if (evidence !== null) {
     evidence.replaceWith(renderAmbientEvidence(model));
+  }
+  // The battle feed is display-only too; refresh it in place per frame.
+  const warFeed = overlay.querySelector<HTMLElement>(".rp-war-feed");
+  if (warFeed !== null) {
+    warFeed.replaceWith(renderWarFeed(model));
   }
 }
 
@@ -615,13 +645,37 @@ function renderHeader(
 ): HTMLElement {
   const header = element("header", "rp-header");
   const titleGroup = element("div", "rp-title-group");
+  const labelRow = element("div", "rp-label-row");
   const label = element(
     "span",
     `rp-label rp-label-${labelTone(model)}`,
     publicLabel(model),
   );
+  labelRow.append(label);
+  // Broadcast-style LIVE chip in the STICKY header for the two live states,
+  // so the red dot + LIVE reads even when the body is scrolled or the reveal
+  // payoff fills the sheet. Structurally gated the same way as the body pill.
+  if (model.state === "playing" || model.state === "checkpoint") {
+    const live = element("span", "rp-live-chip");
+    live.setAttribute("role", "img");
+    live.setAttribute(
+      "aria-label",
+      translateText("replay_premiere.live_status"),
+    );
+    const dot = element("span", "rp-live-chip-dot");
+    dot.setAttribute("aria-hidden", "true");
+    live.append(
+      dot,
+      element(
+        "span",
+        "rp-live-chip-text",
+        translateText("replay_premiere.live_badge"),
+      ),
+    );
+    labelRow.append(live);
+  }
   const title = element("h2", "rp-title", safeDisplay(model.title));
-  titleGroup.append(label, title);
+  titleGroup.append(labelRow, title);
 
   const ambient = button(
     model.ambient
@@ -698,9 +752,13 @@ function renderStateBody(
       body.append(renderScheduled(model, callbacks, safeRun));
       break;
     case "playing":
+      // Order tuned for the capped sheet: LIVE status, then the reaction row
+      // (must be reachable without scrolling), then the war narrative and
+      // leaders, then share.
       body.append(renderPlaying(model));
-      body.append(renderAmbientEvidence(model));
       body.append(renderMarkers(model, latest, callbacks, safeRun));
+      body.append(renderWarFeed(model));
+      body.append(renderAmbientEvidence(model));
       body.append(renderShare(model, latest, callbacks, safeRun, captionState));
       break;
     case "checkpoint":
@@ -710,8 +768,9 @@ function renderStateBody(
       // still reads through the checkpoint timer pill.
       body.append(renderCheckpoint(model, callbacks, safeRun));
       body.append(renderPlaying(model));
-      body.append(renderAmbientEvidence(model));
       body.append(renderMarkers(model, latest, callbacks, safeRun));
+      body.append(renderWarFeed(model));
+      body.append(renderAmbientEvidence(model));
       body.append(renderShare(model, latest, callbacks, safeRun, captionState));
       break;
     case "revealed":
@@ -1268,6 +1327,127 @@ function renderAmbientEvidence(model: ReplayPremiereOverlayModel): HTMLElement {
     ),
   );
   section.append(leaders, headline);
+  return section;
+}
+
+const WAR_EVENT_GLYPHS: Record<ReplayPremiereWarEventKindView, string> = {
+  attack: "⚔",
+  alliance: "🤝",
+  betrayal: "†",
+  nuke: "☢",
+  conquest: "✕",
+  emote: "…",
+  chat: "…",
+};
+
+/** At most this many battle-feed rows are visible at once. */
+const WAR_FEED_VISIBLE_LIMIT = 6;
+
+function warEventText(event: ReplayPremiereWarEventView): string {
+  const actor = safeDisplay(event.actor);
+  const target = event.target === null ? null : safeDisplay(event.target);
+  switch (event.kind) {
+    case "attack":
+      return translateText("replay_premiere.war_attack", {
+        actor,
+        target: target ?? "",
+      });
+    case "alliance":
+      return translateText("replay_premiere.war_alliance", {
+        actor,
+        target: target ?? "",
+      });
+    case "betrayal":
+      return translateText("replay_premiere.war_betrayal", {
+        actor,
+        target: target ?? "",
+      });
+    case "nuke":
+      return translateText("replay_premiere.war_nuke", { actor });
+    case "conquest":
+      return translateText("replay_premiere.war_conquest", {
+        actor,
+        target: target ?? "",
+      });
+    case "emote": {
+      const detail = safeDisplay(event.detail ?? "");
+      return target === null
+        ? translateText("replay_premiere.war_emote_all", { actor, detail })
+        : translateText("replay_premiere.war_emote", {
+            actor,
+            target,
+            detail,
+          });
+    }
+    case "chat": {
+      // detail carries the quick-chat "{category}.{key}" suffix; translate
+      // through the canonical chat phrase table.
+      const phrase =
+        event.detail === null
+          ? ""
+          : translateText(`chat.${safeDisplay(event.detail)}`);
+      return target === null
+        ? translateText("replay_premiere.war_chat_all", {
+            actor,
+            message: phrase,
+          })
+        : translateText("replay_premiere.war_chat", {
+            actor,
+            target,
+            message: phrase,
+          });
+    }
+  }
+}
+
+/**
+ * The live battle feed: the war itself (attacks, alliances, betrayals,
+ * nukes, emotes, chat) as it happens on the sealed map. Spoiler-safe by
+ * construction — entries are facts of moments the viewer has already seen
+ * and never include standings, totals, or the outcome.
+ */
+function renderWarFeed(model: ReplayPremiereOverlayModel): HTMLElement {
+  const section = element("section", "rp-section rp-war-feed");
+  section.append(
+    element(
+      "h3",
+      "rp-subheading",
+      translateText("replay_premiere.war_feed_heading"),
+    ),
+  );
+  const events = (model.warEvents ?? []).slice(0, WAR_FEED_VISIBLE_LIMIT);
+  const list = element("ol", "rp-war-feed-list");
+  list.setAttribute("role", "list");
+  if (events.length === 0) {
+    list.append(
+      element(
+        "li",
+        "rp-muted rp-war-feed-empty",
+        translateText("replay_premiere.war_feed_waiting"),
+      ),
+    );
+  }
+  for (const event of events) {
+    const item = element("li", "rp-war-feed-item");
+    item.dataset.kind = event.kind;
+    const glyph = element(
+      "span",
+      "rp-war-feed-glyph",
+      WAR_EVENT_GLYPHS[event.kind] ?? "•",
+    );
+    glyph.setAttribute("aria-hidden", "true");
+    item.append(
+      glyph,
+      element("span", "rp-war-feed-text", warEventText(event)),
+      element(
+        "span",
+        "rp-war-feed-turn",
+        translateText("replay_premiere.war_turn", { turn: event.turn }),
+      ),
+    );
+    list.append(item);
+  }
+  section.append(list);
   return section;
 }
 
@@ -2622,6 +2802,29 @@ const OVERLAY_CSS = `
     background: var(--rp-bg-solid);
   }
   #${OVERLAY_ID} .rp-title-group { min-width: 0; display: grid; gap: 7px; }
+  #${OVERLAY_ID} .rp-label-row { display: flex; align-items: center; gap: 7px; min-width: 0; flex-wrap: wrap; }
+  #${OVERLAY_ID} .rp-live-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 3px 10px 3px 8px;
+    border: 1px solid var(--rp-live-border);
+    border-radius: var(--rp-r-pill);
+    background: var(--rp-live-soft);
+    color: var(--rp-live-text);
+    font-size: 10px;
+    font-weight: 850;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+  }
+  #${OVERLAY_ID} .rp-live-chip-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: var(--rp-r-pill);
+    background: var(--rp-live);
+    box-shadow: 0 0 0 0 rgba(239, 68, 68, 0.7);
+    animation: rp-live-now-pulse 1.6s ease-out infinite;
+  }
   #${OVERLAY_ID} .rp-title {
     margin: 0;
     overflow-wrap: anywhere;
@@ -3023,6 +3226,38 @@ const OVERLAY_CSS = `
   }
   #${OVERLAY_ID} .rp-leader-share { color: var(--rp-accent); font-variant-numeric: tabular-nums; font-weight: 750; }
 
+  /* ---- Battle feed ---- */
+  #${OVERLAY_ID} .rp-war-feed-list {
+    display: grid;
+    gap: 5px;
+    margin: 8px 0 0;
+    padding: 0;
+    list-style: none;
+  }
+  #${OVERLAY_ID} .rp-war-feed-item {
+    --rp-war: var(--rp-accent);
+    display: flex;
+    align-items: baseline;
+    gap: 8px;
+    padding: 5px 9px;
+    border-left: 3px solid var(--rp-war);
+    border-radius: var(--rp-r-xs);
+    background: var(--rp-surface-2);
+    font-size: 12.5px;
+    line-height: 1.35;
+  }
+  #${OVERLAY_ID} .rp-war-feed-item[data-kind="attack"] { --rp-war: var(--rp-danger); }
+  #${OVERLAY_ID} .rp-war-feed-item[data-kind="conquest"] { --rp-war: var(--rp-danger); }
+  #${OVERLAY_ID} .rp-war-feed-item[data-kind="betrayal"] { --rp-war: var(--rp-mk-betrayal); }
+  #${OVERLAY_ID} .rp-war-feed-item[data-kind="alliance"] { --rp-war: var(--rp-positive); }
+  #${OVERLAY_ID} .rp-war-feed-item[data-kind="nuke"] { --rp-war: var(--rp-caution); }
+  #${OVERLAY_ID} .rp-war-feed-item[data-kind="emote"],
+  #${OVERLAY_ID} .rp-war-feed-item[data-kind="chat"] { --rp-war: var(--rp-controlled); }
+  #${OVERLAY_ID} .rp-war-feed-glyph { flex: none; color: var(--rp-war); font-size: 13px; font-weight: 850; line-height: 1; }
+  #${OVERLAY_ID} .rp-war-feed-text { min-width: 0; overflow-wrap: anywhere; color: var(--rp-text-dim); font-weight: 600; }
+  #${OVERLAY_ID} .rp-war-feed-turn { margin-left: auto; color: var(--rp-muted); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 10.5px; white-space: nowrap; }
+  #${OVERLAY_ID} .rp-war-feed-empty { margin: 0; font-size: 12px; }
+
   /* ---- Reactions / markers ---- */
   #${OVERLAY_ID} .rp-marker-list { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 6px; margin-top: 9px; }
   #${OVERLAY_ID} .rp-marker-button {
@@ -3250,6 +3485,7 @@ const OVERLAY_CSS = `
   }
   #${OVERLAY_ID}[data-ambient="true"] .rp-header { padding: 9px 10px; }
   #${OVERLAY_ID}[data-ambient="true"] .rp-title { max-width: 190px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-size: 14px; }
+  #${OVERLAY_ID}[data-ambient="true"] .rp-war-feed,
   #${OVERLAY_ID}[data-ambient="true"] .rp-label,
   #${OVERLAY_ID}[data-ambient="true"] .rp-live-badge,
   #${OVERLAY_ID}[data-ambient="true"] .rp-shared-status,
@@ -3340,6 +3576,7 @@ const OVERLAY_CSS = `
   @media (prefers-reduced-motion: reduce) {
     #${OVERLAY_ID} * { scroll-behavior: auto !important; transition: none !important; }
     #${OVERLAY_ID} .rp-live-now-dot,
+    #${OVERLAY_ID} .rp-live-chip-dot,
     #${OVERLAY_ID} .rp-checkpoint-timer::before,
     #${OVERLAY_ID} .rp-clip-dot,
     #${OVERLAY_ID} .rp-reveal,

@@ -460,6 +460,150 @@ describe("ReplayPremiereOverlay", () => {
     ).not.toBe(markerBefore);
   });
 
+  it("shows the broadcast LIVE chip in the sticky header only while live", () => {
+    for (const state of ["playing", "checkpoint"] as const) {
+      const handle = mount(
+        makeModel({
+          state,
+          ...(state === "checkpoint"
+            ? { activeCheckpointId: "checkpoint-1" }
+            : {}),
+        }),
+      );
+      const chip = handle.element.querySelector(".rp-header .rp-live-chip");
+      expect(chip, state).not.toBeNull();
+      expect(chip?.textContent).toContain("replay_premiere.live_badge");
+      handle.dispose();
+    }
+    for (const state of ["scheduled", "revealed"] as const) {
+      const handle = mount(
+        makeModel({
+          state,
+          ...(state === "revealed"
+            ? {
+                reveal: {
+                  outcome: "winner" as const,
+                  winnerSeatId: "seat-a",
+                  summary: null,
+                },
+              }
+            : {}),
+        }),
+      );
+      expect(
+        handle.element.querySelector(".rp-header .rp-live-chip"),
+        state,
+      ).toBeNull();
+      handle.dispose();
+    }
+  });
+
+  it("keeps the reaction row above the feed and leaders on the live surface", () => {
+    const handle = mount(makeModel({ state: "playing" }), {
+      onMarker: vi.fn(),
+    });
+    const sections = [
+      ...handle.element.querySelectorAll(
+        ".rp-body > .rp-section, .rp-body > .rp-ambient-evidence",
+      ),
+    ].map((section) => section.className);
+    const markerIndex = sections.findIndex((name) =>
+      name.includes("rp-markers"),
+    );
+    const feedIndex = sections.findIndex((name) =>
+      name.includes("rp-war-feed"),
+    );
+    const evidenceIndex = sections.findIndex((name) =>
+      name.includes("rp-ambient-evidence"),
+    );
+    expect(markerIndex).toBeGreaterThan(-1);
+    expect(feedIndex).toBeGreaterThan(markerIndex);
+    expect(evidenceIndex).toBeGreaterThan(feedIndex);
+  });
+
+  it("renders the battle feed with a visible empty state and live entries", () => {
+    const model = makeModel({ state: "playing" });
+    const handle = mount(model);
+    expect(
+      handle.element.querySelector(".rp-war-feed-empty")?.textContent,
+    ).toBe("replay_premiere.war_feed_waiting");
+
+    handle.hydrate({
+      ...model,
+      warEvents: [
+        {
+          kind: "nuke",
+          actor: "Atlas Prime",
+          target: null,
+          detail: null,
+          turn: 900,
+        },
+        {
+          kind: "betrayal",
+          actor: "Borealis",
+          target: "Atlas Prime",
+          detail: null,
+          turn: 850,
+        },
+        {
+          kind: "emote",
+          actor: "Atlas Prime",
+          target: "Borealis",
+          detail: "😡",
+          turn: 820,
+        },
+      ],
+    });
+    const items = [
+      ...handle.element.querySelectorAll<HTMLElement>(".rp-war-feed-item"),
+    ];
+    expect(items).toHaveLength(3);
+    expect(items[0].dataset.kind).toBe("nuke");
+    expect(items[0].textContent).toContain(
+      "replay_premiere.war_nuke:actor=Atlas Prime",
+    );
+    expect(items[1].textContent).toContain(
+      "replay_premiere.war_betrayal:actor=Borealis,target=Atlas Prime",
+    );
+    expect(items[2].textContent).toContain("😡");
+    // No outcome-bearing text sneaks in through the feed.
+    expect(
+      handle.element.querySelector(".rp-body")?.textContent ?? "",
+    ).not.toContain("winner");
+  });
+
+  it("never anchors the reveal or results panels at an invisible base state", () => {
+    // Regression for the real-page "empty black panel": the entrance
+    // animations own their pre-state (keyframes + fill-mode) — the BASE rules
+    // must never set opacity:0, or an interrupted/disabled animation leaves
+    // the payoff permanently invisible (reduced motion disables them).
+    const handle = mount(
+      makeModel({
+        state: "revealed",
+        reveal: {
+          outcome: "winner",
+          winnerSeatId: "seat-a",
+          summary: null,
+        },
+      }),
+    );
+    const css = handle.element.querySelector("style")?.textContent ?? "";
+    for (const selector of [".rp-reveal {", ".rp-results {"]) {
+      const start = css.indexOf(selector);
+      expect(start, selector).toBeGreaterThan(-1);
+      const block = css.slice(start, css.indexOf("}", start));
+      expect(block).not.toContain("opacity");
+    }
+    // Reduced motion must fully disable the entrance animations so the
+    // panels render at their (visible) base state.
+    const reducedMotion = css.slice(
+      css.indexOf("prefers-reduced-motion: reduce"),
+    );
+    expect(reducedMotion).toContain(".rp-reveal,");
+    expect(reducedMotion).toContain(".rp-results,");
+    expect(reducedMotion).toContain("animation: none !important");
+  });
+
   it("maps unknown public failure input to fixed copy without rendering it", () => {
     const rawFailure =
       "/private/source/replay.json: token=secret Error: stack trace";

@@ -34,6 +34,7 @@ import {
   type ReplayPremiereReminderRequest,
   type ReplayPremiereResultsSummaryView,
   type ReplayPremiereShareRequest,
+  type ReplayPremiereWarEventView,
 } from "./ReplayPremiereOverlay";
 import {
   ReplayPremierePlaybackController,
@@ -1345,6 +1346,8 @@ export class ReplayPremiereRuntimeController {
     | null = null;
   private incomingMoment: ReplayPremiereHighlightedMomentView | null = null;
   private latestFrame: ReplayPremiereFrame | null = null;
+  /** Newest-first spoiler-safe war narrative (bounded ring; see war feed). */
+  private warFeed: ReplayPremiereWarEventView[] = [];
   private headlineEvent: string | null = null;
   private previousLeaderId: string | null = null;
   private recovery: ReplayPremiereRecoveryNotice | null = null;
@@ -1701,6 +1704,12 @@ export class ReplayPremiereRuntimeController {
     }
     this.previousLeaderId = leader?.playerID ?? this.previousLeaderId;
     this.latestFrame = frame;
+    if (frame.warEvents.length > 0) {
+      this.warFeed = [
+        ...frame.warEvents.slice().reverse(),
+        ...this.warFeed,
+      ].slice(0, MAX_WAR_FEED_ENTRIES);
+    }
     this.hydrateOverlay();
   };
 
@@ -2619,6 +2628,7 @@ export class ReplayPremiereRuntimeController {
           ? projectedActiveCheckpoint.id
           : null,
       leaders: frameLeaders(this.latestFrame),
+      warEvents: this.warFeed,
       headlineEvent: this.headlineEvent,
       markerPolicySeatId: null,
       share: {
@@ -2917,10 +2927,24 @@ interface ReplayPremiereFramePlayer {
   tilesOwned: number;
 }
 
+const WAR_EVENT_KINDS = new Set([
+  "attack",
+  "alliance",
+  "betrayal",
+  "nuke",
+  "conquest",
+  "emote",
+  "chat",
+]);
+const MAX_WAR_EVENTS_PER_FRAME = 12;
+/** Newest-first entries kept for the overlay's battle feed. */
+const MAX_WAR_FEED_ENTRIES = 8;
+
 interface ReplayPremiereFrame {
   sequence: number | null;
   turnNumber: number;
   players: ReplayPremiereFramePlayer[];
+  warEvents: ReplayPremiereWarEventView[];
 }
 
 interface ReplayPremiereVerifiedBinding {
@@ -3285,7 +3309,45 @@ function parseReplayPremiereFrame(value: unknown): ReplayPremiereFrame | null {
     sequence: sequence === null ? null : Number(sequence),
     turnNumber: Number(turnNumber),
     players: parsedPlayers,
+    warEvents: parseFrameWarEvents(value.warEvents),
   };
+}
+
+/**
+ * Lenient parse of the spoiler-safe war narrative riding the frame event:
+ * malformed entries are dropped (never a page-level failure — the feed is a
+ * display garnish, not an integrity surface).
+ */
+function parseFrameWarEvents(value: unknown): ReplayPremiereWarEventView[] {
+  if (!Array.isArray(value)) return [];
+  const events: ReplayPremiereWarEventView[] = [];
+  for (const entry of value.slice(0, MAX_WAR_EVENTS_PER_FRAME)) {
+    if (!isRecord(entry)) continue;
+    const { kind, actor, target, detail, turn } = entry;
+    if (
+      typeof kind !== "string" ||
+      !WAR_EVENT_KINDS.has(kind) ||
+      typeof actor !== "string" ||
+      actor.length === 0 ||
+      actor.length > 256 ||
+      (target !== null && typeof target !== "string") ||
+      (typeof target === "string" && target.length > 256) ||
+      (detail !== null && typeof detail !== "string") ||
+      (typeof detail === "string" && detail.length > 256) ||
+      !Number.isSafeInteger(turn) ||
+      Number(turn) < 0
+    ) {
+      continue;
+    }
+    events.push({
+      kind: kind as ReplayPremiereWarEventView["kind"],
+      actor,
+      target: (target ?? null) as string | null,
+      detail: (detail ?? null) as string | null,
+      turn: Number(turn),
+    });
+  }
+  return events;
 }
 
 function frameLeaders(
