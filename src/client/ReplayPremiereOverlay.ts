@@ -199,6 +199,10 @@ export interface ReplayPremiereOverlayModel {
   leaders?: readonly ReplayPremiereLeaderView[];
   /** Newest-first live war narrative shown during sealed playback. */
   warEvents?: readonly ReplayPremiereWarEventView[];
+  /** The viewer's own accepted marks per kind this session (0 when absent). */
+  markerCounts?: Partial<Record<ReplayPremiereMarkerKind, number>>;
+  /** The most recent server-accepted mark, for the confirmation line. */
+  markerConfirmation?: { kind: ReplayPremiereMarkerKind; turn: number } | null;
   headlineEvent?: string | null;
   markerPolicySeatId?: string | null;
   share?: ReplayPremiereShareView | null;
@@ -1485,9 +1489,15 @@ function renderMarkers(
     markerButton.dataset.kind = marker.kind;
     markerButton.dataset.focusKey = `marker-${marker.kind}`;
     markerButton.disabled = !markerEnabled;
+    const ownCount = model.markerCounts?.[marker.kind] ?? 0;
     markerButton.setAttribute(
       "aria-label",
-      translateText(marker.translationKey),
+      ownCount > 0
+        ? translateText("replay_premiere.marker_with_count", {
+            marker: translateText(marker.translationKey),
+            count: ownCount,
+          })
+        : translateText(marker.translationKey),
     );
     const symbol = element("span", "rp-marker-symbol", marker.symbol);
     symbol.setAttribute("aria-hidden", "true");
@@ -1496,7 +1506,14 @@ function renderMarkers(
       "rp-marker-label",
       translateText(marker.translationKey),
     );
-    markerButton.append(symbol, label);
+    // Always-rendered per-kind count (the viewer's own marks, 0-seeded) so
+    // the row reads as a live interactive tally, never as decoration.
+    const count = element("span", "rp-marker-count", String(ownCount));
+    count.setAttribute("aria-hidden", "true");
+    if (ownCount > 0) {
+      markerButton.dataset.marked = "true";
+    }
+    markerButton.append(count, symbol, label);
     markerButton.addEventListener("click", () => {
       safeRun(
         markerButton,
@@ -1520,6 +1537,38 @@ function renderMarkers(
     list.append(markerButton);
   }
   section.append(heading, list);
+  // The row must never look silently dead: while the anonymous interaction
+  // session is still connecting in a live state, say so; once a mark is
+  // accepted by the server, confirm it.
+  if (
+    !markerEnabled &&
+    callbacks.onMarker !== undefined &&
+    model.canMark === false &&
+    (model.state === "playing" || model.state === "checkpoint")
+  ) {
+    const connecting = element(
+      "p",
+      "rp-muted rp-marker-hint",
+      translateText("replay_premiere.reactions_connecting"),
+    );
+    connecting.setAttribute("role", "status");
+    section.append(connecting);
+  }
+  const confirmation = model.markerConfirmation ?? null;
+  if (confirmation !== null) {
+    const meta = MARKERS.find((entry) => entry.kind === confirmation.kind);
+    const confirmed = element(
+      "p",
+      "rp-marker-confirmed",
+      translateText("replay_premiere.marker_confirmed", {
+        marker: meta === undefined ? "" : translateText(meta.translationKey),
+        turn: confirmation.turn,
+      }),
+    );
+    confirmed.setAttribute("role", "status");
+    confirmed.setAttribute("aria-live", "polite");
+    section.append(confirmed);
+  }
   return section;
 }
 
@@ -3280,6 +3329,32 @@ const OVERLAY_CSS = `
   #${OVERLAY_ID} .rp-marker-button[data-kind="clip_this"] { --rp-mk: var(--rp-mk-clip); --rp-mk-soft: var(--rp-mk-clip-soft); }
   #${OVERLAY_ID} .rp-marker-button:hover:not(:disabled) { transform: translateY(-1px); border-color: var(--rp-mk); background: var(--rp-mk-soft); }
   #${OVERLAY_ID} .rp-marker-button:active:not(:disabled) { transform: translateY(0); }
+  #${OVERLAY_ID} .rp-marker-button { position: relative; }
+  #${OVERLAY_ID} .rp-marker-count {
+    position: absolute;
+    top: 3px;
+    right: 4px;
+    min-width: 14px;
+    padding: 0 3px;
+    border-radius: var(--rp-r-pill);
+    background: var(--rp-surface-3);
+    color: var(--rp-muted);
+    font-size: 9px;
+    font-weight: 800;
+    line-height: 14px;
+  }
+  #${OVERLAY_ID} .rp-marker-button[data-marked="true"] .rp-marker-count { background: var(--rp-mk); color: var(--rp-bg-solid); }
+  #${OVERLAY_ID} .rp-marker-hint { margin: 8px 0 0; font-size: 11.5px; }
+  #${OVERLAY_ID} .rp-marker-confirmed {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    margin: 8px 0 0;
+    color: var(--rp-positive-text);
+    font-size: 12px;
+    font-weight: 700;
+  }
+  #${OVERLAY_ID} .rp-marker-confirmed::before { content: "✓"; color: var(--rp-positive); font-weight: 900; }
   #${OVERLAY_ID} .rp-marker-symbol { display: block; color: var(--rp-mk); font-size: 19px; font-weight: 850; line-height: 1; }
   #${OVERLAY_ID} .rp-marker-label { display: block; margin-top: 4px; overflow-wrap: break-word; hyphens: manual; font-size: 10px; font-weight: 650; line-height: 1.12; }
 
@@ -3516,6 +3591,9 @@ const OVERLAY_CSS = `
   #${OVERLAY_ID}[data-ambient="true"] .rp-marker-list { grid-template-columns: repeat(5, 30px); gap: 5px; margin: 0; justify-content: space-between; }
   #${OVERLAY_ID}[data-ambient="true"] .rp-marker-button { min-height: 30px; height: 30px; width: 30px; padding: 1px; box-shadow: inset 0 2px 0 var(--rp-mk); }
   #${OVERLAY_ID}[data-ambient="true"] .rp-marker-symbol { font-size: 14px; }
+  #${OVERLAY_ID}[data-ambient="true"] .rp-marker-count,
+  #${OVERLAY_ID}[data-ambient="true"] .rp-marker-hint,
+  #${OVERLAY_ID}[data-ambient="true"] .rp-marker-confirmed { display: none; }
   #${OVERLAY_ID}[data-ambient="true"] .rp-marker-label {
     position: absolute;
     width: 1px;

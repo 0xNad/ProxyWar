@@ -395,6 +395,55 @@ describe("ReplayPremiereRuntimeController", () => {
     harness.runtime.dispose();
   });
 
+  it("bumps the viewer's own mark tally and confirmation on server-accepted reactions", async () => {
+    const responses = [
+      { idempotent: false, turn: 11 },
+      { idempotent: true, turn: 11 },
+    ];
+    const submitReaction = vi.fn(async (input?: { sequence: number }) => {
+      const next = responses.shift()!;
+      return {
+        schemaVersion: 1,
+        reaction: {
+          id: `react_${"c".repeat(24)}`,
+          premiereId: PREMIERE_ID,
+          participantId: `part_${"d".repeat(24)}`,
+          sequence: input?.sequence ?? 0,
+          turn: next.turn,
+          kind: "betrayal",
+          policyIdentity: null,
+          eventContext: {},
+          createdAt: STARTED_AT,
+        },
+        idempotent: next.idempotent,
+      } as unknown as ReplayPremiereServiceReactionResponse;
+    });
+    const harness = runtimeHarness({
+      state: "playing",
+      service: { submitReaction },
+    });
+    await bootstrapPlayingWithFrame(harness);
+    const marker = {
+      premiereId: PREMIERE_ID,
+      kind: "betrayal" as const,
+      sequence: 0,
+      turn: 0,
+      policySeatId: null,
+    };
+    await harness.overlayCallbacks.onMarker?.(marker);
+    expect(harness.models.at(-1)).toMatchObject({
+      markerCounts: { betrayal: 1 },
+      markerConfirmation: { kind: "betrayal", turn: 11 },
+    });
+    // An idempotent replay confirms but never double-counts.
+    await harness.overlayCallbacks.onMarker?.(marker);
+    expect(harness.models.at(-1)).toMatchObject({
+      markerCounts: { betrayal: 1 },
+      markerConfirmation: { kind: "betrayal", turn: 11 },
+    });
+    harness.runtime.dispose();
+  });
+
   it("defers a live-watch reveal until the viewer's frame reaches the released end", async () => {
     // Real-speed pacing: the map trails the release clock by up to one chunk
     // span, so a reveal landing mid-trail must NOT name the winner while the
@@ -2073,7 +2122,28 @@ function runtimeHarness(options: {
     submitPrediction: vi.fn(),
     submitReaction:
       options.service?.submitReaction === undefined
-        ? vi.fn()
+        ? vi.fn(
+            async (input: {
+              kind: string;
+              sequence: number;
+              turn: number | null;
+            }) =>
+              ({
+                schemaVersion: 1,
+                reaction: {
+                  id: `react_${"a".repeat(24)}`,
+                  premiereId: PREMIERE_ID,
+                  participantId: `part_${"b".repeat(24)}`,
+                  sequence: input.sequence,
+                  turn: input.turn ?? 0,
+                  kind: input.kind,
+                  policyIdentity: null,
+                  eventContext: {},
+                  createdAt: STARTED_AT,
+                },
+                idempotent: false,
+              }) as unknown as ReplayPremiereServiceReactionResponse,
+          )
         : vi.fn(options.service.submitReaction),
     createShare: vi.fn(),
     requestClip:

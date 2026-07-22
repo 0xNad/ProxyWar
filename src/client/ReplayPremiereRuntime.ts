@@ -24,6 +24,7 @@ import {
   type ReplayPremiereClipView,
   type ReplayPremiereCounterChallengeRequest,
   type ReplayPremiereHighlightedMomentView,
+  type ReplayPremiereMarkerKind,
   type ReplayPremiereMarkerRequest,
   type ReplayPremiereOverlayCallbacks,
   type ReplayPremiereOverlayHandle,
@@ -1348,6 +1349,12 @@ export class ReplayPremiereRuntimeController {
   private latestFrame: ReplayPremiereFrame | null = null;
   /** Newest-first spoiler-safe war narrative (bounded ring; see war feed). */
   private warFeed: ReplayPremiereWarEventView[] = [];
+  /** The viewer's own server-accepted marks per kind (session-local). */
+  private ownMarkCounts: Partial<Record<ReplayPremiereMarkerKind, number>> = {};
+  private lastMarkConfirmation: {
+    kind: ReplayPremiereMarkerKind;
+    turn: number;
+  } | null = null;
   private headlineEvent: string | null = null;
   private previousLeaderId: string | null = null;
   private recovery: ReplayPremiereRecoveryNotice | null = null;
@@ -2220,9 +2227,21 @@ export class ReplayPremiereRuntimeController {
         ) {
           throw serviceError("request_rejected");
         }
-        await this.strictInteractionWrite(() =>
+        const response = await this.strictInteractionWrite(() =>
           this.service.submitReaction(request),
         );
+        // Server-confirmed feedback: bump the viewer's own per-kind tally
+        // (idempotent replays of the same moment+kind do not double-count)
+        // and surface the acknowledgment line.
+        if (!response.idempotent) {
+          this.ownMarkCounts[request.kind] =
+            (this.ownMarkCounts[request.kind] ?? 0) + 1;
+        }
+        this.lastMarkConfirmation = {
+          kind: request.kind,
+          turn: response.reaction.turn,
+        };
+        this.hydrateOverlay();
       },
       onShare: (request) => this.share(request),
       onCopySuggestedCaption: (request) => this.copyCaption(request),
@@ -2629,6 +2648,8 @@ export class ReplayPremiereRuntimeController {
           : null,
       leaders: frameLeaders(this.latestFrame),
       warEvents: this.warFeed,
+      markerCounts: { ...this.ownMarkCounts },
+      markerConfirmation: this.lastMarkConfirmation,
       headlineEvent: this.headlineEvent,
       markerPolicySeatId: null,
       share: {

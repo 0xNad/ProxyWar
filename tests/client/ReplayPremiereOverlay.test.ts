@@ -572,6 +572,75 @@ describe("ReplayPremiereOverlay", () => {
     ).not.toContain("winner");
   });
 
+  it("renders the reaction row with zero-count badges in live states, never collapsed", () => {
+    // Regression for "where are annotations/reactions": with no prior
+    // reactions the section must still render five buttons with visible
+    // 0-count badges and invite interaction.
+    for (const state of ["playing", "checkpoint"] as const) {
+      const handle = mount(
+        makeModel({
+          state,
+          canMark: true,
+          ...(state === "checkpoint"
+            ? { activeCheckpointId: "checkpoint-1" }
+            : {}),
+        }),
+        { onMarker: vi.fn() },
+      );
+      const buttons = [
+        ...handle.element.querySelectorAll<HTMLButtonElement>(
+          ".rp-marker-button",
+        ),
+      ];
+      expect(buttons, state).toHaveLength(5);
+      for (const button of buttons) {
+        expect(button.disabled, state).toBe(false);
+        expect(
+          button.querySelector(".rp-marker-count")?.textContent,
+          state,
+        ).toBe("0");
+      }
+      handle.dispose();
+    }
+  });
+
+  it("explains a not-yet-connected reaction row instead of leaving it silently dead", () => {
+    const handle = mount(
+      makeModel({ state: "playing", canMark: false }),
+      { onMarker: vi.fn() },
+    );
+    const buttons = [
+      ...handle.element.querySelectorAll<HTMLButtonElement>(
+        ".rp-marker-button",
+      ),
+    ];
+    expect(buttons).toHaveLength(5);
+    expect(buttons.every((button) => button.disabled)).toBe(true);
+    expect(handle.element.querySelector(".rp-marker-hint")?.textContent).toBe(
+      "replay_premiere.reactions_connecting",
+    );
+  });
+
+  it("shows per-kind own-mark counts and the server-confirmed mark line", () => {
+    const handle = mount(
+      makeModel({
+        state: "playing",
+        canMark: true,
+        markerCounts: { betrayal: 2 },
+        markerConfirmation: { kind: "betrayal", turn: 512 },
+      }),
+      { onMarker: vi.fn() },
+    );
+    const betrayal = handle.element.querySelector<HTMLButtonElement>(
+      '.rp-marker-button[data-kind="betrayal"]',
+    );
+    expect(betrayal?.querySelector(".rp-marker-count")?.textContent).toBe("2");
+    expect(betrayal?.dataset.marked).toBe("true");
+    expect(
+      handle.element.querySelector(".rp-marker-confirmed")?.textContent,
+    ).toContain("turn=512");
+  });
+
   it("never anchors the reveal or results panels at an invisible base state", () => {
     // Regression for the real-page "empty black panel": the entrance
     // animations own their pre-state (keyframes + fill-mode) — the BASE rules
