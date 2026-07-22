@@ -57,6 +57,7 @@ import {
   fetchAndParseProxyWarAgentCard,
   normalizeProxyWarAgentCardInput,
 } from "../server/agents/ProxyWarAgentCard";
+import { sendPublicArtifactFile } from "../server/agents/ProxyWarArtifactStreaming";
 import {
   betaSessionCookieHeader,
   clearBetaSessionCookieHeader,
@@ -683,20 +684,17 @@ app.use((req, res, next) => {
   res.redirect(`/beta?next=${encodeURIComponent(req.originalUrl)}`);
 });
 
-app.get("/league", (_req, res) => {
+app.get("/league", (req, res) => {
   res.setHeader(
     "Content-Security-Policy",
     proxyWarLeagueContentSecurityPolicy(),
   );
-  res.sendFile(
+  sendPublicArtifactFile(
+    req,
+    res,
     path.join("league", "index.html"),
+    "league page not generated yet",
     { root: runsRootDir },
-    (error) => {
-      if (error !== undefined && error !== null) {
-        console.error(`Failed to serve the league page: ${error.message}`);
-        res.status(404).send("league page not generated yet");
-      }
-    },
   );
 });
 
@@ -2476,11 +2474,10 @@ function servePublicRunArtifact(
       proxyWarLeagueContentSecurityPolicy(),
     );
   }
-  res.sendFile(filePath, (error) => {
-    if (error !== undefined && error !== null) {
-      res.status(404).send("artifact not found");
-    }
-  });
+  // Large run bundles (e.g. the multi-MB spectator-replay.json) are streamed;
+  // a client that aborts mid-stream must not crash the process. See
+  // sendPublicArtifactFile / finishArtifactResponse.
+  sendPublicArtifactFile(req, res, filePath, "artifact not found");
 }
 
 function servePublicTournamentArtifact(
@@ -2501,11 +2498,7 @@ function servePublicTournamentArtifact(
     res.status(404).send("artifact not available");
     return;
   }
-  res.sendFile(filePath, (error) => {
-    if (error !== undefined && error !== null) {
-      res.status(404).send("artifact not found");
-    }
-  });
+  sendPublicArtifactFile(req, res, filePath, "artifact not found");
 }
 
 function servePublicDoc(req: express.Request, res: express.Response): void {
@@ -2517,25 +2510,24 @@ function servePublicDoc(req: express.Request, res: express.Response): void {
     res.status(404).send("doc not available");
     return;
   }
-  res.sendFile(path.join(docsRootDir, artifact), (error) => {
-    if (error !== undefined && error !== null) {
-      res.status(404).send("doc not found");
-    }
-  });
+  sendPublicArtifactFile(
+    req,
+    res,
+    path.join(docsRootDir, artifact),
+    "doc not found",
+  );
 }
 
 function serveProxyWarAgentBootstrapScript(
-  _req: express.Request,
+  req: express.Request,
   res: express.Response,
 ): void {
   res.setHeader("content-type", "text/x-shellscript; charset=utf-8");
-  res.sendFile(
+  sendPublicArtifactFile(
+    req,
+    res,
     path.join(externalAgentExampleRootDir, "bootstrap.sh"),
-    (error) => {
-      if (error !== undefined && error !== null) {
-        res.status(404).send("bootstrap script not found");
-      }
-    },
+    "bootstrap script not found",
   );
 }
 
@@ -2551,14 +2543,12 @@ function servePublicExternalAgentExample(
     res.status(404).send("example not available");
     return;
   }
-  res.sendFile(
+  sendPublicArtifactFile(
+    req,
+    res,
     path.join(externalAgentExampleRootDir, artifact),
+    "example not found",
     { dotfiles: "allow" },
-    (error) => {
-      if (error !== undefined && error !== null) {
-        res.status(404).send("example not found");
-      }
-    },
   );
 }
 

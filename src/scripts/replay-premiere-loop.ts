@@ -33,6 +33,7 @@ import {
   derivePremiereId,
   foldLoopJournal,
   holdExpiresAtForScheduled,
+  isCompletedTooOldToSeal,
   isHoldExpired,
   isManagedPublicRunKey,
   isTurnCountWithinStartupBudget,
@@ -705,6 +706,41 @@ async function readPremiereState(
   }
 }
 
+/**
+ * Read-only probe of the deployment origin: has the mirror already published
+ * this episode's public run-key bundle? A single HEAD to a run-key artifact
+ * transfers no body (so this never re-triggers the over-ceiling large-artifact
+ * fetch that this fix exists to avoid) and returns 200 only when the file is
+ * already on the public origin. Fail-open: a null origin, an unmanaged run key,
+ * a network error/timeout, a redirect, or any non-200 leaves the episode
+ * claimable, so a transient blip never blocks a fresh premiere.
+ */
+async function isEpisodeAlreadyPublic(
+  publicRunKey: string,
+  config: LoopConfig,
+): Promise<boolean> {
+  if (
+    config.deploymentOrigin === null ||
+    !isManagedPublicRunKey(publicRunKey)
+  ) {
+    return false;
+  }
+  const probeUrl = `${config.deploymentOrigin}/ai-league-runs/${encodeURIComponent(
+    publicRunKey,
+  )}/spectator.html`;
+  try {
+    const response = await fetch(probeUrl, {
+      method: "HEAD",
+      redirect: "error",
+      signal: AbortSignal.timeout(5_000),
+    });
+    await response.body?.cancel();
+    return response.status === 200;
+  } catch {
+    return false;
+  }
+}
+
 // ---------------------------------------------------------------------------
 // In-process ingest + admit
 // ---------------------------------------------------------------------------
@@ -1157,9 +1193,27 @@ async function claimRound(
     return;
   }
 
+  // Pre-admission already-public check. The mirror can publish a completed
+  // round between premieres (it only quarantines while a suppression contract
+  // is active), so a within-window round may still be on the public origin. A
+  // published outcome can no longer be sealed, and admitting it would drive the
+  // leak collector to fetch (and abort) the multi-MB public replay. Probe the
+  // origin BEFORE pin/contract/admit; skip terminally if it is already public.
+  const publicRunKey = publicRunKeyForSourceRunId(selected.facts.runId);
+  if (await isEpisodeAlreadyPublic(publicRunKey, config)) {
+    log(
+      `round ${round.roundNumber ?? "?"} episode ${selected.row.episodeRequestId} already public (${publicRunKey}); skipping pre-admission`,
+    );
+    await fs.rm(selected.rawReplayPath, { force: true }).catch(() => undefined);
+    await journal.appendRoundSkipped(
+      { id: round.id, roundNumber: round.roundNumber },
+      "already_public",
+    );
+    return;
+  }
+
   await pruneRawReplayCache(config, selected.rawReplayPath);
   const scheduledAt = scheduledAtForClaim(now);
-  const publicRunKey = publicRunKeyForSourceRunId(selected.facts.runId);
   const hold: LoopHoldState = {
     episodeRequestId: selected.row.episodeRequestId,
     premiereId: derivePremiereId(selected.row.episodeRequestId),
@@ -1435,6 +1489,27 @@ async function runLiveIteration(config: LoopConfig): Promise<void> {
   for (const ref of decision.supersededRoundIds) {
     await journal.appendRoundSkipped(ref, "skipped_superseded");
   }
+  // Cold-start / gap-recovery guard. The newest completed unpremiered round can
+  // itself be older than the seal window (e.g. the loop was down or in shadow
+  // across a round). Such a round has already been published by the mirror and
+  // can no longer be sealed, so skip it pre-claim — no download, no admission,
+  // no over-ceiling leak fetch. Fresh rounds (completed within the window) fall
+  // through unchanged; the precise per-episode check is the origin probe in
+  // claimRound. Fail-open: a null/unparseable completedAt stays claimable.
+  if (isCompletedTooOldToSeal(decision.round.completedAt, now)) {
+    await journal.appendRoundSkipped(
+      { id: decision.round.id, roundNumber: decision.round.roundNumber },
+      "too_old_to_seal",
+    );
+    await journal.appendDecision({
+      decision: "claim_skipped_too_old_to_seal",
+      round: decision.round.roundNumber,
+    });
+    log(
+      `round ${decision.round.roundNumber ?? "?"} completed too long ago to seal; skipping`,
+    );
+    return;
+  }
   if (!(await hasStorageFloor(config))) {
     await journal.appendDecision({ decision: "claim_skipped_storage_floor" });
     log("below storage floor; skipping claim this tick");
@@ -1554,5 +1629,5 @@ if (invokedDirectly) {
   });
 }
 
-export { main, resolveLoopConfig };
+export { isEpisodeAlreadyPublic, main, resolveLoopConfig };
 export type { LoopConfig };

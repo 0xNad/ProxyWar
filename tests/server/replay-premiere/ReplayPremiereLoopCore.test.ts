@@ -15,6 +15,7 @@ import {
   PREMIERE_LOOP_HOLD_WINDOW_MS,
   PREMIERE_LOOP_MAX_PIPELINE_ATTEMPTS,
   PREMIERE_LOOP_SCHEDULE_LEAD_MS,
+  PREMIERE_LOOP_SEAL_WINDOW_MS,
   PREMIERE_LOOP_TURN_STARTUP_BUDGET,
   buildLoopEligibilityInput,
   buildLoopPremiereDefinition,
@@ -26,6 +27,7 @@ import {
   derivePremiereId,
   foldLoopJournal,
   holdExpiresAtForScheduled,
+  isCompletedTooOldToSeal,
   isHoldExpired,
   isManagedPublicRunKey,
   isTurnCountWithinStartupBudget,
@@ -554,5 +556,74 @@ describe("shadow-mode side-effect gate (safety proof)", () => {
       admit: true,
       restart: true,
     });
+  });
+});
+
+describe("isCompletedTooOldToSeal — cold-start / already-public pre-admission gate", () => {
+  test("a round completed longer ago than the seal window is too old to seal", () => {
+    // The reported cold-start churn: round 633's episode had completed ~40 min
+    // earlier (already published by the mirror) and must be skipped pre-claim.
+    const completedAt = new Date(NOW.getTime() - 40 * 60_000).toISOString();
+    expect(isCompletedTooOldToSeal(completedAt, NOW)).toBe(true);
+  });
+
+  test("a freshly-completed round is still sealable", () => {
+    // The default `round()` helper completes 90s before NOW — well inside the
+    // window — and must NOT be gated.
+    expect(isCompletedTooOldToSeal(round().completedAt, NOW)).toBe(false);
+    const justNow = new Date(NOW.getTime() - 30_000).toISOString();
+    expect(isCompletedTooOldToSeal(justNow, NOW)).toBe(false);
+  });
+
+  test("fail-open: null or unparseable completion time stays claimable", () => {
+    expect(isCompletedTooOldToSeal(null, NOW)).toBe(false);
+    expect(isCompletedTooOldToSeal("not-a-date", NOW)).toBe(false);
+  });
+
+  test("the boundary is strict: exactly at the window is not yet too old", () => {
+    const atWindow = new Date(
+      NOW.getTime() - PREMIERE_LOOP_SEAL_WINDOW_MS,
+    ).toISOString();
+    const pastWindow = new Date(
+      NOW.getTime() - PREMIERE_LOOP_SEAL_WINDOW_MS - 1,
+    ).toISOString();
+    expect(isCompletedTooOldToSeal(atWindow, NOW)).toBe(false);
+    expect(isCompletedTooOldToSeal(pastWindow, NOW)).toBe(true);
+  });
+
+  test("future completion (clock skew) is never too old", () => {
+    const future = new Date(NOW.getTime() + 5 * 60_000).toISOString();
+    expect(isCompletedTooOldToSeal(future, NOW)).toBe(false);
+  });
+
+  test("the seal window equals the hold window and honours a custom override", () => {
+    expect(PREMIERE_LOOP_SEAL_WINDOW_MS).toBe(PREMIERE_LOOP_HOLD_WINDOW_MS);
+    const tenMinAgo = new Date(NOW.getTime() - 10 * 60_000).toISOString();
+    expect(isCompletedTooOldToSeal(tenMinAgo, NOW, 5 * 60_000)).toBe(true);
+    expect(isCompletedTooOldToSeal(tenMinAgo, NOW, 15 * 60_000)).toBe(false);
+  });
+
+  test("the newest completed round is claim-decided, then gated pre-admission when too old", () => {
+    // decideLoopClaim still selects the newest round; the loop then applies the
+    // seal-window gate BEFORE downloading or admitting it. This composition is
+    // exactly what runLiveIteration wires: claim -> too-old check -> skip.
+    const staleCompletedAt = new Date(
+      NOW.getTime() - 45 * 60_000,
+    ).toISOString();
+    const decision = decideLoopClaim({
+      rounds: [
+        round({
+          id: "round_633",
+          roundNumber: 633,
+          status: "completed",
+          completedAt: staleCompletedAt,
+        }),
+      ],
+      folded: foldLoopJournal([]),
+    });
+    expect(decision.kind).toBe("claim");
+    if (decision.kind !== "claim") return;
+    // The gate the orchestrator applies to decision.round before claimRound.
+    expect(isCompletedTooOldToSeal(decision.round.completedAt, NOW)).toBe(true);
   });
 });

@@ -39,6 +39,19 @@ export const PREMIERE_LOOP_SCHEDULE_LEAD_MS = 5 * 60_000;
 export const PREMIERE_LOOP_HOLD_WINDOW_MS = 35 * 60_000;
 
 /**
+ * Coarse cold-start / gap-recovery seal window. A completed round older than
+ * this can no longer be sealed: the mirror publishes a completed round on its
+ * next cycle (~5 min) unless a suppression contract already covers it, so once a
+ * round is older than the loop's own hold window its outcome is long public.
+ * Claiming such a round wastes a download and, worse, drives the admission leak
+ * collector to fetch the multi-MB public replay and abort it mid-stream. This
+ * is the deterministic no-network fast path; the precise "is it actually public
+ * right now" decision is the per-episode deployment-origin probe in the loop
+ * orchestrator. Fresh rounds (completed within the window) are never affected.
+ */
+export const PREMIERE_LOOP_SEAL_WINDOW_MS = PREMIERE_LOOP_HOLD_WINDOW_MS;
+
+/**
  * Startup projection budget: episodes longer than this risk exceeding the
  * server's ~10s premiere-registration budget on very long World episodes, so
  * they are skipped (the loop tries a shorter episode of the round first).
@@ -341,6 +354,8 @@ export type LoopSkipReason =
   | "skipped_superseded"
   | "projection_over_budget"
   | "no_eligible_episode"
+  | "too_old_to_seal"
+  | "already_public"
   | "exhausted";
 
 export type LoopReleaseOutcome =
@@ -664,4 +679,26 @@ export function loopSideEffectPlan(shadow: boolean): LoopSideEffectPlan {
 export function isHoldExpired(hold: LoopHoldState, now: Date): boolean {
   const expiresMs = Date.parse(hold.holdExpiresAt);
   return Number.isFinite(expiresMs) && now.getTime() >= expiresMs;
+}
+
+/**
+ * Whether a completed round/episode is too old to seal into a premiere, given
+ * its `completedAt` and the current time. Fail-open by construction: a null or
+ * unparseable timestamp (and any not-yet-elapsed window) returns false so an
+ * unknown age never blocks a fresh premiere. Only a completion strictly older
+ * than the seal window returns true.
+ */
+export function isCompletedTooOldToSeal(
+  completedAt: string | null,
+  now: Date,
+  sealWindowMs: number = PREMIERE_LOOP_SEAL_WINDOW_MS,
+): boolean {
+  if (completedAt === null) {
+    return false;
+  }
+  const completedMs = Date.parse(completedAt);
+  if (!Number.isFinite(completedMs)) {
+    return false;
+  }
+  return now.getTime() - completedMs > sealWindowMs;
 }
