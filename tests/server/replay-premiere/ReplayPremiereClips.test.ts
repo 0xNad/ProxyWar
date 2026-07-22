@@ -7,6 +7,7 @@ import { afterEach, beforeEach, describe, expect, test } from "vitest";
 import {
   clipFileName,
   composePremiereClipSocialText,
+  killPremiereClipWorkerTree,
   ReplayPremiereClips,
   type ReplayPremiereClipsOptions,
   selectPrerenderBuckets,
@@ -509,6 +510,160 @@ describe("archived semantics", () => {
         sourceReplaySha256: SHA,
       }),
     ).rejects.toMatchObject({ httpStatus: 404 });
+    await clips.close();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Worker process-group reaping (2026-07-22 orphaned-Chrome incident)
+// ---------------------------------------------------------------------------
+
+describe("worker process-group reaping", () => {
+  async function pidAlive(pid: number): Promise<boolean> {
+    try {
+      process.kill(pid, 0);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  async function waitForPidsDead(pids: number[], label: string): Promise<void> {
+    for (let attempt = 0; attempt < 400; attempt++) {
+      const alive = await Promise.all(pids.map(pidAlive));
+      if (alive.every((isAlive) => !isAlive)) return;
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+    throw new Error(`${label}: pids still alive: ${pids.join(", ")}`);
+  }
+
+  async function processGroupId(pid: number): Promise<number> {
+    const { execFile } = await import("node:child_process");
+    return await new Promise<number>((resolve, reject) => {
+      execFile("ps", ["-o", "pgid=", "-p", String(pid)], (error, stdout) => {
+        if (error) {
+          reject(error);
+          return;
+        }
+        resolve(Number(stdout.trim()));
+      });
+    });
+  }
+
+  test("killPremiereClipWorkerTree reaps a detached worker AND its children", async () => {
+    const { spawn } = await import("node:child_process");
+    // Mirror the service's default spawn shape: a detached node process that
+    // spawns its own long-lived child (Chrome/ffmpeg stand-in).
+    const worker = spawn(
+      process.execPath,
+      [
+        "-e",
+        "const cp=require('node:child_process');const c=cp.spawn('sleep',['300'],{stdio:'ignore'});console.log('CHILD='+c.pid);setInterval(()=>{},1000);",
+      ],
+      { stdio: ["ignore", "pipe", "ignore"], detached: true },
+    );
+    const childPid = await new Promise<number>((resolve, reject) => {
+      let buffer = "";
+      const timer = setTimeout(
+        () => reject(new Error("fixture never reported its child pid")),
+        10_000,
+      );
+      worker.stdout.on("data", (chunk: Buffer) => {
+        buffer += chunk.toString("utf8");
+        const match = /CHILD=(\d+)/.exec(buffer);
+        if (match !== null) {
+          clearTimeout(timer);
+          resolve(Number(match[1]));
+        }
+      });
+    });
+    // The detached worker leads its OWN process group — never the server's —
+    // so a SIGKILL'd render can no longer strand Chrome inside the beta PGID.
+    expect(await processGroupId(worker.pid!)).toBe(worker.pid);
+    expect(await processGroupId(worker.pid!)).not.toBe(
+      await processGroupId(process.pid),
+    );
+    killPremiereClipWorkerTree(worker);
+    await waitForPidsDead([worker.pid!, childPid], "direct group kill");
+  });
+
+  test("killPremiereClipWorkerTree falls back to a plain kill for non-leaders", async () => {
+    const { spawn } = await import("node:child_process");
+    const child = spawn("sleep", ["300"], { stdio: "ignore" });
+    killPremiereClipWorkerTree(child);
+    await waitForPidsDead([child.pid!], "fallback kill");
+  });
+
+  test("a REAL timed-out render leaves neither the worker nor its child behind", async () => {
+    // End-to-end through the service's actual default spawn: a fixture worker
+    // (spawns a long-lived child, reports pids, hangs) is SIGKILL'd by the job
+    // timeout; the whole tree must be gone afterwards.
+    const scratchDir = path.join(root, "orphan-scratch");
+    await fs.mkdir(scratchDir, { recursive: true });
+    const clips = makeClips({
+      spawnWorker: undefined, // the real default spawn path
+      workerModulePath: path.join(
+        __dirname,
+        "fixtures",
+        "orphaning-clip-worker.mjs",
+      ),
+      scratchDir,
+      limits: { jobTimeoutMs: 2_500 },
+    });
+    const status = await clips.requestClip(
+      revealedRequest(PREMIERE, 605, null),
+    );
+    expect(status.state).toBe("pending");
+
+    const pidsPath = path.join(scratchDir, "orphan-pids.txt");
+    const pids = await (async () => {
+      for (let attempt = 0; attempt < 400; attempt++) {
+        try {
+          const raw = await fs.readFile(pidsPath, "utf8");
+          const [workerPid, childPid] = raw.trim().split(/\s+/).map(Number);
+          if (
+            Number.isSafeInteger(workerPid) &&
+            Number.isSafeInteger(childPid)
+          ) {
+            return { workerPid, childPid };
+          }
+        } catch {
+          // Fixture still booting.
+        }
+        await new Promise((resolve) => setTimeout(resolve, 25));
+      }
+      throw new Error("orphan fixture never reported pids");
+    })();
+    // Own group, outside the server's group, while still alive.
+    expect(await processGroupId(pids.workerPid)).toBe(pids.workerPid);
+    expect(await processGroupId(pids.workerPid)).not.toBe(
+      await processGroupId(process.pid),
+    );
+    // The job timeout must reap the ENTIRE tree.
+    await waitForPidsDead(
+      [pids.workerPid, pids.childPid],
+      "service timeout reap",
+    );
+    // The failed job is fully released (no pending latch).
+    for (let attempt = 0; attempt < 200; attempt++) {
+      if (
+        clips.readStatus({
+          premiereId: PREMIERE,
+          lifecycleState: "revealed",
+          bucket: 60,
+        }).state === "absent"
+      ) {
+        break;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+    expect(
+      clips.readStatus({
+        premiereId: PREMIERE,
+        lifecycleState: "revealed",
+        bucket: 60,
+      }).state,
+    ).toBe("absent");
     await clips.close();
   });
 });

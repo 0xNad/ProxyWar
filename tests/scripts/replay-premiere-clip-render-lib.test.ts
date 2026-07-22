@@ -1,17 +1,102 @@
 import { describe, expect, test } from "vitest";
+import { parseReplayRenderFastForwardUntilTurn } from "../../src/client/ReplayRenderFastForward";
 import {
   buildClipEncodeArgs,
   buildSlateArgs,
   CLIP_FRAME_PROFILES,
   CLIP_MAX_CAMERA_OVERSCAN,
   CLIP_MAX_DEAD_SPACE_PER_SIDE,
+  clipReplayPageUrl,
   computeClipCameraGeometry,
   DEFAULT_CLIP_CAMERA_FIT,
   DEFAULT_CLIP_FRAME_SHAPE,
   isClipCameraFit,
   isClipFrameShape,
+  resolveClipCaptureWindow,
   resolveClipFrameProfile,
 } from "../../src/scripts/replay-premiere-clip-render-lib";
+
+describe("clipReplayPageUrl", () => {
+  test("carries the fast-forward park target, and the client parser accepts it", () => {
+    const url = clipReplayPageUrl({
+      baseUrl: "http://127.0.0.1:4567/",
+      runId: "render_abc123",
+      fastForwardUntilTurn: 50_350,
+    });
+    expect(url).toBe(
+      "http://127.0.0.1:4567/ai-league-replay/render_abc123?renderFastForwardUntilTurn=50350",
+    );
+    // The exact query the worker emits must round-trip through the page-side
+    // parser — this pins the two halves of the contract together.
+    expect(parseReplayRenderFastForwardUntilTurn(new URL(url).search)).toBe(
+      50_350,
+    );
+  });
+
+  test("omits the parameter for non-positive or invalid targets", () => {
+    for (const target of [0, -50, Number.NaN, 1.5]) {
+      expect(
+        clipReplayPageUrl({
+          baseUrl: "http://127.0.0.1:4567",
+          runId: "render_abc123",
+          fastForwardUntilTurn: target,
+        }),
+      ).toBe("http://127.0.0.1:4567/ai-league-replay/render_abc123");
+    }
+  });
+});
+
+describe("resolveClipCaptureWindow", () => {
+  const LEAD = 50;
+  const TAIL = 150;
+
+  test("keeps the classic window when the record extends past the tail", () => {
+    expect(
+      resolveClipCaptureWindow({
+        anchorTurn: 2_005,
+        leadTicks: LEAD,
+        tailTicks: TAIL,
+        finalTurnNumber: 31_600,
+      }),
+    ).toEqual({ parkTick: 1_955, endTick: 2_155 });
+  });
+
+  test("shifts an end-of-record anchor back so the payoff clip keeps its full span", () => {
+    // The production auto-clip case: the anchor IS the final released moment,
+    // so anchor+tail overruns the record and the old window could never
+    // finish capturing (2026-07-22 second failure mode).
+    expect(
+      resolveClipCaptureWindow({
+        anchorTurn: 31_550,
+        leadTicks: LEAD,
+        tailTicks: TAIL,
+        finalTurnNumber: 31_600,
+      }),
+    ).toEqual({ parkTick: 31_400, endTick: 31_600 });
+  });
+
+  test("clamps to the record start for very short records", () => {
+    expect(
+      resolveClipCaptureWindow({
+        anchorTurn: 90,
+        leadTicks: LEAD,
+        tailTicks: TAIL,
+        finalTurnNumber: 120,
+      }),
+    ).toEqual({ parkTick: 1, endTick: 120 });
+  });
+
+  test("falls back to the classic window when the record end is unknown", () => {
+    expect(
+      resolveClipCaptureWindow({
+        anchorTurn: 500,
+        leadTicks: LEAD,
+        tailTicks: TAIL,
+        finalTurnNumber: null,
+      }),
+    ).toEqual({ parkTick: 450, endTick: 650 });
+  });
+});
 
 const ATTRIBUTION =
   "Game art from OpenFront (openfront.io), CC BY-SA 4.0; footage shared under the same license.";

@@ -44,6 +44,7 @@ import {
   CdpClient,
   CLIP_FPS,
   CLIP_MAX_DEAD_SPACE_PER_SIDE,
+  clipReplayPageUrl,
   computeClipCameraGeometry,
   DEFAULT_CLIP_CAMERA_FIT,
   DEFAULT_CLIP_FRAME_SHAPE,
@@ -55,6 +56,7 @@ import {
   isClipCameraFit,
   isClipFrameShape,
   launchHeadlessChrome,
+  resolveClipCaptureWindow,
   resolveClipFrameProfile,
   resolveFfmpegBinary,
   runFfmpeg,
@@ -208,6 +210,8 @@ async function readLicenseStrings(): Promise<{
 async function verifyAndExtractRecord(spec: ClipJobSpec): Promise<{
   sourceReplaySha256: string;
   recordJson: string;
+  /** Last turn number in the record (sparse-safe), or null when unreadable. */
+  finalTurnNumber: number | null;
 }> {
   const bundleBytes = await fs.readFile(spec.bundlePath);
   const actualSha = sha256OfBuffer(bundleBytes);
@@ -228,9 +232,23 @@ async function verifyAndExtractRecord(spec: ClipJobSpec): Promise<{
   if (record === null || typeof record !== "object") {
     fail(`bundle has no embedded gameRecord: ${spec.bundlePath}`);
   }
+  // A compressed record stores sparse turns; the LAST entry's turnNumber is
+  // the true end of the match either way (decompression only fills gaps).
+  const turns = (record as { turns?: unknown }).turns;
+  const lastTurn = Array.isArray(turns)
+    ? (turns.at(-1) as { turnNumber?: unknown } | undefined)
+    : undefined;
+  const finalTurnNumber =
+    lastTurn !== undefined &&
+    typeof lastTurn.turnNumber === "number" &&
+    Number.isSafeInteger(lastTurn.turnNumber) &&
+    lastTurn.turnNumber > 0
+      ? lastTurn.turnNumber
+      : null;
   return {
     sourceReplaySha256: actualSha,
     recordJson: JSON.stringify(record),
+    finalTurnNumber,
   };
 }
 
@@ -296,6 +314,8 @@ async function startStaticHost(options: {
   staticDir: string;
   runId: string;
   stagedRecordPath: string;
+  /** Park target for the render fast-forward query param (<=0 disables). */
+  fastForwardUntilTurn: number;
 }): Promise<StaticHost> {
   const indexHtml = await renderIndexHtml(options.staticDir);
   const recordRoute = `/ai-league-runs/${options.runId}/game-record.json`;
@@ -340,7 +360,14 @@ async function startStaticHost(options: {
   const port = address.port;
   return {
     port,
-    replayUrl: `http://127.0.0.1:${port}/ai-league-replay/${options.runId}`,
+    // Carry the render fast-forward target: presentation below the park turn
+    // is coalesced page-side, so end-anchor renders park inside the job
+    // budget instead of flooding the per-turn pipeline (2026-07-22 timeout).
+    replayUrl: clipReplayPageUrl({
+      baseUrl: `http://127.0.0.1:${port}`,
+      runId: options.runId,
+      fastForwardUntilTurn: options.fastForwardUntilTurn,
+    }),
     close: () =>
       new Promise<void>((resolve) => {
         server.close(() => resolve());
@@ -788,9 +815,23 @@ async function main(): Promise<void> {
   log(`ffmpeg ok: ${ffmpegVersion}`);
 
   const bundleVerifyStartedAt = Date.now();
-  const { sourceReplaySha256, recordJson } = await verifyAndExtractRecord(spec);
+  const { sourceReplaySha256, recordJson, finalTurnNumber } =
+    await verifyAndExtractRecord(spec);
   const bundleVerifyMs = Date.now() - bundleVerifyStartedAt;
   log(`bundle verified: sha256=${sourceReplaySha256}`);
+  // Clamp the capture window to the record's true end (auto-clip anchors are
+  // the final released moment, so the naive anchor+tail always overruns) and
+  // shift it back so the payoff clip keeps its full span when possible.
+  const captureWindow = resolveClipCaptureWindow({
+    anchorTurn: spec.anchorTurn,
+    leadTicks: CAPTURE_LEAD_TICKS,
+    tailTicks: CAPTURE_TAIL_TICKS,
+    finalTurnNumber,
+  });
+  log(
+    `capture window ticks ${captureWindow.parkTick}->${captureWindow.endTick}` +
+      ` (anchor ${spec.anchorTurn}, record end ${finalTurnNumber ?? "unknown"})`,
+  );
 
   await fs.mkdir(spec.outDir, { recursive: true, mode: 0o700 });
   const scratchBase = process.env.PROXYWAR_CLIP_SCRATCH_DIR ?? os.tmpdir();
@@ -811,6 +852,7 @@ async function main(): Promise<void> {
       staticDir: spec.staticDir,
       runId,
       stagedRecordPath,
+      fastForwardUntilTurn: captureWindow.parkTick,
     });
     const serverStartMs = Date.now() - serverStartedAt;
     log(`static host on 127.0.0.1:${host.port} (runId ${runId})`);
@@ -910,8 +952,8 @@ async function main(): Promise<void> {
     // Let the camera-lock rAF apply the new fit before parking/capture.
     await sleep(120);
 
-    const parkTick = spec.anchorTurn - CAPTURE_LEAD_TICKS;
-    const endTick = spec.anchorTurn + CAPTURE_TAIL_TICKS;
+    const parkTick = captureWindow.parkTick;
+    const endTick = captureWindow.endTick;
     const parkStartedAt = Date.now();
     await driver.dispatchJump(parkTick);
     // Parking drains the force-queued turns as fast as the worker executes;
@@ -922,9 +964,9 @@ async function main(): Promise<void> {
     const parkMs = Date.now() - parkStartedAt;
     const parkedAt = await driver.lastTick();
     log(`parked at tick ${parkedAt} (target ${parkTick}) in ${parkMs}ms`);
-    if (parkedAt !== null && parkedAt > spec.anchorTurn) {
+    if (parkedAt !== null && parkedAt >= endTick) {
       fail(
-        `park overshot: at tick ${parkedAt}, beyond anchor ${spec.anchorTurn}`,
+        `park overshot: at tick ${parkedAt}, at/beyond capture end ${endTick}`,
       );
     }
 

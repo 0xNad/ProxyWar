@@ -498,7 +498,7 @@ export class ReplayPremiereClips {
       const exitCode = await new Promise<number | null>((resolve) => {
         const timer = setTimeout(() => {
           timedOut = true;
-          child.kill("SIGKILL");
+          killPremiereClipWorkerTree(child);
         }, this.limits.jobTimeoutMs);
         timer.unref?.();
         child.once("error", () => {
@@ -774,10 +774,17 @@ export class ReplayPremiereClips {
   ): ChildProcess {
     // Run the .ts worker through the tsx loader on the current Node. Injectable
     // for tests; the live server does not spawn until a real request arrives.
+    //
+    // detached: the worker becomes the leader of its OWN process group, and
+    // Chrome/ffmpeg it spawns inherit that group. A timeout/shutdown kill can
+    // then reap the ENTIRE render tree atomically via the negative-pgid kill
+    // (see killPremiereClipWorkerTree) — the 2026-07-22 incident left
+    // SIGKILL-orphaned Chrome processes inside the beta's process group, which
+    // made the supervised restart helper refuse restarts.
     return spawn(
       process.execPath,
       ["--import", "tsx", this.options.workerModulePath, jobSpecPath],
-      { stdio: ["ignore", "ignore", "pipe"], env },
+      { stdio: ["ignore", "ignore", "pipe"], env, detached: true },
     );
   }
 
@@ -788,8 +795,35 @@ export class ReplayPremiereClips {
     this.queue.length = 0;
     const child = this.runningChild;
     if (child !== null && child.exitCode === null) {
-      child.kill("SIGKILL");
+      killPremiereClipWorkerTree(child);
     }
+  }
+}
+
+/**
+ * Kills a render worker AND everything it spawned (headless Chrome, ffmpeg).
+ *
+ * The worker is spawned detached, so it leads its own process group and its
+ * children inherit it; killing the NEGATIVE pgid reaps the whole tree in one
+ * signal, even mid-render. Fallback to a single-process kill covers injected
+ * test workers (no pid / not a group leader). Never called after the exit
+ * event (the pid would be reaped and the pgid could be recycled).
+ */
+export function killPremiereClipWorkerTree(child: ChildProcess): void {
+  const pid = child.pid;
+  if (typeof pid === "number" && pid > 0) {
+    try {
+      process.kill(-pid, "SIGKILL");
+      return;
+    } catch {
+      // Not a live group leader (already exited, or a non-detached test
+      // double) — fall through to the direct kill.
+    }
+  }
+  try {
+    child.kill("SIGKILL");
+  } catch {
+    // Already dead.
   }
 }
 

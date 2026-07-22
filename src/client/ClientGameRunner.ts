@@ -54,6 +54,10 @@ import { endGame, startGame, startTime } from "./LocalPersistantStats";
 import { ReplayPremiereProgressiveReplayConfig } from "./ReplayPremierePlayback";
 import { PremiereWarFeedTracker } from "./ReplayPremiereWarFeed";
 import { ReplayPremiereWorkerClient } from "./ReplayPremiereWorkerClient";
+import {
+  parseReplayRenderFastForwardUntilTurn,
+  ReplayRenderFastForward,
+} from "./ReplayRenderFastForward";
 import { terrainMapFileLoader } from "./TerrainMapFileLoader";
 import {
   SendAllianceRequestIntentEvent,
@@ -354,6 +358,10 @@ export class ClientGameRunner {
   // each development surfaces once (see ReplayPremiereWarFeed).
   private readonly warFeedTracker = new PremiereWarFeedTracker();
 
+  // Render-mode fast-forward (clip capture): pacing-only, plain gameRecord
+  // replays only — never premiere pages. See ReplayRenderFastForward.
+  private renderFastForward: ReplayRenderFastForward | null = null;
+
   constructor(
     private lobby: LobbyConfig,
     private clientID: ClientID | undefined,
@@ -365,6 +373,31 @@ export class ClientGameRunner {
     private gameView: GameView,
   ) {
     this.lastMessageTime = Date.now();
+    const fastForwardUntilTurn =
+      typeof window === "undefined"
+        ? null
+        : parseReplayRenderFastForwardUntilTurn(window.location.search);
+    if (
+      fastForwardUntilTurn !== null &&
+      this.lobby.gameRecord !== undefined &&
+      this.lobby.progressiveReplay === undefined
+    ) {
+      this.renderFastForward = new ReplayRenderFastForward(
+        fastForwardUntilTurn,
+        {
+          applyCoalesced: (update) => {
+            // One presentation pass for the whole coalesced span. Deliberately
+            // no per-turn hash events (the skipped span's per-turn verify logs
+            // are exactly the flood being avoided; the captured window beyond
+            // the target runs the full pipeline, hashes included) and no
+            // metrics/save side effects.
+            this.gameView.update(update);
+            this.renderer.tick();
+            this.dispatchAiLeagueReplayFrame(update);
+          },
+        },
+      );
+    }
   }
 
   /**
@@ -475,6 +508,17 @@ export class ClientGameRunner {
         const completedTurns = premiereWorker
           ? premiereWorker.completedTurnsForCurrentUpdate()
           : 1;
+        // Render fast-forward lane (plain replays only; never premieres):
+        // buffer + coalesce presentation below the park target so clip
+        // renders reach late anchors inside their job budget. Turn accounting
+        // toward LocalServer stays exact (one completion per real turn).
+        if (
+          premiereWorker === null &&
+          this.renderFastForward?.offer(gu) === true
+        ) {
+          this.transport.turnComplete();
+          return;
+        }
         if (premiereWorker === null) {
           this.transport.turnComplete();
         }

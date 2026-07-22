@@ -107,6 +107,57 @@ export const CLIP_MAX_DEAD_SPACE_PER_SIDE = 0.12;
  */
 export const CLIP_MAX_CAMERA_OVERSCAN = 1.6;
 
+/**
+ * Replay-page URL for a render, carrying the render fast-forward target so
+ * the page coalesces presentation below the park turn instead of running the
+ * full per-turn pipeline for tens of thousands of skipped turns (the
+ * 2026-07-22 end-anchor render timeout). Pacing-only: the parameter cannot
+ * expose content a plain replay page does not already hold.
+ */
+export function clipReplayPageUrl(options: {
+  baseUrl: string;
+  runId: string;
+  fastForwardUntilTurn: number;
+}): string {
+  const base = `${options.baseUrl.replace(/\/$/, "")}/ai-league-replay/${options.runId}`;
+  if (
+    !Number.isSafeInteger(options.fastForwardUntilTurn) ||
+    options.fastForwardUntilTurn <= 0
+  ) {
+    return base;
+  }
+  return `${base}?renderFastForwardUntilTurn=${options.fastForwardUntilTurn}`;
+}
+
+/**
+ * Resolves the capture window for an anchor against the record's actual end.
+ *
+ * Auto-clips anchor on the FINAL released moment, so the naive
+ * `[anchor - lead, anchor + tail]` window always overruns the record end —
+ * the capture then waits for a tick that can never arrive and the render
+ * dies on its own timeout (2026-07-22 incident, second failure mode). The
+ * window is clamped to the final turn and shifted BACK so the payoff clip
+ * keeps its full span whenever the record allows.
+ */
+export function resolveClipCaptureWindow(options: {
+  anchorTurn: number;
+  leadTicks: number;
+  tailTicks: number;
+  /** Last turn number present in the record, or null when unknown. */
+  finalTurnNumber: number | null;
+}): { parkTick: number; endTick: number } {
+  const span = options.leadTicks + options.tailTicks;
+  let endTick = options.anchorTurn + options.tailTicks;
+  if (
+    options.finalTurnNumber !== null &&
+    Number.isSafeInteger(options.finalTurnNumber) &&
+    options.finalTurnNumber > 0
+  ) {
+    endTick = Math.min(endTick, options.finalTurnNumber);
+  }
+  return { parkTick: Math.max(1, endTick - span), endTick };
+}
+
 export function isClipFrameShape(value: unknown): value is ClipFrameShape {
   return value === "square" || value === "landscape";
 }
