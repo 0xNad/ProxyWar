@@ -1918,16 +1918,12 @@ describe("ReplayPremiere production startup", () => {
     });
     services.push(started.service);
     const runtime = context.runtimeRegistry.get(PREMIERE_ID)!;
-    await vi.advanceTimersByTimeAsync(100);
-    await started.service.waitForRuntimeTimersIdle();
-    await vi.advanceTimersByTimeAsync(15_000);
-    await started.service.waitForRuntimeTimersIdle();
-    await vi.advanceTimersByTimeAsync(100);
-    await started.service.waitForRuntimeTimersIdle();
-    await vi.advanceTimersByTimeAsync(15_000);
-    await started.service.waitForRuntimeTimersIdle();
-    await vi.advanceTimersByTimeAsync(50);
-    await started.service.waitForRuntimeTimersIdle();
+    // Checkpoint pauses follow REPLAY_PREMIERE_CHECKPOINT_PAUSE_MS (60 s
+    // since the real-speed pacing retune; was 15 s).
+    for (const advanceMs of [100, 60_000, 100, 60_000, 50]) {
+      await vi.advanceTimersByTimeAsync(advanceMs);
+      await started.service.waitForRuntimeTimersIdle();
+    }
     expect(runtime.readLifecycleState()).toBe("revealed");
     const revealedAt = runtime.readReveal()!.revealedAt;
     await started.service.close();
