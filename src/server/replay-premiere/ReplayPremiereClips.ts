@@ -145,6 +145,28 @@ export interface ReplayPremiereClipsOptions {
   statfs?: (path: string) => Promise<StatsFs>;
   spawnWorker?: SpawnClipWorker;
   logger?: (message: string) => void;
+  /**
+   * Maps a render request to its on-disk source bundle. Default: the premiere
+   * content-addressed layout (`<sourceBundleRoot>/sources/sha256/xx/<sha>.replay`).
+   * The league-run clip service overrides this to point at a published run's
+   * game-record.json; the worker still verifies the bundle hash EXACTLY
+   * matches `sourceReplaySha256` before rendering, so a swapped file fails
+   * closed.
+   */
+  resolveSourceBundlePath?: (request: {
+    premiereId: string;
+    sourceReplaySha256: string;
+  }) => string;
+  /**
+   * Watch-page url for the id, used in the social first-reply. Default: the
+   * premiere page (`<publicOrigin>/premiere/<id>`).
+   */
+  watchUrlForId?: (id: string) => string;
+  /**
+   * Public download route for a ready clip. Default: the premiere clip route
+   * (`/premiere/<id>/clip-v1-<bucket>.mp4`).
+   */
+  clipUrlFor?: (id: string, bucket: number) => string;
 }
 
 interface ClipIndexEntry {
@@ -212,6 +234,12 @@ export class ReplayPremiereClips {
    */
   async rebuildIndex(): Promise<void> {
     this.ready.clear();
+    // Ensure the cache root exists: the render-admission disk floor statfs's
+    // it, so a FRESH tree (first boot of a new clipsRoot) must not make every
+    // render 503 with clip_disk_floor_unreadable until a promote creates it.
+    await fs
+      .mkdir(this.options.clipsRoot, { recursive: true, mode: 0o700 })
+      .catch(() => undefined);
     let premiereDirs: string[];
     try {
       premiereDirs = await fs.readdir(this.options.clipsRoot);
@@ -375,7 +403,10 @@ export class ReplayPremiereClips {
       premiereId: request.premiereId,
       bucket,
       anchorTurn: premiereClipRepresentativeAnchorTurn(bucket),
-      bundlePath: this.sourceBundlePath(request.sourceReplaySha256),
+      bundlePath: this.sourceBundlePath(
+        request.premiereId,
+        request.sourceReplaySha256,
+      ),
       expectedBundleSha256: request.sourceReplaySha256.toLowerCase(),
     });
     this.pump();
@@ -666,8 +697,9 @@ export class ReplayPremiereClips {
   // -- Composition helpers -------------------------------------------------
 
   private toReady(entry: ClipIndexEntry): PremiereClipReady {
+    const clipUrlFor = this.options.clipUrlFor ?? clipFileRoute;
     return {
-      clipUrl: clipFileRoute(entry.premiereId, entry.bucket),
+      clipUrl: clipUrlFor(entry.premiereId, entry.bucket),
       byteLength: entry.byteLength,
       sha256: entry.sha256,
       anchorTurn: entry.anchorTurn,
@@ -697,10 +729,19 @@ export class ReplayPremiereClips {
   }
 
   private premiereWatchUrl(premiereId: string): string {
+    if (this.options.watchUrlForId !== undefined) {
+      return this.options.watchUrlForId(premiereId);
+    }
     return `${this.options.publicOrigin.replace(/\/$/, "")}/premiere/${premiereId}`;
   }
 
-  private sourceBundlePath(sha256: string): string {
+  private sourceBundlePath(premiereId: string, sha256: string): string {
+    if (this.options.resolveSourceBundlePath !== undefined) {
+      return this.options.resolveSourceBundlePath({
+        premiereId,
+        sourceReplaySha256: sha256,
+      });
+    }
     const hash = sha256.toLowerCase();
     return path.join(
       this.options.sourceBundleRoot,
@@ -806,6 +847,271 @@ export function clipFileName(bucket: number): string {
 
 export function clipFileRoute(premiereId: string, bucket: number): string {
   return `/premiere/${premiereId}/clip-v${PREMIERE_CLIP_VERSION}-${bucket}.mp4`;
+}
+
+/** Canonical clip-cache root under a premiere private state root. */
+export function replayPremiereClipCacheDir(privateStateRoot: string): string {
+  return path.join(privateStateRoot, "clips-v1");
+}
+
+/** Exported for the reclamation-time durable-clip promotion. */
+export function parsePremiereClipRenderManifest(
+  value: unknown,
+): PremiereClipRenderManifest | null {
+  return parseRenderManifest(value);
+}
+
+// ---------------------------------------------------------------------------
+// Durable archived clip (survives terminal reclamation)
+// ---------------------------------------------------------------------------
+
+/**
+ * Directory under the archive root (`archive-v1/`) holding the ONE durable clip
+ * a premiere keeps after reclamation deletes its bulk. Unlike `clips-v1` (a
+ * pure cache — losing it costs render time), these files are the only clip a
+ * reclaimed premiere can ever have: the render source is garbage-collected at
+ * the next startup, so an archived clip can never be re-rendered.
+ */
+export const REPLAY_PREMIERE_ARCHIVE_CLIPS_DIRECTORY = "clips";
+
+export function archivedPremiereClipsDir(archiveRoot: string): string {
+  return path.join(archiveRoot, REPLAY_PREMIERE_ARCHIVE_CLIPS_DIRECTORY);
+}
+
+export function archivedPremiereClipFileName(premiereId: string): string {
+  return `${premiereId}.mp4`;
+}
+
+export function archivedPremiereClipManifestFileName(
+  premiereId: string,
+): string {
+  return `${premiereId}.render-manifest.json`;
+}
+
+/** Public route the archive router serves the durable clip under. */
+export function archivedPremiereClipRoute(premiereId: string): string {
+  return `/premiere/${premiereId}/clip.mp4`;
+}
+
+// ---------------------------------------------------------------------------
+// Reveal-time automatic default clip
+// ---------------------------------------------------------------------------
+
+/** Minimal structural view of a registered premiere runtime (no import cycle). */
+export interface ReplayPremiereAutoClipRuntimeReader {
+  readLifecycleState(): PremiereState;
+  readReveal(): {
+    sourceReplaySha256: string;
+    finalSequence: number;
+  } | null;
+  readReleasedContext(sequence: number): { turn: number } | null;
+}
+
+export interface ReplayPremiereRevealAutoClipOptions {
+  clips: ReplayPremiereClips;
+  /** null => the premiere is no longer registered (renders are impossible). */
+  resolveRuntime: (
+    premiereId: string,
+  ) => ReplayPremiereAutoClipRuntimeReader | null;
+  /** Delay between the render request and its outcome verification. */
+  verifyDelayMs?: number;
+  /** Bounded verification polls while the render is still in flight. */
+  maxVerifyPolls?: number;
+  logger?: (message: string) => void;
+}
+
+const DEFAULT_AUTO_CLIP_VERIFY_DELAY_MS = 60_000;
+const DEFAULT_AUTO_CLIP_MAX_VERIFY_POLLS = 10;
+
+/**
+ * Schedules the DEFAULT social clip automatically when a premiere reveals, so
+ * the durable clip exists without anyone clicking render inside the short
+ * revealed window. Bounded and best-effort by design:
+ *
+ *  - exactly ONE render request per premiere per process, plus ONE retry if
+ *    that render is later observed absent (refused or failed);
+ *  - system job (`participantId: null`) — the per-premiere-day and global-hour
+ *    quotas still apply, so a hostile stream of reveals cannot melt the host;
+ *  - the anchor is the final released moment (what is on screen at reveal),
+ *    i.e. the same clip the manual button makes at the reveal payoff;
+ *  - failures are logged and abandoned. This class never throws into the
+ *    reveal path and never blocks reveal or reclamation.
+ */
+export class ReplayPremiereRevealAutoClip {
+  private readonly requestedRenders = new Map<string, number>();
+  private readonly timers = new Map<string, ReturnType<typeof setTimeout>>();
+  private readonly verifyDelayMs: number;
+  private readonly maxVerifyPolls: number;
+  private readonly logger: (message: string) => void;
+  private closed = false;
+
+  constructor(private readonly options: ReplayPremiereRevealAutoClipOptions) {
+    this.verifyDelayMs =
+      options.verifyDelayMs ?? DEFAULT_AUTO_CLIP_VERIFY_DELAY_MS;
+    this.maxVerifyPolls =
+      options.maxVerifyPolls ?? DEFAULT_AUTO_CLIP_MAX_VERIFY_POLLS;
+    this.logger = options.logger ?? (() => undefined);
+  }
+
+  /**
+   * Observer entry point. Safe to call repeatedly (registration-time and
+   * transition-time observations both funnel here); only the first call for a
+   * premiere that resolves a render anchor schedules work. A spurious call
+   * (not registered / not revealed) never latches the dedupe, so a later real
+   * reveal observation still works.
+   */
+  onPremiereRevealed(premiereId: string): void {
+    if (this.closed || this.requestedRenders.has(premiereId)) return;
+    // Resolve synchronously so two rapid observations cannot double-schedule.
+    const anchor = this.resolveDefaultAnchor(premiereId);
+    if (anchor === null) return;
+    this.requestedRenders.set(premiereId, 0);
+    void this.attemptRender(premiereId, 1).catch((error: unknown) => {
+      this.log(premiereId, `auto clip attempt crashed: ${message(error)}`);
+    });
+  }
+
+  /** Renders requested for a premiere (test/diagnostic surface). */
+  requestedRenderCount(premiereId: string): number {
+    return this.requestedRenders.get(premiereId) ?? 0;
+  }
+
+  close(): void {
+    this.closed = true;
+    for (const timer of this.timers.values()) clearTimeout(timer);
+    this.timers.clear();
+  }
+
+  private async attemptRender(
+    premiereId: string,
+    attempt: 1 | 2,
+  ): Promise<void> {
+    if (this.closed) return;
+    const anchor = this.resolveDefaultAnchor(premiereId);
+    if (anchor === null) return;
+    this.requestedRenders.set(
+      premiereId,
+      (this.requestedRenders.get(premiereId) ?? 0) + 1,
+    );
+    let state: PremiereClipStatusResponse["state"] | "refused" = "refused";
+    try {
+      const status = await this.options.clips.requestClip({
+        premiereId,
+        lifecycleState: "revealed",
+        anchorTurn: anchor.turn,
+        participantId: null,
+        sourceReplaySha256: anchor.sourceReplaySha256,
+      });
+      state = status.state;
+    } catch (error) {
+      this.log(
+        premiereId,
+        `auto clip render request refused (attempt ${attempt}): ${message(error)}`,
+      );
+    }
+    if (state === "ready") {
+      this.log(premiereId, "auto clip already cached");
+      return;
+    }
+    // Verify the outcome later; a first attempt that was refused outright also
+    // goes through verification so transient refusals (queue full, disk floor
+    // probe) get the single retry. The retry gets one more verification pass
+    // purely for the definitive outcome log — it can never render again (the
+    // per-premiere render count is already at the cap).
+    if (attempt === 1) {
+      this.scheduleVerify(premiereId, anchor.turn, this.maxVerifyPolls);
+    } else if (state === "pending") {
+      this.log(premiereId, "auto clip retry enqueued");
+      this.scheduleVerify(premiereId, anchor.turn, this.maxVerifyPolls);
+    } else {
+      this.log(premiereId, "auto clip retry refused; giving up");
+    }
+  }
+
+  private scheduleVerify(
+    premiereId: string,
+    anchorTurn: number,
+    pollsLeft: number,
+  ): void {
+    if (this.closed) return;
+    const timer = setTimeout(() => {
+      this.timers.delete(premiereId);
+      try {
+        this.verify(premiereId, anchorTurn, pollsLeft - 1);
+      } catch (error) {
+        this.log(premiereId, `auto clip verify crashed: ${message(error)}`);
+      }
+    }, this.verifyDelayMs);
+    timer.unref?.();
+    this.timers.set(premiereId, timer);
+  }
+
+  private verify(
+    premiereId: string,
+    anchorTurn: number,
+    pollsLeft: number,
+  ): void {
+    if (this.closed) return;
+    const runtime = this.options.resolveRuntime(premiereId);
+    if (runtime === null) {
+      // De-registered (reclaimed) before the render settled; nothing to do.
+      this.log(premiereId, "auto clip verify: premiere de-registered");
+      return;
+    }
+    const status = this.options.clips.readStatus({
+      premiereId,
+      lifecycleState: runtime.readLifecycleState(),
+      bucket: premiereClipBucketForTurn(anchorTurn),
+    });
+    if (status.state === "ready") {
+      this.log(premiereId, "auto clip ready");
+      return;
+    }
+    if (status.state === "pending") {
+      if (pollsLeft > 0) {
+        this.scheduleVerify(premiereId, anchorTurn, pollsLeft);
+      } else {
+        this.log(premiereId, "auto clip verification budget exhausted");
+      }
+      return;
+    }
+    // Absent: the render was refused or failed. Exactly one retry.
+    if ((this.requestedRenders.get(premiereId) ?? 0) >= 2) {
+      this.log(premiereId, "auto clip absent after retry; giving up");
+      return;
+    }
+    this.log(premiereId, "auto clip absent; retrying once");
+    void this.attemptRender(premiereId, 2).catch((error: unknown) => {
+      this.log(premiereId, `auto clip retry crashed: ${message(error)}`);
+    });
+  }
+
+  private resolveDefaultAnchor(
+    premiereId: string,
+  ): { turn: number; sourceReplaySha256: string } | null {
+    const runtime = this.options.resolveRuntime(premiereId);
+    if (runtime === null) return null;
+    if (runtime.readLifecycleState() !== "revealed") return null;
+    const reveal = runtime.readReveal();
+    if (reveal === null) return null;
+    const context = runtime.readReleasedContext(reveal.finalSequence);
+    if (context === null) {
+      this.log(premiereId, "auto clip anchor unavailable (final context)");
+      return null;
+    }
+    return {
+      turn: context.turn,
+      sourceReplaySha256: reveal.sourceReplaySha256,
+    };
+  }
+
+  private log(premiereId: string, text: string): void {
+    this.logger(`${premiereId}: ${text}`);
+  }
+}
+
+function message(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }
 
 // ---------------------------------------------------------------------------

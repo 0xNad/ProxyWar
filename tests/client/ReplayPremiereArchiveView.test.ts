@@ -132,4 +132,65 @@ describe("mountArchivedReplayPremiereOverlay", () => {
     );
     noReplay.dispose();
   });
+
+  it("renders the durable clip download only when the payload carries one", () => {
+    const clipUrl = `/premiere/${PREMIERE_ID}/clip.mp4`;
+    const withClip = mountArchivedReplayPremiereOverlay({
+      ...samplePayload(),
+      clip: { url: clipUrl, byteLength: 12345 },
+    });
+    const download = withClip.element.querySelector<HTMLAnchorElement>(
+      ".rp-archived-clip-download",
+    );
+    expect(download).not.toBeNull();
+    expect(download?.getAttribute("href")).toBe(clipUrl);
+    expect(download?.hasAttribute("download")).toBe(true);
+    expect(download?.textContent).toBe(
+      "replay_premiere.archived_clip_download",
+    );
+    withClip.dispose();
+
+    // No clip artifact => no section at all (not a broken-looking button) —
+    // exactly the legacy-archive presentation.
+    const withoutClip = mountArchivedReplayPremiereOverlay({
+      ...samplePayload(),
+      clip: null,
+    });
+    expect(
+      withoutClip.element.querySelector(".rp-archived-clip-download"),
+    ).toBeNull();
+    expect(withoutClip.element.textContent).not.toContain(
+      "replay_premiere.archived_clip_download",
+    );
+    withoutClip.dispose();
+  });
+
+  it("parses the clip strictly: only this premiere's exact durable route", () => {
+    const good = {
+      ...samplePayload(),
+      clip: { url: `/premiere/${PREMIERE_ID}/clip.mp4`, byteLength: 77 },
+    };
+    inject(JSON.stringify(good));
+    expect(readReplayPremiereArchivePayload()?.clip).toEqual({
+      url: `/premiere/${PREMIERE_ID}/clip.mp4`,
+      byteLength: 77,
+    });
+    document.getElementById("proxywar-premiere-archive")?.remove();
+
+    // A foreign or absolute url is dropped (clip treated as absent), never
+    // linked — the page only ever links its own same-origin durable route.
+    const foreign = {
+      ...samplePayload(),
+      clip: { url: "https://evil.example/clip.mp4", byteLength: 77 },
+    };
+    inject(JSON.stringify(foreign));
+    expect(readReplayPremiereArchivePayload()?.clip).toBeNull();
+    document.getElementById("proxywar-premiere-archive")?.remove();
+
+    // Legacy payload without the field parses with clip null.
+    const legacy = samplePayload() as unknown as Record<string, unknown>;
+    delete legacy.clip;
+    inject(JSON.stringify(legacy));
+    expect(readReplayPremiereArchivePayload()?.clip).toBeNull();
+  });
 });

@@ -250,7 +250,11 @@ async function handlePremiereApiRequest(
 ): Promise<void> {
   const readRoute = matchProxyWarPublicPremiereReadPath(request.path);
   const writeRoute = matchProxyWarPublicPremiereWritePath(request.path);
-  if (readRoute?.kind === "page" || readRoute?.kind === "card") {
+  if (
+    readRoute?.kind === "page" ||
+    readRoute?.kind === "card" ||
+    readRoute?.kind === "archive_clip"
+  ) {
     throw unavailable("premiere_non_api_route_reached_api_adapter", 404);
   }
   if (

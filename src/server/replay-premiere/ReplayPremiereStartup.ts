@@ -197,6 +197,14 @@ export interface ReplayPremiereProductionStartupOptions {
   reclamationSweepMs?: number;
   /** Premiere ids that must never be reclaimed nor compacted out at startup. */
   reclamationExcludedPremiereIds?: readonly string[];
+  /**
+   * Beta-side observer invoked when a premiere is OBSERVED in the revealed
+   * state: at registration (a runtime recovered already revealed) and after a
+   * supervised synchronize whose advance committed the reveal. May fire more
+   * than once per premiere — subscribers dedupe. Exceptions are swallowed; the
+   * reveal/registration path never depends on it.
+   */
+  onPremiereRevealed?: (premiereId: string) => void;
   onDiagnostic?: (diagnostic: ReplayPremiereStartupDiagnostic) => void;
   /** Bounded test/host barrier; abort is asserted again before journal writes. */
   beforeTargetRecovery?: (options: {
@@ -482,6 +490,7 @@ export async function startReplayPremiereProduction(
     const supervisor = new ReplayPremiereRuntimeSupervisor(
       clock,
       reportRuntime,
+      options.onPremiereRevealed,
     );
     const pendingAssemblies = new Set<Promise<unknown>>();
     const ownedTargets: AssembledPremiereTarget[] = [];
@@ -497,6 +506,14 @@ export async function startReplayPremiereProduction(
                 DEFAULT_REPLAY_PREMIERE_RECLAMATION_GRACE_MS,
               now: () => clock.now(),
               excludedPremiereIds: options.reclamationExcludedPremiereIds,
+              // Durable-clip promotion telemetry rides the runtime diagnostic
+              // channel (operator-visible, never authoritative).
+              logger: (message) =>
+                reportRuntime({
+                  target: "premiere_archived_clips",
+                  premiereId: null,
+                  operatorCode: message,
+                }),
             }),
             sweepMs: boundedReclamationSweepMs(options.reclamationSweepMs),
             report: reportRuntime,
@@ -932,11 +949,26 @@ class ReplayPremiereRuntimeSupervisor {
     private readonly report: (
       diagnostic: ReplayPremiereStartupDiagnostic,
     ) => void,
+    private readonly onPremiereRevealed?: (premiereId: string) => void,
   ) {}
 
   add(runtime: ReplayPremiereRuntimeCoordinator): void {
     if (this.closed) throw startupUnavailable("runtime_supervisor_closed");
+    // A runtime recovered/registered ALREADY revealed never re-fires a
+    // "revealed" advance operation, so the registration itself is the
+    // observation point for it.
+    if (runtime.readLifecycleState() === "revealed") {
+      this.notifyRevealed(runtime.premiereId);
+    }
     this.arm(runtime, runtime.nextWakeAt());
+  }
+
+  private notifyRevealed(premiereId: string): void {
+    try {
+      this.onPremiereRevealed?.(premiereId);
+    } catch {
+      // Observers are non-authoritative; reveal handling never depends on them.
+    }
   }
 
   async close(): Promise<void> {
@@ -978,6 +1010,9 @@ class ReplayPremiereRuntimeSupervisor {
         .synchronize()
         .then((advance) => {
           this.failures.delete(runtime.premiereId);
+          if (advance.operations.includes("revealed")) {
+            this.notifyRevealed(runtime.premiereId);
+          }
           this.arm(runtime, advance.nextWakeAt);
         })
         .catch((error: unknown) => {

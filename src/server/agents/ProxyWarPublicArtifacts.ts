@@ -121,6 +121,12 @@ const proxyWarPremiereClipFilePattern = new RegExp(
 const proxyWarPremiereClipStatusPattern = new RegExp(
   `^/api/premieres/(${proxyWarPremiereIdSource})/clips/(${proxyWarPremiereClipBucketSource})$`,
 );
+// The single durable archived clip promoted at reclamation. Distinct from the
+// bucketed cache route above: this one survives after the live runtime and the
+// clip cache are gone, served by the archive router from archive-v1/clips.
+const proxyWarPremiereArchiveClipPattern = new RegExp(
+  `^/premiere/(${proxyWarPremiereIdSource})/clip\\.mp4$`,
+);
 const proxyWarPremiereClipCreatePattern = new RegExp(
   `^/api/premieres/(${proxyWarPremiereIdSource})/clips$`,
 );
@@ -148,7 +154,8 @@ export type ProxyWarPublicPremiereReadRoute =
   | { kind: "reveal"; premiereId: string }
   | { kind: "card"; premiereId: string }
   | { kind: "clip_status"; premiereId: string; bucket: number }
-  | { kind: "clip_file"; premiereId: string; bucket: number };
+  | { kind: "clip_file"; premiereId: string; bucket: number }
+  | { kind: "archive_clip"; premiereId: string };
 
 export type ProxyWarPublicPremiereWriteRoute =
   | { kind: "prediction"; premiereId: string }
@@ -202,6 +209,10 @@ export function matchProxyWarPublicPremiereReadPath(
       premiereId: clipFile[1],
       bucket: Number(clipFile[2]),
     };
+  }
+  const archiveClip = proxyWarPremiereArchiveClipPattern.exec(pathname);
+  if (archiveClip !== null) {
+    return { kind: "archive_clip", premiereId: archiveClip[1] };
   }
   return null;
 }
@@ -297,6 +308,88 @@ export function isProxyWarPublicLeaguePath(pathname: string): boolean {
   return runKey === "league"
     ? isProxyWarPublicLeagueArtifact(artifact)
     : isProxyWarPublicRunArtifact(artifact);
+}
+
+// ---------------------------------------------------------------------------
+// League-run social clips (any published match, not just premieres)
+// ---------------------------------------------------------------------------
+
+// Run keys are single safe path segments (same charset as run artifacts).
+const proxyWarLeagueRunKeySource = "[a-zA-Z0-9._:-]{1,180}";
+const proxyWarLeagueClipBucketSource = "0|[1-9][0-9]{0,8}";
+const proxyWarLeagueClipFilePattern = new RegExp(
+  `^/ai-league-runs/(${proxyWarLeagueRunKeySource})/clip-v1-(${proxyWarLeagueClipBucketSource})\\.mp4$`,
+);
+const proxyWarLeagueClipStatusPattern = new RegExp(
+  `^/api/league-runs/(${proxyWarLeagueRunKeySource})/clips/(${proxyWarLeagueClipBucketSource})$`,
+);
+const proxyWarLeagueClipCreatePattern = new RegExp(
+  `^/api/league-runs/(${proxyWarLeagueRunKeySource})/clips$`,
+);
+
+export type ProxyWarLeagueClipReadRoute =
+  | {
+      kind: "clip_status";
+      runKey: string;
+      bucket: number;
+      publicLeague: boolean;
+    }
+  | {
+      kind: "clip_file";
+      runKey: string;
+      bucket: number;
+      publicLeague: boolean;
+    };
+
+export interface ProxyWarLeagueClipWriteRoute {
+  kind: "clip_request";
+  runKey: string;
+  publicLeague: boolean;
+}
+
+/**
+ * League-run clip read surface: render-status JSON and the cached mp4.
+ * `publicLeague` marks mirror-published `league-*` run keys — the only keys
+ * the anonymous league surface (beta gate / league wrapper) admits, exactly
+ * mirroring which replay pages are public. Traversal-shaped keys never match.
+ */
+export function matchProxyWarLeagueClipReadPath(
+  pathname: string,
+): ProxyWarLeagueClipReadRoute | null {
+  const status = proxyWarLeagueClipStatusPattern.exec(pathname);
+  if (status !== null && isSafeProxyWarArtifactSegment(status[1])) {
+    return {
+      kind: "clip_status",
+      runKey: status[1],
+      bucket: Number(status[2]),
+      publicLeague: status[1].startsWith("league-"),
+    };
+  }
+  const file = proxyWarLeagueClipFilePattern.exec(pathname);
+  if (file !== null && isSafeProxyWarArtifactSegment(file[1])) {
+    return {
+      kind: "clip_file",
+      runKey: file[1],
+      bucket: Number(file[2]),
+      publicLeague: file[1].startsWith("league-"),
+    };
+  }
+  return null;
+}
+
+/** League-run clip write surface: the render request POST. */
+export function matchProxyWarLeagueClipWritePath(
+  pathname: string,
+): ProxyWarLeagueClipWriteRoute | null {
+  const create = proxyWarLeagueClipCreatePattern.exec(pathname);
+  if (create === null || !isSafeProxyWarArtifactSegment(create[1])) {
+    return null;
+  }
+  return {
+    kind: "clip_request",
+    runKey: create[1],
+    publicLeague: create[1].startsWith("league-"),
+  };
 }
 
 const proxyWarReplayOrRunPrefixes = [

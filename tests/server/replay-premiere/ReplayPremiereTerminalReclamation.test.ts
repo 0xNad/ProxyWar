@@ -263,6 +263,175 @@ describe("ReplayPremiereTerminalReclaimer", () => {
   });
 });
 
+describe("durable archived-clip promotion", () => {
+  const archivedClipPath = (premiereId: string): string =>
+    path.join(root, "archive-v1", "clips", `${premiereId}.mp4`);
+  const archivedClipManifestPath = (premiereId: string): string =>
+    path.join(
+      root,
+      "archive-v1",
+      "clips",
+      `${premiereId}.render-manifest.json`,
+    );
+
+  async function writeCachedClip(
+    premiereId: string,
+    bucket: number,
+    anchorTurn: number,
+    bytes: Buffer,
+  ): Promise<void> {
+    const dir = path.join(root, "clips-v1", premiereId);
+    await fs.mkdir(dir, { recursive: true });
+    const clipPath = path.join(dir, `clip-v1-${bucket}.mp4`);
+    await fs.writeFile(clipPath, bytes);
+    await fs.writeFile(
+      path.join(dir, `clip-v1-${bucket}.render-manifest.json`),
+      JSON.stringify({
+        premiereId,
+        sourceReplaySha256: SOURCE_SHA,
+        anchorTurn,
+        clipVersion: 1,
+        frameShape: "square",
+        frameWidth: 1080,
+        frameHeight: 1080,
+        outSha256: sha256Hex(bytes),
+        outBytes: bytes.length,
+        generatedAt: "2026-07-20T18:00:01.000Z",
+      }),
+    );
+  }
+
+  it("promotes the highest-anchor cached clip into archive-v1/clips before deleting bulk", async () => {
+    await writeBulk();
+    const early = Buffer.alloc(90, 1);
+    const late = Buffer.alloc(120, 2);
+    await writeCachedClip(PREMIERE_ID, 3, 35, early);
+    await writeCachedClip(PREMIERE_ID, 61, 615, late);
+    const { reclaimer, store } = await reclaimerWith(
+      "2026-07-20T18:45:00.000Z",
+    );
+    const result = await reclaimer.reclaimIfEligible(target());
+    expect(result.reclaimed).toBe(true);
+    expect(store.lookup(PREMIERE_ID)).not.toBeNull();
+
+    // The durable clip is the reveal-payoff (highest anchor) render, with its
+    // provenance sidecar, and the per-premiere bulk is still deleted.
+    expect(await fs.readFile(archivedClipPath(PREMIERE_ID))).toEqual(late);
+    expect(await exists(archivedClipManifestPath(PREMIERE_ID))).toBe(true);
+    expect(await exists(admissionPath(PREMIERE_ID))).toBe(false);
+  });
+
+  it("reclaims normally when the premiere has no cached clip", async () => {
+    await writeBulk();
+    const { reclaimer } = await reclaimerWith("2026-07-20T18:45:00.000Z");
+    const result = await reclaimer.reclaimIfEligible(target());
+    expect(result.reclaimed).toBe(true);
+    expect(await exists(archivedClipPath(PREMIERE_ID))).toBe(false);
+    expect(await exists(admissionPath(PREMIERE_ID))).toBe(false);
+  });
+
+  it("never promotes a clip for a premiere that was not reveal-public", async () => {
+    const failedId = "prem_failednoclip0001";
+    await writeBulk(failedId);
+    // Even a (hand-planted) cache entry must not surface for a failed
+    // premiere: the durable clip is reveal-public-only, exactly like the
+    // summary outcome.
+    await writeCachedClip(failedId, 61, 615, Buffer.alloc(64, 3));
+    const failedTarget = {
+      runtime: {
+        premiereId: failedId,
+        readLifecycleState: () => "failed",
+        readBootstrap: () => ({
+          premiereId: failedId,
+          publicationCommitmentHash: COMMITMENT,
+          provenance: {
+            sourceKind: "controlled_exhibition",
+            sourceRunId: "controlled-run-002",
+            sourceReplaySha256: SOURCE_SHA,
+            seats: seatFixtures(),
+          },
+        }),
+        readReveal: () => null,
+      },
+      interactions: {
+        readCheckpoints: () => [],
+        readState: () => ({ reactions: [] }),
+      },
+    } as unknown as ReplayPremiereHttpTarget;
+    const { reclaimer, store } = await reclaimerWith(
+      "2026-07-20T18:45:00.000Z",
+    );
+    const result = await reclaimer.reclaimIfEligible(failedTarget);
+    expect(result.reclaimed).toBe(true);
+    expect(store.lookup(failedId)?.terminalState).toBe("failed");
+    expect(await exists(archivedClipPath(failedId))).toBe(false);
+    expect(await exists(archivedClipManifestPath(failedId))).toBe(false);
+  });
+
+  it("adopts the first durable clip verbatim on the already-reclaimed retry", async () => {
+    await writeBulk();
+    const original = Buffer.alloc(80, 4);
+    await writeCachedClip(PREMIERE_ID, 61, 615, original);
+    const { reclaimer } = await reclaimerWith("2026-07-20T18:45:00.000Z");
+    await reclaimer.reclaimIfEligible(target());
+    expect(await fs.readFile(archivedClipPath(PREMIERE_ID))).toEqual(original);
+
+    // A different cache clip appearing later must never replace the durable
+    // artifact (first write wins, matching summary adoption semantics).
+    await writeCachedClip(PREMIERE_ID, 70, 705, Buffer.alloc(70, 5));
+    const again = await reclaimer.reclaimIfEligible(target());
+    expect(again.reason).toBe("already_reclaimed");
+    expect(await fs.readFile(archivedClipPath(PREMIERE_ID))).toEqual(original);
+  });
+
+  it("ignores cache artifacts whose sidecar is missing, foreign, or size-mismatched", async () => {
+    await writeBulk();
+    const dir = path.join(root, "clips-v1", PREMIERE_ID);
+    await fs.mkdir(dir, { recursive: true });
+    // No sidecar at all.
+    await fs.writeFile(path.join(dir, "clip-v1-10.mp4"), Buffer.alloc(10, 6));
+    // Sidecar bytes disagree with the file (torn write).
+    const torn = Buffer.alloc(50, 7);
+    await writeCachedClip(PREMIERE_ID, 20, 205, torn);
+    await fs.writeFile(path.join(dir, "clip-v1-20.mp4"), Buffer.alloc(49, 7));
+    const { reclaimer } = await reclaimerWith("2026-07-20T18:45:00.000Z");
+    const result = await reclaimer.reclaimIfEligible(target());
+    expect(result.reclaimed).toBe(true);
+    expect(await exists(archivedClipPath(PREMIERE_ID))).toBe(false);
+  });
+
+  it("bounds durable clip storage by count with oldest-first eviction", async () => {
+    const ids = [
+      "prem_retention0000001",
+      "prem_retention0000002",
+      "prem_retention0000003",
+    ] as const;
+    const store = await ReplayPremiereArchiveStore.open({
+      privateStateRoot: root,
+    });
+    const reclaimer = new ReplayPremiereTerminalReclaimer({
+      privateStateRoot: root,
+      store,
+      graceMs: GRACE_MS,
+      now: () => new Date("2026-07-20T18:45:00.000Z"),
+      maxArchivedClips: 2,
+    });
+    for (const [index, premiereId] of ids.entries()) {
+      await writeCachedClip(premiereId, 61, 615, Buffer.alloc(30 + index, 9));
+      await reclaimer.reclaimIfEligible(target(premiereId));
+      // Backdate so eviction ordering is deterministic even within one tick.
+      const when = new Date(
+        Date.parse("2026-07-01T00:00:00Z") + index * 60_000,
+      );
+      await fs.utimes(archivedClipPath(premiereId), when, when);
+    }
+    expect(await exists(archivedClipPath(ids[0]))).toBe(false);
+    expect(await exists(archivedClipManifestPath(ids[0]))).toBe(false);
+    expect(await exists(archivedClipPath(ids[1]))).toBe(true);
+    expect(await exists(archivedClipPath(ids[2]))).toBe(true);
+  });
+});
+
 describe("loadReplayPremiereReclamationExclusions", () => {
   it("merges the env var and the pin file, dropping malformed ids", async () => {
     await fs.writeFile(
