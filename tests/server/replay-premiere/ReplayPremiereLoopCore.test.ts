@@ -147,11 +147,15 @@ describe("playback rate + checkpoint heuristics", () => {
 
 describe("startup budget bound", () => {
   test("accepts within budget, rejects over budget and non-positive", () => {
-    expect(isTurnCountWithinStartupBudget(34_000)).toBe(true);
-    expect(isTurnCountWithinStartupBudget(34_001)).toBe(false);
     expect(
       isTurnCountWithinStartupBudget(PREMIERE_LOOP_TURN_STARTUP_BUDGET),
     ).toBe(true);
+    expect(
+      isTurnCountWithinStartupBudget(PREMIERE_LOOP_TURN_STARTUP_BUDGET + 1),
+    ).toBe(false);
+    // 2026-07-22 production calibration boundary: 32,300 turns exceeded the
+    // server's 8 s registration budget (round 646 zombie); must stay skipped.
+    expect(isTurnCountWithinStartupBudget(32_300)).toBe(false);
     expect(isTurnCountWithinStartupBudget(0)).toBe(false);
     expect(isTurnCountWithinStartupBudget(Number.NaN)).toBe(false);
   });

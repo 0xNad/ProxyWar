@@ -57,10 +57,17 @@ export const PREMIERE_LOOP_SEAL_WINDOW_MS = PREMIERE_LOOP_HOLD_WINDOW_MS;
 
 /**
  * Startup projection budget: episodes longer than this risk exceeding the
- * server's ~10s premiere-registration budget on very long World episodes, so
- * they are skipped (the loop tries a shorter episode of the round first).
+ * server's premiere-registration budget (`maxStartupMs: 8_000` in
+ * ai-agent-demo-server.ts), so they are skipped (the loop tries a shorter
+ * episode of the round first).
+ *
+ * 2026-07-22 production calibration: a 26,900-turn target assembled within
+ * the 8 s budget (round 642, premiered cleanly); a 32,300-turn target did
+ * NOT (round 646, `startup_deadline_exceeded` → activation zombie). 24,000
+ * keeps margin under the measured boundary until fresh admissions get a
+ * real assembly budget decoupled from process startup.
  */
-export const PREMIERE_LOOP_TURN_STARTUP_BUDGET = 34_000;
+export const PREMIERE_LOOP_TURN_STARTUP_BUDGET = 24_000;
 
 /** At most this many raw replays are downloaded while selecting a claim. */
 export const PREMIERE_LOOP_MAX_REPLAY_DOWNLOADS = 3;
