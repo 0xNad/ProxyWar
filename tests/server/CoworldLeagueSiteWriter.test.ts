@@ -80,7 +80,6 @@ function sampleData(): CoworldLeagueMirrorData {
         completedAt: "2026-07-13T10:15:00Z",
         map: "Pangaea",
         mapSize: "Compact",
-        difficulty: "Easy",
         turnCount: 6000,
         decisionCount: 236,
         degradedCount: 33,
@@ -113,7 +112,6 @@ function sampleData(): CoworldLeagueMirrorData {
         completedAt: null,
         map: "Britannia",
         mapSize: "Compact",
-        difficulty: "Easy",
         turnCount: null,
         decisionCount: null,
         degradedCount: 0,
@@ -175,6 +173,13 @@ describe("coworldLeagueIndexHtml", () => {
     const html = coworldLeagueIndexHtml(sampleData());
     expect(html).toContain("⚠ 33 degraded");
     expect(html).not.toContain("⚠ 0 degraded");
+  });
+
+  test("renders the map name and never leaks a difficulty label", () => {
+    const html = coworldLeagueIndexHtml(sampleData());
+    expect(html).toContain("Pangaea");
+    expect(html).toContain("Britannia");
+    expect(html.toLowerCase()).not.toContain("difficulty");
   });
 
   test("links the full render as the single replay button", () => {
@@ -284,6 +289,10 @@ describe("writeCoworldLeagueSite", () => {
     const roundTrip = JSON.parse(await readFile(paths.dataPath, "utf8"));
     expect(roundTrip.league.id).toBe("league_test");
     expect(roundTrip.standings).toHaveLength(3);
+    expect(roundTrip.episodes[0].map).toBe("Pangaea");
+    // Map size is retained in the data model; difficulty is gone end-to-end.
+    expect(roundTrip.episodes[0].mapSize).toBe("Compact");
+    expect(roundTrip.episodes[0]).not.toHaveProperty("difficulty");
   });
 
   test("marks both artifacts stale while retaining the last good sync", async () => {

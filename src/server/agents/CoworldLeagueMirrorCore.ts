@@ -287,13 +287,42 @@ export interface HostedEpisodeMeta {
   roundId: string | null;
   completedAt: string | null;
   replayUrl: string | null;
+  /** Raw variant label from the replays list, e.g. "Tournament 12P - Pangaea". */
+  variantName: string | null;
+  /**
+   * Best-effort map from the replays list alone: the variant label's map
+   * segment first, then the legacy `game_config.map`. Shown verbatim for rows
+   * that never get a downloaded replay; otherwise the replay config refines it.
+   */
   map: string;
   mapSize: string;
-  difficulty: string;
+  /** Legacy `game_config.map` when the list still carries it; null under the current API. */
+  legacyConfigMap: string | null;
 }
 
 export function isSafeCoworldEpisodeRequestId(value: string): boolean {
   return /^ereq_[A-Za-z0-9_-]+$/.test(value);
+}
+
+/**
+ * Extracts the map name from a Coworld variant label. Ladder variants are named
+ * "<tournament label> - <Map>" (e.g. "Tournament 12P - Pangaea",
+ * "Tournament 12P - World"), so the map is the segment after the LAST " - ".
+ * Returns null when there is no such segment so callers can fall back to the
+ * legacy `game_config.map` or the authoritative in-replay config.
+ */
+export function mapNameFromVariant(variantName: unknown): string | null {
+  const label = asString(variantName);
+  if (label === null) {
+    return null;
+  }
+  const separator = " - ";
+  const index = label.lastIndexOf(separator);
+  if (index === -1) {
+    return null;
+  }
+  const candidate = label.slice(index + separator.length).trim();
+  return candidate.length > 0 ? candidate : null;
 }
 
 export function parseCompletedEpisodeMetaList(
@@ -313,14 +342,21 @@ export function parseCompletedEpisodeMetaList(
       continue;
     }
     const gameConfig = asRecord(episode.game_config);
+    const variantName = asString(episode.variant_name);
+    const legacyConfigMap = asString(gameConfig?.map);
     episodes.push({
       episodeRequestId,
       roundId: asString(episode.round_id),
       completedAt: asString(episode.completed_at),
       replayUrl: asString(episode.replay_url),
-      map: asString(gameConfig?.map) ?? "Unknown map",
+      variantName,
+      // The replays-list `game_config` went empty in the 2026-07 API change, so
+      // the variant label ("Tournament 12P - Pangaea") is the reliable map
+      // source now; the legacy field stays as a fallback for older rows or if
+      // the platform restores it.
+      map: mapNameFromVariant(variantName) ?? legacyConfigMap ?? "Unknown map",
       mapSize: asString(gameConfig?.map_size) ?? "",
-      difficulty: asString(gameConfig?.difficulty) ?? "",
+      legacyConfigMap,
     });
   }
   episodes.sort((a, b) =>
@@ -331,6 +367,10 @@ export function parseCompletedEpisodeMetaList(
 
 export interface ParsedHostedReplay {
   runID: string;
+  /** Authoritative map from the downloaded replay config, if present. */
+  map: string | null;
+  /** Authoritative map size from the downloaded replay config, if present. */
+  mapSize: string | null;
   spectatorReplay: AgentSpectatorReplay | null;
   inlineRunArtifacts: Record<string, string>;
   turnCount: number | null;
@@ -357,6 +397,18 @@ export function parseHostedReplayPayload(
     return null;
   }
   const results = asRecord(payload.results);
+  // Map/size live in the hosted replay's own config. Our adapter writes
+  // snake_case `config.map`/`config.map_size`; a raw game-record payload
+  // instead nests camelCase `gameRecord.info.config.gameMap`/`gameMapSize`.
+  // Support both so the map survives either replay shape.
+  const replayConfig = asRecord(payload.config);
+  const gameRecordConfig = asRecord(
+    asRecord(asRecord(payload.gameRecord)?.info)?.config,
+  );
+  const map =
+    asString(replayConfig?.map) ?? asString(gameRecordConfig?.gameMap);
+  const mapSize =
+    asString(replayConfig?.map_size) ?? asString(gameRecordConfig?.gameMapSize);
   const players: ParsedHostedReplay["players"] = [];
   for (const entry of asArray(results?.players)) {
     const player = asRecord(entry);
@@ -382,6 +434,8 @@ export function parseHostedReplayPayload(
   const spectator = asRecord(payload.spectatorReplay);
   return {
     runID,
+    map,
+    mapSize,
     spectatorReplay:
       spectator && Array.isArray(spectator.snapshots)
         ? (spectator as unknown as AgentSpectatorReplay)
@@ -442,9 +496,16 @@ export function buildEpisodeRow(input: {
     shortId: shortEpisodeId(meta.episodeRequestId),
     roundNumber: input.roundNumber,
     completedAt: meta.completedAt,
-    map: meta.map,
-    mapSize: meta.mapSize,
-    difficulty: meta.difficulty,
+    // Precedence: variant-label map (reliable, list-derived) -> authoritative
+    // in-replay config map -> legacy game_config.map -> "Unknown map".
+    map:
+      mapNameFromVariant(meta.variantName) ??
+      replay.map ??
+      meta.legacyConfigMap ??
+      "Unknown map",
+    // Map size is absent from the variant label; prefer the downloaded replay
+    // config, else the legacy list value, else blank.
+    mapSize: replay.mapSize ?? meta.mapSize,
     turnCount: replay.turnCount,
     decisionCount: replay.decisionCount,
     degradedCount: replay.degradedCount,

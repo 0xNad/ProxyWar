@@ -4,6 +4,7 @@ import {
   buildEpisodeRow,
   buildRoundRows,
   buildStandingRows,
+  mapNameFromVariant,
   mergeEpisodeRows,
   parseCompletedEpisodeMetaList,
   parseHostedReplayPayload,
@@ -142,6 +143,9 @@ const replayPayloadFixture = {
   schemaVersion: 1,
   replayKind: "proxywar-coworld-local-poc",
   runID: "coworld-2026-07-13T10-40-45-699Z-9ed769ef",
+  // The hosted replay payload carries the authoritative runner config
+  // (snake_case), even though the replays-list `game_config` is now empty.
+  config: { map: "Britannia", map_size: "Normal", difficulty: "Easy" },
   results: {
     winner_slot: 2,
     turn_count: 6000,
@@ -418,5 +422,169 @@ describe("CoworldLeagueMirrorCore", () => {
   test("shortEpisodeId strips the prefix and sanitizes", () => {
     expect(shortEpisodeId("ereq_c2c89bdc-28ac")).toBe("c2c89bdc");
     expect(shortEpisodeId("ereq_<evil>!!")).toBe("evil");
+  });
+
+  test("mapNameFromVariant reads the map after the last hyphen segment", () => {
+    expect(mapNameFromVariant("Tournament 12P - Pangaea")).toBe("Pangaea");
+    expect(mapNameFromVariant("Tournament 12P - World")).toBe("World");
+    expect(mapNameFromVariant("Qualifier 2P - Black Sea")).toBe("Black Sea");
+    expect(mapNameFromVariant("Tournament 12P -    ")).toBeNull();
+    expect(mapNameFromVariant("NoSeparatorHere")).toBeNull();
+    expect(mapNameFromVariant(null)).toBeNull();
+    expect(mapNameFromVariant(42)).toBeNull();
+  });
+
+  test("parseCompletedEpisodeMetaList derives the map from variant_name when game_config is empty", () => {
+    const episodes = parseCompletedEpisodeMetaList([
+      {
+        id: "ereq_variant-empty",
+        status: "completed",
+        round_id: "round_1",
+        completed_at: "2026-07-21T23:43:00Z",
+        replay_url: "https://example.com/replays/v.replay",
+        game_config: {},
+        variant_name: "Tournament 12P - World",
+      },
+      {
+        id: "ereq_variant-null",
+        status: "completed",
+        round_id: "round_1",
+        completed_at: "2026-07-21T23:13:00Z",
+        replay_url: "https://example.com/replays/w.replay",
+        game_config: null,
+        variant_name: "Tournament 12P - Pangaea",
+      },
+    ]);
+    expect(episodes.map((entry) => entry.map)).toEqual(["World", "Pangaea"]);
+    expect(episodes[0].variantName).toBe("Tournament 12P - World");
+    expect(episodes[0].mapSize).toBe("");
+    expect(episodes[0].legacyConfigMap).toBeNull();
+  });
+
+  test("parseCompletedEpisodeMetaList prefers variant_name over a legacy game_config.map", () => {
+    const [episode] = parseCompletedEpisodeMetaList([
+      {
+        id: "ereq_variant-wins",
+        status: "completed",
+        round_id: "round_1",
+        completed_at: "2026-07-21T23:43:00Z",
+        replay_url: "https://example.com/replays/x.replay",
+        game_config: { map: "LegacyIsland", map_size: "Compact" },
+        variant_name: "Tournament 12P - World",
+      },
+    ]);
+    expect(episode.map).toBe("World");
+    expect(episode.legacyConfigMap).toBe("LegacyIsland");
+    expect(episode.mapSize).toBe("Compact");
+  });
+
+  test("parseCompletedEpisodeMetaList still reads a legacy game_config.map with no variant", () => {
+    const [episode] = parseCompletedEpisodeMetaList([
+      {
+        id: "ereq_legacy-only",
+        status: "completed",
+        round_id: "round_1",
+        completed_at: "2026-07-21T23:43:00Z",
+        replay_url: "https://example.com/replays/y.replay",
+        game_config: { map: "Africa", map_size: "Large" },
+      },
+    ]);
+    expect(episode.map).toBe("Africa");
+    expect(episode.mapSize).toBe("Large");
+  });
+
+  test("parseCompletedEpisodeMetaList falls back to Unknown map with neither source", () => {
+    const [episode] = parseCompletedEpisodeMetaList([
+      {
+        id: "ereq_no-map",
+        status: "completed",
+        round_id: "round_1",
+        completed_at: "2026-07-21T23:43:00Z",
+        replay_url: "https://example.com/replays/z.replay",
+        game_config: {},
+      },
+    ]);
+    expect(episode.map).toBe("Unknown map");
+    expect(episode.mapSize).toBe("");
+    expect(episode.variantName).toBeNull();
+  });
+
+  test("parseHostedReplayPayload reads map and size from the replay config", () => {
+    const replay = parseHostedReplayPayload(replayPayloadFixture);
+    expect(replay?.map).toBe("Britannia");
+    expect(replay?.mapSize).toBe("Normal");
+  });
+
+  test("parseHostedReplayPayload reads a raw game-record config as a fallback", () => {
+    const replay = parseHostedReplayPayload({
+      ...replayPayloadFixture,
+      config: undefined,
+      gameRecord: {
+        info: { config: { gameMap: "Asia", gameMapSize: "Huge" } },
+      },
+    });
+    expect(replay?.map).toBe("Asia");
+    expect(replay?.mapSize).toBe("Huge");
+  });
+
+  test("buildEpisodeRow keeps the variant map, enriches size, and drops difficulty", () => {
+    const replay = parseHostedReplayPayload(replayPayloadFixture);
+    expect(replay).not.toBeNull();
+    if (replay === null) {
+      return;
+    }
+    const [meta] = parseCompletedEpisodeMetaList([
+      {
+        id: "ereq_variant-row",
+        status: "completed",
+        round_id: "round_1",
+        completed_at: "2026-07-21T23:43:00Z",
+        replay_url: "https://example.com/replays/r.replay",
+        game_config: {},
+        variant_name: "Tournament 12P - World",
+      },
+    ]);
+    const row = buildEpisodeRow({
+      meta,
+      replay,
+      roundNumber: 1,
+      watchHref: null,
+      fullRenderHref: null,
+    });
+    // The variant label wins over the replay config's "Britannia".
+    expect(row.map).toBe("World");
+    // Map size comes from the authoritative replay config.
+    expect(row.mapSize).toBe("Normal");
+    expect(row).not.toHaveProperty("difficulty");
+  });
+
+  test("buildEpisodeRow recovers the map from the replay config when the list has none", () => {
+    const replay = parseHostedReplayPayload(replayPayloadFixture);
+    expect(replay).not.toBeNull();
+    if (replay === null) {
+      return;
+    }
+    const [meta] = parseCompletedEpisodeMetaList([
+      {
+        id: "ereq_no-list-map",
+        status: "completed",
+        round_id: "round_1",
+        completed_at: "2026-07-21T23:43:00Z",
+        replay_url: "https://example.com/replays/n.replay",
+        game_config: {},
+      },
+    ]);
+    // The list alone cannot resolve the map for this row.
+    expect(meta.map).toBe("Unknown map");
+    const row = buildEpisodeRow({
+      meta,
+      replay,
+      roundNumber: 1,
+      watchHref: null,
+      fullRenderHref: null,
+    });
+    // Recovered from the authoritative replay config.
+    expect(row.map).toBe("Britannia");
+    expect(row.mapSize).toBe("Normal");
   });
 });
