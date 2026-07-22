@@ -5,6 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import { ReplayPremiereAnonymousWriteLimiter } from "../../../src/server/replay-premiere/ReplayPremiereAnonymousWriteLimiter";
+import { ReplayPremiereArchiveStore } from "../../../src/server/replay-premiere/ReplayPremiereArchiveIndex";
 import { ReplayPremiereAdmissionCatalog } from "../../../src/server/replay-premiere/ReplayPremiereCatalog";
 import {
   freezeReplayPremiereCheckpointProjection,
@@ -37,6 +38,7 @@ import {
   startReplayPremiereProduction,
   type ReplayPremiereProductionService,
 } from "../../../src/server/replay-premiere/ReplayPremiereStartup";
+import { ReplayPremiereTerminalReclaimer } from "../../../src/server/replay-premiere/ReplayPremiereTerminalReclamation";
 import {
   NOW,
   PREMIERE_ID,
@@ -1891,7 +1893,210 @@ describe("ReplayPremiere production startup", () => {
     expect(context.httpRegistry.get(PREMIERE_ID)).toBeNull();
     expect(context.runtimeRegistry.get(PREMIERE_ID)).toBeNull();
   });
+
+  // -------------------------------------------------------------------------
+  // Orphan reclamation (2026-07-22 rounds 652/653): a premiere that reveals
+  // and then spans a beta restart inside its reclamation grace is never
+  // re-registered (fresh rounds own the critical startup slot), so the
+  // live-target sweep can never archive it and /premiere/<id> 404s forever.
+  // The sweep now also reclaims such orphans from durable evidence.
+  // -------------------------------------------------------------------------
+
+  async function revealPremiereAndClose(): Promise<string> {
+    vi.useFakeTimers({ now: NOW });
+    await writeAdmission(root);
+    const context = startupContext(() => new Date());
+    const started = await startReplayPremiereProduction({
+      ...context,
+      privateStateRoot: path.join(root, "private"),
+      servedRoots: [path.join(root, "served")],
+    });
+    services.push(started.service);
+    const runtime = context.runtimeRegistry.get(PREMIERE_ID)!;
+    await vi.advanceTimersByTimeAsync(100);
+    await started.service.waitForRuntimeTimersIdle();
+    await vi.advanceTimersByTimeAsync(15_000);
+    await started.service.waitForRuntimeTimersIdle();
+    await vi.advanceTimersByTimeAsync(100);
+    await started.service.waitForRuntimeTimersIdle();
+    await vi.advanceTimersByTimeAsync(15_000);
+    await started.service.waitForRuntimeTimersIdle();
+    await vi.advanceTimersByTimeAsync(50);
+    await started.service.waitForRuntimeTimersIdle();
+    expect(runtime.readLifecycleState()).toBe("revealed");
+    const revealedAt = runtime.readReveal()!.revealedAt;
+    await started.service.close();
+    services.splice(services.indexOf(started.service), 1);
+    vi.useRealTimers();
+    // A newer scheduled admission owns the critical startup slot on reboot,
+    // exactly like production (fresh rounds keep premiering): the revealed
+    // premiere is left unregistered — the orphan.
+    await writeAlternateAdmission(root, ORPHAN_ALTERNATE_ID);
+    return revealedAt;
+  }
+
+  test("a revealed premiere orphaned across a restart is reclaimed from durable evidence", async () => {
+    const revealedAt = await revealPremiereAndClose();
+    const lines: string[] = [];
+    // Reboot far past the 30-minute reclamation grace.
+    const rebootContext = startupContext(
+      () => new Date(NOW.getTime() + 45 * 60_000),
+    );
+    const archiveStore = await ReplayPremiereArchiveStore.open({
+      privateStateRoot: path.join(root, "private"),
+    });
+    const rebooted = await startReplayPremiereProduction({
+      ...rebootContext,
+      privateStateRoot: path.join(root, "private"),
+      servedRoots: [path.join(root, "served")],
+      archiveStore,
+      reclamationSweepMs: 0,
+      onDiagnostic: (diagnostic) => {
+        lines.push(`${diagnostic.target}:${diagnostic.operatorCode}`);
+      },
+    });
+    services.push(rebooted.service);
+    expect(rebooted.registeredPremiereIds).toEqual([ORPHAN_ALTERNATE_ID]);
+    expect(rebootContext.runtimeRegistry.get(PREMIERE_ID)).toBeNull();
+
+    await rebooted.service.runReclamationSweepOnce();
+
+    expect(lines).toContain(`${PREMIERE_ID}.orphan:orphan_reclaimed`);
+    const summary = await archiveStore.loadSummary(PREMIERE_ID);
+    expect(summary).not.toBeNull();
+    expect(summary!.terminalState).toBe("revealed");
+    expect(summary!.revealedAt).toBe(revealedAt);
+    // The winner-led archived page has what it needs: a full outcome from the
+    // hash-covered authoritative result; interaction aggregates are empty by
+    // design (no live runtime existed to read them from).
+    expect(summary!.outcome).not.toBeNull();
+    expect(summary!.outcome!.standings.length).toBeGreaterThan(0);
+    expect(summary!.predictions).toEqual([]);
+    expect(summary!.markers).toEqual([]);
+    // The bulk is gone; the archive pointer now owns /premiere/<id>.
+    await expect(
+      fs.stat(admissionPath(root, PREMIERE_ID)),
+    ).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  test("a reclaim-excluded orphan is never touched", async () => {
+    await revealPremiereAndClose();
+    const rebootContext = startupContext(
+      () => new Date(NOW.getTime() + 45 * 60_000),
+    );
+    const archiveStore = await ReplayPremiereArchiveStore.open({
+      privateStateRoot: path.join(root, "private"),
+    });
+    const lines: string[] = [];
+    const rebooted = await startReplayPremiereProduction({
+      ...rebootContext,
+      privateStateRoot: path.join(root, "private"),
+      servedRoots: [path.join(root, "served")],
+      archiveStore,
+      reclamationSweepMs: 0,
+      reclamationExcludedPremiereIds: [PREMIERE_ID],
+      onDiagnostic: (diagnostic) => {
+        lines.push(`${diagnostic.target}:${diagnostic.operatorCode}`);
+      },
+    });
+    services.push(rebooted.service);
+
+    await rebooted.service.runReclamationSweepOnce();
+
+    expect(lines).not.toContain(`${PREMIERE_ID}.orphan:orphan_reclaimed`);
+    expect(archiveStore.lookup(PREMIERE_ID)).toBeNull();
+    await expect(
+      fs.stat(admissionPath(root, PREMIERE_ID)),
+    ).resolves.toBeTruthy();
+  });
+
+  test("a within-grace orphan is left alone, then reclaimed once the grace elapses", async () => {
+    const revealedAt = await revealPremiereAndClose();
+    // Reboot five minutes after the reveal: well inside the 30-minute grace.
+    let nowMs = Date.parse(revealedAt) + 5 * 60_000;
+    const rebootContext = startupContext(() => new Date(nowMs));
+    const archiveStore = await ReplayPremiereArchiveStore.open({
+      privateStateRoot: path.join(root, "private"),
+    });
+    const lines: string[] = [];
+    const rebooted = await startReplayPremiereProduction({
+      ...rebootContext,
+      privateStateRoot: path.join(root, "private"),
+      servedRoots: [path.join(root, "served")],
+      archiveStore,
+      reclamationSweepMs: 0,
+      onDiagnostic: (diagnostic) => {
+        lines.push(`${diagnostic.target}:${diagnostic.operatorCode}`);
+      },
+    });
+    services.push(rebooted.service);
+
+    await rebooted.service.runReclamationSweepOnce();
+    expect(lines).not.toContain(`${PREMIERE_ID}.orphan:orphan_reclaimed`);
+    expect(archiveStore.lookup(PREMIERE_ID)).toBeNull();
+    await expect(
+      fs.stat(admissionPath(root, PREMIERE_ID)),
+    ).resolves.toBeTruthy();
+
+    // The candidate is retained across sweeps: once the grace elapses, the
+    // next periodic sweep reclaims it without another restart.
+    nowMs = Date.parse(revealedAt) + 31 * 60_000;
+    await rebooted.service.runReclamationSweepOnce();
+    expect(lines).toContain(`${PREMIERE_ID}.orphan:orphan_reclaimed`);
+    expect(archiveStore.lookup(PREMIERE_ID)).not.toBeNull();
+    await expect(
+      fs.stat(admissionPath(root, PREMIERE_ID)),
+    ).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  test("orphan reclamation fails closed without a proven reveal instant, and stays neutral for cancelled orphans", async () => {
+    await writeAdmission(root);
+    const catalog = await ReplayPremiereAdmissionCatalog.open({
+      privateStateRoot: path.join(root, "private"),
+      servedRoots: [path.join(root, "served")],
+    });
+    const record = (await catalog.readAll()).entries[0];
+    await catalog.close();
+    const archiveStore = await ReplayPremiereArchiveStore.open({
+      privateStateRoot: path.join(root, "private"),
+    });
+    const reclaimer = new ReplayPremiereTerminalReclaimer({
+      privateStateRoot: path.join(root, "private"),
+      store: archiveStore,
+      now: () => new Date(NOW.getTime() + 60 * 60_000),
+    });
+
+    // Revealed/archived without a reveal instant: refused, nothing written —
+    // a stale non-revealed admission can never become publishable this way.
+    const refused = await reclaimer.reclaimOrphanIfEligible({
+      premiereId: PREMIERE_ID,
+      record,
+      terminalState: "revealed",
+      revealedAt: null,
+      attempts: 0,
+    });
+    expect(refused.reclaimed).toBe(false);
+    expect(refused.reason).toBe("revealed_time_unavailable");
+    expect(archiveStore.lookup(PREMIERE_ID)).toBeNull();
+
+    // Cancelled orphan: immediately eligible with the spoiler-neutral
+    // null-outcome summary — exactly the live path's terminal handling.
+    const cancelled = await reclaimer.reclaimOrphanIfEligible({
+      premiereId: PREMIERE_ID,
+      record,
+      terminalState: "cancelled",
+      revealedAt: null,
+      attempts: 0,
+    });
+    expect(cancelled.reclaimed).toBe(true);
+    const summary = await archiveStore.loadSummary(PREMIERE_ID);
+    expect(summary!.terminalState).toBe("cancelled");
+    expect(summary!.outcome).toBeNull();
+    expect(summary!.revealedAt).toBeNull();
+  });
 });
+
+const ORPHAN_ALTERNATE_ID = "prem_89abcdef01234567";
 
 async function writeAdmission(root: string, origin?: string): Promise<void> {
   const fixture = await verifiedPublicationFixture(root, { origin });

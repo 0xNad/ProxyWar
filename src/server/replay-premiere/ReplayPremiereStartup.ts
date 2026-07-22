@@ -62,10 +62,13 @@ import {
 import {
   DEFAULT_REPLAY_PREMIERE_RECLAMATION_GRACE_MS,
   ReplayPremiereTerminalReclaimer,
+  type ReplayPremiereOrphanCandidate,
 } from "./ReplayPremiereTerminalReclamation";
 
 const DEFAULT_RECLAMATION_SWEEP_MS = 60_000;
 const MAX_RECLAMATION_SWEEP_MS = 3_600_000;
+/** Per-orphan bounded retry budget for transient reclamation failures. */
+const MAX_ORPHAN_RECLAMATION_ATTEMPTS = 3;
 
 const DEFAULT_STARTUP_DEADLINE_MS = 10_000;
 const MAX_STARTUP_DEADLINE_MS = 10_000;
@@ -250,6 +253,14 @@ export interface ReplayPremiereReclamationConfig {
   reclaimer: ReplayPremiereTerminalReclaimer;
   sweepMs: number;
   report: (diagnostic: ReplayPremiereStartupDiagnostic) => void;
+  /**
+   * Terminal premieres with durable evidence but no live runtime (the
+   * 2026-07-22 orphan class), derived once at startup from the admission
+   * catalog + recovered events. Every sweep retries the survivors (bounded
+   * per-candidate) until each is reclaimed, refused, or dropped; a candidate
+   * that becomes a live registered runtime is handed back to the live path.
+   */
+  orphanCandidates: ReplayPremiereOrphanCandidate[];
 }
 
 export class ReplayPremiereProductionService {
@@ -342,6 +353,66 @@ export class ReplayPremiereProductionService {
       this.runtimeRegistry.unregister(assembled.runtime);
       const index = this.ownedTargets.indexOf(assembled);
       if (index !== -1) this.ownedTargets.splice(index, 1);
+    }
+    await this.sweepOrphanCandidates(reclamation);
+  }
+
+  /**
+   * ORPHAN sweep (2026-07-22): reclaim terminal premieres that have durable
+   * evidence but no live runtime, so a reveal whose reclamation grace spans a
+   * beta restart still ends up archived instead of 404ing forever. Bounded and
+   * fail-closed per candidate: a within-grace orphan is retried next sweep, a
+   * refused or repeatedly-failing one is dropped with a report, and a
+   * candidate that meanwhile registered live is left to the live path above.
+   */
+  private async sweepOrphanCandidates(
+    reclamation: ReplayPremiereReclamationConfig,
+  ): Promise<void> {
+    if (reclamation.orphanCandidates.length === 0) return;
+    const drop = (candidate: ReplayPremiereOrphanCandidate): void => {
+      const index = reclamation.orphanCandidates.indexOf(candidate);
+      if (index !== -1) reclamation.orphanCandidates.splice(index, 1);
+    };
+    for (const candidate of [...reclamation.orphanCandidates]) {
+      if (this.closing) return;
+      if (this.runtimeRegistry.get(candidate.premiereId) !== null) {
+        // Registered after candidacy (e.g. the deferred assembly lane): the
+        // live-target sweep owns it now.
+        drop(candidate);
+        continue;
+      }
+      try {
+        const result =
+          await reclamation.reclaimer.reclaimOrphanIfEligible(candidate);
+        if (result.reclaimed) {
+          drop(candidate);
+          reclamation.report({
+            target: `${candidate.premiereId}.orphan`,
+            premiereId: candidate.premiereId,
+            operatorCode: "orphan_reclaimed",
+          });
+          continue;
+        }
+        if (result.reason === "within_grace") continue; // retry next sweep
+        drop(candidate);
+        if (result.reason !== "excluded") {
+          reclamation.report({
+            target: `${candidate.premiereId}.orphan`,
+            premiereId: candidate.premiereId,
+            operatorCode: `orphan_not_reclaimed:${result.reason}`,
+          });
+        }
+      } catch (error) {
+        candidate.attempts += 1;
+        reclamation.report({
+          target: `${candidate.premiereId}.orphan`,
+          premiereId: candidate.premiereId,
+          operatorCode: `orphan_reclamation_failed:${operatorCode(error)}`,
+        });
+        if (candidate.attempts >= MAX_ORPHAN_RECLAMATION_ATTEMPTS) {
+          drop(candidate);
+        }
+      }
     }
   }
 
@@ -517,6 +588,7 @@ export async function startReplayPremiereProduction(
             }),
             sweepMs: boundedReclamationSweepMs(options.reclamationSweepMs),
             report: reportRuntime,
+            orphanCandidates: [],
           };
     const service = new ReplayPremiereProductionService(
       eventStore,
@@ -662,6 +734,7 @@ export async function startReplayPremiereProduction(
     // admissions (e.g. prem_live20260721aaan) never qualify: freshness is
     // keyed exclusively on the hash-covered `admittedAt`, so a stale premiere
     // can never self-activate after a restart.
+    const deferredPremiereIds = new Set<string>();
     if (deferredBudgetMs > 0) {
       const freshNowMs = clock.now().getTime();
       for (const plan of deadlineMissedPlans) {
@@ -669,6 +742,7 @@ export async function startReplayPremiereProduction(
         if (!isFreshAdmission(record.admittedAt, freshNowMs, freshWindowMs)) {
           continue;
         }
+        deferredPremiereIds.add(record.premiereId);
         report({
           target: `${record.premiereId}.admission.json`,
           premiereId: record.premiereId,
@@ -734,6 +808,35 @@ export async function startReplayPremiereProduction(
         void deferred.finally(() => pendingAssemblies.delete(deferred));
       }
     }
+    // ORPHAN CANDIDATES (2026-07-22): terminal premieres with durable
+    // evidence but no live runtime — a reveal whose reclamation grace spans a
+    // beta restart is never re-registered (fresh rounds own the critical
+    // slot), so without this the live-target sweep can never archive it and
+    // its /premiere page 404s forever. Derivation is pure in-memory filtering
+    // of state startup already loaded (no extra I/O on the boot path); the
+    // bounded reclamation work runs on the background sweep.
+    if (reclamation !== null) {
+      reclamation.orphanCandidates.push(
+        ...deriveOrphanCandidates({
+          plans: startupPlans,
+          registeredPremiereIds: new Set(registered),
+          deferredPremiereIds,
+          excludedPremiereIds: new Set(
+            options.reclamationExcludedPremiereIds ?? [],
+          ),
+          latestEventsByAggregate,
+          recoveredEvents: recoveredAtStartup.events,
+          report: reportRuntime,
+        }),
+      );
+      if (reclamation.orphanCandidates.length > 0) {
+        // One immediate background sweep so a past-grace orphan archives
+        // within seconds of boot instead of waiting for the first timer tick.
+        const kick = service.runReclamationSweepOnce().catch(() => undefined);
+        pendingAssemblies.add(kick);
+        void kick.finally(() => pendingAssemblies.delete(kick));
+      }
+    }
     return {
       service,
       registeredPremiereIds: Object.freeze([...registered]),
@@ -743,6 +846,106 @@ export async function startReplayPremiereProduction(
     await eventStore?.close().catch(() => undefined);
     throw error;
   }
+}
+
+/**
+ * Derives the orphan-reclamation candidates from state startup already holds.
+ * Only PROVEN terminal states qualify: revealed/archived need a canonical
+ * reveal instant recovered from the event store (fail-closed with a report
+ * when absent — a stale non-revealed admission can never become publishable
+ * through the orphan path); failed/cancelled orphans carry the neutral
+ * null-outcome evidence. Registered, deferred, and reclaim-excluded premieres
+ * never become candidates.
+ */
+function deriveOrphanCandidates(options: {
+  plans: readonly ReplayPremiereStartupPlan[];
+  registeredPremiereIds: ReadonlySet<string>;
+  deferredPremiereIds: ReadonlySet<string>;
+  excludedPremiereIds: ReadonlySet<string>;
+  latestEventsByAggregate: Map<string, StoredReplayPremiereEvent>;
+  recoveredEvents: readonly StoredReplayPremiereEvent[];
+  report: (diagnostic: ReplayPremiereStartupDiagnostic) => void;
+}): ReplayPremiereOrphanCandidate[] {
+  const candidates: ReplayPremiereOrphanCandidate[] = [];
+  let revealInstants: Map<string, string> | null = null;
+  for (const plan of options.plans) {
+    const premiereId = plan.record.premiereId;
+    if (
+      options.registeredPremiereIds.has(premiereId) ||
+      options.deferredPremiereIds.has(premiereId) ||
+      options.excludedPremiereIds.has(premiereId)
+    ) {
+      continue;
+    }
+    const state = plan.projection.state;
+    if (state === "failed" || state === "cancelled") {
+      candidates.push({
+        premiereId,
+        record: plan.record,
+        terminalState: state,
+        revealedAt: null,
+        attempts: 0,
+      });
+      continue;
+    }
+    if (state !== "revealed" && state !== "archived") {
+      // scheduled/draft stay untouchable (never publishable via this path);
+      // playing/checkpoint plans are critical and re-register live.
+      continue;
+    }
+    let revealedAt: string | null;
+    const latest = options.latestEventsByAggregate.get(premiereId);
+    if (
+      latest !== undefined &&
+      latest.eventType === "premiere_reveal_committed"
+    ) {
+      revealedAt = revealInstantFromEventPayload(latest.payload);
+    } else {
+      // Archived premieres' latest event lacks the reveal payload; find the
+      // aggregate's reveal event among the recovered events (latest wins).
+      revealInstants ??= indexRevealInstants(options.recoveredEvents);
+      revealedAt = revealInstants.get(premiereId) ?? null;
+    }
+    if (revealedAt === null) {
+      options.report({
+        target: `${premiereId}.orphan`,
+        premiereId,
+        operatorCode: "orphan_evidence_incomplete",
+      });
+      continue;
+    }
+    candidates.push({
+      premiereId,
+      record: plan.record,
+      terminalState: state,
+      revealedAt,
+      attempts: 0,
+    });
+  }
+  return candidates;
+}
+
+function revealInstantFromEventPayload(payload: unknown): string | null {
+  if (!isRecord(payload) || !isRecord(payload.reveal)) return null;
+  const revealedAt = payload.reveal.revealedAt;
+  if (typeof revealedAt !== "string") return null;
+  const parsedMs = Date.parse(revealedAt);
+  return Number.isFinite(parsedMs) &&
+    new Date(parsedMs).toISOString() === revealedAt
+    ? revealedAt
+    : null;
+}
+
+function indexRevealInstants(
+  events: readonly StoredReplayPremiereEvent[],
+): Map<string, string> {
+  const instants = new Map<string, string>();
+  for (const event of events) {
+    if (event.eventType !== "premiere_reveal_committed") continue;
+    const instant = revealInstantFromEventPayload(event.payload);
+    if (instant !== null) instants.set(event.aggregateId, instant);
+  }
+  return instants;
 }
 
 function boundedReclamationSweepMs(value: number | undefined): number {
