@@ -103,6 +103,18 @@
         letter-spacing: 0.01em;
       }
 
+      #proxywar-replay-loading .proxywar-replay-loading-progress {
+        min-height: 1.3em;
+        color: #7dd3fc;
+        font-size: clamp(13px, 1.8vw, 15px);
+        font-weight: 700;
+        font-variant-numeric: tabular-nums;
+      }
+
+      #proxywar-replay-loading .proxywar-replay-loading-progress[hidden] {
+        display: none;
+      }
+
       .proxywar-replay-loading-actions {
         display: flex;
         flex-wrap: wrap;
@@ -318,6 +330,11 @@
         <p
           data-replay-loading-message
           data-i18n="ai_league_replay.loading_replay"
+        ></p>
+        <p
+          data-replay-loading-progress
+          class="proxywar-replay-loading-progress"
+          hidden
         ></p>
         <div class="proxywar-replay-loading-actions">
           <button

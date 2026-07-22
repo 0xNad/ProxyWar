@@ -17,6 +17,7 @@ vi.mock("../../src/client/Utils", () => ({
 import {
   holdReplayLoadingScreenUntilFirstFrame,
   runReplayStartup,
+  setReplayLoadingProgress,
   showReplayLoadingFailure,
   showReplayLoadingScreen,
 } from "../../src/client/ReplayLoadingScreen";
@@ -76,6 +77,31 @@ describe("ReplayLoadingScreen", () => {
       document.querySelector<HTMLElement>("[data-replay-loading-message]")
         ?.dataset.i18n,
     ).toBe("replay_premiere.loading_premiere");
+  });
+
+  it("shows and clears the join-sync progress subline", () => {
+    showReplayLoadingScreen("replay_premiere.joining_live");
+    const progress = document.querySelector<HTMLElement>(
+      "[data-replay-loading-progress]",
+    );
+    expect(progress).not.toBeNull();
+    expect(progress?.hidden).toBe(true);
+
+    setReplayLoadingProgress("Syncing to turn 17,000…");
+    expect(progress?.hidden).toBe(false);
+    expect(progress?.textContent).toBe("Syncing to turn 17,000…");
+
+    setReplayLoadingProgress(null);
+    expect(progress?.hidden).toBe(true);
+    expect(progress?.textContent).toBe("");
+
+    // A fresh veil never inherits a stale progress line.
+    setReplayLoadingProgress("stale");
+    showReplayLoadingScreen("replay_premiere.loading_premiere");
+    expect(
+      document.querySelector<HTMLElement>("[data-replay-loading-progress]")
+        ?.hidden,
+    ).toBe(true);
   });
 
   it("keeps the cover up when loading takes longer than the threshold", () => {

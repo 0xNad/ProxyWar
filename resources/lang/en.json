@@ -1064,6 +1064,10 @@
   "replay_premiere": {
     "overlay_label": "Replay Premiere controls",
     "loading_premiere": "Loading premiere…",
+    "joining_live": "Joining live…",
+    "join_sync_target": "Syncing to turn {target}…",
+    "join_sync_progress": "Syncing to turn {target} · at turn {current} ({percent}%)",
+    "buffering_live": "Buffering live…",
     "ambient_unavailable": "Ambient mode is available once the premiere starts",
     "war_feed_heading": "Battle feed",
     "war_feed_waiting": "Waiting for first contact…",

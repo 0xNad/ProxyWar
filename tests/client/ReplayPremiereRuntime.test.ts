@@ -31,6 +31,7 @@ import {
   ReplayPremiereRuntimeController,
   ReplayPremiereServiceClient,
   ReplayPremiereServiceError,
+  type ReplayPremiereJoinSyncUpdate,
   type ReplayPremiereServiceCheckpoint,
   type ReplayPremiereServiceHeartbeatResponse,
   type ReplayPremiereServiceReactionResponse,
@@ -441,6 +442,146 @@ describe("ReplayPremiereRuntimeController", () => {
       markerCounts: { betrayal: 1 },
       markerConfirmation: { kind: "betrayal", turn: 11 },
     });
+    harness.runtime.dispose();
+  });
+
+  it("drives the live-join veil: syncing progress toward the trailed target, complete on arrival", async () => {
+    const harness = runtimeHarness({ state: "playing" });
+    const started = harness.runtime.start();
+    await harness.callbacks.onReady?.(projection("playing"));
+    await started;
+
+    // Released backlog (a mid-show join) + the network's trailed catch-up.
+    const records = Array.from({ length: 12 }, (_, sequence) => ({
+      sequence,
+      presentationOffsetMs: sequence * 100,
+      turn: { turnNumber: sequence, intents: [] },
+    }));
+    harness.runtime.playback.appendVerifiedBatch({
+      premiereId: PREMIERE_ID,
+      chunkIndex: 0,
+      chunkHash: HASH_A,
+      previousChunkHash: null,
+      payloadHash: HASH_B,
+      startSequence: 0,
+      endSequence: 11,
+      verification: { payloadHashVerified: true, chunkHashVerified: true },
+      records,
+    });
+    harness.runtime.playback.requestForwardCatchUp(8);
+    expect(harness.onJoinSync).toHaveBeenCalledWith({
+      state: "syncing",
+      currentTurn: null,
+      targetTurn: 8,
+    });
+
+    // Catch-up frames advance the veil progress; the entry frame settles it.
+    for (const record of records.slice(0, 9)) {
+      harness.runtime.playback.acknowledgeDispatchedRecord(record);
+    }
+    document.dispatchEvent(
+      new CustomEvent("ai-league-replay-frame", {
+        detail: { sequence: 5, turnNumber: 5, players: [] },
+      }),
+    );
+    expect(harness.onJoinSync).toHaveBeenCalledWith({
+      state: "syncing",
+      currentTurn: 5,
+      targetTurn: 8,
+    });
+    expect(harness.onJoinSync).not.toHaveBeenCalledWith({ state: "complete" });
+
+    document.dispatchEvent(
+      new CustomEvent("ai-league-replay-frame", {
+        detail: { sequence: 8, turnNumber: 8, players: [] },
+      }),
+    );
+    expect(harness.onJoinSync).toHaveBeenCalledWith({ state: "complete" });
+
+    // Later catch-ups are mid-watch gap recovery: never re-veiled.
+    const completeCalls = harness.onJoinSync.mock.calls.length;
+    harness.runtime.playback.requestForwardCatchUp(11);
+    expect(
+      harness.onJoinSync.mock.calls
+        .slice(completeCalls)
+        .filter(([update]) => update.state === "syncing"),
+    ).toEqual([]);
+    harness.runtime.dispose();
+  });
+
+  it("settles the join veil on the first frame when no catch-up is needed", async () => {
+    const harness = runtimeHarness({ state: "playing" });
+    await bootstrapPlayingWithFrame(harness);
+    expect(harness.onJoinSync).toHaveBeenCalledWith({ state: "complete" });
+    expect(
+      harness.onJoinSync.mock.calls.filter(
+        ([update]) => update.state === "syncing",
+      ),
+    ).toEqual([]);
+    harness.runtime.dispose();
+  });
+
+  it("holds the join veil on an early frame when a catch-up is imminent", async () => {
+    // Released stream far ahead of the first rendered frame (more than the
+    // catch-up threshold in records at 2x): the network will request catch-up
+    // on its next manifest, so the first frame must NOT settle the veil into
+    // the pre-teleport view.
+    const harness = runtimeHarness({ state: "playing" });
+    const started = harness.runtime.start();
+    await harness.callbacks.onReady?.(projection("playing"));
+    await started;
+    const records = Array.from({ length: 4_096 }, (_, sequence) => ({
+      sequence,
+      presentationOffsetMs: sequence * 50,
+      turn: { turnNumber: sequence, intents: [] },
+    }));
+    harness.runtime.playback.appendVerifiedBatch({
+      premiereId: PREMIERE_ID,
+      chunkIndex: 0,
+      chunkHash: HASH_A,
+      previousChunkHash: null,
+      payloadHash: HASH_B,
+      startSequence: 0,
+      endSequence: 4_095,
+      verification: { payloadHashVerified: true, chunkHashVerified: true },
+      records,
+    });
+    harness.runtime.playback.acknowledgeDispatchedRecord(records[0]);
+    document.dispatchEvent(
+      new CustomEvent("ai-league-replay-frame", {
+        detail: { sequence: 0, turnNumber: 0, players: [] },
+      }),
+    );
+    expect(harness.onJoinSync).not.toHaveBeenCalledWith({ state: "complete" });
+    expect(harness.onJoinSync).toHaveBeenCalledWith({
+      state: "syncing",
+      currentTurn: 0,
+      targetTurn: 4_095,
+    });
+    harness.runtime.dispose();
+  });
+
+  it("surfaces buffering only after the display grace and clears it immediately", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date(STARTED_AT));
+    const harness = runtimeHarness({ state: "playing" });
+    await bootstrapPlayingWithFrame(harness);
+
+    harness.runtime.playback.reportDispatchStarvation(true);
+    expect(harness.models.at(-1)?.buffering ?? false).toBe(false);
+    // Sub-grace jitter (a chunk boundary) never shows the chip.
+    await vi.advanceTimersByTimeAsync(800);
+    harness.runtime.playback.reportDispatchStarvation(false);
+    await vi.advanceTimersByTimeAsync(2_000);
+    expect(harness.models.at(-1)?.buffering ?? false).toBe(false);
+
+    // A real stall outlives the grace and surfaces.
+    harness.runtime.playback.reportDispatchStarvation(true);
+    await vi.advanceTimersByTimeAsync(1_500);
+    expect(harness.models.at(-1)?.buffering).toBe(true);
+    // Resume clears instantly.
+    harness.runtime.playback.reportDispatchStarvation(false);
+    expect(harness.models.at(-1)?.buffering).toBe(false);
     harness.runtime.dispose();
   });
 
@@ -2093,6 +2234,7 @@ function runtimeHarness(options: {
   };
   onJoin?: () => void;
   onRevealSeek?: (turn: number) => void;
+  onJoinSync?: (update: ReplayPremiereJoinSyncUpdate) => void;
 }) {
   let callbacks!: ReplayPremiereNetworkCallbacks;
   let overlayCallbacks!: ReplayPremiereOverlayCallbacks;
@@ -2158,10 +2300,12 @@ function runtimeHarness(options: {
   };
   const onJoin = vi.fn(options.onJoin);
   const onRevealSeek = vi.fn(options.onRevealSeek);
+  const onJoinSync = vi.fn(options.onJoinSync);
   const runtime = new ReplayPremiereRuntimeController({
     premiereId: PREMIERE_ID,
     onJoinReady: onJoin,
     onRevealSeek,
+    onJoinSync,
     dependencies: {
       windowRef: window,
       documentRef: document,
@@ -2197,6 +2341,7 @@ function runtimeHarness(options: {
     copyText,
     onJoin,
     onRevealSeek,
+    onJoinSync,
   };
 }
 

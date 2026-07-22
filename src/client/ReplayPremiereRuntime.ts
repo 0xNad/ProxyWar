@@ -1,6 +1,7 @@
 import { z } from "zod";
 import type { GameStartInfo } from "../core/Schemas";
 import {
+  PREMIERE_PRESENTATION_TRAIL_MS,
   premiereClipStatusResponseSchema,
   ReplayPremiereNetworkController,
   ReplayPremiereNetworkError,
@@ -39,6 +40,7 @@ import {
 } from "./ReplayPremiereOverlay";
 import {
   ReplayPremierePlaybackController,
+  type ReplayPremierePlaybackEvent,
   type ReplayPremiereProgressiveReplayConfig,
 } from "./ReplayPremierePlayback";
 import { translateText } from "./Utils";
@@ -1308,6 +1310,16 @@ export interface ReplayPremiereRuntimeDependencies {
   windowRef?: Window;
 }
 
+/**
+ * Live-join synchronization progress. `syncing` reports the catch-up toward
+ * the trail-buffered entry position (turn numbers are viewer-facing);
+ * `complete` fires exactly once, when the entry position is reached with the
+ * standard presentation trail in hand — the host lifts its join veil then.
+ */
+export type ReplayPremiereJoinSyncUpdate =
+  | { state: "syncing"; currentTurn: number | null; targetTurn: number }
+  | { state: "complete" };
+
 export interface ReplayPremiereRuntimeOptions {
   premiereId: string;
   onJoinReady: (request: ReplayPremiereJoinRequest) => void;
@@ -1315,6 +1327,7 @@ export interface ReplayPremiereRuntimeOptions {
     projection: Readonly<ReplayPremiereReadyProjection>,
   ) => void;
   onRevealSeek?: (turn: number) => void;
+  onJoinSync?: (update: ReplayPremiereJoinSyncUpdate) => void;
   fetchImpl?: typeof fetch;
   dependencies?: ReplayPremiereRuntimeDependencies;
 }
@@ -1385,6 +1398,23 @@ export class ReplayPremiereRuntimeController {
    */
   private preRevealLifecycleObserved = false;
   private revealDisplayTimer: ReturnType<typeof setInterval> | null = null;
+  /** Dispatcher starvation surfaced by playback ("Buffering live…"). */
+  private buffering = false;
+  /**
+   * Starvation display grace: releases are edge-timed against the trail, so
+   * a sub-second stall at each chunk boundary is normal jitter. The chip only
+   * shows after continuous starvation outlives the grace; clearing is
+   * immediate.
+   */
+  private bufferingDisplayTimer: ReturnType<typeof setTimeout> | null = null;
+  private playbackUnsubscribe: (() => void) | null = null;
+  /**
+   * Live-join catch-up target (sequence). Set from playback catch-up events
+   * observed before the first sync completion; catch-ups after that are
+   * mid-watch gap recovery and never re-veil.
+   */
+  private joinSyncTargetSequence: number | null = null;
+  private joinSyncSettled = false;
   private ambient = false;
   private readySettled = false;
   private started = false;
@@ -1461,6 +1491,9 @@ export class ReplayPremiereRuntimeController {
     if (!this.started) {
       this.started = true;
       this.documentRef.body.classList.add(PRE_REVEAL_BODY_CLASS);
+      this.playbackUnsubscribe = this.playback.subscribe((event) =>
+        this.onPlaybackEvent(event),
+      );
       this.documentRef.addEventListener(
         "ai-league-replay-frame",
         this.onFrameEvent,
@@ -1491,6 +1524,12 @@ export class ReplayPremiereRuntimeController {
     this.clearCheckpointDeadline();
     this.clearClipPoll();
     this.clearRevealDisplayPump();
+    this.playbackUnsubscribe?.();
+    this.playbackUnsubscribe = null;
+    if (this.bufferingDisplayTimer !== null) {
+      clearTimeout(this.bufferingDisplayTimer);
+      this.bufferingDisplayTimer = null;
+    }
     this.documentRef.removeEventListener(
       "ai-league-replay-frame",
       this.onFrameEvent,
@@ -1717,6 +1756,7 @@ export class ReplayPremiereRuntimeController {
         ...this.warFeed,
       ].slice(0, MAX_WAR_FEED_ENTRIES);
     }
+    this.maybeSettleJoinSync(frame);
     this.hydrateOverlay();
   };
 
@@ -1724,6 +1764,119 @@ export class ReplayPremiereRuntimeController {
     if (this.disposed) return;
     this.latchFailure("runtime_failure");
   };
+
+  private onPlaybackEvent(event: ReplayPremierePlaybackEvent): void {
+    if (this.disposed) return;
+    if (event.type === "buffering") {
+      if (event.buffering) {
+        if (this.bufferingDisplayTimer === null && !this.buffering) {
+          this.bufferingDisplayTimer = setTimeout(() => {
+            this.bufferingDisplayTimer = null;
+            if (this.disposed) return;
+            this.buffering = true;
+            this.hydrateOverlay();
+          }, BUFFERING_DISPLAY_GRACE_MS);
+        }
+      } else {
+        if (this.bufferingDisplayTimer !== null) {
+          clearTimeout(this.bufferingDisplayTimer);
+          this.bufferingDisplayTimer = null;
+        }
+        if (this.buffering) {
+          this.buffering = false;
+          this.hydrateOverlay();
+        }
+      }
+      return;
+    }
+    if (event.type === "catch-up") {
+      // Only pre-settlement catch-ups define the join entry position; later
+      // ones are mid-watch gap recovery (buffering chip + fast-forward, no
+      // re-veil). Catch-up may free-run the simulation: it replays ALREADY
+      // RELEASED content and playback stays bounded by released chunks
+      // regardless of pacing, so there is no spoiler surface.
+      if (!this.joinSyncSettled) {
+        this.joinSyncTargetSequence = Math.max(
+          this.joinSyncTargetSequence ?? event.targetSequence,
+          event.targetSequence,
+        );
+        this.options.onJoinSync?.({
+          state: "syncing",
+          currentTurn: this.latestFrame?.turnNumber ?? null,
+          // Dense records: sequence === turn number, viewer-facing.
+          targetTurn: this.joinSyncTargetSequence,
+        });
+      }
+      return;
+    }
+    if (event.type === "playback-complete" && !this.joinSyncSettled) {
+      // A show that ends before the entry position is reached still settles
+      // (short shows, reveal racing a join).
+      this.settleJoinSync();
+    }
+  }
+
+  /**
+   * Join-sync settlement: the veil lifts once the viewer's rendered frame
+   * reaches the trail-buffered entry position (or immediately on the first
+   * frame when no catch-up was requested — a from-start join). At settlement
+   * the standard presentation trail is in hand by construction, so playback
+   * has runway and does not gate on the next release.
+   */
+  private maybeSettleJoinSync(frame: ReplayPremiereFrame): void {
+    if (this.joinSyncSettled) return;
+    if (this.joinSyncTargetSequence === null) {
+      // No catch-up requested yet. If the released stream is already more
+      // than the catch-up threshold's worth of records beyond this frame, the
+      // network WILL request one imminently (same arithmetic on its side) —
+      // hold the veil instead of settling into the pre-teleport view. Joins
+      // within the threshold settle on their first frame and simply play
+      // from where they are (they are already inside the designed trail).
+      const released = this.playback.state().releasedThroughSequence;
+      if (
+        released !== null &&
+        frame.sequence !== null &&
+        released - frame.sequence > this.imminentCatchUpGuardRecords()
+      ) {
+        this.options.onJoinSync?.({
+          state: "syncing",
+          currentTurn: frame.turnNumber,
+          targetTurn: released,
+        });
+        return;
+      }
+      this.settleJoinSync();
+      return;
+    }
+    if (
+      frame.sequence === null ||
+      frame.sequence < this.joinSyncTargetSequence
+    ) {
+      this.options.onJoinSync?.({
+        state: "syncing",
+        currentTurn: frame.turnNumber,
+        targetTurn: this.joinSyncTargetSequence,
+      });
+      return;
+    }
+    this.settleJoinSync();
+  }
+
+  /**
+   * The catch-up threshold (two presentation trails) expressed in records:
+   * presentation time per record is the real 100 ms turn interval divided by
+   * the fixed playback rate (dense records, one per game turn).
+   */
+  private imminentCatchUpGuardRecords(): number {
+    const rate = this.projection?.playbackRate ?? 1;
+    return Math.ceil((2 * PREMIERE_PRESENTATION_TRAIL_MS * rate) / 100);
+  }
+
+  private settleJoinSync(): void {
+    if (this.joinSyncSettled) return;
+    this.joinSyncSettled = true;
+    this.options.onJoinSync?.({ state: "complete" });
+  }
 
   private readonly onVisibilityChange = (): void => {
     if (this.disposed || !this.interactionReady) return;
@@ -2679,6 +2832,7 @@ export class ReplayPremiereRuntimeController {
         this.terminalFailure ??
         (state === "cancelled" ? "cancelled_by_operator" : null),
       ambient: this.ambient,
+      buffering: this.buffering,
       canPredict: this.interactionReady && !this.isReadOnlyLifecycle(),
       canMark: this.interactionReady && !this.isReadOnlyLifecycle(),
       canShare: this.interactionReady && !this.isReadOnlyLifecycle(),
@@ -2947,6 +3101,9 @@ interface ReplayPremiereFramePlayer {
   displayName: string;
   tilesOwned: number;
 }
+
+/** Continuous starvation must outlive this before "Buffering live…" shows. */
+const BUFFERING_DISPLAY_GRACE_MS = 1_500;
 
 const WAR_EVENT_KINDS = new Set([
   "attack",
