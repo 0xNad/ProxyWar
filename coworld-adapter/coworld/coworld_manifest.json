@@ -7,7 +7,7 @@
   ],
   "game": {
     "name": "proxywar",
-    "version": "0.1.10",
+    "version": "0.1.11",
     "description": "Hosted Proxy War Coworld adapter that preserves the LegalAction.id decision path.",
     "owner": "proxywar",
     "config_schema": {
@@ -248,7 +248,7 @@
     },
     "runnable": {
       "type": "game",
-      "image": "proxywar-coworld-local:coworld-0.1.10-idfix-r2",
+      "image": "proxywar-coworld-local:coworld-9f8b668b9f41",
       "run": [
         "node",
         "--max-old-space-size=640",
@@ -279,7 +279,7 @@
   "player": [
     {
       "type": "player",
-      "image": "proxywar-coworld-local:coworld-0.1.10-idfix-r2",
+      "image": "proxywar-coworld-local:coworld-9f8b668b9f41",
       "run": [
         "node",
         "/app/integration/src/starter-player.mjs"
@@ -294,7 +294,7 @@
   "commissioner": [
     {
       "type": "commissioner",
-      "image": "proxywar-commissioner-local:coworld-bfd49adf8272",
+      "image": "proxywar-commissioner-local:coworld-4f9aa7c3c37f",
       "run": [],
       "env": {},
       "id": "proxywar-ladder-commissioner",
@@ -307,7 +307,7 @@
   "optimizer": [
     {
       "type": "optimizer",
-      "image": "proxywar-coworld-local:coworld-0.1.10-idfix-r2",
+      "image": "proxywar-coworld-local:coworld-9f8b668b9f41",
       "run": [
         "node",
         "/app/integration/src/proxywar-optimizer-plan.mjs"

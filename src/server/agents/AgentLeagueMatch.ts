@@ -68,6 +68,22 @@ export interface AgentLeagueMatchOptions {
   legalActionBuilder?: LegalActionBuilder;
   decisionValidator?: typeof validateAgentDecision;
   disabledActionKinds?: LegalActionKind[];
+  /**
+   * Whether to build and retain the per-decision `tacticalAffordances` summary.
+   * Default: true (local eval / benchmark path — the behavior-quality report
+   * and decision-log aggregates read it). The Coworld episode adapter sets this
+   * false: `tacticalAffordances` is the single largest field of every decision
+   * record on World (~8 KB, ~60-77% of the record) and is not part of the hosted
+   * result/replay contract, so skipping it cuts per-record memory the same
+   * amount at EVERY game depth — enough that the FULL decision log stays
+   * affordable and never has to be truncated (which would hide fallback /
+   * degradation telemetry). Skipping also avoids its per-decision build cost.
+   * The field is already optional on AgentDecisionRecord and every reader uses
+   * optional chaining, so omitting it is safe. Does not touch the simulation or
+   * the agent decision — the record is built after the decision is made, and
+   * the decision-feeding `observation.tacticalAffordances` is built separately.
+   */
+  retainTacticalAffordances?: boolean;
 }
 
 export interface RunAgentDecisionTurnOptions {
@@ -121,6 +137,7 @@ export class AgentLeagueMatchRunner {
   private readonly objectiveManager = new AgentObjectiveManager();
   private readonly decisionValidator: typeof validateAgentDecision;
   private readonly disabledActionKinds: Set<LegalActionKind>;
+  private readonly retainTacticalAffordances: boolean;
   // Log-once bookkeeping for seatEliminated. Liveness itself is recomputed
   // from the game snapshot every decision turn — never latched here.
   private readonly eliminatedSeatsAnnounced = new Set<string>();
@@ -139,6 +156,7 @@ export class AgentLeagueMatchRunner {
       options.legalActionBuilder ?? new LegalActionBuilder();
     this.decisionValidator = options.decisionValidator ?? validateAgentDecision;
     this.disabledActionKinds = new Set(options.disabledActionKinds ?? []);
+    this.retainTacticalAffordances = options.retainTacticalAffordances ?? true;
   }
 
   attachAgents(): void {
@@ -1038,10 +1056,17 @@ export class AgentLeagueMatchRunner {
       // scores, and lengths the report/replay/result exporters need are kept.
       decisionMetadata: compactDecisionMetadata(input.decision.metadata),
       chosenActionMetadata: input.chosenAction?.metadata,
-      tacticalAffordances: buildAgentTacticalAffordances({
-        observation: input.observation,
-        legalActions: input.legalActions,
-      }),
+      // tacticalAffordances is the single largest record field on World
+      // (~8 KB, ~60-77% of the record). The Coworld path opts out (see
+      // retainTacticalAffordances) to keep long-episode heap flat; local eval
+      // keeps it for the behavior-quality report. Skipping also avoids the
+      // per-decision build cost. It never feeds the decision, only the record.
+      tacticalAffordances: this.retainTacticalAffordances
+        ? buildAgentTacticalAffordances({
+            observation: input.observation,
+            legalActions: input.legalActions,
+          })
+        : undefined,
       intent: input.chosenAction?.intent ?? null,
       result: input.result,
     };
