@@ -145,6 +145,28 @@ export interface ReplayPremiereClipsOptions {
   statfs?: (path: string) => Promise<StatsFs>;
   spawnWorker?: SpawnClipWorker;
   logger?: (message: string) => void;
+  /**
+   * Maps a render request to its on-disk source bundle. Default: the premiere
+   * content-addressed layout (`<sourceBundleRoot>/sources/sha256/xx/<sha>.replay`).
+   * The league-run clip service overrides this to point at a published run's
+   * game-record.json; the worker still verifies the bundle hash EXACTLY
+   * matches `sourceReplaySha256` before rendering, so a swapped file fails
+   * closed.
+   */
+  resolveSourceBundlePath?: (request: {
+    premiereId: string;
+    sourceReplaySha256: string;
+  }) => string;
+  /**
+   * Watch-page url for the id, used in the social first-reply. Default: the
+   * premiere page (`<publicOrigin>/premiere/<id>`).
+   */
+  watchUrlForId?: (id: string) => string;
+  /**
+   * Public download route for a ready clip. Default: the premiere clip route
+   * (`/premiere/<id>/clip-v1-<bucket>.mp4`).
+   */
+  clipUrlFor?: (id: string, bucket: number) => string;
 }
 
 interface ClipIndexEntry {
@@ -375,7 +397,10 @@ export class ReplayPremiereClips {
       premiereId: request.premiereId,
       bucket,
       anchorTurn: premiereClipRepresentativeAnchorTurn(bucket),
-      bundlePath: this.sourceBundlePath(request.sourceReplaySha256),
+      bundlePath: this.sourceBundlePath(
+        request.premiereId,
+        request.sourceReplaySha256,
+      ),
       expectedBundleSha256: request.sourceReplaySha256.toLowerCase(),
     });
     this.pump();
@@ -666,8 +691,9 @@ export class ReplayPremiereClips {
   // -- Composition helpers -------------------------------------------------
 
   private toReady(entry: ClipIndexEntry): PremiereClipReady {
+    const clipUrlFor = this.options.clipUrlFor ?? clipFileRoute;
     return {
-      clipUrl: clipFileRoute(entry.premiereId, entry.bucket),
+      clipUrl: clipUrlFor(entry.premiereId, entry.bucket),
       byteLength: entry.byteLength,
       sha256: entry.sha256,
       anchorTurn: entry.anchorTurn,
@@ -697,10 +723,19 @@ export class ReplayPremiereClips {
   }
 
   private premiereWatchUrl(premiereId: string): string {
+    if (this.options.watchUrlForId !== undefined) {
+      return this.options.watchUrlForId(premiereId);
+    }
     return `${this.options.publicOrigin.replace(/\/$/, "")}/premiere/${premiereId}`;
   }
 
-  private sourceBundlePath(sha256: string): string {
+  private sourceBundlePath(premiereId: string, sha256: string): string {
+    if (this.options.resolveSourceBundlePath !== undefined) {
+      return this.options.resolveSourceBundlePath({
+        premiereId,
+        sourceReplaySha256: sha256,
+      });
+    }
     const hash = sha256.toLowerCase();
     return path.join(
       this.options.sourceBundleRoot,

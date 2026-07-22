@@ -1,0 +1,394 @@
+/**
+ * League-run social clips: the premiere clip pipeline generalized to EVERY
+ * published match, not just premieres.
+ *
+ * A run clip is rendered from the run's published replay bundle
+ * (`<runsRoot>/<runKey>/game-record.json` — the same record the
+ * `/ai-league-replay/<runKey>` viewer plays) through the identical watermarked
+ * worker, cache, quota, and eviction machinery as premiere clips. Availability
+ * is therefore retention-bounded by design: any run whose replay bundle still
+ * exists on disk can render a clip; a run aged off by retention 404s cleanly
+ * (an already-cached clip stays downloadable until its own cache eviction).
+ *
+ * Namespacing: this wrapper owns its OWN ReplayPremiereClips instance rooted
+ * at a SEPARATE cache tree (`league-clips-v1`), so premiere and run clips can
+ * never collide in cache keys, directories, byte budgets, or eviction — even
+ * for identical id strings.
+ */
+
+import express, { type Request, type Response, type Router } from "express";
+import { createHash } from "node:crypto";
+import { createReadStream, promises as fs, type StatsFs } from "node:fs";
+import path from "node:path";
+import {
+  ReplayPremiereClips,
+  type ReplayPremiereClipFile,
+  type ReplayPremiereClipsOptions,
+} from "../replay-premiere/ReplayPremiereClips";
+import type {
+  PremiereClipStatusResponse,
+  PremiereState,
+} from "../replay-premiere/ReplayPremiereContracts";
+import { ReplayPremiereError } from "../replay-premiere/ReplayPremiereErrors";
+import {
+  isSafeProxyWarArtifactSegment,
+  matchProxyWarLeagueClipReadPath,
+} from "./ProxyWarPublicArtifacts";
+
+/** Published runs are public: the wrapped cache always sees this state. */
+const RUN_CLIP_LIFECYCLE: PremiereState = "revealed";
+/** Sanity ceiling for a requested anchor turn (no record parse required). */
+const MAX_RUN_CLIP_ANCHOR_TURN = 1_000_000;
+/** Bounded sha memo (records are MB-scale; avoid rehashing per request). */
+const MAX_SHA_MEMO_ENTRIES = 256;
+
+export function aiLeagueRunClipFileRoute(
+  runKey: string,
+  bucket: number,
+): string {
+  return `/ai-league-runs/${runKey}/clip-v1-${bucket}.mp4`;
+}
+
+export function aiLeagueRunClipStatusRoute(
+  runKey: string,
+  bucket: number,
+): string {
+  return `/api/league-runs/${runKey}/clips/${bucket}`;
+}
+
+export interface AiLeagueRunClipsOptions {
+  /** Root holding published run directories (`<runsRoot>/<runKey>/...`). */
+  runsRootDir: string;
+  /** Cache root — MUST be distinct from the premiere `clips-v1` tree. */
+  clipsRoot: string;
+  staticDir: string;
+  workerModulePath: string;
+  publicOrigin: string;
+  licenseStrings: { attribution: string; noEndorsement: string };
+  storageStatePath: string;
+  clipFfmpegBin?: string;
+  clipChromeBin?: string;
+  scratchDir?: string;
+  limits?: ReplayPremiereClipsOptions["limits"];
+  now?: () => number;
+  statfs?: (path: string) => Promise<StatsFs>;
+  spawnWorker?: ReplayPremiereClipsOptions["spawnWorker"];
+  logger?: (message: string) => void;
+}
+
+export class AiLeagueRunClips {
+  private readonly clips: ReplayPremiereClips;
+  private readonly runsRootDir: string;
+  private readonly shaMemo = new Map<
+    string,
+    { size: number; mtimeMs: number; sha256: string }
+  >();
+
+  constructor(options: AiLeagueRunClipsOptions) {
+    this.runsRootDir = path.resolve(options.runsRootDir);
+    const publicOrigin = options.publicOrigin.replace(/\/$/, "");
+    this.clips = new ReplayPremiereClips({
+      clipsRoot: options.clipsRoot,
+      // Unused (a resolver is injected below) but required by the service.
+      sourceBundleRoot: this.runsRootDir,
+      staticDir: options.staticDir,
+      workerModulePath: options.workerModulePath,
+      publicOrigin: options.publicOrigin,
+      licenseStrings: options.licenseStrings,
+      storageStatePath: options.storageStatePath,
+      clipFfmpegBin: options.clipFfmpegBin,
+      clipChromeBin: options.clipChromeBin,
+      scratchDir: options.scratchDir,
+      limits: options.limits,
+      now: options.now,
+      statfs: options.statfs,
+      spawnWorker: options.spawnWorker,
+      logger: options.logger,
+      resolveSourceBundlePath: (request) =>
+        this.recordPathFor(request.premiereId),
+      watchUrlForId: (runKey) => `${publicOrigin}/ai-league-replay/${runKey}`,
+      clipUrlFor: aiLeagueRunClipFileRoute,
+    });
+  }
+
+  /** Rebuild the disk-scan cache index (mirrors the premiere service). */
+  async rebuildIndex(): Promise<void> {
+    await this.clips.rebuildIndex();
+  }
+
+  async close(): Promise<void> {
+    await this.clips.close();
+  }
+
+  /**
+   * Request a render for a published run. System job (no participant
+   * identity on the league surface): the per-run-per-day and global-per-hour
+   * quotas, queue depth, and disk floor still bound the work; callers add
+   * per-IP request rate limiting at the route.
+   */
+  async requestRunClip(request: {
+    runKey: string;
+    anchorTurn: number;
+  }): Promise<PremiereClipStatusResponse> {
+    const runKey = this.validateRunKey(request.runKey);
+    if (
+      !Number.isSafeInteger(request.anchorTurn) ||
+      request.anchorTurn < 0 ||
+      request.anchorTurn > MAX_RUN_CLIP_ANCHOR_TURN
+    ) {
+      throw new ReplayPremiereError(
+        "league_clip_anchor_invalid",
+        "PREMIERE_INVALID_REQUEST",
+        400,
+        "League clip anchor turn is invalid",
+      );
+    }
+    const sourceReplaySha256 = await this.hashRunRecord(runKey);
+    return this.clips.requestClip({
+      premiereId: runKey,
+      lifecycleState: RUN_CLIP_LIFECYCLE,
+      anchorTurn: request.anchorTurn,
+      participantId: null,
+      sourceReplaySha256,
+    });
+  }
+
+  /** Render status for a bucket (absent | pending | ready). */
+  readRunClipStatus(request: {
+    runKey: string;
+    bucket: number;
+  }): PremiereClipStatusResponse {
+    const runKey = this.validateRunKey(request.runKey);
+    return this.clips.readStatus({
+      premiereId: runKey,
+      lifecycleState: RUN_CLIP_LIFECYCLE,
+      bucket: request.bucket,
+    });
+  }
+
+  /** On-disk cached mp4 for the document route, or null (=> 404). */
+  async resolveRunClipFile(request: {
+    runKey: string;
+    bucket: number;
+  }): Promise<ReplayPremiereClipFile | null> {
+    if (!isServableRunKey(request.runKey)) return null;
+    return this.clips.resolveReadyClip({
+      premiereId: request.runKey,
+      lifecycleState: RUN_CLIP_LIFECYCLE,
+      bucket: request.bucket,
+    });
+  }
+
+  /** Absolute record path for a validated run key (containment-checked). */
+  private recordPathFor(runKey: string): string {
+    const validated = this.validateRunKey(runKey);
+    const recordPath = path.resolve(
+      this.runsRootDir,
+      validated,
+      "game-record.json",
+    );
+    if (
+      recordPath !== path.join(this.runsRootDir, validated, "game-record.json")
+    ) {
+      throw runInvalid("league_clip_run_path_escape");
+    }
+    return recordPath;
+  }
+
+  /**
+   * Hash the run's replay bundle so the worker verifies EXACTLY the bytes we
+   * admitted (mtime+size-keyed memo; a changed file re-hashes). An absent
+   * bundle — the run aged off retention, or never published a record — is a
+   * clean 404 BEFORE any quota is consumed.
+   */
+  private async hashRunRecord(runKey: string): Promise<string> {
+    const recordPath = this.recordPathFor(runKey);
+    let stat;
+    try {
+      stat = await fs.stat(recordPath);
+      if (!stat.isFile()) throw new Error("not a file");
+    } catch {
+      throw new ReplayPremiereError(
+        "league_clip_replay_absent",
+        "PREMIERE_UNAVAILABLE",
+        404,
+        "League clip source replay is not available",
+      );
+    }
+    const memo = this.shaMemo.get(recordPath);
+    if (
+      memo !== undefined &&
+      memo.size === stat.size &&
+      memo.mtimeMs === stat.mtimeMs
+    ) {
+      return memo.sha256;
+    }
+    const sha256 = await sha256OfFile(recordPath);
+    if (this.shaMemo.size >= MAX_SHA_MEMO_ENTRIES) {
+      const oldest = this.shaMemo.keys().next().value;
+      if (oldest !== undefined) this.shaMemo.delete(oldest);
+    }
+    this.shaMemo.set(recordPath, {
+      size: stat.size,
+      mtimeMs: stat.mtimeMs,
+      sha256,
+    });
+    return sha256;
+  }
+
+  private validateRunKey(runKey: string): string {
+    if (!isServableRunKey(runKey)) {
+      throw runInvalid("league_clip_run_key_invalid");
+    }
+    return runKey;
+  }
+}
+
+/** Strict single-segment run key (no traversal, no separators, bounded). */
+export function isServableRunKey(runKey: string): boolean {
+  return isSafeProxyWarArtifactSegment(runKey);
+}
+
+function runInvalid(operatorCode: string): ReplayPremiereError {
+  return new ReplayPremiereError(
+    operatorCode,
+    "PREMIERE_INVALID_REQUEST",
+    400,
+    `League clip request rejected: ${operatorCode}`,
+  );
+}
+
+async function sha256OfFile(filePath: string): Promise<string> {
+  const hash = createHash("sha256");
+  await new Promise<void>((resolve, reject) => {
+    const stream = createReadStream(filePath);
+    stream.on("data", (chunk) => hash.update(chunk));
+    stream.on("error", reject);
+    stream.on("end", () => resolve());
+  });
+  return hash.digest("hex");
+}
+
+// ---------------------------------------------------------------------------
+// mp4 document router (mounted before the run-artifact handlers)
+// ---------------------------------------------------------------------------
+
+export interface AiLeagueRunClipDocumentRouterOptions {
+  runClips: AiLeagueRunClips;
+  onOperatorError?: (error: unknown) => void;
+}
+
+/**
+ * Serves `GET|HEAD /ai-league-runs/<runKey>/clip-v1-<bucket>.mp4` from the
+ * league clip cache. A missing artifact is a bare 404; every other run
+ * artifact path passes through untouched. Published clips are public: the
+ * response is cacheable (noindex stays).
+ */
+export function createAiLeagueRunClipDocumentRouter(
+  options: AiLeagueRunClipDocumentRouterOptions,
+): Router {
+  const router = express.Router();
+  router.use((request, response, next) => {
+    const route = matchProxyWarLeagueClipReadPath(request.path);
+    if (route?.kind !== "clip_file") {
+      next();
+      return;
+    }
+    void handleRunClipFileRequest(request, response, route, options).catch(
+      (error: unknown) => {
+        try {
+          options.onOperatorError?.(error);
+        } catch {
+          // Operator diagnostics never replace the fixed public response.
+        }
+        if (!response.headersSent) {
+          sendRunClipFailure(response, 404);
+        } else {
+          response.destroy();
+        }
+      },
+    );
+  });
+  return router;
+}
+
+async function handleRunClipFileRequest(
+  request: Request,
+  response: Response,
+  route: { runKey: string; bucket: number },
+  options: AiLeagueRunClipDocumentRouterOptions,
+): Promise<void> {
+  if (request.method !== "GET" && request.method !== "HEAD") {
+    response.setHeader("Allow", "GET, HEAD");
+    sendRunClipFailure(response, 405);
+    return;
+  }
+  if (request.headers.range !== undefined) {
+    sendRunClipFailure(response, 416);
+    return;
+  }
+  const file = await options.runClips.resolveRunClipFile({
+    runKey: route.runKey,
+    bucket: route.bucket,
+  });
+  if (file === null) {
+    sendRunClipFailure(response, 404);
+    return;
+  }
+  setRunClipHeaders(response);
+  response.status(200);
+  response.setHeader("Cache-Control", "public, max-age=3600");
+  response.setHeader("Content-Type", "video/mp4");
+  response.setHeader("Content-Length", file.byteLength);
+  response.setHeader(
+    "Content-Disposition",
+    `attachment; filename="${route.runKey}-clip-${route.bucket}.mp4"`,
+  );
+  if (request.method === "HEAD") {
+    response.end();
+    return;
+  }
+  const stream = createReadStream(file.filePath);
+  stream.on("error", () => {
+    if (!response.headersSent) sendRunClipFailure(response, 404);
+    else response.destroy();
+  });
+  stream.pipe(response);
+}
+
+function setRunClipHeaders(response: Response): void {
+  response.setHeader("X-Content-Type-Options", "nosniff");
+  response.setHeader("X-Robots-Tag", "noindex, nofollow");
+  response.setHeader("Referrer-Policy", "same-origin");
+  response.setHeader(
+    "Content-Security-Policy",
+    "default-src 'none'; frame-ancestors 'none'; base-uri 'none'; sandbox",
+  );
+}
+
+function sendRunClipFailure(response: Response, status: number): void {
+  setRunClipHeaders(response);
+  response.setHeader("Cache-Control", "no-store, max-age=0");
+  const body = JSON.stringify({ error: { code: "LEAGUE_CLIP_UNAVAILABLE" } });
+  response.status(status);
+  response.setHeader("Content-Type", "application/json; charset=utf-8");
+  response.setHeader("Content-Length", Buffer.byteLength(body));
+  response.end(response.req.method === "HEAD" ? undefined : body);
+}
+
+/** Public JSON error shape for the league clip API routes. */
+export function aiLeagueRunClipErrorBody(error: unknown): {
+  status: number;
+  body: { error: { code: string } };
+} {
+  if (error instanceof ReplayPremiereError) {
+    const code =
+      error.publicCode === "PREMIERE_CAPACITY_EXCEEDED"
+        ? "LEAGUE_CLIP_CAPACITY_EXCEEDED"
+        : error.publicCode === "PREMIERE_INVALID_REQUEST"
+          ? "LEAGUE_CLIP_INVALID_REQUEST"
+          : "LEAGUE_CLIP_UNAVAILABLE";
+    return { status: error.httpStatus, body: { error: { code } } };
+  }
+  return { status: 503, body: { error: { code: "LEAGUE_CLIP_UNAVAILABLE" } } };
+}

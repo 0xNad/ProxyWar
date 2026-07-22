@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { mountAiLeagueReplayOverlay } from "../../src/client/AiLeagueReplayOverlay";
 
 describe("AiLeagueReplayOverlay", () => {
@@ -794,6 +794,140 @@ describe("AiLeagueReplayOverlay", () => {
     // The "Replay mode: watching Proxy War agents" banner was removed (it
     // overlapped the end-of-game winner banner); it must no longer be mounted.
     expect(document.getElementById("ai-league-replay-mode-banner")).toBeNull();
+  });
+
+  describe("social clip block", () => {
+    function frame(turnNumber: number): void {
+      document.dispatchEvent(
+        new CustomEvent("ai-league-replay-frame", {
+          detail: { tick: turnNumber * 2, turnNumber, players: [] },
+        }),
+      );
+    }
+
+    it("locks the clip button until playback reaches a clippable turn", () => {
+      const runID = "league-clip-lock-1";
+      mountAiLeagueReplayOverlay({
+        runID,
+        artifactBasePath: `/ai-league-runs/${runID}`,
+        decisions: [],
+      });
+      const section = document.querySelector("[data-ai-league-clip]");
+      expect(section).not.toBeNull();
+      expect(section?.textContent).toContain(
+        "ai_league_replay.clip_waiting_playback",
+      );
+      expect(section?.querySelector("[data-ai-league-clip-render]")).toBeNull();
+
+      frame(120);
+      const unlocked = document.querySelector("[data-ai-league-clip]");
+      expect(
+        unlocked?.querySelector("[data-ai-league-clip-render]"),
+      ).not.toBeNull();
+      expect(unlocked?.textContent).toContain("ai_league_replay.clip_render");
+    });
+
+    it("requests a clip for the current moment and renders the Download MP4 link when ready", async () => {
+      const runID = "league-clip-ready-1";
+      const clipUrl = `/ai-league-runs/${runID}/clip-v1-61.mp4`;
+      const requests: Array<{ url: string; body: unknown }> = [];
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(async (url: string, init?: RequestInit) => {
+          requests.push({
+            url: String(url),
+            body: typeof init?.body === "string" ? JSON.parse(init.body) : null,
+          });
+          return new Response(
+            JSON.stringify({
+              schemaVersion: 1,
+              premiereId: runID,
+              bucket: 61,
+              clipVersion: 1,
+              state: "ready",
+              ready: {
+                clipUrl,
+                byteLength: 96,
+                sha256: "c".repeat(64),
+                anchorTurn: 615,
+                social: { caption: "caption text", firstReply: "watch url" },
+              },
+            }),
+            { status: 200, headers: { "Content-Type": "application/json" } },
+          );
+        }),
+      );
+      try {
+        mountAiLeagueReplayOverlay({
+          runID,
+          artifactBasePath: `/ai-league-runs/${runID}`,
+          decisions: [],
+        });
+        frame(615);
+        const render = document.querySelector<HTMLButtonElement>(
+          "[data-ai-league-clip-render]",
+        );
+        expect(render).not.toBeNull();
+        render?.click();
+        await vi.waitFor(() => {
+          expect(
+            document.querySelector("[data-ai-league-clip-download]"),
+          ).not.toBeNull();
+        });
+        expect(requests[0].url).toBe(`/api/league-runs/${runID}/clips`);
+        expect(requests[0].body).toEqual({ turn: 615 });
+        const download = document.querySelector<HTMLAnchorElement>(
+          "[data-ai-league-clip-download]",
+        );
+        expect(download?.getAttribute("href")).toBe(clipUrl);
+        expect(download?.hasAttribute("download")).toBe(true);
+        const section = document.querySelector("[data-ai-league-clip]");
+        expect(section?.textContent).toContain(
+          "ai_league_replay.clip_download_file",
+        );
+        expect(section?.textContent).toContain(
+          "ai_league_replay.clip_copy_caption",
+        );
+      } finally {
+        vi.unstubAllGlobals();
+      }
+    });
+
+    it("surfaces a failed render as a retryable failure state", async () => {
+      const runID = "league-clip-fail-1";
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(
+          async () =>
+            new Response(
+              JSON.stringify({ error: { code: "LEAGUE_CLIP_UNAVAILABLE" } }),
+              { status: 404 },
+            ),
+        ),
+      );
+      try {
+        mountAiLeagueReplayOverlay({
+          runID,
+          artifactBasePath: `/ai-league-runs/${runID}`,
+          decisions: [],
+        });
+        frame(200);
+        document
+          .querySelector<HTMLButtonElement>("[data-ai-league-clip-render]")
+          ?.click();
+        await vi.waitFor(() => {
+          expect(
+            document.querySelector("[data-ai-league-clip]")?.textContent,
+          ).toContain("ai_league_replay.clip_failed");
+        });
+        // The failure state keeps the render button for a retry.
+        expect(
+          document.querySelector("[data-ai-league-clip-render]"),
+        ).not.toBeNull();
+      } finally {
+        vi.unstubAllGlobals();
+      }
+    });
   });
 });
 

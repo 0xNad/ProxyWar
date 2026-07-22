@@ -29,6 +29,11 @@ import {
   type AgentStrategyProfile,
 } from "../server/agents/AgentTypes";
 import {
+  aiLeagueRunClipErrorBody,
+  AiLeagueRunClips,
+  createAiLeagueRunClipDocumentRouter,
+} from "../server/agents/AiLeagueRunClips";
+import {
   checkExternalAgentEndpoint,
   normalizeExternalAgentHealthCheckInput,
 } from "../server/agents/ExternalAgentHealthCheck";
@@ -94,6 +99,8 @@ import {
   isProxyWarPublicTournamentArtifact,
   isProxyWarReplayOrRunPath,
   isSafeProxyWarArtifactSegment,
+  matchProxyWarLeagueClipReadPath,
+  matchProxyWarLeagueClipWritePath,
   proxyWarLeagueContentSecurityPolicy,
   proxyWarPublicRendererAssetPrefixes,
 } from "../server/agents/ProxyWarPublicArtifacts";
@@ -351,6 +358,49 @@ if (replayPremiereClips !== null) {
 } else {
   bufferedRevealObservations.length = 0;
 }
+// League-run clips: the same watermarked social-clip pipeline for EVERY
+// published match, rendered from the run's own game-record.json. Separate
+// cache tree (league-clips-v1) so premiere and run clips never collide.
+// Shares the PROXYWAR_CLIPS_ENABLED gate and construction resilience.
+let aiLeagueRunClips: AiLeagueRunClips | null = null;
+if (replayPremiereClipsEnabled) {
+  try {
+    aiLeagueRunClips = new AiLeagueRunClips({
+      runsRootDir,
+      clipsRoot: path.join(replayPremierePrivateStateRoot, "league-clips-v1"),
+      staticDir: staticRootDir,
+      workerModulePath: path.join(
+        process.cwd(),
+        "src",
+        "scripts",
+        "replay-premiere-clip-worker.ts",
+      ),
+      publicOrigin: replayPremierePublicOrigin,
+      licenseStrings: await loadReplayPremiereClipLicenseStrings(),
+      storageStatePath: path.join(
+        path.dirname(replayPremierePrivateStateRoot),
+        "state.json",
+      ),
+      clipFfmpegBin: firstConfiguredEnv("PROXYWAR_CLIP_FFMPEG_BIN"),
+      clipChromeBin: firstConfiguredEnv("PROXYWAR_CLIP_CHROME_BIN"),
+      logger: (message) => console.log(`[league-clips] ${message}`),
+    });
+    await aiLeagueRunClips.rebuildIndex().catch((error: unknown) => {
+      console.error(
+        `League run clip index rebuild failed: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+    });
+  } catch (error) {
+    aiLeagueRunClips = null;
+    console.error(
+      `League run clips disabled: ${
+        error instanceof Error ? error.message : String(error)
+      }`,
+    );
+  }
+}
 const betaAccess = loadProxyWarBetaAccessConfig();
 const betaFeedbackRootDir = path.join(
   artifactsRootDir,
@@ -392,6 +442,12 @@ const rateLimits = {
     60,
   ),
   feedback: positiveInt(firstConfiguredEnv("PROXYWAR_RATE_LIMIT_FEEDBACK"), 30),
+  // League-run clip render requests (the clip service's own render quotas and
+  // queue bound the actual work; this only caps request spam per IP).
+  leagueClips: positiveInt(
+    firstConfiguredEnv("PROXYWAR_RATE_LIMIT_LEAGUE_CLIPS"),
+    20,
+  ),
   // Managed-relay routes are polled by automated workers (~1 long poll / 25s
   // steady, faster during active play), so this scope is far more generous than
   // the human-initiated scopes above. It only caps tunnelled external callers;
@@ -523,7 +579,10 @@ if (leagueWrapperOnly) {
       if (
         isProxyWarPublicLeaguePath(req.path) ||
         isProxyWarPublicPremiereReadPath(req.path) ||
-        isProxyWarPublicRendererAssetPath(req.path)
+        isProxyWarPublicRendererAssetPath(req.path) ||
+        // League-run clip status/mp4 for mirror-published (league-*) runs —
+        // exactly the runs whose replay pages are already public.
+        matchProxyWarLeagueClipReadPath(req.path)?.publicLeague === true
       ) {
         next();
         return;
@@ -535,7 +594,11 @@ if (leagueWrapperOnly) {
       res.redirect("/league");
       return;
     }
-    if (req.method === "POST" && isProxyWarPublicPremiereWritePath(req.path)) {
+    if (
+      req.method === "POST" &&
+      (isProxyWarPublicPremiereWritePath(req.path) ||
+        matchProxyWarLeagueClipWritePath(req.path)?.publicLeague === true)
+    ) {
       next();
       return;
     }
@@ -726,12 +789,17 @@ app.use((req, res, next) => {
     (req.method === "GET" || req.method === "HEAD") &&
     (isProxyWarPublicLeaguePath(req.path) ||
       isProxyWarPublicPremiereReadPath(req.path) ||
-      isProxyWarPublicRendererAssetPath(req.path))
+      isProxyWarPublicRendererAssetPath(req.path) ||
+      matchProxyWarLeagueClipReadPath(req.path)?.publicLeague === true)
   ) {
     next();
     return;
   }
-  if (req.method === "POST" && isProxyWarPublicPremiereWritePath(req.path)) {
+  if (
+    req.method === "POST" &&
+    (isProxyWarPublicPremiereWritePath(req.path) ||
+      matchProxyWarLeagueClipWritePath(req.path)?.publicLeague === true)
+  ) {
     next();
     return;
   }
@@ -741,6 +809,64 @@ app.use((req, res, next) => {
   }
   res.redirect(`/beta?next=${encodeURIComponent(req.originalUrl)}`);
 });
+
+// League-run clip surface. Mounted after the wrapper/beta gates (which admit
+// only mirror-published league-* keys anonymously) and BEFORE the run-artifact
+// handlers so clip-v1-<bucket>.mp4 never falls into the artifact allowlist.
+if (aiLeagueRunClips !== null) {
+  const runClips = aiLeagueRunClips;
+  app.use(
+    createAiLeagueRunClipDocumentRouter({
+      runClips,
+      onOperatorError: (error) => {
+        console.error(
+          `League run clip route failed: ${
+            error instanceof Error ? error.message : String(error)
+          }`,
+        );
+      },
+    }),
+  );
+  app.use((req, res, next) => {
+    const read = matchProxyWarLeagueClipReadPath(req.path);
+    if (
+      read?.kind === "clip_status" &&
+      (req.method === "GET" || req.method === "HEAD")
+    ) {
+      res.setHeader("Cache-Control", "no-store, max-age=0");
+      const status = runClips.readRunClipStatus({
+        runKey: read.runKey,
+        bucket: read.bucket,
+      });
+      if (status.state === "absent") {
+        res.status(404).json({ error: { code: "LEAGUE_CLIP_UNAVAILABLE" } });
+        return;
+      }
+      res.json(status);
+      return;
+    }
+    const write = matchProxyWarLeagueClipWritePath(req.path);
+    if (write !== null && req.method === "POST") {
+      if (!enforceRateLimit("league-clips", rateLimits.leagueClips, req, res)) {
+        return;
+      }
+      const body = (req.body ?? {}) as Record<string, unknown>;
+      const turn = typeof body.turn === "number" ? body.turn : Number.NaN;
+      void runClips
+        .requestRunClip({ runKey: write.runKey, anchorTurn: turn })
+        .then((status) => {
+          res.setHeader("Cache-Control", "no-store, max-age=0");
+          res.json(status);
+        })
+        .catch((error: unknown) => {
+          const mapped = aiLeagueRunClipErrorBody(error);
+          res.status(mapped.status).json(mapped.body);
+        });
+      return;
+    }
+    next();
+  });
+}
 
 app.get("/league", (req, res) => {
   res.setHeader(
@@ -2095,6 +2221,7 @@ for (const signal of ["SIGINT", "SIGTERM"] as const) {
     renderer?.kill(signal);
     replayPremiereRevealAutoClip?.close();
     void replayPremiereClips?.close();
+    void aiLeagueRunClips?.close();
     server.close(() => {
       void (
         replayPremiereProduction?.service.close() ?? Promise.resolve()
