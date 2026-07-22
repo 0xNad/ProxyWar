@@ -19,6 +19,7 @@ import {
   retentionReferencesFromEpisodes,
 } from "../server/agents/CoworldLeagueArtifactRetention";
 import {
+  buildCoworldReplayUiArtifact,
   buildEpisodeRow,
   buildRoundRows,
   buildStandingRows,
@@ -27,12 +28,25 @@ import {
   parseHostedReplayPayload,
   parseLeagueSummary,
   pickCompetitionDivision,
+  premiereHrefForEpisode,
+  resolveLatestRevealedPremiere,
   roundNumberByRoundId,
   scoreLabelFromStandings,
+  selectServingLatestPremiere,
+  summarizePremiereArchiveIndex,
   type HostedEpisodeMeta,
   type ParsedHostedReplay,
+  type PremiereArchiveIndexSummary,
 } from "../server/agents/CoworldLeagueMirrorCore";
 import { withCoworldLeagueMirrorOperationLock } from "../server/agents/CoworldLeagueMirrorOperationLock";
+import {
+  buildPremiereSiteBlock,
+  classifyEpisodeSuppression,
+  filterSuppressedEpisodeRows,
+  loadLatestPremierePointer,
+  loadPremiereSuppressionContract,
+  type PremiereSuppressionState,
+} from "../server/agents/CoworldLeaguePremiereSuppression";
 import {
   markCoworldLeagueSiteStale,
   writeCoworldLeagueSite,
@@ -53,6 +67,29 @@ import {
  * This script never mutates hosted state: no upload, submit, publish, or
  * experience-request creation. Keep it that way — hosted mutations are
  * operator-gated.
+ *
+ * Premiere links (`--premiere-archive-index <absolute path>`): when pointed at
+ * the replay-premiere archive index (production:
+ * `$PROXYWAR_STORAGE_STATE_DIR/replay-premiere/archive-v1/archive-index.jsonl`,
+ * wired in `start-proxywar-league-mirror.zsh` exactly like
+ * `--suppression-contract`), each battle card whose episode has a REVEALED
+ * premiere gains a `/premiere/<premiereId>` link. The index is READ-ONLY here,
+ * only reveal-public facts are extracted, and every failure mode fails open to
+ * "no links". Default off: without the flag the mirror output is unchanged.
+ *
+ * Latest-premiere card (`--latest-premiere <absolute path>`): when pointed at
+ * the loop-written latest-revealed pointer (production:
+ * `$PROXYWAR_STORAGE_STATE_DIR/premiere-suppression/latest-premiere.json`,
+ * next to the suppression contract), the league page's premiere slot becomes
+ * persistent: whenever no LIVE premiere card is showing it renders the most
+ * recent REVEALED premiere as a watchable card, replaced only when the next
+ * premiere activates — so once any premiere has revealed, the slot is never
+ * empty. The pointer is the freshness source (written at reveal, before the
+ * ~30-minute terminal reclamation), READ-ONLY here, carries reveal-public
+ * facts only, and is cross-checked against the archive index when that is
+ * also wired (with the index's newest revealed entry as the fallback). Every
+ * failure mode fails open to "no card". Default off: without the flag the
+ * mirror output is unchanged.
  */
 
 const execFileAsync = promisify(execFile);
@@ -76,6 +113,34 @@ interface MirrorOptions {
   recoverPinnedArtifacts: boolean;
   watch: boolean;
   intervalSeconds: number;
+  /**
+   * Absolute path to the premiere-suppression contract, or null (default) to
+   * run with suppression disabled — the mirror then behaves exactly as before.
+   */
+  suppressionContractPath: string | null;
+  /**
+   * Absolute path to the replay-premiere archive index
+   * (`archive-v1/archive-index.jsonl`), or null (default) to publish battle
+   * cards without premiere links — the mirror then behaves exactly as before.
+   */
+  premiereArchiveIndexPath: string | null;
+  /**
+   * Absolute path to the loop-written latest-revealed-premiere pointer
+   * (`premiere-suppression/latest-premiere.json`), or null (default) to
+   * publish without the "Latest premiere" card — the mirror then behaves
+   * exactly as before.
+   */
+  latestPremierePointerPath: string | null;
+  /**
+   * Origin to probe (`--premiere-probe-origin`, e.g. `http://127.0.0.1:8788`)
+   * before linking a "Latest premiere" card: a candidate whose
+   * `/premiere/<id>` page does not return 200 is dropped in favor of the
+   * archive-index fallback (or no card). Null (default) skips probing —
+   * candidates are trusted as before. 2026-07-22 orphan incident: a pointer
+   * can name a revealed premiere that is neither live-registered nor archived
+   * after restart churn; without the probe the card links a 404.
+   */
+  premiereProbeOrigin: string | null;
 }
 
 function parseOptions(argv: string[]): MirrorOptions {
@@ -113,6 +178,10 @@ function parseOptions(argv: string[]): MirrorOptions {
     recoverPinnedArtifacts: false,
     watch: false,
     intervalSeconds: 300,
+    suppressionContractPath: null,
+    premiereArchiveIndexPath: null,
+    latestPremierePointerPath: null,
+    premiereProbeOrigin: null,
   };
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i];
@@ -170,6 +239,46 @@ function parseOptions(argv: string[]): MirrorOptions {
       case "--interval-seconds":
         options.intervalSeconds = Math.max(60, Number(next()));
         break;
+      case "--suppression-contract": {
+        const value = next();
+        if (!path.isAbsolute(value)) {
+          throw new Error(
+            `--suppression-contract must be an absolute path: ${value}`,
+          );
+        }
+        options.suppressionContractPath = value;
+        break;
+      }
+      case "--premiere-archive-index": {
+        const value = next();
+        if (!path.isAbsolute(value)) {
+          throw new Error(
+            `--premiere-archive-index must be an absolute path: ${value}`,
+          );
+        }
+        options.premiereArchiveIndexPath = value;
+        break;
+      }
+      case "--latest-premiere": {
+        const value = next();
+        if (!path.isAbsolute(value)) {
+          throw new Error(
+            `--latest-premiere must be an absolute path: ${value}`,
+          );
+        }
+        options.latestPremierePointerPath = value;
+        break;
+      }
+      case "--premiere-probe-origin": {
+        const value = next();
+        if (!/^https?:\/\/[^/\s]+$/.test(value)) {
+          throw new Error(
+            `--premiere-probe-origin must be a bare http(s) origin: ${value}`,
+          );
+        }
+        options.premiereProbeOrigin = value;
+        break;
+      }
       default:
         throw new Error(`Unknown flag: ${arg}`);
     }
@@ -335,7 +444,7 @@ async function ensureEpisodeReplayCached(
 
 // Bump when bundle contents change shape so existing directories regenerate
 // in place on the next sync (files are overwritten, never deleted).
-const bundleVersion = "2";
+const bundleVersion = "3";
 
 async function unpackEpisodeRunDir(
   replay: ParsedHostedReplay,
@@ -367,6 +476,10 @@ async function unpackEpisodeRunDir(
     const generatedFiles = [
       ...Object.entries(replay.inlineRunArtifacts),
       [
+        "replay-ui.json",
+        `${JSON.stringify(buildCoworldReplayUiArtifact(replay.inlineRunArtifacts))}\n`,
+      ],
+      [
         "spectator-replay.json",
         `${JSON.stringify(publicSpectatorReplay, null, 2)}\n`,
       ],
@@ -395,6 +508,149 @@ async function unpackEpisodeRunDir(
 
 function log(message: string): void {
   console.log(`[league-mirror ${new Date().toISOString()}] ${message}`);
+}
+
+/**
+ * Read the premiere-suppression contract, or resolve to a stale (non-
+ * suppressing) state when no contract path is configured. Fail-open: any
+ * unreadable/corrupt/stale contract also resolves to a stale state inside
+ * {@link loadPremiereSuppressionContract}, so this never throws and never
+ * blocks publication.
+ */
+async function readSuppressionState(
+  options: MirrorOptions,
+  now: Date = new Date(),
+): Promise<PremiereSuppressionState> {
+  if (options.suppressionContractPath === null) {
+    return { status: "stale", reason: "not_configured" };
+  }
+  return loadPremiereSuppressionContract(options.suppressionContractPath, now);
+}
+
+const maximumPremiereArchiveIndexBytes = 64 * 1024 * 1024;
+
+/**
+ * Read the replay-premiere archive index into its mirror projection: REVEALED
+ * premiere ids for battle-card links plus the known-id/newest-revealed view
+ * the latest-premiere card cross-checks against. Fail-open on every failure
+ * mode — not configured, missing (the normal pre-first-premiere state),
+ * unreadable, not a regular file, or oversized — the mirror then publishes
+ * without premiere links rather than degrading the feed. A link appears on
+ * the first mirror cycle after the premiere's terminal reclamation (≤ ~30
+ * minutes after reveal); revealed-but-not-yet-reclaimed premieres are
+ * intentionally not linked, so this reader never has to touch the live
+ * premiere catalog.
+ */
+async function readPremiereArchiveIndex(
+  options: MirrorOptions,
+): Promise<PremiereArchiveIndexSummary | null> {
+  if (options.premiereArchiveIndexPath === null) {
+    return null;
+  }
+  try {
+    const indexStat = await fs.stat(options.premiereArchiveIndexPath);
+    if (
+      !indexStat.isFile() ||
+      indexStat.size > maximumPremiereArchiveIndexBytes
+    ) {
+      log(
+        "premiere archive index skipped (not a regular file or over the byte ceiling); publishing without premiere links",
+      );
+      return null;
+    }
+    const summary = summarizePremiereArchiveIndex(
+      await fs.readFile(options.premiereArchiveIndexPath, "utf8"),
+    );
+    log(
+      `premiere archive index: ${summary.revealedIds.size} revealed premiere(s)`,
+    );
+    return summary;
+  } catch (error) {
+    const code =
+      error !== null && typeof error === "object" && "code" in error
+        ? (error as { code?: unknown }).code
+        : null;
+    if (code !== "ENOENT") {
+      log(
+        `premiere archive index unreadable; publishing without premiere links: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+    }
+    return null;
+  }
+}
+
+/**
+ * Resolve the "Latest premiere" card for this cycle, or null when the feature
+ * is off (`--latest-premiere` not passed) or nothing revealed is known.
+ * Fail-open end to end: the pointer read tolerates missing/unreadable/
+ * malformed/oversized files, the resolver drops a pointer the archive index
+ * contradicts and falls back to the index's newest revealed entry, and any
+ * failure here only costs the card — never the cycle.
+ */
+async function readLatestPremiereCard(
+  options: MirrorOptions,
+  archiveIndex: PremiereArchiveIndexSummary | null,
+): Promise<ReturnType<typeof resolveLatestRevealedPremiere>> {
+  if (options.latestPremierePointerPath === null) {
+    return null;
+  }
+  const pointer = await loadLatestPremierePointer(
+    options.latestPremierePointerPath,
+  );
+  const latest = await selectServingLatestPremiere(
+    pointer,
+    archiveIndex,
+    latestPremiereProbe(options),
+  );
+  if (latest !== null) {
+    log(
+      `latest premiere card: ${latest.premiereId} (${
+        pointer !== null && pointer.premiereId === latest.premiereId
+          ? "pointer"
+          : "archive-index fallback"
+      })`,
+    );
+  } else if (pointer !== null) {
+    log(
+      `latest premiere card omitted: no candidate page is serving (pointer ${pointer.premiereId})`,
+    );
+  }
+  return latest;
+}
+
+/**
+ * Bounded page probe for latest-premiere candidates. With no
+ * `--premiere-probe-origin` the probe trusts every candidate (legacy
+ * behavior). With an origin, a candidate must answer 200 on its
+ * `/premiere/<id>` page within 2.5 s; any error, timeout, or non-200 drops
+ * it. Probe failures never fail the cycle — worst case the card is omitted
+ * for this cycle and returns when the page serves.
+ */
+function latestPremiereProbe(
+  options: MirrorOptions,
+): (premiereId: string) => Promise<boolean> {
+  const origin = options.premiereProbeOrigin;
+  if (origin === null) {
+    return async () => true;
+  }
+  return async (premiereId: string) => {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 2_500);
+    try {
+      const response = await fetch(
+        `${origin}/premiere/${encodeURIComponent(premiereId)}`,
+        { method: "GET", redirect: "manual", signal: controller.signal },
+      );
+      await response.body?.cancel().catch(() => undefined);
+      return response.status === 200;
+    } catch {
+      return false;
+    } finally {
+      clearTimeout(timer);
+    }
+  };
 }
 
 async function pruneMirrorArtifacts(
@@ -510,18 +766,79 @@ async function syncOnce(options: MirrorOptions): Promise<void> {
   const recoveryReferences = options.recoverPinnedArtifacts
     ? await readCoworldLeagueRetentionPins(options.retentionPinManifestPath)
     : null;
-  const episodeMetasToProcess =
+  // Revealed premieres, for spoiler-safe battle-card links and the latest-
+  // premiere card's cross-check/fallback. Read once per cycle; fail-open to an
+  // absent summary (cards simply carry no premiere link, no latest card
+  // fallback).
+  const premiereArchiveIndex = await readPremiereArchiveIndex(options);
+  const revealedPremiereIds =
+    premiereArchiveIndex?.revealedIds ?? new Set<string>();
+  // Read the contract at cycle start to log/observe suppression status. Only
+  // the cycle-start OBSERVATION is skipped during operator-driven pinned-artifact
+  // recovery; the final-defense filter below still runs unconditionally, so a
+  // held/quarantined episode is spoiler-shielded even on the recovery path.
+  const suppressionAtCycleStart =
+    recoveryReferences === null ? await readSuppressionState(options) : null;
+  if (
+    options.suppressionContractPath !== null &&
+    suppressionAtCycleStart !== null
+  ) {
+    log(
+      suppressionAtCycleStart.status === "active"
+        ? `premiere suppression active (${suppressionAtCycleStart.contract.holds.length} hold(s))`
+        : `premiere suppression inactive (contract ${suppressionAtCycleStart.reason})`,
+    );
+  }
+  const episodeMetasToProcess = (
     recoveryReferences === null
       ? episodeMetas.slice(0, options.maxRenderedEpisodes)
       : episodeMetas.filter((meta) =>
           recoveryReferences.episodeRequestIds.has(meta.episodeRequestId),
-        );
+        )
+  ).filter((meta) => {
+    if (suppressionAtCycleStart === null) {
+      return true;
+    }
+    const decision = classifyEpisodeSuppression(
+      suppressionAtCycleStart,
+      meta,
+      new Date(),
+    );
+    if (decision !== "publish") {
+      log(
+        `episode ${meta.episodeRequestId} ${
+          decision === "held"
+            ? "held for premiere — excluded"
+            : "deferred this cycle (premiere quarantine)"
+        }`,
+      );
+    }
+    return decision === "publish";
+  });
 
   const freshEpisodes: CoworldLeagueEpisodeRow[] = [];
   const recoveredEpisodeRequestIds = new Set<string>();
   let replayEpisodeFailures = 0;
   for (const meta of episodeMetasToProcess) {
     try {
+      // Re-read the contract immediately before unpack/card build so a claim
+      // that lands mid-cycle still suppresses this episode (shrinks the
+      // in-flight race). Stale/absent contract keeps this a no-op.
+      if (recoveryReferences === null) {
+        const decision = classifyEpisodeSuppression(
+          await readSuppressionState(options),
+          meta,
+          new Date(),
+        );
+        if (decision !== "publish") {
+          log(
+            `episode ${meta.episodeRequestId} suppressed before unpack (${
+              decision === "held" ? "premiere hold" : "premiere quarantine"
+            })`,
+          );
+          continue;
+        }
+      }
       if (
         (await minimumAvailableDiskBytes([
           options.cacheDir,
@@ -581,6 +898,10 @@ async function syncOnce(options: MirrorOptions): Promise<void> {
               : (roundNumbers.get(meta.roundId) ?? null),
           watchHref: unpacked?.watchHref ?? null,
           fullRenderHref: unpacked?.fullRenderHref ?? null,
+          premiereHref: premiereHrefForEpisode(
+            meta.episodeRequestId,
+            revealedPremiereIds,
+          ),
         }),
       );
       recoveredEpisodeRequestIds.add(meta.episodeRequestId);
@@ -630,6 +951,34 @@ async function syncOnce(options: MirrorOptions): Promise<void> {
     );
   }
 
+  // Final defense: mergeEpisodeRows retains previously-published cards, so a
+  // card published before a premiere claim can still be in `episodes`. Re-read
+  // the contract and filter held/quarantined episodes out of the MERGED list
+  // before it reaches data.json. Stale/absent contract returns the list
+  // unchanged, so the mirror output stays byte-identical to today.
+  const finalSuppression = await readSuppressionState(options);
+  const publishedEpisodes = filterSuppressedEpisodeRows(
+    finalSuppression,
+    episodes,
+    new Date(),
+  );
+  if (publishedEpisodes.length !== episodes.length) {
+    log(
+      `premiere suppression removed ${
+        episodes.length - publishedEpisodes.length
+      } card(s) from the merged episode list`,
+    );
+  }
+  const premiere = buildPremiereSiteBlock(finalSuppression, new Date());
+  // Latest REVEALED premiere for the between-premieres card. Read late (after
+  // the final suppression read) so a reveal that lands mid-cycle is already
+  // visible. Feature-gated on --latest-premiere; the site writer gives the
+  // live card precedence, so data.json may carry both while only one renders.
+  const latestPremiere = await readLatestPremiereCard(
+    options,
+    premiereArchiveIndex,
+  );
+
   const now = new Date().toISOString();
   const data: CoworldLeagueMirrorData = {
     generatedAt: now,
@@ -655,7 +1004,13 @@ async function syncOnce(options: MirrorOptions): Promise<void> {
     },
     standings,
     rounds,
-    episodes,
+    episodes: publishedEpisodes,
+    // Only present when a premiere is currently claimed; omitting the key keeps
+    // stale/absent-contract output byte-identical to pre-premiere behavior.
+    ...(premiere !== null ? { premiere } : {}),
+    // Additive: only present when --latest-premiere resolved a revealed
+    // premiere; omitted otherwise so existing consumers see identical output.
+    ...(latestPremiere !== null ? { latestPremiere } : {}),
     links: {
       enterTheLeagueUrl: options.starterUrl,
       platformLabel: "Softmax Coworld",
@@ -663,7 +1018,7 @@ async function syncOnce(options: MirrorOptions): Promise<void> {
   };
   const paths = await writeCoworldLeagueSite(options.siteDir, data);
   log(
-    `site updated: ${paths.indexPath} (${standings.length} standings, ${episodes.length} battles)`,
+    `site updated: ${paths.indexPath} (${standings.length} standings, ${publishedEpisodes.length} battles)`,
   );
   await pruneMirrorArtifacts(options, data.episodes);
 }

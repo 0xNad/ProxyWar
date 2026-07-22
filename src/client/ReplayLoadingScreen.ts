@@ -12,7 +12,9 @@ export type ReplayLoadingMessageKey =
   | "ai_league_replay.loading_replay"
   | "ai_league_replay.waiting_for_replay"
   | "ai_league_replay.loading_slow"
-  | "ai_league_replay.loading_failed";
+  | "ai_league_replay.loading_failed"
+  | "replay_premiere.loading_premiere"
+  | "replay_premiere.joining_live";
 
 export function showReplayLoadingScreen(
   messageKey: ReplayLoadingMessageKey = "ai_league_replay.loading_replay",
@@ -24,6 +26,7 @@ export function showReplayLoadingScreen(
   );
 
   const screen = ensureReplayLoadingScreen();
+  screen.setAttribute("role", "status");
   screen.setAttribute("aria-busy", String(busy));
   updateReplayLoadingMessage(screen, messageKey);
 
@@ -33,15 +36,41 @@ export function showReplayLoadingScreen(
   if (retry !== null) {
     retry.hidden = true;
   }
+  const back = screen.querySelector<HTMLElement>("[data-replay-loading-back]");
+  if (back !== null) {
+    back.hidden = true;
+  }
+  setReplayLoadingProgress(null);
 
   document.getElementById("proxywar-coworld-splash")?.remove();
   return screen;
 }
 
+/**
+ * Live-updating subline under the veil message (join-sync progress:
+ * "Syncing to turn {n}…"). Pass null to clear/hide. No aria-live: it updates
+ * many times per second during a catch-up; the headline message carries the
+ * announced state.
+ */
+export function setReplayLoadingProgress(text: string | null): void {
+  const progress = document.querySelector<HTMLElement>(
+    "[data-replay-loading-progress]",
+  );
+  if (progress === null) return;
+  if (text === null || text.length === 0) {
+    progress.hidden = true;
+    progress.textContent = "";
+    return;
+  }
+  progress.hidden = false;
+  progress.textContent = text;
+}
+
 export function holdReplayLoadingScreenUntilFirstFrame(
   timeoutMs = REPLAY_LOADING_SLOW_TIMEOUT_MS,
+  messageKey: ReplayLoadingMessageKey = "ai_league_replay.loading_replay",
 ): () => void {
-  showReplayLoadingScreen();
+  showReplayLoadingScreen(messageKey);
 
   let active = true;
   let slowTimer: ReturnType<typeof setTimeout> | null = null;
@@ -97,12 +126,24 @@ export function showReplayLoadingFailure(): HTMLElement {
   const retry = screen.querySelector<HTMLButtonElement>(
     "[data-replay-loading-retry]",
   );
+  screen.setAttribute("role", "alert");
   if (retry !== null) {
     retry.hidden = false;
     retry.dataset.i18n = "ai_league_replay.retry";
     const translated = translateText("ai_league_replay.retry");
     retry.textContent =
       translated === "ai_league_replay.retry" ? "" : translated;
+    retry.focus();
+  }
+  const back = screen.querySelector<HTMLAnchorElement>(
+    "[data-replay-loading-back]",
+  );
+  if (back !== null) {
+    back.hidden = false;
+    back.dataset.i18n = "ai_league_replay.back_to_league";
+    const translated = translateText("ai_league_replay.back_to_league");
+    back.textContent =
+      translated === "ai_league_replay.back_to_league" ? "" : translated;
   }
   return screen;
 }
@@ -117,6 +158,7 @@ function ensureReplayLoadingScreen(): HTMLElement {
   const existing = document.getElementById(REPLAY_LOADING_ID);
   if (existing !== null) {
     bindRetry(existing);
+    ensureProgressElement(existing);
     return existing;
   }
 
@@ -136,16 +178,48 @@ function ensureReplayLoadingScreen(): HTMLElement {
   const message = document.createElement("p");
   message.dataset.replayLoadingMessage = "";
 
+  const progress = document.createElement("p");
+  progress.dataset.replayLoadingProgress = "";
+  progress.className = "proxywar-replay-loading-progress";
+  progress.hidden = true;
+
   const retry = document.createElement("button");
   retry.type = "button";
   retry.dataset.replayLoadingRetry = "";
   retry.hidden = true;
 
-  content.append(spinner, message, retry);
+  const actions = document.createElement("div");
+  actions.className = "proxywar-replay-loading-actions";
+
+  const back = document.createElement("a");
+  back.href = "/league";
+  back.dataset.replayLoadingBack = "";
+  back.hidden = true;
+
+  actions.append(retry, back);
+  content.append(spinner, message, progress, actions);
   screen.append(content);
   document.body.prepend(screen);
   bindRetry(screen);
   return screen;
+}
+
+// The static first-paint veil may come from a cached app shell that predates
+// the join-sync progress line; owning the screen adds it when missing.
+function ensureProgressElement(screen: HTMLElement): void {
+  if (screen.querySelector("[data-replay-loading-progress]") !== null) {
+    return;
+  }
+  const progress = document.createElement("p");
+  progress.dataset.replayLoadingProgress = "";
+  progress.className = "proxywar-replay-loading-progress";
+  progress.hidden = true;
+  const message = screen.querySelector("[data-replay-loading-message]");
+  if (message?.parentElement) {
+    message.after(progress);
+  } else {
+    screen.append(progress);
+  }
 }
 
 function bindRetry(screen: HTMLElement): void {

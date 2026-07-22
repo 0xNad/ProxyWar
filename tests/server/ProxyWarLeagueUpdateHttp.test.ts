@@ -3,6 +3,7 @@ import {
   copyFile,
   mkdir,
   mkdtemp,
+  realpath,
   rm,
   stat,
   writeFile,
@@ -37,9 +38,21 @@ describe("league update HTTP contract", () => {
   let openServerOutput = "";
   let caseInsensitiveFixturePaths = false;
   let validReplayRecordPath = "";
+  let privateStateRoot = "";
+  let openPrivateStateRoot = "";
 
   beforeAll(async () => {
-    fixtureRoot = await mkdtemp(path.join(tmpdir(), "proxywar-league-http-"));
+    fixtureRoot = await realpath(
+      await mkdtemp(path.join(tmpdir(), "proxywar-league-http-")),
+    );
+    privateStateRoot = path.join(
+      path.dirname(fixtureRoot),
+      `${path.basename(fixtureRoot)}-premiere-gated`,
+    );
+    openPrivateStateRoot = path.join(
+      path.dirname(fixtureRoot),
+      `${path.basename(fixtureRoot)}-premiere-open`,
+    );
     const artifactsRoot = path.join(fixtureRoot, "artifacts");
     const leagueRoot = path.join(artifactsRoot, "ai-league-runs", "league");
     const homeRoot = path.join(fixtureRoot, "home-gated");
@@ -74,11 +87,7 @@ describe("league update HTTP contract", () => {
         path.join(projectRoot, "index.html"),
         path.join(staticRoot, "index.html"),
       ),
-      writeFile(
-        validReplayRecordPath,
-        JSON.stringify({ turns: [] }),
-        "utf8",
-      ),
+      writeFile(validReplayRecordPath, JSON.stringify({ turns: [] }), "utf8"),
       writeFile(
         path.join(compactedReplayRoot, "game-record.json"),
         JSON.stringify({ compacted: true }),
@@ -86,9 +95,7 @@ describe("league update HTTP contract", () => {
       ),
     ]);
     try {
-      await stat(
-        path.join(artifactsRoot, "ai-league-runs", "League"),
-      );
+      await stat(path.join(artifactsRoot, "ai-league-runs", "League"));
       caseInsensitiveFixturePaths = true;
     } catch {
       caseInsensitiveFixturePaths = false;
@@ -103,6 +110,7 @@ describe("league update HTTP contract", () => {
       fixtureRoot,
       homeRoot,
       nationsRoot,
+      privateStateRoot,
       port,
       betaEnabled: true,
       wrapperOnly: true,
@@ -112,6 +120,7 @@ describe("league update HTTP contract", () => {
       fixtureRoot,
       homeRoot: openHomeRoot,
       nationsRoot: openNationsRoot,
+      privateStateRoot: openPrivateStateRoot,
       port: openPort,
       betaEnabled: false,
       wrapperOnly: false,
@@ -141,6 +150,11 @@ describe("league update HTTP contract", () => {
     if (fixtureRoot !== "") {
       await rm(fixtureRoot, { recursive: true, force: true });
     }
+    await Promise.all(
+      [privateStateRoot, openPrivateStateRoot]
+        .filter((root) => root !== "")
+        .map((root) => rm(root, { recursive: true, force: true })),
+    );
   });
 
   test("serves the league page with a CSP that permits only same-origin scripts", async () => {
@@ -229,10 +243,7 @@ describe("league update HTTP contract", () => {
   });
 
   test("serves and revalidates only the allowlisted update artifacts", async () => {
-    const client = await rawRequest(
-      origin,
-      "/ai-league-runs/league/client.js",
-    );
+    const client = await rawRequest(origin, "/ai-league-runs/league/client.js");
     expect(client.status).toBe(200);
     expect(client.headers["content-type"]).toMatch(/javascript/);
     expect(client.headers["x-content-type-options"]).toBe("nosniff");
@@ -246,10 +257,7 @@ describe("league update HTTP contract", () => {
     expect(clientHead.status).toBe(200);
     expect(clientHead.body).toHaveLength(0);
 
-    const data = await rawRequest(
-      origin,
-      "/ai-league-runs/league/data.json",
-    );
+    const data = await rawRequest(origin, "/ai-league-runs/league/data.json");
     expect(data.status).toBe(200);
     expect(data.headers.etag).toBeDefined();
     expect(data.headers["cache-control"]).toContain("max-age=0");
@@ -270,8 +278,20 @@ describe("league update HTTP contract", () => {
         "/ai-league-runs/league/untrusted.js",
         { method },
       );
-      expect(blocked.status).toBe(302);
-      expect(blocked.headers.location).toBe("/league");
+      expect(blocked.status).toBe(404);
+      expect(blocked.headers.location).toBeUndefined();
+    }
+
+    for (const route of [
+      "/ai-league-replay/controlled-source-1",
+      "/ai-league-runs/controlled-source-1/game-record.json",
+      "/proxywar-replay/controlled-source-1",
+    ]) {
+      for (const method of ["GET", "HEAD"] as const) {
+        const blocked = await rawRequest(origin, route, { method });
+        expect(blocked.status, `${method} ${route}`).toBe(404);
+        expect(blocked.headers.location).toBeUndefined();
+      }
     }
   });
 
@@ -358,6 +378,7 @@ function spawnLeagueServer(options: {
   fixtureRoot: string;
   homeRoot: string;
   nationsRoot: string;
+  privateStateRoot: string;
   port: number;
   betaEnabled: boolean;
   wrapperOnly: boolean;
@@ -366,6 +387,8 @@ function spawnLeagueServer(options: {
     process.execPath,
     [
       require.resolve("tsx/cli"),
+      "--tsconfig",
+      path.join(projectRoot, "tsconfig.json"),
       path.join(projectRoot, "src", "scripts", "ai-agent-demo-server.ts"),
     ],
     {
@@ -383,6 +406,7 @@ function spawnLeagueServer(options: {
         PROXYWAR_LEAGUE_WRAPPER_ONLY: String(options.wrapperOnly),
         PROXYWAR_ARTIFACTS_ROOT: options.artifactsRoot,
         PROXYWAR_NATIONS_DIR: options.nationsRoot,
+        PROXYWAR_REPLAY_PREMIERE_STATE_ROOT: options.privateStateRoot,
       },
       stdio: ["ignore", "pipe", "pipe"],
     },

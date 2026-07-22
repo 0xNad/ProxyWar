@@ -159,6 +159,7 @@ const report = buildProxyWarHostedBetaReadinessReport({
       "cloudflare-tunnel.yml.example",
       path.join("mac", "proxywar-beta.env.example"),
       path.join("mac", "start-proxywar-beta.zsh"),
+      path.join("mac", "proxywar-beta-launchd-restart.mjs"),
       path.join("mac", "start-proxywar-cloudflared.zsh"),
       path.join("mac", "backup-proxywar-beta.zsh"),
       path.join("mac", "com.proxywar.beta.plist.example"),

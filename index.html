@@ -39,6 +39,21 @@
         pointer-events: none !important;
       }
 
+      /*
+       * Replay/premiere routes never show the landing page. The boot veil
+       * above drops as soon as the replay surface (or the premiere overlay
+       * for a scheduled countdown) is ready — before the game canvas has
+       * necessarily rendered — so the main-menu DOM is suppressed for the
+       * whole lifetime of these routes or it flashes in that gap. The class
+       * is set by the inline head script at parse time (first paint safe).
+       */
+      html.proxywar-replay-route #main-menu-area,
+      html.proxywar-replay-route #hex-grid,
+      html.proxywar-replay-route #mobile-menu-backdrop,
+      html.proxywar-replay-route #sidebar-menu {
+        display: none !important;
+      }
+
       html.proxywar-replay-route #proxywar-replay-loading {
         position: fixed;
         inset: 0;
@@ -88,8 +103,32 @@
         letter-spacing: 0.01em;
       }
 
-      #proxywar-replay-loading button {
+      #proxywar-replay-loading .proxywar-replay-loading-progress {
+        min-height: 1.3em;
+        color: #7dd3fc;
+        font-size: clamp(13px, 1.8vw, 15px);
+        font-weight: 700;
+        font-variant-numeric: tabular-nums;
+      }
+
+      #proxywar-replay-loading .proxywar-replay-loading-progress[hidden] {
+        display: none;
+      }
+
+      .proxywar-replay-loading-actions {
+        display: flex;
+        flex-wrap: wrap;
+        justify-content: center;
+        gap: 10px;
+      }
+
+      #proxywar-replay-loading button,
+      #proxywar-replay-loading a {
         min-height: 44px;
+        box-sizing: border-box;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
         padding: 10px 18px;
         border: 1px solid rgba(125, 211, 252, 0.5);
         border-radius: 10px;
@@ -98,13 +137,20 @@
         font: inherit;
         font-weight: 700;
         cursor: pointer;
+        text-decoration: none;
       }
 
-      #proxywar-replay-loading button[hidden] {
+      #proxywar-replay-loading a {
+        background: transparent;
+      }
+
+      #proxywar-replay-loading button[hidden],
+      #proxywar-replay-loading a[hidden] {
         display: none;
       }
 
-      #proxywar-replay-loading button:focus-visible {
+      #proxywar-replay-loading button:focus-visible,
+      #proxywar-replay-loading a:focus-visible {
         outline: 3px solid #7dd3fc;
         outline-offset: 3px;
       }
@@ -179,6 +225,7 @@
         location.pathname.startsWith("/ai-league-replay/") ||
         location.pathname.startsWith("/proxywar-replay/") ||
         location.pathname.startsWith("/openfront-replay/") ||
+        location.pathname.startsWith("/premiere/") ||
         isCoworldRoute("/client/global") ||
         isCoworldRoute("/client/replay") ||
         isCoworldRoute("/client/player");
@@ -284,12 +331,25 @@
           data-replay-loading-message
           data-i18n="ai_league_replay.loading_replay"
         ></p>
-        <button
-          type="button"
-          data-replay-loading-retry
-          data-i18n="ai_league_replay.retry"
+        <p
+          data-replay-loading-progress
+          class="proxywar-replay-loading-progress"
           hidden
-        ></button>
+        ></p>
+        <div class="proxywar-replay-loading-actions">
+          <button
+            type="button"
+            data-replay-loading-retry
+            data-i18n="ai_league_replay.retry"
+            hidden
+          ></button>
+          <a
+            href="/league"
+            data-replay-loading-back
+            data-i18n="ai_league_replay.back_to_league"
+            hidden
+          ></a>
+        </div>
       </div>
     </div>
 
@@ -330,6 +390,7 @@
 
     <!-- MAIN CONTENT AREA -->
     <div
+      id="main-menu-area"
       class="in-[.in-game]:hidden flex-1 relative overflow-hidden h-full transition-[margin] duration-500 ease-out will-change-[margin-left] flex flex-col"
     >
       <!-- Desktop Top Bar -->

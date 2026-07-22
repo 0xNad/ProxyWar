@@ -33,7 +33,10 @@ import { GameView, PlayerView } from "../core/game/GameView";
 import { loadTerrainMap, TerrainMapData } from "../core/game/TerrainMapLoader";
 import { UserSettings } from "../core/game/UserSettings";
 import { WorkerClient } from "../core/worker/WorkerClient";
-import { isAiLeagueReplayRoute } from "./AiLeagueReplayMode";
+import {
+  aiLeagueSpectatorDisplayName,
+  isAiLeagueReplayRoute,
+} from "./AiLeagueReplayMode";
 import { getPersistentID } from "./Auth";
 import {
   AutoUpgradeEvent,
@@ -48,6 +51,13 @@ import {
   TickMetricsEvent,
 } from "./InputHandler";
 import { endGame, startGame, startTime } from "./LocalPersistantStats";
+import { ReplayPremiereProgressiveReplayConfig } from "./ReplayPremierePlayback";
+import { PremiereWarFeedTracker } from "./ReplayPremiereWarFeed";
+import { ReplayPremiereWorkerClient } from "./ReplayPremiereWorkerClient";
+import {
+  parseReplayRenderFastForwardUntilTurn,
+  ReplayRenderFastForward,
+} from "./ReplayRenderFastForward";
 import { terrainMapFileLoader } from "./TerrainMapFileLoader";
 import {
   SendAllianceRequestIntentEvent,
@@ -62,7 +72,6 @@ import {
 import { createCanvas } from "./Utils";
 import { createRenderer, GameRenderer } from "./graphics/GameRenderer";
 import { GoToPlayerEvent } from "./graphics/TransformHandler";
-import { SoundManager } from "./sound/SoundManager";
 
 function isFullMapReplayRecordingView(): boolean {
   const recordingWindow = window as typeof window & {
@@ -88,6 +97,18 @@ export interface LobbyConfig {
   gameStartInfo?: GameStartInfo;
   // GameRecord exists when replaying an archived game.
   gameRecord?: GameRecord;
+  // Progressive replay starts from sanitized GameStartInfo and receives only
+  // hash-verified, released turns through its controller.
+  progressiveReplay?: ReplayPremiereProgressiveReplayConfig;
+}
+
+export function isReplayLobby(
+  lobbyConfig: Pick<LobbyConfig, "gameRecord" | "progressiveReplay">,
+): boolean {
+  return (
+    lobbyConfig.gameRecord !== undefined ||
+    lobbyConfig.progressiveReplay !== undefined
+  );
 }
 
 export interface JoinLobbyResult {
@@ -255,7 +276,7 @@ async function createClientGame(
   const config = await getGameLogicConfig(
     lobbyConfig.gameStartInfo.config,
     userSettings,
-    lobbyConfig.gameRecord !== undefined,
+    isReplayLobby(lobbyConfig),
   );
   let gameMap: TerrainMapData;
 
@@ -268,22 +289,29 @@ async function createClientGame(
       mapLoader,
     );
   }
-  const worker = new WorkerClient(lobbyConfig.gameStartInfo, clientID);
-  await worker.initialize();
-  const gameView = new GameView(
-    worker,
-    config,
-    gameMap,
-    clientID,
-    lobbyConfig.playerName,
-    lobbyConfig.playerClanTag,
-    lobbyConfig.gameStartInfo.gameID,
-    lobbyConfig.gameStartInfo.players,
-  );
-
-  const canvas = createCanvas();
-  const soundManager = new SoundManager(eventBus, userSettings);
+  const worker = lobbyConfig.progressiveReplay
+    ? new ReplayPremiereWorkerClient(lobbyConfig.gameStartInfo, clientID)
+    : new WorkerClient(lobbyConfig.gameStartInfo, clientID);
   try {
+    await worker.initialize();
+  } catch (error) {
+    worker.cleanup();
+    throw error;
+  }
+  try {
+    const gameView = new GameView(
+      // ReplayPremiereWorkerClient implements WorkerClient's full public query
+      // surface, but WorkerClient's private fields make TypeScript nominal here.
+      worker as WorkerClient,
+      config,
+      gameMap,
+      clientID,
+      lobbyConfig.playerName,
+      lobbyConfig.playerClanTag,
+      lobbyConfig.gameStartInfo.gameID,
+      lobbyConfig.gameStartInfo.players,
+    );
+    const canvas = createCanvas();
     const gameRenderer = createRenderer(
       canvas,
       gameView,
@@ -304,10 +332,9 @@ async function createClientGame(
       transport,
       worker,
       gameView,
-      soundManager,
     );
   } catch (err) {
-    soundManager.dispose();
+    worker.cleanup();
     throw err;
   }
 }
@@ -327,6 +354,14 @@ export class ClientGameRunner {
   private lastTickReceiveTime: number = 0;
   private currentTickDelay: number | undefined = undefined;
 
+  // Sealed-premiere war narrative: dedupe state for attack/nuke sightings so
+  // each development surfaces once (see ReplayPremiereWarFeed).
+  private readonly warFeedTracker = new PremiereWarFeedTracker();
+
+  // Render-mode fast-forward (clip capture): pacing-only, plain gameRecord
+  // replays only — never premiere pages. See ReplayRenderFastForward.
+  private renderFastForward: ReplayRenderFastForward | null = null;
+
   constructor(
     private lobby: LobbyConfig,
     private clientID: ClientID | undefined,
@@ -334,11 +369,35 @@ export class ClientGameRunner {
     private renderer: GameRenderer,
     private input: InputHandler,
     private transport: Transport,
-    private worker: WorkerClient,
+    private worker: WorkerClient | ReplayPremiereWorkerClient,
     private gameView: GameView,
-    private soundManager: SoundManager,
   ) {
     this.lastMessageTime = Date.now();
+    const fastForwardUntilTurn =
+      typeof window === "undefined"
+        ? null
+        : parseReplayRenderFastForwardUntilTurn(window.location.search);
+    if (
+      fastForwardUntilTurn !== null &&
+      this.lobby.gameRecord !== undefined &&
+      this.lobby.progressiveReplay === undefined
+    ) {
+      this.renderFastForward = new ReplayRenderFastForward(
+        fastForwardUntilTurn,
+        {
+          applyCoalesced: (update) => {
+            // One presentation pass for the whole coalesced span. Deliberately
+            // no per-turn hash events (the skipped span's per-turn verify logs
+            // are exactly the flood being avoided; the captured window beyond
+            // the target runs the full pipeline, hashes included) and no
+            // metrics/save side effects.
+            this.gameView.update(update);
+            this.renderer.tick();
+            this.dispatchAiLeagueReplayFrame(update);
+          },
+        },
+      );
+    }
   }
 
   /**
@@ -389,7 +448,6 @@ export class ClientGameRunner {
   }
 
   public start() {
-    this.soundManager.playBackgroundMusic();
     console.log("starting client game");
 
     this.isActive = true;
@@ -443,7 +501,27 @@ export class ClientGameRunner {
           this.stop();
           return;
         }
-        this.transport.turnComplete();
+        const premiereWorker =
+          this.worker instanceof ReplayPremiereWorkerClient
+            ? this.worker
+            : null;
+        const completedTurns = premiereWorker
+          ? premiereWorker.completedTurnsForCurrentUpdate()
+          : 1;
+        // Render fast-forward lane (plain replays only; never premieres):
+        // buffer + coalesce presentation below the park target so clip
+        // renders reach late anchors inside their job budget. Turn accounting
+        // toward LocalServer stays exact (one completion per real turn).
+        if (
+          premiereWorker === null &&
+          this.renderFastForward?.offer(gu) === true
+        ) {
+          this.transport.turnComplete();
+          return;
+        }
+        if (premiereWorker === null) {
+          this.transport.turnComplete();
+        }
         gu.updates[GameUpdateType.Hash].forEach((hu: HashUpdate) => {
           this.eventBus.emit(new SendHashEvent(hu.tick, hu.hash));
         });
@@ -456,9 +534,22 @@ export class ClientGameRunner {
         this.renderer.tick();
         this.dispatchAiLeagueReplayFrame(gu);
 
-        // Emit tick metrics event for performance overlay
+        // A premiere completion is observable only after its coalesced state
+        // has entered GameView and the renderer. This also prevents the final
+        // playback-complete signal from racing ahead of the visible frame.
+        if (premiereWorker !== null) {
+          this.transport.turnsComplete(completedTurns);
+        }
+
         this.eventBus.emit(
-          new TickMetricsEvent(gu.tickExecutionDuration, this.currentTickDelay),
+          new TickMetricsEvent(
+            gu.tickExecutionDuration,
+            this.currentTickDelay,
+            completedTurns,
+            this.worker instanceof ReplayPremiereWorkerClient
+              ? this.worker.tickExecutionDurationsForCurrentUpdate()
+              : undefined,
+          ),
         );
 
         // Reset tick delay for next measurement
@@ -610,18 +701,27 @@ export class ClientGameRunner {
   }
 
   private dispatchAiLeagueReplayFrame(gu: GameUpdateViewData) {
-    if (this.lobby.gameRecord === undefined || !isAiLeagueReplayRoute()) {
+    if (
+      this.lobby.progressiveReplay === undefined &&
+      (this.lobby.gameRecord === undefined || !isAiLeagueReplayRoute())
+    ) {
       return;
     }
-    const players = this.gameView
-      .players()
-      .filter((player) => player.isAlive() && player.hasSpawned())
-      .map((player) => {
-        const nameLocation = player.nameLocation();
-        const screen = this.renderer.transformHandler.worldToScreenCoordinates(
-          new Cell(nameLocation.x, nameLocation.y),
-        );
-        return {
+    const players = this.gameView.players().flatMap((player) => {
+      if (!player.isAlive() || !player.hasSpawned()) {
+        return [];
+      }
+      const nameLocation = player.nameLocation();
+      // Name locations are calculated asynchronously after spawn and can be
+      // absent for a few replay updates despite the non-null view type.
+      if (!nameLocation) {
+        return [];
+      }
+      const screen = this.renderer.transformHandler.worldToScreenCoordinates(
+        new Cell(nameLocation.x, nameLocation.y),
+      );
+      return [
+        {
           playerID: player.id(),
           smallID: player.smallID(),
           clientID: player.clientID(),
@@ -639,21 +739,66 @@ export class ClientGameRunner {
             expiresAt: alliance.expiresAt,
             hasExtensionRequest: alliance.hasExtensionRequest,
           })),
-        };
-      });
+        },
+      ];
+    });
+    const premiereProcessedSequence =
+      this.worker instanceof ReplayPremiereWorkerClient
+        ? this.worker.processedSequence()
+        : null;
+    const turnNumber =
+      premiereProcessedSequence === null
+        ? this.turnsSeen
+        : premiereProcessedSequence + 1;
+    // Sealed premieres get the spoiler-safe war narrative derived from the
+    // update batch the viewer is already watching (attacks, alliances,
+    // betrayals, nukes, emotes, quick chat). Ordinary replays keep their
+    // artifact-backed overlay instead.
+    const warEvents =
+      this.lobby.progressiveReplay === undefined
+        ? undefined
+        : this.warFeedTracker.extract(gu, turnNumber, {
+            bySmallId: (smallId) => this.spectatorNameBySmallId(smallId),
+            byPlayerId: (playerId) => this.spectatorNameByPlayerId(playerId),
+          });
     document.dispatchEvent(
       new CustomEvent("ai-league-replay-frame", {
         detail: {
           tick: gu.tick,
-          turnNumber: this.turnsSeen,
+          sequence: premiereProcessedSequence,
+          turnNumber,
           players,
+          ...(warEvents === undefined ? {} : { warEvents }),
         },
       }),
     );
   }
 
+  private spectatorNameBySmallId(smallId: number): string | null {
+    if (!Number.isSafeInteger(smallId) || smallId <= 0) {
+      return null;
+    }
+    try {
+      const view = this.gameView.playerBySmallID(smallId);
+      return "displayName" in view
+        ? aiLeagueSpectatorDisplayName(view.displayName())
+        : null;
+    } catch {
+      return null;
+    }
+  }
+
+  private spectatorNameByPlayerId(playerId: string): string | null {
+    try {
+      return aiLeagueSpectatorDisplayName(
+        this.gameView.player(playerId).displayName(),
+      );
+    } catch {
+      return null;
+    }
+  }
+
   public stop() {
-    this.soundManager.dispose();
     if (!this.isActive) return;
 
     this.isActive = false;
@@ -672,7 +817,7 @@ export class ClientGameRunner {
   private focusReplaySpectatorOnce() {
     if (
       this.hasFocusedReplaySpectator ||
-      this.lobby.gameRecord === undefined ||
+      !isReplayLobby(this.lobby) ||
       this.shouldLockFullMapReplayView()
     ) {
       return;

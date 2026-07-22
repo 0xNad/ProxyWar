@@ -8,6 +8,7 @@ vi.mock("../../src/client/Utils", () => ({
       "ai_league_replay.loading_slow": "Replay is taking longer than expected…",
       "ai_league_replay.loading_failed": "Replay unavailable.",
       "ai_league_replay.retry": "Retry",
+      "ai_league_replay.back_to_league": "Back to league",
     };
     return translations[key] ?? key;
   }),
@@ -16,6 +17,7 @@ vi.mock("../../src/client/Utils", () => ({
 import {
   holdReplayLoadingScreenUntilFirstFrame,
   runReplayStartup,
+  setReplayLoadingProgress,
   showReplayLoadingFailure,
   showReplayLoadingScreen,
 } from "../../src/client/ReplayLoadingScreen";
@@ -30,7 +32,10 @@ describe("ReplayLoadingScreen", () => {
         <div class="proxywar-replay-loading-content">
           <div class="proxywar-replay-loading-spinner" aria-hidden="true"></div>
           <p data-replay-loading-message></p>
-          <button type="button" data-replay-loading-retry hidden></button>
+          <div class="proxywar-replay-loading-actions">
+            <button type="button" data-replay-loading-retry hidden></button>
+            <a href="/league" data-replay-loading-back hidden></a>
+          </div>
         </div>
       </div>
       <div id="page-play"></div>
@@ -58,6 +63,45 @@ describe("ReplayLoadingScreen", () => {
       first.querySelector("[data-replay-loading-message]")?.textContent,
     ).toBe("Loading replay…");
     expect(document.getElementById("proxywar-coworld-splash")).toBeNull();
+  });
+
+  it("shows the premiere-specific boot message on premiere routes", () => {
+    holdReplayLoadingScreenUntilFirstFrame(
+      undefined,
+      "replay_premiere.loading_premiere",
+    );
+    expect(document.documentElement.classList).toContain(
+      "proxywar-replay-booting",
+    );
+    expect(
+      document.querySelector<HTMLElement>("[data-replay-loading-message]")
+        ?.dataset.i18n,
+    ).toBe("replay_premiere.loading_premiere");
+  });
+
+  it("shows and clears the join-sync progress subline", () => {
+    showReplayLoadingScreen("replay_premiere.joining_live");
+    const progress = document.querySelector<HTMLElement>(
+      "[data-replay-loading-progress]",
+    );
+    expect(progress).not.toBeNull();
+    expect(progress?.hidden).toBe(true);
+
+    setReplayLoadingProgress("Syncing to turn 17,000…");
+    expect(progress?.hidden).toBe(false);
+    expect(progress?.textContent).toBe("Syncing to turn 17,000…");
+
+    setReplayLoadingProgress(null);
+    expect(progress?.hidden).toBe(true);
+    expect(progress?.textContent).toBe("");
+
+    // A fresh veil never inherits a stale progress line.
+    setReplayLoadingProgress("stale");
+    showReplayLoadingScreen("replay_premiere.loading_premiere");
+    expect(
+      document.querySelector<HTMLElement>("[data-replay-loading-progress]")
+        ?.hidden,
+    ).toBe(true);
   });
 
   it("keeps the cover up when loading takes longer than the threshold", () => {
@@ -105,6 +149,14 @@ describe("ReplayLoadingScreen", () => {
     );
     expect(retry?.hidden).toBe(false);
     expect(retry?.textContent).toBe("Retry");
+    expect(document.activeElement).toBe(retry);
+    expect(screen?.getAttribute("role")).toBe("alert");
+    const back = screen?.querySelector<HTMLAnchorElement>(
+      "[data-replay-loading-back]",
+    );
+    expect(back?.hidden).toBe(false);
+    expect(back?.textContent).toBe("Back to league");
+    expect(back?.getAttribute("href")).toBe("/league");
   });
 
   it("does not let a cancelled first-frame listener remove a failure screen", () => {
@@ -133,5 +185,22 @@ describe("ReplayLoadingScreen", () => {
     expect(
       screen?.querySelector("[data-replay-loading-message]")?.textContent,
     ).toBe("Replay unavailable.");
+  });
+
+  it("hides recovery actions when a new replay attempt starts", () => {
+    showReplayLoadingFailure();
+
+    showReplayLoadingScreen();
+
+    const screen = document.getElementById("proxywar-replay-loading");
+    expect(screen?.getAttribute("role")).toBe("status");
+    expect(
+      screen?.querySelector<HTMLButtonElement>("[data-replay-loading-retry]")
+        ?.hidden,
+    ).toBe(true);
+    expect(
+      screen?.querySelector<HTMLAnchorElement>("[data-replay-loading-back]")
+        ?.hidden,
+    ).toBe(true);
   });
 });

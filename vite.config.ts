@@ -190,9 +190,11 @@ export default defineConfig(({ mode }) => {
       // vitest REPLACES its default `exclude` when this is set, so the
       // defaults (node_modules, dist, …) are restated here, plus artifacts/
       // and outputs/ so archived test copies under artifacts/ (pre-rename
-      // cleanup snapshots) are not scanned as live tests, and .claude/ so test
-      // copies inside sibling-session git worktrees (.claude/worktrees/<id>/)
-      // are not scanned as live tests of this checkout.
+      // cleanup snapshots) are not scanned as live tests, and .claude/ plus
+      // .codex/ so test copies inside sibling-session git worktrees are not
+      // scanned as live tests of this checkout. deploy/ holds node:test
+      // (`.test.mjs`) launchd suites run via `node --test`, not vitest; scanning
+      // them as vitest suites reports a spurious failure.
       exclude: [
         "**/node_modules/**",
         "**/dist/**",
@@ -202,6 +204,8 @@ export default defineConfig(({ mode }) => {
         "**/artifacts/**",
         "**/outputs/**",
         "**/.claude/**",
+        "**/.codex/**",
+        "**/deploy/**",
       ],
     },
     root: "./",
@@ -265,7 +269,7 @@ export default defineConfig(({ mode }) => {
       rollupOptions: {
         output: {
           manualChunks: (id) => {
-            const vendorModules = ["pixi.js", "howler", "zod"];
+            const vendorModules = ["pixi.js", "zod"];
             if (vendorModules.some((module) => id.includes(module))) {
               return "vendor";
             }

@@ -57,6 +57,16 @@ export interface CoworldLeagueEpisodeRow {
   watchHref: string | null;
   /** Absolute path served by the Vite/demo stack for the real-client render. */
   fullRenderHref: string | null;
+  /**
+   * `/premiere/<premiereId>` when this episode's sealed premiere has REVEALED
+   * (terminal state "revealed" in the premiere archive index — outcome
+   * public). Never set for failed/cancelled premieres and never before
+   * reveal; a held/quarantined episode has no card at all, so this field can
+   * only ever appear on an outcome-public row. Optional and omitted when
+   * absent, keeping data.json purely additive for existing consumers (the
+   * polling client only checks that `episodes` is an array).
+   */
+  premiereHref?: string;
 }
 
 export interface CoworldLeagueRoundRow {
@@ -64,6 +74,41 @@ export interface CoworldLeagueRoundRow {
   status: string;
   startedAt: string | null;
   completedAt: string | null;
+}
+
+/**
+ * Spoiler-safe premiere card data. Built ONLY from the suppression contract, so
+ * it carries no episodeRequestId, run id, player name, or match outcome. The
+ * premiere leak audit scans `/league` HTML for forbidden substrings and
+ * `data.json` for exact JSON leaves; keeping this shape to these five fields is
+ * what guarantees the league page can never spoil a held premiere.
+ */
+export interface CoworldLeaguePremiereCard {
+  premiereId: string;
+  roundNumber: number | null;
+  mapLabel: string;
+  scheduledAt: string;
+  premierePageLive: boolean;
+}
+
+/**
+ * The persistent premiere slot's REVEALED state: once any premiere has ever
+ * revealed, this card fills the slot whenever no LIVE premiere card is
+ * rendered, and is only ever REPLACED when the next premiere activates —
+ * never removed on a timer — so the slot is never empty again. Carries
+ * reveal-public facts only — round, map, reveal time, and the
+ * `/premiere/<id>` link (that page is post-reveal public) — and by
+ * construction NO winner/outcome text, so it can never spoil anything: it is
+ * only ever built for a premiere whose outcome is already public.
+ */
+export interface CoworldLeagueLatestPremiereCard {
+  premiereId: string;
+  roundNumber: number | null;
+  mapLabel: string;
+  /** ISO timestamp of the public reveal. */
+  revealedAt: string;
+  /** `/premiere/<premiereId>` for the archived premiere page. */
+  href: string;
 }
 
 export interface CoworldLeagueMirrorData {
@@ -89,6 +134,21 @@ export interface CoworldLeagueMirrorData {
   standings: CoworldLeagueStandingRow[];
   rounds: CoworldLeagueRoundRow[];
   episodes: CoworldLeagueEpisodeRow[];
+  /**
+   * Optional spoiler-safe premiere card. Omitted whenever nothing is currently
+   * premiering (including every stale/absent-contract case), which keeps the
+   * mirror output byte-identical to pre-premiere behavior.
+   */
+  premiere?: CoworldLeaguePremiereCard;
+  /**
+   * Optional most-recent REVEALED premiere. Additive: omitted whenever the
+   * mirror runs without `--latest-premiere` (byte-identical output) or no
+   * premiere has ever revealed. Rendered only when the LIVE premiere card is
+   * not — the live card always takes precedence and the two never co-render —
+   * so once any premiere has revealed, the premiere slot is never empty:
+   * exactly one of the live/latest cards shows.
+   */
+  latestPremiere?: CoworldLeagueLatestPremiereCard;
   links: {
     enterTheLeagueUrl: string;
     platformLabel: string;
@@ -374,6 +434,47 @@ export function coworldLeagueIndexHtml(data: CoworldLeagueMirrorData): string {
         )}</div>`
       : "";
   const watchLatest = data.episodes.find((episode) => episode.fullRenderHref);
+  // The LIVE premiere card always takes precedence; the compact latest-revealed
+  // card fills the same slot ONLY when nothing is currently premiering, so the
+  // two never co-render.
+  const latestPremiere =
+    data.premiere === undefined ? data.latestPremiere : undefined;
+  const premiereSection =
+    data.premiere !== undefined
+      ? premiereCard(data.premiere)
+      : latestPremiereCard(latestPremiere);
+  // Premiere-only CSS, emitted ONLY when a premiere card (live or latest) is
+  // present. Keeping it out of the static <style> block when absent is what
+  // makes the mirror's index.html byte-identical to pre-premiere output for a
+  // stale/absent contract (and for a mirror running without
+  // --latest-premiere). Leading "\n    " with no trailing newline so it slots
+  // between two existing style rules without shifting any bytes when empty.
+  const premiereStyles =
+    data.premiere === undefined && latestPremiere === undefined
+      ? ""
+      : "\n    " +
+        [
+          ".round-pill.premiering { border-color:rgba(122,215,240,.6); color:var(--cyan); box-shadow:inset 0 0 0 1px rgba(122,215,240,.25); }",
+          ".premiere-card { position:relative; overflow:hidden; border:1px solid rgba(122,215,240,.5); background:linear-gradient(180deg, rgba(122,215,240,.1), rgba(122,215,240,.02) 60%), var(--surface); border-radius:12px; padding:20px; display:flex; flex-direction:column; gap:11px; box-shadow:0 18px 44px rgba(4,10,18,.5); }",
+          ".premiere-card::before { content:''; position:absolute; inset:0 0 auto 0; height:2px; background:linear-gradient(90deg, transparent, rgba(122,215,240,.65), transparent); }",
+          '.premiere-card[data-premiere-live="true"] { border-color:rgba(239,68,68,.45); background:radial-gradient(120% 130% at 0% 0%, rgba(239,68,68,.14), transparent 42%), linear-gradient(180deg, rgba(122,215,240,.08), rgba(122,215,240,.015) 60%), var(--surface); }',
+          '.premiere-card[data-premiere-live="true"]::before { background:linear-gradient(90deg, rgba(239,68,68,.75), rgba(122,215,240,.5), transparent); }',
+          ".premiere-card .premiere-badge { align-self:flex-start; display:inline-flex; align-items:center; gap:8px; padding:6px 14px; border-radius:999px; font:900 13px/1 ui-monospace, SFMono-Regular, Menlo, monospace; letter-spacing:.14em; text-transform:uppercase; }",
+          ".premiere-card .premiere-badge.live { border:1px solid rgba(239,68,68,.75); background:rgba(239,68,68,.18); color:#ffd7d2; box-shadow:0 0 22px rgba(239,68,68,.22); }",
+          ".premiere-card .premiere-badge.scheduled { gap:10px; border:1px solid var(--line); background:var(--surface2); color:var(--muted); font-weight:800; }",
+          ".premiere-card .premiere-badge-dot { width:10px; height:10px; border-radius:999px; background:#ef4444; box-shadow:0 0 0 0 rgba(239,68,68,.55); animation:pw-premiere-pulse 1.6s ease-out infinite; }",
+          "@keyframes pw-premiere-pulse { 0% { box-shadow:0 0 0 0 rgba(239,68,68,.55); } 70% { box-shadow:0 0 0 7px rgba(239,68,68,0); } 100% { box-shadow:0 0 0 0 rgba(239,68,68,0); } }",
+          ".premiere-card .premiere-badge .premiere-starts { color:var(--muted); font-weight:700; letter-spacing:.02em; text-transform:none; }",
+          ".premiere-card .premiere-eyebrow { color:var(--cyan); font:800 11px/1 ui-monospace, SFMono-Regular, Menlo, monospace; text-transform:uppercase; letter-spacing:.14em; }",
+          ".premiere-card h2 { margin:0; font-size:21px; letter-spacing:-.01em; }",
+          ".premiere-card .premiere-body { margin:0; color:#cbd3df; max-width:640px; }",
+          ".premiere-card .premiere-meta { display:flex; gap:8px; flex-wrap:wrap; color:var(--muted); font:700 12px ui-monospace, SFMono-Regular, Menlo, monospace; }",
+          ".premiere-card .premiere-meta span { border:1px solid var(--line); background:var(--surface2); border-radius:999px; padding:5px 11px; }",
+          ".premiere-card .actions { margin-top:4px; }",
+          ".premiere-card .premiere-link { gap:9px; }",
+          ".premiere-card .premiere-link::before { content:''; width:0; height:0; border-style:solid; border-width:5px 0 5px 8px; border-color:transparent transparent transparent currentColor; }",
+          "@media (prefers-reduced-motion: reduce) { .premiere-card .premiere-badge-dot { animation:none; } }",
+        ].join("\n    ");
   return `<!doctype html>
 <html lang="en" data-generated-at="${escapeHtml(data.generatedAt)}" data-stale="${data.stale ? "true" : "false"}" data-league-id="${escapeHtml(league.id)}">
 <head>
@@ -386,6 +487,8 @@ export function coworldLeagueIndexHtml(data: CoworldLeagueMirrorData): string {
     * { box-sizing:border-box; }
     html, body { max-width:100%; overflow-x:hidden; }
     body { margin:0; background:linear-gradient(rgba(255,255,255,.018) 1px, transparent 1px), linear-gradient(90deg, rgba(255,255,255,.018) 1px, transparent 1px), var(--bg); background-size:48px 48px,48px 48px,auto; color:var(--text); font:15px/1.55 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+    .skip-link { position:fixed; z-index:100; top:8px; left:8px; padding:10px 14px; border-radius:5px; background:var(--amber); color:#1a1206; transform:translateY(-150%); }
+    .skip-link:focus { transform:translateY(0); }
     .shell { width:100%; max-width:1180px; margin:0 auto; padding:24px 18px 56px; }
     header { display:flex; justify-content:space-between; gap:16px; align-items:center; margin-bottom:14px; flex-wrap:wrap; }
     .brand { display:flex; gap:10px; align-items:center; font-weight:900; }
@@ -411,7 +514,9 @@ export function coworldLeagueIndexHtml(data: CoworldLeagueMirrorData): string {
     h2 { margin:0 0 10px; font-size:20px; }
     .standings-note { max-width:820px; color:var(--muted); font-size:13px; margin:-2px 0 10px; }
     section { margin-bottom:26px; }
-    table { width:100%; border-collapse:collapse; background:var(--surface); border:1px solid var(--line); border-radius:8px; overflow:hidden; }
+    .standings-scroll { width:100%; overflow-x:auto; border:1px solid var(--line); border-radius:8px; -webkit-overflow-scrolling:touch; }
+    .standings-scroll:focus-visible { outline:2px solid var(--cyan); outline-offset:3px; }
+    table { width:100%; min-width:600px; border-collapse:collapse; background:var(--surface); }
     th, td { padding:10px 12px; border-bottom:1px solid var(--line); text-align:left; vertical-align:middle; }
     th { background:var(--surface2); font-size:11px; text-transform:uppercase; letter-spacing:.08em; color:var(--muted); }
     tr:last-child td { border-bottom:0; }
@@ -427,8 +532,9 @@ export function coworldLeagueIndexHtml(data: CoworldLeagueMirrorData): string {
     .battle-grid { display:grid; grid-template-columns:repeat(auto-fill, minmax(320px, 1fr)); gap:14px; }
     .battle { background:var(--surface); border:1px solid var(--line); border-radius:8px; padding:14px; display:flex; flex-direction:column; gap:10px; }
     .battle-head { display:flex; justify-content:space-between; gap:8px; align-items:baseline; }
-    .battle-head b { font-size:15px; }
+    .battle-head h3 { margin:0; font-size:15px; }
     .battle-head span { color:var(--muted); font:700 11px ui-monospace, SFMono-Regular, Menlo, monospace; }
+    .combatants, .combatant-extra-group { display:flex; flex-direction:column; gap:10px; }
     .combatant { display:grid; grid-template-columns:12px minmax(0,1fr) 62px; gap:8px; align-items:center; }
     .dot { width:10px; height:10px; border-radius:3px; }
     .combatant .name { white-space:nowrap; overflow:hidden; text-overflow:ellipsis; font-weight:700; }
@@ -437,18 +543,39 @@ export function coworldLeagueIndexHtml(data: CoworldLeagueMirrorData): string {
     .tiles { color:var(--muted); font:700 11px ui-monospace, SFMono-Regular, Menlo, monospace; text-align:right; }
     .bar { grid-column:2 / 4; height:4px; background:var(--surface2); border-radius:2px; overflow:hidden; }
     .bar i { display:block; height:100%; }
-    .battle-foot { display:flex; justify-content:space-between; align-items:center; gap:8px; border-top:1px solid var(--line); padding-top:10px; margin-top:2px; }
+    .sr-only { position:absolute; width:1px; height:1px; padding:0; margin:-1px; overflow:hidden; clip:rect(0, 0, 0, 0); white-space:nowrap; border:0; }
+    .roster-toggle { display:none; align-self:flex-start; min-height:40px; border:1px solid var(--line); border-radius:5px; padding:8px 10px; background:var(--surface2); color:var(--cyan); font:800 12px/1 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; cursor:pointer; }
+    .roster-toggle:focus-visible { outline:2px solid var(--cyan); outline-offset:2px; }
+    .roster-toggle .when-expanded { display:none; }
+    .battle[data-roster-expanded="true"] .roster-toggle .when-collapsed { display:none; }
+    .battle[data-roster-expanded="true"] .roster-toggle .when-expanded { display:inline; }
+    .battle-foot { display:flex; justify-content:space-between; align-items:center; gap:8px; flex-wrap:wrap; border-top:1px solid var(--line); padding-top:10px; margin-top:2px; }
     .battle-foot .meta { color:var(--muted); font:700 11px ui-monospace, SFMono-Regular, Menlo, monospace; }
+    .battle-foot .links { margin-left:auto; }
+    .battle-foot .links .link-sep { color:var(--muted); }
     .degraded { border:1px solid rgba(244,166,74,.5); color:var(--amber); border-radius:4px; padding:2px 7px; font:800 10px ui-monospace, SFMono-Regular, Menlo, monospace; }
     .rounds-strip { display:flex; gap:8px; flex-wrap:wrap; }
     .round-pill { border:1px solid var(--line); background:var(--surface); border-radius:6px; padding:8px 10px; font:700 12px ui-monospace, SFMono-Regular, Menlo, monospace; color:var(--muted); }
-    .round-pill.running { border-color:rgba(126,224,168,.5); color:var(--good); }
+    .round-pill.running { border-color:rgba(126,224,168,.5); color:var(--good); }${premiereStyles}
     footer { border-top:1px solid var(--line); padding-top:16px; color:var(--muted); font-size:13px; display:flex; justify-content:space-between; gap:12px; flex-wrap:wrap; }
-    @media (max-width:640px) { .battle-grid { grid-template-columns:1fr; } }
+    @media (max-width:640px) {
+      .shell { padding-left:12px; padding-right:12px; }
+      .battle-grid { grid-template-columns:minmax(0, 1fr); }
+      .battle { padding:12px; }
+      .roster-disclosure-ready .battle[data-roster-expanded="false"] .combatant-extra-group { display:none; }
+      .roster-disclosure-ready .roster-toggle { display:inline-flex; align-items:center; justify-content:center; min-height:44px; }
+      .battle-foot { align-items:flex-start; }
+      .battle-foot > .meta { flex:1 1 100%; }
+      .battle-foot .links { margin-left:0; }
+      .battle-foot .links a { display:inline-flex; align-items:center; min-height:44px; }
+    }
   </style>
 </head>
 <body>
-  <div class="shell">
+  <a class="skip-link" href="#league-main">${escapeHtml(
+    translateText("coworld_league.skip_to_content"),
+  )}</a>
+  <main id="league-main" class="shell" tabindex="-1">
     <header>
       <div class="brand">
         <div class="mark">PW</div>
@@ -485,7 +612,7 @@ export function coworldLeagueIndexHtml(data: CoworldLeagueMirrorData): string {
             : ""
         }
       </div>
-    </div>
+    </div>${premiereSection}
     <div class="metric-grid">
       <div class="metric"><span>Current round</span><strong>${
         league.currentRoundNumber === null
@@ -522,12 +649,18 @@ export function coworldLeagueIndexHtml(data: CoworldLeagueMirrorData): string {
     <section>
       <h2>Recent rounds</h2>
       <div class="rounds-strip">${data.rounds
-        .map(
-          (round) =>
-            `<span class="round-pill${round.status === "running" ? " running" : ""}">#${escapeHtml(
-              String(round.roundNumber),
-            )} ${escapeHtml(round.status)}</span>`,
-        )
+        .map((round) => {
+          const premiering =
+            data.premiere !== undefined &&
+            data.premiere.roundNumber !== null &&
+            data.premiere.roundNumber === round.roundNumber;
+          const classes = `round-pill${round.status === "running" ? " running" : ""}${
+            premiering ? " premiering" : ""
+          }`;
+          return `<span class="${classes}">#${escapeHtml(
+            String(round.roundNumber),
+          )} ${escapeHtml(round.status)}</span>`;
+        })
         .join("\n")}</div>
     </section>
     <footer>
@@ -536,7 +669,7 @@ export function coworldLeagueIndexHtml(data: CoworldLeagueMirrorData): string {
       )}</code></div>
       <div>${escapeHtml(translateText("coworld_league.update_cadence"))}</div>
     </footer>
-  </div>
+  </main>
   <script src="${coworldLeagueClientAssetPath()}"></script>
 </body>
 </html>
@@ -553,6 +686,24 @@ export function coworldLeagueClientJavaScript(): string {
       if (Number.isFinite(time)) {
         el.textContent = new Date(time).toLocaleString();
       }
+    }
+
+    for (const toggle of document.querySelectorAll("[data-roster-toggle]")) {
+      if (!(toggle instanceof HTMLButtonElement)) {
+        continue;
+      }
+      toggle.addEventListener("click", () => {
+        const battle = toggle.closest(".battle");
+        if (!(battle instanceof HTMLElement)) {
+          return;
+        }
+        const expanded = battle.dataset.rosterExpanded !== "true";
+        battle.dataset.rosterExpanded = String(expanded);
+        toggle.setAttribute("aria-expanded", String(expanded));
+      });
+    }
+    if (document.documentElement.classList) {
+      document.documentElement.classList.add("roster-disclosure-ready");
     }
 
     const root = document.documentElement;
@@ -725,14 +876,16 @@ function standingsTable(data: CoworldLeagueMirrorData): string {
         </tr>`;
     })
     .join("\n");
-  return `<table aria-labelledby="standings-title" aria-describedby="standings-provenance">
+  return `<div class="standings-scroll" role="region" aria-describedby="standings-provenance" aria-label="${escapeHtml(
+    translateText("coworld_league.standings_scroll_label"),
+  )}" tabindex="0"><table aria-labelledby="standings-title" aria-describedby="standings-provenance">
     <thead><tr><th>Rank</th><th>Warlord</th><th>${escapeHtml(
       data.league.scoreLabel,
     )}</th><th>${escapeHtml(
       translateText("coworld_league.rated_rounds"),
     )}</th></tr></thead>
     <tbody>${rows}</tbody>
-  </table>`;
+  </table></div>`;
 }
 
 function battleCard(episode: CoworldLeagueEpisodeRow): string {
@@ -740,23 +893,49 @@ function battleCard(episode: CoworldLeagueEpisodeRow): string {
     (sum, player) => sum + Math.max(0, player.tilesOwned),
     0,
   );
-  const combatants = episode.players
-    .map((player) => {
-      const share =
-        totalTiles > 0 ? Math.max(0, player.tilesOwned) / totalTiles : 0;
-      return `
-        <div class="combatant">
-          <span class="dot" style="background:${escapeHtml(player.color)}"></span>
+  const rankedPlayers = [...episode.players].sort(
+    (left, right) =>
+      Number(right.isWinner) - Number(left.isWinner) ||
+      right.tilesOwned - left.tilesOwned ||
+      left.slot - right.slot,
+  );
+  const combatantMarkup = (player: CoworldLeagueEpisodePlayerRow): string => {
+    const share =
+      totalTiles > 0 ? Math.max(0, player.tilesOwned) / totalTiles : 0;
+    return `
+        <div class="combatant" role="listitem">
+          <span class="dot" aria-hidden="true" style="background:${escapeHtml(player.color)}"></span>
           <span class="name${player.isAlive ? "" : " dead"}">${escapeHtml(player.name)}${
-            player.isWinner ? ` <span class="win">★</span>` : ""
+            player.isWinner
+              ? ` <span class="win" aria-hidden="true">★</span><span class="sr-only"> (${escapeHtml(
+                  translateText("coworld_league.winner"),
+                )})</span>`
+              : ""
+          }${
+            player.isAlive
+              ? ""
+              : `<span class="sr-only"> (${escapeHtml(
+                  translateText("coworld_league.eliminated"),
+                )})</span>`
           }</span>
           <span class="tiles">${escapeHtml(formatTiles(player.tilesOwned))}</span>
-          <span class="bar"><i style="width:${(share * 100).toFixed(1)}%;background:${escapeHtml(
+          <span class="bar" aria-hidden="true"><i style="width:${(share * 100).toFixed(1)}%;background:${escapeHtml(
             player.color,
           )}"></i></span>
         </div>`;
-    })
+  };
+  const primaryCombatants = rankedPlayers
+    .slice(0, 3)
+    .map(combatantMarkup)
     .join("\n");
+  const extraCombatants = rankedPlayers
+    .slice(3)
+    .map(combatantMarkup)
+    .join("\n");
+  const rosterId = `battle-roster-${createHash("sha256")
+    .update(episode.episodeRequestId)
+    .digest("hex")
+    .slice(0, 12)}`;
   const meta: string[] = [];
   if (episode.turnCount !== null) {
     meta.push(`${formatTiles(episode.turnCount)} turns`);
@@ -768,31 +947,201 @@ function battleCard(episode: CoworldLeagueEpisodeRow): string {
     episode.degradedCount !== null && episode.degradedCount > 0
       ? `<span class="degraded">⚠ ${escapeHtml(String(episode.degradedCount))} degraded</span>`
       : "";
+  // Battle-card links. The premiere link is present ONLY when the mirror
+  // attached a revealed-premiere href (see CoworldLeagueEpisodeRow.premiereHref
+  // — outcome already public, never pre-reveal). The `typeof` guard also
+  // tolerates legacy merged data.json rows where the optional field is absent.
+  const cardLinks: string[] = [];
+  if (
+    typeof episode.premiereHref === "string" &&
+    episode.premiereHref.length > 0
+  ) {
+    cardLinks.push(
+      `<a href="${escapeHtml(episode.premiereHref)}">▶ Watch the premiere</a>`,
+    );
+  }
+  if (episode.fullRenderHref !== null) {
+    cardLinks.push(
+      `<a href="${escapeHtml(episode.fullRenderHref)}">▶ Watch replay</a>`,
+    );
+  }
   return `
-    <article class="battle">
+    <article class="battle" data-roster-expanded="false">
       <div class="battle-head">
-        <b>${escapeHtml(episode.map)}${
+        <h3>${escapeHtml(episode.map)}${
           episode.roundNumber === null
             ? ""
             : ` · Round ${escapeHtml(String(episode.roundNumber))}`
-        }</b>
+        }</h3>
         <span data-utc="${escapeHtml(episode.completedAt ?? "")}">${escapeHtml(
           episode.completedAt === null
             ? "in progress"
             : shortUtc(episode.completedAt),
         )}</span>
       </div>
-      ${combatants}
+      <div class="combatants" role="list">
+        ${primaryCombatants}
+        ${
+          extraCombatants.length === 0
+            ? ""
+            : `<div id="${rosterId}" class="combatant-extra-group" role="presentation">${extraCombatants}</div>`
+        }
+      </div>
+      ${
+        extraCombatants.length === 0
+          ? ""
+          : `<button class="roster-toggle" type="button" data-roster-toggle aria-expanded="false" aria-controls="${rosterId}"><span class="when-collapsed">${escapeHtml(
+              translateText("coworld_league.show_full_roster"),
+            )}</span><span class="when-expanded">${escapeHtml(
+              translateText("coworld_league.show_top_three"),
+            )}</span></button>`
+      }
       <div class="battle-foot">
         <span class="meta">${escapeHtml(meta.join(" · "))}</span>
         ${degraded}
         <span class="links">${
-          episode.fullRenderHref === null
+          cardLinks.length === 0
             ? `<span class="meta">replay pending</span>`
-            : `<a href="${escapeHtml(episode.fullRenderHref)}">▶ Watch replay</a>`
+            : cardLinks.join(`<span class="link-sep"> · </span>`)
         }</span>
       </div>
     </article>`;
+}
+
+function premiereCard(premiere: CoworldLeaguePremiereCard | undefined): string {
+  if (premiere === undefined) {
+    return "";
+  }
+  // Built ONLY from the five contract fields below. Never reference episode
+  // rows, run ids, player names, or outcomes here — the premiere leak audit
+  // fails every future admission if any forbidden fingerprint appears on
+  // `/league`.
+  const eyebrow = premiere.premierePageLive
+    ? translateText("coworld_league.premiere_now_eyebrow")
+    : translateText("coworld_league.premiere_scheduled_eyebrow");
+  const body = premiere.premierePageLive
+    ? translateText("coworld_league.premiere_now_body")
+    : translateText("coworld_league.premiere_scheduled_body");
+  const metaPills: string[] = [];
+  if (premiere.roundNumber !== null) {
+    metaPills.push(
+      `<span>Round ${escapeHtml(String(premiere.roundNumber))}</span>`,
+    );
+  }
+  if (premiere.mapLabel.length > 0) {
+    metaPills.push(`<span>${escapeHtml(premiere.mapLabel)}</span>`);
+  }
+  metaPills.push(
+    `<span data-utc="${escapeHtml(premiere.scheduledAt)}">${escapeHtml(
+      shortUtc(premiere.scheduledAt),
+    )}</span>`,
+  );
+  // Link to the premiere page only once it is actually live; a scheduled
+  // premiere has no public page to reveal yet.
+  const link = premiere.premierePageLive
+    ? `<div class="actions"><a class="button primary premiere-link" href="/premiere/${encodeURIComponent(
+        premiere.premiereId,
+      )}">${escapeHtml(translateText("coworld_league.premiere_watch"))}</a></div>`
+    : "";
+  // Prominent LIVE/PREMIERE badge — the loudest signal on the card. When the
+  // premiere page is actually live (premierePageLive), it is a red "LIVE" pill
+  // that, with the primary Watch CTA, dominates the card; otherwise it is a
+  // calmer "Premiere" pill carrying the localized start time and NO watch link.
+  // Built ONLY from premierePageLive + scheduledAt (already used above), so it
+  // adds no new data source and the spoiler invariant is unchanged.
+  const badge = premiere.premierePageLive
+    ? `<div class="premiere-badge live"><span class="premiere-badge-dot" aria-hidden="true"></span>${escapeHtml(
+        translateText("coworld_league.premiere_live"),
+      )}</div>`
+    : premiereScheduledBadge(premiere.scheduledAt);
+  // Leading "\n    " so the caller can append this to the metric-grid's closing
+  // </div> with no standalone template line; when premiere is undefined the
+  // caller sees "" and the page is byte-identical to the pre-premiere layout.
+  return `
+    <section class="premiere-section">
+      <article class="premiere-card" data-premiere-live="${
+        premiere.premierePageLive ? "true" : "false"
+      }">
+        ${badge}
+        <div class="premiere-eyebrow">${escapeHtml(eyebrow)}</div>
+        <h2>${escapeHtml(translateText("coworld_league.premiere_heading"))}</h2>
+        <p class="premiere-body">${escapeHtml(body)}</p>
+        <div class="premiere-meta">${metaPills.join("")}</div>
+        ${link}
+      </article>
+    </section>`;
+}
+
+// The calmer scheduled-state badge: a "Premiere" pill plus the localized start
+// time. The timestamp lives in its own [data-utc] span so the page's existing
+// localizer rewrites just the time (it replaces the full textContent of any
+// [data-utc] element), while the "Starts" prefix around the {time} placeholder
+// is preserved. Uses only the scheduledAt contract field — no new data source.
+function premiereScheduledBadge(scheduledAt: string): string {
+  const [before, after = ""] = translateText(
+    "coworld_league.premiere_starts",
+  ).split("{time}");
+  const startsTime = `<span data-utc="${escapeHtml(scheduledAt)}">${escapeHtml(
+    shortUtc(scheduledAt),
+  )}</span>`;
+  return `<div class="premiere-badge scheduled"><span>${escapeHtml(
+    translateText("coworld_league.premiere_label"),
+  )}</span><span class="premiere-starts">${escapeHtml(
+    before,
+  )}${startsTime}${escapeHtml(after)}</span></div>`;
+}
+
+/**
+ * The premiere slot's REVEALED state: the most recent revealed premiere as a
+ * first-class watchable card, rendered whenever nothing is currently
+ * premiering (the caller enforces live-card precedence) and replaced only
+ * when the next premiere activates. Full premiere-card visual weight minus
+ * the live-state signals — no red LIVE pill, no pulsing dot — just the
+ * eyebrow, the round/map/reveal-time pills, and the primary watch link.
+ * Built ONLY from reveal-public fields (round, map, reveal time,
+ * `/premiere/<id>` href) and NEVER any winner/outcome text.
+ */
+function latestPremiereCard(
+  latest: CoworldLeagueLatestPremiereCard | undefined,
+): string {
+  if (latest === undefined) {
+    return "";
+  }
+  const metaPills: string[] = [];
+  if (latest.roundNumber !== null) {
+    metaPills.push(
+      `<span>Round ${escapeHtml(String(latest.roundNumber))}</span>`,
+    );
+  }
+  if (latest.mapLabel.length > 0) {
+    metaPills.push(`<span>${escapeHtml(latest.mapLabel)}</span>`);
+  }
+  // "Revealed {time}" with the timestamp in its own [data-utc] span so the
+  // page's existing localizer rewrites just the time while the prefix around
+  // the {time} placeholder is preserved (same pattern as the scheduled badge).
+  const [before, after = ""] = translateText(
+    "coworld_league.latest_premiere_revealed",
+  ).split("{time}");
+  const revealedTime = `<span data-utc="${escapeHtml(
+    latest.revealedAt,
+  )}">${escapeHtml(shortUtc(latest.revealedAt))}</span>`;
+  metaPills.push(
+    `<span>${escapeHtml(before)}${revealedTime}${escapeHtml(after)}</span>`,
+  );
+  return `
+    <section class="premiere-section">
+      <article class="premiere-card latest-premiere-card">
+        <div class="premiere-eyebrow">${escapeHtml(
+          translateText("coworld_league.latest_premiere_eyebrow"),
+        )}</div>
+        <div class="premiere-meta">${metaPills.join("")}</div>
+        <div class="actions"><a class="button primary premiere-link" href="${escapeHtml(
+          latest.href,
+        )}">${escapeHtml(
+          translateText("coworld_league.latest_premiere_watch"),
+        )}</a></div>
+      </article>
+    </section>`;
 }
 
 function formatTiles(value: number): string {
