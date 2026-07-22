@@ -150,8 +150,12 @@ export function importPremiereReplay(
     }
     records.push({
       sequence,
-      turn: sequence,
-      nominalOffsetMs: sequence * input.turnIntervalMs,
+      turn: denseTurn.turnNumber,
+      // Paced from the record's GAME TURN (dense records are 1:1 with turns,
+      // so turnNumber === sequence) at the caller's turn interval. With the
+      // real-cadence default (PREMIERE_REAL_TURN_INTERVAL_MS) playback at
+      // rate 1 equals regular OpenFront match speed exactly.
+      nominalOffsetMs: denseTurn.turnNumber * input.turnIntervalMs,
       payload,
     });
   }

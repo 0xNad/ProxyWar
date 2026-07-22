@@ -889,7 +889,10 @@ class Client {
   private async openReplayPremiere(premiereId: string): Promise<void> {
     this.replayAttemptCleanup?.();
     this.replayLoadingCleanup?.();
-    this.replayLoadingCleanup = holdReplayLoadingScreenUntilFirstFrame();
+    this.replayLoadingCleanup = holdReplayLoadingScreenUntilFirstFrame(
+      undefined,
+      "replay_premiere.loading_premiere",
+    );
 
     let active = true;
     let projectionMounted = false;

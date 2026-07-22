@@ -1,5 +1,6 @@
 import {
   isPremiereId,
+  REPLAY_PREMIERE_MAX_PRESENTATION_SPAN_MS,
   type PremiereChunkDescriptor,
   type PremiereChunkDraft,
   type PremiereChunkPayload,
@@ -157,7 +158,7 @@ export function verifyPremiereChunkChain(
     validateReleasedRecords(payload.records);
     assertPresentationSpan(
       payload.records,
-      options.maxPresentationSpanMs ?? 1_000,
+      options.maxPresentationSpanMs ?? REPLAY_PREMIERE_MAX_PRESENTATION_SPAN_MS,
     );
     if (previousDescriptor === null) {
       if (options.allowNonZeroFirstIndex !== true && descriptor.index !== 0) {
@@ -222,7 +223,7 @@ export function verifyPremiereChunkDraftChain(
     validateChunkPayloadAgainstDescriptor(
       payload,
       descriptor,
-      options.maxPresentationSpanMs ?? 1_000,
+      options.maxPresentationSpanMs ?? REPLAY_PREMIERE_MAX_PRESENTATION_SPAN_MS,
     );
     const expectedHash = hashReplayPremiereJson(
       prepublicationHashInput(descriptor),
@@ -425,7 +426,9 @@ function validateBuildOptions(options: BuildPremiereChunksOptions): void {
   if (options.maxTotalBytes < options.maxChunkBytes) {
     throw invalidRequest("total_ceiling_below_chunk_ceiling");
   }
-  if (options.maxPresentationSpanMs > 1_000) {
+  if (
+    options.maxPresentationSpanMs > REPLAY_PREMIERE_MAX_PRESENTATION_SPAN_MS
+  ) {
     throw invalidRequest("presentation_span_exceeds_hard_maximum");
   }
   if (!Array.isArray(options.records) || options.records.length < 4) {
@@ -604,7 +607,7 @@ function assertPresentationSpan(
   if (
     !Number.isSafeInteger(maxPresentationSpanMs) ||
     maxPresentationSpanMs <= 0 ||
-    maxPresentationSpanMs > 1_000 ||
+    maxPresentationSpanMs > REPLAY_PREMIERE_MAX_PRESENTATION_SPAN_MS ||
     presentationSpanMs(records) > maxPresentationSpanMs
   ) {
     throw integrityError("chunk_presentation_span_exceeded");

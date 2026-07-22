@@ -1,5 +1,10 @@
 import type { PremiereCanonicalAuthoritativeResult } from "./ReplayPremiereAuthoritativeResult";
-import type { PolicyIdentity, PremiereState } from "./ReplayPremiereContracts";
+import {
+  REPLAY_PREMIERE_CHECKPOINT_PAUSE_MS,
+  REPLAY_PREMIERE_LEGACY_CHECKPOINT_PAUSE_MS,
+  type PolicyIdentity,
+  type PremiereState,
+} from "./ReplayPremiereContracts";
 import { ReplayPremiereError } from "./ReplayPremiereErrors";
 import type { ReplayPremiereShareAttribution } from "./ReplayPremiereGuestSecurity";
 import {
@@ -618,8 +623,11 @@ export class ReplayPremiereInteractions {
       }
       const opensAtMs = timestamp(options.opensAt, "checkpoint_opens_at");
       const closesAtMs = timestamp(options.closesAt, "checkpoint_closes_at");
-      if (closesAtMs - opensAtMs !== 15_000) {
-        throw invalidInteraction("checkpoint_duration_not_15_seconds");
+      // The window must exactly equal the release pause: predictions close
+      // before any post-checkpoint content is released, and the pause covers
+      // the viewer's presentation trail plus a real 15 s voting window.
+      if (closesAtMs - opensAtMs !== REPLAY_PREMIERE_CHECKPOINT_PAUSE_MS) {
+        throw invalidInteraction("checkpoint_duration_invalid");
       }
       const optionSeatIds = [...options.optionSeatIds];
       if (
@@ -1801,7 +1809,14 @@ function validateSnapshotCheckpoints(
       timestamp(checkpoint.closesAt, "snapshot_checkpoint_closes_at") -
       timestamp(checkpoint.opensAt, "snapshot_checkpoint_opens_at");
     if (
-      duration !== 15_000 + checkpoint.outageShiftMs ||
+      // Durable snapshots recorded before the real-speed retune carry 15 s
+      // windows; both canonical durations stay valid so archived journals
+      // keep validating.
+      (duration !==
+        REPLAY_PREMIERE_CHECKPOINT_PAUSE_MS + checkpoint.outageShiftMs &&
+        duration !==
+          REPLAY_PREMIERE_LEGACY_CHECKPOINT_PAUSE_MS +
+            checkpoint.outageShiftMs) ||
       checkpoint.optionSeatIds.length < 2 ||
       checkpoint.optionSeatIds.length > 64 ||
       new Set(checkpoint.optionSeatIds).size !== checkpoint.optionSeatIds.length

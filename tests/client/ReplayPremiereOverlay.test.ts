@@ -80,7 +80,7 @@ describe("ReplayPremiereOverlay", () => {
     ).not.toBeNull();
   });
 
-  it("shows exactly one open 15-second checkpoint and locks one prediction", async () => {
+  it("shows exactly one open checkpoint window and locks one prediction", async () => {
     const onPrediction = vi.fn();
     const now = "2026-07-20T20:00:00.000Z";
     const model = makeModel({
@@ -298,6 +298,376 @@ describe("ReplayPremiereOverlay", () => {
     ).toHaveLength(5);
     expect(handle.element.querySelector(".rp-leaders")).not.toBeNull();
     expect(handle.element.querySelector(".rp-headline")).not.toBeNull();
+  });
+
+  it("keeps the ambient toggle functional and visibly responsive in every live and terminal state", async () => {
+    // Regression for "ambient mode doesn't work": the toggle must either work
+    // (callback fires, [data-ambient] flips, the compact pane rules engage) or
+    // be explicitly disabled with a reason — never a live-looking no-op.
+    const states = [
+      "playing",
+      "checkpoint",
+      "revealed",
+      "failed",
+      "cancelled",
+      "archived",
+    ] as const;
+    for (const state of states) {
+      const onAmbientChange = vi.fn();
+      const model = makeModel({
+        state,
+        ...(state === "checkpoint"
+          ? { activeCheckpointId: "checkpoint-1" }
+          : {}),
+        ...(state === "revealed" || state === "archived"
+          ? {
+              reveal: {
+                outcome: "winner" as const,
+                winnerSeatId: "seat-a",
+                summary: null,
+              },
+            }
+          : {}),
+      });
+      const handle = mount(model, { onAmbientChange });
+      const toggle = handle.element.querySelector<HTMLButtonElement>(
+        "[data-focus-key=ambient]",
+      );
+      expect(toggle, state).not.toBeNull();
+      expect(toggle?.disabled, state).toBe(false);
+      toggle?.click();
+      await vi.waitFor(() =>
+        expect(onAmbientChange).toHaveBeenCalledWith({
+          premiereId: "premiere-test",
+          ambient: true,
+        }),
+      );
+      handle.hydrate({ ...model, ambient: true });
+      expect(handle.element.dataset.ambient, state).toBe("true");
+      expect(document.body.classList).toContain("replay-premiere-ambient-mode");
+      // And back out again.
+      handle.element
+        .querySelector<HTMLButtonElement>("[data-focus-key=ambient]")
+        ?.click();
+      await vi.waitFor(() =>
+        expect(onAmbientChange).toHaveBeenCalledWith({
+          premiereId: "premiere-test",
+          ambient: false,
+        }),
+      );
+      handle.dispose();
+    }
+  });
+
+  it("disables the ambient toggle with a visible reason before the premiere starts", () => {
+    const onAmbientChange = vi.fn();
+    const handle = mount(makeModel({ state: "scheduled" }), {
+      onAmbientChange,
+    });
+    const toggle = handle.element.querySelector<HTMLButtonElement>(
+      "[data-focus-key=ambient]",
+    );
+    expect(toggle?.disabled).toBe(true);
+    expect(toggle?.title).toBe("replay_premiere.ambient_unavailable");
+    toggle?.click();
+    expect(onAmbientChange).not.toHaveBeenCalled();
+  });
+
+  it("patches volatile frame data in place so live hydrates cannot swallow clicks", async () => {
+    // Regression for the live render storm: frame-driven hydrates arrive many
+    // times per second; a full rebuild per frame replaced buttons between
+    // pointerdown and click, making ambient/reactions feel dead. Hydrates
+    // that only move volatile fields must keep the same DOM nodes alive AND
+    // handlers must read the LATEST sequence/turn at click time.
+    const onMarker = vi.fn();
+    const onAmbientChange = vi.fn();
+    const model = makeModel({
+      state: "playing",
+      canMark: true,
+      releasedSequence: 100,
+      currentTurn: 100,
+      leaders: [{ seatId: "seat-a", displayName: "Atlas Prime" }],
+    });
+    const handle = mount(model, { onMarker, onAmbientChange });
+    const markerBefore = handle.element.querySelector<HTMLButtonElement>(
+      '.rp-marker-button[data-kind="turning_point"]',
+    );
+    const ambientBefore = handle.element.querySelector<HTMLButtonElement>(
+      "[data-focus-key=ambient]",
+    );
+    expect(markerBefore).not.toBeNull();
+
+    // 60 volatile-only hydrates (one per simulated frame).
+    for (let frame = 1; frame <= 60; frame += 1) {
+      handle.hydrate({
+        ...model,
+        releasedSequence: 100 + frame,
+        currentTurn: 100 + frame,
+        leaders: [
+          {
+            seatId: "seat-a",
+            displayName: "Atlas Prime",
+            territoryPercent: frame,
+          },
+        ],
+        headlineEvent: `headline-${frame}`,
+      });
+    }
+
+    // Same DOM nodes — the buttons were never torn down.
+    expect(
+      handle.element.querySelector<HTMLButtonElement>(
+        '.rp-marker-button[data-kind="turning_point"]',
+      ),
+    ).toBe(markerBefore);
+    expect(
+      handle.element.querySelector<HTMLButtonElement>(
+        "[data-focus-key=ambient]",
+      ),
+    ).toBe(ambientBefore);
+    // The volatile regions still updated in place.
+    expect(handle.element.querySelector(".rp-position")?.textContent).toContain(
+      "turn=160",
+    );
+    expect(handle.element.textContent).toContain("headline-60");
+
+    // A click on the long-lived button reports the LATEST moment, not the
+    // one from when the button was built.
+    markerBefore?.click();
+    await vi.waitFor(() =>
+      expect(onMarker).toHaveBeenCalledWith(
+        expect.objectContaining({ sequence: 160, turn: 160 }),
+      ),
+    );
+
+    // A structural change (state flip) still rebuilds fully.
+    handle.hydrate({
+      ...model,
+      state: "revealed",
+      reveal: {
+        outcome: "winner",
+        winnerSeatId: "seat-a",
+        summary: null,
+      },
+    });
+    expect(handle.element.dataset.state).toBe("revealed");
+    expect(
+      handle.element.querySelector<HTMLButtonElement>(
+        '.rp-marker-button[data-kind="turning_point"]',
+      ),
+    ).not.toBe(markerBefore);
+  });
+
+  it("shows the broadcast LIVE chip in the sticky header only while live", () => {
+    for (const state of ["playing", "checkpoint"] as const) {
+      const handle = mount(
+        makeModel({
+          state,
+          ...(state === "checkpoint"
+            ? { activeCheckpointId: "checkpoint-1" }
+            : {}),
+        }),
+      );
+      const chip = handle.element.querySelector(".rp-header .rp-live-chip");
+      expect(chip, state).not.toBeNull();
+      expect(chip?.textContent).toContain("replay_premiere.live_badge");
+      handle.dispose();
+    }
+    for (const state of ["scheduled", "revealed"] as const) {
+      const handle = mount(
+        makeModel({
+          state,
+          ...(state === "revealed"
+            ? {
+                reveal: {
+                  outcome: "winner" as const,
+                  winnerSeatId: "seat-a",
+                  summary: null,
+                },
+              }
+            : {}),
+        }),
+      );
+      expect(
+        handle.element.querySelector(".rp-header .rp-live-chip"),
+        state,
+      ).toBeNull();
+      handle.dispose();
+    }
+  });
+
+  it("keeps the reaction row above the feed and leaders on the live surface", () => {
+    const handle = mount(makeModel({ state: "playing" }), {
+      onMarker: vi.fn(),
+    });
+    const sections = [
+      ...handle.element.querySelectorAll(
+        ".rp-body > .rp-section, .rp-body > .rp-ambient-evidence",
+      ),
+    ].map((section) => section.className);
+    const markerIndex = sections.findIndex((name) =>
+      name.includes("rp-markers"),
+    );
+    const feedIndex = sections.findIndex((name) =>
+      name.includes("rp-war-feed"),
+    );
+    const evidenceIndex = sections.findIndex((name) =>
+      name.includes("rp-ambient-evidence"),
+    );
+    expect(markerIndex).toBeGreaterThan(-1);
+    expect(feedIndex).toBeGreaterThan(markerIndex);
+    expect(evidenceIndex).toBeGreaterThan(feedIndex);
+  });
+
+  it("renders the battle feed with a visible empty state and live entries", () => {
+    const model = makeModel({ state: "playing" });
+    const handle = mount(model);
+    expect(
+      handle.element.querySelector(".rp-war-feed-empty")?.textContent,
+    ).toBe("replay_premiere.war_feed_waiting");
+
+    handle.hydrate({
+      ...model,
+      warEvents: [
+        {
+          kind: "nuke",
+          actor: "Atlas Prime",
+          target: null,
+          detail: null,
+          turn: 900,
+        },
+        {
+          kind: "betrayal",
+          actor: "Borealis",
+          target: "Atlas Prime",
+          detail: null,
+          turn: 850,
+        },
+        {
+          kind: "emote",
+          actor: "Atlas Prime",
+          target: "Borealis",
+          detail: "😡",
+          turn: 820,
+        },
+      ],
+    });
+    const items = [
+      ...handle.element.querySelectorAll<HTMLElement>(".rp-war-feed-item"),
+    ];
+    expect(items).toHaveLength(3);
+    expect(items[0].dataset.kind).toBe("nuke");
+    expect(items[0].textContent).toContain(
+      "replay_premiere.war_nuke:actor=Atlas Prime",
+    );
+    expect(items[1].textContent).toContain(
+      "replay_premiere.war_betrayal:actor=Borealis,target=Atlas Prime",
+    );
+    expect(items[2].textContent).toContain("😡");
+    // No outcome-bearing text sneaks in through the feed.
+    expect(
+      handle.element.querySelector(".rp-body")?.textContent ?? "",
+    ).not.toContain("winner");
+  });
+
+  it("renders the reaction row with zero-count badges in live states, never collapsed", () => {
+    // Regression for "where are annotations/reactions": with no prior
+    // reactions the section must still render five buttons with visible
+    // 0-count badges and invite interaction.
+    for (const state of ["playing", "checkpoint"] as const) {
+      const handle = mount(
+        makeModel({
+          state,
+          canMark: true,
+          ...(state === "checkpoint"
+            ? { activeCheckpointId: "checkpoint-1" }
+            : {}),
+        }),
+        { onMarker: vi.fn() },
+      );
+      const buttons = [
+        ...handle.element.querySelectorAll<HTMLButtonElement>(
+          ".rp-marker-button",
+        ),
+      ];
+      expect(buttons, state).toHaveLength(5);
+      for (const button of buttons) {
+        expect(button.disabled, state).toBe(false);
+        expect(
+          button.querySelector(".rp-marker-count")?.textContent,
+          state,
+        ).toBe("0");
+      }
+      handle.dispose();
+    }
+  });
+
+  it("explains a not-yet-connected reaction row instead of leaving it silently dead", () => {
+    const handle = mount(makeModel({ state: "playing", canMark: false }), {
+      onMarker: vi.fn(),
+    });
+    const buttons = [
+      ...handle.element.querySelectorAll<HTMLButtonElement>(
+        ".rp-marker-button",
+      ),
+    ];
+    expect(buttons).toHaveLength(5);
+    expect(buttons.every((button) => button.disabled)).toBe(true);
+    expect(handle.element.querySelector(".rp-marker-hint")?.textContent).toBe(
+      "replay_premiere.reactions_connecting",
+    );
+  });
+
+  it("shows per-kind own-mark counts and the server-confirmed mark line", () => {
+    const handle = mount(
+      makeModel({
+        state: "playing",
+        canMark: true,
+        markerCounts: { betrayal: 2 },
+        markerConfirmation: { kind: "betrayal", turn: 512 },
+      }),
+      { onMarker: vi.fn() },
+    );
+    const betrayal = handle.element.querySelector<HTMLButtonElement>(
+      '.rp-marker-button[data-kind="betrayal"]',
+    );
+    expect(betrayal?.querySelector(".rp-marker-count")?.textContent).toBe("2");
+    expect(betrayal?.dataset.marked).toBe("true");
+    expect(
+      handle.element.querySelector(".rp-marker-confirmed")?.textContent,
+    ).toContain("turn=512");
+  });
+
+  it("never anchors the reveal or results panels at an invisible base state", () => {
+    // Regression for the real-page "empty black panel": the entrance
+    // animations own their pre-state (keyframes + fill-mode) — the BASE rules
+    // must never set opacity:0, or an interrupted/disabled animation leaves
+    // the payoff permanently invisible (reduced motion disables them).
+    const handle = mount(
+      makeModel({
+        state: "revealed",
+        reveal: {
+          outcome: "winner",
+          winnerSeatId: "seat-a",
+          summary: null,
+        },
+      }),
+    );
+    const css = handle.element.querySelector("style")?.textContent ?? "";
+    for (const selector of [".rp-reveal {", ".rp-results {"]) {
+      const start = css.indexOf(selector);
+      expect(start, selector).toBeGreaterThan(-1);
+      const block = css.slice(start, css.indexOf("}", start));
+      expect(block).not.toContain("opacity");
+    }
+    // Reduced motion must fully disable the entrance animations so the
+    // panels render at their (visible) base state.
+    const reducedMotion = css.slice(
+      css.indexOf("prefers-reduced-motion: reduce"),
+    );
+    expect(reducedMotion).toContain(".rp-reveal,");
+    expect(reducedMotion).toContain(".rp-results,");
+    expect(reducedMotion).toContain("animation: none !important");
   });
 
   it("maps unknown public failure input to fixed copy without rendering it", () => {

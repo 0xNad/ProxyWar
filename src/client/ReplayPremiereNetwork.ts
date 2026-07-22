@@ -224,7 +224,11 @@ const publicationCommitmentSchema = z
     publicDefinitionHash: sha256Schema,
     playbackRate: z.union([z.literal(1), z.literal(2), z.literal(4)]),
     checkpoints: publicationCheckpointsSchema,
-    maxPresentationSpanMs: z.number().int().min(1).max(1_000).safe(),
+    // Mirrors REPLAY_PREMIERE_MAX_PRESENTATION_SPAN_MS (server contracts);
+    // the client does not import server modules, so a test pins the two.
+    // Raised from 1_000 with real-speed pacing (45 s build spans); archives
+    // committed under the old 1_000 ms ceiling still validate.
+    maxPresentationSpanMs: z.number().int().min(1).max(60_000).safe(),
     finalSequence: nonNegativeIntegerSchema,
     chunkCount: z.number().int().positive().safe(),
     terminalPrepublicationRoot: sha256Schema,

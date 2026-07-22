@@ -2,9 +2,10 @@ import { constants, promises as fs } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { GameRecordSchema, TurnSchema, type GameRecord } from "../core/Schemas";
-import type {
-  CoworldPremiereSourceIds,
-  PremiereSeatIdentity,
+import {
+  PREMIERE_REAL_TURN_INTERVAL_MS,
+  type CoworldPremiereSourceIds,
+  type PremiereSeatIdentity,
 } from "../server/replay-premiere/ReplayPremiereContracts";
 import { ReplayPremiereError } from "../server/replay-premiere/ReplayPremiereErrors";
 import {
@@ -698,7 +699,11 @@ function parseArgs(args: string[]): ReplayPremiereCoworldIngestOptions {
   const divisionFile = singleValue(args, "--division-file=");
   const divisionId = singleValue(args, "--division-id=");
   const outFile = singleValue(args, "--out-file=");
-  const turnIntervalRaw = optionalValue(args, "--turn-interval-ms=") ?? "1";
+  // Default to the real OpenFront turn cadence so premieres play at regular
+  // match speed at rate 1. The flag remains only as an explicit override.
+  const turnIntervalRaw =
+    optionalValue(args, "--turn-interval-ms=") ??
+    String(PREMIERE_REAL_TURN_INTERVAL_MS);
   const admissionInputDir = optionalValue(args, "--admission-input-dir=");
   const turnIntervalMs = Number(turnIntervalRaw);
   if (

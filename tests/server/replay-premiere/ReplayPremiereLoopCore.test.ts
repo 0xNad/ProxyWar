@@ -16,6 +16,7 @@ import {
 } from "../../../src/server/agents/CoworldLeaguePremiereSuppression";
 import {
   PREMIERE_ID_PATTERN,
+  PREMIERE_REAL_TURN_INTERVAL_MS,
   isPremiereId,
 } from "../../../src/server/replay-premiere/ReplayPremiereContracts";
 import {
@@ -141,14 +142,35 @@ describe("premiere id derivation and opacity (requirement #3)", () => {
 
 describe("playback rate + checkpoint heuristics", () => {
   test("playback rate bands (admit accepts only 1/2/4)", () => {
-    // 2026-07-22 retune: premieres are the live product surface — typical
-    // rounds play at 1x (~8-18 min on air), only >32k-turn episodes at 2x.
+    // 2026-07-22 retune #3: 1x now means REAL match speed (100 ms/turn — 10
+    // turns/s), so ≤36k turns (≤60 min) play at true speed and only outsized
+    // shows compress to 2x (60k cap @2x = 50 min). Earlier same-day retunes
+    // (≤24k → faster bands, then ≤32k → 1x) were calibrated to free-run
+    // throughput while nominal offsets were ~1 ms/turn and are obsolete.
     expect(playbackRateForTurnCount(9_999)).toBe(1);
     expect(playbackRateForTurnCount(17_000)).toBe(1);
     expect(playbackRateForTurnCount(32_000)).toBe(1);
-    expect(playbackRateForTurnCount(32_001)).toBe(2);
+    expect(playbackRateForTurnCount(36_000)).toBe(1);
+    expect(playbackRateForTurnCount(36_001)).toBe(2);
     expect(playbackRateForTurnCount(50_400)).toBe(2);
     expect(playbackRateForTurnCount(60_000)).toBe(2);
+  });
+
+  test("real-speed playback duration sanity", () => {
+    // At 1x a premiere plays at the real 100 ms turn cadence: 17,000 turns
+    // ≈ 28.3 min; the 36k 1x band edge = 60 min; the 60k admission cap at 2x
+    // = 50 min — all inside the 75-minute hold valve.
+    const minutesAtRate = (turns: number) =>
+      (turns * PREMIERE_REAL_TURN_INTERVAL_MS) /
+      playbackRateForTurnCount(turns) /
+      60_000;
+    expect(minutesAtRate(17_000)).toBeCloseTo(28.33, 1);
+    expect(minutesAtRate(36_000)).toBeCloseTo(60, 5);
+    expect(minutesAtRate(60_000)).toBeCloseTo(50, 5);
+    expect(
+      PREMIERE_LOOP_SCHEDULE_LEAD_MS + 60 * 60_000 <
+        PREMIERE_LOOP_HOLD_WINDOW_MS,
+    ).toBe(true);
   });
 
   test("checkpoints at 0.35x/0.65x rounded", () => {
@@ -183,15 +205,17 @@ describe("hold arithmetic", () => {
     );
   });
 
-  test("holdExpiresAt is scheduledAt + 35min", () => {
+  test("holdExpiresAt is scheduledAt + 75min", () => {
     const scheduledAt = scheduledAtForClaim(NOW);
     expect(holdExpiresAtForScheduled(scheduledAt)).toBe(
       new Date(
         Date.parse(scheduledAt) + PREMIERE_LOOP_HOLD_WINDOW_MS,
       ).toISOString(),
     );
-    // 35min window stays under the ~30min interval + max play time envelope.
-    expect(PREMIERE_LOOP_HOLD_WINDOW_MS).toBe(35 * 60_000);
+    // Real-speed derivation: 60-min worst show (36k turns @1x; 60k @2x is
+    // 50 min) + checkpoint intermissions + client presentation trail +
+    // reveal margin. History: 35 min while playback free-ran at ~1 ms/turn.
+    expect(PREMIERE_LOOP_HOLD_WINDOW_MS).toBe(75 * 60_000);
   });
 
   test("expiry valve trips only at/after holdExpiresAt", () => {
@@ -901,7 +925,7 @@ describe("admission input builders (exact shapes the admit CLI validates)", () =
     expect(definition.checkpoints).toHaveLength(2);
     expect(definition.checkpoints[0].sequence).toBe(14_000);
     expect(definition.checkpoints[1].sequence).toBe(26_000);
-    // 40k turns > the 32k 1x band -> 2x under the 2026-07-22 retune.
+    // 40k turns > the 36k real-speed 1x band -> 2x.
     expect(definition.playbackRate).toBe(2);
     expect(definition.matchFormat).toEqual({
       id: "ffa-12",
@@ -1030,8 +1054,14 @@ describe("isCompletedTooOldToSeal — cold-start / already-public pre-admission 
     expect(isCompletedTooOldToSeal(future, NOW)).toBe(false);
   });
 
-  test("the seal window equals the hold window and honours a custom override", () => {
-    expect(PREMIERE_LOOP_SEAL_WINDOW_MS).toBe(PREMIERE_LOOP_HOLD_WINDOW_MS);
+  test("the seal window is claim freshness (~35min), split from the hold window", () => {
+    // Deliberately NOT aliased: the hold window grew to 75 min for real-speed
+    // playback duration, while claim freshness stays governed by the mirror
+    // publish cadence — a round completed >35 min ago is long public.
+    expect(PREMIERE_LOOP_SEAL_WINDOW_MS).toBe(35 * 60_000);
+    expect(PREMIERE_LOOP_SEAL_WINDOW_MS).toBeLessThan(
+      PREMIERE_LOOP_HOLD_WINDOW_MS,
+    );
     const tenMinAgo = new Date(NOW.getTime() - 10 * 60_000).toISOString();
     expect(isCompletedTooOldToSeal(tenMinAgo, NOW, 5 * 60_000)).toBe(true);
     expect(isCompletedTooOldToSeal(tenMinAgo, NOW, 15 * 60_000)).toBe(false);

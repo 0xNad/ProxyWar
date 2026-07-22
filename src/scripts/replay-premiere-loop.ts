@@ -22,6 +22,7 @@ import {
   buildProxyWarDemoServerUrls,
   loadProxyWarDemoServerNetworkConfig,
 } from "../server/agents/ProxyWarDemoServerConfig";
+import { PREMIERE_REAL_TURN_INTERVAL_MS } from "../server/replay-premiere/ReplayPremiereContracts";
 import { ReplayPremiereError } from "../server/replay-premiere/ReplayPremiereErrors";
 import {
   PREMIERE_LOOP_ACTIVATION_BACKOFF_MS,
@@ -181,7 +182,13 @@ function resolveLoopConfig(env: NodeJS.ProcessEnv): LoopConfig {
     ingestScratchDir: path.join(loopStateDir, "ingest-scratch"),
     nonceDir: path.join(loopStateDir, "admit-nonce"),
     minimumFreeBytes: Number(env.PROXYWAR_LEAGUE_MIN_FREE_GIB ?? "10") * GIB,
-    turnIntervalMs: Number(env.PROXYWAR_PREMIERE_LOOP_TURN_INTERVAL_MS ?? "1"),
+    // Real match cadence by default (100 ms/turn — DefaultConfig
+    // turnIntervalMs), so a premiere at rate 1 plays at regular OpenFront
+    // speed. The env var remains only as an explicit operator override.
+    turnIntervalMs: Number(
+      env.PROXYWAR_PREMIERE_LOOP_TURN_INTERVAL_MS ??
+        String(PREMIERE_REAL_TURN_INTERVAL_MS),
+    ),
     coworldTimeoutMs: Number(
       env.PROXYWAR_PREMIERE_LOOP_COWORLD_TIMEOUT_MS ?? "120000",
     ),

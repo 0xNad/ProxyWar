@@ -39,6 +39,21 @@
         pointer-events: none !important;
       }
 
+      /*
+       * Replay/premiere routes never show the landing page. The boot veil
+       * above drops as soon as the replay surface (or the premiere overlay
+       * for a scheduled countdown) is ready — before the game canvas has
+       * necessarily rendered — so the main-menu DOM is suppressed for the
+       * whole lifetime of these routes or it flashes in that gap. The class
+       * is set by the inline head script at parse time (first paint safe).
+       */
+      html.proxywar-replay-route #main-menu-area,
+      html.proxywar-replay-route #hex-grid,
+      html.proxywar-replay-route #mobile-menu-backdrop,
+      html.proxywar-replay-route #sidebar-menu {
+        display: none !important;
+      }
+
       html.proxywar-replay-route #proxywar-replay-loading {
         position: fixed;
         inset: 0;
@@ -358,6 +373,7 @@
 
     <!-- MAIN CONTENT AREA -->
     <div
+      id="main-menu-area"
       class="in-[.in-game]:hidden flex-1 relative overflow-hidden h-full transition-[margin] duration-500 ease-out will-change-[margin-left] flex flex-col"
     >
       <!-- Desktop Top Bar -->

@@ -24,6 +24,7 @@ import {
   type ReplayPremiereClipView,
   type ReplayPremiereCounterChallengeRequest,
   type ReplayPremiereHighlightedMomentView,
+  type ReplayPremiereMarkerKind,
   type ReplayPremiereMarkerRequest,
   type ReplayPremiereOverlayCallbacks,
   type ReplayPremiereOverlayHandle,
@@ -34,6 +35,7 @@ import {
   type ReplayPremiereReminderRequest,
   type ReplayPremiereResultsSummaryView,
   type ReplayPremiereShareRequest,
+  type ReplayPremiereWarEventView,
 } from "./ReplayPremiereOverlay";
 import {
   ReplayPremierePlaybackController,
@@ -1345,6 +1347,14 @@ export class ReplayPremiereRuntimeController {
     | null = null;
   private incomingMoment: ReplayPremiereHighlightedMomentView | null = null;
   private latestFrame: ReplayPremiereFrame | null = null;
+  /** Newest-first spoiler-safe war narrative (bounded ring; see war feed). */
+  private warFeed: ReplayPremiereWarEventView[] = [];
+  /** The viewer's own server-accepted marks per kind (session-local). */
+  private ownMarkCounts: Partial<Record<ReplayPremiereMarkerKind, number>> = {};
+  private lastMarkConfirmation: {
+    kind: ReplayPremiereMarkerKind;
+    turn: number;
+  } | null = null;
   private headlineEvent: string | null = null;
   private previousLeaderId: string | null = null;
   private recovery: ReplayPremiereRecoveryNotice | null = null;
@@ -1364,6 +1374,17 @@ export class ReplayPremiereRuntimeController {
   private heartbeatInFlight = false;
   private joinDispatched = false;
   private revealSeekApplied = false;
+  /**
+   * True when this session ever observed a sealed (pre-reveal) lifecycle. At
+   * real-speed pacing the viewer's map trails the authoritative release clock
+   * by up to one chunk presentation span (~45 s), so a reveal that lands
+   * while the ending is still playing out is DEFERRED for display until local
+   * playback completes — otherwise the overlay would name the winner while
+   * the final minutes were still on screen. Pages that load already revealed
+   * or archived never defer (no live trailing view to spoil).
+   */
+  private preRevealLifecycleObserved = false;
+  private revealDisplayTimer: ReturnType<typeof setInterval> | null = null;
   private ambient = false;
   private readySettled = false;
   private started = false;
@@ -1469,6 +1490,7 @@ export class ReplayPremiereRuntimeController {
     this.clearInteractionTimers();
     this.clearCheckpointDeadline();
     this.clearClipPoll();
+    this.clearRevealDisplayPump();
     this.documentRef.removeEventListener(
       "ai-league-replay-frame",
       this.onFrameEvent,
@@ -1497,6 +1519,13 @@ export class ReplayPremiereRuntimeController {
       return;
     }
     this.projection = projection;
+    if (
+      projection.state === "scheduled" ||
+      projection.state === "playing" ||
+      projection.state === "checkpoint"
+    ) {
+      this.preRevealLifecycleObserved = true;
+    }
     try {
       this.service.bindVerifiedProjection(projection);
     } catch {
@@ -1571,11 +1600,11 @@ export class ReplayPremiereRuntimeController {
     }
     this.reveal = reveal;
     this.recovery = null;
-    this.documentRef.body.classList.remove(PRE_REVEAL_BODY_CLASS);
+    this.maybeLiftPreRevealSuppression();
     this.hydrateOverlay();
-    if (this.incomingMoment !== null && !this.revealSeekApplied) {
-      this.revealSeekApplied = true;
-      this.options.onRevealSeek?.(this.incomingMoment.turn);
+    this.maybeApplyRevealSeek();
+    if (this.isRevealDisplayDeferred()) {
+      this.ensureRevealDisplayPump();
     }
     if (this.currentNetworkState() === "archived") {
       this.servicePremiereState = "archived";
@@ -1603,7 +1632,7 @@ export class ReplayPremiereRuntimeController {
     }
     this.networkTerminalState = state;
     if (state === "revealed" || state === "archived") {
-      this.documentRef.body.classList.remove(PRE_REVEAL_BODY_CLASS);
+      this.maybeLiftPreRevealSuppression();
     }
     if (state === "failed" || state === "cancelled" || state === "archived") {
       this.enterReadOnlyNetworkTerminal(state);
@@ -1682,6 +1711,12 @@ export class ReplayPremiereRuntimeController {
     }
     this.previousLeaderId = leader?.playerID ?? this.previousLeaderId;
     this.latestFrame = frame;
+    if (frame.warEvents.length > 0) {
+      this.warFeed = [
+        ...frame.warEvents.slice().reverse(),
+        ...this.warFeed,
+      ].slice(0, MAX_WAR_FEED_ENTRIES);
+    }
     this.hydrateOverlay();
   };
 
@@ -1809,10 +1844,7 @@ export class ReplayPremiereRuntimeController {
     this.fencedSessionReadyForVerifiedReveal = false;
     this.interactionReady = true;
     this.hydrateOverlay();
-    if (this.incomingMoment !== null && !this.revealSeekApplied) {
-      this.revealSeekApplied = true;
-      this.options.onRevealSeek?.(this.incomingMoment.turn);
-    }
+    this.maybeApplyRevealSeek();
     this.dispatchJoinAfterBootstrap();
     this.heartbeatTimer ??= setInterval(
       () => void this.sendHeartbeat(),
@@ -1923,13 +1955,85 @@ export class ReplayPremiereRuntimeController {
       this.interactionReady = false;
       this.clearInteractionTimers();
     }
+    this.maybeApplyRevealSeek();
+  }
+
+  /**
+   * Applies the shared-moment reveal seek exactly once, and only when the
+   * reveal is actually displayable — a seek during the live-view deferral
+   * window would skip the still-playing ending.
+   */
+  private maybeApplyRevealSeek(): void {
     if (
-      this.reveal !== null &&
-      this.incomingMoment !== null &&
-      !this.revealSeekApplied
+      this.reveal === null ||
+      this.incomingMoment === null ||
+      this.revealSeekApplied ||
+      this.isRevealDisplayDeferred()
     ) {
-      this.revealSeekApplied = true;
-      this.options.onRevealSeek?.(this.incomingMoment.turn);
+      return;
+    }
+    this.revealSeekApplied = true;
+    this.options.onRevealSeek?.(this.incomingMoment.turn);
+  }
+
+  /**
+   * Whether a verified reveal exists but must not be PRESENTED yet because
+   * this session watched the premiere live and the viewer's rendered frame is
+   * still behind the released stream (at real-speed pacing the map trails the
+   * release clock by up to one chunk presentation span). Bounded by
+   * construction: playback runs at presentation speed toward the already
+   * released terminal sequence, and the deferral pump re-checks every 500 ms,
+   * so the banner lands as the viewer's own playback reaches the end. Pages
+   * with no live playback on screen (no frame yet — fresh revealed/archived
+   * loads, or a session that never joined) never defer.
+   */
+  private isRevealDisplayDeferred(): boolean {
+    if (
+      this.reveal === null ||
+      !this.preRevealLifecycleObserved ||
+      this.terminalFailure !== null
+    ) {
+      return false;
+    }
+    const observed = this.latestFrame?.sequence ?? null;
+    const released = this.playback.state().releasedThroughSequence;
+    if (observed === null || released === null) {
+      return false;
+    }
+    return observed < released;
+  }
+
+  private displayableReveal(): Readonly<ReplayPremiereReveal> | null {
+    return this.reveal !== null && !this.isRevealDisplayDeferred()
+      ? this.reveal
+      : null;
+  }
+
+  /** Pre-reveal host suppression lifts only when the reveal may display. */
+  private maybeLiftPreRevealSuppression(): void {
+    if (this.isRevealDisplayDeferred()) return;
+    this.documentRef.body.classList.remove(PRE_REVEAL_BODY_CLASS);
+  }
+
+  private ensureRevealDisplayPump(): void {
+    if (this.revealDisplayTimer !== null || this.disposed) return;
+    this.revealDisplayTimer = setInterval(() => {
+      if (this.disposed) {
+        this.clearRevealDisplayPump();
+        return;
+      }
+      if (this.isRevealDisplayDeferred()) return;
+      this.clearRevealDisplayPump();
+      this.maybeLiftPreRevealSuppression();
+      this.maybeApplyRevealSeek();
+      this.hydrateOverlay();
+    }, 500);
+  }
+
+  private clearRevealDisplayPump(): void {
+    if (this.revealDisplayTimer !== null) {
+      clearInterval(this.revealDisplayTimer);
+      this.revealDisplayTimer = null;
     }
   }
 
@@ -2123,9 +2227,21 @@ export class ReplayPremiereRuntimeController {
         ) {
           throw serviceError("request_rejected");
         }
-        await this.strictInteractionWrite(() =>
+        const response = await this.strictInteractionWrite(() =>
           this.service.submitReaction(request),
         );
+        // Server-confirmed feedback: bump the viewer's own per-kind tally
+        // (idempotent replays of the same moment+kind do not double-count)
+        // and surface the acknowledgment line.
+        if (!response.idempotent) {
+          this.ownMarkCounts[request.kind] =
+            (this.ownMarkCounts[request.kind] ?? 0) + 1;
+        }
+        this.lastMarkConfirmation = {
+          kind: request.kind,
+          turn: response.reaction.turn,
+        };
+        this.hydrateOverlay();
       },
       onShare: (request) => this.share(request),
       onCopySuggestedCaption: (request) => this.copyCaption(request),
@@ -2418,6 +2534,13 @@ export class ReplayPremiereRuntimeController {
     if (this.overlay === null || this.projection === null || this.disposed) {
       return;
     }
+    // A deferred reveal becomes displayable the moment the viewer catches up;
+    // every hydrate path (frames, manifests, the deferral pump) settles the
+    // idempotent side effects here so no caller can miss the transition.
+    if (this.reveal !== null && !this.isRevealDisplayDeferred()) {
+      this.maybeLiftPreRevealSuppression();
+      this.maybeApplyRevealSeek();
+    }
     this.overlay.hydrate(this.buildOverlayModel());
   }
 
@@ -2426,10 +2549,15 @@ export class ReplayPremiereRuntimeController {
       throw new ReplayPremiereNetworkError("callback_failure", false);
     }
     const manifest = preRevealManifest(this.latestManifest);
+    // Presentation uses the DISPLAYABLE reveal: during a live watch the
+    // verified reveal is deferred until local playback reaches the end, so
+    // the overlay keeps its live "playing" surface (plus the quiet verifying
+    // status) instead of naming the winner over the still-playing ending.
+    const displayReveal = this.displayableReveal();
     const revealPending =
       (this.latestManifest?.state === "revealed" ||
         this.latestManifest?.state === "archived") &&
-      this.reveal === null;
+      displayReveal === null;
     const networkState = this.currentNetworkState();
     const checkpointDeadlineElapsed =
       this.locallyClosedCheckpointId !== null &&
@@ -2440,12 +2568,12 @@ export class ReplayPremiereRuntimeController {
       ? "failed"
       : networkState === "failed" || networkState === "cancelled"
         ? networkState
-        : this.reveal !== null &&
+        : displayReveal !== null &&
             (this.latestManifest?.state === "archived" ||
               this.servicePremiereState === "archived" ||
               networkState === "archived")
           ? "archived"
-          : this.reveal !== null
+          : displayReveal !== null
             ? "revealed"
             : revealPending
               ? "playing"
@@ -2519,6 +2647,9 @@ export class ReplayPremiereRuntimeController {
           ? projectedActiveCheckpoint.id
           : null,
       leaders: frameLeaders(this.latestFrame),
+      warEvents: this.warFeed,
+      markerCounts: { ...this.ownMarkCounts },
+      markerConfirmation: this.lastMarkConfirmation,
       headlineEvent: this.headlineEvent,
       markerPolicySeatId: null,
       share: {
@@ -2534,7 +2665,7 @@ export class ReplayPremiereRuntimeController {
                 turn: currentTurn,
               }),
       },
-      reveal: this.revealView(policies),
+      reveal: displayReveal === null ? null : this.revealView(policies),
       recovery:
         this.recovery === null
           ? null
@@ -2552,7 +2683,7 @@ export class ReplayPremiereRuntimeController {
       canMark: this.interactionReady && !this.isReadOnlyLifecycle(),
       canShare: this.interactionReady && !this.isReadOnlyLifecycle(),
       canExportCounterChallenge:
-        this.reveal !== null &&
+        displayReveal !== null &&
         networkState !== "failed" &&
         networkState !== "cancelled",
       // Clips exist only on the revealed/archived surface. The request button is
@@ -2817,10 +2948,24 @@ interface ReplayPremiereFramePlayer {
   tilesOwned: number;
 }
 
+const WAR_EVENT_KINDS = new Set([
+  "attack",
+  "alliance",
+  "betrayal",
+  "nuke",
+  "conquest",
+  "emote",
+  "chat",
+]);
+const MAX_WAR_EVENTS_PER_FRAME = 12;
+/** Newest-first entries kept for the overlay's battle feed. */
+const MAX_WAR_FEED_ENTRIES = 8;
+
 interface ReplayPremiereFrame {
   sequence: number | null;
   turnNumber: number;
   players: ReplayPremiereFramePlayer[];
+  warEvents: ReplayPremiereWarEventView[];
 }
 
 interface ReplayPremiereVerifiedBinding {
@@ -3185,7 +3330,45 @@ function parseReplayPremiereFrame(value: unknown): ReplayPremiereFrame | null {
     sequence: sequence === null ? null : Number(sequence),
     turnNumber: Number(turnNumber),
     players: parsedPlayers,
+    warEvents: parseFrameWarEvents(value.warEvents),
   };
+}
+
+/**
+ * Lenient parse of the spoiler-safe war narrative riding the frame event:
+ * malformed entries are dropped (never a page-level failure — the feed is a
+ * display garnish, not an integrity surface).
+ */
+function parseFrameWarEvents(value: unknown): ReplayPremiereWarEventView[] {
+  if (!Array.isArray(value)) return [];
+  const events: ReplayPremiereWarEventView[] = [];
+  for (const entry of value.slice(0, MAX_WAR_EVENTS_PER_FRAME)) {
+    if (!isRecord(entry)) continue;
+    const { kind, actor, target, detail, turn } = entry;
+    if (
+      typeof kind !== "string" ||
+      !WAR_EVENT_KINDS.has(kind) ||
+      typeof actor !== "string" ||
+      actor.length === 0 ||
+      actor.length > 256 ||
+      (target !== null && typeof target !== "string") ||
+      (typeof target === "string" && target.length > 256) ||
+      (detail !== null && typeof detail !== "string") ||
+      (typeof detail === "string" && detail.length > 256) ||
+      !Number.isSafeInteger(turn) ||
+      Number(turn) < 0
+    ) {
+      continue;
+    }
+    events.push({
+      kind: kind as ReplayPremiereWarEventView["kind"],
+      actor,
+      target: (target ?? null) as string | null,
+      detail: (detail ?? null) as string | null,
+      turn: Number(turn),
+    });
+  }
+  return events;
 }
 
 function frameLeaders(

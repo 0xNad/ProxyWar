@@ -3,6 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import { freezeReplayPremiereCheckpointProjection } from "../../../src/server/replay-premiere/ReplayPremiereCheckpointProjection";
+import { REPLAY_PREMIERE_CHECKPOINT_PAUSE_MS } from "../../../src/server/replay-premiere/ReplayPremiereContracts";
 import {
   ReplayPremiereEventStore,
   type StoredReplayPremiereEvent,
@@ -147,7 +148,7 @@ describe("ReplayPremiere long runtime persistence", () => {
       LONG_REPLAY_CHUNK_LIMITS.maxRecordsPerChunk,
     );
 
-    clock.advance(15_000);
+    clock.advance(REPLAY_PREMIERE_CHECKPOINT_PAUSE_MS);
     await second.synchronize();
     expect(second.readLifecycleState()).toBe("playing");
     clock.advance(
@@ -159,7 +160,7 @@ describe("ReplayPremiere long runtime persistence", () => {
       releasedThroughSequence: LONG_REPLAY_CHECKPOINT_SEQUENCES[1],
     });
 
-    clock.advance(15_000);
+    clock.advance(REPLAY_PREMIERE_CHECKPOINT_PAUSE_MS);
     await second.synchronize();
     expect(second.readLifecycleState()).toBe("playing");
     clock.advance(

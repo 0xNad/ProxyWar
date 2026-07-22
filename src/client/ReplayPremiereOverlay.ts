@@ -156,6 +156,28 @@ export interface ReplayPremiereHighlightedMomentView {
   turn: number;
 }
 
+export type ReplayPremiereWarEventKindView =
+  | "attack"
+  | "alliance"
+  | "betrayal"
+  | "nuke"
+  | "conquest"
+  | "emote"
+  | "chat";
+
+/**
+ * One spoiler-safe live war-narrative entry (attack launched, alliance
+ * formed/broken, nuke flying, emote/quick-chat). Derived client-side from the
+ * simulation updates already on screen — carries no outcome information.
+ */
+export interface ReplayPremiereWarEventView {
+  kind: ReplayPremiereWarEventKindView;
+  actor: string;
+  target: string | null;
+  detail: string | null;
+  turn: number;
+}
+
 export interface ReplayPremiereOverlayModel {
   premiereId: string;
   state: ReplayPremierePublicState;
@@ -175,6 +197,12 @@ export interface ReplayPremiereOverlayModel {
   checkpoints: ReplayPremiereCheckpointPair;
   activeCheckpointId?: string | null;
   leaders?: readonly ReplayPremiereLeaderView[];
+  /** Newest-first live war narrative shown during sealed playback. */
+  warEvents?: readonly ReplayPremiereWarEventView[];
+  /** The viewer's own accepted marks per kind this session (0 when absent). */
+  markerCounts?: Partial<Record<ReplayPremiereMarkerKind, number>>;
+  /** The most recent server-accepted mark, for the confirmation line. */
+  markerConfirmation?: { kind: ReplayPremiereMarkerKind; turn: number } | null;
   headlineEvent?: string | null;
   markerPolicySeatId?: string | null;
   share?: ReplayPremiereShareView | null;
@@ -367,6 +395,12 @@ export function mountReplayPremiereOverlay(
   let captionTouched = false;
   let lastSuggestedCaption = captionDraft;
   let lastWindowPhase: ReplayPremiereWindowPhase | null = null;
+  let lastStructuralKey: string | null = null;
+  // Event handlers read the LATEST model through this accessor instead of the
+  // render-time snapshot: volatile-only hydrates keep the same DOM nodes (and
+  // therefore the same closures) alive across frames, so a click must see the
+  // current sequence/turn, not the ones from whenever the button was built.
+  const latestModel = () => model;
 
   const safeRun = (
     button: HTMLButtonElement,
@@ -439,9 +473,10 @@ export function mountReplayPremiereOverlay(
     overlay.dataset.state = model.state;
     overlay.dataset.ambient = String(model.ambient);
     document.body.classList.toggle(AMBIENT_BODY_CLASS, model.ambient);
+    lastStructuralKey = structuralModelKey(model);
     overlay.replaceChildren(
       createStyle(),
-      renderOverlay(model, callbacks, safeRun, {
+      renderOverlay(model, latestModel, callbacks, safeRun, {
         captionDraft,
         setCaptionDraft(nextCaption: string) {
           captionDraft = nextCaption;
@@ -470,6 +505,19 @@ export function mountReplayPremiereOverlay(
       model = nextModel;
       serverClockMs = parseTime(nextModel.authoritativeNow);
       localClockMs = Date.now();
+      // Frame-driven hydrates arrive many times per second during live
+      // playback. A full rebuild on each one tears the DOM down under the
+      // pointer — clicks between pointerdown and pointerup land on removed
+      // nodes and are silently swallowed, which made the ambient toggle and
+      // the reaction row feel dead on the real live page. When nothing
+      // structural changed, patch the volatile read-only regions in place
+      // and keep every interactive element (and its hover/focus/press state)
+      // alive.
+      if (structuralModelKey(nextModel) === lastStructuralKey) {
+        applyVolatileModelUpdates(overlay, nextModel);
+        updateClock();
+        return;
+      }
       render();
     },
     dispose() {
@@ -499,8 +547,69 @@ interface CaptionDraftState {
   setCaptionDraft(nextCaption: string): void;
 }
 
+/** Latest-model accessor for event handlers (see mountReplayPremiereOverlay). */
+type LatestModel = () => ReplayPremiereOverlayModel;
+
+/**
+ * Model fields that change on nearly every rendered frame during live
+ * playback. They are excluded from the structural key and patched in place by
+ * {@link applyVolatileModelUpdates}; anything else triggers a full rebuild.
+ */
+const VOLATILE_MODEL_KEYS = new Set([
+  "releasedSequence",
+  "currentTurn",
+  "leaders",
+  "warEvents",
+  "headlineEvent",
+  "authoritativeNow",
+  "suggestedCaption",
+]);
+
+function structuralModelKey(model: ReplayPremiereOverlayModel): string {
+  const structural = JSON.stringify(model, (key: string, value: unknown) =>
+    VOLATILE_MODEL_KEYS.has(key) ? undefined : value,
+  );
+  // Derived structural facts of the volatile fields: crossing any of these
+  // boundaries changes what is rendered (explainer retirement, marker/share
+  // enablement, clip anchor availability), so they re-enter the key as
+  // booleans while the raw per-frame values stay out.
+  return [
+    structural,
+    Math.floor(model.releasedSequence) < SHARED_PLAYBACK_EXPLAINER_SEQUENCES,
+    model.releasedSequence >= 0,
+    finiteIntegerOrNull(model.currentTurn) !== null,
+    (model.share?.timestampUrl ?? null) === null,
+  ].join("|");
+}
+
+/** Patch the read-only per-frame regions without tearing down the DOM. */
+function applyVolatileModelUpdates(
+  overlay: HTMLElement,
+  model: ReplayPremiereOverlayModel,
+): void {
+  const position = overlay.querySelector<HTMLElement>(".rp-position");
+  if (position !== null) {
+    position.textContent = positionLabel(
+      model.currentTurn,
+      model.releasedSequence,
+    );
+  }
+  // The leaders/headline card is display-only (no interactive elements), so
+  // replacing the subtree per frame is safe and keeps it a live scoreboard.
+  const evidence = overlay.querySelector<HTMLElement>(".rp-ambient-evidence");
+  if (evidence !== null) {
+    evidence.replaceWith(renderAmbientEvidence(model));
+  }
+  // The battle feed is display-only too; refresh it in place per frame.
+  const warFeed = overlay.querySelector<HTMLElement>(".rp-war-feed");
+  if (warFeed !== null) {
+    warFeed.replaceWith(renderWarFeed(model));
+  }
+}
+
 function renderOverlay(
   model: ReplayPremiereOverlayModel,
+  latest: LatestModel,
   callbacks: ReplayPremiereOverlayCallbacks,
   safeRun: (
     button: HTMLButtonElement,
@@ -511,7 +620,7 @@ function renderOverlay(
   const shell = element("div", "rp-shell");
   shell.append(
     renderHeader(model, callbacks, safeRun),
-    renderStateBody(model, callbacks, safeRun, captionState),
+    renderStateBody(model, latest, callbacks, safeRun, captionState),
   );
   const actionStatus = element("p", "rp-action-status");
   actionStatus.dataset.premiereActionStatus = "";
@@ -540,13 +649,37 @@ function renderHeader(
 ): HTMLElement {
   const header = element("header", "rp-header");
   const titleGroup = element("div", "rp-title-group");
+  const labelRow = element("div", "rp-label-row");
   const label = element(
     "span",
     `rp-label rp-label-${labelTone(model)}`,
     publicLabel(model),
   );
+  labelRow.append(label);
+  // Broadcast-style LIVE chip in the STICKY header for the two live states,
+  // so the red dot + LIVE reads even when the body is scrolled or the reveal
+  // payoff fills the sheet. Structurally gated the same way as the body pill.
+  if (model.state === "playing" || model.state === "checkpoint") {
+    const live = element("span", "rp-live-chip");
+    live.setAttribute("role", "img");
+    live.setAttribute(
+      "aria-label",
+      translateText("replay_premiere.live_status"),
+    );
+    const dot = element("span", "rp-live-chip-dot");
+    dot.setAttribute("aria-hidden", "true");
+    live.append(
+      dot,
+      element(
+        "span",
+        "rp-live-chip-text",
+        translateText("replay_premiere.live_badge"),
+      ),
+    );
+    labelRow.append(live);
+  }
   const title = element("h2", "rp-title", safeDisplay(model.title));
-  titleGroup.append(label, title);
+  titleGroup.append(labelRow, title);
 
   const ambient = button(
     model.ambient
@@ -556,9 +689,23 @@ function renderHeader(
   );
   ambient.dataset.focusKey = "ambient";
   ambient.setAttribute("aria-pressed", String(model.ambient));
-  // Mirror every other control: when the host wires no ambient handler the
-  // toggle is a visible no-op, so disable it instead of looking live-but-dead.
-  ambient.disabled = callbacks.onAmbientChange === undefined;
+  // Ambient collapses the overlay so the map fills the screen. Before the
+  // premiere starts there is no map behind the countdown, so the toggle is
+  // disabled WITH a visible reason instead of being a live-looking no-op.
+  // (Exception: if the host somehow left ambient on, the exit control stays
+  // usable.) When the host wires no handler at all it also disables.
+  const ambientUnavailable = model.state === "scheduled" && !model.ambient;
+  ambient.disabled =
+    callbacks.onAmbientChange === undefined || ambientUnavailable;
+  if (ambientUnavailable) {
+    ambient.title = translateText("replay_premiere.ambient_unavailable");
+    ambient.setAttribute(
+      "aria-label",
+      `${translateText("replay_premiere.enter_ambient")} — ${translateText(
+        "replay_premiere.ambient_unavailable",
+      )}`,
+    );
+  }
   ambient.addEventListener("click", () => {
     safeRun(
       ambient,
@@ -577,6 +724,7 @@ function renderHeader(
 
 function renderStateBody(
   model: ReplayPremiereOverlayModel,
+  latest: LatestModel,
   callbacks: ReplayPremiereOverlayCallbacks,
   safeRun: (
     button: HTMLButtonElement,
@@ -608,10 +756,14 @@ function renderStateBody(
       body.append(renderScheduled(model, callbacks, safeRun));
       break;
     case "playing":
+      // Order tuned for the capped sheet: LIVE status, then the reaction row
+      // (must be reachable without scrolling), then the war narrative and
+      // leaders, then share.
       body.append(renderPlaying(model));
+      body.append(renderMarkers(model, latest, callbacks, safeRun));
+      body.append(renderWarFeed(model));
       body.append(renderAmbientEvidence(model));
-      body.append(renderMarkers(model, callbacks, safeRun));
-      body.append(renderShare(model, callbacks, safeRun, captionState));
+      body.append(renderShare(model, latest, callbacks, safeRun, captionState));
       break;
     case "checkpoint":
       // The prediction card is the interactive beat, so it leads. On the tight
@@ -620,9 +772,10 @@ function renderStateBody(
       // still reads through the checkpoint timer pill.
       body.append(renderCheckpoint(model, callbacks, safeRun));
       body.append(renderPlaying(model));
+      body.append(renderMarkers(model, latest, callbacks, safeRun));
+      body.append(renderWarFeed(model));
       body.append(renderAmbientEvidence(model));
-      body.append(renderMarkers(model, callbacks, safeRun));
-      body.append(renderShare(model, callbacks, safeRun, captionState));
+      body.append(renderShare(model, latest, callbacks, safeRun, captionState));
       break;
     case "revealed":
       if (!isVerifiedRevealView(model)) {
@@ -638,9 +791,9 @@ function renderStateBody(
       body.append(
         renderResultsSummary(model.reveal, model.mapName, model.matchFormat),
       );
-      body.append(renderMarkers(model, callbacks, safeRun));
-      body.append(renderShare(model, callbacks, safeRun, captionState));
-      body.append(renderCounterChallenge(model, callbacks, safeRun));
+      body.append(renderMarkers(model, latest, callbacks, safeRun));
+      body.append(renderShare(model, latest, callbacks, safeRun, captionState));
+      body.append(renderCounterChallenge(model, latest, callbacks, safeRun));
       break;
     case "failed":
       body.append(renderSanitizedFailure(model.failureCode));
@@ -658,8 +811,8 @@ function renderStateBody(
       body.append(
         renderResultsSummary(model.reveal, model.mapName, model.matchFormat),
       );
-      body.append(renderShare(model, callbacks, safeRun, captionState));
-      body.append(renderCounterChallenge(model, callbacks, safeRun));
+      body.append(renderShare(model, latest, callbacks, safeRun, captionState));
+      body.append(renderCounterChallenge(model, latest, callbacks, safeRun));
       break;
     default:
       body.append(renderSanitizedFailure("integrity_failure"));
@@ -1181,8 +1334,130 @@ function renderAmbientEvidence(model: ReplayPremiereOverlayModel): HTMLElement {
   return section;
 }
 
+const WAR_EVENT_GLYPHS: Record<ReplayPremiereWarEventKindView, string> = {
+  attack: "⚔",
+  alliance: "🤝",
+  betrayal: "†",
+  nuke: "☢",
+  conquest: "✕",
+  emote: "…",
+  chat: "…",
+};
+
+/** At most this many battle-feed rows are visible at once. */
+const WAR_FEED_VISIBLE_LIMIT = 6;
+
+function warEventText(event: ReplayPremiereWarEventView): string {
+  const actor = safeDisplay(event.actor);
+  const target = event.target === null ? null : safeDisplay(event.target);
+  switch (event.kind) {
+    case "attack":
+      return translateText("replay_premiere.war_attack", {
+        actor,
+        target: target ?? "",
+      });
+    case "alliance":
+      return translateText("replay_premiere.war_alliance", {
+        actor,
+        target: target ?? "",
+      });
+    case "betrayal":
+      return translateText("replay_premiere.war_betrayal", {
+        actor,
+        target: target ?? "",
+      });
+    case "nuke":
+      return translateText("replay_premiere.war_nuke", { actor });
+    case "conquest":
+      return translateText("replay_premiere.war_conquest", {
+        actor,
+        target: target ?? "",
+      });
+    case "emote": {
+      const detail = safeDisplay(event.detail ?? "");
+      return target === null
+        ? translateText("replay_premiere.war_emote_all", { actor, detail })
+        : translateText("replay_premiere.war_emote", {
+            actor,
+            target,
+            detail,
+          });
+    }
+    case "chat": {
+      // detail carries the quick-chat "{category}.{key}" suffix; translate
+      // through the canonical chat phrase table.
+      const phrase =
+        event.detail === null
+          ? ""
+          : translateText(`chat.${safeDisplay(event.detail)}`);
+      return target === null
+        ? translateText("replay_premiere.war_chat_all", {
+            actor,
+            message: phrase,
+          })
+        : translateText("replay_premiere.war_chat", {
+            actor,
+            target,
+            message: phrase,
+          });
+    }
+  }
+}
+
+/**
+ * The live battle feed: the war itself (attacks, alliances, betrayals,
+ * nukes, emotes, chat) as it happens on the sealed map. Spoiler-safe by
+ * construction — entries are facts of moments the viewer has already seen
+ * and never include standings, totals, or the outcome.
+ */
+function renderWarFeed(model: ReplayPremiereOverlayModel): HTMLElement {
+  const section = element("section", "rp-section rp-war-feed");
+  section.append(
+    element(
+      "h3",
+      "rp-subheading",
+      translateText("replay_premiere.war_feed_heading"),
+    ),
+  );
+  const events = (model.warEvents ?? []).slice(0, WAR_FEED_VISIBLE_LIMIT);
+  const list = element("ol", "rp-war-feed-list");
+  list.setAttribute("role", "list");
+  if (events.length === 0) {
+    list.append(
+      element(
+        "li",
+        "rp-muted rp-war-feed-empty",
+        translateText("replay_premiere.war_feed_waiting"),
+      ),
+    );
+  }
+  for (const event of events) {
+    const item = element("li", "rp-war-feed-item");
+    item.dataset.kind = event.kind;
+    const glyph = element(
+      "span",
+      "rp-war-feed-glyph",
+      WAR_EVENT_GLYPHS[event.kind] ?? "•",
+    );
+    glyph.setAttribute("aria-hidden", "true");
+    item.append(
+      glyph,
+      element("span", "rp-war-feed-text", warEventText(event)),
+      element(
+        "span",
+        "rp-war-feed-turn",
+        translateText("replay_premiere.war_turn", { turn: event.turn }),
+      ),
+    );
+    list.append(item);
+  }
+  section.append(list);
+  return section;
+}
+
 function renderMarkers(
   model: ReplayPremiereOverlayModel,
+  latest: LatestModel,
   callbacks: ReplayPremiereOverlayCallbacks,
   safeRun: (
     button: HTMLButtonElement,
@@ -1214,9 +1489,15 @@ function renderMarkers(
     markerButton.dataset.kind = marker.kind;
     markerButton.dataset.focusKey = `marker-${marker.kind}`;
     markerButton.disabled = !markerEnabled;
+    const ownCount = model.markerCounts?.[marker.kind] ?? 0;
     markerButton.setAttribute(
       "aria-label",
-      translateText(marker.translationKey),
+      ownCount > 0
+        ? translateText("replay_premiere.marker_with_count", {
+            marker: translateText(marker.translationKey),
+            count: ownCount,
+          })
+        : translateText(marker.translationKey),
     );
     const symbol = element("span", "rp-marker-symbol", marker.symbol);
     symbol.setAttribute("aria-hidden", "true");
@@ -1225,30 +1506,75 @@ function renderMarkers(
       "rp-marker-label",
       translateText(marker.translationKey),
     );
-    markerButton.append(symbol, label);
+    // Always-rendered per-kind count (the viewer's own marks, 0-seeded) so
+    // the row reads as a live interactive tally, never as decoration.
+    const count = element("span", "rp-marker-count", String(ownCount));
+    count.setAttribute("aria-hidden", "true");
+    if (ownCount > 0) {
+      markerButton.dataset.marked = "true";
+    }
+    markerButton.append(count, symbol, label);
     markerButton.addEventListener("click", () => {
       safeRun(
         markerButton,
         callbacks.onMarker === undefined
           ? undefined
-          : () =>
-              callbacks.onMarker?.({
-                premiereId: model.premiereId,
+          : () => {
+              // Read the LATEST model: volatile hydrates keep this button
+              // alive across frames, so the render-time snapshot's sequence
+              // and turn would be stale by click time.
+              const current = latest();
+              return callbacks.onMarker?.({
+                premiereId: current.premiereId,
                 kind: marker.kind,
-                sequence: model.releasedSequence,
-                turn: finiteIntegerOrNull(model.currentTurn),
-                policySeatId: model.markerPolicySeatId ?? null,
-              }),
+                sequence: current.releasedSequence,
+                turn: finiteIntegerOrNull(current.currentTurn),
+                policySeatId: current.markerPolicySeatId ?? null,
+              });
+            },
       );
     });
     list.append(markerButton);
   }
   section.append(heading, list);
+  // The row must never look silently dead: while the anonymous interaction
+  // session is still connecting in a live state, say so; once a mark is
+  // accepted by the server, confirm it.
+  if (
+    !markerEnabled &&
+    callbacks.onMarker !== undefined &&
+    model.canMark === false &&
+    (model.state === "playing" || model.state === "checkpoint")
+  ) {
+    const connecting = element(
+      "p",
+      "rp-muted rp-marker-hint",
+      translateText("replay_premiere.reactions_connecting"),
+    );
+    connecting.setAttribute("role", "status");
+    section.append(connecting);
+  }
+  const confirmation = model.markerConfirmation ?? null;
+  if (confirmation !== null) {
+    const meta = MARKERS.find((entry) => entry.kind === confirmation.kind);
+    const confirmed = element(
+      "p",
+      "rp-marker-confirmed",
+      translateText("replay_premiere.marker_confirmed", {
+        marker: meta === undefined ? "" : translateText(meta.translationKey),
+        turn: confirmation.turn,
+      }),
+    );
+    confirmed.setAttribute("role", "status");
+    confirmed.setAttribute("aria-live", "polite");
+    section.append(confirmed);
+  }
   return section;
 }
 
 function renderShare(
   model: ReplayPremiereOverlayModel,
+  latest: LatestModel,
   callbacks: ReplayPremiereOverlayCallbacks,
   safeRun: (
     button: HTMLButtonElement,
@@ -1288,14 +1614,16 @@ function renderShare(
       timestamp,
       callbacks.onShare === undefined || !timestampUrl
         ? undefined
-        : () =>
-            callbacks.onShare?.({
-              premiereId: model.premiereId,
+        : () => {
+            const current = latest();
+            return callbacks.onShare?.({
+              premiereId: current.premiereId,
               kind: "timestamp",
-              url: timestampUrl,
-              sequence: model.releasedSequence,
-              turn: finiteIntegerOrNull(model.currentTurn),
-            }),
+              url: current.share?.timestampUrl ?? timestampUrl,
+              sequence: current.releasedSequence,
+              turn: finiteIntegerOrNull(current.currentTurn),
+            });
+          },
     );
   });
   const captionLabel = element(
@@ -1324,13 +1652,15 @@ function renderShare(
       copyCaption,
       callbacks.onCopySuggestedCaption === undefined
         ? undefined
-        : () =>
-            callbacks.onCopySuggestedCaption?.({
-              premiereId: model.premiereId,
+        : () => {
+            const current = latest();
+            return callbacks.onCopySuggestedCaption?.({
+              premiereId: current.premiereId,
               caption: caption.value,
-              sequence: model.releasedSequence,
-              turn: finiteIntegerOrNull(model.currentTurn),
-            }),
+              sequence: current.releasedSequence,
+              turn: finiteIntegerOrNull(current.currentTurn),
+            });
+          },
     );
   });
   section.append(heading, timestamp, captionLabel, caption, copyCaption);
@@ -1339,7 +1669,7 @@ function renderShare(
   // download button and social-copy controls are absent from the DOM before
   // reveal.
   if (model.state === "revealed" || model.state === "archived") {
-    const clip = renderClip(model, callbacks, safeRun);
+    const clip = renderClip(model, latest, callbacks, safeRun);
     if (clip !== null) {
       section.append(clip);
     }
@@ -1349,6 +1679,7 @@ function renderShare(
 
 function renderClip(
   model: ReplayPremiereOverlayModel,
+  latest: LatestModel,
   callbacks: ReplayPremiereOverlayCallbacks,
   safeRun: (
     button: HTMLButtonElement,
@@ -1391,12 +1722,14 @@ function renderClip(
       request,
       !canRequest || callbacks.onRequestClip === undefined
         ? undefined
-        : () =>
-            callbacks.onRequestClip?.({
-              premiereId: model.premiereId,
-              sequence: model.releasedSequence,
-              turn: anchorTurn,
-            }),
+        : () => {
+            const current = latest();
+            return callbacks.onRequestClip?.({
+              premiereId: current.premiereId,
+              sequence: current.releasedSequence,
+              turn: finiteIntegerOrNull(current.currentTurn) ?? anchorTurn,
+            });
+          },
     );
   });
 
@@ -2016,6 +2349,7 @@ function isVerifiedRevealView(
 
 function renderCounterChallenge(
   model: ReplayPremiereOverlayModel,
+  latest: LatestModel,
   callbacks: ReplayPremiereOverlayCallbacks,
   safeRun: (
     button: HTMLButtonElement,
@@ -2044,17 +2378,19 @@ function renderCounterChallenge(
       exportButton,
       callbacks.onExportCounterChallenge === undefined
         ? undefined
-        : () =>
-            callbacks.onExportCounterChallenge?.({
-              premiereId: model.premiereId,
-              replayUrl: model.share?.canonicalUrl ?? "",
-              sequence: model.releasedSequence,
-              turn: finiteIntegerOrNull(model.currentTurn),
-              policySeatId: model.markerPolicySeatId ?? null,
-              mapName: model.mapName,
-              matchFormat: model.matchFormat,
-              policies: model.policies,
-            }),
+        : () => {
+            const current = latest();
+            return callbacks.onExportCounterChallenge?.({
+              premiereId: current.premiereId,
+              replayUrl: current.share?.canonicalUrl ?? "",
+              sequence: current.releasedSequence,
+              turn: finiteIntegerOrNull(current.currentTurn),
+              policySeatId: current.markerPolicySeatId ?? null,
+              mapName: current.mapName,
+              matchFormat: current.matchFormat,
+              policies: current.policies,
+            });
+          },
     );
   });
   // A quiet bordered group so the counter-challenge copy + button read as one
@@ -2515,6 +2851,29 @@ const OVERLAY_CSS = `
     background: var(--rp-bg-solid);
   }
   #${OVERLAY_ID} .rp-title-group { min-width: 0; display: grid; gap: 7px; }
+  #${OVERLAY_ID} .rp-label-row { display: flex; align-items: center; gap: 7px; min-width: 0; flex-wrap: wrap; }
+  #${OVERLAY_ID} .rp-live-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 3px 10px 3px 8px;
+    border: 1px solid var(--rp-live-border);
+    border-radius: var(--rp-r-pill);
+    background: var(--rp-live-soft);
+    color: var(--rp-live-text);
+    font-size: 10px;
+    font-weight: 850;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+  }
+  #${OVERLAY_ID} .rp-live-chip-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: var(--rp-r-pill);
+    background: var(--rp-live);
+    box-shadow: 0 0 0 0 rgba(239, 68, 68, 0.7);
+    animation: rp-live-now-pulse 1.6s ease-out infinite;
+  }
   #${OVERLAY_ID} .rp-title {
     margin: 0;
     overflow-wrap: anywhere;
@@ -2916,6 +3275,38 @@ const OVERLAY_CSS = `
   }
   #${OVERLAY_ID} .rp-leader-share { color: var(--rp-accent); font-variant-numeric: tabular-nums; font-weight: 750; }
 
+  /* ---- Battle feed ---- */
+  #${OVERLAY_ID} .rp-war-feed-list {
+    display: grid;
+    gap: 5px;
+    margin: 8px 0 0;
+    padding: 0;
+    list-style: none;
+  }
+  #${OVERLAY_ID} .rp-war-feed-item {
+    --rp-war: var(--rp-accent);
+    display: flex;
+    align-items: baseline;
+    gap: 8px;
+    padding: 5px 9px;
+    border-left: 3px solid var(--rp-war);
+    border-radius: var(--rp-r-xs);
+    background: var(--rp-surface-2);
+    font-size: 12.5px;
+    line-height: 1.35;
+  }
+  #${OVERLAY_ID} .rp-war-feed-item[data-kind="attack"] { --rp-war: var(--rp-danger); }
+  #${OVERLAY_ID} .rp-war-feed-item[data-kind="conquest"] { --rp-war: var(--rp-danger); }
+  #${OVERLAY_ID} .rp-war-feed-item[data-kind="betrayal"] { --rp-war: var(--rp-mk-betrayal); }
+  #${OVERLAY_ID} .rp-war-feed-item[data-kind="alliance"] { --rp-war: var(--rp-positive); }
+  #${OVERLAY_ID} .rp-war-feed-item[data-kind="nuke"] { --rp-war: var(--rp-caution); }
+  #${OVERLAY_ID} .rp-war-feed-item[data-kind="emote"],
+  #${OVERLAY_ID} .rp-war-feed-item[data-kind="chat"] { --rp-war: var(--rp-controlled); }
+  #${OVERLAY_ID} .rp-war-feed-glyph { flex: none; color: var(--rp-war); font-size: 13px; font-weight: 850; line-height: 1; }
+  #${OVERLAY_ID} .rp-war-feed-text { min-width: 0; overflow-wrap: anywhere; color: var(--rp-text-dim); font-weight: 600; }
+  #${OVERLAY_ID} .rp-war-feed-turn { margin-left: auto; color: var(--rp-muted); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 10.5px; white-space: nowrap; }
+  #${OVERLAY_ID} .rp-war-feed-empty { margin: 0; font-size: 12px; }
+
   /* ---- Reactions / markers ---- */
   #${OVERLAY_ID} .rp-marker-list { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 6px; margin-top: 9px; }
   #${OVERLAY_ID} .rp-marker-button {
@@ -2938,6 +3329,32 @@ const OVERLAY_CSS = `
   #${OVERLAY_ID} .rp-marker-button[data-kind="clip_this"] { --rp-mk: var(--rp-mk-clip); --rp-mk-soft: var(--rp-mk-clip-soft); }
   #${OVERLAY_ID} .rp-marker-button:hover:not(:disabled) { transform: translateY(-1px); border-color: var(--rp-mk); background: var(--rp-mk-soft); }
   #${OVERLAY_ID} .rp-marker-button:active:not(:disabled) { transform: translateY(0); }
+  #${OVERLAY_ID} .rp-marker-button { position: relative; }
+  #${OVERLAY_ID} .rp-marker-count {
+    position: absolute;
+    top: 3px;
+    right: 4px;
+    min-width: 14px;
+    padding: 0 3px;
+    border-radius: var(--rp-r-pill);
+    background: var(--rp-surface-3);
+    color: var(--rp-muted);
+    font-size: 9px;
+    font-weight: 800;
+    line-height: 14px;
+  }
+  #${OVERLAY_ID} .rp-marker-button[data-marked="true"] .rp-marker-count { background: var(--rp-mk); color: var(--rp-bg-solid); }
+  #${OVERLAY_ID} .rp-marker-hint { margin: 8px 0 0; font-size: 11.5px; }
+  #${OVERLAY_ID} .rp-marker-confirmed {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    margin: 8px 0 0;
+    color: var(--rp-positive-text);
+    font-size: 12px;
+    font-weight: 700;
+  }
+  #${OVERLAY_ID} .rp-marker-confirmed::before { content: "✓"; color: var(--rp-positive); font-weight: 900; }
   #${OVERLAY_ID} .rp-marker-symbol { display: block; color: var(--rp-mk); font-size: 19px; font-weight: 850; line-height: 1; }
   #${OVERLAY_ID} .rp-marker-label { display: block; margin-top: 4px; overflow-wrap: break-word; hyphens: manual; font-size: 10px; font-weight: 650; line-height: 1.12; }
 
@@ -3143,6 +3560,7 @@ const OVERLAY_CSS = `
   }
   #${OVERLAY_ID}[data-ambient="true"] .rp-header { padding: 9px 10px; }
   #${OVERLAY_ID}[data-ambient="true"] .rp-title { max-width: 190px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-size: 14px; }
+  #${OVERLAY_ID}[data-ambient="true"] .rp-war-feed,
   #${OVERLAY_ID}[data-ambient="true"] .rp-label,
   #${OVERLAY_ID}[data-ambient="true"] .rp-live-badge,
   #${OVERLAY_ID}[data-ambient="true"] .rp-shared-status,
@@ -3173,6 +3591,9 @@ const OVERLAY_CSS = `
   #${OVERLAY_ID}[data-ambient="true"] .rp-marker-list { grid-template-columns: repeat(5, 30px); gap: 5px; margin: 0; justify-content: space-between; }
   #${OVERLAY_ID}[data-ambient="true"] .rp-marker-button { min-height: 30px; height: 30px; width: 30px; padding: 1px; box-shadow: inset 0 2px 0 var(--rp-mk); }
   #${OVERLAY_ID}[data-ambient="true"] .rp-marker-symbol { font-size: 14px; }
+  #${OVERLAY_ID}[data-ambient="true"] .rp-marker-count,
+  #${OVERLAY_ID}[data-ambient="true"] .rp-marker-hint,
+  #${OVERLAY_ID}[data-ambient="true"] .rp-marker-confirmed { display: none; }
   #${OVERLAY_ID}[data-ambient="true"] .rp-marker-label {
     position: absolute;
     width: 1px;
@@ -3233,6 +3654,7 @@ const OVERLAY_CSS = `
   @media (prefers-reduced-motion: reduce) {
     #${OVERLAY_ID} * { scroll-behavior: auto !important; transition: none !important; }
     #${OVERLAY_ID} .rp-live-now-dot,
+    #${OVERLAY_ID} .rp-live-chip-dot,
     #${OVERLAY_ID} .rp-checkpoint-timer::before,
     #${OVERLAY_ID} .rp-clip-dot,
     #${OVERLAY_ID} .rp-reveal,

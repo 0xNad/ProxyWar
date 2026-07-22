@@ -33,7 +33,10 @@ import { GameView, PlayerView } from "../core/game/GameView";
 import { loadTerrainMap, TerrainMapData } from "../core/game/TerrainMapLoader";
 import { UserSettings } from "../core/game/UserSettings";
 import { WorkerClient } from "../core/worker/WorkerClient";
-import { isAiLeagueReplayRoute } from "./AiLeagueReplayMode";
+import {
+  aiLeagueSpectatorDisplayName,
+  isAiLeagueReplayRoute,
+} from "./AiLeagueReplayMode";
 import { getPersistentID } from "./Auth";
 import {
   AutoUpgradeEvent,
@@ -49,6 +52,7 @@ import {
 } from "./InputHandler";
 import { endGame, startGame, startTime } from "./LocalPersistantStats";
 import { ReplayPremiereProgressiveReplayConfig } from "./ReplayPremierePlayback";
+import { PremiereWarFeedTracker } from "./ReplayPremiereWarFeed";
 import { ReplayPremiereWorkerClient } from "./ReplayPremiereWorkerClient";
 import { terrainMapFileLoader } from "./TerrainMapFileLoader";
 import {
@@ -345,6 +349,10 @@ export class ClientGameRunner {
 
   private lastTickReceiveTime: number = 0;
   private currentTickDelay: number | undefined = undefined;
+
+  // Sealed-premiere war narrative: dedupe state for attack/nuke sightings so
+  // each development surfaces once (see ReplayPremiereWarFeed).
+  private readonly warFeedTracker = new PremiereWarFeedTracker();
 
   constructor(
     private lobby: LobbyConfig,
@@ -694,19 +702,56 @@ export class ClientGameRunner {
       this.worker instanceof ReplayPremiereWorkerClient
         ? this.worker.processedSequence()
         : null;
+    const turnNumber =
+      premiereProcessedSequence === null
+        ? this.turnsSeen
+        : premiereProcessedSequence + 1;
+    // Sealed premieres get the spoiler-safe war narrative derived from the
+    // update batch the viewer is already watching (attacks, alliances,
+    // betrayals, nukes, emotes, quick chat). Ordinary replays keep their
+    // artifact-backed overlay instead.
+    const warEvents =
+      this.lobby.progressiveReplay === undefined
+        ? undefined
+        : this.warFeedTracker.extract(gu, turnNumber, {
+            bySmallId: (smallId) => this.spectatorNameBySmallId(smallId),
+            byPlayerId: (playerId) => this.spectatorNameByPlayerId(playerId),
+          });
     document.dispatchEvent(
       new CustomEvent("ai-league-replay-frame", {
         detail: {
           tick: gu.tick,
           sequence: premiereProcessedSequence,
-          turnNumber:
-            premiereProcessedSequence === null
-              ? this.turnsSeen
-              : premiereProcessedSequence + 1,
+          turnNumber,
           players,
+          ...(warEvents === undefined ? {} : { warEvents }),
         },
       }),
     );
+  }
+
+  private spectatorNameBySmallId(smallId: number): string | null {
+    if (!Number.isSafeInteger(smallId) || smallId <= 0) {
+      return null;
+    }
+    try {
+      const view = this.gameView.playerBySmallID(smallId);
+      return "displayName" in view
+        ? aiLeagueSpectatorDisplayName(view.displayName())
+        : null;
+    } catch {
+      return null;
+    }
+  }
+
+  private spectatorNameByPlayerId(playerId: string): string | null {
+    try {
+      return aiLeagueSpectatorDisplayName(
+        this.gameView.player(playerId).displayName(),
+      );
+    } catch {
+      return null;
+    }
   }
 
   public stop() {

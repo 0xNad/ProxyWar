@@ -2,6 +2,7 @@ import { promises as fs } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, test } from "vitest";
+import { getServerConfig } from "../../../src/core/configuration/ConfigLoader";
 import {
   buildPremiereChunks,
   isPremiereChunkReleaseDue,
@@ -10,6 +11,10 @@ import {
   verifyPremiereChunkChain,
   verifyPremiereChunkDraftChain,
 } from "../../../src/server/replay-premiere/ReplayPremiereChunks";
+import {
+  PREMIERE_REAL_TURN_INTERVAL_MS,
+  REPLAY_PREMIERE_MAX_PRESENTATION_SPAN_MS,
+} from "../../../src/server/replay-premiere/ReplayPremiereContracts";
 import { importPremiereReplay } from "../../../src/server/replay-premiere/ReplayPremiereImport";
 import { canonicalReplayPremiereJson } from "../../../src/server/replay-premiere/ReplayPremiereIntegrity";
 import {
@@ -85,6 +90,43 @@ describe("ReplayPremiere import and chunks", () => {
     expect(replay.records[1].payload).toEqual({ turnNumber: 1, intents: [] });
   });
 
+  test("real-speed pacing: nominal offsets equal the real turn interval x turn delta", () => {
+    // Playback at rate 1 must equal regular OpenFront match speed exactly:
+    // consecutive dense records are one game turn apart, so their nominal
+    // offsets differ by exactly the real turn interval.
+    expect(PREMIERE_REAL_TURN_INTERVAL_MS).toBe(100);
+    const replay = importPremiereReplay(
+      {
+        gameStartInfo: gameStartInfo(),
+        turnCount: 8,
+        turnIntervalMs: PREMIERE_REAL_TURN_INTERVAL_MS,
+        turns: [{ turn: { turnNumber: 3, intents: [] } }],
+      },
+      IMPORT_LIMITS,
+    );
+    for (let index = 1; index < replay.records.length; index += 1) {
+      const previous = replay.records[index - 1];
+      const record = replay.records[index];
+      expect(record.nominalOffsetMs - previous.nominalOffsetMs).toBe(
+        (record.turn - previous.turn) * PREMIERE_REAL_TURN_INTERVAL_MS,
+      );
+    }
+    // Computed-duration sanity: a 17,000-turn episode at rate 1 plays for
+    // 17,000 x 100ms = 1,700s ~= 28.3 minutes of presentation time.
+    const seventeenThousandTurnsMs = 17_000 * PREMIERE_REAL_TURN_INTERVAL_MS;
+    expect(seventeenThousandTurnsMs / 60_000).toBeCloseTo(28.33, 1);
+  });
+
+  test("real-speed pacing pins the constant to the live server config cadence", () => {
+    // DefaultConfig.turnIntervalMs() is the game's actual cadence; the
+    // premiere constant must never drift from it. The client wire schema's
+    // presentation-span ceiling mirrors the server contract constant too.
+    expect(PREMIERE_REAL_TURN_INTERVAL_MS).toBe(
+      getServerConfig("prod").turnIntervalMs(),
+    );
+    expect(REPLAY_PREMIERE_MAX_PRESENTATION_SPAN_MS).toBe(60_000);
+  });
+
   test("rejects outcome fields, unknown bootstrap fields, and turn disorder", () => {
     expect(() =>
       importPremiereReplay(
@@ -156,7 +198,7 @@ describe("ReplayPremiere import and chunks", () => {
       ).toBeLessThanOrEqual(100);
     }
     expect(() =>
-      buildPremiereChunks({ ...options, maxPresentationSpanMs: 1_001 }),
+      buildPremiereChunks({ ...options, maxPresentationSpanMs: 60_001 }),
     ).toThrow(/hard_maximum/);
   });
 
