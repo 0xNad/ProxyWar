@@ -60,7 +60,6 @@ function episodeRow(
     completedAt: "2026-07-21T09:00:00.000Z",
     map: "Europe",
     mapSize: "Large",
-    difficulty: "Hard",
     turnCount: 3000,
     decisionCount: 300,
     degradedCount: 0,

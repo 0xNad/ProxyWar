@@ -35,7 +35,6 @@ function episode(
     completedAt: "2026-07-17T10:00:00Z",
     map: "Pangaea",
     mapSize: "Compact",
-    difficulty: "Easy",
     turnCount: 400,
     decisionCount: 10,
     degradedCount: 0,

@@ -42,8 +42,12 @@ export interface CoworldLeagueEpisodeRow {
   roundNumber: number | null;
   completedAt: string | null;
   map: string;
+  /**
+   * Map dimensions (e.g. "Normal"). Populated from the authoritative in-replay
+   * config; blank when a row is shown without its downloaded replay. Not a
+   * nation/bot property, so — unlike difficulty — it is retained.
+   */
   mapSize: string;
-  difficulty: string;
   turnCount: number | null;
   decisionCount: number | null;
   degradedCount: number | null;
