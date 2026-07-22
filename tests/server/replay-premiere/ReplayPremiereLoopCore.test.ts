@@ -19,8 +19,10 @@ import {
   isPremiereId,
 } from "../../../src/server/replay-premiere/ReplayPremiereContracts";
 import {
+  PREMIERE_LOOP_ACTIVATION_VERIFY_MS,
   PREMIERE_LOOP_HOLD_WINDOW_MS,
   PREMIERE_LOOP_MAX_PIPELINE_ATTEMPTS,
+  PREMIERE_LOOP_MAX_REACTIVATION_ATTEMPTS,
   PREMIERE_LOOP_SCHEDULE_LEAD_MS,
   PREMIERE_LOOP_SEAL_WINDOW_MS,
   PREMIERE_LOOP_TURN_STARTUP_BUDGET,
@@ -29,6 +31,7 @@ import {
   buildLoopSuppressionContract,
   ceilToMinuteIso,
   checkpointSequencesForTurnCount,
+  decideActivationVerification,
   decideLoopClaim,
   deriveCheckpointId,
   derivePremiereId,
@@ -40,6 +43,7 @@ import {
   isTurnCountWithinStartupBudget,
   loopSideEffectPlan,
   mapLabelFromVariantName,
+  normalizeLoopHoldState,
   orderEpisodesForClaim,
   parseLoopReplayRows,
   parseLoopRounds,
@@ -83,6 +87,8 @@ function hold(overrides: Partial<LoopHoldState> = {}): LoopHoldState {
     playbackRate: 2,
     phase: "claimed",
     activationAttempts: 0,
+    activatedAt: null,
+    reactivationAttempts: 0,
     createdAt: NOW.toISOString(),
     ...overrides,
   };
@@ -448,6 +454,177 @@ describe("foldLoopJournal — hold lifecycle, retry ceiling, terminality", () =>
     ]);
     expect(folded.terminalRoundIds.has("round_9")).toBe(true);
     expect(folded.attemptsByRound.get("round_9")).toBeUndefined();
+  });
+
+  test("activation_lost is terminal (publish at quarantine expiry), never a retry", () => {
+    const active = hold({ phase: "activated" });
+    const folded = foldLoopJournal([
+      { kind: "hold_update", ts: NOW.toISOString(), hold: active },
+      {
+        kind: "hold_released",
+        ts: NOW.toISOString(),
+        episodeRequestId: active.episodeRequestId,
+        premiereId: active.premiereId,
+        roundId: active.roundId,
+        outcome: "activation_lost",
+        terminal: true,
+      },
+    ]);
+    expect(folded.activeHold).toBeNull();
+    expect(folded.terminalRoundIds.has("round_1")).toBe(true);
+    expect(folded.attemptsByRound.get("round_1")).toBeUndefined();
+  });
+
+  test("pre-verification journal records fold with a normalized window state", () => {
+    // Simulate a hold journaled by the pre-fix loop: the two verification
+    // fields are absent entirely (old schema on disk).
+    const legacy = hold({ phase: "activated" });
+    const legacyShape = { ...legacy } as Record<string, unknown>;
+    delete legacyShape.activatedAt;
+    delete legacyShape.reactivationAttempts;
+    const folded = foldLoopJournal([
+      {
+        kind: "hold_update",
+        ts: NOW.toISOString(),
+        hold: legacyShape as unknown as LoopHoldState,
+      },
+    ]);
+    expect(folded.activeHold?.activatedAt).toBeNull();
+    expect(folded.activeHold?.reactivationAttempts).toBe(0);
+  });
+});
+
+describe("post-activation registration verification (activation-zombie fix, 2026-07-22 round 644)", () => {
+  const activatedAt = "2026-07-22T12:00:00.000Z";
+
+  test("any observable premiere state verifies registration", () => {
+    for (const state of [
+      "draft",
+      "scheduled",
+      "playing",
+      "checkpoint",
+      "revealed",
+    ]) {
+      expect(
+        decideActivationVerification(
+          hold({ phase: "activated", activatedAt }),
+          state,
+          NOW,
+        ),
+      ).toEqual({ kind: "registered" });
+    }
+  });
+
+  test("verification only applies to the activated phase", () => {
+    for (const phase of ["claimed", "admitted", "live"] as const) {
+      expect(decideActivationVerification(hold({ phase }), null, NOW)).toEqual({
+        kind: "not_applicable",
+      });
+    }
+  });
+
+  test("an unregistered activated hold without a window stamp starts the window", () => {
+    expect(
+      decideActivationVerification(
+        hold({ phase: "activated", activatedAt: null }),
+        null,
+        NOW,
+      ),
+    ).toEqual({ kind: "start_window" });
+  });
+
+  test("waits strictly inside the bounded window", () => {
+    const inside = new Date(
+      Date.parse(activatedAt) + PREMIERE_LOOP_ACTIVATION_VERIFY_MS - 1,
+    );
+    expect(
+      decideActivationVerification(
+        hold({ phase: "activated", activatedAt }),
+        null,
+        inside,
+      ),
+    ).toEqual({ kind: "wait" });
+  });
+
+  test("re-activates exactly once when the window elapses", () => {
+    const elapsed = new Date(
+      Date.parse(activatedAt) + PREMIERE_LOOP_ACTIVATION_VERIFY_MS,
+    );
+    expect(
+      decideActivationVerification(
+        hold({ phase: "activated", activatedAt, reactivationAttempts: 0 }),
+        null,
+        elapsed,
+      ),
+    ).toEqual({ kind: "reactivate" });
+    expect(
+      decideActivationVerification(
+        hold({
+          phase: "activated",
+          activatedAt,
+          reactivationAttempts: PREMIERE_LOOP_MAX_REACTIVATION_ATTEMPTS,
+        }),
+        null,
+        elapsed,
+      ),
+    ).toEqual({ kind: "activation_lost" });
+  });
+
+  test("normalizeLoopHoldState nulls invalid stamps and floors bad retry counters", () => {
+    const garbage = normalizeLoopHoldState(
+      hold({
+        activatedAt: "not-a-timestamp",
+        reactivationAttempts: -3 as number,
+      }),
+    );
+    expect(garbage.activatedAt).toBeNull();
+    expect(garbage.reactivationAttempts).toBe(0);
+    const kept = normalizeLoopHoldState(
+      hold({ activatedAt, reactivationAttempts: 1 }),
+    );
+    expect(kept.activatedAt).toBe(activatedAt);
+    expect(kept.reactivationAttempts).toBe(1);
+  });
+
+  test("terminates: a permanently unregistered premiere reaches activation_lost in bounded ticks", () => {
+    // Simulate the loop's 61s tick cadence against a premiere that never
+    // registers. The sequence must reach activation_lost without ever
+    // repeating a non-terminal state indefinitely (no new unbounded states).
+    let current = hold({
+      phase: "activated",
+      activatedAt,
+      reactivationAttempts: 0,
+    });
+    const transitions: string[] = [];
+    let released = false;
+    for (let tick = 1; tick <= 10 && !released; tick += 1) {
+      const now = new Date(Date.parse(activatedAt) + tick * 61_000);
+      const decision = decideActivationVerification(current, null, now);
+      transitions.push(decision.kind);
+      if (decision.kind === "reactivate") {
+        current = {
+          ...current,
+          reactivationAttempts: current.reactivationAttempts + 1,
+          activatedAt: now.toISOString(),
+        };
+      } else if (decision.kind === "activation_lost") {
+        released = true;
+      } else if (decision.kind !== "wait") {
+        throw new Error(`unexpected transition: ${decision.kind}`);
+      }
+    }
+    expect(released).toBe(true);
+    expect(transitions.filter((kind) => kind === "reactivate")).toHaveLength(
+      PREMIERE_LOOP_MAX_REACTIVATION_ATTEMPTS,
+    );
+    // wait, wait(reactivate at 122s), then a fresh window, then lost: the
+    // whole verification story fits comfortably inside the hold window.
+    expect(transitions.length).toBeLessThanOrEqual(6);
+    expect(transitions.at(-1)).toBe("activation_lost");
+  });
+
+  test("shadow mode still forbids the restart side effect the retry uses", () => {
+    expect(loopSideEffectPlan(true).restart).toBe(false);
   });
 });
 

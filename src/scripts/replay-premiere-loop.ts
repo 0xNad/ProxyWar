@@ -29,6 +29,7 @@ import {
   buildLoopEligibilityInput,
   buildLoopPremiereDefinition,
   buildLoopSuppressionContract,
+  decideActivationVerification,
   decideLoopClaim,
   derivePremiereId,
   foldLoopJournal,
@@ -64,6 +65,18 @@ import { runReplayPremiereCoworldIngest } from "./replay-premiere-ingest-coworld
  * and admits it in-process into a sealed premiere, activates it with a
  * controlled server restart, tracks it to reveal, then releases the hold so the
  * episode publishes ordinarily.
+ *
+ * ACTIVATION IS VERIFIED (2026-07-22 round-644 activation zombie): a
+ * successful controlled restart only proves a fresh server process accepted
+ * traffic — the server's startup recovery can still reject the freshly
+ * admitted premiere on its own total assembly budget
+ * (`startup_deadline_exceeded`), leaving the premiere page 404. After
+ * activation the tracker therefore polls the premiere's loopback manifest
+ * inside a bounded window (~2 ticks); if the premiere never becomes
+ * observable it fires EXACTLY ONE fresh controlled-restart re-activation, and
+ * if that also fails verification it releases the hold immediately as
+ * `activation_lost` (journaled, terminal) so the episode publishes at
+ * quarantine expiry instead of zombie-tracking to `holdExpiresAt`.
  *
  * EVERY ROUND IS PREMIERE (2026-07-22 operator directive): each live tick also
  * heartbeats a STANDING suppression contract — zero holds when nothing is
@@ -948,7 +961,11 @@ async function activateHold(
   if (liveState !== null) {
     // Already registered (a prior restart, or an external one, took effect). Do
     // not interrupt a live premiere; move straight to tracking.
-    const activated = { ...hold, phase: "activated" as const };
+    const activated = {
+      ...hold,
+      phase: "activated" as const,
+      activatedAt: now.toISOString(),
+    };
     await journal.appendHoldUpdate(activated);
     return { kind: "activated", hold: activated };
   }
@@ -958,7 +975,13 @@ async function activateHold(
   const restarted = await fireRestartHelper(config);
   if (restarted) {
     log(`activated premiere ${hold.premiereId} via controlled restart`);
-    const activated = { ...hold, phase: "activated" as const };
+    // `activatedAt` starts the bounded registration verification window; the
+    // tracker below only trusts an activation it can observe.
+    const activated = {
+      ...hold,
+      phase: "activated" as const,
+      activatedAt: now.toISOString(),
+    };
     await journal.appendHoldUpdate(activated);
     return { kind: "activated", hold: activated };
   }
@@ -1007,6 +1030,7 @@ async function trackHold(
   config: LoopConfig,
   journal: JournalWriter,
   now: Date,
+  restart: () => Promise<boolean> = () => fireRestartHelper(config),
 ): Promise<void> {
   const state = await readPremiereState(config, hold.premiereId);
   if (state === "revealed" || state === "archived") {
@@ -1027,8 +1051,60 @@ async function trackHold(
     log(`premiere ${hold.premiereId} is live (${state}); league card flipped`);
     return;
   }
-  // Still scheduled/playing and already live, or not yet serving: keep the
-  // contract fresh (requirement #1) and wait for the next tick.
+
+  // Post-activation registration verification (2026-07-22 round-644 activation
+  // zombie): a successful controlled restart does not prove the premiere
+  // registered — the fresh server's startup recovery can reject the admission
+  // on its own budget (`startup_deadline_exceeded`), leaving the page 404. An
+  // activated-but-unregistered hold gets a bounded window, then exactly one
+  // re-activation, then an immediate terminal `activation_lost` release
+  // (fail-open: the episode publishes at quarantine expiry). Every transition
+  // is journaled; the hard holdExpiresAt valve above this is never extended.
+  const verification = decideActivationVerification(hold, state, now);
+  if (verification.kind === "start_window") {
+    const stamped = { ...hold, activatedAt: now.toISOString() };
+    await journal.appendHoldUpdate(stamped);
+    await writeContractForHold(stamped, config, now);
+    log(
+      `premiere ${hold.premiereId} not registered after activation; verification window started`,
+    );
+    return;
+  }
+  if (verification.kind === "wait") {
+    await writeContractForHold(hold, config, now);
+    log(`premiere ${hold.premiereId} awaiting registration (verify window)`);
+    return;
+  }
+  if (verification.kind === "reactivate") {
+    const attempted = {
+      ...hold,
+      reactivationAttempts: hold.reactivationAttempts + 1,
+    };
+    if (await restart()) {
+      const reactivated = { ...attempted, activatedAt: now.toISOString() };
+      await journal.appendHoldUpdate(reactivated);
+      await writeContractForHold(reactivated, config, now);
+      log(
+        `re-activated premiere ${hold.premiereId} via controlled restart (registration verify failed)`,
+      );
+      return;
+    }
+    // The single retry could not even restart the server; release immediately
+    // rather than holding the card for a premiere that cannot register.
+    log(`re-activation refused for ${hold.premiereId}; releasing`);
+    await releaseHold(attempted, "activation_lost", true, config, journal, now);
+    return;
+  }
+  if (verification.kind === "activation_lost") {
+    log(
+      `premiere ${hold.premiereId} never registered after re-activation; releasing`,
+    );
+    await releaseHold(hold, "activation_lost", true, config, journal, now);
+    return;
+  }
+
+  // Still scheduled/playing and already live, or registered and waiting: keep
+  // the contract fresh (requirement #1) and wait for the next tick.
   await writeContractForHold(hold, config, now);
 }
 
@@ -1267,6 +1343,8 @@ async function claimRound(
     playbackRate: playbackRateForTurnCount(selected.facts.turnCount),
     phase: "claimed",
     activationAttempts: 0,
+    activatedAt: null,
+    reactivationAttempts: 0,
     createdAt: now.toISOString(),
   };
 
@@ -1674,5 +1752,5 @@ if (invokedDirectly) {
   });
 }
 
-export { isEpisodeAlreadyPublic, main, resolveLoopConfig };
-export type { LoopConfig };
+export { isEpisodeAlreadyPublic, main, resolveLoopConfig, trackHold };
+export type { JournalWriter, LoopConfig };

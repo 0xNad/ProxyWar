@@ -79,6 +79,27 @@ export const PREMIERE_LOOP_MAX_RAW_REPLAY_CACHE = 3;
 export const PREMIERE_LOOP_MAX_ACTIVATION_ATTEMPTS = 3;
 
 /**
+ * Bounded post-activation registration verification window (~2 loop ticks).
+ * A successful controlled restart proves a fresh server process accepted
+ * traffic — it does NOT prove the premiere registered: the server's startup
+ * recovery has its own total assembly budget (`maxStartupMs`, ~8s) and can
+ * reject a freshly admitted premiere with `startup_deadline_exceeded`
+ * (2026-07-22 round-644 activation zombie). The loop therefore verifies the
+ * premiere's public surface after activation and only trusts registration it
+ * can observe.
+ */
+export const PREMIERE_LOOP_ACTIVATION_VERIFY_MS = 120_000;
+/**
+ * Exactly one fresh controlled-restart re-activation after a failed
+ * verification. A retry boots a process whose startup scan is guaranteed to
+ * see the admission (it was written long before the restart) with a full
+ * startup budget; if registration still fails, the hold is released as
+ * `activation_lost` so the episode publishes ordinarily — never zombie-tracked
+ * to `holdExpiresAt`.
+ */
+export const PREMIERE_LOOP_MAX_REACTIVATION_ATTEMPTS = 1;
+
+/**
  * The public run key the mirror derives for a Coworld episode bundle:
  * `league-<sourceRunId>`. The retention-pin manifest validates pins against
  * exactly this pattern, so an invalid key would break the mirror's pin read;
@@ -351,6 +372,16 @@ export interface LoopHoldState {
   playbackRate: PremierePlaybackRate;
   phase: LoopHoldPhase;
   activationAttempts: number;
+  /**
+   * When the loop last confirmed a controlled restart for this hold (initial
+   * activation or the single re-activation). Starts the bounded registration
+   * verification window. Null until activated — and on records journaled
+   * before this field existed; {@link foldLoopJournal} normalizes those, and
+   * the tracker stamps the window start on first observation.
+   */
+  activatedAt: string | null;
+  /** Re-activation restarts consumed after a failed verification (0 or 1). */
+  reactivationAttempts: number;
   createdAt: string;
 }
 
@@ -374,6 +405,14 @@ export type LoopReleaseOutcome =
   | "expired"
   | "leak_audit_refused"
   | "activation_refused"
+  /**
+   * The controlled restart reported success but the premiere never became
+   * observable (e.g. the server's startup recovery rejected the admission on
+   * its own deadline) and the single re-activation retry did not fix it. The
+   * hold is released immediately so the episode publishes at quarantine
+   * expiry instead of zombie-tracking to holdExpiresAt.
+   */
+  | "activation_lost"
   | "ingest_failed"
   | "admit_failed"
   | "failed_or_cancelled"
@@ -409,6 +448,31 @@ export interface LoopFoldedState {
 }
 
 /**
+ * Normalize a journaled hold to the current schema. Records appended before
+ * the activation-verification fields existed lack `activatedAt` /
+ * `reactivationAttempts`; treat those (and any invalid value) as "window not
+ * started / no retries consumed" so the tracker starts a fresh bounded window
+ * rather than releasing early or zombie-tracking.
+ */
+export function normalizeLoopHoldState(hold: LoopHoldState): LoopHoldState {
+  const activatedAtMs =
+    typeof hold.activatedAt === "string"
+      ? Date.parse(hold.activatedAt)
+      : Number.NaN;
+  const reactivationAttempts =
+    typeof hold.reactivationAttempts === "number" &&
+    Number.isSafeInteger(hold.reactivationAttempts) &&
+    hold.reactivationAttempts >= 0
+      ? hold.reactivationAttempts
+      : 0;
+  return {
+    ...hold,
+    activatedAt: Number.isFinite(activatedAtMs) ? hold.activatedAt : null,
+    reactivationAttempts,
+  };
+}
+
+/**
  * Fold an append-only journal into current loop state. `hold_update` sets the
  * single active hold; `hold_released` clears it and either marks its round
  * terminal (success/publish outcomes) or counts a retriable attempt (and marks
@@ -425,7 +489,7 @@ export function foldLoopJournal(
 
   for (const record of records) {
     if (record.kind === "hold_update") {
-      activeHold = record.hold;
+      activeHold = normalizeLoopHoldState(record.hold);
       continue;
     }
     if (record.kind === "round_skipped") {
@@ -699,6 +763,71 @@ export function loopSideEffectPlan(shadow: boolean): LoopSideEffectPlan {
 export function isHoldExpired(hold: LoopHoldState, now: Date): boolean {
   const expiresMs = Date.parse(hold.holdExpiresAt);
   return Number.isFinite(expiresMs) && now.getTime() >= expiresMs;
+}
+
+// ---------------------------------------------------------------------------
+// Post-activation registration verification (the activation-zombie fix)
+// ---------------------------------------------------------------------------
+
+export type LoopActivationVerification =
+  /** The premiere is observable — registration verified, keep tracking. */
+  | { kind: "registered" }
+  /** Not an activated-phase hold; verification does not apply. */
+  | { kind: "not_applicable" }
+  /** Unregistered and no window running: stamp `activatedAt` now. */
+  | { kind: "start_window" }
+  /** Unregistered but the bounded window is still open: wait. */
+  | { kind: "wait" }
+  /** Window elapsed and the single retry is unspent: re-activate once. */
+  | { kind: "reactivate" }
+  /** Window elapsed after the retry: release the hold as activation_lost. */
+  | { kind: "activation_lost" };
+
+/**
+ * Decide what the tracker must do about an activated hold whose premiere may
+ * not actually be registered. The 2026-07-22 round-644 incident proved a
+ * successful controlled restart does not imply registration: the fresh
+ * server's startup recovery can reject the admission on its own total budget
+ * (`startup_deadline_exceeded`), leaving `/premiere/<id>` 404 while the loop
+ * tracked "phase activated" for the full 40-minute hold window.
+ *
+ * Bounded by construction — every path terminates:
+ * - `start_window` fires at most once per activation (it writes a valid
+ *   `activatedAt`, after which the branch is unreachable);
+ * - `wait` lasts at most `windowMs` per activation;
+ * - `reactivate` is capped by `maxReactivations` (exactly one by default) and
+ *   restarts the window by stamping a fresh `activatedAt`;
+ * - `activation_lost` and `registered` end verification.
+ * The hard `holdExpiresAt` valve in the caller still bounds everything above
+ * this, and is never extended.
+ */
+export function decideActivationVerification(
+  hold: LoopHoldState,
+  premiereState: string | null,
+  now: Date,
+  windowMs: number = PREMIERE_LOOP_ACTIVATION_VERIFY_MS,
+  maxReactivations: number = PREMIERE_LOOP_MAX_REACTIVATION_ATTEMPTS,
+): LoopActivationVerification {
+  if (premiereState !== null) {
+    return { kind: "registered" };
+  }
+  if (hold.phase !== "activated") {
+    return { kind: "not_applicable" };
+  }
+  const activatedAtMs =
+    typeof hold.activatedAt === "string"
+      ? Date.parse(hold.activatedAt)
+      : Number.NaN;
+  if (!Number.isFinite(activatedAtMs)) {
+    return { kind: "start_window" };
+  }
+  if (now.getTime() - activatedAtMs < windowMs) {
+    return { kind: "wait" };
+  }
+  if (hold.reactivationAttempts < maxReactivations) {
+    return { kind: "reactivate" };
+  }
+  return { kind: "activation_lost" };
 }
 
 /**
