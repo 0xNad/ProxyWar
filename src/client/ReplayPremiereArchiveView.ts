@@ -63,6 +63,9 @@ interface ArchiveSummary {
   outcome: ArchiveSummaryOutcome | null;
   predictions: ArchiveSummaryPrediction[];
   markers: ArchiveSummaryMarker[];
+  /** Optional public labels; legacy summaries built before them carry neither. */
+  mapLabel: string | null;
+  formatLabel: string | null;
 }
 
 export interface ReplayPremiereArchivePayload {
@@ -99,7 +102,7 @@ export function mountArchivedReplayPremiereOverlay(
   ambient = false,
 ): ReplayPremiereOverlayHandle {
   const model = { ...buildArchivedOverlayModel(payload), ambient };
-  return mountReplayPremiereOverlay(model, {
+  const handle = mountReplayPremiereOverlay(model, {
     // The archived page is read-only, but the ambient toggle must still work:
     // re-mount the same summary with the ambient flag flipped. This gives the
     // archived surface a real compact mode so the league replay behind it is
@@ -108,6 +111,61 @@ export function mountArchivedReplayPremiereOverlay(
       mountArchivedReplayPremiereOverlay(payload, request.ambient);
     },
   });
+  // The read-only archived model drops the whole share card, leaving only the
+  // ambient toggle and an undiscoverable replay. Add back just two actions the
+  // durable page needs — copy the premiere link, and a loud "watch" entry into
+  // ambient mode when the underlying league replay exists — without resurrecting
+  // the full share surface. They render outside the overlay's own body markup
+  // (which this batch does not modify), so they are re-added on each mount.
+  augmentArchivedOverlayActions(handle.element, payload, ambient);
+  return handle;
+}
+
+/**
+ * Appends the copy-link / watch-replay actions into the mounted overlay body.
+ * Only in the expanded (non-ambient) view: ambient is a clean compact watch
+ * surface, so the extra chrome stays out of it.
+ */
+function augmentArchivedOverlayActions(
+  overlayElement: HTMLElement,
+  payload: ReplayPremiereArchivePayload,
+  ambient: boolean,
+): void {
+  if (ambient) return;
+  const body = overlayElement.querySelector(".rp-body");
+  if (body === null) return;
+
+  const actions = document.createElement("section");
+  actions.className = "rp-section rp-archived-actions";
+  // Inline layout only: the overlay stylesheet (a separate file) is untouched
+  // this batch, so these two buttons are laid out here without new CSS.
+  actions.style.display = "grid";
+  actions.style.gap = "8px";
+
+  if (payload.replayRunKey !== null) {
+    const watch = document.createElement("button");
+    watch.type = "button";
+    watch.className = "rp-button rp-button-primary";
+    watch.textContent = translateText("replay_premiere.watch_full_replay");
+    watch.addEventListener("click", () => {
+      mountArchivedReplayPremiereOverlay(payload, true);
+    });
+    actions.append(watch);
+  }
+
+  const copyLink = document.createElement("button");
+  copyLink.type = "button";
+  copyLink.className = "rp-button rp-button-quiet";
+  copyLink.textContent = translateText("replay_premiere.copy_link");
+  copyLink.addEventListener("click", () => {
+    const url = `${window.location.origin}/premiere/${payload.premiereId}`;
+    void navigator.clipboard?.writeText(url).catch(() => undefined);
+  });
+  actions.append(copyLink);
+
+  // Placed right after the first body card (the archived header / winner reveal)
+  // so the watch CTA sits high, above the detailed results.
+  body.insertBefore(actions, body.children[1] ?? null);
 }
 
 function buildArchivedOverlayModel(
@@ -174,19 +232,35 @@ function buildArchivedOverlayModel(
         ? { outcome: "winner", winnerSeatId: wonSeats[0].seatId, results }
         : { outcome: "void", winnerSeatId: null, results };
   const timestamp = payload.revealedAt ?? new Date().toISOString();
+  const soleWinner = wonSeats.length === 1 ? wonSeats[0] : null;
+  const mapLabel =
+    typeof summary.mapLabel === "string" && summary.mapLabel.length > 0
+      ? summary.mapLabel
+      : null;
   return {
     premiereId: payload.premiereId,
     state: archivedOverlayState(payload.terminalState, outcome !== null),
-    title: translateText("replay_premiere.results_page_title"),
-    description: translateText("replay_premiere.archived_description"),
+    // Winner-led identity once revealed: the header H1 names the winner (or
+    // "Results" for a void), so the durable page is not a generic "Premiere
+    // replay". Outcome-free archives keep the generic title.
+    title: archivedTitle(outcome !== null, soleWinner),
+    description: archivedIdentitySubline(
+      outcome !== null,
+      standings.length,
+      mapLabel,
+      timestamp,
+    ),
     sourceKind: payload.sourceKind,
     publicLabel: "premiere",
     scheduledAt: timestamp,
     actualStartAt: timestamp,
     authoritativeNow: timestamp,
     playbackRate: 1,
-    mapName: "",
-    matchFormat: "",
+    mapName: mapLabel ?? "",
+    matchFormat:
+      typeof summary.formatLabel === "string" && summary.formatLabel.length > 0
+        ? summary.formatLabel
+        : "",
     policies: standings.map(
       (standing): ReplayPremierePolicyView => ({
         seatId: standing.seatId,
@@ -235,6 +309,48 @@ function archivedOverlayState(
 ): ReplayPremierePublicState {
   if (hasOutcome) return "archived";
   return terminalState === "cancelled" ? "cancelled" : "failed";
+}
+
+function archivedTitle(
+  hasOutcome: boolean,
+  soleWinner: ArchiveSummaryStanding | null,
+): string {
+  if (!hasOutcome) return translateText("replay_premiere.results_page_title");
+  if (soleWinner === null)
+    return translateText("replay_premiere.results_heading");
+  return translateText("replay_premiere.archived_winner_heading", {
+    name: soleWinner.displayName,
+  });
+}
+
+function archivedIdentitySubline(
+  hasOutcome: boolean,
+  agents: number,
+  mapLabel: string | null,
+  timestamp: string,
+): string {
+  if (!hasOutcome) return translateText("replay_premiere.archived_description");
+  const date = formatArchivedDate(timestamp);
+  return mapLabel === null
+    ? translateText("replay_premiere.archived_identity_subline_no_map", {
+        agents,
+        date,
+      })
+    : translateText("replay_premiere.archived_identity_subline", {
+        map: mapLabel,
+        agents,
+        date,
+      });
+}
+
+function formatArchivedDate(timestamp: string): string {
+  const parsed = Date.parse(timestamp);
+  if (!Number.isFinite(parsed)) return timestamp;
+  return new Date(parsed).toLocaleDateString(undefined, {
+    year: "numeric",
+    month: "short",
+    day: "numeric",
+  });
 }
 
 function buildArchivedCheckpoints(
@@ -341,8 +457,15 @@ function parseArchivePayload(
       outcome,
       predictions,
       markers,
+      mapLabel: optionalLabel(summary.mapLabel),
+      formatLabel: optionalLabel(summary.formatLabel),
     },
   };
+}
+
+/** Tolerant read of an optional public label; anything non-string becomes null. */
+function optionalLabel(value: unknown): string | null {
+  return typeof value === "string" && value.length > 0 ? value : null;
 }
 
 function parseOutcome(raw: unknown): ArchiveSummaryOutcome | null | undefined {

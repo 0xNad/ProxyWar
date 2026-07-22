@@ -106,6 +106,30 @@ describe("mountArchivedReplayPremiereOverlay", () => {
     // Prediction accuracy = 3/4 = 75% (computed client-side from counts).
     expect(text).toContain("replay_premiere.results_accuracy:percent=75");
     expect(text).toContain("Alpha");
+    // Winner-led H1 in the header, not the generic "Premiere replay".
+    expect(handle.element.querySelector(".rp-title")?.textContent).toContain(
+      "replay_premiere.archived_winner_heading:name=Alpha",
+    );
     handle.dispose();
+  });
+
+  it("adds a copy-link action, plus a watch action only when a replay exists", () => {
+    const withReplay = mountArchivedReplayPremiereOverlay(samplePayload());
+    const actions = withReplay.element.querySelector(".rp-archived-actions");
+    expect(actions).not.toBeNull();
+    expect(actions?.textContent).toContain("replay_premiere.copy_link");
+    expect(actions?.textContent).toContain("replay_premiere.watch_full_replay");
+    withReplay.dispose();
+
+    const noReplay = mountArchivedReplayPremiereOverlay({
+      ...samplePayload(),
+      replayRunKey: null,
+    });
+    const actions2 = noReplay.element.querySelector(".rp-archived-actions");
+    expect(actions2?.textContent).toContain("replay_premiere.copy_link");
+    expect(actions2?.textContent).not.toContain(
+      "replay_premiere.watch_full_replay",
+    );
+    noReplay.dispose();
   });
 });

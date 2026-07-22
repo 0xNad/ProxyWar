@@ -1,5 +1,6 @@
 import express, { type Request, type Response, type Router } from "express";
 import { randomBytes } from "node:crypto";
+import englishTranslations from "../../../resources/lang/en.json";
 import { matchProxyWarPublicPremiereReadPath } from "../agents/ProxyWarPublicArtifacts";
 import type {
   PremiereArchivePointerV1,
@@ -173,26 +174,138 @@ export function renderReplayPremiereArchivePageHtml(options: {
     `/premiere/${options.payload.premiereId}`,
     origin,
   ).href;
-  const title = `Premiere replay · ${options.payload.premiereId}`;
+  // Reveal-public archives get a real social card again (the same URL that
+  // unfurled with a card during the premiere). Winner/standings language reaches
+  // meta ONLY when the summary carries an outcome — which, by construction, only
+  // a post-reveal (revealed/archived) summary ever does; failed/cancelled and
+  // archived-without-reveal stay neutral. Deliberately no og:image: the card
+  // image route intentionally 404s, so this is a text-only card.
+  const meta = archivedSocialMetadata(options.payload.summary);
   // `<` is escaped inside the JSON island so it can never break out of the
   // non-executing data block; the client reads it by element id.
   const dataJson = JSON.stringify(options.payload).replaceAll("<", "\\u003c");
   const injected = [
-    `<title>${escapeHtml(title)}</title>`,
+    `<title>${escapeHtml(meta.title)}</title>`,
+    `<meta name="description" content="${escapeHtml(meta.description)}">`,
     `<link rel="canonical" href="${escapeHtml(canonicalUrl)}">`,
+    `<meta property="og:type" content="website">`,
+    `<meta property="og:title" content="${escapeHtml(meta.title)}">`,
+    `<meta property="og:description" content="${escapeHtml(meta.description)}">`,
+    `<meta property="og:url" content="${escapeHtml(canonicalUrl)}">`,
+    `<meta name="twitter:card" content="summary">`,
+    `<meta name="twitter:title" content="${escapeHtml(meta.title)}">`,
+    `<meta name="twitter:description" content="${escapeHtml(meta.description)}">`,
     `<meta name="proxywar:premiere_archived" content="1">`,
     `<meta name="proxywar:premiere_id" content="${escapeHtml(options.payload.premiereId)}">`,
     `<script type="application/json" id="${ARCHIVE_DATA_ELEMENT_ID}">${dataJson}</script>`,
   ].join("\n");
-  const withoutTitle = options.appShell.replace(
-    /<title(?:\s[^>]*)?>[\s\S]*?<\/title>/gi,
-    "",
-  );
-  const withInjection = withoutTitle.replace(
+  // Strip the app shell's generic site card first so exactly one set of social
+  // tags survives (mirrors the live premiere page).
+  const withoutShellSocial = stripShellSocialMetadata(options.appShell);
+  const withInjection = withoutShellSocial.replace(
     /<head(?:\s[^>]*)?>/i,
     (head) => `${head}\n${injected}`,
   );
   return nonceInlineScripts(withInjection, options.scriptNonce);
+}
+
+/**
+ * Builds the archived page's title + description from the durable summary.
+ *
+ * SPOILER GATE: an outcome is present only on a reveal-public summary
+ * (validateSummaryPreimage rejects an outcome on failed/cancelled, and the
+ * archive index never holds a pre-reveal id), so winner/standings language is
+ * emitted only when `summary.outcome !== null`. Failed/cancelled/archived-
+ * without-reveal fall through to a neutral, outcome-free card.
+ */
+function archivedSocialMetadata(summary: PremiereResultSummaryV1): {
+  title: string;
+  description: string;
+} {
+  const outcome = summary.outcome;
+  if (outcome === null) {
+    return {
+      title: translateText("replay_premiere.archived_meta_ended_title"),
+      description: translateText(
+        "replay_premiere.archived_meta_ended_description",
+      ),
+    };
+  }
+  const wonStandings = outcome.standings.filter((standing) => standing.won);
+  const soleWinner = wonStandings.length === 1 ? wonStandings[0] : null;
+  const title =
+    soleWinner === null
+      ? translateText("replay_premiere.archived_meta_results_title")
+      : interpolate(
+          translateText("replay_premiere.archived_meta_winner_title"),
+          { name: soleWinner.displayName },
+        );
+  const revealedDate = (summary.revealedAt ?? outcome.completedAt).slice(0, 10);
+  let description = interpolate(
+    translateText("replay_premiere.archived_meta_description"),
+    {
+      agents: String(outcome.standings.length),
+      turns: String(outcome.turnCount),
+      date: revealedDate,
+    },
+  );
+  if (typeof summary.mapLabel === "string" && summary.mapLabel.length > 0) {
+    description += ` · ${summary.mapLabel}`;
+  }
+  return { title, description };
+}
+
+type ReplayPremiereTranslationSuffix =
+  keyof typeof englishTranslations.replay_premiere;
+type ReplayPremiereTranslationKey =
+  `replay_premiere.${ReplayPremiereTranslationSuffix}`;
+
+function translateText(key: ReplayPremiereTranslationKey): string {
+  const suffix = key.slice(
+    "replay_premiere.".length,
+  ) as ReplayPremiereTranslationSuffix;
+  return englishTranslations.replay_premiere[suffix];
+}
+
+function interpolate(
+  template: string,
+  values: Readonly<Record<string, string>>,
+): string {
+  return template.replace(/\{([a-zA-Z0-9_]+)\}/g, (match, key: string) =>
+    Object.hasOwn(values, key) ? values[key] : match,
+  );
+}
+
+// Mirrors the live premiere page: drops the shell's <title>, canonical link, and
+// every description/og:/twitter:/proxywar: tag so the archived injection owns the
+// page's social metadata outright.
+function stripShellSocialMetadata(appShell: string): string {
+  return appShell
+    .replace(/<title(?:\s[^>]*)?>[\s\S]*?<\/title>/gi, "")
+    .replace(/<(?:meta|link)\b[^>]*>/gi, (tag) => {
+      const rel = tagAttribute(tag, "rel")?.toLocaleLowerCase("en-US");
+      if (rel?.split(/\s+/).includes("canonical") === true) return "";
+      const identity = (
+        tagAttribute(tag, "name") ?? tagAttribute(tag, "property")
+      )?.toLocaleLowerCase("en-US");
+      if (
+        identity === "description" ||
+        identity?.startsWith("og:") === true ||
+        identity?.startsWith("twitter:") === true ||
+        identity?.startsWith("proxywar:") === true
+      ) {
+        return "";
+      }
+      return tag;
+    });
+}
+
+function tagAttribute(tag: string, name: string): string | null {
+  const match = new RegExp(
+    `(?:^|\\s)${name}\\s*=\\s*(?:"([^"]*)"|'([^']*)'|([^\\s>]+))`,
+    "i",
+  ).exec(tag);
+  return match?.[1] ?? match?.[2] ?? match?.[3] ?? null;
 }
 
 function sendDocument(

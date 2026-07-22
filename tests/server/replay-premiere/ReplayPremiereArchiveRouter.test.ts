@@ -15,6 +15,7 @@ const PUBLIC_ORIGIN = "https://beta.proxywar.xyz";
 const APP_SHELL =
   '<!doctype html><html><head><title>Proxy War</title><script>window.BOOTSTRAP_CONFIG={gameEnv:"dev"}</script><script type="module" src="/assets/app.js"></script></head><body><main id=app></main></body></html>';
 const ARCHIVED_ID = "prem_archiverouter0001";
+const FAILED_ID = "prem_archiverouterfail1";
 const REGISTERED_ID = "prem_registeredlive001";
 
 let root: string;
@@ -63,8 +64,27 @@ async function harness(): Promise<{
       },
       predictions: [],
       markers: [{ kind: "betrayal", turn: 3, count: 2 }],
+      mapLabel: "Pangaea",
+      formatLabel: "2-player FFA",
     }),
     sha256Hex(ARCHIVED_ID),
+  );
+
+  // A terminal FAILED premiere is archived without any outcome (spoiler-neutral).
+  await store.recordReclaimed(
+    buildPremiereResultSummary({
+      premiereId: FAILED_ID,
+      sourceRunId: "coworld-run-002",
+      sourceKind: "rated_coworld",
+      publicationCommitmentHash: sha256Hex(FAILED_ID),
+      terminalState: "failed",
+      revealedAt: null,
+      reclaimedAt: "2026-07-20T18:45:00.000Z",
+      outcome: null,
+      predictions: [],
+      markers: [],
+    }),
+    sha256Hex(FAILED_ID),
   );
 
   // A "live" premiere is registered but never in the archive index.
@@ -121,6 +141,61 @@ describe("createReplayPremiereArchiveRouter", () => {
       // The post-reveal winner display name is present (outcome is public now).
       expect(body).toContain("Alpha");
       expect(body).toContain('nonce="');
+    });
+  });
+
+  it("emits a winner-led social card for a reveal-public archive", async () => {
+    const h = await harness();
+    await h.run(async (baseUrl) => {
+      const response = await fetch(`${baseUrl}/premiere/${ARCHIVED_ID}`);
+      expect(response.status).toBe(200);
+      const head = (await response.text()).split("</head>")[0];
+      // Winner name + turn/agent counts + map are public post-reveal.
+      expect(head).toContain(
+        "<title>Alpha wins — Proxy War Replay Premiere</title>",
+      );
+      expect(head).toContain(
+        '<meta property="og:title" content="Alpha wins — Proxy War Replay Premiere">',
+      );
+      expect(head).toContain(
+        '<meta property="og:description" content="Rated league replay · 2 agents · 6 turns · revealed 2026-07-20 · Pangaea">',
+      );
+      expect(head).toContain('<meta property="og:url" content="');
+      // Text-only card: the card-image route intentionally 404s, so no og:image.
+      expect(head).toContain('<meta name="twitter:card" content="summary">');
+      expect(head).not.toContain("og:image");
+      // The shell's own <title> is stripped so exactly one title survives.
+      expect(head).not.toContain("<title>Proxy War</title>");
+    });
+  });
+
+  it("keeps a failed archived page's meta neutral — no winner/standings words", async () => {
+    const h = await harness();
+    await h.run(async (baseUrl) => {
+      const response = await fetch(`${baseUrl}/premiere/${FAILED_ID}`);
+      expect(response.status).toBe(200);
+      const head = (await response.text()).split("</head>")[0];
+      expect(head).toContain(
+        "<title>Premiere ended — Proxy War Replay Premiere</title>",
+      );
+      expect(head).toContain(
+        '<meta property="og:title" content="Premiere ended — Proxy War Replay Premiere">',
+      );
+      // No outcome/winner/standings language anywhere in the meta.
+      expect(head).not.toContain("wins");
+      expect(head).not.toContain("Alpha");
+      expect(head).not.toContain("standings");
+      expect(head).not.toContain("og:image");
+    });
+  });
+
+  it("still 404s a non-indexed id even with archived meta injection", async () => {
+    const h = await harness();
+    await h.run(async (baseUrl) => {
+      const response = await fetch(`${baseUrl}/premiere/prem_neverindexed0001`);
+      expect(response.status).toBe(404);
+      const body = await response.json();
+      expect(body.error.code).toBe("DOWNSTREAM_HANDLED");
     });
   });
 

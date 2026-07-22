@@ -84,6 +84,12 @@ function revealedTarget(): ReplayPremiereHttpTarget {
       readBootstrap: () => ({
         premiereId: PREMIERE_ID,
         publicationCommitmentHash: COMMITMENT,
+        publicDefinition: {
+          title: "Controlled exhibition",
+          spoilerNeutralDescription: "A completed match.",
+          map: { id: "pangaea", label: "Pangaea" },
+          matchFormat: { id: "ffa-2p", label: "2-player FFA", seatCount: 2 },
+        },
         provenance: {
           sourceKind: "controlled_exhibition",
           sourceRunId: "controlled-run-001",
@@ -157,6 +163,9 @@ describe("buildPremiereResultSummaryFromTarget", () => {
     expect(summary.terminalState).toBe("revealed");
     expect(summary.revealedAt).toBe(REVEALED_AT);
     expect(summary.reclaimedAt).toBe(RECLAIMED_AT);
+    // Public map/format labels are pulled from the target's public definition.
+    expect(summary.mapLabel).toBe("Pangaea");
+    expect(summary.formatLabel).toBe("2-player FFA");
 
     expect(summary.outcome).not.toBeNull();
     expect(summary.outcome?.winner).toEqual({
@@ -247,6 +256,38 @@ describe("aggregate-only enforcement", () => {
     expect(() => assertPremiereResultSummaryAggregateOnly(tampered)).toThrow(
       /per_viewer_identifier/,
     );
+  });
+
+  it("carries optional public labels through hash, parse, and the scan", () => {
+    const summary = buildPremiereResultSummary({
+      ...baseInput(),
+      mapLabel: "World",
+      formatLabel: "12-player FFA",
+    });
+    expect(summary.mapLabel).toBe("World");
+    expect(summary.formatLabel).toBe("12-player FFA");
+    // Labels are aggregate public metadata, not per-viewer data.
+    expect(() =>
+      assertPremiereResultSummaryAggregateOnly(summary),
+    ).not.toThrow();
+    // The hash covers the labels: a clean round-trip validates, but mutating a
+    // label breaks the hash.
+    const bytes = Buffer.from(JSON.stringify(summary), "utf8");
+    expect(parsePremiereResultSummary(bytes)).toEqual(summary);
+    const tampered = { ...summary, mapLabel: "Pangaea" };
+    expect(() =>
+      parsePremiereResultSummary(Buffer.from(JSON.stringify(tampered), "utf8")),
+    ).toThrow(/summary_hash_mismatch/);
+  });
+
+  it("still builds and parses a legacy summary with no public labels", () => {
+    const summary = buildPremiereResultSummary(baseInput());
+    expect(summary.mapLabel).toBeUndefined();
+    expect(summary.formatLabel).toBeUndefined();
+    // A labels-less summary hashes and round-trips exactly like before, so old
+    // archived summaries stay valid.
+    const bytes = Buffer.from(JSON.stringify(summary), "utf8");
+    expect(parsePremiereResultSummary(bytes)).toEqual(summary);
   });
 });
 

@@ -92,6 +92,14 @@ export interface PremiereResultSummaryV1 {
   outcome: PremiereResultSummaryOutcome | null;
   predictions: PremiereResultSummaryPrediction[];
   markers: PremiereResultSummaryMarker[];
+  /**
+   * Public, non-viewer match metadata (the same pre-reveal labels the /league
+   * contract card already exposes). Optional and additive: legacy summaries
+   * built before these fields existed carry neither, so every consumer must
+   * tolerate their absence. When present they are covered by `summaryHash`.
+   */
+  mapLabel?: string;
+  formatLabel?: string;
   summaryHash: string;
 }
 
@@ -135,6 +143,9 @@ export interface PremiereResultSummaryInput {
   outcome: PremiereResultSummaryOutcome | null;
   predictions: PremiereResultSummaryPrediction[];
   markers: PremiereResultSummaryMarker[];
+  /** Optional public match labels (see PremiereResultSummaryV1). */
+  mapLabel?: string;
+  formatLabel?: string;
 }
 
 /**
@@ -178,6 +189,11 @@ export function buildPremiereResultSummaryFromTarget(options: {
     revealedAt = reveal.revealedAt;
   }
 
+  // The public definition carries the same spoiler-neutral map/format labels the
+  // /league contract card shows. Read defensively: a malformed or legacy runtime
+  // that lacks the definition simply omits the (optional, cosmetic) labels rather
+  // than failing the reclamation path.
+  const definition = bootstrap.publicDefinition;
   return buildPremiereResultSummary({
     premiereId: bootstrap.premiereId,
     sourceRunId: bootstrap.provenance.sourceRunId,
@@ -189,7 +205,14 @@ export function buildPremiereResultSummaryFromTarget(options: {
     outcome,
     predictions,
     markers,
+    mapLabel: optionalPublicLabel(definition?.map?.label),
+    formatLabel: optionalPublicLabel(definition?.matchFormat?.label),
   });
+}
+
+/** Accepts a non-empty string label, otherwise omits the optional field. */
+function optionalPublicLabel(value: unknown): string | undefined {
+  return typeof value === "string" && value.length > 0 ? value : undefined;
 }
 
 /** Pure builder: hashes and freezes an already-derived aggregate summary. */
@@ -210,6 +233,15 @@ export function buildPremiereResultSummary(
     predictions: input.predictions,
     markers: input.markers,
   };
+  // Additive optional fields are only ever written when present, never as
+  // `undefined` (canonical hashing rejects undefined). A summary without labels
+  // therefore hashes byte-identically to the legacy 12-field form.
+  if (input.mapLabel !== undefined) {
+    preimage.mapLabel = input.mapLabel;
+  }
+  if (input.formatLabel !== undefined) {
+    preimage.formatLabel = input.formatLabel;
+  }
   validateSummaryPreimage(preimage);
   const summary: PremiereResultSummaryV1 = {
     ...preimage,
@@ -325,7 +357,9 @@ export function parsePremiereResultSummary(
  * Fails closed if the summary carries any per-viewer identifier. This is a
  * defense-in-depth belt over the aggregate-only builder: it walks every key and
  * value and rejects participant/session/cookie/idempotency/attribution fields
- * or recognizable guest/session/ip id values.
+ * or recognizable guest/session/ip id values. The additive public labels
+ * (`mapLabel`/`formatLabel`) carry no per-viewer data — they are the same
+ * spoiler-neutral labels the /league contract card exposes — so they pass.
  */
 export function assertPremiereResultSummaryAggregateOnly(
   summary: PremiereResultSummaryV1,
@@ -361,20 +395,26 @@ function validateSummaryPreimage(
 ): void {
   if (!isRecord(preimage))
     throw summaryIntegrity("summary_preimage_not_object");
-  assertExactKeys(preimage as Record<string, unknown>, [
-    "schemaVersion",
-    "summaryKind",
-    "premiereId",
-    "sourceRunId",
-    "sourceKind",
-    "publicationCommitmentHash",
-    "terminalState",
-    "revealedAt",
-    "reclaimedAt",
-    "outcome",
-    "predictions",
-    "markers",
-  ]);
+  assertExactKeys(
+    preimage as Record<string, unknown>,
+    [
+      "schemaVersion",
+      "summaryKind",
+      "premiereId",
+      "sourceRunId",
+      "sourceKind",
+      "publicationCommitmentHash",
+      "terminalState",
+      "revealedAt",
+      "reclaimedAt",
+      "outcome",
+      "predictions",
+      "markers",
+    ],
+    // Additive public labels: allowed but not required, so both legacy summaries
+    // (which lack them) and current ones (which carry them) validate.
+    ["mapLabel", "formatLabel"],
+  );
   const value = preimage as unknown as PremiereResultSummaryPreimage;
   if (
     value.schemaVersion !== 1 ||
@@ -391,7 +431,9 @@ function validateSummaryPreimage(
       canonicalTimestampOrNull(value.revealedAt) === null) ||
     canonicalTimestampOrNull(value.reclaimedAt) === null ||
     !Array.isArray(value.predictions) ||
-    !Array.isArray(value.markers)
+    !Array.isArray(value.markers) ||
+    !isOptionalLabel(value.mapLabel) ||
+    !isOptionalLabel(value.formatLabel)
   ) {
     throw summaryIntegrity("summary_contract_invalid");
   }
@@ -516,16 +558,25 @@ function canonicalTimestampOrNull(value: unknown): string | null {
 
 function assertExactKeys(
   value: Record<string, unknown>,
-  expected: readonly string[],
+  required: readonly string[],
+  optional: readonly string[] = [],
 ): void {
-  const actual = Object.keys(value).sort();
-  const sorted = [...expected].sort();
-  if (
-    actual.length !== sorted.length ||
-    actual.some((key, index) => key !== sorted[index])
-  ) {
+  const allowed = new Set<string>([...required, ...optional]);
+  const hasAllRequired = required.every((key) =>
+    Object.prototype.hasOwnProperty.call(value, key),
+  );
+  const hasNoUnknown = Object.keys(value).every((key) => allowed.has(key));
+  if (!hasAllRequired || !hasNoUnknown) {
     throw summaryIntegrity("summary_unknown_or_missing_fields");
   }
+}
+
+/** An optional label is either absent or a bounded, non-empty string. */
+function isOptionalLabel(value: unknown): boolean {
+  return (
+    value === undefined ||
+    (typeof value === "string" && value.length > 0 && value.length <= 512)
+  );
 }
 
 function isRecord(value: unknown): value is Record<string, any> {
