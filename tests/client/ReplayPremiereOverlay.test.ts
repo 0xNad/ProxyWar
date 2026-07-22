@@ -629,6 +629,97 @@ describe("ReplayPremiereOverlay", () => {
   });
 });
 
+function resultsReveal(): NonNullable<ReplayPremiereOverlayModel["reveal"]> {
+  return {
+    outcome: "winner",
+    winnerSeatId: "seat-a",
+    results: {
+      turnCount: 640,
+      standings: [
+        { seatId: "seat-a", displayName: "Atlas Prime", won: true },
+        { seatId: "seat-b", displayName: "Borealis", won: false },
+      ],
+      predictions: [
+        {
+          checkpointId: "checkpoint-1",
+          sequence: 350,
+          correctPercent: 75,
+          totalPredictions: 4,
+          options: [
+            { seatId: "seat-a", displayName: "Atlas Prime", percent: 75 },
+            { seatId: "seat-b", displayName: "Borealis", percent: 25 },
+          ],
+        },
+        {
+          checkpointId: "checkpoint-2",
+          sequence: 650,
+          correctPercent: 50,
+          totalPredictions: 4,
+          options: [
+            { seatId: "seat-a", displayName: "Atlas Prime", percent: 50 },
+            { seatId: "seat-b", displayName: "Borealis", percent: 50 },
+          ],
+        },
+      ],
+      markers: [
+        { kind: "betrayal", turn: 300, count: 2 },
+        { kind: "smart", turn: 500, count: 1 },
+      ],
+    },
+  };
+}
+
+describe("results summary panel", () => {
+  it("renders standings, prediction accuracy, and notable markers on reveal", () => {
+    const handle = mount(
+      makeModel({ state: "revealed", reveal: resultsReveal() }),
+    );
+    const panel = handle.element.querySelector(".rp-results");
+    expect(panel).not.toBeNull();
+    const text = panel?.textContent ?? "";
+    expect(text).toContain("replay_premiere.results_heading");
+    expect(text).toContain("replay_premiere.results_standings");
+    expect(text).toContain("replay_premiere.results_winner_badge");
+    expect(text).toContain("replay_premiere.results_accuracy:percent=75");
+    expect(text).toContain("replay_premiere.results_markers");
+    expect(text).toContain(
+      "replay_premiere.results_marker_detail:turn=300,count=2",
+    );
+    // The winning seat's standing row carries the positive treatment.
+    const winRow = handle.element.querySelector(
+      ".rp-results-standing.rp-results-win",
+    );
+    expect(winRow?.textContent).toContain("Atlas Prime");
+  });
+
+  it("renders the panel on an archived premiere as well", () => {
+    const handle = mount(
+      makeModel({ state: "archived", reveal: resultsReveal() }),
+    );
+    expect(handle.element.querySelector(".rp-results")).not.toBeNull();
+    expect(handle.element.textContent).toContain(
+      "replay_premiere.results_markers",
+    );
+  });
+
+  it("shows no results panel when the reveal carries no summary", () => {
+    const handle = mount(
+      makeModel({
+        state: "revealed",
+        reveal: { outcome: "winner", winnerSeatId: "seat-a" },
+      }),
+    );
+    // The section renders empty + hidden, so its heading never appears.
+    expect(handle.element.textContent).not.toContain(
+      "replay_premiere.results_heading",
+    );
+    const panel = handle.element.querySelector<HTMLElement>(".rp-results");
+    if (panel !== null) {
+      expect(panel.hidden).toBe(true);
+    }
+  });
+});
+
 function mount(
   model: ReplayPremiereOverlayModel,
   callbacks: ReplayPremiereOverlayCallbacks = {},

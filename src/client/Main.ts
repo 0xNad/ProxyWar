@@ -59,6 +59,12 @@ import {
   showReplayLoadingFailure,
   showReplayLoadingScreen,
 } from "./ReplayLoadingScreen";
+import {
+  mountArchivedReplayPremiereOverlay,
+  readReplayPremiereArchivePayload,
+  type ReplayPremiereArchivePayload,
+} from "./ReplayPremiereArchiveView";
+import type { ReplayPremiereOverlayHandle } from "./ReplayPremiereOverlay";
 import type { ReplayPremiereProgressiveReplayConfig } from "./ReplayPremierePlayback";
 import {
   parseReplayPremiereRoute,
@@ -287,6 +293,8 @@ class Client {
   private replayLoadingCleanup: (() => void) | null = null;
   private replayAttemptCleanup: (() => void) | null = null;
   private replayPremiereRuntime: ReplayPremiereRuntimeController | null = null;
+  private replayPremiereArchiveOverlay: ReplayPremiereOverlayHandle | null =
+    null;
 
   private currentUrl: string | null = null;
 
@@ -671,7 +679,12 @@ class Client {
     // into the match — never run landing-page hash/SDK logic for them.
     const premiereId = parseReplayPremiereRoute(window.location.pathname);
     if (premiereId !== null) {
-      await this.openReplayPremiere(premiereId);
+      const archived = readReplayPremiereArchivePayload();
+      if (archived !== null && archived.premiereId === premiereId) {
+        await this.openArchivedReplayPremiere(archived);
+      } else {
+        await this.openReplayPremiere(premiereId);
+      }
       return;
     }
     if (isCoworldPlayerRoute()) {
@@ -840,6 +853,36 @@ class Client {
           );
         }
       });
+    }
+  }
+
+  /**
+   * Renders an archived premiere's durable results-summary page: the polished
+   * results overlay from the persisted summary, plus a best-effort render of the
+   * ordinary league replay behind it. The overlay renders immediately and stands
+   * alone if the underlying replay has aged off the mirror.
+   */
+  private async openArchivedReplayPremiere(
+    payload: ReplayPremiereArchivePayload,
+  ): Promise<void> {
+    this.replayPremiereArchiveOverlay?.dispose();
+    this.replayPremiereArchiveOverlay =
+      mountArchivedReplayPremiereOverlay(payload);
+    finishReplayLoadingScreen();
+    if (payload.replayRunKey !== null) {
+      try {
+        await this.openAiLeagueReplay(payload.replayRunKey, {
+          source: "ai-league-replay",
+        });
+      } catch (error) {
+        console.warn("Archived premiere replay unavailable", error);
+        finishReplayLoadingScreen();
+      }
+      // The ordinary replay path mounts its own overlays; re-assert the durable
+      // results overlay so it floats on top of the rendered replay.
+      this.replayPremiereArchiveOverlay?.dispose();
+      this.replayPremiereArchiveOverlay =
+        mountArchivedReplayPremiereOverlay(payload);
     }
   }
 

@@ -236,7 +236,10 @@ async function handlePublicDocumentRequest(options: {
   );
 }
 
-function nonceInlineScripts(appShell: string, scriptNonce: string): string {
+export function nonceInlineScripts(
+  appShell: string,
+  scriptNonce: string,
+): string {
   assertScriptNonce(scriptNonce);
   let inlineScriptCount = 0;
   const rendered = appShell.replace(/<script\b[^>]*>/gi, (tag) => {
@@ -253,7 +256,7 @@ function nonceInlineScripts(appShell: string, scriptNonce: string): string {
   return rendered;
 }
 
-function pageContentSecurityPolicyWithNonce(
+export function pageContentSecurityPolicyWithNonce(
   policy: string,
   scriptNonce: string,
 ): string {
@@ -635,7 +638,7 @@ function hasControlCharacter(value: string): boolean {
   });
 }
 
-function escapeHtml(value: string): string {
+export function escapeHtml(value: string): string {
   return value
     .replaceAll("&", "&amp;")
     .replaceAll("<", "&lt;")

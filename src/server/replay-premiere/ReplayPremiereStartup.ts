@@ -1,3 +1,4 @@
+import type { ReplayPremiereArchiveStore } from "./ReplayPremiereArchiveIndex";
 import {
   assessmentOptionsFromAdmission,
   DEFAULT_REPLAY_PREMIERE_CATALOG_LIMITS,
@@ -5,6 +6,7 @@ import {
   ReplayPremiereAdmissionCatalog,
   type ReplayPremiereAdmissionRecordV1,
   type ReplayPremiereCatalogLimits,
+  type ReplayPremiereCatalogReadResult,
 } from "./ReplayPremiereCatalog";
 import type { ReplayPremiereCheckpointProjector } from "./ReplayPremiereCheckpointProjection";
 import { buildPremiereChunks } from "./ReplayPremiereChunks";
@@ -38,6 +40,7 @@ import type {
   ReplayPremiereInteractionLimits,
   ReplayPremiereReleasedContext,
 } from "./ReplayPremiereInteractions";
+import { compactReplayPremiereEventJournal } from "./ReplayPremiereJournalCompaction";
 import { verifyStoredReplayPremiereLeakAuditReceipt } from "./ReplayPremiereLeakAuditCollector";
 import {
   importControlledPremiereSourceForPublication,
@@ -53,6 +56,13 @@ import {
   assertValidPremiereLifecycleSnapshot,
   type PremiereLifecycleSnapshot,
 } from "./ReplayPremiereStateMachine";
+import {
+  DEFAULT_REPLAY_PREMIERE_RECLAMATION_GRACE_MS,
+  ReplayPremiereTerminalReclaimer,
+} from "./ReplayPremiereTerminalReclamation";
+
+const DEFAULT_RECLAMATION_SWEEP_MS = 60_000;
+const MAX_RECLAMATION_SWEEP_MS = 3_600_000;
 
 const DEFAULT_STARTUP_DEADLINE_MS = 10_000;
 const MAX_STARTUP_DEADLINE_MS = 10_000;
@@ -138,6 +148,15 @@ export interface ReplayPremiereProductionStartupOptions {
   interactionLimits?: Partial<ReplayPremiereInteractionLimits>;
   clock?: ReplayPremiereRuntimeClock;
   maxStartupMs?: number;
+  /**
+   * When provided, terminal premieres are reclaimed (durable summary + pointer,
+   * then bulk deletion) after a grace window, and fully-reclaimed premieres are
+   * compacted out of the shared event journal at startup. Omit to disable the
+   * terminal-premiere lifecycle entirely.
+   */
+  archiveStore?: ReplayPremiereArchiveStore;
+  reclamationGraceMs?: number;
+  reclamationSweepMs?: number;
   onDiagnostic?: (diagnostic: ReplayPremiereStartupDiagnostic) => void;
   /** Bounded test/host barrier; abort is asserted again before journal writes. */
   beforeTargetRecovery?: (options: {
@@ -179,10 +198,20 @@ interface ReplayPremiereStartupOperationFence {
  * next target while the current runtimes remain live. Closing never removes
  * retained evidence.
  */
+export interface ReplayPremiereReclamationConfig {
+  reclaimer: ReplayPremiereTerminalReclaimer;
+  sweepMs: number;
+  report: (diagnostic: ReplayPremiereStartupDiagnostic) => void;
+}
+
 export class ReplayPremiereProductionService {
   private readonly supervisor: ReplayPremiereRuntimeSupervisor;
   private readonly pendingAssemblies: Set<Promise<unknown>>;
+  private readonly reclamation: ReplayPremiereReclamationConfig | null;
   private closePromise: Promise<void> | null = null;
+  private closing = false;
+  private reclamationTimer: ReturnType<typeof setTimeout> | null = null;
+  private reclamationInFlight: Promise<void> = Promise.resolve();
 
   constructor(
     private readonly eventStore: ReplayPremiereEventStore,
@@ -191,9 +220,14 @@ export class ReplayPremiereProductionService {
     private readonly ownedTargets: AssembledPremiereTarget[],
     supervisor: ReplayPremiereRuntimeSupervisor,
     pendingAssemblies: Set<Promise<unknown>>,
+    reclamation: ReplayPremiereReclamationConfig | null = null,
   ) {
     this.supervisor = supervisor;
     this.pendingAssemblies = pendingAssemblies;
+    this.reclamation = reclamation;
+    if (this.reclamation !== null && this.reclamation.sweepMs > 0) {
+      this.scheduleReclamationSweep(this.reclamation.sweepMs);
+    }
   }
 
   close(): Promise<void> {
@@ -202,6 +236,12 @@ export class ReplayPremiereProductionService {
   }
 
   private async closeOnce(): Promise<void> {
+    this.closing = true;
+    if (this.reclamationTimer !== null) {
+      clearTimeout(this.reclamationTimer);
+      this.reclamationTimer = null;
+    }
+    await this.reclamationInFlight.catch(() => undefined);
     await this.supervisor.close();
     await Promise.allSettled([...this.pendingAssemblies]);
     for (const assembled of [...this.ownedTargets].reverse()) {
@@ -210,6 +250,47 @@ export class ReplayPremiereProductionService {
     }
     this.ownedTargets.length = 0;
     await this.eventStore.close();
+  }
+
+  /**
+   * Reclaims every currently-eligible terminal premiere: writes its durable
+   * summary + pointer, deletes its bulk, and de-registers it so the archive
+   * router takes over `/premiere/<id>`. Exposed for direct invocation in tests;
+   * the production service also runs it on a self-rescheduling timer.
+   */
+  async runReclamationSweepOnce(): Promise<void> {
+    const reclamation = this.reclamation;
+    if (reclamation === null) return;
+    for (const assembled of [...this.ownedTargets]) {
+      const result = await reclamation.reclaimer
+        .reclaimIfEligible(assembled.target)
+        .catch((error: unknown) => {
+          reclamation.report({
+            target: `${assembled.runtime.premiereId}.reclamation`,
+            premiereId: assembled.runtime.premiereId,
+            operatorCode: operatorCode(error),
+          });
+          return null;
+        });
+      if (result === null || !result.reclaimed) continue;
+      this.httpRegistry.unregister(assembled.target);
+      this.runtimeRegistry.unregister(assembled.runtime);
+      const index = this.ownedTargets.indexOf(assembled);
+      if (index !== -1) this.ownedTargets.splice(index, 1);
+    }
+  }
+
+  private scheduleReclamationSweep(sweepMs: number): void {
+    if (this.closing || this.reclamation === null) return;
+    const timer = setTimeout(() => {
+      this.reclamationInFlight = this.runReclamationSweepOnce()
+        .catch(() => undefined)
+        .then(() => {
+          this.scheduleReclamationSweep(sweepMs);
+        });
+    }, sweepMs);
+    timer.unref?.();
+    this.reclamationTimer = timer;
   }
 
   readActiveTimerCount(): number {
@@ -271,6 +352,35 @@ export async function startReplayPremiereProduction(
     servedRoots: options.servedRoots,
     limits: catalogLimits,
   });
+  const privateStateRoot = catalog.privateStateRoot;
+  let read: ReplayPremiereCatalogReadResult;
+  try {
+    read = await catalog.readAll();
+  } finally {
+    // The catalog lock is only held while startup snapshots the admission set,
+    // so operators can admit the next target while runtimes stay live.
+    await catalog.close().catch(() => undefined);
+  }
+  // Compact fully-reclaimed premieres out of the shared, hash-chained event
+  // journal before any writer opens it. This keeps the event-store byte ceiling
+  // unreachable across an unbounded premiere stream. Fail-closed: a failure here
+  // just leaves the journal intact for this cycle.
+  if (options.archiveStore !== undefined) {
+    try {
+      await compactReplayPremiereEventJournal({
+        privateStateRoot,
+        reclaimedPremiereIds: options.archiveStore.reclaimedPremiereIds(),
+        presentPremiereIds: read.entries.map((entry) => entry.premiereId),
+        limits: eventStoreLimits,
+      });
+    } catch (error) {
+      report({
+        target: "event_store_journal",
+        premiereId: null,
+        operatorCode: operatorCode(error),
+      });
+    }
+  }
   let eventStore: ReplayPremiereEventStore | null = null;
   try {
     eventStore = await ReplayPremiereEventStore.open({
@@ -280,8 +390,6 @@ export async function startReplayPremiereProduction(
       now: () => clock.now(),
     });
     const activeEventStore = eventStore;
-    const read = await catalog.readAll();
-    await catalog.close();
     const recoveredAtStartup = activeEventStore.recovered;
     const latestEventsByAggregate = indexLatestEventsByAggregate(
       recoveredAtStartup.events,
@@ -292,6 +400,21 @@ export async function startReplayPremiereProduction(
     );
     const pendingAssemblies = new Set<Promise<unknown>>();
     const ownedTargets: AssembledPremiereTarget[] = [];
+    const reclamation: ReplayPremiereReclamationConfig | null =
+      options.archiveStore === undefined
+        ? null
+        : {
+            reclaimer: new ReplayPremiereTerminalReclaimer({
+              privateStateRoot,
+              store: options.archiveStore,
+              graceMs:
+                options.reclamationGraceMs ??
+                DEFAULT_REPLAY_PREMIERE_RECLAMATION_GRACE_MS,
+              now: () => clock.now(),
+            }),
+            sweepMs: boundedReclamationSweepMs(options.reclamationSweepMs),
+            report: reportRuntime,
+          };
     const service = new ReplayPremiereProductionService(
       eventStore,
       options.httpRegistry,
@@ -299,6 +422,7 @@ export async function startReplayPremiereProduction(
       ownedTargets,
       supervisor,
       pendingAssemblies,
+      reclamation,
     );
     for (const failure of read.failures) {
       report({
@@ -417,9 +541,20 @@ export async function startReplayPremiereProduction(
     };
   } catch (error) {
     await eventStore?.close().catch(() => undefined);
-    await catalog.close().catch(() => undefined);
     throw error;
   }
+}
+
+function boundedReclamationSweepMs(value: number | undefined): number {
+  const sweepMs = value ?? DEFAULT_RECLAMATION_SWEEP_MS;
+  if (
+    !Number.isSafeInteger(sweepMs) ||
+    sweepMs < 0 ||
+    sweepMs > MAX_RECLAMATION_SWEEP_MS
+  ) {
+    throw startupUnavailable("invalid_reclamation_sweep_interval");
+  }
+  return sweepMs;
 }
 
 async function assemblePremiereTarget(options: {

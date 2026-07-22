@@ -111,6 +111,8 @@ import {
   setHtmlNoCacheHeaders,
 } from "../server/RenderHtml";
 import { ReplayPremiereAnonymousWriteLimiter } from "../server/replay-premiere/ReplayPremiereAnonymousWriteLimiter";
+import { ReplayPremiereArchiveStore } from "../server/replay-premiere/ReplayPremiereArchiveIndex";
+import { createReplayPremiereArchiveRouter } from "../server/replay-premiere/ReplayPremiereArchiveRouter";
 import { DeterministicReplayPremiereCheckpointProjector } from "../server/replay-premiere/ReplayPremiereCheckpointProjection";
 import {
   createReplayPremiereTrustedProxyAddressResolver,
@@ -201,6 +203,14 @@ const replayPremiereGuestSecurity = new ReplayPremiereGuestSecurity({
 });
 export const replayPremiereRuntimeRegistry =
   new ReplayPremiereRuntimeRegistry();
+// Durable archive of reclaimed premieres: keeps `/premiere/<id>` resolvable
+// after the bulk is deleted and across restarts, and drives startup journal
+// compaction. Its pointer index is deduped/compacted on open.
+export const replayPremiereArchiveStore = await ReplayPremiereArchiveStore.open(
+  {
+    privateStateRoot: replayPremierePrivateStateRoot,
+  },
+);
 const replayPremiereProduction = await startReplayPremiereProduction({
   privateStateRoot: replayPremierePrivateStateRoot,
   servedRoots: [
@@ -217,6 +227,7 @@ const replayPremiereProduction = await startReplayPremiereProduction({
   checkpointProjector: new DeterministicReplayPremiereCheckpointProjector(
     path.join(process.cwd(), "resources", "maps"),
   ),
+  archiveStore: replayPremiereArchiveStore,
   // Leave bounded launch headroom for the remaining initialization and bind.
   maxStartupMs: 8_000,
   onDiagnostic: (diagnostic) => {
@@ -399,6 +410,23 @@ if (replayPremiereClips !== null) {
     }),
   );
 }
+// Mounted BEFORE the public-page router: a revealed premiere whose live runtime
+// has de-registered (post-reveal reclamation, or a fresh restart) is served its
+// durable results-summary page here. It defers to the live router for still-
+// registered premieres and for unknown ids.
+app.use(
+  createReplayPremiereArchiveRouter({
+    registry: replayPremiereHttpRegistry,
+    archiveStore: replayPremiereArchiveStore,
+    loadAppShell: () =>
+      getAppShellContent(path.resolve(staticRootDir, "index.html")),
+    publicOrigin: replayPremierePublicOrigin,
+    pageContentSecurityPolicy: proxyWarLeagueContentSecurityPolicy(),
+    onOperatorError: (error) => {
+      console.error(formatReplayPremiereHttpOperatorError(error));
+    },
+  }),
+);
 app.use(
   createReplayPremierePublicPageRouter({
     registry: replayPremiereHttpRegistry,

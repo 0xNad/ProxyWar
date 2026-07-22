@@ -192,7 +192,9 @@ export default defineConfig(({ mode }) => {
       // and outputs/ so archived test copies under artifacts/ (pre-rename
       // cleanup snapshots) are not scanned as live tests, and .claude/ plus
       // .codex/ so test copies inside sibling-session git worktrees are not
-      // scanned as live tests of this checkout.
+      // scanned as live tests of this checkout. deploy/ holds node:test
+      // (`.test.mjs`) launchd suites run via `node --test`, not vitest; scanning
+      // them as vitest suites reports a spurious failure.
       exclude: [
         "**/node_modules/**",
         "**/dist/**",
@@ -203,6 +205,7 @@ export default defineConfig(({ mode }) => {
         "**/outputs/**",
         "**/.claude/**",
         "**/.codex/**",
+        "**/deploy/**",
       ],
     },
     root: "./",

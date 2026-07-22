@@ -32,6 +32,7 @@ import {
   type ReplayPremierePolicyView,
   type ReplayPremierePredictionRequest,
   type ReplayPremiereReminderRequest,
+  type ReplayPremiereResultsSummaryView,
   type ReplayPremiereShareRequest,
 } from "./ReplayPremiereOverlay";
 import {
@@ -2533,7 +2534,7 @@ export class ReplayPremiereRuntimeController {
                 turn: currentTurn,
               }),
       },
-      reveal: this.revealView(),
+      reveal: this.revealView(policies),
       recovery:
         this.recovery === null
           ? null
@@ -2639,14 +2640,72 @@ export class ReplayPremiereRuntimeController {
     return [toView(definitions[0]), toView(definitions[1])];
   }
 
-  private revealView(): ReplayPremiereOverlayModel["reveal"] {
+  private revealView(
+    policies: readonly ReplayPremierePolicyView[],
+  ): ReplayPremiereOverlayModel["reveal"] {
     if (this.reveal === null) return null;
     const winners = this.reveal.verifiedAuthoritativeResult.seats.filter(
       (seat) => seat.won,
     );
+    const results = this.resultsView(policies);
     return winners.length === 1
-      ? { outcome: "winner", winnerSeatId: winners[0].seatId }
-      : { outcome: "void", winnerSeatId: null };
+      ? { outcome: "winner", winnerSeatId: winners[0].seatId, results }
+      : { outcome: "void", winnerSeatId: null, results };
+  }
+
+  /**
+   * Builds the aggregate-only results summary from the verified authoritative
+   * result and the service checkpoint views. It carries no per-viewer data;
+   * the marker tally is server-owned, so live it is empty and the durable
+   * archived page fills it in from the persisted summary.
+   */
+  private resultsView(
+    policies: readonly ReplayPremierePolicyView[],
+  ): ReplayPremiereResultsSummaryView | null {
+    if (this.reveal === null) return null;
+    const result = this.reveal.verifiedAuthoritativeResult;
+    const nameOf = (seatId: string): string =>
+      result.seats.find((seat) => seat.seatId === seatId)?.displayName ??
+      policies.find((policy) => policy.seatId === seatId)?.displayName ??
+      seatId;
+    const definitions = this.projection!.publicDefinition.checkpoints;
+    const predictions = definitions.map((definition) => {
+      const serviceView = this.serviceCheckpoints?.find(
+        (checkpoint) => checkpoint.id === definition.id,
+      );
+      const total = serviceView?.totalPredictions ?? 0;
+      const distribution = serviceView?.distribution ?? null;
+      const options = (serviceView?.optionSeatIds ?? []).map((seatId) => ({
+        seatId,
+        displayName: nameOf(seatId),
+        percent:
+          total > 0 && distribution !== null
+            ? ((distribution[seatId] ?? 0) / total) * 100
+            : 0,
+      }));
+      const crowd = serviceView?.crowdAccuracy ?? null;
+      const correctPercent =
+        crowd !== null && crowd.totalPredictions > 0
+          ? (crowd.correctPredictions / crowd.totalPredictions) * 100
+          : null;
+      return {
+        checkpointId: definition.id,
+        sequence: definition.sequence,
+        correctPercent,
+        totalPredictions: total,
+        options,
+      };
+    });
+    return {
+      turnCount: result.turnCount,
+      standings: result.seats.map((seat) => ({
+        seatId: seat.seatId,
+        displayName: seat.displayName,
+        won: seat.won,
+      })),
+      predictions,
+      markers: [],
+    };
   }
 
   private observedSequence(): number {

@@ -98,10 +98,52 @@ export interface ReplayPremiereClipView {
   ready?: ReplayPremiereClipReadyView | null;
 }
 
+export interface ReplayPremiereResultsStandingView {
+  seatId: string;
+  displayName: string;
+  won: boolean;
+}
+
+export interface ReplayPremiereResultsPredictionOptionView {
+  seatId: string;
+  displayName: string;
+  percent: number;
+}
+
+export interface ReplayPremiereResultsPredictionView {
+  checkpointId: string;
+  sequence: number;
+  /** Share of predictions that named the actual winner; null when void. */
+  correctPercent: number | null;
+  /** Total predictions, when known (archived summary); omitted live. */
+  totalPredictions?: number | null;
+  options: readonly ReplayPremiereResultsPredictionOptionView[];
+}
+
+export interface ReplayPremiereResultsMarkerView {
+  kind: ReplayPremiereMarkerKind;
+  turn: number;
+  count: number;
+}
+
+/**
+ * Aggregate-only results the post-reveal panel renders. It carries no
+ * per-viewer data — every field is a seat identity, a public display name, or a
+ * tally — so it is safe to persist and re-serve on the archived premiere page.
+ */
+export interface ReplayPremiereResultsSummaryView {
+  turnCount?: number | null;
+  standings: readonly ReplayPremiereResultsStandingView[];
+  predictions: readonly ReplayPremiereResultsPredictionView[];
+  markers: readonly ReplayPremiereResultsMarkerView[];
+}
+
 export interface ReplayPremiereRevealView {
   outcome: "winner" | "void";
   winnerSeatId?: string | null;
   summary?: string | null;
+  /** The durable results summary; augments the reveal payoff post-reveal. */
+  results?: ReplayPremiereResultsSummaryView | null;
 }
 
 export interface ReplayPremiereRecoveryView {
@@ -553,6 +595,7 @@ function renderStateBody(
         break;
       }
       body.append(renderReveal(model, model.reveal));
+      body.append(renderResultsSummary(model.reveal));
       body.append(renderAmbientEvidence(model));
       body.append(renderMarkers(model, callbacks, safeRun));
       body.append(renderShare(model, callbacks, safeRun, captionState));
@@ -571,6 +614,7 @@ function renderStateBody(
         body.append(renderSanitizedFailure("integrity_failure"));
         break;
       }
+      body.append(renderResultsSummary(model.reveal));
       body.append(renderShare(model, callbacks, safeRun, captionState));
       body.append(renderCounterChallenge(model, callbacks, safeRun));
       break;
@@ -1488,6 +1532,250 @@ function renderCancelled(
     ),
   );
   return section;
+}
+
+const RESULTS_STANDINGS_LIMIT = 10;
+const RESULTS_MARKERS_LIMIT = 12;
+
+/**
+ * The durable post-reveal results panel: final standings, per-checkpoint crowd
+ * prediction accuracy, and notable community markers. It renders nothing when
+ * no results summary is attached, so it stays fail-closed on an absent reveal.
+ */
+function renderResultsSummary(reveal: ReplayPremiereRevealView): HTMLElement {
+  const section = element("section", "rp-section rp-results");
+  const results = reveal.results;
+  if (results === null || results === undefined) {
+    section.hidden = true;
+    return section;
+  }
+  const titleId = "rp-results-title";
+  section.setAttribute("aria-labelledby", titleId);
+  const heading = element(
+    "h3",
+    "rp-section-title",
+    translateText("replay_premiere.results_heading"),
+  );
+  heading.id = titleId;
+  section.append(heading);
+  if (
+    typeof results.turnCount === "number" &&
+    Number.isFinite(results.turnCount) &&
+    results.turnCount > 0
+  ) {
+    section.append(
+      element(
+        "p",
+        "rp-results-meta",
+        translateText("replay_premiere.results_turn_count", {
+          turns: Math.trunc(results.turnCount),
+        }),
+      ),
+    );
+  }
+  const winnerSeatIds = new Set(
+    results.standings
+      .filter((standing) => standing.won)
+      .map((standing) => standing.seatId),
+  );
+  section.append(renderResultsStandings(results.standings));
+  if (results.predictions.length > 0) {
+    section.append(
+      renderResultsPredictions(results.predictions, winnerSeatIds),
+    );
+  }
+  if (results.markers.length > 0) {
+    section.append(renderResultsMarkers(results.markers));
+  }
+  return section;
+}
+
+function renderResultsStandings(
+  standings: readonly ReplayPremiereResultsStandingView[],
+): HTMLElement {
+  const group = element("div", "rp-results-group");
+  group.append(
+    element(
+      "h4",
+      "rp-subheading",
+      translateText("replay_premiere.results_standings"),
+    ),
+  );
+  const ordered = [...standings].sort(
+    (left, right) => Number(right.won) - Number(left.won),
+  );
+  const shown = ordered.slice(0, RESULTS_STANDINGS_LIMIT);
+  const list = element("ul", "rp-results-standings");
+  list.setAttribute("role", "list");
+  for (const standing of shown) {
+    const item = element(
+      "li",
+      `rp-results-standing${standing.won ? " rp-results-win" : ""}`,
+    );
+    item.append(
+      element(
+        "span",
+        "rp-results-standing-name",
+        safeDisplay(standing.displayName),
+      ),
+    );
+    if (standing.won) {
+      item.append(
+        element(
+          "span",
+          "rp-results-badge",
+          translateText("replay_premiere.results_winner_badge"),
+        ),
+      );
+    }
+    list.append(item);
+  }
+  group.append(list);
+  const remaining = ordered.length - shown.length;
+  if (remaining > 0) {
+    group.append(
+      element(
+        "p",
+        "rp-muted rp-results-more",
+        translateText("replay_premiere.results_more_agents", {
+          count: remaining,
+        }),
+      ),
+    );
+  }
+  return group;
+}
+
+function renderResultsPredictions(
+  predictions: readonly ReplayPremiereResultsPredictionView[],
+  winnerSeatIds: ReadonlySet<string>,
+): HTMLElement {
+  const group = element("div", "rp-results-group");
+  group.append(
+    element(
+      "h4",
+      "rp-subheading",
+      translateText("replay_premiere.results_predictions"),
+    ),
+  );
+  predictions.forEach((prediction, index) => {
+    const block = element("div", "rp-results-prediction");
+    block.append(
+      element(
+        "p",
+        "rp-results-prediction-title",
+        translateText("replay_premiere.checkpoint_number", {
+          number: index + 1,
+        }),
+      ),
+    );
+    if (prediction.correctPercent !== null) {
+      block.append(
+        element(
+          "p",
+          "rp-results-accuracy",
+          translateText("replay_premiere.results_accuracy", {
+            percent: boundedPercent(prediction.correctPercent),
+          }),
+        ),
+      );
+    } else {
+      block.append(
+        element(
+          "p",
+          "rp-muted",
+          translateText("replay_premiere.results_accuracy_void"),
+        ),
+      );
+    }
+    for (const option of prediction.options) {
+      const pct = boundedPercent(option.percent);
+      const row = element(
+        "div",
+        `rp-distribution-row${
+          winnerSeatIds.has(option.seatId) ? " rp-distribution-mine" : ""
+        }`,
+      );
+      row.style.setProperty("--rp-share", String(pct));
+      row.append(
+        element(
+          "span",
+          "rp-distribution-name",
+          safeDisplay(option.displayName),
+        ),
+      );
+      row.append(
+        element(
+          "span",
+          "rp-distribution-pct",
+          translateText("replay_premiere.percent", { percent: pct }),
+        ),
+      );
+      block.append(row);
+    }
+    if (
+      typeof prediction.totalPredictions === "number" &&
+      Number.isFinite(prediction.totalPredictions) &&
+      prediction.totalPredictions >= 0
+    ) {
+      block.append(
+        element(
+          "p",
+          "rp-muted rp-results-votes",
+          translateText("replay_premiere.results_vote_count", {
+            count: Math.trunc(prediction.totalPredictions),
+          }),
+        ),
+      );
+    }
+    group.append(block);
+  });
+  return group;
+}
+
+function renderResultsMarkers(
+  markers: readonly ReplayPremiereResultsMarkerView[],
+): HTMLElement {
+  const group = element("div", "rp-results-group");
+  group.append(
+    element(
+      "h4",
+      "rp-subheading",
+      translateText("replay_premiere.results_markers"),
+    ),
+  );
+  const list = element("ul", "rp-results-markers");
+  list.setAttribute("role", "list");
+  for (const marker of markers.slice(0, RESULTS_MARKERS_LIMIT)) {
+    const meta = MARKERS.find((entry) => entry.kind === marker.kind);
+    const item = element("li", "rp-results-marker");
+    item.dataset.kind = marker.kind;
+    const symbol = element(
+      "span",
+      "rp-results-marker-symbol",
+      meta?.symbol ?? "•",
+    );
+    symbol.setAttribute("aria-hidden", "true");
+    item.append(
+      symbol,
+      element(
+        "span",
+        "rp-results-marker-label",
+        meta === undefined ? "" : translateText(meta.translationKey),
+      ),
+      element(
+        "span",
+        "rp-results-marker-detail",
+        translateText("replay_premiere.results_marker_detail", {
+          turn: marker.turn,
+          count: marker.count,
+        }),
+      ),
+    );
+    list.append(item);
+  }
+  group.append(list);
+  return group;
 }
 
 function renderArchive(model: ReplayPremiereOverlayModel): HTMLElement {
@@ -2423,6 +2711,69 @@ const OVERLAY_CSS = `
   #${OVERLAY_ID} .rp-reveal-void .rp-winner { color: var(--rp-text); font-size: 17px; }
   #${OVERLAY_ID} .rp-reveal-summary { color: var(--rp-text-dim); }
 
+  /* ---- Results summary (durable post-reveal panel) ---- */
+  #${OVERLAY_ID} .rp-results { display: grid; gap: 12px; animation: rp-results-rise 0.4s cubic-bezier(0.22, 1, 0.36, 1) both; }
+  #${OVERLAY_ID} .rp-results-meta { margin: 0; color: var(--rp-text-dim); font-weight: 650; }
+  #${OVERLAY_ID} .rp-results-group { display: grid; gap: 7px; }
+  #${OVERLAY_ID} .rp-results-standings { list-style: none; margin: 0; padding: 0; display: grid; gap: 5px; }
+  #${OVERLAY_ID} .rp-results-standing {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 10px;
+    padding: 7px 11px;
+    border: 1px solid var(--rp-line);
+    border-radius: var(--rp-r-sm);
+    background: var(--rp-surface-2);
+    font-weight: 650;
+  }
+  #${OVERLAY_ID} .rp-results-standing.rp-results-win { border-color: var(--rp-positive); background: var(--rp-positive-soft); color: var(--rp-positive-text); }
+  #${OVERLAY_ID} .rp-results-standing-name { min-width: 0; overflow-wrap: anywhere; }
+  #${OVERLAY_ID} .rp-results-badge {
+    flex: none;
+    padding: 2px 9px;
+    border-radius: var(--rp-r-pill);
+    background: var(--rp-positive);
+    color: var(--rp-on-positive);
+    font-size: 11px;
+    font-weight: 800;
+    letter-spacing: 0.05em;
+    text-transform: uppercase;
+  }
+  #${OVERLAY_ID} .rp-results-more { margin: 0; font-size: 12px; }
+  #${OVERLAY_ID} .rp-results-prediction {
+    display: grid;
+    gap: 5px;
+    padding: 9px 11px;
+    border: 1px solid var(--rp-line);
+    border-radius: var(--rp-r-md);
+    background: var(--rp-surface);
+  }
+  #${OVERLAY_ID} .rp-results-prediction-title { margin: 0; font-weight: 750; }
+  #${OVERLAY_ID} .rp-results-accuracy { margin: 0; color: var(--rp-positive-text); font-weight: 800; }
+  #${OVERLAY_ID} .rp-results-votes { margin: 1px 0 0; font-size: 11px; }
+  #${OVERLAY_ID} .rp-results-markers { list-style: none; margin: 0; padding: 0; display: grid; gap: 5px; }
+  #${OVERLAY_ID} .rp-results-marker {
+    --rp-mk: var(--rp-accent);
+    display: flex;
+    align-items: center;
+    gap: 9px;
+    padding: 6px 11px;
+    border: 1px solid var(--rp-line);
+    border-left: 3px solid var(--rp-mk);
+    border-radius: var(--rp-r-sm);
+    background: var(--rp-surface-2);
+  }
+  #${OVERLAY_ID} .rp-results-marker[data-kind="turning_point"] { --rp-mk: var(--rp-mk-turning); }
+  #${OVERLAY_ID} .rp-results-marker[data-kind="smart"] { --rp-mk: var(--rp-mk-smart); }
+  #${OVERLAY_ID} .rp-results-marker[data-kind="mistake"] { --rp-mk: var(--rp-mk-mistake); }
+  #${OVERLAY_ID} .rp-results-marker[data-kind="betrayal"] { --rp-mk: var(--rp-mk-betrayal); }
+  #${OVERLAY_ID} .rp-results-marker[data-kind="clip_this"] { --rp-mk: var(--rp-mk-clip); }
+  #${OVERLAY_ID} .rp-results-marker-symbol { flex: none; color: var(--rp-mk); font-size: 16px; font-weight: 850; line-height: 1; }
+  #${OVERLAY_ID} .rp-results-marker-label { font-weight: 700; overflow-wrap: anywhere; }
+  #${OVERLAY_ID} .rp-results-marker-detail { margin-left: auto; color: var(--rp-muted); font-size: 12px; font-variant-numeric: tabular-nums; white-space: nowrap; }
+  @keyframes rp-results-rise { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
+
   /* ---- Failure / cancelled / frozen / counter ---- */
   #${OVERLAY_ID} .rp-failure { border-color: rgba(248, 113, 113, 0.5); background: var(--rp-danger-soft); }
   #${OVERLAY_ID} .rp-failure .rp-section-title { color: var(--rp-danger); }
@@ -2494,6 +2845,7 @@ const OVERLAY_CSS = `
     #${OVERLAY_ID} .rp-live-now-dot,
     #${OVERLAY_ID} .rp-checkpoint-timer::before,
     #${OVERLAY_ID} .rp-reveal,
+    #${OVERLAY_ID} .rp-results,
     #${OVERLAY_ID} .rp-reveal-crest { animation: none !important; }
     #${OVERLAY_ID} button:hover { transform: none !important; }
   }
