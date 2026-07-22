@@ -1062,6 +1062,7 @@
   },
   "replay_premiere": {
     "overlay_label": "Replay Premiere controls",
+    "loading_premiere": "Loading premiere…",
     "label_premiere": "Replay Premiere",
     "label_controlled": "Controlled replay premiere",
     "label_spoiler_resistant": "Sealed rated replay",

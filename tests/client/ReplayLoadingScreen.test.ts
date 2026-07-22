@@ -64,6 +64,19 @@ describe("ReplayLoadingScreen", () => {
     expect(document.getElementById("proxywar-coworld-splash")).toBeNull();
   });
 
+  it("shows the premiere-specific boot message on premiere routes", () => {
+    holdReplayLoadingScreenUntilFirstFrame(
+      undefined,
+      "replay_premiere.loading_premiere",
+    );
+    expect(document.documentElement.classList).toContain(
+      "proxywar-replay-booting",
+    );
+    expect(
+      document.querySelector("[data-replay-loading-message]")?.dataset.i18n,
+    ).toBe("replay_premiere.loading_premiere");
+  });
+
   it("keeps the cover up when loading takes longer than the threshold", () => {
     holdReplayLoadingScreenUntilFirstFrame(1_000);
 

@@ -12,7 +12,8 @@ export type ReplayLoadingMessageKey =
   | "ai_league_replay.loading_replay"
   | "ai_league_replay.waiting_for_replay"
   | "ai_league_replay.loading_slow"
-  | "ai_league_replay.loading_failed";
+  | "ai_league_replay.loading_failed"
+  | "replay_premiere.loading_premiere";
 
 export function showReplayLoadingScreen(
   messageKey: ReplayLoadingMessageKey = "ai_league_replay.loading_replay",
@@ -45,8 +46,9 @@ export function showReplayLoadingScreen(
 
 export function holdReplayLoadingScreenUntilFirstFrame(
   timeoutMs = REPLAY_LOADING_SLOW_TIMEOUT_MS,
+  messageKey: ReplayLoadingMessageKey = "ai_league_replay.loading_replay",
 ): () => void {
-  showReplayLoadingScreen();
+  showReplayLoadingScreen(messageKey);
 
   let active = true;
   let slowTimer: ReturnType<typeof setTimeout> | null = null;

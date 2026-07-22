@@ -118,4 +118,23 @@ describe("RenderHtml", () => {
     expect(ordinaryPage.windowObject.__PROXYWAR_AI_REPLAY__).toBe(false);
     expect(ordinaryPage.classNames).not.toContain("proxywar-replay-route");
   });
+
+  test("suppresses the main-menu DOM for the whole lifetime of replay routes", async () => {
+    // The boot veil drops when the premiere overlay is ready — before the
+    // game canvas has necessarily rendered — so the landing page must be
+    // display:none'd under the route class or it flashes in that gap.
+    const html = await renderHtmlContent(path.resolve("index.html"));
+    const headStyle = html.slice(0, html.indexOf("</head>"));
+    for (const surface of [
+      "#main-menu-area",
+      "#hex-grid",
+      "#mobile-menu-backdrop",
+      "#sidebar-menu",
+    ]) {
+      expect(headStyle).toContain(
+        `html.proxywar-replay-route ${surface}`.trim(),
+      );
+    }
+    expect(html).toContain('id="main-menu-area"');
+  });
 });
