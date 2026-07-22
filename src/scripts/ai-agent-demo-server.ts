@@ -121,7 +121,9 @@ import {
 } from "../server/replay-premiere/ReplayPremiereClientAddress";
 import {
   createReplayPremiereClipDocumentRouter,
+  replayPremiereClipCacheDir,
   ReplayPremiereClips,
+  ReplayPremiereRevealAutoClip,
 } from "../server/replay-premiere/ReplayPremiereClips";
 import { ReplayPremiereError } from "../server/replay-premiere/ReplayPremiereErrors";
 import { ReplayPremiereGuestSecurity } from "../server/replay-premiere/ReplayPremiereGuestSecurity";
@@ -220,6 +222,19 @@ const replayPremiereReclaimExclusions =
   await loadReplayPremiereReclamationExclusions({
     privateStateRoot: replayPremierePrivateStateRoot,
   });
+// Reveal observations feed the automatic default-clip render. The scheduler is
+// constructed after the clip service below; observations that fire during
+// startup recovery (a premiere recovered already revealed) are buffered
+// (bounded) and replayed once the scheduler exists.
+let replayPremiereRevealAutoClip: ReplayPremiereRevealAutoClip | null = null;
+const bufferedRevealObservations: string[] = [];
+const notifyPremiereRevealed = (premiereId: string): void => {
+  if (replayPremiereRevealAutoClip !== null) {
+    replayPremiereRevealAutoClip.onPremiereRevealed(premiereId);
+  } else if (bufferedRevealObservations.length < 64) {
+    bufferedRevealObservations.push(premiereId);
+  }
+};
 // Premiere recovery must never take the whole beta down: the league, demo,
 // and replay surfaces do not depend on it. 2026-07-22 round-649 outage: an
 // over-ceiling catalog AGGREGATE threw json_complexity_exceeded out of this
@@ -244,15 +259,19 @@ const replayPremiereProduction = await startReplayPremiereProduction({
   ),
   archiveStore: replayPremiereArchiveStore,
   reclamationExcludedPremiereIds: replayPremiereReclaimExclusions,
+  onPremiereRevealed: notifyPremiereRevealed,
   // Leave bounded launch headroom for the remaining initialization and bind.
   maxStartupMs: 8_000,
   onDiagnostic: (diagnostic) => {
     // Deferred fresh-admission lane events are progress, not rejections; keep
     // the historical "recovery rejected" wording for real rejections so
-    // existing operator greps stay valid.
+    // existing operator greps stay valid. Archived-clip promotion telemetry is
+    // likewise progress, not a rejection.
     const line = diagnostic.operatorCode.startsWith("deferred_assembly")
       ? `Replay Premiere deferred recovery ${diagnostic.target}: ${diagnostic.operatorCode}`
-      : `Replay Premiere recovery rejected ${diagnostic.target}: ${diagnostic.operatorCode}`;
+      : diagnostic.operatorCode.startsWith("archived_clip")
+        ? `Replay Premiere archived clips: ${diagnostic.operatorCode}`
+        : `Replay Premiere recovery rejected ${diagnostic.target}: ${diagnostic.operatorCode}`;
     console.error(line);
   },
 }).catch((error: unknown) => {
@@ -278,7 +297,7 @@ let replayPremiereClips: ReplayPremiereClips | null = null;
 if (replayPremiereClipsEnabled) {
   try {
     replayPremiereClips = new ReplayPremiereClips({
-      clipsRoot: path.join(replayPremierePrivateStateRoot, "clips-v1"),
+      clipsRoot: replayPremiereClipCacheDir(replayPremierePrivateStateRoot),
       sourceBundleRoot: replayPremierePrivateStateRoot,
       staticDir: staticRootDir,
       workerModulePath: path.join(
@@ -314,6 +333,23 @@ if (replayPremiereClipsEnabled) {
       }`,
     );
   }
+}
+// Automatic default clip at reveal: every revealed premiere gets ONE scheduled
+// render (plus one bounded retry) of its reveal-payoff moment, so the durable
+// archived page has a clip even if nobody clicked render during the short
+// revealed window. Best-effort; disabled together with the clip service.
+if (replayPremiereClips !== null) {
+  replayPremiereRevealAutoClip = new ReplayPremiereRevealAutoClip({
+    clips: replayPremiereClips,
+    resolveRuntime: (premiereId) =>
+      replayPremiereHttpRegistry.get(premiereId)?.runtime ?? null,
+    logger: (message) => console.log(`[premiere-clips] auto ${message}`),
+  });
+  for (const premiereId of bufferedRevealObservations.splice(0)) {
+    replayPremiereRevealAutoClip.onPremiereRevealed(premiereId);
+  }
+} else {
+  bufferedRevealObservations.length = 0;
 }
 const betaAccess = loadProxyWarBetaAccessConfig();
 const betaFeedbackRootDir = path.join(
@@ -2057,6 +2093,7 @@ for (const signal of ["SIGINT", "SIGTERM"] as const) {
     shutdownStarted = true;
     runningChild?.kill(signal);
     renderer?.kill(signal);
+    replayPremiereRevealAutoClip?.close();
     void replayPremiereClips?.close();
     server.close(() => {
       void (

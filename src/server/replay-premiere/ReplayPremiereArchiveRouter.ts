@@ -1,11 +1,18 @@
 import express, { type Request, type Response, type Router } from "express";
 import { randomBytes } from "node:crypto";
+import { createReadStream, promises as fs } from "node:fs";
+import path from "node:path";
 import englishTranslations from "../../../resources/lang/en.json";
 import { matchProxyWarPublicPremiereReadPath } from "../agents/ProxyWarPublicArtifacts";
 import type {
   PremiereArchivePointerV1,
   ReplayPremiereArchiveStore,
 } from "./ReplayPremiereArchiveIndex";
+import {
+  archivedPremiereClipFileName,
+  archivedPremiereClipRoute,
+  archivedPremiereClipsDir,
+} from "./ReplayPremiereClips";
 import type { ReplayPremiereHttpRegistry } from "./ReplayPremiereHttp";
 import { publicRunKeyForSourceRunId } from "./ReplayPremiereLoopCore";
 import {
@@ -19,6 +26,13 @@ const JSON_DOCUMENT_CSP =
   "default-src 'none'; frame-ancestors 'none'; base-uri 'none'; sandbox";
 const ARCHIVE_DATA_ELEMENT_ID = "proxywar-premiere-archive";
 
+/** The archived page's downloadable-clip descriptor (stat-derived, no schema). */
+export interface PremiereArchiveClientClip {
+  /** Same-origin download route (`/premiere/<id>/clip.mp4`). */
+  url: string;
+  byteLength: number;
+}
+
 /** The exact JSON the archived premiere page hands the client to render. */
 export interface PremiereArchiveClientPayload {
   schemaVersion: 1;
@@ -29,6 +43,12 @@ export interface PremiereArchiveClientPayload {
   revealedAt: string | null;
   /** The ordinary league replay run key to render behind the summary, or null. */
   replayRunKey: string | null;
+  /**
+   * The durable archived clip, when one was promoted at reclamation and still
+   * exists on disk (retention-bounded). Availability is a stat of the artifact
+   * — the durable summary schema is untouched.
+   */
+  clip: PremiereArchiveClientClip | null;
   summary: PremiereResultSummaryV1;
 }
 
@@ -63,8 +83,37 @@ export function createReplayPremiereArchiveRouter(
 
   router.use((request, response, next) => {
     const route = matchProxyWarPublicPremiereReadPath(request.path);
-    if (route === null || (route.kind !== "page" && route.kind !== "card")) {
+    if (
+      route === null ||
+      (route.kind !== "page" &&
+        route.kind !== "card" &&
+        route.kind !== "archive_clip")
+    ) {
       next();
+      return;
+    }
+    // The durable-clip route is owned here TERMINALLY: no downstream premiere
+    // router serves it, so every state (registered/live, unknown, failed,
+    // missing artifact) is an identical fixed 404 and nothing falls through to
+    // generic handling.
+    if (route.kind === "archive_clip") {
+      void handleArchivedClipRequest({
+        request,
+        response,
+        route,
+        options,
+      }).catch((error: unknown) => {
+        try {
+          options.onOperatorError?.(error);
+        } catch {
+          // Operator diagnostics can never replace the fixed public response.
+        }
+        if (!response.headersSent) {
+          sendFailure(response, 404);
+        } else {
+          response.destroy();
+        }
+      });
       return;
     }
     // A live premiere is owned by the downstream public-page router/API.
@@ -101,6 +150,103 @@ export function createReplayPremiereArchiveRouter(
   return router;
 }
 
+/**
+ * Serves `GET|HEAD /premiere/<id>/clip.mp4` — the ONE durable clip promoted at
+ * reclamation. Fail-closed: anything but a reveal-public archived premiere
+ * with an on-disk artifact is the same bare 404 (unknown id, still-registered
+ * premiere, failed/cancelled terminal, evicted clip). Post-reveal-public, so
+ * the mp4 itself is cacheable; the noindex robots header stays.
+ */
+async function handleArchivedClipRequest(context: {
+  request: Request;
+  response: Response;
+  route: { premiereId: string };
+  options: ReplayPremiereArchiveRouterOptions;
+}): Promise<void> {
+  const { request, response, route, options } = context;
+  if (request.method !== "GET" && request.method !== "HEAD") {
+    response.setHeader("Allow", "GET, HEAD");
+    sendFailure(response, 405);
+    return;
+  }
+  if (request.headers.range !== undefined) {
+    sendFailure(response, 416);
+    return;
+  }
+  const clip = await resolveArchivedClipFile(
+    options.archiveStore,
+    options.registry,
+    route.premiereId,
+  );
+  if (clip === null) {
+    sendFailure(response, 404);
+    return;
+  }
+  setArchivedClipSuccessHeaders(response);
+  response.status(200);
+  response.setHeader("Content-Type", "video/mp4");
+  response.setHeader("Content-Length", clip.byteLength);
+  response.setHeader(
+    "Content-Disposition",
+    `attachment; filename="${archivedPremiereClipFileName(route.premiereId)}"`,
+  );
+  if (request.method === "HEAD") {
+    response.end();
+    return;
+  }
+  const stream = createReadStream(clip.filePath);
+  stream.on("error", () => {
+    if (!response.headersSent) sendFailure(response, 404);
+    else response.destroy();
+  });
+  stream.pipe(response);
+}
+
+/**
+ * Resolves the durable clip artifact for a premiere id, or null (=> 404).
+ * Requires: not live-registered, archived pointer present, reveal-public
+ * (revealedAt non-null, terminal revealed|archived), artifact on disk.
+ */
+async function resolveArchivedClipFile(
+  archiveStore: ReplayPremiereArchiveRouterOptions["archiveStore"],
+  registry: ReplayPremiereArchiveRouterOptions["registry"],
+  premiereId: string,
+): Promise<{ filePath: string; byteLength: number } | null> {
+  if (registry.get(premiereId) !== null) return null;
+  const pointer = archiveStore.lookup(premiereId);
+  if (
+    pointer === null ||
+    pointer.revealedAt === null ||
+    (pointer.terminalState !== "revealed" &&
+      pointer.terminalState !== "archived")
+  ) {
+    return null;
+  }
+  const filePath = path.join(
+    archivedPremiereClipsDir(archiveStore.archiveRoot),
+    archivedPremiereClipFileName(premiereId),
+  );
+  try {
+    const stat = await fs.stat(filePath);
+    if (!stat.isFile() || stat.size <= 0) return null;
+    return { filePath, byteLength: stat.size };
+  } catch {
+    return null;
+  }
+}
+
+function setArchivedClipSuccessHeaders(response: Response): void {
+  // Public post-reveal artifact: cacheable (unlike premiere pages/cache clips).
+  response.setHeader("Cache-Control", "public, max-age=3600");
+  response.setHeader("X-Content-Type-Options", "nosniff");
+  response.setHeader("X-Robots-Tag", "noindex, nofollow");
+  response.setHeader("Referrer-Policy", "same-origin");
+  response.setHeader(
+    "Content-Security-Policy",
+    "default-src 'none'; frame-ancestors 'none'; base-uri 'none'; sandbox",
+  );
+}
+
 async function handleArchivedDocumentRequest(context: {
   request: Request;
   response: Response;
@@ -130,6 +276,11 @@ async function handleArchivedDocumentRequest(context: {
     sendFailure(response, 404);
     return;
   }
+  const clip = await resolveArchivedClipFile(
+    options.archiveStore,
+    options.registry,
+    route.premiereId,
+  );
   const payload: PremiereArchiveClientPayload = {
     schemaVersion: 1,
     premiereId: summary.premiereId,
@@ -141,6 +292,13 @@ async function handleArchivedDocumentRequest(context: {
       summary.sourceKind === "rated_coworld"
         ? publicRunKeyForSourceRunId(summary.sourceRunId)
         : null,
+    clip:
+      clip === null
+        ? null
+        : {
+            url: archivedPremiereClipRoute(summary.premiereId),
+            byteLength: clip.byteLength,
+          },
     summary,
   };
   const shell = await options.loadAppShell();

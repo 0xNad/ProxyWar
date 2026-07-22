@@ -122,6 +122,12 @@ const proxyWarPremiereClipFilePattern = new RegExp(
 const proxyWarPremiereClipStatusPattern = new RegExp(
   `^/api/premieres/(${proxyWarPremiereIdSource})/clips/(${proxyWarPremiereClipBucketSource})$`,
 );
+// The single durable archived clip promoted at reclamation. Distinct from the
+// bucketed cache route above: this one survives after the live runtime and the
+// clip cache are gone, served by the archive router from archive-v1/clips.
+const proxyWarPremiereArchiveClipPattern = new RegExp(
+  `^/premiere/(${proxyWarPremiereIdSource})/clip\\.mp4$`,
+);
 const proxyWarPremiereClipCreatePattern = new RegExp(
   `^/api/premieres/(${proxyWarPremiereIdSource})/clips$`,
 );
@@ -149,7 +155,8 @@ export type ProxyWarPublicPremiereReadRoute =
   | { kind: "reveal"; premiereId: string }
   | { kind: "card"; premiereId: string }
   | { kind: "clip_status"; premiereId: string; bucket: number }
-  | { kind: "clip_file"; premiereId: string; bucket: number };
+  | { kind: "clip_file"; premiereId: string; bucket: number }
+  | { kind: "archive_clip"; premiereId: string };
 
 export type ProxyWarPublicPremiereWriteRoute =
   | { kind: "prediction"; premiereId: string }
@@ -203,6 +210,10 @@ export function matchProxyWarPublicPremiereReadPath(
       premiereId: clipFile[1],
       bucket: Number(clipFile[2]),
     };
+  }
+  const archiveClip = proxyWarPremiereArchiveClipPattern.exec(pathname);
+  if (archiveClip !== null) {
+    return { kind: "archive_clip", premiereId: archiveClip[1] };
   }
   return null;
 }

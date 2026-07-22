@@ -68,6 +68,12 @@ interface ArchiveSummary {
   formatLabel: string | null;
 }
 
+export interface ReplayPremiereArchiveClip {
+  /** Same-origin durable download route (`/premiere/<id>/clip.mp4`). */
+  url: string;
+  byteLength: number;
+}
+
 export interface ReplayPremiereArchivePayload {
   premiereId: string;
   sourceRunId: string;
@@ -75,6 +81,8 @@ export interface ReplayPremiereArchivePayload {
   terminalState: "revealed" | "archived" | "failed" | "cancelled";
   revealedAt: string | null;
   replayRunKey: string | null;
+  /** Durable archived clip; null (or absent in older payloads) => no section. */
+  clip: ReplayPremiereArchiveClip | null;
   summary: ArchiveSummary;
 }
 
@@ -151,6 +159,23 @@ function augmentArchivedOverlayActions(
       mountArchivedReplayPremiereOverlay(payload, true);
     });
     actions.append(watch);
+  }
+
+  // Durable social clip: present only when the server statted a real artifact.
+  // Absent clip => no element at all — the durable page never shows a broken
+  // or disabled download affordance for old archives without a clip. The `??`
+  // tolerates payloads built before the field existed.
+  const clip = payload.clip ?? null;
+  if (clip !== null) {
+    const downloadClip = document.createElement("a");
+    downloadClip.className =
+      "rp-button rp-button-primary rp-archived-clip-download";
+    downloadClip.href = clip.url;
+    downloadClip.setAttribute("download", "");
+    downloadClip.textContent = translateText(
+      "replay_premiere.archived_clip_download",
+    );
+    actions.append(downloadClip);
   }
 
   const copyLink = document.createElement("button");
@@ -445,6 +470,7 @@ function parseArchivePayload(
     terminalState: raw.terminalState,
     revealedAt: raw.revealedAt === null ? null : String(raw.revealedAt),
     replayRunKey: raw.replayRunKey === null ? null : String(raw.replayRunKey),
+    clip: parseArchiveClip(raw.clip, raw.premiereId),
     summary: {
       premiereId: raw.premiereId,
       sourceRunId: String(summary.sourceRunId ?? raw.sourceRunId),
@@ -466,6 +492,29 @@ function parseArchivePayload(
 /** Tolerant read of an optional public label; anything non-string becomes null. */
 function optionalLabel(value: unknown): string | null {
   return typeof value === "string" && value.length > 0 ? value : null;
+}
+
+/**
+ * Tolerant clip parse: the clip is auxiliary, so anything malformed (or a
+ * pre-clip payload with no field at all) renders as "no clip section", never a
+ * rejected page. The url must be EXACTLY this premiere's same-origin durable
+ * clip route — nothing else is ever linked.
+ */
+function parseArchiveClip(
+  value: unknown,
+  premiereId: string,
+): ReplayPremiereArchiveClip | null {
+  if (!isRecord(value)) return null;
+  const expectedUrl = `/premiere/${premiereId}/clip.mp4`;
+  if (value.url !== expectedUrl) return null;
+  if (
+    typeof value.byteLength !== "number" ||
+    !Number.isFinite(value.byteLength) ||
+    value.byteLength <= 0
+  ) {
+    return null;
+  }
+  return { url: expectedUrl, byteLength: Math.floor(value.byteLength) };
 }
 
 function parseOutcome(raw: unknown): ArchiveSummaryOutcome | null | undefined {

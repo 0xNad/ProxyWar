@@ -1174,6 +1174,7 @@
     "archived_identity_subline": "{map} · {agents} agents · Premiered {date}",
     "archived_identity_subline_no_map": "{agents} agents · Premiered {date}",
     "watch_full_replay": "Watch the full replay",
+    "archived_clip_download": "Download clip (MP4)",
     "archived_meta_winner_title": "{name} wins — Proxy War Replay Premiere",
     "archived_meta_results_title": "Final results — Proxy War Replay Premiere",
     "archived_meta_ended_title": "Premiere ended — Proxy War Replay Premiere",

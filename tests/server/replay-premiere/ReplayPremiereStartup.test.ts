@@ -1478,6 +1478,69 @@ describe("ReplayPremiere production startup", () => {
     ).toBe("archived");
   });
 
+  test("fires onPremiereRevealed at the reveal commit and again when a revealed premiere re-registers", async () => {
+    vi.useFakeTimers({ now: NOW });
+    await writeAdmission(root);
+    const context = startupContext(() => new Date());
+    const observed: string[] = [];
+    const started = await startReplayPremiereProduction({
+      ...context,
+      privateStateRoot: path.join(root, "private"),
+      servedRoots: [path.join(root, "served")],
+      onPremiereRevealed: (premiereId) => observed.push(premiereId),
+    });
+    services.push(started.service);
+    expect(context.runtimeRegistry.get(PREMIERE_ID)!.readLifecycleState()).toBe(
+      "playing",
+    );
+    // Not revealed at registration: no observation yet.
+    expect(observed).toEqual([]);
+
+    // Walk the supervisor's own timers through both checkpoints to the reveal.
+    for (const advanceMs of [100, 15_000, 100, 15_000, 50]) {
+      await vi.advanceTimersByTimeAsync(advanceMs);
+      await started.service.waitForRuntimeTimersIdle();
+    }
+    expect(context.runtimeRegistry.get(PREMIERE_ID)!.readLifecycleState()).toBe(
+      "revealed",
+    );
+    // The reveal-commit advance fired the observer exactly once.
+    expect(observed).toEqual([PREMIERE_ID]);
+
+    await started.service.close();
+    services.splice(services.indexOf(started.service), 1);
+
+    // A restart that recovers the premiere ALREADY revealed observes it at
+    // registration (subscribers dedupe repeats).
+    const recoveredObserved: string[] = [];
+    const recoveredContext = startupContext(() => new Date());
+    const recovered = await startReplayPremiereProduction({
+      ...recoveredContext,
+      privateStateRoot: path.join(root, "private"),
+      servedRoots: [path.join(root, "served")],
+      onPremiereRevealed: (premiereId) => recoveredObserved.push(premiereId),
+    });
+    services.push(recovered.service);
+    expect(recovered.registeredPremiereIds).toEqual([PREMIERE_ID]);
+    expect(recoveredObserved).toEqual([PREMIERE_ID]);
+
+    // A throwing observer must never break registration or the supervisor.
+    await recovered.service.close();
+    services.splice(services.indexOf(recovered.service), 1);
+    const throwingContext = startupContext(() => new Date());
+    const throwing = await startReplayPremiereProduction({
+      ...throwingContext,
+      privateStateRoot: path.join(root, "private"),
+      servedRoots: [path.join(root, "served")],
+      onPremiereRevealed: () => {
+        throw new Error("observer crash");
+      },
+    });
+    services.push(throwing.service);
+    expect(throwing.registeredPremiereIds).toEqual([PREMIERE_ID]);
+    expect(throwingContext.httpRegistry.get(PREMIERE_ID)).not.toBeNull();
+  });
+
   // -------------------------------------------------------------------------
   // Deferred fresh-admission assembly (2026-07-22 activation zombie, rounds
   // 644/646): a freshly admitted premiere that misses the shared boot budget

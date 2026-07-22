@@ -232,3 +232,137 @@ describe("createReplayPremiereArchiveRouter", () => {
     });
   });
 });
+
+describe("archived durable clip route", () => {
+  const CLIP_BYTES = Buffer.from("mp4-bytes-for-archive-test");
+
+  async function plantDurableClip(premiereId: string): Promise<void> {
+    const clipsDir = path.join(root, "archive-v1", "clips");
+    await fs.mkdir(clipsDir, { recursive: true });
+    await fs.writeFile(path.join(clipsDir, `${premiereId}.mp4`), CLIP_BYTES);
+  }
+
+  function archivePayloadFrom(html: string): {
+    clip: { url: string; byteLength: number } | null;
+  } {
+    const match =
+      /<script[^>]*id="proxywar-premiere-archive"[^>]*>([\s\S]*?)<\/script>/.exec(
+        html,
+      );
+    if (match === null) throw new Error("archive payload island missing");
+    return JSON.parse(match[1]);
+  }
+
+  it("serves the durable clip with download headers, GET and HEAD", async () => {
+    const h = await harness();
+    await plantDurableClip(ARCHIVED_ID);
+    await h.run(async (baseUrl) => {
+      const response = await fetch(
+        `${baseUrl}/premiere/${ARCHIVED_ID}/clip.mp4`,
+      );
+      expect(response.status).toBe(200);
+      expect(response.headers.get("content-type")).toBe("video/mp4");
+      expect(response.headers.get("content-length")).toBe(
+        String(CLIP_BYTES.byteLength),
+      );
+      expect(response.headers.get("content-disposition")).toBe(
+        `attachment; filename="${ARCHIVED_ID}.mp4"`,
+      );
+      // Post-reveal-public: cacheable, but never indexable.
+      expect(response.headers.get("cache-control")).toContain("public");
+      expect(response.headers.get("x-robots-tag")).toContain("noindex");
+      expect(response.headers.get("x-content-type-options")).toBe("nosniff");
+      expect(Buffer.from(await response.arrayBuffer())).toEqual(CLIP_BYTES);
+
+      const head = await fetch(`${baseUrl}/premiere/${ARCHIVED_ID}/clip.mp4`, {
+        method: "HEAD",
+      });
+      expect(head.status).toBe(200);
+      expect(head.headers.get("content-length")).toBe(
+        String(CLIP_BYTES.byteLength),
+      );
+      expect((await head.arrayBuffer()).byteLength).toBe(0);
+    });
+  });
+
+  it("404s (fixed body, never downstream) when no durable artifact exists", async () => {
+    const h = await harness();
+    await h.run(async (baseUrl) => {
+      const response = await fetch(
+        `${baseUrl}/premiere/${ARCHIVED_ID}/clip.mp4`,
+      );
+      expect(response.status).toBe(404);
+      expect(await response.json()).toEqual({
+        error: { code: "PREMIERE_UNAVAILABLE" },
+      });
+    });
+  });
+
+  it("404s a failed premiere's clip even if an artifact was planted (spoiler gate)", async () => {
+    const h = await harness();
+    await plantDurableClip(FAILED_ID);
+    await h.run(async (baseUrl) => {
+      const response = await fetch(`${baseUrl}/premiere/${FAILED_ID}/clip.mp4`);
+      expect(response.status).toBe(404);
+      expect(await response.json()).toEqual({
+        error: { code: "PREMIERE_UNAVAILABLE" },
+      });
+    });
+  });
+
+  it("404s unknown and registered (non-revealed) ids terminally — no fall-through", async () => {
+    const h = await harness();
+    // Even a planted artifact for a still-registered premiere must not serve:
+    // while the runtime is live the durable route stays closed.
+    await plantDurableClip(REGISTERED_ID);
+    await h.run(async (baseUrl) => {
+      for (const premiereId of ["prem_unknown000000001", REGISTERED_ID]) {
+        const response = await fetch(
+          `${baseUrl}/premiere/${premiereId}/clip.mp4`,
+        );
+        expect(response.status).toBe(404);
+        // The fixed premiere failure body — proving the request never reached
+        // the downstream marker (no DOWNSTREAM_HANDLED).
+        expect(await response.json()).toEqual({
+          error: { code: "PREMIERE_UNAVAILABLE" },
+        });
+      }
+    });
+  });
+
+  it("rejects range requests and non-GET methods", async () => {
+    const h = await harness();
+    await plantDurableClip(ARCHIVED_ID);
+    await h.run(async (baseUrl) => {
+      const range = await fetch(`${baseUrl}/premiere/${ARCHIVED_ID}/clip.mp4`, {
+        headers: { Range: "bytes=0-3" },
+      });
+      expect(range.status).toBe(416);
+      const post = await fetch(`${baseUrl}/premiere/${ARCHIVED_ID}/clip.mp4`, {
+        method: "POST",
+      });
+      expect(post.status).toBe(405);
+      expect(post.headers.get("allow")).toBe("GET, HEAD");
+    });
+  });
+
+  it("embeds the clip in the archived page payload only when the artifact exists", async () => {
+    const h = await harness();
+    await h.run(async (baseUrl) => {
+      // Availability is a per-request stat: absent before, present after.
+      const before = archivePayloadFrom(
+        await (await fetch(`${baseUrl}/premiere/${ARCHIVED_ID}`)).text(),
+      );
+      expect(before.clip).toBeNull();
+
+      await plantDurableClip(ARCHIVED_ID);
+      const after = archivePayloadFrom(
+        await (await fetch(`${baseUrl}/premiere/${ARCHIVED_ID}`)).text(),
+      );
+      expect(after.clip).toEqual({
+        url: `/premiere/${ARCHIVED_ID}/clip.mp4`,
+        byteLength: CLIP_BYTES.byteLength,
+      });
+    });
+  });
+});
