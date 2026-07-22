@@ -901,7 +901,8 @@ describe("admission input builders (exact shapes the admit CLI validates)", () =
     expect(definition.checkpoints).toHaveLength(2);
     expect(definition.checkpoints[0].sequence).toBe(14_000);
     expect(definition.checkpoints[1].sequence).toBe(26_000);
-    expect(definition.playbackRate).toBe(4);
+    // 40k turns > the 32k 1x band -> 2x under the 2026-07-22 retune.
+    expect(definition.playbackRate).toBe(2);
     expect(definition.matchFormat).toEqual({
       id: "ffa-12",
       label: "Tournament 12P - World",
