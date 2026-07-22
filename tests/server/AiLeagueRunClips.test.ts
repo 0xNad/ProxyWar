@@ -315,6 +315,23 @@ describe("AiLeagueRunClips", () => {
       body: { error: { code: "LEAGUE_CLIP_UNAVAILABLE" } },
     });
   });
+
+  test("admits the first render on a FRESH cache tree with a REAL disk-floor probe", async () => {
+    // Regression (found live): the render-admission disk floor statfs's the
+    // cache root, which used to not exist until the first promote — so every
+    // render on a fresh tree 503'd clip_disk_floor_unreadable forever.
+    // rebuildIndex now creates the root; use the real statfs (no injection)
+    // with a tiny floor so the probe itself is exercised.
+    const clips = makeRunClips({
+      statfs: undefined,
+      limits: { minFreeBytes: 1 },
+    });
+    await clips.rebuildIndex();
+    expect(
+      (await clips.requestRunClip({ runKey: RUN_KEY, anchorTurn: 605 })).state,
+    ).toBe("pending");
+    await clips.close();
+  });
 });
 
 // ---------------------------------------------------------------------------

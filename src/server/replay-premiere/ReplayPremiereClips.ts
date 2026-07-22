@@ -234,6 +234,12 @@ export class ReplayPremiereClips {
    */
   async rebuildIndex(): Promise<void> {
     this.ready.clear();
+    // Ensure the cache root exists: the render-admission disk floor statfs's
+    // it, so a FRESH tree (first boot of a new clipsRoot) must not make every
+    // render 503 with clip_disk_floor_unreadable until a promote creates it.
+    await fs
+      .mkdir(this.options.clipsRoot, { recursive: true, mode: 0o700 })
+      .catch(() => undefined);
     let premiereDirs: string[];
     try {
       premiereDirs = await fs.readdir(this.options.clipsRoot);
