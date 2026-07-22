@@ -90,7 +90,6 @@ Tests use a `setup()` helper from `tests/util/Setup.ts` that creates a full game
 - **Bundler:** Vite + TypeScript 5.7
 - **Rendering:** Pixi.js (WebGL)
 - **UI Components:** Lit (LitElement) + Tailwind CSS 4
-- **Audio:** Howler.js
 - **Schemas/Validation:** Zod
 - **Testing:** Vitest
 - **Server:** Node.js, Express, ws (WebSocket)

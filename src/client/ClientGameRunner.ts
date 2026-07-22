@@ -64,7 +64,6 @@ import {
 import { createCanvas } from "./Utils";
 import { createRenderer, GameRenderer } from "./graphics/GameRenderer";
 import { GoToPlayerEvent } from "./graphics/TransformHandler";
-import { SoundManager } from "./sound/SoundManager";
 
 function isFullMapReplayRecordingView(): boolean {
   const recordingWindow = window as typeof window & {
@@ -291,7 +290,6 @@ async function createClientGame(
     worker.cleanup();
     throw error;
   }
-  let soundManager: SoundManager | null = null;
   try {
     const gameView = new GameView(
       // ReplayPremiereWorkerClient implements WorkerClient's full public query
@@ -306,7 +304,6 @@ async function createClientGame(
       lobbyConfig.gameStartInfo.players,
     );
     const canvas = createCanvas();
-    soundManager = new SoundManager(eventBus, userSettings);
     const gameRenderer = createRenderer(
       canvas,
       gameView,
@@ -327,10 +324,8 @@ async function createClientGame(
       transport,
       worker,
       gameView,
-      soundManager,
     );
   } catch (err) {
-    soundManager?.dispose();
     worker.cleanup();
     throw err;
   }
@@ -360,7 +355,6 @@ export class ClientGameRunner {
     private transport: Transport,
     private worker: WorkerClient | ReplayPremiereWorkerClient,
     private gameView: GameView,
-    private soundManager: SoundManager,
   ) {
     this.lastMessageTime = Date.now();
   }
@@ -413,7 +407,6 @@ export class ClientGameRunner {
   }
 
   public start() {
-    this.soundManager.playBackgroundMusic();
     console.log("starting client game");
 
     this.isActive = true;
@@ -717,7 +710,6 @@ export class ClientGameRunner {
   }
 
   public stop() {
-    this.soundManager.dispose();
     if (!this.isActive) return;
 
     this.isActive = false;

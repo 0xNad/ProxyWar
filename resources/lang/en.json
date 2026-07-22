@@ -789,8 +789,6 @@
     "toggle_terrain": "Toggle Terrain",
     "exit_game_label": "Exit Game",
     "exit_game_info": "Return to main menu",
-    "background_music_volume": "Background Music Volume",
-    "sound_effects_volume": "Sound Effects Volume",
     "keybind_conflict_error": "The key {key} is already bound to another action."
   },
   "chat": {

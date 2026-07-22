@@ -35,10 +35,6 @@ describe("ClientGameRunner replay startup errors", () => {
       }),
       cleanup: vi.fn(),
     };
-    const soundManager = {
-      playBackgroundMusic: vi.fn(),
-      dispose: vi.fn(),
-    };
     const replayLoadError = vi.fn();
     document.addEventListener("ai-league-replay-load-error", replayLoadError, {
       once: true,
@@ -54,7 +50,6 @@ describe("ClientGameRunner replay startup errors", () => {
       transport as never,
       worker as never,
       {} as never,
-      soundManager as never,
     );
     runner.start();
 
@@ -110,7 +105,6 @@ describe("ClientGameRunner replay startup errors", () => {
       {
         players: () => [missingLocationPlayer, readyPlayer],
       } as never,
-      {} as never,
     );
 
     expect(() =>
@@ -176,10 +170,6 @@ describe("ClientGameRunner replay startup errors", () => {
       inSpawnPhase: () => false,
       players: () => [],
     };
-    const soundManager = {
-      playBackgroundMusic: vi.fn(),
-      dispose: vi.fn(),
-    };
     const updates = Object.fromEntries(
       Object.values(GameUpdateType)
         .filter((value) => typeof value === "number")
@@ -198,7 +188,6 @@ describe("ClientGameRunner replay startup errors", () => {
       transport as never,
       worker as never,
       gameView as never,
-      soundManager as never,
     );
     runner.start();
 

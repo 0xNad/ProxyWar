@@ -269,7 +269,7 @@ export default defineConfig(({ mode }) => {
       rollupOptions: {
         output: {
           manualChunks: (id) => {
-            const vendorModules = ["pixi.js", "howler", "zod"];
+            const vendorModules = ["pixi.js", "zod"];
             if (vendorModules.some((module) => id.includes(module))) {
               return "vendor";
             }
