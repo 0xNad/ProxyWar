@@ -17,7 +17,11 @@ import {
   type ReplayPremiereJsonValue,
 } from "./ReplayPremiereIntegrity";
 import {
+  deriveReplayPremierePredictionOutcome,
   REPLAY_PREMIERE_REACTION_KINDS,
+  type ReplayPremiereInteractionsSnapshot,
+  type ReplayPremierePredictionOutcome,
+  type ReplayPremierePredictionResolution,
   type ReplayPremiereReactionKind,
 } from "./ReplayPremiereInteractions";
 
@@ -186,9 +190,10 @@ export function buildPremiereResultSummaryFromTarget(options: {
       eligibilityRecord: reveal.eligibilityRecord,
       resultBytes,
     });
+    const interactionState = target.interactions.readState();
     outcome = summarizeOutcome(canonical);
-    predictions = summarizePredictions(target);
-    markers = summarizeMarkers(target);
+    predictions = summarizePredictionsFromState(interactionState, canonical);
+    markers = summarizeMarkersFromState(interactionState);
     revealedAt = reveal.revealedAt;
   }
 
@@ -229,10 +234,9 @@ function optionalPublicLabel(value: unknown): string | undefined {
  * Outcome derivation is identical to the live path: the admission record's
  * hash-covered authoritative result bytes are verified against its
  * eligibility record — the exact bytes the reveal committed. Interaction
- * aggregates (predictions/markers) require a live runtime's recovered
- * interaction state and are deliberately EMPTY here: they are cosmetic
- * engagement tallies, and reconstructing them without a runtime would drag
- * the whole interaction-recovery machinery into the reclamation path.
+ * aggregates (predictions/markers) are included only when the orphan
+ * reclaimer supplies a hash-chained, fully validated terminal snapshot.
+ * Missing evidence stays empty; malformed evidence aborts reclamation.
  *
  * Spoiler safety is unchanged: an outcome is derived only for
  * revealed/archived terminal states (with a required reveal timestamp);
@@ -251,6 +255,8 @@ export function buildPremiereResultSummaryFromDurableEvidence(options: {
   eligibilityRecord: PremiereEligibility;
   /** The admission's base64 authoritative-result payload. */
   authoritativeResultBase64: string;
+  /** Hash-chained, fully validated terminal interaction state when available. */
+  interactionState?: ReplayPremiereInteractionsSnapshot | null;
   mapLabel?: unknown;
   formatLabel?: unknown;
 }): PremiereResultSummaryV1 {
@@ -259,6 +265,8 @@ export function buildPremiereResultSummaryFromDurableEvidence(options: {
     options.terminalState === "revealed" ||
     options.terminalState === "archived";
   let outcome: PremiereResultSummaryOutcome | null = null;
+  let predictions: PremiereResultSummaryPrediction[] = [];
+  let markers: PremiereResultSummaryMarker[] = [];
   let revealedAt: string | null = null;
   if (revealed) {
     if (
@@ -276,6 +284,19 @@ export function buildPremiereResultSummaryFromDurableEvidence(options: {
       resultBytes,
     });
     outcome = summarizeOutcome(canonical);
+    if (
+      options.interactionState !== null &&
+      options.interactionState !== undefined
+    ) {
+      if (options.interactionState.premiereId !== options.premiereId) {
+        throw summaryIntegrity("summary_interaction_identity_mismatch");
+      }
+      predictions = summarizePredictionsFromState(
+        options.interactionState,
+        canonical,
+      );
+      markers = summarizeMarkersFromState(options.interactionState);
+    }
     revealedAt = options.revealedAt;
   }
   return buildPremiereResultSummary({
@@ -287,8 +308,8 @@ export function buildPremiereResultSummaryFromDurableEvidence(options: {
     revealedAt,
     reclaimedAt: options.reclaimedAt,
     outcome,
-    predictions: [],
-    markers: [],
+    predictions,
+    markers,
     mapLabel: optionalPublicLabel(options.mapLabel),
     formatLabel: optionalPublicLabel(options.formatLabel),
   });
@@ -358,30 +379,84 @@ function summarizeWinner(
   return { category, groupLabel, seatIds: [...seatIds] };
 }
 
-function summarizePredictions(
-  target: ReplayPremiereHttpTarget,
+function summarizePredictionsFromState(
+  state: ReplayPremiereInteractionsSnapshot,
+  canonical: PremiereCanonicalAuthoritativeResult,
 ): PremiereResultSummaryPrediction[] {
-  // participantId=null yields the aggregate view with zero per-viewer fields.
-  return target.interactions.readCheckpoints(null).map((checkpoint) => ({
-    checkpointId: checkpoint.id,
-    sequence: checkpoint.sequence,
-    totalPredictions: checkpoint.totalPredictions ?? 0,
-    options: checkpoint.optionSeatIds.map((seatId) => ({
-      seatId,
-      count: checkpoint.distribution?.[seatId] ?? 0,
-    })),
-    correctPredictions: checkpoint.crowdAccuracy?.correctPredictions ?? null,
-  }));
+  const authoritativeSeatIds = new Set(
+    canonical.seats.map((seat) => seat.seatId),
+  );
+  const eligibleAtEveryCheckpoint = new Set(
+    [...authoritativeSeatIds].filter((seatId) =>
+      state.checkpoints.every((checkpoint) =>
+        checkpoint.optionSeatIds.includes(seatId),
+      ),
+    ),
+  );
+  const expectedOutcome = deriveReplayPremierePredictionOutcome(
+    canonical,
+    eligibleAtEveryCheckpoint,
+  );
+  for (const checkpoint of state.checkpoints) {
+    if (
+      checkpoint.resolution !== null &&
+      !predictionResolutionMatchesOutcome(
+        checkpoint.resolution,
+        expectedOutcome,
+      )
+    ) {
+      throw summaryIntegrity("summary_prediction_resolution_mismatch");
+    }
+  }
+  const winnerSeatId =
+    expectedOutcome.kind === "winner" ? expectedOutcome.winnerSeatId : null;
+  return state.checkpoints.map((checkpoint) => {
+    const predictions = state.predictions.filter(
+      (prediction) => prediction.checkpointId === checkpoint.id,
+    );
+    const counts = new Map(
+      checkpoint.optionSeatIds.map((seatId) => [seatId, 0]),
+    );
+    for (const prediction of predictions) {
+      counts.set(
+        prediction.selectedSeatId,
+        (counts.get(prediction.selectedSeatId) ?? 0) + 1,
+      );
+    }
+    return {
+      checkpointId: checkpoint.id,
+      sequence: checkpoint.sequence,
+      totalPredictions: predictions.length,
+      options: checkpoint.optionSeatIds.map((seatId) => ({
+        seatId,
+        count: counts.get(seatId) ?? 0,
+      })),
+      correctPredictions:
+        winnerSeatId !== null
+          ? predictions.filter(
+              (prediction) => prediction.selectedSeatId === winnerSeatId,
+            ).length
+          : null,
+    };
+  });
 }
 
-function summarizeMarkers(
-  target: ReplayPremiereHttpTarget,
+function predictionResolutionMatchesOutcome(
+  resolution: ReplayPremierePredictionResolution,
+  outcome: ReplayPremierePredictionOutcome,
+): boolean {
+  return resolution.kind === "winner" && outcome.kind === "winner"
+    ? resolution.winnerSeatId === outcome.winnerSeatId
+    : resolution.kind === "void" && outcome.kind === "void"
+      ? resolution.reason === outcome.reason
+      : false;
+}
+
+function summarizeMarkersFromState(
+  state: ReplayPremiereInteractionsSnapshot,
 ): PremiereResultSummaryMarker[] {
-  // Markers have no aggregate read API, so the per-viewer reaction records are
-  // grouped here by (kind, turn) and every participant id is dropped in the
-  // process. Only the resulting tallies enter the summary.
   const tallies = new Map<string, PremiereResultSummaryMarker>();
-  for (const reaction of target.interactions.readState().reactions) {
+  for (const reaction of state.reactions) {
     const key = `${reaction.kind} ${reaction.turn}`;
     const existing = tallies.get(key);
     if (existing === undefined) {

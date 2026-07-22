@@ -79,6 +79,10 @@ export interface ReplayPremiereShareView {
   canonicalUrl: string;
   timestampUrl?: string | null;
   suggestedCaption: string;
+  /** Accepted mark to anchor the next timestamp share to, when present. */
+  sourceReactionId?: string | null;
+  sourceReactionSequence?: number | null;
+  sourceReactionTurn?: number | null;
 }
 
 export type ReplayPremiereClipStatus =
@@ -113,11 +117,15 @@ export interface ReplayPremiereResultsPredictionOptionView {
 export interface ReplayPremiereResultsPredictionView {
   checkpointId: string;
   sequence: number;
-  /** Share of predictions that named the actual winner; null when void. */
+  /** Share that named the winner; null for void or zero submissions. */
   correctPercent: number | null;
+  /** Distinguishes a void outcome from a scored checkpoint with zero votes. */
+  accuracyStatus: "scored" | "no_predictions" | "void";
   /** Total predictions, when known (archived summary); omitted live. */
   totalPredictions?: number | null;
   options: readonly ReplayPremiereResultsPredictionOptionView[];
+  /** Session-private selection; omitted on anonymous archived summaries. */
+  selectedSeatId?: string | null;
 }
 
 export interface ReplayPremiereResultsMarkerView {
@@ -127,9 +135,9 @@ export interface ReplayPremiereResultsMarkerView {
 }
 
 /**
- * Aggregate-only results the post-reveal panel renders. It carries no
- * per-viewer data — every field is a seat identity, a public display name, or a
- * tally — so it is safe to persist and re-serve on the archived premiere page.
+ * Results the post-reveal panel renders. Archived summaries contain only
+ * aggregates; the live runtime may attach the current session's sealed picks
+ * so that viewer receives an immediate personal verdict after reveal.
  */
 export interface ReplayPremiereResultsSummaryView {
   turnCount?: number | null;
@@ -199,8 +207,16 @@ export interface ReplayPremiereOverlayModel {
   leaders?: readonly ReplayPremiereLeaderView[];
   /** Newest-first live war narrative shown during sealed playback. */
   warEvents?: readonly ReplayPremiereWarEventView[];
-  /** The viewer's own accepted marks per kind this session (0 when absent). */
+  /** Public accepted-mark aggregates per kind (0 when absent). */
   markerCounts?: Partial<Record<ReplayPremiereMarkerKind, number>>;
+  /** The viewer's own accepted marks, kept separate from the public counters. */
+  ownMarkerCounts?: Partial<Record<ReplayPremiereMarkerKind, number>>;
+  /** Distinct viewers represented by the public mark aggregate. */
+  markerParticipantCount?: number;
+  /** False when exact-v1 fallback preserved only a last-known aggregate. */
+  markerAggregateFresh?: boolean;
+  /** Clip marks stay hidden unless server capability is explicitly proven. */
+  clipMarkerAvailable?: boolean;
   /** The most recent server-accepted mark, for the confirmation line. */
   markerConfirmation?: { kind: ReplayPremiereMarkerKind; turn: number } | null;
   headlineEvent?: string | null;
@@ -255,6 +271,7 @@ export interface ReplayPremiereShareRequest {
   url: string;
   sequence: number | null;
   turn: number | null;
+  sourceReactionId?: string | null;
 }
 
 export interface ReplayPremiereCaptionRequest {
@@ -395,7 +412,6 @@ export function mountReplayPremiereOverlay(
   let localClockMs = Date.now();
   let captionDraft = initialModel.share?.suggestedCaption ?? "";
   let captionTouched = false;
-  let lastSuggestedCaption = captionDraft;
   let lastWindowPhase: ReplayPremiereWindowPhase | null = null;
   let lastStructuralKey: string | null = null;
   // Event handlers read the LATEST model through this accessor instead of the
@@ -496,14 +512,12 @@ export function mountReplayPremiereOverlay(
       if (disposed) {
         return;
       }
-      if (
-        !captionTouched ||
-        nextModel.share?.suggestedCaption !== lastSuggestedCaption
-      ) {
-        captionDraft = nextModel.share?.suggestedCaption ?? "";
-        captionTouched = false;
+      const nextSuggestedCaption = nextModel.share?.suggestedCaption ?? "";
+      const shouldPatchCaption =
+        !captionTouched && captionDraft !== nextSuggestedCaption;
+      if (!captionTouched) {
+        captionDraft = nextSuggestedCaption;
       }
-      lastSuggestedCaption = nextModel.share?.suggestedCaption ?? "";
       model = nextModel;
       serverClockMs = parseTime(nextModel.authoritativeNow);
       localClockMs = Date.now();
@@ -517,6 +531,14 @@ export function mountReplayPremiereOverlay(
       // alive.
       if (structuralModelKey(nextModel) === lastStructuralKey) {
         applyVolatileModelUpdates(overlay, nextModel);
+        if (shouldPatchCaption) {
+          const caption = overlay.querySelector<HTMLTextAreaElement>(
+            "#replay-premiere-caption",
+          );
+          if (caption !== null) {
+            caption.value = captionDraft;
+          }
+        }
         updateClock();
         return;
       }
@@ -1479,10 +1501,21 @@ function renderMarkers(
   ) => void,
 ): HTMLElement {
   const section = element("section", "rp-section rp-markers");
+  const hasCommunityCounts =
+    typeof model.markerParticipantCount === "number" &&
+    Number.isSafeInteger(model.markerParticipantCount) &&
+    model.markerParticipantCount >= 0;
+  const communityCountsFresh = model.markerAggregateFresh !== false;
   const heading = element(
     "h3",
     "rp-subheading rp-marker-heading",
-    translateText("replay_premiere.mark_moment"),
+    translateText(
+      hasCommunityCounts
+        ? communityCountsFresh
+          ? "replay_premiere.community_marks"
+          : "replay_premiere.community_marks_last_known"
+        : "replay_premiere.your_marks",
+    ),
   );
   const list = element("div", "rp-marker-list");
   list.setAttribute("role", "group");
@@ -1494,7 +1527,12 @@ function renderMarkers(
       model.state === "checkpoint" ||
       model.state === "revealed") &&
     callbacks.onMarker !== undefined;
-  for (const marker of MARKERS) {
+  const visibleMarkers = MARKERS.filter(
+    (marker) =>
+      marker.kind !== "clip_this" || model.clipMarkerAvailable === true,
+  );
+  list.style.setProperty("--rp-marker-columns", String(visibleMarkers.length));
+  for (const marker of visibleMarkers) {
     const markerButton = element(
       "button",
       "rp-marker-button",
@@ -1503,15 +1541,21 @@ function renderMarkers(
     markerButton.dataset.kind = marker.kind;
     markerButton.dataset.focusKey = `marker-${marker.kind}`;
     markerButton.disabled = !markerEnabled;
-    const ownCount = model.markerCounts?.[marker.kind] ?? 0;
+    const displayedCount = model.markerCounts?.[marker.kind] ?? 0;
+    const ownCount = hasCommunityCounts
+      ? (model.ownMarkerCounts?.[marker.kind] ?? 0)
+      : displayedCount;
     markerButton.setAttribute(
       "aria-label",
-      ownCount > 0
-        ? translateText("replay_premiere.marker_with_count", {
-            marker: translateText(marker.translationKey),
-            count: ownCount,
-          })
-        : translateText(marker.translationKey),
+      translateText(
+        hasCommunityCounts
+          ? "replay_premiere.community_marker_with_count"
+          : "replay_premiere.marker_with_count",
+        {
+          marker: translateText(marker.translationKey),
+          count: displayedCount,
+        },
+      ),
     );
     const symbol = element("span", "rp-marker-symbol", marker.symbol);
     symbol.setAttribute("aria-hidden", "true");
@@ -1520,9 +1564,9 @@ function renderMarkers(
       "rp-marker-label",
       translateText(marker.translationKey),
     );
-    // Always-rendered per-kind count (the viewer's own marks, 0-seeded) so
-    // the row reads as a live interactive tally, never as decoration.
-    const count = element("span", "rp-marker-count", String(ownCount));
+    // Always-rendered accepted count (community aggregate when available,
+    // otherwise this viewer's private fallback) so the row never fakes scope.
+    const count = element("span", "rp-marker-count", String(displayedCount));
     count.setAttribute("aria-hidden", "true");
     if (ownCount > 0) {
       markerButton.dataset.marked = "true";
@@ -1551,6 +1595,21 @@ function renderMarkers(
     list.append(markerButton);
   }
   section.append(heading, list);
+  section.append(
+    element(
+      "p",
+      "rp-muted rp-marker-scope",
+      hasCommunityCounts
+        ? communityCountsFresh
+          ? translateText("replay_premiere.community_marks_hint", {
+              count: model.markerParticipantCount ?? 0,
+            })
+          : translateText("replay_premiere.community_marks_stale_hint", {
+              count: model.markerParticipantCount ?? 0,
+            })
+        : translateText("replay_premiere.private_marks_hint"),
+    ),
+  );
   // The row must never look silently dead: while the anonymous interaction
   // session is still connecting in a live state, say so; once a mark is
   // accepted by the server, confirm it.
@@ -1611,8 +1670,13 @@ function renderShare(
   // While live it remains the primary share affordance.
   const timestampPrimary =
     model.state !== "revealed" && model.state !== "archived";
+  const hasMarkedMoment =
+    model.share.sourceReactionId !== null &&
+    model.share.sourceReactionId !== undefined;
   const timestamp = button(
-    "replay_premiere.copy_timestamp",
+    hasMarkedMoment
+      ? "replay_premiere.copy_marked_moment"
+      : "replay_premiere.copy_timestamp",
     `rp-button ${
       timestampPrimary ? "rp-button-primary" : "rp-button-quiet"
     } rp-timestamp-share`,
@@ -1630,12 +1694,17 @@ function renderShare(
         ? undefined
         : () => {
             const current = latest();
+            const sourceReactionId = current.share?.sourceReactionId ?? null;
+            const sourceSequence =
+              current.share?.sourceReactionSequence ?? null;
+            const sourceTurn = current.share?.sourceReactionTurn ?? null;
             return callbacks.onShare?.({
               premiereId: current.premiereId,
               kind: "timestamp",
               url: current.share?.timestampUrl ?? timestampUrl,
-              sequence: current.releasedSequence,
-              turn: finiteIntegerOrNull(current.currentTurn),
+              sequence: sourceSequence ?? current.releasedSequence,
+              turn: sourceTurn ?? finiteIntegerOrNull(current.currentTurn),
+              ...(sourceReactionId === null ? {} : { sourceReactionId }),
             });
           },
     );
@@ -1668,11 +1737,12 @@ function renderShare(
         ? undefined
         : () => {
             const current = latest();
+            const sourceTurn = current.share?.sourceReactionTurn ?? null;
             return callbacks.onCopySuggestedCaption?.({
               premiereId: current.premiereId,
               caption: caption.value,
               sequence: current.releasedSequence,
-              turn: finiteIntegerOrNull(current.currentTurn),
+              turn: sourceTurn ?? finiteIntegerOrNull(current.currentTurn),
             });
           },
     );
@@ -2189,7 +2259,30 @@ function renderResultsPredictions(
         }),
       ),
     );
-    if (prediction.correctPercent !== null) {
+    const selectedOption = prediction.options.find(
+      (option) => option.seatId === prediction.selectedSeatId,
+    );
+    if (selectedOption !== undefined) {
+      const verdict =
+        winnerSeatIds.size !== 1
+          ? "void"
+          : winnerSeatIds.has(selectedOption.seatId)
+            ? "correct"
+            : "incorrect";
+      const personal = element(
+        "p",
+        "rp-results-personal-pick",
+        translateText(`replay_premiere.results_your_pick_${verdict}`, {
+          name: safeDisplay(selectedOption.displayName),
+        }),
+      );
+      personal.dataset.verdict = verdict;
+      block.append(personal);
+    }
+    if (
+      prediction.accuracyStatus === "scored" &&
+      prediction.correctPercent !== null
+    ) {
       block.append(
         element(
           "p",
@@ -2197,6 +2290,14 @@ function renderResultsPredictions(
           translateText("replay_premiere.results_accuracy", {
             percent: boundedPercent(prediction.correctPercent),
           }),
+        ),
+      );
+    } else if (prediction.accuracyStatus === "no_predictions") {
+      block.append(
+        element(
+          "p",
+          "rp-muted",
+          translateText("replay_premiere.results_accuracy_no_predictions"),
         ),
       );
     } else {
@@ -3344,7 +3445,7 @@ const OVERLAY_CSS = `
   #${OVERLAY_ID} .rp-war-feed-empty { margin: 0; font-size: 12px; }
 
   /* ---- Reactions / markers ---- */
-  #${OVERLAY_ID} .rp-marker-list { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 6px; margin-top: 9px; }
+  #${OVERLAY_ID} .rp-marker-list { display: grid; grid-template-columns: repeat(var(--rp-marker-columns, 4), minmax(0, 1fr)); gap: 6px; margin-top: 9px; }
   #${OVERLAY_ID} .rp-marker-button {
     --rp-mk: var(--rp-accent);
     --rp-mk-soft: var(--rp-accent-soft);
@@ -3381,6 +3482,7 @@ const OVERLAY_CSS = `
   }
   #${OVERLAY_ID} .rp-marker-button[data-marked="true"] .rp-marker-count { background: var(--rp-mk); color: var(--rp-bg-solid); }
   #${OVERLAY_ID} .rp-marker-hint { margin: 8px 0 0; font-size: 11.5px; }
+  #${OVERLAY_ID} .rp-marker-scope { margin: 8px 0 0; font-size: 11.5px; }
   #${OVERLAY_ID} .rp-marker-confirmed {
     display: inline-flex;
     align-items: center;
@@ -3534,6 +3636,8 @@ const OVERLAY_CSS = `
     background: var(--rp-surface);
   }
   #${OVERLAY_ID} .rp-results-prediction-title { margin: 0; font-weight: 750; }
+  #${OVERLAY_ID} .rp-results-personal-pick { margin: 7px 0 0; padding: 7px 9px; border: 1px solid var(--rp-line); border-radius: 8px; background: var(--rp-surface-2); font-weight: 750; }
+  #${OVERLAY_ID} .rp-results-personal-pick[data-verdict="correct"] { border-color: var(--rp-positive); background: var(--rp-positive-soft); }
   #${OVERLAY_ID} .rp-results-accuracy { margin: 0; color: var(--rp-positive-text); font-weight: 800; }
   #${OVERLAY_ID} .rp-results-votes { margin: 1px 0 0; font-size: 11px; }
   #${OVERLAY_ID} .rp-results-markers { list-style: none; margin: 0; padding: 0; display: grid; gap: 5px; }
@@ -3603,7 +3707,7 @@ const OVERLAY_CSS = `
   #${OVERLAY_ID}[data-ambient="true"] .rp-checkpoint-progress,
   #${OVERLAY_ID}[data-ambient="true"] .rp-secondary,
   #${OVERLAY_ID}[data-ambient="true"] .rp-marker-heading { display: none; }
-  /* Ambient stacks in a single column so the leaders and the full 5-reaction
+  /* Ambient stacks in a single column so leaders and the evidence-gated mark
      row are never clipped by the compact pane. */
   #${OVERLAY_ID}[data-ambient="true"] .rp-body { grid-template-columns: 1fr; gap: 7px; padding: 8px; }
   #${OVERLAY_ID}[data-ambient="true"] .rp-playing-status,
@@ -3616,7 +3720,7 @@ const OVERLAY_CSS = `
   #${OVERLAY_ID}[data-ambient="true"][data-state="checkpoint"] .rp-playing-status { display: none; }
   #${OVERLAY_ID}[data-ambient="true"] .rp-position { margin-top: 5px; }
   #${OVERLAY_ID}[data-ambient="true"] .rp-ambient-evidence { grid-column: 1 / -1; grid-template-columns: 1fr; gap: 0; }
-  /* Compact the leader scoreboard so the full 5-reaction row still fits the
+  /* Compact the leader scoreboard so the mark row still fits the
      pane underneath it. */
   #${OVERLAY_ID}[data-ambient="true"] .rp-leaders .rp-subheading { font-size: 10px; }
   #${OVERLAY_ID}[data-ambient="true"] .rp-leader-list { gap: 3px; margin-top: 5px; }
@@ -3624,7 +3728,7 @@ const OVERLAY_CSS = `
   #${OVERLAY_ID}[data-ambient="true"] .rp-headline { display: none; }
   #${OVERLAY_ID}[data-ambient="true"] .rp-leader:nth-child(n + 3) { display: none; }
   #${OVERLAY_ID}[data-ambient="true"] .rp-markers { grid-column: 1 / -1; }
-  #${OVERLAY_ID}[data-ambient="true"] .rp-marker-list { grid-template-columns: repeat(5, 30px); gap: 5px; margin: 0; justify-content: space-between; }
+  #${OVERLAY_ID}[data-ambient="true"] .rp-marker-list { grid-template-columns: repeat(var(--rp-marker-columns, 4), 30px); gap: 5px; margin: 0; justify-content: space-between; }
   #${OVERLAY_ID}[data-ambient="true"] .rp-marker-button { min-height: 30px; height: 30px; width: 30px; padding: 1px; box-shadow: inset 0 2px 0 var(--rp-mk); }
   #${OVERLAY_ID}[data-ambient="true"] .rp-marker-symbol { font-size: 14px; }
   #${OVERLAY_ID}[data-ambient="true"] .rp-marker-count,

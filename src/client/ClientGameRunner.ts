@@ -71,6 +71,10 @@ import {
 } from "./Transport";
 import { createCanvas } from "./Utils";
 import { createRenderer, GameRenderer } from "./graphics/GameRenderer";
+import {
+  ReplayPresentationCadenceEvent,
+  replayPresentationIntervalMsForPlaybackRate,
+} from "./graphics/ReplayPresentationSmoothing";
 import { GoToPlayerEvent } from "./graphics/TransformHandler";
 
 function isFullMapReplayRecordingView(): boolean {
@@ -484,6 +488,15 @@ export class ClientGameRunner {
     );
 
     this.renderer.initialize();
+    if (this.lobby.progressiveReplay !== undefined) {
+      this.eventBus.emit(
+        new ReplayPresentationCadenceEvent(
+          replayPresentationIntervalMsForPlaybackRate(
+            this.lobby.progressiveReplay.playbackRate,
+          ),
+        ),
+      );
+    }
     this.input.initialize();
     this.worker.start((gu: GameUpdateViewData | ErrorUpdate) => {
       try {

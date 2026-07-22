@@ -84,6 +84,68 @@ function hangingSpawn(): ReplayPremiereClipsOptions["spawnWorker"] {
   };
 }
 
+interface ControlledRender {
+  complete(): Promise<void>;
+}
+
+function controlledSpawn(): {
+  spawnWorker: NonNullable<ReplayPremiereClipsOptions["spawnWorker"]>;
+  renders: ControlledRender[];
+} {
+  const renders: ControlledRender[] = [];
+  const spawnWorker: NonNullable<ReplayPremiereClipsOptions["spawnWorker"]> = (
+    jobSpecPath,
+  ) => {
+    const child = new EventEmitter() as FakeChild;
+    child.exitCode = null;
+    let settled = false;
+    child.kill = () => {
+      if (!settled) {
+        settled = true;
+        child.exitCode = -1;
+        child.emit("exit", null);
+      }
+      return true;
+    };
+    renders.push({
+      complete: async () => {
+        if (settled) return;
+        const spec = JSON.parse(await fs.readFile(jobSpecPath, "utf8"));
+        const bytes = Buffer.alloc(100, spec.anchorTurn % 251);
+        await fs.writeFile(path.join(spec.outDir, "clip.mp4"), bytes);
+        await fs.writeFile(
+          path.join(spec.outDir, "render-manifest.json"),
+          JSON.stringify({
+            premiereId: spec.premiereId,
+            sourceReplaySha256: spec.expectedBundleSha256,
+            anchorTurn: spec.anchorTurn,
+            clipVersion: spec.clipVersion,
+            frameShape: "square",
+            frameWidth: 1080,
+            frameHeight: 1080,
+            outSha256: createHash("sha256").update(bytes).digest("hex"),
+            outBytes: bytes.length,
+            generatedAt: new Date().toISOString(),
+          }),
+        );
+        settled = true;
+        child.exitCode = 0;
+        child.emit("exit", 0);
+      },
+    });
+    return child as never;
+  };
+  return { spawnWorker, renders };
+}
+
+async function waitFor(predicate: () => boolean, label: string): Promise<void> {
+  for (let attempt = 0; attempt < 400; attempt++) {
+    if (predicate()) return;
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+  throw new Error(`${label} did not happen`);
+}
+
 function statfsFree(bytes: number): (p: string) => Promise<StatsFs> {
   return async () => ({ bavail: bytes, bsize: 1 }) as unknown as StatsFs;
 }
@@ -179,6 +241,153 @@ describe("cache hit / miss and render", () => {
     expect(first.state).toBe("pending");
     expect(join.state).toBe("pending");
     await clips.close();
+  });
+});
+
+describe("terminal render fencing", () => {
+  test("is idempotent and rejects every post-fence request with a stable 410", async () => {
+    const clips = makeClips();
+    const firstFence = clips.fenceWritesAndDrain(PREMIERE);
+    const repeatedFence = clips.fenceWritesAndDrain(PREMIERE);
+    expect(repeatedFence).toBe(firstFence);
+    await firstFence;
+
+    await expect(
+      clips.requestClip(revealedRequest(PREMIERE, 605, "p_a")),
+    ).rejects.toMatchObject({
+      httpStatus: 410,
+      operatorCode: "clip_writes_fenced",
+    });
+    await clips.close();
+  });
+
+  test("waits for already running and queued renders through cache promotion", async () => {
+    const controlled = controlledSpawn();
+    const clips = makeClips({
+      spawnWorker: controlled.spawnWorker,
+      limits: { maxQueueDepth: 10 },
+    });
+    await clips.requestClip(revealedRequest(PREMIERE, 605, "p_a"));
+    await clips.requestClip(revealedRequest(PREMIERE, 705, "p_a"));
+    await waitFor(() => controlled.renders.length === 1, "first render start");
+
+    let drained = false;
+    const fence = clips.fenceWritesAndDrain(PREMIERE).then(() => {
+      drained = true;
+    });
+    await Promise.resolve();
+    expect(drained).toBe(false);
+
+    await controlled.renders[0].complete();
+    await waitFor(() => controlled.renders.length === 2, "second render start");
+    expect(drained).toBe(false);
+    await controlled.renders[1].complete();
+    await fence;
+
+    expect(
+      clips.readStatus({
+        premiereId: PREMIERE,
+        lifecycleState: "revealed",
+        bucket: 60,
+      }).state,
+    ).toBe("ready");
+    expect(
+      clips.readStatus({
+        premiereId: PREMIERE,
+        lifecycleState: "revealed",
+        bucket: 70,
+      }).state,
+    ).toBe("ready");
+    await clips.close();
+  });
+
+  test("rejects an admission that was awaiting the asynchronous disk guard", async () => {
+    let diskCheckStarted!: () => void;
+    const diskCheckStartedPromise = new Promise<void>((resolve) => {
+      diskCheckStarted = resolve;
+    });
+    let releaseDiskCheck!: (stats: StatsFs) => void;
+    const diskCheck = new Promise<StatsFs>((resolve) => {
+      releaseDiskCheck = resolve;
+    });
+    const clips = makeClips({
+      statfs: async () => {
+        diskCheckStarted();
+        return await diskCheck;
+      },
+    });
+
+    const request = clips.requestClip(revealedRequest(PREMIERE, 605, "p_a"));
+    await diskCheckStartedPromise;
+    await clips.fenceWritesAndDrain(PREMIERE);
+    releaseDiskCheck({ bavail: 100 * 1024 ** 3, bsize: 1 } as StatsFs);
+
+    await expect(request).rejects.toMatchObject({
+      httpStatus: 410,
+      operatorCode: "clip_writes_fenced",
+    });
+    expect(
+      clips.readStatus({
+        premiereId: PREMIERE,
+        lifecycleState: "revealed",
+        bucket: 60,
+      }).state,
+    ).toBe("absent");
+    await clips.close();
+  });
+
+  test("does not fence or wait for another premiere's work", async () => {
+    const otherPremiere = "prem_1111111111111111";
+    const controlled = controlledSpawn();
+    const clips = makeClips({
+      spawnWorker: controlled.spawnWorker,
+      limits: { maxQueueDepth: 10 },
+    });
+    await clips.requestClip(revealedRequest(PREMIERE, 605, "p_a"));
+    await waitFor(() => controlled.renders.length === 1, "first render start");
+    const fence = clips.fenceWritesAndDrain(PREMIERE);
+
+    const other = await clips.requestClip(
+      revealedRequest(otherPremiere, 605, "p_b"),
+    );
+    expect(other.state).toBe("pending");
+    await controlled.renders[0].complete();
+    await fence;
+    await waitFor(() => controlled.renders.length === 2, "other render start");
+
+    await expect(
+      clips.requestClip(revealedRequest(PREMIERE, 705, "p_a")),
+    ).rejects.toMatchObject({ operatorCode: "clip_writes_fenced" });
+    expect(
+      (await clips.requestClip(revealedRequest(otherPremiere, 605, "p_b")))
+        .state,
+    ).toBe("pending");
+    await controlled.renders[1].complete();
+    await waitReady(clips, otherPremiere, 60);
+    await clips.close();
+  });
+
+  test("close releases fence waiters and clears pending queued keys", async () => {
+    const controlled = controlledSpawn();
+    const clips = makeClips({
+      spawnWorker: controlled.spawnWorker,
+      limits: { maxQueueDepth: 10 },
+    });
+    await clips.requestClip(revealedRequest(PREMIERE, 605, "p_a"));
+    await clips.requestClip(revealedRequest(PREMIERE, 705, "p_a"));
+    await waitFor(() => controlled.renders.length === 1, "render start");
+    const fence = clips.fenceWritesAndDrain(PREMIERE);
+
+    await Promise.all([clips.close(), fence]);
+    for (const bucket of [60, 70]) {
+      expect(
+        clips.readStatus({
+          premiereId: PREMIERE,
+          lifecycleState: "revealed",
+          bucket,
+        }).state,
+      ).toBe("absent");
+    }
   });
 });
 

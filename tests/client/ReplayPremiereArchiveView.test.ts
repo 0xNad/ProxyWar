@@ -113,6 +113,28 @@ describe("mountArchivedReplayPremiereOverlay", () => {
     handle.dispose();
   });
 
+  it("labels a winner with zero archived votes as no predictions, not void", () => {
+    const payload = samplePayload();
+    payload.summary.predictions[0] = {
+      ...payload.summary.predictions[0],
+      totalPredictions: 0,
+      correctPredictions: 0,
+      options: payload.summary.predictions[0].options.map((option) => ({
+        ...option,
+        count: 0,
+      })),
+    };
+    const handle = mountArchivedReplayPremiereOverlay(payload);
+
+    expect(handle.element.textContent).toContain(
+      "replay_premiere.results_accuracy_no_predictions",
+    );
+    expect(handle.element.textContent).not.toContain(
+      "replay_premiere.results_accuracy_void",
+    );
+    handle.dispose();
+  });
+
   it("adds a copy-link action, plus a watch action only when a replay exists", () => {
     const withReplay = mountArchivedReplayPremiereOverlay(samplePayload());
     const actions = withReplay.element.querySelector(".rp-archived-actions");

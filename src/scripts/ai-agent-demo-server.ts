@@ -234,6 +234,10 @@ const replayPremiereReclaimExclusions =
 // startup recovery (a premiere recovered already revealed) are buffered
 // (bounded) and replayed once the scheduler exists.
 let replayPremiereRevealAutoClip: ReplayPremiereRevealAutoClip | null = null;
+// Constructed after bounded Premiere recovery. The reclamation callback below
+// closes over this binding so later sweeps fence and drain real clip work;
+// during startup itself it is still null, when no clip route or worker exists.
+let replayPremiereClips: ReplayPremiereClips | null = null;
 const bufferedRevealObservations: string[] = [];
 const notifyPremiereRevealed = (premiereId: string): void => {
   if (replayPremiereRevealAutoClip !== null) {
@@ -266,6 +270,8 @@ const replayPremiereProduction = await startReplayPremiereProduction({
   ),
   archiveStore: replayPremiereArchiveStore,
   reclamationExcludedPremiereIds: replayPremiereReclaimExclusions,
+  fenceClipWritesAndDrain: (premiereId) =>
+    replayPremiereClips?.fenceWritesAndDrain(premiereId) ?? Promise.resolve(),
   onPremiereRevealed: notifyPremiereRevealed,
   // Leave bounded launch headroom for the remaining initialization and bind.
   maxStartupMs: 8_000,
@@ -302,7 +308,6 @@ const replayPremiereProduction = await startReplayPremiereProduction({
 // disabled with a warning rather than crashing the whole server.
 const replayPremiereClipsEnabled =
   process.env.PROXYWAR_CLIPS_ENABLED !== "false";
-let replayPremiereClips: ReplayPremiereClips | null = null;
 if (replayPremiereClipsEnabled) {
   try {
     replayPremiereClips = new ReplayPremiereClips({

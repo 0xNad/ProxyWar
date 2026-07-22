@@ -330,6 +330,7 @@ async function handlePremiereApiRequest(
     const requesterBucketId = options.security.deriveRequesterBucketId(
       trustedClientAddress(request, options.resolveClientAddress),
     );
+    const interactionContractVersion = requestedInteractionContract(request);
     if (writeRoute.kind === "session") {
       await handleSessionWrite({
         request,
@@ -339,6 +340,8 @@ async function handlePremiereApiRequest(
         idempotencyKey,
         requesterBucketId,
         operationTimeoutMs,
+        interactionContractVersion,
+        clipsEnabled: options.clips !== undefined,
       });
       return;
     }
@@ -360,10 +363,17 @@ async function handlePremiereApiRequest(
           operationTimeoutMs,
         );
         sendJson(response, 200, {
-          schemaVersion: 1,
+          schemaVersion: interactionContractVersion,
           ...result,
           premiereState: target.runtime.readLifecycleState(),
           checkpoints: target.interactions.readCheckpoints(participantId),
+          ...(interactionContractVersion === 2
+            ? {
+                clipsEnabled: options.clips !== undefined,
+                reactionSummary:
+                  target.interactions.readReactionSummary(participantId),
+              }
+            : {}),
         });
         return;
       }
@@ -399,7 +409,17 @@ async function handlePremiereApiRequest(
           }),
           operationTimeoutMs,
         );
-        sendJson(response, 200, { schemaVersion: 1, ...result });
+        sendJson(response, 200, {
+          schemaVersion: interactionContractVersion,
+          ...result,
+          ...(interactionContractVersion === 2
+            ? {
+                clipsEnabled: options.clips !== undefined,
+                reactionSummary:
+                  target.interactions.readReactionSummary(participantId),
+              }
+            : {}),
+        });
         return;
       }
       case "share": {
@@ -473,6 +493,8 @@ async function handleSessionWrite(options: {
   idempotencyKey: string;
   requesterBucketId: string;
   operationTimeoutMs: number;
+  interactionContractVersion: 1 | 2;
+  clipsEnabled: boolean;
 }): Promise<void> {
   const body = parseSessionBody(options.request.body);
   const guest = options.security.authorizeSessionCreation(
@@ -514,7 +536,7 @@ async function handleSessionWrite(options: {
     options.operationTimeoutMs,
   );
   sendJson(options.response, 201, {
-    schemaVersion: 1,
+    schemaVersion: options.interactionContractVersion,
     csrfToken: guest.csrfToken,
     session,
     premiereState: options.target.runtime.readLifecycleState(),
@@ -522,6 +544,14 @@ async function handleSessionWrite(options: {
       guest.participant.participantId,
     ),
     incomingMoment,
+    ...(options.interactionContractVersion === 2
+      ? {
+          clipsEnabled: options.clipsEnabled,
+          reactionSummary: options.target.interactions.readReactionSummary(
+            guest.participant.participantId,
+          ),
+        }
+      : {}),
   });
 }
 
@@ -735,6 +765,15 @@ function requiredHeader(request: Request, name: string): string {
   if (single === null)
     throw invalidRequest(`missing_${name.replaceAll("-", "_")}`, 400);
   return single;
+}
+
+/**
+ * Opt-in additive interaction response contract. Missing, duplicated,
+ * malformed, or unknown values deliberately stay on the exact legacy v1
+ * shape so an old tab can survive a server restart during a rolling rollout.
+ */
+function requestedInteractionContract(request: Request): 1 | 2 {
+  return request.headers["x-proxywar-premiere-interactions"] === "2" ? 2 : 1;
 }
 
 function optionalSingleHeader(

@@ -13,7 +13,15 @@ import {
 } from "./ReplayPremiereClips";
 import { ReplayPremiereError } from "./ReplayPremiereErrors";
 import type { ReplayPremiereHttpTarget } from "./ReplayPremiereHttp";
-import { replayPremiereInteractionAggregateId } from "./ReplayPremiereInteractionRecovery";
+import {
+  recoverReplayPremiereTerminalInteractionState,
+  replayPremiereInteractionAggregateId,
+  type ReplayPremiereInteractionEventStore,
+} from "./ReplayPremiereInteractionRecovery";
+import {
+  createReplayPremiereInitialInteractionsSnapshot,
+  type ReplayPremiereInteractionLimits,
+} from "./ReplayPremiereInteractions";
 import {
   buildPremiereResultSummaryFromDurableEvidence,
   buildPremiereResultSummaryFromTarget,
@@ -109,6 +117,13 @@ export class ReplayPremiereTerminalReclaimer {
   private readonly maxArchivedClips: number;
   private readonly maxArchivedClipBytes: number;
   private readonly logger: (message: string) => void;
+  private readonly interactionEventStore: ReplayPremiereInteractionEventStore | null;
+  private readonly interactionLimits:
+    | Partial<ReplayPremiereInteractionLimits>
+    | undefined;
+  private readonly fenceClipWritesAndDrain:
+    | ((premiereId: string) => Promise<void>)
+    | null;
 
   constructor(options: {
     privateStateRoot: string;
@@ -122,6 +137,11 @@ export class ReplayPremiereTerminalReclaimer {
     maxArchivedClipBytes?: number;
     /** Operator diagnostics for best-effort clip promotion; never throws out. */
     logger?: (message: string) => void;
+    /** Active writer used for one atomic, hash-chained orphan interaction read. */
+    interactionEventStore?: ReplayPremiereInteractionEventStore;
+    interactionLimits?: Partial<ReplayPremiereInteractionLimits>;
+    /** Permanently fences and drains queued/running clip work for a live target. */
+    fenceClipWritesAndDrain?: (premiereId: string) => Promise<void>;
   }) {
     const graceMs =
       options.graceMs ?? DEFAULT_REPLAY_PREMIERE_RECLAMATION_GRACE_MS;
@@ -159,6 +179,9 @@ export class ReplayPremiereTerminalReclaimer {
       throw reclamationRequest("invalid_archived_clip_bounds");
     }
     this.logger = options.logger ?? (() => undefined);
+    this.interactionEventStore = options.interactionEventStore ?? null;
+    this.interactionLimits = options.interactionLimits;
+    this.fenceClipWritesAndDrain = options.fenceClipWritesAndDrain ?? null;
   }
 
   /** Pure eligibility check: terminal AND (post-grace for revealed/archived). */
@@ -253,6 +276,15 @@ export class ReplayPremiereTerminalReclaimer {
       };
     }
     let pointer = already;
+    // Close mutation admission before either building the one authoritative
+    // terminal snapshot or finishing an already-recorded reclamation. The
+    // latter matters after a crash between pointer commit and bulk deletion:
+    // startup can temporarily reconstruct a writable target from the surviving
+    // admission, and its retry must not race new writes while deleting bulk.
+    const interactionDrain = target.interactions.fenceWritesAndDrain();
+    const clipDrain =
+      this.fenceClipWritesAndDrain?.(premiereId) ?? Promise.resolve();
+    await Promise.all([interactionDrain, clipDrain]);
     if (pointer === null) {
       if (eligibility.terminalState === null) {
         throw reclamationIntegrity("reclamation_terminal_state_missing");
@@ -268,6 +300,22 @@ export class ReplayPremiereTerminalReclaimer {
       const sourceReplaySha256 =
         target.runtime.readBootstrap().provenance.sourceReplaySha256;
       pointer = await this.store.recordReclaimed(summary, sourceReplaySha256);
+    } else {
+      // A restart can recover the admission after the immutable archive pointer
+      // was committed but before bulk deletion. Defense in depth: after the
+      // write fence drains, prove the recovered aggregate is still exactly the
+      // one the pointer names. Any accepted post-pointer reaction changes this
+      // hash, so deletion fails closed and preserves its durable evidence.
+      const recoveredSummary = buildPremiereResultSummaryFromTarget({
+        target,
+        terminalState: pointer.terminalState,
+        reclaimedAt: pointer.reclaimedAt,
+      });
+      if (recoveredSummary.summaryHash !== pointer.summaryHash) {
+        throw reclamationIntegrity(
+          "reclamation_archived_summary_state_diverged",
+        );
+      }
     }
     // Promote the premiere's default clip into the durable archive BEFORE the
     // bulk is deleted (the clip cache is not bulk, but the render SOURCE is
@@ -366,8 +414,26 @@ export class ReplayPremiereTerminalReclaimer {
       // live viewers to protect — immediately eligible, like the live path.
     }
     let pointer = already;
+    const record = candidate.record;
+    const interactionRecovery =
+      (candidate.terminalState === "revealed" ||
+        candidate.terminalState === "archived") &&
+      this.interactionEventStore !== null
+        ? await recoverReplayPremiereTerminalInteractionState({
+            eventStore: this.interactionEventStore,
+            validationOptions: {
+              premiereId,
+              checkpointDescriptors: record.publicDefinition.checkpoints,
+              seats: record.eligibilityRecord.seats.map((seat) => ({
+                seatId: seat.seatId,
+                policyIdentity: seat.policyIdentity,
+              })),
+              getPremiereState: () => candidate.terminalState,
+              limits: this.interactionLimits,
+            },
+          })
+        : null;
     if (pointer === null) {
-      const record = candidate.record;
       const summary = buildPremiereResultSummaryFromDurableEvidence({
         premiereId,
         sourceRunId: record.eligibilityRecord.sourceRunId,
@@ -379,6 +445,7 @@ export class ReplayPremiereTerminalReclaimer {
         reclaimedAt: this.now().toISOString(),
         eligibilityRecord: record.eligibilityRecord,
         authoritativeResultBase64: record.authoritativeResult.bytes,
+        interactionState: interactionRecovery?.snapshot ?? null,
         mapLabel: record.publicDefinition.map.label,
         formatLabel: record.publicDefinition.matchFormat.label,
       });
@@ -386,6 +453,74 @@ export class ReplayPremiereTerminalReclaimer {
         summary,
         record.stagedSource.sourceReplaySha256,
       );
+    } else {
+      const archivedSummary = await this.store.loadSummary(premiereId);
+      if (archivedSummary === null) {
+        throw reclamationIntegrity("reclamation_archived_summary_missing");
+      }
+      // A premiere with zero audience writes may have no interaction aggregate
+      // at all. The live summary still records both zero-vote checkpoints, so
+      // reproduce their terminal option sets for existing-pointer comparison;
+      // `null` would incorrectly mean "no checkpoint aggregates available",
+      // while the raw initial state still has pre-open empty option arrays.
+      const terminalEmptyInteractionState = () => {
+        const empty = createReplayPremiereInitialInteractionsSnapshot({
+          premiereId,
+          checkpointDescriptors: record.publicDefinition.checkpoints,
+          seats: record.eligibilityRecord.seats.map((seat) => ({
+            seatId: seat.seatId,
+            policyIdentity: seat.policyIdentity,
+          })),
+          getPremiereState: () => candidate.terminalState,
+          getReleasedContext: () => null,
+          limits: this.interactionLimits,
+        });
+        const optionSeatIds = record.eligibilityRecord.seats.map(
+          (seat) => seat.seatId,
+        );
+        for (const checkpoint of empty.checkpoints) {
+          checkpoint.optionSeatIds = [...optionSeatIds];
+          checkpoint.state = "closed";
+        }
+        return empty;
+      };
+      const comparisonInteractionState =
+        interactionRecovery?.snapshot ??
+        ((candidate.terminalState === "revealed" ||
+          candidate.terminalState === "archived") &&
+        archivedSummary.predictions.length > 0
+          ? terminalEmptyInteractionState()
+          : null);
+      const recoveredSummary = buildPremiereResultSummaryFromDurableEvidence({
+        premiereId,
+        sourceRunId: record.eligibilityRecord.sourceRunId,
+        sourceKind:
+          record.eligibilityRecord.sourceKind ?? "controlled_exhibition",
+        publicationCommitmentHash: record.expectedPublicationCommitmentHash,
+        terminalState: candidate.terminalState,
+        revealedAt: candidate.revealedAt,
+        reclaimedAt: pointer.reclaimedAt,
+        eligibilityRecord: record.eligibilityRecord,
+        authoritativeResultBase64: record.authoritativeResult.bytes,
+        interactionState: comparisonInteractionState,
+        // Optional labels were added after the v1 aggregate shipped. Compare
+        // against the archived artifact's schema shape so a legacy pointer
+        // without them remains byte-for-byte reproducible, while a newer
+        // pointer still validates the current admission labels.
+        mapLabel:
+          archivedSummary.mapLabel === undefined
+            ? undefined
+            : record.publicDefinition.map.label,
+        formatLabel:
+          archivedSummary.formatLabel === undefined
+            ? undefined
+            : record.publicDefinition.matchFormat.label,
+      });
+      if (recoveredSummary.summaryHash !== pointer.summaryHash) {
+        throw reclamationIntegrity(
+          "reclamation_archived_summary_state_diverged",
+        );
+      }
     }
     await this.promoteDurableClip(premiereId, pointer).catch(
       (error: unknown) => {

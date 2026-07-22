@@ -157,7 +157,7 @@ describe("ReplayPremiereOverlay", () => {
     ).toHaveLength(0);
   });
 
-  it("offers only the five structured markers and emits released context", async () => {
+  it("hides the clip mark without proven clip capability and emits released context", async () => {
     const onMarker = vi.fn();
     const handle = mount(
       makeModel({
@@ -171,13 +171,12 @@ describe("ReplayPremiereOverlay", () => {
 
     const markerButtons =
       handle.element.querySelectorAll<HTMLButtonElement>(".rp-marker-button");
-    expect(markerButtons).toHaveLength(5);
+    expect(markerButtons).toHaveLength(4);
     expect([...markerButtons].map((entry) => entry.dataset.kind)).toEqual([
       "turning_point",
       "smart",
       "mistake",
       "betrayal",
-      "clip_this",
     ]);
     expect(handle.element.querySelector(".rp-markers input")).toBeNull();
     expect(handle.element.querySelector(".rp-markers textarea")).toBeNull();
@@ -191,6 +190,23 @@ describe("ReplayPremiereOverlay", () => {
         turn: 730,
         policySeatId: "seat-b",
       }),
+    );
+  });
+
+  it("shows the clip mark only when capability is explicitly proven", () => {
+    const handle = mount(
+      makeModel({
+        state: "playing",
+        clipMarkerAvailable: true,
+      }),
+      { onMarker: vi.fn() },
+    );
+
+    expect(
+      handle.element.querySelector('.rp-marker-button[data-kind="clip_this"]'),
+    ).not.toBeNull();
+    expect(handle.element.querySelectorAll(".rp-marker-button")).toHaveLength(
+      5,
     );
   });
 
@@ -225,7 +241,14 @@ describe("ReplayPremiereOverlay", () => {
     caption!.focus();
     caption!.value = "My evidence-linked caption";
     caption!.dispatchEvent(new Event("input", { bubbles: true }));
-    handle.hydrate({ ...model, headlineEvent: "A newly released event" });
+    handle.hydrate({
+      ...model,
+      headlineEvent: "A newly released event",
+      share: {
+        ...model.share!,
+        suggestedCaption: "A newer automatic caption",
+      },
+    });
 
     const hydratedCaption = handle.element.querySelector<HTMLTextAreaElement>(
       "#replay-premiere-caption",
@@ -270,6 +293,83 @@ describe("ReplayPremiereOverlay", () => {
     });
   });
 
+  it("refreshes an untouched suggested caption during volatile playback hydration", () => {
+    const model = makeModel({ state: "playing", currentTurn: 10 });
+    const handle = mount(model);
+    const caption = handle.element.querySelector<HTMLTextAreaElement>(
+      "#replay-premiere-caption",
+    );
+    expect(caption?.value).toBe("Watch this Proxy War replay premiere moment.");
+
+    handle.hydrate({
+      ...model,
+      currentTurn: 11,
+      share: {
+        ...model.share!,
+        suggestedCaption: "Watch turn 11.",
+      },
+    });
+
+    expect(
+      handle.element.querySelector<HTMLTextAreaElement>(
+        "#replay-premiere-caption",
+      ),
+    ).toBe(caption);
+    expect(caption?.value).toBe("Watch turn 11.");
+  });
+
+  it("labels and emits a timestamp share anchored to the accepted mark", async () => {
+    const onShare = vi.fn();
+    const onCopySuggestedCaption = vi.fn();
+    const model = makeModel({
+      state: "playing",
+      releasedSequence: 999,
+      currentTurn: 1600,
+    });
+    const handle = mount(
+      {
+        ...model,
+        share: {
+          ...model.share!,
+          sourceReactionId: `react_${"a".repeat(32)}`,
+          sourceReactionSequence: 700,
+          sourceReactionTurn: 1200,
+          suggestedCaption: "Watch turn 1200.",
+        },
+      },
+      { onShare, onCopySuggestedCaption },
+    );
+    const share = handle.element.querySelector<HTMLButtonElement>(
+      "[data-focus-key=timestamp-share]",
+    );
+    const caption = handle.element.querySelector<HTMLTextAreaElement>(
+      "#replay-premiere-caption",
+    );
+
+    expect(share?.textContent).toBe("replay_premiere.copy_marked_moment");
+    expect(caption?.value).toBe("Watch turn 1200.");
+    share?.click();
+    handle.element
+      .querySelector<HTMLButtonElement>("[data-focus-key=caption-copy]")
+      ?.click();
+    await vi.waitFor(() =>
+      expect(onShare).toHaveBeenCalledWith({
+        premiereId: "premiere-test",
+        kind: "timestamp",
+        url: "https://proxywar.example/premiere/premiere-test?s=999",
+        sequence: 700,
+        turn: 1200,
+        sourceReactionId: `react_${"a".repeat(32)}`,
+      }),
+    );
+    expect(onCopySuggestedCaption).toHaveBeenCalledWith({
+      premiereId: "premiere-test",
+      caption: "Watch turn 1200.",
+      sequence: 999,
+      turn: 1200,
+    });
+  });
+
   it("switches to a compact ambient surface while keeping controls reachable", async () => {
     const onAmbientChange = vi.fn();
     const model = makeModel({ state: "playing" });
@@ -295,7 +395,7 @@ describe("ReplayPremiereOverlay", () => {
     ).toBe("true");
     expect(
       handle.element.querySelectorAll<HTMLButtonElement>(".rp-marker-button"),
-    ).toHaveLength(5);
+    ).toHaveLength(4);
     expect(handle.element.querySelector(".rp-leaders")).not.toBeNull();
     expect(handle.element.querySelector(".rp-headline")).not.toBeNull();
   });
@@ -572,7 +672,7 @@ describe("ReplayPremiereOverlay", () => {
 
   it("renders the reaction row with zero-count badges in live states, never collapsed", () => {
     // Regression for "where are annotations/reactions": with no prior
-    // reactions the section must still render five buttons with visible
+    // reactions the section must still render the four supported buttons with visible
     // 0-count badges and invite interaction.
     for (const state of ["playing", "checkpoint"] as const) {
       const handle = mount(
@@ -590,7 +690,7 @@ describe("ReplayPremiereOverlay", () => {
           ".rp-marker-button",
         ),
       ];
-      expect(buttons, state).toHaveLength(5);
+      expect(buttons, state).toHaveLength(4);
       for (const button of buttons) {
         expect(button.disabled, state).toBe(false);
         expect(
@@ -611,7 +711,7 @@ describe("ReplayPremiereOverlay", () => {
         ".rp-marker-button",
       ),
     ];
-    expect(buttons).toHaveLength(5);
+    expect(buttons).toHaveLength(4);
     expect(buttons.every((button) => button.disabled)).toBe(true);
     expect(handle.element.querySelector(".rp-marker-hint")?.textContent).toBe(
       "replay_premiere.reactions_connecting",
@@ -636,6 +736,54 @@ describe("ReplayPremiereOverlay", () => {
     expect(
       handle.element.querySelector(".rp-marker-confirmed")?.textContent,
     ).toContain("turn=512");
+  });
+
+  it("labels aggregate counters as community marks while retaining own state", () => {
+    const handle = mount(
+      makeModel({
+        state: "playing",
+        canMark: true,
+        markerCounts: { betrayal: 7 },
+        ownMarkerCounts: { betrayal: 2 },
+        markerParticipantCount: 4,
+      }),
+      { onMarker: vi.fn() },
+    );
+    const betrayal = handle.element.querySelector<HTMLButtonElement>(
+      '.rp-marker-button[data-kind="betrayal"]',
+    );
+
+    expect(
+      handle.element.querySelector(".rp-marker-heading")?.textContent,
+    ).toBe("replay_premiere.community_marks");
+    expect(betrayal?.querySelector(".rp-marker-count")?.textContent).toBe("7");
+    expect(betrayal?.dataset.marked).toBe("true");
+    expect(betrayal?.getAttribute("aria-label")).toContain(
+      "replay_premiere.community_marker_with_count",
+    );
+    expect(handle.element.querySelector(".rp-marker-scope")?.textContent).toBe(
+      "replay_premiere.community_marks_hint:count=4",
+    );
+  });
+
+  it("labels preserved downgrade-era community counters as last known", () => {
+    const handle = mount(
+      makeModel({
+        state: "playing",
+        markerCounts: { betrayal: 7 },
+        ownMarkerCounts: { betrayal: 2 },
+        markerParticipantCount: 4,
+        markerAggregateFresh: false,
+      }),
+      { onMarker: vi.fn() },
+    );
+
+    expect(
+      handle.element.querySelector(".rp-marker-heading")?.textContent,
+    ).toBe("replay_premiere.community_marks_last_known");
+    expect(handle.element.querySelector(".rp-marker-scope")?.textContent).toBe(
+      "replay_premiere.community_marks_stale_hint:count=4",
+    );
   });
 
   it("shows the buffering chip as a polite status only while starved", () => {
@@ -1047,6 +1195,7 @@ function resultsReveal(): NonNullable<ReplayPremiereOverlayModel["reveal"]> {
           checkpointId: "checkpoint-1",
           sequence: 350,
           correctPercent: 75,
+          accuracyStatus: "scored",
           totalPredictions: 4,
           options: [
             { seatId: "seat-a", displayName: "Atlas Prime", percent: 75 },
@@ -1057,6 +1206,7 @@ function resultsReveal(): NonNullable<ReplayPremiereOverlayModel["reveal"]> {
           checkpointId: "checkpoint-2",
           sequence: 650,
           correctPercent: 50,
+          accuracyStatus: "scored",
           totalPredictions: 4,
           options: [
             { seatId: "seat-a", displayName: "Atlas Prime", percent: 50 },
@@ -1095,6 +1245,33 @@ describe("results summary panel", () => {
     expect(winRow?.textContent).toContain("Atlas Prime");
   });
 
+  it("distinguishes a winner with zero votes from a void prediction", () => {
+    const reveal = resultsReveal();
+    const predictions = reveal.results!.predictions.map((prediction) => ({
+      ...prediction,
+      correctPercent: null,
+      accuracyStatus: "no_predictions" as const,
+      totalPredictions: 0,
+      options: prediction.options.map((option) => ({ ...option, percent: 0 })),
+    }));
+    const handle = mount(
+      makeModel({
+        state: "revealed",
+        reveal: {
+          ...reveal,
+          results: { ...reveal.results!, predictions },
+        },
+      }),
+    );
+
+    expect(handle.element.textContent).toContain(
+      "replay_premiere.results_accuracy_no_predictions",
+    );
+    expect(handle.element.textContent).not.toContain(
+      "replay_premiere.results_accuracy_void",
+    );
+  });
+
   it("renders the panel on an archived premiere as well", () => {
     const handle = mount(
       makeModel({ state: "archived", reveal: resultsReveal() }),
@@ -1102,6 +1279,40 @@ describe("results summary panel", () => {
     expect(handle.element.querySelector(".rp-results")).not.toBeNull();
     expect(handle.element.textContent).toContain(
       "replay_premiere.results_markers",
+    );
+  });
+
+  it("shows the current viewer's sealed choice and verdict after reveal", () => {
+    const reveal = resultsReveal();
+    const predictions = reveal.results!.predictions.map(
+      (prediction, index) => ({
+        ...prediction,
+        selectedSeatId: index === 0 ? "seat-a" : "seat-b",
+      }),
+    );
+    const handle = mount(
+      makeModel({
+        state: "revealed",
+        reveal: {
+          ...reveal,
+          results: { ...reveal.results!, predictions },
+        },
+      }),
+    );
+    const picks = [
+      ...handle.element.querySelectorAll<HTMLElement>(
+        ".rp-results-personal-pick",
+      ),
+    ];
+
+    expect(picks).toHaveLength(2);
+    expect(picks[0].dataset.verdict).toBe("correct");
+    expect(picks[0].textContent).toContain(
+      "replay_premiere.results_your_pick_correct:name=Atlas Prime",
+    );
+    expect(picks[1].dataset.verdict).toBe("incorrect");
+    expect(picks[1].textContent).toContain(
+      "replay_premiere.results_your_pick_incorrect:name=Borealis",
     );
   });
 

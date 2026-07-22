@@ -34,6 +34,7 @@ import {
   type ReplayPremierePolicyView,
   type ReplayPremierePredictionRequest,
   type ReplayPremiereReminderRequest,
+  type ReplayPremiereResultsPredictionView,
   type ReplayPremiereResultsSummaryView,
   type ReplayPremiereShareRequest,
   type ReplayPremiereWarEventView,
@@ -58,6 +59,8 @@ const ATTRIBUTION_PATTERN = /^[A-Za-z0-9_-]{16,512}\.[A-Za-z0-9_-]{16,128}$/;
 const JSON_CONTENT_TYPE_PATTERN = /^(?:application\/json|[^;]+\+json)(?:;|$)/i;
 const MAX_INTERACTION_RESPONSE_BYTES = 256 * 1024;
 const INTERACTION_REQUEST_TIMEOUT_MS = 2_000;
+const INTERACTION_CONTRACT_HEADER = "X-ProxyWar-Premiere-Interactions";
+const INTERACTION_CONTRACT_VERSION = "2";
 const HEARTBEAT_INTERVAL_MS = 10_000;
 const INTERACTION_RECOVERY_RETRY_MS = 1_000;
 const MAX_CLIPBOARD_TEXT_LENGTH = 16_384;
@@ -149,6 +152,31 @@ const predictionSchema = z
     lockedAt: canonicalTimestampSchema,
   })
   .strict();
+const REACTION_KINDS = [
+  "turning_point",
+  "smart",
+  "mistake",
+  "betrayal",
+  "clip_this",
+] as const;
+const reactionKindSchema = z.enum(REACTION_KINDS);
+const reactionCountsSchema = z
+  .object({
+    turning_point: nonNegativeIntegerSchema,
+    smart: nonNegativeIntegerSchema,
+    mistake: nonNegativeIntegerSchema,
+    betrayal: nonNegativeIntegerSchema,
+    clip_this: nonNegativeIntegerSchema,
+  })
+  .strict();
+const reactionSummarySchema = z
+  .object({
+    totalReactions: nonNegativeIntegerSchema,
+    distinctParticipants: nonNegativeIntegerSchema,
+    byKind: reactionCountsSchema,
+    ownByKind: reactionCountsSchema.nullable(),
+  })
+  .strict();
 const predictionResolutionSchema = z.discriminatedUnion("kind", [
   z
     .object({
@@ -233,7 +261,7 @@ const incomingMomentSchema = z
     turn: nonNegativeIntegerSchema,
   })
   .strict();
-const sessionResponseSchema = z
+const sessionResponseV1Schema = z
   .object({
     schemaVersion: z.literal(1),
     csrfToken: z.string().min(1).max(512).regex(CSRF_PATTERN),
@@ -243,7 +271,22 @@ const sessionResponseSchema = z
     incomingMoment: incomingMomentSchema.nullable(),
   })
   .strict();
-const heartbeatResponseSchema = z
+const sessionResponseV2Schema = sessionResponseV1Schema.extend({
+  schemaVersion: z.literal(2),
+  reactionSummary: reactionSummarySchema,
+  clipsEnabled: z.boolean(),
+});
+const sessionResponseSchema = z
+  .discriminatedUnion("schemaVersion", [
+    sessionResponseV1Schema,
+    sessionResponseV2Schema,
+  ])
+  .transform((response) =>
+    response.schemaVersion === 1
+      ? { ...response, reactionSummary: null, clipsEnabled: null }
+      : response,
+  );
+const heartbeatResponseV1Schema = z
   .object({
     schemaVersion: z.literal(1),
     session: viewerSessionSchema,
@@ -253,6 +296,21 @@ const heartbeatResponseSchema = z
     checkpoints: checkpointPairSchema,
   })
   .strict();
+const heartbeatResponseV2Schema = heartbeatResponseV1Schema.extend({
+  schemaVersion: z.literal(2),
+  reactionSummary: reactionSummarySchema,
+  clipsEnabled: z.boolean(),
+});
+const heartbeatResponseSchema = z
+  .discriminatedUnion("schemaVersion", [
+    heartbeatResponseV1Schema,
+    heartbeatResponseV2Schema,
+  ])
+  .transform((response) =>
+    response.schemaVersion === 1
+      ? { ...response, reactionSummary: null, clipsEnabled: null }
+      : response,
+  );
 const predictionResponseSchema = z
   .object({
     schemaVersion: z.literal(1),
@@ -268,25 +326,34 @@ const reactionSchema = z
     participantId: z.string().regex(PARTICIPANT_ID_PATTERN),
     sequence: nonNegativeIntegerSchema,
     turn: nonNegativeIntegerSchema,
-    kind: z.enum([
-      "turning_point",
-      "smart",
-      "mistake",
-      "betrayal",
-      "clip_this",
-    ]),
+    kind: reactionKindSchema,
     policyIdentity: policyIdentitySchema.nullable(),
     eventContext: z.unknown().refine((value) => isBoundedJsonValue(value)),
     createdAt: canonicalTimestampSchema,
   })
   .strict();
-const reactionResponseSchema = z
+const reactionResponseV1Schema = z
   .object({
     schemaVersion: z.literal(1),
     reaction: reactionSchema,
     idempotent: z.boolean(),
   })
   .strict();
+const reactionResponseV2Schema = reactionResponseV1Schema.extend({
+  schemaVersion: z.literal(2),
+  reactionSummary: reactionSummarySchema,
+  clipsEnabled: z.boolean(),
+});
+const reactionResponseSchema = z
+  .discriminatedUnion("schemaVersion", [
+    reactionResponseV1Schema,
+    reactionResponseV2Schema,
+  ])
+  .transform((response) =>
+    response.schemaVersion === 1
+      ? { ...response, reactionSummary: null, clipsEnabled: null }
+      : response,
+  );
 const shareSchema = z
   .object({
     id: z.string().regex(SHARE_ID_PATTERN),
@@ -325,6 +392,9 @@ export type ReplayPremiereServicePredictionResponse = z.infer<
 >;
 export type ReplayPremiereServiceReactionResponse = z.infer<
   typeof reactionResponseSchema
+>;
+export type ReplayPremiereServiceReactionSummary = z.infer<
+  typeof reactionSummarySchema
 >;
 export type ReplayPremiereServiceShareResponse = z.infer<
   typeof shareResponseSchema
@@ -397,6 +467,12 @@ export class ReplayPremiereServiceClient {
   } | null = null;
   private csrfToken: string | null = null;
   private currentSession: ReplayPremiereServiceSession | null = null;
+  private currentReactionSummary: ReplayPremiereServiceReactionSummary | null =
+    null;
+  private currentParticipantReactionSummary: ReplayPremiereServiceReactionSummary | null =
+    null;
+  private currentReactionParticipantId: string | null = null;
+  private clipsEnabled: boolean | null = null;
   private disposed = false;
 
   constructor(private readonly options: ReplayPremiereServiceClientOptions) {
@@ -464,6 +540,7 @@ export class ReplayPremiereServiceClient {
       sessionResponseSchema,
       201,
       false,
+      true,
     );
     try {
       this.assertSessionResponseBound(
@@ -474,8 +551,22 @@ export class ReplayPremiereServiceClient {
     } catch (error) {
       throw serviceErrorWithPhase(error, "response_binding");
     }
+    const previousParticipantId = this.currentSession?.participantId ?? null;
     this.csrfToken = response.csrfToken;
     this.currentSession = response.session;
+    this.mergeCurrentReactionSummary(
+      response.reactionSummary,
+      response.session.participantId,
+    );
+    if (
+      previousParticipantId !== null &&
+      previousParticipantId !== response.session.participantId
+    ) {
+      // Operation keys are participant-private. A recovered guest identity
+      // must not reuse semantic keys that were accepted for the old viewer.
+      this.semanticIdempotencyKeys.clear();
+    }
+    this.mergeClipCapability(response.clipsEnabled);
     return response;
   }
 
@@ -516,9 +607,15 @@ export class ReplayPremiereServiceClient {
         heartbeatResponseSchema,
         200,
         true,
+        true,
       );
       this.assertHeartbeatResponseBound(response, session);
       this.currentSession = response.session;
+      this.mergeCurrentReactionSummary(
+        response.reactionSummary,
+        response.session.participantId,
+      );
+      this.mergeClipCapability(response.clipsEnabled);
       this.pendingHeartbeat = null;
       return response;
     } catch (error) {
@@ -580,6 +677,10 @@ export class ReplayPremiereServiceClient {
         ? {}
         : { policySeatId: input.policySeatId }),
     };
+    // Bind a non-idempotent acceptance to the state visible when THIS request
+    // began. A newer heartbeat or concurrent reaction may legitimately update
+    // the client before this response arrives.
+    const summaryAtRequest = this.currentParticipantReactionSummary;
     const response = await this.postJson(
       "reactions",
       body,
@@ -587,8 +688,25 @@ export class ReplayPremiereServiceClient {
       reactionResponseSchema,
       200,
       true,
+      true,
     );
-    this.assertReactionResponseBound(response, input, session);
+    const sessionStillCurrent =
+      this.currentSession?.participantId === session.participantId;
+    this.assertReactionResponseBound(
+      response,
+      input,
+      session,
+      summaryAtRequest,
+      sessionStillCurrent,
+    );
+    if (!sessionStillCurrent) {
+      return response;
+    }
+    this.mergeCurrentReactionSummary(
+      response.reactionSummary,
+      session.participantId,
+    );
+    this.mergeClipCapability(response.clipsEnabled);
     return response;
   }
 
@@ -711,6 +829,7 @@ export class ReplayPremiereServiceClient {
     schema: z.ZodType<T>,
     expectedStatus: number,
     requireCsrf: boolean,
+    negotiateInteractionContract = false,
   ): Promise<T> {
     this.assertActive();
     if (requireCsrf && this.csrfToken === null) {
@@ -739,6 +858,11 @@ export class ReplayPremiereServiceClient {
               // Origin is user-agent controlled. A relative same-origin POST
               // lets the browser supply the actual page origin.
               "x-idempotency-key": idempotencyKey,
+              ...(negotiateInteractionContract
+                ? {
+                    [INTERACTION_CONTRACT_HEADER]: INTERACTION_CONTRACT_VERSION,
+                  }
+                : {}),
               ...(requireCsrf && this.csrfToken !== null
                 ? { "x-csrf-token": this.csrfToken }
                 : {}),
@@ -1014,6 +1138,11 @@ export class ReplayPremiereServiceClient {
       throw serviceError("invalid_response");
     }
     this.assertCheckpointsBound(response.checkpoints, session.participantId);
+    this.assertReactionSummaryBound(
+      response.reactionSummary,
+      session.participantId,
+    );
+    this.assertClipCapabilityBound(response.clipsEnabled);
     if (
       response.incomingMoment !== null &&
       (session.incomingAttribution === null ||
@@ -1045,6 +1174,11 @@ export class ReplayPremiereServiceClient {
       throw serviceError("invalid_response");
     }
     this.assertCheckpointsBound(response.checkpoints, current.participantId);
+    this.assertReactionSummaryBound(
+      response.reactionSummary,
+      current.participantId,
+    );
+    this.assertClipCapabilityBound(response.clipsEnabled);
   }
 
   private assertPredictionResponseBound(
@@ -1076,6 +1210,8 @@ export class ReplayPremiereServiceClient {
     response: ReplayPremiereServiceReactionResponse,
     input: ReplayPremiereMarkerRequest,
     session: ReplayPremiereServiceSession,
+    summaryAtRequest: ReplayPremiereServiceReactionSummary | null,
+    compareWithCurrent: boolean,
   ): void {
     const reaction = response.reaction;
     const binding = this.requireBinding();
@@ -1093,6 +1229,148 @@ export class ReplayPremiereServiceClient {
     ) {
       throw serviceError("invalid_response");
     }
+    this.assertReactionSummaryBound(
+      response.reactionSummary,
+      session.participantId,
+      compareWithCurrent,
+    );
+    if (compareWithCurrent) {
+      this.assertClipCapabilityBound(response.clipsEnabled);
+    }
+    if (
+      response.reactionSummary !== null &&
+      (response.reactionSummary.ownByKind === null ||
+        response.reactionSummary.byKind[reaction.kind] < 1 ||
+        response.reactionSummary.ownByKind[reaction.kind] < 1 ||
+        (!response.idempotent &&
+          !reactionSummaryProvesIncrement(
+            response.reactionSummary,
+            summaryAtRequest,
+            reaction.kind,
+          )))
+    ) {
+      throw serviceError("invalid_response");
+    }
+  }
+
+  private assertReactionSummaryBound(
+    summary: ReplayPremiereServiceReactionSummary | null,
+    participantId: string,
+    compareWithCurrent = true,
+  ): void {
+    if (summary === null) return;
+    const identityChanged =
+      this.currentReactionParticipantId !== null &&
+      this.currentReactionParticipantId !== participantId;
+    if (
+      !isConsistentReactionSummary(summary) ||
+      summary.ownByKind === null ||
+      (compareWithCurrent &&
+        this.currentReactionSummary !== null &&
+        comparePublicReactionSummaries(summary, this.currentReactionSummary) ===
+          "incomparable") ||
+      (compareWithCurrent &&
+        !identityChanged &&
+        this.currentParticipantReactionSummary !== null &&
+        compareReactionSummaries(
+          summary,
+          this.currentParticipantReactionSummary,
+        ) === "incomparable")
+    ) {
+      throw serviceError("invalid_response");
+    }
+  }
+
+  private mergeCurrentReactionSummary(
+    summary: ReplayPremiereServiceReactionSummary | null,
+    participantId: string,
+  ): void {
+    const identityChanged =
+      this.currentReactionParticipantId !== null &&
+      this.currentReactionParticipantId !== participantId;
+    this.currentReactionParticipantId = participantId;
+    if (identityChanged) {
+      this.currentParticipantReactionSummary = summary;
+      if (summary === null) {
+        if (this.currentReactionSummary !== null) {
+          this.currentReactionSummary = {
+            ...this.currentReactionSummary,
+            ownByKind: null,
+          };
+        }
+        return;
+      }
+      if (this.currentReactionSummary === null) {
+        this.currentReactionSummary = summary;
+        return;
+      }
+      const publicOrder = comparePublicReactionSummaries(
+        summary,
+        this.currentReactionSummary,
+      );
+      if (publicOrder === "incomparable") {
+        throw serviceError("invalid_response");
+      }
+      this.currentReactionSummary =
+        publicOrder === "newer"
+          ? summary
+          : {
+              ...this.currentReactionSummary,
+              ownByKind: { ...summary.ownByKind! },
+            };
+      return;
+    }
+    if (summary === null) return;
+    const participantOrder =
+      this.currentParticipantReactionSummary === null
+        ? "newer"
+        : compareReactionSummaries(
+            summary,
+            this.currentParticipantReactionSummary,
+          );
+    const publicOrder =
+      this.currentReactionSummary === null
+        ? "newer"
+        : comparePublicReactionSummaries(summary, this.currentReactionSummary);
+    const previousPrivate = this.currentReactionSummary?.ownByKind ?? null;
+    if (
+      this.currentParticipantReactionSummary === null ||
+      participantOrder === "newer"
+    ) {
+      this.currentParticipantReactionSummary = summary;
+    }
+    if (this.currentReactionSummary === null) {
+      this.currentReactionSummary = summary;
+      return;
+    }
+    if (publicOrder === "incomparable" || participantOrder === "incomparable") {
+      // Every caller validates before merging. Keep this defensive guard so a
+      // future call site cannot silently combine contradictory evidence.
+      throw serviceError("invalid_response");
+    }
+    if (publicOrder === "newer" || participantOrder === "newer") {
+      const publicSource =
+        publicOrder === "newer" ? summary : this.currentReactionSummary;
+      this.currentReactionSummary = {
+        ...publicSource,
+        ownByKind:
+          participantOrder === "newer"
+            ? { ...summary.ownByKind! }
+            : previousPrivate,
+      };
+    }
+    // Equal and totally ordered older snapshots are safe no-ops.
+  }
+
+  private assertClipCapabilityBound(clipsEnabled: boolean | null): void {
+    if (clipsEnabled === null) return;
+    if (this.clipsEnabled !== null && clipsEnabled !== this.clipsEnabled) {
+      throw serviceError("invalid_response");
+    }
+  }
+
+  private mergeClipCapability(clipsEnabled: boolean | null): void {
+    this.clipsEnabled = clipsEnabled;
   }
 
   private assertShareResponseBound(
@@ -1364,6 +1642,23 @@ export class ReplayPremiereRuntimeController {
   private warFeed: ReplayPremiereWarEventView[] = [];
   /** The viewer's own server-accepted marks per kind (session-local). */
   private ownMarkCounts: Partial<Record<ReplayPremiereMarkerKind, number>> = {};
+  /** Public aggregate returned by the interaction service, never raw reactions. */
+  private reactionSummary: ReplayPremiereServiceReactionSummary | null = null;
+  /** False after an exact-v1 response cannot refresh the public aggregate. */
+  private reactionSummaryFresh = false;
+  /** Participant identity that owns the private side of reactionSummary. */
+  private reactionSummaryParticipantId: string | null = null;
+  /** Raw monotonic baseline for the current participant's private counts. */
+  private participantReactionSummary: ReplayPremiereServiceReactionSummary | null =
+    null;
+  /** Most recent accepted mark; timestamp sharing uses it as an explicit anchor. */
+  private lastAcceptedReaction: {
+    id: string;
+    sequence: number;
+    turn: number;
+  } | null = null;
+  /** Server-proven clip capability; null/false both fail closed in the UI. */
+  private clipsEnabled: boolean | null = null;
   private lastMarkConfirmation: {
     kind: ReplayPremiereMarkerKind;
     turn: number;
@@ -2099,6 +2394,17 @@ export class ReplayPremiereRuntimeController {
       this.latchFailure("integrity_failure");
       return;
     }
+    if (
+      !this.acceptReactionSummary(
+        response.reactionSummary,
+        response.session.participantId,
+      )
+    ) {
+      return;
+    }
+    if (!this.acceptClipCapability(response.clipsEnabled)) {
+      return;
+    }
     this.servicePremiereState = response.premiereState;
     this.serviceCheckpoints = response.checkpoints;
     if ("incomingMoment" in response) {
@@ -2109,6 +2415,118 @@ export class ReplayPremiereRuntimeController {
       this.clearInteractionTimers();
     }
     this.maybeApplyRevealSeek();
+  }
+
+  private acceptReactionSummary(
+    summary: ReplayPremiereServiceReactionSummary | null,
+    participantId: string,
+    accepted?: {
+      kind: ReplayPremiereMarkerKind;
+      newlyAccepted: boolean;
+      summaryAtRequest: ReplayPremiereServiceReactionSummary | null;
+    },
+  ): boolean {
+    const identityChanged =
+      this.reactionSummaryParticipantId !== null &&
+      this.reactionSummaryParticipantId !== participantId;
+    // Exact legacy v1 response: there is no aggregate evidence to compare.
+    // Keep public v2 evidence, but never carry private counts or mark anchors
+    // across a recovered anonymous participant identity.
+    if (summary === null) {
+      this.reactionSummaryFresh = false;
+      if (identityChanged) {
+        if (this.reactionSummary !== null) {
+          this.reactionSummary = {
+            ...this.reactionSummary,
+            ownByKind: null,
+          };
+        }
+        this.participantReactionSummary = null;
+        this.resetParticipantReactionState();
+      }
+      this.reactionSummaryParticipantId = participantId;
+      return true;
+    }
+    const previous = this.reactionSummary;
+    if (!isConsistentReactionSummary(summary) || summary.ownByKind === null) {
+      this.latchFailure("integrity_failure");
+      return false;
+    }
+    this.reactionSummaryFresh = true;
+    const publicOrder =
+      previous === null
+        ? "newer"
+        : comparePublicReactionSummaries(summary, previous);
+    const participantOrder =
+      identityChanged || this.participantReactionSummary === null
+        ? "newer"
+        : compareReactionSummaries(summary, this.participantReactionSummary);
+    if (
+      publicOrder === "incomparable" ||
+      participantOrder === "incomparable" ||
+      (accepted?.newlyAccepted === true &&
+        !reactionSummaryProvesIncrement(
+          summary,
+          accepted.summaryAtRequest,
+          accepted.kind,
+        ))
+    ) {
+      this.latchFailure("integrity_failure");
+      return false;
+    }
+    if (identityChanged) {
+      this.resetParticipantReactionState();
+    }
+    if (
+      this.participantReactionSummary === null ||
+      identityChanged ||
+      participantOrder === "newer"
+    ) {
+      this.participantReactionSummary = summary;
+    }
+    if (
+      previous === null ||
+      identityChanged ||
+      publicOrder === "newer" ||
+      participantOrder === "newer"
+    ) {
+      const publicSource =
+        previous === null || publicOrder === "newer" ? summary : previous;
+      const ownByKind =
+        identityChanged || participantOrder === "newer"
+          ? summary.ownByKind
+          : (previous?.ownByKind ?? null);
+      this.reactionSummary = {
+        ...publicSource,
+        ownByKind: ownByKind === null ? null : { ...ownByKind },
+      };
+      this.ownMarkCounts = ownByKind === null ? {} : { ...ownByKind };
+    }
+    this.reactionSummaryParticipantId = participantId;
+    // Equal or totally ordered older snapshots are valid but do not regress
+    // the public or participant counters already visible in the overlay.
+    return true;
+  }
+
+  private resetParticipantReactionState(): void {
+    this.ownMarkCounts = {};
+    this.lastAcceptedReaction = null;
+    this.lastMarkConfirmation = null;
+  }
+
+  private acceptClipCapability(clipsEnabled: boolean | null): boolean {
+    // Legacy v1 communicates no capability. Invalidate a cached value so a
+    // mixed-route downgrade cannot leave unsupported clip controls exposed.
+    if (clipsEnabled === null) {
+      this.clipsEnabled = null;
+      return true;
+    }
+    if (this.clipsEnabled !== null && clipsEnabled !== this.clipsEnabled) {
+      this.latchFailure("integrity_failure");
+      return false;
+    }
+    this.clipsEnabled = clipsEnabled;
+    return true;
   }
 
   /**
@@ -2380,16 +2798,42 @@ export class ReplayPremiereRuntimeController {
         ) {
           throw serviceError("request_rejected");
         }
+        const summaryAtRequest = this.participantReactionSummary;
         const response = await this.strictInteractionWrite(() =>
           this.service.submitReaction(request),
         );
-        // Server-confirmed feedback: bump the viewer's own per-kind tally
-        // (idempotent replays of the same moment+kind do not double-count)
-        // and surface the acknowledgment line.
-        if (!response.idempotent) {
+        const participantId = this.service.session()?.participantId;
+        if (participantId === undefined) {
+          this.latchFailure("integrity_failure");
+          throw serviceError("invalid_response");
+        }
+        if (response.reaction.participantId !== participantId) {
+          // A valid response for the anonymous identity that initiated this
+          // request may arrive after session recovery rotated that identity.
+          // It must not restore the old viewer's private marks or share anchor.
+          return;
+        }
+        if (
+          !this.acceptReactionSummary(response.reactionSummary, participantId, {
+            kind: request.kind,
+            newlyAccepted: !response.idempotent,
+            summaryAtRequest,
+          })
+        ) {
+          throw serviceError("invalid_response");
+        }
+        if (!this.acceptClipCapability(response.clipsEnabled)) {
+          throw serviceError("invalid_response");
+        }
+        if (response.reactionSummary === null && !response.idempotent) {
           this.ownMarkCounts[request.kind] =
             (this.ownMarkCounts[request.kind] ?? 0) + 1;
         }
+        this.lastAcceptedReaction = {
+          id: response.reaction.id,
+          sequence: response.reaction.sequence,
+          turn: response.reaction.turn,
+        };
         this.lastMarkConfirmation = {
           kind: request.kind,
           turn: response.reaction.turn,
@@ -2417,9 +2861,11 @@ export class ReplayPremiereRuntimeController {
       throw serviceError("request_rejected");
     }
     const sequence = request.sequence;
+    const sourceReactionId = request.sourceReactionId ?? null;
     const response = await this.strictInteractionWrite(() =>
       this.service.createShare({
         sequence,
+        sourceReactionId,
       }),
     );
     if (
@@ -2479,7 +2925,10 @@ export class ReplayPremiereRuntimeController {
       throw serviceError("invalid_configuration");
     }
     this.assertInteractionWriteAllowed();
-    if (this.currentNetworkState() !== "revealed") {
+    if (
+      this.clipsEnabled !== true ||
+      this.currentNetworkState() !== "revealed"
+    ) {
       throw serviceError("request_rejected");
     }
     const frame = this.latestFrame;
@@ -2746,6 +3195,7 @@ export class ReplayPremiereRuntimeController {
         ? manifest.releasedThroughSequence
         : null;
     const currentTurn = this.latestFrame?.turnNumber ?? null;
+    const shareTurn = this.lastAcceptedReaction?.turn ?? currentTurn;
     const projectedActiveCheckpointId =
       manifest?.activeCheckpoint?.id ??
       this.serviceCheckpoints?.find(
@@ -2801,21 +3251,30 @@ export class ReplayPremiereRuntimeController {
           : null,
       leaders: frameLeaders(this.latestFrame),
       warEvents: this.warFeed,
-      markerCounts: { ...this.ownMarkCounts },
+      markerCounts: {
+        ...(this.reactionSummary?.byKind ?? this.ownMarkCounts),
+      },
+      ownMarkerCounts: { ...this.ownMarkCounts },
+      markerParticipantCount: this.reactionSummary?.distinctParticipants,
+      markerAggregateFresh: this.reactionSummaryFresh,
+      clipMarkerAvailable: this.clipsEnabled === true,
       markerConfirmation: this.lastMarkConfirmation,
       headlineEvent: this.headlineEvent,
       markerPolicySeatId: null,
       share: {
         canonicalUrl: this.canonicalUrl(),
         timestampUrl: viewedSequence < 0 ? null : this.canonicalUrl(),
+        sourceReactionId: this.lastAcceptedReaction?.id ?? null,
+        sourceReactionSequence: this.lastAcceptedReaction?.sequence ?? null,
+        sourceReactionTurn: this.lastAcceptedReaction?.turn ?? null,
         suggestedCaption:
-          currentTurn === null
+          shareTurn === null
             ? translateText("replay_premiere.share_caption_premiere", {
                 title: this.projection.publicDefinition.title,
               })
             : translateText("replay_premiere.share_caption", {
                 title: this.projection.publicDefinition.title,
-                turn: currentTurn,
+                turn: shareTurn,
               }),
       },
       reveal: displayReveal === null ? null : this.revealView(policies),
@@ -2840,13 +3299,16 @@ export class ReplayPremiereRuntimeController {
         displayReveal !== null &&
         networkState !== "failed" &&
         networkState !== "cancelled",
-      // Clips exist only on the revealed/archived surface. The request button is
-      // live only while `revealed` with an active interaction session (archived
-      // disposes the session and is server-410'd); a previously rendered clip
-      // stays downloadable through archived.
+      // A server-proven capability is required before any live clip affordance
+      // enters the DOM. Archived pages can still supply a durable ready clip
+      // directly through their separate archive model.
       clip:
-        state === "revealed" || state === "archived" ? this.clipView() : null,
+        this.clipsEnabled === true &&
+        (state === "revealed" || state === "archived")
+          ? this.clipView()
+          : null,
       canRequestClip:
+        this.clipsEnabled === true &&
         state === "revealed" &&
         this.interactionReady &&
         !this.isReadOnlyLifecycle(),
@@ -2939,10 +3401,10 @@ export class ReplayPremiereRuntimeController {
   }
 
   /**
-   * Builds the aggregate-only results summary from the verified authoritative
-   * result and the service checkpoint views. It carries no per-viewer data;
-   * the marker tally is server-owned, so live it is empty and the durable
-   * archived page fills it in from the persisted summary.
+   * Builds results from the verified authoritative result and service
+   * checkpoint views. Aggregate tallies are public; a participant's sealed
+   * selection stays session-local and is attached only for their reveal
+   * verdict. Archived summaries never carry that private selection.
    */
   private resultsView(
     policies: readonly ReplayPremierePolicyView[],
@@ -2953,6 +3415,9 @@ export class ReplayPremiereRuntimeController {
       result.seats.find((seat) => seat.seatId === seatId)?.displayName ??
       policies.find((policy) => policy.seatId === seatId)?.displayName ??
       seatId;
+    const authoritativeWinners = result.seats.filter((seat) => seat.won);
+    const authoritativeWinnerSeatId =
+      authoritativeWinners.length === 1 ? authoritativeWinners[0].seatId : null;
     const definitions = this.projection!.publicDefinition.checkpoints;
     const predictions = definitions.map((definition) => {
       const serviceView = this.serviceCheckpoints?.find(
@@ -2968,17 +3433,30 @@ export class ReplayPremiereRuntimeController {
             ? ((distribution[seatId] ?? 0) / total) * 100
             : 0,
       }));
-      const crowd = serviceView?.crowdAccuracy ?? null;
       const correctPercent =
-        crowd !== null && crowd.totalPredictions > 0
-          ? (crowd.correctPredictions / crowd.totalPredictions) * 100
+        authoritativeWinnerSeatId !== null &&
+        serviceView?.optionSeatIds.includes(authoritativeWinnerSeatId) ===
+          true &&
+        distribution !== null &&
+        total > 0
+          ? ((distribution[authoritativeWinnerSeatId] ?? 0) / total) * 100
           : null;
+      const accuracyStatus: ReplayPremiereResultsPredictionView["accuracyStatus"] =
+        authoritativeWinnerSeatId === null ||
+        serviceView?.optionSeatIds.includes(authoritativeWinnerSeatId) !== true
+          ? "void"
+          : total > 0 && distribution !== null
+            ? "scored"
+            : "no_predictions";
       return {
         checkpointId: definition.id,
         sequence: definition.sequence,
         correctPercent,
+        accuracyStatus,
         totalPredictions: total,
         options,
+        selectedSeatId:
+          serviceView?.participantPrediction?.selectedSeatId ?? null,
       };
     });
     return {
@@ -3692,6 +4170,116 @@ function parseSameOrigin(value: string | undefined): string {
     throw serviceError("invalid_configuration");
   }
   return parsed.origin;
+}
+
+function isConsistentReactionSummary(
+  summary: ReplayPremiereServiceReactionSummary,
+): boolean {
+  const aggregateTotal = REACTION_KINDS.reduce(
+    (total, kind) => total + summary.byKind[kind],
+    0,
+  );
+  const ownTotal =
+    summary.ownByKind === null
+      ? 0
+      : REACTION_KINDS.reduce(
+          (total, kind) => total + summary.ownByKind![kind],
+          0,
+        );
+  return (
+    aggregateTotal === summary.totalReactions &&
+    summary.distinctParticipants <= summary.totalReactions &&
+    (summary.totalReactions === 0) === (summary.distinctParticipants === 0) &&
+    ownTotal <= summary.totalReactions &&
+    (summary.ownByKind === null ||
+      REACTION_KINDS.every(
+        (kind) => summary.ownByKind![kind] <= summary.byKind[kind],
+      ))
+  );
+}
+
+function reactionSummaryAtLeast(
+  next: ReplayPremiereServiceReactionSummary,
+  previous: ReplayPremiereServiceReactionSummary,
+): boolean {
+  return (
+    next.totalReactions >= previous.totalReactions &&
+    next.distinctParticipants >= previous.distinctParticipants &&
+    REACTION_KINDS.every(
+      (kind) => next.byKind[kind] >= previous.byKind[kind],
+    ) &&
+    (previous.ownByKind === null ||
+      (next.ownByKind !== null &&
+        REACTION_KINDS.every(
+          (kind) => next.ownByKind![kind] >= previous.ownByKind![kind],
+        )))
+  );
+}
+
+function publicReactionSummaryAtLeast(
+  next: ReplayPremiereServiceReactionSummary,
+  previous: ReplayPremiereServiceReactionSummary,
+): boolean {
+  return (
+    next.totalReactions >= previous.totalReactions &&
+    next.distinctParticipants >= previous.distinctParticipants &&
+    REACTION_KINDS.every((kind) => next.byKind[kind] >= previous.byKind[kind])
+  );
+}
+
+type ReactionSummaryOrder = "equal" | "newer" | "older" | "incomparable";
+
+function compareReactionSummaries(
+  candidate: ReplayPremiereServiceReactionSummary,
+  current: ReplayPremiereServiceReactionSummary,
+): ReactionSummaryOrder {
+  const candidateAtLeastCurrent = reactionSummaryAtLeast(candidate, current);
+  const currentAtLeastCandidate = reactionSummaryAtLeast(current, candidate);
+  if (candidateAtLeastCurrent && currentAtLeastCandidate) return "equal";
+  if (candidateAtLeastCurrent) return "newer";
+  if (currentAtLeastCandidate) return "older";
+  return "incomparable";
+}
+
+function comparePublicReactionSummaries(
+  candidate: ReplayPremiereServiceReactionSummary,
+  current: ReplayPremiereServiceReactionSummary,
+): ReactionSummaryOrder {
+  const candidateAtLeastCurrent = publicReactionSummaryAtLeast(
+    candidate,
+    current,
+  );
+  const currentAtLeastCandidate = publicReactionSummaryAtLeast(
+    current,
+    candidate,
+  );
+  if (candidateAtLeastCurrent && currentAtLeastCandidate) return "equal";
+  if (candidateAtLeastCurrent) return "newer";
+  if (currentAtLeastCandidate) return "older";
+  return "incomparable";
+}
+
+function reactionSummaryProvesIncrement(
+  summary: ReplayPremiereServiceReactionSummary,
+  summaryAtRequest: ReplayPremiereServiceReactionSummary | null,
+  kind: ReplayPremiereMarkerKind,
+): boolean {
+  if (summary.ownByKind === null) return false;
+  if (summaryAtRequest === null) {
+    return (
+      summary.totalReactions > 0 &&
+      summary.byKind[kind] > 0 &&
+      summary.ownByKind[kind] > 0
+    );
+  }
+  return (
+    reactionSummaryAtLeast(summary, summaryAtRequest) &&
+    summary.totalReactions > summaryAtRequest.totalReactions &&
+    summary.byKind[kind] > summaryAtRequest.byKind[kind] &&
+    (summaryAtRequest.ownByKind === null
+      ? summary.ownByKind[kind] > 0
+      : summary.ownByKind[kind] > summaryAtRequest.ownByKind[kind])
+  );
 }
 
 function isBoundedJsonValue(value: unknown): boolean {

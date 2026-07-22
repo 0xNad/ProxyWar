@@ -6,8 +6,9 @@ import { Cell } from "../../../core/game/Game";
 import { GameView, PlayerView } from "../../../core/game/GameView";
 import { UserSettings } from "../../../core/game/UserSettings";
 import { aiLeagueSpectatorDisplayName } from "../../AiLeagueReplayMode";
-import { AlternateViewEvent } from "../../InputHandler";
+import { AlternateViewEvent, ReplaySpeedChangeEvent } from "../../InputHandler";
 import { renderTroops } from "../../Utils";
+import { defaultReplaySpeedMultiplier } from "../../utilities/ReplaySpeedMultiplier";
 import {
   ALLIANCE_ICON_ID,
   AllianceProgressIconRefs,
@@ -21,6 +22,12 @@ import {
   TRAITOR_ICON_ID,
   updateAllianceProgressIconRefs,
 } from "../PlayerIcons";
+import {
+  REPLAY_NAME_POSITION_REFRESH_MS,
+  ReplayPresentationCadenceEvent,
+  replayPresentationTransitionDurationForIntervalMs,
+  replayPresentationTransitionDurationMs,
+} from "../ReplayPresentationSmoothing";
 import { TransformHandler } from "../TransformHandler";
 import { Layer } from "./Layer";
 
@@ -53,7 +60,7 @@ class RenderInfo {
 export class NameLayer implements Layer {
   private config: Config;
   private lastChecked = 0;
-  private renderCheckRate = 100;
+  private renderCheckRate = REPLAY_NAME_POSITION_REFRESH_MS;
   private renderRefreshRate = 500;
   private rand = new PseudoRandom(10);
   private renders: RenderInfo[] = [];
@@ -71,6 +78,8 @@ export class NameLayer implements Layer {
   private iconTemplate: HTMLImageElement;
   private iconCenterTemplate: HTMLImageElement;
   private emojiTemplate: HTMLDivElement;
+  private replayNameTransitionMs = 0;
+  private progressivePresentationIntervalMs: number | null = null;
 
   constructor(
     private game: GameView,
@@ -111,6 +120,18 @@ export class NameLayer implements Layer {
     this.myPlayer = this.game.myPlayer();
     this.config = this.game.config();
     this.theme = this.config.theme();
+
+    if (this.config.isReplay()) {
+      this.replayNameTransitionMs = replayPresentationTransitionDurationMs(
+        defaultReplaySpeedMultiplier,
+      );
+      this.eventBus.on(ReplaySpeedChangeEvent, (event) =>
+        this.onReplaySpeedChange(event),
+      );
+      this.eventBus.on(ReplayPresentationCadenceEvent, (event) =>
+        this.onReplayPresentationCadence(event),
+      );
+    }
 
     this.alliancesDisabled = this.config.disableAlliances();
     this.allianceDuration = Math.max(1, this.config.allianceDuration());
@@ -198,7 +219,7 @@ export class NameLayer implements Layer {
     }
 
     const now = Date.now();
-    if (now > this.lastChecked + this.renderCheckRate) {
+    if (now >= this.lastChecked + this.renderCheckRate) {
       this.lastChecked = now;
 
       this.myPlayer ??= this.game.myPlayer();
@@ -216,6 +237,7 @@ export class NameLayer implements Layer {
     element.style.flexDirection = "column";
     element.style.alignItems = "center";
     element.style.gap = "0px";
+    this.applyReplayNameTransition(element);
     // Start off invisible so it doesn't flash at 0,0
     element.style.display = "none";
 
@@ -330,6 +352,13 @@ export class NameLayer implements Layer {
     }
 
     const baseSize = Math.max(1, Math.floor(nameLocation.size));
+
+    // Position is cheap and visible, so replay mode updates it at simulation
+    // cadence. Ordinary play retains the original post-throttle DOM cadence.
+    if (this.config.isReplay()) {
+      this.updateElementTransform(render, newX, newY, baseSize);
+    }
+
     this.updateElementVisibility(render, baseSize);
 
     if (render.element.style.display === "none") {
@@ -422,16 +451,69 @@ export class NameLayer implements Layer {
       }
     }
 
-    // Position element with scale
-    // Don't require nameLocation to be changed: Scale update otherwise sometimes only happens after seconds which looks buggy.
-    // Because of sometimes overlapping delays of 20 ticks for nameLocation() (largestClusterBoundingBox in PlayerExecution)
-    // and the 500ms renderRefreshRate in here.
+    if (!this.config.isReplay()) {
+      this.updateElementTransform(render, newX, newY, baseSize);
+    }
+  }
+
+  private updateElementTransform(
+    render: RenderInfo,
+    x: number,
+    y: number,
+    baseSize: number,
+  ) {
     const scale = Math.min(baseSize * 0.25, 3);
-    const transform = `translate(${newX}px, ${newY}px) translate(-50%, -50%) scale(${scale})`;
+    const transform = `translate(${x}px, ${y}px) translate(-50%, -50%) scale(${scale})`;
     if (render.lastTransform !== transform) {
       render.element.style.transform = transform;
       render.lastTransform = transform;
     }
+  }
+
+  private onReplaySpeedChange(event: ReplaySpeedChangeEvent) {
+    // A live Premiere has a fixed committed presentation rate. Its LocalServer
+    // intentionally ignores viewer replay-speed events, so the compositor must
+    // ignore them too or labels drift behind the authoritative live cadence.
+    if (this.progressivePresentationIntervalMs !== null) {
+      return;
+    }
+    this.replayNameTransitionMs = replayPresentationTransitionDurationMs(
+      event.replaySpeedMultiplier,
+    );
+    this.applyReplayNameTransitions();
+  }
+
+  private onReplayPresentationCadence(event: ReplayPresentationCadenceEvent) {
+    if (
+      !Number.isFinite(event.presentationIntervalMs) ||
+      event.presentationIntervalMs <= 0
+    ) {
+      return;
+    }
+    this.progressivePresentationIntervalMs = event.presentationIntervalMs;
+    this.renderCheckRate = event.presentationIntervalMs;
+    this.replayNameTransitionMs =
+      replayPresentationTransitionDurationForIntervalMs(
+        event.presentationIntervalMs,
+      );
+    this.applyReplayNameTransitions();
+  }
+
+  private applyReplayNameTransitions() {
+    this.applyReplayNameTransition(this.basePlayerTemplate);
+    for (const render of this.renders) {
+      this.applyReplayNameTransition(render.element);
+    }
+  }
+
+  private applyReplayNameTransition(element: HTMLElement) {
+    if (!this.config?.isReplay()) {
+      return;
+    }
+    element.style.transition =
+      this.replayNameTransitionMs === 0
+        ? "none"
+        : `transform ${this.replayNameTransitionMs}ms linear`;
   }
 
   private handleEmojiIcon(

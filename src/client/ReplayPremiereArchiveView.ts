@@ -224,6 +224,12 @@ function buildArchivedOverlayModel(
                       prediction.totalPredictions) *
                     100
                   : null,
+              accuracyStatus:
+                prediction.correctPredictions === null
+                  ? "void"
+                  : prediction.totalPredictions === 0
+                    ? "no_predictions"
+                    : "scored",
               totalPredictions: prediction.totalPredictions,
               options: prediction.options.map((option) => ({
                 seatId: option.seatId,

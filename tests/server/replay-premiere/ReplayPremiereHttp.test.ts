@@ -368,7 +368,12 @@ describe("ReplayPremiere HTTP adapter", () => {
       const sessionUrl = `${baseUrl}/api/premieres/${PREMIERE_ID}/sessions`;
       const sessionResponse = await fetch(sessionUrl, {
         method: "POST",
-        headers: writeHeaders("session_request_00000001"),
+        headers: writeHeaders(
+          "session_request_00000001",
+          undefined,
+          undefined,
+          "2",
+        ),
         body: JSON.stringify({ visible: true, observedSequence: 5 }),
       });
       expect(harness.operatorErrors).toEqual([]);
@@ -378,11 +383,30 @@ describe("ReplayPremiere HTTP adapter", () => {
       expect(cookie).toContain("SameSite=Lax");
       const sessionBody = await sessionResponse.json();
       expect(sessionBody).toMatchObject({
-        schemaVersion: 1,
+        schemaVersion: 2,
         csrfToken: expect.any(String),
         incomingMoment: null,
         premiereState: "revealed",
+        clipsEnabled: false,
         session: { premiereId: PREMIERE_ID },
+        reactionSummary: {
+          totalReactions: 0,
+          distinctParticipants: 0,
+          byKind: {
+            turning_point: 0,
+            smart: 0,
+            mistake: 0,
+            betrayal: 0,
+            clip_this: 0,
+          },
+          ownByKind: {
+            turning_point: 0,
+            smart: 0,
+            mistake: 0,
+            betrayal: 0,
+            clip_this: 0,
+          },
+        },
       });
       expect(harness.admissions[0]).toMatchObject({
         route: "session",
@@ -406,13 +430,19 @@ describe("ReplayPremiere HTTP adapter", () => {
           "heartbeat_request_000002",
           cookie ?? undefined,
           sessionBody.csrfToken,
+          "2",
         ),
         body: JSON.stringify({ visible: true, observedSequence: 5 }),
       });
       expect(heartbeat.status).toBe(200);
       expect(await heartbeat.json()).toMatchObject({
-        schemaVersion: 1,
+        schemaVersion: 2,
         persisted: false,
+        clipsEnabled: false,
+        reactionSummary: {
+          totalReactions: 0,
+          distinctParticipants: 0,
+        },
       });
 
       for (const [index, kind] of REPLAY_PREMIERE_REACTION_KINDS.entries()) {
@@ -424,6 +454,7 @@ describe("ReplayPremiere HTTP adapter", () => {
               `reaction_request_${index.toString().padStart(16, "0")}`,
               cookie ?? undefined,
               sessionBody.csrfToken,
+              "2",
             ),
             body: JSON.stringify({
               sessionId: sessionBody.session.id,
@@ -434,8 +465,15 @@ describe("ReplayPremiere HTTP adapter", () => {
         );
         expect(reaction.status).toBe(200);
         expect(await reaction.json()).toMatchObject({
-          schemaVersion: 1,
+          schemaVersion: 2,
           reaction: { kind },
+          clipsEnabled: false,
+          reactionSummary: {
+            totalReactions: index + 1,
+            distinctParticipants: 1,
+            byKind: { [kind]: 1 },
+            ownByKind: { [kind]: 1 },
+          },
         });
       }
       const unknownReaction = await fetch(
@@ -458,7 +496,12 @@ describe("ReplayPremiere HTTP adapter", () => {
 
       const reload = await fetch(sessionUrl, {
         method: "POST",
-        headers: writeHeaders("session_request_00000002", cookie ?? undefined),
+        headers: writeHeaders(
+          "session_request_00000002",
+          cookie ?? undefined,
+          undefined,
+          "2",
+        ),
         body: JSON.stringify({ visible: true, observedSequence: 5 }),
       });
       expect(reload.status).toBe(201);
@@ -473,6 +516,89 @@ describe("ReplayPremiere HTTP adapter", () => {
         body: JSON.stringify({ visible: true, observedSequence: 5 }),
       });
       expect(wrongOrigin.status).toBe(403);
+    });
+  });
+
+  test("keeps legacy v1 interaction response shapes without exact v2 negotiation", async () => {
+    const harness = await httpHarness(root, true);
+    await harness.run(async (baseUrl) => {
+      const sessionUrl = `${baseUrl}/api/premieres/${PREMIERE_ID}/sessions`;
+      const sessionResponse = await fetch(sessionUrl, {
+        method: "POST",
+        headers: writeHeaders("legacy_session_request_001"),
+        body: JSON.stringify({ visible: true, observedSequence: 5 }),
+      });
+      expect(sessionResponse.status).toBe(201);
+      const cookie = sessionResponse.headers.get("set-cookie") ?? undefined;
+      const sessionBody = await sessionResponse.json();
+      expect(Object.keys(sessionBody).sort()).toEqual(
+        [
+          "schemaVersion",
+          "csrfToken",
+          "session",
+          "premiereState",
+          "checkpoints",
+          "incomingMoment",
+        ].sort(),
+      );
+      expect(sessionBody.schemaVersion).toBe(1);
+      expect(sessionBody).not.toHaveProperty("reactionSummary");
+      expect(sessionBody).not.toHaveProperty("clipsEnabled");
+
+      const heartbeatResponse = await fetch(
+        `${sessionUrl}/${sessionBody.session.id}/heartbeat`,
+        {
+          method: "POST",
+          headers: writeHeaders(
+            "legacy_heartbeat_request01",
+            cookie,
+            sessionBody.csrfToken,
+            "unexpected",
+          ),
+          body: JSON.stringify({ visible: true, observedSequence: 5 }),
+        },
+      );
+      expect(heartbeatResponse.status).toBe(200);
+      const heartbeatBody = await heartbeatResponse.json();
+      expect(Object.keys(heartbeatBody).sort()).toEqual(
+        [
+          "schemaVersion",
+          "session",
+          "idempotent",
+          "persisted",
+          "premiereState",
+          "checkpoints",
+        ].sort(),
+      );
+      expect(heartbeatBody.schemaVersion).toBe(1);
+      expect(heartbeatBody).not.toHaveProperty("reactionSummary");
+      expect(heartbeatBody).not.toHaveProperty("clipsEnabled");
+
+      const reactionResponse = await fetch(
+        `${baseUrl}/api/premieres/${PREMIERE_ID}/reactions`,
+        {
+          method: "POST",
+          headers: writeHeaders(
+            "legacy_reaction_request001",
+            cookie,
+            sessionBody.csrfToken,
+            "2, 3",
+          ),
+          body: JSON.stringify({
+            sessionId: sessionBody.session.id,
+            sequence: 0,
+            kind: "smart",
+          }),
+        },
+      );
+      expect(reactionResponse.status).toBe(200);
+      const reactionBody = await reactionResponse.json();
+      expect(Object.keys(reactionBody).sort()).toEqual(
+        ["schemaVersion", "reaction", "idempotent"].sort(),
+      );
+      expect(reactionBody.schemaVersion).toBe(1);
+      expect(reactionBody).not.toHaveProperty("reactionSummary");
+      expect(reactionBody).not.toHaveProperty("clipsEnabled");
     });
   });
 
@@ -1173,6 +1299,7 @@ function writeHeaders(
   idempotencyKey: string,
   cookie?: string,
   csrfToken?: string,
+  interactionVersion?: string,
 ): Record<string, string> {
   return {
     "Content-Type": "application/json",
@@ -1181,6 +1308,9 @@ function writeHeaders(
     "X-Forwarded-For": "203.0.113.99",
     ...(cookie === undefined ? {} : { Cookie: cookie }),
     ...(csrfToken === undefined ? {} : { "X-CSRF-Token": csrfToken }),
+    ...(interactionVersion === undefined
+      ? {}
+      : { "X-ProxyWar-Premiere-Interactions": interactionVersion }),
   };
 }
 

@@ -25,6 +25,7 @@ import {
   PREMIERE_LOOP_HOLD_WINDOW_MS,
   PREMIERE_LOOP_MAX_PIPELINE_ATTEMPTS,
   PREMIERE_LOOP_MAX_REACTIVATION_ATTEMPTS,
+  PREMIERE_LOOP_POST_REVEAL_COOLDOWN_MS,
   PREMIERE_LOOP_SCHEDULE_LEAD_MS,
   PREMIERE_LOOP_SEAL_WINDOW_MS,
   PREMIERE_LOOP_TURN_STARTUP_BUDGET,
@@ -350,6 +351,7 @@ describe("decideLoopClaim — ONLY-LATEST detection, supersede, busy-skip", () =
     const decision = decideLoopClaim({
       rounds,
       folded: foldLoopJournal([]),
+      now: NOW,
     });
     expect(decision.kind).toBe("claim");
     if (decision.kind !== "claim") return;
@@ -364,6 +366,7 @@ describe("decideLoopClaim — ONLY-LATEST detection, supersede, busy-skip", () =
     const decision = decideLoopClaim({
       rounds: [round({ id: "round_10", status: "running" })],
       folded: foldLoopJournal([]),
+      now: NOW,
     });
     expect(decision.kind).toBe("idle");
   });
@@ -379,6 +382,7 @@ describe("decideLoopClaim — ONLY-LATEST detection, supersede, busy-skip", () =
         round({ id: "round_10", roundNumber: 10, status: "completed" }),
       ],
       folded,
+      now: NOW,
     });
     expect(decision.kind).toBe("track");
     if (decision.kind !== "track") return;
@@ -402,8 +406,61 @@ describe("decideLoopClaim — ONLY-LATEST detection, supersede, busy-skip", () =
     const decision = decideLoopClaim({
       rounds: [round({ id: "round_9", roundNumber: 9, status: "completed" })],
       folded,
+      now: NOW,
     });
     expect(decision.kind).toBe("idle");
+  });
+
+  test("skips completed rounds while the prior reveal remains in reclamation grace", () => {
+    const revealedAt = new Date(
+      NOW.getTime() - PREMIERE_LOOP_POST_REVEAL_COOLDOWN_MS + 60_000,
+    ).toISOString();
+    const folded = foldLoopJournal([
+      {
+        kind: "hold_released",
+        ts: revealedAt,
+        episodeRequestId: "ereq_previous",
+        premiereId: derivePremiereId("ereq_previous"),
+        roundId: "round_previous",
+        outcome: "revealed",
+        terminal: true,
+      },
+    ]);
+    const decision = decideLoopClaim({
+      rounds: [round({ id: "round_10", roundNumber: 10 })],
+      folded,
+      now: NOW,
+    });
+    expect(decision).toEqual({
+      kind: "post_reveal_cooldown",
+      skippedRoundIds: [{ id: "round_10", roundNumber: 10 }],
+      nextClaimAt: new Date(
+        Date.parse(revealedAt) + PREMIERE_LOOP_POST_REVEAL_COOLDOWN_MS,
+      ).toISOString(),
+    });
+  });
+
+  test("claims again once the post-reveal reclamation window has elapsed", () => {
+    const revealedAt = new Date(
+      NOW.getTime() - PREMIERE_LOOP_POST_REVEAL_COOLDOWN_MS,
+    ).toISOString();
+    const folded = foldLoopJournal([
+      {
+        kind: "hold_released",
+        ts: revealedAt,
+        episodeRequestId: "ereq_previous",
+        premiereId: derivePremiereId("ereq_previous"),
+        roundId: "round_previous",
+        outcome: "revealed",
+        terminal: true,
+      },
+    ]);
+    const decision = decideLoopClaim({
+      rounds: [round({ id: "round_10", roundNumber: 10 })],
+      folded,
+      now: NOW,
+    });
+    expect(decision.kind).toBe("claim");
   });
 });
 
@@ -429,6 +486,42 @@ describe("foldLoopJournal — hold lifecycle, retry ceiling, terminality", () =>
     ]);
     expect(released.activeHold).toBeNull();
     expect(released.terminalRoundIds.has("round_1")).toBe(true);
+    expect(released.lastRevealedAt).toBe(NOW.toISOString());
+  });
+
+  test("tracks the newest valid revealed release timestamp only", () => {
+    const older = "2026-07-22T10:00:00.000Z";
+    const newer = "2026-07-22T11:00:00.000Z";
+    const folded = foldLoopJournal([
+      {
+        kind: "hold_released",
+        ts: newer,
+        episodeRequestId: "ereq_newer",
+        premiereId: derivePremiereId("ereq_newer"),
+        roundId: "round_newer",
+        outcome: "revealed",
+        terminal: true,
+      },
+      {
+        kind: "hold_released",
+        ts: older,
+        episodeRequestId: "ereq_older",
+        premiereId: derivePremiereId("ereq_older"),
+        roundId: "round_older",
+        outcome: "revealed",
+        terminal: true,
+      },
+      {
+        kind: "hold_released",
+        ts: "not-a-time",
+        episodeRequestId: "ereq_invalid",
+        premiereId: derivePremiereId("ereq_invalid"),
+        roundId: "round_invalid",
+        outcome: "revealed",
+        terminal: true,
+      },
+    ]);
+    expect(folded.lastRevealedAt).toBe(newer);
   });
 
   test("retriable releases count attempts and go terminal at the ceiling", () => {
@@ -1084,6 +1177,7 @@ describe("isCompletedTooOldToSeal — cold-start / already-public pre-admission 
         }),
       ],
       folded: foldLoopJournal([]),
+      now: NOW,
     });
     expect(decision.kind).toBe("claim");
     if (decision.kind !== "claim") return;

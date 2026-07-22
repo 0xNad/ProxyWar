@@ -7,7 +7,7 @@ import {
 import type { PremierePlaybackRate } from "./ReplayPremiereContracts";
 
 /**
- * Pure decision core for the premiere-by-default watcher loop (Phase 2).
+ * Pure decision core for the bounded Replay Premiere watcher loop (Phase 2).
  *
  * Everything here is deterministic and side-effect free so the loop's real
  * decisions — round detection/diff, episode ordering, supersede/skip rules,
@@ -20,10 +20,10 @@ import type { PremierePlaybackRate } from "./ReplayPremiereContracts";
  * The single hard invariant this module encodes is ONLY-LATEST: at most one
  * episode is ever held at a time, and only the freshest completed unpremiered
  * round is ever claimed. Everything else publishes once its blanket
- * quarantine window expires (see {@link buildLoopSuppressionContract} — since
- * the 2026-07-22 "every round is premiere" operator directive the loop keeps
- * a STANDING contract active even with zero holds, so freshly-completed
- * episodes always wait out `quarantineMs` before the mirror publishes them).
+ * quarantine window expires (see {@link buildLoopSuppressionContract}). The
+ * standing contract lets the loop win the publish race; the post-reveal
+ * cooldown deliberately skips intervening rounds so a completed premiere
+ * remains resident through terminal reclamation.
  */
 
 /** Public league the loop watches (read-only). */
@@ -48,10 +48,23 @@ export const PREMIERE_LOOP_SCHEDULE_LEAD_MS = 5 * 60_000;
  * History: 35 min while premieres free-ran at ~1 ms/turn nominal offsets and
  * the whole show fit inside one 30-minute round. At real speed a premiere
  * intentionally spans multiple rounds: while one plays, newly-completed rounds
- * publish ordinarily at quarantine expiry (skipped_busy) and the loop claims
- * the next fresh round after release.
+ * publish ordinarily at quarantine expiry (skipped_busy). After release, the
+ * post-reveal cooldown lets the prior audience window and reclamation grace
+ * complete before a later fresh round can be claimed.
  */
 export const PREMIERE_LOOP_HOLD_WINDOW_MS = 75 * 60_000;
+
+/**
+ * Keep a revealed premiere resident through the terminal-reclamation grace
+ * before another controlled restart can replace it. The reclaimer's default
+ * grace is 30 minutes; five additional minutes cover the minute loop cadence
+ * and the next reclamation sweep without coupling the pure loop core to the
+ * storage implementation.
+ *
+ * This also gives each premiere one bounded audience window instead of
+ * immediately displacing it with the next completed Coworld round.
+ */
+export const PREMIERE_LOOP_POST_REVEAL_COOLDOWN_MS = 35 * 60_000;
 
 /**
  * Coarse cold-start / gap-recovery seal window. A completed round older than
@@ -441,6 +454,7 @@ export interface LoopRoundRef {
 
 export type LoopSkipReason =
   | "skipped_busy"
+  | "skipped_post_reveal_cooldown"
   | "skipped_superseded"
   | "projection_over_budget"
   | "no_eligible_episode"
@@ -493,6 +507,8 @@ export interface LoopFoldedState {
   terminalRoundIds: ReadonlySet<string>;
   /** Retriable pipeline attempts consumed per round. */
   attemptsByRound: ReadonlyMap<string, number>;
+  /** Most recent successful reveal release observed in the durable journal. */
+  lastRevealedAt: string | null;
 }
 
 /**
@@ -555,6 +571,7 @@ export function foldLoopJournal(
   let activeHold: LoopHoldState | null = null;
   const terminalRoundIds = new Set<string>();
   const attemptsByRound = new Map<string, number>();
+  let lastRevealedAt: string | null = null;
 
   for (const record of records) {
     if (record.kind === "hold_update") {
@@ -566,6 +583,14 @@ export function foldLoopJournal(
       continue;
     }
     // hold_released
+    if (
+      record.outcome === "revealed" &&
+      Number.isFinite(Date.parse(record.ts)) &&
+      (lastRevealedAt === null ||
+        Date.parse(record.ts) > Date.parse(lastRevealedAt))
+    ) {
+      lastRevealedAt = record.ts;
+    }
     if (
       activeHold !== null &&
       activeHold.episodeRequestId === record.episodeRequestId
@@ -586,7 +611,12 @@ export function foldLoopJournal(
     }
   }
 
-  return { activeHold, terminalRoundIds, attemptsByRound };
+  return {
+    activeHold,
+    terminalRoundIds,
+    attemptsByRound,
+    lastRevealedAt,
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -606,6 +636,12 @@ export type LoopClaimDecision =
       /** Older completed rounds to journal `skipped_superseded`. */
       supersededRoundIds: LoopRoundRef[];
     }
+  | {
+      kind: "post_reveal_cooldown";
+      /** Completed rounds that publish normally instead of becoming premieres. */
+      skippedRoundIds: LoopRoundRef[];
+      nextClaimAt: string;
+    }
   | { kind: "idle" };
 
 function toRoundRef(round: LoopRound): LoopRoundRef {
@@ -621,6 +657,8 @@ function toRoundRef(round: LoopRound): LoopRoundRef {
 export function decideLoopClaim(input: {
   rounds: readonly LoopRound[];
   folded: LoopFoldedState;
+  now: Date;
+  postRevealCooldownMs?: number;
 }): LoopClaimDecision {
   const completedUnpremiered = input.rounds
     .filter(
@@ -636,6 +674,29 @@ export function decideLoopClaim(input: {
       kind: "track",
       hold: input.folded.activeHold,
       busySkipRoundIds: completedUnpremiered.map(toRoundRef),
+    };
+  }
+
+  const now = input.now;
+  const postRevealCooldownMs =
+    input.postRevealCooldownMs ?? PREMIERE_LOOP_POST_REVEAL_COOLDOWN_MS;
+  const lastRevealedAtMs =
+    input.folded.lastRevealedAt === null
+      ? Number.NaN
+      : Date.parse(input.folded.lastRevealedAt);
+  if (
+    completedUnpremiered.length > 0 &&
+    Number.isFinite(lastRevealedAtMs) &&
+    Number.isSafeInteger(postRevealCooldownMs) &&
+    postRevealCooldownMs >= 0 &&
+    now.getTime() < lastRevealedAtMs + postRevealCooldownMs
+  ) {
+    return {
+      kind: "post_reveal_cooldown",
+      skippedRoundIds: completedUnpremiered.map(toRoundRef),
+      nextClaimAt: new Date(
+        lastRevealedAtMs + postRevealCooldownMs,
+      ).toISOString(),
     };
   }
 
@@ -676,17 +737,19 @@ function toSuppressionHold(hold: LoopHoldState): PremiereSuppressionHold {
  * Build the suppression contract for the current holds. ZERO HOLDS IS VALID:
  * the resulting contract carries only the blanket `quarantineMs`, which defers
  * every freshly-completed episode until the loop has had its chance to claim
- * it — the STANDING QUARANTINE that makes the loop win the publish race
- * against the mirror for every round.
+ * it — the standing quarantine that makes the loop win the publish race
+ * before it either claims or explicitly skips a completed round.
  *
  * HISTORY — suppression reviewer requirement #4 REVERSED (2026-07-22): the
  * original review required "never write a zero-hold active contract" so an
  * idle loop could not blanket-quarantine fresh cards, and this function
- * returned null for zero holds. On 2026-07-22 the operator directed EVERY NEW
- * ROUND IS PREMIERE and explicitly accepted the resulting ~12-minute
- * battle-card lag, so the zero-hold standing contract is now the intended
- * behavior. Fail-open is unchanged: if the loop dies, the contract goes stale
- * within PREMIERE_SUPPRESSION_STALE_MS (15 min) and everything publishes.
+ * returned null for zero holds. A later release introduced the zero-hold
+ * contract so the loop wins the mirror race. The 2026-07-22 UX audit retained
+ * that race protection but added a post-reveal cooldown: intervening rounds
+ * are skipped and publish at quarantine expiry instead of becoming
+ * back-to-back premieres. Fail-open is unchanged: if the loop dies, the
+ * contract goes stale within PREMIERE_SUPPRESSION_STALE_MS (15 min) and
+ * everything publishes.
  *
  * The `generatedAt` is always the caller's `now` — never a future/skewed
  * value — and the loop rewrites it every tick, satisfying requirement #1.

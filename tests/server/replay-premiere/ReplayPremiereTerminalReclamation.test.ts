@@ -7,6 +7,10 @@ import { encodePremiereAuthoritativeResult } from "../../../src/server/replay-pr
 import type { ReplayPremiereHttpTarget } from "../../../src/server/replay-premiere/ReplayPremiereHttp";
 import { sha256Hex } from "../../../src/server/replay-premiere/ReplayPremiereIntegrity";
 import { replayPremiereInteractionAggregateId } from "../../../src/server/replay-premiere/ReplayPremiereInteractionRecovery";
+import {
+  ReplayPremiereInteractions,
+  type ReplayPremiereInteractionsSnapshot,
+} from "../../../src/server/replay-premiere/ReplayPremiereInteractions";
 import { reclaimUnreferencedPremiereSources } from "../../../src/server/replay-premiere/ReplayPremiereJournalCompaction";
 import {
   loadReplayPremiereReclamationExclusions,
@@ -34,6 +38,31 @@ afterEach(async () => {
   await fs.rm(root, { recursive: true, force: true });
 });
 
+function emptyInteractionSnapshot(
+  premiereId: string,
+): ReplayPremiereInteractionsSnapshot {
+  const checkpoint = (id: string, sequence: number) => ({
+    id,
+    sequence,
+    opensAt: "2026-07-20T17:58:00.000Z",
+    closesAt: "2026-07-20T17:59:00.000Z",
+    outageShiftMs: 0,
+    optionSeatIds: ["SEAT0001", "SEAT0002"],
+    state: "closed" as const,
+    resolution: null,
+  });
+  return {
+    schemaVersion: 1,
+    premiereId,
+    checkpoints: [checkpoint("cp_00000001", 2), checkpoint("cp_00000002", 4)],
+    predictions: [],
+    reactions: [],
+    shares: [],
+    sessions: [],
+    lastNonDirectAttributionByParticipant: [],
+  };
+}
+
 function target(premiereId = PREMIERE_ID): ReplayPremiereHttpTarget {
   return {
     runtime: {
@@ -60,9 +89,50 @@ function target(premiereId = PREMIERE_ID): ReplayPremiereHttpTarget {
     },
     interactions: {
       readCheckpoints: () => [],
-      readState: () => ({ reactions: [] }),
+      readState: () => emptyInteractionSnapshot(premiereId),
+      fenceWritesAndDrain: async () => undefined,
     },
   } as unknown as ReplayPremiereHttpTarget;
+}
+
+function terminalInteractions(
+  beforePersist?: (eventType: string) => Promise<void>,
+): ReplayPremiereInteractions {
+  let randomByte = 1;
+  return new ReplayPremiereInteractions({
+    premiereId: PREMIERE_ID,
+    checkpointDescriptors: [
+      { id: "cp_00000001", sequence: 2 },
+      { id: "cp_00000002", sequence: 4 },
+    ],
+    seats: seatFixtures().map(({ seatId, policyIdentity }) => ({
+      seatId,
+      policyIdentity,
+    })),
+    getPremiereState: () => "revealed",
+    getReleasedContext: (sequence) =>
+      sequence <= 6
+        ? {
+            releasedThroughSequence: 6,
+            turn: sequence,
+            eventContext: { headline: `released-${sequence}` },
+          }
+        : null,
+    persistence: {
+      async persist({ eventType }) {
+        await beforePersist?.(eventType);
+      },
+    },
+    signAttribution: ({ shareId }) => `signed-${shareId}`,
+    canonicalPremiereUrl: `https://beta.proxywar.xyz/premiere/${PREMIERE_ID}`,
+    now: () => new Date("2026-07-20T18:44:00.000Z"),
+    randomBytes: (size) => {
+      const bytes = new Uint8Array(size).fill(randomByte);
+      randomByte += 1;
+      return bytes;
+    },
+    admitAnonymousWrite: () => undefined,
+  });
 }
 
 const admissionPath = (premiereId: string): string =>
@@ -112,7 +182,12 @@ async function exists(filePath: string): Promise<boolean> {
   }
 }
 
-async function reclaimerWith(nowIso: string): Promise<{
+async function reclaimerWith(
+  nowIso: string,
+  options: {
+    fenceClipWritesAndDrain?: (premiereId: string) => Promise<void>;
+  } = {},
+): Promise<{
   reclaimer: ReplayPremiereTerminalReclaimer;
   store: ReplayPremiereArchiveStore;
 }> {
@@ -126,6 +201,7 @@ async function reclaimerWith(nowIso: string): Promise<{
       store,
       graceMs: GRACE_MS,
       now: () => new Date(nowIso),
+      fenceClipWritesAndDrain: options.fenceClipWritesAndDrain,
     }),
   };
 }
@@ -201,6 +277,101 @@ describe("ReplayPremiereTerminalReclaimer", () => {
     expect(await exists(interactionSnapshotPath(PREMIERE_ID))).toBe(false);
   });
 
+  it("fences live writes, drains an admitted reaction into the summary, and rejects later writes", async () => {
+    await writeBulk();
+    let releaseClipDrain!: () => void;
+    const clipDrainGate = new Promise<void>((resolve) => {
+      releaseClipDrain = resolve;
+    });
+    let clipFenceCalled = false;
+    const { reclaimer, store } = await reclaimerWith(
+      "2026-07-20T18:45:00.000Z",
+      {
+        fenceClipWritesAndDrain: (premiereId) => {
+          expect(premiereId).toBe(PREMIERE_ID);
+          clipFenceCalled = true;
+          return clipDrainGate;
+        },
+      },
+    );
+    let releaseReactionPersist!: () => void;
+    const reactionPersistGate = new Promise<void>((resolve) => {
+      releaseReactionPersist = resolve;
+    });
+    let markReactionPersistStarted!: () => void;
+    const reactionPersistStarted = new Promise<void>((resolve) => {
+      markReactionPersistStarted = resolve;
+    });
+    const interactions = terminalInteractions(async (eventType) => {
+      if (eventType === "reaction_submitted") {
+        markReactionPersistStarted();
+        await reactionPersistGate;
+      }
+    });
+    const participantId = `guest_${"a".repeat(32)}`;
+    const requesterBucketId = `ip_${"1".repeat(64)}`;
+    const session = await interactions.createViewerSession({
+      participantId,
+      idempotencyKey: "session_before_fence_0001",
+      requesterBucketId,
+      visible: true,
+      observedSequence: 5,
+      excludedAsOperator: false,
+      excludedAsBot: false,
+    });
+    const admittedReaction = interactions.submitReaction({
+      participantId,
+      sessionId: session.id,
+      idempotencyKey: "reaction_before_fence001",
+      requesterBucketId,
+      sequence: 5,
+      kind: "smart",
+    });
+    await reactionPersistStarted;
+
+    const liveTarget = {
+      ...target(),
+      interactions,
+    } as ReplayPremiereHttpTarget;
+    const reclamation = reclaimer.reclaimIfEligible(liveTarget);
+    // Both admission fences are entered synchronously before either drain is
+    // awaited; a slow interaction persistence never leaves clip admission open.
+    expect(clipFenceCalled).toBe(true);
+
+    // The reclaimer has fenced synchronously, but cannot take its summary
+    // snapshot or write the pointer until the already-admitted persistence
+    // finishes.
+    await expect(
+      interactions.submitReaction({
+        participantId,
+        sessionId: session.id,
+        idempotencyKey: "reaction_after_fence0001",
+        requesterBucketId,
+        sequence: 6,
+        kind: "mistake",
+      }),
+    ).rejects.toMatchObject({
+      httpStatus: 410,
+      operatorCode: "interaction_writes_fenced",
+    });
+    expect(store.lookup(PREMIERE_ID)).toBeNull();
+    expect(await exists(admissionPath(PREMIERE_ID))).toBe(true);
+
+    releaseReactionPersist();
+    await admittedReaction;
+    await Promise.resolve();
+    expect(store.lookup(PREMIERE_ID)).toBeNull();
+    expect(await exists(admissionPath(PREMIERE_ID))).toBe(true);
+    releaseClipDrain();
+    const result = await reclamation;
+    expect(result.reason).toBe("reclaimed");
+    expect((await store.loadSummary(PREMIERE_ID))?.markers).toEqual([
+      { kind: "smart", turn: 5, count: 1 },
+    ]);
+    expect(await exists(admissionPath(PREMIERE_ID))).toBe(false);
+    expect(await exists(interactionSnapshotPath(PREMIERE_ID))).toBe(false);
+  });
+
   it("defers shared-source deletion to the startup GC (unreferenced only)", async () => {
     await writeBulk();
     const { reclaimer, store } = await reclaimerWith(
@@ -260,6 +431,142 @@ describe("ReplayPremiereTerminalReclaimer", () => {
     // Deletion completed on the retry; the summary is preserved throughout.
     expect(await exists(admissionPath(PREMIERE_ID))).toBe(false);
     expect(await reopened.loadSummary(PREMIERE_ID)).toEqual(summary);
+  });
+
+  it("fences and drains an existing-pointer live retry before deleting bulk", async () => {
+    await writeBulk();
+    let blockSessionPersist = false;
+    let releaseSessionPersist!: () => void;
+    const sessionPersistGate = new Promise<void>((resolve) => {
+      releaseSessionPersist = resolve;
+    });
+    let markSessionPersistStarted!: () => void;
+    const sessionPersistStarted = new Promise<void>((resolve) => {
+      markSessionPersistStarted = resolve;
+    });
+    const interactions = terminalInteractions(async (eventType) => {
+      if (blockSessionPersist && eventType === "viewer_session_started") {
+        markSessionPersistStarted();
+        await sessionPersistGate;
+      }
+    });
+    const liveTarget = {
+      ...target(),
+      interactions,
+    } as ReplayPremiereHttpTarget;
+    const { reclaimer, store } = await reclaimerWith(
+      "2026-07-20T18:45:00.000Z",
+    );
+    const summary = (
+      await import("../../../src/server/replay-premiere/ReplayPremiereResultSummary")
+    ).buildPremiereResultSummaryFromTarget({
+      target: liveTarget,
+      terminalState: "revealed",
+      reclaimedAt: "2026-07-20T18:45:00.000Z",
+    });
+    await store.recordReclaimed(summary, SOURCE_SHA);
+
+    blockSessionPersist = true;
+    const admittedSession = interactions.createViewerSession({
+      participantId: `guest_${"a".repeat(32)}`,
+      idempotencyKey: "existing_pointer_session01",
+      requesterBucketId: `ip_${"1".repeat(64)}`,
+      visible: true,
+      observedSequence: 5,
+      excludedAsOperator: false,
+      excludedAsBot: false,
+    });
+    await sessionPersistStarted;
+    const retry = reclaimer.reclaimIfEligible(liveTarget);
+
+    await expect(
+      interactions.createViewerSession({
+        participantId: `guest_${"b".repeat(32)}`,
+        idempotencyKey: "existing_pointer_session02",
+        requesterBucketId: `ip_${"2".repeat(64)}`,
+        visible: true,
+        observedSequence: 5,
+        excludedAsOperator: false,
+        excludedAsBot: false,
+      }),
+    ).rejects.toMatchObject({
+      httpStatus: 410,
+      operatorCode: "interaction_writes_fenced",
+    });
+    expect(await exists(admissionPath(PREMIERE_ID))).toBe(true);
+
+    releaseSessionPersist();
+    await admittedSession;
+    const result = await retry;
+    expect(result.reason).toBe("already_reclaimed");
+    expect(await exists(admissionPath(PREMIERE_ID))).toBe(false);
+    expect(await store.loadSummary(PREMIERE_ID)).toEqual(summary);
+  });
+
+  it("refuses existing-pointer bulk deletion when recovered reactions diverge from the immutable summary", async () => {
+    await writeBulk();
+    const interactions = terminalInteractions();
+    const liveTarget = {
+      ...target(),
+      interactions,
+    } as ReplayPremiereHttpTarget;
+    const participantId = `guest_${"a".repeat(32)}`;
+    const requesterBucketId = `ip_${"1".repeat(64)}`;
+    const session = await interactions.createViewerSession({
+      participantId,
+      idempotencyKey: "divergence_session_0001",
+      requesterBucketId,
+      visible: true,
+      observedSequence: 5,
+      excludedAsOperator: false,
+      excludedAsBot: false,
+    });
+    const { reclaimer, store } = await reclaimerWith(
+      "2026-07-20T18:45:00.000Z",
+    );
+    const archivedSummary = (
+      await import("../../../src/server/replay-premiere/ReplayPremiereResultSummary")
+    ).buildPremiereResultSummaryFromTarget({
+      target: liveTarget,
+      terminalState: "revealed",
+      reclaimedAt: "2026-07-20T18:45:00.000Z",
+    });
+    const archivedPointer = await store.recordReclaimed(
+      archivedSummary,
+      SOURCE_SHA,
+    );
+    await interactions.submitReaction({
+      participantId,
+      sessionId: session.id,
+      idempotencyKey: "divergence_reaction_0001",
+      requesterBucketId,
+      sequence: 5,
+      kind: "smart",
+    });
+
+    await expect(reclaimer.reclaimIfEligible(liveTarget)).rejects.toMatchObject(
+      {
+        operatorCode: "reclamation_archived_summary_state_diverged",
+      },
+    );
+    expect(store.lookup(PREMIERE_ID)).toEqual(archivedPointer);
+    expect((await store.loadSummary(PREMIERE_ID))?.markers).toEqual([]);
+    expect(await exists(admissionPath(PREMIERE_ID))).toBe(true);
+    expect(await exists(interactionSnapshotPath(PREMIERE_ID))).toBe(true);
+    await expect(
+      interactions.createViewerSession({
+        participantId: `guest_${"b".repeat(32)}`,
+        idempotencyKey: "divergence_session_0002",
+        requesterBucketId: `ip_${"2".repeat(64)}`,
+        visible: true,
+        observedSequence: 6,
+        excludedAsOperator: false,
+        excludedAsBot: false,
+      }),
+    ).rejects.toMatchObject({
+      httpStatus: 410,
+      operatorCode: "interaction_writes_fenced",
+    });
   });
 });
 
@@ -355,7 +662,8 @@ describe("durable archived-clip promotion", () => {
       },
       interactions: {
         readCheckpoints: () => [],
-        readState: () => ({ reactions: [] }),
+        readState: () => emptyInteractionSnapshot(failedId),
+        fenceWritesAndDrain: async () => undefined,
       },
     } as unknown as ReplayPremiereHttpTarget;
     const { reclaimer, store } = await reclaimerWith(

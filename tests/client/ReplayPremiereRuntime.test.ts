@@ -35,8 +35,10 @@ import {
   type ReplayPremiereServiceCheckpoint,
   type ReplayPremiereServiceHeartbeatResponse,
   type ReplayPremiereServiceReactionResponse,
+  type ReplayPremiereServiceReactionSummary,
   type ReplayPremiereServiceSession,
   type ReplayPremiereServiceSessionResponse,
+  type ReplayPremiereServiceShareResponse,
 } from "../../src/client/ReplayPremiereRuntime";
 import type { GameStartInfo } from "../../src/core/Schemas";
 import {
@@ -52,6 +54,7 @@ const OTHER_PREMIERE_ID = "prem_fedcba9876543210";
 const SESSION_ID = `sess_${"1".repeat(32)}`;
 const OTHER_SESSION_ID = `sess_${"2".repeat(32)}`;
 const PARTICIPANT_ID = `guest_${"3".repeat(32)}`;
+const OTHER_PARTICIPANT_ID = `guest_${"4".repeat(32)}`;
 const HASH_A = "a".repeat(64);
 const HASH_B = "b".repeat(64);
 const HASH_C = "c".repeat(64);
@@ -404,11 +407,11 @@ describe("ReplayPremiereRuntimeController", () => {
     const submitReaction = vi.fn(async (input?: { sequence: number }) => {
       const next = responses.shift()!;
       return {
-        schemaVersion: 1,
+        schemaVersion: 2,
         reaction: {
-          id: `react_${"c".repeat(24)}`,
+          id: `react_${"c".repeat(32)}`,
           premiereId: PREMIERE_ID,
-          participantId: `part_${"d".repeat(24)}`,
+          participantId: PARTICIPANT_ID,
           sequence: input?.sequence ?? 0,
           turn: next.turn,
           kind: "betrayal",
@@ -417,6 +420,8 @@ describe("ReplayPremiereRuntimeController", () => {
           createdAt: STARTED_AT,
         },
         idempotent: next.idempotent,
+        reactionSummary: reactionSummaryWith("betrayal", 1),
+        clipsEnabled: true,
       } as unknown as ReplayPremiereServiceReactionResponse;
     });
     const harness = runtimeHarness({
@@ -434,13 +439,410 @@ describe("ReplayPremiereRuntimeController", () => {
     await harness.overlayCallbacks.onMarker?.(marker);
     expect(harness.models.at(-1)).toMatchObject({
       markerCounts: { betrayal: 1 },
+      ownMarkerCounts: { betrayal: 1 },
+      markerParticipantCount: 1,
       markerConfirmation: { kind: "betrayal", turn: 11 },
     });
     // An idempotent replay confirms but never double-counts.
     await harness.overlayCallbacks.onMarker?.(marker);
     expect(harness.models.at(-1)).toMatchObject({
       markerCounts: { betrayal: 1 },
+      ownMarkerCounts: { betrayal: 1 },
       markerConfirmation: { kind: "betrayal", turn: 11 },
+    });
+    harness.runtime.dispose();
+  });
+
+  it("keeps a newer heartbeat tally when an older in-flight reaction returns", async () => {
+    vi.useFakeTimers();
+    const pendingReaction = deferred<ReplayPremiereServiceReactionResponse>();
+    const heartbeat = heartbeatResponse("playing");
+    heartbeat.reactionSummary = reactionSummaryWith("smart", 2);
+    const harness = runtimeHarness({
+      state: "playing",
+      service: {
+        submitReaction: () => pendingReaction.promise,
+        heartbeat: async () => heartbeat,
+      },
+    });
+    await bootstrapPlayingWithFrame(harness);
+
+    const markerWrite = harness.overlayCallbacks.onMarker?.({
+      premiereId: PREMIERE_ID,
+      kind: "smart",
+      sequence: 0,
+      turn: 0,
+      policySeatId: null,
+    });
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(harness.models.at(-1)).toMatchObject({
+      state: "playing",
+      markerCounts: { smart: 2 },
+      ownMarkerCounts: { smart: 2 },
+      failureCode: null,
+    });
+
+    pendingReaction.resolve(reactionResponse());
+    await markerWrite;
+    expect(harness.models.at(-1)).toMatchObject({
+      state: "playing",
+      markerCounts: { smart: 2 },
+      ownMarkerCounts: { smart: 2 },
+      markerConfirmation: { kind: "smart", turn: 0 },
+      failureCode: null,
+    });
+    harness.runtime.dispose();
+  });
+
+  it("keeps private own counts on v1 fallback and upgrades cleanly to v2 crowd state", async () => {
+    vi.useFakeTimers();
+    const upgradedHeartbeat = heartbeatResponse("playing");
+    upgradedHeartbeat.reactionSummary = reactionSummaryWith("smart", 1);
+    upgradedHeartbeat.clipsEnabled = true;
+    const harness = runtimeHarness({
+      state: "playing",
+      service: {
+        startSession: async () => legacySessionResponse("playing"),
+        submitReaction: async () => legacyReactionResponse(),
+        heartbeat: async () => upgradedHeartbeat,
+      },
+    });
+    await bootstrapPlayingWithFrame(harness);
+    await harness.overlayCallbacks.onMarker?.({
+      premiereId: PREMIERE_ID,
+      kind: "smart",
+      sequence: 0,
+      turn: 0,
+      policySeatId: null,
+    });
+    expect(harness.models.at(-1)).toMatchObject({
+      markerCounts: { smart: 1 },
+      ownMarkerCounts: { smart: 1 },
+      clipMarkerAvailable: false,
+      failureCode: null,
+    });
+    expect(harness.models.at(-1)?.markerParticipantCount).toBeUndefined();
+
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(harness.models.at(-1)).toMatchObject({
+      markerCounts: { smart: 1 },
+      ownMarkerCounts: { smart: 1 },
+      markerParticipantCount: 1,
+      clipMarkerAvailable: true,
+      failureCode: null,
+    });
+    harness.runtime.dispose();
+  });
+
+  it("marks cached crowd totals stale and hides clips across a v2 to v1 downgrade", async () => {
+    vi.useFakeTimers();
+    const initial = sessionResponse("playing");
+    initial.reactionSummary = reactionSummaryWith("smart", 1);
+    initial.clipsEnabled = true;
+    const upgraded = heartbeatResponse("playing");
+    upgraded.reactionSummary = reactionSummaryWith("smart", 2);
+    upgraded.clipsEnabled = false;
+    let heartbeatCount = 0;
+    const harness = runtimeHarness({
+      state: "playing",
+      service: {
+        startSession: async () => initial,
+        heartbeat: async () =>
+          heartbeatCount++ === 0
+            ? legacyHeartbeatResponse("playing")
+            : upgraded,
+        submitReaction: async () => legacyReactionResponse(),
+      },
+    });
+    await bootstrapPlayingWithFrame(harness);
+    expect(harness.models.at(-1)).toMatchObject({
+      markerCounts: { smart: 1 },
+      markerAggregateFresh: true,
+      clipMarkerAvailable: true,
+    });
+
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(harness.models.at(-1)).toMatchObject({
+      markerCounts: { smart: 1 },
+      ownMarkerCounts: { smart: 1 },
+      markerAggregateFresh: false,
+      clipMarkerAvailable: false,
+      failureCode: null,
+    });
+
+    await harness.overlayCallbacks.onMarker?.({
+      premiereId: PREMIERE_ID,
+      kind: "smart",
+      sequence: 0,
+      turn: 0,
+      policySeatId: null,
+    });
+    expect(harness.models.at(-1)).toMatchObject({
+      markerCounts: { smart: 1 },
+      ownMarkerCounts: { smart: 2 },
+      markerAggregateFresh: false,
+      markerConfirmation: { kind: "smart", turn: 0 },
+      clipMarkerAvailable: false,
+    });
+
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(harness.models.at(-1)).toMatchObject({
+      markerCounts: { smart: 2 },
+      ownMarkerCounts: { smart: 2 },
+      markerAggregateFresh: true,
+      clipMarkerAvailable: false,
+      failureCode: null,
+    });
+    harness.runtime.dispose();
+  });
+
+  it("clears private mark state when session recovery rotates the guest identity", async () => {
+    vi.useFakeTimers();
+    const initial = sessionResponse("playing");
+    initial.reactionSummary = reactionSummaryWith("smart", 1);
+    const recovered = sessionResponse("playing");
+    recovered.session = viewerSession({
+      id: OTHER_SESSION_ID,
+      participantId: OTHER_PARTICIPANT_ID,
+    });
+    recovered.reactionSummary = reactionSummaryWith("smart", 2);
+    recovered.reactionSummary.ownByKind = { ...emptyReactionSummary().byKind };
+    const accepted = reactionResponse();
+    accepted.reactionSummary = reactionSummaryWith("smart", 2);
+    let bootstrapCount = 0;
+    const harness = runtimeHarness({
+      state: "playing",
+      service: {
+        startSession: async () =>
+          bootstrapCount++ === 0 ? initial : recovered,
+        heartbeat: async () => {
+          throw new ReplayPremiereServiceError("request_rejected", 401);
+        },
+        submitReaction: async () => accepted,
+      },
+    });
+    await bootstrapPlayingWithFrame(harness);
+    await harness.overlayCallbacks.onMarker?.({
+      premiereId: PREMIERE_ID,
+      kind: "smart",
+      sequence: 0,
+      turn: 0,
+      policySeatId: null,
+    });
+    expect(harness.models.at(-1)).toMatchObject({
+      ownMarkerCounts: { smart: 2 },
+      markerConfirmation: { kind: "smart", turn: 0 },
+      share: { sourceReactionId: accepted.reaction.id },
+    });
+
+    await vi.advanceTimersByTimeAsync(10_000);
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(harness.service.startSession).toHaveBeenCalledTimes(2);
+    expect(harness.models.at(-1)).toMatchObject({
+      markerCounts: { smart: 2 },
+      ownMarkerCounts: { smart: 0 },
+      markerConfirmation: null,
+      share: { sourceReactionId: null, sourceReactionTurn: null },
+      failureCode: null,
+    });
+    harness.runtime.dispose();
+  });
+
+  it("does not restore an old guest's private mark when its response loses a recovery race", async () => {
+    vi.useFakeTimers();
+    const pendingReaction = deferred<ReplayPremiereServiceReactionResponse>();
+    const recovered = sessionResponse("playing");
+    recovered.session = viewerSession({
+      id: OTHER_SESSION_ID,
+      participantId: OTHER_PARTICIPANT_ID,
+    });
+    recovered.reactionSummary = reactionSummaryWith("smart", 1);
+    recovered.reactionSummary.ownByKind = { ...emptyReactionSummary().byKind };
+    let bootstrapCount = 0;
+    const harness = runtimeHarness({
+      state: "playing",
+      service: {
+        startSession: async () =>
+          bootstrapCount++ === 0 ? sessionResponse("playing") : recovered,
+        heartbeat: async () => {
+          throw new ReplayPremiereServiceError("request_rejected", 401);
+        },
+        submitReaction: () => pendingReaction.promise,
+      },
+    });
+    await bootstrapPlayingWithFrame(harness);
+    const markerWrite = harness.overlayCallbacks.onMarker?.({
+      premiereId: PREMIERE_ID,
+      kind: "smart",
+      sequence: 0,
+      turn: 0,
+      policySeatId: null,
+    });
+
+    await vi.advanceTimersByTimeAsync(10_000);
+    await Promise.resolve();
+    expect(harness.service.startSession).toHaveBeenCalledTimes(2);
+    expect(harness.models.at(-1)).toMatchObject({
+      markerCounts: { smart: 1 },
+      ownMarkerCounts: { smart: 0 },
+      share: { sourceReactionId: null },
+    });
+
+    pendingReaction.resolve(reactionResponse());
+    await markerWrite;
+    expect(harness.models.at(-1)).toMatchObject({
+      markerCounts: { smart: 1 },
+      ownMarkerCounts: { smart: 0 },
+      markerConfirmation: null,
+      share: { sourceReactionId: null },
+      failureCode: null,
+    });
+    harness.runtime.dispose();
+  });
+
+  it("turns an accepted mark into an explicitly anchored share moment", async () => {
+    const reactionId = `react_${"7".repeat(32)}`;
+    const shareId = `share_${"8".repeat(32)}`;
+    const attributionToken = `${"a".repeat(16)}.${"b".repeat(16)}`;
+    const url = `${window.location.origin}/premiere/${PREMIERE_ID}?moment=${shareId}&attribution=${attributionToken}`;
+    const createShare = vi.fn(
+      async (input: { sequence: number; sourceReactionId?: string | null }) =>
+        ({
+          schemaVersion: 1,
+          share: {
+            id: shareId,
+            premiereId: PREMIERE_ID,
+            sourceReactionId: input.sourceReactionId ?? null,
+            sequence: input.sequence,
+            turn: 0,
+            createdByParticipantId: PARTICIPANT_ID,
+            cardVersion: 1,
+            createdAt: STARTED_AT,
+            idempotencyKey: `idem_${"9".repeat(32)}`,
+          },
+          attributionToken,
+          url,
+          idempotent: false,
+        }) as ReplayPremiereServiceShareResponse,
+    );
+    const harness = runtimeHarness({
+      state: "playing",
+      service: {
+        submitReaction: async () => ({
+          ...reactionResponse(),
+          reaction: {
+            ...reactionResponse().reaction,
+            id: reactionId,
+            sequence: 0,
+            turn: 100,
+          },
+        }),
+        createShare,
+      },
+    });
+    await bootstrapPlayingWithFrame(harness);
+    document.dispatchEvent(
+      new CustomEvent("ai-league-replay-frame", {
+        detail: { sequence: 0, turnNumber: 100, players: [] },
+      }),
+    );
+    await harness.overlayCallbacks.onMarker?.({
+      premiereId: PREMIERE_ID,
+      kind: "smart",
+      sequence: 0,
+      turn: 100,
+      policySeatId: null,
+    });
+    document.dispatchEvent(
+      new CustomEvent("ai-league-replay-frame", {
+        detail: { sequence: 0, turnNumber: 150, players: [] },
+      }),
+    );
+    expect(harness.models.at(-1)?.share).toMatchObject({
+      sourceReactionId: reactionId,
+      sourceReactionSequence: 0,
+      sourceReactionTurn: 100,
+      suggestedCaption:
+        "replay_premiere.share_caption:title=Alpha vs Beta,turn=100",
+    });
+    expect(harness.models.at(-1)?.currentTurn).toBe(150);
+
+    await harness.overlayCallbacks.onShare?.({
+      premiereId: PREMIERE_ID,
+      kind: "timestamp",
+      url: `https://proxywar.example/premiere/${PREMIERE_ID}`,
+      sequence: 0,
+      turn: 100,
+      sourceReactionId: reactionId,
+    });
+
+    expect(createShare).toHaveBeenCalledWith({
+      sequence: 0,
+      sourceReactionId: reactionId,
+    });
+    expect(harness.copyText).toHaveBeenCalledWith(url);
+    harness.runtime.dispose();
+  });
+
+  it("derives a real post-reveal prediction verdict without a seeded resolution", async () => {
+    const interaction = sessionResponse("playing");
+    interaction.checkpoints[0] = {
+      ...checkpoint("cp_12345678", 10),
+      state: "closed",
+      optionSeatIds: ["seat_a", "seat_b"],
+      participantPrediction: {
+        premiereId: PREMIERE_ID,
+        checkpointId: "cp_12345678",
+        participantId: PARTICIPANT_ID,
+        selectedSeatId: "seat_a",
+        submittedAt: STARTED_AT,
+        lockedAt: STARTED_AT,
+      },
+      distribution: { seat_a: 1, seat_b: 0 },
+      totalPredictions: 1,
+    };
+    const harness = runtimeHarness({
+      state: "playing",
+      service: { startSession: async () => interaction },
+    });
+    await bootstrapPlayingWithFrame(harness);
+    await revealAfter(harness);
+
+    expect(
+      harness.models.at(-1)?.reveal?.results?.predictions[0],
+    ).toMatchObject({
+      selectedSeatId: "seat_a",
+      correctPercent: 100,
+      accuracyStatus: "scored",
+      totalPredictions: 1,
+    });
+    harness.runtime.dispose();
+  });
+
+  it("keeps a real winner with zero live votes distinct from a void result", async () => {
+    const interaction = sessionResponse("playing");
+    interaction.checkpoints[0] = {
+      ...checkpoint("cp_12345678", 10),
+      state: "closed",
+      optionSeatIds: ["seat_a", "seat_b"],
+      distribution: { seat_a: 0, seat_b: 0 },
+      totalPredictions: 0,
+    };
+    const harness = runtimeHarness({
+      state: "playing",
+      service: { startSession: async () => interaction },
+    });
+    await bootstrapPlayingWithFrame(harness);
+    await revealAfter(harness);
+
+    expect(
+      harness.models.at(-1)?.reveal?.results?.predictions[0],
+    ).toMatchObject({
+      accuracyStatus: "no_predictions",
+      correctPercent: null,
+      totalPredictions: 0,
     });
     harness.runtime.dispose();
   });
@@ -1773,9 +2175,313 @@ describe("ReplayPremiereRuntimeController", () => {
     expect(CLIP_REPLY).toContain(`/premiere/${PREMIERE_ID}`);
     harness.runtime.dispose();
   });
+
+  it("keeps every clip affordance and write disabled when the server capability is off", async () => {
+    const disabledSession = sessionResponse("playing");
+    disabledSession.clipsEnabled = false;
+    const harness = runtimeHarness({
+      state: "playing",
+      service: { startSession: async () => disabledSession },
+    });
+    await bootstrapPlayingWithFrame(harness);
+    await revealAfter(harness);
+
+    expect(harness.models.at(-1)).toMatchObject({
+      clip: null,
+      canRequestClip: false,
+      clipMarkerAvailable: false,
+    });
+    await expect(
+      harness.overlayCallbacks.onRequestClip?.({
+        premiereId: PREMIERE_ID,
+        sequence: 0,
+        turn: 0,
+      }),
+    ).rejects.toMatchObject({ code: "request_rejected" });
+    expect(harness.service.requestClip).not.toHaveBeenCalled();
+    harness.runtime.dispose();
+  });
 });
 
 describe("ReplayPremiereServiceClient", () => {
+  it("ignores ordered stale aggregates but rejects inconsistent/incomparable evidence and capability drift", async () => {
+    const inconsistent = sessionResponse("playing");
+    inconsistent.reactionSummary = {
+      ...reactionSummaryWith("smart", 1),
+      totalReactions: 2,
+    };
+    const seeded = sessionResponse("playing");
+    seeded.reactionSummary = reactionSummaryWith("smart", 2);
+    const stale = heartbeatResponse("playing");
+    stale.reactionSummary = reactionSummaryWith("smart", 1);
+    const incomparable = heartbeatResponse("playing");
+    incomparable.reactionSummary = reactionSummaryWith("betrayal", 1);
+    const capabilityFlip = heartbeatResponse("playing");
+    capabilityFlip.reactionSummary = reactionSummaryWith("smart", 2);
+    capabilityFlip.clipsEnabled = false;
+    const fetchMock = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(jsonResponse(inconsistent, 201))
+      .mockResolvedValueOnce(jsonResponse(seeded, 201))
+      .mockResolvedValueOnce(jsonResponse(stale, 200))
+      .mockResolvedValueOnce(jsonResponse(incomparable, 200))
+      .mockResolvedValueOnce(jsonResponse(capabilityFlip, 200));
+    const client = new ReplayPremiereServiceClient({
+      premiereId: PREMIERE_ID,
+      origin: "https://proxywar.example",
+      fetchImpl: fetchMock,
+      randomBytes: () => new Uint8Array(16).fill(1),
+    });
+    client.bindVerifiedProjection(projection("playing"));
+
+    await expect(
+      client.startSession({ visible: true, observedSequence: -1 }),
+    ).rejects.toMatchObject({
+      code: "invalid_response",
+      phase: "response_binding",
+    });
+    await expect(
+      client.startSession({ visible: true, observedSequence: -1 }),
+    ).resolves.toMatchObject({ reactionSummary: { totalReactions: 2 } });
+    await expect(
+      client.heartbeat({ visible: true, observedSequence: -1 }),
+    ).resolves.toMatchObject({ reactionSummary: { totalReactions: 1 } });
+    await expect(
+      client.heartbeat({ visible: true, observedSequence: -1 }),
+    ).rejects.toMatchObject({ code: "invalid_response" });
+    await expect(
+      client.heartbeat({ visible: true, observedSequence: -1 }),
+    ).rejects.toMatchObject({ code: "invalid_response" });
+    client.dispose();
+  });
+
+  it("accepts concurrent reaction responses in reverse arrival order without regressing state", async () => {
+    const olderResponse = deferred<Response>();
+    const newerResponse = deferred<Response>();
+    const newerSummary = reactionSummaryWith("smart", 1);
+    newerSummary.totalReactions = 2;
+    newerSummary.byKind.betrayal = 1;
+    newerSummary.ownByKind!.betrayal = 1;
+    const older = reactionResponse();
+    const newer: ReplayPremiereServiceReactionResponse = {
+      ...reactionResponse(),
+      reaction: {
+        ...reactionResponse().reaction,
+        id: `react_${"8".repeat(32)}`,
+        sequence: 1,
+        kind: "betrayal",
+      },
+      reactionSummary: newerSummary,
+    };
+    const fetchMock = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(jsonResponse(sessionResponse("playing"), 201))
+      .mockImplementationOnce(() => olderResponse.promise)
+      .mockImplementationOnce(() => newerResponse.promise);
+    const client = new ReplayPremiereServiceClient({
+      premiereId: PREMIERE_ID,
+      origin: "https://proxywar.example",
+      fetchImpl: fetchMock,
+      randomBytes: () => new Uint8Array(16).fill(1),
+    });
+    client.bindVerifiedProjection(projection("playing"));
+    await client.startSession({ visible: true, observedSequence: -1 });
+
+    const olderWrite = client.submitReaction({
+      premiereId: PREMIERE_ID,
+      kind: "smart",
+      sequence: 0,
+      turn: 0,
+      policySeatId: null,
+    });
+    const newerWrite = client.submitReaction({
+      premiereId: PREMIERE_ID,
+      kind: "betrayal",
+      sequence: 1,
+      turn: 1,
+      policySeatId: null,
+    });
+    newerResponse.resolve(jsonResponse(newer, 200));
+    await expect(newerWrite).resolves.toMatchObject({
+      reactionSummary: { totalReactions: 2 },
+    });
+    olderResponse.resolve(jsonResponse(older, 200));
+    await expect(olderWrite).resolves.toMatchObject({
+      reactionSummary: { totalReactions: 1 },
+    });
+    client.dispose();
+  });
+
+  it("normalizes exact v1 fallback responses and accepts a later negotiated v2 upgrade", async () => {
+    const upgradedHeartbeat = heartbeatResponse("playing");
+    upgradedHeartbeat.reactionSummary = reactionSummaryWith("smart", 1);
+    upgradedHeartbeat.clipsEnabled = false;
+    const fetchMock = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(
+        jsonResponse(legacySessionResponseRaw("playing"), 201),
+      )
+      .mockResolvedValueOnce(jsonResponse(legacyReactionResponseRaw(), 200))
+      .mockResolvedValueOnce(jsonResponse(upgradedHeartbeat, 200));
+    const client = new ReplayPremiereServiceClient({
+      premiereId: PREMIERE_ID,
+      origin: "https://proxywar.example",
+      fetchImpl: fetchMock,
+      randomBytes: () => new Uint8Array(16).fill(1),
+    });
+    client.bindVerifiedProjection(projection("playing"));
+
+    await expect(
+      client.startSession({ visible: true, observedSequence: -1 }),
+    ).resolves.toMatchObject({
+      schemaVersion: 1,
+      reactionSummary: null,
+      clipsEnabled: null,
+    });
+    await expect(
+      client.submitReaction({
+        premiereId: PREMIERE_ID,
+        kind: "smart",
+        sequence: 0,
+        turn: 0,
+        policySeatId: null,
+      }),
+    ).resolves.toMatchObject({
+      schemaVersion: 1,
+      reactionSummary: null,
+      clipsEnabled: null,
+    });
+    await expect(
+      client.heartbeat({ visible: true, observedSequence: 0 }),
+    ).resolves.toMatchObject({
+      schemaVersion: 2,
+      reactionSummary: { totalReactions: 1 },
+      clipsEnabled: false,
+    });
+    for (const [, request] of fetchMock.mock.calls) {
+      expect(
+        new Headers(request?.headers).get("x-proxywar-premiere-interactions"),
+      ).toBe("2");
+    }
+    client.dispose();
+  });
+
+  it("invalidates v2 capability across exact-v1 session, heartbeat, and reaction fallback", async () => {
+    const initial = sessionResponse("playing");
+    initial.reactionSummary = reactionSummaryWith("smart", 1);
+    initial.clipsEnabled = true;
+    const upgraded = heartbeatResponse("playing");
+    upgraded.reactionSummary = reactionSummaryWith("smart", 2);
+    upgraded.clipsEnabled = false;
+    const fetchMock = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(jsonResponse(initial, 201))
+      .mockResolvedValueOnce(
+        jsonResponse(legacySessionResponseRaw("playing"), 201),
+      )
+      .mockResolvedValueOnce(
+        jsonResponse(legacyHeartbeatResponseRaw("playing"), 200),
+      )
+      .mockResolvedValueOnce(jsonResponse(legacyReactionResponseRaw(), 200))
+      .mockResolvedValueOnce(jsonResponse(upgraded, 200));
+    const client = new ReplayPremiereServiceClient({
+      premiereId: PREMIERE_ID,
+      origin: "https://proxywar.example",
+      fetchImpl: fetchMock,
+      randomBytes: () => new Uint8Array(16).fill(1),
+    });
+    client.bindVerifiedProjection(projection("playing"));
+
+    await client.startSession({ visible: true, observedSequence: -1 });
+    await expect(
+      client.startSession({ visible: true, observedSequence: -1 }),
+    ).resolves.toMatchObject({ reactionSummary: null, clipsEnabled: null });
+    await expect(
+      client.heartbeat({ visible: true, observedSequence: 0 }),
+    ).resolves.toMatchObject({ reactionSummary: null, clipsEnabled: null });
+    await expect(
+      client.submitReaction({
+        premiereId: PREMIERE_ID,
+        kind: "smart",
+        sequence: 0,
+        turn: 0,
+        policySeatId: null,
+      }),
+    ).resolves.toMatchObject({ reactionSummary: null, clipsEnabled: null });
+    await expect(
+      client.heartbeat({ visible: true, observedSequence: 0 }),
+    ).resolves.toMatchObject({
+      schemaVersion: 2,
+      reactionSummary: { totalReactions: 2 },
+      clipsEnabled: false,
+    });
+    client.dispose();
+  });
+
+  it("resets the private reaction baseline and semantic keys when guest identity rotates", async () => {
+    const initial = sessionResponse("playing");
+    const firstReaction = reactionResponse();
+    const recovered = sessionResponse("playing");
+    recovered.session = viewerSession({
+      id: OTHER_SESSION_ID,
+      participantId: OTHER_PARTICIPANT_ID,
+    });
+    recovered.reactionSummary = reactionSummaryWith("smart", 1);
+    recovered.reactionSummary.ownByKind = { ...emptyReactionSummary().byKind };
+    const secondReaction: ReplayPremiereServiceReactionResponse = {
+      ...reactionResponse(),
+      reaction: {
+        ...reactionResponse().reaction,
+        id: `react_${"8".repeat(32)}`,
+        participantId: OTHER_PARTICIPANT_ID,
+      },
+      reactionSummary: reactionSummaryWith("smart", 2),
+    };
+    secondReaction.reactionSummary!.ownByKind = {
+      ...emptyReactionSummary().byKind,
+      smart: 1,
+    };
+    const fetchMock = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(jsonResponse(initial, 201))
+      .mockResolvedValueOnce(jsonResponse(firstReaction, 200))
+      .mockResolvedValueOnce(jsonResponse(recovered, 201))
+      .mockResolvedValueOnce(jsonResponse(secondReaction, 200));
+    let randomByte = 1;
+    const client = new ReplayPremiereServiceClient({
+      premiereId: PREMIERE_ID,
+      origin: "https://proxywar.example",
+      fetchImpl: fetchMock,
+      randomBytes: () => new Uint8Array(16).fill(randomByte++),
+    });
+    client.bindVerifiedProjection(projection("playing"));
+    const input = {
+      premiereId: PREMIERE_ID,
+      kind: "smart" as const,
+      sequence: 0,
+      turn: 0,
+      policySeatId: null,
+    };
+
+    await client.startSession({ visible: true, observedSequence: -1 });
+    await expect(client.submitReaction(input)).resolves.toMatchObject({
+      reaction: { participantId: PARTICIPANT_ID },
+    });
+    await client.startSession({ visible: true, observedSequence: -1 });
+    await expect(client.submitReaction(input)).resolves.toMatchObject({
+      reaction: { participantId: OTHER_PARTICIPANT_ID },
+      reactionSummary: { ownByKind: { smart: 1 } },
+    });
+    const firstKey = new Headers(fetchMock.mock.calls[1][1]?.headers).get(
+      "x-idempotency-key",
+    );
+    const secondKey = new Headers(fetchMock.mock.calls[3][1]?.headers).get(
+      "x-idempotency-key",
+    );
+    expect(firstKey).not.toBe(secondKey);
+    client.dispose();
+  });
+
   it("retries malformed gateway failures with the exact session and heartbeat idempotency envelopes", async () => {
     const fetchMock = vi
       .fn<typeof fetch>()
@@ -1812,6 +2518,11 @@ describe("ReplayPremiereServiceClient", () => {
     expect(
       new Headers(retriedSessionRequest?.headers).get("x-idempotency-key"),
     ).toBe(new Headers(firstSessionRequest?.headers).get("x-idempotency-key"));
+    expect(
+      new Headers(firstSessionRequest?.headers).get(
+        "x-proxywar-premiere-interactions",
+      ),
+    ).toBe("2");
 
     await expect(
       client.heartbeat({ visible: true, observedSequence: -1 }),
@@ -1837,6 +2548,11 @@ describe("ReplayPremiereServiceClient", () => {
     ).toBe(
       new Headers(firstHeartbeatRequest?.headers).get("x-idempotency-key"),
     );
+    expect(
+      new Headers(firstHeartbeatRequest?.headers).get(
+        "x-proxywar-premiere-interactions",
+      ),
+    ).toBe("2");
 
     const marker = {
       premiereId: PREMIERE_ID,
@@ -1859,6 +2575,11 @@ describe("ReplayPremiereServiceClient", () => {
     expect(
       new Headers(retriedReactionRequest?.headers).get("x-idempotency-key"),
     ).toBe(new Headers(firstReactionRequest?.headers).get("x-idempotency-key"));
+    expect(
+      new Headers(firstReactionRequest?.headers).get(
+        "x-proxywar-premiere-interactions",
+      ),
+    ).toBe("2");
     expect(randomBytes).toHaveBeenCalledTimes(3);
     client.dispose();
   });
@@ -2223,6 +2944,10 @@ function runtimeHarness(options: {
     startSession?: () => Promise<ReplayPremiereServiceSessionResponse>;
     heartbeat?: () => Promise<ReplayPremiereServiceHeartbeatResponse>;
     submitReaction?: () => Promise<ReplayPremiereServiceReactionResponse>;
+    createShare?: (input: {
+      sequence: number;
+      sourceReactionId?: string | null;
+    }) => Promise<ReplayPremiereServiceShareResponse>;
     requestClip?: (input: {
       sequence: number;
       turn: number;
@@ -2271,11 +2996,11 @@ function runtimeHarness(options: {
               turn: number | null;
             }) =>
               ({
-                schemaVersion: 1,
+                schemaVersion: 2,
                 reaction: {
-                  id: `react_${"a".repeat(24)}`,
+                  id: `react_${"a".repeat(32)}`,
                   premiereId: PREMIERE_ID,
-                  participantId: `part_${"b".repeat(24)}`,
+                  participantId: PARTICIPANT_ID,
                   sequence: input.sequence,
                   turn: input.turn ?? 0,
                   kind: input.kind,
@@ -2284,10 +3009,18 @@ function runtimeHarness(options: {
                   createdAt: STARTED_AT,
                 },
                 idempotent: false,
+                reactionSummary: reactionSummaryWith(
+                  input.kind as keyof ReplayPremiereServiceReactionSummary["byKind"],
+                  1,
+                ),
+                clipsEnabled: true,
               }) as unknown as ReplayPremiereServiceReactionResponse,
           )
         : vi.fn(options.service.submitReaction),
-    createShare: vi.fn(),
+    createShare:
+      options.service?.createShare === undefined
+        ? vi.fn()
+        : vi.fn(options.service.createShare),
     requestClip:
       options.service?.requestClip === undefined
         ? vi.fn(async () => clipStatus("pending"))
@@ -2525,12 +3258,14 @@ function sessionResponse(
   premiereState: ReplayPremiereServiceSessionResponse["premiereState"],
 ): ReplayPremiereServiceSessionResponse {
   return {
-    schemaVersion: 1,
+    schemaVersion: 2,
     csrfToken: CSRF_TOKEN,
     session: viewerSession(),
     premiereState,
     checkpoints: [checkpoint("cp_12345678", 10), checkpoint("cp_abcdef12", 20)],
     incomingMoment: null,
+    reactionSummary: emptyReactionSummary(),
+    clipsEnabled: true,
   };
 }
 
@@ -2559,18 +3294,20 @@ function heartbeatResponse(
   sessionOverrides: Partial<ReplayPremiereServiceSession> = {},
 ): ReplayPremiereServiceHeartbeatResponse {
   return {
-    schemaVersion: 1,
+    schemaVersion: 2,
     session: viewerSession(sessionOverrides),
     idempotent: false,
     persisted: false,
     premiereState,
     checkpoints: [checkpoint("cp_12345678", 10), checkpoint("cp_abcdef12", 20)],
+    reactionSummary: emptyReactionSummary(),
+    clipsEnabled: true,
   };
 }
 
 function reactionResponse() {
   return {
-    schemaVersion: 1 as const,
+    schemaVersion: 2 as const,
     reaction: {
       id: `react_${"7".repeat(32)}`,
       premiereId: PREMIERE_ID,
@@ -2583,7 +3320,105 @@ function reactionResponse() {
       createdAt: STARTED_AT,
     },
     idempotent: false,
+    reactionSummary: reactionSummaryWith("smart", 1),
+    clipsEnabled: true,
   };
+}
+
+function legacySessionResponseRaw(
+  premiereState: ReplayPremiereServiceSessionResponse["premiereState"],
+) {
+  const current = sessionResponse(premiereState);
+  const {
+    reactionSummary: _summary,
+    clipsEnabled: _clips,
+    ...legacy
+  } = current;
+  return { ...legacy, schemaVersion: 1 as const };
+}
+
+function legacyReactionResponseRaw() {
+  const current = reactionResponse();
+  const {
+    reactionSummary: _summary,
+    clipsEnabled: _clips,
+    ...legacy
+  } = current;
+  return { ...legacy, schemaVersion: 1 as const };
+}
+
+function legacyHeartbeatResponseRaw(
+  premiereState: ReplayPremiereServiceHeartbeatResponse["premiereState"],
+) {
+  const current = heartbeatResponse(premiereState);
+  const {
+    reactionSummary: _summary,
+    clipsEnabled: _clips,
+    ...legacy
+  } = current;
+  return { ...legacy, schemaVersion: 1 as const };
+}
+
+function legacySessionResponse(
+  premiereState: ReplayPremiereServiceSessionResponse["premiereState"],
+): ReplayPremiereServiceSessionResponse {
+  return {
+    ...legacySessionResponseRaw(premiereState),
+    reactionSummary: null,
+    clipsEnabled: null,
+  };
+}
+
+function legacyReactionResponse(): ReplayPremiereServiceReactionResponse {
+  return {
+    ...legacyReactionResponseRaw(),
+    reactionSummary: null,
+    clipsEnabled: null,
+  };
+}
+
+function legacyHeartbeatResponse(
+  premiereState: ReplayPremiereServiceHeartbeatResponse["premiereState"],
+): ReplayPremiereServiceHeartbeatResponse {
+  return {
+    ...legacyHeartbeatResponseRaw(premiereState),
+    reactionSummary: null,
+    clipsEnabled: null,
+  };
+}
+
+function emptyReactionSummary(): ReplayPremiereServiceReactionSummary {
+  return {
+    totalReactions: 0,
+    distinctParticipants: 0,
+    byKind: {
+      turning_point: 0,
+      smart: 0,
+      mistake: 0,
+      betrayal: 0,
+      clip_this: 0,
+    },
+    ownByKind: {
+      turning_point: 0,
+      smart: 0,
+      mistake: 0,
+      betrayal: 0,
+      clip_this: 0,
+    },
+  };
+}
+
+function reactionSummaryWith(
+  kind: keyof ReplayPremiereServiceReactionSummary["byKind"],
+  count: number,
+  distinctParticipants = count > 0 ? 1 : 0,
+): ReplayPremiereServiceReactionSummary {
+  const summary = emptyReactionSummary();
+  summary.totalReactions = count;
+  summary.distinctParticipants = distinctParticipants;
+  summary.byKind[kind] = count;
+  summary.ownByKind![kind] = count;
+  return summary;
 }
 
 function archivedPointer(): ReplayPremiereRevealPointer {

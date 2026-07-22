@@ -190,6 +190,12 @@ interface QueuedJob {
   expectedBundleSha256: string;
 }
 
+interface PremiereWriteFence {
+  promise: Promise<void>;
+  resolve: () => void;
+  settled: boolean;
+}
+
 // ---------------------------------------------------------------------------
 // Service
 // ---------------------------------------------------------------------------
@@ -206,8 +212,12 @@ export class ReplayPremiereClips {
   private readonly pending = new Set<string>();
   /** Reserved synchronously in pump() so concurrency stays 1 across awaits. */
   private runningJob: QueuedJob | null = null;
+  private runningJobCompletion: Promise<void> | null = null;
   private runningChild: ChildProcess | null = null;
+  /** Presence in this map permanently closes render admission for the id. */
+  private readonly writeFences = new Map<string, PremiereWriteFence>();
   private closed = false;
+  private closePromise: Promise<void> | null = null;
 
   // Quota accounting (accepted NEW renders only; not cache hits or joins).
   private readonly participantRenders = new Map<string, number>();
@@ -363,6 +373,31 @@ export class ReplayPremiereClips {
   // -- Render admission ----------------------------------------------------
 
   /**
+   * Permanently fence clip writes for one premiere and wait until every render
+   * admitted before the fence has finished (including final cache promotion).
+   *
+   * The map insertion is synchronous, before this method returns its promise,
+   * so a concurrent request cannot cross the reclamation boundary. Requests
+   * already awaiting the disk guard re-check the fence before enqueueing.
+   */
+  fenceWritesAndDrain(premiereId: string): Promise<void> {
+    const existing = this.writeFences.get(premiereId);
+    if (existing !== undefined) return existing.promise;
+
+    let resolve!: () => void;
+    const fence: PremiereWriteFence = {
+      promise: new Promise<void>((done) => {
+        resolve = done;
+      }),
+      resolve: () => resolve(),
+      settled: false,
+    };
+    this.writeFences.set(premiereId, fence);
+    this.settleWriteFenceIfDrained(premiereId);
+    return fence.promise;
+  }
+
+  /**
    * Admit a render request. Enforces lifecycle gating, then (for a cache miss)
    * quotas, disk floor, and the bounded queue. Cache hits and joins to an
    * in-flight job never consume quota.
@@ -371,6 +406,7 @@ export class ReplayPremiereClips {
     request: ReplayPremiereClipRenderRequest,
   ): Promise<PremiereClipStatusResponse> {
     this.assertWritesAllowed(request.lifecycleState);
+    this.assertRenderAdmissionOpen(request.premiereId);
     if (!Number.isSafeInteger(request.anchorTurn) || request.anchorTurn < 0) {
       throw invalid("clip_anchor_turn_invalid", 400);
     }
@@ -391,7 +427,15 @@ export class ReplayPremiereClips {
     }
 
     this.admitNewRender(request.premiereId, request.participantId);
-    await this.assertDiskFloor();
+    try {
+      await this.assertDiskFloor();
+    } catch (error) {
+      // A fence/close that landed while the asynchronous disk guard was in
+      // flight owns the outcome and must prevent a late admission.
+      this.assertRenderAdmissionOpen(request.premiereId);
+      throw error;
+    }
+    this.assertRenderAdmissionOpen(request.premiereId);
     if (this.queue.length >= this.limits.maxQueueDepth) {
       throw capacity("clip_queue_full", 429);
     }
@@ -455,7 +499,20 @@ export class ReplayPremiereClips {
     if (job === undefined) return;
     // Reserve the single slot synchronously (runJob awaits before it spawns).
     this.runningJob = job;
-    void this.runJob(job);
+    const completion = this.runJob(job);
+    this.runningJobCompletion = completion;
+    void completion.then(
+      () => {
+        if (this.runningJobCompletion === completion) {
+          this.runningJobCompletion = null;
+        }
+      },
+      () => {
+        if (this.runningJobCompletion === completion) {
+          this.runningJobCompletion = null;
+        }
+      },
+    );
   }
 
   private async runJob(job: QueuedJob): Promise<void> {
@@ -467,6 +524,7 @@ export class ReplayPremiereClips {
     let timedOut = false;
     try {
       await fs.mkdir(renderDir, { recursive: true, mode: 0o700 });
+      if (this.closed) return;
       const specPath = path.join(renderDir, "jobspec.json");
       const spec: PremiereClipJobSpec = {
         premiereId: job.premiereId,
@@ -481,6 +539,7 @@ export class ReplayPremiereClips {
         cameraFit: "fill",
       };
       await fs.writeFile(specPath, JSON.stringify(spec));
+      if (this.closed) return;
 
       const env: NodeJS.ProcessEnv = { ...process.env };
       if (this.options.scratchDir !== undefined) {
@@ -530,6 +589,7 @@ export class ReplayPremiereClips {
       this.pending.delete(job.key);
       this.runningJob = null;
       this.runningChild = null;
+      this.settleWriteFenceIfDrained(job.premiereId);
       if (!this.closed) this.pump();
     }
   }
@@ -766,6 +826,24 @@ export class ReplayPremiereClips {
       throw unavailable("clip_premiere_unavailable", 404);
   }
 
+  private assertRenderAdmissionOpen(premiereId: string): void {
+    if (this.writeFences.has(premiereId)) {
+      throw invalid("clip_writes_fenced", 410);
+    }
+    if (this.closed) {
+      throw unavailable("clip_service_closed", 503);
+    }
+  }
+
+  private settleWriteFenceIfDrained(premiereId: string): void {
+    const fence = this.writeFences.get(premiereId);
+    if (fence === undefined || fence.settled) return;
+    if (this.runningJob?.premiereId === premiereId) return;
+    if (this.queue.some((job) => job.premiereId === premiereId)) return;
+    fence.settled = true;
+    fence.resolve();
+  }
+
   // -- Worker spawn --------------------------------------------------------
 
   private defaultSpawnWorker(
@@ -790,13 +868,33 @@ export class ReplayPremiereClips {
 
   // -- Shutdown ------------------------------------------------------------
 
-  async close(): Promise<void> {
+  close(): Promise<void> {
+    if (this.closePromise !== null) return this.closePromise;
     this.closed = true;
-    this.queue.length = 0;
+    const abandoned = this.queue.splice(0);
+    const abandonedPremieres = new Set<string>();
+    for (const job of abandoned) {
+      this.pending.delete(job.key);
+      abandonedPremieres.add(job.premiereId);
+    }
+    for (const premiereId of abandonedPremieres) {
+      this.settleWriteFenceIfDrained(premiereId);
+    }
     const child = this.runningChild;
     if (child !== null && child.exitCode === null) {
       killPremiereClipWorkerTree(child);
     }
+    const runningCompletion = this.runningJobCompletion;
+    this.closePromise = (async () => {
+      await runningCompletion?.catch(() => undefined);
+      // No work survives close. Clear defensive residue as well as keys from
+      // the ordinary runJob finally path, then release every fence waiter.
+      this.pending.clear();
+      for (const premiereId of this.writeFences.keys()) {
+        this.settleWriteFenceIfDrained(premiereId);
+      }
+    })();
+    return this.closePromise;
   }
 }
 

@@ -11,6 +11,7 @@ import {
 } from "../../../src/server/replay-premiere/ReplayPremiereIntegrity";
 import {
   loadReplayPremiereInteractions,
+  recoverReplayPremiereTerminalInteractionState,
   type ReplayPremiereInteractionEventStore,
   type ReplayPremiereRecoveredInteractionsOptions,
 } from "../../../src/server/replay-premiere/ReplayPremiereInteractionRecovery";
@@ -155,6 +156,70 @@ describe("ReplayPremiereInteractionRecovery", () => {
     });
     expect(recovered.checkpoints[1].state).toBe("upcoming");
     expect(restarted.recovery.eventCursor).toBe(2);
+  });
+
+  test("recovers hash-chained terminal reactions without a live runtime", async () => {
+    const store = await openStore();
+    stores.push(store);
+    const live = await loadReplayPremiereInteractions({
+      eventStore: store,
+      interactions: interactionOptions(),
+    });
+    const session = await live.interactions.createViewerSession({
+      participantId: PARTICIPANT_ID,
+      idempotencyKey: "idem_terminal_session_001",
+      requesterBucketId: `ip_${"3".repeat(32)}`,
+      visible: true,
+      observedSequence: 10,
+      excludedAsOperator: false,
+      excludedAsBot: false,
+    });
+    await live.interactions.submitReaction({
+      participantId: PARTICIPANT_ID,
+      sessionId: session.id,
+      idempotencyKey: "idem_terminal_reaction01",
+      requesterBucketId: `ip_${"3".repeat(32)}`,
+      sequence: 10,
+      kind: "smart",
+    });
+
+    const { getReleasedContext: _liveContext, ...terminalOptions } =
+      interactionOptions();
+    const recovered = await recoverReplayPremiereTerminalInteractionState({
+      eventStore: store,
+      validationOptions: {
+        ...terminalOptions,
+        getPremiereState: () => "revealed",
+      },
+    });
+
+    expect(recovered?.snapshot.reactions).toEqual([
+      expect.objectContaining({
+        participantId: PARTICIPANT_ID,
+        sequence: 10,
+        turn: 10,
+        kind: "smart",
+        eventContext: { sequence: 10 },
+      }),
+    ]);
+    expect(recovered?.stateHash).toMatch(/^[a-f0-9]{64}$/);
+  });
+
+  test("returns no terminal interaction state when no aggregate evidence exists", async () => {
+    const store = await openStore();
+    stores.push(store);
+    const { getReleasedContext: _liveContext, ...terminalOptions } =
+      interactionOptions();
+
+    await expect(
+      recoverReplayPremiereTerminalInteractionState({
+        eventStore: store,
+        validationOptions: {
+          ...terminalOptions,
+          getPremiereState: () => "revealed",
+        },
+      }),
+    ).resolves.toBeNull();
   });
 
   test("anchors a normal write after a runtime checkpoint without duplicating checkpoint authority", async () => {

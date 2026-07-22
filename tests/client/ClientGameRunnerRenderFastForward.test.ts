@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ClientGameRunner } from "../../src/client/ClientGameRunner";
 import { REPLAY_RENDER_FAST_FORWARD_PARAM } from "../../src/client/ReplayRenderFastForward";
+import { ReplayPresentationCadenceEvent } from "../../src/client/graphics/ReplayPresentationSmoothing";
 import { GameUpdateType } from "../../src/core/game/GameUpdates";
 
 function emptyUpdates() {
@@ -23,7 +24,11 @@ function gameUpdate(tick: number) {
 
 interface Harness {
   updateCallback: (update: never) => void;
-  renderer: { tick: ReturnType<typeof vi.fn> };
+  eventBus: { emit: ReturnType<typeof vi.fn> };
+  renderer: {
+    initialize: ReturnType<typeof vi.fn>;
+    tick: ReturnType<typeof vi.fn>;
+  };
   transport: { turnComplete: ReturnType<typeof vi.fn> };
   gameView: { update: ReturnType<typeof vi.fn> };
 }
@@ -70,6 +75,7 @@ function mountRunner(lobby: Record<string, unknown>): Harness {
   runner.start();
   return {
     updateCallback: (update) => updateCallback(update),
+    eventBus,
     renderer,
     transport,
     gameView,
@@ -132,7 +138,7 @@ describe("ClientGameRunner render fast-forward gating", () => {
     const harness = mountRunner({
       gameID: "PREM0001",
       gameStartInfo: { gameID: "PREM0001" },
-      progressiveReplay: {},
+      progressiveReplay: { playbackRate: 1 },
       gameRecord: undefined,
     });
     harness.updateCallback(gameUpdate(3) as never);
@@ -141,6 +147,29 @@ describe("ClientGameRunner render fast-forward gating", () => {
     expect(harness.gameView.update).toHaveBeenCalledTimes(1);
     expect(harness.renderer.tick).toHaveBeenCalledTimes(1);
   });
+
+  it.each([
+    [2, 50],
+    [4, 25],
+  ] as const)(
+    "publishes the committed %ix Premiere cadence to initialized renderer layers",
+    (playbackRate, expectedIntervalMs) => {
+      const harness = mountRunner({
+        gameID: `PREM000${playbackRate}`,
+        gameStartInfo: { gameID: `PREM000${playbackRate}` },
+        progressiveReplay: { playbackRate },
+      });
+      const cadenceEvent = harness.eventBus.emit.mock.calls
+        .map(([event]) => event)
+        .find((event) => event instanceof ReplayPresentationCadenceEvent);
+
+      expect(cadenceEvent).toBeInstanceOf(ReplayPresentationCadenceEvent);
+      expect(cadenceEvent?.presentationIntervalMs).toBe(expectedIntervalMs);
+      expect(
+        harness.renderer.initialize.mock.invocationCallOrder[0],
+      ).toBeLessThan(harness.eventBus.emit.mock.invocationCallOrder[0]);
+    },
+  );
 
   it("runs the ordinary per-turn pipeline when the parameter is absent", () => {
     history.replaceState(null, "", "/ai-league-replay/league-normal");

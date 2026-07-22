@@ -32,6 +32,7 @@ import {
   importControlledPremiereSourceForPublication,
   VerifiedPremiereEligibilityGate,
 } from "../../../src/server/replay-premiere/ReplayPremierePublication";
+import { buildPremiereResultSummaryFromTarget } from "../../../src/server/replay-premiere/ReplayPremiereResultSummary";
 import { ReplayPremiereRuntimeRegistry } from "../../../src/server/replay-premiere/ReplayPremiereRuntimeCoordinator";
 import {
   DEFAULT_DEFERRED_FRESH_ASSEMBLY_BUDGET_MS,
@@ -95,6 +96,12 @@ describe("ReplayPremiere production startup", () => {
     expect(callStart).toBeGreaterThanOrEqual(0);
     expect(callEnd).toBeGreaterThan(callStart);
     expect(source.slice(callStart, callEnd)).toContain("maxStartupMs: 8_000,");
+    expect(source.slice(callStart, callEnd)).toContain(
+      "fenceClipWritesAndDrain:",
+    );
+    expect(source).toContain(
+      "replayPremiereClips?.fenceWritesAndDrain(premiereId)",
+    );
     const listenStart = source.indexOf("const server = app.listen(");
     expect(callStart).toBeLessThan(listenStart);
     expect(source).not.toContain("startDeferredHydration");
@@ -1907,6 +1914,171 @@ describe("ReplayPremiere production startup", () => {
   // The sweep now also reclaims such orphans from durable evidence.
   // -------------------------------------------------------------------------
 
+  async function leaveArchivedPointerAdmission(
+    options: {
+      afterPointer?: (target: ReplayPremiereHttpTarget) => Promise<void>;
+    } = {},
+  ): Promise<{
+    archiveStore: ReplayPremiereArchiveStore;
+    summary: ReturnType<typeof buildPremiereResultSummaryFromTarget>;
+  }> {
+    vi.useFakeTimers({ now: NOW });
+    await writeAdmission(root);
+    const firstContext = startupContext(() => new Date());
+    const first = await startReplayPremiereProduction({
+      ...firstContext,
+      privateStateRoot: path.join(root, "private"),
+      servedRoots: [path.join(root, "served")],
+    });
+    services.push(first.service);
+    for (const advanceMs of [100, 60_000, 100, 60_000, 50]) {
+      await vi.advanceTimersByTimeAsync(advanceMs);
+      await first.service.waitForRuntimeTimersIdle();
+    }
+    const target = firstContext.httpRegistry.get(PREMIERE_ID)!;
+    expect(target.runtime.readLifecycleState()).toBe("revealed");
+    const archiveStore = await ReplayPremiereArchiveStore.open({
+      privateStateRoot: path.join(root, "private"),
+    });
+    const summary = buildPremiereResultSummaryFromTarget({
+      target,
+      terminalState: "revealed",
+      reclaimedAt: new Date().toISOString(),
+    });
+    await archiveStore.recordReclaimed(
+      summary,
+      target.runtime.readBootstrap().provenance.sourceReplaySha256,
+    );
+    await options.afterPointer?.(target);
+    await first.service.close();
+    services.splice(services.indexOf(first.service), 1);
+    vi.useRealTimers();
+    return { archiveStore, summary };
+  }
+
+  test("an archived-pointer admission is never reassembled or reopened for writes", async () => {
+    const { archiveStore, summary } = await leaveArchivedPointerAdmission();
+
+    const recoveryAttempt = vi.fn(async () => undefined);
+    const diagnostics: string[] = [];
+    const rebootContext = startupContext(
+      () => new Date(NOW.getTime() + 45 * 60_000),
+    );
+    const rebooted = await startReplayPremiereProduction({
+      ...rebootContext,
+      privateStateRoot: path.join(root, "private"),
+      servedRoots: [path.join(root, "served")],
+      archiveStore,
+      reclamationSweepMs: 0,
+      beforeTargetRecovery: recoveryAttempt,
+      onDiagnostic: (diagnostic) => {
+        diagnostics.push(`${diagnostic.target}:${diagnostic.operatorCode}`);
+      },
+    });
+    services.push(rebooted.service);
+
+    expect(rebooted.registeredPremiereIds).toEqual([]);
+    expect(rebootContext.httpRegistry.get(PREMIERE_ID)).toBeNull();
+    expect(rebootContext.runtimeRegistry.get(PREMIERE_ID)).toBeNull();
+    expect(recoveryAttempt).not.toHaveBeenCalled();
+    await vi.waitFor(() => {
+      expect(diagnostics).toEqual([`${PREMIERE_ID}.orphan:orphan_reclaimed`]);
+    });
+    expect(await archiveStore.loadSummary(PREMIERE_ID)).toEqual(summary);
+    await expect(
+      fs.stat(admissionPath(root, PREMIERE_ID)),
+    ).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  test("an archived-pointer orphan preserves divergent accepted reactions and refuses deletion", async () => {
+    const { archiveStore, summary } = await leaveArchivedPointerAdmission({
+      afterPointer: async (target) => {
+        const participantId = `guest_${"e".repeat(32)}`;
+        const reactionSequence =
+          target.interactions.readCheckpoints(null)[1].sequence;
+        const session = await target.interactions.createViewerSession({
+          participantId,
+          idempotencyKey: "post_pointer_session001",
+          requesterBucketId: `ip_${"5".repeat(32)}`,
+          visible: true,
+          observedSequence: reactionSequence,
+          excludedAsOperator: false,
+          excludedAsBot: false,
+        });
+        await target.interactions.submitReaction({
+          participantId,
+          sessionId: session.id,
+          idempotencyKey: "post_pointer_reaction01",
+          requesterBucketId: `ip_${"5".repeat(32)}`,
+          sequence: reactionSequence,
+          kind: "smart",
+        });
+      },
+    });
+    const diagnostics: string[] = [];
+    const recoveryAttempt = vi.fn(async () => undefined);
+    const rebootContext = startupContext(
+      () => new Date(NOW.getTime() + 45 * 60_000),
+    );
+    const rebooted = await startReplayPremiereProduction({
+      ...rebootContext,
+      privateStateRoot: path.join(root, "private"),
+      servedRoots: [path.join(root, "served")],
+      archiveStore,
+      reclamationSweepMs: 0,
+      beforeTargetRecovery: recoveryAttempt,
+      onDiagnostic: (diagnostic) => {
+        diagnostics.push(`${diagnostic.target}:${diagnostic.operatorCode}`);
+      },
+    });
+    services.push(rebooted.service);
+
+    expect(rebooted.registeredPremiereIds).toEqual([]);
+    expect(rebootContext.httpRegistry.get(PREMIERE_ID)).toBeNull();
+    expect(recoveryAttempt).not.toHaveBeenCalled();
+    await vi.waitFor(() => {
+      expect(diagnostics).toContain(
+        `${PREMIERE_ID}.orphan:orphan_reclamation_failed:reclamation_archived_summary_state_diverged`,
+      );
+    });
+    expect(await archiveStore.loadSummary(PREMIERE_ID)).toEqual(summary);
+    expect(summary.markers).toEqual([]);
+    await expect(
+      fs.stat(admissionPath(root, PREMIERE_ID)),
+    ).resolves.toBeTruthy();
+  });
+
+  test("production startup forwards the clip fence into live terminal reclamation", async () => {
+    vi.useFakeTimers({ now: NOW });
+    await writeAdmission(root);
+    const archiveStore = await ReplayPremiereArchiveStore.open({
+      privateStateRoot: path.join(root, "private"),
+    });
+    const clipFence = vi.fn(async (_premiereId: string) => undefined);
+    const context = startupContext(() => new Date());
+    const started = await startReplayPremiereProduction({
+      ...context,
+      privateStateRoot: path.join(root, "private"),
+      servedRoots: [path.join(root, "served")],
+      archiveStore,
+      reclamationGraceMs: 0,
+      reclamationSweepMs: 0,
+      fenceClipWritesAndDrain: clipFence,
+    });
+    services.push(started.service);
+    for (const advanceMs of [100, 60_000, 100, 60_000, 50]) {
+      await vi.advanceTimersByTimeAsync(advanceMs);
+      await started.service.waitForRuntimeTimersIdle();
+    }
+
+    await started.service.runReclamationSweepOnce();
+
+    expect(clipFence).toHaveBeenCalledTimes(1);
+    expect(clipFence).toHaveBeenCalledWith(PREMIERE_ID);
+    expect(context.httpRegistry.get(PREMIERE_ID)).toBeNull();
+    expect(archiveStore.lookup(PREMIERE_ID)).not.toBeNull();
+  });
+
   async function revealPremiereAndClose(): Promise<string> {
     vi.useFakeTimers({ now: NOW });
     await writeAdmission(root);
@@ -1918,11 +2090,46 @@ describe("ReplayPremiere production startup", () => {
     });
     services.push(started.service);
     const runtime = context.runtimeRegistry.get(PREMIERE_ID)!;
+    const target = context.httpRegistry.get(PREMIERE_ID)!;
+    const participantId = `guest_${"d".repeat(32)}`;
+    const session = await target.interactions.createViewerSession({
+      participantId,
+      idempotencyKey: "orphan_session_000001",
+      requesterBucketId: `ip_${"4".repeat(32)}`,
+      visible: true,
+      observedSequence: -1,
+      excludedAsOperator: false,
+      excludedAsBot: false,
+    });
     // Checkpoint pauses follow REPLAY_PREMIERE_CHECKPOINT_PAUSE_MS (60 s
     // since the real-speed pacing retune; was 15 s).
-    for (const advanceMs of [100, 60_000, 100, 60_000, 50]) {
+    for (const [index, advanceMs] of [100, 60_000, 100, 60_000, 50].entries()) {
       await vi.advanceTimersByTimeAsync(advanceMs);
       await started.service.waitForRuntimeTimersIdle();
+      if (index === 0 || index === 2) {
+        const checkpoint = target.interactions
+          .readCheckpoints(participantId)
+          .find((candidate) => candidate.state === "open");
+        expect(checkpoint).toBeDefined();
+        await target.interactions.submitPrediction({
+          participantId,
+          sessionId: session.id,
+          checkpointId: checkpoint!.id,
+          selectedSeatId: checkpoint!.optionSeatIds[0],
+          idempotencyKey: `orphan_prediction_000${index}`,
+          requesterBucketId: `ip_${"4".repeat(32)}`,
+        });
+        if (index === 0) {
+          await target.interactions.submitReaction({
+            participantId,
+            sessionId: session.id,
+            sequence: checkpoint!.sequence,
+            kind: "smart",
+            idempotencyKey: "orphan_reaction_000001",
+            requesterBucketId: `ip_${"4".repeat(32)}`,
+          });
+        }
+      }
     }
     expect(runtime.readLifecycleState()).toBe("revealed");
     const revealedAt = runtime.readReveal()!.revealedAt;
@@ -1967,13 +2174,17 @@ describe("ReplayPremiere production startup", () => {
     expect(summary).not.toBeNull();
     expect(summary!.terminalState).toBe("revealed");
     expect(summary!.revealedAt).toBe(revealedAt);
-    // The winner-led archived page has what it needs: a full outcome from the
-    // hash-covered authoritative result; interaction aggregates are empty by
-    // design (no live runtime existed to read them from).
+    // The winner-led archived page retains aggregate audience evidence even
+    // though no live runtime exists on this boot.
     expect(summary!.outcome).not.toBeNull();
     expect(summary!.outcome!.standings.length).toBeGreaterThan(0);
-    expect(summary!.predictions).toEqual([]);
-    expect(summary!.markers).toEqual([]);
+    expect(summary!.predictions).toHaveLength(2);
+    expect(summary!.predictions.map((entry) => entry.totalPredictions)).toEqual(
+      [1, 1],
+    );
+    expect(summary!.markers).toEqual([
+      { kind: "smart", turn: expect.any(Number), count: 1 },
+    ]);
     // The bulk is gone; the archive pointer now owns /premiere/<id>.
     await expect(
       fs.stat(admissionPath(root, PREMIERE_ID)),

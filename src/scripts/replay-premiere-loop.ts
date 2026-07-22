@@ -65,7 +65,7 @@ import { runReplayPremiereAdmission } from "./replay-premiere-admit";
 import { runReplayPremiereCoworldIngest } from "./replay-premiere-ingest-coworld";
 
 /**
- * Premiere-by-default watcher loop (Phase 2). One iteration per invocation, run
+ * Bounded Replay Premiere watcher loop (Phase 2). One iteration per invocation, run
  * by a launchd StartInterval=60 job. Detects a newly completed rated Coworld
  * league round, holds its freshest episode from the public league page, ingests
  * and admits it in-process into a sealed premiere, activates it with a
@@ -84,14 +84,12 @@ import { runReplayPremiereCoworldIngest } from "./replay-premiere-ingest-coworld
  * `activation_lost` (journaled, terminal) so the episode publishes at
  * quarantine expiry instead of zombie-tracking to `holdExpiresAt`.
  *
- * EVERY ROUND IS PREMIERE (2026-07-22 operator directive): each live tick also
- * heartbeats a STANDING suppression contract — zero holds when nothing is
- * claimed — whose blanket quarantine defers every freshly-completed episode
- * from the league page until the loop has decided, so the loop wins the
- * publish race against the 300s mirror for every round. The operator
- * explicitly accepted the ~12-minute battle-card lag this creates (reversing
- * suppression reviewer requirement #4). Fail-open is untouched: a dead loop
- * stops heartbeating and the mirror ignores the contract after 15 minutes.
+ * Each live tick heartbeats a STANDING suppression contract — zero holds when
+ * nothing is claimed — whose blanket quarantine lets the loop win the publish
+ * race against the 300s mirror. A post-reveal cooldown now keeps the prior
+ * premiere resident through its reclamation grace; rounds completed during
+ * that window are explicitly skipped and publish normally at quarantine
+ * expiry instead of triggering another host restart.
  *
  * Read-only toward Softmax (coworld `rounds`/`replays`/`divisions` reads plus
  * public S3 replay downloads); the only local mutations are the suppression
@@ -707,16 +705,15 @@ async function writeContractForHold(
 
 /**
  * The zero-hold STANDING contract. Its blanket `quarantineMs` defers every
- * freshly-completed episode until the loop has had its chance to claim it, so
- * the loop wins the publish race against the mirror for every round.
+ * freshly-completed episode until the loop has had its chance to decide, so
+ * the loop wins the publish race before it claims or skips a round.
  *
- * 2026-07-22 operator reversal of suppression reviewer requirement #4 ("never
- * write a zero-hold active contract"): the operator directed EVERY NEW ROUND
- * IS PREMIERE and explicitly accepted the ~12-minute battle-card lag the
- * standing quarantine creates. The former `deleteContract` release path is
- * gone; releasing a hold now falls back to this standing contract instead.
- * Fail-open is unchanged — a dead loop stops refreshing `generatedAt` and the
- * mirror ignores the contract entirely after 15 minutes.
+ * The former `deleteContract` release path is gone; releasing a hold falls
+ * back to this standing contract. The post-reveal cooldown marks intervening
+ * rounds skipped, so they publish at quarantine expiry instead of becoming
+ * back-to-back premieres. Fail-open is unchanged — a dead loop stops
+ * refreshing `generatedAt` and the mirror ignores the contract after 15
+ * minutes.
  */
 async function writeStandingContract(
   config: LoopConfig,
@@ -1498,6 +1495,7 @@ async function runShadowIteration(config: LoopConfig): Promise<void> {
   }
   const journal = await readJournal(config.journalPath);
   const folded = foldLoopJournal(journal);
+  const now = new Date();
   const roundsRaw = await coworldRead(
     ["rounds", "-l", config.leagueId, "--limit", "40"],
     config,
@@ -1505,6 +1503,7 @@ async function runShadowIteration(config: LoopConfig): Promise<void> {
   const decision = decideLoopClaim({
     rounds: parseLoopRounds(roundsRaw),
     folded,
+    now,
   });
   if (decision.kind !== "claim") {
     await appendJsonl(config.shadowDecisionsPath, {
@@ -1633,8 +1632,7 @@ async function runLiveIteration(config: LoopConfig): Promise<void> {
   const folded = foldLoopJournal(records);
   const now = new Date();
 
-  // Standing-quarantine heartbeat (2026-07-22 "every round is premiere"
-  // operator directive): refresh the contract EVERY live tick — with the
+  // Standing-quarantine heartbeat: refresh the contract every live tick — with the
   // active hold when one exists, otherwise as the zero-hold standing contract
   // whose blanket quarantine defers every freshly-completed episode until the
   // loop has had its chance to claim it. Written BEFORE the coworld reads that
@@ -1661,11 +1659,27 @@ async function runLiveIteration(config: LoopConfig): Promise<void> {
   const decision = decideLoopClaim({
     rounds: parseLoopRounds(roundsRaw),
     folded,
+    now,
   });
 
   if (decision.kind === "idle") {
     await journal.appendDecision({ decision: "idle" });
     log("idle: no completed unpremiered round");
+    return;
+  }
+
+  if (decision.kind === "post_reveal_cooldown") {
+    for (const ref of decision.skippedRoundIds) {
+      await journal.appendRoundSkipped(ref, "skipped_post_reveal_cooldown");
+    }
+    await journal.appendDecision({
+      decision: "post_reveal_cooldown",
+      nextClaimAt: decision.nextClaimAt,
+      skipped: decision.skippedRoundIds.map((ref) => ref.roundNumber),
+    });
+    log(
+      `post-reveal cooldown until ${decision.nextClaimAt}; ${decision.skippedRoundIds.length} completed round(s) publish normally`,
+    );
     return;
   }
 

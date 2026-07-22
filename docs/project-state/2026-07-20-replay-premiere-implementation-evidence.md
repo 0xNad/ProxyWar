@@ -1,6 +1,6 @@
 # Proxy War Replay Premiere — implementation evidence
 
-Status: local implementation verified; browser and deployment proof pending
+Status: local recovery implementation and browser QA verified; deployment proof pending
 Control owner: Codex
 Contract: `2026-07-20-proxywar-premiere-loop-product-spec.md`
 Contract SHA-256: `e56f7ff7f751dfc2b3ecba593bfc29bbb2ad3cc9cfbc2ec80ac449ea78a8312d`
@@ -224,3 +224,70 @@ recorded. Local green tests do not grant release authority.
   Admission, commit identity, live restart, public-edge checks, two-browser UX,
   reveal, and archive proof remain pending and are not implied by these local
   results.
+
+### 2026-07-22 — interaction payoff, terminal recovery, and replay presentation
+
+- Branch `codex/replay-experience-recovery` is based on the exact deployed
+  Replay Premiere candidate `3943e20e44487848021a54648ead992978199f21` via
+  local integration commit `f932322a98eb50a108ec3bffb0ba68c4bc955988`.
+  This recovery work is local only: it has not been pushed, deployed, or used
+  to mutate Coworld or the production premiere service. `[repo/file verified]`
+- Reactions now cross an explicit aggregate boundary: total accepted marks,
+  counts by kind, and distinct anonymous-participant count are public; only the
+  current authenticated guest receives its own counts. Reaction ids,
+  participant ids, turns, and event context are not exposed in the crowd
+  summary. The server maintains these counts in an append-only index, so a
+  heartbeat reads five counters instead of rescanning every reaction and replay
+  context. A saved mark anchors the timestamp, share, and suggested caption to
+  its server-accepted reaction. `[repo/file verified]`
+- The interaction client requests exact contract v2 and still accepts the
+  strict legacy v1 response shape during a rolling deployment. Ordered older
+  responses are ignored rather than treated as corruption; contradictory
+  summaries still fail closed. A v2-to-v1 downgrade hides clip controls and
+  labels retained crowd totals as last-known instead of current. Anonymous
+  identity rotation clears all private counts and mark anchors. `[repo/file verified]`
+- A viewer's sealed prediction now resolves to a personal correct, incorrect,
+  or void verdict in the live reveal session. Crowd accuracy is derived from
+  the verified canonical result and sealed distribution, never a caller-fed
+  percentage. A real winner with zero votes says "No predictions were
+  submitted" rather than falsely claiming there was no winner. Durable archive
+  summaries remain aggregate-only. `[repo/file verified]`
+- Terminal reclamation reconstructs predictions and markers from the
+  authenticated hash-chained interaction journal. It synchronously fences and
+  drains both interaction writes and queued/running clip renders before taking
+  the immutable snapshot, promoting a clip, or deleting bulk. A surviving
+  archive pointer is re-derived with its original timestamp; divergent evidence
+  aborts cleanup. Startup never registers an already archived admission as a
+  live API target. `[repo/file verified]`
+- Replay-only presentation smoothing now fills the frames between authoritative
+  unit positions without predicting simulation state and snaps during catch-up
+  and seek-sized discontinuities. Progressive Premiere publishes its committed
+  renderer cadence after layer initialization: 1x/2x/4x use 100/50/25 ms
+  presentation intervals and 90/45/23 ms transitions, so sprites finish each
+  move before the next authoritative frame instead of perpetually trailing it.
+  Ordinary play and `src/core/**` are unchanged. Territory expansion, shells,
+  and MIRV warheads remain tick-stepped; full current-OpenFront parity requires
+  a renderer migration rather than a timer adjustment. `[repo/file verified]`
+- The watcher keeps its standing publish-race quarantine but applies a
+  35-minute post-reveal cooldown. Rounds completed in that window are explicitly
+  skipped and publish normally at quarantine expiry, preventing the next
+  controlled restart from displacing a reveal inside the reclaimer's 30-minute
+  grace. `[repo/file verified]`
+- Local verification passes: 14 focused files / 368 tests, root TypeScript,
+  production build, Coworld adapter TypeScript, and lint with zero errors (110
+  inherited warnings). Browser
+  QA at 1280x720 verified visible community totals, viewer count, accepted-mark
+  sharing with `sourceReactionId`, untouched-caption refresh, edited-caption
+  preservation, a correct personal prediction verdict, and complete removal of
+  disabled clip affordances. `[local browser verified]`
+- Independent stable-tree review returned GO with no remaining actionable
+  correctness, security, protocol, deterministic-core, or hosted-mutation
+  finding. Representative large-replay performance, reduced-motion browser,
+  public-edge, two-viewer, and real restart/recovery proof remain release
+  evidence gates rather than local code findings. `[repo/file verified]`
+- Coworld adapter TypeScript passes. `npm run certify` and `npm run run:episode`
+  were both attempted and stop before execution because exact pinned image
+  `proxywar-coworld-local:coworld-3e7e218fc73f` is absent locally and denied by
+  the registry. No substitute image was relabeled; therefore Coworld
+  certification and replay-bearing episode proof remain blocked, not passed.
+  `[repo/file verified]`

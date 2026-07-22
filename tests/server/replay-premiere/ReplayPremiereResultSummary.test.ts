@@ -1,13 +1,20 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { encodePremiereAuthoritativeResult } from "../../../src/server/replay-premiere/ReplayPremiereAuthoritativeResult";
 import type { ReplayPremiereHttpTarget } from "../../../src/server/replay-premiere/ReplayPremiereHttp";
 import {
+  canonicalReplayPremiereJson,
   isSha256Hex,
   sha256Hex,
+  type ReplayPremiereJsonValue,
 } from "../../../src/server/replay-premiere/ReplayPremiereIntegrity";
+import type {
+  ReplayPremiereInteractionsSnapshot,
+  ReplayPremierePredictionResolution,
+} from "../../../src/server/replay-premiere/ReplayPremiereInteractions";
 import {
   assertPremiereResultSummaryAggregateOnly,
   buildPremiereResultSummary,
+  buildPremiereResultSummaryFromDurableEvidence,
   buildPremiereResultSummaryFromTarget,
   parsePremiereResultSummary,
   REPLAY_PREMIERE_RESULT_SUMMARY_KIND,
@@ -15,6 +22,7 @@ import {
 } from "../../../src/server/replay-premiere/ReplayPremiereResultSummary";
 import {
   authoritativeResultBytes,
+  authoritativeResultValue,
   eligibilityFixture,
   NOW,
   PREMIERE_ID,
@@ -24,38 +32,6 @@ import {
 const COMMITMENT = sha256Hex("commitment");
 const RECLAIMED_AT = "2026-07-20T18:45:00.000Z";
 const REVEALED_AT = "2026-07-20T18:00:01.000Z";
-
-function checkpointView(options: {
-  id: string;
-  sequence: number;
-  distribution: Record<string, number>;
-  total: number;
-  correct: number | null;
-}): unknown {
-  return {
-    id: options.id,
-    sequence: options.sequence,
-    opensAt: null,
-    closesAt: null,
-    outageShiftMs: 0,
-    optionSeatIds: ["SEAT0001", "SEAT0002"],
-    state: "closed",
-    participantPrediction: null,
-    distribution: options.distribution,
-    totalPredictions: options.total,
-    resolution:
-      options.correct === null
-        ? { kind: "void", reason: "no_winner", resolvedAt: REVEALED_AT }
-        : { kind: "winner", winnerSeatId: "SEAT0001", resolvedAt: REVEALED_AT },
-    crowdAccuracy:
-      options.correct === null
-        ? null
-        : {
-            correctPredictions: options.correct,
-            totalPredictions: options.total,
-          },
-  };
-}
 
 function reaction(options: {
   participantId: string;
@@ -76,7 +52,76 @@ function reaction(options: {
   };
 }
 
-function revealedTarget(): ReplayPremiereHttpTarget {
+function revealedTarget(
+  resolution: ReplayPremierePredictionResolution | null = {
+    kind: "winner",
+    winnerSeatId: "SEAT0001",
+    resolvedAt: REVEALED_AT,
+  },
+): ReplayPremiereHttpTarget {
+  const checkpoint = (id: string, sequence: number) => ({
+    id,
+    sequence,
+    opensAt: "2026-07-20T17:58:00.000Z",
+    closesAt: "2026-07-20T17:59:00.000Z",
+    outageShiftMs: 0,
+    optionSeatIds: ["SEAT0001", "SEAT0002"],
+    state: "closed" as const,
+    resolution,
+  });
+  const prediction = (
+    checkpointId: string,
+    participant: string,
+    selectedSeatId: string,
+  ) => ({
+    premiereId: PREMIERE_ID,
+    checkpointId,
+    participantId: `guest_${participant.repeat(32)}`,
+    selectedSeatId,
+    submittedAt: "2026-07-20T17:58:10.000Z",
+    lockedAt: "2026-07-20T17:58:10.000Z",
+  });
+  const interactionState = {
+    schemaVersion: 1,
+    premiereId: PREMIERE_ID,
+    checkpoints: [
+      checkpoint("cp_first00000001", 35),
+      checkpoint("cp_second0000001", 65),
+    ],
+    predictions: [
+      prediction("cp_first00000001", "a", "SEAT0001"),
+      prediction("cp_first00000001", "b", "SEAT0001"),
+      prediction("cp_first00000001", "c", "SEAT0001"),
+      prediction("cp_first00000001", "d", "SEAT0002"),
+      prediction("cp_second0000001", "a", "SEAT0001"),
+      prediction("cp_second0000001", "b", "SEAT0001"),
+      prediction("cp_second0000001", "c", "SEAT0002"),
+      prediction("cp_second0000001", "d", "SEAT0002"),
+    ],
+    reactions: [
+      reaction({
+        participantId: `guest_${"a".repeat(32)}`,
+        sequence: 300,
+        turn: 3,
+        kind: "betrayal",
+      }),
+      reaction({
+        participantId: `guest_${"b".repeat(32)}`,
+        sequence: 300,
+        turn: 3,
+        kind: "betrayal",
+      }),
+      reaction({
+        participantId: `guest_${"c".repeat(32)}`,
+        sequence: 500,
+        turn: 5,
+        kind: "smart",
+      }),
+    ],
+    shares: [],
+    sessions: [],
+    lastNonDirectAttributionByParticipant: [],
+  } as unknown as ReplayPremiereInteractionsSnapshot;
   return {
     runtime: {
       premiereId: PREMIERE_ID,
@@ -107,52 +152,19 @@ function revealedTarget(): ReplayPremiereHttpTarget {
       }),
     },
     interactions: {
-      readCheckpoints: () => [
-        checkpointView({
-          id: "cp_first00000001",
-          sequence: 35,
-          distribution: { SEAT0001: 3, SEAT0002: 1 },
-          total: 4,
-          correct: 3,
-        }),
-        checkpointView({
-          id: "cp_second0000001",
-          sequence: 65,
-          distribution: { SEAT0001: 2, SEAT0002: 2 },
-          total: 4,
-          correct: 2,
-        }),
-      ],
-      readState: () => ({
-        reactions: [
-          reaction({
-            participantId: `guest_${"a".repeat(32)}`,
-            sequence: 300,
-            turn: 3,
-            kind: "betrayal",
-          }),
-          reaction({
-            participantId: `guest_${"b".repeat(32)}`,
-            sequence: 300,
-            turn: 3,
-            kind: "betrayal",
-          }),
-          reaction({
-            participantId: `guest_${"c".repeat(32)}`,
-            sequence: 500,
-            turn: 5,
-            kind: "smart",
-          }),
-        ],
-      }),
+      readCheckpoints: () => {
+        throw new Error("summary must not trust the derived checkpoint view");
+      },
+      readState: vi.fn(() => interactionState),
     },
   } as unknown as ReplayPremiereHttpTarget;
 }
 
 describe("buildPremiereResultSummaryFromTarget", () => {
   it("builds an aggregate outcome, predictions, and deduped markers", () => {
+    const target = revealedTarget();
     const summary = buildPremiereResultSummaryFromTarget({
-      target: revealedTarget(),
+      target,
       terminalState: "revealed",
       reclaimedAt: RECLAIMED_AT,
     });
@@ -197,6 +209,32 @@ describe("buildPremiereResultSummaryFromTarget", () => {
       { kind: "smart", turn: 5, count: 1 },
     ]);
     expect(isSha256Hex(summary.summaryHash)).toBe(true);
+    expect(target.interactions.readState).toHaveBeenCalledTimes(1);
+  });
+
+  it("derives authoritative accuracy when the live snapshot has no stored resolution", () => {
+    const summary = buildPremiereResultSummaryFromTarget({
+      target: revealedTarget(null),
+      terminalState: "revealed",
+      reclaimedAt: RECLAIMED_AT,
+    });
+    expect(
+      summary.predictions.map((entry) => entry.correctPredictions),
+    ).toEqual([3, 2]);
+  });
+
+  it("fails closed when the live snapshot resolution conflicts with the result", () => {
+    expect(() =>
+      buildPremiereResultSummaryFromTarget({
+        target: revealedTarget({
+          kind: "winner",
+          winnerSeatId: "SEAT0002",
+          resolvedAt: REVEALED_AT,
+        }),
+        terminalState: "revealed",
+        reclaimedAt: RECLAIMED_AT,
+      }),
+    ).toThrow(/summary_prediction_resolution_mismatch/);
   });
 
   it("contains no per-viewer identifiers anywhere in the summary", () => {
@@ -214,6 +252,184 @@ describe("buildPremiereResultSummaryFromTarget", () => {
     expect(() =>
       assertPremiereResultSummaryAggregateOnly(summary),
     ).not.toThrow();
+  });
+});
+
+describe("buildPremiereResultSummaryFromDurableEvidence", () => {
+  const interactionState = (
+    resolution: ReplayPremierePredictionResolution | null,
+  ): ReplayPremiereInteractionsSnapshot => {
+    const checkpoint = (id: string, sequence: number) => ({
+      id,
+      sequence,
+      opensAt: "2026-07-20T17:58:00.000Z",
+      closesAt: "2026-07-20T17:59:00.000Z",
+      outageShiftMs: 0,
+      optionSeatIds: ["SEAT0001", "SEAT0002"],
+      state: "closed" as const,
+      resolution,
+    });
+    return {
+      schemaVersion: 1,
+      premiereId: PREMIERE_ID,
+      checkpoints: [
+        checkpoint("cp_first00000001", 35),
+        checkpoint("cp_second0000001", 65),
+      ],
+      predictions: [
+        {
+          premiereId: PREMIERE_ID,
+          checkpointId: "cp_first00000001",
+          participantId: `guest_${"a".repeat(32)}`,
+          selectedSeatId: "SEAT0001",
+          submittedAt: "2026-07-20T17:58:10.000Z",
+          lockedAt: "2026-07-20T17:58:10.000Z",
+        },
+        {
+          premiereId: PREMIERE_ID,
+          checkpointId: "cp_first00000001",
+          participantId: `guest_${"b".repeat(32)}`,
+          selectedSeatId: "SEAT0002",
+          submittedAt: "2026-07-20T17:58:20.000Z",
+          lockedAt: "2026-07-20T17:58:20.000Z",
+        },
+      ],
+      reactions: [
+        reaction({
+          participantId: `guest_${"a".repeat(32)}`,
+          sequence: 300,
+          turn: 3,
+          kind: "smart",
+        }),
+        reaction({
+          participantId: `guest_${"b".repeat(32)}`,
+          sequence: 301,
+          turn: 3,
+          kind: "smart",
+        }),
+      ],
+      shares: [],
+      sessions: [],
+      lastNonDirectAttributionByParticipant: [],
+    } as unknown as ReplayPremiereInteractionsSnapshot;
+  };
+
+  const buildFrom = (
+    resultBytes: Uint8Array,
+    state: ReplayPremiereInteractionsSnapshot,
+  ) => {
+    const authoritative = encodePremiereAuthoritativeResult(resultBytes);
+    return buildPremiereResultSummaryFromDurableEvidence({
+      premiereId: PREMIERE_ID,
+      sourceRunId: "controlled-run-001",
+      sourceKind: "controlled_exhibition",
+      publicationCommitmentHash: COMMITMENT,
+      terminalState: "revealed",
+      revealedAt: REVEALED_AT,
+      reclaimedAt: RECLAIMED_AT,
+      eligibilityRecord: eligibilityFixture({ resultBytes }),
+      authoritativeResultBase64: authoritative.bytes,
+      interactionState: state,
+    });
+  };
+
+  const resultBytesWith = (
+    winner: ReplayPremiereJsonValue,
+    seats: ReplayPremiereJsonValue,
+  ): Buffer =>
+    Buffer.from(
+      canonicalReplayPremiereJson(authoritativeResultValue({ winner, seats })),
+      "utf8",
+    );
+
+  it("keeps only aggregate predictions and markers with a matching stored resolution", () => {
+    const summary = buildFrom(
+      authoritativeResultBytes(),
+      interactionState({
+        kind: "winner",
+        winnerSeatId: "SEAT0001",
+        resolvedAt: REVEALED_AT,
+      }),
+    );
+
+    expect(summary.predictions[0]).toEqual({
+      checkpointId: "cp_first00000001",
+      sequence: 35,
+      totalPredictions: 2,
+      options: [
+        { seatId: "SEAT0001", count: 1 },
+        { seatId: "SEAT0002", count: 1 },
+      ],
+      correctPredictions: 1,
+    });
+    expect(summary.markers).toEqual([{ kind: "smart", turn: 3, count: 2 }]);
+    expect(JSON.stringify(summary)).not.toContain("guest_");
+    expect(JSON.stringify(summary)).not.toContain("participantId");
+    expect(() =>
+      assertPremiereResultSummaryAggregateOnly(summary),
+    ).not.toThrow();
+  });
+
+  it("derives accuracy from the verified result when stored resolutions are absent", () => {
+    const summary = buildFrom(
+      authoritativeResultBytes(),
+      interactionState(null),
+    );
+    expect(
+      summary.predictions.map((entry) => entry.correctPredictions),
+    ).toEqual([1, 0]);
+  });
+
+  it("fails closed when any stored resolution conflicts with the verified result", () => {
+    expect(() =>
+      buildFrom(
+        authoritativeResultBytes(),
+        interactionState({
+          kind: "winner",
+          winnerSeatId: "SEAT0002",
+          resolvedAt: REVEALED_AT,
+        }),
+      ),
+    ).toThrow(/summary_prediction_resolution_mismatch/);
+  });
+
+  it("keeps no-winner predictions void with a matching stored void", () => {
+    const bytes = resultBytesWith(null, [
+      { seatId: "SEAT0001", displayName: "Alpha", won: false },
+      { seatId: "SEAT0002", displayName: "Beta", won: false },
+    ]);
+    const summary = buildFrom(
+      bytes,
+      interactionState({
+        kind: "void",
+        reason: "no_winner",
+        resolvedAt: REVEALED_AT,
+      }),
+    );
+    expect(
+      summary.predictions.map((entry) => entry.correctPredictions),
+    ).toEqual([null, null]);
+  });
+
+  it("derives an ambiguous-winner void and accepts only that stored reason", () => {
+    const bytes = resultBytesWith(
+      ["player", "SEAT0001", "SEAT0002"],
+      [
+        { seatId: "SEAT0001", displayName: "Alpha", won: true },
+        { seatId: "SEAT0002", displayName: "Beta", won: true },
+      ],
+    );
+    const summary = buildFrom(
+      bytes,
+      interactionState({
+        kind: "void",
+        reason: "ambiguous_winner",
+        resolvedAt: REVEALED_AT,
+      }),
+    );
+    expect(
+      summary.predictions.map((entry) => entry.correctPredictions),
+    ).toEqual([null, null]);
   });
 });
 

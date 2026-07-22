@@ -26,6 +26,11 @@ describe("ReplayPremiereInteractions", () => {
       ) => void;
       minHeartbeatIntervalMs?: number;
       initialNowMs?: number;
+      onGetReleasedContext?: (sequence: number) => void;
+      beforePersist?: (
+        eventType: string,
+        nextState: ReplayPremiereInteractionsSnapshot,
+      ) => Promise<void>;
     },
   ) {
     let nowMs =
@@ -68,16 +73,19 @@ describe("ReplayPremiereInteractions", () => {
         },
       ],
       getPremiereState: () => premiereState,
-      getReleasedContext: (sequence) =>
-        sequence <= releasedThroughSequence
+      getReleasedContext: (sequence) => {
+        overrides?.onGetReleasedContext?.(sequence);
+        return sequence <= releasedThroughSequence
           ? {
               releasedThroughSequence,
               turn: sequence,
               eventContext: { headline: `released-${sequence}` },
             }
-          : null,
+          : null;
+      },
       persistence: {
         async persist({ eventType, nextState }) {
+          await overrides?.beforePersist?.(eventType, nextState);
           persisted.push({ eventType, state: structuredClone(nextState) });
         },
       },
@@ -371,6 +379,138 @@ describe("ReplayPremiereInteractions", () => {
     ).rejects.toMatchObject({ httpStatus: 410 });
   });
 
+  it("returns aggregate crowd reactions plus participant-only counts", async () => {
+    const h = harness();
+    const sessionA = await createSession(h, guestA);
+    const sessionB = await createSession(h, guestB);
+    await submitReaction(h, {
+      participantId: guestA,
+      sessionId: sessionA.id,
+      sequence: 10,
+      kind: "smart",
+    });
+    await submitReaction(h, {
+      participantId: guestB,
+      sessionId: sessionB.id,
+      sequence: 11,
+      kind: "smart",
+    });
+    await submitReaction(h, {
+      participantId: guestB,
+      sessionId: sessionB.id,
+      sequence: 12,
+      kind: "mistake",
+    });
+
+    expect(h.interactions.readReactionSummary(guestA)).toEqual({
+      totalReactions: 3,
+      distinctParticipants: 2,
+      byKind: {
+        turning_point: 0,
+        smart: 2,
+        mistake: 1,
+        betrayal: 0,
+        clip_this: 0,
+      },
+      ownByKind: {
+        turning_point: 0,
+        smart: 1,
+        mistake: 0,
+        betrayal: 0,
+        clip_this: 0,
+      },
+    });
+    expect(h.interactions.readReactionSummary(null)).toMatchObject({
+      totalReactions: 3,
+      distinctParticipants: 2,
+      ownByKind: null,
+    });
+
+    const recovered = harness(h.interactions.readState());
+    expect(recovered.interactions.readReactionSummary(guestB)).toEqual({
+      totalReactions: 3,
+      distinctParticipants: 2,
+      byKind: {
+        turning_point: 0,
+        smart: 2,
+        mistake: 1,
+        betrayal: 0,
+        clip_this: 0,
+      },
+      ownByKind: {
+        turning_point: 0,
+        smart: 1,
+        mistake: 1,
+        betrayal: 0,
+        clip_this: 0,
+      },
+    });
+  });
+
+  it("indexes released reactions once across summaries and non-reaction mutations", async () => {
+    const releasedContextCalls = new Map<number, number>();
+    const h = harness(undefined, {
+      onGetReleasedContext(sequence) {
+        releasedContextCalls.set(
+          sequence,
+          (releasedContextCalls.get(sequence) ?? 0) + 1,
+        );
+      },
+    });
+    const sessionA = await createSession(h, guestA);
+    const sessionB = await createSession(h, guestB);
+    for (const marker of [
+      { participantId: guestA, sessionId: sessionA.id, sequence: 10 },
+      { participantId: guestB, sessionId: sessionB.id, sequence: 11 },
+      { participantId: guestB, sessionId: sessionB.id, sequence: 12 },
+    ]) {
+      await submitReaction(h, { ...marker, kind: "smart" });
+    }
+    expect(
+      [10, 11, 12].map((sequence) => releasedContextCalls.get(sequence)),
+    ).toEqual([1, 1, 1]);
+
+    for (let index = 0; index < 20; index += 1) {
+      h.interactions.readReactionSummary(index % 2 === 0 ? guestA : null);
+    }
+    h.advance(1_000);
+    await h.interactions.heartbeat({
+      participantId: guestA,
+      sessionId: sessionA.id,
+      idempotencyKey: h.nextIdempotencyKey(),
+      requesterBucketId: `ip_${"1".repeat(32)}`,
+      visible: true,
+      observedSequence: 35,
+    });
+    expect(
+      [10, 11, 12].map((sequence) => releasedContextCalls.get(sequence)),
+    ).toEqual([1, 1, 1]);
+
+    await submitReaction(h, {
+      participantId: guestA,
+      sessionId: sessionA.id,
+      sequence: 13,
+      kind: "betrayal",
+    });
+    expect(releasedContextCalls.get(13)).toBe(1);
+    const appended = h.interactions.readReactionSummary(guestA);
+    expect(appended).toMatchObject({
+      totalReactions: 4,
+      distinctParticipants: 2,
+      byKind: { smart: 3, betrayal: 1 },
+      ownByKind: { smart: 1, betrayal: 1 },
+    });
+    appended.byKind.smart = 999;
+    if (appended.ownByKind !== null) appended.ownByKind.smart = 999;
+    expect(h.interactions.readReactionSummary(guestA)).toMatchObject({
+      byKind: { smart: 3 },
+      ownByKind: { smart: 1 },
+    });
+    expect(
+      [10, 11, 12, 13].map((sequence) => releasedContextCalls.get(sequence)),
+    ).toEqual([1, 1, 1, 1]);
+  });
+
   it("qualifies visible or interacting sessions once per participant and preserves last non-direct attribution", async () => {
     const h = harness();
     const sourceSession = await h.interactions.createViewerSession({
@@ -558,6 +698,73 @@ describe("ReplayPremiereInteractions", () => {
     expect(() =>
       h.interactions.restoreState(h.interactions.readState()),
     ).not.toThrow();
+  });
+
+  it("fences later writes while draining and retaining already queued state", async () => {
+    let releasePersistence!: () => void;
+    const persistenceGate = new Promise<void>((resolve) => {
+      releasePersistence = resolve;
+    });
+    let notifyPersistenceEntered!: () => void;
+    const persistenceEntered = new Promise<void>((resolve) => {
+      notifyPersistenceEntered = resolve;
+    });
+    const h = harness(undefined, {
+      async beforePersist(eventType) {
+        if (eventType !== "viewer_session_started") return;
+        notifyPersistenceEntered();
+        await persistenceGate;
+      },
+    });
+
+    const admittedBeforeFence = createSession(h, guestA);
+    await persistenceEntered;
+    const drain = h.interactions.fenceWritesAndDrain();
+    expect(h.interactions.fenceWritesAndDrain()).toBe(drain);
+    await expect(createSession(h, guestB)).rejects.toMatchObject({
+      httpStatus: 410,
+      operatorCode: "interaction_writes_fenced",
+    });
+    expect(h.admissions).toHaveLength(1);
+
+    releasePersistence();
+    const admittedSession = await admittedBeforeFence;
+    await expect(drain).resolves.toBeUndefined();
+    expect(h.interactions.readState().sessions).toEqual([
+      expect.objectContaining({ id: admittedSession.id }),
+    ]);
+    expect(h.persisted).toHaveLength(1);
+    await expect(createSession(h, guestC)).rejects.toMatchObject({
+      httpStatus: 410,
+      operatorCode: "interaction_writes_fenced",
+    });
+  });
+
+  it("fails a write drain closed while a prepared transition is active", async () => {
+    const h = harness();
+    const prepared = h.interactions.prepareOpenCheckpoint({
+      checkpointId: "cp_first0001",
+      opensAt: h.now(),
+      closesAt: new Date(
+        Date.parse(h.now()) + REPLAY_PREMIERE_CHECKPOINT_PAUSE_MS,
+      ).toISOString(),
+      optionSeatIds: ["seat-1", "SEAT0001"],
+    });
+    await expect(h.interactions.fenceWritesAndDrain()).rejects.toMatchObject({
+      httpStatus: 409,
+      operatorCode: "interaction_prepared_transition_during_write_drain",
+    });
+    prepared.abort();
+    expect(() =>
+      h.interactions.prepareOpenCheckpoint({
+        checkpointId: "cp_first0001",
+        opensAt: h.now(),
+        closesAt: new Date(
+          Date.parse(h.now()) + REPLAY_PREMIERE_CHECKPOINT_PAUSE_MS,
+        ).toISOString(),
+        optionSeatIds: ["seat-1", "SEAT0001"],
+      }),
+    ).toThrow(/interaction_writes_fenced/);
   });
 
   it("fails closed on malformed restart projections instead of trusting typed input", async () => {

@@ -266,6 +266,43 @@ export interface ReplayPremiereInteractionMetrics {
   attributedQualifiedParticipants: number;
 }
 
+/**
+ * Public, release-gated crowd signal. No reaction ids, viewer ids, turns, or
+ * event context cross this boundary. `ownByKind` is present only for the
+ * authenticated participant requesting the view.
+ */
+export interface ReplayPremiereReactionSummary {
+  totalReactions: number;
+  distinctParticipants: number;
+  byKind: Record<ReplayPremiereReactionKind, number>;
+  ownByKind: Record<ReplayPremiereReactionKind, number> | null;
+}
+
+interface ReplayPremiereReactionIndex {
+  totalReactions: number;
+  byKind: Record<ReplayPremiereReactionKind, number>;
+  byParticipantKind: Map<string, Record<ReplayPremiereReactionKind, number>>;
+  byParticipantTotal: Map<string, number>;
+  ids: Set<string>;
+  dedupeKeys: Set<string>;
+  createdAtMsByParticipant: Map<string, number[]>;
+  lastReactionId: string | null;
+}
+
+interface ReplayPremiereValidatedReactionAppend {
+  reaction: ReplayPremiereReaction;
+  releasedContext: ReplayPremiereReleasedContext;
+}
+
+interface ReplayPremiereAppendOnlyReactionValidation {
+  index: ReplayPremiereReactionIndex;
+  appended: ReplayPremiereValidatedReactionAppend | null;
+}
+
+interface ReplayPremiereReactionIndexCapture {
+  value: ReplayPremiereReactionIndex | null;
+}
+
 export interface ReplayPremierePreparedInteractionTransition<T> {
   /** Immutable-by-contract snapshot the coordinator includes in its write. */
   nextState: ReplayPremiereInteractionsSnapshot;
@@ -430,6 +467,9 @@ export class ReplayPremiereInteractions {
   private pendingMutations = 0;
   private stateEpoch = 0;
   private preparedTransitionToken: object | null = null;
+  private reactionIndex: ReplayPremiereReactionIndex;
+  private writesFenced = false;
+  private writeFenceDrain: Promise<void> | null = null;
 
   constructor(options: ReplayPremiereInteractionsOptions) {
     assertPremiereId(options.premiereId);
@@ -478,9 +518,18 @@ export class ReplayPremiereInteractions {
       limits: this.limits,
       initialState: undefined,
     };
-    this.state = options.initialState
-      ? validateSnapshot(clone(options.initialState), options)
-      : createInitialSnapshot(options);
+    if (options.initialState === undefined) {
+      this.state = createInitialSnapshot(options);
+      this.reactionIndex = createReactionIndex();
+    } else {
+      const recovered = validateSnapshotAndCreateReactionIndex(
+        clone(options.initialState),
+        options,
+      );
+      this.state = recovered.snapshot;
+      this.reactionIndex = recovered.reactionIndex;
+    }
+    freezeReactionEvidence(this.state.reactions);
   }
 
   readState(): ReplayPremiereInteractionsSnapshot {
@@ -488,14 +537,38 @@ export class ReplayPremiereInteractions {
   }
 
   restoreState(snapshot: ReplayPremiereInteractionsSnapshot): void {
+    this.assertWritesOpen();
     if (this.preparedTransitionToken !== null || this.pendingMutations !== 0) {
       throw conflict("interaction_restore_while_busy");
     }
-    this.state = validateSnapshot(
+    const restored = validateSnapshotAndCreateReactionIndex(
       clone(snapshot),
       this.snapshotValidationOptions,
     );
+    this.reactionIndex = restored.reactionIndex;
+    freezeReactionEvidence(restored.snapshot.reactions);
+    this.state = restored.snapshot;
     this.stateEpoch += 1;
+  }
+
+  /**
+   * Irreversibly closes write admission for terminal reclamation. Mutations
+   * admitted before the fence retain their queue position and are allowed to
+   * settle; later callers fail before entering the queue.
+   */
+  fenceWritesAndDrain(): Promise<void> {
+    if (this.writeFenceDrain !== null) return this.writeFenceDrain;
+    this.writesFenced = true;
+    const admittedQueue = this.mutationQueue;
+    this.writeFenceDrain = admittedQueue.then(() => {
+      if (this.pendingMutations !== 0) {
+        throw conflict("interaction_write_drain_incomplete");
+      }
+      if (this.preparedTransitionToken !== null) {
+        throw conflict("interaction_prepared_transition_during_write_drain");
+      }
+    });
+    return this.writeFenceDrain;
   }
 
   usesAnonymousWriteAdmission(
@@ -510,6 +583,26 @@ export class ReplayPremiereInteractions {
     return this.state.checkpoints.map((checkpoint) =>
       this.readCheckpoint(checkpoint.id, participantId),
     );
+  }
+
+  readReactionSummary(
+    participantId: string | null,
+  ): ReplayPremiereReactionSummary {
+    if (participantId !== null) assertParticipantId(participantId);
+    this.assertReactionIndexSynchronized();
+    const ownCounts =
+      participantId === null
+        ? null
+        : this.reactionIndex.byParticipantKind.get(participantId);
+    return {
+      totalReactions: this.reactionIndex.totalReactions,
+      distinctParticipants: this.reactionIndex.byParticipantKind.size,
+      byKind: cloneReactionCounts(this.reactionIndex.byKind),
+      ownByKind:
+        participantId === null
+          ? null
+          : cloneReactionCounts(ownCounts ?? emptyReactionCounts()),
+    };
   }
 
   readShareMoment(shareId: string): ReplayPremiereShareMoment | null {
@@ -842,6 +935,7 @@ export class ReplayPremiereInteractions {
     checkpointId: string;
     selectedSeatId: string;
   }): Promise<{ prediction: ReplayPremierePrediction; idempotent: boolean }> {
+    this.assertWritesOpen();
     const occurredAt = this.nowChecked().toISOString();
     assertParticipantId(options.participantId);
     assertSessionId(options.sessionId);
@@ -934,6 +1028,7 @@ export class ReplayPremiereInteractions {
     kind: ReplayPremiereReactionKind;
     policySeatId?: string | null;
   }): Promise<{ reaction: ReplayPremiereReaction; idempotent: boolean }> {
+    this.assertWritesOpen();
     const occurredAt = this.nowChecked().toISOString();
     assertParticipantId(options.participantId);
     assertSessionId(options.sessionId);
@@ -1029,12 +1124,15 @@ export class ReplayPremiereInteractions {
         createdAt: occurredAt,
       };
       assertPremiereRecordCapacity(next, this.limits, 1);
-      next.reactions.push(reaction);
       recordSessionAction(session, "reaction", occurredAt);
       return {
         result: { reaction: clone(reaction), idempotent: false },
         payload: json({ reaction }),
         persistenceIdempotencyKey: `interaction:reaction:${options.participantId}:${options.sequence}:${options.kind}`,
+        appendedReaction: {
+          reaction,
+          releasedContext: clone(context),
+        },
       };
     });
   }
@@ -1052,6 +1150,7 @@ export class ReplayPremiereInteractions {
     url: string;
     idempotent: boolean;
   }> {
+    this.assertWritesOpen();
     const occurredAt = this.nowChecked().toISOString();
     assertParticipantId(options.participantId);
     assertSessionId(options.sessionId);
@@ -1205,6 +1304,7 @@ export class ReplayPremiereInteractions {
     excludedAsBot: boolean;
     incomingAttribution?: ReplayPremiereShareAttribution | null;
   }): Promise<ReplayPremiereViewerSession> {
+    this.assertWritesOpen();
     const occurredAt = this.nowChecked().toISOString();
     assertParticipantId(options.participantId);
     assertIdempotencyKey(options.idempotencyKey);
@@ -1366,6 +1466,7 @@ export class ReplayPremiereInteractions {
     idempotent: boolean;
     persisted: boolean;
   }> {
+    this.assertWritesOpen();
     const occurredAt = this.nowChecked().toISOString();
     assertParticipantId(options.participantId);
     assertSessionId(options.sessionId);
@@ -1556,17 +1657,47 @@ export class ReplayPremiereInteractions {
       payload: ReplayPremiereJsonValue;
       persist?: boolean;
       persistenceIdempotencyKey?: string;
+      appendedReaction?: ReplayPremiereValidatedReactionAppend;
     },
   ): Promise<T> {
+    this.assertWritesOpen();
+    this.assertReactionIndexSynchronized();
     this.pendingMutations += 1;
     const run = async (): Promise<T> => {
       if (this.preparedTransitionToken !== null) {
         throw conflict("checkpoint_transition_in_flight");
       }
-      const next = clone(this.state);
+      this.assertReactionIndexSynchronized();
+      const next = cloneSnapshotPreservingReactionEvidence(this.state);
       const mutation = operation(next);
-      if (mutation.persist === false) return mutation.result;
-      validateSnapshot(clone(next), this.snapshotValidationOptions);
+      const appendedReaction = mutation.appendedReaction ?? null;
+      if (mutation.persist === false) {
+        if (
+          appendedReaction !== null ||
+          next.reactions !== this.state.reactions
+        ) {
+          throw invalidInteraction("non_persisted_reaction_state_changed");
+        }
+        return mutation.result;
+      }
+      if (appendedReaction === null) {
+        if (next.reactions !== this.state.reactions) {
+          throw invalidInteraction("reaction_evidence_not_append_only");
+        }
+      } else {
+        if (
+          eventType !== "reaction_submitted" ||
+          next.reactions !== this.state.reactions
+        ) {
+          throw invalidInteraction("reaction_evidence_not_append_only");
+        }
+        next.reactions = [...this.state.reactions, appendedReaction.reaction];
+      }
+      validateSnapshot(next, this.snapshotValidationOptions, {
+        index: this.reactionIndex,
+        appended: appendedReaction,
+      });
+      freezeReactionEvidence(next.reactions);
       await this.persistence.persist({
         eventType,
         occurredAt,
@@ -1574,6 +1705,12 @@ export class ReplayPremiereInteractions {
         nextState: next,
         idempotencyKey: mutation.persistenceIdempotencyKey,
       });
+      if (appendedReaction !== null) {
+        appendValidatedReactionToIndex(
+          this.reactionIndex,
+          appendedReaction.reaction,
+        );
+      }
       this.state = next;
       this.stateEpoch += 1;
       return mutation.result;
@@ -1592,15 +1729,23 @@ export class ReplayPremiereInteractions {
   private prepareCheckpointTransition<T>(
     operation: (next: ReplayPremiereInteractionsSnapshot) => T,
   ): ReplayPremierePreparedInteractionTransition<T> {
+    this.assertWritesOpen();
+    this.assertReactionIndexSynchronized();
     if (this.preparedTransitionToken !== null || this.pendingMutations !== 0) {
       throw conflict("interaction_transition_already_in_flight");
     }
     const baseEpoch = this.stateEpoch;
     const baseStateHash = hashReplayPremiereJson(json(this.state));
-    const next = clone(this.state);
+    const next = cloneSnapshotPreservingReactionEvidence(this.state);
     const result = operation(next);
-    validateSnapshot(clone(next), this.snapshotValidationOptions);
-    const committedState = clone(next);
+    if (next.reactions !== this.state.reactions) {
+      throw invalidInteraction("reaction_evidence_not_append_only");
+    }
+    validateSnapshot(next, this.snapshotValidationOptions, {
+      index: this.reactionIndex,
+      appended: null,
+    });
+    const committedState = cloneSnapshotPreservingReactionEvidence(next);
     const token = Object.freeze({});
     this.preparedTransitionToken = token;
     let finished = false;
@@ -1623,7 +1768,7 @@ export class ReplayPremiereInteractions {
       result: clone(result),
       commit: () => {
         assertActive();
-        this.state = clone(committedState);
+        this.state = committedState;
         this.stateEpoch += 1;
         this.preparedTransitionToken = null;
         finished = true;
@@ -1634,6 +1779,23 @@ export class ReplayPremiereInteractions {
         finished = true;
       },
     };
+  }
+
+  private assertReactionIndexSynchronized(): void {
+    const reactions = this.state.reactions;
+    if (
+      reactions.length !== this.reactionIndex.totalReactions ||
+      (reactions.length === 0
+        ? this.reactionIndex.lastReactionId !== null
+        : reactions[reactions.length - 1].id !==
+          this.reactionIndex.lastReactionId)
+    ) {
+      throw invalidInteraction("reaction_index_state_mismatch");
+    }
+  }
+
+  private assertWritesOpen(): void {
+    if (this.writesFenced) throw gone("interaction_writes_fenced");
   }
 
   private randomHex(size: number): string {
@@ -1659,6 +1821,101 @@ export class ReplayPremiereInteractions {
       throw invalidInteraction("invalid_clock");
     return now;
   }
+}
+
+function emptyReactionCounts(): Record<ReplayPremiereReactionKind, number> {
+  return {
+    turning_point: 0,
+    smart: 0,
+    mistake: 0,
+    betrayal: 0,
+    clip_this: 0,
+  };
+}
+
+function cloneReactionCounts(
+  counts: Readonly<Record<ReplayPremiereReactionKind, number>>,
+): Record<ReplayPremiereReactionKind, number> {
+  return {
+    turning_point: counts.turning_point,
+    smart: counts.smart,
+    mistake: counts.mistake,
+    betrayal: counts.betrayal,
+    clip_this: counts.clip_this,
+  };
+}
+
+function createReactionIndex(): ReplayPremiereReactionIndex {
+  return {
+    totalReactions: 0,
+    byKind: emptyReactionCounts(),
+    byParticipantKind: new Map(),
+    byParticipantTotal: new Map(),
+    ids: new Set(),
+    dedupeKeys: new Set(),
+    createdAtMsByParticipant: new Map(),
+    lastReactionId: null,
+  };
+}
+
+function appendValidatedReactionToIndex(
+  index: ReplayPremiereReactionIndex,
+  reaction: ReplayPremiereReaction,
+): void {
+  const participantCounts =
+    index.byParticipantKind.get(reaction.participantId) ??
+    emptyReactionCounts();
+  participantCounts[reaction.kind] += 1;
+  index.byParticipantKind.set(reaction.participantId, participantCounts);
+  index.byParticipantTotal.set(
+    reaction.participantId,
+    (index.byParticipantTotal.get(reaction.participantId) ?? 0) + 1,
+  );
+  const createdAtMs = index.createdAtMsByParticipant.get(
+    reaction.participantId,
+  );
+  if (createdAtMs === undefined) {
+    index.createdAtMsByParticipant.set(reaction.participantId, [
+      Date.parse(reaction.createdAt),
+    ]);
+  } else {
+    createdAtMs.push(Date.parse(reaction.createdAt));
+  }
+  index.totalReactions += 1;
+  index.byKind[reaction.kind] += 1;
+  index.ids.add(reaction.id);
+  index.dedupeKeys.add(reactionDedupeKey(reaction));
+  index.lastReactionId = reaction.id;
+}
+
+function reactionDedupeKey(reaction: ReplayPremiereReaction): string {
+  return `${reaction.participantId}\u0000${reaction.sequence}\u0000${reaction.kind}`;
+}
+
+function cloneSnapshotPreservingReactionEvidence(
+  snapshot: ReplayPremiereInteractionsSnapshot,
+): ReplayPremiereInteractionsSnapshot {
+  const reactionEvidence = snapshot.reactions;
+  const withoutReactionEvidence: ReplayPremiereInteractionsSnapshot = {
+    ...snapshot,
+    reactions: [],
+  };
+  const cloned = clone(withoutReactionEvidence);
+  cloned.reactions = reactionEvidence;
+  return cloned;
+}
+
+function freezeReactionEvidence(reactions: ReplayPremiereReaction[]): void {
+  for (const reaction of reactions) deepFreeze(reaction);
+  Object.freeze(reactions);
+}
+
+function deepFreeze(value: unknown): void {
+  if (value === null || typeof value !== "object" || Object.isFrozen(value)) {
+    return;
+  }
+  for (const child of Object.values(value)) deepFreeze(child);
+  Object.freeze(value);
 }
 
 function createInitialSnapshot(
@@ -1700,6 +1957,8 @@ function createInitialSnapshot(
 function validateSnapshot(
   snapshot: ReplayPremiereInteractionsSnapshot,
   options: ReplayPremiereInteractionSnapshotValidationOptions,
+  appendOnlyReactions?: ReplayPremiereAppendOnlyReactionValidation,
+  reactionIndexCapture?: ReplayPremiereReactionIndexCapture,
 ): ReplayPremiereInteractionsSnapshot {
   const limits = resolveInteractionLimits(options.limits);
   if (!isRecord(snapshot)) {
@@ -1747,13 +2006,49 @@ function validateSnapshot(
   );
   validateSnapshotCheckpoints(snapshot, options, seatIdentityById);
   validateSnapshotPredictions(snapshot);
-  validateSnapshotReactions(snapshot, options, seatIdentityById);
+  let validatedReactionIndex: ReplayPremiereReactionIndex | null = null;
+  if (appendOnlyReactions === undefined) {
+    validatedReactionIndex = validateSnapshotReactions(
+      snapshot,
+      options.getReleasedContext,
+      seatIdentityById,
+    );
+  } else {
+    validateAppendOnlySnapshotReactions(
+      snapshot,
+      seatIdentityById,
+      appendOnlyReactions,
+    );
+  }
   validateSnapshotShares(snapshot, options);
   validateSnapshotSessions(snapshot, options);
   validateSnapshotAttributions(snapshot);
-  validateSnapshotSessionActionTotals(snapshot);
+  validateSnapshotSessionActionTotals(snapshot, appendOnlyReactions);
   validateSnapshotInteractionLimits(snapshot, limits);
+  if (reactionIndexCapture !== undefined) {
+    if (validatedReactionIndex === null) {
+      throw invalidInteraction(
+        "reaction_index_capture_without_full_validation",
+      );
+    }
+    reactionIndexCapture.value = validatedReactionIndex;
+  }
   return snapshot;
+}
+
+function validateSnapshotAndCreateReactionIndex(
+  snapshot: ReplayPremiereInteractionsSnapshot,
+  options: ReplayPremiereInteractionSnapshotValidationOptions,
+): {
+  snapshot: ReplayPremiereInteractionsSnapshot;
+  reactionIndex: ReplayPremiereReactionIndex;
+} {
+  const capture: ReplayPremiereReactionIndexCapture = { value: null };
+  const validated = validateSnapshot(snapshot, options, undefined, capture);
+  if (capture.value === null) {
+    throw invalidInteraction("reaction_index_initialization_failed");
+  }
+  return { snapshot: validated, reactionIndex: capture.value };
 }
 
 function validateSnapshotCheckpoints(
@@ -1955,9 +2250,10 @@ function validateSnapshotPredictions(
 
 function validateSnapshotReactions(
   snapshot: ReplayPremiereInteractionsSnapshot,
-  options: ReplayPremiereInteractionSnapshotValidationOptions,
+  getReleasedContext: ReplayPremiereInteractionSnapshotValidationOptions["getReleasedContext"],
   seatIdentityById: ReadonlyMap<string, string>,
-): void {
+): ReplayPremiereReactionIndex {
+  const index = createReactionIndex();
   const ids = new Set<string>();
   const dedupe = new Set<string>();
   const byParticipant = new Map<string, ReplayPremiereReaction[]>();
@@ -1983,7 +2279,7 @@ function validateSnapshotReactions(
       throw invalidInteraction("invalid_snapshot_reaction_kind");
     }
     timestamp(reaction.createdAt, "snapshot_reaction_created_at");
-    const context = options.getReleasedContext(reaction.sequence);
+    const context = getReleasedContext(reaction.sequence);
     if (
       reaction.premiereId !== snapshot.premiereId ||
       context === null ||
@@ -2019,6 +2315,7 @@ function validateSnapshotReactions(
     const participantRecords = byParticipant.get(reaction.participantId) ?? [];
     participantRecords.push(reaction);
     byParticipant.set(reaction.participantId, participantRecords);
+    appendValidatedReactionToIndex(index, reaction);
   }
   for (const reactions of byParticipant.values()) {
     if (reactions.length > 30) {
@@ -2035,6 +2332,69 @@ function validateSnapshotReactions(
       ) {
         throw invalidInteraction("snapshot_reaction_rate_exceeded");
       }
+    }
+  }
+  return index;
+}
+
+function validateAppendOnlySnapshotReactions(
+  snapshot: ReplayPremiereInteractionsSnapshot,
+  seatIdentityById: ReadonlyMap<string, string>,
+  validation: ReplayPremiereAppendOnlyReactionValidation,
+): void {
+  const { index, appended } = validation;
+  const expectedLength = index.totalReactions + (appended === null ? 0 : 1);
+  const priorTail = snapshot.reactions[index.totalReactions - 1];
+  if (
+    snapshot.reactions.length !== expectedLength ||
+    (index.totalReactions === 0
+      ? index.lastReactionId !== null
+      : priorTail?.id !== index.lastReactionId)
+  ) {
+    throw invalidInteraction("reaction_evidence_not_append_only");
+  }
+  if (appended === null) return;
+  if (snapshot.reactions[expectedLength - 1] !== appended.reaction) {
+    throw invalidInteraction("reaction_append_identity_mismatch");
+  }
+
+  // The release callback was consulted when the reaction entered the private
+  // mutation queue. Reuse that exact evidence here so a committed reaction is
+  // checked once, while recovered/external snapshots still take the full
+  // validation path above.
+  validateSnapshotReactions(
+    { ...snapshot, reactions: [appended.reaction] },
+    () => appended.releasedContext,
+    seatIdentityById,
+  );
+
+  const reaction = appended.reaction;
+  const dedupeKey = reactionDedupeKey(reaction);
+  if (index.ids.has(reaction.id)) {
+    throw invalidInteraction("duplicate_reaction_id");
+  }
+  if (index.dedupeKeys.has(dedupeKey)) {
+    throw invalidInteraction("duplicate_snapshot_reaction");
+  }
+  const participantTimes = [
+    ...(index.createdAtMsByParticipant.get(reaction.participantId) ?? []),
+    Date.parse(reaction.createdAt),
+  ];
+  assertReactionParticipantLimits(participantTimes);
+}
+
+function assertReactionParticipantLimits(times: readonly number[]): void {
+  if (times.length > 30) {
+    throw invalidInteraction("snapshot_reaction_total_exceeded");
+  }
+  const ordered = [...times].sort((left, right) => left - right);
+  for (let index = 0; index < ordered.length; index += 1) {
+    const windowStart = ordered[index] - 60_000;
+    if (
+      ordered.filter((time) => time > windowStart && time <= ordered[index])
+        .length > 5
+    ) {
+      throw invalidInteraction("snapshot_reaction_rate_exceeded");
     }
   }
 }
@@ -2295,13 +2655,17 @@ function validateSnapshotAttributions(
 
 function validateSnapshotSessionActionTotals(
   snapshot: ReplayPremiereInteractionsSnapshot,
+  appendOnlyReactions?: ReplayPremiereAppendOnlyReactionValidation,
 ): void {
   const expectedPredictions = countBy(
     snapshot.predictions.map((record) => record.participantId),
   );
-  const expectedReactions = countBy(
-    snapshot.reactions.map((record) => record.participantId),
-  );
+  const expectedReactions =
+    appendOnlyReactions === undefined
+      ? countBy(snapshot.reactions.map((record) => record.participantId))
+      : appendOnlyReactions.index.byParticipantTotal;
+  const appendedReactionParticipantId =
+    appendOnlyReactions?.appended?.reaction.participantId ?? null;
   const expectedShares = countBy(
     snapshot.shares.map((record) => record.createdByParticipantId),
   );
@@ -2315,6 +2679,9 @@ function validateSnapshotSessionActionTotals(
     ...expectedPredictions.keys(),
     ...expectedReactions.keys(),
     ...expectedShares.keys(),
+    ...(appendedReactionParticipantId === null
+      ? []
+      : [appendedReactionParticipantId]),
     ...actualPredictions.keys(),
     ...actualReactions.keys(),
     ...actualShares.keys(),
@@ -2324,7 +2691,8 @@ function validateSnapshotSessionActionTotals(
       (actualPredictions.get(participantId) ?? 0) !==
         (expectedPredictions.get(participantId) ?? 0) ||
       (actualReactions.get(participantId) ?? 0) !==
-        (expectedReactions.get(participantId) ?? 0) ||
+        (expectedReactions.get(participantId) ?? 0) +
+          (participantId === appendedReactionParticipantId ? 1 : 0) ||
       (actualShares.get(participantId) ?? 0) !==
         (expectedShares.get(participantId) ?? 0)
     ) {

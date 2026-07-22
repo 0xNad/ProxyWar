@@ -198,6 +198,8 @@ export interface ReplayPremiereProductionStartupOptions {
   archiveStore?: ReplayPremiereArchiveStore;
   reclamationGraceMs?: number;
   reclamationSweepMs?: number;
+  /** Permanently fences and drains queued/running clip work before live reclaim. */
+  fenceClipWritesAndDrain?: (premiereId: string) => Promise<void>;
   /** Premiere ids that must never be reclaimed nor compacted out at startup. */
   reclamationExcludedPremiereIds?: readonly string[];
   /**
@@ -577,6 +579,9 @@ export async function startReplayPremiereProduction(
                 DEFAULT_REPLAY_PREMIERE_RECLAMATION_GRACE_MS,
               now: () => clock.now(),
               excludedPremiereIds: options.reclamationExcludedPremiereIds,
+              interactionEventStore: activeEventStore,
+              interactionLimits: options.interactionLimits,
+              fenceClipWritesAndDrain: options.fenceClipWritesAndDrain,
               // Durable-clip promotion telemetry rides the runtime diagnostic
               // channel (operator-visible, never authoritative).
               logger: (message) =>
@@ -625,17 +630,29 @@ export async function startReplayPremiereProduction(
       }
     }
     const startupOrderingNowMs = clock.now().getTime();
+    // A durable archive pointer is an irreversible write-admission fence. A
+    // crash may leave the old catalog admission behind after pointer commit;
+    // never reconstruct or register that target, even briefly, because its
+    // immutable summary can no longer absorb new reactions. The admission
+    // remains in startupPlans so the orphan/existing-pointer cleanup path can
+    // verify evidence and finish clip promotion + bulk deletion.
+    const alreadyArchivedPremiereIds = new Set(
+      options.archiveStore?.reclaimedPremiereIds() ?? [],
+    );
+    const liveStartupPlans = startupPlans.filter(
+      (plan) => !alreadyArchivedPremiereIds.has(plan.record.premiereId),
+    );
     // Belt-and-suspenders (2026-07-22 round-649 outage class): ordering and
     // selection are pure and should never throw, but no admission may crash
     // the process — a failure here registers nothing this boot and reports,
     // instead of rejecting the whole startup.
     let criticalPlans: ReplayPremiereStartupPlan[];
     try {
-      startupPlans.sort((left, right) =>
+      liveStartupPlans.sort((left, right) =>
         compareStartupPlans(left, right, startupOrderingNowMs),
       );
       criticalPlans = selectCriticalStartupPlans(
-        startupPlans,
+        liveStartupPlans,
         options.reclamationExcludedPremiereIds ?? [],
       );
     } catch (error) {

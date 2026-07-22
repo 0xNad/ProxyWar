@@ -17,8 +17,10 @@ import {
   validateReplayPremiereInteractionsSnapshot,
   type ReplayPremiereInteractionCheckpoint,
   type ReplayPremiereInteractionPersistence,
+  type ReplayPremiereInteractionSnapshotValidationOptions,
   type ReplayPremiereInteractionsOptions,
   type ReplayPremiereInteractionsSnapshot,
+  type ReplayPremiereReleasedContext,
 } from "./ReplayPremiereInteractions";
 
 const INTERACTION_AGGREGATE_PREFIX = "interaction:";
@@ -128,14 +130,18 @@ export async function loadReplayPremiereInteractions(options: {
 export async function recoverReplayPremiereInteractionState(options: {
   eventStore: ReplayPremiereInteractionEventStore;
   initialState: ReplayPremiereInteractionsSnapshot;
-  validationOptions: ReplayPremiereRecoveredInteractionsOptions;
+  validationOptions: ReplayPremiereInteractionSnapshotValidationOptions;
+  /** Optional atomic view already read by a bounded terminal-recovery caller. */
+  recoveryView?: ReplayPremiereEventRecoveryView;
 }): Promise<ReplayPremiereInteractionRecovery> {
   const premiereId = options.validationOptions.premiereId;
   if (options.initialState.premiereId !== premiereId) {
     throw recoveryIntegrity("interaction_initial_state_premiere_mismatch");
   }
   const aggregateId = replayPremiereInteractionAggregateId(premiereId);
-  const recoveryView = await options.eventStore.readRecoveryView(aggregateId);
+  const recoveryView =
+    options.recoveryView ??
+    (await options.eventStore.readRecoveryView(aggregateId));
   const recovered = recoveryView.recovery;
   assertGlobalEventOrder(recovered.events, recovered.lastEventSequence);
   const durableSnapshot = recoveryView.snapshot;
@@ -196,6 +202,51 @@ export async function recoverReplayPremiereInteractionState(options: {
     snapshot: state,
     eventCursor: recovered.lastEventSequence,
     stateHash: stateHash(state),
+  });
+}
+
+/**
+ * Recovers the terminal premiere's durable interaction state without creating
+ * a live runtime. The summary path needs this after a restart, while the
+ * orphan has no registered target to expose `ReplayPremiereInteractions`.
+ *
+ * A revealed/archived premiere has released its complete source, so observed
+ * session sequences are public. Reaction/share turn and event-context values
+ * are still cross-checked against the same hash-chained records themselves;
+ * malformed or conflicting evidence throws and reclamation leaves the bulk in
+ * place. No interaction aggregate means `null`, not invented empty events.
+ */
+export async function recoverReplayPremiereTerminalInteractionState(options: {
+  eventStore: ReplayPremiereInteractionEventStore;
+  validationOptions: Omit<
+    ReplayPremiereInteractionSnapshotValidationOptions,
+    "getReleasedContext"
+  >;
+}): Promise<ReplayPremiereInteractionRecovery | null> {
+  const premiereId = options.validationOptions.premiereId;
+  const aggregateId = replayPremiereInteractionAggregateId(premiereId);
+  const recoveryView = await options.eventStore.readRecoveryView(aggregateId);
+  const hasInteractionEvidence = recoveryView.recovery.events.some(
+    (event) => event.aggregateId === aggregateId,
+  );
+  if (!hasInteractionEvidence && recoveryView.snapshot === null) return null;
+
+  const getReleasedContext = terminalReleasedContextEvidence(
+    recoveryView,
+    premiereId,
+  );
+  const validationOptions: ReplayPremiereInteractionSnapshotValidationOptions =
+    {
+      ...options.validationOptions,
+      getReleasedContext,
+    };
+  const initialState =
+    createReplayPremiereInitialInteractionsSnapshot(validationOptions);
+  return recoverReplayPremiereInteractionState({
+    eventStore: options.eventStore,
+    initialState,
+    validationOptions,
+    recoveryView,
   });
 }
 
@@ -681,6 +732,116 @@ function parseTransitionPayload(
     baseMutableStateHash: payload.baseMutableStateHash,
     nextMutableStateHash: payload.nextMutableStateHash,
     deltas,
+  };
+}
+
+function terminalReleasedContextEvidence(
+  recoveryView: ReplayPremiereEventRecoveryView,
+  premiereId: string,
+): (sequence: number) => ReplayPremiereReleasedContext | null {
+  const aggregateId = replayPremiereInteractionAggregateId(premiereId);
+  const contexts = new Map<
+    number,
+    {
+      turn: number;
+      eventContext: ReplayPremiereJsonValue | null;
+      exact: boolean;
+    }
+  >();
+  const add = (
+    sequenceValue: unknown,
+    turnValue: unknown,
+    eventContext: ReplayPremiereJsonValue | null,
+    exact: boolean,
+  ): void => {
+    if (
+      !Number.isSafeInteger(sequenceValue) ||
+      Number(sequenceValue) < 0 ||
+      !Number.isSafeInteger(turnValue) ||
+      Number(turnValue) < 0
+    ) {
+      throw recoveryIntegrity("invalid_terminal_interaction_context");
+    }
+    const sequence = Number(sequenceValue);
+    const turn = Number(turnValue);
+    const existing = contexts.get(sequence);
+    if (
+      existing !== undefined &&
+      (existing.turn !== turn ||
+        (existing.exact &&
+          exact &&
+          jsonHash(asJson(existing.eventContext)) !==
+            jsonHash(asJson(eventContext))))
+    ) {
+      throw recoveryIntegrity("terminal_interaction_context_mismatch");
+    }
+    contexts.set(sequence, {
+      turn,
+      eventContext:
+        exact || existing === undefined
+          ? clone(eventContext)
+          : existing.eventContext,
+      exact: exact || existing?.exact === true,
+    });
+  };
+  const inspectRecords = (value: unknown): void => {
+    const state = record(value, "terminal interaction state");
+    if (!Array.isArray(state.reactions) || !Array.isArray(state.shares)) {
+      throw recoveryIntegrity("invalid_terminal_interaction_state");
+    }
+    for (const candidate of state.reactions) {
+      const reaction = record(candidate, "terminal reaction evidence");
+      const eventContext = reaction.eventContext;
+      if (eventContext !== null) {
+        assertReplayPremiereJsonValue(
+          eventContext,
+          "terminal reaction event context",
+        );
+      }
+      add(reaction.sequence, reaction.turn, eventContext, true);
+    }
+    for (const candidate of state.shares) {
+      const share = record(candidate, "terminal share evidence");
+      add(share.sequence, share.turn, null, false);
+    }
+  };
+
+  if (recoveryView.snapshot !== null) {
+    inspectRecords(recoveryView.snapshot.state);
+  }
+  for (const event of recoveryView.recovery.events) {
+    if (event.aggregateId !== aggregateId) continue;
+    const transition = parseTransitionPayload(event.payload);
+    for (const delta of transition.deltas) {
+      if (delta.collection === "reactions") {
+        for (const candidate of delta.upserts) {
+          const reaction = record(candidate, "terminal reaction delta");
+          const eventContext = reaction.eventContext;
+          if (eventContext !== null) {
+            assertReplayPremiereJsonValue(
+              eventContext,
+              "terminal reaction delta context",
+            );
+          }
+          add(reaction.sequence, reaction.turn, eventContext, true);
+        }
+      } else if (delta.collection === "shares") {
+        for (const candidate of delta.upserts) {
+          const share = record(candidate, "terminal share delta");
+          add(share.sequence, share.turn, null, false);
+        }
+      }
+    }
+  }
+
+  return (sequence: number): ReplayPremiereReleasedContext | null => {
+    if (!Number.isSafeInteger(sequence) || sequence < 0) return null;
+    const context = contexts.get(sequence);
+    return {
+      releasedThroughSequence: sequence,
+      turn: context?.turn ?? 0,
+      eventContext: clone(context?.eventContext ?? null),
+    };
   };
 }
 
