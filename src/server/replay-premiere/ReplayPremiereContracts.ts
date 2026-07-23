@@ -313,7 +313,9 @@ export const PREMIERE_CLIP_ANCHOR_BUCKET_TURNS = 10;
  * anchor is its center (`bucket*10 + 5`), so bucket 5 (turns 50-59, center 55)
  * is the earliest renderable bucket. Requests for earlier turns are rejected.
  */
-export const PREMIERE_CLIP_MIN_ANCHOR_TURN = 50;
+export const PREMIERE_CLIP_CAPTURE_LEAD_TURNS = 50;
+export const PREMIERE_CLIP_CAPTURE_TAIL_TURNS = 150;
+export const PREMIERE_CLIP_MIN_ANCHOR_TURN = PREMIERE_CLIP_CAPTURE_LEAD_TURNS;
 
 /** Upper bound on the bucket index encoded in routes/filenames (9 digits). */
 export const PREMIERE_CLIP_MAX_BUCKET = 999_999_999;
@@ -348,12 +350,29 @@ export interface PremiereClipStatusResponse {
   ready: PremiereClipReady | null;
 }
 
+/**
+ * Current replay-scoped clip eligibility. `renderableThroughTurn` is the
+ * highest turn whose source bytes are both retained and public to this
+ * viewer. It is deliberately NOT a lifecycle flag: an in-progress Premiere
+ * can expose a bounded prefix, while any retained completed replay exposes
+ * its complete supported range.
+ */
+export interface ReplayClipEligibility {
+  generationEnabled: boolean;
+  renderableThroughTurn: number | null;
+  sourceComplete: boolean;
+}
+
 /** The exact JSON the clip service writes for the tsx worker subprocess. */
 export interface PremiereClipJobSpec {
   premiereId: string;
   bundlePath: string;
   expectedBundleSha256: string;
   anchorTurn: number;
+  /** Highest source/released turn this job is permitted to render. */
+  renderableThroughTurn: number;
+  /** True only when the retained source is a complete terminal replay. */
+  sourceComplete: boolean;
   clipVersion: number;
   outDir: string;
   staticDir: string;

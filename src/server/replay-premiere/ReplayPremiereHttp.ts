@@ -10,7 +10,10 @@ import {
 } from "../agents/ProxyWarPublicArtifacts";
 import type { ReplayPremiereClientAddressResolver } from "./ReplayPremiereClientAddress";
 import type { ReplayPremiereClips } from "./ReplayPremiereClips";
-import type { PremiereState } from "./ReplayPremiereContracts";
+import type {
+  PremiereState,
+  ReplayClipEligibility,
+} from "./ReplayPremiereContracts";
 import {
   ReplayPremiereError,
   toPublicReplayPremiereFailure,
@@ -113,9 +116,8 @@ export interface ReplayPremiereHttpOptions {
   /** Must return a validated client address across any trusted proxy boundary. */
   resolveClientAddress?: ReplayPremiereClientAddressResolver;
   /**
-   * Clip cache service. When absent, clip routes fail closed with a bare 404
-   * (the PROXYWAR_CLIPS_ENABLED gate is off), indistinguishable from a
-   * nonexistent premiere.
+   * Replay-scoped clip cache service. When absent, clip routes fail closed
+   * with a bare 404 (the effective master + Premiere flags are off).
    */
   clips?: ReplayPremiereClips;
   /** Operator-only diagnostics sink; never serialized into the response. */
@@ -294,15 +296,24 @@ async function handlePremiereApiRequest(
         return;
       }
       case "clip_status": {
-        // Fail closed exactly like a nonexistent premiere when clips are
-        // disabled or the premiere is pre-reveal / has no cached artifact.
+        // Fail closed exactly like a nonexistent replay when generation is
+        // disabled or this immutable source has no cached artifact.
         if (options.clips === undefined) {
           throw unavailable("premiere_clips_disabled", 404);
         }
+        const clipState = runtime.readLifecycleState();
+        if (
+          clipState === "failed" ||
+          clipState === "cancelled" ||
+          clipState === "archived"
+        ) {
+          throw unavailable("premiere_clip_absent", 404);
+        }
         const status = options.clips.readStatus({
           premiereId: readRoute.premiereId,
-          lifecycleState: runtime.readLifecycleState(),
           bucket: readRoute.bucket,
+          sourceReplaySha256:
+            runtime.readBootstrap().provenance.sourceReplaySha256,
         });
         if (status.state === "absent") {
           throw unavailable("premiere_clip_absent", 404);
@@ -370,6 +381,11 @@ async function handlePremiereApiRequest(
           ...(interactionContractVersion >= 2
             ? {
                 clipsEnabled: options.clips !== undefined,
+                clipEligibility: await readClipEligibility(
+                  target,
+                  options.clips !== undefined,
+                  operationTimeoutMs,
+                ),
                 reactionSummary:
                   target.interactions.readReactionSummary(participantId),
               }
@@ -421,6 +437,11 @@ async function handlePremiereApiRequest(
           ...(interactionContractVersion >= 2
             ? {
                 clipsEnabled: options.clips !== undefined,
+                clipEligibility: await readClipEligibility(
+                  target,
+                  options.clips !== undefined,
+                  operationTimeoutMs,
+                ),
                 reactionSummary:
                   target.interactions.readReactionSummary(participantId),
               }
@@ -449,19 +470,32 @@ async function handlePremiereApiRequest(
         return;
       }
       case "clip": {
-        // Fail closed like a nonexistent premiere when clips are disabled or
-        // the premiere is pre-reveal (archived was already 410'd above).
+        // Replay lifecycle is not clip eligibility. Any public released prefix
+        // may render, while terminal/private states still fail closed.
         if (options.clips === undefined) {
           throw unavailable("premiere_clips_disabled", 404);
         }
         const state = target.runtime.readLifecycleState();
-        if (state !== "revealed") {
+        if (
+          state === "failed" ||
+          state === "cancelled" ||
+          state === "archived"
+        ) {
           throw unavailable("premiere_clip_unavailable", 404);
         }
-        const reveal = target.runtime.readReveal();
-        if (reveal === null) {
-          throw unavailable("premiere_clip_unavailable", 404);
+        const clipBody = parseClipBody(request.body);
+        const clipEligibility = await readClipEligibility(
+          target,
+          true,
+          operationTimeoutMs,
+        );
+        if (
+          !clipEligibility.generationEnabled ||
+          clipEligibility.renderableThroughTurn === null
+        ) {
+          throw unavailable("premiere_clip_range_unavailable", 404);
         }
+        const anchor = resolveClipAnchor(target, clipBody);
         // Shared anonymous-write admission, exactly like reaction/share writes
         // (which admit inside the interactions layer). Clips have no session.
         options.registry.admitAnonymousWrite({
@@ -474,14 +508,15 @@ async function handlePremiereApiRequest(
           occurredAt: new Date().toISOString(),
           currentPremiereRecordCount: 0,
         });
-        const anchor = resolveClipAnchor(target, parseClipBody(request.body));
         const status = await withTimeout(
           options.clips.requestClip({
             premiereId: writeRoute.premiereId,
-            lifecycleState: state,
             anchorTurn: anchor.turn,
             participantId,
-            sourceReplaySha256: reveal.sourceReplaySha256,
+            sourceReplaySha256:
+              target.runtime.readBootstrap().provenance.sourceReplaySha256,
+            renderableThroughTurn: clipEligibility.renderableThroughTurn,
+            sourceComplete: clipEligibility.sourceComplete,
           }),
           operationTimeoutMs,
         );
@@ -559,6 +594,11 @@ async function handleSessionWrite(options: {
     ...(options.interactionContractVersion >= 2
       ? {
           clipsEnabled: options.clipsEnabled,
+          clipEligibility: await readClipEligibility(
+            options.target,
+            options.clipsEnabled,
+            options.operationTimeoutMs,
+          ),
           reactionSummary: options.target.interactions.readReactionSummary(
             guest.participant.participantId,
           ),
@@ -572,6 +612,55 @@ async function handleSessionWrite(options: {
         }
       : {}),
   });
+}
+
+async function readClipEligibility(
+  target: ReplayPremiereHttpTarget,
+  serviceEnabled: boolean,
+  operationTimeoutMs: number,
+): Promise<ReplayClipEligibility> {
+  const unavailableEligibility: ReplayClipEligibility = {
+    generationEnabled: false,
+    renderableThroughTurn: null,
+    sourceComplete: false,
+  };
+  if (!serviceEnabled) return unavailableEligibility;
+  const state = target.runtime.readLifecycleState();
+  if (state === "failed" || state === "cancelled" || state === "archived") {
+    return unavailableEligibility;
+  }
+  try {
+    const reveal = target.runtime.readReveal();
+    if (reveal !== null) {
+      const finalContext = target.runtime.readReleasedContext(
+        reveal.finalSequence,
+      );
+      return {
+        generationEnabled: finalContext !== null,
+        renderableThroughTurn: finalContext?.turn ?? null,
+        sourceComplete: finalContext !== null,
+      };
+    }
+    const manifest = await withTimeout(
+      target.runtime.readManifest(),
+      operationTimeoutMs,
+    );
+    if (!("releasedThroughSequence" in manifest)) {
+      return unavailableEligibility;
+    }
+    const releasedContext = target.runtime.readReleasedContext(
+      manifest.releasedThroughSequence,
+    );
+    return {
+      generationEnabled: true,
+      renderableThroughTurn: releasedContext?.turn ?? null,
+      sourceComplete: false,
+    };
+  } catch {
+    // Clip availability is optional payoff state; a failed projection must not
+    // turn a valid heartbeat/session into a 503.
+    return unavailableEligibility;
+  }
 }
 
 function parseSessionBody(value: unknown): {

@@ -14,7 +14,8 @@ import type { PremiereState } from "../../../src/server/replay-premiere/ReplayPr
 
 const ATTRIBUTION = "Game art from OpenFront (openfront.io), CC BY-SA 4.0.";
 const NO_ENDORSEMENT = "Proxy War is an independent fork.";
-const SHA = "b".repeat(64);
+const SOURCE_BYTES = Buffer.from("fixture replay");
+const SHA = createHash("sha256").update(SOURCE_BYTES).digest("hex");
 const PREMIERE = "prem_autoclip00000001";
 const FINAL_SEQUENCE = 41;
 const FINAL_TURN = 987;
@@ -98,7 +99,7 @@ beforeEach(async () => {
     `${SHA}.replay`,
   );
   await fs.mkdir(path.dirname(sourcePath), { recursive: true });
-  await fs.writeFile(sourcePath, "fixture replay");
+  await fs.writeFile(sourcePath, SOURCE_BYTES);
 });
 
 afterEach(async () => {
@@ -120,6 +121,18 @@ function makeClips(
     spawnWorker: scriptedSpawn(["ok"]),
     ...overrides,
   });
+}
+
+function readAutoClipStatus(
+  clips: ReplayPremiereClips,
+  request: {
+    premiereId: string;
+    bucket: number;
+    lifecycleState?: PremiereState;
+  },
+) {
+  const sourceBoundRequest = { ...request, sourceReplaySha256: SHA };
+  return clips.readStatus(sourceBoundRequest);
 }
 
 async function waitFor(
@@ -152,7 +165,7 @@ describe("ReplayPremiereRevealAutoClip", () => {
 
     await waitFor(
       () =>
-        clips.readStatus({
+        readAutoClipStatus(clips, {
           premiereId: PREMIERE,
           lifecycleState: "revealed",
           bucket: Math.floor(FINAL_TURN / 10),
@@ -161,7 +174,7 @@ describe("ReplayPremiereRevealAutoClip", () => {
     );
     expect(auto.requestedRenderCount(PREMIERE)).toBe(1);
 
-    const status = clips.readStatus({
+    const status = readAutoClipStatus(clips, {
       premiereId: PREMIERE,
       lifecycleState: "revealed",
       bucket: Math.floor(FINAL_TURN / 10),
@@ -185,7 +198,7 @@ describe("ReplayPremiereRevealAutoClip", () => {
     auto.onPremiereRevealed(PREMIERE);
     await waitFor(
       () =>
-        clips.readStatus({
+        readAutoClipStatus(clips, {
           premiereId: PREMIERE,
           lifecycleState: "revealed",
           bucket: Math.floor(FINAL_TURN / 10),
@@ -216,7 +229,7 @@ describe("ReplayPremiereRevealAutoClip", () => {
     await new Promise((resolve) => setTimeout(resolve, 50));
     expect(auto.requestedRenderCount(PREMIERE)).toBe(2);
     expect(
-      clips.readStatus({
+      readAutoClipStatus(clips, {
         premiereId: PREMIERE,
         lifecycleState: "revealed",
         bucket: Math.floor(FINAL_TURN / 10),
@@ -242,7 +255,7 @@ describe("ReplayPremiereRevealAutoClip", () => {
     await new Promise((resolve) => setTimeout(resolve, 30));
     expect(auto.requestedRenderCount(PREMIERE)).toBe(0);
     expect(
-      clips.readStatus({
+      readAutoClipStatus(clips, {
         premiereId: PREMIERE,
         lifecycleState: "revealed",
         bucket: Math.floor(FINAL_TURN / 10),
@@ -253,7 +266,7 @@ describe("ReplayPremiereRevealAutoClip", () => {
     auto.onPremiereRevealed(PREMIERE);
     await waitFor(
       () =>
-        clips.readStatus({
+        readAutoClipStatus(clips, {
           premiereId: PREMIERE,
           lifecycleState: "revealed",
           bucket: Math.floor(FINAL_TURN / 10),

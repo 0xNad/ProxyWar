@@ -8,7 +8,10 @@ import {
   runReplayPremiereCoworldIngest,
 } from "../../../src/scripts/replay-premiere-ingest-coworld";
 import { ReplayPremiereAnonymousWriteLimiter } from "../../../src/server/replay-premiere/ReplayPremiereAnonymousWriteLimiter";
-import { freezeReplayPremiereCheckpointProjection } from "../../../src/server/replay-premiere/ReplayPremiereCheckpointProjection";
+import {
+  freezeReplayPremiereCheckpointProjection,
+  type ReplayPremiereCheckpointProjector,
+} from "../../../src/server/replay-premiere/ReplayPremiereCheckpointProjection";
 import { ReplayPremiereError } from "../../../src/server/replay-premiere/ReplayPremiereErrors";
 import { ReplayPremiereGuestSecurity } from "../../../src/server/replay-premiere/ReplayPremiereGuestSecurity";
 import { ReplayPremiereHttpRegistry } from "../../../src/server/replay-premiere/ReplayPremiereHttp";
@@ -339,19 +342,10 @@ describe("Replay Premiere rated Coworld ingestion", () => {
       httpRegistry,
       runtimeRegistry,
       checkpointProjector: {
-        async project({ gate }) {
-          const definition = gate.publicDefinition();
-          const optionSeatIds = definition.provenance.seats.map(
-            (seat) => seat.seatId,
+        async project() {
+          throw new Error(
+            "admission projection artifact must bypass startup projection",
           );
-          return freezeReplayPremiereCheckpointProjection({
-            premiereId: gate.premiereId,
-            publicationCommitmentHash: gate.publicationCommitmentHash,
-            checkpoints: [
-              { ...definition.checkpoints[0], optionSeatIds },
-              { ...definition.checkpoints[1], optionSeatIds },
-            ],
-          });
         },
       },
       clock: { now: () => new Date(NOW) },
@@ -525,10 +519,36 @@ async function createRatedAdmissionHarness(
       fetch: fixtureFetch,
       now: () => new Date(NOW),
       environment: { PROXYWAR_PUBLIC_URL: EXPECTED_ORIGIN },
+      checkpointProjector: ratedFixtureCheckpointProjector(),
     },
     fetchCalls: () => fetchCalls,
     privateStateRoot,
     servedRoot,
+  };
+}
+
+/**
+ * This eight-turn ingestion fixture exercises Coworld identity and admission,
+ * not deterministic survival at production checkpoint depth. Give admission
+ * an exact, gate-bound projection so the new pre-publication artifact contract
+ * is covered without pretending the tiny fixture is a representative match.
+ */
+function ratedFixtureCheckpointProjector(): ReplayPremiereCheckpointProjector {
+  return {
+    async project({ gate }) {
+      const definition = gate.publicDefinition();
+      const optionSeatIds = definition.provenance.seats.map(
+        (seat) => seat.seatId,
+      );
+      return freezeReplayPremiereCheckpointProjection({
+        premiereId: gate.premiereId,
+        publicationCommitmentHash: gate.publicationCommitmentHash,
+        checkpoints: [
+          { ...definition.checkpoints[0], optionSeatIds },
+          { ...definition.checkpoints[1], optionSeatIds },
+        ],
+      });
+    },
   };
 }
 

@@ -17,12 +17,26 @@ import {
   matchProxyWarLeagueClipWritePath,
 } from "../../src/server/agents/ProxyWarPublicArtifacts";
 import { ReplayPremiereClips } from "../../src/server/replay-premiere/ReplayPremiereClips";
+import { controlledSourceBytes } from "./replay-premiere/ReplayPremiereFixtures";
 
 const RUN_KEY = "league-coworld-ereq-1234abcd";
 const ATTRIBUTION = "Game art from OpenFront (openfront.io), CC BY-SA 4.0.";
 const NO_ENDORSEMENT = "Proxy War is an independent fork.";
+const CONTROLLED_SOURCE = JSON.parse(
+  controlledSourceBytes().toString("utf8"),
+) as {
+  gameRecord: Record<string, unknown> & { info: Record<string, unknown> };
+};
 const RECORD_BYTES = Buffer.from(
-  JSON.stringify({ info: { gitCommit: "test" }, turns: [] }),
+  JSON.stringify({
+    ...CONTROLLED_SOURCE.gameRecord,
+    info: {
+      ...CONTROLLED_SOURCE.gameRecord.info,
+      num_turns: 1_000,
+      winner: undefined,
+    },
+    turns: [],
+  }),
 );
 const RECORD_SHA = createHash("sha256").update(RECORD_BYTES).digest("hex");
 
@@ -122,7 +136,7 @@ async function waitReady(
   bucket: number,
 ) {
   for (let attempt = 0; attempt < 400; attempt++) {
-    const status = clips.readRunClipStatus({ runKey, bucket });
+    const status = await clips.readRunClipStatus({ runKey, bucket });
     if (status.state === "ready") return status;
     await new Promise((resolve) => setTimeout(resolve, 5));
   }
@@ -237,6 +251,172 @@ describe("AiLeagueRunClips", () => {
     await clips.close();
   });
 
+  test("invalidates a cached bucket when the retained replay bytes change", async () => {
+    const captured: unknown[] = [];
+    const clips = makeRunClips({}, captured);
+    await clips.requestRunClip({ runKey: RUN_KEY, anchorTurn: 605 });
+    await waitReady(clips, RUN_KEY, 60);
+
+    const replacement = Buffer.from(
+      JSON.stringify({
+        ...CONTROLLED_SOURCE.gameRecord,
+        gitCommit: "b".repeat(40),
+        info: {
+          ...CONTROLLED_SOURCE.gameRecord.info,
+          num_turns: 1_200,
+          winner: undefined,
+        },
+        turns: [],
+      }),
+    );
+    const replacementSha = createHash("sha256")
+      .update(replacement)
+      .digest("hex");
+    await fs.writeFile(
+      path.join(runsRoot, RUN_KEY, "game-record.json"),
+      replacement,
+    );
+
+    // The run key and bucket are unchanged, but the immutable source is not.
+    // Neither status nor the document route may serve the stale artifact.
+    expect(
+      (await clips.readRunClipStatus({ runKey: RUN_KEY, bucket: 60 })).state,
+    ).toBe("absent");
+    expect(
+      await clips.resolveRunClipFile({ runKey: RUN_KEY, bucket: 60 }),
+    ).toBeNull();
+
+    expect(
+      (await clips.requestRunClip({ runKey: RUN_KEY, anchorTurn: 605 })).state,
+    ).toBe("pending");
+    await waitReady(clips, RUN_KEY, 60);
+    expect(captured).toHaveLength(2);
+    expect(
+      (captured[1] as { expectedBundleSha256: string }).expectedBundleSha256,
+    ).toBe(replacementSha);
+    await clips.close();
+  });
+
+  test("rejects anchors outside the retained replay's supported range", async () => {
+    const clips = makeRunClips();
+    await expect(
+      clips.requestRunClip({ runKey: RUN_KEY, anchorTurn: 1_001 }),
+    ).rejects.toMatchObject({
+      httpStatus: 400,
+      operatorCode: "clip_anchor_outside_retained_range",
+    });
+    await clips.close();
+  });
+
+  test("rejects symlinked, malformed, and compacted sources before quota admission", async () => {
+    const clips = makeRunClips({
+      limits: { maxRendersPerPremierePerDay: 1 },
+    });
+    const recordPath = path.join(runsRoot, RUN_KEY, "game-record.json");
+    const outsidePath = path.join(root, "outside-game-record.json");
+    await fs.writeFile(outsidePath, RECORD_BYTES);
+    await fs.rm(recordPath);
+    await fs.symlink(outsidePath, recordPath);
+    expect(await clips.resolveRetainedRunSource(RUN_KEY)).toBeNull();
+    await expect(
+      clips.requestRunClip({ runKey: RUN_KEY, anchorTurn: 605 }),
+    ).rejects.toMatchObject({
+      httpStatus: 404,
+      operatorCode: "league_clip_replay_absent",
+    });
+
+    await fs.rm(recordPath);
+    await fs.writeFile(recordPath, Buffer.from("not-json"));
+    expect(await clips.resolveRetainedRunSource(RUN_KEY)).toBeNull();
+    await expect(
+      clips.requestRunClip({ runKey: RUN_KEY, anchorTurn: 605 }),
+    ).rejects.toMatchObject({ httpStatus: 404 });
+
+    await fs.writeFile(
+      recordPath,
+      JSON.stringify({
+        compacted: true,
+        info: { num_turns: 1_000 },
+        turns: [],
+      }),
+    );
+    expect(await clips.resolveRetainedRunSource(RUN_KEY)).toBeNull();
+    await expect(
+      clips.requestRunClip({ runKey: RUN_KEY, anchorTurn: 605 }),
+    ).rejects.toMatchObject({ httpStatus: 404 });
+
+    // All three refusals precede admission; the one-render daily allowance is
+    // still available after a valid retained artifact is restored.
+    await fs.writeFile(recordPath, RECORD_BYTES);
+    expect(
+      (await clips.requestRunClip({ runKey: RUN_KEY, anchorTurn: 605 })).state,
+    ).toBe("pending");
+    await clips.close();
+  });
+
+  test("rejects a schema-invalid retained record before quota or worker spawn", async () => {
+    const captured: unknown[] = [];
+    const clips = makeRunClips(
+      { limits: { maxRendersPerPremierePerDay: 1 } },
+      captured,
+    );
+    const recordPath = path.join(runsRoot, RUN_KEY, "game-record.json");
+    // Superficially render-shaped, but not a canonical GameRecord: it lacks
+    // the full analytics/start/config/player contract the replay client uses.
+    await fs.writeFile(
+      recordPath,
+      JSON.stringify({ info: { num_turns: 1_000 }, turns: [] }),
+    );
+    expect(await clips.resolveRetainedRunSource(RUN_KEY)).toBeNull();
+    await expect(
+      clips.requestRunClip({ runKey: RUN_KEY, anchorTurn: 605 }),
+    ).rejects.toMatchObject({
+      httpStatus: 404,
+      operatorCode: "league_clip_replay_absent",
+    });
+    expect(captured).toHaveLength(0);
+
+    // The refusal consumed neither the one-render quota nor a worker slot.
+    await fs.writeFile(recordPath, RECORD_BYTES);
+    expect(
+      (await clips.requestRunClip({ runKey: RUN_KEY, anchorTurn: 605 })).state,
+    ).toBe("pending");
+    await waitReady(clips, RUN_KEY, 60);
+    expect(captured).toHaveLength(1);
+    await clips.close();
+  });
+
+  test("enforces per-participant quota across distinct archived replay buckets", async () => {
+    const clips = makeRunClips({
+      limits: {
+        maxQueueDepth: 8,
+        maxRendersPerParticipantPerPremiere: 3,
+      },
+    });
+    for (const anchorTurn of [605, 705, 805]) {
+      expect(
+        (
+          await clips.requestRunClip({
+            runKey: RUN_KEY,
+            anchorTurn,
+            participantId: "opaque-requester-bucket",
+          })
+        ).state,
+      ).toBe("pending");
+    }
+    await expect(
+      clips.requestRunClip({
+        runKey: RUN_KEY,
+        anchorTurn: 905,
+        participantId: "opaque-requester-bucket",
+      }),
+    ).rejects.toMatchObject({
+      httpStatus: 429,
+      operatorCode: "clip_participant_quota_exceeded",
+    });
+    await clips.close();
+  });
+
   test("rejects malformed run keys and anchors before touching disk", async () => {
     const clips = makeRunClips();
     for (const runKey of ["..", "a/b", "a\\b", "", "x".repeat(181)]) {
@@ -298,12 +478,14 @@ describe("AiLeagueRunClips", () => {
         premiereId: sharedId,
         lifecycleState: "revealed",
         bucket: 60,
+        sourceReplaySha256: RECORD_SHA,
       }).state,
     ).toBe("absent");
     // ...and the run service still serves it after ITS index rebuild.
     await runClips.rebuildIndex();
     expect(
-      runClips.readRunClipStatus({ runKey: sharedId, bucket: 60 }).state,
+      (await runClips.readRunClipStatus({ runKey: sharedId, bucket: 60 }))
+        .state,
     ).toBe("ready");
     await runClips.close();
     await premiereClips.close();

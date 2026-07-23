@@ -1,4 +1,8 @@
 import {
+  mountReplayScopedLeagueClipControl,
+  type ReplayScopedLeagueClipControlHandle,
+} from "./ReplayClipControl";
+import {
   mountReplayPremiereOverlay,
   type ReplayPremiereCheckpointView,
   type ReplayPremiereMarkerKind,
@@ -74,6 +78,11 @@ export interface ReplayPremiereArchiveClip {
   byteLength: number;
 }
 
+export interface ReplayPremiereArchiveClipGenerationTarget {
+  kind: "league_run";
+  replayRunKey: string;
+}
+
 export interface ReplayPremiereArchivePayload {
   premiereId: string;
   sourceRunId: string;
@@ -81,6 +90,8 @@ export interface ReplayPremiereArchivePayload {
   terminalState: "revealed" | "archived" | "failed" | "cancelled";
   revealedAt: string | null;
   replayRunKey: string | null;
+  /** Retained replay identity authorized by the archive router for generation. */
+  clipGenerationTarget: ReplayPremiereArchiveClipGenerationTarget | null;
   /** Durable archived clip; null (or absent in older payloads) => no section. */
   clip: ReplayPremiereArchiveClip | null;
   summary: ArchiveSummary;
@@ -110,12 +121,15 @@ export function mountArchivedReplayPremiereOverlay(
   ambient = false,
 ): ReplayPremiereOverlayHandle {
   const model = { ...buildArchivedOverlayModel(payload), ambient };
-  const handle = mountReplayPremiereOverlay(model, {
+  let clipControl: ReplayScopedLeagueClipControlHandle | null = null;
+  const overlayHandle = mountReplayPremiereOverlay(model, {
     // The archived page is read-only, but the ambient toggle must still work:
     // re-mount the same summary with the ambient flag flipped. This gives the
     // archived surface a real compact mode so the league replay behind it is
     // watchable, instead of a live-looking button that silently no-ops.
     onAmbientChange: (request): void => {
+      clipControl?.dispose();
+      overlayHandle.dispose();
       mountArchivedReplayPremiereOverlay(payload, request.ambient);
     },
   });
@@ -125,8 +139,19 @@ export function mountArchivedReplayPremiereOverlay(
   // ambient mode when the underlying league replay exists — without resurrecting
   // the full share surface. They render outside the overlay's own body markup
   // (which this batch does not modify), so they are re-added on each mount.
-  augmentArchivedOverlayActions(handle.element, payload, ambient);
-  return handle;
+  clipControl = augmentArchivedOverlayActions(
+    overlayHandle.element,
+    payload,
+    ambient,
+  );
+  return {
+    element: overlayHandle.element,
+    hydrate: (nextModel): void => overlayHandle.hydrate(nextModel),
+    dispose(): void {
+      clipControl?.dispose();
+      overlayHandle.dispose();
+    },
+  };
 }
 
 /**
@@ -138,10 +163,10 @@ function augmentArchivedOverlayActions(
   overlayElement: HTMLElement,
   payload: ReplayPremiereArchivePayload,
   ambient: boolean,
-): void {
-  if (ambient) return;
+): ReplayScopedLeagueClipControlHandle | null {
+  if (ambient) return null;
   const body = overlayElement.querySelector(".rp-body");
-  if (body === null) return;
+  if (body === null) return null;
 
   const actions = document.createElement("section");
   actions.className = "rp-section rp-archived-actions";
@@ -178,6 +203,26 @@ function augmentArchivedOverlayActions(
     actions.append(downloadClip);
   }
 
+  // A retained rated replay may generate any additional moment through the
+  // ordinary league-run clip path, but playback identity alone is not
+  // generation authority. The server's explicit generation target must match
+  // that playback run exactly. Missing, malformed, or mismatched targets hide
+  // the control without probing capability. This path is replay-scoped: it
+  // never bootstraps a Premiere interaction session and deliberately coexists
+  // with the promoted-download fast path.
+  let clipControl: ReplayScopedLeagueClipControlHandle | null = null;
+  const clipGenerationRunKey = validatedClipGenerationRunKey(payload);
+  if (clipGenerationRunKey !== null) {
+    const clipGenerator = document.createElement("section");
+    clipGenerator.className = "rp-archived-clip-generation ai-league-clip";
+    clipGenerator.dataset.aiLeagueClip = "";
+    actions.append(clipGenerator);
+    clipControl = mountReplayScopedLeagueClipControl({
+      container: clipGenerator,
+      runKey: clipGenerationRunKey,
+    });
+  }
+
   const copyLink = document.createElement("button");
   copyLink.type = "button";
   copyLink.className = "rp-button rp-button-quiet";
@@ -191,6 +236,7 @@ function augmentArchivedOverlayActions(
   // Placed right after the first body card (the archived header / winner reveal)
   // so the watch CTA sits high, above the detailed results.
   body.insertBefore(actions, body.children[1] ?? null);
+  return clipControl;
 }
 
 function buildArchivedOverlayModel(
@@ -469,13 +515,19 @@ function parseArchivePayload(
       count: Number(entry.count),
     });
   }
+  const replayRunKey =
+    raw.replayRunKey === null ? null : String(raw.replayRunKey);
   return {
     premiereId: raw.premiereId,
     sourceRunId: raw.sourceRunId,
     sourceKind: raw.sourceKind,
     terminalState: raw.terminalState,
     revealedAt: raw.revealedAt === null ? null : String(raw.revealedAt),
-    replayRunKey: raw.replayRunKey === null ? null : String(raw.replayRunKey),
+    replayRunKey,
+    clipGenerationTarget: parseClipGenerationTarget(
+      raw.clipGenerationTarget,
+      replayRunKey,
+    ),
     clip: parseArchiveClip(raw.clip, raw.premiereId),
     summary: {
       premiereId: raw.premiereId,
@@ -493,6 +545,39 @@ function parseArchivePayload(
       formatLabel: optionalLabel(summary.formatLabel),
     },
   };
+}
+
+/**
+ * Optional generation authority is tolerant for legacy archives, but strict
+ * when present: only a league target matching the page's exact playback run
+ * can reach the shared clip controller.
+ */
+function parseClipGenerationTarget(
+  value: unknown,
+  replayRunKey: string | null,
+): ReplayPremiereArchiveClipGenerationTarget | null {
+  if (
+    replayRunKey === null ||
+    !isRecord(value) ||
+    value.kind !== "league_run" ||
+    value.replayRunKey !== replayRunKey
+  ) {
+    return null;
+  }
+  return { kind: "league_run", replayRunKey };
+}
+
+/** Revalidates direct callers too; parsing is not the only construction path. */
+function validatedClipGenerationRunKey(
+  payload: ReplayPremiereArchivePayload,
+): string | null {
+  const target = payload.clipGenerationTarget ?? null;
+  return target !== null &&
+    target.kind === "league_run" &&
+    payload.replayRunKey !== null &&
+    target.replayRunKey === payload.replayRunKey
+    ? target.replayRunKey
+    : null;
 }
 
 /** Tolerant read of an optional public label; anything non-string becomes null. */

@@ -9,6 +9,8 @@
  *   "bundlePath": string,            // admitted premiere bundle (read-only)
  *   "expectedBundleSha256": string,  // must match EXACTLY before anything else
  *   "anchorTurn": number,            // clip covers [anchorTurn-50, anchorTurn+150]
+ *   "renderableThroughTurn": number, // public/retained upper bound
+ *   "sourceComplete": boolean,       // permits terminal-window backshift
  *   "clipVersion": number,
  *   "outDir": string,                // clip.mp4 + render-manifest.json + frame dumps
  *   "staticDir": string,             // built client (served read-only over loopback)
@@ -34,6 +36,10 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { buildAssetUrl, type AssetManifest } from "../core/AssetUrls";
+import {
+  PREMIERE_CLIP_CAPTURE_LEAD_TURNS,
+  PREMIERE_CLIP_CAPTURE_TAIL_TURNS,
+} from "../server/replay-premiere/ReplayPremiereContracts";
 import {
   buildClipEncodeArgs,
   buildConcatFileContent,
@@ -73,8 +79,8 @@ import {
 const SCRIPT_DIR = path.dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = path.resolve(SCRIPT_DIR, "../..");
 
-const CAPTURE_LEAD_TICKS = 50;
-const CAPTURE_TAIL_TICKS = 150;
+const CAPTURE_LEAD_TICKS = PREMIERE_CLIP_CAPTURE_LEAD_TURNS;
+const CAPTURE_TAIL_TICKS = PREMIERE_CLIP_CAPTURE_TAIL_TURNS;
 /**
  * Leaves 210s of the production service's 360s job ceiling for the required
  * clean reload, second simulation pass, capture, and encode.
@@ -97,6 +103,8 @@ interface ClipJobSpec {
   bundlePath: string;
   expectedBundleSha256: string;
   anchorTurn: number;
+  renderableThroughTurn: number;
+  sourceComplete: boolean;
   clipVersion: number;
   outDir: string;
   staticDir: string;
@@ -170,14 +178,33 @@ async function readJobSpec(specPath: string): Promise<ClipJobSpec> {
     fail(`job spec field "cameraFit" must be "fill" or "whole-map"`);
   }
   const anchorTurn = requireNumber("anchorTurn");
-  if (anchorTurn <= CAPTURE_LEAD_TICKS) {
+  const renderableThroughTurn = requireNumber("renderableThroughTurn");
+  const sourceComplete = raw["sourceComplete"];
+  if (!Number.isSafeInteger(anchorTurn) || anchorTurn <= CAPTURE_LEAD_TICKS) {
     fail(`anchorTurn must be > ${CAPTURE_LEAD_TICKS}`);
+  }
+  if (
+    !Number.isSafeInteger(renderableThroughTurn) ||
+    renderableThroughTurn < anchorTurn
+  ) {
+    fail("renderableThroughTurn must include anchorTurn");
+  }
+  if (typeof sourceComplete !== "boolean") {
+    fail('job spec field "sourceComplete" must be a boolean');
+  }
+  if (
+    sourceComplete === false &&
+    anchorTurn + CAPTURE_TAIL_TICKS > renderableThroughTurn
+  ) {
+    fail("incomplete source does not include the full capture tail");
   }
   return {
     premiereId: requireString("premiereId"),
     bundlePath: requireString("bundlePath"),
     expectedBundleSha256: requireString("expectedBundleSha256").toLowerCase(),
     anchorTurn,
+    renderableThroughTurn,
+    sourceComplete,
     clipVersion: requireNumber("clipVersion"),
     outDir: requireString("outDir"),
     staticDir: requireString("staticDir"),
@@ -304,9 +331,31 @@ export function validateDiscoveredWinnerTerminalTick(
   return terminalTick;
 }
 
-interface ClipCaptureWindow {
+export interface ClipCaptureWindow {
   parkTick: number;
   endTick: number;
+}
+
+export function validateClipCaptureWindowWithinSource(
+  spec: Pick<
+    ClipJobSpec,
+    "anchorTurn" | "renderableThroughTurn" | "sourceComplete"
+  >,
+  terminalTick: number,
+  captureWindow: ClipCaptureWindow,
+): void {
+  if (spec.anchorTurn > terminalTick) {
+    fail("clip anchor exceeds the replay terminal turn");
+  }
+  if (captureWindow.endTick > spec.renderableThroughTurn) {
+    fail("clip capture window exceeds the retained/released range");
+  }
+  if (
+    !spec.sourceComplete &&
+    captureWindow.endTick < spec.anchorTurn + CAPTURE_TAIL_TICKS
+  ) {
+    fail("incomplete source attempted terminal-window backshift");
+  }
 }
 
 export interface InitialReplayRenderPlan {
@@ -1043,6 +1092,8 @@ async function main(): Promise<void> {
   let terminalTick = initialRenderPlan.terminalTick;
   let captureWindow = initialRenderPlan.captureWindow;
   if (captureWindow !== null) {
+    if (terminalTick === null) fail("capture terminal is unavailable");
+    validateClipCaptureWindowWithinSource(spec, terminalTick, captureWindow);
     log(
       `capture window ticks ${captureWindow.parkTick}->${captureWindow.endTick}` +
         ` (anchor ${spec.anchorTurn}, capped record end ${terminalTick ?? "unknown"})`,
@@ -1169,6 +1220,7 @@ async function main(): Promise<void> {
       });
       terminalTick = discoveredPlan.terminalTick;
       captureWindow = discoveredPlan.captureWindow;
+      validateClipCaptureWindowWithinSource(spec, terminalTick, captureWindow);
       terminalDiscoveryMs = Date.now() - discoveryStartedAt;
       const captureUrl = new URL(
         clipReplayPageUrl({
@@ -1338,6 +1390,8 @@ async function main(): Promise<void> {
       premiereId: spec.premiereId,
       sourceReplaySha256,
       anchorTurn: spec.anchorTurn,
+      renderableThroughTurn: spec.renderableThroughTurn,
+      sourceComplete: spec.sourceComplete,
       clipVersion: spec.clipVersion,
       captureMode,
       frameShape: frameProfile.shape,

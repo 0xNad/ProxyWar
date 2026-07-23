@@ -44,6 +44,14 @@ export interface PremiereArchiveClientPayload {
   /** The ordinary league replay run key to render behind the summary, or null. */
   replayRunKey: string | null;
   /**
+   * Canonical generation target for a retained, renderable completed replay.
+   * Capability flags remain the independent process-level emergency gate.
+   */
+  clipGenerationTarget: {
+    kind: "league_run";
+    replayRunKey: string;
+  } | null;
+  /**
    * The durable archived clip, when one was promoted at reclamation and still
    * exists on disk (retention-bounded). Availability is a stat of the artifact
    * — the durable summary schema is untouched.
@@ -58,6 +66,8 @@ export interface ReplayPremiereArchiveRouterOptions {
   loadAppShell(): Promise<string>;
   publicOrigin: string;
   pageContentSecurityPolicy: string;
+  /** True only while the ordinary replay source is retained and renderable. */
+  resolveClipGenerationTarget?: (replayRunKey: string) => Promise<boolean>;
   onOperatorError?: (error: unknown) => void;
 }
 
@@ -281,6 +291,19 @@ async function handleArchivedDocumentRequest(context: {
     options.registry,
     route.premiereId,
   );
+  const replayRunKey =
+    summary.sourceKind === "rated_coworld"
+      ? publicRunKeyForSourceRunId(summary.sourceRunId)
+      : null;
+  const clipGenerationTarget =
+    replayRunKey !== null &&
+    summary.revealedAt !== null &&
+    (summary.terminalState === "revealed" ||
+      summary.terminalState === "archived") &&
+    options.resolveClipGenerationTarget !== undefined &&
+    (await options.resolveClipGenerationTarget(replayRunKey).catch(() => false))
+      ? { kind: "league_run" as const, replayRunKey }
+      : null;
   const payload: PremiereArchiveClientPayload = {
     schemaVersion: 1,
     premiereId: summary.premiereId,
@@ -288,10 +311,8 @@ async function handleArchivedDocumentRequest(context: {
     sourceKind: summary.sourceKind,
     terminalState: summary.terminalState,
     revealedAt: summary.revealedAt,
-    replayRunKey:
-      summary.sourceKind === "rated_coworld"
-        ? publicRunKeyForSourceRunId(summary.sourceRunId)
-        : null,
+    replayRunKey,
+    clipGenerationTarget,
     clip:
       clip === null
         ? null

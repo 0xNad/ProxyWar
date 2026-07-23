@@ -6,13 +6,19 @@ import {
   executeReplayPremiereAdmissionCli,
   runReplayPremiereAdmission,
 } from "../../../src/scripts/replay-premiere-admit";
+import { runLoopReplayPremiereAdmission } from "../../../src/scripts/replay-premiere-loop";
 import { ReplayPremiereAnonymousWriteLimiter } from "../../../src/server/replay-premiere/ReplayPremiereAnonymousWriteLimiter";
 import { ReplayPremiereAdmissionCatalog } from "../../../src/server/replay-premiere/ReplayPremiereCatalog";
+import {
+  freezeReplayPremiereCheckpointProjection,
+  type ReplayPremiereCheckpointProjector,
+} from "../../../src/server/replay-premiere/ReplayPremiereCheckpointProjection";
 import { ReplayPremiereError } from "../../../src/server/replay-premiere/ReplayPremiereErrors";
 import { ReplayPremiereGuestSecurity } from "../../../src/server/replay-premiere/ReplayPremiereGuestSecurity";
 import { ReplayPremiereHttpRegistry } from "../../../src/server/replay-premiere/ReplayPremiereHttp";
 import {
   canonicalReplayPremiereJson,
+  hashReplayPremiereJson,
   sha256Hex,
   type ReplayPremiereJsonValue,
 } from "../../../src/server/replay-premiere/ReplayPremiereIntegrity";
@@ -105,6 +111,32 @@ describe("Replay Premiere operator admission command", () => {
     expect(await admissionEntries(harness.privateStateRoot)).toEqual([
       `${PREMIERE_ID}.admission.json`,
     ]);
+    const projectionArtifactName =
+      `${PREMIERE_ID}.${String(output.admissionRecordHash)}` +
+      ".checkpoint-projection.json";
+    expect(await projectionEntries(harness.privateStateRoot)).toEqual([
+      projectionArtifactName,
+    ]);
+    const projectionArtifact = JSON.parse(
+      await fs.readFile(
+        path.join(
+          harness.privateStateRoot,
+          "catalog-v1",
+          "checkpoint-projections",
+          projectionArtifactName,
+        ),
+        "utf8",
+      ),
+    ) as Record<string, unknown>;
+    expect(projectionArtifact).toMatchObject({
+      premiereId: PREMIERE_ID,
+      admissionRecordHash: output.admissionRecordHash,
+      sourceReplaySha256: output.sourceReplaySha256,
+      eligibilityRecordHash: output.eligibilityRecordHash,
+      publicationCommitmentHash: output.publicationCommitmentHash,
+      orderedDraftManifestRoot: output.orderedDraftManifestRoot,
+    });
+    expect(projectionArtifact.artifactHash).toMatch(/^[a-f0-9]{64}$/);
     const stored = JSON.parse(
       await fs.readFile(
         path.join(
@@ -127,6 +159,206 @@ describe("Replay Premiere operator admission command", () => {
         ),
       ),
     ).toEqual(new Set([EXPECTED_ORIGIN]));
+  });
+
+  test("releases the catalog lock while the direct projector does expensive work", async () => {
+    const harness = await createHarness(root);
+    const projector = harness.dependencies.checkpointProjector;
+    let concurrentRead = false;
+
+    const admitted = await runReplayPremiereAdmission(harness.args, {
+      ...harness.dependencies,
+      checkpointProjector: {
+        async project(options) {
+          const concurrent = await ReplayPremiereAdmissionCatalog.open({
+            privateStateRoot: harness.privateStateRoot,
+            servedRoots: [harness.servedRoot],
+          });
+          try {
+            expect(await concurrent.readAll()).toEqual({
+              entries: [],
+              failures: [],
+            });
+            concurrentRead = true;
+          } finally {
+            await concurrent.close();
+          }
+          return projector.project(options);
+        },
+      },
+    });
+
+    expect(concurrentRead).toBe(true);
+    expect(admitted.premiereId).toBe(PREMIERE_ID);
+    expect(await admissionEntries(harness.privateStateRoot)).toEqual([
+      `${PREMIERE_ID}.admission.json`,
+    ]);
+    expect(await projectionEntries(harness.privateStateRoot)).toHaveLength(1);
+  });
+
+  test("rolls back a projected artifact when admission visibility fails", async () => {
+    const harness = await createHarness(root);
+    let artifactObserved = false;
+    let projectionArtifactName = "";
+    await expect(
+      runReplayPremiereAdmission(harness.args, {
+        ...harness.dependencies,
+        afterCheckpointProjectionPublished: async (artifact) => {
+          artifactObserved = true;
+          projectionArtifactName =
+            `${PREMIERE_ID}.${artifact.admissionRecordHash}` +
+            ".checkpoint-projection.json";
+          expect(artifact.premiereId).toBe(PREMIERE_ID);
+          expect(await projectionEntries(harness.privateStateRoot)).toEqual([
+            projectionArtifactName,
+          ]);
+          expect(await admissionEntries(harness.privateStateRoot)).toEqual([]);
+          throw new Error("injected before catalog visibility");
+        },
+      }),
+    ).rejects.toThrow("injected before catalog visibility");
+
+    expect(artifactObserved).toBe(true);
+    expect(await projectionEntries(harness.privateStateRoot)).toEqual([]);
+    expect(await admissionEntries(harness.privateStateRoot)).toEqual([]);
+
+    const retried = await runReplayPremiereAdmission(harness.args, {
+      ...harness.dependencies,
+      now: () => new Date(NOW.getTime() + 1),
+    });
+    expect(retried.admissionRecordHash).not.toBe(
+      projectionArtifactName.split(".")[1],
+    );
+    expect(await admissionEntries(harness.privateStateRoot)).toEqual([
+      `${PREMIERE_ID}.admission.json`,
+    ]);
+    expect(await projectionEntries(harness.privateStateRoot)).toHaveLength(1);
+  });
+
+  test("keeps the loop hold when Catalog cannot resolve a linked admission", async () => {
+    const harness = await createHarness(root);
+    let publicationFailed = false;
+    let cleanupFailed = false;
+
+    const result = await runLoopReplayPremiereAdmission({
+      args: harness.args,
+      premiereId: PREMIERE_ID,
+      bundleSha256: harness.sourceSha256,
+      environment: { PROXYWAR_PUBLIC_URL: EXPECTED_ORIGIN },
+      runAdmission: (args, loopDependencies) =>
+        runReplayPremiereAdmission(args, {
+          ...harness.dependencies,
+          ...loopDependencies,
+          admissionPublicationFaultInjector: (phase) => {
+            if (!publicationFailed && phase === "after_admission_link") {
+              publicationFailed = true;
+              throw new Error("injected linked admission failure");
+            }
+            if (!cleanupFailed && phase === "before_cleanup_admission_unlink") {
+              cleanupFailed = true;
+              throw Object.assign(new Error("injected admission unlink EIO"), {
+                code: "EIO",
+              });
+            }
+          },
+        }),
+    });
+
+    expect(publicationFailed).toBe(true);
+    expect(cleanupFailed).toBe(true);
+    expect(result).toEqual({
+      kind: "hold",
+      reason: "admission_state_uncertain",
+    });
+    expect(await admissionEntries(harness.privateStateRoot)).toEqual([
+      `${PREMIERE_ID}.admission.json`,
+    ]);
+    expect(await projectionEntries(harness.privateStateRoot)).toHaveLength(1);
+  });
+
+  test("an aborted checkpoint projection publishes neither artifact nor admission", async () => {
+    const harness = await createHarness(root);
+    const controller = new AbortController();
+    controller.abort();
+
+    await expectOperatorCode(
+      runReplayPremiereAdmission(harness.args, {
+        ...harness.dependencies,
+        checkpointProjectionSignal: controller.signal,
+        checkpointProjector: {
+          async project({ signal }) {
+            expect(signal).not.toBe(controller.signal);
+            expect(signal.aborted).toBe(true);
+            throw new ReplayPremiereError(
+              "checkpoint_projection_aborted",
+              "PREMIERE_UNAVAILABLE",
+              503,
+              "checkpoint projection aborted",
+            );
+          },
+        },
+      }),
+      "checkpoint_projection_aborted",
+    );
+
+    expect(await admissionEntries(harness.privateStateRoot)).toEqual([]);
+    expect(await projectionEntries(harness.privateStateRoot)).toEqual([]);
+  });
+
+  test("bounds a direct admission projector and publishes nothing after its full prelude", async () => {
+    const harness = await createHarness(root);
+    let observedAbort = false;
+
+    await expectOperatorCode(
+      runReplayPremiereAdmission(harness.args, {
+        ...harness.dependencies,
+        checkpointProjectionTimeoutMs: 10,
+        checkpointProjector: {
+          async project({ signal }) {
+            return new Promise((_resolve, reject) => {
+              signal.addEventListener(
+                "abort",
+                () => {
+                  observedAbort = true;
+                  reject(new Error("projector observed intrinsic deadline"));
+                },
+                { once: true },
+              );
+            });
+          },
+        },
+      }),
+      "admission_checkpoint_projection_deadline_exceeded",
+    );
+
+    expect(observedAbort).toBe(true);
+    expect(harness.fetchCalls()).toBeGreaterThan(70);
+    expect(await admissionEntries(harness.privateStateRoot)).toEqual([]);
+    expect(await projectionEntries(harness.privateStateRoot)).toEqual([]);
+  });
+
+  test("rechecks projection cancellation after the projector resolves", async () => {
+    const harness = await createHarness(root);
+    const controller = new AbortController();
+    const projector = harness.dependencies.checkpointProjector;
+
+    await expectOperatorCode(
+      runReplayPremiereAdmission(harness.args, {
+        ...harness.dependencies,
+        checkpointProjectionSignal: controller.signal,
+        checkpointProjector: {
+          async project(options) {
+            const projection = await projector.project(options);
+            controller.abort();
+            return projection;
+          },
+        },
+      }),
+      "checkpoint_projection_aborted",
+    );
+
+    expect(await admissionEntries(harness.privateStateRoot)).toEqual([]);
+    expect(await projectionEntries(harness.privateStateRoot)).toEqual([]);
   });
 
   test("rejects a decoy deployment origin that differs from production config", async () => {
@@ -314,7 +546,7 @@ describe("Replay Premiere operator admission command", () => {
     expect(await privateFileSnapshot(harness.privateStateRoot)).toEqual({});
   });
 
-  test("fails closed before probes when the premiere id already exists", async () => {
+  test("reuses an exact existing admission and its bound projection before probes", async () => {
     const harness = await createHarness(root);
     const first = await runReplayPremiereAdmission(
       harness.args,
@@ -330,18 +562,21 @@ describe("Replay Premiere operator admission command", () => {
     const privateBefore = await privateFileSnapshot(harness.privateStateRoot);
     const callsAfterFirst = harness.fetchCalls();
 
-    await expectOperatorCode(
-      runReplayPremiereAdmission(harness.args, {
-        now: () => NOW,
-        environment: { PROXYWAR_PUBLIC_URL: EXPECTED_ORIGIN },
-        fetch: async () => {
-          throw new Error("existing admission must not probe");
+    const reused = await runReplayPremiereAdmission(harness.args, {
+      now: () => new Date(NOW.getTime() + 60_000),
+      environment: { PROXYWAR_PUBLIC_URL: EXPECTED_ORIGIN },
+      fetch: async () => {
+        throw new Error("existing admission must not probe");
+      },
+      checkpointProjector: {
+        async project() {
+          throw new Error("existing admission must not project");
         },
-      }),
-      "admission_premiere_already_exists",
-    );
+      },
+    });
 
     expect(first.premiereId).toBe(PREMIERE_ID);
+    expect(reused).toEqual(first);
     expect(harness.fetchCalls()).toBe(callsAfterFirst);
     expect(await fs.readFile(entryPath)).toEqual(before);
     expect(await privateFileSnapshot(harness.privateStateRoot)).toEqual(
@@ -350,6 +585,234 @@ describe("Replay Premiere operator admission command", () => {
     expect(await admissionEntries(harness.privateStateRoot)).toEqual([
       `${PREMIERE_ID}.admission.json`,
     ]);
+  });
+
+  test("holds an incompatible same-id retry across two ticks without probes or mutation", async () => {
+    const harness = await createHarness(root);
+    await runReplayPremiereAdmission(harness.args, harness.dependencies);
+    const privateBefore = await privateFileSnapshot(harness.privateStateRoot);
+    const callsAfterFirst = harness.fetchCalls();
+    const definition = JSON.parse(
+      await fs.readFile(harness.definitionFile, "utf8"),
+    ) as Record<string, unknown>;
+    definition.title = "Different retained transaction";
+    await fs.writeFile(
+      harness.definitionFile,
+      `${JSON.stringify(definition)}\n`,
+      { mode: 0o600 },
+    );
+    const runTick = () =>
+      runLoopReplayPremiereAdmission({
+        args: harness.args,
+        premiereId: PREMIERE_ID,
+        bundleSha256: harness.sourceSha256,
+        environment: { PROXYWAR_PUBLIC_URL: EXPECTED_ORIGIN },
+        runAdmission: (args, dependencies) =>
+          runReplayPremiereAdmission(args, {
+            ...dependencies,
+            fetch: async () => {
+              throw new Error("incompatible existing admission must not probe");
+            },
+          }),
+      });
+
+    await expect(runTick()).resolves.toEqual({
+      kind: "hold",
+      reason: "admission_state_uncertain",
+    });
+    await expect(runTick()).resolves.toEqual({
+      kind: "hold",
+      reason: "admission_state_uncertain",
+    });
+
+    expect(harness.fetchCalls()).toBe(callsAfterFirst);
+    expect(await admissionEntries(harness.privateStateRoot)).toEqual([
+      `${PREMIERE_ID}.admission.json`,
+    ]);
+    const privateAfter = await privateFileSnapshot(harness.privateStateRoot);
+    expect(privateAfter).toEqual(privateBefore);
+    expect(await fs.readFile(harness.definitionFile, "utf8")).toContain(
+      "Different retained transaction",
+    );
+  });
+
+  test("refuses same-id reuse when retained source bytes differ", async () => {
+    const harness = await createHarness(root);
+    await runReplayPremiereAdmission(harness.args, harness.dependencies);
+    const callsAfterFirst = harness.fetchCalls();
+    await fs.writeFile(harness.sourceFile, Buffer.from("different source"), {
+      mode: 0o600,
+    });
+
+    await expectOperatorCode(
+      runReplayPremiereAdmission(harness.args, {
+        environment: { PROXYWAR_PUBLIC_URL: EXPECTED_ORIGIN },
+      }),
+      "admission_existing_identity_mismatch",
+    );
+    expect(harness.fetchCalls()).toBe(callsAfterFirst);
+  });
+
+  test("rejects a different declared source identity before staging retained bytes", async () => {
+    const harness = await createHarness(root);
+    await runReplayPremiereAdmission(harness.args, harness.dependencies);
+    const privateBefore = await privateFileSnapshot(harness.privateStateRoot);
+    const callsAfterFirst = harness.fetchCalls();
+    const differentSourceBytes = Buffer.from(
+      '{"different":"retained source identity"}\n',
+    );
+    const differentSourceSha256 = sha256Hex(differentSourceBytes);
+    await fs.writeFile(harness.sourceFile, differentSourceBytes, {
+      mode: 0o600,
+    });
+    const retryArgs = harness.args.map((argument) =>
+      argument.startsWith("--expected-source-sha256=")
+        ? `--expected-source-sha256=${differentSourceSha256}`
+        : argument,
+    );
+
+    await expectOperatorCode(
+      runReplayPremiereAdmission(retryArgs, {
+        environment: { PROXYWAR_PUBLIC_URL: EXPECTED_ORIGIN },
+        fetch: async () => {
+          throw new Error("identity mismatch must not probe");
+        },
+      }),
+      "admission_existing_identity_mismatch",
+    );
+
+    expect(harness.fetchCalls()).toBe(callsAfterFirst);
+    const privateAfter = await privateFileSnapshot(harness.privateStateRoot);
+    expect(privateAfter).toEqual(privateBefore);
+    expect(Object.keys(privateAfter)).not.toContain(
+      `sources/sha256/${differentSourceSha256.slice(0, 2)}/${differentSourceSha256}.replay`,
+    );
+  });
+
+  test.each(["operator input", "private nonce"] as const)(
+    "refuses same-id reuse when the retained %s differs",
+    async (mismatch) => {
+      const harness = await createHarness(root);
+      await runReplayPremiereAdmission(harness.args, harness.dependencies);
+      const privateBefore = await privateFileSnapshot(harness.privateStateRoot);
+      if (mismatch === "operator input") {
+        const eligibility = JSON.parse(
+          await fs.readFile(harness.eligibilityFile, "utf8"),
+        ) as Record<string, unknown>;
+        eligibility.eligibilityCheckVersion = "different-retained-check";
+        await fs.writeFile(
+          harness.eligibilityFile,
+          `${JSON.stringify(eligibility)}\n`,
+          { mode: 0o600 },
+        );
+      } else {
+        await fs.writeFile(harness.nonceFile, Buffer.alloc(32, 7), {
+          mode: 0o600,
+        });
+      }
+
+      await expectOperatorCode(
+        runReplayPremiereAdmission(harness.args, {
+          environment: { PROXYWAR_PUBLIC_URL: EXPECTED_ORIGIN },
+          fetch: async () => {
+            throw new Error("identity mismatch must not probe");
+          },
+        }),
+        "admission_existing_identity_mismatch",
+      );
+
+      expect(await privateFileSnapshot(harness.privateStateRoot)).toEqual(
+        privateBefore,
+      );
+    },
+  );
+
+  test("refuses exact reuse when the bound checkpoint projection is missing", async () => {
+    const harness = await createHarness(root);
+    await runReplayPremiereAdmission(harness.args, harness.dependencies);
+    const [artifactName] = await projectionEntries(harness.privateStateRoot);
+    expect(artifactName).toBeDefined();
+    await fs.rm(
+      path.join(
+        harness.privateStateRoot,
+        "catalog-v1",
+        "checkpoint-projections",
+        artifactName,
+      ),
+    );
+
+    await expectOperatorCode(
+      runReplayPremiereAdmission(harness.args, {
+        environment: { PROXYWAR_PUBLIC_URL: EXPECTED_ORIGIN },
+      }),
+      "admission_existing_projection_unavailable",
+    );
+  });
+
+  test.each(["corrupt", "mismatched"] as const)(
+    "refuses exact reuse when the bound checkpoint projection is %s",
+    async (failureMode) => {
+      const harness = await createHarness(root);
+      await runReplayPremiereAdmission(harness.args, harness.dependencies);
+      const [artifactName] = await projectionEntries(harness.privateStateRoot);
+      expect(artifactName).toBeDefined();
+      const artifactPath = path.join(
+        harness.privateStateRoot,
+        "catalog-v1",
+        "checkpoint-projections",
+        artifactName,
+      );
+      await fs.chmod(artifactPath, 0o600);
+      if (failureMode === "corrupt") {
+        await fs.writeFile(artifactPath, "{}\n", { mode: 0o600 });
+      } else {
+        const artifact = JSON.parse(
+          await fs.readFile(artifactPath, "utf8"),
+        ) as Record<string, unknown>;
+        artifact.admissionRecordHash = "f".repeat(64);
+        const { artifactHash: _artifactHash, ...preimage } = artifact;
+        artifact.artifactHash = hashReplayPremiereJson(
+          preimage as ReplayPremiereJsonValue,
+        );
+        await fs.writeFile(
+          artifactPath,
+          `${canonicalReplayPremiereJson(
+            artifact as ReplayPremiereJsonValue,
+          )}\n`,
+          { mode: 0o600 },
+        );
+      }
+      await fs.chmod(artifactPath, 0o400);
+
+      await expectOperatorCode(
+        runReplayPremiereAdmission(harness.args, {
+          environment: { PROXYWAR_PUBLIC_URL: EXPECTED_ORIGIN },
+        }),
+        "admission_existing_projection_unavailable",
+      );
+    },
+  );
+
+  test("maps a commitment-only collision with no requested premiere to a retained hold", async () => {
+    const result = await runLoopReplayPremiereAdmission({
+      args: [],
+      premiereId: PREMIERE_ID,
+      bundleSha256: "a".repeat(64),
+      environment: {},
+      runAdmission: async () => {
+        throw new ReplayPremiereError(
+          "admission_commitment_already_exists",
+          "PREMIERE_INVALID_REQUEST",
+          409,
+          "commitment belongs to a different premiere",
+        );
+      },
+    });
+
+    expect(result).toEqual({
+      kind: "hold",
+      reason: "admission_state_uncertain",
+    });
   });
 
   test("reports catalog lock contention with a fixed operator code and no entry", async () => {
@@ -466,12 +929,31 @@ async function createHarness(
       fetch: fixtureFetch,
       now: () => NOW,
       environment: { PROXYWAR_PUBLIC_URL: EXPECTED_ORIGIN },
+      checkpointProjector: {
+        async project({ gate }) {
+          const definition = gate.publicDefinition();
+          const optionSeatIds = definition.provenance.seats.map(
+            (seat) => seat.seatId,
+          );
+          return freezeReplayPremiereCheckpointProjection({
+            premiereId: gate.premiereId,
+            publicationCommitmentHash: gate.publicationCommitmentHash,
+            checkpoints: [
+              { ...definition.checkpoints[0], optionSeatIds },
+              { ...definition.checkpoints[1], optionSeatIds },
+            ],
+          });
+        },
+      } satisfies ReplayPremiereCheckpointProjector,
     },
     fetchCalls: () => fetchCalls,
     sourceSha256,
+    sourceFile,
     privateStateRoot,
     servedRoot,
     eligibilityFile,
+    definitionFile,
+    nonceFile,
     operatorEligibility,
   };
 }
@@ -508,6 +990,19 @@ async function admissionEntries(privateStateRoot: string): Promise<string[]> {
     ) {
       return [];
     }
+    throw error;
+  }
+}
+
+async function projectionEntries(privateStateRoot: string): Promise<string[]> {
+  try {
+    return (
+      await fs.readdir(
+        path.join(privateStateRoot, "catalog-v1", "checkpoint-projections"),
+      )
+    ).sort();
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];
     throw error;
   }
 }

@@ -86,22 +86,28 @@ export const PREMIERE_LOOP_POST_REVEAL_COOLDOWN_MS = 35 * 60_000;
 export const PREMIERE_LOOP_SEAL_WINDOW_MS = 35 * 60_000;
 
 /**
- * Startup projection budget: episodes longer than this are skipped (the loop
- * tries a shorter episode of the round first).
+ * Admission projection input budget: episodes longer than this are skipped
+ * (the loop tries a shorter episode of the round first).
  *
- * History: while premiere registration only had the server's 8 s boot budget
- * (`maxStartupMs: 8_000`), this cap was calibrated to 24,000 turns (26,900
- * assembled in time — round 642; 32,300 did not — round 646's activation
- * zombie). Fresh admissions now get the deferred 90 s assembly lane
- * (`DEFAULT_DEFERRED_FRESH_ASSEMBLY_BUDGET_MS`) plus activation
- * verify → one retry → terminal `activation_lost`, so the binding constraint
- * is the 90 s lane (~11× the window that fit 26,900 turns), not the 8 s boot
- * pass. 60,000 admits the real league's large World episodes (observed up to
- * 50,400) while still excluding pathological outliers; an over-budget
- * assembly fails BOUNDED (deferred timeout → one spaced retry →
- * activation_lost, feed publishes at quarantine expiry).
+ * History: this was originally named for the server's startup projector. New
+ * admissions now compute and durably publish the exact projection artifact
+ * before the catalog entry becomes visible. The loop gives that computation a
+ * hard 90-second deadline; on timeout it releases the hold as a retriable
+ * `admit_failed`, so the feed publishes at quarantine expiry instead of
+ * leaving an unbounded catalog writer or suppression heartbeat. The 60,000
+ * turn cap admits the real league's large World episodes (observed up to
+ * 50,400) while still excluding pathological inputs. Startup authenticates and
+ * loads the artifact inside its unchanged eight-second replacement bound.
  */
 export const PREMIERE_LOOP_TURN_STARTUP_BUDGET = 60_000;
+
+/**
+ * Hard wall-clock ceiling for admission-time GameRunner projection. This is
+ * deliberately not operator-configurable: it preserves the previously
+ * reviewed 90-second upper bound and stays far inside the suppression
+ * contract's 15-minute fail-open staleness valve.
+ */
+export const PREMIERE_LOOP_ADMISSION_PROJECTION_TIMEOUT_MS = 90_000;
 
 /** At most this many raw replays are downloaded while selecting a claim. */
 export const PREMIERE_LOOP_MAX_REPLAY_DOWNLOADS = 3;
@@ -115,19 +121,18 @@ export const PREMIERE_LOOP_MAX_ACTIVATION_ATTEMPTS = 3;
 /**
  * Bounded post-activation registration verification window (~2 loop ticks).
  * A successful controlled restart proves a fresh server process accepted
- * traffic — it does NOT prove the premiere registered: the server's startup
- * recovery has its own total assembly budget (`maxStartupMs`, ~8s) and can
- * reject a freshly admitted premiere with `startup_deadline_exceeded`
- * (2026-07-22 round-644 activation zombie). The loop therefore verifies the
- * premiere's public surface after activation and only trusts registration it
- * can observe.
+ * traffic — it does NOT prove the premiere registered. New admissions carry a
+ * precomputed projection artifact, fixing the round-644 deadline class, but a
+ * legacy/missing artifact or another startup-integrity refusal can still leave
+ * the route unavailable. The loop therefore verifies the public surface after
+ * activation and only trusts registration it can observe.
  */
 export const PREMIERE_LOOP_ACTIVATION_VERIFY_MS = 120_000;
 /**
  * Exactly one fresh controlled-restart re-activation after a failed
  * verification. A retry boots a process whose startup scan is guaranteed to
- * see the admission (it was written long before the restart) with a full
- * startup budget; if registration still fails, the hold is released as
+ * see the admission (it was written long before the restart) and its persisted
+ * projection artifact. If registration still fails, the hold is released as
  * `activation_lost` so the episode publishes ordinarily — never zombie-tracked
  * to `holdExpiresAt`.
  */
@@ -218,7 +223,7 @@ export function checkpointSequencesForTurnCount(
   return [Math.round(0.35 * turnCount), Math.round(0.65 * turnCount)];
 }
 
-/** Whether an episode's turn count fits the startup projection budget. */
+/** Whether an episode's turn count fits the admission projection budget. */
 export function isTurnCountWithinStartupBudget(
   turnCount: number,
   budget: number = PREMIERE_LOOP_TURN_STARTUP_BUDGET,
@@ -375,7 +380,7 @@ export function parseLoopReplayRows(raw: unknown): LoopReplayRow[] {
  * Newest-first ordering of an already-completed round's admissible episodes.
  * Only completed episodes of THIS round with a replay URL and a safe id are
  * candidates; the caller downloads them in order (bounded) and claims the first
- * one that fits the startup budget.
+ * one that fits the admission projection input budget.
  */
 export function orderEpisodesForClaim(
   round: LoopRound,

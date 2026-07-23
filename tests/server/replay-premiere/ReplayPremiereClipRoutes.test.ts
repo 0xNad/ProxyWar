@@ -25,7 +25,8 @@ import type { PremiereRevealResponse } from "../../../src/server/replay-premiere
 
 const ID = "prem_0123456789abcdef";
 const ORIGIN = "https://beta.proxywar.xyz";
-const SHA = "b".repeat(64);
+const SOURCE_BYTES = Buffer.from("fixture replay");
+const SHA = createHash("sha256").update(SOURCE_BYTES).digest("hex");
 const ATTRIBUTION =
   "Game art from OpenFront (openfront.io), CC BY-SA 4.0; footage shared under the same license.";
 const NO_ENDORSEMENT =
@@ -136,7 +137,7 @@ beforeEach(async () => {
     `${SHA}.replay`,
   );
   await fs.mkdir(path.dirname(sourcePath), { recursive: true });
-  await fs.writeFile(sourcePath, "fixture replay");
+  await fs.writeFile(sourcePath, SOURCE_BYTES);
 });
 
 afterEach(async () => {
@@ -159,16 +160,24 @@ function buildHarness(
   const runtime: ReplayPremiereHttpTarget["runtime"] = {
     premiereId: ID,
     readLifecycleState: () => state,
-    readBootstrap: () => {
-      throw new Error("unused");
-    },
-    readManifest: async () => {
-      throw new Error("unused");
-    },
+    readBootstrap: () =>
+      ({ provenance: { sourceReplaySha256: SHA } }) as ReturnType<
+        ReplayPremiereHttpTarget["runtime"]["readBootstrap"]
+      >,
+    readManifest: async () =>
+      ({
+        state,
+        releasedThroughSequence: 10_000,
+      }) as Awaited<
+        ReturnType<ReplayPremiereHttpTarget["runtime"]["readManifest"]>
+      >,
     readChunk: () => null,
     readReveal: () =>
       state === "revealed" || state === "archived"
-        ? ({ sourceReplaySha256: SHA } as unknown as PremiereRevealResponse)
+        ? ({
+            sourceReplaySha256: SHA,
+            finalSequence: 10_000,
+          } as unknown as PremiereRevealResponse)
         : null,
     readReleasedContext: (sequence) =>
       sequence >= 0 && sequence <= 10_000
@@ -282,10 +291,10 @@ async function pollReady(baseUrl: string, cookie: string, bucket: number) {
 }
 
 // ---------------------------------------------------------------------------
-// Gating: pre-reveal fail closed
+// Replay-scoped live range
 // ---------------------------------------------------------------------------
 
-describe("pre-reveal gating (fail closed as 404)", () => {
+describe("in-progress replay clipping", () => {
   test("clip status GET is a bare 404 while playing", async () => {
     const harness = buildHarness("playing", { withClips: true });
     await harness.run(async (baseUrl) => {
@@ -305,7 +314,7 @@ describe("pre-reveal gating (fail closed as 404)", () => {
     });
   });
 
-  test("clip POST with a valid envelope is a 404 while playing (no reveal leak)", async () => {
+  test("clips an already-released live range and rejects a future-leaking tail", async () => {
     const harness = buildHarness("playing", { withClips: true });
     await harness.run(async (baseUrl) => {
       const response = await fetch(`${baseUrl}/api/premieres/${ID}/clips`, {
@@ -317,9 +326,21 @@ describe("pre-reveal gating (fail closed as 404)", () => {
         ),
         body: JSON.stringify({ sequence: 605, turn: 605 }),
       });
-      expect(response.status).toBe(404);
-      expect(await response.json()).toEqual({
-        error: { code: "PREMIERE_UNAVAILABLE" },
+      expect(response.status).toBe(200);
+      expect((await response.json()).state).toBe("pending");
+
+      const unreleased = await fetch(`${baseUrl}/api/premieres/${ID}/clips`, {
+        method: "POST",
+        headers: clipHeaders(
+          "clip_req_000000000000009",
+          harness.cookie,
+          harness.csrfToken,
+        ),
+        body: JSON.stringify({ sequence: 9_900, turn: 9_900 }),
+      });
+      expect(unreleased.status).toBe(410);
+      expect(await unreleased.json()).toEqual({
+        error: { code: "PREMIERE_INVALID_REQUEST" },
       });
     });
   });

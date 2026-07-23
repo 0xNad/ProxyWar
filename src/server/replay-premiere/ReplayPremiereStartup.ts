@@ -1,15 +1,13 @@
 import type { ReplayPremiereArchiveStore } from "./ReplayPremiereArchiveIndex";
 import {
-  assessmentOptionsFromAdmission,
   DEFAULT_REPLAY_PREMIERE_CATALOG_LIMITS,
-  readAdmissionVerifiedSource,
   ReplayPremiereAdmissionCatalog,
   type ReplayPremiereAdmissionRecordV1,
   type ReplayPremiereCatalogLimits,
   type ReplayPremiereCatalogReadResult,
 } from "./ReplayPremiereCatalog";
 import type { ReplayPremiereCheckpointProjector } from "./ReplayPremiereCheckpointProjection";
-import { buildPremiereChunks } from "./ReplayPremiereChunks";
+import { rebuildReplayPremiereProjectionInput } from "./ReplayPremiereCheckpointProjectionStore";
 import type {
   PremiereChunkDraft,
   PremiereState,
@@ -44,11 +42,6 @@ import {
   compactReplayPremiereEventJournal,
   reclaimUnreferencedPremiereSources,
 } from "./ReplayPremiereJournalCompaction";
-import { verifyStoredReplayPremiereLeakAuditReceipt } from "./ReplayPremiereLeakAuditCollector";
-import {
-  importControlledPremiereSourceForPublication,
-  VerifiedPremiereEligibilityGate,
-} from "./ReplayPremierePublication";
 import { REPLAY_PREMIERE_V1_MAX_REVEAL_STORED_EVENT_BYTES } from "./ReplayPremiereRevealEnvelopeCapacity";
 import {
   isReplayPremiereOutageStartIdempotencyKey,
@@ -596,6 +589,7 @@ export async function startReplayPremiereProduction(
     privateStateRoot: options.privateStateRoot,
     servedRoots: options.servedRoots,
     limits: catalogLimits,
+    writerWaitMs: Math.min(1_000, maxStartupMs),
   });
   const privateStateRoot = catalog.privateStateRoot;
   let read: ReplayPremiereCatalogReadResult;
@@ -802,6 +796,7 @@ export async function startReplayPremiereProduction(
             eventStoreLimits,
             clock,
             checkpointProjector: options.checkpointProjector,
+            checkpointProjectionCatalog: catalog,
             interactionLimits: options.interactionLimits,
             recoveryProjection: plan.projection,
             fence,
@@ -887,6 +882,7 @@ export async function startReplayPremiereProduction(
                   eventStoreLimits,
                   clock,
                   checkpointProjector: options.checkpointProjector,
+                  checkpointProjectionCatalog: catalog,
                   interactionLimits: options.interactionLimits,
                   recoveryProjection: plan.projection,
                   fence,
@@ -1090,76 +1086,21 @@ async function assemblePremiereTarget(options: {
   eventStoreLimits: ReplayPremiereEventStoreLimits;
   clock: ReplayPremiereRuntimeClock;
   checkpointProjector: ReplayPremiereCheckpointProjector;
+  checkpointProjectionCatalog: ReplayPremiereAdmissionCatalog;
   interactionLimits?: Partial<ReplayPremiereInteractionLimits>;
   recoveryProjection: RecoveryProjection;
   fence: ReplayPremiereStartupOperationFence;
 }): Promise<AssembledPremiereTarget> {
   assertStartupActive(options.fence.signal);
-  const assessmentOptions = assessmentOptionsFromAdmission(
-    options.record.assessment,
-  );
-  const receipt = verifyStoredReplayPremiereLeakAuditReceipt({
-    material: options.record.leakAuditReceipt,
-    assessmentOptions,
-  });
-  assertProductionLeakAuditOrigin(options.record, options.publicOrigin);
-  const verifiedSource = await readAdmissionVerifiedSource({
+  const rebuilt = await rebuildReplayPremiereProjectionInput({
     record: options.record,
     privateStateRoot: options.privateStateRoot,
     servedRoots: options.servedRoots,
     maxSourceBytes: options.maxSourceBytes,
+    publicOrigin: options.publicOrigin,
   });
   assertStartupActive(options.fence.signal);
-  const resultBytes = Buffer.from(
-    options.record.authoritativeResult.bytes,
-    "base64",
-  );
-  if (
-    sha256Hex(resultBytes) !== options.record.authoritativeResult.sha256 ||
-    options.record.authoritativeResult.sourceId !==
-      options.record.eligibilityRecord.authoritativeResult.sourceId
-  ) {
-    throw startupIntegrity("startup_authoritative_result_binding_mismatch");
-  }
-  const imported = importControlledPremiereSourceForPublication({
-    sourceBytes: verifiedSource.copyBytes(),
-    eligibilityRecord: options.record.eligibilityRecord,
-    authoritativeResultBytes: resultBytes,
-    replayImportLimits: options.record.replayImportLimits,
-  });
-  const drafts = buildPremiereChunks({
-    premiereId: options.record.premiereId,
-    records: imported.records,
-    playbackRate: options.record.publicDefinition.playbackRate,
-    checkpointSequences: options.record.publicDefinition.checkpoints.map(
-      (checkpoint) => checkpoint.sequence,
-    ),
-    ...options.record.chunkBuildLimits,
-  });
-  const gate = VerifiedPremiereEligibilityGate.verify({
-    premiereId: options.record.premiereId,
-    eligibilityRecord: options.record.eligibilityRecord,
-    eligibilityOptions: assessmentOptions,
-    leakAuditReceipt: receipt,
-    verifiedSource,
-    authoritativeResultBytes: resultBytes,
-    replayImportLimits: options.record.replayImportLimits,
-    publicDefinition: options.record.publicDefinition,
-    draftChunks: drafts,
-    maxPresentationSpanMs:
-      options.record.chunkBuildLimits.maxPresentationSpanMs,
-  });
-  const commitment = gate.publicationCommitment();
-  if (
-    gate.eligibilityRecordHash !==
-      options.record.expectedEligibilityRecordHash ||
-    gate.publicationCommitmentHash !==
-      options.record.expectedPublicationCommitmentHash ||
-    commitment.orderedDraftManifestRoot !==
-      options.record.expectedOrderedDraftManifestRoot
-  ) {
-    throw startupIntegrity("startup_publication_commitment_mismatch");
-  }
+  const { gate, drafts } = rebuilt;
   if (
     gate.requiredRevealEventBytes > options.eventStoreLimits.maxEventBytes ||
     gate.requiredRevealEventBytes > options.eventStoreLimits.maxSnapshotBytes
@@ -1167,11 +1108,25 @@ async function assemblePremiereTarget(options: {
     throw startupCapacity("startup_reveal_capacity_incompatible");
   }
   assertStartupActive(options.fence.signal);
-  const checkpointProjection = await options.checkpointProjector.project({
-    gate,
-    drafts,
-    signal: options.fence.signal,
-  });
+  const storedArtifact =
+    await options.checkpointProjectionCatalog.loadCheckpointProjection({
+      record: options.record,
+      gate,
+    });
+  const checkpointProjection =
+    storedArtifact?.projection ??
+    (await options.checkpointProjector.project({
+      gate,
+      drafts,
+      signal: options.fence.signal,
+    }));
+  if (storedArtifact === null) {
+    await options.checkpointProjectionCatalog.publishCheckpointProjection({
+      record: options.record,
+      gate,
+      projection: checkpointProjection,
+    });
+  }
   assertStartupActive(options.fence.signal);
 
   const projection = options.recoveryProjection;
@@ -1870,33 +1825,6 @@ function exactPublicOrigin(value: string): string {
     throw startupUnavailable("invalid_startup_public_origin");
   }
   return value;
-}
-
-function assertProductionLeakAuditOrigin(
-  record: ReplayPremiereAdmissionRecordV1,
-  publicOrigin: string,
-): void {
-  const targetUrls = [
-    ...record.leakAuditReceipt.manifest.targets.map((target) => target.target),
-    ...record.leakAuditReceipt.evidence.map((evidence) => evidence.target),
-    ...record.eligibilityRecord.proxyWarLeakAuditManifest.targets.map(
-      (target) => target.target,
-    ),
-    ...record.eligibilityRecord.proxyWarLeakChecks.map(
-      (evidence) => evidence.target,
-    ),
-  ];
-  for (const targetUrl of targetUrls) {
-    let target: URL;
-    try {
-      target = new URL(targetUrl);
-    } catch (error) {
-      throw startupIntegrity("startup_leak_audit_origin_mismatch", error);
-    }
-    if (target.origin !== publicOrigin) {
-      throw startupIntegrity("startup_leak_audit_origin_mismatch");
-    }
-  }
 }
 
 function startupDiagnosticTarget(target: string): string {

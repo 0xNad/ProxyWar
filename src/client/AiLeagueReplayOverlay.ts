@@ -3,7 +3,10 @@ import {
   aiLeagueSpectatorText,
   isAiLeagueNativeSpectatorUiEnabled,
 } from "./AiLeagueReplayMode";
-import { readProxyWarClipGenerationCapabilities } from "./ClipGenerationCapabilities";
+import {
+  mountReplayScopedLeagueClipControl,
+  type ReplayScopedLeagueClipControlHandle,
+} from "./ReplayClipControl";
 import { ReplaySpeedMultiplier } from "./utilities/ReplaySpeedMultiplier";
 import { translateText } from "./Utils";
 
@@ -176,7 +179,7 @@ export function mountAiLeagueReplayOverlay(input: AiLeagueReplayOverlayInput) {
   document.body.appendChild(overlay);
   mountReplayPanelDisclosure(overlay);
   mountReplayPanelControls(overlay);
-  mountReplayDetailsBindings(overlay, currentInput);
+  let clipControl = mountReplayDetailsBindings(overlay, currentInput);
   mountReplayJumpControls(document);
   let disposed = false;
 
@@ -201,13 +204,17 @@ export function mountAiLeagueReplayOverlay(input: AiLeagueReplayOverlayInput) {
         return;
       }
       details.innerHTML = overlayDetailsHtml(currentInput);
-      mountReplayDetailsBindings(overlay, currentInput);
+      const previousClipControl = clipControl;
+      clipControl = mountReplayDetailsBindings(overlay, currentInput);
+      previousClipControl?.dispose();
     },
     dispose() {
       if (disposed) {
         return;
       }
       disposed = true;
+      clipControl?.dispose();
+      clipControl = null;
       disposeReplayOverlay(overlay);
     },
   } satisfies AiLeagueReplayOverlayHandle;
@@ -226,26 +233,19 @@ function disposeReplayOverlay(overlay: HTMLElement) {
     __aiLeagueHeadlineCleanup?: () => void;
     __aiLeagueDiplomacyCleanup?: () => void;
     __aiLeagueSocialBubblesCleanup?: () => void;
-  } & AiLeagueClipWindow;
+  };
   win.__aiLeaguePanelDisclosureCleanup?.();
   win.__aiLeaguePanelControlsCleanup?.();
   win.__aiLeagueReplayJumpCleanup?.();
   win.__aiLeagueHeadlineCleanup?.();
   win.__aiLeagueDiplomacyCleanup?.();
   win.__aiLeagueSocialBubblesCleanup?.();
-  win.__aiLeagueClipCleanup?.();
-  const clipPollTimer = win.__aiLeagueClipState?.pollTimer ?? null;
-  if (clipPollTimer !== null && win.__aiLeagueClipState !== undefined) {
-    clearTimeout(clipPollTimer);
-    win.__aiLeagueClipState.pollTimer = null;
-  }
   delete win.__aiLeaguePanelDisclosureCleanup;
   delete win.__aiLeaguePanelControlsCleanup;
   delete win.__aiLeagueReplayJumpCleanup;
   delete win.__aiLeagueHeadlineCleanup;
   delete win.__aiLeagueDiplomacyCleanup;
   delete win.__aiLeagueSocialBubblesCleanup;
-  delete win.__aiLeagueClipCleanup;
   overlay.remove();
   document.getElementById("ai-league-social-transcript")?.remove();
   document.getElementById("ai-league-headline-event")?.remove();
@@ -258,15 +258,23 @@ function disposeReplayOverlay(overlay: HTMLElement) {
 function mountReplayDetailsBindings(
   overlay: HTMLElement,
   input: AiLeagueReplayOverlayInput,
-) {
+): ReplayScopedLeagueClipControlHandle | null {
   const telemetry =
     input.spectatorTelemetry as AiLeagueSpectatorTelemetry | null;
   mountAiLeagueSocialTranscript(input.decisions, telemetry);
   mountAiLeagueHeadlineEvent(input.decisions, telemetry);
   mountAiLeagueDiplomacyStrip(overlay, input.decisions, telemetry);
   mountAiLeagueTalksToggle(overlay, telemetry);
-  mountAiLeagueClipControls(overlay, input);
   mountAiLeagueDecisionLogExpander(overlay, input.decisions);
+  const clipContainer = overlay.querySelector<HTMLElement>(
+    "[data-ai-league-clip]",
+  );
+  return clipContainer === null
+    ? null
+    : mountReplayScopedLeagueClipControl({
+        container: clipContainer,
+        runKey: input.runID,
+      });
 }
 
 const AI_LEAGUE_MOBILE_BREAKPOINT = 740;
@@ -1370,316 +1378,6 @@ function overlayDetailsHtml(input: AiLeagueReplayOverlayInput): string {
     ${artifactLinksHtml(input)}
     <section class="ai-league-clip" data-ai-league-clip></section>
     ${decisionLogHtml(input.decisions)}`;
-}
-
-// ---------------------------------------------------------------------------
-// Social clip (every published match): idle → preparing → ready → Download MP4
-// ---------------------------------------------------------------------------
-
-/** Anchors below this cannot render (clip covers [anchor-50, anchor+150]). */
-const AI_LEAGUE_CLIP_MIN_TURN = 50;
-const AI_LEAGUE_CLIP_POLL_MS = 3_000;
-const AI_LEAGUE_CLIP_MAX_POLLS = 130; // ~6.5 min, past the render timeout.
-
-interface AiLeagueClipReadyView {
-  clipUrl: string;
-  caption: string;
-  firstReply: string;
-}
-
-interface AiLeagueClipState {
-  runID: string;
-  status: "idle" | "preparing" | "ready" | "failed" | "busy";
-  generationCapability: "unknown" | "loading" | "enabled" | "disabled";
-  ready: AiLeagueClipReadyView | null;
-  latestTurn: number;
-  pollTimer: ReturnType<typeof setTimeout> | null;
-  pollBucket: number | null;
-  pollAttempts: number;
-}
-
-type AiLeagueClipWindow = Window & {
-  __aiLeagueClipState?: AiLeagueClipState;
-  __aiLeagueClipCleanup?: () => void;
-};
-
-function aiLeagueClipState(runID: string): AiLeagueClipState {
-  const win = window as AiLeagueClipWindow;
-  if (win.__aiLeagueClipState?.runID !== runID) {
-    const staleTimer = win.__aiLeagueClipState?.pollTimer ?? null;
-    if (staleTimer !== null) {
-      clearTimeout(staleTimer);
-    }
-    win.__aiLeagueClipState = {
-      runID,
-      status: "idle",
-      generationCapability: "unknown",
-      ready: null,
-      latestTurn: 0,
-      pollTimer: null,
-      pollBucket: null,
-      pollAttempts: 0,
-    };
-  }
-  return win.__aiLeagueClipState;
-}
-
-/**
- * Mounts the clip block for the current run. State survives detail re-hydrates
- * (it lives beside the other overlay singletons on window), and the section is
- * re-rendered from that state on every mount.
- */
-function mountAiLeagueClipControls(
-  overlay: HTMLElement,
-  input: AiLeagueReplayOverlayInput,
-): void {
-  const section = overlay.querySelector<HTMLElement>("[data-ai-league-clip]");
-  if (section === null) {
-    return;
-  }
-  const state = aiLeagueClipState(input.runID);
-  const win = window as AiLeagueClipWindow;
-  win.__aiLeagueClipCleanup?.();
-  const onFrame = (event: Event) => {
-    const detail = (event as CustomEvent<AiLeagueReplayFrameEventDetail>)
-      .detail;
-    if (typeof detail?.turnNumber !== "number") {
-      return;
-    }
-    const previous = state.latestTurn;
-    state.latestTurn = Math.max(state.latestTurn, detail.turnNumber);
-    // Re-render once when the render button first unlocks.
-    if (
-      previous < AI_LEAGUE_CLIP_MIN_TURN &&
-      state.latestTurn >= AI_LEAGUE_CLIP_MIN_TURN &&
-      state.status === "idle"
-    ) {
-      renderAiLeagueClipSection(state);
-    }
-  };
-  document.addEventListener("ai-league-replay-frame", onFrame);
-  win.__aiLeagueClipCleanup = () => {
-    document.removeEventListener("ai-league-replay-frame", onFrame);
-  };
-  if (state.generationCapability === "unknown") {
-    state.generationCapability = "loading";
-    void readProxyWarClipGenerationCapabilities().then((capabilities) => {
-      if (win.__aiLeagueClipState !== state) {
-        return;
-      }
-      state.generationCapability = capabilities.leagueGenerationEnabled
-        ? "enabled"
-        : "disabled";
-      if (state.generationCapability === "disabled") {
-        clearAiLeagueClipPoll(state);
-      }
-      renderAiLeagueClipSection(state);
-    });
-  }
-  renderAiLeagueClipSection(state);
-}
-
-function currentAiLeagueClipSection(): HTMLElement | null {
-  return document.querySelector<HTMLElement>("[data-ai-league-clip]");
-}
-
-function renderAiLeagueClipSection(state: AiLeagueClipState): void {
-  const section = currentAiLeagueClipSection();
-  if (section === null) {
-    return;
-  }
-  if (state.generationCapability !== "enabled") {
-    section.hidden = true;
-    section.replaceChildren();
-    return;
-  }
-  section.hidden = false;
-  const heading = `<strong>${escapeHtml(translateText("ai_league_replay.clip_heading"))}</strong>`;
-  if (state.status === "ready" && state.ready !== null) {
-    section.innerHTML = `
-      ${heading}
-      <span class="ai-league-muted">${escapeHtml(translateText("ai_league_replay.clip_ready"))}</span>
-      <a class="ai-league-badge" href="${escapeHtml(state.ready.clipUrl)}" download data-ai-league-clip-download>${escapeHtml(translateText("ai_league_replay.clip_download_file"))}</a>
-      <button type="button" class="ai-league-badge" data-ai-league-clip-copy-caption>${escapeHtml(translateText("ai_league_replay.clip_copy_caption"))}</button>`;
-    section
-      .querySelector("[data-ai-league-clip-copy-caption]")
-      ?.addEventListener("click", () => {
-        const caption = state.ready?.caption;
-        if (typeof caption === "string") {
-          void navigator.clipboard?.writeText(caption).catch(() => undefined);
-        }
-      });
-    return;
-  }
-  if (state.status === "preparing") {
-    section.innerHTML = `${heading} <span class="ai-league-muted">${escapeHtml(translateText("ai_league_replay.clip_preparing"))}</span>`;
-    return;
-  }
-  const statusLine =
-    state.status === "failed"
-      ? `<span class="ai-league-muted">${escapeHtml(translateText("ai_league_replay.clip_failed"))}</span>`
-      : state.status === "busy"
-        ? `<span class="ai-league-muted">${escapeHtml(translateText("ai_league_replay.clip_busy"))}</span>`
-        : "";
-  const locked = state.latestTurn < AI_LEAGUE_CLIP_MIN_TURN;
-  const button = locked
-    ? `<span class="ai-league-muted">${escapeHtml(translateText("ai_league_replay.clip_waiting_playback"))}</span>`
-    : `<button type="button" class="ai-league-badge" data-ai-league-clip-render>${escapeHtml(translateText("ai_league_replay.clip_render"))}</button>`;
-  section.innerHTML = `${heading} ${button} ${statusLine}`;
-  section
-    .querySelector("[data-ai-league-clip-render]")
-    ?.addEventListener("click", () => {
-      void requestAiLeagueClip(state);
-    });
-}
-
-async function requestAiLeagueClip(state: AiLeagueClipState): Promise<void> {
-  if (
-    state.generationCapability !== "enabled" ||
-    state.status === "preparing"
-  ) {
-    return;
-  }
-  clearAiLeagueClipPoll(state);
-  state.status = "preparing";
-  state.ready = null;
-  renderAiLeagueClipSection(state);
-  let response: Response;
-  try {
-    response = await fetch(
-      `/api/league-runs/${encodeURIComponent(state.runID)}/clips`,
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ turn: state.latestTurn }),
-      },
-    );
-  } catch {
-    applyAiLeagueClipFailure(state, "failed");
-    return;
-  }
-  if (!response.ok) {
-    applyAiLeagueClipFailure(
-      state,
-      response.status === 429 || response.status === 503 ? "busy" : "failed",
-    );
-    return;
-  }
-  try {
-    applyAiLeagueClipStatus(state, await response.json());
-  } catch {
-    applyAiLeagueClipFailure(state, "failed");
-  }
-}
-
-function applyAiLeagueClipStatus(
-  state: AiLeagueClipState,
-  status: unknown,
-): void {
-  const record = status as {
-    state?: unknown;
-    bucket?: unknown;
-    ready?: {
-      clipUrl?: unknown;
-      social?: { caption?: unknown; firstReply?: unknown };
-    } | null;
-  };
-  const readyRecord = record?.ready ?? null;
-  if (record?.state === "ready" && readyRecord !== null) {
-    const clipUrl = readyRecord.clipUrl;
-    const caption = readyRecord.social?.caption;
-    const firstReply = readyRecord.social?.firstReply;
-    if (
-      typeof clipUrl === "string" &&
-      clipUrl.startsWith(`/ai-league-runs/${state.runID}/clip-v1-`) &&
-      typeof caption === "string" &&
-      typeof firstReply === "string"
-    ) {
-      clearAiLeagueClipPoll(state);
-      state.status = "ready";
-      state.ready = { clipUrl, caption, firstReply };
-      renderAiLeagueClipSection(state);
-      return;
-    }
-    applyAiLeagueClipFailure(state, "failed");
-    return;
-  }
-  if (record?.state === "pending" && typeof record.bucket === "number") {
-    state.status = "preparing";
-    state.pollBucket = record.bucket;
-    state.pollAttempts = 0;
-    renderAiLeagueClipSection(state);
-    scheduleAiLeagueClipPoll(state);
-    return;
-  }
-  applyAiLeagueClipFailure(state, "failed");
-}
-
-function scheduleAiLeagueClipPoll(state: AiLeagueClipState): void {
-  clearAiLeagueClipPoll(state);
-  state.pollTimer = setTimeout(() => {
-    state.pollTimer = null;
-    void pollAiLeagueClipStatus(state);
-  }, AI_LEAGUE_CLIP_POLL_MS);
-}
-
-async function pollAiLeagueClipStatus(state: AiLeagueClipState): Promise<void> {
-  if (state.status !== "preparing" || state.pollBucket === null) {
-    return;
-  }
-  state.pollAttempts += 1;
-  if (state.pollAttempts > AI_LEAGUE_CLIP_MAX_POLLS) {
-    applyAiLeagueClipFailure(state, "failed");
-    return;
-  }
-  let response: Response;
-  try {
-    response = await fetch(
-      `/api/league-runs/${encodeURIComponent(state.runID)}/clips/${state.pollBucket}`,
-    );
-  } catch {
-    scheduleAiLeagueClipPoll(state);
-    return;
-  }
-  if (response.status === 404) {
-    // The pending render finished without a cached artifact: it failed.
-    applyAiLeagueClipFailure(state, "failed");
-    return;
-  }
-  if (!response.ok) {
-    scheduleAiLeagueClipPoll(state);
-    return;
-  }
-  let status: unknown;
-  try {
-    status = await response.json();
-  } catch {
-    scheduleAiLeagueClipPoll(state);
-    return;
-  }
-  const record = status as { state?: unknown };
-  if (record?.state === "pending") {
-    scheduleAiLeagueClipPoll(state);
-    return;
-  }
-  applyAiLeagueClipStatus(state, status);
-}
-
-function applyAiLeagueClipFailure(
-  state: AiLeagueClipState,
-  kind: "failed" | "busy",
-): void {
-  clearAiLeagueClipPoll(state);
-  state.status = kind;
-  state.ready = null;
-  renderAiLeagueClipSection(state);
-}
-
-function clearAiLeagueClipPoll(state: AiLeagueClipState): void {
-  if (state.pollTimer !== null) {
-    clearTimeout(state.pollTimer);
-    state.pollTimer = null;
-  }
 }
 
 function playstyleLineHtml(kinds: string[]): string {

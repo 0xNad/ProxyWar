@@ -408,3 +408,158 @@ recorded. Local green tests do not grant release authority.
   and final-code two-viewer/reload/CP1/late-join/outcome proof remain pending.
   Both Clip capability flags remain disabled. `[repo/file verified]` +
   `[local artifact verified]` + `[live verified]`
+
+## Controlled-outage NO-GO and exact-manifest rehydration blocker (2026-07-23)
+
+- Reload/outage correction commit
+  `c8b5e0ad69ad76d93037156c60154c46ab32f09a` (tree
+  `6f494afe525f31187c416b3281a67d25532e35a8`) was independently reviewed and
+  activated with both Clip capability flags false. The ordinary activation
+  replaced the old direct-Node owner with PID/PGID/writer `1194`; scheduler
+  activation of the next documented league hold later replaced it with
+  direct-Node PID/PGID/writer `31748`. The ordinary activation made no durable
+  outage-pair claim. `[repo/file verified]` + `[live verified]`
+- The scheduler admitted one eligible completed episode from league round 702
+  as `prem_8d2c287c333ae24a41b452c2`, source run
+  `coworld-2026-07-23T14-37-03-743Z-a1f599fa`, source replay SHA-256
+  `dbf2c7000532916b448c2a196f1551876442983c72b9a1e7c6c33260cf204cb2`.
+  It is a World 12-player, 50,400-turn replay at 2x, scheduled for
+  `2026-07-23T14:44:00.000Z`. The league-level round row was still `running`;
+  this evidence proves episode eligibility/admission, not whole-round
+  completion. No synthetic round or Coworld mutation was used. `[live verified]`
+- One controlled outage drill on that exact scheduled manifest produced a real
+  interruption and an honest ledger pair, but is a release **NO-GO**. External
+  sampling first observed local refusal/public 502 at
+  `2026-07-23T14:41:18.448Z`; continuous refusal lasted through
+  `14:42:14.089Z`, followed by exact-route `404 premiere_not_registered` until
+  the target was finally reconstructed. Replacement direct-Node PID `34016`
+  started at `14:42:04` and acquired the writer at `14:42:05.134Z`; the helper
+  correctly failed its unchanged eight-second acceptance gate at `14:42:12`
+  with `replacement not ready`. Exact-manifest HTTP 200 returned only around
+  `14:42:52`, roughly 94 seconds after first refusal. No second blind restart
+  was attempted and Clips remained false/false. `[live verified]`
+- A read-only clone of the canonical event journal was 10,033,597 bytes, SHA-256
+  `3acf065e507a25e8a6acce2b5db7412246a6cddbcd79347007143a959c7743be`.
+  Canonical validation passed all 480 cloned events through sequence 479.
+  Outage-start sequence 478 (`ef190ffa-3bd1-4dea-840a-00bdca00b235`) occurred
+  at `14:41:18.283Z`, event hash
+  `75867c1e55801ceb65bacfdaf050e2585807595c2bb7fa3fd62f207d6d6097c5`,
+  reason `controlled_outage_drill`. Recovery sequence 479
+  (`74255c6f-4268-4ba9-92b0-4575c83ea798`) occurred at
+  `14:42:40.899Z`, has event hash
+  `ed8dd4ca79c5b1d9af25e2b512554372e80a6398596626da84a663909af2f572`,
+  names the same lifecycle and commitment, and has that exact start hash as
+  `previousEventHash`. The ledger duration is 82,616 ms. This is
+  valid interruption evidence, not accepted recovery evidence. `[local artifact verified]`
+- The periodic scheduler did not restore the manifest: recovery at
+  `14:42:40.899Z` preceded the next scheduler `track` decision at
+  `14:42:57.336Z`. Server diagnostics instead show
+  `startup_deadline_exceeded -> deferred_assembly_scheduled ->
+  deferred_assembly_registered`. Production startup spends its eight-second
+  budget re-verifying/importing the replay and unconditionally executing the
+  deterministic GameRunner through CP2 sequence 32,760; the fresh-admission
+  lane then repeats the same work under a 90-second budget. After the
+  admission becomes ten minutes old, that fallback is unavailable, so a large
+  scheduled/playing target can remain process-lifetime 404 while scheduler
+  `track/live` records continue. This is the P1 release blocker; widening the
+  replacement bound is not accepted. `[repo/file verified]` + `[live verified]`
+- The P1 successor persists a small immutable private checkpoint-projection
+  artifact before a new admission becomes catalog-visible. The artifact binds
+  the premiere id, admission hash, source replay SHA-256, eligibility hash,
+  publication commitment, ordered draft root, both checkpoint option sets, and
+  its own canonical hash. Startup still rebuilds and authenticates the source,
+  drafts, and publication gate, but a valid artifact bypasses the expensive
+  GameRunner projection. Missing legacy artifacts project and persist once;
+  present corrupt, mismatched, symlinked, or oversized artifacts fail closed
+  without projector or registry fallback. A bounded preparation command can
+  add only that artifact for an existing immutable admission while leaving the
+  admission, source, and event journal byte-identical. The production startup
+  deadline and restart helper's eight-second acceptance bound are unchanged.
+  `[repo/file verified]`
+- Interaction proof is classified separately from the failed recovery. Viewer
+  A's accepted Smart mark at turn 940 became a public aggregate (`Smart=1`, one
+  distinct participant). Isolated participants saw the aggregate while their
+  private own count and latest-own-reaction remained empty. Same-participant
+  reload preserved the signed identity, accepted mark confirmation, turn-940
+  anchor, and share affordance; a late isolated participant reconstructed the
+  same aggregate without private leakage. CP1 opened with personal prediction,
+  distribution, total, resolution, and crowd-accuracy fields all hidden; after
+  close the isolated viewer saw the zero-vote distribution and total only. No
+  personal CP1 vote was accepted because the browser renderer reached the
+  checkpoint after the authoritative voting window. At CP2, an isolated
+  participant submitted `DKLYEE1Y` at `2026-07-23T15:14:34.299Z`; after close
+  it retained that locked private prediction and saw the one-vote aggregate,
+  while a distinct late participant saw the same aggregate with
+  `participantPrediction=null`. The final personal correct/incorrect verdict
+  remains pending reveal. `[live verified]`
+- The turn-940 share action was durably accepted as `share_created`, anchored
+  to the restored reaction, before the UI displayed "That action is temporarily
+  unavailable." The failure is therefore post-write clipboard handling, not
+  lost participant identity or a server rejection. Clipboard denial is an
+  expected browser constraint; discarding the already minted URL is a separate
+  product UX defect. The successor retains only the validated, participant-
+  bound URL in memory and exposes it as an accessible selectable field when
+  clipboard delivery is rejected or unavailable. It never repeats the durable
+  share write, clears the URL on participant rotation, and keeps genuine
+  server/validation failures on the existing fail-closed path. `[repo/file verified]`
+  + `[live verified]`
+- The first successor tree was rejected in exact-tree review: projection
+  publication could leave a store-poisoning temporary/hard-link residue,
+  capacity admission was not serialized across admission/startup/preparation,
+  projection execution was unbounded, and the literal package commands omitted
+  the bundled game environment. The refrozen successor repairs stale residue
+  under the canonical catalog lock, serializes capacity + artifact + admission
+  visibility, recovers both projection and admission hard-link residue before
+  orphan cleanup, and removes the exact visible admission before rolling back
+  its artifact on any post-link failure. Both projection paths have an
+  intrinsic non-widenable 90-second ceiling, and the package commands set
+  `GAME_ENV=dev`. Failure-injection through entry directory fsync,
+  same/different-target and startup-writer contention, capacity, abort,
+  release/unpin, and real-projector initialization regressions cover the
+  rejected cases. `[repo/file verified]`
+- A later exact-tree review also rejected fail-open commit uncertainty,
+  corrupt-entry global startup failure, and repeated scratch creation on a held
+  admission. The successor now adopts only an exact durable
+  admission-plus-projection pair, preserves an uncertain transaction as a
+  non-releasing hold, contains corrupt entries per target, and reuses one
+  mode-0600 retained-admission manifest across retries with a storage-floor
+  check and exact cleanup after the admitted journal transition.
+  `[repo/file verified]`
+- The deployed clipping product was reveal/lifecycle scoped. The successor
+  makes eligibility replay scoped through the existing worker/cache path:
+  exact source SHA, retained availability, actual renderable turn range,
+  completeness, quotas, and independently effective default-off capability
+  flags determine generation. Safe released windows of a live Premiere and any
+  retained completed league replay can use the same renderer; archived rated
+  pages use the existing league-run route without a Premiere interaction
+  session. Cache/status/file reads are source-bound, future turns and
+  out-of-range terminal anchors fail before render, and reveal auto-clipping
+  remains only an additional trigger. `[repo/file verified]`
+- Exact-tree review rejected three remaining successor gaps before commit: the
+  live overlay still hid otherwise eligible clips, journal compaction replaced
+  a durable private hold journal without syncing the replacement or directory,
+  and a self-consistent wrong-source retry staged bytes before identity
+  rejection. The corrected tree renders live controls from canonical clip
+  eligibility, rotates the mode-0600 journal through an exclusive synced temp,
+  atomic rename, and directory sync while preserving the admitted hold across
+  every fault boundary, and compares both stored source hashes before staging
+  retry bytes. Focused visibility/continuity, crash/permission, and no-mutation
+  regressions pass 3 files / 106 tests. `[repo/file verified]`
+- Refrozen-successor verification passes the complete Replay Premiere
+  replay/clip/client behavior through the full root and dedicated server
+  matrices, restart helper 45/45, root TypeScript, Coworld-adapter TypeScript,
+  ESLint (zero errors; 110 existing warnings), Prettier, and production build
+  (1,935 modules; `index-CATt7Qb-.js` SHA-256
+  `535a3450f6108d65780c5738b54dbce62ea1548be334103517303df729660083`).
+  Full root passes 257 files / 3,012 tests and dedicated server passes 139 files
+  / 1,694
+  tests. Running the full-root and server matrices simultaneously caused both
+  processes to miss one fixed startup-registration assertion under host load;
+  the isolated assertion and both complete matrices then passed serially. The
+  first full-suite invocation was intentionally
+  discarded because a globally set low-disk evaluation flag altered the
+  storage-policy assertion under test; the clean-environment rerun produced
+  the passing counts above. Exact-tree review, commit identity, deployment,
+  legacy-artifact preparation, and a successful real-Premiere drill remain
+  pending. Clips remain false/false. `[repo/file verified]` +
+  `[local artifact verified]`

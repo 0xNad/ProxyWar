@@ -37,7 +37,9 @@ afterEach(async () => {
   await fs.rm(root, { recursive: true, force: true });
 });
 
-async function harness(): Promise<{
+async function harness(
+  options: { retainedRunKeys?: ReadonlySet<string> } = {},
+): Promise<{
   store: ReplayPremiereArchiveStore;
   run(operation: (baseUrl: string) => Promise<void>): Promise<void>;
 }> {
@@ -101,6 +103,10 @@ async function harness(): Promise<{
       loadAppShell: async () => APP_SHELL,
       publicOrigin: PUBLIC_ORIGIN,
       pageContentSecurityPolicy: proxyWarLeagueContentSecurityPolicy(),
+      resolveClipGenerationTarget:
+        options.retainedRunKeys === undefined
+          ? undefined
+          : async (runKey) => options.retainedRunKeys?.has(runKey) === true,
     }),
   );
   // Downstream marker: proves whether the archive router deferred (next()).
@@ -243,6 +249,11 @@ describe("archived durable clip route", () => {
   }
 
   function archivePayloadFrom(html: string): {
+    replayRunKey: string | null;
+    clipGenerationTarget: {
+      kind: "league_run";
+      replayRunKey: string;
+    } | null;
     clip: { url: string; byteLength: number } | null;
   } {
     const match =
@@ -362,6 +373,31 @@ describe("archived durable clip route", () => {
       expect(after.clip).toEqual({
         url: `/premiere/${ARCHIVED_ID}/clip.mp4`,
         byteLength: CLIP_BYTES.byteLength,
+      });
+    });
+  });
+
+  it("exposes a replay-scoped generation target only while the ordinary source is retained", async () => {
+    const expectedRunKey = "league-coworld-run-001";
+    const missing = await harness({ retainedRunKeys: new Set() });
+    await missing.run(async (baseUrl) => {
+      const payload = archivePayloadFrom(
+        await (await fetch(`${baseUrl}/premiere/${ARCHIVED_ID}`)).text(),
+      );
+      expect(payload.replayRunKey).toBe(expectedRunKey);
+      expect(payload.clipGenerationTarget).toBeNull();
+    });
+
+    const retained = await harness({
+      retainedRunKeys: new Set([expectedRunKey]),
+    });
+    await retained.run(async (baseUrl) => {
+      const payload = archivePayloadFrom(
+        await (await fetch(`${baseUrl}/premiere/${ARCHIVED_ID}`)).text(),
+      );
+      expect(payload.clipGenerationTarget).toEqual({
+        kind: "league_run",
+        replayRunKey: expectedRunKey,
       });
     });
   });

@@ -25,6 +25,10 @@ function samplePayload(): ReplayPremiereArchivePayload {
     terminalState: "revealed",
     revealedAt: "2026-07-20T18:00:00.000Z",
     replayRunKey: "league-coworld-run-001",
+    clipGenerationTarget: {
+      kind: "league_run",
+      replayRunKey: "league-coworld-run-001",
+    },
     summary: {
       premiereId: PREMIERE_ID,
       sourceRunId: "coworld-run-001",
@@ -69,6 +73,12 @@ afterEach(() => {
   document.getElementById("proxywar-premiere-archive")?.remove();
   document.getElementById("replay-premiere-overlay")?.remove();
   document.body.innerHTML = "";
+  delete (
+    window as Window & {
+      __proxyWarLeagueClipStates?: Map<string, unknown>;
+    }
+  ).__proxyWarLeagueClipStates;
+  vi.unstubAllGlobals();
   vi.restoreAllMocks();
 });
 
@@ -93,7 +103,48 @@ describe("readReplayPremiereArchivePayload", () => {
     const parsed = readReplayPremiereArchivePayload();
     expect(parsed?.premiereId).toBe(PREMIERE_ID);
     expect(parsed?.replayRunKey).toBe("league-coworld-run-001");
+    expect(parsed?.clipGenerationTarget).toEqual({
+      kind: "league_run",
+      replayRunKey: "league-coworld-run-001",
+    });
     expect(parsed?.summary.markers).toHaveLength(1);
+  });
+
+  it("treats absent, malformed, and mismatched generation targets as unavailable", () => {
+    const fetchMock = vi.fn(async () => clipCapabilitiesResponse(true));
+    vi.stubGlobal("fetch", fetchMock);
+    const invalidTargets: unknown[] = [
+      undefined,
+      null,
+      { kind: "premiere", replayRunKey: "league-coworld-run-001" },
+      { kind: "league_run" },
+      { kind: "league_run", replayRunKey: "league-coworld-other" },
+    ];
+
+    for (const clipGenerationTarget of invalidTargets) {
+      const candidate = {
+        ...samplePayload(),
+        clipGenerationTarget,
+      } as unknown as Record<string, unknown>;
+      if (clipGenerationTarget === undefined) {
+        delete candidate.clipGenerationTarget;
+      }
+      inject(JSON.stringify(candidate));
+      const parsed = readReplayPremiereArchivePayload();
+      expect(parsed).not.toBeNull();
+      expect(parsed?.clipGenerationTarget).toBeNull();
+
+      const handle = mountArchivedReplayPremiereOverlay(parsed!);
+      expect(
+        handle.element.querySelector(".rp-archived-clip-generation"),
+      ).toBeNull();
+      handle.dispose();
+      handle.element.remove();
+      document.getElementById("proxywar-premiere-archive")?.remove();
+    }
+
+    // A rejected generation target never even probes the process capability.
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 });
 
@@ -187,6 +238,124 @@ describe("mountArchivedReplayPremiereOverlay", () => {
     withoutClip.dispose();
   });
 
+  it("hides archived generation when the process capability is off but keeps a promoted download", async () => {
+    const fetchMock = vi.fn(async () => clipCapabilitiesResponse(false));
+    vi.stubGlobal("fetch", fetchMock);
+    const payload = samplePayload();
+    payload.clip = {
+      url: `/premiere/${PREMIERE_ID}/clip.mp4`,
+      byteLength: 12345,
+    };
+    const handle = mountArchivedReplayPremiereOverlay(payload);
+
+    await vi.waitFor(() => {
+      const generation = handle.element.querySelector<HTMLElement>(
+        ".rp-archived-clip-generation",
+      );
+      expect(generation?.hidden).toBe(true);
+      expect(generation?.childElementCount).toBe(0);
+    });
+    expect(
+      handle.element.querySelector(".rp-archived-clip-download"),
+    ).not.toBeNull();
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    handle.dispose();
+  });
+
+  it("requests a clip for a retained archived rated replay without a Premiere interaction session", async () => {
+    const payload = samplePayload();
+    payload.clip = null;
+    const runKey = payload.replayRunKey!;
+    const clipUrl = `/ai-league-runs/${runKey}/clip-v1-61.mp4`;
+    const requests: Array<{ url: string; method: string; body: unknown }> = [];
+    const fetchMock = vi.fn(
+      async (input: string | URL | Request, init?: RequestInit) => {
+        const url = String(input);
+        if (url === "/api/clip-capabilities") {
+          return clipCapabilitiesResponse(true);
+        }
+        requests.push({
+          url,
+          method: init?.method ?? "GET",
+          body: typeof init?.body === "string" ? JSON.parse(init.body) : null,
+        });
+        return new Response(
+          JSON.stringify({
+            schemaVersion: 1,
+            premiereId: runKey,
+            bucket: 61,
+            clipVersion: 1,
+            state: "ready",
+            ready: {
+              clipUrl,
+              byteLength: 96,
+              sha256: "c".repeat(64),
+              anchorTurn: 615,
+              social: { caption: "caption text", firstReply: "watch url" },
+            },
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        );
+      },
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    const handle = mountArchivedReplayPremiereOverlay(payload);
+    document.dispatchEvent(
+      new CustomEvent("ai-league-replay-frame", {
+        detail: { turnNumber: 615, players: [] },
+      }),
+    );
+
+    await vi.waitFor(() => {
+      expect(
+        handle.element.querySelector("[data-ai-league-clip-render]"),
+      ).not.toBeNull();
+    });
+    handle.element
+      .querySelector<HTMLButtonElement>("[data-ai-league-clip-render]")
+      ?.click();
+    await vi.waitFor(() => {
+      expect(
+        handle.element.querySelector("[data-ai-league-clip-download]"),
+      ).not.toBeNull();
+    });
+
+    expect(requests).toEqual([
+      {
+        url: `/api/league-runs/${runKey}/clips`,
+        method: "POST",
+        body: { turn: 615 },
+      },
+    ]);
+    expect(
+      requests.some(({ url }) =>
+        url.includes(`/api/premieres/${PREMIERE_ID}/sessions`),
+      ),
+    ).toBe(false);
+    expect(
+      handle.element
+        .querySelector<HTMLAnchorElement>("[data-ai-league-clip-download]")
+        ?.getAttribute("href"),
+    ).toBe(clipUrl);
+    handle.dispose();
+  });
+
+  it("does not show or probe generation when the archived replay source is unavailable", () => {
+    const fetchMock = vi.fn(async () => clipCapabilitiesResponse(true));
+    vi.stubGlobal("fetch", fetchMock);
+    const handle = mountArchivedReplayPremiereOverlay({
+      ...samplePayload(),
+      replayRunKey: null,
+      clip: null,
+    });
+
+    expect(
+      handle.element.querySelector(".rp-archived-clip-generation"),
+    ).toBeNull();
+    expect(fetchMock).not.toHaveBeenCalled();
+    handle.dispose();
+  });
+
   it("parses the clip strictly: only this premiere's exact durable route", () => {
     const good = {
       ...samplePayload(),
@@ -216,3 +385,14 @@ describe("mountArchivedReplayPremiereOverlay", () => {
     expect(readReplayPremiereArchivePayload()?.clip).toBeNull();
   });
 });
+
+function clipCapabilitiesResponse(enabled: boolean): Response {
+  return new Response(
+    JSON.stringify({
+      schemaVersion: 1,
+      premiereGenerationEnabled: enabled,
+      leagueGenerationEnabled: enabled,
+    }),
+    { status: 200, headers: { "Content-Type": "application/json" } },
+  );
+}

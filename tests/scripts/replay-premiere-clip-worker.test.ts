@@ -4,6 +4,7 @@ import {
   preInjectSource,
   resolveDiscoveredWinnerReplayPlan,
   resolveInitialReplayRenderPlan,
+  validateClipCaptureWindowWithinSource,
   validateDiscoveredWinnerTerminalTick,
   WINNER_TERMINAL_DISCOVERY_PHASE_TIMEOUT_MS,
 } from "../../src/scripts/replay-premiere-clip-worker";
@@ -134,5 +135,55 @@ describe("replay premiere clip winner-terminal contract", () => {
         hasWinnerMetadata: true,
       }),
     ).toThrow("no valid declared turn upper bound");
+  });
+
+  it("defensively fences capture against the admitted immutable source range", () => {
+    expect(() =>
+      validateClipCaptureWindowWithinSource(
+        {
+          anchorTurn: 900,
+          renderableThroughTurn: 1_000,
+          sourceComplete: false,
+        },
+        1_000,
+        { parkTick: 800, endTick: 1_000 },
+      ),
+    ).toThrow("incomplete source attempted terminal-window backshift");
+
+    expect(() =>
+      validateClipCaptureWindowWithinSource(
+        {
+          anchorTurn: 900,
+          renderableThroughTurn: 1_000,
+          sourceComplete: true,
+        },
+        1_000,
+        { parkTick: 800, endTick: 1_000 },
+      ),
+    ).not.toThrow();
+
+    expect(() =>
+      validateClipCaptureWindowWithinSource(
+        {
+          anchorTurn: 1_001,
+          renderableThroughTurn: 1_001,
+          sourceComplete: true,
+        },
+        1_000,
+        { parkTick: 800, endTick: 1_000 },
+      ),
+    ).toThrow("clip anchor exceeds the replay terminal turn");
+
+    expect(() =>
+      validateClipCaptureWindowWithinSource(
+        {
+          anchorTurn: 900,
+          renderableThroughTurn: 1_000,
+          sourceComplete: true,
+        },
+        1_100,
+        { parkTick: 900, endTick: 1_050 },
+      ),
+    ).toThrow("clip capture window exceeds the retained/released range");
   });
 });

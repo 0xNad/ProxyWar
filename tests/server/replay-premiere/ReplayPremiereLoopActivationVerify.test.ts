@@ -1,20 +1,43 @@
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { execFile } from "node:child_process";
+import {
+  chmod,
+  mkdir,
+  mkdtemp,
+  readFile,
+  readdir,
+  rm,
+  stat,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { promisify } from "node:util";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import {
   activateHold,
+  compactJournalIfNeeded,
+  createJournalWriter,
+  persistRetainedAdmissionTransaction,
+  progressHold,
+  runLoopReplayPremiereAdmission,
   trackHold,
+  type IngestMaterials,
   type JournalWriter,
   type LoopConfig,
+  type RetainedAdmissionTransaction,
 } from "../../../src/scripts/replay-premiere-loop";
+import { ReplayPremiereError } from "../../../src/server/replay-premiere/ReplayPremiereErrors";
 import {
   PREMIERE_LOOP_ACTIVATION_BACKOFF_MS,
   PREMIERE_LOOP_ACTIVATION_VERIFY_MS,
+  PREMIERE_LOOP_ADMISSION_PROJECTION_TIMEOUT_MS,
+  PREMIERE_LOOP_HOLD_WINDOW_MS,
   PREMIERE_LOOP_MAX_ACTIVATION_ATTEMPTS,
   derivePremiereId,
+  foldLoopJournal,
   holdExpiresAtForScheduled,
   type LoopHoldState,
+  type LoopJournalRecord,
   type LoopReleaseOutcome,
   type LoopRoundRef,
   type LoopSkipReason,
@@ -22,11 +45,10 @@ import {
 
 /**
  * The activation-zombie fix (2026-07-22, round 644 / prem_105c…): a controlled
- * restart that exits 0 only proves a fresh server process accepted traffic —
- * the server's startup recovery can still reject the freshly admitted
- * premiere on its own total budget (`startup_deadline_exceeded`), leaving
- * `/premiere/<id>` 404 while the loop tracked "phase activated" for the whole
- * 40-minute hold window. These tests drive the real `trackHold` with a
+ * restart that exits 0 only proves a fresh server process accepted traffic.
+ * New admissions now carry the precomputed projection artifact, but a legacy
+ * artifact or another startup refusal can still leave `/premiere/<id>` 404.
+ * These tests drive the real `trackHold` with a
  * stubbed loopback origin and an injected restart to prove:
  *   - a registered premiere behaves exactly as before (no restart calls);
  *   - an unregistered activated premiere waits only a bounded window;
@@ -36,6 +58,7 @@ import {
  */
 
 const NOW = new Date("2026-07-22T12:00:30.000Z");
+const execFileAsync = promisify(execFile);
 
 let stateDir: string;
 
@@ -74,6 +97,15 @@ function config(): LoopConfig {
     loopbackBaseUrl: "http://127.0.0.1:9",
     contractPath: path.join(stateDir, "premiere-suppression", "contract.json"),
     pinManifestPath: path.join(stateDir, "retention-pins.json"),
+    loopStateDir: stateDir,
+    journalPath: path.join(stateDir, "journal.jsonl"),
+    decisionsPath: path.join(stateDir, "decisions.jsonl"),
+    ingestScratchDir: path.join(stateDir, "ingest-scratch"),
+    nonceDir: path.join(stateDir, "admit-nonce"),
+    privateStateRoot: path.join(stateDir, "private"),
+    servedRoots: [path.join(stateDir, "served")],
+    deploymentOrigin: "https://beta.proxywar.xyz",
+    minimumFreeBytes: 0,
   } as unknown as LoopConfig;
 }
 
@@ -104,6 +136,111 @@ function hold(overrides: Partial<LoopHoldState> = {}): LoopHoldState {
   };
 }
 
+async function retainedFileSnapshot(
+  loopConfig: LoopConfig,
+): Promise<Record<string, number>> {
+  const snapshot: Record<string, number> = {};
+  for (const root of [loopConfig.ingestScratchDir, loopConfig.nonceDir]) {
+    let entries: string[];
+    try {
+      entries = await readdir(root);
+    } catch {
+      continue;
+    }
+    for (const entry of entries) {
+      const filePath = path.join(root, entry);
+      snapshot[`${path.basename(root)}/${entry}`] = (await stat(filePath)).size;
+    }
+  }
+  return snapshot;
+}
+
+async function createRetainedTransaction(
+  current: LoopHoldState,
+  loopConfig: LoopConfig,
+  prefix: string,
+): Promise<RetainedAdmissionTransaction> {
+  await Promise.all([
+    mkdir(loopConfig.ingestScratchDir, { recursive: true }),
+    mkdir(loopConfig.nonceDir, { recursive: true }),
+  ]);
+  const scratch = (name: string) =>
+    path.join(loopConfig.ingestScratchDir, `${prefix}.${name}`);
+  const transaction: RetainedAdmissionTransaction = {
+    premiereId: current.premiereId,
+    episodeRequestId: current.episodeRequestId,
+    bundleSha256: "d".repeat(64),
+    createdAt: NOW.toISOString(),
+    rawReplayPath: scratch("replay"),
+    divisionFile: scratch("divisions.json"),
+    episodeFile: scratch("episode.json"),
+    sourceFile: scratch("source.json"),
+    eligibilityFile: scratch("eligibility.json"),
+    definitionFile: scratch("definition.json"),
+    nonceFile: path.join(loopConfig.nonceDir, `${prefix}.nonce.bin`),
+    markerPath: path.join(
+      loopConfig.ingestScratchDir,
+      `${current.premiereId}.retained-admission.json`,
+    ),
+  };
+  await Promise.all(
+    [
+      transaction.rawReplayPath,
+      transaction.divisionFile,
+      transaction.episodeFile,
+      transaction.sourceFile,
+      transaction.eligibilityFile,
+      transaction.definitionFile,
+      transaction.nonceFile,
+    ].map((filePath, index) => writeFile(filePath, `evidence-${index}`)),
+  );
+  await persistRetainedAdmissionTransaction(transaction, loopConfig);
+  return transaction;
+}
+
+function parseJournal(raw: string): LoopJournalRecord[] {
+  return raw
+    .split("\n")
+    .filter((line) => line.trim().length > 0)
+    .map((line) => JSON.parse(line) as LoopJournalRecord);
+}
+
+function compactionRecords(): LoopJournalRecord[] {
+  const admitted = hold({
+    phase: "admitted",
+    activatedAt: null,
+    premierePageLive: false,
+  });
+  return [
+    {
+      kind: "hold_update",
+      ts: NOW.toISOString(),
+      hold: admitted,
+    },
+    ...Array.from({ length: 5_001 }, (_value, index) => ({
+      kind: "round_skipped" as const,
+      ts: NOW.toISOString(),
+      roundId: `round_compaction_${index}`,
+      roundNumber: 1_000 + index,
+      reason: "skipped_busy" as const,
+    })),
+  ];
+}
+
+function serializeJournal(records: readonly LoopJournalRecord[]): string {
+  return `${records.map((record) => JSON.stringify(record)).join("\n")}\n`;
+}
+
+async function compactionTemporaryNames(
+  loopConfig: LoopConfig,
+): Promise<string[]> {
+  return (await readdir(path.dirname(loopConfig.journalPath))).filter(
+    (entry) =>
+      entry.startsWith(`${path.basename(loopConfig.journalPath)}.`) &&
+      entry.endsWith(".tmp"),
+  );
+}
+
 function stubPremiereState(state: string | null): ReturnType<typeof vi.fn> {
   const fetchMock = vi.fn(async () => {
     if (state === null) {
@@ -125,8 +262,633 @@ beforeEach(async () => {
 });
 
 afterEach(async () => {
+  vi.useRealTimers();
   vi.unstubAllGlobals();
   await rm(stateDir, { recursive: true, force: true });
+});
+
+describe("private journal compaction durability", () => {
+  test("publishes a mode-0600 compacted journal whose fold preserves the admitted hold", async () => {
+    const loopConfig = config();
+    const records = compactionRecords();
+    await writeFile(loopConfig.journalPath, serializeJournal(records), {
+      mode: 0o644,
+    });
+    await chmod(loopConfig.journalPath, 0o644);
+
+    const compacted = await compactJournalIfNeeded(loopConfig, records);
+
+    expect(compacted).toHaveLength(2_001);
+    expect(foldLoopJournal(compacted).activeHold?.phase).toBe("admitted");
+    const persisted = parseJournal(
+      await readFile(loopConfig.journalPath, "utf8"),
+    );
+    expect(persisted).toEqual(compacted);
+    expect(foldLoopJournal(persisted).activeHold?.phase).toBe("admitted");
+    expect((await stat(loopConfig.journalPath)).mode & 0o777).toBe(0o600);
+    const archivePath = path.join(
+      loopConfig.loopStateDir,
+      "journal.archive.jsonl",
+    );
+    expect((await stat(archivePath)).mode & 0o777).toBe(0o600);
+    expect(await compactionTemporaryNames(loopConfig)).toEqual([]);
+  });
+
+  test.each([
+    "after_archive_sync",
+    "after_temporary_write",
+    "after_temporary_sync",
+    "after_temporary_close",
+  ] as const)(
+    "keeps the original active journal and rejects a pre-rename fault at %s",
+    async (failurePhase) => {
+      const loopConfig = config();
+      const records = compactionRecords();
+      const original = serializeJournal(records);
+      await writeFile(loopConfig.journalPath, original, { mode: 0o600 });
+
+      await expect(
+        compactJournalIfNeeded(loopConfig, records, (phase) => {
+          if (phase === failurePhase) {
+            throw new Error(`compaction fault at ${phase}`);
+          }
+        }),
+      ).rejects.toThrow(`compaction fault at ${failurePhase}`);
+
+      expect(await readFile(loopConfig.journalPath, "utf8")).toBe(original);
+      expect(foldLoopJournal(parseJournal(original)).activeHold?.phase).toBe(
+        "admitted",
+      );
+      expect(await compactionTemporaryNames(loopConfig)).toEqual([]);
+    },
+  );
+
+  test.each([
+    "after_rename",
+    "before_directory_sync",
+    "after_directory_sync",
+  ] as const)(
+    "rejects durability uncertainty at %s while both old and new folds preserve the admitted hold",
+    async (failurePhase) => {
+      const loopConfig = config();
+      const records = compactionRecords();
+      const original = serializeJournal(records);
+      await writeFile(loopConfig.journalPath, original, { mode: 0o600 });
+
+      await expect(
+        compactJournalIfNeeded(loopConfig, records, (phase) => {
+          if (phase === failurePhase) {
+            throw new Error(`compaction fault at ${phase}`);
+          }
+        }),
+      ).rejects.toThrow(`compaction fault at ${failurePhase}`);
+
+      const persisted = parseJournal(
+        await readFile(loopConfig.journalPath, "utf8"),
+      );
+      expect(foldLoopJournal(parseJournal(original)).activeHold?.phase).toBe(
+        "admitted",
+      );
+      expect(foldLoopJournal(persisted).activeHold?.phase).toBe("admitted");
+      expect(persisted).toHaveLength(2_001);
+      expect((await stat(loopConfig.journalPath)).mode & 0o777).toBe(0o600);
+      expect(await compactionTemporaryNames(loopConfig)).toEqual([]);
+    },
+  );
+
+  test("cleans a pre-rename temporary and preserves the primary error when cleanup reporting also fails", async () => {
+    const loopConfig = config();
+    const records = compactionRecords();
+    const original = serializeJournal(records);
+    await writeFile(loopConfig.journalPath, original, { mode: 0o600 });
+    let caught: unknown;
+
+    try {
+      await compactJournalIfNeeded(loopConfig, records, (phase) => {
+        if (phase === "after_temporary_write") {
+          throw new Error("primary compaction failure");
+        }
+        if (phase === "after_temporary_cleanup") {
+          throw new Error("cleanup durability report failure");
+        }
+      });
+    } catch (error) {
+      caught = error;
+    }
+
+    expect(caught).toBeInstanceOf(AggregateError);
+    expect(
+      (caught as AggregateError).errors.map((error) =>
+        error instanceof Error ? error.message : String(error),
+      ),
+    ).toEqual([
+      "primary compaction failure",
+      "cleanup durability report failure",
+    ]);
+    expect(await readFile(loopConfig.journalPath, "utf8")).toBe(original);
+    expect(await compactionTemporaryNames(loopConfig)).toEqual([]);
+  });
+});
+
+describe("admission projection deadline", () => {
+  test("boots the supported loop package entrypoint in the bundled game environment", async () => {
+    let failure: unknown;
+    try {
+      await execFileAsync(
+        "npm",
+        ["run", "--silent", "premiere:loop", "--", "--unsupported"],
+        {
+          cwd: process.cwd(),
+          env: { ...process.env, GAME_ENV: "" },
+          timeout: 30_000,
+          maxBuffer: 1024 * 1024,
+        },
+      );
+    } catch (error) {
+      failure = error;
+    }
+    expect(failure).toMatchObject({
+      code: 1,
+      stderr: expect.stringContaining(
+        "unknown premiere-loop argument(s): --unsupported",
+      ),
+    });
+  });
+
+  test("cannot be widened beyond the reviewed 90-second ceiling", async () => {
+    const runAdmission = vi.fn();
+    await expect(
+      runLoopReplayPremiereAdmission({
+        args: [],
+        premiereId: hold().premiereId,
+        bundleSha256: "a".repeat(64),
+        environment: {},
+        projectionTimeoutMs: PREMIERE_LOOP_ADMISSION_PROJECTION_TIMEOUT_MS + 1,
+        runAdmission,
+      }),
+    ).rejects.toThrow("invalid premiere admission projection timeout");
+    expect(runAdmission).not.toHaveBeenCalled();
+  });
+
+  test("aborts at the fixed ceiling and maps the failure to a retriable admit release", async () => {
+    vi.useFakeTimers();
+    let projectionSignal: AbortSignal | undefined;
+    const pending = runLoopReplayPremiereAdmission({
+      args: [],
+      premiereId: hold().premiereId,
+      bundleSha256: "a".repeat(64),
+      environment: {},
+      runAdmission: async (_args, dependencies) => {
+        projectionSignal = dependencies?.checkpointProjectionSignal;
+        if (projectionSignal === undefined) {
+          throw new Error("missing projection deadline signal");
+        }
+        return new Promise<never>((_resolve, reject) => {
+          projectionSignal?.addEventListener(
+            "abort",
+            () =>
+              reject(
+                new ReplayPremiereError(
+                  "checkpoint_projection_aborted",
+                  "PREMIERE_UNAVAILABLE",
+                  503,
+                  "checkpoint projection aborted",
+                ),
+              ),
+            { once: true },
+          );
+        });
+      },
+    });
+
+    expect(projectionSignal?.aborted).toBe(false);
+    await vi.advanceTimersByTimeAsync(
+      PREMIERE_LOOP_ADMISSION_PROJECTION_TIMEOUT_MS - 1,
+    );
+    expect(projectionSignal?.aborted).toBe(false);
+    await vi.advanceTimersByTimeAsync(1);
+
+    await expect(pending).resolves.toEqual({
+      kind: "release",
+      outcome: "admit_failed",
+      terminal: false,
+    });
+    expect(projectionSignal?.aborted).toBe(true);
+  });
+
+  test("timeout release refreshes the standing heartbeat, unpins once, and never activates", async () => {
+    const current = hold({
+      phase: "claimed",
+      activatedAt: null,
+      premierePageLive: false,
+    });
+    await writeFile(
+      config().pinManifestPath,
+      `${JSON.stringify({
+        schemaVersion: 1,
+        pins: [
+          {
+            episodeRequestId: current.episodeRequestId,
+            publicRunKey: current.publicRunKey,
+            reason: `premiere-hold:${current.premiereId}`,
+          },
+        ],
+      })}\n`,
+      "utf8",
+    );
+    const journal = captureJournal();
+    const timedOutAdmission = vi.fn(async () => ({
+      kind: "release" as const,
+      outcome: "admit_failed" as const,
+      terminal: false,
+    }));
+    const activate = vi.fn();
+    const track = vi.fn();
+    const releasedAt = new Date(
+      NOW.getTime() + PREMIERE_LOOP_ADMISSION_PROJECTION_TIMEOUT_MS,
+    );
+    const materials = {
+      rawRow: {},
+      rawReplayPath: path.join(stateDir, "unused.replay"),
+      facts: {
+        runId: "coworld-run",
+        turnCount: current.turnCount,
+        seatCount: current.seatCount,
+        gameMap: "World",
+        gameMapSize: "Large",
+        difficulty: "Hard",
+        coworldName: "proxywar",
+      },
+      divisionFile: path.join(stateDir, "unused-divisions.json"),
+    } satisfies IngestMaterials;
+
+    await progressHold(current, materials, config(), journal.writer, NOW, {
+      ingestAndAdmit: timedOutAdmission,
+      hasStorageFloor: async () => true,
+      activateHold: activate,
+      trackHold: track,
+      now: () => releasedAt,
+    });
+
+    expect(timedOutAdmission).toHaveBeenCalledTimes(1);
+    expect(activate).not.toHaveBeenCalled();
+    expect(track).not.toHaveBeenCalled();
+    expect(journal.holdUpdates).toEqual([]);
+    expect(journal.released).toEqual([
+      { hold: current, outcome: "admit_failed", terminal: false },
+    ]);
+    const contract = JSON.parse(
+      await readFile(config().contractPath, "utf8"),
+    ) as { generatedAt: string; holds: unknown[] };
+    expect(contract.generatedAt).toBe(releasedAt.toISOString());
+    expect(contract.holds).toEqual([]);
+    const pins = JSON.parse(
+      await readFile(config().pinManifestPath, "utf8"),
+    ) as { pins: unknown[] };
+    expect(pins.pins).toEqual([]);
+  });
+
+  test("an uncertain catalog commit preserves the hold and never enters release or activation", async () => {
+    const current = hold({
+      phase: "claimed",
+      activatedAt: null,
+      premierePageLive: false,
+    });
+    const journal = captureJournal();
+    const holdRequiredAdmission = vi.fn(async () => ({
+      kind: "hold" as const,
+      reason: "admission_state_uncertain" as const,
+    }));
+    const activate = vi.fn();
+    const track = vi.fn();
+    const refreshedAt = new Date(NOW.getTime() + 45_000);
+    const materials = {
+      rawRow: {},
+      rawReplayPath: path.join(stateDir, "retained.replay"),
+      facts: {
+        runId: "coworld-run",
+        turnCount: current.turnCount,
+        seatCount: current.seatCount,
+        gameMap: "World",
+        gameMapSize: "Large",
+        difficulty: "Hard",
+        coworldName: "proxywar",
+      },
+      divisionFile: path.join(stateDir, "retained-divisions.json"),
+    } satisfies IngestMaterials;
+
+    await progressHold(current, materials, config(), journal.writer, NOW, {
+      ingestAndAdmit: holdRequiredAdmission,
+      hasStorageFloor: async () => true,
+      activateHold: activate,
+      trackHold: track,
+      now: () => refreshedAt,
+    });
+
+    expect(holdRequiredAdmission).toHaveBeenCalledTimes(1);
+    expect(activate).not.toHaveBeenCalled();
+    expect(track).not.toHaveBeenCalled();
+    expect(journal.holdUpdates).toEqual([current]);
+    expect(journal.released).toEqual([]);
+    const contract = JSON.parse(
+      await readFile(config().contractPath, "utf8"),
+    ) as { generatedAt: string; holds: Array<{ premiereId: string }> };
+    expect(contract.generatedAt).toBe(refreshedAt.toISOString());
+    expect(contract.holds.map((entry) => entry.premiereId)).toEqual([
+      current.premiereId,
+    ]);
+  });
+
+  test("reuses one retained transaction across two ticks without download, ingest, or growth", async () => {
+    const current = hold({
+      phase: "claimed",
+      activatedAt: null,
+      premierePageLive: false,
+    });
+    const loopConfig = config();
+    await Promise.all([
+      mkdir(loopConfig.ingestScratchDir, { recursive: true }),
+      mkdir(loopConfig.nonceDir, { recursive: true }),
+    ]);
+    const scratch = (name: string) =>
+      path.join(loopConfig.ingestScratchDir, name);
+    const transaction: RetainedAdmissionTransaction = {
+      premiereId: current.premiereId,
+      episodeRequestId: current.episodeRequestId,
+      bundleSha256: "b".repeat(64),
+      createdAt: NOW.toISOString(),
+      rawReplayPath: scratch("retained.replay"),
+      divisionFile: scratch("retained.divisions.json"),
+      episodeFile: scratch("retained.episode.json"),
+      sourceFile: scratch("retained.source.json"),
+      eligibilityFile: scratch("retained.eligibility.json"),
+      definitionFile: scratch("retained.definition.json"),
+      nonceFile: path.join(loopConfig.nonceDir, "retained-nonce.bin"),
+      markerPath: scratch(`${current.premiereId}.retained-admission.json`),
+    };
+    await Promise.all(
+      [
+        transaction.rawReplayPath,
+        transaction.divisionFile,
+        transaction.episodeFile,
+        transaction.sourceFile,
+        transaction.eligibilityFile,
+        transaction.definitionFile,
+        transaction.nonceFile,
+      ].map((filePath, index) => writeFile(filePath, `evidence-${index}`)),
+    );
+    await persistRetainedAdmissionTransaction(transaction, loopConfig);
+    const before = await retainedFileSnapshot(loopConfig);
+    const reconcile = vi
+      .fn()
+      .mockResolvedValueOnce({
+        kind: "hold" as const,
+        reason: "admission_state_uncertain" as const,
+      })
+      .mockResolvedValueOnce({
+        kind: "admitted" as const,
+        bundleSha256: transaction.bundleSha256,
+        retainedTransaction: transaction,
+      });
+    const ingest = vi.fn();
+    const storageFloor = vi.fn(async () => true);
+    const activate = vi.fn(async (admitted: LoopHoldState) => ({
+      kind: "retry" as const,
+      hold: admitted,
+    }));
+    const track = vi.fn();
+    const download = vi.fn();
+    vi.stubGlobal("fetch", download);
+    const journal = captureJournal();
+
+    await progressHold(current, null, loopConfig, journal.writer, NOW, {
+      ingestAndAdmit: ingest,
+      reconcileRetainedAdmission: reconcile,
+      hasStorageFloor: storageFloor,
+      activateHold: activate,
+      trackHold: track,
+      now: () => new Date(NOW.getTime() + 60_000),
+    });
+
+    expect(await retainedFileSnapshot(loopConfig)).toEqual(before);
+    expect(journal.released).toEqual([]);
+    expect(journal.holdUpdates).toHaveLength(1);
+    const preserved = journal.holdUpdates[0];
+    expect(preserved.phase).toBe("claimed");
+
+    await progressHold(
+      preserved,
+      null,
+      loopConfig,
+      journal.writer,
+      new Date(NOW.getTime() + 120_000),
+      {
+        ingestAndAdmit: ingest,
+        reconcileRetainedAdmission: reconcile,
+        hasStorageFloor: storageFloor,
+        activateHold: activate,
+        trackHold: track,
+        now: () => new Date(NOW.getTime() + 120_000),
+      },
+    );
+
+    expect(reconcile).toHaveBeenCalledTimes(2);
+    expect(ingest).not.toHaveBeenCalled();
+    expect(download).not.toHaveBeenCalled();
+    expect(storageFloor).toHaveBeenCalledTimes(2);
+    expect(journal.released).toEqual([]);
+    expect(journal.holdUpdates.at(-1)?.phase).toBe("admitted");
+    expect(activate).toHaveBeenCalledTimes(1);
+    expect(track).not.toHaveBeenCalled();
+    expect(await retainedFileSnapshot(loopConfig)).toEqual({});
+  });
+
+  test.each([
+    "after_write",
+    "after_file_sync",
+    "after_file_close",
+    "after_directory_sync",
+  ] as const)(
+    "retains evidence across an admitted-journal crash at %s and restart-folds safely",
+    async (failurePhase) => {
+      const current = hold({
+        phase: "claimed",
+        activatedAt: null,
+        premierePageLive: false,
+      });
+      const loopConfig = config();
+      const transaction = await createRetainedTransaction(
+        current,
+        loopConfig,
+        failurePhase,
+      );
+      const before = await retainedFileSnapshot(loopConfig);
+      const durableWriter = createJournalWriter(loopConfig);
+      await durableWriter.appendHoldUpdate(current);
+      const durableClaimedJournal = await readFile(
+        loopConfig.journalPath,
+        "utf8",
+      );
+      const crashingWriter = createJournalWriter(
+        loopConfig,
+        (phase, record) => {
+          if (
+            phase === failurePhase &&
+            record.kind === "hold_update" &&
+            record.hold.phase === "admitted"
+          ) {
+            throw new Error(`simulated crash at ${phase}`);
+          }
+        },
+      );
+      const admitted = {
+        kind: "admitted" as const,
+        bundleSha256: transaction.bundleSha256,
+        retainedTransaction: transaction,
+      };
+
+      await expect(
+        progressHold(current, null, loopConfig, crashingWriter, NOW, {
+          reconcileRetainedAdmission: async () => admitted,
+          hasStorageFloor: async () => true,
+          activateHold: async (admittedHold) => ({
+            kind: "retry" as const,
+            hold: admittedHold,
+          }),
+          now: () => new Date(NOW.getTime() + 60_000),
+        }),
+      ).rejects.toThrow(`simulated crash at ${failurePhase}`);
+      expect(await retainedFileSnapshot(loopConfig)).toEqual(before);
+
+      if (failurePhase === "after_write") {
+        // The unsynced append is permitted to disappear in a real crash.
+        await writeFile(loopConfig.journalPath, durableClaimedJournal, {
+          mode: 0o600,
+        });
+      }
+      const folded = foldLoopJournal(
+        parseJournal(await readFile(loopConfig.journalPath, "utf8")),
+      );
+      expect(folded.activeHold?.phase).toBe(
+        failurePhase === "after_write" ? "claimed" : "admitted",
+      );
+      if (folded.activeHold === null) {
+        throw new Error("restart lost the active retained hold");
+      }
+
+      await progressHold(
+        folded.activeHold,
+        null,
+        loopConfig,
+        durableWriter,
+        new Date(NOW.getTime() + 120_000),
+        {
+          reconcileRetainedAdmission: async () => admitted,
+          hasStorageFloor: async () => true,
+          activateHold: async (admittedHold) => ({
+            kind: "retry" as const,
+            hold: admittedHold,
+          }),
+          now: () => new Date(NOW.getTime() + 120_000),
+        },
+      );
+
+      expect(await retainedFileSnapshot(loopConfig)).toEqual({});
+      const restarted = foldLoopJournal(
+        parseJournal(await readFile(loopConfig.journalPath, "utf8")),
+      );
+      expect(restarted.activeHold?.phase).toBe("admitted");
+    },
+  );
+
+  test("checks the storage floor before an existing claimed hold downloads or ingests", async () => {
+    const current = hold({
+      phase: "claimed",
+      activatedAt: null,
+      premierePageLive: false,
+    });
+    const journal = captureJournal();
+    const ingest = vi.fn();
+    const download = vi.fn();
+    vi.stubGlobal("fetch", download);
+
+    await progressHold(current, null, config(), journal.writer, NOW, {
+      ingestAndAdmit: ingest,
+      hasStorageFloor: async () => false,
+    });
+
+    expect(ingest).not.toHaveBeenCalled();
+    expect(download).not.toHaveBeenCalled();
+    expect(journal.holdUpdates).toEqual([]);
+    expect(journal.released).toEqual([]);
+  });
+
+  test("an expired claimed hold with a retained marker extends instead of releasing", async () => {
+    const current = hold({
+      phase: "claimed",
+      activatedAt: null,
+      premierePageLive: false,
+      holdExpiresAt: new Date(NOW.getTime() - 1).toISOString(),
+    });
+    const loopConfig = config();
+    await Promise.all([
+      mkdir(loopConfig.ingestScratchDir, { recursive: true }),
+      mkdir(loopConfig.nonceDir, { recursive: true }),
+    ]);
+    const scratch = (name: string) =>
+      path.join(loopConfig.ingestScratchDir, name);
+    const transaction: RetainedAdmissionTransaction = {
+      premiereId: current.premiereId,
+      episodeRequestId: current.episodeRequestId,
+      bundleSha256: "c".repeat(64),
+      createdAt: NOW.toISOString(),
+      rawReplayPath: scratch("expired.replay"),
+      divisionFile: scratch("expired.divisions.json"),
+      episodeFile: scratch("expired.episode.json"),
+      sourceFile: scratch("expired.source.json"),
+      eligibilityFile: scratch("expired.eligibility.json"),
+      definitionFile: scratch("expired.definition.json"),
+      nonceFile: path.join(loopConfig.nonceDir, "expired-nonce.bin"),
+      markerPath: scratch(`${current.premiereId}.retained-admission.json`),
+    };
+    await persistRetainedAdmissionTransaction(transaction, loopConfig);
+    const journal = captureJournal();
+    const reconcile = vi.fn();
+
+    await progressHold(current, null, loopConfig, journal.writer, NOW, {
+      reconcileRetainedAdmission: reconcile,
+      hasStorageFloor: async () => true,
+    });
+
+    expect(reconcile).not.toHaveBeenCalled();
+    expect(journal.released).toEqual([]);
+    expect(journal.holdUpdates).toHaveLength(1);
+    expect(Date.parse(journal.holdUpdates[0].holdExpiresAt)).toBe(
+      NOW.getTime() + PREMIERE_LOOP_HOLD_WINDOW_MS,
+    );
+  });
+
+  test("maps an uncertain Catalog-to-CLI result to hold, never admit_failed", async () => {
+    const result = await runLoopReplayPremiereAdmission({
+      args: [],
+      premiereId: hold().premiereId,
+      bundleSha256: "a".repeat(64),
+      environment: {},
+      runAdmission: async () => {
+        throw new ReplayPremiereError(
+          "catalog_admission_commit_state_uncertain",
+          "PREMIERE_UNAVAILABLE",
+          500,
+          "uncertain admission commit",
+        );
+      },
+    });
+
+    expect(result).toEqual({
+      kind: "hold",
+      reason: "admission_state_uncertain",
+    });
+  });
 });
 
 describe("trackHold — post-activation registration verification", () => {

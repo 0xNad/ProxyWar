@@ -1,13 +1,14 @@
 /**
  * Replay Premiere clip service.
  *
- * Renders and caches short, watermarked, licensed mp4 clips of premiere
+ * Renders and caches short, watermarked, licensed mp4 clips of retained replay
  * moments for social sharing. Clips are a CACHE, never event-store evidence:
  * the authoritative index is the disk, rebuilt by scanning the clip store at
  * startup; losing the cache loses nothing but render time.
  *
  * Responsibilities:
- *  - 10-turn anchor bucketing and a `(premiereId, bucket, clipVersion)` cache;
+ *  - 10-turn anchor bucketing and a source-bound
+ *    `(replayId, sourceSha256, bucket, clipVersion)` cache;
  *  - render admission: per-participant / per-premiere-day / global-hour quotas,
  *    a disk-space floor, and a bounded queue with concurrency 1 and
  *    join-existing-job dedupe;
@@ -17,10 +18,9 @@
  *    reply);
  *  - reveal-time pre-render of the densest `clip_this` buckets.
  *
- * Lifecycle gating is authoritative here AND at the HTTP layer: writes require
- * `revealed` (archived => 410); reads require `revealed | archived` plus an
- * on-disk artifact; anything else is a fail-closed 404 indistinguishable from a
- * nonexistent premiere.
+ * Replay lifecycle is intentionally NOT an eligibility input. Callers bind
+ * each request to immutable retained source bytes and the exact public/source
+ * range currently renderable. The worker re-verifies both bindings.
  */
 
 import express, { type Request, type Response, type Router } from "express";
@@ -33,6 +33,7 @@ import type { PremiereState } from "./ReplayPremiereContracts";
 import {
   isPremiereClipBucket,
   isRenderablePremiereClipBucket,
+  PREMIERE_CLIP_CAPTURE_TAIL_TURNS,
   PREMIERE_CLIP_VERSION,
   premiereClipBucketForTurn,
   premiereClipRepresentativeAnchorTurn,
@@ -101,18 +102,25 @@ export interface ReplayPremiereClipReactionSample {
 
 export interface ReplayPremiereClipRenderRequest {
   premiereId: string;
-  /** Current lifecycle; gating is enforced here as well as at the HTTP layer. */
-  lifecycleState: PremiereState;
+  /** @deprecated Accepted for source compatibility; never used for eligibility. */
+  lifecycleState?: PremiereState;
   anchorTurn: number;
   /** null for system/pre-render jobs (skips the per-participant quota). */
   participantId: string | null;
   sourceReplaySha256: string;
+  /** Highest retained/released turn the render is permitted to expose. */
+  renderableThroughTurn: number;
+  /** Complete sources may shift a terminal-overlapping window backwards. */
+  sourceComplete: boolean;
 }
 
 export interface ReplayPremiereClipReadRequest {
   premiereId: string;
-  lifecycleState: PremiereState;
+  /** @deprecated Accepted for source compatibility; never used for eligibility. */
+  lifecycleState?: PremiereState;
   bucket: number;
+  /** Exact immutable source identity expected for this replay id. */
+  sourceReplaySha256: string;
 }
 
 export interface ReplayPremiereClipFile {
@@ -174,6 +182,7 @@ export interface ReplayPremiereClipsOptions {
 
 interface ClipIndexEntry {
   premiereId: string;
+  sourceReplaySha256: string;
   bucket: number;
   clipVersion: number;
   anchorTurn: number;
@@ -191,6 +200,8 @@ interface QueuedJob {
   anchorTurn: number;
   bundlePath: string;
   expectedBundleSha256: string;
+  renderableThroughTurn: number;
+  sourceComplete: boolean;
 }
 
 interface PremiereWriteFence {
@@ -318,12 +329,14 @@ export class ReplayPremiereClips {
       if (
         manifest.premiereId !== premiereId ||
         manifest.clipVersion !== PREMIERE_CLIP_VERSION ||
-        manifest.outBytes !== stat.size
+        manifest.outBytes !== stat.size ||
+        (await sha256File(filePath)) !== manifest.outSha256
       ) {
         return null;
       }
       return {
         premiereId,
+        sourceReplaySha256: normalizeSourceSha256(manifest.sourceReplaySha256),
         bucket,
         clipVersion: PREMIERE_CLIP_VERSION,
         anchorTurn: manifest.anchorTurn,
@@ -340,7 +353,7 @@ export class ReplayPremiereClips {
 
   // -- Reads ---------------------------------------------------------------
 
-  /** Public status for a bucket. Gating: reads require revealed | archived. */
+  /** Public status for a bucket, bound to the caller's immutable source. */
   readStatus(
     request: ReplayPremiereClipReadRequest,
   ): PremiereClipStatusResponse {
@@ -352,32 +365,51 @@ export class ReplayPremiereClips {
       state: "absent",
       ready: null,
     };
-    if (!this.readsAllowed(request.lifecycleState)) return base;
     if (!isPremiereClipBucket(request.bucket)) return base;
     const key = cacheKey(request.premiereId, request.bucket);
     const entry = this.ready.get(key);
-    if (entry !== undefined) {
+    if (
+      entry !== undefined &&
+      entry.sourceReplaySha256 ===
+        normalizeSourceSha256(request.sourceReplaySha256)
+    ) {
       entry.lastAccessMs = this.now();
       return { ...base, state: "ready", ready: this.toReady(entry) };
     }
-    if (this.pending.has(key)) return { ...base, state: "pending" };
+    if (
+      this.pending.has(
+        renderKey(
+          request.premiereId,
+          request.bucket,
+          request.sourceReplaySha256,
+        ),
+      )
+    ) {
+      return { ...base, state: "pending" };
+    }
     return base;
   }
 
   /**
    * Resolve the on-disk file for the mp4 route. Returns null (=> 404) unless
-   * the premiere is revealed | archived AND a cached artifact exists on disk.
+   * a cached artifact exists on disk for the exact requested source identity.
    */
   async resolveReadyClip(
     request: ReplayPremiereClipReadRequest,
   ): Promise<ReplayPremiereClipFile | null> {
-    if (!this.readsAllowed(request.lifecycleState)) return null;
     if (!isPremiereClipBucket(request.bucket)) return null;
     const entry = this.ready.get(cacheKey(request.premiereId, request.bucket));
-    if (entry === undefined) return null;
+    if (
+      entry === undefined ||
+      entry.sourceReplaySha256 !==
+        normalizeSourceSha256(request.sourceReplaySha256)
+    ) {
+      return null;
+    }
     try {
       const stat = await fs.stat(entry.filePath);
       if (stat.size !== entry.byteLength) return null;
+      if ((await sha256File(entry.filePath)) !== entry.sha256) return null;
     } catch {
       // The index outran the disk (evicted/removed); fail closed.
       this.ready.delete(cacheKey(request.premiereId, request.bucket));
@@ -419,14 +451,13 @@ export class ReplayPremiereClips {
   }
 
   /**
-   * Admit a render request. Enforces lifecycle gating, then (for a cache miss)
+   * Admit a source/range-bound render request, then (for a cache miss) enforce
    * quotas, disk floor, and the bounded queue. Cache hits and joins to an
    * in-flight job never consume quota.
    */
   async requestClip(
     request: ReplayPremiereClipRenderRequest,
   ): Promise<PremiereClipStatusResponse> {
-    this.assertWritesAllowed(request.lifecycleState);
     this.assertRenderAdmissionOpen(request.premiereId);
     if (!Number.isSafeInteger(request.anchorTurn) || request.anchorTurn < 0) {
       throw invalid("clip_anchor_turn_invalid", 400);
@@ -435,10 +466,37 @@ export class ReplayPremiereClips {
     if (!isRenderablePremiereClipBucket(bucket)) {
       throw invalid("clip_anchor_too_early", 400);
     }
-    const key = cacheKey(request.premiereId, bucket);
+    if (typeof request.sourceComplete !== "boolean") {
+      throw invalid("clip_source_completeness_invalid", 400);
+    }
+    const representativeAnchorTurn =
+      premiereClipRepresentativeAnchorTurn(bucket);
+    if (
+      !Number.isSafeInteger(request.renderableThroughTurn) ||
+      request.renderableThroughTurn < request.anchorTurn
+    ) {
+      throw invalid("clip_anchor_outside_retained_range", 400);
+    }
+    const anchorTurn = request.sourceComplete
+      ? Math.min(representativeAnchorTurn, request.renderableThroughTurn)
+      : representativeAnchorTurn;
+    if (
+      request.sourceComplete !== true &&
+      anchorTurn + PREMIERE_CLIP_CAPTURE_TAIL_TURNS >
+        request.renderableThroughTurn
+    ) {
+      throw invalid("clip_capture_range_unreleased", 410);
+    }
+    const sourceReplaySha256 = normalizeSourceSha256(
+      request.sourceReplaySha256,
+    );
+    const key = renderKey(request.premiereId, bucket, sourceReplaySha256);
 
-    const existing = this.ready.get(key);
-    if (existing !== undefined) {
+    const existing = this.ready.get(cacheKey(request.premiereId, bucket));
+    if (
+      existing !== undefined &&
+      existing.sourceReplaySha256 === sourceReplaySha256
+    ) {
       existing.lastAccessMs = this.now();
       return this.statusFor(request.premiereId, bucket, "ready", existing);
     }
@@ -467,10 +525,10 @@ export class ReplayPremiereClips {
     try {
       const bundlePath = this.sourceBundlePath(
         request.premiereId,
-        request.sourceReplaySha256,
+        sourceReplaySha256,
       );
       try {
-        await this.assertSourceBundleAvailable(bundlePath);
+        await this.assertSourceBundleAvailable(bundlePath, sourceReplaySha256);
       } catch (error) {
         // A fence/close that landed during source preflight owns the outcome
         // and must prevent this request from becoming a late admission.
@@ -490,8 +548,13 @@ export class ReplayPremiereClips {
 
       // All asynchronous gates are complete. Quota check, reservation, and
       // enqueue now form one synchronous admission section.
-      const admittedExisting = this.ready.get(key);
-      if (admittedExisting !== undefined) {
+      const admittedExisting = this.ready.get(
+        cacheKey(request.premiereId, bucket),
+      );
+      if (
+        admittedExisting !== undefined &&
+        admittedExisting.sourceReplaySha256 === sourceReplaySha256
+      ) {
         admittedExisting.lastAccessMs = this.now();
         return this.statusFor(
           request.premiereId,
@@ -514,9 +577,11 @@ export class ReplayPremiereClips {
         key,
         premiereId: request.premiereId,
         bucket,
-        anchorTurn: premiereClipRepresentativeAnchorTurn(bucket),
+        anchorTurn,
         bundlePath,
-        expectedBundleSha256: request.sourceReplaySha256.toLowerCase(),
+        expectedBundleSha256: sourceReplaySha256,
+        renderableThroughTurn: request.renderableThroughTurn,
+        sourceComplete: request.sourceComplete,
       });
       this.pump();
       return this.statusFor(request.premiereId, bucket, "pending", null);
@@ -536,9 +601,10 @@ export class ReplayPremiereClips {
    */
   async prerenderTopReactionBuckets(options: {
     premiereId: string;
-    lifecycleState: PremiereState;
     reactions: readonly ReplayPremiereClipReactionSample[];
     sourceReplaySha256: string;
+    renderableThroughTurn: number;
+    sourceComplete: boolean;
   }): Promise<number[]> {
     const buckets = selectPrerenderBuckets(
       options.reactions,
@@ -549,10 +615,11 @@ export class ReplayPremiereClips {
       try {
         const status = await this.requestClip({
           premiereId: options.premiereId,
-          lifecycleState: options.lifecycleState,
           anchorTurn: premiereClipRepresentativeAnchorTurn(bucket),
           participantId: null,
           sourceReplaySha256: options.sourceReplaySha256,
+          renderableThroughTurn: options.renderableThroughTurn,
+          sourceComplete: options.sourceComplete,
         });
         if (status.state !== "absent") enqueued.push(bucket);
       } catch {
@@ -603,6 +670,8 @@ export class ReplayPremiereClips {
         bundlePath: job.bundlePath,
         expectedBundleSha256: job.expectedBundleSha256,
         anchorTurn: job.anchorTurn,
+        renderableThroughTurn: job.renderableThroughTurn,
+        sourceComplete: job.sourceComplete,
         clipVersion: PREMIERE_CLIP_VERSION,
         outDir: renderDir,
         staticDir: this.options.staticDir,
@@ -685,7 +754,17 @@ export class ReplayPremiereClips {
     const manifest = parseRenderManifest(
       JSON.parse(await fs.readFile(producedManifest, "utf8")),
     );
-    if (manifest === null || manifest.outBytes !== stat.size) {
+    const actualOutSha256 = await sha256File(producedClip);
+    if (
+      manifest === null ||
+      manifest.premiereId !== job.premiereId ||
+      normalizeSourceSha256(manifest.sourceReplaySha256) !==
+        job.expectedBundleSha256 ||
+      manifest.anchorTurn !== job.anchorTurn ||
+      manifest.clipVersion !== PREMIERE_CLIP_VERSION ||
+      manifest.outBytes !== stat.size ||
+      manifest.outSha256 !== actualOutSha256
+    ) {
       throw new Error("clip render produced an invalid manifest");
     }
     const finalDir = path.join(this.options.clipsRoot, job.premiereId);
@@ -698,6 +777,7 @@ export class ReplayPremiereClips {
     const nowMs = this.now();
     this.ready.set(cacheKey(job.premiereId, job.bucket), {
       premiereId: job.premiereId,
+      sourceReplaySha256: job.expectedBundleSha256,
       bucket: job.bucket,
       clipVersion: PREMIERE_CLIP_VERSION,
       anchorTurn: manifest.anchorTurn,
@@ -745,7 +825,9 @@ export class ReplayPremiereClips {
   }
 
   private async removeEntry(entry: ClipIndexEntry): Promise<void> {
-    this.ready.delete(cacheKey(entry.premiereId, entry.bucket));
+    const key = cacheKey(entry.premiereId, entry.bucket);
+    if (this.ready.get(key) !== entry) return;
+    this.ready.delete(key);
     await fs.rm(entry.filePath, { force: true }).catch(() => {});
     await fs.rm(sidecarPath(entry.filePath), { force: true }).catch(() => {});
   }
@@ -821,11 +903,17 @@ export class ReplayPremiereClips {
     }
   }
 
-  private async assertSourceBundleAvailable(bundlePath: string): Promise<void> {
+  private async assertSourceBundleAvailable(
+    bundlePath: string,
+    expectedSha256: string,
+  ): Promise<void> {
     try {
-      const stat = await fs.stat(bundlePath);
-      if (!stat.isFile()) {
+      const stat = await fs.lstat(bundlePath);
+      if (!stat.isFile() || stat.isSymbolicLink()) {
         throw new Error("source bundle is not a regular file");
+      }
+      if ((await sha256File(bundlePath)) !== expectedSha256) {
+        throw new Error("source bundle hash mismatch");
       }
     } catch {
       // Keep a missing operator-side source indistinguishable from an
@@ -903,20 +991,6 @@ export class ReplayPremiereClips {
       hash.slice(0, 2),
       `${hash}.replay`,
     );
-  }
-
-  // -- Gating --------------------------------------------------------------
-
-  private readsAllowed(state: PremiereState): boolean {
-    return state === "revealed" || state === "archived";
-  }
-
-  private assertWritesAllowed(state: PremiereState): void {
-    if (state === "archived") throw invalid("clip_write_archived", 410);
-    // Fail closed for every pre-reveal state: a 404 indistinguishable from a
-    // nonexistent premiere, so no clip route reveals a premiere before reveal.
-    if (state !== "revealed")
-      throw unavailable("clip_premiere_unavailable", 404);
   }
 
   private assertRenderAdmissionOpen(premiereId: string): void {
@@ -1375,10 +1449,11 @@ export class ReplayPremiereRevealAutoClip {
     try {
       const status = await this.options.clips.requestClip({
         premiereId,
-        lifecycleState: "revealed",
         anchorTurn: anchor.turn,
         participantId: null,
         sourceReplaySha256: anchor.sourceReplaySha256,
+        renderableThroughTurn: anchor.turn,
+        sourceComplete: true,
       });
       state = status.state;
     } catch (error) {
@@ -1436,10 +1511,15 @@ export class ReplayPremiereRevealAutoClip {
       this.log(premiereId, "auto clip verify: premiere de-registered");
       return;
     }
+    const reveal = runtime.readReveal();
+    if (reveal === null) {
+      this.log(premiereId, "auto clip verify: reveal source unavailable");
+      return;
+    }
     const status = this.options.clips.readStatus({
       premiereId,
-      lifecycleState: runtime.readLifecycleState(),
       bucket: premiereClipBucketForTurn(anchorTurn),
+      sourceReplaySha256: reveal.sourceReplaySha256,
     });
     if (status.state === "ready") {
       this.log(premiereId, "auto clip ready");
@@ -1498,6 +1578,7 @@ function message(error: unknown): string {
 
 export interface ReplayPremiereClipLifecycleReader {
   readLifecycleState(): PremiereState;
+  readBootstrap(): { provenance: { sourceReplaySha256: string } };
 }
 
 export interface ReplayPremiereClipDocumentRouterOptions {
@@ -1559,15 +1640,21 @@ async function handleClipFileRequest(
     return;
   }
   const reader = options.resolveLifecycle(route.premiereId);
-  // Unregistered id and pre-reveal state must be an identical bare 404.
-  if (reader === null) {
+  // Failed/cancelled sources were never public; reclaimed archives use the
+  // durable archive route instead of this live cache document.
+  if (
+    reader === null ||
+    reader.readLifecycleState() === "failed" ||
+    reader.readLifecycleState() === "cancelled" ||
+    reader.readLifecycleState() === "archived"
+  ) {
     sendClipDocumentFailure(response, 404);
     return;
   }
   const file = await options.clips.resolveReadyClip({
     premiereId: route.premiereId,
-    lifecycleState: reader.readLifecycleState(),
     bucket: route.bucket,
+    sourceReplaySha256: reader.readBootstrap().provenance.sourceReplaySha256,
   });
   if (file === null) {
     sendClipDocumentFailure(response, 404);
@@ -1628,6 +1715,14 @@ function cacheKey(premiereId: string, bucket: number): string {
   return `${premiereId}\x00${bucket}\x00${PREMIERE_CLIP_VERSION}`;
 }
 
+function renderKey(
+  premiereId: string,
+  bucket: number,
+  sourceReplaySha256: string,
+): string {
+  return `${cacheKey(premiereId, bucket)}\x00${normalizeSourceSha256(sourceReplaySha256)}`;
+}
+
 function participantKey(premiereId: string, participantId: string): string {
   return `${premiereId}\x00${participantId}`;
 }
@@ -1680,6 +1775,12 @@ function parseRenderManifest(
   ) {
     return null;
   }
+  if (
+    !/^[a-f0-9]{64}$/.test(sourceReplaySha256) ||
+    !/^[a-f0-9]{64}$/.test(outSha256)
+  ) {
+    return null;
+  }
   return {
     premiereId,
     sourceReplaySha256,
@@ -1692,6 +1793,25 @@ function parseRenderManifest(
     outBytes,
     generatedAt,
   };
+}
+
+function normalizeSourceSha256(value: string): string {
+  const normalized = value.toLowerCase();
+  if (!/^[a-f0-9]{64}$/.test(normalized)) {
+    throw invalid("clip_source_hash_invalid", 400);
+  }
+  return normalized;
+}
+
+async function sha256File(filePath: string): Promise<string> {
+  const hash = createHash("sha256");
+  await new Promise<void>((resolve, reject) => {
+    const stream = createReadStream(filePath);
+    stream.on("data", (chunk) => hash.update(chunk));
+    stream.on("error", reject);
+    stream.on("end", resolve);
+  });
+  return hash.digest("hex");
 }
 
 function prune(times: number[], cutoffMs: number): number[] {

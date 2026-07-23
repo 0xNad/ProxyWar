@@ -7,8 +7,9 @@
  * `/ai-league-replay/<runKey>` viewer plays) through the identical watermarked
  * worker, cache, quota, and eviction machinery as premiere clips. Availability
  * is therefore retention-bounded by design: any run whose replay bundle still
- * exists on disk can render a clip; a run aged off by retention 404s cleanly
- * (an already-cached clip stays downloadable until its own cache eviction).
+ * exists on disk can render or read a clip; a run aged off by retention 404s
+ * cleanly. Durable Premiere promotion is the separate long-lived download
+ * path after its ordinary replay source is reclaimed.
  *
  * Namespacing: this wrapper owns its OWN ReplayPremiereClips instance rooted
  * at a SEPARATE cache tree (`league-clips-v1`), so premiere and run clips can
@@ -20,23 +21,19 @@ import express, { type Request, type Response, type Router } from "express";
 import { createHash } from "node:crypto";
 import { createReadStream, promises as fs, type StatsFs } from "node:fs";
 import path from "node:path";
+import { GameRecordSchema } from "../../core/Schemas";
 import {
   ReplayPremiereClips,
   type ReplayPremiereClipFile,
   type ReplayPremiereClipsOptions,
 } from "../replay-premiere/ReplayPremiereClips";
-import type {
-  PremiereClipStatusResponse,
-  PremiereState,
-} from "../replay-premiere/ReplayPremiereContracts";
+import type { PremiereClipStatusResponse } from "../replay-premiere/ReplayPremiereContracts";
 import { ReplayPremiereError } from "../replay-premiere/ReplayPremiereErrors";
 import {
   isSafeProxyWarArtifactSegment,
   matchProxyWarLeagueClipReadPath,
 } from "./ProxyWarPublicArtifacts";
 
-/** Published runs are public: the wrapped cache always sees this state. */
-const RUN_CLIP_LIFECYCLE: PremiereState = "revealed";
 /** Sanity ceiling for a requested anchor turn (no record parse required). */
 const MAX_RUN_CLIP_ANCHOR_TURN = 1_000_000;
 /** Bounded sha memo (records are MB-scale; avoid rehashing per request). */
@@ -76,12 +73,27 @@ export interface AiLeagueRunClipsOptions {
   logger?: (message: string) => void;
 }
 
+export interface RetainedAiLeagueReplaySource {
+  runKey: string;
+  filePath: string;
+  sourceReplaySha256: string;
+  renderableThroughTurn: number;
+  sourceComplete: true;
+}
+
 export class AiLeagueRunClips {
   private readonly clips: ReplayPremiereClips;
   private readonly runsRootDir: string;
   private readonly shaMemo = new Map<
     string,
-    { size: number; mtimeMs: number; sha256: string }
+    {
+      dev: number;
+      ino: number;
+      size: number;
+      mtimeMs: number;
+      ctimeMs: number;
+      source: RetainedAiLeagueReplaySource;
+    }
   >();
 
   constructor(options: AiLeagueRunClipsOptions) {
@@ -121,14 +133,16 @@ export class AiLeagueRunClips {
   }
 
   /**
-   * Request a render for a published run. System job (no participant
-   * identity on the league surface): the per-run-per-day and global-per-hour
-   * quotas, queue depth, and disk floor still bound the work; callers add
-   * per-IP request rate limiting at the route.
+   * Request a render for a published run. Public callers pass a stable opaque
+   * requester bucket for the per-participant quota; system jobs may pass null.
+   * Per-run/day and global/hour quotas, queue depth, and disk floor also bound
+   * the work; callers add request rate limiting at the route.
    */
   async requestRunClip(request: {
     runKey: string;
     anchorTurn: number;
+    /** Stable opaque requester bucket; null is reserved for system jobs. */
+    participantId?: string | null;
   }): Promise<PremiereClipStatusResponse> {
     const runKey = this.validateRunKey(request.runKey);
     if (
@@ -143,26 +157,28 @@ export class AiLeagueRunClips {
         "League clip anchor turn is invalid",
       );
     }
-    const sourceReplaySha256 = await this.hashRunRecord(runKey);
+    const source = await this.requireRetainedRunSource(runKey);
     return this.clips.requestClip({
       premiereId: runKey,
-      lifecycleState: RUN_CLIP_LIFECYCLE,
       anchorTurn: request.anchorTurn,
-      participantId: null,
-      sourceReplaySha256,
+      participantId: request.participantId ?? null,
+      sourceReplaySha256: source.sourceReplaySha256,
+      renderableThroughTurn: source.renderableThroughTurn,
+      sourceComplete: source.sourceComplete,
     });
   }
 
   /** Render status for a bucket (absent | pending | ready). */
-  readRunClipStatus(request: {
+  async readRunClipStatus(request: {
     runKey: string;
     bucket: number;
-  }): PremiereClipStatusResponse {
+  }): Promise<PremiereClipStatusResponse> {
     const runKey = this.validateRunKey(request.runKey);
+    const source = await this.requireRetainedRunSource(runKey);
     return this.clips.readStatus({
       premiereId: runKey,
-      lifecycleState: RUN_CLIP_LIFECYCLE,
       bucket: request.bucket,
+      sourceReplaySha256: source.sourceReplaySha256,
     });
   }
 
@@ -172,11 +188,104 @@ export class AiLeagueRunClips {
     bucket: number;
   }): Promise<ReplayPremiereClipFile | null> {
     if (!isServableRunKey(request.runKey)) return null;
+    const source = await this.resolveRetainedRunSource(request.runKey);
+    if (source === null) return null;
     return this.clips.resolveReadyClip({
       premiereId: request.runKey,
-      lifecycleState: RUN_CLIP_LIFECYCLE,
       bucket: request.bucket,
+      sourceReplaySha256: source.sourceReplaySha256,
     });
+  }
+
+  /**
+   * Resolve the immutable bytes and supported range for a retained replay.
+   * Missing, compacted, malformed, symlinked, or range-less records are not
+   * clip targets. This is also the archive page's single canonical resolver.
+   */
+  async resolveRetainedRunSource(
+    runKey: string,
+  ): Promise<RetainedAiLeagueReplaySource | null> {
+    const validated = this.validateRunKey(runKey);
+    const recordPath = this.recordPathFor(validated);
+    let stat;
+    try {
+      stat = await fs.lstat(recordPath);
+      if (!stat.isFile() || stat.isSymbolicLink()) return null;
+    } catch {
+      return null;
+    }
+    const memo = this.shaMemo.get(recordPath);
+    if (
+      memo !== undefined &&
+      memo.dev === stat.dev &&
+      memo.ino === stat.ino &&
+      memo.size === stat.size &&
+      memo.mtimeMs === stat.mtimeMs &&
+      memo.ctimeMs === stat.ctimeMs
+    ) {
+      return memo.source;
+    }
+
+    let bytes: Buffer;
+    try {
+      bytes = await fs.readFile(recordPath);
+    } catch {
+      return null;
+    }
+    try {
+      const after = await fs.lstat(recordPath);
+      if (
+        !after.isFile() ||
+        after.isSymbolicLink() ||
+        after.dev !== stat.dev ||
+        after.ino !== stat.ino ||
+        after.size !== stat.size ||
+        after.mtimeMs !== stat.mtimeMs ||
+        after.ctimeMs !== stat.ctimeMs
+      ) {
+        return null;
+      }
+    } catch {
+      return null;
+    }
+    let parsedJson: unknown;
+    try {
+      parsedJson = JSON.parse(bytes.toString("utf8"));
+    } catch {
+      return null;
+    }
+    // Reuse the ordinary replay client's canonical full-record validation. A
+    // top-level turns array alone is not enough: malformed config, players, or
+    // turns must never become clip-eligible merely because bytes are retained.
+    const parsedRecord = GameRecordSchema.safeParse(parsedJson);
+    if (!parsedRecord.success) return null;
+    const renderableThroughTurn = parsedRecord.data.info.num_turns;
+    if (
+      !Number.isSafeInteger(renderableThroughTurn) ||
+      renderableThroughTurn <= 0
+    ) {
+      return null;
+    }
+    const source: RetainedAiLeagueReplaySource = {
+      runKey: validated,
+      filePath: recordPath,
+      sourceReplaySha256: createHash("sha256").update(bytes).digest("hex"),
+      renderableThroughTurn,
+      sourceComplete: true,
+    };
+    if (this.shaMemo.size >= MAX_SHA_MEMO_ENTRIES) {
+      const oldest = this.shaMemo.keys().next().value;
+      if (oldest !== undefined) this.shaMemo.delete(oldest);
+    }
+    this.shaMemo.set(recordPath, {
+      dev: stat.dev,
+      ino: stat.ino,
+      size: stat.size,
+      mtimeMs: stat.mtimeMs,
+      ctimeMs: stat.ctimeMs,
+      source,
+    });
+    return source;
   }
 
   /** Absolute record path for a validated run key (containment-checked). */
@@ -201,13 +310,11 @@ export class AiLeagueRunClips {
    * bundle — the run aged off retention, or never published a record — is a
    * clean 404 BEFORE any quota is consumed.
    */
-  private async hashRunRecord(runKey: string): Promise<string> {
-    const recordPath = this.recordPathFor(runKey);
-    let stat;
-    try {
-      stat = await fs.stat(recordPath);
-      if (!stat.isFile()) throw new Error("not a file");
-    } catch {
+  private async requireRetainedRunSource(
+    runKey: string,
+  ): Promise<RetainedAiLeagueReplaySource> {
+    const source = await this.resolveRetainedRunSource(runKey);
+    if (source === null) {
       throw new ReplayPremiereError(
         "league_clip_replay_absent",
         "PREMIERE_UNAVAILABLE",
@@ -215,25 +322,7 @@ export class AiLeagueRunClips {
         "League clip source replay is not available",
       );
     }
-    const memo = this.shaMemo.get(recordPath);
-    if (
-      memo !== undefined &&
-      memo.size === stat.size &&
-      memo.mtimeMs === stat.mtimeMs
-    ) {
-      return memo.sha256;
-    }
-    const sha256 = await sha256OfFile(recordPath);
-    if (this.shaMemo.size >= MAX_SHA_MEMO_ENTRIES) {
-      const oldest = this.shaMemo.keys().next().value;
-      if (oldest !== undefined) this.shaMemo.delete(oldest);
-    }
-    this.shaMemo.set(recordPath, {
-      size: stat.size,
-      mtimeMs: stat.mtimeMs,
-      sha256,
-    });
-    return sha256;
+    return source;
   }
 
   private validateRunKey(runKey: string): string {
@@ -256,17 +345,6 @@ function runInvalid(operatorCode: string): ReplayPremiereError {
     400,
     `League clip request rejected: ${operatorCode}`,
   );
-}
-
-async function sha256OfFile(filePath: string): Promise<string> {
-  const hash = createHash("sha256");
-  await new Promise<void>((resolve, reject) => {
-    const stream = createReadStream(filePath);
-    stream.on("data", (chunk) => hash.update(chunk));
-    stream.on("error", reject);
-    stream.on("end", () => resolve());
-  });
-  return hash.digest("hex");
 }
 
 // ---------------------------------------------------------------------------

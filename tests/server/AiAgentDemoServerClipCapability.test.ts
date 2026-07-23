@@ -25,7 +25,16 @@ describe("ai-agent-demo-server clip capability wiring", () => {
       "replayPremiereClipsEnabled && replayPremiereClips !== null",
     );
     expect(route).toContain(
-      "replayPremiereClipsEnabled && aiLeagueRunClips !== null",
+      "aiLeagueRunClipsEnabled && aiLeagueRunClips !== null",
+    );
+    expect(source).toContain(
+      'const replayClipsMasterEnabled = envFlag("PROXYWAR_CLIPS_ENABLED")',
+    );
+    expect(source).toContain(
+      'replayClipsMasterEnabled && envFlag("PROXYWAR_PREMIERE_CLIPS_ENABLED")',
+    );
+    expect(source).toContain(
+      'replayClipsMasterEnabled && envFlag("PROXYWAR_LEAGUE_CLIPS_ENABLED")',
     );
   });
 

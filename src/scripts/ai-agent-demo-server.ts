@@ -301,13 +301,15 @@ const replayPremiereProduction = await startReplayPremiereProduction({
   );
   return null;
 });
-// Premiere social-clip cache service. Clips are cache, never event-store
-// evidence. Gated ON unless PROXYWAR_CLIPS_ENABLED is exactly "false".
+// Replay social-clip services are cache, never event-store evidence. Every
+// generation surface defaults OFF. PROXYWAR_CLIPS_ENABLED is the master
+// emergency gate; each surface additionally requires its own explicit flag.
 // Construction is best-effort: if the license strings (or index rebuild) fail
 // — e.g. a minimal test checkout with no resources/lang/en.json — clips are
 // disabled with a warning rather than crashing the whole server.
+const replayClipsMasterEnabled = envFlag("PROXYWAR_CLIPS_ENABLED");
 const replayPremiereClipsEnabled =
-  process.env.PROXYWAR_CLIPS_ENABLED !== "false";
+  replayClipsMasterEnabled && envFlag("PROXYWAR_PREMIERE_CLIPS_ENABLED");
 if (replayPremiereClipsEnabled) {
   try {
     replayPremiereClips = new ReplayPremiereClips({
@@ -368,9 +370,11 @@ if (replayPremiereClips !== null) {
 // League-run clips: the same watermarked social-clip pipeline for EVERY
 // published match, rendered from the run's own game-record.json. Separate
 // cache tree (league-clips-v1) so premiere and run clips never collide.
-// Shares the PROXYWAR_CLIPS_ENABLED gate and construction resilience.
+// Has an independent effective gate under the master emergency switch.
 let aiLeagueRunClips: AiLeagueRunClips | null = null;
-if (replayPremiereClipsEnabled) {
+const aiLeagueRunClipsEnabled =
+  replayClipsMasterEnabled && envFlag("PROXYWAR_LEAGUE_CLIPS_ENABLED");
+if (aiLeagueRunClipsEnabled) {
   try {
     aiLeagueRunClips = new AiLeagueRunClips({
       runsRootDir,
@@ -521,7 +525,7 @@ app.get("/api/clip-capabilities", (_req, res) => {
     premiereGenerationEnabled:
       replayPremiereClipsEnabled && replayPremiereClips !== null,
     leagueGenerationEnabled:
-      replayPremiereClipsEnabled && aiLeagueRunClips !== null,
+      aiLeagueRunClipsEnabled && aiLeagueRunClips !== null,
   });
 });
 
@@ -559,6 +563,7 @@ if (replayPremiereClips !== null) {
 // has de-registered (post-reveal reclamation, or a fresh restart) is served its
 // durable results-summary page here. It defers to the live router for still-
 // registered premieres and for unknown ids.
+const replayRunClipsForArchive = aiLeagueRunClips;
 app.use(
   createReplayPremiereArchiveRouter({
     registry: replayPremiereHttpRegistry,
@@ -567,6 +572,13 @@ app.use(
       getAppShellContent(path.resolve(staticRootDir, "index.html")),
     publicOrigin: replayPremierePublicOrigin,
     pageContentSecurityPolicy: proxyWarLeagueContentSecurityPolicy(),
+    resolveClipGenerationTarget:
+      replayRunClipsForArchive === null
+        ? undefined
+        : async (replayRunKey) =>
+            (await replayRunClipsForArchive.resolveRetainedRunSource(
+              replayRunKey,
+            )) !== null,
     onOperatorError: (error) => {
       console.error(formatReplayPremiereHttpOperatorError(error));
     },
@@ -856,15 +868,24 @@ if (aiLeagueRunClips !== null) {
       (req.method === "GET" || req.method === "HEAD")
     ) {
       res.setHeader("Cache-Control", "no-store, max-age=0");
-      const status = runClips.readRunClipStatus({
-        runKey: read.runKey,
-        bucket: read.bucket,
-      });
-      if (status.state === "absent") {
-        res.status(404).json({ error: { code: "LEAGUE_CLIP_UNAVAILABLE" } });
-        return;
-      }
-      res.json(status);
+      void runClips
+        .readRunClipStatus({
+          runKey: read.runKey,
+          bucket: read.bucket,
+        })
+        .then((status) => {
+          if (status.state === "absent") {
+            res
+              .status(404)
+              .json({ error: { code: "LEAGUE_CLIP_UNAVAILABLE" } });
+            return;
+          }
+          res.json(status);
+        })
+        .catch((error: unknown) => {
+          const mapped = aiLeagueRunClipErrorBody(error);
+          res.status(mapped.status).json(mapped.body);
+        });
       return;
     }
     const write = matchProxyWarLeagueClipWritePath(req.path);
@@ -875,7 +896,13 @@ if (aiLeagueRunClips !== null) {
       const body = (req.body ?? {}) as Record<string, unknown>;
       const turn = typeof body.turn === "number" ? body.turn : Number.NaN;
       void runClips
-        .requestRunClip({ runKey: write.runKey, anchorTurn: turn })
+        .requestRunClip({
+          runKey: write.runKey,
+          anchorTurn: turn,
+          participantId: replayPremiereGuestSecurity.deriveRequesterBucketId(
+            rateLimitKey(req),
+          ),
+        })
         .then((status) => {
           res.setHeader("Cache-Control", "no-store, max-age=0");
           res.json(status);

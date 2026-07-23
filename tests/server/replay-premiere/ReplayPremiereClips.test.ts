@@ -22,7 +22,8 @@ const ATTRIBUTION =
   "Game art from OpenFront (openfront.io), CC BY-SA 4.0; footage shared under the same license.";
 const NO_ENDORSEMENT =
   "Proxy War is an independent fork — not affiliated with or endorsed by OpenFront.";
-const SHA = "a".repeat(64);
+const SOURCE_BYTES = Buffer.from("fixture replay");
+const SHA = createHash("sha256").update(SOURCE_BYTES).digest("hex");
 const PREMIERE = "prem_0123456789abcdef";
 
 type FakeChild = EventEmitter & {
@@ -161,9 +162,15 @@ let sourcePath: string;
 beforeEach(async () => {
   root = await fs.mkdtemp(path.join(os.tmpdir(), "pw-clips-test-"));
   clipsRoot = path.join(root, "clips-v1");
-  sourcePath = path.join(root, "sources", "sha256", "aa", `${SHA}.replay`);
+  sourcePath = path.join(
+    root,
+    "sources",
+    "sha256",
+    SHA.slice(0, 2),
+    `${SHA}.replay`,
+  );
   await fs.mkdir(path.dirname(sourcePath), { recursive: true });
-  await fs.writeFile(sourcePath, "fixture replay");
+  await fs.writeFile(sourcePath, SOURCE_BYTES);
 });
 
 afterEach(async () => {
@@ -187,14 +194,29 @@ function makeClips(
   });
 }
 
+function readBoundStatus(
+  clips: ReplayPremiereClips,
+  request: {
+    premiereId: string;
+    bucket: number;
+    lifecycleState?: PremiereState;
+  },
+) {
+  const sourceBoundRequest = { ...request, sourceReplaySha256: SHA };
+  return clips.readStatus(sourceBoundRequest);
+}
+
 async function waitReady(
   clips: ReplayPremiereClips,
   premiereId: string,
   bucket: number,
-  lifecycleState: PremiereState = "revealed",
+  _lifecycleState: PremiereState = "revealed",
 ) {
   for (let attempt = 0; attempt < 400; attempt++) {
-    const status = clips.readStatus({ premiereId, lifecycleState, bucket });
+    const status = readBoundStatus(clips, {
+      premiereId,
+      bucket,
+    });
     if (status.state === "ready") return status;
     await new Promise((resolve) => setTimeout(resolve, 5));
   }
@@ -234,6 +256,8 @@ const revealedRequest = (
   anchorTurn,
   participantId,
   sourceReplaySha256: SHA,
+  renderableThroughTurn: 1_000_000,
+  sourceComplete: true,
 });
 
 describe("bucketing", () => {
@@ -428,14 +452,14 @@ describe("terminal render fencing", () => {
     await fence;
 
     expect(
-      clips.readStatus({
+      readBoundStatus(clips, {
         premiereId: PREMIERE,
         lifecycleState: "revealed",
         bucket: 60,
       }).state,
     ).toBe("ready");
     expect(
-      clips.readStatus({
+      readBoundStatus(clips, {
         premiereId: PREMIERE,
         lifecycleState: "revealed",
         bucket: 70,
@@ -470,7 +494,7 @@ describe("terminal render fencing", () => {
       operatorCode: "clip_writes_fenced",
     });
     expect(
-      clips.readStatus({
+      readBoundStatus(clips, {
         premiereId: PREMIERE,
         lifecycleState: "revealed",
         bucket: 60,
@@ -480,7 +504,7 @@ describe("terminal render fencing", () => {
   });
 
   test("rejects an admission fenced during source-bundle preflight", async () => {
-    const realStat = fs.stat.bind(fs);
+    const realLstat = fs.lstat.bind(fs);
     let sourceCheckStarted!: () => void;
     const sourceCheckStartedPromise = new Promise<void>((resolve) => {
       sourceCheckStarted = resolve;
@@ -491,12 +515,12 @@ describe("terminal render fencing", () => {
     });
     let spawnCalls = 0;
     const spawn = hangingSpawn()!;
-    const statSpy = vi.spyOn(fs, "stat").mockImplementation(async (target) => {
+    const statSpy = vi.spyOn(fs, "lstat").mockImplementation(async (target) => {
       if (String(target) === sourcePath) {
         sourceCheckStarted();
         await sourceCheck;
       }
-      return await realStat(target);
+      return await realLstat(target);
     });
     const clips = makeClips({
       spawnWorker: (...args) => {
@@ -517,7 +541,7 @@ describe("terminal render fencing", () => {
       });
       expect(spawnCalls).toBe(0);
       expect(
-        clips.readStatus({
+        readBoundStatus(clips, {
           premiereId: PREMIERE,
           lifecycleState: "revealed",
           bucket: 60,
@@ -575,7 +599,7 @@ describe("terminal render fencing", () => {
     await Promise.all([clips.close(), fence]);
     for (const bucket of [60, 70]) {
       expect(
-        clips.readStatus({
+        readBoundStatus(clips, {
           premiereId: PREMIERE,
           lifecycleState: "revealed",
           bucket,
@@ -740,7 +764,7 @@ describe("LRU eviction", () => {
     // Touch bucket 60 so it is more-recently-used than 70.
     clock = 3000;
     expect(
-      clips.readStatus({
+      readBoundStatus(clips, {
         premiereId: PREMIERE,
         lifecycleState: "revealed",
         bucket: 60,
@@ -751,14 +775,14 @@ describe("LRU eviction", () => {
     await waitReady(clips, PREMIERE, 80);
     // 70 was the LRU -> evicted; 60 and 80 remain (250-byte cap holds 2).
     expect(
-      clips.readStatus({
+      readBoundStatus(clips, {
         premiereId: PREMIERE,
         lifecycleState: "revealed",
         bucket: 70,
       }).state,
     ).toBe("absent");
     expect(
-      clips.readStatus({
+      readBoundStatus(clips, {
         premiereId: PREMIERE,
         lifecycleState: "revealed",
         bucket: 80,
@@ -779,7 +803,7 @@ describe("LRU eviction", () => {
     }
     const readyCount = [60, 70, 80].filter(
       (bucket) =>
-        clips.readStatus({
+        readBoundStatus(clips, {
           premiereId: PREMIERE,
           lifecycleState: "revealed",
           bucket,
@@ -843,13 +867,14 @@ describe("pre-render selection", () => {
     const clips = makeClips();
     const enqueued = await clips.prerenderTopReactionBuckets({
       premiereId: PREMIERE,
-      lifecycleState: "revealed",
       reactions: [
         { kind: "clip_this", sequence: 1, turn: 600 },
         { kind: "clip_this", sequence: 2, turn: 605 },
         { kind: "clip_this", sequence: 3, turn: 705 },
       ],
       sourceReplaySha256: SHA,
+      renderableThroughTurn: 1_000_000,
+      sourceComplete: true,
     });
     expect(enqueued).toEqual([60, 70]);
     await waitReady(clips, PREMIERE, 60);
@@ -900,14 +925,14 @@ describe("index rebuild from a synthetic cache dir", () => {
     const clips = makeClips();
     await clips.rebuildIndex();
     expect(
-      clips.readStatus({
+      readBoundStatus(clips, {
         premiereId: PREMIERE,
         lifecycleState: "revealed",
         bucket: 60,
       }).state,
     ).toBe("ready");
     expect(
-      clips.readStatus({
+      readBoundStatus(clips, {
         premiereId: PREMIERE,
         lifecycleState: "revealed",
         bucket: 70,
@@ -917,14 +942,14 @@ describe("index rebuild from a synthetic cache dir", () => {
   });
 });
 
-describe("archived semantics", () => {
-  test("reads are allowed when archived; writes are 410", async () => {
+describe("replay-scoped lifecycle independence", () => {
+  test("retained source reads and writes do not depend on an archived lifecycle label", async () => {
     const clips = makeClips();
     await clips.requestClip(revealedRequest(PREMIERE, 605, "p_a"));
     await waitReady(clips, PREMIERE, 60);
     // Read while archived -> still ready.
     expect(
-      clips.readStatus({
+      readBoundStatus(clips, {
         premiereId: PREMIERE,
         lifecycleState: "archived",
         bucket: 60,
@@ -934,25 +959,29 @@ describe("archived semantics", () => {
       premiereId: PREMIERE,
       lifecycleState: "archived",
       bucket: 60,
+      sourceReplaySha256: SHA,
     });
     expect(file).not.toBeNull();
-    // Write while archived -> 410.
-    await expect(
-      clips.requestClip({
-        premiereId: PREMIERE,
-        lifecycleState: "archived",
-        anchorTurn: 705,
-        participantId: "p_a",
-        sourceReplaySha256: SHA,
-      }),
-    ).rejects.toMatchObject({ httpStatus: 410 });
+    expect(
+      (
+        await clips.requestClip({
+          premiereId: PREMIERE,
+          lifecycleState: "archived",
+          anchorTurn: 705,
+          participantId: "p_a",
+          sourceReplaySha256: SHA,
+          renderableThroughTurn: 1_000,
+          sourceComplete: true,
+        })
+      ).state,
+    ).toBe("pending");
     await clips.close();
   });
 
-  test("pre-reveal reads are absent and writes are a fail-closed 404", async () => {
+  test("an in-progress source admits only a full forward capture window", async () => {
     const clips = makeClips();
     expect(
-      clips.readStatus({
+      readBoundStatus(clips, {
         premiereId: PREMIERE,
         lifecycleState: "playing",
         bucket: 60,
@@ -965,8 +994,26 @@ describe("archived semantics", () => {
         anchorTurn: 605,
         participantId: "p_a",
         sourceReplaySha256: SHA,
+        renderableThroughTurn: 700,
+        sourceComplete: false,
       }),
-    ).rejects.toMatchObject({ httpStatus: 404 });
+    ).rejects.toMatchObject({
+      httpStatus: 410,
+      operatorCode: "clip_capture_range_unreleased",
+    });
+    expect(
+      (
+        await clips.requestClip({
+          premiereId: PREMIERE,
+          lifecycleState: "playing",
+          anchorTurn: 605,
+          participantId: "p_a",
+          sourceReplaySha256: SHA,
+          renderableThroughTurn: 755,
+          sourceComplete: false,
+        })
+      ).state,
+    ).toBe("pending");
     await clips.close();
   });
 });
@@ -1084,7 +1131,7 @@ describe("worker diagnostics and shutdown", () => {
     await clips.close();
     expect(spawnCalls).toBe(0);
     expect(
-      clips.readStatus({
+      readBoundStatus(clips, {
         premiereId: PREMIERE,
         lifecycleState: "revealed",
         bucket: 60,
@@ -1258,7 +1305,7 @@ describe("worker process-group reaping", () => {
     // The failed job is fully released (no pending latch).
     for (let attempt = 0; attempt < 200; attempt++) {
       if (
-        clips.readStatus({
+        readBoundStatus(clips, {
           premiereId: PREMIERE,
           lifecycleState: "revealed",
           bucket: 60,
@@ -1269,7 +1316,7 @@ describe("worker process-group reaping", () => {
       await new Promise((resolve) => setTimeout(resolve, 25));
     }
     expect(
-      clips.readStatus({
+      readBoundStatus(clips, {
         premiereId: PREMIERE,
         lifecycleState: "revealed",
         bucket: 60,
@@ -1333,7 +1380,7 @@ describe("worker process-group reaping", () => {
       );
       await waitUntil(
         () =>
-          clips.readStatus({
+          readBoundStatus(clips, {
             premiereId: PREMIERE,
             lifecycleState: "revealed",
             bucket: 60,
@@ -1341,7 +1388,7 @@ describe("worker process-group reaping", () => {
         "ordinary failed-worker release",
       );
       expect(
-        clips.readStatus({
+        readBoundStatus(clips, {
           premiereId: PREMIERE,
           lifecycleState: "revealed",
           bucket: 60,

@@ -370,6 +370,77 @@ describe("ReplayPremiereOverlay", () => {
     });
   });
 
+  it("exposes a selectable manual URL after handled clipboard failure without a generic action error", async () => {
+    const url = `https://proxywar.example/premiere/premiere-test?moment=share_${"8".repeat(32)}&attribution=${"a".repeat(16)}.${"b".repeat(16)}`;
+    const model = makeModel({
+      state: "playing",
+      releasedSequence: 999,
+      currentTurn: 1600,
+    });
+    const handleRef: { current: ReplayPremiereOverlayHandle | null } = {
+      current: null,
+    };
+    const onShare = vi.fn(async () => {
+      handleRef.current?.hydrate({
+        ...model,
+        share: {
+          ...model.share!,
+          manualCopyUrl: url,
+          manualCopyReason: "clipboard_rejected",
+        },
+      });
+    });
+    const handle = mount(model, { onShare });
+    handleRef.current = handle;
+
+    handle.element
+      .querySelector<HTMLButtonElement>("[data-focus-key=timestamp-share]")
+      ?.click();
+
+    await vi.waitFor(() => expect(onShare).toHaveBeenCalledTimes(1));
+    const manual = handle.element.querySelector<HTMLInputElement>(
+      ".rp-manual-copy-url",
+    );
+    expect(manual).not.toBeNull();
+    expect(manual?.readOnly).toBe(true);
+    expect(manual?.value).toBe(url);
+    manual?.focus();
+    expect(manual?.selectionStart).toBe(0);
+    expect(manual?.selectionEnd).toBe(url.length);
+    expect(
+      handle.element.querySelector(".rp-manual-copy-status")?.textContent,
+    ).toBe("replay_premiere.share_created_clipboard_rejected");
+    expect(
+      handle.element.querySelector("[data-premiere-action-status]")
+        ?.textContent,
+    ).toBe("");
+    expect(handle.element.textContent).not.toContain(
+      "replay_premiere.action_unavailable",
+    );
+
+    handle.hydrate({
+      ...model,
+      share: {
+        ...model.share!,
+        manualCopyUrl: url,
+        manualCopyReason: "clipboard_unavailable",
+      },
+    });
+    expect(
+      handle.element.querySelector(".rp-manual-copy-status")?.textContent,
+    ).toBe("replay_premiere.share_created_clipboard_unavailable");
+
+    handle.hydrate({
+      ...model,
+      share: {
+        ...model.share!,
+        manualCopyUrl: null,
+        manualCopyReason: null,
+      },
+    });
+    expect(handle.element.querySelector(".rp-manual-copy-url")).toBeNull();
+  });
+
   it("switches to a compact ambient surface while keeping controls reachable", async () => {
     const onAmbientChange = vi.fn();
     const model = makeModel({ state: "playing" });
@@ -1036,26 +1107,117 @@ describe("ReplayPremiereOverlay", () => {
     expect(handle.element.querySelector(".rp-prediction-button")).toBeNull();
   });
 
-  it("keeps the clip control absent from the DOM before reveal", () => {
+  it.each(["playing", "checkpoint"] as const)(
+    "renders and submits an eligible clip request while %s",
+    async (state) => {
+      const onRequestClip = vi.fn();
+      const handle = mount(
+        makeModel({
+          state,
+          releasedSequence: 418,
+          currentTurn: 700,
+          clip: { status: "idle", ready: null },
+          canRequestClip: true,
+        }),
+        { onShare: vi.fn(), onRequestClip, onMarker: vi.fn() },
+      );
+      const request = handle.element.querySelector<HTMLButtonElement>(
+        "[data-focus-key=clip-request]",
+      );
+
+      expect(handle.element.querySelector(".rp-clip")).not.toBeNull();
+      expect(request?.disabled).toBe(false);
+      expect(
+        handle.element.querySelector("[data-focus-key=timestamp-share]"),
+      ).not.toBeNull();
+      expect(
+        handle.element.querySelector("[data-focus-key=marker-smart]"),
+      ).not.toBeNull();
+
+      request?.click();
+      await vi.waitFor(() =>
+        expect(onRequestClip).toHaveBeenCalledWith({
+          premiereId: "premiere-test",
+          sequence: 418,
+          turn: 700,
+        }),
+      );
+    },
+  );
+
+  it.each([
+    {
+      label: "unavailable",
+      clip: null,
+      canRequestClip: true,
+    },
+    {
+      label: "flagged off",
+      clip: { status: "idle" as const, ready: null },
+      canRequestClip: false,
+    },
+    {
+      label: "default off",
+      clip: { status: "idle" as const, ready: null },
+      canRequestClip: undefined,
+    },
+  ])("keeps the live clip affordance hidden when $label", (overrides) => {
     const handle = mount(
       makeModel({
         state: "playing",
         releasedSequence: 418,
         currentTurn: 700,
-        clip: { status: "idle", ready: null },
-        canRequestClip: true,
+        clip: overrides.clip,
+        canRequestClip: overrides.canRequestClip,
       }),
-      { onShare: vi.fn(), onRequestClip: vi.fn(), onMarker: vi.fn() },
+      { onRequestClip: vi.fn() },
     );
 
-    expect(
-      handle.element.querySelector("[data-focus-key=timestamp-share]"),
-    ).not.toBeNull();
     expect(handle.element.querySelector(".rp-clip")).toBeNull();
     expect(
       handle.element.querySelector("[data-focus-key=clip-request]"),
     ).toBeNull();
   });
+
+  it.each([
+    {
+      label: "preparing",
+      clip: { status: "preparing" as const, ready: null },
+      visibleSelector: '.rp-clip-status[data-clip-status="preparing"]',
+    },
+    {
+      label: "ready",
+      clip: {
+        status: "ready" as const,
+        ready: { downloadUrl: "/premiere/premiere-test/clip-v1-6.mp4" },
+      },
+      visibleSelector: "[data-focus-key=clip-download]",
+    },
+  ])(
+    "keeps a $label live clip visible but request-disabled after eligibility drops",
+    ({ clip, visibleSelector }) => {
+      const onRequestClip = vi.fn();
+      const handle = mount(
+        makeModel({
+          state: "playing",
+          releasedSequence: 418,
+          currentTurn: 700,
+          clip,
+          canRequestClip: false,
+        }),
+        { onRequestClip },
+      );
+      const request = handle.element.querySelector<HTMLButtonElement>(
+        "[data-focus-key=clip-request]",
+      );
+
+      expect(handle.element.querySelector(".rp-clip")).not.toBeNull();
+      expect(handle.element.querySelector(visibleSelector)).not.toBeNull();
+      expect(request?.disabled).toBe(true);
+      request?.click();
+      expect(onRequestClip).not.toHaveBeenCalled();
+    },
+  );
 
   it("anchors a clip download request to the current moment once revealed", async () => {
     const onRequestClip = vi.fn();

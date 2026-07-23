@@ -5,9 +5,16 @@ import { GameRecordSchema } from "../core/Schemas";
 import { loadProxyWarDemoServerNetworkConfig } from "../server/agents/ProxyWarDemoServerConfig";
 import {
   ReplayPremiereAdmissionCatalog,
+  type ReplayPremiereAdmissionPublicationFaultInjector,
   type ReplayPremiereAdmissionRecordV1,
   type ReplayPremiereChunkBuildLimits,
 } from "../server/replay-premiere/ReplayPremiereCatalog";
+import {
+  DeterministicReplayPremiereCheckpointProjector,
+  type ReplayPremiereCheckpointProjector,
+} from "../server/replay-premiere/ReplayPremiereCheckpointProjection";
+import type { ReplayPremiereCheckpointProjectionArtifactV1 } from "../server/replay-premiere/ReplayPremiereCheckpointProjectionStore";
+import { rebuildReplayPremiereProjectionInput } from "../server/replay-premiere/ReplayPremiereCheckpointProjectionStore";
 import { buildPremiereChunks } from "../server/replay-premiere/ReplayPremiereChunks";
 import {
   isPremiereId,
@@ -28,8 +35,10 @@ import { ReplayPremiereError } from "../server/replay-premiere/ReplayPremiereErr
 import type { PremiereReplayImportLimits } from "../server/replay-premiere/ReplayPremiereImport";
 import {
   assertReplayPremiereJsonValue,
+  canonicalReplayPremiereJson,
   isSha256Hex,
   sha256Hex,
+  type ReplayPremiereJsonValue,
 } from "../server/replay-premiere/ReplayPremiereIntegrity";
 import {
   collectReplayPremiereLeakAudit,
@@ -51,6 +60,7 @@ const MAX_SOURCE_BYTES = 256 * MIB;
 const MAX_RESULT_BYTES = 2 * MIB;
 const MAX_INPUT_JSON_BYTES = 1 * MIB;
 const MAX_SERVED_ROOTS = 16;
+export const REPLAY_PREMIERE_ADMISSION_PROJECTION_TIMEOUT_MS = 90_000;
 /**
  * Chunk build span. At real-speed pacing (100 ms/turn nominal offsets) the
  * worst admitted show is 3,600 s of presentation (36k turns @1x), so 45 s
@@ -152,6 +162,20 @@ export interface ReplayPremiereAdmissionDependencies {
   fetch?: typeof globalThis.fetch;
   now?: () => Date;
   environment?: Record<string, string | undefined>;
+  checkpointProjector?: ReplayPremiereCheckpointProjector;
+  /**
+   * Operator/orchestrator deadline for the deterministic checkpoint projection.
+   * The catalog passes this exact signal through; aborting it must happen before
+   * either the projection artifact or admission record becomes visible.
+   */
+  checkpointProjectionSignal?: AbortSignal;
+  /** Test-only stricter override; production cannot exceed the fixed ceiling. */
+  checkpointProjectionTimeoutMs?: number;
+  afterCheckpointProjectionPublished?: (
+    artifact: ReplayPremiereCheckpointProjectionArtifactV1,
+  ) => void | Promise<void>;
+  /** Test-only admission-record durability seam. */
+  admissionPublicationFaultInjector?: ReplayPremiereAdmissionPublicationFaultInjector;
 }
 
 export interface ReplayPremiereAdmissionCliIo {
@@ -164,7 +188,7 @@ export async function runReplayPremiereAdmission(
   dependencies: ReplayPremiereAdmissionDependencies = {},
 ): Promise<ReplayPremiereAdmissionSummary> {
   const options = parseReplayPremiereAdmissionArgs(args);
-  const deploymentOrigin = configuredDeploymentOrigin(
+  const deploymentOrigin = configuredReplayPremiereDeploymentOrigin(
     dependencies.environment ?? process.env,
   );
   if (options.deploymentOrigin !== deploymentOrigin) {
@@ -186,16 +210,31 @@ export async function runReplayPremiereAdmission(
     catalog = await ReplayPremiereAdmissionCatalog.open({
       privateStateRoot: layout.privateStateRoot,
       servedRoots: layout.servedRoots,
+      writerWaitMs: 1_000,
+      admissionPublicationFaultInjector:
+        dependencies.admissionPublicationFaultInjector,
     });
     const existing = await catalog.readAll();
     if (existing.failures.length > 0) {
       throw cliFailure("admission_catalog_not_clean");
     }
-    if (
-      existing.entries.some((entry) => entry.premiereId === options.premiereId)
-    ) {
-      throw cliFailure("admission_premiere_already_exists");
+    const existingPremiere = existing.entries.find(
+      (entry) => entry.premiereId === options.premiereId,
+    );
+    if (existingPremiere !== undefined) {
+      return await exactExistingAdmissionSummary({
+        record: existingPremiere,
+        catalog,
+        options,
+        layout,
+        operatorInput,
+        definitionInput,
+        privateCommitmentNonce,
+        deploymentOrigin,
+      });
     }
+    await catalog.close();
+    catalog = null;
 
     // Failure-retention contract: once this content-addressed copy exists, a
     // later import/probe/gate failure retains it as private integrity evidence.
@@ -331,8 +370,50 @@ export async function runReplayPremiereAdmission(
       maxPresentationSpanMs: MAX_PRESENTATION_SPAN_MS,
     } satisfies Parameters<typeof VerifiedPremiereEligibilityGate.verify>[0];
     const gate = VerifiedPremiereEligibilityGate.verify(verification);
+    const checkpointProjectionSignal =
+      dependencies.checkpointProjectionSignal ?? new AbortController().signal;
+    const checkpointProjection = await deadlineBoundCheckpointProjector({
+      projector:
+        dependencies.checkpointProjector ??
+        new DeterministicReplayPremiereCheckpointProjector(
+          path.join(process.cwd(), "resources", "maps"),
+        ),
+      timeoutMs:
+        dependencies.checkpointProjectionTimeoutMs ??
+        REPLAY_PREMIERE_ADMISSION_PROJECTION_TIMEOUT_MS,
+    }).project({
+      gate,
+      drafts: verification.draftChunks,
+      signal: checkpointProjectionSignal,
+    });
+    catalog = await ReplayPremiereAdmissionCatalog.open({
+      privateStateRoot: layout.privateStateRoot,
+      servedRoots: layout.servedRoots,
+      writerWaitMs: 1_000,
+      admissionPublicationFaultInjector:
+        dependencies.admissionPublicationFaultInjector,
+    });
+    const current = await catalog.readAll();
+    if (current.failures.length > 0) {
+      throw cliFailure("admission_catalog_not_clean");
+    }
+    const concurrentlyAdmittedPremiere = current.entries.find(
+      (entry) => entry.premiereId === options.premiereId,
+    );
+    if (concurrentlyAdmittedPremiere !== undefined) {
+      return await exactExistingAdmissionSummary({
+        record: concurrentlyAdmittedPremiere,
+        catalog,
+        options,
+        layout,
+        operatorInput,
+        definitionInput,
+        privateCommitmentNonce,
+        deploymentOrigin,
+      });
+    }
     if (
-      existing.entries.some(
+      current.entries.some(
         (entry) =>
           entry.expectedPublicationCommitmentHash ===
           gate.publicationCommitmentHash,
@@ -345,6 +426,18 @@ export async function runReplayPremiereAdmission(
       verification,
       chunkBuildLimits: CHUNK_BUILD_LIMITS,
       collectorLimits: COLLECTOR_LIMITS,
+      checkpointProjector: {
+        async project() {
+          return checkpointProjection;
+        },
+      },
+      checkpointProjectionSignal,
+      ...(dependencies.afterCheckpointProjectionPublished === undefined
+        ? {}
+        : {
+            afterCheckpointProjectionPublished:
+              dependencies.afterCheckpointProjectionPublished,
+          }),
     });
     return admissionSummary(record, deploymentOrigin);
   } finally {
@@ -796,6 +889,144 @@ function buildPublicDefinition(options: {
   };
 }
 
+/**
+ * A retained admission retry may observe the catalog record written by its
+ * previous process immediately before that process crashed. Reuse is safe only
+ * when the durable record is the exact transaction described by the retained
+ * inputs and its precomputed checkpoint projection is still present and
+ * authentic. A shared premiere id or publication commitment alone is never an
+ * identity proof.
+ */
+async function exactExistingAdmissionSummary(options: {
+  record: ReplayPremiereAdmissionRecordV1;
+  catalog: ReplayPremiereAdmissionCatalog;
+  options: ReplayPremiereAdmissionCliOptions;
+  layout: { privateStateRoot: string; servedRoots: readonly string[] };
+  operatorInput: OperatorEligibilityInput;
+  definitionInput: SpoilerNeutralDefinitionInput;
+  privateCommitmentNonce: Buffer;
+  deploymentOrigin: string;
+}): Promise<ReplayPremiereAdmissionSummary> {
+  const expectedSourceSha256 = options.options.expectedSourceSha256;
+  if (
+    options.record.stagedSource.sourceReplaySha256 !== expectedSourceSha256 ||
+    options.record.eligibilityRecord.sourceReplaySha256 !== expectedSourceSha256
+  ) {
+    throw existingAdmissionUnavailable("admission_existing_identity_mismatch");
+  }
+
+  let retainedSource: Awaited<ReturnType<typeof stagePremiereSource>>;
+  try {
+    retainedSource = await stagePremiereSource({
+      sourceFilePath: options.options.sourceFile,
+      privateStateRoot: options.layout.privateStateRoot,
+      servedRoots: options.layout.servedRoots,
+      maxSourceBytes: MAX_SOURCE_BYTES,
+      expectedSourceReplaySha256: options.options.expectedSourceSha256,
+    });
+  } catch (error) {
+    if (
+      error instanceof ReplayPremiereError &&
+      error.operatorCode === "source_bundle_hash_mismatch"
+    ) {
+      throw existingAdmissionUnavailable(
+        "admission_existing_identity_mismatch",
+        error,
+      );
+    }
+    throw existingAdmissionUnavailable(
+      "admission_existing_identity_unverified",
+      error,
+    );
+  }
+
+  const { provenance: _provenance, ...storedDefinition } =
+    options.record.publicDefinition;
+  const storedEligibilityInput: OperatorEligibilityInput = {
+    schemaVersion: 1,
+    eligibilityCheckVersion:
+      options.record.eligibilityRecord.eligibilityCheckVersion,
+    externalEmbargoEvidence:
+      options.record.eligibilityRecord.externalEmbargoEvidence,
+    externalOutcomeMayBePublic:
+      options.record.eligibilityRecord.externalOutcomeMayBePublic,
+    publicLabel: options.record.eligibilityRecord.publicLabel,
+  };
+  const requestedDefinition = options.definitionInput;
+  const storedDefinitionInput: SpoilerNeutralDefinitionInput = {
+    schemaVersion: 1,
+    ...storedDefinition,
+  };
+  const identityMatches =
+    retainedSource.sourceReplaySha256 === expectedSourceSha256 &&
+    retainedSource.byteLength === options.record.stagedSource.byteLength &&
+    options.record.stagedSource.sourceReplaySha256 === expectedSourceSha256 &&
+    options.record.eligibilityRecord.sourceReplaySha256 ===
+      expectedSourceSha256 &&
+    Buffer.from(
+      options.record.assessment.privateCommitmentNonceBase64,
+      "base64",
+    ).equals(options.privateCommitmentNonce) &&
+    sameCanonicalJson(storedEligibilityInput, options.operatorInput) &&
+    sameCanonicalJson(storedDefinitionInput, requestedDefinition);
+  if (!identityMatches) {
+    throw existingAdmissionUnavailable("admission_existing_identity_mismatch");
+  }
+
+  try {
+    const rebuilt = await rebuildReplayPremiereProjectionInput({
+      record: options.record,
+      privateStateRoot: options.layout.privateStateRoot,
+      servedRoots: options.layout.servedRoots,
+      maxSourceBytes: MAX_SOURCE_BYTES,
+      publicOrigin: options.deploymentOrigin,
+    });
+    const projection = await options.catalog.loadCheckpointProjection({
+      record: options.record,
+      gate: rebuilt.gate,
+    });
+    if (projection === null) {
+      throw existingAdmissionUnavailable(
+        "admission_existing_projection_unavailable",
+      );
+    }
+  } catch (error) {
+    if (
+      error instanceof ReplayPremiereError &&
+      error.operatorCode === "admission_existing_projection_unavailable"
+    ) {
+      throw error;
+    }
+    throw existingAdmissionUnavailable(
+      "admission_existing_projection_unavailable",
+      error,
+    );
+  }
+  return admissionSummary(options.record, options.deploymentOrigin);
+}
+
+function sameCanonicalJson(left: unknown, right: unknown): boolean {
+  assertReplayPremiereJsonValue(left, "existing admission identity");
+  assertReplayPremiereJsonValue(right, "retained admission identity");
+  return (
+    canonicalReplayPremiereJson(left as ReplayPremiereJsonValue) ===
+    canonicalReplayPremiereJson(right as ReplayPremiereJsonValue)
+  );
+}
+
+function existingAdmissionUnavailable(
+  operatorCode: string,
+  cause?: unknown,
+): ReplayPremiereError {
+  return new ReplayPremiereError(
+    operatorCode,
+    "PREMIERE_UNAVAILABLE",
+    503,
+    "Replay Premiere could not prove an exact retained admission retry",
+    cause === undefined ? undefined : { cause },
+  );
+}
+
 async function readBoundedJson(
   filePath: string,
   operatorCodeValue: string,
@@ -981,7 +1212,79 @@ function admissionSummary(
   };
 }
 
-function configuredDeploymentOrigin(
+function deadlineBoundCheckpointProjector(options: {
+  projector: ReplayPremiereCheckpointProjector;
+  timeoutMs: number;
+}): ReplayPremiereCheckpointProjector {
+  if (
+    !Number.isSafeInteger(options.timeoutMs) ||
+    options.timeoutMs <= 0 ||
+    options.timeoutMs > REPLAY_PREMIERE_ADMISSION_PROJECTION_TIMEOUT_MS
+  ) {
+    throw cliFailure("admission_checkpoint_projection_timeout_invalid");
+  }
+  return {
+    async project(projectOptions) {
+      const controller = new AbortController();
+      let deadlineExpired = false;
+      let rejectFence: ((error: ReplayPremiereError) => void) | undefined;
+      const fence = new Promise<never>((_resolve, reject) => {
+        rejectFence = reject;
+      });
+      const abortFromCaller = (): void => {
+        controller.abort();
+        rejectFence?.(
+          new ReplayPremiereError(
+            "checkpoint_projection_aborted",
+            "PREMIERE_UNAVAILABLE",
+            503,
+            "Replay Premiere checkpoint projection was aborted",
+          ),
+        );
+      };
+      projectOptions.signal.addEventListener("abort", abortFromCaller, {
+        once: true,
+      });
+      if (projectOptions.signal.aborted) abortFromCaller();
+      const timer = setTimeout(() => {
+        deadlineExpired = true;
+        controller.abort();
+        rejectFence?.(
+          cliFailure(
+            "admission_checkpoint_projection_deadline_exceeded",
+            "PREMIERE_UNAVAILABLE",
+            503,
+          ),
+        );
+      }, options.timeoutMs);
+      timer.unref?.();
+      const projection = Promise.resolve().then(() =>
+        options.projector.project({
+          ...projectOptions,
+          signal: controller.signal,
+        }),
+      );
+      void projection.catch(() => undefined);
+      try {
+        return await Promise.race([projection, fence]);
+      } catch (error) {
+        if (deadlineExpired) {
+          throw cliFailure(
+            "admission_checkpoint_projection_deadline_exceeded",
+            "PREMIERE_UNAVAILABLE",
+            503,
+          );
+        }
+        throw error;
+      } finally {
+        clearTimeout(timer);
+        projectOptions.signal.removeEventListener("abort", abortFromCaller);
+      }
+    },
+  };
+}
+
+export function configuredReplayPremiereDeploymentOrigin(
   environment: Record<string, string | undefined>,
 ): string {
   const configured = loadProxyWarDemoServerNetworkConfig(environment).publicUrl;

@@ -1,6 +1,13 @@
 import { randomUUID } from "node:crypto";
 import { constants, promises as fs, type Stats } from "node:fs";
 import path from "node:path";
+import type { ReplayPremiereCheckpointProjector } from "./ReplayPremiereCheckpointProjection";
+import {
+  ReplayPremiereCheckpointProjectionStore,
+  type ReplayPremiereCheckpointProjectionAdmissionBinding,
+  type ReplayPremiereCheckpointProjectionArtifactV1,
+  type ReplayPremiereCheckpointProjectionPublicationFaultInjector,
+} from "./ReplayPremiereCheckpointProjectionStore";
 import {
   buildPremiereChunks,
   type BuildPremiereChunksOptions,
@@ -48,6 +55,7 @@ const ENTRY_DIRECTORY = "entries";
 const ENTRY_SUFFIX = ".admission.json";
 const MAX_CATALOG_LOCK_BYTES = 4_096;
 const MAX_DIAGNOSTIC_TARGET_BYTES = 160;
+const MAX_CATALOG_WRITER_WAIT_MS = 10_000;
 const SAFE_DIAGNOSTIC_TARGET = /^[A-Za-z0-9._-]+$/;
 const activeCatalogRoots = new Set<string>();
 
@@ -131,50 +139,95 @@ export interface ReplayPremiereCatalogReadResult {
   failures: ReplayPremiereCatalogFailure[];
 }
 
+export type ReplayPremiereAdmissionPublicationPhase =
+  | "after_temporary_write"
+  | "after_temporary_sync"
+  | "after_temporary_close"
+  | "after_admission_link"
+  | "after_admission_chmod"
+  | "after_temporary_unlink"
+  | "after_directory_sync"
+  | "before_cleanup_admission_unlink"
+  | "before_cleanup_temporary_unlink"
+  | "before_cleanup_directory_sync"
+  | "before_rollback_absence_stat"
+  | "before_rollback_absence_sync";
+
+/** Test-only fault seam around admission-record durability boundaries. */
+export type ReplayPremiereAdmissionPublicationFaultInjector = (
+  phase: ReplayPremiereAdmissionPublicationPhase,
+) => void | Promise<void>;
+
 export interface ReplayPremiereAdmissionWriteOptions {
   gate: VerifiedPremiereEligibilityGate;
   verification: VerifyPremierePublicationOptions;
   chunkBuildLimits: ReplayPremiereChunkBuildLimits;
   collectorLimits: ReplayPremiereLeakAuditCollectorLimits;
+  /** New production admissions provide this; omission creates a legacy record. */
+  checkpointProjector?: ReplayPremiereCheckpointProjector;
+  checkpointProjectionSignal?: AbortSignal;
+  /** Test/operator seam after durable artifact publication, before visibility. */
+  afterCheckpointProjectionPublished?: (
+    artifact: ReplayPremiereCheckpointProjectionArtifactV1,
+  ) => void | Promise<void>;
 }
 
 export class ReplayPremiereAdmissionCatalog {
   readonly privateStateRoot: string;
   readonly catalogRoot: string;
   readonly entriesRoot: string;
+  readonly checkpointProjectionStore: ReplayPremiereCheckpointProjectionStore;
   private readonly servedRoots: readonly string[];
   private readonly limits: ReplayPremiereCatalogLimits;
   private readonly lockPath: string;
   private readonly writerId: string;
+  private readonly admissionPublicationFaultInjector?: ReplayPremiereAdmissionPublicationFaultInjector;
+  private readonly checkpointProjectionPublicationFaultInjector?: ReplayPremiereCheckpointProjectionPublicationFaultInjector;
   private closed = false;
   private writeQueue: Promise<void> = Promise.resolve();
+  private postCloseProjectionQueue: Promise<void> = Promise.resolve();
 
   private constructor(options: {
     privateStateRoot: string;
     catalogRoot: string;
     entriesRoot: string;
+    checkpointProjectionStore: ReplayPremiereCheckpointProjectionStore;
     servedRoots: readonly string[];
     limits: ReplayPremiereCatalogLimits;
     lockPath: string;
     writerId: string;
+    admissionPublicationFaultInjector?: ReplayPremiereAdmissionPublicationFaultInjector;
+    checkpointProjectionPublicationFaultInjector?: ReplayPremiereCheckpointProjectionPublicationFaultInjector;
   }) {
     this.privateStateRoot = options.privateStateRoot;
     this.catalogRoot = options.catalogRoot;
     this.entriesRoot = options.entriesRoot;
+    this.checkpointProjectionStore = options.checkpointProjectionStore;
     this.servedRoots = options.servedRoots;
     this.limits = options.limits;
     this.lockPath = options.lockPath;
     this.writerId = options.writerId;
+    this.admissionPublicationFaultInjector =
+      options.admissionPublicationFaultInjector;
+    this.checkpointProjectionPublicationFaultInjector =
+      options.checkpointProjectionPublicationFaultInjector;
   }
 
   static async open(options: {
     privateStateRoot: string;
     servedRoots: readonly string[];
     limits?: ReplayPremiereCatalogLimits;
+    /** Bounded canonical-lock contention wait; fail-fast remains the default. */
+    writerWaitMs?: number;
+    /** Test-only failure injection at projection-artifact durability seams. */
+    checkpointProjectionPublicationFaultInjector?: ReplayPremiereCheckpointProjectionPublicationFaultInjector;
+    /** Test-only failure injection at admission-record durability seams. */
+    admissionPublicationFaultInjector?: ReplayPremiereAdmissionPublicationFaultInjector;
   }): Promise<ReplayPremiereAdmissionCatalog> {
     const limits = validateCatalogLimits(
       options.limits ?? DEFAULT_REPLAY_PREMIERE_CATALOG_LIMITS,
     );
+    const writerWaitMs = validateCatalogWriterWaitMs(options.writerWaitMs);
     const layout = await validatePremierePrivateLayout(options);
     const canonicalCatalogRoot = await ensurePrivateDirectory(
       path.join(layout.privateStateRoot, CATALOG_DIRECTORY),
@@ -188,22 +241,54 @@ export class ReplayPremiereAdmissionCatalog {
       path.join(canonicalCatalogRoot, "recovery"),
       canonicalCatalogRoot,
     );
-    if (activeCatalogRoots.has(canonicalCatalogRoot)) {
-      throw catalogWriter("catalog_writer_already_active_in_process");
-    }
+    const checkpointProjectionStore =
+      await ReplayPremiereCheckpointProjectionStore.open({
+        catalogRoot: canonicalCatalogRoot,
+        catalogEntriesRoot: entriesRoot,
+        maxTotalBytes: limits.maxTotalEntryBytes,
+        publicationFaultInjector:
+          options.checkpointProjectionPublicationFaultInjector,
+      });
     const lockPath = path.join(canonicalCatalogRoot, "write-owner.json");
     const writerId = randomUUID();
-    await acquireCatalogLock(lockPath, recoveryRoot, writerId);
-    activeCatalogRoots.add(canonicalCatalogRoot);
-    return new ReplayPremiereAdmissionCatalog({
-      privateStateRoot: layout.privateStateRoot,
+    await acquireCatalogLockWithWait({
       catalogRoot: canonicalCatalogRoot,
-      entriesRoot,
-      servedRoots: layout.servedRoots,
-      limits,
       lockPath,
+      recoveryRoot,
       writerId,
+      writerWaitMs,
     });
+    activeCatalogRoots.add(canonicalCatalogRoot);
+    try {
+      await recoverInterruptedAdmissionPublications(entriesRoot);
+      await checkpointProjectionStore.recoverInterruptedPublications();
+      await checkpointProjectionStore.removeOrphanArtifacts({
+        admissionBinding: (premiereId) =>
+          readCheckpointProjectionAdmissionBinding({
+            entriesRoot,
+            premiereId,
+            maxEntryBytes: limits.maxEntryBytes,
+          }),
+      });
+      return new ReplayPremiereAdmissionCatalog({
+        privateStateRoot: layout.privateStateRoot,
+        catalogRoot: canonicalCatalogRoot,
+        entriesRoot,
+        checkpointProjectionStore,
+        servedRoots: layout.servedRoots,
+        limits,
+        lockPath,
+        writerId,
+        admissionPublicationFaultInjector:
+          options.admissionPublicationFaultInjector,
+        checkpointProjectionPublicationFaultInjector:
+          options.checkpointProjectionPublicationFaultInjector,
+      });
+    } catch (error) {
+      activeCatalogRoots.delete(canonicalCatalogRoot);
+      await releaseCatalogLock(lockPath, writerId);
+      throw error;
+    }
   }
 
   async readAll(): Promise<ReplayPremiereCatalogReadResult> {
@@ -316,11 +401,27 @@ export class ReplayPremiereAdmissionCatalog {
     if (bytes.byteLength > this.limits.maxEntryBytes) {
       throw catalogCapacity("catalog_entry_byte_ceiling_exceeded");
     }
+    const projection =
+      options.checkpointProjector === undefined
+        ? null
+        : await options.checkpointProjector.project({
+            gate: options.gate,
+            drafts: options.verification.draftChunks,
+            signal:
+              options.checkpointProjectionSignal ??
+              new AbortController().signal,
+          });
+    assertCheckpointProjectionSignalActive(options.checkpointProjectionSignal);
     return this.runExclusive(async () => {
+      assertCheckpointProjectionSignalActive(
+        options.checkpointProjectionSignal,
+      );
+      await recoverInterruptedAdmissionPublications(this.entriesRoot);
       const destination = path.join(
         this.entriesRoot,
         `${record.premiereId}${ENTRY_SUFFIX}`,
       );
+      let admissionAlreadyExists = false;
       try {
         const existing = await readBoundedCatalogFile(
           destination,
@@ -329,52 +430,173 @@ export class ReplayPremiereAdmissionCatalog {
         if (!Buffer.from(existing).equals(bytes)) {
           throw catalogIntegrity("catalog_admission_is_immutable");
         }
-        return record;
+        admissionAlreadyExists = true;
       } catch (error) {
         if (!hasCode(error, "ENOENT")) throw error;
       }
-      await this.assertWriteCapacity(bytes.byteLength);
-      await assertPremiereDurableWriteAdmission({
-        destinationPath: this.entriesRoot,
-        pendingBytes: bytes.byteLength,
-      });
-      const temporary = path.join(
-        this.entriesRoot,
-        `.${record.premiereId}.${randomUUID()}.tmp`,
-      );
-      const handle = await fs.open(
-        temporary,
-        constants.O_CREAT |
-          constants.O_EXCL |
-          constants.O_WRONLY |
-          constants.O_NOFOLLOW,
-        0o600,
-      );
+      let publishedArtifact:
+        | {
+            artifact: ReplayPremiereCheckpointProjectionArtifactV1;
+            created: boolean;
+          }
+        | undefined;
       try {
-        await handle.writeFile(bytes);
-        await handle.sync();
-      } finally {
-        await handle.close();
-      }
-      try {
-        await fs.link(temporary, destination);
-        await fs.chmod(destination, 0o400);
-      } catch (error) {
-        if (!hasCode(error, "EEXIST")) throw error;
-        const existing = await readBoundedCatalogFile(
-          destination,
-          this.limits.maxEntryBytes,
-        );
-        if (!Buffer.from(existing).equals(bytes)) {
-          throw catalogIntegrity("catalog_admission_publish_conflict");
+        if (!admissionAlreadyExists) {
+          await this.assertWriteCapacity({
+            pendingBytes: bytes.byteLength,
+            pendingEntries: 1,
+          });
         }
-      } finally {
-        await fs.unlink(temporary).catch((error: unknown) => {
-          if (!hasCode(error, "ENOENT")) throw error;
+        if (projection !== null) {
+          publishedArtifact = await this.checkpointProjectionStore.publish({
+            record,
+            gate: options.gate,
+            projection,
+            beforePublish: (artifactBytes) =>
+              this.assertWriteCapacity({
+                pendingBytes:
+                  artifactBytes +
+                  (admissionAlreadyExists ? 0 : bytes.byteLength),
+                pendingEntries: admissionAlreadyExists ? 0 : 1,
+              }),
+          });
+          await options.afterCheckpointProjectionPublished?.(
+            publishedArtifact.artifact,
+          );
+          assertCheckpointProjectionSignalActive(
+            options.checkpointProjectionSignal,
+          );
+        }
+        if (admissionAlreadyExists) return record;
+        await assertPremiereDurableWriteAdmission({
+          destinationPath: this.entriesRoot,
+          pendingBytes: bytes.byteLength,
         });
+        assertCheckpointProjectionSignalActive(
+          options.checkpointProjectionSignal,
+        );
+        await this.publishAdmissionRecord({
+          record,
+          bytes,
+          destination,
+          signal: options.checkpointProjectionSignal,
+        });
+        return record;
+      } catch (error) {
+        if (publishedArtifact !== undefined && !admissionAlreadyExists) {
+          const commitState = await this.resolveAdmissionCommitState({
+            record,
+            gate: options.gate,
+            artifact: publishedArtifact.artifact,
+            destination,
+          });
+          if (commitState === "committed") {
+            // Publication completed durably even though its cleanup/reporting
+            // path failed. Adopt the exact transaction instead of reporting a
+            // failure that would let the league release sealed evidence.
+            return record;
+          }
+          if (commitState === "absent" && publishedArtifact.created) {
+            try {
+              await this.checkpointProjectionStore.removePublishedArtifact({
+                record,
+                gate: options.gate,
+                artifact: publishedArtifact.artifact,
+              });
+            } catch (cleanupError) {
+              throw catalogIntegrity(
+                "catalog_projection_rollback_failed",
+                new AggregateError(
+                  [error, cleanupError],
+                  "admission publication and projection rollback failed",
+                ),
+              );
+            }
+          }
+          if (commitState === "uncertain") {
+            throw catalogIntegrity(
+              "catalog_admission_commit_state_uncertain",
+              error,
+            );
+          }
+        }
+        throw error;
       }
-      await syncDirectory(this.entriesRoot);
-      return record;
+    });
+  }
+
+  async loadCheckpointProjection(options: {
+    record: ReplayPremiereAdmissionRecordV1;
+    gate: VerifiedPremiereEligibilityGate;
+  }): Promise<ReplayPremiereCheckpointProjectionArtifactV1 | null> {
+    if (this.closed) {
+      return this.runPostCloseProjectionExclusive(async () => {
+        const catalog = await ReplayPremiereAdmissionCatalog.open({
+          privateStateRoot: this.privateStateRoot,
+          servedRoots: this.servedRoots,
+          limits: this.limits,
+          writerWaitMs: 1_000,
+          checkpointProjectionPublicationFaultInjector:
+            this.checkpointProjectionPublicationFaultInjector,
+        });
+        try {
+          return await catalog.loadCheckpointProjection(options);
+        } finally {
+          await catalog.close();
+        }
+      });
+    }
+    await this.assertExactAdmissionPresent(options.record);
+    return this.checkpointProjectionStore.load(options);
+  }
+
+  async publishCheckpointProjection(options: {
+    record: ReplayPremiereAdmissionRecordV1;
+    gate: VerifiedPremiereEligibilityGate;
+    projection: Awaited<
+      ReturnType<ReplayPremiereCheckpointProjector["project"]>
+    >;
+  }): Promise<ReplayPremiereCheckpointProjectionArtifactV1> {
+    if (this.closed) {
+      return this.runPostCloseProjectionExclusive(async () => {
+        const catalog = await ReplayPremiereAdmissionCatalog.open({
+          privateStateRoot: this.privateStateRoot,
+          servedRoots: this.servedRoots,
+          limits: this.limits,
+          writerWaitMs: 1_000,
+          checkpointProjectionPublicationFaultInjector:
+            this.checkpointProjectionPublicationFaultInjector,
+        });
+        try {
+          return await catalog.publishCheckpointProjection(options);
+        } finally {
+          await catalog.close();
+        }
+      });
+    }
+    return this.runExclusive(async () => {
+      await this.assertExactAdmissionPresent(options.record);
+      const published = await this.checkpointProjectionStore.publish({
+        ...options,
+        beforePublish: (artifactBytes) =>
+          this.assertWriteCapacity({
+            pendingBytes: artifactBytes,
+            pendingEntries: 0,
+          }),
+      });
+      try {
+        await this.assertExactAdmissionPresent(options.record);
+      } catch (error) {
+        if (published.created) {
+          await this.removeStalePublishedArtifactIfSafe({
+            record: options.record,
+            gate: options.gate,
+            artifact: published.artifact,
+          });
+        }
+        throw error;
+      }
+      return published.artifact;
     });
   }
 
@@ -408,17 +630,258 @@ export class ReplayPremiereAdmissionCatalog {
     }
   }
 
-  private async assertWriteCapacity(pendingBytes: number): Promise<void> {
+  private async runPostCloseProjectionExclusive<T>(
+    operation: () => Promise<T>,
+  ): Promise<T> {
+    const previous = this.postCloseProjectionQueue;
+    let release: (() => void) | undefined;
+    this.postCloseProjectionQueue = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    await previous;
+    try {
+      return await operation();
+    } finally {
+      release?.();
+    }
+  }
+
+  private async assertWriteCapacity(options: {
+    pendingBytes: number;
+    pendingEntries: 0 | 1;
+  }): Promise<void> {
     const entries = await fs.readdir(this.entriesRoot);
-    if (entries.length + 1 > this.limits.maxEntries) {
+    if (entries.length + options.pendingEntries > this.limits.maxEntries) {
       throw catalogCapacity("catalog_entry_count_ceiling_exceeded");
     }
-    let totalBytes = pendingBytes;
+    let totalBytes =
+      options.pendingBytes +
+      (await this.checkpointProjectionStore.totalArtifactBytes());
+    if (totalBytes > this.limits.maxTotalEntryBytes) {
+      throw catalogCapacity("catalog_total_byte_ceiling_exceeded");
+    }
     for (const entry of entries) {
       totalBytes += (await fs.lstat(path.join(this.entriesRoot, entry))).size;
       if (totalBytes > this.limits.maxTotalEntryBytes) {
         throw catalogCapacity("catalog_total_byte_ceiling_exceeded");
       }
+    }
+  }
+
+  private async publishAdmissionRecord(options: {
+    record: ReplayPremiereAdmissionRecordV1;
+    bytes: Uint8Array;
+    destination: string;
+    signal?: AbortSignal;
+  }): Promise<void> {
+    const temporary = path.join(
+      this.entriesRoot,
+      `.${options.record.premiereId}.${randomUUID()}.tmp`,
+    );
+    let handle: Awaited<ReturnType<typeof fs.open>> | null = null;
+    let temporaryIdentity: { dev: number; ino: number } | null = null;
+    try {
+      handle = await fs.open(
+        temporary,
+        constants.O_CREAT |
+          constants.O_EXCL |
+          constants.O_WRONLY |
+          constants.O_NOFOLLOW,
+        0o600,
+      );
+      const opened = await handle.stat();
+      temporaryIdentity = { dev: opened.dev, ino: opened.ino };
+      await handle.writeFile(options.bytes);
+      await this.injectAdmissionPublicationFault("after_temporary_write");
+      assertCheckpointProjectionSignalActive(options.signal);
+      await handle.sync();
+      await this.injectAdmissionPublicationFault("after_temporary_sync");
+      assertCheckpointProjectionSignalActive(options.signal);
+      await handle.close();
+      handle = null;
+      await this.injectAdmissionPublicationFault("after_temporary_close");
+      assertCheckpointProjectionSignalActive(options.signal);
+      await fs.link(temporary, options.destination);
+      await this.injectAdmissionPublicationFault("after_admission_link");
+      assertCheckpointProjectionSignalActive(options.signal);
+      await fs.chmod(options.destination, 0o400);
+      await this.injectAdmissionPublicationFault("after_admission_chmod");
+      assertCheckpointProjectionSignalActive(options.signal);
+      await fs.unlink(temporary);
+      await this.injectAdmissionPublicationFault("after_temporary_unlink");
+      assertCheckpointProjectionSignalActive(options.signal);
+      await syncDirectory(this.entriesRoot);
+      await this.injectAdmissionPublicationFault("after_directory_sync");
+      assertCheckpointProjectionSignalActive(options.signal);
+    } catch (error) {
+      if (handle !== null) await handle.close().catch(() => undefined);
+      if (hasCode(error, "EEXIST")) {
+        try {
+          const existing = await readBoundedCatalogFile(
+            options.destination,
+            this.limits.maxEntryBytes,
+          );
+          if (!Buffer.from(existing).equals(options.bytes)) {
+            throw catalogIntegrity("catalog_admission_publish_conflict");
+          }
+          await unlinkIfPresent(temporary);
+          await syncDirectory(this.entriesRoot);
+          return;
+        } catch (existingError) {
+          await cleanupFailedAdmissionPublication({
+            entriesRoot: this.entriesRoot,
+            temporary,
+            destination: options.destination,
+            temporaryIdentity,
+            injectFault: (phase) => this.injectAdmissionPublicationFault(phase),
+          });
+          throw existingError;
+        }
+      }
+      try {
+        await cleanupFailedAdmissionPublication({
+          entriesRoot: this.entriesRoot,
+          temporary,
+          destination: options.destination,
+          temporaryIdentity,
+          injectFault: (phase) => this.injectAdmissionPublicationFault(phase),
+        });
+      } catch (cleanupError) {
+        throw catalogIntegrity(
+          "catalog_admission_cleanup_failed",
+          new AggregateError(
+            [error, cleanupError],
+            "admission publication and cleanup failed",
+          ),
+        );
+      }
+      throw error;
+    }
+  }
+
+  private async injectAdmissionPublicationFault(
+    phase: ReplayPremiereAdmissionPublicationPhase,
+  ): Promise<void> {
+    await this.admissionPublicationFaultInjector?.(phase);
+  }
+
+  private async admissionAbsenceIsDurable(
+    destination: string,
+  ): Promise<boolean> {
+    try {
+      await this.injectAdmissionPublicationFault(
+        "before_rollback_absence_stat",
+      );
+      if ((await lstatIfPresent(destination)) !== null) return false;
+      await this.injectAdmissionPublicationFault(
+        "before_rollback_absence_sync",
+      );
+      await syncDirectory(this.entriesRoot);
+      await this.injectAdmissionPublicationFault(
+        "before_rollback_absence_stat",
+      );
+      return (await lstatIfPresent(destination)) === null;
+    } catch {
+      // Absence must be positively observed on both sides of a successful
+      // directory fsync. Any stat/fsync uncertainty retains the projection so
+      // a possibly-visible admission can never become projectionless.
+      return false;
+    }
+  }
+
+  private async resolveAdmissionCommitState(options: {
+    record: ReplayPremiereAdmissionRecordV1;
+    gate: VerifiedPremiereEligibilityGate;
+    artifact: ReplayPremiereCheckpointProjectionArtifactV1;
+    destination: string;
+  }): Promise<"committed" | "absent" | "uncertain"> {
+    try {
+      // Complete both directory durability barriers, then validate the exact
+      // immutable pair twice around the artifact read. The catalog lock blocks
+      // admissions while this resolves the transaction; any external delete
+      // or replacement is detected by the second exact-record check.
+      await syncDirectory(this.checkpointProjectionStore.root);
+      await syncDirectory(this.entriesRoot);
+      await this.assertExactAdmissionPresent(options.record);
+      const stored = await this.checkpointProjectionStore.load({
+        record: options.record,
+        gate: options.gate,
+      });
+      if (stored?.artifactHash !== options.artifact.artifactHash) {
+        return "uncertain";
+      }
+      await this.assertExactAdmissionPresent(options.record);
+      return "committed";
+    } catch {
+      if (await this.admissionAbsenceIsDurable(options.destination)) {
+        return "absent";
+      }
+      return "uncertain";
+    }
+  }
+
+  private async assertExactAdmissionPresent(
+    record: ReplayPremiereAdmissionRecordV1,
+  ): Promise<void> {
+    const state = await this.exactAdmissionState(record);
+    if (state === "missing") {
+      throw catalogIntegrity("catalog_projection_admission_missing");
+    }
+    if (state === "replaced") {
+      throw catalogIntegrity("catalog_projection_admission_replaced");
+    }
+  }
+
+  private async exactAdmissionState(
+    record: ReplayPremiereAdmissionRecordV1,
+  ): Promise<"exact" | "missing" | "replaced"> {
+    const destination = path.join(
+      this.entriesRoot,
+      `${record.premiereId}${ENTRY_SUFFIX}`,
+    );
+    let bytes: Uint8Array;
+    try {
+      bytes = await readBoundedCatalogFile(
+        destination,
+        this.limits.maxEntryBytes,
+      );
+    } catch (error) {
+      if (hasCode(error, "ENOENT")) {
+        return "missing";
+      }
+      throw error;
+    }
+    const expected = Buffer.from(
+      `${canonicalReplayPremiereJson(asJson(record))}\n`,
+      "utf8",
+    );
+    return Buffer.from(bytes).equals(expected) ? "exact" : "replaced";
+  }
+
+  private async removeStalePublishedArtifactIfSafe(options: {
+    record: ReplayPremiereAdmissionRecordV1;
+    gate: VerifiedPremiereEligibilityGate;
+    artifact: ReplayPremiereCheckpointProjectionArtifactV1;
+  }): Promise<void> {
+    let removable = false;
+    try {
+      const state = await this.exactAdmissionState(options.record);
+      if (state === "replaced") {
+        removable = true;
+      } else if (state === "missing") {
+        removable = await this.admissionAbsenceIsDurable(
+          path.join(
+            this.entriesRoot,
+            `${options.record.premiereId}${ENTRY_SUFFIX}`,
+          ),
+        );
+      }
+    } catch {
+      // Read uncertainty retains the artifact. Removing it could make an exact
+      // admission that is merely unreadable at this instant projectionless.
+    }
+    if (removable) {
+      await this.checkpointProjectionStore.removePublishedArtifact(options);
     }
   }
 }
@@ -840,6 +1303,18 @@ function validateCatalogLimits(
   return immutable(limits, "replay premiere catalog limits");
 }
 
+function validateCatalogWriterWaitMs(value: number | undefined): number {
+  const waitMs = value ?? 0;
+  if (
+    !Number.isSafeInteger(waitMs) ||
+    waitMs < 0 ||
+    waitMs > MAX_CATALOG_WRITER_WAIT_MS
+  ) {
+    throw catalogWriter("catalog_writer_wait_invalid");
+  }
+  return waitMs;
+}
+
 async function ensurePrivateDirectory(
   directory: string,
   expectedParent: string,
@@ -941,6 +1416,44 @@ async function acquireCatalogLock(
     await createCatalogLockFile(lockPath, bytes);
   } catch (error) {
     throw catalogWriter("catalog_lock_reacquisition_failed", error);
+  }
+}
+
+async function acquireCatalogLockWithWait(options: {
+  catalogRoot: string;
+  lockPath: string;
+  recoveryRoot: string;
+  writerId: string;
+  writerWaitMs: number;
+}): Promise<void> {
+  const deadline = Date.now() + options.writerWaitMs;
+  while (true) {
+    let contention: ReplayPremiereError;
+    if (activeCatalogRoots.has(options.catalogRoot)) {
+      contention = catalogWriter("catalog_writer_already_active_in_process");
+    } else {
+      try {
+        await acquireCatalogLock(
+          options.lockPath,
+          options.recoveryRoot,
+          options.writerId,
+        );
+        return;
+      } catch (error) {
+        if (
+          !(error instanceof ReplayPremiereError) ||
+          error.operatorCode !== "catalog_writer_already_active_on_host"
+        ) {
+          throw error;
+        }
+        contention = error;
+      }
+    }
+    const remainingMs = deadline - Date.now();
+    if (remainingMs <= 0) throw contention;
+    await new Promise<void>((resolve) =>
+      setTimeout(resolve, Math.min(25, remainingMs)),
+    );
   }
 }
 
@@ -1072,6 +1585,136 @@ async function syncDirectory(directory: string): Promise<void> {
   }
 }
 
+async function recoverInterruptedAdmissionPublications(
+  entriesRoot: string,
+): Promise<void> {
+  let changed = false;
+  const entries = await fs.readdir(entriesRoot, { withFileTypes: true });
+  for (const temporaryEntry of entries) {
+    if (!isAdmissionPublicationTemporaryName(temporaryEntry.name)) continue;
+    if (!temporaryEntry.isFile()) {
+      throw catalogIntegrity("catalog_admission_temporary_invalid");
+    }
+    const temporary = path.join(entriesRoot, temporaryEntry.name);
+    const temporaryStat = await fs.lstat(temporary);
+    if (
+      !temporaryStat.isFile() ||
+      temporaryStat.isSymbolicLink() ||
+      !ownedByCurrentProcess(temporaryStat.uid) ||
+      temporaryStat.nlink < 1 ||
+      temporaryStat.nlink > 2
+    ) {
+      throw catalogIntegrity("catalog_admission_temporary_invalid");
+    }
+    const linkedAdmissions: string[] = [];
+    for (const candidate of entries) {
+      if (!candidate.name.endsWith(ENTRY_SUFFIX)) continue;
+      const candidatePath = path.join(entriesRoot, candidate.name);
+      const candidateStat = await fs.lstat(candidatePath);
+      if (
+        candidateStat.dev === temporaryStat.dev &&
+        candidateStat.ino === temporaryStat.ino
+      ) {
+        linkedAdmissions.push(candidatePath);
+      }
+    }
+    if (temporaryStat.nlink === 1 && linkedAdmissions.length === 0) {
+      await fs.unlink(temporary);
+      changed = true;
+      continue;
+    }
+    if (temporaryStat.nlink !== 2 || linkedAdmissions.length !== 1) {
+      throw catalogIntegrity("catalog_admission_temporary_invalid");
+    }
+    // The admission link is not committed until its temporary is removed.
+    // A crash before that point rolls the entry back; the projection-store
+    // orphan sweep that follows removes its now-unreferenced artifact.
+    await fs.unlink(linkedAdmissions[0]);
+    await fs.unlink(temporary);
+    changed = true;
+  }
+  if (changed) await syncDirectory(entriesRoot);
+}
+
+async function readCheckpointProjectionAdmissionBinding(options: {
+  entriesRoot: string;
+  premiereId: string;
+  maxEntryBytes: number;
+}): Promise<ReplayPremiereCheckpointProjectionAdmissionBinding> {
+  const destination = path.join(
+    options.entriesRoot,
+    `${options.premiereId}${ENTRY_SUFFIX}`,
+  );
+  let bytes: Uint8Array;
+  try {
+    bytes = await readBoundedCatalogFile(destination, options.maxEntryBytes);
+  } catch (error) {
+    if (hasCode(error, "ENOENT")) return { state: "missing" };
+    // The catalog reader owns per-target diagnostics. An unreadable, unsafe,
+    // or transiently uncertain admission must not make Catalog.open fail and
+    // must not authorize deleting its possibly-required projection.
+    return { state: "uncertain" };
+  }
+  try {
+    const record = parseAdmissionRecord(bytes);
+    if (record.premiereId !== options.premiereId) {
+      return { state: "uncertain" };
+    }
+    return { state: "validated", recordHash: record.recordHash };
+  } catch {
+    return { state: "uncertain" };
+  }
+}
+
+async function cleanupFailedAdmissionPublication(options: {
+  entriesRoot: string;
+  temporary: string;
+  destination: string;
+  temporaryIdentity: { dev: number; ino: number } | null;
+  injectFault: (
+    phase: ReplayPremiereAdmissionPublicationPhase,
+  ) => void | Promise<void>;
+}): Promise<void> {
+  const temporaryStat = await lstatIfPresent(options.temporary);
+  const destinationStat = await lstatIfPresent(options.destination);
+  const identity = temporaryStat ?? options.temporaryIdentity;
+  if (
+    destinationStat !== null &&
+    identity !== null &&
+    destinationStat.dev === identity.dev &&
+    destinationStat.ino === identity.ino
+  ) {
+    await options.injectFault("before_cleanup_admission_unlink");
+    await fs.unlink(options.destination);
+  }
+  await options.injectFault("before_cleanup_temporary_unlink");
+  await unlinkIfPresent(options.temporary);
+  await options.injectFault("before_cleanup_directory_sync");
+  await syncDirectory(options.entriesRoot);
+}
+
+async function lstatIfPresent(filePath: string): Promise<Stats | null> {
+  try {
+    return await fs.lstat(filePath);
+  } catch (error) {
+    if (hasCode(error, "ENOENT")) return null;
+    throw error;
+  }
+}
+
+async function unlinkIfPresent(filePath: string): Promise<void> {
+  try {
+    await fs.unlink(filePath);
+  } catch (error) {
+    if (!hasCode(error, "ENOENT")) throw error;
+  }
+}
+
+function isAdmissionPublicationTemporaryName(name: string): boolean {
+  const match = /^\.(prem_[a-z0-9]{16,32})\.([0-9a-f-]{36})\.tmp$/.exec(name);
+  return match !== null && isPremiereId(match[1]);
+}
+
 function duplicates(values: readonly string[]): Set<string> {
   const seen = new Set<string>();
   const duplicate = new Set<string>();
@@ -1167,6 +1810,19 @@ function catalogCapacity(operatorCodeValue: string): ReplayPremiereError {
     413,
     "Replay Premiere private admission catalog exceeded a bounded limit",
   );
+}
+
+function assertCheckpointProjectionSignalActive(
+  signal: AbortSignal | undefined,
+): void {
+  if (signal?.aborted === true) {
+    throw new ReplayPremiereError(
+      "checkpoint_projection_aborted",
+      "PREMIERE_UNAVAILABLE",
+      503,
+      "Replay Premiere checkpoint projection was aborted before publication",
+    );
+  }
 }
 
 function catalogWriter(

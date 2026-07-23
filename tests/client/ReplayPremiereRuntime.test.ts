@@ -35,6 +35,7 @@ import {
   ReplayPremiereRuntimeController,
   ReplayPremiereServiceClient,
   ReplayPremiereServiceError,
+  type ReplayPremiereClipEligibility,
   type ReplayPremiereJoinSyncUpdate,
   type ReplayPremiereServiceCheckpoint,
   type ReplayPremiereServiceHeartbeatResponse,
@@ -487,6 +488,7 @@ describe("ReplayPremiereRuntimeController", () => {
         idempotent: next.idempotent,
         reactionSummary: reactionSummaryWith("betrayal", 1),
         clipsEnabled: true,
+        clipEligibility: clipEligibility(),
       } as unknown as ReplayPremiereServiceReactionResponse;
     });
     const harness = runtimeHarness({
@@ -700,6 +702,10 @@ describe("ReplayPremiereRuntimeController", () => {
     const upgraded = heartbeatResponse("playing");
     upgraded.reactionSummary = reactionSummaryWith("smart", 2);
     upgraded.clipsEnabled = false;
+    upgraded.clipEligibility = clipEligibility({
+      generationEnabled: false,
+      renderableThroughTurn: null,
+    });
     let heartbeatCount = 0;
     const harness = runtimeHarness({
       state: "playing",
@@ -860,6 +866,57 @@ describe("ReplayPremiereRuntimeController", () => {
     harness.runtime.dispose();
   });
 
+  it("does not copy or expose an old guest's share when its response loses a recovery race", async () => {
+    vi.useFakeTimers();
+    const pendingShare = deferred<ReplayPremiereServiceShareResponse>();
+    const recovered = sessionResponse("playing");
+    recovered.session = viewerSession({
+      id: OTHER_SESSION_ID,
+      participantId: OTHER_PARTICIPANT_ID,
+    });
+    recovered.reactionSummary!.ownByKind = { ...emptyReactionSummary().byKind };
+    let bootstrapCount = 0;
+    const harness = runtimeHarness({
+      state: "playing",
+      service: {
+        startSession: async () =>
+          bootstrapCount++ === 0 ? sessionResponse("playing") : recovered,
+        heartbeat: async () => {
+          throw new ReplayPremiereServiceError("request_rejected", 401);
+        },
+        createShare: () => pendingShare.promise,
+      },
+    });
+    await bootstrapPlayingWithFrame(harness);
+    const shareWrite = harness.overlayCallbacks.onShare?.({
+      premiereId: PREMIERE_ID,
+      kind: "timestamp",
+      url: `${window.location.origin}/premiere/${PREMIERE_ID}`,
+      sequence: 0,
+      turn: 0,
+    });
+
+    await vi.advanceTimersByTimeAsync(10_000);
+    await Promise.resolve();
+    expect(harness.service.startSession).toHaveBeenCalledTimes(2);
+
+    pendingShare.resolve(shareResponse({ sequence: 0 }));
+    await shareWrite;
+
+    expect(harness.service.createShare).toHaveBeenCalledTimes(1);
+    expect(harness.copyText).not.toHaveBeenCalled();
+    expect(harness.models.at(-1)).toMatchObject({
+      share: {
+        sourceReactionId: null,
+        manualCopyUrl: null,
+        manualCopyReason: null,
+      },
+      canShare: true,
+      failureCode: null,
+    });
+    harness.runtime.dispose();
+  });
+
   it("turns an accepted mark into an explicitly anchored share moment", async () => {
     const reactionId = `react_${"7".repeat(32)}`;
     const shareId = `share_${"8".repeat(32)}`;
@@ -940,7 +997,167 @@ describe("ReplayPremiereRuntimeController", () => {
       sequence: 0,
       sourceReactionId: reactionId,
     });
+    expect(createShare).toHaveBeenCalledTimes(1);
     expect(harness.copyText).toHaveBeenCalledWith(url);
+    expect(harness.models.at(-1)?.share?.manualCopyUrl).toBeNull();
+    harness.runtime.dispose();
+  });
+
+  it("exposes the validated share URL without repeating the server write when clipboard copy is rejected", async () => {
+    const createShare = vi.fn(
+      async (input: { sequence: number; sourceReactionId?: string | null }) =>
+        shareResponse(input),
+    );
+    const harness = runtimeHarness({
+      state: "playing",
+      copyText: async () => {
+        throw new DOMException(
+          "Clipboard permission denied",
+          "NotAllowedError",
+        );
+      },
+      service: { createShare },
+    });
+    await bootstrapPlayingWithFrame(harness);
+
+    await expect(
+      harness.overlayCallbacks.onShare?.({
+        premiereId: PREMIERE_ID,
+        kind: "timestamp",
+        url: `${window.location.origin}/premiere/${PREMIERE_ID}`,
+        sequence: 0,
+        turn: 0,
+      }),
+    ).resolves.toBeUndefined();
+
+    const url = shareResponse({ sequence: 0 }).url;
+    expect(createShare).toHaveBeenCalledTimes(1);
+    expect(harness.copyText).toHaveBeenCalledTimes(1);
+    expect(harness.copyText).toHaveBeenCalledWith(url);
+    expect(harness.models.at(-1)).toMatchObject({
+      share: {
+        manualCopyUrl: url,
+        manualCopyReason: "clipboard_rejected",
+      },
+      canShare: true,
+      failureCode: null,
+    });
+    harness.runtime.dispose();
+  });
+
+  it("exposes the validated share URL when the Clipboard API is unavailable", async () => {
+    const navigatorRef = window.navigator as Navigator & {
+      clipboard?: Clipboard;
+    };
+    const clipboardDescriptor = Object.getOwnPropertyDescriptor(
+      navigatorRef,
+      "clipboard",
+    );
+    Object.defineProperty(navigatorRef, "clipboard", {
+      configurable: true,
+      value: undefined,
+    });
+    const createShare = vi.fn(
+      async (input: { sequence: number; sourceReactionId?: string | null }) =>
+        shareResponse(input),
+    );
+    const harness = runtimeHarness({
+      state: "playing",
+      useDefaultCopyText: true,
+      service: { createShare },
+    });
+    try {
+      await bootstrapPlayingWithFrame(harness);
+
+      await expect(
+        harness.overlayCallbacks.onShare?.({
+          premiereId: PREMIERE_ID,
+          kind: "timestamp",
+          url: `${window.location.origin}/premiere/${PREMIERE_ID}`,
+          sequence: 0,
+          turn: 0,
+        }),
+      ).resolves.toBeUndefined();
+
+      const url = shareResponse({ sequence: 0 }).url;
+      expect(createShare).toHaveBeenCalledTimes(1);
+      expect(harness.copyText).not.toHaveBeenCalled();
+      expect(harness.models.at(-1)).toMatchObject({
+        share: {
+          manualCopyUrl: url,
+          manualCopyReason: "clipboard_unavailable",
+        },
+        canShare: true,
+        failureCode: null,
+      });
+    } finally {
+      harness.runtime.dispose();
+      if (clipboardDescriptor === undefined) {
+        Reflect.deleteProperty(navigatorRef, "clipboard");
+      } else {
+        Object.defineProperty(navigatorRef, "clipboard", clipboardDescriptor);
+      }
+    }
+  });
+
+  it("does not retain a URL when createShare fails", async () => {
+    const createShare = vi.fn(async () => {
+      throw new ReplayPremiereServiceError("request_failed", 503);
+    });
+    const harness = runtimeHarness({
+      state: "playing",
+      service: { createShare },
+    });
+    await bootstrapPlayingWithFrame(harness);
+
+    await expect(
+      harness.overlayCallbacks.onShare?.({
+        premiereId: PREMIERE_ID,
+        kind: "timestamp",
+        url: `${window.location.origin}/premiere/${PREMIERE_ID}`,
+        sequence: 0,
+        turn: 0,
+      }),
+    ).rejects.toMatchObject({ code: "request_failed" });
+
+    expect(createShare).toHaveBeenCalledTimes(1);
+    expect(harness.copyText).not.toHaveBeenCalled();
+    expect(harness.models.at(-1)).toMatchObject({
+      share: { manualCopyUrl: null, manualCopyReason: null },
+      canShare: true,
+    });
+    harness.runtime.dispose();
+  });
+
+  it("does not retain or copy an invalid cross-origin share URL", async () => {
+    const createShare = vi.fn(
+      async (input: { sequence: number; sourceReactionId?: string | null }) =>
+        shareResponse(input, {
+          url: `https://attacker.example/premiere/${PREMIERE_ID}?moment=share_${"8".repeat(32)}&attribution=${"a".repeat(16)}.${"b".repeat(16)}`,
+        }),
+    );
+    const harness = runtimeHarness({
+      state: "playing",
+      service: { createShare },
+    });
+    await bootstrapPlayingWithFrame(harness);
+
+    await expect(
+      harness.overlayCallbacks.onShare?.({
+        premiereId: PREMIERE_ID,
+        kind: "timestamp",
+        url: `${window.location.origin}/premiere/${PREMIERE_ID}`,
+        sequence: 0,
+        turn: 0,
+      }),
+    ).rejects.toMatchObject({ code: "invalid_response" });
+
+    expect(createShare).toHaveBeenCalledTimes(1);
+    expect(harness.copyText).not.toHaveBeenCalled();
+    expect(harness.models.at(-1)).toMatchObject({
+      share: { manualCopyUrl: null, manualCopyReason: null },
+      canShare: true,
+    });
     harness.runtime.dispose();
   });
 
@@ -954,9 +1171,16 @@ describe("ReplayPremiereRuntimeController", () => {
     const sameParticipant = sessionResponseV3("playing");
     sameParticipant.reactionSummary = reactionSummaryWith("smart", 1);
     sameParticipant.latestOwnReaction = anchor;
+    const createShare = vi.fn(
+      async (input: { sequence: number; sourceReactionId?: string | null }) =>
+        shareResponse(input),
+    );
     const restored = runtimeHarness({
       state: "playing",
-      service: { startSession: async () => sameParticipant },
+      service: {
+        startSession: async () => sameParticipant,
+        createShare,
+      },
     });
     await bootstrapPlayingWithFrame(restored);
 
@@ -972,6 +1196,27 @@ describe("ReplayPremiereRuntimeController", () => {
           "replay_premiere.share_caption:title=Alpha vs Beta,turn=100",
       },
     });
+    const restoredShare = restored.models.at(-1)?.share;
+    await restored.overlayCallbacks.onShare?.({
+      premiereId: PREMIERE_ID,
+      kind: "timestamp",
+      url: restoredShare?.timestampUrl ?? "",
+      sequence: restoredShare?.sourceReactionSequence ?? null,
+      turn: restoredShare?.sourceReactionTurn ?? null,
+      sourceReactionId: restoredShare?.sourceReactionId,
+    });
+    const url = shareResponse({
+      sequence: anchor.sequence,
+      sourceReactionId: anchor.id,
+    }).url;
+    expect(createShare).toHaveBeenCalledTimes(1);
+    expect(createShare).toHaveBeenCalledWith({
+      sequence: anchor.sequence,
+      sourceReactionId: anchor.id,
+    });
+    expect(restored.copyText).toHaveBeenCalledTimes(1);
+    expect(restored.copyText).toHaveBeenCalledWith(url);
+    expect(restored.models.at(-1)?.share?.manualCopyUrl).toBeNull();
     restored.runtime.dispose();
 
     const otherParticipant = sessionResponseV3("playing");
@@ -2197,18 +2442,65 @@ describe("ReplayPremiereRuntimeController", () => {
     harness.runtime.dispose();
   });
 
-  it("keeps the clip control out of the pre-reveal model and exposes it only after reveal", async () => {
+  it("shows clip generation during playing when the current released range is renderable", async () => {
     const harness = runtimeHarness({ state: "playing" });
     await bootstrapPlayingWithFrame(harness);
-    expect(harness.models.at(-1)?.state).toBe("playing");
-    expect(harness.models.at(-1)?.clip ?? null).toBeNull();
-    expect(harness.models.at(-1)?.canRequestClip ?? false).toBe(false);
+    renderClipEligibleFrame();
 
-    await revealAfter(harness);
-    const revealed = harness.models.at(-1);
-    expect(revealed?.state).toBe("revealed");
-    expect(revealed?.clip).toEqual({ status: "idle", ready: null });
-    expect(revealed?.canRequestClip).toBe(true);
+    const playing = harness.models.at(-1);
+    expect(playing?.state).toBe("playing");
+    expect(playing?.clip).toEqual({ status: "idle", ready: null });
+    expect(playing?.canRequestClip).toBe(true);
+    harness.runtime.dispose();
+  });
+
+  it("hides generation until an incomplete source proves the full capture tail", async () => {
+    vi.useFakeTimers();
+    const initial = sessionResponse("playing");
+    initial.clipEligibility = clipEligibility({ renderableThroughTurn: 214 });
+    const expanded = heartbeatResponse("checkpoint");
+    expanded.clipEligibility = clipEligibility({ renderableThroughTurn: 215 });
+    const harness = runtimeHarness({
+      state: "playing",
+      service: {
+        startSession: async () => initial,
+        heartbeat: async () => expanded,
+      },
+    });
+    await bootstrapPlayingWithFrame(harness);
+    renderClipEligibleFrame();
+    expect(harness.models.at(-1)).toMatchObject({
+      clip: null,
+      canRequestClip: false,
+    });
+
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(harness.models.at(-1)).toMatchObject({
+      state: "checkpoint",
+      clip: { status: "idle", ready: null },
+      canRequestClip: true,
+    });
+    harness.runtime.dispose();
+  });
+
+  it("uses source completeness rather than lifecycle state for terminal clip shifting", async () => {
+    const complete = sessionResponse("playing");
+    complete.clipEligibility = clipEligibility({
+      renderableThroughTurn: 65,
+      sourceComplete: true,
+    });
+    const harness = runtimeHarness({
+      state: "playing",
+      service: { startSession: async () => complete },
+    });
+    await bootstrapPlayingWithFrame(harness);
+    renderClipEligibleFrame();
+
+    expect(harness.models.at(-1)).toMatchObject({
+      state: "playing",
+      clip: { status: "idle", ready: null },
+      canRequestClip: true,
+    });
     harness.runtime.dispose();
   });
 
@@ -2222,6 +2514,7 @@ describe("ReplayPremiereRuntimeController", () => {
       }),
     });
     await bootstrapPlayingWithFrame(harness);
+    renderClipEligibleFrame();
     await revealAfter(harness);
     await vi.waitFor(() => {
       expect(harness.models.at(-1)).toMatchObject({
@@ -2257,6 +2550,7 @@ describe("ReplayPremiereRuntimeController", () => {
       },
     });
     await bootstrapPlayingWithFrame(harness);
+    renderClipEligibleFrame();
     await revealAfter(harness);
 
     await harness.overlayCallbacks.onRequestClip?.({
@@ -2266,7 +2560,7 @@ describe("ReplayPremiereRuntimeController", () => {
     });
     expect(harness.service.requestClip).toHaveBeenCalledWith({
       sequence: 0,
-      turn: 0,
+      turn: 60,
     });
     expect(harness.models.at(-1)?.clip).toEqual({
       status: "preparing",
@@ -2301,6 +2595,7 @@ describe("ReplayPremiereRuntimeController", () => {
       },
     });
     await bootstrapPlayingWithFrame(harness);
+    renderClipEligibleFrame();
     await revealAfter(harness);
 
     await expect(
@@ -2338,6 +2633,7 @@ describe("ReplayPremiereRuntimeController", () => {
       },
     });
     await bootstrapPlayingWithFrame(harness);
+    renderClipEligibleFrame();
     await revealAfter(harness);
     await harness.overlayCallbacks.onRequestClip?.({
       premiereId: PREMIERE_ID,
@@ -2371,6 +2667,7 @@ describe("ReplayPremiereRuntimeController", () => {
       },
     });
     await bootstrapPlayingWithFrame(harness);
+    renderClipEligibleFrame();
     await revealAfter(harness);
     await harness.overlayCallbacks.onRequestClip?.({
       premiereId: PREMIERE_ID,
@@ -2396,6 +2693,7 @@ describe("ReplayPremiereRuntimeController", () => {
       },
     });
     await bootstrapPlayingWithFrame(harness);
+    renderClipEligibleFrame();
     await revealAfter(harness);
     await harness.overlayCallbacks.onRequestClip?.({
       premiereId: PREMIERE_ID,
@@ -2426,11 +2724,16 @@ describe("ReplayPremiereRuntimeController", () => {
   it("keeps every clip affordance and write disabled when the server capability is off", async () => {
     const disabledSession = sessionResponse("playing");
     disabledSession.clipsEnabled = false;
+    disabledSession.clipEligibility = clipEligibility({
+      generationEnabled: false,
+      renderableThroughTurn: null,
+    });
     const harness = runtimeHarness({
       state: "playing",
       service: { startSession: async () => disabledSession },
     });
     await bootstrapPlayingWithFrame(harness);
+    renderClipEligibleFrame();
     await revealAfter(harness);
 
     expect(harness.models.at(-1)).toMatchObject({
@@ -2466,6 +2769,10 @@ describe("ReplayPremiereServiceClient", () => {
     const capabilityFlip = heartbeatResponse("playing");
     capabilityFlip.reactionSummary = reactionSummaryWith("smart", 2);
     capabilityFlip.clipsEnabled = false;
+    capabilityFlip.clipEligibility = clipEligibility({
+      generationEnabled: false,
+      renderableThroughTurn: null,
+    });
     const fetchMock = vi
       .fn<typeof fetch>()
       .mockResolvedValueOnce(jsonResponse(inconsistent, 201))
@@ -2563,6 +2870,10 @@ describe("ReplayPremiereServiceClient", () => {
     const upgradedHeartbeat = heartbeatResponse("playing");
     upgradedHeartbeat.reactionSummary = reactionSummaryWith("smart", 1);
     upgradedHeartbeat.clipsEnabled = false;
+    upgradedHeartbeat.clipEligibility = clipEligibility({
+      generationEnabled: false,
+      renderableThroughTurn: null,
+    });
     const fetchMock = vi
       .fn<typeof fetch>()
       .mockResolvedValueOnce(
@@ -2584,6 +2895,7 @@ describe("ReplayPremiereServiceClient", () => {
       schemaVersion: 1,
       reactionSummary: null,
       clipsEnabled: null,
+      clipEligibility: null,
     });
     await expect(
       client.submitReaction({
@@ -2597,6 +2909,7 @@ describe("ReplayPremiereServiceClient", () => {
       schemaVersion: 1,
       reactionSummary: null,
       clipsEnabled: null,
+      clipEligibility: null,
     });
     await expect(
       client.heartbeat({ visible: true, observedSequence: 0 }),
@@ -2604,6 +2917,7 @@ describe("ReplayPremiereServiceClient", () => {
       schemaVersion: 2,
       reactionSummary: { totalReactions: 1 },
       clipsEnabled: false,
+      clipEligibility: { generationEnabled: false },
     });
     for (const [, request] of fetchMock.mock.calls) {
       expect(
@@ -2647,6 +2961,10 @@ describe("ReplayPremiereServiceClient", () => {
     const upgraded = heartbeatResponse("playing");
     upgraded.reactionSummary = reactionSummaryWith("smart", 2);
     upgraded.clipsEnabled = false;
+    upgraded.clipEligibility = clipEligibility({
+      generationEnabled: false,
+      renderableThroughTurn: null,
+    });
     const fetchMock = vi
       .fn<typeof fetch>()
       .mockResolvedValueOnce(jsonResponse(initial, 201))
@@ -2669,10 +2987,18 @@ describe("ReplayPremiereServiceClient", () => {
     await client.startSession({ visible: true, observedSequence: -1 });
     await expect(
       client.startSession({ visible: true, observedSequence: -1 }),
-    ).resolves.toMatchObject({ reactionSummary: null, clipsEnabled: null });
+    ).resolves.toMatchObject({
+      reactionSummary: null,
+      clipsEnabled: null,
+      clipEligibility: null,
+    });
     await expect(
       client.heartbeat({ visible: true, observedSequence: 0 }),
-    ).resolves.toMatchObject({ reactionSummary: null, clipsEnabled: null });
+    ).resolves.toMatchObject({
+      reactionSummary: null,
+      clipsEnabled: null,
+      clipEligibility: null,
+    });
     await expect(
       client.submitReaction({
         premiereId: PREMIERE_ID,
@@ -2681,13 +3007,18 @@ describe("ReplayPremiereServiceClient", () => {
         turn: 0,
         policySeatId: null,
       }),
-    ).resolves.toMatchObject({ reactionSummary: null, clipsEnabled: null });
+    ).resolves.toMatchObject({
+      reactionSummary: null,
+      clipsEnabled: null,
+      clipEligibility: null,
+    });
     await expect(
       client.heartbeat({ visible: true, observedSequence: 0 }),
     ).resolves.toMatchObject({
       schemaVersion: 2,
       reactionSummary: { totalReactions: 2 },
       clipsEnabled: false,
+      clipEligibility: { generationEnabled: false },
     });
     client.dispose();
   });
@@ -3215,6 +3546,8 @@ describe("ReplayPremiereServiceClient", () => {
 function runtimeHarness(options: {
   state: ReplayPremiereReadyProjection["state"];
   clipCapabilities?: () => Promise<ProxyWarClipGenerationCapabilities>;
+  copyText?: (text: string) => Promise<void>;
+  useDefaultCopyText?: boolean;
   service?: {
     startSession?: () => Promise<ReplayPremiereServiceSessionResponse>;
     heartbeat?: () => Promise<ReplayPremiereServiceHeartbeatResponse>;
@@ -3239,7 +3572,10 @@ function runtimeHarness(options: {
   let callbacks!: ReplayPremiereNetworkCallbacks;
   let overlayCallbacks!: ReplayPremiereOverlayCallbacks;
   const models: ReplayPremiereOverlayModel[] = [];
-  const copyText = vi.fn(async () => undefined);
+  if (options.copyText !== undefined && options.useDefaultCopyText === true) {
+    throw new Error("runtimeHarness clipboard configuration is ambiguous");
+  }
+  const copyText = vi.fn(options.copyText ?? (async () => undefined));
   const network = {
     start: vi.fn(async () => ({ status: "active" })),
     syncOnce: vi.fn(async () => ({ status: "active" })),
@@ -3289,6 +3625,7 @@ function runtimeHarness(options: {
                   1,
                 ),
                 clipsEnabled: true,
+                clipEligibility: clipEligibility(),
               }) as unknown as ReplayPremiereServiceReactionResponse,
           )
         : vi.fn(options.service.submitReaction),
@@ -3333,7 +3670,7 @@ function runtimeHarness(options: {
           dispose: vi.fn(),
         };
       },
-      copyText,
+      ...(options.useDefaultCopyText === true ? {} : { copyText }),
       downloadReminder: vi.fn(),
       readClipGenerationCapabilities:
         options.clipCapabilities ??
@@ -3386,6 +3723,14 @@ async function bootstrapPlayingWithFrame(
   document.dispatchEvent(
     new CustomEvent("ai-league-replay-frame", {
       detail: { sequence: 0, turnNumber: 0, players: [] },
+    }),
+  );
+}
+
+function renderClipEligibleFrame(turnNumber = 60): void {
+  document.dispatchEvent(
+    new CustomEvent("ai-league-replay-frame", {
+      detail: { sequence: 0, turnNumber, players: [] },
     }),
   );
 }
@@ -3548,6 +3893,7 @@ function sessionResponse(
     incomingMoment: null,
     reactionSummary: emptyReactionSummary(),
     clipsEnabled: true,
+    clipEligibility: clipEligibility(),
   };
 }
 
@@ -3598,6 +3944,7 @@ function heartbeatResponse(
     checkpoints: [checkpoint("cp_12345678", 10), checkpoint("cp_abcdef12", 20)],
     reactionSummary: emptyReactionSummary(),
     clipsEnabled: true,
+    clipEligibility: clipEligibility(),
   };
 }
 
@@ -3632,6 +3979,7 @@ function reactionResponse() {
     idempotent: false,
     reactionSummary: reactionSummaryWith("smart", 1),
     clipsEnabled: true,
+    clipEligibility: clipEligibility(),
   };
 }
 
@@ -3652,6 +4000,36 @@ function reactionResponseV3(): Extract<
   };
 }
 
+function shareResponse(
+  input: { sequence: number; sourceReactionId?: string | null },
+  overrides: {
+    participantId?: string;
+    url?: string;
+  } = {},
+): ReplayPremiereServiceShareResponse {
+  const shareId = `share_${"8".repeat(32)}`;
+  const attributionToken = `${"a".repeat(16)}.${"b".repeat(16)}`;
+  return {
+    schemaVersion: 1,
+    share: {
+      id: shareId,
+      premiereId: PREMIERE_ID,
+      sourceReactionId: input.sourceReactionId ?? null,
+      sequence: input.sequence,
+      turn: 0,
+      createdByParticipantId: overrides.participantId ?? PARTICIPANT_ID,
+      cardVersion: 1,
+      createdAt: STARTED_AT,
+      idempotencyKey: `idem_${"9".repeat(32)}`,
+    },
+    attributionToken,
+    url:
+      overrides.url ??
+      `${window.location.origin}/premiere/${PREMIERE_ID}?moment=${shareId}&attribution=${attributionToken}`,
+    idempotent: false,
+  };
+}
+
 function legacySessionResponseRaw(
   premiereState: ReplayPremiereServiceSessionResponse["premiereState"],
 ) {
@@ -3659,6 +4037,7 @@ function legacySessionResponseRaw(
   const {
     reactionSummary: _summary,
     clipsEnabled: _clips,
+    clipEligibility: _clipEligibility,
     ...legacy
   } = current;
   return { ...legacy, schemaVersion: 1 as const };
@@ -3669,6 +4048,7 @@ function legacyReactionResponseRaw() {
   const {
     reactionSummary: _summary,
     clipsEnabled: _clips,
+    clipEligibility: _clipEligibility,
     ...legacy
   } = current;
   return { ...legacy, schemaVersion: 1 as const };
@@ -3681,6 +4061,7 @@ function legacyHeartbeatResponseRaw(
   const {
     reactionSummary: _summary,
     clipsEnabled: _clips,
+    clipEligibility: _clipEligibility,
     ...legacy
   } = current;
   return { ...legacy, schemaVersion: 1 as const };
@@ -3693,6 +4074,7 @@ function legacySessionResponse(
     ...legacySessionResponseRaw(premiereState),
     reactionSummary: null,
     clipsEnabled: null,
+    clipEligibility: null,
   };
 }
 
@@ -3701,6 +4083,7 @@ function legacyReactionResponse(): ReplayPremiereServiceReactionResponse {
     ...legacyReactionResponseRaw(),
     reactionSummary: null,
     clipsEnabled: null,
+    clipEligibility: null,
   };
 }
 
@@ -3711,6 +4094,18 @@ function legacyHeartbeatResponse(
     ...legacyHeartbeatResponseRaw(premiereState),
     reactionSummary: null,
     clipsEnabled: null,
+    clipEligibility: null,
+  };
+}
+
+function clipEligibility(
+  overrides: Partial<ReplayPremiereClipEligibility> = {},
+): ReplayPremiereClipEligibility {
+  return {
+    generationEnabled: true,
+    renderableThroughTurn: 1_000,
+    sourceComplete: false,
+    ...overrides,
   };
 }
 

@@ -22,6 +22,7 @@ import {
 import {
   PREMIERE_LOOP_ACTIVATION_BACKOFF_MS,
   PREMIERE_LOOP_ACTIVATION_VERIFY_MS,
+  PREMIERE_LOOP_ADMISSION_PROJECTION_TIMEOUT_MS,
   PREMIERE_LOOP_HOLD_WINDOW_MS,
   PREMIERE_LOOP_MAX_PIPELINE_ATTEMPTS,
   PREMIERE_LOOP_MAX_REACTIVATION_ATTEMPTS,
@@ -180,7 +181,7 @@ describe("playback rate + checkpoint heuristics", () => {
   });
 });
 
-describe("startup budget bound", () => {
+describe("admission projection budget bound", () => {
   test("accepts within budget, rejects over budget and non-positive", () => {
     expect(
       isTurnCountWithinStartupBudget(PREMIERE_LOOP_TURN_STARTUP_BUDGET),
@@ -188,12 +189,19 @@ describe("startup budget bound", () => {
     expect(
       isTurnCountWithinStartupBudget(PREMIERE_LOOP_TURN_STARTUP_BUDGET + 1),
     ).toBe(false);
-    // 2026-07-22: with the deferred 90 s assembly lane, the real league's
-    // large World episodes (observed up to 50,400 turns) must be admitted —
-    // the 8 s-boot-era 24k calibration no longer binds.
+    // The real league's large World episodes (observed up to 50,400 turns)
+    // remain admissible, but their pre-publication projection is now fenced by
+    // the explicit wall-clock deadline below.
     expect(isTurnCountWithinStartupBudget(50_400)).toBe(true);
     expect(isTurnCountWithinStartupBudget(0)).toBe(false);
     expect(isTurnCountWithinStartupBudget(Number.NaN)).toBe(false);
+  });
+
+  test("keeps admission projection inside the prior 90s bound and suppression staleness valve", () => {
+    expect(PREMIERE_LOOP_ADMISSION_PROJECTION_TIMEOUT_MS).toBe(90_000);
+    expect(PREMIERE_LOOP_ADMISSION_PROJECTION_TIMEOUT_MS).toBeLessThan(
+      PREMIERE_SUPPRESSION_STALE_MS,
+    );
   });
 });
 

@@ -83,7 +83,15 @@ export interface ReplayPremiereShareView {
   sourceReactionId?: string | null;
   sourceReactionSequence?: number | null;
   sourceReactionTurn?: number | null;
+  /** Server-validated URL retained only when automatic clipboard delivery fails. */
+  manualCopyUrl?: string | null;
+  /** Clipboard stage that forced the validated URL into the manual-copy UI. */
+  manualCopyReason?: ReplayPremiereShareManualCopyReason | null;
 }
+
+export type ReplayPremiereShareManualCopyReason =
+  | "clipboard_rejected"
+  | "clipboard_unavailable";
 
 export type ReplayPremiereClipStatus =
   | "idle"
@@ -234,7 +242,7 @@ export interface ReplayPremiereOverlayModel {
   canMark?: boolean;
   canShare?: boolean;
   canExportCounterChallenge?: boolean;
-  /** Present only on the revealed/archived surface; absent otherwise. */
+  /** Canonical clip state; live surfaces expose it only when requestable. */
   clip?: ReplayPremiereClipView | null;
   canRequestClip?: boolean;
 }
@@ -1748,17 +1756,70 @@ function renderShare(
     );
   });
   section.append(heading, timestamp, captionLabel, caption, copyCaption);
-  // The clip block lives in the revealed/archived share section only. It is
-  // never constructed on the scheduled/playing/checkpoint surface, so the
-  // download button and social-copy controls are absent from the DOM before
-  // reveal.
-  if (model.state === "revealed" || model.state === "archived") {
+  const manualCopy = renderManualShareCopy(model.share);
+  if (manualCopy !== null) {
+    section.append(manualCopy);
+  }
+  // Live visibility follows the model's canonical request eligibility rather
+  // than duplicating lifecycle policy here. Once rendering has started (or a
+  // ready/failed result exists), preserve that continuity even if interaction
+  // readiness or the current safe range no longer permits another request.
+  // Revealed/archived surfaces retain their durable presentation as before.
+  const liveClipStatus = model.clip?.status;
+  if (
+    model.canRequestClip === true ||
+    liveClipStatus === "preparing" ||
+    liveClipStatus === "ready" ||
+    liveClipStatus === "failed" ||
+    model.state === "revealed" ||
+    model.state === "archived"
+  ) {
     const clip = renderClip(model, latest, callbacks, safeRun);
     if (clip !== null) {
       section.append(clip);
     }
   }
   return section;
+}
+
+function renderManualShareCopy(
+  share: ReplayPremiereShareView,
+): HTMLElement | null {
+  const url = share.manualCopyUrl;
+  if (url === null || url === undefined || url.length === 0) {
+    return null;
+  }
+  const container = element("div", "rp-manual-copy");
+  const status = element(
+    "p",
+    "rp-manual-copy-status",
+    translateText(
+      share.manualCopyReason === "clipboard_unavailable"
+        ? "replay_premiere.share_created_clipboard_unavailable"
+        : "replay_premiere.share_created_clipboard_rejected",
+    ),
+  );
+  status.id = "replay-premiere-manual-copy-status";
+  status.setAttribute("role", "status");
+  status.setAttribute("aria-live", "polite");
+  const label = element(
+    "label",
+    "rp-manual-copy-label",
+    translateText("replay_premiere.manual_copy_url"),
+  ) as HTMLLabelElement;
+  label.htmlFor = "replay-premiere-manual-copy-url";
+  const input = element("input", "rp-manual-copy-url") as HTMLInputElement;
+  input.id = "replay-premiere-manual-copy-url";
+  input.type = "url";
+  input.readOnly = true;
+  input.spellcheck = false;
+  input.autocomplete = "off";
+  input.value = url;
+  input.setAttribute("aria-describedby", status.id);
+  input.addEventListener("focus", () => input.select());
+  input.addEventListener("click", () => input.select());
+  container.append(status, label, input);
+  return container;
 }
 
 function renderClip(
@@ -3511,6 +3572,12 @@ const OVERLAY_CSS = `
   }
   :root[data-theme="light"] #${OVERLAY_ID} .rp-caption { background: #ffffff; }
   #${OVERLAY_ID} .rp-caption:focus-visible { outline: 3px solid var(--rp-focus); outline-offset: 1px; }
+  #${OVERLAY_ID} .rp-manual-copy { display: grid; gap: 7px; padding: 9px; border: 1px solid var(--rp-caution); border-radius: var(--rp-r-sm); background: var(--rp-surface-2); }
+  #${OVERLAY_ID} .rp-manual-copy-status { margin: 0; color: var(--rp-text-dim); font-size: 12px; font-weight: 650; line-height: 1.35; }
+  #${OVERLAY_ID} .rp-manual-copy-label { color: var(--rp-text-dim); font-size: 11px; font-weight: 750; }
+  #${OVERLAY_ID} .rp-manual-copy-url { width: 100%; min-width: 0; padding: 7px 8px; border: 1px solid var(--rp-line); border-radius: var(--rp-r-xs); background: var(--rp-bg-solid); color: var(--rp-text); font: 11px/1.3 ui-monospace, SFMono-Regular, Menlo, monospace; user-select: all; }
+  :root[data-theme="light"] #${OVERLAY_ID} .rp-manual-copy-url { background: #ffffff; }
+  #${OVERLAY_ID} .rp-manual-copy-url:focus-visible { outline: 3px solid var(--rp-focus); outline-offset: 1px; }
 
   /* ---- Social clip (revealed / archived only) ---- */
   #${OVERLAY_ID} .rp-clip {

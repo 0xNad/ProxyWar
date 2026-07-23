@@ -391,6 +391,7 @@ describe("ReplayPremiere HTTP adapter", () => {
           "checkpoints",
           "incomingMoment",
           "clipsEnabled",
+          "clipEligibility",
           "reactionSummary",
         ].sort(),
       );
@@ -401,6 +402,11 @@ describe("ReplayPremiere HTTP adapter", () => {
         incomingMoment: null,
         premiereState: "revealed",
         clipsEnabled: false,
+        clipEligibility: {
+          generationEnabled: false,
+          renderableThroughTurn: null,
+          sourceComplete: false,
+        },
         session: { premiereId: PREMIERE_ID },
         reactionSummary: {
           totalReactions: 0,
@@ -458,6 +464,7 @@ describe("ReplayPremiere HTTP adapter", () => {
           "premiereState",
           "checkpoints",
           "clipsEnabled",
+          "clipEligibility",
           "reactionSummary",
         ].sort(),
       );
@@ -466,6 +473,11 @@ describe("ReplayPremiere HTTP adapter", () => {
         schemaVersion: 2,
         persisted: false,
         clipsEnabled: false,
+        clipEligibility: {
+          generationEnabled: false,
+          renderableThroughTurn: null,
+          sourceComplete: false,
+        },
         reactionSummary: {
           totalReactions: 0,
           distinctParticipants: 0,
@@ -498,6 +510,7 @@ describe("ReplayPremiere HTTP adapter", () => {
             "reaction",
             "idempotent",
             "clipsEnabled",
+            "clipEligibility",
             "reactionSummary",
           ].sort(),
         );
@@ -506,6 +519,11 @@ describe("ReplayPremiere HTTP adapter", () => {
           schemaVersion: 2,
           reaction: { kind },
           clipsEnabled: false,
+          clipEligibility: {
+            generationEnabled: false,
+            renderableThroughTurn: null,
+            sourceComplete: false,
+          },
           reactionSummary: {
             totalReactions: index + 1,
             distinctParticipants: 1,
@@ -724,6 +742,7 @@ describe("ReplayPremiere HTTP adapter", () => {
           "checkpoints",
           "incomingMoment",
           "clipsEnabled",
+          "clipEligibility",
           "reactionSummary",
         ].sort(),
       );

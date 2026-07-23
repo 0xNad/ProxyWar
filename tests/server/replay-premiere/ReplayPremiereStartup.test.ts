@@ -14,7 +14,10 @@ import {
 import { buildPremiereChunks } from "../../../src/server/replay-premiere/ReplayPremiereChunks";
 import { REPLAY_PREMIERE_CHECKPOINT_PAUSE_MS } from "../../../src/server/replay-premiere/ReplayPremiereContracts";
 import { ReplayPremiereError } from "../../../src/server/replay-premiere/ReplayPremiereErrors";
-import { ReplayPremiereEventStore } from "../../../src/server/replay-premiere/ReplayPremiereEventStore";
+import {
+  ReplayPremiereEventStore,
+  type StoredReplayPremiereEvent,
+} from "../../../src/server/replay-premiere/ReplayPremiereEventStore";
 import { ReplayPremiereGuestSecurity } from "../../../src/server/replay-premiere/ReplayPremiereGuestSecurity";
 import {
   createReplayPremiereRouter,
@@ -168,6 +171,328 @@ describe("ReplayPremiere production startup", () => {
     services.splice(services.indexOf(started.service), 1);
     expect(context.httpRegistry.get(PREMIERE_ID)).toBeNull();
     expect(context.runtimeRegistry.get(PREMIERE_ID)).toBeNull();
+  });
+
+  test("persists a missing legacy projection once and skips the projector on the next start", async () => {
+    await writeAdmission(root);
+    const firstContext = startupContext();
+    const project = vi.spyOn(firstContext.checkpointProjector, "project");
+    const first = await startReplayPremiereProduction({
+      ...firstContext,
+      privateStateRoot: path.join(root, "private"),
+      servedRoots: [path.join(root, "served")],
+    });
+    services.push(first.service);
+    expect(project).toHaveBeenCalledTimes(1);
+    await fs.stat(await projectionArtifactPath(root));
+    await first.service.close();
+    services.splice(services.indexOf(first.service), 1);
+
+    const restartedContext = startupContext();
+    restartedContext.checkpointProjector = throwingCheckpointProjector();
+    const restarted = await startReplayPremiereProduction({
+      ...restartedContext,
+      privateStateRoot: path.join(root, "private"),
+      servedRoots: [path.join(root, "served")],
+      maxStartupMs: 500,
+    });
+    services.push(restarted.service);
+    expect(restarted.registeredPremiereIds).toEqual([PREMIERE_ID]);
+    expect(restartedContext.runtimeRegistry.get(PREMIERE_ID)).not.toBeNull();
+    expect(restartedContext.httpRegistry.get(PREMIERE_ID)).not.toBeNull();
+  });
+
+  test.each([
+    {
+      mutation: "deletion",
+      operatorCode: "catalog_projection_admission_missing",
+      mutate: async (filePath: string) => fs.unlink(filePath),
+    },
+    {
+      mutation: "replacement",
+      operatorCode: "catalog_projection_admission_replaced",
+      mutate: async (filePath: string) => {
+        await fs.chmod(filePath, 0o600);
+        await fs.writeFile(filePath, "{}\n");
+        await fs.chmod(filePath, 0o400);
+      },
+    },
+  ])(
+    "rejects admission $mutation while startup projects a stale snapshot",
+    async ({ operatorCode, mutate }) => {
+      await writeAdmission(root);
+      const context = startupContext();
+      const projector = context.checkpointProjector;
+      let mutated = false;
+      context.checkpointProjector = {
+        async project(options) {
+          await mutate(admissionPath(root, PREMIERE_ID));
+          mutated = true;
+          return projector.project(options);
+        },
+      };
+
+      const started = await startReplayPremiereProduction({
+        ...context,
+        privateStateRoot: path.join(root, "private"),
+        servedRoots: [path.join(root, "served")],
+      });
+      services.push(started.service);
+
+      expect(mutated).toBe(true);
+      expect(started.registeredPremiereIds).toEqual([]);
+      expect(context.runtimeRegistry.get(PREMIERE_ID)).toBeNull();
+      expect(context.httpRegistry.get(PREMIERE_ID)).toBeNull();
+      expect(started.diagnostics).toEqual([
+        {
+          target: `${PREMIERE_ID}.admission.json`,
+          premiereId: PREMIERE_ID,
+          operatorCode,
+        },
+      ]);
+      expect(
+        await fs.readdir(
+          path.join(root, "private", "catalog-v1", "checkpoint-projections"),
+        ),
+      ).toEqual([]);
+    },
+  );
+
+  test.each([
+    {
+      condition: "corrupt JSON",
+      operatorCode: "catalog_entry_invalid_json",
+      mutate: async (filePath: string, _bytes: Buffer, _root: string) => {
+        await fs.chmod(filePath, 0o600);
+        await fs.writeFile(filePath, "{\n");
+        await fs.chmod(filePath, 0o400);
+      },
+    },
+    {
+      condition: "wrong mode",
+      operatorCode: "catalog_entry_file_contract_invalid",
+      mutate: async (filePath: string) => fs.chmod(filePath, 0o600),
+    },
+    {
+      condition: "symlink",
+      operatorCode: "catalog_entry_name_or_type_invalid",
+      mutate: async (filePath: string, bytes: Buffer, testRoot: string) => {
+        const target = path.join(
+          testRoot,
+          "startup-symlinked-admission-target.json",
+        );
+        await fs.writeFile(target, bytes, { mode: 0o400 });
+        await fs.unlink(filePath);
+        await fs.symlink(target, filePath);
+      },
+    },
+  ])(
+    "contains a projected admission with $condition without failing startup",
+    async ({ operatorCode, mutate }) => {
+      const projected = await writeProjectedAdmission(root);
+      await mutate(projected.admissionPath, projected.admissionBytes, root);
+      const context = startupContext();
+
+      const started = await startReplayPremiereProduction({
+        ...context,
+        privateStateRoot: path.join(root, "private"),
+        servedRoots: [path.join(root, "served")],
+      });
+      services.push(started.service);
+
+      expect(started.registeredPremiereIds).toEqual([]);
+      expect(started.diagnostics).toEqual([
+        {
+          target: `${PREMIERE_ID}.admission.json`,
+          premiereId: PREMIERE_ID,
+          operatorCode,
+        },
+      ]);
+      expect(context.httpRegistry.get(PREMIERE_ID)).toBeNull();
+      expect(context.runtimeRegistry.get(PREMIERE_ID)).toBeNull();
+      expect(await fs.lstat(projected.artifactPath)).toBeDefined();
+    },
+  );
+
+  test("scheduled planned restart registers one exact target without invoking the projector", async () => {
+    vi.useFakeTimers({ now: NOW.getTime() - 120_000 });
+    await writeAdmission(root);
+    const firstContext = startupContext(() => new Date());
+    const first = await startReplayPremiereProduction({
+      ...firstContext,
+      privateStateRoot: path.join(root, "private"),
+      servedRoots: [path.join(root, "served")],
+    });
+    services.push(first.service);
+    expect(
+      firstContext.runtimeRegistry.get(PREMIERE_ID)?.readLifecycleState(),
+    ).toBe("scheduled");
+    await first.service.closeForPlannedRestart();
+    services.splice(services.indexOf(first.service), 1);
+
+    vi.setSystemTime(NOW.getTime() - 119_999);
+    const restartedContext = startupContext(() => new Date());
+    restartedContext.checkpointProjector = throwingCheckpointProjector();
+    const runtimeRegister = vi.spyOn(
+      restartedContext.runtimeRegistry,
+      "register",
+    );
+    const httpRegister = vi.spyOn(restartedContext.httpRegistry, "register");
+    const restartBegan = process.hrtime.bigint();
+    const restarted = await startReplayPremiereProduction({
+      ...restartedContext,
+      privateStateRoot: path.join(root, "private"),
+      servedRoots: [path.join(root, "served")],
+      maxStartupMs: 8_000,
+    });
+    const restartElapsedMs =
+      Number(process.hrtime.bigint() - restartBegan) / 1_000_000;
+    services.push(restarted.service);
+
+    expect(restarted.registeredPremiereIds).toEqual([PREMIERE_ID]);
+    expect(restartElapsedMs).toBeLessThan(8_000);
+    expect(runtimeRegister).toHaveBeenCalledTimes(1);
+    expect(httpRegister).toHaveBeenCalledTimes(1);
+    expect(
+      restartedContext.runtimeRegistry.get(PREMIERE_ID)?.readLifecycleState(),
+    ).toBe("scheduled");
+    await expectHttpManifestState(restartedContext, "scheduled");
+    await restarted.service.close();
+    services.splice(services.indexOf(restarted.service), 1);
+    const events = await readPremiereEvents(root);
+    expect(
+      events.filter(
+        (event) => event.eventType === "premiere_runtime_initialized",
+      ),
+    ).toHaveLength(1);
+    expectOutageLedgerAdjacency(events);
+  });
+
+  test("playing planned restart records one matching recovery and skips projection", async () => {
+    vi.useFakeTimers({ now: NOW.getTime() });
+    await writeAdmission(root);
+    const firstContext = startupContext(() => new Date());
+    const first = await startReplayPremiereProduction({
+      ...firstContext,
+      privateStateRoot: path.join(root, "private"),
+      servedRoots: [path.join(root, "served")],
+    });
+    services.push(first.service);
+    expect(
+      firstContext.runtimeRegistry.get(PREMIERE_ID)?.readLifecycleState(),
+    ).toBe("playing");
+    await first.service.closeForPlannedRestart();
+    services.splice(services.indexOf(first.service), 1);
+
+    vi.setSystemTime(NOW.getTime() + 1);
+    const restartedContext = startupContext(() => new Date());
+    restartedContext.checkpointProjector = throwingCheckpointProjector();
+    const runtimeRegister = vi.spyOn(
+      restartedContext.runtimeRegistry,
+      "register",
+    );
+    const httpRegister = vi.spyOn(restartedContext.httpRegistry, "register");
+    const restartBegan = process.hrtime.bigint();
+    const restarted = await startReplayPremiereProduction({
+      ...restartedContext,
+      privateStateRoot: path.join(root, "private"),
+      servedRoots: [path.join(root, "served")],
+      maxStartupMs: 8_000,
+    });
+    const restartElapsedMs =
+      Number(process.hrtime.bigint() - restartBegan) / 1_000_000;
+    services.push(restarted.service);
+    expect(restarted.registeredPremiereIds).toEqual([PREMIERE_ID]);
+    expect(restartElapsedMs).toBeLessThan(8_000);
+    expect(runtimeRegister).toHaveBeenCalledTimes(1);
+    expect(httpRegister).toHaveBeenCalledTimes(1);
+    await expectHttpManifestState(restartedContext, "playing");
+    await restarted.service.close();
+    services.splice(services.indexOf(restarted.service), 1);
+
+    const events = await readPremiereEvents(root);
+    expect(
+      events.filter(
+        (event) => event.eventType === "premiere_runtime_initialized",
+      ),
+    ).toHaveLength(1);
+    const outageStarts = events.filter(
+      (event) => event.eventType === "premiere_runtime_outage_started",
+    );
+    const outageRecoveries = events.filter(
+      (event) => event.eventType === "premiere_runtime_outage_recovered",
+    );
+    expect(outageStarts).toHaveLength(1);
+    expect(outageRecoveries).toHaveLength(1);
+    expectOutageLedgerAdjacency(events);
+    expect(outageRecoveries[0].idempotencyKey).toMatch(
+      new RegExp(`:${Date.parse(outageStarts[0].occurredAt)}$`),
+    );
+  });
+
+  test.each([
+    ["corrupt", "checkpoint_projection_artifact_invalid_json"],
+    ["mismatched", "checkpoint_projection_artifact_binding_mismatch"],
+    ["symlink", "checkpoint_projection_artifact_file_invalid"],
+    ["oversize", "checkpoint_projection_artifact_file_invalid"],
+  ])("fails closed on a present %s projection artifact", async (mode, code) => {
+    await writeAdmission(root);
+    const firstContext = startupContext();
+    const first = await startReplayPremiereProduction({
+      ...firstContext,
+      privateStateRoot: path.join(root, "private"),
+      servedRoots: [path.join(root, "served")],
+    });
+    services.push(first.service);
+    await first.service.close();
+    services.splice(services.indexOf(first.service), 1);
+
+    const artifactPath = await projectionArtifactPath(root);
+    await fs.chmod(artifactPath, 0o600);
+    if (mode === "corrupt") {
+      await fs.writeFile(artifactPath, "{\n");
+    } else if (mode === "oversize") {
+      await fs.writeFile(artifactPath, Buffer.alloc(64 * 1024 + 1, 1));
+    } else if (mode === "symlink") {
+      const target = path.join(root, "projection-symlink-target");
+      await fs.writeFile(target, "{}\n", { mode: 0o400 });
+      await fs.unlink(artifactPath);
+      await fs.symlink(target, artifactPath);
+    } else {
+      const artifact = JSON.parse(await fs.readFile(artifactPath, "utf8")) as
+        | Record<string, unknown>
+        | undefined;
+      if (artifact === undefined) throw new Error("artifact unavailable");
+      artifact.sourceReplaySha256 = "0".repeat(64);
+      const { artifactHash: _artifactHash, ...preimage } = artifact;
+      artifact.artifactHash = hashReplayPremiereJson(
+        preimage as ReplayPremiereJsonValue,
+      );
+      await fs.writeFile(
+        artifactPath,
+        `${canonicalReplayPremiereJson(artifact as ReplayPremiereJsonValue)}\n`,
+      );
+    }
+    if (mode !== "symlink") await fs.chmod(artifactPath, 0o400);
+
+    const restartedContext = startupContext();
+    restartedContext.checkpointProjector = throwingCheckpointProjector();
+    const restarted = await startReplayPremiereProduction({
+      ...restartedContext,
+      privateStateRoot: path.join(root, "private"),
+      servedRoots: [path.join(root, "served")],
+    });
+    services.push(restarted.service);
+    expect(restarted.registeredPremiereIds).toEqual([]);
+    expect(restarted.diagnostics).toEqual([
+      {
+        target: `${PREMIERE_ID}.admission.json`,
+        premiereId: PREMIERE_ID,
+        operatorCode: code,
+      },
+    ]);
+    expect(restartedContext.runtimeRegistry.get(PREMIERE_ID)).toBeNull();
+    expect(restartedContext.httpRegistry.get(PREMIERE_ID)).toBeNull();
   });
 
   test("ordinary close does not fabricate an outage-start event", async () => {
@@ -2595,6 +2920,38 @@ async function writeAdmission(root: string, origin?: string): Promise<void> {
   }
 }
 
+async function writeProjectedAdmission(root: string): Promise<{
+  admissionPath: string;
+  admissionBytes: Buffer;
+  artifactPath: string;
+}> {
+  const fixture = await verifiedPublicationFixture(root);
+  const catalog = await ReplayPremiereAdmissionCatalog.open({
+    privateStateRoot: path.join(root, "private"),
+    servedRoots: [path.join(root, "served")],
+  });
+  try {
+    const record = await catalog.writeVerifiedAdmission({
+      gate: fixture.gate,
+      verification: fixture.verificationOptions,
+      chunkBuildLimits: CHUNK_LIMITS,
+      collectorLimits: COLLECTOR_LIMITS,
+      checkpointProjector: startupContext().checkpointProjector,
+    });
+    const exactAdmissionPath = admissionPath(root, record.premiereId);
+    return {
+      admissionPath: exactAdmissionPath,
+      admissionBytes: await fs.readFile(exactAdmissionPath),
+      artifactPath: catalog.checkpointProjectionStore.artifactPath(
+        record.premiereId,
+        record.recordHash,
+      ),
+    };
+  } finally {
+    await catalog.close();
+  }
+}
+
 async function writeAdmissionWithChunkLimits(
   root: string,
   chunkLimits: typeof PLAYING_CHUNK_LIMITS,
@@ -2697,6 +3054,80 @@ function startupContext(now: () => Date = () => new Date(NOW)): {
     publicOrigin: ORIGIN,
     clock: { now },
   };
+}
+
+function throwingCheckpointProjector(): ReplayPremiereCheckpointProjector {
+  return {
+    async project() {
+      throw new Error("checkpoint projector must not run");
+    },
+  };
+}
+
+async function projectionArtifactPath(testRoot: string): Promise<string> {
+  const admission = JSON.parse(
+    await fs.readFile(admissionPath(testRoot, PREMIERE_ID), "utf8"),
+  ) as { recordHash: string };
+  return path.join(
+    testRoot,
+    "private",
+    "catalog-v1",
+    "checkpoint-projections",
+    `${PREMIERE_ID}.${admission.recordHash}.checkpoint-projection.json`,
+  );
+}
+
+async function readPremiereEvents(
+  testRoot: string,
+): Promise<StoredReplayPremiereEvent[]> {
+  const store = await ReplayPremiereEventStore.open({
+    privateStateRoot: path.join(testRoot, "private"),
+    servedRoots: [path.join(testRoot, "served")],
+    limits: DEFAULT_REPLAY_PREMIERE_EVENT_STORE_LIMITS,
+  });
+  try {
+    return store.recovered.events.filter(
+      (event) => event.aggregateId === PREMIERE_ID,
+    );
+  } finally {
+    await store.close();
+  }
+}
+
+async function expectHttpManifestState(
+  context: ReturnType<typeof startupContext>,
+  state: "scheduled" | "playing",
+): Promise<void> {
+  await withHttpApp(
+    createReplayPremiereRouter({
+      registry: context.httpRegistry,
+      security: context.security,
+      resolveClientAddress: () => "127.0.0.1",
+    }),
+    async (baseUrl) => {
+      const response = await fetch(
+        `${baseUrl}/api/premieres/${PREMIERE_ID}/manifest`,
+      );
+      expect(response.status).toBe(200);
+      expect(await response.json()).toMatchObject({
+        premiereId: PREMIERE_ID,
+        state,
+      });
+    },
+  );
+}
+
+function expectOutageLedgerAdjacency(
+  events: readonly StoredReplayPremiereEvent[],
+): void {
+  const outageStartIndex = events.findIndex(
+    (event) => event.eventType === "premiere_runtime_outage_started",
+  );
+  const outageRecoveryIndex = events.findIndex(
+    (event) => event.eventType === "premiere_runtime_outage_recovered",
+  );
+  expect(outageStartIndex).toBeGreaterThanOrEqual(0);
+  expect(outageRecoveryIndex).toBe(outageStartIndex + 1);
 }
 
 async function withHttpApp(

@@ -40,6 +40,7 @@ import {
   type ReplayPremiereReminderRequest,
   type ReplayPremiereResultsPredictionView,
   type ReplayPremiereResultsSummaryView,
+  type ReplayPremiereShareManualCopyReason,
   type ReplayPremiereShareRequest,
   type ReplayPremiereWarEventView,
 } from "./ReplayPremiereOverlay";
@@ -79,6 +80,17 @@ const CLIP_POLL_BACKOFF = 1.5;
 const CLIP_POLL_MAX_ATTEMPTS = 20;
 const CLIP_POLL_MAX_ELAPSED_MS = 120_000;
 const CLIP_MAX_BUCKET = 999_999_999;
+const CLIP_ANCHOR_BUCKET_TURNS = 10;
+const CLIP_MIN_ANCHOR_TURN = 50;
+const CLIP_POST_ANCHOR_TURNS = 150;
+
+interface ReplayPremiereShareDeliveryState {
+  attemptId: number;
+  participantId: string;
+  phase: "creating" | "copying" | "copied" | "manual";
+  url: string | null;
+  manualCopyReason: ReplayPremiereShareManualCopyReason | null;
+}
 
 const premiereLifecycleStateSchema = z.enum([
   "draft",
@@ -273,6 +285,13 @@ const incomingMomentSchema = z
     turn: nonNegativeIntegerSchema,
   })
   .strict();
+const clipEligibilitySchema = z
+  .object({
+    generationEnabled: z.boolean(),
+    renderableThroughTurn: nonNegativeIntegerSchema.nullable(),
+    sourceComplete: z.boolean(),
+  })
+  .strict();
 const sessionResponseV1Schema = z
   .object({
     schemaVersion: z.literal(1),
@@ -287,6 +306,7 @@ const sessionResponseV2Schema = sessionResponseV1Schema.extend({
   schemaVersion: z.literal(2),
   reactionSummary: reactionSummarySchema,
   clipsEnabled: z.boolean(),
+  clipEligibility: clipEligibilitySchema,
 });
 const sessionResponseV3Schema = sessionResponseV2Schema.extend({
   schemaVersion: z.literal(3),
@@ -300,7 +320,12 @@ const sessionResponseSchema = z
   ])
   .transform((response) =>
     response.schemaVersion === 1
-      ? { ...response, reactionSummary: null, clipsEnabled: null }
+      ? {
+          ...response,
+          reactionSummary: null,
+          clipsEnabled: null,
+          clipEligibility: null,
+        }
       : response,
   );
 const heartbeatResponseV1Schema = z
@@ -317,6 +342,7 @@ const heartbeatResponseV2Schema = heartbeatResponseV1Schema.extend({
   schemaVersion: z.literal(2),
   reactionSummary: reactionSummarySchema,
   clipsEnabled: z.boolean(),
+  clipEligibility: clipEligibilitySchema,
 });
 const heartbeatResponseV3Schema = heartbeatResponseV2Schema.extend({
   schemaVersion: z.literal(3),
@@ -330,7 +356,12 @@ const heartbeatResponseSchema = z
   ])
   .transform((response) =>
     response.schemaVersion === 1
-      ? { ...response, reactionSummary: null, clipsEnabled: null }
+      ? {
+          ...response,
+          reactionSummary: null,
+          clipsEnabled: null,
+          clipEligibility: null,
+        }
       : response,
   );
 const predictionResponseSchema = z
@@ -365,6 +396,7 @@ const reactionResponseV2Schema = reactionResponseV1Schema.extend({
   schemaVersion: z.literal(2),
   reactionSummary: reactionSummarySchema,
   clipsEnabled: z.boolean(),
+  clipEligibility: clipEligibilitySchema,
 });
 const reactionResponseV3Schema = reactionResponseV2Schema.extend({
   schemaVersion: z.literal(3),
@@ -378,7 +410,12 @@ const reactionResponseSchema = z
   ])
   .transform((response) =>
     response.schemaVersion === 1
-      ? { ...response, reactionSummary: null, clipsEnabled: null }
+      ? {
+          ...response,
+          reactionSummary: null,
+          clipsEnabled: null,
+          clipEligibility: null,
+        }
       : response,
   );
 const shareSchema = z
@@ -419,6 +456,9 @@ export type ReplayPremiereServicePredictionResponse = z.infer<
 >;
 export type ReplayPremiereServiceReactionResponse = z.infer<
   typeof reactionResponseSchema
+>;
+export type ReplayPremiereClipEligibility = z.infer<
+  typeof clipEligibilitySchema
 >;
 export type ReplayPremiereServiceReactionSummary = z.infer<
   typeof reactionSummarySchema
@@ -503,6 +543,7 @@ export class ReplayPremiereServiceClient {
     null;
   private currentReactionParticipantId: string | null = null;
   private clipsEnabled: boolean | null = null;
+  private clipEligibility: ReplayPremiereClipEligibility | null = null;
   private disposed = false;
 
   constructor(private readonly options: ReplayPremiereServiceClientOptions) {
@@ -596,7 +637,7 @@ export class ReplayPremiereServiceClient {
       // must not reuse semantic keys that were accepted for the old viewer.
       this.semanticIdempotencyKeys.clear();
     }
-    this.mergeClipCapability(response.clipsEnabled);
+    this.mergeClipEligibility(response.clipsEnabled, response.clipEligibility);
     return response;
   }
 
@@ -645,7 +686,10 @@ export class ReplayPremiereServiceClient {
         response.reactionSummary,
         response.session.participantId,
       );
-      this.mergeClipCapability(response.clipsEnabled);
+      this.mergeClipEligibility(
+        response.clipsEnabled,
+        response.clipEligibility,
+      );
       this.pendingHeartbeat = null;
       return response;
     } catch (error) {
@@ -736,7 +780,7 @@ export class ReplayPremiereServiceClient {
       response.reactionSummary,
       session.participantId,
     );
-    this.mergeClipCapability(response.clipsEnabled);
+    this.mergeClipEligibility(response.clipsEnabled, response.clipEligibility);
     return response;
   }
 
@@ -1177,7 +1221,10 @@ export class ReplayPremiereServiceClient {
       response.reactionSummary,
       response.schemaVersion,
     );
-    this.assertClipCapabilityBound(response.clipsEnabled);
+    this.assertClipEligibilityBound(
+      response.clipsEnabled,
+      response.clipEligibility,
+    );
     if (
       response.incomingMoment !== null &&
       (session.incomingAttribution === null ||
@@ -1218,7 +1265,10 @@ export class ReplayPremiereServiceClient {
       response.reactionSummary,
       response.schemaVersion,
     );
-    this.assertClipCapabilityBound(response.clipsEnabled);
+    this.assertClipEligibilityBound(
+      response.clipsEnabled,
+      response.clipEligibility,
+    );
   }
 
   private assertPredictionResponseBound(
@@ -1280,7 +1330,10 @@ export class ReplayPremiereServiceClient {
       response.schemaVersion,
     );
     if (compareWithCurrent) {
-      this.assertClipCapabilityBound(response.clipsEnabled);
+      this.assertClipEligibilityBound(
+        response.clipsEnabled,
+        response.clipEligibility,
+      );
     }
     if (
       response.reactionSummary !== null &&
@@ -1435,15 +1488,36 @@ export class ReplayPremiereServiceClient {
     // Equal and totally ordered older snapshots are safe no-ops.
   }
 
-  private assertClipCapabilityBound(clipsEnabled: boolean | null): void {
-    if (clipsEnabled === null) return;
-    if (this.clipsEnabled !== null && clipsEnabled !== this.clipsEnabled) {
+  private assertClipEligibilityBound(
+    clipsEnabled: boolean | null,
+    eligibility: ReplayPremiereClipEligibility | null,
+  ): void {
+    if (clipsEnabled === null && eligibility === null) return;
+    if (
+      clipsEnabled === null ||
+      eligibility === null ||
+      clipsEnabled !== eligibility.generationEnabled ||
+      (this.clipsEnabled !== null && clipsEnabled !== this.clipsEnabled)
+    ) {
       throw serviceError("invalid_response");
     }
   }
 
-  private mergeClipCapability(clipsEnabled: boolean | null): void {
+  private mergeClipEligibility(
+    clipsEnabled: boolean | null,
+    eligibility: ReplayPremiereClipEligibility | null,
+  ): void {
+    this.assertClipEligibilityBound(clipsEnabled, eligibility);
+    if (clipsEnabled === null || eligibility === null) {
+      this.clipsEnabled = null;
+      this.clipEligibility = null;
+      return;
+    }
     this.clipsEnabled = clipsEnabled;
+    this.clipEligibility = mergeClipEligibility(
+      this.clipEligibility,
+      eligibility,
+    );
   }
 
   private assertShareResponseBound(
@@ -1732,8 +1806,14 @@ export class ReplayPremiereRuntimeController {
     sequence: number;
     turn: number;
   } | null = null;
+  /** Memory-only delivery state for a bound share URL; never survives identity rotation. */
+  private shareDelivery: ReplayPremiereShareDeliveryState | null = null;
+  /** Invalidates older share/copy completions when another attempt or identity wins. */
+  private shareAttemptId = 0;
   /** Server-proven clip capability; null/false both fail closed in the UI. */
   private clipsEnabled: boolean | null = null;
+  /** Dynamic immutable-source/range proof from the v2/v3 interaction contract. */
+  private clipEligibility: ReplayPremiereClipEligibility | null = null;
   private lastMarkConfirmation: {
     kind: ReplayPremiereMarkerKind;
     turn: number;
@@ -1816,7 +1896,9 @@ export class ReplayPremiereRuntimeController {
     this.windowRef = options.dependencies?.windowRef ?? window;
     this.overlayFactory =
       options.dependencies?.overlayFactory ?? mountReplayPremiereOverlay;
-    this.copyText = options.dependencies?.copyText ?? defaultCopyText;
+    this.copyText =
+      options.dependencies?.copyText ??
+      ((text) => defaultCopyText(text, this.windowRef.navigator));
     this.downloadReminder =
       options.dependencies?.downloadReminder ??
       ((request) => defaultDownloadReminder(request, this.documentRef));
@@ -2498,7 +2580,12 @@ export class ReplayPremiereRuntimeController {
     ) {
       return;
     }
-    if (!this.acceptClipCapability(response.clipsEnabled)) {
+    if (
+      !this.acceptClipEligibility(
+        response.clipsEnabled,
+        response.clipEligibility,
+      )
+    ) {
       return;
     }
     this.servicePremiereState = response.premiereState;
@@ -2640,6 +2727,8 @@ export class ReplayPremiereRuntimeController {
     this.ownMarkCounts = {};
     this.lastAcceptedReaction = null;
     this.lastMarkConfirmation = null;
+    this.shareAttemptId += 1;
+    this.shareDelivery = null;
   }
 
   private applyOwnReactionAnchor(
@@ -2658,18 +2747,31 @@ export class ReplayPremiereRuntimeController {
     this.lastMarkConfirmation = { kind: anchor.kind, turn: anchor.turn };
   }
 
-  private acceptClipCapability(clipsEnabled: boolean | null): boolean {
+  private acceptClipEligibility(
+    clipsEnabled: boolean | null,
+    eligibility: ReplayPremiereClipEligibility | null,
+  ): boolean {
     // Legacy v1 communicates no capability. Invalidate a cached value so a
     // mixed-route downgrade cannot leave unsupported clip controls exposed.
-    if (clipsEnabled === null) {
+    if (clipsEnabled === null && eligibility === null) {
       this.clipsEnabled = null;
+      this.clipEligibility = null;
       return true;
     }
-    if (this.clipsEnabled !== null && clipsEnabled !== this.clipsEnabled) {
+    if (
+      clipsEnabled === null ||
+      eligibility === null ||
+      clipsEnabled !== eligibility.generationEnabled ||
+      (this.clipsEnabled !== null && clipsEnabled !== this.clipsEnabled)
+    ) {
       this.latchFailure("integrity_failure");
       return false;
     }
     this.clipsEnabled = clipsEnabled;
+    this.clipEligibility = mergeClipEligibility(
+      this.clipEligibility,
+      eligibility,
+    );
     return true;
   }
 
@@ -2977,7 +3079,12 @@ export class ReplayPremiereRuntimeController {
         ) {
           throw serviceError("invalid_response");
         }
-        if (!this.acceptClipCapability(response.clipsEnabled)) {
+        if (
+          !this.acceptClipEligibility(
+            response.clipsEnabled,
+            response.clipEligibility,
+          )
+        ) {
           throw serviceError("invalid_response");
         }
         if (response.reactionSummary === null && !response.idempotent) {
@@ -3017,20 +3124,105 @@ export class ReplayPremiereRuntimeController {
     if (request.sequence > this.observedSequence()) {
       throw serviceError("request_rejected");
     }
+    const participantId = this.service.session()?.participantId;
+    if (participantId === undefined) {
+      throw serviceError("session_required");
+    }
     const sequence = request.sequence;
     const sourceReactionId = request.sourceReactionId ?? null;
-    const response = await this.strictInteractionWrite(() =>
-      this.service.createShare({
-        sequence,
-        sourceReactionId,
-      }),
-    );
+    const attemptId = ++this.shareAttemptId;
+    this.shareDelivery = {
+      attemptId,
+      participantId,
+      phase: "creating",
+      url: null,
+      manualCopyReason: null,
+    };
+    // Preserve safeRun's disabled state across structural hydrates while the
+    // server write and clipboard delivery are in flight.
+    this.hydrateOverlay();
+    let response: ReplayPremiereServiceShareResponse;
+    try {
+      response = await this.strictInteractionWrite(() =>
+        this.service.createShare({
+          sequence,
+          sourceReactionId,
+        }),
+      );
+    } catch (error) {
+      if (this.shareDelivery?.attemptId === attemptId) {
+        this.shareDelivery = null;
+        this.hydrateOverlay();
+      }
+      throw error;
+    }
     if (
+      response.share.createdByParticipantId !== participantId ||
       !isSafeShareUrl(response.url, this.options.premiereId, this.windowRef)
     ) {
+      if (this.shareDelivery?.attemptId === attemptId) {
+        this.shareDelivery = null;
+        this.hydrateOverlay();
+      }
       throw serviceError("invalid_response");
     }
-    await this.copyText(response.url);
+    // A response can be valid for the session that initiated it but stale for
+    // the recovered session now on screen. Never copy or expose that old
+    // participant's attribution URL.
+    if (
+      this.shareDelivery?.attemptId !== attemptId ||
+      this.service.session()?.participantId !== participantId
+    ) {
+      if (this.shareDelivery?.attemptId === attemptId) {
+        this.shareDelivery = null;
+        this.hydrateOverlay();
+      }
+      return;
+    }
+    this.shareDelivery = {
+      attemptId,
+      participantId,
+      phase: "copying",
+      url: response.url,
+      manualCopyReason: null,
+    };
+    try {
+      await this.copyText(response.url);
+    } catch (error) {
+      if (
+        this.shareDelivery?.attemptId === attemptId &&
+        this.service.session()?.participantId === participantId
+      ) {
+        this.shareDelivery = {
+          attemptId,
+          participantId,
+          phase: "manual",
+          url: response.url,
+          manualCopyReason:
+            error instanceof ReplayPremiereClipboardUnavailableError
+              ? "clipboard_unavailable"
+              : "clipboard_rejected",
+        };
+        this.hydrateOverlay();
+      }
+      // The share is already durably created and its validated URL remains
+      // usable. Clipboard delivery failure is therefore a handled UI state,
+      // not a failed backend action and not a reason to repeat createShare.
+      return;
+    }
+    if (
+      this.shareDelivery?.attemptId === attemptId &&
+      this.service.session()?.participantId === participantId
+    ) {
+      this.shareDelivery = {
+        attemptId,
+        participantId,
+        phase: "copied",
+        url: response.url,
+        manualCopyReason: null,
+      };
+      this.hydrateOverlay();
+    }
   }
 
   private async copyCaption(
@@ -3072,10 +3264,10 @@ export class ReplayPremiereRuntimeController {
 
   /**
    * Request a downloadable clip for the moment currently on screen. Only the
-   * `revealed` lifecycle admits a clip request (archived is server-410'd and
-   * the interaction session is already disposed). Failures surface on the clip
-   * status line — a clip is a non-authoritative cache, so a bad clip response
-   * never latches a page-level integrity failure.
+   * server-proven immutable/released range admits the anchor; lifecycle labels
+   * do not. Archived Premiere pages use the replay-scoped league endpoint and
+   * never need this interaction-session client. Failures surface on the clip
+   * status line because a clip is a non-authoritative cache.
    */
   private async requestClip(request: ReplayPremiereClipRequest): Promise<void> {
     if (request.premiereId !== this.options.premiereId) {
@@ -3085,20 +3277,16 @@ export class ReplayPremiereRuntimeController {
       throw serviceError("request_rejected");
     }
     this.assertInteractionWriteAllowed();
-    if (
-      this.clipsEnabled !== true ||
-      this.currentNetworkState() !== "revealed"
-    ) {
+    if (this.clipsEnabled !== true) {
       throw serviceError("request_rejected");
     }
-    const frame = this.latestFrame;
-    if (frame === null || frame.sequence === null) {
+    const anchor = this.currentClipAnchor();
+    if (anchor === null) {
       throw serviceError("request_rejected");
     }
     // Anchor on the runtime's own observed frame so sequence and turn are a
     // consistent pair (the server cross-checks turn against the released
     // context for the sequence).
-    const anchor = { sequence: frame.sequence, turn: frame.turnNumber };
     this.clearClipPoll();
     this.clipStatus = "preparing";
     this.clipReady = null;
@@ -3112,6 +3300,18 @@ export class ReplayPremiereRuntimeController {
     }
     if (this.disposed || this.terminalFailure !== null) return;
     this.applyClipStatus(status);
+  }
+
+  private currentClipAnchor(): { sequence: number; turn: number } | null {
+    const frame = this.latestFrame;
+    if (
+      frame === null ||
+      frame.sequence === null ||
+      !isPremiereClipAnchorEligible(frame.turnNumber, this.clipEligibility)
+    ) {
+      return null;
+    }
+    return { sequence: frame.sequence, turn: frame.turnNumber };
   }
 
   private async copyClipText(
@@ -3195,12 +3395,10 @@ export class ReplayPremiereRuntimeController {
     ) {
       return;
     }
-    // Leaving the revealed window (archived/failed) disposes the session and
-    // ends clip availability; stop polling.
-    if (
-      this.currentNetworkState() !== "revealed" ||
-      this.isReadOnlyLifecycle()
-    ) {
+    // Terminal reclamation disposes the live service. Playing/checkpoint/
+    // revealed transitions do not: a render admitted from a proven safe range
+    // keeps polling through those presentation-state changes.
+    if (this.isReadOnlyLifecycle()) {
       this.clearClipPoll();
       return;
     }
@@ -3367,6 +3565,24 @@ export class ReplayPremiereRuntimeController {
         : null;
     const currentTurn = this.latestFrame?.turnNumber ?? null;
     const shareTurn = this.lastAcceptedReaction?.turn ?? currentTurn;
+    const currentParticipantId = this.service.session()?.participantId ?? null;
+    const manualShareDelivery =
+      this.shareDelivery?.phase === "manual" &&
+      this.shareDelivery.participantId === currentParticipantId
+        ? this.shareDelivery
+        : null;
+    const shareWritePending =
+      this.shareDelivery?.participantId === currentParticipantId &&
+      (this.shareDelivery.phase === "creating" ||
+        this.shareDelivery.phase === "copying");
+    const currentClipAnchor = this.currentClipAnchor();
+    const clipContractEnabled =
+      this.clipsEnabled === true &&
+      this.clipEligibility?.generationEnabled === true &&
+      this.clipGenerationEnabled;
+    const clipVisible =
+      clipContractEnabled &&
+      (currentClipAnchor !== null || this.clipStatus !== "idle");
     const projectedActiveCheckpointId =
       manifest?.activeCheckpoint?.id ??
       this.serviceCheckpoints?.find(
@@ -3429,7 +3645,8 @@ export class ReplayPremiereRuntimeController {
       markerParticipantCount: this.reactionSummary?.distinctParticipants,
       markerAggregateFresh: this.reactionSummaryFresh,
       clipMarkerAvailable:
-        this.clipsEnabled === true && this.clipGenerationEnabled,
+        this.clipEligibility?.generationEnabled === true &&
+        this.clipGenerationEnabled,
       markerConfirmation: this.lastMarkConfirmation,
       headlineEvent: this.headlineEvent,
       markerPolicySeatId: null,
@@ -3439,6 +3656,8 @@ export class ReplayPremiereRuntimeController {
         sourceReactionId: this.lastAcceptedReaction?.id ?? null,
         sourceReactionSequence: this.lastAcceptedReaction?.sequence ?? null,
         sourceReactionTurn: this.lastAcceptedReaction?.turn ?? null,
+        manualCopyUrl: manualShareDelivery?.url ?? null,
+        manualCopyReason: manualShareDelivery?.manualCopyReason ?? null,
         suggestedCaption:
           shareTurn === null
             ? translateText("replay_premiere.share_caption_premiere", {
@@ -3466,24 +3685,21 @@ export class ReplayPremiereRuntimeController {
       buffering: this.buffering,
       canPredict: this.interactionReady && !this.isReadOnlyLifecycle(),
       canMark: this.interactionReady && !this.isReadOnlyLifecycle(),
-      canShare: this.interactionReady && !this.isReadOnlyLifecycle(),
+      canShare:
+        this.interactionReady &&
+        !this.isReadOnlyLifecycle() &&
+        !shareWritePending,
       canExportCounterChallenge:
         displayReveal !== null &&
         networkState !== "failed" &&
         networkState !== "cancelled",
-      // Live clip affordances require both the interaction protocol's
-      // server-proven support and this process's constructed generation
-      // service. Durable archived clips use the separate archive view.
-      clip:
-        this.clipsEnabled === true &&
-        this.clipGenerationEnabled &&
-        (state === "revealed" || state === "archived")
-          ? this.clipView()
-          : null,
+      // Visibility is replay/range-scoped, not lifecycle-scoped. The process
+      // master flag and the interaction contract must both prove generation,
+      // and an idle control appears only for a fully renderable current range.
+      clip: clipVisible ? this.clipView() : null,
       canRequestClip:
-        this.clipsEnabled === true &&
-        this.clipGenerationEnabled &&
-        state === "revealed" &&
+        clipContractEnabled &&
+        currentClipAnchor !== null &&
         this.interactionReady &&
         !this.isReadOnlyLifecycle(),
     };
@@ -3879,6 +4095,52 @@ function hasOutcomeProjection(
   return checkpoints.some(
     (checkpoint) =>
       checkpoint.resolution !== null || checkpoint.crowdAccuracy !== null,
+  );
+}
+
+function mergeClipEligibility(
+  current: ReplayPremiereClipEligibility | null,
+  next: ReplayPremiereClipEligibility,
+): ReplayPremiereClipEligibility {
+  if (current === null) return { ...next };
+  const currentTurn = current.renderableThroughTurn;
+  const nextTurn = next.renderableThroughTurn;
+  return {
+    generationEnabled: next.generationEnabled,
+    renderableThroughTurn:
+      currentTurn === null
+        ? nextTurn
+        : nextTurn === null
+          ? currentTurn
+          : Math.max(currentTurn, nextTurn),
+    // Source completeness is immutable once observed. An older in-flight
+    // interaction response may still report false after a terminal response.
+    sourceComplete: current.sourceComplete || next.sourceComplete,
+  };
+}
+
+function isPremiereClipAnchorEligible(
+  anchorTurn: number,
+  eligibility: ReplayPremiereClipEligibility | null,
+): boolean {
+  if (
+    eligibility === null ||
+    eligibility.generationEnabled !== true ||
+    eligibility.renderableThroughTurn === null ||
+    !Number.isSafeInteger(anchorTurn) ||
+    anchorTurn < CLIP_MIN_ANCHOR_TURN
+  ) {
+    return false;
+  }
+  const representativeAnchor =
+    Math.floor(anchorTurn / CLIP_ANCHOR_BUCKET_TURNS) *
+      CLIP_ANCHOR_BUCKET_TURNS +
+    Math.floor(CLIP_ANCHOR_BUCKET_TURNS / 2);
+  if (representativeAnchor > eligibility.renderableThroughTurn) return false;
+  return (
+    eligibility.sourceComplete ||
+    representativeAnchor + CLIP_POST_ANCHOR_TURNS <=
+      eligibility.renderableThroughTurn
   );
 }
 
@@ -4542,16 +4804,34 @@ function serviceErrorWithPhase(
     : serviceError("invalid_configuration", null, null, phase);
 }
 
-async function defaultCopyText(text: string): Promise<void> {
+class ReplayPremiereClipboardUnavailableError extends Error {
+  constructor() {
+    super("clipboard_unavailable");
+    this.name = "ReplayPremiereClipboardUnavailableError";
+  }
+}
+
+async function defaultCopyText(
+  text: string,
+  navigatorRef: Navigator = navigator,
+): Promise<void> {
   if (
     typeof text !== "string" ||
     text.length === 0 ||
-    text.length > MAX_CLIPBOARD_TEXT_LENGTH ||
-    navigator.clipboard === undefined
+    text.length > MAX_CLIPBOARD_TEXT_LENGTH
   ) {
     throw serviceError("invalid_configuration");
   }
-  await navigator.clipboard.writeText(text);
+  let clipboard: Clipboard | undefined;
+  try {
+    clipboard = navigatorRef.clipboard;
+  } catch {
+    throw new ReplayPremiereClipboardUnavailableError();
+  }
+  if (clipboard === undefined || typeof clipboard.writeText !== "function") {
+    throw new ReplayPremiereClipboardUnavailableError();
+  }
+  await clipboard.writeText(text);
 }
 
 function defaultDownloadReminder(
