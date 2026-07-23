@@ -65,7 +65,7 @@ const JSON_CONTENT_TYPE_PATTERN = /^(?:application\/json|[^;]+\+json)(?:;|$)/i;
 const MAX_INTERACTION_RESPONSE_BYTES = 256 * 1024;
 const INTERACTION_REQUEST_TIMEOUT_MS = 2_000;
 const INTERACTION_CONTRACT_HEADER = "X-ProxyWar-Premiere-Interactions";
-const INTERACTION_CONTRACT_VERSION = "3";
+const INTERACTION_CONTRACT_VERSION = "4";
 const HEARTBEAT_INTERVAL_MS = 10_000;
 const INTERACTION_RECOVERY_RETRY_MS = 1_000;
 const MAX_CLIPBOARD_TEXT_LENGTH = 16_384;
@@ -306,28 +306,44 @@ const sessionResponseV2Schema = sessionResponseV1Schema.extend({
   schemaVersion: z.literal(2),
   reactionSummary: reactionSummarySchema,
   clipsEnabled: z.boolean(),
-  clipEligibility: clipEligibilitySchema,
+  // Accept the short-lived pre-v4 additive shape so a newly loaded client can
+  // recover through either side of the corrective rolling deployment.
+  clipEligibility: clipEligibilitySchema.optional(),
 });
 const sessionResponseV3Schema = sessionResponseV2Schema.extend({
   schemaVersion: z.literal(3),
   latestOwnReaction: ownReactionAnchorSchema.nullable(),
+});
+const sessionResponseV4Schema = sessionResponseV3Schema.extend({
+  schemaVersion: z.literal(4),
+  clipEligibility: clipEligibilitySchema,
 });
 const sessionResponseSchema = z
   .discriminatedUnion("schemaVersion", [
     sessionResponseV1Schema,
     sessionResponseV2Schema,
     sessionResponseV3Schema,
+    sessionResponseV4Schema,
   ])
-  .transform((response) =>
-    response.schemaVersion === 1
-      ? {
+  .transform((response) => {
+    switch (response.schemaVersion) {
+      case 1:
+        return {
           ...response,
           reactionSummary: null,
           clipsEnabled: null,
           clipEligibility: null,
-        }
-      : response,
-  );
+        };
+      case 2:
+      case 3:
+        return {
+          ...response,
+          clipEligibility: response.clipEligibility ?? null,
+        };
+      case 4:
+        return response;
+    }
+  });
 const heartbeatResponseV1Schema = z
   .object({
     schemaVersion: z.literal(1),
@@ -342,28 +358,42 @@ const heartbeatResponseV2Schema = heartbeatResponseV1Schema.extend({
   schemaVersion: z.literal(2),
   reactionSummary: reactionSummarySchema,
   clipsEnabled: z.boolean(),
-  clipEligibility: clipEligibilitySchema,
+  clipEligibility: clipEligibilitySchema.optional(),
 });
 const heartbeatResponseV3Schema = heartbeatResponseV2Schema.extend({
   schemaVersion: z.literal(3),
   latestOwnReaction: ownReactionAnchorSchema.nullable(),
+});
+const heartbeatResponseV4Schema = heartbeatResponseV3Schema.extend({
+  schemaVersion: z.literal(4),
+  clipEligibility: clipEligibilitySchema,
 });
 const heartbeatResponseSchema = z
   .discriminatedUnion("schemaVersion", [
     heartbeatResponseV1Schema,
     heartbeatResponseV2Schema,
     heartbeatResponseV3Schema,
+    heartbeatResponseV4Schema,
   ])
-  .transform((response) =>
-    response.schemaVersion === 1
-      ? {
+  .transform((response) => {
+    switch (response.schemaVersion) {
+      case 1:
+        return {
           ...response,
           reactionSummary: null,
           clipsEnabled: null,
           clipEligibility: null,
-        }
-      : response,
-  );
+        };
+      case 2:
+      case 3:
+        return {
+          ...response,
+          clipEligibility: response.clipEligibility ?? null,
+        };
+      case 4:
+        return response;
+    }
+  });
 const predictionResponseSchema = z
   .object({
     schemaVersion: z.literal(1),
@@ -396,28 +426,42 @@ const reactionResponseV2Schema = reactionResponseV1Schema.extend({
   schemaVersion: z.literal(2),
   reactionSummary: reactionSummarySchema,
   clipsEnabled: z.boolean(),
-  clipEligibility: clipEligibilitySchema,
+  clipEligibility: clipEligibilitySchema.optional(),
 });
 const reactionResponseV3Schema = reactionResponseV2Schema.extend({
   schemaVersion: z.literal(3),
   latestOwnReaction: ownReactionAnchorSchema.nullable(),
+});
+const reactionResponseV4Schema = reactionResponseV3Schema.extend({
+  schemaVersion: z.literal(4),
+  clipEligibility: clipEligibilitySchema,
 });
 const reactionResponseSchema = z
   .discriminatedUnion("schemaVersion", [
     reactionResponseV1Schema,
     reactionResponseV2Schema,
     reactionResponseV3Schema,
+    reactionResponseV4Schema,
   ])
-  .transform((response) =>
-    response.schemaVersion === 1
-      ? {
+  .transform((response) => {
+    switch (response.schemaVersion) {
+      case 1:
+        return {
           ...response,
           reactionSummary: null,
           clipsEnabled: null,
           clipEligibility: null,
-        }
-      : response,
-  );
+        };
+      case 2:
+      case 3:
+        return {
+          ...response,
+          clipEligibility: response.clipEligibility ?? null,
+        };
+      case 4:
+        return response;
+    }
+  });
 const shareSchema = z
   .object({
     id: z.string().regex(SHARE_ID_PATTERN),
@@ -1217,7 +1261,9 @@ export class ReplayPremiereServiceClient {
       session.participantId,
     );
     this.assertOwnReactionAnchorBound(
-      response.schemaVersion === 3 ? response.latestOwnReaction : null,
+      response.schemaVersion === 3 || response.schemaVersion === 4
+        ? response.latestOwnReaction
+        : null,
       response.reactionSummary,
       response.schemaVersion,
     );
@@ -1261,7 +1307,9 @@ export class ReplayPremiereServiceClient {
       current.participantId,
     );
     this.assertOwnReactionAnchorBound(
-      response.schemaVersion === 3 ? response.latestOwnReaction : null,
+      response.schemaVersion === 3 || response.schemaVersion === 4
+        ? response.latestOwnReaction
+        : null,
       response.reactionSummary,
       response.schemaVersion,
     );
@@ -1325,7 +1373,9 @@ export class ReplayPremiereServiceClient {
       compareWithCurrent,
     );
     this.assertOwnReactionAnchorBound(
-      response.schemaVersion === 3 ? response.latestOwnReaction : null,
+      response.schemaVersion === 3 || response.schemaVersion === 4
+        ? response.latestOwnReaction
+        : null,
       response.reactionSummary,
       response.schemaVersion,
     );
@@ -1382,12 +1432,12 @@ export class ReplayPremiereServiceClient {
   private assertOwnReactionAnchorBound(
     anchor: ReplayPremiereServiceOwnReactionAnchor | null,
     summary: ReplayPremiereServiceReactionSummary | null,
-    schemaVersion: 1 | 2 | 3,
+    schemaVersion: 1 | 2 | 3 | 4,
   ): void {
     // v1/v2 carry no private anchor. Callers normalize their omission to null,
-    // but only v3 null is authoritative evidence that this participant has
-    // never submitted a mark.
-    if (schemaVersion !== 3) {
+    // but v3+ null is authoritative evidence that this participant has never
+    // submitted a mark.
+    if (schemaVersion < 3) {
       if (anchor !== null) throw serviceError("invalid_response");
       return;
     }
@@ -1492,10 +1542,21 @@ export class ReplayPremiereServiceClient {
     clipsEnabled: boolean | null,
     eligibility: ReplayPremiereClipEligibility | null,
   ): void {
-    if (clipsEnabled === null && eligibility === null) return;
+    // v1 has neither field; v2/v3 carry only the legacy boolean. The v4 range
+    // proof is required before any clip control is exposed, but an exact
+    // legacy response remains valid during a rolling server transition.
+    if (eligibility === null) {
+      if (
+        clipsEnabled !== null &&
+        this.clipsEnabled !== null &&
+        clipsEnabled !== this.clipsEnabled
+      ) {
+        throw serviceError("invalid_response");
+      }
+      return;
+    }
     if (
       clipsEnabled === null ||
-      eligibility === null ||
       clipsEnabled !== eligibility.generationEnabled ||
       (this.clipsEnabled !== null && clipsEnabled !== this.clipsEnabled)
     ) {
@@ -1508,8 +1569,8 @@ export class ReplayPremiereServiceClient {
     eligibility: ReplayPremiereClipEligibility | null,
   ): void {
     this.assertClipEligibilityBound(clipsEnabled, eligibility);
-    if (clipsEnabled === null || eligibility === null) {
-      this.clipsEnabled = null;
+    if (eligibility === null) {
+      this.clipsEnabled = clipsEnabled;
       this.clipEligibility = null;
       return;
     }
@@ -1812,7 +1873,7 @@ export class ReplayPremiereRuntimeController {
   private shareAttemptId = 0;
   /** Server-proven clip capability; null/false both fail closed in the UI. */
   private clipsEnabled: boolean | null = null;
-  /** Dynamic immutable-source/range proof from the v2/v3 interaction contract. */
+  /** Dynamic immutable-source/range proof from the v4 interaction contract. */
   private clipEligibility: ReplayPremiereClipEligibility | null = null;
   private lastMarkConfirmation: {
     kind: ReplayPremiereMarkerKind;
@@ -2574,7 +2635,9 @@ export class ReplayPremiereRuntimeController {
         {
           schemaVersion: response.schemaVersion,
           latestOwnReaction:
-            response.schemaVersion === 3 ? response.latestOwnReaction : null,
+            response.schemaVersion === 3 || response.schemaVersion === 4
+              ? response.latestOwnReaction
+              : null,
         },
       )
     ) {
@@ -2609,7 +2672,7 @@ export class ReplayPremiereRuntimeController {
       summaryAtRequest: ReplayPremiereServiceReactionSummary | null;
     },
     privateProjection?: {
-      schemaVersion: 1 | 2 | 3;
+      schemaVersion: 1 | 2 | 3 | 4;
       latestOwnReaction: ReplayPremiereServiceOwnReactionAnchor | null;
     },
   ): boolean {
@@ -2640,7 +2703,8 @@ export class ReplayPremiereRuntimeController {
       return false;
     }
     if (
-      privateProjection?.schemaVersion === 3 &&
+      privateProjection !== undefined &&
+      privateProjection.schemaVersion >= 3 &&
       !isConsistentOwnReactionAnchor(
         privateProjection.latestOwnReaction,
         summary,
@@ -2701,7 +2765,8 @@ export class ReplayPremiereRuntimeController {
     }
     this.reactionSummaryParticipantId = participantId;
     if (
-      privateProjection?.schemaVersion === 3 &&
+      privateProjection !== undefined &&
+      privateProjection.schemaVersion >= 3 &&
       (identityChanged || participantOrder !== "older")
     ) {
       const nextAnchor = privateProjection.latestOwnReaction;
@@ -2751,16 +2816,24 @@ export class ReplayPremiereRuntimeController {
     clipsEnabled: boolean | null,
     eligibility: ReplayPremiereClipEligibility | null,
   ): boolean {
-    // Legacy v1 communicates no capability. Invalidate a cached value so a
-    // mixed-route downgrade cannot leave unsupported clip controls exposed.
-    if (clipsEnabled === null && eligibility === null) {
-      this.clipsEnabled = null;
+    // v1 has neither field; v2/v3 carry only the legacy capability boolean.
+    // Clear the v4 range proof on either downgrade so unsupported clip
+    // controls cannot remain exposed while replay and reactions continue.
+    if (eligibility === null) {
+      if (
+        clipsEnabled !== null &&
+        this.clipsEnabled !== null &&
+        clipsEnabled !== this.clipsEnabled
+      ) {
+        this.latchFailure("integrity_failure");
+        return false;
+      }
+      this.clipsEnabled = clipsEnabled;
       this.clipEligibility = null;
       return true;
     }
     if (
       clipsEnabled === null ||
-      eligibility === null ||
       clipsEnabled !== eligibility.generationEnabled ||
       (this.clipsEnabled !== null && clipsEnabled !== this.clipsEnabled)
     ) {
@@ -3071,7 +3144,7 @@ export class ReplayPremiereRuntimeController {
             {
               schemaVersion: response.schemaVersion,
               latestOwnReaction:
-                response.schemaVersion === 3
+                response.schemaVersion === 3 || response.schemaVersion === 4
                   ? response.latestOwnReaction
                   : null,
             },
@@ -3091,7 +3164,7 @@ export class ReplayPremiereRuntimeController {
           this.ownMarkCounts[request.kind] =
             (this.ownMarkCounts[request.kind] ?? 0) + 1;
         }
-        if (response.schemaVersion !== 3) {
+        if (response.schemaVersion < 3) {
           this.lastAcceptedReaction = {
             id: response.reaction.id,
             sequence: response.reaction.sequence,

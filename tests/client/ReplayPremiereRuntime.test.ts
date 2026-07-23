@@ -561,12 +561,12 @@ describe("ReplayPremiereRuntimeController", () => {
     harness.runtime.dispose();
   });
 
-  it("hydrates an accepted v3 mark and share anchor immediately", async () => {
-    const accepted = reactionResponseV3();
+  it("hydrates an accepted v4 mark and share anchor immediately", async () => {
+    const accepted = reactionResponseV4();
     const harness = runtimeHarness({
       state: "playing",
       service: {
-        startSession: async () => sessionResponseV3("playing"),
+        startSession: async () => sessionResponseV4("playing"),
         submitReaction: async () => accepted,
       },
     });
@@ -594,10 +594,10 @@ describe("ReplayPremiereRuntimeController", () => {
     harness.runtime.dispose();
   });
 
-  it("keeps a newer v3 private anchor when an older reaction response lands", async () => {
+  it("keeps a newer v4 private anchor when an older reaction response lands", async () => {
     vi.useFakeTimers();
     const pendingReaction = deferred<ReplayPremiereServiceReactionResponse>();
-    const newerHeartbeat = heartbeatResponseV3("playing");
+    const newerHeartbeat = heartbeatResponseV4("playing");
     newerHeartbeat.reactionSummary = reactionSummaryWith("smart", 1);
     newerHeartbeat.reactionSummary.totalReactions = 2;
     newerHeartbeat.reactionSummary.byKind.betrayal = 1;
@@ -611,7 +611,7 @@ describe("ReplayPremiereRuntimeController", () => {
     const harness = runtimeHarness({
       state: "playing",
       service: {
-        startSession: async () => sessionResponseV3("playing"),
+        startSession: async () => sessionResponseV4("playing"),
         submitReaction: () => pendingReaction.promise,
         heartbeat: async () => newerHeartbeat,
       },
@@ -638,7 +638,7 @@ describe("ReplayPremiereRuntimeController", () => {
       failureCode: null,
     });
 
-    pendingReaction.resolve(reactionResponseV3());
+    pendingReaction.resolve(reactionResponseV4());
     await markerWrite;
     expect(harness.models.at(-1)).toMatchObject({
       markerCounts: { smart: 1, betrayal: 1 },
@@ -1168,7 +1168,7 @@ describe("ReplayPremiereRuntimeController", () => {
       sequence: 0,
       turn: 100,
     };
-    const sameParticipant = sessionResponseV3("playing");
+    const sameParticipant = sessionResponseV4("playing");
     sameParticipant.reactionSummary = reactionSummaryWith("smart", 1);
     sameParticipant.latestOwnReaction = anchor;
     const createShare = vi.fn(
@@ -1219,7 +1219,7 @@ describe("ReplayPremiereRuntimeController", () => {
     expect(restored.models.at(-1)?.share?.manualCopyUrl).toBeNull();
     restored.runtime.dispose();
 
-    const otherParticipant = sessionResponseV3("playing");
+    const otherParticipant = sessionResponseV4("playing");
     otherParticipant.session = viewerSession({
       id: OTHER_SESSION_ID,
       participantId: OTHER_PARTICIPANT_ID,
@@ -2922,13 +2922,69 @@ describe("ReplayPremiereServiceClient", () => {
     for (const [, request] of fetchMock.mock.calls) {
       expect(
         new Headers(request?.headers).get("x-proxywar-premiere-interactions"),
-      ).toBe("3");
+      ).toBe("4");
     }
     client.dispose();
   });
 
-  it("rejects a v3 private anchor not proven by the requesting participant's counts", async () => {
-    const leaked = sessionResponseV3("playing");
+  it("accepts frozen v3 responses without clip eligibility and keeps clips fail closed", async () => {
+    const fetchMock = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(
+        jsonResponse(frozenV3SessionResponseRaw("playing"), 201),
+      )
+      .mockResolvedValueOnce(
+        jsonResponse(frozenV3HeartbeatResponseRaw("playing"), 200),
+      )
+      .mockResolvedValueOnce(jsonResponse(frozenV3ReactionResponseRaw(), 200));
+    const client = new ReplayPremiereServiceClient({
+      premiereId: PREMIERE_ID,
+      origin: "https://proxywar.example",
+      fetchImpl: fetchMock,
+      randomBytes: () => new Uint8Array(16).fill(1),
+    });
+    client.bindVerifiedProjection(projection("playing"));
+
+    await expect(
+      client.startSession({ visible: true, observedSequence: -1 }),
+    ).resolves.toMatchObject({
+      schemaVersion: 3,
+      clipsEnabled: true,
+      clipEligibility: null,
+      latestOwnReaction: null,
+    });
+    await expect(
+      client.heartbeat({ visible: true, observedSequence: 0 }),
+    ).resolves.toMatchObject({
+      schemaVersion: 3,
+      clipsEnabled: true,
+      clipEligibility: null,
+      latestOwnReaction: null,
+    });
+    await expect(
+      client.submitReaction({
+        premiereId: PREMIERE_ID,
+        kind: "smart",
+        sequence: 0,
+        turn: 0,
+        policySeatId: null,
+      }),
+    ).resolves.toMatchObject({
+      schemaVersion: 3,
+      clipsEnabled: true,
+      clipEligibility: null,
+      latestOwnReaction: { kind: "smart", sequence: 0, turn: 0 },
+    });
+    for (const [, request] of fetchMock.mock.calls) {
+      expect(
+        new Headers(request?.headers).get("x-proxywar-premiere-interactions"),
+      ).toBe("4");
+    }
+    client.dispose();
+  });
+
+  it("rejects a v4 private anchor not proven by the requesting participant's counts", async () => {
+    const leaked = sessionResponseV4("playing");
     leaked.reactionSummary = reactionSummaryWith("smart", 1);
     leaked.reactionSummary.ownByKind = { ...emptyReactionSummary().byKind };
     leaked.latestOwnReaction = {
@@ -3127,7 +3183,7 @@ describe("ReplayPremiereServiceClient", () => {
       new Headers(firstSessionRequest?.headers).get(
         "x-proxywar-premiere-interactions",
       ),
-    ).toBe("3");
+    ).toBe("4");
 
     await expect(
       client.heartbeat({ visible: true, observedSequence: -1 }),
@@ -3157,7 +3213,7 @@ describe("ReplayPremiereServiceClient", () => {
       new Headers(firstHeartbeatRequest?.headers).get(
         "x-proxywar-premiere-interactions",
       ),
-    ).toBe("3");
+    ).toBe("4");
 
     const marker = {
       premiereId: PREMIERE_ID,
@@ -3184,7 +3240,7 @@ describe("ReplayPremiereServiceClient", () => {
       new Headers(firstReactionRequest?.headers).get(
         "x-proxywar-premiere-interactions",
       ),
-    ).toBe("3");
+    ).toBe("4");
     expect(randomBytes).toHaveBeenCalledTimes(3);
     client.dispose();
   });
@@ -3897,17 +3953,19 @@ function sessionResponse(
   };
 }
 
-function sessionResponseV3(
+function sessionResponseV4(
   premiereState: ReplayPremiereServiceSessionResponse["premiereState"],
-): Extract<ReplayPremiereServiceSessionResponse, { schemaVersion: 3 }> {
+): Extract<ReplayPremiereServiceSessionResponse, { schemaVersion: 4 }> {
   const response = sessionResponse(premiereState);
-  if (response.schemaVersion !== 2) {
+  const eligibility = response.clipEligibility;
+  if (response.schemaVersion !== 2 || eligibility === null) {
     throw new Error("test helper expected a v2 session response");
   }
   return {
     ...response,
-    schemaVersion: 3,
+    schemaVersion: 4,
     latestOwnReaction: null,
+    clipEligibility: eligibility,
   };
 }
 
@@ -3948,17 +4006,19 @@ function heartbeatResponse(
   };
 }
 
-function heartbeatResponseV3(
+function heartbeatResponseV4(
   premiereState: ReplayPremiereServiceHeartbeatResponse["premiereState"],
-): Extract<ReplayPremiereServiceHeartbeatResponse, { schemaVersion: 3 }> {
+): Extract<ReplayPremiereServiceHeartbeatResponse, { schemaVersion: 4 }> {
   const response = heartbeatResponse(premiereState);
-  if (response.schemaVersion !== 2) {
+  const eligibility = response.clipEligibility;
+  if (response.schemaVersion !== 2 || eligibility === null) {
     throw new Error("test helper expected a v2 heartbeat response");
   }
   return {
     ...response,
-    schemaVersion: 3,
+    schemaVersion: 4,
     latestOwnReaction: null,
+    clipEligibility: eligibility,
   };
 }
 
@@ -3983,14 +4043,14 @@ function reactionResponse() {
   };
 }
 
-function reactionResponseV3(): Extract<
+function reactionResponseV4(): Extract<
   ReplayPremiereServiceReactionResponse,
-  { schemaVersion: 3 }
+  { schemaVersion: 4 }
 > {
   const response = reactionResponse();
   return {
     ...response,
-    schemaVersion: 3,
+    schemaVersion: 4,
     latestOwnReaction: {
       id: response.reaction.id,
       kind: response.reaction.kind,
@@ -4043,6 +4103,14 @@ function legacySessionResponseRaw(
   return { ...legacy, schemaVersion: 1 as const };
 }
 
+function frozenV3SessionResponseRaw(
+  premiereState: ReplayPremiereServiceSessionResponse["premiereState"],
+) {
+  const current = sessionResponseV4(premiereState);
+  const { clipEligibility: _clipEligibility, ...frozen } = current;
+  return { ...frozen, schemaVersion: 3 as const };
+}
+
 function legacyReactionResponseRaw() {
   const current = reactionResponse();
   const {
@@ -4052,6 +4120,12 @@ function legacyReactionResponseRaw() {
     ...legacy
   } = current;
   return { ...legacy, schemaVersion: 1 as const };
+}
+
+function frozenV3ReactionResponseRaw() {
+  const current = reactionResponseV4();
+  const { clipEligibility: _clipEligibility, ...frozen } = current;
+  return { ...frozen, schemaVersion: 3 as const };
 }
 
 function legacyHeartbeatResponseRaw(
@@ -4065,6 +4139,14 @@ function legacyHeartbeatResponseRaw(
     ...legacy
   } = current;
   return { ...legacy, schemaVersion: 1 as const };
+}
+
+function frozenV3HeartbeatResponseRaw(
+  premiereState: ReplayPremiereServiceHeartbeatResponse["premiereState"],
+) {
+  const current = heartbeatResponseV4(premiereState);
+  const { clipEligibility: _clipEligibility, ...frozen } = current;
+  return { ...frozen, schemaVersion: 3 as const };
 }
 
 function legacySessionResponse(

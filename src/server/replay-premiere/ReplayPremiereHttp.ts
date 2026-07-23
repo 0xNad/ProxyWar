@@ -50,6 +50,7 @@ const REACTION_ID_PATTERN = /^react_[a-f0-9]{32}$/;
 const REACTION_KINDS = new Set<ReplayPremiereReactionKind>(
   REPLAY_PREMIERE_REACTION_KINDS,
 );
+type ReplayPremiereInteractionContractVersion = 1 | 2 | 3 | 4;
 
 export interface ReplayPremiereIncomingMoment {
   shareId: string;
@@ -381,19 +382,23 @@ async function handlePremiereApiRequest(
           ...(interactionContractVersion >= 2
             ? {
                 clipsEnabled: options.clips !== undefined,
+                reactionSummary:
+                  target.interactions.readReactionSummary(participantId),
+              }
+            : {}),
+          ...(interactionContractVersion >= 3
+            ? {
+                latestOwnReaction:
+                  target.interactions.readLatestOwnReaction(participantId),
+              }
+            : {}),
+          ...(interactionContractVersion >= 4
+            ? {
                 clipEligibility: await readClipEligibility(
                   target,
                   options.clips !== undefined,
                   operationTimeoutMs,
                 ),
-                reactionSummary:
-                  target.interactions.readReactionSummary(participantId),
-              }
-            : {}),
-          ...(interactionContractVersion === 3
-            ? {
-                latestOwnReaction:
-                  target.interactions.readLatestOwnReaction(participantId),
               }
             : {}),
         });
@@ -437,19 +442,23 @@ async function handlePremiereApiRequest(
           ...(interactionContractVersion >= 2
             ? {
                 clipsEnabled: options.clips !== undefined,
+                reactionSummary:
+                  target.interactions.readReactionSummary(participantId),
+              }
+            : {}),
+          ...(interactionContractVersion >= 3
+            ? {
+                latestOwnReaction:
+                  target.interactions.readLatestOwnReaction(participantId),
+              }
+            : {}),
+          ...(interactionContractVersion >= 4
+            ? {
                 clipEligibility: await readClipEligibility(
                   target,
                   options.clips !== undefined,
                   operationTimeoutMs,
                 ),
-                reactionSummary:
-                  target.interactions.readReactionSummary(participantId),
-              }
-            : {}),
-          ...(interactionContractVersion === 3
-            ? {
-                latestOwnReaction:
-                  target.interactions.readLatestOwnReaction(participantId),
               }
             : {}),
         });
@@ -540,7 +549,7 @@ async function handleSessionWrite(options: {
   idempotencyKey: string;
   requesterBucketId: string;
   operationTimeoutMs: number;
-  interactionContractVersion: 1 | 2 | 3;
+  interactionContractVersion: ReplayPremiereInteractionContractVersion;
   clipsEnabled: boolean;
 }): Promise<void> {
   const body = parseSessionBody(options.request.body);
@@ -594,20 +603,24 @@ async function handleSessionWrite(options: {
     ...(options.interactionContractVersion >= 2
       ? {
           clipsEnabled: options.clipsEnabled,
-          clipEligibility: await readClipEligibility(
-            options.target,
-            options.clipsEnabled,
-            options.operationTimeoutMs,
-          ),
           reactionSummary: options.target.interactions.readReactionSummary(
             guest.participant.participantId,
           ),
         }
       : {}),
-    ...(options.interactionContractVersion === 3
+    ...(options.interactionContractVersion >= 3
       ? {
           latestOwnReaction: options.target.interactions.readLatestOwnReaction(
             guest.participant.participantId,
+          ),
+        }
+      : {}),
+    ...(options.interactionContractVersion >= 4
+      ? {
+          clipEligibility: await readClipEligibility(
+            options.target,
+            options.clipsEnabled,
+            options.operationTimeoutMs,
           ),
         }
       : {}),
@@ -876,12 +889,16 @@ function requiredHeader(request: Request, name: string): string {
 }
 
 /**
- * Opt-in additive interaction response contract. Missing, duplicated,
- * malformed, or unknown values deliberately stay on the exact legacy v1
- * shape so an old tab can survive a server restart during a rolling rollout.
+ * Opt-in additive interaction response contract. Each recognized version is
+ * immutable; missing, duplicated, malformed, or unknown values deliberately
+ * stay on the exact legacy v1 shape. That lets both an old tab and a newly
+ * loaded tab survive opposite sides of a rolling server transition.
  */
-function requestedInteractionContract(request: Request): 1 | 2 | 3 {
+function requestedInteractionContract(
+  request: Request,
+): ReplayPremiereInteractionContractVersion {
   const requested = request.headers["x-proxywar-premiere-interactions"];
+  if (requested === "4") return 4;
   if (requested === "3") return 3;
   if (requested === "2") return 2;
   return 1;

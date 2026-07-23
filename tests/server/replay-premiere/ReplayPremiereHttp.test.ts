@@ -3,6 +3,7 @@ import { promises as fs } from "node:fs";
 import http from "node:http";
 import os from "node:os";
 import path from "node:path";
+import { z } from "zod";
 import { freezeReplayPremiereCheckpointProjection } from "../../../src/server/replay-premiere/ReplayPremiereCheckpointProjection";
 import {
   createReplayPremiereTrustedProxyAddressResolver,
@@ -60,6 +61,46 @@ import {
 } from "./ReplayPremiereFixtures";
 
 const EXPECTED_ORIGIN = "https://beta.proxywar.xyz";
+
+// Frozen top-level c8b5 v3 parsers. The old client used strict schemas, so an
+// additive key is a wire incompatibility even when every existing field is
+// otherwise valid.
+const frozenC8b5SessionV3Schema = z
+  .object({
+    schemaVersion: z.literal(3),
+    csrfToken: z.unknown(),
+    session: z.unknown(),
+    premiereState: z.unknown(),
+    checkpoints: z.unknown(),
+    incomingMoment: z.unknown(),
+    clipsEnabled: z.unknown(),
+    reactionSummary: z.unknown(),
+    latestOwnReaction: z.unknown(),
+  })
+  .strict();
+const frozenC8b5HeartbeatV3Schema = z
+  .object({
+    schemaVersion: z.literal(3),
+    session: z.unknown(),
+    idempotent: z.unknown(),
+    persisted: z.unknown(),
+    premiereState: z.unknown(),
+    checkpoints: z.unknown(),
+    clipsEnabled: z.unknown(),
+    reactionSummary: z.unknown(),
+    latestOwnReaction: z.unknown(),
+  })
+  .strict();
+const frozenC8b5ReactionV3Schema = z
+  .object({
+    schemaVersion: z.literal(3),
+    reaction: z.unknown(),
+    idempotent: z.unknown(),
+    clipsEnabled: z.unknown(),
+    reactionSummary: z.unknown(),
+    latestOwnReaction: z.unknown(),
+  })
+  .strict();
 
 describe("ReplayPremiere HTTP adapter", () => {
   let root: string;
@@ -362,7 +403,7 @@ describe("ReplayPremiere HTTP adapter", () => {
     }
   });
 
-  test("bootstraps reload-safe CSRF and requires cookie, Origin, and token on every later write", async () => {
+  test("negotiates v4 clip eligibility while requiring reload-safe CSRF, cookie, Origin, and token", async () => {
     const harness = await httpHarness(root, true);
     await harness.run(async (baseUrl) => {
       const sessionUrl = `${baseUrl}/api/premieres/${PREMIERE_ID}/sessions`;
@@ -372,7 +413,7 @@ describe("ReplayPremiere HTTP adapter", () => {
           "session_request_00000001",
           undefined,
           undefined,
-          "2",
+          "4",
         ),
         body: JSON.stringify({ visible: true, observedSequence: 5 }),
       });
@@ -393,14 +434,15 @@ describe("ReplayPremiere HTTP adapter", () => {
           "clipsEnabled",
           "clipEligibility",
           "reactionSummary",
+          "latestOwnReaction",
         ].sort(),
       );
-      expect(sessionBody).not.toHaveProperty("latestOwnReaction");
       expect(sessionBody).toMatchObject({
-        schemaVersion: 2,
+        schemaVersion: 4,
         csrfToken: expect.any(String),
         incomingMoment: null,
         premiereState: "revealed",
+        latestOwnReaction: null,
         clipsEnabled: false,
         clipEligibility: {
           generationEnabled: false,
@@ -449,7 +491,7 @@ describe("ReplayPremiere HTTP adapter", () => {
           "heartbeat_request_000002",
           cookie ?? undefined,
           sessionBody.csrfToken,
-          "2",
+          "4",
         ),
         body: JSON.stringify({ visible: true, observedSequence: 5 }),
       });
@@ -466,12 +508,13 @@ describe("ReplayPremiere HTTP adapter", () => {
           "clipsEnabled",
           "clipEligibility",
           "reactionSummary",
+          "latestOwnReaction",
         ].sort(),
       );
-      expect(heartbeatBody).not.toHaveProperty("latestOwnReaction");
       expect(heartbeatBody).toMatchObject({
-        schemaVersion: 2,
+        schemaVersion: 4,
         persisted: false,
+        latestOwnReaction: null,
         clipsEnabled: false,
         clipEligibility: {
           generationEnabled: false,
@@ -493,7 +536,7 @@ describe("ReplayPremiere HTTP adapter", () => {
               `reaction_request_${index.toString().padStart(16, "0")}`,
               cookie ?? undefined,
               sessionBody.csrfToken,
-              "2",
+              "4",
             ),
             body: JSON.stringify({
               sessionId: sessionBody.session.id,
@@ -512,12 +555,18 @@ describe("ReplayPremiere HTTP adapter", () => {
             "clipsEnabled",
             "clipEligibility",
             "reactionSummary",
+            "latestOwnReaction",
           ].sort(),
         );
-        expect(reactionBody).not.toHaveProperty("latestOwnReaction");
         expect(reactionBody).toMatchObject({
-          schemaVersion: 2,
+          schemaVersion: 4,
           reaction: { kind },
+          latestOwnReaction: {
+            id: reactionBody.reaction.id,
+            kind,
+            sequence: index,
+            turn: index,
+          },
           clipsEnabled: false,
           clipEligibility: {
             generationEnabled: false,
@@ -577,7 +626,7 @@ describe("ReplayPremiere HTTP adapter", () => {
     });
   });
 
-  test("negotiates v3 latest-own-reaction anchors without crossing participant boundaries", async () => {
+  test("preserves the frozen c8b5 v3 session, heartbeat, and reaction shapes", async () => {
     const harness = await httpHarness(root, true);
     await harness.run(async (baseUrl) => {
       const sessionUrl = `${baseUrl}/api/premieres/${PREMIERE_ID}/sessions`;
@@ -594,6 +643,21 @@ describe("ReplayPremiere HTTP adapter", () => {
       expect(sessionAResponse.status).toBe(201);
       const cookieA = sessionAResponse.headers.get("set-cookie") ?? undefined;
       const sessionA = await sessionAResponse.json();
+      expect(Object.keys(sessionA).sort()).toEqual(
+        [
+          "schemaVersion",
+          "csrfToken",
+          "session",
+          "premiereState",
+          "checkpoints",
+          "incomingMoment",
+          "clipsEnabled",
+          "reactionSummary",
+          "latestOwnReaction",
+        ].sort(),
+      );
+      expect(sessionA).not.toHaveProperty("clipEligibility");
+      expect(() => frozenC8b5SessionV3Schema.parse(sessionA)).not.toThrow();
       expect(sessionA).toMatchObject({
         schemaVersion: 3,
         latestOwnReaction: null,
@@ -618,6 +682,18 @@ describe("ReplayPremiere HTTP adapter", () => {
       );
       expect(reactionAResponse.status).toBe(200);
       const reactionA = await reactionAResponse.json();
+      expect(Object.keys(reactionA).sort()).toEqual(
+        [
+          "schemaVersion",
+          "reaction",
+          "idempotent",
+          "clipsEnabled",
+          "reactionSummary",
+          "latestOwnReaction",
+        ].sort(),
+      );
+      expect(reactionA).not.toHaveProperty("clipEligibility");
+      expect(() => frozenC8b5ReactionV3Schema.parse(reactionA)).not.toThrow();
       const anchorA = {
         id: reactionA.reaction.id,
         kind: "smart",
@@ -716,7 +792,23 @@ describe("ReplayPremiere HTTP adapter", () => {
         },
       );
       expect(heartbeatAResponse.status).toBe(200);
-      expect(await heartbeatAResponse.json()).toMatchObject({
+      const heartbeatA = await heartbeatAResponse.json();
+      expect(Object.keys(heartbeatA).sort()).toEqual(
+        [
+          "schemaVersion",
+          "session",
+          "idempotent",
+          "persisted",
+          "premiereState",
+          "checkpoints",
+          "clipsEnabled",
+          "reactionSummary",
+          "latestOwnReaction",
+        ].sort(),
+      );
+      expect(heartbeatA).not.toHaveProperty("clipEligibility");
+      expect(() => frozenC8b5HeartbeatV3Schema.parse(heartbeatA)).not.toThrow();
+      expect(heartbeatA).toMatchObject({
         schemaVersion: 3,
         latestOwnReaction: anchorA,
       });
@@ -742,12 +834,12 @@ describe("ReplayPremiere HTTP adapter", () => {
           "checkpoints",
           "incomingMoment",
           "clipsEnabled",
-          "clipEligibility",
           "reactionSummary",
         ].sort(),
       );
       expect(v2Reload.schemaVersion).toBe(2);
       expect(v2Reload).not.toHaveProperty("latestOwnReaction");
+      expect(v2Reload).not.toHaveProperty("clipEligibility");
     });
   });
 
