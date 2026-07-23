@@ -805,27 +805,86 @@ describe("AiLeagueReplayOverlay", () => {
       );
     }
 
-    it("locks the clip button until playback reaches a clippable turn", () => {
+    it("locks the clip button until playback reaches a clippable turn", async () => {
       const runID = "league-clip-lock-1";
-      mountAiLeagueReplayOverlay({
-        runID,
-        artifactBasePath: `/ai-league-runs/${runID}`,
-        decisions: [],
-      });
-      const section = document.querySelector("[data-ai-league-clip]");
-      expect(section).not.toBeNull();
-      expect(section?.textContent).toContain(
-        "ai_league_replay.clip_waiting_playback",
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(async () => clipCapabilitiesResponse(true)),
       );
-      expect(section?.querySelector("[data-ai-league-clip-render]")).toBeNull();
+      try {
+        mountAiLeagueReplayOverlay({
+          runID,
+          artifactBasePath: `/ai-league-runs/${runID}`,
+          decisions: [],
+        });
+        const section = document.querySelector("[data-ai-league-clip]");
+        expect(section).not.toBeNull();
+        // Unknown capability fails closed while the read is in flight.
+        expect(section?.hasAttribute("hidden")).toBe(true);
+        await vi.waitFor(() => {
+          expect(section?.hasAttribute("hidden")).toBe(false);
+          expect(section?.textContent).toContain(
+            "ai_league_replay.clip_waiting_playback",
+          );
+        });
+        expect(
+          section?.querySelector("[data-ai-league-clip-render]"),
+        ).toBeNull();
 
-      frame(120);
-      const unlocked = document.querySelector("[data-ai-league-clip]");
-      expect(
-        unlocked?.querySelector("[data-ai-league-clip-render]"),
-      ).not.toBeNull();
-      expect(unlocked?.textContent).toContain("ai_league_replay.clip_render");
+        frame(120);
+        const unlocked = document.querySelector("[data-ai-league-clip]");
+        expect(
+          unlocked?.querySelector("[data-ai-league-clip-render]"),
+        ).not.toBeNull();
+        expect(unlocked?.textContent).toContain("ai_league_replay.clip_render");
+      } finally {
+        vi.unstubAllGlobals();
+      }
     });
+
+    it.each([
+      {
+        name: "the server reports generation disabled",
+        runID: "league-clip-disabled-1",
+        response: () => Promise.resolve(clipCapabilitiesResponse(false)),
+      },
+      {
+        name: "the capability request fails",
+        runID: "league-clip-capability-failure-1",
+        response: () => Promise.reject(new TypeError("offline")),
+      },
+    ])(
+      "hides the complete generation block when $name",
+      async ({ runID, response }) => {
+        const fetchMock = vi.fn(response);
+        vi.stubGlobal("fetch", fetchMock);
+        try {
+          mountAiLeagueReplayOverlay({
+            runID,
+            artifactBasePath: `/ai-league-runs/${runID}`,
+            decisions: [],
+          });
+          frame(500);
+          await vi.waitFor(() => {
+            const section = document.querySelector<HTMLElement>(
+              "[data-ai-league-clip]",
+            );
+            expect(section?.hidden).toBe(true);
+            expect(section?.childElementCount).toBe(0);
+          });
+          expect(
+            document.querySelector("[data-ai-league-clip-render]"),
+          ).toBeNull();
+          expect(fetchMock).toHaveBeenCalledTimes(1);
+          expect(fetchMock).toHaveBeenCalledWith(
+            "/api/clip-capabilities",
+            expect.objectContaining({ method: "GET" }),
+          );
+        } finally {
+          vi.unstubAllGlobals();
+        }
+      },
+    );
 
     it("requests a clip for the current moment and renders the Download MP4 link when ready", async () => {
       const runID = "league-clip-ready-1";
@@ -834,6 +893,9 @@ describe("AiLeagueReplayOverlay", () => {
       vi.stubGlobal(
         "fetch",
         vi.fn(async (url: string, init?: RequestInit) => {
+          if (String(url) === "/api/clip-capabilities") {
+            return clipCapabilitiesResponse(true);
+          }
           requests.push({
             url: String(url),
             body: typeof init?.body === "string" ? JSON.parse(init.body) : null,
@@ -864,6 +926,11 @@ describe("AiLeagueReplayOverlay", () => {
           decisions: [],
         });
         frame(615);
+        await vi.waitFor(() => {
+          expect(
+            document.querySelector("[data-ai-league-clip-render]"),
+          ).not.toBeNull();
+        });
         const render = document.querySelector<HTMLButtonElement>(
           "[data-ai-league-clip-render]",
         );
@@ -897,12 +964,13 @@ describe("AiLeagueReplayOverlay", () => {
       const runID = "league-clip-fail-1";
       vi.stubGlobal(
         "fetch",
-        vi.fn(
-          async () =>
-            new Response(
-              JSON.stringify({ error: { code: "LEAGUE_CLIP_UNAVAILABLE" } }),
-              { status: 404 },
-            ),
+        vi.fn(async (url: string) =>
+          String(url) === "/api/clip-capabilities"
+            ? clipCapabilitiesResponse(true)
+            : new Response(
+                JSON.stringify({ error: { code: "LEAGUE_CLIP_UNAVAILABLE" } }),
+                { status: 404 },
+              ),
         ),
       );
       try {
@@ -912,6 +980,11 @@ describe("AiLeagueReplayOverlay", () => {
           decisions: [],
         });
         frame(200);
+        await vi.waitFor(() => {
+          expect(
+            document.querySelector("[data-ai-league-clip-render]"),
+          ).not.toBeNull();
+        });
         document
           .querySelector<HTMLButtonElement>("[data-ai-league-clip-render]")
           ?.click();
@@ -930,6 +1003,17 @@ describe("AiLeagueReplayOverlay", () => {
     });
   });
 });
+
+function clipCapabilitiesResponse(enabled: boolean): Response {
+  return new Response(
+    JSON.stringify({
+      schemaVersion: 1,
+      premiereGenerationEnabled: enabled,
+      leagueGenerationEnabled: enabled,
+    }),
+    { status: 200, headers: { "Content-Type": "application/json" } },
+  );
+}
 
 function decisionFixture(sequence: number) {
   return {

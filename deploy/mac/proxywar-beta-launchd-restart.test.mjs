@@ -76,6 +76,340 @@ test("ownership audit rejects foreign executable, cwd, and ancestry", () => {
   assert.throws(() => validateOwnedGroup(foreignParent), /non-descendant/);
 });
 
+test("snapshot skips a confirmed non-root zombie without reading its cwd", async () => {
+  const project = "/tmp/project";
+  const state = snapshotFixture({
+    tables: [
+      [
+        processRow(230, 1, 230, { cwd: project }),
+        processRow(231, 230, 230, { stat: "Z+", cwd: null }),
+      ],
+    ],
+  });
+  const members = await state.host.snapshotGroup(230);
+  assert.deepEqual(
+    members.map(({ pid }) => pid),
+    [230],
+  );
+  assert.deepEqual(state.cwdReads, [230]);
+});
+
+test("snapshot tolerates a same-identity live-to-zombie cwd race", async () => {
+  const project = "/tmp/project";
+  const root = processRow(240, 1, 240, { cwd: project });
+  const child = processRow(241, 240, 240, {
+    cwd: lsofFailure(),
+  });
+  const state = snapshotFixture({
+    tables: [
+      [root, child],
+      [root, { ...child, stat: "Z" }],
+    ],
+  });
+  const members = await state.host.snapshotGroup(240);
+  assert.deepEqual(
+    members.map(({ pid }) => pid),
+    [240],
+  );
+  assert.deepEqual(state.cwdReads, [240, 241, 240]);
+  assert.equal(state.tableReads, 2);
+});
+
+test("snapshot tolerates a member reaped during cwd lookup", async () => {
+  const project = "/tmp/project";
+  const root = processRow(250, 1, 250, { cwd: project });
+  const child = processRow(251, 250, 250, {
+    cwd: lsofFailure(),
+  });
+  const state = snapshotFixture({ tables: [[root, child], [root]] });
+  const members = await state.host.snapshotGroup(250);
+  assert.deepEqual(
+    members.map(({ pid }) => pid),
+    [250],
+  );
+  assert.equal(state.tableReads, 2);
+});
+
+test("snapshot rejects PID reuse and process-group changes after cwd failure", async (t) => {
+  const project = "/tmp/project";
+  const root = processRow(260, 1, 260, { cwd: project });
+  const child = processRow(261, 260, 260, {
+    cwd: lsofFailure(),
+  });
+
+  await t.test("PID reuse", async () => {
+    const reused = { ...child, start: "Wed Jul 22 13:00:01 2026" };
+    const state = snapshotFixture({
+      tables: [
+        [root, child],
+        [root, reused],
+      ],
+    });
+    await assert.rejects(
+      state.host.snapshotGroup(260),
+      /process 261 was reused during cwd lookup/,
+    );
+  });
+
+  await t.test("process-group change", async () => {
+    const moved = { ...child, pgid: 999, stat: "Z" };
+    const state = snapshotFixture({
+      tables: [
+        [root, child],
+        [root, moved],
+      ],
+    });
+    await assert.rejects(
+      state.host.snapshotGroup(260),
+      /process 261 changed process group during cwd lookup/,
+    );
+  });
+});
+
+test("snapshot fails closed when a cwd-unreadable member remains live", async () => {
+  const project = "/tmp/project";
+  const root = processRow(270, 1, 270, { cwd: project });
+  const child = processRow(271, 270, 270, {
+    cwd: lsofFailure(),
+  });
+  const state = snapshotFixture({
+    tables: [
+      [root, child],
+      [root, child],
+    ],
+  });
+  await assert.rejects(
+    state.host.snapshotGroup(270),
+    /cwd unreadable for live process 271/,
+  );
+  assert.equal(state.tableReads, 2);
+});
+
+test("snapshot never omits a zombie or cwd-unreadable managed leader", async (t) => {
+  await t.test("initial zombie", async () => {
+    const root = processRow(280, 1, 280, {
+      stat: "Z",
+      cwd: null,
+    });
+    const state = snapshotFixture({ tables: [[root]] });
+    await assert.rejects(
+      state.host.snapshotGroup(280),
+      /managed PID 280 is a zombie/,
+    );
+    assert.deepEqual(state.cwdReads, []);
+  });
+
+  await t.test("live-to-zombie cwd race", async () => {
+    const root = processRow(281, 1, 281, { cwd: lsofFailure() });
+    const state = snapshotFixture({
+      tables: [[root], [{ ...root, stat: "Z" }]],
+    });
+    await assert.rejects(
+      state.host.snapshotGroup(281),
+      /managed PID 281 is a zombie/,
+    );
+  });
+
+  await t.test("disappearance before a pre-TERM signal", async () => {
+    const captured = managed(282, "/tmp/project");
+    const root = processRow(282, 1, 282, { cwd: lsofFailure() });
+    const state = snapshotFixture({ tables: [[root], []] });
+    const signals = [];
+    await assert.rejects(
+      terminateOwnedGroup(
+        {
+          async groupExists() {
+            return true;
+          },
+          async snapshotGroup(...args) {
+            return state.host.snapshotGroup(...args);
+          },
+          async signalGroup(...args) {
+            signals.push(args);
+          },
+        },
+        captured,
+        { graceMs: 10, forceWaitMs: 10 },
+      ),
+      /managed PID 282 disappeared during snapshot/,
+    );
+    assert.deepEqual(signals, []);
+  });
+
+  await t.test("another member cannot hide leader disappearance", async () => {
+    const project = "/tmp/project";
+    const captured = managed(283, project);
+    const root = processRow(283, 1, 283, { cwd: project });
+    const child = processRow(284, 283, 283, { cwd: lsofFailure() });
+    const state = snapshotFixture({
+      tables: [[root, child], [{ ...child, stat: "Z" }]],
+    });
+    const signals = [];
+    await assert.rejects(
+      terminateOwnedGroup(
+        {
+          async groupExists() {
+            return true;
+          },
+          async snapshotGroup(...args) {
+            return state.host.snapshotGroup(...args);
+          },
+          async signalGroup(...args) {
+            signals.push(args);
+          },
+        },
+        captured,
+        { graceMs: 10, forceWaitMs: 10 },
+      ),
+      /managed PID 283 disappeared during snapshot/,
+    );
+    assert.deepEqual(signals, []);
+  });
+
+  await t.test("initial pre-TERM sample requires the leader", async () => {
+    const captured = managed(285, "/tmp/project");
+    const state = snapshotFixture({ tables: [[]] });
+    const signals = [];
+    await assert.rejects(
+      terminateOwnedGroup(
+        {
+          async groupExists() {
+            return true;
+          },
+          async snapshotGroup(...args) {
+            return state.host.snapshotGroup(...args);
+          },
+          async signalGroup(...args) {
+            signals.push(args);
+          },
+        },
+        captured,
+        { graceMs: 10, forceWaitMs: 10 },
+      ),
+      /managed PID 285 disappeared during snapshot/,
+    );
+    assert.deepEqual(signals, []);
+  });
+});
+
+test("a dying child cannot hide a new live foreign member before TERM", async () => {
+  const project = "/tmp/project";
+  const captured = managed(290, project);
+  const root = processRow(290, 1, 290, { cwd: project });
+  const dying = processRow(291, 290, 290, { cwd: lsofFailure() });
+  const foreign = processRow(292, 290, 290, {
+    cwd: project,
+    executable: "python3",
+  });
+  const state = snapshotFixture({
+    tables: [
+      [root, dying],
+      [root, foreign],
+    ],
+  });
+  const signals = [];
+  await assert.rejects(
+    terminateOwnedGroup(
+      {
+        async groupExists() {
+          return true;
+        },
+        async snapshotGroup(...args) {
+          return state.host.snapshotGroup(...args);
+        },
+        async signalGroup(...args) {
+          signals.push(args);
+        },
+      },
+      captured,
+      { graceMs: 10, forceWaitMs: 10 },
+    ),
+    /PGID membership changed before signal/,
+  );
+  assert.deepEqual(signals, []);
+  assert.deepEqual(state.cwdReads, [290, 291, 290, 292]);
+});
+
+test("post-TERM cleanup audits a captured child after the leader disappears", async () => {
+  const project = "/tmp/project";
+  const root = processRow(293, 1, 293, { cwd: lsofFailure() });
+  const child = processRow(294, 293, 293, { cwd: project });
+  const reparentedChild = { ...child, ppid: 1 };
+  const capturedRoot = { ...root, cwd: project };
+  const captured = {
+    ...capturedRoot,
+    command: "fixture",
+    members: [capturedRoot, child],
+  };
+  const state = snapshotFixture({
+    tables: [[root, child], [reparentedChild]],
+  });
+  const signals = [];
+  let snapshotReads = 0;
+  let gone = false;
+  const result = await terminateOwnedGroup(
+    {
+      async groupExists() {
+        return true;
+      },
+      async snapshotGroup(...args) {
+        snapshotReads += 1;
+        if (snapshotReads === 1) return captured.members;
+        return state.host.snapshotGroup(...args);
+      },
+      async signalGroup(pgid, signal) {
+        signals.push([pgid, signal]);
+        if (signal === "SIGKILL") gone = true;
+      },
+      async groupGone() {
+        return gone;
+      },
+      async sleep(ms) {
+        await new Promise((resolve) => setTimeout(resolve, ms));
+      },
+    },
+    captured,
+    { graceMs: 1, forceWaitMs: 10 },
+  );
+  assert.deepEqual(result, { forced: true });
+  assert.deepEqual(signals, [
+    [293, "SIGTERM"],
+    [293, "SIGKILL"],
+  ]);
+  assert.deepEqual(state.cwdReads, [293, 294]);
+});
+
+test("pre-TERM audit rejects reparenting even for a captured child", async () => {
+  const project = "/tmp/project";
+  const root = processRow(295, 1, 295, { cwd: project });
+  const child = processRow(296, 295, 295, { cwd: project });
+  const captured = {
+    ...root,
+    command: "fixture",
+    members: [root, child],
+  };
+  const signals = [];
+  await assert.rejects(
+    terminateOwnedGroup(
+      {
+        async groupExists() {
+          return true;
+        },
+        async snapshotGroup() {
+          return [root, { ...child, ppid: 1 }];
+        },
+        async signalGroup(...args) {
+          signals.push(args);
+        },
+      },
+      captured,
+      { graceMs: 10, forceWaitMs: 10 },
+    ),
+    /PGID membership changed before signal/,
+  );
+  assert.deepEqual(signals, []);
+});
+
 test("PID/start-token reuse is rejected before TERM", async () => {
   const captured = managed(300, "/tmp/project");
   const reused = { ...captured.members[0], start: "different-start" };
@@ -353,6 +687,66 @@ function managed(
 ) {
   const root = member(pid, 1, pid, cwd);
   return { ...root, command, members: [root] };
+}
+
+function processRow(pid, ppid, pgid, options = {}) {
+  return {
+    uid,
+    pid,
+    ppid,
+    pgid,
+    stat: options.stat ?? "S",
+    start:
+      options.start ??
+      `Wed Jul 22 12:${String(pid % 60).padStart(2, "0")}:00 2026`,
+    executable: options.executable ?? "node",
+    cwd: options.cwd,
+  };
+}
+
+function snapshotFixture({ tables }) {
+  let tableReads = 0;
+  const cwdReads = [];
+  const exec = async (file, args) => {
+    if (file === "/bin/ps" && args[0] === "-axo") {
+      const table = tables[Math.min(tableReads, tables.length - 1)];
+      tableReads += 1;
+      return {
+        stdout: `${table
+          .map(
+            (entry) =>
+              `${entry.uid} ${entry.pid} ${entry.ppid} ${entry.pgid} ${entry.stat} ${entry.start} ${entry.executable}`,
+          )
+          .join("\n")}\n`,
+      };
+    }
+    if (file === "/usr/sbin/lsof") {
+      const pid = Number(args[2]);
+      cwdReads.push(pid);
+      const process = tables
+        .flat()
+        .find((candidate) => candidate.pid === pid && candidate.cwd !== null);
+      const cwd = process?.cwd;
+      if (cwd instanceof Error) throw cwd;
+      if (typeof cwd !== "string") throw lsofFailure();
+      return { stdout: `p${pid}\nfcwd\nn${cwd}\n` };
+    }
+    throw new Error(`unexpected command: ${file} ${args.join(" ")}`);
+  };
+  return {
+    host: hostController({ exec }),
+    cwdReads,
+    get tableReads() {
+      return tableReads;
+    },
+  };
+}
+
+function lsofFailure() {
+  const error = new Error("lsof found no cwd");
+  error.code = 1;
+  error.stdout = "";
+  return error;
 }
 
 async function launchFiles() {

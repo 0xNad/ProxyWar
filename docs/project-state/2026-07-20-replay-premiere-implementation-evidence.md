@@ -291,3 +291,58 @@ recorded. Local green tests do not grant release authority.
   the registry. No substitute image was relabeled; therefore Coworld
   certification and replay-bearing episode proof remain blocked, not passed.
   `[repo/file verified]`
+
+### 2026-07-23 — immutable Coworld recovery and combined Clips integration
+
+- The old `proxywar-coworld-local:coworld-3e7e218fc73f` name is not an
+  immutable artifact identity. Coworld derived it from a Docker configuration
+  id prefix, and project history later moved corrected 0.1.7 content under the
+  same label. No new image was rebuilt or relabeled. Instead, exact package
+  `cow_67151484-96c8-4aeb-9754-2f3bf40fe1ed` was downloaded from Softmax's
+  public ECR binding. Its game OCI digest is
+  `sha256:219f24d8580ccb7d46be547805d5501b937d679aca7f7b31e6bb8dfa8eb48bd4`;
+  its commissioner digest is
+  `sha256:945945c0b8715c311f771da8a01e1cb9eb57981605c1f79ce8bc2c7142d39dcf`.
+  The downloaded manifest is structurally identical to the repository's 0.1.7
+  manifest after image-name normalization, except that the downloader omits
+  the three required discovery tags. `[repo/file verified]` +
+  `[local artifact verified]`
+- Coworld CLI 0.1.34 certified a tag-preserving copy of that exact downloaded
+  manifest: 10/10 executable checks passed, including the smoke episode,
+  results schema, replay presence, replay load, websocket liveness, players,
+  and supporting roles. A separate `qualifier` episode then passed
+  `--verify-replay`: 450 turns, 34/34 accepted decisions, zero fallback and
+  degradation, 589,423 replay bytes, replay SHA-256
+  `66ca4c9792ce95321740eddd701b12cb88451f22ced0da06672e0de352d20deb`.
+  Two earlier manual certification attempts reached a valid episode/replay but
+  failed replay load because they omitted the repository's shared
+  `TMPDIR="$PWD/tmp"` contract; Colima cannot mount macOS `/var/folders`.
+  `[local artifact verified]`
+- Clips hardening commit `accbd7d35ce0b07e6dc492fdb6cbd551557cfd06`
+  (tree `943fb41609b13640e1a40ef9a2298c66b19c7253`) became the disabled live
+  baseline before this integration. The recovery and Clips commits are
+  siblings over `3943e20e4`, so the combined candidate is an ancestry-
+  preserving merge rather than a replacement. Conflict resolution retains
+  both clip capability authorities, permanent per-premiere admission fences,
+  source/disk async rechecks, cache-promotion drain, detached worker-group
+  cleanup, bounded exit settlement, and memoized shutdown. Clips remain
+  disabled and the Premiere scheduler remains paused pending combined review
+  and activation. `[repo/file verified]` + `[live verified]`
+- Historical restart snapshot `f6a21faa...` was the SHA-256 of a seven-file
+  uncommitted diff stream at `de485b4bd`, not a Git object or current byte
+  identity. It is superseded by the committed helper/test in `accbd7d35`, whose
+  direct-Node, two-sample readiness, writer ownership, TERM/KILL, and rollback
+  invariants remain mandatory. The current helper passes 30/30 tests.
+  `[repo/file verified]`
+- Pre-commit combined verification passes: 22 focused files / 468 tests,
+  including merged clip service coverage for source-preflight fencing,
+  same-bucket async admission coalescing, and atomic cross-bucket quota
+  reservation; restart helper 30/30; root and adapter TypeScript; ESLint with
+  zero errors; focused Prettier; production build; full root 256 files / 2,882
+  tests; dedicated server 138 files / 1,587 tests; and both cached/working-tree
+  diff checks. The full gate first exposed and then closed one unused English
+  key left by the removed legacy mark button.
+  The frozen local production bundle is `index-Dbyrl6Tn.js`, SHA-256
+  `174d8ceeb6a797e7dcc2c20248f12d36d6ceda65ff6fe8cbd5182e73e95968de`.
+  Deployment and combined live two-viewer/restart/reclamation proof remain
+  pending. `[repo/file verified]` + `[local artifact verified]`

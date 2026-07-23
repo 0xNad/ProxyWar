@@ -18,13 +18,25 @@ function emptyUpdates(): GameUpdates {
   ) as unknown as GameUpdates;
 }
 
-function update(tick: number, packedTileUpdates: number[]): GameUpdateViewData {
-  return {
+function update(
+  tick: number,
+  packedTileUpdates: number[],
+  options: { terminal?: boolean } = {},
+): GameUpdateViewData {
+  const gameUpdate = {
     tick,
     updates: emptyUpdates(),
     packedTileUpdates: Uint32Array.from(packedTileUpdates),
     playerNameViewData: {},
   };
+  if (options.terminal === true) {
+    gameUpdate.updates[GameUpdateType.Win].push({
+      type: GameUpdateType.Win,
+      winner: ["player", "terminal-test-player"],
+      allPlayersStats: {},
+    });
+  }
+  return gameUpdate;
 }
 
 describe("parseReplayRenderFastForwardUntilTurn", () => {
@@ -95,6 +107,23 @@ describe("ReplayRenderFastForward", () => {
     // Later (capture window) updates flow straight through.
     expect(fastForward.offer(update(51, [2, 21]))).toBe(false);
     expect(order).toEqual(["coalesced:49:2"]);
+  });
+
+  it("flushes a Win update immediately below the target", () => {
+    const seen: GameUpdateViewData[] = [];
+    const fastForward = new ReplayRenderFastForward(
+      1_000,
+      { applyCoalesced: (coalesced) => seen.push(coalesced) },
+      240,
+    );
+    expect(fastForward.offer(update(100, [1, 10]))).toBe(true);
+    expect(fastForward.offer(update(101, [1, 11], { terminal: true }))).toBe(
+      true,
+    );
+    expect(fastForward.bufferedTurns()).toBe(0);
+    expect(seen).toHaveLength(1);
+    expect(seen[0].tick).toBe(101);
+    expect(seen[0].updates[GameUpdateType.Win]).toHaveLength(1);
   });
 
   it("coalesces intermediate tile states to their final value", () => {

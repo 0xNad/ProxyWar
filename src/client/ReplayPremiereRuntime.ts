@@ -1,6 +1,10 @@
 import { z } from "zod";
 import type { GameStartInfo } from "../core/Schemas";
 import {
+  readProxyWarClipGenerationCapabilities,
+  type ProxyWarClipGenerationCapabilities,
+} from "./ClipGenerationCapabilities";
+import {
   PREMIERE_PRESENTATION_TRAIL_MS,
   premiereClipStatusResponseSchema,
   ReplayPremiereNetworkController,
@@ -1584,6 +1588,7 @@ export interface ReplayPremiereRuntimeDependencies {
   overlayFactory?: typeof mountReplayPremiereOverlay;
   copyText?: (text: string) => Promise<void>;
   downloadReminder?: (request: ReplayPremiereReminderRequest) => void;
+  readClipGenerationCapabilities?: () => Promise<ProxyWarClipGenerationCapabilities>;
   documentRef?: Document;
   windowRef?: Window;
 }
@@ -1620,6 +1625,7 @@ export class ReplayPremiereRuntimeController {
   private readonly downloadReminder: (
     request: ReplayPremiereReminderRequest,
   ) => void;
+  private readonly readClipGenerationCapabilities: () => Promise<ProxyWarClipGenerationCapabilities>;
   private readonly service: ReplayPremiereServiceLike;
   private readonly network: ReplayPremiereNetworkLike;
   private readonly readyPromise: Promise<void>;
@@ -1728,6 +1734,7 @@ export class ReplayPremiereRuntimeController {
   private clipPollBucket: number | null = null;
   private clipPollAttempts = 0;
   private clipPollStartedMs = 0;
+  private clipGenerationEnabled = false;
 
   constructor(private readonly options: ReplayPremiereRuntimeOptions) {
     if (
@@ -1744,6 +1751,12 @@ export class ReplayPremiereRuntimeController {
     this.downloadReminder =
       options.dependencies?.downloadReminder ??
       ((request) => defaultDownloadReminder(request, this.documentRef));
+    this.readClipGenerationCapabilities =
+      options.dependencies?.readClipGenerationCapabilities ??
+      (() =>
+        readProxyWarClipGenerationCapabilities(
+          options.fetchImpl ?? globalThis.fetch,
+        ));
     this.playback = new ReplayPremierePlaybackController(options.premiereId);
     this.service =
       options.dependencies?.serviceFactory?.({
@@ -1800,6 +1813,14 @@ export class ReplayPremiereRuntimeController {
       this.documentRef.addEventListener(
         "visibilitychange",
         this.onVisibilityChange,
+      );
+      void this.readClipGenerationCapabilities().then(
+        (capabilities) => {
+          this.applyClipGenerationCapability(
+            capabilities?.premiereGenerationEnabled === true,
+          );
+        },
+        () => this.applyClipGenerationCapability(false),
       );
       void this.network
         .start()
@@ -2924,6 +2945,9 @@ export class ReplayPremiereRuntimeController {
     if (request.premiereId !== this.options.premiereId) {
       throw serviceError("invalid_configuration");
     }
+    if (!this.clipGenerationEnabled) {
+      throw serviceError("request_rejected");
+    }
     this.assertInteractionWriteAllowed();
     if (
       this.clipsEnabled !== true ||
@@ -3110,6 +3134,17 @@ export class ReplayPremiereRuntimeController {
     this.clipPollAttempts = 0;
   }
 
+  private applyClipGenerationCapability(enabled: boolean): void {
+    if (this.disposed) return;
+    this.clipGenerationEnabled = enabled;
+    if (!enabled) {
+      this.clearClipPoll();
+      this.clipStatus = "idle";
+      this.clipReady = null;
+    }
+    this.hydrateOverlay();
+  }
+
   private clipView(): ReplayPremiereClipView {
     return {
       status: this.clipStatus,
@@ -3257,7 +3292,8 @@ export class ReplayPremiereRuntimeController {
       ownMarkerCounts: { ...this.ownMarkCounts },
       markerParticipantCount: this.reactionSummary?.distinctParticipants,
       markerAggregateFresh: this.reactionSummaryFresh,
-      clipMarkerAvailable: this.clipsEnabled === true,
+      clipMarkerAvailable:
+        this.clipsEnabled === true && this.clipGenerationEnabled,
       markerConfirmation: this.lastMarkConfirmation,
       headlineEvent: this.headlineEvent,
       markerPolicySeatId: null,
@@ -3299,16 +3335,18 @@ export class ReplayPremiereRuntimeController {
         displayReveal !== null &&
         networkState !== "failed" &&
         networkState !== "cancelled",
-      // A server-proven capability is required before any live clip affordance
-      // enters the DOM. Archived pages can still supply a durable ready clip
-      // directly through their separate archive model.
+      // Live clip affordances require both the interaction protocol's
+      // server-proven support and this process's constructed generation
+      // service. Durable archived clips use the separate archive view.
       clip:
         this.clipsEnabled === true &&
+        this.clipGenerationEnabled &&
         (state === "revealed" || state === "archived")
           ? this.clipView()
           : null,
       canRequestClip:
         this.clipsEnabled === true &&
+        this.clipGenerationEnabled &&
         state === "revealed" &&
         this.interactionReady &&
         !this.isReadOnlyLifecycle(),

@@ -59,6 +59,7 @@ import {
   resolveClipCaptureWindow,
   resolveClipFrameProfile,
   resolveFfmpegBinary,
+  resolveReplayRecordUpperBoundTick,
   runFfmpeg,
   ScreencastCollector,
   sha256OfBuffer,
@@ -74,6 +75,11 @@ const REPO_ROOT = path.resolve(SCRIPT_DIR, "../..");
 
 const CAPTURE_LEAD_TICKS = 50;
 const CAPTURE_TAIL_TICKS = 150;
+/**
+ * Leaves 210s of the production service's 360s job ceiling for the required
+ * clean reload, second simulation pass, capture, and encode.
+ */
+export const WINNER_TERMINAL_DISCOVERY_PHASE_TIMEOUT_MS = 150_000;
 const TICK_STEP_ENCODED_FRAMES_PER_TICK = 3;
 const WATERMARK_TEXT = "proxywar.xyz";
 const SLATE_TITLE = "Proxy War";
@@ -104,6 +110,7 @@ interface Timings {
   bundleVerifyMs: number;
   serverStartMs: number;
   chromeLaunchMs: number;
+  terminalDiscoveryMs: number;
   pageLoadToFirstFrameMs: number;
   parkMs: number;
   captureMs: number;
@@ -210,8 +217,10 @@ async function readLicenseStrings(): Promise<{
 async function verifyAndExtractRecord(spec: ClipJobSpec): Promise<{
   sourceReplaySha256: string;
   recordJson: string;
-  /** Last turn number in the record (sparse-safe), or null when unreadable. */
-  finalTurnNumber: number | null;
+  /** Declared/fallback upper bound used directly only for capped records. */
+  recordUpperBoundTick: number | null;
+  /** True only when the record carries non-null outcome metadata. */
+  hasWinnerMetadata: boolean;
 }> {
   const bundleBytes = await fs.readFile(spec.bundlePath);
   const actualSha = sha256OfBuffer(bundleBytes);
@@ -232,23 +241,134 @@ async function verifyAndExtractRecord(spec: ClipJobSpec): Promise<{
   if (record === null || typeof record !== "object") {
     fail(`bundle has no embedded gameRecord: ${spec.bundlePath}`);
   }
-  // A compressed record stores sparse turns; the LAST entry's turnNumber is
-  // the true end of the match either way (decompression only fills gaps).
-  const turns = (record as { turns?: unknown }).turns;
-  const lastTurn = Array.isArray(turns)
-    ? (turns.at(-1) as { turnNumber?: unknown } | undefined)
-    : undefined;
-  const finalTurnNumber =
-    lastTurn !== undefined &&
-    typeof lastTurn.turnNumber === "number" &&
-    Number.isSafeInteger(lastTurn.turnNumber) &&
-    lastTurn.turnNumber > 0
-      ? lastTurn.turnNumber
-      : null;
+  const recordInfo = (record as { info?: unknown }).info;
+  const winnerMetadata =
+    recordInfo !== null && typeof recordInfo === "object"
+      ? (recordInfo as { winner?: unknown }).winner
+      : undefined;
+  const hasWinnerMetadata =
+    winnerMetadata !== undefined && winnerMetadata !== null;
+  // Canonical metadata is the decompressed turn count. Sparse records can
+  // omit a long empty tail, so their final stored turn is only a fallback for
+  // capped/no-winner records. A winning record must discover its actual Win
+  // tick in-page because core execution can terminate below this upper bound.
+  const recordUpperBoundTick = resolveReplayRecordUpperBoundTick(record);
+  if (hasWinnerMetadata) {
+    const declaredTurnCount =
+      recordInfo !== null && typeof recordInfo === "object"
+        ? (recordInfo as { num_turns?: unknown }).num_turns
+        : undefined;
+    if (
+      typeof declaredTurnCount !== "number" ||
+      !Number.isSafeInteger(declaredTurnCount) ||
+      declaredTurnCount <= 0 ||
+      recordUpperBoundTick !== declaredTurnCount
+    ) {
+      fail("winner-bearing record has no valid declared turn upper bound");
+    }
+  }
   return {
     sourceReplaySha256: actualSha,
     recordJson: JSON.stringify(record),
-    finalTurnNumber,
+    recordUpperBoundTick,
+    hasWinnerMetadata,
+  };
+}
+
+/**
+ * Validate the terminal tick emitted by the replay page for a winning record.
+ * No timeout, last-visible-tick, or record-length inference is accepted.
+ */
+export function validateDiscoveredWinnerTerminalTick(
+  terminalTick: unknown,
+  declaredUpperBoundTick: number,
+): number {
+  if (
+    typeof terminalTick !== "number" ||
+    !Number.isSafeInteger(terminalTick) ||
+    terminalTick <= 0
+  ) {
+    fail("winner-bearing record did not emit a valid terminal event");
+  }
+  if (
+    !Number.isSafeInteger(declaredUpperBoundTick) ||
+    declaredUpperBoundTick <= 0
+  ) {
+    fail("winner-bearing record has no valid declared turn upper bound");
+  }
+  if (terminalTick > declaredUpperBoundTick) {
+    fail(
+      `winner terminal tick ${terminalTick} exceeds declared upper bound ${declaredUpperBoundTick}`,
+    );
+  }
+  return terminalTick;
+}
+
+interface ClipCaptureWindow {
+  parkTick: number;
+  endTick: number;
+}
+
+export interface InitialReplayRenderPlan {
+  requiresTerminalDiscovery: boolean;
+  initialFastForwardTarget: number;
+  terminalTick: number | null;
+  captureWindow: ClipCaptureWindow | null;
+}
+
+/** Build the first navigation without guessing a winner's terminal tick. */
+export function resolveInitialReplayRenderPlan(options: {
+  anchorTurn: number;
+  recordUpperBoundTick: number | null;
+  hasWinnerMetadata: boolean;
+}): InitialReplayRenderPlan {
+  if (options.hasWinnerMetadata) {
+    if (
+      options.recordUpperBoundTick === null ||
+      !Number.isSafeInteger(options.recordUpperBoundTick) ||
+      options.recordUpperBoundTick <= 0
+    ) {
+      fail("winner-bearing record has no valid declared turn upper bound");
+    }
+    return {
+      requiresTerminalDiscovery: true,
+      initialFastForwardTarget: options.recordUpperBoundTick,
+      terminalTick: null,
+      captureWindow: null,
+    };
+  }
+  const captureWindow = resolveClipCaptureWindow({
+    anchorTurn: options.anchorTurn,
+    leadTicks: CAPTURE_LEAD_TICKS,
+    tailTicks: CAPTURE_TAIL_TICKS,
+    terminalTick: options.recordUpperBoundTick,
+  });
+  return {
+    requiresTerminalDiscovery: false,
+    initialFastForwardTarget: captureWindow.parkTick,
+    terminalTick: options.recordUpperBoundTick,
+    captureWindow,
+  };
+}
+
+/** Recompute the complete window only from the page's explicit Win event. */
+export function resolveDiscoveredWinnerReplayPlan(options: {
+  anchorTurn: number;
+  declaredUpperBoundTick: number;
+  discoveredTerminalTick: unknown;
+}): { terminalTick: number; captureWindow: ClipCaptureWindow } {
+  const terminalTick = validateDiscoveredWinnerTerminalTick(
+    options.discoveredTerminalTick,
+    options.declaredUpperBoundTick,
+  );
+  return {
+    terminalTick,
+    captureWindow: resolveClipCaptureWindow({
+      anchorTurn: options.anchorTurn,
+      leadTicks: CAPTURE_LEAD_TICKS,
+      tailTicks: CAPTURE_TAIL_TICKS,
+      terminalTick,
+    }),
   };
 }
 
@@ -400,13 +520,18 @@ async function startStaticHost(options: {
  *      contain) and is overwritten with the frame-shape-aware fill value
  *      (window.__pwClip.cameraFitArg) once the worker has read the map dims.
  */
-function preInjectSource(): string {
+export function preInjectSource(): string {
   return `(() => {
   if (window.__pwClip) return;
   window.__openFrontPromoCaptureLock = true;
   window.__openFrontPromoNativeUi = true;
   const state = {
+    // Main rewrites the visible replay URL after lobby join. Retain the URL
+    // this document was actually created for so a second Page.navigate cannot
+    // accidentally accept the prior pass's already-populated state.
+    initialHref: window.location.href,
     lastTick: null,
+    terminalTick: null,
     firstTickAtMs: null,
     pauseSpam: null,
     hashWarnings: 0,
@@ -419,6 +544,9 @@ function preInjectSource(): string {
     if (typeof tick === "number") {
       state.lastTick = tick;
       if (state.firstTickAtMs === null) state.firstTickAtMs = Date.now();
+      if (event.detail.terminal === true && state.terminalTick === null) {
+        state.terminalTick = tick;
+      }
     }
   });
   state.pauseSpam = setInterval(() => {
@@ -487,6 +615,7 @@ interface ClipMapView {
 interface PageDriver {
   evalValue<T>(expression: string): Promise<T>;
   lastTick(): Promise<number | null>;
+  terminalTick(): Promise<number | null>;
   dispatchJump(turnNumber: number): Promise<void>;
   setPaused(paused: boolean): Promise<void>;
   readMapView(): Promise<ClipMapView>;
@@ -497,6 +626,38 @@ interface PageDriver {
     pollMs: number,
     label: string,
   ): Promise<number>;
+  waitForReplayPage(
+    expectedUrl: string,
+    timeoutMs: number,
+    pollMs: number,
+    label: string,
+  ): Promise<number>;
+  waitForTerminal(
+    timeoutMs: number,
+    pollMs: number,
+    label: string,
+  ): Promise<number>;
+}
+
+interface ReplayPageReadinessState {
+  initialHref: string | null;
+  firstTickAtMs: number | null;
+  lastTick: number | null;
+}
+
+export function isExpectedReplayDocumentReady(
+  state: ReplayPageReadinessState,
+  expectedInitialHref: string,
+): state is ReplayPageReadinessState & {
+  firstTickAtMs: number;
+  lastTick: number;
+} {
+  return (
+    state.initialHref === expectedInitialHref &&
+    typeof state.firstTickAtMs === "number" &&
+    typeof state.lastTick === "number" &&
+    state.lastTick >= 0
+  );
 }
 
 function makePageDriver(cdp: CdpClient, sessionId: string): PageDriver {
@@ -513,9 +674,14 @@ function makePageDriver(cdp: CdpClient, sessionId: string): PageDriver {
     evalValue<number | null>(
       "window.__pwClip ? window.__pwClip.lastTick : null",
     );
+  const terminalTick = () =>
+    evalValue<number | null>(
+      "window.__pwClip ? window.__pwClip.terminalTick : null",
+    );
   const driver: PageDriver = {
     evalValue,
     lastTick,
+    terminalTick,
     dispatchJump: async (turnNumber: number) => {
       await evalValue(
         `document.dispatchEvent(new CustomEvent("ai-league-replay-jump-turn", { detail: { turnNumber: ${Math.floor(turnNumber)} } })), true`,
@@ -591,6 +757,52 @@ function makePageDriver(cdp: CdpClient, sessionId: string): PageDriver {
       fail(
         `${label}: tick ${minTick} not reached within ${timeoutMs}ms (last=${tick ?? "none"})`,
       );
+    },
+    waitForReplayPage: async (expectedUrl, timeoutMs, pollMs, label) => {
+      const deadline = Date.now() + timeoutMs;
+      let lastHref: string | null = null;
+      let lastTickSeen: number | null = null;
+      while (Date.now() < deadline) {
+        try {
+          const state = await evalValue<
+            ReplayPageReadinessState & { href: string }
+          >(`(() => ({
+            href: window.location.href,
+            initialHref: window.__pwClip ? window.__pwClip.initialHref : null,
+            firstTickAtMs: window.__pwClip ? window.__pwClip.firstTickAtMs : null,
+            lastTick: window.__pwClip ? window.__pwClip.lastTick : null,
+          }))()`);
+          lastHref = state.href;
+          lastTickSeen = state.lastTick;
+          if (isExpectedReplayDocumentReady(state, expectedUrl)) {
+            return state.lastTick;
+          }
+        } catch {
+          // A Page.navigate can replace the execution context between CDP
+          // polls. Retry only inside this bounded navigation wait.
+        }
+        await sleep(pollMs);
+      }
+      fail(
+        `${label}: replay page did not become ready within ${timeoutMs}ms ` +
+          `(href=${lastHref ?? "none"}, tick=${lastTickSeen ?? "none"})`,
+      );
+    },
+    waitForTerminal: async (timeoutMs, pollMs, label) => {
+      const deadline = Date.now() + timeoutMs;
+      let lastLoggedAt = Date.now();
+      while (Date.now() < deadline) {
+        const tick = await terminalTick();
+        if (tick !== null) return tick;
+        if (Date.now() - lastLoggedAt >= 5000) {
+          lastLoggedAt = Date.now();
+          log(
+            `${label}: awaiting terminal event (visible tick ${await lastTick()})`,
+          );
+        }
+        await sleep(pollMs);
+      }
+      fail(`${label}: terminal event not observed within ${timeoutMs}ms`);
     },
   };
   return driver;
@@ -815,23 +1027,31 @@ async function main(): Promise<void> {
   log(`ffmpeg ok: ${ffmpegVersion}`);
 
   const bundleVerifyStartedAt = Date.now();
-  const { sourceReplaySha256, recordJson, finalTurnNumber } =
-    await verifyAndExtractRecord(spec);
+  const {
+    sourceReplaySha256,
+    recordJson,
+    recordUpperBoundTick,
+    hasWinnerMetadata,
+  } = await verifyAndExtractRecord(spec);
   const bundleVerifyMs = Date.now() - bundleVerifyStartedAt;
   log(`bundle verified: sha256=${sourceReplaySha256}`);
-  // Clamp the capture window to the record's true end (auto-clip anchors are
-  // the final released moment, so the naive anchor+tail always overruns) and
-  // shift it back so the payoff clip keeps its full span when possible.
-  const captureWindow = resolveClipCaptureWindow({
+  const initialRenderPlan = resolveInitialReplayRenderPlan({
     anchorTurn: spec.anchorTurn,
-    leadTicks: CAPTURE_LEAD_TICKS,
-    tailTicks: CAPTURE_TAIL_TICKS,
-    finalTurnNumber,
+    recordUpperBoundTick,
+    hasWinnerMetadata,
   });
-  log(
-    `capture window ticks ${captureWindow.parkTick}->${captureWindow.endTick}` +
-      ` (anchor ${spec.anchorTurn}, record end ${finalTurnNumber ?? "unknown"})`,
-  );
+  let terminalTick = initialRenderPlan.terminalTick;
+  let captureWindow = initialRenderPlan.captureWindow;
+  if (captureWindow !== null) {
+    log(
+      `capture window ticks ${captureWindow.parkTick}->${captureWindow.endTick}` +
+        ` (anchor ${spec.anchorTurn}, capped record end ${terminalTick ?? "unknown"})`,
+    );
+  } else {
+    log(
+      `winner terminal discovery required (declared upper bound ${recordUpperBoundTick})`,
+    );
+  }
 
   await fs.mkdir(spec.outDir, { recursive: true, mode: 0o700 });
   const scratchBase = process.env.PROXYWAR_CLIP_SCRATCH_DIR ?? os.tmpdir();
@@ -852,7 +1072,7 @@ async function main(): Promise<void> {
       staticDir: spec.staticDir,
       runId,
       stagedRecordPath,
-      fastForwardUntilTurn: captureWindow.parkTick,
+      fastForwardUntilTurn: initialRenderPlan.initialFastForwardTarget,
     });
     const serverStartMs = Date.now() - serverStartedAt;
     log(`static host on 127.0.0.1:${host.port} (runId ${runId})`);
@@ -912,11 +1132,75 @@ async function main(): Promise<void> {
     );
 
     const driver = makePageDriver(cdp, sessionId);
+    let terminalDiscoveryMs = 0;
+    let captureReplayUrl = host.replayUrl;
+    if (initialRenderPlan.requiresTerminalDiscovery) {
+      if (recordUpperBoundTick === null) {
+        fail("winner-bearing record has no valid declared turn upper bound");
+      }
+      const discoveryStartedAt = Date.now();
+      const discoveryDeadline =
+        discoveryStartedAt + WINNER_TERMINAL_DISCOVERY_PHASE_TIMEOUT_MS;
+      const remainingDiscoveryBudget = (): number => {
+        const remaining = discoveryDeadline - Date.now();
+        if (remaining <= 0) {
+          fail(
+            `terminal-discovery exceeded ${WINNER_TERMINAL_DISCOVERY_PHASE_TIMEOUT_MS}ms phase budget`,
+          );
+        }
+        return remaining;
+      };
+      await cdp.send("Page.navigate", { url: host.replayUrl }, sessionId);
+      await driver.waitForReplayPage(
+        host.replayUrl,
+        Math.min(120_000, remainingDiscoveryBudget()),
+        200,
+        "terminal-discovery-first-frame",
+      );
+      await driver.dispatchJump(recordUpperBoundTick);
+      const discoveredPlan = resolveDiscoveredWinnerReplayPlan({
+        anchorTurn: spec.anchorTurn,
+        declaredUpperBoundTick: recordUpperBoundTick,
+        discoveredTerminalTick: await driver.waitForTerminal(
+          remainingDiscoveryBudget(),
+          100,
+          "terminal-discovery",
+        ),
+      });
+      terminalTick = discoveredPlan.terminalTick;
+      captureWindow = discoveredPlan.captureWindow;
+      terminalDiscoveryMs = Date.now() - discoveryStartedAt;
+      const captureUrl = new URL(
+        clipReplayPageUrl({
+          baseUrl: `http://127.0.0.1:${host.port}`,
+          runId,
+          fastForwardUntilTurn: captureWindow.parkTick,
+        }),
+      );
+      // The app rewrites away query parameters after joining. A unique token
+      // still binds readiness to this second document even in the degenerate
+      // case where discovery and capture fast-forward targets are identical.
+      captureUrl.searchParams.set("clipRenderPass", randomUUID());
+      captureReplayUrl = captureUrl.toString();
+      log(
+        `discovered winner terminal tick ${terminalTick} in ${terminalDiscoveryMs}ms; ` +
+          `capture window ${captureWindow.parkTick}->${captureWindow.endTick}`,
+      );
+    }
+    if (captureWindow === null) {
+      fail("capture window unavailable after terminal discovery");
+    }
+
     const navigateStartedAt = Date.now();
-    await cdp.send("Page.navigate", { url: host.replayUrl }, sessionId);
+    await cdp.send("Page.navigate", { url: captureReplayUrl }, sessionId);
     // First frame implies: shell + bundle loaded, record fetched/validated,
     // worker booted, map initialized, first tick executed.
-    await driver.waitForTick(0, 120_000, 200, "first-frame");
+    await driver.waitForReplayPage(
+      captureReplayUrl,
+      120_000,
+      200,
+      "capture-first-frame",
+    );
     const pageLoadToFirstFrameMs = Date.now() - navigateStartedAt;
     log(`first frame after ${pageLoadToFirstFrameMs}ms`);
 
@@ -1024,6 +1308,7 @@ async function main(): Promise<void> {
       bundleVerifyMs,
       serverStartMs,
       chromeLaunchMs,
+      terminalDiscoveryMs,
       pageLoadToFirstFrameMs,
       parkMs,
       captureMs: capture.captureMs,
@@ -1108,9 +1393,14 @@ async function main(): Promise<void> {
   }
 }
 
-main().catch((error) => {
-  console.error(
-    `[clip-worker] FAILED: ${error instanceof Error ? error.stack : String(error)}`,
-  );
-  process.exitCode = 1;
-});
+const isDirectEntrypoint =
+  process.argv[1] !== undefined &&
+  path.resolve(process.argv[1]) === fileURLToPath(import.meta.url);
+if (isDirectEntrypoint) {
+  main().catch((error) => {
+    console.error(
+      `[clip-worker] FAILED: ${error instanceof Error ? error.stack : String(error)}`,
+    );
+    process.exitCode = 1;
+  });
+}

@@ -510,6 +510,21 @@ if (interruptedJobsReset > 0) {
   await persistJobs();
 }
 
+// Public, spoiler-neutral process capability. Both clients fail closed until
+// this strict response confirms that their corresponding generation service
+// was actually constructed; durable archived clip documents are independent.
+app.get("/api/clip-capabilities", (_req, res) => {
+  res.setHeader("Cache-Control", "no-store, max-age=0");
+  res.setHeader("X-Content-Type-Options", "nosniff");
+  res.status(200).json({
+    schemaVersion: 1,
+    premiereGenerationEnabled:
+      replayPremiereClipsEnabled && replayPremiereClips !== null,
+    leagueGenerationEnabled:
+      replayPremiereClipsEnabled && aiLeagueRunClips !== null,
+  });
+});
+
 // Mount before the generic parser so Premiere's stricter 32 KiB body ceiling
 // applies to both declared-length and chunked requests.
 app.use(
@@ -2227,15 +2242,15 @@ for (const signal of ["SIGINT", "SIGTERM"] as const) {
     runningChild?.kill(signal);
     renderer?.kill(signal);
     replayPremiereRevealAutoClip?.close();
-    void replayPremiereClips?.close();
-    void aiLeagueRunClips?.close();
+    const serviceShutdown = Promise.allSettled([
+      replayPremiereClips?.close() ?? Promise.resolve(),
+      aiLeagueRunClips?.close() ?? Promise.resolve(),
+      replayPremiereProduction?.service.close() ?? Promise.resolve(),
+    ]).then((results) =>
+      results.some((result) => result.status === "rejected") ? 1 : 0,
+    );
     server.close(() => {
-      void (
-        replayPremiereProduction?.service.close() ?? Promise.resolve()
-      ).then(
-        () => process.exit(0),
-        () => process.exit(1),
-      );
+      void serviceShutdown.then((exitCode) => process.exit(exitCode));
     });
   });
 }
