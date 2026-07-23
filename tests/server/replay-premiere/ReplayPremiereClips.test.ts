@@ -884,6 +884,36 @@ describe("pre-render selection", () => {
 });
 
 describe("index rebuild from a synthetic cache dir", () => {
+  async function writeCachedArtifact(options: {
+    premiereId: string;
+    bucket: number;
+    bytes: Buffer;
+    sourceReplaySha256?: string;
+    cacheRoot?: string;
+  }): Promise<{ clipPath: string; manifestPath: string }> {
+    const dir = path.join(options.cacheRoot ?? clipsRoot, options.premiereId);
+    await fs.mkdir(dir, { recursive: true });
+    const clipPath = path.join(dir, clipFileName(options.bucket));
+    const manifestPath = clipPath.replace(/\.mp4$/, ".render-manifest.json");
+    await fs.writeFile(clipPath, options.bytes);
+    await fs.writeFile(
+      manifestPath,
+      JSON.stringify({
+        premiereId: options.premiereId,
+        sourceReplaySha256: options.sourceReplaySha256 ?? SHA,
+        anchorTurn: options.bucket * 10 + 5,
+        clipVersion: 1,
+        frameShape: "square",
+        frameWidth: 1080,
+        frameHeight: 1080,
+        outSha256: createHash("sha256").update(options.bytes).digest("hex"),
+        outBytes: options.bytes.byteLength,
+        generatedAt: "2026-07-23T20:00:00.000Z",
+      }),
+    );
+    return { clipPath, manifestPath };
+  }
+
   test("adopts on-disk clips with valid sidecars and ignores mismatched ones", async () => {
     const dir = path.join(clipsRoot, PREMIERE);
     await fs.mkdir(dir, { recursive: true });
@@ -940,6 +970,152 @@ describe("index rebuild from a synthetic cache dir", () => {
     ).toBe("absent");
     await clips.close();
   });
+
+  test("rejects planted clip/manifest symlinks and special leaf files", async () => {
+    const dir = path.join(clipsRoot, PREMIERE);
+    await fs.mkdir(dir, { recursive: true });
+    const outsideClip = path.join(root, "outside.mp4");
+    const outsideManifest = path.join(root, "outside.render-manifest.json");
+    const bytes = Buffer.alloc(64, 7);
+    await fs.writeFile(outsideClip, bytes);
+    await fs.writeFile(
+      outsideManifest,
+      JSON.stringify({
+        premiereId: PREMIERE,
+        sourceReplaySha256: SHA,
+        anchorTurn: 605,
+        clipVersion: 1,
+        frameShape: "square",
+        frameWidth: 1080,
+        frameHeight: 1080,
+        outSha256: createHash("sha256").update(bytes).digest("hex"),
+        outBytes: bytes.byteLength,
+        generatedAt: "2026-07-23T20:00:00.000Z",
+      }),
+    );
+
+    // Valid bytes behind either leaf symlink must not be adopted.
+    const clipSymlink = path.join(dir, clipFileName(60));
+    await fs.symlink(outsideClip, clipSymlink);
+    await fs.copyFile(
+      outsideManifest,
+      clipSymlink.replace(/\.mp4$/, ".render-manifest.json"),
+    );
+    const manifestSymlinkClip = path.join(dir, clipFileName(70));
+    await fs.writeFile(manifestSymlinkClip, bytes);
+    await fs.symlink(
+      outsideManifest,
+      manifestSymlinkClip.replace(/\.mp4$/, ".render-manifest.json"),
+    );
+
+    // Directories planted under canonical leaf names represent special files
+    // without relying on platform-specific fifo/device creation in the test.
+    const specialClip = path.join(dir, clipFileName(80));
+    await fs.mkdir(specialClip);
+    await fs.copyFile(
+      outsideManifest,
+      specialClip.replace(/\.mp4$/, ".render-manifest.json"),
+    );
+    const specialManifestClip = path.join(dir, clipFileName(90));
+    await fs.writeFile(specialManifestClip, bytes);
+    await fs.mkdir(
+      specialManifestClip.replace(/\.mp4$/, ".render-manifest.json"),
+    );
+
+    const ancestorId = "prem_ancestor00000001";
+    const outsideAncestorRoot = path.join(root, "outside-cache-id");
+    await writeCachedArtifact({
+      cacheRoot: outsideAncestorRoot,
+      premiereId: ancestorId,
+      bucket: 60,
+      bytes,
+    });
+    await fs.symlink(
+      path.join(outsideAncestorRoot, ancestorId),
+      path.join(clipsRoot, ancestorId),
+      "dir",
+    );
+
+    const clips = makeClips();
+    await clips.rebuildIndex();
+    for (const bucket of [60, 70, 80, 90]) {
+      expect(
+        readBoundStatus(clips, { premiereId: PREMIERE, bucket }).state,
+      ).toBe("absent");
+    }
+    expect(
+      readBoundStatus(clips, { premiereId: ancestorId, bucket: 60 }).state,
+    ).toBe("absent");
+    await clips.close();
+  });
+
+  test("rejects a symlinked cache root without indexing outside bytes", async () => {
+    const actualRoot = path.join(root, "outside-cache-root");
+    await writeCachedArtifact({
+      cacheRoot: actualRoot,
+      premiereId: PREMIERE,
+      bucket: 60,
+      bytes: Buffer.from("outside-root-clip"),
+    });
+    await fs.symlink(actualRoot, clipsRoot, "dir");
+    const clips = makeClips();
+    await clips.rebuildIndex();
+    expect(
+      readBoundStatus(clips, { premiereId: PREMIERE, bucket: 60 }).state,
+    ).toBe("absent");
+    await clips.close();
+  });
+
+  test("resolveReadyClip pins the validated inode across a cache-id directory swap", async () => {
+    const originalBytes = Buffer.from("validated-clip-inode");
+    const { clipPath } = await writeCachedArtifact({
+      premiereId: PREMIERE,
+      bucket: 60,
+      bytes: originalBytes,
+    });
+    const clips = makeClips();
+    await clips.rebuildIndex();
+    const file = await clips.resolveReadyClip({
+      premiereId: PREMIERE,
+      bucket: 60,
+      sourceReplaySha256: SHA,
+    });
+    expect(file).not.toBeNull();
+    if (file === null) throw new Error("expected pinned clip handle");
+
+    const cacheIdDirectory = path.dirname(clipPath);
+    const displaced = `${cacheIdDirectory}.validated`;
+    const outsideDirectory = path.join(root, "replacement-cache-id");
+    const replacement = Buffer.alloc(originalBytes.byteLength, 9);
+    await fs.mkdir(outsideDirectory);
+    await fs.writeFile(
+      path.join(outsideDirectory, path.basename(clipPath)),
+      replacement,
+    );
+    await fs.rename(cacheIdDirectory, displaced);
+    await fs.symlink(outsideDirectory, cacheIdDirectory, "dir");
+    try {
+      const chunks: Buffer[] = [];
+      for await (const chunk of file.fileHandle.createReadStream({
+        autoClose: false,
+        start: 0,
+      })) {
+        chunks.push(Buffer.from(chunk));
+      }
+      expect(Buffer.concat(chunks)).toEqual(originalBytes);
+      expect(await fs.readFile(clipPath)).toEqual(replacement);
+    } finally {
+      await file.fileHandle.close();
+    }
+    expect(
+      await clips.resolveReadyClip({
+        premiereId: PREMIERE,
+        bucket: 60,
+        sourceReplaySha256: SHA,
+      }),
+    ).toBeNull();
+    await clips.close();
+  });
 });
 
 describe("replay-scoped lifecycle independence", () => {
@@ -962,6 +1138,7 @@ describe("replay-scoped lifecycle independence", () => {
       sourceReplaySha256: SHA,
     });
     expect(file).not.toBeNull();
+    await file?.fileHandle.close();
     expect(
       (
         await clips.requestClip({

@@ -3,6 +3,12 @@ set -euo pipefail
 
 PROJECT_DIR="${PROXYWAR_PROJECT_DIR:-$HOME/Documents/ProxyWar}"
 ENV_FILE="${PROXYWAR_ENV_FILE:-$HOME/.proxywar/proxywar-beta.env}"
+# The archived-replay Clip canary uses a bounded launchd-manager override so
+# the master gate can be enabled for one reviewed restart without editing the
+# private env file. The ordinary Premiere/league flags remain independent and
+# must stay false. Capture before sourcing because the private env intentionally
+# keeps the master gate false outside the canary.
+ARCHIVED_CLIP_CANARY_MASTER_OVERRIDE="${PROXYWAR_ARCHIVED_CLIP_CANARY_MASTER_OVERRIDE:-false}"
 
 if [[ ! -d "$PROJECT_DIR" ]]; then
   echo "ProxyWar project directory not found: $PROJECT_DIR" >&2
@@ -18,6 +24,12 @@ fi
 set -a
 source "$ENV_FILE"
 set +a
+
+if [[ "$ARCHIVED_CLIP_CANARY_MASTER_OVERRIDE" == "true" ]]; then
+  export PROXYWAR_CLIPS_ENABLED=true
+fi
+unset ARCHIVED_CLIP_CANARY_MASTER_OVERRIDE
+unset PROXYWAR_ARCHIVED_CLIP_CANARY_MASTER_OVERRIDE
 
 cd "$PROJECT_DIR"
 

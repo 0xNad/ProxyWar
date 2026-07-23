@@ -3,7 +3,8 @@ import { promises as fs } from "node:fs";
 import http from "node:http";
 import os from "node:os";
 import path from "node:path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { Readable } from "node:stream";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { proxyWarLeagueContentSecurityPolicy } from "../../../src/server/agents/ProxyWarPublicArtifacts";
 import { ReplayPremiereArchiveStore } from "../../../src/server/replay-premiere/ReplayPremiereArchiveIndex";
 import { createReplayPremiereArchiveRouter } from "../../../src/server/replay-premiere/ReplayPremiereArchiveRouter";
@@ -26,6 +27,7 @@ beforeEach(async () => {
 });
 
 afterEach(async () => {
+  vi.restoreAllMocks();
   await Promise.all(
     servers
       .splice(0)
@@ -242,10 +244,140 @@ describe("createReplayPremiereArchiveRouter", () => {
 describe("archived durable clip route", () => {
   const CLIP_BYTES = Buffer.from("mp4-bytes-for-archive-test");
 
-  async function plantDurableClip(premiereId: string): Promise<void> {
+  function durableClipManifest(
+    premiereId: string,
+    clipBytes: Buffer,
+  ): Record<string, unknown> {
+    return {
+      premiereId,
+      sourceReplaySha256: sha256Hex(premiereId),
+      anchorTurn: 250,
+      clipVersion: 1,
+      frameShape: "square",
+      frameWidth: 720,
+      frameHeight: 720,
+      outSha256: sha256Hex(clipBytes),
+      outBytes: clipBytes.byteLength,
+      generatedAt: "2026-07-20T18:30:00.000Z",
+    };
+  }
+
+  async function plantDurableClip(
+    premiereId: string,
+    options: {
+      clipBytes?: Buffer;
+      manifest?: Record<string, unknown>;
+    } = {},
+  ): Promise<void> {
     const clipsDir = path.join(root, "archive-v1", "clips");
+    const clipBytes = options.clipBytes ?? CLIP_BYTES;
     await fs.mkdir(clipsDir, { recursive: true });
-    await fs.writeFile(path.join(clipsDir, `${premiereId}.mp4`), CLIP_BYTES);
+    await fs.writeFile(path.join(clipsDir, `${premiereId}.mp4`), clipBytes);
+    await fs.writeFile(
+      path.join(clipsDir, `${premiereId}.render-manifest.json`),
+      JSON.stringify(
+        options.manifest ?? durableClipManifest(premiereId, clipBytes),
+      ),
+    );
+  }
+
+  function durableClipPaths(premiereId: string): {
+    archiveRoot: string;
+    clipsDirectory: string;
+    clip: string;
+    manifest: string;
+  } {
+    const archiveRoot = path.join(root, "archive-v1");
+    const clipsDirectory = path.join(archiveRoot, "clips");
+    return {
+      archiveRoot,
+      clipsDirectory,
+      clip: path.join(clipsDirectory, `${premiereId}.mp4`),
+      manifest: path.join(clipsDirectory, `${premiereId}.render-manifest.json`),
+    };
+  }
+
+  type ArchivedDescriptorKind =
+    | "archiveRoot"
+    | "clipsDirectory"
+    | "clip"
+    | "manifest";
+
+  function trackArchivedDescriptorCloses(
+    options: {
+      clipStreamFactory?: () => Readable;
+    } = {},
+  ): {
+    expectClosedExactlyOnce(): Promise<void>;
+  } {
+    const paths = durableClipPaths(ARCHIVED_ID);
+    const kindByPath = new Map<string, ArchivedDescriptorKind>([
+      [paths.archiveRoot, "archiveRoot"],
+      [paths.clipsDirectory, "clipsDirectory"],
+      [paths.clip, "clip"],
+      [paths.manifest, "manifest"],
+    ]);
+    const closeSpies = new Map<
+      ArchivedDescriptorKind,
+      ReturnType<typeof vi.fn>
+    >();
+    const originalOpen = fs.open.bind(fs);
+    vi.spyOn(fs, "open").mockImplementation(async (...args) => {
+      const handle = await originalOpen(...args);
+      const kind =
+        typeof args[0] === "string" ? kindByPath.get(args[0]) : undefined;
+      if (kind !== undefined) {
+        const closeSpy = vi.fn(handle.close.bind(handle));
+        closeSpies.set(kind, closeSpy);
+        Object.defineProperty(handle, "close", {
+          configurable: true,
+          enumerable: true,
+          value: closeSpy,
+          writable: true,
+        });
+        if (kind === "clip" && options.clipStreamFactory !== undefined) {
+          Object.defineProperty(handle, "createReadStream", {
+            configurable: true,
+            value: () => {
+              const stream = options.clipStreamFactory?.();
+              stream?.once("close", () => {
+                void handle.close();
+              });
+              return stream;
+            },
+            writable: true,
+          });
+        }
+      }
+      return handle;
+    });
+
+    return {
+      async expectClosedExactlyOnce() {
+        const expectedKinds: ArchivedDescriptorKind[] = [
+          "archiveRoot",
+          "clipsDirectory",
+          "clip",
+          "manifest",
+        ];
+        for (let attempt = 0; attempt < 100; attempt += 1) {
+          if (
+            expectedKinds.every(
+              (kind) => (closeSpies.get(kind)?.mock.calls.length ?? 0) >= 1,
+            )
+          ) {
+            break;
+          }
+          await new Promise((resolve) => setTimeout(resolve, 5));
+        }
+        expect([...closeSpies.keys()].sort()).toEqual(
+          [...expectedKinds].sort(),
+        );
+        for (const kind of expectedKinds) {
+          expect(closeSpies.get(kind), kind).toHaveBeenCalledTimes(1);
+        }
+      },
+    };
   }
 
   function archivePayloadFrom(html: string): {
@@ -296,6 +428,147 @@ describe("archived durable clip route", () => {
     });
   });
 
+  it("serves a replay-scoped league clip with distinct admission and league source hashes", async () => {
+    const h = await harness();
+    const leagueSourceSha256 = sha256Hex("retained-league-game-record");
+    const pointer = h.store.lookup(ARCHIVED_ID);
+    expect(pointer?.sourceReplaySha256).toBe(sha256Hex(ARCHIVED_ID));
+    expect(pointer?.sourceReplaySha256).not.toBe(leagueSourceSha256);
+    await plantDurableClip(ARCHIVED_ID, {
+      manifest: {
+        ...durableClipManifest(ARCHIVED_ID, CLIP_BYTES),
+        premiereId: "league-coworld-run-001",
+        sourceReplaySha256: leagueSourceSha256,
+      },
+    });
+    await h.run(async (baseUrl) => {
+      const response = await fetch(
+        `${baseUrl}/premiere/${ARCHIVED_ID}/clip.mp4`,
+      );
+      expect(response.status).toBe(200);
+      expect(Buffer.from(await response.arrayBuffer())).toEqual(CLIP_BYTES);
+    });
+  });
+
+  it("rejects a league clip whose manifest names a different public run key", async () => {
+    const h = await harness();
+    await plantDurableClip(ARCHIVED_ID, {
+      manifest: {
+        ...durableClipManifest(ARCHIVED_ID, CLIP_BYTES),
+        premiereId: "league-coworld-another-run",
+        sourceReplaySha256: sha256Hex("retained-league-game-record"),
+      },
+    });
+    await h.run(async (baseUrl) => {
+      const response = await fetch(
+        `${baseUrl}/premiere/${ARCHIVED_ID}/clip.mp4`,
+      );
+      expect(response.status).toBe(404);
+      expect(await response.json()).toEqual({
+        error: { code: "PREMIERE_UNAVAILABLE" },
+      });
+    });
+  });
+
+  it("closes every pinned descriptor exactly once after a completed GET", async () => {
+    const h = await harness();
+    await plantDurableClip(ARCHIVED_ID);
+    const tracker = trackArchivedDescriptorCloses();
+    await h.run(async (baseUrl) => {
+      const response = await fetch(
+        `${baseUrl}/premiere/${ARCHIVED_ID}/clip.mp4`,
+      );
+      expect(response.status).toBe(200);
+      expect(Buffer.from(await response.arrayBuffer())).toEqual(CLIP_BYTES);
+      await tracker.expectClosedExactlyOnce();
+    });
+  });
+
+  it("closes every pinned descriptor exactly once before completing HEAD", async () => {
+    const h = await harness();
+    await plantDurableClip(ARCHIVED_ID);
+    const tracker = trackArchivedDescriptorCloses();
+    await h.run(async (baseUrl) => {
+      const response = await fetch(
+        `${baseUrl}/premiere/${ARCHIVED_ID}/clip.mp4`,
+        { method: "HEAD" },
+      );
+      expect(response.status).toBe(200);
+      await tracker.expectClosedExactlyOnce();
+    });
+  });
+
+  it("closes every pinned descriptor exactly once on stream error", async () => {
+    const h = await harness();
+    await plantDurableClip(ARCHIVED_ID);
+    const tracker = trackArchivedDescriptorCloses({
+      clipStreamFactory: () =>
+        new Readable({
+          read() {
+            this.destroy(new Error("forced archived clip stream error"));
+          },
+        }),
+    });
+    await h.run(async (baseUrl) => {
+      const response = await fetch(
+        `${baseUrl}/premiere/${ARCHIVED_ID}/clip.mp4`,
+      );
+      expect(response.status).toBe(404);
+      expect(await response.json()).toEqual({
+        error: { code: "PREMIERE_UNAVAILABLE" },
+      });
+      await tracker.expectClosedExactlyOnce();
+    });
+  });
+
+  it("closes every pinned descriptor exactly once when the client aborts", async () => {
+    const h = await harness();
+    await plantDurableClip(ARCHIVED_ID);
+    let emitted = false;
+    const tracker = trackArchivedDescriptorCloses({
+      clipStreamFactory: () =>
+        new Readable({
+          read() {
+            if (emitted) return;
+            emitted = true;
+            this.push(Buffer.from([CLIP_BYTES[0]]));
+          },
+        }),
+    });
+    await h.run(async (baseUrl) => {
+      await new Promise<void>((resolve, reject) => {
+        let settled = false;
+        const finish = (error?: Error): void => {
+          if (settled) return;
+          settled = true;
+          if (error === undefined) resolve();
+          else reject(error);
+        };
+        const request = http.get(
+          `${baseUrl}/premiere/${ARCHIVED_ID}/clip.mp4`,
+          (response) => {
+            response.once("data", () => {
+              request.destroy();
+              finish();
+            });
+            response.once("error", (error) => {
+              if ((error as NodeJS.ErrnoException).code === "ECONNRESET") {
+                finish();
+              } else {
+                finish(error);
+              }
+            });
+          },
+        );
+        request.once("error", (error) => {
+          if ((error as NodeJS.ErrnoException).code === "ECONNRESET") finish();
+          else finish(error);
+        });
+      });
+      await tracker.expectClosedExactlyOnce();
+    });
+  });
+
   it("404s (fixed body, never downstream) when no durable artifact exists", async () => {
     const h = await harness();
     await h.run(async (baseUrl) => {
@@ -319,6 +592,135 @@ describe("archived durable clip route", () => {
         error: { code: "PREMIERE_UNAVAILABLE" },
       });
     });
+  });
+
+  it.each(["clip", "manifest"] as const)(
+    "never follows a symlinked archived %s leaf",
+    async (leaf) => {
+      const h = await harness();
+      await plantDurableClip(ARCHIVED_ID);
+      const paths = durableClipPaths(ARCHIVED_ID);
+      const target = paths[leaf];
+      const outside = path.join(root, `outside-${path.basename(target)}`);
+      await fs.rename(target, outside);
+      await fs.symlink(outside, target);
+      await h.run(async (baseUrl) => {
+        const response = await fetch(
+          `${baseUrl}/premiere/${ARCHIVED_ID}/clip.mp4`,
+        );
+        expect(response.status).toBe(404);
+        expect(await response.json()).toEqual({
+          error: { code: "PREMIERE_UNAVAILABLE" },
+        });
+      });
+    },
+  );
+
+  it("never follows a symlinked archive clips directory", async () => {
+    const h = await harness();
+    await plantDurableClip(ARCHIVED_ID);
+    const paths = durableClipPaths(ARCHIVED_ID);
+    const outside = path.join(root, "outside-archive-clips");
+    await fs.rename(paths.clipsDirectory, outside);
+    await fs.symlink(outside, paths.clipsDirectory);
+    await h.run(async (baseUrl) => {
+      const response = await fetch(
+        `${baseUrl}/premiere/${ARCHIVED_ID}/clip.mp4`,
+      );
+      expect(response.status).toBe(404);
+      expect(await response.json()).toEqual({
+        error: { code: "PREMIERE_UNAVAILABLE" },
+      });
+    });
+  });
+
+  it.each(["clipsDirectory", "clip", "manifest"] as const)(
+    "rejects a same-content %s pathname swap after opening the descriptor",
+    async (targetKind) => {
+      const h = await harness();
+      await plantDurableClip(ARCHIVED_ID);
+      const target = durableClipPaths(ARCHIVED_ID)[targetKind];
+      const originalOpen = fs.open.bind(fs);
+      let swapped = false;
+      vi.spyOn(fs, "open").mockImplementation(async (...args) => {
+        const handle = await originalOpen(...args);
+        if (!swapped && args[0] === target) {
+          swapped = true;
+          const displaced = `${target}.displaced`;
+          if (targetKind === "clipsDirectory") {
+            await fs.rename(target, displaced);
+            await fs.mkdir(target);
+          } else {
+            const bytes = await fs.readFile(target);
+            await fs.rename(target, displaced);
+            await fs.writeFile(target, bytes);
+          }
+        }
+        return handle;
+      });
+
+      await h.run(async (baseUrl) => {
+        const response = await fetch(
+          `${baseUrl}/premiere/${ARCHIVED_ID}/clip.mp4`,
+        );
+        expect(swapped).toBe(true);
+        expect(response.status).toBe(404);
+        expect(await response.json()).toEqual({
+          error: { code: "PREMIERE_UNAVAILABLE" },
+        });
+      });
+    },
+  );
+
+  it("rejects malformed, provenance-mismatched, and oversized manifests", async () => {
+    const cases: Array<{ name: string; bytes: Buffer }> = [
+      { name: "malformed", bytes: Buffer.from("{not-json") },
+      {
+        name: "wrong-source",
+        bytes: Buffer.from(
+          JSON.stringify({
+            ...durableClipManifest(ARCHIVED_ID, CLIP_BYTES),
+            sourceReplaySha256: sha256Hex("different-source"),
+          }),
+        ),
+      },
+      { name: "oversized", bytes: Buffer.alloc(64 * 1024 + 1, 0x20) },
+    ];
+    for (const fixture of cases) {
+      const h = await harness();
+      await plantDurableClip(ARCHIVED_ID);
+      await fs.writeFile(durableClipPaths(ARCHIVED_ID).manifest, fixture.bytes);
+      await h.run(async (baseUrl) => {
+        const response = await fetch(
+          `${baseUrl}/premiere/${ARCHIVED_ID}/clip.mp4`,
+        );
+        expect(response.status, fixture.name).toBe(404);
+        expect(await response.json()).toEqual({
+          error: { code: "PREMIERE_UNAVAILABLE" },
+        });
+      });
+    }
+  });
+
+  it("rejects MP4 bytes whose size or SHA disagrees with the manifest", async () => {
+    const fixtures = [
+      Buffer.concat([CLIP_BYTES, Buffer.from("-longer")]),
+      Buffer.from(CLIP_BYTES.map((byte) => byte ^ 0xff)),
+    ];
+    for (const fixture of fixtures) {
+      const h = await harness();
+      await plantDurableClip(ARCHIVED_ID);
+      await fs.writeFile(durableClipPaths(ARCHIVED_ID).clip, fixture);
+      await h.run(async (baseUrl) => {
+        const response = await fetch(
+          `${baseUrl}/premiere/${ARCHIVED_ID}/clip.mp4`,
+        );
+        expect(response.status).toBe(404);
+        expect(await response.json()).toEqual({
+          error: { code: "PREMIERE_UNAVAILABLE" },
+        });
+      });
+    }
   });
 
   it("404s unknown and registered (non-revealed) ids terminally — no fall-through", async () => {

@@ -26,7 +26,15 @@
 import express, { type Request, type Response, type Router } from "express";
 import { spawn, type ChildProcess } from "node:child_process";
 import { createHash } from "node:crypto";
-import { createReadStream, promises as fs, type StatsFs } from "node:fs";
+import {
+  createReadStream,
+  promises as fs,
+  constants as fsConstants,
+  type Dirent,
+  type Stats,
+  type StatsFs,
+} from "node:fs";
+import type { FileHandle } from "node:fs/promises";
 import path from "node:path";
 import { matchProxyWarPublicPremiereReadPath } from "../agents/ProxyWarPublicArtifacts";
 import type { PremiereState } from "./ReplayPremiereContracts";
@@ -124,7 +132,24 @@ export interface ReplayPremiereClipReadRequest {
 }
 
 export interface ReplayPremiereClipFile {
+  /**
+   * Read-only descriptor for the exact inode whose size and sha256 were
+   * validated. Consumers MUST stream this handle and close it; reopening the
+   * cache pathname would reintroduce a post-validation swap race.
+   */
+  fileHandle: FileHandle;
+  byteLength: number;
+  sha256: string;
+}
+
+export interface ReplayPremiereClipReadyArtifact {
+  premiereId: string;
+  sourceReplaySha256: string;
+  bucket: number;
+  anchorTurn: number;
+  clipVersion: number;
   filePath: string;
+  manifestPath: string;
   byteLength: number;
   sha256: string;
 }
@@ -156,6 +181,19 @@ export interface ReplayPremiereClipsOptions {
   statfs?: (path: string) => Promise<StatsFs>;
   spawnWorker?: SpawnClipWorker;
   logger?: (message: string) => void;
+  /** Best-effort server-side completion and filtered startup-repair hook. */
+  onClipReady?: (
+    artifact: ReplayPremiereClipReadyArtifact,
+  ) => Promise<void> | void;
+  /**
+   * Explicit, cheap startup-repair eligibility filter. Rebuild hashes every
+   * cache entry because disk is the index, but invokes the expensive ready
+   * callback only for the best eligible artifact per id. Omit to do no startup
+   * callback repair; render-complete callbacks are unaffected.
+   */
+  shouldRepairClipOnIndexRebuild?: (
+    artifact: ReplayPremiereClipReadyArtifact,
+  ) => Promise<boolean> | boolean;
   /**
    * Maps a render request to its on-disk source bundle. Default: the premiere
    * content-addressed layout (`<sourceBundleRoot>/sources/sha256/xx/<sha>.replay`).
@@ -282,35 +320,97 @@ export class ReplayPremiereClips {
     await fs
       .mkdir(this.options.clipsRoot, { recursive: true, mode: 0o700 })
       .catch(() => undefined);
-    let premiereDirs: string[];
+    const pinnedRoot = await openPinnedDirectory(this.options.clipsRoot);
+    if (pinnedRoot === null) return;
     try {
-      premiereDirs = await fs.readdir(this.options.clipsRoot);
-    } catch {
-      return; // No clip store yet.
-    }
-    for (const premiereId of premiereDirs) {
-      const dir = path.join(this.options.clipsRoot, premiereId);
-      let files: string[];
+      let premiereDirs: Dirent[];
       try {
-        files = await fs.readdir(dir);
+        premiereDirs = await fs.readdir(this.options.clipsRoot, {
+          withFileTypes: true,
+        });
       } catch {
-        continue;
+        return; // No stable clip store yet.
       }
-      for (const file of files) {
-        const bucket = parseClipFileName(file);
-        if (bucket === null) continue;
-        const filePath = path.join(dir, file);
-        const manifestPath = sidecarPath(filePath);
-        const entry = await this.loadIndexEntry(
-          premiereId,
-          bucket,
-          filePath,
-          manifestPath,
-        );
-        if (entry !== null) this.ready.set(cacheKey(premiereId, bucket), entry);
+      if (!(await pinnedDirectoryIsStable(pinnedRoot))) return;
+      for (const premiereDir of premiereDirs) {
+        // Never traverse a symlink or non-directory planted directly under the
+        // cache root. Pinning below closes a post-readdir directory swap.
+        if (!premiereDir.isDirectory()) continue;
+        const premiereId = premiereDir.name;
+        const dir = path.join(this.options.clipsRoot, premiereId);
+        const pinnedDir = await openPinnedDirectory(dir, [pinnedRoot]);
+        if (pinnedDir === null) continue;
+        try {
+          let files: Dirent[];
+          try {
+            files = await fs.readdir(dir, { withFileTypes: true });
+          } catch {
+            continue;
+          }
+          if (!(await pinnedDirectoriesAreStable([pinnedRoot, pinnedDir]))) {
+            continue;
+          }
+          for (const file of files) {
+            // A planted symlink, fifo, socket, device, or directory with a clip
+            // filename is never a cache candidate. open(2) below repeats this
+            // check with O_NOFOLLOW so a post-readdir replacement also fails.
+            if (!file.isFile()) continue;
+            const bucket = parseClipFileName(file.name);
+            if (bucket === null) continue;
+            const filePath = path.join(dir, file.name);
+            const manifestPath = sidecarPath(filePath);
+            const entry = await this.loadIndexEntry(
+              premiereId,
+              bucket,
+              filePath,
+              manifestPath,
+              [pinnedRoot, pinnedDir],
+            );
+            if (entry !== null) {
+              this.ready.set(cacheKey(premiereId, bucket), entry);
+            }
+          }
+        } finally {
+          await closeFileHandle(pinnedDir.fileHandle);
+        }
       }
+    } finally {
+      await closeFileHandle(pinnedRoot.fileHandle);
     }
     this.logger(`clip index rebuilt: ${this.ready.size} cached`);
+    if (
+      this.options.onClipReady !== undefined &&
+      this.options.shouldRepairClipOnIndexRebuild !== undefined
+    ) {
+      const bestByPremiere = new Map<string, ClipIndexEntry>();
+      for (const entry of this.ready.values()) {
+        const artifact = this.toReadyArtifact(entry);
+        let shouldRepair = false;
+        try {
+          shouldRepair =
+            await this.options.shouldRepairClipOnIndexRebuild(artifact);
+        } catch (error) {
+          this.logger(
+            `clip repair filter failed premiere=${entry.premiereId} bucket=${entry.bucket}: ${
+              error instanceof Error ? error.message : String(error)
+            }`,
+          );
+        }
+        if (!shouldRepair) {
+          continue;
+        }
+        const best = bestByPremiere.get(entry.premiereId);
+        if (best === undefined || entry.anchorTurn > best.anchorTurn) {
+          bestByPremiere.set(entry.premiereId, entry);
+        }
+      }
+      const repairEntries = [...bestByPremiere.values()].sort((left, right) =>
+        left.premiereId.localeCompare(right.premiereId),
+      );
+      for (const entry of repairEntries) {
+        await this.notifyClipReady(entry, "index_rebuild");
+      }
+    }
   }
 
   private async loadIndexEntry(
@@ -318,19 +418,37 @@ export class ReplayPremiereClips {
     bucket: number,
     filePath: string,
     manifestPath: string,
+    pinnedDirectories: readonly PinnedDirectory[],
   ): Promise<ClipIndexEntry | null> {
+    let clip: PinnedRegularFile | null = null;
+    let manifestFile: PinnedRegularFile | null = null;
     try {
-      const [stat, manifestRaw] = await Promise.all([
-        fs.stat(filePath),
-        fs.readFile(manifestPath, "utf8"),
+      [clip, manifestFile] = await Promise.all([
+        openPinnedRegularFile(filePath, pinnedDirectories),
+        openPinnedRegularFile(manifestPath, pinnedDirectories),
       ]);
-      const manifest = parseRenderManifest(JSON.parse(manifestRaw));
+      if (clip === null || manifestFile === null) return null;
+      const [clipDigest, manifestBytes] = await Promise.all([
+        sha256FileHandle(clip.fileHandle),
+        manifestFile.fileHandle.readFile(),
+      ]);
+      if (
+        clipDigest.byteLength !== clip.stat.size ||
+        manifestBytes.byteLength !== manifestFile.stat.size ||
+        !(await pinnedRegularFileIsStable(clip)) ||
+        !(await pinnedRegularFileIsStable(manifestFile))
+      ) {
+        return null;
+      }
+      const manifest = parseRenderManifest(
+        JSON.parse(manifestBytes.toString("utf8")),
+      );
       if (manifest === null) return null;
       if (
         manifest.premiereId !== premiereId ||
         manifest.clipVersion !== PREMIERE_CLIP_VERSION ||
-        manifest.outBytes !== stat.size ||
-        (await sha256File(filePath)) !== manifest.outSha256
+        manifest.outBytes !== clip.stat.size ||
+        clipDigest.sha256 !== manifest.outSha256
       ) {
         return null;
       }
@@ -341,13 +459,18 @@ export class ReplayPremiereClips {
         clipVersion: PREMIERE_CLIP_VERSION,
         anchorTurn: manifest.anchorTurn,
         filePath,
-        byteLength: stat.size,
+        byteLength: clip.stat.size,
         sha256: manifest.outSha256,
-        createdMs: Date.parse(manifest.generatedAt) || stat.mtimeMs,
-        lastAccessMs: stat.mtimeMs,
+        createdMs: Date.parse(manifest.generatedAt) || clip.stat.mtimeMs,
+        lastAccessMs: clip.stat.mtimeMs,
       };
     } catch {
       return null;
+    } finally {
+      await Promise.all([
+        closeFileHandle(clip?.fileHandle),
+        closeFileHandle(manifestFile?.fileHandle),
+      ]);
     }
   }
 
@@ -391,8 +514,9 @@ export class ReplayPremiereClips {
   }
 
   /**
-   * Resolve the on-disk file for the mp4 route. Returns null (=> 404) unless
-   * a cached artifact exists on disk for the exact requested source identity.
+   * Resolve and pin the exact validated inode for the mp4 route. Returns null
+   * (=> 404) unless a cached artifact exists for the requested source. The
+   * caller owns the returned FileHandle and must close it.
    */
   async resolveReadyClip(
     request: ReplayPremiereClipReadRequest,
@@ -406,21 +530,60 @@ export class ReplayPremiereClips {
     ) {
       return null;
     }
+    const key = cacheKey(request.premiereId, request.bucket);
+    const expectedDirectory = path.join(
+      this.options.clipsRoot,
+      entry.premiereId,
+    );
+    const expectedFilePath = path.join(
+      expectedDirectory,
+      clipFileName(entry.bucket),
+    );
+    let pinnedRoot: PinnedDirectory | null = null;
+    let pinnedDirectory: PinnedDirectory | null = null;
+    let pinned: PinnedRegularFile | null = null;
+    let returnPinnedHandle = false;
     try {
-      const stat = await fs.stat(entry.filePath);
-      if (stat.size !== entry.byteLength) return null;
-      if ((await sha256File(entry.filePath)) !== entry.sha256) return null;
+      if (entry.filePath !== expectedFilePath) return null;
+      pinnedRoot = await openPinnedDirectory(this.options.clipsRoot);
+      if (pinnedRoot === null) return null;
+      pinnedDirectory = await openPinnedDirectory(expectedDirectory, [
+        pinnedRoot,
+      ]);
+      if (pinnedDirectory === null) return null;
+      pinned = await openPinnedRegularFile(entry.filePath, [
+        pinnedRoot,
+        pinnedDirectory,
+      ]);
+      if (pinned === null) return null;
+      const digest = await sha256FileHandle(pinned.fileHandle);
+      if (
+        pinned.stat.size !== entry.byteLength ||
+        digest.byteLength !== pinned.stat.size ||
+        digest.sha256 !== entry.sha256 ||
+        !(await pinnedRegularFileIsStable(pinned))
+      ) {
+        return null;
+      }
+      entry.lastAccessMs = this.now();
+      returnPinnedHandle = true;
+      return {
+        fileHandle: pinned.fileHandle,
+        byteLength: entry.byteLength,
+        sha256: entry.sha256,
+      };
     } catch {
-      // The index outran the disk (evicted/removed); fail closed.
-      this.ready.delete(cacheKey(request.premiereId, request.bucket));
       return null;
+    } finally {
+      await Promise.all([
+        closeFileHandle(pinnedRoot?.fileHandle),
+        closeFileHandle(pinnedDirectory?.fileHandle),
+        returnPinnedHandle
+          ? Promise.resolve()
+          : closeFileHandle(pinned?.fileHandle),
+      ]);
+      if (!returnPinnedHandle) this.ready.delete(key);
     }
-    entry.lastAccessMs = this.now();
-    return {
-      filePath: entry.filePath,
-      byteLength: entry.byteLength,
-      sha256: entry.sha256,
-    };
   }
 
   // -- Render admission ----------------------------------------------------
@@ -787,7 +950,28 @@ export class ReplayPremiereClips {
       createdMs: nowMs,
       lastAccessMs: nowMs,
     });
+    const promoted = this.ready.get(cacheKey(job.premiereId, job.bucket));
+    if (promoted !== undefined) {
+      await this.notifyClipReady(promoted, "render_complete");
+    }
     await this.evict();
+  }
+
+  private async notifyClipReady(
+    entry: ClipIndexEntry,
+    reason: "render_complete" | "index_rebuild",
+  ): Promise<void> {
+    const callback = this.options.onClipReady;
+    if (callback === undefined) return;
+    try {
+      await callback(this.toReadyArtifact(entry));
+    } catch (error) {
+      this.logger(
+        `clip ready callback failed premiere=${entry.premiereId} bucket=${entry.bucket} reason=${reason}: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+    }
   }
 
   // -- LRU eviction --------------------------------------------------------
@@ -950,6 +1134,22 @@ export class ReplayPremiereClips {
         watchUrl: this.premiereWatchUrl(entry.premiereId),
         anchorTurn: entry.anchorTurn,
       }),
+    };
+  }
+
+  private toReadyArtifact(
+    entry: ClipIndexEntry,
+  ): ReplayPremiereClipReadyArtifact {
+    return {
+      premiereId: entry.premiereId,
+      sourceReplaySha256: entry.sourceReplaySha256,
+      bucket: entry.bucket,
+      anchorTurn: entry.anchorTurn,
+      clipVersion: entry.clipVersion,
+      filePath: entry.filePath,
+      manifestPath: sidecarPath(entry.filePath),
+      byteLength: entry.byteLength,
+      sha256: entry.sha256,
     };
   }
 
@@ -1660,22 +1860,47 @@ async function handleClipFileRequest(
     sendClipDocumentFailure(response, 404);
     return;
   }
-  setClipDocumentHeaders(response);
-  response.status(200);
-  response.setHeader("Content-Type", "video/mp4");
-  response.setHeader("Content-Length", file.byteLength);
-  response.setHeader(
-    "Content-Disposition",
-    `attachment; filename="${clipFileName(route.bucket)}"`,
-  );
-  if (request.method === "HEAD") {
-    response.end();
-    return;
+  try {
+    setClipDocumentHeaders(response);
+    response.status(200);
+    response.setHeader("Content-Type", "video/mp4");
+    response.setHeader("Content-Length", file.byteLength);
+    response.setHeader(
+      "Content-Disposition",
+      `attachment; filename="${clipFileName(route.bucket)}"`,
+    );
+    if (request.method === "HEAD") {
+      await closeFileHandle(file.fileHandle);
+      response.end();
+      return;
+    }
+    pipePinnedClipFile(file, response, () => {
+      if (!response.headersSent) sendClipDocumentFailure(response, 404);
+      else response.destroy();
+    });
+  } catch (error) {
+    await closeFileHandle(file.fileHandle);
+    throw error;
   }
-  const stream = createReadStream(file.filePath);
-  stream.on("error", () => {
-    if (!response.headersSent) sendClipDocumentFailure(response, 404);
-    else response.destroy();
+}
+
+/** Stream only the already-validated descriptor; never reopen its pathname. */
+function pipePinnedClipFile(
+  file: ReplayPremiereClipFile,
+  response: Response,
+  onStreamError: () => void,
+): void {
+  const stream = file.fileHandle.createReadStream({
+    autoClose: true,
+    start: 0,
+  });
+  const close = (): void => {
+    stream.destroy();
+  };
+  response.once("finish", close);
+  response.once("close", close);
+  stream.once("error", () => {
+    onStreamError();
   });
   stream.pipe(response);
 }
@@ -1801,6 +2026,204 @@ function normalizeSourceSha256(value: string): string {
     throw invalid("clip_source_hash_invalid", 400);
   }
   return normalized;
+}
+
+interface PinnedRegularFile {
+  filePath: string;
+  fileHandle: FileHandle;
+  /** Stable lstat/fstat identity captured immediately after O_NOFOLLOW open. */
+  stat: Stats;
+  pinnedDirectories: readonly PinnedDirectory[];
+}
+
+interface PinnedDirectory {
+  directoryPath: string;
+  fileHandle: FileHandle;
+  stat: Stats;
+}
+
+const PINNED_READ_FLAGS =
+  fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW | fsConstants.O_NONBLOCK;
+const PINNED_DIRECTORY_FLAGS = PINNED_READ_FLAGS | fsConstants.O_DIRECTORY;
+
+async function openPinnedDirectory(
+  directoryPath: string,
+  pinnedAncestors: readonly PinnedDirectory[] = [],
+): Promise<PinnedDirectory | null> {
+  if (!(await pinnedDirectoriesAreStable(pinnedAncestors))) return null;
+  let before: Stats;
+  try {
+    before = await fs.lstat(directoryPath);
+  } catch {
+    return null;
+  }
+  if (!before.isDirectory() || before.isSymbolicLink()) return null;
+
+  let fileHandle: FileHandle | null = null;
+  try {
+    fileHandle = await fs.open(directoryPath, PINNED_DIRECTORY_FLAGS);
+    const [opened, afterOpen, ancestorsStable] = await Promise.all([
+      fileHandle.stat(),
+      fs.lstat(directoryPath),
+      pinnedDirectoriesAreStable(pinnedAncestors),
+    ]);
+    if (
+      !ancestorsStable ||
+      !sameStableDirectory(before, opened) ||
+      !sameStableDirectory(opened, afterOpen)
+    ) {
+      await closeFileHandle(fileHandle);
+      return null;
+    }
+    return { directoryPath, fileHandle, stat: opened };
+  } catch {
+    await closeFileHandle(fileHandle);
+    return null;
+  }
+}
+
+/**
+ * Open one regular leaf without following it, then prove the pathname and
+ * descriptor still name the same stable inode. O_NONBLOCK prevents a planted
+ * fifo/device replacement from hanging open(2) between lstat and open.
+ */
+async function openPinnedRegularFile(
+  filePath: string,
+  pinnedDirectories: readonly PinnedDirectory[] = [],
+): Promise<PinnedRegularFile | null> {
+  if (!(await pinnedDirectoriesAreStable(pinnedDirectories))) return null;
+  let before: Stats;
+  try {
+    before = await fs.lstat(filePath);
+  } catch {
+    return null;
+  }
+  if (!before.isFile() || before.isSymbolicLink()) return null;
+
+  let fileHandle: FileHandle | null = null;
+  try {
+    fileHandle = await fs.open(filePath, PINNED_READ_FLAGS);
+    const [opened, afterOpen, directoriesStable] = await Promise.all([
+      fileHandle.stat(),
+      fs.lstat(filePath),
+      pinnedDirectoriesAreStable(pinnedDirectories),
+    ]);
+    if (
+      !directoriesStable ||
+      !sameStableRegularFile(before, opened) ||
+      !sameStableRegularFile(opened, afterOpen)
+    ) {
+      await closeFileHandle(fileHandle);
+      return null;
+    }
+    return { filePath, fileHandle, stat: opened, pinnedDirectories };
+  } catch {
+    await closeFileHandle(fileHandle);
+    return null;
+  }
+}
+
+async function pinnedRegularFileIsStable(
+  pinned: PinnedRegularFile,
+): Promise<boolean> {
+  try {
+    const [descriptorStat, pathStat, directoriesStable] = await Promise.all([
+      pinned.fileHandle.stat(),
+      fs.lstat(pinned.filePath),
+      pinnedDirectoriesAreStable(pinned.pinnedDirectories),
+    ]);
+    return (
+      directoriesStable &&
+      sameStableRegularFile(pinned.stat, descriptorStat) &&
+      sameStableRegularFile(descriptorStat, pathStat)
+    );
+  } catch {
+    return false;
+  }
+}
+
+async function pinnedDirectoriesAreStable(
+  directories: readonly PinnedDirectory[],
+): Promise<boolean> {
+  const results = await Promise.all(
+    directories.map((directory) => pinnedDirectoryIsStable(directory)),
+  );
+  return results.every(Boolean);
+}
+
+async function pinnedDirectoryIsStable(
+  pinned: PinnedDirectory,
+): Promise<boolean> {
+  try {
+    const [descriptorStat, pathStat] = await Promise.all([
+      pinned.fileHandle.stat(),
+      fs.lstat(pinned.directoryPath),
+    ]);
+    return (
+      sameStableDirectory(pinned.stat, descriptorStat) &&
+      sameStableDirectory(descriptorStat, pathStat)
+    );
+  } catch {
+    return false;
+  }
+}
+
+function sameStableDirectory(left: Stats, right: Stats): boolean {
+  return (
+    left.isDirectory() &&
+    !left.isSymbolicLink() &&
+    right.isDirectory() &&
+    !right.isSymbolicLink() &&
+    left.dev === right.dev &&
+    left.ino === right.ino &&
+    left.mode === right.mode &&
+    left.uid === right.uid &&
+    left.gid === right.gid
+  );
+}
+
+function sameStableRegularFile(left: Stats, right: Stats): boolean {
+  return (
+    left.isFile() &&
+    !left.isSymbolicLink() &&
+    right.isFile() &&
+    !right.isSymbolicLink() &&
+    left.dev === right.dev &&
+    left.ino === right.ino &&
+    left.mode === right.mode &&
+    left.nlink === right.nlink &&
+    left.uid === right.uid &&
+    left.gid === right.gid &&
+    left.size === right.size &&
+    left.mtimeMs === right.mtimeMs &&
+    left.ctimeMs === right.ctimeMs
+  );
+}
+
+async function sha256FileHandle(
+  fileHandle: FileHandle,
+): Promise<{ sha256: string; byteLength: number }> {
+  const hash = createHash("sha256");
+  let byteLength = 0;
+  const buffer = Buffer.allocUnsafe(64 * 1024);
+  while (true) {
+    const { bytesRead } = await fileHandle.read(
+      buffer,
+      0,
+      buffer.byteLength,
+      byteLength,
+    );
+    if (bytesRead === 0) break;
+    hash.update(buffer.subarray(0, bytesRead));
+    byteLength += bytesRead;
+  }
+  return { sha256: hash.digest("hex"), byteLength };
+}
+
+async function closeFileHandle(
+  fileHandle: FileHandle | null | undefined,
+): Promise<void> {
+  await fileHandle?.close().catch(() => undefined);
 }
 
 async function sha256File(filePath: string): Promise<string> {

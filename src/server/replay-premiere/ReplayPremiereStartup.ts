@@ -1,4 +1,5 @@
 import type { ReplayPremiereArchiveStore } from "./ReplayPremiereArchiveIndex";
+import type { ReplayPremiereArchivedClipPromoter } from "./ReplayPremiereArchivedClipPromoter";
 import {
   DEFAULT_REPLAY_PREMIERE_CATALOG_LIMITS,
   ReplayPremiereAdmissionCatalog,
@@ -198,6 +199,8 @@ export interface ReplayPremiereProductionStartupOptions {
    * terminal-premiere lifecycle entirely.
    */
   archiveStore?: ReplayPremiereArchiveStore;
+  /** Shared with league-ready callbacks so every durable write is serialized. */
+  archivedClipPromoter?: ReplayPremiereArchivedClipPromoter;
   reclamationGraceMs?: number;
   reclamationSweepMs?: number;
   /** Permanently fences and drains queued/running clip work before live reclaim. */
@@ -677,6 +680,7 @@ export async function startReplayPremiereProduction(
               interactionEventStore: activeEventStore,
               interactionLimits: options.interactionLimits,
               fenceClipWritesAndDrain: options.fenceClipWritesAndDrain,
+              archivedClipPromoter: options.archivedClipPromoter,
               // Durable-clip promotion telemetry rides the runtime diagnostic
               // channel (operator-visible, never authoritative).
               logger: (message) =>

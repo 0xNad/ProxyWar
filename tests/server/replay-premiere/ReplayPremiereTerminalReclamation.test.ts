@@ -1,7 +1,7 @@
 import { promises as fs } from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ReplayPremiereArchiveStore } from "../../../src/server/replay-premiere/ReplayPremiereArchiveIndex";
 import { encodePremiereAuthoritativeResult } from "../../../src/server/replay-premiere/ReplayPremiereAuthoritativeResult";
 import type { ReplayPremiereHttpTarget } from "../../../src/server/replay-premiere/ReplayPremiereHttp";
@@ -767,9 +767,81 @@ describe("durable archived-clip promotion", () => {
       await fs.utimes(archivedClipPath(premiereId), when, when);
     }
     expect(await exists(archivedClipPath(ids[0]))).toBe(false);
-    expect(await exists(archivedClipManifestPath(ids[0]))).toBe(false);
+    // Provenance sidecars are monotonic so a concurrent re-link can never
+    // expose an MP4 after eviction without its matching manifest.
+    expect(await exists(archivedClipManifestPath(ids[0]))).toBe(true);
     expect(await exists(archivedClipPath(ids[1]))).toBe(true);
     expect(await exists(archivedClipPath(ids[2]))).toBe(true);
+  });
+
+  it("preserves retry state when retention cannot unlink an old MP4, then converges on retry", async () => {
+    const firstId = "prem_retryretain000001";
+    const secondId = "prem_retryretain000002";
+    const logs: string[] = [];
+    const store = await ReplayPremiereArchiveStore.open({
+      privateStateRoot: root,
+    });
+    const reclaimer = new ReplayPremiereTerminalReclaimer({
+      privateStateRoot: root,
+      store,
+      graceMs: GRACE_MS,
+      now: () => new Date("2026-07-20T18:45:00.000Z"),
+      maxArchivedClips: 1,
+      logger: (message) => logs.push(message),
+    });
+    await writeBulk(firstId);
+    await writeCachedClip(firstId, 61, 615, Buffer.alloc(40, 1));
+    await reclaimer.reclaimIfEligible(target(firstId));
+    const old = new Date("2026-07-01T00:00:00.000Z");
+    await fs.utimes(archivedClipPath(firstId), old, old);
+
+    await writeBulk(secondId);
+    await writeCachedClip(secondId, 61, 615, Buffer.alloc(41, 2));
+    const originalUnlink = fs.unlink.bind(fs);
+    const unlinkFailure = Object.assign(new Error("injected unlink failure"), {
+      code: "EACCES",
+    });
+    const unlinkSpy = vi
+      .spyOn(fs, "unlink")
+      .mockImplementation(async (file) => {
+        if (path.resolve(String(file)) === archivedClipPath(firstId)) {
+          throw unlinkFailure;
+        }
+        await originalUnlink(file);
+      });
+    try {
+      await expect(reclaimer.reclaimIfEligible(target(secondId))).rejects.toBe(
+        unlinkFailure,
+      );
+    } finally {
+      unlinkSpy.mockRestore();
+    }
+
+    // The failed eviction was never reported/accounted as success, its
+    // sidecar remains, and the newly archived premiere retains every bulk
+    // artifact needed for the existing-pointer retry.
+    expect(logs).not.toContain(`archived_clip_evicted ${firstId} retention`);
+    expect(await exists(archivedClipPath(firstId))).toBe(true);
+    expect(await exists(archivedClipManifestPath(firstId))).toBe(true);
+    expect(await exists(admissionPath(secondId))).toBe(true);
+    expect(await exists(runtimeSnapshotPath(secondId))).toBe(true);
+    expect(await exists(interactionSnapshotPath(secondId))).toBe(true);
+
+    const retry = new ReplayPremiereTerminalReclaimer({
+      privateStateRoot: root,
+      store,
+      graceMs: GRACE_MS,
+      now: () => new Date("2026-07-20T18:46:00.000Z"),
+      maxArchivedClips: 1,
+      logger: (message) => logs.push(message),
+    });
+    const result = await retry.reclaimIfEligible(target(secondId));
+    expect(result.reason).toBe("already_reclaimed");
+    expect(await exists(archivedClipPath(firstId))).toBe(false);
+    expect(await exists(archivedClipManifestPath(firstId))).toBe(true);
+    expect(await exists(archivedClipPath(secondId))).toBe(true);
+    expect(await exists(admissionPath(secondId))).toBe(false);
+    expect(logs).toContain(`archived_clip_evicted ${firstId} retention`);
   });
 });
 

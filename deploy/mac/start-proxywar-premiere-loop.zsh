@@ -30,13 +30,19 @@ set +a
 
 cd "$PROJECT_DIR"
 
+# This wrapper bypasses the package script's `cross-env GAME_ENV=dev` so
+# launchd can supervise the direct Node process. Preserve the same required
+# bundled-game environment explicitly; without it checkpoint projection fails
+# before an otherwise valid completed replay can be admitted.
+export GAME_ENV=dev
+
 # Storage-floor preflight (defaults to 10 GiB, matching the league mirror). Skip
 # the tick cheaply rather than starting downloads under disk pressure; the loop
 # itself also re-checks the floor before each fetch.
 MIN_FREE_GIB="${PROXYWAR_LEAGUE_MIN_FREE_GIB:-10}"
 FREE_KB="$(df -k "$PROJECT_DIR" | awk 'NR==2 {print $4}')"
-FREE_GIB=$(( FREE_KB / 1024 / 1024 ))
-if (( FREE_GIB < MIN_FREE_GIB )); then
+FREE_GIB=$((FREE_KB / 1024 / 1024))
+if ((FREE_GIB < MIN_FREE_GIB)); then
   echo "premiere-loop skipped: ${FREE_GIB} GiB free < ${MIN_FREE_GIB} GiB floor" >&2
   exit 0
 fi

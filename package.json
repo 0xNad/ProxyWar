@@ -37,6 +37,7 @@
     "agent:league-demo:planner:codex-cli": "cross-env GAME_ENV=dev AI_LEAGUE_LLM_PROVIDER=codex-cli AI_LEAGUE_REQUIRE_EXTERNAL_BRAIN_SUCCESS=true AI_LEAGUE_CODEX_TIMEOUT_MS=180000 tsx src/scripts/ai-agent-league-smoke.ts --brain=planner-codex-cli --runner=step-locked --scenario=actions --disable-alliance-actions --max-decision-ms=180000 --max-steps=3",
     "agent:league-demo:planner:codex-medium": "cross-env GAME_ENV=dev AI_LEAGUE_LLM_PROVIDER=codex-cli AI_LEAGUE_REQUIRE_EXTERNAL_BRAIN_SUCCESS=true AI_LEAGUE_CODEX_REASONING_EFFORT=medium AI_LEAGUE_CODEX_TIMEOUT_MS=180000 tsx src/scripts/ai-agent-league-smoke.ts --brain=planner-codex-cli --runner=step-locked --scenario=actions --disable-alliance-actions --max-decision-ms=180000 --max-steps=15 --turns-per-decision-step=100 --replay-tail-turns=350 --bots=5 --nations=5 --map=Pangaea --map-size=Compact --vary-spawns",
     "agent:demo-server": "cross-env GAME_ENV=dev tsx src/scripts/ai-agent-demo-server.ts",
+    "clips:canary": "tsx src/scripts/ai-league-clip-canary.ts",
     "league:mirror": "tsx src/scripts/coworld-league-mirror.ts",
     "league:mirror:watch": "tsx src/scripts/coworld-league-mirror.ts --watch",
     "league:prune": "tsx src/scripts/coworld-league-prune.ts",

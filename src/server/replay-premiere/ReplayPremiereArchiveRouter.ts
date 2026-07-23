@@ -1,6 +1,7 @@
 import express, { type Request, type Response, type Router } from "express";
-import { randomBytes } from "node:crypto";
-import { createReadStream, promises as fs } from "node:fs";
+import { createHash, randomBytes } from "node:crypto";
+import { constants, promises as fs, type Stats } from "node:fs";
+import type { FileHandle } from "node:fs/promises";
 import path from "node:path";
 import englishTranslations from "../../../resources/lang/en.json";
 import { matchProxyWarPublicPremiereReadPath } from "../agents/ProxyWarPublicArtifacts";
@@ -10,9 +11,12 @@ import type {
 } from "./ReplayPremiereArchiveIndex";
 import {
   archivedPremiereClipFileName,
+  archivedPremiereClipManifestFileName,
   archivedPremiereClipRoute,
   archivedPremiereClipsDir,
+  parsePremiereClipRenderManifest,
 } from "./ReplayPremiereClips";
+import { PREMIERE_CLIP_VERSION } from "./ReplayPremiereContracts";
 import type { ReplayPremiereHttpRegistry } from "./ReplayPremiereHttp";
 import { publicRunKeyForSourceRunId } from "./ReplayPremiereLoopCore";
 import {
@@ -25,6 +29,11 @@ import type { PremiereResultSummaryV1 } from "./ReplayPremiereResultSummary";
 const JSON_DOCUMENT_CSP =
   "default-src 'none'; frame-ancestors 'none'; base-uri 'none'; sandbox";
 const ARCHIVE_DATA_ELEMENT_ID = "proxywar-premiere-archive";
+const MAX_ARCHIVED_CLIP_MANIFEST_BYTES = 64 * 1024;
+const ARCHIVED_CLIP_HASH_BUFFER_BYTES = 64 * 1024;
+const PINNED_READ_FLAGS =
+  constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK;
+const PINNED_DIRECTORY_FLAGS = PINNED_READ_FLAGS | constants.O_DIRECTORY;
 
 /** The archived page's downloadable-clip descriptor (stat-derived, no schema). */
 export interface PremiereArchiveClientClip {
@@ -183,7 +192,7 @@ async function handleArchivedClipRequest(context: {
     sendFailure(response, 416);
     return;
   }
-  const clip = await resolveArchivedClipFile(
+  const clip = await openValidatedArchivedClipFile(
     options.archiveStore,
     options.registry,
     route.premiereId,
@@ -192,36 +201,42 @@ async function handleArchivedClipRequest(context: {
     sendFailure(response, 404);
     return;
   }
-  setArchivedClipSuccessHeaders(response);
-  response.status(200);
-  response.setHeader("Content-Type", "video/mp4");
-  response.setHeader("Content-Length", clip.byteLength);
-  response.setHeader(
-    "Content-Disposition",
-    `attachment; filename="${archivedPremiereClipFileName(route.premiereId)}"`,
-  );
-  if (request.method === "HEAD") {
-    response.end();
-    return;
+  try {
+    setArchivedClipSuccessHeaders(response);
+    response.status(200);
+    response.setHeader("Content-Type", "video/mp4");
+    response.setHeader("Content-Length", clip.byteLength);
+    response.setHeader(
+      "Content-Disposition",
+      `attachment; filename="${archivedPremiereClipFileName(route.premiereId)}"`,
+    );
+    if (request.method === "HEAD") {
+      await clip.close();
+      response.end();
+      return;
+    }
+    pipePinnedArchivedClipFile(clip, response, () => {
+      if (!response.headersSent) sendFailure(response, 404);
+      else response.destroy();
+    });
+  } catch (error) {
+    await clip.close();
+    throw error;
   }
-  const stream = createReadStream(clip.filePath);
-  stream.on("error", () => {
-    if (!response.headersSent) sendFailure(response, 404);
-    else response.destroy();
-  });
-  stream.pipe(response);
 }
 
 /**
- * Resolves the durable clip artifact for a premiere id, or null (=> 404).
+ * Opens and authenticates the durable clip artifact, or null (=> 404).
  * Requires: not live-registered, archived pointer present, reveal-public
- * (revealedAt non-null, terminal revealed|archived), artifact on disk.
+ * (revealedAt non-null, terminal revealed|archived), and a canonical manifest
+ * whose immutable source, output size, and output hash match the same pinned
+ * MP4 descriptor returned to the caller. No validated pathname is reopened.
  */
-async function resolveArchivedClipFile(
+async function openValidatedArchivedClipFile(
   archiveStore: ReplayPremiereArchiveRouterOptions["archiveStore"],
   registry: ReplayPremiereArchiveRouterOptions["registry"],
   premiereId: string,
-): Promise<{ filePath: string; byteLength: number } | null> {
+): Promise<PinnedArchivedClipFile | null> {
   if (registry.get(premiereId) !== null) return null;
   const pointer = archiveStore.lookup(premiereId);
   if (
@@ -232,16 +247,386 @@ async function resolveArchivedClipFile(
   ) {
     return null;
   }
-  const filePath = path.join(
-    archivedPremiereClipsDir(archiveStore.archiveRoot),
+
+  const archiveRootPath = archiveStore.archiveRoot;
+  const clipsDirectoryPath = archivedPremiereClipsDir(archiveRootPath);
+  const clipPath = path.join(
+    clipsDirectoryPath,
     archivedPremiereClipFileName(premiereId),
   );
+  const manifestPath = path.join(
+    clipsDirectoryPath,
+    archivedPremiereClipManifestFileName(premiereId),
+  );
+  let archiveRoot: PinnedDirectory | null = null;
+  let clipsDirectory: PinnedDirectory | null = null;
+  let clip: PinnedRegularFile | null = null;
+  let manifest: PinnedRegularFile | null = null;
+  let transferred = false;
   try {
-    const stat = await fs.stat(filePath);
-    if (!stat.isFile() || stat.size <= 0) return null;
-    return { filePath, byteLength: stat.size };
+    archiveRoot = await openPinnedDirectory(archiveRootPath);
+    if (archiveRoot === null) return null;
+    clipsDirectory = await openPinnedDirectory(clipsDirectoryPath, [
+      archiveRoot,
+    ]);
+    if (clipsDirectory === null) return null;
+    [clip, manifest] = await Promise.all([
+      openPinnedRegularFile(clipPath, [archiveRoot, clipsDirectory]),
+      openPinnedRegularFile(manifestPath, [archiveRoot, clipsDirectory]),
+    ]);
+    if (clip === null || manifest === null) return null;
+    if (
+      clip.stat.size <= 0 ||
+      manifest.stat.size <= 0 ||
+      manifest.stat.size > MAX_ARCHIVED_CLIP_MANIFEST_BYTES
+    ) {
+      return null;
+    }
+
+    const [manifestBytes, clipDigest] = await Promise.all([
+      manifest.fileHandle.readFile(),
+      sha256FileHandle(clip.fileHandle),
+    ]);
+    if (
+      manifestBytes.byteLength !== manifest.stat.size ||
+      manifestBytes.byteLength > MAX_ARCHIVED_CLIP_MANIFEST_BYTES ||
+      clipDigest.byteLength !== clip.stat.size
+    ) {
+      return null;
+    }
+    const renderManifest = parsePremiereClipRenderManifest(
+      JSON.parse(manifestBytes.toString("utf8")),
+    );
+    const originalPremiereProvenance =
+      renderManifest?.premiereId === premiereId &&
+      renderManifest.sourceReplaySha256 === pointer.sourceReplaySha256;
+    const ratedCoworldRunProvenance =
+      pointer.sourceKind === "rated_coworld" &&
+      renderManifest?.premiereId ===
+        publicRunKeyForSourceRunId(pointer.sourceRunId);
+    if (
+      renderManifest === null ||
+      (!originalPremiereProvenance && !ratedCoworldRunProvenance) ||
+      renderManifest.clipVersion !== PREMIERE_CLIP_VERSION ||
+      renderManifest.outBytes !== clip.stat.size ||
+      renderManifest.outBytes <= 0 ||
+      renderManifest.outSha256 !== clipDigest.sha256
+    ) {
+      return null;
+    }
+    if (
+      !(await pinnedRegularFileIsStable(clip)) ||
+      !(await pinnedRegularFileIsStable(manifest)) ||
+      !isSameRevealPublicPointer(archiveStore.lookup(premiereId), pointer)
+    ) {
+      return null;
+    }
+
+    const closeClip = closeFileHandlesOnce([clip.fileHandle]);
+    const closeCompanions = closeFileHandlesOnce([
+      manifest.fileHandle,
+      clipsDirectory.fileHandle,
+      archiveRoot.fileHandle,
+    ]);
+    const close = closeOperationsOnce([closeClip, closeCompanions]);
+    transferred = true;
+    return {
+      fileHandle: clip.fileHandle,
+      byteLength: clip.stat.size,
+      close,
+      closeAfterStream: closeCompanions,
+    };
   } catch {
     return null;
+  } finally {
+    if (!transferred) {
+      await closeFileHandles([
+        clip?.fileHandle,
+        manifest?.fileHandle,
+        clipsDirectory?.fileHandle,
+        archiveRoot?.fileHandle,
+      ]);
+    }
+  }
+}
+
+interface PinnedArchivedClipFile {
+  fileHandle: FileHandle;
+  byteLength: number;
+  close(): Promise<void>;
+  /** The FileHandle stream owns the MP4 descriptor after construction. */
+  closeAfterStream(): Promise<void>;
+}
+
+interface PinnedDirectory {
+  directoryPath: string;
+  fileHandle: FileHandle;
+  stat: Stats;
+}
+
+interface PinnedRegularFile {
+  filePath: string;
+  fileHandle: FileHandle;
+  stat: Stats;
+  pinnedDirectories: readonly PinnedDirectory[];
+}
+
+async function openPinnedDirectory(
+  directoryPath: string,
+  pinnedAncestors: readonly PinnedDirectory[] = [],
+): Promise<PinnedDirectory | null> {
+  if (!(await pinnedDirectoriesAreStable(pinnedAncestors))) return null;
+  let before: Stats;
+  try {
+    before = await fs.lstat(directoryPath);
+  } catch {
+    return null;
+  }
+  if (!before.isDirectory() || before.isSymbolicLink()) return null;
+
+  let fileHandle: FileHandle | null = null;
+  try {
+    fileHandle = await fs.open(directoryPath, PINNED_DIRECTORY_FLAGS);
+    const [opened, afterOpen, ancestorsStable] = await Promise.all([
+      fileHandle.stat(),
+      fs.lstat(directoryPath),
+      pinnedDirectoriesAreStable(pinnedAncestors),
+    ]);
+    if (
+      !ancestorsStable ||
+      !sameStableDirectory(before, opened) ||
+      !sameStableDirectory(opened, afterOpen)
+    ) {
+      await closeFileHandle(fileHandle);
+      return null;
+    }
+    return { directoryPath, fileHandle, stat: opened };
+  } catch {
+    await closeFileHandle(fileHandle);
+    return null;
+  }
+}
+
+async function openPinnedRegularFile(
+  filePath: string,
+  pinnedDirectories: readonly PinnedDirectory[],
+): Promise<PinnedRegularFile | null> {
+  if (!(await pinnedDirectoriesAreStable(pinnedDirectories))) return null;
+  let before: Stats;
+  try {
+    before = await fs.lstat(filePath);
+  } catch {
+    return null;
+  }
+  if (!before.isFile() || before.isSymbolicLink()) return null;
+
+  let fileHandle: FileHandle | null = null;
+  try {
+    fileHandle = await fs.open(filePath, PINNED_READ_FLAGS);
+    const [opened, afterOpen, directoriesStable] = await Promise.all([
+      fileHandle.stat(),
+      fs.lstat(filePath),
+      pinnedDirectoriesAreStable(pinnedDirectories),
+    ]);
+    if (
+      !directoriesStable ||
+      !sameStableRegularFile(before, opened) ||
+      !sameStableRegularFile(opened, afterOpen)
+    ) {
+      await closeFileHandle(fileHandle);
+      return null;
+    }
+    return { filePath, fileHandle, stat: opened, pinnedDirectories };
+  } catch {
+    await closeFileHandle(fileHandle);
+    return null;
+  }
+}
+
+async function pinnedRegularFileIsStable(
+  pinned: PinnedRegularFile,
+): Promise<boolean> {
+  try {
+    const [descriptorStat, pathStat, directoriesStable] = await Promise.all([
+      pinned.fileHandle.stat(),
+      fs.lstat(pinned.filePath),
+      pinnedDirectoriesAreStable(pinned.pinnedDirectories),
+    ]);
+    return (
+      directoriesStable &&
+      sameStableRegularFile(pinned.stat, descriptorStat) &&
+      sameStableRegularFile(descriptorStat, pathStat)
+    );
+  } catch {
+    return false;
+  }
+}
+
+async function pinnedDirectoriesAreStable(
+  directories: readonly PinnedDirectory[],
+): Promise<boolean> {
+  const results = await Promise.all(
+    directories.map((directory) => pinnedDirectoryIsStable(directory)),
+  );
+  return results.every(Boolean);
+}
+
+async function pinnedDirectoryIsStable(
+  pinned: PinnedDirectory,
+): Promise<boolean> {
+  try {
+    const [descriptorStat, pathStat] = await Promise.all([
+      pinned.fileHandle.stat(),
+      fs.lstat(pinned.directoryPath),
+    ]);
+    return (
+      sameStableDirectory(pinned.stat, descriptorStat) &&
+      sameStableDirectory(descriptorStat, pathStat)
+    );
+  } catch {
+    return false;
+  }
+}
+
+function sameStableDirectory(left: Stats, right: Stats): boolean {
+  return (
+    left.isDirectory() &&
+    !left.isSymbolicLink() &&
+    right.isDirectory() &&
+    !right.isSymbolicLink() &&
+    left.dev === right.dev &&
+    left.ino === right.ino &&
+    left.mode === right.mode &&
+    left.uid === right.uid &&
+    left.gid === right.gid
+  );
+}
+
+function sameStableRegularFile(left: Stats, right: Stats): boolean {
+  return (
+    left.isFile() &&
+    !left.isSymbolicLink() &&
+    right.isFile() &&
+    !right.isSymbolicLink() &&
+    left.dev === right.dev &&
+    left.ino === right.ino &&
+    left.mode === right.mode &&
+    left.nlink === right.nlink &&
+    left.uid === right.uid &&
+    left.gid === right.gid &&
+    left.size === right.size &&
+    left.mtimeMs === right.mtimeMs &&
+    left.ctimeMs === right.ctimeMs
+  );
+}
+
+async function sha256FileHandle(
+  fileHandle: FileHandle,
+): Promise<{ sha256: string; byteLength: number }> {
+  const hash = createHash("sha256");
+  let byteLength = 0;
+  const buffer = Buffer.allocUnsafe(ARCHIVED_CLIP_HASH_BUFFER_BYTES);
+  for (;;) {
+    const { bytesRead } = await fileHandle.read(
+      buffer,
+      0,
+      buffer.byteLength,
+      byteLength,
+    );
+    if (bytesRead === 0) break;
+    hash.update(buffer.subarray(0, bytesRead));
+    byteLength += bytesRead;
+  }
+  return { sha256: hash.digest("hex"), byteLength };
+}
+
+function isSameRevealPublicPointer(
+  current: PremiereArchivePointerV1 | null,
+  expected: PremiereArchivePointerV1,
+): boolean {
+  return (
+    current !== null &&
+    current.schemaVersion === expected.schemaVersion &&
+    current.premiereId === expected.premiereId &&
+    current.sourceRunId === expected.sourceRunId &&
+    current.sourceKind === expected.sourceKind &&
+    current.terminalState === expected.terminalState &&
+    current.revealedAt === expected.revealedAt &&
+    current.revealedAt !== null &&
+    (current.terminalState === "revealed" ||
+      current.terminalState === "archived") &&
+    current.publicationCommitmentHash === expected.publicationCommitmentHash &&
+    current.sourceReplaySha256 === expected.sourceReplaySha256 &&
+    current.summaryHash === expected.summaryHash &&
+    current.summaryRelPath === expected.summaryRelPath &&
+    current.reclaimedAt === expected.reclaimedAt
+  );
+}
+
+function closeFileHandlesOnce(
+  fileHandles: readonly FileHandle[],
+): () => Promise<void> {
+  let closePromise: Promise<void> | null = null;
+  return () => {
+    closePromise ??= closeFileHandles(fileHandles);
+    return closePromise;
+  };
+}
+
+function closeOperationsOnce(
+  operations: readonly (() => Promise<void>)[],
+): () => Promise<void> {
+  let closePromise: Promise<void> | null = null;
+  return () => {
+    closePromise ??= Promise.all(
+      operations.map((operation) => operation()),
+    ).then(() => undefined);
+    return closePromise;
+  };
+}
+
+async function closeFileHandles(
+  fileHandles: readonly (FileHandle | null | undefined)[],
+): Promise<void> {
+  await Promise.all(
+    fileHandles.map((fileHandle) => closeFileHandle(fileHandle)),
+  );
+}
+
+async function closeFileHandle(
+  fileHandle: FileHandle | null | undefined,
+): Promise<void> {
+  await fileHandle?.close().catch(() => undefined);
+}
+
+/** Stream the authenticated MP4 descriptor; never reopen its pathname. */
+function pipePinnedArchivedClipFile(
+  clip: PinnedArchivedClipFile,
+  response: Response,
+  onStreamError: () => void,
+): void {
+  const stream = clip.fileHandle.createReadStream({
+    autoClose: true,
+    start: 0,
+  });
+  let finalized = false;
+  const finalize = (): void => {
+    if (finalized) return;
+    finalized = true;
+    stream.destroy();
+    void clip.closeAfterStream();
+  };
+  response.once("finish", finalize);
+  response.once("close", finalize);
+  stream.once("error", () => {
+    finalize();
+    onStreamError();
+  });
+  try {
+    stream.pipe(response);
+  } catch {
+    finalize();
+    onStreamError();
   }
 }
 
@@ -286,11 +671,13 @@ async function handleArchivedDocumentRequest(context: {
     sendFailure(response, 404);
     return;
   }
-  const clip = await resolveArchivedClipFile(
+  const clip = await openValidatedArchivedClipFile(
     options.archiveStore,
     options.registry,
     route.premiereId,
   );
+  const clipByteLength = clip?.byteLength ?? null;
+  await clip?.close();
   const replayRunKey =
     summary.sourceKind === "rated_coworld"
       ? publicRunKeyForSourceRunId(summary.sourceRunId)
@@ -314,11 +701,11 @@ async function handleArchivedDocumentRequest(context: {
     replayRunKey,
     clipGenerationTarget,
     clip:
-      clip === null
+      clipByteLength === null
         ? null
         : {
             url: archivedPremiereClipRoute(summary.premiereId),
-            byteLength: clip.byteLength,
+            byteLength: clipByteLength,
           },
     summary,
   };

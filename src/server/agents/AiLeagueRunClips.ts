@@ -19,15 +19,17 @@
 
 import express, { type Request, type Response, type Router } from "express";
 import { createHash } from "node:crypto";
-import { createReadStream, promises as fs, type StatsFs } from "node:fs";
+import { promises as fs, type StatsFs } from "node:fs";
 import path from "node:path";
 import { GameRecordSchema } from "../../core/Schemas";
 import {
   ReplayPremiereClips,
   type ReplayPremiereClipFile,
+  type ReplayPremiereClipReadyArtifact,
   type ReplayPremiereClipsOptions,
 } from "../replay-premiere/ReplayPremiereClips";
 import type { PremiereClipStatusResponse } from "../replay-premiere/ReplayPremiereContracts";
+import { premiereClipBucketForTurn } from "../replay-premiere/ReplayPremiereContracts";
 import { ReplayPremiereError } from "../replay-premiere/ReplayPremiereErrors";
 import {
   isSafeProxyWarArtifactSegment,
@@ -71,6 +73,29 @@ export interface AiLeagueRunClipsOptions {
   statfs?: (path: string) => Promise<StatsFs>;
   spawnWorker?: ReplayPremiereClipsOptions["spawnWorker"];
   logger?: (message: string) => void;
+  /** Ready/cache-repair callback for durable archived-Premiere promotion. */
+  onRunClipReady?: (ready: AiLeagueRunClipReady) => Promise<void> | void;
+  /**
+   * Cheap server-composition filter for archived run ids needing crash repair.
+   * Omit to avoid rebuild callbacks for unrelated league-cache history.
+   */
+  shouldRepairRunClipOnIndexRebuild?: (runKey: string) => boolean;
+  /** One-shot startup canary: every request/read/callback is exact-target only. */
+  canaryScope?: {
+    runKey: string;
+    bucket: number;
+    sourceReplaySha256: string;
+    expiresAt: string;
+    /** False while armed; true only after durable claim or on claimed restart. */
+    isAuthorized: () => boolean;
+  };
+}
+
+export interface AiLeagueRunClipReady {
+  runKey: string;
+  bucket: number;
+  sourceReplaySha256: string;
+  sourceFilePath: string;
 }
 
 export interface RetainedAiLeagueReplaySource {
@@ -84,6 +109,14 @@ export interface RetainedAiLeagueReplaySource {
 export class AiLeagueRunClips {
   private readonly clips: ReplayPremiereClips;
   private readonly runsRootDir: string;
+  private readonly onRunClipReady:
+    | ((ready: AiLeagueRunClipReady) => Promise<void> | void)
+    | undefined;
+  private readonly shouldRepairRunClipOnIndexRebuild:
+    | ((runKey: string) => boolean)
+    | undefined;
+  private readonly canaryScope: AiLeagueRunClipsOptions["canaryScope"];
+  private readonly now: () => number;
   private readonly shaMemo = new Map<
     string,
     {
@@ -98,6 +131,11 @@ export class AiLeagueRunClips {
 
   constructor(options: AiLeagueRunClipsOptions) {
     this.runsRootDir = path.resolve(options.runsRootDir);
+    this.onRunClipReady = options.onRunClipReady;
+    this.shouldRepairRunClipOnIndexRebuild =
+      options.shouldRepairRunClipOnIndexRebuild;
+    this.canaryScope = options.canaryScope;
+    this.now = options.now ?? (() => Date.now());
     const publicOrigin = options.publicOrigin.replace(/\/$/, "");
     this.clips = new ReplayPremiereClips({
       clipsRoot: options.clipsRoot,
@@ -120,6 +158,59 @@ export class AiLeagueRunClips {
         this.recordPathFor(request.premiereId),
       watchUrlForId: (runKey) => `${publicOrigin}/ai-league-replay/${runKey}`,
       clipUrlFor: aiLeagueRunClipFileRoute,
+      onClipReady: (artifact) => this.handleReadyArtifact(artifact),
+      shouldRepairClipOnIndexRebuild: (artifact) =>
+        this.shouldRepairReadyArtifact(artifact),
+    });
+  }
+
+  private async shouldRepairReadyArtifact(
+    artifact: ReplayPremiereClipReadyArtifact,
+  ): Promise<boolean> {
+    if (
+      this.shouldRepairRunClipOnIndexRebuild === undefined ||
+      !isServableRunKey(artifact.premiereId) ||
+      !this.shouldRepairRunClipOnIndexRebuild(artifact.premiereId) ||
+      !this.canaryActionAllows(
+        artifact.premiereId,
+        artifact.bucket,
+        artifact.sourceReplaySha256,
+      )
+    ) {
+      return false;
+    }
+    // Select the best cache entry only after binding it to the retained source.
+    // Otherwise a higher stale-source bucket can suppress a lower valid repair.
+    const source = await this.resolveRetainedRunSource(artifact.premiereId);
+    return source?.sourceReplaySha256 === artifact.sourceReplaySha256;
+  }
+
+  private async handleReadyArtifact(
+    artifact: ReplayPremiereClipReadyArtifact,
+  ): Promise<void> {
+    if (this.onRunClipReady === undefined) return;
+    if (
+      !this.canaryActionAllows(
+        artifact.premiereId,
+        artifact.bucket,
+        artifact.sourceReplaySha256,
+      )
+    ) {
+      return;
+    }
+    if (!isServableRunKey(artifact.premiereId)) return;
+    const source = await this.resolveRetainedRunSource(artifact.premiereId);
+    if (
+      source === null ||
+      source.sourceReplaySha256 !== artifact.sourceReplaySha256
+    ) {
+      return;
+    }
+    await this.onRunClipReady({
+      runKey: artifact.premiereId,
+      bucket: artifact.bucket,
+      sourceReplaySha256: source.sourceReplaySha256,
+      sourceFilePath: source.filePath,
     });
   }
 
@@ -157,7 +248,10 @@ export class AiLeagueRunClips {
         "League clip anchor turn is invalid",
       );
     }
+    const bucket = premiereClipBucketForTurn(request.anchorTurn);
+    this.requireCanaryActionScope(runKey, bucket);
     const source = await this.requireRetainedRunSource(runKey);
+    this.requireCanaryActionScope(runKey, bucket, source.sourceReplaySha256);
     return this.clips.requestClip({
       premiereId: runKey,
       anchorTurn: request.anchorTurn,
@@ -174,7 +268,13 @@ export class AiLeagueRunClips {
     bucket: number;
   }): Promise<PremiereClipStatusResponse> {
     const runKey = this.validateRunKey(request.runKey);
+    this.requireCanaryActionScope(runKey, request.bucket);
     const source = await this.requireRetainedRunSource(runKey);
+    this.requireCanaryActionScope(
+      runKey,
+      request.bucket,
+      source.sourceReplaySha256,
+    );
     return this.clips.readStatus({
       premiereId: runKey,
       bucket: request.bucket,
@@ -188,8 +288,18 @@ export class AiLeagueRunClips {
     bucket: number;
   }): Promise<ReplayPremiereClipFile | null> {
     if (!isServableRunKey(request.runKey)) return null;
+    if (!this.canaryActionAllows(request.runKey, request.bucket)) return null;
     const source = await this.resolveRetainedRunSource(request.runKey);
     if (source === null) return null;
+    if (
+      !this.canaryActionAllows(
+        request.runKey,
+        request.bucket,
+        source.sourceReplaySha256,
+      )
+    ) {
+      return null;
+    }
     return this.clips.resolveReadyClip({
       premiereId: request.runKey,
       bucket: request.bucket,
@@ -206,6 +316,7 @@ export class AiLeagueRunClips {
     runKey: string,
   ): Promise<RetainedAiLeagueReplaySource | null> {
     const validated = this.validateRunKey(runKey);
+    if (!this.canaryAllowsRun(validated)) return null;
     const recordPath = this.recordPathFor(validated);
     let stat;
     try {
@@ -273,6 +384,12 @@ export class AiLeagueRunClips {
       renderableThroughTurn,
       sourceComplete: true,
     };
+    if (
+      this.canaryScope !== undefined &&
+      source.sourceReplaySha256 !== this.canaryScope.sourceReplaySha256
+    ) {
+      return null;
+    }
     if (this.shaMemo.size >= MAX_SHA_MEMO_ENTRIES) {
       const oldest = this.shaMemo.keys().next().value;
       if (oldest !== undefined) this.shaMemo.delete(oldest);
@@ -330,6 +447,65 @@ export class AiLeagueRunClips {
       throw runInvalid("league_clip_run_key_invalid");
     }
     return runKey;
+  }
+
+  /** True only for the process-lifetime, exact-target canary service. */
+  isCanaryScoped(): boolean {
+    return this.canaryScope !== undefined;
+  }
+
+  allowsCanaryRead(runKey: string, bucket: number): boolean {
+    return (
+      this.canaryScope !== undefined && this.canaryActionAllows(runKey, bucket)
+    );
+  }
+
+  private canaryAllowsRun(runKey: string): boolean {
+    return (
+      this.canaryScope === undefined ||
+      (this.now() < Date.parse(this.canaryScope.expiresAt) &&
+        runKey === this.canaryScope.runKey)
+    );
+  }
+
+  private canaryAllows(
+    runKey: string,
+    bucket: number,
+    sourceReplaySha256?: string,
+  ): boolean {
+    return (
+      this.canaryScope === undefined ||
+      (this.canaryAllowsRun(runKey) &&
+        bucket === this.canaryScope.bucket &&
+        (sourceReplaySha256 === undefined ||
+          sourceReplaySha256 === this.canaryScope.sourceReplaySha256))
+    );
+  }
+
+  private canaryActionAllows(
+    runKey: string,
+    bucket: number,
+    sourceReplaySha256?: string,
+  ): boolean {
+    return (
+      this.canaryAllows(runKey, bucket, sourceReplaySha256) &&
+      (this.canaryScope === undefined || this.canaryScope.isAuthorized())
+    );
+  }
+
+  private requireCanaryActionScope(
+    runKey: string,
+    bucket: number,
+    sourceReplaySha256?: string,
+  ): void {
+    if (!this.canaryActionAllows(runKey, bucket, sourceReplaySha256)) {
+      throw new ReplayPremiereError(
+        "league_clip_canary_scope_refused",
+        "PREMIERE_UNAVAILABLE",
+        404,
+        "League clip lacks active claimed canary authorization",
+      );
+    }
   }
 }
 
@@ -413,25 +589,59 @@ async function handleRunClipFileRequest(
     sendRunClipFailure(response, 404);
     return;
   }
-  setRunClipHeaders(response);
-  response.status(200);
-  response.setHeader("Cache-Control", "public, max-age=3600");
-  response.setHeader("Content-Type", "video/mp4");
-  response.setHeader("Content-Length", file.byteLength);
-  response.setHeader(
-    "Content-Disposition",
-    `attachment; filename="${route.runKey}-clip-${route.bucket}.mp4"`,
-  );
-  if (request.method === "HEAD") {
-    response.end();
-    return;
+  try {
+    setRunClipHeaders(response);
+    response.status(200);
+    response.setHeader(
+      "Cache-Control",
+      options.runClips.isCanaryScoped()
+        ? "no-store, max-age=0"
+        : "public, max-age=3600",
+    );
+    response.setHeader("Content-Type", "video/mp4");
+    response.setHeader("Content-Length", file.byteLength);
+    response.setHeader(
+      "Content-Disposition",
+      `attachment; filename="${route.runKey}-clip-${route.bucket}.mp4"`,
+    );
+    if (request.method === "HEAD") {
+      await closeRunClipFile(file);
+      response.end();
+      return;
+    }
+    pipePinnedRunClip(file, response, () => {
+      if (!response.headersSent) sendRunClipFailure(response, 404);
+      else response.destroy();
+    });
+  } catch (error) {
+    await closeRunClipFile(file);
+    throw error;
   }
-  const stream = createReadStream(file.filePath);
-  stream.on("error", () => {
-    if (!response.headersSent) sendRunClipFailure(response, 404);
-    else response.destroy();
+}
+
+/** Stream the validated inode held by resolveReadyClip, never its pathname. */
+function pipePinnedRunClip(
+  file: ReplayPremiereClipFile,
+  response: Response,
+  onStreamError: () => void,
+): void {
+  const stream = file.fileHandle.createReadStream({
+    autoClose: true,
+    start: 0,
+  });
+  const close = (): void => {
+    stream.destroy();
+  };
+  response.once("finish", close);
+  response.once("close", close);
+  stream.once("error", () => {
+    onStreamError();
   });
   stream.pipe(response);
+}
+
+async function closeRunClipFile(file: ReplayPremiereClipFile): Promise<void> {
+  await file.fileHandle.close().catch(() => undefined);
 }
 
 function setRunClipHeaders(response: Response): void {

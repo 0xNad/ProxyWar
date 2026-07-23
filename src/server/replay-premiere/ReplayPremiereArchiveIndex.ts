@@ -4,6 +4,7 @@ import path from "node:path";
 import type { PremiereSourceKind } from "./ReplayPremiereContracts";
 import { ReplayPremiereError } from "./ReplayPremiereErrors";
 import { isSha256Hex } from "./ReplayPremiereIntegrity";
+import { publicRunKeyForSourceRunId } from "./ReplayPremiereLoopCore";
 import {
   parsePremiereResultSummary,
   type PremiereResultSummaryV1,
@@ -16,6 +17,7 @@ const ARCHIVE_INDEX_FILE = "archive-index.jsonl";
 const MAX_SUMMARY_BYTES = 512 * 1024;
 const MAX_INDEX_BYTES = 64 * 1024 * 1024;
 const PREMIERE_ID_PATTERN = /^prem_[a-z0-9]{16,32}$/;
+const MAX_ARCHIVED_POINTERS_PER_RUN = 16;
 
 /**
  * The durable pointer that keeps `/premiere/<id>` resolvable forever, even after
@@ -76,6 +78,10 @@ export class ReplayPremiereArchiveStore {
   private readonly indexPath: string;
   private readonly summaryDirectory: string;
   private readonly pointers: Map<string, PremiereArchivePointerV1>;
+  private readonly ratedCoworldPointersByRunKey = new Map<
+    string,
+    Map<string, PremiereArchivePointerV1>
+  >();
   private writeQueue: Promise<void> = Promise.resolve();
 
   private constructor(options: {
@@ -86,6 +92,9 @@ export class ReplayPremiereArchiveStore {
     this.indexPath = path.join(options.archiveRoot, ARCHIVE_INDEX_FILE);
     this.summaryDirectory = path.join(options.archiveRoot, SUMMARY_DIRECTORY);
     this.pointers = options.pointers;
+    for (const pointer of this.pointers.values()) {
+      this.indexRatedCoworldPointer(pointer);
+    }
   }
 
   /**
@@ -123,6 +132,30 @@ export class ReplayPremiereArchiveStore {
 
   reclaimedPremiereIds(): readonly string[] {
     return [...this.pointers.keys()];
+  }
+
+  /**
+   * Reveal-public rated Coworld pointers bound to one ordinary league run.
+   * The cap makes post-render/startup repair fail closed if corrupt or
+   * pathological archive history maps an unbounded number of premieres to the
+   * same run.
+   */
+  revealPublicRatedCoworldPointersForRunKey(
+    runKey: string,
+  ): readonly PremiereArchivePointerV1[] {
+    const indexed = this.ratedCoworldPointersByRunKey.get(runKey);
+    if (indexed === undefined || indexed.size > MAX_ARCHIVED_POINTERS_PER_RUN) {
+      return [];
+    }
+    const matches = [...indexed.values()].filter(
+      (pointer) =>
+        pointer.revealedAt !== null &&
+        (pointer.terminalState === "revealed" ||
+          pointer.terminalState === "archived"),
+    );
+    return matches.sort((left, right) =>
+      left.premiereId.localeCompare(right.premiereId),
+    );
   }
 
   /**
@@ -166,9 +199,30 @@ export class ReplayPremiereArchiveStore {
       const pointer = pointerForSummary(effective, sourceReplaySha256);
       if (adopted === null) await this.writeSummaryArtifact(summary);
       await this.appendPointer(pointer);
-      this.pointers.set(pointer.premiereId, pointer);
+      this.registerPointer(pointer);
       return pointer;
     });
+  }
+
+  private registerPointer(pointer: PremiereArchivePointerV1): void {
+    const previous = this.pointers.get(pointer.premiereId);
+    if (previous?.sourceKind === "rated_coworld") {
+      const previousKey = publicRunKeyForSourceRunId(previous.sourceRunId);
+      const bucket = this.ratedCoworldPointersByRunKey.get(previousKey);
+      bucket?.delete(previous.premiereId);
+      if (bucket?.size === 0)
+        this.ratedCoworldPointersByRunKey.delete(previousKey);
+    }
+    this.pointers.set(pointer.premiereId, pointer);
+    this.indexRatedCoworldPointer(pointer);
+  }
+
+  private indexRatedCoworldPointer(pointer: PremiereArchivePointerV1): void {
+    if (pointer.sourceKind !== "rated_coworld") return;
+    const runKey = publicRunKeyForSourceRunId(pointer.sourceRunId);
+    const bucket = this.ratedCoworldPointersByRunKey.get(runKey) ?? new Map();
+    bucket.set(pointer.premiereId, pointer);
+    this.ratedCoworldPointersByRunKey.set(runKey, bucket);
   }
 
   private async readSummaryArtifact(

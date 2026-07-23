@@ -206,6 +206,148 @@ describe("league clip route matchers", () => {
 // ---------------------------------------------------------------------------
 
 describe("AiLeagueRunClips", () => {
+  test("canary scope rejects every other run, bucket, source, and expired read before quota or spawn", async () => {
+    const captured: unknown[] = [];
+    let now = Date.parse("2026-07-23T20:00:00.000Z");
+    const clips = makeRunClips(
+      {
+        now: () => now,
+        limits: { maxRendersPerPremierePerDay: 1 },
+        canaryScope: {
+          runKey: RUN_KEY,
+          bucket: 60,
+          sourceReplaySha256: RECORD_SHA,
+          expiresAt: new Date(now + 10 * 60_000).toISOString(),
+          isAuthorized: () => true,
+        },
+      },
+      captured,
+    );
+    const otherRun = "league-coworld-other-canary";
+    await fs.mkdir(path.join(runsRoot, otherRun), { recursive: true });
+    await fs.writeFile(
+      path.join(runsRoot, otherRun, "game-record.json"),
+      RECORD_BYTES,
+    );
+
+    await expect(
+      clips.requestRunClip({ runKey: otherRun, anchorTurn: 605 }),
+    ).rejects.toMatchObject({
+      httpStatus: 404,
+      operatorCode: "league_clip_canary_scope_refused",
+    });
+    await expect(
+      clips.requestRunClip({ runKey: RUN_KEY, anchorTurn: 705 }),
+    ).rejects.toMatchObject({
+      operatorCode: "league_clip_canary_scope_refused",
+    });
+    await expect(
+      clips.readRunClipStatus({ runKey: RUN_KEY, bucket: 70 }),
+    ).rejects.toMatchObject({
+      operatorCode: "league_clip_canary_scope_refused",
+    });
+    expect(
+      await clips.resolveRunClipFile({ runKey: otherRun, bucket: 60 }),
+    ).toBeNull();
+    expect(captured).toHaveLength(0);
+
+    expect(
+      (await clips.requestRunClip({ runKey: RUN_KEY, anchorTurn: 605 })).state,
+    ).toBe("pending");
+    await waitReady(clips, RUN_KEY, 60);
+    expect(captured).toHaveLength(1);
+
+    now += 10 * 60_000;
+    await expect(
+      clips.readRunClipStatus({ runKey: RUN_KEY, bucket: 60 }),
+    ).rejects.toMatchObject({
+      operatorCode: "league_clip_canary_scope_refused",
+    });
+    expect(
+      await clips.resolveRunClipFile({ runKey: RUN_KEY, bucket: 60 }),
+    ).toBeNull();
+    await clips.close();
+  });
+
+  test("armed or failed-claim authorization cannot read cached bytes or enqueue, while claimed restart only reads", async () => {
+    const seedCaptured: unknown[] = [];
+    const seed = makeRunClips({}, seedCaptured);
+    await seed.requestRunClip({ runKey: RUN_KEY, anchorTurn: 605 });
+    await waitReady(seed, RUN_KEY, 60);
+    await seed.close();
+    expect(seedCaptured).toHaveLength(1);
+
+    let authorized = false;
+    const postRestartSpawns: unknown[] = [];
+    const scoped = makeRunClips(
+      {
+        canaryScope: {
+          runKey: RUN_KEY,
+          bucket: 60,
+          sourceReplaySha256: RECORD_SHA,
+          expiresAt: new Date(Date.now() + 10 * 60_000).toISOString(),
+          isAuthorized: () => authorized,
+        },
+      },
+      postRestartSpawns,
+    );
+    await scoped.rebuildIndex();
+
+    // Armed startup still needs source/range/SHA validation before claim.
+    await expect(
+      scoped.resolveRetainedRunSource(RUN_KEY),
+    ).resolves.toMatchObject({
+      sourceReplaySha256: RECORD_SHA,
+      renderableThroughTurn: 1_000,
+    });
+    // But a failed/unreached claim leaves every action and cached read closed.
+    expect(scoped.allowsCanaryRead(RUN_KEY, 60)).toBe(false);
+    await expect(
+      scoped.readRunClipStatus({ runKey: RUN_KEY, bucket: 60 }),
+    ).rejects.toMatchObject({
+      httpStatus: 404,
+      operatorCode: "league_clip_canary_scope_refused",
+    });
+    await expect(
+      scoped.requestRunClip({ runKey: RUN_KEY, anchorTurn: 605 }),
+    ).rejects.toMatchObject({
+      httpStatus: 404,
+      operatorCode: "league_clip_canary_scope_refused",
+    });
+    expect(
+      await scoped.resolveRunClipFile({ runKey: RUN_KEY, bucket: 60 }),
+    ).toBeNull();
+    const baseUrl = await documentHarness(scoped);
+    expect(
+      (await fetch(`${baseUrl}/ai-league-runs/${RUN_KEY}/clip-v1-60.mp4`))
+        .status,
+    ).toBe(404);
+    expect(postRestartSpawns).toHaveLength(0);
+
+    // A claimed restart initializes authorization true. Rebuild/read serves
+    // the exact existing cache but never calls requestRunClip or spawns.
+    authorized = true;
+    expect(scoped.allowsCanaryRead(RUN_KEY, 60)).toBe(true);
+    expect(
+      (await scoped.readRunClipStatus({ runKey: RUN_KEY, bucket: 60 })).state,
+    ).toBe("ready");
+    const claimedFile = await scoped.resolveRunClipFile({
+      runKey: RUN_KEY,
+      bucket: 60,
+    });
+    expect(claimedFile).toMatchObject({ byteLength: 96 });
+    await claimedFile?.fileHandle.close();
+    const claimedRead = await fetch(
+      `${baseUrl}/ai-league-runs/${RUN_KEY}/clip-v1-60.mp4`,
+    );
+    expect(claimedRead.status).toBe(200);
+    expect(claimedRead.headers.get("cache-control")).toBe(
+      "no-store, max-age=0",
+    );
+    expect(postRestartSpawns).toHaveLength(0);
+    await scoped.close();
+  });
+
   test("renders a clip from the run's game-record.json and serves run-shaped urls", async () => {
     const captured: unknown[] = [];
     const clips = makeRunClips({}, captured);
@@ -491,6 +633,74 @@ describe("AiLeagueRunClips", () => {
     await premiereClips.close();
   });
 
+  test("repairs every archive-relevant run beyond 256 unrelated cache ids", async () => {
+    const seed = makeRunClips();
+    await seed.requestRunClip({ runKey: RUN_KEY, anchorTurn: 605 });
+    await waitReady(seed, RUN_KEY, 60);
+    await seed.close();
+
+    const cacheRoot = path.join(root, "league-clips-v1");
+    const unrelatedBytes = Buffer.from("unrelated-cache-entry");
+    const unrelatedSha = createHash("sha256")
+      .update(unrelatedBytes)
+      .digest("hex");
+    // These ids sort before RUN_KEY and reproduce the old lexical slice(0,256)
+    // starvation. Their ready callbacks must not run.
+    for (let index = 0; index < 257; index++) {
+      const runKey = `aaa-unrelated-${String(index).padStart(3, "0")}`;
+      const directory = path.join(cacheRoot, runKey);
+      await fs.mkdir(directory, { recursive: true });
+      const clipPath = path.join(directory, "clip-v1-60.mp4");
+      await fs.writeFile(clipPath, unrelatedBytes);
+      await fs.writeFile(
+        clipPath.replace(/\.mp4$/, ".render-manifest.json"),
+        JSON.stringify({
+          premiereId: runKey,
+          sourceReplaySha256: RECORD_SHA,
+          anchorTurn: 605,
+          clipVersion: 1,
+          frameShape: "square",
+          frameWidth: 1080,
+          frameHeight: 1080,
+          outSha256: unrelatedSha,
+          outBytes: unrelatedBytes.byteLength,
+          generatedAt: "2026-07-23T20:00:00.000Z",
+        }),
+      );
+    }
+    // A higher stale-source bucket for the relevant run must not suppress its
+    // lower current-source bucket during best-artifact selection.
+    const staleBytes = Buffer.from("stale-relevant-source");
+    const stalePath = path.join(cacheRoot, RUN_KEY, "clip-v1-70.mp4");
+    await fs.writeFile(stalePath, staleBytes);
+    await fs.writeFile(
+      stalePath.replace(/\.mp4$/, ".render-manifest.json"),
+      JSON.stringify({
+        premiereId: RUN_KEY,
+        sourceReplaySha256: "a".repeat(64),
+        anchorTurn: 705,
+        clipVersion: 1,
+        frameShape: "square",
+        frameWidth: 1080,
+        frameHeight: 1080,
+        outSha256: createHash("sha256").update(staleBytes).digest("hex"),
+        outBytes: staleBytes.byteLength,
+        generatedAt: "2026-07-23T20:00:00.000Z",
+      }),
+    );
+
+    const repaired: Array<{ runKey: string; bucket: number }> = [];
+    const restarted = makeRunClips({
+      shouldRepairRunClipOnIndexRebuild: (runKey) => runKey === RUN_KEY,
+      onRunClipReady: (ready) => {
+        repaired.push({ runKey: ready.runKey, bucket: ready.bucket });
+      },
+    });
+    await restarted.rebuildIndex();
+    expect(repaired).toEqual([{ runKey: RUN_KEY, bucket: 60 }]);
+    await restarted.close();
+  });
+
   test("maps service errors to the public league clip error body", () => {
     expect(aiLeagueRunClipErrorBody(new Error("boom"))).toEqual({
       status: 503,
@@ -566,6 +776,55 @@ describe("createAiLeagueRunClipDocumentRouter", () => {
     expect(await absent.json()).toEqual({
       error: { code: "LEAGUE_CLIP_UNAVAILABLE" },
     });
+    await clips.close();
+  });
+
+  test("streams the pinned inode after a post-hash path swap and closes GET/HEAD handles", async () => {
+    const clips = makeRunClips();
+    await clips.requestRunClip({ runKey: RUN_KEY, anchorTurn: 605 });
+    await waitReady(clips, RUN_KEY, 60);
+    const clipPath = path.join(
+      root,
+      "league-clips-v1",
+      RUN_KEY,
+      "clip-v1-60.mp4",
+    );
+    const replacement = Buffer.alloc(96, 9);
+    const originalResolve = clips.resolveRunClipFile.bind(clips);
+    const closeCounts: number[] = [];
+    let resolveCount = 0;
+    clips.resolveRunClipFile = async (request) => {
+      const file = await originalResolve(request);
+      if (file === null) return null;
+      const closeIndex = closeCounts.push(0) - 1;
+      const originalClose = file.fileHandle.close.bind(file.fileHandle);
+      file.fileHandle.close = async () => {
+        closeCounts[closeIndex] += 1;
+        await originalClose();
+      };
+      resolveCount += 1;
+      if (resolveCount === 2) {
+        await fs.rename(clipPath, `${clipPath}.validated`);
+        await fs.writeFile(clipPath, replacement);
+      }
+      return file;
+    };
+    const baseUrl = await documentHarness(clips);
+
+    const head = await fetch(
+      `${baseUrl}/ai-league-runs/${RUN_KEY}/clip-v1-60.mp4`,
+      { method: "HEAD" },
+    );
+    expect(head.status).toBe(200);
+    expect(closeCounts[0]).toBe(1);
+
+    const get = await fetch(
+      `${baseUrl}/ai-league-runs/${RUN_KEY}/clip-v1-60.mp4`,
+    );
+    expect(get.status).toBe(200);
+    expect(Buffer.from(await get.arrayBuffer())).toEqual(Buffer.alloc(96, 5));
+    expect(await fs.readFile(clipPath)).toEqual(replacement);
+    expect(closeCounts[1]).toBe(1);
     await clips.close();
   });
 

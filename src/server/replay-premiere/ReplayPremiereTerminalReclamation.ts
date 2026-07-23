@@ -1,16 +1,13 @@
-import { createHash, randomUUID } from "node:crypto";
-import { createReadStream, promises as fs } from "node:fs";
+import { promises as fs } from "node:fs";
 import path from "node:path";
+import {
+  DEFAULT_REPLAY_PREMIERE_MAX_ARCHIVED_CLIP_BYTES,
+  DEFAULT_REPLAY_PREMIERE_MAX_ARCHIVED_CLIPS,
+  ReplayPremiereArchivedClipPromoter,
+} from "./ReplayPremiereArchivedClipPromoter";
 import type { PremiereArchivePointerV1 } from "./ReplayPremiereArchiveIndex";
 import { ReplayPremiereArchiveStore } from "./ReplayPremiereArchiveIndex";
 import type { ReplayPremiereAdmissionRecordV1 } from "./ReplayPremiereCatalog";
-import {
-  archivedPremiereClipFileName,
-  archivedPremiereClipManifestFileName,
-  archivedPremiereClipsDir,
-  parsePremiereClipRenderManifest,
-  replayPremiereClipCacheDir,
-} from "./ReplayPremiereClips";
 import { ReplayPremiereError } from "./ReplayPremiereErrors";
 import type { ReplayPremiereHttpTarget } from "./ReplayPremiereHttp";
 import {
@@ -47,9 +44,10 @@ const ADMISSION_SUFFIX = ".admission.json";
  * mtime) eviction, applied at promotion time. Evicting a durable clip only
  * removes the archived page's download section — the page itself never breaks.
  */
-export const DEFAULT_REPLAY_PREMIERE_MAX_ARCHIVED_CLIPS = 200;
-export const DEFAULT_REPLAY_PREMIERE_MAX_ARCHIVED_CLIP_BYTES = 1024 ** 3;
-const CACHED_CLIP_FILE_PATTERN = /^clip-v[0-9]{1,4}-(0|[1-9][0-9]{0,8})\.mp4$/;
+export {
+  DEFAULT_REPLAY_PREMIERE_MAX_ARCHIVED_CLIP_BYTES,
+  DEFAULT_REPLAY_PREMIERE_MAX_ARCHIVED_CLIPS,
+} from "./ReplayPremiereArchivedClipPromoter";
 
 export interface ReplayPremiereReclamationEligibility {
   eligible: boolean;
@@ -112,10 +110,7 @@ export class ReplayPremiereTerminalReclaimer {
   private readonly catalogEntriesDir: string;
   private readonly snapshotsDir: string;
   private readonly excluded: ReadonlySet<string>;
-  private readonly clipCacheDir: string;
-  private readonly archivedClipsDir: string;
-  private readonly maxArchivedClips: number;
-  private readonly maxArchivedClipBytes: number;
+  private readonly archivedClipPromoter: ReplayPremiereArchivedClipPromoter;
   private readonly logger: (message: string) => void;
   private readonly interactionEventStore: ReplayPremiereInteractionEventStore | null;
   private readonly interactionLimits:
@@ -135,8 +130,10 @@ export class ReplayPremiereTerminalReclaimer {
     /** Durable archived-clip retention bounds (count / total bytes). */
     maxArchivedClips?: number;
     maxArchivedClipBytes?: number;
-    /** Operator diagnostics for best-effort clip promotion; never throws out. */
+    /** Operator diagnostics; durable promotion failures propagate before deletion. */
     logger?: (message: string) => void;
+    /** Shared durable promoter used by post-archive league render callbacks. */
+    archivedClipPromoter?: ReplayPremiereArchivedClipPromoter;
     /** Active writer used for one atomic, hash-chained orphan interaction read. */
     interactionEventStore?: ReplayPremiereInteractionEventStore;
     interactionLimits?: Partial<ReplayPremiereInteractionLimits>;
@@ -163,22 +160,20 @@ export class ReplayPremiereTerminalReclaimer {
       "event-store-v1",
       "snapshots",
     );
-    this.clipCacheDir = replayPremiereClipCacheDir(this.privateStateRoot);
-    this.archivedClipsDir = archivedPremiereClipsDir(this.store.archiveRoot);
-    this.maxArchivedClips =
-      options.maxArchivedClips ?? DEFAULT_REPLAY_PREMIERE_MAX_ARCHIVED_CLIPS;
-    this.maxArchivedClipBytes =
-      options.maxArchivedClipBytes ??
-      DEFAULT_REPLAY_PREMIERE_MAX_ARCHIVED_CLIP_BYTES;
-    if (
-      !Number.isSafeInteger(this.maxArchivedClips) ||
-      this.maxArchivedClips < 1 ||
-      !Number.isSafeInteger(this.maxArchivedClipBytes) ||
-      this.maxArchivedClipBytes < 1
-    ) {
-      throw reclamationRequest("invalid_archived_clip_bounds");
-    }
     this.logger = options.logger ?? (() => undefined);
+    this.archivedClipPromoter =
+      options.archivedClipPromoter ??
+      new ReplayPremiereArchivedClipPromoter({
+        privateStateRoot: this.privateStateRoot,
+        archiveStore: this.store,
+        maxArchivedClips:
+          options.maxArchivedClips ??
+          DEFAULT_REPLAY_PREMIERE_MAX_ARCHIVED_CLIPS,
+        maxArchivedClipBytes:
+          options.maxArchivedClipBytes ??
+          DEFAULT_REPLAY_PREMIERE_MAX_ARCHIVED_CLIP_BYTES,
+        logger: this.logger,
+      });
     this.interactionEventStore = options.interactionEventStore ?? null;
     this.interactionLimits = options.interactionLimits;
     this.fenceClipWritesAndDrain = options.fenceClipWritesAndDrain ?? null;
@@ -320,18 +315,10 @@ export class ReplayPremiereTerminalReclaimer {
     // Promote the premiere's default clip into the durable archive BEFORE the
     // bulk is deleted (the clip cache is not bulk, but the render SOURCE is
     // startup-GC'd once the pointer exists, so post-reclamation the cached clip
-    // is the last renderable copy). Best-effort: promotion failure is logged
-    // and never blocks reclamation; the idempotent already-reclaimed retry
-    // re-attempts it while the cache copy still exists.
-    await this.promoteDurableClip(premiereId, pointer).catch(
-      (error: unknown) => {
-        this.logger(
-          `archived_clip_promotion_failed ${premiereId}: ${
-            error instanceof Error ? error.message : String(error)
-          }`,
-        );
-      },
-    );
+    // is the last renderable copy). Missing/invalid candidates are a normal
+    // no-op, but a real durability error aborts before bulk deletion so the
+    // admission and snapshots remain a deterministic retry anchor.
+    await this.promoteDurableClip(premiereId, pointer);
     await this.deleteBulk(premiereId);
     return {
       premiereId,
@@ -522,15 +509,7 @@ export class ReplayPremiereTerminalReclaimer {
         );
       }
     }
-    await this.promoteDurableClip(premiereId, pointer).catch(
-      (error: unknown) => {
-        this.logger(
-          `archived_clip_promotion_failed ${premiereId}: ${
-            error instanceof Error ? error.message : String(error)
-          }`,
-        );
-      },
-    );
+    await this.promoteDurableClip(premiereId, pointer);
     await this.deleteBulk(premiereId);
     return {
       premiereId,
@@ -572,267 +551,14 @@ export class ReplayPremiereTerminalReclaimer {
       ),
     );
   }
-
-  /**
-   * Copies the premiere's best cached clip (highest anchor turn — the reveal
-   * payoff the automatic default render targets) into
-   * `archive-v1/clips/<premiereId>.mp4` (+ manifest sidecar), so the durable
-   * archived page keeps a downloadable clip after the cache and source are
-   * gone.
-   *
-   * SPOILER GATE: only reveal-public premieres are promoted (`revealedAt`
-   * non-null AND terminal revealed|archived) — exactly the condition under
-   * which the summary may carry an outcome. Failed/cancelled premieres can
-   * never have cached clips (writes are reveal-gated) and are skipped anyway.
-   *
-   * Idempotent: an existing durable clip is adopted verbatim (first write
-   * wins, matching summary adoption). Missing cache is a silent no-op.
-   */
+  /** Promote through the canonical durable archive boundary. */
   private async promoteDurableClip(
     premiereId: string,
     pointer: PremiereArchivePointerV1,
   ): Promise<void> {
-    if (!PREMIERE_ID_PATTERN.test(premiereId)) return;
-    if (
-      pointer.revealedAt === null ||
-      (pointer.terminalState !== "revealed" &&
-        pointer.terminalState !== "archived")
-    ) {
-      return;
-    }
-    const durableClipPath = path.join(
-      this.archivedClipsDir,
-      archivedPremiereClipFileName(premiereId),
-    );
-    if (await fileExists(durableClipPath)) return;
-    const candidate = await this.selectBestCachedClip(
-      premiereId,
-      pointer.sourceReplaySha256,
-    );
-    if (candidate === null) return;
-    await fs.mkdir(this.archivedClipsDir, { recursive: true, mode: 0o700 });
-    const durableManifestPath = path.join(
-      this.archivedClipsDir,
-      archivedPremiereClipManifestFileName(premiereId),
-    );
-    // Manifest first, mp4 last, both atomic renames: a crash can leave a
-    // manifest without an mp4 (harmless — availability is stat(mp4)-based),
-    // never a served mp4 without its provenance sidecar.
-    await copyFileAtomicVerified(
-      candidate.clipPath,
-      durableClipPath,
-      {
-        byteLength: candidate.byteLength,
-        sha256: candidate.outSha256,
-      },
-      () => writeFileAtomic(candidate.manifestRaw, durableManifestPath),
-    );
-    this.logger(
-      `archived_clip_promoted ${premiereId} anchorTurn=${candidate.anchorTurn} bytes=${candidate.byteLength}`,
-    );
-    await this.evictArchivedClipsOverBounds(premiereId);
-  }
-
-  private async selectBestCachedClip(
-    premiereId: string,
-    expectedSourceReplaySha256: string,
-  ): Promise<{
-    clipPath: string;
-    manifestRaw: string;
-    anchorTurn: number;
-    byteLength: number;
-    outSha256: string;
-  } | null> {
-    const cacheDir = path.join(this.clipCacheDir, premiereId);
-    let files: string[];
-    try {
-      files = await fs.readdir(cacheDir);
-    } catch {
-      return null; // No clip cache for this premiere.
-    }
-    let best: {
-      clipPath: string;
-      manifestRaw: string;
-      anchorTurn: number;
-      byteLength: number;
-      outSha256: string;
-    } | null = null;
-    for (const file of files) {
-      if (!CACHED_CLIP_FILE_PATTERN.test(file)) continue;
-      const clipPath = path.join(cacheDir, file);
-      const manifestPath = clipPath.replace(/\.mp4$/, ".render-manifest.json");
-      try {
-        const [stat, manifestRaw] = await Promise.all([
-          fs.stat(clipPath),
-          fs.readFile(manifestPath, "utf8"),
-        ]);
-        const manifest = parsePremiereClipRenderManifest(
-          JSON.parse(manifestRaw),
-        );
-        if (
-          manifest === null ||
-          manifest.premiereId !== premiereId ||
-          manifest.sourceReplaySha256 !== expectedSourceReplaySha256 ||
-          !stat.isFile() ||
-          manifest.outBytes !== stat.size
-        ) {
-          continue; // Partial/foreign artifact; never promote it.
-        }
-        if ((await sha256File(clipPath)) !== manifest.outSha256) {
-          continue; // Same-size corruption or swapped content; fail closed.
-        }
-        if (best === null || manifest.anchorTurn > best.anchorTurn) {
-          best = {
-            clipPath,
-            manifestRaw,
-            anchorTurn: manifest.anchorTurn,
-            byteLength: stat.size,
-            outSha256: manifest.outSha256,
-          };
-        }
-      } catch {
-        continue;
-      }
-    }
-    return best;
-  }
-
-  /**
-   * Applies the archived-clip retention bounds (count and total bytes) with
-   * oldest-first eviction by file mtime. The just-promoted premiere's clip is
-   * never evicted in its own promotion pass.
-   */
-  private async evictArchivedClipsOverBounds(
-    justPromotedPremiereId: string,
-  ): Promise<void> {
-    let files: string[];
-    try {
-      files = await fs.readdir(this.archivedClipsDir);
-    } catch {
-      return;
-    }
-    const entries: Array<{
-      premiereId: string;
-      clipPath: string;
-      bytes: number;
-      mtimeMs: number;
-    }> = [];
-    for (const file of files) {
-      if (!file.endsWith(".mp4")) continue;
-      const premiereId = file.slice(0, -".mp4".length);
-      if (!PREMIERE_ID_PATTERN.test(premiereId)) continue;
-      const clipPath = path.join(this.archivedClipsDir, file);
-      try {
-        const stat = await fs.stat(clipPath);
-        entries.push({
-          premiereId,
-          clipPath,
-          bytes: stat.size,
-          mtimeMs: stat.mtimeMs,
-        });
-      } catch {
-        continue;
-      }
-    }
-    let count = entries.length;
-    let totalBytes = entries.reduce((sum, entry) => sum + entry.bytes, 0);
-    if (
-      count <= this.maxArchivedClips &&
-      totalBytes <= this.maxArchivedClipBytes
-    ) {
-      return;
-    }
-    const oldestFirst = [...entries].sort((a, b) => a.mtimeMs - b.mtimeMs);
-    for (const entry of oldestFirst) {
-      if (
-        count <= this.maxArchivedClips &&
-        totalBytes <= this.maxArchivedClipBytes
-      ) {
-        break;
-      }
-      if (entry.premiereId === justPromotedPremiereId) continue;
-      await unlinkIfPresent(entry.clipPath).catch(() => undefined);
-      await unlinkIfPresent(
-        path.join(
-          this.archivedClipsDir,
-          archivedPremiereClipManifestFileName(entry.premiereId),
-        ),
-      ).catch(() => undefined);
-      count -= 1;
-      totalBytes -= entry.bytes;
-      this.logger(`archived_clip_evicted ${entry.premiereId} retention`);
-    }
+    await this.archivedClipPromoter.promotePremiereCache(premiereId, pointer);
   }
 }
-
-async function fileExists(filePath: string): Promise<boolean> {
-  try {
-    const stat = await fs.stat(filePath);
-    return stat.isFile();
-  } catch {
-    return false;
-  }
-}
-
-/**
- * Copies and re-validates a file through a same-directory temp path before the
- * final rename. The validation closes the race between candidate selection and
- * promotion: a cache file swapped after selection can never become durable.
- */
-async function copyFileAtomicVerified(
-  sourcePath: string,
-  destinationPath: string,
-  expected: { byteLength: number; sha256: string },
-  beforeCommit: () => Promise<void>,
-): Promise<void> {
-  const temporary = path.join(
-    path.dirname(destinationPath),
-    `.${path.basename(destinationPath)}.${randomUUID()}.tmp`,
-  );
-  try {
-    await fs.copyFile(sourcePath, temporary);
-    const stat = await fs.stat(temporary);
-    if (
-      !stat.isFile() ||
-      stat.size !== expected.byteLength ||
-      (await sha256File(temporary)) !== expected.sha256
-    ) {
-      throw reclamationIntegrity("archived_clip_copy_integrity_mismatch");
-    }
-    await beforeCommit();
-    await fs.rename(temporary, destinationPath);
-  } catch (error) {
-    await fs.unlink(temporary).catch(() => undefined);
-    throw error;
-  }
-}
-
-/** Writes a validated manifest snapshot atomically beside the durable clip. */
-async function writeFileAtomic(
-  contents: string,
-  destinationPath: string,
-): Promise<void> {
-  const temporary = path.join(
-    path.dirname(destinationPath),
-    `.${path.basename(destinationPath)}.${randomUUID()}.tmp`,
-  );
-  try {
-    await fs.writeFile(temporary, contents, { mode: 0o600 });
-    await fs.rename(temporary, destinationPath);
-  } catch (error) {
-    await fs.unlink(temporary).catch(() => undefined);
-    throw error;
-  }
-}
-
-async function sha256File(filePath: string): Promise<string> {
-  const hash = createHash("sha256");
-  for await (const chunk of createReadStream(filePath)) {
-    hash.update(chunk);
-  }
-  return hash.digest("hex");
-}
-
 /**
  * Loads the premiere-reclamation exclusion set from BOTH the
  * `PROXYWAR_PREMIERE_RECLAIM_EXCLUDE` env (comma-separated premiere ids) and an

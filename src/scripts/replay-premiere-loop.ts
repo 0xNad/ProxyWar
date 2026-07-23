@@ -23,6 +23,7 @@ import {
   loadProxyWarDemoServerNetworkConfig,
 } from "../server/agents/ProxyWarDemoServerConfig";
 import { PREMIERE_REAL_TURN_INTERVAL_MS } from "../server/replay-premiere/ReplayPremiereContracts";
+import { formatReplayPremiereErrorCauseChain } from "../server/replay-premiere/ReplayPremiereErrorTelemetry";
 import { ReplayPremiereError } from "../server/replay-premiere/ReplayPremiereErrors";
 import {
   PREMIERE_LOOP_ACTIVATION_BACKOFF_MS,
@@ -1549,7 +1550,9 @@ export async function runLoopReplayPremiereAdmission(options: {
       );
       return { kind: "release", outcome: "leak_audit_refused", terminal: true };
     }
-    log(`admission failed for ${options.premiereId}: ${operatorCodeOf(error)}`);
+    log(
+      `admission failed for ${options.premiereId}: ${admissionFailureOperatorCodeOf(error)} cause=${formatReplayPremiereErrorCauseChain(error)}`,
+    );
     return { kind: "release", outcome: "admit_failed", terminal: false };
   } finally {
     clearTimeout(timeout);
@@ -2559,6 +2562,12 @@ function operatorCodeOf(error: unknown): string {
   return error instanceof ReplayPremiereError
     ? error.operatorCode
     : errorMessage(error);
+}
+
+function admissionFailureOperatorCodeOf(error: unknown): string {
+  return error instanceof ReplayPremiereError
+    ? error.operatorCode
+    : "admission_unexpected_error";
 }
 
 function isAdmissionHoldRequired(error: unknown): boolean {

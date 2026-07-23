@@ -29,6 +29,12 @@ import {
   type AgentStrategyProfile,
 } from "../server/agents/AgentTypes";
 import {
+  claimAiLeagueClipCanary,
+  createAiLeagueClipCanaryWriteRefusal,
+  readAiLeagueClipCanary,
+  type AiLeagueClipCanaryRecord,
+} from "../server/agents/AiLeagueClipCanary";
+import {
   aiLeagueRunClipErrorBody,
   AiLeagueRunClips,
   createAiLeagueRunClipDocumentRouter,
@@ -119,6 +125,7 @@ import {
   setHtmlNoCacheHeaders,
 } from "../server/RenderHtml";
 import { ReplayPremiereAnonymousWriteLimiter } from "../server/replay-premiere/ReplayPremiereAnonymousWriteLimiter";
+import { ReplayPremiereArchivedClipPromoter } from "../server/replay-premiere/ReplayPremiereArchivedClipPromoter";
 import { ReplayPremiereArchiveStore } from "../server/replay-premiere/ReplayPremiereArchiveIndex";
 import { createReplayPremiereArchiveRouter } from "../server/replay-premiere/ReplayPremiereArchiveRouter";
 import { DeterministicReplayPremiereCheckpointProjector } from "../server/replay-premiere/ReplayPremiereCheckpointProjection";
@@ -132,6 +139,7 @@ import {
   ReplayPremiereClips,
   ReplayPremiereRevealAutoClip,
 } from "../server/replay-premiere/ReplayPremiereClips";
+import { premiereClipRepresentativeAnchorTurn } from "../server/replay-premiere/ReplayPremiereContracts";
 import { ReplayPremiereError } from "../server/replay-premiere/ReplayPremiereErrors";
 import { ReplayPremiereGuestSecurity } from "../server/replay-premiere/ReplayPremiereGuestSecurity";
 import {
@@ -223,6 +231,25 @@ export const replayPremiereArchiveStore = await ReplayPremiereArchiveStore.open(
     privateStateRoot: replayPremierePrivateStateRoot,
   },
 );
+const replayPremiereArchivedClipPromoter =
+  new ReplayPremiereArchivedClipPromoter({
+    privateStateRoot: replayPremierePrivateStateRoot,
+    archiveStore: replayPremiereArchiveStore,
+    logger: (message) => console.log(`[premiere-archived-clips] ${message}`),
+  });
+try {
+  await replayPremiereArchivedClipPromoter.repairOrphanedTemporaryFiles();
+} catch (error) {
+  console.error(
+    `Replay Premiere archived clip temp repair degraded: ${
+      error instanceof ReplayPremiereError
+        ? error.operatorCode
+        : error instanceof Error
+          ? error.message
+          : String(error)
+    }`,
+  );
+}
 // Premiere ids that must never be reclaimed (release-proof premieres). Sourced
 // from PROXYWAR_PREMIERE_RECLAIM_EXCLUDE and the reclaim-exclude.txt pin file.
 const replayPremiereReclaimExclusions =
@@ -269,6 +296,7 @@ const replayPremiereProduction = await startReplayPremiereProduction({
     path.join(process.cwd(), "resources", "maps"),
   ),
   archiveStore: replayPremiereArchiveStore,
+  archivedClipPromoter: replayPremiereArchivedClipPromoter,
   reclamationExcludedPremiereIds: replayPremiereReclaimExclusions,
   fenceClipWritesAndDrain: (premiereId) =>
     replayPremiereClips?.fenceWritesAndDrain(premiereId) ?? Promise.resolve(),
@@ -307,9 +335,25 @@ const replayPremiereProduction = await startReplayPremiereProduction({
 // Construction is best-effort: if the license strings (or index rebuild) fail
 // — e.g. a minimal test checkout with no resources/lang/en.json — clips are
 // disabled with a warning rather than crashing the whole server.
-const replayClipsMasterEnabled = envFlag("PROXYWAR_CLIPS_ENABLED");
+const replayClipsMasterRequested = envFlag("PROXYWAR_CLIPS_ENABLED");
+const replayPremiereClipsRequested = envFlag("PROXYWAR_PREMIERE_CLIPS_ENABLED");
+const aiLeagueRunClipsRequested = envFlag("PROXYWAR_LEAGUE_CLIPS_ENABLED");
+const aiLeagueClipCanaryState = await readAiLeagueClipCanary({
+  privateStateRoot: replayPremierePrivateStateRoot,
+});
+console.error(
+  `[league-clips] canary ${aiLeagueClipCanaryState.diagnostic.code}`,
+);
+const aiLeagueClipCanaryConfigurationConflict =
+  (aiLeagueClipCanaryState.claimable || aiLeagueClipCanaryState.readEnabled) &&
+  (replayPremiereClipsRequested || aiLeagueRunClipsRequested);
+if (aiLeagueClipCanaryConfigurationConflict) {
+  console.error("[league-clips] canary clip_canary_global_flag_conflict");
+}
+const replayClipsMasterEnabled =
+  replayClipsMasterRequested && !aiLeagueClipCanaryConfigurationConflict;
 const replayPremiereClipsEnabled =
-  replayClipsMasterEnabled && envFlag("PROXYWAR_PREMIERE_CLIPS_ENABLED");
+  replayClipsMasterEnabled && replayPremiereClipsRequested;
 if (replayPremiereClipsEnabled) {
   try {
     replayPremiereClips = new ReplayPremiereClips({
@@ -373,8 +417,22 @@ if (replayPremiereClips !== null) {
 // Has an independent effective gate under the master emergency switch.
 let aiLeagueRunClips: AiLeagueRunClips | null = null;
 const aiLeagueRunClipsEnabled =
-  replayClipsMasterEnabled && envFlag("PROXYWAR_LEAGUE_CLIPS_ENABLED");
-if (aiLeagueRunClipsEnabled) {
+  replayClipsMasterEnabled && aiLeagueRunClipsRequested;
+const aiLeagueClipCanaryRecord: AiLeagueClipCanaryRecord | null =
+  replayClipsMasterRequested &&
+  !aiLeagueClipCanaryConfigurationConflict &&
+  (aiLeagueClipCanaryState.claimable || aiLeagueClipCanaryState.readEnabled)
+    ? aiLeagueClipCanaryState.record
+    : null;
+if (aiLeagueClipCanaryState.claimable && !replayClipsMasterRequested) {
+  console.error("[league-clips] canary clip_canary_master_disabled");
+}
+let aiLeagueClipCanaryActionAuthorized =
+  aiLeagueClipCanaryRecord?.lifecycle === "claimed";
+let aiLeagueClipCanaryValidatedSource: Awaited<
+  ReturnType<AiLeagueRunClips["resolveRetainedRunSource"]>
+> | null = null;
+if (aiLeagueRunClipsEnabled || aiLeagueClipCanaryRecord !== null) {
   try {
     aiLeagueRunClips = new AiLeagueRunClips({
       runsRootDir,
@@ -395,6 +453,31 @@ if (aiLeagueRunClipsEnabled) {
       clipFfmpegBin: firstConfiguredEnv("PROXYWAR_CLIP_FFMPEG_BIN"),
       clipChromeBin: firstConfiguredEnv("PROXYWAR_CLIP_CHROME_BIN"),
       logger: (message) => console.log(`[league-clips] ${message}`),
+      shouldRepairRunClipOnIndexRebuild: (runKey) =>
+        replayPremiereArchiveStore.revealPublicRatedCoworldPointersForRunKey(
+          runKey,
+        ).length > 0,
+      canaryScope:
+        aiLeagueClipCanaryRecord === null
+          ? undefined
+          : {
+              runKey: aiLeagueClipCanaryRecord.runKey,
+              bucket: aiLeagueClipCanaryRecord.bucket,
+              sourceReplaySha256: aiLeagueClipCanaryRecord.sourceReplaySha256,
+              expiresAt: aiLeagueClipCanaryRecord.expiresAt,
+              isAuthorized: () => aiLeagueClipCanaryActionAuthorized,
+            },
+      onRunClipReady: async (ready) => {
+        if (
+          aiLeagueClipCanaryRecord !== null &&
+          !aiLeagueClipCanaryActionAuthorized
+        ) {
+          return;
+        }
+        await replayPremiereArchivedClipPromoter.promoteRatedCoworldRunClip(
+          ready,
+        );
+      },
     });
     await aiLeagueRunClips.rebuildIndex().catch((error: unknown) => {
       console.error(
@@ -403,8 +486,28 @@ if (aiLeagueRunClipsEnabled) {
         }`,
       );
     });
+    if (aiLeagueClipCanaryRecord !== null) {
+      aiLeagueClipCanaryValidatedSource =
+        await aiLeagueRunClips.resolveRetainedRunSource(
+          aiLeagueClipCanaryRecord.runKey,
+        );
+      const representativeAnchorTurn = premiereClipRepresentativeAnchorTurn(
+        aiLeagueClipCanaryRecord.bucket,
+      );
+      if (
+        aiLeagueClipCanaryValidatedSource === null ||
+        aiLeagueClipCanaryValidatedSource.sourceReplaySha256 !==
+          aiLeagueClipCanaryRecord.sourceReplaySha256 ||
+        representativeAnchorTurn >
+          aiLeagueClipCanaryValidatedSource.renderableThroughTurn
+      ) {
+        throw new Error("clip_canary_source_validation_failed");
+      }
+    }
   } catch (error) {
+    await aiLeagueRunClips?.close().catch(() => undefined);
     aiLeagueRunClips = null;
+    aiLeagueClipCanaryValidatedSource = null;
     console.error(
       `League run clips disabled: ${
         error instanceof Error ? error.message : String(error)
@@ -563,7 +666,9 @@ if (replayPremiereClips !== null) {
 // has de-registered (post-reveal reclamation, or a fresh restart) is served its
 // durable results-summary page here. It defers to the live router for still-
 // registered premieres and for unknown ids.
-const replayRunClipsForArchive = aiLeagueRunClips;
+const replayRunClipsForArchive = aiLeagueRunClipsEnabled
+  ? aiLeagueRunClips
+  : null;
 app.use(
   createReplayPremiereArchiveRouter({
     registry: replayPremiereHttpRegistry,
@@ -593,6 +698,12 @@ app.use(
     pageContentSecurityPolicy: proxyWarLeagueContentSecurityPolicy(),
   }),
 );
+app.use(
+  createAiLeagueClipCanaryWriteRefusal({
+    isCanaryActive: () =>
+      aiLeagueClipCanaryState.claimable || aiLeagueClipCanaryState.readEnabled,
+  }),
+);
 app.use(express.json({ limit: "256kb" }));
 app.use(express.urlencoded({ extended: false }));
 app.use((_req, res, next) => {
@@ -616,7 +727,7 @@ if (leagueWrapperOnly) {
         isProxyWarPublicRendererAssetPath(req.path) ||
         // League-run clip status/mp4 for mirror-published (league-*) runs —
         // exactly the runs whose replay pages are already public.
-        matchProxyWarLeagueClipReadPath(req.path)?.publicLeague === true
+        leagueClipPublicReadAllowed(req.path)
       ) {
         next();
         return;
@@ -631,7 +742,7 @@ if (leagueWrapperOnly) {
     if (
       req.method === "POST" &&
       (isProxyWarPublicPremiereWritePath(req.path) ||
-        matchProxyWarLeagueClipWritePath(req.path)?.publicLeague === true)
+        leagueClipPublicWriteAllowed(req.path))
     ) {
       next();
       return;
@@ -824,7 +935,7 @@ app.use((req, res, next) => {
     (isProxyWarPublicLeaguePath(req.path) ||
       isProxyWarPublicPremiereReadPath(req.path) ||
       isProxyWarPublicRendererAssetPath(req.path) ||
-      matchProxyWarLeagueClipReadPath(req.path)?.publicLeague === true)
+      leagueClipPublicReadAllowed(req.path))
   ) {
     next();
     return;
@@ -832,7 +943,7 @@ app.use((req, res, next) => {
   if (
     req.method === "POST" &&
     (isProxyWarPublicPremiereWritePath(req.path) ||
-      matchProxyWarLeagueClipWritePath(req.path)?.publicLeague === true)
+      leagueClipPublicWriteAllowed(req.path))
   ) {
     next();
     return;
@@ -890,6 +1001,12 @@ if (aiLeagueRunClips !== null) {
     }
     const write = matchProxyWarLeagueClipWritePath(req.path);
     if (write !== null && req.method === "POST") {
+      // Canary mode has no public write path. Refuse before rate-limit state,
+      // requester derivation, clip quota, disk probes, or worker admission.
+      if (!aiLeagueRunClipsEnabled) {
+        res.status(404).json({ error: { code: "LEAGUE_CLIP_UNAVAILABLE" } });
+        return;
+      }
       if (!enforceRateLimit("league-clips", rateLimits.leagueClips, req, res)) {
         return;
       }
@@ -2259,6 +2376,57 @@ const server = app.listen(port, host, () => {
       : `Proxy War renderer: ${rendererBaseUrl}`,
   );
   console.log("Press Ctrl-C to stop.");
+  if (
+    aiLeagueClipCanaryRecord?.lifecycle === "armed" &&
+    aiLeagueRunClips !== null &&
+    aiLeagueClipCanaryValidatedSource !== null
+  ) {
+    const canaryService = aiLeagueRunClips;
+    const canaryRecord = aiLeagueClipCanaryRecord;
+    void (async () => {
+      // Revalidate immediately before consuming the one shot. Claim is a
+      // durable, exclusive transition and always precedes the sole request.
+      const freshSource = await canaryService.resolveRetainedRunSource(
+        canaryRecord.runKey,
+      );
+      const anchorTurn = premiereClipRepresentativeAnchorTurn(
+        canaryRecord.bucket,
+      );
+      if (
+        freshSource === null ||
+        freshSource.sourceReplaySha256 !== canaryRecord.sourceReplaySha256 ||
+        anchorTurn > freshSource.renderableThroughTurn
+      ) {
+        throw new Error("clip_canary_source_validation_failed_after_bind");
+      }
+      await claimAiLeagueClipCanary({
+        privateStateRoot: replayPremierePrivateStateRoot,
+        expectedTarget: canaryRecord,
+      });
+      aiLeagueClipCanaryActionAuthorized = true;
+      const status = await canaryService.requestRunClip({
+        runKey: canaryRecord.runKey,
+        anchorTurn,
+        participantId: null,
+      });
+      // A cache hit has no render-complete callback; reuse the canonical
+      // promoter explicitly after claim so it follows the same provenance path.
+      if (status.state === "ready") {
+        await replayPremiereArchivedClipPromoter.promoteRatedCoworldRunClip({
+          runKey: canaryRecord.runKey,
+          bucket: canaryRecord.bucket,
+          sourceReplaySha256: canaryRecord.sourceReplaySha256,
+          sourceFilePath: freshSource.filePath,
+        });
+      }
+    })().catch((error: unknown) => {
+      console.error(
+        `[league-clips] canary one-shot failed: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+    });
+  }
 });
 
 let shutdownStarted = false;
@@ -3455,6 +3623,23 @@ function positiveInt(value: string | undefined, fallback: number): number {
   }
   const parsed = Number(value);
   return Number.isInteger(parsed) && parsed >= 0 ? parsed : fallback;
+}
+
+function leagueClipPublicReadAllowed(requestPath: string): boolean {
+  const route = matchProxyWarLeagueClipReadPath(requestPath);
+  if (route?.publicLeague !== true) return false;
+  if (aiLeagueRunClipsEnabled) return true;
+  return (
+    aiLeagueRunClips !== null &&
+    aiLeagueRunClips.allowsCanaryRead(route.runKey, route.bucket)
+  );
+}
+
+function leagueClipPublicWriteAllowed(requestPath: string): boolean {
+  return (
+    aiLeagueRunClipsEnabled &&
+    matchProxyWarLeagueClipWritePath(requestPath)?.publicLeague === true
+  );
 }
 
 function firstConfiguredEnv(...names: string[]): string | undefined {
