@@ -2235,25 +2235,82 @@ const server = app.listen(port, host, () => {
 });
 
 let shutdownStarted = false;
-for (const signal of ["SIGINT", "SIGTERM"] as const) {
-  process.on(signal, () => {
-    if (shutdownStarted) return;
-    shutdownStarted = true;
-    runningChild?.kill(signal);
-    renderer?.kill(signal);
-    replayPremiereRevealAutoClip?.close();
-    const serviceShutdown = Promise.allSettled([
-      replayPremiereClips?.close() ?? Promise.resolve(),
-      aiLeagueRunClips?.close() ?? Promise.resolve(),
-      replayPremiereProduction?.service.close() ?? Promise.resolve(),
-    ]).then((results) =>
-      results.some((result) => result.status === "rejected") ? 1 : 0,
-    );
-    server.close(() => {
-      void serviceShutdown.then((exitCode) => process.exit(exitCode));
-    });
+process.on("SIGINT", () => {
+  if (shutdownStarted) return;
+  shutdownStarted = true;
+  runningChild?.kill("SIGINT");
+  renderer?.kill("SIGINT");
+  replayPremiereRevealAutoClip?.close();
+  const serviceShutdown = Promise.allSettled([
+    replayPremiereClips?.close() ?? Promise.resolve(),
+    aiLeagueRunClips?.close() ?? Promise.resolve(),
+    replayPremiereProduction?.service.close() ?? Promise.resolve(),
+  ]).then((results) =>
+    results.some((result) => result.status === "rejected") ? 1 : 0,
+  );
+  server.close(() => {
+    void serviceShutdown.then((exitCode) => process.exit(exitCode));
+  });
+});
+
+const PLANNED_RESTART_SHUTDOWN_WATCHDOG_MS = 12_000;
+const CONTROLLED_OUTAGE_DRILL_SHUTDOWN_WATCHDOG_MS = 50_000;
+
+function beginHttpShutdown(): Promise<void> {
+  return new Promise((resolve, reject) => {
+    // close() synchronously stops new accepts. Drop idle keep-alive sockets as
+    // well, but let active writes finish instead of destroying them.
+    server.close((error) => (error === undefined ? resolve() : reject(error)));
+    server.closeIdleConnections();
   });
 }
+
+function beginRestartShutdown(
+  mode: "planned_restart" | "controlled_outage_drill",
+): void {
+  if (shutdownStarted) return;
+  shutdownStarted = true;
+  const watchdogMs =
+    mode === "controlled_outage_drill"
+      ? CONTROLLED_OUTAGE_DRILL_SHUTDOWN_WATCHDOG_MS
+      : PLANNED_RESTART_SHUTDOWN_WATCHDOG_MS;
+  // Arm this before any asynchronous shutdown work: an event-store append or
+  // active HTTP request must not leave a listener-dark process alive forever.
+  const watchdog = setTimeout(() => {
+    console.error(`ProxyWar ${mode} shutdown exceeded its hard deadline.`);
+    process.exit(1);
+  }, watchdogMs);
+  watchdog.unref();
+
+  // External unavailability is initiated before any outage-start event. That
+  // ordering makes the durable event evidence of real downtime, not a proof-
+  // only ledger fabrication.
+  const httpShutdown = beginHttpShutdown();
+  runningChild?.kill("SIGTERM");
+  renderer?.kill("SIGTERM");
+  replayPremiereRevealAutoClip?.close();
+  const premiereShutdown = httpShutdown.then(() =>
+    mode === "controlled_outage_drill"
+      ? (replayPremiereProduction?.service.closeForControlledOutageDrill() ??
+        Promise.resolve())
+      : (replayPremiereProduction?.service.closeForPlannedRestart() ??
+        Promise.resolve()),
+  );
+  void Promise.allSettled([
+    httpShutdown,
+    replayPremiereClips?.close() ?? Promise.resolve(),
+    aiLeagueRunClips?.close() ?? Promise.resolve(),
+    premiereShutdown,
+  ]).then((results) => {
+    clearTimeout(watchdog);
+    process.exit(
+      results.some((result) => result.status === "rejected") ? 1 : 0,
+    );
+  });
+}
+
+process.on("SIGTERM", () => beginRestartShutdown("planned_restart"));
+process.on("SIGUSR2", () => beginRestartShutdown("controlled_outage_drill"));
 
 function hasValidBetaSession(req: Request): boolean {
   const cookies = parseCookieHeader(req.headers.cookie);

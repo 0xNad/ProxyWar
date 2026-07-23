@@ -11,6 +11,13 @@ const execFileAsync = promisify(execFile);
 const LABEL = "com.proxywar.beta";
 const SERVER_ENTRY = "src/scripts/ai-agent-demo-server.ts";
 const TARGET = `gui/${process.getuid()}/${LABEL}`;
+export const PREMIERE_CONTROLLED_OUTAGE_DRILL_MIN_DWELL_MS = 46_000;
+export const PREMIERE_CONTROLLED_OUTAGE_DRILL_MAX_DWELL_MS = 49_000;
+export const PREMIERE_CONTROLLED_OUTAGE_DRILL_GRACE_MS = 49_000;
+export const PREMIERE_CONTROLLED_OUTAGE_DRILL_MAX_START_TIMEOUT_MS = 8_000;
+export const PREMIERE_CONTROLLED_OUTAGE_DRILL_MAX_FORCE_WAIT_MS = 500;
+export const PREMIERE_CONTROLLED_OUTAGE_DRILL_MAX_TOTAL_MS = 58_000;
+const PREMIERE_CONTROLLED_OUTAGE_DRILL_SIGNAL = "SIGUSR2";
 // prettier-ignore
 const DEFAULT_PLIST = path.join(os.homedir(), "Library", "LaunchAgents", `${LABEL}.plist`);
 // prettier-ignore
@@ -100,6 +107,82 @@ export async function terminateOwnedGroup(
   return { forced: true };
 }
 
+async function runControlledOutageDrill(
+  host,
+  managed,
+  { graceMs, forceWaitMs },
+) {
+  validateOwnedGroup(managed);
+  const signalledAt = hostNowMs(host);
+  if (await host.groupExists(managed.pgid)) {
+    assertCapturedMembers(
+      managed,
+      await host.snapshotGroup(managed.pgid, managed.pid, true),
+    );
+    // SIGUSR2 belongs only to the validated direct Node leader. Sending it to
+    // the whole PGID would apply platform-default semantics to caffeinate,
+    // esbuild, or other children before the server can stop them with TERM.
+    await host.signalProcess(
+      managed.pid,
+      PREMIERE_CONTROLLED_OUTAGE_DRILL_SIGNAL,
+    );
+  }
+  if (await wait(host, graceMs, () => host.groupGone(managed.pgid))) {
+    const dwellMs = Math.max(0, hostNowMs(host) - signalledAt);
+    return {
+      cooperative:
+        dwellMs >= PREMIERE_CONTROLLED_OUTAGE_DRILL_MIN_DWELL_MS &&
+        dwellMs < PREMIERE_CONTROLLED_OUTAGE_DRILL_MAX_DWELL_MS,
+      dwellMs,
+      fallbackTerm: false,
+      forced: false,
+    };
+  }
+
+  let remaining = await host.snapshotGroup(managed.pgid, managed.pid, false);
+  if (remaining.length === 0) {
+    const dwellMs = Math.max(0, hostNowMs(host) - signalledAt);
+    return {
+      cooperative:
+        dwellMs >= PREMIERE_CONTROLLED_OUTAGE_DRILL_MIN_DWELL_MS &&
+        dwellMs < PREMIERE_CONTROLLED_OUTAGE_DRILL_MAX_DWELL_MS,
+      dwellMs,
+      fallbackTerm: false,
+      forced: false,
+    };
+  }
+  assertCapturedMembers(managed, remaining, { allowPostTermReparent: true });
+  await host.signalGroup(managed.pgid, "SIGTERM");
+  if (await wait(host, forceWaitMs, () => host.groupGone(managed.pgid))) {
+    return {
+      cooperative: false,
+      dwellMs: Math.max(0, hostNowMs(host) - signalledAt),
+      fallbackTerm: true,
+      forced: false,
+    };
+  }
+  remaining = await host.snapshotGroup(managed.pgid, managed.pid, false);
+  if (remaining.length === 0) {
+    return {
+      cooperative: false,
+      dwellMs: Math.max(0, hostNowMs(host) - signalledAt),
+      fallbackTerm: true,
+      forced: false,
+    };
+  }
+  assertCapturedMembers(managed, remaining, { allowPostTermReparent: true });
+  await host.signalGroup(managed.pgid, "SIGKILL");
+  if (!(await wait(host, forceWaitMs, () => host.groupGone(managed.pgid)))) {
+    throw new Error(`PGID ${managed.pgid} survived SIGKILL`);
+  }
+  return {
+    cooperative: false,
+    dwellMs: Math.max(0, hostNowMs(host) - signalledAt),
+    fallbackTerm: true,
+    forced: true,
+  };
+}
+
 export async function restartBeta({
   host,
   plistPath = DEFAULT_PLIST,
@@ -109,9 +192,20 @@ export async function restartBeta({
   forceWaitMs = 2_000,
   startTimeoutMs = 20_000,
   allowUnreadyCurrent = false,
+  premiereControlledOutageDrill = false,
   dryRun = false,
 }) {
-  validateInputs({ readyUrl, graceMs, forceWaitMs, startTimeoutMs });
+  validateInputs({
+    readyUrl,
+    graceMs,
+    forceWaitMs,
+    startTimeoutMs,
+    allowUnreadyCurrent,
+    premiereControlledOutageDrill,
+  });
+  const mode = premiereControlledOutageDrill
+    ? "premiere-controlled-outage-drill"
+    : "restart";
   const installed = await verifyInstalled(host, plistPath);
   const current = await host.readManaged(TARGET);
   if (!current) throw new Error(`LaunchAgent is not running: ${TARGET}`);
@@ -128,16 +222,24 @@ export async function restartBeta({
   if (dryRun) {
     // prettier-ignore
     return {
-      mode: "restart", dryRun: true, target: TARGET, pid: current.pid,
+      mode, dryRun: true, target: TARGET, pid: current.pid,
       pgid: current.pgid, ownedPids: current.members.map((member) => member.pid),
       projectDir: installed.projectDir, currentReady,
+      ...(premiereControlledOutageDrill ? {
+        signal: PREMIERE_CONTROLLED_OUTAGE_DRILL_SIGNAL,
+        requiredDwellMs: PREMIERE_CONTROLLED_OUTAGE_DRILL_MIN_DWELL_MS,
+        maximumDwellMs: PREMIERE_CONTROLLED_OUTAGE_DRILL_MAX_DWELL_MS,
+        verificationScope: "process_dwell_and_manifest_readiness_only",
+        ledgerVerificationRequired: true,
+      } : {}),
     };
   }
 
-  const stopped = await terminateOwnedGroup(host, current, {
-    graceMs,
-    forceWaitMs,
-  });
+  const drillStartedAt = premiereControlledOutageDrill ? hostNowMs(host) : null;
+  const stopped = premiereControlledOutageDrill
+    ? await runControlledOutageDrill(host, current, { graceMs, forceWaitMs })
+    : await terminateOwnedGroup(host, current, { graceMs, forceWaitMs });
+  const replacementStartedAt = hostNowMs(host);
   const replacement = await replacementReady(host, {
     target: TARGET,
     oldPid: current.pid,
@@ -145,12 +247,50 @@ export async function restartBeta({
     writerLockPath,
     readyUrl,
     startTimeoutMs,
+    deadlineAt: replacementStartedAt + startTimeoutMs,
   });
+  const replacementFinishedAt = hostNowMs(host);
+  const measuredReplacementMs = Math.max(
+    0,
+    replacementFinishedAt - replacementStartedAt,
+  );
+  const measuredTotalMs =
+    drillStartedAt === null
+      ? null
+      : Math.max(0, replacementFinishedAt - drillStartedAt);
+  if (premiereControlledOutageDrill && !stopped.cooperative) {
+    const failure = stopped.fallbackTerm
+      ? "validated Node leader required TERM/KILL fallback"
+      : `old PID exited outside the required ${PREMIERE_CONTROLLED_OUTAGE_DRILL_MIN_DWELL_MS}-${PREMIERE_CONTROLLED_OUTAGE_DRILL_MAX_DWELL_MS}ms dwell window`;
+    throw new Error(
+      `controlled outage drill failed after replacement readiness: ${failure}`,
+    );
+  }
+  if (
+    premiereControlledOutageDrill &&
+    (measuredTotalMs === null ||
+      measuredTotalMs >= PREMIERE_CONTROLLED_OUTAGE_DRILL_MAX_TOTAL_MS)
+  ) {
+    throw new Error(
+      `controlled outage drill exceeded the ${PREMIERE_CONTROLLED_OUTAGE_DRILL_MAX_TOTAL_MS}ms total success budget`,
+    );
+  }
   // prettier-ignore
   return {
-    mode: "restart", dryRun: false, oldPid: current.pid, oldPgid: current.pgid,
+    mode, dryRun: false, oldPid: current.pid, oldPgid: current.pgid,
     newPid: replacement.pid, newPgid: replacement.pgid, writerPid: replacement.pid,
     forced: stopped.forced, ready: true, currentReady,
+    ...(premiereControlledOutageDrill ? {
+      signal: PREMIERE_CONTROLLED_OUTAGE_DRILL_SIGNAL,
+      requiredDwellMs: PREMIERE_CONTROLLED_OUTAGE_DRILL_MIN_DWELL_MS,
+      maximumDwellMs: PREMIERE_CONTROLLED_OUTAGE_DRILL_MAX_DWELL_MS,
+      measuredDwellMs: stopped.dwellMs,
+      measuredReplacementMs,
+      measuredTotalMs,
+      fallbackTerm: stopped.fallbackTerm,
+      verificationScope: "process_dwell_and_manifest_readiness_only",
+      ledgerVerificationRequired: true,
+    } : {}),
   };
 }
 
@@ -183,33 +323,47 @@ function assertCapturedMembers(
 
 async function replacementReady(host, options) {
   let lastFailure = "replacement not started";
+  const assertBeforeDeadline = () => {
+    if (hostNowMs(host) >= options.deadlineAt) {
+      throw new Error("replacement readiness deadline exceeded");
+    }
+  };
   const accepted = await wait(host, options.startTimeoutMs, async () => {
     try {
+      assertBeforeDeadline();
       const candidate = await host.readManaged(options.target);
       if (candidate === null || candidate.pid === options.oldPid) return false;
       validateOwnedGroup(candidate, options.expectedCwd);
       validateDirectServer(candidate);
-      if (
-        (await host.readWriterPid(options.writerLockPath)) !== candidate.pid
-      ) {
+      const candidateWriterPid = await host.readWriterPid(
+        options.writerLockPath,
+      );
+      if (candidateWriterPid !== candidate.pid) {
         throw new Error("replacement writer mismatch");
       }
-      if (!(await host.ready(options.readyUrl)))
-        throw new Error("replacement not ready");
+      assertBeforeDeadline();
+      const candidateReady = await host.ready(options.readyUrl);
+      assertBeforeDeadline();
+      if (!candidateReady) throw new Error("replacement not ready");
       await host.sleep(100);
       const stable = await host.readManaged(options.target);
       if (stable === null) throw new Error("replacement disappeared");
       validateOwnedGroup(stable, options.expectedCwd);
       validateDirectServer(stable);
       assertSameManagedIdentity(candidate, stable);
-      if (
-        (await host.readWriterPid(options.writerLockPath)) !== candidate.pid
-      ) {
+      const stableWriterPid = await host.readWriterPid(options.writerLockPath);
+      if (stableWriterPid !== candidate.pid) {
         throw new Error("replacement writer changed");
       }
-      if (!(await host.ready(options.readyUrl))) {
+      assertBeforeDeadline();
+      const stableReady = await host.ready(options.readyUrl);
+      assertBeforeDeadline();
+      if (!stableReady) {
         throw new Error("replacement readiness changed");
       }
+      // Do not accept the second sample if any validation work reached the
+      // absolute replacement deadline.
+      assertBeforeDeadline();
       return stable;
     } catch (error) {
       lastFailure = error.message;
@@ -353,6 +507,13 @@ export function hostController({ exec = execFileAsync } = {}) {
     async signalGroup(pgid, signal) {
       try {
         process.kill(-pgid, signal);
+      } catch (error) {
+        if (error?.code !== "ESRCH") throw error;
+      }
+    },
+    async signalProcess(pid, signal) {
+      try {
+        process.kill(pid, signal);
       } catch (error) {
         if (error?.code !== "ESRCH") throw error;
       }
@@ -523,13 +684,17 @@ async function processCwd(exec, lsof, pid) {
 }
 
 async function wait(host, timeoutMs, probe) {
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
+  const deadline = hostNowMs(host) + timeoutMs;
+  while (hostNowMs(host) < deadline) {
     const value = await probe();
     if (value) return value;
-    await host.sleep(Math.min(50, Math.max(1, deadline - Date.now())));
+    await host.sleep(Math.min(50, Math.max(1, deadline - hostNowMs(host))));
   }
   return false;
+}
+
+function hostNowMs(host) {
+  return host.nowMs?.() ?? Date.now();
 }
 
 function validateInputs(values) {
@@ -540,11 +705,49 @@ function validateInputs(values) {
   ) {
     throw new Error("ready URL must be loopback HTTP");
   }
+  if (
+    values.premiereControlledOutageDrill &&
+    (!/^\/api\/premieres\/prem_[a-z0-9]{16,32}\/manifest$/.test(url.pathname) ||
+      url.search !== "" ||
+      url.hash !== "")
+  ) {
+    throw new Error(
+      "controlled outage drill requires --ready-url for the exact active Premiere manifest",
+    );
+  }
   // prettier-ignore
   for (const ms of [values.graceMs, values.forceWaitMs, values.startTimeoutMs]) {
     if (!Number.isSafeInteger(ms) || ms < 1 || ms > 120_000) {
       throw new Error("invalid restart duration");
     }
+  }
+  if (
+    values.premiereControlledOutageDrill &&
+    values.graceMs !== PREMIERE_CONTROLLED_OUTAGE_DRILL_GRACE_MS
+  ) {
+    throw new Error(
+      `controlled outage drill requires --grace-ms=${PREMIERE_CONTROLLED_OUTAGE_DRILL_GRACE_MS}`,
+    );
+  }
+  if (
+    values.premiereControlledOutageDrill &&
+    values.startTimeoutMs >
+      PREMIERE_CONTROLLED_OUTAGE_DRILL_MAX_START_TIMEOUT_MS
+  ) {
+    throw new Error(
+      `controlled outage drill requires --start-timeout-ms<=${PREMIERE_CONTROLLED_OUTAGE_DRILL_MAX_START_TIMEOUT_MS}`,
+    );
+  }
+  if (
+    values.premiereControlledOutageDrill &&
+    values.forceWaitMs > PREMIERE_CONTROLLED_OUTAGE_DRILL_MAX_FORCE_WAIT_MS
+  ) {
+    throw new Error(
+      `controlled outage drill requires --force-wait-ms<=${PREMIERE_CONTROLLED_OUTAGE_DRILL_MAX_FORCE_WAIT_MS}`,
+    );
+  }
+  if (values.premiereControlledOutageDrill && values.allowUnreadyCurrent) {
+    throw new Error("controlled outage drill requires a ready current server");
   }
 }
 
@@ -552,10 +755,12 @@ function must(condition, field) {
   if (!condition) throw new Error(`unsafe or unrendered ${field}`);
 }
 
-function cli(argv) {
+export function parseRestartCliArguments(argv) {
   const options = {};
   for (const arg of argv) {
     if (arg === "--dry-run") options.dryRun = true;
+    else if (arg === "--premiere-controlled-outage-drill")
+      options.premiereControlledOutageDrill = true;
     else if (arg === "--allow-unready-current")
       options.allowUnreadyCurrent = true;
     else if (arg.startsWith("--plist=")) options.plistPath = arg.slice(8);
@@ -570,6 +775,12 @@ function cli(argv) {
       options.startTimeoutMs = Number(arg.slice(19));
     else throw new Error(`unknown argument: ${arg}`);
   }
+  if (options.premiereControlledOutageDrill) {
+    options.graceMs ??= PREMIERE_CONTROLLED_OUTAGE_DRILL_GRACE_MS;
+    options.forceWaitMs ??= PREMIERE_CONTROLLED_OUTAGE_DRILL_MAX_FORCE_WAIT_MS;
+    options.startTimeoutMs ??=
+      PREMIERE_CONTROLLED_OUTAGE_DRILL_MAX_START_TIMEOUT_MS;
+  }
   return options;
 }
 
@@ -579,7 +790,7 @@ if (
 ) {
   try {
     // prettier-ignore
-    const output = await restartBeta({ host: hostController(), ...cli(process.argv.slice(2)) });
+    const output = await restartBeta({ host: hostController(), ...parseRestartCliArguments(process.argv.slice(2)) });
     process.stdout.write(`${JSON.stringify(output, null, 2)}\n`);
   } catch (error) {
     process.stderr.write(`ProxyWar beta restart refused: ${error.message}\n`);

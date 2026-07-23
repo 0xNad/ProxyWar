@@ -89,6 +89,31 @@ shape, follow the exact-hash activation and rollback transaction in
 `deploy/README.md`. Matching restored hashes alone is not rollback success; the
 restored managed group, writer ownership, and loopback HTTP 200 must also pass.
 
+The controlled Replay Premiere outage drill is a separate, one-shot evidence
+operation. Substitute the exact active premiere ID and run the dry run before
+the real invocation:
+
+```bash
+node deploy/mac/proxywar-beta-launchd-restart.mjs \
+  --premiere-controlled-outage-drill \
+  --ready-url=http://127.0.0.1:8787/api/premieres/prem_0123456789abcdef/manifest \
+  --dry-run
+node deploy/mac/proxywar-beta-launchd-restart.mjs \
+  --premiere-controlled-outage-drill \
+  --ready-url=http://127.0.0.1:8787/api/premieres/prem_0123456789abcdef/manifest
+```
+
+This deliberately causes about 46 seconds of public downtime after the
+drill-labelled outage start is durable. The drill flag selects its bounded
+grace and replacement timeouts automatically; `/league` readiness is
+deliberately rejected because it can be healthy while Premiere recovery is
+disabled. Ordinary helper restarts remain SIGTERM planned restarts with no
+artificial dwell. A successful helper result proves only owned-process dwell
+and two-sample manifest readiness. Final evidence still requires an external
+availability sampler plus inspection of the hash-chained event store for the
+matching `:controlled_outage_drill` outage-start and subsequent outage-recovered
+events.
+
 ### Safety Defaults
 
 For hosted testers:

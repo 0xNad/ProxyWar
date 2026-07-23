@@ -8,6 +8,13 @@ import { afterEach, test } from "node:test";
 import { fileURLToPath } from "node:url";
 import {
   hostController,
+  parseRestartCliArguments,
+  PREMIERE_CONTROLLED_OUTAGE_DRILL_GRACE_MS,
+  PREMIERE_CONTROLLED_OUTAGE_DRILL_MAX_DWELL_MS,
+  PREMIERE_CONTROLLED_OUTAGE_DRILL_MAX_FORCE_WAIT_MS,
+  PREMIERE_CONTROLLED_OUTAGE_DRILL_MAX_START_TIMEOUT_MS,
+  PREMIERE_CONTROLLED_OUTAGE_DRILL_MAX_TOTAL_MS,
+  PREMIERE_CONTROLLED_OUTAGE_DRILL_MIN_DWELL_MS,
   restartBeta,
   terminateOwnedGroup,
   validateDirectServer,
@@ -16,6 +23,8 @@ import {
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const uid = process.getuid?.() ?? os.userInfo().uid;
+const DRILL_READY_URL =
+  "http://127.0.0.1:8787/api/premieres/prem_0123456789abcdef/manifest";
 const temporaryRoots = [];
 const liveGroups = new Set();
 
@@ -36,9 +45,20 @@ afterEach(async () => {
 });
 
 test("wrapper and plist encode direct ownership and bounded group cleanup", async () => {
-  const [wrapper, plist] = await Promise.all([
+  const [wrapper, plist, demoServer, startup] = await Promise.all([
     fs.readFile(path.join(here, "start-proxywar-beta.zsh"), "utf8"),
     fs.readFile(path.join(here, "com.proxywar.beta.plist.example"), "utf8"),
+    fs.readFile(
+      path.join(here, "../../src/scripts/ai-agent-demo-server.ts"),
+      "utf8",
+    ),
+    fs.readFile(
+      path.join(
+        here,
+        "../../src/server/replay-premiere/ReplayPremiereStartup.ts",
+      ),
+      "utf8",
+    ),
   ]);
   assert.doesNotMatch(wrapper, /npm run agent:closed-beta:prod/);
   assert.match(
@@ -47,6 +67,21 @@ test("wrapper and plist encode direct ownership and bounded group cleanup", asyn
   );
   assert.match(plist, /<key>AbandonProcessGroup<\/key>\s*<false\/>/);
   assert.match(plist, /<key>ExitTimeOut<\/key>\s*<integer>10<\/integer>/);
+  assert.match(
+    startup,
+    /REPLAY_PREMIERE_CONTROLLED_OUTAGE_DRILL_HOLD_MS = 46_000/,
+  );
+  assert.match(
+    demoServer,
+    /CONTROLLED_OUTAGE_DRILL_SHUTDOWN_WATCHDOG_MS = 50_000/,
+  );
+  assert.ok(
+    46_000 < PREMIERE_CONTROLLED_OUTAGE_DRILL_MAX_DWELL_MS &&
+      PREMIERE_CONTROLLED_OUTAGE_DRILL_MAX_DWELL_MS <=
+        PREMIERE_CONTROLLED_OUTAGE_DRILL_GRACE_MS &&
+      PREMIERE_CONTROLLED_OUTAGE_DRILL_GRACE_MS < 50_000 &&
+      50_000 < PREMIERE_CONTROLLED_OUTAGE_DRILL_MAX_TOTAL_MS,
+  );
 });
 
 test("direct server validation rejects the npm ancestor", () => {
@@ -535,6 +570,237 @@ test("dry run reports current readiness without signalling", async () => {
   assert.deepEqual(state.signals, []);
 });
 
+test("controlled outage drill CLI selects bounded safe defaults", () => {
+  assert.deepEqual(
+    parseRestartCliArguments(["--premiere-controlled-outage-drill"]),
+    {
+      premiereControlledOutageDrill: true,
+      graceMs: PREMIERE_CONTROLLED_OUTAGE_DRILL_GRACE_MS,
+      forceWaitMs: PREMIERE_CONTROLLED_OUTAGE_DRILL_MAX_FORCE_WAIT_MS,
+      startTimeoutMs: PREMIERE_CONTROLLED_OUTAGE_DRILL_MAX_START_TIMEOUT_MS,
+    },
+  );
+});
+
+test("controlled outage drill rejects unsafe timing and unready overrides", async (t) => {
+  const safe = {
+    host: {},
+    premiereControlledOutageDrill: true,
+    readyUrl: DRILL_READY_URL,
+    graceMs: PREMIERE_CONTROLLED_OUTAGE_DRILL_GRACE_MS,
+    forceWaitMs: PREMIERE_CONTROLLED_OUTAGE_DRILL_MAX_FORCE_WAIT_MS,
+    startTimeoutMs: PREMIERE_CONTROLLED_OUTAGE_DRILL_MAX_START_TIMEOUT_MS,
+  };
+  await t.test("short grace", async () => {
+    await assert.rejects(
+      restartBeta({
+        ...safe,
+        graceMs: PREMIERE_CONTROLLED_OUTAGE_DRILL_GRACE_MS - 1,
+      }),
+      /requires --grace-ms=49000/,
+    );
+  });
+  await t.test("long grace", async () => {
+    await assert.rejects(
+      restartBeta({
+        ...safe,
+        graceMs: PREMIERE_CONTROLLED_OUTAGE_DRILL_GRACE_MS + 1,
+      }),
+      /requires --grace-ms=49000/,
+    );
+  });
+  await t.test("generic league readiness", async () => {
+    await assert.rejects(
+      restartBeta({
+        ...safe,
+        readyUrl: "http://127.0.0.1:8787/league",
+      }),
+      /requires --ready-url for the exact active Premiere manifest/,
+    );
+  });
+  await t.test("long replacement timeout", async () => {
+    await assert.rejects(
+      restartBeta({
+        ...safe,
+        startTimeoutMs:
+          PREMIERE_CONTROLLED_OUTAGE_DRILL_MAX_START_TIMEOUT_MS + 1,
+      }),
+      /requires --start-timeout-ms<=/,
+    );
+  });
+  await t.test("long force wait", async () => {
+    await assert.rejects(
+      restartBeta({
+        ...safe,
+        forceWaitMs: PREMIERE_CONTROLLED_OUTAGE_DRILL_MAX_FORCE_WAIT_MS + 1,
+      }),
+      /requires --force-wait-ms<=/,
+    );
+  });
+  await t.test("unready override", async () => {
+    await assert.rejects(
+      restartBeta({ ...safe, allowUnreadyCurrent: true }),
+      /requires a ready current server/,
+    );
+  });
+});
+
+test("explicit controlled outage drill signals only the Node leader and never forces a cooperative exit", async () => {
+  const fixture = await launchFiles();
+  const state = fakeRestart(fixture);
+  const result = await restartBeta({
+    host: state.host,
+    premiereControlledOutageDrill: true,
+    readyUrl: DRILL_READY_URL,
+    plistPath: fixture.plistPath,
+    writerLockPath: fixture.lockPath,
+    graceMs: PREMIERE_CONTROLLED_OUTAGE_DRILL_GRACE_MS,
+    forceWaitMs: PREMIERE_CONTROLLED_OUTAGE_DRILL_MAX_FORCE_WAIT_MS,
+    startTimeoutMs: PREMIERE_CONTROLLED_OUTAGE_DRILL_MAX_START_TIMEOUT_MS,
+  });
+
+  assert.equal(result.mode, "premiere-controlled-outage-drill");
+  assert.equal(result.signal, "SIGUSR2");
+  assert.equal(result.requiredDwellMs, 46_000);
+  assert.equal(result.maximumDwellMs, 49_000);
+  assert.equal(result.measuredDwellMs, 46_000);
+  assert.equal(result.measuredReplacementMs, 100);
+  assert.equal(result.measuredTotalMs, 46_100);
+  assert.ok(result.measuredTotalMs < 58_000);
+  assert.equal(result.fallbackTerm, false);
+  assert.equal(result.forced, false);
+  assert.equal(
+    result.verificationScope,
+    "process_dwell_and_manifest_readiness_only",
+  );
+  assert.equal(result.ledgerVerificationRequired, true);
+  assert.deepEqual(state.processSignals, [[400, "SIGUSR2"]]);
+  assert.deepEqual(state.signals, []);
+});
+
+test("controlled outage drill refuses an early old-PID exit after accepting the replacement", async () => {
+  const fixture = await launchFiles();
+  const state = fakeRestart(fixture, { controlledDwellMs: 1_000 });
+  await assert.rejects(
+    restartBeta({
+      host: state.host,
+      premiereControlledOutageDrill: true,
+      readyUrl: DRILL_READY_URL,
+      plistPath: fixture.plistPath,
+      writerLockPath: fixture.lockPath,
+      graceMs: PREMIERE_CONTROLLED_OUTAGE_DRILL_GRACE_MS,
+      forceWaitMs: PREMIERE_CONTROLLED_OUTAGE_DRILL_MAX_FORCE_WAIT_MS,
+      startTimeoutMs: PREMIERE_CONTROLLED_OUTAGE_DRILL_MAX_START_TIMEOUT_MS,
+    }),
+    /old PID exited outside the required 46000-49000ms dwell window/,
+  );
+  assert.deepEqual(state.processSignals, [[400, "SIGUSR2"]]);
+  assert.deepEqual(state.signals, []);
+  assert.ok(state.readyReads >= 2);
+});
+
+test("controlled outage drill refuses an old-PID exit at the late dwell boundary", async () => {
+  const fixture = await launchFiles();
+  const state = fakeRestart(fixture, {
+    controlledDwellMs: PREMIERE_CONTROLLED_OUTAGE_DRILL_MAX_DWELL_MS,
+  });
+  await assert.rejects(
+    restartBeta({
+      host: state.host,
+      premiereControlledOutageDrill: true,
+      readyUrl: DRILL_READY_URL,
+      plistPath: fixture.plistPath,
+      writerLockPath: fixture.lockPath,
+      graceMs: PREMIERE_CONTROLLED_OUTAGE_DRILL_GRACE_MS,
+      forceWaitMs: PREMIERE_CONTROLLED_OUTAGE_DRILL_MAX_FORCE_WAIT_MS,
+      startTimeoutMs: PREMIERE_CONTROLLED_OUTAGE_DRILL_MAX_START_TIMEOUT_MS,
+    }),
+    /old PID exited outside the required 46000-49000ms dwell window/,
+  );
+  assert.ok(state.readyReads >= 2);
+});
+
+test("controlled outage drill rejects an 8001ms readiness-probe overrun at the absolute replacement deadline", async () => {
+  const fixture = await launchFiles();
+  const state = fakeRestart(fixture, { replacementReadyDelayMs: 8_001 });
+  await assert.rejects(
+    restartBeta({
+      host: state.host,
+      premiereControlledOutageDrill: true,
+      readyUrl: DRILL_READY_URL,
+      plistPath: fixture.plistPath,
+      writerLockPath: fixture.lockPath,
+      graceMs: PREMIERE_CONTROLLED_OUTAGE_DRILL_GRACE_MS,
+      forceWaitMs: PREMIERE_CONTROLLED_OUTAGE_DRILL_MAX_FORCE_WAIT_MS,
+      startTimeoutMs: PREMIERE_CONTROLLED_OUTAGE_DRILL_MAX_START_TIMEOUT_MS,
+    }),
+    /replacement acceptance failed: replacement readiness deadline exceeded/,
+  );
+  assert.equal(state.readyReads, 1);
+});
+
+test("controlled outage drill cleans up but refuses success when the leader needs TERM fallback", async () => {
+  const fixture = await launchFiles();
+  const state = fakeRestart(fixture, { controlledNeverExits: true });
+  await assert.rejects(
+    restartBeta({
+      host: state.host,
+      premiereControlledOutageDrill: true,
+      readyUrl: DRILL_READY_URL,
+      plistPath: fixture.plistPath,
+      writerLockPath: fixture.lockPath,
+      graceMs: PREMIERE_CONTROLLED_OUTAGE_DRILL_GRACE_MS,
+      forceWaitMs: PREMIERE_CONTROLLED_OUTAGE_DRILL_MAX_FORCE_WAIT_MS,
+      startTimeoutMs: PREMIERE_CONTROLLED_OUTAGE_DRILL_MAX_START_TIMEOUT_MS,
+    }),
+    /required TERM\/KILL fallback/,
+  );
+  assert.deepEqual(state.processSignals, [[400, "SIGUSR2"]]);
+  assert.deepEqual(state.signals, [[400, "SIGTERM"]]);
+  assert.ok(state.readyReads >= 2);
+});
+
+test("ordinary restart remains SIGTERM-only and reports restart mode", async () => {
+  const fixture = await launchFiles();
+  const state = fakeRestart(fixture);
+  const result = await restartBeta({
+    host: state.host,
+    plistPath: fixture.plistPath,
+    writerLockPath: fixture.lockPath,
+    graceMs: 50,
+    forceWaitMs: 50,
+    startTimeoutMs: 500,
+  });
+  assert.equal(result.mode, "restart");
+  assert.equal(result.forced, false);
+  assert.deepEqual(state.processSignals, []);
+  assert.deepEqual(state.signals, [[400, "SIGTERM"]]);
+});
+
+test("controlled outage drill dry run reports mode without signalling", async () => {
+  const fixture = await launchFiles();
+  const state = fakeRestart(fixture);
+  const result = await restartBeta({
+    host: state.host,
+    premiereControlledOutageDrill: true,
+    readyUrl: DRILL_READY_URL,
+    dryRun: true,
+    plistPath: fixture.plistPath,
+    writerLockPath: fixture.lockPath,
+    graceMs: PREMIERE_CONTROLLED_OUTAGE_DRILL_GRACE_MS,
+    forceWaitMs: PREMIERE_CONTROLLED_OUTAGE_DRILL_MAX_FORCE_WAIT_MS,
+    startTimeoutMs: PREMIERE_CONTROLLED_OUTAGE_DRILL_MAX_START_TIMEOUT_MS,
+  });
+  assert.equal(result.mode, "premiere-controlled-outage-drill");
+  assert.equal(result.requiredDwellMs, 46_000);
+  assert.equal(
+    result.verificationScope,
+    "process_dwell_and_manifest_readiness_only",
+  );
+  assert.deepEqual(state.processSignals, []);
+  assert.deepEqual(state.signals, []);
+});
+
 test("replacement polling tolerates missing writer and not-ready transients", async () => {
   const fixture = await launchFiles();
   const state = fakeRestart(fixture, {
@@ -568,7 +834,7 @@ test("replacement rejects same-PID reuse during stability sampling", async () =>
       writerLockPath: fixture.lockPath,
       graceMs: 20,
       forceWaitMs: 20,
-      startTimeoutMs: 35,
+      startTimeoutMs: 101,
     }),
     /replacement acceptance failed: replacement process identity changed/,
   );
@@ -584,7 +850,7 @@ test("replacement requires a second stable HTTP 200", async () => {
       writerLockPath: fixture.lockPath,
       graceMs: 20,
       forceWaitMs: 20,
-      startTimeoutMs: 35,
+      startTimeoutMs: 101,
     }),
     /replacement acceptance failed: replacement readiness changed/,
   );
@@ -612,6 +878,8 @@ function fakeRestart(fixture, options = {}) {
   const replacement = managed(401, fixture.projectDir);
   let phase = "current";
   let groupAlive = true;
+  let virtualNowMs = 0;
+  let controlledSignalAt = null;
   let transientWriterFailures = options.transientWriterFailures ?? 0;
   let transientReadyFailures = options.transientReadyFailures ?? 0;
   let replacementReads = 0;
@@ -622,15 +890,30 @@ function fakeRestart(fixture, options = {}) {
   };
   const state = {
     signals: [],
+    processSignals: [],
     writerReads: 0,
     readyReads: 0,
     preflightReads: 0,
+  };
+  const refreshControlledExit = () => {
+    if (
+      groupAlive &&
+      controlledSignalAt !== null &&
+      options.controlledNeverExits !== true &&
+      virtualNowMs - controlledSignalAt >=
+        (options.controlledDwellMs ??
+          PREMIERE_CONTROLLED_OUTAGE_DRILL_MIN_DWELL_MS)
+    ) {
+      groupAlive = false;
+      phase = "replacement";
+    }
   };
   state.host = {
     async readPlist() {
       return fixture.config;
     },
     async readManaged() {
+      refreshControlledExit();
       if (phase === "current") return current;
       replacementReads += 1;
       if (options.reusePidDuringStability && replacementReads % 2 === 0) {
@@ -639,6 +922,7 @@ function fakeRestart(fixture, options = {}) {
       return replacement;
     },
     async readWriterPid() {
+      refreshControlledExit();
       state.writerReads += 1;
       if (phase === "current") return options.initialWriterPid ?? current.pid;
       if (transientWriterFailures-- > 0) throw new Error("writer lock absent");
@@ -648,9 +932,11 @@ function fakeRestart(fixture, options = {}) {
       return groupAlive ? current.members : [];
     },
     async groupExists() {
+      refreshControlledExit();
       return groupAlive;
     },
     async groupGone() {
+      refreshControlledExit();
       return !groupAlive;
     },
     async signalGroup(pgid, signal) {
@@ -658,19 +944,34 @@ function fakeRestart(fixture, options = {}) {
       groupAlive = false;
       phase = "replacement";
     },
+    async signalProcess(pid, signal) {
+      state.processSignals.push([pid, signal]);
+      controlledSignalAt = virtualNowMs;
+    },
     async ready() {
+      refreshControlledExit();
       if (phase === "current") {
         state.preflightReads += 1;
         return options.currentUnready !== true;
       }
       state.readyReads += 1;
+      if (
+        state.readyReads === 1 &&
+        options.replacementReadyDelayMs !== undefined
+      ) {
+        virtualNowMs += options.replacementReadyDelayMs;
+      }
       if (options.neverReady) return false;
       if (transientReadyFailures-- > 0) return false;
       if (options.readinessChanges && state.readyReads % 2 === 0) return false;
       return true;
     },
     async sleep(ms) {
-      await new Promise((resolve) => setTimeout(resolve, Math.min(ms, 2)));
+      virtualNowMs += ms;
+      refreshControlledExit();
+    },
+    nowMs() {
+      return virtualNowMs;
     },
   };
   return state;

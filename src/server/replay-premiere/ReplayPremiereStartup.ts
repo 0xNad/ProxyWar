@@ -51,8 +51,10 @@ import {
 } from "./ReplayPremierePublication";
 import { REPLAY_PREMIERE_V1_MAX_REVEAL_STORED_EVENT_BYTES } from "./ReplayPremiereRevealEnvelopeCapacity";
 import {
+  isReplayPremiereOutageStartIdempotencyKey,
   ReplayPremiereRuntimeCoordinator,
   ReplayPremiereRuntimeRegistry,
+  type ReplayPremiereOutageReason,
   type ReplayPremiereRuntimeClock,
 } from "./ReplayPremiereRuntimeCoordinator";
 import {
@@ -104,6 +106,13 @@ const RUNTIME_RETRY_MAX_MS = 60_000;
 const MAX_RUNTIME_REPORTS_PER_INCIDENT = 4;
 const MAX_DIAGNOSTIC_TARGET_BYTES = 160;
 const SAFE_DIAGNOSTIC_TARGET = /^[A-Za-z0-9._:-]+$/;
+/**
+ * A controlled drill must remain externally unavailable past the observed
+ * ~45.1s runtime wake cadence. Holding for 46s after every durable outage
+ * begin leaves roughly 6s for clean exit plus the production startup budget
+ * before the coordinator's strict 60s recoverable-outage ceiling.
+ */
+export const REPLAY_PREMIERE_CONTROLLED_OUTAGE_DRILL_HOLD_MS = 46_000;
 const RUNTIME_PROJECTION_EVENT_TYPES = new Set([
   "premiere_runtime_initialized",
   "premiere_runtime_started",
@@ -292,25 +301,117 @@ export class ReplayPremiereProductionService {
   }
 
   close(): Promise<void> {
-    this.closePromise ??= this.closeOnce();
+    this.closePromise ??= this.closeOnce(null);
     return this.closePromise;
   }
 
-  private async closeOnce(): Promise<void> {
+  /**
+   * Idempotently quiesces timers, durably marks every active premiere as
+   * entering a real planned-restart outage, then closes retained resources.
+   * The caller must stop external HTTP admission before invoking this method.
+   */
+  closeForPlannedRestart(): Promise<void> {
+    this.closePromise ??= this.closeOnce("planned_restart");
+    return this.closePromise;
+  }
+
+  /**
+   * The explicit controlled-outage drill path. It records the drill reason in
+   * each outage-start event, holds the service down across one observed runtime
+   * wake cadence, then closes cleanly. The caller must stop external HTTP
+   * admission before invoking this method.
+   */
+  closeForControlledOutageDrill(): Promise<void> {
+    this.closePromise ??= this.closeOnce("controlled_outage_drill");
+    return this.closePromise;
+  }
+
+  private async closeOnce(
+    outageReason: ReplayPremiereOutageReason | null,
+  ): Promise<void> {
     this.closing = true;
-    if (this.reclamationTimer !== null) {
-      clearTimeout(this.reclamationTimer);
-      this.reclamationTimer = null;
+    const failures: unknown[] = [];
+    try {
+      if (this.reclamationTimer !== null) {
+        clearTimeout(this.reclamationTimer);
+        this.reclamationTimer = null;
+      }
+      await this.reclamationInFlight.catch(() => undefined);
+      await this.supervisor.close();
+      if (outageReason !== null) {
+        let outagesStarted = 0;
+        const orderedTargets = [...this.ownedTargets].sort((left, right) =>
+          left.runtime.premiereId.localeCompare(right.runtime.premiereId),
+        );
+        for (const assembled of orderedTargets) {
+          const state = assembled.runtime.readLifecycleState();
+          if (
+            state !== "scheduled" &&
+            state !== "playing" &&
+            state !== "checkpoint"
+          ) {
+            continue;
+          }
+          try {
+            await assembled.runtime.beginOutage(outageReason);
+            outagesStarted += 1;
+          } catch (error) {
+            failures.push(error);
+          }
+        }
+        if (outageReason === "controlled_outage_drill") {
+          if (outagesStarted === 0) {
+            failures.push(
+              startupUnavailable(
+                "controlled_outage_drill_requires_durable_outage",
+              ),
+            );
+          } else {
+            // Once any drill-labelled begin is durable, preserve the full
+            // external dwell even if another target refused its begin. A
+            // short drill-labelled outage would be misleading evidence.
+            await new Promise<void>((resolve) =>
+              setTimeout(
+                resolve,
+                REPLAY_PREMIERE_CONTROLLED_OUTAGE_DRILL_HOLD_MS,
+              ),
+            );
+          }
+        }
+      }
+      // Deferred assembly can retain its own 90s budget. Closing already
+      // fences registration, so outage begins must become durable first; the
+      // pending work is then allowed to finish before the event store closes.
+      await Promise.allSettled([...this.pendingAssemblies]);
+    } catch (error) {
+      failures.push(error);
+    } finally {
+      for (const assembled of [...this.ownedTargets].reverse()) {
+        try {
+          this.httpRegistry.unregister(assembled.target);
+        } catch (error) {
+          failures.push(error);
+        }
+        try {
+          this.runtimeRegistry.unregister(assembled.runtime);
+        } catch (error) {
+          failures.push(error);
+        }
+      }
+      this.ownedTargets.length = 0;
+      try {
+        await this.eventStore.close();
+      } catch (error) {
+        failures.push(error);
+      }
     }
-    await this.reclamationInFlight.catch(() => undefined);
-    await this.supervisor.close();
-    await Promise.allSettled([...this.pendingAssemblies]);
-    for (const assembled of [...this.ownedTargets].reverse()) {
-      this.httpRegistry.unregister(assembled.target);
-      this.runtimeRegistry.unregister(assembled.runtime);
+    if (failures.length === 1) throw failures[0];
+    if (failures.length > 1) {
+      throw new AggregateError(
+        failures,
+        "Replay Premiere production shutdown failed",
+      );
     }
-    this.ownedTargets.length = 0;
-    await this.eventStore.close();
   }
 
   /**
@@ -1554,7 +1655,11 @@ function runtimeProjectionIdempotencyMatches(
     case "premiere_runtime_outage_started":
       return (
         payload.outageStartedAt === event.occurredAt &&
-        key === `runtime:outage:${commitment}:begin:${lifecycle.version}`
+        isReplayPremiereOutageStartIdempotencyKey(
+          key,
+          commitment,
+          lifecycle.version,
+        )
       );
     case "premiere_runtime_outage_recovered": {
       const prefix = `runtime:outage:${commitment}:recover:${lifecycle.version}:`;

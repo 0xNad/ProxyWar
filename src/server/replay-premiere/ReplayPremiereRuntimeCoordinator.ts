@@ -68,6 +68,13 @@ export { REPLAY_PREMIERE_CHECKPOINT_PAUSE_MS };
 export const REPLAY_PREMIERE_MAX_RECOVERABLE_OUTAGE_MS = 60_000;
 export const REPLAY_PREMIERE_MAX_OUTAGE_EVENTS_PER_LIFECYCLE_VERSION = 2;
 
+export type ReplayPremiereOutageReason =
+  | "planned_restart"
+  | "controlled_outage_drill";
+
+const REPLAY_PREMIERE_OUTAGE_REASONS: readonly ReplayPremiereOutageReason[] =
+  Object.freeze(["planned_restart", "controlled_outage_drill"]);
+
 const runtimeEventTypes = new Set([
   "premiere_runtime_initialized",
   "premiere_runtime_started",
@@ -314,8 +321,14 @@ export class ReplayPremiereRuntimeCoordinator {
     return this.runExclusive(async () => this.synchronizeUnlocked());
   }
 
-  async beginOutage(): Promise<void> {
+  async beginOutage(reason?: ReplayPremiereOutageReason): Promise<void> {
     return this.runExclusive(async () => {
+      if (
+        reason !== undefined &&
+        !REPLAY_PREMIERE_OUTAGE_REASONS.includes(reason)
+      ) {
+        throw runtimeRequest("invalid_outage_reason");
+      }
       const now = this.clockTimestamp();
       if (
         this.recoveredReveal !== null ||
@@ -337,7 +350,11 @@ export class ReplayPremiereRuntimeCoordinator {
       await this.persistRuntimeState(
         next,
         "premiere_runtime_outage_started",
-        `runtime:outage:${this.gate.publicationCommitmentHash}:begin:${this.state.lifecycle.version}`,
+        outageStartIdempotencyKey(
+          this.gate.publicationCommitmentHash,
+          this.state.lifecycle.version,
+          reason,
+        ),
         now,
       );
     });
@@ -1588,7 +1605,7 @@ function validateRuntimeEventSemantics(
   drafts: readonly PremiereChunkDraft[],
 ): void {
   const commitmentHash = state.publicationCommitmentHash;
-  let expectedIdempotencyKey: string;
+  let expectedIdempotencyKey: string | readonly string[];
   let expectedLifecycleVersion: number;
   let expectedLifecycleState: PremiereState;
   let expectedNextDraftIndex: number;
@@ -1653,7 +1670,20 @@ function validateRuntimeEventSemantics(
       if (previous === null || previous.outageStartedAt !== null) {
         throw runtimeIntegrity("outage_start_event_transition_mismatch");
       }
-      expectedIdempotencyKey = `runtime:outage:${commitmentHash}:begin:${previous.lifecycle.version}`;
+      // Historical and test-authored outages use the unsuffixed key. Production
+      // shutdown paths append a closed-set reason suffix so the durable event
+      // distinguishes a planned restart from a controlled outage drill without
+      // changing the v1 runtime snapshot schema.
+      expectedIdempotencyKey = [
+        outageStartIdempotencyKey(commitmentHash, previous.lifecycle.version),
+        ...REPLAY_PREMIERE_OUTAGE_REASONS.map((reason) =>
+          outageStartIdempotencyKey(
+            commitmentHash,
+            previous.lifecycle.version,
+            reason,
+          ),
+        ),
+      ];
       expectedLifecycleVersion = previous.lifecycle.version;
       expectedLifecycleState = previous.lifecycle.state;
       expectedNextDraftIndex = previous.nextDraftIndex;
@@ -1721,7 +1751,9 @@ function validateRuntimeEventSemantics(
   }
 
   if (
-    event.idempotencyKey !== expectedIdempotencyKey ||
+    !(Array.isArray(expectedIdempotencyKey)
+      ? expectedIdempotencyKey.includes(event.idempotencyKey ?? "")
+      : event.idempotencyKey === expectedIdempotencyKey) ||
     state.lifecycle.version !== expectedLifecycleVersion ||
     state.lifecycle.state !== expectedLifecycleState ||
     state.nextDraftIndex !== expectedNextDraftIndex ||
@@ -1729,6 +1761,27 @@ function validateRuntimeEventSemantics(
   ) {
     throw runtimeIntegrity("event_semantics_mismatch");
   }
+}
+
+function outageStartIdempotencyKey(
+  commitmentHash: string,
+  lifecycleVersion: number,
+  reason?: ReplayPremiereOutageReason,
+): string {
+  const base = `runtime:outage:${commitmentHash}:begin:${lifecycleVersion}`;
+  return reason === undefined ? base : `${base}:${reason}`;
+}
+
+export function isReplayPremiereOutageStartIdempotencyKey(
+  key: string,
+  commitmentHash: string,
+  lifecycleVersion: number,
+): boolean {
+  return [undefined, ...REPLAY_PREMIERE_OUTAGE_REASONS].some(
+    (reason) =>
+      key ===
+      outageStartIdempotencyKey(commitmentHash, lifecycleVersion, reason),
+  );
 }
 
 function recoverOutageEventsByLifecycleVersion(

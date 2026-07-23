@@ -382,6 +382,19 @@ describe("ReplayPremiere HTTP adapter", () => {
       expect(cookie).toContain("HttpOnly");
       expect(cookie).toContain("SameSite=Lax");
       const sessionBody = await sessionResponse.json();
+      expect(Object.keys(sessionBody).sort()).toEqual(
+        [
+          "schemaVersion",
+          "csrfToken",
+          "session",
+          "premiereState",
+          "checkpoints",
+          "incomingMoment",
+          "clipsEnabled",
+          "reactionSummary",
+        ].sort(),
+      );
+      expect(sessionBody).not.toHaveProperty("latestOwnReaction");
       expect(sessionBody).toMatchObject({
         schemaVersion: 2,
         csrfToken: expect.any(String),
@@ -435,7 +448,21 @@ describe("ReplayPremiere HTTP adapter", () => {
         body: JSON.stringify({ visible: true, observedSequence: 5 }),
       });
       expect(heartbeat.status).toBe(200);
-      expect(await heartbeat.json()).toMatchObject({
+      const heartbeatBody = await heartbeat.json();
+      expect(Object.keys(heartbeatBody).sort()).toEqual(
+        [
+          "schemaVersion",
+          "session",
+          "idempotent",
+          "persisted",
+          "premiereState",
+          "checkpoints",
+          "clipsEnabled",
+          "reactionSummary",
+        ].sort(),
+      );
+      expect(heartbeatBody).not.toHaveProperty("latestOwnReaction");
+      expect(heartbeatBody).toMatchObject({
         schemaVersion: 2,
         persisted: false,
         clipsEnabled: false,
@@ -464,7 +491,18 @@ describe("ReplayPremiere HTTP adapter", () => {
           },
         );
         expect(reaction.status).toBe(200);
-        expect(await reaction.json()).toMatchObject({
+        const reactionBody = await reaction.json();
+        expect(Object.keys(reactionBody).sort()).toEqual(
+          [
+            "schemaVersion",
+            "reaction",
+            "idempotent",
+            "clipsEnabled",
+            "reactionSummary",
+          ].sort(),
+        );
+        expect(reactionBody).not.toHaveProperty("latestOwnReaction");
+        expect(reactionBody).toMatchObject({
           schemaVersion: 2,
           reaction: { kind },
           clipsEnabled: false,
@@ -505,7 +543,9 @@ describe("ReplayPremiere HTTP adapter", () => {
         body: JSON.stringify({ visible: true, observedSequence: 5 }),
       });
       expect(reload.status).toBe(201);
-      expect((await reload.json()).csrfToken).toEqual(expect.any(String));
+      const reloadBody = await reload.json();
+      expect(reloadBody.csrfToken).toEqual(expect.any(String));
+      expect(reloadBody).not.toHaveProperty("latestOwnReaction");
 
       const wrongOrigin = await fetch(sessionUrl, {
         method: "POST",
@@ -516,6 +556,179 @@ describe("ReplayPremiere HTTP adapter", () => {
         body: JSON.stringify({ visible: true, observedSequence: 5 }),
       });
       expect(wrongOrigin.status).toBe(403);
+    });
+  });
+
+  test("negotiates v3 latest-own-reaction anchors without crossing participant boundaries", async () => {
+    const harness = await httpHarness(root, true);
+    await harness.run(async (baseUrl) => {
+      const sessionUrl = `${baseUrl}/api/premieres/${PREMIERE_ID}/sessions`;
+      const sessionAResponse = await fetch(sessionUrl, {
+        method: "POST",
+        headers: writeHeaders(
+          "v3_session_request_000001",
+          undefined,
+          undefined,
+          "3",
+        ),
+        body: JSON.stringify({ visible: true, observedSequence: 5 }),
+      });
+      expect(sessionAResponse.status).toBe(201);
+      const cookieA = sessionAResponse.headers.get("set-cookie") ?? undefined;
+      const sessionA = await sessionAResponse.json();
+      expect(sessionA).toMatchObject({
+        schemaVersion: 3,
+        latestOwnReaction: null,
+      });
+
+      const reactionAResponse = await fetch(
+        `${baseUrl}/api/premieres/${PREMIERE_ID}/reactions`,
+        {
+          method: "POST",
+          headers: writeHeaders(
+            "v3_reaction_request_a001",
+            cookieA,
+            sessionA.csrfToken,
+            "3",
+          ),
+          body: JSON.stringify({
+            sessionId: sessionA.session.id,
+            sequence: 2,
+            kind: "smart",
+          }),
+        },
+      );
+      expect(reactionAResponse.status).toBe(200);
+      const reactionA = await reactionAResponse.json();
+      const anchorA = {
+        id: reactionA.reaction.id,
+        kind: "smart",
+        sequence: 2,
+        turn: 2,
+      };
+      expect(reactionA).toMatchObject({
+        schemaVersion: 3,
+        latestOwnReaction: anchorA,
+      });
+      expect(Object.keys(reactionA.latestOwnReaction).sort()).toEqual(
+        ["id", "kind", "sequence", "turn"].sort(),
+      );
+      expect(Object.keys(reactionA.reactionSummary).sort()).toEqual(
+        [
+          "totalReactions",
+          "distinctParticipants",
+          "byKind",
+          "ownByKind",
+        ].sort(),
+      );
+
+      const reloadAResponse = await fetch(sessionUrl, {
+        method: "POST",
+        headers: writeHeaders(
+          "v3_session_reload_a00001",
+          cookieA,
+          undefined,
+          "3",
+        ),
+        body: JSON.stringify({ visible: true, observedSequence: 5 }),
+      });
+      expect(reloadAResponse.status).toBe(201);
+      const reloadA = await reloadAResponse.json();
+      expect(reloadA.session.participantId).toBe(
+        sessionA.session.participantId,
+      );
+      expect(reloadA.latestOwnReaction).toEqual(anchorA);
+
+      const sessionBResponse = await fetch(sessionUrl, {
+        method: "POST",
+        headers: writeHeaders(
+          "v3_session_request_000002",
+          undefined,
+          undefined,
+          "3",
+        ),
+        body: JSON.stringify({ visible: true, observedSequence: 5 }),
+      });
+      expect(sessionBResponse.status).toBe(201);
+      const cookieB = sessionBResponse.headers.get("set-cookie") ?? undefined;
+      const sessionB = await sessionBResponse.json();
+      expect(sessionB.session.participantId).not.toBe(
+        sessionA.session.participantId,
+      );
+      expect(sessionB.latestOwnReaction).toBeNull();
+
+      const reactionBResponse = await fetch(
+        `${baseUrl}/api/premieres/${PREMIERE_ID}/reactions`,
+        {
+          method: "POST",
+          headers: writeHeaders(
+            "v3_reaction_request_b001",
+            cookieB,
+            sessionB.csrfToken,
+            "3",
+          ),
+          body: JSON.stringify({
+            sessionId: sessionB.session.id,
+            sequence: 3,
+            kind: "mistake",
+          }),
+        },
+      );
+      expect(reactionBResponse.status).toBe(200);
+      const reactionB = await reactionBResponse.json();
+      expect(reactionB.latestOwnReaction).toEqual({
+        id: reactionB.reaction.id,
+        kind: "mistake",
+        sequence: 3,
+        turn: 3,
+      });
+      expect(reactionB.latestOwnReaction).not.toEqual(anchorA);
+
+      const heartbeatAResponse = await fetch(
+        `${sessionUrl}/${sessionA.session.id}/heartbeat`,
+        {
+          method: "POST",
+          headers: writeHeaders(
+            "v3_heartbeat_request_a01",
+            cookieA,
+            reloadA.csrfToken,
+            "3",
+          ),
+          body: JSON.stringify({ visible: true, observedSequence: 5 }),
+        },
+      );
+      expect(heartbeatAResponse.status).toBe(200);
+      expect(await heartbeatAResponse.json()).toMatchObject({
+        schemaVersion: 3,
+        latestOwnReaction: anchorA,
+      });
+
+      const v2ReloadResponse = await fetch(sessionUrl, {
+        method: "POST",
+        headers: writeHeaders(
+          "v2_session_reload_a00001",
+          cookieA,
+          undefined,
+          "2",
+        ),
+        body: JSON.stringify({ visible: true, observedSequence: 5 }),
+      });
+      expect(v2ReloadResponse.status).toBe(201);
+      const v2Reload = await v2ReloadResponse.json();
+      expect(Object.keys(v2Reload).sort()).toEqual(
+        [
+          "schemaVersion",
+          "csrfToken",
+          "session",
+          "premiereState",
+          "checkpoints",
+          "incomingMoment",
+          "clipsEnabled",
+          "reactionSummary",
+        ].sort(),
+      );
+      expect(v2Reload.schemaVersion).toBe(2);
+      expect(v2Reload).not.toHaveProperty("latestOwnReaction");
     });
   });
 

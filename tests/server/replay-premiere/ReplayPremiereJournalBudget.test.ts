@@ -510,7 +510,9 @@ async function appendOutagePair(
     harness,
     began,
     "premiere_runtime_outage_started",
-    `runtime:outage:${binding.publicationCommitmentHash}:begin:${began.lifecycle.version}`,
+    // Longest production reason suffix: the hard event/journal byte proof must
+    // cover the controlled drill, not only the shorter legacy key.
+    `runtime:outage:${binding.publicationCommitmentHash}:begin:${began.lifecycle.version}:controlled_outage_drill`,
   );
 
   const recoveredAt = clock.next(REPLAY_PREMIERE_MAX_RECOVERABLE_OUTAGE_MS);

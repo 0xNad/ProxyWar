@@ -447,6 +447,70 @@ describe("ReplayPremiereInteractions", () => {
     });
   });
 
+  it("rebuilds participant-private latest reaction anchors from a validated snapshot", async () => {
+    const h = harness();
+    const sessionA = await createSession(h, guestA);
+    const sessionB = await createSession(h, guestB);
+    await submitReaction(h, {
+      participantId: guestA,
+      sessionId: sessionA.id,
+      sequence: 10,
+      kind: "smart",
+    });
+    const latestA = await submitReaction(h, {
+      participantId: guestA,
+      sessionId: sessionA.id,
+      sequence: 12,
+      kind: "clip_this",
+    });
+    const latestB = await submitReaction(h, {
+      participantId: guestB,
+      sessionId: sessionB.id,
+      sequence: 11,
+      kind: "mistake",
+    });
+
+    expect(h.interactions.readLatestOwnReaction(guestA)).toEqual({
+      id: latestA.reaction.id,
+      kind: "clip_this",
+      sequence: 12,
+      turn: 12,
+    });
+    expect(h.interactions.readLatestOwnReaction(guestB)).toEqual({
+      id: latestB.reaction.id,
+      kind: "mistake",
+      sequence: 11,
+      turn: 11,
+    });
+    expect(h.interactions.readLatestOwnReaction(guestC)).toBeNull();
+    expect(h.interactions.readLatestOwnReaction(null)).toBeNull();
+    expect(
+      Object.keys(h.interactions.readReactionSummary(null)).sort(),
+    ).toEqual(
+      ["totalReactions", "distinctParticipants", "byKind", "ownByKind"].sort(),
+    );
+
+    const recovered = harness(h.interactions.readState());
+    const recoveredA = recovered.interactions.readLatestOwnReaction(guestA);
+    expect(recoveredA).toEqual({
+      id: latestA.reaction.id,
+      kind: "clip_this",
+      sequence: 12,
+      turn: 12,
+    });
+    expect(recovered.interactions.readLatestOwnReaction(guestB)).toEqual({
+      id: latestB.reaction.id,
+      kind: "mistake",
+      sequence: 11,
+      turn: 11,
+    });
+    expect(recovered.interactions.readLatestOwnReaction(guestC)).toBeNull();
+    if (recoveredA !== null) recoveredA.sequence = 999;
+    expect(recovered.interactions.readLatestOwnReaction(guestA)?.sequence).toBe(
+      12,
+    );
+  });
+
   it("indexes released reactions once across summaries and non-reaction mutations", async () => {
     const releasedContextCalls = new Map<number, number>();
     const h = harness(undefined, {

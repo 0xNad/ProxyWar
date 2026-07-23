@@ -37,6 +37,7 @@ import { ReplayPremiereRuntimeRegistry } from "../../../src/server/replay-premie
 import {
   DEFAULT_DEFERRED_FRESH_ASSEMBLY_BUDGET_MS,
   DEFAULT_REPLAY_PREMIERE_EVENT_STORE_LIMITS,
+  REPLAY_PREMIERE_CONTROLLED_OUTAGE_DRILL_HOLD_MS,
   startReplayPremiereProduction,
   type ReplayPremiereProductionService,
 } from "../../../src/server/replay-premiere/ReplayPremiereStartup";
@@ -108,6 +109,43 @@ describe("ReplayPremiere production startup", () => {
     // 2026-07-22 round-649 outage: premiere recovery failure must degrade to
     // premieres-disabled, never crash the beta's top-level await.
     expect(source).toContain("premieres disabled for this process");
+
+    const restartShutdownStart = source.indexOf(
+      "function beginRestartShutdown(",
+    );
+    const restartShutdownEnd = source.indexOf(
+      'process.on("SIGTERM"',
+      restartShutdownStart,
+    );
+    const restartShutdown = source.slice(
+      restartShutdownStart,
+      restartShutdownEnd,
+    );
+    const httpStop = restartShutdown.indexOf(
+      "const httpShutdown = beginHttpShutdown();",
+    );
+    expect(restartShutdownStart).toBeGreaterThan(listenStart);
+    expect(httpStop).toBeGreaterThanOrEqual(0);
+    expect(httpStop).toBeLessThan(
+      restartShutdown.indexOf("closeForControlledOutageDrill()"),
+    );
+    expect(httpStop).toBeLessThan(
+      restartShutdown.indexOf("closeForPlannedRestart()"),
+    );
+    expect(restartShutdown).toContain(
+      "const premiereShutdown = httpShutdown.then(() =>",
+    );
+    expect(restartShutdown).toContain('runningChild?.kill("SIGTERM")');
+    expect(restartShutdown).toContain('renderer?.kill("SIGTERM")');
+    expect(source).toContain(
+      'process.on("SIGTERM", () => beginRestartShutdown("planned_restart"))',
+    );
+    expect(source).toContain('beginRestartShutdown("controlled_outage_drill")');
+    expect(source).toContain("server.closeIdleConnections()");
+    expect(source).toContain(
+      "const CONTROLLED_OUTAGE_DRILL_SHUTDOWN_WATCHDOG_MS = 50_000;",
+    );
+    expect(REPLAY_PREMIERE_CONTROLLED_OUTAGE_DRILL_HOLD_MS).toBe(46_000);
   });
 
   test("reconstructs, synchronizes, and registers a clean admission", async () => {
@@ -130,6 +168,235 @@ describe("ReplayPremiere production startup", () => {
     services.splice(services.indexOf(started.service), 1);
     expect(context.httpRegistry.get(PREMIERE_ID)).toBeNull();
     expect(context.runtimeRegistry.get(PREMIERE_ID)).toBeNull();
+  });
+
+  test("ordinary close does not fabricate an outage-start event", async () => {
+    vi.useFakeTimers({ now: NOW.getTime() });
+    await writeAdmission(root);
+    const context = startupContext(() => new Date());
+    const started = await startReplayPremiereProduction({
+      ...context,
+      privateStateRoot: path.join(root, "private"),
+      servedRoots: [path.join(root, "served")],
+    });
+    services.push(started.service);
+
+    await started.service.close();
+    services.splice(services.indexOf(started.service), 1);
+    const store = await ReplayPremiereEventStore.open({
+      privateStateRoot: path.join(root, "private"),
+      servedRoots: [path.join(root, "served")],
+      limits: DEFAULT_REPLAY_PREMIERE_EVENT_STORE_LIMITS,
+    });
+    expect(
+      store.recovered.events.filter(
+        (event) => event.eventType === "premiere_runtime_outage_started",
+      ),
+    ).toHaveLength(0);
+    await store.close();
+  });
+
+  test("planned restart close is idempotent and durably labels the real outage", async () => {
+    vi.useFakeTimers({ now: NOW.getTime() });
+    await writeAdmission(root);
+    const context = startupContext(() => new Date());
+    const started = await startReplayPremiereProduction({
+      ...context,
+      privateStateRoot: path.join(root, "private"),
+      servedRoots: [path.join(root, "served")],
+    });
+    services.push(started.service);
+
+    const firstClose = started.service.closeForPlannedRestart();
+    const duplicateClose = started.service.closeForPlannedRestart();
+    expect(duplicateClose).toBe(firstClose);
+    await firstClose;
+    services.splice(services.indexOf(started.service), 1);
+
+    const store = await ReplayPremiereEventStore.open({
+      privateStateRoot: path.join(root, "private"),
+      servedRoots: [path.join(root, "served")],
+      limits: DEFAULT_REPLAY_PREMIERE_EVENT_STORE_LIMITS,
+    });
+    const outageStarts = store.recovered.events.filter(
+      (event) => event.eventType === "premiere_runtime_outage_started",
+    );
+    expect(outageStarts).toHaveLength(1);
+    expect(outageStarts[0].idempotencyKey).toMatch(/:planned_restart$/);
+    await store.close();
+
+    vi.setSystemTime(NOW.getTime() + 1);
+    const recoveredContext = startupContext(() => new Date());
+    const recovered = await startReplayPremiereProduction({
+      ...recoveredContext,
+      privateStateRoot: path.join(root, "private"),
+      servedRoots: [path.join(root, "served")],
+    });
+    services.push(recovered.service);
+    expect(recoveredContext.runtimeRegistry.get(PREMIERE_ID)).not.toBeNull();
+    await recovered.service.close();
+    services.splice(services.indexOf(recovered.service), 1);
+    const recoveredStore = await ReplayPremiereEventStore.open({
+      privateStateRoot: path.join(root, "private"),
+      servedRoots: [path.join(root, "served")],
+      limits: DEFAULT_REPLAY_PREMIERE_EVENT_STORE_LIMITS,
+    });
+    expect(
+      recoveredStore.recovered.events.filter(
+        (event) => event.eventType === "premiere_runtime_outage_recovered",
+      ),
+    ).toHaveLength(1);
+    await recoveredStore.close();
+  });
+
+  test("controlled outage drill holds 46s after its durable begin and replacement startup recovers under 60s", async () => {
+    vi.useFakeTimers({ now: NOW.getTime() });
+    await writeAdmission(root);
+    const firstContext = startupContext(() => new Date());
+    const first = await startReplayPremiereProduction({
+      ...firstContext,
+      privateStateRoot: path.join(root, "private"),
+      servedRoots: [path.join(root, "served")],
+    });
+    services.push(first.service);
+    const runtime = firstContext.runtimeRegistry.get(PREMIERE_ID)!;
+    const originalBeginOutage = runtime.beginOutage.bind(runtime);
+    let outagePersisted!: () => void;
+    const outagePersistedPromise = new Promise<void>((resolve) => {
+      outagePersisted = resolve;
+    });
+    const beginOutage = vi
+      .spyOn(runtime, "beginOutage")
+      .mockImplementation(async (reason) => {
+        await originalBeginOutage(reason);
+        outagePersisted();
+      });
+    let closed = false;
+
+    const closePromise = first.service.closeForControlledOutageDrill();
+    const duplicateClose = first.service.closeForControlledOutageDrill();
+    expect(duplicateClose).toBe(closePromise);
+    expect(first.service.close()).toBe(closePromise);
+    const firstClose = closePromise.then(() => {
+      closed = true;
+    });
+    await outagePersistedPromise;
+    await vi.advanceTimersByTimeAsync(0);
+    expect(beginOutage).toHaveBeenCalledTimes(1);
+    expect(beginOutage).toHaveBeenCalledWith("controlled_outage_drill");
+    expect(vi.getTimerCount()).toBe(1);
+    expect(closed).toBe(false);
+    await vi.advanceTimersByTimeAsync(
+      REPLAY_PREMIERE_CONTROLLED_OUTAGE_DRILL_HOLD_MS - 1,
+    );
+    expect(closed).toBe(false);
+    await vi.advanceTimersByTimeAsync(1);
+    await Promise.all([firstClose, duplicateClose]);
+    services.splice(services.indexOf(first.service), 1);
+
+    const beganAtMs = NOW.getTime();
+    const recoveredContext = startupContext(() => new Date());
+    const recovered = await startReplayPremiereProduction({
+      ...recoveredContext,
+      privateStateRoot: path.join(root, "private"),
+      servedRoots: [path.join(root, "served")],
+    });
+    services.push(recovered.service);
+    expect(recoveredContext.runtimeRegistry.get(PREMIERE_ID)).not.toBeNull();
+    await recovered.service.close();
+    services.splice(services.indexOf(recovered.service), 1);
+
+    const store = await ReplayPremiereEventStore.open({
+      privateStateRoot: path.join(root, "private"),
+      servedRoots: [path.join(root, "served")],
+      limits: DEFAULT_REPLAY_PREMIERE_EVENT_STORE_LIMITS,
+    });
+    const events = store.recovered.events.filter(
+      (event) => event.aggregateId === PREMIERE_ID,
+    );
+    const outageStarted = events.find(
+      (event) => event.eventType === "premiere_runtime_outage_started",
+    )!;
+    const outageRecovered = events.find(
+      (event) => event.eventType === "premiere_runtime_outage_recovered",
+    )!;
+    expect(outageStarted.idempotencyKey).toMatch(/:controlled_outage_drill$/);
+    expect(Date.parse(outageStarted.occurredAt)).toBe(beganAtMs);
+    expect(
+      Date.parse(outageRecovered.occurredAt) -
+        Date.parse(outageStarted.occurredAt),
+    ).toBe(REPLAY_PREMIERE_CONTROLLED_OUTAGE_DRILL_HOLD_MS);
+    expect(
+      Date.parse(outageRecovered.occurredAt) -
+        Date.parse(outageStarted.occurredAt),
+    ).toBeLessThan(60_000);
+    await store.close();
+  });
+
+  test("planned restart surfaces beginOutage failure after closing the event store", async () => {
+    vi.useFakeTimers({ now: NOW.getTime() });
+    await writeAdmission(root);
+    const context = startupContext(() => new Date());
+    const started = await startReplayPremiereProduction({
+      ...context,
+      privateStateRoot: path.join(root, "private"),
+      servedRoots: [path.join(root, "served")],
+    });
+    services.push(started.service);
+    const runtime = context.runtimeRegistry.get(PREMIERE_ID)!;
+    vi.spyOn(runtime, "beginOutage").mockRejectedValueOnce(
+      new Error("injected beginOutage failure"),
+    );
+
+    await expect(started.service.closeForPlannedRestart()).rejects.toThrow(
+      "injected beginOutage failure",
+    );
+    services.splice(services.indexOf(started.service), 1);
+    expect(context.httpRegistry.get(PREMIERE_ID)).toBeNull();
+    expect(context.runtimeRegistry.get(PREMIERE_ID)).toBeNull();
+    const reopened = await ReplayPremiereEventStore.open({
+      privateStateRoot: path.join(root, "private"),
+      servedRoots: [path.join(root, "served")],
+      limits: DEFAULT_REPLAY_PREMIERE_EVENT_STORE_LIMITS,
+    });
+    expect(
+      reopened.recovered.events.filter(
+        (event) => event.eventType === "premiere_runtime_outage_started",
+      ),
+    ).toHaveLength(0);
+    await reopened.close();
+  });
+
+  test("controlled outage drill refuses immediately when no runtime can durably begin", async () => {
+    vi.useFakeTimers({ now: NOW.getTime() - 120_000 });
+    await writeAdmission(root);
+    const context = startupContext(() => new Date());
+    const started = await startReplayPremiereProduction({
+      ...context,
+      privateStateRoot: path.join(root, "private"),
+      servedRoots: [path.join(root, "served")],
+    });
+    services.push(started.service);
+    await context.runtimeRegistry.get(PREMIERE_ID)!.cancel();
+
+    await expect(
+      started.service.closeForControlledOutageDrill(),
+    ).rejects.toMatchObject({
+      operatorCode: "controlled_outage_drill_requires_durable_outage",
+    });
+    services.splice(services.indexOf(started.service), 1);
+    expect(vi.getTimerCount()).toBe(0);
+    const reopened = await ReplayPremiereEventStore.open({
+      privateStateRoot: path.join(root, "private"),
+      servedRoots: [path.join(root, "served")],
+      limits: DEFAULT_REPLAY_PREMIERE_EVENT_STORE_LIMITS,
+    });
+    expect(
+      reopened.recovered.events.filter(
+        (event) => event.eventType === "premiere_runtime_outage_started",
+      ),
+    ).toHaveLength(0);
+    await reopened.close();
   });
 
   test.each(["maxEventBytes", "maxSnapshotBytes"] as const)(

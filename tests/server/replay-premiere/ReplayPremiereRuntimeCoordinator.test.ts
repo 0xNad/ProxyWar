@@ -394,6 +394,111 @@ describe("ReplayPremiereRuntimeCoordinator", () => {
     });
   });
 
+  test.each(["planned_restart", "controlled_outage_drill"] as const)(
+    "durably labels and recovers a %s outage without changing the snapshot schema",
+    async (reason) => {
+      const caseRoot = path.join(root, reason);
+      const { gate, drafts } = await verifiedPublicationFixture(caseRoot);
+      const clock = new FakeClock(NOW);
+      const firstStore = await openStore(caseRoot);
+      stores.push(firstStore);
+      const interactions = createInteractions(gate, clock);
+      const runtime = await ReplayPremiereRuntimeCoordinator.createOrRecover({
+        gate,
+        drafts,
+        persistence: firstStore,
+        clock,
+        interactions,
+      });
+      await runtime.synchronize();
+      await runtime.beginOutage(reason);
+
+      const started = firstStore.recovered.events.at(-1)!;
+      const lifecycleVersion = (
+        started.payload as unknown as { lifecycle: { version: number } }
+      ).lifecycle.version;
+      expect(started.eventType).toBe("premiere_runtime_outage_started");
+      expect(started.idempotencyKey).toBe(
+        `runtime:outage:${gate.publicationCommitmentHash}:begin:` +
+          `${lifecycleVersion}:${reason}`,
+      );
+      expect(started.payload).not.toHaveProperty("outageReason");
+      await firstStore.close();
+      stores.splice(stores.indexOf(firstStore), 1);
+
+      clock.advance(1);
+      const restartedStore = await openStore(caseRoot);
+      stores.push(restartedStore);
+      const restarted = await ReplayPremiereRuntimeCoordinator.createOrRecover({
+        gate,
+        drafts,
+        persistence: restartedStore,
+        clock,
+        interactions: createInteractions(gate, clock, interactions.readState()),
+      });
+      expect(restarted.readLifecycleState()).toBe("playing");
+      expect(restartedStore.recovered.events.at(-1)?.eventType).toBe(
+        "premiere_runtime_outage_recovered",
+      );
+    },
+  );
+
+  test("rejects an unrecognized durable outage-reason suffix", async () => {
+    const { gate, drafts } = await verifiedPublicationFixture(root);
+    const clock = new FakeClock(NOW);
+    const store = await openStore(root);
+    stores.push(store);
+    const interactions = createInteractions(gate, clock);
+    const runtime = await ReplayPremiereRuntimeCoordinator.createOrRecover({
+      gate,
+      drafts,
+      persistence: store,
+      clock,
+      interactions,
+    });
+    await runtime.synchronize();
+    await runtime.beginOutage("planned_restart");
+    const events = structuredClone(store.recovered.events);
+    events.at(-1)!.idempotencyKey =
+      `${events.at(-1)!.idempotencyKey}:unrecognized`;
+    rehashStoredEventChain(events);
+
+    await expect(
+      ReplayPremiereRuntimeCoordinator.createOrRecover({
+        gate,
+        drafts,
+        persistence: persistenceForEvents(store.recovered, events),
+        clock,
+        interactions: createInteractions(gate, clock, interactions.readState()),
+      }),
+    ).rejects.toMatchObject({
+      operatorCode: "premiere_runtime_event_semantics_mismatch",
+    });
+  });
+
+  test("rejects an unrecognized outage reason before writing", async () => {
+    const { gate, drafts } = await verifiedPublicationFixture(root);
+    const clock = new FakeClock(NOW);
+    const store = await openStore(root);
+    stores.push(store);
+    const runtime = await ReplayPremiereRuntimeCoordinator.createOrRecover({
+      gate,
+      drafts,
+      persistence: store,
+      clock,
+      interactions: createInteractions(gate, clock),
+    });
+    await runtime.synchronize();
+    const eventCount = store.recovered.events.length;
+
+    await expect(
+      runtime.beginOutage("unrecognized" as never),
+    ).rejects.toMatchObject({
+      operatorCode: "premiere_runtime_invalid_outage_reason",
+    });
+    expect(store.recovered.events).toHaveLength(eventCount);
+  });
+
   test("delays a prestart outage of any length but fails a playing outage over 60s", async () => {
     const { gate, drafts } = await verifiedPublicationFixture(root);
     const clock = new FakeClock(new Date(NOW.getTime() - 120_000));

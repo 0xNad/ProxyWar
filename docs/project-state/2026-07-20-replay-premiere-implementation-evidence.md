@@ -346,3 +346,65 @@ recorded. Local green tests do not grant release authority.
   `174d8ceeb6a797e7dcc2c20248f12d36d6ceda65ff6fe8cbd5182e73e95968de`.
   Deployment and combined live two-viewer/restart/reclamation proof remain
   pending. `[repo/file verified]` + `[local artifact verified]`
+
+## Post-activation reload correction (2026-07-23)
+
+- The ancestry-preserving merge was committed as
+  `d3d998ad61cef9273c72462969911b924d301053` (tree
+  `842b5d6fb45001af0b4754103596631beb4ae1aa`) and activated with both Clip
+  capability flags disabled. The combined activation replaced direct-Node
+  PID/PGID/writer `53377` with `6601`; scheduler activation later replaced it
+  with `8056`. The explicit recovery restart replaced PID `8056` with direct-
+  Node PID/PGID/writer `11940`. `[repo/file verified]` + `[live verified]`
+- That restart caused a real public-origin outage, but not the required durable
+  runtime outage pair. PID `8056` exited at `2026-07-23T12:05:03.880173Z`;
+  PID `11940` executed the replacement at `12:05:03.913350Z` and acquired the
+  writer lock at `12:05:04.470Z`. Cloudflared recorded origin refusals through
+  `12:05:09Z`; two pre-existing browser sessions resumed accepted heartbeats at
+  `12:05:09.855Z` and `12:05:10.338Z`. They were distinct sessions under one
+  participant identity, so this proves session recovery, not two independent
+  viewers or exact visible-render recovery times. The event store contains no
+  matching `premiere_runtime_outage_started` / `_recovered` events for this
+  transaction. `[local artifact verified]` + `[live verified]`
+- The first live run proved that a submitted Smart mark became a visible crowd
+  aggregate for another session and survived process restart. Reload retained
+  the signed participant identity and private `ownByKind` count, but lost the
+  accepted marked-moment confirmation and reaction-anchored share affordance.
+  This is a release-blocking product defect, not expected identity rotation.
+  `[repo/file verified]` + `[live verified]`
+- The correction negotiates strict interaction contract v3. V3 adds only a
+  participant-private `latestOwnReaction` projection (`id`, `kind`, `sequence`,
+  and `turn`) to authenticated session, heartbeat, and reaction responses.
+  The projection is rebuilt from the validated append-only reaction index and
+  contains no participant id, policy identity, event context, or timestamp.
+  Exact v2 response keys remain unchanged for surviving tabs; malformed or
+  unknown versions still degrade to exact v1. A fresh controller hydrates the
+  personal confirmation/share anchor only from consistent v3 private evidence,
+  while another participant receives `null`. `[repo/file verified]`
+- The first deployed restart exposed a second release blocker: the supported
+  shutdown path could recover a missed runtime wake but never durably start an
+  outage, so it could not produce an honest start/recovery pair. The corrected
+  path stops and drains HTTP before any outage append. Ordinary `SIGTERM`
+  records `planned_restart`; the explicit leader-only controlled drill records
+  `controlled_outage_drill`, holds a real outage for 46 seconds, and requires
+  the exact active Premiere manifest for readiness. Its accepted process dwell
+  is `[46s,49s)`, cleanup fallback is bounded to two 500ms waits, replacement
+  acceptance to 8 seconds, total success to less than 58 seconds, and the
+  independent server watchdog to 50 seconds. Reasons are hash-chained in the
+  existing outage-start event idempotency key, preserving the v1 snapshot and
+  legacy unsuffixed recovery contract. Helper success deliberately does not
+  claim the ledger pair; live hash-chain inspection remains mandatory.
+  `[repo/file verified]`
+- Post-fix verification currently passes the wider Replay Premiere, Clips,
+  worker, fast-forward, reload-v3, and outage matrix at 48 files / 702 tests;
+  restart helper 45/45; outage startup/coordinator/journal 89/89; root and
+  Coworld-adapter TypeScript; ESLint with zero errors (110 existing warnings);
+  Prettier; both diff checks; the production build; full root 256 files / 2,897
+  tests; and the dedicated server rerun 138 files / 1,598 tests. There is no
+  English translation-key delta. The candidate bundle is
+  `index-CiU1n02I.js`,
+  SHA-256 `a18ff084df6995ee6b5eb7b3490d34a31d36408faffd08bbff20af0225ff2036`.
+  Exact-tree independent review, the final sampled outage/recovery deployment,
+  and final-code two-viewer/reload/CP1/late-join/outcome proof remain pending.
+  Both Clip capability flags remain disabled. `[repo/file verified]` +
+  `[local artifact verified]` + `[live verified]`

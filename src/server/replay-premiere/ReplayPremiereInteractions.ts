@@ -278,11 +278,24 @@ export interface ReplayPremiereReactionSummary {
   ownByKind: Record<ReplayPremiereReactionKind, number> | null;
 }
 
+/**
+ * Participant-private durable anchor for restoring the latest accepted mark.
+ * Policy identity, event context, timestamps, and participant ids never cross
+ * this projection boundary.
+ */
+export interface ReplayPremiereLatestOwnReaction {
+  id: string;
+  kind: ReplayPremiereReactionKind;
+  sequence: number;
+  turn: number;
+}
+
 interface ReplayPremiereReactionIndex {
   totalReactions: number;
   byKind: Record<ReplayPremiereReactionKind, number>;
   byParticipantKind: Map<string, Record<ReplayPremiereReactionKind, number>>;
   byParticipantTotal: Map<string, number>;
+  latestByParticipant: Map<string, ReplayPremiereLatestOwnReaction>;
   ids: Set<string>;
   dedupeKeys: Set<string>;
   createdAtMsByParticipant: Map<string, number[]>;
@@ -603,6 +616,17 @@ export class ReplayPremiereInteractions {
           ? null
           : cloneReactionCounts(ownCounts ?? emptyReactionCounts()),
     };
+  }
+
+  readLatestOwnReaction(
+    participantId: string | null,
+  ): ReplayPremiereLatestOwnReaction | null {
+    this.assertReactionIndexSynchronized();
+    if (participantId === null) return null;
+    assertParticipantId(participantId);
+    return clone(
+      this.reactionIndex.latestByParticipant.get(participantId) ?? null,
+    );
   }
 
   readShareMoment(shareId: string): ReplayPremiereShareMoment | null {
@@ -1851,6 +1875,7 @@ function createReactionIndex(): ReplayPremiereReactionIndex {
     byKind: emptyReactionCounts(),
     byParticipantKind: new Map(),
     byParticipantTotal: new Map(),
+    latestByParticipant: new Map(),
     ids: new Set(),
     dedupeKeys: new Set(),
     createdAtMsByParticipant: new Map(),
@@ -1871,6 +1896,12 @@ function appendValidatedReactionToIndex(
     reaction.participantId,
     (index.byParticipantTotal.get(reaction.participantId) ?? 0) + 1,
   );
+  index.latestByParticipant.set(reaction.participantId, {
+    id: reaction.id,
+    kind: reaction.kind,
+    sequence: reaction.sequence,
+    turn: reaction.turn,
+  });
   const createdAtMs = index.createdAtMsByParticipant.get(
     reaction.participantId,
   );

@@ -559,6 +559,99 @@ describe("ReplayPremiereRuntimeController", () => {
     harness.runtime.dispose();
   });
 
+  it("hydrates an accepted v3 mark and share anchor immediately", async () => {
+    const accepted = reactionResponseV3();
+    const harness = runtimeHarness({
+      state: "playing",
+      service: {
+        startSession: async () => sessionResponseV3("playing"),
+        submitReaction: async () => accepted,
+      },
+    });
+    await bootstrapPlayingWithFrame(harness);
+
+    await harness.overlayCallbacks.onMarker?.({
+      premiereId: PREMIERE_ID,
+      kind: "smart",
+      sequence: 0,
+      turn: 0,
+      policySeatId: null,
+    });
+
+    expect(harness.models.at(-1)).toMatchObject({
+      markerCounts: { smart: 1 },
+      ownMarkerCounts: { smart: 1 },
+      markerConfirmation: { kind: "smart", turn: 0 },
+      share: {
+        sourceReactionId: accepted.reaction.id,
+        sourceReactionSequence: 0,
+        sourceReactionTurn: 0,
+      },
+      failureCode: null,
+    });
+    harness.runtime.dispose();
+  });
+
+  it("keeps a newer v3 private anchor when an older reaction response lands", async () => {
+    vi.useFakeTimers();
+    const pendingReaction = deferred<ReplayPremiereServiceReactionResponse>();
+    const newerHeartbeat = heartbeatResponseV3("playing");
+    newerHeartbeat.reactionSummary = reactionSummaryWith("smart", 1);
+    newerHeartbeat.reactionSummary.totalReactions = 2;
+    newerHeartbeat.reactionSummary.byKind.betrayal = 1;
+    newerHeartbeat.reactionSummary.ownByKind!.betrayal = 1;
+    newerHeartbeat.latestOwnReaction = {
+      id: `react_${"8".repeat(32)}`,
+      kind: "betrayal",
+      sequence: 1,
+      turn: 1,
+    };
+    const harness = runtimeHarness({
+      state: "playing",
+      service: {
+        startSession: async () => sessionResponseV3("playing"),
+        submitReaction: () => pendingReaction.promise,
+        heartbeat: async () => newerHeartbeat,
+      },
+    });
+    await bootstrapPlayingWithFrame(harness);
+
+    const markerWrite = harness.overlayCallbacks.onMarker?.({
+      premiereId: PREMIERE_ID,
+      kind: "smart",
+      sequence: 0,
+      turn: 0,
+      policySeatId: null,
+    });
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(harness.models.at(-1)).toMatchObject({
+      markerCounts: { smart: 1, betrayal: 1 },
+      ownMarkerCounts: { smart: 1, betrayal: 1 },
+      markerConfirmation: { kind: "betrayal", turn: 1 },
+      share: {
+        sourceReactionId: newerHeartbeat.latestOwnReaction.id,
+        sourceReactionSequence: 1,
+        sourceReactionTurn: 1,
+      },
+      failureCode: null,
+    });
+
+    pendingReaction.resolve(reactionResponseV3());
+    await markerWrite;
+    expect(harness.models.at(-1)).toMatchObject({
+      markerCounts: { smart: 1, betrayal: 1 },
+      ownMarkerCounts: { smart: 1, betrayal: 1 },
+      markerConfirmation: { kind: "betrayal", turn: 1 },
+      share: {
+        sourceReactionId: newerHeartbeat.latestOwnReaction.id,
+        sourceReactionSequence: 1,
+        sourceReactionTurn: 1,
+      },
+      failureCode: null,
+    });
+    harness.runtime.dispose();
+  });
+
   it("keeps private own counts on v1 fallback and upgrades cleanly to v2 crowd state", async () => {
     vi.useFakeTimers();
     const upgradedHeartbeat = heartbeatResponse("playing");
@@ -849,6 +942,65 @@ describe("ReplayPremiereRuntimeController", () => {
     });
     expect(harness.copyText).toHaveBeenCalledWith(url);
     harness.runtime.dispose();
+  });
+
+  it("restores a same-participant saved-mark anchor without exposing it to another viewer", async () => {
+    const anchor = {
+      id: `react_${"5".repeat(32)}`,
+      kind: "smart" as const,
+      sequence: 0,
+      turn: 100,
+    };
+    const sameParticipant = sessionResponseV3("playing");
+    sameParticipant.reactionSummary = reactionSummaryWith("smart", 1);
+    sameParticipant.latestOwnReaction = anchor;
+    const restored = runtimeHarness({
+      state: "playing",
+      service: { startSession: async () => sameParticipant },
+    });
+    await bootstrapPlayingWithFrame(restored);
+
+    expect(restored.models.at(-1)).toMatchObject({
+      markerCounts: { smart: 1 },
+      ownMarkerCounts: { smart: 1 },
+      markerConfirmation: { kind: "smart", turn: 100 },
+      share: {
+        sourceReactionId: anchor.id,
+        sourceReactionSequence: 0,
+        sourceReactionTurn: 100,
+        suggestedCaption:
+          "replay_premiere.share_caption:title=Alpha vs Beta,turn=100",
+      },
+    });
+    restored.runtime.dispose();
+
+    const otherParticipant = sessionResponseV3("playing");
+    otherParticipant.session = viewerSession({
+      id: OTHER_SESSION_ID,
+      participantId: OTHER_PARTICIPANT_ID,
+    });
+    otherParticipant.reactionSummary = reactionSummaryWith("smart", 1);
+    otherParticipant.reactionSummary.ownByKind = {
+      ...emptyReactionSummary().byKind,
+    };
+    otherParticipant.latestOwnReaction = null;
+    const privateViewer = runtimeHarness({
+      state: "playing",
+      service: { startSession: async () => otherParticipant },
+    });
+    await bootstrapPlayingWithFrame(privateViewer);
+
+    expect(privateViewer.models.at(-1)).toMatchObject({
+      markerCounts: { smart: 1 },
+      ownMarkerCounts: { smart: 0 },
+      markerConfirmation: null,
+      share: {
+        sourceReactionId: null,
+        sourceReactionSequence: null,
+        sourceReactionTurn: null,
+      },
+    });
+    privateViewer.runtime.dispose();
   });
 
   it("derives a real post-reveal prediction verdict without a seeded resolution", async () => {
@@ -2456,8 +2608,35 @@ describe("ReplayPremiereServiceClient", () => {
     for (const [, request] of fetchMock.mock.calls) {
       expect(
         new Headers(request?.headers).get("x-proxywar-premiere-interactions"),
-      ).toBe("2");
+      ).toBe("3");
     }
+    client.dispose();
+  });
+
+  it("rejects a v3 private anchor not proven by the requesting participant's counts", async () => {
+    const leaked = sessionResponseV3("playing");
+    leaked.reactionSummary = reactionSummaryWith("smart", 1);
+    leaked.reactionSummary.ownByKind = { ...emptyReactionSummary().byKind };
+    leaked.latestOwnReaction = {
+      id: `react_${"4".repeat(32)}`,
+      kind: "smart",
+      sequence: 0,
+      turn: 100,
+    };
+    const client = new ReplayPremiereServiceClient({
+      premiereId: PREMIERE_ID,
+      origin: "https://proxywar.example",
+      fetchImpl: vi.fn(async () => jsonResponse(leaked, 201)),
+      randomBytes: () => new Uint8Array(16).fill(1),
+    });
+    client.bindVerifiedProjection(projection("playing"));
+
+    await expect(
+      client.startSession({ visible: true, observedSequence: -1 }),
+    ).rejects.toMatchObject({
+      code: "invalid_response",
+      phase: "response_binding",
+    });
     client.dispose();
   });
 
@@ -2617,7 +2796,7 @@ describe("ReplayPremiereServiceClient", () => {
       new Headers(firstSessionRequest?.headers).get(
         "x-proxywar-premiere-interactions",
       ),
-    ).toBe("2");
+    ).toBe("3");
 
     await expect(
       client.heartbeat({ visible: true, observedSequence: -1 }),
@@ -2647,7 +2826,7 @@ describe("ReplayPremiereServiceClient", () => {
       new Headers(firstHeartbeatRequest?.headers).get(
         "x-proxywar-premiere-interactions",
       ),
-    ).toBe("2");
+    ).toBe("3");
 
     const marker = {
       premiereId: PREMIERE_ID,
@@ -2674,7 +2853,7 @@ describe("ReplayPremiereServiceClient", () => {
       new Headers(firstReactionRequest?.headers).get(
         "x-proxywar-premiere-interactions",
       ),
-    ).toBe("2");
+    ).toBe("3");
     expect(randomBytes).toHaveBeenCalledTimes(3);
     client.dispose();
   });
@@ -3372,6 +3551,20 @@ function sessionResponse(
   };
 }
 
+function sessionResponseV3(
+  premiereState: ReplayPremiereServiceSessionResponse["premiereState"],
+): Extract<ReplayPremiereServiceSessionResponse, { schemaVersion: 3 }> {
+  const response = sessionResponse(premiereState);
+  if (response.schemaVersion !== 2) {
+    throw new Error("test helper expected a v2 session response");
+  }
+  return {
+    ...response,
+    schemaVersion: 3,
+    latestOwnReaction: null,
+  };
+}
+
 function sessionResponseWithIncomingMoment(
   premiereState: ReplayPremiereServiceSessionResponse["premiereState"],
 ): ReplayPremiereServiceSessionResponse {
@@ -3408,6 +3601,20 @@ function heartbeatResponse(
   };
 }
 
+function heartbeatResponseV3(
+  premiereState: ReplayPremiereServiceHeartbeatResponse["premiereState"],
+): Extract<ReplayPremiereServiceHeartbeatResponse, { schemaVersion: 3 }> {
+  const response = heartbeatResponse(premiereState);
+  if (response.schemaVersion !== 2) {
+    throw new Error("test helper expected a v2 heartbeat response");
+  }
+  return {
+    ...response,
+    schemaVersion: 3,
+    latestOwnReaction: null,
+  };
+}
+
 function reactionResponse() {
   return {
     schemaVersion: 2 as const,
@@ -3425,6 +3632,23 @@ function reactionResponse() {
     idempotent: false,
     reactionSummary: reactionSummaryWith("smart", 1),
     clipsEnabled: true,
+  };
+}
+
+function reactionResponseV3(): Extract<
+  ReplayPremiereServiceReactionResponse,
+  { schemaVersion: 3 }
+> {
+  const response = reactionResponse();
+  return {
+    ...response,
+    schemaVersion: 3,
+    latestOwnReaction: {
+      id: response.reaction.id,
+      kind: response.reaction.kind,
+      sequence: response.reaction.sequence,
+      turn: response.reaction.turn,
+    },
   };
 }
 

@@ -367,11 +367,17 @@ async function handlePremiereApiRequest(
           ...result,
           premiereState: target.runtime.readLifecycleState(),
           checkpoints: target.interactions.readCheckpoints(participantId),
-          ...(interactionContractVersion === 2
+          ...(interactionContractVersion >= 2
             ? {
                 clipsEnabled: options.clips !== undefined,
                 reactionSummary:
                   target.interactions.readReactionSummary(participantId),
+              }
+            : {}),
+          ...(interactionContractVersion === 3
+            ? {
+                latestOwnReaction:
+                  target.interactions.readLatestOwnReaction(participantId),
               }
             : {}),
         });
@@ -412,11 +418,17 @@ async function handlePremiereApiRequest(
         sendJson(response, 200, {
           schemaVersion: interactionContractVersion,
           ...result,
-          ...(interactionContractVersion === 2
+          ...(interactionContractVersion >= 2
             ? {
                 clipsEnabled: options.clips !== undefined,
                 reactionSummary:
                   target.interactions.readReactionSummary(participantId),
+              }
+            : {}),
+          ...(interactionContractVersion === 3
+            ? {
+                latestOwnReaction:
+                  target.interactions.readLatestOwnReaction(participantId),
               }
             : {}),
         });
@@ -493,7 +505,7 @@ async function handleSessionWrite(options: {
   idempotencyKey: string;
   requesterBucketId: string;
   operationTimeoutMs: number;
-  interactionContractVersion: 1 | 2;
+  interactionContractVersion: 1 | 2 | 3;
   clipsEnabled: boolean;
 }): Promise<void> {
   const body = parseSessionBody(options.request.body);
@@ -544,10 +556,17 @@ async function handleSessionWrite(options: {
       guest.participant.participantId,
     ),
     incomingMoment,
-    ...(options.interactionContractVersion === 2
+    ...(options.interactionContractVersion >= 2
       ? {
           clipsEnabled: options.clipsEnabled,
           reactionSummary: options.target.interactions.readReactionSummary(
+            guest.participant.participantId,
+          ),
+        }
+      : {}),
+    ...(options.interactionContractVersion === 3
+      ? {
+          latestOwnReaction: options.target.interactions.readLatestOwnReaction(
             guest.participant.participantId,
           ),
         }
@@ -772,8 +791,11 @@ function requiredHeader(request: Request, name: string): string {
  * malformed, or unknown values deliberately stay on the exact legacy v1
  * shape so an old tab can survive a server restart during a rolling rollout.
  */
-function requestedInteractionContract(request: Request): 1 | 2 {
-  return request.headers["x-proxywar-premiere-interactions"] === "2" ? 2 : 1;
+function requestedInteractionContract(request: Request): 1 | 2 | 3 {
+  const requested = request.headers["x-proxywar-premiere-interactions"];
+  if (requested === "3") return 3;
+  if (requested === "2") return 2;
+  return 1;
 }
 
 function optionalSingleHeader(

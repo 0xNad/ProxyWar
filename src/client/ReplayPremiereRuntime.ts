@@ -64,7 +64,7 @@ const JSON_CONTENT_TYPE_PATTERN = /^(?:application\/json|[^;]+\+json)(?:;|$)/i;
 const MAX_INTERACTION_RESPONSE_BYTES = 256 * 1024;
 const INTERACTION_REQUEST_TIMEOUT_MS = 2_000;
 const INTERACTION_CONTRACT_HEADER = "X-ProxyWar-Premiere-Interactions";
-const INTERACTION_CONTRACT_VERSION = "2";
+const INTERACTION_CONTRACT_VERSION = "3";
 const HEARTBEAT_INTERVAL_MS = 10_000;
 const INTERACTION_RECOVERY_RETRY_MS = 1_000;
 const MAX_CLIPBOARD_TEXT_LENGTH = 16_384;
@@ -171,6 +171,14 @@ const reactionCountsSchema = z
     mistake: nonNegativeIntegerSchema,
     betrayal: nonNegativeIntegerSchema,
     clip_this: nonNegativeIntegerSchema,
+  })
+  .strict();
+const ownReactionAnchorSchema = z
+  .object({
+    id: z.string().regex(REACTION_ID_PATTERN),
+    sequence: nonNegativeIntegerSchema,
+    turn: nonNegativeIntegerSchema,
+    kind: reactionKindSchema,
   })
   .strict();
 const reactionSummarySchema = z
@@ -280,10 +288,15 @@ const sessionResponseV2Schema = sessionResponseV1Schema.extend({
   reactionSummary: reactionSummarySchema,
   clipsEnabled: z.boolean(),
 });
+const sessionResponseV3Schema = sessionResponseV2Schema.extend({
+  schemaVersion: z.literal(3),
+  latestOwnReaction: ownReactionAnchorSchema.nullable(),
+});
 const sessionResponseSchema = z
   .discriminatedUnion("schemaVersion", [
     sessionResponseV1Schema,
     sessionResponseV2Schema,
+    sessionResponseV3Schema,
   ])
   .transform((response) =>
     response.schemaVersion === 1
@@ -305,10 +318,15 @@ const heartbeatResponseV2Schema = heartbeatResponseV1Schema.extend({
   reactionSummary: reactionSummarySchema,
   clipsEnabled: z.boolean(),
 });
+const heartbeatResponseV3Schema = heartbeatResponseV2Schema.extend({
+  schemaVersion: z.literal(3),
+  latestOwnReaction: ownReactionAnchorSchema.nullable(),
+});
 const heartbeatResponseSchema = z
   .discriminatedUnion("schemaVersion", [
     heartbeatResponseV1Schema,
     heartbeatResponseV2Schema,
+    heartbeatResponseV3Schema,
   ])
   .transform((response) =>
     response.schemaVersion === 1
@@ -348,10 +366,15 @@ const reactionResponseV2Schema = reactionResponseV1Schema.extend({
   reactionSummary: reactionSummarySchema,
   clipsEnabled: z.boolean(),
 });
+const reactionResponseV3Schema = reactionResponseV2Schema.extend({
+  schemaVersion: z.literal(3),
+  latestOwnReaction: ownReactionAnchorSchema.nullable(),
+});
 const reactionResponseSchema = z
   .discriminatedUnion("schemaVersion", [
     reactionResponseV1Schema,
     reactionResponseV2Schema,
+    reactionResponseV3Schema,
   ])
   .transform((response) =>
     response.schemaVersion === 1
@@ -399,6 +422,9 @@ export type ReplayPremiereServiceReactionResponse = z.infer<
 >;
 export type ReplayPremiereServiceReactionSummary = z.infer<
   typeof reactionSummarySchema
+>;
+export type ReplayPremiereServiceOwnReactionAnchor = z.infer<
+  typeof ownReactionAnchorSchema
 >;
 export type ReplayPremiereServiceShareResponse = z.infer<
   typeof shareResponseSchema
@@ -1146,6 +1172,11 @@ export class ReplayPremiereServiceClient {
       response.reactionSummary,
       session.participantId,
     );
+    this.assertOwnReactionAnchorBound(
+      response.schemaVersion === 3 ? response.latestOwnReaction : null,
+      response.reactionSummary,
+      response.schemaVersion,
+    );
     this.assertClipCapabilityBound(response.clipsEnabled);
     if (
       response.incomingMoment !== null &&
@@ -1181,6 +1212,11 @@ export class ReplayPremiereServiceClient {
     this.assertReactionSummaryBound(
       response.reactionSummary,
       current.participantId,
+    );
+    this.assertOwnReactionAnchorBound(
+      response.schemaVersion === 3 ? response.latestOwnReaction : null,
+      response.reactionSummary,
+      response.schemaVersion,
     );
     this.assertClipCapabilityBound(response.clipsEnabled);
   }
@@ -1238,6 +1274,11 @@ export class ReplayPremiereServiceClient {
       session.participantId,
       compareWithCurrent,
     );
+    this.assertOwnReactionAnchorBound(
+      response.schemaVersion === 3 ? response.latestOwnReaction : null,
+      response.reactionSummary,
+      response.schemaVersion,
+    );
     if (compareWithCurrent) {
       this.assertClipCapabilityBound(response.clipsEnabled);
     }
@@ -1280,6 +1321,34 @@ export class ReplayPremiereServiceClient {
           summary,
           this.currentParticipantReactionSummary,
         ) === "incomparable")
+    ) {
+      throw serviceError("invalid_response");
+    }
+  }
+
+  private assertOwnReactionAnchorBound(
+    anchor: ReplayPremiereServiceOwnReactionAnchor | null,
+    summary: ReplayPremiereServiceReactionSummary | null,
+    schemaVersion: 1 | 2 | 3,
+  ): void {
+    // v1/v2 carry no private anchor. Callers normalize their omission to null,
+    // but only v3 null is authoritative evidence that this participant has
+    // never submitted a mark.
+    if (schemaVersion !== 3) {
+      if (anchor !== null) throw serviceError("invalid_response");
+      return;
+    }
+    if (summary?.ownByKind === null || summary === null) {
+      throw serviceError("invalid_response");
+    }
+    const ownTotal = REACTION_KINDS.reduce(
+      (total, kind) => total + summary.ownByKind![kind],
+      0,
+    );
+    if (
+      (anchor === null && ownTotal !== 0) ||
+      (anchor !== null &&
+        (ownTotal === 0 || summary.ownByKind[anchor.kind] < 1))
     ) {
       throw serviceError("invalid_response");
     }
@@ -1646,7 +1715,7 @@ export class ReplayPremiereRuntimeController {
   private latestFrame: ReplayPremiereFrame | null = null;
   /** Newest-first spoiler-safe war narrative (bounded ring; see war feed). */
   private warFeed: ReplayPremiereWarEventView[] = [];
-  /** The viewer's own server-accepted marks per kind (session-local). */
+  /** The viewer's own server-accepted marks per kind (participant-private). */
   private ownMarkCounts: Partial<Record<ReplayPremiereMarkerKind, number>> = {};
   /** Public aggregate returned by the interaction service, never raw reactions. */
   private reactionSummary: ReplayPremiereServiceReactionSummary | null = null;
@@ -2419,6 +2488,12 @@ export class ReplayPremiereRuntimeController {
       !this.acceptReactionSummary(
         response.reactionSummary,
         response.session.participantId,
+        undefined,
+        {
+          schemaVersion: response.schemaVersion,
+          latestOwnReaction:
+            response.schemaVersion === 3 ? response.latestOwnReaction : null,
+        },
       )
     ) {
       return;
@@ -2446,6 +2521,10 @@ export class ReplayPremiereRuntimeController {
       newlyAccepted: boolean;
       summaryAtRequest: ReplayPremiereServiceReactionSummary | null;
     },
+    privateProjection?: {
+      schemaVersion: 1 | 2 | 3;
+      latestOwnReaction: ReplayPremiereServiceOwnReactionAnchor | null;
+    },
   ): boolean {
     const identityChanged =
       this.reactionSummaryParticipantId !== null &&
@@ -2470,6 +2549,16 @@ export class ReplayPremiereRuntimeController {
     }
     const previous = this.reactionSummary;
     if (!isConsistentReactionSummary(summary) || summary.ownByKind === null) {
+      this.latchFailure("integrity_failure");
+      return false;
+    }
+    if (
+      privateProjection?.schemaVersion === 3 &&
+      !isConsistentOwnReactionAnchor(
+        privateProjection.latestOwnReaction,
+        summary,
+      )
+    ) {
       this.latchFailure("integrity_failure");
       return false;
     }
@@ -2524,6 +2613,24 @@ export class ReplayPremiereRuntimeController {
       this.ownMarkCounts = ownByKind === null ? {} : { ...ownByKind };
     }
     this.reactionSummaryParticipantId = participantId;
+    if (
+      privateProjection?.schemaVersion === 3 &&
+      (identityChanged || participantOrder !== "older")
+    ) {
+      const nextAnchor = privateProjection.latestOwnReaction;
+      if (
+        !identityChanged &&
+        participantOrder === "equal" &&
+        this.lastAcceptedReaction !== null &&
+        nextAnchor !== null &&
+        (!sameOwnReactionAnchor(this.lastAcceptedReaction, nextAnchor) ||
+          this.lastMarkConfirmation?.kind !== nextAnchor.kind)
+      ) {
+        this.latchFailure("integrity_failure");
+        return false;
+      }
+      this.applyOwnReactionAnchor(nextAnchor);
+    }
     // Equal or totally ordered older snapshots are valid but do not regress
     // the public or participant counters already visible in the overlay.
     return true;
@@ -2533,6 +2640,22 @@ export class ReplayPremiereRuntimeController {
     this.ownMarkCounts = {};
     this.lastAcceptedReaction = null;
     this.lastMarkConfirmation = null;
+  }
+
+  private applyOwnReactionAnchor(
+    anchor: ReplayPremiereServiceOwnReactionAnchor | null,
+  ): void {
+    if (anchor === null) {
+      this.lastAcceptedReaction = null;
+      this.lastMarkConfirmation = null;
+      return;
+    }
+    this.lastAcceptedReaction = {
+      id: anchor.id,
+      sequence: anchor.sequence,
+      turn: anchor.turn,
+    };
+    this.lastMarkConfirmation = { kind: anchor.kind, turn: anchor.turn };
   }
 
   private acceptClipCapability(clipsEnabled: boolean | null): boolean {
@@ -2835,11 +2958,22 @@ export class ReplayPremiereRuntimeController {
           return;
         }
         if (
-          !this.acceptReactionSummary(response.reactionSummary, participantId, {
-            kind: request.kind,
-            newlyAccepted: !response.idempotent,
-            summaryAtRequest,
-          })
+          !this.acceptReactionSummary(
+            response.reactionSummary,
+            participantId,
+            {
+              kind: request.kind,
+              newlyAccepted: !response.idempotent,
+              summaryAtRequest,
+            },
+            {
+              schemaVersion: response.schemaVersion,
+              latestOwnReaction:
+                response.schemaVersion === 3
+                  ? response.latestOwnReaction
+                  : null,
+            },
+          )
         ) {
           throw serviceError("invalid_response");
         }
@@ -2850,15 +2984,17 @@ export class ReplayPremiereRuntimeController {
           this.ownMarkCounts[request.kind] =
             (this.ownMarkCounts[request.kind] ?? 0) + 1;
         }
-        this.lastAcceptedReaction = {
-          id: response.reaction.id,
-          sequence: response.reaction.sequence,
-          turn: response.reaction.turn,
-        };
-        this.lastMarkConfirmation = {
-          kind: request.kind,
-          turn: response.reaction.turn,
-        };
+        if (response.schemaVersion !== 3) {
+          this.lastAcceptedReaction = {
+            id: response.reaction.id,
+            sequence: response.reaction.sequence,
+            turn: response.reaction.turn,
+          };
+          this.lastMarkConfirmation = {
+            kind: request.kind,
+            turn: response.reaction.turn,
+          };
+        }
         this.hydrateOverlay();
       },
       onShare: (request) => this.share(request),
@@ -4233,6 +4369,31 @@ function isConsistentReactionSummary(
       REACTION_KINDS.every(
         (kind) => summary.ownByKind![kind] <= summary.byKind[kind],
       ))
+  );
+}
+
+function isConsistentOwnReactionAnchor(
+  anchor: ReplayPremiereServiceOwnReactionAnchor | null,
+  summary: ReplayPremiereServiceReactionSummary,
+): boolean {
+  if (summary.ownByKind === null) return false;
+  const ownTotal = REACTION_KINDS.reduce(
+    (total, kind) => total + summary.ownByKind![kind],
+    0,
+  );
+  return anchor === null
+    ? ownTotal === 0
+    : ownTotal > 0 && summary.ownByKind[anchor.kind] > 0;
+}
+
+function sameOwnReactionAnchor(
+  current: { id: string; sequence: number; turn: number },
+  candidate: ReplayPremiereServiceOwnReactionAnchor,
+): boolean {
+  return (
+    current.id === candidate.id &&
+    current.sequence === candidate.sequence &&
+    current.turn === candidate.turn
   );
 }
 
