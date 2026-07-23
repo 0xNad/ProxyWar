@@ -4,7 +4,7 @@ import { promises as fs, type StatsFs } from "node:fs";
 import http from "node:http";
 import os from "node:os";
 import path from "node:path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   AiLeagueRunClips,
   type AiLeagueRunClipsOptions,
@@ -81,6 +81,7 @@ afterEach(async () => {
           new Promise<void>((resolve) => server.close(() => resolve())),
       ),
   );
+  vi.restoreAllMocks();
   await fs.rm(root, { recursive: true, force: true });
 });
 
@@ -126,6 +127,7 @@ function makeRunClips(
   options: {
     callback?: boolean;
     clipBytes?: Buffer;
+    onPromotionComplete?: () => void;
   } = {},
 ): AiLeagueRunClips {
   const service = new AiLeagueRunClips({
@@ -145,6 +147,7 @@ function makeRunClips(
         ? undefined
         : async (ready) => {
             await promoter.promoteRatedCoworldRunClip(ready);
+            options.onPromotionComplete?.();
           },
     shouldRepairRunClipOnIndexRebuild: () => true,
   });
@@ -218,6 +221,55 @@ async function waitForFile(filePath: string): Promise<void> {
     }
   }
   throw new Error(`file never appeared: ${filePath}`);
+}
+
+function blockPromoterTemporaryUnlink(
+  temporarySuffix: ".mp4.tmp" | ".manifest.tmp",
+): {
+  cleanupObserved: Promise<void>;
+  tempUnlinked: Promise<void>;
+  unblockCleanup(): void;
+} {
+  const originalUnlink = fs.unlink.bind(fs);
+  let observeCleanup!: () => void;
+  const cleanupObserved = new Promise<void>((resolve) => {
+    observeCleanup = resolve;
+  });
+  let releaseCleanup!: () => void;
+  const cleanupRelease = new Promise<void>((resolve) => {
+    releaseCleanup = resolve;
+  });
+  let observeTempUnlink!: () => void;
+  const tempUnlinked = new Promise<void>((resolve) => {
+    observeTempUnlink = resolve;
+  });
+  let cleanupReleased = false;
+  let cleanupBlocked = false;
+  vi.spyOn(fs, "unlink").mockImplementation(async (...args) => {
+    const filePath = String(args[0]);
+    if (
+      !cleanupBlocked &&
+      filePath.startsWith(`${path.dirname(archivedClipPath())}${path.sep}`) &&
+      filePath.endsWith(temporarySuffix)
+    ) {
+      cleanupBlocked = true;
+      observeCleanup();
+      await cleanupRelease;
+      await originalUnlink(...args);
+      observeTempUnlink();
+      return;
+    }
+    await originalUnlink(...args);
+  });
+  return {
+    cleanupObserved,
+    tempUnlinked,
+    unblockCleanup() {
+      if (cleanupReleased) return;
+      cleanupReleased = true;
+      releaseCleanup();
+    },
+  };
 }
 
 async function archiveServer(): Promise<string> {
@@ -330,6 +382,215 @@ describe("ReplayPremiereArchivedClipPromoter", () => {
     expect(await pageResponse.text()).toContain(
       `"url":"/premiere/${PREMIERE_ID}/clip.mp4"`,
     );
+  });
+
+  it.each([
+    {
+      leaf: "clip",
+      temporarySuffix: ".mp4.tmp" as const,
+    },
+    {
+      leaf: "manifest",
+      temporarySuffix: ".manifest.tmp" as const,
+    },
+  ])(
+    "revalidates after the promoter $leaf hardlink settles from two links to one",
+    async ({ leaf, temporarySuffix }) => {
+      await archivePointer();
+      const clipBytes = Buffer.from(`${leaf}-hardlink-settlement-clip`);
+      let observePromotionComplete!: () => void;
+      const promotionComplete = new Promise<void>((resolve) => {
+        observePromotionComplete = resolve;
+      });
+      const runClips = makeRunClips({
+        clipBytes,
+        onPromotionComplete: observePromotionComplete,
+      });
+      const originalLstat = fs.lstat.bind(fs);
+      const blocked = blockPromoterTemporaryUnlink(temporarySuffix);
+      const targetPath =
+        leaf === "clip" ? archivedClipPath() : archivedManifestPath();
+
+      try {
+        expect(
+          (await runClips.requestRunClip({ runKey: RUN_KEY, anchorTurn: 605 }))
+            .state,
+        ).toBe("pending");
+        await blocked.cleanupObserved;
+        expect((await originalLstat(targetPath)).nlink).toBe(2);
+
+        let forcedSettlement = false;
+        vi.spyOn(fs, "lstat").mockImplementation(async (...args) => {
+          const stat = await originalLstat(...args);
+          if (!forcedSettlement && String(args[0]) === targetPath) {
+            forcedSettlement = true;
+            blocked.unblockCleanup();
+            await blocked.tempUnlinked;
+            expect((await originalLstat(targetPath)).nlink).toBe(1);
+            // Return the pre-unlink snapshot. The router's next descriptor/path
+            // snapshots see the same inode after its benign 2 -> 1 settlement.
+            return stat;
+          }
+          return stat;
+        });
+
+        const baseUrl = await archiveServer();
+        const response = await fetch(
+          `${baseUrl}/premiere/${PREMIERE_ID}/clip.mp4`,
+        );
+        expect(forcedSettlement).toBe(true);
+        expect(response.status).toBe(200);
+        expect(Buffer.from(await response.arrayBuffer())).toEqual(clipBytes);
+        const pageResponse = await fetch(`${baseUrl}/premiere/${PREMIERE_ID}`);
+        expect(pageResponse.status).toBe(200);
+        expect(await pageResponse.text()).toContain(
+          `"url":"/premiere/${PREMIERE_ID}/clip.mp4"`,
+        );
+        await promotionComplete;
+        expect((await originalLstat(archivedClipPath())).nlink).toBe(1);
+        expect((await originalLstat(archivedManifestPath())).nlink).toBe(1);
+      } finally {
+        blocked.unblockCleanup();
+      }
+    },
+  );
+
+  it("serializes descriptor and path snapshots before classifying hardlink settlement", async () => {
+    await archivePointer();
+    const clipBytes = Buffer.from("ordered-hardlink-snapshot-clip");
+    let observePromotionComplete!: () => void;
+    const promotionComplete = new Promise<void>((resolve) => {
+      observePromotionComplete = resolve;
+    });
+    const runClips = makeRunClips({
+      clipBytes,
+      onPromotionComplete: observePromotionComplete,
+    });
+    const originalLstat = fs.lstat.bind(fs);
+    const originalOpen = fs.open.bind(fs);
+    const blocked = blockPromoterTemporaryUnlink(".mp4.tmp");
+    let targetLstatCalls = 0;
+    let secondPathSnapshotStarted = false;
+    let sequentialFallbackReleased = false;
+    let wrappedDescriptor = false;
+    let targetOpenCount = 0;
+    let firstDescriptorCloseCount = 0;
+    let retryOpenedAfterFirstClose = false;
+
+    try {
+      expect(
+        (await runClips.requestRunClip({ runKey: RUN_KEY, anchorTurn: 605 }))
+          .state,
+      ).toBe("pending");
+      await blocked.cleanupObserved;
+      expect((await originalLstat(archivedClipPath())).nlink).toBe(2);
+
+      vi.spyOn(fs, "lstat").mockImplementation(async (...args) => {
+        if (String(args[0]) !== archivedClipPath()) {
+          return await originalLstat(...args);
+        }
+        targetLstatCalls += 1;
+        if (targetLstatCalls !== 2) return await originalLstat(...args);
+        // With the old Promise.all this second pathname read began while the
+        // descriptor read was blocked, captured nlink=2, and returned after
+        // the descriptor observed nlink=1: fixed array order became 1 -> 2.
+        secondPathSnapshotStarted = true;
+        const staleSnapshot = await originalLstat(...args);
+        blocked.unblockCleanup();
+        await blocked.tempUnlinked;
+        return staleSnapshot;
+      });
+      vi.spyOn(fs, "open").mockImplementation(async (...args) => {
+        const handle = await originalOpen(...args);
+        if (String(args[0]) !== archivedClipPath()) return handle;
+        targetOpenCount += 1;
+        if (targetOpenCount === 2) {
+          retryOpenedAfterFirstClose = firstDescriptorCloseCount === 1;
+        }
+        if (!wrappedDescriptor) {
+          wrappedDescriptor = true;
+          const originalStat = handle.stat.bind(handle);
+          const originalClose = handle.close.bind(handle);
+          let firstStat = true;
+          Object.defineProperty(handle, "stat", {
+            configurable: true,
+            value: async () => {
+              if (firstStat) {
+                firstStat = false;
+                queueMicrotask(() => {
+                  if (secondPathSnapshotStarted) return;
+                  sequentialFallbackReleased = true;
+                  blocked.unblockCleanup();
+                });
+                await blocked.tempUnlinked;
+              }
+              return await originalStat();
+            },
+            writable: true,
+          });
+          Object.defineProperty(handle, "close", {
+            configurable: true,
+            value: async () => {
+              firstDescriptorCloseCount += 1;
+              await originalClose();
+            },
+            writable: true,
+          });
+        }
+        return handle;
+      });
+
+      const baseUrl = await archiveServer();
+      const response = await fetch(
+        `${baseUrl}/premiere/${PREMIERE_ID}/clip.mp4`,
+      );
+      expect(wrappedDescriptor).toBe(true);
+      expect(sequentialFallbackReleased).toBe(true);
+      expect(targetOpenCount).toBeGreaterThanOrEqual(2);
+      expect(firstDescriptorCloseCount).toBe(1);
+      expect(retryOpenedAfterFirstClose).toBe(true);
+      expect(response.status).toBe(200);
+      expect(Buffer.from(await response.arrayBuffer())).toEqual(clipBytes);
+      await promotionComplete;
+      expect((await originalLstat(archivedClipPath())).nlink).toBe(1);
+      expect((await originalLstat(archivedManifestPath())).nlink).toBe(1);
+    } finally {
+      blocked.unblockCleanup();
+    }
+  });
+
+  it("does not retry a hardlink addition during archived clip validation", async () => {
+    await archivePointer();
+    const artifact = await writeCachedArtifact();
+    expect(
+      await promoter.promoteRatedCoworldRunClip({
+        runKey: RUN_KEY,
+        bucket: artifact.bucket,
+        sourceReplaySha256: RECORD_SHA,
+        sourceFilePath: path.join(runsRoot, RUN_KEY, "game-record.json"),
+      }),
+    ).toBe(1);
+    expect((await fs.lstat(archivedClipPath())).nlink).toBe(1);
+
+    const originalLstat = fs.lstat.bind(fs);
+    const addedLinkPath = path.join(root, "outside-archived-clip-hardlink");
+    let hardlinkAdded = false;
+    vi.spyOn(fs, "lstat").mockImplementation(async (...args) => {
+      const stat = await originalLstat(...args);
+      if (!hardlinkAdded && String(args[0]) === archivedClipPath()) {
+        hardlinkAdded = true;
+        await fs.link(archivedClipPath(), addedLinkPath);
+      }
+      return stat;
+    });
+
+    const baseUrl = await archiveServer();
+    const response = await fetch(`${baseUrl}/premiere/${PREMIERE_ID}/clip.mp4`);
+    expect(hardlinkAdded).toBe(true);
+    expect(response.status).toBe(404);
+    expect(await response.json()).toEqual({
+      error: { code: "PREMIERE_UNAVAILABLE" },
+    });
   });
 
   it("repairs the cache-ready crash window during bounded index rebuild", async () => {

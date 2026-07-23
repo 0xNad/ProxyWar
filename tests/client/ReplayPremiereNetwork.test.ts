@@ -844,6 +844,327 @@ describe("ReplayPremiereNetwork", () => {
     expect(eventTypes).toEqual(["batch"]);
   });
 
+  it("catches a viewer 78s behind to the checkpoint's retained 45s trail", async () => {
+    const checkpointRecords = records(0, 1, 2, 3, 4).map((record) => ({
+      ...record,
+      presentationOffsetMs: [0, 33_000, 78_000, 79_000, 80_000][
+        record.sequence
+      ],
+    }));
+    const chunk = await buildChunk({
+      index: 0,
+      records: checkpointRecords,
+      previousChunkHash: null,
+    });
+    const playback = new ReplayPremierePlaybackController(PREMIERE_ID);
+    const catchUps: number[] = [];
+    playback.subscribe((event) => {
+      if (event.type === "catch-up") catchUps.push(event.targetSequence);
+    });
+    const fetchMock = queuedFetch(
+      jsonResponse(await bootstrap()),
+      jsonResponse(
+        await manifest([chunk], {
+          serverNow: "2026-07-20T18:01:30.000Z",
+          authoritativeElapsedMs: 78_000,
+        }),
+      ),
+      jsonResponse(chunk),
+      jsonResponse(
+        await manifest([chunk], {
+          state: "checkpoint",
+          serverNow: "2026-07-20T18:01:30.000Z",
+          authoritativeElapsedMs: 78_000,
+          activeCheckpoint: {
+            id: "cp_00000001",
+            sequence: 2,
+            opensAt: "2026-07-20T18:01:30.000Z",
+            closesAt: "2026-07-20T18:02:30.000Z",
+            questionKind: "winner_from_here",
+            optionSeatIds: ["seat_0", "seat_1"],
+            state: "open",
+          },
+        }),
+      ),
+      jsonResponse(
+        await manifest([chunk], {
+          state: "checkpoint",
+          serverNow: "2026-07-20T18:01:32.000Z",
+          authoritativeElapsedMs: 78_000,
+          activeCheckpoint: {
+            id: "cp_00000001",
+            sequence: 2,
+            opensAt: "2026-07-20T18:01:30.000Z",
+            closesAt: "2026-07-20T18:02:30.000Z",
+            questionKind: "winner_from_here",
+            optionSeatIds: ["seat_0", "seat_1"],
+            state: "open",
+          },
+        }),
+      ),
+    );
+    const { network } = controller(
+      fetchMock as unknown as typeof fetch,
+      { onReady: vi.fn() },
+      playback,
+    );
+
+    await network.syncOnce();
+    playback.acknowledgeDispatchedRecord({
+      sequence: 0,
+      presentationOffsetMs: checkpointRecords[0].presentationOffsetMs,
+      turn: checkpointRecords[0].payload,
+    });
+    await network.syncOnce();
+    await network.syncOnce();
+
+    // The observed live failure was ~78s behind: bypass the ordinary 90s
+    // trigger, but retain the decisive 45s before asking for a prediction.
+    expect(catchUps).toEqual([1]);
+    expect(
+      checkpointRecords[2].presentationOffsetMs -
+        checkpointRecords[catchUps[0]].presentationOffsetMs,
+    ).toBe(PREMIERE_PRESENTATION_TRAIL_MS);
+    expect(catchUps[0]).toBeLessThan(2);
+    expect(catchUps[0]).toBeLessThanOrEqual(
+      playback.state().releasedThroughSequence!,
+    );
+  });
+
+  it("shrinks the retained checkpoint trail as the vote deadline approaches", async () => {
+    const checkpointRecords = records(0, 1, 2, 3, 4).map((record) => ({
+      ...record,
+      presentationOffsetMs: [0, 18_000, 33_000, 63_000, 78_000][
+        record.sequence
+      ],
+    }));
+    const chunk = await buildChunk({
+      index: 0,
+      records: checkpointRecords,
+      previousChunkHash: null,
+    });
+    const playback = new ReplayPremierePlaybackController(PREMIERE_ID);
+    const catchUps: number[] = [];
+    playback.subscribe((event) => {
+      if (event.type === "catch-up") catchUps.push(event.targetSequence);
+    });
+    const checkpoint = {
+      id: "cp_00000002",
+      sequence: 4,
+      opensAt: "2026-07-20T18:01:30.000Z",
+      closesAt: "2026-07-20T18:02:30.000Z",
+      questionKind: "winner_from_here" as const,
+      optionSeatIds: ["seat_0", "seat_1"],
+      state: "open" as const,
+    };
+    const { network } = controller(
+      queuedFetch(
+        jsonResponse(await bootstrap()),
+        jsonResponse(
+          await manifest([chunk], {
+            serverNow: "2026-07-20T18:01:30.000Z",
+            authoritativeElapsedMs: 78_000,
+          }),
+        ),
+        jsonResponse(chunk),
+        jsonResponse(
+          await manifest([chunk], {
+            state: "checkpoint",
+            serverNow: "2026-07-20T18:02:00.000Z",
+            authoritativeElapsedMs: 78_000,
+            activeCheckpoint: checkpoint,
+          }),
+        ),
+        jsonResponse(
+          await manifest([chunk], {
+            state: "checkpoint",
+            serverNow: "2026-07-20T18:02:15.000Z",
+            authoritativeElapsedMs: 78_000,
+            activeCheckpoint: checkpoint,
+          }),
+        ),
+      ) as unknown as typeof fetch,
+      { onReady: vi.fn() },
+      playback,
+    );
+
+    await network.syncOnce();
+    playback.acknowledgeDispatchedRecord({
+      sequence: 0,
+      presentationOffsetMs: checkpointRecords[0].presentationOffsetMs,
+      turn: checkpointRecords[0].payload,
+    });
+    await network.syncOnce();
+
+    // With 30s left, retain 15s before the boundary rather than teleporting.
+    expect(catchUps).toEqual([3]);
+    playback.acknowledgeDispatchedRecord({
+      sequence: 1,
+      presentationOffsetMs: checkpointRecords[1].presentationOffsetMs,
+      turn: checkpointRecords[1].payload,
+    });
+    playback.acknowledgeDispatchedRecord({
+      sequence: 2,
+      presentationOffsetMs: checkpointRecords[2].presentationOffsetMs,
+      turn: checkpointRecords[2].payload,
+    });
+    playback.acknowledgeDispatchedRecord({
+      sequence: 3,
+      presentationOffsetMs: checkpointRecords[3].presentationOffsetMs,
+      turn: checkpointRecords[3].payload,
+    });
+    await network.syncOnce();
+
+    // At the 15s usable-window floor, the adaptive target is the immutable
+    // boundary itself, never any released sequence beyond it.
+    expect(catchUps).toEqual([3, 4]);
+    expect(catchUps.at(-1)).toBe(checkpoint.sequence);
+  });
+
+  it("preserves the healthy 45s trail and does not catch up after the boundary", async () => {
+    const checkpointRecords = records(0, 1, 2).map((record) => ({
+      ...record,
+      presentationOffsetMs: record.sequence * 22_500,
+    }));
+    const chunk = await buildChunk({
+      index: 0,
+      records: checkpointRecords,
+      previousChunkHash: null,
+    });
+    const playback = new ReplayPremierePlaybackController(PREMIERE_ID);
+    const catchUps: number[] = [];
+    playback.subscribe((event) => {
+      if (event.type === "catch-up") catchUps.push(event.targetSequence);
+    });
+    const { network } = controller(
+      queuedFetch(
+        jsonResponse(await bootstrap()),
+        jsonResponse(
+          await manifest([chunk], {
+            serverNow: "2026-07-20T18:00:55.000Z",
+            authoritativeElapsedMs: 45_000,
+          }),
+        ),
+        jsonResponse(chunk),
+        jsonResponse(
+          await manifest([chunk], {
+            state: "checkpoint",
+            serverNow: "2026-07-20T18:00:56.000Z",
+            authoritativeElapsedMs: 45_000,
+            activeCheckpoint: {
+              id: "cp_00000001",
+              sequence: 2,
+              opensAt: "2026-07-20T18:00:55.000Z",
+              closesAt: "2026-07-20T18:01:55.000Z",
+              questionKind: "winner_from_here",
+              optionSeatIds: ["seat_0", "seat_1"],
+              state: "open",
+            },
+          }),
+        ),
+        jsonResponse(
+          await manifest([chunk], {
+            state: "checkpoint",
+            serverNow: "2026-07-20T18:00:57.000Z",
+            authoritativeElapsedMs: 45_000,
+            activeCheckpoint: {
+              id: "cp_00000001",
+              sequence: 2,
+              opensAt: "2026-07-20T18:00:55.000Z",
+              closesAt: "2026-07-20T18:01:55.000Z",
+              questionKind: "winner_from_here",
+              optionSeatIds: ["seat_0", "seat_1"],
+              state: "open",
+            },
+          }),
+        ),
+      ) as unknown as typeof fetch,
+      { onReady: vi.fn() },
+      playback,
+    );
+
+    await network.syncOnce();
+    playback.acknowledgeDispatchedRecord({
+      sequence: 0,
+      presentationOffsetMs: checkpointRecords[0].presentationOffsetMs,
+      turn: checkpointRecords[0].payload,
+    });
+    await network.syncOnce();
+    expect(catchUps).toEqual([]);
+
+    for (const record of chunk.records.slice(1)) {
+      playback.acknowledgeDispatchedRecord({
+        sequence: record.sequence,
+        presentationOffsetMs: record.presentationOffsetMs,
+        turn: record.payload,
+      });
+    }
+    await network.syncOnce();
+
+    expect(playback.state().lastDispatchedSequence).toBe(2);
+    expect(catchUps).toEqual([]);
+  });
+
+  it("fails closed for mismatched or unreleased active checkpoints", async () => {
+    const released = await buildChunk({
+      index: 0,
+      records: records(0, 1, 2, 3, 4),
+      previousChunkHash: null,
+    });
+    const mismatched = controller(
+      queuedFetch(
+        jsonResponse(await bootstrap()),
+        jsonResponse(
+          await manifest([released], {
+            state: "checkpoint",
+            activeCheckpoint: {
+              id: "cp_00000001",
+              sequence: 3,
+              opensAt: "2026-07-20T18:00:20.000Z",
+              closesAt: "2026-07-20T18:01:20.000Z",
+              questionKind: "winner_from_here",
+              optionSeatIds: ["seat_0", "seat_1"],
+              state: "open",
+            },
+          }),
+        ),
+      ) as unknown as typeof fetch,
+    );
+    await expectNetworkError(
+      mismatched.network.syncOnce(),
+      "manifest_integrity_failure",
+    );
+
+    const prefix = await buildChunk({
+      index: 0,
+      records: records(0, 1),
+      previousChunkHash: null,
+    });
+    const unreleased = controller(
+      queuedFetch(
+        jsonResponse(await bootstrap()),
+        jsonResponse(
+          await manifest([prefix], {
+            state: "checkpoint",
+            activeCheckpoint: {
+              id: "cp_00000001",
+              sequence: 2,
+              opensAt: "2026-07-20T18:00:20.000Z",
+              closesAt: "2026-07-20T18:01:20.000Z",
+              questionKind: "winner_from_here",
+              optionSeatIds: ["seat_0", "seat_1"],
+              state: "open",
+            },
+          }),
+        ),
+      ) as unknown as typeof fetch,
+    );
+    await expectNetworkError(
+      unreleased.network.syncOnce(),
+      "manifest_integrity_failure",
+    );
+  });
+
   it("skips catch-up entirely while the released stream is younger than the trail", async () => {
     const chunk = await buildChunk({
       index: 0,

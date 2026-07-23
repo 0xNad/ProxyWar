@@ -31,6 +31,8 @@ const JSON_DOCUMENT_CSP =
 const ARCHIVE_DATA_ELEMENT_ID = "proxywar-premiere-archive";
 const MAX_ARCHIVED_CLIP_MANIFEST_BYTES = 64 * 1024;
 const ARCHIVED_CLIP_HASH_BUFFER_BYTES = 64 * 1024;
+/** Initial validation plus one independent settlement retry per published leaf. */
+const MAX_ARCHIVED_CLIP_OPEN_ATTEMPTS = 3;
 const PINNED_READ_FLAGS =
   constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK;
 const PINNED_DIRECTORY_FLAGS = PINNED_READ_FLAGS | constants.O_DIRECTORY;
@@ -237,7 +239,33 @@ async function openValidatedArchivedClipFile(
   registry: ReplayPremiereArchiveRouterOptions["registry"],
   premiereId: string,
 ): Promise<PinnedArchivedClipFile | null> {
-  if (registry.get(premiereId) !== null) return null;
+  for (
+    let attempt = 0;
+    attempt < MAX_ARCHIVED_CLIP_OPEN_ATTEMPTS;
+    attempt += 1
+  ) {
+    const result = await openValidatedArchivedClipFileOnce(
+      archiveStore,
+      registry,
+      premiereId,
+    );
+    if (result.state === "ready") return result.clip;
+    if (result.state === "unavailable") return null;
+  }
+  return null;
+}
+
+type ArchivedClipOpenResult =
+  | { state: "ready"; clip: PinnedArchivedClipFile }
+  | { state: "promoter_hardlink_settled" }
+  | { state: "unavailable" };
+
+async function openValidatedArchivedClipFileOnce(
+  archiveStore: ReplayPremiereArchiveRouterOptions["archiveStore"],
+  registry: ReplayPremiereArchiveRouterOptions["registry"],
+  premiereId: string,
+): Promise<ArchivedClipOpenResult> {
+  if (registry.get(premiereId) !== null) return { state: "unavailable" };
   const pointer = archiveStore.lookup(premiereId);
   if (
     pointer === null ||
@@ -245,7 +273,7 @@ async function openValidatedArchivedClipFile(
     (pointer.terminalState !== "revealed" &&
       pointer.terminalState !== "archived")
   ) {
-    return null;
+    return { state: "unavailable" };
   }
 
   const archiveRootPath = archiveStore.archiveRoot;
@@ -265,22 +293,38 @@ async function openValidatedArchivedClipFile(
   let transferred = false;
   try {
     archiveRoot = await openPinnedDirectory(archiveRootPath);
-    if (archiveRoot === null) return null;
+    if (archiveRoot === null) return { state: "unavailable" };
     clipsDirectory = await openPinnedDirectory(clipsDirectoryPath, [
       archiveRoot,
     ]);
-    if (clipsDirectory === null) return null;
-    [clip, manifest] = await Promise.all([
+    if (clipsDirectory === null) return { state: "unavailable" };
+    const [clipOpen, manifestOpen] = await Promise.all([
       openPinnedRegularFile(clipPath, [archiveRoot, clipsDirectory]),
       openPinnedRegularFile(manifestPath, [archiveRoot, clipsDirectory]),
     ]);
-    if (clip === null || manifest === null) return null;
+    if (clipOpen.state === "ready") clip = clipOpen.file;
+    if (manifestOpen.state === "ready") manifest = manifestOpen.file;
+    if (
+      clipOpen.state === "unavailable" ||
+      manifestOpen.state === "unavailable"
+    ) {
+      return { state: "unavailable" };
+    }
+    if (
+      clipOpen.state === "promoter_hardlink_settled" ||
+      manifestOpen.state === "promoter_hardlink_settled"
+    ) {
+      return { state: "promoter_hardlink_settled" };
+    }
+    if (clip === null || manifest === null) {
+      return { state: "unavailable" };
+    }
     if (
       clip.stat.size <= 0 ||
       manifest.stat.size <= 0 ||
       manifest.stat.size > MAX_ARCHIVED_CLIP_MANIFEST_BYTES
     ) {
-      return null;
+      return { state: "unavailable" };
     }
 
     const [manifestBytes, clipDigest] = await Promise.all([
@@ -292,7 +336,7 @@ async function openValidatedArchivedClipFile(
       manifestBytes.byteLength > MAX_ARCHIVED_CLIP_MANIFEST_BYTES ||
       clipDigest.byteLength !== clip.stat.size
     ) {
-      return null;
+      return { state: "unavailable" };
     }
     const renderManifest = parsePremiereClipRenderManifest(
       JSON.parse(manifestBytes.toString("utf8")),
@@ -312,14 +356,26 @@ async function openValidatedArchivedClipFile(
       renderManifest.outBytes <= 0 ||
       renderManifest.outSha256 !== clipDigest.sha256
     ) {
-      return null;
+      return { state: "unavailable" };
+    }
+    const [clipStability, manifestStability] = await Promise.all([
+      pinnedRegularFileStability(clip),
+      pinnedRegularFileStability(manifest),
+    ]);
+    if (
+      clipStability === "unavailable" ||
+      manifestStability === "unavailable"
+    ) {
+      return { state: "unavailable" };
     }
     if (
-      !(await pinnedRegularFileIsStable(clip)) ||
-      !(await pinnedRegularFileIsStable(manifest)) ||
-      !isSameRevealPublicPointer(archiveStore.lookup(premiereId), pointer)
+      clipStability === "promoter_hardlink_settled" ||
+      manifestStability === "promoter_hardlink_settled"
     ) {
-      return null;
+      return { state: "promoter_hardlink_settled" };
+    }
+    if (!isSameRevealPublicPointer(archiveStore.lookup(premiereId), pointer)) {
+      return { state: "unavailable" };
     }
 
     const closeClip = closeFileHandlesOnce([clip.fileHandle]);
@@ -331,13 +387,16 @@ async function openValidatedArchivedClipFile(
     const close = closeOperationsOnce([closeClip, closeCompanions]);
     transferred = true;
     return {
-      fileHandle: clip.fileHandle,
-      byteLength: clip.stat.size,
-      close,
-      closeAfterStream: closeCompanions,
+      state: "ready",
+      clip: {
+        fileHandle: clip.fileHandle,
+        byteLength: clip.stat.size,
+        close,
+        closeAfterStream: closeCompanions,
+      },
     };
   } catch {
-    return null;
+    return { state: "unavailable" };
   } finally {
     if (!transferred) {
       await closeFileHandles([
@@ -370,6 +429,16 @@ interface PinnedRegularFile {
   stat: Stats;
   pinnedDirectories: readonly PinnedDirectory[];
 }
+
+type PinnedRegularFileOpenResult =
+  | { state: "ready"; file: PinnedRegularFile }
+  | { state: "promoter_hardlink_settled" }
+  | { state: "unavailable" };
+
+type PinnedRegularFileStability =
+  | "stable"
+  | "promoter_hardlink_settled"
+  | "unavailable";
 
 async function openPinnedDirectory(
   directoryPath: string,
@@ -410,55 +479,66 @@ async function openPinnedDirectory(
 async function openPinnedRegularFile(
   filePath: string,
   pinnedDirectories: readonly PinnedDirectory[],
-): Promise<PinnedRegularFile | null> {
-  if (!(await pinnedDirectoriesAreStable(pinnedDirectories))) return null;
+): Promise<PinnedRegularFileOpenResult> {
+  if (!(await pinnedDirectoriesAreStable(pinnedDirectories))) {
+    return { state: "unavailable" };
+  }
   let before: Stats;
   try {
     before = await fs.lstat(filePath);
   } catch {
-    return null;
+    return { state: "unavailable" };
   }
-  if (!before.isFile() || before.isSymbolicLink()) return null;
+  if (!before.isFile() || before.isSymbolicLink()) {
+    return { state: "unavailable" };
+  }
 
   let fileHandle: FileHandle | null = null;
   try {
     fileHandle = await fs.open(filePath, PINNED_READ_FLAGS);
-    const [opened, afterOpen, directoriesStable] = await Promise.all([
-      fileHandle.stat(),
-      fs.lstat(filePath),
-      pinnedDirectoriesAreStable(pinnedDirectories),
-    ]);
-    if (
-      !directoriesStable ||
-      !sameStableRegularFile(before, opened) ||
-      !sameStableRegularFile(opened, afterOpen)
-    ) {
+    // These snapshots are direction-sensitive: only an observed 2 -> 1
+    // transition can be a promoter temp-link settlement. Keep their reads
+    // sequential so array position always matches observation order.
+    const opened = await fileHandle.stat();
+    const afterOpen = await fs.lstat(filePath);
+    const directoriesStable =
+      await pinnedDirectoriesAreStable(pinnedDirectories);
+    const stability = regularFileSnapshotStability([before, opened, afterOpen]);
+    if (!directoriesStable || stability !== "stable") {
       await closeFileHandle(fileHandle);
-      return null;
+      return {
+        state:
+          directoriesStable && stability === "promoter_hardlink_settled"
+            ? "promoter_hardlink_settled"
+            : "unavailable",
+      };
     }
-    return { filePath, fileHandle, stat: opened, pinnedDirectories };
+    return {
+      state: "ready",
+      file: { filePath, fileHandle, stat: opened, pinnedDirectories },
+    };
   } catch {
     await closeFileHandle(fileHandle);
-    return null;
+    return { state: "unavailable" };
   }
 }
 
-async function pinnedRegularFileIsStable(
+async function pinnedRegularFileStability(
   pinned: PinnedRegularFile,
-): Promise<boolean> {
+): Promise<PinnedRegularFileStability> {
   try {
-    const [descriptorStat, pathStat, directoriesStable] = await Promise.all([
-      pinned.fileHandle.stat(),
-      fs.lstat(pinned.filePath),
-      pinnedDirectoriesAreStable(pinned.pinnedDirectories),
-    ]);
-    return (
-      directoriesStable &&
-      sameStableRegularFile(pinned.stat, descriptorStat) &&
-      sameStableRegularFile(descriptorStat, pathStat)
+    // Preserve temporal order for the same direction-sensitive classification
+    // used while opening the leaf.
+    const descriptorStat = await pinned.fileHandle.stat();
+    const pathStat = await fs.lstat(pinned.filePath);
+    const directoriesStable = await pinnedDirectoriesAreStable(
+      pinned.pinnedDirectories,
     );
+    return directoriesStable
+      ? regularFileSnapshotStability([pinned.stat, descriptorStat, pathStat])
+      : "unavailable";
   } catch {
-    return false;
+    return "unavailable";
   }
 }
 
@@ -517,6 +597,46 @@ function sameStableRegularFile(left: Stats, right: Stats): boolean {
     left.size === right.size &&
     left.mtimeMs === right.mtimeMs &&
     left.ctimeMs === right.ctimeMs
+  );
+}
+
+function regularFileSnapshotStability(
+  snapshots: readonly [Stats, Stats, Stats],
+): PinnedRegularFileStability {
+  let promoterHardlinkSettled = false;
+  for (let index = 1; index < snapshots.length; index += 1) {
+    const left = snapshots[index - 1];
+    const right = snapshots[index];
+    if (sameStableRegularFile(left, right)) continue;
+    if (!isPromoterHardlinkSettlement(left, right)) return "unavailable";
+    promoterHardlinkSettled = true;
+  }
+  return promoterHardlinkSettled ? "promoter_hardlink_settled" : "stable";
+}
+
+/**
+ * The promoter publishes each final leaf with link(2), then removes its sole
+ * temp hardlink. That changes nlink and ctime on the final inode during the
+ * 2 -> 1 settlement. Classify exactly that forward transition so the caller
+ * can close every descriptor and repeat the complete strict validation;
+ * additions, replacements, and content/ownership changes remain terminal.
+ */
+function isPromoterHardlinkSettlement(left: Stats, right: Stats): boolean {
+  return (
+    left.isFile() &&
+    !left.isSymbolicLink() &&
+    right.isFile() &&
+    !right.isSymbolicLink() &&
+    left.dev === right.dev &&
+    left.ino === right.ino &&
+    left.mode === right.mode &&
+    left.nlink === 2 &&
+    right.nlink === 1 &&
+    left.uid === right.uid &&
+    left.gid === right.gid &&
+    left.size === right.size &&
+    left.mtimeMs === right.mtimeMs &&
+    right.ctimeMs >= left.ctimeMs
   );
 }
 

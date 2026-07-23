@@ -264,6 +264,36 @@ function startServer(config: LobbyConfig, isReplay = true) {
   return { server, messages, eventBus };
 }
 
+function startServerWithManualPacingTimer(config: LobbyConfig) {
+  const fakeSetInterval = globalThis.setInterval;
+  let pacingTick: (() => void) | undefined;
+  const intervalSpy = vi.spyOn(globalThis, "setInterval").mockImplementation(((
+    callback: TimerHandler,
+    delay?: number,
+  ) => {
+    if (typeof callback !== "function") {
+      throw new Error("expected a function pacing callback");
+    }
+    pacingTick = callback as () => void;
+    // Give LocalServer a real fake-timer handle so endGame can clear it,
+    // while the test controls exactly when the captured callback runs.
+    return fakeSetInterval(() => {}, delay);
+  }) as unknown as typeof setInterval);
+  const started = startServer(config);
+  intervalSpy.mockRestore();
+  if (pacingTick === undefined) {
+    throw new Error("missing LocalServer pacing callback");
+  }
+  const tick = pacingTick;
+  return {
+    ...started,
+    tickAt(nowMs: number) {
+      vi.setSystemTime(nowMs);
+      tick();
+    },
+  };
+}
+
 function turnMessages(messages: ServerMessage[]): Turn[] {
   return messages.flatMap((message) =>
     message.type === "turn" ? [message.turn] : [],
@@ -472,6 +502,83 @@ describe("LocalServer progressive replay", () => {
       0, 1, 2,
     ]);
     expect(controller.state().lastAcceptedPresentationOffsetMs).toBe(95);
+    server.endGame();
+  });
+
+  it("does not accumulate repeated timer callback overshoot", () => {
+    const controller = new ReplayPremierePlaybackController(
+      "prem_0123456789abcdef",
+    );
+    const { server, messages, tickAt } = startServerWithManualPacingTimer(
+      lobbyConfig(controller),
+    );
+    controller.appendVerifiedBatch(
+      batch(
+        Array.from({ length: 11 }, (_, turnNumber) => ({
+          turnNumber,
+          intents: [],
+        })),
+        Array.from({ length: 11 }, (_, sequence) => sequence * 50),
+      ),
+    );
+
+    // A congested 5 ms poll arrives every 7 ms. Resetting the schedule to
+    // Date.now() on every dispatch permanently compounds that overshoot and
+    // emits only ten turns by 511 ms. A cumulative deadline emits all eleven.
+    let completedTurns = 0;
+    for (let nowMs = 7; nowMs <= 511; nowMs += 7) {
+      tickAt(nowMs);
+      const dispatchedTurns = turnMessages(messages).length;
+      if (dispatchedTurns > completedTurns) {
+        expect(dispatchedTurns).toBe(completedTurns + 1);
+        server.turnComplete();
+        completedTurns += 1;
+      }
+    }
+
+    expect(turnMessages(messages).map((turn) => turn.turnNumber)).toEqual(
+      Array.from({ length: 11 }, (_, turnNumber) => turnNumber),
+    );
+    server.endGame();
+  });
+
+  it("rebases after a long stall instead of bursting overdue turns", () => {
+    const controller = new ReplayPremierePlaybackController(
+      "prem_0123456789abcdef",
+    );
+    const { server, messages, tickAt } = startServerWithManualPacingTimer(
+      lobbyConfig(controller),
+    );
+    controller.appendVerifiedBatch(
+      batch(
+        Array.from({ length: 5 }, (_, turnNumber) => ({
+          turnNumber,
+          intents: [],
+        })),
+        [0, 50, 100, 150, 200],
+      ),
+    );
+
+    tickAt(5);
+    server.turnComplete();
+    tickAt(55);
+    server.turnComplete();
+
+    tickAt(1_000);
+    expect(turnMessages(messages).map((turn) => turn.turnNumber)).toEqual([
+      0, 1, 2,
+    ]);
+    server.turnComplete();
+
+    // The next turn waits for its verified 50 ms interval. The stall does not
+    // drain hundreds of milliseconds of schedule debt at the 5 ms poll rate.
+    tickAt(1_005);
+    tickAt(1_049);
+    expect(turnMessages(messages)).toHaveLength(3);
+    tickAt(1_050);
+    expect(turnMessages(messages).map((turn) => turn.turnNumber)).toEqual([
+      0, 1, 2, 3,
+    ]);
     server.endGame();
   });
 

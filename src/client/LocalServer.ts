@@ -141,7 +141,7 @@ export class LocalServer {
         turnIntervalMs !== null &&
         Date.now() >= this.turnStartTime + turnIntervalMs
       ) {
-        this.turnStartTime = Date.now();
+        this.advanceTurnDeadline(turnIntervalMs);
         // End turn on the server means the client will start processing the turn.
         this.endTurn();
       }
@@ -418,6 +418,24 @@ export class LocalServer {
         : this.progressiveReplayTurns[this.turns.length - 1]
             .presentationOffsetMs;
     return Math.max(0, next.presentationOffsetMs - previousOffset);
+  }
+
+  private advanceTurnDeadline(turnIntervalMs: number) {
+    const now = Date.now();
+    if (!this.lobbyConfig.progressiveReplay) {
+      // Preserve the existing wall-clock pacing for games and plain replays.
+      this.turnStartTime = now;
+      return;
+    }
+
+    const scheduledDeadline = this.turnStartTime + turnIntervalMs;
+    // Premiere intervals come from the verified release stream. Keep their
+    // cumulative schedule through normal timer overshoot instead of adding
+    // that overshoot to every turn. If the main thread missed a full verified
+    // interval, rebase at now so a long stall cannot create a burst of overdue
+    // turns that starves rendering.
+    this.turnStartTime =
+      now - scheduledDeadline < turnIntervalMs ? scheduledDeadline : now;
   }
 
   private runPendingProgressiveCatchUp() {

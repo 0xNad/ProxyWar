@@ -48,6 +48,13 @@ export const PREMIERE_PRESENTATION_TRAIL_MS = 45_000;
  * stalls.
  */
 const DEFAULT_CATCH_UP_THRESHOLD_MS = 2 * PREMIERE_PRESENTATION_TRAIL_MS;
+// A healthy viewer reaches a 60s checkpoint after the 45s presentation trail
+// with 15s left to vote. Preserve that experience; checkpoint catch-up is only
+// for viewers beyond the trail that can still be retained before the deadline.
+// The jitter allowance prevents tiny clock/offset differences from turning a
+// healthy viewer's smooth playback into a catch-up loop.
+const CHECKPOINT_MIN_USABLE_VOTE_WINDOW_MS = 15_000;
+const CHECKPOINT_CATCH_UP_JITTER_ALLOWANCE_MS = 2_000;
 const DEFAULT_REQUEST_TIMEOUT_MS = 2_000;
 const MAX_REQUEST_TIMEOUT_MS = 2_000;
 const MAX_AUTHORITATIVE_RESULT_BYTES = 1_000_000;
@@ -1196,6 +1203,62 @@ export class ReplayPremiereNetworkController {
     }
     const dispatchedOffset =
       dispatched === null ? 0 : (this.presentationOffsets.get(dispatched) ?? 0);
+    // An open checkpoint is a short-lived interaction boundary, not ordinary
+    // steady-state playback. A healthy viewer inside the designed 45s trail
+    // must keep smooth pacing. A lagged viewer keeps as much of that decisive
+    // pre-prediction context as the remaining vote window permits; only a late
+    // window falls all the way back to the checkpoint boundary itself.
+    const checkpoint = manifest.activeCheckpoint;
+    const checkpointTarget = checkpoint?.sequence ?? null;
+    const checkpointOffset =
+      checkpointTarget === null
+        ? undefined
+        : this.presentationOffsets.get(checkpointTarget);
+    const checkpointRemainingMs =
+      checkpoint === null
+        ? 0
+        : Date.parse(checkpoint.closesAt) - Date.parse(manifest.serverNow);
+    const retainedCheckpointTrailMs = Math.min(
+      PREMIERE_PRESENTATION_TRAIL_MS,
+      Math.max(0, checkpointRemainingMs - CHECKPOINT_MIN_USABLE_VOTE_WINDOW_MS),
+    );
+    const checkpointCatchUpTarget =
+      checkpointTarget === null
+        ? null
+        : this.trailedCatchUpTarget(
+            checkpointTarget,
+            retainedCheckpointTrailMs,
+          );
+    if (
+      checkpoint?.state === "open" &&
+      checkpointTarget !== null &&
+      checkpointTarget <= frontier &&
+      checkpointTarget > (dispatched ?? -1) &&
+      checkpointOffset !== undefined &&
+      checkpointRemainingMs > CHECKPOINT_CATCH_UP_JITTER_ALLOWANCE_MS &&
+      checkpointOffset - dispatchedOffset >
+        retainedCheckpointTrailMs + CHECKPOINT_CATCH_UP_JITTER_ALLOWANCE_MS &&
+      checkpointCatchUpTarget !== null &&
+      checkpointCatchUpTarget > (dispatched ?? -1)
+    ) {
+      // Do not advance a still-pending request on every manifest poll. Once it
+      // is acknowledged, the recalculated retained trail may move forward if
+      // the deadline has genuinely shortened.
+      if (
+        this.lastCatchUpTarget === checkpointCatchUpTarget ||
+        (this.lastCatchUpTarget !== null &&
+          this.lastCatchUpTarget > (dispatched ?? -1))
+      ) {
+        return;
+      }
+      try {
+        this.options.playback.requestForwardCatchUp(checkpointCatchUpTarget);
+      } catch {
+        throw networkError("manifest_integrity_failure");
+      }
+      this.lastCatchUpTarget = checkpointCatchUpTarget;
+      return;
+    }
     if (
       manifest.authoritativeElapsedMs - dispatchedOffset <=
       this.catchUpThresholdMs
@@ -1229,26 +1292,27 @@ export class ReplayPremiereNetworkController {
   }
 
   /**
-   * The greatest released sequence whose presentation offset is at least
-   * {@link PREMIERE_PRESENTATION_TRAIL_MS} behind the frontier record's
-   * offset, or null when the released stream is younger than the trail (an
-   * early join simply starts from 0 and is already within the trail).
+   * The greatest released sequence whose presentation offset is at least the
+   * requested trail behind the frontier record's offset, or null when the
+   * released stream is younger than that trail (an early join simply starts
+   * from 0 and is already within it). A zero trail resolves to the immutable
+   * frontier for the late-checkpoint fallback.
    */
-  private trailedCatchUpTarget(frontier: number): number | null {
+  private trailedCatchUpTarget(
+    frontier: number,
+    trailMs = PREMIERE_PRESENTATION_TRAIL_MS,
+  ): number | null {
     const frontierOffset = this.presentationOffsets.get(frontier);
     if (frontierOffset === undefined) return null;
-    const trailedOffset = frontierOffset - PREMIERE_PRESENTATION_TRAIL_MS;
-    if (trailedOffset <= 0) return null;
+    const trailedOffset = frontierOffset - trailMs;
+    if (trailedOffset < 0) return null;
     // Records are dense (one per sequence) with uniform presentation deltas,
     // so estimate then correct — bounded to a few steps either side.
     let candidate = frontier;
     const previousOffset = this.presentationOffsets.get(frontier - 1);
     if (previousOffset !== undefined && previousOffset < frontierOffset) {
       const perRecordMs = frontierOffset - previousOffset;
-      candidate = Math.max(
-        0,
-        frontier - Math.ceil(PREMIERE_PRESENTATION_TRAIL_MS / perRecordMs),
-      );
+      candidate = Math.max(0, frontier - Math.ceil(trailMs / perRecordMs));
     }
     while (candidate > 0) {
       const offset = this.presentationOffsets.get(candidate);
