@@ -627,6 +627,13 @@ const premiereClipReadySchema = z
   })
   .strict();
 
+const premiereClipPendingSchema = z
+  .object({
+    phase: z.enum(["queued", "rendering"]),
+    jobsAhead: nonNegativeIntegerSchema,
+  })
+  .strict();
+
 export const premiereClipStatusResponseSchema = z
   .object({
     schemaVersion: z.literal(1),
@@ -635,6 +642,8 @@ export const premiereClipStatusResponseSchema = z
     clipVersion: z.literal(1),
     state: z.enum(["ready", "pending", "absent"]),
     ready: premiereClipReadySchema.nullable(),
+    // Optional while old cached/bootstrap fixtures are still in circulation.
+    pending: premiereClipPendingSchema.nullable().optional(),
   })
   .strict();
 

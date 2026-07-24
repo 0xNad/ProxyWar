@@ -116,6 +116,36 @@ export class LocalServer {
           this.onProgressiveReplayEvent(event),
         );
     }
+    if (this.lobbyConfig.gameRecord) {
+      this.replayTurns = decompressGameRecord(
+        this.lobbyConfig.gameRecord,
+      ).turns;
+    }
+    const clipPreviewTarget = this.lobbyConfig.replayClipPreviewTarget;
+    if (clipPreviewTarget !== undefined) {
+      if (
+        !this.isReplay ||
+        this.lobbyConfig.gameRecord === undefined ||
+        progressiveReplay !== undefined ||
+        !Number.isSafeInteger(clipPreviewTarget) ||
+        clipPreviewTarget <= 0 ||
+        clipPreviewTarget > this.replayTurns.length
+      ) {
+        throw new Error("invalid replay clip preview target");
+      }
+      // Preview is a fresh-document exact-anchor contract. Retain the target
+      // prefix before the pacing interval exists and start paused, so neither
+      // normal pacing nor MAX backlog can enqueue target + 1. The client
+      // receives this prefix on its rejoin and may advance only after an
+      // explicit unpause.
+      this.turns = this.replayTurns
+        .slice(0, clipPreviewTarget)
+        .map((turn, turnNumber) => ({
+          turnNumber,
+          intents: turn.intents,
+        }));
+      this.paused = true;
+    }
     this.turnCheckInterval = setInterval(() => {
       const turnIntervalMs = this.progressiveReplayDelayForNextTurn();
       // Starvation is a visible state, not a silent freeze: a null delay on
@@ -185,11 +215,6 @@ export class LocalServer {
       this.turnStartTime = this.startedAt;
     }
     this.clientConnect();
-    if (this.lobbyConfig.gameRecord) {
-      this.replayTurns = decompressGameRecord(
-        this.lobbyConfig.gameRecord,
-      ).turns;
-    }
     if (this.lobbyConfig.gameStartInfo === undefined) {
       throw new Error("missing gameStartInfo");
     }
@@ -200,7 +225,7 @@ export class LocalServer {
     this.clientMessage({
       type: "start",
       gameStartInfo: this.lobbyConfig.gameStartInfo,
-      turns: [],
+      turns: this.turns,
       lobbyCreatedAt: this.lobbyConfig.gameStartInfo.lobbyCreatedAt,
       // Don't send myClientID for replays — viewer has no player identity.
       myClientID: this.isReplay ? undefined : this.clientID,

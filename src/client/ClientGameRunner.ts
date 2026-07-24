@@ -49,6 +49,7 @@ import {
   MouseMoveEvent,
   MouseUpEvent,
   TickMetricsEvent,
+  TogglePauseIntentEvent,
 } from "./InputHandler";
 import { endGame, startGame, startTime } from "./LocalPersistantStats";
 import { ReplayPremiereProgressiveReplayConfig } from "./ReplayPremierePlayback";
@@ -104,6 +105,9 @@ export interface LobbyConfig {
   // Progressive replay starts from sanitized GameStartInfo and receives only
   // hash-verified, released turns through its controller.
   progressiveReplay?: ReplayPremiereProgressiveReplayConfig;
+  // Validated plain-replay Clip Preview target. LocalServer pre-stages this
+  // exact prefix before pacing starts; the renderer coalesces only below it.
+  replayClipPreviewTarget?: number;
 }
 
 export function isReplayLobby(
@@ -378,9 +382,10 @@ export class ClientGameRunner {
   ) {
     this.lastMessageTime = Date.now();
     const fastForwardUntilTurn =
-      typeof window === "undefined"
+      this.lobby.replayClipPreviewTarget ??
+      (typeof window === "undefined"
         ? null
-        : parseReplayRenderFastForwardUntilTurn(window.location.search);
+        : parseReplayRenderFastForwardUntilTurn(window.location.search));
     if (
       fastForwardUntilTurn !== null &&
       this.lobby.gameRecord !== undefined &&
@@ -498,6 +503,12 @@ export class ClientGameRunner {
       );
     }
     this.input.initialize();
+    if (this.lobby.replayClipPreviewTarget !== undefined) {
+      // LocalServer is already paused at the exact pre-staged anchor. Toggle
+      // the initialized replay sidebar into its matching Play state now; the
+      // redundant pause intent cannot advance because the server is paused.
+      this.eventBus.emit(new TogglePauseIntentEvent());
+    }
     this.worker.start((gu: GameUpdateViewData | ErrorUpdate) => {
       try {
         if (this.lobby.gameStartInfo === undefined) {

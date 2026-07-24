@@ -265,6 +265,7 @@ describe("mountArchivedReplayPremiereOverlay", () => {
   it("requests a clip for a retained archived rated replay without a Premiere interaction session", async () => {
     const payload = samplePayload();
     payload.clip = null;
+    payload.summary.outcome!.turnCount = 1_000;
     const runKey = payload.replayRunKey!;
     const clipUrl = `/ai-league-runs/${runKey}/clip-v1-61.mp4`;
     const requests: Array<{ url: string; method: string; body: unknown }> = [];
@@ -300,9 +301,19 @@ describe("mountArchivedReplayPremiereOverlay", () => {
     );
     vi.stubGlobal("fetch", fetchMock);
     const handle = mountArchivedReplayPremiereOverlay(payload);
+    await vi.waitFor(() => {
+      expect(
+        handle.element.querySelector("[data-ai-league-clip]")?.textContent,
+      ).toContain("ai_league_replay.clip_range_pending");
+    });
     document.dispatchEvent(
       new CustomEvent("ai-league-replay-frame", {
-        detail: { turnNumber: 615, players: [] },
+        detail: {
+          tick: 615,
+          terminal: false,
+          turnNumber: 900,
+          players: [],
+        },
       }),
     );
 
@@ -310,6 +321,11 @@ describe("mountArchivedReplayPremiereOverlay", () => {
       expect(
         handle.element.querySelector("[data-ai-league-clip-render]"),
       ).not.toBeNull();
+      expect(
+        handle.element.querySelector<HTMLInputElement>(
+          "[data-ai-league-clip-moment]",
+        )?.max,
+      ).toBe("61");
     });
     handle.element
       .querySelector<HTMLButtonElement>("[data-ai-league-clip-render]")

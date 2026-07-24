@@ -1,4 +1,5 @@
 import {
+  initialReplayClipRenderableThroughTurn,
   mountReplayScopedLeagueClipControl,
   type ReplayScopedLeagueClipControlHandle,
 } from "./ReplayClipControl";
@@ -220,6 +221,13 @@ function augmentArchivedOverlayActions(
     clipControl = mountReplayScopedLeagueClipControl({
       container: clipGenerator,
       runKey: clipGenerationRunKey,
+      renderableThroughTurn:
+        payload.summary.outcome === null
+          ? null
+          : initialReplayClipRenderableThroughTurn({
+              num_turns: payload.summary.outcome.turnCount,
+              winner: payload.summary.outcome.winner,
+            }),
     });
   }
 

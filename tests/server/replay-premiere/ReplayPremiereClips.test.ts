@@ -201,9 +201,10 @@ function readBoundStatus(
     bucket: number;
     lifecycleState?: PremiereState;
   },
+  options: { includeProgress?: boolean } = {},
 ) {
   const sourceBoundRequest = { ...request, sourceReplaySha256: SHA };
-  return clips.readStatus(sourceBoundRequest);
+  return clips.readStatus(sourceBoundRequest, options);
 }
 
 async function waitReady(
@@ -295,6 +296,144 @@ describe("cache hit / miss and render", () => {
     const join = await clips.requestClip(revealedRequest(PREMIERE, 605, "p_a"));
     expect(first.state).toBe("pending");
     expect(join.state).toBe("pending");
+    await clips.close();
+  });
+
+  test("reports exact source-bound queued and rendering progress", async () => {
+    const controlled = controlledSpawn();
+    const clips = makeClips({
+      spawnWorker: controlled.spawnWorker,
+      limits: {
+        maxQueueDepth: 10,
+        maxRendersPerParticipantPerPremiere: 10,
+      },
+    });
+
+    const rendering = await clips.requestClip(
+      revealedRequest(PREMIERE, 605, "p_a"),
+    );
+    const firstQueued = await clips.requestClip(
+      revealedRequest(PREMIERE, 705, "p_a"),
+    );
+    const secondQueued = await clips.requestClip(
+      revealedRequest(PREMIERE, 805, "p_a"),
+    );
+
+    // POST/request responses preserve the legacy schema-v1 object shape.
+    for (const status of [rendering, firstQueued, secondQueued]) {
+      expect(status.state).toBe("pending");
+      expect(status).not.toHaveProperty("pending");
+    }
+    expect(
+      readBoundStatus(
+        clips,
+        { premiereId: PREMIERE, bucket: 60 },
+        { includeProgress: true },
+      ),
+    ).toMatchObject({
+      state: "pending",
+      pending: { phase: "rendering", jobsAhead: 0 },
+    });
+    expect(
+      readBoundStatus(
+        clips,
+        { premiereId: PREMIERE, bucket: 70 },
+        { includeProgress: true },
+      ),
+    ).toMatchObject({
+      state: "pending",
+      pending: { phase: "queued", jobsAhead: 1 },
+    });
+    expect(
+      readBoundStatus(
+        clips,
+        { premiereId: PREMIERE, bucket: 80 },
+        { includeProgress: true },
+      ),
+    ).toMatchObject({
+      state: "pending",
+      pending: { phase: "queued", jobsAhead: 2 },
+    });
+    expect(
+      readBoundStatus(clips, { premiereId: PREMIERE, bucket: 70 }),
+    ).not.toHaveProperty("pending");
+    expect(
+      clips.readStatus(
+        {
+          premiereId: PREMIERE,
+          bucket: 70,
+          sourceReplaySha256: "f".repeat(64),
+        },
+        { includeProgress: true },
+      ),
+    ).toMatchObject({ state: "absent", pending: null });
+
+    // Joining the exact in-flight key returns its current queue position
+    // without consuming quota or manufacturing a separate progress record.
+    const joined = await clips.requestClip(
+      revealedRequest(PREMIERE, 705, "p_a"),
+    );
+    expect(joined.state).toBe("pending");
+    expect(joined).not.toHaveProperty("pending");
+
+    await waitFor(() => controlled.renders.length === 1, "first render start");
+    await controlled.renders[0].complete();
+    await waitReady(clips, PREMIERE, 60);
+    await waitFor(() => controlled.renders.length === 2, "second render start");
+    expect(
+      readBoundStatus(
+        clips,
+        { premiereId: PREMIERE, bucket: 60 },
+        { includeProgress: true },
+      ),
+    ).toMatchObject({ state: "ready", pending: null });
+    expect(
+      readBoundStatus(
+        clips,
+        { premiereId: PREMIERE, bucket: 70 },
+        { includeProgress: true },
+      ),
+    ).toMatchObject({
+      state: "pending",
+      pending: { phase: "rendering", jobsAhead: 0 },
+    });
+    expect(
+      readBoundStatus(
+        clips,
+        { premiereId: PREMIERE, bucket: 80 },
+        { includeProgress: true },
+      ),
+    ).toMatchObject({
+      state: "pending",
+      pending: { phase: "queued", jobsAhead: 1 },
+    });
+
+    await controlled.renders[1].complete();
+    await waitReady(clips, PREMIERE, 70);
+    await waitFor(() => controlled.renders.length === 3, "third render start");
+    expect(
+      readBoundStatus(
+        clips,
+        { premiereId: PREMIERE, bucket: 80 },
+        { includeProgress: true },
+      ),
+    ).toMatchObject({
+      state: "pending",
+      pending: { phase: "rendering", jobsAhead: 0 },
+    });
+
+    await controlled.renders[2].complete();
+    await waitReady(clips, PREMIERE, 80);
+    expect(
+      readBoundStatus(
+        clips,
+        { premiereId: PREMIERE, bucket: 80 },
+        { includeProgress: true },
+      ),
+    ).toMatchObject({
+      state: "ready",
+      pending: null,
+    });
     await clips.close();
   });
 

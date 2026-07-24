@@ -1,5 +1,9 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { mountAiLeagueReplayOverlay } from "../../src/client/AiLeagueReplayOverlay";
+import {
+  initialReplayClipRenderableThroughTurn,
+  replayClipPreviewTarget,
+} from "../../src/client/ReplayClipControl";
 
 describe("AiLeagueReplayOverlay", () => {
   beforeEach(() => {
@@ -13,6 +17,22 @@ describe("AiLeagueReplayOverlay", () => {
     });
     document.body.innerHTML = "";
     localStorage.clear();
+  });
+
+  it("accepts only a matching fresh-document Clip Preview target", () => {
+    expect(
+      replayClipPreviewTarget(
+        "?turn=605&renderFastForwardUntilTurn=605&clipPreview=1",
+      ),
+    ).toBe(605);
+    expect(
+      replayClipPreviewTarget(
+        "?turn=605&renderFastForwardUntilTurn=604&clipPreview=1",
+      ),
+    ).toBeNull();
+    expect(
+      replayClipPreviewTarget("?turn=605&renderFastForwardUntilTurn=605"),
+    ).toBeNull();
   });
 
   it("renders a read-only decision panel for the real ProxyWar replay route", () => {
@@ -800,13 +820,13 @@ describe("AiLeagueReplayOverlay", () => {
     function frame(turnNumber: number): void {
       document.dispatchEvent(
         new CustomEvent("ai-league-replay-frame", {
-          detail: { tick: turnNumber * 2, turnNumber, players: [] },
+          detail: { tick: turnNumber, turnNumber, players: [] },
         }),
       );
     }
 
-    it("locks the clip button until playback reaches a clippable turn", async () => {
-      const runID = "league-clip-lock-1";
+    it("offers the full one-second selector before playback reaches the moment", async () => {
+      const runID = "league-clip-selector-1";
       vi.stubGlobal(
         "fetch",
         vi.fn(async () => clipCapabilitiesResponse(true)),
@@ -816,6 +836,7 @@ describe("AiLeagueReplayOverlay", () => {
           runID,
           artifactBasePath: `/ai-league-runs/${runID}`,
           decisions: [],
+          replayMaxTurn: 1_000,
         });
         const section = document.querySelector("[data-ai-league-clip]");
         expect(section).not.toBeNull();
@@ -823,20 +844,356 @@ describe("AiLeagueReplayOverlay", () => {
         expect(section?.hasAttribute("hidden")).toBe(true);
         await vi.waitFor(() => {
           expect(section?.hasAttribute("hidden")).toBe(false);
-          expect(section?.textContent).toContain(
-            "ai_league_replay.clip_waiting_playback",
-          );
+          expect(
+            section?.querySelector("[data-ai-league-clip-render]"),
+          ).not.toBeNull();
         });
         expect(
-          section?.querySelector("[data-ai-league-clip-render]"),
-        ).toBeNull();
+          section?.querySelector<HTMLInputElement>(
+            "[data-ai-league-clip-moment]",
+          )?.max,
+        ).toBe("99");
+        expect(
+          section
+            ?.querySelector("[data-ai-league-clip-selected-turn]")
+            ?.getAttribute("data-ai-league-clip-selected-turn"),
+        ).toBe("55");
 
         frame(120);
-        const unlocked = document.querySelector("[data-ai-league-clip]");
         expect(
-          unlocked?.querySelector("[data-ai-league-clip-render]"),
-        ).not.toBeNull();
-        expect(unlocked?.textContent).toContain("ai_league_replay.clip_render");
+          document
+            .querySelector("[data-ai-league-clip-selected-turn]")
+            ?.getAttribute("data-ai-league-clip-selected-turn"),
+        ).toBe("125");
+      } finally {
+        vi.unstubAllGlobals();
+      }
+    });
+
+    it("keeps a manually selected bucket stable and previews it through pause plus an authoritative jump", async () => {
+      const runID = "league-clip-manual-1";
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(async () => clipCapabilitiesResponse(true)),
+      );
+      try {
+        mountAiLeagueReplayOverlay({
+          runID,
+          artifactBasePath: `/ai-league-runs/${runID}`,
+          decisions: [],
+          replayMaxTurn: 1_000,
+        });
+        frame(615);
+        await vi.waitFor(() => {
+          expect(
+            document.querySelector("[data-ai-league-clip-next-second]"),
+          ).not.toBeNull();
+        });
+
+        document
+          .querySelector<HTMLButtonElement>("[data-ai-league-clip-next-second]")
+          ?.click();
+        expect(
+          document
+            .querySelector("[data-ai-league-clip-selected-turn]")
+            ?.getAttribute("data-ai-league-clip-selected-turn"),
+        ).toBe("625");
+
+        frame(900);
+        expect(
+          document
+            .querySelector("[data-ai-league-clip-selected-turn]")
+            ?.getAttribute("data-ai-league-clip-selected-turn"),
+        ).toBe("625");
+
+        const pauses: boolean[] = [];
+        const jumps: number[] = [];
+        const navigations: Array<{ turnNumber: number; url: string }> = [];
+        const onJump = (event: Event) => {
+          jumps.push(
+            (event as CustomEvent<{ turnNumber: number }>).detail.turnNumber,
+          );
+        };
+        document.addEventListener(
+          "ai-league-replay-pause",
+          (event) => {
+            pauses.push(
+              (event as CustomEvent<{ paused: boolean }>).detail.paused,
+            );
+          },
+          { once: true },
+        );
+        document.addEventListener("ai-league-replay-jump-turn", onJump);
+        document.addEventListener(
+          "ai-league-replay-preview-navigation",
+          (event) => {
+            event.preventDefault();
+            navigations.push(
+              (event as CustomEvent<{ turnNumber: number; url: string }>)
+                .detail,
+            );
+          },
+          { once: true },
+        );
+        document
+          .querySelector<HTMLButtonElement>("[data-ai-league-clip-preview]")
+          ?.click();
+        document.removeEventListener("ai-league-replay-jump-turn", onJump);
+        expect(pauses).toEqual([true]);
+        // Preview never trusts an in-process jump: queued fastest-playback
+        // frames could otherwise overshoot even after pause was requested.
+        expect(jumps).toEqual([]);
+        expect(navigations[0]?.turnNumber).toBe(625);
+        expect(navigations[0]?.url).toContain("turn=625");
+        expect(navigations[0]?.url).toContain("renderFastForwardUntilTurn=625");
+        expect(navigations[0]?.url).toContain("clipPreview=1");
+
+        document
+          .querySelector<HTMLButtonElement>("[data-ai-league-clip-use-current]")
+          ?.click();
+        expect(
+          document
+            .querySelector("[data-ai-league-clip-selected-turn]")
+            ?.getAttribute("data-ai-league-clip-selected-turn"),
+        ).toBe("905");
+      } finally {
+        vi.unstubAllGlobals();
+      }
+    });
+
+    it.each([
+      { relation: "same", adjust: false, expectedTurn: 615 },
+      { relation: "forward", adjust: true, expectedTurn: 625 },
+    ])(
+      "restarts for a $relation-moment preview instead of risking queued-frame overshoot",
+      async ({ adjust, expectedTurn }) => {
+        const runID = `league-clip-preview-${expectedTurn}`;
+        vi.stubGlobal(
+          "fetch",
+          vi.fn(async () => clipCapabilitiesResponse(true)),
+        );
+        try {
+          mountAiLeagueReplayOverlay({
+            runID,
+            artifactBasePath: `/ai-league-runs/${runID}`,
+            decisions: [],
+            replayMaxTurn: 1_000,
+          });
+          frame(615);
+          await vi.waitFor(() => {
+            expect(
+              document.querySelector("[data-ai-league-clip-preview]"),
+            ).not.toBeNull();
+          });
+          if (adjust) {
+            document
+              .querySelector<HTMLButtonElement>(
+                "[data-ai-league-clip-next-second]",
+              )
+              ?.click();
+          }
+
+          const jumps: number[] = [];
+          const navigations: Array<{ turnNumber: number; url: string }> = [];
+          const onJump = (event: Event) => {
+            jumps.push(
+              (event as CustomEvent<{ turnNumber: number }>).detail.turnNumber,
+            );
+          };
+          document.addEventListener("ai-league-replay-jump-turn", onJump);
+          document.addEventListener(
+            "ai-league-replay-preview-navigation",
+            (event) => {
+              event.preventDefault();
+              navigations.push(
+                (event as CustomEvent<{ turnNumber: number; url: string }>)
+                  .detail,
+              );
+            },
+            { once: true },
+          );
+          document
+            .querySelector<HTMLButtonElement>("[data-ai-league-clip-preview]")
+            ?.click();
+          document.removeEventListener("ai-league-replay-jump-turn", onJump);
+
+          expect(jumps).toEqual([]);
+          expect(navigations[0]?.turnNumber).toBe(expectedTurn);
+          expect(navigations[0]?.url).toContain(`turn=${expectedTurn}`);
+          expect(navigations[0]?.url).toContain(
+            `renderFastForwardUntilTurn=${expectedTurn}`,
+          );
+          expect(navigations[0]?.url).toContain("clipPreview=1");
+        } finally {
+          vi.unstubAllGlobals();
+        }
+      },
+    );
+
+    it("caps a winner-bearing replay at the observed terminal instead of configured num_turns", async () => {
+      const runID = "league-clip-early-winner-1";
+      const replayMaxTurn = initialReplayClipRenderableThroughTurn({
+        num_turns: 1_000,
+        winner: ["player", "winner-id"],
+      });
+      expect(replayMaxTurn).toBeNull();
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(async () => clipCapabilitiesResponse(true)),
+      );
+      try {
+        mountAiLeagueReplayOverlay({
+          runID,
+          artifactBasePath: `/ai-league-runs/${runID}`,
+          decisions: [],
+          replayMaxTurn,
+        });
+        await vi.waitFor(() => {
+          expect(
+            document.querySelector("[data-ai-league-clip]")?.textContent,
+          ).toContain("ai_league_replay.clip_range_pending");
+        });
+
+        // With no authoritative terminal yet, expose only fully observed
+        // canonical centers, never the configured 1,000-turn upper bound.
+        document.dispatchEvent(
+          new CustomEvent("ai-league-replay-frame", {
+            detail: {
+              tick: 612,
+              terminal: false,
+              turnNumber: 900,
+              players: [],
+            },
+          }),
+        );
+        expect(
+          document.querySelector<HTMLInputElement>(
+            "[data-ai-league-clip-moment]",
+          )?.max,
+        ).toBe("60");
+
+        document.dispatchEvent(
+          new CustomEvent("ai-league-replay-frame", {
+            detail: {
+              tick: 612,
+              terminal: true,
+              turnNumber: 900,
+              players: [],
+            },
+          }),
+        );
+        expect(
+          document.querySelector<HTMLInputElement>(
+            "[data-ai-league-clip-moment]",
+          )?.max,
+        ).toBe("60");
+        expect(
+          document
+            .querySelector("[data-ai-league-clip-selected-turn]")
+            ?.getAttribute("data-ai-league-clip-selected-turn"),
+        ).toBe("605");
+
+        document.dispatchEvent(
+          new CustomEvent("ai-league-replay-frame", {
+            detail: {
+              tick: 900,
+              terminal: false,
+              turnNumber: 1_000,
+              players: [],
+            },
+          }),
+        );
+        expect(
+          document.querySelector<HTMLInputElement>(
+            "[data-ai-league-clip-moment]",
+          )?.max,
+        ).toBe("60");
+      } finally {
+        vi.unstubAllGlobals();
+      }
+    });
+
+    it.each([
+      { terminalTick: 54, expectedMax: null },
+      { terminalTick: 55, expectedMax: "5" },
+    ])(
+      "handles the canonical minimum boundary at terminal tick $terminalTick",
+      async ({ terminalTick, expectedMax }) => {
+        const runID = `league-clip-terminal-boundary-${terminalTick}`;
+        vi.stubGlobal(
+          "fetch",
+          vi.fn(async () => clipCapabilitiesResponse(true)),
+        );
+        try {
+          mountAiLeagueReplayOverlay({
+            runID,
+            artifactBasePath: `/ai-league-runs/${runID}`,
+            decisions: [],
+            replayMaxTurn: null,
+          });
+          await vi.waitFor(() => {
+            expect(
+              document.querySelector("[data-ai-league-clip]")?.textContent,
+            ).toContain("ai_league_replay.clip_range_pending");
+          });
+          document.dispatchEvent(
+            new CustomEvent("ai-league-replay-frame", {
+              detail: {
+                tick: terminalTick,
+                terminal: true,
+                turnNumber: 900,
+                players: [],
+              },
+            }),
+          );
+
+          const slider = document.querySelector<HTMLInputElement>(
+            "[data-ai-league-clip-moment]",
+          );
+          if (expectedMax === null) {
+            expect(slider).toBeNull();
+            expect(
+              document.querySelector("[data-ai-league-clip]")?.textContent,
+            ).toContain("ai_league_replay.clip_too_short");
+          } else {
+            expect(slider?.min).toBe("5");
+            expect(slider?.max).toBe(expectedMax);
+            expect(
+              document
+                .querySelector("[data-ai-league-clip-selected-turn]")
+                ?.getAttribute("data-ai-league-clip-selected-turn"),
+            ).toBe("55");
+          }
+        } finally {
+          vi.unstubAllGlobals();
+        }
+      },
+    );
+
+    it("exposes a capped no-winner record's declared range immediately", async () => {
+      const runID = "league-clip-no-winner-range-1";
+      const replayMaxTurn = initialReplayClipRenderableThroughTurn({
+        num_turns: 1_000,
+      });
+      expect(replayMaxTurn).toBe(1_000);
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(async () => clipCapabilitiesResponse(true)),
+      );
+      try {
+        mountAiLeagueReplayOverlay({
+          runID,
+          artifactBasePath: `/ai-league-runs/${runID}`,
+          decisions: [],
+          replayMaxTurn,
+        });
+        await vi.waitFor(() => {
+          expect(
+            document.querySelector<HTMLInputElement>(
+              "[data-ai-league-clip-moment]",
+            )?.max,
+          ).toBe("99");
+        });
       } finally {
         vi.unstubAllGlobals();
       }
@@ -863,6 +1220,7 @@ describe("AiLeagueReplayOverlay", () => {
             runID,
             artifactBasePath: `/ai-league-runs/${runID}`,
             decisions: [],
+            replayMaxTurn: 1_000,
           });
           frame(500);
           await vi.waitFor(() => {
@@ -886,9 +1244,35 @@ describe("AiLeagueReplayOverlay", () => {
       },
     );
 
-    it("requests a clip for the current moment and renders the Download MP4 link when ready", async () => {
+    it("fails closed when record metadata has no complete canonical Clip bucket", async () => {
+      const runID = "league-clip-too-short-1";
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(async () => clipCapabilitiesResponse(true)),
+      );
+      try {
+        mountAiLeagueReplayOverlay({
+          runID,
+          artifactBasePath: `/ai-league-runs/${runID}`,
+          decisions: [],
+          replayMaxTurn: 54,
+        });
+        await vi.waitFor(() => {
+          expect(
+            document.querySelector("[data-ai-league-clip]")?.textContent,
+          ).toContain("ai_league_replay.clip_too_short");
+        });
+        expect(
+          document.querySelector("[data-ai-league-clip-render]"),
+        ).toBeNull();
+      } finally {
+        vi.unstubAllGlobals();
+      }
+    });
+
+    it("posts the frozen selected moment, not the furthest frame, and renders the Download MP4 link", async () => {
       const runID = "league-clip-ready-1";
-      const clipUrl = `/ai-league-runs/${runID}/clip-v1-61.mp4`;
+      const clipUrl = `/ai-league-runs/${runID}/clip-v1-60.mp4`;
       const requests: Array<{ url: string; body: unknown }> = [];
       vi.stubGlobal(
         "fetch",
@@ -904,14 +1288,14 @@ describe("AiLeagueReplayOverlay", () => {
             JSON.stringify({
               schemaVersion: 1,
               premiereId: runID,
-              bucket: 61,
+              bucket: 60,
               clipVersion: 1,
               state: "ready",
               ready: {
                 clipUrl,
                 byteLength: 96,
                 sha256: "c".repeat(64),
-                anchorTurn: 615,
+                anchorTurn: 605,
                 social: { caption: "caption text", firstReply: "watch url" },
               },
             }),
@@ -924,6 +1308,7 @@ describe("AiLeagueReplayOverlay", () => {
           runID,
           artifactBasePath: `/ai-league-runs/${runID}`,
           decisions: [],
+          replayMaxTurn: 1_000,
         });
         frame(615);
         await vi.waitFor(() => {
@@ -931,6 +1316,12 @@ describe("AiLeagueReplayOverlay", () => {
             document.querySelector("[data-ai-league-clip-render]"),
           ).not.toBeNull();
         });
+        document
+          .querySelector<HTMLButtonElement>(
+            "[data-ai-league-clip-previous-second]",
+          )
+          ?.click();
+        frame(900);
         const render = document.querySelector<HTMLButtonElement>(
           "[data-ai-league-clip-render]",
         );
@@ -942,7 +1333,7 @@ describe("AiLeagueReplayOverlay", () => {
           ).not.toBeNull();
         });
         expect(requests[0].url).toBe(`/api/league-runs/${runID}/clips`);
-        expect(requests[0].body).toEqual({ turn: 615 });
+        expect(requests[0].body).toEqual({ turn: 605 });
         const download = document.querySelector<HTMLAnchorElement>(
           "[data-ai-league-clip-download]",
         );
@@ -956,6 +1347,85 @@ describe("AiLeagueReplayOverlay", () => {
           "ai_league_replay.clip_copy_caption",
         );
       } finally {
+        vi.unstubAllGlobals();
+      }
+    });
+
+    it("keeps polling truthful pending work beyond the old 390-second client cutoff", async () => {
+      const runID = "league-clip-pending-long-1";
+      const pendingResponse = (phase: "queued" | "rendering") =>
+        new Response(
+          JSON.stringify({
+            schemaVersion: 1,
+            premiereId: runID,
+            bucket: 61,
+            clipVersion: 1,
+            state: "pending",
+            ready: null,
+            pending: {
+              phase,
+              jobsAhead: phase === "queued" ? 2 : 0,
+            },
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        );
+      let statusReads = 0;
+      const statusUrls: string[] = [];
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(async (url: string) => {
+          if (String(url) === "/api/clip-capabilities") {
+            return clipCapabilitiesResponse(true);
+          }
+          if (String(url).endsWith("/clips/61?progress=1")) {
+            statusReads += 1;
+            statusUrls.push(String(url));
+            return pendingResponse("rendering");
+          }
+          return pendingResponse("queued");
+        }),
+      );
+      const handle = mountAiLeagueReplayOverlay({
+        runID,
+        artifactBasePath: `/ai-league-runs/${runID}`,
+        decisions: [],
+        replayMaxTurn: 1_000,
+      });
+      frame(615);
+      await vi.waitFor(() => {
+        expect(
+          document.querySelector("[data-ai-league-clip-render]"),
+        ).not.toBeNull();
+      });
+
+      const consoleError = vi
+        .spyOn(console, "error")
+        .mockImplementation(() => undefined);
+      vi.useFakeTimers();
+      try {
+        document
+          .querySelector<HTMLButtonElement>("[data-ai-league-clip-render]")
+          ?.click();
+        await vi.advanceTimersByTimeAsync(0);
+        expect(
+          document.querySelector("[data-ai-league-clip]")?.textContent,
+        ).toContain("ai_league_replay.clip_queued_ahead");
+
+        await vi.advanceTimersByTimeAsync(3_000 * 131);
+        expect(statusReads).toBeGreaterThanOrEqual(131);
+        expect(statusUrls[0]).toBe(
+          `/api/league-runs/${runID}/clips/61?progress=1`,
+        );
+        expect(
+          document.querySelector("[data-ai-league-clip]")?.textContent,
+        ).toContain("ai_league_replay.clip_rendering");
+        expect(
+          document.querySelector("[data-ai-league-clip]")?.textContent,
+        ).not.toContain("ai_league_replay.clip_failed");
+      } finally {
+        handle.dispose();
+        vi.useRealTimers();
+        consoleError.mockRestore();
         vi.unstubAllGlobals();
       }
     });
@@ -978,6 +1448,7 @@ describe("AiLeagueReplayOverlay", () => {
           runID,
           artifactBasePath: `/ai-league-runs/${runID}`,
           decisions: [],
+          replayMaxTurn: 1_000,
         });
         frame(200);
         await vi.waitFor(() => {

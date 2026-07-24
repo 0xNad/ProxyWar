@@ -1031,6 +1031,10 @@ if (aiLeagueRunClips !== null) {
         .readRunClipStatus({
           runKey: read.runKey,
           bucket: read.bucket,
+          // Explicit opt-in keeps the default schema-v1 body compatible with
+          // already-cached strict clients. Repeated/ambiguous values fail
+          // closed to the legacy response shape.
+          includeProgress: req.query.progress === "1",
         })
         .then((status) => {
           if (status.state === "absent") {

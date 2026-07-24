@@ -266,6 +266,8 @@ export class AiLeagueRunClips {
   async readRunClipStatus(request: {
     runKey: string;
     bucket: number;
+    /** Opt-in exact FIFO progress; omitted preserves legacy schema-v1 JSON. */
+    includeProgress?: boolean;
   }): Promise<PremiereClipStatusResponse> {
     const runKey = this.validateRunKey(request.runKey);
     this.requireCanaryActionScope(runKey, request.bucket);
@@ -275,11 +277,14 @@ export class AiLeagueRunClips {
       request.bucket,
       source.sourceReplaySha256,
     );
-    return this.clips.readStatus({
-      premiereId: runKey,
-      bucket: request.bucket,
-      sourceReplaySha256: source.sourceReplaySha256,
-    });
+    return this.clips.readStatus(
+      {
+        premiereId: runKey,
+        bucket: request.bucket,
+        sourceReplaySha256: source.sourceReplaySha256,
+      },
+      { includeProgress: request.includeProgress === true },
+    );
   }
 
   /** On-disk cached mp4 for the document route, or null (=> 404). */

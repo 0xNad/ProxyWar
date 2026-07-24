@@ -7,6 +7,7 @@ import {
   canonicalReplayPremiereJson,
   hashCanonicalJson,
   PREMIERE_PRESENTATION_TRAIL_MS,
+  premiereClipStatusResponseSchema,
   REPLAY_PREMIERE_REVEAL_FETCH_CONCURRENCY,
   ReplayPremiereNetworkController,
   ReplayPremiereNetworkError,
@@ -50,6 +51,32 @@ const STARTED_AT = "2026-07-20T18:00:10.000Z";
 const SERVER_NOW = "2026-07-20T18:00:20.000Z";
 const RELEASED_AT = "2026-07-20T18:00:12.000Z";
 let fixtureRoot: string;
+
+describe("premiereClipStatusResponseSchema", () => {
+  it("accepts truthful pending progress while preserving old responses", () => {
+    const base = {
+      schemaVersion: 1,
+      premiereId: PREMIERE_ID,
+      bucket: 61,
+      clipVersion: 1,
+      state: "pending",
+      ready: null,
+    } as const;
+    expect(premiereClipStatusResponseSchema.safeParse(base).success).toBe(true);
+    expect(
+      premiereClipStatusResponseSchema.safeParse({
+        ...base,
+        pending: { phase: "queued", jobsAhead: 2 },
+      }).success,
+    ).toBe(true);
+    expect(
+      premiereClipStatusResponseSchema.safeParse({
+        ...base,
+        pending: { phase: "estimating", jobsAhead: -1 },
+      }).success,
+    ).toBe(false);
+  });
+});
 
 beforeEach(async () => {
   fixtureRoot = await fs.mkdtemp(

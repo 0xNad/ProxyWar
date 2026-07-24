@@ -341,6 +341,18 @@ export interface PremiereClipReady {
   social: PremiereClipSocialText;
 }
 
+export type PremiereClipPendingPhase = "queued" | "rendering";
+
+/**
+ * Truthful progress for an admitted render. `jobsAhead` is the exact number
+ * of running/queued jobs ahead of this source-bound cache key at response
+ * time; it is not an estimated completion percentage.
+ */
+export interface PremiereClipPending {
+  phase: PremiereClipPendingPhase;
+  jobsAhead: number;
+}
+
 export interface PremiereClipStatusResponse {
   schemaVersion: 1;
   premiereId: PremiereId;
@@ -348,6 +360,12 @@ export interface PremiereClipStatusResponse {
   clipVersion: PremiereClipVersion;
   state: PremiereClipState;
   ready: PremiereClipReady | null;
+  /**
+   * Opt-in progress extension. Omitted from legacy schema-v1 responses so an
+   * older strict client does not reject an otherwise compatible status body.
+   * When requested, it is non-null only while `state === "pending"`.
+   */
+  pending?: PremiereClipPending | null;
 }
 
 /**

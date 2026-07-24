@@ -46,6 +46,7 @@ import {
   premiereClipBucketForTurn,
   premiereClipRepresentativeAnchorTurn,
   type PremiereClipJobSpec,
+  type PremiereClipPending,
   type PremiereClipReady,
   type PremiereClipRenderManifest,
   type PremiereClipSocialText,
@@ -129,6 +130,11 @@ export interface ReplayPremiereClipReadRequest {
   bucket: number;
   /** Exact immutable source identity expected for this replay id. */
   sourceReplaySha256: string;
+}
+
+export interface ReplayPremiereClipStatusReadOptions {
+  /** Add exact queue progress; false/omitted preserves the legacy v1 shape. */
+  includeProgress?: boolean;
 }
 
 export interface ReplayPremiereClipFile {
@@ -479,6 +485,7 @@ export class ReplayPremiereClips {
   /** Public status for a bucket, bound to the caller's immutable source. */
   readStatus(
     request: ReplayPremiereClipReadRequest,
+    options: ReplayPremiereClipStatusReadOptions = {},
   ): PremiereClipStatusResponse {
     const base: PremiereClipStatusResponse = {
       schemaVersion: 1,
@@ -488,7 +495,9 @@ export class ReplayPremiereClips {
       state: "absent",
       ready: null,
     };
-    if (!isPremiereClipBucket(request.bucket)) return base;
+    const responseBase: PremiereClipStatusResponse =
+      options.includeProgress === true ? { ...base, pending: null } : base;
+    if (!isPremiereClipBucket(request.bucket)) return responseBase;
     const key = cacheKey(request.premiereId, request.bucket);
     const entry = this.ready.get(key);
     if (
@@ -497,20 +506,27 @@ export class ReplayPremiereClips {
         normalizeSourceSha256(request.sourceReplaySha256)
     ) {
       entry.lastAccessMs = this.now();
-      return { ...base, state: "ready", ready: this.toReady(entry) };
+      return {
+        ...responseBase,
+        state: "ready",
+        ready: this.toReady(entry),
+      };
     }
-    if (
-      this.pending.has(
-        renderKey(
-          request.premiereId,
-          request.bucket,
-          request.sourceReplaySha256,
-        ),
-      )
-    ) {
-      return { ...base, state: "pending" };
+    const pendingKey = renderKey(
+      request.premiereId,
+      request.bucket,
+      request.sourceReplaySha256,
+    );
+    if (this.pending.has(pendingKey)) {
+      if (options.includeProgress !== true) {
+        return { ...responseBase, state: "pending" };
+      }
+      const pending = this.pendingProgressForKey(pendingKey);
+      if (pending !== null) {
+        return { ...responseBase, state: "pending", pending };
+      }
     }
-    return base;
+    return responseBase;
   }
 
   /**
@@ -1168,6 +1184,23 @@ export class ReplayPremiereClips {
       clipVersion: PREMIERE_CLIP_VERSION,
       state,
       ready: entry === null ? null : this.toReady(entry),
+    };
+  }
+
+  /**
+   * Derive public progress from the exact source-bound render key and current
+   * FIFO state. A stale/mismatched pending key fails closed as null instead of
+   * leaking or inventing another source's position.
+   */
+  private pendingProgressForKey(key: string): PremiereClipPending | null {
+    if (this.runningJob?.key === key) {
+      return { phase: "rendering", jobsAhead: 0 };
+    }
+    const queueIndex = this.queue.findIndex((job) => job.key === key);
+    if (queueIndex < 0) return null;
+    return {
+      phase: "queued",
+      jobsAhead: queueIndex + (this.runningJob === null ? 0 : 1),
     };
   }
 

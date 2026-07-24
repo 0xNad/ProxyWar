@@ -496,16 +496,38 @@ describe("league update HTTP contract", () => {
     const exactStatusPath = `/api/league-runs/${canaryRunKey}/clips/${canaryBucket}`;
     const exactFilePath = `/ai-league-runs/${canaryRunKey}/clip-v1-${canaryBucket}.mp4`;
     const exactStatus = await rawRequest(origin, exactStatusPath);
+    const progressStatus = await rawRequest(
+      origin,
+      `${exactStatusPath}?progress=1`,
+    );
+    const ambiguousProgressStatus = await rawRequest(
+      origin,
+      `${exactStatusPath}?progress=1&progress=0`,
+    );
     const exactFile = await rawRequest(origin, exactFilePath);
 
     expect(exactStatus.status).toBe(200);
-    expect(JSON.parse(exactStatus.body.toString())).toMatchObject({
+    const legacyStatusBody = JSON.parse(exactStatus.body.toString()) as Record<
+      string,
+      unknown
+    >;
+    expect(legacyStatusBody).toMatchObject({
       state: "ready",
       bucket: canaryBucket,
       ready: {
         clipUrl: exactFilePath,
       },
     });
+    expect(legacyStatusBody).not.toHaveProperty("pending");
+    expect(progressStatus.status).toBe(200);
+    expect(JSON.parse(progressStatus.body.toString())).toMatchObject({
+      state: "ready",
+      bucket: canaryBucket,
+      pending: null,
+    });
+    expect(
+      JSON.parse(ambiguousProgressStatus.body.toString()),
+    ).not.toHaveProperty("pending");
     expect(exactFile.status).toBe(200);
     expect(exactFile.body).toEqual(canaryClipBytes);
 

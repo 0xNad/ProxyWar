@@ -881,4 +881,76 @@ describe("LocalServer progressive replay", () => {
     });
     server.endGame();
   });
+
+  it.each([55, 605])(
+    "pre-stages Clip Preview turn %i before pacing and holds the exact anchor until unpause",
+    (target) => {
+      const config = lobbyConfig();
+      config.gameRecord = {
+        info: { num_turns: 700 },
+        turns: Array.from({ length: 700 }, (_, turnNumber) => ({
+          turnNumber,
+          intents: [],
+        })),
+      } as unknown as GameRecord;
+      config.replayClipPreviewTarget = target;
+
+      const { server, messages, tickAt } =
+        startServerWithManualPacingTimer(config);
+      const initialStart = messages.find((message) => message.type === "start");
+      if (initialStart?.type !== "start") {
+        throw new Error("missing initial replay start message");
+      }
+      expect(initialStart.turns).toHaveLength(target);
+      expect(initialStart.turns.at(-1)?.turnNumber).toBe(target - 1);
+
+      // Even a massively overdue pacing callback cannot queue the next turn:
+      // Preview was paused before this interval existed.
+      tickAt(100_000);
+      expect(turnMessages(messages)).toHaveLength(0);
+
+      server.onMessage({
+        type: "rejoin",
+        gameID: "PREM0001",
+        lastTurn: 0,
+        token: "00000000-0000-4000-8000-000000000000",
+      });
+      const rejoinStart = messages.at(-1);
+      if (rejoinStart?.type !== "start") {
+        throw new Error("missing replay rejoin start message");
+      }
+      expect(rejoinStart.turns).toHaveLength(target);
+      expect(rejoinStart.turns.at(-1)?.turnNumber).toBe(target - 1);
+
+      tickAt(200_000);
+      expect(turnMessages(messages)).toHaveLength(0);
+
+      // Explicit playback is the only operation allowed to move beyond the
+      // selected visible tick. Record turn `target` produces tick target + 1.
+      server.onMessage({
+        type: "intent",
+        intent: { type: "toggle_pause", paused: false },
+      });
+      expect(turnMessages(messages).map((turn) => turn.turnNumber)).toEqual([
+        target,
+      ]);
+      server.endGame();
+    },
+  );
+
+  it("rejects Clip Preview targets outside the retained plain replay", () => {
+    const config = lobbyConfig();
+    config.gameRecord = {
+      info: { num_turns: 54 },
+      turns: [],
+    } as unknown as GameRecord;
+    config.replayClipPreviewTarget = 55;
+    const server = new LocalServer(config, true, new EventBus());
+    server.updateCallback(
+      () => {},
+      () => {},
+    );
+
+    expect(() => server.start()).toThrow("invalid replay clip preview target");
+  });
 });

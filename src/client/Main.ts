@@ -52,6 +52,10 @@ import { initNavigation } from "./Navigation";
 import "./NewsModal";
 import "./PatternInput";
 import {
+  initialReplayClipRenderableThroughTurn,
+  replayClipPreviewTarget,
+} from "./ReplayClipControl";
+import {
   finishReplayLoadingScreen,
   holdReplayLoadingScreenUntilFirstFrame,
   REPLAY_LOADING_SLOW_TIMEOUT_MS,
@@ -273,6 +277,9 @@ export interface JoinLobbyEvent {
   gameRecord?: GameRecord;
   // A Premiere receives only released, hash-verified turns.
   progressiveReplay?: ReplayPremiereProgressiveReplayConfig;
+  // Validated fresh-document Clip Preview target for a plain archived replay.
+  // LocalServer consumes this before replay pacing begins.
+  replayClipPreviewTarget?: number;
   aiLeagueRunID?: string;
   premiereId?: string;
   source?:
@@ -1168,6 +1175,7 @@ class Client {
         summary: null,
         spectatorTelemetry: null,
         artifactBasePath,
+        replayMaxTurn: initialReplayClipRenderableThroughTurn(parsed.data.info),
         detailsLoading: true,
         artifactAvailability: {
           visualReport: false,
@@ -1209,10 +1217,14 @@ class Client {
       document.removeEventListener("ai-league-replay-pause", onReplayPause);
     });
 
-    const requestedTurn = Number(
-      new URLSearchParams(window.location.search).get("turn"),
-    );
-    if (Number.isFinite(requestedTurn) && requestedTurn > 0) {
+    const replaySearchParams = new URLSearchParams(window.location.search);
+    const requestedTurn = Number(replaySearchParams.get("turn"));
+    const previewTarget = replayClipPreviewTarget(window.location.search);
+    if (
+      previewTarget === null &&
+      Number.isFinite(requestedTurn) &&
+      requestedTurn > 0
+    ) {
       const jumpAfterFirstFrame = () => {
         this.eventBus.emit(new ReplayJumpToTurnEvent(requestedTurn));
         document.removeEventListener(
@@ -1301,6 +1313,7 @@ class Client {
           source: options.source ?? "ai-league-replay",
           aiLeagueRunID: runID,
           coworldReplayPath: options.coworldReplayPath,
+          replayClipPreviewTarget: previewTarget ?? undefined,
         } satisfies JoinLobbyEvent,
         bubbles: true,
         composed: true,
@@ -1403,6 +1416,14 @@ class Client {
     }
     const auth = await userAuth();
     const playerRole = auth !== false ? (auth.claims.role ?? null) : null;
+    const clipPreviewTarget =
+      lobby.gameRecord !== undefined &&
+      lobby.progressiveReplay === undefined &&
+      lobby.aiLeagueRunID !== undefined &&
+      Number.isSafeInteger(lobby.replayClipPreviewTarget) &&
+      (lobby.replayClipPreviewTarget ?? 0) > 0
+        ? lobby.replayClipPreviewTarget!
+        : null;
     const newLobbyHandle = joinLobby(this.eventBus, {
       gameID: lobby.gameID,
       serverConfig: config,
@@ -1414,6 +1435,7 @@ class Client {
       gameStartInfo: lobby.gameStartInfo ?? lobby.gameRecord?.info,
       gameRecord: lobby.gameRecord,
       progressiveReplay: lobby.progressiveReplay,
+      replayClipPreviewTarget: clipPreviewTarget ?? undefined,
     });
 
     if (this.mostRecentJoinEvent !== event.timeStamp) {
@@ -1536,7 +1558,7 @@ class Client {
         };
         if (runtimeWindow.__openFrontPromoCaptureLock === true) {
           this.eventBus.emit(new PauseGameIntentEvent(true));
-        } else {
+        } else if (clipPreviewTarget === null) {
           this.eventBus.emit(
             new ReplaySpeedChangeEvent(ReplaySpeedMultiplier.fastest),
           );

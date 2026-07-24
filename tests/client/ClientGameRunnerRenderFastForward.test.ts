@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ClientGameRunner } from "../../src/client/ClientGameRunner";
+import { TogglePauseIntentEvent } from "../../src/client/InputHandler";
 import { REPLAY_RENDER_FAST_FORWARD_PARAM } from "../../src/client/ReplayRenderFastForward";
 import { ReplayPresentationCadenceEvent } from "../../src/client/graphics/ReplayPresentationSmoothing";
 import type { GameUpdates } from "../../src/core/game/Game";
@@ -233,4 +234,55 @@ describe("ClientGameRunner render fast-forward gating", () => {
     expect(harness.renderer.tick).toHaveBeenCalledTimes(2);
     expect(frameDetails[0]).toMatchObject({ tick: 1, terminal: false });
   });
+
+  it.each([55, 605])(
+    "uses the carried Clip Preview target %i after the replay query has been rewritten",
+    (target) => {
+      // Main deliberately rewrites the address after joining. The validated
+      // LobbyConfig target must remain authoritative when no query survives.
+      history.replaceState(null, "", "/ai-league-replay/league-preview");
+      const frameDetails: Array<Record<string, unknown>> = [];
+      const onFrame = (event: Event) => {
+        frameDetails.push(
+          (event as CustomEvent<Record<string, unknown>>).detail,
+        );
+      };
+      document.addEventListener("ai-league-replay-frame", onFrame);
+      try {
+        const harness = mountRunner({
+          gameID: "PREVIEW1",
+          gameStartInfo: { gameID: "PREVIEW1" },
+          gameRecord: {},
+          replayClipPreviewTarget: target,
+        });
+        expect(
+          harness.eventBus.emit.mock.calls.filter(
+            ([event]) => event instanceof TogglePauseIntentEvent,
+          ),
+        ).toHaveLength(1);
+
+        for (let tick = 1; tick <= target; tick += 1) {
+          harness.updateCallback(gameUpdate(tick) as never);
+        }
+
+        expect(harness.transport.turnComplete).toHaveBeenCalledTimes(target);
+        expect(frameDetails.at(-1)).toMatchObject({
+          tick: target,
+          terminal: false,
+        });
+        expect(frameDetails.some((detail) => detail.tick === target + 1)).toBe(
+          false,
+        );
+        expect(
+          (harness.gameView.update.mock.calls.at(-1)?.[0] as { tick: number })
+            .tick,
+        ).toBe(target);
+        if (target > 240) {
+          expect(harness.renderer.tick.mock.calls.length).toBeLessThan(target);
+        }
+      } finally {
+        document.removeEventListener("ai-league-replay-frame", onFrame);
+      }
+    },
+  );
 });

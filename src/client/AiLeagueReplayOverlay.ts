@@ -7,6 +7,7 @@ import {
   mountReplayScopedLeagueClipControl,
   type ReplayScopedLeagueClipControlHandle,
 } from "./ReplayClipControl";
+import { REPLAY_RENDER_FAST_FORWARD_PARAM } from "./ReplayRenderFastForward";
 import { ReplaySpeedMultiplier } from "./utilities/ReplaySpeedMultiplier";
 import { translateText } from "./Utils";
 
@@ -140,6 +141,8 @@ interface AiLeagueReplayOverlayInput {
   summary?: AiLeagueReplaySummary | null;
   spectatorTelemetry?: unknown;
   artifactBasePath: string;
+  /** Canonical record range, used to expose every valid Clip v1 bucket. */
+  replayMaxTurn?: number | null;
   artifactAvailability?: AiLeagueReplayArtifactAvailability;
   detailsLoading?: boolean;
   onReplaySpeedChange?: (speed: ReplaySpeedMultiplier) => void;
@@ -274,6 +277,7 @@ function mountReplayDetailsBindings(
     : mountReplayScopedLeagueClipControl({
         container: clipContainer,
         runKey: input.runID,
+        renderableThroughTurn: input.replayMaxTurn,
       });
 }
 
@@ -506,6 +510,44 @@ function mountReplayJumpControls(root: Document) {
     }
   };
   const onClick = (event: Event) => {
+    const preview = (event.target as HTMLElement | null)?.closest<HTMLElement>(
+      "[data-ai-league-preview-turn]",
+    );
+    if (preview !== null && preview !== undefined) {
+      const turnNumber = Number(preview.dataset.aiLeaguePreviewTurn);
+      if (!Number.isSafeInteger(turnNumber) || turnNumber < 0) {
+        return;
+      }
+      document.dispatchEvent(
+        new CustomEvent("ai-league-replay-pause", {
+          detail: { paused: true },
+          bubbles: true,
+        }),
+      );
+      // Preview always starts a fresh replay document. Even a same/forward
+      // in-process jump can overshoot while fastest-playback frames already
+      // queued ahead of the pause are draining. The render fast-forward lane
+      // coalesces the restart, and Main pauses before the exact target jump.
+      const url = new URL(window.location.href);
+      url.searchParams.set("replay", "");
+      url.searchParams.set("turn", String(turnNumber));
+      url.searchParams.set(
+        REPLAY_RENDER_FAST_FORWARD_PARAM,
+        String(turnNumber),
+      );
+      url.searchParams.set("clipPreview", "1");
+      const navigation = new CustomEvent(
+        "ai-league-replay-preview-navigation",
+        {
+          detail: { turnNumber, url: url.toString() },
+          cancelable: true,
+        },
+      );
+      if (root.dispatchEvent(navigation)) {
+        window.location.href = url.toString();
+      }
+      return;
+    }
     const button = (event.target as HTMLElement | null)?.closest<HTMLElement>(
       "[data-ai-league-jump-turn]",
     );
@@ -1006,6 +1048,46 @@ function overlayHtml(input: AiLeagueReplayOverlayInput): string {
         color: #215a9c;
         font-size: 12px;
         font-weight: 800;
+      }
+      .ai-league-clip {
+        display: grid;
+        gap: 7px;
+        margin: 12px 0;
+      }
+      .ai-league-clip-selector {
+        display: grid;
+        gap: 7px;
+        min-width: 0;
+        margin: 0;
+        padding: 8px;
+        border: 1px solid rgba(15, 23, 42, 0.12);
+        border-radius: 8px;
+        background: #f8fafc;
+      }
+      .ai-league-clip-selector legend {
+        padding: 0 4px;
+        color: #334155;
+        font-size: 12px;
+        font-weight: 900;
+      }
+      .ai-league-clip-selected {
+        color: #17202a;
+        font-size: 13px;
+        font-variant-numeric: tabular-nums;
+        font-weight: 900;
+      }
+      .ai-league-clip-selector input[type="range"] {
+        width: 100%;
+        margin: 0;
+      }
+      .ai-league-clip-moment-actions {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 5px;
+      }
+      .ai-league-clip-moment-actions button:disabled {
+        cursor: default;
+        opacity: 0.45;
       }
       .ai-league-badge.ok {
         background: #e5f8ef;

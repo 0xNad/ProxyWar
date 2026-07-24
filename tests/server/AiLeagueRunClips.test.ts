@@ -356,7 +356,16 @@ describe("AiLeagueRunClips", () => {
       anchorTurn: 605,
     });
     expect(first.state).toBe("pending");
+    expect(first).not.toHaveProperty("pending");
     const ready = await waitReady(clips, RUN_KEY, 60);
+    expect(ready).not.toHaveProperty("pending");
+    await expect(
+      clips.readRunClipStatus({
+        runKey: RUN_KEY,
+        bucket: 60,
+        includeProgress: true,
+      }),
+    ).resolves.toMatchObject({ state: "ready", pending: null });
     expect(ready.ready?.clipUrl).toBe(
       `/ai-league-runs/${RUN_KEY}/clip-v1-60.mp4`,
     );
