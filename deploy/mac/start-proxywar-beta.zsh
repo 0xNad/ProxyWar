@@ -22,12 +22,17 @@ CLIPS_FORCE_DISABLED="${PROXYWAR_CLIPS_FORCE_DISABLED:-false}"
 CLIPS_EXPECTED_COMMIT="${PROXYWAR_CLIPS_EXPECTED_COMMIT:-}"
 CLIPS_EXPECTED_TREE="${PROXYWAR_CLIPS_EXPECTED_TREE:-}"
 CLIPS_EXPECTED_BUILD_SHA256="${PROXYWAR_CLIPS_EXPECTED_BUILD_SHA256:-}"
-# Resolve Git against launchd's reviewed environment before the private env is
-# sourced. That file may replace PATH for the server process; Clip identity
-# verification must keep using the absolute executable and helper search path
-# that launchd supplied rather than re-resolving a bare `git` afterward.
-CLIPS_GIT_BIN="$(command -v git || true)"
-CLIPS_GIT_PATH="$PATH"
+CLIPS_EXPECTED_ATTESTATION_NONCE="${PROXYWAR_CLIPS_EXPECTED_ATTESTATION_NONCE:-}"
+# launchd cannot traverse a release checkout under Documents with Git because
+# macOS privacy policy applies to the noninteractive zsh/git processes. The
+# reviewed wrapper instead binds an installed helper outside Documents. That
+# helper verifies an owner-only deployment attestation and every attested file
+# with Node, the same executable class that runs the server.
+CLIPS_WRAPPER_PATH="${0:A}"
+CLIPS_WRAPPER_DIR="${CLIPS_WRAPPER_PATH:h}"
+CLIPS_TRUSTED_ROOT="${CLIPS_WRAPPER_DIR:h}"
+CLIPS_DEPLOYMENT_ATTESTATION_HELPER="$CLIPS_WRAPPER_DIR/proxywar-clips-deployment-attestation.mjs"
+CLIPS_DEPLOYMENT_ATTESTATION_HELPER_SHA256="c2604a2a5904b8e974e669cc62f1f51a9c28b935896aab88deb2fabcd13e468a"
 
 if [[ ! -d "$PROJECT_DIR" ]]; then
   echo "ProxyWar project directory not found: $PROJECT_DIR" >&2
@@ -45,10 +50,11 @@ source "$ENV_FILE"
 set +a
 
 if [[ -n "${PROXYWAR_REPLAY_PREMIERE_STATE_ROOT:-}" ]]; then
-  CLIPS_RELEASE_STATE_FILE="$PROXYWAR_REPLAY_PREMIERE_STATE_ROOT/clip-release-v1.json"
+  CLIPS_STATE_ROOT="$PROXYWAR_REPLAY_PREMIERE_STATE_ROOT"
 else
-  CLIPS_RELEASE_STATE_FILE="$HOME/Library/Application Support/ProxyWar/storage/replay-premiere/clip-release-v1.json"
+  CLIPS_STATE_ROOT="$HOME/Library/Application Support/ProxyWar/storage/replay-premiere"
 fi
+CLIPS_RELEASE_STATE_FILE="$CLIPS_STATE_ROOT/clip-release-v1.json"
 NODE_BIN="${PROXYWAR_NODE_BIN:-$(command -v node || true)}"
 if [[ -z "$NODE_BIN" || "$NODE_BIN" != /* || ! -x "$NODE_BIN" ]]; then
   echo "ProxyWar beta Node executable is unavailable or not absolute: $NODE_BIN" >&2
@@ -63,7 +69,7 @@ if [[ "$CLIPS_FORCE_DISABLED" != "true" && "$CLIPS_RELEASE_OVERRIDE" != "true" &
   if [[ "$CLIPS_RELEASE_STATE_STATUS" == "disabled" ]]; then
     CLIPS_DURABLY_DISABLED=true
   elif [[ "$CLIPS_RELEASE_STATE_STATUS" == enabled\ * ]]; then
-    read -r CLIPS_RELEASE_STATE_KIND CLIPS_EXPECTED_COMMIT CLIPS_EXPECTED_TREE CLIPS_EXPECTED_BUILD_SHA256 CLIPS_RELEASE_STATE_EXTRA <<< "$CLIPS_RELEASE_STATE_STATUS"
+    read -r CLIPS_RELEASE_STATE_KIND CLIPS_EXPECTED_COMMIT CLIPS_EXPECTED_TREE CLIPS_EXPECTED_BUILD_SHA256 CLIPS_EXPECTED_ATTESTATION_NONCE CLIPS_RELEASE_STATE_EXTRA <<< "$CLIPS_RELEASE_STATE_STATUS"
     if [[ "$CLIPS_RELEASE_STATE_KIND" != "enabled" || -n "$CLIPS_RELEASE_STATE_EXTRA" ]]; then
       echo "Clip durable release state is malformed; Clips disabled" >&2
       CLIPS_CONFIGURATION_BLOCKED=true
@@ -81,25 +87,42 @@ if [[ "$CLIPS_FORCE_DISABLED" != "true" && "$ARCHIVED_CLIP_CANARY_MASTER_OVERRID
   CLIPS_CONFIGURATION_BLOCKED=true
 fi
 if [[ "$CLIPS_FORCE_DISABLED" != "true" && ("$CLIPS_RELEASE_OVERRIDE" == "true" || "$ARCHIVED_CLIP_CANARY_MASTER_OVERRIDE" == "true") && "$CLIPS_CONFIGURATION_BLOCKED" != "true" ]]; then
-  if [[ ${#CLIPS_EXPECTED_COMMIT} -ne 40 || "$CLIPS_EXPECTED_COMMIT" == *[^a-f0-9]* || ${#CLIPS_EXPECTED_TREE} -ne 40 || "$CLIPS_EXPECTED_TREE" == *[^a-f0-9]* || ${#CLIPS_EXPECTED_BUILD_SHA256} -ne 64 || "$CLIPS_EXPECTED_BUILD_SHA256" == *[^a-f0-9]* ]]; then
-    echo "Clip activation requires exact commit, tree, and build bindings; Clips disabled" >&2
+  if [[ ${#CLIPS_EXPECTED_COMMIT} -ne 40 || "$CLIPS_EXPECTED_COMMIT" == *[^a-f0-9]* || ${#CLIPS_EXPECTED_TREE} -ne 40 || "$CLIPS_EXPECTED_TREE" == *[^a-f0-9]* || ${#CLIPS_EXPECTED_BUILD_SHA256} -ne 64 || "$CLIPS_EXPECTED_BUILD_SHA256" == *[^a-f0-9]* || ${#CLIPS_EXPECTED_ATTESTATION_NONCE} -ne 64 || "$CLIPS_EXPECTED_ATTESTATION_NONCE" == *[^a-f0-9]* ]]; then
+    echo "Clip activation requires exact commit, tree, build, and attestation bindings; Clips disabled" >&2
     CLIPS_CONFIGURATION_BLOCKED=true
   fi
   if [[ "$CLIPS_CONFIGURATION_BLOCKED" != "true" ]]; then
-    CURRENT_RELEASE_COMMIT=""
-    CURRENT_RELEASE_TREE=""
-    CURRENT_RELEASE_STATUS=""
-    CURRENT_RELEASE_BUILD_SHA256=""
-    if [[ -z "$CLIPS_GIT_BIN" || "$CLIPS_GIT_BIN" != /* || ! -x "$CLIPS_GIT_BIN" ]] \
-      || ! CURRENT_RELEASE_COMMIT="$(PATH="$CLIPS_GIT_PATH" "$CLIPS_GIT_BIN" -C "$PROJECT_DIR" rev-parse HEAD 2> /dev/null)" \
-      || ! CURRENT_RELEASE_TREE="$(PATH="$CLIPS_GIT_PATH" "$CLIPS_GIT_BIN" -C "$PROJECT_DIR" rev-parse 'HEAD^{tree}' 2> /dev/null)" \
-      || ! CURRENT_RELEASE_STATUS="$(PATH="$CLIPS_GIT_PATH" "$CLIPS_GIT_BIN" -C "$PROJECT_DIR" status --porcelain --untracked-files=all 2> /dev/null)" \
-      || ! CURRENT_RELEASE_BUILD_SHA256="$("$NODE_BIN" "$PROJECT_DIR/deploy/mac/proxywar-clips-release-state.mjs" build-hash --path="$PROJECT_DIR/static" 2> /dev/null)"; then
-      echo "Clip activation could not verify the deployed commit, tree, status, and build; Clips disabled" >&2
+    CLIPS_DEPLOYMENT_ATTESTATION_HELPER_HASH_OUTPUT="$(/usr/bin/shasum -a 256 "$CLIPS_DEPLOYMENT_ATTESTATION_HELPER" 2> /dev/null || true)"
+    CLIPS_DEPLOYMENT_ATTESTATION_HELPER_CURRENT_SHA256="${CLIPS_DEPLOYMENT_ATTESTATION_HELPER_HASH_OUTPUT%% *}"
+    if [[ "$CLIPS_DEPLOYMENT_ATTESTATION_HELPER_CURRENT_SHA256" != "$CLIPS_DEPLOYMENT_ATTESTATION_HELPER_SHA256" ]]; then
+      echo "Clip deployment attestation helper verification failed; Clips disabled" >&2
       CLIPS_CONFIGURATION_BLOCKED=true
-    elif [[ "$CURRENT_RELEASE_COMMIT" != "$CLIPS_EXPECTED_COMMIT" || "$CURRENT_RELEASE_TREE" != "$CLIPS_EXPECTED_TREE" || -n "$CURRENT_RELEASE_STATUS" || "$CURRENT_RELEASE_BUILD_SHA256" != "$CLIPS_EXPECTED_BUILD_SHA256" ]]; then
-      echo "Clip activation does not match the clean deployed commit, tree, and build; Clips disabled" >&2
-      CLIPS_CONFIGURATION_BLOCKED=true
+    else
+      CLIPS_DEPLOYMENT_ATTESTATION_STATUS="$("$NODE_BIN" "$CLIPS_DEPLOYMENT_ATTESTATION_HELPER" verify \
+        --state-root="$CLIPS_STATE_ROOT" \
+        --trusted-root="$CLIPS_TRUSTED_ROOT" \
+        --project-dir="$PROJECT_DIR" \
+        --wrapper-path="$CLIPS_WRAPPER_PATH" \
+        --helper-path="$CLIPS_DEPLOYMENT_ATTESTATION_HELPER" \
+        --expected-nonce="$CLIPS_EXPECTED_ATTESTATION_NONCE" \
+        --expected-commit="$CLIPS_EXPECTED_COMMIT" \
+        --expected-tree="$CLIPS_EXPECTED_TREE" \
+        --expected-build-sha256="$CLIPS_EXPECTED_BUILD_SHA256" \
+        2> /dev/null || true)"
+      if [[ "$CLIPS_DEPLOYMENT_ATTESTATION_STATUS" != "verified" ]]; then
+        case "$CLIPS_DEPLOYMENT_ATTESTATION_STATUS" in
+          "failed root") CLIPS_DEPLOYMENT_ATTESTATION_STAGE="root" ;;
+          "failed attestation") CLIPS_DEPLOYMENT_ATTESTATION_STAGE="record" ;;
+          "failed binding") CLIPS_DEPLOYMENT_ATTESTATION_STAGE="binding" ;;
+          "failed wrapper") CLIPS_DEPLOYMENT_ATTESTATION_STAGE="wrapper" ;;
+          "failed helper") CLIPS_DEPLOYMENT_ATTESTATION_STAGE="helper" ;;
+          "failed tracked_content") CLIPS_DEPLOYMENT_ATTESTATION_STAGE="tracked content" ;;
+          "failed static_build") CLIPS_DEPLOYMENT_ATTESTATION_STAGE="static build" ;;
+          *) CLIPS_DEPLOYMENT_ATTESTATION_STAGE="invocation" ;;
+        esac
+        echo "Clip deployment attestation $CLIPS_DEPLOYMENT_ATTESTATION_STAGE verification failed; Clips disabled" >&2
+        CLIPS_CONFIGURATION_BLOCKED=true
+      fi
     fi
   fi
 fi
@@ -143,8 +166,18 @@ unset CLIPS_EXPECTED_TREE
 unset PROXYWAR_CLIPS_EXPECTED_TREE
 unset CLIPS_EXPECTED_BUILD_SHA256
 unset PROXYWAR_CLIPS_EXPECTED_BUILD_SHA256
-unset CLIPS_GIT_BIN
-unset CLIPS_GIT_PATH
+unset CLIPS_EXPECTED_ATTESTATION_NONCE
+unset PROXYWAR_CLIPS_EXPECTED_ATTESTATION_NONCE
+unset CLIPS_WRAPPER_PATH
+unset CLIPS_WRAPPER_DIR
+unset CLIPS_TRUSTED_ROOT
+unset CLIPS_DEPLOYMENT_ATTESTATION_HELPER
+unset CLIPS_DEPLOYMENT_ATTESTATION_HELPER_SHA256
+unset CLIPS_DEPLOYMENT_ATTESTATION_HELPER_HASH_OUTPUT
+unset CLIPS_DEPLOYMENT_ATTESTATION_HELPER_CURRENT_SHA256
+unset CLIPS_DEPLOYMENT_ATTESTATION_STATUS
+unset CLIPS_DEPLOYMENT_ATTESTATION_STAGE
+unset CLIPS_STATE_ROOT
 unset CLIPS_RELEASE_STATE_FILE
 unset CLIPS_RELEASE_STATE_STATUS
 unset CLIPS_RELEASE_STATE_KIND
@@ -152,10 +185,6 @@ unset CLIPS_RELEASE_STATE_EXTRA
 unset CLIPS_CONFIGURATION_BLOCKED
 unset CLIPS_DURABLY_DISABLED
 unset CLIPS_ACTIVATION_SOURCE
-unset CURRENT_RELEASE_COMMIT
-unset CURRENT_RELEASE_TREE
-unset CURRENT_RELEASE_STATUS
-unset CURRENT_RELEASE_BUILD_SHA256
 
 cd "$PROJECT_DIR"
 

@@ -5,7 +5,15 @@ import { constants, promises as fs } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
-const KEYS = ["buildSha256", "commit", "enabled", "schemaVersion", "tree"];
+const V1_KEYS = ["buildSha256", "commit", "enabled", "schemaVersion", "tree"];
+const V2_KEYS = [
+  "attestationNonce",
+  "buildSha256",
+  "commit",
+  "enabled",
+  "schemaVersion",
+  "tree",
+];
 const MAX_STATE_BYTES = 1_024;
 
 export function parseClipReleaseState(text) {
@@ -18,28 +26,44 @@ export function parseClipReleaseState(text) {
   if (value === null || typeof value !== "object" || Array.isArray(value)) {
     return null;
   }
-  const keys = Object.keys(value).sort();
-  if (
-    keys.length !== KEYS.length ||
-    keys.some((key, index) => key !== KEYS[index])
-  ) {
+  if (typeof value.enabled !== "boolean") {
     return null;
   }
-  if (value.schemaVersion !== 1 || typeof value.enabled !== "boolean") {
+  const keys = Object.keys(value).sort();
+  if (value.schemaVersion === 1) {
+    if (
+      keys.length !== V1_KEYS.length ||
+      keys.some((key, index) => key !== V1_KEYS[index]) ||
+      value.enabled ||
+      value.commit !== null ||
+      value.tree !== null ||
+      value.buildSha256 !== null
+    ) {
+      return null;
+    }
+    return value;
+  }
+  if (
+    value.schemaVersion !== 2 ||
+    keys.length !== V2_KEYS.length ||
+    keys.some((key, index) => key !== V2_KEYS[index])
+  ) {
     return null;
   }
   if (value.enabled) {
     if (
       !isHex(value.commit, 40) ||
       !isHex(value.tree, 40) ||
-      !isHex(value.buildSha256, 64)
+      !isHex(value.buildSha256, 64) ||
+      !isHex(value.attestationNonce, 64)
     ) {
       return null;
     }
   } else if (
     value.commit !== null ||
     value.tree !== null ||
-    value.buildSha256 !== null
+    value.buildSha256 !== null ||
+    value.attestationNonce !== null
   ) {
     return null;
   }
@@ -49,6 +73,7 @@ export function parseClipReleaseState(text) {
 export async function writeClipReleaseState({ statePath, state }) {
   if (
     !path.isAbsolute(statePath) ||
+    state?.schemaVersion !== 2 ||
     parseClipReleaseState(JSON.stringify(state)) === null
   ) {
     throw new Error("clip_release_state_invalid");
@@ -244,7 +269,7 @@ function parseArgs(argv) {
   }
   const options = { command };
   for (const arg of argv.slice(1)) {
-    const match = /^--([a-z-]+)=(.*)$/.exec(arg);
+    const match = /^--([a-z0-9-]+)=(.*)$/.exec(arg);
     if (match === null || match[2] === "")
       throw new Error("clip_release_state_argument_invalid");
     const key = match[1];
@@ -256,7 +281,7 @@ function parseArgs(argv) {
     throw new Error("clip_release_state_path_not_absolute");
   const allowed =
     command === "enable"
-      ? ["path", "commit", "tree", "build-sha256"]
+      ? ["path", "commit", "tree", "build-sha256", "attestation-nonce"]
       : command === "status"
         ? ["path", "shell"]
         : ["path"];
@@ -289,7 +314,7 @@ if (invokedModulePath !== null && invokedModulePath === currentModulePath) {
         process.stdout.write(
           state === null || !state.enabled
             ? "disabled\n"
-            : `enabled ${state.commit} ${state.tree} ${state.buildSha256}\n`,
+            : `enabled ${state.commit} ${state.tree} ${state.buildSha256} ${state.attestationNonce}\n`,
         );
       } else {
         process.stdout.write(`${JSON.stringify(state)}\n`);
@@ -298,18 +323,20 @@ if (invokedModulePath !== null && invokedModulePath === currentModulePath) {
       const state =
         options.command === "enable"
           ? {
-              schemaVersion: 1,
+              schemaVersion: 2,
               enabled: true,
               commit: options.commit,
               tree: options.tree,
               buildSha256: options["build-sha256"],
+              attestationNonce: options["attestation-nonce"],
             }
           : {
-              schemaVersion: 1,
+              schemaVersion: 2,
               enabled: false,
               commit: null,
               tree: null,
               buildSha256: null,
+              attestationNonce: null,
             };
       await writeClipReleaseState({ statePath: options.path, state });
       process.stdout.write(`${JSON.stringify(state)}\n`);

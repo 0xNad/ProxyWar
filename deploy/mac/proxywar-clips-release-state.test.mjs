@@ -1,9 +1,10 @@
 import assert from "node:assert/strict";
-import { execFile } from "node:child_process";
+import { execFile, execFileSync } from "node:child_process";
 import { promises as fs } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, test } from "node:test";
+import { fileURLToPath } from "node:url";
 import {
   hashStaticBuild,
   parseClipReleaseState,
@@ -21,32 +22,64 @@ afterEach(async () => {
   );
 });
 
-test("strictly parses enabled and disabled release state", () => {
+test("strictly parses nonce-bound v2 state and only migrates disabled v1", () => {
   const enabled = {
-    schemaVersion: 1,
+    schemaVersion: 2,
     enabled: true,
     commit: "a".repeat(40),
     tree: "b".repeat(40),
     buildSha256: "c".repeat(64),
+    attestationNonce: "d".repeat(64),
   };
   assert.deepEqual(parseClipReleaseState(JSON.stringify(enabled)), enabled);
   assert.deepEqual(
     parseClipReleaseState(
       JSON.stringify({
-        schemaVersion: 1,
+        schemaVersion: 2,
         enabled: false,
         commit: null,
         tree: null,
         buildSha256: null,
+        attestationNonce: null,
       }),
     ),
     {
-      schemaVersion: 1,
+      schemaVersion: 2,
       enabled: false,
       commit: null,
       tree: null,
       buildSha256: null,
+      attestationNonce: null,
     },
+  );
+  const migratedDisabledV1 = {
+    schemaVersion: 1,
+    enabled: false,
+    commit: null,
+    tree: null,
+    buildSha256: null,
+  };
+  assert.deepEqual(
+    parseClipReleaseState(JSON.stringify(migratedDisabledV1)),
+    migratedDisabledV1,
+  );
+  assert.equal(
+    parseClipReleaseState(
+      JSON.stringify({
+        schemaVersion: 1,
+        enabled: true,
+        commit: "a".repeat(40),
+        tree: "b".repeat(40),
+        buildSha256: "c".repeat(64),
+      }),
+    ),
+    null,
+  );
+  assert.equal(
+    parseClipReleaseState(
+      JSON.stringify({ ...enabled, attestationNonce: null }),
+    ),
+    null,
   );
   assert.equal(
     parseClipReleaseState(JSON.stringify({ ...enabled, extra: true })),
@@ -68,11 +101,12 @@ test("atomically replaces an owner-only release state", async () => {
   await fs.chmod(root, 0o700);
   const statePath = path.join(root, "clip-release-v1.json");
   const enabled = {
-    schemaVersion: 1,
+    schemaVersion: 2,
     enabled: true,
     commit: "a".repeat(40),
     tree: "b".repeat(40),
     buildSha256: "c".repeat(64),
+    attestationNonce: "d".repeat(64),
   };
   await writeClipReleaseState({ statePath, state: enabled });
   assert.equal((await fs.lstat(statePath)).mode & 0o777, 0o600);
@@ -81,11 +115,12 @@ test("atomically replaces an owner-only release state", async () => {
     enabled,
   );
   const disabled = {
-    schemaVersion: 1,
+    schemaVersion: 2,
     enabled: false,
     commit: null,
     tree: null,
     buildSha256: null,
+    attestationNonce: null,
   };
   await writeClipReleaseState({ statePath, state: disabled });
   assert.deepEqual(
@@ -93,6 +128,49 @@ test("atomically replaces an owner-only release state", async () => {
     disabled,
   );
   assert.deepEqual((await fs.readdir(root)).sort(), ["clip-release-v1.json"]);
+});
+
+test("CLI writes and reports an enabled v2 nonce binding", async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "pw-clip-release-cli-"));
+  roots.push(root);
+  await fs.chmod(root, 0o700);
+  const statePath = path.join(root, "clip-release-v1.json");
+  const script = fileURLToPath(
+    new URL("./proxywar-clips-release-state.mjs", import.meta.url),
+  );
+  const commit = "a".repeat(40);
+  const tree = "b".repeat(40);
+  const buildSha256 = "c".repeat(64);
+  const attestationNonce = "d".repeat(64);
+  const enabled = execFileSync(
+    process.execPath,
+    [
+      script,
+      "enable",
+      `--path=${statePath}`,
+      `--commit=${commit}`,
+      `--tree=${tree}`,
+      `--build-sha256=${buildSha256}`,
+      `--attestation-nonce=${attestationNonce}`,
+    ],
+    { encoding: "utf8" },
+  );
+  assert.deepEqual(JSON.parse(enabled), {
+    schemaVersion: 2,
+    enabled: true,
+    commit,
+    tree,
+    buildSha256,
+    attestationNonce,
+  });
+  assert.equal(
+    execFileSync(
+      process.execPath,
+      [script, "status", `--path=${statePath}`, "--shell=true"],
+      { encoding: "utf8" },
+    ).trim(),
+    `enabled ${commit} ${tree} ${buildSha256} ${attestationNonce}`,
+  );
 });
 
 test("refuses a group-readable parent", async () => {
@@ -105,11 +183,12 @@ test("refuses a group-readable parent", async () => {
     writeClipReleaseState({
       statePath: path.join(root, "clip-release-v1.json"),
       state: {
-        schemaVersion: 1,
+        schemaVersion: 2,
         enabled: false,
         commit: null,
         tree: null,
         buildSha256: null,
+        attestationNonce: null,
       },
     }),
     /clip_release_state_parent_unsafe/,
@@ -124,11 +203,12 @@ test("bounded no-follow reads reject extra bytes, oversized files, symlinks, and
   await fs.chmod(root, 0o700);
   const statePath = path.join(root, "clip-release-v1.json");
   const valid = JSON.stringify({
-    schemaVersion: 1,
+    schemaVersion: 2,
     enabled: false,
     commit: null,
     tree: null,
     buildSha256: null,
+    attestationNonce: null,
   });
 
   await fs.writeFile(statePath, `${valid}\n${valid}\n`, { mode: 0o600 });
