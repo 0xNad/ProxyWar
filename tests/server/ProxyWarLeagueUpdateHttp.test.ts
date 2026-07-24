@@ -188,13 +188,14 @@ describe("league update HTTP contract", () => {
       writeFile(
         path.join(privateStateRoot, AI_LEAGUE_CLIP_CANARY_FILE),
         JSON.stringify({
-          schemaVersion: 2,
+          schemaVersion: 3,
           lifecycle: "claimed",
           runKey: canaryRunKey,
           premiereId: "prem_0123456789abcdef",
           bucket: canaryBucket,
           sourceReplaySha256: canarySourceSha256,
           priorStateSha256: "f".repeat(64),
+          rootPredecessorStateSha256: "e".repeat(64),
           armedAt: new Date(now - 60_000).toISOString(),
           expiresAt: new Date(now + 10 * 60_000).toISOString(),
           claimedAt: new Date(now - 30_000).toISOString(),

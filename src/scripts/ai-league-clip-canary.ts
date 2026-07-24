@@ -51,6 +51,7 @@ export async function runAiLeagueClipCanaryCli(
       "bucket",
       "source-replay-sha256",
       "prior-state-sha256",
+      "root-predecessor-state-sha256",
       "expires-at",
     ]);
     const bucket = Number(requireArg(args, "bucket"));
@@ -65,6 +66,10 @@ export async function runAiLeagueClipCanaryCli(
       runsRoot: requireAbsolute(args, "runs-root"),
       target,
       priorStateSha256: requireArg(args, "prior-state-sha256"),
+      rootPredecessorStateSha256: requireArg(
+        args,
+        "root-predecessor-state-sha256",
+      ),
       expiresAt: requireArg(args, "expires-at"),
     });
     io.stdout(JSON.stringify({ enabled: true, record }));

@@ -4,7 +4,11 @@ import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, test } from "vitest";
 import { runAiLeagueClipCanaryCli } from "../../src/scripts/ai-league-clip-canary";
-import { AI_LEAGUE_CLIP_CANARY_FILE } from "../../src/server/agents/AiLeagueClipCanary";
+import {
+  AI_LEAGUE_CLIP_CANARY_FILE,
+  AI_LEAGUE_CLIP_CANARY_PREDECESSOR_FILE,
+  AI_LEAGUE_CLIP_CANARY_ROOT_PREDECESSOR_FILE,
+} from "../../src/server/agents/AiLeagueClipCanary";
 import { controlledSourceBytes } from "../server/replay-premiere/ReplayPremiereFixtures";
 
 let root: string;
@@ -81,8 +85,11 @@ describe("clips:canary CLI", () => {
         reclaimedAt: "2026-07-24T02:31:00.000Z",
       })}\n`,
     );
-    const predecessor = path.join(root, "clip-canary-v1.json");
-    const predecessorBytes = Buffer.from(
+    const rootPredecessor = path.join(
+      root,
+      AI_LEAGUE_CLIP_CANARY_ROOT_PREDECESSOR_FILE,
+    );
+    const rootPredecessorBytes = Buffer.from(
       `${JSON.stringify({
         schemaVersion: 1,
         lifecycle: "disarmed",
@@ -93,6 +100,26 @@ describe("clips:canary CLI", () => {
         expiresAt: "2026-07-24T02:59:52.000Z",
         claimedAt: "2026-07-24T02:40:18.409Z",
         disarmedAt: "2026-07-24T02:44:26.234Z",
+      })}\n`,
+    );
+    const rootPredecessorSha256 = createHash("sha256")
+      .update(rootPredecessorBytes)
+      .digest("hex");
+    await fs.writeFile(rootPredecessor, rootPredecessorBytes, { mode: 0o600 });
+    const predecessor = path.join(root, AI_LEAGUE_CLIP_CANARY_PREDECESSOR_FILE);
+    const predecessorBytes = Buffer.from(
+      `${JSON.stringify({
+        schemaVersion: 2,
+        lifecycle: "disarmed",
+        runKey: "league-coworld-predecessor-v2",
+        premiereId: "prem_1234567890abcdef",
+        bucket: 61,
+        sourceReplaySha256: "b".repeat(64),
+        priorStateSha256: rootPredecessorSha256,
+        armedAt: "2026-07-24T02:45:00.000Z",
+        expiresAt: "2026-07-24T03:05:00.000Z",
+        claimedAt: null,
+        disarmedAt: "2026-07-24T02:46:00.000Z",
       })}\n`,
     );
     const predecessorSha256 = createHash("sha256")
@@ -118,6 +145,8 @@ describe("clips:canary CLI", () => {
           sourceSha256,
           "--prior-state-sha256",
           predecessorSha256,
+          "--root-predecessor-state-sha256",
+          rootPredecessorSha256,
           "--expires-at",
           expiresAt,
         ],
@@ -127,16 +156,34 @@ describe("clips:canary CLI", () => {
     expect(JSON.parse(stdout.pop() ?? "null")).toMatchObject({
       enabled: true,
       record: {
-        schemaVersion: 2,
+        schemaVersion: 3,
         lifecycle: "armed",
         bucket: 60,
         priorStateSha256: predecessorSha256,
+        rootPredecessorStateSha256: rootPredecessorSha256,
       },
     });
     expect(
       (await fs.lstat(path.join(root, AI_LEAGUE_CLIP_CANARY_FILE))).mode &
         0o777,
     ).toBe(0o600);
+    expect(
+      await runAiLeagueClipCanaryCli(
+        ["status", "--private-state-root", root],
+        io(),
+      ),
+    ).toBe(0);
+    expect(JSON.parse(stdout.pop() ?? "null")).toMatchObject({
+      enabled: true,
+      claimable: true,
+      readEnabled: false,
+      record: {
+        schemaVersion: 3,
+        lifecycle: "armed",
+        priorStateSha256: predecessorSha256,
+        rootPredecessorStateSha256: rootPredecessorSha256,
+      },
+    });
 
     expect(
       await runAiLeagueClipCanaryCli(
@@ -158,5 +205,6 @@ describe("clips:canary CLI", () => {
       await fs.readFile(path.join(root, AI_LEAGUE_CLIP_CANARY_FILE), "utf8"),
     ).toBe(first);
     expect(await fs.readFile(predecessor)).toEqual(predecessorBytes);
+    expect(await fs.readFile(rootPredecessor)).toEqual(rootPredecessorBytes);
   });
 });
