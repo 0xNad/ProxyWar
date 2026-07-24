@@ -466,6 +466,23 @@ describe("durable clip canary transitions", () => {
       arm(createHash("sha256").update(armedPredecessor).digest("hex")),
     ).rejects.toThrow("clip_canary_predecessor_not_valid_disarmed_v2");
 
+    const claimedAndDisarmedPredecessor = Buffer.from(
+      `${JSON.stringify({
+        ...predecessor,
+        claimedAt: new Date(NOW_MS + 1_000).toISOString(),
+      })}\n`,
+    );
+    await fs.writeFile(predecessorPath, claimedAndDisarmedPredecessor, {
+      mode: 0o600,
+    });
+    await expect(
+      arm(
+        createHash("sha256")
+          .update(claimedAndDisarmedPredecessor)
+          .digest("hex"),
+      ),
+    ).rejects.toThrow("clip_canary_predecessor_not_valid_disarmed_v2");
+
     const wrongRootChain = Buffer.from(
       `${JSON.stringify({
         ...predecessor,

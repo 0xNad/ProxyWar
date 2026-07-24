@@ -541,6 +541,7 @@ function isDisarmedPredecessorRecord(
     keys.some((key, index) => key !== PREDECESSOR_RECORD_KEYS[index]) ||
     parsed.schemaVersion !== 2 ||
     parsed.lifecycle !== "disarmed" ||
+    parsed.claimedAt !== null ||
     parsed.priorStateSha256 !== rootPredecessorStateSha256
   ) {
     return false;
