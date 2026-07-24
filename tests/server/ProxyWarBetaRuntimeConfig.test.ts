@@ -86,6 +86,8 @@ describe("Proxy War beta runtime config", () => {
     expect(wrapper).toContain(
       'CLIPS_EXPECTED_BUILD_SHA256="${PROXYWAR_CLIPS_EXPECTED_BUILD_SHA256:-}"',
     );
+    expect(wrapper).toContain('CLIPS_GIT_BIN="$(command -v git || true)"');
+    expect(wrapper).toContain('PATH="$CLIPS_GIT_PATH" "$CLIPS_GIT_BIN"');
     expect(wrapper).not.toContain("PROXYWAR_CLIPS_RELEASE_STATE_FILE");
     expect(wrapper).toContain(
       "Clip activation does not match the clean deployed commit, tree, and build; Clips disabled",
@@ -107,7 +109,7 @@ describe("Proxy War beta runtime config", () => {
   });
 
   it.skipIf(process.platform !== "darwin")(
-    "binds Clip activation to a clean commit, tree, and production build while failing drift closed",
+    "binds Clip activation to a clean commit, tree, and production build after the private env replaces PATH while failing drift closed",
     async () => {
       const fixture = await fs.mkdtemp(
         path.join(os.tmpdir(), "pw-clip-release-"),
@@ -142,6 +144,7 @@ describe("Proxy War beta runtime config", () => {
           "PROXYWAR_CLIPS_ENABLED=false",
           "PROXYWAR_PREMIERE_CLIPS_ENABLED=true",
           "PROXYWAR_LEAGUE_CLIPS_ENABLED=false",
+          `PATH=${path.join(fixture, "private-env-bin-without-git")}`,
           `PROXYWAR_REPLAY_PREMIERE_STATE_ROOT=${fixture}`,
           "",
         ].join("\n"),

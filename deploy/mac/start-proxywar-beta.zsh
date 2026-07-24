@@ -22,6 +22,12 @@ CLIPS_FORCE_DISABLED="${PROXYWAR_CLIPS_FORCE_DISABLED:-false}"
 CLIPS_EXPECTED_COMMIT="${PROXYWAR_CLIPS_EXPECTED_COMMIT:-}"
 CLIPS_EXPECTED_TREE="${PROXYWAR_CLIPS_EXPECTED_TREE:-}"
 CLIPS_EXPECTED_BUILD_SHA256="${PROXYWAR_CLIPS_EXPECTED_BUILD_SHA256:-}"
+# Resolve Git against launchd's reviewed environment before the private env is
+# sourced. That file may replace PATH for the server process; Clip identity
+# verification must keep using the absolute executable and helper search path
+# that launchd supplied rather than re-resolving a bare `git` afterward.
+CLIPS_GIT_BIN="$(command -v git || true)"
+CLIPS_GIT_PATH="$PATH"
 
 if [[ ! -d "$PROJECT_DIR" ]]; then
   echo "ProxyWar project directory not found: $PROJECT_DIR" >&2
@@ -84,9 +90,10 @@ if [[ "$CLIPS_FORCE_DISABLED" != "true" && ("$CLIPS_RELEASE_OVERRIDE" == "true" 
     CURRENT_RELEASE_TREE=""
     CURRENT_RELEASE_STATUS=""
     CURRENT_RELEASE_BUILD_SHA256=""
-    if ! CURRENT_RELEASE_COMMIT="$(git -C "$PROJECT_DIR" rev-parse HEAD 2> /dev/null)" \
-      || ! CURRENT_RELEASE_TREE="$(git -C "$PROJECT_DIR" rev-parse 'HEAD^{tree}' 2> /dev/null)" \
-      || ! CURRENT_RELEASE_STATUS="$(git -C "$PROJECT_DIR" status --porcelain --untracked-files=all 2> /dev/null)" \
+    if [[ -z "$CLIPS_GIT_BIN" || "$CLIPS_GIT_BIN" != /* || ! -x "$CLIPS_GIT_BIN" ]] \
+      || ! CURRENT_RELEASE_COMMIT="$(PATH="$CLIPS_GIT_PATH" "$CLIPS_GIT_BIN" -C "$PROJECT_DIR" rev-parse HEAD 2> /dev/null)" \
+      || ! CURRENT_RELEASE_TREE="$(PATH="$CLIPS_GIT_PATH" "$CLIPS_GIT_BIN" -C "$PROJECT_DIR" rev-parse 'HEAD^{tree}' 2> /dev/null)" \
+      || ! CURRENT_RELEASE_STATUS="$(PATH="$CLIPS_GIT_PATH" "$CLIPS_GIT_BIN" -C "$PROJECT_DIR" status --porcelain --untracked-files=all 2> /dev/null)" \
       || ! CURRENT_RELEASE_BUILD_SHA256="$("$NODE_BIN" "$PROJECT_DIR/deploy/mac/proxywar-clips-release-state.mjs" build-hash --path="$PROJECT_DIR/static" 2> /dev/null)"; then
       echo "Clip activation could not verify the deployed commit, tree, status, and build; Clips disabled" >&2
       CLIPS_CONFIGURATION_BLOCKED=true
@@ -136,6 +143,8 @@ unset CLIPS_EXPECTED_TREE
 unset PROXYWAR_CLIPS_EXPECTED_TREE
 unset CLIPS_EXPECTED_BUILD_SHA256
 unset PROXYWAR_CLIPS_EXPECTED_BUILD_SHA256
+unset CLIPS_GIT_BIN
+unset CLIPS_GIT_PATH
 unset CLIPS_RELEASE_STATE_FILE
 unset CLIPS_RELEASE_STATE_STATUS
 unset CLIPS_RELEASE_STATE_KIND
