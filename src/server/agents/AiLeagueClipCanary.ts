@@ -1,14 +1,32 @@
 import type { RequestHandler } from "express";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { constants, promises as fs, type Stats } from "node:fs";
 import path from "node:path";
-import { isRenderablePremiereClipBucket } from "../replay-premiere/ReplayPremiereContracts";
+import { GameRecordSchema } from "../../core/Schemas";
+import { ReplayPremiereArchiveStore } from "../replay-premiere/ReplayPremiereArchiveIndex";
+import {
+  archivedPremiereClipFileName,
+  archivedPremiereClipManifestFileName,
+  archivedPremiereClipsDir,
+  clipFileName,
+} from "../replay-premiere/ReplayPremiereClips";
+import {
+  isPremiereId,
+  isRenderablePremiereClipBucket,
+  premiereClipRepresentativeAnchorTurn,
+} from "../replay-premiere/ReplayPremiereContracts";
 import {
   isSafeProxyWarArtifactSegment,
   matchProxyWarLeagueClipWritePath,
 } from "./ProxyWarPublicArtifacts";
 
-export const AI_LEAGUE_CLIP_CANARY_FILE = "clip-canary-v1.json";
+// The first production one-shot is retained forever as clip-canary-v1.json.
+// The post-fix acceptance transaction uses a distinct immutable slot so the
+// failed predecessor can never be reset, deleted, or reinterpreted as a pass.
+export const AI_LEAGUE_CLIP_CANARY_FILE = "clip-canary-v2.json";
+export const AI_LEAGUE_CLIP_CANARY_PREDECESSOR_FILE = "clip-canary-v1.json";
+// Reuse the v1 lock name so an older checked-out CLI and the v2 CLI cannot
+// mutate their state lanes concurrently in the same private root.
 export const AI_LEAGUE_CLIP_CANARY_LOCK_FILE = "clip-canary-v1.lock";
 export const AI_LEAGUE_CLIP_CANARY_MAX_BYTES = 4_096;
 export const AI_LEAGUE_CLIP_CANARY_MAX_LIFETIME_MS = 30 * 60 * 1_000;
@@ -38,7 +56,7 @@ interface AiLeagueClipCanaryMutationLockRecord {
   pid: number;
 }
 
-const RECORD_KEYS = [
+const PREDECESSOR_RECORD_KEYS = [
   "armedAt",
   "bucket",
   "claimedAt",
@@ -49,21 +67,28 @@ const RECORD_KEYS = [
   "schemaVersion",
   "sourceReplaySha256",
 ] as const;
+const RECORD_KEYS = [
+  ...PREDECESSOR_RECORD_KEYS,
+  "premiereId",
+  "priorStateSha256",
+].sort();
 
 export type AiLeagueClipCanaryLifecycle = "armed" | "claimed" | "disarmed";
 
 export interface AiLeagueClipCanaryTarget {
   runKey: string;
+  premiereId: string;
   bucket: number;
   sourceReplaySha256: string;
 }
 
 /**
- * Strict v1 state. Nullable transition timestamps keep one exact-key schema
+ * Strict v2 state. Nullable transition timestamps keep one exact-key schema
  * across the durable armed -> claimed -> disarmed lifecycle.
  */
 export interface AiLeagueClipCanaryRecord extends AiLeagueClipCanaryTarget {
-  schemaVersion: 1;
+  schemaVersion: 2;
+  priorStateSha256: string;
   lifecycle: AiLeagueClipCanaryLifecycle;
   armedAt: string;
   expiresAt: string;
@@ -120,7 +145,7 @@ const DIAGNOSTIC_MESSAGES: Record<AiLeagueClipCanaryDiagnosticCode, string> = {
   clip_canary_private_state_root_wrong_mode:
     "Clip canary private state root mode is not 0700; canary is disabled.",
   clip_canary_state_malformed:
-    "Clip canary state does not match strict schema v1; canary is disabled.",
+    "Clip canary state does not match strict schema v2; canary is disabled.",
   clip_canary_state_expired:
     "Clip canary arm expired before claim; canary is disabled.",
   clip_canary_state_claimed:
@@ -264,18 +289,21 @@ export function parseAiLeagueClipCanaryRecord(
     return null;
   }
   if (
-    parsed.schemaVersion !== 1 ||
+    parsed.schemaVersion !== 2 ||
     (parsed.lifecycle !== "armed" &&
       parsed.lifecycle !== "claimed" &&
       parsed.lifecycle !== "disarmed") ||
     typeof parsed.runKey !== "string" ||
     !isSafeProxyWarArtifactSegment(parsed.runKey) ||
     !parsed.runKey.startsWith("league-") ||
+    !isPremiereId(parsed.premiereId) ||
     typeof parsed.bucket !== "number" ||
     !isRenderablePremiereClipBucket(parsed.bucket) ||
     parsed.bucket > 99_999 ||
     typeof parsed.sourceReplaySha256 !== "string" ||
     !/^[a-f0-9]{64}$/.test(parsed.sourceReplaySha256) ||
+    typeof parsed.priorStateSha256 !== "string" ||
+    !/^[a-f0-9]{64}$/.test(parsed.priorStateSha256) ||
     typeof parsed.armedAt !== "string" ||
     !isCanonicalTimestamp(parsed.armedAt) ||
     typeof parsed.expiresAt !== "string" ||
@@ -318,9 +346,149 @@ export function parseAiLeagueClipCanaryRecord(
   return parsed as unknown as AiLeagueClipCanaryRecord;
 }
 
+async function verifyDisarmedPredecessor(options: {
+  privateStateRoot: string;
+  expectedSha256: string;
+  expectedUid?: number | null;
+}): Promise<void> {
+  if (!/^[a-f0-9]{64}$/.test(options.expectedSha256)) {
+    throw new Error("clip_canary_predecessor_sha256_invalid");
+  }
+  const expectedUid =
+    options.expectedUid === undefined ? currentUid() : options.expectedUid;
+  const rootBefore = await validatePrivateStateRoot(
+    options.privateStateRoot,
+    expectedUid,
+  );
+  if (typeof rootBefore === "string") {
+    throw new Error(`clip_canary_predecessor_refused:${rootBefore}`);
+  }
+  const predecessorPath = path.join(
+    path.resolve(options.privateStateRoot),
+    AI_LEAGUE_CLIP_CANARY_PREDECESSOR_FILE,
+  );
+  let before: Stats;
+  try {
+    before = await fs.lstat(predecessorPath);
+  } catch (error) {
+    throw new Error(
+      `clip_canary_predecessor_refused:${
+        isNodeError(error, "ENOENT")
+          ? "clip_canary_state_missing"
+          : "clip_canary_state_stat_failed"
+      }`,
+      { cause: error },
+    );
+  }
+  const metadataFailure = validateStateMetadata(before, expectedUid);
+  if (metadataFailure !== null) {
+    throw new Error(`clip_canary_predecessor_refused:${metadataFailure}`);
+  }
+
+  let handle;
+  try {
+    handle = await fs.open(
+      predecessorPath,
+      constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0),
+    );
+  } catch {
+    throw new Error(
+      "clip_canary_predecessor_refused:clip_canary_state_read_failed",
+    );
+  }
+  let bytes: Buffer;
+  let opened: Stats;
+  try {
+    opened = await handle.stat();
+    const openedFailure = validateStateMetadata(opened, expectedUid);
+    if (openedFailure !== null || !sameIdentity(before, opened)) {
+      throw new Error(
+        `clip_canary_predecessor_refused:${
+          openedFailure ?? "clip_canary_state_changed_during_read"
+        }`,
+      );
+    }
+    bytes = await handle.readFile();
+    const openedAfter = await handle.stat();
+    if (!sameIdentity(opened, openedAfter)) {
+      throw new Error(
+        "clip_canary_predecessor_refused:clip_canary_state_changed_during_read",
+      );
+    }
+  } finally {
+    await handle.close().catch(() => undefined);
+  }
+  if (bytes.byteLength > AI_LEAGUE_CLIP_CANARY_MAX_BYTES) {
+    throw new Error(
+      "clip_canary_predecessor_refused:clip_canary_state_too_large",
+    );
+  }
+  let after: Stats;
+  try {
+    after = await fs.lstat(predecessorPath);
+  } catch {
+    throw new Error(
+      "clip_canary_predecessor_refused:clip_canary_state_changed_during_read",
+    );
+  }
+  const rootAfter = await validatePrivateStateRoot(
+    options.privateStateRoot,
+    expectedUid,
+  );
+  if (
+    !sameIdentity(before, after) ||
+    after.size !== bytes.byteLength ||
+    typeof rootAfter === "string" ||
+    !sameIdentity(rootBefore, rootAfter)
+  ) {
+    throw new Error(
+      "clip_canary_predecessor_refused:clip_canary_state_changed_during_read",
+    );
+  }
+  const actualSha256 = createHash("sha256").update(bytes).digest("hex");
+  if (actualSha256 !== options.expectedSha256) {
+    throw new Error("clip_canary_predecessor_sha256_mismatch");
+  }
+  if (!isDisarmedPredecessorRecord(bytes.toString("utf8"), actualSha256)) {
+    throw new Error("clip_canary_predecessor_not_valid_disarmed_v1");
+  }
+}
+
+function isDisarmedPredecessorRecord(text: string, sha256: string): boolean {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    return false;
+  }
+  if (!isPlainObject(parsed)) return false;
+  const keys = Object.keys(parsed).sort();
+  if (
+    keys.length !== PREDECESSOR_RECORD_KEYS.length ||
+    keys.some((key, index) => key !== PREDECESSOR_RECORD_KEYS[index]) ||
+    parsed.schemaVersion !== 1 ||
+    parsed.lifecycle !== "disarmed"
+  ) {
+    return false;
+  }
+  const candidate = {
+    ...parsed,
+    schemaVersion: 2,
+    premiereId: "prem_0000000000000000",
+    priorStateSha256: sha256,
+  };
+  return parseAiLeagueClipCanaryRecord(JSON.stringify(candidate)) !== null;
+}
+
 export async function armAiLeagueClipCanary(options: {
   privateStateRoot: string;
+  runsRoot: string;
+  archiveStore?: Pick<
+    ReplayPremiereArchiveStore,
+    "archiveRoot" | "revealPublicRatedCoworldPointersForRunKey"
+  >;
   target: AiLeagueClipCanaryTarget;
+  priorStateSha256: string;
   expiresAt: string;
   now?: () => number;
   expectedUid?: number | null;
@@ -333,9 +501,10 @@ export async function armAiLeagueClipCanary(options: {
     async () => {
       const nowMs = (options.now ?? Date.now)();
       const record: AiLeagueClipCanaryRecord = {
-        schemaVersion: 1,
+        schemaVersion: 2,
         lifecycle: "armed",
         ...options.target,
+        priorStateSha256: options.priorStateSha256,
         armedAt: new Date(nowMs).toISOString(),
         expiresAt: options.expiresAt,
         claimedAt: null,
@@ -352,6 +521,20 @@ export async function armAiLeagueClipCanary(options: {
       if (existing.diagnostic.code !== "clip_canary_state_missing") {
         throw new Error(`clip_canary_arm_refused:${existing.diagnostic.code}`);
       }
+      await verifyDisarmedPredecessor({
+        privateStateRoot: options.privateStateRoot,
+        expectedSha256: options.priorStateSha256,
+        expectedUid: options.expectedUid,
+      });
+      // This is deliberately inside the shared mutation lock and before the
+      // one-shot state write. A stale archive pointer, changed replay source,
+      // or pre-existing output must not consume the only v2 transaction.
+      await validateFreshAiLeagueClipCanaryTarget({
+        privateStateRoot: options.privateStateRoot,
+        runsRoot: options.runsRoot,
+        target: options.target,
+        archiveStore: options.archiveStore,
+      });
       await atomicWriteState(
         options.privateStateRoot,
         record,
@@ -360,6 +543,135 @@ export async function armAiLeagueClipCanary(options: {
       return record;
     },
   );
+}
+
+export async function validateFreshAiLeagueClipCanaryTarget(options: {
+  privateStateRoot: string;
+  runsRoot: string;
+  target: AiLeagueClipCanaryTarget;
+  archiveStore?: Pick<
+    ReplayPremiereArchiveStore,
+    "archiveRoot" | "revealPublicRatedCoworldPointersForRunKey"
+  >;
+}): Promise<void> {
+  if (!path.isAbsolute(options.runsRoot)) {
+    throw new Error("clip_canary_runs_root_not_absolute");
+  }
+  const runDirectory = path.resolve(options.runsRoot, options.target.runKey);
+  if (runDirectory !== path.join(options.runsRoot, options.target.runKey)) {
+    throw new Error("clip_canary_source_path_escape");
+  }
+  const recordPath = path.join(runDirectory, "game-record.json");
+  let before: Stats;
+  try {
+    before = await fs.lstat(recordPath);
+  } catch (error) {
+    throw new Error("clip_canary_source_unverifiable", { cause: error });
+  }
+  if (!before.isFile() || before.isSymbolicLink() || before.nlink !== 1) {
+    throw new Error("clip_canary_source_unverifiable");
+  }
+  let handle;
+  try {
+    handle = await fs.open(
+      recordPath,
+      constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0),
+    );
+  } catch (error) {
+    throw new Error("clip_canary_source_unverifiable", { cause: error });
+  }
+  let bytes: Buffer;
+  try {
+    const opened = await handle.stat();
+    if (!sameIdentity(before, opened) || !opened.isFile()) {
+      throw new Error("clip_canary_source_changed_during_read");
+    }
+    bytes = await handle.readFile();
+    const openedAfter = await handle.stat();
+    if (!sameIdentity(opened, openedAfter)) {
+      throw new Error("clip_canary_source_changed_during_read");
+    }
+  } finally {
+    await handle.close().catch(() => undefined);
+  }
+  let after: Stats;
+  try {
+    after = await fs.lstat(recordPath);
+  } catch (error) {
+    throw new Error("clip_canary_source_changed_during_read", { cause: error });
+  }
+  if (!sameIdentity(before, after) || after.size !== bytes.byteLength) {
+    throw new Error("clip_canary_source_changed_during_read");
+  }
+  const parsed = GameRecordSchema.safeParse(
+    (() => {
+      try {
+        return JSON.parse(bytes.toString("utf8"));
+      } catch {
+        return null;
+      }
+    })(),
+  );
+  if (!parsed.success) throw new Error("clip_canary_source_invalid");
+  const renderableThroughTurn = parsed.data.info.num_turns;
+  if (
+    !Number.isSafeInteger(renderableThroughTurn) ||
+    renderableThroughTurn <= 0 ||
+    premiereClipRepresentativeAnchorTurn(options.target.bucket) >
+      renderableThroughTurn
+  ) {
+    throw new Error("clip_canary_source_range_invalid");
+  }
+  const actualSourceSha256 = createHash("sha256").update(bytes).digest("hex");
+  if (actualSourceSha256 !== options.target.sourceReplaySha256) {
+    throw new Error("clip_canary_source_sha256_mismatch");
+  }
+
+  const archiveStore =
+    options.archiveStore ??
+    (await ReplayPremiereArchiveStore.open({
+      privateStateRoot: options.privateStateRoot,
+      compactOnOpen: false,
+    }));
+  const pointers = archiveStore.revealPublicRatedCoworldPointersForRunKey(
+    options.target.runKey,
+  );
+  if (
+    pointers.length !== 1 ||
+    pointers[0]?.premiereId !== options.target.premiereId
+  ) {
+    throw new Error("clip_canary_archive_pointer_mismatch");
+  }
+
+  const cacheClip = path.join(
+    options.privateStateRoot,
+    "league-clips-v1",
+    options.target.runKey,
+    clipFileName(options.target.bucket),
+  );
+  const archiveClipsRoot = archivedPremiereClipsDir(archiveStore.archiveRoot);
+  for (const artifactPath of [
+    cacheClip,
+    cacheClip.replace(/\.mp4$/, ".render-manifest.json"),
+    path.join(
+      archiveClipsRoot,
+      archivedPremiereClipFileName(options.target.premiereId),
+    ),
+    path.join(
+      archiveClipsRoot,
+      archivedPremiereClipManifestFileName(options.target.premiereId),
+    ),
+  ]) {
+    try {
+      await fs.lstat(artifactPath);
+    } catch (error) {
+      if (isNodeError(error, "ENOENT")) continue;
+      throw new Error("clip_canary_fresh_target_unverifiable", {
+        cause: error,
+      });
+    }
+    throw new Error("clip_canary_fresh_target_already_exists");
+  }
 }
 
 export async function claimAiLeagueClipCanary(options: {
@@ -1056,6 +1368,7 @@ function sameTarget(
 ): boolean {
   return (
     left.runKey === right.runKey &&
+    left.premiereId === right.premiereId &&
     left.bucket === right.bucket &&
     left.sourceReplaySha256 === right.sourceReplaySha256
   );

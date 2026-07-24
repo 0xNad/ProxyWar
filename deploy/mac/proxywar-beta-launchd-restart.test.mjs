@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
+import { createHash } from "node:crypto";
 import { once } from "node:events";
 import { promises as fs } from "node:fs";
 import os from "node:os";
@@ -567,6 +568,35 @@ test("dry run reports current readiness without signalling", async () => {
   });
   assert.equal(result.dryRun, true);
   assert.equal(result.currentReady, true);
+  const wrapperSha256 = createHash("sha256")
+    .update(await fs.readFile(fixture.wrapperPath))
+    .digest("hex");
+  assert.equal(result.installedWrapperSha256, wrapperSha256);
+  assert.deepEqual(state.signals, []);
+});
+
+test("restart binds the installed wrapper SHA-256 before signalling", async () => {
+  const fixture = await launchFiles();
+  const state = fakeRestart(fixture);
+  const expectedWrapperSha256 = createHash("sha256")
+    .update(await fs.readFile(fixture.wrapperPath))
+    .digest("hex");
+  assert.deepEqual(
+    parseRestartCliArguments([
+      `--expected-wrapper-sha256=${expectedWrapperSha256}`,
+    ]),
+    { expectedWrapperSha256 },
+  );
+  await assert.rejects(
+    restartBeta({
+      host: state.host,
+      dryRun: true,
+      plistPath: fixture.plistPath,
+      writerLockPath: fixture.lockPath,
+      expectedWrapperSha256: "0".repeat(64),
+    }),
+    /installed wrapper SHA-256 does not match reviewed bytes/,
+  );
   assert.deepEqual(state.signals, []);
 });
 
@@ -1072,6 +1102,7 @@ async function launchFiles() {
   await fs.writeFile(plistPath, "fixture\n", { mode: 0o600 });
   return {
     projectDir,
+    wrapperPath,
     plistPath,
     lockPath: path.join(root, "write-owner.json"),
     config: {

@@ -32,6 +32,7 @@ import {
   claimAiLeagueClipCanary,
   createAiLeagueClipCanaryWriteRefusal,
   readAiLeagueClipCanary,
+  validateFreshAiLeagueClipCanaryTarget,
   type AiLeagueClipCanaryRecord,
 } from "../server/agents/AiLeagueClipCanary";
 import {
@@ -237,6 +238,7 @@ const replayPremiereArchivedClipPromoter =
     archiveStore: replayPremiereArchiveStore,
     logger: (message) => console.log(`[premiere-archived-clips] ${message}`),
   });
+
 try {
   await replayPremiereArchivedClipPromoter.repairOrphanedTemporaryFiles();
 } catch (error) {
@@ -503,6 +505,14 @@ if (aiLeagueRunClipsEnabled || aiLeagueClipCanaryRecord !== null) {
       ) {
         throw new Error("clip_canary_source_validation_failed");
       }
+      if (aiLeagueClipCanaryRecord.lifecycle === "armed") {
+        await validateFreshAiLeagueClipCanaryTarget({
+          privateStateRoot: replayPremierePrivateStateRoot,
+          runsRoot: runsRootDir,
+          target: aiLeagueClipCanaryRecord,
+          archiveStore: replayPremiereArchiveStore,
+        });
+      }
     }
   } catch (error) {
     await aiLeagueRunClips?.close().catch(() => undefined);
@@ -704,6 +714,20 @@ app.use(
       aiLeagueClipCanaryState.claimable || aiLeagueClipCanaryState.readEnabled,
   }),
 );
+const leagueWrapperOnly = process.env.PROXYWAR_LEAGUE_WRAPPER_ONLY === "true";
+app.use((req, res, next) => {
+  if (
+    leagueWrapperOnly &&
+    req.method === "POST" &&
+    matchProxyWarLeagueClipWritePath(req.path) !== null &&
+    !leagueClipPublicWriteAllowed(req.path)
+  ) {
+    res.setHeader("Cache-Control", "no-store, max-age=0");
+    res.status(404).json({ error: { code: "LEAGUE_CLIP_UNAVAILABLE" } });
+    return;
+  }
+  next();
+});
 app.use(express.json({ limit: "256kb" }));
 app.use(express.urlencoded({ extended: false }));
 app.use((_req, res, next) => {
@@ -717,7 +741,6 @@ app.use((_req, res, next) => {
 // its replay renders. Every other surface — beta login, hub, /play, tester
 // dashboard, admin, relay, job APIs (anything that could start a match on
 // the operator's account) — is unreachable. Reversible via env flag.
-const leagueWrapperOnly = process.env.PROXYWAR_LEAGUE_WRAPPER_ONLY === "true";
 if (leagueWrapperOnly) {
   app.use((req, res, next) => {
     if (req.method === "GET" || req.method === "HEAD") {
@@ -738,6 +761,10 @@ if (leagueWrapperOnly) {
       // Clip route. Fail it closed here instead of letting the wrapper's
       // generic document fallback turn an unavailable artifact into /league.
       if (leagueClipRead !== null) {
+        // A missing bucket can become available later after an authorized
+        // render. Never let the edge cache this pre-gate 404 and mask the
+        // subsequent immutable Clip document or ready status.
+        res.setHeader("Cache-Control", "no-store, max-age=0");
         if (leagueClipRead.kind === "clip_status") {
           res.status(404).json({ error: { code: "LEAGUE_CLIP_UNAVAILABLE" } });
         } else {
@@ -752,13 +779,21 @@ if (leagueWrapperOnly) {
       res.redirect("/league");
       return;
     }
-    if (
-      req.method === "POST" &&
-      (isProxyWarPublicPremiereWritePath(req.path) ||
-        leagueClipPublicWriteAllowed(req.path))
-    ) {
-      next();
-      return;
+    if (req.method === "POST") {
+      const leagueClipWrite = matchProxyWarLeagueClipWritePath(req.path);
+      if (leagueClipWrite !== null) {
+        if (leagueClipPublicWriteAllowed(req.path)) {
+          next();
+          return;
+        }
+        res.setHeader("Cache-Control", "no-store, max-age=0");
+        res.status(404).json({ error: { code: "LEAGUE_CLIP_UNAVAILABLE" } });
+        return;
+      }
+      if (isProxyWarPublicPremiereWritePath(req.path)) {
+        next();
+        return;
+      }
     }
     res.status(404).send("not available in league wrapper mode");
   });
@@ -2412,6 +2447,12 @@ const server = app.listen(port, host, () => {
       ) {
         throw new Error("clip_canary_source_validation_failed_after_bind");
       }
+      await validateFreshAiLeagueClipCanaryTarget({
+        privateStateRoot: replayPremierePrivateStateRoot,
+        runsRoot: runsRootDir,
+        target: canaryRecord,
+        archiveStore: replayPremiereArchiveStore,
+      });
       await claimAiLeagueClipCanary({
         privateStateRoot: replayPremierePrivateStateRoot,
         expectedTarget: canaryRecord,
@@ -3641,7 +3682,7 @@ function positiveInt(value: string | undefined, fallback: number): number {
 function leagueClipPublicReadAllowed(requestPath: string): boolean {
   const route = matchProxyWarLeagueClipReadPath(requestPath);
   if (route?.publicLeague !== true) return false;
-  if (aiLeagueRunClipsEnabled) return true;
+  if (aiLeagueRunClipsEnabled && aiLeagueRunClips !== null) return true;
   return (
     aiLeagueRunClips !== null &&
     aiLeagueRunClips.allowsCanaryRead(route.runKey, route.bucket)
@@ -3651,6 +3692,7 @@ function leagueClipPublicReadAllowed(requestPath: string): boolean {
 function leagueClipPublicWriteAllowed(requestPath: string): boolean {
   return (
     aiLeagueRunClipsEnabled &&
+    aiLeagueRunClips !== null &&
     matchProxyWarLeagueClipWritePath(requestPath)?.publicLeague === true
   );
 }

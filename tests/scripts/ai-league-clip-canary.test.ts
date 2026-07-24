@@ -1,9 +1,11 @@
+import { createHash } from "node:crypto";
 import { promises as fs } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, test } from "vitest";
 import { runAiLeagueClipCanaryCli } from "../../src/scripts/ai-league-clip-canary";
 import { AI_LEAGUE_CLIP_CANARY_FILE } from "../../src/server/agents/AiLeagueClipCanary";
+import { controlledSourceBytes } from "../server/replay-premiere/ReplayPremiereFixtures";
 
 let root: string;
 let stdout: string[];
@@ -40,6 +42,63 @@ describe("clips:canary CLI", () => {
   });
 
   test("atomically arms, reports, and idempotently disarms the explicit root", async () => {
+    const runKey = "league-coworld-cli-canary";
+    const premiereId = "prem_abcdef1234567890";
+    const runsRoot = path.join(root, "ai-league-runs");
+    const controlledSource = (
+      JSON.parse(controlledSourceBytes().toString("utf8")) as {
+        gameRecord: Record<string, unknown> & { info: Record<string, unknown> };
+      }
+    ).gameRecord;
+    const sourceBytes = Buffer.from(
+      JSON.stringify({
+        ...controlledSource,
+        info: { ...controlledSource.info, num_turns: 1_000 },
+        turns: [],
+      }),
+    );
+    const sourceSha256 = createHash("sha256").update(sourceBytes).digest("hex");
+    await fs.mkdir(path.join(runsRoot, runKey), { recursive: true });
+    await fs.writeFile(
+      path.join(runsRoot, runKey, "game-record.json"),
+      sourceBytes,
+    );
+    const archiveRoot = path.join(root, "archive-v1");
+    await fs.mkdir(path.join(archiveRoot, "summaries"), { recursive: true });
+    await fs.writeFile(
+      path.join(archiveRoot, "archive-index.jsonl"),
+      `${JSON.stringify({
+        schemaVersion: 1,
+        premiereId,
+        sourceRunId: "coworld-cli-canary",
+        sourceKind: "rated_coworld",
+        terminalState: "revealed",
+        revealedAt: "2026-07-24T02:30:00.000Z",
+        publicationCommitmentHash: "1".repeat(64),
+        sourceReplaySha256: sourceSha256,
+        summaryHash: "2".repeat(64),
+        summaryRelPath: `summaries/${premiereId}.summary.json`,
+        reclaimedAt: "2026-07-24T02:31:00.000Z",
+      })}\n`,
+    );
+    const predecessor = path.join(root, "clip-canary-v1.json");
+    const predecessorBytes = Buffer.from(
+      `${JSON.stringify({
+        schemaVersion: 1,
+        lifecycle: "disarmed",
+        runKey: "league-coworld-predecessor",
+        bucket: 60,
+        sourceReplaySha256: "a".repeat(64),
+        armedAt: "2026-07-24T02:39:53.048Z",
+        expiresAt: "2026-07-24T02:59:52.000Z",
+        claimedAt: "2026-07-24T02:40:18.409Z",
+        disarmedAt: "2026-07-24T02:44:26.234Z",
+      })}\n`,
+    );
+    const predecessorSha256 = createHash("sha256")
+      .update(predecessorBytes)
+      .digest("hex");
+    await fs.writeFile(predecessor, predecessorBytes, { mode: 0o600 });
     const expiresAt = new Date(Date.now() + 5 * 60_000).toISOString();
     expect(
       await runAiLeagueClipCanaryCli(
@@ -47,12 +106,18 @@ describe("clips:canary CLI", () => {
           "arm",
           "--private-state-root",
           root,
+          "--runs-root",
+          runsRoot,
           "--run-key",
-          "league-coworld-cli-canary",
+          runKey,
+          "--premiere-id",
+          premiereId,
           "--bucket",
           "60",
           "--source-replay-sha256",
-          "b".repeat(64),
+          sourceSha256,
+          "--prior-state-sha256",
+          predecessorSha256,
           "--expires-at",
           expiresAt,
         ],
@@ -61,7 +126,12 @@ describe("clips:canary CLI", () => {
     ).toBe(0);
     expect(JSON.parse(stdout.pop() ?? "null")).toMatchObject({
       enabled: true,
-      record: { lifecycle: "armed", bucket: 60 },
+      record: {
+        schemaVersion: 2,
+        lifecycle: "armed",
+        bucket: 60,
+        priorStateSha256: predecessorSha256,
+      },
     });
     expect(
       (await fs.lstat(path.join(root, AI_LEAGUE_CLIP_CANARY_FILE))).mode &
@@ -87,5 +157,6 @@ describe("clips:canary CLI", () => {
     expect(
       await fs.readFile(path.join(root, AI_LEAGUE_CLIP_CANARY_FILE), "utf8"),
     ).toBe(first);
+    expect(await fs.readFile(predecessor)).toEqual(predecessorBytes);
   });
 });

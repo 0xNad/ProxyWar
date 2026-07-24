@@ -1,12 +1,26 @@
 # Archived Replay Clip One-Shot Canary Runbook
 
 Status: candidate procedure. Execute only from the exact independently reviewed
-release commit. This control does not deploy code, mutate Coworld, read private
-environment files, or enable anonymous Clip generation.
+release commit. This procedure deploys the reviewed beta wrapper and, after a
+literal canary GO, enables anonymous retained-replay Clip generation. It does
+not mutate Coworld or read private environment-file contents.
+
+This is a checked command sequence, not a pasteable batch script. Start one
+dedicated `zsh`, run the input block first, then execute exactly one command at
+a time in the documented order. Record each exit status and required output.
+Do not execute the next command unless the current command exits zero and its
+literal assertion passes. Code fences group phases for readability; pasting a
+whole fence would defeat the release gates because a later command could hide
+an earlier failure. The release-enable phase is forbidden unless the standalone
+GO-evidence `jq` command has just exited zero in that same shell.
 
 ## Contract
 
-The owner-only state is exactly `<privateStateRoot>/clip-canary-v1.json`.
+The owner-only state for this post-fix acceptance transaction is exactly
+`<privateStateRoot>/clip-canary-v2.json`. The failed predecessor remains
+durably preserved as `clip-canary-v1.json`; no command in this release reads,
+except to verify its exact terminal bytes before v2 arm, and no command rewrites,
+resets, renames, or deletes it.
 `clips:canary` accepts that root only through explicit
 `--private-state-root`; it does not read an env file or secret. An arm is bound
 to one public `league-*` run key, one renderable bucket, the exact retained
@@ -20,11 +34,18 @@ surface flags, `PROXYWAR_PREMIERE_CLIPS_ENABLED` and
 therefore remain `false/false`. If either surface flag is on, the server treats
 the armed state as a conflict and constructs no Clip service.
 
-An armed target is source-validated before bind and again after bind. Only
-after port 8788 binds does the server durably claim it and issue exactly one
-system request at `premiereClipRepresentativeAnchorTurn(bucket)`. Claim is
-at-most-once authorization, not proof of render success. A claimed restart
-never requests again. Render failure has no automatic retry.
+The `arm` transaction validates stable source bytes and their exact hash, the
+canonical Premiere id and sole reveal-public rated-Coworld archive pointer, the
+bucket against the record's declared `num_turns`, and absence of both cache and
+durable destination files while holding the shared mutation lock, before the
+immutable v2 write. Because the true replay terminal is discovered by the
+renderer, the operator must independently observe playback beyond the planned
+capture tail and choose a safely earlier bucket before arming.
+The server repeats the same validation before bind and after bind. Only after
+port 8788 binds does the server durably claim it and issue exactly one system
+request at `premiereClipRepresentativeAnchorTurn(bucket)`. Claim is at-most-once
+authorization, not proof of render success. A claimed restart never requests
+again. Render failure has no automatic retry.
 
 ## Operator-supplied exact inputs
 
@@ -32,23 +53,82 @@ Set these from reviewed, non-secret paths and retained public replay evidence;
 do not source the private service env file:
 
 ```bash
+set -u
+set -o pipefail
 PRIVATE_STATE_ROOT=/absolute/reviewed/replay-premiere-private-root
+RELEASE_STATE_FILE="$PRIVATE_STATE_ROOT/clip-release-v1.json"
 RUNS_ROOT=/absolute/reviewed/ai-league-runs
 RUN_KEY=league-coworld-REPLACE_EXACTLY
 PREMIERE_ID=prem_REPLACE_EXACTLY
 BUCKET=REPLACE_INTEGER
 SOURCE_SHA256=REPLACE_64_LOWERCASE_HEX
+PRIOR_STATE_SHA256=REPLACE_V1_STATE_64_LOWERCASE_HEX
+RELEASE_COMMIT=REPLACE_40_LOWERCASE_HEX
+RELEASE_TREE=REPLACE_40_LOWERCASE_HEX
+RELEASE_BUILD_SHA256=REPLACE_STATIC_BUILD_64_LOWERCASE_HEX
+REVIEWED_WRAPPER_SHA256=REPLACE_WRAPPER_64_LOWERCASE_HEX
+INSTALLED_WRAPPER="$HOME/Library/Application Support/ProxyWar/bin/start-proxywar-beta.zsh"
+WRAPPER_BACKUP=/absolute/release-evidence/start-proxywar-beta.before-v2.zsh
+CANARY_GO_EVIDENCE=/absolute/reviewed/canary-go.json
+CANARY_GO_EVIDENCE_SHA256=REPLACE_GO_EVIDENCE_64_LOWERCASE_HEX
 ORIGIN=http://127.0.0.1:8788
+PUBLIC_ORIGIN=https://beta.proxywar.xyz
 PREMIERE_LOOP_LABEL="gui/$(id -u)/com.proxywar.premiere-loop"
+assert_clip_manager_env_unset() {
+  local PW_CLIP_ENV_NAME="$1"
+  local PW_CLIP_ENV_VALUE
+  PW_CLIP_ENV_VALUE="$(launchctl getenv "$PW_CLIP_ENV_NAME")" || return 1
+  test -z "$PW_CLIP_ENV_VALUE"
+}
 ```
 
 Verify the retained source identity before arming:
 
 ```bash
 test "$(shasum -a 256 "$RUNS_ROOT/$RUN_KEY/game-record.json" | awk '{print $1}')" = "$SOURCE_SHA256"
+test "$(shasum -a 256 "$PRIVATE_STATE_ROOT/clip-canary-v1.json" | awk '{print $1}')" = "$PRIOR_STATE_SHA256"
+test "$(git rev-parse HEAD)" = "$RELEASE_COMMIT"
+test "$(git rev-parse 'HEAD^{tree}')" = "$RELEASE_TREE"
+if ! RELEASE_STATUS="$(git status --porcelain --untracked-files=all)"; then
+  echo "Unable to verify release worktree status" >&2
+  exit 1
+fi
+test -z "$RELEASE_STATUS"
+test "$(node deploy/mac/proxywar-clips-release-state.mjs build-hash \
+  --path="$PWD/static")" = "$RELEASE_BUILD_SHA256"
 npm run clips:canary -- status --private-state-root "$PRIVATE_STATE_ROOT"
 curl --fail --silent "$ORIGIN/api/clip-capabilities" | jq -e '.schemaVersion == 1 and .premiereGenerationEnabled == false and .leagueGenerationEnabled == false'
+curl --fail --silent "$PUBLIC_ORIGIN/api/clip-capabilities" | jq -e '.schemaVersion == 1 and .premiereGenerationEnabled == false and .leagueGenerationEnabled == false'
 ```
+
+Before arming, deploy the reviewed wrapper atomically while Clips remain
+disabled. Preserve the previous exact bytes for rollback; never overwrite the
+backup. The installed file must be owned by the service uid, mode `0755`, and
+hash-identical to the reviewed repository file:
+
+```bash
+node deploy/mac/proxywar-clips-release-state.mjs disable \
+  --path="$RELEASE_STATE_FILE"
+launchctl unsetenv PROXYWAR_CLIPS_RELEASE_OVERRIDE
+launchctl unsetenv PROXYWAR_CLIPS_EXPECTED_COMMIT
+launchctl unsetenv PROXYWAR_CLIPS_EXPECTED_TREE
+launchctl unsetenv PROXYWAR_CLIPS_EXPECTED_BUILD_SHA256
+test "$(shasum -a 256 deploy/mac/start-proxywar-beta.zsh | awk '{print $1}')" = "$REVIEWED_WRAPPER_SHA256"
+test ! -e "$WRAPPER_BACKUP"
+cp -p "$INSTALLED_WRAPPER" "$WRAPPER_BACKUP"
+install -m 0755 deploy/mac/start-proxywar-beta.zsh "$INSTALLED_WRAPPER.next"
+test "$(shasum -a 256 "$INSTALLED_WRAPPER.next" | awk '{print $1}')" = "$REVIEWED_WRAPPER_SHA256"
+mv -f "$INSTALLED_WRAPPER.next" "$INSTALLED_WRAPPER"
+test "$(stat -f '%u:%Lp' "$INSTALLED_WRAPPER")" = "$(id -u):755"
+test "$(shasum -a 256 "$INSTALLED_WRAPPER" | awk '{print $1}')" = "$REVIEWED_WRAPPER_SHA256"
+```
+
+There is no automatic restore. On any failure, stop before the next command. If
+the installed wrapper was already replaced, restore `$WRAPPER_BACKUP` through a
+new `.next` file, verify its preserved hash/mode/owner, and only then consider a
+disabled restart. Every dry-run and restart below supplies the expected wrapper
+hash, and its JSON result must report the same
+`installedWrapperSha256`.
 
 Stop new Premiere admissions before the restart transaction. Preserve the
 plist and scheduler data; unload rather than delete it:
@@ -70,9 +150,12 @@ Use a short explicit expiry (20 minutes shown; the parser rejects more than 30):
 EXPIRES_AT="$(date -u -v+20M '+%Y-%m-%dT%H:%M:%S.000Z')"
 npm run clips:canary -- arm \
   --private-state-root "$PRIVATE_STATE_ROOT" \
+  --runs-root "$RUNS_ROOT" \
   --run-key "$RUN_KEY" \
+  --premiere-id "$PREMIERE_ID" \
   --bucket "$BUCKET" \
   --source-replay-sha256 "$SOURCE_SHA256" \
+  --prior-state-sha256 "$PRIOR_STATE_SHA256" \
   --expires-at "$EXPIRES_AT"
 ```
 
@@ -80,11 +163,18 @@ Use the reviewed ordinary restart helper, not `launchctl kickstart -k` and not
 the controlled-outage drill:
 
 ```bash
+launchctl setenv PROXYWAR_CLIPS_EXPECTED_COMMIT "$RELEASE_COMMIT"
+launchctl setenv PROXYWAR_CLIPS_EXPECTED_TREE "$RELEASE_TREE"
+launchctl setenv PROXYWAR_CLIPS_EXPECTED_BUILD_SHA256 "$RELEASE_BUILD_SHA256"
 launchctl setenv PROXYWAR_ARCHIVED_CLIP_CANARY_MASTER_OVERRIDE true
 node deploy/mac/proxywar-beta-launchd-restart.mjs \
+  --expected-wrapper-sha256="$REVIEWED_WRAPPER_SHA256" \
+  --start-timeout-ms=60000 \
   --ready-url=http://127.0.0.1:8788/league \
   --dry-run
 node deploy/mac/proxywar-beta-launchd-restart.mjs \
+  --expected-wrapper-sha256="$REVIEWED_WRAPPER_SHA256" \
+  --start-timeout-ms=60000 \
   --ready-url=http://127.0.0.1:8788/league
 ```
 
@@ -94,6 +184,7 @@ same endpoint for another bucket and every POST must be 404:
 
 ```bash
 curl --fail --silent "$ORIGIN/api/clip-capabilities" | jq -e '.premiereGenerationEnabled == false and .leagueGenerationEnabled == false'
+curl --fail --silent "$PUBLIC_ORIGIN/api/clip-capabilities" | jq -e '.premiereGenerationEnabled == false and .leagueGenerationEnabled == false'
 curl --silent --show-error -o /tmp/proxywar-canary-status.json -w '%{http_code}\n' \
   "$ORIGIN/api/league-runs/$RUN_KEY/clips/$BUCKET"
 curl --silent --show-error -o /dev/null -w '%{http_code}\n' \
@@ -101,8 +192,37 @@ curl --silent --show-error -o /dev/null -w '%{http_code}\n' \
 curl --silent --show-error -o /dev/null -w '%{http_code}\n' \
   -H 'Content-Type: application/json' -d '{"turn":0}' \
   "$ORIGIN/api/league-runs/$RUN_KEY/clips"
+curl --silent --show-error --dump-header /tmp/proxywar-public-canary-status.headers \
+  -o /tmp/proxywar-public-canary-status.json \
+  "$PUBLIC_ORIGIN/api/league-runs/$RUN_KEY/clips/$BUCKET"
+curl --silent --show-error --dump-header /tmp/proxywar-public-wrong-status-GET.headers \
+  --output /dev/null --write-out '%{http_code}\n' \
+  "$PUBLIC_ORIGIN/api/league-runs/$RUN_KEY/clips/$((BUCKET + 1))"
+curl --silent --show-error --head \
+  --dump-header /tmp/proxywar-public-wrong-status-HEAD.headers \
+  --output /dev/null --write-out '%{http_code}\n' \
+  "$PUBLIC_ORIGIN/api/league-runs/$RUN_KEY/clips/$((BUCKET + 1))"
+curl --silent --show-error --dump-header /tmp/proxywar-public-wrong-mp4-GET.headers \
+  --output /dev/null --write-out '%{http_code}\n' \
+  "$PUBLIC_ORIGIN/ai-league-runs/$RUN_KEY/clip-v1-$((BUCKET + 1)).mp4"
+curl --silent --show-error --head \
+  --dump-header /tmp/proxywar-public-wrong-mp4-HEAD.headers \
+  --output /dev/null --write-out '%{http_code}\n' \
+  "$PUBLIC_ORIGIN/ai-league-runs/$RUN_KEY/clip-v1-$((BUCKET + 1)).mp4"
+curl --silent --show-error --dump-header /tmp/proxywar-public-canary-post.headers \
+  --output /tmp/proxywar-public-canary-post.json \
+  -H 'Content-Type: application/json' -d '{"turn":0}' \
+  "$PUBLIC_ORIGIN/api/league-runs/$RUN_KEY/clips"
 npm run clips:canary -- status --private-state-root "$PRIVATE_STATE_ROOT"
 ```
+
+Use a wrong bucket whose public Clip URLs have never been probed. Its four
+GET/HEAD responses and the POST must be literal 404, have no `Location`, carry
+`Cache-Control: no-store, max-age=0`, and must not report an edge cache HIT.
+Retain every header/body file above. Poll the public exact-target status until
+`ready`; then require its public MP4 GET and HEAD to be 200 and the public GET
+hash/length to match the cache and durable archive. A loopback-only result is
+not a canary GO.
 
 When ready, `GET|HEAD /ai-league-runs/$RUN_KEY/clip-v1-$BUCKET.mp4` is the
 only canary cache document. The archive pointer for `$PREMIERE_ID` must name the
@@ -166,16 +286,47 @@ diagnostic as a stop condition, not permission to retry.
   directory before any retry.
 
 ```bash
-npm run clips:canary -- disarm --private-state-root "$PRIVATE_STATE_ROOT"
+npm run --silent clips:canary -- disarm --private-state-root "$PRIVATE_STATE_ROOT" | jq -e \
+  --arg run "$RUN_KEY" --arg premiere "$PREMIERE_ID" \
+  --argjson bucket "$BUCKET" --arg source "$SOURCE_SHA256" \
+  --arg prior "$PRIOR_STATE_SHA256" \
+  '.record.schemaVersion == 2 and .record.lifecycle == "disarmed" and
+   .record.runKey == $run and .record.premiereId == $premiere and
+   .record.bucket == $bucket and .record.sourceReplaySha256 == $source and
+   .record.priorStateSha256 == $prior'
 launchctl unsetenv PROXYWAR_ARCHIVED_CLIP_CANARY_MASTER_OVERRIDE
+launchctl unsetenv PROXYWAR_CLIPS_RELEASE_OVERRIDE
+launchctl unsetenv PROXYWAR_CLIPS_EXPECTED_COMMIT
+launchctl unsetenv PROXYWAR_CLIPS_EXPECTED_TREE
+launchctl unsetenv PROXYWAR_CLIPS_EXPECTED_BUILD_SHA256
+assert_clip_manager_env_unset PROXYWAR_CLIPS_RELEASE_OVERRIDE
+assert_clip_manager_env_unset PROXYWAR_CLIPS_EXPECTED_COMMIT
+assert_clip_manager_env_unset PROXYWAR_CLIPS_EXPECTED_TREE
+assert_clip_manager_env_unset PROXYWAR_CLIPS_EXPECTED_BUILD_SHA256
 node deploy/mac/proxywar-beta-launchd-restart.mjs \
+  --expected-wrapper-sha256="$REVIEWED_WRAPPER_SHA256" \
+  --start-timeout-ms=60000 \
   --ready-url=http://127.0.0.1:8788/league \
   --dry-run
 node deploy/mac/proxywar-beta-launchd-restart.mjs \
+  --expected-wrapper-sha256="$REVIEWED_WRAPPER_SHA256" \
+  --start-timeout-ms=60000 \
   --ready-url=http://127.0.0.1:8788/league
 curl --fail --silent "$ORIGIN/api/clip-capabilities" | jq -e '.premiereGenerationEnabled == false and .leagueGenerationEnabled == false'
+curl --fail --silent "$PUBLIC_ORIGIN/api/clip-capabilities" | jq -e '.premiereGenerationEnabled == false and .leagueGenerationEnabled == false'
 test "$(curl --silent -o /dev/null -w '%{http_code}' "$ORIGIN/ai-league-runs/$RUN_KEY/clip-v1-$BUCKET.mp4")" = 404
+curl --silent --show-error --dump-header /tmp/proxywar-public-rollback-mp4-GET.headers \
+  --output /dev/null --write-out '%{http_code}\n' \
+  "$PUBLIC_ORIGIN/ai-league-runs/$RUN_KEY/clip-v1-$BUCKET.mp4"
+curl --silent --show-error --head \
+  --dump-header /tmp/proxywar-public-rollback-mp4-HEAD.headers \
+  --output /dev/null --write-out '%{http_code}\n' \
+  "$PUBLIC_ORIGIN/ai-league-runs/$RUN_KEY/clip-v1-$BUCKET.mp4"
 ```
+
+Both public rollback responses must be literal 404 with no `Location`,
+`Cache-Control: no-store, max-age=0`, and no edge cache HIT before restoring
+the scheduler. The durable `/premiere/$PREMIERE_ID/clip.mp4` remains 200.
 
 Restore the scheduler only after rollback proof:
 
@@ -189,3 +340,183 @@ If claim, source validation, quota, disk floor, renderer, manifest, promotion,
 or restart validation fails, do not re-arm or retry the render. Record the
 fixed canary diagnostic, disarm, perform the ordinary rollback restart, and
 retain both the state record and Clip cache for inspection.
+
+## Enable replay-scoped Clips after a GO
+
+Only a complete canary GO authorizes this transaction. Disarm the canary and
+remove its manager override first. Then enable the documented release override;
+the wrapper translates it into the master and retained league-run generation
+gates after sourcing the private env. The live-Premiere generation gate remains
+false: replay clipping is keyed by the retained league replay and does not
+depend on a live Premiere lifecycle. The child unsets the override name, while
+launchd retains the manager value across controlled restarts.
+
+Before setting the release override, quiesce the Premiere loop exactly as in
+the canary transaction and confirm no iteration remains. Preserve a
+content-addressed `canary-go.json` whose exact commit, run, Premiere id, bucket,
+source hash, prior-state hash, HTTP assertions, artifact hashes, decode result,
+visual result, cleanup result, and `verdict: "GO"` have all been verified.
+
+```bash
+npm run --silent clips:canary -- disarm --private-state-root "$PRIVATE_STATE_ROOT" | jq -e \
+  --arg run "$RUN_KEY" --arg premiere "$PREMIERE_ID" \
+  --argjson bucket "$BUCKET" --arg source "$SOURCE_SHA256" \
+  --arg prior "$PRIOR_STATE_SHA256" \
+  '.record.schemaVersion == 2 and .record.lifecycle == "disarmed" and
+   .record.claimedAt != null and .record.runKey == $run and
+   .record.premiereId == $premiere and .record.bucket == $bucket and
+   .record.sourceReplaySha256 == $source and .record.priorStateSha256 == $prior'
+test "$(shasum -a 256 "$CANARY_GO_EVIDENCE" | awk '{print $1}')" = "$CANARY_GO_EVIDENCE_SHA256"
+jq -e --arg run "$RUN_KEY" --arg premiere "$PREMIERE_ID" \
+  --argjson bucket "$BUCKET" --arg source "$SOURCE_SHA256" \
+  --arg prior "$PRIOR_STATE_SHA256" --arg commit "$RELEASE_COMMIT" \
+  --arg tree "$RELEASE_TREE" --arg build "$RELEASE_BUILD_SHA256" \
+  '(keys | sort) == (["artifacts","attributionPassed","bucket","buildSha256",
+    "cleanupPassed","commit","decodePassed","http","premiereId",
+    "priorStateSha256","runKey","schemaVersion","sourceReplaySha256","tree",
+    "verdict","watermarkPassed"] | sort) and
+   .schemaVersion == 1 and .verdict == "GO" and .commit == $commit and
+   .tree == $tree and .buildSha256 == $build and .runKey == $run and
+   .premiereId == $premiere and .bucket == $bucket and
+   .sourceReplaySha256 == $source and .priorStateSha256 == $prior and
+   (.http | keys | sort) == (["exactMp4Get","exactMp4Head","exactStatusReady",
+    "localCapabilitiesDisabled","postNoStore404","publicCapabilitiesDisabled",
+    "wrongMp4GetNoStore404","wrongMp4HeadNoStore404",
+    "wrongStatusGetNoStore404","wrongStatusHeadNoStore404"] | sort) and
+   ([.http[]] | all(. == true)) and
+   (.artifacts | keys | sort) == (["archiveBytes","archiveSha256","cacheBytes",
+    "cacheSha256","manifestsEqual","publicBytes","publicSha256"] | sort) and
+   (.artifacts.cacheSha256 | test("^[a-f0-9]{64}$")) and
+   .artifacts.cacheSha256 == .artifacts.archiveSha256 and
+   .artifacts.cacheSha256 == .artifacts.publicSha256 and
+   (.artifacts.cacheBytes | type == "number") and .artifacts.cacheBytes > 0 and
+   .artifacts.cacheBytes == .artifacts.archiveBytes and
+   .artifacts.cacheBytes == .artifacts.publicBytes and
+   .artifacts.manifestsEqual == true and .decodePassed == true and
+   .watermarkPassed == true and .attributionPassed == true and
+   .cleanupPassed == true' "$CANARY_GO_EVIDENCE"
+launchctl unsetenv PROXYWAR_ARCHIVED_CLIP_CANARY_MASTER_OVERRIDE
+launchctl setenv PROXYWAR_CLIPS_EXPECTED_COMMIT "$RELEASE_COMMIT"
+launchctl setenv PROXYWAR_CLIPS_EXPECTED_TREE "$RELEASE_TREE"
+launchctl setenv PROXYWAR_CLIPS_EXPECTED_BUILD_SHA256 "$RELEASE_BUILD_SHA256"
+launchctl setenv PROXYWAR_CLIPS_RELEASE_OVERRIDE true
+node deploy/mac/proxywar-beta-launchd-restart.mjs \
+  --expected-wrapper-sha256="$REVIEWED_WRAPPER_SHA256" \
+  --start-timeout-ms=60000 \
+  --ready-url=http://127.0.0.1:8788/league \
+  --dry-run
+node deploy/mac/proxywar-beta-launchd-restart.mjs \
+  --expected-wrapper-sha256="$REVIEWED_WRAPPER_SHA256" \
+  --start-timeout-ms=60000 \
+  --ready-url=http://127.0.0.1:8788/league
+curl --fail --silent "$ORIGIN/api/clip-capabilities" | jq -e \
+  '.premiereGenerationEnabled == false and .leagueGenerationEnabled == true'
+curl --fail --silent "$PUBLIC_ORIGIN/api/clip-capabilities" | jq -e \
+  '.premiereGenerationEnabled == false and .leagueGenerationEnabled == true'
+```
+
+The service log for this first restart must contain exactly
+`Clip activation source: release_manager`.
+
+If the dry-run, restart, or either capability check fails, this transaction is
+NO-GO. Immediately unset `PROXYWAR_CLIPS_RELEASE_OVERRIDE`, run the emergency
+disable dry-run and restart below, prove `false/false` locally and publicly,
+and only then restore the scheduler. Never leave a release override latent
+after a failed enable attempt.
+
+On success, keep the scheduler quiesced through the UI proof and the
+manager-to-durable-state restart below. Do not restore it between those steps.
+
+After enablement, verify one retained archived replay and one currently exposed
+replay show the Clip control, a fresh permitted bucket can reach `ready`, the
+MP4 decodes with watermark and attribution, wrong or unavailable buckets stay
+fail-closed, and no worker/Chrome/ffmpeg process survives completion. Live
+Premiere lifecycle is never an eligibility requirement for a retained replay.
+
+Only after that post-enable proof, persist the same nonsecret identity in the
+owner-only release-state record. Then remove every manager value and perform
+one more hash-bound restart. `false/true` after this manager-free restart proves
+the durable startup path rather than merely the current login-session manager
+environment. A real logout/reboot remains a separate live recovery observation:
+
+```bash
+node deploy/mac/proxywar-clips-release-state.mjs enable \
+  --path="$RELEASE_STATE_FILE" \
+  --commit="$RELEASE_COMMIT" \
+  --tree="$RELEASE_TREE" \
+  --build-sha256="$RELEASE_BUILD_SHA256"
+launchctl unsetenv PROXYWAR_ARCHIVED_CLIP_CANARY_MASTER_OVERRIDE
+launchctl unsetenv PROXYWAR_CLIPS_RELEASE_OVERRIDE
+launchctl unsetenv PROXYWAR_CLIPS_EXPECTED_COMMIT
+launchctl unsetenv PROXYWAR_CLIPS_EXPECTED_TREE
+launchctl unsetenv PROXYWAR_CLIPS_EXPECTED_BUILD_SHA256
+assert_clip_manager_env_unset PROXYWAR_CLIPS_RELEASE_OVERRIDE
+assert_clip_manager_env_unset PROXYWAR_ARCHIVED_CLIP_CANARY_MASTER_OVERRIDE
+assert_clip_manager_env_unset PROXYWAR_CLIPS_EXPECTED_COMMIT
+assert_clip_manager_env_unset PROXYWAR_CLIPS_EXPECTED_TREE
+assert_clip_manager_env_unset PROXYWAR_CLIPS_EXPECTED_BUILD_SHA256
+node deploy/mac/proxywar-beta-launchd-restart.mjs \
+  --expected-wrapper-sha256="$REVIEWED_WRAPPER_SHA256" \
+  --start-timeout-ms=60000 \
+  --ready-url=http://127.0.0.1:8788/league \
+  --dry-run
+node deploy/mac/proxywar-beta-launchd-restart.mjs \
+  --expected-wrapper-sha256="$REVIEWED_WRAPPER_SHA256" \
+  --start-timeout-ms=60000 \
+  --ready-url=http://127.0.0.1:8788/league
+curl --fail --silent "$ORIGIN/api/clip-capabilities" | jq -e \
+  '.premiereGenerationEnabled == false and .leagueGenerationEnabled == true'
+curl --fail --silent "$PUBLIC_ORIGIN/api/clip-capabilities" | jq -e \
+  '.premiereGenerationEnabled == false and .leagueGenerationEnabled == true'
+```
+
+The service log for this manager-free restart must contain exactly
+`Clip activation source: durable_state` and must not contain
+`release_manager`. If any durable-state write, manager-absence assertion,
+restart, log assertion, or capability check fails, immediately run the
+emergency disable transaction below (which first writes durable state false),
+then prove `false/false` locally and publicly. Never leave a failed durable
+enablement latent.
+
+Only now restore the scheduler with the commands in the rollback section,
+require two exit-zero iterations, and recheck `false/true` locally and publicly.
+
+Emergency disable is the inverse controlled transaction:
+
+Before invoking it against a live release, disable/boot out the Premiere loop
+and confirm no iteration remains. Restore it only after `false/false` proof.
+
+Every later deployment must begin with these five unsets before installing or
+restarting a new release. The wrapper also binds either Clip override to the
+expected clean commit, tree, and deterministic `static/` digest; mismatch
+keeps the core league process available but forces all Clip gates false.
+
+```bash
+node deploy/mac/proxywar-clips-release-state.mjs disable \
+  --path="$RELEASE_STATE_FILE"
+launchctl unsetenv PROXYWAR_ARCHIVED_CLIP_CANARY_MASTER_OVERRIDE
+launchctl unsetenv PROXYWAR_CLIPS_RELEASE_OVERRIDE
+launchctl unsetenv PROXYWAR_CLIPS_EXPECTED_COMMIT
+launchctl unsetenv PROXYWAR_CLIPS_EXPECTED_TREE
+launchctl unsetenv PROXYWAR_CLIPS_EXPECTED_BUILD_SHA256
+assert_clip_manager_env_unset PROXYWAR_ARCHIVED_CLIP_CANARY_MASTER_OVERRIDE
+assert_clip_manager_env_unset PROXYWAR_CLIPS_RELEASE_OVERRIDE
+assert_clip_manager_env_unset PROXYWAR_CLIPS_EXPECTED_COMMIT
+assert_clip_manager_env_unset PROXYWAR_CLIPS_EXPECTED_TREE
+assert_clip_manager_env_unset PROXYWAR_CLIPS_EXPECTED_BUILD_SHA256
+node deploy/mac/proxywar-beta-launchd-restart.mjs \
+  --expected-wrapper-sha256="$REVIEWED_WRAPPER_SHA256" \
+  --start-timeout-ms=60000 \
+  --ready-url=http://127.0.0.1:8788/league \
+  --dry-run
+node deploy/mac/proxywar-beta-launchd-restart.mjs \
+  --expected-wrapper-sha256="$REVIEWED_WRAPPER_SHA256" \
+  --start-timeout-ms=60000 \
+  --ready-url=http://127.0.0.1:8788/league
+curl --fail --silent "$ORIGIN/api/clip-capabilities" | jq -e \
+  '.premiereGenerationEnabled == false and .leagueGenerationEnabled == false'
+curl --fail --silent "$PUBLIC_ORIGIN/api/clip-capabilities" | jq -e \
+  '.premiereGenerationEnabled == false and .leagueGenerationEnabled == false'
+```
+
+The emergency restart log must contain no `Clip activation source:` line.

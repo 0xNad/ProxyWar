@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 
 import { execFile } from "node:child_process";
+import { createHash } from "node:crypto";
 import { lstat, readFile, realpath } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -194,6 +195,7 @@ export async function restartBeta({
   allowUnreadyCurrent = false,
   premiereControlledOutageDrill = false,
   dryRun = false,
+  expectedWrapperSha256,
 }) {
   validateInputs({
     readyUrl,
@@ -202,11 +204,18 @@ export async function restartBeta({
     startTimeoutMs,
     allowUnreadyCurrent,
     premiereControlledOutageDrill,
+    expectedWrapperSha256,
   });
   const mode = premiereControlledOutageDrill
     ? "premiere-controlled-outage-drill"
     : "restart";
   const installed = await verifyInstalled(host, plistPath);
+  if (
+    expectedWrapperSha256 !== undefined &&
+    installed.wrapperSha256 !== expectedWrapperSha256
+  ) {
+    throw new Error("installed wrapper SHA-256 does not match reviewed bytes");
+  }
   const current = await host.readManaged(TARGET);
   if (!current) throw new Error(`LaunchAgent is not running: ${TARGET}`);
   validateOwnedGroup(current, installed.projectDir);
@@ -225,6 +234,7 @@ export async function restartBeta({
       mode, dryRun: true, target: TARGET, pid: current.pid,
       pgid: current.pgid, ownedPids: current.members.map((member) => member.pid),
       projectDir: installed.projectDir, currentReady,
+      installedWrapperSha256: installed.wrapperSha256,
       ...(premiereControlledOutageDrill ? {
         signal: PREMIERE_CONTROLLED_OUTAGE_DRILL_SIGNAL,
         requiredDwellMs: PREMIERE_CONTROLLED_OUTAGE_DRILL_MIN_DWELL_MS,
@@ -280,6 +290,7 @@ export async function restartBeta({
     mode, dryRun: false, oldPid: current.pid, oldPgid: current.pgid,
     newPid: replacement.pid, newPgid: replacement.pgid, writerPid: replacement.pid,
     forced: stopped.forced, ready: true, currentReady,
+    installedWrapperSha256: installed.wrapperSha256,
     ...(premiereControlledOutageDrill ? {
       signal: PREMIERE_CONTROLLED_OUTAGE_DRILL_SIGNAL,
       requiredDwellMs: PREMIERE_CONTROLLED_OUTAGE_DRILL_MIN_DWELL_MS,
@@ -430,7 +441,10 @@ async function verifyInstalled(host, plistPath) {
       wrapper.includes("npm run agent:closed-beta:prod")) {
     throw new Error("installed wrapper does not directly exec the writer server");
   }
-  return { projectDir: path.resolve(projectDir) };
+  return {
+    projectDir: path.resolve(projectDir),
+    wrapperSha256: createHash("sha256").update(wrapper).digest("hex"),
+  };
 }
 
 async function safeFile(filePath, executable) {
@@ -706,6 +720,12 @@ function validateInputs(values) {
     throw new Error("ready URL must be loopback HTTP");
   }
   if (
+    values.expectedWrapperSha256 !== undefined &&
+    !/^[a-f0-9]{64}$/.test(values.expectedWrapperSha256)
+  ) {
+    throw new Error("expected wrapper SHA-256 must be 64 lowercase hex");
+  }
+  if (
     values.premiereControlledOutageDrill &&
     (!/^\/api\/premieres\/prem_[a-z0-9]{16,32}\/manifest$/.test(url.pathname) ||
       url.search !== "" ||
@@ -767,6 +787,8 @@ export function parseRestartCliArguments(argv) {
     else if (arg.startsWith("--writer-lock="))
       options.writerLockPath = arg.slice(14);
     else if (arg.startsWith("--ready-url=")) options.readyUrl = arg.slice(12);
+    else if (arg.startsWith("--expected-wrapper-sha256="))
+      options.expectedWrapperSha256 = arg.slice(26);
     else if (arg.startsWith("--grace-ms="))
       options.graceMs = Number(arg.slice(11));
     else if (arg.startsWith("--force-wait-ms="))

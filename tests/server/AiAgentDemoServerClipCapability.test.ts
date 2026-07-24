@@ -97,7 +97,13 @@ describe("ai-agent-demo-server clip capability wiring", () => {
       "isAuthorized: () => aiLeagueClipCanaryActionAuthorized",
     );
     expect(source).toContain('aiLeagueClipCanaryRecord?.lifecycle === "armed"');
+    expect(source.match(/validateFreshAiLeagueClipCanaryTarget/g)).toHaveLength(
+      3,
+    );
     const oneShot = source.slice(claim, source.indexOf("})().catch", claim));
+    expect(
+      oneShot.indexOf("validateFreshAiLeagueClipCanaryTarget"),
+    ).toBeLessThan(oneShot.indexOf("await claimAiLeagueClipCanary"));
     expect(oneShot.match(/requestRunClip\(\{/g)).toHaveLength(1);
     expect(
       oneShot.match(/aiLeagueClipCanaryActionAuthorized = true/g),

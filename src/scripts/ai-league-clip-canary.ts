@@ -45,20 +45,26 @@ export async function runAiLeagueClipCanaryCli(
     }
     rejectUnknown(args, [
       "private-state-root",
+      "runs-root",
       "run-key",
+      "premiere-id",
       "bucket",
       "source-replay-sha256",
+      "prior-state-sha256",
       "expires-at",
     ]);
     const bucket = Number(requireArg(args, "bucket"));
     const target: AiLeagueClipCanaryTarget = {
       runKey: requireArg(args, "run-key"),
+      premiereId: requireArg(args, "premiere-id"),
       bucket,
       sourceReplaySha256: requireArg(args, "source-replay-sha256"),
     };
     const record = await armAiLeagueClipCanary({
       privateStateRoot,
+      runsRoot: requireAbsolute(args, "runs-root"),
       target,
+      priorStateSha256: requireArg(args, "prior-state-sha256"),
       expiresAt: requireArg(args, "expires-at"),
     });
     io.stdout(JSON.stringify({ enabled: true, record }));
