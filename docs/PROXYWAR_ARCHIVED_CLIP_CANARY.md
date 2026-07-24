@@ -1,9 +1,12 @@
 # Archived Replay Clip One-Shot Canary Runbook
 
-Status: candidate procedure. Execute only from the exact independently reviewed
-release commit. This procedure deploys the reviewed beta wrapper and, after a
-literal canary GO, enables anonymous retained-replay Clip generation. It does
-not mutate Coworld or read private environment-file contents.
+Status: executed successfully for production commit
+`91f806131a65b35e3fa3601f70d459ffe3706aa3` on 2026-07-24. Anonymous
+retained-replay Clip generation is durably enabled; Premiere generation remains
+disabled. The exact evidence and remaining recovery observation are recorded in
+`project-state/2026-07-24-clips-release-evidence.md`. Reuse this procedure only
+from a newly reviewed release identity. It does not mutate Coworld or read
+private environment-file contents.
 
 This is a checked command sequence, not a pasteable batch script. Start one
 dedicated `zsh`, run the input block first, then execute exactly one command at
@@ -294,7 +297,7 @@ curl --fail --silent "$ORIGIN/api/clip-capabilities" | jq -e \
 curl --fail --silent "$PUBLIC_ORIGIN/api/clip-capabilities" | jq -e \
   '.premiereGenerationEnabled == false and .leagueGenerationEnabled == false'
 dd if="$BETA_ERROR_LOG" of="$ATTESTATION_PROBE_LOG" bs=1 \
-  skip="$ATTESTATION_PROBE_LOG_OFFSET" 2>/dev/null
+  skip="$ATTESTATION_PROBE_LOG_OFFSET" 2> "/dev/null"
 test "$(grep -Fxc 'Clip deployment attestation verification passed' "$ATTESTATION_PROBE_LOG")" = 1
 ! grep -F 'Clip activation source:' "$ATTESTATION_PROBE_LOG"
 launchctl unsetenv PROXYWAR_CLIPS_VERIFY_ATTESTATION_ONLY

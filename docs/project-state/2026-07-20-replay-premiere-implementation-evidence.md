@@ -1,9 +1,21 @@
 # Proxy War Replay Premiere — implementation evidence
 
-Status: local recovery implementation and browser QA verified; deployment proof pending
+Status: Replay Premiere deployed; replay-scoped Clips deployed and live-verified
 Control owner: Codex
 Contract: `2026-07-20-proxywar-premiere-loop-product-spec.md`
 Contract SHA-256: `e56f7ff7f751dfc2b3ecba593bfc29bbb2ad3cc9cfbc2ec80ac449ea78a8312d`
+
+## 2026-07-24 update — replay-scoped Clips live
+
+The Clips successor is complete and live at exact commit
+`91f806131a65b35e3fa3601f70d459ffe3706aa3`, tree
+`c375e12aa9a5ab02d257b514d9eddebeec8e3ccb`, and static-build SHA-256
+`24f3ff9c9d58486f2ca574b763444daf31b59491d6277f821a3ec889828f5141`.
+Replay generation is available on retained league replays, including ordinary
+archived replay pages; it is not restricted to a live Premiere. Premiere
+generation remains independently disabled. The full release record is
+`2026-07-24-clips-release-evidence.md`. `[repo/file verified]` +
+`[live verified]`
 
 This file is the completion ledger for the non-conditional requirements in the
 contract. A source change is not completion evidence by itself. Every row must
