@@ -50,6 +50,8 @@ export async function runAiLeagueClipCanaryCli(
       "premiere-id",
       "bucket",
       "source-replay-sha256",
+      // Exact immutable clip-canary-v3.json bytes. V4 derives and verifies the
+      // v2 hash embedded in that strict claimed-and-disarmed predecessor.
       "prior-state-sha256",
       "root-predecessor-state-sha256",
       "expires-at",

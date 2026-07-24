@@ -20,11 +20,13 @@ import {
   matchProxyWarLeagueClipWritePath,
 } from "./ProxyWarPublicArtifacts";
 
-// Every production one-shot has an immutable versioned state lane. The failed
-// v1 and disarmed v2 predecessors are retained byte-for-byte; v3 never resets,
-// deletes, renames, or rewrites them.
-export const AI_LEAGUE_CLIP_CANARY_FILE = "clip-canary-v3.json";
-export const AI_LEAGUE_CLIP_CANARY_PREDECESSOR_FILE = "clip-canary-v2.json";
+// Every production one-shot has an immutable versioned state lane. The v1, v2,
+// and claimed-and-disarmed v3 predecessors are retained byte-for-byte; v4 never
+// resets, deletes, renames, or rewrites them.
+export const AI_LEAGUE_CLIP_CANARY_FILE = "clip-canary-v4.json";
+export const AI_LEAGUE_CLIP_CANARY_PREDECESSOR_FILE = "clip-canary-v3.json";
+export const AI_LEAGUE_CLIP_CANARY_INTERMEDIATE_PREDECESSOR_FILE =
+  "clip-canary-v2.json";
 export const AI_LEAGUE_CLIP_CANARY_ROOT_PREDECESSOR_FILE =
   "clip-canary-v1.json";
 // Reuse the v1 lock name so every checked-out CLI generation serializes its
@@ -89,11 +91,26 @@ export interface AiLeagueClipCanaryTarget {
 }
 
 /**
- * Strict v3 state. Nullable transition timestamps keep one exact-key schema
+ * Frozen strict v3 state. V4 arm accepts only its claimed-and-disarmed terminal
+ * shape and verifies the v2/v1 hashes embedded in these immutable bytes.
+ */
+export interface AiLeagueClipCanaryV3Record extends AiLeagueClipCanaryTarget {
+  schemaVersion: 3;
+  priorStateSha256: string;
+  rootPredecessorStateSha256: string;
+  lifecycle: AiLeagueClipCanaryLifecycle;
+  armedAt: string;
+  expiresAt: string;
+  claimedAt: string | null;
+  disarmedAt: string | null;
+}
+
+/**
+ * Strict v4 state. Nullable transition timestamps keep one exact-key schema
  * across the durable armed -> claimed -> disarmed lifecycle.
  */
 export interface AiLeagueClipCanaryRecord extends AiLeagueClipCanaryTarget {
-  schemaVersion: 3;
+  schemaVersion: 4;
   priorStateSha256: string;
   rootPredecessorStateSha256: string;
   lifecycle: AiLeagueClipCanaryLifecycle;
@@ -152,7 +169,7 @@ const DIAGNOSTIC_MESSAGES: Record<AiLeagueClipCanaryDiagnosticCode, string> = {
   clip_canary_private_state_root_wrong_mode:
     "Clip canary private state root mode is not 0700; canary is disabled.",
   clip_canary_state_malformed:
-    "Clip canary state does not match strict schema v3; canary is disabled.",
+    "Clip canary state does not match strict schema v4; canary is disabled.",
   clip_canary_state_expired:
     "Clip canary arm expired before claim; canary is disabled.",
   clip_canary_state_claimed:
@@ -278,6 +295,29 @@ export async function readAiLeagueClipCanary(
 export function parseAiLeagueClipCanaryRecord(
   text: string,
 ): AiLeagueClipCanaryRecord | null {
+  return parseVersionedAiLeagueClipCanaryRecord(
+    text,
+    4,
+  ) as AiLeagueClipCanaryRecord | null;
+}
+
+/**
+ * Frozen parser retained for exact v3 predecessor/status evidence. It never
+ * selects v3 as the active lane and never mutates the v3 file.
+ */
+export function parseAiLeagueClipCanaryV3Record(
+  text: string,
+): AiLeagueClipCanaryV3Record | null {
+  return parseVersionedAiLeagueClipCanaryRecord(
+    text,
+    3,
+  ) as AiLeagueClipCanaryV3Record | null;
+}
+
+function parseVersionedAiLeagueClipCanaryRecord(
+  text: string,
+  schemaVersion: 3 | 4,
+): AiLeagueClipCanaryV3Record | AiLeagueClipCanaryRecord | null {
   if (Buffer.byteLength(text, "utf8") > AI_LEAGUE_CLIP_CANARY_MAX_BYTES) {
     return null;
   }
@@ -296,7 +336,7 @@ export function parseAiLeagueClipCanaryRecord(
     return null;
   }
   if (
-    parsed.schemaVersion !== 3 ||
+    parsed.schemaVersion !== schemaVersion ||
     (parsed.lifecycle !== "armed" &&
       parsed.lifecycle !== "claimed" &&
       parsed.lifecycle !== "disarmed") ||
@@ -352,7 +392,9 @@ export function parseAiLeagueClipCanaryRecord(
   ) {
     return null;
   }
-  return parsed as unknown as AiLeagueClipCanaryRecord;
+  return parsed as unknown as
+    | AiLeagueClipCanaryV3Record
+    | AiLeagueClipCanaryRecord;
 }
 
 async function readVerifiedPredecessor(options: {
@@ -360,7 +402,10 @@ async function readVerifiedPredecessor(options: {
   fileName: string;
   expectedSha256: string;
   expectedUid?: number | null;
-  diagnosticPrefix: "clip_canary_predecessor" | "clip_canary_root_predecessor";
+  diagnosticPrefix:
+    | "clip_canary_predecessor"
+    | "clip_canary_intermediate_predecessor"
+    | "clip_canary_root_predecessor";
 }): Promise<Buffer> {
   if (!/^[a-f0-9]{64}$/.test(options.expectedSha256)) {
     throw new Error(`${options.diagnosticPrefix}_sha256_invalid`);
@@ -487,13 +532,37 @@ async function verifyDisarmedPredecessors(options: {
     expectedUid: options.expectedUid,
     diagnosticPrefix: "clip_canary_predecessor",
   });
+  const predecessor = parseAiLeagueClipCanaryV3Record(
+    predecessorBytes.toString("utf8"),
+  );
   if (
-    !isDisarmedPredecessorRecord(
-      predecessorBytes.toString("utf8"),
+    predecessor === null ||
+    predecessor.lifecycle !== "disarmed" ||
+    predecessor.claimedAt === null ||
+    predecessor.rootPredecessorStateSha256 !==
+      options.rootPredecessorStateSha256
+  ) {
+    throw new Error(
+      "clip_canary_predecessor_not_valid_claimed_and_disarmed_v3",
+    );
+  }
+
+  const intermediatePredecessorBytes = await readVerifiedPredecessor({
+    privateStateRoot: options.privateStateRoot,
+    fileName: AI_LEAGUE_CLIP_CANARY_INTERMEDIATE_PREDECESSOR_FILE,
+    expectedSha256: predecessor.priorStateSha256,
+    expectedUid: options.expectedUid,
+    diagnosticPrefix: "clip_canary_intermediate_predecessor",
+  });
+  if (
+    !isDisarmedIntermediatePredecessorRecord(
+      intermediatePredecessorBytes.toString("utf8"),
       options.rootPredecessorStateSha256,
     )
   ) {
-    throw new Error("clip_canary_predecessor_not_valid_disarmed_v2");
+    throw new Error(
+      "clip_canary_intermediate_predecessor_not_valid_disarmed_v2",
+    );
   }
 }
 
@@ -516,7 +585,7 @@ function isDisarmedRootPredecessorRecord(text: string): boolean {
   }
   const candidate = {
     ...parsed,
-    schemaVersion: 3,
+    schemaVersion: 4,
     premiereId: "prem_0000000000000000",
     priorStateSha256: "0".repeat(64),
     rootPredecessorStateSha256: "0".repeat(64),
@@ -524,7 +593,7 @@ function isDisarmedRootPredecessorRecord(text: string): boolean {
   return parseAiLeagueClipCanaryRecord(JSON.stringify(candidate)) !== null;
 }
 
-function isDisarmedPredecessorRecord(
+function isDisarmedIntermediatePredecessorRecord(
   text: string,
   rootPredecessorStateSha256: string,
 ): boolean {
@@ -548,7 +617,7 @@ function isDisarmedPredecessorRecord(
   }
   const candidate = {
     ...parsed,
-    schemaVersion: 3,
+    schemaVersion: 4,
     rootPredecessorStateSha256,
   };
   return parseAiLeagueClipCanaryRecord(JSON.stringify(candidate)) !== null;
@@ -576,7 +645,7 @@ export async function armAiLeagueClipCanary(options: {
     async () => {
       const nowMs = (options.now ?? Date.now)();
       const record: AiLeagueClipCanaryRecord = {
-        schemaVersion: 3,
+        schemaVersion: 4,
         lifecycle: "armed",
         ...options.target,
         priorStateSha256: options.priorStateSha256,
@@ -605,7 +674,7 @@ export async function armAiLeagueClipCanary(options: {
       });
       // This is deliberately inside the shared mutation lock and before the
       // one-shot state write. A stale archive pointer, changed replay source,
-      // or pre-existing output must not consume the only v3 transaction.
+      // or pre-existing output must not consume the only v4 transaction.
       await validateFreshAiLeagueClipCanaryTarget({
         privateStateRoot: options.privateStateRoot,
         runsRoot: options.runsRoot,

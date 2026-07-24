@@ -1,12 +1,13 @@
 # Archived Replay Clip One-Shot Canary Runbook
 
-Status: executed successfully for production commit
-`91f806131a65b35e3fa3601f70d459ffe3706aa3` on 2026-07-24. Anonymous
-retained-replay Clip generation is durably enabled; Premiere generation remains
-disabled. The exact evidence and remaining recovery observation are recorded in
-`project-state/2026-07-24-clips-release-evidence.md`. Reuse this procedure only
-from a newly reviewed release identity. It does not mutate Coworld or read
-private environment-file contents.
+Status: the v3 transaction executed successfully for production commit
+`91f806131a65b35e3fa3601f70d459ffe3706aa3` on 2026-07-24 and remains immutable
+historical evidence in `project-state/2026-07-24-clips-release-evidence.md`.
+This revision prepares the distinct v4 successor lane; v4 has not been armed,
+deployed, or run. Its release gates are summarized under “V4 successor release
+boundary” in `project-state/2026-07-24-clips-release-evidence.md`. Reuse this
+procedure only from a newly reviewed release identity. It does not mutate Coworld
+or read private environment-file contents.
 
 This is a checked command sequence, not a pasteable batch script. Start one
 dedicated `zsh`, run the input block first, then execute exactly one command at
@@ -20,11 +21,12 @@ GO-evidence `jq` command has just exited zero in that same shell.
 ## Contract
 
 The owner-only state for this acceptance transaction is exactly
-`<privateStateRoot>/clip-canary-v3.json`. The failed v1 predecessor and the
-disarmed, unclaimed v2 attempt remain durably preserved as
-`clip-canary-v1.json` and `clip-canary-v2.json`. No command in this release
-reads either predecessor except to verify its exact terminal bytes before v3
-arm, and no command rewrites, resets, renames, or deletes either file.
+`<privateStateRoot>/clip-canary-v4.json`. The v1, v2, and successful v3
+transactions remain durably preserved as `clip-canary-v1.json`,
+`clip-canary-v2.json`, and `clip-canary-v3.json`. No command in this release
+rewrites, resets, renames, or deletes any predecessor. Arm reads all three only
+to verify their exact terminal bytes and hash chain before the distinct v4
+write.
 `clips:canary` accepts that root only through explicit
 `--private-state-root`; it does not read an env file or secret. An arm is bound
 to one public `league-*` run key, one renderable bucket, the exact retained
@@ -65,14 +67,20 @@ schema-v1 disabled record is accepted only as disabled; schema-v1 enabled is
 always malformed and fail-closed. Launchd reads this record only through the
 hash-pinned installed helper; it never executes the in-repository state helper.
 
-The `arm` transaction validates the exact hashes and terminal-disarmed schemas
-of both immutable predecessor records, stable source bytes and their exact hash,
-the canonical Premiere id and sole reveal-public rated-Coworld archive pointer,
-the bucket against the record's declared `num_turns`, and absence of both cache
-and durable destination files while holding the shared mutation lock, before
-the immutable v3 write. Because the true replay terminal is discovered by the
-renderer, the operator must independently observe playback beyond the planned
-capture tail and choose a safely earlier bucket before arming.
+The `arm` transaction validates exact v1, v2, and v3 bytes while holding the
+shared mutation lock. V1 must be strict disarmed. V2 must be strict disarmed and
+unclaimed, with its `priorStateSha256` equal to the exact v1 hash. V3 must be
+strict claimed and disarmed, with its `priorStateSha256` equal to the exact v2
+hash and `rootPredecessorStateSha256` equal to the exact v1 hash. Arm also
+validates stable source bytes and their exact hash, the canonical Premiere id
+and sole reveal-public rated-Coworld archive pointer, the bucket against the
+record's declared `num_turns`, and absence of both cache and durable destination
+files before the immutable v4 write. The pointer's archived `.replay` hash and
+the retained `game-record.json` hash are different hash domains and must not be
+compared. Because the true
+replay terminal is discovered by the renderer, the operator must independently
+observe playback beyond the planned capture tail and choose a safely earlier
+bucket before arming.
 The server repeats the same validation before bind and after bind. Only after
 port 8788 binds does the server durably claim it and issue exactly one system
 request at `premiereClipRepresentativeAnchorTurn(bucket)`. Claim is at-most-once
@@ -95,7 +103,8 @@ RUN_KEY=league-coworld-REPLACE_EXACTLY
 PREMIERE_ID=prem_REPLACE_EXACTLY
 BUCKET=REPLACE_INTEGER
 SOURCE_SHA256=REPLACE_64_LOWERCASE_HEX
-PRIOR_STATE_SHA256=REPLACE_V2_STATE_64_LOWERCASE_HEX
+PRIOR_STATE_SHA256=REPLACE_V3_STATE_64_LOWERCASE_HEX
+INTERMEDIATE_PREDECESSOR_STATE_SHA256=REPLACE_V2_STATE_64_LOWERCASE_HEX
 ROOT_PREDECESSOR_STATE_SHA256=REPLACE_V1_STATE_64_LOWERCASE_HEX
 RELEASE_COMMIT=REPLACE_40_LOWERCASE_HEX
 RELEASE_TREE=REPLACE_40_LOWERCASE_HEX
@@ -105,8 +114,8 @@ REVIEWED_ATTESTATION_HELPER_SHA256=REPLACE_ATTESTATION_HELPER_64_LOWERCASE_HEX
 TRUSTED_ROOT="$HOME/Library/Application Support/ProxyWar"
 INSTALLED_WRAPPER="$TRUSTED_ROOT/bin/start-proxywar-beta.zsh"
 INSTALLED_ATTESTATION_HELPER="$TRUSTED_ROOT/bin/proxywar-clips-deployment-attestation.mjs"
-WRAPPER_BACKUP=/absolute/release-evidence/start-proxywar-beta.before-v3.zsh
-ATTESTATION_HELPER_BACKUP=/absolute/release-evidence/proxywar-clips-deployment-attestation.before-v3.mjs
+WRAPPER_BACKUP=/absolute/release-evidence/start-proxywar-beta.before-v4.zsh
+ATTESTATION_HELPER_BACKUP=/absolute/release-evidence/proxywar-clips-deployment-attestation.before-v4.mjs
 ATTESTATION_CREATE_RESULT=/absolute/release-evidence/clip-deployment-attestation-create-v1.json
 ATTESTATION_PROBE_LOG=/absolute/release-evidence/clip-deployment-attestation-disabled-probe.log
 BETA_ERROR_LOG=/absolute/reviewed/com.proxywar.beta.stderr.log
@@ -130,13 +139,23 @@ Verify the retained source identity before arming:
 ```bash
 test "$(shasum -a 256 "$RUNS_ROOT/$RUN_KEY/game-record.json" | awk '{print $1}')" = "$SOURCE_SHA256"
 test "$(shasum -a 256 "$PRIVATE_STATE_ROOT/clip-canary-v1.json" | awk '{print $1}')" = "$ROOT_PREDECESSOR_STATE_SHA256"
-test "$(shasum -a 256 "$PRIVATE_STATE_ROOT/clip-canary-v2.json" | awk '{print $1}')" = "$PRIOR_STATE_SHA256"
+test "$(shasum -a 256 "$PRIVATE_STATE_ROOT/clip-canary-v2.json" | awk '{print $1}')" = "$INTERMEDIATE_PREDECESSOR_STATE_SHA256"
+test "$(shasum -a 256 "$PRIVATE_STATE_ROOT/clip-canary-v3.json" | awk '{print $1}')" = "$PRIOR_STATE_SHA256"
 jq -e '.schemaVersion == 1 and .lifecycle == "disarmed"' \
   "$PRIVATE_STATE_ROOT/clip-canary-v1.json"
 jq -e --arg rootPrior "$ROOT_PREDECESSOR_STATE_SHA256" \
   '.schemaVersion == 2 and .lifecycle == "disarmed" and .claimedAt == null and
    .priorStateSha256 == $rootPrior' \
   "$PRIVATE_STATE_ROOT/clip-canary-v2.json"
+jq -e --arg prior "$INTERMEDIATE_PREDECESSOR_STATE_SHA256" \
+  --arg rootPrior "$ROOT_PREDECESSOR_STATE_SHA256" \
+  '(keys | sort) == (["armedAt","bucket","claimedAt","disarmedAt","expiresAt",
+    "lifecycle","premiereId","priorStateSha256","rootPredecessorStateSha256",
+    "runKey","schemaVersion","sourceReplaySha256"] | sort) and
+   .schemaVersion == 3 and .lifecycle == "disarmed" and .claimedAt != null and
+   .disarmedAt != null and .priorStateSha256 == $prior and
+   .rootPredecessorStateSha256 == $rootPrior' \
+  "$PRIVATE_STATE_ROOT/clip-canary-v3.json"
 test "$(git rev-parse HEAD)" = "$RELEASE_COMMIT"
 test "$(git rev-parse 'HEAD^{tree}')" = "$RELEASE_TREE"
 if ! RELEASE_STATUS="$(git status --porcelain --untracked-files=all)"; then
@@ -259,7 +278,7 @@ launchctl bootout "gui/$(id -u)" "$HOME/Library/LaunchAgents/com.proxywar.premie
 
 Confirm no `replay-premiere-loop.ts` iteration remains before proceeding.
 
-Before v3 arm, exercise the exact launchd path while the manager deny remains
+Before v4 arm, exercise the exact launchd path while the manager deny remains
 latched. This is a disabled attestation probe, not an activation: both
 capabilities must remain false, and the retained new stderr slice must contain
 the exact success line once. Do not continue if the log path is not the active
@@ -333,7 +352,7 @@ npm run --silent clips:canary -- arm \
   --argjson bucket "$BUCKET" --arg source "$SOURCE_SHA256" \
   --arg prior "$PRIOR_STATE_SHA256" \
   --arg rootPrior "$ROOT_PREDECESSOR_STATE_SHA256" \
-  '.enabled == true and .record.schemaVersion == 3 and
+  '.enabled == true and .record.schemaVersion == 4 and
    .record.lifecycle == "armed" and .record.runKey == $run and
    .record.premiereId == $premiere and .record.bucket == $bucket and
    .record.sourceReplaySha256 == $source and
@@ -517,13 +536,14 @@ npm run --silent clips:canary -- disarm --private-state-root "$PRIVATE_STATE_ROO
   --argjson bucket "$BUCKET" --arg source "$SOURCE_SHA256" \
   --arg prior "$PRIOR_STATE_SHA256" \
   --arg rootPrior "$ROOT_PREDECESSOR_STATE_SHA256" \
-  '.record.schemaVersion == 3 and .record.lifecycle == "disarmed" and
+  '.record.schemaVersion == 4 and .record.lifecycle == "disarmed" and
    .record.runKey == $run and .record.premiereId == $premiere and
    .record.bucket == $bucket and .record.sourceReplaySha256 == $source and
    .record.priorStateSha256 == $prior and
    .record.rootPredecessorStateSha256 == $rootPrior'
 test "$(shasum -a 256 "$PRIVATE_STATE_ROOT/clip-canary-v1.json" | awk '{print $1}')" = "$ROOT_PREDECESSOR_STATE_SHA256"
-test "$(shasum -a 256 "$PRIVATE_STATE_ROOT/clip-canary-v2.json" | awk '{print $1}')" = "$PRIOR_STATE_SHA256"
+test "$(shasum -a 256 "$PRIVATE_STATE_ROOT/clip-canary-v2.json" | awk '{print $1}')" = "$INTERMEDIATE_PREDECESSOR_STATE_SHA256"
+test "$(shasum -a 256 "$PRIVATE_STATE_ROOT/clip-canary-v3.json" | awk '{print $1}')" = "$PRIOR_STATE_SHA256"
 test "$(curl --silent -o /dev/null -w '%{http_code}' "$ORIGIN/ai-league-runs/$RUN_KEY/clip-v1-$BUCKET.mp4")" = 404
 curl --silent --show-error --dump-header /tmp/proxywar-public-rollback-mp4-GET.headers \
   --output /dev/null --write-out '%{http_code}\n' \
@@ -563,10 +583,10 @@ launchd retains the manager value across controlled restarts.
 
 Before setting the release override, quiesce the Premiere loop exactly as in
 the canary transaction and confirm no iteration remains. Preserve a
-content-addressed `canary-go.json` whose exact commit, run, Premiere id, bucket,
-source hash, both predecessor-state hashes, HTTP assertions, artifact hashes,
-decode result, visual result, cleanup result, and `verdict: "GO"` have all been
-verified.
+content-addressed `canary-go.json` whose exact successor commit, tree, static
+build digest, run, Premiere id, bucket, source hash, all three predecessor-state
+hashes, HTTP assertions, artifact hashes, decode result, visual result, cleanup
+result, and `verdict: "GO"` have all been verified.
 
 ```bash
 npm run --silent clips:canary -- disarm --private-state-root "$PRIVATE_STATE_ROOT" | jq -e \
@@ -574,29 +594,33 @@ npm run --silent clips:canary -- disarm --private-state-root "$PRIVATE_STATE_ROO
   --argjson bucket "$BUCKET" --arg source "$SOURCE_SHA256" \
   --arg prior "$PRIOR_STATE_SHA256" \
   --arg rootPrior "$ROOT_PREDECESSOR_STATE_SHA256" \
-  '.record.schemaVersion == 3 and .record.lifecycle == "disarmed" and
+  '.record.schemaVersion == 4 and .record.lifecycle == "disarmed" and
    .record.claimedAt != null and .record.runKey == $run and
    .record.premiereId == $premiere and .record.bucket == $bucket and
    .record.sourceReplaySha256 == $source and
    .record.priorStateSha256 == $prior and
    .record.rootPredecessorStateSha256 == $rootPrior'
 test "$(shasum -a 256 "$PRIVATE_STATE_ROOT/clip-canary-v1.json" | awk '{print $1}')" = "$ROOT_PREDECESSOR_STATE_SHA256"
-test "$(shasum -a 256 "$PRIVATE_STATE_ROOT/clip-canary-v2.json" | awk '{print $1}')" = "$PRIOR_STATE_SHA256"
+test "$(shasum -a 256 "$PRIVATE_STATE_ROOT/clip-canary-v2.json" | awk '{print $1}')" = "$INTERMEDIATE_PREDECESSOR_STATE_SHA256"
+test "$(shasum -a 256 "$PRIVATE_STATE_ROOT/clip-canary-v3.json" | awk '{print $1}')" = "$PRIOR_STATE_SHA256"
 test "$(shasum -a 256 "$CANARY_GO_EVIDENCE" | awk '{print $1}')" = "$CANARY_GO_EVIDENCE_SHA256"
 jq -e --arg run "$RUN_KEY" --arg premiere "$PREMIERE_ID" \
   --argjson bucket "$BUCKET" --arg source "$SOURCE_SHA256" \
   --arg prior "$PRIOR_STATE_SHA256" \
+  --arg intermediatePrior "$INTERMEDIATE_PREDECESSOR_STATE_SHA256" \
   --arg rootPrior "$ROOT_PREDECESSOR_STATE_SHA256" \
   --arg commit "$RELEASE_COMMIT" \
   --arg tree "$RELEASE_TREE" --arg build "$RELEASE_BUILD_SHA256" \
   '(keys | sort) == (["artifacts","attributionPassed","bucket","buildSha256",
     "cleanupPassed","commit","decodePassed","http","premiereId",
-    "priorStateSha256","rootPredecessorStateSha256","runKey","schemaVersion",
+    "intermediatePredecessorStateSha256","priorStateSha256",
+    "rootPredecessorStateSha256","runKey","schemaVersion",
     "sourceReplaySha256","tree","verdict","watermarkPassed"] | sort) and
-   .schemaVersion == 1 and .verdict == "GO" and .commit == $commit and
+   .schemaVersion == 2 and .verdict == "GO" and .commit == $commit and
    .tree == $tree and .buildSha256 == $build and .runKey == $run and
    .premiereId == $premiere and .bucket == $bucket and
    .sourceReplaySha256 == $source and .priorStateSha256 == $prior and
+   .intermediatePredecessorStateSha256 == $intermediatePrior and
    .rootPredecessorStateSha256 == $rootPrior and
    (.http | keys | sort) == (["exactMp4Get","exactMp4Head","exactStatusReady",
     "localCapabilitiesDisabled","postNoStore404","publicCapabilitiesDisabled",

@@ -5,6 +5,7 @@ import path from "node:path";
 import { afterEach, beforeEach, describe, expect, test } from "vitest";
 import {
   AI_LEAGUE_CLIP_CANARY_FILE,
+  AI_LEAGUE_CLIP_CANARY_INTERMEDIATE_PREDECESSOR_FILE,
   AI_LEAGUE_CLIP_CANARY_LOCK_FILE,
   AI_LEAGUE_CLIP_CANARY_LOCK_MAX_BYTES,
   AI_LEAGUE_CLIP_CANARY_MAX_BYTES,
@@ -14,6 +15,7 @@ import {
   claimAiLeagueClipCanary,
   disarmAiLeagueClipCanary,
   parseAiLeagueClipCanaryRecord,
+  parseAiLeagueClipCanaryV3Record,
   readAiLeagueClipCanary,
   type AiLeagueClipCanaryRecord,
   type AiLeagueClipCanaryTarget,
@@ -56,7 +58,7 @@ const ROOT_PREDECESSOR_BYTES = Buffer.from(
 const ROOT_PREDECESSOR_SHA256 = createHash("sha256")
   .update(ROOT_PREDECESSOR_BYTES)
   .digest("hex");
-const PREDECESSOR_BYTES = Buffer.from(
+const INTERMEDIATE_PREDECESSOR_BYTES = Buffer.from(
   `${JSON.stringify({
     schemaVersion: 2,
     lifecycle: "disarmed",
@@ -69,6 +71,25 @@ const PREDECESSOR_BYTES = Buffer.from(
     expiresAt: "2026-07-23T19:20:00.000Z",
     claimedAt: null,
     disarmedAt: "2026-07-23T19:05:00.000Z",
+  })}\n`,
+);
+const INTERMEDIATE_PREDECESSOR_SHA256 = createHash("sha256")
+  .update(INTERMEDIATE_PREDECESSOR_BYTES)
+  .digest("hex");
+const PREDECESSOR_BYTES = Buffer.from(
+  `${JSON.stringify({
+    schemaVersion: 3,
+    lifecycle: "disarmed",
+    runKey: "league-coworld-predecessor-v3",
+    premiereId: "prem_fedcba0987654321",
+    bucket: 57,
+    sourceReplaySha256: "d".repeat(64),
+    priorStateSha256: INTERMEDIATE_PREDECESSOR_SHA256,
+    rootPredecessorStateSha256: ROOT_PREDECESSOR_SHA256,
+    armedAt: "2026-07-23T19:30:00.000Z",
+    expiresAt: "2026-07-23T19:50:00.000Z",
+    claimedAt: "2026-07-23T19:31:00.000Z",
+    disarmedAt: "2026-07-23T19:35:00.000Z",
   })}\n`,
 );
 const PREDECESSOR_SHA256 = createHash("sha256")
@@ -94,6 +115,11 @@ beforeEach(async () => {
   await fs.writeFile(
     path.join(root, AI_LEAGUE_CLIP_CANARY_ROOT_PREDECESSOR_FILE),
     ROOT_PREDECESSOR_BYTES,
+    { mode: 0o600 },
+  );
+  await fs.writeFile(
+    path.join(root, AI_LEAGUE_CLIP_CANARY_INTERMEDIATE_PREDECESSOR_FILE),
+    INTERMEDIATE_PREDECESSOR_BYTES,
     { mode: 0o600 },
   );
   await fs.writeFile(
@@ -144,7 +170,7 @@ function armedRecord(
   overrides: Partial<AiLeagueClipCanaryRecord> = {},
 ): AiLeagueClipCanaryRecord {
   return {
-    schemaVersion: 3,
+    schemaVersion: 4,
     lifecycle: "armed",
     ...TARGET,
     priorStateSha256: PREDECESSOR_SHA256,
@@ -168,8 +194,8 @@ async function writeState(
   );
 }
 
-describe("strict clip canary v3 state", () => {
-  test("defaults off when the record is missing", async () => {
+describe("strict clip canary v4 state", () => {
+  test("defaults off when v4 is missing while preserving parseable v3 predecessor evidence", async () => {
     await expect(
       readAiLeagueClipCanary({ privateStateRoot: root, now: () => NOW_MS }),
     ).resolves.toMatchObject({
@@ -177,6 +203,23 @@ describe("strict clip canary v3 state", () => {
       record: null,
       diagnostic: { code: "clip_canary_state_missing" },
     });
+    expect(
+      parseAiLeagueClipCanaryV3Record(PREDECESSOR_BYTES.toString("utf8")),
+    ).toMatchObject({
+      schemaVersion: 3,
+      lifecycle: "disarmed",
+      claimedAt: "2026-07-23T19:31:00.000Z",
+      priorStateSha256: INTERMEDIATE_PREDECESSOR_SHA256,
+      rootPredecessorStateSha256: ROOT_PREDECESSOR_SHA256,
+    });
+    expect(
+      parseAiLeagueClipCanaryRecord(PREDECESSOR_BYTES.toString("utf8")),
+    ).toBeNull();
+    expect(
+      await fs.readFile(
+        path.join(root, AI_LEAGUE_CLIP_CANARY_PREDECESSOR_FILE),
+      ),
+    ).toEqual(PREDECESSOR_BYTES);
   });
 
   test("accepts only exact keys, canonical timestamps, target grammar, and a 30-minute arm", () => {
@@ -185,7 +228,7 @@ describe("strict clip canary v3 state", () => {
     ).toEqual(armedRecord());
     for (const invalid of [
       { ...armedRecord(), extra: true },
-      { ...armedRecord(), schemaVersion: 2 },
+      { ...armedRecord(), schemaVersion: 3 },
       { ...armedRecord(), priorStateSha256: "F".repeat(64) },
       { ...armedRecord(), rootPredecessorStateSha256: "F".repeat(64) },
       { ...armedRecord(), runKey: "coworld-not-public" },
@@ -300,7 +343,7 @@ describe("strict clip canary v3 state", () => {
 });
 
 describe("durable clip canary transitions", () => {
-  test("validates the exact source, archive pointer, and empty destinations before consuming v3", async () => {
+  test("validates the exact source, archive pointer, and empty destinations before consuming v4", async () => {
     const options = {
       privateStateRoot: root,
       runsRoot,
@@ -377,10 +420,14 @@ describe("durable clip canary transitions", () => {
     await expect(fs.lstat(statePath)).rejects.toMatchObject({ code: "ENOENT" });
   });
 
-  test("requires exact valid disarmed v1 and v2 predecessors before creating v3", async () => {
+  test("requires the exact v1 -> v2 -> claimed-and-disarmed v3 chain before creating v4", async () => {
     const rootPredecessorPath = path.join(
       root,
       AI_LEAGUE_CLIP_CANARY_ROOT_PREDECESSOR_FILE,
+    );
+    const intermediatePredecessorPath = path.join(
+      root,
+      AI_LEAGUE_CLIP_CANARY_INTERMEDIATE_PREDECESSOR_FILE,
     );
     const predecessorPath = path.join(
       root,
@@ -398,6 +445,18 @@ describe("durable clip canary transitions", () => {
         expiresAt: new Date(NOW_MS + 10 * 60_000).toISOString(),
         now: () => NOW_MS,
       });
+    const sha256 = (bytes: Buffer) =>
+      createHash("sha256").update(bytes).digest("hex");
+    const predecessorRecord = JSON.parse(
+      PREDECESSOR_BYTES.toString("utf8"),
+    ) as Record<string, unknown>;
+    const intermediatePredecessorRecord = JSON.parse(
+      INTERMEDIATE_PREDECESSOR_BYTES.toString("utf8"),
+    ) as Record<string, unknown>;
+    const versionedBytes = (
+      source: Record<string, unknown>,
+      overrides: Record<string, unknown>,
+    ) => Buffer.from(`${JSON.stringify({ ...source, ...overrides })}\n`);
 
     await fs.rm(rootPredecessorPath);
     await expect(arm()).rejects.toThrow(
@@ -438,6 +497,15 @@ describe("durable clip canary transitions", () => {
       mode: 0o600,
     });
 
+    const malformedRoot = Buffer.from("{malformed\n");
+    await fs.writeFile(rootPredecessorPath, malformedRoot, { mode: 0o600 });
+    await expect(
+      arm(PREDECESSOR_SHA256, sha256(malformedRoot)),
+    ).rejects.toThrow("clip_canary_root_predecessor_not_valid_disarmed_v1");
+    await fs.writeFile(rootPredecessorPath, ROOT_PREDECESSOR_BYTES, {
+      mode: 0o600,
+    });
+
     await fs.rm(predecessorPath);
     await expect(arm()).rejects.toThrow(
       "clip_canary_predecessor_refused:clip_canary_state_missing",
@@ -448,60 +516,123 @@ describe("durable clip canary transitions", () => {
       "clip_canary_predecessor_sha256_mismatch",
     );
 
-    const predecessor = JSON.parse(PREDECESSOR_BYTES.toString("utf8")) as {
-      lifecycle: string;
-      claimedAt: string | null;
-      disarmedAt: string | null;
-    };
-    const armedPredecessor = Buffer.from(
-      `${JSON.stringify({
-        ...predecessor,
-        lifecycle: "armed",
-        claimedAt: null,
-        disarmedAt: null,
-      })}\n`,
+    const malformedPredecessor = Buffer.from("{malformed\n");
+    await fs.writeFile(predecessorPath, malformedPredecessor, { mode: 0o600 });
+    await expect(arm(sha256(malformedPredecessor))).rejects.toThrow(
+      "clip_canary_predecessor_not_valid_claimed_and_disarmed_v3",
     );
-    await fs.writeFile(predecessorPath, armedPredecessor, { mode: 0o600 });
-    await expect(
-      arm(createHash("sha256").update(armedPredecessor).digest("hex")),
-    ).rejects.toThrow("clip_canary_predecessor_not_valid_disarmed_v2");
 
-    const claimedAndDisarmedPredecessor = Buffer.from(
-      `${JSON.stringify({
-        ...predecessor,
-        claimedAt: new Date(NOW_MS + 1_000).toISOString(),
-      })}\n`,
+    const armedPredecessor = versionedBytes(predecessorRecord, {
+      lifecycle: "armed",
+      claimedAt: null,
+      disarmedAt: null,
+    });
+    await fs.writeFile(predecessorPath, armedPredecessor, { mode: 0o600 });
+    await expect(arm(sha256(armedPredecessor))).rejects.toThrow(
+      "clip_canary_predecessor_not_valid_claimed_and_disarmed_v3",
     );
-    await fs.writeFile(predecessorPath, claimedAndDisarmedPredecessor, {
+
+    const claimedOnlyPredecessor = versionedBytes(predecessorRecord, {
+      lifecycle: "claimed",
+      disarmedAt: null,
+    });
+    await fs.writeFile(predecessorPath, claimedOnlyPredecessor, {
       mode: 0o600,
     });
-    await expect(
-      arm(
-        createHash("sha256")
-          .update(claimedAndDisarmedPredecessor)
-          .digest("hex"),
-      ),
-    ).rejects.toThrow("clip_canary_predecessor_not_valid_disarmed_v2");
-
-    const wrongRootChain = Buffer.from(
-      `${JSON.stringify({
-        ...predecessor,
-        priorStateSha256: "1".repeat(64),
-      })}\n`,
+    await expect(arm(sha256(claimedOnlyPredecessor))).rejects.toThrow(
+      "clip_canary_predecessor_not_valid_claimed_and_disarmed_v3",
     );
-    await fs.writeFile(predecessorPath, wrongRootChain, { mode: 0o600 });
-    await expect(
-      arm(createHash("sha256").update(wrongRootChain).digest("hex")),
-    ).rejects.toThrow("clip_canary_predecessor_not_valid_disarmed_v2");
 
-    await fs.writeFile(predecessorPath, "{malformed\n", { mode: 0o600 });
-    const malformedSha256 = createHash("sha256")
-      .update("{malformed\n")
-      .digest("hex");
-    await expect(arm(malformedSha256)).rejects.toThrow(
-      "clip_canary_predecessor_not_valid_disarmed_v2",
+    const unclaimedDisarmedPredecessor = versionedBytes(predecessorRecord, {
+      claimedAt: null,
+    });
+    await fs.writeFile(predecessorPath, unclaimedDisarmedPredecessor, {
+      mode: 0o600,
+    });
+    await expect(arm(sha256(unclaimedDisarmedPredecessor))).rejects.toThrow(
+      "clip_canary_predecessor_not_valid_claimed_and_disarmed_v3",
     );
+
+    const wrongV3RootChain = versionedBytes(predecessorRecord, {
+      rootPredecessorStateSha256: "1".repeat(64),
+    });
+    await fs.writeFile(predecessorPath, wrongV3RootChain, { mode: 0o600 });
+    await expect(arm(sha256(wrongV3RootChain))).rejects.toThrow(
+      "clip_canary_predecessor_not_valid_claimed_and_disarmed_v3",
+    );
+
+    const wrongV3IntermediateChain = versionedBytes(predecessorRecord, {
+      priorStateSha256: "1".repeat(64),
+    });
+    await fs.writeFile(predecessorPath, wrongV3IntermediateChain, {
+      mode: 0o600,
+    });
+    await expect(arm(sha256(wrongV3IntermediateChain))).rejects.toThrow(
+      "clip_canary_intermediate_predecessor_sha256_mismatch",
+    );
+
+    await fs.writeFile(predecessorPath, PREDECESSOR_BYTES, { mode: 0o600 });
+    await fs.rm(intermediatePredecessorPath);
+    await expect(arm()).rejects.toThrow(
+      "clip_canary_intermediate_predecessor_refused:clip_canary_state_missing",
+    );
+
+    const malformedIntermediate = Buffer.from("{malformed\n");
+    await fs.writeFile(intermediatePredecessorPath, malformedIntermediate, {
+      mode: 0o600,
+    });
+    const v3ForMalformedIntermediate = versionedBytes(predecessorRecord, {
+      priorStateSha256: sha256(malformedIntermediate),
+    });
+    await fs.writeFile(predecessorPath, v3ForMalformedIntermediate, {
+      mode: 0o600,
+    });
+    await expect(arm(sha256(v3ForMalformedIntermediate))).rejects.toThrow(
+      "clip_canary_intermediate_predecessor_not_valid_disarmed_v2",
+    );
+
+    const wrongV2RootChain = versionedBytes(intermediatePredecessorRecord, {
+      priorStateSha256: "2".repeat(64),
+    });
+    await fs.writeFile(intermediatePredecessorPath, wrongV2RootChain, {
+      mode: 0o600,
+    });
+    const v3ForWrongV2RootChain = versionedBytes(predecessorRecord, {
+      priorStateSha256: sha256(wrongV2RootChain),
+    });
+    await fs.writeFile(predecessorPath, v3ForWrongV2RootChain, { mode: 0o600 });
+    await expect(arm(sha256(v3ForWrongV2RootChain))).rejects.toThrow(
+      "clip_canary_intermediate_predecessor_not_valid_disarmed_v2",
+    );
+
+    const claimedV2 = versionedBytes(intermediatePredecessorRecord, {
+      claimedAt: "2026-07-23T19:01:00.000Z",
+    });
+    await fs.writeFile(intermediatePredecessorPath, claimedV2, { mode: 0o600 });
+    const v3ForClaimedV2 = versionedBytes(predecessorRecord, {
+      priorStateSha256: sha256(claimedV2),
+    });
+    await fs.writeFile(predecessorPath, v3ForClaimedV2, { mode: 0o600 });
+    await expect(arm(sha256(v3ForClaimedV2))).rejects.toThrow(
+      "clip_canary_intermediate_predecessor_not_valid_disarmed_v2",
+    );
+
     await expect(fs.lstat(statePath)).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  test("refuses to overwrite any pre-existing v4 state", async () => {
+    await writeState(armedRecord());
+    const before = await fs.readFile(statePath);
+    await expect(
+      armAiLeagueClipCanary({
+        privateStateRoot: root,
+        target: TARGET,
+        priorStateSha256: PREDECESSOR_SHA256,
+        expiresAt: new Date(NOW_MS + 10 * 60_000).toISOString(),
+        now: () => NOW_MS,
+      }),
+    ).rejects.toThrow("clip_canary_arm_refused:clip_canary_armed");
+    expect(await fs.readFile(statePath)).toEqual(before);
   });
 
   test("atomically arms, claims once, and idempotently disarms without deleting evidence", async () => {
@@ -511,6 +642,9 @@ describe("durable clip canary transitions", () => {
     const predecessorBefore = await fs.readFile(
       path.join(root, AI_LEAGUE_CLIP_CANARY_PREDECESSOR_FILE),
     );
+    const intermediatePredecessorBefore = await fs.readFile(
+      path.join(root, AI_LEAGUE_CLIP_CANARY_INTERMEDIATE_PREDECESSOR_FILE),
+    );
     const armed = await armAiLeagueClipCanary({
       privateStateRoot: root,
       target: TARGET,
@@ -519,7 +653,7 @@ describe("durable clip canary transitions", () => {
       now: () => NOW_MS,
     });
     expect(armed).toMatchObject({
-      schemaVersion: 3,
+      schemaVersion: 4,
       lifecycle: "armed",
       priorStateSha256: PREDECESSOR_SHA256,
       rootPredecessorStateSha256: ROOT_PREDECESSOR_SHA256,
@@ -565,6 +699,11 @@ describe("durable clip canary transitions", () => {
       claimedAt: claimed.claimedAt,
       disarmedAt: new Date(NOW_MS + 3_000).toISOString(),
     });
+    expect(
+      await fs.readFile(
+        path.join(root, AI_LEAGUE_CLIP_CANARY_INTERMEDIATE_PREDECESSOR_FILE),
+      ),
+    ).toEqual(intermediatePredecessorBefore);
     expect(
       await fs.readFile(
         path.join(root, AI_LEAGUE_CLIP_CANARY_PREDECESSOR_FILE),

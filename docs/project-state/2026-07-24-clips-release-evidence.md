@@ -121,3 +121,58 @@ The write-independent emergency deny remains
 literal `false/false` proof before attempting to write durable state disabled.
 The complete inverse transaction is preserved in
 `docs/PROXYWAR_ARCHIVED_CLIP_CANARY.md`.
+
+## V4 successor release boundary
+
+Status: local implementation and certification only; not deployed, armed, or
+run. `[repo/file verified]`
+
+The next acceptance transaction uses distinct
+`<privateStateRoot>/clip-canary-v4.json` strict schema 4 state. V1, v2, and v3
+remain immutable, and every generation continues to serialize mutations through
+`clip-canary-v1.lock`. The implementation began from
+`d93bcba4b5bd40d7dd4afef042a3e01845d3d9b6`, tree
+`d679ff329da280c27487c205da2bf1ef4d3df746`. That is the parent identity, not
+the successor release identity. Record the exact reviewed successor commit,
+tree, and deterministic static-build SHA-256 after the candidate is frozen.
+
+A read-only 2026-07-24 audit reported exact predecessor SHA-256 values:
+
+- v1: `f45aa93ce4180e5e92d8c1eb7b269b33b7261f76a2fbb65a7b4d3af6a928a94b`
+- v2: `e9fffd81bdac826546230909a770459c27001a1fbff7944f0d69854422dde5f3`
+- v3: `775692766541e11d1c0218e6618b60c96cbe3d0b0f316995949f5463d9240c48`
+
+All three were reported uid 501, mode `0600`, one hard link. V3 is strict
+claimed-and-disarmed state and embeds the listed v2 and v1 hashes. V2 is strict
+disarmed, unclaimed state and embeds the v1 hash. The release transaction must
+re-read all bytes and metadata. Any mismatch is a hard stop, and v1/v2/v3 must
+remain byte-identical after v4 arm, claim, and disarm. `[live verified,
+read-only]`
+
+V4 arm remains bound to a fresh public run, canonical Premiere id, renderable
+bucket, exact retained `game-record.json` hash, sole matching Premiere archive
+pointer, absent cache/archive destinations, and at most a 30-minute lifetime.
+The archive pointer’s `.replay` hash is a different hash domain from the retained
+`game-record.json`; those hashes must not be compared. The server validates
+before and after bind, durably claims before one internal request, never
+automatically retries, and never re-enqueues a claimed restart.
+
+No activating action is allowed until a reviewed successor has its own exact
+commit, tree, deterministic static-build SHA-256, closed source attestation,
+installed wrapper/helper hashes, and fresh nonce. The disabled attestation probe
+remains mandatory. The content-addressed v4 `canary-go.json` advances to
+exact-key schema 2 and binds the successor commit/tree/build, target identity,
+v3/v2/v1 hashes, literal local/public HTTP assertions, byte-identical artifact
+hashes and lengths, decode, watermark, attribution, cleanup, and
+`verdict: "GO"`. A claimed state, HTTP 200, prior v3 result, or local scratch
+render is not GO.
+
+The v4 canary deliberately requests
+`premiereClipRepresentativeAnchorTurn(bucket)` internally while public POST is
+unavailable. It therefore cannot prove the new precise-moment selector. After a
+complete v4 GO and ordinary replay-scoped enablement, a separate fresh ordinary
+replay must prove selector/Preview position, a non-default bucket POST,
+`progress=1`, expected manifest anchor, public MP4 GET/HEAD, decode/watermark,
+and zero worker/Chrome/ffmpeg/temp residue. Failure triggers the documented
+emergency disable transaction. The exact command gates remain in
+`docs/PROXYWAR_ARCHIVED_CLIP_CANARY.md`.
