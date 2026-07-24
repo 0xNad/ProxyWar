@@ -8,6 +8,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { proxyWarLeagueContentSecurityPolicy } from "../../../src/server/agents/ProxyWarPublicArtifacts";
 import { ReplayPremiereArchiveStore } from "../../../src/server/replay-premiere/ReplayPremiereArchiveIndex";
 import { createReplayPremiereArchiveRouter } from "../../../src/server/replay-premiere/ReplayPremiereArchiveRouter";
+import type { PremiereState } from "../../../src/server/replay-premiere/ReplayPremiereContracts";
 import type { ReplayPremiereHttpRegistry } from "../../../src/server/replay-premiere/ReplayPremiereHttp";
 import { sha256Hex } from "../../../src/server/replay-premiere/ReplayPremiereIntegrity";
 import { buildPremiereResultSummary } from "../../../src/server/replay-premiere/ReplayPremiereResultSummary";
@@ -40,7 +41,10 @@ afterEach(async () => {
 });
 
 async function harness(
-  options: { retainedRunKeys?: ReadonlySet<string> } = {},
+  options: {
+    retainedRunKeys?: ReadonlySet<string>;
+    registeredStates?: ReadonlyMap<string, PremiereState>;
+  } = {},
 ): Promise<{
   store: ReplayPremiereArchiveStore;
   run(operation: (baseUrl: string) => Promise<void>): Promise<void>;
@@ -91,10 +95,19 @@ async function harness(
     sha256Hex(FAILED_ID),
   );
 
-  // A "live" premiere is registered but never in the archive index.
+  // A playing premiere is registered but never in the archive index by
+  // default. Individual tests may also register an indexed terminal runtime.
+  const registeredStates =
+    options.registeredStates ?? new Map([[REGISTERED_ID, "playing"]]);
   const registry = {
-    get: (premiereId: string) =>
-      premiereId === REGISTERED_ID ? ({ live: true } as unknown) : null,
+    get: (premiereId: string) => {
+      const state = registeredStates.get(premiereId);
+      return state === undefined
+        ? null
+        : ({
+            runtime: { readLifecycleState: () => state },
+          } as unknown);
+    },
   } as unknown as ReplayPremiereHttpRegistry;
 
   const app = express();
@@ -133,6 +146,22 @@ async function harness(
       await operation(`http://127.0.0.1:${address.port}`);
     },
   };
+}
+
+function archivePayloadFrom(html: string): {
+  replayRunKey: string | null;
+  clipGenerationTarget: {
+    kind: "league_run";
+    replayRunKey: string;
+  } | null;
+  clip: { url: string; byteLength: number } | null;
+} {
+  const match =
+    /<script[^>]*id="proxywar-premiere-archive"[^>]*>([\s\S]*?)<\/script>/.exec(
+      html,
+    );
+  if (match === null) throw new Error("archive payload island missing");
+  return JSON.parse(match[1]);
 }
 
 describe("createReplayPremiereArchiveRouter", () => {
@@ -237,6 +266,58 @@ describe("createReplayPremiereArchiveRouter", () => {
       expect(response.status).toBe(404);
       const body = await response.json();
       expect(body.error.code).toBe("DOWNSTREAM_HANDLED");
+    });
+  });
+
+  it.each(["playing", "revealed"] as const)(
+    "defers an indexed registered %s runtime to the live page",
+    async (state) => {
+      const h = await harness({
+        registeredStates: new Map([[ARCHIVED_ID, state]]),
+      });
+      await h.run(async (baseUrl) => {
+        const response = await fetch(`${baseUrl}/premiere/${ARCHIVED_ID}`);
+        expect(response.status).toBe(404);
+        expect(await response.json()).toEqual({
+          error: {
+            code: "DOWNSTREAM_HANDLED",
+            path: `/premiere/${ARCHIVED_ID}`,
+          },
+        });
+      });
+    },
+  );
+
+  it("serves the session-free league clip control for an indexed registered archive", async () => {
+    const expectedRunKey = "league-coworld-run-001";
+    const h = await harness({
+      retainedRunKeys: new Set([expectedRunKey]),
+      registeredStates: new Map([[ARCHIVED_ID, "archived"]]),
+    });
+    await h.run(async (baseUrl) => {
+      const response = await fetch(`${baseUrl}/premiere/${ARCHIVED_ID}`);
+      expect(response.status).toBe(200);
+      const payload = archivePayloadFrom(await response.text());
+      expect(payload.clipGenerationTarget).toEqual({
+        kind: "league_run",
+        replayRunKey: expectedRunKey,
+      });
+    });
+  });
+
+  it("defers a registered archive without a durable pointer", async () => {
+    const h = await harness({
+      registeredStates: new Map([[REGISTERED_ID, "archived"]]),
+    });
+    await h.run(async (baseUrl) => {
+      const response = await fetch(`${baseUrl}/premiere/${REGISTERED_ID}`);
+      expect(response.status).toBe(404);
+      expect(await response.json()).toEqual({
+        error: {
+          code: "DOWNSTREAM_HANDLED",
+          path: `/premiere/${REGISTERED_ID}`,
+        },
+      });
     });
   });
 });
@@ -380,22 +461,6 @@ describe("archived durable clip route", () => {
     };
   }
 
-  function archivePayloadFrom(html: string): {
-    replayRunKey: string | null;
-    clipGenerationTarget: {
-      kind: "league_run";
-      replayRunKey: string;
-    } | null;
-    clip: { url: string; byteLength: number } | null;
-  } {
-    const match =
-      /<script[^>]*id="proxywar-premiere-archive"[^>]*>([\s\S]*?)<\/script>/.exec(
-        html,
-      );
-    if (match === null) throw new Error("archive payload island missing");
-    return JSON.parse(match[1]);
-  }
-
   it("serves the durable clip with download headers, GET and HEAD", async () => {
     const h = await harness();
     await plantDurableClip(ARCHIVED_ID);
@@ -425,6 +490,36 @@ describe("archived durable clip route", () => {
         String(CLIP_BYTES.byteLength),
       );
       expect((await head.arrayBuffer()).byteLength).toBe(0);
+    });
+  });
+
+  it("serves the durable clip while its indexed runtime remains registered archived", async () => {
+    const h = await harness({
+      registeredStates: new Map([[ARCHIVED_ID, "archived"]]),
+    });
+    await plantDurableClip(ARCHIVED_ID);
+    await h.run(async (baseUrl) => {
+      const response = await fetch(
+        `${baseUrl}/premiere/${ARCHIVED_ID}/clip.mp4`,
+      );
+      expect(response.status).toBe(200);
+      expect(Buffer.from(await response.arrayBuffer())).toEqual(CLIP_BYTES);
+    });
+  });
+
+  it("keeps a pointer-backed durable clip closed while its runtime is registered non-archived", async () => {
+    const h = await harness({
+      registeredStates: new Map([[ARCHIVED_ID, "revealed"]]),
+    });
+    await plantDurableClip(ARCHIVED_ID);
+    await h.run(async (baseUrl) => {
+      const response = await fetch(
+        `${baseUrl}/premiere/${ARCHIVED_ID}/clip.mp4`,
+      );
+      expect(response.status).toBe(404);
+      expect(await response.json()).toEqual({
+        error: { code: "PREMIERE_UNAVAILABLE" },
+      });
     });
   });
 

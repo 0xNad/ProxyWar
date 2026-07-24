@@ -612,6 +612,27 @@ describe("ReplayPremiereArchivedClipPromoter", () => {
     );
   });
 
+  it("promotes a cached ready run clip when its archive pointer appears without a restart", async () => {
+    const clipBytes = Buffer.from("cache-hit-promoted-league-clip");
+    const runClips = makeRunClips({ clipBytes });
+
+    expect(
+      (await runClips.requestRunClip({ runKey: RUN_KEY, anchorTurn: 605 }))
+        .state,
+    ).toBe("pending");
+    await waitForFile(
+      path.join(root, "league-clips-v1", RUN_KEY, "clip-v1-60.mp4"),
+    );
+    expect(await fs.lstat(archivedClipPath()).catch(() => null)).toBeNull();
+
+    await archivePointer();
+    expect(
+      (await runClips.requestRunClip({ runKey: RUN_KEY, anchorTurn: 605 }))
+        .state,
+    ).toBe("ready");
+    expect(await fs.readFile(archivedClipPath())).toEqual(clipBytes);
+  });
+
   it("fails closed for wrong run/hash, non-public terminals, symlinks, and missing sources", async () => {
     await archivePointer({
       premiereId: OTHER_RUN_ID,

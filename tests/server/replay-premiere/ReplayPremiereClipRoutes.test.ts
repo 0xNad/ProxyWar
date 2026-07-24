@@ -362,6 +362,31 @@ describe("in-progress replay clipping", () => {
       expect(post.status).toBe(404);
     });
   });
+
+  test("keeps the registered archived Premiere cache fenced", async () => {
+    const harness = buildHarness("archived", { withClips: true });
+    await harness.run(async (baseUrl) => {
+      const status = await fetch(`${baseUrl}/api/premieres/${ID}/clips/60`);
+      expect(status.status).toBe(404);
+      expect(await status.json()).toEqual({
+        error: { code: "PREMIERE_UNAVAILABLE" },
+      });
+
+      const post = await fetch(`${baseUrl}/api/premieres/${ID}/clips`, {
+        method: "POST",
+        headers: clipHeaders(
+          "clip_req_archived000001",
+          harness.cookie,
+          harness.csrfToken,
+        ),
+        body: JSON.stringify({ sequence: 605, turn: 605 }),
+      });
+      expect(post.status).toBe(410);
+      expect(await post.json()).toEqual({
+        error: { code: "PREMIERE_INVALID_REQUEST" },
+      });
+    });
+  });
 });
 
 // ---------------------------------------------------------------------------

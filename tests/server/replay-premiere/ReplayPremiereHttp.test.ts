@@ -1062,6 +1062,7 @@ describe("ReplayPremiere HTTP adapter", () => {
         "predictions",
         "reactions",
         "shares",
+        "clips",
         `sessions/sess_${"a".repeat(32)}/heartbeat`,
       ];
       for (const suffix of paths) {

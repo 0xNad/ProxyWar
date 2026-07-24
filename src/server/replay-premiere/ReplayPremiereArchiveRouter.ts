@@ -137,8 +137,17 @@ export function createReplayPremiereArchiveRouter(
       });
       return;
     }
-    // A live premiere is owned by the downstream public-page router/API.
-    if (options.registry.get(route.premiereId) !== null) {
+    // Active/revealed runtimes are owned by the downstream public-page router.
+    // Once a registered runtime is archived, however, its anonymous
+    // interaction and Premiere-cache write surfaces are permanently fenced.
+    // If a durable reveal-public pointer exists below, let this archive router
+    // take ownership so the page can expose the canonical session-free
+    // retained-run clip control instead of reopening the Premiere API.
+    const registered = options.registry.get(route.premiereId);
+    if (
+      registered !== null &&
+      registered.runtime.readLifecycleState() !== "archived"
+    ) {
       next();
       return;
     }
@@ -229,10 +238,11 @@ async function handleArchivedClipRequest(context: {
 
 /**
  * Opens and authenticates the durable clip artifact, or null (=> 404).
- * Requires: not live-registered, archived pointer present, reveal-public
- * (revealedAt non-null, terminal revealed|archived), and a canonical manifest
- * whose immutable source, output size, and output hash match the same pinned
- * MP4 descriptor returned to the caller. No validated pathname is reopened.
+ * Requires: not active/revealed-registered (an archived registration is safe),
+ * archived pointer present, reveal-public (revealedAt non-null, terminal
+ * revealed|archived), and a canonical manifest whose immutable source, output
+ * size, and output hash match the same pinned MP4 descriptor returned to the
+ * caller. No validated pathname is reopened.
  */
 async function openValidatedArchivedClipFile(
   archiveStore: ReplayPremiereArchiveRouterOptions["archiveStore"],
@@ -265,7 +275,13 @@ async function openValidatedArchivedClipFileOnce(
   registry: ReplayPremiereArchiveRouterOptions["registry"],
   premiereId: string,
 ): Promise<ArchivedClipOpenResult> {
-  if (registry.get(premiereId) !== null) return { state: "unavailable" };
+  const registered = registry.get(premiereId);
+  if (
+    registered !== null &&
+    registered.runtime.readLifecycleState() !== "archived"
+  ) {
+    return { state: "unavailable" };
+  }
   const pointer = archiveStore.lookup(premiereId);
   if (
     pointer === null ||

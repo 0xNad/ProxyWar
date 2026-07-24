@@ -661,6 +661,7 @@ export class ReplayPremiereClips {
       existing.sourceReplaySha256 === sourceReplaySha256
     ) {
       existing.lastAccessMs = this.now();
+      await this.notifyClipReady(existing, "cache_hit");
       return this.statusFor(request.premiereId, bucket, "ready", existing);
     }
     if (this.pending.has(key)) {
@@ -719,6 +720,7 @@ export class ReplayPremiereClips {
         admittedExisting.sourceReplaySha256 === sourceReplaySha256
       ) {
         admittedExisting.lastAccessMs = this.now();
+        await this.notifyClipReady(admittedExisting, "cache_hit");
         return this.statusFor(
           request.premiereId,
           bucket,
@@ -959,7 +961,7 @@ export class ReplayPremiereClips {
 
   private async notifyClipReady(
     entry: ClipIndexEntry,
-    reason: "render_complete" | "index_rebuild",
+    reason: "cache_hit" | "render_complete" | "index_rebuild",
   ): Promise<void> {
     const callback = this.options.onClipReady;
     if (callback === undefined) return;
