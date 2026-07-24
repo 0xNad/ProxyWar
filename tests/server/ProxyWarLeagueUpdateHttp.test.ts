@@ -1,5 +1,7 @@
 import { spawn, type ChildProcess } from "node:child_process";
+import { createHash } from "node:crypto";
 import {
+  chmod,
   copyFile,
   mkdir,
   mkdtemp,
@@ -14,13 +16,37 @@ import net from "node:net";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterAll, beforeAll, describe, expect, test } from "vitest";
+import { AI_LEAGUE_CLIP_CANARY_FILE } from "../../src/server/agents/AiLeagueClipCanary";
 import {
   writeCoworldLeagueSite,
   type CoworldLeagueMirrorData,
 } from "../../src/server/agents/CoworldLeagueSiteWriter";
+import { controlledSourceBytes } from "./replay-premiere/ReplayPremiereFixtures";
 
 const projectRoot = process.cwd();
 const require = createRequire(import.meta.url);
+const canaryRunKey = "league-coworld-canary-wrapper";
+const canaryBucket = 60;
+const controlledSource = JSON.parse(
+  controlledSourceBytes().toString("utf8"),
+) as {
+  gameRecord: Record<string, unknown> & { info: Record<string, unknown> };
+};
+const canaryRecordBytes = Buffer.from(
+  JSON.stringify({
+    ...controlledSource.gameRecord,
+    info: {
+      ...controlledSource.gameRecord.info,
+      num_turns: 1_000,
+      winner: undefined,
+    },
+    turns: [],
+  }),
+);
+const canarySourceSha256 = createHash("sha256")
+  .update(canaryRecordBytes)
+  .digest("hex");
+const canaryClipBytes = Buffer.alloc(96, 7);
 
 interface RawResponse {
   status: number;
@@ -70,6 +96,16 @@ describe("league update HTTP contract", () => {
       "ai-league-runs",
       "league-compacted",
     );
+    const canaryReplayRoot = path.join(
+      artifactsRoot,
+      "ai-league-runs",
+      canaryRunKey,
+    );
+    const canaryClipRoot = path.join(
+      privateStateRoot,
+      "league-clips-v1",
+      canaryRunKey,
+    );
     validReplayRecordPath = path.join(validReplayRoot, "game-record.json");
     await Promise.all([
       mkdir(leagueRoot, { recursive: true }),
@@ -80,18 +116,68 @@ describe("league update HTTP contract", () => {
       mkdir(staticRoot, { recursive: true }),
       mkdir(validReplayRoot, { recursive: true }),
       mkdir(compactedReplayRoot, { recursive: true }),
+      mkdir(canaryReplayRoot, { recursive: true }),
+      mkdir(canaryClipRoot, { recursive: true }),
+      mkdir(path.join(fixtureRoot, "resources", "lang"), { recursive: true }),
     ]);
+    await chmod(privateStateRoot, 0o700);
+    const now = Date.now();
     await Promise.all([
       writeCoworldLeagueSite(leagueRoot, fixtureLeagueData()),
       copyFile(
         path.join(projectRoot, "index.html"),
         path.join(staticRoot, "index.html"),
       ),
+      copyFile(
+        path.join(projectRoot, "resources", "lang", "en.json"),
+        path.join(fixtureRoot, "resources", "lang", "en.json"),
+      ),
       writeFile(validReplayRecordPath, JSON.stringify({ turns: [] }), "utf8"),
       writeFile(
         path.join(compactedReplayRoot, "game-record.json"),
         JSON.stringify({ compacted: true }),
         "utf8",
+      ),
+      writeFile(
+        path.join(canaryReplayRoot, "game-record.json"),
+        canaryRecordBytes,
+      ),
+      writeFile(
+        path.join(canaryClipRoot, `clip-v1-${canaryBucket}.mp4`),
+        canaryClipBytes,
+      ),
+      writeFile(
+        path.join(
+          canaryClipRoot,
+          `clip-v1-${canaryBucket}.render-manifest.json`,
+        ),
+        JSON.stringify({
+          premiereId: canaryRunKey,
+          sourceReplaySha256: canarySourceSha256,
+          anchorTurn: canaryBucket * 10 + 5,
+          clipVersion: 1,
+          frameShape: "square",
+          frameWidth: 1080,
+          frameHeight: 1080,
+          outSha256: createHash("sha256").update(canaryClipBytes).digest("hex"),
+          outBytes: canaryClipBytes.byteLength,
+          generatedAt: new Date(now).toISOString(),
+        }),
+      ),
+      writeFile(
+        path.join(privateStateRoot, AI_LEAGUE_CLIP_CANARY_FILE),
+        JSON.stringify({
+          schemaVersion: 1,
+          lifecycle: "claimed",
+          runKey: canaryRunKey,
+          bucket: canaryBucket,
+          sourceReplaySha256: canarySourceSha256,
+          armedAt: new Date(now - 60_000).toISOString(),
+          expiresAt: new Date(now + 10 * 60_000).toISOString(),
+          claimedAt: new Date(now - 30_000).toISOString(),
+          disarmedAt: null,
+        }),
+        { mode: 0o600 },
       ),
     ]);
     try {
@@ -295,6 +381,48 @@ describe("league update HTTP contract", () => {
     }
   });
 
+  test("serves only the exact claimed Clip canary target without wrapper redirects", async () => {
+    const exactStatusPath = `/api/league-runs/${canaryRunKey}/clips/${canaryBucket}`;
+    const exactFilePath = `/ai-league-runs/${canaryRunKey}/clip-v1-${canaryBucket}.mp4`;
+    const exactStatus = await rawRequest(origin, exactStatusPath);
+    const exactFile = await rawRequest(origin, exactFilePath);
+
+    expect(exactStatus.status).toBe(200);
+    expect(JSON.parse(exactStatus.body.toString())).toMatchObject({
+      state: "ready",
+      bucket: canaryBucket,
+      ready: {
+        clipUrl: exactFilePath,
+      },
+    });
+    expect(exactFile.status).toBe(200);
+    expect(exactFile.body).toEqual(canaryClipBytes);
+
+    for (const requestPath of [
+      `/api/league-runs/${canaryRunKey}/clips/${canaryBucket + 1}`,
+      `/ai-league-runs/${canaryRunKey}/clip-v1-${canaryBucket + 1}.mp4`,
+      `/api/league-runs/league-coworld-other-wrapper/clips/${canaryBucket}`,
+      `/ai-league-runs/league-coworld-other-wrapper/clip-v1-${canaryBucket}.mp4`,
+    ]) {
+      for (const method of ["GET", "HEAD"] as const) {
+        const response = await rawRequest(origin, requestPath, { method });
+        expect(response.status, `${method} ${requestPath}`).toBe(404);
+        expect(
+          response.headers.location,
+          `${method} ${requestPath}`,
+        ).toBeUndefined();
+      }
+    }
+
+    const refusedWrite = await rawRequest(
+      origin,
+      `/api/league-runs/${canaryRunKey}/clips`,
+      { method: "POST" },
+    );
+    expect(refusedWrite.status).toBe(404);
+    expect(refusedWrite.headers.location).toBeUndefined();
+  });
+
   test("serves the replay shell only for a renderable public league record", async () => {
     const replayResponses = await Promise.all(
       Array.from({ length: 6 }, (_, index) =>
@@ -404,6 +532,9 @@ function spawnLeagueServer(options: {
         PROXYWAR_BETA_ENABLED: String(options.betaEnabled),
         PROXYWAR_BETA_CODE: "fixture-invite-code",
         PROXYWAR_LEAGUE_WRAPPER_ONLY: String(options.wrapperOnly),
+        PROXYWAR_CLIPS_ENABLED: String(options.wrapperOnly),
+        PROXYWAR_PREMIERE_CLIPS_ENABLED: "false",
+        PROXYWAR_LEAGUE_CLIPS_ENABLED: "false",
         PROXYWAR_ARTIFACTS_ROOT: options.artifactsRoot,
         PROXYWAR_NATIONS_DIR: options.nationsRoot,
         PROXYWAR_REPLAY_PREMIERE_STATE_ROOT: options.privateStateRoot,

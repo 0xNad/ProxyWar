@@ -721,6 +721,7 @@ const leagueWrapperOnly = process.env.PROXYWAR_LEAGUE_WRAPPER_ONLY === "true";
 if (leagueWrapperOnly) {
   app.use((req, res, next) => {
     if (req.method === "GET" || req.method === "HEAD") {
+      const leagueClipRead = matchProxyWarLeagueClipReadPath(req.path);
       if (
         isProxyWarPublicLeaguePath(req.path) ||
         isProxyWarPublicPremiereReadPath(req.path) ||
@@ -730,6 +731,18 @@ if (leagueWrapperOnly) {
         leagueClipPublicReadAllowed(req.path)
       ) {
         next();
+        return;
+      }
+      // A syntactically valid Clip read that is outside the active surface
+      // (including every non-target read during a one-shot canary) is still a
+      // Clip route. Fail it closed here instead of letting the wrapper's
+      // generic document fallback turn an unavailable artifact into /league.
+      if (leagueClipRead !== null) {
+        if (leagueClipRead.kind === "clip_status") {
+          res.status(404).json({ error: { code: "LEAGUE_CLIP_UNAVAILABLE" } });
+        } else {
+          res.status(404).end();
+        }
         return;
       }
       if (isProxyWarReplayOrRunPath(req.path)) {
