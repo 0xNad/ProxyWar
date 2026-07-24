@@ -78,21 +78,26 @@ describe("Proxy War beta runtime config", () => {
       'CLIPS_EXPECTED_COMMIT="${PROXYWAR_CLIPS_EXPECTED_COMMIT:-}"',
     );
     expect(wrapper).toContain(
+      'CLIPS_FORCE_DISABLED="${PROXYWAR_CLIPS_FORCE_DISABLED:-false}"',
+    );
+    expect(wrapper).toContain(
       'CLIPS_EXPECTED_TREE="${PROXYWAR_CLIPS_EXPECTED_TREE:-}"',
     );
     expect(wrapper).toContain(
       'CLIPS_EXPECTED_BUILD_SHA256="${PROXYWAR_CLIPS_EXPECTED_BUILD_SHA256:-}"',
     );
+    expect(wrapper).not.toContain("PROXYWAR_CLIPS_RELEASE_STATE_FILE");
     expect(wrapper).toContain(
       "Clip activation does not match the clean deployed commit, tree, and build; Clips disabled",
     );
     expect(wrapper).toContain(
-      'if [[ "$ARCHIVED_CLIP_CANARY_MASTER_OVERRIDE" == "true" && "$CLIPS_RELEASE_OVERRIDE" == "true" ]]',
+      'if [[ "$CLIPS_FORCE_DISABLED" != "true" && "$ARCHIVED_CLIP_CANARY_MASTER_OVERRIDE" == "true" && "$CLIPS_RELEASE_OVERRIDE" == "true" ]]',
     );
     expect(wrapper).toContain("export PROXYWAR_CLIPS_ENABLED=true");
     expect(wrapper).toContain("export PROXYWAR_PREMIERE_CLIPS_ENABLED=false");
     expect(wrapper).toContain("export PROXYWAR_LEAGUE_CLIPS_ENABLED=true");
     expect(wrapper).toContain("unset PROXYWAR_CLIPS_RELEASE_OVERRIDE");
+    expect(wrapper).toContain("unset PROXYWAR_CLIPS_FORCE_DISABLED");
     expect(runbook).toContain(
       "launchctl setenv PROXYWAR_CLIPS_RELEASE_OVERRIDE true",
     );
@@ -278,6 +283,31 @@ describe("Proxy War beta runtime config", () => {
         expect(rebootRecovered.stdout.trim()).toBe(
           "true|false|true|unset|unset",
         );
+
+        await fs.chmod(releaseStateFile, 0o644);
+        const forceDisabled = runWrapper({
+          PROXYWAR_CLIPS_FORCE_DISABLED: "true",
+        });
+        expect(forceDisabled.status).toBe(0);
+        expect(forceDisabled.stderr).not.toContain(
+          "Clip durable release state is unsafe or malformed",
+        );
+        expect(forceDisabled.stderr).not.toContain("Clip activation source:");
+        expect(forceDisabled.stdout.trim()).toBe(
+          "false|false|false|unset|unset",
+        );
+        const forcedManagerDisable = runWrapper({
+          PROXYWAR_CLIPS_FORCE_DISABLED: "true",
+          PROXYWAR_CLIPS_RELEASE_OVERRIDE: "true",
+        });
+        expect(forcedManagerDisable.status).toBe(0);
+        expect(forcedManagerDisable.stderr).not.toContain(
+          "Clip activation source:",
+        );
+        expect(forcedManagerDisable.stdout.trim()).toBe(
+          "false|false|false|unset|unset",
+        );
+        await fs.chmod(releaseStateFile, 0o600);
         await fs.writeFile(
           releaseStateFile,
           '{"schemaVersion":1,"enabled":false,"commit":null,"tree":null,"buildSha256":null}\n',

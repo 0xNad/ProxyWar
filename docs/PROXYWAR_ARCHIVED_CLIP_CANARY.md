@@ -26,13 +26,19 @@ resets, renames, or deletes it.
 to one public `league-*` run key, one renderable bucket, the exact retained
 `game-record.json` SHA-256, and an expiry no more than 30 minutes after arm.
 
-The master emergency gate `PROXYWAR_CLIPS_ENABLED` is enabled for only the
+The master generation gate `PROXYWAR_CLIPS_ENABLED` is enabled for only the
 canary restart through the documented launchd-manager override below; the
 private service env remains off and is not edited. Both ordinary generation
 surface flags, `PROXYWAR_PREMIERE_CLIPS_ENABLED` and
 `PROXYWAR_LEAGUE_CLIPS_ENABLED`, must remain off. The public capability must
 therefore remain `false/false`. If either surface flag is on, the server treats
 the armed state as a conflict and constructs no Clip service.
+
+`PROXYWAR_CLIPS_FORCE_DISABLED=true` is the manager-only, highest-priority
+emergency deny. It is captured before the private env is sourced and overrides
+canary, release-manager, and durable-state enables without requiring any state
+file write. Keep it latched after a failed durable disable; the core league
+continues with all Clip capabilities false.
 
 The `arm` transaction validates stable source bytes and their exact hash, the
 canonical Premiere id and sole reveal-public rated-Coworld archive pointer, the
@@ -109,10 +115,18 @@ hash-identical to the reviewed repository file:
 ```bash
 node deploy/mac/proxywar-clips-release-state.mjs disable \
   --path="$RELEASE_STATE_FILE"
+launchctl unsetenv PROXYWAR_ARCHIVED_CLIP_CANARY_MASTER_OVERRIDE
 launchctl unsetenv PROXYWAR_CLIPS_RELEASE_OVERRIDE
+launchctl unsetenv PROXYWAR_CLIPS_FORCE_DISABLED
 launchctl unsetenv PROXYWAR_CLIPS_EXPECTED_COMMIT
 launchctl unsetenv PROXYWAR_CLIPS_EXPECTED_TREE
 launchctl unsetenv PROXYWAR_CLIPS_EXPECTED_BUILD_SHA256
+assert_clip_manager_env_unset PROXYWAR_ARCHIVED_CLIP_CANARY_MASTER_OVERRIDE
+assert_clip_manager_env_unset PROXYWAR_CLIPS_RELEASE_OVERRIDE
+assert_clip_manager_env_unset PROXYWAR_CLIPS_FORCE_DISABLED
+assert_clip_manager_env_unset PROXYWAR_CLIPS_EXPECTED_COMMIT
+assert_clip_manager_env_unset PROXYWAR_CLIPS_EXPECTED_TREE
+assert_clip_manager_env_unset PROXYWAR_CLIPS_EXPECTED_BUILD_SHA256
 test "$(shasum -a 256 deploy/mac/start-proxywar-beta.zsh | awk '{print $1}')" = "$REVIEWED_WRAPPER_SHA256"
 test ! -e "$WRAPPER_BACKUP"
 cp -p "$INSTALLED_WRAPPER" "$WRAPPER_BACKUP"
@@ -163,6 +177,8 @@ Use the reviewed ordinary restart helper, not `launchctl kickstart -k` and not
 the controlled-outage drill:
 
 ```bash
+assert_clip_manager_env_unset PROXYWAR_CLIPS_FORCE_DISABLED
+assert_clip_manager_env_unset PROXYWAR_CLIPS_RELEASE_OVERRIDE
 launchctl setenv PROXYWAR_CLIPS_EXPECTED_COMMIT "$RELEASE_COMMIT"
 launchctl setenv PROXYWAR_CLIPS_EXPECTED_TREE "$RELEASE_TREE"
 launchctl setenv PROXYWAR_CLIPS_EXPECTED_BUILD_SHA256 "$RELEASE_BUILD_SHA256"
@@ -286,19 +302,14 @@ diagnostic as a stop condition, not permission to retry.
   directory before any retry.
 
 ```bash
-npm run --silent clips:canary -- disarm --private-state-root "$PRIVATE_STATE_ROOT" | jq -e \
-  --arg run "$RUN_KEY" --arg premiere "$PREMIERE_ID" \
-  --argjson bucket "$BUCKET" --arg source "$SOURCE_SHA256" \
-  --arg prior "$PRIOR_STATE_SHA256" \
-  '.record.schemaVersion == 2 and .record.lifecycle == "disarmed" and
-   .record.runKey == $run and .record.premiereId == $premiere and
-   .record.bucket == $bucket and .record.sourceReplaySha256 == $source and
-   .record.priorStateSha256 == $prior'
+launchctl setenv PROXYWAR_CLIPS_FORCE_DISABLED true
+test "$(launchctl getenv PROXYWAR_CLIPS_FORCE_DISABLED)" = true
 launchctl unsetenv PROXYWAR_ARCHIVED_CLIP_CANARY_MASTER_OVERRIDE
 launchctl unsetenv PROXYWAR_CLIPS_RELEASE_OVERRIDE
 launchctl unsetenv PROXYWAR_CLIPS_EXPECTED_COMMIT
 launchctl unsetenv PROXYWAR_CLIPS_EXPECTED_TREE
 launchctl unsetenv PROXYWAR_CLIPS_EXPECTED_BUILD_SHA256
+assert_clip_manager_env_unset PROXYWAR_ARCHIVED_CLIP_CANARY_MASTER_OVERRIDE
 assert_clip_manager_env_unset PROXYWAR_CLIPS_RELEASE_OVERRIDE
 assert_clip_manager_env_unset PROXYWAR_CLIPS_EXPECTED_COMMIT
 assert_clip_manager_env_unset PROXYWAR_CLIPS_EXPECTED_TREE
@@ -314,6 +325,14 @@ node deploy/mac/proxywar-beta-launchd-restart.mjs \
   --ready-url=http://127.0.0.1:8788/league
 curl --fail --silent "$ORIGIN/api/clip-capabilities" | jq -e '.premiereGenerationEnabled == false and .leagueGenerationEnabled == false'
 curl --fail --silent "$PUBLIC_ORIGIN/api/clip-capabilities" | jq -e '.premiereGenerationEnabled == false and .leagueGenerationEnabled == false'
+npm run --silent clips:canary -- disarm --private-state-root "$PRIVATE_STATE_ROOT" | jq -e \
+  --arg run "$RUN_KEY" --arg premiere "$PREMIERE_ID" \
+  --argjson bucket "$BUCKET" --arg source "$SOURCE_SHA256" \
+  --arg prior "$PRIOR_STATE_SHA256" \
+  '.record.schemaVersion == 2 and .record.lifecycle == "disarmed" and
+   .record.runKey == $run and .record.premiereId == $premiere and
+   .record.bucket == $bucket and .record.sourceReplaySha256 == $source and
+   .record.priorStateSha256 == $prior'
 test "$(curl --silent -o /dev/null -w '%{http_code}' "$ORIGIN/ai-league-runs/$RUN_KEY/clip-v1-$BUCKET.mp4")" = 404
 curl --silent --show-error --dump-header /tmp/proxywar-public-rollback-mp4-GET.headers \
   --output /dev/null --write-out '%{http_code}\n' \
@@ -396,6 +415,8 @@ jq -e --arg run "$RUN_KEY" --arg premiere "$PREMIERE_ID" \
    .watermarkPassed == true and .attributionPassed == true and
    .cleanupPassed == true' "$CANARY_GO_EVIDENCE"
 launchctl unsetenv PROXYWAR_ARCHIVED_CLIP_CANARY_MASTER_OVERRIDE
+launchctl unsetenv PROXYWAR_CLIPS_FORCE_DISABLED
+assert_clip_manager_env_unset PROXYWAR_CLIPS_FORCE_DISABLED
 launchctl setenv PROXYWAR_CLIPS_EXPECTED_COMMIT "$RELEASE_COMMIT"
 launchctl setenv PROXYWAR_CLIPS_EXPECTED_TREE "$RELEASE_TREE"
 launchctl setenv PROXYWAR_CLIPS_EXPECTED_BUILD_SHA256 "$RELEASE_BUILD_SHA256"
@@ -447,11 +468,13 @@ node deploy/mac/proxywar-clips-release-state.mjs enable \
   --build-sha256="$RELEASE_BUILD_SHA256"
 launchctl unsetenv PROXYWAR_ARCHIVED_CLIP_CANARY_MASTER_OVERRIDE
 launchctl unsetenv PROXYWAR_CLIPS_RELEASE_OVERRIDE
+launchctl unsetenv PROXYWAR_CLIPS_FORCE_DISABLED
 launchctl unsetenv PROXYWAR_CLIPS_EXPECTED_COMMIT
 launchctl unsetenv PROXYWAR_CLIPS_EXPECTED_TREE
 launchctl unsetenv PROXYWAR_CLIPS_EXPECTED_BUILD_SHA256
 assert_clip_manager_env_unset PROXYWAR_CLIPS_RELEASE_OVERRIDE
 assert_clip_manager_env_unset PROXYWAR_ARCHIVED_CLIP_CANARY_MASTER_OVERRIDE
+assert_clip_manager_env_unset PROXYWAR_CLIPS_FORCE_DISABLED
 assert_clip_manager_env_unset PROXYWAR_CLIPS_EXPECTED_COMMIT
 assert_clip_manager_env_unset PROXYWAR_CLIPS_EXPECTED_TREE
 assert_clip_manager_env_unset PROXYWAR_CLIPS_EXPECTED_BUILD_SHA256
@@ -474,9 +497,9 @@ The service log for this manager-free restart must contain exactly
 `Clip activation source: durable_state` and must not contain
 `release_manager`. If any durable-state write, manager-absence assertion,
 restart, log assertion, or capability check fails, immediately run the
-emergency disable transaction below (which first writes durable state false),
-then prove `false/false` locally and publicly. Never leave a failed durable
-enablement latent.
+emergency disable transaction below. It first latches the write-independent
+manager deny and proves `false/false`; only then does it attempt to write
+durable state false. Never leave a failed durable enablement latent.
 
 Only now restore the scheduler with the commands in the rollback section,
 require two exit-zero iterations, and recheck `false/true` locally and publicly.
@@ -486,14 +509,14 @@ Emergency disable is the inverse controlled transaction:
 Before invoking it against a live release, disable/boot out the Premiere loop
 and confirm no iteration remains. Restore it only after `false/false` proof.
 
-Every later deployment must begin with these five unsets before installing or
+Every later deployment must begin with these six unsets before installing or
 restarting a new release. The wrapper also binds either Clip override to the
 expected clean commit, tree, and deterministic `static/` digest; mismatch
 keeps the core league process available but forces all Clip gates false.
 
 ```bash
-node deploy/mac/proxywar-clips-release-state.mjs disable \
-  --path="$RELEASE_STATE_FILE"
+launchctl setenv PROXYWAR_CLIPS_FORCE_DISABLED true
+test "$(launchctl getenv PROXYWAR_CLIPS_FORCE_DISABLED)" = true
 launchctl unsetenv PROXYWAR_ARCHIVED_CLIP_CANARY_MASTER_OVERRIDE
 launchctl unsetenv PROXYWAR_CLIPS_RELEASE_OVERRIDE
 launchctl unsetenv PROXYWAR_CLIPS_EXPECTED_COMMIT
@@ -517,6 +540,26 @@ curl --fail --silent "$ORIGIN/api/clip-capabilities" | jq -e \
   '.premiereGenerationEnabled == false and .leagueGenerationEnabled == false'
 curl --fail --silent "$PUBLIC_ORIGIN/api/clip-capabilities" | jq -e \
   '.premiereGenerationEnabled == false and .leagueGenerationEnabled == false'
+node deploy/mac/proxywar-clips-release-state.mjs disable \
+  --path="$RELEASE_STATE_FILE"
+launchctl unsetenv PROXYWAR_CLIPS_FORCE_DISABLED
+assert_clip_manager_env_unset PROXYWAR_CLIPS_FORCE_DISABLED
+node deploy/mac/proxywar-beta-launchd-restart.mjs \
+  --expected-wrapper-sha256="$REVIEWED_WRAPPER_SHA256" \
+  --start-timeout-ms=60000 \
+  --ready-url=http://127.0.0.1:8788/league \
+  --dry-run
+node deploy/mac/proxywar-beta-launchd-restart.mjs \
+  --expected-wrapper-sha256="$REVIEWED_WRAPPER_SHA256" \
+  --start-timeout-ms=60000 \
+  --ready-url=http://127.0.0.1:8788/league
+curl --fail --silent "$ORIGIN/api/clip-capabilities" | jq -e \
+  '.premiereGenerationEnabled == false and .leagueGenerationEnabled == false'
+curl --fail --silent "$PUBLIC_ORIGIN/api/clip-capabilities" | jq -e \
+  '.premiereGenerationEnabled == false and .leagueGenerationEnabled == false'
 ```
 
-The emergency restart log must contain no `Clip activation source:` line.
+Both emergency restart logs must contain no `Clip activation source:` line. If
+the durable disable write fails, do not unset
+`PROXYWAR_CLIPS_FORCE_DISABLED` or run the second restart; keep the manager deny
+latched, retain `false/false`, and escalate the state-root fault.

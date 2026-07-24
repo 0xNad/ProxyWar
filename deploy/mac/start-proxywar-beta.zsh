@@ -15,10 +15,13 @@ ARCHIVED_CLIP_CANARY_MASTER_OVERRIDE="${PROXYWAR_ARCHIVED_CLIP_CANARY_MASTER_OVE
 # league-replay surface and remains effective across managed restarts until
 # unset. The live-Premiere generation lane stays independently disabled.
 CLIPS_RELEASE_OVERRIDE="${PROXYWAR_CLIPS_RELEASE_OVERRIDE:-false}"
+# This manager-only deny gate is captured before the private env is sourced and
+# has higher priority than canary, release-manager, and durable-state enables.
+# It keeps the core league available when a durable-state write is impossible.
+CLIPS_FORCE_DISABLED="${PROXYWAR_CLIPS_FORCE_DISABLED:-false}"
 CLIPS_EXPECTED_COMMIT="${PROXYWAR_CLIPS_EXPECTED_COMMIT:-}"
 CLIPS_EXPECTED_TREE="${PROXYWAR_CLIPS_EXPECTED_TREE:-}"
 CLIPS_EXPECTED_BUILD_SHA256="${PROXYWAR_CLIPS_EXPECTED_BUILD_SHA256:-}"
-CLIPS_RELEASE_STATE_FILE_OVERRIDE="${PROXYWAR_CLIPS_RELEASE_STATE_FILE:-}"
 
 if [[ ! -d "$PROJECT_DIR" ]]; then
   echo "ProxyWar project directory not found: $PROJECT_DIR" >&2
@@ -35,9 +38,7 @@ set -a
 source "$ENV_FILE"
 set +a
 
-if [[ -n "$CLIPS_RELEASE_STATE_FILE_OVERRIDE" ]]; then
-  CLIPS_RELEASE_STATE_FILE="$CLIPS_RELEASE_STATE_FILE_OVERRIDE"
-elif [[ -n "${PROXYWAR_REPLAY_PREMIERE_STATE_ROOT:-}" ]]; then
+if [[ -n "${PROXYWAR_REPLAY_PREMIERE_STATE_ROOT:-}" ]]; then
   CLIPS_RELEASE_STATE_FILE="$PROXYWAR_REPLAY_PREMIERE_STATE_ROOT/clip-release-v1.json"
 else
   CLIPS_RELEASE_STATE_FILE="$HOME/Library/Application Support/ProxyWar/storage/replay-premiere/clip-release-v1.json"
@@ -51,7 +52,7 @@ fi
 CLIPS_CONFIGURATION_BLOCKED=false
 CLIPS_DURABLY_DISABLED=false
 CLIPS_ACTIVATION_SOURCE=none
-if [[ "$CLIPS_RELEASE_OVERRIDE" != "true" && -e "$CLIPS_RELEASE_STATE_FILE" ]]; then
+if [[ "$CLIPS_FORCE_DISABLED" != "true" && "$CLIPS_RELEASE_OVERRIDE" != "true" && -e "$CLIPS_RELEASE_STATE_FILE" ]]; then
   CLIPS_RELEASE_STATE_STATUS="$("$NODE_BIN" "$PROJECT_DIR/deploy/mac/proxywar-clips-release-state.mjs" status --path="$CLIPS_RELEASE_STATE_FILE" --shell=true 2> /dev/null || true)"
   if [[ "$CLIPS_RELEASE_STATE_STATUS" == "disabled" ]]; then
     CLIPS_DURABLY_DISABLED=true
@@ -69,11 +70,11 @@ if [[ "$CLIPS_RELEASE_OVERRIDE" != "true" && -e "$CLIPS_RELEASE_STATE_FILE" ]]; 
     CLIPS_CONFIGURATION_BLOCKED=true
   fi
 fi
-if [[ "$ARCHIVED_CLIP_CANARY_MASTER_OVERRIDE" == "true" && "$CLIPS_RELEASE_OVERRIDE" == "true" ]]; then
+if [[ "$CLIPS_FORCE_DISABLED" != "true" && "$ARCHIVED_CLIP_CANARY_MASTER_OVERRIDE" == "true" && "$CLIPS_RELEASE_OVERRIDE" == "true" ]]; then
   echo "Clip canary and release overrides cannot be enabled together" >&2
   CLIPS_CONFIGURATION_BLOCKED=true
 fi
-if [[ ("$CLIPS_RELEASE_OVERRIDE" == "true" || "$ARCHIVED_CLIP_CANARY_MASTER_OVERRIDE" == "true") && "$CLIPS_CONFIGURATION_BLOCKED" != "true" ]]; then
+if [[ "$CLIPS_FORCE_DISABLED" != "true" && ("$CLIPS_RELEASE_OVERRIDE" == "true" || "$ARCHIVED_CLIP_CANARY_MASTER_OVERRIDE" == "true") && "$CLIPS_CONFIGURATION_BLOCKED" != "true" ]]; then
   if [[ ${#CLIPS_EXPECTED_COMMIT} -ne 40 || "$CLIPS_EXPECTED_COMMIT" == *[^a-f0-9]* || ${#CLIPS_EXPECTED_TREE} -ne 40 || "$CLIPS_EXPECTED_TREE" == *[^a-f0-9]* || ${#CLIPS_EXPECTED_BUILD_SHA256} -ne 64 || "$CLIPS_EXPECTED_BUILD_SHA256" == *[^a-f0-9]* ]]; then
     echo "Clip activation requires exact commit, tree, and build bindings; Clips disabled" >&2
     CLIPS_CONFIGURATION_BLOCKED=true
@@ -95,7 +96,11 @@ if [[ ("$CLIPS_RELEASE_OVERRIDE" == "true" || "$ARCHIVED_CLIP_CANARY_MASTER_OVER
     fi
   fi
 fi
-if [[ "$CLIPS_CONFIGURATION_BLOCKED" == "true" ]]; then
+if [[ "$CLIPS_FORCE_DISABLED" == "true" ]]; then
+  export PROXYWAR_CLIPS_ENABLED=false
+  export PROXYWAR_PREMIERE_CLIPS_ENABLED=false
+  export PROXYWAR_LEAGUE_CLIPS_ENABLED=false
+elif [[ "$CLIPS_CONFIGURATION_BLOCKED" == "true" ]]; then
   export PROXYWAR_CLIPS_ENABLED=false
   export PROXYWAR_PREMIERE_CLIPS_ENABLED=false
   export PROXYWAR_LEAGUE_CLIPS_ENABLED=false
@@ -123,6 +128,8 @@ unset ARCHIVED_CLIP_CANARY_MASTER_OVERRIDE
 unset PROXYWAR_ARCHIVED_CLIP_CANARY_MASTER_OVERRIDE
 unset CLIPS_RELEASE_OVERRIDE
 unset PROXYWAR_CLIPS_RELEASE_OVERRIDE
+unset CLIPS_FORCE_DISABLED
+unset PROXYWAR_CLIPS_FORCE_DISABLED
 unset CLIPS_EXPECTED_COMMIT
 unset PROXYWAR_CLIPS_EXPECTED_COMMIT
 unset CLIPS_EXPECTED_TREE
@@ -130,8 +137,6 @@ unset PROXYWAR_CLIPS_EXPECTED_TREE
 unset CLIPS_EXPECTED_BUILD_SHA256
 unset PROXYWAR_CLIPS_EXPECTED_BUILD_SHA256
 unset CLIPS_RELEASE_STATE_FILE
-unset CLIPS_RELEASE_STATE_FILE_OVERRIDE
-unset PROXYWAR_CLIPS_RELEASE_STATE_FILE
 unset CLIPS_RELEASE_STATE_STATUS
 unset CLIPS_RELEASE_STATE_KIND
 unset CLIPS_RELEASE_STATE_EXTRA

@@ -527,14 +527,17 @@ recorded. Local green tests do not grant release authority.
   `[repo/file verified]`
 - The deployed clipping product was reveal/lifecycle scoped. The successor
   makes eligibility replay scoped through the existing worker/cache path:
-  exact source SHA, retained availability, actual renderable turn range,
+  exact source SHA, retained availability, the record's declared `num_turns`,
   completeness, quotas, and independently effective default-off capability
-  flags determine generation. Safe released windows of a live Premiere and any
+  flags determine admission. Safe released windows of a live Premiere and any
   retained completed league replay can use the same renderer; archived rated
   pages use the existing league-run route without a Premiere interaction
-  session. Cache/status/file reads are source-bound, future turns and
-  out-of-range terminal anchors fail before render, and reveal auto-clipping
-  remains only an additional trigger. `[repo/file verified]`
+  session. Cache/status/file reads are source-bound. The true winning terminal
+  is discovered only after renderer launch, where an anchor or capture tail
+  beyond it fails before cache or archive promotion; canary selection therefore
+  requires independently observed playback beyond a safely earlier capture
+  tail. Reveal auto-clipping remains only an additional trigger.
+  `[repo/file verified]`
 - Exact-tree review rejected three remaining successor gaps before commit: the
   live overlay still hid otherwise eligible clips, journal compaction replaced
   a durable private hold journal without syncing the replacement or directory,
