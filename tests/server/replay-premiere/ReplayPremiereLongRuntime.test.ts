@@ -29,7 +29,7 @@ import {
 } from "./ReplayPremiereFixtures";
 
 const ReplayPremiereRuntimeCoordinator = {
-  createOrRecover(
+  async createOrRecover(
     options: Omit<
       Parameters<
         typeof ProductionReplayPremiereRuntimeCoordinator.createOrRecover
@@ -41,19 +41,28 @@ const ReplayPremiereRuntimeCoordinator = {
     const optionSeatIds = definition.provenance.seats.map(
       (seat) => seat.seatId,
     );
-    return ProductionReplayPremiereRuntimeCoordinator.createOrRecover({
-      ...options,
-      checkpointProjection: freezeReplayPremiereCheckpointProjection({
-        premiereId: options.gate.premiereId,
-        publicationCommitmentHash: options.gate.publicationCommitmentHash,
-        checkpoints: [
-          { ...definition.checkpoints[0], optionSeatIds },
-          { ...definition.checkpoints[1], optionSeatIds },
-        ],
-      }),
-    });
+    const runtime =
+      await ProductionReplayPremiereRuntimeCoordinator.createOrRecover({
+        ...options,
+        checkpointProjection: freezeReplayPremiereCheckpointProjection({
+          premiereId: options.gate.premiereId,
+          publicationCommitmentHash: options.gate.publicationCommitmentHash,
+          checkpoints: [
+            { ...definition.checkpoints[0], optionSeatIds },
+            { ...definition.checkpoints[1], optionSeatIds },
+          ],
+        }),
+      });
+    const state = interactionRuntimeState.get(options.interactions);
+    if (state !== undefined) state.runtime = runtime;
+    return runtime;
   },
 };
+
+const interactionRuntimeState = new WeakMap<
+  ReplayPremiereInteractions,
+  { runtime: ProductionReplayPremiereRuntimeCoordinator | null }
+>();
 
 class FakeClock implements ReplayPremiereRuntimeClock {
   constructor(private value: Date) {}
@@ -236,11 +245,20 @@ function createInteractions(
   initialState?: ReturnType<ReplayPremiereInteractions["readState"]>,
 ): ReplayPremiereInteractions {
   const definition = gate.publicDefinition();
-  return new ReplayPremiereInteractions({
+  const state: {
+    runtime: ProductionReplayPremiereRuntimeCoordinator | null;
+  } = { runtime: null };
+  const initialPremiereState = initialState?.checkpoints.some(
+    (checkpoint) => checkpoint.resolution !== null,
+  )
+    ? "revealed"
+    : "playing";
+  const interactions = new ReplayPremiereInteractions({
     premiereId: gate.premiereId,
     checkpointDescriptors: definition.checkpoints,
     seats: definition.provenance.seats,
-    getPremiereState: () => "playing",
+    getPremiereState: () =>
+      state.runtime?.readLifecycleState() ?? initialPremiereState,
     getReleasedContext: () => null,
     persistence: { persist: async () => undefined },
     signAttribution: () => "a".repeat(64),
@@ -249,6 +267,8 @@ function createInteractions(
     admitAnonymousWrite: () => undefined,
     initialState,
   });
+  interactionRuntimeState.set(interactions, state);
+  return interactions;
 }
 
 async function assertCompactPersistence(

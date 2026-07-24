@@ -18,6 +18,7 @@ import {
 } from "./ReplayPremiereIntegrity";
 import {
   deriveReplayPremierePredictionOutcome,
+  hasCompleteReplayPremierePredictionResolution,
   REPLAY_PREMIERE_REACTION_KINDS,
   type ReplayPremiereInteractionsSnapshot,
   type ReplayPremierePredictionOutcome,
@@ -383,6 +384,9 @@ function summarizePredictionsFromState(
   state: ReplayPremiereInteractionsSnapshot,
   canonical: PremiereCanonicalAuthoritativeResult,
 ): PremiereResultSummaryPrediction[] {
+  if (!hasCompleteReplayPremierePredictionResolution(state)) {
+    throw summaryIntegrity("summary_prediction_resolution_incomplete");
+  }
   const authoritativeSeatIds = new Set(
     canonical.seats.map((seat) => seat.seatId),
   );

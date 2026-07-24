@@ -2,6 +2,7 @@ import { promises as fs } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, test } from "vitest";
+import type { PremiereCanonicalAuthoritativeResult } from "../../../src/server/replay-premiere/ReplayPremiereAuthoritativeResult";
 import { REPLAY_PREMIERE_CHECKPOINT_PAUSE_MS } from "../../../src/server/replay-premiere/ReplayPremiereContracts";
 import { ReplayPremiereEventStore } from "../../../src/server/replay-premiere/ReplayPremiereEventStore";
 import {
@@ -12,6 +13,7 @@ import {
 import {
   loadReplayPremiereInteractions,
   recoverReplayPremiereTerminalInteractionState,
+  resolveReplayPremiereTerminalPredictionsFromAuthoritativeResult,
   type ReplayPremiereInteractionEventStore,
   type ReplayPremiereRecoveredInteractionsOptions,
 } from "../../../src/server/replay-premiere/ReplayPremiereInteractionRecovery";
@@ -218,6 +220,165 @@ describe("ReplayPremiereInteractionRecovery", () => {
           ...terminalOptions,
           getPremiereState: () => "revealed",
         },
+      }),
+    ).resolves.toBeNull();
+  });
+
+  test("durably resolves a terminal orphan with no prior interaction aggregate exactly once", async () => {
+    const store = await openStore();
+    stores.push(store);
+    await appendRuntimeCheckpointEvent(
+      store,
+      "premiere_runtime_failed",
+      closedCheckpoints(),
+      "runtime:terminal:no-interaction-aggregate",
+    );
+    expect(
+      store.recovered.events.filter((event) =>
+        event.aggregateId.startsWith("interaction:"),
+      ),
+    ).toHaveLength(0);
+
+    const first =
+      await resolveReplayPremiereTerminalPredictionsFromAuthoritativeResult({
+        eventStore: store,
+        validationOptions: terminalValidationOptions(),
+        result: authoritativeResult(["player", "seat-1"]),
+        resolvedAt: resolvedAt(),
+      });
+    expect(first.snapshot.checkpoints.map((entry) => entry.resolution)).toEqual(
+      [
+        { kind: "winner", winnerSeatId: "seat-1", resolvedAt: resolvedAt() },
+        { kind: "winner", winnerSeatId: "seat-1", resolvedAt: resolvedAt() },
+      ],
+    );
+    const resolutionEvents = store.recovered.events.filter(
+      (event) => event.eventType === "predictions_resolved",
+    );
+    expect(resolutionEvents).toHaveLength(1);
+    expect(resolutionEvents[0]).toMatchObject({
+      aggregateId: `interaction:${PREMIERE_ID}`,
+      occurredAt: resolvedAt(),
+      idempotencyKey: `interaction:prediction_resolution:${PREMIERE_ID}`,
+      payload: {
+        sourceEventType: "predictions_resolved",
+        sourceEventPayload: {
+          checkpointIds: ["cp_first0001", "cp_second001"],
+          resolution: {
+            kind: "winner",
+            winnerSeatId: "seat-1",
+            resolvedAt: resolvedAt(),
+          },
+        },
+      },
+    });
+
+    const retried =
+      await resolveReplayPremiereTerminalPredictionsFromAuthoritativeResult({
+        eventStore: store,
+        validationOptions: terminalValidationOptions(),
+        result: authoritativeResult(["player", "seat-1"]),
+        resolvedAt: resolvedAt(),
+      });
+    expect(retried).toEqual(first);
+    expect(
+      store.recovered.events.filter(
+        (event) => event.eventType === "predictions_resolved",
+      ),
+    ).toHaveLength(1);
+
+    await expect(
+      resolveReplayPremiereTerminalPredictionsFromAuthoritativeResult({
+        eventStore: store,
+        validationOptions: terminalValidationOptions(),
+        result: authoritativeResult(["player", "SEAT0001"]),
+        resolvedAt: resolvedAt(),
+      }),
+    ).rejects.toMatchObject({ operatorCode: "prediction_resolution_conflict" });
+    expect(
+      store.recovered.events.filter(
+        (event) => event.eventType === "predictions_resolved",
+      ),
+    ).toHaveLength(1);
+  });
+
+  test("preserves an unresolved durable audience aggregate while resolving its terminal checkpoints", async () => {
+    const store = await openStore();
+    stores.push(store);
+    await appendRuntimeCheckpointEvent(
+      store,
+      "premiere_runtime_failed",
+      closedCheckpoints(),
+      "runtime:terminal:unresolved-interaction-aggregate",
+    );
+    const loaded = await loadReplayPremiereInteractions({
+      eventStore: store,
+      interactions: interactionOptions({ fixedRandom: true }),
+    });
+    const session = await loaded.interactions.createViewerSession({
+      participantId: PARTICIPANT_ID,
+      idempotencyKey: "idem_unresolved_terminal_001",
+      requesterBucketId: `ip_${"7".repeat(32)}`,
+      visible: true,
+      observedSequence: -1,
+      excludedAsOperator: false,
+      excludedAsBot: false,
+    });
+    expect(loaded.interactions.hasCompletePredictionResolution()).toBe(false);
+
+    const resolved =
+      await resolveReplayPremiereTerminalPredictionsFromAuthoritativeResult({
+        eventStore: store,
+        validationOptions: terminalValidationOptions(),
+        result: authoritativeResult(["player", "SEAT0001"]),
+        resolvedAt: resolvedAt(),
+      });
+    expect(resolved.snapshot.sessions).toEqual([
+      expect.objectContaining({
+        id: session.id,
+        participantId: PARTICIPANT_ID,
+      }),
+    ]);
+    expect(
+      resolved.snapshot.checkpoints.map((entry) => entry.resolution),
+    ).toEqual([
+      {
+        kind: "winner",
+        winnerSeatId: "SEAT0001",
+        resolvedAt: resolvedAt(),
+      },
+      {
+        kind: "winner",
+        winnerSeatId: "SEAT0001",
+        resolvedAt: resolvedAt(),
+      },
+    ]);
+    expect(
+      store.recovered.events.filter(
+        (event) => event.eventType === "predictions_resolved",
+      ),
+    ).toHaveLength(1);
+  });
+
+  test("refuses to invent closed checkpoint evidence for an incomplete terminal orphan", async () => {
+    const store = await openStore();
+    stores.push(store);
+
+    await expect(
+      resolveReplayPremiereTerminalPredictionsFromAuthoritativeResult({
+        eventStore: store,
+        validationOptions: terminalValidationOptions(),
+        result: authoritativeResult(["player", "seat-1"]),
+        resolvedAt: resolvedAt(),
+      }),
+    ).rejects.toMatchObject({
+      operatorCode: "prediction_checkpoint_not_closed",
+    });
+    expect(store.recovered.events).toHaveLength(0);
+    await expect(
+      recoverReplayPremiereTerminalInteractionState({
+        eventStore: store,
+        validationOptions: terminalValidationOptions(),
       }),
     ).resolves.toBeNull();
   });
@@ -505,6 +666,76 @@ function interactionOptions(
     },
     admitAnonymousWrite: () => undefined,
   };
+}
+
+function terminalValidationOptions(): Omit<
+  ReplayPremiereRecoveredInteractionsOptions,
+  "getReleasedContext"
+> {
+  const { getReleasedContext: _getReleasedContext, ...options } =
+    interactionOptions({ fixedRandom: true });
+  return {
+    ...options,
+    getPremiereState: () => "archived",
+  };
+}
+
+function closedCheckpoints(): ReplayPremiereInteractionCheckpoint[] {
+  const firstOpensAt = NOW;
+  const firstClosesAt = new Date(
+    Date.parse(firstOpensAt) + REPLAY_PREMIERE_CHECKPOINT_PAUSE_MS,
+  ).toISOString();
+  const secondOpensAt = firstClosesAt;
+  const secondClosesAt = new Date(
+    Date.parse(secondOpensAt) + REPLAY_PREMIERE_CHECKPOINT_PAUSE_MS,
+  ).toISOString();
+  return [
+    {
+      id: "cp_first0001",
+      sequence: 35,
+      opensAt: firstOpensAt,
+      closesAt: firstClosesAt,
+      outageShiftMs: 0,
+      optionSeatIds: ["seat-1", "SEAT0001"],
+      state: "closed",
+      resolution: null,
+    },
+    {
+      id: "cp_second001",
+      sequence: 65,
+      opensAt: secondOpensAt,
+      closesAt: secondClosesAt,
+      outageShiftMs: 0,
+      optionSeatIds: ["seat-1", "SEAT0001"],
+      state: "closed",
+      resolution: null,
+    },
+  ];
+}
+
+function authoritativeResult(
+  winner: PremiereCanonicalAuthoritativeResult["winner"],
+): PremiereCanonicalAuthoritativeResult {
+  return {
+    schemaVersion: 1,
+    sourceKind: "controlled_result",
+    sourceRunId: "controlled-run-terminal-recovery",
+    sourceId: "controlled-source-terminal-recovery",
+    gameId: "game-terminal-recovery",
+    completedAt: "2026-07-20T11:55:00.000Z",
+    turnCount: 80,
+    winner,
+    seats: [
+      { seatId: "seat-1", displayName: "Alpha", won: false },
+      { seatId: "SEAT0001", displayName: "Beta", won: false },
+    ],
+  };
+}
+
+function resolvedAt(): string {
+  return new Date(
+    Date.parse(NOW) + 3 * REPLAY_PREMIERE_CHECKPOINT_PAUSE_MS,
+  ).toISOString();
 }
 
 async function appendRuntimeCheckpointEvent(

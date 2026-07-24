@@ -7,16 +7,18 @@ import {
 } from "./ReplayPremiereArchivedClipPromoter";
 import type { PremiereArchivePointerV1 } from "./ReplayPremiereArchiveIndex";
 import { ReplayPremiereArchiveStore } from "./ReplayPremiereArchiveIndex";
+import { verifyPremiereAuthoritativeResultBytes } from "./ReplayPremiereAuthoritativeResult";
 import type { ReplayPremiereAdmissionRecordV1 } from "./ReplayPremiereCatalog";
 import { ReplayPremiereError } from "./ReplayPremiereErrors";
 import type { ReplayPremiereHttpTarget } from "./ReplayPremiereHttp";
 import {
-  recoverReplayPremiereTerminalInteractionState,
   replayPremiereInteractionAggregateId,
+  resolveReplayPremiereTerminalPredictionsFromAuthoritativeResult,
   type ReplayPremiereInteractionEventStore,
 } from "./ReplayPremiereInteractionRecovery";
 import {
   createReplayPremiereInitialInteractionsSnapshot,
+  hasCompleteReplayPremierePredictionResolution,
   type ReplayPremiereInteractionLimits,
 } from "./ReplayPremiereInteractions";
 import {
@@ -58,6 +60,7 @@ export interface ReplayPremiereReclamationEligibility {
     | "eligible"
     | "excluded"
     | "not_terminal"
+    | "prediction_resolution_pending"
     | "within_grace"
     | "revealed_time_unavailable";
 }
@@ -70,6 +73,7 @@ export interface ReplayPremiereReclamationResult {
     | "already_reclaimed"
     | "excluded"
     | "not_terminal"
+    | "prediction_resolution_pending"
     | "within_grace"
     | "revealed_time_unavailable";
   pointer: PremiereArchivePointerV1 | null;
@@ -208,6 +212,15 @@ export class ReplayPremiereTerminalReclaimer {
         };
       }
       const elapsed = this.now().getTime() - revealedAtMs;
+      if (!target.interactions.hasCompletePredictionResolution()) {
+        return {
+          eligible: false,
+          terminal: true,
+          terminalState: state,
+          revealedAt: reveal.revealedAt,
+          reason: "prediction_resolution_pending",
+        };
+      }
       return {
         eligible: elapsed >= this.graceMs,
         terminal: true,
@@ -256,7 +269,10 @@ export class ReplayPremiereTerminalReclaimer {
     }
     const already = this.store.lookup(premiereId);
     const eligibility = this.eligibility(target);
-    if (already === null && !eligibility.eligible) {
+    if (
+      eligibility.reason === "prediction_resolution_pending" ||
+      (already === null && !eligibility.eligible)
+    ) {
       return {
         premiereId,
         reclaimed: false,
@@ -266,7 +282,7 @@ export class ReplayPremiereTerminalReclaimer {
             : eligibility.reason === "not_terminal"
               ? "not_terminal"
               : eligibility.reason,
-        pointer: null,
+        pointer: already,
         deletedBulk: false,
       };
     }
@@ -405,21 +421,48 @@ export class ReplayPremiereTerminalReclaimer {
     const interactionRecovery =
       (candidate.terminalState === "revealed" ||
         candidate.terminalState === "archived") &&
-      this.interactionEventStore !== null
-        ? await recoverReplayPremiereTerminalInteractionState({
-            eventStore: this.interactionEventStore,
-            validationOptions: {
-              premiereId,
-              checkpointDescriptors: record.publicDefinition.checkpoints,
-              seats: record.eligibilityRecord.seats.map((seat) => ({
-                seatId: seat.seatId,
-                policyIdentity: seat.policyIdentity,
-              })),
-              getPremiereState: () => candidate.terminalState,
-              limits: this.interactionLimits,
+      this.interactionEventStore !== null &&
+      candidate.revealedAt !== null
+        ? await resolveReplayPremiereTerminalPredictionsFromAuthoritativeResult(
+            {
+              eventStore: this.interactionEventStore,
+              validationOptions: {
+                premiereId,
+                checkpointDescriptors: record.publicDefinition.checkpoints,
+                seats: record.eligibilityRecord.seats.map((seat) => ({
+                  seatId: seat.seatId,
+                  policyIdentity: seat.policyIdentity,
+                })),
+                getPremiereState: () => candidate.terminalState,
+                limits: this.interactionLimits,
+              },
+              result: verifyPremiereAuthoritativeResultBytes({
+                eligibilityRecord: record.eligibilityRecord,
+                resultBytes: Buffer.from(
+                  record.authoritativeResult.bytes,
+                  "base64",
+                ),
+              }),
+              resolvedAt: candidate.revealedAt,
             },
-          })
+          )
         : null;
+    if (
+      (candidate.terminalState === "revealed" ||
+        candidate.terminalState === "archived") &&
+      (interactionRecovery === null ||
+        !hasCompleteReplayPremierePredictionResolution(
+          interactionRecovery.snapshot,
+        ))
+    ) {
+      return {
+        premiereId,
+        reclaimed: false,
+        reason: "prediction_resolution_pending",
+        pointer: already,
+        deletedBulk: false,
+      };
+    }
     if (pointer === null) {
       const summary = buildPremiereResultSummaryFromDurableEvidence({
         premiereId,
@@ -559,6 +602,7 @@ export class ReplayPremiereTerminalReclaimer {
     await this.archivedClipPromoter.promotePremiereCache(premiereId, pointer);
   }
 }
+
 /**
  * Loads the premiere-reclamation exclusion set from BOTH the
  * `PROXYWAR_PREMIERE_RECLAIM_EXCLUDE` env (comma-separated premiere ids) and an

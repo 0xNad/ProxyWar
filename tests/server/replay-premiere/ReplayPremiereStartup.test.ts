@@ -30,6 +30,7 @@ import {
   sha256Hex,
   type ReplayPremiereJsonValue,
 } from "../../../src/server/replay-premiere/ReplayPremiereIntegrity";
+import { ReplayPremiereInteractions } from "../../../src/server/replay-premiere/ReplayPremiereInteractions";
 import { PREMIERE_LOOP_ACTIVATION_VERIFY_MS } from "../../../src/server/replay-premiere/ReplayPremiereLoopCore";
 import {
   importControlledPremiereSourceForPublication,
@@ -2030,11 +2031,33 @@ describe("ReplayPremiere production startup", () => {
     });
     services.push(started.service);
     const runtime = context.runtimeRegistry.get(PREMIERE_ID)!;
+    const target = context.httpRegistry.get(PREMIERE_ID)!;
+    const participantId = `guest_${"9".repeat(32)}`;
+    const session = await target.interactions.createViewerSession({
+      participantId,
+      idempotencyKey: "startup_reveal_resolution_session_0001",
+      requesterBucketId: `ip_${"8".repeat(32)}`,
+      visible: true,
+      observedSequence: -1,
+      excludedAsOperator: false,
+      excludedAsBot: false,
+    });
     expect(runtime.readLifecycleState()).toBe("playing");
 
     await vi.advanceTimersByTimeAsync(100);
     await started.service.waitForRuntimeTimersIdle();
     expect(runtime.readLifecycleState()).toBe("checkpoint");
+    const predictedCheckpoint = target.interactions
+      .readCheckpoints(participantId)
+      .find((checkpoint) => checkpoint.state === "open")!;
+    await target.interactions.submitPrediction({
+      participantId,
+      sessionId: session.id,
+      checkpointId: predictedCheckpoint.id,
+      selectedSeatId: predictedCheckpoint.optionSeatIds[0],
+      idempotencyKey: "startup_reveal_resolution_prediction_0001",
+      requesterBucketId: `ip_${"8".repeat(32)}`,
+    });
     await vi.advanceTimersByTimeAsync(REPLAY_PREMIERE_CHECKPOINT_PAUSE_MS);
     await started.service.waitForRuntimeTimersIdle();
     expect(runtime.readLifecycleState()).toBe("playing");
@@ -2050,9 +2073,27 @@ describe("ReplayPremiere production startup", () => {
     expect(runtime.readLifecycleState()).toBe("revealed");
     expect(runtime.readReveal()).not.toBeNull();
     expect(started.service.readActiveTimerCount()).toBe(0);
-
+    expect(
+      target.interactions.readCheckpoint(predictedCheckpoint.id, participantId),
+    ).toMatchObject({
+      participantPrediction: {
+        selectedSeatId: predictedCheckpoint.optionSeatIds[0],
+      },
+      resolution: {
+        kind: "winner",
+        winnerSeatId: predictedCheckpoint.optionSeatIds[0],
+      },
+      crowdAccuracy: { correctPredictions: 1, totalPredictions: 1 },
+    });
     await started.service.close();
     services.splice(services.indexOf(started.service), 1);
+    expect(
+      (await readAllPremiereEvents(root)).filter(
+        (event) =>
+          event.aggregateId === `interaction:${PREMIERE_ID}` &&
+          event.eventType === "predictions_resolved",
+      ),
+    ).toHaveLength(1);
     const revealedContext = startupContext(() => new Date());
     const revealed = await startReplayPremiereProduction({
       ...revealedContext,
@@ -2064,10 +2105,30 @@ describe("ReplayPremiere production startup", () => {
     expect(revealed.registeredPremiereIds).toEqual([PREMIERE_ID]);
     const revealedRuntime = revealedContext.runtimeRegistry.get(PREMIERE_ID)!;
     expect(revealedRuntime.readLifecycleState()).toBe("revealed");
-
+    expect(
+      revealedContext.httpRegistry
+        .get(PREMIERE_ID)!
+        .interactions.readCheckpoint(predictedCheckpoint.id, participantId),
+    ).toMatchObject({
+      participantPrediction: {
+        selectedSeatId: predictedCheckpoint.optionSeatIds[0],
+      },
+      resolution: {
+        kind: "winner",
+        winnerSeatId: predictedCheckpoint.optionSeatIds[0],
+      },
+      crowdAccuracy: { correctPredictions: 1, totalPredictions: 1 },
+    });
     await revealedRuntime.archive();
     await revealed.service.close();
     services.splice(services.indexOf(revealed.service), 1);
+    expect(
+      (await readAllPremiereEvents(root)).filter(
+        (event) =>
+          event.aggregateId === `interaction:${PREMIERE_ID}` &&
+          event.eventType === "predictions_resolved",
+      ),
+    ).toHaveLength(1);
     const archivedContext = startupContext(() => new Date());
     const archived = await startReplayPremiereProduction({
       ...archivedContext,
@@ -2080,6 +2141,225 @@ describe("ReplayPremiere production startup", () => {
     expect(
       archivedContext.runtimeRegistry.get(PREMIERE_ID)?.readLifecycleState(),
     ).toBe("archived");
+  });
+
+  test("registers a revealed target before transient startup prediction repair and retries in process", async () => {
+    vi.useFakeTimers({ now: NOW });
+    await writeAdmission(root);
+    const firstContext = startupContext(() => new Date());
+    const first = await startReplayPremiereProduction({
+      ...firstContext,
+      privateStateRoot: path.join(root, "private"),
+      servedRoots: [path.join(root, "served")],
+    });
+    services.push(first.service);
+    const firstRuntime = firstContext.runtimeRegistry.get(PREMIERE_ID)!;
+    const firstTarget = firstContext.httpRegistry.get(PREMIERE_ID)!;
+    const participantId = `guest_${"7".repeat(32)}`;
+    const requesterBucketId = `ip_${"6".repeat(32)}`;
+    const session = await firstTarget.interactions.createViewerSession({
+      participantId,
+      idempotencyKey: "startup_pending_resolution_session_0001",
+      requesterBucketId,
+      visible: true,
+      observedSequence: -1,
+      excludedAsOperator: false,
+      excludedAsBot: false,
+    });
+
+    await vi.advanceTimersByTimeAsync(100);
+    await first.service.waitForRuntimeTimersIdle();
+    const checkpoint = firstTarget.interactions
+      .readCheckpoints(participantId)
+      .find((candidate) => candidate.state === "open")!;
+    await firstTarget.interactions.submitPrediction({
+      participantId,
+      sessionId: session.id,
+      checkpointId: checkpoint.id,
+      selectedSeatId: checkpoint.optionSeatIds[0],
+      idempotencyKey: "startup_pending_resolution_prediction_0001",
+      requesterBucketId,
+    });
+    for (const advanceMs of [
+      REPLAY_PREMIERE_CHECKPOINT_PAUSE_MS,
+      100,
+      REPLAY_PREMIERE_CHECKPOINT_PAUSE_MS,
+    ]) {
+      await vi.advanceTimersByTimeAsync(advanceMs);
+      await first.service.waitForRuntimeTimersIdle();
+    }
+
+    const revealFailure = vi
+      .spyOn(
+        ReplayPremiereInteractions.prototype,
+        "resolvePredictionsFromAuthoritativeResult",
+      )
+      .mockRejectedValueOnce(
+        new ReplayPremiereError(
+          "test_reveal_prediction_persistence_unavailable",
+          "PREMIERE_UNAVAILABLE",
+          503,
+          "Injected reveal prediction persistence failure",
+        ),
+      );
+    await vi.advanceTimersByTimeAsync(50);
+    await first.service.waitForRuntimeTimersIdle();
+    expect(firstRuntime.readLifecycleState()).toBe("revealed");
+    expect(
+      firstTarget.interactions.readCheckpoint(checkpoint.id, participantId)
+        .resolution,
+    ).toBeNull();
+    expect(first.service.readActiveTimerCount()).toBe(1);
+    revealFailure.mockRestore();
+
+    await first.service.close();
+    services.splice(services.indexOf(first.service), 1);
+
+    const liveDiagnostics: string[] = [];
+    const startupRepair = vi
+      .spyOn(
+        ReplayPremiereInteractions.prototype,
+        "resolvePredictionsFromAuthoritativeResult",
+      )
+      .mockRejectedValueOnce(
+        new ReplayPremiereError(
+          "test_startup_prediction_persistence_unavailable",
+          "PREMIERE_UNAVAILABLE",
+          503,
+          "Injected startup prediction persistence failure",
+        ),
+      );
+    const restartedContext = startupContext(() => new Date());
+    const restarted = await startReplayPremiereProduction({
+      ...restartedContext,
+      privateStateRoot: path.join(root, "private"),
+      servedRoots: [path.join(root, "served")],
+      onDiagnostic: (diagnostic) =>
+        liveDiagnostics.push(diagnostic.operatorCode),
+    });
+    services.push(restarted.service);
+    const restartedRuntime = restartedContext.runtimeRegistry.get(PREMIERE_ID)!;
+    const restartedTarget = restartedContext.httpRegistry.get(PREMIERE_ID)!;
+
+    // Startup returns with the already-verified reveal served; private repair
+    // is a supervised concern and cannot make the replay disappear.
+    expect(restarted.registeredPremiereIds).toEqual([PREMIERE_ID]);
+    expect(restartedRuntime.readLifecycleState()).toBe("revealed");
+    expect(restartedTarget).not.toBeNull();
+    expect(
+      restartedTarget.interactions.readCheckpoint(checkpoint.id, participantId)
+        .resolution,
+    ).toBeNull();
+    expect(restarted.service.readActiveTimerCount()).toBe(1);
+
+    await vi.advanceTimersByTimeAsync(0);
+    await restarted.service.waitForRuntimeTimersIdle();
+    expect(startupRepair).toHaveBeenCalledTimes(1);
+    expect(liveDiagnostics).toContain(
+      "test_startup_prediction_persistence_unavailable",
+    );
+    expect(restartedContext.httpRegistry.get(PREMIERE_ID)).toBe(
+      restartedTarget,
+    );
+    expect(restarted.service.readActiveTimerCount()).toBe(1);
+
+    await vi.advanceTimersByTimeAsync(1_000);
+    await restarted.service.waitForRuntimeTimersIdle();
+    expect(startupRepair).toHaveBeenCalledTimes(2);
+    expect(
+      restartedTarget.interactions.readCheckpoint(checkpoint.id, participantId),
+    ).toMatchObject({
+      participantPrediction: { selectedSeatId: checkpoint.optionSeatIds[0] },
+      resolution: {
+        kind: "winner",
+        winnerSeatId: checkpoint.optionSeatIds[0],
+      },
+      crowdAccuracy: { correctPredictions: 1, totalPredictions: 1 },
+    });
+    expect(restarted.service.readActiveTimerCount()).toBe(0);
+    await restarted.service.close();
+    services.splice(services.indexOf(restarted.service), 1);
+    expect(
+      (await readAllPremiereEvents(root)).filter(
+        (event) =>
+          event.aggregateId === `interaction:${PREMIERE_ID}` &&
+          event.eventType === "predictions_resolved",
+      ),
+    ).toHaveLength(1);
+  });
+
+  test("reclamation removes exact supervisor ownership before an old in-flight completion can re-arm", async () => {
+    vi.useFakeTimers({ now: NOW });
+    await writeAdmission(root);
+    const archiveStore = await ReplayPremiereArchiveStore.open({
+      privateStateRoot: path.join(root, "private"),
+    });
+    const context = startupContext(() => new Date());
+    const started = await startReplayPremiereProduction({
+      ...context,
+      privateStateRoot: path.join(root, "private"),
+      servedRoots: [path.join(root, "served")],
+      archiveStore,
+      reclamationGraceMs: 0,
+      reclamationSweepMs: 0,
+    });
+    services.push(started.service);
+    const runtime = context.runtimeRegistry.get(PREMIERE_ID)!;
+    const resolutionFailure = vi
+      .spyOn(
+        ReplayPremiereInteractions.prototype,
+        "resolvePredictionsFromAuthoritativeResult",
+      )
+      .mockRejectedValueOnce(new Error("injected terminal repair failure"));
+    for (const advanceMs of [100, 60_000, 100, 60_000, 50]) {
+      await vi.advanceTimersByTimeAsync(advanceMs);
+      await started.service.waitForRuntimeTimersIdle();
+    }
+    expect(runtime.readLifecycleState()).toBe("revealed");
+    expect(started.service.readActiveTimerCount()).toBe(1);
+    resolutionFailure.mockRestore();
+
+    // Repair directly while leaving the supervisor's already-scheduled retry
+    // in place, then hold that old retry in flight through reclamation.
+    await runtime.synchronize();
+    expect(
+      context.httpRegistry
+        .get(PREMIERE_ID)!
+        .interactions.hasCompletePredictionResolution(),
+    ).toBe(true);
+    let releaseOldCompletion!: (value: {
+      state: "revealed";
+      operations: [];
+      nextWakeAt: string;
+    }) => void;
+    const oldCompletion = new Promise<{
+      state: "revealed";
+      operations: [];
+      nextWakeAt: string;
+    }>((resolve) => {
+      releaseOldCompletion = resolve;
+    });
+    const oldSynchronize = vi
+      .spyOn(runtime, "synchronize")
+      .mockImplementationOnce(() => oldCompletion);
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(oldSynchronize).toHaveBeenCalledTimes(1);
+
+    await started.service.runReclamationSweepOnce();
+    expect(context.httpRegistry.get(PREMIERE_ID)).toBeNull();
+    expect(context.runtimeRegistry.get(PREMIERE_ID)).toBeNull();
+    expect(archiveStore.lookup(PREMIERE_ID)).not.toBeNull();
+    expect(started.service.readActiveTimerCount()).toBe(0);
+
+    releaseOldCompletion({
+      state: "revealed",
+      operations: [],
+      nextWakeAt: new Date(Date.now() + 1_000).toISOString(),
+    });
+    await started.service.waitForRuntimeTimersIdle();
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(oldSynchronize).toHaveBeenCalledTimes(1);
+    expect(started.service.readActiveTimerCount()).toBe(0);
   });
 
   test("fires onPremiereRevealed at the reveal commit and again when a revealed premiere re-registers", async () => {
@@ -2735,6 +3015,76 @@ describe("ReplayPremiere production startup", () => {
     return revealedAt;
   }
 
+  async function leaveUnresolvedPredictionOrphan(): Promise<{
+    revealedAt: string;
+    checkpointId: string;
+  }> {
+    vi.useFakeTimers({ now: NOW });
+    await writeAdmission(root);
+    const context = startupContext(() => new Date());
+    const started = await startReplayPremiereProduction({
+      ...context,
+      privateStateRoot: path.join(root, "private"),
+      servedRoots: [path.join(root, "served")],
+    });
+    services.push(started.service);
+    const runtime = context.runtimeRegistry.get(PREMIERE_ID)!;
+    const target = context.httpRegistry.get(PREMIERE_ID)!;
+    const participantId = `guest_${"3".repeat(32)}`;
+    const requesterBucketId = `ip_${"2".repeat(32)}`;
+    const session = await target.interactions.createViewerSession({
+      participantId,
+      idempotencyKey: "orphan_pending_session_0001",
+      requesterBucketId,
+      visible: true,
+      observedSequence: -1,
+      excludedAsOperator: false,
+      excludedAsBot: false,
+    });
+    await vi.advanceTimersByTimeAsync(100);
+    await started.service.waitForRuntimeTimersIdle();
+    const checkpoint = target.interactions
+      .readCheckpoints(participantId)
+      .find((candidate) => candidate.state === "open")!;
+    await target.interactions.submitPrediction({
+      participantId,
+      sessionId: session.id,
+      checkpointId: checkpoint.id,
+      selectedSeatId: checkpoint.optionSeatIds[0],
+      idempotencyKey: "orphan_pending_prediction_0001",
+      requesterBucketId,
+    });
+    for (const advanceMs of [60_000, 100, 60_000]) {
+      await vi.advanceTimersByTimeAsync(advanceMs);
+      await started.service.waitForRuntimeTimersIdle();
+    }
+    const failure = vi
+      .spyOn(
+        ReplayPremiereInteractions.prototype,
+        "resolvePredictionsFromAuthoritativeResult",
+      )
+      .mockRejectedValueOnce(
+        new ReplayPremiereError(
+          "test_orphan_prediction_persistence_unavailable",
+          "PREMIERE_UNAVAILABLE",
+          503,
+          "Injected orphan prediction persistence failure",
+        ),
+      );
+    await vi.advanceTimersByTimeAsync(50);
+    await started.service.waitForRuntimeTimersIdle();
+    expect(runtime.readLifecycleState()).toBe("revealed");
+    expect(target.interactions.hasCompletePredictionResolution()).toBe(false);
+    expect(started.service.readActiveTimerCount()).toBe(1);
+    const revealedAt = runtime.readReveal()!.revealedAt;
+    failure.mockRestore();
+    await started.service.close();
+    services.splice(services.indexOf(started.service), 1);
+    vi.useRealTimers();
+    await writeAlternateAdmission(root, ORPHAN_ALTERNATE_ID);
+    return { revealedAt, checkpointId: checkpoint.id };
+  }
+
   test("a revealed premiere orphaned across a restart is reclaimed from durable evidence", async () => {
     const revealedAt = await revealPremiereAndClose();
     const lines: string[] = [];
@@ -2781,6 +3131,57 @@ describe("ReplayPremiere production startup", () => {
     await expect(
       fs.stat(admissionPath(root, PREMIERE_ID)),
     ).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  test("an unresolved revealed orphan durably repairs once, then reclaims on the same boot", async () => {
+    const pending = await leaveUnresolvedPredictionOrphan();
+    const lines: string[] = [];
+    const archiveStore = await ReplayPremiereArchiveStore.open({
+      privateStateRoot: path.join(root, "private"),
+    });
+    const rebootContext = startupContext(
+      () => new Date(Date.parse(pending.revealedAt) + 45 * 60_000),
+    );
+    const rebooted = await startReplayPremiereProduction({
+      ...rebootContext,
+      privateStateRoot: path.join(root, "private"),
+      servedRoots: [path.join(root, "served")],
+      archiveStore,
+      reclamationSweepMs: 0,
+      onDiagnostic: (diagnostic) =>
+        lines.push(`${diagnostic.target}:${diagnostic.operatorCode}`),
+    });
+    services.push(rebooted.service);
+    expect(rebooted.registeredPremiereIds).toEqual([ORPHAN_ALTERNATE_ID]);
+    expect(rebootContext.runtimeRegistry.get(PREMIERE_ID)).toBeNull();
+
+    await rebooted.service.runReclamationSweepOnce();
+    await vi.waitFor(() => {
+      expect(lines).toContain(`${PREMIERE_ID}.orphan:orphan_reclaimed`);
+    });
+    const summary = await archiveStore.loadSummary(PREMIERE_ID);
+    expect(summary?.predictions).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          checkpointId: pending.checkpointId,
+          totalPredictions: 1,
+          correctPredictions: 1,
+        }),
+      ]),
+    );
+    await expect(
+      fs.stat(admissionPath(root, PREMIERE_ID)),
+    ).rejects.toMatchObject({ code: "ENOENT" });
+
+    await rebooted.service.close();
+    services.splice(services.indexOf(rebooted.service), 1);
+    expect(
+      (await readAllPremiereEvents(root)).filter(
+        (event) =>
+          event.aggregateId === `interaction:${PREMIERE_ID}` &&
+          event.eventType === "predictions_resolved",
+      ),
+    ).toHaveLength(1);
   });
 
   test("a reclaim-excluded orphan is never touched", async () => {
@@ -3089,6 +3490,21 @@ async function readPremiereEvents(
     return store.recovered.events.filter(
       (event) => event.aggregateId === PREMIERE_ID,
     );
+  } finally {
+    await store.close();
+  }
+}
+
+async function readAllPremiereEvents(
+  testRoot: string,
+): Promise<StoredReplayPremiereEvent[]> {
+  const store = await ReplayPremiereEventStore.open({
+    privateStateRoot: path.join(testRoot, "private"),
+    servedRoots: [path.join(testRoot, "served")],
+    limits: DEFAULT_REPLAY_PREMIERE_EVENT_STORE_LIMITS,
+  });
+  try {
+    return [...store.recovered.events];
   } finally {
     await store.close();
   }

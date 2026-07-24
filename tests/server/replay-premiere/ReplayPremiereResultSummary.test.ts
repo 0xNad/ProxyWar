@@ -212,15 +212,14 @@ describe("buildPremiereResultSummaryFromTarget", () => {
     expect(target.interactions.readState).toHaveBeenCalledTimes(1);
   });
 
-  it("derives authoritative accuracy when the live snapshot has no stored resolution", () => {
-    const summary = buildPremiereResultSummaryFromTarget({
-      target: revealedTarget(null),
-      terminalState: "revealed",
-      reclaimedAt: RECLAIMED_AT,
-    });
-    expect(
-      summary.predictions.map((entry) => entry.correctPredictions),
-    ).toEqual([3, 2]);
+  it("refuses a live summary whose prediction resolution is not durable", () => {
+    expect(() =>
+      buildPremiereResultSummaryFromTarget({
+        target: revealedTarget(null),
+        terminalState: "revealed",
+        reclaimedAt: RECLAIMED_AT,
+      }),
+    ).toThrow(/summary_prediction_resolution_incomplete/);
   });
 
   it("fails closed when the live snapshot resolution conflicts with the result", () => {
@@ -370,14 +369,10 @@ describe("buildPremiereResultSummaryFromDurableEvidence", () => {
     ).not.toThrow();
   });
 
-  it("derives accuracy from the verified result when stored resolutions are absent", () => {
-    const summary = buildFrom(
-      authoritativeResultBytes(),
-      interactionState(null),
-    );
-    expect(
-      summary.predictions.map((entry) => entry.correctPredictions),
-    ).toEqual([1, 0]);
+  it("refuses a durable summary whose prediction resolution is absent", () => {
+    expect(() =>
+      buildFrom(authoritativeResultBytes(), interactionState(null)),
+    ).toThrow(/summary_prediction_resolution_incomplete/);
   });
 
   it("fails closed when any stored resolution conflicts with the verified result", () => {

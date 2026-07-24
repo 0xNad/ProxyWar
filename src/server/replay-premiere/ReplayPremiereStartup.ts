@@ -448,6 +448,7 @@ export class ReplayPremiereProductionService {
           return null;
         });
       if (result === null || !result.reclaimed) continue;
+      this.supervisor.remove(assembled.runtime);
       this.httpRegistry.unregister(assembled.target);
       this.runtimeRegistry.unregister(assembled.runtime);
       const index = this.ownedTargets.indexOf(assembled);
@@ -492,7 +493,19 @@ export class ReplayPremiereProductionService {
           });
           continue;
         }
-        if (result.reason === "within_grace") continue; // retry next sweep
+        if (
+          result.reason === "within_grace" ||
+          result.reason === "prediction_resolution_pending"
+        ) {
+          if (result.reason === "prediction_resolution_pending") {
+            reclamation.report({
+              target: `${candidate.premiereId}.orphan`,
+              premiereId: candidate.premiereId,
+              operatorCode: "orphan_prediction_resolution_pending",
+            });
+          }
+          continue; // retry next sweep without discarding durable evidence
+        }
         drop(candidate);
         if (result.reason !== "excluded") {
           reclamation.report({
@@ -1169,7 +1182,17 @@ async function assemblePremiereTarget(options: {
     clock: options.clock,
     interactions: recoveredInteractions.interactions,
   });
-  await runtime.synchronize();
+  // A recovered reveal is already a complete, independently verified public
+  // artifact. Register it before repairing its participant-private prediction
+  // projection so a transient interaction-store failure cannot make the
+  // entire replay unavailable. `nextWakeAt()` gives the normal supervisor an
+  // immediate retry when a resolution is still pending.
+  if (
+    runtime.readLifecycleState() !== "revealed" &&
+    runtime.readLifecycleState() !== "archived"
+  ) {
+    await runtime.synchronize();
+  }
   const journalAnchor = recoveredInteractions.persistence.recoveryAnchor();
   const interactionState = recoveredInteractions.interactions.readState();
   if (
@@ -1222,6 +1245,10 @@ class ReplayPremiereRuntimeSupervisor {
       reportedOperatorCodes: Set<string>;
     }
   >();
+  private readonly activeRuntimes = new Map<
+    string,
+    ReplayPremiereRuntimeCoordinator
+  >();
   private closed = false;
 
   constructor(
@@ -1234,6 +1261,11 @@ class ReplayPremiereRuntimeSupervisor {
 
   add(runtime: ReplayPremiereRuntimeCoordinator): void {
     if (this.closed) throw startupUnavailable("runtime_supervisor_closed");
+    const existing = this.activeRuntimes.get(runtime.premiereId);
+    if (existing !== undefined && existing !== runtime) {
+      throw startupUnavailable("runtime_supervisor_identity_conflict");
+    }
+    this.activeRuntimes.set(runtime.premiereId, runtime);
     // A runtime recovered/registered ALREADY revealed never re-fires a
     // "revealed" advance operation, so the registration itself is the
     // observation point for it.
@@ -1241,6 +1273,16 @@ class ReplayPremiereRuntimeSupervisor {
       this.notifyRevealed(runtime.premiereId);
     }
     this.arm(runtime, runtime.nextWakeAt());
+  }
+
+  remove(runtime: ReplayPremiereRuntimeCoordinator): void {
+    const premiereId = runtime.premiereId;
+    if (this.activeRuntimes.get(premiereId) !== runtime) return;
+    this.activeRuntimes.delete(premiereId);
+    const timer = this.timers.get(premiereId);
+    if (timer !== undefined) clearTimeout(timer);
+    this.timers.delete(premiereId);
+    this.failures.delete(premiereId);
   }
 
   private notifyRevealed(premiereId: string): void {
@@ -1257,6 +1299,7 @@ class ReplayPremiereRuntimeSupervisor {
     this.timers.clear();
     await this.waitForIdle();
     this.failures.clear();
+    this.activeRuntimes.clear();
   }
 
   activeTimerCount(): number {
@@ -1276,7 +1319,12 @@ class ReplayPremiereRuntimeSupervisor {
     const previous = this.timers.get(runtime.premiereId);
     if (previous !== undefined) clearTimeout(previous);
     this.timers.delete(runtime.premiereId);
-    if (this.closed || nextWakeAt === null) return;
+    if (
+      this.closed ||
+      this.activeRuntimes.get(runtime.premiereId) !== runtime ||
+      nextWakeAt === null
+    )
+      return;
     const delay = Math.max(
       0,
       Math.min(
@@ -1286,9 +1334,11 @@ class ReplayPremiereRuntimeSupervisor {
     );
     const timer = setTimeout(() => {
       this.timers.delete(runtime.premiereId);
+      if (this.activeRuntimes.get(runtime.premiereId) !== runtime) return;
       const operation = runtime
         .synchronize()
         .then((advance) => {
+          if (this.activeRuntimes.get(runtime.premiereId) !== runtime) return;
           this.failures.delete(runtime.premiereId);
           if (advance.operations.includes("revealed")) {
             this.notifyRevealed(runtime.premiereId);
@@ -1296,6 +1346,7 @@ class ReplayPremiereRuntimeSupervisor {
           this.arm(runtime, advance.nextWakeAt);
         })
         .catch((error: unknown) => {
+          if (this.activeRuntimes.get(runtime.premiereId) !== runtime) return;
           const failure = this.recordFailure(runtime.premiereId, error);
           if (!this.closed) {
             const retryAt = new Date(

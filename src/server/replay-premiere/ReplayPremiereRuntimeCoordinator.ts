@@ -1,4 +1,8 @@
 import {
+  decodePremiereAuthoritativeResult,
+  verifyPremiereAuthoritativeResultBytes,
+} from "./ReplayPremiereAuthoritativeResult";
+import {
   assertReplayPremiereCheckpointProjection,
   type ReplayPremiereCheckpointProjection,
 } from "./ReplayPremiereCheckpointProjection";
@@ -156,6 +160,7 @@ export class ReplayPremiereRuntimeCoordinator {
   private recoveredReveal: RecoveredRevealView | null;
   private readonly outageEventsByLifecycleVersion: Map<number, number>;
   private lastClockObservedAtMs: number;
+  private revealNotificationPending = false;
   private operationQueue: Promise<void> = Promise.resolve();
 
   private constructor(options: {
@@ -313,7 +318,21 @@ export class ReplayPremiereRuntimeCoordinator {
   }
 
   nextWakeAt(): string | null {
-    if (this.recoveredReveal !== null) return null;
+    if (this.recoveredReveal !== null) {
+      if (
+        (this.recoveredReveal.lifecycle.state === "revealed" ||
+          this.recoveredReveal.lifecycle.state === "archived") &&
+        !this.interactions.hasCompletePredictionResolution()
+      ) {
+        // A recovered reveal can be durably ahead of its independently
+        // persisted participant-private prediction projection. Returning the
+        // already-past reveal instant gives the supervisor an immediate,
+        // bounded retry lane after registration without inventing a second
+        // startup-only repair path.
+        return this.recoveredReveal.reveal.revealedAt;
+      }
+      return null;
+    }
     return nextRuntimeWakeAt(this.state, this.gate, this.drafts);
   }
 
@@ -433,6 +452,11 @@ export class ReplayPremiereRuntimeCoordinator {
       ) {
         throw runtimeRequest("archive_requires_revealed_state");
       }
+      // A terminal archive is irreversible from the interaction aggregate's
+      // perspective. Reconcile the independently durable prediction outcome
+      // while the interaction state is still legally `revealed`; a failed
+      // persistence therefore leaves the runtime revealed and retryable.
+      await this.resolvePredictionsFromReveal();
       const now = this.clockTimestamp();
       const transition = transitionPremiereLifecycle(
         this.recoveredReveal.lifecycle,
@@ -673,8 +697,21 @@ export class ReplayPremiereRuntimeCoordinator {
 
   private async synchronizeUnlocked(): Promise<ReplayPremiereRuntimeAdvance> {
     const operations: ReplayPremiereRuntimeAdvance["operations"] = [];
+    if (this.recoveredReveal !== null) {
+      this.clockTimestamp();
+      if (
+        this.recoveredReveal.lifecycle.state === "revealed" ||
+        this.recoveredReveal.lifecycle.state === "archived"
+      ) {
+        await this.resolvePredictionsFromReveal();
+        if (this.revealNotificationPending) {
+          operations.push("revealed");
+          this.revealNotificationPending = false;
+        }
+      }
+      return this.advanceResult(operations);
+    }
     if (
-      this.recoveredReveal !== null ||
       this.state.lifecycle.state === "failed" ||
       this.state.lifecycle.state === "cancelled" ||
       this.state.lifecycle.state === "archived"
@@ -896,6 +933,40 @@ export class ReplayPremiereRuntimeCoordinator {
       reveal: result.reveal,
       chunks,
     };
+    try {
+      await this.resolvePredictionsFromReveal();
+    } catch (error) {
+      // The reveal is already durable. Keep the notification pending so the
+      // supervisor's retry both repairs the interaction projection and still
+      // runs the ordinary post-reveal observer exactly once in this process.
+      this.revealNotificationPending = true;
+      throw error;
+    }
+  }
+
+  /**
+   * Project the already-verified reveal outcome into the participant-private
+   * interaction store. The interaction mutation is independently durable and
+   * idempotent, so a crash after the reveal commit is repaired by the next
+   * synchronize call (including startup recovery) without republishing the
+   * terminal chunk or inventing a second result-validation path.
+   */
+  private async resolvePredictionsFromReveal(): Promise<void> {
+    const reveal = this.recoveredReveal?.reveal;
+    if (reveal === undefined) {
+      throw runtimeIntegrity("prediction_resolution_requires_reveal");
+    }
+    const resultBytes = decodePremiereAuthoritativeResult(
+      reveal.authoritativeResult,
+    );
+    const result = verifyPremiereAuthoritativeResultBytes({
+      eligibilityRecord: reveal.eligibilityRecord,
+      resultBytes,
+    });
+    await this.interactions.resolvePredictionsFromAuthoritativeResult({
+      result,
+      resolvedAt: reveal.revealedAt,
+    });
   }
 
   private async recoverAvailabilityGap(): Promise<void> {

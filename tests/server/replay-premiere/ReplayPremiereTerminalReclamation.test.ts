@@ -49,7 +49,11 @@ function emptyInteractionSnapshot(
     outageShiftMs: 0,
     optionSeatIds: ["SEAT0001", "SEAT0002"],
     state: "closed" as const,
-    resolution: null,
+    resolution: {
+      kind: "winner" as const,
+      winnerSeatId: "SEAT0001",
+      resolvedAt: REVEALED_AT,
+    },
   });
   return {
     schemaVersion: 1,
@@ -90,7 +94,35 @@ function target(premiereId = PREMIERE_ID): ReplayPremiereHttpTarget {
     interactions: {
       readCheckpoints: () => [],
       readState: () => emptyInteractionSnapshot(premiereId),
+      hasCompletePredictionResolution: () => true,
       fenceWritesAndDrain: async () => undefined,
+    },
+  } as unknown as ReplayPremiereHttpTarget;
+}
+
+function unresolvedPredictionTarget(
+  options: {
+    interactionFence?: () => Promise<void>;
+  } = {},
+): ReplayPremiereHttpTarget {
+  const base = target();
+  const snapshot = emptyInteractionSnapshot(PREMIERE_ID);
+  for (const checkpoint of snapshot.checkpoints) checkpoint.resolution = null;
+  snapshot.predictions.push({
+    premiereId: PREMIERE_ID,
+    checkpointId: snapshot.checkpoints[0].id,
+    participantId: `guest_${"f".repeat(32)}`,
+    selectedSeatId: "SEAT0001",
+    submittedAt: "2026-07-20T17:58:30.000Z",
+    lockedAt: "2026-07-20T17:59:00.000Z",
+  });
+  return {
+    ...base,
+    interactions: {
+      ...base.interactions,
+      readState: () => structuredClone(snapshot),
+      hasCompletePredictionResolution: () => false,
+      fenceWritesAndDrain: options.interactionFence ?? (async () => undefined),
     },
   } as unknown as ReplayPremiereHttpTarget;
 }
@@ -132,6 +164,7 @@ function terminalInteractions(
       return bytes;
     },
     admitAnonymousWrite: () => undefined,
+    initialState: emptyInteractionSnapshot(PREMIERE_ID),
   });
 }
 
@@ -218,6 +251,84 @@ describe("ReplayPremiereTerminalReclaimer", () => {
     expect(store.lookup(PREMIERE_ID)).toBeNull();
     expect(await exists(admissionPath(PREMIERE_ID))).toBe(true);
     expect(await exists(sourcePath())).toBe(true);
+  });
+
+  it("preserves an unresolved accepted prediction past grace and across a reclaimer restart", async () => {
+    await writeBulk();
+    const interactionFence = vi.fn(async () => undefined);
+    const clipFence = vi.fn(async () => undefined);
+    const liveTarget = unresolvedPredictionTarget({ interactionFence });
+    const first = await reclaimerWith("2026-07-20T18:45:00.000Z", {
+      fenceClipWritesAndDrain: clipFence,
+    });
+
+    await expect(
+      first.reclaimer.reclaimIfEligible(liveTarget),
+    ).resolves.toEqual(
+      expect.objectContaining({
+        premiereId: PREMIERE_ID,
+        reclaimed: false,
+        reason: "prediction_resolution_pending",
+        pointer: null,
+        deletedBulk: false,
+      }),
+    );
+
+    // A fresh reclaimer instance represents the next-process sweep. The
+    // unresolved private consequence remains retryable; no irreversible fence,
+    // pointer, promotion, or bulk deletion is allowed in either process.
+    const restarted = await reclaimerWith("2026-07-20T19:45:00.000Z", {
+      fenceClipWritesAndDrain: clipFence,
+    });
+    await expect(
+      restarted.reclaimer.reclaimIfEligible(liveTarget),
+    ).resolves.toMatchObject({
+      reclaimed: false,
+      reason: "prediction_resolution_pending",
+      pointer: null,
+      deletedBulk: false,
+    });
+    expect(interactionFence).not.toHaveBeenCalled();
+    expect(clipFence).not.toHaveBeenCalled();
+    expect(first.store.lookup(PREMIERE_ID)).toBeNull();
+    expect(restarted.store.lookup(PREMIERE_ID)).toBeNull();
+    expect(await exists(admissionPath(PREMIERE_ID))).toBe(true);
+    expect(await exists(runtimeSnapshotPath(PREMIERE_ID))).toBe(true);
+    expect(await exists(interactionSnapshotPath(PREMIERE_ID))).toBe(true);
+  });
+
+  it("does not finish an existing-pointer retry while its private prediction outcome is unresolved", async () => {
+    await writeBulk();
+    const interactionFence = vi.fn(async () => undefined);
+    const clipFence = vi.fn(async () => undefined);
+    const { reclaimer, store } = await reclaimerWith(
+      "2026-07-20T18:45:00.000Z",
+      { fenceClipWritesAndDrain: clipFence },
+    );
+    const summary = (
+      await import("../../../src/server/replay-premiere/ReplayPremiereResultSummary")
+    ).buildPremiereResultSummaryFromTarget({
+      target: target(),
+      terminalState: "revealed",
+      reclaimedAt: "2026-07-20T18:45:00.000Z",
+    });
+    const pointer = await store.recordReclaimed(summary, SOURCE_SHA);
+
+    await expect(
+      reclaimer.reclaimIfEligible(
+        unresolvedPredictionTarget({ interactionFence }),
+      ),
+    ).resolves.toMatchObject({
+      reclaimed: false,
+      reason: "prediction_resolution_pending",
+      pointer,
+      deletedBulk: false,
+    });
+    expect(interactionFence).not.toHaveBeenCalled();
+    expect(clipFence).not.toHaveBeenCalled();
+    expect(await exists(admissionPath(PREMIERE_ID))).toBe(true);
+    expect(await exists(runtimeSnapshotPath(PREMIERE_ID))).toBe(true);
+    expect(await exists(interactionSnapshotPath(PREMIERE_ID))).toBe(true);
   });
 
   it("never reclaims an excluded premiere, even past grace", async () => {

@@ -23,7 +23,7 @@ import {
 import { NOW, verifiedPublicationFixture } from "./ReplayPremiereFixtures";
 
 const ReplayPremiereRuntimeCoordinator = {
-  createOrRecover(
+  async createOrRecover(
     options: Omit<
       Parameters<
         typeof ProductionReplayPremiereRuntimeCoordinator.createOrRecover
@@ -31,12 +31,21 @@ const ReplayPremiereRuntimeCoordinator = {
       "checkpointProjection"
     >,
   ) {
-    return ProductionReplayPremiereRuntimeCoordinator.createOrRecover({
-      ...options,
-      checkpointProjection: allSeatsProjection(options.gate),
-    });
+    const runtime =
+      await ProductionReplayPremiereRuntimeCoordinator.createOrRecover({
+        ...options,
+        checkpointProjection: allSeatsProjection(options.gate),
+      });
+    const state = interactionRuntimeState.get(options.interactions);
+    if (state !== undefined) state.runtime = runtime;
+    return runtime;
   },
 };
+
+const interactionRuntimeState = new WeakMap<
+  ReplayPremiereInteractions,
+  { runtime: ProductionReplayPremiereRuntimeCoordinator | null }
+>();
 
 class FakeClock implements ReplayPremiereRuntimeClock {
   constructor(private value: Date) {}
@@ -154,7 +163,26 @@ describe("ReplayPremiereRuntimeCoordinator", () => {
     expect(terminal.operations).toContain("revealed");
     expect(runtime.readLifecycleState()).toBe("revealed");
     expect(runtime.readReveal()).toMatchObject({ state: "revealed" });
+    expect(
+      store.recovered.events.filter(
+        (event) => event.eventType === "premiere_reveal_committed",
+      ),
+    ).toHaveLength(1);
     expect(runtime.readChunk(2)).toMatchObject({ terminal: true });
+    expect(
+      interactions.readState().checkpoints.map((entry) => entry.resolution),
+    ).toEqual([
+      {
+        kind: "winner",
+        winnerSeatId: "SEAT0001",
+        resolvedAt: runtime.readReveal()!.revealedAt,
+      },
+      {
+        kind: "winner",
+        winnerSeatId: "SEAT0001",
+        resolvedAt: runtime.readReveal()!.revealedAt,
+      },
+    ]);
   });
 
   test("projects the current authoritative clock without releasing and rejects read-clock rollback", async () => {
@@ -178,6 +206,129 @@ describe("ReplayPremiereRuntimeCoordinator", () => {
     expect(runtime.readChunk(0)).toBeNull();
     clock.advance(-1);
     await expect(runtime.readManifest()).rejects.toThrow(/integrity/i);
+  });
+
+  test("repairs a durable reveal after prediction persistence fails and preserves the reveal notification", async () => {
+    const { gate, drafts } = await verifiedPublicationFixture(root);
+    const clock = new FakeClock(NOW);
+    const store = await openStore(root);
+    stores.push(store);
+    const interactions = createInteractions(gate, clock);
+    const runtime = await ReplayPremiereRuntimeCoordinator.createOrRecover({
+      gate,
+      drafts,
+      persistence: store,
+      clock,
+      interactions,
+    });
+
+    await runtime.synchronize();
+    clock.advance(100);
+    await runtime.synchronize();
+    clock.advance(REPLAY_PREMIERE_CHECKPOINT_PAUSE_MS + 100);
+    await runtime.synchronize();
+    const resolve = vi.spyOn(
+      interactions,
+      "resolvePredictionsFromAuthoritativeResult",
+    );
+    resolve.mockRejectedValueOnce(
+      new Error("simulated prediction resolution persistence failure"),
+    );
+
+    clock.advance(REPLAY_PREMIERE_CHECKPOINT_PAUSE_MS + 50);
+    await expect(runtime.synchronize()).rejects.toThrow(
+      /simulated prediction resolution persistence failure/,
+    );
+    expect(runtime.readLifecycleState()).toBe("revealed");
+    expect(runtime.readReveal()).toMatchObject({ state: "revealed" });
+    expect(
+      interactions.readState().checkpoints.map((entry) => entry.resolution),
+    ).toEqual([null, null]);
+
+    const repaired = await runtime.synchronize();
+    expect(repaired.operations).toEqual(["revealed"]);
+    expect(repaired.nextWakeAt).toBeNull();
+    expect(resolve).toHaveBeenCalledTimes(2);
+    expect(
+      store.recovered.events.filter(
+        (event) => event.eventType === "premiere_reveal_committed",
+      ),
+    ).toHaveLength(1);
+    expect(
+      interactions.readState().checkpoints.map((entry) => entry.resolution),
+    ).toEqual([
+      expect.objectContaining({ kind: "winner", winnerSeatId: "SEAT0001" }),
+      expect.objectContaining({ kind: "winner", winnerSeatId: "SEAT0001" }),
+    ]);
+  });
+
+  test("refuses archive while resolution persistence is unavailable and repairs a legacy archived projection", async () => {
+    const { gate, drafts } = await verifiedPublicationFixture(root);
+    const clock = new FakeClock(NOW);
+    const firstStore = await openStore(root);
+    stores.push(firstStore);
+    const firstInteractions = createInteractions(gate, clock);
+    const runtime = await ReplayPremiereRuntimeCoordinator.createOrRecover({
+      gate,
+      drafts,
+      persistence: firstStore,
+      clock,
+      interactions: firstInteractions,
+    });
+
+    await runtime.synchronize();
+    clock.advance(100);
+    await runtime.synchronize();
+    clock.advance(REPLAY_PREMIERE_CHECKPOINT_PAUSE_MS + 100);
+    await runtime.synchronize();
+    const resolve = vi
+      .spyOn(firstInteractions, "resolvePredictionsFromAuthoritativeResult")
+      .mockRejectedValue(
+        new Error("simulated persistent prediction persistence failure"),
+      );
+    clock.advance(REPLAY_PREMIERE_CHECKPOINT_PAUSE_MS + 50);
+    await expect(runtime.synchronize()).rejects.toThrow(
+      /persistent prediction persistence failure/,
+    );
+    expect(runtime.readLifecycleState()).toBe("revealed");
+    const unresolved = firstInteractions.readState();
+    expect(
+      unresolved.checkpoints.map((checkpoint) => checkpoint.resolution),
+    ).toEqual([null, null]);
+
+    await expect(runtime.archive()).rejects.toThrow(
+      /persistent prediction persistence failure/,
+    );
+    expect(runtime.readLifecycleState()).toBe("revealed");
+    expect(
+      firstStore.recovered.events.filter(
+        (event) => event.eventType === "premiere_runtime_archived",
+      ),
+    ).toHaveLength(0);
+
+    resolve.mockRestore();
+    await runtime.archive();
+    expect(runtime.readLifecycleState()).toBe("archived");
+    expect(firstInteractions.hasCompletePredictionResolution()).toBe(true);
+    await closeTrackedStore(firstStore, stores);
+
+    // Simulate a legacy crash image whose runtime archive was durable but whose
+    // independently persisted interaction snapshot still lacked resolutions.
+    const restartedStore = await openStore(root);
+    stores.push(restartedStore);
+    const restartedInteractions = createInteractions(gate, clock, unresolved);
+    const restarted = await ReplayPremiereRuntimeCoordinator.createOrRecover({
+      gate,
+      drafts,
+      persistence: restartedStore,
+      clock,
+      interactions: restartedInteractions,
+    });
+    expect(restarted.readLifecycleState()).toBe("archived");
+    expect(restarted.nextWakeAt()).toBe(restarted.readReveal()!.revealedAt);
+    await restarted.synchronize();
+    expect(restartedInteractions.hasCompletePredictionResolution()).toBe(true);
+    expect(restarted.nextWakeAt()).toBeNull();
   });
 
   test("projects a committed checkpoint deadline immediately while its durable resume remains pending", async () => {
@@ -667,7 +818,13 @@ describe("ReplayPremiereRuntimeCoordinator", () => {
     await first.synchronize();
     clock.advance(REPLAY_PREMIERE_CHECKPOINT_PAUSE_MS + 100);
     await first.synchronize();
-    clock.advance(REPLAY_PREMIERE_CHECKPOINT_PAUSE_MS + 50);
+    clock.advance(REPLAY_PREMIERE_CHECKPOINT_PAUSE_MS + 49);
+    await first.synchronize();
+    const unresolvedInteractions = firstInteractions.readState();
+    expect(
+      unresolvedInteractions.checkpoints.map((entry) => entry.resolution),
+    ).toEqual([null, null]);
+    clock.advance(1);
     await first.synchronize();
     expect(first.readLifecycleState()).toBe("revealed");
     const eventCount = firstStore.recovered.events.length;
@@ -676,21 +833,31 @@ describe("ReplayPremiereRuntimeCoordinator", () => {
 
     const restartedStore = await openStore(root);
     stores.push(restartedStore);
+    const restartedInteractions = createInteractions(
+      gate,
+      clock,
+      unresolvedInteractions,
+    );
     const restarted = await ReplayPremiereRuntimeCoordinator.createOrRecover({
       gate,
       drafts,
       persistence: restartedStore,
       clock,
-      interactions: createInteractions(
-        gate,
-        clock,
-        firstInteractions.readState(),
-      ),
+      interactions: restartedInteractions,
     });
     expect(restarted.readLifecycleState()).toBe("revealed");
     expect(await restarted.readManifest()).toMatchObject({ state: "revealed" });
     expect(restarted.readChunk(2)).toMatchObject({ terminal: true });
     await restarted.synchronize();
+    expect(
+      restartedInteractions
+        .readState()
+        .checkpoints.map((entry) => entry.resolution),
+    ).toEqual(
+      firstInteractions
+        .readState()
+        .checkpoints.map((entry) => entry.resolution),
+    );
     expect(restartedStore.recovered.events).toHaveLength(eventCount);
   });
 
@@ -1112,11 +1279,20 @@ function createInteractions(
   initialState?: ReturnType<ReplayPremiereInteractions["readState"]>,
 ): ReplayPremiereInteractions {
   const definition = gate.publicDefinition();
-  return new ReplayPremiereInteractions({
+  const state: {
+    runtime: ProductionReplayPremiereRuntimeCoordinator | null;
+  } = { runtime: null };
+  const initialPremiereState = initialState?.checkpoints.some(
+    (checkpoint) => checkpoint.resolution !== null,
+  )
+    ? "revealed"
+    : "playing";
+  const interactions = new ReplayPremiereInteractions({
     premiereId: gate.premiereId,
     checkpointDescriptors: definition.checkpoints,
     seats: definition.provenance.seats,
-    getPremiereState: () => "playing",
+    getPremiereState: () =>
+      state.runtime?.readLifecycleState() ?? initialPremiereState,
     getReleasedContext: () => null,
     persistence: { persist: async () => undefined },
     signAttribution: () => "a".repeat(64),
@@ -1125,6 +1301,8 @@ function createInteractions(
     admitAnonymousWrite: () => undefined,
     initialState,
   });
+  interactionRuntimeState.set(interactions, state);
+  return interactions;
 }
 
 function allSeatsProjection(

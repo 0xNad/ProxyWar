@@ -170,6 +170,15 @@ export interface ReplayPremiereInteractionsSnapshot {
   }>;
 }
 
+export function hasCompleteReplayPremierePredictionResolution(
+  state: Pick<ReplayPremiereInteractionsSnapshot, "checkpoints">,
+): boolean {
+  return (
+    state.checkpoints.length > 0 &&
+    state.checkpoints.every((checkpoint) => checkpoint.resolution !== null)
+  );
+}
+
 export interface ReplayPremiereReleasedContext {
   releasedThroughSequence: number;
   turn: number;
@@ -441,6 +450,114 @@ export function deriveReplayPremierePredictionOutcome(
   return { kind: "winner", winnerSeatId: String(winnerSeatValues[0]) };
 }
 
+export interface ReplayPremierePredictionResolutionTransition {
+  result: {
+    resolutions: ReplayPremierePredictionResolution[];
+    idempotent: boolean;
+  };
+  eventPayload: ReplayPremiereJsonValue;
+  persist: boolean;
+  persistenceIdempotencyKey?: string;
+}
+
+/**
+ * Applies the one canonical prediction-resolution transition to a caller-owned
+ * snapshot clone. Both the live runtime and terminal orphan recovery use this
+ * function so outcome derivation, conflict handling, event payload, and the
+ * durable idempotency key cannot drift between paths.
+ */
+export function applyReplayPremierePredictionResolutionTransition(options: {
+  state: ReplayPremiereInteractionsSnapshot;
+  premiereState: PremiereState;
+  eligibleSeatIds: ReadonlySet<string>;
+  result: PremiereCanonicalAuthoritativeResult;
+  resolvedAt: string;
+}): ReplayPremierePredictionResolutionTransition {
+  const resolvedAtMs = timestamp(options.resolvedAt, "prediction_resolved_at");
+  if (
+    options.premiereState !== "revealed" &&
+    options.premiereState !== "archived"
+  ) {
+    throw conflict("predictions_not_revealable");
+  }
+  if (
+    options.state.checkpoints.some(
+      (checkpoint) =>
+        checkpoint.state !== "closed" ||
+        checkpoint.closesAt === null ||
+        Date.parse(checkpoint.closesAt) > resolvedAtMs,
+    )
+  ) {
+    throw conflict("prediction_checkpoint_not_closed");
+  }
+  const eligibleAtEveryCheckpoint = new Set(
+    [...options.eligibleSeatIds].filter((seatId) =>
+      options.state.checkpoints.every((checkpoint) =>
+        checkpoint.optionSeatIds.includes(seatId),
+      ),
+    ),
+  );
+  const outcome = deriveReplayPremierePredictionOutcome(
+    options.result,
+    eligibleAtEveryCheckpoint,
+  );
+  const existing = options.state.checkpoints.map(
+    (checkpoint) => checkpoint.resolution,
+  );
+  if (existing.every((resolution) => resolution !== null)) {
+    if (
+      !existing.every(
+        (resolution) =>
+          resolution !== null && samePredictionOutcome(resolution, outcome),
+      )
+    ) {
+      throw conflict("prediction_resolution_conflict");
+    }
+    return {
+      result: {
+        resolutions: clone(existing as ReplayPremierePredictionResolution[]),
+        idempotent: true,
+      },
+      eventPayload: json({ idempotent: true }),
+      persist: false,
+    };
+  }
+  if (existing.some((resolution) => resolution !== null)) {
+    throw conflict("partial_prediction_resolution");
+  }
+  const resolution: ReplayPremierePredictionResolution =
+    outcome.kind === "winner"
+      ? {
+          kind: "winner",
+          winnerSeatId: outcome.winnerSeatId,
+          resolvedAt: options.resolvedAt,
+        }
+      : {
+          kind: "void",
+          reason: outcome.reason,
+          resolvedAt: options.resolvedAt,
+        };
+  for (const checkpoint of options.state.checkpoints) {
+    checkpoint.resolution = clone(resolution);
+  }
+  return {
+    result: {
+      resolutions: options.state.checkpoints.map((checkpoint) =>
+        clone(checkpoint.resolution as ReplayPremierePredictionResolution),
+      ),
+      idempotent: false,
+    },
+    eventPayload: json({
+      checkpointIds: options.state.checkpoints.map(
+        (checkpoint) => checkpoint.id,
+      ),
+      resolution,
+    }),
+    persist: true,
+    persistenceIdempotencyKey: `interaction:prediction_resolution:${options.state.premiereId}`,
+  };
+}
+
 function samePredictionOutcome(
   resolution: ReplayPremierePredictionResolution,
   outcome: ReplayPremierePredictionOutcome,
@@ -547,6 +664,10 @@ export class ReplayPremiereInteractions {
 
   readState(): ReplayPremiereInteractionsSnapshot {
     return clone(this.state);
+  }
+
+  hasCompletePredictionResolution(): boolean {
+    return hasCompleteReplayPremierePredictionResolution(this.state);
   }
 
   restoreState(snapshot: ReplayPremiereInteractionsSnapshot): void {
@@ -866,87 +987,18 @@ export class ReplayPremiereInteractions {
       resolutions: ReplayPremierePredictionResolution[];
       idempotent: boolean;
     }>("predictions_resolved", options.resolvedAt, (next) => {
-      const resolvedAtMs = timestamp(
-        options.resolvedAt,
-        "prediction_resolved_at",
-      );
-      if (this.getPremiereState() !== "revealed") {
-        throw conflict("predictions_not_revealable");
-      }
-      if (
-        next.checkpoints.some(
-          (checkpoint) =>
-            checkpoint.state !== "closed" ||
-            checkpoint.closesAt === null ||
-            Date.parse(checkpoint.closesAt) > resolvedAtMs,
-        )
-      ) {
-        throw conflict("prediction_checkpoint_not_closed");
-      }
-      const eligibleAtEveryCheckpoint = new Set(
-        [...this.seats.keys()].filter((seatId) =>
-          next.checkpoints.every((checkpoint) =>
-            checkpoint.optionSeatIds.includes(seatId),
-          ),
-        ),
-      );
-      const outcome = deriveReplayPremierePredictionOutcome(
-        options.result,
-        eligibleAtEveryCheckpoint,
-      );
-      const existing = next.checkpoints.map(
-        (checkpoint) => checkpoint.resolution,
-      );
-      if (existing.every((resolution) => resolution !== null)) {
-        if (
-          !existing.every(
-            (resolution) =>
-              resolution !== null && samePredictionOutcome(resolution, outcome),
-          )
-        ) {
-          throw conflict("prediction_resolution_conflict");
-        }
-        return {
-          result: {
-            resolutions: clone(
-              existing as ReplayPremierePredictionResolution[],
-            ),
-            idempotent: true,
-          },
-          payload: json({ idempotent: true }),
-          persist: false,
-        };
-      }
-      if (existing.some((resolution) => resolution !== null)) {
-        throw conflict("partial_prediction_resolution");
-      }
-      const resolution: ReplayPremierePredictionResolution =
-        outcome.kind === "winner"
-          ? {
-              kind: "winner",
-              winnerSeatId: outcome.winnerSeatId,
-              resolvedAt: options.resolvedAt,
-            }
-          : {
-              kind: "void",
-              reason: outcome.reason,
-              resolvedAt: options.resolvedAt,
-            };
-      for (const checkpoint of next.checkpoints) {
-        checkpoint.resolution = clone(resolution);
-      }
+      const transition = applyReplayPremierePredictionResolutionTransition({
+        state: next,
+        premiereState: this.getPremiereState(),
+        eligibleSeatIds: new Set(this.seats.keys()),
+        result: options.result,
+        resolvedAt: options.resolvedAt,
+      });
       return {
-        result: {
-          resolutions: next.checkpoints.map((checkpoint) =>
-            clone(checkpoint.resolution as ReplayPremierePredictionResolution),
-          ),
-          idempotent: false,
-        },
-        payload: json({
-          checkpointIds: next.checkpoints.map((checkpoint) => checkpoint.id),
-          resolution,
-        }),
-        persistenceIdempotencyKey: `interaction:prediction_resolution:${this.premiereId}`,
+        result: transition.result,
+        payload: transition.eventPayload,
+        persist: transition.persist,
+        persistenceIdempotencyKey: transition.persistenceIdempotencyKey,
       };
     });
   }

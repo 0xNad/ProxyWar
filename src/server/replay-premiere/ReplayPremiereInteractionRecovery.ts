@@ -1,3 +1,4 @@
+import type { PremiereCanonicalAuthoritativeResult } from "./ReplayPremiereAuthoritativeResult";
 import { ReplayPremiereError } from "./ReplayPremiereErrors";
 import type {
   ReplayPremiereEventInput,
@@ -12,6 +13,7 @@ import {
   type ReplayPremiereJsonValue,
 } from "./ReplayPremiereIntegrity";
 import {
+  applyReplayPremierePredictionResolutionTransition,
   createReplayPremiereInitialInteractionsSnapshot,
   ReplayPremiereInteractions,
   validateReplayPremiereInteractionsSnapshot,
@@ -248,6 +250,71 @@ export async function recoverReplayPremiereTerminalInteractionState(options: {
     validationOptions,
     recoveryView,
   });
+}
+
+/**
+ * Resolves predictions for a terminal orphan directly through the canonical
+ * interaction event store. Unlike the read-only terminal recovery helper,
+ * this deliberately starts from the validated empty aggregate when no prior
+ * audience event exists, then projects the durable runtime checkpoint history
+ * before deciding whether a resolution can be persisted.
+ */
+export async function resolveReplayPremiereTerminalPredictionsFromAuthoritativeResult(options: {
+  eventStore: ReplayPremiereInteractionEventStore;
+  validationOptions: Omit<
+    ReplayPremiereInteractionSnapshotValidationOptions,
+    "getReleasedContext"
+  >;
+  result: PremiereCanonicalAuthoritativeResult;
+  resolvedAt: string;
+}): Promise<ReplayPremiereInteractionRecovery> {
+  const premiereId = options.validationOptions.premiereId;
+  const aggregateId = replayPremiereInteractionAggregateId(premiereId);
+  const recoveryView = await options.eventStore.readRecoveryView(aggregateId);
+  const validationOptions: ReplayPremiereInteractionSnapshotValidationOptions =
+    {
+      ...options.validationOptions,
+      getReleasedContext: terminalReleasedContextEvidence(
+        recoveryView,
+        premiereId,
+      ),
+    };
+  const recovered = await recoverReplayPremiereInteractionState({
+    eventStore: options.eventStore,
+    initialState:
+      createReplayPremiereInitialInteractionsSnapshot(validationOptions),
+    validationOptions,
+    recoveryView,
+  });
+  const nextState = clone(recovered.snapshot);
+  const transition = applyReplayPremierePredictionResolutionTransition({
+    state: nextState,
+    premiereState: validationOptions.getPremiereState(),
+    eligibleSeatIds: new Set(
+      validationOptions.seats.map(({ seatId }) => seatId),
+    ),
+    result: options.result,
+    resolvedAt: options.resolvedAt,
+  });
+  if (!transition.persist) return recovered;
+
+  const validatedNextState = validateReplayPremiereInteractionsSnapshot(
+    nextState,
+    validationOptions,
+  );
+  const persistence = new ReplayPremiereInteractionEventPersistence({
+    premiereId,
+    eventStore: options.eventStore,
+    recovery: recovered,
+  });
+  await persistence.persist({
+    eventType: "predictions_resolved",
+    occurredAt: options.resolvedAt,
+    eventPayload: transition.eventPayload,
+    nextState: validatedNextState,
+    idempotencyKey: transition.persistenceIdempotencyKey,
+  });
+  return persistence.recoveryAnchor();
 }
 
 export class ReplayPremiereInteractionEventPersistence implements ReplayPremiereInteractionPersistence {
