@@ -9,9 +9,19 @@ import { promisify } from "node:util";
 
 const execFileAsync = promisify(execFile);
 const ATTESTATION_NAME = "clip-deployment-attestation-v1.json";
+const RELEASE_STATE_NAME = "clip-release-v1.json";
+const GIT_BIN = "/usr/bin/git";
 const MAX_ATTESTATION_BYTES = 4 * 1024 * 1024;
+const MAX_RELEASE_STATE_BYTES = 1_024;
 const MAX_TRACKED_FILES = 20_000;
 const MAX_GIT_OUTPUT_BYTES = 16 * 1024 * 1024;
+const RUNTIME_INVENTORY_EXCLUDED_PATHS = new Set([
+  ".git",
+  "artifacts",
+  "coworld-adapter/tmp",
+  "node_modules",
+  "static",
+]);
 const ATTESTATION_KEYS = [
   "buildSha256",
   "commit",
@@ -27,7 +37,22 @@ const ATTESTATION_KEYS = [
   "wrapperPath",
   "wrapperSha256",
 ];
-const TRACKED_FILE_KEYS = ["mode", "path", "sha256", "size"];
+const TRACKED_FILE_KEYS = ["gitBlobOid", "mode", "path", "sha256", "size"];
+const RELEASE_STATE_V1_KEYS = [
+  "buildSha256",
+  "commit",
+  "enabled",
+  "schemaVersion",
+  "tree",
+];
+const RELEASE_STATE_V2_KEYS = [
+  "attestationNonce",
+  "buildSha256",
+  "commit",
+  "enabled",
+  "schemaVersion",
+  "tree",
+];
 
 class AttestationError extends Error {
   constructor(stage, code, cause) {
@@ -43,7 +68,6 @@ export async function createDeploymentAttestation({
   projectDir,
   wrapperPath,
   helperPath,
-  gitBin,
   expectedCommit,
   expectedTree,
   expectedBuildSha256,
@@ -76,7 +100,7 @@ export async function createDeploymentAttestation({
     wrapperPath,
     helperPath,
   });
-  await validateExecutable(gitBin, "git");
+  await validateCanonicalGit();
   const wrapper = await hashInstalledExecutable(roots.wrapperPath, "wrapper");
   const helper = await hashInstalledExecutable(roots.helperPath, "helper");
   if (wrapper.sha256 !== expectedWrapperSha256)
@@ -85,15 +109,14 @@ export async function createDeploymentAttestation({
     fail("helper", "attestation_helper_mismatch");
 
   await assertGitIdentity({
-    gitBin,
     projectDir: roots.projectDir,
     expectedCommit,
     expectedTree,
   });
   const trackedFiles = await collectTrackedFiles({
-    gitBin,
     projectDir: roots.projectDir,
   });
+  await verifyRuntimeInventory(roots.projectDir, trackedFiles);
   const trackedContentSha256 = hashTrackedManifest(trackedFiles);
   const buildSha256 = await hashStaticBuild(
     path.join(roots.projectDir, "static"),
@@ -101,7 +124,6 @@ export async function createDeploymentAttestation({
   if (buildSha256 !== expectedBuildSha256)
     fail("static_build", "attestation_build_mismatch");
   await assertGitIdentity({
-    gitBin,
     projectDir: roots.projectDir,
     expectedCommit,
     expectedTree,
@@ -181,6 +203,7 @@ export async function verifyDeploymentAttestation({
   if (helper.sha256 !== attestation.helperSha256)
     fail("helper", "attestation_helper_mismatch");
   await verifyTrackedFiles(roots.projectDir, attestation.trackedFiles);
+  await verifyRuntimeInventory(roots.projectDir, attestation.trackedFiles);
   const buildSha256 = await hashStaticBuild(
     path.join(roots.projectDir, "static"),
   );
@@ -227,6 +250,7 @@ export function parseDeploymentAttestation(text) {
       entry.path <= previousPath ||
       !Number.isSafeInteger(entry.size) ||
       entry.size < 0 ||
+      !isGitObjectId(entry.gitBlobOid) ||
       !isHex(entry.sha256, 64)
     ) {
       return null;
@@ -236,12 +260,98 @@ export function parseDeploymentAttestation(text) {
   return value;
 }
 
+export function parseClipReleaseState(text) {
+  let value;
+  try {
+    value = JSON.parse(text);
+  } catch {
+    return null;
+  }
+  if (!isPlainObject(value) || typeof value.enabled !== "boolean") return null;
+  if (value.schemaVersion === 1) {
+    if (
+      !hasExactKeys(value, RELEASE_STATE_V1_KEYS) ||
+      value.enabled ||
+      value.commit !== null ||
+      value.tree !== null ||
+      value.buildSha256 !== null
+    ) {
+      return null;
+    }
+    return value;
+  }
+  if (
+    value.schemaVersion !== 2 ||
+    !hasExactKeys(value, RELEASE_STATE_V2_KEYS)
+  ) {
+    return null;
+  }
+  if (value.enabled) {
+    if (
+      !isHex(value.commit, 40) ||
+      !isHex(value.tree, 40) ||
+      !isHex(value.buildSha256, 64) ||
+      !isHex(value.attestationNonce, 64)
+    ) {
+      return null;
+    }
+  } else if (
+    value.commit !== null ||
+    value.tree !== null ||
+    value.buildSha256 !== null ||
+    value.attestationNonce !== null
+  ) {
+    return null;
+  }
+  return value;
+}
+
+export async function readDurableClipReleaseStatus({ stateRoot, trustedRoot }) {
+  if (
+    !isCanonicalAbsolutePath(stateRoot) ||
+    !isCanonicalAbsolutePath(trustedRoot)
+  ) {
+    fail("release_state", "clip_release_state_path_invalid");
+  }
+  const resolvedTrustedRoot = await canonicalExistingPath(
+    trustedRoot,
+    "release_state",
+  );
+  const resolvedStateRoot = await canonicalExistingPath(
+    stateRoot,
+    "release_state",
+  );
+  if (!isDescendant(resolvedStateRoot, resolvedTrustedRoot))
+    fail("release_state", "clip_release_state_trust_boundary_invalid");
+  await validateDirectory(resolvedTrustedRoot, 0o700, "release_state");
+  await validateDirectory(resolvedStateRoot, 0o700, "release_state");
+  const statePath = path.join(resolvedStateRoot, RELEASE_STATE_NAME);
+  try {
+    await fs.lstat(statePath);
+  } catch (error) {
+    if (error?.code === "ENOENT") return { kind: "disabled", state: null };
+    fail("release_state", "clip_release_state_unreadable", error);
+  }
+  const bytes = await readStableFile(statePath, {
+    stage: "release_state",
+    mode: 0o600,
+    maxBytes: MAX_RELEASE_STATE_BYTES,
+  });
+  const state = parseClipReleaseState(bytes.toString("utf8"));
+  if (state === null)
+    fail("release_state", "clip_release_state_schema_invalid");
+  return state.enabled
+    ? { kind: "enabled", state }
+    : { kind: "disabled", state };
+}
+
 export async function hashStaticBuild(staticRoot) {
   if (!isCanonicalAbsolutePath(staticRoot))
     fail("static_build", "attestation_static_path_invalid");
   await validateDirectory(staticRoot, null, "static_build");
   const files = [];
-  await collectStaticFiles(path.resolve(staticRoot), "", files);
+  const directories = new Map();
+  await collectStaticFiles(path.resolve(staticRoot), "", files, directories);
   files.sort();
   const digest = createHash("sha256");
   for (const relativePath of files) {
@@ -254,6 +364,7 @@ export async function hashStaticBuild(staticRoot) {
     digest.update(file.bytes);
     digest.update("\0");
   }
+  await assertRememberedDirectoriesStable(directories, "static_build");
   return digest.digest("hex");
 }
 
@@ -308,11 +419,10 @@ async function validatePaths({
   };
 }
 
-async function collectTrackedFiles({ gitBin, projectDir }) {
+async function collectTrackedFiles({ projectDir }) {
   const { stdout } = await runGit(
-    gitBin,
     projectDir,
-    ["ls-files", "--stage", "-z"],
+    ["ls-tree", "-r", "-z", "--full-tree", "HEAD"],
     "tracked_content",
   );
   const payload = stdout.at(-1) === 0 ? stdout.subarray(0, -1) : stdout;
@@ -323,28 +433,38 @@ async function collectTrackedFiles({ gitBin, projectDir }) {
   if (records.length < 1 || records.length > MAX_TRACKED_FILES)
     fail("tracked_content", "attestation_tracked_count_invalid");
   const entries = [];
-  const validatedDirectories = new Set([""]);
+  const validatedDirectories = new Map();
+  await rememberDirectory(projectDir, validatedDirectories, "tracked_content");
   for (const record of records) {
-    const match = /^(100644|100755) [a-f0-9]{40,64} 0\t(.+)$/.exec(record);
-    if (match === null || !isSafeRelativePath(match[2]))
+    const match =
+      /^(100644|100755) blob ([a-f0-9]{40}|[a-f0-9]{64})\t(.+)$/.exec(record);
+    if (match === null || !isSafeRelativePath(match[3]))
       fail("tracked_content", "attestation_tracked_record_invalid");
     await validateTrackedParentDirectories(
       projectDir,
-      match[2],
+      match[3],
       validatedDirectories,
     );
-    const absolutePath = path.join(projectDir, ...match[2].split("/"));
+    const absolutePath = path.join(projectDir, ...match[3].split("/"));
     const file = await hashRegularFile(absolutePath, "tracked_content");
     const executable = (file.mode & 0o111) !== 0;
     if (executable !== (match[1] === "100755"))
       fail("tracked_content", "attestation_tracked_mode_mismatch");
+    const gitBlobOid = hashGitBlob(file.bytes, match[2].length);
+    if (gitBlobOid !== match[2])
+      fail("tracked_content", "attestation_tracked_blob_mismatch");
     entries.push({
-      path: match[2],
+      path: match[3],
       mode: match[1],
       size: file.size,
+      gitBlobOid,
       sha256: createHash("sha256").update(file.bytes).digest("hex"),
     });
   }
+  await assertRememberedDirectoriesStable(
+    validatedDirectories,
+    "tracked_content",
+  );
   entries.sort((left, right) =>
     left.path < right.path ? -1 : left.path > right.path ? 1 : 0,
   );
@@ -356,7 +476,8 @@ async function collectTrackedFiles({ gitBin, projectDir }) {
 }
 
 async function verifyTrackedFiles(projectDir, entries) {
-  const validatedDirectories = new Set([""]);
+  const validatedDirectories = new Map();
+  await rememberDirectory(projectDir, validatedDirectories, "tracked_content");
   for (const entry of entries) {
     await validateTrackedParentDirectories(
       projectDir,
@@ -367,14 +488,20 @@ async function verifyTrackedFiles(projectDir, entries) {
     const file = await hashRegularFile(absolutePath, "tracked_content");
     const executable = (file.mode & 0o111) !== 0;
     const sha256 = createHash("sha256").update(file.bytes).digest("hex");
+    const gitBlobOid = hashGitBlob(file.bytes, entry.gitBlobOid.length);
     if (
       file.size !== entry.size ||
       executable !== (entry.mode === "100755") ||
+      gitBlobOid !== entry.gitBlobOid ||
       sha256 !== entry.sha256
     ) {
       fail("tracked_content", "attestation_tracked_content_mismatch");
     }
   }
+  await assertRememberedDirectoriesStable(
+    validatedDirectories,
+    "tracked_content",
+  );
 }
 
 async function validateTrackedParentDirectories(
@@ -388,20 +515,87 @@ async function validateTrackedParentDirectories(
     relativeDirectory = relativeDirectory
       ? `${relativeDirectory}/${segment}`
       : segment;
-    if (validatedDirectories.has(relativeDirectory)) continue;
     const absoluteDirectory = path.join(
       projectDir,
       ...relativeDirectory.split("/"),
     );
-    let stats;
-    try {
-      stats = await fs.lstat(absoluteDirectory);
-    } catch (error) {
-      fail("tracked_content", "attestation_tracked_parent_unreadable", error);
+    if (validatedDirectories.has(absoluteDirectory)) continue;
+    await rememberDirectory(
+      absoluteDirectory,
+      validatedDirectories,
+      "tracked_content",
+    );
+  }
+}
+
+async function verifyRuntimeInventory(projectDir, entries) {
+  const expectedPaths = new Set(entries.map((entry) => entry.path));
+  const observedPaths = new Set();
+  const directories = new Map();
+  await collectRuntimeInventory(
+    projectDir,
+    "",
+    expectedPaths,
+    observedPaths,
+    directories,
+  );
+  await assertRememberedDirectoriesStable(directories, "runtime_inventory");
+  if (
+    observedPaths.size !== expectedPaths.size ||
+    [...expectedPaths].some((relativePath) => !observedPaths.has(relativePath))
+  ) {
+    fail("runtime_inventory", "attestation_runtime_inventory_mismatch");
+  }
+}
+
+async function collectRuntimeInventory(
+  projectDir,
+  relativeDirectory,
+  expectedPaths,
+  observedPaths,
+  directories,
+) {
+  const directory = relativeDirectory
+    ? path.join(projectDir, ...relativeDirectory.split("/"))
+    : projectDir;
+  await rememberDirectory(directory, directories, "runtime_inventory");
+  let dirents;
+  try {
+    dirents = await fs.readdir(directory, { withFileTypes: true });
+  } catch (error) {
+    fail(
+      "runtime_inventory",
+      "attestation_runtime_inventory_unreadable",
+      error,
+    );
+  }
+  await assertDirectoryStable(
+    directory,
+    directories.get(directory),
+    "runtime_inventory",
+  );
+  for (const dirent of dirents) {
+    const relativePath = relativeDirectory
+      ? `${relativeDirectory}/${dirent.name}`
+      : dirent.name;
+    if (RUNTIME_INVENTORY_EXCLUDED_PATHS.has(relativePath)) continue;
+    if (dirent.isSymbolicLink())
+      fail("runtime_inventory", "attestation_runtime_inventory_symlink");
+    if (dirent.isDirectory()) {
+      await collectRuntimeInventory(
+        projectDir,
+        relativePath,
+        expectedPaths,
+        observedPaths,
+        directories,
+      );
+    } else if (dirent.isFile()) {
+      if (!expectedPaths.has(relativePath))
+        fail("runtime_inventory", "attestation_runtime_inventory_unexpected");
+      observedPaths.add(relativePath);
+    } else {
+      fail("runtime_inventory", "attestation_runtime_inventory_not_regular");
     }
-    if (!stats.isDirectory() || stats.isSymbolicLink())
-      fail("tracked_content", "attestation_tracked_parent_invalid");
-    validatedDirectories.add(relativeDirectory);
   }
 }
 
@@ -414,34 +608,28 @@ function hashTrackedManifest(entries) {
     digest.update("\0");
     digest.update(String(entry.size), "ascii");
     digest.update("\0");
+    digest.update(entry.gitBlobOid, "ascii");
+    digest.update("\0");
     digest.update(entry.sha256, "ascii");
     digest.update("\0");
   }
   return digest.digest("hex");
 }
 
-async function assertGitIdentity({
-  gitBin,
-  projectDir,
-  expectedCommit,
-  expectedTree,
-}) {
+async function assertGitIdentity({ projectDir, expectedCommit, expectedTree }) {
   const commit = await runGitText(
-    gitBin,
     projectDir,
     ["rev-parse", "--verify", "HEAD"],
     "commit",
   );
   if (commit !== expectedCommit) fail("commit", "attestation_commit_mismatch");
   const tree = await runGitText(
-    gitBin,
     projectDir,
     ["rev-parse", "--verify", "HEAD^{tree}"],
     "tree",
   );
   if (tree !== expectedTree) fail("tree", "attestation_tree_mismatch");
   const status = await runGitText(
-    gitBin,
     projectDir,
     ["status", "--porcelain=v1", "--untracked-files=all"],
     "status",
@@ -449,22 +637,39 @@ async function assertGitIdentity({
   if (status !== "") fail("status", "attestation_status_not_clean");
 }
 
-async function runGitText(gitBin, projectDir, args, stage) {
-  const { stdout } = await runGit(gitBin, projectDir, args, stage);
+async function runGitText(projectDir, args, stage) {
+  const { stdout } = await runGit(projectDir, args, stage);
   return stdout.toString("utf8").trim();
 }
 
-async function runGit(gitBin, projectDir, args, stage) {
+async function runGit(projectDir, args, stage) {
   try {
-    return await execFileAsync(gitBin, ["-C", projectDir, ...args], {
-      encoding: null,
-      maxBuffer: MAX_GIT_OUTPUT_BYTES,
-      env: {
-        ...process.env,
-        GIT_OPTIONAL_LOCKS: "0",
-        LC_ALL: "C",
+    return await execFileAsync(
+      GIT_BIN,
+      [
+        "-c",
+        "core.fsmonitor=false",
+        "-c",
+        "core.untrackedCache=false",
+        "-C",
+        projectDir,
+        ...args,
+      ],
+      {
+        encoding: null,
+        maxBuffer: MAX_GIT_OUTPUT_BYTES,
+        env: {
+          PATH: "/usr/bin:/bin",
+          LANG: "C",
+          LC_ALL: "C",
+          GIT_CONFIG_NOSYSTEM: "1",
+          GIT_CONFIG_SYSTEM: "/dev/null",
+          GIT_CONFIG_GLOBAL: "/dev/null",
+          GIT_OPTIONAL_LOCKS: "0",
+          GIT_TERMINAL_PROMPT: "0",
+        },
       },
-    });
+    );
   } catch (error) {
     fail(stage, `attestation_git_${stage}_failed`, error);
   }
@@ -557,6 +762,11 @@ async function hashRegularFile(filePath, stage) {
     const after = await handle.stat();
     if (!sameIdentity(opened, after) || bytes.byteLength !== opened.size)
       fail(stage, "attestation_content_changed");
+    const finalPath = await fs
+      .lstat(filePath)
+      .catch((error) => fail(stage, "attestation_content_changed", error));
+    if (!sameIdentity(before, finalPath))
+      fail(stage, "attestation_content_changed");
     return { bytes, size: opened.size, mode: opened.mode };
   } catch (error) {
     if (error instanceof AttestationError) throw error;
@@ -625,14 +835,23 @@ async function validateDirectory(directory, expectedMode, stage) {
     fail(stage, "attestation_directory_mode");
 }
 
-async function validateExecutable(executable, name) {
-  if (!isCanonicalAbsolutePath(executable))
-    fail(name, `attestation_${name}_path_invalid`);
+async function validateCanonicalGit() {
+  const real = await fs
+    .realpath(GIT_BIN)
+    .catch((error) => fail("git", "attestation_git_unreadable", error));
+  if (real !== GIT_BIN) fail("git", "attestation_git_not_canonical");
   const stats = await fs
-    .lstat(executable)
-    .catch((error) => fail(name, `attestation_${name}_unreadable`, error));
-  if (!stats.isFile() || stats.isSymbolicLink() || (stats.mode & 0o111) === 0)
-    fail(name, `attestation_${name}_invalid`);
+    .lstat(GIT_BIN)
+    .catch((error) => fail("git", "attestation_git_unreadable", error));
+  if (
+    !stats.isFile() ||
+    stats.isSymbolicLink() ||
+    stats.uid !== 0 ||
+    (stats.mode & 0o111) === 0 ||
+    (stats.mode & 0o022) !== 0
+  ) {
+    fail("git", "attestation_git_invalid");
+  }
 }
 
 async function canonicalExistingPath(value, stage) {
@@ -646,17 +865,23 @@ async function canonicalExistingPath(value, stage) {
   return real;
 }
 
-async function collectStaticFiles(root, relativeDirectory, files) {
+async function collectStaticFiles(root, relativeDirectory, files, directories) {
   const directory = path.join(
     root,
     ...relativeDirectory.split("/").filter(Boolean),
   );
+  await rememberDirectory(directory, directories, "static_build");
   let entries;
   try {
     entries = await fs.readdir(directory, { withFileTypes: true });
   } catch (error) {
     fail("static_build", "attestation_static_unreadable", error);
   }
+  await assertDirectoryStable(
+    directory,
+    directories.get(directory),
+    "static_build",
+  );
   for (const entry of entries) {
     if (entry.isSymbolicLink())
       fail("static_build", "attestation_static_symlink");
@@ -664,13 +889,59 @@ async function collectStaticFiles(root, relativeDirectory, files) {
       ? `${relativeDirectory}/${entry.name}`
       : entry.name;
     if (entry.isDirectory()) {
-      await collectStaticFiles(root, relativePath, files);
+      await collectStaticFiles(root, relativePath, files, directories);
     } else if (entry.isFile()) {
       files.push(relativePath);
     } else {
       fail("static_build", "attestation_static_not_regular");
     }
   }
+}
+
+async function rememberDirectory(directory, directories, stage) {
+  let stats;
+  try {
+    stats = await fs.lstat(directory);
+  } catch (error) {
+    fail(stage, "attestation_directory_unreadable", error);
+  }
+  if (
+    !stats.isDirectory() ||
+    stats.isSymbolicLink() ||
+    stats.uid !== process.getuid() ||
+    (stats.mode & 0o022) !== 0
+  ) {
+    fail(stage, "attestation_directory_invalid");
+  }
+  const existing = directories.get(directory);
+  if (existing !== undefined && !sameIdentity(existing, stats))
+    fail(stage, "attestation_directory_changed");
+  directories.set(directory, stats);
+}
+
+async function assertDirectoryStable(directory, before, stage) {
+  const after = await fs
+    .lstat(directory)
+    .catch((error) => fail(stage, "attestation_directory_changed", error));
+  if (before === undefined || !sameIdentity(before, after))
+    fail(stage, "attestation_directory_changed");
+}
+
+async function assertRememberedDirectoriesStable(directories, stage) {
+  for (const [directory, before] of directories) {
+    await assertDirectoryStable(directory, before, stage);
+  }
+}
+
+function hashGitBlob(bytes, oidLength) {
+  const algorithm =
+    oidLength === 40 ? "sha1" : oidLength === 64 ? "sha256" : null;
+  if (algorithm === null)
+    fail("tracked_content", "attestation_tracked_oid_invalid");
+  return createHash(algorithm)
+    .update(`blob ${bytes.byteLength}\0`, "utf8")
+    .update(bytes)
+    .digest("hex");
 }
 
 function validateHex(value, length, stage, code) {
@@ -683,6 +954,10 @@ function isHex(value, length) {
     value.length === length &&
     /^[a-f0-9]+$/.test(value)
   );
+}
+
+function isGitObjectId(value) {
+  return isHex(value, 40) || isHex(value, 64);
 }
 
 function isCanonicalIsoTimestamp(value) {
@@ -742,7 +1017,11 @@ function fail(stage, code, cause) {
 
 function parseArgs(argv) {
   const command = argv[0];
-  if (command !== "create" && command !== "verify")
+  if (
+    command !== "create" &&
+    command !== "verify" &&
+    command !== "release-status"
+  )
     throw new Error("attestation_usage");
   const options = { command };
   for (const argument of argv.slice(1)) {
@@ -764,14 +1043,11 @@ function parseArgs(argv) {
     "expected-build-sha256",
   ];
   const required =
-    command === "create"
-      ? [
-          ...common,
-          "git-bin",
-          "expected-wrapper-sha256",
-          "expected-helper-sha256",
-        ]
-      : [...common, "expected-nonce"];
+    command === "release-status"
+      ? ["state-root", "trusted-root"]
+      : command === "create"
+        ? [...common, "expected-wrapper-sha256", "expected-helper-sha256"]
+        : [...common, "expected-nonce"];
   if (
     Object.keys(options).some(
       (key) => key !== "command" && !required.includes(key),
@@ -795,46 +1071,58 @@ if (invokedModulePath !== null && invokedModulePath === currentModulePath) {
   try {
     const options = parseArgs(process.argv.slice(2));
     command = options.command;
-    const common = {
-      stateRoot: options["state-root"],
-      trustedRoot: options["trusted-root"],
-      projectDir: options["project-dir"],
-      wrapperPath: options["wrapper-path"],
-      helperPath: options["helper-path"],
-      expectedCommit: options["expected-commit"],
-      expectedTree: options["expected-tree"],
-      expectedBuildSha256: options["expected-build-sha256"],
-    };
-    if (options.command === "create") {
-      const result = await createDeploymentAttestation({
-        ...common,
-        gitBin: options["git-bin"],
-        expectedWrapperSha256: options["expected-wrapper-sha256"],
-        expectedHelperSha256: options["expected-helper-sha256"],
+    if (options.command === "release-status") {
+      const result = await readDurableClipReleaseStatus({
+        stateRoot: options["state-root"],
+        trustedRoot: options["trusted-root"],
       });
       process.stdout.write(
-        `${JSON.stringify({
-          schemaVersion: result.attestation.schemaVersion,
-          nonce: result.attestation.nonce,
-          commit: result.attestation.commit,
-          tree: result.attestation.tree,
-          buildSha256: result.attestation.buildSha256,
-          wrapperSha256: result.attestation.wrapperSha256,
-          helperSha256: result.attestation.helperSha256,
-          trackedContentSha256: result.attestation.trackedContentSha256,
-          trackedFileCount: result.attestation.trackedFiles.length,
-          attestationPath: result.attestationPath,
-        })}\n`,
+        result.kind === "enabled"
+          ? `enabled ${result.state.commit} ${result.state.tree} ${result.state.buildSha256} ${result.state.attestationNonce}\n`
+          : "disabled\n",
       );
+      process.exitCode = 0;
     } else {
-      await verifyDeploymentAttestation({
-        ...common,
-        expectedNonce: options["expected-nonce"],
-      });
-      process.stdout.write("verified\n");
+      const common = {
+        stateRoot: options["state-root"],
+        trustedRoot: options["trusted-root"],
+        projectDir: options["project-dir"],
+        wrapperPath: options["wrapper-path"],
+        helperPath: options["helper-path"],
+        expectedCommit: options["expected-commit"],
+        expectedTree: options["expected-tree"],
+        expectedBuildSha256: options["expected-build-sha256"],
+      };
+      if (options.command === "create") {
+        const result = await createDeploymentAttestation({
+          ...common,
+          expectedWrapperSha256: options["expected-wrapper-sha256"],
+          expectedHelperSha256: options["expected-helper-sha256"],
+        });
+        process.stdout.write(
+          `${JSON.stringify({
+            schemaVersion: result.attestation.schemaVersion,
+            nonce: result.attestation.nonce,
+            commit: result.attestation.commit,
+            tree: result.attestation.tree,
+            buildSha256: result.attestation.buildSha256,
+            wrapperSha256: result.attestation.wrapperSha256,
+            helperSha256: result.attestation.helperSha256,
+            trackedContentSha256: result.attestation.trackedContentSha256,
+            trackedFileCount: result.attestation.trackedFiles.length,
+            attestationPath: result.attestationPath,
+          })}\n`,
+        );
+      } else {
+        await verifyDeploymentAttestation({
+          ...common,
+          expectedNonce: options["expected-nonce"],
+        });
+        process.stdout.write("verified\n");
+      }
     }
   } catch (error) {
-    if (command === "verify") {
+    if (command === "verify" || command === "release-status") {
       const stage =
         error instanceof AttestationError ? error.stage : "invocation";
       process.stdout.write(`failed ${stage}\n`);

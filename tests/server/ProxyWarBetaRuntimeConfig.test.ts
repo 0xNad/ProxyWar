@@ -82,6 +82,9 @@ describe("Proxy War beta runtime config", () => {
       'CLIPS_FORCE_DISABLED="${PROXYWAR_CLIPS_FORCE_DISABLED:-false}"',
     );
     expect(wrapper).toContain(
+      'CLIPS_VERIFY_ATTESTATION_ONLY="${PROXYWAR_CLIPS_VERIFY_ATTESTATION_ONLY:-false}"',
+    );
+    expect(wrapper).toContain(
       'CLIPS_EXPECTED_TREE="${PROXYWAR_CLIPS_EXPECTED_TREE:-}"',
     );
     expect(wrapper).toContain(
@@ -108,8 +111,17 @@ describe("Proxy War beta runtime config", () => {
     );
     expect(wrapper).not.toContain('$(git -C "$PROJECT_DIR"');
     expect(wrapper).not.toContain("PROXYWAR_CLIPS_RELEASE_STATE_FILE");
+    expect(wrapper).not.toContain(
+      '"$PROJECT_DIR/deploy/mac/proxywar-clips-release-state.mjs"',
+    );
     expect(wrapper).toContain(
       '"failed tracked_content") CLIPS_DEPLOYMENT_ATTESTATION_STAGE="tracked content"',
+    );
+    expect(wrapper).toContain(
+      '"failed runtime_inventory") CLIPS_DEPLOYMENT_ATTESTATION_STAGE="runtime inventory"',
+    );
+    expect(wrapper).toContain(
+      'echo "Clip deployment attestation verification passed" >&2',
     );
     expect(wrapper).toContain(
       'if [[ "$CLIPS_FORCE_DISABLED" != "true" && "$ARCHIVED_CLIP_CANARY_MASTER_OVERRIDE" == "true" && "$CLIPS_RELEASE_OVERRIDE" == "true" ]]',
@@ -125,6 +137,23 @@ describe("Proxy War beta runtime config", () => {
     expect(runbook).toContain(
       "launchctl unsetenv PROXYWAR_CLIPS_RELEASE_OVERRIDE",
     );
+    expect(runbook).toContain(
+      "launchctl setenv PROXYWAR_CLIPS_VERIFY_ATTESTATION_ONLY true",
+    );
+    expect(runbook).toContain(
+      "Clip deployment attestation verification passed",
+    );
+    expect(runbook).toContain(
+      'test "$(launchctl getenv PROXYWAR_CLIPS_EXPECTED_COMMIT)" = "$RELEASE_COMMIT"',
+    );
+    expect(runbook).toContain(
+      'test "$(launchctl getenv PROXYWAR_CLIPS_EXPECTED_TREE)" = "$RELEASE_TREE"',
+    );
+    expect(runbook).toContain(
+      'test "$(launchctl getenv PROXYWAR_CLIPS_EXPECTED_BUILD_SHA256)" = "$RELEASE_BUILD_SHA256"',
+    );
+    expect(runbook).not.toContain("--git-bin=");
+    expect(runbook).toContain("these eight unsets");
   });
 
   it.skipIf(process.platform !== "darwin")(
@@ -152,9 +181,6 @@ describe("Proxy War beta runtime config", () => {
         "proxywar-clips-deployment-attestation.mjs",
       );
       const releaseStateFile = path.join(stateRoot, "clip-release-v1.json");
-      const realGit = spawnSync("/bin/zsh", ["-lc", "command -v git"], {
-        encoding: "utf8",
-      }).stdout.trim();
       await fs.mkdir(stateRoot, { recursive: true, mode: 0o700 });
       await fs.chmod(trustedRoot, 0o700);
       await fs.chmod(path.join(trustedRoot, "storage"), 0o700);
@@ -198,7 +224,8 @@ describe("Proxy War beta runtime config", () => {
         fakeNode,
         [
           "#!/bin/zsh",
-          `if [[ "$1" == */proxywar-clips-release-state.mjs || "$1" == */proxywar-clips-deployment-attestation.mjs ]]; then exec ${JSON.stringify(process.execPath)} "$@"; fi`,
+          'if [[ "$1" == */proxywar-clips-release-state.mjs ]]; then exit 91; fi',
+          `if [[ "$1" == */proxywar-clips-deployment-attestation.mjs ]]; then exec ${JSON.stringify(process.execPath)} "$@"; fi`,
           'print -r -- "$PROXYWAR_CLIPS_ENABLED|$PROXYWAR_PREMIERE_CLIPS_ENABLED|$PROXYWAR_LEAGUE_CLIPS_ENABLED|${PROXYWAR_CLIPS_RELEASE_OVERRIDE-unset}|${PROXYWAR_ARCHIVED_CLIP_CANARY_MASTER_OVERRIDE-unset}|${PROXYWAR_CLIPS_EXPECTED_ATTESTATION_NONCE-unset}"',
           "",
         ].join("\n"),
@@ -259,7 +286,6 @@ describe("Proxy War beta runtime config", () => {
           `--project-dir=${projectDir}`,
           `--wrapper-path=${installedWrapper}`,
           `--helper-path=${installedHelper}`,
-          `--git-bin=${realGit}`,
           `--expected-commit=${commit}`,
           `--expected-tree=${tree}`,
           `--expected-build-sha256=${buildSha256}`,
@@ -297,6 +323,30 @@ describe("Proxy War beta runtime config", () => {
           "Clip activation source: release_manager",
         );
         expect(enabled.stdout.trim()).toBe("true|false|true|unset|unset|unset");
+
+        const disabledProbe = runWrapper({
+          PROXYWAR_CLIPS_FORCE_DISABLED: "true",
+          PROXYWAR_CLIPS_VERIFY_ATTESTATION_ONLY: "true",
+        });
+        expect(disabledProbe.status).toBe(0);
+        expect(disabledProbe.stderr).toContain(
+          "Clip deployment attestation verification passed",
+        );
+        expect(disabledProbe.stderr).not.toContain("Clip activation source:");
+        expect(disabledProbe.stdout.trim()).toBe(
+          "false|false|false|unset|unset|unset",
+        );
+
+        const unsafeProbe = runWrapper({
+          PROXYWAR_CLIPS_VERIFY_ATTESTATION_ONLY: "true",
+        });
+        expect(unsafeProbe.status).toBe(0);
+        expect(unsafeProbe.stderr).toContain(
+          "Clip deployment attestation probe requires force-disabled with activation overrides unset; Clips disabled",
+        );
+        expect(unsafeProbe.stderr).not.toContain(
+          "Clip deployment attestation verification passed",
+        );
 
         const wrongNonce = runWrapper({
           PROXYWAR_CLIPS_RELEASE_OVERRIDE: "true",
@@ -345,15 +395,10 @@ describe("Proxy War beta runtime config", () => {
         const stateStatus = spawnSync(
           process.execPath,
           [
-            path.join(
-              projectDir,
-              "deploy",
-              "mac",
-              "proxywar-clips-release-state.mjs",
-            ),
-            "status",
-            `--path=${releaseStateFile}`,
-            "--shell=true",
+            installedHelper,
+            "release-status",
+            `--state-root=${stateRoot}`,
+            `--trusted-root=${trustedRoot}`,
           ],
           { encoding: "utf8" },
         );
@@ -485,6 +530,19 @@ describe("Proxy War beta runtime config", () => {
           "false|false|false|unset|unset|unset",
         );
         await fs.writeFile(path.join(projectDir, "README.md"), "fixture\n");
+
+        await fs.writeFile(path.join(projectDir, "src-shadow.ts"), "shadow\n");
+        const runtimeShadow = runWrapper({
+          PROXYWAR_CLIPS_RELEASE_OVERRIDE: "true",
+        });
+        expect(runtimeShadow.status).toBe(0);
+        expect(runtimeShadow.stderr).toContain(
+          "Clip deployment attestation runtime inventory verification failed; Clips disabled",
+        );
+        expect(runtimeShadow.stdout.trim()).toBe(
+          "false|false|false|unset|unset|unset",
+        );
+        await fs.rm(path.join(projectDir, "src-shadow.ts"));
 
         await fs.rm(path.join(projectDir, "static"), {
           recursive: true,

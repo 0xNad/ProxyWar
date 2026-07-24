@@ -10,6 +10,7 @@ import {
   DEPLOYMENT_ATTESTATION_NAME,
   hashStaticBuild,
   parseDeploymentAttestation,
+  readDurableClipReleaseStatus,
   verifyDeploymentAttestation,
 } from "./proxywar-clips-deployment-attestation.mjs";
 
@@ -52,28 +53,32 @@ test("creates and verifies a content-bound owner-only deployment attestation", a
   assert.equal(verified.trackedContentSha256, state.trackedContentSha256);
 });
 
-test("create proves clean status and exact commit, tree, build, wrapper, and helper", async () => {
+test("create uses canonical Git with a sanitized environment and proves exact identities", async () => {
   const fixture = await makeFixture();
-  const failingGit = path.join(fixture.trustedRoot, "bin", "failing-git.zsh");
-  await fs.writeFile(
-    failingGit,
-    [
-      "#!/bin/zsh",
-      '[[ "${GIT_OPTIONAL_LOCKS:-}" == "0" ]] || exit 71',
-      '[[ "$3" != "status" ]] || exit 70',
-      `exec ${JSON.stringify(fixture.gitBin)} "$@"`,
-      "",
-    ].join("\n"),
-    { mode: 0o755 },
-  );
-  await assertStage(
-    () =>
-      createDeploymentAttestation({
-        ...fixture.createOptions,
-        gitBin: failingGit,
-      }),
-    "status",
-  );
+  const fakeBin = path.join(fixture.trustedRoot, "fake-bin");
+  await fs.mkdir(fakeBin);
+  const fakeGit = path.join(fakeBin, "git");
+  await fs.writeFile(fakeGit, "#!/bin/zsh\nexit 70\n", { mode: 0o755 });
+  const inherited = {
+    PATH: process.env.PATH,
+    GIT_DIR: process.env.GIT_DIR,
+    GIT_WORK_TREE: process.env.GIT_WORK_TREE,
+    GIT_INDEX_FILE: process.env.GIT_INDEX_FILE,
+    GIT_CONFIG_GLOBAL: process.env.GIT_CONFIG_GLOBAL,
+  };
+  process.env.PATH = `${fakeBin}:/bin`;
+  process.env.GIT_DIR = "/definitely/not/the/repository";
+  process.env.GIT_WORK_TREE = "/definitely/not/the/worktree";
+  process.env.GIT_INDEX_FILE = "/definitely/not/the/index";
+  process.env.GIT_CONFIG_GLOBAL = "/definitely/not/the/config";
+  try {
+    await createDeploymentAttestation(fixture.createOptions);
+  } finally {
+    for (const [key, value] of Object.entries(inherited)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  }
 
   await fs.writeFile(path.join(fixture.projectDir, "untracked.txt"), "drift\n");
   await assertStage(
@@ -98,6 +103,35 @@ test("create proves clean status and exact commit, tree, build, wrapper, and hel
       stage,
     );
   }
+});
+
+test("create rejects assume-unchanged drift against the HEAD blob bytes", async () => {
+  const fixture = await makeFixture();
+  const trackedPath = path.join(fixture.projectDir, "src/main.ts");
+  execFileSync(
+    "/usr/bin/git",
+    ["update-index", "--assume-unchanged", "src/main.ts"],
+    {
+      cwd: fixture.projectDir,
+    },
+  );
+  await fs.writeFile(trackedPath, "export const value = 2;\n");
+  assert.equal(
+    execFileSync("/usr/bin/git", ["status", "--porcelain=v1"], {
+      cwd: fixture.projectDir,
+      encoding: "utf8",
+    }),
+    "",
+  );
+  await assertStage(
+    () => createDeploymentAttestation(fixture.createOptions),
+    "tracked_content",
+  );
+  execFileSync(
+    "/usr/bin/git",
+    ["update-index", "--no-assume-unchanged", "src/main.ts"],
+    { cwd: fixture.projectDir },
+  );
 });
 
 test("verify fails closed at the exact binding, tracked, static, wrapper, and helper stages", async () => {
@@ -128,6 +162,16 @@ test("verify fails closed at the exact binding, tracked, static, wrapper, and he
     path.join(fixture.projectDir, "src/main.ts"),
     "export const value = 1;\n",
   );
+
+  await fs.writeFile(
+    path.join(fixture.projectDir, "src/shadow.ts"),
+    "shadow\n",
+  );
+  await assertStage(
+    () => verifyDeploymentAttestation(options),
+    "runtime_inventory",
+  );
+  await fs.rm(path.join(fixture.projectDir, "src/shadow.ts"));
 
   await fs.rename(
     path.join(fixture.projectDir, "src"),
@@ -195,6 +239,72 @@ test("verify rejects malformed, permissive, and symlinked attestation state", as
   await assertStage(() => verifyDeploymentAttestation(options), "attestation");
 });
 
+test("installed helper strictly reads durable release state from its trusted root", async () => {
+  const fixture = await makeFixture();
+  const statePath = path.join(fixture.stateRoot, "clip-release-v1.json");
+
+  assert.deepEqual(
+    await readDurableClipReleaseStatus({
+      stateRoot: fixture.stateRoot,
+      trustedRoot: fixture.trustedRoot,
+    }),
+    { kind: "disabled", state: null },
+  );
+
+  const legacyDisabled = {
+    schemaVersion: 1,
+    enabled: false,
+    commit: null,
+    tree: null,
+    buildSha256: null,
+  };
+  await fs.writeFile(statePath, `${JSON.stringify(legacyDisabled)}\n`, {
+    mode: 0o600,
+  });
+  assert.equal(
+    (
+      await readDurableClipReleaseStatus({
+        stateRoot: fixture.stateRoot,
+        trustedRoot: fixture.trustedRoot,
+      })
+    ).kind,
+    "disabled",
+  );
+
+  await fs.writeFile(
+    statePath,
+    `${JSON.stringify({ ...legacyDisabled, enabled: true })}\n`,
+    { mode: 0o600 },
+  );
+  await assertStage(
+    () =>
+      readDurableClipReleaseStatus({
+        stateRoot: fixture.stateRoot,
+        trustedRoot: fixture.trustedRoot,
+      }),
+    "release_state",
+  );
+
+  const enabled = {
+    schemaVersion: 2,
+    enabled: true,
+    commit: fixture.commit,
+    tree: fixture.tree,
+    buildSha256: fixture.buildSha256,
+    attestationNonce: "a".repeat(64),
+  };
+  await fs.writeFile(statePath, `${JSON.stringify(enabled)}\n`, {
+    mode: 0o600,
+  });
+  assert.deepEqual(
+    await readDurableClipReleaseStatus({
+      stateRoot: fixture.stateRoot,
+      trustedRoot: fixture.trustedRoot,
+    }),
+    { kind: "enabled", state: enabled },
+  );
+});
+
 async function makeFixture() {
   const rawTrustedRoot = await fs.mkdtemp(
     path.join(os.tmpdir(), "pw-clip-attestation-trusted-"),
@@ -231,9 +341,7 @@ async function makeFixture() {
     "export const value = 1;\n",
   );
   await fs.writeFile(path.join(projectDir, "static/index.html"), "v1\n");
-  const gitBin = execFileSync("/bin/zsh", ["-lc", "command -v git"], {
-    encoding: "utf8",
-  }).trim();
+  const gitBin = "/usr/bin/git";
   for (const args of [
     ["init", "-q"],
     ["config", "user.email", "clip-test@proxywar.invalid"],
@@ -274,7 +382,6 @@ async function makeFixture() {
       projectDir,
       wrapperPath,
       helperPath,
-      gitBin,
       expectedCommit: commit,
       expectedTree: tree,
       expectedBuildSha256: buildSha256,

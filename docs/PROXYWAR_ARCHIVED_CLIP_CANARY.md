@@ -43,19 +43,24 @@ continues with all Clip capabilities false.
 
 macOS denies noninteractive `zsh` and `git` traversal of the release checkout
 under Documents. Clip activation therefore never invokes Git from launchd.
-Before any activating restart, the interactive deployment transaction proves
-the exact commit, tree, clean status, generated static build, installed wrapper,
-and installed verifier helper; hashes every tracked regular file; and atomically
-writes `clip-deployment-attestation-v1.json` in the owner-only private state
-root. The installed helper outside Documents verifies that manifest, current
-static build, wrapper, helper, canonical paths, and fresh nonce using Node.
+Before any activating restart, the interactive deployment transaction uses only
+root-owned `/usr/bin/git` with a sanitized environment, derives every expected
+blob from `git ls-tree -r -z HEAD`, proves the current Git-blob bytes, and
+atomically writes `clip-deployment-attestation-v1.json` in the owner-only private
+state root. The installed helper outside Documents verifies that manifest,
+current static build, wrapper, helper, canonical paths, fresh nonce, and a closed
+runtime-source inventory using Node. The only inventory exclusions are `.git`,
+`node_modules`, `artifacts`, `coworld-adapter/tmp`, and `static`; `static` has its
+own closed digest. A shadow source file, symlink, special file, or changed
+pathname/directory fails closed.
 Any fixed-stage failure keeps every Clip gate false without exposing paths or
 identity values in the service log.
 
 The durable path remains `clip-release-v1.json` for in-place migration, but
 new writes use strict schema v2 and bind the same attestation nonce. A legacy
 schema-v1 disabled record is accepted only as disabled; schema-v1 enabled is
-always malformed and fail-closed.
+always malformed and fail-closed. Launchd reads this record only through the
+hash-pinned installed helper; it never executes the in-repository state helper.
 
 The `arm` transaction validates the exact hashes and terminal-disarmed schemas
 of both immutable predecessor records, stable source bytes and their exact hash,
@@ -100,14 +105,15 @@ INSTALLED_ATTESTATION_HELPER="$TRUSTED_ROOT/bin/proxywar-clips-deployment-attest
 WRAPPER_BACKUP=/absolute/release-evidence/start-proxywar-beta.before-v3.zsh
 ATTESTATION_HELPER_BACKUP=/absolute/release-evidence/proxywar-clips-deployment-attestation.before-v3.mjs
 ATTESTATION_CREATE_RESULT=/absolute/release-evidence/clip-deployment-attestation-create-v1.json
+ATTESTATION_PROBE_LOG=/absolute/release-evidence/clip-deployment-attestation-disabled-probe.log
+BETA_ERROR_LOG=/absolute/reviewed/com.proxywar.beta.stderr.log
 CANARY_GO_EVIDENCE=/absolute/reviewed/canary-go.json
 CANARY_GO_EVIDENCE_SHA256=REPLACE_GO_EVIDENCE_64_LOWERCASE_HEX
 ORIGIN=http://127.0.0.1:8788
 PUBLIC_ORIGIN=https://beta.proxywar.xyz
 PREMIERE_LOOP_LABEL="gui/$(id -u)/com.proxywar.premiere-loop"
-GIT_BIN="$(command -v git)"
-test "$GIT_BIN" = /*
-test -x "$GIT_BIN"
+test -x /usr/bin/git
+test "$(stat -f '%u' /usr/bin/git)" = 0
 assert_clip_manager_env_unset() {
   local PW_CLIP_ENV_NAME="$1"
   local PW_CLIP_ENV_VALUE
@@ -158,6 +164,7 @@ node deploy/mac/proxywar-clips-release-state.mjs disable \
 launchctl unsetenv PROXYWAR_ARCHIVED_CLIP_CANARY_MASTER_OVERRIDE
 launchctl unsetenv PROXYWAR_CLIPS_RELEASE_OVERRIDE
 launchctl unsetenv PROXYWAR_CLIPS_FORCE_DISABLED
+launchctl unsetenv PROXYWAR_CLIPS_VERIFY_ATTESTATION_ONLY
 launchctl unsetenv PROXYWAR_CLIPS_EXPECTED_COMMIT
 launchctl unsetenv PROXYWAR_CLIPS_EXPECTED_TREE
 launchctl unsetenv PROXYWAR_CLIPS_EXPECTED_BUILD_SHA256
@@ -165,10 +172,13 @@ launchctl unsetenv PROXYWAR_CLIPS_EXPECTED_ATTESTATION_NONCE
 assert_clip_manager_env_unset PROXYWAR_ARCHIVED_CLIP_CANARY_MASTER_OVERRIDE
 assert_clip_manager_env_unset PROXYWAR_CLIPS_RELEASE_OVERRIDE
 assert_clip_manager_env_unset PROXYWAR_CLIPS_FORCE_DISABLED
+assert_clip_manager_env_unset PROXYWAR_CLIPS_VERIFY_ATTESTATION_ONLY
 assert_clip_manager_env_unset PROXYWAR_CLIPS_EXPECTED_COMMIT
 assert_clip_manager_env_unset PROXYWAR_CLIPS_EXPECTED_TREE
 assert_clip_manager_env_unset PROXYWAR_CLIPS_EXPECTED_BUILD_SHA256
 assert_clip_manager_env_unset PROXYWAR_CLIPS_EXPECTED_ATTESTATION_NONCE
+launchctl setenv PROXYWAR_CLIPS_FORCE_DISABLED true
+test "$(launchctl getenv PROXYWAR_CLIPS_FORCE_DISABLED)" = true
 test "$(pwd -P)" = "$PWD"
 test "$(stat -f '%u:%Lp' "$TRUSTED_ROOT")" = "$(id -u):700"
 test "$(stat -f '%u:%Lp' "$PRIVATE_STATE_ROOT")" = "$(id -u):700"
@@ -196,7 +206,6 @@ node deploy/mac/proxywar-clips-deployment-attestation.mjs create \
   --project-dir="$PWD" \
   --wrapper-path="$INSTALLED_WRAPPER" \
   --helper-path="$INSTALLED_ATTESTATION_HELPER" \
-  --git-bin="$GIT_BIN" \
   --expected-commit="$RELEASE_COMMIT" \
   --expected-tree="$RELEASE_TREE" \
   --expected-build-sha256="$RELEASE_BUILD_SHA256" \
@@ -247,6 +256,60 @@ launchctl bootout "gui/$(id -u)" "$HOME/Library/LaunchAgents/com.proxywar.premie
 
 Confirm no `replay-premiere-loop.ts` iteration remains before proceeding.
 
+Before v3 arm, exercise the exact launchd path while the manager deny remains
+latched. This is a disabled attestation probe, not an activation: both
+capabilities must remain false, and the retained new stderr slice must contain
+the exact success line once. Do not continue if the log path is not the active
+service `StandardErrorPath` or if any assertion fails:
+
+```bash
+test -f "$BETA_ERROR_LOG"
+test ! -e "$ATTESTATION_PROBE_LOG"
+ATTESTATION_PROBE_LOG_OFFSET="$(wc -c < "$BETA_ERROR_LOG" | tr -d ' ')"
+test "$ATTESTATION_PROBE_LOG_OFFSET" -ge 0
+test "$(launchctl getenv PROXYWAR_CLIPS_FORCE_DISABLED)" = true
+assert_clip_manager_env_unset PROXYWAR_ARCHIVED_CLIP_CANARY_MASTER_OVERRIDE
+assert_clip_manager_env_unset PROXYWAR_CLIPS_RELEASE_OVERRIDE
+launchctl setenv PROXYWAR_CLIPS_EXPECTED_COMMIT "$RELEASE_COMMIT"
+launchctl setenv PROXYWAR_CLIPS_EXPECTED_TREE "$RELEASE_TREE"
+launchctl setenv PROXYWAR_CLIPS_EXPECTED_BUILD_SHA256 "$RELEASE_BUILD_SHA256"
+launchctl setenv PROXYWAR_CLIPS_EXPECTED_ATTESTATION_NONCE "$ATTESTATION_NONCE"
+launchctl setenv PROXYWAR_CLIPS_VERIFY_ATTESTATION_ONLY true
+test "$(launchctl getenv PROXYWAR_CLIPS_EXPECTED_COMMIT)" = "$RELEASE_COMMIT"
+test "$(launchctl getenv PROXYWAR_CLIPS_EXPECTED_TREE)" = "$RELEASE_TREE"
+test "$(launchctl getenv PROXYWAR_CLIPS_EXPECTED_BUILD_SHA256)" = "$RELEASE_BUILD_SHA256"
+test "$(launchctl getenv PROXYWAR_CLIPS_EXPECTED_ATTESTATION_NONCE)" = "$ATTESTATION_NONCE"
+test "$(launchctl getenv PROXYWAR_CLIPS_VERIFY_ATTESTATION_ONLY)" = true
+node deploy/mac/proxywar-beta-launchd-restart.mjs \
+  --expected-wrapper-sha256="$REVIEWED_WRAPPER_SHA256" \
+  --start-timeout-ms=60000 \
+  --ready-url=http://127.0.0.1:8788/league \
+  --dry-run
+node deploy/mac/proxywar-beta-launchd-restart.mjs \
+  --expected-wrapper-sha256="$REVIEWED_WRAPPER_SHA256" \
+  --start-timeout-ms=60000 \
+  --ready-url=http://127.0.0.1:8788/league
+curl --fail --silent "$ORIGIN/api/clip-capabilities" | jq -e \
+  '.premiereGenerationEnabled == false and .leagueGenerationEnabled == false'
+curl --fail --silent "$PUBLIC_ORIGIN/api/clip-capabilities" | jq -e \
+  '.premiereGenerationEnabled == false and .leagueGenerationEnabled == false'
+dd if="$BETA_ERROR_LOG" of="$ATTESTATION_PROBE_LOG" bs=1 \
+  skip="$ATTESTATION_PROBE_LOG_OFFSET" 2>/dev/null
+test "$(grep -Fxc 'Clip deployment attestation verification passed' "$ATTESTATION_PROBE_LOG")" = 1
+! grep -F 'Clip activation source:' "$ATTESTATION_PROBE_LOG"
+launchctl unsetenv PROXYWAR_CLIPS_VERIFY_ATTESTATION_ONLY
+launchctl unsetenv PROXYWAR_CLIPS_EXPECTED_COMMIT
+launchctl unsetenv PROXYWAR_CLIPS_EXPECTED_TREE
+launchctl unsetenv PROXYWAR_CLIPS_EXPECTED_BUILD_SHA256
+launchctl unsetenv PROXYWAR_CLIPS_EXPECTED_ATTESTATION_NONCE
+assert_clip_manager_env_unset PROXYWAR_CLIPS_VERIFY_ATTESTATION_ONLY
+assert_clip_manager_env_unset PROXYWAR_CLIPS_EXPECTED_COMMIT
+assert_clip_manager_env_unset PROXYWAR_CLIPS_EXPECTED_TREE
+assert_clip_manager_env_unset PROXYWAR_CLIPS_EXPECTED_BUILD_SHA256
+assert_clip_manager_env_unset PROXYWAR_CLIPS_EXPECTED_ATTESTATION_NONCE
+test "$(launchctl getenv PROXYWAR_CLIPS_FORCE_DISABLED)" = true
+```
+
 ## Arm and activate
 
 Use a short explicit expiry (20 minutes shown; the parser rejects more than 30):
@@ -279,19 +342,32 @@ Use the reviewed ordinary restart helper, not `launchctl kickstart -k` and not
 the controlled-outage drill:
 
 ```bash
-assert_clip_manager_env_unset PROXYWAR_CLIPS_FORCE_DISABLED
+test "$(launchctl getenv PROXYWAR_CLIPS_FORCE_DISABLED)" = true
 assert_clip_manager_env_unset PROXYWAR_CLIPS_RELEASE_OVERRIDE
+assert_clip_manager_env_unset PROXYWAR_CLIPS_VERIFY_ATTESTATION_ONLY
 launchctl setenv PROXYWAR_CLIPS_EXPECTED_COMMIT "$RELEASE_COMMIT"
 launchctl setenv PROXYWAR_CLIPS_EXPECTED_TREE "$RELEASE_TREE"
 launchctl setenv PROXYWAR_CLIPS_EXPECTED_BUILD_SHA256 "$RELEASE_BUILD_SHA256"
 launchctl setenv PROXYWAR_CLIPS_EXPECTED_ATTESTATION_NONCE "$ATTESTATION_NONCE"
+test "$(launchctl getenv PROXYWAR_CLIPS_EXPECTED_COMMIT)" = "$RELEASE_COMMIT"
+test "$(launchctl getenv PROXYWAR_CLIPS_EXPECTED_TREE)" = "$RELEASE_TREE"
+test "$(launchctl getenv PROXYWAR_CLIPS_EXPECTED_BUILD_SHA256)" = "$RELEASE_BUILD_SHA256"
 test "$(launchctl getenv PROXYWAR_CLIPS_EXPECTED_ATTESTATION_NONCE)" = "$ATTESTATION_NONCE"
-launchctl setenv PROXYWAR_ARCHIVED_CLIP_CANARY_MASTER_OVERRIDE true
 node deploy/mac/proxywar-beta-launchd-restart.mjs \
   --expected-wrapper-sha256="$REVIEWED_WRAPPER_SHA256" \
   --start-timeout-ms=60000 \
   --ready-url=http://127.0.0.1:8788/league \
   --dry-run
+launchctl setenv PROXYWAR_ARCHIVED_CLIP_CANARY_MASTER_OVERRIDE true
+launchctl unsetenv PROXYWAR_CLIPS_FORCE_DISABLED
+test "$(launchctl getenv PROXYWAR_ARCHIVED_CLIP_CANARY_MASTER_OVERRIDE)" = true
+assert_clip_manager_env_unset PROXYWAR_CLIPS_RELEASE_OVERRIDE
+assert_clip_manager_env_unset PROXYWAR_CLIPS_FORCE_DISABLED
+assert_clip_manager_env_unset PROXYWAR_CLIPS_VERIFY_ATTESTATION_ONLY
+test "$(launchctl getenv PROXYWAR_CLIPS_EXPECTED_COMMIT)" = "$RELEASE_COMMIT"
+test "$(launchctl getenv PROXYWAR_CLIPS_EXPECTED_TREE)" = "$RELEASE_TREE"
+test "$(launchctl getenv PROXYWAR_CLIPS_EXPECTED_BUILD_SHA256)" = "$RELEASE_BUILD_SHA256"
+test "$(launchctl getenv PROXYWAR_CLIPS_EXPECTED_ATTESTATION_NONCE)" = "$ATTESTATION_NONCE"
 node deploy/mac/proxywar-beta-launchd-restart.mjs \
   --expected-wrapper-sha256="$REVIEWED_WRAPPER_SHA256" \
   --start-timeout-ms=60000 \
@@ -410,12 +486,14 @@ launchctl setenv PROXYWAR_CLIPS_FORCE_DISABLED true
 test "$(launchctl getenv PROXYWAR_CLIPS_FORCE_DISABLED)" = true
 launchctl unsetenv PROXYWAR_ARCHIVED_CLIP_CANARY_MASTER_OVERRIDE
 launchctl unsetenv PROXYWAR_CLIPS_RELEASE_OVERRIDE
+launchctl unsetenv PROXYWAR_CLIPS_VERIFY_ATTESTATION_ONLY
 launchctl unsetenv PROXYWAR_CLIPS_EXPECTED_COMMIT
 launchctl unsetenv PROXYWAR_CLIPS_EXPECTED_TREE
 launchctl unsetenv PROXYWAR_CLIPS_EXPECTED_BUILD_SHA256
 launchctl unsetenv PROXYWAR_CLIPS_EXPECTED_ATTESTATION_NONCE
 assert_clip_manager_env_unset PROXYWAR_ARCHIVED_CLIP_CANARY_MASTER_OVERRIDE
 assert_clip_manager_env_unset PROXYWAR_CLIPS_RELEASE_OVERRIDE
+assert_clip_manager_env_unset PROXYWAR_CLIPS_VERIFY_ATTESTATION_ONLY
 assert_clip_manager_env_unset PROXYWAR_CLIPS_EXPECTED_COMMIT
 assert_clip_manager_env_unset PROXYWAR_CLIPS_EXPECTED_TREE
 assert_clip_manager_env_unset PROXYWAR_CLIPS_EXPECTED_BUILD_SHA256
@@ -536,12 +614,24 @@ jq -e --arg run "$RUN_KEY" --arg premiere "$PREMIERE_ID" \
 launchctl unsetenv PROXYWAR_ARCHIVED_CLIP_CANARY_MASTER_OVERRIDE
 launchctl unsetenv PROXYWAR_CLIPS_FORCE_DISABLED
 assert_clip_manager_env_unset PROXYWAR_CLIPS_FORCE_DISABLED
+assert_clip_manager_env_unset PROXYWAR_CLIPS_VERIFY_ATTESTATION_ONLY
 launchctl setenv PROXYWAR_CLIPS_EXPECTED_COMMIT "$RELEASE_COMMIT"
 launchctl setenv PROXYWAR_CLIPS_EXPECTED_TREE "$RELEASE_TREE"
 launchctl setenv PROXYWAR_CLIPS_EXPECTED_BUILD_SHA256 "$RELEASE_BUILD_SHA256"
 launchctl setenv PROXYWAR_CLIPS_EXPECTED_ATTESTATION_NONCE "$ATTESTATION_NONCE"
+test "$(launchctl getenv PROXYWAR_CLIPS_EXPECTED_COMMIT)" = "$RELEASE_COMMIT"
+test "$(launchctl getenv PROXYWAR_CLIPS_EXPECTED_TREE)" = "$RELEASE_TREE"
+test "$(launchctl getenv PROXYWAR_CLIPS_EXPECTED_BUILD_SHA256)" = "$RELEASE_BUILD_SHA256"
 test "$(launchctl getenv PROXYWAR_CLIPS_EXPECTED_ATTESTATION_NONCE)" = "$ATTESTATION_NONCE"
 launchctl setenv PROXYWAR_CLIPS_RELEASE_OVERRIDE true
+test "$(launchctl getenv PROXYWAR_CLIPS_RELEASE_OVERRIDE)" = true
+assert_clip_manager_env_unset PROXYWAR_ARCHIVED_CLIP_CANARY_MASTER_OVERRIDE
+assert_clip_manager_env_unset PROXYWAR_CLIPS_FORCE_DISABLED
+assert_clip_manager_env_unset PROXYWAR_CLIPS_VERIFY_ATTESTATION_ONLY
+test "$(launchctl getenv PROXYWAR_CLIPS_EXPECTED_COMMIT)" = "$RELEASE_COMMIT"
+test "$(launchctl getenv PROXYWAR_CLIPS_EXPECTED_TREE)" = "$RELEASE_TREE"
+test "$(launchctl getenv PROXYWAR_CLIPS_EXPECTED_BUILD_SHA256)" = "$RELEASE_BUILD_SHA256"
+test "$(launchctl getenv PROXYWAR_CLIPS_EXPECTED_ATTESTATION_NONCE)" = "$ATTESTATION_NONCE"
 node deploy/mac/proxywar-beta-launchd-restart.mjs \
   --expected-wrapper-sha256="$REVIEWED_WRAPPER_SHA256" \
   --start-timeout-ms=60000 \
@@ -591,6 +681,7 @@ node deploy/mac/proxywar-clips-release-state.mjs enable \
 launchctl unsetenv PROXYWAR_ARCHIVED_CLIP_CANARY_MASTER_OVERRIDE
 launchctl unsetenv PROXYWAR_CLIPS_RELEASE_OVERRIDE
 launchctl unsetenv PROXYWAR_CLIPS_FORCE_DISABLED
+launchctl unsetenv PROXYWAR_CLIPS_VERIFY_ATTESTATION_ONLY
 launchctl unsetenv PROXYWAR_CLIPS_EXPECTED_COMMIT
 launchctl unsetenv PROXYWAR_CLIPS_EXPECTED_TREE
 launchctl unsetenv PROXYWAR_CLIPS_EXPECTED_BUILD_SHA256
@@ -598,6 +689,7 @@ launchctl unsetenv PROXYWAR_CLIPS_EXPECTED_ATTESTATION_NONCE
 assert_clip_manager_env_unset PROXYWAR_CLIPS_RELEASE_OVERRIDE
 assert_clip_manager_env_unset PROXYWAR_ARCHIVED_CLIP_CANARY_MASTER_OVERRIDE
 assert_clip_manager_env_unset PROXYWAR_CLIPS_FORCE_DISABLED
+assert_clip_manager_env_unset PROXYWAR_CLIPS_VERIFY_ATTESTATION_ONLY
 assert_clip_manager_env_unset PROXYWAR_CLIPS_EXPECTED_COMMIT
 assert_clip_manager_env_unset PROXYWAR_CLIPS_EXPECTED_TREE
 assert_clip_manager_env_unset PROXYWAR_CLIPS_EXPECTED_BUILD_SHA256
@@ -633,7 +725,7 @@ Emergency disable is the inverse controlled transaction:
 Before invoking it against a live release, disable/boot out the Premiere loop
 and confirm no iteration remains. Restore it only after `false/false` proof.
 
-Every later deployment must begin with these seven unsets before installing or
+Every later deployment must begin with these eight unsets before installing or
 restarting a new release. The wrapper binds either Clip override to the fresh
 owner-only content attestation: exact commit, tree, tracked-file manifest,
 deterministic `static/` digest, installed wrapper/helper bytes, and nonce.
@@ -645,12 +737,14 @@ launchctl setenv PROXYWAR_CLIPS_FORCE_DISABLED true
 test "$(launchctl getenv PROXYWAR_CLIPS_FORCE_DISABLED)" = true
 launchctl unsetenv PROXYWAR_ARCHIVED_CLIP_CANARY_MASTER_OVERRIDE
 launchctl unsetenv PROXYWAR_CLIPS_RELEASE_OVERRIDE
+launchctl unsetenv PROXYWAR_CLIPS_VERIFY_ATTESTATION_ONLY
 launchctl unsetenv PROXYWAR_CLIPS_EXPECTED_COMMIT
 launchctl unsetenv PROXYWAR_CLIPS_EXPECTED_TREE
 launchctl unsetenv PROXYWAR_CLIPS_EXPECTED_BUILD_SHA256
 launchctl unsetenv PROXYWAR_CLIPS_EXPECTED_ATTESTATION_NONCE
 assert_clip_manager_env_unset PROXYWAR_ARCHIVED_CLIP_CANARY_MASTER_OVERRIDE
 assert_clip_manager_env_unset PROXYWAR_CLIPS_RELEASE_OVERRIDE
+assert_clip_manager_env_unset PROXYWAR_CLIPS_VERIFY_ATTESTATION_ONLY
 assert_clip_manager_env_unset PROXYWAR_CLIPS_EXPECTED_COMMIT
 assert_clip_manager_env_unset PROXYWAR_CLIPS_EXPECTED_TREE
 assert_clip_manager_env_unset PROXYWAR_CLIPS_EXPECTED_BUILD_SHA256
