@@ -15,9 +15,6 @@ export const proxyWarPublicRunArtifacts = [
   "behavior-quality-report.json",
   "behavior-quality-report.md",
   "external-agent-feedback.md",
-  // Social preview image published beside the league page. og:image must be
-  // fetchable by external scrapers, so it has to be on the public allowlist.
-  "social.png",
 ] as const;
 
 export const proxyWarPublicTournamentArtifacts = [
@@ -53,6 +50,9 @@ export const proxyWarPublicLeagueArtifacts = [
   "index.html",
   "client.js",
   "data.json",
+  // Social preview image published beside the league page. og:image must be
+  // fetchable by external scrapers, so it has to be publicly gettable.
+  "social.png",
 ] as const;
 
 /**
