@@ -207,6 +207,13 @@ export function mountAiLeagueReplayOverlay(input: AiLeagueReplayOverlayInput) {
         return;
       }
       details.innerHTML = overlayDetailsHtml(currentInput);
+      const subtitle = overlay.querySelector<HTMLElement>(
+        "[data-ai-league-subtitle]",
+      );
+      const subtitleText = matchSubtitle(currentInput);
+      if (subtitle !== null && subtitleText !== null) {
+        subtitle.textContent = subtitleText;
+      }
       const previousClipControl = clipControl;
       clipControl = mountReplayDetailsBindings(overlay, currentInput);
       previousClipControl?.dispose();
@@ -269,6 +276,8 @@ function mountReplayDetailsBindings(
   mountAiLeagueDiplomacyStrip(overlay, input.decisions, telemetry);
   mountAiLeagueTalksToggle(overlay, telemetry);
   mountAiLeagueDecisionLogExpander(overlay, input.decisions);
+  mountAiLeagueDecisionsDisclosure(overlay);
+  mountAiLeagueRadioToggle(overlay);
   const clipContainer = overlay.querySelector<HTMLElement>(
     "[data-ai-league-clip]",
   );
@@ -279,6 +288,60 @@ function mountReplayDetailsBindings(
         runKey: input.runID,
         renderableThroughTurn: input.replayMaxTurn,
       });
+}
+
+/**
+ * Disclosure for the decision log. It is the panel's largest block and pure
+ * reference material, so it ships collapsed and the viewer opts in.
+ */
+function mountAiLeagueDecisionsDisclosure(overlay: HTMLElement): void {
+  const toggle = overlay.querySelector<HTMLButtonElement>(
+    "[data-ai-league-decisions-toggle]",
+  );
+  const body = overlay.querySelector<HTMLElement>(
+    "[data-ai-league-decisions-body]",
+  );
+  if (toggle === null || body === null) return;
+  toggle.addEventListener("click", () => {
+    const nowOpen = body.hidden;
+    body.hidden = !nowOpen;
+    toggle.setAttribute("aria-expanded", String(nowOpen));
+    toggle.textContent = translateText(
+      nowOpen
+        ? "ai_league_replay.decisions_hide"
+        : "ai_league_replay.decisions_show",
+    );
+  });
+}
+
+/**
+ * Political radio (the floating social transcript) is atmosphere, not signal,
+ * and it covers the map's lower-left corner. Ship it OFF and let the viewer
+ * turn it on from a small control in the panel header actions.
+ */
+function mountAiLeagueRadioToggle(overlay: HTMLElement): void {
+  const actions = overlay.querySelector<HTMLElement>(
+    ".ai-league-header-actions",
+  );
+  if (actions === null) return;
+  if (actions.querySelector("[data-ai-league-radio-toggle]") !== null) return;
+  const toggle = document.createElement("button");
+  toggle.type = "button";
+  toggle.dataset.aiLeagueRadioToggle = "";
+  toggle.setAttribute("aria-pressed", "false");
+  toggle.textContent = translateText("ai_league_replay.radio_show");
+  const apply = (on: boolean) => {
+    document.body.classList.toggle("ai-league-radio-on", on);
+    toggle.setAttribute("aria-pressed", String(on));
+    toggle.textContent = translateText(
+      on ? "ai_league_replay.radio_hide" : "ai_league_replay.radio_show",
+    );
+  };
+  apply(false);
+  toggle.addEventListener("click", () => {
+    apply(!document.body.classList.contains("ai-league-radio-on"));
+  });
+  actions.prepend(toggle);
 }
 
 const AI_LEAGUE_MOBILE_BREAKPOINT = 740;
@@ -1269,6 +1332,12 @@ function overlayHtml(input: AiLeagueReplayOverlayInput): string {
       body.ai-league-replay-mode .ai-league-game-id {
         display: none !important;
       }
+      /* Political radio is opt-in: hidden until the header toggle adds
+         .ai-league-radio-on to <body>. It overlays the map's lower-left corner,
+         so defaulting it on made the replay noisier than it needed to be. */
+      body:not(.ai-league-radio-on) #ai-league-social-transcript {
+        display: none !important;
+      }
       #ai-league-social-transcript {
         position: fixed;
         left: 18px;
@@ -1451,7 +1520,13 @@ function overlayHtml(input: AiLeagueReplayOverlayInput): string {
     <header data-ai-league-drag>
       <div>
         <h2>${escapeHtml(translateText("ai_league_replay.title"))}</h2>
-        <div class="ai-league-muted ai-league-run-id" title="${escapeHtml(input.runID)}">${escapeHtml(input.runID)}</div>
+        <!--
+          Subtitle carries what a viewer needs to place the match (map, agent
+          count, length). The run id is support provenance, not a headline, so
+          it moves to the tooltip. Populated by the details render because the
+          summary arrives after the shell mounts.
+        -->
+        <div class="ai-league-muted ai-league-run-id" data-ai-league-subtitle title="${escapeHtml(input.runID)}">${escapeHtml(matchSubtitle(input) ?? input.runID)}</div>
       </div>
       <div class="ai-league-header-actions">
         <button type="button" data-ai-league-reset-layout title="${escapeHtml(translateText("ai_league_replay.reset_layout_title"))}">${escapeHtml(translateText("ai_league_replay.reset_layout"))}</button>
@@ -1493,11 +1568,6 @@ function overlayDetailsHtml(input: AiLeagueReplayOverlayInput): string {
     nonNegativeCount(input.summary?.fallbackCount) ?? localFallbackCount;
   const actionCounts =
     summaryActionCounts(input.summary?.actionCounts) ?? localActionCounts;
-  const playstyleKinds = Object.entries(actionCounts)
-    .filter(([kind]) => kind !== "hold" && kind !== "spawn")
-    .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
-    .slice(0, 3)
-    .map(([kind]) => kind);
   const agentCount = input.summary?.roster?.length ?? 0;
   const bots = input.summary?.runnerConfig?.bots ?? null;
   const nations = input.summary?.runnerConfig?.nations ?? null;
@@ -1507,40 +1577,10 @@ function overlayDetailsHtml(input: AiLeagueReplayOverlayInput): string {
   // is only meaningful when built-in opponents actually exist — it used to
   // render the nonsense "vs 0 built-in opponents". Both branches go through
   // translateText (this line was previously hardcoded English).
-  const setupLine =
-    agentCount > 0 && configuredOpponentCount > 0
-      ? translateText("ai_league_replay.setup_agents_vs_builtin", {
-          agents: agentCount,
-          opponents: configuredOpponentCount,
-        })
-      : agentCount > 0
-        ? translateText("ai_league_replay.setup_agents_only", {
-            agents: agentCount,
-          })
-        : translateText("ai_league_replay.setup_generic");
   const mapName =
     typeof input.summary?.runnerConfig?.map === "string"
       ? input.summary.runnerConfig.map
       : null;
-  // Built-in difficulty describes the nation AI, which has no bearing on an
-  // agent-vs-agent match; /league dropped it for the same reason. Keep it only
-  // when built-in opponents are actually present.
-  const difficulty =
-    configuredOpponentCount > 0 &&
-    typeof input.summary?.runnerConfig?.difficulty === "string"
-      ? input.summary.runnerConfig.difficulty
-      : null;
-  const configLine = [
-    mapName,
-    difficulty,
-    // maxSteps counts agent DECISION steps, not game turns — labelling it
-    // "500-turn" next to a live turn counter reading 4425 looked broken.
-    maxSteps !== null && maxSteps !== undefined
-      ? translateText("ai_league_replay.setup_decisions", { steps: maxSteps })
-      : null,
-  ]
-    .filter(Boolean)
-    .join(" · ");
   const spectatorTelemetry =
     input.spectatorTelemetry as AiLeagueSpectatorTelemetry | null;
   const detailsUnavailable =
@@ -1554,10 +1594,7 @@ function overlayDetailsHtml(input: AiLeagueReplayOverlayInput): string {
     ? `<section class="ai-league-match-setup ai-league-muted" data-ai-league-details-loading>${escapeHtml(translateText("ai_league_replay.loading_details"))}</section>`
     : detailsUnavailable
       ? `<section class="ai-league-match-setup ai-league-muted" data-ai-league-details-unavailable>${escapeHtml(translateText("ai_league_replay.details_unavailable"))}</section>`
-      : `<section class="ai-league-match-setup">
-        <strong>${escapeHtml(setupLine)}</strong>
-        ${configLine ? `<div class="ai-league-muted">${escapeHtml(configLine)}</div>` : ""}
-      </section>`;
+      : "";
 
   return `
     <section class="ai-league-metrics">
@@ -1565,11 +1602,51 @@ function overlayDetailsHtml(input: AiLeagueReplayOverlayInput): string {
       <div class="ai-league-metric" title="${escapeHtml(translateText("ai_league_replay.metric_invalid_tip"))}">${escapeHtml(translateText("ai_league_replay.metric_invalid"))}<b>${metricValue(rejectedCount)}</b></div>
       <div class="ai-league-metric${!input.detailsLoading && fallbackCount > 0 ? " warn" : ""}" title="${escapeHtml(translateText("ai_league_replay.metric_recovered_tip"))}">${escapeHtml(translateText("ai_league_replay.metric_recovered"))}<b>${metricValue(fallbackCount)}</b>${recoveredShareHtml(input, fallbackCount, decisionCount, detailsUnavailable)}</div>
     </section>
-    ${setupHtml}
-    ${!input.detailsLoading && !detailsUnavailable && playstyleKinds.length > 0 ? playstyleLineHtml(playstyleKinds) : ""}
+    ${input.detailsLoading || detailsUnavailable ? setupHtml : ""}
     ${spectatorTelemetry ? communicationThreadsHtml(spectatorTelemetry) : ""}
     <section class="ai-league-clip" data-ai-league-clip></section>
     ${decisionLogHtml(input.decisions)}`;
+}
+
+/**
+ * One-line match identity for the panel header: map, agent count, and length.
+ * Replaces the raw run id, which wrapped, dominated the header, and told a
+ * viewer nothing. Returns null while the summary has not arrived, in which case
+ * the header keeps showing the run id.
+ */
+function matchSubtitle(input: AiLeagueReplayOverlayInput): string | null {
+  const summary = input.summary;
+  if (summary === null || summary === undefined) return null;
+  const agentCount = summary.roster?.length ?? 0;
+  const mapName =
+    typeof summary.runnerConfig?.map === "string"
+      ? summary.runnerConfig.map
+      : null;
+  const maxSteps = summary.runnerConfig?.maxSteps ?? null;
+  const bots = summary.runnerConfig?.bots ?? null;
+  const nations = summary.runnerConfig?.nations ?? null;
+  const builtInCount = numericCount(nations) + numericCount(bots);
+  // Built-in opponents only exist outside the agent-vs-agent league, and the
+  // "vs N built-in opponents" clause is meaningless when there are none.
+  const roster =
+    agentCount > 0 && builtInCount > 0
+      ? translateText("ai_league_replay.setup_agents_vs_builtin", {
+          agents: agentCount,
+          opponents: builtInCount,
+        })
+      : agentCount > 0
+        ? translateText("ai_league_replay.setup_agents_only", {
+            agents: agentCount,
+          })
+        : null;
+  const parts = [
+    mapName,
+    roster,
+    maxSteps !== null && maxSteps !== undefined
+      ? translateText("ai_league_replay.setup_decisions", { steps: maxSteps })
+      : null,
+  ].filter((part): part is string => part !== null && part !== "");
+  return parts.length > 0 ? parts.join(" · ") : null;
 }
 
 /**
@@ -1594,15 +1671,6 @@ function recoveredShareHtml(
   )}</span>`;
 }
 
-function playstyleLineHtml(kinds: string[]): string {
-  const badges = kinds
-    .map(
-      (kind) =>
-        `<span class="ai-league-badge">${escapeHtml(actionLabelFromKind(kind))}</span>`,
-    )
-    .join(" ");
-  return `<p class="ai-league-playstyle"><strong>${escapeHtml(translateText("ai_league_replay.playstyle_label"))}</strong> ${badges}</p>`;
-}
 
 const AI_LEAGUE_DECISION_LOG_CAP = 15;
 
@@ -1616,13 +1684,19 @@ function decisionLogHtml(decisions: AiLeagueDecisionLogEntry[]): string {
     olderCount > 0
       ? `<button type="button" class="ai-league-badge" data-ai-league-decision-expander aria-expanded="false" aria-controls="ai-league-older-decisions">${escapeHtml(translateText("ai_league_replay.decisions_show_older", { count: olderCount }))}</button>`
       : "";
+  // The decision log is the panel's largest block and is reference material,
+  // not something a viewer wants open by default. Ship it collapsed behind a
+  // disclosure; the older-pages expander lives inside the disclosed region.
   return `
     <div class="ai-league-decisions-head">
       <span class="ai-league-decisions-title">${escapeHtml(translateText("ai_league_replay.decisions_title"))}</span>
-      ${expander}
+      <button type="button" class="ai-league-badge" data-ai-league-decisions-toggle aria-expanded="false" aria-controls="ai-league-decisions-body">${escapeHtml(translateText("ai_league_replay.decisions_show"))}</button>
     </div>
-    ${olderCount > 0 ? `<div id="ai-league-older-decisions" data-ai-league-decision-pages></div>` : ""}
-    ${visible.map(decisionHtml).join("")}`;
+    <div id="ai-league-decisions-body" data-ai-league-decisions-body hidden>
+      ${expander}
+      ${olderCount > 0 ? `<div id="ai-league-older-decisions" data-ai-league-decision-pages></div>` : ""}
+      ${visible.map(decisionHtml).join("")}
+    </div>`;
 }
 
 function mountAiLeagueDecisionLogExpander(

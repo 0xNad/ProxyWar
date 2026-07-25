@@ -145,11 +145,12 @@ describe("AiLeagueReplayOverlay", () => {
     expect(overlay?.textContent).toContain("build:Defense Post:10");
     // The setup line goes through translateText (it used to be hardcoded
     // English). translateText echoes the key in tests, as with the title above.
-    expect(overlay?.textContent).toContain(
-      "ai_league_replay.setup_agents_vs_builtin",
-    );
-    // Playstyle line replaces the action-count tally and recent-action feed.
-    expect(overlay?.querySelector(".ai-league-playstyle")).not.toBeNull();
+    // Match identity moved from a body card into the header subtitle, and the
+    // "Plays mostly" line was removed entirely.
+    expect(
+      overlay?.querySelector("[data-ai-league-subtitle]")?.textContent,
+    ).toContain("ai_league_replay.setup_agents_vs_builtin");
+    expect(overlay?.querySelector(".ai-league-playstyle")).toBeNull();
     expect(overlay?.querySelector(".ai-league-metrics")).not.toBeNull();
     // No speed slider, story card, or opening-neutral section in the overlay.
     expect(overlay?.querySelector("[data-ai-league-speed]")).toBeNull();
@@ -584,6 +585,7 @@ describe("AiLeagueReplayOverlay", () => {
     expect(
       overlay.querySelector(".ai-league-match-setup")?.textContent,
     ).not.toContain("Proxy War agents");
+    expect(overlay.querySelector(".ai-league-playstyle")).toBeNull();
   });
 
   it("pins the panel grid column so a long run id cannot push controls out of reach", () => {
@@ -626,7 +628,8 @@ describe("AiLeagueReplayOverlay", () => {
       decisions: [],
     });
 
-    const setup = document.querySelector(".ai-league-match-setup")?.textContent;
+    const setup = document.querySelector("[data-ai-league-subtitle]")
+      ?.textContent;
     expect(setup).toContain("ai_league_replay.setup_agents_only");
     expect(setup).not.toContain("setup_agents_vs_builtin");
     expect(setup).not.toContain("Easy");
@@ -796,13 +799,9 @@ describe("AiLeagueReplayOverlay", () => {
         (metric) => metric.textContent,
       ),
     ).toEqual(["200", "3", "7"]);
-    const playstyle = overlay.querySelector(
-      ".ai-league-playstyle",
-    )?.textContent;
-    expect(playstyle).toContain("nuke");
-    expect(playstyle).toContain("chat");
-    expect(playstyle).toContain("build");
-    expect(playstyle).not.toContain("hold");
+    // The "Plays mostly" line was removed from the panel entirely; the metric
+    // row above is what summary actionCounts still drive.
+    expect(overlay.querySelector(".ai-league-playstyle")).toBeNull();
   });
 
   it("hydrates older decisions in bounded pages instead of building hidden cards", () => {
