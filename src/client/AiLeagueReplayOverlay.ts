@@ -776,6 +776,20 @@ function overlayHtml(input: AiLeagueReplayOverlayInput): string {
         margin: 0 0 2px;
         font-size: 15px;
       }
+      /*
+       * The run id is support/debug provenance, not a headline. Left to wrap it
+       * took three lines and dominated the header. Keep it to one line with the
+       * full value in the tooltip (and selectable for copy/paste). Mobile
+       * already did this; it was only ever gated behind a breakpoint.
+       */
+      .ai-league-run-id {
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+        max-width: 100%;
+        user-select: all;
+        cursor: text;
+      }
       .ai-league-header-actions {
         display: flex;
         gap: 6px;
@@ -829,6 +843,13 @@ function overlayHtml(input: AiLeagueReplayOverlayInput): string {
         display: block;
         font-size: 14px;
         font-variant-numeric: tabular-nums;
+      }
+      .ai-league-metric-share {
+        display: block;
+        margin-top: 1px;
+        font-size: 10px;
+        font-weight: 600;
+        opacity: 0.75;
       }
       .ai-league-metric.warn {
         background: var(--pw-caution-soft, rgba(251, 191, 36, 0.14));
@@ -1195,6 +1216,16 @@ function overlayHtml(input: AiLeagueReplayOverlayInput): string {
       body.ai-league-replay-mode:not(.ai-league-native-spectator-ui) game-left-sidebar {
         display: none !important;
       }
+      /*
+       * The raw game id is useful to a player who wants to report or share their
+       * own match. In a replay it is provenance nobody asked for — and for
+       * Coworld episodes the id IS the fixed seed (e.g. "COWRLD01"), identical
+       * in every match, so it identifies nothing. The run id in the panel header
+       * is the real identifier here.
+       */
+      body.ai-league-replay-mode .ai-league-game-id {
+        display: none !important;
+      }
       #ai-league-social-transcript {
         position: fixed;
         left: 18px;
@@ -1377,7 +1408,7 @@ function overlayHtml(input: AiLeagueReplayOverlayInput): string {
     <header data-ai-league-drag>
       <div>
         <h2>${escapeHtml(translateText("ai_league_replay.title"))}</h2>
-        <div class="ai-league-muted">${escapeHtml(input.runID)}</div>
+        <div class="ai-league-muted ai-league-run-id" title="${escapeHtml(input.runID)}">${escapeHtml(input.runID)}</div>
       </div>
       <div class="ai-league-header-actions">
         <button type="button" data-ai-league-reset-layout title="${escapeHtml(translateText("ai_league_replay.reset_layout_title"))}">${escapeHtml(translateText("ai_league_replay.reset_layout"))}</button>
@@ -1489,7 +1520,7 @@ function overlayDetailsHtml(input: AiLeagueReplayOverlayInput): string {
     <section class="ai-league-metrics">
       <div class="ai-league-metric" title="${escapeHtml(translateText("ai_league_replay.metric_moves_tip"))}">${escapeHtml(translateText("ai_league_replay.metric_moves"))}<b>${metricValue(decisionCount)}</b></div>
       <div class="ai-league-metric" title="${escapeHtml(translateText("ai_league_replay.metric_invalid_tip"))}">${escapeHtml(translateText("ai_league_replay.metric_invalid"))}<b>${metricValue(rejectedCount)}</b></div>
-      <div class="ai-league-metric${!input.detailsLoading && fallbackCount > 0 ? " warn" : ""}" title="${escapeHtml(translateText("ai_league_replay.metric_recovered_tip"))}">${escapeHtml(translateText("ai_league_replay.metric_recovered"))}<b>${metricValue(fallbackCount)}</b></div>
+      <div class="ai-league-metric${!input.detailsLoading && fallbackCount > 0 ? " warn" : ""}" title="${escapeHtml(translateText("ai_league_replay.metric_recovered_tip"))}">${escapeHtml(translateText("ai_league_replay.metric_recovered"))}<b>${metricValue(fallbackCount)}</b>${recoveredShareHtml(input, fallbackCount, decisionCount, detailsUnavailable)}</div>
     </section>
     ${setupHtml}
     ${!input.detailsLoading && !detailsUnavailable && playstyleKinds.length > 0 ? playstyleLineHtml(playstyleKinds) : ""}
@@ -1498,6 +1529,28 @@ function overlayDetailsHtml(input: AiLeagueReplayOverlayInput): string {
     ${artifactLinksHtml(input)}
     <section class="ai-league-clip" data-ai-league-clip></section>
     ${decisionLogHtml(input.decisions)}`;
+}
+
+/**
+ * Share of moves that fell back, shown under the Recovered count. A bare "175"
+ * reads as alarming (or as nothing) with no denominator; "7% of moves" is the
+ * number a viewer can actually judge. Omitted at zero so a clean match stays
+ * quiet, and while details are still loading/unavailable.
+ */
+function recoveredShareHtml(
+  input: AiLeagueReplayOverlayInput,
+  fallbackCount: number,
+  decisionCount: number,
+  detailsUnavailable: boolean,
+): string {
+  if (input.detailsLoading || detailsUnavailable) return "";
+  if (fallbackCount <= 0 || decisionCount <= 0) return "";
+  const percent = Math.round((fallbackCount / decisionCount) * 100);
+  return `<span class="ai-league-metric-share">${escapeHtml(
+    translateText("ai_league_replay.metric_recovered_share", {
+      percent: String(percent),
+    }),
+  )}</span>`;
 }
 
 function playstyleLineHtml(kinds: string[]): string {
