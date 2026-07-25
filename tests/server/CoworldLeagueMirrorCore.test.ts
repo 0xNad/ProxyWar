@@ -389,9 +389,22 @@ describe("CoworldLeagueMirrorCore", () => {
 
     expect(artifact.version).toBe(1);
     expect(artifact.decisionCount).toBe(65);
+    // The window spans the whole match, not just its tail. It used to be
+    // decisions.slice(-60), so agents eliminated early never appeared and the
+    // replay panel had nothing to show until playback reached the final
+    // minutes. Same payload budget, but coverage from the first decision on.
     expect(artifact.recentDecisions).toHaveLength(60);
-    expect(artifact.recentDecisions[0]?.sequence).toBe(6);
+    expect(artifact.recentDecisions[0]?.sequence).toBe(1);
     expect(artifact.recentDecisions.at(-1)?.sequence).toBe(65);
+    const sequences = artifact.recentDecisions.map((d) => d.sequence);
+    expect(sequences).toEqual([...sequences].sort((a, b) => a - b));
+    // Every notable decision is retained. The fixture marks fallbackUsed on
+    // every 10th index and rejects every 7th, so the notable sequences are
+    // fully determined (sequence = index + 1).
+    const notable = Array.from({ length: 65 }, (_, index) => index)
+      .filter((index) => index % 10 === 0 || index % 7 === 0)
+      .map((index) => index + 1);
+    expect(notable.filter((seq) => !sequences.includes(seq))).toEqual([]);
     expect(artifact.fallbackCount).toBe(7);
     expect(artifact.rejectedCount).toBe(10);
     expect(artifact.actionCounts).toEqual({ attack: 33, hold: 32 });

@@ -450,6 +450,53 @@ export interface CoworldReplayUiArtifact {
  * decision logs can be tens of megabytes; the frontend needs totals and a
  * short recent window, not raw provider output or every historical card.
  */
+/**
+ * Choose which decisions the replay UI receives, within a fixed budget.
+ *
+ * This used to be `decisions.slice(-limit)` — the LAST N of the match. Two
+ * consequences: agents eliminated early never appeared at all (their decisions
+ * are never in the tail), and the panel's playhead window had nothing to show
+ * until playback reached the final minutes of a 50,000-turn match.
+ *
+ * Keep the same payload budget but spread it across the whole match: every
+ * notable decision (engine fallback or rejected action) is kept first, then the
+ * remainder is filled by an even stride so early, middle and late play are all
+ * represented. Chronological order is preserved.
+ */
+export function sampleDecisionsAcrossMatch<T extends CoworldReplayUiDecision>(
+  decisions: readonly T[],
+  limit: number,
+): T[] {
+  if (limit <= 0) return [];
+  if (decisions.length <= limit) return [...decisions];
+  const chosen = new Set<number>();
+  // 1. Every notable decision first (engine fallback or rejected action).
+  for (let index = 0; index < decisions.length && chosen.size < limit; index++) {
+    const decision = decisions[index];
+    if (decision.fallbackUsed === true || decision.result?.accepted === false) {
+      chosen.add(index);
+    }
+  }
+  // 2. Even stride across the whole match for temporal coverage.
+  const strideSlots = limit - chosen.size;
+  if (strideSlots > 0) {
+    const stride = decisions.length / strideSlots;
+    for (let step = 0; step < strideSlots && chosen.size < limit; step += 1) {
+      chosen.add(
+        Math.min(decisions.length - 1, Math.floor(step * stride + stride / 2)),
+      );
+    }
+  }
+  // 3. Stride picks can collide with step 1, leaving the budget under-filled.
+  // Top up so the payload size stays exactly as before.
+  for (let index = 0; index < decisions.length && chosen.size < limit; index++) {
+    chosen.add(index);
+  }
+  return [...chosen]
+    .sort((left, right) => left - right)
+    .map((index) => decisions[index]);
+}
+
 export function buildCoworldReplayUiArtifact(
   inlineRunArtifacts: Record<string, string>,
 ): CoworldReplayUiArtifact {
@@ -483,7 +530,10 @@ export function buildCoworldReplayUiArtifact(
     rejectedCount,
     fallbackCount,
     actionCounts,
-    recentDecisions: decisions.slice(-replayUiRecentDecisionLimit),
+    recentDecisions: sampleDecisionsAcrossMatch(
+      decisions,
+      replayUiRecentDecisionLimit,
+    ),
     artifacts: {
       visualReport: Object.hasOwn(inlineRunArtifacts, "visual-report.html"),
       spectatorTelemetry: Object.hasOwn(
