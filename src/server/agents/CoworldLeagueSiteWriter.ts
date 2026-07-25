@@ -526,7 +526,8 @@ export function coworldLeagueIndexHtml(data: CoworldLeagueMirrorData): string {
     td.score { font-family:ui-monospace, SFMono-Regular, Menlo, monospace; font-weight:800; }
     .policy { display:block; color:var(--muted); font:600 12px ui-monospace, SFMono-Regular, Menlo, monospace; margin-top:2px; }
     .policy.active { color:var(--good); font-weight:800; }
-    .policy-kind { display:inline-block; min-width:116px; font-size:10px; font-weight:900; letter-spacing:.08em; text-transform:uppercase; }
+    .policy-kind { display:inline-block; min-width:116px; font-size:10px; font-weight:900; letter-spacing:.08em; text-transform:uppercase; cursor:help; }
+    .policy-unrated { font-style:italic; opacity:.7; }
     .badge { display:inline-block; border-radius:4px; padding:2px 7px; font:800 10px ui-monospace, SFMono-Regular, Menlo, monospace; letter-spacing:.08em; margin-left:6px; vertical-align:2px; }
     .badge.house { border:1px solid rgba(244,166,74,.5); color:var(--amber); }
     .battle-grid { display:grid; grid-template-columns:repeat(auto-fill, minmax(320px, 1fr)); gap:14px; }
@@ -553,7 +554,7 @@ export function coworldLeagueIndexHtml(data: CoworldLeagueMirrorData): string {
     .battle-foot .meta { color:var(--muted); font:700 11px ui-monospace, SFMono-Regular, Menlo, monospace; }
     .battle-foot .links { margin-left:auto; }
     .battle-foot .links .link-sep { color:var(--muted); }
-    .degraded { border:1px solid rgba(244,166,74,.5); color:var(--amber); border-radius:4px; padding:2px 7px; font:800 10px ui-monospace, SFMono-Regular, Menlo, monospace; }
+    .degraded { border:1px solid rgba(244,166,74,.5); color:var(--amber); border-radius:4px; padding:2px 7px; font:800 10px ui-monospace, SFMono-Regular, Menlo, monospace; cursor:help; }
     .rounds-strip { display:flex; gap:8px; flex-wrap:wrap; }
     .round-pill { border:1px solid var(--line); background:var(--surface); border-radius:6px; padding:8px 10px; font:700 12px ui-monospace, SFMono-Regular, Menlo, monospace; color:var(--muted); }
     .round-pill.running { border-color:rgba(126,224,168,.5); color:var(--good); }${premiereStyles}
@@ -847,24 +848,38 @@ function standingsTable(data: CoworldLeagueMirrorData): string {
     .map((row) => {
       // Old snapshots used policyLabel for the rating row. Keep that fallback
       // so a stale-site regeneration cannot relabel or lose the last good row.
-      const ratingPolicyLabel =
-        row.ratingPolicyLabel ?? row.policyLabel ?? "unknown policy";
+      // `null` means the rating policy is genuinely unknown — never surface the
+      // old "unknown policy" jargon to viewers.
+      const ratingPolicyLabel = row.ratingPolicyLabel ?? row.policyLabel ?? null;
       const activeChampionPolicyLabel = row.activeChampionPolicyLabel ?? null;
+      const championKind = `<span class="policy-kind" title="${escapeHtml(
+        translateText("coworld_league.active_champion_tip"),
+      )}">${escapeHtml(translateText("coworld_league.active_champion"))}</span>`;
+      const ratingKind = `<span class="policy-kind" title="${escapeHtml(
+        translateText("coworld_league.rating_row_tip"),
+      )}">${escapeHtml(translateText("coworld_league.rating_row"))}</span>`;
       const ratingDiffersFromChampion =
         activeChampionPolicyLabel !== null &&
+        ratingPolicyLabel !== null &&
         activeChampionPolicyLabel !== ratingPolicyLabel;
       const policyProvenance = ratingDiffersFromChampion
-        ? `<span class="policy active"><span class="policy-kind">${escapeHtml(
-            translateText("coworld_league.active_champion"),
-          )}</span> ${escapeHtml(activeChampionPolicyLabel ?? "")}</span>
-          <span class="policy rating"><span class="policy-kind">${escapeHtml(
-            translateText("coworld_league.rating_row"),
-          )}</span> ${escapeHtml(ratingPolicyLabel)}</span>`
-        : activeChampionPolicyLabel === null
-          ? `<span class="policy rating"><span class="policy-kind">${escapeHtml(
-              translateText("coworld_league.rating_row"),
-            )}</span> ${escapeHtml(ratingPolicyLabel)}</span>`
-          : `<span class="policy">${escapeHtml(ratingPolicyLabel)}</span>`;
+        ? // Transparency case: the rating feed lags the live champion — show both.
+          `<span class="policy active">${championKind} ${escapeHtml(
+            activeChampionPolicyLabel ?? "",
+          )}</span>
+          <span class="policy rating">${ratingKind} ${escapeHtml(
+            ratingPolicyLabel ?? "",
+          )}</span>`
+        : activeChampionPolicyLabel !== null
+          ? // Champion known (rating matches or is unknown): one clean line.
+            `<span class="policy">${escapeHtml(activeChampionPolicyLabel)}</span>`
+          : ratingPolicyLabel !== null
+            ? `<span class="policy rating">${ratingKind} ${escapeHtml(
+                ratingPolicyLabel,
+              )}</span>`
+            : `<span class="policy policy-unrated">${escapeHtml(
+                translateText("coworld_league.not_yet_rated"),
+              )}</span>`;
       return `
         <tr${row.isHouse ? ` class="house"` : ""}>
           <td class="rank">${escapeHtml(String(row.rank))}</td>
@@ -945,7 +960,9 @@ function battleCard(episode: CoworldLeagueEpisodeRow): string {
   }
   const degraded =
     episode.degradedCount !== null && episode.degradedCount > 0
-      ? `<span class="degraded">⚠ ${escapeHtml(String(episode.degradedCount))} degraded</span>`
+      ? `<span class="degraded" title="${escapeHtml(
+          translateText("coworld_league.degraded_tip"),
+        )}">⚠ ${escapeHtml(String(episode.degradedCount))} degraded</span>`
       : "";
   // Battle-card links. The premiere link is present ONLY when the mirror
   // attached a revealed-premiere href (see CoworldLeagueEpisodeRow.premiereHref

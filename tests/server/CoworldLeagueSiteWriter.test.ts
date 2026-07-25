@@ -164,11 +164,9 @@ describe("coworldLeagueIndexHtml", () => {
     expect(html).toContain("proxywar-keystone:v40");
     expect(html).toContain("Rating row");
     expect(html).toContain("proxywar-keystone:v7");
-    expect(html).toContain(
-      '<span class="policy rating"><span class="policy-kind">Rating row</span> evil:v1</span>',
-    );
+    expect(html).toContain(">Rating row</span> evil:v1</span>");
     expect(html).not.toContain('class="badge champion"');
-    expect(html.match(/Active champion/g)).toHaveLength(1);
+    expect(html.match(/>Active champion</g)).toHaveLength(1);
   });
 
   test("binds score and rounds to rating provenance", () => {
@@ -320,9 +318,7 @@ describe("coworldLeagueIndexHtml", () => {
     expect(html).toContain(
       "Champion status delayed — standings show rating rows only.",
     );
-    expect(html).toContain(
-      '<span class="policy rating"><span class="policy-kind">Rating row</span> proxywar-keystone:v7</span>',
-    );
+    expect(html).toContain(">Rating row</span> proxywar-keystone:v7</span>");
     expect(html).not.toContain("HOUSE");
   });
 
