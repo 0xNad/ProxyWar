@@ -1326,7 +1326,6 @@
     "clip_copy_caption": "Copy caption",
     "clip_failed": "The clip could not be prepared. Try again later.",
     "clip_busy": "The clip service is busy. Try again in a moment.",
-    "clip_waiting_playback": "Clips unlock a moment into playback.",
     "stance_ally": "ally",
     "stance_war": "war",
     "stance_embargo": "embargo",
