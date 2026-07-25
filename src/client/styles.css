@@ -1,5 +1,9 @@
 @import "tailwindcss";
 
+/* Proxy War canonical design tokens (--pw-*). Single source of truth for the
+   shared visual system; see src/client/styles/tokens.css. */
+@import "./styles/tokens.css";
+
 @custom-variant dark (&:where(.dark, .dark *));
 @custom-variant hover (&:hover);
 
@@ -35,6 +39,33 @@
   --shadow-lobby-card-hover: 0 0 0 2px #0084d1, 0 0 20px rgba(0, 132, 209, 0.5);
   --shadow-action-card-hover:
     0 0 0 1px #0084d1, 0 0 12px rgba(0, 132, 209, 0.35);
+
+  /* Proxy War semantic bridge — Tailwind utilities (bg-accent, text-info,
+     border-line, …) for the canonical design system. Additive: existing
+     Openfront color utilities are untouched; consumers migrate onto these in the
+     per-surface phases (see docs/2026-07-25-ui-ux-overhaul-plan.md).
+     NOTE: these are LITERAL values (not var(--pw-*)) so Tailwind opacity
+     modifiers like bg-accent/10 and ring-info/30 resolve via color-mix — a
+     var() reference silently disables the modifier. They MUST stay equal to the
+     canonical values in styles/tokens.css. */
+  --color-accent: #f4a64a;
+  --color-accent-strong: #f0902a;
+  --color-accent-soft: rgba(244, 166, 74, 0.14);
+  --color-on-accent: #1a1206;
+  --color-info: #56c7f5;
+  --color-info-strong: #0ea5e9;
+  --color-live: #ef4444;
+  --color-positive: #34d399;
+  --color-caution: #fbbf24;
+  --color-danger: #f87171;
+  --color-surface-2: #18202b;
+  --color-surface-3: #212b38;
+  --color-glass: rgba(17, 23, 32, 0.92);
+  --color-line: #2a3442;
+  --color-line-strong: #3a4656;
+  --color-ink: #edf1f7;
+  --color-ink-dim: #cbd5e1;
+  --color-ink-muted: #a4afbf;
 }
 
 @layer base {
@@ -134,130 +165,6 @@ body {
 }
 .hide-scrollbar::-webkit-scrollbar {
   display: none; /* Chrome, Safari */
-}
-
-.start-game-button {
-  width: 100%;
-  max-width: 300px;
-  padding: 15px 20px;
-  font-size: 16px;
-  cursor: pointer;
-  background-color: var(--color-malibu-blue);
-  color: white;
-  border: none;
-  border-radius: 8px;
-  transition: background-color 0.3s;
-  display: inline-block;
-  margin: 0 0 20px 0;
-}
-
-.start-game-button:not(:disabled):hover {
-  background-color: var(--color-aquarius);
-}
-
-.start-game-button:disabled {
-  background: linear-gradient(to right, #4a4a4a, #3d3d3d);
-  opacity: 0.7;
-  cursor: not-allowed;
-}
-
-.options-layout {
-  display: grid;
-  grid-template-columns: 1fr;
-  gap: 24px;
-  margin: 24px 0;
-}
-
-.option-cards {
-  display: flex;
-  flex-direction: row;
-  flex-wrap: wrap;
-  justify-content: center;
-  gap: 16px;
-}
-
-.option-card {
-  width: 100%;
-  min-width: 100px;
-  max-width: 120px;
-  padding: 4px 4px 0 4px;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: space-between;
-  background: rgba(30, 30, 30, 0.95);
-  border: 2px solid rgba(255, 255, 255, 0.1);
-  border-radius: 12px;
-  cursor: pointer;
-  transition: all 0.2s ease-in-out;
-}
-
-.option-card:hover:not(.disabled) {
-  transform: translateY(-2px);
-  border-color: rgba(255, 255, 255, 0.3);
-  background: rgba(40, 40, 40, 0.95);
-}
-
-.option-card.selected {
-  border-color: #4a9eff;
-  background: rgba(74, 158, 255, 0.1);
-}
-
-.option-card.disabled {
-  opacity: 0.3;
-  cursor: not-allowed;
-}
-
-.option-card-title {
-  font-size: 14px;
-  color: #aaa;
-  text-align: center;
-  margin: 0 0 4px 0;
-  word-break: break-word;
-  overflow-wrap: break-word;
-}
-
-.option-image {
-  width: 100%;
-  aspect-ratio: 4/2;
-  color: #aaa;
-  transition: transform 0.2s ease-in-out;
-  border-radius: 8px;
-  background-color: rgba(255, 255, 255, 0.1);
-  font-size: 14px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-}
-
-.option-card input[type="checkbox"] {
-  display: none;
-}
-
-label.option-card:hover {
-  transform: none;
-}
-
-.checkbox-icon {
-  width: 16px;
-  height: 16px;
-  border: 2px solid #aaa;
-  border-radius: 6px;
-  margin: 4px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  transition: all 0.2s ease-in-out;
-}
-
-.option-card.selected .checkbox-icon {
-  border-color: #4a9eff;
-  background: #4a9eff;
-}
-
-.option-card.selected .checkbox-icon::after {
-  content: "✓";
-  color: white;
 }
 
 /* HostLobbyModal css */
@@ -504,99 +411,6 @@ label.option-card:hover {
   margin-right: 0px;
   position: fixed;
   width: 40px;
-}
-
-.start-game-button-container {
-  display: flex;
-  justify-content: center;
-  width: 100%;
-  margin-top: 20px;
-}
-
-.message-area {
-  margin-top: 10px;
-  padding: 10px;
-  border-radius: 4px;
-  font-size: 14px;
-  transition: opacity 0.3s ease;
-  opacity: 0;
-  height: 0;
-  overflow: hidden;
-}
-
-.message-area.show {
-  opacity: 1;
-  height: auto;
-  margin-bottom: 10px;
-}
-
-.message-area.error {
-  background-color: #ffebee;
-  color: #c62828;
-}
-
-.message-area.success {
-  background-color: #e8f5e9;
-  color: #2e7d32;
-}
-
-.lobby-id-box {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  position: sticky;
-  top: 0;
-  z-index: 50;
-  gap: 10px;
-  margin: 40px 0px 0px 0px;
-}
-
-.lobby-id-box input {
-  flex-grow: 1;
-  max-width: 200px;
-  outline: 0;
-  padding: 10px;
-  font-size: 16px;
-  border: 1px solid #ccc;
-  color: #202020;
-  border-radius: 8px;
-}
-
-.lobby-id-paste-button {
-  display: flex;
-  align-items: center;
-  background: rgba(0, 0, 0, 0.2);
-  padding: 10px 16px;
-  border-radius: 8px;
-  border: 1px solid rgba(255, 255, 255, 0.1);
-  cursor: pointer;
-  transition: all 0.2s ease-in-out;
-}
-
-.lobby-id-paste-button:hover {
-  background: rgba(0, 0, 0, 0.3);
-  border-color: rgba(255, 255, 255, 0.2);
-  transform: translateY(-1px);
-}
-
-.lobby-id-paste-button-icon {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  color: #fff;
-}
-
-.options-section {
-  background: rgba(0, 0, 0, 0.2);
-  padding: 12px 24px 24px 24px;
-  border-radius: 12px;
-}
-
-.option-title {
-  margin: 0 0 16px 0;
-  font-size: 20px;
-  color: #fff;
-  text-align: center;
 }
 
 .players-list {

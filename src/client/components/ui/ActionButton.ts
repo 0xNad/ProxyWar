@@ -30,13 +30,16 @@ const getButtonStyles = () => {
     "focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-white/20 " +
     "active:translate-y-[1px]";
 
+  // Variants route through the canonical --pw-* tokens (see styles/tokens.css)
+  // instead of hardcoded hex. red/green map 1:1 onto --pw-danger/--pw-positive;
+  // yellow/sky unify onto --pw-caution/--pw-info.
   return {
     normal: `${btnBase} text-white/90 hover:bg-white/10 hover:text-white`,
-    red: `${btnBase} text-red-400 hover:bg-red-500/10 hover:text-red-300 focus-visible:ring-red-400/30`,
-    green: `${btnBase} text-emerald-400 hover:bg-emerald-500/10 hover:text-emerald-300 focus-visible:ring-emerald-400/30`,
-    yellow: `${btnBase} text-[#f59e0b] hover:bg-[#f59e0b]/10 hover:text-[#fbbf24] focus-visible:ring-[#f59e0b]/30`,
+    red: `${btnBase} text-danger hover:bg-danger/10 hover:text-danger focus-visible:ring-danger/30`,
+    green: `${btnBase} text-positive hover:bg-positive/10 hover:text-positive focus-visible:ring-positive/30`,
+    yellow: `${btnBase} text-caution hover:bg-caution/10 hover:text-caution focus-visible:ring-caution/30`,
     indigo: `${btnBase} text-indigo-400 hover:bg-indigo-500/10 hover:text-indigo-300 focus-visible:ring-indigo-400/30`,
-    sky: `${btnBase} text-[#38bdf8] hover:bg-[#38bdf8]/10 hover:text-[#0ea5e9] focus-visible:ring-[#38bdf8]/30`,
+    sky: `${btnBase} text-info hover:bg-info/10 hover:text-info-strong focus-visible:ring-info/30`,
   };
 };
 
