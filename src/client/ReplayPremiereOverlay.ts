@@ -1313,11 +1313,25 @@ function renderDistribution(
 function renderAmbientEvidence(model: ReplayPremiereOverlayModel): HTMLElement {
   const section = element("section", "rp-ambient-evidence");
   const leaders = element("div", "rp-leaders");
+  const leadersHeading = element(
+    "h3",
+    "rp-subheading",
+    translateText("replay_premiere.current_leaders"),
+  );
+  // This percentage is each leader's share of CLAIMED land (denominator is the
+  // sum of players' owned tiles), while the in-game leaderboard on the same
+  // screen shows share of the whole map. They are different measures, so the
+  // two panels legitimately print different numbers for what looks like one
+  // stat — worst in the early game, when most of the map is still unclaimed.
+  // Until the frame carries a map total we cannot align the denominators, so
+  // name the measure instead of letting it read as a contradiction.
+  leadersHeading.title = translateText("replay_premiere.current_leaders_tip");
+  leaders.append(leadersHeading);
   leaders.append(
     element(
-      "h3",
-      "rp-subheading",
-      translateText("replay_premiere.current_leaders"),
+      "p",
+      "rp-leaders-basis",
+      translateText("replay_premiere.current_leaders_basis"),
     ),
   );
   const leaderList = element("ol", "rp-leader-list");
@@ -3118,6 +3132,13 @@ const OVERLAY_CSS = `
   #${OVERLAY_ID} .rp-subheading,
   #${OVERLAY_ID} .rp-question { margin: 0; }
   #${OVERLAY_ID} .rp-section-title { font-size: 16px; letter-spacing: -0.01em; }
+  #${OVERLAY_ID} .rp-leaders-basis {
+    margin: 1px 0 0;
+    color: var(--rp-muted);
+    font-size: 10px;
+    font-weight: 600;
+    opacity: 0.8;
+  }
   #${OVERLAY_ID} .rp-subheading {
     color: var(--rp-muted);
     font-size: 11px;
@@ -3790,6 +3811,7 @@ const OVERLAY_CSS = `
   /* Compact the leader scoreboard so the mark row still fits the
      pane underneath it. */
   #${OVERLAY_ID}[data-ambient="true"] .rp-leaders .rp-subheading { font-size: 10px; }
+  #${OVERLAY_ID}[data-ambient="true"] .rp-leaders-basis { display: none; }
   #${OVERLAY_ID}[data-ambient="true"] .rp-leader-list { gap: 3px; margin-top: 5px; }
   #${OVERLAY_ID}[data-ambient="true"] .rp-leader { padding: 1px 0 5px; font-size: 13px; }
   #${OVERLAY_ID}[data-ambient="true"] .rp-headline { display: none; }

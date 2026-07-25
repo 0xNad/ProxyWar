@@ -726,31 +726,40 @@ function headlineKindLabel(kind: AiLeagueHeadlineEvent["kind"]): string {
 function overlayHtml(input: AiLeagueReplayOverlayInput): string {
   return `
     <style>
+      /*
+       * Chrome is aligned to the premiere overlay so the two spectator panels
+       * read as one product: same geometry, radius, blur and type stack. The
+       * premiere is the flagship surface, so it sets the direction rather than
+       * the reverse. Only chrome is shared here — the button system and control
+       * layout deliberately stay put until the two panels converge into one
+       * component, because matching controls that behave differently would
+       * promise capabilities this panel does not have.
+       */
       #ai-league-replay-overlay {
         position: fixed;
-        top: 16px;
-        right: 16px;
+        top: 12px;
+        right: 12px;
         z-index: 50000;
-        width: min(360px, calc(100vw - 32px));
-        max-height: calc(100vh - 32px);
+        width: min(376px, calc(100vw - 24px));
+        max-height: calc(100vh - 24px);
         overflow: hidden;
         display: grid;
         grid-template-rows: auto 1fr;
         border: 1px solid var(--pw-line-strong, #3a4656);
-        border-radius: 14px;
+        border-radius: var(--pw-r-xl, 18px);
         background: var(--pw-glass-strong, rgba(10, 14, 20, 0.95));
         color: var(--pw-text, #edf1f7);
         box-shadow: var(--pw-shadow, 0 26px 74px rgba(0, 0, 0, 0.52));
-        backdrop-filter: blur(10px);
-        font: 14px/1.4 system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        backdrop-filter: blur(18px) saturate(1.15);
+        font: 14px/1.45 Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
         font-variant-numeric: tabular-nums;
       }
       body.ai-league-native-spectator-ui #ai-league-replay-overlay {
         top: auto;
         right: auto;
-        left: 16px;
-        bottom: 16px;
-        width: min(360px, calc(100vw - 32px));
+        left: 12px;
+        bottom: 12px;
+        width: min(376px, calc(100vw - 24px));
         max-height: min(58vh, 520px);
       }
       #ai-league-replay-overlay.collapsed {

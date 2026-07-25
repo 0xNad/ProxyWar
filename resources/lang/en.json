@@ -1142,6 +1142,8 @@
     "crowd_prediction": "Crowd prediction",
     "percent": "{percent}%",
     "current_leaders": "Current leaders",
+    "current_leaders_basis": "share of claimed land",
+    "current_leaders_tip": "Each leader's share of land claimed so far. The in-game leaderboard shows share of the whole map, so the two differ while land is still unclaimed.",
     "leaders_waiting": "Waiting for released match state…",
     "headline_event": "Headline event",
     "headline_waiting": "No headline event yet.",
