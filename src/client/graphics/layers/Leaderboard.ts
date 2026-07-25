@@ -9,6 +9,21 @@ import { formatPercentage, renderNumber } from "../../Utils";
 import { GoToPlayerEvent } from "../TransformHandler";
 import { Layer } from "./Layer";
 
+// Sort-direction caret. Replaces the ⬆️/⬇️ emoji so the indicator matches the
+// UI font, inherits the header text color, and renders identically across
+// platforms (emoji glyphs vary and read as clip-art in a data table).
+const sortCaret = (order: "asc" | "desc") =>
+  html`<svg
+    viewBox="0 0 10 10"
+    width="9"
+    height="9"
+    fill="currentColor"
+    aria-hidden="true"
+    class="inline-block ml-0.5 align-middle opacity-80"
+  >
+    <path d=${order === "asc" ? "M5 3 1.5 7h7z" : "M5 7 1.5 3h7z"} />
+  </svg>`;
+
 interface Entry {
   name: string;
   position: number;
@@ -194,33 +209,21 @@ export class Leaderboard extends LitElement implements Layer {
               @click=${() => this.setSort("tiles")}
             >
               ${translateText("leaderboard.owned")}
-              ${this._sortKey === "tiles"
-                ? this._sortOrder === "asc"
-                  ? "⬆️"
-                  : "⬇️"
-                : ""}
+              ${this._sortKey === "tiles" ? sortCaret(this._sortOrder) : ""}
             </div>
             <div
               class="py-1 md:py-2 text-center border-b border-slate-500 cursor-pointer whitespace-nowrap truncate"
               @click=${() => this.setSort("gold")}
             >
               ${translateText("leaderboard.gold")}
-              ${this._sortKey === "gold"
-                ? this._sortOrder === "asc"
-                  ? "⬆️"
-                  : "⬇️"
-                : ""}
+              ${this._sortKey === "gold" ? sortCaret(this._sortOrder) : ""}
             </div>
             <div
               class="py-1 md:py-2 text-center border-b border-slate-500 cursor-pointer whitespace-nowrap truncate"
               @click=${() => this.setSort("maxtroops")}
             >
               ${translateText("leaderboard.maxtroops")}
-              ${this._sortKey === "maxtroops"
-                ? this._sortOrder === "asc"
-                  ? "⬆️"
-                  : "⬇️"
-                : ""}
+              ${this._sortKey === "maxtroops" ? sortCaret(this._sortOrder) : ""}
             </div>
           </div>
 
