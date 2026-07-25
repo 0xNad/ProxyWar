@@ -207,7 +207,11 @@ export function buildStandingRows(
     if (!row) {
       continue;
     }
-    const ratingPolicyLabel = asString(row.policy_label) ?? "unknown policy";
+    // Null, not a jargon placeholder. The site writer decides how an unknown
+    // rating policy is presented ("Not yet rated"); stamping "unknown policy"
+    // here leaked an internal string straight onto the public standings and
+    // made the writer's own fallback unreachable.
+    const ratingPolicyLabel = asString(row.policy_label);
     const playerId = asString(row.player_id);
     const activeChampionPolicyLabel =
       playerId === null ? null : (activeChampionLabels.get(playerId) ?? null);

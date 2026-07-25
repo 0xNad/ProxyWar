@@ -256,6 +256,20 @@ describe("CoworldLeagueMirrorCore", () => {
     expect(rows.filter((row) => row.isHouse)).toHaveLength(1);
   });
 
+  test("buildStandingRows reports an absent rating policy as null, not jargon", () => {
+    // A missing policy_label used to become the literal "unknown policy",
+    // which shipped that internal string onto the public standings and made
+    // the site writer's own "Not yet rated" fallback unreachable.
+    const rows = buildStandingRows(
+      [{ rank: 1, player_name: "newcomer", player_id: "p-new" }],
+      [],
+    );
+    expect(rows).toHaveLength(1);
+    expect(rows[0].ratingPolicyLabel).toBeNull();
+    expect(rows[0].policyLabel).toBeNull();
+    expect(JSON.stringify(rows)).not.toContain("unknown policy");
+  });
+
   test("keeps publishing rating provenance when champion memberships are unavailable", () => {
     const rows = buildStandingRows(standingsFixture);
     const ratingRow = rows.find((row) => row.playerName === "Auri");

@@ -16,12 +16,16 @@ import englishTranslations from "../../../resources/lang/en.json";
 export interface CoworldLeagueStandingRow {
   rank: number;
   playerName: string;
-  /** Policy label attached to the historical leaderboard rating row. */
-  ratingPolicyLabel: string;
+  /**
+   * Policy label attached to the historical leaderboard rating row, or null
+   * when Coworld has not reported one. Null renders as "Not yet rated" — never
+   * as an internal placeholder string.
+   */
+  ratingPolicyLabel: string | null;
   /** Policy currently marked as this player's active champion, if any. */
   activeChampionPolicyLabel: string | null;
   /** @deprecated Compatibility alias for existing data.json consumers. */
-  policyLabel: string;
+  policyLabel: string | null;
   score: number | null;
   roundsPlayed: number | null;
   isHouse: boolean;
