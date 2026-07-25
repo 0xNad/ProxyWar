@@ -886,7 +886,11 @@ function overlayHtml(input: AiLeagueReplayOverlayInput): string {
         overflow: hidden;
         text-overflow: ellipsis;
         white-space: nowrap;
-        max-width: 96px;
+        /* Was a flat 96px, which truncated the identifying part of most league
+           names ("K1Z Mickey …", "Captain Unde…"). Let the name take the row's
+           free space instead; the rank, dot and share column are fixed. */
+        flex: 1 1 auto;
+        min-width: 0;
       }
       .ai-league-diplo-share {
         margin-left: auto;
@@ -894,14 +898,25 @@ function overlayHtml(input: AiLeagueReplayOverlayInput): string {
         font-weight: 900;
         color: var(--pw-text-dim, #cbd5e1);
       }
+      /*
+       * Diplomacy stances belong to the ranked row directly above them. They
+       * used to render flush-left at nearly the same size and weight as a
+       * ranked row, so a stance entry ("softmaxwell ⊘") read as another player
+       * — a 9-player match looked like ~14 entries. Indent them under the name
+       * column, bind them to the parent row with a rule, and demote the type
+       * so the ranking stays the dominant structure.
+       */
       .ai-league-diplo-stances {
         display: flex;
         align-items: center;
         gap: 6px;
-        margin-top: 3px;
+        margin: 2px 0 6px 20px;
+        padding-left: 8px;
+        border-left: 1px solid var(--pw-line, #2a3442);
         flex-wrap: wrap;
-        font-size: 12px;
-        font-weight: 700;
+        font-size: 11px;
+        font-weight: 600;
+        color: var(--pw-muted, #a4afbf);
       }
       .ai-league-stance {
         display: inline-flex;
@@ -1414,23 +1429,40 @@ function overlayDetailsHtml(input: AiLeagueReplayOverlayInput): string {
   const nations = input.summary?.runnerConfig?.nations ?? null;
   const maxSteps = input.summary?.runnerConfig?.maxSteps ?? null;
   const configuredOpponentCount = numericCount(nations) + numericCount(bots);
+  // League matches are agent-vs-agent, so the "vs N built-in opponents" clause
+  // is only meaningful when built-in opponents actually exist — it used to
+  // render the nonsense "vs 0 built-in opponents". Both branches go through
+  // translateText (this line was previously hardcoded English).
   const setupLine =
-    agentCount > 0 || configuredOpponentCount > 0
-      ? `${agentCount} Proxy War agents vs ${configuredOpponentCount} built-in opponents`
-      : translateText("ai_league_replay.setup_generic");
+    agentCount > 0 && configuredOpponentCount > 0
+      ? translateText("ai_league_replay.setup_agents_vs_builtin", {
+          agents: agentCount,
+          opponents: configuredOpponentCount,
+        })
+      : agentCount > 0
+        ? translateText("ai_league_replay.setup_agents_only", {
+            agents: agentCount,
+          })
+        : translateText("ai_league_replay.setup_generic");
   const mapName =
     typeof input.summary?.runnerConfig?.map === "string"
       ? input.summary.runnerConfig.map
       : null;
+  // Built-in difficulty describes the nation AI, which has no bearing on an
+  // agent-vs-agent match; /league dropped it for the same reason. Keep it only
+  // when built-in opponents are actually present.
   const difficulty =
+    configuredOpponentCount > 0 &&
     typeof input.summary?.runnerConfig?.difficulty === "string"
       ? input.summary.runnerConfig.difficulty
       : null;
   const configLine = [
     mapName,
     difficulty,
+    // maxSteps counts agent DECISION steps, not game turns — labelling it
+    // "500-turn" next to a live turn counter reading 4425 looked broken.
     maxSteps !== null && maxSteps !== undefined
-      ? translateText("ai_league_replay.setup_turns", { turns: maxSteps })
+      ? translateText("ai_league_replay.setup_decisions", { steps: maxSteps })
       : null,
   ]
     .filter(Boolean)
@@ -2394,11 +2426,26 @@ const AI_LEAGUE_ACTION_LABEL_KEYS: Record<string, string> = {
   embargo: "ai_league_replay.action_embargo",
   embargo_all: "ai_league_replay.action_embargo_all",
   nuke: "ai_league_replay.action_nuke",
+  // Kinds the legal-action builder actually emits that had no label, so they
+  // leaked raw snake_case ids into the panel ("upgrade_structure", "boat").
+  boat: "ai_league_replay.action_boat",
+  boat_retreat: "ai_league_replay.action_boat_retreat",
+  delete_unit: "ai_league_replay.action_delete_unit",
+  hold: "ai_league_replay.action_hold",
+  move_warship: "ai_league_replay.action_move_warship",
+  retreat: "ai_league_replay.action_retreat",
+  spawn: "ai_league_replay.action_spawn",
+  upgrade_structure: "ai_league_replay.action_upgrade_structure",
 };
 
 function actionLabelFromKind(kind: string): string {
   const key = AI_LEAGUE_ACTION_LABEL_KEYS[kind];
-  return key !== undefined ? translateText(key) : kind;
+  if (key !== undefined) {
+    return translateText(key);
+  }
+  // Never surface a raw id. An unmapped kind (new action shipped ahead of its
+  // label) degrades to a readable phrase instead of "upgrade_structure".
+  return kind.replace(/_/g, " ");
 }
 
 function numericCount(value: number | string | null | undefined): number {
