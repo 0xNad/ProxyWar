@@ -585,6 +585,26 @@ describe("AiLeagueReplayOverlay", () => {
     ).not.toContain("Proxy War agents");
   });
 
+  it("pins the panel grid column so a long run id cannot push controls out of reach", () => {
+    // Regression: the panel is `display:grid` with only grid-template-rows set,
+    // so the implicit column floored at min-content. Once the run id became
+    // nowrap, that min-content width (the whole id string) widened the header
+    // past the panel and overflow:hidden clipped "Hide panel"/"Reset" outside
+    // the viewport entirely — the panel could not be collapsed at all.
+    mountAiLeagueReplayOverlay({
+      runID: "league-coworld-2026-07-25T13-50-41-478Z-3ff05139",
+      artifactBasePath: "/ai-league-runs/x",
+      decisions: [],
+    });
+    const style = document.querySelector("#ai-league-replay-overlay style")
+      ?.textContent;
+    expect(style).toContain("grid-template-columns: minmax(0, 1fr)");
+    // The shrinkable title block and the fixed action cluster are what make
+    // the pinned column actually resolve to a usable header.
+    expect(style).toMatch(/\.ai-league-header-actions \{[^}]*flex: 0 0 auto/);
+    expect(style).toMatch(/#ai-league-replay-overlay header \{[^}]*min-width: 0/);
+  });
+
   it("omits the built-in-opponent clause and difficulty for agent-vs-agent matches", () => {
     // A league match has no built-in nations/bots. The setup line used to read
     // "12 Proxy War agents vs 0 built-in opponents", and showed a built-in

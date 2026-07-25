@@ -745,6 +745,14 @@ function overlayHtml(input: AiLeagueReplayOverlayInput): string {
         overflow: hidden;
         display: grid;
         grid-template-rows: auto 1fr;
+        /*
+         * The implicit grid column is auto-sized, which floors at min-content.
+         * Any unbreakable child (the nowrap run id) therefore widens the track
+         * past the panel's own width, and overflow:hidden silently clips the
+         * header controls out of reach instead of shrinking them. Pin the
+         * column and let children shrink.
+         */
+        grid-template-columns: minmax(0, 1fr);
         border: 1px solid var(--pw-line-strong, #3a4656);
         border-radius: var(--pw-r-xl, 18px);
         background: var(--pw-glass-strong, rgba(10, 14, 20, 0.95));
@@ -777,9 +785,15 @@ function overlayHtml(input: AiLeagueReplayOverlayInput): string {
         border-bottom: 1px solid var(--pw-line, #2a3442);
         cursor: move;
         user-select: none;
+        /* Grid/flex children default to min-width:auto and refuse to shrink
+           below their content; without this the run id pushes the header
+           actions outside the panel. */
+        min-width: 0;
       }
       #ai-league-replay-overlay header > div:first-child {
         min-width: 0;
+        flex: 1 1 auto;
+        overflow: hidden;
       }
       #ai-league-replay-overlay h2 {
         margin: 0 0 2px;
@@ -803,6 +817,7 @@ function overlayHtml(input: AiLeagueReplayOverlayInput): string {
         display: flex;
         gap: 6px;
         align-items: center;
+        flex: 0 0 auto;
       }
       #ai-league-replay-overlay button {
         border: 1px solid var(--pw-line-strong, #3a4656);
@@ -820,6 +835,7 @@ function overlayHtml(input: AiLeagueReplayOverlayInput): string {
       .ai-league-body {
         overflow: auto;
         padding: 12px;
+        min-width: 0;
       }
       .ai-league-resize-handle {
         position: absolute;
