@@ -142,6 +142,14 @@ describe("AiLeagueReplayOverlay", () => {
     const overlay = document.getElementById("ai-league-replay-overlay");
     expect(overlay).not.toBeNull();
     expect(overlay?.textContent).toContain("ai_league_replay.title");
+    // The decision log is windowed to the playhead, so nothing from turn 300
+    // renders until playback has actually reached it.
+    expect(overlay?.textContent).not.toContain("build:Defense Post:10");
+    document.dispatchEvent(
+      new CustomEvent("ai-league-replay-frame", {
+        detail: { tick: 500, turnNumber: 500, players: [] },
+      }),
+    );
     expect(overlay?.textContent).toContain("build:Defense Post:10");
     // The setup line goes through translateText (it used to be hardcoded
     // English). translateText echoes the key in tests, as with the title above.
@@ -812,6 +820,14 @@ describe("AiLeagueReplayOverlay", () => {
         decisionFixture(index + 1),
       ),
     });
+
+    // The decision log is windowed to the playhead; advance past every fixture
+    // turn so the paging behaviour under test is what's being exercised.
+    document.dispatchEvent(
+      new CustomEvent("ai-league-replay-frame", {
+        detail: { tick: 1_000_000, turnNumber: 1_000_000, players: [] },
+      }),
+    );
 
     const overlay = document.getElementById("ai-league-replay-overlay")!;
     const expander = overlay.querySelector<HTMLButtonElement>(

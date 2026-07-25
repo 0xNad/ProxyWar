@@ -136,6 +136,12 @@ interface AiLeagueMapSocialEvent {
 }
 
 interface AiLeagueReplayOverlayInput {
+  /**
+   * Turn currently rendered on the map. The decision log and diplomacy talks are
+   * windowed to it so a viewer never reads the end of the match while watching
+   * the beginning. Internal: set by the overlay's own playhead sync.
+   */
+  currentTurn?: number;
   runID: string;
   decisions: AiLeagueDecisionLogEntry[];
   summary?: AiLeagueReplaySummary | null;
@@ -186,6 +192,56 @@ export function mountAiLeagueReplayOverlay(input: AiLeagueReplayOverlayInput) {
   mountReplayJumpControls(document);
   let disposed = false;
 
+  // Single re-render path for the details block, shared by hydrate() and the
+  // playhead sync so both keep the subtitle and clip control consistent.
+  const renderDetails = (): void => {
+    const details = overlay.querySelector<HTMLElement>(
+      "[data-ai-league-details]",
+    );
+    if (details === null || !overlay.isConnected) return;
+    details.innerHTML = overlayDetailsHtml(currentInput);
+    const subtitle = overlay.querySelector<HTMLElement>(
+      "[data-ai-league-subtitle]",
+    );
+    const subtitleText = matchSubtitle(currentInput);
+    if (subtitle !== null && subtitleText !== null) {
+      subtitle.textContent = subtitleText;
+    }
+    const previousClipControl = clipControl;
+    clipControl = mountReplayDetailsBindings(overlay, currentInput);
+    previousClipControl?.dispose();
+  };
+  const disposePlayheadSync = mountAiLeaguePlayheadSync(
+    overlay,
+    (turn) => {
+      currentInput = { ...currentInput, currentTurn: turn };
+      // Refresh ONLY the decision-log region. Re-rendering the whole details
+      // block would re-mount the political-radio transcript, the headline
+      // lower-third and the clip control, discarding their accumulated state.
+      const region = overlay.querySelector<HTMLElement>(
+        "[data-ai-league-decisions-region]",
+      );
+      if (region === null) return;
+      const wasOpen =
+        region
+          .querySelector("[data-ai-league-decisions-toggle]")
+          ?.getAttribute("aria-expanded") === "true";
+      region.outerHTML = decisionLogHtml(currentInput.decisions, turn);
+      mountAiLeagueDecisionLogExpander(overlay, currentInput.decisions);
+      mountAiLeagueDecisionsDisclosure(overlay);
+      if (wasOpen) {
+        overlay
+          .querySelector<HTMLButtonElement>("[data-ai-league-decisions-toggle]")
+          ?.click();
+      }
+    },
+    (turn) =>
+      currentInput.decisions.filter(
+        (decision) =>
+          !Number.isFinite(decision.turnNumber) || decision.turnNumber <= turn,
+      ).length,
+  );
+
   return {
     hydrate(nextInput: Partial<AiLeagueReplayOverlayInput>) {
       if (disposed) {
@@ -206,23 +262,14 @@ export function mountAiLeagueReplayOverlay(input: AiLeagueReplayOverlayInput) {
       if (details === null || !overlay.isConnected) {
         return;
       }
-      details.innerHTML = overlayDetailsHtml(currentInput);
-      const subtitle = overlay.querySelector<HTMLElement>(
-        "[data-ai-league-subtitle]",
-      );
-      const subtitleText = matchSubtitle(currentInput);
-      if (subtitle !== null && subtitleText !== null) {
-        subtitle.textContent = subtitleText;
-      }
-      const previousClipControl = clipControl;
-      clipControl = mountReplayDetailsBindings(overlay, currentInput);
-      previousClipControl?.dispose();
+      renderDetails();
     },
     dispose() {
       if (disposed) {
         return;
       }
       disposed = true;
+      disposePlayheadSync();
       clipControl?.dispose();
       clipControl = null;
       disposeReplayOverlay(overlay);
@@ -345,6 +392,44 @@ function mountAiLeagueRadioToggle(overlay: HTMLElement): void {
     apply(!document.body.classList.contains("ai-league-radio-on"));
   });
   actions.prepend(toggle);
+}
+
+/**
+ * Advance the playhead-windowed panels as the replay runs. Re-renders the whole
+ * details block on a throttle (not every frame — that block is expensive), and
+ * only when the visible decision count actually changes, so an idle or paused
+ * replay costs nothing. Disclosure state for the decision log and talks is
+ * preserved across the re-render so the panels do not snap shut underneath the
+ * viewer.
+ */
+function mountAiLeaguePlayheadSync(
+  overlay: HTMLElement,
+  applyTurn: (turn: number) => void,
+  visibleDecisionCount: (turn: number) => number,
+): () => void {
+  const THROTTLE_MS = 750;
+  let lastRenderedAt = 0;
+  let lastVisibleCount = -1;
+  // Per-listener, NOT global: aiLeagueCurrentTurn is shared render-time state,
+  // so gating on it would let whichever listener ran first swallow the event and
+  // leave every other mounted overlay frozen.
+  let lastSeenTurn = -1;
+  const onFrame = (event: Event) => {
+    const detail = (event as CustomEvent<{ turnNumber?: unknown }>).detail;
+    if (typeof detail?.turnNumber !== "number") return;
+    if (!Number.isFinite(detail.turnNumber)) return;
+    if (detail.turnNumber <= lastSeenTurn) return;
+    lastSeenTurn = detail.turnNumber;
+    const now = Date.now();
+    if (now - lastRenderedAt < THROTTLE_MS) return;
+    const count = visibleDecisionCount(detail.turnNumber);
+    if (count === lastVisibleCount) return;
+    lastVisibleCount = count;
+    lastRenderedAt = now;
+    applyTurn(detail.turnNumber);
+  };
+  document.addEventListener("ai-league-replay-frame", onFrame);
+  return () => document.removeEventListener("ai-league-replay-frame", onFrame);
 }
 
 const AI_LEAGUE_MOBILE_BREAKPOINT = 740;
@@ -1571,6 +1656,9 @@ function overlayHtml(input: AiLeagueReplayOverlayInput): string {
 }
 
 function overlayDetailsHtml(input: AiLeagueReplayOverlayInput): string {
+  // Playhead window for the decision log and talks. Per-overlay (carried on the
+  // input), never module state: two mounted overlays must not share it.
+  const currentTurn = input.currentTurn ?? 0;
   const localRejectedCount = input.decisions.filter(
     (decision) => !decision.result.accepted,
   ).length;
@@ -1630,7 +1718,7 @@ function overlayDetailsHtml(input: AiLeagueReplayOverlayInput): string {
     ${input.detailsLoading || detailsUnavailable ? setupHtml : ""}
     ${spectatorTelemetry ? communicationThreadsHtml(spectatorTelemetry) : ""}
     <section class="ai-league-clip" data-ai-league-clip></section>
-    ${decisionLogHtml(input.decisions)}`;
+    ${decisionLogHtml(input.decisions, currentTurn)}`;
 }
 
 /**
@@ -1699,9 +1787,20 @@ function recoveredShareHtml(
 
 const AI_LEAGUE_DECISION_LOG_CAP = 15;
 
-function decisionLogHtml(decisions: AiLeagueDecisionLogEntry[]): string {
+function decisionLogHtml(
+  decisions: AiLeagueDecisionLogEntry[],
+  currentTurn: number,
+): string {
+  decisions = decisions.filter(
+    (decision) =>
+      !Number.isFinite(decision.turnNumber) ||
+      decision.turnNumber <= currentTurn,
+  );
+  // Always emit the region wrapper, even with nothing to show yet: the playhead
+  // sync refreshes this element in place, so it has to exist from first paint
+  // (at turn 0 every decision is still in the future).
   if (decisions.length === 0) {
-    return "";
+    return `<div data-ai-league-decisions-region></div>`;
   }
   const visible = decisions.slice(-AI_LEAGUE_DECISION_LOG_CAP);
   const olderCount = Math.max(0, decisions.length - visible.length);
@@ -1713,6 +1812,7 @@ function decisionLogHtml(decisions: AiLeagueDecisionLogEntry[]): string {
   // not something a viewer wants open by default. Ship it collapsed behind a
   // disclosure; the older-pages expander lives inside the disclosed region.
   return `
+    <div data-ai-league-decisions-region>
     <div class="ai-league-decisions-head">
       <span class="ai-league-decisions-title">${escapeHtml(translateText("ai_league_replay.decisions_title"))}</span>
       <button type="button" class="ai-league-badge" data-ai-league-decisions-toggle aria-expanded="false" aria-controls="ai-league-decisions-body">${escapeHtml(translateText("ai_league_replay.decisions_show"))}</button>
@@ -1721,6 +1821,7 @@ function decisionLogHtml(decisions: AiLeagueDecisionLogEntry[]): string {
       ${expander}
       ${olderCount > 0 ? `<div id="ai-league-older-decisions" data-ai-league-decision-pages></div>` : ""}
       ${visible.map(decisionHtml).join("")}
+    </div>
     </div>`;
 }
 
