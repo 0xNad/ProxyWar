@@ -981,12 +981,24 @@ function overlayHtml(input: AiLeagueReplayOverlayInput): string {
       }
       .ai-league-standings {
         display: grid;
+        /* Header stays put, rows scroll. Without the fixed row track the block
+           grew and shrank every frame (ranks reorder, stance chips come and
+           go), which shoved every section below it up and down continuously. */
+        grid-template-rows: auto minmax(0, 1fr);
         gap: 5px;
         border: 1px solid var(--pw-line, #2a3442);
         border-radius: 8px;
         padding: 9px;
         margin: 0 0 10px;
         background: var(--pw-surface, #111720);
+        height: 244px;
+      }
+      [data-ai-league-diplomacy-rows] {
+        overflow-y: auto;
+        overflow-x: hidden;
+        min-height: 0;
+        /* Keep the scrollbar from reflowing content when it appears. */
+        scrollbar-gutter: stable;
       }
       .ai-league-standings-title {
         font-weight: 900;
