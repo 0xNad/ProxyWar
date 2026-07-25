@@ -2944,8 +2944,16 @@ const OVERLAY_CSS = `
 
     position: fixed;
     z-index: 51000;
+    /*
+     * Left-anchored. The top-right corner is game-right-sidebar's lane (time,
+     * speed, pause, settings, fullscreen, leave); that strip has no stacking
+     * context of its own, so a panel pinned top-right sat on top of it and made
+     * every playback control unreachable on the LIVE premiere — the surface a
+     * first-time viewer actually lands on. Matches the archived replay panel,
+     * which was moved for the same reason.
+     */
     top: 12px;
-    right: 12px;
+    left: 12px;
     width: min(376px, calc(100vw - 24px));
     max-height: calc(100vh - 24px);
     overflow: auto;

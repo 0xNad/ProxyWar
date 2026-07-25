@@ -1530,6 +1530,7 @@
     "pause": "Pause",
     "resume": "Resume",
     "playback_speed": "Playback speed",
+    "speed_max": "Max",
     "playback_speed_current": "Playback speed — now {speed}×",
     "settings": "Settings",
     "exit": "Leave match"

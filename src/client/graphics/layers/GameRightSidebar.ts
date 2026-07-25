@@ -17,6 +17,19 @@ import { Layer } from "./Layer";
 import { ShowReplayPanelEvent } from "./ReplayPanel";
 import { ShowSettingsModalEvent } from "./SettingsModal";
 import { SpawnBarVisibleEvent } from "./SpawnTimer";
+/**
+ * ReplaySpeedMultiplier is a DELAY multiplier, not a speed one: slow=2 means
+ * twice the delay (half speed) and fastest=0 means no delay (max speed).
+ * Rendering the raw value therefore labelled max speed as "0x" and half speed
+ * as "2x" — the exact inverse of the truth. Map it to what a viewer means.
+ */
+function playbackSpeedLabel(multiplier: number): string {
+  if (multiplier === 0) return translateText("game_controls.speed_max");
+  if (multiplier <= 0) return translateText("game_controls.speed_max");
+  const speed = 1 / multiplier;
+  return `${Number.isInteger(speed) ? speed : speed.toFixed(1)}\u00d7`;
+}
+
 // Shared affordance for every control in the top-right cluster. These were bare
 // <div class="cursor-pointer"> wrappers: not focusable, no keyboard activation,
 // no hover/focus feedback, and 20px hit targets. One class keeps them
@@ -333,7 +346,7 @@ export class GameRightSidebar extends LitElement implements Layer {
       this._replaySpeedMultiplier === 1
         ? translateText("game_controls.playback_speed")
         : translateText("game_controls.playback_speed_current", {
-            speed: String(this._replaySpeedMultiplier),
+            speed: playbackSpeedLabel(this._replaySpeedMultiplier),
           });
 
     return html`
@@ -360,7 +373,7 @@ export class GameRightSidebar extends LitElement implements Layer {
                 ? html`<span
                     class="text-[11px] font-bold leading-none tabular-nums"
                     aria-hidden="true"
-                    >${this._replaySpeedMultiplier}×</span
+                    >${playbackSpeedLabel(this._replaySpeedMultiplier)}</span
                   >`
                 : ""}
             </button>
