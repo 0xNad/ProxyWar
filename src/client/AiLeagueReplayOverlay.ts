@@ -1105,31 +1105,40 @@ function overlayHtml(input: AiLeagueReplayOverlayInput): string {
         gap: 7px;
         margin: 12px 0;
       }
+      /*
+       * The clip moment picker shipped on the clips line while the panel was
+       * still light, so it kept a white card (#f8fafc on slate borders) after
+       * the panel went dark — the one visibly out-of-place block left on this
+       * surface. Bring it onto the shared tokens like every other card here.
+       */
       .ai-league-clip-selector {
         display: grid;
         gap: 7px;
         min-width: 0;
         margin: 0;
         padding: 8px;
-        border: 1px solid rgba(15, 23, 42, 0.12);
+        border: 1px solid var(--pw-line, #2a3442);
         border-radius: 8px;
-        background: #f8fafc;
+        background: var(--pw-surface-2, #18202b);
       }
       .ai-league-clip-selector legend {
         padding: 0 4px;
-        color: #334155;
+        color: var(--pw-text-dim, #cbd5e1);
         font-size: 12px;
         font-weight: 900;
       }
       .ai-league-clip-selected {
-        color: #17202a;
+        color: var(--pw-text, #edf1f7);
         font-size: 13px;
         font-variant-numeric: tabular-nums;
         font-weight: 900;
       }
+      /* Range track/thumb inherit the panel accent instead of the OS default,
+         which renders near-invisible on a dark card. */
       .ai-league-clip-selector input[type="range"] {
         width: 100%;
         margin: 0;
+        accent-color: var(--pw-accent, #f4a64a);
       }
       .ai-league-clip-moment-actions {
         display: flex;
