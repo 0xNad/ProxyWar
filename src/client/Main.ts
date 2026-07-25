@@ -347,10 +347,17 @@ class Client {
       console.warn("Game version element not found");
     } else {
       const trimmed = version.trim();
+      // version.txt ships as a placeholder ("x.xx.xx") that release tooling is
+      // meant to overwrite. Until it carries a real (digit-bearing) version,
+      // hide the subtitle rather than render the placeholder — in the pixel
+      // display font "vx.xx.xx" reads as garbled "VH.HH.HH".
+      const hasRealVersion = /\d/.test(trimmed);
       const displayVersion = trimmed.startsWith("v") ? trimmed : `v${trimmed}`;
       versionElements.forEach((el) => {
-        (el as HTMLElement).style.fontFamily = '"OpenFront", Inter, sans-serif';
-        el.textContent = displayVersion;
+        const host = el as HTMLElement;
+        host.style.fontFamily = '"OpenFront", Inter, sans-serif';
+        host.style.display = hasRealVersion ? "" : "none";
+        host.textContent = hasRealVersion ? displayVersion : "";
       });
     }
 
