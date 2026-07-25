@@ -677,11 +677,12 @@ function overlayHtml(input: AiLeagueReplayOverlayInput): string {
         overflow: hidden;
         display: grid;
         grid-template-rows: auto 1fr;
-        border: 1px solid rgba(15, 23, 42, 0.22);
-        border-radius: 8px;
-        background: rgba(255, 255, 255, 0.94);
-        color: #17202a;
-        box-shadow: 0 18px 60px rgba(15, 23, 42, 0.22);
+        border: 1px solid var(--pw-line-strong, #3a4656);
+        border-radius: 14px;
+        background: var(--pw-glass-strong, rgba(10, 14, 20, 0.95));
+        color: var(--pw-text, #edf1f7);
+        box-shadow: var(--pw-shadow, 0 26px 74px rgba(0, 0, 0, 0.52));
+        backdrop-filter: blur(10px);
         font: 14px/1.4 system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
         font-variant-numeric: tabular-nums;
       }
@@ -705,7 +706,7 @@ function overlayHtml(input: AiLeagueReplayOverlayInput): string {
         justify-content: space-between;
         gap: 10px;
         padding: 12px;
-        border-bottom: 1px solid rgba(15, 23, 42, 0.12);
+        border-bottom: 1px solid var(--pw-line, #2a3442);
         cursor: move;
         user-select: none;
       }
@@ -722,12 +723,17 @@ function overlayHtml(input: AiLeagueReplayOverlayInput): string {
         align-items: center;
       }
       #ai-league-replay-overlay button {
-        border: 1px solid rgba(15, 23, 42, 0.18);
-        background: #fff;
-        border-radius: 6px;
+        border: 1px solid var(--pw-line-strong, #3a4656);
+        background: var(--pw-surface-2, #18202b);
+        color: var(--pw-text, #edf1f7);
+        border-radius: 8px;
         padding: 6px 8px;
         cursor: pointer;
         font-weight: 700;
+      }
+      #ai-league-replay-overlay button:hover {
+        border-color: var(--pw-accent, #f4a64a);
+        color: var(--pw-accent, #f4a64a);
       }
       .ai-league-body {
         overflow: auto;
@@ -740,11 +746,11 @@ function overlayHtml(input: AiLeagueReplayOverlayInput): string {
         width: 16px;
         height: 16px;
         cursor: nwse-resize;
-        border-right: 2px solid rgba(15, 23, 42, 0.28);
-        border-bottom: 2px solid rgba(15, 23, 42, 0.28);
+        border-right: 2px solid var(--pw-line-strong, #3a4656);
+        border-bottom: 2px solid var(--pw-line-strong, #3a4656);
       }
       .ai-league-muted {
-        color: #64748b;
+        color: var(--pw-muted, #a4afbf);
         font-size: 12px;
       }
       .ai-league-metrics {
@@ -754,10 +760,10 @@ function overlayHtml(input: AiLeagueReplayOverlayInput): string {
         margin-bottom: 10px;
       }
       .ai-league-metric {
-        border: 1px solid rgba(15, 23, 42, 0.12);
+        border: 1px solid var(--pw-line, #2a3442);
         border-radius: 8px;
         padding: 6px;
-        background: #f8fafc;
+        background: var(--pw-surface-2, #18202b);
         font-size: 12px;
       }
       .ai-league-metric b {
@@ -766,13 +772,13 @@ function overlayHtml(input: AiLeagueReplayOverlayInput): string {
         font-variant-numeric: tabular-nums;
       }
       .ai-league-metric.warn {
-        background: #fff2dc;
-        border-color: rgba(165, 91, 0, 0.4);
-        color: #a55b00;
+        background: var(--pw-caution-soft, rgba(251, 191, 36, 0.14));
+        border-color: var(--pw-caution, #fbbf24);
+        color: var(--pw-caution-text, #fde68a);
       }
       .ai-league-actions {
         margin: 0 0 10px;
-        color: #475569;
+        color: var(--pw-text-dim, #cbd5e1);
       }
       .ai-league-playstyle {
         display: flex;
@@ -780,21 +786,21 @@ function overlayHtml(input: AiLeagueReplayOverlayInput): string {
         flex-wrap: wrap;
         gap: 5px;
         margin: 0 0 10px;
-        color: #475569;
+        color: var(--pw-text-dim, #cbd5e1);
         font-size: 12px;
       }
       .ai-league-standings {
         display: grid;
         gap: 5px;
-        border: 1px solid rgba(15, 23, 42, 0.12);
+        border: 1px solid var(--pw-line, #2a3442);
         border-radius: 8px;
         padding: 9px;
         margin: 0 0 10px;
-        background: #fff;
+        background: var(--pw-surface, #111720);
       }
       .ai-league-standings-title {
         font-weight: 900;
-        color: #334155;
+        color: var(--pw-text-dim, #cbd5e1);
       }
       .ai-league-diplo-row {
         display: flex;
@@ -805,7 +811,7 @@ function overlayHtml(input: AiLeagueReplayOverlayInput): string {
       }
       .ai-league-diplo-rank {
         min-width: 16px;
-        color: #64748b;
+        color: var(--pw-muted, #a4afbf);
         font-variant-numeric: tabular-nums;
       }
       .ai-league-color-dot {
@@ -813,11 +819,11 @@ function overlayHtml(input: AiLeagueReplayOverlayInput): string {
         width: 11px;
         height: 11px;
         border-radius: 50%;
-        border: 1px solid rgba(15, 23, 42, 0.35);
+        border: 1px solid rgba(255, 255, 255, 0.35);
       }
       .ai-league-diplo-name {
         font-weight: 900;
-        color: #17202a;
+        color: var(--pw-text, #edf1f7);
         overflow: hidden;
         text-overflow: ellipsis;
         white-space: nowrap;
@@ -827,7 +833,7 @@ function overlayHtml(input: AiLeagueReplayOverlayInput): string {
         margin-left: auto;
         font-variant-numeric: tabular-nums;
         font-weight: 900;
-        color: #334155;
+        color: var(--pw-text-dim, #cbd5e1);
       }
       .ai-league-diplo-stances {
         display: flex;
@@ -842,7 +848,7 @@ function overlayHtml(input: AiLeagueReplayOverlayInput): string {
         display: inline-flex;
         align-items: center;
         gap: 3px;
-        color: #475569;
+        color: var(--pw-text-dim, #cbd5e1);
       }
       .ai-league-stance .ai-league-color-dot {
         width: 9px;
@@ -863,13 +869,13 @@ function overlayHtml(input: AiLeagueReplayOverlayInput): string {
         line-height: 1;
       }
       .ai-league-stance.ally .ai-league-stance-glyph {
-        color: #15803d;
+        color: var(--pw-positive, #34d399);
       }
       .ai-league-stance.war .ai-league-stance-glyph {
-        color: #b91c1c;
+        color: var(--pw-danger, #f87171);
       }
       .ai-league-stance.embargo .ai-league-stance-glyph {
-        color: #92400e;
+        color: var(--pw-caution, #fbbf24);
       }
       .ai-league-stance.expiring {
         opacity: 0.55;
@@ -884,41 +890,41 @@ function overlayHtml(input: AiLeagueReplayOverlayInput): string {
         grid-template-columns: auto 1fr;
         gap: 7px;
         align-items: start;
-        border: 1px solid rgba(15, 23, 42, 0.1);
+        border: 1px solid var(--pw-line, #2a3442);
         border-radius: 8px;
         padding: 8px;
-        background: #f8fafc;
+        background: var(--pw-surface-2, #18202b);
       }
       .ai-league-feed-item strong {
         display: block;
       }
       .ai-league-feed-item p {
         margin: 2px 0 0;
-        color: #475569;
+        color: var(--pw-text-dim, #cbd5e1);
       }
       .ai-league-chat-bubble {
         display: inline-block;
         margin: 5px 0 0;
         padding: 6px 8px;
-        border: 1px solid #c8dcf2;
+        border: 1px solid var(--pw-info-soft, rgba(56, 189, 248, 0.16));
         border-radius: 12px 12px 12px 3px;
-        background: #eef6ff;
-        color: #17324d;
+        background: var(--pw-info-soft, rgba(56, 189, 248, 0.16));
+        color: var(--pw-text, #edf1f7);
         font-weight: 800;
       }
       .ai-league-match-setup {
-        border: 1px solid rgba(29, 94, 143, 0.2);
+        border: 1px solid var(--pw-line, #2a3442);
         border-radius: 8px;
         padding: 9px;
         margin-bottom: 10px;
-        background: #eef7fb;
+        background: var(--pw-surface-2, #18202b);
       }
       .ai-league-politics {
-        border: 1px solid rgba(15, 23, 42, 0.12);
+        border: 1px solid var(--pw-line, #2a3442);
         border-radius: 8px;
         padding: 9px;
         margin: 0 0 10px;
-        background: #fff;
+        background: var(--pw-surface, #111720);
       }
       .ai-league-politics-head {
         display: flex;
@@ -937,10 +943,10 @@ function overlayHtml(input: AiLeagueReplayOverlayInput): string {
         margin-bottom: 10px;
       }
       .ai-league-thread {
-        border: 1px solid rgba(15, 23, 42, 0.12);
+        border: 1px solid var(--pw-line, #2a3442);
         border-radius: 8px;
         padding: 8px;
-        background: #fff;
+        background: var(--pw-surface, #111720);
       }
       .ai-league-thread.hidden {
         display: none;
@@ -955,19 +961,19 @@ function overlayHtml(input: AiLeagueReplayOverlayInput): string {
       .ai-league-jump {
         min-width: 48px;
         padding: 4px 6px !important;
-        color: #215a9c;
+        color: var(--pw-info, #56c7f5);
         font-size: 11px;
       }
       .ai-league-message p {
         margin: 1px 0 0;
-        color: #334155;
+        color: var(--pw-text-dim, #cbd5e1);
       }
       .ai-league-decision {
-        border: 1px solid rgba(15, 23, 42, 0.12);
+        border: 1px solid var(--pw-line, #2a3442);
         border-radius: 8px;
         padding: 9px;
         margin: 8px 0;
-        background: #fff;
+        background: var(--pw-surface, #111720);
       }
       .ai-league-row {
         display: flex;
@@ -985,14 +991,14 @@ function overlayHtml(input: AiLeagueReplayOverlayInput): string {
         display: inline-flex;
         border-radius: 999px;
         padding: 2px 7px;
-        background: #e7eef7;
-        color: #215a9c;
+        background: var(--pw-info-soft, rgba(56, 189, 248, 0.16));
+        color: var(--pw-info, #56c7f5);
         font-size: 12px;
         font-weight: 800;
       }
       .ai-league-badge.ok {
-        background: #e5f8ef;
-        color: #19764b;
+        background: var(--pw-positive-soft, rgba(16, 185, 129, 0.18));
+        color: var(--pw-positive-text, #a7f3d0);
       }
       /*
        * Rejected/invalid decision badge: neutral slate, NOT red. Red is
@@ -1000,20 +1006,20 @@ function overlayHtml(input: AiLeagueReplayOverlayInput): string {
        * betrayal social tones) so the aggression cue stays unambiguous.
        */
       .ai-league-badge.bad {
-        background: #e2e8f0;
-        color: #475569;
+        background: var(--pw-surface-3, #212b38);
+        color: var(--pw-muted, #a4afbf);
       }
       .ai-league-badge.warn {
-        background: #fff2dc;
-        color: #a55b00;
+        background: var(--pw-caution-soft, rgba(251, 191, 36, 0.14));
+        color: var(--pw-caution-text, #fde68a);
       }
       .ai-league-directive {
         margin: 4px 0 0;
-        color: #334155;
+        color: var(--pw-text-dim, #cbd5e1);
         font-size: 12px;
       }
       .ai-league-directive b {
-        color: #17202a;
+        color: var(--pw-text, #edf1f7);
       }
       .ai-league-decisions-head {
         display: flex;
@@ -1024,7 +1030,7 @@ function overlayHtml(input: AiLeagueReplayOverlayInput): string {
       }
       .ai-league-decisions-title {
         font-weight: 900;
-        color: #334155;
+        color: var(--pw-text-dim, #cbd5e1);
       }
       .ai-league-decision-extra[hidden] {
         display: none;
@@ -1034,7 +1040,7 @@ function overlayHtml(input: AiLeagueReplayOverlayInput): string {
         overflow-wrap: anywhere;
       }
       #ai-league-replay-overlay a {
-        color: #215a9c;
+        color: var(--pw-info, #56c7f5);
         font-weight: 700;
         text-decoration: none;
       }
@@ -1101,46 +1107,46 @@ function overlayHtml(input: AiLeagueReplayOverlayInput): string {
         grid-template-columns: auto 1fr;
         gap: 8px;
         align-items: start;
-        border: 1px solid rgba(15, 23, 42, 0.16);
+        border: 1px solid var(--pw-line-strong, #3a4656);
         border-radius: 8px;
         padding: 8px 10px;
-        background: rgba(255, 255, 255, 0.94);
-        box-shadow: 0 12px 34px rgba(15, 23, 42, 0.18);
+        background: var(--pw-glass-strong, rgba(10, 14, 20, 0.95));
+        box-shadow: var(--pw-shadow-soft, 0 12px 32px rgba(0, 0, 0, 0.35));
       }
       .ai-league-social-transcript-line b {
         display: block;
-        color: #17202a;
+        color: var(--pw-text, #edf1f7);
       }
       .ai-league-social-transcript-line span {
-        color: #475569;
+        color: var(--pw-text-dim, #cbd5e1);
       }
       .ai-league-social-tone {
         border-radius: 999px;
         padding: 2px 7px;
-        background: #e7eef7;
-        color: #215a9c;
+        background: var(--pw-info-soft, rgba(56, 189, 248, 0.16));
+        color: var(--pw-info, #56c7f5);
         font-size: 11px;
         font-weight: 900;
       }
       .ai-league-social-tone.betrayal {
-        background: #ffe4e6;
-        color: #9f1239;
+        background: var(--pw-mk-betrayal-soft, rgba(248, 113, 113, 0.18));
+        color: var(--pw-mk-betrayal, #f87171);
       }
       .ai-league-social-tone.conspiracy {
-        background: #ede9fe;
-        color: #5b21b6;
+        background: var(--pw-mk-turning-soft, rgba(167, 139, 250, 0.18));
+        color: var(--pw-mk-turning, #a78bfa);
       }
       .ai-league-social-tone.threat {
-        background: #ffedd5;
-        color: #9a3412;
+        background: var(--pw-caution-soft, rgba(251, 191, 36, 0.14));
+        color: var(--pw-caution, #fbbf24);
       }
       .ai-league-social-tone.war {
-        background: #fee2e2;
-        color: #991b1b;
+        background: var(--pw-danger-soft, rgba(239, 68, 68, 0.16));
+        color: var(--pw-danger, #f87171);
       }
       .ai-league-social-tone.trade {
-        background: #dcfce7;
-        color: #166534;
+        background: var(--pw-positive-soft, rgba(16, 185, 129, 0.18));
+        color: var(--pw-positive-text, #a7f3d0);
       }
       #ai-league-headline-event {
         position: fixed;
@@ -1350,9 +1356,9 @@ function overlayDetailsHtml(input: AiLeagueReplayOverlayInput): string {
 
   return `
     <section class="ai-league-metrics">
-      <div class="ai-league-metric">${escapeHtml(translateText("ai_league_replay.metric_moves"))}<b>${metricValue(decisionCount)}</b></div>
-      <div class="ai-league-metric">${escapeHtml(translateText("ai_league_replay.metric_invalid"))}<b>${metricValue(rejectedCount)}</b></div>
-      <div class="ai-league-metric${!input.detailsLoading && fallbackCount > 0 ? " warn" : ""}">${escapeHtml(translateText("ai_league_replay.metric_recovered"))}<b>${metricValue(fallbackCount)}</b></div>
+      <div class="ai-league-metric" title="${escapeHtml(translateText("ai_league_replay.metric_moves_tip"))}">${escapeHtml(translateText("ai_league_replay.metric_moves"))}<b>${metricValue(decisionCount)}</b></div>
+      <div class="ai-league-metric" title="${escapeHtml(translateText("ai_league_replay.metric_invalid_tip"))}">${escapeHtml(translateText("ai_league_replay.metric_invalid"))}<b>${metricValue(rejectedCount)}</b></div>
+      <div class="ai-league-metric${!input.detailsLoading && fallbackCount > 0 ? " warn" : ""}" title="${escapeHtml(translateText("ai_league_replay.metric_recovered_tip"))}">${escapeHtml(translateText("ai_league_replay.metric_recovered"))}<b>${metricValue(fallbackCount)}</b></div>
     </section>
     ${setupHtml}
     ${!input.detailsLoading && !detailsUnavailable && playstyleKinds.length > 0 ? playstyleLineHtml(playstyleKinds) : ""}
