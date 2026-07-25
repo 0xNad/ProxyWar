@@ -459,6 +459,16 @@ async function renderIndexHtml(staticDir: string): Promise<string> {
       assetManifest,
       "",
     ),
+    // Social/canonical URLs. Inert for a loopback capture host, but index.html
+    // references them, and EJS throws ReferenceError on any undefined name —
+    // which killed every clip render when these tags were added. Keep this set
+    // in sync with src/server/RenderHtml.ts.
+    socialImageUrl: buildAssetUrl(
+      "images/GameplayScreenshot.png",
+      assetManifest,
+      "",
+    ),
+    socialPageUrl: "/",
     backgroundImageUrl: buildAssetUrl(
       "images/background.webp",
       assetManifest,
