@@ -1515,5 +1515,14 @@
   "fullscreen": {
     "enter": "Enter fullscreen",
     "exit": "Exit fullscreen"
+  },
+  "game_controls": {
+    "elapsed": "Time elapsed",
+    "pause": "Pause",
+    "resume": "Resume",
+    "playback_speed": "Playback speed",
+    "playback_speed_current": "Playback speed — now {speed}×",
+    "settings": "Settings",
+    "exit": "Leave match"
   }
 }
