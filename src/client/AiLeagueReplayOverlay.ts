@@ -333,9 +333,12 @@ function mountAiLeagueRadioToggle(overlay: HTMLElement): void {
   const apply = (on: boolean) => {
     document.body.classList.toggle("ai-league-radio-on", on);
     toggle.setAttribute("aria-pressed", String(on));
+    // Label stays constant so the header does not reflow on toggle; the
+    // pressed state is what communicates on/off.
     toggle.textContent = translateText(
       on ? "ai_league_replay.radio_hide" : "ai_league_replay.radio_show",
     );
+    toggle.classList.toggle("is-on", on);
   };
   apply(false);
   toggle.addEventListener("click", () => {
@@ -870,6 +873,7 @@ function overlayHtml(input: AiLeagueReplayOverlayInput): string {
       #ai-league-replay-overlay h2 {
         margin: 0 0 2px;
         font-size: 15px;
+        white-space: nowrap;
       }
       /*
        * The run id is support/debug provenance, not a headline. Left to wrap it
@@ -887,9 +891,18 @@ function overlayHtml(input: AiLeagueReplayOverlayInput): string {
       }
       .ai-league-header-actions {
         display: flex;
-        gap: 6px;
+        gap: 5px;
         align-items: center;
         flex: 0 0 auto;
+      }
+      .ai-league-header-actions button {
+        padding: 5px 7px;
+        font-size: 12px;
+        white-space: nowrap;
+      }
+      .ai-league-header-actions button.is-on {
+        border-color: var(--pw-accent, #f4a64a);
+        color: var(--pw-accent, #f4a64a);
       }
       #ai-league-replay-overlay button {
         border: 1px solid var(--pw-line-strong, #3a4656);
