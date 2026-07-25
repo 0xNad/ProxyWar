@@ -737,11 +737,18 @@ function overlayHtml(input: AiLeagueReplayOverlayInput): string {
        */
       #ai-league-replay-overlay {
         position: fixed;
-        top: 12px;
+        /*
+         * Clear the top-right playback cluster (game-right-sidebar: time,
+         * speed, pause, settings, fullscreen, leave). That strip ends around
+         * y=73 and has no stacking context of its own, so a panel pinned to the
+         * top-right corner sat on top of it and made every playback control
+         * unclickable on the surface where replays are actually watched.
+         */
+        top: 84px;
         right: 12px;
         z-index: 50000;
         width: min(376px, calc(100vw - 24px));
-        max-height: calc(100vh - 24px);
+        max-height: calc(100vh - 96px);
         overflow: hidden;
         display: grid;
         grid-template-rows: auto 1fr;
