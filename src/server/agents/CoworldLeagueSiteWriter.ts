@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { promises as fs } from "node:fs";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import englishTranslations from "../../../resources/lang/en.json";
 
 /**
@@ -370,6 +371,85 @@ async function writeFileAtomic(
   }
 }
 
+export const COWORLD_LEAGUE_SOCIAL_IMAGE = "social.png";
+
+/**
+ * Social/SEO tags for the league page, which previously shipped with none at
+ * all — anything shared from it previewed as a bare link.
+ *
+ * Deliberately GENERIC: no round number, standings, player name, or outcome.
+ * The league page suppresses the currently-premiering round, and these tags are
+ * cached and re-scraped independently of the page, so putting live match state
+ * in them would be a spoiler channel that bypasses the suppression contract.
+ */
+function leagueSocialMetaHtml(): string {
+  const origin = leagueSocialOrigin();
+  const pageUrl = origin === "" ? null : `${origin}/league`;
+  const imageUrl =
+    origin === ""
+      ? null
+      : `${origin}/ai-league-runs/league/${COWORLD_LEAGUE_SOCIAL_IMAGE}`;
+  const title = "Proxy War — live AI agent league";
+  const description =
+    "Autonomous AI agents fight full territorial wars on a live ladder — expansion, alliances, betrayals, nukes. A new round every 30 minutes, with no humans at the controls.";
+  const tags = [
+    `<meta name="description" content="${escapeHtml(description)}">`,
+    `<meta property="og:site_name" content="Proxy War">`,
+    `<meta property="og:type" content="website">`,
+    `<meta property="og:title" content="${escapeHtml(title)}">`,
+    `<meta property="og:description" content="${escapeHtml(description)}">`,
+    `<meta name="twitter:title" content="${escapeHtml(title)}">`,
+    `<meta name="twitter:description" content="${escapeHtml(description)}">`,
+  ];
+  if (pageUrl !== null) {
+    tags.push(`<link rel="canonical" href="${escapeHtml(pageUrl)}">`);
+    tags.push(`<meta property="og:url" content="${escapeHtml(pageUrl)}">`);
+  }
+  if (imageUrl !== null) {
+    tags.push(`<meta property="og:image" content="${escapeHtml(imageUrl)}">`);
+    tags.push(
+      `<meta property="og:image:alt" content="A Proxy War map with territory claimed by rival AI agents.">`,
+    );
+    tags.push(`<meta property="og:image:width" content="1200">`);
+    tags.push(`<meta property="og:image:height" content="630">`);
+    tags.push(`<meta name="twitter:image" content="${escapeHtml(imageUrl)}">`);
+    // Without an image X falls back to a small thumbnail card.
+    tags.push(`<meta name="twitter:card" content="summary_large_image">`);
+  } else {
+    tags.push(`<meta name="twitter:card" content="summary">`);
+  }
+  return tags.map((tag) => `  ${tag}`).join("\n");
+}
+
+/**
+ * Absolute origin for canonical/social URLs. Social scrapers do not resolve
+ * relative og: values, so without this the page gets no preview card at all.
+ * Empty when unset — the page then omits absolute URLs rather than guessing a
+ * domain.
+ */
+function leagueSocialOrigin(): string {
+  const raw = process.env.PROXYWAR_PUBLIC_URL ?? "";
+  if (raw === "") return "";
+  try {
+    return new URL(raw).origin;
+  } catch {
+    return "";
+  }
+}
+
+async function copySocialImage(siteDir: string): Promise<void> {
+  const destination = path.join(siteDir, COWORLD_LEAGUE_SOCIAL_IMAGE);
+  const source = path.join(
+    path.dirname(fileURLToPath(import.meta.url)),
+    "../../../resources/images/GameplayScreenshot.png",
+  );
+  try {
+    await fs.copyFile(source, destination);
+  } catch {
+    // Publishing the league must not depend on the social asset being present.
+  }
+}
+
 async function writeCoworldLeagueSiteUnlocked(
   siteDir: string,
   data: CoworldLeagueMirrorData,
@@ -378,6 +458,12 @@ async function writeCoworldLeagueSiteUnlocked(
   const indexPath = path.join(siteDir, "index.html");
   const clientPath = path.join(siteDir, "client.js");
   const dataPath = path.join(siteDir, "data.json");
+  // Self-host the social preview image next to the page. The app shell's copy
+  // is content-hashed by the build and this writer cannot know that hash, so
+  // publishing a stable sibling keeps og:image resolvable without coupling the
+  // mirror to the client build. Best-effort: a missing source must never fail a
+  // league publish.
+  await copySocialImage(siteDir);
   // Publish data.json last. Existing pages only reload after observing a newer
   // snapshot, so they cannot race ahead of either the client or the HTML.
   await writeFileAtomic(clientPath, coworldLeagueClientJavaScript());
@@ -486,6 +572,7 @@ export function coworldLeagueIndexHtml(data: CoworldLeagueMirrorData): string {
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta id="league-refresh-fallback" http-equiv="refresh" content="300">
   <title>Proxy War — Live League</title>
+${leagueSocialMetaHtml()}
   <style>
     :root { color-scheme: dark; --bg:#080b10; --surface:#111720; --surface2:#18202b; --line:#2a3442; --text:#edf1f7; --muted:#a4afbf; --amber:#f4a64a; --cyan:#7ad7f0; --good:#7ee0a8; --bad:#ff9b8f; }
     * { box-sizing:border-box; }

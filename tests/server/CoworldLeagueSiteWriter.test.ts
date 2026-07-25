@@ -433,10 +433,14 @@ describe("writeCoworldLeagueSite", () => {
     expect(stillStaleData.generatedAt).toBe("2026-07-13T12:05:00.000Z");
     expect((await stat(paths.dataPath)).ino).toBe(inodeBefore);
 
+    // social.png is published alongside the page so og:image resolves to a
+    // stable URL the mirror controls (the app shell's copy is content-hashed
+    // by the client build, which this writer cannot know).
     expect((await readdir(siteDir)).sort()).toEqual([
       "client.js",
       "data.json",
       "index.html",
+      "social.png",
     ]);
   });
 

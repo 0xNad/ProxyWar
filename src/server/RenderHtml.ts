@@ -15,6 +15,29 @@ export type RenderHtmlOptions = {
   viteAssetBase?: string;
 };
 
+/**
+ * Absolute origin used for social/canonical URLs, e.g. "https://beta.proxywar.xyz".
+ * Social scrapers do not resolve relative og:image/og:url values, so a
+ * root-relative asset path (what CDN_BASE="" produces) yields no preview image
+ * at all. Returns "" when unknown, in which case the template falls back to the
+ * relative path rather than emitting a wrong absolute one.
+ */
+function resolveSocialOrigin(): string {
+  const raw = process.env.PROXYWAR_PUBLIC_URL ?? "";
+  if (raw === "") return "";
+  try {
+    return new URL(raw).origin;
+  } catch {
+    return "";
+  }
+}
+
+function toAbsolute(origin: string, url: string): string {
+  if (origin === "" || url === "") return url;
+  if (/^https?:\/\//i.test(url)) return url;
+  return `${origin}${url.startsWith("/") ? "" : "/"}${url}`;
+}
+
 export async function renderHtmlContent(
   htmlPath: string,
   options: RenderHtmlOptions = {},
@@ -24,7 +47,14 @@ export async function renderHtmlContent(
   const cdnBase = process.env.CDN_BASE ?? "";
   const htmlAssetBase = options.htmlAssetBase ?? cdnBase;
   const viteAssetBase = options.viteAssetBase ?? cdnBase;
+  const socialOrigin = resolveSocialOrigin();
+  const socialImageUrl = toAbsolute(
+    socialOrigin,
+    buildAssetUrl("images/GameplayScreenshot.png", assetManifest, htmlAssetBase),
+  );
   return ejs.render(htmlContent, {
+    socialImageUrl,
+    socialPageUrl: socialOrigin === "" ? "/" : `${socialOrigin}/`,
     gitCommit: JSON.stringify(process.env.GIT_COMMIT ?? "undefined"),
     assetManifest: JSON.stringify(assetManifest),
     cdnBase: JSON.stringify(cdnBase),

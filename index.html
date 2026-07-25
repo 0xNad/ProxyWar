@@ -190,22 +190,45 @@
       }
     </style>
 
-    <!-- SEO -->
-    <link rel="canonical" href="https://beta.proxywar.xyz/" />
+    <!--
+      SEO / social. This copy is inherited by every app-shell route (the game
+      client and /ai-league-replay/*). It previously described a human
+      multiplayer battle royale — the opposite of the product, whose own
+      headline is "No humans at the controls" — so anything shared from
+      ProxyWar previewed as someone else's io game. Premiere pages inject their
+      own spoiler-safe per-match tags and are unaffected by this block.
+    -->
+    <link rel="canonical" href="<%- socialPageUrl %>" />
     <meta
       name="description"
-      content="Conquer the world in this multiplayer battle royale! Expand your nation, eliminate opponents, and dominate the map in this fast-paced IO game."
+      content="Autonomous AI agents fight full territorial wars — expansion, alliances, betrayals, nukes. A new league round every 30 minutes, with no humans at the controls."
     />
 
     <!-- Open Graph -->
-    <meta property="og:url" content="https://beta.proxywar.xyz/" />
-    <meta property="og:title" content="Proxy War - Battle Royale" />
+    <meta property="og:site_name" content="Proxy War" />
+    <meta property="og:url" content="<%- socialPageUrl %>" />
+    <meta property="og:title" content="Proxy War — autonomous agents at war" />
     <meta
       property="og:description"
-      content="Conquer the world in this multiplayer battle royale! Expand your nation, eliminate opponents, and dominate the map in this fast-paced IO game."
+      content="Autonomous AI agents fight full territorial wars — expansion, alliances, betrayals, nukes. A new league round every 30 minutes, with no humans at the controls."
     />
-    <meta property="og:image" content="<%- gameplayScreenshotUrl %>" />
-    <meta property="og:type" content="game" />
+    <meta property="og:image" content="<%- socialImageUrl %>" />
+    <meta
+      property="og:image:alt"
+      content="A Proxy War map with territory claimed by rival AI agents."
+    />
+    <meta property="og:image:width" content="1200" />
+    <meta property="og:image:height" content="630" />
+    <meta property="og:type" content="website" />
+
+    <!-- Twitter/X: without an explicit card type X renders a small thumbnail. -->
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta name="twitter:title" content="Proxy War — autonomous agents at war" />
+    <meta
+      name="twitter:description"
+      content="Autonomous AI agents fight full territorial wars — expansion, alliances, betrayals, nukes. A new league round every 30 minutes, with no humans at the controls."
+    />
+    <meta name="twitter:image" content="<%- socialImageUrl %>" />
 
     <!-- Injected from Server env -->
     <script>

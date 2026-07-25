@@ -738,17 +738,19 @@ function overlayHtml(input: AiLeagueReplayOverlayInput): string {
       #ai-league-replay-overlay {
         position: fixed;
         /*
-         * Clear the top-right playback cluster (game-right-sidebar: time,
-         * speed, pause, settings, fullscreen, leave). That strip ends around
-         * y=73 and has no stacking context of its own, so a panel pinned to the
-         * top-right corner sat on top of it and made every playback control
-         * unclickable on the surface where replays are actually watched.
+         * Left-anchored: the top-right corner is the playback cluster's lane
+         * (game-right-sidebar: time, speed, pause, settings, fullscreen,
+         * leave). That strip has no stacking context of its own, so a panel
+         * pinned top-right sat on top of it and made every playback control
+         * unclickable. Moving to the left keeps both reachable and gives the
+         * panel back its full height. game-left-sidebar is hidden in replay
+         * mode, so this lane is free.
          */
-        top: 84px;
-        right: 12px;
+        top: 12px;
+        left: 12px;
         z-index: 50000;
         width: min(376px, calc(100vw - 24px));
-        max-height: calc(100vh - 96px);
+        max-height: calc(100vh - 24px);
         overflow: hidden;
         display: grid;
         grid-template-rows: auto 1fr;
@@ -1566,8 +1568,6 @@ function overlayDetailsHtml(input: AiLeagueReplayOverlayInput): string {
     ${setupHtml}
     ${!input.detailsLoading && !detailsUnavailable && playstyleKinds.length > 0 ? playstyleLineHtml(playstyleKinds) : ""}
     ${spectatorTelemetry ? communicationThreadsHtml(spectatorTelemetry) : ""}
-    <p class="ai-league-muted">${escapeHtml(translateText("ai_league_replay.disclaimer"))}</p>
-    ${artifactLinksHtml(input)}
     <section class="ai-league-clip" data-ai-league-clip></section>
     ${decisionLogHtml(input.decisions)}`;
 }
@@ -1602,27 +1602,6 @@ function playstyleLineHtml(kinds: string[]): string {
     )
     .join(" ");
   return `<p class="ai-league-playstyle"><strong>${escapeHtml(translateText("ai_league_replay.playstyle_label"))}</strong> ${badges}</p>`;
-}
-
-function artifactLinksHtml(input: AiLeagueReplayOverlayInput): string {
-  const availability = input.artifactAvailability;
-  const isAvailable = (key: keyof AiLeagueReplayArtifactAvailability) =>
-    availability === undefined || availability[key] === true;
-  const links = [
-    isAvailable("visualReport")
-      ? `<a href="${escapeHtml(input.artifactBasePath)}/visual-report.html">${escapeHtml(translateText("ai_league_replay.link_visual_report"))}</a>`
-      : null,
-    isAvailable("spectatorTelemetry")
-      ? `<a href="${escapeHtml(input.artifactBasePath)}/spectator-telemetry.json">${escapeHtml(translateText("ai_league_replay.link_politics_data"))}</a>`
-      : null,
-    isAvailable("decisions")
-      ? `<a href="${escapeHtml(input.artifactBasePath)}/decisions.jsonl">${escapeHtml(translateText("ai_league_replay.link_decisions"))}</a>`
-      : null,
-    isAvailable("summary")
-      ? `<a href="${escapeHtml(input.artifactBasePath)}/match-summary.json">${escapeHtml(translateText("ai_league_replay.link_summary"))}</a>`
-      : null,
-  ].filter((link): link is string => link !== null);
-  return links.length > 0 ? `<p>${links.join(" · ")}</p>` : "";
 }
 
 const AI_LEAGUE_DECISION_LOG_CAP = 15;

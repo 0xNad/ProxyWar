@@ -161,9 +161,9 @@ describe("AiLeagueReplayOverlay", () => {
     // Decision card no longer prints latency / intent type / audit status.
     expect(overlay?.textContent).not.toContain("25ms");
     expect(overlay?.textContent).not.toContain("build_unit");
-    expect(overlay?.querySelector("a")?.getAttribute("href")).toContain(
-      "/ai-league-runs/run-render-1",
-    );
+    // Raw artifact download links were removed from the panel; nothing in the
+    // body should link out to the run bundle any more.
+    expect(overlay?.querySelector("a")).toBeNull();
 
     document.dispatchEvent(
       new CustomEvent("ai-league-replay-frame", {
@@ -535,7 +535,11 @@ describe("AiLeagueReplayOverlay", () => {
     expect(styles).toContain("white-space: nowrap");
   });
 
-  it("renders only known-existing artifact links when availability is provided", () => {
+  it("no longer renders raw artifact download links in the panel", () => {
+    // The "politics data · decisions · summary" row linked straight to raw
+    // artifacts (decisions.jsonl is ~16 MB) and read as noise on a spectator
+    // surface. Removed on operator request; match data stays reachable at the
+    // same artifact paths, just not advertised from the panel.
     mountAiLeagueReplayOverlay({
       runID: "artifact-links",
       artifactBasePath: "/ai-league-runs/artifact-links",
@@ -554,10 +558,7 @@ describe("AiLeagueReplayOverlay", () => {
       ),
       (link) => link.getAttribute("href"),
     );
-    expect(hrefs).toEqual([
-      "/ai-league-runs/artifact-links/decisions.jsonl",
-      "/ai-league-runs/artifact-links/match-summary.json",
-    ]);
+    expect(hrefs).toEqual([]);
   });
 
   it("shows honest loading placeholders before optional match details arrive", () => {
