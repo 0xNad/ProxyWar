@@ -2,7 +2,42 @@
 
 Date: 2026-07-25
 Author: Control (Claude)
-Status: Proposed — implementation plan, not yet started. Deploy is operator-gated.
+Status: In progress on branch `codex/ui-ux-overhaul`. Local only — deploy is operator-gated.
+
+---
+
+## Execution status (2026-07-25, branch `codex/ui-ux-overhaul`)
+
+Landed and verified (tsc + lint clean, full suite 4,198 tests green, prod build OK):
+
+- **Phase 0 (foundation) — DONE (core).** `src/client/styles/tokens.css` canonical
+  `--pw-*` system + additive Tailwind semantic bridge (`bg-accent`, `text-info`,
+  `bg-glass`, … with literal values so opacity modifiers work). Dead legacy CSS
+  removed (−3 kB). `ActionButton` variants token-ized off hardcoded hex. *Deferred:*
+  full `actionButton`→`o-button` API merge; native `alert()`/`confirm()`→`confirm-dialog`.
+- **Phase 1 (/league) — DONE (visible wins).** Standings jargon humanized — killed
+  "unknown policy", added "Not yet rated", tooltips on champion/rating-row + the
+  degraded badge; transparency case preserved; leak-audit green. *Deferred:*
+  DOM-diff-instead-of-reload, SVG glyph icons. (League `:root` already matched `--pw-*`.)
+- **Phase 2 (/premiere) — VERIFIED, no change needed.** The white "Social clip" card
+  is the *old deployed build*; current source already reworked the clip UI to dark
+  `--rp-*` (which match `--pw-*`). Fix lands when the branch deploys.
+- **Phase 3 (/ai-league-replay) — DONE.** Re-themed the light (`#fff`) spectator panel
+  fully dark onto shared tokens (verified in a render harness); jargon tooltips added.
+- **Phase 4 (replay-visible HUD) — DONE (verifiable slice).** Leaderboard emoji
+  arrows → SVG caret; unified 3 glass backgrounds → `bg-glass`; dropped dead `z-999`.
+  *Deferred:* GameRightSidebar div→button a11y.
+- **Phase 5 (client shell) — DONE (safe wins).** Hid garbled placeholder version
+  string; replaced inherited OpenFront promos (fake tournament / discord.gg/openfront)
+  with Proxy War league content.
+
+**Open operator decision (flagged, not done):** the full OpenFront-**blue** →
+Proxy-War-**amber** client accent repalette. It affects the replay HUD accent in
+production. `--pw-accent` is ready; flip when confirmed. See §0.1 / §Phase 5.
+
+**Not started:** Phase 6 (interactive-play HUD islands) — Tier B (not served in the
+production `/league` wrapper) and unverifiable in the dev sandbox (serverless sim
+stalls at spawn); left for a future increment with a live game.
 
 ---
 
