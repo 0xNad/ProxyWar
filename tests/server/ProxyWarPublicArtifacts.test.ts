@@ -237,6 +237,9 @@ describe("ProxyWarPublicArtifacts", () => {
     expect(
       isProxyWarPublicPremiereReadPath(`/premiere/${id}/card-v1.svg`),
     ).toBe(true);
+    expect(
+      matchProxyWarPublicPremiereReadPath(`/api/premieres/${id}/market`),
+    ).toEqual({ kind: "market_state", premiereId: id });
 
     for (const forbidden of [
       `/api/premieres/${id}/source`,
@@ -269,6 +272,9 @@ describe("ProxyWarPublicArtifacts", () => {
       matchProxyWarPublicPremiereWritePath(`/api/premieres/${id}/sessions`),
     ).toEqual({ kind: "session", premiereId: id });
     expect(
+      matchProxyWarPublicPremiereWritePath(`/api/premieres/${id}/market-orders`),
+    ).toEqual({ kind: "market_order", premiereId: id });
+    expect(
       matchProxyWarPublicPremiereWritePath(
         `/api/premieres/${id}/sessions/sess_0123456789abcdef/heartbeat`,
       ),
@@ -284,6 +290,7 @@ describe("ProxyWarPublicArtifacts", () => {
       `/api/premieres/${id}/reveal`,
       `/api/premieres/${id}/archive`,
       `/api/premieres/${id}/predictions/extra`,
+      `/api/premieres/${id}/market-orders/extra`,
       `/api/premieres/${id}/sessions/../../admin/heartbeat`,
       `/api/premieres/${id}/sessions/sess_0123456789ABCDEF/heartbeat`,
     ]) {

@@ -39,6 +39,7 @@ import type {
   ReplayPremiereInteractionLimits,
   ReplayPremiereReleasedContext,
 } from "./ReplayPremiereInteractions";
+import { WAGERING_MAX_PRESENTATION_SPAN_MS } from "./wagering";
 import {
   compactReplayPremiereEventJournal,
   reclaimUnreferencedPremiereSources,
@@ -181,6 +182,8 @@ export interface ReplayPremiereProductionStartupOptions {
   catalogLimits?: ReplayPremiereCatalogLimits;
   eventStoreLimits?: ReplayPremiereEventStoreLimits;
   interactionLimits?: Partial<ReplayPremiereInteractionLimits>;
+  /** Server-side LMSR prediction market, continuous from match start to reveal. Off by default. */
+  wageringEnabled?: boolean;
   clock?: ReplayPremiereRuntimeClock;
   maxStartupMs?: number;
   /**
@@ -815,6 +818,7 @@ export async function startReplayPremiereProduction(
             checkpointProjector: options.checkpointProjector,
             checkpointProjectionCatalog: catalog,
             interactionLimits: options.interactionLimits,
+            wageringEnabled: options.wageringEnabled,
             recoveryProjection: plan.projection,
             fence,
           });
@@ -901,6 +905,7 @@ export async function startReplayPremiereProduction(
                   checkpointProjector: options.checkpointProjector,
                   checkpointProjectionCatalog: catalog,
                   interactionLimits: options.interactionLimits,
+                  wageringEnabled: options.wageringEnabled,
                   recoveryProjection: plan.projection,
                   fence,
                 });
@@ -1105,10 +1110,27 @@ async function assemblePremiereTarget(options: {
   checkpointProjector: ReplayPremiereCheckpointProjector;
   checkpointProjectionCatalog: ReplayPremiereAdmissionCatalog;
   interactionLimits?: Partial<ReplayPremiereInteractionLimits>;
+  wageringEnabled?: boolean;
   recoveryProjection: RecoveryProjection;
   fence: ReplayPremiereStartupOperationFence;
 }): Promise<AssembledPremiereTarget> {
   assertStartupActive(options.fence.signal);
+  // Continuous trading has no checkpoint pause to hide behind: a chunk
+  // still only releases once the authoritative clock reaches its LAST
+  // record (ReplayPremiereContracts.ts:194-207), so with a normal ~60s
+  // presentation span a client reading the network payload directly sees
+  // up to a minute of future game state and can trade on it before any
+  // other viewer does. Release granularity must approach presentation
+  // granularity while wagering is live — enforced here, not merely
+  // documented: this combination is impossible to configure, not just
+  // discouraged.
+  if (
+    options.wageringEnabled === true &&
+    options.record.chunkBuildLimits.maxPresentationSpanMs >
+      WAGERING_MAX_PRESENTATION_SPAN_MS
+  ) {
+    throw startupCapacity("wagering_presentation_span_exceeds_ceiling");
+  }
   const rebuilt = await rebuildReplayPremiereProjectionInput({
     record: options.record,
     privateStateRoot: options.privateStateRoot,
@@ -1169,6 +1191,7 @@ async function assemblePremiereTarget(options: {
       canonicalPremiereUrl: `${options.publicOrigin}/premiere/${options.record.premiereId}`,
       now: () => options.clock.now(),
       limits: options.interactionLimits,
+      wageringEnabled: options.wageringEnabled,
       admitAnonymousWrite: options.httpRegistry.admitAnonymousWrite,
     },
   });

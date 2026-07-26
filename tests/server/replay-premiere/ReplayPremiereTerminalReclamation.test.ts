@@ -60,6 +60,8 @@ function emptyInteractionSnapshot(
     premiereId,
     checkpoints: [checkpoint("cp_00000001", 2), checkpoint("cp_00000002", 4)],
     predictions: [],
+    market: null,
+    trades: [],
     reactions: [],
     shares: [],
     sessions: [],

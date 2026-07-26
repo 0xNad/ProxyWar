@@ -305,6 +305,9 @@ const replayPremiereProduction = await startReplayPremiereProduction({
   onPremiereRevealed: notifyPremiereRevealed,
   // Leave bounded launch headroom for the remaining initialization and bind.
   maxStartupMs: 8_000,
+  // Play money only, off by default. PROXYWAR_WAGERING_ENABLED=1 turns on
+  // pari-mutuel wagering on prediction checkpoints for local/dev testing.
+  wageringEnabled: envFlag("PROXYWAR_WAGERING_ENABLED"),
   onDiagnostic: (diagnostic) => {
     // Deferred fresh-admission lane, orphan-reclamation, and archived-clip
     // promotion events are progress, not rejections; keep the historical

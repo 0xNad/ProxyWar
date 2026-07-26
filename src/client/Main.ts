@@ -75,6 +75,10 @@ import {
   parseReplayPremiereRoute,
   ReplayPremiereRuntimeController,
 } from "./ReplayPremiereRuntime";
+import {
+  openBettingPremierePage,
+  parseBettingPremiereRoute,
+} from "./prediction/wagering/page/BettingPremierePage";
 import "./SinglePlayerModal";
 import { StoreModal } from "./Store";
 import "./TerritoryPatternsModal";
@@ -702,6 +706,13 @@ class Client {
       }
       return;
     }
+    const bettingPremiereId = parseBettingPremiereRoute(
+      window.location.pathname,
+    );
+    if (bettingPremiereId !== null) {
+      await this.openBettingPremiere(bettingPremiereId);
+      return;
+    }
     if (isCoworldPlayerRoute()) {
       await this.openCoworldPlayer();
       return;
@@ -1069,6 +1080,179 @@ class Client {
         premiereId,
         "replay-premiere",
         "Replay Premiere failed to start",
+        error,
+      );
+    }
+  }
+
+  /**
+   * The dedicated betting page's own bootstrap — mirrors
+   * `openReplayPremiere` exactly for the veil/join dance (same runtime
+   * class, same game engine mounting), delegating the trading-specific
+   * wiring (continuous market poll, bankroll, buy/sell) to
+   * `openBettingPremierePage`. Deliberately reuses `replayPremiereRuntime`/
+   * `replayAttemptCleanup`/`replayLoadingCleanup` rather than dedicated
+   * fields and the `"replay-premiere"` join source rather than a new one:
+   * the two surfaces are mutually exclusive routes over the SAME runtime
+   * shape, so every existing interruption/cleanup path
+   * (`handleJoinLobby`'s guard, `beforeunload`, `failReplayLoading`)
+   * already does the right thing without new branches.
+   */
+  private async openBettingPremiere(premiereId: string): Promise<void> {
+    this.replayAttemptCleanup?.();
+    this.replayLoadingCleanup?.();
+
+    showReplayLoadingScreen("replay_premiere.loading_premiere");
+    let veilFinished = false;
+    let veilSlowTimer: ReturnType<typeof setTimeout> | null = setTimeout(() => {
+      if (!veilFinished) {
+        showReplayLoadingScreen("ai_league_replay.loading_slow");
+      }
+    }, REPLAY_LOADING_SLOW_TIMEOUT_MS);
+    const clearVeilSlowTimer = () => {
+      if (veilSlowTimer !== null) {
+        clearTimeout(veilSlowTimer);
+        veilSlowTimer = null;
+      }
+    };
+    const onVeilReplayError = () => {
+      if (veilFinished) return;
+      veilFinished = true;
+      clearVeilSlowTimer();
+      showReplayLoadingFailure();
+    };
+    document.addEventListener(
+      "ai-league-replay-load-error",
+      onVeilReplayError,
+      {
+        once: true,
+      },
+    );
+    const releaseVeilHold = () => {
+      clearVeilSlowTimer();
+      document.removeEventListener(
+        "ai-league-replay-load-error",
+        onVeilReplayError,
+      );
+    };
+    const finishVeil = () => {
+      if (veilFinished) return;
+      veilFinished = true;
+      releaseVeilHold();
+      setReplayLoadingProgress(null);
+      finishReplayLoadingScreen();
+      if (this.replayLoadingCleanup === releaseVeilHold) {
+        this.replayLoadingCleanup = null;
+      }
+    };
+    this.replayLoadingCleanup = releaseVeilHold;
+
+    let active = true;
+    let projectionMounted = false;
+    const handle = openBettingPremierePage(premiereId, {
+      onProjectionReady: (projection) => {
+        if (!active || this.replayPremiereRuntime !== handle.runtime) return;
+        projectionMounted = true;
+        if (
+          projection.state === "playing" ||
+          projection.state === "checkpoint"
+        ) {
+          if (!veilFinished) {
+            clearVeilSlowTimer();
+            showReplayLoadingScreen("replay_premiere.joining_live");
+          }
+          return;
+        }
+        if (
+          projection.state === "revealed" ||
+          projection.state === "archived"
+        ) {
+          const onFirstFrame = () => finishVeil();
+          document.addEventListener("ai-league-replay-frame", onFirstFrame, {
+            once: true,
+          });
+          return;
+        }
+        finishVeil();
+      },
+      onJoinSync: (update) => {
+        if (!active || this.replayPremiereRuntime !== handle.runtime) return;
+        if (update.state === "complete") {
+          finishVeil();
+          return;
+        }
+        if (veilFinished) return;
+        setReplayLoadingProgress(
+          update.currentTurn === null
+            ? translateText("replay_premiere.join_sync_target", {
+                target: update.targetTurn,
+              })
+            : translateText("replay_premiere.join_sync_progress", {
+                current: update.currentTurn,
+                target: update.targetTurn,
+                percent: Math.min(
+                  100,
+                  Math.max(
+                    0,
+                    Math.floor((update.currentTurn / update.targetTurn) * 100),
+                  ),
+                ),
+              }),
+        );
+      },
+      onJoinReady: (request) => {
+        if (
+          !active ||
+          this.replayPremiereRuntime !== handle.runtime ||
+          request.premiereId !== premiereId
+        ) {
+          return;
+        }
+        document.dispatchEvent(
+          new CustomEvent("join-lobby", {
+            detail: {
+              gameID: request.gameID,
+              gameStartInfo: request.gameStartInfo,
+              progressiveReplay: request.progressiveReplay,
+              source: "replay-premiere",
+              premiereId,
+            } satisfies JoinLobbyEvent,
+            bubbles: true,
+            composed: true,
+          }),
+        );
+      },
+      onRevealSeek: (turn) => {
+        if (!active || this.replayPremiereRuntime !== handle.runtime) return;
+        this.eventBus.emit(new ReplayJumpToTurnEvent(turn));
+      },
+    });
+    const cleanupAttempt = () => {
+      if (!active) return;
+      active = false;
+      handle.dispose();
+      if (this.replayPremiereRuntime === handle.runtime) {
+        this.replayPremiereRuntime = null;
+      }
+      if (this.replayAttemptCleanup === cleanupAttempt) {
+        this.replayAttemptCleanup = null;
+      }
+    };
+    this.replayPremiereRuntime = handle.runtime;
+    this.replayAttemptCleanup = cleanupAttempt;
+
+    try {
+      await handle.runtime.start();
+    } catch (error) {
+      if (!active || this.replayPremiereRuntime !== handle.runtime) return;
+      if (projectionMounted) {
+        console.error("Betting premiere runtime stopped", error);
+        return;
+      }
+      this.failReplayLoading(
+        premiereId,
+        "replay-premiere",
+        "Betting premiere failed to start",
         error,
       );
     }

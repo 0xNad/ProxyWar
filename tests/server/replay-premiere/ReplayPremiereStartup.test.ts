@@ -45,6 +45,7 @@ import {
   startReplayPremiereProduction,
   type ReplayPremiereProductionService,
 } from "../../../src/server/replay-premiere/ReplayPremiereStartup";
+import { WAGERING_MAX_PRESENTATION_SPAN_MS } from "../../../src/server/replay-premiere/wagering";
 import { ReplayPremiereTerminalReclaimer } from "../../../src/server/replay-premiere/ReplayPremiereTerminalReclamation";
 import {
   NOW,
@@ -3299,6 +3300,90 @@ describe("ReplayPremiere production startup", () => {
     expect(summary!.outcome).toBeNull();
     expect(summary!.revealedAt).toBeNull();
   });
+  test("refuses to assemble a wagering-enabled premiere whose admitted presentation span exceeds the wagering ceiling, but allows the same oversized span with wagering off", async () => {
+    expect(WAGERING_MAX_PRESENTATION_SPAN_MS).toBe(1_000);
+
+    const rejectRoot = await fs.mkdtemp(
+      path.join(os.tmpdir(), "premiere-startup-span-reject-"),
+    );
+    try {
+      await writeAdmissionWithChunkLimits(rejectRoot, {
+        ...PLAYING_CHUNK_LIMITS,
+        maxPresentationSpanMs: 5_000,
+      });
+      const rejectingContext = startupContext();
+      const rejected = await startReplayPremiereProduction({
+        ...rejectingContext,
+        privateStateRoot: path.join(rejectRoot, "private"),
+        servedRoots: [path.join(rejectRoot, "served")],
+        wageringEnabled: true,
+      });
+      try {
+        expect(rejected.registeredPremiereIds).toEqual([]);
+        expect(rejected.diagnostics).toEqual([
+          {
+            target: `${PREMIERE_ID}.admission.json`,
+            premiereId: PREMIERE_ID,
+            operatorCode: "wagering_presentation_span_exceeds_ceiling",
+          },
+        ]);
+        expect(rejectingContext.httpRegistry.get(PREMIERE_ID)).toBeNull();
+      } finally {
+        await rejected.service.close();
+      }
+    } finally {
+      await fs.rm(rejectRoot, { recursive: true, force: true });
+    }
+
+    // The identical oversized span assembles fine in a fresh premiere with
+    // wagering off — the ceiling is a wagering-only constraint, not general.
+    const plainRoot = await fs.mkdtemp(
+      path.join(os.tmpdir(), "premiere-startup-span-plain-"),
+    );
+    try {
+      await writeAdmissionWithChunkLimits(plainRoot, {
+        ...PLAYING_CHUNK_LIMITS,
+        maxPresentationSpanMs: 5_000,
+      });
+      const plainContext = startupContext();
+      const plain = await startReplayPremiereProduction({
+        ...plainContext,
+        privateStateRoot: path.join(plainRoot, "private"),
+        servedRoots: [path.join(plainRoot, "served")],
+      });
+      try {
+        expect(plain.diagnostics).toEqual([]);
+        expect(plain.registeredPremiereIds).toEqual([PREMIERE_ID]);
+      } finally {
+        await plain.service.close();
+      }
+    } finally {
+      await fs.rm(plainRoot, { recursive: true, force: true });
+    }
+
+    // A compliant tight span assembles fine WITH wagering on.
+    const compliantRoot = await fs.mkdtemp(
+      path.join(os.tmpdir(), "premiere-startup-span-compliant-"),
+    );
+    try {
+      await writeAdmissionWithChunkLimits(compliantRoot, PLAYING_CHUNK_LIMITS);
+      const compliantContext = startupContext();
+      const compliant = await startReplayPremiereProduction({
+        ...compliantContext,
+        privateStateRoot: path.join(compliantRoot, "private"),
+        servedRoots: [path.join(compliantRoot, "served")],
+        wageringEnabled: true,
+      });
+      try {
+        expect(compliant.diagnostics).toEqual([]);
+        expect(compliant.registeredPremiereIds).toEqual([PREMIERE_ID]);
+      } finally {
+        await compliant.service.close();
+      }
+    } finally {
+      await fs.rm(compliantRoot, { recursive: true, force: true });
+    }
+  });
 });
 
 const ORPHAN_ALTERNATE_ID = "prem_89abcdef01234567";
@@ -3355,7 +3440,12 @@ async function writeProjectedAdmission(root: string): Promise<{
 
 async function writeAdmissionWithChunkLimits(
   root: string,
-  chunkLimits: typeof PLAYING_CHUNK_LIMITS,
+  chunkLimits: {
+    maxChunkBytes: number;
+    maxTotalBytes: number;
+    maxRecordsPerChunk: number;
+    maxPresentationSpanMs: number;
+  },
 ): Promise<void> {
   const fixture = await verifiedPublicationFixture(root);
   const imported = importControlledPremiereSourceForPublication({
@@ -3377,6 +3467,7 @@ async function writeAdmissionWithChunkLimits(
   });
   const verification = {
     ...fixture.verificationOptions,
+    maxPresentationSpanMs: chunkLimits.maxPresentationSpanMs,
     draftChunks: drafts,
   };
   const gate = VerifiedPremiereEligibilityGate.verify(verification);

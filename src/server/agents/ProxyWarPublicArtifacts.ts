@@ -136,6 +136,12 @@ const proxyWarPremiereClipCreatePattern = new RegExp(
 const proxyWarPremierePredictionPattern = new RegExp(
   `^/api/premieres/(${proxyWarPremiereIdSource})/predictions$`,
 );
+const proxyWarPremiereMarketOrderPattern = new RegExp(
+  `^/api/premieres/(${proxyWarPremiereIdSource})/market-orders$`,
+);
+const proxyWarPremiereMarketStatePattern = new RegExp(
+  `^/api/premieres/(${proxyWarPremiereIdSource})/market$`,
+);
 const proxyWarPremiereReactionPattern = new RegExp(
   `^/api/premieres/(${proxyWarPremiereIdSource})/reactions$`,
 );
@@ -158,10 +164,12 @@ export type ProxyWarPublicPremiereReadRoute =
   | { kind: "card"; premiereId: string }
   | { kind: "clip_status"; premiereId: string; bucket: number }
   | { kind: "clip_file"; premiereId: string; bucket: number }
-  | { kind: "archive_clip"; premiereId: string };
+  | { kind: "archive_clip"; premiereId: string }
+  | { kind: "market_state"; premiereId: string };
 
 export type ProxyWarPublicPremiereWriteRoute =
   | { kind: "prediction"; premiereId: string }
+  | { kind: "market_order"; premiereId: string }
   | { kind: "reaction"; premiereId: string }
   | { kind: "share"; premiereId: string }
   | { kind: "session"; premiereId: string }
@@ -217,6 +225,10 @@ export function matchProxyWarPublicPremiereReadPath(
   if (archiveClip !== null) {
     return { kind: "archive_clip", premiereId: archiveClip[1] };
   }
+  const marketState = proxyWarPremiereMarketStatePattern.exec(pathname);
+  if (marketState !== null) {
+    return { kind: "market_state", premiereId: marketState[1] };
+  }
   return null;
 }
 
@@ -235,6 +247,10 @@ export function matchProxyWarPublicPremiereWritePath(
   const prediction = proxyWarPremierePredictionPattern.exec(pathname);
   if (prediction !== null) {
     return { kind: "prediction", premiereId: prediction[1] };
+  }
+  const marketOrder = proxyWarPremiereMarketOrderPattern.exec(pathname);
+  if (marketOrder !== null) {
+    return { kind: "market_order", premiereId: marketOrder[1] };
   }
   const reaction = proxyWarPremiereReactionPattern.exec(pathname);
   if (reaction !== null) {

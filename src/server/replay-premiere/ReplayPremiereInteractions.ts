@@ -13,6 +13,25 @@ import {
   hashReplayPremiereJson,
   type ReplayPremiereJsonValue,
 } from "./ReplayPremiereIntegrity";
+import {
+  applyBuy,
+  applySell,
+  computeMarketPrices,
+  liquidityForOutcomeCount,
+  maxSharesForBudget,
+  positionsFor,
+  quoteBuy,
+  quoteSell,
+  ReplayPremiereLedger,
+  settleMarket,
+  sharesHeld,
+  STARTING_BANKROLL,
+  validateBuyStake,
+  type ReplayPremiereMarket,
+  type ReplayPremiereMarketParticipantKind,
+  type ReplayPremiereMarketStateView,
+  type ReplayPremiereMarketTrade,
+} from "./wagering";
 
 export const REPLAY_PREMIERE_REACTION_KINDS = [
   "turning_point",
@@ -160,6 +179,8 @@ export interface ReplayPremiereInteractionsSnapshot {
   premiereId: string;
   checkpoints: ReplayPremiereInteractionCheckpoint[];
   predictions: ReplayPremierePrediction[];
+  market: ReplayPremiereMarket | null;
+  trades: ReplayPremiereMarketTrade[];
   reactions: ReplayPremiereReaction[];
   shares: ReplayPremiereShareMoment[];
   sessions: ReplayPremiereViewerSession[];
@@ -208,7 +229,7 @@ export interface ReplayPremiereInteractionLimits {
 }
 
 export interface ReplayPremiereAnonymousWriteAdmissionRequest {
-  route: "session" | "heartbeat" | "prediction" | "reaction" | "share" | "clip";
+  route: "session" | "heartbeat" | "prediction" | "reaction" | "share" | "clip" | "market_order";
   premiereId: string;
   participantId: string;
   sessionId: string | null;
@@ -254,6 +275,8 @@ export interface ReplayPremiereInteractionsOptions {
   minHeartbeatIntervalMs?: number;
   limits?: Partial<ReplayPremiereInteractionLimits>;
   admitAnonymousWrite: ReplayPremiereAnonymousWriteAdmission;
+  /** Server-side LMSR prediction market, continuous from match start to reveal. Off by default — an existing premiere behaves byte-identically with this unset. */
+  wageringEnabled?: boolean;
 }
 
 export type ReplayPremiereInteractionSnapshotValidationOptions = Pick<
@@ -266,6 +289,7 @@ export type ReplayPremiereInteractionSnapshotValidationOptions = Pick<
   | "maxHeartbeatGapMs"
   | "minHeartbeatIntervalMs"
   | "limits"
+  | "wageringEnabled"
 >;
 
 export interface ReplayPremiereInteractionMetrics {
@@ -472,6 +496,7 @@ export function applyReplayPremierePredictionResolutionTransition(options: {
   eligibleSeatIds: ReadonlySet<string>;
   result: PremiereCanonicalAuthoritativeResult;
   resolvedAt: string;
+  wageringEnabled?: boolean;
 }): ReplayPremierePredictionResolutionTransition {
   const resolvedAtMs = timestamp(options.resolvedAt, "prediction_resolved_at");
   if (
@@ -540,6 +565,27 @@ export function applyReplayPremierePredictionResolutionTransition(options: {
   for (const checkpoint of options.state.checkpoints) {
     checkpoint.resolution = clone(resolution);
   }
+  if (
+    options.wageringEnabled &&
+    options.state.market !== null &&
+    options.state.market.status === "open"
+  ) {
+    const marketLedger = ReplayPremiereLedger.restore({
+      balances: options.state.market.ledgerBalances,
+      granted: options.state.market.ledgerGranted,
+    });
+    const settled = settleMarket({
+      market: options.state.market,
+      ledger: marketLedger,
+      winnerSeatId: outcome.kind === "winner" ? outcome.winnerSeatId : null,
+    });
+    const marketLedgerSnapshot = marketLedger.snapshot();
+    options.state.market = {
+      ...settled,
+      ledgerBalances: marketLedgerSnapshot.balances,
+      ledgerGranted: marketLedgerSnapshot.granted,
+    };
+  }
   return {
     result: {
       resolutions: options.state.checkpoints.map((checkpoint) =>
@@ -592,6 +638,7 @@ export class ReplayPremiereInteractions {
   private readonly minHeartbeatIntervalMs: number;
   private readonly limits: ReplayPremiereInteractionLimits;
   private readonly admitAnonymousWrite: ReplayPremiereAnonymousWriteAdmission;
+  private readonly wageringEnabled: boolean;
   private readonly snapshotValidationOptions: ReplayPremiereInteractionsOptions;
   private mutationQueue: Promise<void> = Promise.resolve();
   private pendingMutations = 0;
@@ -643,6 +690,7 @@ export class ReplayPremiereInteractions {
       throw invalidInteraction("anonymous_write_admission_required");
     }
     this.admitAnonymousWrite = options.admitAnonymousWrite;
+    this.wageringEnabled = options.wageringEnabled ?? false;
     this.snapshotValidationOptions = {
       ...options,
       limits: this.limits,
@@ -756,6 +804,33 @@ export class ReplayPremiereInteractions {
       (candidate) => candidate.id === shareId,
     );
     return share === undefined ? null : clone(share);
+  }
+
+  /**
+   * Live, poll-friendly market state — one continuous market spans the
+   * whole premiere and trades continuously from match start to reveal, not
+   * gated to checkpoints. Visible to every caller at any time: the whole
+   * point of a live market is that the crowd sees prices move as trades
+   * land, and exposing current `q`/prices never leaks anything about the
+   * eventual outcome, only current trading activity. `submitMarketOrder`
+   * alone enforces when orders may execute — this is a pure read.
+   */
+  readMarketState(
+    participantId: string | null,
+  ): ReplayPremiereMarketStateView | null {
+    if (participantId !== null) assertParticipantId(participantId);
+    if (!this.wageringEnabled || this.state.market === null) return null;
+    const market = this.state.market;
+    return {
+      outcomeSeatIds: [...market.outcomeSeatIds],
+      b: market.b,
+      q: [...market.q],
+      prices: computeMarketPrices(market),
+      status: market.status,
+      winnerSeatId: market.winnerSeatId,
+      positions:
+        participantId === null ? null : positionsFor(market, participantId),
+    };
   }
 
   readCheckpoint(
@@ -993,6 +1068,7 @@ export class ReplayPremiereInteractions {
         eligibleSeatIds: new Set(this.seats.keys()),
         result: options.result,
         resolvedAt: options.resolvedAt,
+        wageringEnabled: this.wageringEnabled,
       });
       return {
         result: transition.result,
@@ -1091,6 +1167,176 @@ export class ReplayPremiereInteractions {
         result: { prediction: clone(prediction), idempotent: false },
         payload: json({ prediction }),
         persistenceIdempotencyKey: `interaction:prediction:${options.checkpointId}:${options.participantId}`,
+      };
+    });
+  }
+  async submitMarketOrder(options: {
+    participantId: string;
+    participantKind: ReplayPremiereMarketParticipantKind;
+    sessionId: string;
+    idempotencyKey: string;
+    requesterBucketId: string;
+    seatId: string;
+    side: "buy" | "sell";
+    /** Buy: credit budget to spend. Sell: exact share count (send the full held amount to sell all). */
+    amount: number;
+    /** 0..100. Ceiling for a buy, floor for a sell — the whole order is rejected if the execution price would be worse, never silently filled worse. */
+    limitPrice: number;
+  }): Promise<{ trade: ReplayPremiereMarketTrade; idempotent: boolean }> {
+    if (!this.wageringEnabled) throw invalidInteraction("wagering_disabled");
+    this.assertWritesOpen();
+    const occurredAt = this.nowChecked().toISOString();
+    assertParticipantId(options.participantId);
+    assertSessionId(options.sessionId);
+    assertIdempotencyKey(options.idempotencyKey);
+    assertRequesterBucketId(options.requesterBucketId);
+    assertSeatId(options.seatId);
+    if (options.side !== "buy" && options.side !== "sell") {
+      throw invalidInteraction("invalid_order_side");
+    }
+    if (
+      options.participantKind !== "real" &&
+      options.participantKind !== "synthetic"
+    ) {
+      throw invalidInteraction("invalid_participant_kind");
+    }
+    if (!Number.isSafeInteger(options.amount) || options.amount <= 0) {
+      throw invalidInteraction("invalid_order_amount");
+    }
+    if (
+      !Number.isFinite(options.limitPrice) ||
+      options.limitPrice < 0 ||
+      options.limitPrice > 100
+    ) {
+      throw invalidInteraction("invalid_limit_price");
+    }
+    this.admitAnonymousWrite({
+      route: "market_order",
+      premiereId: this.premiereId,
+      participantId: options.participantId,
+      sessionId: options.sessionId,
+      requesterBucketId: options.requesterBucketId,
+      idempotencyKey: options.idempotencyKey,
+      occurredAt,
+      currentPremiereRecordCount: premiereRecordCount(this.state),
+    });
+    ownedSession(this.state, options.sessionId, options.participantId);
+    return this.mutate<{
+      trade: ReplayPremiereMarketTrade;
+      idempotent: boolean;
+    }>("market_order_submitted", occurredAt, (next) => {
+      assertParticipantId(options.participantId);
+      assertSessionId(options.sessionId);
+      assertSeatId(options.seatId);
+      ownedSession(next, options.sessionId, options.participantId);
+      const existingTrade = next.trades.find(
+        (trade) =>
+          trade.participantId === options.participantId &&
+          trade.idempotencyKey === options.idempotencyKey,
+      );
+      if (existingTrade !== undefined) {
+        return {
+          result: { trade: clone(existingTrade), idempotent: true },
+          payload: json({ tradeId: existingTrade.id, idempotent: true }),
+          persist: false,
+        };
+      }
+      if (next.market === null) {
+        throw invalidInteraction("market_not_initialized");
+      }
+      if (!next.market.outcomeSeatIds.includes(options.seatId)) {
+        throw invalidInteraction("order_seat_not_eligible");
+      }
+      // Continuous market, no checkpoint gate: trading is live whenever the
+      // match itself is live. Server-authoritative — `this.getPremiereState()`
+      // is never client-supplied, unlike an `observedSequence` heartbeat
+      // marker, which is client-reported and is never a trust boundary here.
+      // Read-ahead integrity comes from the release clock itself (see
+      // `WAGERING_MAX_PRESENTATION_SPAN_MS`), not from gating this call.
+      const premiereState = this.getPremiereState();
+      if (premiereState !== "playing" && premiereState !== "checkpoint") {
+        throw gone("market_not_live");
+      }
+      // Server-authoritative, never client-trusted: the pre-trade `q` this
+      // order prices off of is whatever `next.market` holds at the moment
+      // this callback runs — the single ordered mutation queue below
+      // (`mutate()`) is what guarantees two concurrent orders never price
+      // off the same `q`, and that the `q` update and the ledger
+      // debit/credit commit atomically in the same durable transaction.
+      const ledger = ReplayPremiereLedger.restore({
+        balances: next.market.ledgerBalances,
+        granted: next.market.ledgerGranted,
+      });
+      if (ledger.grantedTo(options.participantId) === 0) {
+        ledger.grant(options.participantId, STARTING_BANKROLL);
+      }
+      let shares: number;
+      if (options.side === "buy") {
+        const bankroll = ledger.balanceOf(options.participantId);
+        const validation = validateBuyStake(options.amount, bankroll);
+        if (!validation.ok) {
+          throw invalidInteraction(`order_rejected_${validation.reason}`);
+        }
+        shares = maxSharesForBudget(next.market, options.seatId, options.amount);
+        if (shares <= 0) throw invalidInteraction("order_rejected_zero_shares");
+        const fill = quoteBuy(next.market, options.seatId, shares);
+        if (fill.avgPrice > options.limitPrice) {
+          throw invalidInteraction("order_rejected_slippage_exceeded");
+        }
+      } else {
+        const held = sharesHeld(next.market, options.participantId, options.seatId);
+        if (held <= 0) {
+          throw invalidInteraction("order_rejected_no_shares_to_sell");
+        }
+        shares = Math.min(options.amount, held);
+        if (shares <= 0) throw invalidInteraction("order_rejected_zero_shares");
+        const fill = quoteSell(next.market, options.seatId, shares);
+        if (fill.avgPrice < options.limitPrice) {
+          throw invalidInteraction("order_rejected_slippage_exceeded");
+        }
+      }
+      const applied =
+        options.side === "buy"
+          ? applyBuy({
+              market: next.market,
+              ledger,
+              participantId: options.participantId,
+              seatId: options.seatId,
+              shares,
+            })
+          : applySell({
+              market: next.market,
+              ledger,
+              participantId: options.participantId,
+              seatId: options.seatId,
+              shares,
+            });
+      const avgPrice = shares > 0 ? applied.chips / shares : 0;
+      const ledgerSnapshot = ledger.snapshot();
+      next.market = {
+        ...applied.market,
+        ledgerBalances: ledgerSnapshot.balances,
+        ledgerGranted: ledgerSnapshot.granted,
+      };
+      const trade: ReplayPremiereMarketTrade = {
+        id: `trade_${this.randomHex(16)}`,
+        premiereId: this.premiereId,
+        participantId: options.participantId,
+        participantKind: options.participantKind,
+        seatId: options.seatId,
+        side: options.side,
+        shares,
+        chips: applied.chips,
+        avgPrice,
+        executedAt: occurredAt,
+        idempotencyKey: options.idempotencyKey,
+      };
+      assertPremiereRecordCapacity(next, this.limits, 1);
+      next.trades.push(trade);
+      return {
+        result: { trade: clone(trade), idempotent: false },
+        payload: json({ trade }),
+        persistenceIdempotencyKey: `interaction:market_order:${options.participantId}:${options.idempotencyKey}`,
       };
     });
   }
@@ -2030,6 +2276,21 @@ function createInitialSnapshot(
       resolution: null,
     })),
     predictions: [],
+    market: options.wageringEnabled
+      ? {
+          premiereId: options.premiereId,
+          outcomeSeatIds: options.seats.map((seat) => seat.seatId),
+          b: liquidityForOutcomeCount(options.seats.length),
+          q: options.seats.map(() => 0),
+          status: "open",
+          winnerSeatId: null,
+          holdings: {},
+          costBasis: {},
+          ledgerBalances: {},
+          ledgerGranted: {},
+        }
+      : null,
+    trades: [],
     reactions: [],
     shares: [],
     sessions: [],
@@ -2052,6 +2313,8 @@ function validateSnapshot(
     "premiereId",
     "checkpoints",
     "predictions",
+    "market",
+    "trades",
     "reactions",
     "shares",
     "sessions",
@@ -2063,6 +2326,7 @@ function validateSnapshot(
     !Array.isArray(snapshot.checkpoints) ||
     snapshot.checkpoints.length !== 2 ||
     !Array.isArray(snapshot.predictions) ||
+    !Array.isArray(snapshot.trades) ||
     !Array.isArray(snapshot.reactions) ||
     !Array.isArray(snapshot.shares) ||
     !Array.isArray(snapshot.sessions) ||
@@ -2089,6 +2353,8 @@ function validateSnapshot(
   );
   validateSnapshotCheckpoints(snapshot, options, seatIdentityById);
   validateSnapshotPredictions(snapshot);
+  validateSnapshotMarket(snapshot, options);
+  validateSnapshotTrades(snapshot);
   let validatedReactionIndex: ReplayPremiereReactionIndex | null = null;
   if (appendOnlyReactions === undefined) {
     validatedReactionIndex = validateSnapshotReactions(
@@ -2328,6 +2594,138 @@ function validateSnapshotPredictions(
     if (keys.has(key))
       throw invalidInteraction("duplicate_snapshot_prediction");
     keys.add(key);
+  }
+}
+
+function validateSnapshotMarket(
+  snapshot: ReplayPremiereInteractionsSnapshot,
+  options: ReplayPremiereInteractionSnapshotValidationOptions,
+): void {
+  const market = snapshot.market;
+  if (!options.wageringEnabled) {
+    if (market !== null) throw invalidInteraction("market_present_while_disabled");
+    return;
+  }
+  if (market === null) throw invalidInteraction("market_missing_while_enabled");
+  if (!isRecord(market)) throw invalidInteraction("market_not_object");
+  assertExactKeys(market, [
+    "premiereId",
+    "outcomeSeatIds",
+    "b",
+    "q",
+    "status",
+    "winnerSeatId",
+    "holdings",
+    "costBasis",
+    "ledgerBalances",
+    "ledgerGranted",
+  ]);
+  const expectedSeatIds = options.seats.map((seat) => seat.seatId);
+  if (
+    market.premiereId !== snapshot.premiereId ||
+    !Array.isArray(market.outcomeSeatIds) ||
+    market.outcomeSeatIds.length !== expectedSeatIds.length ||
+    market.outcomeSeatIds.some((seatId, index) => seatId !== expectedSeatIds[index]) ||
+    market.b !== liquidityForOutcomeCount(expectedSeatIds.length) ||
+    !Array.isArray(market.q) ||
+    market.q.length !== expectedSeatIds.length ||
+    market.q.some((value) => !Number.isSafeInteger(value) || value < 0) ||
+    (market.status !== "open" && market.status !== "settled") ||
+    (market.winnerSeatId !== null && !expectedSeatIds.includes(market.winnerSeatId)) ||
+    (market.status === "open" && market.winnerSeatId !== null)
+  ) {
+    throw invalidInteraction("invalid_snapshot_market");
+  }
+  const totals = expectedSeatIds.map(() => 0);
+  for (const [participantId, holdings] of Object.entries(market.holdings)) {
+    assertParticipantId(participantId);
+    if (
+      !Array.isArray(holdings) ||
+      holdings.length !== expectedSeatIds.length ||
+      holdings.some((value) => !Number.isSafeInteger(value) || value < 0)
+    ) {
+      throw invalidInteraction("invalid_snapshot_market_holdings");
+    }
+    holdings.forEach((value, index) => {
+      totals[index] += value;
+    });
+    const basis = market.costBasis[participantId];
+    if (
+      !Array.isArray(basis) ||
+      basis.length !== expectedSeatIds.length ||
+      basis.some((value) => !Number.isSafeInteger(value) || value < 0)
+    ) {
+      throw invalidInteraction("invalid_snapshot_market_cost_basis");
+    }
+  }
+  if (totals.some((value, index) => value !== market.q[index])) {
+    throw invalidInteraction("market_holdings_q_mismatch");
+  }
+  for (const balance of Object.values(market.ledgerBalances)) {
+    if (!Number.isSafeInteger(balance)) {
+      throw invalidInteraction("invalid_snapshot_ledger_balance");
+    }
+  }
+  if (Object.values(market.ledgerBalances).reduce((a, b) => a + b, 0) !== 0) {
+    throw invalidInteraction("ledger_does_not_balance");
+  }
+  for (const granted of Object.values(market.ledgerGranted)) {
+    if (!Number.isSafeInteger(granted) || granted < 0) {
+      throw invalidInteraction("invalid_snapshot_ledger_granted");
+    }
+  }
+}
+
+function validateSnapshotTrades(snapshot: ReplayPremiereInteractionsSnapshot): void {
+  const ids = new Set<string>();
+  const dedupe = new Set<string>();
+  for (const trade of snapshot.trades) {
+    if (!isRecord(trade)) throw invalidInteraction("trade_not_object");
+    assertExactKeys(trade, [
+      "id",
+      "premiereId",
+      "participantId",
+      "participantKind",
+      "seatId",
+      "side",
+      "shares",
+      "chips",
+      "avgPrice",
+      "executedAt",
+      "idempotencyKey",
+    ]);
+    assertTradeId(trade.id);
+    assertParticipantId(trade.participantId);
+    assertSeatId(trade.seatId);
+    assertIdempotencyKey(trade.idempotencyKey);
+    if (trade.participantKind !== "real" && trade.participantKind !== "synthetic") {
+      throw invalidInteraction("invalid_trade_participant_kind");
+    }
+    if (trade.side !== "buy" && trade.side !== "sell") {
+      throw invalidInteraction("invalid_trade_side");
+    }
+    if (!Number.isSafeInteger(trade.shares) || trade.shares <= 0) {
+      throw invalidInteraction("invalid_trade_shares");
+    }
+    if (!Number.isSafeInteger(trade.chips) || trade.chips < 0) {
+      throw invalidInteraction("invalid_trade_chips");
+    }
+    if (
+      typeof trade.avgPrice !== "number" ||
+      !Number.isFinite(trade.avgPrice) ||
+      trade.avgPrice < 0
+    ) {
+      throw invalidInteraction("invalid_trade_avg_price");
+    }
+    timestamp(trade.executedAt, "snapshot_trade_executed_at");
+    if (trade.premiereId !== snapshot.premiereId) {
+      throw invalidInteraction("invalid_snapshot_trade");
+    }
+    if (ids.has(trade.id)) throw invalidInteraction("duplicate_trade_id");
+    ids.add(trade.id);
+    const key = `${trade.participantId}\u0000${trade.idempotencyKey}`;
+    if (dedupe.has(key)) throw invalidInteraction("duplicate_snapshot_trade");
+    dedupe.add(key);
   }
 }
 
@@ -2894,6 +3292,7 @@ function premiereRecordCount(
   return (
     snapshot.checkpoints.length +
     snapshot.predictions.length +
+    snapshot.trades.length +
     snapshot.reactions.length +
     snapshot.shares.length +
     snapshot.sessions.length +
@@ -3133,7 +3532,11 @@ function assertPremiereId(value: string): void {
 }
 
 function assertParticipantId(value: string): void {
-  if (!/^guest_[a-f0-9]{32}$/.test(value)) {
+  // guest_* = real anonymous participants; sim_* = the synthetic crowd,
+  // deliberately in an equally locked, visibly distinct namespace so the
+  // two can never be confused. Both go through the exact same session
+  // ownership, idempotency, and market-order path — no bypass.
+  if (!/^(guest|sim)_[a-f0-9]{32}$/.test(value)) {
     throw invalidInteraction("invalid_participant_id");
   }
 }
@@ -3165,6 +3568,12 @@ function assertReactionId(value: string): void {
 function assertShareId(value: string): void {
   if (!/^share_[a-f0-9]{32}$/.test(value)) {
     throw invalidInteraction("invalid_share_id");
+  }
+}
+
+function assertTradeId(value: string): void {
+  if (!/^trade_[a-f0-9]{32}$/.test(value)) {
+    throw invalidInteraction("invalid_trade_id");
   }
 }
 

@@ -267,10 +267,8 @@ async function handlePremiereApiRequest(
     if (request.headers.range !== undefined) {
       throw invalidRequest("premiere_range_request_rejected", 416);
     }
-    const runtime = requireTarget(
-      options.registry,
-      readRoute.premiereId,
-    ).runtime;
+    const target = requireTarget(options.registry, readRoute.premiereId);
+    const runtime = target.runtime;
     switch (readRoute.kind) {
       case "bootstrap":
         sendJson(response, 200, runtime.readBootstrap());
@@ -325,6 +323,12 @@ async function handlePremiereApiRequest(
       case "clip_file":
         // The mp4 is served by the document router, not this API adapter.
         throw unavailable("premiere_non_api_route_reached_api_adapter", 404);
+      case "market_state":
+        sendJson(response, 200, {
+          schemaVersion: 1,
+          market: target.interactions.readMarketState(null),
+        });
+        return;
     }
   }
   if (request.method === "POST" && writeRoute !== null) {
@@ -422,6 +426,25 @@ async function handlePremiereApiRequest(
             target.interactions
               .readCheckpoints(participantId)
               .find((entry) => entry.id === body.checkpointId) ?? null,
+        });
+        return;
+      }
+      case "market_order": {
+        const body = parseMarketOrderBody(request.body);
+        const result = await withTimeout(
+          target.interactions.submitMarketOrder({
+            participantId,
+            participantKind: "real",
+            idempotencyKey,
+            requesterBucketId,
+            ...body,
+          }),
+          operationTimeoutMs,
+        );
+        sendJson(response, 200, {
+          schemaVersion: 1,
+          ...result,
+          market: target.interactions.readMarketState(participantId),
         });
         return;
       }
@@ -726,6 +749,62 @@ function parsePredictionBody(value: unknown): {
     throw invalidRequest("invalid_prediction_body", 400);
   }
   return { sessionId, checkpointId, selectedSeatId };
+}
+
+function parseMarketOrderBody(value: unknown): {
+  sessionId: string;
+  seatId: string;
+  side: "buy" | "sell";
+  amount: number;
+  limitPrice: number;
+} {
+  const body = exactObject(value, [
+    "sessionId",
+    "seatId",
+    "side",
+    "amount",
+    "limitPrice",
+  ]);
+  const sessionId = stringField(body, "sessionId", 64);
+  const seatId = stringField(body, "seatId", 128);
+  const side = stringField(body, "side", 4);
+  const amount = marketOrderAmountField(body, "amount");
+  const limitPrice = limitPriceField(body, "limitPrice");
+  if (
+    !SESSION_ID_PATTERN.test(sessionId) ||
+    !SEAT_ID_PATTERN.test(seatId) ||
+    seatId.includes("..") ||
+    (side !== "buy" && side !== "sell")
+  ) {
+    throw invalidRequest("invalid_market_order_body", 400);
+  }
+  return { sessionId, seatId, side, amount, limitPrice };
+}
+
+function marketOrderAmountField(
+  record: Record<string, unknown>,
+  key: string,
+): number {
+  const value = record[key];
+  if (
+    !Number.isSafeInteger(value) ||
+    (value as number) <= 0 ||
+    (value as number) > 1_000_000
+  ) {
+    throw invalidRequest(`invalid_${key}`, 400);
+  }
+  return value as number;
+}
+
+function limitPriceField(
+  record: Record<string, unknown>,
+  key: string,
+): number {
+  const value = record[key];
+  if (typeof value !== "number" || !Number.isFinite(value) || value < 0 || value > 100) {
+    throw invalidRequest(`invalid_${key}`, 400);
+  }
+  return value;
 }
 
 function parseReactionBody(value: unknown): {

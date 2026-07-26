@@ -402,6 +402,67 @@ const predictionResponseSchema = z
     checkpoint: checkpointViewSchema,
   })
   .strict();
+// ---------------------------------------------------------------------------
+// Prediction market — LMSR (Logarithmic Market Scoring Rule), server-
+// authoritative, ONE continuous market per premiere (not per checkpoint,
+// per Main's pivot off the earlier pari-mutuel design). Every seat trades
+// as an integer-chip share priced 0..100 while a checkpoint window is
+// open (frozen in the gap between checkpoints, tradeable again at the
+// next one); price moves with real trades plus a server-side synthetic
+// crowd. One settlement at reveal: winning shares pay 100/share. The
+// client only mirrors and validates the shape — see
+// `src/client/prediction/wagering/lmsr.ts` for the pure pricing math this
+// mirrors.
+// ---------------------------------------------------------------------------
+const marketPositionSchema = z
+  .object({
+    seatId: opaqueIdSchema,
+    shares: nonNegativeIntegerSchema,
+    costBasis: nonNegativeIntegerSchema,
+    currentValue: nonNegativeIntegerSchema,
+    unrealizedPnl: z.number().int().safe(),
+  })
+  .strict();
+const marketStateSchema = z
+  .object({
+    premiereId: z.string().regex(PREMIERE_ID_PATTERN),
+    outcomeSeatIds: z.array(opaqueIdSchema).min(2).max(64),
+    q: z.array(z.number().int().safe()),
+    b: z.number().positive().safe(),
+    prices: z.array(z.number().min(0).max(100)),
+    status: z.enum(["open", "settled"]),
+    winnerSeatId: opaqueIdSchema.nullable(),
+    positions: z.array(marketPositionSchema).nullable(),
+  })
+  .strict();
+const marketStateResponseSchema = z
+  .object({
+    schemaVersion: z.literal(1),
+    market: marketStateSchema,
+  })
+  .strict();
+const tradeSchema = z
+  .object({
+    id: z.string().min(1).max(128),
+    premiereId: z.string().regex(PREMIERE_ID_PATTERN),
+    checkpointId: z.string().regex(CHECKPOINT_ID_PATTERN),
+    participantId: z.string().regex(PARTICIPANT_ID_PATTERN),
+    seatId: opaqueIdSchema,
+    side: z.enum(["buy", "sell"]),
+    shares: z.number().int().positive().safe(),
+    chips: nonNegativeIntegerSchema,
+    avgPrice: z.number().min(0).max(100),
+    executedAt: canonicalTimestampSchema,
+  })
+  .strict();
+const tradeResponseSchema = z
+  .object({
+    schemaVersion: z.literal(1),
+    trade: tradeSchema,
+    idempotent: z.boolean(),
+    market: marketStateSchema,
+  })
+  .strict();
 const reactionSchema = z
   .object({
     id: z.string().regex(REACTION_ID_PATTERN),
@@ -498,6 +559,15 @@ export type ReplayPremiereServiceHeartbeatResponse = z.infer<
 export type ReplayPremiereServicePredictionResponse = z.infer<
   typeof predictionResponseSchema
 >;
+export type ReplayPremiereServiceMarketState = z.infer<
+  typeof marketStateSchema
+>;
+export type ReplayPremiereServiceMarketStateResponse = z.infer<
+  typeof marketStateResponseSchema
+>;
+export type ReplayPremiereServiceTradeResponse = z.infer<
+  typeof tradeResponseSchema
+>;
 export type ReplayPremiereServiceReactionResponse = z.infer<
   typeof reactionResponseSchema
 >;
@@ -550,6 +620,16 @@ export class ReplayPremiereServiceError extends Error {
     super(code);
     this.name = "ReplayPremiereServiceError";
   }
+}
+
+export interface ReplayPremiereTradeRequest {
+  premiereId: string;
+  checkpointId: string;
+  seatId: string;
+  side: "buy" | "sell";
+  amount: number;
+  /** 0..100 — ceiling for a buy, floor for a sell. The crowd trades the same live book. */
+  limitPrice: number;
 }
 
 export interface ReplayPremiereServiceClientOptions {
@@ -774,6 +854,58 @@ export class ReplayPremiereServiceClient {
     return response;
   }
 
+  /**
+   * LMSR market order write (buy or sell). Not part of
+   * `ReplayPremiereOverlayCallbacks` — trading renders its own dedicated
+   * overlay (see `src/client/prediction/wagering/**`), so this is a plain
+   * public method: callable from that overlay's event handlers AND
+   * directly from a programmatic caller (synthetic crowd / persona
+   * testing), same integrity path either way. Unlike the old one-stake-
+   * per-checkpoint wager, a participant may submit MANY orders across the
+   * life of the market — each gets its own fresh idempotency key (a
+   * network-level retry of ONE order reuses it; a second, genuinely
+   * different order never does).
+   */
+  async submitMarketOrder(
+    input: ReplayPremiereTradeRequest,
+  ): Promise<ReplayPremiereServiceTradeResponse> {
+    const session = this.requireSession();
+    if (
+      input.premiereId !== this.options.premiereId ||
+      !CHECKPOINT_ID_PATTERN.test(input.checkpointId) ||
+      !OPAQUE_ID_PATTERN.test(input.seatId) ||
+      (input.side !== "buy" && input.side !== "sell") ||
+      !Number.isSafeInteger(input.amount) ||
+      input.amount <= 0 ||
+      !Number.isFinite(input.limitPrice) ||
+      input.limitPrice < 0 ||
+      input.limitPrice > 100
+    ) {
+      throw serviceError("invalid_configuration");
+    }
+    const body = {
+      sessionId: session.id,
+      checkpointId: input.checkpointId,
+      seatId: input.seatId,
+      side: input.side,
+      amount: input.amount,
+      limitPrice: input.limitPrice,
+    };
+    const response = await this.postJson(
+      "market-orders",
+      body,
+      // Each order is a genuinely distinct action (unlike the old
+      // deterministic-per-checkpoint wager key) — a fresh key per call, so
+      // only a network-level retry of THIS call reuses it.
+      this.createIdempotencyKey(),
+      tradeResponseSchema,
+      200,
+      true,
+    );
+    this.assertTradeResponseBound(response, input, session);
+    return response;
+  }
+
   async submitReaction(
     input: ReplayPremiereMarkerRequest,
   ): Promise<ReplayPremiereServiceReactionResponse> {
@@ -928,6 +1060,32 @@ export class ReplayPremiereServiceClient {
       throw serviceError("invalid_response");
     }
     this.assertClipStatusBound(response);
+    return response;
+  }
+
+  /**
+   * Cheap, participant-agnostic poll read for the live odds ticker:
+   * current LMSR prices for the whole premiere market, no session/CSRF
+   * scoping, safe to poll on an interval independent of the heartbeat
+   * cadence. The market is visible for the entire life of the premiere,
+   * not gated behind having traded. Any per-participant `positions` on
+   * the response are best-effort for an anonymous poll — a trade's own
+   * response is the authoritative source for the viewer's own position.
+   */
+  async readMarketState(): Promise<ReplayPremiereServiceMarketStateResponse> {
+    this.assertActive();
+    const response = await this.getJson(
+      "market",
+      marketStateResponseSchema,
+      200,
+    );
+    if (
+      response.market.premiereId !== this.options.premiereId ||
+      response.market.q.length !== response.market.outcomeSeatIds.length ||
+      response.market.prices.length !== response.market.outcomeSeatIds.length
+    ) {
+      throw serviceError("invalid_response");
+    }
     return response;
   }
 
@@ -1344,6 +1502,57 @@ export class ReplayPremiereServiceClient {
     }
   }
 
+  private assertTradeResponseBound(
+    response: ReplayPremiereServiceTradeResponse,
+    input: ReplayPremiereTradeRequest,
+    session: ReplayPremiereServiceSession,
+  ): void {
+    const trade = response.trade;
+    // 1 point of chip-rounding slop tolerated between the requested limit
+    // and the executed average price — the server fills in whole chips,
+    // the limit is a continuous 0..100 figure.
+    if (
+      trade.premiereId !== this.options.premiereId ||
+      trade.participantId !== session.participantId ||
+      trade.checkpointId !== input.checkpointId ||
+      trade.seatId !== input.seatId ||
+      trade.side !== input.side ||
+      (trade.side === "buy" && trade.avgPrice > input.limitPrice + 1) ||
+      (trade.side === "sell" && trade.avgPrice < input.limitPrice - 1)
+    ) {
+      throw serviceError("invalid_response");
+    }
+    this.assertMarketStateBound(response.market);
+  }
+
+  private assertMarketStateBound(
+    market: ReplayPremiereServiceMarketState,
+  ): void {
+    const binding = this.requireBinding();
+    const uniqueSeats = new Set(market.outcomeSeatIds);
+    const seatsAreBound = market.outcomeSeatIds.every((seatId) =>
+      binding.policyIdentities.has(seatId),
+    );
+    const pricesSum = market.prices.reduce((sum, price) => sum + price, 0);
+    if (
+      market.premiereId !== this.options.premiereId ||
+      uniqueSeats.size !== market.outcomeSeatIds.length ||
+      !seatsAreBound ||
+      market.q.length !== market.outcomeSeatIds.length ||
+      market.prices.length !== market.outcomeSeatIds.length ||
+      Math.abs(pricesSum - 100) > 0.5 ||
+      (market.status === "settled") !== (market.winnerSeatId !== null) ||
+      (market.winnerSeatId !== null &&
+        !uniqueSeats.has(market.winnerSeatId)) ||
+      (market.positions !== null &&
+        market.positions.some(
+          (position) => !uniqueSeats.has(position.seatId),
+        ))
+    ) {
+      throw serviceError("invalid_response");
+    }
+  }
+
   private assertReactionResponseBound(
     response: ReplayPremiereServiceReactionResponse,
     input: ReplayPremiereMarkerRequest,
@@ -1702,7 +1911,7 @@ export class ReplayPremiereServiceClient {
       (crowd !== null &&
         (resolution?.kind !== "winner" ||
           crowd.correctPredictions > crowd.totalPredictions ||
-          (total !== null && crowd.totalPredictions !== total)))
+      (total !== null && crowd.totalPredictions !== total)))
     ) {
       throw serviceError("invalid_response");
     }
@@ -1770,6 +1979,10 @@ interface ReplayPremiereServiceLike {
   submitReaction(
     input: ReplayPremiereMarkerRequest,
   ): Promise<ReplayPremiereServiceReactionResponse>;
+  submitMarketOrder(
+    input: ReplayPremiereTradeRequest,
+  ): Promise<ReplayPremiereServiceTradeResponse>;
+  readMarketState(): Promise<ReplayPremiereServiceMarketStateResponse>;
   createShare(input: {
     sequence: number;
     sourceReactionId?: string | null;
@@ -3076,6 +3289,47 @@ export class ReplayPremiereRuntimeController {
       }
       throw error;
     }
+  }
+
+  /**
+   * Public market-order write — NOT part of `overlayCallbacks()` because
+   * trading renders its own dedicated overlay (`src/client/prediction/
+   * wagering/**`), not `ReplayPremiereOverlay`. Mirrors `onPrediction`'s
+   * integrity path (write-allowed guard, sequence-not-ahead guard,
+   * strict-response latching) so an order gets the same sealed-window
+   * guarantee a prediction does. Also callable directly by a non-UI
+   * caller (synthetic crowd / persona testing) — this is a plain method,
+   * not tucked inside a click handler. Unlike a checkpoint prediction, a
+   * trade does NOT replace anything in `serviceCheckpoints` or re-hydrate
+   * the overlay — the market is a sibling concern the page controller
+   * polls and renders independently (see `readMarketState()` below).
+   */
+  async submitMarketOrder(
+    request: ReplayPremiereTradeRequest,
+  ): Promise<ReplayPremiereServiceTradeResponse> {
+    this.assertInteractionWriteAllowed();
+    const checkpoint = this.projection?.publicDefinition.checkpoints.find(
+      (candidate) => candidate.id === request.checkpointId,
+    );
+    if (
+      checkpoint === undefined ||
+      checkpoint.sequence > this.observedSequence()
+    ) {
+      throw serviceError("request_rejected");
+    }
+    const response = await this.strictInteractionWrite(() =>
+      this.service.submitMarketOrder(request),
+    );
+    if (this.reveal === null && response.market.status === "settled") {
+      this.latchFailure("integrity_failure");
+      throw serviceError("invalid_response");
+    }
+    return response;
+  }
+
+  /** Public poll read for the live odds ticker — no session/write gating. */
+  async readMarketState(): Promise<ReplayPremiereServiceMarketStateResponse> {
+    return this.service.readMarketState();
   }
 
   private overlayCallbacks(): ReplayPremiereOverlayCallbacks {

@@ -3654,6 +3654,20 @@ function runtimeHarness(options: {
         ? vi.fn(async () => heartbeatResponse("playing"))
         : vi.fn(options.service.heartbeat),
     submitPrediction: vi.fn(),
+    submitMarketOrder: vi.fn(),
+    readMarketState: vi.fn(async () => ({
+      schemaVersion: 1 as const,
+      market: {
+        premiereId: PREMIERE_ID,
+        outcomeSeatIds: [],
+        q: [],
+        b: 1,
+        prices: [],
+        status: "open" as const,
+        winnerSeatId: null,
+        positions: null,
+      },
+    })),
     submitReaction:
       options.service?.submitReaction === undefined
         ? vi.fn(

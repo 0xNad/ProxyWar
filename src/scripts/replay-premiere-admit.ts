@@ -18,6 +18,7 @@ import { rebuildReplayPremiereProjectionInput } from "../server/replay-premiere/
 import { buildPremiereChunks } from "../server/replay-premiere/ReplayPremiereChunks";
 import {
   isPremiereId,
+  REPLAY_PREMIERE_MAX_PRESENTATION_SPAN_MS,
   type CoworldPremiereSourceIds,
   type PolicyIdentity,
   type PremiereEligibility,
@@ -108,6 +109,12 @@ const REQUIRED_ARGUMENT_PREFIXES = [
   "--nonce-file=",
 ] as const;
 const REPEATED_ARGUMENT_PREFIX = "--served-root=";
+// Optional: overrides the admitted chunk build's maxPresentationSpanMs (default
+// MAX_PRESENTATION_SPAN_MS = 45s). Wagering-enabled premieres must be admitted
+// with a span <= wagering's WAGERING_MAX_PRESENTATION_SPAN_MS (1s) or startup
+// refuses to assemble them (`wagering_presentation_span_exceeds_ceiling`) — see
+// ReplayPremiereStartup.ts. Non-wagering admissions should leave this unset.
+const OPTIONAL_MAX_PRESENTATION_SPAN_MS_PREFIX = "--max-presentation-span-ms=";
 
 interface ReplayPremiereAdmissionCliOptions {
   premiereId: string;
@@ -119,6 +126,7 @@ interface ReplayPremiereAdmissionCliOptions {
   definitionFile: string;
   deploymentOrigin: string;
   nonceFile: string;
+  maxPresentationSpanMs: number;
 }
 
 interface OperatorEligibilityInput {
@@ -348,6 +356,10 @@ export async function runReplayPremiereAdmission(
       eligibilityRecord,
       eligibilityRecordHash: assessment.eligibilityRecordHash,
     });
+    const chunkBuildLimits: ReplayPremiereChunkBuildLimits = {
+      ...CHUNK_BUILD_LIMITS,
+      maxPresentationSpanMs: options.maxPresentationSpanMs,
+    };
     const draftChunks = buildPremiereChunks({
       premiereId: options.premiereId,
       records: imported.records,
@@ -355,7 +367,7 @@ export async function runReplayPremiereAdmission(
       checkpointSequences: publicDefinition.checkpoints.map(
         (checkpoint) => checkpoint.sequence,
       ),
-      ...CHUNK_BUILD_LIMITS,
+      ...chunkBuildLimits,
     });
     const verification = {
       premiereId: options.premiereId,
@@ -367,7 +379,7 @@ export async function runReplayPremiereAdmission(
       replayImportLimits: REPLAY_IMPORT_LIMITS,
       publicDefinition,
       draftChunks,
-      maxPresentationSpanMs: MAX_PRESENTATION_SPAN_MS,
+      maxPresentationSpanMs: chunkBuildLimits.maxPresentationSpanMs,
     } satisfies Parameters<typeof VerifiedPremiereEligibilityGate.verify>[0];
     const gate = VerifiedPremiereEligibilityGate.verify(verification);
     const checkpointProjectionSignal =
@@ -424,7 +436,7 @@ export async function runReplayPremiereAdmission(
     const record = await catalog.writeVerifiedAdmission({
       gate,
       verification,
-      chunkBuildLimits: CHUNK_BUILD_LIMITS,
+      chunkBuildLimits,
       collectorLimits: COLLECTOR_LIMITS,
       checkpointProjector: {
         async project() {
@@ -469,7 +481,9 @@ function parseReplayPremiereAdmissionArgs(
       (argument) =>
         !REQUIRED_ARGUMENT_PREFIXES.some((prefix) =>
           argument.startsWith(prefix),
-        ) && !argument.startsWith(REPEATED_ARGUMENT_PREFIX),
+        ) &&
+        !argument.startsWith(REPEATED_ARGUMENT_PREFIX) &&
+        !argument.startsWith(OPTIONAL_MAX_PRESENTATION_SPAN_MS_PREFIX),
     )
   ) {
     throw cliFailure("admission_unknown_or_missing_argument");
@@ -478,6 +492,25 @@ function parseReplayPremiereAdmissionArgs(
     if (args.filter((argument) => argument.startsWith(prefix)).length !== 1) {
       throw cliFailure("admission_argument_cardinality_invalid");
     }
+  }
+  const maxPresentationSpanMsValues = valuesFor(
+    args,
+    OPTIONAL_MAX_PRESENTATION_SPAN_MS_PREFIX,
+  );
+  if (maxPresentationSpanMsValues.length > 1) {
+    throw cliFailure("admission_argument_cardinality_invalid");
+  }
+  let maxPresentationSpanMs = MAX_PRESENTATION_SPAN_MS;
+  if (maxPresentationSpanMsValues.length === 1) {
+    const parsed = Number(maxPresentationSpanMsValues[0]);
+    if (
+      !Number.isSafeInteger(parsed) ||
+      parsed <= 0 ||
+      parsed > REPLAY_PREMIERE_MAX_PRESENTATION_SPAN_MS
+    ) {
+      throw cliFailure("admission_argument_value_invalid");
+    }
+    maxPresentationSpanMs = parsed;
   }
   const servedRoots = valuesFor(args, REPEATED_ARGUMENT_PREFIX);
   if (
@@ -498,6 +531,7 @@ function parseReplayPremiereAdmissionArgs(
     definitionFile: singleValue(args, "--definition-file="),
     deploymentOrigin: singleValue(args, "--deployment-origin="),
     nonceFile: singleValue(args, "--nonce-file="),
+    maxPresentationSpanMs,
   };
   const paths = [
     options.sourceFile,
