@@ -139,10 +139,12 @@ export function clipReplayPageUrl(options: {
   ) {
     return base;
   }
-  // "fast" halves the inter-turn delay, so the doubled capture window still
-  // yields the same clip length. Deliberately not "fastest": that removes the
-  // delay entirely and clip duration becomes pipeline-dependent.
-  return `${base}?renderFastForwardUntilTurn=${options.fastForwardUntilTurn}&renderReplaySpeed=fast`;
+  // "fastest" drops the inter-turn delay entirely so the capture advances as
+  // fast as the sim + presentation pipeline sustains (LocalServer still caps the
+  // un-executed backlog, so this is bounded). The window is sized for that rate
+  // and the encoder pins the final body length, so a pipeline-dependent capture
+  // time cannot produce a wildly long or short clip.
+  return `${base}?renderFastForwardUntilTurn=${options.fastForwardUntilTurn}&renderReplaySpeed=fastest`;
 }
 
 /**
@@ -447,6 +449,8 @@ function drawtext(options: {
   x: string;
   y: string;
   box?: boolean;
+  /** Per-frame alpha expression (`t` is the input timestamp). */
+  alpha?: string;
 }): string {
   const parts = [
     `drawtext=fontfile='${options.fontFile}'`,
@@ -457,6 +461,9 @@ function drawtext(options: {
     `x=${options.x}`,
     `y=${options.y}`,
   ];
+  if (options.alpha !== undefined) {
+    parts.push(`alpha='${options.alpha}'`);
+  }
   if (options.box === true) {
     parts.push("box=1", "boxcolor=black@0.35", "boxborderw=6");
   }
@@ -495,6 +502,55 @@ export function durationsFromTimestamps(
       ? Math.max(0.001, timestamps[i + 1] - ts)
       : fallbackSeconds,
   );
+}
+
+/** Target body length for a social clip. */
+export const CLIP_TARGET_BODY_SECONDS = 20;
+
+/**
+ * Never stretch so far that the captured frames can no longer carry the motion.
+ * Below this effective rate the body reads as a slideshow rather than playback.
+ */
+export const CLIP_MIN_EFFECTIVE_FPS = 20;
+
+/**
+ * Pin the body length independently of how fast the capture actually ran.
+ *
+ * Capture rate is pipeline-dependent — emphatically so at `renderReplaySpeed=fastest`,
+ * where the inter-turn delay is zero and the rate settles wherever the sim and
+ * presentation pipeline land. Leaving body duration equal to capture wall-time
+ * therefore makes clip length a function of host load. Scaling every frame
+ * duration by one factor pins the total while preserving relative pacing, so a
+ * pause in the match still reads as a pause.
+ *
+ * Only two things bound the scale factor:
+ *  - a capture SHORTER than the target is never stretched past
+ *    CLIP_MIN_EFFECTIVE_FPS, so a sparse capture yields a shorter honest clip
+ *    rather than a slideshow;
+ *  - a capture longer than the target is compressed freely (that is the
+ *    speed-up that lets one clip cover far more of the match).
+ */
+export function clampClipDurationsToBudget(
+  durations: number[],
+  targetSeconds: number = CLIP_TARGET_BODY_SECONDS,
+  minEffectiveFps: number = CLIP_MIN_EFFECTIVE_FPS,
+): number[] {
+  if (durations.length === 0) return durations;
+  if (!Number.isFinite(targetSeconds) || targetSeconds <= 0) {
+    throw new Error(`invalid clip target duration: ${targetSeconds}`);
+  }
+  if (!Number.isFinite(minEffectiveFps) || minEffectiveFps <= 0) {
+    throw new Error(`invalid clip minimum effective fps: ${minEffectiveFps}`);
+  }
+  const total = durations.reduce((sum, value) => sum + value, 0);
+  if (total <= 0) return durations;
+  // The longest duration these frames can carry without dropping below the
+  // legibility floor. A capture that already exceeds the target is unaffected.
+  const maxSupportedSeconds = durations.length / minEffectiveFps;
+  const effectiveTarget = Math.min(targetSeconds, maxSupportedSeconds);
+  if (effectiveTarget >= total) return durations;
+  const scale = effectiveTarget / total;
+  return durations.map((value) => Math.max(0.001, value * scale));
 }
 
 /**
@@ -550,44 +606,66 @@ export function buildClipEncodeArgs(options: {
   ];
 }
 
+/** Slate default length. Long enough to read the CTA without stalling the clip. */
+export const SLATE_SECONDS = 3;
+
 /**
- * Build the 2s end slate: dark background, "Proxy War" wordmark, CTA, and the
- * exact `replay_premiere.asset_attribution` / `replay_premiere.no_endorsement`
- * strings (passed in verbatim from resources/lang/en.json). The layout is
- * re-derived from the target dimensions so both license lines stay fully inside
- * the frame at 1080x1080 (square) and 1280x720 (landscape).
+ * Staggered reveal alpha for one slate element: hard 0 before `startSeconds`,
+ * then a linear ramp to opaque over `rampSeconds`.
+ *
+ * drawtext evaluates `alpha` per frame with `t` bound to the slate-local
+ * timestamp, so this needs no separate overlay pass.
+ */
+function revealAlpha(
+  startSeconds: number,
+  peak: number,
+  rampSeconds = 0.32,
+): string {
+  return `if(lt(t,${startSeconds.toFixed(2)}),0,min(${peak},(t-${startSeconds.toFixed(2)})*${(peak / rampSeconds).toFixed(3)}))`;
+}
+
+/**
+ * Build the end slate: a dark vignetted card that the gameplay settles into,
+ * with the wordmark, an accent rule that wipes out from center, the tagline and
+ * the CTA revealed in sequence, then a clean fade to black.
+ *
+ * NO LICENSE TEXT IS BURNED INTO THE FRAME. CC BY-SA 4.0 §3(a)(2) allows
+ * attribution "in any reasonable manner based on the medium", and the repo's own
+ * asset audit resolves that as once per post in a reasonable place. The
+ * attribution and no-endorsement strings instead travel with the file in the mp4
+ * container metadata (see buildFinalMuxArgs) and in the share caption the clip
+ * service already returns, which reaches the reader far more reliably than a
+ * 20px line held for two seconds.
  */
 export function buildSlateArgs(options: {
   outPath: string;
   title: string;
   taglineText: string;
   ctaText: string;
+  /** Embedded in mp4 metadata by buildFinalMuxArgs, never drawn on the frame. */
   attributionText: string;
+  /** Embedded in mp4 metadata by buildFinalMuxArgs, never drawn on the frame. */
   noEndorsementText: string;
   seconds?: number;
   width?: number;
   height?: number;
 }): string[] {
-  const seconds = options.seconds ?? 3;
+  const seconds = options.seconds ?? SLATE_SECONDS;
   const { width, height } = frameSize(options);
-  // Title/CTA sit above vertical center; the two license lines are pinned to
-  // the bottom margin (measured up from the frame bottom, not down from the
-  // top) so they never overflow whatever the frame height is. The license font
-  // is capped so the longer attribution line fits within the frame width with a
-  // safe margin at either aspect.
-  const titleSize = Math.round(height * 0.105);
-  const taglineSize = Math.round(height * 0.036);
-  const ctaSize = Math.round(height * 0.05);
-  // The credit is a footer, not a competing element: smaller and dimmer than
-  // before so the brand moment reads first. It stays on-frame because CC BY-SA
-  // attribution is a licence obligation, not decoration.
-  const licenseSize = Math.min(
-    Math.round(height * 0.019),
-    // ~0.9 px per character for Arial at the widths we use; keep the longest
-    // license line inside 92% of the frame width.
-    Math.floor((width * 0.92) / (longestLicenseChars(options) * 0.52)),
-  );
-  const licenseLineGap = Math.round(licenseSize * 1.7);
+  // With the license block gone the composition is optically centered instead
+  // of pinned above a footer, so the wordmark carries the frame.
+  const titleSize = Math.round(height * 0.115);
+  const taglineSize = Math.round(height * 0.034);
+  const ctaSize = Math.round(height * 0.046);
+  const titleY = height * 0.5 - titleSize - height * 0.045;
+  const ruleY = Math.round(height * 0.5 + height * 0.012);
+  const ruleHeight = Math.max(2, Math.round(height * 0.004));
+  const ruleWidth = Math.round(width * 0.16);
+  // Center-out wipe: half-width per side grows over ~0.26s from `ruleStart`.
+  const ruleStart = 0.5;
+  const ruleGrowthPxPerSecond = (ruleWidth / 0.26).toFixed(0);
+  const ruleCurrentWidth = `min(${ruleWidth},max(0,(t-${ruleStart})*${ruleGrowthPxPerSecond}))`;
+
   const drawtexts = [
     drawtext({
       fontFile: FONT_ARIAL_BLACK,
@@ -595,15 +673,19 @@ export function buildSlateArgs(options: {
       fontColor: "white",
       fontSize: titleSize,
       x: "(w-text_w)/2",
-      y: `${(height * 0.5 - titleSize - height * 0.055).toFixed(0)}`,
+      y: `${titleY.toFixed(0)}`,
+      alpha: revealAlpha(0.22, 1),
     }),
+    // Accent rule under the wordmark, wiping outward from the center.
+    `drawbox=x='(iw-${ruleCurrentWidth})/2':y=${ruleY}:w='${ruleCurrentWidth}':h=${ruleHeight}:color=${SLATE_ACCENT}@0.95:t=fill`,
     drawtext({
       fontFile: FONT_ARIAL,
       text: options.taglineText,
-      fontColor: "white@0.72",
+      fontColor: "white",
       fontSize: taglineSize,
       x: "(w-text_w)/2",
-      y: `${(height * 0.5 - height * 0.028).toFixed(0)}`,
+      y: `${(height * 0.5 + height * 0.045).toFixed(0)}`,
+      alpha: revealAlpha(0.68, 0.74),
     }),
     drawtext({
       fontFile: FONT_ARIAL_BOLD,
@@ -611,24 +693,19 @@ export function buildSlateArgs(options: {
       fontColor: SLATE_ACCENT,
       fontSize: ctaSize,
       x: "(w-text_w)/2",
-      y: `${(height * 0.5 + height * 0.045).toFixed(0)}`,
+      y: `${(height * 0.5 + height * 0.115).toFixed(0)}`,
+      alpha: revealAlpha(0.92, 1),
     }),
-    drawtext({
-      fontFile: FONT_ARIAL,
-      text: options.attributionText,
-      fontColor: "white@0.5",
-      fontSize: licenseSize,
-      x: "(w-text_w)/2",
-      y: `h-${(height * 0.07 + licenseLineGap).toFixed(0)}`,
-    }),
-    drawtext({
-      fontFile: FONT_ARIAL,
-      text: options.noEndorsementText,
-      fontColor: "white@0.5",
-      fontSize: licenseSize,
-      x: "(w-text_w)/2",
-      y: `h-${(height * 0.07).toFixed(0)}`,
-    }),
+  ];
+  const fadeOutStart = Math.max(0, seconds - 0.45).toFixed(2);
+  const filters = [
+    // Radial falloff gives the flat card depth without a second input.
+    "vignette=angle=PI/5",
+    ...drawtexts,
+    // Fade in absorbs the cut from gameplay; fade out ends the clip cleanly
+    // instead of snapping to the next loop.
+    "fade=t=in:st=0:d=0.38",
+    `fade=t=out:st=${fadeOutStart}:d=0.45`,
   ];
   return [
     "-y",
@@ -637,7 +714,7 @@ export function buildSlateArgs(options: {
     "-i",
     `color=c=${SLATE_BACKGROUND}:s=${width}x${height}:d=${seconds}`,
     "-vf",
-    drawtexts.join(","),
+    filters.join(","),
     "-c:v",
     "libx264",
     "-preset",
@@ -654,17 +731,6 @@ export function buildSlateArgs(options: {
     String(CLIP_TIMESCALE),
     options.outPath,
   ];
-}
-
-function longestLicenseChars(options: {
-  attributionText: string;
-  noEndorsementText: string;
-}): number {
-  return Math.max(
-    1,
-    options.attributionText.length,
-    options.noEndorsementText.length,
-  );
 }
 
 function frameSize(options: { width?: number; height?: number }): {
@@ -697,13 +763,25 @@ export function buildConcatListContent(absolutePaths: string[]): string {
 }
 
 /**
- * Final mux: concat body+slate (-c copy), add a silent stereo AAC track, and
- * set +faststart (moov before mdat).
+ * Final mux: concat body+slate (-c copy), add a silent stereo AAC track, carry
+ * the CC BY-SA attribution in container metadata, and set +faststart (moov
+ * before mdat).
+ *
+ * The attribution lives here rather than burned into the slate. CC BY-SA 4.0
+ * §3(a)(2) permits attribution "in any reasonable manner based on the medium",
+ * and metadata satisfies it in a way that survives re-hosting and download —
+ * unlike on-frame text, which is lost the moment anyone re-encodes or crops.
+ * The clip service's share caption carries the same strings for the reader.
  */
 export function buildFinalMuxArgs(options: {
   listPath: string;
   outPath: string;
+  attributionText?: string;
+  noEndorsementText?: string;
 }): string[] {
+  const credit = [options.attributionText, options.noEndorsementText]
+    .filter((line): line is string => line !== undefined && line.trim() !== "")
+    .join(" ");
   return [
     "-y",
     "-f",
@@ -723,6 +801,9 @@ export function buildFinalMuxArgs(options: {
     "-b:a",
     "96k",
     "-shortest",
+    ...(credit === ""
+      ? []
+      : ["-metadata", `comment=${credit}`, "-metadata", `copyright=${credit}`]),
     "-movflags",
     "+faststart",
     // The atomic-write temp name carries no .mp4 suffix, so name the muxer.

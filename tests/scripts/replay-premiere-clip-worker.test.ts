@@ -8,6 +8,13 @@ import {
   validateDiscoveredWinnerTerminalTick,
   WINNER_TERMINAL_DISCOVERY_PHASE_TIMEOUT_MS,
 } from "../../src/scripts/replay-premiere-clip-worker";
+import {
+  PREMIERE_CLIP_CAPTURE_LEAD_TURNS,
+  PREMIERE_CLIP_CAPTURE_TAIL_TURNS,
+} from "../../src/server/replay-premiere/ReplayPremiereContracts";
+
+const CAPTURE_WINDOW_SPAN =
+  PREMIERE_CLIP_CAPTURE_LEAD_TURNS + PREMIERE_CLIP_CAPTURE_TAIL_TURNS;
 
 describe("replay premiere clip winner-terminal contract", () => {
   it("reserves more than half the six-minute job budget for reload and capture", () => {
@@ -94,6 +101,10 @@ describe("replay premiere clip winner-terminal contract", () => {
       captureWindow: null,
     });
 
+    // Derived from the window constants rather than hardcoded, so tuning the
+    // capture window does not require re-deriving magic numbers here. The
+    // invariant under test is the back-shift: an end-anchored window keeps its
+    // FULL span by moving the park tick back, never by overrunning the record.
     expect(
       resolveDiscoveredWinnerReplayPlan({
         anchorTurn: 32_295,
@@ -102,7 +113,10 @@ describe("replay premiere clip winner-terminal contract", () => {
       }),
     ).toEqual({
       terminalTick: 32_251,
-      captureWindow: { parkTick: 31_851, endTick: 32_251 },
+      captureWindow: {
+        parkTick: 32_251 - CAPTURE_WINDOW_SPAN,
+        endTick: 32_251,
+      },
     });
   });
 
@@ -115,9 +129,12 @@ describe("replay premiere clip winner-terminal contract", () => {
       }),
     ).toEqual({
       requiresTerminalDiscovery: false,
-      initialFastForwardTarget: 50_000,
+      initialFastForwardTarget: 50_400 - CAPTURE_WINDOW_SPAN,
       terminalTick: 50_400,
-      captureWindow: { parkTick: 50_000, endTick: 50_400 },
+      captureWindow: {
+        parkTick: 50_400 - CAPTURE_WINDOW_SPAN,
+        endTick: 50_400,
+      },
     });
   });
 

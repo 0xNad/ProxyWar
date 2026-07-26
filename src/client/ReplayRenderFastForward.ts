@@ -137,9 +137,13 @@ export class ReplayRenderFastForward {
  * window's end tick, so the rate and the capture window size together decide
  * how much of the match a clip actually shows.
  *
- * Deliberately bounded: "fastest" removes the inter-turn delay entirely and the
- * resulting duration is pipeline-dependent, which is unusable for a fixed-length
- * social clip. Only the named bounded rates are accepted.
+ * "fastest" drops the inter-turn delay to zero. That does NOT make capture
+ * unbounded: on a `gameRecord` replay LocalServer caps the un-executed backlog
+ * at MAX_REPLAY_BACKLOG_TURNS, so the rate settles at whatever the sim +
+ * presentation pipeline sustains. It is the same rate the viewer-facing max
+ * speed control already selects, so it is a proven path rather than a new one.
+ * Because the resulting body length is pipeline-dependent, the encoder pins the
+ * final duration (see clampClipDurationsToBudget).
  */
 export const REPLAY_RENDER_SPEED_PARAM = "renderReplaySpeed";
 
@@ -147,6 +151,7 @@ const REPLAY_RENDER_SPEED_VALUES: Record<string, number> = {
   // Delay multipliers: lower means faster. Mirrors ReplaySpeedMultiplier.
   normal: 1,
   fast: 0.5,
+  fastest: 0,
 };
 
 /**

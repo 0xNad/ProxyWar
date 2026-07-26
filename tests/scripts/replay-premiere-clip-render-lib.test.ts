@@ -11,8 +11,10 @@ import {
 } from "../../src/client/ReplayRenderFastForward";
 import {
   buildClipEncodeArgs,
+  buildFinalMuxArgs,
   buildSlateArgs,
   CdpClient,
+  clampClipDurationsToBudget,
   CLIP_FRAME_PROFILES,
   CLIP_MAX_CAMERA_OVERSCAN,
   CLIP_MAX_DEAD_SPACE_PER_SIDE,
@@ -37,19 +39,19 @@ describe("clipReplayPageUrl", () => {
       fastForwardUntilTurn: 50_350,
     });
     expect(url).toBe(
-      "http://127.0.0.1:4567/ai-league-replay/render_abc123?renderFastForwardUntilTurn=50350&renderReplaySpeed=fast",
+      "http://127.0.0.1:4567/ai-league-replay/render_abc123?renderFastForwardUntilTurn=50350&renderReplaySpeed=fastest",
     );
     // The exact query the worker emits must round-trip through BOTH page-side
     // parsers — this pins the halves of the contract together.
     expect(parseReplayRenderFastForwardUntilTurn(new URL(url).search)).toBe(
       50_350,
     );
-    // "fast" is the bounded 2x rate (delay multiplier 0.5), paired with the
-    // doubled capture window so clip length stays put while covering twice the
-    // match. "fastest" is deliberately not accepted: unbounded rate makes clip
-    // duration pipeline-dependent.
-    expect(parseReplayRenderSpeed(new URL(url).search)).toBe(0.5);
-    expect(parseReplayRenderSpeed("?renderReplaySpeed=fastest")).toBeNull();
+    // "fastest" is delay multiplier 0: the capture advances as fast as the sim
+    // and presentation pipeline sustain. Body length no longer rides on capture
+    // wall-time because the encoder pins it (clampClipDurationsToBudget), so the
+    // pipeline-dependent rate cannot leak into clip duration.
+    expect(parseReplayRenderSpeed(new URL(url).search)).toBe(0);
+    expect(parseReplayRenderSpeed("?renderReplaySpeed=fast")).toBe(0.5);
     expect(parseReplayRenderSpeed("?renderReplaySpeed=bogus")).toBeNull();
   });
 
@@ -545,13 +547,13 @@ describe("ffmpeg builders honor the target dimensions and licensing", () => {
     expect(args).toContain("high");
   });
 
-  test("slate renders at the frame size with BOTH exact license strings", () => {
+  test("slate renders at the frame size and burns NO license text into the frame", () => {
     for (const shape of ["square", "landscape"] as const) {
       const profile = CLIP_FRAME_PROFILES[shape];
       const args = buildSlateArgs({
         outPath: "/tmp/slate.mp4",
         taglineText: "Autonomous agents. No humans at the controls.",
-      title: "Proxy War",
+        title: "Proxy War",
         ctaText: "proxywar.xyz",
         attributionText: ATTRIBUTION,
         noEndorsementText: NO_ENDORSEMENT,
@@ -560,13 +562,78 @@ describe("ffmpeg builders honor the target dimensions and licensing", () => {
       });
       const joined = args.join("\x00");
       expect(joined).toContain(`s=${profile.width}x${profile.height}`);
-      // The exact strings survive drawtext escaping (only ':' and a few
-      // specials are escaped; these two lines contain none of them except the
-      // attribution comma/colon, so assert on the distinctive substrings).
-      expect(joined).toContain("CC BY-SA 4.0");
-      expect(joined).toContain("footage shared under the same license");
-      expect(joined).toContain("not affiliated with or endorsed by OpenFront");
+      // The credit moved off the frame to the container (see the metadata test
+      // below). Nothing licence-related may be drawn on the slate.
+      expect(joined).not.toContain("CC BY-SA 4.0");
+      expect(joined).not.toContain("footage shared under the same license");
+      expect(joined).not.toContain(
+        "not affiliated with or endorsed by OpenFront",
+      );
+      // The brand elements it exists to show are still present.
+      expect(joined).toContain("Proxy War");
+      expect(joined).toContain("proxywar.xyz");
     }
+  });
+
+  test("duration budget compresses a long capture and preserves relative pacing", () => {
+    // 40s of capture across 1200 frames: comfortably above the fps floor, so it
+    // is pinned to the 20s target. A frame held 4x as long as its neighbours
+    // must still be held 4x as long afterwards, or match pauses stop reading.
+    const durations = new Array<number>(1200).fill(1 / 30);
+    durations[10] = (1 / 30) * 4;
+    const total = durations.reduce((a, b) => a + b, 0);
+    expect(total).toBeGreaterThan(20);
+
+    const budgeted = clampClipDurationsToBudget(durations, 20, 20);
+    const budgetedTotal = budgeted.reduce((a, b) => a + b, 0);
+    expect(budgetedTotal).toBeCloseTo(20, 3);
+    expect(budgeted[10] / budgeted[11]).toBeCloseTo(4, 6);
+  });
+
+  test("duration budget never stretches a sparse capture into a slideshow", () => {
+    // 60 frames captured over 5s. Stretching to 20s would be 3 fps. The floor
+    // caps it at 60/20 = 3s, which is honest: a short clip, not a slideshow.
+    const durations = new Array<number>(60).fill(5 / 60);
+    const budgeted = clampClipDurationsToBudget(durations, 20, 20);
+    const budgetedTotal = budgeted.reduce((a, b) => a + b, 0);
+    expect(budgetedTotal).toBeCloseTo(3, 3);
+    expect(budgetedTotal).toBeLessThan(5);
+  });
+
+  test("duration budget leaves an already-short capture alone", () => {
+    // 900 frames over 12s is under the 20s target and above the floor: pinning
+    // must never pad a clip out to the target with slower playback.
+    const durations = new Array<number>(900).fill(12 / 900);
+    const budgeted = clampClipDurationsToBudget(durations, 20, 20);
+    expect(budgeted.reduce((a, b) => a + b, 0)).toBeCloseTo(12, 3);
+    expect(budgeted).toEqual(durations);
+  });
+
+  test("duration budget tolerates degenerate input", () => {
+    expect(clampClipDurationsToBudget([], 20, 20)).toEqual([]);
+    expect(clampClipDurationsToBudget([0, 0], 20, 20)).toEqual([0, 0]);
+    expect(() => clampClipDurationsToBudget([1], 0, 20)).toThrow();
+    expect(() => clampClipDurationsToBudget([1], 20, 0)).toThrow();
+  });
+
+  test("final mux carries BOTH exact license strings in container metadata", () => {
+    // The CC BY-SA obligation did not go away when the text left the frame:
+    // §3(a)(2) allows medium-appropriate placement, and metadata is the copy
+    // that survives download and re-hosting. If this assertion is ever relaxed,
+    // the clip ships with no attribution at all.
+    const args = buildFinalMuxArgs({
+      listPath: "/tmp/list.txt",
+      outPath: "/tmp/out",
+      attributionText: ATTRIBUTION,
+      noEndorsementText: NO_ENDORSEMENT,
+    });
+    const joined = args.join("\x00");
+    expect(joined).toContain("CC BY-SA 4.0");
+    expect(joined).toContain("footage shared under the same license");
+    expect(joined).toContain("not affiliated with or endorsed by OpenFront");
+    expect(args).toContain("-metadata");
+    expect(args.some((a) => a.startsWith("comment="))).toBe(true);
+    expect(args.some((a) => a.startsWith("copyright="))).toBe(true);
   });
 
   test("slate rejects odd/degenerate dimensions", () => {
@@ -574,7 +641,7 @@ describe("ffmpeg builders honor the target dimensions and licensing", () => {
       buildSlateArgs({
         outPath: "/tmp/s.mp4",
         taglineText: "Autonomous agents. No humans at the controls.",
-      title: "Proxy War",
+        title: "Proxy War",
         ctaText: "x",
         attributionText: ATTRIBUTION,
         noEndorsementText: NO_ENDORSEMENT,

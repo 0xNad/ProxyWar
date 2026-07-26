@@ -8,7 +8,7 @@
  *   "premiereId": string,
  *   "bundlePath": string,            // admitted premiere bundle (read-only)
  *   "expectedBundleSha256": string,  // must match EXACTLY before anything else
- *   "anchorTurn": number,            // clip covers [anchorTurn-50, anchorTurn+150]
+ *   "anchorTurn": number,            // window is PREMIERE_CLIP_CAPTURE_{LEAD,TAIL}_TURNS around it
  *   "renderableThroughTurn": number, // public/retained upper bound
  *   "sourceComplete": boolean,       // permits terminal-window backshift
  *   "clipVersion": number,
@@ -21,10 +21,11 @@
  *
  * Pipeline: verify bundle sha256 -> stage embedded gameRecord -> ephemeral
  * loopback static host -> headless Chrome via CDP (pre-injected pause spam,
- * overlay-hiding CSS, per-frame centerAll camera lock) -> park at
- * anchorTurn-50 -> tick-bounded capture to anchorTurn+150 -> ffmpeg assembly
- * (watermark + licensed end slate + silent AAC + faststart) -> atomic
- * clip.mp4 / render-manifest.json writes.
+ * overlay-hiding CSS, per-frame centerAll camera lock) -> park at the window's
+ * lead boundary -> tick-bounded capture at `renderReplaySpeed=fastest` to its
+ * tail boundary -> ffmpeg assembly (watermark + branded end slate + silent AAC
+ * + attribution metadata + faststart) -> atomic clip.mp4 /
+ * render-manifest.json writes.
  */
 
 import ejs from "ejs";
@@ -39,6 +40,7 @@ import { buildAssetUrl, type AssetManifest } from "../core/AssetUrls";
 import {
   PREMIERE_CLIP_CAPTURE_LEAD_TURNS,
   PREMIERE_CLIP_CAPTURE_TAIL_TURNS,
+  PREMIERE_CLIP_MIN_ANCHOR_TURN,
 } from "../server/replay-premiere/ReplayPremiereContracts";
 import {
   buildClipEncodeArgs,
@@ -48,6 +50,7 @@ import {
   buildFrameExtractArgs,
   buildSlateArgs,
   CdpClient,
+  clampClipDurationsToBudget,
   CLIP_FPS,
   CLIP_MAX_DEAD_SPACE_PER_SIDE,
   clipReplayPageUrl,
@@ -180,8 +183,15 @@ async function readJobSpec(specPath: string): Promise<ClipJobSpec> {
   const anchorTurn = requireNumber("anchorTurn");
   const renderableThroughTurn = requireNumber("renderableThroughTurn");
   const sourceComplete = raw["sourceComplete"];
-  if (!Number.isSafeInteger(anchorTurn) || anchorTurn <= CAPTURE_LEAD_TICKS) {
-    fail(`anchorTurn must be > ${CAPTURE_LEAD_TICKS}`);
+  // Gate on the explicit minimum, not the capture lead: the window resolver
+  // back-shifts and clamps at tick 1, so an early anchor is renderable with a
+  // shorter lead-in. Coupling these would make widening the window silently
+  // reject early-game moments.
+  if (
+    !Number.isSafeInteger(anchorTurn) ||
+    anchorTurn <= PREMIERE_CLIP_MIN_ANCHOR_TURN
+  ) {
+    fail(`anchorTurn must be > ${PREMIERE_CLIP_MIN_ANCHOR_TURN}`);
   }
   if (
     !Number.isSafeInteger(renderableThroughTurn) ||
@@ -924,7 +934,12 @@ async function captureScreencast(
     tickStart,
     tickEnd,
     frameCount: stats.frameCount,
-    frameDurations: durationsFromTimestamps(stats.timestamps),
+    // Capture runs at `renderReplaySpeed=fastest`, so its wall-clock length
+    // tracks host throughput rather than the match. Pin the body to the social
+    // target instead of shipping whatever the pipeline happened to take.
+    frameDurations: clampClipDurationsToBudget(
+      durationsFromTimestamps(stats.timestamps),
+    ),
     captureMs,
     frameTimestamps: stats.timestamps,
   };
@@ -1028,7 +1043,6 @@ async function assembleClip(options: {
       ctaText: options.licenseStrings.cta,
       attributionText: options.licenseStrings.attribution,
       noEndorsementText: options.licenseStrings.noEndorsement,
-      seconds: 2,
       width: options.frame.width,
       height: options.frame.height,
     }),
@@ -1042,10 +1056,17 @@ async function assembleClip(options: {
   const clipPath = path.join(options.outDir, "clip.mp4");
   await runFfmpeg(
     options.ffmpegBinary,
-    buildFinalMuxArgs({ listPath, outPath: tmpClipPath }),
+    buildFinalMuxArgs({
+      listPath,
+      outPath: tmpClipPath,
+      // The slate no longer burns these in; the container carries them so the
+      // credit survives download and re-hosting.
+      attributionText: options.licenseStrings.attribution,
+      noEndorsementText: options.licenseStrings.noEndorsement,
+    }),
   );
 
-  // Proof frame dumps from the FINAL clip (watermark + slate license lines).
+  // Proof frame dumps from the FINAL clip (watermark + slate).
   const bodySeconds = options.frameDurations.reduce((a, b) => a + b, 0);
   await runFfmpeg(
     options.ffmpegBinary,

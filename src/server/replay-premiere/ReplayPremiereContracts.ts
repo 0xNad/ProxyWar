@@ -316,17 +316,38 @@ export const PREMIERE_CLIP_ANCHOR_BUCKET_TURNS = 10;
 /**
  * Clip capture window, in game turns.
  *
- * Capture runs in wall-clock time until the window's end tick, so window size
- * and playback rate together decide how much of a match a clip shows. These
- * were 50/150 (200 turns) at the normal 10 turns/sec — 20s of video showing 200
- * turns of a match that can run 50,000, which reads as a near-still image.
+ * Window size and capture rate together decide how much of a match a clip
+ * shows. These began at 50/150 (200 turns) at the normal 10 turns/sec — 20s of
+ * video covering 200 turns of a match that can run 50,000, which reads as a
+ * near-still image. 100/300 at the "fast" rate doubled that and measured 401
+ * ticks over a 21s capture (~19 turns/sec, i.e. still delay-bound).
  *
- * Doubled, and paired with the "fast" capture rate (2x), so a clip covers twice
- * the match in the same ~20s of video.
+ * Now paired with `renderReplaySpeed=fastest`, which removes the inter-turn
+ * delay so the rate is bound by the dispatch loop rather than a timer, and with
+ * an encoder that pins the body to CLIP_TARGET_BODY_SECONDS. Window size is
+ * therefore the only knob that decides coverage, and overshooting is the safe
+ * direction: a long capture is compressed to the target, while a short one can
+ * only produce a shorter clip.
+ *
+ * Sized from measurement, not estimate. At `fastest` the dispatch loop's 5ms
+ * period caps the rate at 200 turns/sec, and a real render measured 200.2
+ * turns/sec — i.e. the ceiling, so the rate is stable rather than load-dependent.
+ * 4000 turns therefore captures in ~20s, which is the body target.
  */
-export const PREMIERE_CLIP_CAPTURE_LEAD_TURNS = 100;
-export const PREMIERE_CLIP_CAPTURE_TAIL_TURNS = 300;
-export const PREMIERE_CLIP_MIN_ANCHOR_TURN = PREMIERE_CLIP_CAPTURE_LEAD_TURNS;
+export const PREMIERE_CLIP_CAPTURE_LEAD_TURNS = 1000;
+export const PREMIERE_CLIP_CAPTURE_TAIL_TURNS = 3000;
+
+/**
+ * Earliest anchor that can be clipped.
+ *
+ * Deliberately NOT the capture lead. resolveClipCaptureWindow already clamps the
+ * park tick at 1 and back-shifts the window, so an early anchor simply gets less
+ * lead-in — it does not need a full lead's worth of match to exist. Tying this to
+ * the lead would silently make every early-game moment unclippable each time the
+ * window grows (at a 1000-turn lead that would be the whole first 1.6% of a
+ * 50k-turn match).
+ */
+export const PREMIERE_CLIP_MIN_ANCHOR_TURN = 100;
 
 /** Upper bound on the bucket index encoded in routes/filenames (9 digits). */
 export const PREMIERE_CLIP_MAX_BUCKET = 999_999_999;
