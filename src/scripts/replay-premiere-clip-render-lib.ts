@@ -43,7 +43,8 @@ export const FONT_ARIAL_BLACK =
 /** Slate background color, ported from assemble.py's endcard (0x0e0e12). */
 export const SLATE_BACKGROUND = "0x0e0e12";
 /** Gold accent, ported from assemble.py's endcard line color. */
-export const SLATE_ACCENT = "0xF8D530";
+// Canonical Proxy War amber (--pw-accent #f4a64a). ffmpeg wants 0xRRGGBB.
+export const SLATE_ACCENT = "0xF4A64A";
 
 export const CLIP_FPS = 30;
 export const CLIP_CRF = 21;
@@ -556,6 +557,7 @@ export function buildClipEncodeArgs(options: {
 export function buildSlateArgs(options: {
   outPath: string;
   title: string;
+  taglineText: string;
   ctaText: string;
   attributionText: string;
   noEndorsementText: string;
@@ -563,17 +565,21 @@ export function buildSlateArgs(options: {
   width?: number;
   height?: number;
 }): string[] {
-  const seconds = options.seconds ?? 2;
+  const seconds = options.seconds ?? 3;
   const { width, height } = frameSize(options);
   // Title/CTA sit above vertical center; the two license lines are pinned to
   // the bottom margin (measured up from the frame bottom, not down from the
   // top) so they never overflow whatever the frame height is. The license font
   // is capped so the longer attribution line fits within the frame width with a
   // safe margin at either aspect.
-  const titleSize = Math.round(height * 0.089);
-  const ctaSize = Math.round(height * 0.055);
+  const titleSize = Math.round(height * 0.105);
+  const taglineSize = Math.round(height * 0.036);
+  const ctaSize = Math.round(height * 0.05);
+  // The credit is a footer, not a competing element: smaller and dimmer than
+  // before so the brand moment reads first. It stays on-frame because CC BY-SA
+  // attribution is a licence obligation, not decoration.
   const licenseSize = Math.min(
-    Math.round(height * 0.024),
+    Math.round(height * 0.019),
     // ~0.9 px per character for Arial at the widths we use; keep the longest
     // license line inside 92% of the frame width.
     Math.floor((width * 0.92) / (longestLicenseChars(options) * 0.52)),
@@ -586,7 +592,15 @@ export function buildSlateArgs(options: {
       fontColor: "white",
       fontSize: titleSize,
       x: "(w-text_w)/2",
-      y: `${(height * 0.5 - titleSize - height * 0.03).toFixed(0)}`,
+      y: `${(height * 0.5 - titleSize - height * 0.055).toFixed(0)}`,
+    }),
+    drawtext({
+      fontFile: FONT_ARIAL,
+      text: options.taglineText,
+      fontColor: "white@0.72",
+      fontSize: taglineSize,
+      x: "(w-text_w)/2",
+      y: `${(height * 0.5 - height * 0.028).toFixed(0)}`,
     }),
     drawtext({
       fontFile: FONT_ARIAL_BOLD,
@@ -594,12 +608,12 @@ export function buildSlateArgs(options: {
       fontColor: SLATE_ACCENT,
       fontSize: ctaSize,
       x: "(w-text_w)/2",
-      y: `${(height * 0.5 + height * 0.02).toFixed(0)}`,
+      y: `${(height * 0.5 + height * 0.045).toFixed(0)}`,
     }),
     drawtext({
       fontFile: FONT_ARIAL,
       text: options.attributionText,
-      fontColor: "white@0.85",
+      fontColor: "white@0.5",
       fontSize: licenseSize,
       x: "(w-text_w)/2",
       y: `h-${(height * 0.07 + licenseLineGap).toFixed(0)}`,
@@ -607,7 +621,7 @@ export function buildSlateArgs(options: {
     drawtext({
       fontFile: FONT_ARIAL,
       text: options.noEndorsementText,
-      fontColor: "white@0.85",
+      fontColor: "white@0.5",
       fontSize: licenseSize,
       x: "(w-text_w)/2",
       y: `h-${(height * 0.07).toFixed(0)}`,

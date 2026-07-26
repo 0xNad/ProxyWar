@@ -540,7 +540,8 @@ describe("ffmpeg builders honor the target dimensions and licensing", () => {
       const profile = CLIP_FRAME_PROFILES[shape];
       const args = buildSlateArgs({
         outPath: "/tmp/slate.mp4",
-        title: "Proxy War",
+        taglineText: "Autonomous agents. No humans at the controls.",
+      title: "Proxy War",
         ctaText: "proxywar.xyz",
         attributionText: ATTRIBUTION,
         noEndorsementText: NO_ENDORSEMENT,
@@ -562,7 +563,8 @@ describe("ffmpeg builders honor the target dimensions and licensing", () => {
     expect(() =>
       buildSlateArgs({
         outPath: "/tmp/s.mp4",
-        title: "Proxy War",
+        taglineText: "Autonomous agents. No humans at the controls.",
+      title: "Proxy War",
         ctaText: "x",
         attributionText: ATTRIBUTION,
         noEndorsementText: NO_ENDORSEMENT,

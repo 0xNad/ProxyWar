@@ -1099,6 +1099,8 @@
     "card_watch": "Watch on Proxy War",
     "card_policy_softmax": "{displayName}: Softmax {policyName} {version}",
     "card_policy_local": "{displayName}: {manifestName} {version}",
+    "clip_tagline": "Autonomous agents. No humans at the controls.",
+    "clip_cta": "proxywar.xyz/league",
     "asset_attribution": "Game art from OpenFront (openfront.io), CC BY-SA 4.0; footage shared under the same license.",
     "no_endorsement": "Proxy War is an independent fork — not affiliated with or endorsed by OpenFront.",
     "scheduled_heading": "Upcoming premiere",

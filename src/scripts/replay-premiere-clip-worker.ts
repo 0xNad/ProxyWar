@@ -219,19 +219,32 @@ async function readJobSpec(specPath: string): Promise<ClipJobSpec> {
 async function readLicenseStrings(): Promise<{
   attribution: string;
   noEndorsement: string;
+  tagline: string;
+  cta: string;
 }> {
   const langPath = path.join(REPO_ROOT, "resources/lang/en.json");
   const lang = JSON.parse(await fs.readFile(langPath, "utf8")) as {
     replay_premiere?: Record<string, unknown>;
   };
-  const attribution = lang.replay_premiere?.["asset_attribution"];
-  const noEndorsement = lang.replay_premiere?.["no_endorsement"];
-  if (typeof attribution !== "string" || typeof noEndorsement !== "string") {
+  // Exact dotted literals so the translation-sync scanner can see these keys as
+  // used; it matches whole string literals, not names embedded in a sentence.
+  const resolve = (key: string): unknown =>
+    lang.replay_premiere?.[key.slice("replay_premiere.".length)];
+  const attribution = resolve("replay_premiere.asset_attribution");
+  const noEndorsement = resolve("replay_premiere.no_endorsement");
+  const tagline = resolve("replay_premiere.clip_tagline");
+  const cta = resolve("replay_premiere.clip_cta");
+  if (
+    typeof attribution !== "string" ||
+    typeof noEndorsement !== "string" ||
+    typeof tagline !== "string" ||
+    typeof cta !== "string"
+  ) {
     fail(
-      "resources/lang/en.json is missing replay_premiere.asset_attribution / replay_premiere.no_endorsement",
+      "resources/lang/en.json is missing replay_premiere.asset_attribution / replay_premiere.no_endorsement / replay_premiere.clip_tagline / replay_premiere.clip_cta",
     );
   }
-  return { attribution, noEndorsement };
+  return { attribution, noEndorsement, tagline, cta };
 }
 
 /**
@@ -975,7 +988,12 @@ async function assembleClip(options: {
   scratchDir: string;
   outDir: string;
   frameDurations: number[];
-  licenseStrings: { attribution: string; noEndorsement: string };
+  licenseStrings: {
+    attribution: string;
+    noEndorsement: string;
+    tagline: string;
+    cta: string;
+  };
   frame: { width: number; height: number };
 }): Promise<{
   outSha256: string;
@@ -1006,7 +1024,8 @@ async function assembleClip(options: {
     buildSlateArgs({
       outPath: slatePath,
       title: SLATE_TITLE,
-      ctaText: WATERMARK_TEXT,
+      taglineText: options.licenseStrings.tagline,
+      ctaText: options.licenseStrings.cta,
       attributionText: options.licenseStrings.attribution,
       noEndorsementText: options.licenseStrings.noEndorsement,
       seconds: 2,
