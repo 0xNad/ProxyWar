@@ -2412,6 +2412,21 @@ for (const replayRoute of [
   });
 }
 
+// Final catch-all: any request that reaches here matched no route or static
+// file. Express's built-in fallback echoes the raw request path into the
+// response body ("Cannot GET /..."), which fails the Replay Premiere leak
+// audit for any URL constructed from a private sourceRunId (e.g. the
+// `/ai-league-runs/league-<runId>/<artifact>` alias probe: it matches
+// `isProxyWarPublicLeaguePath`'s generic "league-*" pattern and is let
+// through to the static/artifact routes, which correctly 404 when no such
+// run exists on disk — but without this handler that 404 falls through to
+// Express's default, path-echoing page). Replace it with a fixed, path-free
+// body for every method/route so no unmatched path ever appears in a
+// response.
+app.use((_req, res) => {
+  res.status(404).send("Not found.");
+});
+
 const renderer = maybeStartRenderer();
 const server = app.listen(port, host, () => {
   console.log(`Proxy War demo hub: ${serverUrls.localUrl}`);
