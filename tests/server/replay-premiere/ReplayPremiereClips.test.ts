@@ -14,6 +14,7 @@ import {
 } from "../../../src/server/replay-premiere/ReplayPremiereClips";
 import type { PremiereState } from "../../../src/server/replay-premiere/ReplayPremiereContracts";
 import {
+  PREMIERE_CLIP_CAPTURE_TAIL_TURNS,
   premiereClipBucketForTurn,
   premiereClipRepresentativeAnchorTurn,
 } from "../../../src/server/replay-premiere/ReplayPremiereContracts";
@@ -1325,7 +1326,9 @@ describe("replay-scoped lifecycle independence", () => {
           anchorTurn: 605,
           participantId: "p_a",
           sourceReplaySha256: SHA,
-          renderableThroughTurn: 755,
+          // Exactly anchor + the full capture tail. Derived, not hard-coded, so
+          // widening the capture window cannot silently invalidate this case.
+          renderableThroughTurn: 605 + PREMIERE_CLIP_CAPTURE_TAIL_TURNS,
           sourceComplete: false,
         })
       ).state,

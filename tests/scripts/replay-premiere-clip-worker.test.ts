@@ -102,7 +102,7 @@ describe("replay premiere clip winner-terminal contract", () => {
       }),
     ).toEqual({
       terminalTick: 32_251,
-      captureWindow: { parkTick: 32_051, endTick: 32_251 },
+      captureWindow: { parkTick: 31_851, endTick: 32_251 },
     });
   });
 
@@ -115,9 +115,9 @@ describe("replay premiere clip winner-terminal contract", () => {
       }),
     ).toEqual({
       requiresTerminalDiscovery: false,
-      initialFastForwardTarget: 50_200,
+      initialFastForwardTarget: 50_000,
       terminalTick: 50_400,
-      captureWindow: { parkTick: 50_200, endTick: 50_400 },
+      captureWindow: { parkTick: 50_000, endTick: 50_400 },
     });
   });
 

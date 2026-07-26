@@ -30,6 +30,7 @@ import {
   ReplayPremierePlaybackEvent,
   ReplayPremiereReleasedTurn,
 } from "./ReplayPremierePlayback";
+import { parseReplayRenderSpeed } from "./ReplayRenderFastForward";
 import {
   defaultReplaySpeedMultiplier,
   ReplaySpeedMultiplier,
@@ -63,7 +64,12 @@ export class LocalServer {
   private startedAt: number;
 
   private paused = false;
-  private replaySpeedMultiplier: number = defaultReplaySpeedMultiplier;
+  // Headless clip captures pass their playback rate on the URL; everything else
+  // starts at the normal rate.
+  private replaySpeedMultiplier: number =
+    parseReplayRenderSpeed(
+      typeof window === "undefined" ? "" : window.location.search,
+    ) ?? defaultReplaySpeedMultiplier;
 
   private progressiveReplayTurns: Readonly<ReplayPremiereReleasedTurn>[] = [];
   private progressiveReplayTurnsByTurnNumber = new Map<number, Turn>();

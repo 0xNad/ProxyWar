@@ -313,8 +313,19 @@ export const PREMIERE_CLIP_ANCHOR_BUCKET_TURNS = 10;
  * anchor is its center (`bucket*10 + 5`), so bucket 5 (turns 50-59, center 55)
  * is the earliest renderable bucket. Requests for earlier turns are rejected.
  */
-export const PREMIERE_CLIP_CAPTURE_LEAD_TURNS = 50;
-export const PREMIERE_CLIP_CAPTURE_TAIL_TURNS = 150;
+/**
+ * Clip capture window, in game turns.
+ *
+ * Capture runs in wall-clock time until the window's end tick, so window size
+ * and playback rate together decide how much of a match a clip shows. These
+ * were 50/150 (200 turns) at the normal 10 turns/sec — 20s of video showing 200
+ * turns of a match that can run 50,000, which reads as a near-still image.
+ *
+ * Doubled, and paired with the "fast" capture rate (2x), so a clip covers twice
+ * the match in the same ~20s of video.
+ */
+export const PREMIERE_CLIP_CAPTURE_LEAD_TURNS = 100;
+export const PREMIERE_CLIP_CAPTURE_TAIL_TURNS = 300;
 export const PREMIERE_CLIP_MIN_ANCHOR_TURN = PREMIERE_CLIP_CAPTURE_LEAD_TURNS;
 
 /** Upper bound on the bucket index encoded in routes/filenames (9 digits). */

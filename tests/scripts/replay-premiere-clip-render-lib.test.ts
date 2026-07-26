@@ -5,7 +5,10 @@ import os from "node:os";
 import path from "node:path";
 import { describe, expect, test } from "vitest";
 import { WebSocketServer } from "ws";
-import { parseReplayRenderFastForwardUntilTurn } from "../../src/client/ReplayRenderFastForward";
+import {
+  parseReplayRenderFastForwardUntilTurn,
+  parseReplayRenderSpeed,
+} from "../../src/client/ReplayRenderFastForward";
 import {
   buildClipEncodeArgs,
   buildSlateArgs,
@@ -34,13 +37,20 @@ describe("clipReplayPageUrl", () => {
       fastForwardUntilTurn: 50_350,
     });
     expect(url).toBe(
-      "http://127.0.0.1:4567/ai-league-replay/render_abc123?renderFastForwardUntilTurn=50350",
+      "http://127.0.0.1:4567/ai-league-replay/render_abc123?renderFastForwardUntilTurn=50350&renderReplaySpeed=fast",
     );
-    // The exact query the worker emits must round-trip through the page-side
-    // parser — this pins the two halves of the contract together.
+    // The exact query the worker emits must round-trip through BOTH page-side
+    // parsers — this pins the halves of the contract together.
     expect(parseReplayRenderFastForwardUntilTurn(new URL(url).search)).toBe(
       50_350,
     );
+    // "fast" is the bounded 2x rate (delay multiplier 0.5), paired with the
+    // doubled capture window so clip length stays put while covering twice the
+    // match. "fastest" is deliberately not accepted: unbounded rate makes clip
+    // duration pipeline-dependent.
+    expect(parseReplayRenderSpeed(new URL(url).search)).toBe(0.5);
+    expect(parseReplayRenderSpeed("?renderReplaySpeed=fastest")).toBeNull();
+    expect(parseReplayRenderSpeed("?renderReplaySpeed=bogus")).toBeNull();
   });
 
   test("omits the parameter for non-positive or invalid targets", () => {

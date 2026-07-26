@@ -130,3 +130,36 @@ export class ReplayRenderFastForward {
     return this.buffer.length;
   }
 }
+
+/**
+ * Query parameter the clip worker appends to set replay playback rate for a
+ * headless capture. The clip body is captured in wall-clock time until the
+ * window's end tick, so the rate and the capture window size together decide
+ * how much of the match a clip actually shows.
+ *
+ * Deliberately bounded: "fastest" removes the inter-turn delay entirely and the
+ * resulting duration is pipeline-dependent, which is unusable for a fixed-length
+ * social clip. Only the named bounded rates are accepted.
+ */
+export const REPLAY_RENDER_SPEED_PARAM = "renderReplaySpeed";
+
+const REPLAY_RENDER_SPEED_VALUES: Record<string, number> = {
+  // Delay multipliers: lower means faster. Mirrors ReplaySpeedMultiplier.
+  normal: 1,
+  fast: 0.5,
+};
+
+/**
+ * Parses the capture playback rate. Fail-closed: anything unrecognised returns
+ * null so playback keeps its normal rate.
+ */
+export function parseReplayRenderSpeed(search: string): number | null {
+  let raw: string | null;
+  try {
+    raw = new URLSearchParams(search).get(REPLAY_RENDER_SPEED_PARAM);
+  } catch {
+    return null;
+  }
+  if (raw === null) return null;
+  return REPLAY_RENDER_SPEED_VALUES[raw] ?? null;
+}

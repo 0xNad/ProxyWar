@@ -139,7 +139,10 @@ export function clipReplayPageUrl(options: {
   ) {
     return base;
   }
-  return `${base}?renderFastForwardUntilTurn=${options.fastForwardUntilTurn}`;
+  // "fast" halves the inter-turn delay, so the doubled capture window still
+  // yields the same clip length. Deliberately not "fastest": that removes the
+  // delay entirely and clip duration becomes pipeline-dependent.
+  return `${base}?renderFastForwardUntilTurn=${options.fastForwardUntilTurn}&renderReplaySpeed=fast`;
 }
 
 /**
