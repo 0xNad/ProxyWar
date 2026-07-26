@@ -172,9 +172,12 @@ describe("coworldLeagueIndexHtml", () => {
   test("binds score and rounds to rating provenance", () => {
     const html = coworldLeagueIndexHtml(sampleData());
     expect(html).toContain("Rated rounds");
-    expect(html).toContain(
-      "Rank, score, and rated rounds come from Coworld&#39;s rating row; the active champion is shown separately when it differs.",
-    );
+    // The note now says what the numbers MEAN, not just where they come from:
+    // "SCORE 25.65 — out of what?" was the single most common newcomer question.
+    expect(html).toContain("Score is a rolling rating from recent finishing");
+    expect(html).toContain("it is not a percentage");
+    expect(html).toContain("a low number means a provisional score");
+    expect(html).toContain("Coworld&#39;s rating row");
     expect(html).toContain('aria-describedby="standings-provenance"');
   });
 
@@ -183,10 +186,23 @@ describe("coworldLeagueIndexHtml", () => {
     expect(html).toContain('<span class="policy">qd1n:v2</span>');
   });
 
-  test("renders degraded chip only for degraded battles", () => {
+  test("names the recovered-turn chip and only warns above the threshold", () => {
+    // Every card used to read "⚠ N degraded", which simulated newcomers read as
+    // "this site is broken". Same number, named the way the replay panel names
+    // it, with a denominator, and the warning colour reserved for elevated runs.
     const html = coworldLeagueIndexHtml(sampleData());
-    expect(html).toContain("⚠ 33 degraded");
-    expect(html).not.toContain("⚠ 0 degraded");
+    // 33 of 236 decisions = 14%, below the 15% warning threshold.
+    expect(html).toContain("33 recovered turns (14%)");
+    expect(html).not.toContain("degraded<");
+    expect(html).not.toContain("⚠ 33");
+    expect(html).not.toContain("class=\"degraded elevated\"");
+
+    const elevated = sampleData();
+    elevated.episodes[0].degradedCount = 120;
+    elevated.episodes[0].decisionCount = 236;
+    const elevatedHtml = coworldLeagueIndexHtml(elevated);
+    expect(elevatedHtml).toContain("⚠ 120 recovered turns (51%)");
+    expect(elevatedHtml).toContain('class="degraded elevated"');
   });
 
   test("renders compact mobile rosters with an accessible disclosure", () => {

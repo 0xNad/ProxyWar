@@ -166,6 +166,13 @@ export interface CoworldLeagueSitePaths {
   dataPath: string;
 }
 
+/**
+ * Share of a match's decisions that must fall back before the card shows a
+ * warning. Below this it is normal variance; every card carrying ⚠ made the
+ * whole league look broken.
+ */
+const DEGRADED_WARNING_PERCENT = 15;
+
 export const COWORLD_LEAGUE_POLL_INTERVAL_MS = 30_000;
 export const COWORLD_LEAGUE_POLL_TIMEOUT_MS = 10_000;
 const COWORLD_LEAGUE_FAILURES_BEFORE_WARNING = 2;
@@ -645,7 +652,8 @@ ${leagueSocialMetaHtml()}
     .battle-foot .meta { color:var(--muted); font:700 11px ui-monospace, SFMono-Regular, Menlo, monospace; }
     .battle-foot .links { margin-left:auto; }
     .battle-foot .links .link-sep { color:var(--muted); }
-    .degraded { border:1px solid rgba(244,166,74,.5); color:var(--amber); border-radius:4px; padding:2px 7px; font:800 10px ui-monospace, SFMono-Regular, Menlo, monospace; cursor:help; }
+    .degraded { border:1px solid var(--line); color:var(--muted); border-radius:4px; padding:2px 7px; font:800 10px ui-monospace, SFMono-Regular, Menlo, monospace; cursor:help; }
+    .degraded.elevated { border-color:rgba(244,166,74,.5); color:var(--amber); }
     .rounds-strip { display:flex; gap:8px; flex-wrap:wrap; }
     .round-pill { border:1px solid var(--line); background:var(--surface); border-radius:6px; padding:8px 10px; font:700 12px ui-monospace, SFMono-Regular, Menlo, monospace; color:var(--muted); }
     .round-pill.running { border-color:rgba(126,224,168,.5); color:var(--good); }${premiereStyles}
@@ -1049,12 +1057,31 @@ function battleCard(episode: CoworldLeagueEpisodeRow): string {
   if (episode.decisionCount !== null) {
     meta.push(`${formatTiles(episode.decisionCount)} decisions`);
   }
-  const degraded =
-    episode.degradedCount !== null && episode.degradedCount > 0
-      ? `<span class="degraded" title="${escapeHtml(
-          translateText("coworld_league.degraded_tip"),
-        )}">⚠ ${escapeHtml(String(episode.degradedCount))} degraded</span>`
-      : "";
+  // "⚠ 181 degraded" appeared on EVERY card and read as "this site is broken"
+  // to every simulated newcomer. Same number, but: name it the way the replay
+  // panel does ("recovered"), give it a denominator, and only wear the warning
+  // colour above a threshold — below that it is ordinary match noise, not an
+  // alarm.
+  const degraded = (() => {
+    const count = episode.degradedCount;
+    if (count === null || count <= 0) return "";
+    const total = episode.decisionCount;
+    const share =
+      total !== null && total > 0 ? Math.round((count / total) * 100) : null;
+    const elevated = share !== null && share >= DEGRADED_WARNING_PERCENT;
+    const label =
+      share === null
+        ? translateText("coworld_league.recovered_plain").replace(
+            "{count}",
+            formatTiles(count),
+          )
+        : translateText("coworld_league.recovered_share")
+            .replace("{count}", formatTiles(count))
+            .replace("{percent}", String(share));
+    return `<span class="degraded${elevated ? " elevated" : ""}" title="${escapeHtml(
+      translateText("coworld_league.degraded_tip"),
+    )}">${elevated ? "⚠ " : ""}${escapeHtml(label)}</span>`;
+  })();
   // Battle-card links. The premiere link is present ONLY when the mirror
   // attached a revealed-premiere href (see CoworldLeagueEpisodeRow.premiereHref
   // — outcome already public, never pre-reveal). The `typeof` guard also
