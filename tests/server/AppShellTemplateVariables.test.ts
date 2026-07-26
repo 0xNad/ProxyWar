@@ -3,21 +3,26 @@ import path from "node:path";
 import { describe, expect, it } from "vitest";
 
 /**
- * index.html is rendered by TWO independent EJS callers:
+ * index.html is rendered by THREE independent EJS callers:
  *
  *   1. src/server/RenderHtml.ts            — the live app shell
  *   2. src/scripts/replay-premiere-clip-worker.ts — the clip renderer's
  *      loopback capture host
+ *   3. vite.config.ts (vite-plugin-html)   — the dev server and build
  *
  * EJS throws ReferenceError on ANY undefined name, so a variable added to the
- * template but supplied by only one caller breaks the other at runtime. That is
- * not hypothetical: adding the social/OG tags supplied `socialPageUrl` from the
- * server only, and every clip render died with
- * "ReferenceError: socialPageUrl is not defined" — after ffmpeg and bundle
- * verification had already succeeded, so it surfaced as a generic clip failure.
+ * template but supplied by only one caller breaks the others at runtime. That is
+ * not hypothetical, and it has now happened twice from the SAME change: adding
+ * the social/OG tags supplied `socialPageUrl` from the server only, which first
+ * killed every clip render ("ReferenceError: socialPageUrl is not defined",
+ * surfacing only as a generic clip failure because it came after ffmpeg and
+ * bundle verification), and then — missed because this test originally covered
+ * just the two runtime renderers — made every `npm run dev` page a 500.
+ * Production was fine throughout, since it serves prebuilt HTML, which is
+ * exactly why the gap stayed invisible.
  *
  * This test pins the invariant: every name the template interpolates must be
- * supplied by both renderers.
+ * supplied by ALL THREE renderers. When a fourth appears, add it here.
  */
 const repoRoot = path.resolve(__dirname, "../..");
 
@@ -48,6 +53,7 @@ describe("app shell EJS template variables", () => {
   it.each([
     ["src/server/RenderHtml.ts"],
     ["src/scripts/replay-premiere-clip-worker.ts"],
+    ["vite.config.ts"],
   ])("%s supplies every name index.html interpolates", (relativePath) => {
     const source = sourceOf(relativePath);
     // Accept both `name: value` and ES object shorthand (`name,`).

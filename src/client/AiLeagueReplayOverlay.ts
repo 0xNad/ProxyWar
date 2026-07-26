@@ -8,6 +8,11 @@ import {
   type ReplayScopedLeagueClipControlHandle,
 } from "./ReplayClipControl";
 import { REPLAY_RENDER_FAST_FORWARD_PARAM } from "./ReplayRenderFastForward";
+import {
+  REPLAY_SHARE_IMAGE_REQUEST_EVENT,
+  REPLAY_SHARE_IMAGE_RESULT_EVENT,
+  type ReplayShareImageResultDetail,
+} from "./ReplayShareImageBinding";
 import { ReplaySpeedMultiplier } from "./utilities/ReplaySpeedMultiplier";
 import { translateText } from "./Utils";
 
@@ -325,6 +330,7 @@ function mountReplayDetailsBindings(
   mountAiLeagueDecisionLogExpander(overlay, input.decisions);
   mountAiLeagueDecisionsDisclosure(overlay);
   mountAiLeagueRadioToggle(overlay);
+  mountAiLeagueShareImageButton(overlay);
   const clipContainer = overlay.querySelector<HTMLElement>(
     "[data-ai-league-clip]",
   );
@@ -335,6 +341,60 @@ function mountReplayDetailsBindings(
         runKey: input.runID,
         renderableThroughTurn: input.replayMaxTurn,
       });
+}
+
+/**
+ * Share button. The capture itself happens in the renderer binding, which owns
+ * the canvas; this only asks for it and reports the outcome. The button is
+ * disabled while a capture is in flight so a double click cannot queue two
+ * encodes, and it self-resets if no binding is listening.
+ */
+function mountAiLeagueShareImageButton(overlay: HTMLElement): void {
+  const button = overlay.querySelector<HTMLButtonElement>(
+    "[data-ai-league-share-button]",
+  );
+  const status = overlay.querySelector<HTMLElement>(
+    "[data-ai-league-share-status]",
+  );
+  if (button === null) return;
+  let resetTimer: ReturnType<typeof setTimeout> | null = null;
+  const settle = (message: string): void => {
+    button.disabled = false;
+    if (status !== null) status.textContent = message;
+    if (resetTimer !== null) clearTimeout(resetTimer);
+    resetTimer = setTimeout(() => {
+      if (status !== null) status.textContent = "";
+    }, 4000);
+  };
+  document.addEventListener(REPLAY_SHARE_IMAGE_RESULT_EVENT, (event: Event) => {
+    const detail = (event as CustomEvent<ReplayShareImageResultDetail>).detail;
+    settle(
+      translateText(
+        detail?.ok !== true
+          ? "ai_league_replay.share_image_failed"
+          : detail.delivery === "clipboard"
+            ? "ai_league_replay.share_image_copied"
+            : "ai_league_replay.share_image_saved",
+      ),
+    );
+  });
+  button.addEventListener("click", () => {
+    button.disabled = true;
+    if (status !== null) {
+      status.textContent = translateText(
+        "ai_league_replay.share_image_working",
+      );
+    }
+    document.dispatchEvent(new CustomEvent(REPLAY_SHARE_IMAGE_REQUEST_EVENT));
+    // No binding mounted (details-only page, or the renderer is gone): the
+    // request goes nowhere, so recover the button instead of wedging it.
+    if (resetTimer !== null) clearTimeout(resetTimer);
+    resetTimer = setTimeout(() => {
+      if (button.disabled) {
+        settle(translateText("ai_league_replay.share_image_failed"));
+      }
+    }, 8000);
+  });
 }
 
 /**
@@ -1283,6 +1343,49 @@ function overlayHtml(input: AiLeagueReplayOverlayInput): string {
         gap: 8px;
         align-items: start;
       }
+      .ai-league-share {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        margin: 8px 0 0;
+        min-height: 30px;
+      }
+      .ai-league-share-button {
+        border: 1px solid var(--pw-border, rgba(148, 163, 184, 0.28));
+        background: var(--pw-surface, #111720);
+        color: var(--pw-text, #e6edf6);
+        border-radius: var(--pw-r-sm, 8px);
+        padding: 6px 11px;
+        font: inherit;
+        font-size: 12px;
+        font-weight: 600;
+        cursor: pointer;
+        transition:
+          background 120ms ease,
+          border-color 120ms ease;
+      }
+      .ai-league-share-button:hover:not(:disabled) {
+        background: var(--pw-surface-raised, #18202b);
+        border-color: var(--pw-accent, #f4a64a);
+      }
+      .ai-league-share-button:focus-visible {
+        outline: 2px solid var(--pw-accent, #f4a64a);
+        outline-offset: 2px;
+      }
+      .ai-league-share-button:disabled {
+        opacity: 0.55;
+        cursor: default;
+      }
+      .ai-league-share-status {
+        font-size: 12px;
+        color: var(--pw-text-muted, rgba(230, 237, 246, 0.62));
+      }
+      @media (pointer: coarse) {
+        .ai-league-share-button {
+          min-height: 44px;
+          padding: 6px 14px;
+        }
+      }
       .ai-league-badges {
         display: flex;
         gap: 5px;
@@ -1717,6 +1820,13 @@ function overlayDetailsHtml(input: AiLeagueReplayOverlayInput): string {
     </section>
     ${input.detailsLoading || detailsUnavailable ? setupHtml : ""}
     ${spectatorTelemetry ? communicationThreadsHtml(spectatorTelemetry) : ""}
+    <section class="ai-league-share">
+      <button type="button" class="ai-league-share-button" data-ai-league-share-button
+        title="${escapeHtml(translateText("ai_league_replay.share_image_tip"))}">
+        ${escapeHtml(translateText("ai_league_replay.share_image"))}
+      </button>
+      <span class="ai-league-share-status" data-ai-league-share-status role="status" aria-live="polite"></span>
+    </section>
     <section class="ai-league-clip" data-ai-league-clip></section>
     ${decisionLogHtml(input.decisions, currentTurn)}`;
 }
@@ -1783,7 +1893,6 @@ function recoveredShareHtml(
     }),
   )}</span>`;
 }
-
 
 const AI_LEAGUE_DECISION_LOG_CAP = 15;
 

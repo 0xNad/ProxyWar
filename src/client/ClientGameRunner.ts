@@ -59,6 +59,7 @@ import {
   parseReplayRenderFastForwardUntilTurn,
   ReplayRenderFastForward,
 } from "./ReplayRenderFastForward";
+import { mountReplayShareImageCapture } from "./ReplayShareImageBinding";
 import { terrainMapFileLoader } from "./TerrainMapFileLoader";
 import {
   SendAllianceRequestIntentEvent,
@@ -370,6 +371,9 @@ export class ClientGameRunner {
   // replays only — never premiere pages. See ReplayRenderFastForward.
   private renderFastForward: ReplayRenderFastForward | null = null;
 
+  /** Removes the share-image capture listener; set while the game is active. */
+  private disposeShareImageCapture: (() => void) | null = null;
+
   constructor(
     private lobby: LobbyConfig,
     private clientID: ClientID | undefined,
@@ -461,6 +465,17 @@ export class ClientGameRunner {
 
     this.isActive = true;
     this.lastMessageTime = Date.now();
+    try {
+      this.disposeShareImageCapture = mountReplayShareImageCapture({
+        canvas: this.renderer.gameCanvas,
+        game: this.gameView,
+        runId: this.lobby.gameStartInfo?.gameID ?? "replay",
+      });
+    } catch (error) {
+      // Share capture is a convenience on top of playback. Nothing about it may
+      // prevent a game from starting, so a failure here is logged and dropped.
+      console.error("[share-image] capture unavailable", error);
+    }
     setTimeout(() => {
       this.connectionCheckInterval = setInterval(
         () => this.onConnectionCheck(),
@@ -832,6 +847,10 @@ export class ClientGameRunner {
     if (!this.isActive) return;
 
     this.isActive = false;
+    if (this.disposeShareImageCapture !== null) {
+      this.disposeShareImageCapture();
+      this.disposeShareImageCapture = null;
+    }
     this.worker.cleanup();
     this.transport.leaveGame();
     if (this.connectionCheckInterval) {

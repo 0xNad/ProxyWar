@@ -122,6 +122,18 @@ export default defineConfig(({ mode }) => {
       cdnBase,
     ),
     mobileLogoImageUrl: buildAssetUrl("images/OF.png", assetManifest, cdnBase),
+    // index.html's social block is rendered by THREE callers, not two: the two
+    // runtime EJS renderers (RenderHtml.ts and the clip worker's capture host)
+    // and this build/dev-time vite-plugin-html pass. Omitting these here does
+    // not affect production — it serves prebuilt HTML — but it makes every dev
+    // server page a 500, which is how it went unnoticed. Dev has no public
+    // origin, so relative values are correct rather than merely a placeholder.
+    socialPageUrl: "/",
+    socialImageUrl: buildAssetUrl(
+      "images/GameplayScreenshot.png",
+      assetManifest,
+      cdnBase,
+    ),
   };
 
   // Vite's HTML transform replaces the source <script src="/src/client/Main.ts">
