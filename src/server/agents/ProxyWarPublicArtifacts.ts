@@ -100,6 +100,12 @@ const proxyWarPremiereIdSource = "prem_[a-z0-9]{16,32}";
 const proxyWarPremierePagePattern = new RegExp(
   `^/premiere/(${proxyWarPremiereIdSource})$`,
 );
+// The dedicated live-betting page: same premiere, same anonymous read
+// surface and app shell as `/premiere/:id` (client-side routing decides
+// which page mounts from the URL) — see BettingPremierePage.ts.
+const proxyWarBettingPagePattern = new RegExp(
+  `^/bet/(${proxyWarPremiereIdSource})$`,
+);
 const proxyWarPremiereManifestPattern = new RegExp(
   `^/api/premieres/(${proxyWarPremiereIdSource})/manifest$`,
 );
@@ -185,6 +191,8 @@ export function matchProxyWarPublicPremiereReadPath(
 ): ProxyWarPublicPremiereReadRoute | null {
   const page = proxyWarPremierePagePattern.exec(pathname);
   if (page !== null) return { kind: "page", premiereId: page[1] };
+  const betPage = proxyWarBettingPagePattern.exec(pathname);
+  if (betPage !== null) return { kind: "page", premiereId: betPage[1] };
   const bootstrap = proxyWarPremiereBootstrapPattern.exec(pathname);
   if (bootstrap !== null) {
     return { kind: "bootstrap", premiereId: bootstrap[1] };
