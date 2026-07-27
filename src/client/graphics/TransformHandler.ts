@@ -42,6 +42,10 @@ export class GoToUnitEvent implements GameEvent {
 export const GOTO_INTERVAL_MS = 16;
 export const CAMERA_MAX_SPEED = 15;
 export const CAMERA_SMOOTHING = 0.03;
+// How far below the exact "whole map visible" (contain) scale a spectator's
+// deliberate zoom-out is allowed to land: <1 leaves a small margin around
+// the board instead of stopping exactly at its edge.
+const SPECTATOR_ZOOM_OUT_MARGIN = 0.85;
 
 export class TransformHandler {
   public scale: number = 1.8;
@@ -54,14 +58,16 @@ export class TransformHandler {
   private targetScale: number | null = null;
   private intervalID: NodeJS.Timeout | null = null;
   private changed = false;
-  // Set by centerAll() for replay/spectator full-map views: true when the
-  // current scale/offset were chosen via "cover" fit (map fills the
-  // viewport, cropping the excess edge instead of letterboxing — see
-  // centerAll's comment). Read by clampOffsets()/onZoom() so any later pan
-  // or zoom can never re-expose the background those routes deliberately
-  // hide.
-  private coverFitActive = false;
-  private coverMinScale = 0;
+  // spectatorFillScale: the scale at which the map exactly fills the
+  // viewport on both axes — the point past which any pan would have to
+  // reveal background. spectatorZoomFloor: how far a spectator is allowed
+  // to deliberately scroll out past that — down to the whole map (plus a
+  // small margin) instead of being stuck at fill-viewport. Both are
+  // recomputed by centerAll() from the current map/viewport dimensions;
+  // onZoom()/clampOffsets() gate their use on isReplaySpectatorView() so
+  // live play is untouched. See centerAll() for the full picture.
+  private spectatorFillScale = 0;
+  private spectatorZoomFloor = 0;
 
   constructor(
     private game: GameView,
@@ -322,7 +328,13 @@ export class TransformHandler {
         (1 / (2 * oldScale) - 1 / (2 * this.scale));
     }
 
-    if (this.coverFitActive) {
+    // Spectator/replay auto-pans (onGoToPlayer's pan-only chase; a
+    // leaderboard/event "go to" click) must stay bounded the same way a
+    // drag or scroll would — clampOffsets() itself decides whether that
+    // means the tight fill-viewport band or the generous background-visible
+    // one. Live play never calls this (isReplaySpectatorView() false), so
+    // it's untouched.
+    if (isReplaySpectatorView()) {
       this.clampOffsets();
     }
 
@@ -335,15 +347,15 @@ export class TransformHandler {
     const zoomFactor = 1 + event.delta / 600;
     this.scale /= zoomFactor;
 
-    // Clamp the scale to prevent extreme zooming; cover-fit spectator
-    // views (see centerAll/clampOffsets) additionally floor it at
-    // coverMinScale so scrolling out can never shrink the map below the
-    // viewport and expose background.
-    this.scale = Math.max(
-      0.2,
-      this.coverFitActive ? this.coverMinScale : 0.2,
-      Math.min(20, this.scale),
-    );
+    // Clamp the scale to prevent extreme zooming. Spectator/replay routes
+    // additionally floor zoom-out at spectatorZoomFloor (see centerAll) —
+    // the whole-map scale plus a small margin — so scrolling out always
+    // reaches the full board; the absolute 0.2 floor still stops it going
+    // further into an unusably tiny map.
+    const spectatorFloor = isReplaySpectatorView()
+      ? this.spectatorZoomFloor
+      : 0.2;
+    this.scale = Math.max(0.2, spectatorFloor, Math.min(20, this.scale));
 
     const canvasCoords = this.screenToCanvasCoordinates(event.x, event.y);
 
@@ -374,19 +386,25 @@ export class TransformHandler {
     let maxOffsetX: number;
     let minOffsetY: number;
     let maxOffsetY: number;
-    if (this.coverFitActive) {
-      // Cover-fit (replay/spectator full-map view — see centerAll)
-      // intentionally leaves zero-or-thin slack on one axis so the map
-      // fills the viewport with no letterboxing. Any pan on that axis — a
-      // drag, the initial spectator auto-focus, a leaderboard/event "go
-      // to" click — must stay within whatever slack exists, or it drags
-      // the map's edge past the canvas and reveals background. Zero
-      // background exposure allowed, unlike the generous bounds below.
+    const spectatorFilling =
+      isReplaySpectatorView() && scale >= this.spectatorFillScale;
+    if (spectatorFilling) {
+      // Spectator/replay routes land cover-fit, or get zoomed back in to
+      // spectatorFillScale (see centerAll): at that scale or above, the map
+      // can fill the viewport with zero background, so pin it there with
+      // zero-or-thin slack on one axis. Any pan at this zoom — a drag, the
+      // initial spectator auto-focus, a leaderboard/event "go to" click —
+      // must stay within whatever slack exists, or it drags the map's edge
+      // past the canvas and reveals background.
       minOffsetX = gameWidth / (2 * scale) - gameWidth / 2;
       maxOffsetX = gameWidth / 2 - (canvasWidth - gameWidth / 2) / scale;
       minOffsetY = gameH / (2 * scale) - gameH / 2;
       maxOffsetY = gameH / 2 - (canvasHeight - gameH / 2) / scale;
     } else {
+      // Below spectatorFillScale, background is visible on purpose — either
+      // this is live play, or a spectator scrolled out past the fill point
+      // deliberately (floored at spectatorZoomFloor in onZoom) to see the
+      // whole board. Same generous bound either way:
       // Allow panning so that up to half of the viewport can be outside the map on each side.
       // This lets a map corner be placed at the screen center, but no further.
       // Derivation (X axis):
@@ -477,10 +495,21 @@ export class TransformHandler {
     const oHor = (mapWidth - vpWidth) / 2 / tScale;
     const oVer = (mapHeight - vpHeight) / 2 / tScale;
 
-    this.coverFitActive = cover;
-    this.coverMinScale = cover
-      ? Math.max(vpWidth / mapWidth, vpHeight / mapHeight)
-      : 0;
+    // fillScale: the scale at which the map exactly fills the viewport on
+    // both axes — clampOffsets()'s zero-slack threshold. zoomFloor: the
+    // "whole map visible" (plain contain) scale, backed off by
+    // SPECTATOR_ZOOM_OUT_MARGIN so a deliberate scroll-out lands a touch
+    // past a snug fit rather than exactly on its edge. Both are independent
+    // of `cover`/`effectiveFit` above (which only pick the *landing*
+    // framing) — onZoom()/clampOffsets() gate their use on
+    // isReplaySpectatorView() at each call site, so live play (which never
+    // sets that) is unaffected by these being set unconditionally here.
+    const containScale = Math.min(vpWidth / mapWidth, vpHeight / mapHeight);
+    this.spectatorFillScale = Math.max(
+      vpWidth / mapWidth,
+      vpHeight / mapHeight,
+    );
+    this.spectatorZoomFloor = containScale * SPECTATOR_ZOOM_OUT_MARGIN;
 
     this.override(oHor, oVer, tScale);
   }
