@@ -44,6 +44,7 @@ import {
 import type {
   ReplayPremiereInteractionLimits,
   ReplayPremiereReleasedContext,
+  ReplayPremiereSettlementPointsRecorder,
 } from "./ReplayPremiereInteractions";
 import {
   compactReplayPremiereEventJournal,
@@ -189,6 +190,8 @@ export interface ReplayPremiereProductionStartupOptions {
   interactionLimits?: Partial<ReplayPremiereInteractionLimits>;
   /** Server-side LMSR prediction market, continuous from match start to reveal. Off by default. */
   wageringEnabled?: boolean;
+  /** Durable cross-premiere points-ledger sink — see `ReplayPremiereSettlementPointsRecorder`. Absent by default; no leaderboard recording happens without it. */
+  pointsLedger?: ReplayPremiereSettlementPointsRecorder;
   /**
    * Deterministic, seeded synthetic bettors trading the same LMSR market
    * real participants use, to keep thin markets legible for demos/tester
@@ -845,6 +848,7 @@ export async function startReplayPremiereProduction(
             checkpointProjectionCatalog: catalog,
             interactionLimits: options.interactionLimits,
             wageringEnabled: options.wageringEnabled,
+            pointsLedger: options.pointsLedger,
             syntheticCrowdEnabled: options.syntheticCrowdEnabled,
             syntheticCrowdConfig: options.syntheticCrowdConfig,
             syntheticCrowdPollIntervalMs: options.syntheticCrowdPollIntervalMs,
@@ -939,6 +943,7 @@ export async function startReplayPremiereProduction(
                   checkpointProjectionCatalog: catalog,
                   interactionLimits: options.interactionLimits,
                   wageringEnabled: options.wageringEnabled,
+                  pointsLedger: options.pointsLedger,
                   syntheticCrowdEnabled: options.syntheticCrowdEnabled,
                   syntheticCrowdConfig: options.syntheticCrowdConfig,
                   syntheticCrowdPollIntervalMs: options.syntheticCrowdPollIntervalMs,
@@ -1148,6 +1153,7 @@ async function assemblePremiereTarget(options: {
   checkpointProjectionCatalog: ReplayPremiereAdmissionCatalog;
   interactionLimits?: Partial<ReplayPremiereInteractionLimits>;
   wageringEnabled?: boolean;
+  pointsLedger?: ReplayPremiereSettlementPointsRecorder;
   syntheticCrowdEnabled?: boolean;
   syntheticCrowdConfig?: Partial<SyntheticCrowdConfig>;
   syntheticCrowdPollIntervalMs?: number;
@@ -1219,6 +1225,7 @@ async function assemblePremiereTarget(options: {
       now: () => options.clock.now(),
       limits: options.interactionLimits,
       wageringEnabled: options.wageringEnabled,
+      pointsLedger: options.pointsLedger,
       admitAnonymousWrite: options.httpRegistry.admitAnonymousWrite,
     },
   });

@@ -963,7 +963,7 @@ function resolveClipAnchor(
   return { sequence, turn: context.turn };
 }
 
-function requestSecurityHeaders(request: Request): {
+export function requestSecurityHeaders(request: Request): {
   cookie?: string | string[];
   origin?: string | string[];
   csrfToken?: string | string[];

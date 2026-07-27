@@ -181,6 +181,25 @@ export class ReplayPremiereGuestSecurity {
     return this.authorizeGuestCredentials(headers);
   }
 
+  /**
+   * GET-appropriate identity bootstrap for a premiere-agnostic surface
+   * (the cross-premiere points leaderboard) — same relaxed-but-checked
+   * origin discipline as `authorizeAuthenticatedRead` (see its doc: a
+   * real browser omits `Origin` on a same-origin GET, so `Sec-Fetch-Site`/
+   * `Referer` stand in), but MINTS a guest identity + CSRF token on first
+   * visit instead of requiring one already exist — exactly like
+   * `authorizeSessionCreation` does for the strict-origin POST session
+   * bootstrap. This and `authorizeSessionCreation` are the only two
+   * places a guest identity is minted; every other route reuses the
+   * cookie/CSRF pair either of them issued.
+   */
+  bootstrapRead(
+    headers: ReplayPremiereRequestHeaders,
+  ): ReplayPremiereGuestBootstrap {
+    this.assertReadOrigin(headers);
+    return this.bootstrap(headers.cookie);
+  }
+
   private assertReadOrigin(headers: ReplayPremiereRequestHeaders): void {
     const origin = singleHeader(headers.origin, "origin");
     if (origin !== null) {

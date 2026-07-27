@@ -25,6 +25,11 @@ PIDFILE="/tmp/pw-bet-origin.pid"
 LOGFILE="/tmp/pw-bet-origin.log"
 STATE_PARENT="$HOME/.proxywar-bet-live"
 STATE_ROOT="$STATE_PARENT/replay-premiere"
+# Deliberately OUTSIDE $STATE_PARENT, which this script deletes every cycle.
+GUEST_KEY_FILE="${PW_BET_GUEST_KEY_FILE:-$HOME/.proxywar-deploy/guest-hmac-key.hex}"
+# Likewise the points ledger: durable across cycles, so a returning player
+# keeps their score.
+POINTS_LEDGER_ROOT="${PROXYWAR_POINTS_LEDGER_ROOT:-$HOME/.proxywar-deploy/points-ledger}"
 HERE="$(cd "$(dirname "$0")" && pwd)"
 cd "$HERE"
 # The leak audit fetches the PUBLIC origin and requires a 200 from /league, so
@@ -88,11 +93,29 @@ stop_origin() {
   return 0
 }
 
+# The guest HMAC key normally lives INSIDE the premiere state root, which this
+# script deletes every cycle. Losing it invalidates every signed guest cookie,
+# so returning players silently become brand-new participants and the points
+# ledger fragments into one-cycle ghosts. Keep the key outside the wiped root
+# and hand it to the server explicitly, so a browser keeps its identity - and
+# its leaderboard entry - across cycles.
+ensure_guest_key() {
+  if [ -s "$GUEST_KEY_FILE" ]; then return 0; fi
+  mkdir -p "$(dirname "$GUEST_KEY_FILE")"
+  openssl rand -hex 32 >"$GUEST_KEY_FILE"
+  chmod 600 "$GUEST_KEY_FILE"
+  echo "    minted a new guest identity key (first run): $GUEST_KEY_FILE"
+  echo "    deleting it will reset every player's identity and leaderboard row."
+}
+
 start_origin() {
+  ensure_guest_key
   # Own process group, so stop_origin can take down the whole
   # npx -> tsx -> node chain in one signal. macOS has no setsid(1), so call
   # setsid(2) via python and exec the server in its place.
   GAME_ENV=dev \
+  PROXYWAR_REPLAY_PREMIERE_HMAC_KEY_HEX="$(cat "$GUEST_KEY_FILE")" \
+  PROXYWAR_POINTS_LEDGER_ROOT="$POINTS_LEDGER_ROOT" \
   AI_LEAGUE_DEMO_PORT="$ORIGIN_PORT" \
   PROXYWAR_PUBLIC_URL="$ORIGIN" \
   PROXYWAR_WAGERING_ENABLED=1 \

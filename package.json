@@ -23,6 +23,7 @@
     "premiere-wagering:roster": "tsx src/scripts/premiere-wagering/pull-active-roster.ts",
     "premiere-wagering:generate": "tsx src/scripts/premiere-wagering/generate-xp-request-episode.ts",
     "premiere-wagering:demo-crowd": "tsx src/scripts/premiere-wagering/demo-synthetic-crowd.ts",
+    "premiere-wagering:build-source": "tsx src/scripts/premiere-wagering/build-source-bundle.ts",
     "agent:league-smoke:mock-llm": "cross-env GAME_ENV=dev tsx src/scripts/ai-agent-league-smoke.ts --brain=mock-llm",
     "agent:league-smoke:mock-llm:stepped": "cross-env GAME_ENV=dev tsx src/scripts/ai-agent-league-smoke.ts --brain=mock-llm --runner=step-locked",
     "agent:league-smoke:real-llm": "cross-env GAME_ENV=dev tsx src/scripts/ai-agent-league-smoke.ts --brain=real-llm --runner=step-locked --scenario=actions --disable-alliance-actions --max-decision-ms=120000",

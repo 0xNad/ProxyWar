@@ -102,7 +102,7 @@ function parseActiveRosterSeats(value: unknown): ActiveRosterSeat[] {
         policyVersionId,
         policyLabel,
         playerId,
-        playerName: player !== null ? asString(player.username) : null,
+        playerName: player !== null ? asString(player.name) : null,
       });
     }
   }

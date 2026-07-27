@@ -297,6 +297,35 @@ describe("Replay Premiere rated Coworld ingestion", () => {
     expect(harness.fetchCalls()).toBe(0);
   });
 
+  test("admits a rated source whose outcome is genuinely NOT externally public, given confirmed embargo evidence", async () => {
+    // Unlike a public league round (the only rated source this pipeline
+    // supported until now), a privately-sourced rated episode (e.g. an
+    // xp-request) has no public round listing its outcome — the strict
+    // "premiere" label plus real embargo evidence is the honest claim, not
+    // "spoiler_resistant_premiere" (which asserts the opposite: that the
+    // outcome IS independently public elsewhere).
+    const harness = await createRatedAdmissionHarness(root, {
+      eligibilityOverrides: {
+        externalOutcomeMayBePublic: false,
+        publicLabel: "premiere",
+        externalEmbargoEvidence: [
+          {
+            source: "xp-request premiere-wagering pipeline",
+            scope: "source and outcome",
+            observedAt: NOW.toISOString(),
+            verifier: "operator",
+            embargoConfirmed: true,
+          },
+        ],
+      },
+    });
+    const admitted = await runReplayPremiereAdmission(
+      harness.args,
+      harness.dependencies,
+    );
+    expect(admitted.premiereId).toBe(RATED_PREMIERE_ID);
+  });
+
   test("rejects the strict premiere label for a rated bundle", async () => {
     const harness = await createRatedAdmissionHarness(root, {
       eligibilityOverrides: { publicLabel: "premiere" },

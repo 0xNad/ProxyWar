@@ -266,10 +266,32 @@ export async function runReplayPremiereAdmission(
     const source = deriveStrictBundleAdmissionMaterial(sourceBytes);
     if (
       source.sourceKind === "rated_coworld" &&
-      operatorInput.externalOutcomeMayBePublic !== true
+      operatorInput.externalOutcomeMayBePublic !== true &&
+      // `ReplayPremiereEligibility.ts`'s `validateExternalEmbargo` already
+      // accepts a "premiere"-labeled source with a genuinely non-public
+      // outcome, provided real confirmed embargo evidence backs the claim —
+      // that path exists for exactly this case (a rated Coworld source
+      // that, unlike a public league round, was never listed anywhere: an
+      // xp-request episode). Only the two EXISTING rated callers
+      // (`replay-premiere-ingest-coworld.ts`'s public-league templates,
+      // `ReplayPremiereLoopCore.ts`'s automated loop) always declare
+      // `externalOutcomeMayBePublic: true` with no embargo evidence, so
+      // this widened condition is unreachable for them — this stays a pure
+      // addition, not a relaxation of their behavior.
+      // Mirrors `validateExternalEmbargo`'s own "premiere_label_requires_
+      // external_embargo" condition exactly (non-empty, every entry
+      // confirmed) so this early gate never passes something the deeper
+      // validator would still reject.
+      !(
+        operatorInput.externalEmbargoEvidence.length > 0 &&
+        operatorInput.externalEmbargoEvidence.every(
+          (evidence) => evidence.embargoConfirmed,
+        )
+      )
     ) {
-      // League standings make every rated episode outcome externally public;
-      // an operator claim to the contrary is a false embargo claim.
+      // League standings make every PUBLIC-ROUND rated episode outcome
+      // externally public; an operator claim to the contrary with no
+      // embargo evidence is a false embargo claim.
       throw cliFailure("admission_rated_outcome_must_be_public");
     }
     const manifest = buildRequiredProxyWarLeakAuditManifest({

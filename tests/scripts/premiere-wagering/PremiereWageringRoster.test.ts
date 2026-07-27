@@ -27,7 +27,7 @@ function membershipRow(
       label,
       player_id: playerId,
     },
-    player: { id: playerId, username: `player-${playerId}` },
+    player: { id: playerId, name: `Player ${playerId}` },
     ...overrides,
   };
 }
@@ -53,6 +53,15 @@ describe("fetchActiveLeagueRoster", () => {
       coworldJson: fakeCoworldJson(memberships),
     });
     expect(roster.seats).toHaveLength(3);
+    // Real Coworld membership rows carry the player's display name under
+    // `player.name`, not `player.username` — this pins the field this
+    // parser actually reads (a prior version silently read the wrong key
+    // and always produced `playerName: null`).
+    expect(roster.seats.map((s) => s.playerName).sort()).toEqual([
+      "Player player_1",
+      "Player player_2",
+      "Player player_3",
+    ]);
     expect(roster.seats.map((s) => s.policyVersionId).sort()).toEqual([
       "pv_1",
       "pv_2",

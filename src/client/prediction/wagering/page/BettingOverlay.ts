@@ -7,11 +7,13 @@ import type {
   ReplayPremierePublicState,
 } from "src/client/ReplayPremiereOverlay";
 import { MIN_STAKE } from "src/prediction/types";
+import "../components/LeagueContextPanel";
 import "../components/MarketBankrollBadge";
 import "../components/MarketPositionSummary";
 import "../components/MarketPriceBoard";
 import "../components/MarketSettlementPanel";
 import "../components/PositionsPanel";
+import "../components/PointsLeaderboard";
 import "../components/PriceAnnouncer";
 import "../components/TradeTicket";
 import { formatSignedCredits } from "../components/pnlDisplay";
@@ -107,6 +109,8 @@ export class PremiereBettingOverlay extends LitElement {
   ) => Promise<void>;
 
   @state() private sheetOverride: boolean | null = null;
+  /** Cross-premiere points leaderboard modal — premiere-agnostic, so it owns its own open/closed state rather than sharing the sheet's. */
+  @state() private leaderboardOpen = false;
   /**
    * The trader's in-progress order — seat/side/amount — lives here, not on
    * `<premiere-trade-ticket>` itself. This overlay element is created once
@@ -472,6 +476,16 @@ export class PremiereBettingOverlay extends LitElement {
               : nothing}
             <button
               type="button"
+              class="inline-flex items-center justify-center rounded-md border border-line px-1.5 py-1 text-[11px] font-semibold text-ink-muted outline-none transition-colors hover:bg-surface-hover hover:text-ink focus-visible:ring-2 focus-visible:ring-accent"
+              aria-label="View leaderboard"
+              @click=${() => {
+                this.leaderboardOpen = true;
+              }}
+            >
+              Leaderboard
+            </button>
+            <button
+              type="button"
               class="hidden items-center justify-center rounded-md border border-line px-1.5 py-1 text-ink-muted outline-none transition-colors hover:bg-surface-hover hover:text-ink focus-visible:ring-2 focus-visible:ring-accent lg:inline-flex"
               aria-label="Collapse trading panel"
               aria-controls="betting-sheet-panel"
@@ -511,6 +525,11 @@ export class PremiereBettingOverlay extends LitElement {
                 Buy shares in whichever one you think wins; the crowd's own
                 trading sets the odds as the match plays out.
               </p>
+            </div>
+            <div class="text-left">
+              <premiere-league-context-panel
+                .seats=${seats}
+              ></premiere-league-context-panel>
             </div>
             ${this.renderMarketFacts()}
             <p class="text-xs text-ink-muted">
@@ -655,6 +674,9 @@ export class PremiereBettingOverlay extends LitElement {
           .seats=${seats}
           .market=${this.market}
         ></premiere-price-announcer>
+        <premiere-league-context-panel
+          .seats=${seats}
+        ></premiere-league-context-panel>
         ${this.renderMarketFacts()}
         <premiere-trade-ticket
           .seats=${seats}
@@ -809,6 +831,12 @@ export class PremiereBettingOverlay extends LitElement {
           ${this.renderBody()}
         </div>
       </aside>
+      <premiere-points-leaderboard
+        .open=${this.leaderboardOpen}
+        @close=${() => {
+          this.leaderboardOpen = false;
+        }}
+      ></premiere-points-leaderboard>
     `;
   }
 }

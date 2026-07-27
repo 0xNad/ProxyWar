@@ -54,6 +54,8 @@ const DEFAULT_INTERACTION_LIMITS: ReplayPremiereInteractionLimits = {
 };
 const MAX_EVENT_CONTEXT_BYTES = 8_192;
 const OPAQUE_SEAT_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
+/** guest_* = real anonymous participants (as opposed to sim_*, the synthetic crowd) — see `assertParticipantId`. */
+const REAL_GUEST_PARTICIPANT_ID_PATTERN = /^guest_[a-f0-9]{32}$/;
 const IDEMPOTENCY_KEY_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{15,127}$/;
 const REQUESTER_BUCKET_ID_PATTERN = /^ip_[a-f0-9]{32,64}$/;
 const HEARTBEAT_RECEIPT_LIMIT = 128;
@@ -247,6 +249,26 @@ export type ReplayPremiereAnonymousWriteAdmission = (
   request: ReplayPremiereAnonymousWriteAdmissionRequest,
 ) => void;
 
+/**
+ * Durable sink for the cross-premiere points leaderboard — structurally
+ * satisfied by `ReplayPremierePointsLedger` (`points/`), duck-typed here
+ * so this module never imports that concrete class. `recordPremiereSettlement`
+ * MUST be idempotent per `(participantId, premiereId)`: it is invoked once
+ * per resolution call, and prediction resolution's own idempotent replay
+ * (crash recovery, a retried caller) can legitimately invoke it again for
+ * an already-settled premiere.
+ */
+export interface ReplayPremiereSettlementPointsRecorder {
+  recordPremiereSettlement(
+    premiereId: string,
+    settlements: readonly {
+      participantId: string;
+      granted: number;
+      balance: number;
+    }[],
+  ): Promise<void>;
+}
+
 export interface ReplayPremiereInteractionsOptions {
   premiereId: string;
   checkpointDescriptors: readonly [
@@ -284,6 +306,15 @@ export interface ReplayPremiereInteractionsOptions {
   admitAnonymousWrite: ReplayPremiereAnonymousWriteAdmission;
   /** Server-side LMSR prediction market, continuous from match start to reveal. Off by default — an existing premiere behaves byte-identically with this unset. */
   wageringEnabled?: boolean;
+  /**
+   * Durable cross-premiere points-ledger sink. When set and wagering is
+   * enabled, every real (`guest_*`) participant who placed at least one
+   * order gets their realized net P&L for this premiere folded into it
+   * exactly once, the moment predictions resolve (see
+   * `recordSettlementPointsIfNeeded`). Absent by default — an existing
+   * premiere behaves byte-identically with this unset.
+   */
+  pointsLedger?: ReplayPremiereSettlementPointsRecorder;
 }
 
 export type ReplayPremiereInteractionSnapshotValidationOptions = Pick<
@@ -648,6 +679,7 @@ export class ReplayPremiereInteractions {
   private readonly limits: ReplayPremiereInteractionLimits;
   private readonly admitAnonymousWrite: ReplayPremiereAnonymousWriteAdmission;
   private readonly wageringEnabled: boolean;
+  private readonly pointsLedger: ReplayPremiereSettlementPointsRecorder | null;
   private readonly snapshotValidationOptions: ReplayPremiereInteractionsOptions;
   private mutationQueue: Promise<void> = Promise.resolve();
   private pendingMutations = 0;
@@ -701,6 +733,7 @@ export class ReplayPremiereInteractions {
     }
     this.admitAnonymousWrite = options.admitAnonymousWrite;
     this.wageringEnabled = options.wageringEnabled ?? false;
+    this.pointsLedger = options.pointsLedger ?? null;
     this.snapshotValidationOptions = {
       ...options,
       limits: this.limits,
@@ -1138,7 +1171,7 @@ export class ReplayPremiereInteractions {
     resolutions: ReplayPremierePredictionResolution[];
     idempotent: boolean;
   }> {
-    return this.mutate<{
+    const outcome = await this.mutate<{
       resolutions: ReplayPremierePredictionResolution[];
       idempotent: boolean;
     }>("predictions_resolved", options.resolvedAt, (next) => {
@@ -1157,6 +1190,46 @@ export class ReplayPremiereInteractions {
         persistenceIdempotencyKey: transition.persistenceIdempotencyKey,
       };
     });
+    await this.recordSettlementPointsIfNeeded();
+    return outcome;
+  }
+
+  /**
+   * Folds a just-settled market's final ledger into the durable
+   * cross-premiere points ledger, once per participant per premiere. A
+   * no-op unless `pointsLedger` was configured, the market is wagering-
+   * enabled, and has actually reached `"settled"` — reads `this.state`
+   * directly, so this MUST only be called after `mutate()` has resolved
+   * (i.e. after any settlement transition already committed). Safe to
+   * call for an already-recorded premiere (e.g. a retried resolution
+   * call): `pointsLedger.recordPremiereSettlement` is itself idempotent
+   * per `(participantId, premiereId)`. Never throws — a durable
+   * leaderboard side-channel failing is never a reason to fail prediction
+   * resolution itself.
+   */
+  private async recordSettlementPointsIfNeeded(): Promise<void> {
+    if (this.pointsLedger === null) return;
+    const market = this.state.market;
+    if (market === null || market.status !== "settled") return;
+    const settlements = Object.entries(market.ledgerGranted)
+      .filter(
+        ([participantId, granted]) =>
+          granted > 0 && REAL_GUEST_PARTICIPANT_ID_PATTERN.test(participantId),
+      )
+      .map(([participantId, granted]) => ({
+        participantId,
+        granted,
+        balance: market.ledgerBalances[participantId] ?? 0,
+      }));
+    if (settlements.length === 0) return;
+    try {
+      await this.pointsLedger.recordPremiereSettlement(
+        this.premiereId,
+        settlements,
+      );
+    } catch {
+      // Best-effort durable side-channel — never fail resolution over it.
+    }
   }
 
   async submitPrediction(options: {

@@ -307,6 +307,23 @@ export function isProxyWarPublicPremiereWritePath(pathname: string): boolean {
   return matchProxyWarPublicPremiereWritePath(pathname) !== null;
 }
 
+const PROXYWAR_POINTS_LEADERBOARD_PATH = "/api/points/leaderboard";
+const PROXYWAR_POINTS_DISPLAY_NAME_PATH = "/api/points/display-name";
+
+/**
+ * Cross-premiere points leaderboard read. Not `:premiereId`-scoped, so it
+ * sits outside the premiere route family above and needs its own allowlist
+ * entry in league-wrapper-only mode.
+ */
+export function isProxyWarPublicPointsReadPath(pathname: string): boolean {
+  return pathname === PROXYWAR_POINTS_LEADERBOARD_PATH;
+}
+
+/** Cross-premiere points leaderboard write (setting a display name) — see {@link isProxyWarPublicPointsReadPath}. */
+export function isProxyWarPublicPointsWritePath(pathname: string): boolean {
+  return pathname === PROXYWAR_POINTS_DISPLAY_NAME_PATH;
+}
+
 export function proxyWarLeagueContentSecurityPolicy(): string {
   return [
     "default-src 'self'",
