@@ -30,6 +30,8 @@ GUEST_KEY_FILE="${PW_BET_GUEST_KEY_FILE:-$HOME/.proxywar-deploy/guest-hmac-key.h
 # Likewise the points ledger: durable across cycles, so a returning player
 # keeps their score.
 POINTS_LEDGER_ROOT="${PROXYWAR_POINTS_LEDGER_ROOT:-$HOME/.proxywar-deploy/points-ledger}"
+# The live league's own public standings feed. Not the deploy's copy.
+LEAGUE_DATA_URL="${PW_BET_LEAGUE_DATA_URL:-https://beta.proxywar.xyz/ai-league-runs/league/data.json}"
 HERE="$(cd "$(dirname "$0")" && pwd)"
 cd "$HERE"
 # The leak audit fetches the PUBLIC origin and requires a 200 from /league, so
@@ -106,6 +108,38 @@ ensure_guest_key() {
   chmod 600 "$GUEST_KEY_FILE"
   echo "    minted a new guest identity key (first run): $GUEST_KEY_FILE"
   echo "    deleting it will reset every player's identity and leaderboard row."
+}
+
+# The scouting panel reads league standings from this deploy's own
+# artifacts/. That file is a COPY, and its own `stale` flag is copied with
+# it - so a snapshot taken hours ago keeps asserting `stale:false` and the
+# panel presents old ratings as current. Confidently wrong is worse than
+# absent, so refresh it from the live league every cycle, and if that fails,
+# mark the local copy stale so the panel says so instead of lying.
+refresh_league_data() {
+  local dest tmp
+  dest="$ARTIFACTS_ROOT/ai-league-runs/league/data.json"
+  [ -f "$dest" ] || return 0
+  tmp="${dest}.fetch.$$"
+  if curl -s --fail -m 30 "$LEAGUE_DATA_URL" -o "$tmp" 2>/dev/null &&
+     python3 -c "import json,sys; d=json.load(open(sys.argv[1])); sys.exit(0 if d.get('standings') else 1)" "$tmp" 2>/dev/null; then
+    mv "$tmp" "$dest"
+    echo "    league data refreshed"
+  else
+    rm -f "$tmp"
+    python3 - "$dest" <<'PY' 2>/dev/null || true
+import json, sys
+p = sys.argv[1]
+try:
+    d = json.load(open(p))
+except Exception:
+    sys.exit(0)
+if d.get("stale") is not True:
+    d["stale"] = True
+    json.dump(d, open(p, "w"))
+PY
+    echo "    !! league data refresh FAILED - local copy marked stale"
+  fi
 }
 
 start_origin() {
@@ -218,6 +252,11 @@ chmod 700 "$STATE_PARENT" "$STATE_ROOT"
 # Admission's leak audit fetches the PUBLIC origin and needs a 200 from
 # /league, so the origin has to be serving before we admit - even though it
 # does not yet know about this premiere.
+# Before the origin serves anything, make the standings the scouting panel
+# reads match reality rather than whenever this deploy was created.
+echo "==> refreshing league data"
+refresh_league_data
+
 echo "==> bringing origin up for the leak audit"
 restart_origin
 wait_for_origin
