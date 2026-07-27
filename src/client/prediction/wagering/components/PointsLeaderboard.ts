@@ -126,7 +126,7 @@ export class PremierePointsLeaderboard extends LitElement {
       this.viewer = parsed.data.leaderboard.viewer;
       this.nameDraft = this.viewer?.displayName ?? "";
     } catch {
-      this.loadError = "Could not load the leaderboard. Try again.";
+      this.loadError = "Could not load points. Try again.";
     } finally {
       this.loading = false;
     }
@@ -185,12 +185,12 @@ export class PremierePointsLeaderboard extends LitElement {
               id="points-leaderboard-title"
               class="text-base font-bold text-ink"
             >
-              Leaderboard
+              Points
             </h2>
             <button
               type="button"
               @click=${() => this.closeModal()}
-              aria-label="Close leaderboard"
+              aria-label="Close points"
               class="rounded-md p-1 text-ink-muted outline-none transition-colors hover:bg-surface-hover hover:text-ink focus-visible:ring-2 focus-visible:ring-accent"
             >
               <span aria-hidden="true">✕</span>
@@ -248,7 +248,7 @@ export class PremierePointsLeaderboard extends LitElement {
           class="flex items-center justify-center rounded-md border border-line bg-surface-2 px-4 py-6 text-sm text-ink-muted"
           role="status"
         >
-          Loading leaderboard…
+          Loading points…
         </div>
       `;
     }

@@ -66,6 +66,28 @@ function asString(value: unknown): string | null {
 }
 
 /**
+ * Membership `substatus` values actually observed on this league (verified
+ * live against `coworld memberships --json` and against
+ * `coworld-adapter/commissioner/commissioners/common/models.py`'s
+ * `POLICY_MEMBERSHIP_SUBSTATUS_*` constants + the qualifier stage's
+ * `on_round_complete` action in `proxywar.yaml`, which sets
+ * `substatus: champion` the moment a policy is promoted into Competition):
+ * `"active"` and `"champion"` BOTH mean "currently a real, competing
+ * champion" — `"champion"` is not a demotion or a terminal state, it is the
+ * substatus a policy is given the moment it becomes (or currently is) the
+ * reigning champion. A membership with `is_champion:true` legitimately
+ * carries either label depending on which commissioner pass last touched
+ * it. Treating `"champion"` as "not active" (the prior bug) silently
+ * dropped whichever policy happened to hold that substatus at pull time —
+ * observed live on djizus, and reproducibly on richard / James Boggs.
+ * `"benched"` / `"inactive"` / `"crash"` are genuinely NOT current
+ * champions (benched is set exactly when `is_champion` is false; inactive
+ * marks disqualification; crash marks a broken policy container) and stay
+ * excluded.
+ */
+const RUNNABLE_CHAMPION_SUBSTATUSES = new Set(["active", "champion"]);
+
+/**
  * Every DISTINCT active, competing, champion policy in the division —
  * de-duplicated by `policyVersionId` (a policy can hold more than one
  * membership row, e.g. across nested rating carry-over) so the roster never
@@ -79,7 +101,7 @@ function parseActiveRosterSeats(value: unknown): ActiveRosterSeat[] {
     if (
       membership === null ||
       membership.status !== "competing" ||
-      (substatus !== null && substatus !== "active") ||
+      (substatus !== null && !RUNNABLE_CHAMPION_SUBSTATUSES.has(substatus)) ||
       membership.is_champion !== true ||
       asString(membership.end_time) !== null
     ) {
@@ -112,6 +134,93 @@ function parseActiveRosterSeats(value: unknown): ActiveRosterSeat[] {
 }
 
 /**
+ * Explains, for a `standings[]` player who has no resolved seat, what their
+ * most recent membership row in this division actually says — so a
+ * reconciliation failure names a reason instead of just a player.
+ */
+function diagnoseMissingSeat(playerId: string, membershipsRaw: unknown): string {
+  let best: {
+    status: unknown;
+    substatus: string | null;
+    isChampion: unknown;
+    endTime: string | null;
+    startedAt: number;
+  } | null = null;
+  for (const entry of Array.isArray(membershipsRaw) ? membershipsRaw : []) {
+    const membership = isRecord(entry) ? entry : null;
+    if (membership === null) {
+      continue;
+    }
+    const policyVersion = isRecord(membership.policy_version)
+      ? membership.policy_version
+      : null;
+    const player = isRecord(membership.player) ? membership.player : null;
+    const membershipPlayerId =
+      (policyVersion !== null ? asString(policyVersion.player_id) : null) ??
+      (player !== null ? asString(player.id) : null);
+    if (membershipPlayerId !== playerId) {
+      continue;
+    }
+    const parsedStartedAt = Date.parse(asString(membership.start_time) ?? "");
+    const startedAt = Number.isFinite(parsedStartedAt)
+      ? parsedStartedAt
+      : Number.NEGATIVE_INFINITY;
+    if (best === null || startedAt > best.startedAt) {
+      best = {
+        status: membership.status,
+        substatus: asString(membership.substatus),
+        isChampion: membership.is_champion,
+        endTime: asString(membership.end_time),
+        startedAt,
+      };
+    }
+  }
+  if (best === null) {
+    return "no membership record found in this division";
+  }
+  return (
+    `status=${JSON.stringify(best.status)} substatus=${JSON.stringify(best.substatus)} ` +
+    `is_champion=${JSON.stringify(best.isChampion)} end_time=${JSON.stringify(best.endTime)}`
+  );
+}
+
+/**
+ * The league's own `standings[]` (division `results`) is the authoritative
+ * "who is in this league" list — the same source the public league mirror
+ * (`CoworldLeagueMirrorCore.ts`'s `buildStandingRows`) renders. Every
+ * standings player MUST resolve to a runnable seat here; a standings player
+ * with no seat is exactly the class of bug that silently produced
+ * `policyLabel: null` rows on the public standings page. Fail loudly, by
+ * name and reason, instead of quietly seating fewer players than the league
+ * actually has.
+ */
+export function assertRosterReconcilesWithStandings(
+  standingsRaw: unknown,
+  membershipsRaw: unknown,
+  seats: readonly ActiveRosterSeat[],
+): void {
+  const seatPlayerIds = new Set(seats.map((seat) => seat.playerId));
+  const seenPlayerIds = new Set<string>();
+  const mismatches: string[] = [];
+  for (const entry of Array.isArray(standingsRaw) ? standingsRaw : []) {
+    const row = isRecord(entry) ? entry : null;
+    const playerId = row !== null ? asString(row.player_id) : null;
+    if (playerId === null || seenPlayerIds.has(playerId) || seatPlayerIds.has(playerId)) {
+      continue;
+    }
+    seenPlayerIds.add(playerId);
+    const playerName = row !== null ? (asString(row.player_name) ?? playerId) : playerId;
+    mismatches.push(`${playerName} (${playerId}): ${diagnoseMissingSeat(playerId, membershipsRaw)}`);
+  }
+  if (mismatches.length > 0) {
+    throw new PremiereWageringRosterError(
+      `roster does not reconcile with league standings — ${mismatches.length} standings ` +
+        `player(s) did not resolve to a runnable policy: ${mismatches.join("; ")}`,
+    );
+  }
+}
+
+/**
  * Resolves the league's competition division and returns every active
  * champion policy in it. Throws (never silently returns a partial roster) if
  * the league or division can't be resolved — an xp-request seating a
@@ -139,16 +248,18 @@ export async function fetchActiveLeagueRoster(options: {
       `league ${options.leagueId} has no readable competition division`,
     );
   }
-  const membershipsRaw = await coworldJson([
-    "memberships",
-    "-d",
-    division.id,
-    "--active-only",
-    "--champions-only",
-    "--limit",
-    "1000",
+  // No `--active-only --champions-only`: those hosted filters gate on
+  // `status`/`is_champion`, which `parseActiveRosterSeats` already re-checks
+  // client-side, and fetching the full division roster here means
+  // `assertRosterReconcilesWithStandings` can explain the *reason* a
+  // standings player is missing (disqualified, crashed, ...) rather than
+  // just observing their absence.
+  const [membershipsRaw, standingsRaw] = await Promise.all([
+    coworldJson(["memberships", "-d", division.id, "--limit", "1000"]),
+    coworldJson(["results", division.id]),
   ]);
   const seats = parseActiveRosterSeats(membershipsRaw);
+  assertRosterReconcilesWithStandings(standingsRaw, membershipsRaw, seats);
   if (seats.length === 0) {
     throw new PremiereWageringRosterError(
       `division ${division.id} has zero active champion policies — nothing to seat`,

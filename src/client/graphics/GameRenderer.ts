@@ -1,7 +1,10 @@
 import { EventBus } from "../../core/EventBus";
 import { GameView } from "../../core/game/GameView";
 import { UserSettings } from "../../core/game/UserSettings";
-import { isAiLeagueNativeSpectatorUiEnabled } from "../AiLeagueReplayMode";
+import {
+  isAiLeagueNativeSpectatorUiEnabled,
+  isBettingPremiereRoute,
+} from "../AiLeagueReplayMode";
 import { GameStartingModal } from "../GameStartingModal";
 import { RefreshGraphicsEvent as RedrawGraphicsEvent } from "../InputHandler";
 import { FrameProfiler } from "./FrameProfiler";
@@ -57,9 +60,23 @@ export function createRenderer(
   const transformHandler = new TransformHandler(game, eventBus, canvas);
   const userSettings = new UserSettings();
   const nativeSpectatorUiEnabled = isAiLeagueNativeSpectatorUiEnabled();
+  // The betting page (`/bet/<id>`) wants the SAME standalone, detached
+  // `<leader-board>` this promo flag already builds below — live match
+  // standings rendered outside `game-left-sidebar` (which
+  // `BettingPremierePage.ts` hides unconditionally for every /bet
+  // visitor, spectator chrome included). Kept as its own condition
+  // rather than folding into `nativeSpectatorUiEnabled`: that flag also
+  // drives the AI-league promo/clip-capture declutter
+  // (`AiLeagueReplayOverlay.ts`), which /bet never mounts and has no
+  // reason to couple to.
+  const bettingStandingsEnabled = isBettingPremiereRoute();
   document.body.classList.toggle(
     "ai-league-native-spectator-ui",
     nativeSpectatorUiEnabled,
+  );
+  document.body.classList.toggle(
+    "betting-standings-enabled",
+    bettingStandingsEnabled,
   );
   mountAiLeagueNativeSpectatorStyles();
 
@@ -102,22 +119,53 @@ export function createRenderer(
   leaderboard.eventBus = eventBus;
   leaderboard.game = game;
 
-  const nativeSpectatorLeaderboard = nativeSpectatorUiEnabled
+  const standaloneStandingsEnabled =
+    nativeSpectatorUiEnabled || bettingStandingsEnabled;
+  const nativeSpectatorLeaderboard = standaloneStandingsEnabled
     ? (document.createElement("leader-board") as Leaderboard)
     : null;
   if (nativeSpectatorLeaderboard !== null) {
     nativeSpectatorLeaderboard.eventBus = eventBus;
     nativeSpectatorLeaderboard.game = game;
     nativeSpectatorLeaderboard.visible = true;
-    nativeSpectatorLeaderboard.classList.add("ai-league-native-leaderboard");
     Object.assign(nativeSpectatorLeaderboard.style, {
       position: "fixed",
       top: "16px",
       left: "16px",
       zIndex: "50002",
       width: "min(360px, calc(100vw - 32px))",
-      pointerEvents: "none",
     });
+    if (bettingStandingsEnabled) {
+      // A bettor needs a reachable, readable panel — never the
+      // decorative/click-through treatment the promo overlay uses below.
+      nativeSpectatorLeaderboard.classList.add(
+        "betting-standings-leaderboard",
+      );
+      nativeSpectatorLeaderboard.compact = true;
+      // Bridges the market's live prices in from `BettingPremierePage.ts`
+      // without this shared rendering module importing anything from the
+      // wagering feature — same cross-module-flag shape as
+      // `window.__openFrontPromoNativeUi` above, just read-only and
+      // per-tick instead of a one-shot boolean. `readBettingSeatPrice`
+      // returns `null` on every route but /bet (nothing ever sets the
+      // global), so this is a no-op everywhere else.
+      nativeSpectatorLeaderboard.priceLookup = (clientID) =>
+        readBettingSeatPrice(clientID);
+      nativeSpectatorLeaderboard.setAttribute("role", "region");
+      nativeSpectatorLeaderboard.setAttribute(
+        "aria-label",
+        "Live match standings",
+      );
+      Object.assign(nativeSpectatorLeaderboard.style, {
+        width: "min(260px, calc(100vw - 32px))",
+      });
+    } else {
+      // Promo/clip-capture only: decorative, non-interactive, never
+      // focusable — the opposite of what a bettor needs, so /bet never
+      // takes this branch.
+      nativeSpectatorLeaderboard.classList.add("ai-league-native-leaderboard");
+      nativeSpectatorLeaderboard.style.pointerEvents = "none";
+    }
     document.body.appendChild(nativeSpectatorLeaderboard);
   }
 
@@ -375,8 +423,29 @@ function mountAiLeagueNativeSpectatorStyles() {
     body.ai-league-native-spectator-ui leader-board.ai-league-native-leaderboard {
       filter: drop-shadow(0 14px 32px rgba(2, 6, 23, 0.32));
     }
+    body.betting-standings-enabled leader-board.betting-standings-leaderboard {
+      filter: drop-shadow(0 14px 32px rgba(2, 6, 23, 0.32));
+    }
   `;
   document.head.appendChild(style);
+}
+
+/**
+ * The market's live per-seat prices, as last written by
+ * `BettingPremiereMarketController` (`BettingPremierePage.ts`) — read here
+ * so the standalone betting standings leaderboard can show each row's
+ * price without this shared rendering module statically importing
+ * anything from the wagering feature. Set only on `/bet/<id>`; `undefined`
+ * (and therefore `null` from every lookup) on every other route, since
+ * nothing else ever assigns it.
+ */
+function readBettingSeatPrice(clientID: string): number | null {
+  const prices = (
+    window as typeof window & {
+      __bettingSeatPrices?: Readonly<Record<string, number>>;
+    }
+  ).__bettingSeatPrices;
+  return prices?.[clientID] ?? null;
 }
 
 export class GameRenderer {

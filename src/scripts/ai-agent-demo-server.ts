@@ -672,6 +672,95 @@ app.get("/api/clip-capabilities", (_req, res) => {
 
 // Mount before the generic parser so Premiere's stricter 32 KiB body ceiling
 // applies to both declared-length and chunked requests.
+// Gated on wagering rather than on middleware ordering: these must sit ABOVE
+// createReplayPremiereRouter (which claims all of /api/premieres and 404s an
+// unknown id), but that is also above the league-wrapper and beta gates. A
+// wagering check is the precise condition anyway - points only exist where a
+// market does, so beta (no PROXYWAR_WAGERING_ENABLED) serves 404 here.
+const pointsRoutesEnabled = envFlag("PROXYWAR_WAGERING_ENABLED");
+
+// Cross-premiere points leaderboard. Mounted after the league-wrapper-only
+// and beta gates. League-wrapper-only mode explicitly allowlists the two
+// exact paths below (`isProxyWarPublicPointsReadPath`/`WritePath`) so this
+// surface reaches the betting demo (`bet.proxywar.xyz`); the beta gate does
+// NOT allowlist them, so this is unreachable in beta mode (`PROXYWAR_BETA_
+// ENABLED=1`, the real-participant league) — deliberately: points/leaderboard
+// is a betting-demo feature, not a beta-league one. See
+// `ReplayPremierePointsLedger` for the durable-storage and points-formula
+// reasoning; `bootstrapRead` mints/reuses the same signed guest cookie the
+// premiere session flow uses, so a viewer's identity here is the SAME
+// identity that owns their bankroll and positions.
+const MAX_DISPLAY_NAME_REQUEST_BYTES = 512;
+function sendReplayPremiereFailure(res: Response, error: unknown): void {
+  const status =
+    error instanceof ReplayPremiereError ? error.httpStatus : 503;
+  if (error instanceof ReplayPremiereError) {
+    console.error(formatReplayPremiereHttpOperatorError(error));
+  } else {
+    console.error(
+      `Points route failed: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
+  res.status(status).json(toPublicReplayPremiereFailure(error));
+}
+app.get("/api/premieres/points/leaderboard", async (req, res) => {
+  if (!pointsRoutesEnabled) {
+    res.status(404).json({ error: { code: "PREMIERE_UNAVAILABLE" } });
+    return;
+  }
+  try {
+    res.setHeader("Cache-Control", "no-store, max-age=0");
+    const guest = replayPremiereGuestSecurity.bootstrapRead(
+      requestSecurityHeaders(req),
+    );
+    if (guest.setCookie !== null) {
+      res.setHeader("Set-Cookie", guest.setCookie);
+    }
+    const leaderboard = await replayPremierePointsLedger.readLeaderboard({
+      viewerParticipantId: guest.participant.participantId,
+    });
+    res.status(200).json({
+      schemaVersion: 1,
+      csrfToken: guest.csrfToken,
+      leaderboard,
+    });
+  } catch (error) {
+    sendReplayPremiereFailure(res, error);
+  }
+});
+app.post("/api/premieres/points/display-name", async (req, res) => {
+  if (!pointsRoutesEnabled) {
+    res.status(404).json({ error: { code: "PREMIERE_UNAVAILABLE" } });
+    return;
+  }
+  try {
+    res.setHeader("Cache-Control", "no-store, max-age=0");
+    const authorization = replayPremiereGuestSecurity.authorizeWrite(
+      requestSecurityHeaders(req),
+    );
+    const body: unknown = req.body;
+    const displayName =
+      typeof body === "object" &&
+      body !== null &&
+      "displayName" in body &&
+      typeof body.displayName === "string" &&
+      body.displayName.length <= MAX_DISPLAY_NAME_REQUEST_BYTES
+        ? body.displayName
+        : null;
+    if (displayName === null) {
+      res.status(400).json({ error: { code: "PREMIERE_INVALID_REQUEST" } });
+      return;
+    }
+    const entry = await replayPremierePointsLedger.setDisplayName(
+      authorization.participant.participantId,
+      displayName,
+    );
+    res.status(200).json({ schemaVersion: 1, entry });
+  } catch (error) {
+    sendReplayPremiereFailure(res, error);
+  }
+});
+
 app.use(
   createReplayPremiereRouter({
     registry: replayPremiereHttpRegistry,
@@ -1052,79 +1141,6 @@ app.use((req, res, next) => {
   res.redirect(`/beta?next=${encodeURIComponent(req.originalUrl)}`);
 });
 
-// Cross-premiere points leaderboard. Mounted after the league-wrapper-only
-// and beta gates. League-wrapper-only mode explicitly allowlists the two
-// exact paths below (`isProxyWarPublicPointsReadPath`/`WritePath`) so this
-// surface reaches the betting demo (`bet.proxywar.xyz`); the beta gate does
-// NOT allowlist them, so this is unreachable in beta mode (`PROXYWAR_BETA_
-// ENABLED=1`, the real-participant league) — deliberately: points/leaderboard
-// is a betting-demo feature, not a beta-league one. See
-// `ReplayPremierePointsLedger` for the durable-storage and points-formula
-// reasoning; `bootstrapRead` mints/reuses the same signed guest cookie the
-// premiere session flow uses, so a viewer's identity here is the SAME
-// identity that owns their bankroll and positions.
-const MAX_DISPLAY_NAME_REQUEST_BYTES = 512;
-function sendReplayPremiereFailure(res: Response, error: unknown): void {
-  const status =
-    error instanceof ReplayPremiereError ? error.httpStatus : 503;
-  if (error instanceof ReplayPremiereError) {
-    console.error(formatReplayPremiereHttpOperatorError(error));
-  } else {
-    console.error(
-      `Points route failed: ${error instanceof Error ? error.message : String(error)}`,
-    );
-  }
-  res.status(status).json(toPublicReplayPremiereFailure(error));
-}
-app.get("/api/premieres/points/leaderboard", async (req, res) => {
-  try {
-    res.setHeader("Cache-Control", "no-store, max-age=0");
-    const guest = replayPremiereGuestSecurity.bootstrapRead(
-      requestSecurityHeaders(req),
-    );
-    if (guest.setCookie !== null) {
-      res.setHeader("Set-Cookie", guest.setCookie);
-    }
-    const leaderboard = await replayPremierePointsLedger.readLeaderboard({
-      viewerParticipantId: guest.participant.participantId,
-    });
-    res.status(200).json({
-      schemaVersion: 1,
-      csrfToken: guest.csrfToken,
-      leaderboard,
-    });
-  } catch (error) {
-    sendReplayPremiereFailure(res, error);
-  }
-});
-app.post("/api/premieres/points/display-name", async (req, res) => {
-  try {
-    res.setHeader("Cache-Control", "no-store, max-age=0");
-    const authorization = replayPremiereGuestSecurity.authorizeWrite(
-      requestSecurityHeaders(req),
-    );
-    const body: unknown = req.body;
-    const displayName =
-      typeof body === "object" &&
-      body !== null &&
-      "displayName" in body &&
-      typeof body.displayName === "string" &&
-      body.displayName.length <= MAX_DISPLAY_NAME_REQUEST_BYTES
-        ? body.displayName
-        : null;
-    if (displayName === null) {
-      res.status(400).json({ error: { code: "PREMIERE_INVALID_REQUEST" } });
-      return;
-    }
-    const entry = await replayPremierePointsLedger.setDisplayName(
-      authorization.participant.participantId,
-      displayName,
-    );
-    res.status(200).json({ schemaVersion: 1, entry });
-  } catch (error) {
-    sendReplayPremiereFailure(res, error);
-  }
-});
 
 // League-run clip surface. Mounted after the wrapper/beta gates (which admit
 // only mirror-published league-* keys anonymously) and BEFORE the run-artifact

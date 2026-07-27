@@ -51,7 +51,6 @@ export class PremiereWageringSourceBundleError extends Error {
 }
 
 const RATED_BUNDLE_KIND = "proxywar_rated_coworld_source";
-const GENERATOR = "premiere-wagering/build-source-bundle/v1";
 const MAX_GAME_RECORD_BYTES = 512 * 1024 * 1024;
 export const XP_REQUEST_ROSTER_FILE = "xp-request-roster.json";
 

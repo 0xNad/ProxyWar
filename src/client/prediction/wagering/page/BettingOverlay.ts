@@ -477,12 +477,12 @@ export class PremiereBettingOverlay extends LitElement {
             <button
               type="button"
               class="inline-flex items-center justify-center rounded-md border border-line px-1.5 py-1 text-[11px] font-semibold text-ink-muted outline-none transition-colors hover:bg-surface-hover hover:text-ink focus-visible:ring-2 focus-visible:ring-accent"
-              aria-label="View leaderboard"
+              aria-label="View points"
               @click=${() => {
                 this.leaderboardOpen = true;
               }}
             >
-              Leaderboard
+              Points
             </button>
             <button
               type="button"

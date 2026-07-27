@@ -105,6 +105,30 @@ function capturingOverlayFactory(
  * rather than zeroing them — see that function's doc comment), so this
  * stays a plain passthrough in every market state, including settled.
  */
+
+/**
+ * Window-global bridge for `GameRenderer.ts`'s standalone betting standings
+ * leaderboard (`readBettingSeatPrice`) — that shared rendering module can't
+ * statically import this wagering-feature type without coupling core game
+ * rendering to a demo feature, so the market controller below writes its
+ * prices here on every poll/trade instead. Set only while a betting page
+ * is mounted; cleared on dispose so a leftover value can never leak into
+ * an unrelated route navigated to next in the same tab.
+ */
+type BettingSeatPriceWindow = typeof window & {
+  __bettingSeatPrices?: Readonly<Record<string, number>>;
+};
+
+function writeBettingSeatPrices(
+  prices: Readonly<Record<string, number>>,
+): void {
+  (window as BettingSeatPriceWindow).__bettingSeatPrices = prices;
+}
+
+function clearBettingSeatPrices(): void {
+  delete (window as BettingSeatPriceWindow).__bettingSeatPrices;
+}
+
 export class BettingPremiereMarketController {
   private overlay: PremiereBettingOverlay | null = null;
   private pollTimer: number | null = null;
@@ -145,6 +169,7 @@ export class BettingPremiereMarketController {
     window.clearInterval(this.pollTimer ?? undefined);
     this.pollTimer = null;
     this.overlay = null;
+    clearBettingSeatPrices();
   }
 
   private async submitTrade(
@@ -233,6 +258,7 @@ export class BettingPremiereMarketController {
   private applyMarket(market: MarketState): void {
     if (this.disposed) return;
     this.latestLiveVisibleSequence = market.liveVisibleSequence;
+    writeBettingSeatPrices(market.prices);
     if (this.overlay !== null) {
       this.overlay.market = market;
       this.overlay.bankroll = market.balance;
