@@ -3196,7 +3196,12 @@ export class ReplayPremiereRuntimeController {
       !this.interactionReady ||
       this.heartbeatInFlight ||
       this.terminalFailure !== null ||
-      this.isReadOnlyLifecycle()
+      this.isReadOnlyLifecycle() ||
+      // A backoff retry is already scheduled — let it be authoritative
+      // instead of the regular interval timer also firing in the
+      // meantime, which would send a redundant request against a limiter
+      // that's already ratcheting its own retry interval up.
+      this.heartbeatRetryTimer !== null
     ) {
       return;
     }
@@ -3765,39 +3770,6 @@ export class ReplayPremiereRuntimeController {
     rejection?: unknown,
   ): void {
     if (this.disposed || this.terminalFailure !== null) return;
-    // TEMP DIAGNOSTIC (Resilience session — occurrence-3 root-cause hunt,
-    // remove before finishing): exception-safe stack + state capture so a
-    // live reproduction names its exact call site instead of guessing.
-    // Never let diagnostic collection itself throw and get mistaken for a
-    // second, unrelated failure (the EndRace session's cautionary tale —
-    // an unchecked `this.projection!` read inside a diagnostic threw,
-    // got caught and rethrown as `callback_failure` by the network
-    // controller, and produced fake "reproductions").
-    try {
-      console.error("[latchFailure]", {
-        failure,
-        // Bounded, enum-like fields only — never `.message` (arbitrary
-        // text; the `logInteractionBootstrapFailure` leak-audit test
-        // caught exactly this pulling a private URL/token through in an
-        // earlier version of this diagnostic).
-        rejectionKind:
-          rejection instanceof ReplayPremiereServiceError
-            ? { code: rejection.code, status: rejection.status }
-            : rejection instanceof ReplayPremiereNetworkError
-              ? { code: rejection.code, recoverable: rejection.recoverable }
-              : rejection === undefined
-                ? null
-                : "unknown",
-        networkState: this.networkTerminalState,
-        servicePremiereState: this.servicePremiereState,
-        hasReveal: this.reveal !== null,
-        interactionReady: this.interactionReady,
-        stack: new Error("latchFailure").stack ?? null,
-      });
-    } catch {
-      // Exception-safe by construction: diagnostic failure must never
-      // masquerade as the failure being diagnosed.
-    }
     this.terminalFailure = failure;
     this.recovery = null;
     this.interactionReady = false;

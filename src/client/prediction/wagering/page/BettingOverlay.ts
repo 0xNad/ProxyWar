@@ -255,22 +255,102 @@ export class PremiereBettingOverlay extends LitElement {
       case "archived":
         return this.renderSettlement();
       case "failed":
-        return html`
-          <div class="flex flex-1 flex-col items-center justify-center gap-2 px-4 py-10 text-center" role="alert">
-            <p class="text-sm font-semibold text-danger">This premiere could not continue.</p>
-            <p class="text-xs text-ink-muted">Any open positions were voided and refunded.</p>
-          </div>
-        `;
+        return this.renderTerminalFailure();
       case "cancelled":
-        return html`
-          <div class="flex flex-1 flex-col items-center justify-center gap-2 px-4 py-10 text-center">
-            <p class="text-sm font-semibold text-ink">This premiere was cancelled.</p>
-            <p class="text-xs text-ink-muted">Any open positions were voided and refunded.</p>
-          </div>
-        `;
+        return this.renderTerminalFailure();
       default:
         return nothing;
     }
+  }
+
+  /**
+   * Honest, bucketed failure copy. Never claims a refund unless it
+   * actually happened and is known — the client cannot see server-side
+   * settlement from here, so "voided and refunded" (the old unconditional
+   * claim) was simply false whenever nothing was staked, and unverified
+   * whenever something was. Three distinct situations, three distinct
+   * messages:
+   *   - `runtime_failure`: a connection/session problem — recoverable,
+   *     never data-integrity. Offers a reload, since the client's own
+   *     network/service layer is torn down by this point and a reload is
+   *     the one action guaranteed to work (and — via session
+   *     resumability — reconnects to the same session rather than
+   *     starting over).
+   *   - `integrity_failure`: the server claimed something the verified
+   *     chain cannot support. No retry offered — this state is
+   *     deliberately terminal — but still never asserts a refund it
+   *     cannot confirm.
+   *   - anything else (server-reported `failed`/`cancelled` lifecycle,
+   *     not a client-side latch): an operator-level event outside what
+   *     this overlay can verify — same discipline, no unconfirmed claim.
+   */
+  private renderTerminalFailure() {
+    const failureCode = this.model.failureCode;
+    const hadPosition = (this.market?.positions?.length ?? 0) > 0;
+    const positionNote = hadPosition
+      ? html`<p class="text-xs text-ink-muted">
+          Your position status could not be confirmed here — check your
+          balance before assuming anything about it.
+        </p>`
+      : nothing;
+    if (failureCode === "runtime_failure") {
+      return html`
+        <div class="flex flex-1 flex-col items-center justify-center gap-2 px-4 py-10 text-center" role="alert">
+          <p class="text-sm font-semibold text-danger">Lost connection to the live market.</p>
+          <p class="text-xs text-ink-muted">
+            This is a connection problem, not a match or account issue.
+          </p>
+          ${positionNote}
+          <button
+            type="button"
+            class="mt-2 rounded-md border border-line bg-surface px-3 py-1.5 text-xs font-semibold text-ink hover:bg-surface-hover"
+            @click=${() => this.ownerDocument.defaultView?.location.reload()}
+          >
+            Reload to reconnect
+          </button>
+        </div>
+      `;
+    }
+    if (failureCode === "integrity_failure") {
+      return html`
+        <div class="flex flex-1 flex-col items-center justify-center gap-2 px-4 py-10 text-center" role="alert">
+          <p class="text-sm font-semibold text-danger">
+            This premiere's data could not be verified.
+          </p>
+          <p class="text-xs text-ink-muted">
+            Something the server reported did not match what this client
+            could independently verify.
+          </p>
+          ${positionNote}
+        </div>
+      `;
+    }
+    // Server-reported failed/cancelled, not a client-side latch.
+    return html`
+      <div class="flex flex-1 flex-col items-center justify-center gap-2 px-4 py-10 text-center">
+        <p class="text-sm font-semibold text-ink">
+          ${this.model.state === "cancelled"
+            ? "This premiere was cancelled."
+            : "This premiere could not continue."}
+        </p>
+        ${positionNote}
+      </div>
+    `;
+  }
+
+  /** Quiet, non-alarming — a transient failure recovers on its own. */
+  private renderRecovery() {
+    if (this.model.recovery === null || this.model.recovery === undefined) {
+      return nothing;
+    }
+    return html`
+      <div
+        class="border-b border-line bg-surface/80 px-4 py-1.5 text-center text-[11px] font-medium text-ink-muted"
+        role="status"
+      >
+        Reconnecting…
+      </div>
+    `;
   }
 
   private renderMarket() {
@@ -402,6 +482,7 @@ export class PremiereBettingOverlay extends LitElement {
           class="${open ? "flex" : "hidden"} min-h-0 flex-1 flex-col overflow-y-auto"
         >
           ${this.renderHeader()}
+          ${this.renderRecovery()}
           <div class="flex items-center justify-between gap-2 border-b border-line px-4 py-2">
             <span class="text-xs text-ink-muted">Your bankroll</span>
             <premiere-market-bankroll-badge

@@ -362,7 +362,7 @@ describe("ReplayPremiereRuntimeController", () => {
     harness.runtime.dispose();
   });
 
-  it("maintains one bounded heartbeat retry loop across a persistent outage", async () => {
+  it("backs off exponentially (capped) instead of hammering a persistent outage", async () => {
     vi.useFakeTimers();
     const heartbeat = vi.fn(async () => {
       throw new ReplayPremiereServiceError(
@@ -383,15 +383,140 @@ describe("ReplayPremiereRuntimeController", () => {
     await vi.advanceTimersByTimeAsync(10_000);
     expect(heartbeat).toHaveBeenCalledOnce();
 
+    // A fixed-interval retry-forever loop is exactly what let one
+    // transient rejection escalate into a self-sustaining request storm —
+    // every attempt is itself a new request against the same limiter it
+    // just tripped, so it never gives the outage (or the rate limit it
+    // may itself be causing) a chance to clear. Doubling from 1s, capped
+    // at 30s: 1s, 2s, 4s, 8s, 16s, then holds at 30s.
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(heartbeat).toHaveBeenCalledTimes(2);
+    await vi.advanceTimersByTimeAsync(2_000);
+    expect(heartbeat).toHaveBeenCalledTimes(3);
     await vi.advanceTimersByTimeAsync(4_000);
+    expect(heartbeat).toHaveBeenCalledTimes(4);
+    await vi.advanceTimersByTimeAsync(8_000);
     expect(heartbeat).toHaveBeenCalledTimes(5);
+    await vi.advanceTimersByTimeAsync(16_000);
+    expect(heartbeat).toHaveBeenCalledTimes(6);
+    // Next delay would be 32s uncapped — held at the 30s ceiling instead.
+    await vi.advanceTimersByTimeAsync(29_999);
+    expect(heartbeat).toHaveBeenCalledTimes(6);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(heartbeat).toHaveBeenCalledTimes(7);
+
+    // Never a fatal latch, however long the outage runs — this recovers
+    // on its own the moment the outage clears, with no user action.
     expect(harness.models.at(-1)).toMatchObject({
       state: "playing",
       failureCode: null,
     });
     harness.runtime.dispose();
-    await vi.advanceTimersByTimeAsync(5_000);
-    expect(heartbeat).toHaveBeenCalledTimes(5);
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(heartbeat).toHaveBeenCalledTimes(7);
+  });
+
+  it("resumes a previously-established session on reload instead of minting a new one", async () => {
+    // First load: establishes and persists a session.
+    const first = runtimeHarness({ state: "playing" });
+    const startedFirst = first.runtime.start();
+    await first.callbacks.onReady?.(projection("playing"));
+    await startedFirst;
+    expect(first.service.startSession).toHaveBeenCalledOnce();
+    // A normal unmount/navigation-away (not a failure) must never discard
+    // the persisted pointer — that is the whole point of resumability.
+    first.runtime.dispose();
+
+    // Second load (same premiere, same browser session storage): must
+    // resume, never mint a second session record. Every ordinary reload
+    // minting a fresh session is exactly what exhausts the small,
+    // permanent `maxSessionsPerParticipant` server-side cap.
+    const resumeSession = vi.fn(async () => heartbeatResponse("playing"));
+    const second = runtimeHarness({
+      state: "playing",
+      service: { resumeSession },
+    });
+    const startedSecond = second.runtime.start();
+    await second.callbacks.onReady?.(projection("playing"));
+    await startedSecond;
+
+    expect(resumeSession).toHaveBeenCalledOnce();
+    expect(second.service.startSession).not.toHaveBeenCalled();
+    expect(second.onJoin).toHaveBeenCalledOnce();
+    expect(second.models.at(-1)).toMatchObject({
+      state: "playing",
+      failureCode: null,
+    });
+    second.runtime.dispose();
+  });
+
+  it("falls back to a fresh session when the persisted one is no longer resumable", async () => {
+    const first = runtimeHarness({ state: "playing" });
+    const startedFirst = first.runtime.start();
+    await first.callbacks.onReady?.(projection("playing"));
+    await startedFirst;
+    first.runtime.dispose();
+
+    // Server no longer recognizes the persisted session (expired/evicted)
+    // — resume 404s. Must recover on its own by minting a fresh one, not
+    // get stuck retrying a pointer that can never come back.
+    const resumeSession = vi.fn(async () => {
+      throw new ReplayPremiereServiceError(
+        "request_rejected",
+        404,
+        "PREMIERE_INVALID_REQUEST",
+      );
+    });
+    const startSession = vi.fn(async () => sessionResponse("playing"));
+    const second = runtimeHarness({
+      state: "playing",
+      service: { resumeSession, startSession },
+    });
+    const startedSecond = second.runtime.start();
+    await second.callbacks.onReady?.(projection("playing"));
+    await startedSecond;
+
+    expect(resumeSession).toHaveBeenCalledOnce();
+    expect(startSession).toHaveBeenCalledOnce();
+    expect(second.onJoin).toHaveBeenCalledOnce();
+    expect(second.models.at(-1)).toMatchObject({
+      state: "playing",
+      failureCode: null,
+    });
+    second.runtime.dispose();
+  });
+
+  it("never lets a reload silently resume a session behind a genuine integrity latch", async () => {
+    const first = runtimeHarness({ state: "playing" });
+    const startedFirst = first.runtime.start();
+    await first.callbacks.onReady?.(projection("playing"));
+    await startedFirst;
+    // A genuine integrity violation, independent of resumability.
+    await first.callbacks.onManifest?.({
+      ...revealedPointer(),
+      premiereId: OTHER_PREMIERE_ID,
+    });
+    expect(first.models.at(-1)).toMatchObject({
+      state: "failed",
+      failureCode: "integrity_failure",
+    });
+    first.runtime.dispose();
+
+    // The next load must never find a resumable pointer for this
+    // premiere — a compromised session must not quietly resume.
+    const startSession = vi.fn(async () => sessionResponse("playing"));
+    const resumeSession = vi.fn();
+    const second = runtimeHarness({
+      state: "playing",
+      service: { startSession, resumeSession },
+    });
+    const startedSecond = second.runtime.start();
+    await second.callbacks.onReady?.(projection("playing"));
+    await startedSecond;
+
+    expect(resumeSession).not.toHaveBeenCalled();
+    expect(startSession).toHaveBeenCalledOnce();
+    second.runtime.dispose();
   });
 
   it("keeps transient marker failure recoverable but latches a strict marker response failure", async () => {
@@ -2303,6 +2428,10 @@ describe("ReplayPremiereRuntimeController", () => {
 
     await harness.callbacks.onManifest?.(revealedPointer());
     sessionDeferred.resolve(sessionResponse("archived"));
+    // `resumeSession`/`establishFreshSession` add one more microtask hop
+    // than a bare `await this.service.startSession(...)` — one extra tick
+    // to let it fully settle before asserting on its effects.
+    await Promise.resolve();
     await Promise.resolve();
     await Promise.resolve();
 
@@ -3755,7 +3884,15 @@ function runtimeHarness(options: {
               "PREMIERE_INVALID_REQUEST",
             );
           })
-        : vi.fn(options.service.resumeSession),
+        : vi.fn(async () => {
+            const override = options.service?.resumeSession;
+            const response =
+              override === undefined
+                ? heartbeatResponse("playing")
+                : await override();
+            service.sessionValue = response.session;
+            return response;
+          }),
     heartbeat:
       options.service?.heartbeat === undefined
         ? vi.fn(async () => heartbeatResponse("playing"))
