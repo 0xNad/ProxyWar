@@ -891,6 +891,7 @@ export class ReplayPremiereRuntimeCoordinator {
         lifecycle = recordSafeReleasedSequence(lifecycle, sequence, now);
       }
       let activeCheckpoint: PremierePublicCheckpoint | null = null;
+      let completedCheckpointIds = this.state.completedCheckpointIds;
       let preparedInteraction:
         | ReplayPremierePreparedInteractionTransition<unknown>
         | undefined;
@@ -908,28 +909,48 @@ export class ReplayPremiereRuntimeCoordinator {
         if (projectedCheckpoint === undefined) {
           throw runtimeIntegrity("checkpoint_option_projection_missing");
         }
-        lifecycle = transitionPremiereLifecycle(lifecycle, {
-          action: "open_checkpoint",
-          actor: "service",
-          occurredAt: now,
-        }).snapshot;
-        activeCheckpoint = {
-          id: checkpoint.id,
-          sequence: checkpoint.sequence,
-          opensAt: now,
-          closesAt: new Date(
-            Date.parse(now) + REPLAY_PREMIERE_CHECKPOINT_PAUSE_MS,
-          ).toISOString(),
-          questionKind: "winner_from_here",
-          optionSeatIds: [...projectedCheckpoint.optionSeatIds],
-          state: "open",
-        };
-        preparedInteraction = this.interactions.prepareOpenCheckpoint({
-          checkpointId: activeCheckpoint.id,
-          opensAt: activeCheckpoint.opensAt,
-          closesAt: activeCheckpoint.closesAt,
-          optionSeatIds: activeCheckpoint.optionSeatIds,
-        });
+        if (this.interactions.isWageringEnabled()) {
+          // Wagering premieres never halt the release clock for a
+          // checkpoint: the legacy open-window-then-pause-then-resume
+          // sequence (below) is replaced with a single durable "passed"
+          // step — no active checkpoint, no lifecycle transition, no
+          // REPLAY_PREMIERE_CHECKPOINT_PAUSE_MS wait. Checkpoints still
+          // exist as content beats (their optionSeatIds are still
+          // recorded, so post-reveal resolution/eligibility is
+          // unaffected) — they just stop gating anything. /premiere/<id>
+          // (wagering disabled) takes the untouched branch below.
+          preparedInteraction = this.interactions.prepareMarkCheckpointPassed(
+            {
+              checkpointId: checkpoint.id,
+              occurredAt: now,
+              optionSeatIds: projectedCheckpoint.optionSeatIds,
+            },
+          );
+          completedCheckpointIds = [...completedCheckpointIds, checkpoint.id];
+        } else {
+          lifecycle = transitionPremiereLifecycle(lifecycle, {
+            action: "open_checkpoint",
+            actor: "service",
+            occurredAt: now,
+          }).snapshot;
+          activeCheckpoint = {
+            id: checkpoint.id,
+            sequence: checkpoint.sequence,
+            opensAt: now,
+            closesAt: new Date(
+              Date.parse(now) + REPLAY_PREMIERE_CHECKPOINT_PAUSE_MS,
+            ).toISOString(),
+            questionKind: "winner_from_here",
+            optionSeatIds: [...projectedCheckpoint.optionSeatIds],
+            state: "open",
+          };
+          preparedInteraction = this.interactions.prepareOpenCheckpoint({
+            checkpointId: activeCheckpoint.id,
+            opensAt: activeCheckpoint.opensAt,
+            closesAt: activeCheckpoint.closesAt,
+            optionSeatIds: activeCheckpoint.optionSeatIds,
+          });
+        }
         eventType = "premiere_runtime_chunk_released";
       }
       const next = immutable<ReplayPremiereRuntimeSnapshotV1>(
@@ -937,6 +958,7 @@ export class ReplayPremiereRuntimeCoordinator {
           ...this.state,
           lifecycle,
           activeCheckpoint,
+          completedCheckpointIds,
           lastObservedAt: now,
           nextDraftIndex: this.state.nextDraftIndex + 1,
           releasedChunks: [

@@ -23,6 +23,7 @@ export function marketStateFromService(
     status: wire.status,
     winnerSeatId: wire.winnerSeatId,
     liveVisibleSequence: wire.liveVisibleSequence,
+    balance: wire.balance,
     positions:
       wire.positions?.map((position) => ({
         seatId: position.seatId,

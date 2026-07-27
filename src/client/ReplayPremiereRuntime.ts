@@ -435,6 +435,13 @@ const marketStateSchema = z
     // order (see `submitMarketOrder`) — never cached across multiple orders.
     liveVisibleSequence: nonNegativeIntegerSchema,
     positions: z.array(marketPositionSchema).nullable(),
+    // The caller's own available ledger balance — the SOLE money-
+    // authoritative number for bankroll display and buy-stake validation
+    // (see `src/client/prediction/wagering/**`, which carries no local
+    // debit/credit arithmetic of its own). Null only when this view was
+    // read anonymously (no participant bound); an authenticated read
+    // (`market/me`, or any trade response) always carries a number.
+    balance: nonNegativeIntegerSchema.nullable(),
   })
   .strict();
 const marketStateResponseSchema = z
@@ -1099,6 +1106,34 @@ export class ReplayPremiereServiceClient {
     return response;
   }
 
+  /**
+   * Authenticated participant read: this caller's own open positions AND
+   * available ledger balance — the sole money authority for the client
+   * (see `src/client/prediction/wagering/**`, which keeps no local
+   * debit/credit/payout arithmetic of its own; every figure it shows is
+   * this response, verbatim). Same auth discipline as every write route
+   * (guest cookie + CSRF + strict Origin, via {@link authenticatedGetJson})
+   * — never silently degrades to the anonymous view when creds are
+   * missing; the server 401s, and so does this call (via
+   * {@link requireSession}'s client-side short-circuit) before a request
+   * is even sent.
+   */
+  async readMarketSelf(): Promise<ReplayPremiereServiceMarketStateResponse> {
+    this.requireSession();
+    const response = await this.authenticatedGetJson(
+      "market/me",
+      marketStateResponseSchema,
+      200,
+    );
+    if (
+      response.market.q.length !== response.market.outcomeSeatIds.length ||
+      response.market.prices.length !== response.market.outcomeSeatIds.length
+    ) {
+      throw serviceError("invalid_response");
+    }
+    return response;
+  }
+
   dispose(): void {
     if (this.disposed) return;
     this.disposed = true;
@@ -1286,6 +1321,144 @@ export class ReplayPremiereServiceClient {
           {
             method: "GET",
             headers: { Accept: "application/json" },
+            cache: "no-store",
+            credentials: "same-origin",
+            redirect: "error",
+            signal: requestController.signal,
+          },
+        );
+      } catch {
+        if (this.disposed) {
+          throw serviceError("disposed", null, null, "fetch_rejection");
+        }
+        throw serviceError(
+          "request_failed",
+          null,
+          null,
+          timedOut ? "timeout" : "fetch_rejection",
+        );
+      }
+      const transientStatus = isTransientInteractionStatus(response.status);
+      const contentType = response.headers.get("content-type") ?? "";
+      const hasJsonContentType = JSON_CONTENT_TYPE_PATTERN.test(
+        contentType.trim(),
+      );
+      const responseHasApplicationPolicy =
+        hasJsonContentType && hasNoStoreCachePolicy(response.headers);
+      if (transientStatus && !hasJsonContentType) {
+        throw serviceError(
+          "request_failed",
+          response.status,
+          null,
+          "response_status",
+        );
+      }
+      if (!responseHasApplicationPolicy) {
+        throw serviceError(
+          "invalid_response",
+          response.status,
+          null,
+          "response_policy",
+        );
+      }
+      let value: unknown;
+      try {
+        value = await readBoundedJsonResponse(
+          response,
+          this.maxResponseBytes,
+          requestController.signal,
+        );
+      } catch (error) {
+        if (transientStatus) {
+          throw serviceError(
+            "request_failed",
+            response.status,
+            null,
+            "response_status",
+          );
+        }
+        throw error;
+      }
+      if (response.status !== expectedStatus) {
+        const publicFailure = publicErrorResponseSchema.safeParse(value);
+        if (!publicFailure.success) {
+          if (transientStatus) {
+            throw serviceError(
+              "request_failed",
+              response.status,
+              null,
+              "response_status",
+            );
+          }
+          throw serviceError(
+            "invalid_response",
+            response.status,
+            null,
+            "response_schema",
+          );
+        }
+        throw serviceError(
+          "request_rejected",
+          response.status,
+          publicFailure.data.error.code,
+          "response_status",
+        );
+      }
+      const parsed = schema.safeParse(value);
+      if (!parsed.success) {
+        throw serviceError(
+          "invalid_response",
+          response.status,
+          null,
+          "response_schema",
+        );
+      }
+      return parsed.data;
+    } finally {
+      clearTimeout(timeout);
+      this.abortController.signal.removeEventListener("abort", abortRequest);
+    }
+  }
+
+  /**
+   * Same-origin GET with the identical transient-status, no-store
+   * application-policy, response-size, and timeout discipline as
+   * {@link postJson} / {@link getJson}, but stamped with the guest CSRF
+   * token like every write — for a read that returns one participant's
+   * own private data (`market/me`) and is never exempt from that
+   * discipline. Throws `session_required` before sending anything if
+   * there is no session yet, exactly like `postJson`'s `requireCsrf` path.
+   */
+  private async authenticatedGetJson<T>(
+    route: string,
+    schema: z.ZodType<T>,
+    expectedStatus: number,
+  ): Promise<T> {
+    this.assertActive();
+    if (this.csrfToken === null) {
+      throw serviceError("session_required");
+    }
+    const requestController = new AbortController();
+    const abortRequest = () => requestController.abort();
+    this.abortController.signal.addEventListener("abort", abortRequest, {
+      once: true,
+    });
+    let timedOut = false;
+    const timeout = setTimeout(() => {
+      timedOut = true;
+      requestController.abort();
+    }, this.requestTimeoutMs);
+    try {
+      let response: Response;
+      try {
+        response = await this.fetchImpl(
+          `/api/premieres/${this.options.premiereId}/${route}`,
+          {
+            method: "GET",
+            headers: {
+              Accept: "application/json",
+              "x-csrf-token": this.csrfToken,
+            },
             cache: "no-store",
             credentials: "same-origin",
             redirect: "error",
@@ -1992,6 +2165,7 @@ interface ReplayPremiereServiceLike {
     input: ReplayPremiereTradeRequest,
   ): Promise<ReplayPremiereServiceTradeResponse>;
   readMarketState(): Promise<ReplayPremiereServiceMarketStateResponse>;
+  readMarketSelf(): Promise<ReplayPremiereServiceMarketStateResponse>;
   createShare(input: {
     sequence: number;
     sourceReactionId?: string | null;
@@ -3343,6 +3517,19 @@ export class ReplayPremiereRuntimeController {
   /** Public poll read for the live odds ticker — no session/write gating. */
   async readMarketState(): Promise<ReplayPremiereServiceMarketStateResponse> {
     return this.service.readMarketState();
+  }
+
+  /**
+   * Authenticated participant read — this caller's own positions AND
+   * available ledger balance, the sole money authority for the client
+   * (see `src/client/prediction/wagering/**`; no local bankroll
+   * arithmetic anywhere in that module). Deliberately NOT gated by
+   * {@link assertInteractionWriteAllowed} — unlike a trade, this is a
+   * pure read and must keep working after settlement (to reconcile the
+   * final balance) and before this session has ever placed an order.
+   */
+  async readMarketSelf(): Promise<ReplayPremiereServiceMarketStateResponse> {
+    return this.service.readMarketSelf();
   }
 
   private overlayCallbacks(): ReplayPremiereOverlayCallbacks {

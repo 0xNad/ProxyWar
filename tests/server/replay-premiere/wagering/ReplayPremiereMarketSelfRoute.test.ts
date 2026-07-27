@@ -23,6 +23,7 @@ import {
   ReplayPremiereInteractions,
   type ReplayPremiereInteractionsSnapshot,
 } from "../../../../src/server/replay-premiere/ReplayPremiereInteractions";
+import { STARTING_BANKROLL } from "../../../../src/server/replay-premiere/wagering";
 
 const ORIGIN = "https://beta.proxywar.xyz";
 const premiereId = "prem_abcdefghijklmnop";
@@ -179,7 +180,7 @@ async function placeOrder(
     amount: number;
     idempotencyKey: string;
   },
-): Promise<void> {
+): Promise<{ trade: { chips: number }; market: { balance: number | null } }> {
   const response = await fetch(
     `${baseUrl}/api/premieres/${premiereId}/market-orders`,
     {
@@ -202,6 +203,7 @@ async function placeOrder(
     },
   );
   expect(response.status).toBe(200);
+  return response.json();
 }
 
 async function readMarketSelf(
@@ -209,7 +211,10 @@ async function readMarketSelf(
   guest: Guest | null,
 ): Promise<{
   schemaVersion: 1;
-  market: { positions: { seatId: string; shares: number }[] | null } | null;
+  market: {
+    positions: { seatId: string; shares: number }[] | null;
+    balance: number | null;
+  } | null;
 } | null> {
   const response = await fetch(`${baseUrl}/api/premieres/${premiereId}/market/me`, {
     headers:
@@ -231,7 +236,7 @@ describe("GET /api/premieres/:id/market/me", () => {
     const security = buildSecurity(1);
     await withServer(interactions, security, async (baseUrl) => {
       const guestA = await createGuest(baseUrl);
-      await placeOrder(baseUrl, guestA, {
+      const order = await placeOrder(baseUrl, guestA, {
         seatId: "seat-1",
         amount: 100,
         idempotencyKey: "idem_order_00000000000001",
@@ -240,6 +245,22 @@ describe("GET /api/premieres/:id/market/me", () => {
       expect(body?.market?.positions).toEqual([
         expect.objectContaining({ seatId: "seat-1" }),
       ]);
+      // The single money-authoritative balance: STARTING_BANKROLL debited
+      // by exactly what the trade actually charged (order.market.balance
+      // from the trade response itself confirms the two paths agree).
+      expect(body?.market?.balance).toBe(STARTING_BANKROLL - order.trade.chips);
+      expect(body?.market?.balance).toBe(order.market.balance);
+    });
+  });
+
+  it("a participant who has never traded reads balance as STARTING_BANKROLL, not 0", async () => {
+    const interactions = buildInteractions();
+    const security = buildSecurity(1);
+    await withServer(interactions, security, async (baseUrl) => {
+      const guestA = await createGuest(baseUrl);
+      const body = await readMarketSelf(baseUrl, guestA);
+      expect(body?.market?.positions).toEqual([]);
+      expect(body?.market?.balance).toBe(STARTING_BANKROLL);
     });
   });
 
@@ -277,12 +298,12 @@ describe("GET /api/premieres/:id/market/me", () => {
       const guestB = await createGuest(baseUrl);
       expect(guestA.cookie).not.toBe(guestB.cookie);
 
-      await placeOrder(baseUrl, guestA, {
+      const orderA = await placeOrder(baseUrl, guestA, {
         seatId: "seat-1",
         amount: 100,
         idempotencyKey: "idem_order_00000000000003",
       });
-      await placeOrder(baseUrl, guestB, {
+      const orderB = await placeOrder(baseUrl, guestB, {
         seatId: "SEAT0001",
         amount: 150,
         idempotencyKey: "idem_order_00000000000004",
@@ -306,13 +327,20 @@ describe("GET /api/premieres/:id/market/me", () => {
       // and vice versa — no cross-participant leak via a stolen/forged token
       // shape, only via legitimately owning that exact signed cookie.
       expect(seatIdsForA).not.toEqual(seatIdsForB);
+
+      // Balances are per-participant too: A's spend never appears on B's
+      // ledger line and vice versa, each independently STARTING_BANKROLL
+      // minus exactly (and only) their own trade's actual chips.
+      expect(bodyA?.market?.balance).toBe(STARTING_BANKROLL - orderA.trade.chips);
+      expect(bodyB?.market?.balance).toBe(STARTING_BANKROLL - orderB.trade.chips);
+      expect(bodyA?.market?.balance).not.toBe(bodyB?.market?.balance);
     });
   });
 
-  it("a position survives a simulated cold reload (fresh interactions instance recovered from persisted state)", async () => {
+  it("a position AND balance survive a simulated cold reload (fresh interactions instance recovered from persisted state)", async () => {
     const security = buildSecurity(1);
     let guestA!: Guest;
-    let persistedSnapshot!: ReplayPremiereInteractionsSnapshot;
+    let balanceBeforeRestart!: number | null;
 
     // "Before restart": place the trade, capture exactly what the durable
     // snapshot looks like — this is the same state every mutate() already
@@ -320,13 +348,14 @@ describe("GET /api/premieres/:id/market/me", () => {
     const before = buildInteractions();
     await withServer(before, security, async (baseUrl) => {
       guestA = await createGuest(baseUrl);
-      await placeOrder(baseUrl, guestA, {
+      const order = await placeOrder(baseUrl, guestA, {
         seatId: "seat-1",
         amount: 100,
         idempotencyKey: "idem_order_00000000000005",
       });
+      balanceBeforeRestart = order.market.balance;
     });
-    persistedSnapshot = before.readState();
+    const persistedSnapshot = before.readState();
     expect(persistedSnapshot.market?.holdings[guestA.sessionId] ?? null).toBe(
       null,
     ); // sanity: holdings are keyed by participantId, not sessionId
@@ -336,13 +365,18 @@ describe("GET /api/premieres/:id/market/me", () => {
     // recovered purely from that persisted snapshot — same guest-auth
     // secret (config surviving a restart), completely different in-memory
     // object. The same signed cookie from before the "restart" must still
-    // authenticate and see the position.
+    // authenticate and see the position AND the exact balance — the bug
+    // this test exists to catch is a client-local bankroll number that
+    // silently resets to STARTING_BANKROLL on reload while the server
+    // still holds the real, debited balance.
     const after = buildInteractions({ initialState: persistedSnapshot });
     await withServer(after, security, async (baseUrl) => {
       const body = await readMarketSelf(baseUrl, guestA);
       expect(body?.market?.positions).toEqual([
         expect.objectContaining({ seatId: "seat-1", shares: expect.any(Number) }),
       ]);
+      expect(body?.market?.balance).toBe(balanceBeforeRestart);
+      expect(body?.market?.balance).toBeLessThan(STARTING_BANKROLL);
     });
   });
 });

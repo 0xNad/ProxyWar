@@ -728,6 +728,18 @@ export class ReplayPremiereInteractions {
     return hasCompleteReplayPremierePredictionResolution(this.state);
   }
 
+  /**
+   * Whether this premiere runs the LMSR wagering market. The runtime
+   * coordinator reads this to decide whether a checkpoint boundary should
+   * pause the release clock (legacy prediction-checkpoint behavior,
+   * unchanged) or pass straight through with no window (see
+   * `prepareMarkCheckpointPassed`) — single source of truth, never
+   * duplicated as a second constructor flag on the coordinator.
+   */
+  isWageringEnabled(): boolean {
+    return this.wageringEnabled;
+  }
+
   restoreState(snapshot: ReplayPremiereInteractionsSnapshot): void {
     this.assertWritesOpen();
     if (this.preparedTransitionToken !== null || this.pendingMutations !== 0) {
@@ -841,6 +853,19 @@ export class ReplayPremiereInteractions {
       liveVisibleSequence: this.getLiveVisibleSequence(),
       positions:
         participantId === null ? null : positionsFor(market, participantId),
+      // Authoritative available balance for the calling participant — the
+      // ONLY money number the client may trust across a reload/new tab.
+      // Mirrors submitMarketOrder's own lazy-grant semantics (a
+      // never-before-traded participant reads as STARTING_BANKROLL, the
+      // exact amount their first order would actually be granted and
+      // charged against) without granting anything on this read — a pure
+      // read never mutates the ledger.
+      balance:
+        participantId === null
+          ? null
+          : (market.ledgerGranted[participantId] ?? 0) > 0
+            ? (market.ledgerBalances[participantId] ?? 0)
+            : STARTING_BANKROLL,
     };
   }
 
@@ -966,6 +991,50 @@ export class ReplayPremiereInteractions {
       checkpoint.outageShiftMs = 0;
       checkpoint.optionSeatIds = optionSeatIds;
       checkpoint.state = "open";
+      return clone(checkpoint);
+    });
+  }
+
+  /**
+   * Wagering-only sibling of `prepareOpenCheckpoint` + `prepareCloseCheckpoint`:
+   * passes a checkpoint straight from "upcoming" to "closed" in one durable
+   * step, at the instant the coordinator releases its content, with no open
+   * window and no `REPLAY_PREMIERE_CHECKPOINT_PAUSE_MS` pause — the replay
+   * clock never halts for a wagering premiere. `optionSeatIds` is still
+   * recorded (from the same checkpoint projection the legacy path uses) so
+   * post-reveal prediction-resolution eligibility derivation stays correct;
+   * only the pause and the open voting window are gone, per operator
+   * direction that /premiere/<id> (non-wagering) is untouched. Callers must
+   * keep the runtime's own `completedCheckpointIds` in lockstep with this in
+   * the same persisted step — the coordinator's `validateRuntimeSnapshot`
+   * requires every interaction checkpoint past the completed prefix to
+   * still read "upcoming".
+   */
+  prepareMarkCheckpointPassed(options: {
+    checkpointId: string;
+    occurredAt: string;
+    optionSeatIds: readonly string[];
+  }): ReplayPremierePreparedInteractionTransition<ReplayPremiereInteractionCheckpoint> {
+    if (!this.wageringEnabled) throw invalidInteraction("wagering_disabled");
+    return this.prepareCheckpointTransition((next) => {
+      const checkpoint = findCheckpoint(next, options.checkpointId);
+      if (checkpoint.state !== "upcoming") {
+        throw conflict("checkpoint_already_opened");
+      }
+      timestamp(options.occurredAt, "checkpoint_passed_at");
+      const optionSeatIds = [...options.optionSeatIds];
+      if (
+        optionSeatIds.length < 2 ||
+        new Set(optionSeatIds).size !== optionSeatIds.length ||
+        optionSeatIds.some((seatId) => !this.seats.has(seatId))
+      ) {
+        throw invalidInteraction("invalid_checkpoint_options");
+      }
+      checkpoint.opensAt = options.occurredAt;
+      checkpoint.closesAt = options.occurredAt;
+      checkpoint.outageShiftMs = 0;
+      checkpoint.optionSeatIds = optionSeatIds;
+      checkpoint.state = "closed";
       return clone(checkpoint);
     });
   }
@@ -2485,12 +2554,15 @@ function validateSnapshotCheckpoints(
     if (
       // Durable snapshots recorded before the real-speed retune carry 15 s
       // windows; both canonical durations stay valid so archived journals
-      // keep validating.
+      // keep validating. Wagering premieres never open a real window —
+      // `prepareMarkCheckpointPassed` records a zero-duration "passed"
+      // marker instead, honestly reflecting that no pause ever happened.
       (duration !==
         REPLAY_PREMIERE_CHECKPOINT_PAUSE_MS + checkpoint.outageShiftMs &&
         duration !==
           REPLAY_PREMIERE_LEGACY_CHECKPOINT_PAUSE_MS +
-            checkpoint.outageShiftMs) ||
+            checkpoint.outageShiftMs &&
+        !(options.wageringEnabled && duration === 0)) ||
       checkpoint.optionSeatIds.length < 2 ||
       checkpoint.optionSeatIds.length > 64 ||
       new Set(checkpoint.optionSeatIds).size !== checkpoint.optionSeatIds.length

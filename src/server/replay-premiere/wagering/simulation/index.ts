@@ -10,6 +10,11 @@ export {
 } from "./SyntheticCrowdPersonas";
 export { Prng as SyntheticCrowdPrng } from "./SyntheticCrowdPrng";
 export { SyntheticCrowdSimulator } from "./SyntheticCrowdSimulator";
+export {
+  SyntheticCrowdLiveDriver,
+  type SyntheticCrowdLiveDriverOptions,
+  type SyntheticCrowdLiveProjectionSource,
+} from "./SyntheticCrowdLiveDriver";
 export type {
   SyntheticCrowdActivityCurve,
   SyntheticCrowdConfig,

@@ -44,6 +44,8 @@ export class FakeSyntheticCrowdMarket {
   private nowIso: string;
   private tradeCounter = 0;
   private sessionCounter = 0;
+  /** Mirrors `ReplayPremiereRuntimeCoordinator.readLiveVisibleSequence()`. Defaults high so existing tests that never call `setVisibleSequence` are unaffected. */
+  private visibleSequence = 1_000_000_000;
 
   constructor(options: {
     outcomeSeatIds: readonly string[];
@@ -69,6 +71,10 @@ export class FakeSyntheticCrowdMarket {
     this.nowIso = nowIso;
   }
 
+  setVisibleSequence(sequence: number): void {
+    this.visibleSequence = sequence;
+  }
+
   ledgerTotal(): number {
     return this.ledger.total();
   }
@@ -89,7 +95,7 @@ export class FakeSyntheticCrowdMarket {
       prices: computeMarketPrices(this.market),
       status: this.market.status,
       winnerSeatId: this.market.winnerSeatId,
-      liveVisibleSequence: 1_000_000,
+      liveVisibleSequence: this.visibleSequence,
     };
   }
 
@@ -124,6 +130,9 @@ export class FakeSyntheticCrowdMarket {
     }
     if (this.market.status !== "open") {
       throw new FakeSyntheticCrowdMarketRejection("market_not_open");
+    }
+    if (options.sequence > this.visibleSequence) {
+      throw new FakeSyntheticCrowdMarketRejection("order_sequence_unreleased");
     }
     if (!this.market.outcomeSeatIds.includes(options.seatId)) {
       throw new FakeSyntheticCrowdMarketRejection("unknown_seat");

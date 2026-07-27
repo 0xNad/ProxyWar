@@ -17,6 +17,7 @@ import {
   positionsFor,
   quoteSell,
   settleMarket,
+  SHARE_PAYOUT,
 } from "../../../../src/server/replay-premiere/wagering/ReplayPremiereMarket";
 import type { ReplayPremiereMarket } from "../../../../src/server/replay-premiere/wagering/ReplayPremiereWageringTypes";
 
@@ -131,18 +132,85 @@ describe("positionsFor currentValue is the executable liquidation value", () => 
     }
   });
 
-  it("a settled market has no open positions left to value (settlement already paid/refunded through the ledger, not through currentValue)", () => {
+  it("a settled market keeps serving each participant's final position, valued at the real payout — never sellProceeds against a market that can no longer be traded", () => {
+    const ledger = new ReplayPremiereLedger();
+    ledger.grant("winner", 500);
+    ledger.grant("loser", 500);
+    let market = freshMarket(["seat-0", "seat-1"]);
+    const winnerBuy = applyBuy({
+      market,
+      ledger,
+      participantId: "winner",
+      seatId: "seat-0",
+      shares: 2,
+    });
+    market = winnerBuy.market;
+    const loserBuy = applyBuy({
+      market,
+      ledger,
+      participantId: "loser",
+      seatId: "seat-1",
+      shares: 3,
+    });
+    market = loserBuy.market;
+    const winnerCostBasis = positionsFor(market, "winner")[0].costBasis;
+    market = settleMarket({ market, ledger, winnerSeatId: "seat-0" });
+
+    // The winner's position is still readable after settlement — final
+    // shares and cost basis frozen exactly as they were, currentValue now
+    // the real flat payout (shares * SHARE_PAYOUT), not a liquidation
+    // quote against a market that no longer accepts trades.
+    const winnerPositions = positionsFor(market, "winner");
+    expect(winnerPositions).toEqual([
+      {
+        seatId: "seat-0",
+        shares: 2,
+        costBasis: winnerCostBasis,
+        currentValue: 2 * SHARE_PAYOUT,
+        unrealizedPnl: 2 * SHARE_PAYOUT - winnerCostBasis,
+      },
+    ]);
+    // The payout landed in the ledger too, not just in the read: starting
+    // grant minus the buy cost plus the flat per-share payout.
+    expect(ledger.balanceOf("winner")).toBe(500 - winnerBuy.chips + 2 * SHARE_PAYOUT);
+
+    // The loser's shares are still on record too (never silently erased)
+    // but are worthless — currentValue 0, matching the payout they
+    // actually received (none).
+    const loserPositions = positionsFor(market, "loser");
+    expect(loserPositions).toEqual([
+      {
+        seatId: "seat-1",
+        shares: 3,
+        costBasis: loserBuy.chips,
+        currentValue: 0,
+        unrealizedPnl: -loserBuy.chips,
+      },
+    ]);
+  });
+
+  it("a voided settled market refunds cost basis as currentValue, still per-position", () => {
     const ledger = new ReplayPremiereLedger();
     ledger.grant("p1", 500);
     let market = freshMarket(["seat-0", "seat-1"]);
-    market = applyBuy({
+    const buy = applyBuy({
       market,
       ledger,
       participantId: "p1",
       seatId: "seat-0",
       shares: 2,
-    }).market;
-    market = settleMarket({ market, ledger, winnerSeatId: "seat-0" });
-    expect(positionsFor(market, "p1")).toEqual([]);
+    });
+    market = buy.market;
+    market = settleMarket({ market, ledger, winnerSeatId: null });
+    const positions = positionsFor(market, "p1");
+    expect(positions).toEqual([
+      {
+        seatId: "seat-0",
+        shares: 2,
+        costBasis: buy.chips,
+        currentValue: buy.chips,
+        unrealizedPnl: 0,
+      },
+    ]);
   });
 });

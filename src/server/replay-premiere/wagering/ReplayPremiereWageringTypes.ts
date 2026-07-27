@@ -125,4 +125,14 @@ export interface ReplayPremiereMarketStateView {
   readonly liveVisibleSequence: number;
   /** The caller's own positions, mark-to-market. Null when no participant was specified. */
   readonly positions: readonly ReplayPremiereMarketPosition[] | null;
+  /**
+   * The caller's own available (spendable) ledger balance — the single
+   * money-authoritative number for bankroll display and buy-stake
+   * validation; the client must never re-derive it locally (that's the
+   * two-authorities drift this field exists to eliminate). Null only when
+   * no participant was specified. A participant who has never traded yet
+   * reads as `STARTING_BANKROLL` (the exact amount their first order would
+   * be lazily granted and charged against), not 0.
+   */
+  readonly balance: number | null;
 }

@@ -17,6 +17,7 @@ function serviceMarket(
     winnerSeatId: null,
     liveVisibleSequence: 0,
     positions: null,
+    balance: null,
     ...overrides,
   };
 }
@@ -32,6 +33,15 @@ describe("marketStateFromService", () => {
 
   it("maps null positions through unchanged", () => {
     expect(marketStateFromService(serviceMarket()).positions).toBeNull();
+  });
+
+  it("maps balance straight through — the sole bankroll authority", () => {
+    expect(marketStateFromService(serviceMarket({ balance: 742 })).balance).toBe(
+      742,
+    );
+    expect(marketStateFromService(serviceMarket({ balance: null })).balance).toBe(
+      null,
+    );
   });
 
   it("maps each position's server-computed value fields", () => {

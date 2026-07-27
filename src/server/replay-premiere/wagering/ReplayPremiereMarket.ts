@@ -209,13 +209,22 @@ export function applySell(options: {
 }
 
 /**
- * Every non-empty position a participant currently holds, valued at the
- * EXECUTABLE liquidation price: exactly what an immediate full sell of the
- * whole position would pay on this same LMSR cost curve (`sellProceeds`,
- * the same function every real sell fill uses) — never the marginal
- * per-share price. Selling moves price against the seller along the curve,
- * so `shares * price` overstates what's actually realisable; this is the
- * number that must match a real "sell all" to the credit.
+ * Every non-empty position a participant currently holds. While the market
+ * is open, `currentValue` is the EXECUTABLE liquidation price: exactly
+ * what an immediate full sell of the whole position would pay on this same
+ * LMSR cost curve (`sellProceeds`, the same function every real sell fill
+ * uses) — never the marginal per-share price, which overstates it since
+ * selling moves price against the seller along the curve.
+ *
+ * Once `market.status === "settled"`, `currentValue` is instead the REAL
+ * payout already posted to the ledger by `settleMarket` for that exact
+ * holding: `shares * SHARE_PAYOUT` for the winning seat, `0` for a losing
+ * one, or the full cost-basis refund on a void market — never
+ * `sellProceeds`, which is meaningless once the market can no longer be
+ * traded into. `settleMarket` deliberately leaves `holdings`/`q` untouched
+ * at settlement specifically so this read keeps working forever after —
+ * final shares, cost basis, and the real payout, from the server, for a
+ * settlement card the client never has to recompute locally.
  */
 export function positionsFor(
   market: ReplayPremiereMarket,
@@ -226,9 +235,17 @@ export function positionsFor(
   const positions: ReplayPremiereMarketPosition[] = [];
   for (const [index, shares] of holdings.entries()) {
     if (shares <= 0) continue;
-    const currentValue = sellProceeds(market, index, shares);
+    const seatId = market.outcomeSeatIds[index];
+    const currentValue =
+      market.status === "settled"
+        ? market.winnerSeatId === null
+          ? costBasis[index]
+          : seatId === market.winnerSeatId
+            ? shares * SHARE_PAYOUT
+            : 0
+        : sellProceeds(market, index, shares);
     positions.push({
-      seatId: market.outcomeSeatIds[index],
+      seatId,
       shares,
       costBasis: costBasis[index],
       currentValue,
@@ -247,6 +264,17 @@ export function positionsFor(
  * simply worthless. Idempotent by construction: settling an already-settled
  * market is a caller-level no-op (see `ReplayPremiereInteractions`), never
  * re-executed here.
+ *
+ * `holdings` and `q` are deliberately left EXACTLY as they were the instant
+ * before settlement — every position was already paid or refunded above
+ * through the ledger (the actual money movement), not by zeroing shares.
+ * No further order can ever be placed against a settled market (gated by
+ * premiere lifecycle state in `submitMarketOrder`, independent of
+ * holdings/q), so nothing can be double-spent by leaving them non-zero.
+ * Keeping them intact is what lets `positionsFor` still serve an honest,
+ * server-truth settlement read after the fact — final shares, cost basis,
+ * and the real payout — instead of every participant's history vanishing
+ * the instant the market settles.
  */
 export function settleMarket(options: {
   readonly market: ReplayPremiereMarket;
@@ -255,7 +283,6 @@ export function settleMarket(options: {
 }): ReplayPremiereMarket {
   const { market, ledger, winnerSeatId } = options;
   const winnerIndex = winnerSeatId === null ? -1 : outcomeIndex(market, winnerSeatId);
-  const nextHoldings: Record<string, readonly number[]> = {};
   for (const [participantId, holdings] of Object.entries(market.holdings)) {
     if (winnerIndex >= 0) {
       const winShares = holdings[winnerIndex] ?? 0;
@@ -276,16 +303,10 @@ export function settleMarket(options: {
         ]);
       }
     }
-    nextHoldings[participantId] = holdings.map(() => 0);
   }
   return {
     ...market,
     status: "settled",
     winnerSeatId,
-    // Every position was just closed out (paid or refunded) above, so no
-    // shares remain outstanding — q must agree with the now-zeroed
-    // holdings, or the snapshot's holdings-vs-q invariant would break.
-    q: market.q.map(() => 0),
-    holdings: nextHoldings,
   };
 }

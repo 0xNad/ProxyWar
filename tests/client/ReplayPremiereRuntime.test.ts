@@ -3666,6 +3666,21 @@ function runtimeHarness(options: {
         winnerSeatId: null,
         liveVisibleSequence: 0,
         positions: null,
+        balance: null,
+      },
+    })),
+    readMarketSelf: vi.fn(async () => ({
+      schemaVersion: 1 as const,
+      market: {
+        outcomeSeatIds: [],
+        q: [],
+        b: 1,
+        prices: [],
+        status: "open" as const,
+        winnerSeatId: null,
+        liveVisibleSequence: 0,
+        positions: null,
+        balance: null,
       },
     })),
     submitReaction:

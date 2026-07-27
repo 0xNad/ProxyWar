@@ -596,6 +596,26 @@ describe("ReplayPremiereInteractions LMSR market orders", () => {
     const balanceB = market?.ledgerBalances[guestB] ?? 0;
     expect(balanceB).toBeLessThan(1_000); // loser never gets the stake back
 
+    // The authenticated read (GET /market/me in production) still serves
+    // each participant's real settlement outcome through readMarketState
+    // — winner's shares valued at the actual flat payout, loser's shares
+    // still on record but worthless. This is the exact server-truth read
+    // MarketSettlementPanel renders; it must never come back empty just
+    // because the market settled.
+    const winnerView = h.interactions.readMarketState(guestA);
+    expect(winnerView?.positions).toEqual([
+      {
+        seatId: "seat-1",
+        shares: winnerBuy.trade.shares,
+        costBasis: winnerBuy.trade.chips,
+        currentValue: winnerBuy.trade.shares * 100,
+        unrealizedPnl: winnerBuy.trade.shares * 100 - winnerBuy.trade.chips,
+      },
+    ]);
+    const loserView = h.interactions.readMarketState(guestB);
+    expect(loserView?.positions).toEqual([
+      expect.objectContaining({ seatId: "SEAT0001", currentValue: 0 }),
+    ]);
     const persistedBefore = h.persisted.length;
     await expect(
       h.interactions.resolvePredictionsFromAuthoritativeResult({
@@ -633,5 +653,19 @@ describe("ReplayPremiereInteractions LMSR market orders", () => {
     expect(market?.status).toBe("settled");
     expect(market?.winnerSeatId).toBeNull();
     expect(market?.ledgerBalances[guestA]).toBe(1_000 - buy.trade.chips + buy.trade.chips);
+
+    // Void settlement: the position is still readable, currentValue is
+    // the cost-basis refund (already posted to the ledger above), not 0
+    // and not sellProceeds against a market that can no longer be traded.
+    const view = h.interactions.readMarketState(guestA);
+    expect(view?.positions).toEqual([
+      {
+        seatId: "seat-1",
+        shares: buy.trade.shares,
+        costBasis: buy.trade.chips,
+        currentValue: buy.trade.chips,
+        unrealizedPnl: 0,
+      },
+    ]);
   });
 });

@@ -32,6 +32,11 @@ import {
   type ReplayPremiereJsonValue,
 } from "./ReplayPremiereIntegrity";
 import {
+  DEFAULT_SYNTHETIC_CROWD_CONFIG,
+  SyntheticCrowdLiveDriver,
+  type SyntheticCrowdConfig,
+} from "./wagering/simulation";
+import {
   hashReplayPremiereCheckpointSchedule,
   loadReplayPremiereInteractions,
 } from "./ReplayPremiereInteractionRecovery";
@@ -183,6 +188,18 @@ export interface ReplayPremiereProductionStartupOptions {
   interactionLimits?: Partial<ReplayPremiereInteractionLimits>;
   /** Server-side LMSR prediction market, continuous from match start to reveal. Off by default. */
   wageringEnabled?: boolean;
+  /**
+   * Deterministic, seeded synthetic bettors trading the same LMSR market
+   * real participants use, to keep thin markets legible for demos/tester
+   * sessions. Requires `wageringEnabled`. Off by default — see
+   * `SyntheticCrowdSimulator.ts`'s header for why this must never be on in
+   * anything resembling production.
+   */
+  syntheticCrowdEnabled?: boolean;
+  /** Overrides merged onto `DEFAULT_SYNTHETIC_CROWD_CONFIG` when `syntheticCrowdEnabled` is set. */
+  syntheticCrowdConfig?: Partial<SyntheticCrowdConfig>;
+  /** Real-time poll cadence for the synthetic crowd driver; defaults to 1000ms. Lower only for tests. */
+  syntheticCrowdPollIntervalMs?: number;
   clock?: ReplayPremiereRuntimeClock;
   maxStartupMs?: number;
   /**
@@ -234,6 +251,8 @@ export interface ReplayPremiereProductionStartupResult {
 interface AssembledPremiereTarget {
   runtime: ReplayPremiereRuntimeCoordinator;
   target: ReplayPremiereHttpTarget;
+  /** Present only when `syntheticCrowdEnabled` was set at assembly time. Started once registration succeeds, stopped on every teardown path. */
+  syntheticCrowdDriver?: SyntheticCrowdLiveDriver;
 }
 
 interface RecoveryProjection {
@@ -385,6 +404,7 @@ export class ReplayPremiereProductionService {
       failures.push(error);
     } finally {
       for (const assembled of [...this.ownedTargets].reverse()) {
+        assembled.syntheticCrowdDriver?.stop();
         try {
           this.httpRegistry.unregister(assembled.target);
         } catch (error) {
@@ -423,7 +443,10 @@ export class ReplayPremiereProductionService {
       this.runtimeRegistry,
       this.httpRegistry,
       assembled,
-      () => this.supervisor.add(assembled.runtime),
+      () => {
+        this.supervisor.add(assembled.runtime);
+        assembled.syntheticCrowdDriver?.start();
+      },
     );
     this.ownedTargets.push(assembled);
     return true;
@@ -450,6 +473,7 @@ export class ReplayPremiereProductionService {
           return null;
         });
       if (result === null || !result.reclaimed) continue;
+      assembled.syntheticCrowdDriver?.stop();
       this.supervisor.remove(assembled.runtime);
       this.httpRegistry.unregister(assembled.target);
       this.runtimeRegistry.unregister(assembled.runtime);
@@ -818,6 +842,9 @@ export async function startReplayPremiereProduction(
             checkpointProjectionCatalog: catalog,
             interactionLimits: options.interactionLimits,
             wageringEnabled: options.wageringEnabled,
+            syntheticCrowdEnabled: options.syntheticCrowdEnabled,
+            syntheticCrowdConfig: options.syntheticCrowdConfig,
+            syntheticCrowdPollIntervalMs: options.syntheticCrowdPollIntervalMs,
             recoveryProjection: plan.projection,
             fence,
           });
@@ -847,7 +874,10 @@ export async function startReplayPremiereProduction(
           options.runtimeRegistry,
           options.httpRegistry,
           assembled,
-          () => supervisor.add(assembled.runtime),
+          () => {
+            supervisor.add(assembled.runtime);
+            assembled.syntheticCrowdDriver?.start();
+          },
         );
         ownedTargets.push(assembled);
         registered.push(record.premiereId);
@@ -905,6 +935,9 @@ export async function startReplayPremiereProduction(
                   checkpointProjectionCatalog: catalog,
                   interactionLimits: options.interactionLimits,
                   wageringEnabled: options.wageringEnabled,
+                  syntheticCrowdEnabled: options.syntheticCrowdEnabled,
+                  syntheticCrowdConfig: options.syntheticCrowdConfig,
+                  syntheticCrowdPollIntervalMs: options.syntheticCrowdPollIntervalMs,
                   recoveryProjection: plan.projection,
                   fence,
                 });
@@ -1110,6 +1143,9 @@ async function assemblePremiereTarget(options: {
   checkpointProjectionCatalog: ReplayPremiereAdmissionCatalog;
   interactionLimits?: Partial<ReplayPremiereInteractionLimits>;
   wageringEnabled?: boolean;
+  syntheticCrowdEnabled?: boolean;
+  syntheticCrowdConfig?: Partial<SyntheticCrowdConfig>;
+  syntheticCrowdPollIntervalMs?: number;
   recoveryProjection: RecoveryProjection;
   fence: ReplayPremiereStartupOperationFence;
 }): Promise<AssembledPremiereTarget> {
@@ -1213,12 +1249,38 @@ async function assemblePremiereTarget(options: {
   ) {
     throw startupIntegrity("startup_interaction_journal_anchor_mismatch");
   }
+  const syntheticCrowdDriver =
+    options.syntheticCrowdEnabled === true && options.wageringEnabled === true
+      ? new SyntheticCrowdLiveDriver({
+          runtime,
+          target: recoveredInteractions.interactions,
+          seatIds: options.record.eligibilityRecord.seats.map(
+            (seat) => seat.seatId,
+          ),
+          finalSequence:
+            drafts.length > 0 ? drafts[drafts.length - 1].descriptor.endSequence : 0,
+          pollIntervalMs: options.syntheticCrowdPollIntervalMs,
+          config: {
+            ...DEFAULT_SYNTHETIC_CROWD_CONFIG,
+            enabled: true,
+            ...options.syntheticCrowdConfig,
+          },
+          onError: (error) => {
+            console.error(
+              `Synthetic crowd driver poll failed for ${options.record.premiereId}: ${
+                error instanceof Error ? error.message : String(error)
+              }`,
+            );
+          },
+        })
+      : undefined;
   return {
     runtime,
     target: {
       runtime,
       interactions: recoveredInteractions.interactions,
     },
+    syntheticCrowdDriver,
   };
 }
 

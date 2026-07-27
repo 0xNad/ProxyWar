@@ -308,6 +308,10 @@ const replayPremiereProduction = await startReplayPremiereProduction({
   // Play money only, off by default. PROXYWAR_WAGERING_ENABLED=1 turns on
   // pari-mutuel wagering on prediction checkpoints for local/dev testing.
   wageringEnabled: envFlag("PROXYWAR_WAGERING_ENABLED"),
+  // Deterministic, seeded synthetic bettors that keep a thin local/dev
+  // market legible for demos/tester sessions. Requires PROXYWAR_WAGERING_ENABLED=1
+  // too. Off by default, never for production.
+  syntheticCrowdEnabled: envFlag("PROXYWAR_SYNTHETIC_CROWD_ENABLED"),
   onDiagnostic: (diagnostic) => {
     // Deferred fresh-admission lane, orphan-reclamation, and archived-clip
     // promotion events are progress, not rejections; keep the historical

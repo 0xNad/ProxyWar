@@ -75,6 +75,16 @@ export interface MarketState {
   readonly liveVisibleSequence: number;
   /** This participant's own open positions, one entry per seat held. */
   readonly positions: readonly MarketPosition[] | null;
+  /**
+   * The caller's own available (spendable) ledger balance — the SOLE
+   * money authority for bankroll display and buy-stake validation. This
+   * module never re-derives a bankroll figure locally; the bankroll
+   * badge and every stake check read this field, verbatim, off the
+   * latest `/market/me` poll or trade response. `null` only when this
+   * snapshot was read anonymously (no participant bound) — which never
+   * happens on this page, every read here is authenticated.
+   */
+  readonly balance: number | null;
 }
 
 /** Outbound request to trade at an open checkpoint window. */
@@ -107,8 +117,8 @@ export type MarketOutcome =
  * Post-resolution settlement for one seat's final position.
  * `bankrollDelta` (`payout - costBasis`) is this seat's own net effect —
  * self-contained, independent of the viewer's overall running bankroll
- * (see `SessionBankroll` for that, there is no server wallet in this
- * slice).
+ * (that's `MarketState.balance`, the server's authoritative ledger
+ * figure — there is no client-local wallet in this module).
  */
 export interface MarketSettlement {
   readonly outcome: MarketOutcome;

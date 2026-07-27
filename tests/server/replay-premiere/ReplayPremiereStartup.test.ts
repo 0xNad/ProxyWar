@@ -3367,6 +3367,114 @@ describe("ReplayPremiere production startup", () => {
     });
     expect(trade.shares).toBeGreaterThan(0);
   });
+  test("synthetic crowd, on: drives visible trades and price movement with zero human trading", async () => {
+    const fixture = await verifiedRealtimeLongPublicationFixture(root);
+    const catalog = await ReplayPremiereAdmissionCatalog.open({
+      privateStateRoot: path.join(root, "private"),
+      servedRoots: [path.join(root, "served")],
+    });
+    try {
+      await catalog.writeVerifiedAdmission({
+        gate: fixture.gate,
+        verification: fixture.verificationOptions,
+        chunkBuildLimits: fixture.chunkBuildLimits,
+        collectorLimits: COLLECTOR_LIMITS,
+      });
+    } finally {
+      await catalog.close();
+    }
+
+    const context = startupContext();
+    const started = await startReplayPremiereProduction({
+      ...context,
+      privateStateRoot: path.join(root, "private"),
+      servedRoots: [path.join(root, "served")],
+      wageringEnabled: true,
+      syntheticCrowdEnabled: true,
+      syntheticCrowdConfig: {
+        seed: 7,
+        count: 10,
+        activityProbability: 1,
+        // startupContext()'s injected clock is frozen (matches the rest of
+        // this file's convention: real progression needs an explicit
+        // vi.setSystemTime), so `readLiveVisibleSequence` never advances
+        // past the single turn already visible at admission — every
+        // persona whose fair value derives from the (uniform, real-signal)
+        // snapshot sees an exact price match and correctly declines to
+        // trade. Only noise-trader's jitter reliably clears the threshold
+        // on that one visible turn, which is exactly what this test needs:
+        // proof the wiring drives a real trade end to end, not a
+        // statistics-dependent persona mix.
+        personaWeights: {
+          "favorite-backer": 0,
+          "value-hunter": 0,
+          "momentum-chaser": 0,
+          "noise-trader": 1,
+        },
+      },
+      syntheticCrowdPollIntervalMs: 25,
+    });
+    services.push(started.service);
+    expect(started.diagnostics).toEqual([]);
+
+    const target = context.httpRegistry.get(PREMIERE_ID);
+    expect(target).not.toBeNull();
+    const before = target!.interactions.readMarketState(null)!.prices.slice();
+
+    // Real wait, deliberately: SyntheticCrowdLiveDriver polls on a genuine
+    // `setInterval` against the platform clock (by design — it drives a
+    // live server's background loop, not deterministic test time), and no
+    // human ever trades in this test — every trade below must come from
+    // that background driver alone.
+    await new Promise((resolve) => setTimeout(resolve, 250));
+
+    const snapshot = target!.interactions.readState();
+    expect(snapshot.trades.length).toBeGreaterThan(0);
+    for (const trade of snapshot.trades) {
+      expect(trade.participantKind).toBe("synthetic");
+      expect(trade.participantId).toMatch(/^sim_[a-f0-9]{32}$/);
+    }
+    const after = target!.interactions.readMarketState(null)!.prices;
+    expect(after).not.toEqual(before);
+  });
+
+  test("synthetic crowd, off: a premiere behaves byte-identically to no simulator running at all", async () => {
+    const fixture = await verifiedRealtimeLongPublicationFixture(root);
+    const catalog = await ReplayPremiereAdmissionCatalog.open({
+      privateStateRoot: path.join(root, "private"),
+      servedRoots: [path.join(root, "served")],
+    });
+    try {
+      await catalog.writeVerifiedAdmission({
+        gate: fixture.gate,
+        verification: fixture.verificationOptions,
+        chunkBuildLimits: fixture.chunkBuildLimits,
+        collectorLimits: COLLECTOR_LIMITS,
+      });
+    } finally {
+      await catalog.close();
+    }
+
+    const context = startupContext();
+    const started = await startReplayPremiereProduction({
+      ...context,
+      privateStateRoot: path.join(root, "private"),
+      servedRoots: [path.join(root, "served")],
+      wageringEnabled: true,
+      // syntheticCrowdEnabled intentionally omitted: off by default.
+    });
+    services.push(started.service);
+
+    const target = context.httpRegistry.get(PREMIERE_ID);
+    expect(target).not.toBeNull();
+    const before = target!.interactions.readMarketState(null)!.prices.slice();
+    // Real wait for the same reason as the "on" test above: proving NOTHING
+    // happens over real wall-clock time is the point of this assertion.
+    await new Promise((resolve) => setTimeout(resolve, 250));
+    const snapshot = target!.interactions.readState();
+    expect(snapshot.trades).toEqual([]);
+    expect(target!.interactions.readMarketState(null)!.prices).toEqual(before);
+  });
 });
 
 const ORPHAN_ALTERNATE_ID = "prem_89abcdef01234567";
