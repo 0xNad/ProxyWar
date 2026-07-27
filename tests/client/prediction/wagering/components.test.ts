@@ -5,18 +5,21 @@
  * DOM via `createRenderRoot() { return this; }`).
  */
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { ReplayPremiereServiceError } from "../../../../src/client/ReplayPremiereRuntime";
 import "../../../../src/client/prediction/wagering/components/MarketBankrollBadge";
 import "../../../../src/client/prediction/wagering/components/MarketPriceBoard";
 import "../../../../src/client/prediction/wagering/components/MarketPositionSummary";
 import "../../../../src/client/prediction/wagering/components/TradeTicket";
 import "../../../../src/client/prediction/wagering/components/PositionsPanel";
 import "../../../../src/client/prediction/wagering/components/MarketSettlementPanel";
+import "../../../../src/client/prediction/wagering/components/PriceAnnouncer";
 import type { PremiereMarketBankrollBadge } from "../../../../src/client/prediction/wagering/components/MarketBankrollBadge";
 import type { PremiereMarketPriceBoard } from "../../../../src/client/prediction/wagering/components/MarketPriceBoard";
 import type { PremiereMarketPositionSummary } from "../../../../src/client/prediction/wagering/components/MarketPositionSummary";
 import type { PremiereTradeTicket } from "../../../../src/client/prediction/wagering/components/TradeTicket";
 import type { PremierePositionsPanel } from "../../../../src/client/prediction/wagering/components/PositionsPanel";
 import type { PremiereMarketSettlement } from "../../../../src/client/prediction/wagering/components/MarketSettlementPanel";
+import type { PremiereMarketPriceAnnouncer } from "../../../../src/client/prediction/wagering/components/PriceAnnouncer";
 import type { MarketSeatOption, MarketState } from "../../../../src/client/prediction/wagering/types";
 
 function mount<T extends HTMLElement>(tag: string): T {
@@ -356,7 +359,7 @@ describe("premiere-trade-ticket", () => {
     // b=100, q=[0,0]: the first share on a 50/50 book costs exactly 50 chips.
     expect(el.textContent).toContain("1 sh");
     const submit = [...el.querySelectorAll("button")].find((b) =>
-      b.textContent?.includes("Buy 1 sh"),
+      b.textContent?.includes("Buy ~1 sh"),
     );
     expect(submit).not.toBeUndefined();
 
@@ -443,5 +446,165 @@ describe("premiere-trade-ticket", () => {
     await flushMicrotasks();
     await el.updateComplete;
     expect(submit?.disabled).toBe(false);
+  });
+
+  it("labels the amount input for assistive tech, and the label swaps with the side", async () => {
+    const el = mount<PremiereTradeTicket>("premiere-trade-ticket");
+    el.seats = SEATS;
+    el.market = market();
+    el.windowOpen = true;
+    el.bankroll = 1000;
+    await el.updateComplete;
+
+    const input = el.querySelector<HTMLInputElement>("#trade-amount-input");
+    if (!input) throw new Error("amount input not rendered");
+    expect(input.labels?.length).toBe(1);
+    expect(input.labels?.[0]?.textContent).toContain("Budget (chips)");
+
+    const sellButton = [...el.querySelectorAll("button")].find(
+      (b) => b.textContent?.trim().toLowerCase() === "sell",
+    );
+    sellButton?.click();
+    await el.updateComplete;
+    expect(input.labels?.[0]?.textContent).toContain("Shares");
+  });
+
+  it("restores focus to the submit button after a successful trade, instead of leaving it at <body>", async () => {
+    const el = mount<PremiereTradeTicket>("premiere-trade-ticket");
+    el.seats = SEATS;
+    el.market = market({ q: [0, 0], b: 100, prices: { "seat-a": 50, "seat-b": 50 } });
+    el.windowOpen = true;
+    el.bankroll = 1000;
+    const onTrade = vi.fn().mockResolvedValue(undefined);
+    el.onTrade = onTrade;
+    await el.updateComplete;
+
+    clickSeat(el, "Nation A");
+    await el.updateComplete;
+    const input = el.querySelector<HTMLInputElement>('input[type="number"]');
+    if (!input) throw new Error("amount input not rendered");
+    input.value = "50";
+    input.dispatchEvent(new Event("input"));
+    await el.updateComplete;
+
+    const submit = [...el.querySelectorAll("button")].find((b) =>
+      b.textContent?.includes("Buy"),
+    );
+    if (!submit) throw new Error("submit button not rendered");
+    // A keyboard user's Enter fires on the element that already has focus.
+    submit.focus();
+    submit.click();
+    await flushMicrotasks();
+    await el.updateComplete;
+
+    expect(document.activeElement).toBe(submit);
+  });
+
+  it("restores focus to the submit button after a rejected trade, with a human-readable message (not the raw error)", async () => {
+    const el = mount<PremiereTradeTicket>("premiere-trade-ticket");
+    el.seats = SEATS;
+    el.market = market({ q: [0, 0], b: 100, prices: { "seat-a": 50, "seat-b": 50 } });
+    el.windowOpen = true;
+    el.bankroll = 1000;
+    const onTrade = vi
+      .fn()
+      .mockRejectedValue(
+        new ReplayPremiereServiceError("request_rejected", 400, "PREMIERE_INVALID_REQUEST"),
+      );
+    el.onTrade = onTrade;
+    await el.updateComplete;
+
+    clickSeat(el, "Nation A");
+    await el.updateComplete;
+    const input = el.querySelector<HTMLInputElement>('input[type="number"]');
+    if (!input) throw new Error("amount input not rendered");
+    input.value = "50";
+    input.dispatchEvent(new Event("input"));
+    await el.updateComplete;
+
+    const submit = [...el.querySelectorAll("button")].find((b) =>
+      b.textContent?.includes("Buy"),
+    );
+    if (!submit) throw new Error("submit button not rendered");
+    submit.focus();
+    submit.click();
+    await flushMicrotasks();
+    await el.updateComplete;
+
+    expect(document.activeElement).toBe(submit);
+    const alert = el.querySelector('[role="alert"]');
+    expect(alert?.textContent).not.toContain("request_rejected");
+    expect(alert?.textContent).toMatch(/price likely moved|amount wasn't valid/);
+  });
+
+  it("maps service-error statuses to actionable sentences instead of the raw coarse code", async () => {
+    const el = mount<PremiereTradeTicket>("premiere-trade-ticket");
+    el.seats = SEATS;
+    el.market = market({ q: [0, 0], b: 100, prices: { "seat-a": 50, "seat-b": 50 } });
+    el.windowOpen = true;
+    el.bankroll = 1000;
+
+    const cases: Array<[ConstructorParameters<typeof ReplayPremiereServiceError>, RegExp]> = [
+      [["request_rejected", 429, "PREMIERE_INVALID_REQUEST"], /too many requests/i],
+      [["request_rejected", 410, "PREMIERE_INVALID_REQUEST"], /moved on/i],
+      [["request_rejected", null, "PREMIERE_CAPACITY_EXCEEDED"], /capacity/i],
+      [["request_failed", null, null], /reach the market/i],
+    ];
+
+    for (const [args, expected] of cases) {
+      const onTrade = vi.fn().mockRejectedValue(new ReplayPremiereServiceError(...args));
+      el.onTrade = onTrade;
+      await el.updateComplete;
+
+      clickSeat(el, "Nation A");
+      await el.updateComplete;
+      const input = el.querySelector<HTMLInputElement>('input[type="number"]');
+      if (!input) throw new Error("amount input not rendered");
+      input.value = "50";
+      input.dispatchEvent(new Event("input"));
+      await el.updateComplete;
+
+      const submit = [...el.querySelectorAll("button")].find((b) =>
+        b.textContent?.includes("Buy"),
+      );
+      submit?.click();
+      await flushMicrotasks();
+      await el.updateComplete;
+
+      const alert = el.querySelector('[role="alert"]');
+      expect(alert?.textContent).not.toMatch(/^request_rejected$|^request_failed$/);
+      expect(alert?.textContent).toMatch(expected);
+    }
+  });
+});
+
+describe("premiere-price-announcer", () => {
+  it("has an on-demand button and a polite live region that starts silent", async () => {
+    const el = mount<PremiereMarketPriceAnnouncer>("premiere-price-announcer");
+    el.seats = SEATS;
+    el.market = market();
+    await el.updateComplete;
+
+    const button = el.querySelector("button");
+    expect(button?.textContent).toContain("Read current prices");
+    const region = el.querySelector('[role="status"]');
+    expect(region?.getAttribute("aria-live")).toBe("polite");
+    expect(region?.textContent).toBe("");
+  });
+
+  it("announces a price snapshot on demand without needing a live region", async () => {
+    const el = mount<PremiereMarketPriceAnnouncer>("premiere-price-announcer");
+    el.seats = SEATS;
+    el.market = market({ prices: { "seat-a": 61, "seat-b": 39 } });
+    await el.updateComplete;
+
+    const button = el.querySelector("button");
+    button?.click();
+    await new Promise((resolve) => requestAnimationFrame(resolve));
+    await el.updateComplete;
+
+    const region = el.querySelector('[role="status"]');
+    expect(region?.textContent).toContain("Nation A 61.0");
+    expect(region?.textContent).toContain("Nation B 39.0");
   });
 });

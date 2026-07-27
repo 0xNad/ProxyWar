@@ -256,7 +256,7 @@ export class PremiereTradeTicket extends LitElement {
         <div
           role="group"
           aria-labelledby="trade-seat-label"
-          class="grid grid-cols-2 gap-1.5 sm:grid-cols-3"
+          class="grid grid-cols-2 gap-1.5 sm:grid-cols-3 lg:grid-cols-1"
         >
           ${this.seats.map((seat) => {
             const selected = seatId === seat.seatId;
