@@ -3507,7 +3507,23 @@ export class ReplayPremiereRuntimeController {
     const response = await this.strictInteractionWrite(() =>
       this.service.submitMarketOrder(request),
     );
-    if (this.reveal === null && response.market.status === "settled") {
+    // Checkpoint pauses are bypassed for wagering premieres (the replay
+    // plays straight through to the end, never pausing at the final
+    // checkpoint the way a non-wagering premiere does) — so a trade
+    // landing in the last moments of a live match can race the verified
+    // reveal payload's own delivery: the market can legitimately settle
+    // (server-authoritative, independent of video reveal) before `reveal`
+    // has been fetched client-side. `isRevealVerificationPending()` is
+    // the SAME "is this an ordinary reveal-delivery race, or a genuinely
+    // impossible claim" distinction `sendHeartbeat` already relies on for
+    // this exact scenario — only latch a hard integrity failure when the
+    // replay's own state machine doesn't yet think the match is over
+    // either (i.e., nothing here can explain a "settled" claim).
+    if (
+      this.reveal === null &&
+      response.market.status === "settled" &&
+      !this.isRevealVerificationPending()
+    ) {
       this.latchFailure("integrity_failure");
       throw serviceError("invalid_response");
     }

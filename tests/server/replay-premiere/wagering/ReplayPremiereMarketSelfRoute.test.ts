@@ -380,3 +380,149 @@ describe("GET /api/premieres/:id/market/me", () => {
     });
   });
 });
+
+describe("GET /api/premieres/:id/market/me origin fallback (real-browser GET semantics)", () => {
+  // A real browser correctly omits `Origin` on a same-origin GET/HEAD
+  // fetch (it's a forbidden header no page script can set, and the Fetch
+  // spec only appends it there for non-GET/HEAD same-origin requests —
+  // Origin is ALWAYS sent for a cross-origin fetch, any method, which the
+  // strict-Origin-when-present branch below still covers). Reproduces the
+  // exact wire-level shape Chrome sends, confirmed via CDP
+  // Network.requestWillBeSentExtraInfo — Origin absent, Sec-Fetch-Site
+  // present.
+  it("a real-browser same-origin GET (no Origin, Sec-Fetch-Site: same-origin) is accepted", async () => {
+    const interactions = buildInteractions();
+    const security = buildSecurity(1);
+    await withServer(interactions, security, async (baseUrl) => {
+      const guestA = await createGuest(baseUrl);
+      await placeOrder(baseUrl, guestA, {
+        seatId: "seat-1",
+        amount: 100,
+        idempotencyKey: "idem_order_00000000000006",
+      });
+      const response = await fetch(
+        `${baseUrl}/api/premieres/${premiereId}/market/me`,
+        {
+          headers: {
+            Cookie: guestA.cookie,
+            "X-CSRF-Token": guestA.csrfToken,
+            "Sec-Fetch-Site": "same-origin",
+          },
+        },
+      );
+      expect(response.status).toBe(200);
+      const body = (await response.json()) as {
+        market: { positions: { seatId: string }[] };
+      };
+      expect(body.market.positions).toEqual([
+        expect.objectContaining({ seatId: "seat-1" }),
+      ]);
+    });
+  });
+
+  it("no Origin, no Sec-Fetch-Site, but a matching Referer is accepted (old-browser fallback)", async () => {
+    const interactions = buildInteractions();
+    const security = buildSecurity(1);
+    await withServer(interactions, security, async (baseUrl) => {
+      const guestA = await createGuest(baseUrl);
+      const response = await fetch(
+        `${baseUrl}/api/premieres/${premiereId}/market/me`,
+        {
+          headers: {
+            Cookie: guestA.cookie,
+            "X-CSRF-Token": guestA.csrfToken,
+            Referer: `${ORIGIN}/premiere/${premiereId}`,
+          },
+        },
+      );
+      expect(response.status).toBe(200);
+    });
+  });
+
+  it("no Origin, no Sec-Fetch-Site, no Referer at all is rejected — no same-origin proof, never silently allowed", async () => {
+    const interactions = buildInteractions();
+    const security = buildSecurity(1);
+    await withServer(interactions, security, async (baseUrl) => {
+      const guestA = await createGuest(baseUrl);
+      const response = await fetch(
+        `${baseUrl}/api/premieres/${premiereId}/market/me`,
+        {
+          headers: {
+            Cookie: guestA.cookie,
+            "X-CSRF-Token": guestA.csrfToken,
+          },
+        },
+      );
+      expect(response.status).toBe(403);
+    });
+  });
+
+  it("no Origin, Sec-Fetch-Site: cross-site is rejected — the real cross-site GET this whole check exists to catch", async () => {
+    const interactions = buildInteractions();
+    const security = buildSecurity(1);
+    await withServer(interactions, security, async (baseUrl) => {
+      const guestA = await createGuest(baseUrl);
+      const response = await fetch(
+        `${baseUrl}/api/premieres/${premiereId}/market/me`,
+        {
+          headers: {
+            Cookie: guestA.cookie,
+            "X-CSRF-Token": guestA.csrfToken,
+            "Sec-Fetch-Site": "cross-site",
+          },
+        },
+      );
+      expect(response.status).toBe(403);
+    });
+  });
+
+  it("an explicitly wrong Origin is still rejected, even with Sec-Fetch-Site: same-origin present — Origin, when sent, is never overridden by a weaker signal", async () => {
+    const interactions = buildInteractions();
+    const security = buildSecurity(1);
+    await withServer(interactions, security, async (baseUrl) => {
+      const guestA = await createGuest(baseUrl);
+      const response = await fetch(
+        `${baseUrl}/api/premieres/${premiereId}/market/me`,
+        {
+          headers: {
+            Cookie: guestA.cookie,
+            "X-CSRF-Token": guestA.csrfToken,
+            Origin: "https://evil.example.com",
+            "Sec-Fetch-Site": "same-origin",
+          },
+        },
+      );
+      expect(response.status).toBe(403);
+    });
+  });
+
+  it("writes still require Origin unconditionally — the GET relaxation never reaches submitMarketOrder", async () => {
+    const interactions = buildInteractions();
+    const security = buildSecurity(1);
+    await withServer(interactions, security, async (baseUrl) => {
+      const guestA = await createGuest(baseUrl);
+      const response = await fetch(
+        `${baseUrl}/api/premieres/${premiereId}/market-orders`,
+        {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Cookie: guestA.cookie,
+            "X-CSRF-Token": guestA.csrfToken,
+            "X-Idempotency-Key": "idem_order_00000000000007",
+            "Sec-Fetch-Site": "same-origin",
+          },
+          body: JSON.stringify({
+            sessionId: guestA.sessionId,
+            seatId: "seat-1",
+            side: "buy",
+            sequence: 0,
+            amount: 100,
+            limitPrice: 100,
+          }),
+        },
+      );
+      expect(response.status).toBe(403);
+    });
+  });
+});

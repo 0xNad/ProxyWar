@@ -40,6 +40,18 @@ export interface ReplayPremiereRequestHeaders {
   cookie?: string | string[];
   origin?: string | string[];
   csrfToken?: string | string[];
+  /**
+   * `Sec-Fetch-Site`, sent by every modern browser on same-origin GET/HEAD
+   * fetches even though `Origin` is correctly omitted there (see
+   * `authorizeAuthenticatedRead`). Optional purely for older clients that
+   * predate the header; never required when `Origin` itself is present.
+   */
+  secFetchSite?: string | string[];
+  /**
+   * `Referer`, the last-resort same-origin proof when both `Origin` and
+   * `Sec-Fetch-Site` are absent (very old browsers, or a stripped proxy).
+   */
+  referer?: string | string[];
 }
 
 export interface ReplayPremiereShareAttribution {
@@ -143,6 +155,64 @@ export class ReplayPremiereGuestSecurity {
     headers: ReplayPremiereRequestHeaders,
   ): ReplayPremiereGuestWriteAuthorization {
     this.assertStrictOrigin(headers.origin);
+    return this.authorizeGuestCredentials(headers);
+  }
+
+  /**
+   * GET-appropriate sibling of `authorizeWrite`, for an authenticated read
+   * of one participant's own private data (e.g. `GET .../market/me`). A
+   * real browser correctly omits `Origin` on a same-origin GET/HEAD fetch —
+   * per the Fetch standard, `Origin` is only appended for non-GET/HEAD
+   * same-origin requests (it's always sent cross-origin, any method, which
+   * `assertStrictOrigin` below still catches). `Origin` is a forbidden
+   * header no page script can set, so its absence here is expected browser
+   * behavior, never an attack signal — rejecting on that basis would 403
+   * every legitimate browser client with valid cookie+CSRF credentials.
+   * When `Origin` IS present, it is checked with the exact same strictness
+   * as a write; this only relaxes what is REQUIRED, never what gets
+   * rejected. When absent, `Sec-Fetch-Site: same-origin` (sent by every
+   * modern browser on fetch/XHR) or, failing that, `Referer` matching the
+   * expected origin, stands in as the same-origin proof instead.
+   */
+  authorizeAuthenticatedRead(
+    headers: ReplayPremiereRequestHeaders,
+  ): ReplayPremiereGuestWriteAuthorization {
+    this.assertReadOrigin(headers);
+    return this.authorizeGuestCredentials(headers);
+  }
+
+  private assertReadOrigin(headers: ReplayPremiereRequestHeaders): void {
+    const origin = singleHeader(headers.origin, "origin");
+    if (origin !== null) {
+      if (origin !== this.expectedOrigin) {
+        throw securityError("origin_rejected", 403);
+      }
+      return;
+    }
+    const secFetchSite = singleHeader(headers.secFetchSite, "sec-fetch-site");
+    if (secFetchSite !== null) {
+      if (secFetchSite !== "same-origin") {
+        throw securityError("origin_rejected", 403);
+      }
+      return;
+    }
+    const referer = singleHeader(headers.referer, "referer");
+    if (referer === null || !this.refererMatchesExpectedOrigin(referer)) {
+      throw securityError("origin_rejected", 403);
+    }
+  }
+
+  private refererMatchesExpectedOrigin(referer: string): boolean {
+    try {
+      return new URL(referer).origin === this.expectedOrigin;
+    } catch {
+      return false;
+    }
+  }
+
+  private authorizeGuestCredentials(
+    headers: ReplayPremiereRequestHeaders,
+  ): ReplayPremiereGuestWriteAuthorization {
     const nowMs = this.nowChecked().getTime();
     const guest = this.parseGuestCookieHeader(headers.cookie, nowMs);
     if (guest === null) throw securityError("guest_cookie_required", 401);

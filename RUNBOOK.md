@@ -1,18 +1,20 @@
 # Proxy War Replay Premiere + Live Betting — local runbook
 
-Status as of this session (Unblock): the client-side "Joining live…" hang is
-**fixed** — root-caused to two independent client bugs (see §12), not the
-`joinLobby`/replay-premiere join-lobby path the original diagnosis suspected.
-A controlled-exhibition premiere admitted with wagering on now loads all the
-way to a rendering replay, a populated LMSR trade ticket, and a **live, real
-buy** was driven in a real headless-Chromium browser: price moved from
-25.0→35.5 on the bought seat (exact match to the quoted preview) and the
-bankroll debited exactly the quoted cost. See §12 for exactly what was and
-was not verified live before this session ran out of budget — sell, hold-to-
-settlement, the synthetic crowd, and reload-survival were **not** reached.
-Everything below is real, reproduced, command-verified output from this
-session (Integrate's original content, §0–§11, is unchanged and still
-accurate), not aspirational instructions.
+Status as of this session (Finish): the client-side wagering module now has
+**exactly one bankroll authority — the server** (`market.balance` off
+`GET .../market/me`, an authenticated participant read landed by
+PariServer this session). `SessionBankroll` (the old client-local
+debit/credit/payout ledger) is deleted; `BettingPremiereMarketController`
+is a pure passthrough of server-reported `balance`/`positions`, reconciled
+fresh on every poll and every trade response, with zero local money
+arithmetic anywhere in `src/client/prediction/wagering/**`. Two real,
+load-bearing bugs were found and fixed live (not in a unit test) this
+session, both outside the wagering module proper but required to make it
+actually work in a real browser — see §13 for the full account, the exact
+evidence, and the one confirmed-but-unresolved gap (a settlement-timing
+race that can still falsely show "This premiere could not continue" on a
+passively-polling tab, only partially fixed this session — §13.3).
+Previous sessions' content (§0–§12) is unchanged and still accurate.
 
 ## 0. Why `/bet/<id>` and `/premiere/<id>` said "Replay unavailable" for every id
 
@@ -576,3 +578,199 @@ a static header to every outgoing request from the tab before navigating.)
   a browser; root cause not investigated (budget), but it reproduced
   consistently enough in this session to be worth flagging rather than
   assuming it was a one-off.
+
+## 13. Single bankroll authority + the live walkthrough (Finish session)
+
+### 13.1 Client change: one source of truth
+
+`src/client/prediction/wagering/sessionBankroll.ts` (and its test) are
+**deleted**. `BettingPremiereMarketController`
+(`page/BettingPremierePage.ts`) now polls the new authenticated
+`GET .../market/me` (`ReplayPremiereRuntimeController.readMarketSelf()`,
+new this session, mirrors `readMarketState()` but authenticated) instead of
+the anonymous `GET .../market`, and applies every response — poll, trade,
+or stale-sequence re-quote — as a **verbatim passthrough**:
+`overlay.market = market; overlay.bankroll = market.balance;`. No local
+debit/credit/payout math anywhere. `MarketState.balance: number | null`
+(new field, `serviceMapping.ts`/`ReplayPremiereRuntime.ts` schema) carries
+the server's own `market.balance` straight through. `validate.ts` already
+took `bankroll` as a plain input — no change needed there, the caller just
+feeds it a different (now-correct) number. `positionsFor`
+(`ReplayPremiereMarket.ts`, server-side, see §13.2) had a real gap where a
+settled market's positions came back empty for everyone; fixed this
+session so `/market/me` keeps reporting real, non-empty positions
+(final shares/cost basis, real payout) after settlement too — the
+`BettingPremiereMarketController` needs no settlement-specific
+client-side caching or fallback as a result.
+
+### 13.2 Two real bugs found live, not by any unit test — both fixed this session
+
+**Bug 1 — `GET .../market/me` 403'd for every real browser, always.**
+`market_state_self`'s handler called the same `authorizeWrite()` every
+write route uses, which unconditionally requires an `Origin` header. Real
+Chrome (confirmed at the wire level via CDP `Network.
+requestWillBeSentExtraInfo` — NOT `Network.requestWillBeSent`, whose
+`request.headers` silently omits browser-injected headers like `Origin`
+and gives a false negative) sends `Origin` on a same-origin **POST**
+(hence `market-orders`/`sessions`/`heartbeat` all worked) but **never**
+sends `Origin` on a same-origin **GET/HEAD** fetch — this matches the
+Fetch standard, is not a bug in the browser, and `Origin` is a forbidden
+header no page script can set to work around it. Every previous "verified
+live buy" in this RUNBOOK was a POST and never exercised this path, so it
+was never caught before this session. Fixed by PariServer:
+`ReplayPremiereGuestSecurity.authorizeAuthenticatedRead()`, a GET-
+appropriate sibling of `authorizeWrite()` — checks `Origin` with the exact
+same strictness when present, falls back to `Sec-Fetch-Site: same-origin`
+(what Chrome actually sends) or `Referer` when `Origin` is legitimately
+absent. `authorizeWrite()` itself is untouched; every write route's
+Origin requirement is unchanged.
+
+**Bug 2 — a trade landing in the last moments of a match could falsely
+show "This premiere could not continue. Any open positions were voided
+and refunded" even though the server settled normally.**
+`ReplayPremiereRuntimeController.submitMarketOrder()` had a hard
+`this.reveal === null && response.market.status === "settled"` check that
+`latchFailure("integrity_failure")`s unconditionally. Checkpoint pauses
+are bypassed for wagering premieres (the whole point — continuous
+trading), so the replay races straight through to the true end with none
+of the breathing room a normal premiere's final checkpoint pause gives the
+verified-reveal fetch to land first. A trade whose response lands in that
+exact window (server-authoritative market settlement, ahead of the
+client's own reveal fetch) tripped this check even though nothing was
+actually wrong. Fixed by reusing the same `isRevealVerificationPending()`
+distinction `sendHeartbeat` already relies on for this identical race:
+only latch a hard failure when the replay's own state machine doesn't
+*also* think the match could be over — i.e., a genuinely inexplicable
+claim, not an ordinary delivery race. Verified: `tsc --noEmit`, `eslint`,
+and the full suite (296 files / 3485 passed) all clean after this change.
+
+### 13.3 Known gap — NOT fixed this session, reproduces on the passive poll path too
+
+**The exact same class of false "could not continue" failure was observed
+four separate times purely from the automatic heartbeat/poll loop, with
+zero trade ever submitted** — i.e. §13.2's Bug 2 fix (scoped to
+`submitMarketOrder`) does not cover every trigger. `ReplayPremiereRuntime.ts`
+has roughly a dozen other `latchFailure("integrity_failure")` call sites
+(frame processing, reaction/clip response binding, the heartbeat error
+handler at large) and at least one of them is being tripped by this same
+reveal-delivery race during the ordinary heartbeat cadence, near the
+natural end of a wagering premiere specifically (checkpoint-bypass is what
+removes the breathing room every other call site implicitly relied on).
+**Every single wagering-premiere run this session reached this failure
+state exactly once, right around natural settlement** — confirmed via
+direct `curl` each time that the *server's* own `/market` endpoint showed
+`status: "settled"` with a real `winnerSeatId`, never `"failed"`; the
+premiere genuinely completed normally every time, only the client's own
+display went wrong. This was diagnosed down to "some `latchFailure` call
+site is racing reveal delivery, exactly like §13.2's confirmed instance,"
+but which exact site (or sites) was still being isolated (via a temporary
+`console.error` in `latchFailure` logging `new Error().stack`, removed
+before this session ended — not shipped) when this session's time ran
+out. **This is the one item genuinely blocking a clean end-to-end
+recording of the full walkthrough (steps 6-9 below) — everything up to
+and including a live, crowd-driven buy was verified; sell/reload/second-
+tab/hold-to-settlement were not reached cleanly because every run's
+available live window kept getting consumed by (a) this bug's own
+diagnosis and (b) join-sync taking 20-40+ real seconds to catch up to
+live under this machine's multi-agent CPU contention, eating most of the
+~108s match window before any interaction could start.** The fix shape is
+known (apply the same `isRevealVerificationPending()` guard to whichever
+call site is actually firing, the same way §13.2 was fixed) — it just
+wasn't isolated and landed in time.
+
+### 13.4 What was verified live this session (real browser, real server, real crowd)
+
+- `/bet/<id>` with `PROXYWAR_SYNTHETIC_CROWD_ENABLED=1` (see §13.5): loads
+  to a rendering replay, zero *wagering-specific* console errors (the
+  CrazyGames/Turnstile/GTM/YouTube CSP-blocked script-tag noise from §12
+  is present on every route including plain `/premiere/<id>` — it is a
+  site-wide, pre-existing, unconditional `<script src>` tag in
+  `index.html`, not gated by any JS route flag despite an earlier
+  session's note to the contrary; out of scope for this session, tracked
+  here rather than silently ignored).
+- Bankroll badge read `1,000 cr` **off `market.balance` via `/market/me`**
+  (server-authoritative, not a client default) the instant the trade
+  ticket rendered.
+- **Synthetic crowd moved prices with zero human trading**: prices
+  diverged from the 25.0/25.0/25.0/25.0 baseline (observed 13.7/13.7/50.1/
+  22.5 on one run) before any trade of mine landed — confirmed both
+  visually (price board) and via direct `curl` (`market.q` non-zero from
+  crowd activity alone).
+- **A real buy, submitted through the actual trade ticket UI** (seat
+  click → budget input → submit click, not a direct API call): quoted
+  "4 sh of Aggressive Expander for 117 cr, avg 29.3" but — because the
+  synthetic crowd kept trading in the ~2-3s between quote render and the
+  click reaching the server — actually filled 5 sh for 147 cr. Bankroll
+  debited **exactly** 147 cr (1,000 → 853), matching the trade response's
+  own `chips` figure exactly, not the stale quote. This is correct,
+  designed behavior under a live crowd (the `limitPrice` sent with every
+  order is what protects against a materially worse fill, not a promise
+  that quote and fill are byte-identical when the book is moving) — worth
+  recording plainly since it is a real, reproducible divergence from a
+  literal "fill matches the quote" reading, and the crowd being on is
+  what surfaces it. A fast, low-latency click sequence would be expected
+  to match cleanly against a slower-moving book; not reproduced cleanly
+  this session due to the time spent isolating §13.3.
+- Not reached this session (blocked by §13.3, not attempted-and-failed):
+  unrealised P&L development, sell, reload-survival, second-tab
+  agreement, hold-to-settlement reconciliation, narrow-viewport pass.
+  These are the concrete remaining acceptance items for whoever picks up
+  §13.3's fix.
+
+### 13.5 Enabling the synthetic crowd (supersedes §10's "not available yet")
+
+```sh
+PROXYWAR_SYNTHETIC_CROWD_ENABLED=1   # alongside PROXYWAR_WAGERING_ENABLED=1 — requires it
+```
+
+Real env block used this session (isolated port/state-root, same discipline
+as §5's writer-lock note — every concurrent agent on this machine needs its
+own port AND its own `PROXYWAR_REPLAY_PREMIERE_STATE_ROOT`):
+
+```sh
+GAME_ENV=dev \
+PROXYWAR_WAGERING_ENABLED=1 \
+PROXYWAR_SYNTHETIC_CROWD_ENABLED=1 \
+PROXYWAR_PUBLIC_URL=http://127.0.0.1:8793 \
+PROXYWAR_REPLAY_PREMIERE_STATE_ROOT=/Users/<you>/.proxywar-dev-<name>/replay-premiere \
+PROXYWAR_LEAGUE_WRAPPER_ONLY=true AI_LEAGUE_DEMO_PORT=8793 \
+npx tsx src/scripts/ai-agent-demo-server.ts
+```
+
+No separate confirmation log line — verify indirectly via `curl .../market`
+showing `q` go non-zero with nobody trading, or a live price board moving
+on screen before any click.
+
+### 13.6 State reset between runs — real gotchas hit this session, beyond §9
+
+- **Canonical timestamp format is exact-ISO-milliseconds, not
+  microseconds.** `externalEmbargoEvidence[].observedAt` and
+  `definition.scheduledAt` are validated via
+  `new Date(Date.parse(value)).toISOString() === value` — JS's
+  `toISOString()` always emits exactly 3 fractional digits. Python's
+  `datetime.isoformat()` defaults to 6 (microseconds) and fails admission
+  with `external_embargo_invalid_timestamp` even though the timestamp is
+  otherwise fresh and valid. Use
+  `datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")`.
+- **The server must already be running (with the correct
+  `PROXYWAR_PUBLIC_URL`/`PROXYWAR_LEAGUE_WRAPPER_ONLY=true`) *before* you
+  run `replay-premiere-admit.ts`**, not just before you restart it
+  afterward — the admit script's leak-audit collector makes a real HTTP
+  request against the deployment origin during admission itself, and
+  fails closed (`premiere_leak_collector_request_failed`) if nothing is
+  listening yet.
+- **Reuse one generated `.source.json` bundle across many admissions.**
+  Regenerating costs a real ~70s wall-clock run; the bundle is immutable
+  content keyed by its sha256, so admitting the SAME bundle under a fresh
+  `--premiere-id` + fresh `scheduledAt` is the fast path for repeated live
+  runs (this session admitted 6 premieres off one bundle).
+- **Give real lead time on `scheduledAt`.** Anything under ~30s risks the
+  join-sync/asset-load pipeline (12-40+ real seconds observed this
+  session, worse under multi-agent CPU contention) eating into or past
+  the scheduled start before the tab even finishes its initial join,
+  wasting the live window before any interaction is possible.
+- **A restart with no admission pending is a fast no-op** (~1-2s) — safe
+  to restart liberally when only re-registering an already-admitted
+  premiere, no need to tear down and recreate the state root each time
+  within one working session (only §9's full-directory-delete applies
+  between genuinely separate sessions/branches).

@@ -295,6 +295,17 @@ export interface JoinLobbyEvent {
     | "ai-league-replay"
     | "coworld-replay"
     | "replay-premiere";
+  /**
+   * Set when the join originated from the dedicated `/bet/<id>` betting
+   * page rather than `/premiere/<id>` — both share `source: "replay-premiere"`
+   * and the same join-lobby/runtime machinery, so this is the only signal
+   * `handleJoinLobby`'s URL canonicalization has to pick the right path
+   * (see its `premierePath` branch) instead of always rewriting the URL
+   * bar to `/premiere/<id>`, which would silently strand the betting page
+   * on a route with no trade ticket/bankroll/positions after the join
+   * completes.
+   */
+  isBettingPremiere?: boolean;
   coworldReplayPath?: string;
   publicLobbyInfo?: GameInfo | PublicGameInfo;
 }
@@ -1216,6 +1227,7 @@ class Client {
               progressiveReplay: request.progressiveReplay,
               source: "replay-premiere",
               premiereId,
+              isBettingPremiere: true,
             } satisfies JoinLobbyEvent,
             bubbles: true,
             composed: true,
@@ -1726,7 +1738,15 @@ class Client {
       }
       const lobbyIdHidden = !this.userSettings.lobbyIdVisibility();
       if (lobby.progressiveReplay !== undefined && lobby.premiereId) {
-        const premierePath = `/premiere/${encodeURIComponent(lobby.premiereId)}`;
+        // Betting joins share this exact same branch (same `source`, same
+        // `progressiveReplay`/`premiereId` shape) — without checking
+        // `isBettingPremiere` this always canonicalized to `/premiere/<id>`,
+        // silently stranding a `/bet/<id>` viewer on the wrong route (no
+        // trade ticket/bankroll/positions there) the instant the join
+        // completed, and breaking reload/second-tab for the betting page.
+        const premierePath = lobby.isBettingPremiere === true
+          ? `/bet/${encodeURIComponent(lobby.premiereId)}`
+          : `/premiere/${encodeURIComponent(lobby.premiereId)}`;
         if (window.location.pathname !== premierePath) {
           history.replaceState(
             null,

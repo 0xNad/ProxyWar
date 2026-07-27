@@ -342,11 +342,14 @@ async function handlePremiereApiRequest(
         });
         return;
       case "market_state_self": {
-        // Same auth discipline as every write route (guest cookie + CSRF +
-        // strict Origin) — a read that returns one participant's private
-        // positions is not exempt from it. Never trusts anything the
+        // GET-appropriate auth (guest cookie + CSRF + Origin-when-present,
+        // falling back to Sec-Fetch-Site/Referer when a real browser
+        // correctly omits Origin on a same-origin GET) — a read that
+        // returns one participant's private positions is not exempt from
+        // auth just because it is a GET, but it also cannot demand a
+        // header no real browser sends here. Never trusts anything the
         // caller claims about identity beyond the signed guest cookie.
-        const authorization = options.security.authorizeWrite(
+        const authorization = options.security.authorizeAuthenticatedRead(
           requestSecurityHeaders(request),
         );
         sendJson(response, 200, {
@@ -955,11 +958,15 @@ function requestSecurityHeaders(request: Request): {
   cookie?: string | string[];
   origin?: string | string[];
   csrfToken?: string | string[];
+  secFetchSite?: string | string[];
+  referer?: string | string[];
 } {
   return {
     cookie: request.headers.cookie,
     origin: request.headers.origin,
     csrfToken: request.headers["x-csrf-token"],
+    secFetchSite: request.headers["sec-fetch-site"],
+    referer: request.headers.referer,
   };
 }
 
