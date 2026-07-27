@@ -73,14 +73,28 @@ export class PremiereBettingOverlay extends LitElement {
   willUpdate(changed: Map<string, unknown>): void {
     if (!changed.has("model") || this.model === undefined) return;
     const state = this.model.state;
-    // A settlement landing supersedes whatever the viewer left the sheet at
-    // while trading — the outcome should be visible without a tap.
-    if (
-      this.previousModelState !== null &&
-      this.previousModelState !== state &&
-      (state === "revealed" || state === "archived")
-    ) {
-      this.sheetOverride = null;
+    if (this.previousModelState !== null && this.previousModelState !== state) {
+      if (state === "revealed" || state === "archived") {
+        // A settlement landing supersedes whatever the viewer left the
+        // sheet at while trading — the outcome should be visible without
+        // a tap.
+        this.sheetOverride = null;
+      } else if (
+        (state === "failed" || state === "cancelled") &&
+        LIVE_STATES.has(this.previousModelState) &&
+        this.sheetOverride === null
+      ) {
+        // A mid-match failure shouldn't silently steal the map real
+        // estate from a viewer who was implicitly (never explicitly)
+        // collapsed while trading — pin the rail/sheet collapsed rather
+        // than letting `defaultSheetOpen`'s state-driven default (open
+        // for any non-live state) force it wide open. The collapsed
+        // view still surfaces the failure via a compact indicator (see
+        // `renderDesktopRail`/`renderPeekStrip`); a cold landing
+        // directly on a failed premiere is unaffected — there is no
+        // prior live collapse to preserve, so it opens as before.
+        this.sheetOverride = false;
+      }
     }
     this.previousModelState = state;
   }
@@ -117,6 +131,7 @@ export class PremiereBettingOverlay extends LitElement {
 
   private renderPeekStrip() {
     const model = this.model;
+    const failed = model.state === "failed" || model.state === "cancelled";
     const live = LIVE_STATES.has(model.state);
     const open = this.sheetOpen;
     const totalPnl = this.totalUnrealizedPnl();
@@ -131,23 +146,27 @@ export class PremiereBettingOverlay extends LitElement {
         }}
       >
         <span class="flex min-w-0 items-center gap-2">
-          ${live
-            ? html`<span
-                aria-hidden="true"
-                class="h-1.5 w-1.5 shrink-0 rounded-full bg-live motion-safe:animate-pulse"
-              ></span>`
-            : nothing}
-          ${totalPnl !== null
-            ? html`<span
-                class="font-mono text-sm font-bold tabular-nums ${totalPnl >= 0
-                  ? "text-positive"
-                  : "text-danger"}"
-                >${totalPnl >= 0 ? "▲" : "▼"} ${formatSignedCredits(totalPnl)} cr</span
-              >`
-            : html`<span class="truncate text-sm font-semibold text-ink">${model.title}</span>`}
+          ${failed
+            ? html`<span aria-hidden="true" class="h-1.5 w-1.5 shrink-0 rounded-full bg-danger"></span>`
+            : live
+              ? html`<span
+                  aria-hidden="true"
+                  class="h-1.5 w-1.5 shrink-0 rounded-full bg-live motion-safe:animate-pulse"
+                ></span>`
+              : nothing}
+          ${failed
+            ? html`<span class="truncate text-sm font-semibold text-danger">Action needed</span>`
+            : totalPnl !== null
+              ? html`<span
+                  class="font-mono text-sm font-bold tabular-nums ${totalPnl >= 0
+                    ? "text-positive"
+                    : "text-danger"}"
+                  >${totalPnl >= 0 ? "▲" : "▼"} ${formatSignedCredits(totalPnl)} cr</span
+                >`
+              : html`<span class="truncate text-sm font-semibold text-ink">${model.title}</span>`}
         </span>
-        <span class="flex shrink-0 items-center gap-1 text-xs font-semibold text-accent">
-          Trade
+        <span class="flex shrink-0 items-center gap-1 text-xs font-semibold ${failed ? "text-danger" : "text-accent"}">
+          ${failed ? "View" : "Trade"}
           <span aria-hidden="true">${open ? "▴" : "▾"}</span>
         </span>
       </button>
@@ -168,6 +187,7 @@ export class PremiereBettingOverlay extends LitElement {
   private renderDesktopRail() {
     if (this.sheetOpen) return nothing;
     const model = this.model;
+    const failed = model.state === "failed" || model.state === "cancelled";
     const live = LIVE_STATES.has(model.state);
     const totalPnl = this.totalUnrealizedPnl();
     return html`
@@ -176,25 +196,29 @@ export class PremiereBettingOverlay extends LitElement {
         class="hidden w-full flex-1 flex-col items-center justify-between gap-3 px-1.5 py-4 outline-none focus-visible:ring-2 focus-visible:ring-accent focus-visible:ring-inset lg:flex"
         aria-expanded="false"
         aria-controls="betting-sheet-panel"
-        aria-label="Expand trading panel"
+        aria-label=${failed ? "Show market status — action needed" : "Expand trading panel"}
         @click=${() => {
           this.sheetOverride = !this.sheetOpen;
         }}
       >
         <span class="flex flex-col items-center gap-2">
-          ${live
-            ? html`<span
-                aria-hidden="true"
-                class="h-1.5 w-1.5 shrink-0 rounded-full bg-live motion-safe:animate-pulse"
-              ></span>`
-            : nothing}
+          ${failed
+            ? html`<span aria-hidden="true" class="h-1.5 w-1.5 shrink-0 rounded-full bg-danger"></span>`
+            : live
+              ? html`<span
+                  aria-hidden="true"
+                  class="h-1.5 w-1.5 shrink-0 rounded-full bg-live motion-safe:animate-pulse"
+                ></span>`
+              : nothing}
           <span
             aria-hidden="true"
-            class="text-[10px] font-semibold uppercase tracking-wide text-accent [writing-mode:vertical-lr] rotate-180"
-            >Trade</span
+            class="text-[10px] font-semibold uppercase tracking-wide [writing-mode:vertical-lr] rotate-180 ${failed
+              ? "text-danger"
+              : "text-accent"}"
+            >${failed ? "Alert" : "Trade"}</span
           >
         </span>
-        ${totalPnl !== null
+        ${!failed && totalPnl !== null
           ? html`<span
               aria-hidden="true"
               class="flex flex-col items-center font-mono text-xs font-bold tabular-nums ${totalPnl >= 0
@@ -205,7 +229,7 @@ export class PremiereBettingOverlay extends LitElement {
               <span>${Math.abs(Math.round(totalPnl))}</span>
             </span>`
           : nothing}
-        <span aria-hidden="true" class="text-ink-muted">‹</span>
+        <span aria-hidden="true" class="${failed ? "text-danger" : "text-ink-muted"}">‹</span>
       </button>
     `;
   }
@@ -219,16 +243,29 @@ export class PremiereBettingOverlay extends LitElement {
       >
         <div class="flex items-center justify-between gap-2">
           <h2 class="truncate text-base font-bold text-ink">${model.title}</h2>
-          ${live
-            ? html`<span
-                class="inline-flex shrink-0 items-center gap-1 rounded-full bg-live/15 px-2 py-0.5 text-[11px] font-bold uppercase tracking-wide text-live"
-              >
-                <span
-                  class="h-1.5 w-1.5 animate-pulse rounded-full bg-live"
-                ></span>
-                Live
-              </span>`
-            : nothing}
+          <span class="flex shrink-0 items-center gap-2">
+            ${live
+              ? html`<span
+                  class="inline-flex items-center gap-1 rounded-full bg-live/15 px-2 py-0.5 text-[11px] font-bold uppercase tracking-wide text-live"
+                >
+                  <span
+                    class="h-1.5 w-1.5 animate-pulse rounded-full bg-live"
+                  ></span>
+                  Live
+                </span>`
+              : nothing}
+            <button
+              type="button"
+              class="hidden items-center justify-center rounded-md border border-line px-1.5 py-1 text-ink-muted outline-none transition-colors hover:bg-surface-hover hover:text-ink focus-visible:ring-2 focus-visible:ring-accent lg:inline-flex"
+              aria-label="Collapse trading panel"
+              aria-controls="betting-sheet-panel"
+              @click=${() => {
+                this.sheetOverride = false;
+              }}
+            >
+              <span aria-hidden="true">›</span>
+            </button>
+          </span>
         </div>
         <p class="text-xs text-ink-muted">
           ${model.mapName} · ${model.matchFormat}

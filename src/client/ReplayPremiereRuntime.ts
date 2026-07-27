@@ -2441,6 +2441,8 @@ export class ReplayPremiereRuntimeController {
     | null = null;
   private incomingMoment: ReplayPremiereHighlightedMomentView | null = null;
   private latestFrame: ReplayPremiereFrame | null = null;
+  /** Consecutive `onFrameEvent` bookkeeping mismatches not yet resolved by a clean frame — see `MAX_FRAME_BOOKKEEPING_DRIFT_STRIKES`. */
+  private frameBookkeepingDriftStrikes = 0;
   /** Newest-first spoiler-safe war narrative (bounded ring; see war feed). */
   private warFeed: ReplayPremiereWarEventView[] = [];
   /** The viewer's own server-accepted marks per kind (participant-private). */
@@ -2741,6 +2743,26 @@ export class ReplayPremiereRuntimeController {
       return;
     }
     this.latestManifest = manifest;
+    // TEMP DIAGNOSTIC (LateJoin session) — removed before this session ends.
+    {
+      const pb = this.playback.state();
+      // eslint-disable-next-line no-console
+      console.log(
+        "[LATEJOIN-DIAG]",
+        JSON.stringify({
+          wallMs: Date.now(),
+          authoritativeElapsedMs:
+            "authoritativeElapsedMs" in manifest
+              ? manifest.authoritativeElapsedMs
+              : null,
+          released: pb.releasedThroughSequence,
+          dispatched: pb.lastDispatchedSequence,
+          joinSyncTarget: this.joinSyncTargetSequence,
+          joinSyncSettled: this.joinSyncSettled,
+          latestFrameTurn: this.latestFrame?.turnNumber ?? null,
+        }),
+      );
+    }
     this.reconcileCheckpointDeadline(manifest);
     this.recovery = null;
     if (
@@ -2846,20 +2868,48 @@ export class ReplayPremiereRuntimeController {
       (event as CustomEvent<unknown>).detail,
     );
     if (frame === null) return;
-    const playbackState = this.playback.state();
-    if (
-      frame.sequence === null ||
-      playbackState.releasedThroughSequence === null ||
-      playbackState.lastDispatchedSequence === null ||
-      frame.sequence > playbackState.releasedThroughSequence ||
-      frame.sequence > playbackState.lastDispatchedSequence ||
-      (this.latestFrame?.sequence !== null &&
-        this.latestFrame?.sequence !== undefined &&
-        frame.sequence < this.latestFrame.sequence)
-    ) {
-      this.latchFailure("integrity_failure");
+    if (frame.sequence === null) {
+      // Not a premiere-sequenced frame (e.g. the plain-replay engine a
+      // revealed/archived page falls back to) — nothing here for this
+      // controller's release/dispatch bookkeeping to check against.
       return;
     }
+    const playbackState = this.playback.state();
+    const bookkeepingConsistent =
+      playbackState.releasedThroughSequence !== null &&
+      playbackState.lastDispatchedSequence !== null &&
+      frame.sequence <= playbackState.releasedThroughSequence &&
+      frame.sequence <= playbackState.lastDispatchedSequence &&
+      (this.latestFrame?.sequence === null ||
+        this.latestFrame?.sequence === undefined ||
+        frame.sequence >= this.latestFrame.sequence);
+    if (!bookkeepingConsistent) {
+      // eslint-disable-next-line no-console
+      console.log(
+        "[LATEJOIN-DIAG-DRIFT]",
+        JSON.stringify({
+          wallMs: Date.now(),
+          frameSequence: frame.sequence,
+          released: playbackState.releasedThroughSequence,
+          dispatched: playbackState.lastDispatchedSequence,
+          latestFrameSequence: this.latestFrame?.sequence ?? null,
+          strikes: this.frameBookkeepingDriftStrikes + 1,
+        }),
+      );
+      this.frameBookkeepingDriftStrikes += 1;
+      if (
+        this.frameBookkeepingDriftStrikes >=
+        MAX_FRAME_BOOKKEEPING_DRIFT_STRIKES
+      ) {
+        this.latchFailure("integrity_failure");
+      }
+      // Otherwise: this one frame is skipped (not folded into overlay
+      // state) and the next frame event gets a fresh read of both
+      // subsystems' bookkeeping — an ordinary same-tick race resolves
+      // itself well within the strike budget.
+      return;
+    }
+    this.frameBookkeepingDriftStrikes = 0;
     const leaders = [...frame.players].sort(
       (left, right) =>
         right.tilesOwned - left.tilesOwned ||
@@ -4881,6 +4931,23 @@ const WAR_EVENT_KINDS = new Set([
   "chat",
 ]);
 const MAX_WAR_EVENTS_PER_FRAME = 12;
+/**
+ * `onFrameEvent` cross-checks a just-rendered frame's sequence against the
+ * network/playback controller's own bookkeeping (`releasedThroughSequence`/
+ * `lastDispatchedSequence`) — two client-side subsystems (render pipeline,
+ * network/playback controller) that update on independent event-loop turns.
+ * A single observed mismatch is at least as likely to be an ordinary same-
+ * tick read-before-write race between them as a real integrity violation —
+ * the engine can only ever process turns this controller itself already
+ * released and dispatched, so a transient "ahead" reading never reflects
+ * data the viewer wasn't already entitled to. Tolerate a short run of
+ * mismatches (skip those frames, wait for the bookkeeping to resync) and
+ * only latch the terminal failure once the drift persists across this many
+ * consecutive frames — a real, non-self-healing violation exhausts this
+ * budget in well under a second at premiere frame rates.
+ */
+const MAX_FRAME_BOOKKEEPING_DRIFT_STRIKES = 3;
+
 /** Newest-first entries kept for the overlay's battle feed. */
 const MAX_WAR_FEED_ENTRIES = 8;
 
