@@ -8,6 +8,7 @@ import {
   type ReplayPremiereServiceTradeResponse,
 } from "src/client/ReplayPremiereRuntime";
 import { mountBettingOverlay, type PremiereBettingOverlay } from "./BettingOverlay";
+import { quoteSell } from "../marketMath";
 import { marketStateFromService } from "../serviceMapping";
 import { SessionBankroll } from "../sessionBankroll";
 import { SHARE_PAYOUT, type MarketPosition, type MarketState, type TradeSide } from "../types";
@@ -201,11 +202,18 @@ export class BettingPremiereMarketController {
   }
 
   /**
-   * `open`: the server's own mark-to-market formula against this poll's
-   * fresh price. `settled`: the exact payout `settleMarket` pays — a
-   * winning seat's shares at `SHARE_PAYOUT` each, a void market's cost
-   * basis refunded in full, every other seat worthless — so the value
-   * shown here and the amount credited to the bankroll always agree.
+   * `open`: what liquidating the WHOLE position would actually pay out
+   * right now — NOT `shares × marginal price`. LMSR selling moves the
+   * price against the seller, so the marginal-price number is never
+   * realisable; the larger the position, the worse that gap gets. Uses
+   * the same cost curve the server fills a real sell against
+   * (`quoteSell` mirrors `sellProceeds`/`ReplayPremiereMarket` exactly),
+   * so the displayed number and the number a "Sell all" would actually
+   * receive are the same number. `settled`: the exact payout
+   * `settleMarket` pays — a winning seat's shares at `SHARE_PAYOUT` each,
+   * a void market's cost basis refunded in full, every other seat
+   * worthless — so the value shown here and the amount credited to the
+   * bankroll always agree.
    */
   private markToMarket(market: MarketState, position: MarketPosition): number {
     if (market.status === "settled") {
@@ -214,7 +222,7 @@ export class BettingPremiereMarketController {
         ? position.shares * SHARE_PAYOUT
         : 0;
     }
-    return Math.round(position.shares * (market.prices[position.seatId] ?? 0));
+    return quoteSell(market, position.seatId, position.shares)?.chips ?? 0;
   }
 
   private applyMarket(market: MarketState): void {
