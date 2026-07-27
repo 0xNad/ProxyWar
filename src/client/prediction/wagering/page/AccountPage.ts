@@ -112,6 +112,13 @@ export class PremiereAccountPage extends LitElement {
   @state() private claimError: string | null = null;
 
   createRenderRoot() {
+    // Light DOM, so page-level Tailwind applies. Two things bite here:
+    // custom elements are display:inline by default, and `body` is a flex
+    // row — so without `grow` the host shrink-wraps to the inner
+    // `max-w-3xl` (768px) and `mx-auto` then centres inside that shrunken
+    // box, pinning the content left with dead space beside it at any width
+    // above 768.
+    this.classList.add("block", "w-full", "grow");
     return this;
   }
 
@@ -249,7 +256,10 @@ export class PremiereAccountPage extends LitElement {
 
   private renderIdentity() {
     const identity = this.account!.identity;
-    const label = identity.githubLogin ?? identity.displayName ?? `Guest ${identity.participantId.slice(-4)}`;
+    const label =
+      identity.githubLogin ??
+      identity.displayName ??
+      `Guest ${identity.participantId.slice(-4)}`;
     return html`
       <section
         aria-labelledby="account-identity-heading"
@@ -286,7 +296,10 @@ export class PremiereAccountPage extends LitElement {
           ? html`<div
               class="flex flex-wrap items-center gap-2 border-t border-line pt-3 text-xs text-ink-muted"
             >
-              <span>Linking GitHub carries your points and history to any browser you sign into.</span>
+              <span
+                >Linking GitHub carries your points and history to any browser
+                you sign into.</span
+              >
               <premiere-github-sign-in></premiere-github-sign-in>
             </div>`
           : nothing}
@@ -379,8 +392,8 @@ export class PremiereAccountPage extends LitElement {
         </div>
         <p class="text-[11px] leading-snug text-ink-muted">
           Rank is net realized profit or loss across settled matches only —
-          sitting on your starting bankroll without trading earns nothing;
-          being profitable is what moves you up, not being present.
+          sitting on your starting bankroll without trading earns nothing; being
+          profitable is what moves you up, not being present.
         </p>
         ${this.renderCurrentPremiere(betting.currentPremiere)}
         ${this.renderMatchHistory(betting.matches)}
@@ -398,7 +411,8 @@ export class PremiereAccountPage extends LitElement {
         class="flex flex-col gap-2 rounded-md border border-line-strong bg-surface-3 px-3 py-2.5"
       >
         <div class="flex items-center justify-between gap-2">
-          <span class="text-xs font-semibold uppercase tracking-wide text-ink-muted"
+          <span
+            class="text-xs font-semibold uppercase tracking-wide text-ink-muted"
             >Live position — current match</span
           >
           <a
@@ -441,7 +455,9 @@ export class PremiereAccountPage extends LitElement {
     const hasBackfilled = matches.some((match) => match.net === 0);
     return html`
       <div class="flex flex-col gap-2">
-        <h3 class="text-xs font-semibold uppercase tracking-wide text-ink-muted">
+        <h3
+          class="text-xs font-semibold uppercase tracking-wide text-ink-muted"
+        >
           Match history
         </h3>
         <ul class="flex max-h-96 flex-col gap-1 overflow-y-auto pr-1">
@@ -449,9 +465,8 @@ export class PremiereAccountPage extends LitElement {
         </ul>
         ${hasBackfilled
           ? html`<p class="text-[11px] leading-snug text-ink-muted">
-              † A flat 0 may be a real push, or a match settled before
-              per-match history existed — older records can't tell the two
-              apart.
+              † A flat 0 may be a real push, or a match settled before per-match
+              history existed — older records can't tell the two apart.
             </p>`
           : nothing}
       </div>
@@ -584,7 +599,9 @@ export class PremiereAccountPage extends LitElement {
         </h2>
         ${this.renderLeagueStaleness()}
         ${!this.leagueDataLoaded
-          ? html`<p class="text-sm text-ink-muted">Loading league standings…</p>`
+          ? html`<p class="text-sm text-ink-muted">
+              Loading league standings…
+            </p>`
           : data === null || data.standings.length === 0
             ? html`<p class="text-sm text-ink-muted">
                 League standings are unavailable right now — try again later.
@@ -611,7 +628,8 @@ export class PremiereAccountPage extends LitElement {
     currentPlayerName: string | null,
   ) {
     const sorted = [...standings].sort((a, b) => a.rank - b.rank);
-    const draft = this.claimDraft || currentPlayerName || sorted[0]?.playerName || "";
+    const draft =
+      this.claimDraft || currentPlayerName || sorted[0]?.playerName || "";
     return html`
       <div class="flex flex-col gap-2">
         <label
@@ -632,9 +650,8 @@ export class PremiereAccountPage extends LitElement {
             ${sorted.map(
               (standing) => html`
                 <option value=${standing.playerName}>
-                  #${standing.rank} ${standing.playerName}${standing.isHouse
-                    ? " (house)"
-                    : ""}
+                  #${standing.rank}
+                  ${standing.playerName}${standing.isHouse ? " (house)" : ""}
                 </option>
               `,
             )}
@@ -653,7 +670,9 @@ export class PremiereAccountPage extends LitElement {
           This is a self-selected claim, not verified ownership — see below.
         </p>
         ${this.claimError !== null
-          ? html`<p class="text-xs text-danger" role="alert">${this.claimError}</p>`
+          ? html`<p class="text-xs text-danger" role="alert">
+              ${this.claimError}
+            </p>`
           : nothing}
       </div>
     `;
@@ -683,9 +702,9 @@ export class PremiereAccountPage extends LitElement {
         </div>
         <p class="text-[11px] leading-snug text-ink-muted">
           There is currently no way to prove GitHub-account ownership of a
-          league agent, so this claim is private to you and never shown
-          anywhere another player can see it. A verified path arrives with
-          Softmax sign-in.
+          league agent, so this claim is private to you and never shown anywhere
+          another player can see it. A verified path arrives with Softmax
+          sign-in.
         </p>
         ${this.renderLeagueStaleness()}
         ${standing === null
@@ -709,10 +728,10 @@ export class PremiereAccountPage extends LitElement {
     return html`
       <p class="text-sm text-ink">
         You claimed
-        <strong>${playerName}</strong>, but they're not in the current
-        league standings mirror — dropped from rotation, renamed, or the
-        mirror is between updates. Your claim is preserved either way; pick
-        again if this is stale.
+        <strong>${playerName}</strong>, but they're not in the current league
+        standings mirror — dropped from rotation, renamed, or the mirror is
+        between updates. Your claim is preserved either way; pick again if this
+        is stale.
       </p>
     `;
   }
@@ -725,8 +744,8 @@ export class PremiereAccountPage extends LitElement {
       return html`
         <p class="text-sm text-ink">
           <strong>${standing.playerName}</strong> is the house agent — the
-          platform's own bot, not a player-owned entry. Its stats aren't
-          shown here.
+          platform's own bot, not a player-owned entry. Its stats aren't shown
+          here.
         </p>
       `;
     }
@@ -734,11 +753,12 @@ export class PremiereAccountPage extends LitElement {
     return html`
       <div class="flex flex-col gap-2">
         <div class="flex flex-wrap items-baseline justify-between gap-2">
-          <span class="text-base font-bold text-ink">${standing.playerName}</span>
+          <span class="text-base font-bold text-ink"
+            >${standing.playerName}</span
+          >
           <span class="font-mono text-xs tabular-nums text-ink-muted"
-            >Rank #${standing.rank} · Rating ${standing.score !== null
-              ? standing.score.toFixed(1)
-              : "—"}</span
+            >Rank #${standing.rank} · Rating
+            ${standing.score !== null ? standing.score.toFixed(1) : "—"}</span
           >
         </div>
         <div class="flex flex-wrap gap-x-4 gap-y-1 text-xs text-ink-muted">
@@ -820,8 +840,8 @@ export class PremiereAccountPage extends LitElement {
         class="rounded-md border border-caution/40 bg-caution/10 px-2 py-1 text-[11px] font-semibold text-caution"
         role="status"
       >
-        League data is stale — last confirmed ${asOf}. Standings and form
-        below may be dated.
+        League data is stale — last confirmed ${asOf}. Standings and form below
+        may be dated.
       </p>
     `;
   }
