@@ -208,18 +208,25 @@ export function applySell(options: {
   };
 }
 
-/** Every non-empty position a participant currently holds, mark-to-market at current prices. */
+/**
+ * Every non-empty position a participant currently holds, valued at the
+ * EXECUTABLE liquidation price: exactly what an immediate full sell of the
+ * whole position would pay on this same LMSR cost curve (`sellProceeds`,
+ * the same function every real sell fill uses) — never the marginal
+ * per-share price. Selling moves price against the seller along the curve,
+ * so `shares * price` overstates what's actually realisable; this is the
+ * number that must match a real "sell all" to the credit.
+ */
 export function positionsFor(
   market: ReplayPremiereMarket,
   participantId: string,
 ): ReplayPremiereMarketPosition[] {
   const holdings = holdingsOf(market, participantId);
   const costBasis = costBasisOf(market, participantId);
-  const prices = computeMarketPrices(market);
   const positions: ReplayPremiereMarketPosition[] = [];
   for (const [index, shares] of holdings.entries()) {
     if (shares <= 0) continue;
-    const currentValue = Math.round((shares * prices[index] * SHARE_PAYOUT) / 100);
+    const currentValue = sellProceeds(market, index, shares);
     positions.push({
       seatId: market.outcomeSeatIds[index],
       shares,
