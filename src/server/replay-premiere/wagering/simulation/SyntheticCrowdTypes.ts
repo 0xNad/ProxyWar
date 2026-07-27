@@ -67,6 +67,20 @@ export interface SyntheticCrowdConfig {
 export interface SyntheticCrowdSignalSnapshot {
   readonly optionSeatIds: readonly string[];
   readonly favorabilityWeights: Readonly<Record<string, number>>;
+  /**
+   * Seats the caller has structurally ruled out — currently holding zero
+   * of whatever "territory" means for this game, per the released data,
+   * not merely "priced low." Optional and additive: omitting it (or
+   * passing an empty set) changes nothing. Exists so `decideSyntheticCrowdOrder`
+   * can refuse to ever BUY a seat the data says cannot win, even if a
+   * persona's own derived fair value (e.g. momentum-chaser extrapolating
+   * pure price trend) would otherwise manufacture a buy signal on it —
+   * `favorabilityWeights` alone can't carry this distinction reliably,
+   * since a near-floor weight is ambiguous with "no data yet" (see
+   * `SyntheticCrowdLiveDriver`'s baseline-liquidity noise, which
+   * legitimately uses the same small range while genuinely uninformed).
+   */
+  readonly deadSeatIds?: ReadonlySet<string>;
 }
 
 export interface SyntheticCrowdMarketState {

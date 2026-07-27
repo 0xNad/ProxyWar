@@ -110,10 +110,12 @@ const REQUIRED_ARGUMENT_PREFIXES = [
 ] as const;
 const REPEATED_ARGUMENT_PREFIX = "--served-root=";
 // Optional: overrides the admitted chunk build's maxPresentationSpanMs (default
-// MAX_PRESENTATION_SPAN_MS = 45s). Wagering-enabled premieres must be admitted
-// with a span <= wagering's WAGERING_MAX_PRESENTATION_SPAN_MS (1s) or startup
-// refuses to assemble them (`wagering_presentation_span_exceeds_ceiling`) — see
-// ReplayPremiereStartup.ts. Non-wagering admissions should leave this unset.
+// MAX_PRESENTATION_SPAN_MS = 45s). The old wagering-specific 1s span ceiling
+// (`WAGERING_MAX_PRESENTATION_SPAN_MS`, `wagering_presentation_span_exceeds_ceiling`)
+// was reverted — wagering premieres use the same general chunk-span/128-chunk
+// ceiling as everything else; live-visible-sequence freshness, not chunk
+// granularity, is what bounds trading. See ReplayPremiereRuntimeCoordinator.ts's
+// `readLiveVisibleSequence` doc comment.
 const OPTIONAL_MAX_PRESENTATION_SPAN_MS_PREFIX = "--max-presentation-span-ms=";
 
 interface ReplayPremiereAdmissionCliOptions {

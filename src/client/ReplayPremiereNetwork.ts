@@ -1423,13 +1423,15 @@ export class ReplayPremiereNetworkController {
       checkpointCatchUpTarget !== null &&
       checkpointCatchUpTarget > (dispatched ?? -1)
     ) {
-      // Do not advance a still-pending request on every manifest poll. Once it
-      // is acknowledged, the recalculated retained trail may move forward if
-      // the deadline has genuinely shortened.
+      // A checkpoint's own retention target may legitimately supersede an
+      // earlier, less-urgent target this controller already requested (e.g.
+      // a fresh join's general trail catch-up, still in flight when the
+      // checkpoint opens) — only skip once this tick's target stops being
+      // more advanced than what was already asked for, not merely because
+      // something is still pending.
       if (
-        this.lastCatchUpTarget === checkpointCatchUpTarget ||
-        (this.lastCatchUpTarget !== null &&
-          this.lastCatchUpTarget > (dispatched ?? -1))
+        this.lastCatchUpTarget !== null &&
+        this.lastCatchUpTarget >= checkpointCatchUpTarget
       ) {
         return;
       }
@@ -1441,9 +1443,24 @@ export class ReplayPremiereNetworkController {
       this.lastCatchUpTarget = checkpointCatchUpTarget;
       return;
     }
+    // The threshold below exists to stop SMOOTH, already-playing viewers
+    // from tripping catch-up on ordinary clock/offset jitter (see its own
+    // doc comment). A fresh join (`dispatched === null`, nothing ever
+    // handed to the engine yet) has no smooth playback to protect — it is
+    // either already within the trail (handled by `trailedCatchUpTarget`
+    // returning null below, same as today) or it is not, in which case
+    // pacing turn 0 forward in real time would try to replay the ENTIRE
+    // elapsed match at the same rate the live match itself is advancing:
+    // the gap it started with never closes, and every real second the
+    // live match plays on stretches it further — a joiner is watching a
+    // live event, not obligated to relive the trail it will never be
+    // caught up enough to show. Skip the threshold gate on first join only;
+    // every later re-evaluation (once anything has been dispatched) keeps
+    // the existing steady-state behavior unchanged.
     if (
+      dispatched !== null &&
       manifest.authoritativeElapsedMs - dispatchedOffset <=
-      this.catchUpThresholdMs
+        this.catchUpThresholdMs
     ) {
       return;
     }
@@ -1460,7 +1477,10 @@ export class ReplayPremiereNetworkController {
     const target = this.trailedCatchUpTarget(frontier);
     if (
       target === null ||
-      target <= (dispatched ?? -1) ||
+      // Sequence 0 is always the natural starting point regardless of
+      // dispatch state — a target that resolves there (frontier exactly
+      // one trail deep) needs no explicit catch-up, fresh join or not.
+      target <= Math.max(dispatched ?? -1, 0) ||
       this.lastCatchUpTarget === target
     ) {
       return;

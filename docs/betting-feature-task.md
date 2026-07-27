@@ -1,3 +1,12 @@
+> **Note (added post-build, do not edit the brief below):** this is the
+> original task brief and is kept verbatim as the historical record. Two
+> decisions below were superseded by later, explicit operator pivots during
+> the build: the market substrate shipped as a **continuous LMSR (logarithmic
+> market scoring rule) market maker**, not pari-mutuel pooled wagering; and
+> trading is **continuous for the whole live match**, not gated to
+> checkpoint-window staking periods. See `RUNBOOK.md` and `DEMO.md` for the
+> current, verified state.
+
 # TASK — Build the Proxy War prediction-competition ("betting") feature (autonomous, for Claude Cowork)
 
 You are an autonomous engineer. Your mission: deliver a **fully working, hardened,

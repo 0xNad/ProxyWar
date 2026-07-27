@@ -176,6 +176,19 @@ export function decideSyntheticCrowdOrder(
   let bestSeatId: string | null = null;
   let bestMagnitude = 0;
   for (const seatId of snapshot.optionSeatIds) {
+    // A seat the released data has already ruled out (zero held) is never
+    // a legitimate BUY candidate, however large a persona's own derived
+    // fair value looks — momentum-chaser in particular extrapolates pure
+    // price trend and can otherwise manufacture a buy signal on a dead
+    // seat from nothing but its own recent price noise. If this bot
+    // already holds some (bought while the seat was still alive), it
+    // stays a candidate so the sell branch below can wind the position
+    // down; a zero-held dead seat is excluded entirely rather than left
+    // to lose the argmax comparison on its own, so it can never win by
+    // outbidding a smaller-but-genuine gap elsewhere either.
+    if (snapshot.deadSeatIds?.has(seatId) && (heldShares[seatId] ?? 0) <= 0) {
+      continue;
+    }
     const gap = fairValues[seatId] - (marketPrices[seatId] ?? 0);
     const magnitude = Math.abs(gap) + rng.next() * 0.5;
     if (magnitude > bestMagnitude) {
@@ -196,7 +209,13 @@ export function decideSyntheticCrowdOrder(
   // intended price impact rather than genuinely bad execution.
   const slippageSlack = 6 + aggressiveness * 24;
   if (gap > threshold) {
-    if (input.remainingBudgetHint < input.minStake) {
+    // Never buy a seat the released data has already ruled out, however
+    // large a persona's own derived fair value looks (see the candidate
+    // loop above for why this can happen at all) — this only matters
+    // when this bot already holds some (the loop above admits a
+    // zero-held dead seat as a candidate never), i.e. exactly the "add
+    // to an existing dead position instead of selling it down" case.
+    if (snapshot.deadSeatIds?.has(bestSeatId) || input.remainingBudgetHint < input.minStake) {
       return null;
     }
     // Conviction scales with evidence at the trade level too: a bigger
@@ -238,7 +257,21 @@ export function decideSyntheticCrowdOrder(
     if (held <= 0) {
       return null;
     }
-    const sellShares = Math.max(1, Math.floor(held / 2));
+    // A fair value this close to zero is not "overpriced, sell some" —
+    // it is the structural elimination floor (see
+    // `SyntheticCrowdLiveDriver.deriveSnapshot`'s `TERRITORY_FLOOR`):
+    // the released data has already said this seat cannot win. Gradual
+    // half-liquidation (below) is right for an ordinary rally-then-
+    // overpriced seat that still has genuine value; it is wrong here,
+    // where every tick spent only half-selling is a tick a bigger, real
+    // mispricing elsewhere (this module's continuous conviction scaling
+    // now gives moderate-but-real leads a competitive gap too) can win
+    // the single-best-seat pick instead and stall the wind-down
+    // indefinitely. Liquidate the whole position at once — never
+    // partial, never RNG-consuming, so this changes nothing about which
+    // bot/seat gets picked or how any other decision's random draws
+    // sequence.
+    const sellShares = snapshot.deadSeatIds?.has(bestSeatId) ? held : Math.max(1, Math.floor(held / 2));
     return {
       seatId: bestSeatId,
       side: "sell",

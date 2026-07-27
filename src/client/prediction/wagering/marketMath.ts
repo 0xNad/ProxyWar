@@ -7,7 +7,7 @@
  * `limitPrice` to submit alongside the order — without a round trip per
  * keystroke.
  */
-import type { Credits } from "src/prediction/types";
+import { MIN_STAKE, type Credits } from "src/prediction/types";
 import { lmsrCostOfTrade, lmsrDisplayPrices } from "./lmsr";
 import type { MarketSeatOption, MarketState } from "./types";
 import { SHARE_PAYOUT } from "./types";
@@ -64,10 +64,23 @@ function buyCost(market: MarketState, outcome: number, shares: number): number {
   return Math.max(1, roundChips(raw));
 }
 
-/** Chips a sell of `shares` on `outcome` would return right now (>= 0). */
+/**
+ * Chips a sell of `shares` on `outcome` would return right now (>= 1 for >=
+ * 1 share — floored the SAME as `buyCost`, not at 0). A round trip (buy N,
+ * immediately sell N back with no other market activity in between) must
+ * net exactly 0 chips: both directions round the identical LMSR magnitude
+ * with the identical `roundChips`, so the only place a mismatch could
+ * creep in is the floor. On a long-shot outcome the true cost/return can
+ * round to 0 before flooring; flooring the sell at 0 while the buy floors
+ * at 1 would leak 1 chip per round trip, guaranteed, on any outcome cheap
+ * enough to hit it — silently contradicting the platform's stated "no
+ * house edge" guarantee. Flooring both at 1 keeps the guarantee true
+ * everywhere: the AMM absorbs a symmetric bounded subsidy in both
+ * directions instead of a one-sided one.
+ */
 function sellProceeds(market: MarketState, outcome: number, shares: number): number {
   const raw = -SHARE_PAYOUT * lmsrCostOfTrade(market.q, market.b, outcome, -shares);
-  return Math.max(0, roundChips(raw));
+  return Math.max(1, roundChips(raw));
 }
 
 function pricesAfterTrade(
@@ -83,6 +96,25 @@ function pricesAfterTrade(
     out[seatId] = after[index];
   });
   return out;
+}
+
+/**
+ * The platform's flat `MIN_STAKE` (10cr) is a policy floor, not a promise
+ * that 10cr buys anything — a single share can cost well over 10cr the
+ * moment the book has moved off a fresh 25/25/25/25 open (LMSR price ~=
+ * probability * SHARE_PAYOUT, so a seat sitting anywhere near its 25%
+ * opening already prices its first share around 25cr). A preset amount
+ * that can't buy even one whole share always trips `validateBuyDraft`'s
+ * `zero-shares` rejection, so a STATIC minimum preset is a button that
+ * looks actionable and reliably isn't. This returns what a whole share of
+ * `seatId` actually costs RIGHT NOW, floored at the platform's own
+ * absolute minimum — the number a quick-pick preset should show instead
+ * of the flat constant.
+ */
+export function minTradeableStake(market: MarketState, seatId: string): Credits {
+  const outcome = outcomeIndexOf(market, seatId);
+  if (outcome < 0) return MIN_STAKE;
+  return Math.max(MIN_STAKE, buyCost(market, outcome, 1));
 }
 
 /**

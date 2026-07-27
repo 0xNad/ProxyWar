@@ -35,6 +35,7 @@ import {
   DEFAULT_SYNTHETIC_CROWD_CONFIG,
   SyntheticCrowdLiveDriver,
   type SyntheticCrowdConfig,
+  type SyntheticCrowdTerritoryProjector,
 } from "./wagering/simulation";
 import {
   hashReplayPremiereCheckpointSchedule,
@@ -200,6 +201,8 @@ export interface ReplayPremiereProductionStartupOptions {
   syntheticCrowdConfig?: Partial<SyntheticCrowdConfig>;
   /** Real-time poll cadence for the synthetic crowd driver; defaults to 1000ms. Lower only for tests. */
   syntheticCrowdPollIntervalMs?: number;
+  /** Whole-match territory precompute for the synthetic crowd's real per-seat signal (see `SyntheticCrowdTerritoryProjection.ts`). Required for the crowd to price anything beyond the flat floor; omit only if `syntheticCrowdEnabled` is never set. */
+  territoryProjector?: SyntheticCrowdTerritoryProjector;
   clock?: ReplayPremiereRuntimeClock;
   maxStartupMs?: number;
   /**
@@ -846,6 +849,7 @@ export async function startReplayPremiereProduction(
             syntheticCrowdConfig: options.syntheticCrowdConfig,
             syntheticCrowdPollIntervalMs: options.syntheticCrowdPollIntervalMs,
             recoveryProjection: plan.projection,
+            territoryProjector: options.territoryProjector,
             fence,
           });
         },
@@ -939,6 +943,7 @@ export async function startReplayPremiereProduction(
                   syntheticCrowdConfig: options.syntheticCrowdConfig,
                   syntheticCrowdPollIntervalMs: options.syntheticCrowdPollIntervalMs,
                   recoveryProjection: plan.projection,
+                  territoryProjector: options.territoryProjector,
                   fence,
                 });
               },
@@ -1146,6 +1151,7 @@ async function assemblePremiereTarget(options: {
   syntheticCrowdEnabled?: boolean;
   syntheticCrowdConfig?: Partial<SyntheticCrowdConfig>;
   syntheticCrowdPollIntervalMs?: number;
+  territoryProjector?: SyntheticCrowdTerritoryProjector;
   recoveryProjection: RecoveryProjection;
   fence: ReplayPremiereStartupOperationFence;
 }): Promise<AssembledPremiereTarget> {
@@ -1265,6 +1271,10 @@ async function assemblePremiereTarget(options: {
             enabled: true,
             ...options.syntheticCrowdConfig,
           },
+          territory:
+            options.territoryProjector === undefined
+              ? undefined
+              : { projector: options.territoryProjector, gate, drafts },
           onError: (error) => {
             console.error(
               `Synthetic crowd driver poll failed for ${options.record.premiereId}: ${

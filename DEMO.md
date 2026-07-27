@@ -1,11 +1,16 @@
-# Proxy War prediction competition — demo & verification harness
+# Proxy War prediction competition — demo & verification harness (historical, pari-mutuel-era)
 
-**Status: mid-pivot.** The feature substrate changed mid-build (operator decision) from
-single-player synthetic built-in-nation fixtures + a fitted fixed-odds table to a
-server-side **Observatory league replay premiere with pari-mutuel wagering**
-(`src/server/replay-premiere/wagering/**`). This document reflects the state as of
-this handoff: what is built and verified, and what is still landing from sibling
-slices (`PariServer`, `PariClient`, `PariPipeline`).
+**Historical snapshot, superseded.** This document was written mid-build, when the
+feature substrate had just changed (operator decision) from single-player synthetic
+built-in-nation fixtures + a fitted fixed-odds table to a server-side Observatory
+league replay premiere with **pari-mutuel** wagering. That pari-mutuel substrate was
+itself replaced before the feature shipped: the market is now a **continuous LMSR
+(logarithmic market scoring rule) market maker**
+(`src/server/replay-premiere/wagering/**`), open for the whole live match with no
+checkpoint-window gating — see this document's own "Money-drift property test"
+section below and `RUNBOOK.md` for the current, verified state. The rest of this
+file is kept verbatim as the record of what each pivot broke and why; do not read
+"pari-mutuel" or "checkpoint window" below as current behavior.
 
 ## What's verified right now
 

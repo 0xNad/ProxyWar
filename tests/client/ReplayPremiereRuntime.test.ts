@@ -2073,6 +2073,107 @@ describe("ReplayPremiereRuntimeController", () => {
     harness.runtime.dispose();
   });
 
+  it("resyncs a transient onFrameEvent bookkeeping mismatch instead of latching a terminal failure", async () => {
+    const harness = runtimeHarness({ state: "playing" });
+    await bootstrapPlayingWithFrame(harness);
+    expect(harness.models.at(-1)).toMatchObject({
+      state: "playing",
+      failureCode: null,
+    });
+
+    // The network already verified and released sequence 1
+    // (`appendVerifiedBatch` below), but the render pipeline's own frame-
+    // completion event for it is observed before this controller's
+    // `acknowledgeDispatchedRecord` bookkeeping update lands — an ordinary
+    // same-tick race between two independently-updated client subsystems,
+    // not a claim from the server that was never verified.
+    const recordOne = {
+      sequence: 1,
+      presentationOffsetMs: 10,
+      turn: { turnNumber: 1, intents: [] },
+    };
+    harness.runtime.playback.appendVerifiedBatch({
+      premiereId: PREMIERE_ID,
+      chunkIndex: 1,
+      chunkHash: HASH_B,
+      previousChunkHash: HASH_A,
+      payloadHash: HASH_C,
+      startSequence: 1,
+      endSequence: 1,
+      verification: { payloadHashVerified: true, chunkHashVerified: true },
+      records: [recordOne],
+    });
+    document.dispatchEvent(
+      new CustomEvent("ai-league-replay-frame", {
+        detail: { sequence: 1, turnNumber: 1, players: [] },
+      }),
+    );
+    // Skipped, not latched: this one frame is dropped, playback stays live.
+    expect(harness.models.at(-1)).toMatchObject({
+      state: "playing",
+      failureCode: null,
+    });
+
+    // Bookkeeping resyncs; the same frame observed again now matches and
+    // playback carries on with no failure ever having latched.
+    harness.runtime.playback.acknowledgeDispatchedRecord(recordOne);
+    document.dispatchEvent(
+      new CustomEvent("ai-league-replay-frame", {
+        detail: { sequence: 1, turnNumber: 1, players: [] },
+      }),
+    );
+    expect(harness.models.at(-1)).toMatchObject({
+      state: "playing",
+      failureCode: null,
+    });
+    harness.runtime.dispose();
+  });
+
+  it("still latches integrity_failure once a frame/playback mismatch persists past the resync budget", async () => {
+    const harness = runtimeHarness({ state: "playing" });
+    await bootstrapPlayingWithFrame(harness);
+
+    // A frame sequence far beyond anything ever released or dispatched
+    // never resolves itself on a later frame — repeated, unchanging
+    // observation is a real, non-self-healing divergence, not a race.
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      document.dispatchEvent(
+        new CustomEvent("ai-league-replay-frame", {
+          detail: { sequence: 999, turnNumber: 999, players: [] },
+        }),
+      );
+      expect(harness.models.at(-1)).toMatchObject({
+        state: "playing",
+        failureCode: null,
+      });
+    }
+    document.dispatchEvent(
+      new CustomEvent("ai-league-replay-frame", {
+        detail: { sequence: 999, turnNumber: 999, players: [] },
+      }),
+    );
+    expect(harness.models.at(-1)).toMatchObject({
+      state: "failed",
+      failureCode: "integrity_failure",
+    });
+    harness.runtime.dispose();
+  });
+
+  it("ignores a null-sequence replay frame instead of latching (e.g. the plain-replay engine post-reveal)", async () => {
+    const harness = runtimeHarness({ state: "playing" });
+    await bootstrapPlayingWithFrame(harness);
+    document.dispatchEvent(
+      new CustomEvent("ai-league-replay-frame", {
+        detail: { sequence: null, turnNumber: 5, players: [] },
+      }),
+    );
+    expect(harness.models.at(-1)).toMatchObject({
+      state: "playing",
+      failureCode: null,
+    });
+    harness.runtime.dispose();
+  });
+
   it("preserves the original sanitized fatal error before readiness and keeps the failure sticky", async () => {
     const harness = runtimeHarness({ state: "revealed" });
     const originalError = new ReplayPremiereNetworkError(
@@ -3083,6 +3184,81 @@ describe("ReplayPremiereServiceClient", () => {
     await expect(olderWrite).resolves.toMatchObject({
       reactionSummary: { totalReactions: 1 },
     });
+    client.dispose();
+  });
+
+  it("accepts a checkpoint the server closed without ever opening it (wagering bypass — opensAt equals closesAt)", async () => {
+    // Checkpoint pauses are bypassed entirely for wagering premieres — the
+    // server closes a checkpoint the instant its sequence is reached rather
+    // than ever opening a real voting window, reporting `opensAt ===
+    // closesAt` (see `ReplayPremiereInteractions.ts`'s "close without ever
+    // opening" transition). That's a genuine, intentional zero-duration
+    // window, not an impossible claim — only a window that closes BEFORE it
+    // opens is actually impossible. This is the exact condition that
+    // latched the live Buy-click bug: this same `heartbeat()` (and
+    // `startSession()`) response shape used to reject with
+    // `invalid_response`, tearing down the whole trading panel.
+    const bypassClosed = heartbeatResponse("playing");
+    bypassClosed.checkpoints[0] = {
+      ...checkpoint("cp_12345678", 10),
+      opensAt: STARTED_AT,
+      closesAt: STARTED_AT,
+      optionSeatIds: ["seat_a", "seat_b"],
+      state: "closed",
+    };
+    const fetchMock = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(jsonResponse(sessionResponse("playing"), 201))
+      .mockResolvedValueOnce(jsonResponse(bypassClosed, 200));
+    const client = new ReplayPremiereServiceClient({
+      premiereId: PREMIERE_ID,
+      origin: "https://proxywar.example",
+      fetchImpl: fetchMock,
+      randomBytes: () => new Uint8Array(16).fill(1),
+    });
+    client.bindVerifiedProjection(projection("playing"));
+    await client.startSession({ visible: true, observedSequence: -1 });
+
+    await expect(
+      client.heartbeat({ visible: true, observedSequence: 0 }),
+    ).resolves.toMatchObject({
+      checkpoints: [
+        expect.objectContaining({ id: "cp_12345678", state: "closed" }),
+        expect.anything(),
+      ],
+    });
+    client.dispose();
+  });
+
+  it("still rejects a checkpoint window that closes before it opens as invalid_response", async () => {
+    // Unlike the zero-duration bypass case above, a window that closes
+    // strictly BEFORE it opens can never be produced by any real server
+    // transition — a genuine, unexplainable claim the verified chain
+    // cannot support.
+    const impossible = heartbeatResponse("playing");
+    impossible.checkpoints[0] = {
+      ...checkpoint("cp_12345678", 10),
+      opensAt: "2026-07-20T18:00:15.000Z",
+      closesAt: "2026-07-20T18:00:10.000Z",
+      optionSeatIds: ["seat_a", "seat_b"],
+      state: "closed",
+    };
+    const fetchMock = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(jsonResponse(sessionResponse("playing"), 201))
+      .mockResolvedValueOnce(jsonResponse(impossible, 200));
+    const client = new ReplayPremiereServiceClient({
+      premiereId: PREMIERE_ID,
+      origin: "https://proxywar.example",
+      fetchImpl: fetchMock,
+      randomBytes: () => new Uint8Array(16).fill(1),
+    });
+    client.bindVerifiedProjection(projection("playing"));
+    await client.startSession({ visible: true, observedSequence: -1 });
+
+    await expect(
+      client.heartbeat({ visible: true, observedSequence: 0 }),
+    ).rejects.toMatchObject({ code: "invalid_response" });
     client.dispose();
   });
 

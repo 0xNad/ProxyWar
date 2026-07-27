@@ -492,6 +492,72 @@ describe("league update HTTP contract", () => {
     }
   });
 
+  test("the /proxywar-replay and /openfront-replay aliases redirect only for a run that actually exists, and never echo an unknown run id", async () => {
+    // Exercised against the open (non-wrapper) server: in
+    // PROXYWAR_LEAGUE_WRAPPER_ONLY mode this alias never even reaches its
+    // own handler (an earlier, unconditional wrapper gate 404s every
+    // isProxyWarReplayOrRunPath request regardless of existence — see the
+    // "serves and revalidates..." test above for that surface). The open
+    // server is where /proxywar-replay/:runID's own existence check is
+    // the thing actually deciding the response, which is what this fix
+    // changed.
+    //
+    // The positive case: a run that genuinely exists (has a real
+    // game-record.json under runsRootDir, shared across all three fixture
+    // servers) still redirects through the legacy alias exactly as
+    // before — this fix only tightens the negative case, it never breaks
+    // the real one.
+    for (const route of ["/proxywar-replay", "/openfront-replay"]) {
+      for (const method of ["GET", "HEAD"] as const) {
+        const redirected = await rawRequest(
+          openOrigin,
+          `${route}/league-valid`,
+          { method },
+        );
+        expect(redirected.status, `${method} ${route}/league-valid`).toBe(
+          302,
+        );
+        expect(redirected.headers.location).toBe(
+          "/ai-league-replay/league-valid",
+        );
+      }
+    }
+
+    // The negative case this fix exists for: a run id that has no
+    // game-record.json anywhere on disk must 404 directly — never a
+    // redirect a `redirect: "error"` fetch (like the Replay Premiere leak
+    // audit's alternate-source-url check) would have to throw on — and
+    // the 404 body must never echo the requested run id back (no leak of
+    // the very identifier the audit exists to protect).
+    const unknownRunID = "definitely-nonexistent-run-9f3c1a";
+    for (const route of ["/proxywar-replay", "/openfront-replay"]) {
+      for (const method of ["GET", "HEAD"] as const) {
+        const missing = await rawRequest(
+          openOrigin,
+          `${route}/${unknownRunID}`,
+          { method },
+        );
+        expect(missing.status, `${method} ${route}/${unknownRunID}`).toBe(
+          404,
+        );
+        expect(missing.headers.location).toBeUndefined();
+        expect(missing.body.toString()).not.toContain(unknownRunID);
+      }
+    }
+
+    // Also confirms a real `fetch(..., { redirect: "error" })` call — the
+    // exact mechanism the leak audit uses — no longer throws for the
+    // unknown run: it now resolves to a clean Response instead of
+    // rejecting on an unexpected redirect.
+    const auditStyleFetch = await fetch(
+      `${openOrigin}/proxywar-replay/${unknownRunID}`,
+      { redirect: "error" },
+    );
+    expect(auditStyleFetch.status).toBe(404);
+    const auditStyleBody = await auditStyleFetch.text();
+    expect(auditStyleBody).not.toContain(unknownRunID);
+  });
+
   test("serves only the exact claimed Clip canary target without wrapper redirects", async () => {
     const exactStatusPath = `/api/league-runs/${canaryRunKey}/clips/${canaryBucket}`;
     const exactFilePath = `/ai-league-runs/${canaryRunKey}/clip-v1-${canaryBucket}.mp4`;

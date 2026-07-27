@@ -15,6 +15,15 @@ export {
   type SyntheticCrowdLiveDriverOptions,
   type SyntheticCrowdLiveProjectionSource,
 } from "./SyntheticCrowdLiveDriver";
+export {
+  DeterministicSyntheticCrowdTerritoryProjector,
+  projectSyntheticCrowdTerritorySamples,
+  syntheticCrowdTerritorySampleAtOrBefore,
+  SYNTHETIC_CROWD_TERRITORY_SAMPLE_INTERVAL_TURNS,
+  type SyntheticCrowdTerritoryProjector,
+  type SyntheticCrowdTerritorySample,
+  type SyntheticCrowdTerritoryTable,
+} from "./SyntheticCrowdTerritoryProjection";
 export type {
   SyntheticCrowdActivityCurve,
   SyntheticCrowdConfig,

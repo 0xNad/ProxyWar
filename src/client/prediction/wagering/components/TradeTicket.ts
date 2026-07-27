@@ -3,7 +3,7 @@ import { customElement, property, state } from "lit/decorators.js";
 import { createRef, ref, type Ref } from "lit/directives/ref.js";
 import { ReplayPremiereServiceError } from "src/client/ReplayPremiereRuntime";
 import { MIN_STAKE, maxStake } from "src/prediction/types";
-import { quoteBuy, quoteSell, type TradeQuote } from "../marketMath";
+import { minTradeableStake, quoteBuy, quoteSell, type TradeQuote } from "../marketMath";
 import { validateBuyDraft, validateSellDraft } from "../validate";
 import type { MarketSeatOption, MarketState, TradeSide } from "../types";
 import "./MarketBankrollBadge";
@@ -88,9 +88,26 @@ export class PremiereTradeTicket extends LitElement {
     limitPrice: number,
   ) => Promise<void>;
 
-  @state() private draftSeatId: string | null = null;
-  @state() private draftSide: TradeSide = "buy";
-  @state() private draftAmountText = "";
+  /**
+   * Draft order state — seat/side/amount — is CONTROLLED from the parent
+   * (`PremiereBettingOverlay`), not owned here. That overlay instance is
+   * created once and lives for the whole page session; THIS element does
+   * not — `renderBody()` swaps to an entirely different template (and
+   * back) whenever the premiere's state briefly isn't "playing"/
+   * "checkpoint" (e.g. a transient connection-loss screen that self-heals
+   * on reload), which tears this custom element down and rebuilds it from
+   * scratch. Owning the draft as local `@state` meant that teardown wiped
+   * whatever the trader had already picked or typed. Keeping the draft on
+   * the parent instead means a ticket rebuild just re-renders the same
+   * values back in — the trader's in-progress order survives.
+   */
+  @property({ attribute: false }) draftSeatId: string | null = null;
+  @property({ attribute: false }) draftSide: TradeSide = "buy";
+  @property({ attribute: false }) draftAmountText = "";
+  @property({ attribute: false }) onDraftSeatChange?: (seatId: string) => void;
+  @property({ attribute: false }) onDraftSideChange?: (side: TradeSide) => void;
+  @property({ attribute: false }) onDraftAmountChange?: (text: string) => void;
+
   @state() private submitting = false;
   @state() private submitError: string | null = null;
   private submitButtonRef: Ref<HTMLButtonElement> = createRef();
@@ -169,7 +186,7 @@ export class PremiereTradeTicket extends LitElement {
     this.submitError = null;
     try {
       await this.onTrade?.(seatId, this.draftSide, amount, quote.suggestedLimitPrice);
-      this.draftAmountText = "";
+      this.onDraftAmountChange?.("");
     } catch (error) {
       this.submitError = describeTradeError(error);
     } finally {
@@ -266,7 +283,7 @@ export class PremiereTradeTicket extends LitElement {
                 type="button"
                 aria-pressed=${selected}
                 @click=${() => {
-                  this.draftSeatId = seat.seatId;
+                  this.onDraftSeatChange?.(seat.seatId);
                   this.submitError = null;
                 }}
                 class="flex items-center justify-between gap-1.5 rounded-md border px-2.5 py-1.5 text-left text-sm outline-none transition-colors focus-visible:ring-2 focus-visible:ring-accent ${selected
@@ -293,7 +310,14 @@ export class PremiereTradeTicket extends LitElement {
     const quote = this.currentQuote();
     const quickAmounts =
       this.draftSide === "buy"
-        ? [MIN_STAKE, 50, 100, maxStake(bankroll)]
+        ? [
+            seatId !== null && this.market !== null
+              ? minTradeableStake(this.market, seatId)
+              : MIN_STAKE,
+            50,
+            100,
+            maxStake(bankroll),
+          ]
         : seatId !== null
           ? [this.heldShares(seatId)]
           : [];
@@ -314,7 +338,7 @@ export class PremiereTradeTicket extends LitElement {
                 type="button"
                 aria-pressed=${this.draftSide === side}
                 @click=${() => {
-                  this.draftSide = side;
+                  this.onDraftSideChange?.(side);
                   this.submitError = null;
                 }}
                 class="flex-1 px-3 py-1.5 text-sm font-semibold capitalize outline-none transition-colors focus-visible:ring-2 focus-visible:ring-accent ${this
@@ -341,7 +365,7 @@ export class PremiereTradeTicket extends LitElement {
               step="1"
               .value=${this.draftAmountText}
               @input=${(event: Event) => {
-                this.draftAmountText = (event.target as HTMLInputElement).value;
+                this.onDraftAmountChange?.((event.target as HTMLInputElement).value);
                 this.submitError = null;
               }}
               class="w-full rounded-md border border-line bg-surface-2 px-3 py-1.5 pr-9 font-mono text-base tabular-nums text-ink outline-none focus-visible:border-accent focus-visible:ring-2 focus-visible:ring-accent"
@@ -362,7 +386,7 @@ export class PremiereTradeTicket extends LitElement {
                 <button
                   type="button"
                   @click=${() => {
-                    this.draftAmountText = String(amount);
+                    this.onDraftAmountChange?.(String(amount));
                     this.submitError = null;
                   }}
                   class="rounded-full border px-2.5 py-1 text-xs font-medium transition-colors outline-none focus-visible:ring-2 focus-visible:ring-accent ${active

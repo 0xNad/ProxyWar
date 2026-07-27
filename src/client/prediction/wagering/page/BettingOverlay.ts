@@ -64,6 +64,20 @@ export class PremiereBettingOverlay extends LitElement {
   ) => Promise<void>;
 
   @state() private sheetOverride: boolean | null = null;
+  /**
+   * The trader's in-progress order — seat/side/amount — lives here, not on
+   * `<premiere-trade-ticket>` itself. This overlay element is created once
+   * by `mountBettingOverlay` and never recreated for the life of the page;
+   * the ticket underneath it is not — `renderBody()` swaps to a different
+   * template (and back) whenever `model.state` briefly isn't "playing"/
+   * "checkpoint" (e.g. a transient connection-loss screen that self-heals
+   * on reload), which tears the ticket down and rebuilds it. Owning the
+   * draft up here means that rebuild just re-renders the same values back
+   * into the new ticket instance instead of losing them.
+   */
+  @state() private draftSeatId: string | null = null;
+  @state() private draftSide: TradeSide = "buy";
+  @state() private draftAmountText = "";
   private previousModelState: ReplayPremierePublicState | null = null;
 
   createRenderRoot() {
@@ -416,6 +430,18 @@ export class PremiereBettingOverlay extends LitElement {
           .bankroll=${this.bankroll}
           ?loading=${this.market === null && this.marketLoadError === null}
           load-error=${this.marketLoadError ?? nothing}
+          .draftSeatId=${this.draftSeatId}
+          .draftSide=${this.draftSide}
+          .draftAmountText=${this.draftAmountText}
+          .onDraftSeatChange=${(seatId: string) => {
+            this.draftSeatId = seatId;
+          }}
+          .onDraftSideChange=${(side: TradeSide) => {
+            this.draftSide = side;
+          }}
+          .onDraftAmountChange=${(text: string) => {
+            this.draftAmountText = text;
+          }}
           .onTrade=${(seatId: string, side: TradeSide, amount: number, limitPrice: number) =>
             this.onTrade?.(seatId, side, amount, limitPrice) ?? Promise.resolve()}
         ></premiere-trade-ticket>

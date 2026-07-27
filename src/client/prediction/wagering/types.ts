@@ -1,18 +1,18 @@
 /**
  * LMSR prediction market — client view types.
  *
- * Sits on top of the EXISTING sealed replay-premiere checkpoint flow
- * (`ReplayPremiereOverlay.ts` / `ReplayPremiereRuntime.ts`): the window that
- * already gates free predictions is reused verbatim to gate trading. Per
- * Main's pivot, this replaces the earlier pari-mutuel "one stake per
- * checkpoint" model with ONE continuous market for the whole premiere
- * (confirmed with PariServer): every seat trades as a share priced 0..100
- * (= implied probability) from market creation through reveal, players may
- * buy AND sell whenever a checkpoint window is open (frozen in the gap
- * between checkpoints, tradeable again at the next one), and price moves
- * with order flow (real trades plus a server-side synthetic crowd). At
- * checkpoint 2 a participant sees checkpoint 1's position mark-to-market —
- * up or down — and decides to press, cut, or ride; that unrealized P&L is
+ * Sits alongside the existing sealed replay-premiere checkpoint flow
+ * (`ReplayPremiereOverlay.ts` / `ReplayPremiereRuntime.ts`), but trading
+ * itself is NOT checkpoint-gated. Per Main's pivot, this replaces the
+ * earlier pari-mutuel "one stake per checkpoint" model with ONE continuous
+ * market for the whole premiere (confirmed with PariServer): every seat
+ * trades as a share priced 0..100 (= implied probability) from market
+ * creation through reveal, players may buy AND sell at any point while the
+ * premiere is live — checkpoints are content beats the UI highlights, they
+ * never pause or gate the market (see `BettingOverlay.ts`) — and price
+ * moves with order flow (real trades plus a server-side synthetic crowd).
+ * At checkpoint 2 a participant sees checkpoint 1's position mark-to-market
+ * — up or down — and decides to press, cut, or ride; that unrealized P&L is
  * load-bearing UI, not decoration. Holding the winning outcome to
  * settlement pays 100 chips/share. See the pricing math in `lmsr.ts` /
  * `marketMath.ts`.
@@ -66,9 +66,10 @@ export interface MarketPosition {
  * recomputes `prices` for display, only for a draft-trade preview. Pushed
  * fresh as other participants (and the synthetic crowd) trade — the caller
  * feeds fresh snapshots in; this type carries no staleness of its own.
- * Whether trading is currently ALLOWED (checkpoint window open vs. the gap
- * between checkpoints vs. post-reveal) is read from the checkpoint's own
- * `state`, not from here.
+ * Whether trading is currently ALLOWED (premiere live vs. pre-market vs.
+ * post-reveal settled) is read from the overlay's own `model.state`, not
+ * from here — never gated by any per-checkpoint window (see
+ * `BettingOverlay.ts`).
  */
 export interface MarketState {
   readonly outcomeSeatIds: readonly string[];
@@ -97,7 +98,7 @@ export interface MarketState {
   readonly balance: number | null;
 }
 
-/** Outbound request to trade at an open checkpoint window. */
+/** Outbound request to trade on the premiere's one continuous live market — not gated to any checkpoint window. */
 export interface TradeRequest {
   readonly seatId: string;
   readonly side: TradeSide;

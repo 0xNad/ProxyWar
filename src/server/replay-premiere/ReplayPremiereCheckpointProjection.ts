@@ -346,7 +346,7 @@ export async function projectReplayPremiereCheckpointOptionsWithGameRunner(optio
   ) as unknown as ReplayPremiereCheckpointProjection["checkpoints"];
 }
 
-async function strictGateBoundTurns(
+export async function strictGateBoundTurns(
   gate: VerifiedPremiereEligibilityGate,
   drafts: readonly PremiereChunkDraft[],
   throughSequence: number,

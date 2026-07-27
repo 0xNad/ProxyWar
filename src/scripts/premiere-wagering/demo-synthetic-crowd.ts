@@ -2,10 +2,24 @@
 /**
  * CLI: runs the synthetic-bettor crowd against a small, self-contained,
  * in-memory premiere so a human can watch the LMSR odds actually move in
- * real time. This is demo/tester scaffolding — see the header of
- * `SyntheticCrowdSimulator.ts` for why it exists and why it must stay off
- * in anything resembling production. Nothing in the running product calls
- * this script; it is a standalone proof a tester runs by hand.
+ * real time, without booting the full HTTP server/replay stack. This
+ * script itself is standalone tester scaffolding — nothing in the running
+ * product imports or invokes this FILE, and it never has.
+ *
+ * That is a narrower claim than it used to be: the simulator this script
+ * drives (`SyntheticCrowdSimulator`) is no longer demo-only. It is now
+ * wired into the real product via `SyntheticCrowdLiveDriver`
+ * (`server/replay-premiere/wagering/simulation/SyntheticCrowdLiveDriver.ts`),
+ * started by `ReplayPremiereStartup.ts` whenever a premiere is assembled
+ * with `PROXYWAR_SYNTHETIC_CROWD_ENABLED=1` (requires wagering also on) —
+ * see `RUNBOOK.md`. That is the real, end-to-end way to watch the crowd
+ * trade against an actual live premiere and server.
+ *
+ * This script still earns its keep as a lighter-weight, standalone
+ * diagnostic: a deterministic, seeded sanity check of the crowd/LMSR
+ * pricing math alone, in-process, with no server, no browser, and no
+ * premiere admission pipeline required — useful for quickly eyeballing
+ * persona/pricing behavior while iterating on the simulator itself.
  *
  *   npm run premiere-wagering:demo-crowd
  *   npm run premiere-wagering:demo-crowd -- --seed=42 --count=12 --duration=20

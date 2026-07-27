@@ -87,10 +87,15 @@ function buyCost(market: ReplayPremiereMarket, outcome: number, shares: number):
   return Math.max(1, roundChips(raw));
 }
 
-/** Credits a sell of `shares` on `outcomeIndex` would return (>= 0). */
+/**
+ * Credits a sell of `shares` on `outcomeIndex` would return (>= 1 for >= 1
+ * share — floored the SAME as `buyCost`, not at 0; see that function's
+ * neighbor in the client's `marketMath.ts` for the full "no house edge"
+ * round-trip reasoning this floor exists to preserve).
+ */
 function sellProceeds(market: ReplayPremiereMarket, outcome: number, shares: number): number {
   const raw = -SHARE_PAYOUT * lmsrCostOfTrade(market.q, market.b, outcome, -shares);
-  return Math.max(0, roundChips(raw));
+  return Math.max(1, roundChips(raw));
 }
 
 export function sharesHeld(market: ReplayPremiereMarket, participantId: string, seatId: string): number {

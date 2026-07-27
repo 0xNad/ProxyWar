@@ -839,10 +839,59 @@ describe("ReplayPremiereNetwork", () => {
     expect(expectedTarget).toBeLessThan(199);
   });
 
-  it("never trips catch-up inside the designed presentation trail", async () => {
-    // The steady-state trail (one chunk span, 45s) is intentional lag; a
-    // viewer within the threshold must keep smooth pacing — this was the
-    // 2026-07-22 freeze/burst regression (2s threshold vs 45s spans).
+  it("seeks a fresh join straight to the trailed frontier instead of pacing real-time from turn 0", async () => {
+    // A join with nothing dispatched yet has no smooth playback to protect:
+    // pacing turn 0 forward in lockstep with the live match's own real-time
+    // clock never closes a gap it started with (a joiner 80s in would need
+    // 80 real seconds — during which the live match plays on another 80s).
+    // The old convenience threshold below only makes sense for a viewer who
+    // has already dispatched something; a fresh join always seeks straight
+    // to the trailed frontier, regardless of how far behind that is.
+    const chunk = await buildChunk({
+      index: 0,
+      records: records(...Array.from({ length: 200 }, (_, index) => index)),
+      previousChunkHash: null,
+    });
+    const playback = new ReplayPremierePlaybackController(PREMIERE_ID);
+    const eventTypes: string[] = [];
+    const catchUps: number[] = [];
+    playback.subscribe((event) => {
+      eventTypes.push(event.type);
+      if (event.type === "catch-up") catchUps.push(event.targetSequence);
+    });
+    const { network } = controller(
+      queuedFetch(
+        jsonResponse(await bootstrap()),
+        jsonResponse(
+          await manifest([chunk], {
+            authoritativeElapsedMs: 80_000,
+            serverNow: new Date(
+              Date.parse(STARTED_AT) + 80_000 + 5_000,
+            ).toISOString(),
+          }),
+        ),
+        jsonResponse(chunk),
+      ) as unknown as typeof fetch,
+      { onReady: vi.fn() },
+      playback,
+    );
+    await network.syncOnce();
+    expect(eventTypes).toEqual(["batch", "catch-up"]);
+    const frontierOffset = 199 * 500;
+    const expectedTarget = Math.floor(
+      (frontierOffset - PREMIERE_PRESENTATION_TRAIL_MS) / 500,
+    );
+    expect(catchUps).toEqual([expectedTarget]);
+  });
+
+  it("keeps smooth pacing for an already-playing viewer within the catch-up threshold", async () => {
+    // Sibling to the fresh-join test above: once something has actually
+    // been dispatched (steady state established), ordinary clock/offset
+    // jitter under the threshold must NOT trip catch-up — this was the
+    // 2026-07-22 freeze/burst regression (2s threshold vs 45s spans). The
+    // viewer here has genuinely not yet reached the ideal trailed
+    // position (dispatched 70, trailed target 109), but the remaining gap
+    // is still within the threshold's tolerance, so no new request fires.
     const chunk = await buildChunk({
       index: 0,
       records: records(...Array.from({ length: 200 }, (_, index) => index)),
@@ -863,12 +912,29 @@ describe("ReplayPremiereNetwork", () => {
           }),
         ),
         jsonResponse(chunk),
+        jsonResponse(
+          await manifest([chunk], {
+            authoritativeElapsedMs: 80_000,
+            serverNow: new Date(
+              Date.parse(STARTED_AT) + 80_000 + 5_000,
+            ).toISOString(),
+          }),
+        ),
       ) as unknown as typeof fetch,
       { onReady: vi.fn() },
       playback,
     );
     await network.syncOnce();
-    expect(eventTypes).toEqual(["batch"]);
+    for (let sequence = 0; sequence <= 70; sequence += 1) {
+      playback.acknowledgeDispatchedRecord({
+        sequence,
+        presentationOffsetMs: sequence * 500,
+        turn: { turnNumber: sequence, intents: [] },
+      });
+    }
+    eventTypes.length = 0;
+    await network.syncOnce();
+    expect(eventTypes.filter((type) => type === "catch-up")).toEqual([]);
   });
 
   it("catches a viewer 78s behind to the checkpoint's retained 45s trail", async () => {
@@ -1023,8 +1089,13 @@ describe("ReplayPremiereNetwork", () => {
     });
     await network.syncOnce();
 
-    // With 30s left, retain 15s before the boundary rather than teleporting.
-    expect(catchUps).toEqual([3]);
+    // Tick 1 is a fresh join (nothing dispatched yet, no checkpoint open):
+    // it seeks straight to the general trailed target (2) before any
+    // checkpoint-specific retention math is even in play. With 30s left on
+    // the checkpoint, tick 2 then retains 15s before the boundary rather
+    // than teleporting, superseding that general target with the more
+    // urgent checkpoint-specific one (3).
+    expect(catchUps).toEqual([2, 3]);
     playback.acknowledgeDispatchedRecord({
       sequence: 1,
       presentationOffsetMs: checkpointRecords[1].presentationOffsetMs,
@@ -1044,7 +1115,7 @@ describe("ReplayPremiereNetwork", () => {
 
     // At the 15s usable-window floor, the adaptive target is the immutable
     // boundary itself, never any released sequence beyond it.
-    expect(catchUps).toEqual([3, 4]);
+    expect(catchUps).toEqual([2, 3, 4]);
     expect(catchUps.at(-1)).toBe(checkpoint.sequence);
   });
 

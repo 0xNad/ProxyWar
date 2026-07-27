@@ -130,6 +130,7 @@ import { ReplayPremiereArchivedClipPromoter } from "../server/replay-premiere/Re
 import { ReplayPremiereArchiveStore } from "../server/replay-premiere/ReplayPremiereArchiveIndex";
 import { createReplayPremiereArchiveRouter } from "../server/replay-premiere/ReplayPremiereArchiveRouter";
 import { DeterministicReplayPremiereCheckpointProjector } from "../server/replay-premiere/ReplayPremiereCheckpointProjection";
+import { DeterministicSyntheticCrowdTerritoryProjector } from "../server/replay-premiere/wagering/simulation";
 import {
   createReplayPremiereTrustedProxyAddressResolver,
   REPLAY_PREMIERE_LOOPBACK_PROXY_ADDRESSES,
@@ -297,6 +298,9 @@ const replayPremiereProduction = await startReplayPremiereProduction({
   checkpointProjector: new DeterministicReplayPremiereCheckpointProjector(
     path.join(process.cwd(), "resources", "maps"),
   ),
+  territoryProjector: new DeterministicSyntheticCrowdTerritoryProjector(
+    path.join(process.cwd(), "resources", "maps"),
+  ),
   archiveStore: replayPremiereArchiveStore,
   archivedClipPromoter: replayPremiereArchivedClipPromoter,
   reclamationExcludedPremiereIds: replayPremiereReclaimExclusions,
@@ -306,7 +310,8 @@ const replayPremiereProduction = await startReplayPremiereProduction({
   // Leave bounded launch headroom for the remaining initialization and bind.
   maxStartupMs: 8_000,
   // Play money only, off by default. PROXYWAR_WAGERING_ENABLED=1 turns on
-  // pari-mutuel wagering on prediction checkpoints for local/dev testing.
+  // the continuous LMSR prediction market for the whole live premiere (not
+  // checkpoint-gated) for local/dev testing.
   wageringEnabled: envFlag("PROXYWAR_WAGERING_ENABLED"),
   // Deterministic, seeded synthetic bettors that keep a thin local/dev
   // market legible for demos/tester sessions. Requires PROXYWAR_WAGERING_ENABLED=1
@@ -2406,9 +2411,26 @@ for (const replayRoute of [
   "/proxywar-replay/:runID",
   "/openfront-replay/:runID",
 ]) {
-  app.get(replayRoute, (req, res) => {
+  app.get(replayRoute, async (req, res) => {
     const runID = String(req.params.runID);
     if (!isSafeProxyWarArtifactSegment(runID)) {
+      res.status(404).send("AI league replay record not found.");
+      return;
+    }
+    // This is a bare redirect to the canonical /ai-league-replay/<runID>
+    // URL — it must never issue that redirect for a run that doesn't
+    // actually exist. A redirect from a supposedly-nonexistent alias is
+    // indistinguishable, to any external prober (including the Replay
+    // Premiere admission leak audit, which deliberately fetches an
+    // `alternate_source_url` candidate with `redirect: "error"` and
+    // expects a clean 404 for one that shouldn't resolve), from a real
+    // leak: proof the run is reachable somewhere. Same existence check
+    // `/ai-league-replay/:runID`'s own handler already uses.
+    const gameRecordPath = path.resolve(runsRootDir, runID, "game-record.json");
+    if (
+      !isInsideRoot(gameRecordPath, runsRootDir) ||
+      !(await publicReplayRecordIsRenderable(gameRecordPath))
+    ) {
       res.status(404).send("AI league replay record not found.");
       return;
     }

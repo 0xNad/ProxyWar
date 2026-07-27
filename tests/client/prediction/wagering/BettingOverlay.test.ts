@@ -155,3 +155,115 @@ describe("premiere-betting-overlay failure messaging", () => {
     el.remove();
   });
 });
+
+describe("premiere-betting-overlay trade draft survives poll refreshes and ticket rebuilds", () => {
+  const POLICIES: ReplayPremiereOverlayModel["policies"] = [
+    {
+      seatId: "seat-a",
+      displayName: "Nation A",
+      policyIdentity: { namespace: "local_manifest", manifestName: "a", declaredVersion: "v1", manifestSha256: "sha", contentSha256: "sha" },
+    },
+  ];
+
+  it("keeps seat/side/amount when the ticket subtree is torn down and rebuilt (e.g. a transient connection-loss state that recovers)", async () => {
+    const el = mount();
+    el.model = model({ state: "playing", policies: POLICIES });
+    el.market = market(null);
+    await el.updateComplete;
+
+    const ticket = el.querySelector("premiere-trade-ticket");
+    if (!ticket) throw new Error("ticket not rendered");
+    await (ticket as unknown as { updateComplete: Promise<unknown> }).updateComplete;
+
+    const sellButton = [...ticket.querySelectorAll("button")].find(
+      (b) => b.textContent?.trim().toLowerCase() === "sell",
+    );
+    sellButton?.click();
+    await (ticket as unknown as { updateComplete: Promise<unknown> }).updateComplete;
+
+    const seatButton = [...ticket.querySelectorAll("button")].find((b) =>
+      b.textContent?.includes("Nation A"),
+    );
+    seatButton?.click();
+    await (ticket as unknown as { updateComplete: Promise<unknown> }).updateComplete;
+
+    const input = ticket.querySelector<HTMLInputElement>('input[type="number"]');
+    if (!input) throw new Error("amount input not rendered");
+    input.value = "7";
+    input.dispatchEvent(new Event("input"));
+    await (ticket as unknown as { updateComplete: Promise<unknown> }).updateComplete;
+
+    // Simulate the exact remount trigger: `model.state` briefly reports a
+    // non-live state (e.g. the self-healing "runtime_failure" connection
+    // blip) — `renderBody()` swaps to a completely different template,
+    // which tears down `<premiere-trade-ticket>` — then recovers.
+    el.model = model({ state: "failed", failureCode: "runtime_failure" });
+    await el.updateComplete;
+    expect(el.querySelector("premiere-trade-ticket")).toBeNull();
+
+    el.model = model({ state: "playing", policies: POLICIES });
+    await el.updateComplete;
+
+    const ticketAfter = el.querySelector("premiere-trade-ticket");
+    if (!ticketAfter) throw new Error("ticket not rebuilt");
+    await (ticketAfter as unknown as { updateComplete: Promise<unknown> }).updateComplete;
+
+    // A brand-new DOM node — but the draft survives because it lives on
+    // the overlay (created once, never rebuilt), not on the ticket.
+    expect(ticketAfter).not.toBe(ticket);
+    const sellAfter = [...ticketAfter.querySelectorAll("button")].find(
+      (b) => b.textContent?.trim().toLowerCase() === "sell",
+    );
+    expect(sellAfter?.getAttribute("aria-pressed")).toBe("true");
+    const seatAfter = [...ticketAfter.querySelectorAll("button")].find((b) =>
+      b.textContent?.includes("Nation A"),
+    );
+    expect(seatAfter?.getAttribute("aria-pressed")).toBe("true");
+    const inputAfter = ticketAfter.querySelector<HTMLInputElement>('input[type="number"]');
+    expect(inputAfter?.value).toBe("7");
+
+    el.remove();
+  });
+
+  it("preserves seat/amount, DOM node identity and focus across ordinary market/bankroll poll refreshes", async () => {
+    const el = mount();
+    el.model = model({ state: "playing", policies: POLICIES });
+    el.market = market(null);
+    el.bankroll = 1000;
+    await el.updateComplete;
+
+    const ticket = el.querySelector("premiere-trade-ticket");
+    if (!ticket) throw new Error("ticket not rendered");
+    await (ticket as unknown as { updateComplete: Promise<unknown> }).updateComplete;
+
+    const seatButton = [...ticket.querySelectorAll("button")].find((b) =>
+      b.textContent?.includes("Nation A"),
+    );
+    seatButton?.click();
+    await (ticket as unknown as { updateComplete: Promise<unknown> }).updateComplete;
+
+    const input = ticket.querySelector<HTMLInputElement>('input[type="number"]');
+    if (!input) throw new Error("amount input not rendered");
+    input.focus();
+    input.value = "42";
+    input.dispatchEvent(new Event("input"));
+    await (ticket as unknown as { updateComplete: Promise<unknown> }).updateComplete;
+
+    // Several fresh `MarketState` snapshots, exactly like
+    // `BettingPremiereMarketController.applyMarket` on its 2.5s poll.
+    for (let i = 0; i < 3; i++) {
+      el.market = market(null);
+      el.bankroll = 1000 - i;
+      await el.updateComplete;
+    }
+
+    const ticketAfter = el.querySelector("premiere-trade-ticket");
+    expect(ticketAfter).toBe(ticket);
+    const inputAfter = ticketAfter?.querySelector<HTMLInputElement>('input[type="number"]');
+    expect(inputAfter).toBe(input);
+    expect(inputAfter?.value).toBe("42");
+    expect(document.activeElement).toBe(input);
+
+    el.remove();
+  });
+});

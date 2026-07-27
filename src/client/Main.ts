@@ -58,6 +58,7 @@ import {
 import {
   finishReplayLoadingScreen,
   holdReplayLoadingScreenUntilFirstFrame,
+  JOIN_SYNC_TIMEOUT_MS,
   REPLAY_LOADING_SLOW_TIMEOUT_MS,
   runReplayStartup,
   setReplayLoadingProgress,
@@ -945,6 +946,13 @@ class Client {
         veilSlowTimer = null;
       }
     };
+    let joinSyncTimeoutTimer: ReturnType<typeof setTimeout> | null = null;
+    const clearJoinSyncTimeout = () => {
+      if (joinSyncTimeoutTimer !== null) {
+        clearTimeout(joinSyncTimeoutTimer);
+        joinSyncTimeoutTimer = null;
+      }
+    };
     const onVeilReplayError = () => {
       if (veilFinished) return;
       veilFinished = true;
@@ -968,6 +976,7 @@ class Client {
     const finishVeil = () => {
       if (veilFinished) return;
       veilFinished = true;
+      clearJoinSyncTimeout();
       releaseVeilHold();
       setReplayLoadingProgress(null);
       finishReplayLoadingScreen();
@@ -994,6 +1003,16 @@ class Client {
           if (!veilFinished) {
             clearVeilSlowTimer();
             showReplayLoadingScreen("replay_premiere.joining_live");
+            // Independent of the (now-cleared) slow-load timer above: a
+            // join that never converges must still surface Retry/Back
+            // rather than hang indefinitely with nothing reachable. Left
+            // running (not `veilFinished`-gated) so a join that genuinely
+            // finishes late still lifts the veil normally afterward.
+            clearJoinSyncTimeout();
+            joinSyncTimeoutTimer = setTimeout(() => {
+              joinSyncTimeoutTimer = null;
+              if (!veilFinished) showReplayLoadingFailure();
+            }, JOIN_SYNC_TIMEOUT_MS);
           }
           return;
         }
@@ -1068,6 +1087,7 @@ class Client {
     const cleanupAttempt = () => {
       if (!active) return;
       active = false;
+      clearJoinSyncTimeout();
       runtime.dispose();
       if (this.replayPremiereRuntime === runtime) {
         this.replayPremiereRuntime = null;
@@ -1126,6 +1146,13 @@ class Client {
         veilSlowTimer = null;
       }
     };
+    let joinSyncTimeoutTimer: ReturnType<typeof setTimeout> | null = null;
+    const clearJoinSyncTimeout = () => {
+      if (joinSyncTimeoutTimer !== null) {
+        clearTimeout(joinSyncTimeoutTimer);
+        joinSyncTimeoutTimer = null;
+      }
+    };
     const onVeilReplayError = () => {
       if (veilFinished) return;
       veilFinished = true;
@@ -1149,6 +1176,7 @@ class Client {
     const finishVeil = () => {
       if (veilFinished) return;
       veilFinished = true;
+      clearJoinSyncTimeout();
       releaseVeilHold();
       setReplayLoadingProgress(null);
       finishReplayLoadingScreen();
@@ -1171,6 +1199,14 @@ class Client {
           if (!veilFinished) {
             clearVeilSlowTimer();
             showReplayLoadingScreen("replay_premiere.joining_live");
+            // See openReplayPremiere's identical wiring: independent of
+            // the (now-cleared) slow-load timer, and left running so a
+            // join that genuinely finishes late still lifts normally.
+            clearJoinSyncTimeout();
+            joinSyncTimeoutTimer = setTimeout(() => {
+              joinSyncTimeoutTimer = null;
+              if (!veilFinished) showReplayLoadingFailure();
+            }, JOIN_SYNC_TIMEOUT_MS);
           }
           return;
         }
@@ -1242,6 +1278,7 @@ class Client {
     const cleanupAttempt = () => {
       if (!active) return;
       active = false;
+      clearJoinSyncTimeout();
       handle.dispose();
       if (this.replayPremiereRuntime === handle.runtime) {
         this.replayPremiereRuntime = null;

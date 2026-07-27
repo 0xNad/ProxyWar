@@ -7,6 +7,18 @@ const REPLAY_FRAME_EVENT = "ai-league-replay-frame";
 const REPLAY_ERROR_EVENT = "ai-league-replay-load-error";
 
 export const REPLAY_LOADING_SLOW_TIMEOUT_MS = 45_000;
+/**
+ * How long a live join is allowed to sit in "Joining live…" with no
+ * convergence signal before recovery options (Retry / Back to league)
+ * surface. Independent of `REPLAY_LOADING_SLOW_TIMEOUT_MS`: that timer is
+ * cleared the moment join-sync begins (see `Main.ts`'s veil handling), so
+ * without a dedicated bound here a join that never converges has no
+ * escape at all — an indefinite spinner with nothing reachable. Generous
+ * enough that a real, still-progressing catch-up under heavy load is not
+ * mistaken for a stuck one; a genuinely converging join clears this by
+ * reaching `onJoinSync`'s "complete" state long before it fires.
+ */
+export const JOIN_SYNC_TIMEOUT_MS = 60_000;
 
 export type ReplayLoadingMessageKey =
   | "ai_league_replay.loading_replay"
@@ -36,10 +48,12 @@ export function showReplayLoadingScreen(
   if (retry !== null) {
     retry.hidden = true;
   }
-  const back = screen.querySelector<HTMLElement>("[data-replay-loading-back]");
-  if (back !== null) {
-    back.hidden = true;
-  }
+  // The back-to-league escape stays reachable for the ENTIRE loading
+  // sequence, not just after a confirmed failure — an indefinite wait
+  // with nothing focusable but a status region is a dead end for keyboard
+  // users regardless of what eventually goes wrong (or doesn't resolve at
+  // all). Retry stays hidden until there is something real to retry.
+  ensureBackLinkVisible(screen);
   setReplayLoadingProgress(null);
 
   document.getElementById("proxywar-coworld-splash")?.remove();
@@ -135,16 +149,7 @@ export function showReplayLoadingFailure(): HTMLElement {
       translated === "ai_league_replay.retry" ? "" : translated;
     retry.focus();
   }
-  const back = screen.querySelector<HTMLAnchorElement>(
-    "[data-replay-loading-back]",
-  );
-  if (back !== null) {
-    back.hidden = false;
-    back.dataset.i18n = "ai_league_replay.back_to_league";
-    const translated = translateText("ai_league_replay.back_to_league");
-    back.textContent =
-      translated === "ai_league_replay.back_to_league" ? "" : translated;
-  }
+  ensureBackLinkVisible(screen);
   return screen;
 }
 
@@ -194,7 +199,6 @@ function ensureReplayLoadingScreen(): HTMLElement {
   const back = document.createElement("a");
   back.href = "/league";
   back.dataset.replayLoadingBack = "";
-  back.hidden = true;
 
   actions.append(retry, back);
   content.append(spinner, message, progress, actions);
@@ -220,6 +224,24 @@ function ensureProgressElement(screen: HTMLElement): void {
   } else {
     screen.append(progress);
   }
+}
+
+// Always reachable for the entire loading sequence (see
+// `showReplayLoadingScreen`'s call site) — labels/unhides the back-to-
+// league link whether it came from `ensureReplayLoadingScreen`'s freshly
+// created DOM or was adopted from the static pre-hydration veil in
+// `index.html` (which ships `hidden` for a pre-JS-boot instant, same
+// reasoning as `ensureProgressElement` above).
+function ensureBackLinkVisible(screen: HTMLElement): void {
+  const back = screen.querySelector<HTMLAnchorElement>(
+    "[data-replay-loading-back]",
+  );
+  if (back === null) return;
+  back.hidden = false;
+  back.dataset.i18n = "ai_league_replay.back_to_league";
+  const translated = translateText("ai_league_replay.back_to_league");
+  back.textContent =
+    translated === "ai_league_replay.back_to_league" ? "" : translated;
 }
 
 function bindRetry(screen: HTMLElement): void {

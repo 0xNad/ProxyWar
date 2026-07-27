@@ -28,6 +28,26 @@ function mount<T extends HTMLElement>(tag: string): T {
   return el;
 }
 
+/**
+ * The trade ticket is a controlled component — draft seat/side/amount
+ * live on the parent (`PremiereBettingOverlay` in production) and flow
+ * back in as properties. This wires a minimal self-controlled harness so
+ * these tests can drive it the same way a real parent does.
+ */
+function mountTicket(): PremiereTradeTicket {
+  const el = mount<PremiereTradeTicket>("premiere-trade-ticket");
+  el.onDraftSeatChange = (seatId) => {
+    el.draftSeatId = seatId;
+  };
+  el.onDraftSideChange = (side) => {
+    el.draftSide = side;
+  };
+  el.onDraftAmountChange = (text) => {
+    el.draftAmountText = text;
+  };
+  return el;
+}
+
 /** Drains pending microtasks — deterministic, not a real-time wait. */
 async function flushMicrotasks(times = 10): Promise<void> {
   for (let i = 0; i < times; i++) await Promise.resolve();
@@ -261,7 +281,7 @@ describe("premiere-market-settlement", () => {
 
 describe("premiere-trade-ticket", () => {
   it("renders a loading state", async () => {
-    const el = mount<PremiereTradeTicket>("premiere-trade-ticket");
+    const el = mountTicket();
     el.loading = true;
     await el.updateComplete;
     expect(el.querySelector('[role="status"]')?.textContent).toContain(
@@ -270,7 +290,7 @@ describe("premiere-trade-ticket", () => {
   });
 
   it("renders an explicit error state", async () => {
-    const el = mount<PremiereTradeTicket>("premiere-trade-ticket");
+    const el = mountTicket();
     el.loadError = "Could not reach the server.";
     await el.updateComplete;
     expect(el.querySelector('[role="alert"]')?.textContent).toContain(
@@ -279,7 +299,7 @@ describe("premiere-trade-ticket", () => {
   });
 
   it("shows a closed message with no form when the window isn't open", async () => {
-    const el = mount<PremiereTradeTicket>("premiere-trade-ticket");
+    const el = mountTicket();
     el.seats = SEATS;
     el.market = market();
     el.windowOpen = false;
@@ -289,7 +309,7 @@ describe("premiere-trade-ticket", () => {
   });
 
   it("blocks submit with a visible error when no seat is chosen", async () => {
-    const el = mount<PremiereTradeTicket>("premiere-trade-ticket");
+    const el = mountTicket();
     el.seats = SEATS;
     el.market = market();
     el.windowOpen = true;
@@ -311,7 +331,7 @@ describe("premiere-trade-ticket", () => {
   });
 
   it("rejects a budget below MIN_STAKE client-side, without calling onTrade", async () => {
-    const el = mount<PremiereTradeTicket>("premiere-trade-ticket");
+    const el = mountTicket();
     el.seats = SEATS;
     el.market = market();
     el.windowOpen = true;
@@ -340,8 +360,42 @@ describe("premiere-trade-ticket", () => {
     expect(onTrade).not.toHaveBeenCalled();
   });
 
+  it("the minimum quick-pick preset actually buys a share, instead of the flat 10cr preset that reliably failed once the book moved off a fresh open", async () => {
+    const el = mountTicket();
+    el.seats = SEATS;
+    // Off a fresh 25/25 open, seat-a here prices at 55% — its first share
+    // costs well over the old flat 10cr preset.
+    el.market = market();
+    el.windowOpen = true;
+    el.bankroll = 1000;
+    const onTrade = vi.fn().mockResolvedValue(undefined);
+    el.onTrade = onTrade;
+    await el.updateComplete;
+
+    clickSeat(el, "Nation A");
+    await el.updateComplete;
+
+    const quickPickButtons = [...el.querySelectorAll("button")].filter((b) =>
+      /^[\d,]+$/.test(b.textContent?.trim() ?? ""),
+    );
+    expect(quickPickButtons.length).toBeGreaterThan(0);
+    const minPreset = quickPickButtons[0];
+    expect(Number(minPreset.textContent?.trim().replace(/,/g, ""))).toBeGreaterThan(10);
+    minPreset.click();
+    await el.updateComplete;
+
+    const submit = [...el.querySelectorAll("button")].find((b) =>
+      b.textContent?.includes("Buy ~"),
+    );
+    submit?.click();
+    await el.updateComplete;
+
+    expect(el.querySelector('[role="alert"]')).toBeNull();
+    expect(onTrade).toHaveBeenCalledTimes(1);
+  });
+
   it("shows a live buy quote that recomputes as the draft amount changes, and prices it into the submit label", async () => {
-    const el = mount<PremiereTradeTicket>("premiere-trade-ticket");
+    const el = mountTicket();
     el.seats = SEATS;
     el.market = market({ q: [0, 0], b: 100, prices: { "seat-a": 50, "seat-b": 50 } });
     el.windowOpen = true;
@@ -370,7 +424,7 @@ describe("premiere-trade-ticket", () => {
   });
 
   it("rejects selling more shares than held, without calling onTrade", async () => {
-    const el = mount<PremiereTradeTicket>("premiere-trade-ticket");
+    const el = mountTicket();
     el.seats = SEATS;
     el.market = market({
       positions: [
@@ -408,7 +462,7 @@ describe("premiere-trade-ticket", () => {
   });
 
   it("rapid double-clicking submit only applies one order", async () => {
-    const el = mount<PremiereTradeTicket>("premiere-trade-ticket");
+    const el = mountTicket();
     el.seats = SEATS;
     el.market = market({ q: [0, 0], b: 100, prices: { "seat-a": 50, "seat-b": 50 } });
     el.windowOpen = true;
@@ -449,7 +503,7 @@ describe("premiere-trade-ticket", () => {
   });
 
   it("labels the amount input for assistive tech, and the label swaps with the side", async () => {
-    const el = mount<PremiereTradeTicket>("premiere-trade-ticket");
+    const el = mountTicket();
     el.seats = SEATS;
     el.market = market();
     el.windowOpen = true;
@@ -470,7 +524,7 @@ describe("premiere-trade-ticket", () => {
   });
 
   it("restores focus to the submit button after a successful trade, instead of leaving it at <body>", async () => {
-    const el = mount<PremiereTradeTicket>("premiere-trade-ticket");
+    const el = mountTicket();
     el.seats = SEATS;
     el.market = market({ q: [0, 0], b: 100, prices: { "seat-a": 50, "seat-b": 50 } });
     el.windowOpen = true;
@@ -501,7 +555,7 @@ describe("premiere-trade-ticket", () => {
   });
 
   it("restores focus to the submit button after a rejected trade, with a human-readable message (not the raw error)", async () => {
-    const el = mount<PremiereTradeTicket>("premiere-trade-ticket");
+    const el = mountTicket();
     el.seats = SEATS;
     el.market = market({ q: [0, 0], b: 100, prices: { "seat-a": 50, "seat-b": 50 } });
     el.windowOpen = true;
@@ -538,7 +592,7 @@ describe("premiere-trade-ticket", () => {
   });
 
   it("maps service-error statuses to actionable sentences instead of the raw coarse code", async () => {
-    const el = mount<PremiereTradeTicket>("premiere-trade-ticket");
+    const el = mountTicket();
     el.seats = SEATS;
     el.market = market({ q: [0, 0], b: 100, prices: { "seat-a": 50, "seat-b": 50 } });
     el.windowOpen = true;

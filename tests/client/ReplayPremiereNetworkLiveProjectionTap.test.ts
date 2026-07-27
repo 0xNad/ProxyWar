@@ -261,4 +261,119 @@ describe("ReplayPremiereNetworkController content-source=tap", () => {
       );
     }
   });
+
+  it("seeks a late join straight to the trailed frontier — never paces turn 0 forward against the live clock", async () => {
+    // The regression this pins: a client joining well after match start
+    // used to only request forward catch-up once steady-state drift
+    // exceeded a 90s convenience threshold measured from a `dispatched`
+    // baseline of zero — so a fresh join within that window instead paced
+    // turn 0 forward in lockstep with the SAME real-time clock the live
+    // match itself advances on, a gap that mathematically never closes
+    // (every real second spent catching up is a real second the match
+    // plays further ahead). This test joins directly at 150s in — a single
+    // sync tick, no earlier samples — and proves the very first tick
+    // requests a forward catch-up close to the live frontier rather than
+    // leaving the viewer to free-run from sequence 0.
+    const fixture = await verifiedRealtimeLongPublicationFixture(root);
+    const catalog = await ReplayPremiereAdmissionCatalog.open({
+      privateStateRoot: path.join(root, "private"),
+      servedRoots: [path.join(root, "served")],
+    });
+    try {
+      await catalog.writeVerifiedAdmission({
+        gate: fixture.gate,
+        verification: fixture.verificationOptions,
+        chunkBuildLimits: fixture.chunkBuildLimits,
+        collectorLimits: COLLECTOR_LIMITS,
+      });
+    } finally {
+      await catalog.close();
+    }
+
+    const context = startupContext();
+    const started = await startReplayPremiereProduction({
+      ...context,
+      privateStateRoot: path.join(root, "private"),
+      servedRoots: [path.join(root, "served")],
+      wageringEnabled: true,
+    });
+    services.push(started.service);
+
+    const app = express();
+    app.use(
+      createReplayPremiereRouter({
+        registry: context.httpRegistry,
+        security: context.security,
+        resolveClientAddress: () => "127.0.0.1",
+      }),
+    );
+    const server = http.createServer(app);
+    await new Promise<void>((resolve) =>
+      server.listen(0, "127.0.0.1", resolve),
+    );
+    const address = server.address();
+    if (address === null || typeof address === "string") {
+      throw new Error("test server did not bind an address");
+    }
+    const baseUrl = `http://127.0.0.1:${address.port}`;
+
+    try {
+      const fetchImpl: typeof fetch = async (input, init) => {
+        const relative = typeof input === "string" ? input : input.toString();
+        const absolute = relative.startsWith("http")
+          ? relative
+          : `${baseUrl}${relative}`;
+        return fetch(absolute, init);
+      };
+
+      const playback = new ReplayPremierePlaybackController(PREMIERE_ID);
+      const catchUps: number[] = [];
+      playback.subscribe((event) => {
+        if (event.type === "catch-up") catchUps.push(event.targetSequence);
+      });
+      const callbacks: ReplayPremiereNetworkCallbacks = { onReady: () => {} };
+      const network = new ReplayPremiereNetworkController({
+        premiereId: PREMIERE_ID,
+        playback,
+        callbacks,
+        fetchImpl,
+        contentSource: "tap",
+      });
+
+      // A true late join: skip straight to 60s in — a gap the OLD
+      // dispatched-baseline-zero threshold check (90s) would NOT have
+      // treated as "behind enough" to catch up on, leaving the viewer to
+      // free-run turn 0 forward in lockstep with the live clock forever.
+      // One sync tick — no earlier samples ever establish a `dispatched`
+      // baseline.
+      vi.setSystemTime(NOW.getTime() + 60_000);
+      await network.syncOnce();
+
+      const state = playback.state();
+      expect(state.releasedThroughSequence).not.toBeNull();
+      const released = state.releasedThroughSequence!;
+      expect(released).toBeGreaterThan(400);
+
+      // The fix: a catch-up was requested on this very first tick despite
+      // the 60s gap sitting under the old 90s convenience threshold — a
+      // fresh join never defers to it.
+      expect(catchUps.length).toBeGreaterThan(0);
+      const target = catchUps[0];
+      // Anti-read-ahead, proven at the seek itself: the target can only
+      // ever move toward the present, never past what the network has
+      // actually verified as released (itself already clock-bound — see
+      // the sibling test in this file).
+      expect(target).toBeLessThanOrEqual(released);
+      // And it lands close to the live frontier — within one presentation
+      // trail's worth of records — not near the start of the match.
+      const oneTrailRecords = Math.ceil(45_000 / PREMIERE_REAL_TURN_INTERVAL_MS);
+      expect(released - target).toBeLessThanOrEqual(oneTrailRecords);
+    } finally {
+      await new Promise<void>((resolve, reject) =>
+        server.close((error) =>
+          error === undefined ? resolve() : reject(error),
+        ),
+      );
+    }
+  });
 });

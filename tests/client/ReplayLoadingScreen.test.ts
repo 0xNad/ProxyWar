@@ -187,7 +187,7 @@ describe("ReplayLoadingScreen", () => {
     ).toBe("Replay unavailable.");
   });
 
-  it("hides recovery actions when a new replay attempt starts", () => {
+  it("hides retry but keeps an escape route when a new replay attempt starts", () => {
     showReplayLoadingFailure();
 
     showReplayLoadingScreen();
@@ -198,9 +198,12 @@ describe("ReplayLoadingScreen", () => {
       screen?.querySelector<HTMLButtonElement>("[data-replay-loading-retry]")
         ?.hidden,
     ).toBe(true);
+    // Back-to-league stays reachable for the whole loading sequence: a join can
+    // hang without ever raising an error, so gating the only escape on a failure
+    // state left keyboard users with nothing focusable but the status region.
     expect(
       screen?.querySelector<HTMLAnchorElement>("[data-replay-loading-back]")
         ?.hidden,
-    ).toBe(true);
+    ).toBe(false);
   });
 });

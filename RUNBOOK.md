@@ -111,11 +111,16 @@ fully clean (`git status --porcelain` empty, `git diff HEAD` empty) for the whol
 of the run** — commit or stash any WIP first (a plain `git commit` is safe; it doesn't
 discard anything, and PariServer/MarketSim's own uncommitted work is unaffected on disk).
 
-Turn count/turn-interval matter: with wagering on, the server enforces `maxPresentationSpanMs
-<= 1000ms` per chunk and a **hard 128-chunk ceiling**, so `turnCount * turnIntervalMs` must
-stay `<= ~128,000ms`. A real 4-agent FFA on Asia/Compact with alliances disabled took
-10,800 turns to produce a winner in this session — use `--playback-turn-interval-ms=10` to
-keep nominal duration at 108s (well under the ceiling). Real observed run:
+Turn count/turn-interval matter: the server enforces a **hard 128-chunk ceiling**
+per premiere (`REPLAY_PREMIERE_MAX_CHUNK_COUNT`, `maxPresentationSpanMs <=
+60,000ms` per chunk by default) regardless of whether wagering is on — an
+earlier wagering-specific 1s-per-chunk ceiling existed for one session and was
+reverted; there is no wagering-specific cap anymore. So `turnCount *
+turnIntervalMs` just needs to stay well under `128 * 60,000ms` (~2h08m) for the
+default chunking to apply. A real 4-agent FFA on Asia/Compact with alliances
+disabled took 10,800 turns to produce a winner in this session — use
+`--playback-turn-interval-ms=10` to keep nominal duration at 108s, which also
+keeps the demo brisk to watch. Real observed run:
 
 ```sh
 mkdir -p /tmp/proxywar-premiere-staging
@@ -249,15 +254,16 @@ GAME_ENV=dev PROXYWAR_PUBLIC_URL=http://127.0.0.1:8787 npx tsx src/scripts/repla
   --eligibility-file=/private/tmp/proxywar-premiere-admit-inputs/eligibility.json \
   --definition-file=/private/tmp/proxywar-premiere-admit-inputs/definition.json \
   --deployment-origin=http://127.0.0.1:8787 \
-  --nonce-file=/private/tmp/proxywar-premiere-admit-inputs/nonce.bin \
-  --max-presentation-span-ms=1000
+  --nonce-file=/private/tmp/proxywar-premiere-admit-inputs/nonce.bin
 ```
 
-`--max-presentation-span-ms=1000` is a **new optional CLI flag added in this session**
-(`replay-premiere-admit.ts`); without it the script's chunk build always uses its 45s
-default span, which exceeds wagering's hard 1s ceiling and gets the whole admission
-rejected at server startup with `wagering_presentation_span_exceeded_ceiling`. Omit this
-flag entirely for non-wagering admissions (default behavior is unchanged).
+`--max-presentation-span-ms` is an optional CLI flag on `replay-premiere-admit.ts`.
+**It is no longer required for wagering.** A wagering-specific 1s-per-chunk ceiling
+existed for one session and was reverted; `WAGERING_MAX_PRESENTATION_SPAN_MS` and the
+`wagering_presentation_span_exceeded_ceiling` error code no longer exist in the code.
+Wagering premieres now use the same general `REPLAY_PREMIERE_MAX_CHUNK_COUNT` (128) and
+60s-span ceiling as everything else, so the script's 45s default span is fine and the
+flag can be omitted entirely. Pass it only if you deliberately want finer chunking.
 
 Real successful output from this session:
 
@@ -307,14 +313,18 @@ an earlier admitted instance of this same flow (before it aged out — see §9):
 
 ## 10. Enabling the crowd (MarketSim)
 
-Not available yet. `PROXYWAR_WAGERING_ENABLED=1` turns on the market itself, but the
-synthetic-bettor simulator (`MarketSim`'s slice, referenced in
-`src/server/replay-premiere/wagering/simulation/**`) had not landed a runnable CLI/toggle
-as of this session — `npm run premiere-wagering:demo-crowd` exists in `package.json` but
-targets the deleted/superseded pari-mutuel `src/prediction/dev/playthrough.ts`-era design,
-not the LMSR engine; it was not exercised here. **Gap, not worked around**: verify the
-market moves under your own trades in the meantime (§11); MarketSim's own harness should
-supersede this note once it lands.
+`PROXYWAR_WAGERING_ENABLED=1` turns on the market; `PROXYWAR_SYNTHETIC_CROWD_ENABLED=1`
+(requires wagering on) additionally starts `SyntheticCrowdLiveDriver`
+(`src/server/replay-premiere/wagering/simulation/**`) against the real running
+premiere — see §13.5/§13.6 below for the exact env block and verification. That
+is the real, end-to-end way to see the crowd trade.
+
+Separately, `npm run premiere-wagering:demo-crowd` (`src/scripts/premiere-wagering/
+demo-synthetic-crowd.ts`) runs the same LMSR crowd/pricing math standalone,
+in-process, against a small self-contained fixture — no server, no browser.
+Useful as a fast sanity check of the pricing math alone; it does not exercise
+the live driver, the HTTP layer, or the real premiere/order pipeline, so it is
+not a substitute for §13.5/§13.6 below.
 
 ## 11. Client route wiring (PariServer's real routes)
 

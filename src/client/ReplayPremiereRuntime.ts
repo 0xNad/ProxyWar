@@ -417,11 +417,12 @@ const predictionResponseSchema = z
 // Prediction market — LMSR (Logarithmic Market Scoring Rule), server-
 // authoritative, ONE continuous market per premiere (not per checkpoint,
 // per Main's pivot off the earlier pari-mutuel design). Every seat trades
-// as an integer-chip share priced 0..100 while a checkpoint window is
-// open (frozen in the gap between checkpoints, tradeable again at the
-// next one); price moves with real trades plus a server-side synthetic
-// crowd. One settlement at reveal: winning shares pay 100/share. The
-// client only mirrors and validates the shape — see
+// as an integer-chip share priced 0..100 for the whole live phase of the
+// premiere — NOT gated to a checkpoint window; checkpoints are content
+// beats the UI highlights, they gate nothing (see `BettingOverlay.ts`).
+// Price moves with real trades plus a server-side synthetic crowd. One
+// settlement at reveal: winning shares pay 100/share. The client only
+// mirrors and validates the shape — see
 // `src/client/prediction/wagering/lmsr.ts` for the pure pricing math this
 // mirrors.
 // ---------------------------------------------------------------------------
@@ -2175,7 +2176,13 @@ export class ReplayPremiereServiceClient {
       (checkpoint.opensAt === null) !== (checkpoint.closesAt === null) ||
       (checkpoint.opensAt !== null &&
         checkpoint.closesAt !== null &&
-        Date.parse(checkpoint.closesAt) <= Date.parse(checkpoint.opensAt)) ||
+        // Strictly `<`, not `<=`: a checkpoint whose pause was bypassed
+        // entirely (wagering premieres never gate on checkpoints — see
+        // `ReplayPremiereInteractions.ts`'s "close without ever opening"
+        // transition) is reported by the server with `opensAt === closesAt`
+        // — a genuine, intentional zero-duration window, not a lie. Only a
+        // window that closes BEFORE it opens is actually impossible.
+        Date.parse(checkpoint.closesAt) < Date.parse(checkpoint.opensAt)) ||
       (prediction !== null &&
         (prediction.premiereId !== binding.premiereId ||
           prediction.participantId !== participantId ||
@@ -2743,26 +2750,6 @@ export class ReplayPremiereRuntimeController {
       return;
     }
     this.latestManifest = manifest;
-    // TEMP DIAGNOSTIC (LateJoin session) — removed before this session ends.
-    {
-      const pb = this.playback.state();
-      // eslint-disable-next-line no-console
-      console.log(
-        "[LATEJOIN-DIAG]",
-        JSON.stringify({
-          wallMs: Date.now(),
-          authoritativeElapsedMs:
-            "authoritativeElapsedMs" in manifest
-              ? manifest.authoritativeElapsedMs
-              : null,
-          released: pb.releasedThroughSequence,
-          dispatched: pb.lastDispatchedSequence,
-          joinSyncTarget: this.joinSyncTargetSequence,
-          joinSyncSettled: this.joinSyncSettled,
-          latestFrameTurn: this.latestFrame?.turnNumber ?? null,
-        }),
-      );
-    }
     this.reconcileCheckpointDeadline(manifest);
     this.recovery = null;
     if (
@@ -2884,18 +2871,6 @@ export class ReplayPremiereRuntimeController {
         this.latestFrame?.sequence === undefined ||
         frame.sequence >= this.latestFrame.sequence);
     if (!bookkeepingConsistent) {
-      // eslint-disable-next-line no-console
-      console.log(
-        "[LATEJOIN-DIAG-DRIFT]",
-        JSON.stringify({
-          wallMs: Date.now(),
-          frameSequence: frame.sequence,
-          released: playbackState.releasedThroughSequence,
-          dispatched: playbackState.lastDispatchedSequence,
-          latestFrameSequence: this.latestFrame?.sequence ?? null,
-          strikes: this.frameBookkeepingDriftStrikes + 1,
-        }),
-      );
       this.frameBookkeepingDriftStrikes += 1;
       if (
         this.frameBookkeepingDriftStrikes >=
