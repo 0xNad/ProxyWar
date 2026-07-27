@@ -158,7 +158,7 @@ async function createGuest(baseUrl: string): Promise<Guest> {
       Origin: ORIGIN,
       "X-Idempotency-Key": `idem_session_${Math.random().toString(36).slice(2).padEnd(16, "0")}`,
     },
-    body: JSON.stringify({ visible: true, observedSequence: 0 }),
+    body: JSON.stringify({ visible: true, observedSequence: -1 }),
   });
   expect(response.status).toBe(201);
   const setCookie = response.headers.get("set-cookie");
