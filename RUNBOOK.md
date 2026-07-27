@@ -994,6 +994,37 @@ browser. A process restart is required after setting/changing any of
 these (same as every other env var this server reads at boot — no
 hot-reload path exists for any of them).
 
+### 15.3a On the hosted deploy, write two files — don't set env vars
+
+On `bet.proxywar.xyz` the origin's environment is built by
+`cycle-premiere.sh`'s `start_origin`, which is re-run by the autocycler on
+every match. Exporting a variable in your shell would be lost at the next
+cycle, so **both values are read from files** and the script passes them in:
+
+```sh
+printf '%s' '<the Client ID>'     > ~/.proxywar-deploy/github-oauth-client-id
+printf '%s' '<the Client Secret>' > ~/.proxywar-deploy/github-oauth-client-secret
+chmod 600 ~/.proxywar-deploy/github-oauth-client-secret
+```
+
+That is the whole configuration step. `§15.3`'s three environment variables
+are still what the *server* reads; these two files are how this deploy
+supplies them. Note the asymmetry: `PROXYWAR_GITHUB_OAUTH_CLIENT_ID` is
+passed by **value** because it is public, while the secret is passed as
+`..._CLIENT_SECRET_FILE` — a **path** — so it never enters the process
+environment where `ps eww <pid>` would expose it.
+
+**The `chmod 600` is enforced, not advisory.** The resolver `lstat`s the file
+and refuses it unless it is a regular file, owned by the running uid, with no
+group or world bits — a symlink to a world-readable file is rejected too. A
+loose secret fails closed exactly like a missing one, so if sign-in stays
+invisible after registering, check the mode before anything else.
+
+Takes effect on the next cycle (~25 min), or immediately if you restart the
+origin. Until then the three routes are genuinely absent and the client
+renders no sign-in control — that is the correct unconfigured state, not a
+fault.
+
 ### 15.4 Verifying after registration
 
 ```sh
