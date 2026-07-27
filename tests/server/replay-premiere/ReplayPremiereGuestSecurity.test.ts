@@ -226,4 +226,29 @@ describe("ReplayPremiereGuestSecurity", () => {
     expect(security.identifyGuest(undefined)).toBeNull();
     expect(security.identifyGuest(`${guestCookie}x`)).toBeNull();
   });
+
+  it("mintGuestCookieForParticipant issues a signed, verifiable cookie for a PRE-DETERMINED participant id, rejecting anything malformed", () => {
+    const { security } = harness();
+    const canonicalParticipantId = `guest_${"c".repeat(32)}`;
+    const cookieHeaderValue = security
+      .mintGuestCookieForParticipant(canonicalParticipantId)
+      .split(";", 1)[0];
+
+    // The browser's OWN existing cookie is irrelevant — this is the one
+    // deliberate way to hand it someone else's identity.
+    const priorGuestCookie = security.bootstrap(undefined).setCookie ?? "";
+    expect(priorGuestCookie.split(";", 1)[0]).not.toBe(cookieHeaderValue);
+
+    const identified = security.identifyGuest(cookieHeaderValue);
+    expect(identified?.participantId).toBe(canonicalParticipantId);
+
+    // A malformed or non-guest id is refused outright — never silently
+    // truncated or coerced.
+    expect(() =>
+      security.mintGuestCookieForParticipant("not-a-guest-id"),
+    ).toThrow(ReplayPremiereError);
+    expect(() =>
+      security.mintGuestCookieForParticipant(`share_${"a".repeat(32)}`),
+    ).toThrow(ReplayPremiereError);
+  });
 });

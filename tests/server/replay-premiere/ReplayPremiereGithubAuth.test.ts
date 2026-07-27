@@ -10,7 +10,9 @@ import {
 import { ReplayPremierePointsLedger } from "../../../src/server/replay-premiere/points/ReplayPremierePointsLedger";
 import {
   createReplayPremiereGithubAuthRouter,
+  createReplayPremiereGithubOAuthClient,
   resolveReplayPremiereGithubOAuthConfig,
+  type ReplayPremiereCurrentMarketIdentityGuard,
   type ReplayPremiereGithubOAuthClient,
 } from "../../../src/server/replay-premiere/ReplayPremiereGithubAuth";
 import { ReplayPremiereGuestSecurity } from "../../../src/server/replay-premiere/ReplayPremiereGuestSecurity";
@@ -127,28 +129,35 @@ function cookieHeader(pairs: Record<string, string>): string {
 
 describe("ReplayPremiereGithubAuth", () => {
   let root: string;
+  let buildCount: number;
 
   beforeEach(async () => {
     const realTemporaryRoot = await fs.realpath(os.tmpdir());
     root = await fs.mkdtemp(path.join(realTemporaryRoot, "github-auth-"));
+    buildCount = 0;
   });
 
   afterEach(async () => {
     await fs.rm(root, { recursive: true, force: true });
   });
 
-  async function buildServer(oauthState: StubOAuthState): Promise<{
+  async function buildServerWithOAuthClient(
+    oauthClient: ReplayPremiereGithubOAuthClient,
+    resolveCurrentMarketIdentityGuard: () => ReplayPremiereCurrentMarketIdentityGuard | null = () =>
+      null,
+  ): Promise<{
     baseUrl: string;
     close: () => Promise<void>;
     identityLinkStore: ReplayPremiereIdentityLinkStore;
     ledger: ReplayPremierePointsLedger;
     errors: Array<{ code: string; error: unknown }>;
   }> {
+    buildCount += 1;
     const ledger = await ReplayPremierePointsLedger.open(
-      path.join(root, "points-ledger"),
+      path.join(root, `points-ledger-${buildCount}`),
     );
     const identityLinkStore = await ReplayPremiereIdentityLinkStore.open(
-      path.join(root, "identity-links"),
+      path.join(root, `identity-links-${buildCount}`),
       pointsMergerFor(ledger),
     );
     const security = guestSecurityHarness();
@@ -158,8 +167,9 @@ describe("ReplayPremiereGithubAuth", () => {
       createReplayPremiereGithubAuthRouter({
         security,
         identityLinkStore,
-        oauthClient: stubOAuthClient(oauthState),
+        oauthClient,
         publicOrigin: origin,
+        resolveCurrentMarketIdentityGuard,
         onOperatorError: (code, error) => errors.push({ code, error }),
       }),
     );
@@ -173,11 +183,22 @@ describe("ReplayPremiereGithubAuth", () => {
     }
     return {
       baseUrl: `http://127.0.0.1:${address.port}`,
-      close: () => new Promise((resolve) => server.close(() => resolve())),
+      close: () => new Promise<void>((resolve) => server.close(() => resolve())),
       identityLinkStore,
       ledger,
       errors,
     };
+  }
+
+  async function buildServer(
+    oauthState: StubOAuthState,
+    resolveCurrentMarketIdentityGuard: () => ReplayPremiereCurrentMarketIdentityGuard | null = () =>
+      null,
+  ) {
+    return buildServerWithOAuthClient(
+      stubOAuthClient(oauthState),
+      resolveCurrentMarketIdentityGuard,
+    );
   }
 
   test("full happy path: start mints link-intent + guest cookies, callback links, status reports the verified identity", async () => {
@@ -435,6 +456,263 @@ describe("ReplayPremiereGithubAuth", () => {
       expect(identityB.canonicalParticipantId).toBe(participantA);
     } finally {
       await close();
+    }
+  });
+
+  function fakeMarketIdentityGuard(safe: boolean): ReplayPremiereCurrentMarketIdentityGuard & {
+    retireCalls: string[];
+    releaseCalls: string[];
+  } {
+    const retireCalls: string[] = [];
+    const releaseCalls: string[] = [];
+    return {
+      retireCalls,
+      releaseCalls,
+      async retireForIdentityLinkIfSafe(participantId: string) {
+        retireCalls.push(participantId);
+        return { safe };
+      },
+      async releaseIdentityLinkRetirement(participantId: string) {
+        releaseCalls.push(participantId);
+      },
+    };
+  }
+
+  test("a real identity swap mints a guest cookie for the CANONICAL id, and keeps the source id retired from trading", async () => {
+    const oauthState: StubOAuthState = {
+      tokensByCode: new Map([
+        ["code-a", "token-a"],
+        ["code-b", "token-b"],
+      ]),
+      usersByToken: new Map([
+        ["token-a", { githubUserId: 9, login: "daveey", avatarUrl: null }],
+        ["token-b", { githubUserId: 9, login: "daveey", avatarUrl: null }],
+      ]),
+      exchangeShouldThrow: false,
+      fetchUserShouldThrow: false,
+    };
+    const guard = fakeMarketIdentityGuard(true);
+    const { baseUrl, close } = await buildServer(oauthState, () => guard);
+    try {
+      const startA = await rawGet(baseUrl, "/api/premieres/auth/github/start");
+      const cookiesA = setCookiePairs(startA.headers);
+      const stateA = new URL(startA.headers.location ?? "").searchParams.get(
+        "state",
+      );
+      const participantA = cookiesA.proxywar_premiere_guest.split(".")[1];
+      await rawGet(
+        baseUrl,
+        `/api/premieres/auth/github/callback?code=code-a&state=${stateA}`,
+        cookieHeader(cookiesA),
+      );
+
+      const startB = await rawGet(baseUrl, "/api/premieres/auth/github/start");
+      const cookiesB = setCookiePairs(startB.headers);
+      const stateB = new URL(startB.headers.location ?? "").searchParams.get(
+        "state",
+      );
+      const participantB = cookiesB.proxywar_premiere_guest.split(".")[1];
+      expect(participantB).not.toBe(participantA);
+
+      const linkB = await rawGet(
+        baseUrl,
+        `/api/premieres/auth/github/callback?code=code-b&state=${stateB}`,
+        cookieHeader(cookiesB),
+      );
+      expect(linkB.headers.location).toBe("/bet?github=linked");
+      const cookiesAfterLinkB = setCookiePairs(linkB.headers);
+      // Browser B is handed a guest cookie for A's participant id, not its own.
+      expect(cookiesAfterLinkB.proxywar_premiere_guest.split(".")[1]).toBe(
+        participantA,
+      );
+      // A's own callback is a first-ever link (self-canonical): retired
+      // then immediately released. B's callback is the real swap: retired
+      // and — critically — NEVER released, since B is being replaced by
+      // A's identity and must stay out of trading under its old id.
+      expect(guard.retireCalls).toEqual([participantA, participantB]);
+      expect(guard.releaseCalls).toEqual([participantA]);
+    } finally {
+      await close();
+    }
+  });
+
+  test("a first-ever link that resolves to the browser's OWN id releases the transient retirement — nothing to strand", async () => {
+    const oauthState: StubOAuthState = {
+      tokensByCode: new Map([["good-code", "token-1"]]),
+      usersByToken: new Map([
+        ["token-1", { githubUserId: 55, login: "solo", avatarUrl: null }],
+      ]),
+      exchangeShouldThrow: false,
+      fetchUserShouldThrow: false,
+    };
+    const guard = fakeMarketIdentityGuard(true);
+    const { baseUrl, close } = await buildServer(oauthState, () => guard);
+    try {
+      const start = await rawGet(baseUrl, "/api/premieres/auth/github/start");
+      const cookies = setCookiePairs(start.headers);
+      const state = new URL(start.headers.location ?? "").searchParams.get(
+        "state",
+      );
+      const participant = cookies.proxywar_premiere_guest.split(".")[1];
+      const callback = await rawGet(
+        baseUrl,
+        `/api/premieres/auth/github/callback?code=good-code&state=${state}`,
+        cookieHeader(cookies),
+      );
+      expect(callback.headers.location).toBe("/bet?github=linked");
+      const cookiesAfter = setCookiePairs(callback.headers);
+      expect(cookiesAfter.proxywar_premiere_guest.split(".")[1]).toBe(
+        participant,
+      );
+      // Retired, then immediately released — this id keeps trading as itself.
+      expect(guard.retireCalls).toEqual([participant]);
+      expect(guard.releaseCalls).toEqual([participant]);
+    } finally {
+      await close();
+    }
+  });
+
+  test("a source guest with an active market account is refused with a distinct reason, and nothing is linked or retired", async () => {
+    const oauthState: StubOAuthState = {
+      tokensByCode: new Map([["good-code", "token-1"]]),
+      usersByToken: new Map([
+        ["token-1", { githubUserId: 42, login: "trader", avatarUrl: null }],
+      ]),
+      exchangeShouldThrow: false,
+      fetchUserShouldThrow: false,
+    };
+    const guard = fakeMarketIdentityGuard(false);
+    const { baseUrl, close, identityLinkStore, errors } = await buildServer(
+      oauthState,
+      () => guard,
+    );
+    try {
+      const start = await rawGet(baseUrl, "/api/premieres/auth/github/start");
+      const cookies = setCookiePairs(start.headers);
+      const state = new URL(start.headers.location ?? "").searchParams.get(
+        "state",
+      );
+      const participant = cookies.proxywar_premiere_guest.split(".")[1];
+      const callback = await rawGet(
+        baseUrl,
+        `/api/premieres/auth/github/callback?code=good-code&state=${state}`,
+        cookieHeader(cookies),
+      );
+      // Distinct from the generic `?github=error` banner — testers must
+      // never read this as a bug.
+      expect(callback.headers.location).toBe("/bet?github=active_trade");
+      expect(
+        errors.some(
+          (e) => e.code === "github_auth_active_market_participation",
+        ),
+      ).toBe(true);
+      // The GitHub round trip never even started, and nothing was retired
+      // (there was nothing safe to hold), so release is never called.
+      expect(guard.retireCalls).toEqual([participant]);
+      expect(guard.releaseCalls).toEqual([]);
+      const status = await identityLinkStore.getStatus(participant);
+      expect(status.signedIn).toBe(false);
+    } finally {
+      await close();
+    }
+  });
+
+  test("GitHub unreachable after a safe retirement releases the hold — the browser keeps trading as itself", async () => {
+    const oauthState: StubOAuthState = {
+      tokensByCode: new Map(),
+      usersByToken: new Map(),
+      exchangeShouldThrow: true,
+      fetchUserShouldThrow: false,
+    };
+    const guard = fakeMarketIdentityGuard(true);
+    const { baseUrl, close, identityLinkStore } = await buildServer(
+      oauthState,
+      () => guard,
+    );
+    try {
+      const start = await rawGet(baseUrl, "/api/premieres/auth/github/start");
+      const cookies = setCookiePairs(start.headers);
+      const state = new URL(start.headers.location ?? "").searchParams.get(
+        "state",
+      );
+      const participant = cookies.proxywar_premiere_guest.split(".")[1];
+      const callback = await rawGet(
+        baseUrl,
+        `/api/premieres/auth/github/callback?code=whatever&state=${state}`,
+        cookieHeader(cookies),
+      );
+      expect(callback.headers.location).toBe("/bet?github=error");
+      expect(guard.retireCalls).toEqual([participant]);
+      expect(guard.releaseCalls).toEqual([participant]);
+      const status = await identityLinkStore.getStatus(participant);
+      expect(status.signedIn).toBe(false);
+    } finally {
+      await close();
+    }
+  });
+
+  test("GitHub accepting a connection and never answering times out instead of hanging, and links nothing", async () => {
+    const stallingServer = http.createServer(() => {
+      // Deliberately never respond — GitHub accepting the TCP connection
+      // and then hanging is the real-world failure a rejected fetch
+      // Promise does not exercise.
+    });
+    await new Promise<void>((resolve) =>
+      stallingServer.listen(0, "127.0.0.1", resolve),
+    );
+    const stallingAddress = stallingServer.address();
+    if (stallingAddress === null || typeof stallingAddress === "string") {
+      throw new Error("expected a bound TCP address");
+    }
+    const stallingBaseUrl = `http://127.0.0.1:${stallingAddress.port}`;
+    // A short injected timeout — real production default is 10s; a test
+    // must not stall the suite for it.
+    const oauthClient = createReplayPremiereGithubOAuthClient(
+      { clientId: "client-id", clientSecret: "client-secret" },
+      {
+        PROXYWAR_GITHUB_OAUTH_WEB_BASE_URL: stallingBaseUrl,
+        PROXYWAR_GITHUB_OAUTH_API_BASE_URL: stallingBaseUrl,
+      },
+      50,
+    );
+    const { baseUrl, close, identityLinkStore, errors } =
+      await buildServerWithOAuthClient(oauthClient);
+    try {
+      const start = await rawGet(baseUrl, "/api/premieres/auth/github/start");
+      const location = new URL(start.headers.location ?? "");
+      const state = location.searchParams.get("state") ?? "";
+      const cookies = setCookiePairs(start.headers);
+      const startedAtMs = Date.now();
+      const callback = await rawGet(
+        baseUrl,
+        `/api/premieres/auth/github/callback?code=whatever&state=${state}`,
+        cookieHeader(cookies),
+      );
+      const elapsedMs = Date.now() - startedAtMs;
+      expect(callback.status).toBe(302);
+      expect(callback.headers.location).toBe("/bet?github=error");
+      // Well under the real 10s default, comfortably above the injected
+      // 50ms bound — proves it timed out rather than merely being fast.
+      expect(elapsedMs).toBeLessThan(3_000);
+      expect(
+        errors.some((e) => e.code === "github_auth_code_exchange_failed"),
+      ).toBe(true);
+      const status = await rawGet(
+        baseUrl,
+        "/api/premieres/auth/github/status",
+        cookieHeader(cookies),
+      );
+      const parsed = JSON.parse(status.body) as {
+        identity: { signedIn: boolean; canonicalParticipantId: string };
+      };
+      expect(parsed.identity.signedIn).toBe(false);
+      const directStatus = await identityLinkStore.getStatus(
+        parsed.identity.canonicalParticipantId,
+      );
+      expect(directStatus.signedIn).toBe(false);
+    } finally {
+      await close();
+      await new Promise<void>((resolve) => stallingServer.close(() => resolve()));
     }
   });
 });

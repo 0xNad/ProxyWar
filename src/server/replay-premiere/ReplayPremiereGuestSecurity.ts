@@ -458,6 +458,31 @@ export class ReplayPremiereGuestSecurity {
     };
   }
 
+  /**
+   * Mints a signed guest cookie for a PARTICIPANT ID THE CALLER ALREADY
+   * VERIFIED — the one deliberate way to hand a browser an identity other
+   * than the one it currently holds. Every other cookie this class ever
+   * issues (`bootstrap`/`serializeGuestCookie`) re-serializes whatever id
+   * the SAME request's cookie+CSRF already proved ownership of; this is
+   * the sole exception, scoped narrowly to exactly one caller: the GitHub
+   * OAuth callback, immediately after `ReplayPremiereIdentityLinkStore.
+   * linkOrMerge` returns a verified `canonicalParticipantId`. Never call
+   * this with a value that did not just come out of that verified link —
+   * anything else is handing a browser someone else's identity.
+   */
+  mintGuestCookieForParticipant(participantId: string): string {
+    if (!GUEST_ID_PATTERN.test(participantId)) {
+      throw invalidSecurity("invalid_participant_id");
+    }
+    const now = this.nowChecked();
+    return this.serializeGuestCookie({
+      participantId,
+      createdAt: now.toISOString(),
+      issuedAtMs: now.getTime(),
+      nonce: hex(this.randomBytesChecked(16)),
+    });
+  }
+
   private serializeGuestCookie(guest: ParsedGuestCookie): string {
     const issuedAt = guest.issuedAtMs.toString(36);
     const unsigned = `v1.${guest.participantId}.${issuedAt}.${guest.nonce}`;

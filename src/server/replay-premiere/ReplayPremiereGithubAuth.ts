@@ -17,13 +17,17 @@
  *
  * GitHub is never in the path of a trade: nothing here is on the
  * order/settlement path (see `ReplayPremiereInteractions`), and every
- * handler fails closed with a redirect/JSON error, never a thrown 500,
- * never a hang — GitHub being unreachable degrades ONLY sign-in.
+ * handler fails closed with a redirect/JSON error, never a thrown 500 —
+ * including a GitHub that accepts a connection and then never answers,
+ * bounded by `fetchTimeoutMs` on both the token exchange and the `/user`
+ * fetch (see `createReplayPremiereGithubOAuthClient`). GitHub being
+ * unreachable, slow, or hung degrades ONLY sign-in.
  */
 import express, { type Request, type Response, type Router } from "express";
 import { promises as fs } from "node:fs";
 import { z } from "zod";
 import type {
+  ReplayPremiereGithubLinkResult,
   ReplayPremiereGithubUser,
   ReplayPremiereIdentityLinkStore,
 } from "./points/ReplayPremiereIdentityLinkStore";
@@ -43,6 +47,8 @@ const GITHUB_WEB_BASE_URL_ENV = "PROXYWAR_GITHUB_OAUTH_WEB_BASE_URL" as const;
 const GITHUB_API_BASE_URL_ENV = "PROXYWAR_GITHUB_OAUTH_API_BASE_URL" as const;
 const DEFAULT_GITHUB_WEB_BASE_URL = "https://github.com";
 const DEFAULT_GITHUB_API_BASE_URL = "https://api.github.com";
+/** Bounded wait for the token exchange and `/user` fetch — see `createReplayPremiereGithubOAuthClient`'s `fetchTimeoutMs` param. GitHub accepting a connection and then never answering is a more common real failure than an immediate rejection; without this, the callback (and the browser's tab) would hang indefinitely. */
+const DEFAULT_GITHUB_FETCH_TIMEOUT_MS = 10_000;
 
 export const REPLAY_PREMIERE_GITHUB_AUTH_START_PATH =
   "/api/premieres/auth/github/start" as const;
@@ -146,6 +152,8 @@ const githubUserResponseSchema = z.object({
 export function createReplayPremiereGithubOAuthClient(
   config: ReplayPremiereGithubOAuthConfig,
   environment: Record<string, string | undefined> = process.env,
+  /** Injectable so a test can use a few milliseconds instead of stalling the suite for the real default. */
+  fetchTimeoutMs: number = DEFAULT_GITHUB_FETCH_TIMEOUT_MS,
 ): ReplayPremiereGithubOAuthClient {
   const webBaseUrl = (
     environment[GITHUB_WEB_BASE_URL_ENV]?.trim() || DEFAULT_GITHUB_WEB_BASE_URL
@@ -175,6 +183,7 @@ export function createReplayPremiereGithubOAuthClient(
           code,
           redirect_uri: redirectUri,
         }),
+        signal: AbortSignal.timeout(fetchTimeoutMs),
       });
       if (!response.ok) {
         throw new Error(`github_token_exchange_failed_${response.status}`);
@@ -195,6 +204,7 @@ export function createReplayPremiereGithubOAuthClient(
           Accept: "application/vnd.github+json",
           "User-Agent": "proxywar-betting",
         },
+        signal: AbortSignal.timeout(fetchTimeoutMs),
       });
       if (!response.ok)
         throw new Error(`github_user_fetch_failed_${response.status}`);
@@ -210,6 +220,23 @@ export function createReplayPremiereGithubOAuthClient(
   };
 }
 
+/**
+ * Narrow, duck-typed slice of `ReplayPremiereInteractions` (never imported
+ * directly — no import cycle) the GitHub callback needs to close the
+ * two-tab Sybil race: linking canonicalises identity, but if the browser's
+ * OLD guest id already has its own live market account in the currently
+ * open premiere, swapping its cookie for a canonical one would strand
+ * that account — a live balance nobody can reach, and a second
+ * 1,000-credit grant on the next trade under the new id. See
+ * `ReplayPremiereInteractions.retireForIdentityLinkIfSafe`.
+ */
+export interface ReplayPremiereCurrentMarketIdentityGuard {
+  retireForIdentityLinkIfSafe(
+    participantId: string,
+  ): Promise<{ safe: boolean }>;
+  releaseIdentityLinkRetirement(participantId: string): Promise<void>;
+}
+
 export interface ReplayPremiereGithubAuthRouterOptions {
   readonly security: ReplayPremiereGuestSecurity;
   readonly identityLinkStore: ReplayPremiereIdentityLinkStore;
@@ -219,6 +246,13 @@ export interface ReplayPremiereGithubAuthRouterOptions {
   /** Where a completed (or failed) flow lands the browser — the stable `/bet` entry point by default. */
   readonly returnPath?: string;
   readonly onOperatorError?: (operatorCode: string, error: unknown) => void;
+  /**
+   * Resolved fresh on every callback (never cached): the currently live
+   * premiere's market-identity guard, or `null` when no premiere is
+   * currently registered — nothing to strand, always safe. See
+   * `ReplayPremiereCurrentMarketIdentityGuard`.
+   */
+  readonly resolveCurrentMarketIdentityGuard: () => ReplayPremiereCurrentMarketIdentityGuard | null;
 }
 
 /** Creates the three GitHub sign-in routes. Callers MUST only mount this when {@link resolveReplayPremiereGithubOAuthConfig} returned non-null — there is no internal disabled-state 404 here, matching "unset env means the route doesn't exist" rather than "exists but always fails". */
@@ -272,6 +306,23 @@ export function createReplayPremiereGithubAuthRouter(
         );
         res.redirect(302, `${returnPath}?github=error`);
       };
+      // Distinct from failClosed's generic `?github=error`: this is not a
+      // bug or an outage, it is a deliberate refusal — the client shows a
+      // different, specific message (see GithubSignIn.ts's `active_trade`
+      // banner) so a tester reads it as "come back later", not "broken".
+      const failActiveTrade = (): void => {
+        logError(
+          "github_auth_active_market_participation",
+          new Error("github_auth_active_market_participation"),
+        );
+        res.setHeader(
+          "Set-Cookie",
+          options.security.clearLinkIntentCookieHeader(),
+        );
+        res.redirect(302, `${returnPath}?github=active_trade`);
+      };
+      let marketGuard: ReplayPremiereCurrentMarketIdentityGuard | null = null;
+      let retiredParticipantId: string | null = null;
       try {
         const guest = options.security.identifyGuest(req.headers.cookie);
         if (guest === null) {
@@ -297,6 +348,22 @@ export function createReplayPremiereGithubAuthRouter(
           failClosed("github_auth_code_missing");
           return;
         }
+        // Closes the two-tab Sybil race BEFORE any GitHub round trip: this
+        // runs inside the live premiere's own mutation queue, atomically
+        // with every order, so a concurrent trade under this exact id can
+        // never land after we have decided linking is safe. See
+        // `ReplayPremiereInteractions.retireForIdentityLinkIfSafe`.
+        marketGuard = options.resolveCurrentMarketIdentityGuard();
+        if (marketGuard !== null) {
+          const { safe } = await marketGuard.retireForIdentityLinkIfSafe(
+            guest.participantId,
+          );
+          if (!safe) {
+            failActiveTrade();
+            return;
+          }
+          retiredParticipantId = guest.participantId;
+        }
         let accessToken: string;
         try {
           accessToken = await options.oauthClient.exchangeCodeForToken(
@@ -314,17 +381,54 @@ export function createReplayPremiereGithubAuthRouter(
           failClosed("github_auth_user_fetch_failed", error);
           return;
         }
-        await options.identityLinkStore.linkOrMerge(
-          guest.participantId,
-          githubUser,
-        );
-        res.setHeader(
-          "Set-Cookie",
+        let result: ReplayPremiereGithubLinkResult;
+        try {
+          result = await options.identityLinkStore.linkOrMerge(
+            guest.participantId,
+            githubUser,
+          );
+        } catch (error) {
+          failClosed("github_auth_link_failed", error);
+          return;
+        }
+        if (result.canonicalParticipantId === guest.participantId) {
+          // First-ever link for this browser's own id, becoming its own
+          // canonical: no identity actually changes hands, so the hold
+          // taken above must not stick — this id keeps trading as itself.
+          if (marketGuard !== null && retiredParticipantId !== null) {
+            await marketGuard.releaseIdentityLinkRetirement(
+              retiredParticipantId,
+            );
+          }
+        }
+        // Either way, tracking is done: a real swap must stay retired (do
+        // NOT release it below), and a same-id resolution was just
+        // released above. Clearing this here — success from this point
+        // on — is what tells the `finally` below there is nothing left to
+        // undo.
+        retiredParticipantId = null;
+        res.setHeader("Set-Cookie", [
           options.security.clearLinkIntentCookieHeader(),
-        );
+          options.security.mintGuestCookieForParticipant(
+            result.canonicalParticipantId,
+          ),
+        ]);
         res.redirect(302, `${returnPath}?github=linked`);
       } catch (error) {
         failClosed("github_auth_callback_failed", error);
+      } finally {
+        // Any exit above that did NOT explicitly clear this (every
+        // failure path after retirement) leaves it set — release so this
+        // browser's own id stays tradeable; the link never happened.
+        if (marketGuard !== null && retiredParticipantId !== null) {
+          try {
+            await marketGuard.releaseIdentityLinkRetirement(
+              retiredParticipantId,
+            );
+          } catch (releaseError) {
+            logError("github_auth_retirement_release_failed", releaseError);
+          }
+        }
       }
     },
   );

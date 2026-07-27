@@ -872,6 +872,17 @@ if (replayPremiereGithubOAuthClient !== null) {
       identityLinkStore: replayPremiereIdentityLinkStore,
       oauthClient: replayPremiereGithubOAuthClient,
       publicOrigin: replayPremierePublicOrigin,
+      // "Current premiere" here matches /bet's own definition below
+      // (the most recently registered id) — at most one premiere ever
+      // has an open (unsettled) market at a time in this exhibition
+      // loop, so there is nothing to reconcile across instances.
+      resolveCurrentMarketIdentityGuard: () => {
+        const currentPremiereId = replayPremiereHttpRegistry
+          .premiereIds()
+          .at(-1);
+        if (currentPremiereId === undefined) return null;
+        return replayPremiereHttpRegistry.get(currentPremiereId)?.interactions ?? null;
+      },
       onOperatorError: (operatorCode, error) => {
         console.error(
           `GitHub sign-in ${operatorCode}: ${
@@ -959,7 +970,9 @@ app.get("/bet", (request, response) => {
   // provider's redirect, so nothing else is echoed onward.
   const marker = request.query.github;
   const suffix =
-    marker === "linked" || marker === "error" ? `?github=${marker}` : "";
+    marker === "linked" || marker === "error" || marker === "active_trade"
+      ? `?github=${marker}`
+      : "";
   response.redirect(302, `/bet/${current}${suffix}`);
 });
 app.use(

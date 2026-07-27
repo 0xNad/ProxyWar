@@ -688,6 +688,15 @@ export class ReplayPremiereInteractions {
   private reactionIndex: ReplayPremiereReactionIndex;
   private writesFenced = false;
   private writeFenceDrain: Promise<void> | null = null;
+  /**
+   * Process-local only, deliberately never part of the durable snapshot —
+   * see `retireForIdentityLinkIfSafe`. Correctness only needs this to
+   * outlive the narrow in-flight race it defends against, never a process
+   * restart: the market ledger itself (the thing actually worth
+   * protecting) is untouched either way, so a crash in that vanishing
+   * window loses nothing durable.
+   */
+  private readonly retiredForLinkParticipantIds = new Set<string>();
 
   constructor(options: ReplayPremiereInteractionsOptions) {
     assertPremiereId(options.premiereId);
@@ -1391,6 +1400,14 @@ export class ReplayPremiereInteractions {
       assertParticipantId(options.participantId);
       assertSessionId(options.sessionId);
       assertSeatId(options.seatId);
+      // An identity mid-link-transfer: `retireForIdentityLinkIfSafe`
+      // already observed this exact id had no unsettled participation and
+      // marked it retired, atomically, inside this SAME mutation queue —
+      // so no order admitted afterward can ever land under it again,
+      // closing the two-tab race the retirement exists to prevent.
+      if (this.retiredForLinkParticipantIds.has(options.participantId)) {
+        throw gone("order_rejected_identity_retired");
+      }
       ownedSession(next, options.sessionId, options.participantId);
       const existingTrade = next.trades.find(
         (trade) =>
@@ -1511,6 +1528,93 @@ export class ReplayPremiereInteractions {
         persistenceIdempotencyKey: `interaction:market_order:${options.participantId}:${options.idempotencyKey}`,
       };
     });
+  }
+
+  /**
+   * Atomically decides whether `participantId` — a browser's CURRENT
+   * guest id, about to be handed a DIFFERENT (canonical) cookie by the
+   * GitHub link flow — may safely stop trading as itself, and if so,
+   * retires it in the exact same critical section: this runs inside the
+   * SAME `mutationQueue` `submitMarketOrder` uses (see `mutate`'s
+   * chaining), so a concurrent order already in flight under this id
+   * either fully lands BEFORE this check observes the ledger, or is
+   * rejected AFTER by `submitMarketOrder`'s retired-id guard — never a
+   * window where both a stranding order and the retirement can occur.
+   *
+   * "Safe" means `participantId` has never been granted a ledger entry in
+   * THIS premiere's currently-open market — the exact same signal
+   * settlement uses (`ledgerGranted`, see `recordSettlementPointsIfNeeded`)
+   * to decide who counts as a real trader, deliberately not "holds an
+   * open position": a participant who bought and fully sold out still has
+   * a bankroll that diverged from the starting grant, and would be
+   * silently doubled if allowed to link. A settled market can never
+   * strand anything — the payout already landed — so this is always safe
+   * once `status === "settled"`.
+   *
+   * Retirement itself is the load-bearing half. Without it, an order
+   * admitted microseconds after this call returns `{ safe: true }` would
+   * still create a second, stranded bankroll under the old id — exactly
+   * the hole this whole mechanism exists to close, reached through a
+   * two-tab race instead of two browser profiles. Call
+   * `releaseIdentityLinkRetirement` if the link this retirement was
+   * gating does not end up happening (or resolves back to this SAME id) —
+   * a retirement that outlives its own link permanently strands the
+   * participant out of their own trades.
+   */
+  async retireForIdentityLinkIfSafe(
+    participantId: string,
+  ): Promise<{ safe: boolean }> {
+    assertParticipantId(participantId);
+    this.pendingMutations += 1;
+    const run = async (): Promise<{ safe: boolean }> => {
+      const market = this.state.market;
+      const hasUnsettledParticipation =
+        market !== null &&
+        market.status !== "settled" &&
+        (market.ledgerGranted[participantId] ?? 0) > 0;
+      if (hasUnsettledParticipation) return { safe: false };
+      this.retiredForLinkParticipantIds.add(participantId);
+      return { safe: true };
+    };
+    const result = this.mutationQueue.then(run, run);
+    const tracked = result.finally(() => {
+      this.pendingMutations -= 1;
+    });
+    this.mutationQueue = tracked.then(
+      () => undefined,
+      () => undefined,
+    );
+    return tracked;
+  }
+
+  /**
+   * Reverses a `retireForIdentityLinkIfSafe` retirement that must not
+   * stick — either the GitHub round trip or the identity-store write that
+   * was supposed to follow it failed (the link never happened, so this id
+   * is still exactly who it always was), or it succeeded but resolved
+   * back to this SAME participant id (a browser's first-ever link,
+   * becoming its own canonical: no identity actually changed hands, so
+   * nothing should have been retired). Never call this once a DIFFERENT
+   * canonical cookie has actually been handed to the browser — at that
+   * point the old id staying retired is correct, not a bug. Same
+   * mutation-queue serialization as the retirement itself; a no-op if the
+   * id was never retired.
+   */
+  async releaseIdentityLinkRetirement(participantId: string): Promise<void> {
+    assertParticipantId(participantId);
+    this.pendingMutations += 1;
+    const run = async (): Promise<void> => {
+      this.retiredForLinkParticipantIds.delete(participantId);
+    };
+    const result = this.mutationQueue.then(run, run);
+    const tracked = result.finally(() => {
+      this.pendingMutations -= 1;
+    });
+    this.mutationQueue = tracked.then(
+      () => undefined,
+      () => undefined,
+    );
+    return tracked;
   }
 
   async submitReaction(options: {

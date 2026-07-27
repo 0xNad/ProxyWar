@@ -104,11 +104,21 @@ describe("ReplayPremiereIdentityLinkStore", () => {
       root,
       pointsMergerFor(ledger),
     );
-    await store.linkOrMerge(guestA, { githubUserId: 1, login: "a", avatarUrl: null });
-    await store.linkOrMerge(guestB, { githubUserId: 1, login: "a", avatarUrl: null });
+    await store.linkOrMerge(guestA, {
+      githubUserId: 1,
+      login: "a",
+      avatarUrl: null,
+    });
+    await store.linkOrMerge(guestB, {
+      githubUserId: 1,
+      login: "a",
+      avatarUrl: null,
+    });
     const board = await ledger.readLeaderboard({ viewerParticipantId: guestA });
     expect(board.viewer?.lifetimePoints).toBe(-100); // +200 - 300
-    expect(board.entries.some((entry) => entry.participantId === guestB)).toBe(false);
+    expect(board.entries.some((entry) => entry.participantId === guestB)).toBe(
+      false,
+    );
   });
 
   test("renamed handle: login/avatar refresh on every sign-in, even a no-op re-link", async () => {
@@ -139,8 +149,16 @@ describe("ReplayPremiereIdentityLinkStore", () => {
     const merger = recordingMerger();
     const store = await ReplayPremiereIdentityLinkStore.open(root, merger);
     const [first, second] = await Promise.all([
-      store.linkOrMerge(guestA, { githubUserId: 7, login: "x", avatarUrl: null }),
-      store.linkOrMerge(guestB, { githubUserId: 7, login: "x", avatarUrl: null }),
+      store.linkOrMerge(guestA, {
+        githubUserId: 7,
+        login: "x",
+        avatarUrl: null,
+      }),
+      store.linkOrMerge(guestB, {
+        githubUserId: 7,
+        login: "x",
+        avatarUrl: null,
+      }),
     ]);
     // Exactly one of the two is treated as the original link (merged:
     // false) and the other as the merge (merged: true) — the write queue
@@ -168,13 +186,25 @@ describe("ReplayPremiereIdentityLinkStore", () => {
     const merger = recordingMerger();
     const store = await ReplayPremiereIdentityLinkStore.open(root, merger);
     // guestB links first under githubId 1 (guestA hasn't signed in yet).
-    await store.linkOrMerge(guestB, { githubUserId: 1, login: "b", avatarUrl: null });
+    await store.linkOrMerge(guestB, {
+      githubUserId: 1,
+      login: "b",
+      avatarUrl: null,
+    });
     // guestA later signs in with a DIFFERENT GitHub id first, establishing
     // itself as canonical for githubId 2 — unrelated to githubId 1.
-    await store.linkOrMerge(guestA, { githubUserId: 2, login: "a", avatarUrl: null });
+    await store.linkOrMerge(guestA, {
+      githubUserId: 2,
+      login: "a",
+      avatarUrl: null,
+    });
     // Now guestC signs in with githubId 1 — merges into guestB (githubId
     // 1's existing canonical).
-    await store.linkOrMerge(guestC, { githubUserId: 1, login: "b", avatarUrl: null });
+    await store.linkOrMerge(guestC, {
+      githubUserId: 1,
+      login: "b",
+      avatarUrl: null,
+    });
     expect(await store.resolveCanonicalParticipantId(guestC)).toBe(guestB);
     expect(await store.resolveCanonicalParticipantId(guestB)).toBe(guestB);
   });
@@ -220,5 +250,45 @@ describe("ReplayPremiereIdentityLinkStore", () => {
     const status = await second.getStatus(guestA);
     expect(status.signedIn).toBe(true);
     expect(status.login).toBe("daveey");
+  });
+});
+
+describe("ReplayPremiereIdentityLinkStore corruption handling", () => {
+  let root: string;
+
+  beforeEach(async () => {
+    const realTemporaryRoot = await fs.realpath(os.tmpdir());
+    root = await fs.mkdtemp(
+      path.join(realTemporaryRoot, "identity-link-corrupt-"),
+    );
+  });
+
+  test("refuses to start empty over a readable-but-invalid store, rather than silently forgetting every link", async () => {
+    const merger = recordingMerger();
+    const first = await ReplayPremiereIdentityLinkStore.open(root, merger);
+    await first.linkOrMerge(guestA, {
+      githubUserId: 4242,
+      login: "daveey",
+      avatarUrl: null,
+    });
+
+    // Valid JSON, wrong shape — a truncated write, a hand-edit, a schema
+    // change. Falling through to an empty store would let the next sign-in
+    // save over it and destroy every account link on the box.
+    const files = await fs.readdir(root);
+    const storeFile = files.find((name) => name.includes("identity"));
+    expect(storeFile).toBeDefined();
+    const storePath = path.join(root, storeFile!);
+    await fs.writeFile(storePath, JSON.stringify({ unexpected: "shape" }));
+
+    const second = await ReplayPremiereIdentityLinkStore.open(root, merger);
+    await expect(second.getStatus(guestA)).rejects.toThrow(/unreadable/);
+
+    // And the original bytes are still on disk, recoverable by a human.
+    const after = JSON.parse(await fs.readFile(storePath, "utf8")) as Record<
+      string,
+      unknown
+    >;
+    expect(after).toEqual({ unexpected: "shape" });
   });
 });

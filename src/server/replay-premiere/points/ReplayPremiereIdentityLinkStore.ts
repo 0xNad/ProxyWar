@@ -301,6 +301,13 @@ export class ReplayPremiereIdentityLinkStore {
       const parsed: unknown = JSON.parse(raw);
       const result = linkStoreFileSchema.safeParse(parsed);
       if (result.success) return result.data;
+      // Readable, but not the shape we wrote. Do NOT fall through to an empty
+      // store: the next sign-in would save over it and every account link
+      // would be gone, silently. A missing file is the only thing that
+      // legitimately means "no links yet".
+      throw new Error(
+        `Replay Premiere identity link store is unreadable at ${this.filePath} — refusing to start empty and overwrite it`,
+      );
     } catch (error) {
       if (
         typeof error !== "object" ||

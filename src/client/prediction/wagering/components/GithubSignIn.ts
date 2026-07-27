@@ -40,7 +40,7 @@ export class PremiereGithubSignIn extends LitElement {
   @state() private available = false;
   @state() private loading = true;
   @state() private identity: GithubIdentity | null = null;
-  @state() private banner: "linked" | "error" | null = null;
+  @state() private banner: "linked" | "error" | "active_trade" | null = null;
 
   createRenderRoot() {
     return this;
@@ -52,11 +52,11 @@ export class PremiereGithubSignIn extends LitElement {
     void this.load();
   }
 
-  /** Consumes the `?github=linked|error` marker the callback redirect leaves on `/bet/<id>`, showing it once and scrubbing it from the URL so a reload doesn't repeat it. */
+  /** Consumes the `?github=linked|error|active_trade` marker the callback redirect leaves on `/bet/<id>`, showing it once and scrubbing it from the URL so a reload doesn't repeat it. */
   private consumeReturnBanner(): void {
     const url = new URL(window.location.href);
     const marker = url.searchParams.get("github");
-    if (marker !== "linked" && marker !== "error") return;
+    if (marker !== "linked" && marker !== "error" && marker !== "active_trade") return;
     this.banner = marker;
     url.searchParams.delete("github");
     window.history.replaceState(null, "", `${url.pathname}${url.search}${url.hash}`);
@@ -139,18 +139,25 @@ export class PremiereGithubSignIn extends LitElement {
   }
 
   private renderBanner() {
-    const success = this.banner === "linked";
+    const tone =
+      this.banner === "linked"
+        ? "border-accent/40 bg-accent-soft text-accent-strong"
+        : "border-danger/40 bg-danger/10 text-danger";
+    const message =
+      this.banner === "linked"
+        ? "Signed in with GitHub."
+        : this.banner === "active_trade"
+          ? "You already have an open position this match — sign in before you trade, or after it settles."
+          : "GitHub sign-in failed. Try again.";
     return html`
       <div
         role="status"
         class="pointer-events-none fixed inset-x-0 top-0 z-[54000] flex justify-center px-4 pt-2"
       >
         <p
-          class="pointer-events-auto rounded-md border px-3 py-1.5 text-xs font-semibold shadow-lg ${success
-            ? "border-accent/40 bg-accent-soft text-accent-strong"
-            : "border-danger/40 bg-danger/10 text-danger"}"
+          class="pointer-events-auto rounded-md border px-3 py-1.5 text-xs font-semibold shadow-lg ${tone}"
         >
-          ${success ? "Signed in with GitHub." : "GitHub sign-in failed. Try again."}
+          ${message}
         </p>
       </div>
     `;
