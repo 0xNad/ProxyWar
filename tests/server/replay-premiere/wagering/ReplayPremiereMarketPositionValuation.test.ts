@@ -144,4 +144,5 @@ describe("positionsFor currentValue is the executable liquidation value", () => 
     }).market;
     market = settleMarket({ market, ledger, winnerSeatId: "seat-0" });
     expect(positionsFor(market, "p1")).toEqual([]);
+  });
 });
