@@ -27,7 +27,8 @@
 set -uo pipefail
 
 ORIGIN="https://bet.proxywar.xyz"
-LOCAL_ORIGIN="http://127.0.0.1:8792"
+ORIGIN_PORT="${AUTOCYCLE_ORIGIN_PORT:-8792}"
+LOCAL_ORIGIN="http://127.0.0.1:${ORIGIN_PORT}"
 HERE="$(cd "$(dirname "$0")" && pwd)"
 GRACE_SECONDS="${AUTOCYCLE_GRACE_SECONDS:-240}"
 POLL_SECONDS="${AUTOCYCLE_POLL_SECONDS:-20}"
@@ -59,6 +60,13 @@ origin_reachable() {
   curl -s -o /dev/null --fail -m 10 "${LOCAL_ORIGIN}/league" 2>/dev/null
 }
 
+# True when nothing at all is listening. Distinguishes a cold boot (safe to
+# start: no market exists) from a wedged or restarting origin that may still
+# hold live positions.
+port_is_free() {
+  [ -z "$(lsof -ti tcp:"$ORIGIN_PORT" -sTCP:LISTEN 2>/dev/null || true)" ]
+}
+
 cycle() {
   log "cycling onto a fresh match"
   if (cd "$HERE" && ./cycle-premiere.sh "$LEAD_MIN" >/tmp/pw-bet-autocycle-run.log 2>&1); then
@@ -72,6 +80,7 @@ cycle() {
 log "watching ${LOCAL_ORIGIN}/bet (grace ${GRACE_SECONDS}s, lead ${LEAD_MIN}m)"
 settled_since=""
 empty_polls=0
+down_polls=0
 
 while true; do
   premiere="$(current_premiere)"
@@ -85,10 +94,22 @@ while true; do
         empty_polls=0
         settled_since=""
       fi
+    elif port_is_free; then
+      # Nothing is listening at all - a cold boot, or the origin died. There
+      # is no market here to destroy, so bringing one up is purely additive
+      # and this is the only path that recovers the demo after a reboot.
+      down_polls=$((down_polls + 1))
+      log "origin down and port ${ORIGIN_PORT} free (${down_polls}/${EMPTY_STRIKES})"
+      if [ "$down_polls" -ge "$EMPTY_STRIKES" ]; then
+        cycle
+        down_polls=0
+        settled_since=""
+      fi
     else
-      # Origin itself is down or restarting. Nothing to conclude, and
-      # certainly nothing to destroy.
-      log "origin unreachable - waiting, not cycling"
+      # Something holds the port but is not answering: mid-restart, or wedged.
+      # It may still have live positions in memory. Wait it out.
+      log "origin not answering but port ${ORIGIN_PORT} is held - waiting"
+      down_polls=0
       empty_polls=0
     fi
     sleep "$POLL_SECONDS"
