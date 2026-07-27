@@ -314,6 +314,8 @@ async function collectTarget(options: {
     () => requestController.abort(),
     options.limits.requestTimeoutMs,
   );
+    // eslint-disable-next-line no-console
+    console.error("[LEAK-PROBE]", options.target.target, options.target.method);
   try {
     const response = await options.fetchImplementation(options.target.target, {
       method: options.target.method,
@@ -387,6 +389,8 @@ async function collectTarget(options: {
       },
     };
   } catch (error) {
+    // eslint-disable-next-line no-console
+    console.error("[LEAK-PROBE-ERR]", options.target.target, error);
     if (error instanceof ReplayPremiereError) throw error;
     if (requestController.signal.aborted) {
       throw collectorUnavailable("collector_request_timeout", error);
