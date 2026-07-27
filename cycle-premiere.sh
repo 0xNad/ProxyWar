@@ -25,16 +25,19 @@ PIDFILE="/tmp/pw-bet-origin.pid"
 LOGFILE="/tmp/pw-bet-origin.log"
 STATE_PARENT="$HOME/.proxywar-bet-live"
 STATE_ROOT="$STATE_PARENT/replay-premiere"
-# The leak audit fetches the PUBLIC origin and requires 200 from /league, so
-# the origin has to serve real league artifacts. This worktree's own artifacts/
-# is empty on a fresh checkout; point at the main repo's, which the production
-# beta also does. Override with PROXYWAR_ARTIFACTS_ROOT if yours lives elsewhere.
-ARTIFACTS_ROOT="${PROXYWAR_ARTIFACTS_ROOT:-$HOME/Documents/proxywar_main/artifacts}"
-STAGING=/tmp/pw-bet-staging
-MANIFESTS=/tmp/pw-bet-manifests
-ADMIT_IN=/private/tmp/pw-bet-admit
 HERE="$(cd "$(dirname "$0")" && pwd)"
 cd "$HERE"
+# The leak audit fetches the PUBLIC origin and requires a 200 from /league, so
+# the origin must serve real league artifacts. Defaults to this checkout's own
+# artifacts/, which is correct for a standalone deploy; point
+# PROXYWAR_ARTIFACTS_ROOT elsewhere when running out of a dev repo whose
+# artifacts/ is empty.
+ARTIFACTS_ROOT="${PROXYWAR_ARTIFACTS_ROOT:-$HERE/artifacts}"
+STAGING="${PW_BET_STAGING_DIR:-/tmp/pw-bet-staging}"
+# Agent manifests need a policyIdentity the shared docs copies lack, so they
+# get staged into their own directory rather than edited in place.
+MANIFESTS="${PW_BET_MANIFEST_DIR:-/tmp/pw-bet-manifests}"
+ADMIT_IN="${PW_BET_ADMIT_DIR:-/private/tmp/pw-bet-admit}"
 
 RUN_ID="bet-cycle-$(date +%s)"
 # prem_ + exactly 20 lowercase alphanumerics. openssl, not `tr </dev/urandom`,
@@ -142,9 +145,9 @@ if [ ! -f "$ADMIT_IN/nonce.bin" ]; then
   python3 -c "import os;open('$ADMIT_IN/nonce.bin','wb').write(os.urandom(32))"
   chmod 600 "$ADMIT_IN/nonce.bin"
 fi
-python3 - "$BUNDLE" "$LEAD_MIN" <<'PY'
-import json, sys, datetime
-bundle, lead = sys.argv[1], int(sys.argv[2])
+python3 - "$BUNDLE" "$LEAD_MIN" "$ADMIT_IN" <<'PY'
+import json, os, sys, datetime
+bundle, lead, admit_in = sys.argv[1], int(sys.argv[2]), sys.argv[3]
 d = json.load(open(bundle))
 tc = d["replay"]["turnCount"]
 now = datetime.datetime.now(datetime.timezone.utc)
@@ -155,7 +158,7 @@ json.dump({
         "source": "controlled runner", "scope": "source and outcome",
         "observedAt": iso(now), "verifier": "operator", "embargoConfirmed": True}],
     "externalOutcomeMayBePublic": False, "publicLabel": "premiere",
-}, open("/private/tmp/pw-bet-admit/eligibility.json", "w"), indent=2)
+}, open(os.path.join(admit_in, "eligibility.json"), "w"), indent=2)
 json.dump({
     "schemaVersion": 1,
     "title": "Proxy War Live Market - Which AI policy wins?",
@@ -169,7 +172,7 @@ json.dump({
         {"id": "cp_00000001", "sequence": int(tc * 0.35)},
         {"id": "cp_00000002", "sequence": int(tc * 0.65)},
     ],
-}, open("/private/tmp/pw-bet-admit/definition.json", "w"), indent=2)
+}, open(os.path.join(admit_in, "definition.json"), "w"), indent=2)
 print(f"    turns={tc} duration={tc*d['replay']['turnIntervalMs']/60000:.1f}min")
 PY
 
