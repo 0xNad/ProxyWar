@@ -3,10 +3,28 @@
 #
 #   ./cycle-premiere.sh [lead-minutes]
 #
-# Generates a new controlled-exhibition match, resets the premiere state root,
-# admits the match against the public origin, and brings the origin back up on
-# it. Prints the URL. Default lead time is 4 minutes: enough for the restart
-# plus a browser to be open before trading opens.
+# Admits a match against the public origin, resets the premiere state root,
+# and brings the origin back up on it. Prints the URL. Default lead time is
+# 4 minutes: enough for the restart plus a browser to be open before trading
+# opens.
+#
+# The match itself comes from one of two places, in priority order:
+#
+#   1. The real-league premiere queue (premiere-queue-lib.sh), topped up in
+#      the background by generate-premiere-queue.sh. Claiming a queued item
+#      is a local mv, so this path is near-instant - the ~16-minute Coworld
+#      generation already happened earlier, while the PREVIOUS match was
+#      still playing.
+#   2. A freshly generated local exhibition, exactly like this script always
+#      did before the queue existed. This is the fallback for an empty
+#      queue (generator behind, disabled, or rate-capped) - a synthetic
+#      match is a worse product than a real one, but no market at all is
+#      worse than either, so the URL never goes dark waiting on generation.
+#
+# Which one actually went live is logged loudly (`MATCH KIND: ...`) and
+# recorded in /tmp/pw-bet-last-cycle.json for autocycle-premiere.sh to
+# surface - a run of fallback exhibitions must never look like real league
+# matches in the log stream.
 #
 # This REPLACES whatever premiere was live. The state root is wiped every run,
 # which is deliberate - the demo surface shows one live market at a time, and
@@ -34,6 +52,8 @@ POINTS_LEDGER_ROOT="${PROXYWAR_POINTS_LEDGER_ROOT:-$HOME/.proxywar-deploy/points
 LEAGUE_DATA_URL="${PW_BET_LEAGUE_DATA_URL:-https://beta.proxywar.xyz/ai-league-runs/league/data.json}"
 HERE="$(cd "$(dirname "$0")" && pwd)"
 cd "$HERE"
+# shellcheck source=./premiere-queue-lib.sh
+source "$HERE/premiere-queue-lib.sh"
 # The leak audit fetches the PUBLIC origin and requires a 200 from /league, so
 # the origin must serve real league artifacts. Defaults to this checkout's own
 # artifacts/, which is correct for a standalone deploy; point
@@ -179,38 +199,53 @@ wait_for_origin() {
   return 1
 }
 
-echo "==> generating match bundle ${RUN_ID}"
+echo "==> checking premiere queue"
 mkdir -p "$STAGING"
-GAME_ENV=dev npx tsx src/scripts/replay-premiere-controlled-exhibition.ts \
-  --run-id="$RUN_ID" \
-  --private-output-root="$STAGING" \
-  --agent-manifest-dir="$MANIFESTS" \
-  --served-root="$(pwd)" \
-  --served-root="$(pwd)/static" \
-  --served-root="$(pwd)/artifacts" \
-  --served-root="$(pwd)/docs" \
-  --served-root="$(pwd)/examples/external-agent" \
-  --brain=planner \
-  --disable-alliance-actions \
-  --max-steps=200 \
-  --turns-per-decision-step=100 \
-  --replay-tail-turns=400 \
-  --playback-turn-interval-ms="$TURN_INTERVAL_MS" >/dev/null 2>&1
+rm -rf "$STAGING/queue-claim"
+QUEUE_ITEM=""
+if QUEUE_ITEM="$(pq_claim "$STAGING/queue-claim")"; then
+  MATCH_KIND="real-league"
+  BUNDLE="$STAGING/queue-claim/bundle.source.json"
+  META_FILE="$STAGING/queue-claim/meta.json"
+  echo "==> MATCH KIND: real-league (queue item ${QUEUE_ITEM}; queue depth now $(pq_depth))"
+else
+  MATCH_KIND="exhibition"
+  META_FILE=""
+  echo "==> MATCH KIND: exhibition (fallback - real-league queue is empty)"
+  echo "==> generating match bundle ${RUN_ID}"
+  GAME_ENV=dev npx tsx src/scripts/replay-premiere-controlled-exhibition.ts \
+    --run-id="$RUN_ID" \
+    --private-output-root="$STAGING" \
+    --agent-manifest-dir="$MANIFESTS" \
+    --served-root="$(pwd)" \
+    --served-root="$(pwd)/static" \
+    --served-root="$(pwd)/artifacts" \
+    --served-root="$(pwd)/docs" \
+    --served-root="$(pwd)/examples/external-agent" \
+    --brain=planner \
+    --disable-alliance-actions \
+    --max-steps=200 \
+    --turns-per-decision-step=100 \
+    --replay-tail-turns=400 \
+    --playback-turn-interval-ms="$TURN_INTERVAL_MS" >/dev/null 2>&1
+  BUNDLE="${STAGING}/${RUN_ID}.source.json"
+fi
 
-BUNDLE="${STAGING}/${RUN_ID}.source.json"
 SHA="$(shasum -a 256 "$BUNDLE" | awk '{print $1}')"
 
-# Checkpoints land at 35% / 65% of turnCount, matching
-# checkpointSequencesForTurnCount in ReplayPremiereLoopCore.ts.
+# Exhibition checkpoints land at 35% / 65% of turnCount, matching
+# checkpointSequencesForTurnCount in ReplayPremiereLoopCore.ts. Real-league
+# checkpoints instead come from the queue item's own spawn-aware computation
+# (PremiereWageringCheckpoints.ts, done at seal time) - see the python below.
 echo "==> writing admission inputs (lead ${LEAD_MIN}m)"
 mkdir -p "$ADMIT_IN"
 if [ ! -f "$ADMIT_IN/nonce.bin" ]; then
   python3 -c "import os;open('$ADMIT_IN/nonce.bin','wb').write(os.urandom(32))"
   chmod 600 "$ADMIT_IN/nonce.bin"
 fi
-python3 - "$BUNDLE" "$LEAD_MIN" "$ADMIT_IN" <<'PY'
+python3 - "$BUNDLE" "$LEAD_MIN" "$ADMIT_IN" "$MATCH_KIND" "$META_FILE" <<'PY'
 import json, os, sys, datetime
-bundle, lead, admit_in = sys.argv[1], int(sys.argv[2]), sys.argv[3]
+bundle, lead, admit_in, kind, meta_file = sys.argv[1], int(sys.argv[2]), sys.argv[3], sys.argv[4], sys.argv[5]
 d = json.load(open(bundle))
 tc = d["replay"]["turnCount"]
 now = datetime.datetime.now(datetime.timezone.utc)
@@ -222,21 +257,48 @@ json.dump({
         "observedAt": iso(now), "verifier": "operator", "embargoConfirmed": True}],
     "externalOutcomeMayBePublic": False, "publicLabel": "premiere",
 }, open(os.path.join(admit_in, "eligibility.json"), "w"), indent=2)
-json.dump({
-    "schemaVersion": 1,
-    "title": "Proxy War Live Market - Which AI policy wins?",
-    "spoilerNeutralDescription":
-        "Four autonomous AI policies compete on Asia. Trade on the outcome while it unfolds.",
-    "map": {"id": "Asia", "label": "Asia"},
-    "matchFormat": {"id": "ffa-4", "label": "4-seat FFA", "seatCount": 4},
-    "scheduledAt": iso(now + datetime.timedelta(minutes=lead)),
-    "playbackRate": 1,
-    "checkpoints": [
+
+if kind == "real-league":
+    # Ground truth, read from the bundle actually being admitted - not the
+    # generator's meta.json - because bootstrap.config.gameMap (what
+    # admission validates definition.map.id against) is derived from
+    # replaying this exact embedded gameRecord.
+    seat_count = len(d["seats"])
+    map_id = str(d["gameRecord"]["info"]["config"]["gameMap"])
+    title = "Proxy War Live Market - Real AI League Premiere"
+    description = (
+        f"{seat_count} real AI league policies compete on {map_id}. "
+        "Trade on the outcome while it unfolds."
+    )
+    match_format = {"id": f"ffa-{seat_count}", "label": f"{seat_count}-seat FFA", "seatCount": seat_count}
+    map_obj = {"id": map_id, "label": map_id}
+    meta = json.load(open(meta_file))
+    cp_a, cp_b = meta["checkpointTurns"]
+    checkpoints = [
+        {"id": "cp_00000001", "sequence": int(cp_a)},
+        {"id": "cp_00000002", "sequence": int(cp_b)},
+    ]
+else:
+    title = "Proxy War Live Market - Which AI policy wins?"
+    description = "Four autonomous AI policies compete on Asia. Trade on the outcome while it unfolds."
+    match_format = {"id": "ffa-4", "label": "4-seat FFA", "seatCount": 4}
+    map_obj = {"id": "Asia", "label": "Asia"}
+    checkpoints = [
         {"id": "cp_00000001", "sequence": int(tc * 0.35)},
         {"id": "cp_00000002", "sequence": int(tc * 0.65)},
-    ],
+    ]
+
+json.dump({
+    "schemaVersion": 1,
+    "title": title,
+    "spoilerNeutralDescription": description,
+    "map": map_obj,
+    "matchFormat": match_format,
+    "scheduledAt": iso(now + datetime.timedelta(minutes=lead)),
+    "playbackRate": 1,
+    "checkpoints": checkpoints,
 }, open(os.path.join(admit_in, "definition.json"), "w"), indent=2)
-print(f"    turns={tc} duration={tc*d['replay']['turnIntervalMs']/60000:.1f}min")
+print(f"    kind={kind} turns={tc} seats={match_format['seatCount']} duration={tc*d['replay']['turnIntervalMs']/60000:.1f}min")
 PY
 
 # The state root must be empty before admitting or the catalog fills with
@@ -283,5 +345,28 @@ URL="${ORIGIN}/bet/${PREMIERE_ID}"
 CODE="$(curl -s -o /dev/null -w '%{http_code}' -m 25 "$URL" || true)"
 echo
 echo "    ${URL}"
+echo "    kind=${MATCH_KIND}${QUEUE_ITEM:+ queue-item=${QUEUE_ITEM}}"
 echo "    http ${CODE} - trading opens in ~${LEAD_MIN}m"
+
+# Consumed exactly once: fully absorbed into the admission above, so it must
+# not survive to be claimed again or reused - a repeat is worse than a gap,
+# since anyone who saw it already knows the winner.
+if [ "$MATCH_KIND" = "real-league" ]; then
+  rm -rf "$STAGING/queue-claim"
+fi
+
+# Lets autocycle-premiere.sh (and any operator) see which kind is actually
+# live without re-deriving it - a fallback streak must never be mistaken for
+# real league matches.
+python3 -c "
+import json, datetime
+json.dump({
+    'kind': '$MATCH_KIND',
+    'premiereId': '$PREMIERE_ID',
+    'queueItem': '$QUEUE_ITEM',
+    'httpCode': '$CODE',
+    'timestamp': datetime.datetime.now(datetime.timezone.utc).strftime('%Y-%m-%dT%H:%M:%S.000Z'),
+}, open('/tmp/pw-bet-last-cycle.json', 'w'))
+"
+
 [ "$CODE" = "200" ]

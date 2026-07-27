@@ -6,7 +6,11 @@
 # Watches the premiere that /bet currently resolves to. When it has genuinely
 # finished - or when the origin genuinely has nothing registered - waits out a
 # grace window so late arrivals can still read the settlement card, then runs
-# cycle-premiere.sh to put a fresh match up.
+# cycle-premiere.sh to put a fresh match up. cycle-premiere.sh itself picks
+# between a real league premiere (from the queue) and a local exhibition
+# (fallback for an empty queue); this script logs which one actually went
+# live and warns on a run of consecutive fallbacks, so a synthetic streak is
+# never mistaken for real league matches in the supervised log stream.
 #
 # Without this, the demo URL is only tradeable for the ~12 minutes of whatever
 # match was admitted last, and shows a settled market forever afterwards.
@@ -30,6 +34,7 @@ ORIGIN="https://bet.proxywar.xyz"
 ORIGIN_PORT="${AUTOCYCLE_ORIGIN_PORT:-8792}"
 LOCAL_ORIGIN="http://127.0.0.1:${ORIGIN_PORT}"
 HERE="$(cd "$(dirname "$0")" && pwd)"
+source "$HERE/premiere-queue-lib.sh"
 # A settled market is the only genuinely dead state: there is nothing to do
 # and nothing to read but a finished result. Keep it short. A SCHEDULED market
 # is different - the landing page explains the product and counts down to the
@@ -40,6 +45,9 @@ POLL_SECONDS="${AUTOCYCLE_POLL_SECONDS:-20}"
 LEAD_MIN="${AUTOCYCLE_LEAD_MIN:-2}"
 # Consecutive confirmed-empty polls before believing the demo is really down.
 EMPTY_STRIKES="${AUTOCYCLE_EMPTY_STRIKES:-3}"
+# Consecutive fallback (exhibition) cycles before loudly flagging that the
+# real-league queue looks stuck rather than just momentarily empty.
+FALLBACK_STREAK_WARN="${AUTOCYCLE_FALLBACK_STREAK_WARN:-3}"
 
 log() { printf '%s %s\n' "$(date -u +%H:%M:%S)" "$*"; }
 
@@ -76,16 +84,49 @@ cycle() {
   log "cycling onto a fresh match"
   if (cd "$HERE" && ./cycle-premiere.sh "$LEAD_MIN" >/tmp/pw-bet-autocycle-run.log 2>&1); then
     log "up: $(current_premiere)"
+    report_match_kind
   else
     log "!! cycle FAILED - see /tmp/pw-bet-autocycle-run.log"
     sleep 120
   fi
 }
 
-log "watching ${LOCAL_ORIGIN}/bet (grace ${GRACE_SECONDS}s, lead ${LEAD_MIN}m)"
+# cycle-premiere.sh records which kind actually went live in
+# /tmp/pw-bet-last-cycle.json - surface it HERE (the log stream under
+# supervision) rather than leaving it buried in the per-cycle run log that
+# gets overwritten every cycle.
+report_match_kind() {
+  local kind
+  kind="$(python3 -c '
+import json
+try:
+    print(json.load(open("/tmp/pw-bet-last-cycle.json")).get("kind", "unknown"))
+except Exception:
+    print("unknown")
+' 2>/dev/null)"
+  case "$kind" in
+    real-league)
+      fallback_streak=0
+      log "match kind: real-league"
+      ;;
+    exhibition)
+      fallback_streak=$((fallback_streak + 1))
+      log "match kind: exhibition (fallback - real-league queue was empty, depth now $(pq_depth))"
+      if [ "$fallback_streak" -ge "$FALLBACK_STREAK_WARN" ]; then
+        log "!! ${fallback_streak} consecutive FALLBACK exhibition cycles - real queue looks stuck (generator disabled/failing/rate-capped? check /tmp/pw-bet-queue-generator.log and $PW_QUEUE_COST_LEDGER)"
+      fi
+      ;;
+    *)
+      log "match kind: unknown (could not read /tmp/pw-bet-last-cycle.json)"
+      ;;
+  esac
+}
+
+log "watching ${LOCAL_ORIGIN}/bet (grace ${GRACE_SECONDS}s, lead ${LEAD_MIN}m, real-league queue depth $(pq_depth))"
 settled_since=""
 empty_polls=0
 down_polls=0
+fallback_streak=0
 
 while true; do
   premiere="$(current_premiere)"
