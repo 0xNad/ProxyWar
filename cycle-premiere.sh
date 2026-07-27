@@ -38,6 +38,12 @@ STAGING="${PW_BET_STAGING_DIR:-/tmp/pw-bet-staging}"
 # get staged into their own directory rather than edited in place.
 MANIFESTS="${PW_BET_MANIFEST_DIR:-/tmp/pw-bet-manifests}"
 ADMIT_IN="${PW_BET_ADMIT_DIR:-/private/tmp/pw-bet-admit}"
+# Match length = 10800 turns x this interval. Longer matches mean a smaller
+# share of the cycle spent between markets: at 120ms a match runs ~21.6min
+# against roughly 5min of settled-plus-scheduled gap, versus 12.6min against
+# the same gap at 70ms. The hard ceiling is REPLAY_PREMIERE_MAX_CHUNK_COUNT
+# (128) x 60s spans, about 2h08m, so there is plenty of headroom.
+TURN_INTERVAL_MS="${PW_BET_TURN_INTERVAL_MS:-120}"
 
 RUN_ID="bet-cycle-$(date +%s)"
 # prem_ + exactly 20 lowercase alphanumerics. openssl, not `tr </dev/urandom`,
@@ -132,7 +138,7 @@ GAME_ENV=dev npx tsx src/scripts/replay-premiere-controlled-exhibition.ts \
   --max-steps=200 \
   --turns-per-decision-step=100 \
   --replay-tail-turns=400 \
-  --playback-turn-interval-ms=70 >/dev/null 2>&1
+  --playback-turn-interval-ms="$TURN_INTERVAL_MS" >/dev/null 2>&1
 
 BUNDLE="${STAGING}/${RUN_ID}.source.json"
 SHA="$(shasum -a 256 "$BUNDLE" | awk '{print $1}')"

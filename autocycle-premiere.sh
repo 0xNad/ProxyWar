@@ -30,9 +30,14 @@ ORIGIN="https://bet.proxywar.xyz"
 ORIGIN_PORT="${AUTOCYCLE_ORIGIN_PORT:-8792}"
 LOCAL_ORIGIN="http://127.0.0.1:${ORIGIN_PORT}"
 HERE="$(cd "$(dirname "$0")" && pwd)"
-GRACE_SECONDS="${AUTOCYCLE_GRACE_SECONDS:-240}"
+# A settled market is the only genuinely dead state: there is nothing to do
+# and nothing to read but a finished result. Keep it short. A SCHEDULED market
+# is different - the landing page explains the product and counts down to the
+# open, which is a reasonable first thirty seconds for a cold visitor - so the
+# lead time is deliberately not minimised.
+GRACE_SECONDS="${AUTOCYCLE_GRACE_SECONDS:-90}"
 POLL_SECONDS="${AUTOCYCLE_POLL_SECONDS:-20}"
-LEAD_MIN="${AUTOCYCLE_LEAD_MIN:-3}"
+LEAD_MIN="${AUTOCYCLE_LEAD_MIN:-2}"
 # Consecutive confirmed-empty polls before believing the demo is really down.
 EMPTY_STRIKES="${AUTOCYCLE_EMPTY_STRIKES:-3}"
 
