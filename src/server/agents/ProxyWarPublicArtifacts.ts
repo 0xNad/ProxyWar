@@ -307,8 +307,8 @@ export function isProxyWarPublicPremiereWritePath(pathname: string): boolean {
   return matchProxyWarPublicPremiereWritePath(pathname) !== null;
 }
 
-const PROXYWAR_POINTS_LEADERBOARD_PATH = "/api/points/leaderboard";
-const PROXYWAR_POINTS_DISPLAY_NAME_PATH = "/api/points/display-name";
+const PROXYWAR_POINTS_LEADERBOARD_PATH = "/api/premieres/points/leaderboard";
+const PROXYWAR_POINTS_DISPLAY_NAME_PATH = "/api/premieres/points/display-name";
 
 /**
  * Cross-premiere points leaderboard read. Not `:premiereId`-scoped, so it

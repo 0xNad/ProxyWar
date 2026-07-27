@@ -46,9 +46,12 @@ function labelFor(entry: { displayName: string | null; participantId: string }):
  * NOT wired through `ReplayPremiereRuntimeController` — the leaderboard is
  * premiere-agnostic, so it authenticates independently via
  * `ReplayPremiereGuestSecurity.bootstrapRead`/`authorizeWrite`
- * (`/api/points/leaderboard`, `/api/points/display-name`), reusing the
+ * (`/api/premieres/points/leaderboard`, `.../display-name`), reusing the
  * SAME signed guest cookie identity a premiere session already established
- * — never a second identity.
+ * — never a second identity. Those paths sit under `/api/premieres`
+ * deliberately: `serializeGuestCookie` hardcodes `Path=/api/premieres`, so a
+ * route outside it would never receive the cookie and would mint a fresh
+ * anonymous identity on every call.
  */
 @customElement("premiere-points-leaderboard")
 export class PremierePointsLeaderboard extends LitElement {
@@ -106,7 +109,7 @@ export class PremierePointsLeaderboard extends LitElement {
     this.loading = true;
     this.loadError = null;
     try {
-      const response = await fetch("/api/points/leaderboard", {
+      const response = await fetch("/api/premieres/points/leaderboard", {
         method: "GET",
         headers: { Accept: "application/json" },
         credentials: "same-origin",
@@ -134,7 +137,7 @@ export class PremierePointsLeaderboard extends LitElement {
     this.savingName = true;
     this.nameError = null;
     try {
-      const response = await fetch("/api/points/display-name", {
+      const response = await fetch("/api/premieres/points/display-name", {
         method: "POST",
         headers: {
           Accept: "application/json",

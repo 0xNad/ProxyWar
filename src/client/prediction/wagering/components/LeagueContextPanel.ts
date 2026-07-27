@@ -69,9 +69,7 @@ export class PremiereLeagueContextPanel extends LitElement {
           ${this.renderStaleness()} ${this.renderBody()}
           <p class="pt-1 text-[11px] italic leading-snug text-ink-muted">
             Evidence, not advice — league rating, recent form, and past
-            meetings, never a favorite. The synthetic crowd trades on live
-            territory only and cannot see this panel, so reading it is a
-            real edge over the crowd's own price, not a leveling of one.
+            meetings, never a favorite.
           </p>
         </div>
       </details>

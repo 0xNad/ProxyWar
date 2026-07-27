@@ -1076,7 +1076,7 @@ function sendReplayPremiereFailure(res: Response, error: unknown): void {
   }
   res.status(status).json(toPublicReplayPremiereFailure(error));
 }
-app.get("/api/points/leaderboard", async (req, res) => {
+app.get("/api/premieres/points/leaderboard", async (req, res) => {
   try {
     res.setHeader("Cache-Control", "no-store, max-age=0");
     const guest = replayPremiereGuestSecurity.bootstrapRead(
@@ -1097,7 +1097,7 @@ app.get("/api/points/leaderboard", async (req, res) => {
     sendReplayPremiereFailure(res, error);
   }
 });
-app.post("/api/points/display-name", async (req, res) => {
+app.post("/api/premieres/points/display-name", async (req, res) => {
   try {
     res.setHeader("Cache-Control", "no-store, max-age=0");
     const authorization = replayPremiereGuestSecurity.authorizeWrite(
