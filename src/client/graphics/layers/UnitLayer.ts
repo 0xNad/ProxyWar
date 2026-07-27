@@ -10,6 +10,7 @@ import {
   CloseViewEvent,
   ContextMenuEvent,
   MouseUpEvent,
+  ReplaySpeedChangeEvent,
   SelectAllWarshipsEvent,
   TouchEvent,
   UnitSelectionEvent,
@@ -17,6 +18,16 @@ import {
   WarshipSelectionBoxCompleteEvent,
 } from "../../InputHandler";
 import { MoveWarshipIntentEvent } from "../../Transport";
+import { defaultReplaySpeedMultiplier } from "../../utilities/ReplaySpeedMultiplier";
+import {
+  ReplayPresentationCadenceEvent,
+  replayPresentationTransitionDurationForIntervalMs,
+  replayPresentationTransitionDurationMs,
+  ReplayUnitPresentationMotion,
+  retargetReplayUnitPresentationMotion,
+  retimeReplayUnitPresentationMotion,
+  sampleReplayUnitPresentationMotion,
+} from "../ReplayPresentationSmoothing";
 import { TransformHandler } from "../TransformHandler";
 import { Layer } from "./Layer";
 
@@ -56,6 +67,12 @@ export class UnitLayer implements Layer {
   // Multi-selected warships (from selection box)
   private selectedWarships: UnitView[] = [];
 
+  private readonly replayPresentationEnabled: boolean;
+  private replayUnitTransitionMs: number;
+  private progressivePresentationIntervalMs: number | null = null;
+  private replaySpriteUnits = new Map<number, UnitView>();
+  private replayUnitMotions = new Map<number, ReplayUnitPresentationMotion>();
+
   // Configuration for unit selection
   private readonly WARSHIP_SELECTION_RADIUS = 10; // Radius in game cells for warship selection hit zone
 
@@ -66,6 +83,10 @@ export class UnitLayer implements Layer {
   ) {
     this.theme = game.config().theme();
     this.transformHandler = transformHandler;
+    this.replayPresentationEnabled = game.config().isReplay();
+    this.replayUnitTransitionMs = this.replayPresentationEnabled
+      ? replayPresentationTransitionDurationMs(defaultReplaySpeedMultiplier)
+      : 0;
   }
 
   shouldTransform(): boolean {
@@ -109,6 +130,14 @@ export class UnitLayer implements Layer {
     );
     this.eventBus.on(CloseViewEvent, () => this.onSelectionBoxCancel());
     this.eventBus.on(SelectAllWarshipsEvent, () => this.onSelectAllWarships());
+    if (this.replayPresentationEnabled) {
+      this.eventBus.on(ReplaySpeedChangeEvent, (event) =>
+        this.onReplaySpeedChange(event),
+      );
+      this.eventBus.on(ReplayPresentationCadenceEvent, (event) =>
+        this.onReplayPresentationCadence(event),
+      );
+    }
     this.redraw();
 
     loadAllSprites();
@@ -334,6 +363,125 @@ export class UnitLayer implements Layer {
       this.game.width(),
       this.game.height(),
     );
+    this.renderReplayUnits(context);
+  }
+
+  private onReplaySpeedChange(event: ReplaySpeedChangeEvent) {
+    if (this.progressivePresentationIntervalMs !== null) {
+      return;
+    }
+    this.retimeReplayUnitPresentation(
+      replayPresentationTransitionDurationMs(event.replaySpeedMultiplier),
+    );
+  }
+
+  private onReplayPresentationCadence(event: ReplayPresentationCadenceEvent) {
+    if (
+      !Number.isFinite(event.presentationIntervalMs) ||
+      event.presentationIntervalMs <= 0
+    ) {
+      return;
+    }
+    this.progressivePresentationIntervalMs = event.presentationIntervalMs;
+    this.retimeReplayUnitPresentation(
+      replayPresentationTransitionDurationForIntervalMs(
+        event.presentationIntervalMs,
+      ),
+    );
+  }
+
+  private retimeReplayUnitPresentation(durationMs: number) {
+    const nowMs = performance.now();
+    this.replayUnitTransitionMs = durationMs;
+    for (const [unitId, motion] of this.replayUnitMotions) {
+      this.replayUnitMotions.set(
+        unitId,
+        retimeReplayUnitPresentationMotion(
+          motion,
+          nowMs,
+          this.replayUnitTransitionMs,
+        ),
+      );
+    }
+  }
+
+  private renderReplayUnits(context: CanvasRenderingContext2D) {
+    if (!this.replayPresentationEnabled) {
+      return;
+    }
+
+    const nowMs = performance.now();
+    const transitionMs = this.game.isCatchingUp()
+      ? 0
+      : this.replayUnitTransitionMs;
+
+    for (const [unitId, unit] of this.replaySpriteUnits) {
+      if (!unit.isActive()) {
+        this.replaySpriteUnits.delete(unitId);
+        this.replayUnitMotions.delete(unitId);
+        continue;
+      }
+      if (!isSpriteReady(unit)) {
+        continue;
+      }
+
+      const previousTile = unit.lastTile();
+      const targetTile = unit.tile();
+      const authoritativePrevious = {
+        x: this.game.x(previousTile),
+        y: this.game.y(previousTile),
+      };
+      const authoritativeTarget = {
+        x: this.game.x(targetTile),
+        y: this.game.y(targetTile),
+      };
+      const existingMotion = this.replayUnitMotions.get(unitId);
+      const targetChanged =
+        existingMotion === undefined ||
+        existingMotion.target.x !== authoritativeTarget.x ||
+        existingMotion.target.y !== authoritativeTarget.y;
+      let motion: ReplayUnitPresentationMotion;
+      if (targetChanged) {
+        motion = retargetReplayUnitPresentationMotion(
+          existingMotion ?? null,
+          authoritativePrevious,
+          authoritativeTarget,
+          nowMs,
+          transitionMs,
+        );
+      } else if (existingMotion.durationMs !== transitionMs) {
+        motion = retimeReplayUnitPresentationMotion(
+          existingMotion,
+          nowMs,
+          transitionMs,
+        );
+      } else {
+        motion = existingMotion;
+      }
+      this.replayUnitMotions.set(unitId, motion);
+
+      const position = sampleReplayUnitPresentationMotion(motion, nowMs);
+      const renderX = position.x - this.game.width() / 2;
+      const renderY = position.y - this.game.height() / 2;
+      const customTerritoryColor =
+        unit.type() === UnitType.Warship && unit.isInCombat()
+          ? colord("rgb(200,0,0)")
+          : undefined;
+      this.drawSpriteAt(
+        context,
+        unit,
+        renderX,
+        renderY,
+        customTerritoryColor,
+        false,
+      );
+      if (
+        unit.type() === UnitType.Warship &&
+        unit.warshipState().state !== "patrolling"
+      ) {
+        this.drawRetreatCrossAt(context, renderX, renderY);
+      }
+    }
   }
 
   onAlternativeViewEvent(event: AlternateViewEvent) {
@@ -356,7 +504,14 @@ export class UnitLayer implements Layer {
     this.transportShipTrailCanvas.width = this.game.width();
     this.transportShipTrailCanvas.height = this.game.height();
 
+    if (this.replayPresentationEnabled) {
+      this.replaySpriteUnits.clear();
+      this.replayUnitMotions.clear();
+    }
     this.updateUnitsSprites(this.game.units().map((unit) => unit.id()));
+    if (this.replayPresentationEnabled) {
+      this.seedReplayUnitsAtAuthoritativeTargets();
+    }
 
     this.unitToTrail.forEach((trail, unit) => {
       for (const t of trail) {
@@ -477,24 +632,36 @@ export class UnitLayer implements Layer {
   }
 
   private drawRetreatCross(unit: UnitView) {
+    if (this.replayPresentationEnabled) {
+      return;
+    }
+    this.drawRetreatCrossAt(
+      this.context,
+      this.game.x(unit.tile()),
+      this.game.y(unit.tile()),
+    );
+  }
+
+  private drawRetreatCrossAt(
+    context: CanvasRenderingContext2D,
+    x: number,
+    y: number,
+  ) {
     // Blink: 500ms on, 500ms off
     if (Math.floor(Date.now() / 500) % 2 === 0) return;
-    const x = this.game.x(unit.tile());
-    const y = this.game.y(unit.tile());
-    const ctx = this.context;
-    ctx.save();
+    context.save();
     const cx = x + 0.5;
     const cy = y + 0.5;
-    ctx.lineCap = "square";
-    ctx.strokeStyle = "rgb(36,36,36)";
-    ctx.lineWidth = 1;
-    ctx.beginPath();
-    ctx.moveTo(cx, cy - 1.5);
-    ctx.lineTo(cx, cy + 1.5);
-    ctx.moveTo(cx - 1.5, cy);
-    ctx.lineTo(cx + 1.5, cy);
-    ctx.stroke();
-    ctx.restore();
+    context.lineCap = "square";
+    context.strokeStyle = "rgb(36,36,36)";
+    context.lineWidth = 1;
+    context.beginPath();
+    context.moveTo(cx, cy - 1.5);
+    context.lineTo(cx, cy + 1.5);
+    context.moveTo(cx - 1.5, cy);
+    context.lineTo(cx + 1.5, cy);
+    context.stroke();
+    context.restore();
   }
 
   private handleShellEvent(unit: UnitView) {
@@ -708,8 +875,49 @@ export class UnitLayer implements Layer {
   }
 
   drawSprite(unit: UnitView, customTerritoryColor?: Colord) {
+    if (this.replayPresentationEnabled) {
+      if (unit.isActive()) {
+        this.replaySpriteUnits.set(unit.id(), unit);
+      } else {
+        this.replaySpriteUnits.delete(unit.id());
+        this.replayUnitMotions.delete(unit.id());
+      }
+      return;
+    }
+
     const x = this.game.x(unit.tile());
     const y = this.game.y(unit.tile());
+
+    this.drawSpriteAt(this.context, unit, x, y, customTerritoryColor, true);
+  }
+
+  private seedReplayUnitsAtAuthoritativeTargets() {
+    const nowMs = performance.now();
+    for (const [unitId, unit] of this.replaySpriteUnits) {
+      const target = {
+        x: this.game.x(unit.tile()),
+        y: this.game.y(unit.tile()),
+      };
+      this.replayUnitMotions.set(unitId, {
+        source: target,
+        target,
+        startedAtMs: nowMs,
+        durationMs: 0,
+      });
+    }
+  }
+
+  private drawSpriteAt(
+    context: CanvasRenderingContext2D,
+    unit: UnitView,
+    x: number,
+    y: number,
+    customTerritoryColor: Colord | undefined,
+    snapToPixel: boolean,
+  ) {
+    if (!unit.isActive()) {
+      return;
+    }
 
     let alternateViewColor: Colord | null = null;
 
@@ -747,22 +955,22 @@ export class UnitLayer implements Layer {
       alternateViewColor ?? undefined,
     );
 
-    if (unit.isActive()) {
-      const targetable = unit.targetable();
-      if (!targetable) {
-        this.context.save();
-        this.context.globalAlpha = 0.5;
-      }
-      this.context.drawImage(
-        sprite,
-        Math.round(x - sprite.width / 2),
-        Math.round(y - sprite.height / 2),
-        sprite.width,
-        sprite.width,
-      );
-      if (!targetable) {
-        this.context.restore();
-      }
+    const targetable = unit.targetable();
+    if (!targetable) {
+      context.save();
+      context.globalAlpha = 0.5;
+    }
+    const drawX = x - sprite.width / 2;
+    const drawY = y - sprite.height / 2;
+    context.drawImage(
+      sprite,
+      snapToPixel ? Math.round(drawX) : drawX,
+      snapToPixel ? Math.round(drawY) : drawY,
+      sprite.width,
+      sprite.width,
+    );
+    if (!targetable) {
+      context.restore();
     }
   }
 }

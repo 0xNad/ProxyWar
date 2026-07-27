@@ -1,5 +1,6 @@
 {
   "$schema": "https://raw.githubusercontent.com/Metta-AI/coworld/main/src/coworld/coworld_manifest_schema.json",
+  "tags": ["strategy", "multiplayer", "ai-agents"],
   "game": {
     "name": "proxywar-ffa-4p",
     "version": "0.0.8",
@@ -48,9 +49,7 @@
           "items": {
             "type": "object",
             "additionalProperties": false,
-            "required": [
-              "name"
-            ],
+            "required": ["name"],
             "properties": {
               "name": {
                 "type": "string",
@@ -89,17 +88,11 @@
         },
         "map_size": {
           "type": "string",
-          "enum": [
-            "Compact",
-            "Normal"
-          ]
+          "enum": ["Compact", "Normal"]
         },
         "difficulty": {
           "type": "string",
-          "enum": [
-            "Easy",
-            "Medium"
-          ]
+          "enum": ["Easy", "Medium"]
         },
         "seed": {
           "type": "integer",
@@ -159,25 +152,16 @@
           }
         },
         "winner_slot": {
-          "type": [
-            "integer",
-            "null"
-          ],
+          "type": ["integer", "null"],
           "minimum": 0,
           "maximum": 3
         },
         "turn_count": {
-          "type": [
-            "integer",
-            "null"
-          ],
+          "type": ["integer", "null"],
           "minimum": 0
         },
         "tick": {
-          "type": [
-            "integer",
-            "null"
-          ],
+          "type": ["integer", "null"],
           "minimum": 0
         },
         "decision_count": {
@@ -203,13 +187,7 @@
           "items": {
             "type": "object",
             "additionalProperties": false,
-            "required": [
-              "slot",
-              "name",
-              "score",
-              "tiles_owned",
-              "is_alive"
-            ],
+            "required": ["slot", "name", "score", "tiles_owned", "is_alive"],
             "properties": {
               "slot": {
                 "type": "integer",
@@ -223,17 +201,11 @@
                 "type": "number"
               },
               "tiles_owned": {
-                "type": [
-                  "integer",
-                  "null"
-                ],
+                "type": ["integer", "null"],
                 "minimum": 0
               },
               "is_alive": {
-                "type": [
-                  "boolean",
-                  "null"
-                ]
+                "type": ["boolean", "null"]
               }
             }
           }
@@ -263,10 +235,7 @@
       "name": "Proxy War Starter Websocket Player",
       "type": "player",
       "image": "proxywar-coworld-local:latest",
-      "run": [
-        "node",
-        "/app/integration/src/starter-player.mjs"
-      ],
+      "run": ["node", "/app/integration/src/starter-player.mjs"],
       "description": "Minimal websocket player that chooses one offered LegalAction.id."
     }
   ],

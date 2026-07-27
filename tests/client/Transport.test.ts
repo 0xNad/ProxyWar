@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { LobbyConfig } from "../../src/client/ClientGameRunner";
+import { ReplayPremierePlaybackController } from "../../src/client/ReplayPremierePlayback";
 import { Transport } from "../../src/client/Transport";
 import { EventBus } from "../../src/core/EventBus";
 import { ClientHashMessage, ClientMessage } from "../../src/core/Schemas";
@@ -96,5 +97,19 @@ describe("Transport reconnect buffer", () => {
     expect(socket.sent).toEqual(
       messages.map((msg) => JSON.stringify(msg, replacer)),
     );
+  });
+});
+
+describe("Transport progressive replay routing", () => {
+  it("uses the local transport without requiring a full GameRecord", () => {
+    const config = makeLobbyConfig();
+    config.progressiveReplay = {
+      controller: new ReplayPremierePlaybackController("prem_0123456789abcdef"),
+      playbackRate: 2,
+    };
+    const transport = new Transport(config, new EventBus());
+
+    expect(config.gameRecord).toBeUndefined();
+    expect(transport.isLocal).toBe(true);
   });
 });

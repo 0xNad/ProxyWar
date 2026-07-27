@@ -1,0 +1,113 @@
+/*
+ * Proxy War design tokens — SINGLE SOURCE OF TRUTH for the visual system.
+ *
+ * These `--pw-*` custom properties are the canonical palette, spacing, radius,
+ * elevation, and z-index scales shared across every Proxy War surface:
+ *   - the game client (Tailwind + Lit), via `var(--pw-*)`;
+ *   - the server-generated /league page (mirrors these values in
+ *     src/server/agents/leaguePageTokens.ts);
+ *   - the injected-style overlays /premiere and /ai-league-replay (mirror these
+ *     values in src/client/styles/overlayTokens.ts).
+ *
+ * Identity: Proxy War is dark + amber. Amber (`--pw-accent`) is the brand accent
+ * used for primary CTAs and brand moments; cyan (`--pw-info`) is the
+ * broadcast/info accent used by the live surfaces; red/green/amber/purple carry
+ * live/positive/caution/marker meaning. This reconciles the four palettes that
+ * shipped separately (client blue, league amber, premiere `--rp-*`, replay light).
+ *
+ * When these values change, update leaguePageTokens.ts and overlayTokens.ts to
+ * match (they are asserted equal by tests where present). See
+ * docs/2026-07-25-ui-ux-overhaul-plan.md.
+ */
+
+:root {
+  /* ---- Dark surfaces (elevation ladder) ---- */
+  --pw-bg: #080b10;
+  --pw-surface: #111720;
+  --pw-surface-2: #18202b;
+  --pw-surface-3: #212b38;
+  /* Translucent glass for HUD panels over the game canvas (replaces the ad-hoc
+     bg-gray-800/92, slate-800/85, zinc-900/95 mix). */
+  --pw-glass: rgba(17, 23, 32, 0.92);
+  --pw-glass-strong: rgba(10, 14, 20, 0.95);
+
+  /* ---- Borders / lines ---- */
+  --pw-line: #2a3442;
+  --pw-line-strong: #3a4656;
+
+  /* ---- Text ---- */
+  --pw-text: #edf1f7;
+  --pw-text-dim: #cbd5e1;
+  --pw-muted: #a4afbf;
+
+  /* ---- Brand accent (amber) ---- */
+  --pw-accent: #f4a64a;
+  --pw-accent-strong: #f0902a;
+  --pw-accent-soft: rgba(244, 166, 74, 0.14);
+  --pw-on-accent: #1a1206; /* ink on top of amber */
+
+  /* ---- Info / broadcast accent (cyan) ---- */
+  --pw-info: #56c7f5;
+  --pw-info-strong: #0ea5e9;
+  --pw-info-soft: rgba(56, 189, 248, 0.16);
+
+  /* ---- Status ---- */
+  --pw-live: #ef4444;
+  --pw-live-soft: rgba(239, 68, 68, 0.17);
+  --pw-live-border: rgba(248, 113, 113, 0.62);
+  --pw-live-text: #fecaca;
+  --pw-positive: #34d399;
+  --pw-positive-soft: rgba(16, 185, 129, 0.18);
+  --pw-positive-text: #a7f3d0;
+  --pw-on-positive: #052015;
+  --pw-caution: #fbbf24;
+  --pw-caution-soft: rgba(251, 191, 36, 0.14);
+  --pw-caution-text: #fde68a;
+  --pw-danger: #f87171;
+  --pw-danger-soft: rgba(239, 68, 68, 0.16);
+
+  /* ---- Moment markers (premiere REACT + replay headline events) ---- */
+  --pw-mk-turning: #a78bfa;
+  --pw-mk-turning-soft: rgba(167, 139, 250, 0.18);
+  --pw-mk-smart: #34d399;
+  --pw-mk-smart-soft: rgba(52, 211, 153, 0.18);
+  --pw-mk-mistake: #fbbf24;
+  --pw-mk-mistake-soft: rgba(251, 191, 36, 0.18);
+  --pw-mk-betrayal: #f87171;
+  --pw-mk-betrayal-soft: rgba(248, 113, 113, 0.18);
+  --pw-mk-clip: #56c7f5;
+  --pw-mk-clip-soft: rgba(56, 199, 245, 0.18);
+
+  /* ---- Radius scale ---- */
+  --pw-r-xs: 7px;
+  --pw-r-sm: 9px;
+  --pw-r-md: 11px;
+  --pw-r-lg: 14px;
+  --pw-r-xl: 18px;
+  --pw-r-pill: 999px;
+
+  /* ---- Spacing scale (4px base) ---- */
+  --pw-space-1: 4px;
+  --pw-space-2: 8px;
+  --pw-space-3: 12px;
+  --pw-space-4: 16px;
+  --pw-space-5: 20px;
+  --pw-space-6: 24px;
+  --pw-space-8: 32px;
+
+  /* ---- Elevation ---- */
+  --pw-shadow: 0 26px 74px rgba(0, 0, 0, 0.52);
+  --pw-shadow-soft: 0 12px 32px rgba(0, 0, 0, 0.35);
+
+  /* ---- Focus ring ---- */
+  --pw-focus: #56c7f5;
+
+  /* ---- z-index scale (replaces the ad-hoc 40..40001 ladder + invalid z-999) ---- */
+  --pw-z-hud: 100;
+  --pw-z-panel: 800;
+  --pw-z-overlay: 900;
+  --pw-z-modal: 1000;
+  --pw-z-modal-nested: 1200;
+  --pw-z-toast: 2000;
+  --pw-z-top: 9000;
+}

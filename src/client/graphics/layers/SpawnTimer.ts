@@ -105,7 +105,7 @@ export class SpawnTimer extends LitElement implements Layer {
     }
 
     return html`
-      <div class="w-full h-full flex z-999">
+      <div class="w-full h-full flex">
         ${this.ratios.map((ratio, i) => {
           const color = this.colors[i] || "rgba(0, 0, 0, 0.5)";
           return html`

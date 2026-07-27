@@ -1,9 +1,19 @@
-import { ReplaySpeedMultiplier } from "./utilities/ReplaySpeedMultiplier";
 import {
   aiLeagueSpectatorDisplayName,
   aiLeagueSpectatorText,
   isAiLeagueNativeSpectatorUiEnabled,
 } from "./AiLeagueReplayMode";
+import {
+  mountReplayScopedLeagueClipControl,
+  type ReplayScopedLeagueClipControlHandle,
+} from "./ReplayClipControl";
+import { REPLAY_RENDER_FAST_FORWARD_PARAM } from "./ReplayRenderFastForward";
+import {
+  REPLAY_SHARE_IMAGE_REQUEST_EVENT,
+  REPLAY_SHARE_IMAGE_RESULT_EVENT,
+  type ReplayShareImageResultDetail,
+} from "./ReplayShareImageBinding";
+import { ReplaySpeedMultiplier } from "./utilities/ReplaySpeedMultiplier";
 import { translateText } from "./Utils";
 
 interface AiLeagueDecisionLogEntry {
@@ -131,22 +141,37 @@ interface AiLeagueMapSocialEvent {
 }
 
 interface AiLeagueReplayOverlayInput {
+  /**
+   * Turn currently rendered on the map. The decision log and diplomacy talks are
+   * windowed to it so a viewer never reads the end of the match while watching
+   * the beginning. Internal: set by the overlay's own playhead sync.
+   */
+  currentTurn?: number;
   runID: string;
   decisions: AiLeagueDecisionLogEntry[];
   summary?: AiLeagueReplaySummary | null;
   spectatorTelemetry?: unknown;
   artifactBasePath: string;
+  /** Canonical record range, used to expose every valid Clip v1 bucket. */
+  replayMaxTurn?: number | null;
+  artifactAvailability?: AiLeagueReplayArtifactAvailability;
+  detailsLoading?: boolean;
   onReplaySpeedChange?: (speed: ReplaySpeedMultiplier) => void;
 }
 
-export function mountAiLeagueReplayOverlay(input: {
-  runID: string;
-  decisions: AiLeagueDecisionLogEntry[];
-  summary?: AiLeagueReplaySummary | null;
-  spectatorTelemetry?: unknown;
-  artifactBasePath: string;
-  onReplaySpeedChange?: (speed: ReplaySpeedMultiplier) => void;
-}) {
+export interface AiLeagueReplayArtifactAvailability {
+  visualReport?: boolean;
+  spectatorTelemetry?: boolean;
+  decisions?: boolean;
+  summary?: boolean;
+}
+
+interface AiLeagueReplayOverlayHandle {
+  hydrate(nextInput: Partial<AiLeagueReplayOverlayInput>): void;
+  dispose(): void;
+}
+
+export function mountAiLeagueReplayOverlay(input: AiLeagueReplayOverlayInput) {
   document.getElementById("ai-league-replay-overlay")?.remove();
   document.getElementById("ai-league-social-transcript")?.remove();
   document.getElementById("ai-league-headline-event")?.remove();
@@ -158,48 +183,389 @@ export function mountAiLeagueReplayOverlay(input: {
   const spectatorTelemetry = normalizeSpectatorTelemetry(
     input.spectatorTelemetry,
   );
-  const renderInput: AiLeagueReplayOverlayInput = {
+  let currentInput: AiLeagueReplayOverlayInput = {
     ...input,
     spectatorTelemetry,
   };
   const overlay = document.createElement("aside");
   overlay.id = "ai-league-replay-overlay";
-  overlay.innerHTML = overlayHtml(renderInput);
+  overlay.innerHTML = overlayHtml(currentInput);
   document.body.appendChild(overlay);
-  mountAiLeagueSocialTranscript(input.decisions, spectatorTelemetry);
-  mountAiLeagueHeadlineEvent(input.decisions, spectatorTelemetry);
+  mountReplayPanelDisclosure(overlay);
   mountReplayPanelControls(overlay);
-  mountAiLeagueDiplomacyStrip(overlay, input.decisions, spectatorTelemetry);
-  mountAiLeagueTalksToggle(overlay, spectatorTelemetry);
-  mountAiLeagueDecisionLogExpander(overlay);
+  let clipControl = mountReplayDetailsBindings(overlay, currentInput);
   mountReplayJumpControls(document);
+  let disposed = false;
 
-  overlay
-    .querySelectorAll<HTMLButtonElement>("[data-ai-league-toggle]")
-    .forEach((button) => {
-      button.addEventListener("click", () =>
-        overlay.classList.toggle("collapsed"),
+  // Single re-render path for the details block, shared by hydrate() and the
+  // playhead sync so both keep the subtitle and clip control consistent.
+  const renderDetails = (): void => {
+    const details = overlay.querySelector<HTMLElement>(
+      "[data-ai-league-details]",
+    );
+    if (details === null || !overlay.isConnected) return;
+    details.innerHTML = overlayDetailsHtml(currentInput);
+    const subtitle = overlay.querySelector<HTMLElement>(
+      "[data-ai-league-subtitle]",
+    );
+    const subtitleText = matchSubtitle(currentInput);
+    if (subtitle !== null && subtitleText !== null) {
+      subtitle.textContent = subtitleText;
+    }
+    const previousClipControl = clipControl;
+    clipControl = mountReplayDetailsBindings(overlay, currentInput);
+    previousClipControl?.dispose();
+  };
+  const disposePlayheadSync = mountAiLeaguePlayheadSync(
+    overlay,
+    (turn) => {
+      currentInput = { ...currentInput, currentTurn: turn };
+      // Refresh ONLY the decision-log region. Re-rendering the whole details
+      // block would re-mount the political-radio transcript, the headline
+      // lower-third and the clip control, discarding their accumulated state.
+      const region = overlay.querySelector<HTMLElement>(
+        "[data-ai-league-decisions-region]",
       );
-    });
+      if (region === null) return;
+      const wasOpen =
+        region
+          .querySelector("[data-ai-league-decisions-toggle]")
+          ?.getAttribute("aria-expanded") === "true";
+      region.outerHTML = decisionLogHtml(currentInput.decisions, turn);
+      mountAiLeagueDecisionLogExpander(overlay, currentInput.decisions);
+      mountAiLeagueDecisionsDisclosure(overlay);
+      if (wasOpen) {
+        overlay
+          .querySelector<HTMLButtonElement>("[data-ai-league-decisions-toggle]")
+          ?.click();
+      }
+    },
+    (turn) =>
+      currentInput.decisions.filter(
+        (decision) =>
+          !Number.isFinite(decision.turnNumber) || decision.turnNumber <= turn,
+      ).length,
+  );
+
+  return {
+    hydrate(nextInput: Partial<AiLeagueReplayOverlayInput>) {
+      if (disposed) {
+        return;
+      }
+      const nextTelemetry =
+        nextInput.spectatorTelemetry === undefined
+          ? currentInput.spectatorTelemetry
+          : normalizeSpectatorTelemetry(nextInput.spectatorTelemetry);
+      currentInput = {
+        ...currentInput,
+        ...nextInput,
+        spectatorTelemetry: nextTelemetry,
+      };
+      const details = overlay.querySelector<HTMLElement>(
+        "[data-ai-league-details]",
+      );
+      if (details === null || !overlay.isConnected) {
+        return;
+      }
+      renderDetails();
+    },
+    dispose() {
+      if (disposed) {
+        return;
+      }
+      disposed = true;
+      disposePlayheadSync();
+      clipControl?.dispose();
+      clipControl = null;
+      disposeReplayOverlay(overlay);
+    },
+  } satisfies AiLeagueReplayOverlayHandle;
+}
+
+function disposeReplayOverlay(overlay: HTMLElement) {
+  // A stale handle must never tear down a newer replay mounted into the same
+  // document. Every global hook below belongs to the current overlay only.
+  if (document.getElementById("ai-league-replay-overlay") !== overlay) {
+    return;
+  }
+  const win = window as Window & {
+    __aiLeaguePanelDisclosureCleanup?: () => void;
+    __aiLeaguePanelControlsCleanup?: () => void;
+    __aiLeagueReplayJumpCleanup?: () => void;
+    __aiLeagueHeadlineCleanup?: () => void;
+    __aiLeagueDiplomacyCleanup?: () => void;
+    __aiLeagueSocialBubblesCleanup?: () => void;
+  };
+  win.__aiLeaguePanelDisclosureCleanup?.();
+  win.__aiLeaguePanelControlsCleanup?.();
+  win.__aiLeagueReplayJumpCleanup?.();
+  win.__aiLeagueHeadlineCleanup?.();
+  win.__aiLeagueDiplomacyCleanup?.();
+  win.__aiLeagueSocialBubblesCleanup?.();
+  delete win.__aiLeaguePanelDisclosureCleanup;
+  delete win.__aiLeaguePanelControlsCleanup;
+  delete win.__aiLeagueReplayJumpCleanup;
+  delete win.__aiLeagueHeadlineCleanup;
+  delete win.__aiLeagueDiplomacyCleanup;
+  delete win.__aiLeagueSocialBubblesCleanup;
+  overlay.remove();
+  document.getElementById("ai-league-social-transcript")?.remove();
+  document.getElementById("ai-league-headline-event")?.remove();
+  document.body.classList.remove(
+    "ai-league-replay-mode",
+    "ai-league-native-spectator-ui",
+  );
+}
+
+function mountReplayDetailsBindings(
+  overlay: HTMLElement,
+  input: AiLeagueReplayOverlayInput,
+): ReplayScopedLeagueClipControlHandle | null {
+  const telemetry =
+    input.spectatorTelemetry as AiLeagueSpectatorTelemetry | null;
+  mountAiLeagueSocialTranscript(input.decisions, telemetry);
+  mountAiLeagueHeadlineEvent(input.decisions, telemetry);
+  mountAiLeagueDiplomacyStrip(overlay, input.decisions, telemetry);
+  mountAiLeagueTalksToggle(overlay, telemetry);
+  mountAiLeagueDecisionLogExpander(overlay, input.decisions);
+  mountAiLeagueDecisionsDisclosure(overlay);
+  mountAiLeagueRadioToggle(overlay);
+  mountAiLeagueShareImageButton(overlay);
+  const clipContainer = overlay.querySelector<HTMLElement>(
+    "[data-ai-league-clip]",
+  );
+  return clipContainer === null
+    ? null
+    : mountReplayScopedLeagueClipControl({
+        container: clipContainer,
+        runKey: input.runID,
+        renderableThroughTurn: input.replayMaxTurn,
+      });
+}
+
+/**
+ * Share button. The capture itself happens in the renderer binding, which owns
+ * the canvas; this only asks for it and reports the outcome. The button is
+ * disabled while a capture is in flight so a double click cannot queue two
+ * encodes, and it self-resets if no binding is listening.
+ */
+function mountAiLeagueShareImageButton(overlay: HTMLElement): void {
+  const button = overlay.querySelector<HTMLButtonElement>(
+    "[data-ai-league-share-button]",
+  );
+  const status = overlay.querySelector<HTMLElement>(
+    "[data-ai-league-share-status]",
+  );
+  if (button === null) return;
+  let resetTimer: ReturnType<typeof setTimeout> | null = null;
+  const settle = (message: string): void => {
+    button.disabled = false;
+    if (status !== null) status.textContent = message;
+    if (resetTimer !== null) clearTimeout(resetTimer);
+    resetTimer = setTimeout(() => {
+      if (status !== null) status.textContent = "";
+    }, 4000);
+  };
+  document.addEventListener(REPLAY_SHARE_IMAGE_RESULT_EVENT, (event: Event) => {
+    const detail = (event as CustomEvent<ReplayShareImageResultDetail>).detail;
+    settle(
+      translateText(
+        detail?.ok !== true
+          ? "ai_league_replay.share_image_failed"
+          : detail.delivery === "clipboard"
+            ? "ai_league_replay.share_image_copied"
+            : "ai_league_replay.share_image_saved",
+      ),
+    );
+  });
+  button.addEventListener("click", () => {
+    button.disabled = true;
+    if (status !== null) {
+      status.textContent = translateText(
+        "ai_league_replay.share_image_working",
+      );
+    }
+    document.dispatchEvent(new CustomEvent(REPLAY_SHARE_IMAGE_REQUEST_EVENT));
+    // No binding mounted (details-only page, or the renderer is gone): the
+    // request goes nowhere, so recover the button instead of wedging it.
+    if (resetTimer !== null) clearTimeout(resetTimer);
+    resetTimer = setTimeout(() => {
+      if (button.disabled) {
+        settle(translateText("ai_league_replay.share_image_failed"));
+      }
+    }, 8000);
+  });
+}
+
+/**
+ * Disclosure for the decision log. It is the panel's largest block and pure
+ * reference material, so it ships collapsed and the viewer opts in.
+ */
+function mountAiLeagueDecisionsDisclosure(overlay: HTMLElement): void {
+  const toggle = overlay.querySelector<HTMLButtonElement>(
+    "[data-ai-league-decisions-toggle]",
+  );
+  const body = overlay.querySelector<HTMLElement>(
+    "[data-ai-league-decisions-body]",
+  );
+  if (toggle === null || body === null) return;
+  toggle.addEventListener("click", () => {
+    const nowOpen = body.hidden;
+    body.hidden = !nowOpen;
+    toggle.setAttribute("aria-expanded", String(nowOpen));
+    toggle.textContent = translateText(
+      nowOpen
+        ? "ai_league_replay.decisions_hide"
+        : "ai_league_replay.decisions_show",
+    );
+  });
+}
+
+/**
+ * Political radio (the floating social transcript) is atmosphere, not signal,
+ * and it covers the map's lower-left corner. Ship it OFF and let the viewer
+ * turn it on from a small control in the panel header actions.
+ */
+function mountAiLeagueRadioToggle(overlay: HTMLElement): void {
+  const actions = overlay.querySelector<HTMLElement>(
+    ".ai-league-header-actions",
+  );
+  if (actions === null) return;
+  if (actions.querySelector("[data-ai-league-radio-toggle]") !== null) return;
+  const toggle = document.createElement("button");
+  toggle.type = "button";
+  toggle.dataset.aiLeagueRadioToggle = "";
+  toggle.setAttribute("aria-pressed", "false");
+  toggle.textContent = translateText("ai_league_replay.radio_show");
+  const apply = (on: boolean) => {
+    document.body.classList.toggle("ai-league-radio-on", on);
+    toggle.setAttribute("aria-pressed", String(on));
+    // Label stays constant so the header does not reflow on toggle; the
+    // pressed state is what communicates on/off.
+    toggle.textContent = translateText(
+      on ? "ai_league_replay.radio_hide" : "ai_league_replay.radio_show",
+    );
+    toggle.classList.toggle("is-on", on);
+  };
+  apply(false);
+  toggle.addEventListener("click", () => {
+    apply(!document.body.classList.contains("ai-league-radio-on"));
+  });
+  actions.prepend(toggle);
+}
+
+/**
+ * Advance the playhead-windowed panels as the replay runs. Re-renders the whole
+ * details block on a throttle (not every frame — that block is expensive), and
+ * only when the visible decision count actually changes, so an idle or paused
+ * replay costs nothing. Disclosure state for the decision log and talks is
+ * preserved across the re-render so the panels do not snap shut underneath the
+ * viewer.
+ */
+function mountAiLeaguePlayheadSync(
+  overlay: HTMLElement,
+  applyTurn: (turn: number) => void,
+  visibleDecisionCount: (turn: number) => number,
+): () => void {
+  const THROTTLE_MS = 750;
+  let lastRenderedAt = 0;
+  let lastVisibleCount = -1;
+  // Per-listener, NOT global: aiLeagueCurrentTurn is shared render-time state,
+  // so gating on it would let whichever listener ran first swallow the event and
+  // leave every other mounted overlay frozen.
+  let lastSeenTurn = -1;
+  const onFrame = (event: Event) => {
+    const detail = (event as CustomEvent<{ turnNumber?: unknown }>).detail;
+    if (typeof detail?.turnNumber !== "number") return;
+    if (!Number.isFinite(detail.turnNumber)) return;
+    if (detail.turnNumber <= lastSeenTurn) return;
+    lastSeenTurn = detail.turnNumber;
+    const now = Date.now();
+    if (now - lastRenderedAt < THROTTLE_MS) return;
+    const count = visibleDecisionCount(detail.turnNumber);
+    if (count === lastVisibleCount) return;
+    lastVisibleCount = count;
+    lastRenderedAt = now;
+    applyTurn(detail.turnNumber);
+  };
+  document.addEventListener("ai-league-replay-frame", onFrame);
+  return () => document.removeEventListener("ai-league-replay-frame", onFrame);
+}
+
+const AI_LEAGUE_MOBILE_BREAKPOINT = 740;
+
+function isNarrowReplayViewport(): boolean {
+  return window.innerWidth <= AI_LEAGUE_MOBILE_BREAKPOINT;
+}
+
+function mountReplayPanelDisclosure(overlay: HTMLElement) {
+  const toggle = overlay.querySelector<HTMLButtonElement>(
+    "[data-ai-league-toggle]",
+  );
+  const body = overlay.querySelector<HTMLElement>(".ai-league-body");
+  if (toggle === null || body === null) {
+    return;
+  }
+
+  const setExpanded = (expanded: boolean) => {
+    overlay.classList.toggle("collapsed", !expanded);
+    toggle.setAttribute("aria-expanded", String(expanded));
+    toggle.textContent = translateText(
+      expanded ? "ai_league_replay.panel_hide" : "ai_league_replay.panel_show",
+    );
+  };
+
+  let narrow = isNarrowReplayViewport();
+  overlay.classList.toggle("mobile-bottom-sheet", narrow);
+  setExpanded(!narrow);
+  toggle.addEventListener("click", () => {
+    setExpanded(overlay.classList.contains("collapsed"));
+  });
+
+  const onResize = () => {
+    const nextNarrow = isNarrowReplayViewport();
+    if (nextNarrow === narrow) {
+      return;
+    }
+    narrow = nextNarrow;
+    overlay.classList.toggle("mobile-bottom-sheet", narrow);
+    // Crossing the breakpoint resets to the useful default for that layout:
+    // map-first on phones and the full inspector on desktop.
+    setExpanded(!narrow);
+  };
+  const win = window as Window & {
+    __aiLeaguePanelDisclosureCleanup?: () => void;
+  };
+  win.__aiLeaguePanelDisclosureCleanup?.();
+  window.addEventListener("resize", onResize);
+  win.__aiLeaguePanelDisclosureCleanup = () => {
+    window.removeEventListener("resize", onResize);
+  };
 }
 
 function mountReplayPanelControls(overlay: HTMLElement) {
   const storageKey = "ai-league-spectator-layout-v1";
-  const stored = readStoredPanelLayout(storageKey);
-  if (stored !== null) {
-    Object.assign(overlay.style, stored);
+  let narrow = isNarrowReplayViewport();
+  if (!narrow) {
+    const stored = readStoredPanelLayout(storageKey);
+    if (stored !== null) {
+      Object.assign(overlay.style, stored);
+    }
   }
 
-  const dragHandle = overlay.querySelector<HTMLElement>("[data-ai-league-drag]");
-  let dragState:
-    | {
-        startX: number;
-        startY: number;
-        left: number;
-        top: number;
-      }
-    | null = null;
+  const dragHandle = overlay.querySelector<HTMLElement>(
+    "[data-ai-league-drag]",
+  );
+  let dragState: {
+    startX: number;
+    startY: number;
+    left: number;
+    top: number;
+  } | null = null;
   dragHandle?.addEventListener("mousedown", (event) => {
+    if (narrow) {
+      return;
+    }
     if ((event.target as HTMLElement).closest("button,a,input")) {
       return;
     }
@@ -216,15 +582,16 @@ function mountReplayPanelControls(overlay: HTMLElement) {
   const resizeHandle = overlay.querySelector<HTMLElement>(
     "[data-ai-league-resize]",
   );
-  let resizeState:
-    | {
-        startX: number;
-        startY: number;
-        width: number;
-        height: number;
-      }
-    | null = null;
+  let resizeState: {
+    startX: number;
+    startY: number;
+    width: number;
+    height: number;
+  } | null = null;
   resizeHandle?.addEventListener("mousedown", (event) => {
+    if (narrow) {
+      return;
+    }
     const rect = overlay.getBoundingClientRect();
     resizeState = {
       startX: event.clientX,
@@ -236,6 +603,9 @@ function mountReplayPanelControls(overlay: HTMLElement) {
   });
 
   const onMove = (event: MouseEvent) => {
+    if (narrow) {
+      return;
+    }
     if (dragState !== null) {
       const nextLeft = clamp(
         dragState.left + event.clientX - dragState.startX,
@@ -257,7 +627,11 @@ function mountReplayPanelControls(overlay: HTMLElement) {
         clamp(resizeState.width + event.clientX - resizeState.startX, 320, 760),
       )}px`;
       overlay.style.height = `${Math.round(
-        clamp(resizeState.height + event.clientY - resizeState.startY, 260, window.innerHeight - 24),
+        clamp(
+          resizeState.height + event.clientY - resizeState.startY,
+          260,
+          window.innerHeight - 24,
+        ),
       )}px`;
       overlay.style.maxHeight = "none";
       persistPanelLayout(storageKey, overlay);
@@ -266,6 +640,22 @@ function mountReplayPanelControls(overlay: HTMLElement) {
   const onUp = () => {
     dragState = null;
     resizeState = null;
+  };
+  const onResize = () => {
+    const nextNarrow = isNarrowReplayViewport();
+    if (nextNarrow === narrow) {
+      return;
+    }
+    narrow = nextNarrow;
+    dragState = null;
+    resizeState = null;
+    overlay.removeAttribute("style");
+    if (!narrow) {
+      const stored = readStoredPanelLayout(storageKey);
+      if (stored !== null) {
+        Object.assign(overlay.style, stored);
+      }
+    }
   };
   // Same remount-cleanup pattern as every other document-level mount in this
   // file: without it each overlay remount stacks another listener pair, and
@@ -276,9 +666,11 @@ function mountReplayPanelControls(overlay: HTMLElement) {
   win.__aiLeaguePanelControlsCleanup?.();
   document.addEventListener("mousemove", onMove);
   document.addEventListener("mouseup", onUp);
+  window.addEventListener("resize", onResize);
   win.__aiLeaguePanelControlsCleanup = () => {
     document.removeEventListener("mousemove", onMove);
     document.removeEventListener("mouseup", onUp);
+    window.removeEventListener("resize", onResize);
   };
   overlay
     .querySelector<HTMLButtonElement>("[data-ai-league-reset-layout]")
@@ -329,6 +721,44 @@ function mountReplayJumpControls(root: Document) {
     }
   };
   const onClick = (event: Event) => {
+    const preview = (event.target as HTMLElement | null)?.closest<HTMLElement>(
+      "[data-ai-league-preview-turn]",
+    );
+    if (preview !== null && preview !== undefined) {
+      const turnNumber = Number(preview.dataset.aiLeaguePreviewTurn);
+      if (!Number.isSafeInteger(turnNumber) || turnNumber < 0) {
+        return;
+      }
+      document.dispatchEvent(
+        new CustomEvent("ai-league-replay-pause", {
+          detail: { paused: true },
+          bubbles: true,
+        }),
+      );
+      // Preview always starts a fresh replay document. Even a same/forward
+      // in-process jump can overshoot while fastest-playback frames already
+      // queued ahead of the pause are draining. The render fast-forward lane
+      // coalesces the restart, and Main pauses before the exact target jump.
+      const url = new URL(window.location.href);
+      url.searchParams.set("replay", "");
+      url.searchParams.set("turn", String(turnNumber));
+      url.searchParams.set(
+        REPLAY_RENDER_FAST_FORWARD_PARAM,
+        String(turnNumber),
+      );
+      url.searchParams.set("clipPreview", "1");
+      const navigation = new CustomEvent(
+        "ai-league-replay-preview-navigation",
+        {
+          detail: { turnNumber, url: url.toString() },
+          cancelable: true,
+        },
+      );
+      if (root.dispatchEvent(navigation)) {
+        window.location.href = url.toString();
+      }
+      return;
+    }
     const button = (event.target as HTMLElement | null)?.closest<HTMLElement>(
       "[data-ai-league-jump-turn]",
     );
@@ -464,7 +894,8 @@ function mountAiLeagueHeadlineEvent(
     return;
   }
   const onFrame = (event: Event) => {
-    const detail = (event as CustomEvent<AiLeagueReplayFrameEventDetail>).detail;
+    const detail = (event as CustomEvent<AiLeagueReplayFrameEventDetail>)
+      .detail;
     if (!detail || !Number.isFinite(detail.turnNumber)) {
       return;
     }
@@ -475,8 +906,7 @@ function mountAiLeagueHeadlineEvent(
           detail.turnNumber <= headline.turnNumber + HEADLINE_VISIBLE_TURNS,
       )
       .sort(
-        (a, b) =>
-          b.turnNumber - a.turnNumber || b.sequence - a.sequence,
+        (a, b) => b.turnNumber - a.turnNumber || b.sequence - a.sequence,
       )[0];
     if (active === undefined) {
       lowerThird.hidden = true;
@@ -505,78 +935,59 @@ function headlineKindLabel(kind: AiLeagueHeadlineEvent["kind"]): string {
 }
 
 function overlayHtml(input: AiLeagueReplayOverlayInput): string {
-  const rejected = input.decisions.filter(
-    (decision) => !decision.result.accepted,
-  );
-  const fallback = input.decisions.filter((decision) => decision.fallbackUsed);
-  const actionCounts = input.decisions.reduce<Record<string, number>>(
-    (counts, decision) => {
-      const kind = actionLabel(decision);
-      counts[kind] = (counts[kind] ?? 0) + 1;
-      return counts;
-    },
-    {},
-  );
-  const playstyleKinds = Object.entries(actionCounts)
-    .filter(([kind]) => kind !== "hold" && kind !== "spawn")
-    .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
-    .slice(0, 3)
-    .map(([kind]) => kind);
-  const agentCount = input.summary?.roster?.length ?? 0;
-  const bots = input.summary?.runnerConfig?.bots ?? null;
-  const nations = input.summary?.runnerConfig?.nations ?? null;
-  const maxSteps = input.summary?.runnerConfig?.maxSteps ?? null;
-  const configuredOpponentCount = numericCount(nations) + numericCount(bots);
-  const setupLine =
-    agentCount > 0 || configuredOpponentCount > 0
-      ? `${agentCount} Proxy War agents vs ${configuredOpponentCount} built-in opponents`
-      : translateText("ai_league_replay.setup_generic");
-  const mapName =
-    typeof input.summary?.runnerConfig?.map === "string"
-      ? input.summary.runnerConfig.map
-      : null;
-  const difficulty =
-    typeof input.summary?.runnerConfig?.difficulty === "string"
-      ? input.summary.runnerConfig.difficulty
-      : null;
-  const configLine = [
-    mapName,
-    difficulty,
-    maxSteps !== null && maxSteps !== undefined
-      ? translateText("ai_league_replay.setup_turns", { turns: maxSteps })
-      : null,
-  ]
-    .filter(Boolean)
-    .join(" · ");
-  const spectatorTelemetry =
-    input.spectatorTelemetry as AiLeagueSpectatorTelemetry | null;
-
   return `
     <style>
+      /*
+       * Chrome is aligned to the premiere overlay so the two spectator panels
+       * read as one product: same geometry, radius, blur and type stack. The
+       * premiere is the flagship surface, so it sets the direction rather than
+       * the reverse. Only chrome is shared here — the button system and control
+       * layout deliberately stay put until the two panels converge into one
+       * component, because matching controls that behave differently would
+       * promise capabilities this panel does not have.
+       */
       #ai-league-replay-overlay {
         position: fixed;
-        top: 16px;
-        right: 16px;
+        /*
+         * Left-anchored: the top-right corner is the playback cluster's lane
+         * (game-right-sidebar: time, speed, pause, settings, fullscreen,
+         * leave). That strip has no stacking context of its own, so a panel
+         * pinned top-right sat on top of it and made every playback control
+         * unclickable. Moving to the left keeps both reachable and gives the
+         * panel back its full height. game-left-sidebar is hidden in replay
+         * mode, so this lane is free.
+         */
+        top: 12px;
+        left: 12px;
         z-index: 50000;
-        width: min(360px, calc(100vw - 32px));
-        max-height: calc(100vh - 32px);
+        width: min(376px, calc(100vw - 24px));
+        max-height: calc(100vh - 24px);
         overflow: hidden;
         display: grid;
         grid-template-rows: auto 1fr;
-        border: 1px solid rgba(15, 23, 42, 0.22);
-        border-radius: 8px;
-        background: rgba(255, 255, 255, 0.94);
-        color: #17202a;
-        box-shadow: 0 18px 60px rgba(15, 23, 42, 0.22);
-        font: 14px/1.4 system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        /*
+         * The implicit grid column is auto-sized, which floors at min-content.
+         * Any unbreakable child (the nowrap run id) therefore widens the track
+         * past the panel's own width, and overflow:hidden silently clips the
+         * header controls out of reach instead of shrinking them. Pin the
+         * column and let children shrink.
+         */
+        grid-template-columns: minmax(0, 1fr);
+        border: 1px solid var(--pw-line-strong, #3a4656);
+        border-radius: var(--pw-r-xl, 18px);
+        background: var(--pw-glass-strong, rgba(10, 14, 20, 0.95));
+        color: var(--pw-text, #edf1f7);
+        box-shadow: var(--pw-shadow, 0 26px 74px rgba(0, 0, 0, 0.52));
+        backdrop-filter: blur(18px) saturate(1.15);
+        font: 14px/1.45 Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
         font-variant-numeric: tabular-nums;
       }
       body.ai-league-native-spectator-ui #ai-league-replay-overlay {
         top: auto;
         right: auto;
-        left: 16px;
-        bottom: 16px;
-        width: min(360px, calc(100vw - 32px));
+        left: 12px;
+        bottom: 12px;
+        width: min(376px, calc(100vw - 24px));
         max-height: min(58vh, 520px);
       }
       #ai-league-replay-overlay.collapsed {
@@ -591,33 +1002,70 @@ function overlayHtml(input: AiLeagueReplayOverlayInput): string {
         justify-content: space-between;
         gap: 10px;
         padding: 12px;
-        border-bottom: 1px solid rgba(15, 23, 42, 0.12);
+        border-bottom: 1px solid var(--pw-line, #2a3442);
         cursor: move;
         user-select: none;
+        /* Grid/flex children default to min-width:auto and refuse to shrink
+           below their content; without this the run id pushes the header
+           actions outside the panel. */
+        min-width: 0;
       }
       #ai-league-replay-overlay header > div:first-child {
         min-width: 0;
+        flex: 1 1 auto;
+        overflow: hidden;
       }
       #ai-league-replay-overlay h2 {
         margin: 0 0 2px;
         font-size: 15px;
+        white-space: nowrap;
+      }
+      /*
+       * The run id is support/debug provenance, not a headline. Left to wrap it
+       * took three lines and dominated the header. Keep it to one line with the
+       * full value in the tooltip (and selectable for copy/paste). Mobile
+       * already did this; it was only ever gated behind a breakpoint.
+       */
+      .ai-league-run-id {
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+        max-width: 100%;
+        user-select: all;
+        cursor: text;
       }
       .ai-league-header-actions {
         display: flex;
-        gap: 6px;
+        gap: 5px;
         align-items: center;
+        flex: 0 0 auto;
+      }
+      .ai-league-header-actions button {
+        padding: 5px 7px;
+        font-size: 12px;
+        white-space: nowrap;
+      }
+      .ai-league-header-actions button.is-on {
+        border-color: var(--pw-accent, #f4a64a);
+        color: var(--pw-accent, #f4a64a);
       }
       #ai-league-replay-overlay button {
-        border: 1px solid rgba(15, 23, 42, 0.18);
-        background: #fff;
-        border-radius: 6px;
+        border: 1px solid var(--pw-line-strong, #3a4656);
+        background: var(--pw-surface-2, #18202b);
+        color: var(--pw-text, #edf1f7);
+        border-radius: 8px;
         padding: 6px 8px;
         cursor: pointer;
         font-weight: 700;
       }
+      #ai-league-replay-overlay button:hover {
+        border-color: var(--pw-accent, #f4a64a);
+        color: var(--pw-accent, #f4a64a);
+      }
       .ai-league-body {
         overflow: auto;
         padding: 12px;
+        min-width: 0;
       }
       .ai-league-resize-handle {
         position: absolute;
@@ -626,11 +1074,11 @@ function overlayHtml(input: AiLeagueReplayOverlayInput): string {
         width: 16px;
         height: 16px;
         cursor: nwse-resize;
-        border-right: 2px solid rgba(15, 23, 42, 0.28);
-        border-bottom: 2px solid rgba(15, 23, 42, 0.28);
+        border-right: 2px solid var(--pw-line-strong, #3a4656);
+        border-bottom: 2px solid var(--pw-line-strong, #3a4656);
       }
       .ai-league-muted {
-        color: #64748b;
+        color: var(--pw-muted, #a4afbf);
         font-size: 12px;
       }
       .ai-league-metrics {
@@ -640,10 +1088,10 @@ function overlayHtml(input: AiLeagueReplayOverlayInput): string {
         margin-bottom: 10px;
       }
       .ai-league-metric {
-        border: 1px solid rgba(15, 23, 42, 0.12);
+        border: 1px solid var(--pw-line, #2a3442);
         border-radius: 8px;
         padding: 6px;
-        background: #f8fafc;
+        background: var(--pw-surface-2, #18202b);
         font-size: 12px;
       }
       .ai-league-metric b {
@@ -651,14 +1099,21 @@ function overlayHtml(input: AiLeagueReplayOverlayInput): string {
         font-size: 14px;
         font-variant-numeric: tabular-nums;
       }
+      .ai-league-metric-share {
+        display: block;
+        margin-top: 1px;
+        font-size: 10px;
+        font-weight: 600;
+        opacity: 0.75;
+      }
       .ai-league-metric.warn {
-        background: #fff2dc;
-        border-color: rgba(165, 91, 0, 0.4);
-        color: #a55b00;
+        background: var(--pw-caution-soft, rgba(251, 191, 36, 0.14));
+        border-color: var(--pw-caution, #fbbf24);
+        color: var(--pw-caution-text, #fde68a);
       }
       .ai-league-actions {
         margin: 0 0 10px;
-        color: #475569;
+        color: var(--pw-text-dim, #cbd5e1);
       }
       .ai-league-playstyle {
         display: flex;
@@ -666,21 +1121,33 @@ function overlayHtml(input: AiLeagueReplayOverlayInput): string {
         flex-wrap: wrap;
         gap: 5px;
         margin: 0 0 10px;
-        color: #475569;
+        color: var(--pw-text-dim, #cbd5e1);
         font-size: 12px;
       }
       .ai-league-standings {
         display: grid;
+        /* Header stays put, rows scroll. Without the fixed row track the block
+           grew and shrank every frame (ranks reorder, stance chips come and
+           go), which shoved every section below it up and down continuously. */
+        grid-template-rows: auto minmax(0, 1fr);
         gap: 5px;
-        border: 1px solid rgba(15, 23, 42, 0.12);
+        border: 1px solid var(--pw-line, #2a3442);
         border-radius: 8px;
         padding: 9px;
         margin: 0 0 10px;
-        background: #fff;
+        background: var(--pw-surface, #111720);
+        height: 244px;
+      }
+      [data-ai-league-diplomacy-rows] {
+        overflow-y: auto;
+        overflow-x: hidden;
+        min-height: 0;
+        /* Keep the scrollbar from reflowing content when it appears. */
+        scrollbar-gutter: stable;
       }
       .ai-league-standings-title {
         font-weight: 900;
-        color: #334155;
+        color: var(--pw-text-dim, #cbd5e1);
       }
       .ai-league-diplo-row {
         display: flex;
@@ -691,7 +1158,7 @@ function overlayHtml(input: AiLeagueReplayOverlayInput): string {
       }
       .ai-league-diplo-rank {
         min-width: 16px;
-        color: #64748b;
+        color: var(--pw-muted, #a4afbf);
         font-variant-numeric: tabular-nums;
       }
       .ai-league-color-dot {
@@ -699,36 +1166,51 @@ function overlayHtml(input: AiLeagueReplayOverlayInput): string {
         width: 11px;
         height: 11px;
         border-radius: 50%;
-        border: 1px solid rgba(15, 23, 42, 0.35);
+        border: 1px solid rgba(255, 255, 255, 0.35);
       }
       .ai-league-diplo-name {
         font-weight: 900;
-        color: #17202a;
+        color: var(--pw-text, #edf1f7);
         overflow: hidden;
         text-overflow: ellipsis;
         white-space: nowrap;
-        max-width: 96px;
+        /* Was a flat 96px, which truncated the identifying part of most league
+           names ("K1Z Mickey …", "Captain Unde…"). Let the name take the row's
+           free space instead; the rank, dot and share column are fixed. */
+        flex: 1 1 auto;
+        min-width: 0;
       }
       .ai-league-diplo-share {
         margin-left: auto;
         font-variant-numeric: tabular-nums;
         font-weight: 900;
-        color: #334155;
+        color: var(--pw-text-dim, #cbd5e1);
       }
+      /*
+       * Diplomacy stances belong to the ranked row directly above them. They
+       * used to render flush-left at nearly the same size and weight as a
+       * ranked row, so a stance entry ("softmaxwell ⊘") read as another player
+       * — a 9-player match looked like ~14 entries. Indent them under the name
+       * column, bind them to the parent row with a rule, and demote the type
+       * so the ranking stays the dominant structure.
+       */
       .ai-league-diplo-stances {
         display: flex;
         align-items: center;
         gap: 6px;
-        margin-top: 3px;
+        margin: 2px 0 6px 20px;
+        padding-left: 8px;
+        border-left: 1px solid var(--pw-line, #2a3442);
         flex-wrap: wrap;
-        font-size: 12px;
-        font-weight: 700;
+        font-size: 11px;
+        font-weight: 600;
+        color: var(--pw-muted, #a4afbf);
       }
       .ai-league-stance {
         display: inline-flex;
         align-items: center;
         gap: 3px;
-        color: #475569;
+        color: var(--pw-text-dim, #cbd5e1);
       }
       .ai-league-stance .ai-league-color-dot {
         width: 9px;
@@ -749,13 +1231,13 @@ function overlayHtml(input: AiLeagueReplayOverlayInput): string {
         line-height: 1;
       }
       .ai-league-stance.ally .ai-league-stance-glyph {
-        color: #15803d;
+        color: var(--pw-positive, #34d399);
       }
       .ai-league-stance.war .ai-league-stance-glyph {
-        color: #b91c1c;
+        color: var(--pw-danger, #f87171);
       }
       .ai-league-stance.embargo .ai-league-stance-glyph {
-        color: #92400e;
+        color: var(--pw-caution, #fbbf24);
       }
       .ai-league-stance.expiring {
         opacity: 0.55;
@@ -770,41 +1252,41 @@ function overlayHtml(input: AiLeagueReplayOverlayInput): string {
         grid-template-columns: auto 1fr;
         gap: 7px;
         align-items: start;
-        border: 1px solid rgba(15, 23, 42, 0.1);
+        border: 1px solid var(--pw-line, #2a3442);
         border-radius: 8px;
         padding: 8px;
-        background: #f8fafc;
+        background: var(--pw-surface-2, #18202b);
       }
       .ai-league-feed-item strong {
         display: block;
       }
       .ai-league-feed-item p {
         margin: 2px 0 0;
-        color: #475569;
+        color: var(--pw-text-dim, #cbd5e1);
       }
       .ai-league-chat-bubble {
         display: inline-block;
         margin: 5px 0 0;
         padding: 6px 8px;
-        border: 1px solid #c8dcf2;
+        border: 1px solid var(--pw-info-soft, rgba(56, 189, 248, 0.16));
         border-radius: 12px 12px 12px 3px;
-        background: #eef6ff;
-        color: #17324d;
+        background: var(--pw-info-soft, rgba(56, 189, 248, 0.16));
+        color: var(--pw-text, #edf1f7);
         font-weight: 800;
       }
       .ai-league-match-setup {
-        border: 1px solid rgba(29, 94, 143, 0.2);
+        border: 1px solid var(--pw-line, #2a3442);
         border-radius: 8px;
         padding: 9px;
         margin-bottom: 10px;
-        background: #eef7fb;
+        background: var(--pw-surface-2, #18202b);
       }
       .ai-league-politics {
-        border: 1px solid rgba(15, 23, 42, 0.12);
+        border: 1px solid var(--pw-line, #2a3442);
         border-radius: 8px;
         padding: 9px;
         margin: 0 0 10px;
-        background: #fff;
+        background: var(--pw-surface, #111720);
       }
       .ai-league-politics-head {
         display: flex;
@@ -823,10 +1305,10 @@ function overlayHtml(input: AiLeagueReplayOverlayInput): string {
         margin-bottom: 10px;
       }
       .ai-league-thread {
-        border: 1px solid rgba(15, 23, 42, 0.12);
+        border: 1px solid var(--pw-line, #2a3442);
         border-radius: 8px;
         padding: 8px;
-        background: #fff;
+        background: var(--pw-surface, #111720);
       }
       .ai-league-thread.hidden {
         display: none;
@@ -841,25 +1323,68 @@ function overlayHtml(input: AiLeagueReplayOverlayInput): string {
       .ai-league-jump {
         min-width: 48px;
         padding: 4px 6px !important;
-        color: #215a9c;
+        color: var(--pw-info, #56c7f5);
         font-size: 11px;
       }
       .ai-league-message p {
         margin: 1px 0 0;
-        color: #334155;
+        color: var(--pw-text-dim, #cbd5e1);
       }
       .ai-league-decision {
-        border: 1px solid rgba(15, 23, 42, 0.12);
+        border: 1px solid var(--pw-line, #2a3442);
         border-radius: 8px;
         padding: 9px;
         margin: 8px 0;
-        background: #fff;
+        background: var(--pw-surface, #111720);
       }
       .ai-league-row {
         display: flex;
         justify-content: space-between;
         gap: 8px;
         align-items: start;
+      }
+      .ai-league-share {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        margin: 8px 0 0;
+        min-height: 30px;
+      }
+      .ai-league-share-button {
+        border: 1px solid var(--pw-border, rgba(148, 163, 184, 0.28));
+        background: var(--pw-surface, #111720);
+        color: var(--pw-text, #e6edf6);
+        border-radius: var(--pw-r-sm, 8px);
+        padding: 6px 11px;
+        font: inherit;
+        font-size: 12px;
+        font-weight: 600;
+        cursor: pointer;
+        transition:
+          background 120ms ease,
+          border-color 120ms ease;
+      }
+      .ai-league-share-button:hover:not(:disabled) {
+        background: var(--pw-surface-raised, #18202b);
+        border-color: var(--pw-accent, #f4a64a);
+      }
+      .ai-league-share-button:focus-visible {
+        outline: 2px solid var(--pw-accent, #f4a64a);
+        outline-offset: 2px;
+      }
+      .ai-league-share-button:disabled {
+        opacity: 0.55;
+        cursor: default;
+      }
+      .ai-league-share-status {
+        font-size: 12px;
+        color: var(--pw-text-muted, rgba(230, 237, 246, 0.62));
+      }
+      @media (pointer: coarse) {
+        .ai-league-share-button {
+          min-height: 44px;
+          padding: 6px 14px;
+        }
       }
       .ai-league-badges {
         display: flex;
@@ -871,14 +1396,63 @@ function overlayHtml(input: AiLeagueReplayOverlayInput): string {
         display: inline-flex;
         border-radius: 999px;
         padding: 2px 7px;
-        background: #e7eef7;
-        color: #215a9c;
+        background: var(--pw-info-soft, rgba(56, 189, 248, 0.16));
+        color: var(--pw-info, #56c7f5);
         font-size: 12px;
         font-weight: 800;
       }
+      .ai-league-clip {
+        display: grid;
+        gap: 7px;
+        margin: 12px 0;
+      }
+      /*
+       * The clip moment picker shipped on the clips line while the panel was
+       * still light, so it kept a white card (#f8fafc on slate borders) after
+       * the panel went dark — the one visibly out-of-place block left on this
+       * surface. Bring it onto the shared tokens like every other card here.
+       */
+      .ai-league-clip-selector {
+        display: grid;
+        gap: 7px;
+        min-width: 0;
+        margin: 0;
+        padding: 8px;
+        border: 1px solid var(--pw-line, #2a3442);
+        border-radius: 8px;
+        background: var(--pw-surface-2, #18202b);
+      }
+      .ai-league-clip-selector legend {
+        padding: 0 4px;
+        color: var(--pw-text-dim, #cbd5e1);
+        font-size: 12px;
+        font-weight: 900;
+      }
+      .ai-league-clip-selected {
+        color: var(--pw-text, #edf1f7);
+        font-size: 13px;
+        font-variant-numeric: tabular-nums;
+        font-weight: 900;
+      }
+      /* Range track/thumb inherit the panel accent instead of the OS default,
+         which renders near-invisible on a dark card. */
+      .ai-league-clip-selector input[type="range"] {
+        width: 100%;
+        margin: 0;
+        accent-color: var(--pw-accent, #f4a64a);
+      }
+      .ai-league-clip-moment-actions {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 5px;
+      }
+      .ai-league-clip-moment-actions button:disabled {
+        cursor: default;
+        opacity: 0.45;
+      }
       .ai-league-badge.ok {
-        background: #e5f8ef;
-        color: #19764b;
+        background: var(--pw-positive-soft, rgba(16, 185, 129, 0.18));
+        color: var(--pw-positive-text, #a7f3d0);
       }
       /*
        * Rejected/invalid decision badge: neutral slate, NOT red. Red is
@@ -886,20 +1460,20 @@ function overlayHtml(input: AiLeagueReplayOverlayInput): string {
        * betrayal social tones) so the aggression cue stays unambiguous.
        */
       .ai-league-badge.bad {
-        background: #e2e8f0;
-        color: #475569;
+        background: var(--pw-surface-3, #212b38);
+        color: var(--pw-muted, #a4afbf);
       }
       .ai-league-badge.warn {
-        background: #fff2dc;
-        color: #a55b00;
+        background: var(--pw-caution-soft, rgba(251, 191, 36, 0.14));
+        color: var(--pw-caution-text, #fde68a);
       }
       .ai-league-directive {
         margin: 4px 0 0;
-        color: #334155;
+        color: var(--pw-text-dim, #cbd5e1);
         font-size: 12px;
       }
       .ai-league-directive b {
-        color: #17202a;
+        color: var(--pw-text, #edf1f7);
       }
       .ai-league-decisions-head {
         display: flex;
@@ -910,7 +1484,7 @@ function overlayHtml(input: AiLeagueReplayOverlayInput): string {
       }
       .ai-league-decisions-title {
         font-weight: 900;
-        color: #334155;
+        color: var(--pw-text-dim, #cbd5e1);
       }
       .ai-league-decision-extra[hidden] {
         display: none;
@@ -920,7 +1494,7 @@ function overlayHtml(input: AiLeagueReplayOverlayInput): string {
         overflow-wrap: anywhere;
       }
       #ai-league-replay-overlay a {
-        color: #215a9c;
+        color: var(--pw-info, #56c7f5);
         font-weight: 700;
         text-decoration: none;
       }
@@ -961,6 +1535,22 @@ function overlayHtml(input: AiLeagueReplayOverlayInput): string {
       body.ai-league-replay-mode:not(.ai-league-native-spectator-ui) game-left-sidebar {
         display: none !important;
       }
+      /*
+       * The raw game id is useful to a player who wants to report or share their
+       * own match. In a replay it is provenance nobody asked for — and for
+       * Coworld episodes the id IS the fixed seed (e.g. "COWRLD01"), identical
+       * in every match, so it identifies nothing. The run id in the panel header
+       * is the real identifier here.
+       */
+      body.ai-league-replay-mode .ai-league-game-id {
+        display: none !important;
+      }
+      /* Political radio is opt-in: hidden until the header toggle adds
+         .ai-league-radio-on to <body>. It overlays the map's lower-left corner,
+         so defaulting it on made the replay noisier than it needed to be. */
+      body:not(.ai-league-radio-on) #ai-league-social-transcript {
+        display: none !important;
+      }
       #ai-league-social-transcript {
         position: fixed;
         left: 18px;
@@ -987,46 +1577,46 @@ function overlayHtml(input: AiLeagueReplayOverlayInput): string {
         grid-template-columns: auto 1fr;
         gap: 8px;
         align-items: start;
-        border: 1px solid rgba(15, 23, 42, 0.16);
+        border: 1px solid var(--pw-line-strong, #3a4656);
         border-radius: 8px;
         padding: 8px 10px;
-        background: rgba(255, 255, 255, 0.94);
-        box-shadow: 0 12px 34px rgba(15, 23, 42, 0.18);
+        background: var(--pw-glass-strong, rgba(10, 14, 20, 0.95));
+        box-shadow: var(--pw-shadow-soft, 0 12px 32px rgba(0, 0, 0, 0.35));
       }
       .ai-league-social-transcript-line b {
         display: block;
-        color: #17202a;
+        color: var(--pw-text, #edf1f7);
       }
       .ai-league-social-transcript-line span {
-        color: #475569;
+        color: var(--pw-text-dim, #cbd5e1);
       }
       .ai-league-social-tone {
         border-radius: 999px;
         padding: 2px 7px;
-        background: #e7eef7;
-        color: #215a9c;
+        background: var(--pw-info-soft, rgba(56, 189, 248, 0.16));
+        color: var(--pw-info, #56c7f5);
         font-size: 11px;
         font-weight: 900;
       }
       .ai-league-social-tone.betrayal {
-        background: #ffe4e6;
-        color: #9f1239;
+        background: var(--pw-mk-betrayal-soft, rgba(248, 113, 113, 0.18));
+        color: var(--pw-mk-betrayal, #f87171);
       }
       .ai-league-social-tone.conspiracy {
-        background: #ede9fe;
-        color: #5b21b6;
+        background: var(--pw-mk-turning-soft, rgba(167, 139, 250, 0.18));
+        color: var(--pw-mk-turning, #a78bfa);
       }
       .ai-league-social-tone.threat {
-        background: #ffedd5;
-        color: #9a3412;
+        background: var(--pw-caution-soft, rgba(251, 191, 36, 0.14));
+        color: var(--pw-caution, #fbbf24);
       }
       .ai-league-social-tone.war {
-        background: #fee2e2;
-        color: #991b1b;
+        background: var(--pw-danger-soft, rgba(239, 68, 68, 0.16));
+        color: var(--pw-danger, #f87171);
       }
       .ai-league-social-tone.trade {
-        background: #dcfce7;
-        color: #166534;
+        background: var(--pw-positive-soft, rgba(16, 185, 129, 0.18));
+        color: var(--pw-positive-text, #a7f3d0);
       }
       #ai-league-headline-event {
         position: fixed;
@@ -1047,6 +1637,12 @@ function overlayHtml(input: AiLeagueReplayOverlayInput): string {
         backdrop-filter: blur(8px);
         font: 800 15px/1.3 system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
         text-align: left;
+      }
+      .ai-league-headline-text {
+        min-width: 0;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
       }
       #ai-league-headline-event[hidden] {
         display: none;
@@ -1070,16 +1666,30 @@ function overlayHtml(input: AiLeagueReplayOverlayInput): string {
         background: rgba(124, 45, 18, 0.9);
       }
       @media (max-width: 740px) {
-        #ai-league-replay-overlay {
-          top: 8px;
+        #ai-league-replay-overlay,
+        body.ai-league-native-spectator-ui #ai-league-replay-overlay {
+          top: auto;
           right: 8px;
           left: 8px;
+          bottom: max(8px, env(safe-area-inset-bottom));
           width: auto;
-          max-height: 58vh;
+          max-height: min(58vh, 520px);
+          border-radius: 14px;
+        }
+        #ai-league-replay-overlay:not(.collapsed) {
+          height: min(58vh, 520px);
+        }
+        #ai-league-replay-overlay.collapsed {
+          width: auto;
+          max-height: none;
         }
         #ai-league-replay-overlay header {
-          padding: 10px;
+          align-items: center;
+          min-height: 56px;
+          box-sizing: border-box;
+          padding: 6px 8px 6px 12px;
           gap: 6px;
+          cursor: default;
         }
         #ai-league-replay-overlay h2 {
           font-size: 14px;
@@ -1094,7 +1704,12 @@ function overlayHtml(input: AiLeagueReplayOverlayInput): string {
           display: none;
         }
         #ai-league-replay-overlay button {
-          padding: 5px 7px;
+          min-width: 44px;
+          min-height: 44px;
+          padding: 9px 12px;
+        }
+        #ai-league-replay-overlay .ai-league-resize-handle {
+          display: none;
         }
         .ai-league-metrics {
           grid-template-columns: repeat(3, minmax(0, 1fr));
@@ -1103,105 +1718,265 @@ function overlayHtml(input: AiLeagueReplayOverlayInput): string {
           display: none;
         }
         #ai-league-headline-event {
-          bottom: 8px;
-          max-width: calc(100vw - 16px);
+          bottom: calc(72px + env(safe-area-inset-bottom));
+          width: calc(100vw - 16px);
+          max-width: none;
+          box-sizing: border-box;
+          overflow: hidden;
+          white-space: nowrap;
+        }
+        #ai-league-replay-overlay:not(.collapsed) ~ #ai-league-headline-event {
+          bottom: calc(min(58vh, 520px) + 16px + env(safe-area-inset-bottom));
         }
       }
     </style>
     <header data-ai-league-drag>
       <div>
-        <h2>Proxy War Replay</h2>
-        <div class="ai-league-muted">${escapeHtml(input.runID)}</div>
+        <h2>${escapeHtml(translateText("ai_league_replay.title"))}</h2>
+        <!--
+          Subtitle carries what a viewer needs to place the match (map, agent
+          count, length). The run id is support provenance, not a headline, so
+          it moves to the tooltip. Populated by the details render because the
+          summary arrives after the shell mounts.
+        -->
+        <div class="ai-league-muted ai-league-run-id" data-ai-league-subtitle title="${escapeHtml(input.runID)}">${escapeHtml(matchSubtitle(input) ?? input.runID)}</div>
       </div>
       <div class="ai-league-header-actions">
-        <button type="button" data-ai-league-reset-layout title="Reset panel position">Reset</button>
-        <button type="button" data-ai-league-toggle>Panel</button>
+        <button type="button" data-ai-league-reset-layout title="${escapeHtml(translateText("ai_league_replay.reset_layout_title"))}">${escapeHtml(translateText("ai_league_replay.reset_layout"))}</button>
+        <button type="button" data-ai-league-toggle aria-expanded="true" aria-controls="ai-league-replay-panel-body">${escapeHtml(translateText("ai_league_replay.panel_hide"))}</button>
       </div>
     </header>
-    <div class="ai-league-body">
+    <div class="ai-league-body" id="ai-league-replay-panel-body">
       <section class="ai-league-standings" data-ai-league-diplomacy aria-label="${escapeHtml(translateText("ai_league_replay.standings_title"))}">
         <div class="ai-league-standings-title">${escapeHtml(translateText("ai_league_replay.standings_title"))}</div>
         <div data-ai-league-diplomacy-rows>
           <div class="ai-league-muted">${escapeHtml(translateText("ai_league_replay.standings_waiting"))}</div>
         </div>
       </section>
-      <section class="ai-league-metrics">
-        <div class="ai-league-metric">${escapeHtml(translateText("ai_league_replay.metric_moves"))}<b>${input.decisions.length}</b></div>
-        <div class="ai-league-metric">${escapeHtml(translateText("ai_league_replay.metric_invalid"))}<b>${rejected.length}</b></div>
-        <div class="ai-league-metric${fallback.length > 0 ? " warn" : ""}">${escapeHtml(translateText("ai_league_replay.metric_recovered"))}<b>${fallback.length}</b></div>
-      </section>
-      <section class="ai-league-match-setup">
-        <strong>${escapeHtml(setupLine)}</strong>
-        ${configLine ? `<div class="ai-league-muted">${escapeHtml(configLine)}</div>` : ""}
-      </section>
-      ${playstyleKinds.length > 0 ? playstyleLineHtml(playstyleKinds) : ""}
-      ${spectatorTelemetry ? communicationThreadsHtml(spectatorTelemetry) : ""}
-      <p class="ai-league-muted">${escapeHtml(translateText("ai_league_replay.disclaimer"))}</p>
-      <p>
-        <a href="${escapeHtml(input.artifactBasePath)}/visual-report.html">${escapeHtml(translateText("ai_league_replay.link_visual_report"))}</a>
-        · <a href="${escapeHtml(input.artifactBasePath)}/spectator-telemetry.json">${escapeHtml(translateText("ai_league_replay.link_politics_data"))}</a>
-        · <a href="${escapeHtml(input.artifactBasePath)}/decisions.jsonl">${escapeHtml(translateText("ai_league_replay.link_decisions"))}</a>
-        · <a href="${escapeHtml(input.artifactBasePath)}/match-summary.json">${escapeHtml(translateText("ai_league_replay.link_summary"))}</a>
-      </p>
-      ${decisionLogHtml(input.decisions)}
+      <div data-ai-league-details>${overlayDetailsHtml(input)}</div>
     </div>
     <div class="ai-league-resize-handle" data-ai-league-resize aria-hidden="true"></div>`;
 }
 
-function playstyleLineHtml(kinds: string[]): string {
-  const badges = kinds
-    .map(
-      (kind) =>
-        `<span class="ai-league-badge">${escapeHtml(actionLabelFromKind(kind))}</span>`,
-    )
-    .join(" ");
-  return `<p class="ai-league-playstyle"><strong>${escapeHtml(translateText("ai_league_replay.playstyle_label"))}</strong> ${badges}</p>`;
+function overlayDetailsHtml(input: AiLeagueReplayOverlayInput): string {
+  // Playhead window for the decision log and talks. Per-overlay (carried on the
+  // input), never module state: two mounted overlays must not share it.
+  const currentTurn = input.currentTurn ?? 0;
+  const localRejectedCount = input.decisions.filter(
+    (decision) => !decision.result.accepted,
+  ).length;
+  const localFallbackCount = input.decisions.filter(
+    (decision) => decision.fallbackUsed,
+  ).length;
+  const localActionCounts = input.decisions.reduce<Record<string, number>>(
+    (counts, decision) => {
+      const kind = actionLabel(decision);
+      counts[kind] = (counts[kind] ?? 0) + 1;
+      return counts;
+    },
+    {},
+  );
+  const decisionCount =
+    nonNegativeCount(input.summary?.decisionCount) ?? input.decisions.length;
+  const rejectedCount =
+    nonNegativeCount(input.summary?.rejectedCount) ?? localRejectedCount;
+  const fallbackCount =
+    nonNegativeCount(input.summary?.fallbackCount) ?? localFallbackCount;
+  const actionCounts =
+    summaryActionCounts(input.summary?.actionCounts) ?? localActionCounts;
+  const agentCount = input.summary?.roster?.length ?? 0;
+  const bots = input.summary?.runnerConfig?.bots ?? null;
+  const nations = input.summary?.runnerConfig?.nations ?? null;
+  const maxSteps = input.summary?.runnerConfig?.maxSteps ?? null;
+  const configuredOpponentCount = numericCount(nations) + numericCount(bots);
+  // League matches are agent-vs-agent, so the "vs N built-in opponents" clause
+  // is only meaningful when built-in opponents actually exist — it used to
+  // render the nonsense "vs 0 built-in opponents". Both branches go through
+  // translateText (this line was previously hardcoded English).
+  const mapName =
+    typeof input.summary?.runnerConfig?.map === "string"
+      ? input.summary.runnerConfig.map
+      : null;
+  const spectatorTelemetry =
+    input.spectatorTelemetry as AiLeagueSpectatorTelemetry | null;
+  const detailsUnavailable =
+    input.detailsLoading !== true &&
+    (input.summary === null || input.summary === undefined) &&
+    input.decisions.length === 0 &&
+    spectatorTelemetry === null;
+  const metricValue = (value: number) =>
+    input.detailsLoading || detailsUnavailable ? "—" : String(value);
+  const setupHtml = input.detailsLoading
+    ? `<section class="ai-league-match-setup ai-league-muted" data-ai-league-details-loading>${escapeHtml(translateText("ai_league_replay.loading_details"))}</section>`
+    : detailsUnavailable
+      ? `<section class="ai-league-match-setup ai-league-muted" data-ai-league-details-unavailable>${escapeHtml(translateText("ai_league_replay.details_unavailable"))}</section>`
+      : "";
+
+  return `
+    <section class="ai-league-metrics">
+      <div class="ai-league-metric" title="${escapeHtml(translateText("ai_league_replay.metric_moves_tip"))}">${escapeHtml(translateText("ai_league_replay.metric_moves"))}<b>${metricValue(decisionCount)}</b></div>
+      <div class="ai-league-metric" title="${escapeHtml(translateText("ai_league_replay.metric_invalid_tip"))}">${escapeHtml(translateText("ai_league_replay.metric_invalid"))}<b>${metricValue(rejectedCount)}</b></div>
+      <div class="ai-league-metric${!input.detailsLoading && fallbackCount > 0 ? " warn" : ""}" title="${escapeHtml(translateText("ai_league_replay.metric_recovered_tip"))}">${escapeHtml(translateText("ai_league_replay.metric_recovered"))}<b>${metricValue(fallbackCount)}</b>${recoveredShareHtml(input, fallbackCount, decisionCount, detailsUnavailable)}</div>
+    </section>
+    ${input.detailsLoading || detailsUnavailable ? setupHtml : ""}
+    ${spectatorTelemetry ? communicationThreadsHtml(spectatorTelemetry) : ""}
+    <section class="ai-league-share">
+      <button type="button" class="ai-league-share-button" data-ai-league-share-button
+        title="${escapeHtml(translateText("ai_league_replay.share_image_tip"))}">
+        ${escapeHtml(translateText("ai_league_replay.share_image"))}
+      </button>
+      <span class="ai-league-share-status" data-ai-league-share-status role="status" aria-live="polite"></span>
+    </section>
+    <section class="ai-league-clip" data-ai-league-clip></section>
+    ${decisionLogHtml(input.decisions, currentTurn)}`;
+}
+
+/**
+ * One-line match identity for the panel header: map, agent count, and length.
+ * Replaces the raw run id, which wrapped, dominated the header, and told a
+ * viewer nothing. Returns null while the summary has not arrived, in which case
+ * the header keeps showing the run id.
+ */
+function matchSubtitle(input: AiLeagueReplayOverlayInput): string | null {
+  const summary = input.summary;
+  if (summary === null || summary === undefined) return null;
+  const agentCount = summary.roster?.length ?? 0;
+  const mapName =
+    typeof summary.runnerConfig?.map === "string"
+      ? summary.runnerConfig.map
+      : null;
+  const maxSteps = summary.runnerConfig?.maxSteps ?? null;
+  const bots = summary.runnerConfig?.bots ?? null;
+  const nations = summary.runnerConfig?.nations ?? null;
+  const builtInCount = numericCount(nations) + numericCount(bots);
+  // Built-in opponents only exist outside the agent-vs-agent league, and the
+  // "vs N built-in opponents" clause is meaningless when there are none.
+  const roster =
+    agentCount > 0 && builtInCount > 0
+      ? translateText("ai_league_replay.setup_agents_vs_builtin", {
+          agents: agentCount,
+          opponents: builtInCount,
+        })
+      : agentCount > 0
+        ? translateText("ai_league_replay.setup_agents_only", {
+            agents: agentCount,
+          })
+        : null;
+  const parts = [
+    mapName,
+    roster,
+    maxSteps !== null && maxSteps !== undefined
+      ? translateText("ai_league_replay.setup_decisions", { steps: maxSteps })
+      : null,
+  ].filter((part): part is string => part !== null && part !== "");
+  return parts.length > 0 ? parts.join(" · ") : null;
+}
+
+/**
+ * Share of moves that fell back, shown under the Recovered count. A bare "175"
+ * reads as alarming (or as nothing) with no denominator; "7% of moves" is the
+ * number a viewer can actually judge. Omitted at zero so a clean match stays
+ * quiet, and while details are still loading/unavailable.
+ */
+function recoveredShareHtml(
+  input: AiLeagueReplayOverlayInput,
+  fallbackCount: number,
+  decisionCount: number,
+  detailsUnavailable: boolean,
+): string {
+  if (input.detailsLoading || detailsUnavailable) return "";
+  if (fallbackCount <= 0 || decisionCount <= 0) return "";
+  const percent = Math.round((fallbackCount / decisionCount) * 100);
+  return `<span class="ai-league-metric-share">${escapeHtml(
+    translateText("ai_league_replay.metric_recovered_share", {
+      percent: String(percent),
+    }),
+  )}</span>`;
 }
 
 const AI_LEAGUE_DECISION_LOG_CAP = 15;
 
-function decisionLogHtml(decisions: AiLeagueDecisionLogEntry[]): string {
+function decisionLogHtml(
+  decisions: AiLeagueDecisionLogEntry[],
+  currentTurn: number,
+): string {
+  decisions = decisions.filter(
+    (decision) =>
+      !Number.isFinite(decision.turnNumber) ||
+      decision.turnNumber <= currentTurn,
+  );
+  // Always emit the region wrapper, even with nothing to show yet: the playhead
+  // sync refreshes this element in place, so it has to exist from first paint
+  // (at turn 0 every decision is still in the future).
   if (decisions.length === 0) {
-    return "";
+    return `<div data-ai-league-decisions-region></div>`;
   }
   const visible = decisions.slice(-AI_LEAGUE_DECISION_LOG_CAP);
-  const hidden = decisions.slice(0, Math.max(0, decisions.length - visible.length));
+  const olderCount = Math.max(0, decisions.length - visible.length);
   const expander =
-    hidden.length > 0
-      ? `<button type="button" class="ai-league-badge" data-ai-league-decision-expander aria-expanded="false">${escapeHtml(translateText("ai_league_replay.decisions_show_all", { count: hidden.length }))}</button>`
+    olderCount > 0
+      ? `<button type="button" class="ai-league-badge" data-ai-league-decision-expander aria-expanded="false" aria-controls="ai-league-older-decisions">${escapeHtml(translateText("ai_league_replay.decisions_show_older", { count: olderCount }))}</button>`
       : "";
+  // The decision log is the panel's largest block and is reference material,
+  // not something a viewer wants open by default. Ship it collapsed behind a
+  // disclosure; the older-pages expander lives inside the disclosed region.
   return `
+    <div data-ai-league-decisions-region>
     <div class="ai-league-decisions-head">
       <span class="ai-league-decisions-title">${escapeHtml(translateText("ai_league_replay.decisions_title"))}</span>
-      ${expander}
+      <button type="button" class="ai-league-badge" data-ai-league-decisions-toggle aria-expanded="false" aria-controls="ai-league-decisions-body">${escapeHtml(translateText("ai_league_replay.decisions_show"))}</button>
     </div>
-    ${
-      hidden.length > 0
-        ? `<div class="ai-league-decision-extra" data-ai-league-decision-extra hidden>${hidden.map(decisionHtml).join("")}</div>`
-        : ""
-    }
-    ${visible.map(decisionHtml).join("")}`;
+    <div id="ai-league-decisions-body" data-ai-league-decisions-body hidden>
+      ${expander}
+      ${olderCount > 0 ? `<div id="ai-league-older-decisions" data-ai-league-decision-pages></div>` : ""}
+      ${visible.map(decisionHtml).join("")}
+    </div>
+    </div>`;
 }
 
-function mountAiLeagueDecisionLogExpander(overlay: HTMLElement) {
+function mountAiLeagueDecisionLogExpander(
+  overlay: HTMLElement,
+  decisions: readonly AiLeagueDecisionLogEntry[],
+) {
   const expander = overlay.querySelector<HTMLButtonElement>(
     "[data-ai-league-decision-expander]",
   );
-  const extra = overlay.querySelector<HTMLElement>(
-    "[data-ai-league-decision-extra]",
+  const pages = overlay.querySelector<HTMLElement>(
+    "[data-ai-league-decision-pages]",
   );
-  if (expander === null || extra === null) {
+  if (expander === null || pages === null) {
     return;
   }
+  const initialOlderCount = Math.max(
+    0,
+    decisions.length - AI_LEAGUE_DECISION_LOG_CAP,
+  );
+  let olderEnd = initialOlderCount;
   expander.addEventListener("click", () => {
-    const nowHidden = !extra.hidden;
-    extra.hidden = nowHidden;
-    expander.setAttribute("aria-expanded", String(!nowHidden));
-    expander.textContent = nowHidden
-      ? translateText("ai_league_replay.decisions_show_all", {
-          count: extra.childElementCount,
-        })
-      : translateText("ai_league_replay.decisions_show_recent");
+    if (olderEnd === 0) {
+      pages.replaceChildren();
+      olderEnd = initialOlderCount;
+      expander.setAttribute("aria-expanded", "false");
+      expander.textContent = translateText(
+        "ai_league_replay.decisions_show_older",
+        { count: olderEnd },
+      );
+      return;
+    }
+
+    const olderStart = Math.max(0, olderEnd - AI_LEAGUE_DECISION_LOG_CAP);
+    pages.insertAdjacentHTML(
+      "afterbegin",
+      decisions.slice(olderStart, olderEnd).map(decisionHtml).join(""),
+    );
+    olderEnd = olderStart;
+    expander.setAttribute("aria-expanded", "true");
+    expander.textContent =
+      olderEnd > 0
+        ? translateText("ai_league_replay.decisions_show_older", {
+            count: olderEnd,
+          })
+        : translateText("ai_league_replay.decisions_show_recent");
   });
 }
 
@@ -1258,8 +2033,13 @@ function mountAiLeagueDiplomacyStrip(
   // (layout + listener teardown) on the hottest spectator surface.
   let lastRowsHtml = "";
   const onFrame = (event: Event) => {
-    const detail = (event as CustomEvent<AiLeagueReplayFrameEventDetail>).detail;
-    if (!detail || !Array.isArray(detail.players) || detail.players.length === 0) {
+    const detail = (event as CustomEvent<AiLeagueReplayFrameEventDetail>)
+      .detail;
+    if (
+      !detail ||
+      !Array.isArray(detail.players) ||
+      detail.players.length === 0
+    ) {
       return;
     }
     const rowsHtml = diplomacyRowsHtml(
@@ -1330,18 +2110,18 @@ function diplomacyRowsHtml(
   return (
     ranked
       .map((player, index) => {
-      const share =
-        totalTiles > 0
-          ? Math.round((player.tilesOwned / totalTiles) * 100)
-          : 0;
-      const stances = diplomacyStancesHtml(
-        player,
-        bySmallID,
-        byPlayerID,
-        currentTick,
-      );
-      const directive = directiveByName.get(normalizeName(player.username));
-      return `
+        const share =
+          totalTiles > 0
+            ? Math.round((player.tilesOwned / totalTiles) * 100)
+            : 0;
+        const stances = diplomacyStancesHtml(
+          player,
+          bySmallID,
+          byPlayerID,
+          currentTick,
+        );
+        const directive = directiveByName.get(normalizeName(player.username));
+        return `
         <div class="ai-league-diplo-row">
           <span class="ai-league-diplo-rank">${index + 1}</span>
           <span class="ai-league-color-dot" style="background:${escapeHtml(aiLeagueDisplayColor(player))}"></span>
@@ -1411,7 +2191,10 @@ function diplomacyStancesHtml(
     if (other.smallID === player.smallID) {
       continue;
     }
-    if (Array.isArray(other.targets) && other.targets.includes(player.smallID)) {
+    if (
+      Array.isArray(other.targets) &&
+      other.targets.includes(player.smallID)
+    ) {
       warSmallIDs.add(other.smallID);
     }
   }
@@ -1436,7 +2219,10 @@ function diplomacyStancesHtml(
     if (other.playerID === player.playerID) {
       continue;
     }
-    if (Array.isArray(other.embargoes) && other.embargoes.includes(player.playerID)) {
+    if (
+      Array.isArray(other.embargoes) &&
+      other.embargoes.includes(player.playerID)
+    ) {
       embargoTargets.add(other.playerID);
     }
   }
@@ -1467,10 +2253,7 @@ function diplomacyStancesHtml(
 // (.ai-league-stance.ally/.war/.embargo .ai-league-stance-glyph), so RED stays
 // reserved for war only. The icon carries the human label via title +
 // aria-label; the relationship word is no longer printed inline.
-const AI_LEAGUE_STANCE_ICON_SVG: Record<
-  "ally" | "war" | "embargo",
-  string
-> = {
+const AI_LEAGUE_STANCE_ICON_SVG: Record<"ally" | "war" | "embargo", string> = {
   // Alliance: clasped hands (handshake) — alliance/cooperation.
   ally:
     `<svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">` +
@@ -1727,7 +2510,9 @@ function mountAiLeagueSocialTranscript(
           detail.turnNumber <=
             socialEvent.turnNumber + theatreEventBubbleDuration(socialEvent),
       )
-      .sort((a, b) => b.importance - a.importance || b.turnNumber - a.turnNumber)
+      .sort(
+        (a, b) => b.importance - a.importance || b.turnNumber - a.turnNumber,
+      )
       .slice(0, 2);
     transcript.innerHTML = socialTranscriptHtml(active);
   };
@@ -1780,7 +2565,9 @@ function theatreTextForDecision(
   }
 }
 
-function theatreEventBubbleDuration(socialEvent: AiLeagueMapSocialEvent): number {
+function theatreEventBubbleDuration(
+  socialEvent: AiLeagueMapSocialEvent,
+): number {
   if (socialEvent.kind === "emoji") {
     return 220;
   }
@@ -1808,7 +2595,6 @@ function theatreImportance(decision: AiLeagueDecisionLogEntry): number {
   }
   return 55;
 }
-
 
 function socialTranscriptHtml(
   socialEvents: readonly AiLeagueMapSocialEvent[],
@@ -1874,6 +2660,10 @@ function clamp(value: number, min: number, max: number): number {
 
 interface AiLeagueReplaySummary {
   roster?: unknown[];
+  decisionCount?: number | null;
+  rejectedCount?: number | null;
+  fallbackCount?: number | null;
+  actionCounts?: Record<string, number | null | undefined> | null;
   runnerConfig?: {
     bots?: number | string | null;
     nations?: number | string | null;
@@ -1884,6 +2674,27 @@ interface AiLeagueReplaySummary {
   finalState?: {
     opponents?: unknown[];
   } | null;
+}
+
+function nonNegativeCount(value: number | null | undefined): number | null {
+  if (value === null || value === undefined || !Number.isFinite(value)) {
+    return null;
+  }
+  return Math.max(0, Math.trunc(value));
+}
+
+function summaryActionCounts(
+  value: Record<string, number | null | undefined> | null | undefined,
+): Record<string, number> | null {
+  if (value === null || value === undefined) {
+    return null;
+  }
+  return Object.fromEntries(
+    Object.entries(value).flatMap(([kind, count]) => {
+      const normalized = nonNegativeCount(count);
+      return normalized !== null && normalized > 0 ? [[kind, normalized]] : [];
+    }),
+  );
 }
 
 function normalizeSpectatorTelemetry(
@@ -1910,11 +2721,9 @@ function agentName(
   telemetry: AiLeagueSpectatorTelemetry,
   agentID: string,
 ): string {
-  return (
-    aiLeagueSpectatorDisplayName(
-      telemetry.agents.find((agent) => agent.agentID === agentID)?.username ??
-        agentID,
-    )
+  return aiLeagueSpectatorDisplayName(
+    telemetry.agents.find((agent) => agent.agentID === agentID)?.username ??
+      agentID,
   );
 }
 
@@ -1999,11 +2808,26 @@ const AI_LEAGUE_ACTION_LABEL_KEYS: Record<string, string> = {
   embargo: "ai_league_replay.action_embargo",
   embargo_all: "ai_league_replay.action_embargo_all",
   nuke: "ai_league_replay.action_nuke",
+  // Kinds the legal-action builder actually emits that had no label, so they
+  // leaked raw snake_case ids into the panel ("upgrade_structure", "boat").
+  boat: "ai_league_replay.action_boat",
+  boat_retreat: "ai_league_replay.action_boat_retreat",
+  delete_unit: "ai_league_replay.action_delete_unit",
+  hold: "ai_league_replay.action_hold",
+  move_warship: "ai_league_replay.action_move_warship",
+  retreat: "ai_league_replay.action_retreat",
+  spawn: "ai_league_replay.action_spawn",
+  upgrade_structure: "ai_league_replay.action_upgrade_structure",
 };
 
 function actionLabelFromKind(kind: string): string {
   const key = AI_LEAGUE_ACTION_LABEL_KEYS[kind];
-  return key !== undefined ? translateText(key) : kind;
+  if (key !== undefined) {
+    return translateText(key);
+  }
+  // Never surface a raw id. An unmapped kind (new action shipped ahead of its
+  // label) degrades to a readable phrase instead of "upgrade_structure".
+  return kind.replace(/_/g, " ");
 }
 
 function numericCount(value: number | string | null | undefined): number {

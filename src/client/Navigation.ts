@@ -1,4 +1,7 @@
+import { isAiLeagueReplayRoute } from "./AiLeagueReplayMode";
+
 export function initNavigation() {
+  const initiallyReplayOnly = isAiLeagueReplayRoute();
   const closeMobileSidebar = () => {
     const sidebar = document.getElementById("sidebar-menu");
     const backdrop = document.getElementById("mobile-menu-backdrop");
@@ -14,6 +17,8 @@ export function initNavigation() {
   };
 
   const showPage = (pageId: string) => {
+    if (isAiLeagueReplayRoute()) return;
+
     window.currentPageId = pageId;
 
     // Close mobile sidebar if a nav item was clicked
@@ -139,6 +144,8 @@ export function initNavigation() {
     }
   });
 
-  // Ensure Play is the default visible/active page on load.
-  showPage("page-play");
+  if (!initiallyReplayOnly) {
+    // Ensure Play is the default visible/active page on load.
+    showPage("page-play");
+  }
 }

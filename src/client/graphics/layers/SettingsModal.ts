@@ -7,10 +7,6 @@ import { EventBus } from "../../../core/EventBus";
 import { UserSettings } from "../../../core/game/UserSettings";
 import { AlternateViewEvent, RefreshGraphicsEvent } from "../../InputHandler";
 import { translateText } from "../../Utils";
-import {
-  SetBackgroundMusicVolumeEvent,
-  SetSoundEffectsVolumeEvent,
-} from "../../sound/Sounds";
 import { Layer } from "./Layer";
 const structureIcon = assetUrl("images/CityIconWhite.svg");
 const cursorPriceIcon = assetUrl("images/CursorPriceIconWhite.svg");
@@ -24,7 +20,6 @@ const settingsIcon = assetUrl("images/SettingIconWhite.svg");
 const sirenIcon = assetUrl("images/SirenIconWhite.svg");
 const swordIcon = assetUrl("images/SwordIconWhite.svg");
 const treeIcon = assetUrl("images/TreeIconWhite.svg");
-const musicIcon = assetUrl("images/music.svg");
 
 export class ShowSettingsModalEvent {
   constructor(
@@ -179,20 +174,6 @@ export class SettingsModal extends LitElement implements Layer {
     window.location.href = "/";
   }
 
-  private onVolumeChange(event: Event) {
-    const volume = parseFloat((event.target as HTMLInputElement).value) / 100;
-    this.userSettings.setBackgroundMusicVolume(volume);
-    this.eventBus.emit(new SetBackgroundMusicVolumeEvent(volume));
-    this.requestUpdate();
-  }
-
-  private onSoundEffectsVolumeChange(event: Event) {
-    const volume = parseFloat((event.target as HTMLInputElement).value) / 100;
-    this.userSettings.setSoundEffectsVolume(volume);
-    this.eventBus.emit(new SetSoundEffectsVolumeEvent(volume));
-    this.requestUpdate();
-  }
-
   render() {
     if (!this.isVisible) {
       return null;
@@ -230,55 +211,6 @@ export class SettingsModal extends LitElement implements Layer {
           </div>
 
           <div class="p-4 flex flex-col gap-3">
-            <div
-              class="flex gap-3 items-center w-full text-left p-3 hover:bg-slate-700 rounded-sm text-white transition-colors"
-            >
-              <img src=${musicIcon} alt="musicIcon" width="20" height="20" />
-              <div class="flex-1">
-                <div class="font-medium">
-                  ${translateText("user_setting.background_music_volume")}
-                </div>
-                <input
-                  type="range"
-                  min="0"
-                  max="100"
-                  .value=${this.userSettings.backgroundMusicVolume() * 100}
-                  @input=${this.onVolumeChange}
-                  class="w-full border border-slate-500 rounded-lg"
-                />
-              </div>
-              <div class="text-sm text-slate-400">
-                ${Math.round(this.userSettings.backgroundMusicVolume() * 100)}%
-              </div>
-            </div>
-
-            <div
-              class="flex gap-3 items-center w-full text-left p-3 hover:bg-slate-700 rounded-sm text-white transition-colors"
-            >
-              <img
-                src=${musicIcon}
-                alt="soundEffectsIcon"
-                width="20"
-                height="20"
-              />
-              <div class="flex-1">
-                <div class="font-medium">
-                  ${translateText("user_setting.sound_effects_volume")}
-                </div>
-                <input
-                  type="range"
-                  min="0"
-                  max="100"
-                  .value=${this.userSettings.soundEffectsVolume() * 100}
-                  @input=${this.onSoundEffectsVolumeChange}
-                  class="w-full border border-slate-500 rounded-lg"
-                />
-              </div>
-              <div class="text-sm text-slate-400">
-                ${Math.round(this.userSettings.soundEffectsVolume() * 100)}%
-              </div>
-            </div>
-
             <button
               class="flex gap-3 items-center w-full text-left p-3 hover:bg-slate-700 rounded-sm text-white transition-colors"
               @click="${this.onTerrainButtonClick}"

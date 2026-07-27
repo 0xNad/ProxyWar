@@ -8,73 +8,57 @@ import {
   loadAgentDemoHubModel,
   proxyWarAgentProtocolSchema,
   proxyWarAgentStartJson,
-  renderProxyWarAgentStartHtml,
-  renderProxyWarPublicHtml,
   renderAgentDemoHubHtml,
   renderProxyWarAdminHtml,
+  renderProxyWarAgentStartHtml,
+  renderProxyWarPublicHtml,
   renderProxyWarTesterDashboardHtml,
 } from "../server/agents/AgentDemoHub";
-import { renderQuickStartPlayHtml } from "../server/agents/QuickStartPlayPage";
 import {
   buildAgentDemoJobCommand,
-  proxyWarTesterSavedRosterJobDefaults,
-  type AgentDemoJobRequest,
-  type AgentDemoJobRecord,
   loadProxyWarHouseAgentBrain,
   normalizeAgentDemoJobRequest,
+  proxyWarTesterSavedRosterJobDefaults,
+  type AgentDemoJobRecord,
+  type AgentDemoJobRequest,
 } from "../server/agents/AgentDemoServerJobs";
-import {
-  parsePlayerStrategySpec,
-  PlayerStrategySpec,
-} from "../server/agents/PlayerStrategySpec";
-import {
-  defaultProxyWarNationsDir,
-  deleteProxyWarNation,
-  listProxyWarNations,
-  saveProxyWarNation,
-  syncProxyWarActiveRoster,
-} from "../server/agents/ProxyWarNationRegistry";
-import type { ProxyWarDoctrine } from "../server/agents/ProxyWarNationRegistry";
-import {
-  ExternalAgentRelayError,
-  ExternalAgentRelayStore,
-} from "../server/agents/ExternalAgentRelay";
 import { AgentRelayRateGuard } from "../server/agents/AgentRelayRateGuard";
-import type { ExternalAgentRequest } from "../server/agents/ExternalHttpAgentBrain";
+import { gameRecordFileIsRenderable } from "../server/agents/AgentSpectatorReplay";
 import {
   agentStrategyProfiles,
   type AgentStrategyProfile,
 } from "../server/agents/AgentTypes";
 import {
-  betaSessionCookieHeader,
-  clearBetaSessionCookieHeader,
-  createProxyWarBetaSessionToken,
-  loadProxyWarBetaAccessConfig,
-  normalizeProxyWarBetaReturnTo,
-  normalizeProxyWarBetaFeedback,
-  parseCookieHeader,
-  renderProxyWarBetaLoginHtml,
-  verifyProxyWarBetaInviteCode,
-  verifyProxyWarBetaSessionToken,
-} from "../server/agents/ProxyWarBetaAccess";
+  claimAiLeagueClipCanary,
+  createAiLeagueClipCanaryWriteRefusal,
+  readAiLeagueClipCanary,
+  validateFreshAiLeagueClipCanaryTarget,
+  type AiLeagueClipCanaryRecord,
+} from "../server/agents/AiLeagueClipCanary";
 import {
-  isProxyWarPublicDoc,
-  isProxyWarPublicExternalAgentExample,
-  isProxyWarPublicLeagueArtifact,
-  isProxyWarPublicLeaguePath,
-  isProxyWarPublicRendererAssetPath,
-  isProxyWarPublicRunArtifact,
-  isProxyWarPublicTournamentArtifact,
-  isSafeProxyWarArtifactSegment,
-  proxyWarPublicRendererAssetPrefixes,
-} from "../server/agents/ProxyWarPublicArtifacts";
+  aiLeagueRunClipErrorBody,
+  AiLeagueRunClips,
+  createAiLeagueRunClipDocumentRouter,
+} from "../server/agents/AiLeagueRunClips";
 import {
   checkExternalAgentEndpoint,
   normalizeExternalAgentHealthCheckInput,
 } from "../server/agents/ExternalAgentHealthCheck";
-import { resolveExternalAgentToken } from "../server/agents/ExternalAgentSecrets";
 import { assertExternalAgentEndpointAllowed } from "../server/agents/ExternalAgentNetworkPolicy";
-import { gameRecordFileIsRenderable } from "../server/agents/AgentSpectatorReplay";
+import {
+  ExternalAgentRelayError,
+  ExternalAgentRelayStore,
+} from "../server/agents/ExternalAgentRelay";
+import {
+  normalizeExternalAgentReplaySandboxInput,
+  replayExternalAgentDecision,
+} from "../server/agents/ExternalAgentReplaySandbox";
+import { resolveExternalAgentToken } from "../server/agents/ExternalAgentSecrets";
+import type { ExternalAgentRequest } from "../server/agents/ExternalHttpAgentBrain";
+import {
+  parsePlayerStrategySpec,
+  PlayerStrategySpec,
+} from "../server/agents/PlayerStrategySpec";
 import {
   assertProxyWarActiveRosterExternalEndpointsHealthy,
   checkProxyWarActiveRosterExternalEndpoints,
@@ -85,14 +69,48 @@ import {
   fetchAndParseProxyWarAgentCard,
   normalizeProxyWarAgentCardInput,
 } from "../server/agents/ProxyWarAgentCard";
+import { sendPublicArtifactFile } from "../server/agents/ProxyWarArtifactStreaming";
 import {
-  normalizeExternalAgentReplaySandboxInput,
-  replayExternalAgentDecision,
-} from "../server/agents/ExternalAgentReplaySandbox";
+  betaSessionCookieHeader,
+  clearBetaSessionCookieHeader,
+  createProxyWarBetaSessionToken,
+  loadProxyWarBetaAccessConfig,
+  normalizeProxyWarBetaFeedback,
+  normalizeProxyWarBetaReturnTo,
+  parseCookieHeader,
+  renderProxyWarBetaLoginHtml,
+  verifyProxyWarBetaInviteCode,
+  verifyProxyWarBetaSessionToken,
+} from "../server/agents/ProxyWarBetaAccess";
 import {
   buildProxyWarDemoServerUrls,
   loadProxyWarDemoServerNetworkConfig,
 } from "../server/agents/ProxyWarDemoServerConfig";
+import type { ProxyWarDoctrine } from "../server/agents/ProxyWarNationRegistry";
+import {
+  defaultProxyWarNationsDir,
+  deleteProxyWarNation,
+  listProxyWarNations,
+  saveProxyWarNation,
+  syncProxyWarActiveRoster,
+} from "../server/agents/ProxyWarNationRegistry";
+import {
+  isProxyWarPublicDoc,
+  isProxyWarPublicExternalAgentExample,
+  isProxyWarPublicLeagueArtifact,
+  isProxyWarPublicLeaguePath,
+  isProxyWarPublicPremiereReadPath,
+  isProxyWarPublicPremiereWritePath,
+  isProxyWarPublicRendererAssetPath,
+  isProxyWarPublicRunArtifact,
+  isProxyWarPublicTournamentArtifact,
+  isProxyWarReplayOrRunPath,
+  isSafeProxyWarArtifactSegment,
+  matchProxyWarLeagueClipReadPath,
+  matchProxyWarLeagueClipWritePath,
+  proxyWarLeagueContentSecurityPolicy,
+  proxyWarPublicRendererAssetPrefixes,
+} from "../server/agents/ProxyWarPublicArtifacts";
 import {
   buildProxyWarPublicReadinessReport,
   type ProxyWarPublicReadinessReport,
@@ -102,10 +120,43 @@ import {
   ProxyWarRateLimiter,
   type ProxyWarRateLimitSnapshot,
 } from "../server/agents/ProxyWarRateLimit";
+import { renderQuickStartPlayHtml } from "../server/agents/QuickStartPlayPage";
 import {
   getAppShellContent,
   setHtmlNoCacheHeaders,
 } from "../server/RenderHtml";
+import { ReplayPremiereAnonymousWriteLimiter } from "../server/replay-premiere/ReplayPremiereAnonymousWriteLimiter";
+import { ReplayPremiereArchivedClipPromoter } from "../server/replay-premiere/ReplayPremiereArchivedClipPromoter";
+import { ReplayPremiereArchiveStore } from "../server/replay-premiere/ReplayPremiereArchiveIndex";
+import { createReplayPremiereArchiveRouter } from "../server/replay-premiere/ReplayPremiereArchiveRouter";
+import { DeterministicReplayPremiereCheckpointProjector } from "../server/replay-premiere/ReplayPremiereCheckpointProjection";
+import {
+  createReplayPremiereTrustedProxyAddressResolver,
+  REPLAY_PREMIERE_LOOPBACK_PROXY_ADDRESSES,
+} from "../server/replay-premiere/ReplayPremiereClientAddress";
+import {
+  createReplayPremiereClipDocumentRouter,
+  replayPremiereClipCacheDir,
+  ReplayPremiereClips,
+  ReplayPremiereRevealAutoClip,
+} from "../server/replay-premiere/ReplayPremiereClips";
+import { premiereClipRepresentativeAnchorTurn } from "../server/replay-premiere/ReplayPremiereContracts";
+import { ReplayPremiereError } from "../server/replay-premiere/ReplayPremiereErrors";
+import { ReplayPremiereGuestSecurity } from "../server/replay-premiere/ReplayPremiereGuestSecurity";
+import {
+  createReplayPremiereRouter,
+  formatReplayPremiereHttpOperatorError,
+  ReplayPremiereHttpRegistry,
+} from "../server/replay-premiere/ReplayPremiereHttp";
+import { createReplayPremierePublicPageRouter } from "../server/replay-premiere/ReplayPremierePublicPage";
+import { ReplayPremiereRuntimeRegistry } from "../server/replay-premiere/ReplayPremiereRuntimeCoordinator";
+import {
+  loadOrCreateReplayPremiereGuestHmacKey,
+  REPLAY_PREMIERE_HMAC_HEX_ENV,
+  resolveReplayPremierePrivateStateRoot,
+} from "../server/replay-premiere/ReplayPremiereSecrets";
+import { startReplayPremiereProduction } from "../server/replay-premiere/ReplayPremiereStartup";
+import { loadReplayPremiereReclamationExclusions } from "../server/replay-premiere/ReplayPremiereTerminalReclamation";
 import { applyStaticAssetCacheControl } from "../server/StaticAssetCache";
 
 const app = express();
@@ -113,6 +164,16 @@ const networkConfig = loadProxyWarDemoServerNetworkConfig();
 const serverUrls = buildProxyWarDemoServerUrls(networkConfig);
 const port = networkConfig.port;
 const host = networkConfig.host;
+const replayPremierePublicOrigin = new URL(
+  serverUrls.publicUrl ?? serverUrls.localUrl,
+).origin;
+export const replayPremierePrivateStateRoot =
+  resolveReplayPremierePrivateStateRoot();
+const replayPremiereAnonymousWriteLimiter =
+  new ReplayPremiereAnonymousWriteLimiter();
+export const replayPremiereHttpRegistry = new ReplayPremiereHttpRegistry(
+  replayPremiereAnonymousWriteLimiter.admit,
+);
 const rendererPort = Number(process.env.AI_LEAGUE_RENDERER_PORT ?? "9000");
 const rendererListenHost = process.env.AI_LEAGUE_RENDERER_HOST ?? "127.0.0.1";
 const rendererBaseUrl =
@@ -126,10 +187,12 @@ const artifactsRootDir =
     ? path.join(process.cwd(), "artifacts")
     : path.resolve(configuredArtifactsRootDir);
 const runsRootDir = path.join(artifactsRootDir, "ai-league-runs");
-const tournamentsRootDir = path.join(
-  artifactsRootDir,
-  "ai-league-tournaments",
-);
+const publicReplayRenderabilityCache = new Map<
+  string,
+  { fingerprint: string; verdict: Promise<boolean> }
+>();
+const publicReplayRenderabilityCacheMaxEntries = 256;
+const tournamentsRootDir = path.join(artifactsRootDir, "ai-league-tournaments");
 const evaluationsRootDir = path.join(artifactsRootDir, "ai-league-evals");
 const jobsRootDir = path.join(artifactsRootDir, "ai-league-demo-jobs");
 const jobsPath = path.join(jobsRootDir, "jobs.json");
@@ -144,6 +207,324 @@ const externalAgentExampleRootDir = path.join(
   "examples",
   "external-agent",
 );
+const replayPremiereGuestSecurity = new ReplayPremiereGuestSecurity({
+  hmacKey: await loadOrCreateReplayPremiereGuestHmacKey({
+    privateStateRoot: replayPremierePrivateStateRoot,
+    servedRoots: [
+      process.cwd(),
+      staticRootDir,
+      artifactsRootDir,
+      docsRootDir,
+      externalAgentExampleRootDir,
+    ],
+    configuredHex: firstConfiguredEnv(REPLAY_PREMIERE_HMAC_HEX_ENV),
+  }),
+  expectedOrigin: replayPremierePublicOrigin,
+  production: replayPremierePublicOrigin.startsWith("https://"),
+});
+export const replayPremiereRuntimeRegistry =
+  new ReplayPremiereRuntimeRegistry();
+// Durable archive of reclaimed premieres: keeps `/premiere/<id>` resolvable
+// after the bulk is deleted and across restarts, and drives startup journal
+// compaction. Its pointer index is deduped/compacted on open.
+export const replayPremiereArchiveStore = await ReplayPremiereArchiveStore.open(
+  {
+    privateStateRoot: replayPremierePrivateStateRoot,
+  },
+);
+const replayPremiereArchivedClipPromoter =
+  new ReplayPremiereArchivedClipPromoter({
+    privateStateRoot: replayPremierePrivateStateRoot,
+    archiveStore: replayPremiereArchiveStore,
+    logger: (message) => console.log(`[premiere-archived-clips] ${message}`),
+  });
+
+try {
+  await replayPremiereArchivedClipPromoter.repairOrphanedTemporaryFiles();
+} catch (error) {
+  console.error(
+    `Replay Premiere archived clip temp repair degraded: ${
+      error instanceof ReplayPremiereError
+        ? error.operatorCode
+        : error instanceof Error
+          ? error.message
+          : String(error)
+    }`,
+  );
+}
+// Premiere ids that must never be reclaimed (release-proof premieres). Sourced
+// from PROXYWAR_PREMIERE_RECLAIM_EXCLUDE and the reclaim-exclude.txt pin file.
+const replayPremiereReclaimExclusions =
+  await loadReplayPremiereReclamationExclusions({
+    privateStateRoot: replayPremierePrivateStateRoot,
+  });
+// Reveal observations feed the automatic default-clip render. The scheduler is
+// constructed after the clip service below; observations that fire during
+// startup recovery (a premiere recovered already revealed) are buffered
+// (bounded) and replayed once the scheduler exists.
+let replayPremiereRevealAutoClip: ReplayPremiereRevealAutoClip | null = null;
+// Constructed after bounded Premiere recovery. The reclamation callback below
+// closes over this binding so later sweeps fence and drain real clip work;
+// during startup itself it is still null, when no clip route or worker exists.
+let replayPremiereClips: ReplayPremiereClips | null = null;
+const bufferedRevealObservations: string[] = [];
+const notifyPremiereRevealed = (premiereId: string): void => {
+  if (replayPremiereRevealAutoClip !== null) {
+    replayPremiereRevealAutoClip.onPremiereRevealed(premiereId);
+  } else if (bufferedRevealObservations.length < 64) {
+    bufferedRevealObservations.push(premiereId);
+  }
+};
+// Premiere recovery must never take the whole beta down: the league, demo,
+// and replay surfaces do not depend on it. 2026-07-22 round-649 outage: an
+// over-ceiling catalog AGGREGATE threw json_complexity_exceeded out of this
+// top-level await and crash-looped every boot (public 502s, ~10 min) until
+// the admission was quarantined by hand. On failure, premieres are disabled
+// for this process (premiere routes 404) and everything else serves.
+const replayPremiereProduction = await startReplayPremiereProduction({
+  privateStateRoot: replayPremierePrivateStateRoot,
+  servedRoots: [
+    process.cwd(),
+    staticRootDir,
+    artifactsRootDir,
+    docsRootDir,
+    externalAgentExampleRootDir,
+  ],
+  publicOrigin: replayPremierePublicOrigin,
+  security: replayPremiereGuestSecurity,
+  httpRegistry: replayPremiereHttpRegistry,
+  runtimeRegistry: replayPremiereRuntimeRegistry,
+  checkpointProjector: new DeterministicReplayPremiereCheckpointProjector(
+    path.join(process.cwd(), "resources", "maps"),
+  ),
+  archiveStore: replayPremiereArchiveStore,
+  archivedClipPromoter: replayPremiereArchivedClipPromoter,
+  reclamationExcludedPremiereIds: replayPremiereReclaimExclusions,
+  fenceClipWritesAndDrain: (premiereId) =>
+    replayPremiereClips?.fenceWritesAndDrain(premiereId) ?? Promise.resolve(),
+  onPremiereRevealed: notifyPremiereRevealed,
+  // Leave bounded launch headroom for the remaining initialization and bind.
+  maxStartupMs: 8_000,
+  onDiagnostic: (diagnostic) => {
+    // Deferred fresh-admission lane, orphan-reclamation, and archived-clip
+    // promotion events are progress, not rejections; keep the historical
+    // "recovery rejected" wording for real rejections so existing operator
+    // greps stay valid.
+    const line = diagnostic.operatorCode.startsWith("deferred_assembly")
+      ? `Replay Premiere deferred recovery ${diagnostic.target}: ${diagnostic.operatorCode}`
+      : diagnostic.operatorCode.startsWith("orphan_")
+        ? `Replay Premiere orphan reclamation ${diagnostic.target}: ${diagnostic.operatorCode}`
+        : diagnostic.operatorCode.startsWith("archived_clip")
+          ? `Replay Premiere archived clips: ${diagnostic.operatorCode}`
+          : `Replay Premiere recovery rejected ${diagnostic.target}: ${diagnostic.operatorCode}`;
+    console.error(line);
+  },
+}).catch((error: unknown) => {
+  console.error(
+    `Replay Premiere production recovery failed; premieres disabled for this process: ${
+      error instanceof ReplayPremiereError
+        ? error.operatorCode
+        : error instanceof Error
+          ? error.message
+          : String(error)
+    }`,
+  );
+  return null;
+});
+// Replay social-clip services are cache, never event-store evidence. Every
+// generation surface defaults OFF. PROXYWAR_CLIPS_ENABLED is the master
+// emergency gate; each surface additionally requires its own explicit flag.
+// Construction is best-effort: if the license strings (or index rebuild) fail
+// — e.g. a minimal test checkout with no resources/lang/en.json — clips are
+// disabled with a warning rather than crashing the whole server.
+const replayClipsMasterRequested = envFlag("PROXYWAR_CLIPS_ENABLED");
+const replayPremiereClipsRequested = envFlag("PROXYWAR_PREMIERE_CLIPS_ENABLED");
+const aiLeagueRunClipsRequested = envFlag("PROXYWAR_LEAGUE_CLIPS_ENABLED");
+const aiLeagueClipCanaryState = await readAiLeagueClipCanary({
+  privateStateRoot: replayPremierePrivateStateRoot,
+});
+console.error(
+  `[league-clips] canary ${aiLeagueClipCanaryState.diagnostic.code}`,
+);
+const aiLeagueClipCanaryConfigurationConflict =
+  (aiLeagueClipCanaryState.claimable || aiLeagueClipCanaryState.readEnabled) &&
+  (replayPremiereClipsRequested || aiLeagueRunClipsRequested);
+if (aiLeagueClipCanaryConfigurationConflict) {
+  console.error("[league-clips] canary clip_canary_global_flag_conflict");
+}
+const replayClipsMasterEnabled =
+  replayClipsMasterRequested && !aiLeagueClipCanaryConfigurationConflict;
+const replayPremiereClipsEnabled =
+  replayClipsMasterEnabled && replayPremiereClipsRequested;
+if (replayPremiereClipsEnabled) {
+  try {
+    replayPremiereClips = new ReplayPremiereClips({
+      clipsRoot: replayPremiereClipCacheDir(replayPremierePrivateStateRoot),
+      sourceBundleRoot: replayPremierePrivateStateRoot,
+      staticDir: staticRootDir,
+      workerModulePath: path.join(
+        process.cwd(),
+        "src",
+        "scripts",
+        "replay-premiere-clip-worker.ts",
+      ),
+      publicOrigin: replayPremierePublicOrigin,
+      licenseStrings: await loadReplayPremiereClipLicenseStrings(),
+      storageStatePath: path.join(
+        path.dirname(replayPremierePrivateStateRoot),
+        "state.json",
+      ),
+      clipFfmpegBin: firstConfiguredEnv("PROXYWAR_CLIP_FFMPEG_BIN"),
+      clipChromeBin: firstConfiguredEnv("PROXYWAR_CLIP_CHROME_BIN"),
+      logger: (message) => console.log(`[premiere-clips] ${message}`),
+    });
+    // Rebuild the disk-scan cache index before binding; a partial cache costs
+    // only render time, so a rebuild failure is logged, not fatal.
+    await replayPremiereClips.rebuildIndex().catch((error: unknown) => {
+      console.error(
+        `Replay Premiere clip index rebuild failed: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+    });
+  } catch (error) {
+    replayPremiereClips = null;
+    console.error(
+      `Replay Premiere clips disabled: ${
+        error instanceof Error ? error.message : String(error)
+      }`,
+    );
+  }
+}
+// Automatic default clip at reveal: every revealed premiere gets ONE scheduled
+// render (plus one bounded retry) of its reveal-payoff moment, so the durable
+// archived page has a clip even if nobody clicked render during the short
+// revealed window. Best-effort; disabled together with the clip service.
+if (replayPremiereClips !== null) {
+  replayPremiereRevealAutoClip = new ReplayPremiereRevealAutoClip({
+    clips: replayPremiereClips,
+    resolveRuntime: (premiereId) =>
+      replayPremiereHttpRegistry.get(premiereId)?.runtime ?? null,
+    logger: (message) => console.log(`[premiere-clips] auto ${message}`),
+  });
+  for (const premiereId of bufferedRevealObservations.splice(0)) {
+    replayPremiereRevealAutoClip.onPremiereRevealed(premiereId);
+  }
+} else {
+  bufferedRevealObservations.length = 0;
+}
+// League-run clips: the same watermarked social-clip pipeline for EVERY
+// published match, rendered from the run's own game-record.json. Separate
+// cache tree (league-clips-v1) so premiere and run clips never collide.
+// Has an independent effective gate under the master emergency switch.
+let aiLeagueRunClips: AiLeagueRunClips | null = null;
+const aiLeagueRunClipsEnabled =
+  replayClipsMasterEnabled && aiLeagueRunClipsRequested;
+const aiLeagueClipCanaryRecord: AiLeagueClipCanaryRecord | null =
+  replayClipsMasterRequested &&
+  !aiLeagueClipCanaryConfigurationConflict &&
+  (aiLeagueClipCanaryState.claimable || aiLeagueClipCanaryState.readEnabled)
+    ? aiLeagueClipCanaryState.record
+    : null;
+if (aiLeagueClipCanaryState.claimable && !replayClipsMasterRequested) {
+  console.error("[league-clips] canary clip_canary_master_disabled");
+}
+let aiLeagueClipCanaryActionAuthorized =
+  aiLeagueClipCanaryRecord?.lifecycle === "claimed";
+let aiLeagueClipCanaryValidatedSource: Awaited<
+  ReturnType<AiLeagueRunClips["resolveRetainedRunSource"]>
+> | null = null;
+if (aiLeagueRunClipsEnabled || aiLeagueClipCanaryRecord !== null) {
+  try {
+    aiLeagueRunClips = new AiLeagueRunClips({
+      runsRootDir,
+      clipsRoot: path.join(replayPremierePrivateStateRoot, "league-clips-v1"),
+      staticDir: staticRootDir,
+      workerModulePath: path.join(
+        process.cwd(),
+        "src",
+        "scripts",
+        "replay-premiere-clip-worker.ts",
+      ),
+      publicOrigin: replayPremierePublicOrigin,
+      licenseStrings: await loadReplayPremiereClipLicenseStrings(),
+      storageStatePath: path.join(
+        path.dirname(replayPremierePrivateStateRoot),
+        "state.json",
+      ),
+      clipFfmpegBin: firstConfiguredEnv("PROXYWAR_CLIP_FFMPEG_BIN"),
+      clipChromeBin: firstConfiguredEnv("PROXYWAR_CLIP_CHROME_BIN"),
+      logger: (message) => console.log(`[league-clips] ${message}`),
+      shouldRepairRunClipOnIndexRebuild: (runKey) =>
+        replayPremiereArchiveStore.revealPublicRatedCoworldPointersForRunKey(
+          runKey,
+        ).length > 0,
+      canaryScope:
+        aiLeagueClipCanaryRecord === null
+          ? undefined
+          : {
+              runKey: aiLeagueClipCanaryRecord.runKey,
+              bucket: aiLeagueClipCanaryRecord.bucket,
+              sourceReplaySha256: aiLeagueClipCanaryRecord.sourceReplaySha256,
+              expiresAt: aiLeagueClipCanaryRecord.expiresAt,
+              isAuthorized: () => aiLeagueClipCanaryActionAuthorized,
+            },
+      onRunClipReady: async (ready) => {
+        if (
+          aiLeagueClipCanaryRecord !== null &&
+          !aiLeagueClipCanaryActionAuthorized
+        ) {
+          return;
+        }
+        await replayPremiereArchivedClipPromoter.promoteRatedCoworldRunClip(
+          ready,
+        );
+      },
+    });
+    await aiLeagueRunClips.rebuildIndex().catch((error: unknown) => {
+      console.error(
+        `League run clip index rebuild failed: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+    });
+    if (aiLeagueClipCanaryRecord !== null) {
+      aiLeagueClipCanaryValidatedSource =
+        await aiLeagueRunClips.resolveRetainedRunSource(
+          aiLeagueClipCanaryRecord.runKey,
+        );
+      const representativeAnchorTurn = premiereClipRepresentativeAnchorTurn(
+        aiLeagueClipCanaryRecord.bucket,
+      );
+      if (
+        aiLeagueClipCanaryValidatedSource === null ||
+        aiLeagueClipCanaryValidatedSource.sourceReplaySha256 !==
+          aiLeagueClipCanaryRecord.sourceReplaySha256 ||
+        representativeAnchorTurn >
+          aiLeagueClipCanaryValidatedSource.renderableThroughTurn
+      ) {
+        throw new Error("clip_canary_source_validation_failed");
+      }
+      if (aiLeagueClipCanaryRecord.lifecycle === "armed") {
+        await validateFreshAiLeagueClipCanaryTarget({
+          privateStateRoot: replayPremierePrivateStateRoot,
+          runsRoot: runsRootDir,
+          target: aiLeagueClipCanaryRecord,
+          archiveStore: replayPremiereArchiveStore,
+        });
+      }
+    }
+  } catch (error) {
+    await aiLeagueRunClips?.close().catch(() => undefined);
+    aiLeagueRunClips = null;
+    aiLeagueClipCanaryValidatedSource = null;
+    console.error(
+      `League run clips disabled: ${
+        error instanceof Error ? error.message : String(error)
+      }`,
+    );
+  }
+}
 const betaAccess = loadProxyWarBetaAccessConfig();
 const betaFeedbackRootDir = path.join(
   artifactsRootDir,
@@ -178,21 +559,18 @@ const rateLimits = {
     firstConfiguredEnv("PROXYWAR_RATE_LIMIT_BETA_LOGIN"),
     20,
   ),
-  jobs: positiveInt(
-    firstConfiguredEnv("PROXYWAR_RATE_LIMIT_JOBS"),
-    12,
-  ),
-  nations: positiveInt(
-    firstConfiguredEnv("PROXYWAR_RATE_LIMIT_NATIONS"),
-    30,
-  ),
+  jobs: positiveInt(firstConfiguredEnv("PROXYWAR_RATE_LIMIT_JOBS"), 12),
+  nations: positiveInt(firstConfiguredEnv("PROXYWAR_RATE_LIMIT_NATIONS"), 30),
   externalCheck: positiveInt(
     firstConfiguredEnv("PROXYWAR_RATE_LIMIT_EXTERNAL_CHECK"),
     60,
   ),
-  feedback: positiveInt(
-    firstConfiguredEnv("PROXYWAR_RATE_LIMIT_FEEDBACK"),
-    30,
+  feedback: positiveInt(firstConfiguredEnv("PROXYWAR_RATE_LIMIT_FEEDBACK"), 30),
+  // League-run clip render requests (the clip service's own render quotas and
+  // queue bound the actual work; this only caps request spam per IP).
+  leagueClips: positiveInt(
+    firstConfiguredEnv("PROXYWAR_RATE_LIMIT_LEAGUE_CLIPS"),
+    20,
   ),
   // Managed-relay routes are polled by automated workers (~1 long poll / 25s
   // steady, faster during active play), so this scope is far more generous than
@@ -249,6 +627,107 @@ if (interruptedJobsReset > 0) {
   await persistJobs();
 }
 
+// Public, spoiler-neutral process capability. Both clients fail closed until
+// this strict response confirms that their corresponding generation service
+// was actually constructed; durable archived clip documents are independent.
+app.get("/api/clip-capabilities", (_req, res) => {
+  res.setHeader("Cache-Control", "no-store, max-age=0");
+  res.setHeader("X-Content-Type-Options", "nosniff");
+  res.status(200).json({
+    schemaVersion: 1,
+    premiereGenerationEnabled:
+      replayPremiereClipsEnabled && replayPremiereClips !== null,
+    leagueGenerationEnabled:
+      aiLeagueRunClipsEnabled && aiLeagueRunClips !== null,
+  });
+});
+
+// Mount before the generic parser so Premiere's stricter 32 KiB body ceiling
+// applies to both declared-length and chunked requests.
+app.use(
+  createReplayPremiereRouter({
+    registry: replayPremiereHttpRegistry,
+    security: replayPremiereGuestSecurity,
+    clips: replayPremiereClips ?? undefined,
+    resolveClientAddress: createReplayPremiereTrustedProxyAddressResolver({
+      // The managed Cloudflare tunnel reaches this process over loopback. Do
+      // not trust forwarding headers from LAN or directly exposed peers.
+      trustedProxyAddresses: REPLAY_PREMIERE_LOOPBACK_PROXY_ADDRESSES,
+    }),
+    onOperatorError: (error) => {
+      console.error(formatReplayPremiereHttpOperatorError(error));
+    },
+  }),
+);
+if (replayPremiereClips !== null) {
+  // The mp4 file is a document route (like the SVG card), not an /api route.
+  app.use(
+    createReplayPremiereClipDocumentRouter({
+      clips: replayPremiereClips,
+      resolveLifecycle: (premiereId) =>
+        replayPremiereHttpRegistry.get(premiereId)?.runtime ?? null,
+      onOperatorError: (error) => {
+        console.error(formatReplayPremiereHttpOperatorError(error));
+      },
+    }),
+  );
+}
+// Mounted BEFORE the public-page router: a revealed premiere whose live runtime
+// has de-registered (post-reveal reclamation, or a fresh restart) is served its
+// durable results-summary page here. It defers to the live router for still-
+// registered premieres and for unknown ids.
+const replayRunClipsForArchive = aiLeagueRunClipsEnabled
+  ? aiLeagueRunClips
+  : null;
+app.use(
+  createReplayPremiereArchiveRouter({
+    registry: replayPremiereHttpRegistry,
+    archiveStore: replayPremiereArchiveStore,
+    loadAppShell: () =>
+      getAppShellContent(path.resolve(staticRootDir, "index.html")),
+    publicOrigin: replayPremierePublicOrigin,
+    pageContentSecurityPolicy: proxyWarLeagueContentSecurityPolicy(),
+    resolveClipGenerationTarget:
+      replayRunClipsForArchive === null
+        ? undefined
+        : async (replayRunKey) =>
+            (await replayRunClipsForArchive.resolveRetainedRunSource(
+              replayRunKey,
+            )) !== null,
+    onOperatorError: (error) => {
+      console.error(formatReplayPremiereHttpOperatorError(error));
+    },
+  }),
+);
+app.use(
+  createReplayPremierePublicPageRouter({
+    registry: replayPremiereHttpRegistry,
+    loadAppShell: () =>
+      getAppShellContent(path.resolve(staticRootDir, "index.html")),
+    publicOrigin: replayPremierePublicOrigin,
+    pageContentSecurityPolicy: proxyWarLeagueContentSecurityPolicy(),
+  }),
+);
+app.use(
+  createAiLeagueClipCanaryWriteRefusal({
+    isCanaryActive: () =>
+      aiLeagueClipCanaryState.claimable || aiLeagueClipCanaryState.readEnabled,
+  }),
+);
+const leagueWrapperOnly = process.env.PROXYWAR_LEAGUE_WRAPPER_ONLY === "true";
+app.use((req, res, next) => {
+  if (
+    leagueWrapperOnly &&
+    req.method === "POST" &&
+    matchProxyWarLeagueClipWritePath(req.path) !== null &&
+    !leagueClipPublicWriteAllowed(req.path)
+  ) {
+    res.setHeader("Cache-Control", "no-store, max-age=0");
+    res.status(404).json({ error: { code: "LEAGUE_CLIP_UNAVAILABLE" } });
+    return;
+  }
+  next();
+});
 app.use(express.json({ limit: "256kb" }));
 app.use(express.urlencoded({ extended: false }));
 app.use((_req, res, next) => {
@@ -262,20 +741,59 @@ app.use((_req, res, next) => {
 // its replay renders. Every other surface — beta login, hub, /play, tester
 // dashboard, admin, relay, job APIs (anything that could start a match on
 // the operator's account) — is unreachable. Reversible via env flag.
-const leagueWrapperOnly =
-  process.env.PROXYWAR_LEAGUE_WRAPPER_ONLY === "true";
 if (leagueWrapperOnly) {
   app.use((req, res, next) => {
     if (req.method === "GET" || req.method === "HEAD") {
+      const leagueClipRead = matchProxyWarLeagueClipReadPath(req.path);
       if (
         isProxyWarPublicLeaguePath(req.path) ||
-        isProxyWarPublicRendererAssetPath(req.path)
+        isProxyWarPublicPremiereReadPath(req.path) ||
+        isProxyWarPublicRendererAssetPath(req.path) ||
+        // League-run clip status/mp4 for mirror-published (league-*) runs —
+        // exactly the runs whose replay pages are already public.
+        leagueClipPublicReadAllowed(req.path)
       ) {
         next();
         return;
       }
+      // A syntactically valid Clip read that is outside the active surface
+      // (including every non-target read during a one-shot canary) is still a
+      // Clip route. Fail it closed here instead of letting the wrapper's
+      // generic document fallback turn an unavailable artifact into /league.
+      if (leagueClipRead !== null) {
+        // A missing bucket can become available later after an authorized
+        // render. Never let the edge cache this pre-gate 404 and mask the
+        // subsequent immutable Clip document or ready status.
+        res.setHeader("Cache-Control", "no-store, max-age=0");
+        if (leagueClipRead.kind === "clip_status") {
+          res.status(404).json({ error: { code: "LEAGUE_CLIP_UNAVAILABLE" } });
+        } else {
+          res.status(404).end();
+        }
+        return;
+      }
+      if (isProxyWarReplayOrRunPath(req.path)) {
+        res.status(404).send("AI league replay record not found.");
+        return;
+      }
       res.redirect("/league");
       return;
+    }
+    if (req.method === "POST") {
+      const leagueClipWrite = matchProxyWarLeagueClipWritePath(req.path);
+      if (leagueClipWrite !== null) {
+        if (leagueClipPublicWriteAllowed(req.path)) {
+          next();
+          return;
+        }
+        res.setHeader("Cache-Control", "no-store, max-age=0");
+        res.status(404).json({ error: { code: "LEAGUE_CLIP_UNAVAILABLE" } });
+        return;
+      }
+      if (isProxyWarPublicPremiereWritePath(req.path)) {
+        next();
+        return;
+      }
     }
     res.status(404).send("not available in league wrapper mode");
   });
@@ -394,7 +912,10 @@ app.get("/api/agent-relay/sessions/:sessionID/poll", async (req, res) => {
     return;
   }
   try {
-    await restoreSavedRelaySessionIfPossible(req.params.sessionID, bearerToken(req));
+    await restoreSavedRelaySessionIfPossible(
+      req.params.sessionID,
+      bearerToken(req),
+    );
     const result = await agentRelay.poll({
       sessionID: req.params.sessionID,
       token: bearerToken(req),
@@ -431,7 +952,10 @@ app.post("/api/agent-relay/sessions/:sessionID/requests", async (req, res) => {
     return;
   }
   try {
-    await restoreSavedRelaySessionIfPossible(req.params.sessionID, bearerToken(req));
+    await restoreSavedRelaySessionIfPossible(
+      req.params.sessionID,
+      bearerToken(req),
+    );
     const body = req.body as Record<string, unknown>;
     const result = await agentRelay.requestDecision({
       sessionID: req.params.sessionID,
@@ -455,9 +979,19 @@ app.use((req, res, next) => {
     return;
   }
   if (
-    req.method === "GET" &&
+    (req.method === "GET" || req.method === "HEAD") &&
     (isProxyWarPublicLeaguePath(req.path) ||
-      isProxyWarPublicRendererAssetPath(req.path))
+      isProxyWarPublicPremiereReadPath(req.path) ||
+      isProxyWarPublicRendererAssetPath(req.path) ||
+      leagueClipPublicReadAllowed(req.path))
+  ) {
+    next();
+    return;
+  }
+  if (
+    req.method === "POST" &&
+    (isProxyWarPublicPremiereWritePath(req.path) ||
+      leagueClipPublicWriteAllowed(req.path))
   ) {
     next();
     return;
@@ -469,22 +1003,109 @@ app.use((req, res, next) => {
   res.redirect(`/beta?next=${encodeURIComponent(req.originalUrl)}`);
 });
 
-app.get("/league", (_req, res) => {
-  res.sendFile(
-    path.join("league", "index.html"),
-    { root: runsRootDir },
-    (error) => {
-      if (error !== undefined && error !== null) {
-        console.error(`Failed to serve the league page: ${error.message}`);
-        res.status(404).send("league page not generated yet");
+// League-run clip surface. Mounted after the wrapper/beta gates (which admit
+// only mirror-published league-* keys anonymously) and BEFORE the run-artifact
+// handlers so clip-v1-<bucket>.mp4 never falls into the artifact allowlist.
+if (aiLeagueRunClips !== null) {
+  const runClips = aiLeagueRunClips;
+  app.use(
+    createAiLeagueRunClipDocumentRouter({
+      runClips,
+      onOperatorError: (error) => {
+        console.error(
+          `League run clip route failed: ${
+            error instanceof Error ? error.message : String(error)
+          }`,
+        );
+      },
+    }),
+  );
+  app.use((req, res, next) => {
+    const read = matchProxyWarLeagueClipReadPath(req.path);
+    if (
+      read?.kind === "clip_status" &&
+      (req.method === "GET" || req.method === "HEAD")
+    ) {
+      res.setHeader("Cache-Control", "no-store, max-age=0");
+      void runClips
+        .readRunClipStatus({
+          runKey: read.runKey,
+          bucket: read.bucket,
+          // Explicit opt-in keeps the default schema-v1 body compatible with
+          // already-cached strict clients. Repeated/ambiguous values fail
+          // closed to the legacy response shape.
+          includeProgress: req.query.progress === "1",
+        })
+        .then((status) => {
+          if (status.state === "absent") {
+            res
+              .status(404)
+              .json({ error: { code: "LEAGUE_CLIP_UNAVAILABLE" } });
+            return;
+          }
+          res.json(status);
+        })
+        .catch((error: unknown) => {
+          const mapped = aiLeagueRunClipErrorBody(error);
+          res.status(mapped.status).json(mapped.body);
+        });
+      return;
+    }
+    const write = matchProxyWarLeagueClipWritePath(req.path);
+    if (write !== null && req.method === "POST") {
+      // Canary mode has no public write path. Refuse before rate-limit state,
+      // requester derivation, clip quota, disk probes, or worker admission.
+      if (!aiLeagueRunClipsEnabled) {
+        res.status(404).json({ error: { code: "LEAGUE_CLIP_UNAVAILABLE" } });
+        return;
       }
-    },
+      if (!enforceRateLimit("league-clips", rateLimits.leagueClips, req, res)) {
+        return;
+      }
+      const body = (req.body ?? {}) as Record<string, unknown>;
+      const turn = typeof body.turn === "number" ? body.turn : Number.NaN;
+      void runClips
+        .requestRunClip({
+          runKey: write.runKey,
+          anchorTurn: turn,
+          participantId: replayPremiereGuestSecurity.deriveRequesterBucketId(
+            rateLimitKey(req),
+          ),
+        })
+        .then((status) => {
+          res.setHeader("Cache-Control", "no-store, max-age=0");
+          res.json(status);
+        })
+        .catch((error: unknown) => {
+          const mapped = aiLeagueRunClipErrorBody(error);
+          res.status(mapped.status).json(mapped.body);
+        });
+      return;
+    }
+    next();
+  });
+}
+
+app.get("/league", (req, res) => {
+  res.setHeader(
+    "Content-Security-Policy",
+    proxyWarLeagueContentSecurityPolicy(),
+  );
+  sendPublicArtifactFile(
+    req,
+    res,
+    path.join("league", "index.html"),
+    "league page not generated yet",
+    { root: runsRootDir },
   );
 });
 
 if (betaAccess.enabled) {
   app.get("/docs/:artifact", servePublicDoc);
-  app.get("/examples/external-agent/:artifact", servePublicExternalAgentExample);
+  app.get(
+    "/examples/external-agent/:artifact",
+    servePublicExternalAgentExample,
+  );
   app.get("/runs/:runID/:artifact", servePublicRunArtifact);
   app.get("/ai-league-runs/:runID/:artifact", servePublicRunArtifact);
   app.get(
@@ -492,12 +1113,38 @@ if (betaAccess.enabled) {
     servePublicTournamentArtifact,
   );
 } else {
+  const leagueIndexRelativePath = path
+    .join("league", "index.html")
+    .toLocaleLowerCase("en-US");
+  const setRunArtifactHeaders = (res: Response, filePath: string): void => {
+    const relativePath = path
+      .relative(runsRootDir, path.resolve(filePath))
+      .toLocaleLowerCase("en-US");
+    if (relativePath === leagueIndexRelativePath) {
+      res.setHeader(
+        "Content-Security-Policy",
+        proxyWarLeagueContentSecurityPolicy(),
+      );
+    }
+  };
   app.get("/docs/:artifact", servePublicDoc);
-  app.get("/examples/external-agent/:artifact", servePublicExternalAgentExample);
-  app.use("/runs", express.static(runsRootDir, { extensions: ["html"] }));
+  app.get(
+    "/examples/external-agent/:artifact",
+    servePublicExternalAgentExample,
+  );
+  app.use(
+    "/runs",
+    express.static(runsRootDir, {
+      extensions: ["html"],
+      setHeaders: setRunArtifactHeaders,
+    }),
+  );
   app.use(
     "/ai-league-runs",
-    express.static(runsRootDir, { extensions: ["html"] }),
+    express.static(runsRootDir, {
+      extensions: ["html"],
+      setHeaders: setRunArtifactHeaders,
+    }),
   );
   app.use(
     "/tournaments",
@@ -513,6 +1160,15 @@ if (leagueWrapperOnly) {
   app.get("/ai-league-replay/:runID", async (req, res) => {
     if (!isProxyWarPublicLeaguePath(req.path)) {
       res.status(404).send("AI league replay record not found.");
+      return;
+    }
+    const runID = stringParam(req.params.runID);
+    const gameRecordPath = path.resolve(runsRootDir, runID, "game-record.json");
+    if (
+      !isInsideRoot(gameRecordPath, runsRootDir) ||
+      !(await publicReplayRecordIsRenderable(gameRecordPath))
+    ) {
+      res.redirect("/league");
       return;
     }
     try {
@@ -721,16 +1377,18 @@ app.get("/api/tester-dashboard", async (_req, res, next) => {
         ? { enabled: true, label: betaAccess.label }
         : undefined,
     });
-    const latestRun = model.runs.find((run) => run.hasOpenFrontReplay) ?? model.runs[0];
+    const latestRun =
+      model.runs.find((run) => run.hasOpenFrontReplay) ?? model.runs[0];
     res.json({
       ok: true,
       queue: {
         running: runningJobID !== null,
         queuedJobCount: queuedJobIDs.length,
         maxQueuedJobs,
-        activeJob: recentJobs().find(
-          (job) => job.status === "running" || job.status === "queued",
-        ) ?? null,
+        activeJob:
+          recentJobs().find(
+            (job) => job.status === "running" || job.status === "queued",
+          ) ?? null,
       },
       latestRun:
         latestRun === undefined
@@ -749,7 +1407,8 @@ app.get("/api/tester-dashboard", async (_req, res, next) => {
               decisionCount: latestRun.decisionCount,
               acceptedCount: latestRun.acceptedCount,
               rejectedCount: latestRun.rejectedCount,
-              postSpawnNonHoldActionCount: latestRun.postSpawnNonHoldActionCount,
+              postSpawnNonHoldActionCount:
+                latestRun.postSpawnNonHoldActionCount,
             },
       savedAgents: model.savedNations.map((nation) => ({
         nationID: nation.nationID,
@@ -766,7 +1425,14 @@ app.get("/api/tester-dashboard", async (_req, res, next) => {
 });
 
 app.post("/api/tester-dashboard/endpoint-health", async (req, res) => {
-  if (!enforceRateLimit("external-agent-check", rateLimits.externalCheck, req, res)) {
+  if (
+    !enforceRateLimit(
+      "external-agent-check",
+      rateLimits.externalCheck,
+      req,
+      res,
+    )
+  ) {
     return;
   }
   try {
@@ -789,7 +1455,10 @@ app.post("/api/tester-dashboard/endpoint-health", async (req, res) => {
           agentName: nation.agentName,
           profile: nation.profile,
           ok: live,
-          endpoint: relaySessionLabel(provider.relayBaseUrl, provider.sessionID),
+          endpoint: relaySessionLabel(
+            provider.relayBaseUrl,
+            provider.sessionID,
+          ),
           latencyMs: 0,
           ...(live
             ? {
@@ -913,18 +1582,18 @@ app.post("/api/agent-relay/sessions", async (req, res) => {
     });
     const queued = queueMatch ? enqueueProxyWarJob(request) : null;
     if (queued?.ok === false) {
-        agentRelay.closeSession({
-          sessionID: relay.sessionID,
-          token: relay.sessionToken,
-        });
-        res.status(429).json({
-          ok: false,
-          error: queued.error,
-          runningJobID,
-          queuedJobCount: queuedJobIDs.length,
-        });
-        return;
-      }
+      agentRelay.closeSession({
+        sessionID: relay.sessionID,
+        token: relay.sessionToken,
+      });
+      res.status(429).json({
+        ok: false,
+        error: queued.error,
+        runningJobID,
+        queuedJobCount: queuedJobIDs.length,
+      });
+      return;
+    }
 
     res.status(queueMatch ? 202 : 201).json({
       ok: true,
@@ -956,7 +1625,9 @@ app.post("/api/jobs", async (req, res) => {
     return;
   }
   try {
-    const request = normalizeAgentDemoJobRequest(req.body as Record<string, unknown>);
+    const request = normalizeAgentDemoJobRequest(
+      req.body as Record<string, unknown>,
+    );
     if (request.roster === "saved") {
       const activeRoster = await syncProxyWarActiveRoster({
         nationsDir: nationsRootDir,
@@ -985,13 +1656,15 @@ app.post("/api/jobs", async (req, res) => {
       status: queued.job.status,
     });
   } catch (error) {
-    res.status(error instanceof ProxyWarActiveRosterHealthError ? 422 : 400).json({
-      ok: false,
-      error: error instanceof Error ? error.message : "invalid job request",
-      ...(error instanceof ProxyWarActiveRosterHealthError
-        ? { health: error.report }
-        : {}),
-    });
+    res
+      .status(error instanceof ProxyWarActiveRosterHealthError ? 422 : 400)
+      .json({
+        ok: false,
+        error: error instanceof Error ? error.message : "invalid job request",
+        ...(error instanceof ProxyWarActiveRosterHealthError
+          ? { health: error.report }
+          : {}),
+      });
   }
 });
 
@@ -1019,9 +1692,7 @@ app.post("/api/quick-start", async (req, res) => {
   }
   try {
     const body = (req.body ?? {}) as Record<string, unknown>;
-    const maxSteps = Number(
-      process.env.PROXYWAR_QUICK_START_MAX_STEPS ?? "40",
-    );
+    const maxSteps = Number(process.env.PROXYWAR_QUICK_START_MAX_STEPS ?? "40");
     const request = normalizeAgentDemoJobRequest({
       kind: "demo",
       brain: "planner-openrouter",
@@ -1104,35 +1775,36 @@ interface ProxyWarLobby {
 // beat; the /play result card detects it by this exact name (keep them in sync).
 const HOUSE_CHAMPION_NAME = "Proxy Champion";
 const LOBBY_GRACE_MS = Number(process.env.PROXYWAR_LOBBY_GRACE_MS ?? "25000");
-const HOUSE_AGENTS: { agentName: string; strategySpec: PlayerStrategySpec }[] = [
-  {
-    agentName: HOUSE_CHAMPION_NAME,
-    strategySpec: {
-      posture: "aggressive",
-      objectiveBias: "expand",
-      doctrine:
-        "Expand relentlessly into open land and take territory from the weakest neighbor you can reach. Never sit idle — always be expanding or pressing an attack. Hold at most ONE alliance of convenience and break it the moment you can seize the ally's land; do not over-ally or you will be ganged up on. Avoid fighting two strong powers at once: pick off the weak first, then turn on the strong.",
+const HOUSE_AGENTS: { agentName: string; strategySpec: PlayerStrategySpec }[] =
+  [
+    {
+      agentName: HOUSE_CHAMPION_NAME,
+      strategySpec: {
+        posture: "aggressive",
+        objectiveBias: "expand",
+        doctrine:
+          "Expand relentlessly into open land and take territory from the weakest neighbor you can reach. Never sit idle — always be expanding or pressing an attack. Hold at most ONE alliance of convenience and break it the moment you can seize the ally's land; do not over-ally or you will be ganged up on. Avoid fighting two strong powers at once: pick off the weak first, then turn on the strong.",
+      },
     },
-  },
-  {
-    agentName: "Ironwall",
-    strategySpec: {
-      posture: "defensive",
-      objectiveBias: "economy",
-      doctrine:
-        "Build a dominant economy — cities first, then factories and ports. Fortify borders and only fight when attacked or when a neighbor is clearly weaker on your border. Win on production and late-game troop mass.",
+    {
+      agentName: "Ironwall",
+      strategySpec: {
+        posture: "defensive",
+        objectiveBias: "economy",
+        doctrine:
+          "Build a dominant economy — cities first, then factories and ports. Fortify borders and only fight when attacked or when a neighbor is clearly weaker on your border. Win on production and late-game troop mass.",
+      },
     },
-  },
-  {
-    agentName: "Coalition",
-    strategySpec: {
-      posture: "diplomatic",
-      objectiveBias: "diplomacy",
-      doctrine:
-        "Ally widely and early, back allies with gold, and turn the lobby against whoever is in the lead. Avoid first strikes; let rivals bleed each other, then take the spoils.",
+    {
+      agentName: "Coalition",
+      strategySpec: {
+        posture: "diplomatic",
+        objectiveBias: "diplomacy",
+        doctrine:
+          "Ally widely and early, back allies with gold, and turn the lobby against whoever is in the lead. Avoid first strikes; let rivals bleed each other, then take the spoils.",
+      },
     },
-  },
-];
+  ];
 let formingLobby: ProxyWarLobby | null = null;
 const lobbiesById = new Map<string, ProxyWarLobby>();
 
@@ -1264,7 +1936,8 @@ app.post("/api/lobby/join", (req, res) => {
     });
     return;
   }
-  const rawName = typeof body.agentName === "string" ? body.agentName.trim() : "";
+  const rawName =
+    typeof body.agentName === "string" ? body.agentName.trim() : "";
   const agentName = (rawName === "" ? "Agent" : rawName).slice(0, 27);
   const lobby = currentFormingLobby();
   const token = randomUUID();
@@ -1422,7 +2095,9 @@ app.post("/api/nations", async (req, res) => {
   try {
     const body = req.body as Record<string, unknown>;
     await assertExternalEndpointInputAllowed(body);
-    const result = await saveProxyWarNation(body, { nationsDir: nationsRootDir });
+    const result = await saveProxyWarNation(body, {
+      nationsDir: nationsRootDir,
+    });
     res.status(201).json({
       nation: {
         nationID: result.nation.nationID,
@@ -1551,7 +2226,9 @@ app.post("/api/agent-cards/import-and-run", async (req, res) => {
       const healthMessage = [
         health.failureReason ?? "external agent health check failed",
         health.fixHint,
-      ].filter(Boolean).join(" Fix: ");
+      ]
+        .filter(Boolean)
+        .join(" Fix: ");
       res.status(422).json({
         ok: false,
         error: healthMessage,
@@ -1751,15 +2428,142 @@ const server = app.listen(port, host, () => {
       : `Proxy War renderer: ${rendererBaseUrl}`,
   );
   console.log("Press Ctrl-C to stop.");
+  if (
+    aiLeagueClipCanaryRecord?.lifecycle === "armed" &&
+    aiLeagueRunClips !== null &&
+    aiLeagueClipCanaryValidatedSource !== null
+  ) {
+    const canaryService = aiLeagueRunClips;
+    const canaryRecord = aiLeagueClipCanaryRecord;
+    void (async () => {
+      // Revalidate immediately before consuming the one shot. Claim is a
+      // durable, exclusive transition and always precedes the sole request.
+      const freshSource = await canaryService.resolveRetainedRunSource(
+        canaryRecord.runKey,
+      );
+      const anchorTurn = premiereClipRepresentativeAnchorTurn(
+        canaryRecord.bucket,
+      );
+      if (
+        freshSource === null ||
+        freshSource.sourceReplaySha256 !== canaryRecord.sourceReplaySha256 ||
+        anchorTurn > freshSource.renderableThroughTurn
+      ) {
+        throw new Error("clip_canary_source_validation_failed_after_bind");
+      }
+      await validateFreshAiLeagueClipCanaryTarget({
+        privateStateRoot: replayPremierePrivateStateRoot,
+        runsRoot: runsRootDir,
+        target: canaryRecord,
+        archiveStore: replayPremiereArchiveStore,
+      });
+      await claimAiLeagueClipCanary({
+        privateStateRoot: replayPremierePrivateStateRoot,
+        expectedTarget: canaryRecord,
+      });
+      aiLeagueClipCanaryActionAuthorized = true;
+      const status = await canaryService.requestRunClip({
+        runKey: canaryRecord.runKey,
+        anchorTurn,
+        participantId: null,
+      });
+      // A cache hit has no render-complete callback; reuse the canonical
+      // promoter explicitly after claim so it follows the same provenance path.
+      if (status.state === "ready") {
+        await replayPremiereArchivedClipPromoter.promoteRatedCoworldRunClip({
+          runKey: canaryRecord.runKey,
+          bucket: canaryRecord.bucket,
+          sourceReplaySha256: canaryRecord.sourceReplaySha256,
+          sourceFilePath: freshSource.filePath,
+        });
+      }
+    })().catch((error: unknown) => {
+      console.error(
+        `[league-clips] canary one-shot failed: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+    });
+  }
 });
 
-for (const signal of ["SIGINT", "SIGTERM"] as const) {
-  process.on(signal, () => {
-    runningChild?.kill(signal);
-    renderer?.kill(signal);
-    server.close(() => process.exit(0));
+let shutdownStarted = false;
+process.on("SIGINT", () => {
+  if (shutdownStarted) return;
+  shutdownStarted = true;
+  runningChild?.kill("SIGINT");
+  renderer?.kill("SIGINT");
+  replayPremiereRevealAutoClip?.close();
+  const serviceShutdown = Promise.allSettled([
+    replayPremiereClips?.close() ?? Promise.resolve(),
+    aiLeagueRunClips?.close() ?? Promise.resolve(),
+    replayPremiereProduction?.service.close() ?? Promise.resolve(),
+  ]).then((results) =>
+    results.some((result) => result.status === "rejected") ? 1 : 0,
+  );
+  server.close(() => {
+    void serviceShutdown.then((exitCode) => process.exit(exitCode));
+  });
+});
+
+const PLANNED_RESTART_SHUTDOWN_WATCHDOG_MS = 12_000;
+const CONTROLLED_OUTAGE_DRILL_SHUTDOWN_WATCHDOG_MS = 50_000;
+
+function beginHttpShutdown(): Promise<void> {
+  return new Promise((resolve, reject) => {
+    // close() synchronously stops new accepts. Drop idle keep-alive sockets as
+    // well, but let active writes finish instead of destroying them.
+    server.close((error) => (error === undefined ? resolve() : reject(error)));
+    server.closeIdleConnections();
   });
 }
+
+function beginRestartShutdown(
+  mode: "planned_restart" | "controlled_outage_drill",
+): void {
+  if (shutdownStarted) return;
+  shutdownStarted = true;
+  const watchdogMs =
+    mode === "controlled_outage_drill"
+      ? CONTROLLED_OUTAGE_DRILL_SHUTDOWN_WATCHDOG_MS
+      : PLANNED_RESTART_SHUTDOWN_WATCHDOG_MS;
+  // Arm this before any asynchronous shutdown work: an event-store append or
+  // active HTTP request must not leave a listener-dark process alive forever.
+  const watchdog = setTimeout(() => {
+    console.error(`ProxyWar ${mode} shutdown exceeded its hard deadline.`);
+    process.exit(1);
+  }, watchdogMs);
+  watchdog.unref();
+
+  // External unavailability is initiated before any outage-start event. That
+  // ordering makes the durable event evidence of real downtime, not a proof-
+  // only ledger fabrication.
+  const httpShutdown = beginHttpShutdown();
+  runningChild?.kill("SIGTERM");
+  renderer?.kill("SIGTERM");
+  replayPremiereRevealAutoClip?.close();
+  const premiereShutdown = httpShutdown.then(() =>
+    mode === "controlled_outage_drill"
+      ? (replayPremiereProduction?.service.closeForControlledOutageDrill() ??
+        Promise.resolve())
+      : (replayPremiereProduction?.service.closeForPlannedRestart() ??
+        Promise.resolve()),
+  );
+  void Promise.allSettled([
+    httpShutdown,
+    replayPremiereClips?.close() ?? Promise.resolve(),
+    aiLeagueRunClips?.close() ?? Promise.resolve(),
+    premiereShutdown,
+  ]).then((results) => {
+    clearTimeout(watchdog);
+    process.exit(
+      results.some((result) => result.status === "rejected") ? 1 : 0,
+    );
+  });
+}
+
+process.on("SIGTERM", () => beginRestartShutdown("planned_restart"));
+process.on("SIGUSR2", () => beginRestartShutdown("controlled_outage_drill"));
 
 function hasValidBetaSession(req: Request): boolean {
   const cookies = parseCookieHeader(req.headers.cookie);
@@ -1855,7 +2659,11 @@ async function restoreSavedRelaySessionIfPossible(
   sessionID: string,
   bearer: string | undefined,
 ): Promise<void> {
-  if (agentRelay.hasSession(sessionID) || bearer === undefined || bearer === "") {
+  if (
+    agentRelay.hasSession(sessionID) ||
+    bearer === undefined ||
+    bearer === ""
+  ) {
     return;
   }
   const nations = await listProxyWarNations(nationsRootDir);
@@ -1907,7 +2715,8 @@ function sendRelayError(res: Response, error: unknown): void {
   }
   res.status(400).json({
     ok: false,
-    error: error instanceof Error ? error.message : "invalid managed relay request",
+    error:
+      error instanceof Error ? error.message : "invalid managed relay request",
   });
 }
 
@@ -1955,7 +2764,8 @@ function cleanRelayDoctrine(value: unknown): ProxyWarDoctrine {
     "diplomatic",
     "pressure",
   ] as const;
-  return typeof value === "string" && doctrines.includes(value as ProxyWarDoctrine)
+  return typeof value === "string" &&
+    doctrines.includes(value as ProxyWarDoctrine)
     ? (value as ProxyWarDoctrine)
     : "balanced";
 }
@@ -1986,7 +2796,10 @@ function normalizeRelayDecisionRequest(value: unknown): ExternalAgentRequest {
       "Use protocolVersion proxywar-agent-v1.",
     );
   }
-  if (!Array.isArray(request.legalActions) || request.legalActions.length === 0) {
+  if (
+    !Array.isArray(request.legalActions) ||
+    request.legalActions.length === 0
+  ) {
     throw new ExternalAgentRelayError(
       "Managed relay request must include legalActions.",
       400,
@@ -2000,7 +2813,10 @@ function normalizeRelayDecisionRequest(value: unknown): ExternalAgentRequest {
 async function assertExternalEndpointInputAllowed(
   input: Record<string, unknown>,
 ): Promise<void> {
-  if (typeof input.endpointUrl !== "string" || input.endpointUrl.trim() === "") {
+  if (
+    typeof input.endpointUrl !== "string" ||
+    input.endpointUrl.trim() === ""
+  ) {
     return;
   }
   await assertExternalAgentEndpointAllowed(input.endpointUrl, {
@@ -2099,11 +2915,7 @@ function isLoopbackAddress(value: string): boolean {
 }
 
 function rendererProxyPrefixes(): string[] {
-  return [
-    "/ai-league-replay",
-    "/@fs",
-    ...proxyWarPublicRendererAssetPrefixes,
-  ];
+  return ["/ai-league-replay", "/@fs", ...proxyWarPublicRendererAssetPrefixes];
 }
 
 function proxyRendererRequest(
@@ -2111,17 +2923,23 @@ function proxyRendererRequest(
   res: express.Response,
 ): void {
   if (process.env.AI_LEAGUE_DEMO_RENDERER === "false") {
-    res.status(503).send("Proxy War renderer is not running for this demo server.");
+    res
+      .status(503)
+      .send("Proxy War renderer is not running for this demo server.");
     return;
   }
   if (!isLoopbackRendererBaseUrl(rendererBaseUrl)) {
     res
       .status(503)
-      .send("Proxy War renderer proxy is restricted to a loopback renderer URL.");
+      .send(
+        "Proxy War renderer proxy is restricted to a loopback renderer URL.",
+      );
     return;
   }
   if (betaAccess.enabled && req.originalUrl.startsWith("/@fs")) {
-    res.status(404).send("renderer file-system route is not exposed in beta mode");
+    res
+      .status(404)
+      .send("renderer file-system route is not exposed in beta mode");
     return;
   }
   if (req.method !== "GET" && req.method !== "HEAD") {
@@ -2147,9 +2965,7 @@ function proxyRendererRequest(
     },
   );
   proxyReq.on("error", (error) => {
-    res
-      .status(502)
-      .send(`Proxy War renderer is unavailable: ${error.message}`);
+    res.status(502).send(`Proxy War renderer is unavailable: ${error.message}`);
   });
   proxyReq.end();
 }
@@ -2172,11 +2988,16 @@ function servePublicRunArtifact(
     res.status(404).send("artifact not available");
     return;
   }
-  res.sendFile(filePath, (error) => {
-    if (error !== undefined && error !== null) {
-      res.status(404).send("artifact not found");
-    }
-  });
+  if (runID === "league" && artifact === "index.html") {
+    res.setHeader(
+      "Content-Security-Policy",
+      proxyWarLeagueContentSecurityPolicy(),
+    );
+  }
+  // Large run bundles (e.g. the multi-MB spectator-replay.json) are streamed;
+  // a client that aborts mid-stream must not crash the process. See
+  // sendPublicArtifactFile / finishArtifactResponse.
+  sendPublicArtifactFile(req, res, filePath, "artifact not found");
 }
 
 function servePublicTournamentArtifact(
@@ -2197,11 +3018,7 @@ function servePublicTournamentArtifact(
     res.status(404).send("artifact not available");
     return;
   }
-  res.sendFile(filePath, (error) => {
-    if (error !== undefined && error !== null) {
-      res.status(404).send("artifact not found");
-    }
-  });
+  sendPublicArtifactFile(req, res, filePath, "artifact not found");
 }
 
 function servePublicDoc(req: express.Request, res: express.Response): void {
@@ -2213,25 +3030,24 @@ function servePublicDoc(req: express.Request, res: express.Response): void {
     res.status(404).send("doc not available");
     return;
   }
-  res.sendFile(path.join(docsRootDir, artifact), (error) => {
-    if (error !== undefined && error !== null) {
-      res.status(404).send("doc not found");
-    }
-  });
+  sendPublicArtifactFile(
+    req,
+    res,
+    path.join(docsRootDir, artifact),
+    "doc not found",
+  );
 }
 
 function serveProxyWarAgentBootstrapScript(
-  _req: express.Request,
+  req: express.Request,
   res: express.Response,
 ): void {
   res.setHeader("content-type", "text/x-shellscript; charset=utf-8");
-  res.sendFile(
+  sendPublicArtifactFile(
+    req,
+    res,
     path.join(externalAgentExampleRootDir, "bootstrap.sh"),
-    (error) => {
-      if (error !== undefined && error !== null) {
-        res.status(404).send("bootstrap script not found");
-      }
-    },
+    "bootstrap script not found",
   );
 }
 
@@ -2247,20 +3063,16 @@ function servePublicExternalAgentExample(
     res.status(404).send("example not available");
     return;
   }
-  res.sendFile(
+  sendPublicArtifactFile(
+    req,
+    res,
     path.join(externalAgentExampleRootDir, artifact),
+    "example not found",
     { dotfiles: "allow" },
-    (error) => {
-      if (error !== undefined && error !== null) {
-        res.status(404).send("example not found");
-      }
-    },
   );
 }
 
-function jobResponse(
-  job: AgentDemoJobRecord,
-): AgentDemoJobRecord & {
+function jobResponse(job: AgentDemoJobRecord): AgentDemoJobRecord & {
   replayUrl?: string;
   reportUrl?: string;
   tournamentUrl?: string;
@@ -2315,11 +3127,13 @@ function redactLocalPaths(value: string): string {
 
 function isInsideRoot(filePath: string, rootDir: string): boolean {
   const relative = path.relative(path.resolve(rootDir), filePath);
-  return relative !== "" && !relative.startsWith("..") && !path.isAbsolute(relative);
+  return (
+    relative !== "" && !relative.startsWith("..") && !path.isAbsolute(relative)
+  );
 }
 
 function stringParam(value: string | string[]): string {
-  return Array.isArray(value) ? value[0] ?? "" : value;
+  return Array.isArray(value) ? (value[0] ?? "") : value;
 }
 
 function isLoopbackRendererBaseUrl(value: string): boolean {
@@ -2356,30 +3170,31 @@ function rendererProxyHeaders(
 }
 
 function maybeStartRenderer(): ChildProcess | null {
-  if (
-    leagueWrapperOnly ||
-    process.env.AI_LEAGUE_DEMO_RENDERER === "false"
-  ) {
+  if (leagueWrapperOnly || process.env.AI_LEAGUE_DEMO_RENDERER === "false") {
     return null;
   }
-  const child = spawn(localBin("vite"), [
-    "--host",
-    rendererListenHost,
-    "--port",
-    String(rendererPort),
-    "--strictPort",
-  ], {
-    cwd: process.cwd(),
-    env: {
-      ...process.env,
-      GAME_ENV: "dev",
-      AI_LEAGUE_DEMO_HMR_DIRECT: "true",
-      AI_LEAGUE_RENDERER_PORT: String(rendererPort),
-      SKIP_BROWSER_OPEN: "true",
+  const child = spawn(
+    localBin("vite"),
+    [
+      "--host",
+      rendererListenHost,
+      "--port",
+      String(rendererPort),
+      "--strictPort",
+    ],
+    {
+      cwd: process.cwd(),
+      env: {
+        ...process.env,
+        GAME_ENV: "dev",
+        AI_LEAGUE_DEMO_HMR_DIRECT: "true",
+        AI_LEAGUE_RENDERER_PORT: String(rendererPort),
+        SKIP_BROWSER_OPEN: "true",
+      },
+      stdio: ["ignore", "pipe", "pipe"],
+      windowsHide: true,
     },
-    stdio: ["ignore", "pipe", "pipe"],
-    windowsHide: true,
-  });
+  );
   child.stdout.on("data", (chunk: Buffer) => process.stdout.write(chunk));
   child.stderr.on("data", (chunk: Buffer) => process.stderr.write(chunk));
   child.on("error", (error) => {
@@ -2582,7 +3397,9 @@ async function attachExactArtifact(
 ): Promise<boolean> {
   if (job.request.kind === "demo") {
     const runDir = path.join(runsRootDir, artifactID);
-    const summary = await readJsonRecord(path.join(runDir, "match-summary.json"));
+    const summary = await readJsonRecord(
+      path.join(runDir, "match-summary.json"),
+    );
     if (summary?.runID === artifactID) {
       const hasReplayRecord = await gameRecordFileIsRenderable(
         path.join(runDir, "game-record.json"),
@@ -2667,7 +3484,11 @@ async function latestArtifactID(input: {
       dirents
         .filter((dirent) => dirent.isDirectory())
         .map(async (dirent) => {
-          const summaryPath = path.join(input.rootDir, dirent.name, input.summaryFile);
+          const summaryPath = path.join(
+            input.rootDir,
+            dirent.name,
+            input.summaryFile,
+          );
           const summary = await readJsonRecord(summaryPath);
           if (summary === null) return null;
           const completedAt = Date.parse(String(summary.completedAt ?? ""));
@@ -2699,7 +3520,9 @@ async function readJsonRecord(
 ): Promise<Record<string, unknown> | null> {
   try {
     const parsed = JSON.parse(await fs.readFile(filePath, "utf8")) as unknown;
-    return parsed !== null && typeof parsed === "object" && !Array.isArray(parsed)
+    return parsed !== null &&
+      typeof parsed === "object" &&
+      !Array.isArray(parsed)
       ? (parsed as Record<string, unknown>)
       : null;
   } catch {
@@ -2712,6 +3535,60 @@ async function fileExists(filePath: string): Promise<boolean> {
     const stat = await fs.stat(filePath);
     return stat.isFile();
   } catch {
+    return false;
+  }
+}
+
+async function publicReplayRecordIsRenderable(
+  filePath: string,
+): Promise<boolean> {
+  let fileStat: Awaited<ReturnType<typeof fs.stat>>;
+  try {
+    fileStat = await fs.stat(filePath);
+  } catch {
+    publicReplayRenderabilityCache.delete(filePath);
+    return false;
+  }
+  if (!fileStat.isFile()) {
+    publicReplayRenderabilityCache.delete(filePath);
+    return false;
+  }
+
+  const fingerprint = [
+    fileStat.dev,
+    fileStat.ino,
+    fileStat.size,
+    fileStat.mtimeMs,
+  ].join(":");
+  const cached = publicReplayRenderabilityCache.get(filePath);
+  if (cached?.fingerprint === fingerprint) {
+    publicReplayRenderabilityCache.delete(filePath);
+    publicReplayRenderabilityCache.set(filePath, cached);
+    return cached.verdict;
+  }
+
+  if (
+    !publicReplayRenderabilityCache.has(filePath) &&
+    publicReplayRenderabilityCache.size >=
+      publicReplayRenderabilityCacheMaxEntries
+  ) {
+    const oldest = publicReplayRenderabilityCache.keys().next().value;
+    if (oldest !== undefined) {
+      publicReplayRenderabilityCache.delete(oldest);
+    }
+  }
+
+  const entry = {
+    fingerprint,
+    verdict: gameRecordFileIsRenderable(filePath),
+  };
+  publicReplayRenderabilityCache.set(filePath, entry);
+  try {
+    return await entry.verdict;
+  } catch {
+    if (publicReplayRenderabilityCache.get(filePath) === entry) {
+      publicReplayRenderabilityCache.delete(filePath);
+    }
     return false;
   }
 }
@@ -2806,12 +3683,51 @@ function positiveInt(value: string | undefined, fallback: number): number {
   return Number.isInteger(parsed) && parsed >= 0 ? parsed : fallback;
 }
 
+function leagueClipPublicReadAllowed(requestPath: string): boolean {
+  const route = matchProxyWarLeagueClipReadPath(requestPath);
+  if (route?.publicLeague !== true) return false;
+  if (aiLeagueRunClipsEnabled && aiLeagueRunClips !== null) return true;
+  return (
+    aiLeagueRunClips !== null &&
+    aiLeagueRunClips.allowsCanaryRead(route.runKey, route.bucket)
+  );
+}
+
+function leagueClipPublicWriteAllowed(requestPath: string): boolean {
+  return (
+    aiLeagueRunClipsEnabled &&
+    aiLeagueRunClips !== null &&
+    matchProxyWarLeagueClipWritePath(requestPath)?.publicLeague === true
+  );
+}
+
 function firstConfiguredEnv(...names: string[]): string | undefined {
   for (const name of names) {
     const value = process.env[name];
     if (value !== undefined && value.trim() !== "") return value.trim();
   }
   return undefined;
+}
+
+/** The exact CC BY-SA attribution + no-endorsement lines used in clip captions. */
+async function loadReplayPremiereClipLicenseStrings(): Promise<{
+  attribution: string;
+  noEndorsement: string;
+}> {
+  const raw = JSON.parse(
+    await fs.readFile(
+      path.join(process.cwd(), "resources", "lang", "en.json"),
+      "utf8",
+    ),
+  ) as { replay_premiere?: Record<string, unknown> };
+  const attribution = raw.replay_premiere?.["asset_attribution"];
+  const noEndorsement = raw.replay_premiere?.["no_endorsement"];
+  if (typeof attribution !== "string" || typeof noEndorsement !== "string") {
+    throw new Error(
+      "resources/lang/en.json is missing replay_premiere.asset_attribution / .no_endorsement",
+    );
+  }
+  return { attribution, noEndorsement };
 }
 
 function envFlag(name: string): boolean {

@@ -399,6 +399,14 @@ export class GameRenderer {
     this.context = context;
   }
 
+  /**
+   * The surface the game is drawn on. Exposed read-only so share-image capture
+   * can read the current frame without reaching into the DOM for it.
+   */
+  get gameCanvas(): HTMLCanvasElement {
+    return this.canvas;
+  }
+
   initialize() {
     this.eventBus.on(RedrawGraphicsEvent, () => this.redraw());
     this.layers.forEach((l) => l.init?.());

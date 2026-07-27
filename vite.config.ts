@@ -122,6 +122,18 @@ export default defineConfig(({ mode }) => {
       cdnBase,
     ),
     mobileLogoImageUrl: buildAssetUrl("images/OF.png", assetManifest, cdnBase),
+    // index.html's social block is rendered by THREE callers, not two: the two
+    // runtime EJS renderers (RenderHtml.ts and the clip worker's capture host)
+    // and this build/dev-time vite-plugin-html pass. Omitting these here does
+    // not affect production — it serves prebuilt HTML — but it makes every dev
+    // server page a 500, which is how it went unnoticed. Dev has no public
+    // origin, so relative values are correct rather than merely a placeholder.
+    socialPageUrl: "/",
+    socialImageUrl: buildAssetUrl(
+      "images/GameplayScreenshot.png",
+      assetManifest,
+      cdnBase,
+    ),
   };
 
   // Vite's HTML transform replaces the source <script src="/src/client/Main.ts">
@@ -190,9 +202,11 @@ export default defineConfig(({ mode }) => {
       // vitest REPLACES its default `exclude` when this is set, so the
       // defaults (node_modules, dist, …) are restated here, plus artifacts/
       // and outputs/ so archived test copies under artifacts/ (pre-rename
-      // cleanup snapshots) are not scanned as live tests, and .claude/ so test
-      // copies inside sibling-session git worktrees (.claude/worktrees/<id>/)
-      // are not scanned as live tests of this checkout.
+      // cleanup snapshots) are not scanned as live tests, and .claude/ plus
+      // .codex/ so test copies inside sibling-session git worktrees are not
+      // scanned as live tests of this checkout. deploy/ holds node:test
+      // (`.test.mjs`) launchd suites run via `node --test`, not vitest; scanning
+      // them as vitest suites reports a spurious failure.
       exclude: [
         "**/node_modules/**",
         "**/dist/**",
@@ -202,6 +216,8 @@ export default defineConfig(({ mode }) => {
         "**/artifacts/**",
         "**/outputs/**",
         "**/.claude/**",
+        "**/.codex/**",
+        "**/deploy/**",
       ],
     },
     root: "./",
@@ -265,7 +281,7 @@ export default defineConfig(({ mode }) => {
       rollupOptions: {
         output: {
           manualChunks: (id) => {
-            const vendorModules = ["pixi.js", "howler", "zod"];
+            const vendorModules = ["pixi.js", "zod"];
             if (vendorModules.some((module) => id.includes(module))) {
               return "vendor";
             }

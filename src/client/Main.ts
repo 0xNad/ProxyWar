@@ -19,6 +19,7 @@ import {
   UserSettings,
 } from "../core/game/UserSettings";
 import "./AccountModal";
+import { loadAiLeagueReplayDetails } from "./AiLeagueReplayArtifacts";
 import { mountAiLeagueReplayOverlay } from "./AiLeagueReplayOverlay";
 import { getUserMe } from "./Api";
 import { userAuth } from "./Auth";
@@ -50,6 +51,30 @@ import { MatchmakingModal } from "./Matchmaking";
 import { initNavigation } from "./Navigation";
 import "./NewsModal";
 import "./PatternInput";
+import {
+  initialReplayClipRenderableThroughTurn,
+  replayClipPreviewTarget,
+} from "./ReplayClipControl";
+import {
+  finishReplayLoadingScreen,
+  holdReplayLoadingScreenUntilFirstFrame,
+  REPLAY_LOADING_SLOW_TIMEOUT_MS,
+  runReplayStartup,
+  setReplayLoadingProgress,
+  showReplayLoadingFailure,
+  showReplayLoadingScreen,
+} from "./ReplayLoadingScreen";
+import {
+  mountArchivedReplayPremiereOverlay,
+  readReplayPremiereArchivePayload,
+  type ReplayPremiereArchivePayload,
+} from "./ReplayPremiereArchiveView";
+import type { ReplayPremiereOverlayHandle } from "./ReplayPremiereOverlay";
+import type { ReplayPremiereProgressiveReplayConfig } from "./ReplayPremierePlayback";
+import {
+  parseReplayPremiereRoute,
+  ReplayPremiereRuntimeController,
+} from "./ReplayPremiereRuntime";
 import "./SinglePlayerModal";
 import { StoreModal } from "./Store";
 import "./TerritoryPatternsModal";
@@ -73,6 +98,7 @@ import {
 import { ReplaySpeedMultiplier } from "./utilities/ReplaySpeedMultiplier";
 
 import {
+  isAiLeagueReplayRoute,
   isCoworldPlayerRoute,
   isCoworldReplayRoute,
 } from "./AiLeagueReplayMode";
@@ -249,7 +275,13 @@ export interface JoinLobbyEvent {
   gameStartInfo?: GameStartInfo;
   // GameRecord exists when replaying an archived game.
   gameRecord?: GameRecord;
+  // A Premiere receives only released, hash-verified turns.
+  progressiveReplay?: ReplayPremiereProgressiveReplayConfig;
+  // Validated fresh-document Clip Preview target for a plain archived replay.
+  // LocalServer consumes this before replay pacing begins.
+  replayClipPreviewTarget?: number;
   aiLeagueRunID?: string;
+  premiereId?: string;
   source?:
     | "public"
     | "private"
@@ -257,7 +289,8 @@ export interface JoinLobbyEvent {
     | "matchmaking"
     | "singleplayer"
     | "ai-league-replay"
-    | "coworld-replay";
+    | "coworld-replay"
+    | "replay-premiere";
   coworldReplayPath?: string;
   publicLobbyInfo?: GameInfo | PublicGameInfo;
 }
@@ -265,6 +298,11 @@ export interface JoinLobbyEvent {
 class Client {
   private lobbyHandle: JoinLobbyResult | null = null;
   private eventBus: EventBus = new EventBus();
+  private replayLoadingCleanup: (() => void) | null = null;
+  private replayAttemptCleanup: (() => void) | null = null;
+  private replayPremiereRuntime: ReplayPremiereRuntimeController | null = null;
+  private replayPremiereArchiveOverlay: ReplayPremiereOverlayHandle | null =
+    null;
 
   private currentUrl: string | null = null;
 
@@ -309,10 +347,17 @@ class Client {
       console.warn("Game version element not found");
     } else {
       const trimmed = version.trim();
+      // version.txt ships as a placeholder ("x.xx.xx") that release tooling is
+      // meant to overwrite. Until it carries a real (digit-bearing) version,
+      // hide the subtitle rather than render the placeholder — in the pixel
+      // display font "vx.xx.xx" reads as garbled "VH.HH.HH".
+      const hasRealVersion = /\d/.test(trimmed);
       const displayVersion = trimmed.startsWith("v") ? trimmed : `v${trimmed}`;
       versionElements.forEach((el) => {
-        (el as HTMLElement).style.fontFamily = '"OpenFront", Inter, sans-serif';
-        el.textContent = displayVersion;
+        const host = el as HTMLElement;
+        host.style.fontFamily = '"OpenFront", Inter, sans-serif';
+        host.style.display = hasRealVersion ? "" : "none";
+        host.textContent = hasRealVersion ? displayVersion : "";
       });
     }
 
@@ -341,13 +386,38 @@ class Client {
 
     window.addEventListener("beforeunload", async () => {
       console.log("Browser is closing");
+      this.replayAttemptCleanup?.();
       if (this.lobbyHandle !== null) {
         this.lobbyHandle.stop(true);
         await crazyGamesSDK.gameplayStop();
       }
     });
 
-    document.addEventListener("join-lobby", this.handleJoinLobby.bind(this));
+    document.addEventListener("join-lobby", (event) => {
+      const isReplayJoin =
+        event.detail.gameRecord !== undefined ||
+        event.detail.progressiveReplay !== undefined;
+      if (!isReplayJoin || !isAiLeagueReplayRoute()) {
+        void this.handleJoinLobby(event);
+        return;
+      }
+
+      void runReplayStartup(
+        () => this.handleJoinLobby(event),
+        (error) => {
+          this.failReplayLoading(
+            event.detail.aiLeagueRunID ?? event.detail.gameID,
+            event.detail.source === "coworld-replay"
+              ? "coworld-replay"
+              : event.detail.source === "replay-premiere"
+                ? "replay-premiere"
+                : "ai-league-replay",
+            "Replay failed to start",
+            error,
+          );
+        },
+      );
+    });
     document.addEventListener("leave-lobby", this.handleLeaveLobby.bind(this));
     document.addEventListener("kick-player", this.handleKickPlayer.bind(this));
     document.addEventListener("start-game", this.handleStartGame.bind(this));
@@ -622,6 +692,16 @@ class Client {
 
     // Coworld surfaces (Observatory replays / browser player) go straight
     // into the match — never run landing-page hash/SDK logic for them.
+    const premiereId = parseReplayPremiereRoute(window.location.pathname);
+    if (premiereId !== null) {
+      const archived = readReplayPremiereArchivePayload();
+      if (archived !== null && archived.premiereId === premiereId) {
+        await this.openArchivedReplayPremiere(archived);
+      } else {
+        await this.openReplayPremiere(premiereId);
+      }
+      return;
+    }
     if (isCoworldPlayerRoute()) {
       await this.openCoworldPlayer();
       return;
@@ -740,7 +820,7 @@ class Client {
       /^\/(?:w\d+\/)?game\/([^/]+)/,
     );
     const aiLeagueReplayMatch = window.location.pathname.match(
-      /^\/ai-league-replay\/([^/]+)/,
+      /^\/(?:ai-league-replay|proxywar-replay|openfront-replay)\/([^/]+)/,
     );
     if (aiLeagueReplayMatch) {
       await this.openAiLeagueReplay(decodeURIComponent(aiLeagueReplayMatch[1]));
@@ -791,6 +871,209 @@ class Client {
     }
   }
 
+  /**
+   * Renders an archived premiere's durable results-summary page: the polished
+   * results overlay from the persisted summary, plus a best-effort render of the
+   * ordinary league replay behind it. The overlay renders immediately and stands
+   * alone if the underlying replay has aged off the mirror.
+   */
+  private async openArchivedReplayPremiere(
+    payload: ReplayPremiereArchivePayload,
+  ): Promise<void> {
+    this.replayPremiereArchiveOverlay?.dispose();
+    this.replayPremiereArchiveOverlay =
+      mountArchivedReplayPremiereOverlay(payload);
+    finishReplayLoadingScreen();
+    if (payload.replayRunKey !== null) {
+      try {
+        await this.openAiLeagueReplay(payload.replayRunKey, {
+          source: "ai-league-replay",
+        });
+      } catch (error) {
+        console.warn("Archived premiere replay unavailable", error);
+        finishReplayLoadingScreen();
+      }
+      // The ordinary replay path mounts its own overlays; re-assert the durable
+      // results overlay so it floats on top of the rendered replay.
+      this.replayPremiereArchiveOverlay?.dispose();
+      this.replayPremiereArchiveOverlay =
+        mountArchivedReplayPremiereOverlay(payload);
+    }
+  }
+
+  private async openReplayPremiere(premiereId: string): Promise<void> {
+    this.replayAttemptCleanup?.();
+    this.replayLoadingCleanup?.();
+
+    // Premiere-specific veil hold. Unlike ordinary replays this must NOT lift
+    // on the first rendered frame: a live join first renders turn 0 and then
+    // free-runs to the entry position — the veil covers that entire sync so
+    // the viewer never sees the turn-0 map, the catch-up blur, or the
+    // teleport. It lifts per lifecycle state below.
+    showReplayLoadingScreen("replay_premiere.loading_premiere");
+    let veilFinished = false;
+    let veilSlowTimer: ReturnType<typeof setTimeout> | null = setTimeout(() => {
+      if (!veilFinished) {
+        showReplayLoadingScreen("ai_league_replay.loading_slow");
+      }
+    }, REPLAY_LOADING_SLOW_TIMEOUT_MS);
+    const clearVeilSlowTimer = () => {
+      if (veilSlowTimer !== null) {
+        clearTimeout(veilSlowTimer);
+        veilSlowTimer = null;
+      }
+    };
+    const onVeilReplayError = () => {
+      if (veilFinished) return;
+      veilFinished = true;
+      clearVeilSlowTimer();
+      showReplayLoadingFailure();
+    };
+    document.addEventListener(
+      "ai-league-replay-load-error",
+      onVeilReplayError,
+      {
+        once: true,
+      },
+    );
+    const releaseVeilHold = () => {
+      clearVeilSlowTimer();
+      document.removeEventListener(
+        "ai-league-replay-load-error",
+        onVeilReplayError,
+      );
+    };
+    const finishVeil = () => {
+      if (veilFinished) return;
+      veilFinished = true;
+      releaseVeilHold();
+      setReplayLoadingProgress(null);
+      finishReplayLoadingScreen();
+      if (this.replayLoadingCleanup === releaseVeilHold) {
+        this.replayLoadingCleanup = null;
+      }
+    };
+    this.replayLoadingCleanup = releaseVeilHold;
+
+    let active = true;
+    let projectionMounted = false;
+    const runtime = new ReplayPremiereRuntimeController({
+      premiereId,
+      onProjectionReady: (projection) => {
+        if (!active || this.replayPremiereRuntime !== runtime) return;
+        projectionMounted = true;
+        if (
+          projection.state === "playing" ||
+          projection.state === "checkpoint"
+        ) {
+          // Live join: keep the veil up with join-sync messaging until the
+          // runtime reports the trail-buffered entry position is reached
+          // (onJoinSync "complete" below).
+          if (!veilFinished) {
+            clearVeilSlowTimer();
+            showReplayLoadingScreen("replay_premiere.joining_live");
+          }
+          return;
+        }
+        if (
+          projection.state === "revealed" ||
+          projection.state === "archived"
+        ) {
+          // Post-reveal pages intentionally replay from the start; lift on
+          // the first rendered frame like an ordinary replay.
+          const onFirstFrame = () => finishVeil();
+          document.addEventListener("ai-league-replay-frame", onFirstFrame, {
+            once: true,
+          });
+          return;
+        }
+        // Scheduled countdown and terminal failure/cancel pages have no game
+        // playback to wait for.
+        finishVeil();
+      },
+      onJoinSync: (update) => {
+        if (!active || this.replayPremiereRuntime !== runtime) return;
+        if (update.state === "complete") {
+          finishVeil();
+          return;
+        }
+        if (veilFinished) return;
+        setReplayLoadingProgress(
+          update.currentTurn === null
+            ? translateText("replay_premiere.join_sync_target", {
+                target: update.targetTurn,
+              })
+            : translateText("replay_premiere.join_sync_progress", {
+                current: update.currentTurn,
+                target: update.targetTurn,
+                percent: Math.min(
+                  100,
+                  Math.max(
+                    0,
+                    Math.floor((update.currentTurn / update.targetTurn) * 100),
+                  ),
+                ),
+              }),
+        );
+      },
+      onJoinReady: (request) => {
+        if (
+          !active ||
+          this.replayPremiereRuntime !== runtime ||
+          request.premiereId !== premiereId
+        ) {
+          return;
+        }
+        document.dispatchEvent(
+          new CustomEvent("join-lobby", {
+            detail: {
+              gameID: request.gameID,
+              gameStartInfo: request.gameStartInfo,
+              progressiveReplay: request.progressiveReplay,
+              source: "replay-premiere",
+              premiereId,
+            } satisfies JoinLobbyEvent,
+            bubbles: true,
+            composed: true,
+          }),
+        );
+      },
+      onRevealSeek: (turn) => {
+        if (!active || this.replayPremiereRuntime !== runtime) return;
+        this.eventBus.emit(new ReplayJumpToTurnEvent(turn));
+      },
+    });
+    const cleanupAttempt = () => {
+      if (!active) return;
+      active = false;
+      runtime.dispose();
+      if (this.replayPremiereRuntime === runtime) {
+        this.replayPremiereRuntime = null;
+      }
+      if (this.replayAttemptCleanup === cleanupAttempt) {
+        this.replayAttemptCleanup = null;
+      }
+    };
+    this.replayPremiereRuntime = runtime;
+    this.replayAttemptCleanup = cleanupAttempt;
+
+    try {
+      await runtime.start();
+    } catch (error) {
+      if (!active || this.replayPremiereRuntime !== runtime) return;
+      if (projectionMounted) {
+        console.error("Replay Premiere runtime stopped", error);
+        return;
+      }
+      this.failReplayLoading(
+        premiereId,
+        "replay-premiere",
+        "Replay Premiere failed to start",
+        error,
+      );
+    }
+  }
+
   private async openAiLeagueReplay(
     runID: string,
     options: {
@@ -802,92 +1085,153 @@ class Client {
       artifactBasePath?: string;
     } = {},
   ) {
-    const artifactBasePath =
-      options.artifactBasePath ?? `/ai-league-runs/${encodeURIComponent(runID)}`;
-    const [
-      recordResponse,
-      decisionsResponse,
-      summaryResponse,
-      spectatorTelemetryResponse,
-    ] = await Promise.all([
-      fetch(`${artifactBasePath}/game-record.json`),
-      fetch(`${artifactBasePath}/decisions.jsonl`),
-      fetch(`${artifactBasePath}/match-summary.json`),
-      fetch(`${artifactBasePath}/spectator-telemetry.json`),
-    ]);
+    this.replayAttemptCleanup?.();
+    this.replayLoadingCleanup?.();
+    this.replayLoadingCleanup = holdReplayLoadingScreenUntilFirstFrame();
 
-    if (!recordResponse.ok) {
-      const spectatorResponse = await fetch(
-        `${artifactBasePath}/spectator.html`,
-        {
-          method: "HEAD",
-        },
-      );
-      if (spectatorResponse.ok) {
-        alert(
-          `Rendered replay record is missing for run ${runID}. Opening the read-only timeline replay instead.`,
-        );
-        window.location.href = `${artifactBasePath}/spectator.html`;
-        return;
+    const artifactBasePath =
+      options.artifactBasePath ??
+      `/ai-league-runs/${encodeURIComponent(runID)}`;
+    const attemptController = new AbortController();
+    const attemptCleanups: Array<() => void> = [];
+    const cleanupAttempt = () => {
+      attemptController.abort();
+      for (const cleanup of attemptCleanups.splice(0)) cleanup();
+      if (this.replayAttemptCleanup === cleanupAttempt) {
+        this.replayAttemptCleanup = null;
       }
-      alert(
-        `Proxy War replay artifacts are missing for run ${runID}. Try a newer completed match from the Recent Matches list.`,
+    };
+    this.replayAttemptCleanup = cleanupAttempt;
+    const recordTimeout = setTimeout(
+      () => attemptController.abort("Replay record request timed out"),
+      REPLAY_LOADING_SLOW_TIMEOUT_MS,
+    );
+    attemptCleanups.push(() => clearTimeout(recordTimeout));
+
+    let recordResponse: Response;
+    try {
+      recordResponse = await fetch(`${artifactBasePath}/game-record.json`, {
+        signal: attemptController.signal,
+      });
+    } catch (error) {
+      if (this.replayAttemptCleanup !== cleanupAttempt) return;
+      this.failReplayLoading(
+        runID,
+        options.source,
+        "Replay record request failed",
+        error,
+      );
+      return;
+    }
+    if (!recordResponse.ok) {
+      try {
+        const spectatorResponse = await fetch(
+          `${artifactBasePath}/spectator.html`,
+          {
+            method: "HEAD",
+            signal: attemptController.signal,
+          },
+        );
+        if (spectatorResponse.ok) {
+          cleanupAttempt();
+          window.location.replace(`${artifactBasePath}/spectator.html`);
+          return;
+        }
+      } catch (error) {
+        console.warn("Replay timeline fallback request failed", error);
+      }
+
+      this.failReplayLoading(
+        runID,
+        options.source,
+        `Replay record returned HTTP ${recordResponse.status}`,
       );
       return;
     }
 
-    const recordJson = await recordResponse.json();
+    let recordJson: unknown;
+    try {
+      recordJson = await recordResponse.json();
+    } catch (error) {
+      this.failReplayLoading(
+        runID,
+        options.source,
+        "Replay record is not valid JSON",
+        error,
+      );
+      return;
+    }
+
     const parsed = GameRecordSchema.safeParse(recordJson);
     if (!parsed.success) {
-      console.error("Invalid AI league game record", parsed.error);
-      alert(`AI league replay record is invalid for run ${runID}`);
+      this.failReplayLoading(
+        runID,
+        options.source,
+        "Replay record failed schema validation",
+        parsed.error,
+      );
       return;
     }
+    clearTimeout(recordTimeout);
 
-    const decisionsText = decisionsResponse.ok
-      ? await decisionsResponse.text()
-      : "";
-    const decisions = decisionsText
-      .split("\n")
-      .map((line) => line.trim())
-      .filter(Boolean)
-      .map((line) => JSON.parse(line));
-    const summary = summaryResponse.ok ? await summaryResponse.json() : null;
-    let spectatorTelemetry: unknown = null;
-    if (spectatorTelemetryResponse.ok) {
-      try {
-        spectatorTelemetry = await spectatorTelemetryResponse.json();
-      } catch (error) {
-        console.warn("Invalid AI league spectator telemetry", error);
-      }
+    let replayOverlay: ReturnType<typeof mountAiLeagueReplayOverlay>;
+    try {
+      replayOverlay = mountAiLeagueReplayOverlay({
+        runID,
+        decisions: [],
+        summary: null,
+        spectatorTelemetry: null,
+        artifactBasePath,
+        replayMaxTurn: initialReplayClipRenderableThroughTurn(parsed.data.info),
+        detailsLoading: true,
+        artifactAvailability: {
+          visualReport: false,
+          spectatorTelemetry: false,
+          decisions: false,
+          summary: false,
+        },
+        onReplaySpeedChange: (speed) => {
+          this.eventBus.emit(new ReplaySpeedChangeEvent(speed));
+        },
+      });
+    } catch (error) {
+      this.failReplayLoading(
+        runID,
+        options.source,
+        "Replay overlay failed to initialize",
+        error,
+      );
+      return;
     }
+    attemptCleanups.push(() => replayOverlay.dispose());
 
-    mountAiLeagueReplayOverlay({
-      runID,
-      decisions,
-      summary,
-      spectatorTelemetry,
-      artifactBasePath,
-      onReplaySpeedChange: (speed) => {
-        this.eventBus.emit(new ReplaySpeedChangeEvent(speed));
-      },
-    });
-    document.addEventListener("ai-league-replay-jump-turn", (event) => {
+    const onReplayJump = (event: Event) => {
       const turnNumber = (event as CustomEvent<{ turnNumber?: number }>).detail
         ?.turnNumber;
       if (typeof turnNumber === "number" && Number.isFinite(turnNumber)) {
         this.eventBus.emit(new ReplayJumpToTurnEvent(turnNumber));
       }
-    });
-    document.addEventListener("ai-league-replay-pause", (event) => {
+    };
+    const onReplayPause = (event: Event) => {
       const paused = (event as CustomEvent<{ paused?: boolean }>).detail
         ?.paused;
       this.eventBus.emit(new PauseGameIntentEvent(paused !== false));
+    };
+    document.addEventListener("ai-league-replay-jump-turn", onReplayJump);
+    document.addEventListener("ai-league-replay-pause", onReplayPause);
+    attemptCleanups.push(() => {
+      document.removeEventListener("ai-league-replay-jump-turn", onReplayJump);
+      document.removeEventListener("ai-league-replay-pause", onReplayPause);
     });
-    const requestedTurn = Number(
-      new URLSearchParams(window.location.search).get("turn"),
-    );
-    if (Number.isFinite(requestedTurn) && requestedTurn > 0) {
+
+    const replaySearchParams = new URLSearchParams(window.location.search);
+    const requestedTurn = Number(replaySearchParams.get("turn"));
+    const previewTarget = replayClipPreviewTarget(window.location.search);
+    if (
+      previewTarget === null &&
+      Number.isFinite(requestedTurn) &&
+      requestedTurn > 0
+    ) {
       const jumpAfterFirstFrame = () => {
         this.eventBus.emit(new ReplayJumpToTurnEvent(requestedTurn));
         document.removeEventListener(
@@ -896,7 +1240,77 @@ class Client {
         );
       };
       document.addEventListener("ai-league-replay-frame", jumpAfterFirstFrame);
+      attemptCleanups.push(() =>
+        document.removeEventListener(
+          "ai-league-replay-frame",
+          jumpAfterFirstFrame,
+        ),
+      );
     }
+
+    const hydrateAfterFirstFrame = () => {
+      document.removeEventListener(
+        "ai-league-replay-frame",
+        hydrateAfterFirstFrame,
+      );
+      if (this.replayAttemptCleanup !== cleanupAttempt) return;
+      const detailsController = new AbortController();
+      const abortDetails = () => detailsController.abort();
+      attemptController.signal.addEventListener("abort", abortDetails, {
+        once: true,
+      });
+      const detailsTimeout = setTimeout(
+        () => detailsController.abort("Replay details request timed out"),
+        15_000,
+      );
+      void loadAiLeagueReplayDetails(artifactBasePath, {
+        signal: detailsController.signal,
+        onPartial: (details) => {
+          if (this.replayAttemptCleanup !== cleanupAttempt) {
+            return;
+          }
+          replayOverlay.hydrate({
+            decisions: details.recentDecisions,
+            summary: details.summary,
+            spectatorTelemetry: details.spectatorTelemetry,
+            detailsLoading: false,
+            artifactAvailability: details.artifactAvailability,
+          });
+        },
+      })
+        .then((details) => {
+          if (this.replayAttemptCleanup !== cleanupAttempt) {
+            return;
+          }
+          replayOverlay.hydrate({
+            decisions: details.recentDecisions,
+            summary: details.summary,
+            spectatorTelemetry: details.spectatorTelemetry,
+            detailsLoading: false,
+            artifactAvailability: details.artifactAvailability,
+          });
+        })
+        .catch((error) => {
+          if (!detailsController.signal.aborted) {
+            console.warn("Replay details unavailable", error);
+          }
+        })
+        .finally(() => {
+          clearTimeout(detailsTimeout);
+          attemptController.signal.removeEventListener("abort", abortDetails);
+        });
+    };
+    document.addEventListener(
+      "ai-league-replay-frame",
+      hydrateAfterFirstFrame,
+      { once: true },
+    );
+    attemptCleanups.push(() =>
+      document.removeEventListener(
+        "ai-league-replay-frame",
+        hydrateAfterFirstFrame,
+      ),
+    );
 
     document.dispatchEvent(
       new CustomEvent("join-lobby", {
@@ -906,6 +1320,7 @@ class Client {
           source: options.source ?? "ai-league-replay",
           aiLeagueRunID: runID,
           coworldReplayPath: options.coworldReplayPath,
+          replayClipPreviewTarget: previewTarget ?? undefined,
         } satisfies JoinLobbyEvent,
         bubbles: true,
         composed: true,
@@ -915,56 +1330,54 @@ class Client {
 
   private async openCoworldReplay() {
     const coworldReplayPath = window.location.pathname + window.location.search;
-    const loading = document.createElement("div");
-    loading.id = "coworld-replay-loading";
-    loading.textContent = "Waiting for Proxy War replay...";
-    loading.setAttribute(
-      "style",
-      [
-        "position:fixed",
-        "inset:0",
-        "z-index:100000",
-        "display:grid",
-        "place-items:center",
-        "background:#070b12",
-        "color:white",
-        "font:600 18px system-ui,sans-serif",
-      ].join(";"),
+    showReplayLoadingScreen("ai_league_replay.waiting_for_replay");
+    const slowTimer = setTimeout(
+      () => showReplayLoadingScreen("ai_league_replay.loading_slow"),
+      REPLAY_LOADING_SLOW_TIMEOUT_MS,
     );
-    document.body.appendChild(loading);
-    // Hand off from the server-injected first-paint splash (the adapter's
-    // injectCoworldSplash in coworld-adapter/src/coworld-appshell.ts — keep
-    // the id in sync) now that our own overlay covers the page.
-    document.getElementById("proxywar-coworld-splash")?.remove();
+
     while (true) {
-      const response = await fetch("../coworld/replay-info", {
-        cache: "no-store",
-      });
-      if (response.ok) {
-        const info = await response.json();
-        if (info.ready === true && typeof info.runID === "string") {
-          // Straight into the match: keep the branded overlay up until the
-          // first replay frame renders, so the game-start/credits modal
-          // never flashes on Observatory surfaces. Safety timeout so a
-          // failed load can never trap the viewer behind the overlay.
-          loading.textContent = "Loading replay...";
-          const removeLoading = () => loading.remove();
-          document.addEventListener("ai-league-replay-frame", removeLoading, {
-            once: true,
-          });
-          setTimeout(removeLoading, 45_000);
-          await this.openAiLeagueReplay(info.runID, {
-            source: "coworld-replay",
-            coworldReplayPath,
-            artifactBasePath: `../ai-league-runs/${encodeURIComponent(
-              info.runID,
-            )}`,
-          });
-          return;
+      try {
+        const response = await fetch("../coworld/replay-info", {
+          cache: "no-store",
+        });
+        if (response.ok) {
+          const info = await response.json();
+          if (info.ready === true && typeof info.runID === "string") {
+            clearTimeout(slowTimer);
+            showReplayLoadingScreen("ai_league_replay.loading_replay");
+            await this.openAiLeagueReplay(info.runID, {
+              source: "coworld-replay",
+              coworldReplayPath,
+              artifactBasePath: `../ai-league-runs/${encodeURIComponent(
+                info.runID,
+              )}`,
+            });
+            return;
+          }
         }
+      } catch (error) {
+        console.warn("Coworld replay status request failed", error);
       }
       await new Promise((resolve) => setTimeout(resolve, 250));
     }
+  }
+
+  private failReplayLoading(
+    runID: string,
+    _source:
+      | "ai-league-replay"
+      | "coworld-replay"
+      | "replay-premiere"
+      | undefined,
+    message: string,
+    error?: unknown,
+  ): void {
+    this.replayLoadingCleanup?.();
+    this.replayLoadingCleanup = null;
+    this.replayAttemptCleanup?.();
+    showReplayLoadingFailure();
+    console.error(`${message} for run ${runID}`, error);
   }
 
   private async openCoworldPlayer() {
@@ -974,9 +1387,16 @@ class Client {
 
   private async handleJoinLobby(event: CustomEvent<JoinLobbyEvent>) {
     const lobby = event.detail;
+    if (
+      lobby.source !== "replay-premiere" &&
+      this.replayPremiereRuntime !== null
+    ) {
+      this.replayAttemptCleanup?.();
+    }
     this.mostRecentJoinEvent = event.timeStamp;
     if (
       lobby.gameRecord === undefined &&
+      lobby.progressiveReplay === undefined &&
       this.usernameInput &&
       !this.usernameInput.validateOrShowError()
     ) {
@@ -994,11 +1414,23 @@ class Client {
     }
     const config = await getRuntimeClientServerConfig();
     // Only update URL immediately for private lobbies, not public ones
-    if (lobby.source !== "public" && lobby.gameRecord === undefined) {
+    if (
+      lobby.source !== "public" &&
+      lobby.gameRecord === undefined &&
+      lobby.progressiveReplay === undefined
+    ) {
       this.updateJoinUrlForShare(lobby.gameID, config);
     }
     const auth = await userAuth();
     const playerRole = auth !== false ? (auth.claims.role ?? null) : null;
+    const clipPreviewTarget =
+      lobby.gameRecord !== undefined &&
+      lobby.progressiveReplay === undefined &&
+      lobby.aiLeagueRunID !== undefined &&
+      Number.isSafeInteger(lobby.replayClipPreviewTarget) &&
+      (lobby.replayClipPreviewTarget ?? 0) > 0
+        ? lobby.replayClipPreviewTarget!
+        : null;
     const newLobbyHandle = joinLobby(this.eventBus, {
       gameID: lobby.gameID,
       serverConfig: config,
@@ -1009,6 +1441,8 @@ class Client {
       playerRole,
       gameStartInfo: lobby.gameStartInfo ?? lobby.gameRecord?.info,
       gameRecord: lobby.gameRecord,
+      progressiveReplay: lobby.progressiveReplay,
+      replayClipPreviewTarget: clipPreviewTarget ?? undefined,
     });
 
     if (this.mostRecentJoinEvent !== event.timeStamp) {
@@ -1089,6 +1523,7 @@ class Client {
       if (
         lobby.source !== "ai-league-replay" &&
         lobby.source !== "coworld-replay" &&
+        lobby.source !== "replay-premiere" &&
         window.PageOS?.session?.newPageView
       ) {
         window.PageOS.session.newPageView();
@@ -1106,7 +1541,16 @@ class Client {
         history.replaceState(null, "", window.location.origin + "#refresh");
       }
       const lobbyIdHidden = !this.userSettings.lobbyIdVisibility();
-      if (lobby.gameRecord !== undefined && lobby.aiLeagueRunID) {
+      if (lobby.progressiveReplay !== undefined && lobby.premiereId) {
+        const premierePath = `/premiere/${encodeURIComponent(lobby.premiereId)}`;
+        if (window.location.pathname !== premierePath) {
+          history.replaceState(
+            null,
+            "",
+            `${premierePath}${window.location.search}`,
+          );
+        }
+      } else if (lobby.gameRecord !== undefined && lobby.aiLeagueRunID) {
         if (!preserveCoworldReplayUrl) {
           history.pushState(
             null,
@@ -1121,7 +1565,7 @@ class Client {
         };
         if (runtimeWindow.__openFrontPromoCaptureLock === true) {
           this.eventBus.emit(new PauseGameIntentEvent(true));
-        } else {
+        } else if (clipPreviewTarget === null) {
           this.eventBus.emit(
             new ReplaySpeedChangeEvent(ReplaySpeedMultiplier.fastest),
           );
@@ -1157,6 +1601,8 @@ class Client {
   }
 
   private async handleLeaveLobby(event?: CustomEvent) {
+    this.replayAttemptCleanup?.();
+    this.replayAttemptCleanup = null;
     if (this.lobbyHandle === null) {
       return;
     }
@@ -1225,6 +1671,7 @@ class Client {
     const config = await getRuntimeClientServerConfig();
     if (
       lobby.gameRecord !== undefined ||
+      lobby.progressiveReplay !== undefined ||
       config.env() === GameEnv.Dev ||
       lobby.gameStartInfo?.config.gameType === GameType.Singleplayer
     ) {

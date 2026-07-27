@@ -5,7 +5,11 @@ import { EventBus } from "../../../core/EventBus";
 import { GameType } from "../../../core/game/Game";
 import { GameView } from "../../../core/game/GameView";
 import { crazyGamesSDK } from "../../CrazyGamesSDK";
-import { TogglePauseIntentEvent } from "../../InputHandler";
+import {
+  ReplaySpeedChangeEvent,
+  TogglePauseIntentEvent,
+} from "../../InputHandler";
+import { defaultReplaySpeedMultiplier } from "../../utilities/ReplaySpeedMultiplier";
 import { PauseGameIntentEvent, SendWinnerEvent } from "../../Transport";
 import { translateText } from "../../Utils";
 import { ImmunityBarVisibleEvent } from "./ImmunityTimer";
@@ -13,6 +17,29 @@ import { Layer } from "./Layer";
 import { ShowReplayPanelEvent } from "./ReplayPanel";
 import { ShowSettingsModalEvent } from "./SettingsModal";
 import { SpawnBarVisibleEvent } from "./SpawnTimer";
+/**
+ * ReplaySpeedMultiplier is a DELAY multiplier, not a speed one: slow=2 means
+ * twice the delay (half speed) and fastest=0 means no delay (max speed).
+ * Rendering the raw value therefore labelled max speed as "0x" and half speed
+ * as "2x" — the exact inverse of the truth. Map it to what a viewer means.
+ */
+function playbackSpeedLabel(multiplier: number): string {
+  if (multiplier === 0) return translateText("game_controls.speed_max");
+  if (multiplier <= 0) return translateText("game_controls.speed_max");
+  const speed = 1 / multiplier;
+  return `${Number.isInteger(speed) ? speed : speed.toFixed(1)}\u00d7`;
+}
+
+// Shared affordance for every control in the top-right cluster. These were bare
+// <div class="cursor-pointer"> wrappers: not focusable, no keyboard activation,
+// no hover/focus feedback, and 20px hit targets. One class keeps them
+// consistent and gives mobile a 44px target.
+const CONTROL_BUTTON_CLASS =
+  "flex items-center justify-center rounded-md p-1.5 min-w-[34px] min-h-[34px] " +
+  "max-[1199px]:min-w-[44px] max-[1199px]:min-h-[44px] transition-colors " +
+  "hover:bg-white/10 active:bg-white/15 focus-visible:outline-hidden " +
+  "focus-visible:ring-2 focus-visible:ring-info/60";
+
 const exitIcon = assetUrl("images/ExitIconWhite.svg");
 const FastForwardIconSolid = assetUrl("images/FastForwardIconSolidWhite.svg");
 const pauseIcon = assetUrl("images/PauseIconWhite.svg");
@@ -44,6 +71,11 @@ export class GameRightSidebar extends LitElement implements Layer {
   @state()
   private timer: number = 0;
 
+  // Mirrors ReplayPanel's speed so the collapsed cluster can show the current
+  // multiplier without the panel being open.
+  @state()
+  private _replaySpeedMultiplier: number = defaultReplaySpeedMultiplier;
+
   private hasWinner = false;
   private isLobbyCreator = false;
   private spawnBarVisible = false;
@@ -72,6 +104,10 @@ export class GameRightSidebar extends LitElement implements Layer {
     this.eventBus.on(SendWinnerEvent, () => {
       this.hasWinner = true;
       this.requestUpdate();
+    });
+
+    this.eventBus.on(ReplaySpeedChangeEvent, (e: ReplaySpeedChangeEvent) => {
+      this._replaySpeedMultiplier = e.replaySpeedMultiplier;
     });
 
     this.eventBus.on(TogglePauseIntentEvent, () => {
@@ -221,40 +257,80 @@ export class GameRightSidebar extends LitElement implements Layer {
 
     return html`
       <aside
-        class=${`w-fit flex flex-row items-center gap-3 py-2 px-3 bg-gray-800/92 backdrop-blur-sm shadow-xs min-[1200px]:rounded-lg rounded-bl-lg transition-transform duration-300 ease-out transform text-white ${
+        class=${`w-fit flex flex-row items-center gap-3 py-2 px-3 bg-glass backdrop-blur-sm shadow-xs min-[1200px]:rounded-lg rounded-bl-lg transition-transform duration-300 ease-out transform text-white ${
           this._isVisible ? "translate-x-0" : "translate-x-full"
         }`}
         @contextmenu=${(e: Event) => e.preventDefault()}
       >
         <!-- In-game time -->
-        <div class=${timerColor}>${this.secondsToHms(this.timer)}</div>
-
-        <!-- Buttons -->
-        ${this.maybeRenderReplayButtons()}
-
-        <div class="cursor-pointer" @click=${this.onSettingsButtonClick}>
-          <img src=${settingsIcon} alt="settings" width="20" height="20" />
+        <div
+          class=${timerColor}
+          title=${translateText("game_controls.elapsed")}
+          aria-label=${translateText("game_controls.elapsed")}
+        >
+          ${this.secondsToHms(this.timer)}
         </div>
 
+        <!-- Playback controls (replay / singleplayer only) -->
+        ${this.maybeRenderReplayButtons()}
+
+        <!-- Session controls, separated from playback so "leave" never sits
+             flush against "pause". -->
+        <span class="w-px self-stretch bg-white/15" aria-hidden="true"></span>
+
+        <button
+          type="button"
+          class=${CONTROL_BUTTON_CLASS}
+          title=${translateText("game_controls.settings")}
+          aria-label=${translateText("game_controls.settings")}
+          @click=${this.onSettingsButtonClick}
+        >
+          <img
+            src=${settingsIcon}
+            alt=""
+            aria-hidden="true"
+            width="20"
+            height="20"
+          />
+        </button>
+
         ${document.fullscreenEnabled
-          ? html`<div
-              class="cursor-pointer"
+          ? html`<button
+              type="button"
+              class=${CONTROL_BUTTON_CLASS}
+              title=${this.isFullscreen
+                ? translateText("fullscreen.exit")
+                : translateText("fullscreen.enter")}
+              aria-label=${this.isFullscreen
+                ? translateText("fullscreen.exit")
+                : translateText("fullscreen.enter")}
               @click=${this.onFullscreenButtonClick}
             >
               <img
                 src=${this.isFullscreen ? exitFullscreenIcon : fullscreenIcon}
-                alt=${this.isFullscreen
-                  ? translateText("fullscreen.exit")
-                  : translateText("fullscreen.enter")}
+                alt=""
+                aria-hidden="true"
                 width="20"
                 height="20"
               />
-            </div>`
+            </button>`
           : ""}
 
-        <div class="cursor-pointer" @click=${this.onExitButtonClick}>
-          <img src=${exitIcon} alt="exit" width="20" height="20" />
-        </div>
+        <button
+          type="button"
+          class=${`${CONTROL_BUTTON_CLASS} hover:bg-danger/25`}
+          title=${translateText("game_controls.exit")}
+          aria-label=${translateText("game_controls.exit")}
+          @click=${this.onExitButtonClick}
+        >
+          <img
+            src=${exitIcon}
+            alt=""
+            aria-hidden="true"
+            width="20"
+            height="20"
+          />
+        </button>
       </aside>
     `;
   }
@@ -263,30 +339,67 @@ export class GameRightSidebar extends LitElement implements Layer {
     const isReplayOrSingleplayer =
       this._isSinglePlayer || this.game?.config()?.isReplay();
     const showPauseButton = isReplayOrSingleplayer || this.isLobbyCreator;
+    // The fast-forward control opens the speed panel; without the current
+    // multiplier on its face the only way to know the playback speed was to
+    // open that panel. Surface it inline instead (hidden at 1x to stay quiet).
+    const speedLabel =
+      this._replaySpeedMultiplier === 1
+        ? translateText("game_controls.playback_speed")
+        : translateText("game_controls.playback_speed_current", {
+            speed: playbackSpeedLabel(this._replaySpeedMultiplier),
+          });
 
     return html`
       ${isReplayOrSingleplayer
         ? html`
-            <div class="cursor-pointer" @click=${this.toggleReplayPanel}>
+            <button
+              type="button"
+              class=${`${CONTROL_BUTTON_CLASS} gap-1 ${
+                this._isReplayVisible ? "bg-white/10" : ""
+              }`}
+              title=${speedLabel}
+              aria-label=${speedLabel}
+              aria-expanded=${this._isReplayVisible ? "true" : "false"}
+              @click=${this.toggleReplayPanel}
+            >
               <img
                 src=${FastForwardIconSolid}
-                alt="replay"
+                alt=""
+                aria-hidden="true"
                 width="20"
                 height="20"
               />
-            </div>
+              ${this._replaySpeedMultiplier !== 1
+                ? html`<span
+                    class="text-[11px] font-bold leading-none tabular-nums"
+                    aria-hidden="true"
+                    >${playbackSpeedLabel(this._replaySpeedMultiplier)}</span
+                  >`
+                : ""}
+            </button>
           `
         : ""}
       ${showPauseButton
         ? html`
-            <div class="cursor-pointer" @click=${this.onPauseButtonClick}>
+            <button
+              type="button"
+              class=${CONTROL_BUTTON_CLASS}
+              title=${this.isPaused
+                ? translateText("game_controls.resume")
+                : translateText("game_controls.pause")}
+              aria-label=${this.isPaused
+                ? translateText("game_controls.resume")
+                : translateText("game_controls.pause")}
+              @click=${this.onPauseButtonClick}
+            >
               <img
                 src=${this.isPaused ? playIcon : pauseIcon}
-                alt="play/pause"
+                alt=""
+                aria-hidden="true"
                 width="20"
                 height="20"
               />
-            </div>
+            </button>
           `
         : ""}
     `;

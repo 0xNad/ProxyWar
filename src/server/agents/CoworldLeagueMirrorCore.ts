@@ -1,7 +1,11 @@
+import { PREMIERE_ID_PATTERN } from "../replay-premiere/ReplayPremiereContracts";
+import { derivePremiereId } from "../replay-premiere/ReplayPremiereLoopCore";
 import type { AgentSpectatorReplay } from "./AgentSpectatorReplay";
+import type { LatestPremierePointer } from "./CoworldLeaguePremiereSuppression";
 import type {
   CoworldLeagueEpisodePlayerRow,
   CoworldLeagueEpisodeRow,
+  CoworldLeagueLatestPremiereCard,
   CoworldLeagueRoundRow,
   CoworldLeagueStandingRow,
 } from "./CoworldLeagueSiteWriter";
@@ -13,7 +17,9 @@ import { commissionerTopScoreSlots } from "./CoworldScoreSemantics";
  * mirror's site data. No IO here — the mirror script owns fetching.
  */
 
-const housePolicyPrefix = "proxywar-keystone";
+const housePolicyName = "proxywar-keystone";
+const replayUiRecentDecisionLimit = 60;
+const replayUiTextLimit = 1_000;
 
 const fallbackPlayerColors = [
   "#ef4444",
@@ -60,6 +66,18 @@ function asNumberArray(value: unknown): number[] {
   return numbers.every((number) => number !== null)
     ? (numbers as number[])
     : [];
+}
+
+function asBoolean(value: unknown): boolean | null {
+  return typeof value === "boolean" ? value : null;
+}
+
+function boundedString(
+  value: unknown,
+  limit = replayUiTextLimit,
+): string | null {
+  const text = asString(value);
+  return text === null ? null : text.slice(0, limit);
 }
 
 export interface CoworldLeagueSummary {
@@ -126,21 +144,103 @@ export function pickCompetitionDivision(
   return { id: best.id, name: best.name };
 }
 
-export function buildStandingRows(value: unknown): CoworldLeagueStandingRow[] {
+/**
+ * Maps player ids to the policy label currently marked as their champion.
+ * Memberships are read separately from results because a leaderboard rating
+ * row can intentionally retain an older policy label after champion promotion.
+ */
+export function activeChampionPolicyLabelsByPlayerId(
+  value: unknown,
+): Map<string, string> {
+  const champions = new Map<
+    string,
+    { policyLabel: string; startedAt: number }
+  >();
+  for (const entry of asArray(value)) {
+    const membership = asRecord(entry);
+    const substatus = asString(membership?.substatus);
+    if (
+      !membership ||
+      membership.status !== "competing" ||
+      (substatus !== null && substatus !== "active") ||
+      membership.is_champion !== true ||
+      asString(membership.end_time) !== null
+    ) {
+      continue;
+    }
+    const policyVersion = asRecord(membership.policy_version);
+    const player = asRecord(membership.player);
+    const policyPlayerId = asString(policyVersion?.player_id);
+    const membershipPlayerId = asString(player?.id);
+    if (
+      policyPlayerId !== null &&
+      membershipPlayerId !== null &&
+      policyPlayerId !== membershipPlayerId
+    ) {
+      continue;
+    }
+    const playerId = policyPlayerId ?? membershipPlayerId;
+    const policyLabel = asString(policyVersion?.label);
+    if (playerId !== null && policyLabel !== null) {
+      const parsedStartedAt = Date.parse(asString(membership.start_time) ?? "");
+      const startedAt = Number.isFinite(parsedStartedAt)
+        ? parsedStartedAt
+        : Number.NEGATIVE_INFINITY;
+      const existing = champions.get(playerId);
+      if (existing === undefined || startedAt > existing.startedAt) {
+        champions.set(playerId, { policyLabel, startedAt });
+      }
+    }
+  }
+  return new Map(
+    [...champions].map(([playerId, champion]) => [
+      playerId,
+      champion.policyLabel,
+    ]),
+  );
+}
+
+function isHousePolicyLabel(value: string): boolean {
+  const match = /^(.*):v\d+$/.exec(value);
+  return match?.[1] === housePolicyName;
+}
+
+export function buildStandingRows(
+  value: unknown,
+  activeChampionMemberships: unknown = [],
+): CoworldLeagueStandingRow[] {
+  const activeChampionLabels = activeChampionPolicyLabelsByPlayerId(
+    activeChampionMemberships,
+  );
   const rows: CoworldLeagueStandingRow[] = [];
   for (const entry of asArray(value)) {
     const row = asRecord(entry);
     if (!row) {
       continue;
     }
-    const policyLabel = asString(row.policy_label) ?? "unknown policy";
+    // Null, not a jargon placeholder. The site writer decides how an unknown
+    // rating policy is presented ("Not yet rated"); stamping "unknown policy"
+    // here leaked an internal string straight onto the public standings and
+    // made the writer's own fallback unreachable.
+    const ratingPolicyLabel = asString(row.policy_label);
+    const playerId = asString(row.player_id);
+    const activeChampionPolicyLabel =
+      playerId === null ? null : (activeChampionLabels.get(playerId) ?? null);
     rows.push({
       rank: asNumber(row.rank) ?? rows.length + 1,
       playerName: asString(row.player_name) ?? "unknown player",
-      policyLabel,
+      ratingPolicyLabel,
+      activeChampionPolicyLabel,
+      // Preserve the original public data.json contract while exposing the
+      // rating/champion distinction through the two explicit fields above.
+      policyLabel: ratingPolicyLabel,
       score: asNumber(row.score),
       roundsPlayed: asNumber(row.rounds_played),
-      isHouse: policyLabel.startsWith(housePolicyPrefix),
+      // Ownership comes from the current champion membership, never from a
+      // historical rating label or a lookalike prefix.
+      isHouse:
+        activeChampionPolicyLabel !== null &&
+        isHousePolicyLabel(activeChampionPolicyLabel),
     });
   }
   rows.sort((a, b) => a.rank - b.rank);
@@ -150,6 +250,28 @@ export function buildStandingRows(value: unknown): CoworldLeagueStandingRow[] {
 export function scoreLabelFromStandings(value: unknown): string {
   const first = asRecord(asArray(value)[0]);
   return asString(first?.score_label) ?? "Score";
+}
+
+export function mergeEpisodeRows(
+  freshEpisodes: CoworldLeagueEpisodeRow[],
+  previousEpisodes: CoworldLeagueEpisodeRow[],
+  limit: number,
+): CoworldLeagueEpisodeRow[] {
+  const byId = new Map<string, CoworldLeagueEpisodeRow>();
+  for (const episode of previousEpisodes) {
+    byId.set(episode.episodeRequestId, episode);
+  }
+  for (const episode of freshEpisodes) {
+    byId.set(episode.episodeRequestId, episode);
+  }
+  return [...byId.values()]
+    .sort((a, b) => episodeCompletedAt(b) - episodeCompletedAt(a))
+    .slice(0, limit);
+}
+
+function episodeCompletedAt(episode: CoworldLeagueEpisodeRow): number {
+  const completedAt = Date.parse(episode.completedAt ?? "");
+  return Number.isFinite(completedAt) ? completedAt : Number.NEGATIVE_INFINITY;
 }
 
 export function buildRoundRows(
@@ -198,9 +320,42 @@ export interface HostedEpisodeMeta {
   roundId: string | null;
   completedAt: string | null;
   replayUrl: string | null;
+  /** Raw variant label from the replays list, e.g. "Tournament 12P - Pangaea". */
+  variantName: string | null;
+  /**
+   * Best-effort map from the replays list alone: the variant label's map
+   * segment first, then the legacy `game_config.map`. Shown verbatim for rows
+   * that never get a downloaded replay; otherwise the replay config refines it.
+   */
   map: string;
   mapSize: string;
-  difficulty: string;
+  /** Legacy `game_config.map` when the list still carries it; null under the current API. */
+  legacyConfigMap: string | null;
+}
+
+export function isSafeCoworldEpisodeRequestId(value: string): boolean {
+  return /^ereq_[A-Za-z0-9_-]+$/.test(value);
+}
+
+/**
+ * Extracts the map name from a Coworld variant label. Ladder variants are named
+ * "<tournament label> - <Map>" (e.g. "Tournament 12P - Pangaea",
+ * "Tournament 12P - World"), so the map is the segment after the LAST " - ".
+ * Returns null when there is no such segment so callers can fall back to the
+ * legacy `game_config.map` or the authoritative in-replay config.
+ */
+export function mapNameFromVariant(variantName: unknown): string | null {
+  const label = asString(variantName);
+  if (label === null) {
+    return null;
+  }
+  const separator = " - ";
+  const index = label.lastIndexOf(separator);
+  if (index === -1) {
+    return null;
+  }
+  const candidate = label.slice(index + separator.length).trim();
+  return candidate.length > 0 ? candidate : null;
 }
 
 export function parseCompletedEpisodeMetaList(
@@ -213,18 +368,28 @@ export function parseCompletedEpisodeMetaList(
       continue;
     }
     const episodeRequestId = asString(episode.id);
-    if (episodeRequestId === null) {
+    if (
+      episodeRequestId === null ||
+      !isSafeCoworldEpisodeRequestId(episodeRequestId)
+    ) {
       continue;
     }
     const gameConfig = asRecord(episode.game_config);
+    const variantName = asString(episode.variant_name);
+    const legacyConfigMap = asString(gameConfig?.map);
     episodes.push({
       episodeRequestId,
       roundId: asString(episode.round_id),
       completedAt: asString(episode.completed_at),
       replayUrl: asString(episode.replay_url),
-      map: asString(gameConfig?.map) ?? "Unknown map",
+      variantName,
+      // The replays-list `game_config` went empty in the 2026-07 API change, so
+      // the variant label ("Tournament 12P - Pangaea") is the reliable map
+      // source now; the legacy field stays as a fallback for older rows or if
+      // the platform restores it.
+      map: mapNameFromVariant(variantName) ?? legacyConfigMap ?? "Unknown map",
       mapSize: asString(gameConfig?.map_size) ?? "",
-      difficulty: asString(gameConfig?.difficulty) ?? "",
+      legacyConfigMap,
     });
   }
   episodes.sort((a, b) =>
@@ -235,6 +400,10 @@ export function parseCompletedEpisodeMetaList(
 
 export interface ParsedHostedReplay {
   runID: string;
+  /** Authoritative map from the downloaded replay config, if present. */
+  map: string | null;
+  /** Authoritative map size from the downloaded replay config, if present. */
+  mapSize: string | null;
   spectatorReplay: AgentSpectatorReplay | null;
   inlineRunArtifacts: Record<string, string>;
   turnCount: number | null;
@@ -253,6 +422,237 @@ export interface ParsedHostedReplay {
   }>;
 }
 
+export interface CoworldReplayUiDecision {
+  sequence: number;
+  turnNumber: number;
+  username: string;
+  profile: string;
+  brainType: string;
+  selectedActionKind: string;
+  selectedLegalActionId: string;
+  selectedActionMetadata?: Record<string, unknown>;
+  socialText?: string;
+  socialTargetName?: string;
+  reason: string;
+  planObjective?: string;
+  decisionLatencyMs: number;
+  fallbackUsed: boolean;
+  parseSuccess?: boolean;
+  result: {
+    accepted: boolean;
+    reason: string;
+  };
+  auditStatus?: string;
+}
+
+export interface CoworldReplayUiArtifact {
+  version: 1;
+  decisionCount: number;
+  rejectedCount: number;
+  fallbackCount: number;
+  actionCounts: Record<string, number>;
+  recentDecisions: CoworldReplayUiDecision[];
+  artifacts: {
+    visualReport: boolean;
+    spectatorTelemetry: boolean;
+    decisions: boolean;
+    summary: boolean;
+  };
+}
+
+/**
+ * Builds the bounded payload consumed by the rendered replay overlay. Hosted
+ * decision logs can be tens of megabytes; the frontend needs totals and a
+ * short recent window, not raw provider output or every historical card.
+ */
+/**
+ * Choose which decisions the replay UI receives, within a fixed budget.
+ *
+ * This used to be `decisions.slice(-limit)` — the LAST N of the match. Two
+ * consequences: agents eliminated early never appeared at all (their decisions
+ * are never in the tail), and the panel's playhead window had nothing to show
+ * until playback reached the final minutes of a 50,000-turn match.
+ *
+ * Keep the same payload budget but spread it across the whole match: every
+ * notable decision (engine fallback or rejected action) is kept first, then the
+ * remainder is filled by an even stride so early, middle and late play are all
+ * represented. Chronological order is preserved.
+ */
+export function sampleDecisionsAcrossMatch<T extends CoworldReplayUiDecision>(
+  decisions: readonly T[],
+  limit: number,
+): T[] {
+  if (limit <= 0) return [];
+  if (decisions.length <= limit) return [...decisions];
+  const chosen = new Set<number>();
+  // 1. Every notable decision first (engine fallback or rejected action).
+  for (
+    let index = 0;
+    index < decisions.length && chosen.size < limit;
+    index++
+  ) {
+    const decision = decisions[index];
+    if (decision.fallbackUsed === true || decision.result?.accepted === false) {
+      chosen.add(index);
+    }
+  }
+  // 2. Even stride across the whole match for temporal coverage.
+  const strideSlots = limit - chosen.size;
+  if (strideSlots > 0) {
+    const stride = decisions.length / strideSlots;
+    for (let step = 0; step < strideSlots && chosen.size < limit; step += 1) {
+      chosen.add(
+        Math.min(decisions.length - 1, Math.floor(step * stride + stride / 2)),
+      );
+    }
+  }
+  // 3. Stride picks can collide with step 1, leaving the budget under-filled.
+  // Top up so the payload size stays exactly as before.
+  for (
+    let index = 0;
+    index < decisions.length && chosen.size < limit;
+    index++
+  ) {
+    chosen.add(index);
+  }
+  return [...chosen]
+    .sort((left, right) => left - right)
+    .map((index) => decisions[index]);
+}
+
+export function buildCoworldReplayUiArtifact(
+  inlineRunArtifacts: Record<string, string>,
+): CoworldReplayUiArtifact {
+  const decisions: CoworldReplayUiDecision[] = [];
+  const actionCounts: Record<string, number> = {};
+  let rejectedCount = 0;
+  let fallbackCount = 0;
+  const rawDecisions = inlineRunArtifacts["decisions.jsonl"];
+  if (typeof rawDecisions === "string") {
+    for (const rawLine of rawDecisions.split("\n")) {
+      const line = rawLine.trim();
+      if (line.length === 0) continue;
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(line);
+      } catch {
+        continue;
+      }
+      const decision = projectCoworldReplayUiDecision(parsed);
+      if (decision === null) continue;
+      decisions.push(decision);
+      actionCounts[decision.selectedActionKind] =
+        (actionCounts[decision.selectedActionKind] ?? 0) + 1;
+      if (!decision.result.accepted) rejectedCount += 1;
+      if (decision.fallbackUsed) fallbackCount += 1;
+    }
+  }
+  return {
+    version: 1,
+    decisionCount: decisions.length,
+    rejectedCount,
+    fallbackCount,
+    actionCounts,
+    recentDecisions: sampleDecisionsAcrossMatch(
+      decisions,
+      replayUiRecentDecisionLimit,
+    ),
+    artifacts: {
+      visualReport: Object.hasOwn(inlineRunArtifacts, "visual-report.html"),
+      spectatorTelemetry: Object.hasOwn(
+        inlineRunArtifacts,
+        "spectator-telemetry.json",
+      ),
+      decisions: Object.hasOwn(inlineRunArtifacts, "decisions.jsonl"),
+      summary: Object.hasOwn(inlineRunArtifacts, "match-summary.json"),
+    },
+  };
+}
+
+function projectCoworldReplayUiDecision(
+  value: unknown,
+): CoworldReplayUiDecision | null {
+  const decision = asRecord(value);
+  const result = asRecord(decision?.result);
+  const sequence = asNumber(decision?.sequence);
+  const turnNumber = asNumber(decision?.turnNumber);
+  const username = boundedString(decision?.username, 160);
+  const selectedActionKind = boundedString(decision?.selectedActionKind, 120);
+  const selectedLegalActionId = boundedString(
+    decision?.selectedLegalActionId,
+    500,
+  );
+  if (
+    decision === null ||
+    result === null ||
+    sequence === null ||
+    turnNumber === null ||
+    username === null ||
+    selectedActionKind === null ||
+    selectedLegalActionId === null
+  ) {
+    return null;
+  }
+  const projected: CoworldReplayUiDecision = {
+    sequence,
+    turnNumber,
+    username,
+    profile: boundedString(decision.profile, 120) ?? "unknown",
+    brainType: boundedString(decision.brainType, 120) ?? "unknown",
+    selectedActionKind,
+    selectedLegalActionId,
+    reason: boundedString(decision.reason) ?? "",
+    decisionLatencyMs: asNumber(decision.decisionLatencyMs) ?? 0,
+    fallbackUsed: decision.fallbackUsed === true,
+    result: {
+      accepted: result.accepted === true,
+      reason: boundedString(result.reason) ?? "",
+    },
+  };
+  const metadata = projectCoworldReplayUiMetadata(
+    asRecord(decision.selectedActionMetadata),
+  );
+  if (metadata !== undefined) projected.selectedActionMetadata = metadata;
+  const socialText = boundedString(decision.socialText);
+  if (socialText !== null) projected.socialText = socialText;
+  const socialTargetName = boundedString(decision.socialTargetName, 160);
+  if (socialTargetName !== null) {
+    projected.socialTargetName = socialTargetName;
+  }
+  const planObjective = boundedString(decision.planObjective, 500);
+  if (planObjective !== null) projected.planObjective = planObjective;
+  const parseSuccess = asBoolean(decision.parseSuccess);
+  if (parseSuccess !== null) projected.parseSuccess = parseSuccess;
+  const auditStatus = boundedString(decision.auditStatus, 120);
+  if (auditStatus !== null) projected.auditStatus = auditStatus;
+  return projected;
+}
+
+function projectCoworldReplayUiMetadata(
+  metadata: Record<string, unknown> | null,
+): Record<string, unknown> | undefined {
+  if (metadata === null) return undefined;
+  const projected: Record<string, unknown> = {};
+  for (const key of [
+    "message",
+    "quickChatKey",
+    "emojiText",
+    "recipientName",
+    "targetName",
+    "emojiContext",
+  ]) {
+    const value = boundedString(metadata[key], 500);
+    if (value !== null) projected[key] = value;
+  }
+  if (typeof metadata.emoji === "number" && Number.isFinite(metadata.emoji)) {
+    projected.emoji = metadata.emoji;
+  }
+  if (typeof metadata.expansion === "boolean") {
+    projected.expansion = metadata.expansion;
+  }
+  return Object.keys(projected).length > 0 ? projected : undefined;
+}
+
 export function parseHostedReplayPayload(
   value: unknown,
 ): ParsedHostedReplay | null {
@@ -261,10 +661,22 @@ export function parseHostedReplayPayload(
     return null;
   }
   const runID = asString(payload.runID);
-  if (runID === null) {
+  if (runID === null || !/^coworld-[A-Za-z0-9-]+$/.test(runID)) {
     return null;
   }
   const results = asRecord(payload.results);
+  // Map/size live in the hosted replay's own config. Our adapter writes
+  // snake_case `config.map`/`config.map_size`; a raw game-record payload
+  // instead nests camelCase `gameRecord.info.config.gameMap`/`gameMapSize`.
+  // Support both so the map survives either replay shape.
+  const replayConfig = asRecord(payload.config);
+  const gameRecordConfig = asRecord(
+    asRecord(asRecord(payload.gameRecord)?.info)?.config,
+  );
+  const map =
+    asString(replayConfig?.map) ?? asString(gameRecordConfig?.gameMap);
+  const mapSize =
+    asString(replayConfig?.map_size) ?? asString(gameRecordConfig?.gameMapSize);
   const players: ParsedHostedReplay["players"] = [];
   for (const entry of asArray(results?.players)) {
     const player = asRecord(entry);
@@ -292,6 +704,8 @@ export function parseHostedReplayPayload(
   const outrightWinnerSlot = asNumber(results?.winner_slot);
   return {
     runID,
+    map,
+    mapSize,
     spectatorReplay:
       spectator && Array.isArray(spectator.snapshots)
         ? (spectator as unknown as AgentSpectatorReplay)
@@ -330,6 +744,13 @@ export function buildEpisodeRow(input: {
   roundNumber: number | null;
   watchHref: string | null;
   fullRenderHref: string | null;
+  /**
+   * `/premiere/<premiereId>` when this episode's premiere has REVEALED (see
+   * {@link premiereHrefForEpisode}); null/omitted otherwise. Optional so the
+   * field stays entirely absent from data.json rows without one — additive
+   * for every existing consumer.
+   */
+  premiereHref?: string | null;
 }): CoworldLeagueEpisodeRow {
   const { meta, replay } = input;
   const colors = playerColorsFromSpectatorReplay(replay.spectatorReplay);
@@ -374,9 +795,16 @@ export function buildEpisodeRow(input: {
     shortId: shortEpisodeId(meta.episodeRequestId),
     roundNumber: input.roundNumber,
     completedAt: meta.completedAt,
-    map: meta.map,
-    mapSize: meta.mapSize,
-    difficulty: meta.difficulty,
+    // Precedence: variant-label map (reliable, list-derived) -> authoritative
+    // in-replay config map -> legacy game_config.map -> "Unknown map".
+    map:
+      mapNameFromVariant(meta.variantName) ??
+      replay.map ??
+      meta.legacyConfigMap ??
+      "Unknown map",
+    // Map size is absent from the variant label; prefer the downloaded replay
+    // config, else the legacy list value, else blank.
+    mapSize: replay.mapSize ?? meta.mapSize,
     turnCount: replay.turnCount,
     decisionCount: replay.decisionCount,
     degradedCount: replay.degradedCount,
@@ -386,6 +814,9 @@ export function buildEpisodeRow(input: {
     players,
     watchHref: input.watchHref,
     fullRenderHref: input.fullRenderHref,
+    ...(typeof input.premiereHref === "string" && input.premiereHref.length > 0
+      ? { premiereHref: input.premiereHref }
+      : {}),
   };
 }
 
@@ -393,4 +824,202 @@ export function shortEpisodeId(episodeRequestId: string): string {
   const cleaned = episodeRequestId.replace(/^ereq_/, "").toLowerCase();
   const safe = cleaned.replace(/[^a-z0-9-]/g, "");
   return safe.slice(0, 8) === "" ? "episode" : safe.slice(0, 8);
+}
+
+/**
+ * Parse the replay-premiere archive index (JSONL of terminal premiere
+ * pointers, `archive-v1/archive-index.jsonl` under the premiere private state
+ * root) into the set of premiere ids whose OUTCOME IS PUBLIC: terminal state
+ * exactly "revealed" with a reveal timestamp.
+ *
+ * Spoiler-safe by construction: a pre-reveal premiere never appears in the
+ * archive index at all (pointers are written only at post-terminal
+ * reclamation, ~30 minutes after reveal), and failed/cancelled/pre-reveal
+ * terminal pointers are filtered here — so no id this returns can name a
+ * premiere whose outcome is still sealed. Tolerant + fail-open: torn or
+ * invalid lines are skipped, a repeated premiere id keeps the LAST record
+ * (append-only index semantics), and any unreadable input simply yields fewer
+ * links — never a wrong one and never a publication stall.
+ */
+export function revealedPremiereIdsFromArchiveIndex(raw: string): Set<string> {
+  return summarizePremiereArchiveIndex(raw).revealedIds;
+}
+
+/**
+ * Tolerant projection of the replay-premiere archive index for the mirror's
+ * two premiere consumers: battle-card links ({@link revealedIds}) and the
+ * latest-premiere card's cross-check + fallback ({@link knownIds},
+ * {@link newestRevealed}). Same parse semantics as
+ * {@link revealedPremiereIdsFromArchiveIndex} (which is now built on top of
+ * this): torn/invalid lines are skipped and a repeated premiere id keeps the
+ * LAST record (append-only index semantics).
+ */
+export interface PremiereArchiveIndexSummary {
+  /** Ids whose OUTCOME IS PUBLIC: terminal "revealed" with a reveal time. */
+  revealedIds: Set<string>;
+  /** Every premiere id present in the index, whatever its terminal state. */
+  knownIds: Set<string>;
+  /** The revealed entry with the newest parseable revealedAt, if any. */
+  newestRevealed: { premiereId: string; revealedAt: string } | null;
+}
+
+export function summarizePremiereArchiveIndex(
+  raw: string,
+): PremiereArchiveIndexSummary {
+  const lastById = new Map<
+    string,
+    { revealed: boolean; revealedAt: string | null }
+  >();
+  for (const line of raw.split("\n")) {
+    const trimmed = line.trim();
+    if (trimmed.length === 0) {
+      continue;
+    }
+    let value: unknown;
+    try {
+      value = JSON.parse(trimmed);
+    } catch {
+      continue;
+    }
+    const record = asRecord(value);
+    if (record === null) {
+      continue;
+    }
+    const premiereId = asString(record.premiereId);
+    if (premiereId === null || !PREMIERE_ID_PATTERN.test(premiereId)) {
+      continue;
+    }
+    const revealedAt = asString(record.revealedAt);
+    lastById.set(premiereId, {
+      revealed: record.terminalState === "revealed" && revealedAt !== null,
+      revealedAt,
+    });
+  }
+  const revealedIds = new Set<string>();
+  let newestRevealed: PremiereArchiveIndexSummary["newestRevealed"] = null;
+  let newestRevealedMs = Number.NEGATIVE_INFINITY;
+  for (const [premiereId, record] of lastById) {
+    if (!record.revealed) {
+      continue;
+    }
+    revealedIds.add(premiereId);
+    const revealedAtMs = Date.parse(record.revealedAt ?? "");
+    if (!Number.isFinite(revealedAtMs) || record.revealedAt === null) {
+      continue;
+    }
+    if (
+      revealedAtMs > newestRevealedMs ||
+      (revealedAtMs === newestRevealedMs &&
+        (newestRevealed === null ||
+          premiereId.localeCompare(newestRevealed.premiereId) > 0))
+    ) {
+      newestRevealedMs = revealedAtMs;
+      newestRevealed = { premiereId, revealedAt: record.revealedAt };
+    }
+  }
+  return { revealedIds, knownIds: new Set(lastById.keys()), newestRevealed };
+}
+
+/**
+ * Resolve the "Latest premiere" card shown between live premieres.
+ *
+ * The loop-written pointer is the primary source (it carries round + map and
+ * appears at reveal time, before the ~30-minute terminal reclamation adds the
+ * premiere to the archive index). It is cross-checked against the archive
+ * index when one is available: a pointer whose premiere the index knows as
+ * anything OTHER than revealed is dropped — never render a card for a
+ * premiere whose outcome is not public. A pointer the index does not know yet
+ * is fine (the index lags reveal by design). When the pointer is absent,
+ * invalid, or dropped, fall back to the index's newest revealed entry (round
+ * and map are unknown there, so the card renders without those pills). Pure
+ * and fail-open: null in, null out — the card is simply absent.
+ */
+export function resolveLatestRevealedPremiere(
+  pointer: LatestPremierePointer | null,
+  archiveIndex: PremiereArchiveIndexSummary | null,
+): CoworldLeagueLatestPremiereCard | null {
+  if (pointer !== null) {
+    const contradictedByIndex =
+      archiveIndex !== null &&
+      archiveIndex.knownIds.has(pointer.premiereId) &&
+      !archiveIndex.revealedIds.has(pointer.premiereId);
+    if (!contradictedByIndex) {
+      return {
+        premiereId: pointer.premiereId,
+        roundNumber: pointer.roundNumber,
+        mapLabel: pointer.mapLabel,
+        revealedAt: pointer.revealedAt,
+        href: `/premiere/${encodeURIComponent(pointer.premiereId)}`,
+      };
+    }
+  }
+  const fallback = archiveIndex?.newestRevealed ?? null;
+  if (fallback === null) {
+    return null;
+  }
+  return {
+    premiereId: fallback.premiereId,
+    roundNumber: null,
+    mapLabel: "",
+    revealedAt: fallback.revealedAt,
+    href: `/premiere/${encodeURIComponent(fallback.premiereId)}`,
+  };
+}
+
+/**
+ * Probe-checked variant of {@link resolveLatestRevealedPremiere}: never hand
+ * the site writer a card whose target page does not actually serve.
+ *
+ * 2026-07-22 orphan incident: a premiere that reveals but whose ~30-minute
+ * reclamation grace spans a beta restart can end up neither live-registered
+ * nor archived — its /premiere page 404s — while the loop-written pointer
+ * still names it, so the "Watch now" card linked a dead page. The pointer's
+ * freshness-over-index design is correct (the index lags reveal by design),
+ * so the only honest check is asking the serving origin. `probe` returns
+ * true when the candidate's page serves; candidates that fail are dropped:
+ * pointer candidate first, then the archive-index fallback, then no card.
+ * Fail-open on the probe itself is the CALLER's choice: pass an
+ * always-true probe to keep the unprobed behavior (flag off / origin down
+ * should not blank the card for a page that may well be fine).
+ */
+export async function selectServingLatestPremiere(
+  pointer: LatestPremierePointer | null,
+  archiveIndex: PremiereArchiveIndexSummary | null,
+  probe: (premiereId: string) => Promise<boolean>,
+): Promise<CoworldLeagueLatestPremiereCard | null> {
+  const primary = resolveLatestRevealedPremiere(pointer, archiveIndex);
+  if (primary === null) {
+    return null;
+  }
+  if (await probe(primary.premiereId)) {
+    return primary;
+  }
+  const pointerSourced =
+    pointer !== null && primary.premiereId === pointer.premiereId;
+  if (!pointerSourced) {
+    return null;
+  }
+  const fallback = resolveLatestRevealedPremiere(null, archiveIndex);
+  if (fallback === null || fallback.premiereId === primary.premiereId) {
+    return null;
+  }
+  return (await probe(fallback.premiereId)) ? fallback : null;
+}
+
+/**
+ * The battle-card premiere link for an episode, or null when the episode has
+ * no REVEALED premiere. The join is the premiere loop's own deterministic id
+ * derivation (premiereId = derivePremiereId(episodeRequestId)), so no mapping
+ * state is needed and — because {@link revealedPremiereIdsFromArchiveIndex}
+ * only ever returns post-reveal ids — a link can never point at a sealed
+ * premiere.
+ */
+export function premiereHrefForEpisode(
+  episodeRequestId: string,
+  revealedPremiereIds: ReadonlySet<string>,
+): string | null {
+  const premiereId = derivePremiereId(episodeRequestId);
+  return revealedPremiereIds.has(premiereId)
+    ? `/premiere/${encodeURIComponent(premiereId)}`
+    : null;
 }

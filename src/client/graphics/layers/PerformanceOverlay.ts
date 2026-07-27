@@ -477,7 +477,12 @@ export class PerformanceOverlay extends LitElement implements Layer {
   };
 
   private onTickMetricsEvent = (event: TickMetricsEvent) => {
-    this.updateTickMetrics(event.tickExecutionDuration, event.tickDelay);
+    this.updateTickMetrics(
+      event.tickExecutionDuration,
+      event.tickDelay,
+      event.completedTicks,
+      event.tickExecutionDurations,
+    );
   };
 
   private onUserSettingsChanged = (event: CustomEvent<string>) => {
@@ -898,11 +903,22 @@ export class PerformanceOverlay extends LitElement implements Layer {
     });
   }
 
-  updateTickMetrics(tickExecutionDuration?: number, tickDelay?: number) {
+  updateTickMetrics(
+    tickExecutionDuration?: number,
+    tickDelay?: number,
+    completedTicks: number = 1,
+    tickExecutionDurations?: readonly number[],
+  ) {
     if (!this.isVisible) return;
 
     const now = performance.now();
-    this.tickTimestamps.push(now);
+    const safeCompletedTicks =
+      Number.isSafeInteger(completedTicks) && completedTicks > 0
+        ? completedTicks
+        : 1;
+    for (let tick = 0; tick < safeCompletedTicks; tick += 1) {
+      this.tickTimestamps.push(now);
+    }
 
     while (
       this.tickHead1s < this.tickTimestamps.length &&
@@ -933,12 +949,24 @@ export class PerformanceOverlay extends LitElement implements Layer {
     }
 
     // Update tick execution duration stats
-    if (tickExecutionDuration !== undefined) {
-      this.tickExecutionTimes.push(tickExecutionDuration);
-      this.tickExecutionTimesSum += tickExecutionDuration;
+    const executionSamples =
+      tickExecutionDurations ??
+      (tickExecutionDuration === undefined ? [] : [tickExecutionDuration]);
+    if (executionSamples.length > 0) {
+      this.tickExecutionTimes.push(...executionSamples);
+      this.tickExecutionTimesSum += executionSamples.reduce(
+        (sum, duration) => sum + duration,
+        0,
+      );
       if (this.tickExecutionTimes.length > 60) {
-        const removed = this.tickExecutionTimes.shift();
-        if (removed !== undefined) this.tickExecutionTimesSum -= removed;
+        const removed = this.tickExecutionTimes.splice(
+          0,
+          this.tickExecutionTimes.length - 60,
+        );
+        this.tickExecutionTimesSum -= removed.reduce(
+          (sum, duration) => sum + duration,
+          0,
+        );
       }
 
       if (this.tickExecutionTimes.length > 0) {

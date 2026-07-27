@@ -294,14 +294,6 @@ export class UserSettings {
     this.removeCached(FLAG_KEY, emitChange);
   }
 
-  backgroundMusicVolume(): number {
-    return this.getFloat("settings.backgroundMusicVolume", 0);
-  }
-
-  setBackgroundMusicVolume(volume: number): void {
-    this.setFloat("settings.backgroundMusicVolume", volume);
-  }
-
   // What % attack ratio increments per click/scroll
   attackRatioIncrement(): number {
     const increment = Math.round(
@@ -381,13 +373,5 @@ export class UserSettings {
     } else {
       this.setString(KEYBINDS_KEY, JSON.stringify(value));
     }
-  }
-
-  soundEffectsVolume(): number {
-    return this.getFloat("settings.soundEffectsVolume", 0);
-  }
-
-  setSoundEffectsVolume(volume: number): void {
-    this.setFloat("settings.soundEffectsVolume", volume);
   }
 }
