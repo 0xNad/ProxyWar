@@ -6,20 +6,58 @@ import type {
   ReplayPremiereOverlayModel,
   ReplayPremierePublicState,
 } from "src/client/ReplayPremiereOverlay";
+import { MIN_STAKE } from "src/prediction/types";
 import "../components/MarketBankrollBadge";
-import "../components/MarketPriceBoard";
-import "../components/PriceAnnouncer";
 import "../components/MarketPositionSummary";
+import "../components/MarketPriceBoard";
 import "../components/MarketSettlementPanel";
 import "../components/PositionsPanel";
+import "../components/PriceAnnouncer";
 import "../components/TradeTicket";
 import { formatSignedCredits } from "../components/pnlDisplay";
 import { settlementForSeat } from "../serviceMapping";
 import type { MarketSeatOption, MarketState, TradeSide } from "../types";
-import { MIN_STAKE } from "src/prediction/types";
 
 /** Live states where the replay is actually on screen behind the sheet. */
-const LIVE_STATES: ReadonlySet<ReplayPremierePublicState> = new Set(["playing", "checkpoint"]);
+const LIVE_STATES: ReadonlySet<ReplayPremierePublicState> = new Set([
+  "playing",
+  "checkpoint",
+]);
+
+/**
+ * Whether the viewer has ever explicitly collapsed the trading sheet
+ * before, persisted across sessions. Drives the live-state default below:
+ * a first-time viewer starts expanded (the match going live is exactly
+ * when the market becomes interesting — collapsing it by default was
+ * hiding the one thing this page is for), while a returning viewer who
+ * has already made the "collapse it" call once is trusted to have made
+ * it deliberately and isn't re-taught the market exists every session.
+ * Never set by the automatic failure-state pin (see `willUpdate`) — only
+ * by an explicit tap on the peek strip / rail / collapse button — so an
+ * involuntary auto-collapse never gets mistaken for a standing
+ * preference.
+ */
+const SHEET_COLLAPSED_STORAGE_KEY = "pw-betting-sheet-collapsed";
+
+function readPersistedSheetCollapsed(): boolean {
+  try {
+    return localStorage.getItem(SHEET_COLLAPSED_STORAGE_KEY) === "true";
+  } catch {
+    return false;
+  }
+}
+
+function persistSheetCollapsed(collapsed: boolean): void {
+  try {
+    localStorage.setItem(
+      SHEET_COLLAPSED_STORAGE_KEY,
+      collapsed ? "true" : "false",
+    );
+  } catch {
+    // Storage unavailable (private browsing, quota) — falls back to a
+    // session-only preference via `sheetOverride`, never a hard failure.
+  }
+}
 
 /**
  * The dedicated betting premiere's own overlay — NOT `ReplayPremiereOverlay`.
@@ -36,16 +74,21 @@ const LIVE_STATES: ReadonlySet<ReplayPremierePublicState> = new Set(["playing", 
  * they gate nothing). `windowOpen` reflects whether the premiere itself is
  * currently live, not any particular checkpoint's own state.
  *
- * On narrow viewports this is a bottom sheet over the replay, so it
- * defaults to a COLLAPSED peek strip (title + live P&L) while the match is
- * actually playing — the replay is the content, not the trading UI — and
- * expands on tap. It defaults OPEN for every other state (scheduled/
- * settled/failed/cancelled), where there's no video underneath being
- * covered and, once settled, the outcome should land immediately rather
- * than hide behind a tap. `sheetOverride` is the viewer's own explicit
- * choice, once made; it's cleared automatically the moment the premiere
- * settles so a win/loss is never left tucked away behind a peek strip the
- * viewer collapsed earlier while trading.
+ * This is also a bottom sheet on narrow viewports, collapsible to a slim
+ * peek strip/rail (title or leading agent + price, live P&L) so the
+ * replay stays the hero instead of the trading UI. It defaults OPEN for
+ * every state except the live phase (see `defaultSheetOpen`): scheduled/
+ * settled/failed/cancelled have no video underneath to protect and,
+ * once settled, the outcome should land immediately rather than hide
+ * behind a tap. During the live phase specifically, the default depends
+ * on whether this viewer has ever collapsed it before (persisted via
+ * `hasCollapsedBefore`) — open for a first-time viewer, since the match
+ * going live is exactly when the market becomes worth seeing; collapsed
+ * for a returning viewer who already made that call. `sheetOverride` is
+ * the viewer's own explicit choice within THIS session, once made; it's
+ * cleared automatically the moment the premiere settles so a win/loss is
+ * never left tucked away behind a peek strip the viewer collapsed
+ * earlier while trading.
  */
 @customElement("premiere-betting-overlay")
 export class PremiereBettingOverlay extends LitElement {
@@ -79,6 +122,14 @@ export class PremiereBettingOverlay extends LitElement {
   @state() private draftSide: TradeSide = "buy";
   @state() private draftAmountText = "";
   private previousModelState: ReplayPremierePublicState | null = null;
+  /**
+   * Read once at construction — this overlay element is created once per
+   * page load and never recreated (see the class doc comment), so "has
+   * the viewer ever collapsed this before" is exactly "was it collapsed
+   * the last time they visited", not something that needs to react to
+   * changes mid-session.
+   */
+  private hasCollapsedBefore = readPersistedSheetCollapsed();
 
   createRenderRoot() {
     return this;
@@ -113,21 +164,76 @@ export class PremiereBettingOverlay extends LitElement {
     this.previousModelState = state;
   }
 
-  /** Peek-strip default: open unless the match is actually live (replay on screen, protect it). */
+  /**
+   * Peek-strip default. Non-live states (scheduled/settled/failed cold
+   * landing) always default open — there's no replay underneath to
+   * protect and, once settled, the outcome should land immediately. For
+   * the live phase specifically — where the replay IS on screen and does
+   * need protecting — a first-time viewer defaults OPEN: the match going
+   * live is exactly when this market becomes worth looking at, and a
+   * viewer who has never been shown it has no way to know it's there
+   * once the panel snaps to a 24px rail. A returning viewer who has
+   * already collapsed it once (their own explicit choice, remembered via
+   * `hasCollapsedBefore`) defaults collapsed, same as before — they don't
+   * need re-teaching every session.
+   */
   private defaultSheetOpen(): boolean {
-    return !LIVE_STATES.has(this.model.state);
+    if (!LIVE_STATES.has(this.model.state)) return true;
+    return !this.hasCollapsedBefore;
   }
 
   private get sheetOpen(): boolean {
     return this.sheetOverride ?? this.defaultSheetOpen();
   }
 
+  /**
+   * The one path every EXPLICIT user toggle goes through (peek strip,
+   * desktop rail, header collapse button) — as opposed to the automatic
+   * failure-state pin in `willUpdate`, which sets `sheetOverride` directly
+   * and deliberately does NOT persist, since that's a protective default
+   * kicking in, not a preference the viewer stated.
+   */
+  private setSheetOpen(open: boolean): void {
+    this.sheetOverride = open;
+    persistSheetCollapsed(!open);
+  }
+
   private totalUnrealizedPnl(): number | null {
     const positions = this.market?.positions;
-    if (positions === null || positions === undefined || positions.length === 0) {
+    if (
+      positions === null ||
+      positions === undefined ||
+      positions.length === 0
+    ) {
       return null;
     }
     return positions.reduce((sum, position) => sum + position.unrealizedPnl, 0);
+  }
+
+  /**
+   * The single highest-priced seat right now — the "who's winning" signal
+   * that has to carry the collapsed strip/rail (Main: "a changing number
+   * attracts the eye far better than a static label"). `null` before the
+   * market has loaded a first snapshot, so callers fall back to static
+   * copy rather than showing a stale or fabricated leader.
+   */
+  private leadingSeat(): {
+    seatId: string;
+    displayName: string;
+    price: number;
+  } | null {
+    const market = this.market;
+    if (market === null) return null;
+    let best: { seatId: string; displayName: string; price: number } | null =
+      null;
+    for (const seat of this.allSeats()) {
+      const price = market.prices[seat.seatId];
+      if (price === undefined) continue;
+      if (best === null || price > best.price) {
+        best = { seatId: seat.seatId, displayName: seat.displayName, price };
+      }
+    }
+    return best;
   }
 
   /**
@@ -149,19 +255,26 @@ export class PremiereBettingOverlay extends LitElement {
     const live = LIVE_STATES.has(model.state);
     const open = this.sheetOpen;
     const totalPnl = this.totalUnrealizedPnl();
+    // While the match is actually live, the leading agent's price is the
+    // headline signal — a number that keeps moving reads as "something is
+    // happening here" far better than a static label ever could (Main).
+    // Falls back to the old pnl/title copy before the market has loaded
+    // its first snapshot.
+    const leader = live && !failed ? this.leadingSeat() : null;
     return html`
       <button
         type="button"
         class="flex items-center justify-between gap-3 border-b border-line px-4 py-2.5 text-left outline-none focus-visible:ring-2 focus-visible:ring-accent focus-visible:ring-inset lg:hidden"
         aria-expanded=${open}
         aria-controls="betting-sheet-panel"
-        @click=${() => {
-          this.sheetOverride = !this.sheetOpen;
-        }}
+        @click=${() => this.setSheetOpen(!this.sheetOpen)}
       >
         <span class="flex min-w-0 items-center gap-2">
           ${failed
-            ? html`<span aria-hidden="true" class="h-1.5 w-1.5 shrink-0 rounded-full bg-danger"></span>`
+            ? html`<span
+                aria-hidden="true"
+                class="h-1.5 w-1.5 shrink-0 rounded-full bg-danger"
+              ></span>`
             : live
               ? html`<span
                   aria-hidden="true"
@@ -169,19 +282,51 @@ export class PremiereBettingOverlay extends LitElement {
                 ></span>`
               : nothing}
           ${failed
-            ? html`<span class="truncate text-sm font-semibold text-danger">Action needed</span>`
-            : totalPnl !== null
-              ? html`<span
-                  class="font-mono text-sm font-bold tabular-nums ${totalPnl >= 0
-                    ? "text-positive"
-                    : "text-danger"}"
-                  >${totalPnl >= 0 ? "▲" : "▼"} ${formatSignedCredits(totalPnl)} cr</span
-                >`
-              : html`<span class="truncate text-sm font-semibold text-ink">${model.title}</span>`}
+            ? html`<span class="truncate text-sm font-semibold text-danger"
+                >Action needed</span
+              >`
+            : leader !== null
+              ? html`<span class="flex min-w-0 items-baseline gap-1.5">
+                  <span class="min-w-0 truncate text-sm font-semibold text-ink"
+                    >${leader.displayName}</span
+                  >
+                  <span
+                    class="shrink-0 font-mono text-sm font-bold tabular-nums text-ink"
+                    >${leader.price.toFixed(1)}%</span
+                  >
+                </span>`
+              : totalPnl !== null
+                ? html`<span
+                    class="font-mono text-sm font-bold tabular-nums ${totalPnl >=
+                    0
+                      ? "text-positive"
+                      : "text-danger"}"
+                    >${totalPnl >= 0 ? "▲" : "▼"}
+                    ${formatSignedCredits(totalPnl)} cr</span
+                  >`
+                : html`<span class="truncate text-sm font-semibold text-ink"
+                    >${model.title}</span
+                  >`}
         </span>
-        <span class="flex shrink-0 items-center gap-1 text-xs font-semibold ${failed ? "text-danger" : "text-accent"}">
-          ${failed ? "View" : "Trade"}
-          <span aria-hidden="true">${open ? "▴" : "▾"}</span>
+        <span class="flex shrink-0 items-center gap-2 text-xs font-semibold">
+          ${!failed && leader !== null && totalPnl !== null
+            ? html`<span
+                class="font-mono tabular-nums ${totalPnl >= 0
+                  ? "text-positive"
+                  : "text-danger"}"
+                title="Your unrealized profit/loss, not the price above"
+                >${totalPnl >= 0 ? "▲" : "▼"}
+                ${formatSignedCredits(totalPnl)}</span
+              >`
+            : nothing}
+          <span class="${failed ? "text-danger" : "text-accent"}"
+            >${failed ? "View" : "Trade"}</span
+          >
+          <span
+            aria-hidden="true"
+            class="${failed ? "text-danger" : "text-ink-muted"}"
+            >${open ? "▴" : "▾"}</span
+          >
         </span>
       </button>
     `;
@@ -204,38 +349,57 @@ export class PremiereBettingOverlay extends LitElement {
     const failed = model.state === "failed" || model.state === "cancelled";
     const live = LIVE_STATES.has(model.state);
     const totalPnl = this.totalUnrealizedPnl();
+    const leader = live && !failed ? this.leadingSeat() : null;
     return html`
       <button
         type="button"
         class="hidden w-full flex-1 flex-col items-center justify-between gap-3 px-1.5 py-4 outline-none focus-visible:ring-2 focus-visible:ring-accent focus-visible:ring-inset lg:flex"
         aria-expanded="false"
         aria-controls="betting-sheet-panel"
-        aria-label=${failed ? "Show market status — action needed" : "Expand trading panel"}
-        @click=${() => {
-          this.sheetOverride = !this.sheetOpen;
-        }}
+        aria-label=${this.railAriaLabel(failed, leader, totalPnl)}
+        @click=${() => this.setSheetOpen(true)}
       >
-        <span class="flex flex-col items-center gap-2">
+        <span class="flex flex-col items-center gap-1.5">
           ${failed
-            ? html`<span aria-hidden="true" class="h-1.5 w-1.5 shrink-0 rounded-full bg-danger"></span>`
+            ? html`<span
+                aria-hidden="true"
+                class="h-1.5 w-1.5 shrink-0 rounded-full bg-danger"
+              ></span>`
             : live
               ? html`<span
                   aria-hidden="true"
                   class="h-1.5 w-1.5 shrink-0 rounded-full bg-live motion-safe:animate-pulse"
                 ></span>`
               : nothing}
-          <span
-            aria-hidden="true"
-            class="text-[10px] font-semibold uppercase tracking-wide [writing-mode:vertical-lr] rotate-180 ${failed
-              ? "text-danger"
-              : "text-accent"}"
-            >${failed ? "Alert" : "Trade"}</span
-          >
+          ${leader !== null
+            ? html`<span
+                aria-hidden="true"
+                class="flex flex-col items-center gap-0.5 leading-none"
+                title="${leader.displayName} leading at ${leader.price.toFixed(
+                  1,
+                )}%"
+              >
+                <span
+                  class="max-w-[3.25rem] truncate text-[9px] font-semibold uppercase tracking-wide text-ink-muted"
+                  >${leader.displayName}</span
+                >
+                <span class="font-mono text-sm font-bold tabular-nums text-ink"
+                  >${leader.price.toFixed(0)}%</span
+                >
+              </span>`
+            : html`<span
+                aria-hidden="true"
+                class="text-[10px] font-semibold uppercase tracking-wide ${failed
+                  ? "text-danger"
+                  : "text-accent"}"
+                >${failed ? "Alert" : "Trade"}</span
+              >`}
         </span>
         ${!failed && totalPnl !== null
           ? html`<span
               aria-hidden="true"
-              class="flex flex-col items-center font-mono text-xs font-bold tabular-nums ${totalPnl >= 0
+              class="flex flex-col items-center font-mono text-xs font-bold tabular-nums ${totalPnl >=
+              0
                 ? "text-positive"
                 : "text-danger"}"
             >
@@ -243,9 +407,42 @@ export class PremiereBettingOverlay extends LitElement {
               <span>${Math.abs(Math.round(totalPnl))}</span>
             </span>`
           : nothing}
-        <span aria-hidden="true" class="${failed ? "text-danger" : "text-ink-muted"}">‹</span>
+        <span
+          aria-hidden="true"
+          class="${failed ? "text-danger" : "text-ink-muted"}"
+          >‹</span
+        >
       </button>
     `;
+  }
+
+  /**
+   * The rail's own visual content is entirely `aria-hidden` (see above) —
+   * narrow-column layout tricks (truncated names, stacked glyphs) don't
+   * translate to a screen reader, so the accessible name carries the same
+   * three facts explicitly instead: that expanding opens the trading
+   * panel, who's currently leading and at what price, and the viewer's
+   * own P&L if they hold a position. Not `aria-live` — this is a static
+   * name read once when focus lands here, never re-announced on its own
+   * as prices tick (that per-tick spam was already rejected — see
+   * `PriceAnnouncer`).
+   */
+  private railAriaLabel(
+    failed: boolean,
+    leader: { displayName: string; price: number } | null,
+    totalPnl: number | null,
+  ): string {
+    if (failed) return "Show market status — action needed";
+    const parts = ["Expand trading panel"];
+    if (leader !== null) {
+      parts.push(
+        `${leader.displayName} leading at ${leader.price.toFixed(0)}%`,
+      );
+    }
+    if (totalPnl !== null) {
+      parts.push(`your position ${formatSignedCredits(totalPnl)} cr`);
+    }
+    return parts.join(" — ");
   }
 
   private renderHeader() {
@@ -273,9 +470,7 @@ export class PremiereBettingOverlay extends LitElement {
               class="hidden items-center justify-center rounded-md border border-line px-1.5 py-1 text-ink-muted outline-none transition-colors hover:bg-surface-hover hover:text-ink focus-visible:ring-2 focus-visible:ring-accent lg:inline-flex"
               aria-label="Collapse trading panel"
               aria-controls="betting-sheet-panel"
-              @click=${() => {
-                this.sheetOverride = false;
-              }}
+              @click=${() => this.setSheetOpen(false)}
             >
               <span aria-hidden="true">›</span>
             </button>
@@ -290,15 +485,36 @@ export class PremiereBettingOverlay extends LitElement {
 
   private renderBody() {
     switch (this.model.state) {
-      case "scheduled":
+      case "scheduled": {
+        const seats = this.allSeats();
         return html`
-          <div class="flex flex-1 flex-col items-center justify-center gap-2 px-4 py-10 text-center">
-            <p class="text-sm text-ink-dim">The market opens when this premiere starts.</p>
+          <div class="flex flex-col gap-4 px-4 py-6 text-center">
+            <div class="flex flex-col gap-1.5">
+              <p class="text-sm font-semibold text-ink">
+                Live market: which agent wins this match?
+              </p>
+              <p class="text-xs leading-relaxed text-ink-muted">
+                ${seats.length} AI policies are competing here — not
+                humans${seats.length > 0
+                  ? html`:
+                      <span class="text-ink"
+                        >${seats
+                          .map((seat) => seat.displayName)
+                          .join(" · ")}</span
+                      >`
+                  : nothing}.
+                Buy shares in whichever one you think wins; the crowd's own
+                trading sets the odds as the match plays out.
+              </p>
+            </div>
+            ${this.renderMarketFacts()}
             <p class="text-xs text-ink-muted">
-              Scheduled for ${new Date(this.model.scheduledAt).toLocaleString()}
+              Trading opens the moment the match starts — scheduled for
+              ${new Date(this.model.scheduledAt).toLocaleString()}.
             </p>
           </div>
         `;
+      }
       case "playing":
       case "checkpoint":
         return this.renderMarket();
@@ -340,14 +556,19 @@ export class PremiereBettingOverlay extends LitElement {
     const hadPosition = (this.market?.positions?.length ?? 0) > 0;
     const positionNote = hadPosition
       ? html`<p class="text-xs text-ink-muted">
-          Your position status could not be confirmed here — check your
-          balance before assuming anything about it.
+          Your position status could not be confirmed here — check your balance
+          before assuming anything about it.
         </p>`
       : nothing;
     if (failureCode === "runtime_failure") {
       return html`
-        <div class="flex flex-1 flex-col items-center justify-center gap-2 px-4 py-10 text-center" role="alert">
-          <p class="text-sm font-semibold text-danger">Lost connection to the live market.</p>
+        <div
+          class="flex flex-1 flex-col items-center justify-center gap-2 px-4 py-10 text-center"
+          role="alert"
+        >
+          <p class="text-sm font-semibold text-danger">
+            Lost connection to the live market.
+          </p>
           <p class="text-xs text-ink-muted">
             This is a connection problem, not a match or account issue.
           </p>
@@ -364,13 +585,16 @@ export class PremiereBettingOverlay extends LitElement {
     }
     if (failureCode === "integrity_failure") {
       return html`
-        <div class="flex flex-1 flex-col items-center justify-center gap-2 px-4 py-10 text-center" role="alert">
+        <div
+          class="flex flex-1 flex-col items-center justify-center gap-2 px-4 py-10 text-center"
+          role="alert"
+        >
           <p class="text-sm font-semibold text-danger">
             This premiere's data could not be verified.
           </p>
           <p class="text-xs text-ink-muted">
-            Something the server reported did not match what this client
-            could independently verify.
+            Something the server reported did not match what this client could
+            independently verify.
           </p>
           ${positionNote}
         </div>
@@ -378,7 +602,9 @@ export class PremiereBettingOverlay extends LitElement {
     }
     // Server-reported failed/cancelled, not a client-side latch.
     return html`
-      <div class="flex flex-1 flex-col items-center justify-center gap-2 px-4 py-10 text-center">
+      <div
+        class="flex flex-1 flex-col items-center justify-center gap-2 px-4 py-10 text-center"
+      >
         <p class="text-sm font-semibold text-ink">
           ${this.model.state === "cancelled"
             ? "This premiere was cancelled."
@@ -413,7 +639,9 @@ export class PremiereBettingOverlay extends LitElement {
       this.model.state === "playing" || this.model.state === "checkpoint";
     return html`
       <div class="flex flex-col gap-3 px-4 py-4">
-        <premiere-position-summary .market=${this.market}></premiere-position-summary>
+        <premiere-position-summary
+          .market=${this.market}
+        ></premiere-position-summary>
         <premiere-market-price-board
           .seats=${seats}
           .market=${this.market}
@@ -442,8 +670,14 @@ export class PremiereBettingOverlay extends LitElement {
           .onDraftAmountChange=${(text: string) => {
             this.draftAmountText = text;
           }}
-          .onTrade=${(seatId: string, side: TradeSide, amount: number, limitPrice: number) =>
-            this.onTrade?.(seatId, side, amount, limitPrice) ?? Promise.resolve()}
+          .onTrade=${(
+            seatId: string,
+            side: TradeSide,
+            amount: number,
+            limitPrice: number,
+          ) =>
+            this.onTrade?.(seatId, side, amount, limitPrice) ??
+            Promise.resolve()}
         ></premiere-trade-ticket>
         <premiere-positions-panel
           .seats=${seats}
@@ -467,9 +701,18 @@ export class PremiereBettingOverlay extends LitElement {
       <div
         class="flex flex-col gap-1 rounded-md border border-line-strong bg-surface-2 px-3 py-2 text-[11px] leading-snug text-ink-muted"
       >
-        <p>Price = the crowd's implied chance (0–100%) — always sums to 100 across every agent.</p>
-        <p>A winning share pays <strong class="text-ink">100 cr</strong> at settlement; a losing share pays 0.</p>
-        <p>No house edge: buying then immediately selling the same shares back nets exactly 0 cr.</p>
+        <p>
+          Price = the crowd's implied chance (0–100%) — always sums to 100
+          across every agent.
+        </p>
+        <p>
+          A winning share pays <strong class="text-ink">100 cr</strong> at
+          settlement; a losing share pays 0.
+        </p>
+        <p>
+          No house edge: buying then immediately selling the same shares back
+          nets exactly 0 cr.
+        </p>
       </div>
     `;
   }
@@ -484,7 +727,10 @@ export class PremiereBettingOverlay extends LitElement {
           ? html`
               <p class="text-sm text-ink">
                 ${reveal.outcome === "winner"
-                  ? html`Winner: <strong>${this.seatLabel(reveal.winnerSeatId ?? null)}</strong>`
+                  ? html`Winner:
+                      <strong
+                        >${this.seatLabel(reveal.winnerSeatId ?? null)}</strong
+                      >`
                   : "Voided — no winner declared."}
               </p>
             `
@@ -538,15 +784,17 @@ export class PremiereBettingOverlay extends LitElement {
         role="complementary"
         aria-label="Premiere market"
       >
-        ${this.renderPeekStrip()}
-        ${this.renderDesktopRail()}
+        ${this.renderPeekStrip()} ${this.renderDesktopRail()}
         <div
           id="betting-sheet-panel"
-          class="${open ? "flex" : "hidden"} min-h-0 flex-1 flex-col overflow-y-auto"
+          class="${open
+            ? "flex"
+            : "hidden"} min-h-0 flex-1 flex-col overflow-y-auto"
         >
-          ${this.renderHeader()}
-          ${this.renderRecovery()}
-          <div class="flex items-center justify-between gap-2 border-b border-line px-4 py-2">
+          ${this.renderHeader()} ${this.renderRecovery()}
+          <div
+            class="flex items-center justify-between gap-2 border-b border-line px-4 py-2"
+          >
             <span class="text-xs text-ink-muted">Your bankroll</span>
             <premiere-market-bankroll-badge
               .bankroll=${this.bankroll}
