@@ -166,7 +166,19 @@ export function createRenderer(
       nativeSpectatorLeaderboard.classList.add("ai-league-native-leaderboard");
       nativeSpectatorLeaderboard.style.pointerEvents = "none";
     }
-    document.body.appendChild(nativeSpectatorLeaderboard);
+    // Tab order should follow reading order: the standings panel sits
+    // visually top-left, ahead of the trading sheet the overlay already
+    // appended to `body` — a plain `appendChild` here would instead land
+    // it AFTER every trading control in the tab sequence (last on the
+    // page, despite being first on screen). `prepend` fixes that for the
+    // one variant that's actually focusable; the promo/clip-capture
+    // variant is `pointerEvents: none` and never in the tab order to
+    // begin with, so its position doesn't matter and stays untouched.
+    if (bettingStandingsEnabled) {
+      document.body.prepend(nativeSpectatorLeaderboard);
+    } else {
+      document.body.appendChild(nativeSpectatorLeaderboard);
+    }
   }
 
   const gameLeftSidebar = document.querySelector(
