@@ -18,9 +18,6 @@ const PREMIERE_ID_PATTERN = /^prem_[a-z0-9]{16,32}$/;
 const LEDGER_FILE_NAME = "points-ledger-v1.json";
 const SCHEMA_VERSION = 1 as const;
 const MAX_DISPLAY_NAME_CODEPOINTS = 32;
-/** Bounded per-participant history — only the count/sum matter long-term; this just bounds file growth. */
-const MAX_PREMIERE_RESULTS_HISTORY = 500;
-
 export interface ReplayPremierePointsEntry {
   readonly participantId: string;
   readonly displayName: string | null;
@@ -39,7 +36,9 @@ export interface ReplayPremiereLeaderboardView {
   readonly entries: readonly ReplayPremiereLeaderboardEntry[];
   readonly totalRankedParticipants: number;
   /** The requesting viewer's own row, `rank: null` when they have never traded a premiere to completion (so are not board-eligible). `null` when no viewer identity was supplied. */
-  readonly viewer: (ReplayPremierePointsEntry & { readonly rank: number | null }) | null;
+  readonly viewer:
+    | (ReplayPremierePointsEntry & { readonly rank: number | null })
+    | null;
 }
 
 /** One real participant's final settlement figures for one premiere's market. */
@@ -63,7 +62,10 @@ const storedEntrySchema = z.object({
   premieresTraded: z.number().int().nonnegative(),
   premieresWon: z.number().int().nonnegative(),
   updatedAt: z.string(),
-  premiereResults: z.record(z.string().regex(PREMIERE_ID_PATTERN), z.number().finite()),
+  premiereResults: z.record(
+    z.string().regex(PREMIERE_ID_PATTERN),
+    z.number().finite(),
+  ),
 });
 type StoredEntry = z.infer<typeof storedEntrySchema>;
 
@@ -91,7 +93,8 @@ export function resolveReplayPremierePointsLedgerRoot(
   environment: Record<string, string | undefined> = process.env,
   homeDirectory: string = os.homedir(),
 ): string {
-  const configured = environment[REPLAY_PREMIERE_POINTS_LEDGER_ROOT_ENV]?.trim();
+  const configured =
+    environment[REPLAY_PREMIERE_POINTS_LEDGER_ROOT_ENV]?.trim();
   const selected =
     configured === undefined || configured === ""
       ? path.join(
@@ -257,7 +260,10 @@ export class ReplayPremierePointsLedger {
     await this.mutate((file) => {
       const source = file.entries[fromParticipantId];
       delete file.entries[fromParticipantId];
-      if (source === undefined || Object.keys(source.premiereResults).length === 0) {
+      if (
+        source === undefined ||
+        Object.keys(source.premiereResults).length === 0
+      ) {
         return;
       }
       const target = file.entries[intoParticipantId] ?? emptyEntry();
@@ -365,7 +371,10 @@ export class ReplayPremierePointsLedger {
    * needed the legacy conversion, so the caller can decide whether to
    * persist the migrated form back to disk.
    */
-  private async loadDetailed(): Promise<{ file: LedgerFile; migrated: boolean }> {
+  private async loadDetailed(): Promise<{
+    file: LedgerFile;
+    migrated: boolean;
+  }> {
     let raw: unknown;
     try {
       const text = await fs.readFile(this.filePath, "utf8");
@@ -379,16 +388,32 @@ export class ReplayPremierePointsLedger {
       ) {
         throw error;
       }
-      return { file: { schemaVersion: SCHEMA_VERSION, entries: {} }, migrated: false };
+      return {
+        file: { schemaVersion: SCHEMA_VERSION, entries: {} },
+        migrated: false,
+      };
     }
     if (typeof raw !== "object" || raw === null) {
-      return { file: { schemaVersion: SCHEMA_VERSION, entries: {} }, migrated: false };
+      return {
+        file: { schemaVersion: SCHEMA_VERSION, entries: {} },
+        migrated: false,
+      };
     }
     if (!("schemaVersion" in raw) || raw.schemaVersion !== SCHEMA_VERSION) {
-      return { file: { schemaVersion: SCHEMA_VERSION, entries: {} }, migrated: false };
+      return {
+        file: { schemaVersion: SCHEMA_VERSION, entries: {} },
+        migrated: false,
+      };
     }
-    if (!("entries" in raw) || typeof raw.entries !== "object" || raw.entries === null) {
-      return { file: { schemaVersion: SCHEMA_VERSION, entries: {} }, migrated: false };
+    if (
+      !("entries" in raw) ||
+      typeof raw.entries !== "object" ||
+      raw.entries === null
+    ) {
+      return {
+        file: { schemaVersion: SCHEMA_VERSION, entries: {} },
+        migrated: false,
+      };
     }
     const rawEntries = raw.entries;
     const entries: Record<string, StoredEntry> = {};
@@ -404,7 +429,8 @@ export class ReplayPremierePointsLedger {
       if (legacy.success) {
         const premiereResults: Record<string, number> = {};
         for (const premiereId of legacy.data.settledPremiereIds) {
-          if (PREMIERE_ID_PATTERN.test(premiereId)) premiereResults[premiereId] = 0;
+          if (PREMIERE_ID_PATTERN.test(premiereId))
+            premiereResults[premiereId] = 0;
         }
         entries[participantId] = {
           displayName: legacy.data.displayName,
@@ -448,13 +474,25 @@ function emptyEntry(): StoredEntry {
   };
 }
 
-function trimPremiereResults(entry: StoredEntry): void {
-  const keys = Object.keys(entry.premiereResults);
-  if (keys.length <= MAX_PREMIERE_RESULTS_HISTORY) return;
-  const excess = keys.length - MAX_PREMIERE_RESULTS_HISTORY;
-  for (let i = 0; i < excess; i += 1) {
-    delete entry.premiereResults[keys[i]];
-  }
+/**
+ * Deliberately a no-op, kept as the single place to reintroduce compaction if
+ * it ever earns its keep.
+ *
+ * There used to be a 500-premiere cap here, and it was silently destructive:
+ * `mergeParticipant` transfers only the retained `premiereResults`, so linking
+ * an identity with more than 500 settled premieres dropped every result past
+ * the cap — score and history gone, with no error. At roughly two premieres an
+ * hour that is about ten days of play.
+ *
+ * Compaction could be done correctly by folding trimmed results into a running
+ * net plus count and summing those on merge, but then two identities that both
+ * traded the same compacted premiere can no longer be de-duplicated, which is
+ * exactly the correctness the merge rule depends on. A result is a premiere id
+ * and a number; a decade of play is a few hundred kilobytes. Storing all of
+ * them is cheaper than being subtly wrong.
+ */
+function trimPremiereResults(_entry: StoredEntry): void {
+  return;
 }
 
 function toPublicEntry(
@@ -475,10 +513,16 @@ function compareEntries(
   a: ReplayPremierePointsEntry,
   b: ReplayPremierePointsEntry,
 ): number {
-  if (b.lifetimePoints !== a.lifetimePoints) return b.lifetimePoints - a.lifetimePoints;
+  if (b.lifetimePoints !== a.lifetimePoints)
+    return b.lifetimePoints - a.lifetimePoints;
   if (b.premieresWon !== a.premieresWon) return b.premieresWon - a.premieresWon;
-  if (b.premieresTraded !== a.premieresTraded) return b.premieresTraded - a.premieresTraded;
-  return a.participantId < b.participantId ? -1 : a.participantId > b.participantId ? 1 : 0;
+  if (b.premieresTraded !== a.premieresTraded)
+    return b.premieresTraded - a.premieresTraded;
+  return a.participantId < b.participantId
+    ? -1
+    : a.participantId > b.participantId
+      ? 1
+      : 0;
 }
 
 function boundedLimit(value: number): number {

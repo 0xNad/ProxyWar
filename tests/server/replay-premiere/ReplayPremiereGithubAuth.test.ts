@@ -1,15 +1,18 @@
+import express from "express";
 import { promises as fs } from "node:fs";
 import http from "node:http";
 import os from "node:os";
 import path from "node:path";
-import express from "express";
+import {
+  pointsMergerFor,
+  ReplayPremiereIdentityLinkStore,
+} from "../../../src/server/replay-premiere/points/ReplayPremiereIdentityLinkStore";
+import { ReplayPremierePointsLedger } from "../../../src/server/replay-premiere/points/ReplayPremierePointsLedger";
 import {
   createReplayPremiereGithubAuthRouter,
   resolveReplayPremiereGithubOAuthConfig,
   type ReplayPremiereGithubOAuthClient,
 } from "../../../src/server/replay-premiere/ReplayPremiereGithubAuth";
-import { pointsMergerFor, ReplayPremiereIdentityLinkStore } from "../../../src/server/replay-premiere/points/ReplayPremiereIdentityLinkStore";
-import { ReplayPremierePointsLedger } from "../../../src/server/replay-premiere/points/ReplayPremierePointsLedger";
 import { ReplayPremiereGuestSecurity } from "../../../src/server/replay-premiere/ReplayPremiereGuestSecurity";
 
 const origin = "https://bet.example.test";
@@ -26,12 +29,17 @@ interface StubOAuthState {
   /** code -> access token */
   tokensByCode: Map<string, string>;
   /** access token -> user */
-  usersByToken: Map<string, { githubUserId: number; login: string; avatarUrl: string | null }>;
+  usersByToken: Map<
+    string,
+    { githubUserId: number; login: string; avatarUrl: string | null }
+  >;
   exchangeShouldThrow: boolean;
   fetchUserShouldThrow: boolean;
 }
 
-function stubOAuthClient(state: StubOAuthState): ReplayPremiereGithubOAuthClient {
+function stubOAuthClient(
+  state: StubOAuthState,
+): ReplayPremiereGithubOAuthClient {
   return {
     buildAuthorizeUrl({ redirectUri, state: oauthState }) {
       const url = new URL("https://github.example.test/login/oauth/authorize");
@@ -98,7 +106,9 @@ async function rawGet(
   });
 }
 
-function setCookiePairs(headers: http.IncomingHttpHeaders): Record<string, string> {
+function setCookiePairs(
+  headers: http.IncomingHttpHeaders,
+): Record<string, string> {
   const raw = headers["set-cookie"] ?? [];
   const pairs: Record<string, string> = {};
   for (const entry of raw) {
@@ -154,7 +164,9 @@ describe("ReplayPremiereGithubAuth", () => {
       }),
     );
     const server = http.createServer(app);
-    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    await new Promise<void>((resolve) =>
+      server.listen(0, "127.0.0.1", resolve),
+    );
     const address = server.address();
     if (address === null || typeof address === "string") {
       throw new Error("expected a bound TCP address");
@@ -172,7 +184,14 @@ describe("ReplayPremiereGithubAuth", () => {
     const oauthState: StubOAuthState = {
       tokensByCode: new Map([["good-code", "token-1"]]),
       usersByToken: new Map([
-        ["token-1", { githubUserId: 42, login: "daveey", avatarUrl: "https://example.test/a.png" }],
+        [
+          "token-1",
+          {
+            githubUserId: 42,
+            login: "daveey",
+            avatarUrl: "https://example.test/a.png",
+          },
+        ],
       ]),
       exchangeShouldThrow: false,
       fetchUserShouldThrow: false,
@@ -245,7 +264,10 @@ describe("ReplayPremiereGithubAuth", () => {
     try {
       // Victim has an ordinary guest cookie from browsing, but never
       // clicked "Sign in" — no link-intent cookie exists in their browser.
-      const bootstrapOnly = await rawGet(baseUrl, "/api/premieres/auth/github/status");
+      const bootstrapOnly = await rawGet(
+        baseUrl,
+        "/api/premieres/auth/github/status",
+      );
       const guestCookie = setCookiePairs(bootstrapOnly.headers);
 
       const callback = await rawGet(
@@ -261,7 +283,9 @@ describe("ReplayPremiereGithubAuth", () => {
         "/api/premieres/auth/github/status",
         cookieHeader(guestCookie),
       );
-      const parsed = JSON.parse(status.body) as { identity: { signedIn: boolean } };
+      const parsed = JSON.parse(status.body) as {
+        identity: { signedIn: boolean };
+      };
       expect(parsed.identity.signedIn).toBe(false);
     } finally {
       await close();
@@ -271,7 +295,9 @@ describe("ReplayPremiereGithubAuth", () => {
   test("a state parameter that doesn't match the link-intent nonce is rejected", async () => {
     const oauthState: StubOAuthState = {
       tokensByCode: new Map([["good-code", "token-1"]]),
-      usersByToken: new Map([["token-1", { githubUserId: 1, login: "x", avatarUrl: null }]]),
+      usersByToken: new Map([
+        ["token-1", { githubUserId: 1, login: "x", avatarUrl: null }],
+      ]),
       exchangeShouldThrow: false,
       fetchUserShouldThrow: false,
     };
@@ -310,9 +336,9 @@ describe("ReplayPremiereGithubAuth", () => {
       );
       expect(callback.status).toBe(302);
       expect(callback.headers.location).toBe("/bet?github=error");
-      expect(errors.some((e) => e.code === "github_auth_code_exchange_failed")).toBe(
-        true,
-      );
+      expect(
+        errors.some((e) => e.code === "github_auth_code_exchange_failed"),
+      ).toBe(true);
     } finally {
       await close();
     }
@@ -335,12 +361,16 @@ describe("ReplayPremiereGithubAuth", () => {
     try {
       const startA = await rawGet(baseUrl, "/api/premieres/auth/github/start");
       const cookiesA = setCookiePairs(startA.headers);
-      const stateA = new URL(startA.headers.location ?? "").searchParams.get("state");
+      const stateA = new URL(startA.headers.location ?? "").searchParams.get(
+        "state",
+      );
       const participantA = cookiesA.proxywar_premiere_guest.split(".")[1];
 
       const startB = await rawGet(baseUrl, "/api/premieres/auth/github/start");
       const cookiesB = setCookiePairs(startB.headers);
-      const stateB = new URL(startB.headers.location ?? "").searchParams.get("state");
+      const stateB = new URL(startB.headers.location ?? "").searchParams.get(
+        "state",
+      );
       const participantB = cookiesB.proxywar_premiere_guest.split(".")[1];
       expect(participantB).not.toBe(participantA);
 
@@ -365,7 +395,9 @@ describe("ReplayPremiereGithubAuth", () => {
       );
       expect(linkB.headers.location).toBe("/bet?github=linked");
 
-      const board = await ledger.readLeaderboard({ viewerParticipantId: participantA });
+      const board = await ledger.readLeaderboard({
+        viewerParticipantId: participantA,
+      });
       expect(board.viewer).toEqual(
         expect.objectContaining({
           participantId: participantA,
@@ -373,9 +405,9 @@ describe("ReplayPremiereGithubAuth", () => {
           premieresTraded: 2,
         }),
       );
-      expect(board.entries.some((entry) => entry.participantId === participantB)).toBe(
-        false,
-      );
+      expect(
+        board.entries.some((entry) => entry.participantId === participantB),
+      ).toBe(false);
 
       // Both cookies — including guestB's now-merged-away one — resolve to
       // the same canonical, verified identity.
@@ -390,10 +422,14 @@ describe("ReplayPremiereGithubAuth", () => {
         cookieHeader(cookiesB),
       );
       const identityA = (
-        JSON.parse(statusA.body) as { identity: { canonicalParticipantId: string } }
+        JSON.parse(statusA.body) as {
+          identity: { canonicalParticipantId: string };
+        }
       ).identity;
       const identityB = (
-        JSON.parse(statusB.body) as { identity: { canonicalParticipantId: string } }
+        JSON.parse(statusB.body) as {
+          identity: { canonicalParticipantId: string };
+        }
       ).identity;
       expect(identityA.canonicalParticipantId).toBe(participantA);
       expect(identityB.canonicalParticipantId).toBe(participantA);
@@ -408,7 +444,9 @@ describe("resolveReplayPremiereGithubOAuthConfig", () => {
 
   beforeEach(async () => {
     const realTemporaryRoot = await fs.realpath(os.tmpdir());
-    secretFileRoot = await fs.mkdtemp(path.join(realTemporaryRoot, "github-secret-"));
+    secretFileRoot = await fs.mkdtemp(
+      path.join(realTemporaryRoot, "github-secret-"),
+    );
   });
 
   afterEach(async () => {
@@ -444,12 +482,43 @@ describe("resolveReplayPremiereGithubOAuthConfig", () => {
   test("prefers CLIENT_SECRET_FILE over the inline secret, trimming a trailing newline", async () => {
     const secretPath = path.join(secretFileRoot, "secret");
     await fs.writeFile(secretPath, "from-file-secret\n");
+    await fs.chmod(secretPath, 0o600);
     const config = await resolveReplayPremiereGithubOAuthConfig({
       PROXYWAR_GITHUB_OAUTH_CLIENT_ID: "abc",
       PROXYWAR_GITHUB_OAUTH_CLIENT_SECRET: "inline-should-be-ignored",
       PROXYWAR_GITHUB_OAUTH_CLIENT_SECRET_FILE: secretPath,
     });
-    expect(config).toEqual({ clientId: "abc", clientSecret: "from-file-secret" });
+    expect(config).toEqual({
+      clientId: "abc",
+      clientSecret: "from-file-secret",
+    });
+  });
+
+  test("refuses a group/world-readable secret file rather than silently accepting it", async () => {
+    // The entire reason the secret is passed by path is to keep it away from
+    // other local accounts. Accepting a 0644 file gives that up while still
+    // looking secure, so this fails closed exactly like an unset secret.
+    const secretPath = path.join(secretFileRoot, "loose-secret");
+    await fs.writeFile(secretPath, "from-file-secret");
+    await fs.chmod(secretPath, 0o644);
+    const config = await resolveReplayPremiereGithubOAuthConfig({
+      PROXYWAR_GITHUB_OAUTH_CLIENT_ID: "abc",
+      PROXYWAR_GITHUB_OAUTH_CLIENT_SECRET_FILE: secretPath,
+    });
+    expect(config).toBeNull();
+  });
+
+  test("refuses a symlink pointing at a world-readable file — lstat, not stat", async () => {
+    const target = path.join(secretFileRoot, "world-readable-target");
+    const link = path.join(secretFileRoot, "sneaky-link");
+    await fs.writeFile(target, "from-file-secret");
+    await fs.chmod(target, 0o644);
+    await fs.symlink(target, link);
+    const config = await resolveReplayPremiereGithubOAuthConfig({
+      PROXYWAR_GITHUB_OAUTH_CLIENT_ID: "abc",
+      PROXYWAR_GITHUB_OAUTH_CLIENT_SECRET_FILE: link,
+    });
+    expect(config).toBeNull();
   });
 
   test("falls back to the inline secret when CLIENT_SECRET_FILE is unset", async () => {

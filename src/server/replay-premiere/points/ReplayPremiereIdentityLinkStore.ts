@@ -76,7 +76,10 @@ type StoredLink = z.infer<typeof storedLinkSchema>;
 
 const linkStoreFileSchema = z.object({
   schemaVersion: z.literal(SCHEMA_VERSION),
-  byGithubId: z.record(z.string().regex(GITHUB_USER_ID_PATTERN), storedLinkSchema),
+  byGithubId: z.record(
+    z.string().regex(GITHUB_USER_ID_PATTERN),
+    storedLinkSchema,
+  ),
   githubIdByParticipantId: z.record(
     z.string().regex(PARTICIPANT_ID_PATTERN),
     z.string().regex(GITHUB_USER_ID_PATTERN),
@@ -94,7 +97,10 @@ type LinkStoreFile = z.infer<typeof linkStoreFileSchema>;
  * in a minimal fake without constructing a real ledger.
  */
 export interface ReplayPremierePointsMerger {
-  mergeParticipant(fromParticipantId: string, intoParticipantId: string): Promise<void>;
+  mergeParticipant(
+    fromParticipantId: string,
+    intoParticipantId: string,
+  ): Promise<void>;
 }
 
 export class ReplayPremiereIdentityLinkStore {
@@ -121,13 +127,20 @@ export class ReplayPremiereIdentityLinkStore {
     return file.aliases[participantId] ?? participantId;
   }
 
-  async getStatus(participantId: string): Promise<ReplayPremiereGithubIdentityStatus> {
+  async getStatus(
+    participantId: string,
+  ): Promise<ReplayPremiereGithubIdentityStatus> {
     const file = await this.load();
     const canonicalParticipantId = file.aliases[participantId] ?? participantId;
     const githubId = file.githubIdByParticipantId[canonicalParticipantId];
     const link = githubId === undefined ? undefined : file.byGithubId[githubId];
     if (link === undefined) {
-      return { signedIn: false, login: null, avatarUrl: null, canonicalParticipantId };
+      return {
+        signedIn: false,
+        login: null,
+        avatarUrl: null,
+        canonicalParticipantId,
+      };
     }
     return {
       signedIn: true,
@@ -145,12 +158,19 @@ export class ReplayPremiereIdentityLinkStore {
     participantIds: readonly string[],
   ): Promise<ReadonlyMap<string, { login: string; avatarUrl: string | null }>> {
     const file = await this.load();
-    const described = new Map<string, { login: string; avatarUrl: string | null }>();
+    const described = new Map<
+      string,
+      { login: string; avatarUrl: string | null }
+    >();
     for (const participantId of participantIds) {
       const githubId = file.githubIdByParticipantId[participantId];
-      const link = githubId === undefined ? undefined : file.byGithubId[githubId];
+      const link =
+        githubId === undefined ? undefined : file.byGithubId[githubId];
       if (link !== undefined) {
-        described.set(participantId, { login: link.login, avatarUrl: link.avatarUrl });
+        described.set(participantId, {
+          login: link.login,
+          avatarUrl: link.avatarUrl,
+        });
       }
     }
     return described;
@@ -190,6 +210,19 @@ export class ReplayPremiereIdentityLinkStore {
       const selfCanonical = file.aliases[participantId] ?? participantId;
       const existing = file.byGithubId[githubId];
       const nowIso = new Date().toISOString();
+      // This participant may already be linked to a DIFFERENT GitHub account.
+      // Silently repointing them would leave the previous account's record
+      // still aimed here, so two GitHub identities would share one score and
+      // one of them would be invisible in status. On a shared browser that is
+      // a way to attach yourself to someone else's history. Refuse; switching
+      // accounts is an explicit unlink, not a side effect of signing in.
+      const alreadyLinkedGithubId = file.githubIdByParticipantId[selfCanonical];
+      if (
+        alreadyLinkedGithubId !== undefined &&
+        alreadyLinkedGithubId !== githubId
+      ) {
+        throw new Error("github_identity_conflict");
+      }
       if (existing === undefined) {
         const record: StoredLink = {
           githubUserId: githubUser.githubUserId,
@@ -224,12 +257,16 @@ export class ReplayPremiereIdentityLinkStore {
         };
       }
       const canonicalParticipantId = existing.participantId;
-      await this.pointsLedger.mergeParticipant(selfCanonical, canonicalParticipantId);
+      await this.pointsLedger.mergeParticipant(
+        selfCanonical,
+        canonicalParticipantId,
+      );
       // Collapse to one hop: anyone previously aliased to selfCanonical
       // (e.g. it was itself a merge target before ever linking to GitHub)
       // now resolves straight to the new canonical.
       for (const [aliasedId, target] of Object.entries(file.aliases)) {
-        if (target === selfCanonical) file.aliases[aliasedId] = canonicalParticipantId;
+        if (target === selfCanonical)
+          file.aliases[aliasedId] = canonicalParticipantId;
       }
       file.aliases[selfCanonical] = canonicalParticipantId;
       delete file.githubIdByParticipantId[selfCanonical];
@@ -242,7 +279,9 @@ export class ReplayPremiereIdentityLinkStore {
     });
   }
 
-  private async mutate<T>(mutator: (file: LinkStoreFile) => Promise<T>): Promise<T> {
+  private async mutate<T>(
+    mutator: (file: LinkStoreFile) => Promise<T>,
+  ): Promise<T> {
     const run = this.writeQueue.then(async () => {
       const file = await this.load();
       const result = await mutator(file);
