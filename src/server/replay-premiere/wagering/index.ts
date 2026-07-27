@@ -33,14 +33,13 @@ export {
   settleMarket,
   sharesHeld,
 } from "./ReplayPremiereMarket";
-export {
-  WAGERING_MAX_PRESENTATION_SPAN_MS,
-  type ReplayPremiereMarket,
-  type ReplayPremiereMarketFill,
-  type ReplayPremiereMarketOrderRejectReason,
-  type ReplayPremiereMarketOrderSide,
-  type ReplayPremiereMarketParticipantKind,
-  type ReplayPremiereMarketPosition,
-  type ReplayPremiereMarketStateView,
-  type ReplayPremiereMarketTrade,
+export type {
+  ReplayPremiereMarket,
+  ReplayPremiereMarketFill,
+  ReplayPremiereMarketOrderRejectReason,
+  ReplayPremiereMarketOrderSide,
+  ReplayPremiereMarketParticipantKind,
+  ReplayPremiereMarketPosition,
+  ReplayPremiereMarketStateView,
+  ReplayPremiereMarketTrade,
 } from "./ReplayPremiereWageringTypes";

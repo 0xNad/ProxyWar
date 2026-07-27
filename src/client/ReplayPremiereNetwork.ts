@@ -6,6 +6,7 @@ import {
 } from "../core/Schemas";
 import {
   ReplayPremierePlaybackController,
+  type ReplayPremierePlaybackState,
   type VerifiedReplayPremiereBatch,
 } from "./ReplayPremierePlayback";
 
@@ -58,6 +59,8 @@ const CHECKPOINT_CATCH_UP_JITTER_ALLOWANCE_MS = 2_000;
 const DEFAULT_REQUEST_TIMEOUT_MS = 2_000;
 const MAX_REQUEST_TIMEOUT_MS = 2_000;
 const MAX_AUTHORITATIVE_RESULT_BYTES = 1_000_000;
+const LIVE_PROJECTION_MAX_POLLS_PER_TICK = 64;
+const LIVE_PROJECTION_MAX_DRAIN_POLLS = 4_096;
 export const REPLAY_PREMIERE_REVEAL_FETCH_CONCURRENCY = 8;
 // Admission collects at most 1 MiB of UTF-8 response body per leak target.
 // Reveal must carry the exact nonce-committed eligibility preimage, so the
@@ -376,6 +379,13 @@ const releasedRecordSchema = z
     turn: nonNegativeIntegerSchema,
     presentationOffsetMs: nonNegativeIntegerSchema,
     payload: z.unknown(),
+  })
+  .strict();
+const liveProjectionResponseSchema = z
+  .object({
+    schemaVersion: z.literal(1),
+    liveVisibleSequence: releasedIndexSchema,
+    records: z.array(releasedRecordSchema).max(4_100),
   })
   .strict();
 
@@ -739,6 +749,21 @@ export interface ReplayPremiereNetworkOptions {
   playback: ReplayPremierePlaybackController;
   callbacks: ReplayPremiereNetworkCallbacks;
   fetchImpl?: typeof fetch;
+  /**
+   * Selects how mid-match records reach the playback pipeline.
+   * "chunks" (default): the coarse ~60s hash-chained storage chunks used
+   * by the ordinary `/premiere/<id>` route — completely unperturbed.
+   * "tap": the fine-grained live-projection tap
+   * (`GET .../live-projection?after=`), used by the betting page so
+   * rendered/tradeable content never lags — and therefore is never read
+   * ahead of — the authoritative server clock. See `applyLiveProjection`
+   * / `completeRevealForTap` for the one thing this trades away at
+   * reveal time: the storage-chunk hash-chain cross-check against the
+   * revealed draft manifest never runs for tap-sourced batches (there is
+   * no stored chunk for a tap batch to match) — that archival proof
+   * remains fully available, unperturbed, via `/premiere/<id>`.
+   */
+  contentSource?: "chunks" | "tap";
   pollIntervalMs?: number;
   initialRetryMs?: number;
   maxRetryMs?: number;
@@ -793,6 +818,7 @@ export class ReplayPremiereNetworkController {
   private readonly catchUpThresholdMs: number;
   private readonly maxResponseBytes: number;
   private readonly requestTimeoutMs: number;
+  private readonly contentSource: "chunks" | "tap";
 
   private bootstrap: Readonly<ReplayPremiereBootstrap> | null = null;
   private lastManifest: Readonly<ReplayPremierePreRevealManifest> | null = null;
@@ -813,6 +839,7 @@ export class ReplayPremiereNetworkController {
       throw networkError("invalid_configuration");
     }
     this.fetchImpl = options.fetchImpl ?? globalThis.fetch.bind(globalThis);
+    this.contentSource = options.contentSource ?? "chunks";
     this.pollIntervalMs = positiveIntegerOrDefault(
       options.pollIntervalMs,
       DEFAULT_POLL_INTERVAL_MS,
@@ -933,7 +960,10 @@ export class ReplayPremiereNetworkController {
         await this.invokeCallback(this.options.callbacks.onReady, projection);
         this.readyProjection = projection;
       }
-      const reveal = await this.completeReveal(manifest);
+      const reveal =
+        this.contentSource === "tap"
+          ? await this.completeRevealForTap(manifest)
+          : await this.completeReveal(manifest);
       await this.invokeCallback(
         this.options.callbacks.onTerminal,
         manifest.state,
@@ -959,7 +989,11 @@ export class ReplayPremiereNetworkController {
       this.readyProjection = projection;
     }
 
-    await this.applyAdvertisedChunks(manifest);
+    if (this.contentSource === "tap") {
+      await this.applyLiveProjection();
+    } else {
+      await this.applyAdvertisedChunks(manifest);
+    }
     this.requestCatchUpIfBehind(manifest);
     this.lastManifest = deepFreeze(manifest);
 
@@ -1083,6 +1117,145 @@ export class ReplayPremiereNetworkController {
       this.acceptedDescriptors.set(nextIndex, descriptor);
       nextIndex += 1;
     }
+  }
+
+  private liveProjectionPath(afterSequence: number): string {
+    return `/api/premieres/${this.options.premiereId}/live-projection?after=${afterSequence}`;
+  }
+
+  /**
+   * Builds a `VerifiedReplayPremiereBatch` from one live-projection poll's
+   * records. There is no server-published storage chunk backing a tap
+   * batch — chunkIndex/chunkHash/previousChunkHash are a purely
+   * client-local sequence, chained off this controller's own last-accepted
+   * hash (read straight from `playback.state()`), so playback's ordinary
+   * hash-chain continuity check still catches any dropped, duplicated, or
+   * reordered batch within this session. This is NOT a claim that these
+   * bytes match the pre-committed archive — see `completeRevealForTap`.
+   */
+  private async buildTapBatch(
+    records: readonly z.infer<typeof releasedRecordSchema>[],
+    state: ReplayPremierePlaybackState,
+  ): Promise<VerifiedReplayPremiereBatch> {
+    const startSequence = state.nextExpectedSequence;
+    const parsedRecords = records.map((record, offset) => {
+      assertNoOutcomeBearingFields(record.payload);
+      const turn = parseStrictCoreValue(TurnSchema.strict(), record.payload);
+      const expectedSequence = startSequence + offset;
+      const expectedTurn = state.nextExpectedTurnNumber + offset;
+      if (
+        record.sequence !== expectedSequence ||
+        record.turn !== expectedTurn ||
+        turn.turnNumber !== record.turn ||
+        (offset > 0 &&
+          record.presentationOffsetMs < records[offset - 1].presentationOffsetMs)
+      ) {
+        throw networkError("chunk_integrity_failure");
+      }
+      return deepFreeze({
+        sequence: record.sequence,
+        presentationOffsetMs: record.presentationOffsetMs,
+        turn,
+      });
+    });
+    for (const record of parsedRecords) {
+      this.presentationOffsets.set(record.sequence, record.presentationOffsetMs);
+    }
+    const endSequence = parsedRecords[parsedRecords.length - 1].sequence;
+    const payloadBytes = canonicalJsonBytes({
+      schemaVersion: 1 as const,
+      records,
+    });
+    const payloadHash = await sha256Hex(payloadBytes);
+    const chunkIndex = state.nextChunkIndex;
+    const previousChunkHash = state.lastChunkHash;
+    const chunkHash = await hashCanonicalJson({
+      kind: "live-projection-tap-batch",
+      premiereId: this.options.premiereId,
+      chunkIndex,
+      previousChunkHash,
+      startSequence,
+      endSequence,
+      payloadHash,
+    });
+    return {
+      premiereId: this.options.premiereId,
+      chunkIndex,
+      chunkHash,
+      previousChunkHash,
+      payloadHash,
+      startSequence,
+      endSequence,
+      verification: { payloadHashVerified: true, chunkHashVerified: true },
+      records: parsedRecords,
+    };
+  }
+
+  /**
+   * One `GET .../live-projection?after=<cursor>` round trip. The cursor is
+   * always this controller's own `releasedThroughSequence` — the highest
+   * sequence already appended to playback — so a request never asks for,
+   * and the server never has a reason to send, anything this client has
+   * not already consumed. Returns the number of records the response
+   * carried (0 means fully caught up to the server's current
+   * `liveVisibleSequence`).
+   */
+  private async pollLiveProjectionOnce(): Promise<number> {
+    const state = this.options.playback.state();
+    const after = state.releasedThroughSequence ?? -1;
+    const value = await this.fetchJson(this.liveProjectionPath(after), {
+      noStoreRequired: true,
+      maxBytes: this.maxResponseBytes,
+    });
+    assertNoOutcomeBearingFields(value);
+    const parsed = liveProjectionResponseSchema.safeParse(value);
+    if (!parsed.success) throw networkError("invalid_schema");
+    if (parsed.data.records.length === 0) return 0;
+    const batch = await this.buildTapBatch(parsed.data.records, state);
+    try {
+      this.options.playback.appendVerifiedBatch(batch);
+    } catch {
+      throw networkError("chunk_integrity_failure");
+    }
+    return parsed.data.records.length;
+  }
+
+  /**
+   * One sync tick's worth of tap catch-up. Loops on a bounded number of
+   * requests so a client that fell far behind (cold join, reconnect after a
+   * long gap) still converges within a handful of ticks instead of one
+   * unbounded burst; a healthy, already-caught-up viewer exits after its
+   * first empty response — normally one request per tick.
+   */
+  private async applyLiveProjection(): Promise<void> {
+    for (
+      let attempt = 0;
+      attempt < LIVE_PROJECTION_MAX_POLLS_PER_TICK;
+      attempt += 1
+    ) {
+      const received = await this.pollLiveProjectionOnce();
+      if (received === 0) return;
+    }
+  }
+
+  /**
+   * Reveal-time catch-up: drains the tap all the way to the revealed final
+   * sequence. `readLiveProjection` keeps serving the full remainder once a
+   * premiere is revealed/archived (confirmed server behavior), so this
+   * always converges in practice; the bound only guards against a genuine
+   * server-side integrity failure never actually reaching finalSequence.
+   */
+  private async drainLiveProjectionTo(targetSequence: number): Promise<void> {
+    for (
+      let attempt = 0;
+      attempt < LIVE_PROJECTION_MAX_DRAIN_POLLS;
+      attempt += 1
+    ) {
+      const state = this.options.playback.state();
+      if ((state.releasedThroughSequence ?? -1) >= targetSequence) return;
+      await this.pollLiveProjectionOnce();
+    }
+    throw networkError("reveal_integrity_failure");
   }
 
   private async fetchAndVerifyChunk(
@@ -1447,9 +1620,128 @@ export class ReplayPremiereNetworkController {
         finalChunkHash: reveal.finalChunkHash,
         revealedAt: Date.parse(reveal.revealedAt),
         verification: {
-          releaseChainVerified: true,
+          contentChainVerified: "storage_chunk_hash_chain",
           publicationCommitmentVerified: true,
-          publicationDraftManifestVerified: true,
+          provenanceVerified: true,
+          eligibilityCommitmentVerified: true,
+          sourceReplayIntegrityScope: "declared_hash_only",
+          sourceReplayCommitmentMatched: true,
+          authoritativeResultBytesVerified: true,
+          resultCommitmentMatched: true,
+          revealCommitmentVerified: true,
+        },
+      });
+    } catch {
+      throw networkError("reveal_integrity_failure");
+    }
+    this.revealed = deepFreeze({
+      ...reveal,
+      verifiedAuthoritativeResult: authoritativeResult,
+    });
+    await this.invokeCallback(this.options.callbacks.onReveal, this.revealed);
+    return this.revealed;
+  }
+
+  /**
+   * Tap-mode reveal completion. Outcome authenticity (provenance,
+   * eligibility commitment, authoritative-result bytes) is verified
+   * identically to the chunk path — none of that depends on how mid-match
+   * records reached this client. What it deliberately skips is the
+   * per-chunk cross-check against the revealed draft manifest: that proof
+   * binds real *storage chunk* bytes to the pre-commitment, and
+   * tap-sourced batches were never storage chunks (see `buildTapBatch`).
+   * That archival proof stays fully intact and available via the
+   * unmodified `/premiere/<id>` chunk pipeline for anyone who wants it;
+   * wagering itself only ever needed the narrower "never ahead of the
+   * clock" guarantee this content-source mode exists to give.
+   */
+  private async completeRevealForTap(
+    pointer: ReplayPremiereRevealPointer,
+  ): Promise<ReplayPremiereReveal> {
+    const expectedRevealPath = this.revealPath();
+    if (
+      !this.bootstrap ||
+      pointer.revealUrl !== expectedRevealPath ||
+      this.lastManifest?.state === "failed" ||
+      this.lastManifest?.state === "cancelled"
+    ) {
+      throw networkError("reveal_integrity_failure");
+    }
+    if (this.revealed) {
+      if (this.revealed.revealCommitHash !== pointer.revealCommitHash) {
+        throw networkError("reveal_integrity_failure");
+      }
+      return this.revealed;
+    }
+    const value = await this.fetchJson(expectedRevealPath, {
+      noStoreRequired: false,
+      maxBytes: this.maxResponseBytes,
+    });
+    const parsed = revealSchema.safeParse(value);
+    if (
+      !parsed.success ||
+      parsed.data.premiereId !== this.options.premiereId
+    ) {
+      throw networkError("invalid_schema");
+    }
+    const reveal = parsed.data;
+    if (
+      reveal.revealedAt !== pointer.revealedAt ||
+      reveal.revealCommitHash !== pointer.revealCommitHash ||
+      !canonicalJsonEqual(reveal.provenance, pointer.provenance) ||
+      (await hashCanonicalJson(revealCommitInput(reveal))) !==
+        reveal.revealCommitHash
+    ) {
+      throw networkError("reveal_integrity_failure");
+    }
+    const nonce = decodeCanonicalBase64Url(reveal.eligibilityCommitmentNonce);
+    const eligibilityCommitment = await hashEligibilityCommitment(
+      reveal.eligibilityRecord,
+      nonce,
+    );
+    if (
+      eligibilityCommitment !== reveal.eligibilityRecordHash ||
+      reveal.publicationCommitmentHash !==
+        this.bootstrap.publicationCommitmentHash ||
+      reveal.sourceReplaySha256 !==
+        reveal.eligibilityRecord.sourceReplaySha256 ||
+      reveal.resultHash !==
+        reveal.eligibilityRecord.authoritativeResult.resultHash ||
+      !canonicalJsonEqual(reveal.provenance, this.bootstrap.provenance)
+    ) {
+      throw networkError("reveal_integrity_failure");
+    }
+    const provenance = this.bootstrap.provenance;
+    if (
+      provenance.eligibilityRecordHash !== reveal.eligibilityRecordHash ||
+      provenance.publicationCommitmentHash !==
+        reveal.publicationCommitmentHash ||
+      provenance.sourceReplaySha256 !== reveal.sourceReplaySha256 ||
+      !eligibilityMatchesProvenance(reveal.eligibilityRecord, provenance)
+    ) {
+      throw networkError("reveal_integrity_failure");
+    }
+    const authoritativeResult = await verifyReplayPremiereAuthoritativeResult(
+      reveal,
+      this.bootstrap,
+    );
+    await this.drainLiveProjectionTo(reveal.finalSequence);
+    const state = this.options.playback.state();
+    if (
+      state.releasedThroughSequence !== reveal.finalSequence ||
+      state.lastChunkHash === null
+    ) {
+      throw networkError("reveal_integrity_failure");
+    }
+    try {
+      this.options.playback.finalize({
+        premiereId: reveal.premiereId,
+        finalSequence: reveal.finalSequence,
+        finalChunkHash: state.lastChunkHash,
+        revealedAt: Date.parse(reveal.revealedAt),
+        verification: {
+          contentChainVerified: "live_projection_tap",
+          publicationCommitmentVerified: true,
           provenanceVerified: true,
           eligibilityCommitmentVerified: true,
           sourceReplayIntegrityScope: "declared_hash_only",

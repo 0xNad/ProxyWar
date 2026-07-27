@@ -1,19 +1,25 @@
 import { html, LitElement, nothing } from "lit";
-import { customElement, property } from "lit/decorators.js";
+import { customElement, property, state } from "lit/decorators.js";
 import type {
   ReplayPremiereCheckpointView,
   ReplayPremiereOverlayCallbacks,
   ReplayPremiereOverlayHandle,
   ReplayPremiereOverlayModel,
+  ReplayPremierePublicState,
 } from "src/client/ReplayPremiereOverlay";
 import "../components/MarketBankrollBadge";
 import "../components/MarketPriceBoard";
+import "../components/MarketPositionSummary";
 import "../components/MarketSettlementPanel";
 import "../components/PositionsPanel";
 import "../components/TradeTicket";
+import { formatSignedCredits } from "../components/pnlDisplay";
 import { settlementForSeat } from "../serviceMapping";
 import type { MarketSeatOption, MarketState, TradeSide } from "../types";
 import { MIN_STAKE } from "src/prediction/types";
+
+/** Live states where the replay is actually on screen behind the sheet. */
+const LIVE_STATES: ReadonlySet<ReplayPremierePublicState> = new Set(["playing", "checkpoint"]);
 
 /**
  * The dedicated betting premiere's own overlay — NOT `ReplayPremiereOverlay`.
@@ -29,6 +35,17 @@ import { MIN_STAKE } from "src/prediction/types";
  * per operator override, checkpoints are content beats the UI highlights,
  * they gate nothing). `windowOpen` reflects whether the premiere itself is
  * currently live, not any particular checkpoint's own state.
+ *
+ * On narrow viewports this is a bottom sheet over the replay, so it
+ * defaults to a COLLAPSED peek strip (title + live P&L) while the match is
+ * actually playing — the replay is the content, not the trading UI — and
+ * expands on tap. It defaults OPEN for every other state (scheduled/
+ * settled/failed/cancelled), where there's no video underneath being
+ * covered and, once settled, the outcome should land immediately rather
+ * than hide behind a tap. `sheetOverride` is the viewer's own explicit
+ * choice, once made; it's cleared automatically the moment the premiere
+ * settles so a win/loss is never left tucked away behind a peek strip the
+ * viewer collapsed earlier while trading.
  */
 @customElement("premiere-betting-overlay")
 export class PremiereBettingOverlay extends LitElement {
@@ -46,8 +63,43 @@ export class PremiereBettingOverlay extends LitElement {
     limitPrice: number,
   ) => Promise<void>;
 
+  @state() private sheetOverride: boolean | null = null;
+  private previousModelState: ReplayPremierePublicState | null = null;
+
   createRenderRoot() {
     return this;
+  }
+
+  willUpdate(changed: Map<string, unknown>): void {
+    if (!changed.has("model") || this.model === undefined) return;
+    const state = this.model.state;
+    // A settlement landing supersedes whatever the viewer left the sheet at
+    // while trading — the outcome should be visible without a tap.
+    if (
+      this.previousModelState !== null &&
+      this.previousModelState !== state &&
+      (state === "revealed" || state === "archived")
+    ) {
+      this.sheetOverride = null;
+    }
+    this.previousModelState = state;
+  }
+
+  /** Peek-strip default: open unless the match is actually live (replay on screen, protect it). */
+  private defaultSheetOpen(): boolean {
+    return !LIVE_STATES.has(this.model.state);
+  }
+
+  private get sheetOpen(): boolean {
+    return this.sheetOverride ?? this.defaultSheetOpen();
+  }
+
+  private totalUnrealizedPnl(): number | null {
+    const positions = this.market?.positions;
+    if (positions === null || positions === undefined || positions.length === 0) {
+      return null;
+    }
+    return positions.reduce((sum, position) => sum + position.unrealizedPnl, 0);
   }
 
   /**
@@ -81,9 +133,48 @@ export class PremiereBettingOverlay extends LitElement {
     }));
   }
 
+  private renderPeekStrip() {
+    const model = this.model;
+    const live = LIVE_STATES.has(model.state);
+    const open = this.sheetOpen;
+    const totalPnl = this.totalUnrealizedPnl();
+    return html`
+      <button
+        type="button"
+        class="flex items-center justify-between gap-3 border-b border-line px-4 py-2.5 text-left outline-none focus-visible:ring-2 focus-visible:ring-accent focus-visible:ring-inset lg:hidden"
+        aria-expanded=${open}
+        aria-controls="betting-sheet-panel"
+        @click=${() => {
+          this.sheetOverride = !this.sheetOpen;
+        }}
+      >
+        <span class="flex min-w-0 items-center gap-2">
+          ${live
+            ? html`<span
+                aria-hidden="true"
+                class="h-1.5 w-1.5 shrink-0 rounded-full bg-live motion-safe:animate-pulse"
+              ></span>`
+            : nothing}
+          ${totalPnl !== null
+            ? html`<span
+                class="font-mono text-sm font-bold tabular-nums ${totalPnl >= 0
+                  ? "text-positive"
+                  : "text-danger"}"
+                >${totalPnl >= 0 ? "▲" : "▼"} ${formatSignedCredits(totalPnl)} cr</span
+              >`
+            : html`<span class="truncate text-sm font-semibold text-ink">${model.title}</span>`}
+        </span>
+        <span class="flex shrink-0 items-center gap-1 text-xs font-semibold text-accent">
+          Trade
+          <span aria-hidden="true">${open ? "▴" : "▾"}</span>
+        </span>
+      </button>
+    `;
+  }
+
   private renderHeader() {
     const model = this.model;
-    const live = model.state === "playing" || model.state === "checkpoint";
+    const live = LIVE_STATES.has(model.state);
     return html`
       <header
         class="flex flex-col gap-1 border-b border-line bg-surface/95 px-4 py-3"
@@ -159,6 +250,7 @@ export class PremiereBettingOverlay extends LitElement {
               Next checkpoint: ${view.sequence}
             </p>`
           : nothing}
+        <premiere-position-summary .market=${this.market}></premiere-position-summary>
         <premiere-market-price-board
           .seats=${seats}
           .market=${this.market}
@@ -232,21 +324,30 @@ export class PremiereBettingOverlay extends LitElement {
         </div>
       `;
     }
+    const open = this.sheetOpen;
     return html`
       <aside
-        class="fixed inset-x-0 bottom-0 z-[52000] flex max-h-[75vh] flex-col overflow-y-auto rounded-t-xl border-t border-line bg-surface shadow-2xl lg:inset-y-0 lg:right-0 lg:left-auto lg:max-h-none lg:h-full lg:w-[420px] lg:rounded-none lg:border-t-0 lg:border-l"
+        class="fixed inset-x-0 bottom-0 z-[52000] flex flex-col overflow-hidden rounded-t-xl border-t border-line bg-surface shadow-2xl ${open
+          ? "max-h-[75vh]"
+          : "max-h-fit"} lg:inset-y-0 lg:right-0 lg:left-auto lg:h-full lg:max-h-none lg:rounded-none lg:border-t-0 lg:border-l"
         role="complementary"
         aria-label="Premiere market"
       >
-        ${this.renderHeader()}
-        <div class="flex items-center justify-between gap-2 border-b border-line px-4 py-2">
-          <span class="text-xs text-ink-muted">Your bankroll</span>
-          <premiere-market-bankroll-badge
-            .bankroll=${this.bankroll}
-            min-stake=${MIN_STAKE}
-          ></premiere-market-bankroll-badge>
+        ${this.renderPeekStrip()}
+        <div
+          id="betting-sheet-panel"
+          class="${open ? "flex" : "hidden"} min-h-0 flex-1 flex-col overflow-y-auto lg:flex lg:max-h-none"
+        >
+          ${this.renderHeader()}
+          <div class="flex items-center justify-between gap-2 border-b border-line px-4 py-2">
+            <span class="text-xs text-ink-muted">Your bankroll</span>
+            <premiere-market-bankroll-badge
+              .bankroll=${this.bankroll}
+              min-stake=${MIN_STAKE}
+            ></premiere-market-bankroll-badge>
+          </div>
+          ${this.renderBody()}
         </div>
-        ${this.renderBody()}
       </aside>
     `;
   }

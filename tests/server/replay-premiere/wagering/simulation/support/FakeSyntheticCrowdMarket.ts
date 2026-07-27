@@ -89,6 +89,7 @@ export class FakeSyntheticCrowdMarket {
       prices: computeMarketPrices(this.market),
       status: this.market.status,
       winnerSeatId: this.market.winnerSeatId,
+      liveVisibleSequence: 1_000_000,
     };
   }
 
@@ -112,6 +113,7 @@ export class FakeSyntheticCrowdMarket {
     requesterBucketId: string;
     seatId: string;
     side: "buy" | "sell";
+    sequence: number;
     amount: number;
     limitPrice: number;
   }): Promise<{ trade: ReplayPremiereMarketTrade; idempotent: boolean }> {
@@ -186,6 +188,7 @@ export class FakeSyntheticCrowdMarket {
       chips,
       avgPrice: shares > 0 ? chips / shares : 0,
       executedAt: this.nowIso,
+      sequence: options.sequence,
       idempotencyKey: options.idempotencyKey,
     };
     this.tradesByKey.set(key, trade);

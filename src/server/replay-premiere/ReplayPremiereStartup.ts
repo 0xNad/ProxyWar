@@ -39,7 +39,6 @@ import type {
   ReplayPremiereInteractionLimits,
   ReplayPremiereReleasedContext,
 } from "./ReplayPremiereInteractions";
-import { WAGERING_MAX_PRESENTATION_SPAN_MS } from "./wagering";
 import {
   compactReplayPremiereEventJournal,
   reclaimUnreferencedPremiereSources,
@@ -1115,22 +1114,6 @@ async function assemblePremiereTarget(options: {
   fence: ReplayPremiereStartupOperationFence;
 }): Promise<AssembledPremiereTarget> {
   assertStartupActive(options.fence.signal);
-  // Continuous trading has no checkpoint pause to hide behind: a chunk
-  // still only releases once the authoritative clock reaches its LAST
-  // record (ReplayPremiereContracts.ts:194-207), so with a normal ~60s
-  // presentation span a client reading the network payload directly sees
-  // up to a minute of future game state and can trade on it before any
-  // other viewer does. Release granularity must approach presentation
-  // granularity while wagering is live — enforced here, not merely
-  // documented: this combination is impossible to configure, not just
-  // discouraged.
-  if (
-    options.wageringEnabled === true &&
-    options.record.chunkBuildLimits.maxPresentationSpanMs >
-      WAGERING_MAX_PRESENTATION_SPAN_MS
-  ) {
-    throw startupCapacity("wagering_presentation_span_exceeds_ceiling");
-  }
   const rebuilt = await rebuildReplayPremiereProjectionInput({
     record: options.record,
     privateStateRoot: options.privateStateRoot,
@@ -1187,6 +1170,8 @@ async function assemblePremiereTarget(options: {
           projection.releasedThroughSequence,
           sequence,
         ),
+      getLiveVisibleSequence: () =>
+        runtime?.readLiveVisibleSequence() ?? projection.releasedThroughSequence,
       signAttribution: (value) => options.security.signShareAttribution(value),
       canonicalPremiereUrl: `${options.publicOrigin}/premiere/${options.record.premiereId}`,
       now: () => options.clock.now(),

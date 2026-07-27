@@ -240,6 +240,11 @@ describe("ProxyWarPublicArtifacts", () => {
     expect(
       matchProxyWarPublicPremiereReadPath(`/api/premieres/${id}/market`),
     ).toEqual({ kind: "market_state", premiereId: id });
+    expect(
+      matchProxyWarPublicPremiereReadPath(
+        `/api/premieres/${id}/live-projection`,
+      ),
+    ).toEqual({ kind: "live_projection", premiereId: id });
 
     for (const forbidden of [
       `/api/premieres/${id}/source`,

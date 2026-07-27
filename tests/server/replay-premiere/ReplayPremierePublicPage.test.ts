@@ -449,6 +449,8 @@ describe("ReplayPremiere public page and card", () => {
         return null;
       },
       readReleasedContext: () => null,
+      readLiveVisibleSequence: () => -1,
+      readLiveProjection: () => [],
     };
     const target = { runtime } as ReplayPremiereHttpTarget;
     const registry = {

@@ -45,12 +45,12 @@ import {
   startReplayPremiereProduction,
   type ReplayPremiereProductionService,
 } from "../../../src/server/replay-premiere/ReplayPremiereStartup";
-import { WAGERING_MAX_PRESENTATION_SPAN_MS } from "../../../src/server/replay-premiere/wagering";
 import { ReplayPremiereTerminalReclaimer } from "../../../src/server/replay-premiere/ReplayPremiereTerminalReclamation";
 import {
   NOW,
   PREMIERE_ID,
   verifiedPublicationFixture,
+  verifiedRealtimeLongPublicationFixture,
 } from "./ReplayPremiereFixtures";
 
 const ORIGIN = "https://beta.proxywar.xyz";
@@ -3300,89 +3300,72 @@ describe("ReplayPremiere production startup", () => {
     expect(summary!.outcome).toBeNull();
     expect(summary!.revealedAt).toBeNull();
   });
-  test("refuses to assemble a wagering-enabled premiere whose admitted presentation span exceeds the wagering ceiling, but allows the same oversized span with wagering off", async () => {
-    expect(WAGERING_MAX_PRESENTATION_SPAN_MS).toBe(1_000);
-
-    const rejectRoot = await fs.mkdtemp(
-      path.join(os.tmpdir(), "premiere-startup-span-reject-"),
-    );
+  test("a 50-minute premiere at real production cadence admits and plays with wagering on", async () => {
+    // 30,000 turns @ PREMIERE_REAL_TURN_INTERVAL_MS (100ms) = 3,000,000ms =
+    // 50 minutes of presentation, at the coarse, UNMODIFIED
+    // REPLAY_PREMIERE_MAX_PRESENTATION_SPAN_MS (60s) chunk ceiling — ~50
+    // chunks, nowhere near the 128-chunk cap. This is exactly the
+    // combination the old span-ceiling guard made impossible to admit;
+    // proving it here proves the revert plus the live-visible-sequence
+    // redesign actually restored normal long-premiere admission.
+    const fixture = await verifiedRealtimeLongPublicationFixture(root);
+    const catalog = await ReplayPremiereAdmissionCatalog.open({
+      privateStateRoot: path.join(root, "private"),
+      servedRoots: [path.join(root, "served")],
+    });
     try {
-      await writeAdmissionWithChunkLimits(rejectRoot, {
-        ...PLAYING_CHUNK_LIMITS,
-        maxPresentationSpanMs: 5_000,
+      await catalog.writeVerifiedAdmission({
+        gate: fixture.gate,
+        verification: fixture.verificationOptions,
+        chunkBuildLimits: fixture.chunkBuildLimits,
+        collectorLimits: COLLECTOR_LIMITS,
       });
-      const rejectingContext = startupContext();
-      const rejected = await startReplayPremiereProduction({
-        ...rejectingContext,
-        privateStateRoot: path.join(rejectRoot, "private"),
-        servedRoots: [path.join(rejectRoot, "served")],
-        wageringEnabled: true,
-      });
-      try {
-        expect(rejected.registeredPremiereIds).toEqual([]);
-        expect(rejected.diagnostics).toEqual([
-          {
-            target: `${PREMIERE_ID}.admission.json`,
-            premiereId: PREMIERE_ID,
-            operatorCode: "wagering_presentation_span_exceeds_ceiling",
-          },
-        ]);
-        expect(rejectingContext.httpRegistry.get(PREMIERE_ID)).toBeNull();
-      } finally {
-        await rejected.service.close();
-      }
     } finally {
-      await fs.rm(rejectRoot, { recursive: true, force: true });
+      await catalog.close();
     }
 
-    // The identical oversized span assembles fine in a fresh premiere with
-    // wagering off — the ceiling is a wagering-only constraint, not general.
-    const plainRoot = await fs.mkdtemp(
-      path.join(os.tmpdir(), "premiere-startup-span-plain-"),
-    );
-    try {
-      await writeAdmissionWithChunkLimits(plainRoot, {
-        ...PLAYING_CHUNK_LIMITS,
-        maxPresentationSpanMs: 5_000,
-      });
-      const plainContext = startupContext();
-      const plain = await startReplayPremiereProduction({
-        ...plainContext,
-        privateStateRoot: path.join(plainRoot, "private"),
-        servedRoots: [path.join(plainRoot, "served")],
-      });
-      try {
-        expect(plain.diagnostics).toEqual([]);
-        expect(plain.registeredPremiereIds).toEqual([PREMIERE_ID]);
-      } finally {
-        await plain.service.close();
-      }
-    } finally {
-      await fs.rm(plainRoot, { recursive: true, force: true });
-    }
+    const context = startupContext();
+    const started = await startReplayPremiereProduction({
+      ...context,
+      privateStateRoot: path.join(root, "private"),
+      servedRoots: [path.join(root, "served")],
+      wageringEnabled: true,
+    });
+    services.push(started.service);
 
-    // A compliant tight span assembles fine WITH wagering on.
-    const compliantRoot = await fs.mkdtemp(
-      path.join(os.tmpdir(), "premiere-startup-span-compliant-"),
-    );
-    try {
-      await writeAdmissionWithChunkLimits(compliantRoot, PLAYING_CHUNK_LIMITS);
-      const compliantContext = startupContext();
-      const compliant = await startReplayPremiereProduction({
-        ...compliantContext,
-        privateStateRoot: path.join(compliantRoot, "private"),
-        servedRoots: [path.join(compliantRoot, "served")],
-        wageringEnabled: true,
-      });
-      try {
-        expect(compliant.diagnostics).toEqual([]);
-        expect(compliant.registeredPremiereIds).toEqual([PREMIERE_ID]);
-      } finally {
-        await compliant.service.close();
-      }
-    } finally {
-      await fs.rm(compliantRoot, { recursive: true, force: true });
-    }
+    expect(started.diagnostics).toEqual([]);
+    expect(started.registeredPremiereIds).toEqual([PREMIERE_ID]);
+    const runtime = context.runtimeRegistry.get(PREMIERE_ID);
+    expect(runtime).not.toBeNull();
+    expect(runtime!.readLifecycleState()).toBe("playing");
+
+    // Plays: the market is live and accepts a real order immediately.
+    const target = context.httpRegistry.get(PREMIERE_ID);
+    expect(target).not.toBeNull();
+    const marketBefore = target!.interactions.readMarketState(null);
+    expect(marketBefore?.status).toBe("open");
+    const session = await target!.interactions.createViewerSession({
+      participantId: `guest_${"a".repeat(32)}`,
+      idempotencyKey: "idem_0000000000000001",
+      requesterBucketId: `ip_${"1".repeat(32)}`,
+      visible: true,
+      observedSequence: -1,
+      excludedAsOperator: false,
+      excludedAsBot: false,
+    });
+    const { trade } = await target!.interactions.submitMarketOrder({
+      participantId: `guest_${"a".repeat(32)}`,
+      participantKind: "real",
+      sessionId: session.id,
+      idempotencyKey: "idem_0000000000000002",
+      requesterBucketId: `ip_${"1".repeat(32)}`,
+      seatId: "SEAT0001",
+      side: "buy",
+      sequence: marketBefore!.liveVisibleSequence,
+      amount: 100,
+      limitPrice: 100,
+    });
+    expect(trade.shares).toBeGreaterThan(0);
   });
 });
 

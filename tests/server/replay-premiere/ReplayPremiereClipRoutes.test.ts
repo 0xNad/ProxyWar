@@ -187,6 +187,8 @@ function buildHarness(
             eventContext: null,
           }
         : null,
+    readLiveVisibleSequence: () => 10_000,
+    readLiveProjection: () => [],
   };
   const interactions = {
     usesAnonymousWriteAdmission: (candidate: unknown) => candidate === admit,

@@ -120,6 +120,7 @@ export async function runDemoSyntheticCrowdCli(
       turn: sequence,
       eventContext: null,
     }),
+    getLiveVisibleSequence: () => 1_000_000,
     persistence: { async persist() {} },
     signAttribution: ({ shareId }) => `signed-${shareId}`,
     canonicalPremiereUrl: `https://beta.proxywar.xyz/premiere/${premiereId}`,

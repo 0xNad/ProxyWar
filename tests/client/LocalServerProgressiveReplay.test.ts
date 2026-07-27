@@ -195,9 +195,8 @@ function finalization(
     finalChunkHash,
     revealedAt: 1_000,
     verification: {
-      releaseChainVerified: true,
+      contentChainVerified: "storage_chunk_hash_chain",
       publicationCommitmentVerified: true,
-      publicationDraftManifestVerified: true,
       provenanceVerified: true,
       eligibilityCommitmentVerified: true,
       sourceReplayIntegrityScope: "declared_hash_only",

@@ -83,6 +83,7 @@ describe("ReplayPremiereInteractions", () => {
             }
           : null;
       },
+      getLiveVisibleSequence: () => releasedThroughSequence,
       persistence: {
         async persist({ eventType, nextState }) {
           await overrides?.beforePersist?.(eventType, nextState);

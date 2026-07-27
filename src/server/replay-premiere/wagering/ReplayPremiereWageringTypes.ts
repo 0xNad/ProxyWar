@@ -1,22 +1,4 @@
 /**
- * With continuous trading (no checkpoint pause), the existing chunk-release
- * mechanism's normal ceiling — `REPLAY_PREMIERE_MAX_PRESENTATION_SPAN_MS`,
- * 60s in `ReplayPremiereContracts.ts` — becomes a real read-ahead exploit:
- * a chunk still only releases once the authoritative clock reaches its LAST
- * record, so anyone reading the network payload directly (not watching the
- * rendered map) sees up to a minute of future game state and can trade on
- * it before any other viewer does. Release granularity must approach
- * presentation granularity while wagering is live. 1s bounds the read-ahead
- * to something a human render-vs-fetch race cannot meaningfully exploit,
- * while keeping round-trip volume reasonable (~600 chunks over a 10-minute
- * premiere). Enforced, not advisory: `ReplayPremiereStartup.ts` refuses to
- * assemble a wagering-enabled premiere whose admitted
- * `chunkBuildLimits.maxPresentationSpanMs` exceeds this — the combination is
- * impossible to configure, not merely discouraged.
- */
-export const WAGERING_MAX_PRESENTATION_SPAN_MS = 1_000;
-
-/**
  * Server-side LMSR prediction market on the replay-premiere premiere.
  * Ported from the prior single-player client-side engine at
  * `/tmp/markets-prior/engine/` (see the operator's LMSR-pivot directive).
@@ -29,13 +11,14 @@ export const WAGERING_MAX_PRESENTATION_SPAN_MS = 1_000;
  * Integrity is synchronised progressive release, not pausing: every viewer
  * must be on the same authoritative frame at the same time, or a holder
  * with a read-ahead advantage trades on information others don't have yet.
- * `ReplayPremiereInteractions.submitMarketOrder` only requires the premiere
- * be live (not scheduled, not yet revealed); the actual anti-read-ahead
- * property comes from the release clock itself — see
- * `WAGERING_MAX_PRESENTATION_SPAN_MS` above, which is what bounds how far
- * ahead of the rendered frame the network payload can ever be while
- * wagering is on. `observedSequence`-style client-reported markers are
- * never a trust boundary for this — only the server's own release clock is.
+ * `ReplayPremiereInteractions.submitMarketOrder` requires both that the
+ * premiere be live (not scheduled, not yet revealed) AND that the order's
+ * claimed `sequence` is <=
+ * `ReplayPremiereRuntimeCoordinator.readLiveVisibleSequence()` — the
+ * server's own fine-grained release clock, computed independent of chunk
+ * storage/release batching (`readLiveProjection` is the matching "tap"
+ * read). `observedSequence`-style client-reported markers are never a
+ * trust boundary for this — only the server's own release clock is.
  *
  * Types only here — no dependency on ReplayPremiereInteractions, so the
  * market/pricing modules stay independently testable and substrate-agnostic.
@@ -87,6 +70,13 @@ export interface ReplayPremiereMarketTrade {
   readonly chips: number;
   readonly avgPrice: number;
   readonly executedAt: string;
+  /**
+   * The highest sequence the trader's order claimed was live-visible when
+   * submitted (`ReplayPremiereRuntimeCoordinator.readLiveVisibleSequence()`
+   * at accept time, never client-trusted — see `submitMarketOrder`). Purely
+   * an audit/staleness marker; not re-derived at recovery.
+   */
+  readonly sequence: number;
   readonly idempotencyKey: string;
 }
 
@@ -121,6 +111,12 @@ export interface ReplayPremiereMarketStateView {
   readonly prices: readonly number[];
   readonly status: "open" | "settled";
   readonly winnerSeatId: string | null;
+  /**
+   * Highest sequence currently live-visible — independent of chunk-release
+   * batching (see `ReplayPremiereRuntimeCoordinator.readLiveVisibleSequence`).
+   * The value a client should stamp on its next `submitMarketOrder` call.
+   */
+  readonly liveVisibleSequence: number;
   /** The caller's own positions, mark-to-market. Null when no participant was specified. */
   readonly positions: readonly ReplayPremiereMarketPosition[] | null;
 }

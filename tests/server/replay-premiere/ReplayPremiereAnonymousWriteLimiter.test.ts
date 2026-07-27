@@ -125,6 +125,7 @@ function target(
     ],
     getPremiereState: () => "scheduled",
     getReleasedContext: () => null,
+    getLiveVisibleSequence: () => -1,
     persistence: { async persist() {} },
     signAttribution: () => "unused",
     canonicalPremiereUrl: `https://beta.proxywar.xyz/premiere/${premiereId}`,
@@ -144,6 +145,8 @@ function target(
     readChunk: () => null,
     readReveal: () => null,
     readReleasedContext: () => null,
+    readLiveVisibleSequence: () => -1,
+    readLiveProjection: () => [],
   } as ReplayPremiereRuntimeReader;
   return { runtime, interactions };
 }

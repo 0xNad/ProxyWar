@@ -8,10 +8,12 @@ import {
   GameType,
 } from "../../../src/core/game/Game";
 import { buildPremiereChunks } from "../../../src/server/replay-premiere/ReplayPremiereChunks";
-import type {
-  PremiereEligibility,
-  PremiereLeakCheckEvidence,
-  PremiereSeatIdentity,
+import {
+  PREMIERE_REAL_TURN_INTERVAL_MS,
+  REPLAY_PREMIERE_MAX_PRESENTATION_SPAN_MS,
+  type PremiereEligibility,
+  type PremiereLeakCheckEvidence,
+  type PremiereSeatIdentity,
 } from "../../../src/server/replay-premiere/ReplayPremiereContracts";
 import {
   assessPremiereEligibility,
@@ -60,6 +62,31 @@ export const LONG_REPLAY_CHUNK_LIMITS = {
   // chunks, matching the production 120-chunk recovery envelope.
   maxRecordsPerChunk: 126,
   maxPresentationSpanMs: 200,
+} as const;
+
+/**
+ * A 50-minute premiere at REAL production cadence
+ * (`PREMIERE_REAL_TURN_INTERVAL_MS`, playbackRate 1) — proves a long-running
+ * premiere admits and plays with wagering on using the coarse, unmodified
+ * `REPLAY_PREMIERE_MAX_PRESENTATION_SPAN_MS` chunk-release ceiling (~50
+ * chunks, well under the 128-chunk cap). The wagering read-ahead property
+ * comes from `ReplayPremiereRuntimeCoordinator.readLiveVisibleSequence`
+ * binding orders to the release clock, never from shrinking chunk storage.
+ */
+export const REALTIME_LONG_TURN_COUNT = 30_000;
+export const REALTIME_LONG_TURN_INTERVAL_MS = PREMIERE_REAL_TURN_INTERVAL_MS;
+export const REALTIME_LONG_CHECKPOINT_SEQUENCES = [10_000, 20_000] as const;
+export const REALTIME_LONG_IMPORT_LIMITS = {
+  maxBootstrapBytes: 100_000,
+  maxTurnBytes: 100_000,
+  maxTurnRecords: REALTIME_LONG_TURN_COUNT,
+  maxTotalTurnBytes: 2_000_000,
+} as const;
+export const REALTIME_LONG_CHUNK_LIMITS = {
+  maxChunkBytes: 100_000,
+  maxTotalBytes: 4_000_000,
+  maxRecordsPerChunk: 1_000,
+  maxPresentationSpanMs: REPLAY_PREMIERE_MAX_PRESENTATION_SPAN_MS,
 } as const;
 
 interface MutableControlledSourceFixture {
@@ -314,6 +341,61 @@ function longControlledSourceMaterial(): {
   source.provenance.game.startedAt = startedAt;
   source.provenance.game.completedAt = completedAt;
   source.provenance.game.turnCount = LONG_REPLAY_TURN_COUNT;
+
+  return {
+    sourceBytes: Buffer.from(
+      canonicalReplayPremiereJson(source as unknown as ReplayPremiereJsonValue),
+      "utf8",
+    ),
+    resultBytes,
+    sparseTurns: turns.map((turn) => ({ turn })),
+  };
+}
+
+function realtimeLongControlledSourceMaterial(): {
+  sourceBytes: Buffer;
+  resultBytes: Buffer;
+  sparseTurns: Array<{ turn: { turnNumber: number; intents: [] } }>;
+} {
+  const completedAt = NOW.toISOString();
+  const startedAt = new Date(
+    NOW.getTime() -
+      REALTIME_LONG_TURN_COUNT * REALTIME_LONG_TURN_INTERVAL_MS,
+  ).toISOString();
+  const resultBytes = Buffer.from(
+    canonicalReplayPremiereJson(
+      authoritativeResultValue({
+        completedAt,
+        turnCount: REALTIME_LONG_TURN_COUNT,
+      }),
+    ),
+    "utf8",
+  );
+  const source = JSON.parse(
+    controlledSourceBytes().toString("utf8"),
+  ) as MutableControlledSourceFixture;
+  const turns = [
+    { turnNumber: 0, intents: [] as [] },
+    { turnNumber: 2, intents: [] as [] },
+    { turnNumber: REALTIME_LONG_TURN_COUNT - 1, intents: [] as [] },
+  ];
+
+  source.createdAt = completedAt;
+  source.gameRecord.info.start = Date.parse(startedAt);
+  source.gameRecord.info.end = NOW.getTime();
+  source.gameRecord.info.duration =
+    REALTIME_LONG_TURN_COUNT * REALTIME_LONG_TURN_INTERVAL_MS;
+  source.gameRecord.info.num_turns = REALTIME_LONG_TURN_COUNT;
+  source.gameRecord.turns = turns;
+  source.replay = {
+    turnCount: REALTIME_LONG_TURN_COUNT,
+    turnIntervalMs: REALTIME_LONG_TURN_INTERVAL_MS,
+  };
+  source.authoritativeResult.bytes = resultBytes.toString("base64");
+  source.authoritativeResult.sha256 = sha256Hex(resultBytes);
+  source.provenance.game.startedAt = startedAt;
+  source.provenance.game.completedAt = completedAt;
+  source.provenance.game.turnCount = REALTIME_LONG_TURN_COUNT;
 
   return {
     sourceBytes: Buffer.from(
@@ -675,6 +757,103 @@ export async function verifiedLongPublicationFixture(
     drafts,
     verificationOptions,
     chunkBuildLimits: LONG_REPLAY_CHUNK_LIMITS,
+  };
+}
+
+export async function verifiedRealtimeLongPublicationFixture(
+  root: string,
+  options: { origin?: string } = {},
+): Promise<{
+  gate: VerifiedPremiereEligibilityGate;
+  drafts: ReturnType<typeof buildPremiereChunks>;
+  verificationOptions: Parameters<
+    typeof VerifiedPremiereEligibilityGate.verify
+  >[0];
+  chunkBuildLimits: typeof REALTIME_LONG_CHUNK_LIMITS;
+}> {
+  const privateRoot = path.join(root, "private");
+  const servedRoot = path.join(root, "served");
+  const sourcePath = path.join(root, "controlled-realtime-long.source.json");
+  const material = realtimeLongControlledSourceMaterial();
+  await fs.mkdir(servedRoot, { recursive: true });
+  await fs.writeFile(sourcePath, material.sourceBytes, { mode: 0o600 });
+  let eligibility = eligibilityFixture({
+    sourceBytes: material.sourceBytes,
+    resultBytes: material.resultBytes,
+    origin: options.origin,
+  });
+  const eligibilityAssessmentOptions = eligibilityOptions(Buffer.alloc(32, 9));
+  const collectedLeakAudit = await collectFixtureLeakAudit(
+    eligibility,
+    eligibilityAssessmentOptions,
+    options.origin,
+  );
+  eligibility = collectedLeakAudit.eligibility;
+  const staged = await stagePremiereSource({
+    sourceFilePath: sourcePath,
+    privateStateRoot: privateRoot,
+    servedRoots: [servedRoot],
+    maxSourceBytes: 4_000_000,
+    expectedSourceReplaySha256: eligibility.sourceReplaySha256,
+  });
+  const verifiedSource = await readVerifiedStagedPremiereSource({
+    stagedSource: staged,
+    privateStateRoot: privateRoot,
+    servedRoots: [servedRoot],
+    maxSourceBytes: 4_000_000,
+  });
+  const imported = importPremiereReplay(
+    {
+      gameStartInfo: gameStartInfo(),
+      turnCount: REALTIME_LONG_TURN_COUNT,
+      turnIntervalMs: REALTIME_LONG_TURN_INTERVAL_MS,
+      turns: material.sparseTurns,
+    },
+    REALTIME_LONG_IMPORT_LIMITS,
+  );
+  const drafts = buildPremiereChunks({
+    premiereId: PREMIERE_ID,
+    records: imported.records,
+    playbackRate: 1,
+    checkpointSequences: REALTIME_LONG_CHECKPOINT_SEQUENCES,
+    ...REALTIME_LONG_CHUNK_LIMITS,
+  });
+  const eligibilityRecordHash = assessPremiereEligibility(
+    eligibility,
+    eligibilityAssessmentOptions,
+  ).eligibilityRecordHash;
+  const publicDefinition: PremierePublicDefinition = {
+    ...publicDefinitionFixture(eligibilityRecordHash, eligibility),
+    playbackRate: 1,
+    checkpoints: [
+      {
+        id: "cp_00000001",
+        sequence: REALTIME_LONG_CHECKPOINT_SEQUENCES[0],
+      },
+      {
+        id: "cp_00000002",
+        sequence: REALTIME_LONG_CHECKPOINT_SEQUENCES[1],
+      },
+    ],
+  };
+  const verificationOptions = {
+    premiereId: PREMIERE_ID,
+    eligibilityRecord: eligibility,
+    eligibilityOptions: eligibilityAssessmentOptions,
+    leakAuditReceipt: collectedLeakAudit.receipt,
+    verifiedSource,
+    authoritativeResultBytes: material.resultBytes,
+    replayImportLimits: REALTIME_LONG_IMPORT_LIMITS,
+    publicDefinition,
+    draftChunks: drafts,
+    maxPresentationSpanMs: REALTIME_LONG_CHUNK_LIMITS.maxPresentationSpanMs,
+  } satisfies Parameters<typeof VerifiedPremiereEligibilityGate.verify>[0];
+  const gate = VerifiedPremiereEligibilityGate.verify(verificationOptions);
+  return {
+    gate,
+    drafts,
+    verificationOptions,
+    chunkBuildLimits: REALTIME_LONG_CHUNK_LIMITS,
   };
 }
 

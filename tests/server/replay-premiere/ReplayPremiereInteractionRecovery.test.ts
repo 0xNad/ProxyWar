@@ -656,6 +656,7 @@ function interactionOptions(
             eventContext: { sequence },
           }
         : null,
+    getLiveVisibleSequence: () => 80,
     signAttribution: () => "a".repeat(64),
     canonicalPremiereUrl: `https://beta.proxywar.xyz/premiere/${PREMIERE_ID}`,
     now: () => new Date(NOW),

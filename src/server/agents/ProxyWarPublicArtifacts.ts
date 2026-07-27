@@ -148,6 +148,18 @@ const proxyWarPremiereMarketOrderPattern = new RegExp(
 const proxyWarPremiereMarketStatePattern = new RegExp(
   `^/api/premieres/(${proxyWarPremiereIdSource})/market$`,
 );
+/**
+ * Authenticated sibling of the anonymous market-state read: returns the
+ * CALLING participant's own positions (never another participant's). Same
+ * guest cookie + CSRF + Origin discipline as every write route — a read
+ * that returns private per-participant data is not exempt from it.
+ */
+const proxyWarPremiereMarketSelfPattern = new RegExp(
+  `^/api/premieres/(${proxyWarPremiereIdSource})/market/me$`,
+);
+const proxyWarPremiereLiveProjectionPattern = new RegExp(
+  `^/api/premieres/(${proxyWarPremiereIdSource})/live-projection$`,
+);
 const proxyWarPremiereReactionPattern = new RegExp(
   `^/api/premieres/(${proxyWarPremiereIdSource})/reactions$`,
 );
@@ -171,7 +183,9 @@ export type ProxyWarPublicPremiereReadRoute =
   | { kind: "clip_status"; premiereId: string; bucket: number }
   | { kind: "clip_file"; premiereId: string; bucket: number }
   | { kind: "archive_clip"; premiereId: string }
-  | { kind: "market_state"; premiereId: string };
+  | { kind: "market_state"; premiereId: string }
+  | { kind: "market_state_self"; premiereId: string }
+  | { kind: "live_projection"; premiereId: string };
 
 export type ProxyWarPublicPremiereWriteRoute =
   | { kind: "prediction"; premiereId: string }
@@ -236,6 +250,14 @@ export function matchProxyWarPublicPremiereReadPath(
   const marketState = proxyWarPremiereMarketStatePattern.exec(pathname);
   if (marketState !== null) {
     return { kind: "market_state", premiereId: marketState[1] };
+  }
+  const marketSelf = proxyWarPremiereMarketSelfPattern.exec(pathname);
+  if (marketSelf !== null) {
+    return { kind: "market_state_self", premiereId: marketSelf[1] };
+  }
+  const liveProjection = proxyWarPremiereLiveProjectionPattern.exec(pathname);
+  if (liveProjection !== null) {
+    return { kind: "live_projection", premiereId: liveProjection[1] };
   }
   return null;
 }

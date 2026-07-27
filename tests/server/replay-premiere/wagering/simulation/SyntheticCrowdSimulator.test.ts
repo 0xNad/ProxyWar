@@ -145,6 +145,7 @@ describe("SyntheticCrowdSimulator", () => {
       requesterBucketId: `ip_${"1".repeat(32)}`,
       seatId: "seat-1",
       side: "buy",
+      sequence: 0,
       amount: 100,
       limitPrice: 100,
     });
@@ -251,6 +252,7 @@ describe("SyntheticCrowdSimulator", () => {
       requesterBucketId: `ip_${"2".repeat(32)}`,
       seatId: firstTrade.seatId,
       side: firstTrade.side,
+      sequence: 0,
       amount: 999_999, // deliberately different — must be ignored on replay
       limitPrice: 1,
     });

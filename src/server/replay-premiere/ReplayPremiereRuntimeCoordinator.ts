@@ -8,6 +8,7 @@ import {
 } from "./ReplayPremiereCheckpointProjection";
 import type {
   PremiereChunkDraft,
+  PremiereReleasedRecord,
   PremiereState,
   ReleasedPremiereChunk,
 } from "./ReplayPremiereContracts";
@@ -71,6 +72,13 @@ import { REPLAY_PREMIERE_CHECKPOINT_PAUSE_MS } from "./ReplayPremiereContracts";
 export { REPLAY_PREMIERE_CHECKPOINT_PAUSE_MS };
 export const REPLAY_PREMIERE_MAX_RECOVERABLE_OUTAGE_MS = 60_000;
 export const REPLAY_PREMIERE_MAX_OUTAGE_EVENTS_PER_LIFECYCLE_VERSION = 2;
+/**
+ * Cap on records a single readLiveProjection() call returns. A near-real-time
+ * tap client polls incrementally (passing its own last-seen sequence back
+ * in), so this only bounds pathological far-behind catch-up requests — not
+ * normal steady-state polling.
+ */
+export const MAX_LIVE_PROJECTION_RECORDS = 4_000;
 
 export type ReplayPremiereOutageReason =
   | "planned_restart"
@@ -315,6 +323,66 @@ export class ReplayPremiereRuntimeCoordinator {
       }
     }
     throw runtimeIntegrity("released_sequence_missing_from_frozen_drafts");
+  }
+
+  /**
+   * Highest sequence whose presentationOffsetMs is <= the authoritative
+   * clock right now — independent of chunk-release batching. Chunks still
+   * store and release in coarse (up to `REPLAY_PREMIERE_MAX_PRESENTATION_
+   * SPAN_MS`, ~60s) batches so a 50-minute premiere fits the 128-chunk
+   * cap; the *release* granularity of that store is deliberately unrelated
+   * to what this returns. Wagering binds every order to this value (not to
+   * `readReleasedContext`'s coarser `lastSafeReleasedSequence`) so a client
+   * can never trade ahead of what the server itself would currently
+   * reveal, and freshness never depends on shrinking chunk storage.
+   */
+  readLiveVisibleSequence(): number {
+    if (this.recoveredReveal !== null) {
+      const last = this.drafts.at(-1);
+      return last === undefined ? -1 : last.descriptor.endSequence;
+    }
+    const elapsed = authoritativeElapsedAt(this.state, this.clockTimestamp());
+    let visible = -1;
+    for (const draft of this.drafts) {
+      for (const record of draft.payload.records) {
+        if (record.presentationOffsetMs > elapsed) return visible;
+        visible = record.sequence;
+      }
+    }
+    return visible;
+  }
+
+  /**
+   * The live "tap": records with `sequence > afterSequence` whose
+   * `presentationOffsetMs` is <= the authoritative clock right now. Reads
+   * straight through pending (not-yet-released) drafts held in memory —
+   * the server never selects a record ahead of its own presentation
+   * time, so this can never return more than `readLiveVisibleSequence()`
+   * exposes, regardless of chunk batch size.
+   */
+  readLiveProjection(afterSequence: number): readonly PremiereReleasedRecord[] {
+    if (!Number.isSafeInteger(afterSequence) || afterSequence < -1) {
+      throw runtimeRequest("invalid_live_projection_sequence");
+    }
+    const records: PremiereReleasedRecord[] = [];
+    if (this.recoveredReveal !== null) {
+      for (const draft of this.drafts) {
+        for (const record of draft.payload.records) {
+          if (record.sequence > afterSequence) records.push(record);
+          if (records.length >= MAX_LIVE_PROJECTION_RECORDS) return records;
+        }
+      }
+      return records;
+    }
+    const elapsed = authoritativeElapsedAt(this.state, this.clockTimestamp());
+    for (const draft of this.drafts) {
+      for (const record of draft.payload.records) {
+        if (record.presentationOffsetMs > elapsed) return records;
+        if (record.sequence > afterSequence) records.push(record);
+        if (records.length >= MAX_LIVE_PROJECTION_RECORDS) return records;
+      }
+    }
+    return records;
   }
 
   nextWakeAt(): string | null {

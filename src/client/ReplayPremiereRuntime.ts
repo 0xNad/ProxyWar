@@ -2038,6 +2038,15 @@ export interface ReplayPremiereRuntimeOptions {
   onRevealSeek?: (turn: number) => void;
   onJoinSync?: (update: ReplayPremiereJoinSyncUpdate) => void;
   fetchImpl?: typeof fetch;
+  /**
+   * "chunks" (default): coarse ~60s hash-chained storage chunks — the
+   * ordinary `/premiere/<id>` route, completely unperturbed.
+   * "tap": the fine-grained live-projection tap, used by the betting page
+   * so rendered content and the wagering trade gate are never behind (and
+   * therefore never held ahead of) the authoritative server clock. See
+   * `ReplayPremiereNetworkOptions.contentSource` for the detail.
+   */
+  contentSource?: "chunks" | "tap";
   dependencies?: ReplayPremiereRuntimeDependencies;
 }
 
@@ -2215,6 +2224,7 @@ export class ReplayPremiereRuntimeController {
       premiereId: options.premiereId,
       playback: this.playback,
       callbacks,
+      contentSource: options.contentSource,
       fetchImpl: options.fetchImpl,
     };
     this.network =

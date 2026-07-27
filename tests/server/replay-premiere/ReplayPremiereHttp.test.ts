@@ -1264,6 +1264,7 @@ async function liveRuntimeHttpHarness(root: string) {
     getPremiereState: () => runtime?.readLifecycleState() ?? "scheduled",
     getReleasedContext: (sequence) =>
       runtime?.readReleasedContext(sequence) ?? null,
+    getLiveVisibleSequence: () => runtime?.readLiveVisibleSequence() ?? 0,
     persistence: { persist: async () => undefined },
     signAttribution: () => "a".repeat(64),
     canonicalPremiereUrl: `${EXPECTED_ORIGIN}/premieres/${PREMIERE_ID}`,
@@ -1399,6 +1400,7 @@ async function httpHarness(
             eventContext: { released: sequence },
           }
         : null,
+    getLiveVisibleSequence: () => (revealed ? 5 : 4),
     persistence: {
       async persist() {
         if (httpOptions.hangPersistence === true) {
@@ -1580,6 +1582,8 @@ async function publicationTarget(
         ? { releasedThroughSequence, turn: sequence, eventContext: null }
         : null;
     },
+    readLiveVisibleSequence: () => (revealed ? 5 : 4),
+    readLiveProjection: () => [],
   };
   return { gate, runtime };
 }

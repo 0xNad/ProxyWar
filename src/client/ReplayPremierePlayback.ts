@@ -72,9 +72,26 @@ export interface ReplayPremiereFinalizationSignal {
   finalChunkHash: string;
   revealedAt: number;
   verification: {
-    releaseChainVerified: true;
+    /**
+     * How the finalized record chain was assembled and internally
+     * verified.
+     * "storage_chunk_hash_chain": every record arrived via a real,
+     * hash-chained, server-published storage chunk, cross-checked against
+     * the revealed draft manifest end to end — the strongest proof, tying
+     * the exact bytes played to the pre-committed archive. Used by the
+     * ordinary chunk-delivery content source.
+     * "live_projection_tap": records arrived via the fine-grained live
+     * projection tap, chained only by a client-local hash sequence for
+     * append-order self-consistency (dropped/duplicated/reordered-batch
+     * detection) — not cross-checked against the storage chunk chain,
+     * because tap batches were never storage chunks. Used exclusively by
+     * the betting page's real-time content-source mode, where the point
+     * is to never hold a record ahead of the authoritative clock; the
+     * archival storage-chunk proof remains fully available, unperturbed,
+     * via the ordinary chunk-delivery content source.
+     */
+    contentChainVerified: "storage_chunk_hash_chain" | "live_projection_tap";
     publicationCommitmentVerified: true;
-    publicationDraftManifestVerified: true;
     provenanceVerified: true;
     eligibilityCommitmentVerified: true;
     /** The source bytes stay private; only their declared digest is cross-bound. */
@@ -571,9 +588,10 @@ export class ReplayPremierePlaybackController {
       );
     }
     if (
-      input.verification?.releaseChainVerified !== true ||
+      (input.verification?.contentChainVerified !==
+        "storage_chunk_hash_chain" &&
+        input.verification?.contentChainVerified !== "live_projection_tap") ||
       input.verification?.publicationCommitmentVerified !== true ||
-      input.verification?.publicationDraftManifestVerified !== true ||
       input.verification?.provenanceVerified !== true ||
       input.verification?.eligibilityCommitmentVerified !== true ||
       input.verification?.sourceReplayIntegrityScope !== "declared_hash_only" ||

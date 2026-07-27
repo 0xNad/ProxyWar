@@ -261,6 +261,13 @@ export interface ReplayPremiereInteractionsOptions {
   getReleasedContext: (
     sequence: number,
   ) => ReplayPremiereReleasedContext | null;
+  /**
+   * Highest sequence currently live-visible, independent of chunk-release
+   * batching — see `ReplayPremiereRuntimeCoordinator.readLiveVisibleSequence`.
+   * `submitMarketOrder` binds every order to this, never to the coarser
+   * `getReleasedContext`, so wagering freshness never depends on chunk size.
+   */
+  getLiveVisibleSequence: () => number;
   persistence: ReplayPremiereInteractionPersistence;
   signAttribution: (options: {
     attributionId: string;
@@ -286,6 +293,7 @@ export type ReplayPremiereInteractionSnapshotValidationOptions = Pick<
   | "seats"
   | "getPremiereState"
   | "getReleasedContext"
+  | "getLiveVisibleSequence"
   | "maxHeartbeatGapMs"
   | "minHeartbeatIntervalMs"
   | "limits"
@@ -629,6 +637,7 @@ export class ReplayPremiereInteractions {
   private readonly getReleasedContext: (
     sequence: number,
   ) => ReplayPremiereReleasedContext | null;
+  private readonly getLiveVisibleSequence: () => number;
   private readonly persistence: ReplayPremiereInteractionPersistence;
   private readonly signAttribution: ReplayPremiereInteractionsOptions["signAttribution"];
   private readonly canonicalPremiereUrl: string;
@@ -663,6 +672,7 @@ export class ReplayPremiereInteractions {
     }
     this.getPremiereState = options.getPremiereState;
     this.getReleasedContext = options.getReleasedContext;
+    this.getLiveVisibleSequence = options.getLiveVisibleSequence;
     this.persistence = options.persistence;
     this.signAttribution = options.signAttribution;
     this.canonicalPremiereUrl = canonicalUrl(options.canonicalPremiereUrl);
@@ -828,6 +838,7 @@ export class ReplayPremiereInteractions {
       prices: computeMarketPrices(market),
       status: market.status,
       winnerSeatId: market.winnerSeatId,
+      liveVisibleSequence: this.getLiveVisibleSequence(),
       positions:
         participantId === null ? null : positionsFor(market, participantId),
     };
@@ -1178,6 +1189,15 @@ export class ReplayPremiereInteractions {
     requesterBucketId: string;
     seatId: string;
     side: "buy" | "sell";
+    /**
+     * The highest sequence the caller currently observes as live-visible
+     * (`readMarketState(...).liveVisibleSequence`). Never trusted as an
+     * upper bound by itself — validated against this server's own
+     * `getLiveVisibleSequence()` at accept time, so a client cannot trade
+     * on any sequence the server itself has not yet independently
+     * surfaced, regardless of how the client obtained it.
+     */
+    sequence: number;
     /** Buy: credit budget to spend. Sell: exact share count (send the full held amount to sell all). */
     amount: number;
     /** 0..100. Ceiling for a buy, floor for a sell — the whole order is rejected if the execution price would be worse, never silently filled worse. */
@@ -1191,6 +1211,7 @@ export class ReplayPremiereInteractions {
     assertIdempotencyKey(options.idempotencyKey);
     assertRequesterBucketId(options.requesterBucketId);
     assertSeatId(options.seatId);
+    assertSequence(options.sequence);
     if (options.side !== "buy" && options.side !== "sell") {
       throw invalidInteraction("invalid_order_side");
     }
@@ -1251,11 +1272,19 @@ export class ReplayPremiereInteractions {
       // match itself is live. Server-authoritative — `this.getPremiereState()`
       // is never client-supplied, unlike an `observedSequence` heartbeat
       // marker, which is client-reported and is never a trust boundary here.
-      // Read-ahead integrity comes from the release clock itself (see
-      // `WAGERING_MAX_PRESENTATION_SPAN_MS`), not from gating this call.
       const premiereState = this.getPremiereState();
       if (premiereState !== "playing" && premiereState !== "checkpoint") {
         throw gone("market_not_live");
+      }
+      // The real anti-read-ahead property: bind the order to the server's
+      // own fine-grained release clock (independent of chunk-release
+      // batching — see `ReplayPremiereRuntimeCoordinator.
+      // readLiveVisibleSequence`), not to `getPremiereState()` alone. Even a
+      // client that somehow obtained future game state through some other
+      // channel cannot trade on it: the server refuses any order claiming a
+      // sequence beyond what it itself currently reveals.
+      if (options.sequence > this.getLiveVisibleSequence()) {
+        throw gone("order_sequence_unreleased");
       }
       // Server-authoritative, never client-trusted: the pre-trade `q` this
       // order prices off of is whatever `next.market` holds at the moment
@@ -1329,6 +1358,7 @@ export class ReplayPremiereInteractions {
         chips: applied.chips,
         avgPrice,
         executedAt: occurredAt,
+        sequence: options.sequence,
         idempotencyKey: options.idempotencyKey,
       };
       assertPremiereRecordCapacity(next, this.limits, 1);
@@ -2692,6 +2722,7 @@ function validateSnapshotTrades(snapshot: ReplayPremiereInteractionsSnapshot): v
       "chips",
       "avgPrice",
       "executedAt",
+      "sequence",
       "idempotencyKey",
     ]);
     assertTradeId(trade.id);
@@ -2718,6 +2749,18 @@ function validateSnapshotTrades(snapshot: ReplayPremiereInteractionsSnapshot): v
       throw invalidInteraction("invalid_trade_avg_price");
     }
     timestamp(trade.executedAt, "snapshot_trade_executed_at");
+    // Structural only (safe non-negative integer): a strict upper-bound
+    // check against the live clock is deliberately NOT re-applied here.
+    // Unlike reactions/shares (whose `turn`/`eventContext` must be
+    // re-derived from frozen drafts for content integrity), a trade's
+    // `sequence` is purely an audit/staleness marker already enforced once,
+    // authoritatively, at accept time in `submitMarketOrder` — re-checking
+    // it against a *recovery-time* clock would be unsound: the coarse
+    // `getReleasedContext` fallback available pre-runtime can lag behind
+    // where the fine-grained live clock legitimately was at accept time.
+    if (!Number.isSafeInteger(trade.sequence) || trade.sequence < 0) {
+      throw invalidInteraction("invalid_trade_sequence");
+    }
     if (trade.premiereId !== snapshot.premiereId) {
       throw invalidInteraction("invalid_snapshot_trade");
     }

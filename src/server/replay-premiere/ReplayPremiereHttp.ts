@@ -11,6 +11,7 @@ import {
 import type { ReplayPremiereClientAddressResolver } from "./ReplayPremiereClientAddress";
 import type { ReplayPremiereClips } from "./ReplayPremiereClips";
 import type {
+  PremiereReleasedRecord,
   PremiereState,
   ReplayClipEligibility,
 } from "./ReplayPremiereContracts";
@@ -71,6 +72,17 @@ export interface ReplayPremiereRuntimeReader {
    * releasedThroughSequence). Already implemented by the runtime coordinator.
    */
   readReleasedContext(sequence: number): ReplayPremiereReleasedContext | null;
+  /**
+   * The live "tap": highest sequence whose presentationOffsetMs is <= the
+   * authoritative clock right now, and the matching records — independent
+   * of chunk-release batching. This is what the betting page must consume
+   * content through: a client fed straight from chunk releases can hold up
+   * to a full presentation span (~60s) of content the honest, paced viewer
+   * hasn't reached yet, and trade on it. Reading through this instead
+   * collapses that trail to ~0 by construction.
+   */
+  readLiveVisibleSequence(): number;
+  readLiveProjection(afterSequence: number): readonly PremiereReleasedRecord[];
 }
 
 export interface ReplayPremiereHttpTarget {
@@ -329,6 +341,31 @@ async function handlePremiereApiRequest(
           market: target.interactions.readMarketState(null),
         });
         return;
+      case "market_state_self": {
+        // Same auth discipline as every write route (guest cookie + CSRF +
+        // strict Origin) — a read that returns one participant's private
+        // positions is not exempt from it. Never trusts anything the
+        // caller claims about identity beyond the signed guest cookie.
+        const authorization = options.security.authorizeWrite(
+          requestSecurityHeaders(request),
+        );
+        sendJson(response, 200, {
+          schemaVersion: 1,
+          market: target.interactions.readMarketState(
+            authorization.participant.participantId,
+          ),
+        });
+        return;
+      }
+      case "live_projection": {
+        const afterSequence = parseLiveProjectionAfterQuery(request.query.after);
+        sendJson(response, 200, {
+          schemaVersion: 1,
+          liveVisibleSequence: runtime.readLiveVisibleSequence(),
+          records: runtime.readLiveProjection(afterSequence),
+        });
+        return;
+      }
     }
   }
   if (request.method === "POST" && writeRoute !== null) {
@@ -755,6 +792,7 @@ function parseMarketOrderBody(value: unknown): {
   sessionId: string;
   seatId: string;
   side: "buy" | "sell";
+  sequence: number;
   amount: number;
   limitPrice: number;
 } {
@@ -762,12 +800,14 @@ function parseMarketOrderBody(value: unknown): {
     "sessionId",
     "seatId",
     "side",
+    "sequence",
     "amount",
     "limitPrice",
   ]);
   const sessionId = stringField(body, "sessionId", 64);
   const seatId = stringField(body, "seatId", 128);
   const side = stringField(body, "side", 4);
+  const sequence = sequenceField(body, "sequence");
   const amount = marketOrderAmountField(body, "amount");
   const limitPrice = limitPriceField(body, "limitPrice");
   if (
@@ -778,7 +818,7 @@ function parseMarketOrderBody(value: unknown): {
   ) {
     throw invalidRequest("invalid_market_order_body", 400);
   }
-  return { sessionId, seatId, side, amount, limitPrice };
+  return { sessionId, seatId, side, sequence, amount, limitPrice };
 }
 
 function marketOrderAmountField(
@@ -1071,6 +1111,26 @@ function nullableSequenceField(
 ): number | null {
   if (!Object.hasOwn(record, key) || record[key] === null) return null;
   return sequenceField(record, key);
+}
+
+/**
+ * `?after=<sequence>` query param for the live-projection tap. Absent means
+ * "from the very start" (-1, matching `readLiveProjection`'s sentinel).
+ * Only a single plain string value is accepted — never an array or nested
+ * query object, which Express would otherwise happily produce.
+ */
+function parseLiveProjectionAfterQuery(
+  value: Request["query"][string],
+): number {
+  if (value === undefined) return -1;
+  if (typeof value !== "string" || !/^(?:-1|0|[1-9][0-9]{0,15})$/.test(value)) {
+    throw invalidRequest("invalid_after", 400);
+  }
+  const parsed = Number(value);
+  if (!Number.isSafeInteger(parsed) || parsed < -1) {
+    throw invalidRequest("invalid_after", 400);
+  }
+  return parsed;
 }
 
 function isPremiereApiPath(pathname: string): boolean {

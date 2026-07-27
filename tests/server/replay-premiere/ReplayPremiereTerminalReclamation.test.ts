@@ -152,6 +152,7 @@ function terminalInteractions(
             eventContext: { headline: `released-${sequence}` },
           }
         : null,
+    getLiveVisibleSequence: () => 6,
     persistence: {
       async persist({ eventType }) {
         await beforePersist?.(eventType);

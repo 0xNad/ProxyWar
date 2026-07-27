@@ -1,32 +1,35 @@
 import { html, LitElement, nothing } from "lit";
-import { customElement, property } from "lit/decorators.js";
+import { customElement, property, state } from "lit/decorators.js";
 import type { MarketSettlement } from "../types";
 
-const OUTCOME_LABEL: Record<"won" | "lost" | "void", string> = {
-  won: "Won",
-  lost: "Lost",
-  void: "Void — refunded",
-};
-
-const OUTCOME_CLASS: Record<"won" | "lost" | "void", string> = {
-  won: "bg-positive/15 text-positive",
-  lost: "bg-danger/15 text-danger",
-  void: "bg-caution/15 text-caution",
-};
+type Outcome = "won" | "lost" | "void";
 
 /**
  * Post-settlement view for one seat the viewer held: final shares, cost
  * basis, whether the market paid out, the payout, and the bankroll delta.
- * Mirrors the standalone prediction page's `prediction-resolution-panel`
- * styling conventions for the same "outcome badge + bankroll delta" shape.
+ * Winning and losing are deliberately asymmetric: a win gets a large,
+ * saturated, bordered card that visibly "arrives" (a brief fade/rise on
+ * first paint); a loss gets a quieter, smaller-scale acknowledgement.
+ * Treating both the same would flatten the one moment the whole session
+ * built toward.
  */
 @customElement("premiere-market-settlement")
 export class PremiereMarketSettlement extends LitElement {
   @property({ attribute: false }) settlement: MarketSettlement | null = null;
   @property({ type: String, attribute: "seat-label" }) seatLabel = "";
 
+  /** Drives the entrance transition — false on first paint, true one frame later. */
+  @state() private landed = false;
+
   createRenderRoot() {
     return this;
+  }
+
+  connectedCallback(): void {
+    super.connectedCallback();
+    requestAnimationFrame(() => {
+      this.landed = true;
+    });
   }
 
   render() {
@@ -36,54 +39,92 @@ export class PremiereMarketSettlement extends LitElement {
         <p class="text-sm text-ink-muted">You held no position on this seat.</p>
       `;
     }
-    const outcome: "won" | "lost" | "void" =
-      settlement.outcome.kind === "void"
-        ? "void"
-        : settlement.payout > 0
-          ? "won"
-          : "lost";
+    const outcome: Outcome =
+      settlement.outcome.kind === "void" ? "void" : settlement.payout > 0 ? "won" : "lost";
+
+    const transitionClass = `transition-all duration-500 ease-out motion-reduce:transition-none ${
+      this.landed ? "translate-y-0 opacity-100" : "translate-y-1 opacity-0"
+    }`;
+
+    if (outcome === "won") {
+      return html`
+        <div
+          class="flex flex-col gap-2 rounded-lg border border-positive/50 bg-positive/12 px-4 py-4 shadow-[0_0_0_1px_rgba(52,211,153,0.08)] ${transitionClass}"
+          aria-label="Market settlement"
+        >
+          <div class="flex flex-wrap items-center justify-between gap-2">
+            <span class="flex items-center gap-2 text-base font-bold text-positive">
+              <span aria-hidden="true">▲</span>
+              Won
+            </span>
+            <span class="text-xs text-ink-muted">${this.heldLine(settlement)}</span>
+          </div>
+          <div class="flex items-baseline gap-2">
+            <span class="font-mono text-3xl font-extrabold tabular-nums text-positive"
+              >+${settlement.bankrollDelta.toLocaleString()}</span
+            >
+            <span class="text-sm font-semibold text-positive/80">cr</span>
+          </div>
+          <div class="flex flex-wrap items-center justify-between gap-2 text-xs text-ink-muted">
+            <span>Cost basis: ${settlement.costBasis.toLocaleString()} cr</span>
+            <span>Payout: <span class="font-semibold tabular-nums text-ink">${settlement.payout.toLocaleString()} cr</span></span>
+          </div>
+        </div>
+      `;
+    }
+
+    if (outcome === "lost") {
+      return html`
+        <div
+          class="flex flex-col gap-1.5 rounded-lg border border-line bg-surface-2 px-4 py-3 ${transitionClass}"
+          aria-label="Market settlement"
+        >
+          <div class="flex flex-wrap items-center justify-between gap-2">
+            <span class="flex items-center gap-1.5 text-sm font-semibold text-ink-dim">
+              <span aria-hidden="true" class="text-danger">▼</span>
+              Lost
+            </span>
+            <span class="text-xs text-ink-muted">${this.heldLine(settlement)}</span>
+          </div>
+          <div class="flex flex-wrap items-center justify-between gap-2 text-sm">
+            <span class="text-ink-muted">Cost basis: ${settlement.costBasis.toLocaleString()} cr</span>
+            <span class="font-mono font-semibold tabular-nums text-danger"
+              >${settlement.bankrollDelta.toLocaleString()} cr</span
+            >
+          </div>
+        </div>
+      `;
+    }
+
     return html`
       <div
-        class="flex flex-col gap-2 rounded-lg border border-line bg-surface-2 px-4 py-3"
+        class="flex flex-col gap-2 rounded-lg border border-line bg-surface-2 px-4 py-3 ${transitionClass}"
         aria-label="Market settlement"
       >
         <div class="flex flex-wrap items-center justify-between gap-2">
-          <span class="text-sm text-ink">
-            Held
-            <span class="font-semibold tabular-nums">${settlement.finalShares} sh</span>
-            ${this.seatLabel !== ""
-              ? html`of <span class="font-semibold">${this.seatLabel}</span>`
-              : nothing}
-          </span>
-          <span
-            class="rounded-full px-2 py-0.5 text-xs font-semibold ${OUTCOME_CLASS[outcome]}"
-            >${OUTCOME_LABEL[outcome]}</span
+          <span class="text-sm text-ink">${this.heldLine(settlement)}</span>
+          <span class="rounded-full bg-caution/15 px-2 py-0.5 text-xs font-semibold text-caution"
+            >Void — refunded</span
           >
         </div>
         <div class="flex flex-wrap items-center justify-between gap-2 text-sm">
-          <span class="text-ink-muted"
-            >Cost basis: ${settlement.costBasis.toLocaleString()} cr</span
-          >
-          <span class="text-ink-muted"
-            >Payout: <span class="font-semibold tabular-nums text-ink"
-              >${settlement.payout.toLocaleString()} cr</span
-            ></span
-          >
-          <span
-            class="font-semibold tabular-nums ${settlement.bankrollDelta >= 0
-              ? "text-positive"
-              : "text-danger"}"
-            >${settlement.bankrollDelta >= 0 ? "+" : ""}${settlement.bankrollDelta.toLocaleString()}
-            cr</span
+          <span class="text-ink-muted">Cost basis: ${settlement.costBasis.toLocaleString()} cr</span>
+          <span class="font-semibold tabular-nums text-ink"
+            >Payout: ${settlement.payout.toLocaleString()} cr</span
           >
         </div>
         ${settlement.outcome.kind === "void"
           ? html`<p class="text-xs text-ink-muted">
-              Voided (${settlement.outcome.reason.replace(/_/g, " ")}) — your
-              cost basis was refunded in full.
+              Voided (${settlement.outcome.reason.replace(/_/g, " ")}) — your cost basis was
+              refunded in full.
             </p>`
           : nothing}
       </div>
     `;
+  }
+
+  private heldLine(settlement: MarketSettlement): string {
+    const of = this.seatLabel !== "" ? ` of ${this.seatLabel}` : "";
+    return `Held ${settlement.finalShares} sh${of}`;
   }
 }

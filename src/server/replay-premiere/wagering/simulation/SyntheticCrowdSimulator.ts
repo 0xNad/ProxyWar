@@ -235,6 +235,7 @@ export class SyntheticCrowdSimulator {
         requesterBucketId: bettor.requesterBucketId,
         seatId: decision.seatId,
         side: decision.side,
+        sequence: state.liveVisibleSequence,
         amount: decision.amount,
         limitPrice: decision.limitPrice,
       });

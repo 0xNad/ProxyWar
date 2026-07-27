@@ -63,6 +63,7 @@ function harness(overrides?: { wageringEnabled?: boolean }) {
       sequence <= 100
         ? { releasedThroughSequence: 100, turn: sequence, eventContext: null }
         : null,
+    getLiveVisibleSequence: () => 100,
     persistence: { async persist() {} },
     signAttribution: ({ shareId }) => `signed-${shareId}`,
     canonicalPremiereUrl: `https://beta.proxywar.xyz/premiere/${premiereId}`,
@@ -152,6 +153,7 @@ describe("SyntheticCrowdSimulator against the real ReplayPremiereInteractions", 
       requesterBucketId: `ip_${"1".repeat(32)}`,
       seatId: "seat-1",
       side: "buy",
+      sequence: 100,
       amount: 50,
       limitPrice: 100,
     });

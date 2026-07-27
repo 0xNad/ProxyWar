@@ -2,13 +2,15 @@ import type { ReplayPremiereOverlayHandle } from "src/client/ReplayPremiereOverl
 import type { ReplayPremiereReadyProjection } from "src/client/ReplayPremiereNetwork";
 import {
   ReplayPremiereRuntimeController,
+  ReplayPremiereServiceError,
   type ReplayPremiereJoinRequest,
   type ReplayPremiereJoinSyncUpdate,
+  type ReplayPremiereServiceTradeResponse,
 } from "src/client/ReplayPremiereRuntime";
 import { mountBettingOverlay, type PremiereBettingOverlay } from "./BettingOverlay";
 import { marketStateFromService } from "../serviceMapping";
 import { SessionBankroll } from "../sessionBankroll";
-import type { MarketState, TradeSide } from "../types";
+import { SHARE_PAYOUT, type MarketPosition, type MarketState, type TradeSide } from "../types";
 
 /** How often the standalone market poll refreshes prices while the market is live. */
 const MARKET_POLL_INTERVAL_MS = 2_500;
@@ -34,13 +36,35 @@ function capturingOverlayFactory(
 
 /**
  * Owns everything the pari-mutuel-era `onWagerCheckpointsUpdated` hook used
- * to cover, now that trading is a standalone concern (see
- * `ReplayPremiereRuntime.ts`'s `readMarketState`/`submitMarketOrder`): a
- * continuous poll of the LMSR market (live for the WHOLE match per the
- * operator's continuous-trading override — not gated to a checkpoint
- * window), the client-local `SessionBankroll`, and wiring the mounted
- * overlay's `market`/`bankroll`/`onTrade` properties. One instance per
- * premiere attempt; `dispose()` stops the poll.
+ * to own for the checkpoint prediction flow, rebuilt for continuous LMSR
+ * trading: the standalone poll loop (the runtime's own polling only covers
+ * replay content, never the market), the session bankroll, and pushing
+ * fresh market snapshots into the overlay.
+ *
+ * `GET .../market` is deliberately anonymous (see
+ * `ReplayPremiereInteractions.readMarketState`) — it always reports
+ * `positions: null`; only an authenticated `POST .../market-orders`
+ * response ever carries this participant's real positions. Left alone,
+ * every poll tick would clobber whatever the last trade populated back to
+ * null a couple of seconds later, so "Your positions" and unrealised P&L
+ * could never durably display, and a settlement payout could never be
+ * credited unless the viewer happened to be mid-trade exactly when
+ * settlement landed (`settleMarket` zeroes out holdings server-side the
+ * instant it runs, so by the time `status: "settled"` is even visible on
+ * the wire, nothing shows what was actually held).
+ *
+ * `knownPositions` is this controller's own client-side-authoritative
+ * cache, fixing both: replaced WHOLESALE the instant a trade response
+ * reports the server's real view (server truth always wins outright,
+ * never merged with anything stale); in between trades, mark-to-marked
+ * live against every anonymous poll's fresh prices using the server's own
+ * formula (`currentValue = round(shares * price)`, see
+ * `ReplayPremiereMarket.positionsFor`) so P&L keeps moving with the
+ * market even though the wire goes quiet on position data; and, once
+ * settled, snapped to the exact payout `ReplayPremiereMarket.settleMarket`
+ * pays (winning shares at `SHARE_PAYOUT` each, a void market's cost basis
+ * refunded, everything else worthless) so the credited bankroll delta and
+ * the displayed value always agree.
  */
 export class BettingPremiereMarketController {
   private readonly bankroll = new SessionBankroll();
@@ -53,6 +77,9 @@ export class BettingPremiereMarketController {
   // NEXT order only (never cached across multiple orders); updated from
   // every poll AND every trade response's own market snapshot.
   private latestLiveVisibleSequence = 0;
+  // Client-side-authoritative positions cache — see class doc comment.
+  // Keyed by seatId; empty until this participant's first trade response.
+  private knownPositions = new Map<string, MarketPosition>();
 
   constructor(
     private readonly runtime: ReplayPremiereRuntimeController,
@@ -92,19 +119,68 @@ export class BettingPremiereMarketController {
     amount: number,
     limitPrice: number,
   ): Promise<void> {
-    const response = await this.runtime.submitMarketOrder({
-      premiereId: this.premiereId,
-      seatId,
-      side,
-      amount,
-      limitPrice,
-      sequence: this.latestLiveVisibleSequence,
-    });
+    const previousShares = this.knownPositions.get(seatId)?.shares ?? 0;
+    const response = await this.submitTradeWithRetry(seatId, side, amount, limitPrice);
     if (this.disposed) return;
     // Debit a buy's cost / credit a sell's proceeds — straight off the
     // server's own `chips` figure, never a client preview.
     this.bankroll.applyTrade(side === "buy" ? -response.trade.chips : response.trade.chips);
-    this.applyMarket(marketStateFromService(response.market));
+    const market = marketStateFromService(response.market);
+    // Never silently smoothed over: the server's own answer always wins
+    // (applied unconditionally below via `applyMarket`) — this only
+    // surfaces, in dev, a shares count this trade alone doesn't explain
+    // (e.g. a second concurrent session for the same participant).
+    const reportedShares =
+      market.positions?.find((position) => position.seatId === seatId)?.shares ?? 0;
+    const expectedShares =
+      previousShares + (side === "buy" ? response.trade.shares : -response.trade.shares);
+    if (reportedShares !== expectedShares) {
+      console.warn(
+        `[betting] position drift on seat ${seatId}: expected ${expectedShares} shares after this trade, server reported ${reportedShares}. Using the server's value.`,
+      );
+    }
+    this.applyMarket(market);
+  }
+
+  /**
+   * The `sequence` this participant stamps on an order is a snapshot from
+   * the last poll/trade response. A live match can advance past it before
+   * the order reaches the server, which correctly rejects with a 410 (the
+   * server is the sole authority on freshness — never client-trusted).
+   * That is an ordinary race, not a failure: re-quote (fetch the current
+   * market state for a fresh sequence) and retry once, transparently,
+   * instead of surfacing an error the user did nothing wrong to cause. A
+   * second consecutive rejection (the market may genuinely have closed)
+   * propagates normally — `TradeTicket` already turns that into a visible
+   * "Order failed" message.
+   */
+  private async submitTradeWithRetry(
+    seatId: string,
+    side: TradeSide,
+    amount: number,
+    limitPrice: number,
+  ): Promise<ReplayPremiereServiceTradeResponse> {
+    for (let attempt = 0; ; attempt += 1) {
+      try {
+        return await this.runtime.submitMarketOrder({
+          premiereId: this.premiereId,
+          seatId,
+          side,
+          amount,
+          limitPrice,
+          sequence: this.latestLiveVisibleSequence,
+        });
+      } catch (error) {
+        const staleSequence =
+          attempt === 0 &&
+          error instanceof ReplayPremiereServiceError &&
+          error.status === 410;
+        if (!staleSequence) throw error;
+        const refreshed = await this.runtime.readMarketState();
+        if (this.disposed) throw error;
+        this.applyMarket(marketStateFromService(refreshed.market));
+      }
+    }
   }
 
   private async pollOnce(): Promise<void> {
@@ -124,14 +200,54 @@ export class BettingPremiereMarketController {
     }
   }
 
+  /**
+   * `open`: the server's own mark-to-market formula against this poll's
+   * fresh price. `settled`: the exact payout `settleMarket` pays — a
+   * winning seat's shares at `SHARE_PAYOUT` each, a void market's cost
+   * basis refunded in full, every other seat worthless — so the value
+   * shown here and the amount credited to the bankroll always agree.
+   */
+  private markToMarket(market: MarketState, position: MarketPosition): number {
+    if (market.status === "settled") {
+      if (market.winnerSeatId === null) return position.costBasis;
+      return position.seatId === market.winnerSeatId
+        ? position.shares * SHARE_PAYOUT
+        : 0;
+    }
+    return Math.round(position.shares * (market.prices[position.seatId] ?? 0));
+  }
+
   private applyMarket(market: MarketState): void {
     if (this.disposed) return;
     this.latestLiveVisibleSequence = market.liveVisibleSequence;
-    // Credit a settlement payout exactly once per seat the viewer held —
-    // guarded by `SessionBankroll.creditSettlementOnce` itself, safe to
-    // call on every subsequent poll/trade response after settlement.
-    if (market.status === "settled" && market.positions !== null) {
-      for (const position of market.positions) {
+    if (market.positions !== null) {
+      // Authenticated snapshot (a trade response) — always the freshest
+      // server truth; replaces the cache wholesale, never merged with
+      // anything stale.
+      this.knownPositions = new Map(
+        market.positions.map((position) => [position.seatId, position]),
+      );
+    } else {
+      // Anonymous poll: the server never reports positions on this route,
+      // by design. Keep the cached shares/costBasis — the only facts that
+      // change are via a trade — and mark them to market (or to the final
+      // payout, once settled) against this poll's fresh snapshot.
+      for (const [seatId, position] of this.knownPositions) {
+        const currentValue = this.markToMarket(market, position);
+        this.knownPositions.set(seatId, {
+          ...position,
+          currentValue,
+          unrealizedPnl: currentValue - position.costBasis,
+        });
+      }
+    }
+    const positions =
+      this.knownPositions.size > 0 ? Array.from(this.knownPositions.values()) : null;
+    // Credit a settlement payout exactly once per seat this participant
+    // held. `creditSettlementOnce` is itself idempotent, so it is safe to
+    // call on every subsequent poll after settlement first lands.
+    if (market.status === "settled" && positions !== null) {
+      for (const position of positions) {
         this.bankroll.creditSettlementOnce(
           `market-settlement:${position.seatId}`,
           position.currentValue,
@@ -139,7 +255,7 @@ export class BettingPremiereMarketController {
       }
     }
     if (this.overlay !== null) {
-      this.overlay.market = market;
+      this.overlay.market = { ...market, positions };
       this.overlay.bankroll = this.bankroll.balance;
     }
   }
@@ -175,6 +291,13 @@ export function openBettingPremierePage(
   let market: BettingPremiereMarketController | null = null;
   const runtime = new ReplayPremiereRuntimeController({
     premiereId,
+    // Live-projection tap, not chunk delivery: a chunk-delivered client
+    // holds up to a full chunk span of content the honest viewer hasn't
+    // reached yet — see `ReplayPremiereNetworkOptions.contentSource`. The
+    // betting page is the one surface where that gap is a real trading
+    // advantage, so it alone opts in; `/premiere/<id>` (`Main.ts`) is
+    // untouched and stays on chunk delivery.
+    contentSource: "tap",
     onJoinReady: callbacks.onJoinReady,
     onJoinSync: callbacks.onJoinSync,
     onRevealSeek: callbacks.onRevealSeek,

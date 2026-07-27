@@ -48,9 +48,8 @@ function finalization(
     finalChunkHash: HASH_1,
     revealedAt: 1_000,
     verification: {
-      releaseChainVerified: true,
+      contentChainVerified: "storage_chunk_hash_chain",
       publicationCommitmentVerified: true,
-      publicationDraftManifestVerified: true,
       provenanceVerified: true,
       eligibilityCommitmentVerified: true,
       sourceReplayIntegrityScope: "declared_hash_only",
@@ -292,9 +291,8 @@ describe("ReplayPremierePlaybackController", () => {
         controller.finalize(
           finalization({
             verification: {
-              releaseChainVerified: true,
+              contentChainVerified: "storage_chunk_hash_chain",
               publicationCommitmentVerified: true,
-              publicationDraftManifestVerified: true,
               provenanceVerified: true,
               eligibilityCommitmentVerified: true,
               sourceReplayIntegrityScope: "declared_hash_only",

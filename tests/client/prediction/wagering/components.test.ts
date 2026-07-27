@@ -7,11 +7,13 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import "../../../../src/client/prediction/wagering/components/MarketBankrollBadge";
 import "../../../../src/client/prediction/wagering/components/MarketPriceBoard";
+import "../../../../src/client/prediction/wagering/components/MarketPositionSummary";
 import "../../../../src/client/prediction/wagering/components/TradeTicket";
 import "../../../../src/client/prediction/wagering/components/PositionsPanel";
 import "../../../../src/client/prediction/wagering/components/MarketSettlementPanel";
 import type { PremiereMarketBankrollBadge } from "../../../../src/client/prediction/wagering/components/MarketBankrollBadge";
 import type { PremiereMarketPriceBoard } from "../../../../src/client/prediction/wagering/components/MarketPriceBoard";
+import type { PremiereMarketPositionSummary } from "../../../../src/client/prediction/wagering/components/MarketPositionSummary";
 import type { PremiereTradeTicket } from "../../../../src/client/prediction/wagering/components/TradeTicket";
 import type { PremierePositionsPanel } from "../../../../src/client/prediction/wagering/components/PositionsPanel";
 import type { PremiereMarketSettlement } from "../../../../src/client/prediction/wagering/components/MarketSettlementPanel";
@@ -26,6 +28,15 @@ function mount<T extends HTMLElement>(tag: string): T {
 /** Drains pending microtasks — deterministic, not a real-time wait. */
 async function flushMicrotasks(times = 10): Promise<void> {
   for (let i = 0; i < times; i++) await Promise.resolve();
+}
+
+/** Clicks the seat option button matching a display name — the trade ticket's seat picker is buttons, not a `<select>`. */
+function clickSeat(el: HTMLElement, displayName: string): void {
+  const button = [...el.querySelectorAll("button")].find(
+    (b) => b.textContent?.includes(displayName),
+  );
+  if (!button) throw new Error(`seat button "${displayName}" not rendered`);
+  button.click();
 }
 
 afterEach(() => {
@@ -75,6 +86,41 @@ describe("premiere-market-bankroll-badge", () => {
   });
 });
 
+describe("premiere-position-summary", () => {
+  it("renders nothing when the viewer holds no position", async () => {
+    const el = mount<PremiereMarketPositionSummary>("premiere-position-summary");
+    el.market = market({ positions: [] });
+    await el.updateComplete;
+    expect(el.textContent?.trim()).toBe("");
+  });
+
+  it("shows the total unrealized P&L across every held seat, magnitude-toned", async () => {
+    const el = mount<PremiereMarketPositionSummary>("premiere-position-summary");
+    el.market = market({
+      positions: [
+        { seatId: "seat-a", shares: 4, costBasis: 180, currentValue: 220, unrealizedPnl: 40 },
+        { seatId: "seat-b", shares: 2, costBasis: 90, currentValue: 80, unrealizedPnl: -10 },
+      ],
+    });
+    await el.updateComplete;
+    expect(el.textContent).toContain("+30 cr");
+    expect(el.textContent).toContain("2 open positions");
+    expect(el.querySelector(".text-positive")).not.toBeNull();
+  });
+
+  it("colors a net-negative total distinctly", async () => {
+    const el = mount<PremiereMarketPositionSummary>("premiere-position-summary");
+    el.market = market({
+      positions: [
+        { seatId: "seat-a", shares: 4, costBasis: 180, currentValue: 100, unrealizedPnl: -80 },
+      ],
+    });
+    await el.updateComplete;
+    expect(el.textContent).toContain("-80 cr");
+    expect(el.querySelector(".text-danger")).not.toBeNull();
+  });
+});
+
 describe("premiere-market-price-board", () => {
   it("renders an explicit loading state with no market", async () => {
     const el = mount<PremiereMarketPriceBoard>("premiere-market-price-board");
@@ -110,20 +156,22 @@ describe("premiere-market-price-board", () => {
 
     el.market = market({ prices: { "seat-a": 70, "seat-b": 30 } });
     await el.updateComplete;
-    expect(el.querySelector(".ring-accent\\/60")).not.toBeNull();
+    expect(el.querySelector(".border-info\\/40")).not.toBeNull();
+    expect(el.textContent).toContain("▲20.0");
 
     vi.advanceTimersByTime(1000);
     await el.updateComplete;
-    expect(el.querySelector(".ring-accent\\/60")).toBeNull();
+    expect(el.querySelector(".border-info\\/40")).toBeNull();
   });
 
-  it("marks the winning seat once the market settles", async () => {
+  it("marks the winning seat once the market settles, and mutes the rest", async () => {
     const el = mount<PremiereMarketPriceBoard>("premiere-market-price-board");
     el.seats = SEATS;
     el.market = market({ status: "settled", winnerSeatId: "seat-a" });
     el.frozen = true;
     await el.updateComplete;
     expect(el.querySelector(".border-positive\\/50")).not.toBeNull();
+    expect(el.querySelector(".opacity-60")).not.toBeNull();
   });
 });
 
@@ -233,7 +281,7 @@ describe("premiere-trade-ticket", () => {
     el.windowOpen = false;
     await el.updateComplete;
     expect(el.textContent).toContain("Trading is closed");
-    expect(el.querySelector("select")).toBeNull();
+    expect(el.querySelector('[role="group"]')).toBeNull();
   });
 
   it("blocks submit with a visible error when no seat is chosen", async () => {
@@ -268,10 +316,8 @@ describe("premiere-trade-ticket", () => {
     el.onTrade = onTrade;
     await el.updateComplete;
 
-    const select = el.querySelector("select");
-    if (!select) throw new Error("seat select not rendered");
-    select.value = "seat-a";
-    select.dispatchEvent(new Event("change"));
+    clickSeat(el, "Nation A");
+    await el.updateComplete;
     const input = el.querySelector<HTMLInputElement>('input[type="number"]');
     if (!input) throw new Error("amount input not rendered");
     input.value = "1";
@@ -290,7 +336,7 @@ describe("premiere-trade-ticket", () => {
     expect(onTrade).not.toHaveBeenCalled();
   });
 
-  it("shows a live buy quote that recomputes as the draft amount changes", async () => {
+  it("shows a live buy quote that recomputes as the draft amount changes, and prices it into the submit label", async () => {
     const el = mount<PremiereTradeTicket>("premiere-trade-ticket");
     el.seats = SEATS;
     el.market = market({ q: [0, 0], b: 100, prices: { "seat-a": 50, "seat-b": 50 } });
@@ -298,10 +344,8 @@ describe("premiere-trade-ticket", () => {
     el.bankroll = 1000;
     await el.updateComplete;
 
-    const select = el.querySelector("select");
-    if (!select) throw new Error("seat select not rendered");
-    select.value = "seat-a";
-    select.dispatchEvent(new Event("change"));
+    clickSeat(el, "Nation A");
+    await el.updateComplete;
     const input = el.querySelector<HTMLInputElement>('input[type="number"]');
     if (!input) throw new Error("amount input not rendered");
     input.value = "50";
@@ -310,6 +354,10 @@ describe("premiere-trade-ticket", () => {
 
     // b=100, q=[0,0]: the first share on a 50/50 book costs exactly 50 chips.
     expect(el.textContent).toContain("1 sh");
+    const submit = [...el.querySelectorAll("button")].find((b) =>
+      b.textContent?.includes("Buy 1 sh"),
+    );
+    expect(submit).not.toBeUndefined();
 
     input.value = "150";
     input.dispatchEvent(new Event("input"));
@@ -337,10 +385,8 @@ describe("premiere-trade-ticket", () => {
     sellButton?.click();
     await el.updateComplete;
 
-    const select = el.querySelector("select");
-    if (!select) throw new Error("seat select not rendered");
-    select.value = "seat-a";
-    select.dispatchEvent(new Event("change"));
+    clickSeat(el, "Nation A");
+    await el.updateComplete;
     const input = el.querySelector<HTMLInputElement>('input[type="number"]');
     if (!input) throw new Error("amount input not rendered");
     input.value = "5";
@@ -348,7 +394,7 @@ describe("premiere-trade-ticket", () => {
     await el.updateComplete;
 
     const submit = [...el.querySelectorAll("button")].find((b) =>
-      b.textContent?.includes("Sell shares"),
+      b.textContent?.includes("Sell shares") || b.textContent?.includes("Sell 5"),
     );
     submit?.click();
     await el.updateComplete;
@@ -373,10 +419,8 @@ describe("premiere-trade-ticket", () => {
     el.onTrade = onTrade;
     await el.updateComplete;
 
-    const select = el.querySelector("select");
-    if (!select) throw new Error("seat select not rendered");
-    select.value = "seat-a";
-    select.dispatchEvent(new Event("change"));
+    clickSeat(el, "Nation A");
+    await el.updateComplete;
     const input = el.querySelector<HTMLInputElement>('input[type="number"]');
     if (!input) throw new Error("amount input not rendered");
     input.value = "100";
@@ -384,7 +428,7 @@ describe("premiere-trade-ticket", () => {
     await el.updateComplete;
 
     const submit = [...el.querySelectorAll("button")].find((b) =>
-      b.textContent?.includes("Buy shares"),
+      b.textContent?.includes("Buy"),
     );
     // Two synchronous clicks before the first onTrade promise resolves.
     submit?.click();

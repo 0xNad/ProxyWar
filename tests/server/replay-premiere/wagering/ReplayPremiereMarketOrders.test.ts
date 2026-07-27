@@ -62,6 +62,7 @@ function harness(overrides?: {
       sequence <= 80
         ? { releasedThroughSequence: 80, turn: sequence, eventContext: null }
         : null,
+    getLiveVisibleSequence: () => 80,
     persistence: {
       async persist({ eventType, nextState }) {
         await overrides?.beforePersist?.(eventType, nextState);
@@ -122,6 +123,7 @@ function order(
     amount: number;
     limitPrice: number;
     idempotencyKey?: string;
+    sequence?: number;
   },
 ) {
   return h.interactions.submitMarketOrder({
@@ -132,6 +134,7 @@ function order(
     side: options.side,
     amount: options.amount,
     limitPrice: options.limitPrice,
+    sequence: options.sequence ?? 80,
     idempotencyKey: options.idempotencyKey ?? h.nextIdempotencyKey(),
     requesterBucketId: `ip_${"1".repeat(64)}`,
   });
@@ -275,6 +278,43 @@ describe("ReplayPremiereInteractions LMSR market orders", () => {
       limitPrice: 100,
     });
     expect(trade.trade.shares).toBeGreaterThan(0);
+  });
+
+  it("rejects an order referencing a sequence the server has not yet independently revealed", async () => {
+    const h = harness({ wageringEnabled: true });
+    const session = await createSession(h, guestA);
+    // The harness's live-visible ceiling is fixed at 80 (see getLiveVisibleSequence
+    // above) — a claim one past it must be refused even though premiereState
+    // itself is "playing" and the seat/side/amount are otherwise all valid.
+    // This is the real anti-read-ahead property: it holds independent of
+    // premiereState, independent of chunk-release batching, and even if a
+    // client somehow learned of sequence 81 through some other channel.
+    const rejected = await order(h, {
+      participantId: guestA,
+      sessionId: session.id,
+      seatId: "seat-1",
+      side: "buy",
+      amount: 100,
+      limitPrice: 100,
+      sequence: 81,
+    }).catch((error: unknown) => error);
+    expect((rejected as ReplayPremiereError).operatorCode).toBe(
+      "order_sequence_unreleased",
+    );
+    expect((rejected as ReplayPremiereError).httpStatus).toBe(410);
+    expect(h.interactions.readState().trades).toEqual([]);
+
+    // The identical order at the ceiling itself succeeds.
+    const accepted = await order(h, {
+      participantId: guestA,
+      sessionId: session.id,
+      seatId: "seat-1",
+      side: "buy",
+      amount: 100,
+      limitPrice: 100,
+      sequence: 80,
+    });
+    expect(accepted.trade.shares).toBeGreaterThan(0);
   });
 
   it("rejects a buy whose fill would exceed the client's max price, and a sell whose fill would be below the client's min price", async () => {

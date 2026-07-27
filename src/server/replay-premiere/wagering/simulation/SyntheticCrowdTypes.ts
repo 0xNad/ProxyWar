@@ -77,6 +77,8 @@ export interface SyntheticCrowdMarketState {
   readonly prices: readonly number[];
   readonly status: "open" | "settled";
   readonly winnerSeatId: string | null;
+  /** Highest sequence currently live-visible — pass through to `submitMarketOrder`. */
+  readonly liveVisibleSequence: number;
 }
 
 export interface SyntheticCrowdTrade {
@@ -118,6 +120,7 @@ export interface SyntheticCrowdMarketTarget {
     requesterBucketId: string;
     seatId: string;
     side: "buy" | "sell";
+    sequence: number;
     amount: number;
     limitPrice: number;
   }): Promise<{ trade: SyntheticCrowdTrade; idempotent: boolean }>;
