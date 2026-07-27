@@ -164,10 +164,16 @@ export class SyntheticCrowdLiveDriver {
       const decayed = (this.activityLevel.get(seatId) ?? 0) * decayFactor;
       const next = decayed + (tickCounts.get(seatId) ?? 0);
       this.activityLevel.set(seatId, next);
-      // +1 floor: an idle seat still gets a nonzero, non-collapsing weight
-      // rather than 0, which would make normalizedFairValues fall back to
-      // uniform for every quiet tick and swamp the real signal with noise.
-      weights[seatId] = next + 1;
+      // Tiny nonzero floor: an idle seat still gets a nonzero,
+      // non-collapsing weight rather than 0 (which would make
+      // normalizedFairValues fall back to uniform for every quiet tick),
+      // but the floor stays far below any real tick's activity instead of
+      // swamping it. A flat `+1` floor was comparable in size to typical
+      // per-tick decayed counts (often single digits early in a match),
+      // which flattened genuine contrast between a dominant and a quiet
+      // seat toward uniform exactly when the signal mattered most — a
+      // real contributor to the "crowd never converges" finding.
+      weights[seatId] = next + 0.05;
     }
     return { optionSeatIds: [...this.options.seatIds], favorabilityWeights: weights };
   }

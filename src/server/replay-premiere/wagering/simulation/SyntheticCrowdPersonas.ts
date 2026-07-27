@@ -51,6 +51,24 @@ function normalizedFairValues(
 }
 
 /**
+ * How lopsided the raw snapshot already is, 0 (perfectly uniform — every
+ * seat tied) to 1 (one seat holds effectively the entire signal). Used to
+ * let a persona's conviction scale with the strength of the evidence
+ * instead of being a flat function of `aggressiveness` alone: a seat
+ * sitting on a real, sustained lead should earn sharper belief than the
+ * same aggressiveness dial would produce from a genuinely close snapshot.
+ */
+function evidenceConcentration(
+  weights: Readonly<Record<string, number>>,
+  seatIds: readonly string[],
+): number {
+  const shares = normalizedFairValues(weights, seatIds);
+  const uniform = 100 / seatIds.length;
+  const maxShare = Math.max(...seatIds.map((seatId) => shares[seatId] ?? 0));
+  return Math.max(0, Math.min(1, (maxShare - uniform) / (100 - uniform)));
+}
+
+/**
  * Per-persona transform of the frozen snapshot (plus, for the momentum
  * persona, the bot's own memory of prices it has already observed — public
  * market data, not privileged game state) into a fair-value target the
@@ -64,8 +82,18 @@ function personaFairValues(
   const { persona, snapshot, marketPrices, lastSeenPrices, rng, aggressiveness } =
     input;
   if (persona === "favorite-backer") {
-    // Sharpens conviction toward the top pick as aggressiveness rises.
-    const sharpenPower = 1 + aggressiveness;
+    // Sharpens conviction toward the top pick as aggressiveness rises —
+    // and, on top of that, as the snapshot's own evidence concentration
+    // rises: a 25/25/25/25 tie gets the same treatment as before
+    // (concentration 0 leaves `sharpenPower` at the plain `1 +
+    // aggressiveness` baseline), but a snapshot where one seat clearly
+    // dominates earns extra sharpening at the same aggressiveness dial —
+    // "push hard when dominant, stay uncertain when it's genuinely
+    // close." At aggressiveness 0 this is still an exact no-op
+    // (0 * anything === 0), preserving the persona's baseline identity
+    // behaviour.
+    const concentration = evidenceConcentration(snapshot.favorabilityWeights, seatIds);
+    const sharpenPower = 1 + aggressiveness * (1 + 2 * concentration);
     const sharpened = Object.fromEntries(
       seatIds.map((seatId) => [
         seatId,
@@ -101,7 +129,25 @@ function personaFairValues(
         return [seatId, Math.max(0, Math.min(100, projected))];
       }),
     );
-    return normalizedFairValues(extrapolated, seatIds);
+    // Pure trend extrapolation is unmoored from any ground truth: a small
+    // early price wobble (from noise, or even this same persona's own
+    // prior buy) gets amplified by `momentumGain` every frame with
+    // nothing to check it, which can spiral into a self-reinforcing
+    // bubble on a seat with zero actual informational edge — exactly the
+    // "whipsaws... with zero informational trigger" finding. Blending in
+    // the real snapshot signal (still weighted toward the extrapolated
+    // trend, so this persona keeps its distinct "chase the tape" belief —
+    // see the existing test where it still buys a rallying seat the raw
+    // snapshot disagrees with) gives momentum somewhere to fall back to
+    // once the seat it's chasing has no real evidence behind it.
+    const rawSignal = normalizedFairValues(snapshot.favorabilityWeights, seatIds);
+    const blended = Object.fromEntries(
+      seatIds.map((seatId) => [
+        seatId,
+        0.65 * extrapolated[seatId] + 0.35 * (rawSignal[seatId] ?? 0),
+      ]),
+    );
+    return normalizedFairValues(blended, seatIds);
   }
   // "noise-trader": the public signal blended with fresh idiosyncratic
   // jitter — small, mostly-random trades that add genuine microstructure
@@ -153,9 +199,32 @@ export function decideSyntheticCrowdOrder(
     if (input.remainingBudgetHint < input.minStake) {
       return null;
     }
+    // Conviction scales with evidence at the trade level too: a bigger
+    // fair-value/price gap draws a bigger stake, instead of a flat random
+    // draw across the whole min/max band regardless of how mispriced the
+    // seat looks. A 40+ point gap (a seat priced near parity that the
+    // crowd believes is a clear favorite, or vice versa) already earns
+    // full conviction — the top of whatever this trade is allowed to
+    // spend becomes the floor of its random draw rather than the
+    // ceiling.
+    //
+    // "Allowed to spend" is capped at a THIRD of what's left, regardless
+    // of conviction: this is one continuous market spanning a whole
+    // match, not a single-shot bet. A bettor that goes all-in on the
+    // first strong signal it sees has nothing left to react with days —
+    // or, here, minutes — later when the picture changes (an early
+    // signal exhausting a bot's whole bankroll on the wrong seat is
+    // exactly why late-match evidence used to go unpriced).
+    const conviction = Math.min(1, gap / 40);
+    const spendCap = Math.max(input.minStake, Math.floor(input.remainingBudgetHint / 3));
+    const stakeCeiling = Math.min(input.maxStake, spendCap);
+    const stakeFloor = Math.min(
+      stakeCeiling,
+      Math.round(input.minStake + (input.maxStake - input.minStake) * conviction),
+    );
     const stake = Math.min(
       input.remainingBudgetHint,
-      rng.nextInt(input.minStake, input.maxStake),
+      rng.nextInt(stakeFloor, stakeCeiling),
     );
     return {
       seatId: bestSeatId,

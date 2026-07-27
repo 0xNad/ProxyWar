@@ -18,14 +18,24 @@
  * `marketMath.ts`.
  */
 import type { Credits } from "src/prediction/types";
+import type { ReplayPremierePolicyIdentityView } from "src/client/ReplayPremiereOverlay";
 
 /** Chips paid per winning share at settlement — see `market.ts` server-side. */
 export const SHARE_PAYOUT = 100;
 
-/** One seat a participant can trade, as offered by the market. */
+/**
+ * One seat a participant can trade, as offered by the market.
+ * `policyIdentity` is the same cryptographically-verified identity the
+ * server checks every reaction against (see `ReplayPremiereRuntime.ts`'s
+ * `samePolicyIdentity`) — real "who is this" data already reaching the
+ * client, just never surfaced to a viewer before. `undefined` only for a
+ * caller that hasn't wired it through yet (defensive, not expected on
+ * this page).
+ */
 export interface MarketSeatOption {
   readonly seatId: string;
   readonly displayName: string;
+  readonly policyIdentity?: ReplayPremierePolicyIdentityView;
 }
 
 export type TradeSide = "buy" | "sell";

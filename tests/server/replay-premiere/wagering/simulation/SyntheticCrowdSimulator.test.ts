@@ -284,3 +284,108 @@ describe("SyntheticCrowdSimulator", () => {
     expect(capturedKeys[1]).toEqual(capturedKeys[0]);
   });
 });
+
+describe("SyntheticCrowdSimulator — price convergence", () => {
+  const FOUR_SEAT_IDS = ["seat-1", "seat-2", "seat-3", "seat-4"];
+
+  function fourSeatMarket(): FakeSyntheticCrowdMarket {
+    return new FakeSyntheticCrowdMarket({
+      outcomeSeatIds: FOUR_SEAT_IDS,
+      b: liquidityForOutcomeCount(FOUR_SEAT_IDS.length),
+      nowIso: "2026-07-26T12:00:00.000Z",
+    });
+  }
+
+  /**
+   * Mirrors the reported match exactly: seat-3 ("Defensive Builder")
+   * establishes a territory lead in the first ~12% of the match and holds
+   * 30-38% of the board for the rest of it (oscillating like a real
+   * contested board, never running away with it outright, matching "led
+   * 30-38% of territory for most of a 14-minute match"). The other three
+   * seats split the remainder.
+   */
+  function defensiveBuilderSnapshot(matchProgress: number): SyntheticCrowdSignalSnapshot {
+    const rampProgress = Math.min(1, matchProgress / 0.12);
+    const oscillation = matchProgress >= 0.12 ? 4 * Math.sin(matchProgress * 19) : 0;
+    const leaderShare = Math.max(25, Math.min(38, 25 + rampProgress * 9 + oscillation));
+    const others = (100 - leaderShare) / 3;
+    return {
+      optionSeatIds: FOUR_SEAT_IDS,
+      favorabilityWeights: {
+        "seat-1": others,
+        "seat-2": others,
+        "seat-3": leaderShare,
+        "seat-4": others,
+      },
+    };
+  }
+
+  it("converges: a seat that leads 30-38% of territory for most of a long match is priced well above its 25 opening by settlement", async () => {
+    const market = fourSeatMarket();
+    const simulator = new SyntheticCrowdSimulator({
+      config: { ...DEFAULT_SYNTHETIC_CROWD_CONFIG, enabled: true, count: 24, seed: 11 },
+      target: market,
+    });
+    const leaderIndex = FOUR_SEAT_IDS.indexOf("seat-3");
+    const openingPrices = market.readMarketState(null)!.prices.slice();
+    expect(openingPrices[leaderIndex]).toBe(25);
+
+    // 300 frames stands in for the continuous ~1s-poll trading window of a
+    // long (14-minute-class) match.
+    for (let i = 0; i <= 300; i++) {
+      const matchProgress = i / 300;
+      await simulator.onReleasedFrame({
+        snapshot: defensiveBuilderSnapshot(matchProgress),
+        matchProgress,
+        observedSequence: i,
+      });
+    }
+
+    const finalPrices = market.readMarketState(null)!.prices;
+    // Threshold: 33. The opening is 25 (parity); a sustained ~30-38%
+    // territory lead is real, durable evidence, not noise, so by
+    // settlement the price should clear a bar that unambiguously reads
+    // "the crowd's favorite," not just "slightly nudged." 33 tracks the
+    // low end of the 30-38% signal band itself (measured final prices
+    // land ~35-43 across seeds) and is comfortably outside anything the
+    // liquidity tests above show a single order or short-lived noise
+    // could produce — while still leaving real room below the LMSR's
+    // ceiling for a sharp reader who acts on the raw leaderboard before
+    // the (lagging, execution-friction-bound) crowd fully prices it in
+    // (requirement 4: an edge stays available).
+    expect(finalPrices[leaderIndex]).toBeGreaterThan(33);
+    market.settle("seat-3");
+    expect(market.trades.length).toBeGreaterThan(0);
+  });
+
+  it("stays uncertain: a genuinely close race with no sustained leader does not drift far from the 25 opening", async () => {
+    const market = fourSeatMarket();
+    const simulator = new SyntheticCrowdSimulator({
+      config: { ...DEFAULT_SYNTHETIC_CROWD_CONFIG, enabled: true, count: 24, seed: 11 },
+      target: market,
+    });
+    for (let i = 0; i <= 300; i++) {
+      const matchProgress = i / 300;
+      // Small, symmetric back-and-forth jitter around parity — nobody
+      // ever separates from the pack the way seat-3 does above.
+      const jitter = 2 * Math.sin(matchProgress * 23 + 1);
+      await simulator.onReleasedFrame({
+        snapshot: {
+          optionSeatIds: FOUR_SEAT_IDS,
+          favorabilityWeights: {
+            "seat-1": 25 + jitter,
+            "seat-2": 25 - jitter,
+            "seat-3": 25 + jitter / 2,
+            "seat-4": 25 - jitter / 2,
+          },
+        },
+        matchProgress,
+        observedSequence: i,
+      });
+    }
+    const finalPrices = market.readMarketState(null)!.prices;
+    for (const price of finalPrices) {
+      expect(Math.abs(price - 25)).toBeLessThan(15);
+    }
+  });
+});

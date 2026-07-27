@@ -1,6 +1,7 @@
 import { html, LitElement } from "lit";
 import { customElement, state } from "lit/decorators.js";
 import { assetUrl } from "../../../core/AssetUrls";
+import { isBettingPremiereRoute } from "../../AiLeagueReplayMode";
 import { EventBus } from "../../../core/EventBus";
 import { GameType } from "../../../core/game/Game";
 import { GameView } from "../../../core/game/GameView";
@@ -215,9 +216,16 @@ export class GameRightSidebar extends LitElement implements Layer {
 
   private async onExitButtonClick() {
     const isAlive = this.game.myPlayer()?.isAlive();
-    if (isAlive) {
+    // A betting-premiere viewer stakes real chips on this match but is
+    // never `isAlive` (they're not a player) — without this, "Leave
+    // match" skipped the confirmation entirely for the one context where
+    // leaving actually costs something.
+    const hasStakeAtRisk = isBettingPremiereRoute();
+    if (isAlive || hasStakeAtRisk) {
       const isConfirmed = confirm(
-        translateText("help_modal.exit_confirmation"),
+        hasStakeAtRisk
+          ? translateText("game_controls.exit_confirmation_betting")
+          : translateText("help_modal.exit_confirmation"),
       );
       if (!isConfirmed) return;
     }
@@ -260,6 +268,8 @@ export class GameRightSidebar extends LitElement implements Layer {
         class=${`w-fit flex flex-row items-center gap-3 py-2 px-3 bg-glass backdrop-blur-sm shadow-xs min-[1200px]:rounded-lg rounded-bl-lg transition-transform duration-300 ease-out transform text-white ${
           this._isVisible ? "translate-x-0" : "translate-x-full"
         }`}
+        role="region"
+        aria-label=${translateText("game_controls.toolbar_label")}
         @contextmenu=${(e: Event) => e.preventDefault()}
       >
         <!-- In-game time -->

@@ -68,6 +68,17 @@ const INTERACTION_CONTRACT_HEADER = "X-ProxyWar-Premiere-Interactions";
 const INTERACTION_CONTRACT_VERSION = "4";
 const HEARTBEAT_INTERVAL_MS = 10_000;
 const INTERACTION_RECOVERY_RETRY_MS = 1_000;
+// Exponential-backoff ceiling for session/heartbeat recovery retries
+// (doubling from `INTERACTION_RECOVERY_RETRY_MS` — same scheme
+// `ReplayPremiereNetworkController.runLoop` already uses for its own
+// manifest/reveal retry loop). A fixed 1s retry with no cap is what let a
+// single transient rejection escalate into a self-sustaining retry storm:
+// every attempt is itself a new server request, so a client stuck retrying
+// once a second never gives the very rate limit it tripped a chance to
+// clear, and — since limiter buckets can be shared (e.g. by IP) — can starve
+// other clients' legitimate traffic too. See `scheduleHeartbeatRetry` and
+// `bootstrapInteractions`.
+const INTERACTION_RECOVERY_MAX_RETRY_MS = 30_000;
 const MAX_CLIPBOARD_TEXT_LENGTH = 16_384;
 const PRE_REVEAL_BODY_CLASS = "replay-premiere-pre-reveal";
 // Bounded clip render poll: after a POST returns pending, poll the status GET
@@ -627,6 +638,11 @@ export class ReplayPremiereServiceError extends Error {
     public readonly status: number | null = null,
     public readonly publicCode: ReplayPremierePublicErrorCode | null = null,
     public readonly phase: ReplayPremiereServiceErrorPhase = "unspecified",
+    // Server-suggested backoff floor from a `Retry-After` response header
+    // (seconds, per RFC 9110 §10.2.3 — the HTTP-date form is not honored,
+    // only the delay-seconds form). `null` when absent/unparseable; callers
+    // fall back to their own backoff schedule.
+    public readonly retryAfterMs: number | null = null,
   ) {
     super(code);
     this.name = "ReplayPremiereServiceError";
@@ -839,6 +855,46 @@ export class ReplayPremiereServiceClient {
       }
       throw error;
     }
+  }
+
+  /**
+   * Reattaches to a session created in an earlier page load (persisted
+   * client-side) by heartbeating it directly, instead of minting a new
+   * session record via `startSession`. `maxSessionsPerParticipant` /
+   * `maxSessionCreatesPerParticipantPerMinute` are small, permanent, per-
+   * participant server-side caps — every ordinary page reload calling
+   * `startSession` again burns one, and a handful of reloads across a
+   * single premiere is enough to exhaust the cap for good. Resuming avoids
+   * creating a record at all for the overwhelmingly common case (the
+   * session is still alive server-side).
+   */
+  async resumeSession(
+    persisted: PersistedReplayPremiereSession,
+    input: { visible: boolean; observedSequence: number },
+  ): Promise<ReplayPremiereServiceHeartbeatResponse> {
+    this.assertActive();
+    this.csrfToken = persisted.csrfToken;
+    const requestedBody = {
+      visible: input.visible === true,
+      observedSequence: parseObservedSequence(input.observedSequence),
+    };
+    const response = await this.postJson(
+      `sessions/${persisted.sessionId}/heartbeat`,
+      requestedBody,
+      this.createIdempotencyKey(),
+      heartbeatResponseSchema,
+      200,
+      true,
+      true,
+    );
+    this.assertResumeResponseBound(response, persisted);
+    this.currentSession = response.session;
+    this.mergeCurrentReactionSummary(
+      response.reactionSummary,
+      response.session.participantId,
+    );
+    this.mergeClipEligibility(response.clipsEnabled, response.clipEligibility);
+    return response;
   }
 
   async submitPrediction(
@@ -1274,6 +1330,7 @@ export class ReplayPremiereServiceClient {
           response.status,
           publicFailure.data.error.code,
           "response_status",
+          parseRetryAfterMs(response.headers.get("retry-after")),
         );
       }
       const parsed = schema.safeParse(value);
@@ -1646,6 +1703,50 @@ export class ReplayPremiereServiceClient {
     this.assertReactionSummaryBound(
       response.reactionSummary,
       current.participantId,
+    );
+    this.assertOwnReactionAnchorBound(
+      response.schemaVersion === 3 || response.schemaVersion === 4
+        ? response.latestOwnReaction
+        : null,
+      response.reactionSummary,
+      response.schemaVersion,
+    );
+    this.assertClipEligibilityBound(
+      response.clipsEnabled,
+      response.clipEligibility,
+    );
+  }
+
+  /**
+   * Same discipline as {@link assertHeartbeatResponseBound}, narrowed for
+   * resume: there is no in-memory prior session to check monotonic growth
+   * against (this JS context has never seen this session before), so only
+   * identity binding plus each field's own internal consistency is
+   * checked. A stale/foreign/tampered persisted id is caught here or by
+   * `ownedSession` server-side (404) before anything is trusted.
+   */
+  private assertResumeResponseBound(
+    response: ReplayPremiereServiceHeartbeatResponse,
+    persisted: PersistedReplayPremiereSession,
+  ): void {
+    if (
+      response.session.id !== persisted.sessionId ||
+      response.session.participantId !== persisted.participantId ||
+      response.session.premiereId !== this.options.premiereId ||
+      response.session.visibleDurationMs >
+        response.session.connectedDurationMs ||
+      Date.parse(response.session.lastHeartbeatAt) <
+        Date.parse(response.session.startedAt)
+    ) {
+      throw serviceError("invalid_response");
+    }
+    this.assertCheckpointsBound(
+      response.checkpoints,
+      response.session.participantId,
+    );
+    this.assertReactionSummaryBound(
+      response.reactionSummary,
+      response.session.participantId,
     );
     this.assertOwnReactionAnchorBound(
       response.schemaVersion === 3 || response.schemaVersion === 4
@@ -2151,6 +2252,18 @@ interface ReplayPremiereServiceLike {
     input: ReplayPremiereSessionInput,
   ): Promise<ReplayPremiereServiceSessionResponse>;
   refreshSession(): Promise<ReplayPremiereServiceSessionResponse>;
+  /**
+   * Reattaches to an already-established session (persisted client-side
+   * across a reload/new-tab) via a heartbeat, without minting a new
+   * session record. Throws exactly like `heartbeat()` — including a 404
+   * `request_rejected` when the persisted session no longer exists
+   * server-side (expired/evicted/cleared state root), which callers treat
+   * as "fall back to `startSession`", never a hard failure.
+   */
+  resumeSession(
+    persisted: PersistedReplayPremiereSession,
+    input: { visible: boolean; observedSequence: number },
+  ): Promise<ReplayPremiereServiceHeartbeatResponse>;
   heartbeat(input: {
     visible: boolean;
     observedSequence: number;
@@ -2222,6 +2335,81 @@ export interface ReplayPremiereRuntimeOptions {
    */
   contentSource?: "chunks" | "tap";
   dependencies?: ReplayPremiereRuntimeDependencies;
+}
+
+/**
+ * Client-persisted pointer to an already-established viewer session,
+ * surviving a reload/new-tab within the same browser session (persisted to
+ * `sessionStorage`, not `localStorage` — a fresh browser session/incognito
+ * window starts clean, same as arriving cold). `csrfToken` is guest-cookie-
+ * scoped (issued once per anonymous identity, not rotated per session) so
+ * it stays valid for as long as the underlying guest cookie does; the
+ * server is always the final authority regardless — a stale or foreign
+ * value here only ever produces a clean rejection, never a bypass.
+ */
+interface PersistedReplayPremiereSession {
+  sessionId: string;
+  csrfToken: string;
+  participantId: string;
+}
+
+const persistedSessionSchema = z
+  .object({
+    sessionId: z.string().regex(SESSION_ID_PATTERN),
+    csrfToken: z.string().min(1).max(512).regex(CSRF_PATTERN),
+    participantId: z.string().regex(PARTICIPANT_ID_PATTERN),
+  })
+  .strict();
+
+function persistedSessionStorageKey(premiereId: string): string {
+  return `proxywar:replay-premiere:session:${premiereId}`;
+}
+
+function loadPersistedSession(
+  storage: Storage,
+  premiereId: string,
+): PersistedReplayPremiereSession | null {
+  let raw: string | null;
+  try {
+    raw = storage.getItem(persistedSessionStorageKey(premiereId));
+  } catch {
+    return null;
+  }
+  if (raw === null) return null;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return null;
+  }
+  const result = persistedSessionSchema.safeParse(parsed);
+  return result.success ? result.data : null;
+}
+
+function savePersistedSession(
+  storage: Storage,
+  premiereId: string,
+  session: PersistedReplayPremiereSession,
+): void {
+  try {
+    storage.setItem(
+      persistedSessionStorageKey(premiereId),
+      JSON.stringify(session),
+    );
+  } catch {
+    // Storage unavailable, full, or blocked (private browsing) — resumption
+    // degrades to "always mint a fresh session on reload", never a hard
+    // failure. Losing the resumability optimization is acceptable; losing
+    // the ability to join at all is not.
+  }
+}
+
+function removePersistedSession(storage: Storage, premiereId: string): void {
+  try {
+    storage.removeItem(persistedSessionStorageKey(premiereId));
+  } catch {
+    // Best-effort; nothing actionable if storage itself is unavailable.
+  }
 }
 
 export class ReplayPremiereRuntimeController {
@@ -2338,6 +2526,12 @@ export class ReplayPremiereRuntimeController {
   private heartbeatTimer: ReturnType<typeof setInterval> | null = null;
   private sessionRetryTimer: ReturnType<typeof setTimeout> | null = null;
   private heartbeatRetryTimer: ReturnType<typeof setTimeout> | null = null;
+  // Consecutive-failure counters for each recovery loop's backoff — feed
+  // `nextRetryDelayMs`, which doubles the base delay per attempt (capped at
+  // `INTERACTION_RECOVERY_MAX_RETRY_MS`). Both reset to 0 on the next
+  // success.
+  private sessionRetryAttempt = 0;
+  private heartbeatRetryAttempt = 0;
   private checkpointDeadlineTimer: ReturnType<typeof setTimeout> | null = null;
   private locallyClosedCheckpointId: string | null = null;
   // Social-clip state (revealed-only). `clipStatus` drives the overlay clip
@@ -2835,9 +3029,49 @@ export class ReplayPremiereRuntimeController {
     const networkStateAtRequest = this.currentNetworkState();
     this.sessionBootstrapInFlight = true;
     try {
-      const response = await this.service.startSession(
-        this.sessionBootstrapInput,
+      const persisted = loadPersistedSession(
+        this.windowRef.sessionStorage,
+        this.options.premiereId,
       );
+      let response:
+        | ReplayPremiereServiceSessionResponse
+        | ReplayPremiereServiceHeartbeatResponse;
+      // A resumed session's response has no `incomingMoment` field (only a
+      // fresh `startSession` response carries one) — tracked separately so
+      // the `staleAcrossReveal` branch below never reads a field that
+      // doesn't exist on the resumed shape.
+      let freshSession: ReplayPremiereServiceSessionResponse | null = null;
+      if (persisted === null) {
+        freshSession = await this.establishFreshSession(this.sessionBootstrapInput);
+        response = freshSession;
+      } else {
+        try {
+          response = await this.service.resumeSession(persisted, {
+            visible: this.documentRef.visibilityState === "visible",
+            observedSequence: this.observedSequence(),
+          });
+        } catch (resumeError) {
+          // A retryable resume failure (network blip, 429, 5xx) should be
+          // retried as a resume again next attempt, not immediately abandon
+          // resumability and burn a fresh session record — rethrow to the
+          // outer backoff/retry handling below, which calls
+          // `bootstrapInteractions()` again unchanged.
+          if (isRetryableServiceFailure(resumeError)) throw resumeError;
+          // Non-retryable: the persisted session is confirmed dead
+          // (expired, evicted by a server restart, or its CSRF no longer
+          // valid). Never keep retrying a pointer that can't come back —
+          // clear it and fall back to a fresh session, exactly like a
+          // first-ever visit.
+          removePersistedSession(
+            this.windowRef.sessionStorage,
+            this.options.premiereId,
+          );
+          freshSession = await this.establishFreshSession(this.sessionBootstrapInput);
+          response = freshSession;
+        }
+      }
+      this.sessionRetryAttempt = 0;
+      this.recovery = null;
       if (
         this.disposed ||
         this.terminalFailure !== null ||
@@ -2856,8 +3090,8 @@ export class ReplayPremiereRuntimeController {
       }
       if (this.terminalFailure !== null) return;
       if (staleAcrossReveal || this.isRevealVerificationPending()) {
-        if (staleAcrossReveal) {
-          this.incomingMoment = response.incomingMoment;
+        if (staleAcrossReveal && freshSession !== null) {
+          this.incomingMoment = freshSession.incomingMoment;
         }
         this.fencedSessionReadyForVerifiedReveal = true;
         if (this.reveal !== null) {
@@ -2883,12 +3117,29 @@ export class ReplayPremiereRuntimeController {
         return;
       }
       this.interactionReady = false;
-      this.hydrateOverlay();
       if (isRetryableServiceFailure(error)) {
+        // Transient — recover on its own: no alarming UI, just a quiet
+        // reconnecting indicator, and back off instead of hammering the
+        // endpoint (a fixed-interval retry-forever loop is what let one
+        // rejected session-create escalate into a self-sustaining 429
+        // storm — every retry attempt is itself a new request against the
+        // same limiter it just tripped).
+        const retryAfterMs =
+          error instanceof ReplayPremiereServiceError
+            ? error.retryAfterMs
+            : null;
+        const delayMs = nextRetryDelayMs(this.sessionRetryAttempt, retryAfterMs);
+        this.sessionRetryAttempt += 1;
+        this.recovery = {
+          code: "request_failed",
+          attempt: this.sessionRetryAttempt,
+          retryInMs: delayMs,
+        };
         this.sessionRetryTimer = setTimeout(
           () => void this.bootstrapInteractions(),
-          INTERACTION_RECOVERY_RETRY_MS,
+          delayMs,
         );
+        this.hydrateOverlay();
       } else {
         logInteractionBootstrapFailure(error);
         this.latchFailure(
@@ -2974,6 +3225,8 @@ export class ReplayPremiereRuntimeController {
         return;
       }
       this.applyServiceProjection(response);
+      this.heartbeatRetryAttempt = 0;
+      this.recovery = null;
       this.hydrateOverlay();
       if (this.heartbeatRetryTimer !== null) {
         clearTimeout(this.heartbeatRetryTimer);
@@ -2992,16 +3245,34 @@ export class ReplayPremiereRuntimeController {
         error.code === "request_rejected" &&
         (error.status === 401 || error.status === 403)
       ) {
+        // Session no longer recognized (expired/invalidated server-side) —
+        // recover on its own by establishing a fresh one, never a latch.
         this.interactionReady = false;
         this.clearInteractionTimers();
+        this.clearPersistedSession();
         void this.bootstrapInteractions();
       } else if (isRetryableServiceFailure(error)) {
-        this.scheduleHeartbeatRetry();
+        this.scheduleHeartbeatRetry(
+          error instanceof ReplayPremiereServiceError
+            ? error.retryAfterMs
+            : null,
+        );
       } else if (
         error instanceof ReplayPremiereServiceError &&
         error.code === "invalid_response"
       ) {
         this.latchFailure("integrity_failure", error);
+      } else {
+        // Neither a recognized transient condition, a session-expiry
+        // signal, nor a schema-level integrity violation — an unexpected
+        // rejection heartbeat cannot self-explain. Previously this fell
+        // through silently (no retry scheduled, no UI change, nothing
+        // until the next ordinary heartbeat tick 10s later) with no
+        // indication anything was wrong. Surface it honestly instead:
+        // this is not a data-integrity violation, so it gets the
+        // recoverable bucket (offers reload, never claims a refund) —
+        // never the alarming, unconditional one.
+        this.latchFailure("runtime_failure", error);
       }
     } finally {
       this.heartbeatInFlight = false;
@@ -3015,6 +3286,31 @@ export class ReplayPremiereRuntimeController {
       observedSequence: this.observedSequence(),
       ...(attributionToken === null ? {} : { attributionToken }),
     };
+  }
+
+  /**
+   * Creates a brand-new session record and persists its pointer so the
+   * next reload/new-tab can `resumeSession` instead of minting another
+   * one.
+   */
+  private async establishFreshSession(
+    input: ReplayPremiereSessionInput,
+  ): Promise<ReplayPremiereServiceSessionResponse> {
+    const response = await this.service.startSession(input);
+    savePersistedSession(
+      this.windowRef.sessionStorage,
+      this.options.premiereId,
+      {
+        sessionId: response.session.id,
+        csrfToken: response.csrfToken,
+        participantId: response.session.participantId,
+      },
+    );
+    return response;
+  }
+
+  private clearPersistedSession(): void {
+    removePersistedSession(this.windowRef.sessionStorage, this.options.premiereId);
   }
 
   private applyServiceProjection(
@@ -3032,7 +3328,12 @@ export class ReplayPremiereRuntimeController {
       this.latchFailure("integrity_failure");
       return;
     }
-    if (this.reveal === null && hasOutcomeProjection(response.checkpoints)) {
+    if (
+      this.reveal === null &&
+      (response.premiereState === "revealed" ||
+        response.premiereState === "archived") &&
+      hasOutcomeProjection(response.checkpoints)
+    ) {
       // Checkpoint pauses are bypassed for wagering premieres, so the
       // replay races straight through to the true end with none of the
       // breathing room a normal premiere's final checkpoint pause gives
@@ -3046,6 +3347,25 @@ export class ReplayPremiereRuntimeController {
       // lands applies normally. A lifecycle mismatch (checked above,
       // never exempted here) stays a hard failure regardless — an
       // impossible regression is not explained by a pending reveal.
+      //
+      // The `response.premiereState === "revealed" || "archived"` gate is
+      // load-bearing, not decorative: `hasOutcomeProjection` is true the
+      // instant EITHER checkpoint slot in the pair has a non-null
+      // `resolution`/`crowdAccuracy` — and per-checkpoint scoring closes
+      // and resolves continuously while an ordinary wagering premiere is
+      // still mid-match (`premiereState: "playing"`/`"checkpoint"`), long
+      // before the premiere itself is anywhere near its own reveal. Without
+      // this gate, the very first checkpoint to close after a viewer's
+      // session was established latched a hard, unrecoverable
+      // "integrity_failure" on a perfectly healthy, ongoing match — this
+      // was the root cause of the mid-match false "could not continue"
+      // failure (reproduced live: an idle heartbeat carrying a just-closed
+      // checkpoint's resolution, ~6 minutes into a 14-minute premiere, in
+      // an established session with prior successful trades). Gating on
+      // the SERVICE's own reported lifecycle state (not just network
+      // state) narrows this to exactly the near-end race it was written
+      // for, without touching the lifecycle-mismatch check above or any
+      // other guard.
       if (this.isRevealVerificationPending()) return;
       this.latchFailure("integrity_failure");
       return;
@@ -3452,12 +3772,43 @@ export class ReplayPremiereRuntimeController {
     rejection?: unknown,
   ): void {
     if (this.disposed || this.terminalFailure !== null) return;
+    // TEMP DIAGNOSTIC (Resilience session — occurrence-3 root-cause hunt,
+    // remove before finishing): exception-safe stack + state capture so a
+    // live reproduction names its exact call site instead of guessing.
+    // Never let diagnostic collection itself throw and get mistaken for a
+    // second, unrelated failure (the EndRace session's cautionary tale —
+    // an unchecked `this.projection!` read inside a diagnostic threw,
+    // got caught and rethrown as `callback_failure` by the network
+    // controller, and produced fake "reproductions").
+    try {
+      console.error("[latchFailure]", {
+        failure,
+        rejection:
+          rejection instanceof Error
+            ? { name: rejection.name, message: rejection.message }
+            : rejection,
+        networkState: this.networkTerminalState,
+        servicePremiereState: this.servicePremiereState,
+        hasReveal: this.reveal !== null,
+        interactionReady: this.interactionReady,
+        stack: new Error("latchFailure").stack ?? null,
+      });
+    } catch {
+      // Exception-safe by construction: diagnostic failure must never
+      // masquerade as the failure being diagnosed.
+    }
     this.terminalFailure = failure;
     this.recovery = null;
     this.interactionReady = false;
     this.clearInteractionTimers();
     this.clearCheckpointDeadline();
     this.clearClipPoll();
+    if (failure === "integrity_failure") {
+      // A genuine integrity violation must never let a later reload
+      // silently resume the compromised session — force a fresh session
+      // on the next visit, the same as if none had ever existed.
+      this.clearPersistedSession();
+    }
     this.network.dispose();
     this.service.dispose();
     this.hydrateOverlay();
@@ -3586,19 +3937,27 @@ export class ReplayPremiereRuntimeController {
         const response = await this.strictInteractionWrite(() =>
           this.service.submitPrediction(request),
         );
-        // Same ordinary reveal-delivery race `submitMarketOrder` guards
-        // against with `isRevealVerificationPending()`: checkpoint pauses
-        // are bypassed for wagering premieres, so a prediction response
-        // can legitimately carry this checkpoint's outcome before `reveal`
-        // has landed client-side.
-        if (
-          this.reveal === null &&
-          hasOutcomeProjection([response.checkpoint]) &&
-          !this.isRevealVerificationPending()
-        ) {
-          this.latchFailure("integrity_failure");
-          throw serviceError("invalid_response");
-        }
+        // A prediction always targets an already-observed, already-closed
+        // checkpoint (guarded above: `checkpoint.sequence >
+        // this.observedSequence()` is rejected before the write is even
+        // sent). That checkpoint's `resolution`/`crowdAccuracy` can
+        // legitimately already be scored, and legitimately arrive in this
+        // response, before the verified `reveal` lands client-side —
+        // checkpoint pauses are bypassed for wagering premieres, and
+        // per-checkpoint scoring closes continuously throughout an ongoing
+        // match, independent of the premiere's own terminal state. This
+        // used to latch a hard "integrity_failure" on every ordinary
+        // checkpoint resolution mid-match (an inverted-boolean bug: it
+        // fired whenever `hasOutcomeProjection` was true and the near-end
+        // race exemption did NOT apply, i.e. on every case OTHER than the
+        // one race it was meant to guard) — one of the confirmed root
+        // causes of the mid-match false "could not continue" failure. A
+        // single checkpoint's own resolution is never, by itself, evidence
+        // of anything wrong: its content is already bound to the verified
+        // projection by `assertCheckpointBound` (checkpoint identity,
+        // sequence, option membership, winner membership, crowd-count
+        // consistency) before this callback ever runs — that binding check
+        // is the real, still-fully-intact integrity guard here.
         this.replaceServiceCheckpoint(response.checkpoint);
         this.hydrateOverlay();
       },
@@ -4455,7 +4814,7 @@ export class ReplayPremiereRuntimeController {
     }
   }
 
-  private scheduleHeartbeatRetry(): void {
+  private scheduleHeartbeatRetry(retryAfterMs: number | null = null): void {
     if (
       this.heartbeatRetryTimer !== null ||
       this.disposed ||
@@ -4465,10 +4824,18 @@ export class ReplayPremiereRuntimeController {
     ) {
       return;
     }
+    const delayMs = nextRetryDelayMs(this.heartbeatRetryAttempt, retryAfterMs);
+    this.heartbeatRetryAttempt += 1;
+    this.recovery = {
+      code: "request_failed",
+      attempt: this.heartbeatRetryAttempt,
+      retryInMs: delayMs,
+    };
+    this.hydrateOverlay();
     this.heartbeatRetryTimer = setTimeout(() => {
       this.heartbeatRetryTimer = null;
       void this.sendHeartbeat();
-    }, INTERACTION_RECOVERY_RETRY_MS);
+    }, delayMs);
   }
 
   private reconcileCheckpointDeadline(
@@ -4798,13 +5165,37 @@ function presentationState(
 }
 
 function isRetryableServiceFailure(error: unknown): boolean {
-  return (
-    error instanceof ReplayPremiereServiceError &&
-    (error.code === "request_failed" ||
-      (error.code === "request_rejected" &&
-        (error.publicCode === "PREMIERE_CAPACITY_EXCEEDED" ||
-          error.publicCode === "PREMIERE_UNAVAILABLE")))
+  if (!(error instanceof ReplayPremiereServiceError)) return false;
+  if (error.code === "request_failed") return true;
+  if (error.code !== "request_rejected") return false;
+  if (
+    error.publicCode === "PREMIERE_CAPACITY_EXCEEDED" ||
+    error.publicCode === "PREMIERE_UNAVAILABLE"
+  ) {
+    return true;
+  }
+  // The wire flattens many distinct server-side rejections onto the one
+  // coarse `PREMIERE_INVALID_REQUEST` public code — the actual HTTP status
+  // is the only signal left that distinguishes "this specific request was
+  // malformed" (never retryable) from "the server is overloaded/rate-
+  // limiting/temporarily down" (always retryable, regardless of which
+  // public code it was dressed up as). A raw transient status is
+  // retryable on its own terms even when the domain-specific public code
+  // doesn't say so.
+  return error.status !== null && isTransientInteractionStatus(error.status);
+}
+
+// Exponential backoff, doubling from `INTERACTION_RECOVERY_RETRY_MS` and
+// capped at `INTERACTION_RECOVERY_MAX_RETRY_MS` — same scheme
+// `ReplayPremiereNetworkController.runLoop` already uses. A server-supplied
+// `Retry-After` is honored as a floor, never a ceiling: it tells the client
+// the earliest safe time to retry, not the latest useful one.
+function nextRetryDelayMs(attempt: number, retryAfterMs: number | null): number {
+  const exponential = Math.min(
+    INTERACTION_RECOVERY_MAX_RETRY_MS,
+    INTERACTION_RECOVERY_RETRY_MS * 2 ** attempt,
   );
+  return Math.max(exponential, retryAfterMs ?? 0);
 }
 
 function isTransientInteractionStatus(status: number): boolean {
@@ -4814,6 +5205,19 @@ function isTransientInteractionStatus(status: number): boolean {
     status === 429 ||
     (status >= 500 && status <= 599)
   );
+}
+
+// Only the delay-seconds form of `Retry-After` is honored (RFC 9110
+// §10.2.3); the HTTP-date form is deliberately not parsed — a malformed or
+// unexpected date is worse than falling back to the caller's own backoff.
+// Bounded to a sane range so a misconfigured server cannot park a client
+// forever or make it hammer the endpoint.
+function parseRetryAfterMs(headerValue: string | null): number | null {
+  if (headerValue === null) return null;
+  if (!/^\d+$/.test(headerValue.trim())) return null;
+  const seconds = Number(headerValue.trim());
+  if (!Number.isSafeInteger(seconds) || seconds < 0) return null;
+  return Math.min(seconds * 1_000, 300_000);
 }
 
 function logInteractionBootstrapFailure(error: unknown): void {
@@ -5357,8 +5761,15 @@ function serviceError(
   status: number | null = null,
   publicCode: ReplayPremierePublicErrorCode | null = null,
   phase: ReplayPremiereServiceErrorPhase = "unspecified",
+  retryAfterMs: number | null = null,
 ): ReplayPremiereServiceError {
-  return new ReplayPremiereServiceError(code, status, publicCode, phase);
+  return new ReplayPremiereServiceError(
+    code,
+    status,
+    publicCode,
+    phase,
+    retryAfterMs,
+  );
 }
 
 function serviceErrorWithPhase(
@@ -5366,7 +5777,13 @@ function serviceErrorWithPhase(
   phase: ReplayPremiereServiceErrorPhase,
 ): ReplayPremiereServiceError {
   return error instanceof ReplayPremiereServiceError
-    ? serviceError(error.code, error.status, error.publicCode, phase)
+    ? serviceError(
+        error.code,
+        error.status,
+        error.publicCode,
+        phase,
+        error.retryAfterMs,
+      )
     : serviceError("invalid_configuration", null, null, phase);
 }
 

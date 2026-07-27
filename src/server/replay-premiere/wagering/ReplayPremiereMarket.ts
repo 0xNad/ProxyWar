@@ -27,9 +27,37 @@ import type {
 /** Credits paid out per winning share at settlement — an honest 1/probability multiplier. */
 export const SHARE_PAYOUT = 100;
 
-/** LMSR liquidity constant, scaled to outcome count (matches the ported engine's tuning). */
+/**
+ * LMSR liquidity constant, scaled to outcome count.
+ *
+ * Was `max(10, round(1.5*outcomeCount))` — b=10 for a typical 4-seat
+ * match. At b=10 a single ~450cr trade (well inside the 500cr
+ * max-stake ceiling, 50% of the 1,000cr starting bankroll) swung a fresh
+ * 25/25/25/25 book past 50% in one fill — thin enough that one real
+ * bettor could functionally set the price alone (the "whipsaws of 50%+"
+ * finding).
+ *
+ * Now `max(20, round(5*outcomeCount))` — b=20 for 4 seats. Anchored to
+ * the platform's own stake bounds (`ReplayPremiereMarketRules.ts`:
+ * MIN_STAKE=10, maxStake=500 on a 1,000cr bankroll): a ~150cr "ordinary"
+ * order (15% of bankroll, comfortably inside the min/max band, far from
+ * either edge) moves the traded outcome ~5 points (25% -> ~30%, a real
+ * but not violent move — see ReplayPremiereMarketLiquidity.test.ts). A
+ * max-stake 500cr order moves it ~16 points (25% -> ~41%) — genuinely "a
+ * lot" without a single order cornering the book. The synthetic crowd's
+ * strengthened conviction (SyntheticCrowdPersonas.ts) still walks the
+ * price a long way toward the truth over the course of a match despite
+ * the calmer per-trade impact, because dozens of trades compound against
+ * the same convex cost curve (SyntheticCrowdSimulator.test.ts).
+ *
+ * Scales linearly with outcome count, same shape as before, so a larger
+ * field keeps comparable per-trade sensitivity: at n outcomes a buy on
+ * one competes against n-1 other exp() terms instead of 3, so b must
+ * grow with n to hold price impact roughly constant in percentage-point
+ * terms as the field gets bigger.
+ */
 export function liquidityForOutcomeCount(outcomeCount: number): number {
-  return Math.max(10, Math.round(1.5 * outcomeCount));
+  return Math.max(20, Math.round(5 * outcomeCount));
 }
 
 /** Deterministic round-half-up for non-negative credit amounts. */

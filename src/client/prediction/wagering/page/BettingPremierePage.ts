@@ -22,6 +22,49 @@ const MARKET_POLL_INTERVAL_MS = 2_500;
 const SESSION_RETRY_DELAY_MS = 200;
 
 /**
+ * The betting page joins through the exact same client game engine as a
+ * live multiplayer match (`handleJoinLobby` → `ClientGameRunner`) — there
+ * is no premiere-specific renderer, so every local-player HUD surface
+ * mounts unconditionally: the "Choose a starting location" spawn banner,
+ * build menu, attack-ratio control panel, chat/emoji/moderation modals,
+ * the "your nation" sidebar. A visitor here is a spectator/bettor with no
+ * seat and nothing to spawn, so all of that is dead — at best confusing
+ * ("am I supposed to pick a spawn point?"), at worst actively misleading
+ * about what this page is for. This is the SAME declutter list
+ * `AiLeagueReplayOverlay.ts` already applies for its own (unrelated,
+ * static-replay) viewer, reimplemented here under a class scoped to this
+ * route — reusing that file's body class would depend on its `<style>`
+ * tag having been injected by an unrelated code path that never runs on
+ * `/bet/<id>`, so it wouldn't actually hide anything.
+ */
+const BETTING_SPECTATOR_BODY_CLASS = "premiere-betting-spectator-mode";
+const BETTING_SPECTATOR_STYLE_ID = "premiere-betting-spectator-style";
+
+function ensureBettingSpectatorStyleInjected(): void {
+  if (document.getElementById(BETTING_SPECTATOR_STYLE_ID) !== null) return;
+  const style = document.createElement("style");
+  style.id = BETTING_SPECTATOR_STYLE_ID;
+  style.textContent = `
+    body.${BETTING_SPECTATOR_BODY_CLASS} heads-up-message,
+    body.${BETTING_SPECTATOR_BODY_CLASS} control-panel,
+    body.${BETTING_SPECTATOR_BODY_CLASS} unit-display,
+    body.${BETTING_SPECTATOR_BODY_CLASS} build-menu,
+    body.${BETTING_SPECTATOR_BODY_CLASS} emoji-table,
+    body.${BETTING_SPECTATOR_BODY_CLASS} player-panel,
+    body.${BETTING_SPECTATOR_BODY_CLASS} chat-display,
+    body.${BETTING_SPECTATOR_BODY_CLASS} chat-modal,
+    body.${BETTING_SPECTATOR_BODY_CLASS} send-resource-modal,
+    body.${BETTING_SPECTATOR_BODY_CLASS} player-moderation-modal,
+    body.${BETTING_SPECTATOR_BODY_CLASS} spawn-timer,
+    body.${BETTING_SPECTATOR_BODY_CLASS} immunity-timer,
+    body.${BETTING_SPECTATOR_BODY_CLASS} game-left-sidebar {
+      display: none !important;
+    }
+  `;
+  document.head.appendChild(style);
+}
+
+/**
  * Wraps `mountBettingOverlay` so this module can grab the concrete
  * `PremiereBettingOverlay` element the runtime mounts internally — the
  * controller never exposes that handle itself, so capturing it at the
@@ -224,6 +267,8 @@ export function openBettingPremierePage(
   premiereId: string,
   callbacks: BettingPremierePageCallbacks,
 ): BettingPremierePageHandle {
+  ensureBettingSpectatorStyleInjected();
+  document.body.classList.add(BETTING_SPECTATOR_BODY_CLASS);
   let market: BettingPremiereMarketController | null = null;
   const runtime = new ReplayPremiereRuntimeController({
     premiereId,
@@ -255,6 +300,7 @@ export function openBettingPremierePage(
     dispose: () => {
       market?.dispose();
       runtime.dispose();
+      document.body.classList.remove(BETTING_SPECTATOR_BODY_CLASS);
     },
   };
 }

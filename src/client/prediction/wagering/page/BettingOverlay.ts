@@ -1,7 +1,6 @@
 import { html, LitElement, nothing } from "lit";
 import { customElement, property, state } from "lit/decorators.js";
 import type {
-  ReplayPremiereCheckpointView,
   ReplayPremiereOverlayCallbacks,
   ReplayPremiereOverlayHandle,
   ReplayPremiereOverlayModel,
@@ -9,6 +8,7 @@ import type {
 } from "src/client/ReplayPremiereOverlay";
 import "../components/MarketBankrollBadge";
 import "../components/MarketPriceBoard";
+import "../components/PriceAnnouncer";
 import "../components/MarketPositionSummary";
 import "../components/MarketSettlementPanel";
 import "../components/PositionsPanel";
@@ -103,25 +103,6 @@ export class PremiereBettingOverlay extends LitElement {
   }
 
   /**
-   * Trading isn't gated by any checkpoint window, but a trade still needs
-   * SOME checkpoint id to tag as its nearest content beat (for audit/
-   * display) — the earliest one not yet resolved, falling back to the
-   * active one if the model happens to have it set.
-   */
-  private nearestUnresolvedCheckpoint(): ReplayPremiereCheckpointView | null {
-    const activeId = this.model.activeCheckpointId;
-    const active =
-      activeId === null || activeId === undefined
-        ? undefined
-        : this.model.checkpoints.find((c) => c.id === activeId);
-    if (active !== undefined) return active;
-    const unresolved = [...this.model.checkpoints]
-      .filter((c) => c.state !== "closed")
-      .sort((a, b) => a.sequence - b.sequence);
-    return unresolved[0] ?? this.model.checkpoints[0] ?? null;
-  }
-
-  /**
    * Every seat in the match — sourced from the policy roster, not
    * `checkpoints[].options` (that list stays empty until a checkpoint's
    * prediction window opens; continuous LMSR trading isn't gated to one).
@@ -130,6 +111,7 @@ export class PremiereBettingOverlay extends LitElement {
     return this.model.policies.map((policy) => ({
       seatId: policy.seatId,
       displayName: policy.displayName,
+      policyIdentity: policy.policyIdentity,
     }));
   }
 
@@ -168,6 +150,62 @@ export class PremiereBettingOverlay extends LitElement {
           Trade
           <span aria-hidden="true">${open ? "▴" : "▾"}</span>
         </span>
+      </button>
+    `;
+  }
+
+  /**
+   * Desktop analog of the mobile peek strip. Without this, the fixed
+   * right-hand trading column has no width cap and shrink-to-fits its
+   * OWN content (the 3-column seat grid, quick-amount chips, etc.) —
+   * which reliably balloons to roughly half a 1200px viewport, for a
+   * product whose hook is watching the match. While the match is live
+   * and the sheet is collapsed (same `sheetOpen` state the mobile peek
+   * strip already uses), the column shrinks to a narrow rail instead of
+   * staying pinned open at content width; hidden whenever `open` (the
+   * full ticket occupies the same slot then).
+   */
+  private renderDesktopRail() {
+    if (this.sheetOpen) return nothing;
+    const model = this.model;
+    const live = LIVE_STATES.has(model.state);
+    const totalPnl = this.totalUnrealizedPnl();
+    return html`
+      <button
+        type="button"
+        class="hidden w-full flex-1 flex-col items-center justify-between gap-3 px-1.5 py-4 outline-none focus-visible:ring-2 focus-visible:ring-accent focus-visible:ring-inset lg:flex"
+        aria-expanded="false"
+        aria-controls="betting-sheet-panel"
+        aria-label="Expand trading panel"
+        @click=${() => {
+          this.sheetOverride = !this.sheetOpen;
+        }}
+      >
+        <span class="flex flex-col items-center gap-2">
+          ${live
+            ? html`<span
+                aria-hidden="true"
+                class="h-1.5 w-1.5 shrink-0 rounded-full bg-live motion-safe:animate-pulse"
+              ></span>`
+            : nothing}
+          <span
+            aria-hidden="true"
+            class="text-[10px] font-semibold uppercase tracking-wide text-accent [writing-mode:vertical-lr] rotate-180"
+            >Trade</span
+          >
+        </span>
+        ${totalPnl !== null
+          ? html`<span
+              aria-hidden="true"
+              class="flex flex-col items-center font-mono text-xs font-bold tabular-nums ${totalPnl >= 0
+                ? "text-positive"
+                : "text-danger"}"
+            >
+              <span>${totalPnl >= 0 ? "▲" : "▼"}</span>
+              <span>${Math.abs(Math.round(totalPnl))}</span>
+            </span>`
+          : nothing}
+        <span aria-hidden="true" class="text-ink-muted">‹</span>
       </button>
     `;
   }
@@ -236,7 +274,6 @@ export class PremiereBettingOverlay extends LitElement {
   }
 
   private renderMarket() {
-    const view = this.nearestUnresolvedCheckpoint();
     const seats = this.allSeats();
     // Trading is live for the whole "playing"/"checkpoint" phase — a
     // checkpoint window opening/closing is a content beat, not a trading
@@ -245,16 +282,16 @@ export class PremiereBettingOverlay extends LitElement {
       this.model.state === "playing" || this.model.state === "checkpoint";
     return html`
       <div class="flex flex-col gap-3 px-4 py-4">
-        ${view !== null
-          ? html`<p class="text-xs font-semibold uppercase tracking-wide text-ink-muted">
-              Next checkpoint: ${view.sequence}
-            </p>`
-          : nothing}
         <premiere-position-summary .market=${this.market}></premiere-position-summary>
         <premiere-market-price-board
           .seats=${seats}
           .market=${this.market}
         ></premiere-market-price-board>
+        <premiere-price-announcer
+          .seats=${seats}
+          .market=${this.market}
+        ></premiere-price-announcer>
+        ${this.renderMarketFacts()}
         <premiere-trade-ticket
           .seats=${seats}
           .market=${this.market}
@@ -269,6 +306,27 @@ export class PremiereBettingOverlay extends LitElement {
           .seats=${seats}
           .market=${this.market}
         ></premiere-positions-panel>
+      </div>
+    `;
+  }
+
+  /**
+   * Three facts a first-time viewer needs and had no way to learn short
+   * of reading source (Newcomer/Grinder personas, respectively): what the
+   * price number means, what a share is worth at settlement, and that
+   * there is no hidden edge — buy-then-immediate-sell nets exactly zero
+   * (verified over 2,000 simulated round trips). Static copy, given
+   * always-visible screen space rather than a one-time tooltip nobody
+   * finds twice.
+   */
+  private renderMarketFacts() {
+    return html`
+      <div
+        class="flex flex-col gap-1 rounded-md border border-line-strong bg-surface-2 px-3 py-2 text-[11px] leading-snug text-ink-muted"
+      >
+        <p>Price = the crowd's implied chance (0–100%) — always sums to 100 across every agent.</p>
+        <p>A winning share pays <strong class="text-ink">100 cr</strong> at settlement; a losing share pays 0.</p>
+        <p>No house edge: buying then immediately selling the same shares back nets exactly 0 cr.</p>
       </div>
     `;
   }
@@ -319,24 +377,29 @@ export class PremiereBettingOverlay extends LitElement {
   render() {
     if (this.model === undefined) {
       return html`
-        <div class="flex flex-1 items-center justify-center px-4 py-10 text-sm text-ink-muted" role="status">
+        <div
+          class="flex flex-1 items-center justify-center px-4 py-10 text-sm text-ink-muted lg:w-[380px]"
+          role="status"
+        >
           Loading premiere…
         </div>
       `;
     }
     const open = this.sheetOpen;
+    const desktopWidthClass = open ? "lg:w-[380px]" : "lg:w-16";
     return html`
       <aside
         class="fixed inset-x-0 bottom-0 z-[52000] flex flex-col overflow-hidden rounded-t-xl border-t border-line bg-surface shadow-2xl ${open
           ? "max-h-[75vh]"
-          : "max-h-fit"} lg:inset-y-0 lg:right-0 lg:left-auto lg:h-full lg:max-h-none lg:rounded-none lg:border-t-0 lg:border-l"
+          : "max-h-fit"} lg:inset-y-0 lg:right-0 lg:left-auto lg:h-full lg:max-h-none lg:rounded-none lg:border-t-0 lg:border-l lg:transition-[width] lg:duration-200 ${desktopWidthClass}"
         role="complementary"
         aria-label="Premiere market"
       >
         ${this.renderPeekStrip()}
+        ${this.renderDesktopRail()}
         <div
           id="betting-sheet-panel"
-          class="${open ? "flex" : "hidden"} min-h-0 flex-1 flex-col overflow-y-auto lg:flex lg:max-h-none"
+          class="${open ? "flex" : "hidden"} min-h-0 flex-1 flex-col overflow-y-auto"
         >
           ${this.renderHeader()}
           <div class="flex items-center justify-between gap-2 border-b border-line px-4 py-2">

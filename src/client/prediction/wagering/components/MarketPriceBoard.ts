@@ -35,6 +35,7 @@ export class PremiereMarketPriceBoard extends LitElement {
   @property({ type: Boolean }) frozen = false;
 
   @state() private flashes = new Map<string, Flash>();
+  @state() private expandedSeatId: string | null = null;
   private previousPrices: Readonly<Record<string, number>> | null = null;
   private flashTimers = new Map<string, number>();
 
@@ -114,6 +115,8 @@ export class PremiereMarketPriceBoard extends LitElement {
                 )
               : null;
           const tier = row.myUnrealizedPnl !== null ? pnlTier(row.myUnrealizedPnl, percent) : null;
+          const seat = this.seats.find((s) => s.seatId === row.seatId);
+          const expanded = this.expandedSeatId === row.seatId;
           return html`
             <div
               role="listitem"
@@ -123,7 +126,16 @@ export class PremiereMarketPriceBoard extends LitElement {
                   ? "border-line bg-surface-2 opacity-60"
                   : "border-line bg-surface-2"} ${flash !== null ? "bg-info/10 border-info/40" : ""}"
             >
-              <div class="flex items-center justify-between gap-2">
+              <button
+                type="button"
+                class="flex items-center justify-between gap-2 rounded-sm text-left outline-none focus-visible:ring-2 focus-visible:ring-accent"
+                aria-expanded=${expanded}
+                aria-controls="seat-identity-${row.seatId}"
+                aria-label="Show who ${row.displayName} is"
+                @click=${() => {
+                  this.expandedSeatId = expanded ? null : row.seatId;
+                }}
+              >
                 <span class="truncate text-sm text-ink">${row.displayName}</span>
                 <span class="flex items-center gap-2">
                   ${row.myShares > 0
@@ -132,6 +144,7 @@ export class PremiereMarketPriceBoard extends LitElement {
                   ${flash !== null
                     ? html`<span
                         aria-hidden="true"
+                        title="Moved ${flash.direction === "up" ? "up" : "down"} ${Math.abs(flash.delta).toFixed(1)} pts since the last update (not since you loaded the page)"
                         class="font-mono text-[11px] font-semibold tabular-nums text-info"
                         >${flash.direction === "up" ? "▲" : "▼"}${Math.abs(flash.delta).toFixed(1)}</span
                       >`
@@ -141,10 +154,11 @@ export class PremiereMarketPriceBoard extends LitElement {
                     null
                       ? "text-info"
                       : ""}"
-                    >${row.price.toFixed(1)}</span
+                    >${row.price.toFixed(1)}%</span
                   >
+                  <span aria-hidden="true" class="text-[10px] text-ink-muted">${expanded ? "▴" : "▾"}</span>
                 </span>
-              </div>
+              </button>
               <div class="h-1.5 w-full overflow-hidden rounded-full bg-surface-3">
                 <div
                   class="h-full rounded-full bg-accent transition-[width] duration-700 ease-out"
@@ -152,14 +166,61 @@ export class PremiereMarketPriceBoard extends LitElement {
                 ></div>
               </div>
               ${row.myShares > 0 && row.myUnrealizedPnl !== null && tier !== null
-                ? html`<div class="flex items-center justify-end gap-1 text-right text-xs font-semibold tabular-nums ${tier.colorClass}">
+                ? html`<div
+                    class="flex items-center justify-end gap-1.5 text-right text-xs font-semibold tabular-nums ${tier.colorClass}"
+                    title="Your unrealized profit/loss vs. what you paid — not the price direction above"
+                  >
+                    <span class="text-[10px] font-normal uppercase tracking-wide text-ink-muted">Your P&amp;L</span>
                     <span aria-hidden="true">${tier.icon}</span>
                     <span>${formatSignedCredits(row.myUnrealizedPnl)} cr</span>
                   </div>`
                 : nothing}
+              ${expanded ? this.renderIdentity(row.seatId, row.displayName, seat) : nothing}
             </div>
           `;
         })}
+      </div>
+    `;
+  }
+
+  /**
+   * The click-through "who is this" affordance: shows the same
+   * cryptographically-verified policy identity the server checks every
+   * reaction against (`ReplayPremiereRuntime.ts`'s `samePolicyIdentity`),
+   * already reaching the client via `seats[].policyIdentity` but never
+   * displayed before. There is no personality/strategy bio or per-decision
+   * reasoning in the data this page receives — the simulation emits that
+   * internally, but it never crosses the wire to a viewer — so this says
+   * that plainly instead of inventing something to fill the space.
+   */
+  private renderIdentity(
+    seatId: string,
+    displayName: string,
+    seat: MarketSeatOption | undefined,
+  ) {
+    const identity = seat?.policyIdentity;
+    return html`
+      <div
+        id="seat-identity-${seatId}"
+        class="flex flex-col gap-1 rounded-md bg-surface-3 px-3 py-2 text-[11px] text-ink-muted"
+      >
+        ${identity === undefined
+          ? html`<p>No identity data reached this page for ${displayName}.</p>`
+          : identity.namespace === "softmax_policy_version"
+            ? html`
+                <p>Policy: <span class="text-ink">${identity.policyName}</span> · v${identity.serverAssignedVersion}</p>
+                <p class="font-mono text-[10px] opacity-70">id ${identity.policyVersionId}</p>
+              `
+            : html`
+                <p>Manifest: <span class="text-ink">${identity.manifestName}</span> · v${identity.declaredVersion}</p>
+                <p class="font-mono text-[10px] opacity-70" title=${identity.contentSha256}>
+                  build ${identity.contentSha256.slice(0, 12)}…
+                </p>
+              `}
+        <p class="pt-1 italic opacity-80">
+          This is the extent of what's known about this agent here — no personality, strategy notes, or
+          per-decision reasoning reach this page.
+        </p>
       </div>
     `;
   }

@@ -79,6 +79,11 @@ afterEach(() => {
   document.body.className = "";
   vi.useRealTimers();
   vi.restoreAllMocks();
+  // Session resumability persists to real jsdom `sessionStorage` keyed by
+  // premiereId — clear it so one test's successfully-established session
+  // can never leak into the next test's (possibly identical) premiereId
+  // and silently switch it from `startSession` to `resumeSession`.
+  window.sessionStorage.clear();
 });
 
 describe("Replay Premiere route gate", () => {
@@ -3692,6 +3697,7 @@ function runtimeHarness(options: {
   useDefaultCopyText?: boolean;
   service?: {
     startSession?: () => Promise<ReplayPremiereServiceSessionResponse>;
+    resumeSession?: () => Promise<ReplayPremiereServiceHeartbeatResponse>;
     heartbeat?: () => Promise<ReplayPremiereServiceHeartbeatResponse>;
     submitReaction?: () => Promise<ReplayPremiereServiceReactionResponse>;
     createShare?: (input: {
@@ -3735,6 +3741,21 @@ function runtimeHarness(options: {
       return response;
     }),
     refreshSession: vi.fn(async () => sessionResponse("playing")),
+    resumeSession:
+      options.service?.resumeSession === undefined
+        ? vi.fn(async () => {
+            // No test wires a persisted session by default (afterEach
+            // clears sessionStorage), so this path is only exercised by
+            // tests that explicitly seed one — default to "not found",
+            // the real server's response for an unrecognized/expired
+            // session id.
+            throw new ReplayPremiereServiceError(
+              "request_rejected",
+              404,
+              "PREMIERE_INVALID_REQUEST",
+            );
+          })
+        : vi.fn(options.service.resumeSession),
     heartbeat:
       options.service?.heartbeat === undefined
         ? vi.fn(async () => heartbeatResponse("playing"))
