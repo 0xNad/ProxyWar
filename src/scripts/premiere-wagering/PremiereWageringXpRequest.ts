@@ -85,6 +85,10 @@ export interface CompletedExperienceRequest {
   readonly episodeId: string;
   readonly episodeRequestId: string;
   readonly replayUrl: string;
+  readonly coworldName: string;
+  readonly coworldVersion: string;
+  readonly variantName: string | null;
+  readonly requesterUserId: string;
 }
 
 export type ExperienceRequestRunner = (
@@ -113,7 +117,12 @@ with CoworldApiClient.from_login(server_url=server) as c:
     if r.status_code != 200:
         print(f"create FAILED: {r.status_code} {r.text[:500]}", file=sys.stderr)
         sys.exit(1)
-    xid = r.json()["id"]
+    created = r.json()
+    xid = created["id"]
+    coworld_name = str(created.get("coworld_name") or "")
+    coworld_version = str(created.get("coworld_version") or "")
+    variant_name = created.get("variant_id")
+    requester_user_id = str(created.get("requester_user_id") or "")
     print(f"experience-request created: {xid} ({len(body['roster'])} seats)")
     for _ in range(1200):
         d = c._http_client.get(f"/v2/experience-requests/{xid}", headers=c._headers(), timeout=30).json()
@@ -131,6 +140,10 @@ with CoworldApiClient.from_login(server_url=server) as c:
                 "episodeId": ep["id"],
                 "episodeRequestId": str(getattr(epi, "episode_id", "") or ""),
                 "replayUrl": str(getattr(epi, "replay_url", "") or ""),
+                "coworldName": coworld_name,
+                "coworldVersion": coworld_version,
+                "variantName": variant_name,
+                "requesterUserId": requester_user_id,
             }
             if not result["replayUrl"]:
                 print("episode completed but replay_url is empty", file=sys.stderr)
