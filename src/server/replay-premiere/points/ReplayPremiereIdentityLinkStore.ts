@@ -107,6 +107,23 @@ export class ReplayPremiereIdentityLinkStore {
   private readonly filePath: string;
   private readonly pointsLedger: ReplayPremierePointsMerger;
   private writeQueue: Promise<void> = Promise.resolve();
+  /**
+   * `resolveCanonicalParticipantId` sits on the hot trading path (every
+   * authenticated read/write at the HTTP boundary) and the overwhelming
+   * common case has no alias at all — almost nobody links. Re-reading and
+   * re-validating the whole JSON blob per request would make that cheap
+   * case scale with file size and add a syscall to every trade, so the
+   * alias map is cached in memory after the first load and served from
+   * there with zero I/O. `mutate` (the only writer) refreshes this cache
+   * with the just-persisted state immediately after a successful `save`,
+   * so a link/merge is visible to the very next resolve — no staleness
+   * window. A fresh process (this origin restarts every cycle) starts
+   * with an empty cache and pays exactly one real read, on its first
+   * resolve; concurrent first callers share that one in-flight read
+   * instead of each triggering their own.
+   */
+  private cachedAliasesPromise: Promise<ReadonlyMap<string, string>> | null =
+    null;
 
   private constructor(root: string, pointsLedger: ReplayPremierePointsMerger) {
     this.filePath = path.join(root, LINK_STORE_FILE_NAME);
@@ -121,10 +138,30 @@ export class ReplayPremiereIdentityLinkStore {
     return new ReplayPremiereIdentityLinkStore(root, pointsLedger);
   }
 
-  /** `aliases[participantId] ?? participantId` — always resolves in one hop; see `linkOrMerge`, which collapses chains at merge time. */
+  /**
+   * `aliases[participantId] ?? participantId` — always resolves in one hop;
+   * see `linkOrMerge`, which collapses chains at merge time. Never a
+   * network call (see class doc) and, past the first call in this
+   * process, never a file read either — see the `cachedAliasesPromise`
+   * doc above.
+   */
   async resolveCanonicalParticipantId(participantId: string): Promise<string> {
-    const file = await this.load();
-    return file.aliases[participantId] ?? participantId;
+    const aliases = await this.loadCachedAliases();
+    return aliases.get(participantId) ?? participantId;
+  }
+
+  private loadCachedAliases(): Promise<ReadonlyMap<string, string>> {
+    if (this.cachedAliasesPromise === null) {
+      this.cachedAliasesPromise = this.load().then(
+        (file) => new Map(Object.entries(file.aliases)),
+      );
+      // A failed cold read must not permanently poison the cache — let the
+      // next call retry a fresh load instead of forever rejecting.
+      this.cachedAliasesPromise.catch(() => {
+        this.cachedAliasesPromise = null;
+      });
+    }
+    return this.cachedAliasesPromise;
   }
 
   async getStatus(
@@ -286,6 +323,12 @@ export class ReplayPremiereIdentityLinkStore {
       const file = await this.load();
       const result = await mutator(file);
       await this.save(file);
+      // Refresh, never invalidate-and-wait: the very next resolve must see
+      // this write, and doing it here (instead of nulling the cache) also
+      // avoids a redundant re-read on the next call.
+      this.cachedAliasesPromise = Promise.resolve(
+        new Map(Object.entries(file.aliases)),
+      );
       return result;
     });
     this.writeQueue = run.then(

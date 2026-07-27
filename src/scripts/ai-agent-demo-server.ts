@@ -904,6 +904,17 @@ app.use(
       // not trust forwarding headers from LAN or directly exposed peers.
       trustedProxyAddresses: REPLAY_PREMIERE_LOOPBACK_PROXY_ADDRESSES,
     }),
+    // Closes the durable Sybil hole: a signed cookie merged away by a
+    // GitHub link (on this device, another device, or a prior premiere/
+    // process lifetime) resolves to its canonical id before it ever
+    // reaches `interactions`, at every authenticated boundary — not just
+    // the settlement/points routes wired below. Local, cached file lookup
+    // (see `ReplayPremiereIdentityLinkStore.resolveCanonicalParticipantId`)
+    // — never GitHub — so this can never block, delay, or fail a trade.
+    resolveCanonicalParticipantId: (participantId) =>
+      replayPremiereIdentityLinkStore.resolveCanonicalParticipantId(
+        participantId,
+      ),
     onOperatorError: (error) => {
       console.error(formatReplayPremiereHttpOperatorError(error));
     },

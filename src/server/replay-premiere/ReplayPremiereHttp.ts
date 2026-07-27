@@ -130,6 +130,10 @@ export class ReplayPremiereHttpRegistry {
   }
 }
 
+export type ReplayPremiereCanonicalParticipantResolver = (
+  participantId: string,
+) => Promise<string>;
+
 export interface ReplayPremiereHttpOptions {
   registry: ReplayPremiereHttpRegistry;
   security: ReplayPremiereGuestSecurity;
@@ -142,8 +146,29 @@ export interface ReplayPremiereHttpOptions {
    * with a bare 404 (the effective master + Premiere flags are off).
    */
   clips?: ReplayPremiereClips;
+  /**
+   * Resolves a signed-cookie participant id to its durable canonical id
+   * (see `ReplayPremiereIdentityLinkStore.resolveCanonicalParticipantId`)
+   * before it reaches `interactions`, at every authenticated boundary —
+   * self market read, authenticated writes, session creation. Without
+   * this, a cookie merged away by a GitHub link on another
+   * device/process/premiere stays a fully independent, independently
+   * funded trading identity forever: the durable alias exists but is
+   * never consulted on the trading path. Must be a local, cached lookup
+   * — never a network call — so an unreachable GitHub can never block,
+   * delay, or fail a trade. Defaults to identity (no linking configured,
+   * or existing callers/tests that don't wire one), so an unlinked guest
+   * is unaffected either way.
+   */
+  resolveCanonicalParticipantId?: ReplayPremiereCanonicalParticipantResolver;
   /** Operator-only diagnostics sink; never serialized into the response. */
   onOperatorError?: (error: unknown) => void;
+}
+
+async function identityCanonicalParticipantResolver(
+  participantId: string,
+): Promise<string> {
+  return participantId;
 }
 
 export function formatReplayPremiereHttpOperatorError(error: unknown): string {
@@ -272,6 +297,13 @@ async function handlePremiereApiRequest(
   options: ReplayPremiereHttpOptions,
   operationTimeoutMs: number,
 ): Promise<void> {
+  // Resolved once, as early as possible, so every authenticated boundary
+  // below — self market read, authenticated writes, session creation —
+  // sees only the durable canonical id and never has to thread a promise
+  // of its own through call sites that are otherwise synchronous.
+  const resolveCanonicalParticipantId =
+    options.resolveCanonicalParticipantId ??
+    identityCanonicalParticipantResolver;
   const readRoute = matchProxyWarPublicPremiereReadPath(request.path);
   const writeRoute = matchProxyWarPublicPremiereWritePath(request.path);
   if (
@@ -361,11 +393,12 @@ async function handlePremiereApiRequest(
         const authorization = options.security.authorizeAuthenticatedRead(
           requestSecurityHeaders(request),
         );
+        const selfParticipantId = await resolveCanonicalParticipantId(
+          authorization.participant.participantId,
+        );
         sendJson(response, 200, {
           schemaVersion: 1,
-          market: target.interactions.readMarketState(
-            authorization.participant.participantId,
-          ),
+          market: target.interactions.readMarketState(selfParticipantId),
         });
         return;
       }
@@ -407,13 +440,16 @@ async function handlePremiereApiRequest(
         operationTimeoutMs,
         interactionContractVersion,
         clipsEnabled: options.clips !== undefined,
+        resolveCanonicalParticipantId,
       });
       return;
     }
     const authorization = options.security.authorizeWrite(
       requestSecurityHeaders(request),
     );
-    const participantId = authorization.participant.participantId;
+    const participantId = await resolveCanonicalParticipantId(
+      authorization.participant.participantId,
+    );
     switch (writeRoute.kind) {
       case "heartbeat": {
         const body = parseHeartbeatBody(request.body);
@@ -623,6 +659,7 @@ async function handleSessionWrite(options: {
   operationTimeoutMs: number;
   interactionContractVersion: ReplayPremiereInteractionContractVersion;
   clipsEnabled: boolean;
+  resolveCanonicalParticipantId: ReplayPremiereCanonicalParticipantResolver;
 }): Promise<void> {
   const body = parseSessionBody(options.request.body);
   const guest = options.security.authorizeSessionCreation(
@@ -634,6 +671,13 @@ async function handleSessionWrite(options: {
   if (guest.setCookie !== null) {
     options.response.setHeader("Set-Cookie", guest.setCookie);
   }
+  // Resolved once, immediately after auth: `interactions` (and every read
+  // below that decorates this response) must only ever see the durable
+  // canonical id, never the raw signed-cookie id a GitHub link may have
+  // merged away.
+  const participantId = await options.resolveCanonicalParticipantId(
+    guest.participant.participantId,
+  );
   const attribution =
     body.attributionToken === null
       ? null
@@ -650,7 +694,7 @@ async function handleSessionWrite(options: {
   }
   const session = await withTimeout(
     options.target.interactions.createViewerSession({
-      participantId: guest.participant.participantId,
+      participantId,
       idempotencyKey: options.idempotencyKey,
       requesterBucketId: options.requesterBucketId,
       visible: body.visible,
@@ -668,23 +712,19 @@ async function handleSessionWrite(options: {
     csrfToken: guest.csrfToken,
     session,
     premiereState: options.target.runtime.readLifecycleState(),
-    checkpoints: options.target.interactions.readCheckpoints(
-      guest.participant.participantId,
-    ),
+    checkpoints: options.target.interactions.readCheckpoints(participantId),
     incomingMoment,
     ...(options.interactionContractVersion >= 2
       ? {
           clipsEnabled: options.clipsEnabled,
-          reactionSummary: options.target.interactions.readReactionSummary(
-            guest.participant.participantId,
-          ),
+          reactionSummary:
+            options.target.interactions.readReactionSummary(participantId),
         }
       : {}),
     ...(options.interactionContractVersion >= 3
       ? {
-          latestOwnReaction: options.target.interactions.readLatestOwnReaction(
-            guest.participant.participantId,
-          ),
+          latestOwnReaction:
+            options.target.interactions.readLatestOwnReaction(participantId),
         }
       : {}),
     ...(options.interactionContractVersion >= 4

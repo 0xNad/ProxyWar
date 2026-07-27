@@ -6,6 +6,13 @@
  * prevent the Sybil hole (N browsers, N bankrolls, one leaderboard entry)
  * end to end, against a REAL `ReplayPremiereInteractions` market, not a
  * stub.
+ *
+ * The durable half of that hand-off — `ReplayPremiereHttp`'s
+ * `resolveCanonicalParticipantId` applied at every authenticated boundary,
+ * not just the process-local retirement guard — is exercised over the
+ * REAL HTTP trading router (`createReplayPremiereRouter`), across a
+ * simulated origin restart and a later premiere, in the
+ * "durable canonical resolution" describe block below.
  */
 import express from "express";
 import { promises as fs } from "node:fs";
@@ -19,6 +26,11 @@ import {
   createReplayPremiereGithubAuthRouter,
   type ReplayPremiereGithubOAuthClient,
 } from "../../../src/server/replay-premiere/ReplayPremiereGithubAuth";
+import {
+  createReplayPremiereRouter,
+  ReplayPremiereHttpRegistry,
+  type ReplayPremiereRuntimeReader,
+} from "../../../src/server/replay-premiere/ReplayPremiereHttp";
 import {
   ReplayPremiereInteractions,
   type ReplayPremiereInteractionsSnapshot,
@@ -36,16 +48,140 @@ const premiereId = "prem_abcdefghijklmnop";
 const guestA = `guest_${"a".repeat(32)}`;
 const guestB = `guest_${"b".repeat(32)}`;
 
+const guestSecurityOptions = {
+  hmacKey: new Uint8Array(32).fill(9),
+  expectedOrigin: origin,
+  production: false,
+};
+
+interface StubOAuthState {
+  tokensByCode: Map<string, string>;
+  usersByToken: Map<
+    string,
+    { githubUserId: number; login: string; avatarUrl: string | null }
+  >;
+}
+
+function stubOAuthClient(state: StubOAuthState): ReplayPremiereGithubOAuthClient {
+  return {
+    buildAuthorizeUrl({ redirectUri, state: oauthState }) {
+      const url = new URL("https://github.example.test/login/oauth/authorize");
+      url.searchParams.set("redirect_uri", redirectUri);
+      url.searchParams.set("state", oauthState);
+      return url.toString();
+    },
+    async exchangeCodeForToken(code) {
+      const token = state.tokensByCode.get(code);
+      if (token === undefined) throw new Error("invalid_code");
+      return token;
+    },
+    async fetchUser(accessToken) {
+      const user = state.usersByToken.get(accessToken);
+      if (user === undefined) throw new Error("invalid_token");
+      return user;
+    },
+  };
+}
+
+interface RawResponse {
+  status: number;
+  headers: http.IncomingHttpHeaders;
+  body: string;
+}
+
+async function rawGet(
+  baseUrl: string,
+  pathname: string,
+  cookie?: string,
+): Promise<RawResponse> {
+  const url = new URL(baseUrl);
+  return new Promise((resolve, reject) => {
+    const request = http.request(
+      {
+        hostname: url.hostname,
+        port: url.port,
+        path: pathname,
+        method: "GET",
+        headers: {
+          referer: `${origin}/bet`,
+          ...(cookie === undefined ? {} : { cookie }),
+        },
+      },
+      (response) => {
+        const parts: Buffer[] = [];
+        response.on("data", (part: Buffer) => parts.push(part));
+        response.on("end", () =>
+          resolve({
+            status: response.statusCode ?? 0,
+            headers: response.headers,
+            body: Buffer.concat(parts).toString("utf8"),
+          }),
+        );
+      },
+    );
+    request.on("error", reject);
+    request.end();
+  });
+}
+
+function setCookiePairs(
+  headers: http.IncomingHttpHeaders,
+): Record<string, string> {
+  const raw = headers["set-cookie"] ?? [];
+  const pairs: Record<string, string> = {};
+  for (const entry of raw) {
+    const [pair] = entry.split(";", 1);
+    const separator = pair.indexOf("=");
+    pairs[pair.slice(0, separator)] = pair.slice(separator + 1);
+  }
+  return pairs;
+}
+
+function cookieHeader(pairs: Record<string, string>): string {
+  return Object.entries(pairs)
+    .map(([name, value]) => `${name}=${value}`)
+    .join("; ");
+}
+
+function participantIdOf(guestCookieValue: string): string {
+  return guestCookieValue.split(".")[1];
+}
+
+/** Headers for a JSON request against the trading router — every
+ * authenticated boundary needs a strict `Origin`; writes additionally need
+ * `X-Idempotency-Key`; every request after session creation needs the
+ * `X-CSRF-Token` bound to whichever raw cookie is presented. */
+function tradeHeaders(options: {
+  idempotencyKey?: string;
+  cookie?: string;
+  csrfToken?: string;
+}): Record<string, string> {
+  return {
+    "Content-Type": "application/json",
+    Origin: origin,
+    ...(options.idempotencyKey === undefined
+      ? {}
+      : { "X-Idempotency-Key": options.idempotencyKey }),
+    ...(options.cookie === undefined ? {} : { Cookie: options.cookie }),
+    ...(options.csrfToken === undefined
+      ? {}
+      : { "X-CSRF-Token": options.csrfToken }),
+  };
+}
+
 function interactionsHarness(overrides?: {
+  premiereId?: string;
   wageringEnabled?: boolean;
   initialState?: ReplayPremiereInteractionsSnapshot;
   pointsLedger?: ReplayPremiereSettlementPointsRecorder;
 }) {
+  const resolvedPremiereId = overrides?.premiereId ?? premiereId;
   let premiereState: PremiereState = "playing";
   let requestValue = 1;
   let nowMs = Date.parse("2026-07-20T12:00:00.000Z");
+  const admitAnonymousWrite = () => undefined;
   const interactions = new ReplayPremiereInteractions({
-    premiereId,
+    premiereId: resolvedPremiereId,
     checkpointDescriptors: [
       { id: "cp_first0001", sequence: 35 },
       { id: "cp_second001", sequence: 65 },
@@ -80,15 +216,18 @@ function interactionsHarness(overrides?: {
     getLiveVisibleSequence: () => 80,
     persistence: { async persist() {} },
     signAttribution: ({ shareId }) => `signed-${shareId}`,
-    canonicalPremiereUrl: `https://beta.proxywar.xyz/premiere/${premiereId}`,
+    canonicalPremiereUrl: `https://beta.proxywar.xyz/premiere/${resolvedPremiereId}`,
     now: () => new Date(nowMs),
     initialState: overrides?.initialState,
     wageringEnabled: overrides?.wageringEnabled ?? true,
     pointsLedger: overrides?.pointsLedger,
-    admitAnonymousWrite: () => undefined,
+    admitAnonymousWrite,
   });
   return {
     interactions,
+    premiereId: resolvedPremiereId,
+    admitAnonymousWrite,
+    getPremiereState: () => premiereState,
     setPremiereState(state: PremiereState) {
       premiereState = state;
     },
@@ -105,6 +244,112 @@ function interactionsHarness(overrides?: {
 }
 
 type Harness = ReturnType<typeof interactionsHarness>;
+
+/** Minimal `ReplayPremiereRuntimeReader` for these trading-path tests: only
+ * `readLifecycleState` (the "archived" write guard, and the session/
+ * heartbeat response field) is ever exercised — every other method is
+ * unreachable through the routes these tests hit. */
+function stubRuntimeReader(
+  runtimePremiereId: string,
+  readLifecycleState: () => PremiereState,
+): ReplayPremiereRuntimeReader {
+  return {
+    premiereId: runtimePremiereId,
+    readLifecycleState,
+    readBootstrap: () => {
+      throw new Error("not exercised by these trading-path tests");
+    },
+    readManifest: async () => {
+      throw new Error("not exercised by these trading-path tests");
+    },
+    readChunk: () => null,
+    readReveal: () => null,
+    readReleasedContext: () => null,
+    readLiveVisibleSequence: () => 80,
+    readLiveProjection: () => [],
+  };
+}
+
+/**
+ * Mounts BOTH the GitHub sign-in router and the real trading router
+ * (`createReplayPremiereRouter`), wired exactly like production —
+ * `resolveCanonicalParticipantId` bound to the same
+ * `ReplayPremiereIdentityLinkStore` the auth router writes through — so a
+ * test can drive the entire link-then-trade flow over real HTTP. `stores`
+ * lets a test supply an already-open (or freshly reopened) ledger/store
+ * pair, for simulating a restart.
+ */
+async function buildServer(
+  root: string,
+  h: Harness,
+  oauthState: StubOAuthState,
+  stores?: {
+    ledger: ReplayPremierePointsLedger;
+    identityLinkStore: ReplayPremiereIdentityLinkStore;
+  },
+): Promise<{
+  baseUrl: string;
+  identityLinkStore: ReplayPremiereIdentityLinkStore;
+  ledger: ReplayPremierePointsLedger;
+  close: () => Promise<void>;
+}> {
+  const ledger =
+    stores?.ledger ??
+    (await ReplayPremierePointsLedger.open(path.join(root, "points-ledger")));
+  const identityLinkStore =
+    stores?.identityLinkStore ??
+    (await ReplayPremiereIdentityLinkStore.open(
+      path.join(root, "identity-links"),
+      pointsMergerFor(ledger),
+    ));
+  const security = new ReplayPremiereGuestSecurity(guestSecurityOptions);
+  const registry = new ReplayPremiereHttpRegistry(h.admitAnonymousWrite);
+  registry.register({
+    runtime: stubRuntimeReader(h.premiereId, h.getPremiereState),
+    interactions: h.interactions,
+  });
+  const app = express();
+  app.use(
+    createReplayPremiereGithubAuthRouter({
+      security,
+      identityLinkStore,
+      oauthClient: stubOAuthClient(oauthState),
+      publicOrigin: origin,
+      // Exactly one live premiere for these tests — the real deploy
+      // resolves this the same way (most recently registered id).
+      resolveCurrentMarketIdentityGuard: () => h.interactions,
+      onOperatorError: () => {},
+    }),
+  );
+  app.use(
+    createReplayPremiereRouter({
+      registry,
+      security,
+      resolveClientAddress: () => "127.0.0.1",
+      // The fix under test: canonicalise the signed-cookie participant
+      // before it ever reaches `interactions`, at every authenticated
+      // boundary the trading router exposes.
+      resolveCanonicalParticipantId: (participantId) =>
+        identityLinkStore.resolveCanonicalParticipantId(participantId),
+      onOperatorError: () => {},
+    }),
+  );
+  const server = http.createServer(app);
+  await new Promise<void>((resolve) =>
+    server.listen(0, "127.0.0.1", resolve),
+  );
+  const address = server.address();
+  if (address === null || typeof address === "string") {
+    throw new Error("expected a bound TCP address");
+  }
+  return {
+    baseUrl: `http://127.0.0.1:${address.port}`,
+    identityLinkStore,
+    ledger,
+    close: () =>
+      new Promise<void>((resolve) => server.close(() => resolve())),
+  };
+}
 
 async function createSession(h: Harness, participantId: string) {
   return h.interactions.createViewerSession({
@@ -371,105 +616,6 @@ describe("ReplayPremiereInteractions.retireForIdentityLinkIfSafe / releaseIdenti
 });
 
 describe("ReplayPremiereGithubAuth against a real live market", () => {
-  const guestSecurityOptions = {
-    hmacKey: new Uint8Array(32).fill(9),
-    expectedOrigin: origin,
-    production: false,
-  };
-
-  interface StubOAuthState {
-    tokensByCode: Map<string, string>;
-    usersByToken: Map<
-      string,
-      { githubUserId: number; login: string; avatarUrl: string | null }
-    >;
-  }
-
-  function stubOAuthClient(state: StubOAuthState): ReplayPremiereGithubOAuthClient {
-    return {
-      buildAuthorizeUrl({ redirectUri, state: oauthState }) {
-        const url = new URL("https://github.example.test/login/oauth/authorize");
-        url.searchParams.set("redirect_uri", redirectUri);
-        url.searchParams.set("state", oauthState);
-        return url.toString();
-      },
-      async exchangeCodeForToken(code) {
-        const token = state.tokensByCode.get(code);
-        if (token === undefined) throw new Error("invalid_code");
-        return token;
-      },
-      async fetchUser(accessToken) {
-        const user = state.usersByToken.get(accessToken);
-        if (user === undefined) throw new Error("invalid_token");
-        return user;
-      },
-    };
-  }
-
-  interface RawResponse {
-    status: number;
-    headers: http.IncomingHttpHeaders;
-    body: string;
-  }
-
-  async function rawGet(
-    baseUrl: string,
-    pathname: string,
-    cookie?: string,
-  ): Promise<RawResponse> {
-    const url = new URL(baseUrl);
-    return new Promise((resolve, reject) => {
-      const request = http.request(
-        {
-          hostname: url.hostname,
-          port: url.port,
-          path: pathname,
-          method: "GET",
-          headers: {
-            referer: `${origin}/bet`,
-            ...(cookie === undefined ? {} : { cookie }),
-          },
-        },
-        (response) => {
-          const parts: Buffer[] = [];
-          response.on("data", (part: Buffer) => parts.push(part));
-          response.on("end", () =>
-            resolve({
-              status: response.statusCode ?? 0,
-              headers: response.headers,
-              body: Buffer.concat(parts).toString("utf8"),
-            }),
-          );
-        },
-      );
-      request.on("error", reject);
-      request.end();
-    });
-  }
-
-  function setCookiePairs(
-    headers: http.IncomingHttpHeaders,
-  ): Record<string, string> {
-    const raw = headers["set-cookie"] ?? [];
-    const pairs: Record<string, string> = {};
-    for (const entry of raw) {
-      const [pair] = entry.split(";", 1);
-      const separator = pair.indexOf("=");
-      pairs[pair.slice(0, separator)] = pair.slice(separator + 1);
-    }
-    return pairs;
-  }
-
-  function cookieHeader(pairs: Record<string, string>): string {
-    return Object.entries(pairs)
-      .map(([name, value]) => `${name}=${value}`)
-      .join("; ");
-  }
-
-  function participantIdOf(guestCookieValue: string): string {
-    return guestCookieValue.split(".")[1];
-  }
-
   let root: string;
 
   beforeEach(async () => {
@@ -481,46 +627,7 @@ describe("ReplayPremiereGithubAuth against a real live market", () => {
     await fs.rm(root, { recursive: true, force: true });
   });
 
-  async function buildServer(
-    h: Harness,
-    oauthState: StubOAuthState,
-  ): Promise<{ baseUrl: string; close: () => Promise<void> }> {
-    const ledger = await ReplayPremierePointsLedger.open(
-      path.join(root, "points-ledger"),
-    );
-    const identityLinkStore = await ReplayPremiereIdentityLinkStore.open(
-      path.join(root, "identity-links"),
-      pointsMergerFor(ledger),
-    );
-    const security = new ReplayPremiereGuestSecurity(guestSecurityOptions);
-    const app = express();
-    app.use(
-      createReplayPremiereGithubAuthRouter({
-        security,
-        identityLinkStore,
-        oauthClient: stubOAuthClient(oauthState),
-        publicOrigin: origin,
-        // Exactly one live premiere for these tests — the real deploy
-        // resolves this the same way (most recently registered id).
-        resolveCurrentMarketIdentityGuard: () => h.interactions,
-        onOperatorError: () => {},
-      }),
-    );
-    const server = http.createServer(app);
-    await new Promise<void>((resolve) =>
-      server.listen(0, "127.0.0.1", resolve),
-    );
-    const address = server.address();
-    if (address === null || typeof address === "string") {
-      throw new Error("expected a bound TCP address");
-    }
-    return {
-      baseUrl: `http://127.0.0.1:${address.port}`,
-      close: () => new Promise<void>((resolve) => server.close(() => resolve())),
-    };
-  }
-
-  it("ACCEPTANCE: two browsers linked to one GitHub id share one bankroll and one position set — buy in A, sell in B", async () => {
+  it("ACCEPTANCE: two browsers linked to one GitHub id share one bankroll and one position set — buy in A, sell in B, verified at the HTTP trading boundary", async () => {
     const h = interactionsHarness();
     const oauthState: StubOAuthState = {
       tokensByCode: new Map([
@@ -532,7 +639,7 @@ describe("ReplayPremiereGithubAuth against a real live market", () => {
         ["token-b", { githubUserId: 100, login: "daveey", avatarUrl: null }],
       ]),
     };
-    const { baseUrl, close } = await buildServer(h, oauthState);
+    const { baseUrl, close } = await buildServer(root, h, oauthState);
     try {
       // Browser A signs in first — no prior GitHub link for this id, so A
       // becomes its own canonical (a same-id resolution).
@@ -567,56 +674,126 @@ describe("ReplayPremiereGithubAuth against a real live market", () => {
         cookieHeader(cookiesB),
       );
       expect(linkB.headers.location).toBe("/bet?github=linked");
-      const cookiesAfterLinkB = setCookiePairs(linkB.headers);
-      const canonicalParticipantForB = participantIdOf(
-        cookiesAfterLinkB.proxywar_premiere_guest,
-      );
-      // The Sybil fix, verified: browser B's next request trades as A.
-      expect(canonicalParticipantForB).toBe(participantA);
+      // Deliberately keep using `cookiesB` — browser B's ORIGINAL,
+      // now-merged-away cookie from BEFORE the link, never the rewritten
+      // one the callback response also set. This is exactly the
+      // already-open-second-tab / never-reloaded scenario the durable
+      // resolver has to cover; the old test this one replaces used the
+      // POST-link cookie instead, which only proved the trivial case.
 
-      // Buy in browser A.
-      const sessionA = await createSession(h, participantA);
-      const buy = await order(h, {
-        participantId: participantA,
-        sessionId: sessionA.id,
-        seatId: "seat-1",
-        side: "buy",
-        amount: 200,
-        limitPrice: 100,
+      // Buy in browser A, over the real HTTP trading boundary.
+      const sessionA = await fetch(`${baseUrl}/api/premieres/${premiereId}/sessions`, {
+        method: "POST",
+        headers: tradeHeaders({
+          idempotencyKey: "http_session_a_0000001",
+          cookie: cookieHeader(cookiesA),
+        }),
+        body: JSON.stringify({ visible: true, observedSequence: 80 }),
+      }).then((response) => {
+        expect(response.status).toBe(201);
+        return response.json();
       });
+      expect(sessionA.session.participantId).toBe(participantA);
+
+      const buy = await fetch(`${baseUrl}/api/premieres/${premiereId}/market-orders`, {
+        method: "POST",
+        headers: tradeHeaders({
+          idempotencyKey: "http_order_a_00000001",
+          cookie: cookieHeader(cookiesA),
+          csrfToken: sessionA.csrfToken,
+        }),
+        body: JSON.stringify({
+          sessionId: sessionA.session.id,
+          seatId: "seat-1",
+          side: "buy",
+          amount: 200,
+          limitPrice: 100,
+          sequence: 80,
+        }),
+      }).then((response) => {
+        expect(response.status).toBe(200);
+        return response.json();
+      });
+      expect(buy.trade.participantId).toBe(participantA);
       expect(buy.trade.shares).toBeGreaterThan(0);
 
-      // Browser B — now trading as canonicalParticipantForB, i.e. A — must
-      // see that exact position and be able to sell it.
-      const marketViewFromB = h.interactions.readMarketState(
-        canonicalParticipantForB,
-      );
-      const heldByB = marketViewFromB?.positions?.[0]?.shares ?? 0;
+      // Browser B — presenting its OWN, still-signed, pre-link cookie —
+      // creates a session over HTTP. The Sybil fix, verified: it
+      // converges on A's existing session, not a fresh one of its own,
+      // because `interactions` only ever sees the canonical id.
+      const sessionB = await fetch(`${baseUrl}/api/premieres/${premiereId}/sessions`, {
+        method: "POST",
+        headers: tradeHeaders({
+          idempotencyKey: "http_session_b_0000001",
+          cookie: cookieHeader(cookiesB),
+        }),
+        body: JSON.stringify({ visible: true, observedSequence: 80 }),
+      }).then((response) => {
+        expect(response.status).toBe(201);
+        return response.json();
+      });
+      expect(sessionB.session.participantId).toBe(participantA);
+      expect(sessionB.session.id).toBe(sessionA.session.id);
+
+      // Browser B reads its "own" market position over HTTP — sees
+      // exactly what A just bought, because it is the same account.
+      const marketSelfB = await fetch(`${baseUrl}/api/premieres/${premiereId}/market/me`, {
+        headers: tradeHeaders({
+          cookie: cookieHeader(cookiesB),
+          csrfToken: sessionB.csrfToken,
+        }),
+      }).then((response) => {
+        expect(response.status).toBe(200);
+        return response.json();
+      });
+      const heldByB = marketSelfB.market.positions?.[0]?.shares ?? 0;
       expect(heldByB).toBe(buy.trade.shares);
 
-      const sessionB = await createSession(h, canonicalParticipantForB);
-      const sell = await order(h, {
-        participantId: canonicalParticipantForB,
-        sessionId: sessionB.id,
-        seatId: "seat-1",
-        side: "sell",
-        amount: heldByB,
-        limitPrice: 0,
+      // Sell the position from browser B, over HTTP.
+      const sell = await fetch(`${baseUrl}/api/premieres/${premiereId}/market-orders`, {
+        method: "POST",
+        headers: tradeHeaders({
+          idempotencyKey: "http_order_b_00000001",
+          cookie: cookieHeader(cookiesB),
+          csrfToken: sessionB.csrfToken,
+        }),
+        body: JSON.stringify({
+          sessionId: sessionB.session.id,
+          seatId: "seat-1",
+          side: "sell",
+          amount: heldByB,
+          limitPrice: 0,
+          sequence: 80,
+        }),
+      }).then((response) => {
+        expect(response.status).toBe(200);
+        return response.json();
       });
       expect(sell.trade.side).toBe("sell");
       expect(sell.trade.shares).toBe(heldByB);
-      const marketViewAfterSell = h.interactions.readMarketState(participantA);
-      expect(marketViewAfterSell?.positions?.[0]?.shares ?? 0).toBe(0);
+      expect(sell.trade.participantId).toBe(participantA);
 
-      // Original browser B's OWN old id was retired the instant it linked
-      // (no participation, so it was released — but it is no longer the
-      // id this browser presents, since it already holds the canonical
-      // cookie). Confirm the original id never independently accumulated
-      // any ledger state of its own.
-      const originalBView = h.interactions.readMarketState(
-        originalParticipantB,
-      );
-      expect(originalBView?.balance).toBe(1_000); // STARTING_BANKROLL, never granted
+      // Confirmed from A's side too — one shared position set, now flat,
+      // and one shared bankroll (never two independent 1,000-credit
+      // accounts). Both reads are taken at the same point in time, right
+      // after the sell, so they must agree exactly.
+      const marketSelfA = await fetch(`${baseUrl}/api/premieres/${premiereId}/market/me`, {
+        headers: tradeHeaders({
+          cookie: cookieHeader(cookiesA),
+          csrfToken: sessionA.csrfToken,
+        }),
+      }).then((response) => response.json());
+      const marketSelfBAfterSell = await fetch(
+        `${baseUrl}/api/premieres/${premiereId}/market/me`,
+        {
+          headers: tradeHeaders({
+            cookie: cookieHeader(cookiesB),
+            csrfToken: sessionB.csrfToken,
+          }),
+        },
+      ).then((response) => response.json());
+      expect(marketSelfA.market.positions?.[0]?.shares ?? 0).toBe(0);
+      expect(marketSelfA.market.balance).toBe(marketSelfBAfterSell.market.balance);
     } finally {
       await close();
     }
@@ -630,7 +807,7 @@ describe("ReplayPremiereGithubAuth against a real live market", () => {
         ["token-1", { githubUserId: 200, login: "trader", avatarUrl: null }],
       ]),
     };
-    const { baseUrl, close } = await buildServer(h, oauthState);
+    const { baseUrl, close } = await buildServer(root, h, oauthState);
     try {
       const start = await rawGet(baseUrl, "/api/premieres/auth/github/start");
       const cookies = setCookiePairs(start.headers);
@@ -685,7 +862,7 @@ describe("ReplayPremiereGithubAuth against a real live market", () => {
         ["token-1", { githubUserId: 201, login: "flat-trader", avatarUrl: null }],
       ]),
     };
-    const { baseUrl, close } = await buildServer(h, oauthState);
+    const { baseUrl, close } = await buildServer(root, h, oauthState);
     try {
       const start = await rawGet(baseUrl, "/api/premieres/auth/github/start");
       const cookies = setCookiePairs(start.headers);
@@ -748,7 +925,7 @@ describe("ReplayPremiereGithubAuth against a real live market", () => {
     };
     // Router mounted (as it always is in production once GitHub OAuth is
     // configured) but never called.
-    await buildServer(h, oauthState).then(({ close }) => close());
+    await buildServer(root, h, oauthState).then(({ close }) => close());
 
     const session = await createSession(h, guestB);
     const buy = await order(h, {
@@ -840,6 +1017,458 @@ describe("settlement-time canonicalisation (second line of defense)", () => {
       ).toBe(false);
     } finally {
       await fs.rm(root, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("durable canonical resolution at the HTTP trading boundary (across restarts and premieres)", () => {
+  let root: string;
+
+  beforeEach(async () => {
+    const realTemporaryRoot = await fs.realpath(os.tmpdir());
+    root = await fs.mkdtemp(
+      path.join(realTemporaryRoot, "durable-canonical-"),
+    );
+  });
+
+  afterEach(async () => {
+    await fs.rm(root, { recursive: true, force: true });
+  });
+
+  const emptyOauthState: StubOAuthState = {
+    tokensByCode: new Map(),
+    usersByToken: new Map(),
+  };
+
+  it("an old, still-valid signed cookie resolves to the canonical account across a simulated origin restart — new interactions instance, reopened identity store", async () => {
+    const ledger1 = await ReplayPremierePointsLedger.open(
+      path.join(root, "points-ledger"),
+    );
+    const identityLinkStore1 = await ReplayPremiereIdentityLinkStore.open(
+      path.join(root, "identity-links"),
+      pointsMergerFor(ledger1),
+    );
+    await identityLinkStore1.linkOrMerge(guestA, {
+      githubUserId: 600,
+      login: "daveey",
+      avatarUrl: null,
+    });
+    const linked = await identityLinkStore1.linkOrMerge(guestB, {
+      githubUserId: 600,
+      login: "daveey",
+      avatarUrl: null,
+    });
+    expect(linked.merged).toBe(true);
+    expect(linked.canonicalParticipantId).toBe(guestA);
+
+    const h1 = interactionsHarness();
+    const server1 = await buildServer(root, h1, emptyOauthState, {
+      ledger: ledger1,
+      identityLinkStore: identityLinkStore1,
+    });
+    let sessionId: string;
+    let boughtShares: number;
+    try {
+      const security = new ReplayPremiereGuestSecurity(guestSecurityOptions);
+      const cookieA = security
+        .mintGuestCookieForParticipant(guestA)
+        .split(";", 1)[0];
+
+      const sessionBody = await fetch(
+        `${server1.baseUrl}/api/premieres/${premiereId}/sessions`,
+        {
+          method: "POST",
+          headers: tradeHeaders({
+            idempotencyKey: "restart_session_a_00001",
+            cookie: cookieA,
+          }),
+          body: JSON.stringify({ visible: true, observedSequence: 80 }),
+        },
+      ).then((response) => {
+        expect(response.status).toBe(201);
+        return response.json();
+      });
+      expect(sessionBody.session.participantId).toBe(guestA);
+      sessionId = sessionBody.session.id;
+
+      const buy = await fetch(
+        `${server1.baseUrl}/api/premieres/${premiereId}/market-orders`,
+        {
+          method: "POST",
+          headers: tradeHeaders({
+            idempotencyKey: "restart_order_a_0000001",
+            cookie: cookieA,
+            csrfToken: sessionBody.csrfToken,
+          }),
+          body: JSON.stringify({
+            sessionId,
+            seatId: "seat-1",
+            side: "buy",
+            amount: 200,
+            limitPrice: 100,
+            sequence: 80,
+          }),
+        },
+      ).then((response) => {
+        expect(response.status).toBe(200);
+        return response.json();
+      });
+      boughtShares = buy.trade.shares;
+      expect(boughtShares).toBeGreaterThan(0);
+    } finally {
+      await server1.close();
+    }
+
+    // Simulated origin restart: a brand-new `ReplayPremiereInteractions`
+    // recovered from exactly the snapshot the old process would have
+    // persisted, and a brand-new `ReplayPremiereIdentityLinkStore` opened
+    // cold from disk — nothing in-memory carries over from server1.
+    const recoveredState = h1.interactions.readState();
+    const h2 = interactionsHarness({ initialState: recoveredState });
+    const ledger2 = await ReplayPremierePointsLedger.open(
+      path.join(root, "points-ledger"),
+    );
+    const identityLinkStore2 = await ReplayPremiereIdentityLinkStore.open(
+      path.join(root, "identity-links"),
+      pointsMergerFor(ledger2),
+    );
+    const server2 = await buildServer(root, h2, emptyOauthState, {
+      ledger: ledger2,
+      identityLinkStore: identityLinkStore2,
+    });
+    try {
+      // Browser B's cookie was signed against guestB and never touched
+      // since — exactly the stale credential a browser that never
+      // reloaded still presents to a freshly restarted origin.
+      const security = new ReplayPremiereGuestSecurity(guestSecurityOptions);
+      const cookieB = security
+        .mintGuestCookieForParticipant(guestB)
+        .split(";", 1)[0];
+
+      const sessionBody = await fetch(
+        `${server2.baseUrl}/api/premieres/${premiereId}/sessions`,
+        {
+          method: "POST",
+          headers: tradeHeaders({
+            idempotencyKey: "restart_session_b_00001",
+            cookie: cookieB,
+          }),
+          body: JSON.stringify({ visible: true, observedSequence: 80 }),
+        },
+      ).then((response) => {
+        expect(response.status).toBe(201);
+        return response.json();
+      });
+      // Session creation with a merged-away cookie yields a session for
+      // the CANONICAL participant, on a process that never held B's
+      // identity in memory at all — and converges on the SAME session A
+      // already had.
+      expect(sessionBody.session.participantId).toBe(guestA);
+      expect(sessionBody.session.id).toBe(sessionId);
+
+      const marketBody = await fetch(
+        `${server2.baseUrl}/api/premieres/${premiereId}/market/me`,
+        {
+          headers: tradeHeaders({
+            cookie: cookieB,
+            csrfToken: sessionBody.csrfToken,
+          }),
+        },
+      ).then((response) => {
+        expect(response.status).toBe(200);
+        return response.json();
+      });
+      // The canonical bankroll and position from BEFORE the restart —
+      // never a fresh 1,000 credits.
+      expect(marketBody.market.positions?.[0]?.shares ?? 0).toBe(
+        boughtShares,
+      );
+      expect(marketBody.market.balance).not.toBe(1_000);
+    } finally {
+      await server2.close();
+    }
+  });
+
+  it("the same old cookie still resolves to canonical on a later premiere where ledgerGranted is empty — the case the retirement guard structurally cannot cover", async () => {
+    const ledger = await ReplayPremierePointsLedger.open(
+      path.join(root, "points-ledger"),
+    );
+    const identityLinkStore = await ReplayPremiereIdentityLinkStore.open(
+      path.join(root, "identity-links"),
+      pointsMergerFor(ledger),
+    );
+    await identityLinkStore.linkOrMerge(guestA, {
+      githubUserId: 700,
+      login: "daveey",
+      avatarUrl: null,
+    });
+    await identityLinkStore.linkOrMerge(guestB, {
+      githubUserId: 700,
+      login: "daveey",
+      avatarUrl: null,
+    });
+
+    // A brand-new, later premiere: a fresh `ReplayPremiereInteractions`
+    // that has never seen either id — `ledgerGranted` is empty, so
+    // `retireForIdentityLinkIfSafe` was never even called here, let alone
+    // recorded anything against guestB. If durable resolution were
+    // missing, this is the exact case nothing else would catch.
+    const laterPremiereId = "prem_bbbbbbbbbbbbbbbb";
+    const h = interactionsHarness({ premiereId: laterPremiereId });
+    const server = await buildServer(root, h, emptyOauthState, {
+      ledger,
+      identityLinkStore,
+    });
+    try {
+      const security = new ReplayPremiereGuestSecurity(guestSecurityOptions);
+      const cookieB = security
+        .mintGuestCookieForParticipant(guestB)
+        .split(";", 1)[0];
+
+      const sessionBody = await fetch(
+        `${server.baseUrl}/api/premieres/${laterPremiereId}/sessions`,
+        {
+          method: "POST",
+          headers: tradeHeaders({
+            idempotencyKey: "next_premiere_session_b1",
+            cookie: cookieB,
+          }),
+          body: JSON.stringify({ visible: true, observedSequence: 80 }),
+        },
+      ).then((response) => {
+        expect(response.status).toBe(201);
+        return response.json();
+      });
+      expect(sessionBody.session.participantId).toBe(guestA);
+
+      const buy = await fetch(
+        `${server.baseUrl}/api/premieres/${laterPremiereId}/market-orders`,
+        {
+          method: "POST",
+          headers: tradeHeaders({
+            idempotencyKey: "next_premiere_order_b001",
+            cookie: cookieB,
+            csrfToken: sessionBody.csrfToken,
+          }),
+          body: JSON.stringify({
+            sessionId: sessionBody.session.id,
+            seatId: "seat-1",
+            side: "buy",
+            amount: 150,
+            limitPrice: 100,
+            sequence: 80,
+          }),
+        },
+      ).then((response) => {
+        expect(response.status).toBe(200);
+        return response.json();
+      });
+      expect(buy.trade.participantId).toBe(guestA);
+    } finally {
+      await server.close();
+    }
+  });
+
+  it("an unlinked guest is completely untouched by the identity-link machinery, and the resolver adds no I/O once warm", async () => {
+    const ledger = await ReplayPremierePointsLedger.open(
+      path.join(root, "points-ledger"),
+    );
+    const identityLinkStore = await ReplayPremiereIdentityLinkStore.open(
+      path.join(root, "identity-links"),
+      pointsMergerFor(ledger),
+    );
+    const h = interactionsHarness();
+    const server = await buildServer(root, h, emptyOauthState, {
+      ledger,
+      identityLinkStore,
+    });
+    const readFileSpy = vi.spyOn(fs, "readFile");
+    const linkFileReadCount = () =>
+      readFileSpy.mock.calls.filter(([target]) =>
+        String(target).includes("github-identity-links"),
+      ).length;
+    try {
+      const sessionResponse = await fetch(
+        `${server.baseUrl}/api/premieres/${premiereId}/sessions`,
+        {
+          method: "POST",
+          headers: tradeHeaders({ idempotencyKey: "unlinked_session_0001" }),
+          body: JSON.stringify({ visible: true, observedSequence: 80 }),
+        },
+      );
+      expect(sessionResponse.status).toBe(201);
+      const cookie = sessionResponse.headers
+        .get("set-cookie")
+        ?.split(";", 1)[0];
+      const sessionBody = await sessionResponse.json();
+      const rawParticipantId = sessionBody.session.participantId;
+      // Never touched an alias — no link exists for this guest, so it
+      // must trade as exactly itself.
+
+      // The very first authenticated boundary crossing pays exactly one
+      // cold read to warm the resolver's cache.
+      expect(linkFileReadCount()).toBe(1);
+
+      for (let i = 0; i < 5; i += 1) {
+        const marketResponse = await fetch(
+          `${server.baseUrl}/api/premieres/${premiereId}/market/me`,
+          {
+            headers: tradeHeaders({ cookie, csrfToken: sessionBody.csrfToken }),
+          },
+        );
+        expect(marketResponse.status).toBe(200);
+        const marketBody = await marketResponse.json();
+        expect(marketBody.market.balance).toBe(1_000);
+      }
+
+      const buyResponse = await fetch(
+        `${server.baseUrl}/api/premieres/${premiereId}/market-orders`,
+        {
+          method: "POST",
+          headers: tradeHeaders({
+            idempotencyKey: "unlinked_order_0001",
+            cookie,
+            csrfToken: sessionBody.csrfToken,
+          }),
+          body: JSON.stringify({
+            sessionId: sessionBody.session.id,
+            seatId: "seat-1",
+            side: "buy",
+            amount: 100,
+            limitPrice: 100,
+            sequence: 80,
+          }),
+        },
+      );
+      expect(buyResponse.status).toBe(200);
+      const buyBody = await buyResponse.json();
+      expect(buyBody.trade.participantId).toBe(rawParticipantId);
+
+      // Five more reads and one write after the cold start — the cache
+      // absorbed every one of them: still exactly one real file read
+      // against the identity-link file for the whole test.
+      expect(linkFileReadCount()).toBe(1);
+    } finally {
+      readFileSpy.mockRestore();
+      await server.close();
+    }
+  });
+
+  it("GitHub totally unreachable never blocks, delays, or fails a trade — resolution never leaves the local filesystem", async () => {
+    const ledger = await ReplayPremierePointsLedger.open(
+      path.join(root, "points-ledger"),
+    );
+    const identityLinkStore = await ReplayPremiereIdentityLinkStore.open(
+      path.join(root, "identity-links"),
+      pointsMergerFor(ledger),
+    );
+    // Established while GitHub was reachable — this is the durable state
+    // resolution has to serve, not something being tested here.
+    await identityLinkStore.linkOrMerge(guestA, {
+      githubUserId: 800,
+      login: "daveey",
+      avatarUrl: null,
+    });
+    await identityLinkStore.linkOrMerge(guestB, {
+      githubUserId: 800,
+      login: "daveey",
+      avatarUrl: null,
+    });
+
+    const h = interactionsHarness();
+    const server = await buildServer(root, h, emptyOauthState, {
+      ledger,
+      identityLinkStore,
+    });
+    const realFetch = globalThis.fetch.bind(globalThis);
+    const fetchSpy = vi
+      .spyOn(globalThis, "fetch")
+      .mockImplementation(async (input, init) => {
+        const url = typeof input === "string" ? input : String(input);
+        if (url.startsWith(server.baseUrl)) {
+          return realFetch(input, init);
+        }
+        // Anything else — GitHub's API, in production — is simulated as
+        // completely unreachable: an immediate throw, never a hang.
+        throw new Error(
+          `GitHub-unreachable simulation: unexpected outbound request to ${url}`,
+        );
+      });
+    try {
+      const security = new ReplayPremiereGuestSecurity(guestSecurityOptions);
+      const cookieB = security
+        .mintGuestCookieForParticipant(guestB)
+        .split(";", 1)[0];
+
+      const sessionBody = await fetch(
+        `${server.baseUrl}/api/premieres/${premiereId}/sessions`,
+        {
+          method: "POST",
+          headers: tradeHeaders({
+            idempotencyKey: "unreachable_session_b001",
+            cookie: cookieB,
+          }),
+          body: JSON.stringify({ visible: true, observedSequence: 80 }),
+        },
+      ).then((response) => {
+        expect(response.status).toBe(201);
+        return response.json();
+      });
+      expect(sessionBody.session.participantId).toBe(guestA);
+
+      const buy = await fetch(
+        `${server.baseUrl}/api/premieres/${premiereId}/market-orders`,
+        {
+          method: "POST",
+          headers: tradeHeaders({
+            idempotencyKey: "unreachable_order_b0001",
+            cookie: cookieB,
+            csrfToken: sessionBody.csrfToken,
+          }),
+          body: JSON.stringify({
+            sessionId: sessionBody.session.id,
+            seatId: "seat-1",
+            side: "buy",
+            amount: 100,
+            limitPrice: 100,
+            sequence: 80,
+          }),
+        },
+      ).then((response) => {
+        expect(response.status).toBe(200);
+        return response.json();
+      });
+      expect(buy.trade.participantId).toBe(guestA);
+
+      const sell = await fetch(
+        `${server.baseUrl}/api/premieres/${premiereId}/market-orders`,
+        {
+          method: "POST",
+          headers: tradeHeaders({
+            idempotencyKey: "unreachable_order_b0002",
+            cookie: cookieB,
+            csrfToken: sessionBody.csrfToken,
+          }),
+          body: JSON.stringify({
+            sessionId: sessionBody.session.id,
+            seatId: "seat-1",
+            side: "sell",
+            amount: buy.trade.shares,
+            limitPrice: 0,
+            sequence: 80,
+          }),
+        },
+      ).then((response) => {
+        expect(response.status).toBe(200);
+        return response.json();
+      });
+      expect(sell.trade.participantId).toBe(guestA);
+      // Nothing above ever reached outside the local loopback server —
+      // the mock throws immediately on anything else, so an unreachable
+      // GitHub would have failed this test just as loudly as a hang.
+    } finally {
+      fetchSpy.mockRestore();
+      await server.close();
     }
   });
 });
