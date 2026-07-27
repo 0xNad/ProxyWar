@@ -1780,6 +1780,30 @@ export class ReplayPremiereInteractions {
           persist: false,
         };
       }
+      // Participant-scoped convergence: a brand-new tab or a cold reload
+      // has no way to know the idempotencyKey a PRIOR tab used (that key
+      // is per-request, not persisted client-side), so the exact-key check
+      // above can never catch it. Without this, every new tab for the same
+      // guest cookie would mint a genuinely new session record — the
+      // resumability hole this exists to close. If the participant already
+      // has ANY live (never-ended) session for this premiere, hand back
+      // that one instead of creating another: every tab and every reload
+      // converges on the single session a real participant actually has,
+      // and the creation caps below are only ever evaluated on the FIRST
+      // session for a participant, so they keep protecting against a
+      // genuinely abusive client rather than penalizing legitimate tabs.
+      const existingLiveSession = next.sessions.find(
+        (session) =>
+          session.participantId === options.participantId &&
+          session.endedAt === null,
+      );
+      if (existingLiveSession !== undefined) {
+        return {
+          result: clone(existingLiveSession),
+          payload: json({ sessionId: existingLiveSession.id, reused: true }),
+          persist: false,
+        };
+      }
       const participantSessions = next.sessions.filter(
         (session) => session.participantId === options.participantId,
       );
