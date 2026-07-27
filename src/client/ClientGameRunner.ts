@@ -77,7 +77,10 @@ import {
   ReplayPresentationCadenceEvent,
   replayPresentationIntervalMsForPlaybackRate,
 } from "./graphics/ReplayPresentationSmoothing";
-import { GoToPlayerEvent } from "./graphics/TransformHandler";
+import {
+  GoToPlayerEvent,
+  isReplaySpectatorView,
+} from "./graphics/TransformHandler";
 
 function isFullMapReplayRecordingView(): boolean {
   const recordingWindow = window as typeof window & {
@@ -867,8 +870,17 @@ export class ClientGameRunner {
     if (
       this.hasFocusedReplaySpectator ||
       !isReplayLobby(this.lobby) ||
-      this.shouldLockFullMapReplayView()
+      this.shouldLockFullMapReplayView() ||
+      isReplaySpectatorView()
     ) {
+      // isReplaySpectatorView() (bet/premiere/ai-league-replay routes) keeps
+      // the full-map cover-fit set by GameRenderer.initialize -> centerAll
+      // untouched: panning toward one agent's name label would push the
+      // camera past that fit's (intentionally tight, no-letterbox) bounds
+      // and reveal background on the opposite edge. The map staying fully
+      // visible is the point for these routes — see TransformHandler's
+      // onGoToPlayer, which already drops the zoom component for the same
+      // reason.
       return;
     }
     if (this.gameView.inSpawnPhase()) {

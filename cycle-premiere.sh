@@ -3,29 +3,59 @@
 #
 #   ./cycle-premiere.sh [lead-minutes]
 #
-# Generates a new controlled-exhibition match, admits it against the public
-# origin, restarts the origin server, and prints the URL. Default lead time is
-# 4 minutes, which is enough for the restart plus a browser to be open before
-# trading opens.
+# Generates a new controlled-exhibition match, resets the premiere state root,
+# admits the match against the public origin, and brings the origin back up on
+# it. Prints the URL. Default lead time is 4 minutes: enough for the restart
+# plus a browser to be open before trading opens.
 #
-# Requires the origin server to already be running and reachable at the public
-# URL: admission's leak audit fetches https://bet.proxywar.xyz/league and needs
-# a 200 back. Start it first (see RUNBOOK), then run this.
+# This REPLACES whatever premiere was live. The state root is wiped every run,
+# which is deliberate - the demo surface shows one live market at a time, and
+# a root accumulates unusable admissions after a few cycles otherwise
+# (premiere_not_registered, RUNBOOK 13.6). Any in-flight session, position, or
+# bankroll on the previous premiere is destroyed with it.
+#
+# Requires: the origin manageable under the name below, and nothing else
+# holding the state root's single-writer lock.
 set -euo pipefail
 
 LEAD_MIN="${1:-4}"
 ORIGIN="https://bet.proxywar.xyz"
-STATE_ROOT="$HOME/.proxywar-bet-live/replay-premiere"
+ORIGIN_PORT=8792
+PROC_NAME=bet-live
+STATE_PARENT="$HOME/.proxywar-bet-live"
+STATE_ROOT="$STATE_PARENT/replay-premiere"
 STAGING=/tmp/pw-bet-staging
 MANIFESTS=/tmp/pw-bet-manifests
 ADMIT_IN=/private/tmp/pw-bet-admit
 HERE="$(cd "$(dirname "$0")" && pwd)"
 cd "$HERE"
 
-SUFFIX="$(date +%s | tail -c 7)"
-RUN_ID="bet-cycle-${SUFFIX}"
-# premiere id must be prem_ + exactly 20 lowercase alphanumerics
-PREMIERE_ID="prem_$(LC_ALL=C tr -dc 'a-z0-9' </dev/urandom | head -c 20)"
+RUN_ID="bet-cycle-$(date +%s)"
+# prem_ + exactly 20 lowercase alphanumerics. openssl, not `tr </dev/urandom`,
+# which exits 141 on SIGPIPE and takes the script down under pipefail.
+PREMIERE_ID="prem_$(openssl rand -hex 10)"
+
+restart_origin() {
+  if command -v omp >/dev/null 2>&1 && omp hub restart "$PROC_NAME" >/dev/null 2>&1; then
+    return 0
+  fi
+  echo "    !! could not restart '$PROC_NAME' automatically."
+  echo "       Bring the origin up yourself on port ${ORIGIN_PORT} with"
+  echo "       PROXYWAR_REPLAY_PREMIERE_STATE_ROOT=${STATE_ROOT}, then re-run."
+  return 1
+}
+
+wait_for_origin() {
+  for _ in $(seq 1 40); do
+    if [ "$(curl -s -o /dev/null -w '%{http_code}' -m 5 \
+            "http://127.0.0.1:${ORIGIN_PORT}/league" || true)" = "200" ]; then
+      return 0
+    fi
+    sleep 2
+  done
+  echo "    !! origin did not come back on port ${ORIGIN_PORT}"
+  return 1
+}
 
 echo "==> generating match bundle ${RUN_ID}"
 mkdir -p "$STAGING"
@@ -52,10 +82,10 @@ SHA="$(shasum -a 256 "$BUNDLE" | awk '{print $1}')"
 # checkpointSequencesForTurnCount in ReplayPremiereLoopCore.ts.
 echo "==> writing admission inputs (lead ${LEAD_MIN}m)"
 mkdir -p "$ADMIT_IN"
-[ -f "$ADMIT_IN/nonce.bin" ] || {
+if [ ! -f "$ADMIT_IN/nonce.bin" ]; then
   python3 -c "import os;open('$ADMIT_IN/nonce.bin','wb').write(os.urandom(32))"
   chmod 600 "$ADMIT_IN/nonce.bin"
-}
+fi
 python3 - "$BUNDLE" "$LEAD_MIN" <<'PY'
 import json, sys, datetime
 bundle, lead = sys.argv[1], int(sys.argv[2])
@@ -87,6 +117,25 @@ json.dump({
 print(f"    turns={tc} duration={tc*d['replay']['turnIntervalMs']/60000:.1f}min")
 PY
 
+# The state root must be empty before admitting or the catalog fills with
+# unusable records. It also must be 0700, or the server refuses to boot with
+# private_state_root_not_private. Stop the origin first: it holds a
+# single-writer lock on the root.
+echo "==> resetting state root"
+if command -v omp >/dev/null 2>&1; then
+  omp hub stop "$PROC_NAME" >/dev/null 2>&1 || true
+fi
+rm -rf "$STATE_PARENT"
+mkdir -p "$STATE_ROOT"
+chmod 700 "$STATE_PARENT" "$STATE_ROOT"
+
+# Admission's leak audit fetches the PUBLIC origin and needs a 200 from
+# /league, so the origin has to be serving before we admit - even though it
+# does not yet know about this premiere.
+echo "==> bringing origin up for the leak audit"
+restart_origin
+wait_for_origin
+
 echo "==> admitting ${PREMIERE_ID}"
 GAME_ENV=dev PROXYWAR_PUBLIC_URL="$ORIGIN" npx tsx src/scripts/replay-premiere-admit.ts \
   --premiere-id="$PREMIERE_ID" \
@@ -101,22 +150,13 @@ GAME_ENV=dev PROXYWAR_PUBLIC_URL="$ORIGIN" npx tsx src/scripts/replay-premiere-a
   --nonce-file="$ADMIT_IN/nonce.bin" >/dev/null 2>&1
 
 # Admission never hot-registers; the catalog is rebuilt at boot.
-echo "==> restarting origin"
-omp hub restart bet-live >/dev/null 2>&1 || \
-  echo "    (restart bet-live yourself: the origin must reboot to register it)"
-sleep 18
+echo "==> restarting origin onto the new premiere"
+restart_origin
+wait_for_origin
 
 URL="${ORIGIN}/bet/${PREMIERE_ID}"
 CODE="$(curl -s -o /dev/null -w '%{http_code}' -m 25 "$URL" || true)"
 echo
 echo "    ${URL}"
-echo "    http ${CODE} — trading opens in ~${LEAD_MIN}m"
-[ "$CODE" = "200" ] || {
-  echo
-  echo "    Not 200. Most likely the state root has accumulated too many"
-  echo "    admissions (premiere_not_registered — see RUNBOOK 13.6):"
-  echo "      rm -rf ~/.proxywar-bet-live && mkdir -p '${STATE_ROOT}'"
-  echo "      chmod 700 ~/.proxywar-bet-live '${STATE_ROOT}'"
-  echo "    then restart the origin and re-run this."
-  exit 1
-}
+echo "    http ${CODE} - trading opens in ~${LEAD_MIN}m"
+[ "$CODE" = "200" ]

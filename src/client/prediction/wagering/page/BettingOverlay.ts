@@ -452,8 +452,13 @@ export class PremiereBettingOverlay extends LitElement {
       <header
         class="flex flex-col gap-1 border-b border-line bg-surface/95 px-4 py-3"
       >
-        <div class="flex items-center justify-between gap-2">
-          <h2 class="truncate text-base font-bold text-ink">${model.title}</h2>
+        <div class="flex items-start justify-between gap-2">
+          <h2
+            class="line-clamp-2 break-words text-base font-bold leading-snug text-ink"
+            title=${model.title}
+          >
+            ${model.title}
+          </h2>
           <span class="flex shrink-0 items-center gap-2">
             ${live
               ? html`<span

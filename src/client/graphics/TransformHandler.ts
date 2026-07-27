@@ -14,7 +14,7 @@ import { CenterCameraEvent, DragEvent, ZoomEvent } from "../InputHandler";
  * sufficient (they are redundant by design — both derive from the same replay routes);
  * normal live play sets NEITHER, so live play is byte-for-byte unchanged.
  */
-function isReplaySpectatorView(): boolean {
+export function isReplaySpectatorView(): boolean {
   const replayWindow = window as typeof window & {
     __PROXYWAR_AI_REPLAY__?: boolean;
   };
@@ -54,6 +54,14 @@ export class TransformHandler {
   private targetScale: number | null = null;
   private intervalID: NodeJS.Timeout | null = null;
   private changed = false;
+  // Set by centerAll() for replay/spectator full-map views: true when the
+  // current scale/offset were chosen via "cover" fit (map fills the
+  // viewport, cropping the excess edge instead of letterboxing — see
+  // centerAll's comment). Read by clampOffsets()/onZoom() so any later pan
+  // or zoom can never re-expose the background those routes deliberately
+  // hide.
+  private coverFitActive = false;
+  private coverMinScale = 0;
 
   constructor(
     private game: GameView,
@@ -314,6 +322,10 @@ export class TransformHandler {
         (1 / (2 * oldScale) - 1 / (2 * this.scale));
     }
 
+    if (this.coverFitActive) {
+      this.clampOffsets();
+    }
+
     this.changed = true;
   }
 
@@ -323,8 +335,15 @@ export class TransformHandler {
     const zoomFactor = 1 + event.delta / 600;
     this.scale /= zoomFactor;
 
-    // Clamp the scale to prevent extreme zooming
-    this.scale = Math.max(0.2, Math.min(20, this.scale));
+    // Clamp the scale to prevent extreme zooming; cover-fit spectator
+    // views (see centerAll/clampOffsets) additionally floor it at
+    // coverMinScale so scrolling out can never shrink the map below the
+    // viewport and expose background.
+    this.scale = Math.max(
+      0.2,
+      this.coverFitActive ? this.coverMinScale : 0.2,
+      Math.min(20, this.scale),
+    );
 
     const canvasCoords = this.screenToCanvasCoordinates(event.x, event.y);
 
@@ -351,19 +370,36 @@ export class TransformHandler {
     const gameH = this.game.height();
     const scale = this.scale;
 
-    // Allow panning so that up to half of the viewport can be outside the map on each side.
-    // This lets a map corner be placed at the screen center, but no further.
-    // Derivation (X axis):
-    //   gameLeftX = -gameWidth/(2*scale) + offsetX + gameWidth/2 >= -vw/2
-    //   gameRightX = (canvasWidth - gameWidth/2)/scale + offsetX + gameWidth/2 <= gameWidth + vw/2
-    // Solving gives:
-    //   minOffsetX = -gameWidth/2 + (gameWidth - canvasWidth) / (2*scale)
-    //   maxOffsetX =  gameWidth/2 + (gameWidth - canvasWidth) / (2*scale)
-    const minOffsetX = -gameWidth / 2 + (gameWidth - canvasWidth) / (2 * scale);
-    const maxOffsetX = gameWidth / 2 + (gameWidth - canvasWidth) / (2 * scale);
-
-    const minOffsetY = -gameH / 2 + (gameH - canvasHeight) / (2 * scale);
-    const maxOffsetY = gameH / 2 + (gameH - canvasHeight) / (2 * scale);
+    let minOffsetX: number;
+    let maxOffsetX: number;
+    let minOffsetY: number;
+    let maxOffsetY: number;
+    if (this.coverFitActive) {
+      // Cover-fit (replay/spectator full-map view — see centerAll)
+      // intentionally leaves zero-or-thin slack on one axis so the map
+      // fills the viewport with no letterboxing. Any pan on that axis — a
+      // drag, the initial spectator auto-focus, a leaderboard/event "go
+      // to" click — must stay within whatever slack exists, or it drags
+      // the map's edge past the canvas and reveals background. Zero
+      // background exposure allowed, unlike the generous bounds below.
+      minOffsetX = gameWidth / (2 * scale) - gameWidth / 2;
+      maxOffsetX = gameWidth / 2 - (canvasWidth - gameWidth / 2) / scale;
+      minOffsetY = gameH / (2 * scale) - gameH / 2;
+      maxOffsetY = gameH / 2 - (canvasHeight - gameH / 2) / scale;
+    } else {
+      // Allow panning so that up to half of the viewport can be outside the map on each side.
+      // This lets a map corner be placed at the screen center, but no further.
+      // Derivation (X axis):
+      //   gameLeftX = -gameWidth/(2*scale) + offsetX + gameWidth/2 >= -vw/2
+      //   gameRightX = (canvasWidth - gameWidth/2)/scale + offsetX + gameWidth/2 <= gameWidth + vw/2
+      // Solving gives:
+      //   minOffsetX = -gameWidth/2 + (gameWidth - canvasWidth) / (2*scale)
+      //   maxOffsetX =  gameWidth/2 + (gameWidth - canvasWidth) / (2*scale)
+      minOffsetX = -gameWidth / 2 + (gameWidth - canvasWidth) / (2 * scale);
+      maxOffsetX = gameWidth / 2 + (gameWidth - canvasWidth) / (2 * scale);
+      minOffsetY = -gameH / 2 + (gameH - canvasHeight) / (2 * scale);
+      maxOffsetY = gameH / 2 + (gameH - canvasHeight) / (2 * scale);
+    }
 
     // Clamp offsets within computed bounds on each axis
     if (this.offsetX < minOffsetX) {
@@ -406,19 +442,45 @@ export class TransformHandler {
   }
 
   centerAll(fit: number = 1) {
-    //position entire map centered on the screen
-
+    //position entire map centered on the screen.
+    //
+    //Replay/spectator surfaces (bet/premiere/ai-league-replay routes) use a
+    //"cover" fit instead of "contain": the map fills the viewport with no
+    //letterboxing, cropping a little of the far edges instead. The whole
+    //appeal of watching is territory filling the frame, so dead grey bands
+    //(which "contain" produces whenever the viewport aspect ratio doesn't
+    //match the map's) read as a broken layout, not a deliberate one. Live
+    //play is unaffected: it never reaches here with isReplaySpectatorView()
+    //true, and even when this fires during its own transient startup call,
+    //it's immediately superseded by the real spawn/goToPlayer zoom.
+    //
+    //Cropping is skipped back to "contain" outside a plausible desktop
+    //aspect-ratio band (mirrors GameModeSelector's object-contain fallback
+    //for extreme map aspect ratios) so a portrait/mobile viewport doesn't
+    //get most of the map cropped away.
     const vpWidth = this.boundingRect().width;
     const vpHeight = this.boundingRect().height;
     const mapWidth = this.game.width();
     const mapHeight = this.game.height();
 
-    const scHor = (vpWidth / mapWidth) * fit;
-    const scVer = (vpHeight / mapHeight) * fit;
-    const tScale = Math.min(scHor, scVer);
+    const aspectRatioDeviation = vpWidth / vpHeight / (mapWidth / mapHeight);
+    const cover =
+      isReplaySpectatorView() &&
+      aspectRatioDeviation > 0.5 &&
+      aspectRatioDeviation < 2;
+    const effectiveFit = cover ? Math.max(fit, 1) : fit;
+
+    const scHor = (vpWidth / mapWidth) * effectiveFit;
+    const scVer = (vpHeight / mapHeight) * effectiveFit;
+    const tScale = cover ? Math.max(scHor, scVer) : Math.min(scHor, scVer);
 
     const oHor = (mapWidth - vpWidth) / 2 / tScale;
     const oVer = (mapHeight - vpHeight) / 2 / tScale;
+
+    this.coverFitActive = cover;
+    this.coverMinScale = cover
+      ? Math.max(vpWidth / mapWidth, vpHeight / mapHeight)
+      : 0;
 
     this.override(oHor, oVer, tScale);
   }
