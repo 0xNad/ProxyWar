@@ -21,9 +21,15 @@ set -euo pipefail
 LEAD_MIN="${1:-4}"
 ORIGIN="https://bet.proxywar.xyz"
 ORIGIN_PORT=8792
-PROC_NAME=bet-live
+PIDFILE="/tmp/pw-bet-origin.pid"
+LOGFILE="/tmp/pw-bet-origin.log"
 STATE_PARENT="$HOME/.proxywar-bet-live"
 STATE_ROOT="$STATE_PARENT/replay-premiere"
+# The leak audit fetches the PUBLIC origin and requires 200 from /league, so
+# the origin has to serve real league artifacts. This worktree's own artifacts/
+# is empty on a fresh checkout; point at the main repo's, which the production
+# beta also does. Override with PROXYWAR_ARTIFACTS_ROOT if yours lives elsewhere.
+ARTIFACTS_ROOT="${PROXYWAR_ARTIFACTS_ROOT:-$HOME/Documents/proxywar_main/artifacts}"
 STAGING=/tmp/pw-bet-staging
 MANIFESTS=/tmp/pw-bet-manifests
 ADMIT_IN=/private/tmp/pw-bet-admit
@@ -35,14 +41,64 @@ RUN_ID="bet-cycle-$(date +%s)"
 # which exits 141 on SIGPIPE and takes the script down under pipefail.
 PREMIERE_ID="prem_$(openssl rand -hex 10)"
 
-restart_origin() {
-  if command -v omp >/dev/null 2>&1 && omp hub restart "$PROC_NAME" >/dev/null 2>&1; then
-    return 0
+stop_origin() {
+  if [ -f "$PIDFILE" ]; then
+    local pid
+    pid="$(cat "$PIDFILE" 2>/dev/null || true)"
+    if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+      # Kill the process group: npx spawns tsx spawns node, and killing only
+      # the parent leaves the real listener holding the port and the state
+      # root's single-writer lock.
+      kill -TERM "-$pid" 2>/dev/null || kill -TERM "$pid" 2>/dev/null || true
+      for _ in $(seq 1 20); do
+        kill -0 "$pid" 2>/dev/null || break
+        sleep 0.5
+      done
+      kill -KILL "-$pid" 2>/dev/null || true
+    fi
+    rm -f "$PIDFILE"
   fi
-  echo "    !! could not restart '$PROC_NAME' automatically."
-  echo "       Bring the origin up yourself on port ${ORIGIN_PORT} with"
-  echo "       PROXYWAR_REPLAY_PREMIERE_STATE_ROOT=${STATE_ROOT}, then re-run."
-  return 1
+  # Anything still on the port would silently shadow us - but only ever kill
+  # something we can positively identify as this demo's own origin. Other
+  # servers share this machine, including the production league.
+  local squatters pid cmd
+  squatters="$(lsof -ti tcp:"$ORIGIN_PORT" -sTCP:LISTEN 2>/dev/null || true)"
+  for pid in $squatters; do
+    cmd="$(ps -o command= -p "$pid" 2>/dev/null || true)"
+    case "$cmd" in
+      *ai-agent-demo-server*)
+        kill -TERM "$pid" 2>/dev/null || true ;;
+      *)
+        echo "    !! port ${ORIGIN_PORT} held by pid ${pid}, which is not this demo:"
+        echo "       ${cmd}"
+        echo "       Refusing to kill it. Free the port or change ORIGIN_PORT."
+        return 1 ;;
+    esac
+  done
+  if [ -n "$squatters" ]; then sleep 2; fi
+  return 0
+}
+
+start_origin() {
+  # Own process group, so stop_origin can take down the whole
+  # npx -> tsx -> node chain in one signal. macOS has no setsid(1), so call
+  # setsid(2) via python and exec the server in its place.
+  GAME_ENV=dev \
+  AI_LEAGUE_DEMO_PORT="$ORIGIN_PORT" \
+  PROXYWAR_PUBLIC_URL="$ORIGIN" \
+  PROXYWAR_WAGERING_ENABLED=1 \
+  PROXYWAR_SYNTHETIC_CROWD_ENABLED=true \
+  PROXYWAR_REPLAY_PREMIERE_STATE_ROOT="$STATE_ROOT" \
+  PROXYWAR_LEAGUE_WRAPPER_ONLY=true \
+  PROXYWAR_ARTIFACTS_ROOT="$ARTIFACTS_ROOT" \
+  nohup python3 -c 'import os,sys; os.setsid(); os.execvp(sys.argv[1], sys.argv[1:])' \
+    npx tsx src/scripts/ai-agent-demo-server.ts >>"$LOGFILE" 2>&1 &
+  echo $! >"$PIDFILE"
+}
+
+restart_origin() {
+  stop_origin
+  start_origin
 }
 
 wait_for_origin() {
@@ -122,9 +178,7 @@ PY
 # private_state_root_not_private. Stop the origin first: it holds a
 # single-writer lock on the root.
 echo "==> resetting state root"
-if command -v omp >/dev/null 2>&1; then
-  omp hub stop "$PROC_NAME" >/dev/null 2>&1 || true
-fi
+stop_origin
 rm -rf "$STATE_PARENT"
 mkdir -p "$STATE_ROOT"
 chmod 700 "$STATE_PARENT" "$STATE_ROOT"
