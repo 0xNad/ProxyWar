@@ -48,6 +48,12 @@ GUEST_KEY_FILE="${PW_BET_GUEST_KEY_FILE:-$HOME/.proxywar-deploy/guest-hmac-key.h
 # Likewise the points ledger: durable across cycles, so a returning player
 # keeps their score.
 POINTS_LEDGER_ROOT="${PROXYWAR_POINTS_LEDGER_ROOT:-$HOME/.proxywar-deploy/points-ledger}"
+# GitHub OAuth credentials, outside the wiped state root. The client id is not
+# secret. The secret file must be 0600, and the server is handed its PATH
+# rather than its contents - `ps eww <pid>` dumps a process's environment, so
+# an exported secret is one command away from anyone on this box.
+GITHUB_CLIENT_ID_FILE="${PW_BET_GITHUB_CLIENT_ID_FILE:-$HOME/.proxywar-deploy/github-oauth-client-id}"
+GITHUB_CLIENT_SECRET_FILE="${PW_BET_GITHUB_CLIENT_SECRET_FILE:-$HOME/.proxywar-deploy/github-oauth-client-secret}"
 # The live league's own public standings feed. Not the deploy's copy.
 LEAGUE_DATA_URL="${PW_BET_LEAGUE_DATA_URL:-https://beta.proxywar.xyz/ai-league-runs/league/data.json}"
 HERE="$(cd "$(dirname "$0")" && pwd)"
@@ -164,12 +170,23 @@ PY
 
 start_origin() {
   ensure_guest_key
+  # GitHub OAuth, when configured. The client id is not a secret and is passed
+  # normally. The SECRET is passed as a FILE PATH, never a value: `ps eww <pid>`
+  # dumps a process's whole environment, so exporting the secret would put it a
+  # single command away from anyone on this machine. The server reads and trims
+  # the 0600 file itself. A missing file means sign-in cleanly does not exist -
+  # no button, no broken route.
+  #
+  # The HMAC key below is a pre-existing exception, not a precedent: it predates
+  # this and is worth moving to the same file-path treatment.
   # Own process group, so stop_origin can take down the whole
   # npx -> tsx -> node chain in one signal. macOS has no setsid(1), so call
   # setsid(2) via python and exec the server in its place.
   GAME_ENV=dev \
   PROXYWAR_REPLAY_PREMIERE_HMAC_KEY_HEX="$(cat "$GUEST_KEY_FILE")" \
   PROXYWAR_POINTS_LEDGER_ROOT="$POINTS_LEDGER_ROOT" \
+  PROXYWAR_GITHUB_OAUTH_CLIENT_ID="${PROXYWAR_GITHUB_OAUTH_CLIENT_ID:-$(cat "$GITHUB_CLIENT_ID_FILE" 2>/dev/null || true)}" \
+  PROXYWAR_GITHUB_OAUTH_CLIENT_SECRET_FILE="$GITHUB_CLIENT_SECRET_FILE" \
   AI_LEAGUE_DEMO_PORT="$ORIGIN_PORT" \
   PROXYWAR_PUBLIC_URL="$ORIGIN" \
   PROXYWAR_WAGERING_ENABLED=1 \
