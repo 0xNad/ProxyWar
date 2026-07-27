@@ -3328,12 +3328,7 @@ export class ReplayPremiereRuntimeController {
       this.latchFailure("integrity_failure");
       return;
     }
-    if (
-      this.reveal === null &&
-      (response.premiereState === "revealed" ||
-        response.premiereState === "archived") &&
-      hasOutcomeProjection(response.checkpoints)
-    ) {
+    if (this.reveal === null && hasOutcomeProjection(response.checkpoints)) {
       // Checkpoint pauses are bypassed for wagering premieres, so the
       // replay races straight through to the true end with none of the
       // breathing room a normal premiere's final checkpoint pause gives
@@ -3348,24 +3343,22 @@ export class ReplayPremiereRuntimeController {
       // never exempted here) stays a hard failure regardless — an
       // impossible regression is not explained by a pending reveal.
       //
-      // The `response.premiereState === "revealed" || "archived"` gate is
-      // load-bearing, not decorative: `hasOutcomeProjection` is true the
-      // instant EITHER checkpoint slot in the pair has a non-null
-      // `resolution`/`crowdAccuracy` — and per-checkpoint scoring closes
-      // and resolves continuously while an ordinary wagering premiere is
-      // still mid-match (`premiereState: "playing"`/`"checkpoint"`), long
-      // before the premiere itself is anywhere near its own reveal. Without
-      // this gate, the very first checkpoint to close after a viewer's
-      // session was established latched a hard, unrecoverable
-      // "integrity_failure" on a perfectly healthy, ongoing match — this
-      // was the root cause of the mid-match false "could not continue"
-      // failure (reproduced live: an idle heartbeat carrying a just-closed
-      // checkpoint's resolution, ~6 minutes into a 14-minute premiere, in
-      // an established session with prior successful trades). Gating on
-      // the SERVICE's own reported lifecycle state (not just network
-      // state) narrows this to exactly the near-end race it was written
-      // for, without touching the lifecycle-mismatch check above or any
-      // other guard.
+      // NOTE (Resilience session): investigated narrowing this to
+      // `response.premiereState === "revealed" || "archived"`, theorizing
+      // per-checkpoint resolution could arrive mid-match independent of
+      // the premiere's own outcome. Server-side proof this is wrong:
+      // `applyReplayPremierePredictionResolutionTransition`
+      // (`ReplayPremiereInteractions.ts`) throws
+      // `predictions_not_revealable` unless the premiere state is already
+      // `revealed`/`archived`, and resolves every checkpoint atomically
+      // in one transition — a checkpoint's `resolution`/`crowdAccuracy`
+      // literally cannot be non-null while `premiereState` is genuinely
+      // `"playing"`/`"checkpoint"`. A response claiming otherwise IS
+      // exactly the impossible, genuine violation this guard exists to
+      // catch — reverted after the regression suite caught the false
+      // negative this would have introduced. Occurrence 3's real trigger
+      // is elsewhere; see the live-reproduction diagnostic in
+      // `latchFailure`.
       if (this.isRevealVerificationPending()) return;
       this.latchFailure("integrity_failure");
       return;
@@ -3783,10 +3776,18 @@ export class ReplayPremiereRuntimeController {
     try {
       console.error("[latchFailure]", {
         failure,
-        rejection:
-          rejection instanceof Error
-            ? { name: rejection.name, message: rejection.message }
-            : rejection,
+        // Bounded, enum-like fields only — never `.message` (arbitrary
+        // text; the `logInteractionBootstrapFailure` leak-audit test
+        // caught exactly this pulling a private URL/token through in an
+        // earlier version of this diagnostic).
+        rejectionKind:
+          rejection instanceof ReplayPremiereServiceError
+            ? { code: rejection.code, status: rejection.status }
+            : rejection instanceof ReplayPremiereNetworkError
+              ? { code: rejection.code, recoverable: rejection.recoverable }
+              : rejection === undefined
+                ? null
+                : "unknown",
         networkState: this.networkTerminalState,
         servicePremiereState: this.servicePremiereState,
         hasReveal: this.reveal !== null,
@@ -3937,27 +3938,19 @@ export class ReplayPremiereRuntimeController {
         const response = await this.strictInteractionWrite(() =>
           this.service.submitPrediction(request),
         );
-        // A prediction always targets an already-observed, already-closed
-        // checkpoint (guarded above: `checkpoint.sequence >
-        // this.observedSequence()` is rejected before the write is even
-        // sent). That checkpoint's `resolution`/`crowdAccuracy` can
-        // legitimately already be scored, and legitimately arrive in this
-        // response, before the verified `reveal` lands client-side —
-        // checkpoint pauses are bypassed for wagering premieres, and
-        // per-checkpoint scoring closes continuously throughout an ongoing
-        // match, independent of the premiere's own terminal state. This
-        // used to latch a hard "integrity_failure" on every ordinary
-        // checkpoint resolution mid-match (an inverted-boolean bug: it
-        // fired whenever `hasOutcomeProjection` was true and the near-end
-        // race exemption did NOT apply, i.e. on every case OTHER than the
-        // one race it was meant to guard) — one of the confirmed root
-        // causes of the mid-match false "could not continue" failure. A
-        // single checkpoint's own resolution is never, by itself, evidence
-        // of anything wrong: its content is already bound to the verified
-        // projection by `assertCheckpointBound` (checkpoint identity,
-        // sequence, option membership, winner membership, crowd-count
-        // consistency) before this callback ever runs — that binding check
-        // is the real, still-fully-intact integrity guard here.
+        // Same ordinary reveal-delivery race `submitMarketOrder` guards
+        // against with `isRevealVerificationPending()`: checkpoint pauses
+        // are bypassed for wagering premieres, so a prediction response
+        // can legitimately carry this checkpoint's outcome before `reveal`
+        // has landed client-side.
+        if (
+          this.reveal === null &&
+          hasOutcomeProjection([response.checkpoint]) &&
+          !this.isRevealVerificationPending()
+        ) {
+          this.latchFailure("integrity_failure");
+          throw serviceError("invalid_response");
+        }
         this.replaceServiceCheckpoint(response.checkpoint);
         this.hydrateOverlay();
       },
