@@ -5,6 +5,9 @@ const DEFAULT_GUEST_COOKIE = "proxywar_premiere_guest";
 const DEFAULT_GUEST_TTL_MS = 30 * 24 * 60 * 60 * 1_000;
 const DEFAULT_CSRF_TTL_MS = 4 * 60 * 60 * 1_000;
 const ATTRIBUTION_TTL_MS = 7 * 24 * 60 * 60 * 1_000;
+/** Cookie name for the short-lived GitHub sign-in link-intent binding — see `mintLinkIntentCookie`. Not configurable (unlike `guestCookieName`): it's an internal implementation detail, never read by client code. */
+const LINK_INTENT_COOKIE = "proxywar_premiere_link_intent";
+const LINK_INTENT_TTL_MS = 5 * 60 * 1_000;
 const GUEST_ID_PATTERN = /^guest_[a-f0-9]{32}$/;
 const SHARE_ID_PATTERN = /^share_[a-f0-9]{32}$/;
 const PREMIERE_ID_PATTERN = /^prem_[a-z0-9]{16,32}$/;
@@ -336,6 +339,113 @@ export class ReplayPremiereGuestSecurity {
       issuedAt: new Date(Number(iat)).toISOString(),
       expiresAt: new Date(Number(exp)).toISOString(),
     };
+  }
+
+  /**
+   * Mints the short-lived (~5 min) HttpOnly, SameSite=Lax link-intent
+   * cookie a GitHub sign-in click binds to: `{participantId, nonce, exp}`,
+   * HMAC-signed exactly like the CSRF token above. Verified in the OAuth
+   * callback (`verifyLinkIntentCookie`) alongside a `state=` query
+   * parameter equal to `nonce`, both required before any code exchange
+   * happens. Without this, an attacker who completes their OWN GitHub
+   * login and sends a victim a link straight to the bare callback would
+   * force-link the attacker's identity onto the victim's guest cookie —
+   * the victim's browser never holds a matching link-intent cookie (it's
+   * HttpOnly and only ever set by this method, scoped to the participant
+   * who clicked "Sign in"), so `verifyLinkIntentCookie` rejects it.
+   */
+  mintLinkIntentCookie(participantId: string): { cookie: string; nonce: string } {
+    if (!GUEST_ID_PATTERN.test(participantId)) {
+      throw invalidSecurity("invalid_participant_id");
+    }
+    const issuedAtMs = this.nowChecked().getTime();
+    const nonce = hex(this.randomBytesChecked(16));
+    const unsigned = `v1.${participantId}.${issuedAtMs.toString(36)}.${nonce}`;
+    const value = `${unsigned}.${this.sign(`link|${unsigned}`)}`;
+    const attributes = [
+      `${LINK_INTENT_COOKIE}=${value}`,
+      "Path=/api/premieres",
+      `Max-Age=${Math.floor(LINK_INTENT_TTL_MS / 1_000)}`,
+      "HttpOnly",
+      "SameSite=Lax",
+    ];
+    if (this.production) attributes.push("Secure");
+    return { cookie: attributes.join("; "), nonce };
+  }
+
+  /**
+   * Verifies the link-intent cookie minted by `mintLinkIntentCookie`
+   * matches `expectedParticipantId` (the CURRENT guest cookie's
+   * participant) and carries an unexpired, correctly-signed nonce.
+   * Returns the nonce so the caller can additionally check it against an
+   * OAuth `state=` query parameter (defense in depth; the cookie binding
+   * to `expectedParticipantId` is already the load-bearing check).
+   */
+  verifyLinkIntentCookie(
+    cookieHeader: string | string[] | undefined,
+    expectedParticipantId: string,
+  ): { nonce: string } | null {
+    const raw = singleCookieValue(cookieHeader, LINK_INTENT_COOKIE);
+    if (raw === null || raw.length > 512) return null;
+    const parts = raw.split(".");
+    if (parts.length !== 5 || parts[0] !== "v1") return null;
+    const [, participantId, issuedAtPart, nonce, signature] = parts;
+    if (
+      participantId !== expectedParticipantId ||
+      !/^[0-9a-z]{1,16}$/.test(issuedAtPart) ||
+      !/^[a-f0-9]{32}$/.test(nonce) ||
+      !/^[a-f0-9]{64}$/.test(signature)
+    ) {
+      return null;
+    }
+    const unsigned = `v1.${participantId}.${issuedAtPart}.${nonce}`;
+    if (!constantTimeEqual(signature, this.sign(`link|${unsigned}`))) return null;
+    const issuedAtMs = Number.parseInt(issuedAtPart, 36);
+    const nowMs = this.nowChecked().getTime();
+    if (
+      !Number.isSafeInteger(issuedAtMs) ||
+      issuedAtMs > nowMs + 30_000 ||
+      nowMs - issuedAtMs >= LINK_INTENT_TTL_MS
+    ) {
+      return null;
+    }
+    return { nonce };
+  }
+
+  /** Clears the link-intent cookie after the callback consumes it (success or failure) — never left to linger or be replayed. */
+  clearLinkIntentCookieHeader(): string {
+    const attributes = [
+      `${LINK_INTENT_COOKIE}=`,
+      "Path=/api/premieres",
+      "Max-Age=0",
+      "HttpOnly",
+      "SameSite=Lax",
+    ];
+    if (this.production) attributes.push("Secure");
+    return attributes.join("; ");
+  }
+
+  /**
+   * Identifies the current guest from the cookie ALONE, with no Origin/
+   * Sec-Fetch-Site/Referer check and no minting on absence. The OAuth
+   * callback is a deliberate cross-site top-level navigation (GitHub
+   * redirects back to us) — `assertReadOrigin`'s same-origin proof is
+   * structurally unavailable there, by design; the SameSite=Lax guest
+   * cookie itself IS still sent (Lax allows a top-level cross-site GET
+   * navigation), and its own HMAC signature is the only authentication
+   * this read needs. Returns `null` if absent, expired, or malformed —
+   * never mints a guest identity (unlike `bootstrap`/`bootstrapRead`).
+   */
+  identifyGuest(
+    cookieHeader: string | string[] | undefined,
+  ): ReplayPremiereGuestParticipant | null {
+    const guest = this.parseGuestCookieHeader(
+      cookieHeader,
+      this.nowChecked().getTime(),
+    );
+    return guest === null
+      ? null
+      : { participantId: guest.participantId, createdAt: guest.createdAt };
   }
 
   private createGuest(now: Date): ParsedGuestCookie {

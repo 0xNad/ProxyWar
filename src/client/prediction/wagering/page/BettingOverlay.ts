@@ -14,6 +14,7 @@ import "../components/MarketPriceBoard";
 import "../components/MarketSettlementPanel";
 import "../components/PositionsPanel";
 import "../components/PointsLeaderboard";
+import "../components/GithubSignIn";
 import "../components/PriceAnnouncer";
 import "../components/TradeTicket";
 import { formatSignedCredits } from "../components/pnlDisplay";
@@ -474,6 +475,7 @@ export class PremiereBettingOverlay extends LitElement {
                   Live
                 </span>`
               : nothing}
+            <premiere-github-sign-in></premiere-github-sign-in>
             <button
               type="button"
               class="inline-flex items-center justify-center rounded-md border border-line px-1.5 py-1 text-[11px] font-semibold text-ink-muted outline-none transition-colors hover:bg-surface-hover hover:text-ink focus-visible:ring-2 focus-visible:ring-accent"

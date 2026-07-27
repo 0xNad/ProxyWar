@@ -19,7 +19,7 @@ const LEDGER_FILE_NAME = "points-ledger-v1.json";
 const SCHEMA_VERSION = 1 as const;
 const MAX_DISPLAY_NAME_CODEPOINTS = 32;
 /** Bounded per-participant history — only the count/sum matter long-term; this just bounds file growth. */
-const MAX_SETTLED_PREMIERE_HISTORY = 500;
+const MAX_PREMIERE_RESULTS_HISTORY = 500;
 
 export interface ReplayPremierePointsEntry {
   readonly participantId: string;
@@ -51,7 +51,34 @@ export interface ReplayPremiereSettlementLedgerEntry {
   readonly balance: number;
 }
 
+/**
+ * Per-premiere realized net P&L, keyed by premiere id — the prerequisite
+ * for a correct identity-link merge (see {@link ReplayPremierePointsLedger.mergeParticipant}):
+ * a lifetime *total* alone cannot tell you what to do when two identities
+ * both traded the SAME premiere and need folding into one row.
+ */
 const storedEntrySchema = z.object({
+  displayName: z.string().nullable(),
+  lifetimePoints: z.number().finite(),
+  premieresTraded: z.number().int().nonnegative(),
+  premieresWon: z.number().int().nonnegative(),
+  updatedAt: z.string(),
+  premiereResults: z.record(z.string().regex(PREMIERE_ID_PATTERN), z.number().finite()),
+});
+type StoredEntry = z.infer<typeof storedEntrySchema>;
+
+/**
+ * Pre-2026-07-27 on-disk shape: a bare list of settled premiere ids with no
+ * per-premiere net figure, only the running lifetime total. Accepted on
+ * read and migrated forward (see {@link ReplayPremierePointsLedger.open})
+ * into `premiereResults` — each historical id is backfilled at net `0`
+ * (the true historical split is unrecoverable from this shape; only
+ * `lifetimePoints`/`premieresTraded`/`premieresWon` survive intact). This
+ * is a one-time, inherent, and documented loss of granularity for
+ * ALREADY-settled premieres, not an ongoing one: every settlement recorded
+ * from this migration onward carries its real per-premiere net.
+ */
+const legacyStoredEntrySchema = z.object({
   displayName: z.string().nullable(),
   lifetimePoints: z.number().finite(),
   premieresTraded: z.number().int().nonnegative(),
@@ -59,13 +86,6 @@ const storedEntrySchema = z.object({
   updatedAt: z.string(),
   settledPremiereIds: z.array(z.string()),
 });
-type StoredEntry = z.infer<typeof storedEntrySchema>;
-
-const ledgerFileSchema = z.object({
-  schemaVersion: z.literal(SCHEMA_VERSION),
-  entries: z.record(z.string().regex(PARTICIPANT_ID_PATTERN), storedEntrySchema),
-});
-type LedgerFile = z.infer<typeof ledgerFileSchema>;
 
 export function resolveReplayPremierePointsLedgerRoot(
   environment: Record<string, string | undefined> = process.env,
@@ -117,17 +137,19 @@ export function resolveReplayPremierePointsLedgerRoot(
  * `finalBalance - startingGrant` for that one premiere: exactly what they
  * walked away with beyond the bankroll they started with, positive or
  * negative. This is summed across every settled premiere the participant
- * placed at least one order in. A participant who never traded a given
- * premiere contributes nothing for it — critically, a participant who
- * NEVER trades at all has no ledger entry from settlement whatsoever, so
- * they never appear on the leaderboard outranking someone who took real
- * risk. Carrying raw bankroll forward was rejected for exactly this
- * failure mode: it parks a non-trader at a permanent 1,000 that outranks
- * a trader who finished at 900 after real risk. Net realized P&L instead
- * rewards being profitable, not merely present — a losing trader still
- * nets a negative score (correctly below a non-participant), but an
- * idle bankroll can never masquerade as a result. `premieresTraded` and
- * `premieresWon` (net P&L > 0) are carried alongside as a hit-rate
+ * placed at least one order in, and now also retained PER premiere (see
+ * `premiereResults` on the stored shape) — required for a correct
+ * identity-link merge, see {@link mergeParticipant}. A participant who
+ * never traded a given premiere contributes nothing for it — critically, a
+ * participant who NEVER trades at all has no ledger entry from settlement
+ * whatsoever, so they never appear on the leaderboard outranking someone
+ * who took real risk. Carrying raw bankroll forward was rejected for
+ * exactly this failure mode: it parks a non-trader at a permanent 1,000
+ * that outranks a trader who finished at 900 after real risk. Net realized
+ * P&L instead rewards being profitable, not merely present — a losing
+ * trader still nets a negative score (correctly below a non-participant),
+ * but an idle bankroll can never masquerade as a result. `premieresTraded`
+ * and `premieresWon` (net P&L > 0) are carried alongside as a hit-rate
  * context, not folded into the ranking score itself, to keep the primary
  * ranking unambiguous (real credits won or lost) rather than an
  * arbitrarily-weighted composite.
@@ -152,7 +174,14 @@ export class ReplayPremierePointsLedger {
     root: string = resolveReplayPremierePointsLedgerRoot(),
   ): Promise<ReplayPremierePointsLedger> {
     await fs.mkdir(root, { recursive: true, mode: 0o700 });
-    return new ReplayPremierePointsLedger(root);
+    const instance = new ReplayPremierePointsLedger(root);
+    // Forward-migrate a legacy on-disk file (settledPremiereIds -> per-
+    // premiere premiereResults) once, deterministically, before the
+    // instance is ever handed to a request handler — see
+    // `legacyStoredEntrySchema` doc. A no-op for an already-current file.
+    const { file, migrated } = await instance.loadDetailed();
+    if (migrated) await instance.save(file);
+    return instance;
   }
 
   /**
@@ -182,21 +211,74 @@ export class ReplayPremierePointsLedger {
       const nowIso = new Date().toISOString();
       for (const settlement of real) {
         const entry = file.entries[settlement.participantId] ?? emptyEntry();
-        if (entry.settledPremiereIds.includes(premiereId)) continue;
+        if (premiereId in entry.premiereResults) continue;
         const net = Math.round(settlement.balance - settlement.granted);
+        entry.premiereResults[premiereId] = net;
         entry.lifetimePoints += net;
         entry.premieresTraded += 1;
         if (net > 0) entry.premieresWon += 1;
-        entry.settledPremiereIds.push(premiereId);
-        if (entry.settledPremiereIds.length > MAX_SETTLED_PREMIERE_HISTORY) {
-          entry.settledPremiereIds.splice(
-            0,
-            entry.settledPremiereIds.length - MAX_SETTLED_PREMIERE_HISTORY,
-          );
-        }
+        trimPremiereResults(entry);
         entry.updatedAt = nowIso;
         file.entries[settlement.participantId] = entry;
       }
+    });
+  }
+
+  /**
+   * Consolidates `fromParticipantId`'s entire history into
+   * `intoParticipantId` (a GitHub-link-resolved canonical identity) and
+   * removes the source row so it never independently reappears on the
+   * board. Per premiere BOTH identities traded: **sums both contributions
+   * and counts the premiere once** toward `premieresTraded` — the
+   * adversarial-safe rule. The tempting alternative (keep the canonical
+   * side's contribution, drop the other's) is a free option: trade both
+   * sides of one match from two browsers, wait for settlement, link the
+   * winner first, erase the loser. Summing means a merged loss always
+   * comes along with a merged win.
+   *
+   * Idempotent: an absent or already-empty `fromParticipantId` (e.g. a
+   * retried merge after a crash mid-flow — see
+   * `ReplayPremiereIdentityLinkStore`) is a safe no-op beyond removing any
+   * stray empty row. Never invoked from the settlement/trading path — this
+   * only runs from the identity-link flow, so a GitHub outage can never
+   * block or delay a trade.
+   */
+  async mergeParticipant(
+    fromParticipantId: string,
+    intoParticipantId: string,
+  ): Promise<void> {
+    if (
+      !PARTICIPANT_ID_PATTERN.test(fromParticipantId) ||
+      !PARTICIPANT_ID_PATTERN.test(intoParticipantId)
+    ) {
+      throw new Error("invalid_participant_id");
+    }
+    if (fromParticipantId === intoParticipantId) return;
+    await this.mutate((file) => {
+      const source = file.entries[fromParticipantId];
+      delete file.entries[fromParticipantId];
+      if (source === undefined || Object.keys(source.premiereResults).length === 0) {
+        return;
+      }
+      const target = file.entries[intoParticipantId] ?? emptyEntry();
+      for (const [premiereId, net] of Object.entries(source.premiereResults)) {
+        const existingNet = target.premiereResults[premiereId];
+        if (existingNet === undefined) {
+          target.premiereResults[premiereId] = net;
+          target.lifetimePoints += net;
+          target.premieresTraded += 1;
+          if (net > 0) target.premieresWon += 1;
+        } else {
+          if (existingNet > 0) target.premieresWon -= 1;
+          const combined = existingNet + net;
+          target.premiereResults[premiereId] = combined;
+          target.lifetimePoints += net;
+          if (combined > 0) target.premieresWon += 1;
+        }
+      }
+      trimPremiereResults(target);
+      target.updatedAt = new Date().toISOString();
+      file.entries[intoParticipantId] = target;
     });
   }
 
@@ -272,11 +354,22 @@ export class ReplayPremierePointsLedger {
   }
 
   private async load(): Promise<LedgerFile> {
+    return (await this.loadDetailed()).file;
+  }
+
+  /**
+   * Parses the on-disk file, accepting either the current shape or the
+   * legacy pre-migration shape per entry (a mixed file — some entries
+   * already current, some still legacy — is expected mid-rollout and
+   * handled transparently). `migrated` is true iff at least one entry
+   * needed the legacy conversion, so the caller can decide whether to
+   * persist the migrated form back to disk.
+   */
+  private async loadDetailed(): Promise<{ file: LedgerFile; migrated: boolean }> {
+    let raw: unknown;
     try {
-      const raw = await fs.readFile(this.filePath, "utf8");
-      const parsed: unknown = JSON.parse(raw);
-      const result = ledgerFileSchema.safeParse(parsed);
-      if (result.success) return result.data;
+      const text = await fs.readFile(this.filePath, "utf8");
+      raw = JSON.parse(text);
     } catch (error) {
       if (
         typeof error !== "object" ||
@@ -286,8 +379,47 @@ export class ReplayPremierePointsLedger {
       ) {
         throw error;
       }
+      return { file: { schemaVersion: SCHEMA_VERSION, entries: {} }, migrated: false };
     }
-    return { schemaVersion: SCHEMA_VERSION, entries: {} };
+    if (typeof raw !== "object" || raw === null) {
+      return { file: { schemaVersion: SCHEMA_VERSION, entries: {} }, migrated: false };
+    }
+    if (!("schemaVersion" in raw) || raw.schemaVersion !== SCHEMA_VERSION) {
+      return { file: { schemaVersion: SCHEMA_VERSION, entries: {} }, migrated: false };
+    }
+    if (!("entries" in raw) || typeof raw.entries !== "object" || raw.entries === null) {
+      return { file: { schemaVersion: SCHEMA_VERSION, entries: {} }, migrated: false };
+    }
+    const rawEntries = raw.entries;
+    const entries: Record<string, StoredEntry> = {};
+    let migrated = false;
+    for (const [participantId, rawEntry] of Object.entries(rawEntries)) {
+      if (!PARTICIPANT_ID_PATTERN.test(participantId)) continue;
+      const fresh = storedEntrySchema.safeParse(rawEntry);
+      if (fresh.success) {
+        entries[participantId] = fresh.data;
+        continue;
+      }
+      const legacy = legacyStoredEntrySchema.safeParse(rawEntry);
+      if (legacy.success) {
+        const premiereResults: Record<string, number> = {};
+        for (const premiereId of legacy.data.settledPremiereIds) {
+          if (PREMIERE_ID_PATTERN.test(premiereId)) premiereResults[premiereId] = 0;
+        }
+        entries[participantId] = {
+          displayName: legacy.data.displayName,
+          lifetimePoints: legacy.data.lifetimePoints,
+          premieresTraded: legacy.data.premieresTraded,
+          premieresWon: legacy.data.premieresWon,
+          updatedAt: legacy.data.updatedAt,
+          premiereResults,
+        };
+        migrated = true;
+      }
+      // Neither shape parses: drop the single malformed entry rather than
+      // discarding the whole ledger file.
+    }
+    return { file: { schemaVersion: SCHEMA_VERSION, entries }, migrated };
   }
 
   private async save(file: LedgerFile): Promise<void> {
@@ -300,6 +432,11 @@ export class ReplayPremierePointsLedger {
   }
 }
 
+interface LedgerFile {
+  schemaVersion: typeof SCHEMA_VERSION;
+  entries: Record<string, StoredEntry>;
+}
+
 function emptyEntry(): StoredEntry {
   return {
     displayName: null,
@@ -307,8 +444,17 @@ function emptyEntry(): StoredEntry {
     premieresTraded: 0,
     premieresWon: 0,
     updatedAt: new Date(0).toISOString(),
-    settledPremiereIds: [],
+    premiereResults: {},
   };
+}
+
+function trimPremiereResults(entry: StoredEntry): void {
+  const keys = Object.keys(entry.premiereResults);
+  if (keys.length <= MAX_PREMIERE_RESULTS_HISTORY) return;
+  const excess = keys.length - MAX_PREMIERE_RESULTS_HISTORY;
+  for (let i = 0; i < excess; i += 1) {
+    delete entry.premiereResults[keys[i]];
+  }
 }
 
 function toPublicEntry(

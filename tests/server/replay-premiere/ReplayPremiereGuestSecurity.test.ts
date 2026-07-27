@@ -163,4 +163,67 @@ describe("ReplayPremiereGuestSecurity", () => {
       expect(isReplayPremiereBotUserAgent(unclassifiable)).toBe(true);
     }
   });
+
+  it("mints a signed, short-lived link-intent cookie bound to one participant, and rejects a mismatched or expired one", () => {
+    const { security, advance } = harness();
+    const bootstrap = security.bootstrap(undefined);
+    const guestCookie = bootstrap.setCookie?.split(";", 1)[0] ?? "";
+    const otherBootstrap = security.bootstrap(undefined);
+    const otherCookie = otherBootstrap.setCookie?.split(";", 1)[0] ?? "";
+
+    const { cookie: linkCookieHeader, nonce } = security.mintLinkIntentCookie(
+      bootstrap.participant.participantId,
+    );
+    expect(linkCookieHeader).toContain("HttpOnly");
+    expect(linkCookieHeader).toContain("SameSite=Lax");
+    expect(linkCookieHeader).toContain("Path=/api/premieres");
+    const linkCookie = linkCookieHeader.split(";", 1)[0];
+
+    const verified = security.verifyLinkIntentCookie(
+      linkCookie,
+      bootstrap.participant.participantId,
+    );
+    expect(verified).toEqual({ nonce });
+
+    // Bound to the participant that minted it — a DIFFERENT current guest
+    // cookie must never be able to consume someone else's link intent.
+    expect(
+      security.verifyLinkIntentCookie(
+        linkCookie,
+        otherBootstrap.participant.participantId,
+      ),
+    ).toBeNull();
+    expect(otherCookie).not.toBe(guestCookie);
+
+    // Missing, tampered, or expired cookie all reject.
+    expect(
+      security.verifyLinkIntentCookie(undefined, bootstrap.participant.participantId),
+    ).toBeNull();
+    const lastChar = linkCookie.at(-1) ?? "0";
+    const tampered = `${linkCookie.slice(0, -1)}${lastChar === "0" ? "1" : "0"}`;
+    expect(
+      security.verifyLinkIntentCookie(tampered, bootstrap.participant.participantId),
+    ).toBeNull();
+    advance(6 * 60 * 1_000);
+    expect(
+      security.verifyLinkIntentCookie(linkCookie, bootstrap.participant.participantId),
+    ).toBeNull();
+
+    const clearHeader = security.clearLinkIntentCookieHeader();
+    expect(clearHeader).toContain("Max-Age=0");
+  });
+
+  it("identifyGuest reads the guest cookie with no Origin/Referer requirement, for the cross-site OAuth callback", () => {
+    const { security } = harness();
+    const bootstrap = security.bootstrap(undefined);
+    const guestCookie = bootstrap.setCookie?.split(";", 1)[0] ?? "";
+
+    // No Origin, no Sec-Fetch-Site, no Referer at all — exactly what a
+    // cross-site redirect back from github.com looks like — must still work.
+    const identified = security.identifyGuest(guestCookie);
+    expect(identified).toEqual(bootstrap.participant);
+
+    expect(security.identifyGuest(undefined)).toBeNull();
+    expect(security.identifyGuest(`${guestCookie}x`)).toBeNull();
+  });
 });

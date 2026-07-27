@@ -127,7 +127,14 @@ import {
   getAppShellContent,
   setHtmlNoCacheHeaders,
 } from "../server/RenderHtml";
-import { ReplayPremierePointsLedger } from "../server/replay-premiere/points/ReplayPremierePointsLedger";
+import {
+  pointsMergerFor,
+  ReplayPremiereIdentityLinkStore,
+} from "../server/replay-premiere/points/ReplayPremiereIdentityLinkStore";
+import {
+  ReplayPremierePointsLedger,
+  resolveReplayPremierePointsLedgerRoot,
+} from "../server/replay-premiere/points/ReplayPremierePointsLedger";
 import { ReplayPremiereAnonymousWriteLimiter } from "../server/replay-premiere/ReplayPremiereAnonymousWriteLimiter";
 import { ReplayPremiereArchivedClipPromoter } from "../server/replay-premiere/ReplayPremiereArchivedClipPromoter";
 import { ReplayPremiereArchiveStore } from "../server/replay-premiere/ReplayPremiereArchiveIndex";
@@ -148,6 +155,11 @@ import {
   ReplayPremiereError,
   toPublicReplayPremiereFailure,
 } from "../server/replay-premiere/ReplayPremiereErrors";
+import {
+  createReplayPremiereGithubAuthRouter,
+  createReplayPremiereGithubOAuthClient,
+  resolveReplayPremiereGithubOAuthConfig,
+} from "../server/replay-premiere/ReplayPremiereGithubAuth";
 import { ReplayPremiereGuestSecurity } from "../server/replay-premiere/ReplayPremiereGuestSecurity";
 import {
   createReplayPremiereRouter,
@@ -155,6 +167,7 @@ import {
   ReplayPremiereHttpRegistry,
   requestSecurityHeaders,
 } from "../server/replay-premiere/ReplayPremiereHttp";
+import type { ReplayPremiereSettlementPointsRecorder } from "../server/replay-premiere/ReplayPremiereInteractions";
 import { createReplayPremierePublicPageRouter } from "../server/replay-premiere/ReplayPremierePublicPage";
 import { ReplayPremiereRuntimeRegistry } from "../server/replay-premiere/ReplayPremiereRuntimeCoordinator";
 import {
@@ -237,8 +250,52 @@ const replayPremiereGuestSecurity = new ReplayPremiereGuestSecurity({
 // cycle-premiere.sh wiping the premiere state root never touches it. See
 // `ReplayPremierePointsLedger`'s doc comment for the points-formula
 // reasoning.
-export const replayPremierePointsLedger =
-  await ReplayPremierePointsLedger.open();
+const replayPremierePointsLedgerRoot = resolveReplayPremierePointsLedgerRoot();
+export const replayPremierePointsLedger = await ReplayPremierePointsLedger.open(
+  replayPremierePointsLedgerRoot,
+);
+// GitHub identity links — beside the points ledger: same root, same atomic
+// write-temp-then-rename conventions, its own file
+// (`github-identity-links-v1.json`). NOT the premiere private state root —
+// see `ReplayPremiereIdentityLinkStore`'s class doc.
+export const replayPremiereIdentityLinkStore =
+  await ReplayPremiereIdentityLinkStore.open(
+    replayPremierePointsLedgerRoot,
+    pointsMergerFor(replayPremierePointsLedger),
+  );
+// "Sign in with GitHub" is cleanly absent — no button client-side, no
+// mounted route below — unless BOTH secrets are configured. See
+// `resolveReplayPremiereGithubOAuthConfig` and `RUNBOOK.md` for the exact
+// app-registration recipe.
+const replayPremiereGithubOAuthConfig = resolveReplayPremiereGithubOAuthConfig();
+const replayPremiereGithubOAuthClient =
+  replayPremiereGithubOAuthConfig === null
+    ? null
+    : createReplayPremiereGithubOAuthClient(replayPremiereGithubOAuthConfig);
+// Wraps the raw ledger so a settlement always credits the CURRENT canonical
+// identity, even from a browser whose guest cookie was merged away by a
+// GitHub link completed on a different device. `resolveCanonicalParticipantId`
+// is a local file lookup, never a GitHub call — this can never block,
+// delay, or fail a trade because GitHub is unreachable (see
+// `ReplayPremiereIdentityLinkStore`'s class doc: the identity provider is
+// never in the path of a trade).
+const replayPremierePointsRecorder: ReplayPremiereSettlementPointsRecorder = {
+  async recordPremiereSettlement(premiereId, settlements) {
+    const resolved = await Promise.all(
+      settlements.map(async (settlement) => ({
+        ...settlement,
+        participantId:
+          await replayPremiereIdentityLinkStore.resolveCanonicalParticipantId(
+            settlement.participantId,
+          ),
+      })),
+    );
+    await replayPremierePointsLedger.recordPremiereSettlement(
+      premiereId,
+      resolved,
+    );
+  },
+};
 export const replayPremiereRuntimeRegistry =
   new ReplayPremiereRuntimeRegistry();
 // Durable archive of reclaimed premieres: keeps `/premiere/<id>` resolvable
@@ -329,7 +386,7 @@ const replayPremiereProduction = await startReplayPremiereProduction({
   // the continuous LMSR prediction market for the whole live premiere (not
   // checkpoint-gated) for local/dev testing.
   wageringEnabled: envFlag("PROXYWAR_WAGERING_ENABLED"),
-  pointsLedger: replayPremierePointsLedger,
+  pointsLedger: replayPremierePointsRecorder,
   // Deterministic, seeded synthetic bettors that keep a thin local/dev
   // market legible for demos/tester sessions. Requires PROXYWAR_WAGERING_ENABLED=1
   // too. Off by default, never for production.
@@ -703,6 +760,24 @@ function sendReplayPremiereFailure(res: Response, error: unknown): void {
   }
   res.status(status).json(toPublicReplayPremiereFailure(error));
 }
+/** Attaches verified GitHub identity (or `null`s, when unlinked) to leaderboard/viewer entries in one bulk lookup — never per-row. */
+async function decoratePointsEntries<T extends { participantId: string }>(
+  entries: readonly T[],
+): Promise<
+  Array<T & { githubLogin: string | null; githubAvatarUrl: string | null }>
+> {
+  const described = await replayPremiereIdentityLinkStore.describeMany(
+    entries.map((entry) => entry.participantId),
+  );
+  return entries.map((entry) => {
+    const link = described.get(entry.participantId);
+    return {
+      ...entry,
+      githubLogin: link?.login ?? null,
+      githubAvatarUrl: link?.avatarUrl ?? null,
+    };
+  });
+}
 app.get("/api/premieres/points/leaderboard", async (req, res) => {
   if (!pointsRoutesEnabled) {
     res.status(404).json({ error: { code: "PREMIERE_UNAVAILABLE" } });
@@ -716,13 +791,27 @@ app.get("/api/premieres/points/leaderboard", async (req, res) => {
     if (guest.setCookie !== null) {
       res.setHeader("Set-Cookie", guest.setCookie);
     }
+    // Resolve through any GitHub-link merge first: a browser whose guest
+    // cookie was merged away into a canonical identity still finds ITSELF
+    // here — never an empty orphaned row (see `ReplayPremiereIdentityLinkStore`).
+    const viewerParticipantId =
+      await replayPremiereIdentityLinkStore.resolveCanonicalParticipantId(
+        guest.participant.participantId,
+      );
     const leaderboard = await replayPremierePointsLedger.readLeaderboard({
-      viewerParticipantId: guest.participant.participantId,
+      viewerParticipantId,
     });
     res.status(200).json({
       schemaVersion: 1,
       csrfToken: guest.csrfToken,
-      leaderboard,
+      leaderboard: {
+        ...leaderboard,
+        entries: await decoratePointsEntries(leaderboard.entries),
+        viewer:
+          leaderboard.viewer === null
+            ? null
+            : (await decoratePointsEntries([leaderboard.viewer]))[0],
+      },
     });
   } catch (error) {
     sendReplayPremiereFailure(res, error);
@@ -757,16 +846,42 @@ app.post(
         res.status(400).json({ error: { code: "PREMIERE_INVALID_REQUEST" } });
         return;
       }
+      const canonicalParticipantId =
+        await replayPremiereIdentityLinkStore.resolveCanonicalParticipantId(
+          authorization.participant.participantId,
+        );
       const entry = await replayPremierePointsLedger.setDisplayName(
-        authorization.participant.participantId,
+        canonicalParticipantId,
         displayName,
       );
-      res.status(200).json({ schemaVersion: 1, entry });
+      const [decoratedEntry] = await decoratePointsEntries([entry]);
+      res.status(200).json({ schemaVersion: 1, entry: decoratedEntry });
     } catch (error) {
       sendReplayPremiereFailure(res, error);
     }
   },
 );
+// "Sign in with GitHub" — mounted ONLY when both OAuth secrets are
+// configured (see `resolveReplayPremiereGithubOAuthConfig`); unset means
+// these three paths simply don't exist (no route, no button, no broken
+// state) and fall through to `createReplayPremiereRouter`'s 404 below.
+if (replayPremiereGithubOAuthClient !== null) {
+  app.use(
+    createReplayPremiereGithubAuthRouter({
+      security: replayPremiereGuestSecurity,
+      identityLinkStore: replayPremiereIdentityLinkStore,
+      oauthClient: replayPremiereGithubOAuthClient,
+      publicOrigin: replayPremierePublicOrigin,
+      onOperatorError: (operatorCode, error) => {
+        console.error(
+          `GitHub sign-in ${operatorCode}: ${
+            error instanceof Error ? error.message : String(error)
+          }`,
+        );
+      },
+    }),
+  );
+}
 
 app.use(
   createReplayPremiereRouter({

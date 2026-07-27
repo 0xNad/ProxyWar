@@ -229,4 +229,122 @@ describe("ReplayPremierePointsLedger", () => {
     });
     expect(board.viewer?.lifetimePoints).toBe(400);
   });
+
+  test("migrates a legacy on-disk file (settledPremiereIds, no per-premiere net) forward to premiereResults, preserving lifetime totals", async () => {
+    await fs.writeFile(
+      path.join(root, "points-ledger-v1.json"),
+      JSON.stringify({
+        schemaVersion: 1,
+        entries: {
+          [guestA]: {
+            displayName: "Legacy Name",
+            lifetimePoints: 250,
+            premieresTraded: 2,
+            premieresWon: 1,
+            updatedAt: "2026-01-01T00:00:00.000Z",
+            settledPremiereIds: [premiereOne, premiereTwo],
+          },
+        },
+      }),
+    );
+    const ledger = await ReplayPremierePointsLedger.open(root);
+    const board = await ledger.readLeaderboard({ viewerParticipantId: guestA });
+    // Lifetime totals survive the migration exactly; per-premiere granularity
+    // for already-settled premieres is inherently unrecoverable from the old
+    // shape (documented tradeoff), but re-settling either premiere id must
+    // still be a no-op (idempotency is preserved through the migration).
+    expect(board.viewer).toEqual(
+      expect.objectContaining({
+        participantId: guestA,
+        displayName: "Legacy Name",
+        lifetimePoints: 250,
+        premieresTraded: 2,
+        premieresWon: 1,
+      }),
+    );
+    await ledger.recordPremiereSettlement(premiereOne, [
+      { participantId: guestA, granted: 1_000, balance: 9_999 },
+    ]);
+    const afterRetry = await ledger.readLeaderboard({ viewerParticipantId: guestA });
+    expect(afterRetry.viewer?.lifetimePoints).toBe(250);
+    expect(afterRetry.viewer?.premieresTraded).toBe(2);
+
+    // The migration is physically persisted to disk (not just in-memory) —
+    // a fresh instance over the same file never re-parses the legacy shape.
+    const onDisk = JSON.parse(
+      await fs.readFile(path.join(root, "points-ledger-v1.json"), "utf8"),
+    );
+    expect(onDisk.entries[guestA].premiereResults).toEqual({
+      [premiereOne]: 0,
+      [premiereTwo]: 0,
+    });
+    expect(onDisk.entries[guestA].settledPremiereIds).toBeUndefined();
+  });
+
+  test("mergeParticipant sums both identities' per-premiere contribution and counts the premiere once — including the adversarial win/loss case", async () => {
+    const ledger = await ReplayPremierePointsLedger.open(root);
+    // Disjoint premieres: guestB's whole history simply folds into guestA.
+    await ledger.recordPremiereSettlement(premiereOne, [
+      { participantId: guestA, granted: 1_000, balance: 1_200 },
+    ]);
+    await ledger.recordPremiereSettlement(premiereTwo, [
+      { participantId: guestB, granted: 1_000, balance: 900 },
+    ]);
+    await ledger.mergeParticipant(guestB, guestA);
+    const disjoint = await ledger.readLeaderboard({ viewerParticipantId: guestA });
+    expect(disjoint.viewer).toEqual(
+      expect.objectContaining({
+        lifetimePoints: 100, // +200 - 100
+        premieresTraded: 2,
+        premieresWon: 1,
+      }),
+    );
+    expect(disjoint.entries.some((entry) => entry.participantId === guestB)).toBe(
+      false,
+    );
+
+    // Adversarial case: guestA WON a shared premiere alone, then guestC
+    // (linking to the same GitHub id) is discovered to have LOST that exact
+    // same premiere. The tempting "keep the winner's contribution" rule is a
+    // free option; the correct rule sums and re-derives the win/loss flag
+    // from the combined net, so a merged loss always comes along with a win.
+    const premiereShared = "prem_cccccccccccccccc";
+    await ledger.recordPremiereSettlement(premiereShared, [
+      { participantId: guestA, granted: 1_000, balance: 1_100 }, // +100, a win
+    ]);
+    await ledger.recordPremiereSettlement(premiereShared, [
+      { participantId: guestC, granted: 1_000, balance: 850 }, // -150, a loss
+    ]);
+    const beforeMerge = await ledger.readLeaderboard({ viewerParticipantId: guestA });
+    expect(beforeMerge.viewer?.premieresWon).toBe(2); // premiereOne + premiereShared
+
+    await ledger.mergeParticipant(guestC, guestA);
+    const merged = await ledger.readLeaderboard({ viewerParticipantId: guestA });
+    expect(merged.viewer).toEqual(
+      expect.objectContaining({
+        // 200 (premiereOne) + -100 (disjoint B loss already folded) + (100-150)=-50 (shared, net)
+        lifetimePoints: 200 + -100 + -50,
+        premieresTraded: 3, // shared premiere counted ONCE, not twice
+        premieresWon: 1, // the shared premiere is no longer a win once netted
+      }),
+    );
+    expect(merged.entries.some((entry) => entry.participantId === guestC)).toBe(
+      false,
+    );
+  });
+
+  test("mergeParticipant is idempotent — merging an already-empty (or nonexistent) source is a safe no-op", async () => {
+    const ledger = await ReplayPremierePointsLedger.open(root);
+    await ledger.recordPremiereSettlement(premiereOne, [
+      { participantId: guestA, granted: 1_000, balance: 1_300 },
+    ]);
+    // Never traded, never had an entry at all.
+    await ledger.mergeParticipant(guestC, guestA);
+    // Merge again after guestC has nothing left (simulates a retried merge
+    // after a crash between the ledger merge and the identity-link write).
+    await ledger.mergeParticipant(guestC, guestA);
+    const board = await ledger.readLeaderboard({ viewerParticipantId: guestA });
+    expect(board.viewer?.lifetimePoints).toBe(300);
+    expect(board.viewer?.premieresTraded).toBe(1);
+  });
 });
