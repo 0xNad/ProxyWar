@@ -8,14 +8,14 @@
  * tests, unmodified); this file only tests the new fine-grained read path.
  */
 import express from "express";
-import http from "node:http";
 import { promises as fs } from "node:fs";
+import http from "node:http";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { ReplayPremiereAnonymousWriteLimiter } from "../../../../src/server/replay-premiere/ReplayPremiereAnonymousWriteLimiter";
 import { ReplayPremiereAdmissionCatalog } from "../../../../src/server/replay-premiere/ReplayPremiereCatalog";
 import { freezeReplayPremiereCheckpointProjection } from "../../../../src/server/replay-premiere/ReplayPremiereCheckpointProjection";
-import { ReplayPremiereAnonymousWriteLimiter } from "../../../../src/server/replay-premiere/ReplayPremiereAnonymousWriteLimiter";
 import { ReplayPremiereGuestSecurity } from "../../../../src/server/replay-premiere/ReplayPremiereGuestSecurity";
 import {
   createReplayPremiereRouter,
@@ -58,8 +58,12 @@ function startupContext() {
     httpRegistry: new ReplayPremiereHttpRegistry(limiter.admit),
     runtimeRegistry: new ReplayPremiereRuntimeRegistry(),
     checkpointProjector: {
-      async project({ gate }: Parameters<
-        Parameters<typeof startReplayPremiereProduction>[0]["checkpointProjector"]["project"]
+      async project({
+        gate,
+      }: Parameters<
+        Parameters<
+          typeof startReplayPremiereProduction
+        >[0]["checkpointProjector"]["project"]
       >[0]) {
         const definition = gate.publicDefinition();
         const optionSeatIds = definition.provenance.seats.map(
@@ -182,7 +186,10 @@ describe("ReplayPremiereRuntimeCoordinator live visibility", () => {
     for (const record of runtime.readLiveProjection(-1)) {
       expect(record.presentationOffsetMs).toBeLessThanOrEqual(90_000);
     }
-  });
+    // Wall-clock test: it polls a real-cadence premiere and asserts against
+    // elapsed time, so the 5s default cannot hold on a loaded machine.
+    // Assertions unchanged; only the waiting budget.
+  }, 60_000);
 
   it("GET /live-projection: total transmitted content never exceeds the authoritative clock at any polled instant", async () => {
     const fixture = await verifiedRealtimeLongPublicationFixture(root);
@@ -273,5 +280,5 @@ describe("ReplayPremiereRuntimeCoordinator live visibility", () => {
         ),
       );
     }
-  });
+  }, 60_000);
 });

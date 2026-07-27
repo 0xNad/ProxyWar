@@ -13,21 +13,20 @@
  * bound at the instant of that specific request.
  */
 import express from "express";
-import http from "node:http";
 import { promises as fs } from "node:fs";
+import http from "node:http";
 import os from "node:os";
 import path from "node:path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   ReplayPremiereNetworkController,
   type ReplayPremiereNetworkCallbacks,
 } from "../../src/client/ReplayPremiereNetwork";
 import { ReplayPremierePlaybackController } from "../../src/client/ReplayPremierePlayback";
-import { PREMIERE_REAL_TURN_INTERVAL_MS } from "../../src/server/replay-premiere/ReplayPremiereContracts";
+import { ReplayPremiereAnonymousWriteLimiter } from "../../src/server/replay-premiere/ReplayPremiereAnonymousWriteLimiter";
 import { ReplayPremiereAdmissionCatalog } from "../../src/server/replay-premiere/ReplayPremiereCatalog";
 import { freezeReplayPremiereCheckpointProjection } from "../../src/server/replay-premiere/ReplayPremiereCheckpointProjection";
-import { ReplayPremiereAnonymousWriteLimiter } from "../../src/server/replay-premiere/ReplayPremiereAnonymousWriteLimiter";
+import { PREMIERE_REAL_TURN_INTERVAL_MS } from "../../src/server/replay-premiere/ReplayPremiereContracts";
 import { ReplayPremiereGuestSecurity } from "../../src/server/replay-premiere/ReplayPremiereGuestSecurity";
 import {
   createReplayPremiereRouter,
@@ -70,8 +69,12 @@ function startupContext() {
     httpRegistry: new ReplayPremiereHttpRegistry(limiter.admit),
     runtimeRegistry: new ReplayPremiereRuntimeRegistry(),
     checkpointProjector: {
-      async project({ gate }: Parameters<
-        Parameters<typeof startReplayPremiereProduction>[0]["checkpointProjector"]["project"]
+      async project({
+        gate,
+      }: Parameters<
+        Parameters<
+          typeof startReplayPremiereProduction
+        >[0]["checkpointProjector"]["project"]
       >[0]) {
         const definition = gate.publicDefinition();
         const optionSeatIds = definition.provenance.seats.map(
@@ -260,7 +263,9 @@ describe("ReplayPremiereNetworkController content-source=tap", () => {
         ),
       );
     }
-  });
+    // Wall-clock test against a real server and real timers; the 5s default
+    // cannot hold on a loaded machine. Assertions unchanged.
+  }, 60_000);
 
   it("seeks a late join straight to the trailed frontier — never paces turn 0 forward against the live clock", async () => {
     // The regression this pins: a client joining well after match start
@@ -366,7 +371,9 @@ describe("ReplayPremiereNetworkController content-source=tap", () => {
       expect(target).toBeLessThanOrEqual(released);
       // And it lands close to the live frontier — within one presentation
       // trail's worth of records — not near the start of the match.
-      const oneTrailRecords = Math.ceil(45_000 / PREMIERE_REAL_TURN_INTERVAL_MS);
+      const oneTrailRecords = Math.ceil(
+        45_000 / PREMIERE_REAL_TURN_INTERVAL_MS,
+      );
       expect(released - target).toBeLessThanOrEqual(oneTrailRecords);
     } finally {
       await new Promise<void>((resolve, reject) =>
@@ -375,5 +382,5 @@ describe("ReplayPremiereNetworkController content-source=tap", () => {
         ),
       );
     }
-  });
+  }, 60_000);
 });

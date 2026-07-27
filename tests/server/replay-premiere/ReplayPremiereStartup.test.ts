@@ -3366,7 +3366,12 @@ describe("ReplayPremiere production startup", () => {
       limitPrice: 100,
     });
     expect(trade.shares).toBeGreaterThan(0);
-  });
+    // Wall-clock test: it advances a real production-cadence premiere and
+    // asserts against elapsed time, so it cannot finish inside vitest's 5s
+    // default on a loaded machine. The budget is not a correctness knob -
+    // every assertion inside is unchanged - it only has to exceed the real
+    // duration this test deliberately spends waiting.
+  }, 60_000);
   test("synthetic crowd, on: drives visible trades and price movement with zero human trading", async () => {
     const fixture = await verifiedRealtimeLongPublicationFixture(root);
     const catalog = await ReplayPremiereAdmissionCatalog.open({
@@ -3436,7 +3441,7 @@ describe("ReplayPremiere production startup", () => {
     }
     const after = target!.interactions.readMarketState(null)!.prices;
     expect(after).not.toEqual(before);
-  });
+  }, 60_000);
 
   test("synthetic crowd, off: a premiere behaves byte-identically to no simulator running at all", async () => {
     const fixture = await verifiedRealtimeLongPublicationFixture(root);
@@ -3474,7 +3479,7 @@ describe("ReplayPremiere production startup", () => {
     const snapshot = target!.interactions.readState();
     expect(snapshot.trades).toEqual([]);
     expect(target!.interactions.readMarketState(null)!.prices).toEqual(before);
-  });
+  }, 60_000);
 });
 
 const ORPHAN_ALTERNATE_ID = "prem_89abcdef01234567";
