@@ -1,9 +1,11 @@
 import { promises as fs } from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { leagueClaimMergerFor, ReplayPremiereLeagueClaimStore } from "../../../../src/server/replay-premiere/account/ReplayPremiereLeagueClaimStore";
 import {
   pointsMergerFor,
   ReplayPremiereIdentityLinkStore,
+  type ReplayPremiereLeagueClaimMerger,
   type ReplayPremierePointsMerger,
 } from "../../../../src/server/replay-premiere/points/ReplayPremiereIdentityLinkStore";
 import { ReplayPremierePointsLedger } from "../../../../src/server/replay-premiere/points/ReplayPremierePointsLedger";
@@ -24,6 +26,15 @@ function recordingMerger(): ReplayPremierePointsMerger & {
   };
 }
 
+/** A league-claim merger that never has anything to reconcile — for tests exercising the GitHub-link/merge machinery itself, not claim reconciliation. */
+function noopLeagueClaimMerger(): ReplayPremiereLeagueClaimMerger {
+  return {
+    async mergeClaim() {
+      return { claim: null, sourceClaimReplaced: false };
+    },
+  };
+}
+
 describe("ReplayPremiereIdentityLinkStore", () => {
   let root: string;
 
@@ -38,7 +49,11 @@ describe("ReplayPremiereIdentityLinkStore", () => {
 
   test("first sign-in for a GitHub id makes the linking guest canonical", async () => {
     const merger = recordingMerger();
-    const store = await ReplayPremiereIdentityLinkStore.open(root, merger);
+    const store = await ReplayPremiereIdentityLinkStore.open(
+      root,
+      merger,
+      noopLeagueClaimMerger(),
+    );
     const result = await store.linkOrMerge(guestA, {
       githubUserId: 12345,
       login: "daveey",
@@ -49,6 +64,7 @@ describe("ReplayPremiereIdentityLinkStore", () => {
       login: "daveey",
       avatarUrl: "https://avatars.githubusercontent.com/u/12345",
       merged: false,
+      leagueClaimReplaced: false,
     });
     expect(merger.calls).toHaveLength(0);
     const status = await store.getStatus(guestA);
@@ -62,7 +78,11 @@ describe("ReplayPremiereIdentityLinkStore", () => {
 
   test("a different guest linking the same GitHub id merges into the existing canonical, and an old cookie resolves through the alias", async () => {
     const merger = recordingMerger();
-    const store = await ReplayPremiereIdentityLinkStore.open(root, merger);
+    const store = await ReplayPremiereIdentityLinkStore.open(
+      root,
+      merger,
+      noopLeagueClaimMerger(),
+    );
     await store.linkOrMerge(guestA, {
       githubUserId: 999,
       login: "daveey",
@@ -78,6 +98,7 @@ describe("ReplayPremiereIdentityLinkStore", () => {
       login: "daveey",
       avatarUrl: null,
       merged: true,
+      leagueClaimReplaced: false,
     });
     expect(merger.calls).toEqual([{ from: guestB, into: guestA }]);
     // guestB's old cookie still resolves to the canonical account.
@@ -103,6 +124,7 @@ describe("ReplayPremiereIdentityLinkStore", () => {
     const store = await ReplayPremiereIdentityLinkStore.open(
       root,
       pointsMergerFor(ledger),
+      noopLeagueClaimMerger(),
     );
     await store.linkOrMerge(guestA, {
       githubUserId: 1,
@@ -123,7 +145,11 @@ describe("ReplayPremiereIdentityLinkStore", () => {
 
   test("renamed handle: login/avatar refresh on every sign-in, even a no-op re-link", async () => {
     const merger = recordingMerger();
-    const store = await ReplayPremiereIdentityLinkStore.open(root, merger);
+    const store = await ReplayPremiereIdentityLinkStore.open(
+      root,
+      merger,
+      noopLeagueClaimMerger(),
+    );
     await store.linkOrMerge(guestA, {
       githubUserId: 42,
       login: "old-handle",
@@ -139,6 +165,7 @@ describe("ReplayPremiereIdentityLinkStore", () => {
       login: "new-handle",
       avatarUrl: "https://example.test/new.png",
       merged: false,
+      leagueClaimReplaced: false,
     });
     const status = await store.getStatus(guestA);
     expect(status.login).toBe("new-handle");
@@ -147,7 +174,11 @@ describe("ReplayPremiereIdentityLinkStore", () => {
 
   test("two simultaneous callbacks for the same GitHub id (different guests) produce exactly one canonical identity and never double-merge", async () => {
     const merger = recordingMerger();
-    const store = await ReplayPremiereIdentityLinkStore.open(root, merger);
+    const store = await ReplayPremiereIdentityLinkStore.open(
+      root,
+      merger,
+      noopLeagueClaimMerger(),
+    );
     const [first, second] = await Promise.all([
       store.linkOrMerge(guestA, {
         githubUserId: 7,
@@ -184,7 +215,11 @@ describe("ReplayPremiereIdentityLinkStore", () => {
 
   test("a three-way merge chain collapses aliases to a single hop", async () => {
     const merger = recordingMerger();
-    const store = await ReplayPremiereIdentityLinkStore.open(root, merger);
+    const store = await ReplayPremiereIdentityLinkStore.open(
+      root,
+      merger,
+      noopLeagueClaimMerger(),
+    );
     // guestB links first under githubId 1 (guestA hasn't signed in yet).
     await store.linkOrMerge(guestB, {
       githubUserId: 1,
@@ -211,7 +246,11 @@ describe("ReplayPremiereIdentityLinkStore", () => {
 
   test("unknown participant is reported as not signed in and resolves to itself", async () => {
     const merger = recordingMerger();
-    const store = await ReplayPremiereIdentityLinkStore.open(root, merger);
+    const store = await ReplayPremiereIdentityLinkStore.open(
+      root,
+      merger,
+      noopLeagueClaimMerger(),
+    );
     const status = await store.getStatus(guestA);
     expect(status).toEqual({
       signedIn: false,
@@ -224,7 +263,11 @@ describe("ReplayPremiereIdentityLinkStore", () => {
 
   test("describeMany decorates only linked participants, in one bulk read", async () => {
     const merger = recordingMerger();
-    const store = await ReplayPremiereIdentityLinkStore.open(root, merger);
+    const store = await ReplayPremiereIdentityLinkStore.open(
+      root,
+      merger,
+      noopLeagueClaimMerger(),
+    );
     await store.linkOrMerge(guestA, {
       githubUserId: 5,
       login: "daveey",
@@ -240,16 +283,133 @@ describe("ReplayPremiereIdentityLinkStore", () => {
 
   test("survives a fresh store instance pointed at the same root — durable across a process restart", async () => {
     const merger = recordingMerger();
-    const first = await ReplayPremiereIdentityLinkStore.open(root, merger);
+    const first = await ReplayPremiereIdentityLinkStore.open(
+      root,
+      merger,
+      noopLeagueClaimMerger(),
+    );
     await first.linkOrMerge(guestA, {
       githubUserId: 99,
       login: "daveey",
       avatarUrl: null,
     });
-    const second = await ReplayPremiereIdentityLinkStore.open(root, merger);
+    const second = await ReplayPremiereIdentityLinkStore.open(
+      root,
+      merger,
+      noopLeagueClaimMerger(),
+    );
     const status = await second.getStatus(guestA);
     expect(status.signedIn).toBe(true);
     expect(status.login).toBe("daveey");
+  });
+});
+
+describe("ReplayPremiereIdentityLinkStore league-claim reconciliation on merge", () => {
+  let root: string;
+
+  beforeEach(async () => {
+    const realTemporaryRoot = await fs.realpath(os.tmpdir());
+    root = await fs.mkdtemp(path.join(realTemporaryRoot, "identity-link-claims-"));
+  });
+
+  afterEach(async () => {
+    await fs.rm(root, { recursive: true, force: true });
+  });
+
+  async function harness(): Promise<{
+    store: ReplayPremiereIdentityLinkStore;
+    claims: ReplayPremiereLeagueClaimStore;
+  }> {
+    const claims = await ReplayPremiereLeagueClaimStore.open(
+      path.join(root, "claims"),
+    );
+    const store = await ReplayPremiereIdentityLinkStore.open(
+      path.join(root, "identity-links"),
+      recordingMerger(),
+      leagueClaimMergerFor(claims),
+    );
+    return { store, claims };
+  }
+
+  test("a guest claims a league agent, then links GitHub — the claim survives on the canonical identity", async () => {
+    const { store, claims } = await harness();
+    await claims.setClaim(guestA, "daveey");
+    const result = await store.linkOrMerge(guestA, {
+      githubUserId: 1,
+      login: "octo",
+      avatarUrl: null,
+    });
+    expect(result.merged).toBe(false); // first-ever link, no merge
+    expect(result.leagueClaimReplaced).toBe(false);
+    const claim = await claims.getClaim(result.canonicalParticipantId);
+    expect(claim?.playerName).toBe("daveey");
+  });
+
+  test("two guests both claim different players and merge — the canonical target's claim wins, deterministically, and the replacement is reported", async () => {
+    const { store, claims } = await harness();
+    // guestA links first, becoming canonical for this GitHub id, having
+    // already claimed "daveey".
+    await claims.setClaim(guestA, "daveey");
+    await store.linkOrMerge(guestA, {
+      githubUserId: 1,
+      login: "octo",
+      avatarUrl: null,
+    });
+    // guestB — a different browser/session — separately claimed a
+    // different player, then signs in with the SAME GitHub account,
+    // merging into guestA's canonical identity.
+    await claims.setClaim(guestB, "relh");
+    const merge = await store.linkOrMerge(guestB, {
+      githubUserId: 1,
+      login: "octo",
+      avatarUrl: null,
+    });
+    expect(merge.merged).toBe(true);
+    expect(merge.leagueClaimReplaced).toBe(true);
+    const claim = await claims.getClaim(merge.canonicalParticipantId);
+    expect(claim?.playerName).toBe("daveey"); // canonical target's claim wins
+    // The merged-away source id no longer independently carries a claim.
+    expect(await claims.getClaim(guestB)).toBeNull();
+  });
+
+  test("only the source guest claims a player — the claim carries over to the canonical target", async () => {
+    const { store, claims } = await harness();
+    await store.linkOrMerge(guestA, {
+      githubUserId: 1,
+      login: "octo",
+      avatarUrl: null,
+    });
+    // guestB claims a player only AFTER guestA is already canonical, then
+    // signs in and merges into guestA.
+    await claims.setClaim(guestB, "relh");
+    const merge = await store.linkOrMerge(guestB, {
+      githubUserId: 1,
+      login: "octo",
+      avatarUrl: null,
+    });
+    expect(merge.merged).toBe(true);
+    expect(merge.leagueClaimReplaced).toBe(false);
+    const claim = await claims.getClaim(merge.canonicalParticipantId);
+    expect(claim?.playerName).toBe("relh");
+  });
+
+  test("both sides claim the SAME player — a no-op merge, not reported as a replacement", async () => {
+    const { store, claims } = await harness();
+    await claims.setClaim(guestA, "daveey");
+    await store.linkOrMerge(guestA, {
+      githubUserId: 1,
+      login: "octo",
+      avatarUrl: null,
+    });
+    await claims.setClaim(guestB, "daveey");
+    const merge = await store.linkOrMerge(guestB, {
+      githubUserId: 1,
+      login: "octo",
+      avatarUrl: null,
+    });
+    expect(merge.leagueClaimReplaced).toBe(false);
+    const claim = await claims.getClaim(merge.canonicalParticipantId);
+    expect(claim?.playerName).toBe("daveey");
   });
 });
 
@@ -265,7 +425,11 @@ describe("ReplayPremiereIdentityLinkStore corruption handling", () => {
 
   test("refuses to start empty over a readable-but-invalid store, rather than silently forgetting every link", async () => {
     const merger = recordingMerger();
-    const first = await ReplayPremiereIdentityLinkStore.open(root, merger);
+    const first = await ReplayPremiereIdentityLinkStore.open(
+      root,
+      merger,
+      noopLeagueClaimMerger(),
+    );
     await first.linkOrMerge(guestA, {
       githubUserId: 4242,
       login: "daveey",
@@ -281,7 +445,11 @@ describe("ReplayPremiereIdentityLinkStore corruption handling", () => {
     const storePath = path.join(root, storeFile!);
     await fs.writeFile(storePath, JSON.stringify({ unexpected: "shape" }));
 
-    const second = await ReplayPremiereIdentityLinkStore.open(root, merger);
+    const second = await ReplayPremiereIdentityLinkStore.open(
+      root,
+      merger,
+      noopLeagueClaimMerger(),
+    );
     await expect(second.getStatus(guestA)).rejects.toThrow(/unreadable/);
 
     // And the original bytes are still on disk, recoverable by a human.

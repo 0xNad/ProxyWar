@@ -1,5 +1,5 @@
 import { spawn, type ChildProcess } from "child_process";
-import { randomUUID, timingSafeEqual } from "crypto";
+import { randomBytes, randomUUID, timingSafeEqual } from "crypto";
 import express, { type Request, type Response } from "express";
 import fs from "fs/promises";
 import http from "http";
@@ -95,6 +95,8 @@ import {
   syncProxyWarActiveRoster,
 } from "../server/agents/ProxyWarNationRegistry";
 import {
+  isProxyWarPublicAccountReadPath,
+  isProxyWarPublicAccountWritePath,
   isProxyWarPublicDoc,
   isProxyWarPublicExternalAgentExample,
   isProxyWarPublicLeagueArtifact,
@@ -127,6 +129,10 @@ import {
   getAppShellContent,
   setHtmlNoCacheHeaders,
 } from "../server/RenderHtml";
+import {
+  leagueClaimMergerFor,
+  ReplayPremiereLeagueClaimStore,
+} from "../server/replay-premiere/account/ReplayPremiereLeagueClaimStore";
 import {
   pointsMergerFor,
   ReplayPremiereIdentityLinkStore,
@@ -168,7 +174,11 @@ import {
   requestSecurityHeaders,
 } from "../server/replay-premiere/ReplayPremiereHttp";
 import type { ReplayPremiereSettlementPointsRecorder } from "../server/replay-premiere/ReplayPremiereInteractions";
-import { createReplayPremierePublicPageRouter } from "../server/replay-premiere/ReplayPremierePublicPage";
+import {
+  createReplayPremierePublicPageRouter,
+  nonceInlineScripts,
+  pageContentSecurityPolicyWithNonce,
+} from "../server/replay-premiere/ReplayPremierePublicPage";
 import { ReplayPremiereRuntimeRegistry } from "../server/replay-premiere/ReplayPremiereRuntimeCoordinator";
 import {
   loadOrCreateReplayPremiereGuestHmacKey,
@@ -254,6 +264,15 @@ const replayPremierePointsLedgerRoot = resolveReplayPremierePointsLedgerRoot();
 export const replayPremierePointsLedger = await ReplayPremierePointsLedger.open(
   replayPremierePointsLedgerRoot,
 );
+// Self-asserted "this league agent is mine" claims — beside the points
+// ledger: same root, same atomic write-temp-then-rename convention, its
+// own file (`league-claims-v1.json`). Private to each participant's own
+// account read; never joined into the points leaderboard or any other
+// public response — see `ReplayPremiereLeagueClaimStore`'s class doc.
+// Opened BEFORE the identity link store below, which merges claims into
+// it on a GitHub link (`leagueClaimMergerFor`).
+export const replayPremiereLeagueClaimStore =
+  await ReplayPremiereLeagueClaimStore.open(replayPremierePointsLedgerRoot);
 // GitHub identity links — beside the points ledger: same root, same atomic
 // write-temp-then-rename conventions, its own file
 // (`github-identity-links-v1.json`). NOT the premiere private state root —
@@ -262,6 +281,7 @@ export const replayPremiereIdentityLinkStore =
   await ReplayPremiereIdentityLinkStore.open(
     replayPremierePointsLedgerRoot,
     pointsMergerFor(replayPremierePointsLedger),
+    leagueClaimMergerFor(replayPremiereLeagueClaimStore),
   );
 // "Sign in with GitHub" is cleanly absent — no button client-side, no
 // mounted route below — unless BOTH secrets are configured. See
@@ -861,6 +881,189 @@ app.post(
     }
   },
 );
+// -----------------------------------------------------------------------
+// Account page: the one place a participant sees everything the system
+// knows about THEM, both as a bettor and — if they've made one — as a
+// self-asserted league agent owner. Same guest identity and same
+// wagering gate as the points routes above.
+// -----------------------------------------------------------------------
+const MAX_LEAGUE_CLAIM_PLAYER_NAME_BYTES = 512;
+
+/**
+ * The viewer's own live position in the "current" premiere — same
+ * definition `/api/premieres/auth/github/*` uses below (the most
+ * recently registered id; at most one premiere has an open market at a
+ * time in this exhibition loop). `null` when there is no current
+ * premiere, its runtime is gone from the live registry (already
+ * reclaimed), or the viewer holds no open position in it — a bankroll
+ * entry with zero positions is not a "live position" worth surfacing.
+ */
+async function readCurrentPremierePositionSummary(participantId: string): Promise<{
+  premiereId: string;
+  status: "open" | "settled";
+  balance: number | null;
+  positionCount: number;
+  unrealizedPnl: number;
+} | null> {
+  const currentPremiereId = replayPremiereHttpRegistry.premiereIds().at(-1);
+  if (currentPremiereId === undefined) return null;
+  const target = replayPremiereHttpRegistry.get(currentPremiereId);
+  if (target === null) return null;
+  try {
+    const market = target.interactions.readMarketState(participantId);
+    const positions = market?.positions ?? [];
+    if (positions.length === 0) return null;
+    return {
+      premiereId: currentPremiereId,
+      status: market?.status ?? "open",
+      balance: market?.balance ?? null,
+      positionCount: positions.length,
+      unrealizedPnl: positions.reduce((sum, p) => sum + p.unrealizedPnl, 0),
+    };
+  } catch {
+    return null;
+  }
+}
+
+app.get("/api/premieres/account", async (req, res) => {
+  if (!pointsRoutesEnabled) {
+    res.status(404).json({ error: { code: "PREMIERE_UNAVAILABLE" } });
+    return;
+  }
+  try {
+    res.setHeader("Cache-Control", "no-store, max-age=0");
+    const guest = replayPremiereGuestSecurity.bootstrapRead(
+      requestSecurityHeaders(req),
+    );
+    if (guest.setCookie !== null) {
+      res.setHeader("Set-Cookie", guest.setCookie);
+    }
+    const canonicalParticipantId =
+      await replayPremiereIdentityLinkStore.resolveCanonicalParticipantId(
+        guest.participant.participantId,
+      );
+    const [pointsEntry, board, githubStatus, leagueClaim, currentPremiere] =
+      await Promise.all([
+        replayPremierePointsLedger.readParticipant(canonicalParticipantId),
+        replayPremierePointsLedger.readLeaderboard({
+          viewerParticipantId: canonicalParticipantId,
+        }),
+        replayPremiereIdentityLinkStore.getStatus(canonicalParticipantId),
+        replayPremiereLeagueClaimStore.getClaim(canonicalParticipantId),
+        readCurrentPremierePositionSummary(canonicalParticipantId),
+      ]);
+    const matches = Object.entries(pointsEntry?.premiereResults ?? {})
+      .map(([premiereId, net]) => ({
+        premiereId,
+        net,
+        revealedAt:
+          replayPremiereArchiveStore.lookup(premiereId)?.revealedAt ?? null,
+      }))
+      .sort((a, b) => {
+        const aTime = a.revealedAt === null ? -Infinity : Date.parse(a.revealedAt);
+        const bTime = b.revealedAt === null ? -Infinity : Date.parse(b.revealedAt);
+        if (bTime !== aTime) return bTime - aTime;
+        return a.premiereId < b.premiereId ? -1 : a.premiereId > b.premiereId ? 1 : 0;
+      });
+    res.status(200).json({
+      schemaVersion: 1,
+      csrfToken: guest.csrfToken,
+      identity: {
+        participantId: canonicalParticipantId,
+        displayName: pointsEntry?.displayName ?? null,
+        githubLogin: githubStatus.login,
+        githubAvatarUrl: githubStatus.avatarUrl,
+      },
+      betting: {
+        lifetimePoints: pointsEntry?.lifetimePoints ?? 0,
+        premieresTraded: pointsEntry?.premieresTraded ?? 0,
+        premieresWon: pointsEntry?.premieresWon ?? 0,
+        rank: board.viewer?.rank ?? null,
+        totalRankedParticipants: board.totalRankedParticipants,
+        matches,
+        currentPremiere,
+      },
+      league: {
+        claim: leagueClaim,
+      },
+    });
+  } catch (error) {
+    sendReplayPremiereFailure(res, error);
+  }
+});
+// Route-level JSON parsing — same reasoning as points/display-name above:
+// this mounts above the global `express.json()`.
+app.post(
+  "/api/premieres/account/league-claim",
+  express.json({ limit: "4kb" }),
+  async (req, res) => {
+    if (!pointsRoutesEnabled) {
+      res.status(404).json({ error: { code: "PREMIERE_UNAVAILABLE" } });
+      return;
+    }
+    try {
+      res.setHeader("Cache-Control", "no-store, max-age=0");
+      const authorization = replayPremiereGuestSecurity.authorizeWrite(
+        requestSecurityHeaders(req),
+      );
+      const body: unknown = req.body;
+      const playerName =
+        typeof body === "object" &&
+        body !== null &&
+        "playerName" in body &&
+        typeof body.playerName === "string" &&
+        body.playerName.length <= MAX_LEAGUE_CLAIM_PLAYER_NAME_BYTES
+          ? body.playerName
+          : null;
+      if (playerName === null) {
+        res.status(400).json({ error: { code: "PREMIERE_INVALID_REQUEST" } });
+        return;
+      }
+      const canonicalParticipantId =
+        await replayPremiereIdentityLinkStore.resolveCanonicalParticipantId(
+          authorization.participant.participantId,
+        );
+      const claim = await replayPremiereLeagueClaimStore.setClaim(
+        canonicalParticipantId,
+        playerName,
+      );
+      res.status(200).json({ schemaVersion: 1, claim });
+    } catch (error) {
+      sendReplayPremiereFailure(res, error);
+    }
+  },
+);
+// The account page itself — a plain app-shell document, not premiere-
+// scoped, so it needs none of `ReplayPremierePublicPage`'s per-premiere
+// metadata/CSP machinery. Always reachable (like `/premiere/:id`); the
+// client-side component degrades to "betting isn't live here" if the API
+// above 404s for a deployment with wagering off.
+app.get("/account", async (_req, res) => {
+  try {
+    const appShell = await getAppShellContent(
+      path.resolve(staticRootDir, "index.html"),
+    );
+    const scriptNonce = randomBytes(24).toString("base64");
+    res.setHeader(
+      "Content-Security-Policy",
+      pageContentSecurityPolicyWithNonce(
+        proxyWarLeagueContentSecurityPolicy(),
+        scriptNonce,
+      ),
+    );
+    setHtmlNoCacheHeaders(res);
+    res.send(nonceInlineScripts(appShell, scriptNonce));
+  } catch (error) {
+    console.error(
+      `Failed to serve the account page: ${
+        error instanceof Error ? error.message : String(error)
+      }`,
+    );
+    res
+      .status(503)
+      .send("Proxy War account page is not built for this server.");
+  }
+});
 // "Sign in with GitHub" — mounted ONLY when both OAuth secrets are
 // configured (see `resolveReplayPremiereGithubOAuthConfig`); unset means
 // these three paths simply don't exist (no route, no button, no broken
@@ -1036,6 +1239,7 @@ if (leagueWrapperOnly) {
         isProxyWarPublicLeaguePath(req.path) ||
         isProxyWarPublicPremiereReadPath(req.path) ||
         isProxyWarPublicPointsReadPath(req.path) ||
+        isProxyWarPublicAccountReadPath(req.path) ||
         isProxyWarPublicRendererAssetPath(req.path) ||
         // League-run clip status/mp4 for mirror-published (league-*) runs —
         // exactly the runs whose replay pages are already public.
@@ -1080,7 +1284,8 @@ if (leagueWrapperOnly) {
       }
       if (
         isProxyWarPublicPremiereWritePath(req.path) ||
-        isProxyWarPublicPointsWritePath(req.path)
+        isProxyWarPublicPointsWritePath(req.path) ||
+        isProxyWarPublicAccountWritePath(req.path)
       ) {
         next();
         return;

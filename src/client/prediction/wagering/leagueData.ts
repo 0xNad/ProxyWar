@@ -42,6 +42,12 @@ export interface LeagueEpisodeRow {
   readonly episodeRequestId: string;
   readonly roundNumber: number | null;
   readonly completedAt: string | null;
+  readonly map: string | null;
+  readonly winnerName: string | null;
+  /** Relative href to the self-contained spectator page, when the source replay was renderable. */
+  readonly watchHref: string | null;
+  /** Absolute path to the full real-client render, when available — the richer of the two watch links. */
+  readonly fullRenderHref: string | null;
   readonly players: readonly LeagueEpisodePlayerRow[];
 }
 
@@ -111,6 +117,10 @@ function parseEpisode(value: unknown): LeagueEpisodeRow | null {
     episodeRequestId: value.episodeRequestId,
     roundNumber: asNullableNumber(value.roundNumber),
     completedAt: asNullableString(value.completedAt),
+    map: asNullableString(value.map),
+    winnerName: asNullableString(value.winnerName),
+    watchHref: asNullableString(value.watchHref),
+    fullRenderHref: asNullableString(value.fullRenderHref),
     players,
   };
 }

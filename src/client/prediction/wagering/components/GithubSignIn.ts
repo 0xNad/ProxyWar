@@ -40,7 +40,12 @@ export class PremiereGithubSignIn extends LitElement {
   @state() private available = false;
   @state() private loading = true;
   @state() private identity: GithubIdentity | null = null;
-  @state() private banner: "linked" | "error" | "active_trade" | null = null;
+  @state() private banner:
+    | "linked"
+    | "linked_claim_replaced"
+    | "error"
+    | "active_trade"
+    | null = null;
 
   createRenderRoot() {
     return this;
@@ -52,13 +57,16 @@ export class PremiereGithubSignIn extends LitElement {
     void this.load();
   }
 
-  /** Consumes the `?github=linked|error|active_trade` marker the callback redirect leaves on `/bet/<id>`, showing it once and scrubbing it from the URL so a reload doesn't repeat it. */
+  /** Consumes the `?github=linked|error|active_trade` marker (plus `&claim=replaced`, only ever alongside `linked`) the callback redirect leaves on `/bet/<id>` or `/account`, showing it once and scrubbing both from the URL so a reload doesn't repeat it. */
   private consumeReturnBanner(): void {
     const url = new URL(window.location.href);
     const marker = url.searchParams.get("github");
     if (marker !== "linked" && marker !== "error" && marker !== "active_trade") return;
-    this.banner = marker;
+    const claimReplaced = url.searchParams.get("claim") === "replaced";
+    this.banner =
+      marker === "linked" && claimReplaced ? "linked_claim_replaced" : marker;
     url.searchParams.delete("github");
+    url.searchParams.delete("claim");
     window.history.replaceState(null, "", `${url.pathname}${url.search}${url.hash}`);
   }
 
@@ -140,15 +148,17 @@ export class PremiereGithubSignIn extends LitElement {
 
   private renderBanner() {
     const tone =
-      this.banner === "linked"
+      this.banner === "linked" || this.banner === "linked_claim_replaced"
         ? "border-accent/40 bg-accent-soft text-accent-strong"
         : "border-danger/40 bg-danger/10 text-danger";
     const message =
       this.banner === "linked"
         ? "Signed in with GitHub."
-        : this.banner === "active_trade"
-          ? "You already have an open position this match — sign in before you trade, or after it settles."
-          : "GitHub sign-in failed. Try again.";
+        : this.banner === "linked_claim_replaced"
+          ? "Signed in with GitHub. Your league-agent claim on this browser was replaced by the one already on your linked account."
+          : this.banner === "active_trade"
+            ? "You already have an open position this match — sign in before you trade, or after it settles."
+            : "GitHub sign-in failed. Try again.";
     return html`
       <div
         role="status"

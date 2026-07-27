@@ -28,6 +28,19 @@ export interface ReplayPremierePointsEntry {
   readonly updatedAt: string;
 }
 
+/**
+ * `ReplayPremierePointsEntry` plus the per-premiere net history — never
+ * exposed on the leaderboard (rank hides it deliberately: per-match detail
+ * is a "how am I doing" account-page fact, not a competitive leaderboard
+ * one), only via {@link ReplayPremierePointsLedger.readParticipant} for
+ * the viewer's own account read.
+ */
+export interface ReplayPremierePointsEntryDetail
+  extends ReplayPremierePointsEntry {
+  /** premiereId -> net for every settled premiere this participant traded. Entries migrated from the pre-`premiereResults` era read as net `0` — see the module doc on `legacyStoredEntrySchema`; that `0` is a placeholder, not a recorded flat result. */
+  readonly premiereResults: Readonly<Record<string, number>>;
+}
+
 export interface ReplayPremiereLeaderboardEntry extends ReplayPremierePointsEntry {
   readonly rank: number;
 }
@@ -304,6 +317,28 @@ export class ReplayPremierePointsLedger {
       file.entries[participantId] = entry;
       return toPublicEntry(participantId, entry);
     });
+  }
+
+  /**
+   * The viewer's own full record, including per-premiere history — never
+   * called for anyone but the requesting participant themselves (see
+   * {@link ReplayPremierePointsEntryDetail}'s doc: this is account-page
+   * data, not a public read). `null` for a participant with no ledger
+   * entry at all (never traded, never set a display name).
+   */
+  async readParticipant(
+    participantId: string,
+  ): Promise<ReplayPremierePointsEntryDetail | null> {
+    if (!PARTICIPANT_ID_PATTERN.test(participantId)) {
+      throw new Error(`invalid_participant_id: ${participantId}`);
+    }
+    const file = await this.load();
+    const entry = file.entries[participantId];
+    if (entry === undefined) return null;
+    return {
+      ...toPublicEntry(participantId, entry),
+      premiereResults: { ...entry.premiereResults },
+    };
   }
 
   /**

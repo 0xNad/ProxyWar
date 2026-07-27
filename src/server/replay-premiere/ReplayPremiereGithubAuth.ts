@@ -413,7 +413,12 @@ export function createReplayPremiereGithubAuthRouter(
             result.canonicalParticipantId,
           ),
         ]);
-        res.redirect(302, `${returnPath}?github=linked`);
+        res.redirect(
+          302,
+          result.leagueClaimReplaced
+            ? `${returnPath}?github=linked&claim=replaced`
+            : `${returnPath}?github=linked`,
+        );
       } catch (error) {
         failClosed("github_auth_callback_failed", error);
       } finally {

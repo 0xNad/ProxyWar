@@ -324,6 +324,29 @@ export function isProxyWarPublicPointsWritePath(pathname: string): boolean {
   return pathname === PROXYWAR_POINTS_DISPLAY_NAME_PATH;
 }
 
+const PROXYWAR_ACCOUNT_PAGE_PATH = "/account";
+const PROXYWAR_ACCOUNT_API_PATH = "/api/premieres/account";
+const PROXYWAR_ACCOUNT_LEAGUE_CLAIM_PATH =
+  "/api/premieres/account/league-claim";
+
+/**
+ * The account page and its one read API — same "betting-demo feature, not
+ * a beta-league one" reasoning as {@link isProxyWarPublicPointsReadPath}:
+ * reachable in league-wrapper-only mode (bet.proxywar.xyz), deliberately
+ * absent from the beta allowlist.
+ */
+export function isProxyWarPublicAccountReadPath(pathname: string): boolean {
+  return (
+    pathname === PROXYWAR_ACCOUNT_PAGE_PATH ||
+    pathname === PROXYWAR_ACCOUNT_API_PATH
+  );
+}
+
+/** The account page's one write surface: setting or clearing the self-asserted league claim — see {@link isProxyWarPublicPointsWritePath}. */
+export function isProxyWarPublicAccountWritePath(pathname: string): boolean {
+  return pathname === PROXYWAR_ACCOUNT_LEAGUE_CLAIM_PATH;
+}
+
 export function proxyWarLeagueContentSecurityPolicy(): string {
   return [
     "default-src 'self'",

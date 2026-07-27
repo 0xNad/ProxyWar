@@ -39,9 +39,19 @@ import {
 import {
   pointsMergerFor,
   ReplayPremiereIdentityLinkStore,
+  type ReplayPremiereLeagueClaimMerger,
 } from "../../../src/server/replay-premiere/points/ReplayPremiereIdentityLinkStore";
 import { ReplayPremierePointsLedger } from "../../../src/server/replay-premiere/points/ReplayPremierePointsLedger";
 import { ReplayPremiereGuestSecurity } from "../../../src/server/replay-premiere/ReplayPremiereGuestSecurity";
+
+/** A league-claim merger that never has anything to reconcile — this file exercises the market-identity Sybil guard, not claim reconciliation (see `ReplayPremiereIdentityLinkStore.test.ts` for that). */
+function noopLeagueClaimMerger(): ReplayPremiereLeagueClaimMerger {
+  return {
+    async mergeClaim() {
+      return { claim: null, sourceClaimReplaced: false };
+    },
+  };
+}
 
 const origin = "https://bet.example.test";
 const premiereId = "prem_abcdefghijklmnop";
@@ -301,6 +311,7 @@ async function buildServer(
     (await ReplayPremiereIdentityLinkStore.open(
       path.join(root, "identity-links"),
       pointsMergerFor(ledger),
+      noopLeagueClaimMerger(),
     ));
   const security = new ReplayPremiereGuestSecurity(guestSecurityOptions);
   const registry = new ReplayPremiereHttpRegistry(h.admitAnonymousWrite);
@@ -961,6 +972,7 @@ describe("settlement-time canonicalisation (second line of defense)", () => {
       const identityLinkStore = await ReplayPremiereIdentityLinkStore.open(
         path.join(root, "identity-links"),
         pointsMergerFor(ledger),
+        noopLeagueClaimMerger(),
       );
       const h = interactionsHarness({ pointsLedger: ledger });
       const sessionA = await createSession(h, guestA);
@@ -1047,6 +1059,7 @@ describe("durable canonical resolution at the HTTP trading boundary (across rest
     const identityLinkStore1 = await ReplayPremiereIdentityLinkStore.open(
       path.join(root, "identity-links"),
       pointsMergerFor(ledger1),
+      noopLeagueClaimMerger(),
     );
     await identityLinkStore1.linkOrMerge(guestA, {
       githubUserId: 600,
@@ -1131,6 +1144,7 @@ describe("durable canonical resolution at the HTTP trading boundary (across rest
     const identityLinkStore2 = await ReplayPremiereIdentityLinkStore.open(
       path.join(root, "identity-links"),
       pointsMergerFor(ledger2),
+      noopLeagueClaimMerger(),
     );
     const server2 = await buildServer(root, h2, emptyOauthState, {
       ledger: ledger2,
@@ -1196,6 +1210,7 @@ describe("durable canonical resolution at the HTTP trading boundary (across rest
     const identityLinkStore = await ReplayPremiereIdentityLinkStore.open(
       path.join(root, "identity-links"),
       pointsMergerFor(ledger),
+      noopLeagueClaimMerger(),
     );
     await identityLinkStore.linkOrMerge(guestA, {
       githubUserId: 700,
@@ -1276,6 +1291,7 @@ describe("durable canonical resolution at the HTTP trading boundary (across rest
     const identityLinkStore = await ReplayPremiereIdentityLinkStore.open(
       path.join(root, "identity-links"),
       pointsMergerFor(ledger),
+      noopLeagueClaimMerger(),
     );
     const h = interactionsHarness();
     const server = await buildServer(root, h, emptyOauthState, {
@@ -1361,6 +1377,7 @@ describe("durable canonical resolution at the HTTP trading boundary (across rest
     const identityLinkStore = await ReplayPremiereIdentityLinkStore.open(
       path.join(root, "identity-links"),
       pointsMergerFor(ledger),
+      noopLeagueClaimMerger(),
     );
     // Established while GitHub was reachable — this is the durable state
     // resolution has to serve, not something being tested here.

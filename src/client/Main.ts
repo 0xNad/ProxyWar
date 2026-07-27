@@ -80,6 +80,7 @@ import {
   openBettingPremierePage,
   parseBettingPremiereRoute,
 } from "./prediction/wagering/page/BettingPremierePage";
+import "./prediction/wagering/page/AccountPage";
 import "./SinglePlayerModal";
 import { StoreModal } from "./Store";
 import "./TerritoryPatternsModal";
@@ -700,6 +701,17 @@ class Client {
   }
 
   private async handleUrl() {
+    // The account page is a standalone route with no lobby/game/replay
+    // concept behind it — mount it and return before any of the
+    // modal-definition waits or lobby-join logic below, none of which it
+    // needs. `replaceChildren` is safe here: every link the account page
+    // renders is a plain `<a href>` (real navigation, not client-side
+    // routing), so nothing downstream ever needs the DOM nodes this
+    // clears, and a real navigation away reloads the document anyway.
+    if (window.location.pathname === "/account") {
+      await this.openAccountPage();
+      return;
+    }
     // Wait for modal custom elements to be defined
     await Promise.all([
       customElements.whenDefined("join-lobby-modal"),
@@ -892,6 +904,19 @@ class Client {
         }
       });
     }
+  }
+
+  /**
+   * Mounts the standalone `/account` page. Deliberately NOT routed through
+   * any of `ReplayPremiereRuntimeController`/`openBettingPremiere`'s
+   * machinery — there is no replay, session, or WASM engine behind this
+   * route, only a data page over `/api/premieres/account`. The custom
+   * element is registered by the static `AccountPage` import above.
+   */
+  private async openAccountPage(): Promise<void> {
+    document.body.replaceChildren(
+      document.createElement("premiere-account-page"),
+    );
   }
 
   /**

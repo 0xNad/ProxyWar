@@ -6,6 +6,7 @@ import path from "node:path";
 import {
   pointsMergerFor,
   ReplayPremiereIdentityLinkStore,
+  type ReplayPremiereLeagueClaimMerger,
 } from "../../../src/server/replay-premiere/points/ReplayPremiereIdentityLinkStore";
 import { ReplayPremierePointsLedger } from "../../../src/server/replay-premiere/points/ReplayPremierePointsLedger";
 import {
@@ -25,6 +26,15 @@ function guestSecurityHarness(): ReplayPremiereGuestSecurity {
     expectedOrigin: origin,
     production: false,
   });
+}
+
+/** A league-claim merger that never has anything to reconcile — this file exercises the GitHub-link/callback machinery, not claim reconciliation (see `ReplayPremiereIdentityLinkStore.test.ts` for that). */
+function noopLeagueClaimMerger(): ReplayPremiereLeagueClaimMerger {
+  return {
+    async mergeClaim() {
+      return { claim: null, sourceClaimReplaced: false };
+    },
+  };
 }
 
 interface StubOAuthState {
@@ -159,6 +169,7 @@ describe("ReplayPremiereGithubAuth", () => {
     const identityLinkStore = await ReplayPremiereIdentityLinkStore.open(
       path.join(root, `identity-links-${buildCount}`),
       pointsMergerFor(ledger),
+      noopLeagueClaimMerger(),
     );
     const security = guestSecurityHarness();
     const errors: Array<{ code: string; error: unknown }> = [];

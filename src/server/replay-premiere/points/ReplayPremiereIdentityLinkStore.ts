@@ -62,6 +62,8 @@ export interface ReplayPremiereGithubLinkResult {
   readonly avatarUrl: string | null;
   /** True iff this call folded a DIFFERENT, previously-distinct participant's history into the canonical identity. */
   readonly merged: boolean;
+  /** True iff `merged` AND both sides had carried a DIFFERENT self-asserted league claim, so the source browser's claim was discarded in favor of the canonical target's — see `ReplayPremiereLeagueClaimStore.mergeClaim`. Always false when `merged` is false. */
+  readonly leagueClaimReplaced: boolean;
 }
 
 const storedLinkSchema = z.object({
@@ -103,9 +105,31 @@ export interface ReplayPremierePointsMerger {
   ): Promise<void>;
 }
 
+/**
+ * Duck-typed slice of `ReplayPremiereLeagueClaimStore` this store depends
+ * on — only the merge operation, mirroring `ReplayPremierePointsMerger`
+ * above. Kept structural (not imported from `account/ReplayPremiereLeagueClaimStore`)
+ * for the same reason: no import cycle, and a test can hand in a minimal
+ * fake.
+ */
+export interface ReplayPremiereLeagueClaimMerger {
+  mergeClaim(
+    fromParticipantId: string,
+    intoParticipantId: string,
+  ): Promise<{
+    readonly claim: {
+      readonly playerName: string;
+      readonly claimedAt: string;
+      readonly updatedAt: string;
+    } | null;
+    readonly sourceClaimReplaced: boolean;
+  }>;
+}
+
 export class ReplayPremiereIdentityLinkStore {
   private readonly filePath: string;
   private readonly pointsLedger: ReplayPremierePointsMerger;
+  private readonly leagueClaimMerger: ReplayPremiereLeagueClaimMerger;
   private writeQueue: Promise<void> = Promise.resolve();
   /**
    * `resolveCanonicalParticipantId` sits on the hot trading path (every
@@ -125,17 +149,27 @@ export class ReplayPremiereIdentityLinkStore {
   private cachedAliasesPromise: Promise<ReadonlyMap<string, string>> | null =
     null;
 
-  private constructor(root: string, pointsLedger: ReplayPremierePointsMerger) {
+  private constructor(
+    root: string,
+    pointsLedger: ReplayPremierePointsMerger,
+    leagueClaimMerger: ReplayPremiereLeagueClaimMerger,
+  ) {
     this.filePath = path.join(root, LINK_STORE_FILE_NAME);
     this.pointsLedger = pointsLedger;
+    this.leagueClaimMerger = leagueClaimMerger;
   }
 
   static async open(
     root: string,
     pointsLedger: ReplayPremierePointsMerger,
+    leagueClaimMerger: ReplayPremiereLeagueClaimMerger,
   ): Promise<ReplayPremiereIdentityLinkStore> {
     await fs.mkdir(root, { recursive: true, mode: 0o700 });
-    return new ReplayPremiereIdentityLinkStore(root, pointsLedger);
+    return new ReplayPremiereIdentityLinkStore(
+      root,
+      pointsLedger,
+      leagueClaimMerger,
+    );
   }
 
   /**
@@ -276,6 +310,7 @@ export class ReplayPremiereIdentityLinkStore {
           login: record.login,
           avatarUrl: record.avatarUrl,
           merged: false,
+          leagueClaimReplaced: false,
         };
       }
       const refreshed: StoredLink = {
@@ -291,10 +326,15 @@ export class ReplayPremiereIdentityLinkStore {
           login: refreshed.login,
           avatarUrl: refreshed.avatarUrl,
           merged: false,
+          leagueClaimReplaced: false,
         };
       }
       const canonicalParticipantId = existing.participantId;
       await this.pointsLedger.mergeParticipant(
+        selfCanonical,
+        canonicalParticipantId,
+      );
+      const { sourceClaimReplaced } = await this.leagueClaimMerger.mergeClaim(
         selfCanonical,
         canonicalParticipantId,
       );
@@ -312,6 +352,7 @@ export class ReplayPremiereIdentityLinkStore {
         login: refreshed.login,
         avatarUrl: refreshed.avatarUrl,
         merged: true,
+        leagueClaimReplaced: sourceClaimReplaced,
       };
     });
   }
