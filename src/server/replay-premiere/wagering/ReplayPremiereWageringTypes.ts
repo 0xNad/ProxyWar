@@ -80,12 +80,18 @@ export interface ReplayPremiereMarketTrade {
   readonly idempotencyKey: string;
 }
 
-/** A participant's mark-to-market position in one outcome. */
+/** A participant's position in one outcome, valued for liquidation. */
 export interface ReplayPremiereMarketPosition {
   readonly seatId: string;
   readonly shares: number;
   readonly costBasis: number;
-  /** Mark-to-market value at current prices. */
+  /**
+   * The EXECUTABLE liquidation value: what an immediate full sell of
+   * `shares` would actually pay on the LMSR cost curve (`sellProceeds`,
+   * the same function every real sell fill uses) — never `shares` times
+   * the marginal per-share price, which overstates it since selling moves
+   * price against the seller along the curve.
+   */
   readonly currentValue: number;
   readonly unrealizedPnl: number;
 }
