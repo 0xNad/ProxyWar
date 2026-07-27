@@ -711,6 +711,23 @@ app.use(
     },
   }),
 );
+// Stable entry point. Every admission mints a fresh premiere id, so a link to
+// /bet/<id> dies as soon as the demo cycles onto the next match. /bet resolves
+// to whatever is registered right now, which keeps a shared URL alive across
+// cycles. Redirect rather than render, so the address bar still shows the
+// concrete premiere being traded.
+app.get("/bet", (_request, response) => {
+  const ids = replayPremiereHttpRegistry.premiereIds();
+  const current = ids.at(-1);
+  if (current === undefined) {
+    response
+      .status(503)
+      .type("text/plain")
+      .send("No premiere is currently running.");
+    return;
+  }
+  response.redirect(302, `/bet/${current}`);
+});
 app.use(
   createReplayPremierePublicPageRouter({
     registry: replayPremiereHttpRegistry,

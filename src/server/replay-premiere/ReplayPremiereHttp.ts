@@ -119,6 +119,15 @@ export class ReplayPremiereHttpRegistry {
   get(premiereId: string): ReplayPremiereHttpTarget | null {
     return this.targets.get(premiereId) ?? null;
   }
+
+  /**
+   * Registration order, which is admission order. Used by the stable `/bet`
+   * entry point to resolve "the current premiere" without the caller needing
+   * to know an id that changes every time the demo cycles.
+   */
+  premiereIds(): string[] {
+    return [...this.targets.keys()];
+  }
 }
 
 export interface ReplayPremiereHttpOptions {
