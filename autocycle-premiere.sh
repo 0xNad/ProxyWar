@@ -3,38 +3,60 @@
 #
 #   ./autocycle-premiere.sh
 #
-# Watches the premiere that /bet currently resolves to. When it settles - or
-# when nothing is registered at all - waits out a grace window so late arrivals
-# can still read the settlement card, then runs cycle-premiere.sh to put a
-# fresh match up.
+# Watches the premiere that /bet currently resolves to. When it has genuinely
+# finished - or when the origin genuinely has nothing registered - waits out a
+# grace window so late arrivals can still read the settlement card, then runs
+# cycle-premiere.sh to put a fresh match up.
 #
 # Without this, the demo URL is only tradeable for the ~12 minutes of whatever
 # match was admitted last, and shows a settled market forever afterwards.
 #
-# Run it under a supervisor. It is a plain loop: it holds no state beyond the
-# current premiere id, and is safe to kill and restart at any point.
+# Cycling DESTROYS the current premiere and every position and bankroll on it,
+# so the two rules below are load-bearing:
+#
+#   1. Only ever cycle on an explicitly terminal status (settled/void), never
+#      on a status this script does not recognise. A scheduled premiere that
+#      has not started yet must survive, whatever the lead and grace settings.
+#   2. Never treat a failed request as "nothing is running". A single
+#      Cloudflare blip would otherwise wipe a live market mid-trade. Emptiness
+#      has to be confirmed repeatedly AND against the local origin, which is
+#      not behind the tunnel.
+#
+# Run it under a supervisor. It holds no state across restarts and is safe to
+# kill at any point.
 set -uo pipefail
 
 ORIGIN="https://bet.proxywar.xyz"
+LOCAL_ORIGIN="http://127.0.0.1:8792"
 HERE="$(cd "$(dirname "$0")" && pwd)"
-# Seconds to leave a settled market up before replacing it, so someone who
-# arrives just after the finish still sees who won and what they were paid.
 GRACE_SECONDS="${AUTOCYCLE_GRACE_SECONDS:-240}"
 POLL_SECONDS="${AUTOCYCLE_POLL_SECONDS:-20}"
 LEAD_MIN="${AUTOCYCLE_LEAD_MIN:-3}"
+# Consecutive confirmed-empty polls before believing the demo is really down.
+EMPTY_STRIKES="${AUTOCYCLE_EMPTY_STRIKES:-3}"
 
 log() { printf '%s %s\n' "$(date -u +%H:%M:%S)" "$*"; }
 
+# Resolve via the LOCAL origin: it bypasses Cloudflare, so a tunnel hiccup
+# cannot masquerade as an empty registry.
 current_premiere() {
-  curl -s -o /dev/null -w '%{redirect_url}' -m 20 "${ORIGIN}/bet" 2>/dev/null \
+  curl -s -o /dev/null -w '%{redirect_url}' -m 20 "${LOCAL_ORIGIN}/bet" 2>/dev/null \
     | sed 's|.*/bet/||'
 }
 
+# "" on any transport failure, so callers can tell "no market" from "no answer".
 market_status() {
-  curl -s -m 20 "${ORIGIN}/api/premieres/$1/market" 2>/dev/null \
-    | python3 -c 'import sys,json
+  local body
+  body="$(curl -s -m 20 --fail "${LOCAL_ORIGIN}/api/premieres/$1/market" 2>/dev/null)" || return 0
+  printf '%s' "$body" | python3 -c 'import sys,json
 try: print(json.load(sys.stdin)["market"]["status"])
-except Exception: print("unknown")' 2>/dev/null
+except Exception: pass' 2>/dev/null
+}
+
+# Distinguishes "origin answered, registry is empty" from "origin did not
+# answer". Only the former justifies cycling.
+origin_reachable() {
+  curl -s -o /dev/null --fail -m 10 "${LOCAL_ORIGIN}/league" 2>/dev/null
 }
 
 cycle() {
@@ -42,46 +64,60 @@ cycle() {
   if (cd "$HERE" && ./cycle-premiere.sh "$LEAD_MIN" >/tmp/pw-bet-autocycle-run.log 2>&1); then
     log "up: $(current_premiere)"
   else
-    # Most likely the origin could not be restarted, or admission failed. Say
-    # so and back off rather than hammering a broken deploy.
     log "!! cycle FAILED - see /tmp/pw-bet-autocycle-run.log"
     sleep 120
   fi
 }
 
-log "watching ${ORIGIN}/bet (grace ${GRACE_SECONDS}s, lead ${LEAD_MIN}m)"
+log "watching ${LOCAL_ORIGIN}/bet (grace ${GRACE_SECONDS}s, lead ${LEAD_MIN}m)"
 settled_since=""
+empty_polls=0
 
 while true; do
   premiere="$(current_premiere)"
 
   if [ -z "$premiere" ]; then
-    log "nothing registered"
-    cycle
-    settled_since=""
+    if origin_reachable; then
+      empty_polls=$((empty_polls + 1))
+      log "origin up but no premiere registered (${empty_polls}/${EMPTY_STRIKES})"
+      if [ "$empty_polls" -ge "$EMPTY_STRIKES" ]; then
+        cycle
+        empty_polls=0
+        settled_since=""
+      fi
+    else
+      # Origin itself is down or restarting. Nothing to conclude, and
+      # certainly nothing to destroy.
+      log "origin unreachable - waiting, not cycling"
+      empty_polls=0
+    fi
     sleep "$POLL_SECONDS"
     continue
   fi
 
+  empty_polls=0
   status="$(market_status "$premiere")"
 
   case "$status" in
-    open)
-      # Healthy and tradeable. Reset any settlement timer we were holding.
-      if [ -n "$settled_since" ]; then settled_since=""; fi
-      ;;
-    unknown)
-      # A restart or a transient blip. Don't treat it as a finished match.
-      log "status unreadable for ${premiere}"
-      ;;
-    *)
-      # settled, void, or anything else terminal.
+    settled|void)
       now="$(date +%s)"
       if [ -z "$settled_since" ]; then
         settled_since="$now"
         log "premiere ${premiere} is '${status}' - replacing in ${GRACE_SECONDS}s"
       elif [ "$((now - settled_since))" -ge "$GRACE_SECONDS" ]; then
         cycle
+        settled_since=""
+      fi
+      ;;
+    "")
+      # Transport failure, not a finished match.
+      log "status unreadable for ${premiere} - holding"
+      ;;
+    *)
+      # open, scheduled, or anything this script has not been taught about.
+      # Leave it alone: an unrecognised status is never grounds for deletion.
+      if [ -n "$settled_since" ]; then
+        log "premiere ${premiere} back to '${status}' - cancelling replacement"
         settled_since=""
       fi
       ;;
