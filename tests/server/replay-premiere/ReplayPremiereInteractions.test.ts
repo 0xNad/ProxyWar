@@ -891,7 +891,7 @@ describe("ReplayPremiereInteractions", () => {
     expect(() => harness(extraField)).toThrow(ReplayPremiereError);
   });
 
-  it("deduplicates concurrent session creation and enforces guest, premiere, and service admission ceilings", async () => {
+  it("converges every tab/reload for one participant onto their single live session, and still enforces distinct-session, premiere, and service admission ceilings", async () => {
     const h = harness(undefined, {
       limits: {
         maxSessionsPerParticipant: 2,
@@ -919,14 +919,65 @@ describe("ReplayPremiereInteractions", () => {
       h.interactions.createViewerSession({ ...request, visible: false }),
     ).rejects.toMatchObject({ httpStatus: 409 });
 
-    await h.interactions.createViewerSession({
-      ...request,
-      idempotencyKey: h.nextIdempotencyKey(),
-    });
-    await expect(
-      h.interactions.createViewerSession({
+    // A brand-new tab (or a cold reload with no persisted pointer) has no
+    // way to know the idempotencyKey a prior tab used, so it always sends
+    // a fresh one — this is the exact case the exact-key check above can
+    // never catch. Any number of such "new tab" calls must converge onto
+    // the participant's one live session: same session id back every
+    // time, and the session record count for this participant never
+    // grows past 1, no matter how many tabs are opened.
+    for (let tab = 0; tab < 8; tab += 1) {
+      const opened = await h.interactions.createViewerSession({
         ...request,
         idempotencyKey: h.nextIdempotencyKey(),
+      });
+      expect(opened.id).toBe(first.id);
+    }
+    expect(
+      h.interactions
+        .readState()
+        .sessions.filter((session) => session.participantId === guestA),
+    ).toHaveLength(1);
+    expect(h.persisted).toHaveLength(1);
+
+    // The per-participant record ceiling still protects a genuinely
+    // distinct-session scenario: once a session has actually ended (the
+    // only way a participant can legitimately accumulate more than one
+    // record), a subsequent create is a real creation again, and the
+    // ceiling — and the per-minute creation-rate limit — still apply
+    // exactly as before. Fabricates two already-ended session records
+    // directly (there is no live "end session" API to drive this through
+    // yet) so the cap-exhaustion path itself is exercised, not skipped.
+    const endedTemplate = h.interactions.readState().sessions[0];
+    const seeded = harness(
+      {
+        ...h.interactions.readState(),
+        sessions: [
+          {
+            ...endedTemplate,
+            id: `sess_${"e".repeat(32)}`,
+            idempotencyKey: "idem_seed00000000000001",
+            endedAt: h.now(),
+          },
+          {
+            ...endedTemplate,
+            id: `sess_${"f".repeat(32)}`,
+            idempotencyKey: "idem_seed00000000000002",
+            endedAt: h.now(),
+          },
+        ],
+      },
+      {
+        limits: {
+          maxSessionsPerParticipant: 2,
+          maxSessionCreatesPerParticipantPerMinute: 2,
+        },
+      },
+    );
+    await expect(
+      seeded.interactions.createViewerSession({
+        ...request,
+        idempotencyKey: seeded.nextIdempotencyKey(),
       }),
     ).rejects.toMatchObject({ httpStatus: 429 });
 
