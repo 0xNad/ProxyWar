@@ -892,3 +892,141 @@ crowd-driven price movement) were re-confirmed working; steps 3-9 (buy,
 P&L, sell, reload, second tab, settlement, narrow viewport) remain to be
 driven live by whoever picks this up next — nothing about them is known to
 be broken, they simply weren't exercised this session.
+
+## 15. GitHub OAuth app registration recipe (GitHubAuth session)
+
+"Sign in with GitHub" landed this session (per-premiere P&L ledger migration,
+`ReplayPremiereIdentityLinkStore`, the three `/api/premieres/auth/github/*`
+routes, and the client control). It needs one real GitHub OAuth App
+registered by hand — I (the agent) cannot do this; it needs your GitHub
+account. Everything below is exact, verified against the actual code paths,
+not guessed.
+
+### 15.1 Register the app
+
+Go to `https://github.com/settings/applications/new` (a personal **OAuth
+App**, not a GitHub App — no installation/webhook machinery needed) and fill
+in:
+
+| Field | Value |
+|---|---|
+| Application name | `Proxy War Betting` (anything recognizable; shown to the user on GitHub's consent screen, never in-product) |
+| Homepage URL | `https://bet.proxywar.xyz` |
+| Authorization callback URL | `https://bet.proxywar.xyz/api/premieres/auth/github/callback` — **exact**, see §15.2 for why |
+| Enable Device Flow | Leave unchecked — not used |
+
+**Scopes: none beyond GitHub's default.** Do not check or request `user:email`
+or any repo/org scope. The product only ever needs `id`, `login`, and
+`avatar_url` — all present on the unscoped `GET /user` response for the
+authorizing user. The code literally never asks for a scope: see
+`buildAuthorizeUrl` in `src/server/replay-premiere/ReplayPremiereGithubAuth.ts`
+— no `scope=` parameter is set on the authorize URL at all. Requesting
+`user:email` would additionally require a second `GET /user/emails` call and
+a real privacy justification the product doesn't have (nothing here ever
+shows or stores an email).
+
+Registering produces a **Client ID** (public, safe to appear in a redirect
+URL) and a **Client Secret** (generate one via "Generate a new client
+secret" — copy it immediately, GitHub only shows it once).
+
+### 15.2 Why the callback URL is exactly `https://bet.proxywar.xyz/...`
+
+The deploy is a local process behind a Cloudflare tunnel — GitHub redirects
+the **browser**, not the server, so the callback must be the public HTTPS
+origin, never a loopback address, and it is: `createReplayPremiereGithubAuthRouter`
+builds `redirect_uri` as `` `${publicOrigin}/api/premieres/auth/github/callback` ``,
+where `publicOrigin` is the exact same `replayPremierePublicOrigin` value
+(`new URL(PROXYWAR_PUBLIC_URL ?? localUrl).origin`) every other Replay
+Premiere surface already uses for its strict-Origin CORS check and session
+bootstrap (`ReplayPremiereGuestSecurity.expectedOrigin`). Nothing in the
+OAuth handlers reads `req.socket`, a forwarded-header, or any tunnel-internal
+address. So: whatever `PROXYWAR_PUBLIC_URL` is already set to for
+`bet.proxywar.xyz` (per §5 above) is what gets sent to GitHub as
+`redirect_uri` — confirm it is `https://bet.proxywar.xyz` (no trailing
+slash, no port) before registering, and the registered callback URL must
+match it exactly plus the `/api/premieres/auth/github/callback` suffix.
+GitHub rejects a redirect_uri that doesn't exactly match a registered
+callback, so a mismatch here fails closed (a stub-server 400/redirect
+mismatch page), never a silent misroute.
+
+### 15.3 Where the resulting values go
+
+Three environment variables on the `bet.proxywar.xyz` origin process — the
+exact same one that already carries `PROXYWAR_WAGERING_ENABLED`,
+`PROXYWAR_PUBLIC_URL`, etc. (§5). The client secret has two forms —
+**prefer the file form on any shared machine**: `ps eww <pid>` dumps a
+process's entire environment to anyone with an account on the host, so an
+exported `_CLIENT_SECRET` is one command away from being read by another
+user. A file path costs nothing and keeps the secret at rest instead:
+
+```
+PROXYWAR_GITHUB_OAUTH_CLIENT_ID=<the Client ID>
+
+# Preferred: a 0600 file holding just the secret. Write it with printf,
+# NOT echo — echo appends a trailing newline that becomes part of the
+# "secret" verbatim, and GitHub then rejects the token exchange with an
+# opaque error that looks nothing like "your secret has a newline in it".
+# (resolveGithubOAuthClientSecret trims trailing whitespace/newlines
+# defensively, but don't rely on that — write it clean.)
+printf '%s' '<the Client Secret>' > ~/.proxywar-deploy/github-oauth-client-secret
+chmod 600 ~/.proxywar-deploy/github-oauth-client-secret
+PROXYWAR_GITHUB_OAUTH_CLIENT_SECRET_FILE=~/.proxywar-deploy/github-oauth-client-secret
+
+# OR, local dev only — inline, used ONLY when _CLIENT_SECRET_FILE is unset:
+PROXYWAR_GITHUB_OAUTH_CLIENT_SECRET=<the Client Secret>
+```
+
+All three are read once at process start
+(`resolveReplayPremiereGithubOAuthConfig` in `ReplayPremiereGithubAuth.ts`).
+**The client id, plus one working form of the secret, must be present for
+the feature to exist at all** — if the id is missing/blank, or the secret
+is missing/blank/unreadable (file path set but the file doesn't exist or
+isn't readable), the three `/api/premieres/auth/github/*` routes are never
+mounted (not 404'd by a runtime check — genuinely absent from the Express
+router chain), so a missing config means no button client-side and no
+route to hit server-side, exactly the "cleanly not exist" contract. An
+unreadable secret file logs only `GitHub OAuth client secret file
+unreadable at <path>` — never the file's contents, never a raw fs error
+that could embed unrelated data. The secret itself is read only
+server-side for the `POST /login/oauth/access_token` exchange; it is never
+logged, never included in any response body, and never reaches the
+browser. A process restart is required after setting/changing any of
+these (same as every other env var this server reads at boot — no
+hot-reload path exists for any of them).
+
+### 15.4 Verifying after registration
+
+```sh
+curl -sI https://bet.proxywar.xyz/api/premieres/auth/github/start
+# expect: HTTP/2 302, location: https://github.com/login/oauth/authorize?client_id=<id>&redirect_uri=https%3A%2F%2Fbet.proxywar.xyz%2Fapi%2Fpremieres%2Fauth%2Fgithub%2Fcallback&state=...&allow_signup=false
+```
+
+If instead you get a 404 with `PREMIERE_UNAVAILABLE`, the env vars are not
+set on that process (or the process wasn't restarted after setting them).
+Then click through a real sign-in from `https://bet.proxywar.xyz/bet` — the
+header shows a "Sign in" control (amber, matching the existing CTA
+convention); after authorizing, it redirects back and the same spot shows
+"Signed in as `<your GitHub handle>`", and your leaderboard row (once you've
+traded at least one settled premiere) carries a small GitHub-mark badge
+next to your VERIFIED handle instead of any self-claimed display name.
+
+### 15.5 What this session tested instead of real GitHub (and why it's better for this)
+
+No real GitHub OAuth App was registered this session (agents cannot create
+one against your account, and were told not to try). All server-side OAuth
+logic — `ReplayPremiereGithubAuth.ts` — is built against an injectable
+`ReplayPremiereGithubOAuthClient` interface, plus two dev/test-only base-URL
+overrides (`PROXYWAR_GITHUB_OAUTH_WEB_BASE_URL`,
+`PROXYWAR_GITHUB_OAUTH_API_BASE_URL`) that point the real HTTP client at a
+faithful local stub of `/login/oauth/authorize`, `/login/oauth/access_token`,
+and `/user` instead of the real GitHub hosts. This is strictly MORE testable
+than real GitHub for the required adversarial cases: renamed handle, two
+truly concurrent callbacks for one GitHub id, and "provider unreachable"
+are all reproducible on demand against a stub, never on demand against
+GitHub's real infrastructure. See `tests/server/replay-premiere/ReplayPremiereGithubAuth.test.ts`
+(HTTP-level, real Express router + real cookies, stub OAuth client) and
+`tests/server/replay-premiere/points/ReplayPremiereIdentityLinkStore.test.ts`
+(the concurrency/merge/rename cases in isolation). A real click-through
+against the same stub, in a real browser, against a real locally-running
+copy of this server, was also driven live this session — see the final
+session report for the exact steps and screenshots.

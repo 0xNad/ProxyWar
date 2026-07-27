@@ -404,29 +404,81 @@ describe("ReplayPremiereGithubAuth", () => {
 });
 
 describe("resolveReplayPremiereGithubOAuthConfig", () => {
-  test("returns null unless BOTH client id and secret are set", () => {
-    expect(resolveReplayPremiereGithubOAuthConfig({})).toBeNull();
+  let secretFileRoot: string;
+
+  beforeEach(async () => {
+    const realTemporaryRoot = await fs.realpath(os.tmpdir());
+    secretFileRoot = await fs.mkdtemp(path.join(realTemporaryRoot, "github-secret-"));
+  });
+
+  afterEach(async () => {
+    await fs.rm(secretFileRoot, { recursive: true, force: true });
+  });
+
+  test("returns null unless BOTH client id and secret are set", async () => {
+    expect(await resolveReplayPremiereGithubOAuthConfig({})).toBeNull();
     expect(
-      resolveReplayPremiereGithubOAuthConfig({
+      await resolveReplayPremiereGithubOAuthConfig({
         PROXYWAR_GITHUB_OAUTH_CLIENT_ID: "abc",
       }),
     ).toBeNull();
     expect(
-      resolveReplayPremiereGithubOAuthConfig({
+      await resolveReplayPremiereGithubOAuthConfig({
         PROXYWAR_GITHUB_OAUTH_CLIENT_SECRET: "xyz",
       }),
     ).toBeNull();
     expect(
-      resolveReplayPremiereGithubOAuthConfig({
+      await resolveReplayPremiereGithubOAuthConfig({
         PROXYWAR_GITHUB_OAUTH_CLIENT_ID: "  ",
         PROXYWAR_GITHUB_OAUTH_CLIENT_SECRET: "xyz",
       }),
     ).toBeNull();
     expect(
-      resolveReplayPremiereGithubOAuthConfig({
+      await resolveReplayPremiereGithubOAuthConfig({
         PROXYWAR_GITHUB_OAUTH_CLIENT_ID: "abc",
         PROXYWAR_GITHUB_OAUTH_CLIENT_SECRET: "xyz",
       }),
     ).toEqual({ clientId: "abc", clientSecret: "xyz" });
+  });
+
+  test("prefers CLIENT_SECRET_FILE over the inline secret, trimming a trailing newline", async () => {
+    const secretPath = path.join(secretFileRoot, "secret");
+    await fs.writeFile(secretPath, "from-file-secret\n");
+    const config = await resolveReplayPremiereGithubOAuthConfig({
+      PROXYWAR_GITHUB_OAUTH_CLIENT_ID: "abc",
+      PROXYWAR_GITHUB_OAUTH_CLIENT_SECRET: "inline-should-be-ignored",
+      PROXYWAR_GITHUB_OAUTH_CLIENT_SECRET_FILE: secretPath,
+    });
+    expect(config).toEqual({ clientId: "abc", clientSecret: "from-file-secret" });
+  });
+
+  test("falls back to the inline secret when CLIENT_SECRET_FILE is unset", async () => {
+    const config = await resolveReplayPremiereGithubOAuthConfig({
+      PROXYWAR_GITHUB_OAUTH_CLIENT_ID: "abc",
+      PROXYWAR_GITHUB_OAUTH_CLIENT_SECRET: "inline-secret",
+    });
+    expect(config).toEqual({ clientId: "abc", clientSecret: "inline-secret" });
+  });
+
+  test("an unreadable CLIENT_SECRET_FILE is treated exactly like an unset secret — cleanly absent, never thrown", async () => {
+    const config = await resolveReplayPremiereGithubOAuthConfig({
+      PROXYWAR_GITHUB_OAUTH_CLIENT_ID: "abc",
+      PROXYWAR_GITHUB_OAUTH_CLIENT_SECRET: "inline-should-still-be-ignored",
+      PROXYWAR_GITHUB_OAUTH_CLIENT_SECRET_FILE: path.join(
+        secretFileRoot,
+        "does-not-exist",
+      ),
+    });
+    expect(config).toBeNull();
+  });
+
+  test("an empty CLIENT_SECRET_FILE is treated as unset", async () => {
+    const secretPath = path.join(secretFileRoot, "empty-secret");
+    await fs.writeFile(secretPath, "   \n");
+    const config = await resolveReplayPremiereGithubOAuthConfig({
+      PROXYWAR_GITHUB_OAUTH_CLIENT_ID: "abc",
+      PROXYWAR_GITHUB_OAUTH_CLIENT_SECRET_FILE: secretPath,
+    });
+    expect(config).toBeNull();
   });
 });

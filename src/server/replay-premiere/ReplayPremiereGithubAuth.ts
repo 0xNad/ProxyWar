@@ -21,17 +21,22 @@
  * never a hang — GitHub being unreachable degrades ONLY sign-in.
  */
 import express, { type Request, type Response, type Router } from "express";
+import { promises as fs } from "node:fs";
 import { z } from "zod";
 import type {
   ReplayPremiereGithubUser,
   ReplayPremiereIdentityLinkStore,
 } from "./points/ReplayPremiereIdentityLinkStore";
-import { requestSecurityHeaders } from "./ReplayPremiereHttp";
 import type { ReplayPremiereGuestSecurity } from "./ReplayPremiereGuestSecurity";
+import { requestSecurityHeaders } from "./ReplayPremiereHttp";
 
-export const GITHUB_OAUTH_CLIENT_ID_ENV = "PROXYWAR_GITHUB_OAUTH_CLIENT_ID" as const;
+export const GITHUB_OAUTH_CLIENT_ID_ENV =
+  "PROXYWAR_GITHUB_OAUTH_CLIENT_ID" as const;
 export const GITHUB_OAUTH_CLIENT_SECRET_ENV =
   "PROXYWAR_GITHUB_OAUTH_CLIENT_SECRET" as const;
+/** Preferred over `GITHUB_OAUTH_CLIENT_SECRET_ENV` when set: a path to a file holding the secret, kept at rest with `0600` permissions instead of sitting in the process environment (`ps eww <pid>` dumps env vars to anyone with an account on the host). See `resolveGithubOAuthClientSecret`. */
+export const GITHUB_OAUTH_CLIENT_SECRET_FILE_ENV =
+  "PROXYWAR_GITHUB_OAUTH_CLIENT_SECRET_FILE" as const;
 /** Dev/test-only override for GitHub's own web host (`/login/oauth/...`) — points at a faithful local stub instead of github.com. Never changes where the real client secret is sent in production; unset defaults to the real host. */
 const GITHUB_WEB_BASE_URL_ENV = "PROXYWAR_GITHUB_OAUTH_WEB_BASE_URL" as const;
 /** Dev/test-only override for the GitHub REST API host (`/user`) — see {@link GITHUB_WEB_BASE_URL_ENV}. */
@@ -51,20 +56,71 @@ export interface ReplayPremiereGithubOAuthConfig {
   readonly clientSecret: string;
 }
 
-/** Reads both required secrets from the environment. Returns `null` — never a partial config — when either is unset, so the caller can cleanly not build the feature at all. Secrets never logged, never sent to the browser. */
-export function resolveReplayPremiereGithubOAuthConfig(
-  environment: Record<string, string | undefined> = process.env,
-): ReplayPremiereGithubOAuthConfig | null {
-  const clientId = environment[GITHUB_OAUTH_CLIENT_ID_ENV]?.trim();
-  const clientSecret = environment[GITHUB_OAUTH_CLIENT_SECRET_ENV]?.trim();
-  if (
-    clientId === undefined ||
-    clientId === "" ||
-    clientSecret === undefined ||
-    clientSecret === ""
-  ) {
-    return null;
+/**
+ * `_SECRET_FILE` wins when set: reads the file, trims trailing whitespace
+ * and newlines (a secret written with `echo` instead of `printf` gains a
+ * trailing `\n`, which GitHub rejects with an opaque error that looks
+ * nothing like "your secret has a newline in it" — see `RUNBOOK.md`).
+ * Falls back to the inline `_SECRET_ENV` only when `_SECRET_FILE` is
+ * unset, so local development stays convenient. An unreadable file is
+ * treated EXACTLY like an unset secret — sign-in cleanly does not exist —
+ * never a thrown error; only a fixed, path-only, content-free line is
+ * logged (never the file's contents, never a raw fs error that could
+ * embed unrelated data).
+ */
+async function resolveGithubOAuthClientSecret(
+  environment: Record<string, string | undefined>,
+): Promise<string | null> {
+  const secretFilePath =
+    environment[GITHUB_OAUTH_CLIENT_SECRET_FILE_ENV]?.trim();
+  if (secretFilePath !== undefined && secretFilePath !== "") {
+    try {
+      // Fail closed unless the file is genuinely private. The whole reason the
+      // secret is passed by path rather than value is to keep it away from
+      // other local accounts; silently accepting a 0644 secret would give that
+      // up while still looking secure. lstat, not stat, so a symlink pointing
+      // at a world-readable file cannot launder the check.
+      const stats = await fs.lstat(secretFilePath);
+      if (!stats.isFile()) {
+        console.error(
+          `GitHub OAuth client secret path is not a regular file: ${secretFilePath}`,
+        );
+        return null;
+      }
+      if (stats.uid !== process.getuid?.()) {
+        console.error(
+          `GitHub OAuth client secret file is not owned by this process: ${secretFilePath}`,
+        );
+        return null;
+      }
+      if ((stats.mode & 0o077) !== 0) {
+        console.error(
+          `GitHub OAuth client secret file is group/world accessible (need 0600): ${secretFilePath}`,
+        );
+        return null;
+      }
+      const raw = await fs.readFile(secretFilePath, "utf8");
+      const trimmed = raw.trim();
+      return trimmed === "" ? null : trimmed;
+    } catch {
+      console.error(
+        `GitHub OAuth client secret file unreadable at ${secretFilePath}`,
+      );
+      return null;
+    }
   }
+  const inline = environment[GITHUB_OAUTH_CLIENT_SECRET_ENV]?.trim();
+  return inline === undefined || inline === "" ? null : inline;
+}
+
+/** Reads the required secrets from the environment (see {@link resolveGithubOAuthClientSecret} for the client secret's file-vs-inline precedence). Returns `null` — never a partial config — when either half is unset/unreadable, so the caller can cleanly not build the feature at all. Secrets never logged, never sent to the browser. */
+export async function resolveReplayPremiereGithubOAuthConfig(
+  environment: Record<string, string | undefined> = process.env,
+): Promise<ReplayPremiereGithubOAuthConfig | null> {
+  const clientId = environment[GITHUB_OAUTH_CLIENT_ID_ENV]?.trim();
+  if (clientId === undefined || clientId === "") return null;
+  const clientSecret = await resolveGithubOAuthClientSecret(environment);
+  if (clientSecret === null) return null;
   return { clientId, clientSecret };
 }
 
@@ -125,7 +181,8 @@ export function createReplayPremiereGithubOAuthClient(
       }
       const parsed: unknown = await response.json();
       const result = githubTokenResponseSchema.safeParse(parsed);
-      if (!result.success) throw new Error("github_token_exchange_response_invalid");
+      if (!result.success)
+        throw new Error("github_token_exchange_response_invalid");
       if ("error" in result.data) {
         throw new Error(`github_token_exchange_rejected_${result.data.error}`);
       }
@@ -139,7 +196,8 @@ export function createReplayPremiereGithubOAuthClient(
           "User-Agent": "proxywar-betting",
         },
       });
-      if (!response.ok) throw new Error(`github_user_fetch_failed_${response.status}`);
+      if (!response.ok)
+        throw new Error(`github_user_fetch_failed_${response.status}`);
       const parsed: unknown = await response.json();
       const result = githubUserResponseSchema.safeParse(parsed);
       if (!result.success) throw new Error("github_user_response_invalid");
@@ -172,28 +230,34 @@ export function createReplayPremiereGithubAuthRouter(
   const returnPath = options.returnPath ?? "/bet";
   const logError = options.onOperatorError ?? ((): void => {});
 
-  router.get(REPLAY_PREMIERE_GITHUB_AUTH_START_PATH, (req: Request, res: Response) => {
-    res.setHeader("Cache-Control", "no-store, max-age=0");
-    try {
-      const guest = options.security.bootstrapRead(requestSecurityHeaders(req));
-      const { cookie: linkIntentCookie, nonce } = options.security.mintLinkIntentCookie(
-        guest.participant.participantId,
-      );
-      const setCookies =
-        guest.setCookie === null
-          ? [linkIntentCookie]
-          : [linkIntentCookie, guest.setCookie];
-      res.setHeader("Set-Cookie", setCookies);
-      const authorizeUrl = options.oauthClient.buildAuthorizeUrl({
-        redirectUri,
-        state: nonce,
-      });
-      res.redirect(302, authorizeUrl);
-    } catch (error) {
-      logError("github_auth_start_failed", error);
-      res.redirect(302, `${returnPath}?github=error`);
-    }
-  });
+  router.get(
+    REPLAY_PREMIERE_GITHUB_AUTH_START_PATH,
+    (req: Request, res: Response) => {
+      res.setHeader("Cache-Control", "no-store, max-age=0");
+      try {
+        const guest = options.security.bootstrapRead(
+          requestSecurityHeaders(req),
+        );
+        const { cookie: linkIntentCookie, nonce } =
+          options.security.mintLinkIntentCookie(
+            guest.participant.participantId,
+          );
+        const setCookies =
+          guest.setCookie === null
+            ? [linkIntentCookie]
+            : [linkIntentCookie, guest.setCookie];
+        res.setHeader("Set-Cookie", setCookies);
+        const authorizeUrl = options.oauthClient.buildAuthorizeUrl({
+          redirectUri,
+          state: nonce,
+        });
+        res.redirect(302, authorizeUrl);
+      } catch (error) {
+        logError("github_auth_start_failed", error);
+        res.redirect(302, `${returnPath}?github=error`);
+      }
+    },
+  );
 
   router.get(
     REPLAY_PREMIERE_GITHUB_AUTH_CALLBACK_PATH,
@@ -202,7 +266,10 @@ export function createReplayPremiereGithubAuthRouter(
       const failClosed = (operatorCode: string, error?: unknown): void => {
         if (error !== undefined) logError(operatorCode, error);
         else logError(operatorCode, new Error(operatorCode));
-        res.setHeader("Set-Cookie", options.security.clearLinkIntentCookieHeader());
+        res.setHeader(
+          "Set-Cookie",
+          options.security.clearLinkIntentCookieHeader(),
+        );
         res.redirect(302, `${returnPath}?github=error`);
       };
       try {
@@ -215,7 +282,8 @@ export function createReplayPremiereGithubAuthRouter(
           req.headers.cookie,
           guest.participantId,
         );
-        const state = typeof req.query.state === "string" ? req.query.state : null;
+        const state =
+          typeof req.query.state === "string" ? req.query.state : null;
         const code = typeof req.query.code === "string" ? req.query.code : null;
         if (linkIntent === null) {
           failClosed("github_auth_link_intent_missing_or_expired");
@@ -246,8 +314,14 @@ export function createReplayPremiereGithubAuthRouter(
           failClosed("github_auth_user_fetch_failed", error);
           return;
         }
-        await options.identityLinkStore.linkOrMerge(guest.participantId, githubUser);
-        res.setHeader("Set-Cookie", options.security.clearLinkIntentCookieHeader());
+        await options.identityLinkStore.linkOrMerge(
+          guest.participantId,
+          githubUser,
+        );
+        res.setHeader(
+          "Set-Cookie",
+          options.security.clearLinkIntentCookieHeader(),
+        );
         res.redirect(302, `${returnPath}?github=linked`);
       } catch (error) {
         failClosed("github_auth_callback_failed", error);
@@ -260,12 +334,17 @@ export function createReplayPremiereGithubAuthRouter(
     async (req: Request, res: Response) => {
       res.setHeader("Cache-Control", "no-store, max-age=0");
       try {
-        const guest = options.security.bootstrapRead(requestSecurityHeaders(req));
-        if (guest.setCookie !== null) res.setHeader("Set-Cookie", guest.setCookie);
+        const guest = options.security.bootstrapRead(
+          requestSecurityHeaders(req),
+        );
+        if (guest.setCookie !== null)
+          res.setHeader("Set-Cookie", guest.setCookie);
         const identity = await options.identityLinkStore.getStatus(
           guest.participant.participantId,
         );
-        res.status(200).json({ schemaVersion: 1, csrfToken: guest.csrfToken, identity });
+        res
+          .status(200)
+          .json({ schemaVersion: 1, csrfToken: guest.csrfToken, identity });
       } catch (error) {
         logError("github_auth_status_failed", error);
         res.status(503).json({ error: { code: "PREMIERE_UNAVAILABLE" } });

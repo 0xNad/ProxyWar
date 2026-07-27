@@ -267,7 +267,7 @@ export const replayPremiereIdentityLinkStore =
 // mounted route below — unless BOTH secrets are configured. See
 // `resolveReplayPremiereGithubOAuthConfig` and `RUNBOOK.md` for the exact
 // app-registration recipe.
-const replayPremiereGithubOAuthConfig = resolveReplayPremiereGithubOAuthConfig();
+const replayPremiereGithubOAuthConfig = await resolveReplayPremiereGithubOAuthConfig();
 const replayPremiereGithubOAuthClient =
   replayPremiereGithubOAuthConfig === null
     ? null
@@ -943,7 +943,7 @@ app.use(
 // to whatever is registered right now, which keeps a shared URL alive across
 // cycles. Redirect rather than render, so the address bar still shows the
 // concrete premiere being traded.
-app.get("/bet", (_request, response) => {
+app.get("/bet", (request, response) => {
   const ids = replayPremiereHttpRegistry.premiereIds();
   const current = ids.at(-1);
   if (current === undefined) {
@@ -953,7 +953,14 @@ app.get("/bet", (_request, response) => {
       .send("No premiere is currently running.");
     return;
   }
-  response.redirect(302, `/bet/${current}`);
+  // The GitHub callback lands on /bet?github=… and this is a second hop, so
+  // the marker has to survive or the sign-in banner never renders. Carry only
+  // the allowlisted values — this path is reached straight from an external
+  // provider's redirect, so nothing else is echoed onward.
+  const marker = request.query.github;
+  const suffix =
+    marker === "linked" || marker === "error" ? `?github=${marker}` : "";
+  response.redirect(302, `/bet/${current}${suffix}`);
 });
 app.use(
   createReplayPremierePublicPageRouter({
