@@ -127,12 +127,12 @@ import {
   getAppShellContent,
   setHtmlNoCacheHeaders,
 } from "../server/RenderHtml";
+import { ReplayPremierePointsLedger } from "../server/replay-premiere/points/ReplayPremierePointsLedger";
 import { ReplayPremiereAnonymousWriteLimiter } from "../server/replay-premiere/ReplayPremiereAnonymousWriteLimiter";
 import { ReplayPremiereArchivedClipPromoter } from "../server/replay-premiere/ReplayPremiereArchivedClipPromoter";
 import { ReplayPremiereArchiveStore } from "../server/replay-premiere/ReplayPremiereArchiveIndex";
 import { createReplayPremiereArchiveRouter } from "../server/replay-premiere/ReplayPremiereArchiveRouter";
 import { DeterministicReplayPremiereCheckpointProjector } from "../server/replay-premiere/ReplayPremiereCheckpointProjection";
-import { DeterministicSyntheticCrowdTerritoryProjector } from "../server/replay-premiere/wagering/simulation";
 import {
   createReplayPremiereTrustedProxyAddressResolver,
   REPLAY_PREMIERE_LOOPBACK_PROXY_ADDRESSES,
@@ -155,7 +155,6 @@ import {
   ReplayPremiereHttpRegistry,
   requestSecurityHeaders,
 } from "../server/replay-premiere/ReplayPremiereHttp";
-import { ReplayPremierePointsLedger } from "../server/replay-premiere/points/ReplayPremierePointsLedger";
 import { createReplayPremierePublicPageRouter } from "../server/replay-premiere/ReplayPremierePublicPage";
 import { ReplayPremiereRuntimeRegistry } from "../server/replay-premiere/ReplayPremiereRuntimeCoordinator";
 import {
@@ -165,6 +164,7 @@ import {
 } from "../server/replay-premiere/ReplayPremiereSecrets";
 import { startReplayPremiereProduction } from "../server/replay-premiere/ReplayPremiereStartup";
 import { loadReplayPremiereReclamationExclusions } from "../server/replay-premiere/ReplayPremiereTerminalReclamation";
+import { DeterministicSyntheticCrowdTerritoryProjector } from "../server/replay-premiere/wagering/simulation";
 import { applyStaticAssetCacheControl } from "../server/StaticAssetCache";
 
 const app = express();
@@ -237,7 +237,8 @@ const replayPremiereGuestSecurity = new ReplayPremiereGuestSecurity({
 // cycle-premiere.sh wiping the premiere state root never touches it. See
 // `ReplayPremierePointsLedger`'s doc comment for the points-formula
 // reasoning.
-export const replayPremierePointsLedger = await ReplayPremierePointsLedger.open();
+export const replayPremierePointsLedger =
+  await ReplayPremierePointsLedger.open();
 export const replayPremiereRuntimeRegistry =
   new ReplayPremiereRuntimeRegistry();
 // Durable archive of reclaimed premieres: keeps `/premiere/<id>` resolvable
@@ -692,8 +693,7 @@ const pointsRoutesEnabled = envFlag("PROXYWAR_WAGERING_ENABLED");
 // identity that owns their bankroll and positions.
 const MAX_DISPLAY_NAME_REQUEST_BYTES = 512;
 function sendReplayPremiereFailure(res: Response, error: unknown): void {
-  const status =
-    error instanceof ReplayPremiereError ? error.httpStatus : 503;
+  const status = error instanceof ReplayPremiereError ? error.httpStatus : 503;
   if (error instanceof ReplayPremiereError) {
     console.error(formatReplayPremiereHttpOperatorError(error));
   } else {
@@ -728,38 +728,45 @@ app.get("/api/premieres/points/leaderboard", async (req, res) => {
     sendReplayPremiereFailure(res, error);
   }
 });
-app.post("/api/premieres/points/display-name", async (req, res) => {
-  if (!pointsRoutesEnabled) {
-    res.status(404).json({ error: { code: "PREMIERE_UNAVAILABLE" } });
-    return;
-  }
-  try {
-    res.setHeader("Cache-Control", "no-store, max-age=0");
-    const authorization = replayPremiereGuestSecurity.authorizeWrite(
-      requestSecurityHeaders(req),
-    );
-    const body: unknown = req.body;
-    const displayName =
-      typeof body === "object" &&
-      body !== null &&
-      "displayName" in body &&
-      typeof body.displayName === "string" &&
-      body.displayName.length <= MAX_DISPLAY_NAME_REQUEST_BYTES
-        ? body.displayName
-        : null;
-    if (displayName === null) {
-      res.status(400).json({ error: { code: "PREMIERE_INVALID_REQUEST" } });
+// Route-level JSON parsing: these mount above the global express.json() (which
+// has to stay below the premiere router), so req.body would otherwise be
+// undefined and every submission would 400 as a malformed name.
+app.post(
+  "/api/premieres/points/display-name",
+  express.json({ limit: "8kb" }),
+  async (req, res) => {
+    if (!pointsRoutesEnabled) {
+      res.status(404).json({ error: { code: "PREMIERE_UNAVAILABLE" } });
       return;
     }
-    const entry = await replayPremierePointsLedger.setDisplayName(
-      authorization.participant.participantId,
-      displayName,
-    );
-    res.status(200).json({ schemaVersion: 1, entry });
-  } catch (error) {
-    sendReplayPremiereFailure(res, error);
-  }
-});
+    try {
+      res.setHeader("Cache-Control", "no-store, max-age=0");
+      const authorization = replayPremiereGuestSecurity.authorizeWrite(
+        requestSecurityHeaders(req),
+      );
+      const body: unknown = req.body;
+      const displayName =
+        typeof body === "object" &&
+        body !== null &&
+        "displayName" in body &&
+        typeof body.displayName === "string" &&
+        body.displayName.length <= MAX_DISPLAY_NAME_REQUEST_BYTES
+          ? body.displayName
+          : null;
+      if (displayName === null) {
+        res.status(400).json({ error: { code: "PREMIERE_INVALID_REQUEST" } });
+        return;
+      }
+      const entry = await replayPremierePointsLedger.setDisplayName(
+        authorization.participant.participantId,
+        displayName,
+      );
+      res.status(200).json({ schemaVersion: 1, entry });
+    } catch (error) {
+      sendReplayPremiereFailure(res, error);
+    }
+  },
+);
 
 app.use(
   createReplayPremiereRouter({
@@ -1140,7 +1147,6 @@ app.use((req, res, next) => {
   }
   res.redirect(`/beta?next=${encodeURIComponent(req.originalUrl)}`);
 });
-
 
 // League-run clip surface. Mounted after the wrapper/beta gates (which admit
 // only mirror-published league-* keys anonymously) and BEFORE the run-artifact
