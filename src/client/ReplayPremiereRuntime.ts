@@ -3022,14 +3022,31 @@ export class ReplayPremiereRuntimeController {
       | ReplayPremiereServiceSessionResponse
       | ReplayPremiereServiceHeartbeatResponse,
   ): void {
+    if (this.projection === null) {
+      this.latchFailure("integrity_failure");
+      return;
+    }
     if (
-      this.projection === null ||
-      !isLifecycleCompatible(
-        this.currentNetworkState(),
-        response.premiereState,
-      ) ||
-      (this.reveal === null && hasOutcomeProjection(response.checkpoints))
+      !isLifecycleCompatible(this.currentNetworkState(), response.premiereState)
     ) {
+      this.latchFailure("integrity_failure");
+      return;
+    }
+    if (this.reveal === null && hasOutcomeProjection(response.checkpoints)) {
+      // Checkpoint pauses are bypassed for wagering premieres, so the
+      // replay races straight through to the true end with none of the
+      // breathing room a normal premiere's final checkpoint pause gives
+      // the verified-reveal fetch to land first. A session/heartbeat
+      // response can legitimately carry an outcome-bearing checkpoint
+      // before `reveal` has landed client-side — the SAME "ordinary
+      // delivery race, not a failure" distinction `submitMarketOrder`
+      // relies on `isRevealVerificationPending()` for. Skip applying (and
+      // re-hydrating from) a response taken in that exact window instead
+      // of latching a hard failure; the next heartbeat after `reveal`
+      // lands applies normally. A lifecycle mismatch (checked above,
+      // never exempted here) stays a hard failure regardless — an
+      // impossible regression is not explained by a pending reveal.
+      if (this.isRevealVerificationPending()) return;
       this.latchFailure("integrity_failure");
       return;
     }
@@ -3569,9 +3586,15 @@ export class ReplayPremiereRuntimeController {
         const response = await this.strictInteractionWrite(() =>
           this.service.submitPrediction(request),
         );
+        // Same ordinary reveal-delivery race `submitMarketOrder` guards
+        // against with `isRevealVerificationPending()`: checkpoint pauses
+        // are bypassed for wagering premieres, so a prediction response
+        // can legitimately carry this checkpoint's outcome before `reveal`
+        // has landed client-side.
         if (
           this.reveal === null &&
-          hasOutcomeProjection([response.checkpoint])
+          hasOutcomeProjection([response.checkpoint]) &&
+          !this.isRevealVerificationPending()
         ) {
           this.latchFailure("integrity_failure");
           throw serviceError("invalid_response");

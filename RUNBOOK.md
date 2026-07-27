@@ -774,3 +774,111 @@ on screen before any click.
   premiere, no need to tear down and recreate the state root each time
   within one working session (only §9's full-directory-delete applies
   between genuinely separate sessions/branches).
+
+## 14. The false "could not continue" fix, and what's still open (EndRace session)
+
+### 14.1 Root-caused and fixed: `applyServiceProjection` was the real trigger
+
+§13.3's diagnosis (a `latchFailure` call site racing reveal delivery) turned
+out to be half right and half a red herring, isolated this session with a
+crash-safe `console.error(new Error().stack)` inside `latchFailure()` (the
+first, careless version of that same diagnostic — logging
+`this.currentNetworkState()`, which does an unchecked `this.projection!`
+read — itself threw when `latchFailure` fired before `this.projection` was
+set, got swallowed by `ReplayPremiereNetworkController.invokeCallback`'s
+catch-and-rethrow, and cascaded into a *second*, corrupted failure. That
+cascade is what produced this session's first several "reproductions" —
+worth flagging so nobody re-walks that exact trap. The fixed, exception-safe
+version confirmed the real site).
+
+**Real bug**: `ReplayPremiereRuntimeController.applyServiceProjection()`
+(`src/client/ReplayPremiereRuntime.ts`) — called from both `sendHeartbeat`
+and `bootstrapInteractions` — checked
+`this.reveal === null && hasOutcomeProjection(response.checkpoints)` and
+latched `integrity_failure` unconditionally, with no
+`isRevealVerificationPending()` exemption. Checkpoint pauses are bypassed
+for wagering premieres, so a heartbeat response can legitimately carry an
+outcome-bearing checkpoint before the verified reveal has landed
+client-side — the exact same race `submitMarketOrder` was already fixed for
+in the Finish session. Fixed the same way: only latch when
+`!isRevealVerificationPending()`. A lifecycle mismatch
+(`!isLifecycleCompatible(...)`) in the same function is a **different,
+always-genuine** signal (e.g. a regression to `"draft"`) and was
+deliberately left unconditional — narrowing the guard to exactly the
+outcome-ahead-of-reveal case, not the whole function, is what an existing
+test (`does not fence a $label behind a reveal pointer`) was already
+pinning down; it stayed green. `onPrediction`'s callback
+(`overlayCallbacks()`) had the identical unguarded pattern for a checkpoint
+prediction response and got the same fix.
+
+Regression tests: `tests/client/ReplayPremiereRuntime.test.ts` →
+`"wagering premiere reveal-delivery race (natural end, checkpoint pauses
+bypassed)"` — one test proves a heartbeat carrying the match's outcome
+while the reveal is still in flight reaches `revealed` without ever
+latching; the sibling test proves the same outcome-bearing heartbeat still
+latches `integrity_failure` when nothing else explains it (no reveal
+pointer, network state still plainly `"playing"`). Verified the first test
+fails against the pre-fix code and the second passes either way (real
+regression coverage, not a vacuous assertion).
+
+### 14.2 A second, independent, 100%-reproducible bug found via live diagnosis
+
+Every heartbeat/session-create call for a wagering (`contentSource: "tap"`)
+premiere 400'd with `PREMIERE_INVALID_REQUEST` /
+`observed_sequence_unreleased` — **every single heartbeat, every run,
+starting with the very first one** — a real, visible console error every
+10s that alone would have failed the walkthrough's "zero console errors"
+bar. Root cause: `assertAuthoritativeObservedSequence`
+(`src/server/replay-premiere/ReplayPremiereInteractions.ts`) validated the
+client's `observedSequence` against `getReleasedContext`'s
+`lastSafeReleasedSequence` — a coarse, chunk-release-action counter correct
+for `contentSource: "chunks"` clients. A `contentSource: "tap"` client (the
+betting page) legitimately reports a fine-grained per-turn
+`observedSequence` instead (`latestFrame.sequence`), which vastly
+outpaces the coarse counter within about a second of match start. Fixed by
+PariServer (this session, coordinated live over `hub`) by additionally
+accepting `sequence <= this.getLiveVisibleSequence()` — the same
+authoritative, per-turn bound `submitMarketOrder` already trusts — before
+falling back to the original coarse check; pure widening, `chunks`-mode
+premieres are untouched. A second, separate widening was needed (also
+PariServer, same session) in `assertSnapshotObservedSequence` — the
+recovery-time validator run on every server restart — otherwise a session
+accepted live under the new wide bound would fail to reconstruct the next
+time the server restarted. Regression test:
+`tests/server/replay-premiere/wagering/ReplayPremiereObservedSequenceRecovery.test.ts`.
+
+### 14.3 What was and wasn't verified live this session
+
+With both fixes applied, 6 of 7 live natural-end runs (own isolated
+server/port/state-root, synthetic crowd on) reached `revealed` cleanly —
+**zero console errors**, no false failure, confirmed via direct `curl`
+against `/market` (`status: "settled"`, real `winnerSeatId`) and
+`/manifest` (`state: "revealed"`) at the same instant. **One run out of
+seven still showed "This premiere could not continue"** after both fixes,
+confirmed via a crash-safe diagnostic in both `latchFailure()` and
+`onTerminal()` to have latched **neither** `terminalFailure` **nor** a
+`networkTerminalState` of `"failed"`/`"cancelled"` — i.e. not reproducible
+via any code path this session could find or explain, and not reproduced
+again in three further attempts with the same diagnostic active. Given this
+machine consistently runs several other agents' demo-server processes
+concurrently (`ps aux` showed 3-4 unrelated `ai-agent-demo-server.ts`
+processes throughout this session), a genuine, real, one-off service
+hiccup under multi-agent CPU contention (exactly the confound §12/§13
+already flag repeatedly) is the leading explanation, but this is
+**stated plainly as unconfirmed, not swept under the rug**: whoever next
+hits this should re-run the SAME crash-safe `console.error` pattern in both
+`latchFailure()` and `onTerminal()` (both removed cleanly this session,
+confirmed via `grep -n "TEMP DIAGNOSTIC" src/client/ReplayPremiereRuntime.ts`
+returning nothing) on an isolated, otherwise-idle machine to rule out
+environmental contention definitively.
+
+**The full 9-step live walkthrough (buy/sell/reload/second-tab/settlement/
+narrow-viewport) was NOT completed this session** — diagnosing and fixing
+§14.1/§14.2 consumed the session's tool budget. `tsc --noEmit`, `eslint`
+(zero new warnings/errors on every file touched), and the full suite
+(297+156 files, 3489+1858 tests, 3 pre-existing todo) are all green as of
+this session's last commit. Steps 1-2 (page load, zero console errors,
+crowd-driven price movement) were re-confirmed working; steps 3-9 (buy,
+P&L, sell, reload, second tab, settlement, narrow viewport) remain to be
+driven live by whoever picks this up next — nothing about them is known to
+be broken, they simply weren't exercised this session.

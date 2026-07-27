@@ -2230,6 +2230,18 @@ export class ReplayPremiereInteractions {
   private assertAuthoritativeObservedSequence(sequence: number): void {
     assertObservedSequence(sequence);
     if (sequence === -1) return;
+    // `getReleasedContext`'s `lastSafeReleasedSequence` is a coarse,
+    // chunk-release-action counter — correct for `contentSource: "chunks"`
+    // clients, whose own observed sequence advances at the same coarse
+    // granularity. A `contentSource: "tap"` client (the betting page)
+    // legitimately reports a fine-grained per-turn sequence instead
+    // (`latestFrame.sequence`, the same numbering `readLiveVisibleSequence()`
+    // exposes and market orders already trust as their own authoritative
+    // freshness bound — see `submitMarketOrder`'s `getLiveVisibleSequence()`
+    // check above). Accept either bound: this only WIDENS what a coarse
+    // claim can satisfy, it never lets a claim through that exceeds both
+    // the chunk-release counter AND the server's own live-visible frontier.
+    if (sequence <= this.getLiveVisibleSequence()) return;
     const context = this.getReleasedContext(sequence);
     if (context === null || sequence > context.releasedThroughSequence) {
       throw invalidInteraction("observed_sequence_unreleased");
@@ -3510,6 +3522,15 @@ function assertSnapshotObservedSequence(
 ): void {
   assertObservedSequence(sequence);
   if (sequence === -1) return;
+  // Mirrors `assertAuthoritativeObservedSequence`'s live-path widening
+  // exactly: a `contentSource: "tap"` (wagering) client legitimately
+  // reports a fine-grained observedSequence that can be ahead of the
+  // coarse chunk-release marker `getReleasedContext` exposes. A session
+  // accepted live at that fine-grained bound must still validate at
+  // recovery/restart — re-checking ONLY the coarse bound here would
+  // reject exactly the sessions the live-path widening was meant to
+  // unblock, the moment the server next restarts.
+  if (sequence <= options.getLiveVisibleSequence()) return;
   const context = options.getReleasedContext(sequence);
   if (context === null || sequence > context.releasedThroughSequence) {
     throw invalidInteraction("snapshot_observed_sequence_unreleased");

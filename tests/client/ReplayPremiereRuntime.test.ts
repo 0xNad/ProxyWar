@@ -2030,6 +2030,92 @@ describe("ReplayPremiereRuntimeController", () => {
     },
   );
 
+  describe("wagering premiere reveal-delivery race (natural end, checkpoint pauses bypassed)", () => {
+    function resolvedCheckpoint(): ReplayPremiereServiceCheckpoint {
+      return {
+        ...checkpoint("cp_12345678", 10),
+        resolution: {
+          kind: "winner",
+          winnerSeatId: "seat_a",
+          resolvedAt: STARTED_AT,
+        },
+      };
+    }
+
+    it("does not latch a false integrity failure when a heartbeat reports the match's outcome before the verified reveal has landed", async () => {
+      vi.useFakeTimers();
+      const harness = runtimeHarness({
+        state: "playing",
+        service: {
+          heartbeat: vi.fn(
+            async (): Promise<ReplayPremiereServiceHeartbeatResponse> => ({
+              ...heartbeatResponse("revealed"),
+              checkpoints: [resolvedCheckpoint(), checkpoint("cp_abcdef12", 20)],
+            }),
+          ),
+        },
+      });
+      const started = harness.runtime.start();
+      await harness.callbacks.onReady?.(projection("playing"));
+      await started;
+
+      // The content-tap's own network state races ahead to "revealed"
+      // (checkpoint pauses are bypassed for wagering premieres, so there is
+      // no final-checkpoint breathing room) while the verified reveal fetch
+      // is still in flight — `isRevealVerificationPending()` becomes true.
+      await harness.callbacks.onManifest?.(revealedPointer());
+      await vi.advanceTimersByTimeAsync(10_000);
+
+      expect(harness.service.heartbeat).toHaveBeenCalledOnce();
+      expect(harness.models.at(-1)).toMatchObject({ failureCode: null });
+      expect(harness.models.at(-1)?.state).not.toBe("failed");
+      expect(harness.network.dispose).not.toHaveBeenCalled();
+      expect(harness.service.dispose).not.toHaveBeenCalled();
+
+      // The reveal lands shortly after — the premiere reaches `revealed`
+      // cleanly, exactly as if the race had never happened.
+      await harness.callbacks.onReveal?.(verifiedReveal());
+      await harness.callbacks.onTerminal?.("revealed");
+      expect(harness.models.at(-1)).toMatchObject({
+        state: "revealed",
+        failureCode: null,
+      });
+      harness.runtime.dispose();
+    });
+
+    it("still latches a genuine integrity failure when a heartbeat reports the match's outcome and the replay's own state machine cannot explain it", async () => {
+      vi.useFakeTimers();
+      const harness = runtimeHarness({
+        state: "playing",
+        service: {
+          heartbeat: vi.fn(
+            async (): Promise<ReplayPremiereServiceHeartbeatResponse> => ({
+              ...heartbeatResponse("playing"),
+              checkpoints: [resolvedCheckpoint(), checkpoint("cp_abcdef12", 20)],
+            }),
+          ),
+        },
+      });
+      const started = harness.runtime.start();
+      await harness.callbacks.onReady?.(projection("playing"));
+      await started;
+
+      // No reveal pointer, no terminal signal — the network layer still
+      // thinks this premiere is plainly "playing". A heartbeat claiming an
+      // outcome-bearing checkpoint here is not explicable by any pending
+      // reveal; it must still latch.
+      await vi.advanceTimersByTimeAsync(10_000);
+
+      expect(harness.models.at(-1)).toMatchObject({
+        state: "failed",
+        failureCode: "integrity_failure",
+      });
+      expect(harness.network.dispose).toHaveBeenCalled();
+      expect(harness.service.dispose).toHaveBeenCalled();
+      harness.runtime.dispose();
+    });
+  });
+
   it.each(["failed", "cancelled"] as const)(
     "makes a %s terminal pointer outrank a stale playing heartbeat and permanently disables writes",
     async (terminalState) => {
