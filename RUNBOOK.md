@@ -279,6 +279,24 @@ Admission never hot-registers; the server must restart and reconstruct its catal
 # Ctrl-C the server from §5, then start it again with the same env vars.
 ```
 
+The same applies to **client** changes, and it is easy to lose an hour to:
+`npx vite build` writes a fresh `static/assets/index-<hash>.js`, but the
+server caches `index.html` in memory at boot, so it keeps serving the *old*
+hash until it restarts. Cache-busting the URL in the browser does not help —
+the stale reference is coming from the server, not the browser.
+
+To check what is actually live rather than what you built:
+
+```sh
+ls static/assets/index-*.js | head -1                       # on disk
+curl -s https://bet.proxywar.xyz/account \
+  | grep -oE 'assets/index-[A-Za-z0-9_-]+\.js' | head -1    # being served
+```
+
+Different hashes mean your build has not gone live yet. On the hosted deploy
+the autocycler restarts the origin on every cycle, so it lands within ~25
+minutes on its own.
+
 ## 8. Verify
 
 ```sh
