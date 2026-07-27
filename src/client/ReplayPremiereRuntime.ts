@@ -425,13 +425,15 @@ const marketPositionSchema = z
   .strict();
 const marketStateSchema = z
   .object({
-    premiereId: z.string().regex(PREMIERE_ID_PATTERN),
     outcomeSeatIds: z.array(opaqueIdSchema).min(2).max(64),
     q: z.array(z.number().int().safe()),
     b: z.number().positive().safe(),
     prices: z.array(z.number().min(0).max(100)),
     status: z.enum(["open", "settled"]),
     winnerSeatId: opaqueIdSchema.nullable(),
+    // Anti-replay freshness bound the client echoes back on its NEXT market
+    // order (see `submitMarketOrder`) — never cached across multiple orders.
+    liveVisibleSequence: nonNegativeIntegerSchema,
     positions: z.array(marketPositionSchema).nullable(),
   })
   .strict();
@@ -445,14 +447,16 @@ const tradeSchema = z
   .object({
     id: z.string().min(1).max(128),
     premiereId: z.string().regex(PREMIERE_ID_PATTERN),
-    checkpointId: z.string().regex(CHECKPOINT_ID_PATTERN),
     participantId: z.string().regex(PARTICIPANT_ID_PATTERN),
+    participantKind: z.enum(["real", "synthetic"]),
     seatId: opaqueIdSchema,
     side: z.enum(["buy", "sell"]),
     shares: z.number().int().positive().safe(),
     chips: nonNegativeIntegerSchema,
     avgPrice: z.number().min(0).max(100),
     executedAt: canonicalTimestampSchema,
+    sequence: nonNegativeIntegerSchema,
+    idempotencyKey: z.string().min(16).max(128),
   })
   .strict();
 const tradeResponseSchema = z
@@ -624,12 +628,18 @@ export class ReplayPremiereServiceError extends Error {
 
 export interface ReplayPremiereTradeRequest {
   premiereId: string;
-  checkpointId: string;
   seatId: string;
   side: "buy" | "sell";
   amount: number;
   /** 0..100 — ceiling for a buy, floor for a sell. The crowd trades the same live book. */
   limitPrice: number;
+  /**
+   * The freshest `market.liveVisibleSequence` the caller has observed — an
+   * anti-replay freshness bound, NOT a checkpoint reference. The server
+   * rejects with 410 `order_sequence_unreleased` if this is ahead of what
+   * it has actually released. Never reuse a value across multiple orders.
+   */
+  sequence: number;
 }
 
 export interface ReplayPremiereServiceClientOptions {
@@ -872,24 +882,25 @@ export class ReplayPremiereServiceClient {
     const session = this.requireSession();
     if (
       input.premiereId !== this.options.premiereId ||
-      !CHECKPOINT_ID_PATTERN.test(input.checkpointId) ||
       !OPAQUE_ID_PATTERN.test(input.seatId) ||
       (input.side !== "buy" && input.side !== "sell") ||
       !Number.isSafeInteger(input.amount) ||
       input.amount <= 0 ||
       !Number.isFinite(input.limitPrice) ||
       input.limitPrice < 0 ||
-      input.limitPrice > 100
+      input.limitPrice > 100 ||
+      !Number.isSafeInteger(input.sequence) ||
+      input.sequence < 0
     ) {
       throw serviceError("invalid_configuration");
     }
     const body = {
       sessionId: session.id,
-      checkpointId: input.checkpointId,
       seatId: input.seatId,
       side: input.side,
       amount: input.amount,
       limitPrice: input.limitPrice,
+      sequence: input.sequence,
     };
     const response = await this.postJson(
       "market-orders",
@@ -1080,7 +1091,6 @@ export class ReplayPremiereServiceClient {
       200,
     );
     if (
-      response.market.premiereId !== this.options.premiereId ||
       response.market.q.length !== response.market.outcomeSeatIds.length ||
       response.market.prices.length !== response.market.outcomeSeatIds.length
     ) {
@@ -1514,7 +1524,7 @@ export class ReplayPremiereServiceClient {
     if (
       trade.premiereId !== this.options.premiereId ||
       trade.participantId !== session.participantId ||
-      trade.checkpointId !== input.checkpointId ||
+      trade.sequence !== input.sequence ||
       trade.seatId !== input.seatId ||
       trade.side !== input.side ||
       (trade.side === "buy" && trade.avgPrice > input.limitPrice + 1) ||
@@ -1535,7 +1545,6 @@ export class ReplayPremiereServiceClient {
     );
     const pricesSum = market.prices.reduce((sum, price) => sum + price, 0);
     if (
-      market.premiereId !== this.options.premiereId ||
       uniqueSeats.size !== market.outcomeSeatIds.length ||
       !seatsAreBound ||
       market.q.length !== market.outcomeSeatIds.length ||
@@ -3294,10 +3303,13 @@ export class ReplayPremiereRuntimeController {
   /**
    * Public market-order write — NOT part of `overlayCallbacks()` because
    * trading renders its own dedicated overlay (`src/client/prediction/
-   * wagering/**`), not `ReplayPremiereOverlay`. Mirrors `onPrediction`'s
-   * integrity path (write-allowed guard, sequence-not-ahead guard,
-   * strict-response latching) so an order gets the same sealed-window
-   * guarantee a prediction does. Also callable directly by a non-UI
+   * wagering/**`), not `ReplayPremiereOverlay`. Continuous LMSR trading is
+   * NOT gated to a checkpoint window (operator override — checkpoints are
+   * content beats, not a trading gate); the only client-side freshness
+   * bound is `request.sequence`, the caller's freshest observed
+   * `market.liveVisibleSequence`. The server is the sole authority on
+   * sequence freshness — it independently rejects a stale/ahead claim with
+   * 410 `order_sequence_unreleased`. Also callable directly by a non-UI
    * caller (synthetic crowd / persona testing) — this is a plain method,
    * not tucked inside a click handler. Unlike a checkpoint prediction, a
    * trade does NOT replace anything in `serviceCheckpoints` or re-hydrate
@@ -3308,15 +3320,6 @@ export class ReplayPremiereRuntimeController {
     request: ReplayPremiereTradeRequest,
   ): Promise<ReplayPremiereServiceTradeResponse> {
     this.assertInteractionWriteAllowed();
-    const checkpoint = this.projection?.publicDefinition.checkpoints.find(
-      (candidate) => candidate.id === request.checkpointId,
-    );
-    if (
-      checkpoint === undefined ||
-      checkpoint.sequence > this.observedSequence()
-    ) {
-      throw serviceError("request_rejected");
-    }
     const response = await this.strictInteractionWrite(() =>
       this.service.submitMarketOrder(request),
     );

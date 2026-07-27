@@ -46,6 +46,7 @@ function market(overrides: Partial<MarketState> = {}): MarketState {
     prices: { "seat-a": 55, "seat-b": 45 },
     status: "open",
     winnerSeatId: null,
+    liveVisibleSequence: 0,
     positions: null,
     ...overrides,
   };

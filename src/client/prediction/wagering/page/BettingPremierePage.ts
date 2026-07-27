@@ -49,6 +49,10 @@ export class BettingPremiereMarketController {
   private polling = false;
   private started = false;
   private disposed = false;
+  // Freshest observed anti-replay freshness bound — echoed back on the
+  // NEXT order only (never cached across multiple orders); updated from
+  // every poll AND every trade response's own market snapshot.
+  private latestLiveVisibleSequence = 0;
 
   constructor(
     private readonly runtime: ReplayPremiereRuntimeController,
@@ -59,8 +63,8 @@ export class BettingPremiereMarketController {
     if (this.disposed) return;
     this.overlay = overlay;
     overlay.bankroll = this.bankroll.balance;
-    overlay.onTrade = (checkpointId, seatId, side, amount, limitPrice) =>
-      this.submitTrade(checkpointId, seatId, side, amount, limitPrice);
+    overlay.onTrade = (seatId, side, amount, limitPrice) =>
+      this.submitTrade(seatId, side, amount, limitPrice);
   }
 
   /** Begin the continuous poll. Idempotent — safe to call more than once. */
@@ -83,7 +87,6 @@ export class BettingPremiereMarketController {
   }
 
   private async submitTrade(
-    checkpointId: string,
     seatId: string,
     side: TradeSide,
     amount: number,
@@ -91,11 +94,11 @@ export class BettingPremiereMarketController {
   ): Promise<void> {
     const response = await this.runtime.submitMarketOrder({
       premiereId: this.premiereId,
-      checkpointId,
       seatId,
       side,
       amount,
       limitPrice,
+      sequence: this.latestLiveVisibleSequence,
     });
     if (this.disposed) return;
     // Debit a buy's cost / credit a sell's proceeds — straight off the
@@ -123,6 +126,7 @@ export class BettingPremiereMarketController {
 
   private applyMarket(market: MarketState): void {
     if (this.disposed) return;
+    this.latestLiveVisibleSequence = market.liveVisibleSequence;
     // Credit a settlement payout exactly once per seat the viewer held —
     // guarded by `SessionBankroll.creditSettlementOnce` itself, safe to
     // call on every subsequent poll/trade response after settlement.

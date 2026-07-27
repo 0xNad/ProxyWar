@@ -1,12 +1,18 @@
 # Proxy War Replay Premiere + Live Betting — local runbook
 
-Status as of this session: **a controlled-exhibition premiere can be built, admitted, and
-served with a live LMSR market (`GET /premiere/<id>` and `GET /bet/<id>` both return 200,
-`GET /api/premieres/<id>/market` returns a real open market with moving-eligible prices).
-The dedicated betting page in a real browser still hangs on "Joining live…" due to one
-unrelated, unfixed client bug** — see "Known remaining blocker" at the end. Everything
-above that line is real, reproduced, command-verified output from this session, not
-aspirational instructions.
+Status as of this session (Unblock): the client-side "Joining live…" hang is
+**fixed** — root-caused to two independent client bugs (see §12), not the
+`joinLobby`/replay-premiere join-lobby path the original diagnosis suspected.
+A controlled-exhibition premiere admitted with wagering on now loads all the
+way to a rendering replay, a populated LMSR trade ticket, and a **live, real
+buy** was driven in a real headless-Chromium browser: price moved from
+25.0→35.5 on the bought seat (exact match to the quoted preview) and the
+bankroll debited exactly the quoted cost. See §12 for exactly what was and
+was not verified live before this session ran out of budget — sell, hold-to-
+settlement, the synthetic crowd, and reload-survival were **not** reached.
+Everything below is real, reproduced, command-verified output from this
+session (Integrate's original content, §0–§11, is unchanged and still
+accurate), not aspirational instructions.
 
 ## 0. Why `/bet/<id>` and `/premiere/<id>` said "Replay unavailable" for every id
 
@@ -317,71 +323,256 @@ literal paths PariServer confirmed as final (`ReplayPremiereHttp.ts` cases `mark
 this session started (PageWire/PariServer's IRC handoff already used the final paths, not
 placeholders).
 
-## Known remaining blocker: the betting page hangs on "Joining live…" in a real browser
+## 12. The "Joining live…" hang — root-caused and fixed (Unblock session)
 
-Verified via `PROXYWAR_LEAGUE_WRAPPER_ONLY=true` + `ai-agent-demo-server.ts` (this
-session's whole setup) with a live, open market (`GET .../market` returned
-`"status":"open"`, prices `[25,25,25,25]`) and a fresh `/bet/<id>` (HTTP 200):
+**Root cause #1 (the one originally suspected, confirmed correct): an ambient
+`/w1/lobbies` WebSocket, unrelated to the join-lobby event path.**
+`GameModeSelector.ts` (the landing page's public-lobby-list widget,
+`<game-mode-selector>`, present in the shared SPA shell on every route)
+constructs a `PublicLobbySocket` and calls `.start()` unconditionally from
+`connectedCallback()` the instant the custom element is upgraded — regardless
+of the current route. `LobbySocket.ts`'s `PublicLobbySocket.start()` already
+had a guard for this: `if (isAiLeagueReplayRoute()) return;`. That guard
+(`AiLeagueReplayMode.ts`) already recognized `/premiere/<id>` via
+`isReplayPremiereRoute()` — which is why `/premiere/<id>` never had this bug —
+but had **no** case for `/bet/<id>`, so on the betting page the socket opened
+every time. `ai-agent-demo-server.ts` runs no `/w1/*` worker infra at all (confirmed,
+§0), so the handshake gets a 302 and fails immediately, and (via `joinLobby`'s
+ordinary `Transport`, unrelated) is a complete red herring for the actual hang.
+Fix: `AiLeagueReplayMode.ts` — added `isBettingPremiereRoute()`
+(`/^\/bet\/prem_[a-z0-9]{16,32}$/`) and OR'd it into `isAiLeagueReplayRoute()`,
+the single shared classifier every ambient landing-page subsystem (lobby
+socket, ads, analytics, auth refresh, cosmetics) already gates on for
+`/premiere/<id>`. One-line, matches the existing pattern exactly, no new
+concept introduced.
 
-Opening the page in a real browser (headless Chromium via CDP) shows a spinner and
-"Joining live…" indefinitely. Captured browser console:
+**Root cause #2 (undiagnosed by the previous session — this alone still
+hangs the page even with #1 fixed): the betting route never got the
+client-side `CDN_BASE`/`__PROXYWAR_AI_REPLAY__` origin fallback, so the
+progressive-replay worker's asset fetches fail to even parse a URL.**
+`index.html`'s pre-hydration bootstrap script sets
+`window.__PROXYWAR_AI_REPLAY__` from a hardcoded route-prefix list
+(`/ai-league-replay/`, `/premiere/`, coworld routes, …) that also lacked
+`/bet/`. That flag gates `window.CDN_BASE`'s fallback to `location.origin`
+when no real CDN is configured (the local-dev case). Without it,
+`window.CDN_BASE` stays `""`, which the client passes into the progressive-
+replay `Worker` (`ReplayPremiereWorker.worker.ts`, an **inline `blob:` worker**
+per `?worker&inline`) as `cdnBase`. Inside that worker, `assetUrl()` then
+returns path-absolute (not fully-qualified) URLs like
+`/_assets/maps/asia/manifest.<hash>.json`, and `fetch()` of a path-absolute
+URL from a `blob:` base **fails to parse** in Chrome
+(`TypeError: Failed to execute 'fetch' … Failed to parse URL from /_assets/…`;
+confirmed empirically via `worker.evaluate` in this session — the manifest
+itself was present and correct, `self.origin` inside the blob worker
+correctly reports the real page origin, only the fetch call itself broke).
+`createGameRunner()`'s map load rejects, the worker silently swallows the
+real error and posts back `{type:"initialization_error"}` (no `console.error`
+call — this is why nothing showed up in the browser console), and the client
+surfaces a real `error-modal` ("Worker initialization failed") that a
+`showErrorModal` side effect quietly relabels as the generic replay-load
+veil failure. **This exact same latent bug affects `/premiere/<id>` too** —
+it is not betting-specific, `Worker.worker.ts` (ordinary multiplayer/replay)
+uses the identical `FetchGameMapLoader`/`assetUrl`/`cdnBase` pattern with the
+identical comment about the CDN fallback; `/premiere/<id>` only avoided it in
+this session's spot checks because `window.__PROXYWAR_AI_REPLAY__` already
+covered `/premiere/`. Fix: `index.html` — added `/bet/` to the
+`window.__PROXYWAR_AI_REPLAY__` route-prefix list (one line, same file, same
+pattern as root cause #1's fix, just a different hardcoded route list this
+session found by tracing the actual failing `fetch()` call rather than
+trusting a config guess). Also fixes, as a side effect, the CSP-blocked
+`crazygames-sdk`/`turnstile`/`googletagmanager`/`cloudflareinsights`
+console-error noise from the previous session's console capture — those
+scripts are gated on the same flag and now correctly skip loading on
+`/bet/<id>`.
 
+**Root cause #3 (found once #1+#2 unblocked the worker: the market poll
+itself was broken): the client's `marketStateSchema` didn't match the wire
+contract.** Once the replay actually loaded, the trade sidebar got stuck on
+"Loading market…" with a visible `invalid_response` error. The live
+`GET /api/premieres/<id>/market` response never included `premiereId` inside
+`market` (verified via direct `curl` against a real running server, before
+*and* after PariServer's in-flight rework — this was a pre-existing gap, not
+something their change introduced) yet `marketStateSchema` (in
+`ReplayPremiereRuntime.ts`) required it under `.strict()`, so **every** real
+market response ever emitted by this server has always failed client-side
+schema validation — this session is simply the first time a browser session
+ever got far enough to exercise that code path. Separately, PariServer's
+continuous-trading/read-ahead rework (landed live during this session, final
+per their `hub` confirmation) added a required `market.liveVisibleSequence`
+field and reshaped `Trade` (dropped `checkpointId`, added `participantKind`/
+`sequence`/`idempotencyKey`) — both also unhandled by the pre-existing
+schema. Fix, all in `src/client/ReplayPremiereRuntime.ts` +
+`src/client/prediction/wagering/**` (NOT touching
+`src/server/replay-premiere/wagering/**`, per the "coordinate, don't edit"
+constraint):
+  - Removed `premiereId` from `marketStateSchema` and its two now-dead
+    comparison checks (`assertMarketStateBound`, the market-response bind
+    check in `readMarketState`).
+  - Added `liveVisibleSequence: nonNegativeIntegerSchema` to
+    `marketStateSchema`; added `MarketState.liveVisibleSequence` to the
+    client view type and its `serviceMapping.ts` passthrough.
+  - `tradeSchema`: dropped `checkpointId`, added `participantKind`
+    (`"real"|"synthetic"`), `sequence`, `idempotencyKey`.
+  - `ReplayPremiereTradeRequest`: `checkpointId: string` →
+    `sequence: number` (the freshest observed `market.liveVisibleSequence`,
+    per PariServer's semantics — "always send the freshest value you have,
+    don't cache a stale one across multiple orders"); `submitMarketOrder`'s
+    validation/body-construction and `assertTradeResponseBound`'s bind check
+    updated to match.
+  - Removed the stale checkpoint-window gate from the controller-level
+    `submitMarketOrder` (`ReplayPremiereRuntimeController`) — it looked up
+    `request.checkpointId` in `publicDefinition.checkpoints` and rejected if
+    that checkpoint's sequence was ahead of `observedSequence()` (the
+    *replay-turn* clock, an unrelated concept to the *market's* live-visible
+    clock). Continuous LMSR trading is explicitly, deliberately **not**
+    gated to a checkpoint window (see `BettingOverlay.ts`'s own doc comment:
+    "checkpoints are content beats the UI highlights, they gate nothing") —
+    this gate was a checkpoint-era leftover that never got scrubbed when the
+    continuous-market design landed, and would have permanently rejected
+    every order once no real gate concept existed to satisfy it. The server
+    is the sole remaining authority on sequence freshness (rejects a
+    stale/ahead claim with `410 order_sequence_unreleased`).
+  - `BettingOverlay`/`BettingPremierePage`/`TradeTicket` wiring: dropped
+    `checkpointId` threading through `onTrade`; `BettingPremiereMarketController`
+    now tracks `latestLiveVisibleSequence` from every poll/trade response and
+    sends it fresh on each order.
+  - Updated the 4 affected test fixtures (`tests/client/ReplayPremiereRuntime.test.ts`,
+    `tests/client/prediction/wagering/{components,serviceMapping,validate}.test.ts`)
+    to match the corrected wire shape. All 5 affected suites green (198 tests).
+
+**Root cause #4 (found once the market poll worked: the trade ticket's seat
+list was empty): `BettingOverlay.allSeats()`/`seatLabel()` sourced seats from
+`model.checkpoints[].options`, which stays `[]` until a checkpoint's
+prediction window opens — a concept continuous LMSR trading deliberately
+doesn't use.** The market's own `outcomeSeatIds` (always populated) has no
+display names attached; those live on `model.policies` (`ReplayPremiereOverlayModel.policies`,
+always populated from admission-time provenance, independent of checkpoint
+state). Fix: `BettingOverlay.ts` — `allSeats()` and `seatLabel()` now read
+`this.model.policies` directly instead of walking `checkpoints[].options`.
+
+All four fixes are pure client-side (`index.html`,
+`src/client/AiLeagueReplayMode.ts`, `src/client/ReplayPremiereRuntime.ts`,
+`src/client/prediction/wagering/**`) — zero diff under `src/core/**` or
+`src/server/replay-premiere/wagering/**`. `npx tsc --noEmit` and
+`npx eslint` are clean on every file this session touched (the only
+remaining `tsc` errors anywhere in the repo are in
+`tests/server/replay-premiere/**`, PariServer/MarketSim's own concurrent,
+not-yet-typechecking WIP on their rework — confirmed by `git status`
+showing those as the only other dirty files, unrelated to anything in this
+section).
+
+### Real command sequence used to reproduce + verify (local, isolated, this session)
+
+```sh
+# Isolated server on its own port/state-root — avoids colliding with any
+# other agent's demo-server process (see §5's writer-lock note).
+mkdir -p /Users/<you>/.proxywar-dev-unblock/replay-premiere
+chmod 700 /Users/<you>/.proxywar-dev-unblock/replay-premiere   # required — the
+  # server rejects a world/group-readable private-state-root with
+  # `private_state_root_not_private` (503 PREMIERE_UNAVAILABLE) at boot.
+
+GAME_ENV=dev PROXYWAR_WAGERING_ENABLED=1 \
+PROXYWAR_PUBLIC_URL=http://127.0.0.1:8791 \
+PROXYWAR_REPLAY_PREMIERE_STATE_ROOT=/Users/<you>/.proxywar-dev-unblock/replay-premiere \
+PROXYWAR_LEAGUE_WRAPPER_ONLY=true AI_LEAGUE_DEMO_PORT=8791 \
+npx tsx src/scripts/ai-agent-demo-server.ts
+# NOTE: PORT= is NOT the right env var — the server reads AI_LEAGUE_DEMO_PORT
+# (see ProxyWarDemoServerConfig.ts); PORT is silently ignored and the
+# server falls back to the 8787 default, which will collide with any other
+# demo-server process already using that port.
 ```
-error: WebSocket connection to 'ws://127.0.0.1:8787/w1/lobbies' failed:
-  Error during WebSocket handshake: Unexpected response code: 302
-error: Failed to load resource: the server responded with a status of 400 (Bad Request)
-REQFAIL: http://127.0.0.1:8787/api/premieres/<id>/chunks/0 net::ERR_ABORTED
+
+Re-admit with §6's admission command against `--deployment-origin=http://127.0.0.1:8791`,
+restart the server, then:
+
+```sh
+curl -s "http://127.0.0.1:8791/api/premieres/<id>/market"
+# {"schemaVersion":1,"market":{"outcomeSeatIds":[...4 ids...],"b":10,
+#  "q":[0,0,0,0],"prices":[25,25,25,25],"status":"open","winnerSeatId":null,
+#  "liveVisibleSequence":140,"positions":null}}
 ```
 
-(Plus benign CSP-blocked third-party script/analytics noise — `crazygames-sdk`,
-`turnstile`, `googletagmanager`, `cloudflareinsights` — unrelated to this flow.)
+**Chrome, launched directly (not via `open -a`) for a real CDP endpoint:**
 
-`grep`-confirmed: neither `ReplayPremiereRuntime.ts` nor any file under
-`src/client/prediction/wagering/**` opens a WebSocket at all. `Main.ts`'s route dispatch
-(`parseBettingPremiereRoute` → `openBettingPremiere`, `Main.ts:709-714`) correctly early-
-returns *before* the ordinary multiplayer lobby-join path (`joinLobby` from
-`ClientGameRunner.ts`, `Main.ts:1618`) — so on paper this websocket attempt should be
-unreachable for a `/bet/<id>` page load, yet it fires. Something in the client boot chain
-(a module-level side effect, a shared ambient connection, or a code path this session
-didn't locate before running out of budget) still tries to join the real-time multiplayer
-lobby regardless of route. `ai-agent-demo-server.ts` doesn't run the `/w1/*` worker
-websocket infrastructure at all (that's `src/server/Server.ts`'s job, the "master/worker"
-game server used by `npm run dev` — which in turn has **zero** ReplayPremiere/wagering
-wiring, confirmed by `grep -i premiere src/server/Server.ts` returning nothing), so this
-websocket handshake can never succeed against the server topology this whole wagering
-build currently runs on.
+```sh
+/Applications/Google\ Chrome.app/Contents/MacOS/Google\ Chrome \
+  --remote-debugging-port=9222 --remote-allow-origins=* \
+  --user-data-dir=/tmp/proxywar-chrome-profile-unblock \
+  --no-first-run --no-default-browser-check &
+curl -s http://localhost:9222/json/version   # NOTE: use "localhost", not
+  # "127.0.0.1" — Chrome 150 binds the DevTools port on ::1 and 127.0.0.1
+  # gets a bare 404 with no explanation.
+```
 
-**Smallest fix**: find and gate whatever establishes the `/w1/lobbies` connection so it's
-skipped whenever `parseBettingPremiereRoute`/`parseReplayPremiereRoute` matches (mirroring
-the early-return already correctly in place at `Main.ts:699-714` for the surrounding
-route dispatch) — or, if it's structural (e.g. `ClientGameRunner` module-level
-initialization independent of the route check), move premiere/betting route detection
-earlier than that initialization. This was not fixed in this session; it is the one
-concrete step between "server-side stack fully works" (verified above) and "full watch →
-buy → price-move → sell → hold → settle → bankroll loop screenshot-verified in a browser"
-(not completed — ran out of session budget immediately after diagnosing this).
+**Local-only test workaround needed to reach `/bet/<id>` at all — not a code
+bug, a consequence of this server topology never running behind its real
+reverse proxy locally:** every anonymous premiere API write
+(`POST /api/premieres/<id>/sessions`, and transitively every subsequent
+authenticated call) resolves the requester's address via
+`createReplayPremiereTrustedProxyAddressResolver` seeded with
+`REPLAY_PREMIERE_LOOPBACK_PROXY_ADDRESSES` (127.0.0.1/::1) — i.e. it trusts
+forwarding headers **only** from a loopback peer, exactly the shape of the
+real production Cloudflare-tunnel deployment. A browser connecting directly
+to `127.0.0.1:8791` (no tunnel in front, as in any purely local dev setup)
+*is* a loopback peer, so the resolver looks for a forwarding header, finds
+none, and returns `null` → every write 400s with `remote_address_unavailable`.
+Set a header that simulates the tunnel to unblock local testing:
 
-## What was and wasn't verified in this session
+```js
+await page.setExtraHTTPHeaders({ "CF-Connecting-IP": "203.0.113.42" });
+```
 
-**Verified (real commands, real output, captured above):**
-- Root-caused three independent server-side bugs blocking every controlled-exhibition
-  admission on this branch unconditionally, and fixed all three (commits on `claude/betting`).
-- Root-caused the multi-agent private-state-root lock collision (a second, completely
-  separate cause of "Replay unavailable" for every id).
-- Added the missing `/bet/:id` server route recognition (was silently redirecting to
-  `/league`) and a wagering-compatible `--max-presentation-span-ms` admit flag.
-- Produced a real controlled-exhibition source bundle from `docs/ai-league-agent-manifests`
-  (deterministic, in-process, no network) and admitted it with wagering on.
-- `GET /premiere/<id>`, `GET /bet/<id>`, `GET /api/premieres/<id>/bootstrap`, and
-  `GET /api/premieres/<id>/market` all return correct 200 JSON/HTML against the live
-  server, `market.status` transitions `open` → (later) `settled` on schedule.
-- `npx tsc --noEmit` clean after every change in this session.
-- One earlier admitted instance rendered the betting page's sidebar (title, map, bankroll)
-  correctly in a real headless-Chromium screenshot with the SPA shell mounted — before it
-  aged into `failed` state from elapsed time between admission and screenshot.
+(Puppeteer/CDP `Network.setExtraHTTPHeaders` — or any equivalent way to add
+a static header to every outgoing request from the tab before navigating.)
 
-**Not verified — genuinely blocked, not worked around:**
-- The full watch → buy → price-move → sell → hold-to-settlement → bankroll-reconciliation
-  loop in a browser (blocked by the `/w1/lobbies` hang above).
-- MarketSim / synthetic crowd order flow (not landed as a runnable local tool yet).
-- Narrow-viewport check (blocked by the same hang before reaching that step).
+### What was verified live in a real browser this session
+
+- `/bet/<id>` loads all the way through: real replay renders (turn-accurate
+  live territory map, standings table), **zero console errors** (one benign
+  `Canvas2D willReadFrequently` perf warning only), the LMSR trade ticket
+  renders with all 4 seats populated at 25.0 each, bankroll `1,000 cr`.
+- **Buy, live, driven end to end**: selected a seat, entered a 150-chip
+  budget, the client's own preview quote read *"Buy 5 sh of Aggressive
+  Expander for 150 cr (avg 30.0). Price moves to 35.5."* — clicked "Buy
+  shares" and the **actual** post-trade state matched that preview exactly:
+  bankroll `1,000 → 850` (debited exactly 150), `market.q` became
+  `[5,0,0,0]`, and live prices became `[35.47, 21.51, 21.51, 21.51]`
+  (LMSR redistribution across the other 3 seats) — the bought seat's price
+  moved to within rounding of the quoted 35.5.
+
+### What was NOT reached — genuinely out of session budget, not worked around
+
+- **Sell, hold-to-settlement, bankroll reconciliation, the synthetic crowd,
+  and reload-survival were not driven live.** The session ran out of budget
+  immediately after the verified buy above.
+- **A real, separate gap found but not fixed**: `BettingPremiereMarketController`
+  applies every poll response (an *anonymous* `GET /market`, where
+  `positions` is always `null` per PariServer's contract) over the
+  overlay's `market` property unconditionally. A `POST /market-orders`
+  response *does* carry the acting participant's real positions, so
+  "Your positions" briefly would be populated right after a trade — but the
+  very next poll (every 2.5s) overwrites it back to `null`, so the positions
+  panel and unrealised-P&L display cannot durably show anything. Confirmed
+  live: after the successful buy above, "Your positions" still read "No open
+  positions." Smallest fix: `BettingPremiereMarketController.applyMarket`
+  should merge — keep the last known non-null `positions` for a seat when a
+  fresh anonymous poll reports `null`, replacing it only when a POST
+  response (or a future authenticated poll, if one lands) actually carries
+  real position data. Not attempted this session — needs the same care given
+  to the sequence-freshness fix above and there was no budget left to do it
+  safely.
+- PariServer flagged mid-session that a new `readLiveProjection`-backed
+  content route is coming for the betting page specifically (to bound how
+  far ahead of `authoritativeElapsedMs` a client can trade) — not built yet
+  as of this session's end; the betting page still consumes the same chunk-
+  release route `/premiere/<id>` uses. Follow up with PariServer once that
+  lands.
+- Registering more than ~2 premieres against the same
+  `PROXYWAR_REPLAY_PREMIERE_STATE_ROOT` in quick succession without a full
+  reset (§9) sometimes leaves a freshly-admitted premiere unregistered after
+  restart (`operatorCode=premiere_not_registered`) even though its
+  `<id>.admission.json` is present in `catalog-v1/entries/`. Worked around
+  by re-admitting with a fresh id and confirming via `curl` before opening
+  a browser; root cause not investigated (budget), but it reproduced
+  consistently enough in this session to be worth flagging rather than
+  assuming it was a one-off.

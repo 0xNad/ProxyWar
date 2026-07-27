@@ -40,7 +40,6 @@ export class PremiereBettingOverlay extends LitElement {
   @property({ type: String, attribute: "market-load-error" })
   marketLoadError: string | null = null;
   @property({ attribute: false }) onTrade?: (
-    checkpointId: string,
     seatId: string,
     side: TradeSide,
     amount: number,
@@ -70,18 +69,16 @@ export class PremiereBettingOverlay extends LitElement {
     return unresolved[0] ?? this.model.checkpoints[0] ?? null;
   }
 
-  /** Every seat any checkpoint has ever offered — the market's fixed outcome set. */
+  /**
+   * Every seat in the match — sourced from the policy roster, not
+   * `checkpoints[].options` (that list stays empty until a checkpoint's
+   * prediction window opens; continuous LMSR trading isn't gated to one).
+   */
   private allSeats(): readonly MarketSeatOption[] {
-    const byId = new Map<string, MarketSeatOption>();
-    for (const view of this.model.checkpoints) {
-      for (const option of view.options) {
-        byId.set(option.seatId, {
-          seatId: option.seatId,
-          displayName: option.displayName,
-        });
-      }
-    }
-    return [...byId.values()];
+    return this.model.policies.map((policy) => ({
+      seatId: policy.seatId,
+      displayName: policy.displayName,
+    }));
   }
 
   private renderHeader() {
@@ -174,10 +171,7 @@ export class PremiereBettingOverlay extends LitElement {
           ?loading=${this.market === null && this.marketLoadError === null}
           load-error=${this.marketLoadError ?? nothing}
           .onTrade=${(seatId: string, side: TradeSide, amount: number, limitPrice: number) =>
-            view === null
-              ? Promise.resolve()
-              : (this.onTrade?.(view.id, seatId, side, amount, limitPrice) ??
-                Promise.resolve())}
+            this.onTrade?.(seatId, side, amount, limitPrice) ?? Promise.resolve()}
         ></premiere-trade-ticket>
         <premiere-positions-panel
           .seats=${seats}
@@ -226,11 +220,8 @@ export class PremiereBettingOverlay extends LitElement {
 
   private seatLabel(seatId: string | null): string {
     if (seatId === null) return "";
-    for (const view of this.model.checkpoints) {
-      const match = view.options.find((option) => option.seatId === seatId);
-      if (match !== undefined) return match.displayName;
-    }
-    return seatId;
+    const policy = this.model.policies.find((p) => p.seatId === seatId);
+    return policy?.displayName ?? seatId;
   }
 
   render() {

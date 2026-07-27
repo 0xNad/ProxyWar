@@ -22,6 +22,7 @@ export function marketStateFromService(
     prices,
     status: wire.status,
     winnerSeatId: wire.winnerSeatId,
+    liveVisibleSequence: wire.liveVisibleSequence,
     positions:
       wire.positions?.map((position) => ({
         seatId: position.seatId,

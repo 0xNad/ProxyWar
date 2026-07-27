@@ -67,6 +67,12 @@ export interface MarketState {
   readonly prices: Readonly<Record<string, number>>;
   readonly status: "open" | "settled";
   readonly winnerSeatId: string | null;
+  /**
+   * Anti-replay freshness bound — echo the latest value back on the NEXT
+   * trade request (`ReplayPremiereTradeRequest.sequence`); never cache a
+   * stale one across multiple orders.
+   */
+  readonly liveVisibleSequence: number;
   /** This participant's own open positions, one entry per seat held. */
   readonly positions: readonly MarketPosition[] | null;
 }

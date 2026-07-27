@@ -3,6 +3,7 @@ export function isAiLeagueReplayRoute(
 ): boolean {
   return (
     isReplayPremiereRoute(pathname) ||
+    isBettingPremiereRoute(pathname) ||
     pathname.startsWith("/ai-league-replay/") ||
     pathname.startsWith("/proxywar-replay/") ||
     // Legacy path — previously published replay links must keep working.
@@ -20,6 +21,21 @@ export function isReplayPremiereRoute(
   pathname = window.location.pathname,
 ): boolean {
   return /^\/premiere\/prem_[a-z0-9]{16,32}$/.test(pathname);
+}
+
+/**
+ * The dedicated betting page (`/bet/<id>`) mounts the same
+ * `ReplayPremiereRuntimeController` progressive-replay transport as
+ * `/premiere/<id>` (see `BettingPremierePage.ts`) — it must be classified
+ * identically for every consumer of `isAiLeagueReplayRoute`, including the
+ * landing page's ambient `PublicLobbySocket` (`LobbySocket.ts`), which
+ * otherwise opens a `/w1/lobbies` websocket on every route regardless of
+ * whether the route actually needs the ordinary multiplayer lobby list.
+ */
+export function isBettingPremiereRoute(
+  pathname = window.location.pathname,
+): boolean {
+  return /^\/bet\/prem_[a-z0-9]{16,32}$/.test(pathname);
 }
 
 export function isCoworldReplayRoute(

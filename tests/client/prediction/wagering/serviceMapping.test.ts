@@ -9,13 +9,13 @@ function serviceMarket(
   overrides: Partial<ReplayPremiereServiceMarketState> = {},
 ): ReplayPremiereServiceMarketState {
   return {
-    premiereId: "prem_abcdefghijklmnop",
     outcomeSeatIds: ["seat-a", "seat-b"],
     q: [10, -10],
     b: 100,
     prices: [55, 45],
     status: "open",
     winnerSeatId: null,
+    liveVisibleSequence: 0,
     positions: null,
     ...overrides,
   };
