@@ -1,0 +1,58 @@
+# CLAUDE.local.md — Proxy War working model & autonomy (local only)
+
+Gitignored. Holds operating guidance and internal specifics that must NOT go in the public, tracked `CLAUDE.md`. Imported by `CLAUDE.md` via `@CLAUDE.local.md`.
+
+Historical note: this project migrated from a multi-thread Codex workflow to
+Claude Code on 2026-06-04. On 2026-07-13 the operator returned project Control
+leadership to Codex. `.codex/` and `AGENTS.md` are now the active local operating
+layer; `.claude/` remains compatibility/reference material. This does not
+change the product runtime decision to use Claude CLI as the in-house Commander
+where configured.
+
+SUPERSEDING OPERATING RULE: if Claude Code is opened again, it acts only as a
+bounded implementation specialist under the Codex Control model unless the
+operator explicitly changes project leadership. On any conflict, follow the
+newer `AGENTS.md` and project-state decisions; the remaining Claude-era workflow
+text below is archival and must not reprioritize the project.
+
+## Source of truth
+
+`docs/project-state/` is durable decision truth (gitignored / local-only — internal strategy is intentionally kept out of the public repo). On any non-trivial task, read first in this order: `context-for-new-codex-threads.md` → `working-agreements.md` → `roadmap-and-priorities.md` → `known-problems.md` → `decision-log.md` → `private-beta-readiness.md` → newest dated docs. Other docs are secondary unless confirmed there. `/catch-up` does this and prints a Control status block.
+
+**Auto-loaded each session (so context isn't re-derived):** the three operational docs below are @-imported here, so the current priorities, blockers, and open questions are always in context. Deliberately NOT auto-imported: the ever-growing `decision-log.md` (would bloat context — read on demand) and the 238-line historical `context-for-new-codex-threads.md` (run `/catch-up` for the full set + a status block). Paths resolve relative to repo root.
+
+@docs/project-state/roadmap-and-priorities.md
+@docs/project-state/known-problems.md
+@docs/project-state/open-questions.md
+
+## Threads → subagents
+
+The 11 specialist "threads" live in `.claude/agents/` (also gitignored): control, beta-ops, external-agent-onboarding, qa-reliability, frontend-ux, replay-spectator, agent-strategy, docs-public-copy, stakeholder-comms, release-github, coworld-integration. Each is a thin pointer to its full charter in `docs/project-state/new-thread-starter-prompts.md` and its row in `thread-split-plan.md`. **Control** is home base and reconciles the others. Dispatch a subagent for focused work; specialists must not create duplicate architecture or change product direction without updating the decision log.
+
+## Slash commands
+
+`.claude/commands/`: `/catch-up` (Control status block), `/readiness` (local beta readiness), `/coworld-status` (Coworld POC state, read-only).
+
+## Autonomy — superseded by Codex Control rules (2026-07-13)
+
+For current autonomy and outward-action gates, follow `AGENTS.md`. This legacy
+section is retained only for Claude compatibility.
+
+Gated outward actions (only when explicitly asked):
+- push to `main` / force-push
+- `npm publish`
+- Coworld hosted `upload` / `submit` / `publish` (any hosted Coworld mutation)
+- deleting evidence/artifact bulk (`artifacts/`, ~37 GB — much of it is evidence)
+- sending stakeholder/tester messages
+
+The `upstream` git remote push is intentionally disabled — never re-enable it.
+
+## Repo facts that matter
+
+- `docs/project-state/`, `.claude/`, and `CLAUDE.local.md` are all gitignored — they stay local and never reach the public `0xNad/ProxyWar` repo.
+- Public `CLAUDE.md` must stay free of internal strategy, local absolute paths, and stakeholder specifics.
+- `gh` and a package manager (brew) are NOT installed; use plain `git` over the configured `github.com-proxywar` SSH alias for repo work.
+
+## Coworld workspace
+
+The Coworld POC lives outside this repo at `/Users/claude/Documents/Proxy War Coworld Integration Local` (file access granted via `.claude/settings.json` `additionalDirectories`). Its strict hosted-proof gate is intentionally red; never run a hosted Coworld mutation without explicit approval. The send-ready Softmax follow-up lives in `docs/project-state/2026-06-03-softmax-call-follow-up.md`; the verified handoff packet is `artifacts/softmax-handoff/latest.md` in that workspace.

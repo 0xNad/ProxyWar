@@ -96,8 +96,25 @@ esac
 
 echo
 if [ "$fails" -eq 0 ]; then
-  echo "All automated checks passed. Remaining: click Sign in on $ORIGIN/bet"
-  echo "and confirm the header shows your GitHub handle."
+  cat <<'DONE'
+All automated checks passed — everything reachable without a browser is good.
+
+What is NOT yet proven, and cannot be from here: the flow has only ever run
+against a local stub of github.com. First contact with the real provider can
+still surface redirect_uri strictness, form-encoded token responses, or errors
+returned as 200-with-an-error-field.
+
+That needs one human authorization, because no automated agent can (or should)
+type your GitHub credentials:
+
+  1. Open the betting page and click "Sign in".
+  2. Complete the GitHub login and click Authorize.
+  3. Confirm the header then shows your GitHub handle.
+
+If you would rather someone else verify the callback, linking and merge
+behaviour, leave that authenticated browser session open and attachable and
+they can pick it up from step 3.
+DONE
 else
   echo "$fails check(s) failed — see above."
 fi
