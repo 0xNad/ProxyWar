@@ -140,12 +140,7 @@ export function createPlatformGithubAuthRouter(
           options.security.clearLinkIntentCookieHeader(),
           options.security.mintCookieForAccount(result.canonicalAccountId),
         ]);
-        res.redirect(
-          302,
-          result.claimReplaced
-            ? `${returnPath}?github=linked&claim=replaced`
-            : `${returnPath}?github=linked`,
-        );
+        res.redirect(302, `${returnPath}?github=linked`);
       } catch (error) {
         failClosed("platform_github_auth_callback_failed", error);
       }

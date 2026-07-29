@@ -46,8 +46,6 @@ export interface PlatformGithubLinkResult {
   readonly login: string;
   readonly avatarUrl: string | null;
   readonly merged: boolean;
-  /** True iff `merged` AND both sides carried a DIFFERENT self-asserted policy claim, so the source account's claim was discarded in favor of the canonical target's. Always false when `merged` is false. */
-  readonly claimReplaced: boolean;
 }
 
 const storedLinkSchema = z.object({
@@ -180,7 +178,6 @@ export class PlatformGithubIdentityLinkStore {
           login: record.login,
           avatarUrl: record.avatarUrl,
           merged: false,
-          claimReplaced: false,
         };
       }
       const refreshed: StoredLink = {
@@ -196,15 +193,14 @@ export class PlatformGithubIdentityLinkStore {
           login: refreshed.login,
           avatarUrl: refreshed.avatarUrl,
           merged: false,
-          claimReplaced: false,
         };
       }
       const canonicalAccountId = existing.accountId;
       await this.accounts.mergeAccount(selfCanonical, canonicalAccountId);
-      const { sourceClaimReplaced } = await this.claims.mergeClaim(
-        selfCanonical,
-        canonicalAccountId,
-      );
+      // Union, not "canonical side wins" — see
+      // `PlatformPolicyClaimStore.mergeClaims`'s doc for why a claim SET
+      // has no conflict left to resolve; nothing here is ever discarded.
+      await this.claims.mergeClaims(selfCanonical, canonicalAccountId);
       for (const [aliasedId, target] of Object.entries(file.aliases)) {
         if (target === selfCanonical) file.aliases[aliasedId] = canonicalAccountId;
       }
@@ -215,7 +211,6 @@ export class PlatformGithubIdentityLinkStore {
         login: refreshed.login,
         avatarUrl: refreshed.avatarUrl,
         merged: true,
-        claimReplaced: sourceClaimReplaced,
       };
     });
   }

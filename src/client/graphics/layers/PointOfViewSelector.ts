@@ -5,10 +5,10 @@ import { GameView, PlayerView } from "../../../core/game/GameView";
 import { aiLeagueSpectatorDisplayName } from "../../AiLeagueReplayMode";
 import { fetchLeagueData } from "../../prediction/wagering/leagueData";
 import {
-  findPlayerForClaimedLineage,
+  findPlayerForClaimedLineages,
   PointOfViewChangeEvent,
   readManualPovSelection,
-  resolveClaimedLineageSlug,
+  resolveClaimedLineageSlugs,
   writeManualPovSelection,
 } from "../PointOfView";
 import { GoToPlayerEvent } from "../TransformHandler";
@@ -40,7 +40,7 @@ const WHOLE_BOARD_VALUE = "";
  * spectator-safe bounds (see `TransformHandler.onGoToPlayer`).
  *
  * The default is a preference, never a fact: a claimed agent is
- * self-asserted (see `PointOfView.ts`'s `resolveClaimedLineageSlug` doc)
+ * self-asserted (see `PointOfView.ts`'s `resolveClaimedLineageSlugs` doc)
  * and is labelled as such here, never as "your agent" or "owner". It is
  * also never sent anywhere — this component only reads the claim, it
  * never writes a manual pick back to any server, so no other viewer can
@@ -116,17 +116,17 @@ export class PointOfViewSelector extends LitElement implements Layer {
       return;
     }
 
-    const lineageSlug = await resolveClaimedLineageSlug();
+    const lineageSlugs = await resolveClaimedLineageSlugs();
     // A manual pick made while the claim fetch was in flight must win —
     // never clobber a viewer's own click with a slower-arriving default.
     if (readManualPovSelection() !== undefined) return;
     const claimedPlayer =
-      lineageSlug === null || this.game === null
+      lineageSlugs.length === 0 || this.game === null
         ? null
-        : findPlayerForClaimedLineage(
+        : findPlayerForClaimedLineages(
             this.game,
             (await fetchLeagueData())?.standings ?? [],
-            lineageSlug,
+            lineageSlugs,
           );
     this.applyPov(claimedPlayer, claimedPlayer !== null ? "claim" : "neutral", {
       persist: false,

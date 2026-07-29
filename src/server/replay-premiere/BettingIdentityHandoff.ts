@@ -18,14 +18,15 @@
  *   `retireForIdentityLinkIfSafe`/`releaseIdentityLinkRetirement` guard on
  *   `ReplayPremiereInteractions` (unrelated to what triggers the merge).
  *   The redemption response also carries the account's private, self-
- *   asserted lineage claim (or `null`), cached alongside `platformAccountId`
- *   / `displayName` — see `BettingPlatformAccountLinkStore`. This is
- *   betting's OWN local copy for a same-origin authenticated read
- *   (`GET /api/premieres/account`'s `identity.claim`); it goes stale the
- *   moment the user changes their claim on the platform and is refreshed
- *   only by running this handoff again (the next sign-in), never treated
- *   as a live platform query. A guest who never links stays claim-free
- *   with zero extra requests — no failed fetch, no console noise.
+ *   asserted lineage claim SET (possibly empty), cached alongside
+ *   `platformAccountId` / `displayName` — see
+ *   `BettingPlatformAccountLinkStore`. This is betting's OWN local copy
+ *   for a same-origin authenticated read (`GET /api/premieres/account`'s
+ *   `identity.claims`); it goes stale the moment the user changes a
+ *   claim on the platform and is refreshed only by running this handoff
+ *   again (the next sign-in), never treated as a live platform query. A
+ *   guest who never links stays claim-free with zero extra requests —
+ *   no failed fetch, no console noise.
  *
  * Also mounts `/api/identity/status` (betting's side of the origin-
  * agnostic identity-status contract `GithubSignIn.ts` relies on — see
@@ -176,7 +177,7 @@ export function createBettingIdentityHandoffRouter(
           result = await options.linkStore.linkOrMerge(guest.participantId, {
             platformAccountId: redemption.accountId,
             displayName: redemption.displayName,
-            claim: redemption.claim,
+            claims: redemption.claims,
           });
         } catch (error) {
           failClosed("betting_handoff_link_failed", error);

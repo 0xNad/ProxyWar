@@ -1,9 +1,12 @@
 /**
- * Durable store for a self-asserted "this league model lineage is mine"
- * claim, one per canonical platform `accountId`. Platform-owned per the
- * contract: "Claims cover all of a user's models and policies, not one
- * `playerName`. A person owns a lineage — `daveey-proxywar:v24` and
- * everything before it."
+ * Durable store for a self-asserted "these league model lineages are
+ * mine" claim SET, one per canonical platform `accountId`. Platform-owned
+ * per the contract: "Claims cover all of a user's models and policies,
+ * not one `playerName`. A person owns a lineage — `daveey-proxywar:v24`
+ * and everything before it." — and, per the operator directly, "accounts
+ * are for all model": a person can own MORE THAN ONE lineage (plus,
+ * potentially, unrelated policies), so an account claims a SET, not a
+ * single slot. Claiming a second lineage never discards the first.
  *
  * A league `policyLabel` is `<lineageSlug>:v<N>` (e.g.
  * `"daveey-proxywar:v24"` — see `artifacts/ai-league-runs/league/data.json`'s
@@ -15,6 +18,12 @@
  * `policyLabel` they picked from standings) is kept alongside purely for
  * display — "you claimed `daveey-proxywar:v24`" reads better than the
  * bare slug — and is never itself compared against anything.
+ *
+ * Each account's claims are keyed by `lineageSlug`: `addClaim` on a
+ * lineage already in the set updates that ONE entry in place (refreshing
+ * `label`, preserving `claimedAt` — same "re-pick keeps provenance"
+ * reasoning the old single-claim store had), never appends a duplicate.
+ * `removeClaim` takes one lineage back out without touching any other.
  *
  * NOT an identity link like `PlatformGithubIdentityLinkStore` — there is
  * no cryptographic or platform-verified proof that an account actually
@@ -53,18 +62,21 @@ const storedClaimSchema = z.object({
 });
 type StoredClaim = z.infer<typeof storedClaimSchema>;
 
-const claimStoreFileSchema = z.object({
-  schemaVersion: z.literal(SCHEMA_VERSION),
-  claims: z.record(z.string().regex(ACCOUNT_ID_PATTERN), storedClaimSchema),
-});
-type ClaimStoreFile = z.infer<typeof claimStoreFileSchema>;
+/** One account's claim SET, keyed by `lineageSlug` — see this module's doc. */
+const storedClaimSetSchema = z.record(z.string().min(1), storedClaimSchema);
+type StoredClaimSet = z.infer<typeof storedClaimSetSchema>;
 
-export interface PlatformPolicyClaimMergeResult {
-  readonly claim: PlatformPolicyClaimView | null;
-  readonly sourceClaimReplaced: boolean;
+/** On-disk file shape. Not a zod schema: the top-level shape is checked manually in `loadDetailed` (see its doc for why — a per-account legacy/current fallback needs finer control than one flat `.safeParse` gives). */
+interface ClaimStoreFile {
+  schemaVersion: typeof SCHEMA_VERSION;
+  claims: Record<string, StoredClaimSet>;
 }
 
-/** Same sanitization discipline as `ReplayPremiereLeagueClaimStore`'s: collapse whitespace, drop invisible control/format characters, trim, cap length in code points. `null` means "clear it". */
+export interface PlatformPolicyClaimMergeResult {
+  readonly claims: readonly PlatformPolicyClaimView[];
+}
+
+/** Same sanitization discipline as `ReplayPremiereLeagueClaimStore`'s: collapse whitespace, drop invisible control/format characters, trim, cap length in code points. `null` means "blank — not a valid label to add". */
 function sanitizeLabel(raw: string): string | null {
   const stripped = raw
     .replace(/\s+/g, " ")
@@ -82,6 +94,17 @@ export function deriveLineageSlug(label: string): string {
   return label.replace(VERSION_SUFFIX, "");
 }
 
+/** Deterministic, stable order for a claim SET: earliest `claimedAt` first (the longest-standing claim leads), tie-broken by `lineageSlug`. Callers that need "the viewer's primary lineage" (e.g. the replay PoV default) can rely on index 0 of this order without re-sorting themselves. */
+function sortClaims(claims: Iterable<StoredClaim>): PlatformPolicyClaimView[] {
+  return [...claims]
+    .sort((a, b) =>
+      a.claimedAt === b.claimedAt
+        ? a.lineageSlug.localeCompare(b.lineageSlug)
+        : a.claimedAt.localeCompare(b.claimedAt),
+    )
+    .map((claim) => ({ ...claim }));
+}
+
 export class PlatformPolicyClaimStore {
   private readonly filePath: string;
   private writeQueue: Promise<void> = Promise.resolve();
@@ -92,47 +115,108 @@ export class PlatformPolicyClaimStore {
 
   static async open(root: string): Promise<PlatformPolicyClaimStore> {
     await fs.mkdir(root, { recursive: true, mode: 0o700 });
-    return new PlatformPolicyClaimStore(root);
+    const instance = new PlatformPolicyClaimStore(root);
+    // Forward-migrate a legacy on-disk file (one bare `StoredClaim` per
+    // account, from before an account could claim more than one lineage)
+    // once, deterministically, before the instance is ever handed to a
+    // request handler — same convention as
+    // `ReplayPremierePointsLedger.open()`'s `settledPremiereIds` ->
+    // `premiereResults` migration. A no-op for an already-current file,
+    // and for a freshly-created empty one.
+    const { file, migrated } = await instance.loadDetailed();
+    if (migrated) await instance.save(file);
+    return instance;
   }
 
-  async getClaim(accountId: string): Promise<PlatformPolicyClaimView | null> {
+  /** All of `accountId`'s claimed lineages, oldest-claimed first (see `sortClaims`). Empty, never `null`, for an account with nothing claimed. */
+  async getClaims(accountId: string): Promise<readonly PlatformPolicyClaimView[]> {
     if (!ACCOUNT_ID_PATTERN.test(accountId)) {
       throw new Error(`invalid_account_id: ${accountId}`);
     }
     const file = await this.load();
-    const stored = file.claims[accountId];
-    return stored === undefined ? null : { ...stored };
+    const set = file.claims[accountId];
+    return set === undefined ? [] : sortClaims(Object.values(set));
   }
 
-  /** Sets (or, given a blank/whitespace-only label, clears) the claim. `claimedAt` is preserved across an edit that changes which lineage is claimed — see `ReplayPremiereLeagueClaimStore.setClaim`'s identical reasoning. */
-  async setClaim(
+  /**
+   * Adds (or, for a lineage slug already in the set, updates) one claim.
+   * `claimedAt` is preserved across an update that changes the exact
+   * `label` for an already-claimed lineage — see
+   * `ReplayPremiereLeagueClaimStore.setClaim`'s identical reasoning — but
+   * a NEW lineage slug always gets a fresh `claimedAt`, since it's a
+   * genuinely new claim, not an edit of an existing one.
+   *
+   * Throws `invalid_claim_label` for a blank/whitespace-only label:
+   * unlike the old single-claim `setClaim`, blank no longer means "clear
+   * everything" — that's `removeClaim`'s job now, one lineage at a time.
+   */
+  async addClaim(
     accountId: string,
     rawLabel: string,
-  ): Promise<PlatformPolicyClaimView | null> {
+  ): Promise<readonly PlatformPolicyClaimView[]> {
     if (!ACCOUNT_ID_PATTERN.test(accountId)) {
       throw new Error(`invalid_account_id: ${accountId}`);
     }
     const label = sanitizeLabel(rawLabel);
+    if (label === null) {
+      throw new Error("invalid_claim_label");
+    }
     return this.mutate((file) => {
-      if (label === null) {
-        delete file.claims[accountId];
-        return null;
-      }
+      const lineageSlug = deriveLineageSlug(label);
+      const existingSet = file.claims[accountId] ?? {};
+      const existingClaim = existingSet[lineageSlug];
       const nowIso = new Date().toISOString();
-      const existing = file.claims[accountId];
       const claim: StoredClaim = {
-        lineageSlug: deriveLineageSlug(label),
+        lineageSlug,
         label,
-        claimedAt: existing?.claimedAt ?? nowIso,
+        claimedAt: existingClaim?.claimedAt ?? nowIso,
         updatedAt: nowIso,
       };
-      file.claims[accountId] = claim;
-      return { ...claim };
+      file.claims[accountId] = { ...existingSet, [lineageSlug]: claim };
+      return sortClaims(Object.values(file.claims[accountId]));
     });
   }
 
-  /** Folds `fromAccountId`'s claim into `intoAccountId`'s on a GitHub link — same "canonical side wins on conflict, deterministic and explainable" reconciliation as `ReplayPremiereLeagueClaimStore.mergeClaim`; see its doc for why summing (like points) would be wrong here. */
-  async mergeClaim(
+  /** Removes one lineage from `accountId`'s claim set, if present — a no-op (never an error) if it isn't. Returns the resulting set. */
+  async removeClaim(
+    accountId: string,
+    lineageSlug: string,
+  ): Promise<readonly PlatformPolicyClaimView[]> {
+    if (!ACCOUNT_ID_PATTERN.test(accountId)) {
+      throw new Error(`invalid_account_id: ${accountId}`);
+    }
+    return this.mutate((file) => {
+      const existingSet = file.claims[accountId];
+      if (existingSet === undefined || !(lineageSlug in existingSet)) {
+        return sortClaims(Object.values(existingSet ?? {}));
+      }
+      const { [lineageSlug]: _removed, ...rest } = existingSet;
+      if (Object.keys(rest).length === 0) {
+        delete file.claims[accountId];
+      } else {
+        file.claims[accountId] = rest;
+      }
+      return sortClaims(Object.values(rest));
+    });
+  }
+
+  /**
+   * Folds `fromAccountId`'s claim set into `intoAccountId`'s on a GitHub
+   * link, as a UNION — every lineage either side had claimed is present
+   * on `intoAccountId` afterward, and `fromAccountId` ends with none.
+   *
+   * This deliberately does NOT port the old single-claim store's
+   * "canonical side wins on conflict" rule: a claim SET has no conflict
+   * to resolve. The only genuine collision is the SAME lineage slug
+   * appearing on both sides (most likely one person who claimed it from
+   * two browsers before ever linking GitHub) — for that one entry, the
+   * merged record keeps the EARLIER `claimedAt` (the longest-standing
+   * record of the claim survives, exactly like a same-account re-pick
+   * already preserves `claimedAt`) and the fresher side's `label` /
+   * `updatedAt` (whichever pick is more recent). Every other lineage is a
+   * plain, lossless union — nothing is ever discarded or "replaced".
+   */
+  async mergeClaims(
     fromAccountId: string,
     intoAccountId: string,
   ): Promise<PlatformPolicyClaimMergeResult> {
@@ -143,27 +227,39 @@ export class PlatformPolicyClaimStore {
       throw new Error("invalid_account_id");
     }
     if (fromAccountId === intoAccountId) {
-      const claim = await this.getClaim(intoAccountId);
-      return { claim, sourceClaimReplaced: false };
+      return { claims: await this.getClaims(intoAccountId) };
     }
     return this.mutate((file) => {
       const source = file.claims[fromAccountId];
       delete file.claims[fromAccountId];
-      const target = file.claims[intoAccountId];
+      const target = file.claims[intoAccountId] ?? {};
       if (source === undefined) {
-        return {
-          claim: target === undefined ? null : { ...target },
-          sourceClaimReplaced: false,
+        return { claims: sortClaims(Object.values(target)) };
+      }
+      const unioned: StoredClaimSet = { ...target };
+      for (const [lineageSlug, sourceClaim] of Object.entries(source)) {
+        const targetClaim = target[lineageSlug];
+        if (targetClaim === undefined) {
+          unioned[lineageSlug] = sourceClaim;
+          continue;
+        }
+        const sourceIsFresher = sourceClaim.updatedAt > targetClaim.updatedAt;
+        unioned[lineageSlug] = {
+          lineageSlug,
+          label: sourceIsFresher ? sourceClaim.label : targetClaim.label,
+          claimedAt:
+            sourceClaim.claimedAt < targetClaim.claimedAt
+              ? sourceClaim.claimedAt
+              : targetClaim.claimedAt,
+          updatedAt: sourceIsFresher ? sourceClaim.updatedAt : targetClaim.updatedAt,
         };
       }
-      if (target === undefined) {
-        file.claims[intoAccountId] = { ...source };
-        return { claim: { ...source }, sourceClaimReplaced: false };
+      if (Object.keys(unioned).length > 0) {
+        file.claims[intoAccountId] = unioned;
+      } else {
+        delete file.claims[intoAccountId];
       }
-      if (target.lineageSlug === source.lineageSlug) {
-        return { claim: { ...target }, sourceClaimReplaced: false };
-      }
-      return { claim: { ...target }, sourceClaimReplaced: true };
+      return { claims: sortClaims(Object.values(unioned)) };
     });
   }
 
@@ -182,14 +278,30 @@ export class PlatformPolicyClaimStore {
   }
 
   private async load(): Promise<ClaimStoreFile> {
+    return (await this.loadDetailed()).file;
+  }
+
+  /**
+   * Parses the on-disk file, accepting either the current per-account
+   * shape (a claim SET, keyed by `lineageSlug`) or the legacy
+   * pre-2026-07-29 shape (one bare `StoredClaim`) per account — a mixed
+   * file, some accounts already current and some still legacy, is
+   * expected mid-rollout and handled transparently, same convention as
+   * `ReplayPremierePointsLedger.loadDetailed`. `migrated` is true iff at
+   * least one account needed the legacy conversion, so `open()` can
+   * decide whether to persist the migrated form back to disk.
+   *
+   * Unlike the points ledger, this store still REFUSES to silently
+   * reset to empty on anything it can't make sense of: an unparseable
+   * top-level shape, or a per-account entry that matches NEITHER the
+   * current nor the legacy shape, throws rather than dropping data —
+   * the original store's "never quietly overwrite live claims with an
+   * empty file" guarantee, preserved.
+   */
+  private async loadDetailed(): Promise<{ file: ClaimStoreFile; migrated: boolean }> {
+    let raw: unknown;
     try {
-      const raw = await fs.readFile(this.filePath, "utf8");
-      const parsed: unknown = JSON.parse(raw);
-      const result = claimStoreFileSchema.safeParse(parsed);
-      if (result.success) return result.data;
-      throw new Error(
-        `Platform policy claim store is unreadable at ${this.filePath} — refusing to start empty and overwrite it`,
-      );
+      raw = JSON.parse(await fs.readFile(this.filePath, "utf8"));
     } catch (error) {
       if (
         typeof error !== "object" ||
@@ -199,8 +311,38 @@ export class PlatformPolicyClaimStore {
       ) {
         throw error;
       }
+      return { file: { schemaVersion: SCHEMA_VERSION, claims: {} }, migrated: false };
     }
-    return { schemaVersion: SCHEMA_VERSION, claims: {} };
+    const unreadable = (): never => {
+      throw new Error(
+        `Platform policy claim store is unreadable at ${this.filePath} — refusing to start empty and overwrite it`,
+      );
+    };
+    if (typeof raw !== "object" || raw === null) unreadable();
+    const top = raw as Record<string, unknown>;
+    if (top.schemaVersion !== SCHEMA_VERSION) unreadable();
+    if (typeof top.claims !== "object" || top.claims === null) unreadable();
+
+    const claims: Record<string, StoredClaimSet> = {};
+    let migrated = false;
+    for (const [accountId, rawEntry] of Object.entries(
+      top.claims as Record<string, unknown>,
+    )) {
+      if (!ACCOUNT_ID_PATTERN.test(accountId)) unreadable();
+      const asSet = storedClaimSetSchema.safeParse(rawEntry);
+      if (asSet.success) {
+        claims[accountId] = asSet.data;
+        continue;
+      }
+      const asLegacySingle = storedClaimSchema.safeParse(rawEntry);
+      if (asLegacySingle.success) {
+        claims[accountId] = { [asLegacySingle.data.lineageSlug]: asLegacySingle.data };
+        migrated = true;
+        continue;
+      }
+      unreadable();
+    }
+    return { file: { schemaVersion: SCHEMA_VERSION, claims }, migrated };
   }
 
   private async save(file: ClaimStoreFile): Promise<void> {

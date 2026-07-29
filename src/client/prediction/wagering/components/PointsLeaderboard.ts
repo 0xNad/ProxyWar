@@ -2,7 +2,7 @@ import { html, LitElement, nothing } from "lit";
 import { customElement, property, state } from "lit/decorators.js";
 import { z } from "zod";
 import { formatSignedCredits } from "./pnlDisplay";
-import { playerProfileUrl } from "../../../platform/playerProfileLink";
+import { accountProfileUrl } from "../../../platform/playerProfileLink";
 
 /** Octicon "mark-github" path data — same mark used by `GithubSignIn.ts`. */
 const GITHUB_MARK_PATH =
@@ -241,7 +241,8 @@ export class PremierePointsLeaderboard extends LitElement {
     rank: number | null,
   ) {
     const isViewer = entry.participantId === this.viewer?.participantId;
-    const linked = entry.platformAccountId !== null;
+    const { platformAccountId } = entry;
+    const linked = platformAccountId !== null;
     return html`
       <tr
         class="border-b border-line/50 ${isViewer ? "bg-accent-soft" : ""}"
@@ -269,11 +270,13 @@ export class PremierePointsLeaderboard extends LitElement {
                   <path d=${GITHUB_MARK_PATH}></path>
                 </svg>`
               : nothing}
-            <a
-              href=${playerProfileUrl(labelFor(entry))}
-              class="truncate text-accent outline-none hover:text-accent-strong hover:underline focus-visible:ring-2 focus-visible:ring-accent ${linked ? "font-semibold" : ""}"
-              >${labelFor(entry)}</a
-            >
+            ${platformAccountId !== null
+              ? html`<a
+                  href=${accountProfileUrl(platformAccountId)}
+                  class="truncate text-accent outline-none hover:text-accent-strong hover:underline focus-visible:ring-2 focus-visible:ring-accent font-semibold"
+                  >${labelFor(entry)}</a
+                >`
+              : html`<span class="truncate">${labelFor(entry)}</span>`}
           </span>${isViewer ? " (you)" : ""}
         </td>
         <td

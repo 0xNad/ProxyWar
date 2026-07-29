@@ -81,6 +81,7 @@ import {
   parseBettingPremiereRoute,
 } from "./prediction/wagering/page/BettingPremierePage";
 import "./platform/PlayerProfilePage";
+import "./platform/TraderProfilePage";
 import "./prediction/wagering/page/AccountPage";
 import "./SinglePlayerModal";
 import { StoreModal } from "./Store";
@@ -724,6 +725,18 @@ class Client {
       );
       return;
     }
+    // The trader profile page is likewise standalone — same reasoning as
+    // the account-page branch above, but keyed by the platform's opaque
+    // accountId, never a display name (see `TraderProfilePage.ts`'s doc).
+    const traderProfileMatch = window.location.pathname.match(
+      /^\/trader\/([^/]+)$/,
+    );
+    if (traderProfileMatch !== null) {
+      await this.openTraderProfilePage(
+        decodeURIComponent(traderProfileMatch[1]),
+      );
+      return;
+    }
     // Wait for modal custom elements to be defined
     await Promise.all([
       customElements.whenDefined("join-lobby-modal"),
@@ -932,16 +945,28 @@ class Client {
   }
 
   /**
-   * Mounts the standalone `/player/:name` profile page — the shared
-   * destination both the league standings and the points leaderboard link
-   * to. Same reasoning as `openAccountPage` just above: no lobby/game/
-   * replay concept behind it, only a data page over
-   * `/api/players/:name`. The custom element is registered by the static
-   * `PlayerProfilePage` import above.
+   * Mounts the standalone `/player/:name` league profile page — the
+   * destination the public league standings link to. Same reasoning as
+   * `openAccountPage` just above: no lobby/game/replay concept behind
+   * it, only a data page over `/api/players/:name`. The custom element
+   * is registered by the static `PlayerProfilePage` import above.
    */
   private async openPlayerProfilePage(name: string): Promise<void> {
     const page = document.createElement("player-profile-page");
     page.setAttribute("name", name);
+    document.body.replaceChildren(page);
+  }
+
+  /**
+   * Mounts the standalone `/trader/:accountId` betting profile page —
+   * the destination the points leaderboard links a genuinely LINKED row
+   * to. Same reasoning as `openPlayerProfilePage` just above, keyed by
+   * account id instead of a league player name. The custom element is
+   * registered by the static `TraderProfilePage` import above.
+   */
+  private async openTraderProfilePage(accountId: string): Promise<void> {
+    const page = document.createElement("trader-profile-page");
+    page.setAttribute("account-id", accountId);
     document.body.replaceChildren(page);
   }
 

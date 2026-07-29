@@ -47,16 +47,17 @@ export interface PlatformHandoffIssueInput {
   readonly accountId: string;
   readonly displayName: string | null;
   /**
-   * The account's private, self-asserted lineage claim, or `null` — the
-   * SAME shape `GET /api/account` exposes to the platform's own client.
+   * The account's private, self-asserted lineage claim SET — the SAME
+   * shape `GET /api/account` exposes to the platform's own client.
    * Handed to the child so a same-origin default (e.g. replay
    * point-of-view) can work on origins that can never reach the
    * platform's own host-only cookie cross-origin. Still private and
    * self-asserted once it lands in the child: never surfaced on any
    * public route, profile, or leaderboard there either — see
-   * `BettingPlatformAccountLinkStore`'s doc.
+   * `BettingPlatformAccountLinkStore`'s doc. Empty, never omitted, for an
+   * account with nothing claimed.
    */
-  readonly claim: PlatformHandoffClaim | null;
+  readonly claims: readonly PlatformHandoffClaim[];
 }
 
 export interface PlatformHandoffIssued {
@@ -86,7 +87,7 @@ export type PlatformHandoffRedeemResult =
       readonly ok: true;
       readonly accountId: string;
       readonly displayName: string | null;
-      readonly claim: PlatformHandoffClaim | null;
+      readonly claims: readonly PlatformHandoffClaim[];
     }
   | { readonly ok: false; readonly reason: PlatformHandoffRedeemFailureReason };
 
@@ -158,7 +159,7 @@ export class PlatformHandoffStore {
       ok: true,
       accountId: record.accountId,
       displayName: record.displayName,
-      claim: record.claim,
+      claims: record.claims,
     };
   }
 

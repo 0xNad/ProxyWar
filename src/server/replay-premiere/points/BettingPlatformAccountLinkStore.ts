@@ -46,31 +46,45 @@ export interface BettingPlatformLinkStatus {
   /**
    * Cached from the platform at the last successful handoff — private,
    * self-asserted, and STALE by construction: it reflects whatever the
-   * claim was when the user last signed in, not a live platform read. See
-   * this store's class doc. `null` for an unlinked participant, or a
-   * linked one who has never claimed anything.
+   * claim SET was when the user last signed in, not a live platform
+   * read. See this store's class doc. Empty for an unlinked participant,
+   * or a linked one who has never claimed anything.
    */
-  readonly claim: BettingPlatformClaim | null;
+  readonly claims: readonly BettingPlatformClaim[];
 }
 
 export interface BettingPlatformLinkResult {
   readonly canonicalParticipantId: string;
   readonly displayName: string | null;
-  readonly claim: BettingPlatformClaim | null;
+  readonly claims: readonly BettingPlatformClaim[];
   readonly merged: boolean;
 }
 
-const storedLinkSchema = z.object({
+const bettingPlatformClaimSchema = z.object({ lineageSlug: z.string(), label: z.string() });
+
+/**
+ * Accepts either the current shape (`claims`, an array) or the
+ * pre-2026-07-29 shape (`claim`, one nullable object, or altogether
+ * missing on a link written before that field existed) — renamed and
+ * array-ified BEFORE the object schema below ever sees it, so an
+ * already-linked participant's cached claim (`null`, or one claim)
+ * migrates forward losslessly the next time this file is read. No
+ * forced write-back needed: this is a CACHE, refreshed on every sign-in
+ * anyway (unlike the platform's own durable `PlatformPolicyClaimStore`,
+ * which self-heals on `open()` because it's the only copy that matters).
+ */
+const storedLinkSchema = z.preprocess((raw) => {
+  if (typeof raw !== "object" || raw === null || "claims" in raw) return raw;
+  const { claim, ...rest } = raw as Record<string, unknown>;
+  return { ...rest, claims: claim === null || claim === undefined ? [] : [claim] };
+}, z.object({
   platformAccountId: z.string().regex(PLATFORM_ACCOUNT_ID_PATTERN),
   displayName: z.string().nullable(),
-  // `.default(null)`, not just `.nullable()`: a link file written before
-  // this field existed has no `claim` key at all — treat "missing" the
-  // same as "explicitly null" rather than refusing to parse.
-  claim: z.object({ lineageSlug: z.string(), label: z.string() }).nullable().default(null),
+  claims: z.array(bettingPlatformClaimSchema),
   participantId: z.string().regex(PARTICIPANT_ID_PATTERN),
   linkedAt: z.string(),
   updatedAt: z.string(),
-});
+}));
 type StoredLink = z.infer<typeof storedLinkSchema>;
 
 const linkStoreFileSchema = z.object({
@@ -141,13 +155,13 @@ export class BettingPlatformAccountLinkStore {
     const link =
       platformAccountId === undefined ? undefined : file.byPlatformAccountId[platformAccountId];
     if (link === undefined) {
-      return { linked: false, displayName: null, canonicalParticipantId, claim: null };
+      return { linked: false, displayName: null, canonicalParticipantId, claims: [] };
     }
     return {
       linked: true,
       displayName: link.displayName,
       canonicalParticipantId,
-      claim: link.claim,
+      claims: link.claims,
     };
   }
 
@@ -177,9 +191,32 @@ export class BettingPlatformAccountLinkStore {
   }
 
   /**
+   * Direct O(1) lookup by the platform's OWN opaque account id — the
+   * correct join key for a public per-account betting profile. Display
+   * name is NOT unique (`PlatformAccountStore.setDisplayName` never
+   * enforces it) and is self-asserted, so matching on it — as
+   * `/api/players/:name` used to — can silently surface one linked
+   * account's stats under a DIFFERENT linked account's chosen name, or
+   * under an unrelated league player's name. `platformAccountId` is
+   * opaque, stable, and minted once at account creation; it never
+   * collides and never needs a text match.
+   */
+  async getByPlatformAccountId(
+    platformAccountId: string,
+  ): Promise<{ participantId: string; displayName: string | null } | null> {
+    if (!PLATFORM_ACCOUNT_ID_PATTERN.test(platformAccountId)) return null;
+    const file = await this.load();
+    const link = file.byPlatformAccountId[platformAccountId];
+    return link === undefined
+      ? null
+      : { participantId: link.participantId, displayName: link.displayName };
+  }
+
+  /**
    * Links `participantId` to `platformAccountId` (or merges, if that
    * platform account already resolves to a DIFFERENT canonical
-   * `displayName`/`claim` on every call, including a no-op re-link, so a
+   * participant). Refreshes `displayName`/`claims` from the platform's
+   * `displayName`/`claims` on every call, including a no-op re-link, so a
    * rename or a re-picked claim on the platform is reflected on the very
    * next sign-in here — see this store's class doc on staleness.
    */
@@ -188,7 +225,7 @@ export class BettingPlatformAccountLinkStore {
     platform: {
       platformAccountId: string;
       displayName: string | null;
-      claim: BettingPlatformClaim | null;
+      claims: readonly BettingPlatformClaim[];
     },
   ): Promise<BettingPlatformLinkResult> {
     if (!PARTICIPANT_ID_PATTERN.test(participantId)) {
@@ -209,7 +246,7 @@ export class BettingPlatformAccountLinkStore {
         const record: StoredLink = {
           platformAccountId: platform.platformAccountId,
           displayName: platform.displayName,
-          claim: platform.claim,
+          claims: [...platform.claims],
           participantId: selfCanonical,
           linkedAt: nowIso,
           updatedAt: nowIso,
@@ -219,14 +256,14 @@ export class BettingPlatformAccountLinkStore {
         return {
           canonicalParticipantId: selfCanonical,
           displayName: record.displayName,
-          claim: record.claim,
+          claims: record.claims,
           merged: false,
         };
       }
       const refreshed: StoredLink = {
         ...existing,
         displayName: platform.displayName,
-        claim: platform.claim,
+        claims: [...platform.claims],
         updatedAt: nowIso,
       };
       file.byPlatformAccountId[platform.platformAccountId] = refreshed;
@@ -234,7 +271,7 @@ export class BettingPlatformAccountLinkStore {
         return {
           canonicalParticipantId: selfCanonical,
           displayName: refreshed.displayName,
-          claim: refreshed.claim,
+          claims: refreshed.claims,
           merged: false,
         };
       }
@@ -248,7 +285,7 @@ export class BettingPlatformAccountLinkStore {
       return {
         canonicalParticipantId,
         displayName: refreshed.displayName,
-        claim: refreshed.claim,
+        claims: refreshed.claims,
         merged: true,
       };
     });

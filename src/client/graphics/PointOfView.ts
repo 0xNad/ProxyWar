@@ -2,6 +2,7 @@ import { z } from "zod";
 import { GameEvent } from "../../core/EventBus";
 import { GameView, PlayerView } from "../../core/game/GameView";
 import { LeagueStandingRow } from "../prediction/wagering/leagueData";
+import { PLAYER_PROFILE_ORIGIN } from "../platform/playerProfileLink";
 
 /**
  * Broadcast whenever the replay/spectator "point of view" — the single
@@ -60,127 +61,151 @@ const PLATFORM_ACCOUNT_CLAIM_ENDPOINT = "/api/account";
 const BETTING_ACCOUNT_CLAIM_ENDPOINT = "/api/premieres/account";
 
 // Both origins' claim payloads carry the same shape at the point this
-// reads it — a person claims a whole model LINEAGE (e.g.
-// "daveey-proxywar"), not one exact version. `label` is the specific
-// policy build last associated with the claim (e.g.
-// "daveey-proxywar:v24") but is informational only here; matching
+// reads it — an account claims a SET of model LINEAGEs (e.g.
+// "daveey-proxywar"), not one exact version and not just one lineage
+// ("accounts are for all model" — see `PlatformPolicyClaimStore`'s doc).
+// `label` is the specific policy build last associated with each claim
+// (e.g. "daveey-proxywar:v24") but is informational only here; matching
 // against a running game uses `lineageSlug` (see
-// `findPlayerForClaimedLineage`).
-const claimSchema = z
-  .object({ lineageSlug: z.string(), label: z.string() })
-  .nullable();
+// `findPlayerForClaimedLineages`). Array order is already meaningful —
+// the server returns claims oldest-claimed-first (see
+// `PlatformPolicyClaimStore.getClaims`'s doc) — so picking a default
+// among several matches is just "first match in this order", never a
+// re-sort here.
+const claimSchema = z.object({ lineageSlug: z.string(), label: z.string() });
+const claimsSchema = z.array(claimSchema);
 
-// `/api/account` (platform origin) returns the claim at the top level.
-const platformClaimResponseSchema = z.object({ claim: claimSchema });
+// `/api/account` (platform origin) returns the claim set at the top level.
+const platformClaimResponseSchema = z.object({ claims: claimsSchema });
 
 // `/api/premieres/account` (betting origin) nests it under `identity` —
-// same last-handoff-snapshot claim, surfaced beside the rest of that
+// same last-handoff-snapshot claim set, surfaced beside the rest of that
 // route's authenticated identity read.
 const bettingClaimResponseSchema = z.object({
-  identity: z.object({ claim: claimSchema }),
+  identity: z.object({ claims: claimsSchema }),
 });
 
-async function fetchClaimLineageSlug(
+async function fetchClaimLineageSlugs(
   fetchImpl: typeof fetch,
   endpoint: string,
-  extractClaim: (body: unknown) => { lineageSlug: string } | null,
-): Promise<string | null> {
+  extractClaims: (body: unknown) => readonly { lineageSlug: string }[],
+): Promise<readonly string[]> {
   try {
     const response = await fetchImpl(endpoint, {
       credentials: "same-origin",
       headers: { Accept: "application/json" },
     });
-    if (!response.ok) return null;
+    if (!response.ok) return [];
     const body: unknown = await response.json();
-    return extractClaim(body)?.lineageSlug ?? null;
+    return extractClaims(body).map((claim) => claim.lineageSlug);
   } catch {
-    return null;
+    return [];
   }
 }
 
 /**
- * Resolves the signed-in viewer's private, self-asserted "this league
- * lineage is mine" claim, if any — the ONLY signal available for a
- * default PoV (GitHub proves a handle, never agent ownership). Both
- * account origins carry it behind a host-only cookie, so this dispatches
- * on which origin the replay is actually running on rather than probing:
+ * Resolves the signed-in viewer's private, self-asserted "these league
+ * lineages are mine" claim SET, if any — the ONLY signal available for a
+ * default PoV (GitHub proves a handle, never agent ownership). Dispatches
+ * on the CURRENT origin rather than a hostname prefix, comparing against
+ * the same configured platform origin every other cross-origin platform
+ * link uses (`PLAYER_PROFILE_ORIGIN`, from `PROXYWAR_PLATFORM_ORIGIN` —
+ * see `playerProfileLink.ts`'s doc): `app.proxywar.xyz` is a stand-in
+ * only until the operator drops the apex's Cloudflare redirect, at which
+ * point `proxywar.xyz` itself becomes the platform root and this must
+ * keep working WITHOUT a code change — a hostname-prefix check
+ * (`startsWith("app.")`) would silently stop matching the day that
+ * happens, with no error and nothing to notice. `platformOrigin` is an
+ * injected parameter (default `PLAYER_PROFILE_ORIGIN`), exactly like
+ * `fetchImpl`, so a test can exercise either origin without needing to
+ * fake `process.env` at module-load time.
  *
- * - `app.*` (platform): same-origin `GET /api/account`, claim at the
- *   top level.
- * - `bet.*` (betting): same-origin `GET /api/premieres/account`, claim
- *   under `identity.claim` — a snapshot copied at the last platform
+ * - The platform's own origin: same-origin `GET /api/account`, claims at
+ *   the top level.
+ * - `bet.*` (betting): same-origin `GET /api/premieres/account`, claims
+ *   under `identity.claims` — a snapshot copied at the last platform
  *   handoff, not a live read; it goes stale until the viewer signs in
  *   again, by design, and this deliberately doesn't add a refresh path
- *   or a cache of its own on top of it.
+ *   or a cache of its own on top of it. Hostname-based, not
+ *   origin-configured, because it reads a same-origin betting endpoint —
+ *   it does not care what the platform origin is called.
  * - Everything else, including `beta.*` (the league origin): no
  *   cross-origin handoff integration exists there yet, so a request is
- *   guaranteed to fail. Returns `null` WITHOUT attempting one — no
+ *   guaranteed to fail. Returns `[]` WITHOUT attempting one — no
  *   request, no console noise, for what is also the common case (most
  *   viewers have linked nothing).
  *
- * Resolves to `null` on the app./bet. branches too on any network/parse
- * failure — a missing claim is exactly the "no account or no claim" case
- * the picker already has a neutral default for, never an error surfaced
- * to the viewer.
+ * Resolves to `[]` on the platform/bet. branches too on any
+ * network/parse failure — no claims is exactly the "no account or no
+ * claim" case the picker already has a neutral default for, never an
+ * error surfaced to the viewer.
  *
  * Deliberately plain, injectable, stateless functions rather than a
  * class: a future verified owned-policy id can replace the self-asserted
  * claim here (or widen which origins can reach it) without any caller
  * changing.
  */
-export async function resolveClaimedLineageSlug(
+export async function resolveClaimedLineageSlugs(
   fetchImpl: typeof fetch = fetch,
-): Promise<string | null> {
-  const hostname = window.location.hostname;
-  if (hostname.startsWith("app.")) {
-    return fetchClaimLineageSlug(
+  platformOrigin: string = PLAYER_PROFILE_ORIGIN,
+): Promise<readonly string[]> {
+  if (window.location.origin === platformOrigin) {
+    return fetchClaimLineageSlugs(
       fetchImpl,
       PLATFORM_ACCOUNT_CLAIM_ENDPOINT,
-      (body) => platformClaimResponseSchema.safeParse(body).data?.claim ?? null,
+      (body) => platformClaimResponseSchema.safeParse(body).data?.claims ?? [],
     );
   }
-  if (hostname.startsWith("bet.")) {
-    return fetchClaimLineageSlug(
+  if (window.location.hostname.startsWith("bet.")) {
+    return fetchClaimLineageSlugs(
       fetchImpl,
       BETTING_ACCOUNT_CLAIM_ENDPOINT,
       (body) =>
-        bettingClaimResponseSchema.safeParse(body).data?.identity.claim ??
-        null,
+        bettingClaimResponseSchema.safeParse(body).data?.identity.claims ?? [],
     );
   }
-  return null;
+  return [];
 }
 
 /**
- * Joins a claimed lineage to a live participant in the CURRENT game, via
- * the public league mirror. A claim names a lineage (e.g.
- * "daveey-proxywar"), never one exact build, so this matches any
+ * Joins the viewer's OWNED lineages (already ordered — see
+ * `resolveClaimedLineageSlugs`'s doc on why array order is meaningful) to
+ * a live participant in the CURRENT game. A claim names a lineage (e.g.
+ * "daveey-proxywar"), never one exact build, so a lineage matches any
  * standings row whose policy label (rating, active-champion, or the
  * plain `policyLabel` alias) starts with `<lineageSlug>:v` — then joins
  * that row's `playerName` to a `PlayerView.displayName()` in `game`,
  * mirroring the `playerName === displayName` convention already used
  * elsewhere to correlate the league mirror with a running match (see
- * `resolveSeatStanding`). Returns `null` when the claimed lineage has no
- * standings row, or isn't a participant in this particular game — an
- * unmatched claim is not an error, just nothing to follow by default.
+ * `resolveSeatStanding`).
+ *
+ * Returns the player for the FIRST owned lineage (in order) that both
+ * has a standings row AND is actually playing in this game — exactly the
+ * deterministic default the PoV selector promises: one owned lineage in
+ * the match follows it outright; several present resolves to whichever
+ * was claimed first (the picker can always override); none present
+ * returns `null` — not an error, just nothing to follow by default.
  */
-export function findPlayerForClaimedLineage(
+export function findPlayerForClaimedLineages(
   game: GameView,
   standings: readonly LeagueStandingRow[],
-  lineageSlug: string,
+  lineageSlugs: readonly string[],
 ): PlayerView | null {
-  const prefix = `${lineageSlug}:v`;
-  const matchesLineage = (label: string | null): boolean =>
-    label !== null && label.startsWith(prefix);
-  const standing = standings.find(
-    (s) =>
-      matchesLineage(s.policyLabel) ||
-      matchesLineage(s.ratingPolicyLabel) ||
-      matchesLineage(s.activeChampionPolicyLabel),
-  );
-  if (standing === undefined) return null;
-  return (
-    game.playerViews().find((p) => p.displayName() === standing.playerName) ??
-    null
-  );
+  for (const lineageSlug of lineageSlugs) {
+    const prefix = `${lineageSlug}:v`;
+    const matchesLineage = (label: string | null): boolean =>
+      label !== null && label.startsWith(prefix);
+    const standing = standings.find(
+      (s) =>
+        matchesLineage(s.policyLabel) ||
+        matchesLineage(s.ratingPolicyLabel) ||
+        matchesLineage(s.activeChampionPolicyLabel),
+    );
+    if (standing === undefined) continue;
+    const player = game
+      .playerViews()
+      .find((p) => p.displayName() === standing.playerName);
+    if (player !== undefined) return player;
+  }
+  return null;
 }

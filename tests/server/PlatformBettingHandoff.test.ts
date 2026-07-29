@@ -87,11 +87,11 @@ describe("platform account authority <-> betting handoff (real servers)", () => 
     expect(response.status).toBe(200);
     const body = JSON.parse(response.body) as {
       identity: { accountId: string; displayName: null };
-      claim: null;
+      claims: unknown[];
     };
     expect(body.identity.accountId).toMatch(/^acct_[a-f0-9]{32}$/);
     expect(body.identity.displayName).toBeNull();
-    expect(body.claim).toBeNull();
+    expect(body.claims).toEqual([]);
   });
 
   test("GitHub auth routes are absent on the platform when no OAuth credentials are configured", async () => {
@@ -110,7 +110,7 @@ describe("platform account authority <-> betting handoff (real servers)", () => 
     expect(body.identity.displayName).toBeNull();
   });
 
-  test("the full handoff: betting -> platform -> back to betting, sets a display name AND a private lineage claim, both resolve on the betting side without betting ever writing them, and the claim never reaches a public route", async () => {
+  test("the full handoff: betting -> platform -> back to betting, sets a display name AND a private lineage claim SET (two lineages, both survive), both resolve on the betting side without betting ever writing them, and the claims never reach a public route", async () => {
     // 1. Establish a betting guest session.
     const bootstrapResponse = await rawRequest(betting!.origin, "GET", "/api/premieres/account");
     const bettingCookie = firstCookiePair(bootstrapResponse.headers, "proxywar_premiere_guest");
@@ -136,9 +136,9 @@ describe("platform account authority <-> betting handoff (real servers)", () => 
     );
     expect(nameResponse.status).toBe(200);
 
-    // 2b. Also set a private, self-asserted lineage claim on the platform
-    //     — proves the handoff's new claim-passthrough half of the
-    //     contract (see `PlatformHandoffStore.issueCode`'s `claim` field).
+    // 2b. Also set TWO private, self-asserted lineage claims on the
+    //     platform — proves the handoff's claim-passthrough carries the
+    //     whole SET, not just one ("accounts are for all model").
     const claimResponse = await rawRequest(
       platform!.origin,
       "POST",
@@ -152,6 +152,27 @@ describe("platform account authority <-> betting handoff (real servers)", () => 
       JSON.stringify({ label: "daveey-proxywar:v24" }),
     );
     expect(claimResponse.status).toBe(200);
+    const secondClaimResponse = await rawRequest(
+      platform!.origin,
+      "POST",
+      "/api/account/claim",
+      {
+        cookie: platformCookie!,
+        origin: platform!.origin,
+        "x-csrf-token": csrfToken,
+        "content-type": "application/json",
+      },
+      JSON.stringify({ label: "second-lineage:v3" }),
+    );
+    expect(secondClaimResponse.status).toBe(200);
+    const secondClaimBody = JSON.parse(secondClaimResponse.body) as {
+      claims: { lineageSlug: string }[];
+    };
+    // The first claim is still present — adding a second never discards it.
+    expect(secondClaimBody.claims.map((c) => c.lineageSlug).sort()).toEqual([
+      "daveey-proxywar",
+      "second-lineage",
+    ]);
 
     // 3. Click "sign in" on betting: GET the handoff start, following
     //    redirects by hand (a real browser would do this automatically,
@@ -207,20 +228,20 @@ describe("platform account authority <-> betting handoff (real servers)", () => 
       identity: {
         platformLinked: boolean;
         displayName: string | null;
-        claim: { lineageSlug: string; label: string } | null;
+        claims: { lineageSlug: string; label: string }[];
       };
     };
     expect(afterLinkBody.identity.platformLinked).toBe(true);
     expect(afterLinkBody.identity.displayName).toBe("Daveey the Great");
-    // The claim resolves same-origin on betting, sourced from the
+    // BOTH claims resolve same-origin on betting, sourced from the
     // handoff's cached copy — no cross-origin request, no platform call.
-    expect(afterLinkBody.identity.claim).toEqual({
-      lineageSlug: "daveey-proxywar",
-      label: "daveey-proxywar:v24",
-    });
+    expect(
+      afterLinkBody.identity.claims.map((c) => c.lineageSlug).sort(),
+    ).toEqual(["daveey-proxywar", "second-lineage"]);
 
-    // The claim is private: it must never leak into a PUBLIC route, even
-    // though the SAME server process now holds it in the link store.
+    // The claims are private: they must never leak into a PUBLIC route,
+    // even though the SAME server process now holds them in the link
+    // store.
     const leaderboard = await rawRequest(
       betting!.origin,
       "GET",
@@ -228,6 +249,7 @@ describe("platform account authority <-> betting handoff (real servers)", () => 
     );
     expect(leaderboard.body.toLowerCase()).not.toContain("lineageslug");
     expect(leaderboard.body.toLowerCase()).not.toContain("daveey-proxywar");
+    expect(leaderboard.body.toLowerCase()).not.toContain("second-lineage");
   });
 
   test("a handoff code cannot be redeemed twice: replaying the exact callback the second time fails, first identity link is untouched", async () => {

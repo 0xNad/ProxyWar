@@ -1,11 +1,14 @@
 /**
- * Proves, against the REAL running server (not a unit-level fake), that the
- * shared platform player-profile route (`GET /api/players/:name`) —
- * reached by clicking either leaderboard — never leaks a private
- * self-asserted league claim, and never surfaces a bettor's stats under a
- * league player's name unless the match is a genuinely LINKED platform
- * account (`platformAccountId !== null`), never a freely-editable display
- * name an anonymous guest could spoof.
+ * Proves, against the REAL running server (not a unit-level fake), that
+ * the league player-profile route (`GET /api/players/:name`) — reached
+ * by clicking the public league standings — never leaks a private
+ * self-asserted league claim, and never returns a betting section at
+ * all: betting stats now live only at their own account-id-keyed
+ * profile (`GET /api/accounts/:accountId/betting-profile`, platform
+ * only — see `PlatformBettingProfileProjection.test.ts`), never joined
+ * to a league player by a free-text display-name match (that used to be
+ * how this route worked, and it was unsound — see
+ * `BettingPlatformAccountLinkStore.getByPlatformAccountId`'s doc).
  *
  * Same spawn pattern as `ReplayPremiereAccountLeaderboardIsolation.test.ts`
  * (same entry point `bet.proxywar.xyz`/`app.proxywar.xyz` both run).
@@ -268,33 +271,28 @@ describe("player profile: never leaks a claim, never trusts an unverified name m
     expect(response.status).toBe(200);
     const parsed = JSON.parse(response.body) as {
       league: { standing: { rank: number } | null } | null;
-      betting: unknown;
+      betting?: unknown;
     };
     expect(parsed.league?.standing?.rank).toBe(3);
     // The spoofing guest traded and typed the exact league name as their
-    // display name, but is NOT platform-linked — must NOT surface a
-    // betting section here.
-    expect(parsed.betting).toBeNull();
+    // display name, but is NOT platform-linked, AND this route no longer
+    // ever returns betting data at all — must NOT surface a betting
+    // section here.
+    expect(parsed.betting).toBeUndefined();
+    expect(response.body).not.toContain('"betting"');
     // The private claim, and the guest who made it, never appear anywhere.
     expect(response.body).not.toContain(anonParticipantId);
     expect(response.body.toLowerCase()).not.toContain("claim");
   });
 
-  test("the linked trader's profile shows betting data under their real display name, with no league crossover and no claim", async () => {
+  test("/api/players/:name never returns a betting key at all, even for a name matching a genuinely linked trader — betting stats now live at their own account-id-keyed profile", async () => {
     const response = await rawRequest(
       origin,
       `/api/players/${encodeURIComponent(linkedTraderName)}`,
     );
-    expect(response.status).toBe(200);
-    const parsed = JSON.parse(response.body) as {
-      league: unknown;
-      betting: { lifetimePoints: number; premieresTraded: number } | null;
-    };
-    expect(parsed.betting?.lifetimePoints).toBe(500);
-    expect(parsed.betting?.premieresTraded).toBe(2);
-    // No league standing/episode is named "linked-trader" — league must be null.
-    expect(parsed.league).toBeNull();
-    // Never crosses into the league player's identity or the claim.
+    // No league standing/episode is named "linked-trader" — 404, no page.
+    expect(response.status).toBe(404);
+    expect(response.body).not.toContain('"betting"');
     expect(response.body).not.toContain(leaguePlayerName);
     expect(response.body).not.toContain(anonParticipantId);
     expect(response.body.toLowerCase()).not.toContain("claim");

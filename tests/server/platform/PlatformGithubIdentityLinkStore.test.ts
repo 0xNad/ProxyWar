@@ -41,7 +41,6 @@ describe("PlatformGithubIdentityLinkStore", () => {
       login: "octocat-alice",
       avatarUrl: null,
       merged: false,
-      claimReplaced: false,
     });
     const status = await links.getStatus(acctA);
     expect(status).toEqual({
@@ -54,7 +53,7 @@ describe("PlatformGithubIdentityLinkStore", () => {
 
   test("a second account linking the SAME GitHub id merges into the first's canonical account, folding displayName and claim", async () => {
     await accounts.setDisplayName(acctA, "FirstDisplayName");
-    await claims.setClaim(acctA, "first-lineage:v1");
+    await claims.addClaim(acctA, "first-lineage:v1");
     await links.linkOrMerge(acctA, {
       githubUserId: 555,
       login: "shared-handle",
@@ -93,7 +92,6 @@ describe("PlatformGithubIdentityLinkStore", () => {
       login: "renamed-login",
       avatarUrl: "https://example.test/new.png",
       merged: false,
-      claimReplaced: false,
     });
   });
 
@@ -108,17 +106,20 @@ describe("PlatformGithubIdentityLinkStore", () => {
     ).rejects.toThrow("github_identity_conflict");
   });
 
-  test("merge folds a conflicting claim, canonical wins, and reports the replacement", async () => {
-    await claims.setClaim(acctA, "canonical-lineage:v1");
+  test("merge unions both accounts' claim sets onto the canonical account — nothing is discarded", async () => {
+    await claims.addClaim(acctA, "canonical-lineage:v1");
     await links.linkOrMerge(acctA, { githubUserId: 7, login: "a", avatarUrl: null });
-    await claims.setClaim(acctB, "source-lineage:v1");
-    const result = await links.linkOrMerge(acctB, {
+    await claims.addClaim(acctB, "source-lineage:v1");
+    await links.linkOrMerge(acctB, {
       githubUserId: 7,
       login: "a",
       avatarUrl: null,
     });
-    expect(result.claimReplaced).toBe(true);
-    expect((await claims.getClaim(acctA))?.lineageSlug).toBe("canonical-lineage");
+    const canonicalSlugs = (await claims.getClaims(acctA))
+      .map((c) => c.lineageSlug)
+      .sort();
+    expect(canonicalSlugs).toEqual(["canonical-lineage", "source-lineage"]);
+    expect(await claims.getClaims(acctB)).toEqual([]);
   });
 
   test("survives a fresh instance over the same root — durable across a process restart", async () => {

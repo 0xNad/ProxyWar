@@ -27,7 +27,7 @@ const redeemClaimSchema = z.object({ lineageSlug: z.string(), label: z.string() 
 const redeemSuccessSchema = z.object({
   accountId: z.string(),
   displayName: z.string().nullable(),
-  claim: redeemClaimSchema.nullable(),
+  claims: z.array(redeemClaimSchema),
 });
 
 const redeemErrorSchema = z.object({ error: z.object({ code: z.string() }) });
@@ -43,14 +43,14 @@ export type PlatformHandoffClientResult =
       readonly accountId: string;
       readonly displayName: string | null;
       /**
-       * The account's private, self-asserted lineage claim, or `null` —
+       * The account's private, self-asserted lineage claim SET —
        * cached by the caller (`BettingPlatformAccountLinkStore`)
        * alongside `platformAccountId`. Refreshed on every handoff, so it
        * goes stale exactly as long as the last sign-in is old; a caller
        * needing a fresher read must run the handoff again, never treat
        * this as a live platform query.
        */
-      readonly claim: PlatformHandoffClaim | null;
+      readonly claims: readonly PlatformHandoffClaim[];
     }
   | { readonly ok: false; readonly reason: string };
 
@@ -83,8 +83,8 @@ export function createPlatformHandoffClient(
           return {
             ok: true,
             accountId: parsed.data.accountId,
+            claims: parsed.data.claims,
             displayName: parsed.data.displayName,
-            claim: parsed.data.claim,
           };
         }
         const parsedError = redeemErrorSchema.safeParse(body);

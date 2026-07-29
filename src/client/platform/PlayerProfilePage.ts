@@ -1,7 +1,6 @@
 import { html, LitElement, nothing } from "lit";
 import { customElement, property, state } from "lit/decorators.js";
 import { z } from "zod";
-import { formatSignedCredits } from "../prediction/wagering/components/pnlDisplay";
 
 const standingSchema = z.object({
   rank: z.number(),
@@ -36,19 +35,10 @@ const leagueSectionSchema = z.object({
     .nullable(),
 });
 
-const bettingSectionSchema = z.object({
-  lifetimePoints: z.number(),
-  premieresTraded: z.number(),
-  premieresWon: z.number(),
-  rank: z.number(),
-  totalRankedParticipants: z.number(),
-});
-
 const profileResponseSchema = z.object({
   schemaVersion: z.literal(1),
   name: z.string(),
   league: leagueSectionSchema.nullable(),
-  betting: bettingSectionSchema.nullable(),
 });
 
 type ProfileResponse = z.infer<typeof profileResponseSchema>;
@@ -58,19 +48,23 @@ type Episode = z.infer<typeof episodeSchema>;
 type LoadState = "loading" | "ready" | "not-found" | "error";
 
 /**
- * The shared destination for BOTH leaderboards — the public league
- * standings and the betting points leaderboard — reached by clicking any
- * row on either (`playerProfileLink.ts` on the leaderboard side, `GET
+ * The league player profile — the destination the PUBLIC league
+ * standings link to (`playerProfileUrl` in `playerProfileLink.ts`, `GET
  * /api/players/:name` here). Lives on the platform origin: this is a
  * platform-level feature now that accounts are platform-level, not a
  * betting one.
  *
+ * League-only, deliberately: a league player and a platform account are
+ * only the same person by a claim nobody here can verify, and a
+ * bettor's display name isn't even unique among linked accounts — see
+ * `/api/players/:name`'s doc comment in `ai-agent-demo-server.ts`. A
+ * bettor's own stats live at their own stable, account-id-keyed page
+ * instead — see `TraderProfilePage.ts`.
+ *
  * PUBLIC PAGE. Renders only what `/api/players/:name` returns, and that
  * route is itself constructed to never touch the private league-claim
- * store or assert an unverified GitHub-to-league-player link — see its
- * doc comment in `ai-agent-demo-server.ts`. This component adds no
- * additional data of its own, so that guarantee holds all the way to the
- * screen.
+ * store. This component adds no additional data of its own, so that
+ * guarantee holds all the way to the screen.
  *
  * Standalone route (`/player/:name`, see `Main.ts`'s `handleUrl`), not
  * mounted inside the game engine/replay viewer — same pattern as
@@ -164,8 +158,7 @@ export class PlayerProfilePage extends LitElement {
     return html`
       <h1 class="mb-2 text-xl font-bold text-ink">${this.name}</h1>
       <p class="text-sm text-ink-muted">
-        We don't have any league standings or betting record for this name
-        yet.
+        We don't have any league standings for this name yet.
       </p>
     `;
   }
@@ -189,12 +182,9 @@ export class PlayerProfilePage extends LitElement {
         ${profile.league !== null
           ? this.renderLeagueSection(profile.league)
           : nothing}
-        ${profile.betting !== null
-          ? this.renderBettingSection(profile.betting)
-          : nothing}
-        ${profile.league === null && profile.betting === null
+        ${profile.league === null
           ? html`<p class="text-sm text-ink-muted">
-              No league or betting data available for this name.
+              No league data available for this name.
             </p>`
           : nothing}
       </div>
@@ -331,47 +321,6 @@ export class PlayerProfilePage extends LitElement {
             >`
           : nothing}
       </li>
-    `;
-  }
-
-  private renderBettingSection(
-    betting: z.infer<typeof bettingSectionSchema>,
-  ) {
-    return html`
-      <section aria-labelledby="player-profile-betting-heading">
-        <h2
-          id="player-profile-betting-heading"
-          class="mb-2 text-sm font-bold uppercase tracking-wide text-ink-muted"
-        >
-          Betting
-        </h2>
-        <dl class="grid grid-cols-3 gap-3 text-sm">
-          <div>
-            <dt class="text-[11px] uppercase text-ink-muted">
-              Lifetime P&amp;L
-            </dt>
-            <dd
-              class="font-mono font-semibold ${betting.lifetimePoints >= 0
-                ? "text-positive"
-                : "text-danger"}"
-            >
-              ${formatSignedCredits(betting.lifetimePoints)}
-            </dd>
-          </div>
-          <div>
-            <dt class="text-[11px] uppercase text-ink-muted">Rank</dt>
-            <dd class="font-mono font-semibold text-ink">
-              #${betting.rank} of ${betting.totalRankedParticipants}
-            </dd>
-          </div>
-          <div>
-            <dt class="text-[11px] uppercase text-ink-muted">Record</dt>
-            <dd class="font-mono font-semibold text-ink">
-              ${betting.premieresWon}/${betting.premieresTraded}
-            </dd>
-          </div>
-        </dl>
-      </section>
     `;
   }
 }

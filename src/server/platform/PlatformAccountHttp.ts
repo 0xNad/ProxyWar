@@ -60,9 +60,9 @@ export function createPlatformAccountRouter(options: PlatformAccountHttpOptions)
       const canonicalAccountId = await options.identityLinkStore.resolveCanonicalAccountId(
         bootstrap.account.accountId,
       );
-      const [account, claim, githubStatus] = await Promise.all([
+      const [account, claims, githubStatus] = await Promise.all([
         options.accounts.getAccount(canonicalAccountId),
-        options.claims.getClaim(canonicalAccountId),
+        options.claims.getClaims(canonicalAccountId),
         options.identityLinkStore.getStatus(canonicalAccountId),
       ]);
       res.status(200).json({
@@ -74,7 +74,7 @@ export function createPlatformAccountRouter(options: PlatformAccountHttpOptions)
           githubLogin: githubStatus.login,
           githubAvatarUrl: githubStatus.avatarUrl,
         },
-        claim,
+        claims,
       });
     } catch (error) {
       logError("platform_account_read_failed", error);
@@ -114,6 +114,7 @@ export function createPlatformAccountRouter(options: PlatformAccountHttpOptions)
     },
   );
 
+  /** Adds (or updates, for an already-claimed lineage) one claim — never clears the whole set; see `PlatformPolicyClaimStore.addClaim`'s doc. Returns the account's full, resulting claim set. */
   router.post(
     "/api/account/claim",
     express.json({ limit: "4kb" }),
@@ -124,17 +125,43 @@ export function createPlatformAccountRouter(options: PlatformAccountHttpOptions)
           requestSecurityHeaders(req),
         );
         const label = stringField(req.body, "label", MAX_CLAIM_LABEL_REQUEST_BYTES);
-        if (label === null) {
+        if (label === null || label.trim().length === 0) {
           sendFailure(res, 400, "PLATFORM_INVALID_REQUEST");
           return;
         }
         const canonicalAccountId = await options.identityLinkStore.resolveCanonicalAccountId(
           authorization.account.accountId,
         );
-        const claim = await options.claims.setClaim(canonicalAccountId, label);
-        res.status(200).json({ schemaVersion: 1, claim });
+        const claims = await options.claims.addClaim(canonicalAccountId, label);
+        res.status(200).json({ schemaVersion: 1, claims });
       } catch (error) {
         sendPlatformSecurityFailure(res, logError, "platform_claim_failed", error);
+      }
+    },
+  );
+
+  /** Removes one lineage from the caller's claim set — a no-op, not an error, if it was never claimed. Returns the account's full, resulting claim set. */
+  router.post(
+    "/api/account/claim/remove",
+    express.json({ limit: "4kb" }),
+    async (req: Request, res: Response) => {
+      res.setHeader("Cache-Control", "no-store, max-age=0");
+      try {
+        const authorization = options.security.authorizeWrite(
+          requestSecurityHeaders(req),
+        );
+        const lineageSlug = stringField(req.body, "lineageSlug", MAX_CLAIM_LABEL_REQUEST_BYTES);
+        if (lineageSlug === null || lineageSlug.trim().length === 0) {
+          sendFailure(res, 400, "PLATFORM_INVALID_REQUEST");
+          return;
+        }
+        const canonicalAccountId = await options.identityLinkStore.resolveCanonicalAccountId(
+          authorization.account.accountId,
+        );
+        const claims = await options.claims.removeClaim(canonicalAccountId, lineageSlug);
+        res.status(200).json({ schemaVersion: 1, claims });
+      } catch (error) {
+        sendPlatformSecurityFailure(res, logError, "platform_claim_remove_failed", error);
       }
     },
   );
@@ -189,9 +216,9 @@ export function createPlatformAccountRouter(options: PlatformAccountHttpOptions)
       const canonicalAccountId = await options.identityLinkStore.resolveCanonicalAccountId(
         bootstrap.account.accountId,
       );
-      const [account, claim] = await Promise.all([
+      const [account, claims] = await Promise.all([
         options.accounts.getAccount(canonicalAccountId),
-        options.claims.getClaim(canonicalAccountId),
+        options.claims.getClaims(canonicalAccountId),
       ]);
       const { code } = options.handoffs.issueCode({
         state,
@@ -200,8 +227,10 @@ export function createPlatformAccountRouter(options: PlatformAccountHttpOptions)
         childSessionId,
         accountId: canonicalAccountId,
         displayName: account?.displayName ?? null,
-        claim:
-          claim === null ? null : { lineageSlug: claim.lineageSlug, label: claim.label },
+        claims: claims.map((claim) => ({
+          lineageSlug: claim.lineageSlug,
+          label: claim.label,
+        })),
       });
       const target = new URL(returnPath, returnOrigin);
       target.searchParams.set("code", code);
@@ -250,7 +279,7 @@ export function createPlatformAccountRouter(options: PlatformAccountHttpOptions)
         schemaVersion: 1,
         accountId: result.accountId,
         displayName: result.displayName,
-        claim: result.claim,
+        claims: result.claims,
       });
     },
   );

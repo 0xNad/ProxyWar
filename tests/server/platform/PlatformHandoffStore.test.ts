@@ -11,7 +11,7 @@ function baseIssueInput(): PlatformHandoffIssueInput {
     childSessionId: `guest_${"a".repeat(32)}`,
     accountId: `acct_${"b".repeat(32)}`,
     displayName: "Daveey",
-    claim: { lineageSlug: "daveey-proxywar", label: "daveey-proxywar:v24" },
+    claims: [{ lineageSlug: "daveey-proxywar", label: "daveey-proxywar:v24" }],
   };
 }
 
@@ -35,7 +35,7 @@ describe("PlatformHandoffStore", () => {
       ok: true,
       accountId: input.accountId,
       displayName: input.displayName,
-      claim: input.claim,
+      claims: input.claims,
     });
   });
 
@@ -154,16 +154,33 @@ describe("PlatformHandoffStore", () => {
     ).toBe(true);
   });
 
-  test("an account with no claim redeems with claim: null, never a coincidental default", () => {
+  test("an account with no claims redeems with claims: [], never a coincidental default", () => {
     const store = new PlatformHandoffStore();
-    const input = { ...baseIssueInput(), claim: null };
+    const input = { ...baseIssueInput(), claims: [] };
     const { code } = store.issueCode(input);
     const result = store.redeemCode(redeemRequestFor(input, code));
     expect(result).toEqual({
       ok: true,
       accountId: input.accountId,
       displayName: input.displayName,
-      claim: null,
+      claims: [],
     });
+  });
+
+  test("multiple owned lineages all survive issuance and redemption — a set, not a single slot", () => {
+    const store = new PlatformHandoffStore();
+    const input = {
+      ...baseIssueInput(),
+      claims: [
+        { lineageSlug: "daveey-proxywar", label: "daveey-proxywar:v24" },
+        { lineageSlug: "second-lineage", label: "second-lineage:v3" },
+      ],
+    };
+    const { code } = store.issueCode(input);
+    const result = store.redeemCode(redeemRequestFor(input, code));
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.claims).toEqual(input.claims);
+    }
   });
 });
