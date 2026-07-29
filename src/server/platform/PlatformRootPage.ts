@@ -24,6 +24,13 @@ export interface PlatformRootLinks {
   readonly replaysUrl: string;
   /** Trade on a live match (bet.proxywar.xyz today). */
   readonly marketUrl: string;
+  /**
+   * Whether GitHub sign-in actually exists on this process. The OAuth routes
+   * are absent entirely without configured credentials, so the Account card's
+   * copy has to follow — a public homepage promising a sign-in that 404s is
+   * worse than one that honestly describes guest identity.
+   */
+  readonly githubSignInAvailable: boolean;
 }
 
 function escapeAttr(value: string): string {
@@ -69,14 +76,28 @@ export function renderPlatformRootHtml(links: PlatformRootLinks): string {
       cta: "Open the market",
       variant: "primary",
     },
-    {
-      href: "/account",
-      external: false,
-      title: "Account",
-      body: "Sign in with GitHub once. Your identity carries to every Proxy War surface from here.",
-      cta: "Make an account",
-      variant: "default",
-    },
+    // Deliberately conditional. GitHub sign-in only exists when OAuth
+    // credentials are configured — otherwise the routes are genuinely absent —
+    // and even when it is live, identity currently reaches the market but not
+    // the league, which has no handoff integration yet. A public homepage must
+    // not advertise either capability before it works.
+    links.githubSignInAvailable
+      ? {
+          href: "/account",
+          external: false,
+          title: "Account",
+          body: "Sign in with GitHub once, and your points and history follow you to the market from any browser.",
+          cta: "Make an account",
+          variant: "default" as const,
+        }
+      : {
+          href: "/account",
+          external: false,
+          title: "Account",
+          body: "See your trading record and pick the agent you follow. Sign-in is not open yet, so this browser is your identity for now.",
+          cta: "See your account",
+          variant: "default" as const,
+        },
   ];
 
   const cardHtml = cards
@@ -96,7 +117,7 @@ export function renderPlatformRootHtml(links: PlatformRootLinks): string {
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Proxy War</title>
-  <meta name="description" content="Proxy War is an autonomous-agent strategy arena: a fixed league of AI agents fights for territory, live matches are tradeable, and one account carries your identity across every surface.">
+  <meta name="description" content="Proxy War is an autonomous-agent strategy arena: a fixed league of AI agents fights for territory, every match is a rewatchable replay, and a live match can be traded while the outcome is still open.">
   <style>
     :root { color-scheme: dark; --paper:#07090d; --panel:#11151e; --panel-soft:#161c28; --line:#232a3a; --ink:#e7ebf2; --muted:#8b93a6; --amber:#f4a64a; --cyan:#7ad7f0; --good:#7ee0a8; --bad:#ff7a6b; }
     * { box-sizing:border-box; }

@@ -1998,6 +1998,7 @@ app.get("/", async (_req, res, next) => {
           leagueUrl: platformLeagueHomeUrl,
           replaysUrl: platformReplaysHomeUrl,
           marketUrl: platformMarketHomeUrl,
+          githubSignInAvailable: githubOAuthConfig !== null,
         }),
       );
     return;

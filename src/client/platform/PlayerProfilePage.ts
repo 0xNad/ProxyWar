@@ -30,9 +30,7 @@ const leagueSectionSchema = z.object({
   standing: standingSchema.nullable(),
   policyLineageNote: z.string().nullable(),
   episodes: z.array(episodeSchema),
-  recentRecord: z
-    .object({ wins: z.number(), played: z.number() })
-    .nullable(),
+  recentRecord: z.object({ wins: z.number(), played: z.number() }).nullable(),
 });
 
 const profileResponseSchema = z.object({
@@ -278,8 +276,8 @@ export class PlayerProfilePage extends LitElement {
           : nothing}
       </div>
       <p class="mb-2 text-[11px] text-ink-muted">
-        Only the last ${league.episodes.length} rounds are retained — this is
-        a recent window, not a full career record.
+        Only the last ${league.episodes.length} rounds are retained — this is a
+        recent window, not a full career record.
       </p>
       <ul class="flex flex-col gap-1.5" role="list">
         ${league.episodes.map((episode) => this.renderEpisodeRow(episode))}
@@ -288,11 +286,17 @@ export class PlayerProfilePage extends LitElement {
   }
 
   private renderEpisodeRow(episode: Episode) {
+    // Match outcome is deliberately NOT green/red. Those are reserved for
+    // P&L across this codebase, and a linked account's profile shows betting
+    // P&L on this very page — so colouring wins green here would make the
+    // same two colours mean two different things a few hundred pixels apart.
+    // The scouting panel made the same call for the same reason: weight and
+    // wording carry the outcome, colour carries money.
     const outcome = episode.isWinner
-      ? { label: "Won", cls: "text-positive" }
+      ? { label: "Won", cls: "font-semibold text-ink" }
       : episode.isAlive
         ? { label: "Survived", cls: "text-ink-muted" }
-        : { label: "Eliminated", cls: "text-danger" };
+        : { label: "Eliminated", cls: "text-ink-muted" };
     const when =
       episode.completedAt !== null
         ? new Date(episode.completedAt).toLocaleDateString()
@@ -303,7 +307,9 @@ export class PlayerProfilePage extends LitElement {
         class="flex flex-wrap items-center gap-x-3 gap-y-1 rounded-md border border-line bg-surface-2 px-3 py-2 text-xs"
       >
         <span class="font-mono text-ink-muted"
-          >${episode.roundNumber === null ? "—" : `Round ${episode.roundNumber}`}</span
+          >${episode.roundNumber === null
+            ? "—"
+            : `Round ${episode.roundNumber}`}</span
         >
         <span class="text-ink-muted">${episode.map ?? "Unknown map"}</span>
         <span class="text-ink-muted">${when}</span>

@@ -9,10 +9,17 @@
  *      calls, not merely assumed unchanged.
  */
 import { spawn, type ChildProcess } from "node:child_process";
+import {
+  chmod,
+  mkdir,
+  mkdtemp,
+  realpath,
+  rm,
+  writeFile,
+} from "node:fs/promises";
 import http from "node:http";
 import { createRequire } from "node:module";
 import net from "node:net";
-import { chmod, mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterAll, beforeAll, describe, expect, test } from "vitest";
@@ -32,6 +39,7 @@ describe("renderPlatformRootHtml (pure)", () => {
       leagueUrl: "https://beta.example/league",
       replaysUrl: "https://bet.example/bet",
       marketUrl: "https://bet.example/bet",
+      githubSignInAvailable: true,
     });
     expect(html).toContain("Proxy War");
     // One clear explainer sentence, not a dashboard.
@@ -46,6 +54,23 @@ describe("renderPlatformRootHtml (pure)", () => {
     // Never a duplicate of the account page's own content/controls.
     expect(html).not.toContain("display-name");
     expect(html).not.toContain("csrfToken");
+  });
+
+  test("never advertises a sign-in that does not exist on this process", () => {
+    // The OAuth routes are absent entirely without configured credentials, so
+    // a homepage promising GitHub sign-in would be advertising a 404. The
+    // meta description must not claim cross-surface identity either: the
+    // league has no handoff integration, so identity reaches the market only.
+    const html = renderPlatformRootHtml({
+      leagueUrl: "https://beta.example/league",
+      replaysUrl: "https://bet.example/bet",
+      marketUrl: "https://bet.example/bet",
+      githubSignInAvailable: false,
+    });
+    expect(html).not.toContain("Sign in with GitHub");
+    expect(html).not.toContain("every surface");
+    // Still offers the account page — guest identity is real and useful.
+    expect(html).toContain("/account");
   });
 });
 
@@ -101,7 +126,11 @@ describe("GET / (real servers)", () => {
       {
         cwd: platformFixture,
         env: {
-          ...baseServerEnv(platformFixture, platformPort, platformArtifactsRoot),
+          ...baseServerEnv(
+            platformFixture,
+            platformPort,
+            platformArtifactsRoot,
+          ),
           PROXYWAR_PLATFORM_ENABLED: "true",
           PROXYWAR_LEAGUE_WRAPPER_ONLY: "true",
           PROXYWAR_PLATFORM_STATE_ROOT: platformStateRoot,
@@ -112,8 +141,14 @@ describe("GET / (real servers)", () => {
         stdio: ["ignore", "pipe", "pipe"],
       },
     );
-    platform.stdout?.on("data", (chunk: Buffer) => (platformOutput += chunk.toString()));
-    platform.stderr?.on("data", (chunk: Buffer) => (platformOutput += chunk.toString()));
+    platform.stdout?.on(
+      "data",
+      (chunk: Buffer) => (platformOutput += chunk.toString()),
+    );
+    platform.stderr?.on(
+      "data",
+      (chunk: Buffer) => (platformOutput += chunk.toString()),
+    );
 
     hub = spawn(
       process.execPath,
@@ -125,7 +160,12 @@ describe("GET / (real servers)", () => {
       ],
       {
         cwd: hubFixture,
-        env: baseServerEnv(hubFixture, hubPort, hubArtifactsRoot, hubNationsRoot),
+        env: baseServerEnv(
+          hubFixture,
+          hubPort,
+          hubArtifactsRoot,
+          hubNationsRoot,
+        ),
         stdio: ["ignore", "pipe", "pipe"],
       },
     );
@@ -140,8 +180,10 @@ describe("GET / (real servers)", () => {
 
   afterAll(async () => {
     await Promise.all([stopServer(platform), stopServer(hub)]);
-    if (platformFixture !== "") await rm(platformFixture, { recursive: true, force: true });
-    if (hubFixture !== "") await rm(hubFixture, { recursive: true, force: true });
+    if (platformFixture !== "")
+      await rm(platformFixture, { recursive: true, force: true });
+    if (hubFixture !== "")
+      await rm(hubFixture, { recursive: true, force: true });
   });
 
   test("PROXYWAR_PLATFORM_ENABLED serves the platform landing page at /, redirect gate included", async () => {
@@ -195,7 +237,9 @@ async function seedMinimalFixture(
   const privateStateRoot = privateStateRootFor(fixtureRoot);
   await Promise.all([
     mkdir(staticRoot, { recursive: true }),
-    mkdir(path.join(artifactsRoot, "ai-league-runs", "league"), { recursive: true }),
+    mkdir(path.join(artifactsRoot, "ai-league-runs", "league"), {
+      recursive: true,
+    }),
     mkdir(path.join(fixtureRoot, "resources", "lang"), { recursive: true }),
     mkdir(privateStateRoot, { recursive: true }),
   ]);
@@ -211,7 +255,11 @@ async function seedMinimalFixture(
       "<!doctype html><html><head><title>Proxy War</title></head><body>PROXY WAR</body></html>",
       "utf8",
     ),
-    writeFile(path.join(fixtureRoot, "resources", "lang", "en.json"), "{}", "utf8"),
+    writeFile(
+      path.join(fixtureRoot, "resources", "lang", "en.json"),
+      "{}",
+      "utf8",
+    ),
     writeFile(
       path.join(artifactsRoot, "ai-league-runs", "league", "data.json"),
       JSON.stringify({
@@ -273,7 +321,9 @@ async function reservePort(): Promise<number> {
     throw new Error("Failed to reserve a local HTTP port");
   }
   await new Promise<void>((resolve, reject) =>
-    listener.close((error) => (error === undefined ? resolve() : reject(error))),
+    listener.close((error) =>
+      error === undefined ? resolve() : reject(error),
+    ),
   );
   return address.port;
 }
@@ -281,14 +331,22 @@ async function reservePort(): Promise<number> {
 function rawRequest(
   baseUrl: string,
   requestPath: string,
-): Promise<{ status: number; headers: http.IncomingHttpHeaders; body: string }> {
+): Promise<{
+  status: number;
+  headers: http.IncomingHttpHeaders;
+  body: string;
+}> {
   return new Promise((resolve, reject) => {
     const url = new URL(requestPath, baseUrl);
     const request = http.request(url, { method: "GET" }, (response) => {
       let body = "";
       response.on("data", (chunk: Buffer) => (body += chunk.toString()));
       response.on("end", () =>
-        resolve({ status: response.statusCode ?? 0, headers: response.headers, body }),
+        resolve({
+          status: response.statusCode ?? 0,
+          headers: response.headers,
+          body,
+        }),
       );
     });
     request.on("error", reject);
