@@ -230,7 +230,14 @@ else
   META_FILE=""
   echo "==> MATCH KIND: exhibition (fallback - real-league queue is empty)"
   echo "==> generating match bundle ${RUN_ID}"
-  GAME_ENV=dev npx tsx src/scripts/replay-premiere-controlled-exhibition.ts \
+  # The generator refuses to write below a 25GiB free-space reserve and this
+  # machine sits around 16-17GiB free, so every fallback cycle died with
+  # "does not meet the free-space reserve" and the URL served 503. This is the
+  # generator's own documented escape hatch, which lowers the reserve to
+  # 15GiB. It is a thin margin: if free space drops below that, exhibitions
+  # stop again and the only real fix is reclaiming disk.
+  GAME_ENV=dev PROXYWAR_ALLOW_LOW_DISK_HEAVY_WRITE=1 \
+    npx tsx src/scripts/replay-premiere-controlled-exhibition.ts \
     --run-id="$RUN_ID" \
     --private-output-root="$STAGING" \
     --agent-manifest-dir="$MANIFESTS" \
@@ -370,6 +377,28 @@ echo "    http ${CODE} - trading opens in ~${LEAD_MIN}m"
 # since anyone who saw it already knows the winner.
 if [ "$MATCH_KIND" = "real-league" ]; then
   rm -rf "$STAGING/queue-claim"
+fi
+
+# Exhibition fallbacks write a fresh bundle into $STAGING every cycle and
+# nothing used to remove them, so an unattended loop slowly ate the very
+# free-space reserve the generator refuses to write below. Keep only the few
+# most recent, and only once admission has actually succeeded - a failed
+# cycle's bundle is worth keeping to look at.
+#
+# The glob is guarded through an array because a real-league cycle's bundle
+# lives under $STAGING/queue-claim, so $STAGING/*.source.json legitimately
+# matches nothing - and under `set -euo pipefail` an unguarded `ls` on no
+# matches exits nonzero and would abort the whole cycle right before the
+# last-cycle marker is written.
+if [ "$CODE" = "200" ]; then
+  shopt -s nullglob
+  staged_bundles=("$STAGING"/*.source.json)
+  shopt -u nullglob
+  if [ "${#staged_bundles[@]}" -gt 3 ]; then
+    ls -1t "${staged_bundles[@]}" | tail -n +4 | while read -r stale; do
+      rm -f "$stale" "${stale%.source.json}".* 2>/dev/null || true
+    done
+  fi
 fi
 
 # Lets autocycle-premiere.sh (and any operator) see which kind is actually

@@ -271,6 +271,12 @@ export default defineConfig(({ mode }) => {
         env.STRIPE_PUBLISHABLE_KEY,
       ),
       "process.env.API_DOMAIN": JSON.stringify(env.API_DOMAIN),
+      // The platform/account origin the client links profiles at. Injected
+      // rather than hardcoded because it is going to move: app.proxywar.xyz
+      // is a stand-in until the apex stops being a Cloudflare redirect.
+      "process.env.PROXYWAR_PLATFORM_ORIGIN": JSON.stringify(
+        env.PROXYWAR_PLATFORM_ORIGIN ?? "https://app.proxywar.xyz",
+      ),
       // Add other process.env variables if needed, OR migrate code to import.meta.env
     },
 
