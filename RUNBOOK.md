@@ -1079,3 +1079,104 @@ GitHub's real infrastructure. See `tests/server/replay-premiere/ReplayPremiereGi
 against the same stub, in a real browser, against a real locally-running
 copy of this server, was also driven live this session — see the final
 session report for the exact steps and screenshots.
+
+## 16. The platform origin, and the two things only you can do (Platform session)
+
+Identity used to be a betting feature: accounts lived under `/api/premieres/*`
+on `bet.proxywar.xyz`, behind `PROXYWAR_WAGERING_ENABLED`, with a host-only
+cookie scoped to the betting origin. That was backwards. Accounts are for all
+of a user's models and policies, so they cannot exist only where wagering does.
+
+### 16.1 What now runs where
+
+| Origin | Port | Owns | launchd label |
+|---|---|---|---|
+| `app.proxywar.xyz` | 8793 | accounts, GitHub OAuth, display names, lineage claims, player profiles | `com.proxywar.platform` |
+| `bet.proxywar.xyz` | 8792 | the market, points ledger, guest bankrolls | `com.proxywar.betautocycle` |
+| `beta.proxywar.xyz` | 8788 | the league ladder and replays | (pre-existing) |
+
+`com.proxywar.platformleague` keeps the platform's own copy of the league
+mirror fresh. It exists because the platform must not depend on the betting
+cycle running — betting was stopped once and the platform's standings froze
+silently. Each service refreshes its own mirror.
+
+Each origin keeps its own host-only cookie. The betting cookie was NOT widened
+to `Domain=.proxywar.xyz`: a domain cookie lets any sibling origin overwrite
+platform identity. Instead the two are linked by a **one-time opaque handoff
+code**, redeemed server-to-server and consumed atomically. Query strings leak
+through history, server logs, and `Referer`, and "one-time" cannot be enforced
+by a signature — hence a code, not a signed token.
+
+### 16.2 Only you can do these
+
+**1. Delete the Cloudflare redirect rule on the apex.** `proxywar.xyz` currently
+301s to the league for every path — a zone-level rule, not something the tunnel
+serves. `cert.pem` holds only an `ARGO TUNNEL TOKEN`, and `cloudflared` has no
+`rules` subcommand, so there is no API path to it. Until the rule is gone,
+`proxywar.xyz` cannot be the homepage no matter what the tunnel does.
+
+Once it is deleted, the cutover is one ingress line in
+`~/.cloudflared/open-frontier-beta.yml` (point `proxywar.xyz` at
+`http://127.0.0.1:8793`, same as `app.proxywar.xyz`) plus a `cloudflared`
+restart. Nothing in the code is keyed to the subdomain's *name* any more —
+three such hardcodes were found and removed (`playerProfileLink.ts`, the PoV
+resolver's `hostname.startsWith("app.")`, and the lineage-slug resolver), each
+of which would have failed silently with no error at cutover. Set
+`PROXYWAR_PLATFORM_ORIGIN` and the client's build-time define follows.
+
+**2. Register the GitHub OAuth app against the final origin.** App `3760561`
+exists but its callback still points at the betting origin, and a classic OAuth
+app has exactly one callback. No secret has been stashed for it deliberately —
+stashing one against a URL we are about to abandon is how a stale secret ends
+up in a deploy. When the platform origin is final:
+
+```sh
+printf '%s' '<id>'     > ~/.proxywar-deploy/github-oauth-client-id
+printf '%s' '<secret>' > ~/.proxywar-deploy/github-oauth-client-secret
+chmod 600 ~/.proxywar-deploy/github-oauth-client-secret
+./verify-github-signin.sh
+```
+
+Callback: `https://app.proxywar.xyz/api/auth/github/callback` (or the apex once
+cut over). No scopes — the public profile is all that is read.
+
+Until those files exist the OAuth routes are **absent, not broken**: they 404,
+and the homepage's Account card and meta description both change wording to
+match rather than advertising a sign-in that does not answer. That conditional
+is asserted by `tests/server/PlatformRootPage.test.ts`.
+
+### 16.3 Known and deliberate gaps
+
+- **`beta.proxywar.xyz` has no handoff integration.** So the "follow this
+  agent's point of view" preference resolves on `app.` and `bet.` but not on the
+  league site, which is where replays are actually watched. The child-side
+  resolver already branches for it; the league simply never redeems a code. This
+  is the one piece of the identity story still missing.
+- **A lineage claim is self-asserted and private.** GitHub proves a *handle*,
+  never that an agent belongs to someone. So a claim is a preference: never
+  surfaced publicly, never labelled ownership. Softmax sign-in — which can
+  prove owned policies — would swap in as verification. It is blocked on their
+  side (`softmax.com/cli-auth` validates callbacks against a literal
+  `127.0.0.1`/`localhost` allowlist; see
+  `docs/project-state/2026-07-27-softmax-signin-ask.md`).
+- **Betting and account profiles are keyed by `platformAccountId`, never by
+  display name.** Display names are not unique, so string matching would have
+  collapsed two people's profiles into one arbitrary account's stats.
+  `/api/players/:name` is league-identity-only and carries no betting key at all.
+
+### 16.4 The disk trap that will bite again
+
+The exhibition generator refuses to write below a **25 GiB** free-space reserve.
+This machine sits near 17 GiB, so every fallback cycle died silently with "does
+not meet the free space reserve" and betting served 503. `cycle-premiere.sh` now
+passes the generator's own documented escape hatch,
+`PROXYWAR_ALLOW_LOW_DISK_HEAVY_WRITE=1`, which lowers the floor to 15 GiB. That
+is a ~1.5 GiB margin, not a fix. If free space drops below 15 GiB, exhibitions
+stop again and no code change helps.
+
+Two related habits worth not repeating: fallback cycles wrote a staging bundle
+every cycle with nothing pruning them, so the loop slowly ate the reserve it
+depends on (now pruned to the newest three after each successful admission); and
+`chmod +x *.sh` flips the exec bit on files git tracks as non-executable, which
+dirties the tree — and the generator refuses to run from a dirty checkout, so
+the blanket chmod was itself blocking every cycle.
