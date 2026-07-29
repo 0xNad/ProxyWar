@@ -1,8 +1,8 @@
 import { z } from "zod";
 import { GameEvent } from "../../core/EventBus";
 import { GameView, PlayerView } from "../../core/game/GameView";
-import { LeagueStandingRow } from "../prediction/wagering/leagueData";
 import { PLAYER_PROFILE_ORIGIN } from "../platform/playerProfileLink";
+import { LeagueStandingRow } from "../prediction/wagering/leagueData";
 
 /**
  * Broadcast whenever the replay/spectator "point of view" — the single
@@ -59,6 +59,13 @@ export function writeManualPovSelection(playerName: string | null): void {
 
 const PLATFORM_ACCOUNT_CLAIM_ENDPOINT = "/api/account";
 const BETTING_ACCOUNT_CLAIM_ENDPOINT = "/api/premieres/account";
+/**
+ * The platform's least-privilege, cross-origin-readable slug list — the only
+ * account route any sibling origin may read (see `PlatformAccountHttp.ts`).
+ * Absolute, because this is the one branch that is deliberately NOT
+ * same-origin.
+ */
+const PLATFORM_POV_CLAIMS_PATH = "/api/account/pov-claims";
 
 // Both origins' claim payloads carry the same shape at the point this
 // reads it — an account claims a SET of model LINEAGEs (e.g.
@@ -85,19 +92,33 @@ const bettingClaimResponseSchema = z.object({
   identity: z.object({ claims: claimsSchema }),
 });
 
+// The cross-origin slug list, already reduced to `lineageSlug` strings
+// server-side: no `label` (user-supplied free text) and no timestamps cross
+// an origin boundary for a camera default.
+const platformPovClaimsResponseSchema = z.object({
+  lineageSlugs: z.array(z.string()),
+});
+
 async function fetchClaimLineageSlugs(
   fetchImpl: typeof fetch,
   endpoint: string,
-  extractClaims: (body: unknown) => readonly { lineageSlug: string }[],
+  extractSlugs: (body: unknown) => readonly string[],
+  // `"include"` ONLY for the deliberate cross-origin league branch. Every
+  // same-origin caller stays `"same-origin"`, so a misconfigured endpoint can
+  // never quietly start shipping this origin's cookies somewhere else.
+  credentials: RequestCredentials = "same-origin",
 ): Promise<readonly string[]> {
   try {
     const response = await fetchImpl(endpoint, {
-      credentials: "same-origin",
+      credentials,
+      // A GET whose only header is `Accept` is CORS-safelisted, so the
+      // cross-origin branch triggers no preflight and the platform mounts no
+      // OPTIONS handler. Adding a header here would need one added there.
       headers: { Accept: "application/json" },
     });
     if (!response.ok) return [];
     const body: unknown = await response.json();
-    return extractClaims(body).map((claim) => claim.lineageSlug);
+    return extractSlugs(body);
   } catch {
     return [];
   }
@@ -129,11 +150,21 @@ async function fetchClaimLineageSlugs(
  *   or a cache of its own on top of it. Hostname-based, not
  *   origin-configured, because it reads a same-origin betting endpoint —
  *   it does not care what the platform origin is called.
- * - Everything else, including `beta.*` (the league origin): no
- *   cross-origin handoff integration exists there yet, so a request is
- *   guaranteed to fail. Returns `[]` WITHOUT attempting one — no
- *   request, no console noise, for what is also the common case (most
- *   viewers have linked nothing).
+ * - Every other origin, the league mirror (`beta.*`) included: a
+ *   CREDENTIALED CROSS-ORIGIN `GET {platformOrigin}/api/account/pov-claims`
+ *   — a live read of the platform's own claim set, not a stale local
+ *   snapshot. This works without loosening anything because the league,
+ *   market and platform origins are cross-ORIGIN but same-SITE (one
+ *   registrable domain) and `SameSite` is a site-level control, so the
+ *   platform's host-only `SameSite=Lax` session cookie is still sent. Three
+ *   things must all hold or it silently yields nothing: the platform
+ *   allowlists this exact origin for CORS (it reuses the handoff's
+ *   `audience -> origin` map), the serving page's CSP permits the platform
+ *   origin in `connect-src` (see `proxyWarLeagueContentSecurityPolicy`), and
+ *   the viewer has an existing platform cookie. A viewer who has never
+ *   touched the platform gets an empty set and is NOT issued an account.
+ *   Unlike the `bet.` branch this needs no handoff on the reading origin at
+ *   all — the league stores no session, no account link, and no claim copy.
  *
  * Resolves to `[]` on the platform/bet. branches too on any
  * network/parse failure — no claims is exactly the "no account or no
@@ -153,7 +184,10 @@ export async function resolveClaimedLineageSlugs(
     return fetchClaimLineageSlugs(
       fetchImpl,
       PLATFORM_ACCOUNT_CLAIM_ENDPOINT,
-      (body) => platformClaimResponseSchema.safeParse(body).data?.claims ?? [],
+      (body) =>
+        platformClaimResponseSchema
+          .safeParse(body)
+          .data?.claims.map((claim) => claim.lineageSlug) ?? [],
     );
   }
   if (window.location.hostname.startsWith("bet.")) {
@@ -161,10 +195,18 @@ export async function resolveClaimedLineageSlugs(
       fetchImpl,
       BETTING_ACCOUNT_CLAIM_ENDPOINT,
       (body) =>
-        bettingClaimResponseSchema.safeParse(body).data?.identity.claims ?? [],
+        bettingClaimResponseSchema
+          .safeParse(body)
+          .data?.identity.claims.map((claim) => claim.lineageSlug) ?? [],
     );
   }
-  return [];
+  return fetchClaimLineageSlugs(
+    fetchImpl,
+    `${platformOrigin}${PLATFORM_POV_CLAIMS_PATH}`,
+    (body) =>
+      platformPovClaimsResponseSchema.safeParse(body).data?.lineageSlugs ?? [],
+    "include",
+  );
 }
 
 /**

@@ -56,6 +56,10 @@ import {
 import { resolveExternalAgentToken } from "../server/agents/ExternalAgentSecrets";
 import type { ExternalAgentRequest } from "../server/agents/ExternalHttpAgentBrain";
 import {
+  buildLeaguePlayerSection,
+  readLeagueMirrorData,
+} from "../server/agents/LeaguePlayerProfile";
+import {
   parsePlayerStrategySpec,
   PlayerStrategySpec,
 } from "../server/agents/PlayerStrategySpec";
@@ -116,10 +120,6 @@ import {
   proxyWarPublicRendererAssetPrefixes,
 } from "../server/agents/ProxyWarPublicArtifacts";
 import {
-  buildLeaguePlayerSection,
-  readLeagueMirrorData,
-} from "../server/agents/LeaguePlayerProfile";
-import {
   buildProxyWarPublicReadinessReport,
   type ProxyWarPublicReadinessReport,
 } from "../server/agents/ProxyWarPublicReadiness";
@@ -129,12 +129,11 @@ import {
   type ProxyWarRateLimitSnapshot,
 } from "../server/agents/ProxyWarRateLimit";
 import { renderQuickStartPlayHtml } from "../server/agents/QuickStartPlayPage";
-import {
-  getAppShellContent,
-  setHtmlNoCacheHeaders,
-} from "../server/RenderHtml";
-import { createGithubOAuthClient, resolveGithubOAuthConfig } from "../server/GithubOAuthClient";
 import { resolveBettingProfileServiceToken } from "../server/BettingProfileServiceAuth";
+import {
+  createGithubOAuthClient,
+  resolveGithubOAuthConfig,
+} from "../server/GithubOAuthClient";
 import { createPlatformAccountRouter } from "../server/platform/PlatformAccountHttp";
 import { PlatformAccountSecurity } from "../server/platform/PlatformAccountSecurity";
 import { PlatformAccountStore } from "../server/platform/PlatformAccountStore";
@@ -142,13 +141,23 @@ import { createPlatformGithubAuthRouter } from "../server/platform/PlatformGithu
 import { PlatformGithubIdentityLinkStore } from "../server/platform/PlatformGithubIdentityLinkStore";
 import { PlatformHandoffStore } from "../server/platform/PlatformHandoffStore";
 import { PlatformPolicyClaimStore } from "../server/platform/PlatformPolicyClaimStore";
+import { resolvePlatformPovClaimOrigins } from "../server/platform/PlatformPovClaimOrigins";
+import { resolvePlatformReturnOrigins } from "../server/platform/PlatformReturnOrigins";
+import { renderPlatformRootHtml } from "../server/platform/PlatformRootPage";
 import {
   loadOrCreatePlatformHmacKey,
   PLATFORM_HMAC_HEX_ENV,
   resolvePlatformPrivateStateRoot,
 } from "../server/platform/PlatformSecrets";
-import { resolvePlatformReturnOrigins } from "../server/platform/PlatformReturnOrigins";
-import { renderPlatformRootHtml } from "../server/platform/PlatformRootPage";
+import {
+  getAppShellContent,
+  setHtmlNoCacheHeaders,
+} from "../server/RenderHtml";
+import {
+  createBettingIdentityHandoffRouter,
+  createBettingIdentityStatusRouter,
+} from "../server/replay-premiere/BettingIdentityHandoff";
+import { createPlatformHandoffClient } from "../server/replay-premiere/PlatformHandoffClient";
 import {
   BettingPlatformAccountLinkStore,
   pointsMergerFor,
@@ -178,11 +187,6 @@ import {
   ReplayPremiereError,
   toPublicReplayPremiereFailure,
 } from "../server/replay-premiere/ReplayPremiereErrors";
-import {
-  createBettingIdentityHandoffRouter,
-  createBettingIdentityStatusRouter,
-} from "../server/replay-premiere/BettingIdentityHandoff";
-import { createPlatformHandoffClient } from "../server/replay-premiere/PlatformHandoffClient";
 import { ReplayPremiereGuestSecurity } from "../server/replay-premiere/ReplayPremiereGuestSecurity";
 import {
   createReplayPremiereRouter,
@@ -261,6 +265,21 @@ const platformEnabled = envFlag("PROXYWAR_PLATFORM_ENABLED");
 // public URL, never a peer's: a child app never gets an
 // `expectedOrigin`-satisfying platform cookie, and vice versa.
 const configuredPlatformOrigin = firstConfiguredEnv("PROXYWAR_PLATFORM_ORIGIN");
+// The platform account origin every league/replay page must be allowed to
+// `fetch()` for the PoV default (`/api/account/pov-claims`). Same env, same
+// hardcoded fallback as every other platform-origin reference in this tree
+// (`CoworldLeagueSiteWriter`, `playerProfileLink`) — `app.proxywar.xyz` is a
+// stand-in until the apex redirect is removed.
+const platformAccountOrigin =
+  configuredPlatformOrigin ?? "https://app.proxywar.xyz";
+/**
+ * The league/replay CSP, in ONE place. Every document this process serves on
+ * a league surface must allow the platform origin in `connect-src` or the PoV
+ * fetch dies as a silent console violation; routing all call sites through a
+ * single helper is what stops the next page from omitting it.
+ */
+const leagueContentSecurityPolicy = (): string =>
+  proxyWarLeagueContentSecurityPolicy([platformAccountOrigin]);
 // Sibling origins this process links out to from its own homepage nav
 // (`PlatformRootPage`, platform mode only) and — for `bettingOrigin` only
 // — calls server-to-server for a linked bettor's public points stats (see
@@ -333,7 +352,9 @@ export const bettingPlatformAccountLinkStore =
 // `platformEnabled`) — betting never sees these values.
 const githubOAuthConfig = await resolveGithubOAuthConfig();
 const githubOAuthClient =
-  githubOAuthConfig === null ? null : createGithubOAuthClient(githubOAuthConfig);
+  githubOAuthConfig === null
+    ? null
+    : createGithubOAuthClient(githubOAuthConfig);
 // Wraps the raw ledger so a settlement always credits the CURRENT canonical
 // identity, even from a browser whose guest cookie was merged away by a
 // platform-account link completed on a different device.
@@ -905,13 +926,16 @@ if (pointsRoutesEnabled && bettingProfileServiceToken !== null) {
         presented === undefined ||
         !sameSecretValue(presented, bettingProfileServiceToken)
       ) {
-        res.status(401).json({ error: { code: "BETTING_PROFILE_UNAUTHORIZED" } });
+        res
+          .status(401)
+          .json({ error: { code: "BETTING_PROFILE_UNAUTHORIZED" } });
         return;
       }
       try {
-        const link = await bettingPlatformAccountLinkStore.getByPlatformAccountId(
-          req.params.accountId,
-        );
+        const link =
+          await bettingPlatformAccountLinkStore.getByPlatformAccountId(
+            req.params.accountId,
+          );
         if (link === null) {
           res.status(200).json({ schemaVersion: 1, profile: null });
           return;
@@ -967,7 +991,9 @@ const bettingProfileClient =
  * reclaimed), or the viewer holds no open position in it — a bankroll
  * entry with zero positions is not a "live position" worth surfacing.
  */
-async function readCurrentPremierePositionSummary(participantId: string): Promise<{
+async function readCurrentPremierePositionSummary(
+  participantId: string,
+): Promise<{
   premiereId: string;
   status: "open" | "settled";
   balance: number | null;
@@ -1028,10 +1054,16 @@ app.get("/api/premieres/account", async (req, res) => {
           replayPremiereArchiveStore.lookup(premiereId)?.revealedAt ?? null,
       }))
       .sort((a, b) => {
-        const aTime = a.revealedAt === null ? -Infinity : Date.parse(a.revealedAt);
-        const bTime = b.revealedAt === null ? -Infinity : Date.parse(b.revealedAt);
+        const aTime =
+          a.revealedAt === null ? -Infinity : Date.parse(a.revealedAt);
+        const bTime =
+          b.revealedAt === null ? -Infinity : Date.parse(b.revealedAt);
         if (bTime !== aTime) return bTime - aTime;
-        return a.premiereId < b.premiereId ? -1 : a.premiereId > b.premiereId ? 1 : 0;
+        return a.premiereId < b.premiereId
+          ? -1
+          : a.premiereId > b.premiereId
+            ? 1
+            : 0;
       });
     res.status(200).json({
       schemaVersion: 1,
@@ -1072,7 +1104,9 @@ app.get("/account", async (_req, res) => {
     if (configuredPlatformOrigin === undefined) {
       res
         .status(503)
-        .send("Proxy War account management is not available on this deployment.");
+        .send(
+          "Proxy War account management is not available on this deployment.",
+        );
       return;
     }
     res.redirect(302, `${configuredPlatformOrigin}/account`);
@@ -1086,7 +1120,7 @@ app.get("/account", async (_req, res) => {
     res.setHeader(
       "Content-Security-Policy",
       pageContentSecurityPolicyWithNonce(
-        proxyWarLeagueContentSecurityPolicy(),
+        leagueContentSecurityPolicy(),
         scriptNonce,
       ),
     );
@@ -1156,7 +1190,7 @@ app.get("/player/:name", async (_req, res) => {
     res.setHeader(
       "Content-Security-Policy",
       pageContentSecurityPolicyWithNonce(
-        proxyWarLeagueContentSecurityPolicy(),
+        leagueContentSecurityPolicy(),
         scriptNonce,
       ),
     );
@@ -1188,7 +1222,7 @@ app.get("/trader/:accountId", async (_req, res) => {
     res.setHeader(
       "Content-Security-Policy",
       pageContentSecurityPolicyWithNonce(
-        proxyWarLeagueContentSecurityPolicy(),
+        leagueContentSecurityPolicy(),
         scriptNonce,
       ),
     );
@@ -1257,6 +1291,8 @@ if (platformEnabled) {
     production: replayPremierePublicOrigin.startsWith("https://"),
   });
   const platformReturnOrigins = resolvePlatformReturnOrigins();
+  // Separate from the handoff map on purpose — see `PlatformPovClaimOrigins`.
+  const platformPovClaimOrigins = resolvePlatformPovClaimOrigins();
   if (githubOAuthClient !== null) {
     app.use(
       createPlatformGithubAuthRouter({
@@ -1282,6 +1318,7 @@ if (platformEnabled) {
       identityLinkStore: platformGithubIdentityLinkStore,
       handoffs: platformHandoffStore,
       returnOrigins: platformReturnOrigins,
+      povClaimOrigins: platformPovClaimOrigins,
       githubSignInAvailable: githubOAuthClient !== null,
       onOperatorError: (operatorCode, error) => {
         console.error(
@@ -1338,7 +1375,10 @@ if (platformEnabled) {
           .premiereIds()
           .at(-1);
         if (currentPremiereId === undefined) return null;
-        return replayPremiereHttpRegistry.get(currentPremiereId)?.interactions ?? null;
+        return (
+          replayPremiereHttpRegistry.get(currentPremiereId)?.interactions ??
+          null
+        );
       },
       onOperatorError: (operatorCode, error) => {
         console.error(
@@ -1428,7 +1468,7 @@ app.use(
     loadAppShell: () =>
       getAppShellContent(path.resolve(staticRootDir, "index.html")),
     publicOrigin: replayPremierePublicOrigin,
-    pageContentSecurityPolicy: proxyWarLeagueContentSecurityPolicy(),
+    pageContentSecurityPolicy: leagueContentSecurityPolicy(),
     resolveClipGenerationTarget:
       replayRunClipsForArchive === null
         ? undefined
@@ -1473,7 +1513,7 @@ app.use(
     loadAppShell: () =>
       getAppShellContent(path.resolve(staticRootDir, "index.html")),
     publicOrigin: replayPremierePublicOrigin,
-    pageContentSecurityPolicy: proxyWarLeagueContentSecurityPolicy(),
+    pageContentSecurityPolicy: leagueContentSecurityPolicy(),
   }),
 );
 app.use(
@@ -1865,10 +1905,7 @@ if (aiLeagueRunClips !== null) {
 }
 
 app.get("/league", (req, res) => {
-  res.setHeader(
-    "Content-Security-Policy",
-    proxyWarLeagueContentSecurityPolicy(),
-  );
+  res.setHeader("Content-Security-Policy", leagueContentSecurityPolicy());
   sendPublicArtifactFile(
     req,
     res,
@@ -1899,10 +1936,7 @@ if (betaAccess.enabled) {
       .relative(runsRootDir, path.resolve(filePath))
       .toLocaleLowerCase("en-US");
     if (relativePath === leagueIndexRelativePath) {
-      res.setHeader(
-        "Content-Security-Policy",
-        proxyWarLeagueContentSecurityPolicy(),
-      );
+      res.setHeader("Content-Security-Policy", leagueContentSecurityPolicy());
     }
   };
   app.get("/docs/:artifact", servePublicDoc);
@@ -1991,16 +2025,14 @@ if (leagueWrapperOnly) {
 
 app.get("/", async (_req, res, next) => {
   if (platformEnabled) {
-    res
-      .type("html")
-      .send(
-        renderPlatformRootHtml({
-          leagueUrl: platformLeagueHomeUrl,
-          replaysUrl: platformReplaysHomeUrl,
-          marketUrl: platformMarketHomeUrl,
-          githubSignInAvailable: githubOAuthConfig !== null,
-        }),
-      );
+    res.type("html").send(
+      renderPlatformRootHtml({
+        leagueUrl: platformLeagueHomeUrl,
+        replaysUrl: platformReplaysHomeUrl,
+        marketUrl: platformMarketHomeUrl,
+        githubSignInAvailable: githubOAuthConfig !== null,
+      }),
+    );
     return;
   }
   if (betaAccess.enabled) {
@@ -3812,10 +3844,7 @@ function servePublicRunArtifact(
     return;
   }
   if (runID === "league" && artifact === "index.html") {
-    res.setHeader(
-      "Content-Security-Policy",
-      proxyWarLeagueContentSecurityPolicy(),
-    );
+    res.setHeader("Content-Security-Policy", leagueContentSecurityPolicy());
   }
   // Large run bundles (e.g. the multi-MB spectator-replay.json) are streamed;
   // a client that aborts mid-stream must not crash the process. See

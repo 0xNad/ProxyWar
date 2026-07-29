@@ -137,19 +137,24 @@ export class PlatformAccountSecurity {
     this.key = Buffer.from(options.hmacKey);
   }
 
-  bootstrap(cookieHeader: string | string[] | undefined): PlatformAccountBootstrap {
+  bootstrap(
+    cookieHeader: string | string[] | undefined,
+  ): PlatformAccountBootstrap {
     const now = this.now();
     const existing = this.parseAccountCookieHeader(cookieHeader, now.getTime());
     const account = existing ?? this.createAccount(now);
     return {
       account: { accountId: account.accountId, createdAt: account.createdAt },
-      setCookie: existing === null ? this.serializeAccountCookie(account) : null,
+      setCookie:
+        existing === null ? this.serializeAccountCookie(account) : null,
       csrfToken: this.createCsrfToken(account, now.getTime()),
     };
   }
 
   /** Same "no prior CSRF token required" reasoning as `ReplayPremiereGuestSecurity.authorizeSessionCreation`: a strict Origin check stands in for it on the one route that has to work with no CSRF token yet in hand. */
-  authorizeSessionCreation(headers: PlatformRequestHeaders): PlatformAccountBootstrap {
+  authorizeSessionCreation(
+    headers: PlatformRequestHeaders,
+  ): PlatformAccountBootstrap {
     this.assertStrictOrigin(headers.origin);
     return this.bootstrap(headers.cookie);
   }
@@ -161,7 +166,9 @@ export class PlatformAccountSecurity {
     }
   }
 
-  authorizeWrite(headers: PlatformRequestHeaders): PlatformAccountWriteAuthorization {
+  authorizeWrite(
+    headers: PlatformRequestHeaders,
+  ): PlatformAccountWriteAuthorization {
     this.assertStrictOrigin(headers.origin);
     return this.authorizeAccountCredentials(headers);
   }
@@ -170,6 +177,35 @@ export class PlatformAccountSecurity {
   bootstrapRead(headers: PlatformRequestHeaders): PlatformAccountBootstrap {
     this.assertReadOrigin(headers);
     return this.bootstrap(headers.cookie);
+  }
+
+  /**
+   * Parses an ALREADY-ESTABLISHED account cookie and nothing else: no
+   * Origin/Sec-Fetch-Site/Referer check, no CSRF check, and — unlike
+   * `bootstrap`/`bootstrapRead` — no minting of a new account when the
+   * cookie is absent or expired (`null` instead).
+   *
+   * The long name is the warning. Every other entry point on this class
+   * enforces an origin; this one delegates that duty to its caller, so a
+   * caller MUST have already established that the request is permitted —
+   * see `/api/account/pov-claims`, which matches an exact CORS allowlist
+   * first and is the only intended caller. Do not reach for this to make a
+   * route "work cross-origin"; it grants nothing on its own precisely
+   * because it returns no CSRF token, so it must never gate a write.
+   *
+   * Not minting matters as much as not checking: a cross-origin reader is
+   * typically a league visitor who has never touched the platform, and
+   * silently issuing them an account would create an empty account per
+   * visitor and set a cookie from a surface they never visited.
+   */
+  readEstablishedAccountWithoutOriginCheck(
+    cookieHeader: string | string[] | undefined,
+  ): { readonly accountId: string } | null {
+    const account = this.parseAccountCookieHeader(
+      cookieHeader,
+      this.now().getTime(),
+    );
+    return account === null ? null : { accountId: account.accountId };
   }
 
   private assertReadOrigin(headers: PlatformRequestHeaders): void {
@@ -206,12 +242,18 @@ export class PlatformAccountSecurity {
   ): PlatformAccountWriteAuthorization {
     const nowMs = this.now().getTime();
     const account = this.parseAccountCookieHeader(headers.cookie, nowMs);
-    if (account === null) throw new PlatformSecurityError("account_cookie_required", 401);
+    if (account === null)
+      throw new PlatformSecurityError("account_cookie_required", 401);
     const csrfToken = singleHeader(headers.csrfToken);
-    if (csrfToken === null || !this.verifyCsrfToken(csrfToken, account, nowMs)) {
+    if (
+      csrfToken === null ||
+      !this.verifyCsrfToken(csrfToken, account, nowMs)
+    ) {
       throw new PlatformSecurityError("csrf_rejected", 403);
     }
-    return { account: { accountId: account.accountId, createdAt: account.createdAt } };
+    return {
+      account: { accountId: account.accountId, createdAt: account.createdAt },
+    };
   }
 
   /**
@@ -259,7 +301,8 @@ export class PlatformAccountSecurity {
       return null;
     }
     const unsigned = `v1.${accountId}.${issuedAtPart}.${nonce}`;
-    if (!constantTimeEqual(signature, this.sign(`link|${unsigned}`))) return null;
+    if (!constantTimeEqual(signature, this.sign(`link|${unsigned}`)))
+      return null;
     const issuedAtMs = Number.parseInt(issuedAtPart, 36);
     const nowMs = this.now().getTime();
     if (
@@ -288,7 +331,10 @@ export class PlatformAccountSecurity {
   identifyAccount(
     cookieHeader: string | string[] | undefined,
   ): PlatformAccountIdentity | null {
-    const account = this.parseAccountCookieHeader(cookieHeader, this.now().getTime());
+    const account = this.parseAccountCookieHeader(
+      cookieHeader,
+      this.now().getTime(),
+    );
     return account === null
       ? null
       : { accountId: account.accountId, createdAt: account.createdAt };
@@ -351,7 +397,8 @@ export class PlatformAccountSecurity {
       return null;
     }
     const unsigned = `v1.${accountId}.${issuedAtPart}.${nonce}`;
-    if (!constantTimeEqual(signature, this.sign(`account|${unsigned}`))) return null;
+    if (!constantTimeEqual(signature, this.sign(`account|${unsigned}`)))
+      return null;
     const issuedAtMs = Number.parseInt(issuedAtPart, 36);
     if (
       !Number.isSafeInteger(issuedAtMs) ||
@@ -368,7 +415,10 @@ export class PlatformAccountSecurity {
     };
   }
 
-  private createCsrfToken(account: ParsedAccountCookie, issuedAtMs: number): string {
+  private createCsrfToken(
+    account: ParsedAccountCookie,
+    issuedAtMs: number,
+  ): string {
     const unsigned = `v1.${account.accountId}.${issuedAtMs.toString(36)}`;
     return `${unsigned}.${this.sign(`csrf|${unsigned}`)}`;
   }
@@ -382,13 +432,18 @@ export class PlatformAccountSecurity {
     const parts = token.split(".");
     if (parts.length !== 4 || parts[0] !== "v1") return false;
     const [, accountId, issuedAtPart, signature] = parts;
-    if (accountId !== account.accountId || !/^[0-9a-z]{1,16}$/.test(issuedAtPart)) {
+    if (
+      accountId !== account.accountId ||
+      !/^[0-9a-z]{1,16}$/.test(issuedAtPart)
+    ) {
       return false;
     }
     const unsigned = `v1.${accountId}.${issuedAtPart}`;
-    if (!constantTimeEqual(signature, this.sign(`csrf|${unsigned}`))) return false;
+    if (!constantTimeEqual(signature, this.sign(`csrf|${unsigned}`)))
+      return false;
     const issuedAt = Number.parseInt(issuedAtPart, 36);
-    if (!Number.isSafeInteger(issuedAt) || issuedAt > nowMs + 30_000) return false;
+    if (!Number.isSafeInteger(issuedAt) || issuedAt > nowMs + 30_000)
+      return false;
     return nowMs - issuedAt < this.csrfTtlMs;
   }
 

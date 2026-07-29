@@ -32,6 +32,12 @@ export interface PlatformAccountHttpOptions {
   readonly handoffs: PlatformHandoffStore;
   /** `audience -> allowlisted return origin` — see `resolvePlatformReturnOrigins`. Never trust a client-supplied origin; this map is the only source of truth. */
   readonly returnOrigins: ReadonlyMap<string, string>;
+  /**
+   * Origins allowed an ambient credentialed read of `/api/account/pov-claims`
+   * — see `resolvePlatformPovClaimOrigins` for why this is NOT the same list
+   * as `returnOrigins`. Empty means no origin may.
+   */
+  readonly povClaimOrigins: ReadonlySet<string>;
   readonly githubSignInAvailable: boolean;
   readonly onOperatorError?: (operatorCode: string, error: unknown) => void;
 }
@@ -40,26 +46,38 @@ function sendFailure(res: Response, status: number, code: string): void {
   res.status(status).json({ error: { code } });
 }
 
-function stringField(body: unknown, field: string, maxBytes: number): string | null {
-  if (typeof body !== "object" || body === null || !(field in body)) return null;
+function stringField(
+  body: unknown,
+  field: string,
+  maxBytes: number,
+): string | null {
+  if (typeof body !== "object" || body === null || !(field in body))
+    return null;
   const value = (body as Record<string, unknown>)[field];
-  return typeof value === "string" && Buffer.byteLength(value, "utf8") <= maxBytes
+  return typeof value === "string" &&
+    Buffer.byteLength(value, "utf8") <= maxBytes
     ? value
     : null;
 }
 
-export function createPlatformAccountRouter(options: PlatformAccountHttpOptions): Router {
+export function createPlatformAccountRouter(
+  options: PlatformAccountHttpOptions,
+): Router {
   const router = express.Router();
   const logError = options.onOperatorError ?? ((): void => {});
 
   router.get("/api/account", async (req: Request, res: Response) => {
     res.setHeader("Cache-Control", "no-store, max-age=0");
     try {
-      const bootstrap = options.security.bootstrapRead(requestSecurityHeaders(req));
-      if (bootstrap.setCookie !== null) res.setHeader("Set-Cookie", bootstrap.setCookie);
-      const canonicalAccountId = await options.identityLinkStore.resolveCanonicalAccountId(
-        bootstrap.account.accountId,
+      const bootstrap = options.security.bootstrapRead(
+        requestSecurityHeaders(req),
       );
+      if (bootstrap.setCookie !== null)
+        res.setHeader("Set-Cookie", bootstrap.setCookie);
+      const canonicalAccountId =
+        await options.identityLinkStore.resolveCanonicalAccountId(
+          bootstrap.account.accountId,
+        );
       const [account, claims, githubStatus] = await Promise.all([
         options.accounts.getAccount(canonicalAccountId),
         options.claims.getClaims(canonicalAccountId),
@@ -82,6 +100,102 @@ export function createPlatformAccountRouter(options: PlatformAccountHttpOptions)
     }
   });
 
+  /**
+   * The ONLY cross-origin-readable account route, and deliberately the
+   * narrowest possible one: a sibling surface (the league mirror at
+   * `beta.*`, the market at `bet.*`) needs the viewer's claimed lineage
+   * slugs to default the replay camera to their own agent, and needs
+   * nothing else whatsoever.
+   *
+   * Why not just CORS-enable `GET /api/account`? Because it returns
+   * `csrfToken`. Handing that to another origin with credentials would let
+   * anything executing there perform authenticated writes against this
+   * account authority — it would convert a read grant into a full CSRF
+   * bypass. So this route returns claims and a schema version, never the
+   * CSRF token, the account id, the display name, or the GitHub identity.
+   *
+   * Why this works at all without weakening the session cookie: `bet.*`,
+   * `beta.*` and this origin are cross-ORIGIN but same-SITE (shared
+   * registrable domain), and `SameSite` is a site-level control — so the
+   * host-only `SameSite=Lax` session cookie IS sent on a credentialed
+   * fetch here. No `SameSite=None` is needed, and it must not be added:
+   * that would expose the sole account authority to genuinely cross-site
+   * requests. The corollary is that this grant does not extend to any
+   * origin outside the registrable domain, cookie-wise, no matter what the
+   * allowlist says.
+   *
+   * The allowlist is its OWN explicit list (`povClaimOrigins`), deliberately
+   * NOT the handoff's `audience -> origin` map. Those are different grants:
+   * a handoff return origin receives a redirect for a sign-in the viewer
+   * explicitly started, whereas an origin here may read that viewer's claims
+   * silently on any page load. Deriving one from the other would mean
+   * registering a future handoff child quietly widened who can harvest every
+   * viewer's claims — an escalation performed by config, invisible in the
+   * diff. See `PlatformPovClaimOrigins.ts`. An arbitrary `Origin` is never
+   * reflected, and an empty list denies everyone. `Vary: Origin` is
+   * mandatory — without it a shared cache could serve one origin's allow
+   * header to another.
+   *
+   * A GET carrying only `Accept` triggers no preflight (both are CORS-
+   * safelisted), so there is deliberately no `OPTIONS` handler here; adding
+   * a request header later would need one.
+   */
+  router.get("/api/account/pov-claims", async (req: Request, res: Response) => {
+    res.setHeader("Cache-Control", "no-store, max-age=0");
+    // Mandatory, and mandatory even on the paths that set no allow header:
+    // a shared cache keying on URL alone could otherwise hand one origin's
+    // `Access-Control-Allow-Origin` to a different origin.
+    res.setHeader("Vary", "Origin");
+    const empty = { schemaVersion: 1, lineageSlugs: [] as readonly string[] };
+    const requestOrigin = req.headers.origin;
+    if (typeof requestOrigin === "string" && requestOrigin !== "") {
+      if (!options.povClaimOrigins.has(requestOrigin)) {
+        // A cross-origin caller we do not allowlist. The browser would
+        // withhold the body anyway for want of an allow header, but do not
+        // lean on that: read no cookie and disclose nothing. Answering 200
+        // with an empty set rather than 403 keeps this off the error path —
+        // it is a camera default, and a same-site sibling probing it learns
+        // only that it exists.
+        res.status(200).json(empty);
+        return;
+      }
+      res.setHeader("Access-Control-Allow-Origin", requestOrigin);
+      res.setHeader("Access-Control-Allow-Credentials", "true");
+    }
+    try {
+      // Origin duty is discharged above, which is the precondition this
+      // method documents. It also does NOT mint on a cookieless request —
+      // a league visitor who has never touched the platform must not walk
+      // away with a freshly created empty account.
+      const account = options.security.readEstablishedAccountWithoutOriginCheck(
+        req.headers.cookie,
+      );
+      if (account === null) {
+        res.status(200).json(empty);
+        return;
+      }
+      const canonicalAccountId =
+        await options.identityLinkStore.resolveCanonicalAccountId(
+          account.accountId,
+        );
+      const claims = await options.claims.getClaims(canonicalAccountId);
+      // Slugs only. `label` is user-supplied free text and the timestamps
+      // are nobody else's business; the consumer matches on `lineageSlug`
+      // alone (see `findPlayerForClaimedLineages`), so anything more would
+      // be disclosure without a caller.
+      res.status(200).json({
+        schemaVersion: 1,
+        lineageSlugs: claims.map((claim) => claim.lineageSlug),
+      });
+    } catch (error) {
+      logError("platform_pov_claims_read_failed", error);
+      // A camera default is not worth a 503 the caller must special-case:
+      // "no claims" is already the overwhelmingly common answer, and the
+      // picker has a neutral default for it.
+      res.status(200).json(empty);
+    }
+  });
+
   router.post(
     "/api/account/display-name",
     express.json({ limit: "8kb" }),
@@ -100,16 +214,22 @@ export function createPlatformAccountRouter(options: PlatformAccountHttpOptions)
           sendFailure(res, 400, "PLATFORM_INVALID_REQUEST");
           return;
         }
-        const canonicalAccountId = await options.identityLinkStore.resolveCanonicalAccountId(
-          authorization.account.accountId,
-        );
+        const canonicalAccountId =
+          await options.identityLinkStore.resolveCanonicalAccountId(
+            authorization.account.accountId,
+          );
         const account = await options.accounts.setDisplayName(
           canonicalAccountId,
           displayName,
         );
         res.status(200).json({ schemaVersion: 1, account });
       } catch (error) {
-        sendPlatformSecurityFailure(res, logError, "platform_display_name_failed", error);
+        sendPlatformSecurityFailure(
+          res,
+          logError,
+          "platform_display_name_failed",
+          error,
+        );
       }
     },
   );
@@ -124,18 +244,28 @@ export function createPlatformAccountRouter(options: PlatformAccountHttpOptions)
         const authorization = options.security.authorizeWrite(
           requestSecurityHeaders(req),
         );
-        const label = stringField(req.body, "label", MAX_CLAIM_LABEL_REQUEST_BYTES);
+        const label = stringField(
+          req.body,
+          "label",
+          MAX_CLAIM_LABEL_REQUEST_BYTES,
+        );
         if (label === null || label.trim().length === 0) {
           sendFailure(res, 400, "PLATFORM_INVALID_REQUEST");
           return;
         }
-        const canonicalAccountId = await options.identityLinkStore.resolveCanonicalAccountId(
-          authorization.account.accountId,
-        );
+        const canonicalAccountId =
+          await options.identityLinkStore.resolveCanonicalAccountId(
+            authorization.account.accountId,
+          );
         const claims = await options.claims.addClaim(canonicalAccountId, label);
         res.status(200).json({ schemaVersion: 1, claims });
       } catch (error) {
-        sendPlatformSecurityFailure(res, logError, "platform_claim_failed", error);
+        sendPlatformSecurityFailure(
+          res,
+          logError,
+          "platform_claim_failed",
+          error,
+        );
       }
     },
   );
@@ -150,18 +280,31 @@ export function createPlatformAccountRouter(options: PlatformAccountHttpOptions)
         const authorization = options.security.authorizeWrite(
           requestSecurityHeaders(req),
         );
-        const lineageSlug = stringField(req.body, "lineageSlug", MAX_CLAIM_LABEL_REQUEST_BYTES);
+        const lineageSlug = stringField(
+          req.body,
+          "lineageSlug",
+          MAX_CLAIM_LABEL_REQUEST_BYTES,
+        );
         if (lineageSlug === null || lineageSlug.trim().length === 0) {
           sendFailure(res, 400, "PLATFORM_INVALID_REQUEST");
           return;
         }
-        const canonicalAccountId = await options.identityLinkStore.resolveCanonicalAccountId(
-          authorization.account.accountId,
+        const canonicalAccountId =
+          await options.identityLinkStore.resolveCanonicalAccountId(
+            authorization.account.accountId,
+          );
+        const claims = await options.claims.removeClaim(
+          canonicalAccountId,
+          lineageSlug,
         );
-        const claims = await options.claims.removeClaim(canonicalAccountId, lineageSlug);
         res.status(200).json({ schemaVersion: 1, claims });
       } catch (error) {
-        sendPlatformSecurityFailure(res, logError, "platform_claim_remove_failed", error);
+        sendPlatformSecurityFailure(
+          res,
+          logError,
+          "platform_claim_remove_failed",
+          error,
+        );
       }
     },
   );
@@ -180,12 +323,15 @@ export function createPlatformAccountRouter(options: PlatformAccountHttpOptions)
   router.get("/handoff/start", async (req: Request, res: Response) => {
     res.setHeader("Cache-Control", "no-store, max-age=0");
     try {
-      const audience = typeof req.query.audience === "string" ? req.query.audience : "";
+      const audience =
+        typeof req.query.audience === "string" ? req.query.audience : "";
       const state = typeof req.query.state === "string" ? req.query.state : "";
       const returnPath =
         typeof req.query.returnPath === "string" ? req.query.returnPath : "";
       const childSessionId =
-        typeof req.query.childSessionId === "string" ? req.query.childSessionId : "";
+        typeof req.query.childSessionId === "string"
+          ? req.query.childSessionId
+          : "";
       if (
         !isValidHandoffAudience(audience) ||
         !STATE_PATTERN.test(state) ||
@@ -212,10 +358,12 @@ export function createPlatformAccountRouter(options: PlatformAccountHttpOptions)
       // reflected from the request, so the resulting redirect always
       // lands on a real child, never an attacker-controlled origin.
       const bootstrap = options.security.bootstrap(req.headers.cookie);
-      if (bootstrap.setCookie !== null) res.setHeader("Set-Cookie", bootstrap.setCookie);
-      const canonicalAccountId = await options.identityLinkStore.resolveCanonicalAccountId(
-        bootstrap.account.accountId,
-      );
+      if (bootstrap.setCookie !== null)
+        res.setHeader("Set-Cookie", bootstrap.setCookie);
+      const canonicalAccountId =
+        await options.identityLinkStore.resolveCanonicalAccountId(
+          bootstrap.account.accountId,
+        );
       const [account, claims] = await Promise.all([
         options.accounts.getAccount(canonicalAccountId),
         options.claims.getClaims(canonicalAccountId),
@@ -272,7 +420,11 @@ export function createPlatformAccountRouter(options: PlatformAccountHttpOptions)
         childSessionId,
       });
       if (!result.ok) {
-        sendFailure(res, 409, `PLATFORM_HANDOFF_${result.reason.toUpperCase()}`);
+        sendFailure(
+          res,
+          409,
+          `PLATFORM_HANDOFF_${result.reason.toUpperCase()}`,
+        );
         return;
       }
       res.status(200).json({
@@ -288,11 +440,15 @@ export function createPlatformAccountRouter(options: PlatformAccountHttpOptions)
   router.get("/api/identity/status", async (req: Request, res: Response) => {
     res.setHeader("Cache-Control", "no-store, max-age=0");
     try {
-      const bootstrap = options.security.bootstrapRead(requestSecurityHeaders(req));
-      if (bootstrap.setCookie !== null) res.setHeader("Set-Cookie", bootstrap.setCookie);
-      const canonicalAccountId = await options.identityLinkStore.resolveCanonicalAccountId(
-        bootstrap.account.accountId,
+      const bootstrap = options.security.bootstrapRead(
+        requestSecurityHeaders(req),
       );
+      if (bootstrap.setCookie !== null)
+        res.setHeader("Set-Cookie", bootstrap.setCookie);
+      const canonicalAccountId =
+        await options.identityLinkStore.resolveCanonicalAccountId(
+          bootstrap.account.accountId,
+        );
       const [account, githubStatus] = await Promise.all([
         options.accounts.getAccount(canonicalAccountId),
         options.identityLinkStore.getStatus(canonicalAccountId),
@@ -305,7 +461,9 @@ export function createPlatformAccountRouter(options: PlatformAccountHttpOptions)
           githubLogin: githubStatus.login,
           githubAvatarUrl: githubStatus.avatarUrl,
         },
-        signInUrl: options.githubSignInAvailable ? "/api/auth/github/start" : null,
+        signInUrl: options.githubSignInAvailable
+          ? "/api/auth/github/start"
+          : null,
       });
     } catch (error) {
       logError("platform_identity_status_failed", error);
@@ -330,5 +488,9 @@ function sendPlatformSecurityFailure(
       ? error.httpStatus
       : 503;
   logError(operatorCode, error);
-  sendFailure(res, status, status === 503 ? "PLATFORM_UNAVAILABLE" : "PLATFORM_UNAUTHORIZED");
+  sendFailure(
+    res,
+    status,
+    status === 503 ? "PLATFORM_UNAVAILABLE" : "PLATFORM_UNAUTHORIZED",
+  );
 }

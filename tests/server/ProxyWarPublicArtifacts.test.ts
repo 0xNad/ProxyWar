@@ -115,6 +115,27 @@ describe("ProxyWarPublicArtifacts", () => {
     expect(policy).toContain("connect-src 'self'");
   });
 
+  it("widens connect-src for the platform origin — and ONLY connect-src", () => {
+    const policy = proxyWarLeagueContentSecurityPolicy([
+      "https://app.proxywar.xyz",
+    ]);
+    // Without this the PoV claim fetch dies as a silent console violation —
+    // no failed response, nothing to notice. See `resolveClaimedLineageSlugs`.
+    expect(policy).toContain("connect-src 'self' https://app.proxywar.xyz");
+    // Granting a fetch target must not grant anything else: the platform
+    // origin still cannot run script here, be framed, or receive a form post.
+    expect(policy).toContain("script-src 'self'");
+    expect(policy).toContain("frame-src 'none'");
+    expect(policy).toContain("form-action 'none'");
+    expect(policy).not.toContain("script-src 'self' https://app.proxywar.xyz");
+  });
+
+  it("defaults to a closed connect-src when no origin is passed", () => {
+    expect(proxyWarLeagueContentSecurityPolicy()).toContain(
+      "connect-src 'self';",
+    );
+  });
+
   it("lets only league mirror paths through the beta gate anonymously", () => {
     expect(isProxyWarPublicLeaguePath("/league")).toBe(true);
     expect(
@@ -277,7 +298,9 @@ describe("ProxyWarPublicArtifacts", () => {
       matchProxyWarPublicPremiereWritePath(`/api/premieres/${id}/sessions`),
     ).toEqual({ kind: "session", premiereId: id });
     expect(
-      matchProxyWarPublicPremiereWritePath(`/api/premieres/${id}/market-orders`),
+      matchProxyWarPublicPremiereWritePath(
+        `/api/premieres/${id}/market-orders`,
+      ),
     ).toEqual({ kind: "market_order", premiereId: id });
     expect(
       matchProxyWarPublicPremiereWritePath(

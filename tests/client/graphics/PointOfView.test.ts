@@ -66,14 +66,25 @@ describe("resolveClaimedLineageSlugs", () => {
     );
   });
 
-  it("an origin that does NOT match the configured platform origin (and isn't bet.) never hits the platform endpoint — no accidental cross-deployment match", async () => {
-    // Deployment is configured for the apex, but this viewer is on app. —
+  it("an origin that does NOT match the configured platform origin reads the platform CROSS-ORIGIN rather than its own /api/account — no accidental cross-deployment match", async () => {
+    // Deployment is configured for the apex, but this viewer is on app. — it
     // must NOT be treated as the platform origin just because it once was.
+    // It now falls to the cross-origin branch (app. is same-site with the
+    // apex), which is correct: ask the configured authority, never assume
+    // this origin is one.
     setLocation(PLATFORM_ORIGIN, "app.proxywar.xyz");
-    const fetchImpl = vi.fn(async () => jsonResponse({ claims: [] }));
+    const fetchImpl = vi.fn(async () =>
+      jsonResponse({ schemaVersion: 1, lineageSlugs: [] }),
+    );
     const slugs = await resolveClaimedLineageSlugs(fetchImpl, APEX_PLATFORM_ORIGIN);
     expect(slugs).toEqual([]);
-    expect(fetchImpl).not.toHaveBeenCalled();
+    expect(fetchImpl).toHaveBeenCalledWith(
+      `${APEX_PLATFORM_ORIGIN}/api/account/pov-claims`,
+      expect.anything(),
+    );
+    // The thing that must never happen: reading its OWN /api/account and
+    // trusting a peer deployment's session as if it were the authority's.
+    expect(fetchImpl).not.toHaveBeenCalledWith("/api/account", expect.anything());
   });
 
   it("bet.proxywar.xyz: fetches /api/premieres/account and reads identity.claims, independent of the configured platform origin", async () => {
@@ -93,12 +104,50 @@ describe("resolveClaimedLineageSlugs", () => {
     );
   });
 
-  it("beta.proxywar.xyz (no integration): resolves to [] with ZERO requests", async () => {
+  it("beta.proxywar.xyz (the league mirror): reads the platform's slug list CROSS-ORIGIN with credentials — same-site, so the Lax cookie still rides", async () => {
     setLocation("https://beta.proxywar.xyz", "beta.proxywar.xyz");
-    const fetchImpl = vi.fn(async () => jsonResponse({}));
+    const fetchImpl = vi.fn(async () =>
+      jsonResponse({ schemaVersion: 1, lineageSlugs: ["daveey-proxywar"] }),
+    );
     const slugs = await resolveClaimedLineageSlugs(fetchImpl, PLATFORM_ORIGIN);
-    expect(slugs).toEqual([]);
-    expect(fetchImpl).not.toHaveBeenCalled();
+    expect(slugs).toEqual(["daveey-proxywar"]);
+    // Absolute URL, and `include` — this is the ONE branch that deliberately
+    // leaves its own origin. Everything else must stay `same-origin`.
+    expect(fetchImpl).toHaveBeenCalledWith(
+      `${PLATFORM_ORIGIN}/api/account/pov-claims`,
+      expect.objectContaining({ credentials: "include" }),
+    );
+  });
+
+  it("follows the CONFIGURED platform origin cross-origin, so the apex cutover needs no code change", async () => {
+    setLocation("https://beta.proxywar.xyz", "beta.proxywar.xyz");
+    const fetchImpl = vi.fn(async () =>
+      jsonResponse({ schemaVersion: 1, lineageSlugs: [] }),
+    );
+    await resolveClaimedLineageSlugs(fetchImpl, APEX_PLATFORM_ORIGIN);
+    expect(fetchImpl).toHaveBeenCalledWith(
+      `${APEX_PLATFORM_ORIGIN}/api/account/pov-claims`,
+      expect.anything(),
+    );
+  });
+
+  it("never sends this origin's cookies cross-origin from the platform or bet. branches", async () => {
+    // The regression that would matter: a same-origin endpoint quietly
+    // switched to `include`. Both same-origin branches must stay pinned.
+    for (const [origin, hostname] of [
+      [PLATFORM_ORIGIN, "app.proxywar.xyz"],
+      ["https://bet.proxywar.xyz", "bet.proxywar.xyz"],
+    ] as const) {
+      setLocation(origin, hostname);
+      const fetchImpl = vi.fn(async () =>
+        jsonResponse({ claims: [], identity: { claims: [] } }),
+      );
+      await resolveClaimedLineageSlugs(fetchImpl, PLATFORM_ORIGIN);
+      expect(fetchImpl).toHaveBeenCalledWith(
+        expect.not.stringContaining("://"),
+        expect.objectContaining({ credentials: "same-origin" }),
+      );
+    }
   });
 
   it("an unlinked guest on the platform origin costs nothing but the one fetch — an empty claim set resolves to []", async () => {

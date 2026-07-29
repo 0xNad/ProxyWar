@@ -347,14 +347,31 @@ export function isProxyWarPublicAccountWritePath(pathname: string): boolean {
   return pathname === PROXYWAR_ACCOUNT_LEAGUE_CLAIM_PATH;
 }
 
-export function proxyWarLeagueContentSecurityPolicy(): string {
+/**
+ * @param connectOrigins Extra origins the page may `fetch()`. Empty by
+ * default, keeping `connect-src 'self'`. The league mirror needs exactly one:
+ * the platform account origin, so a signed-in viewer's replay camera can
+ * default to their own claimed agent (`resolveClaimedLineageSlugs` →
+ * `/api/account/pov-claims`). Without it that fetch is blocked by CSP before
+ * CORS is ever consulted — and blocked *silently*, as a console violation
+ * with no failed response to notice, which is why this is a parameter rather
+ * than something a caller can forget.
+ *
+ * Widening `connect-src` is deliberately the ONLY concession: `script-src`,
+ * `frame-src`, `form-action` and the rest stay closed, so this grants the
+ * platform origin no ability to run code or receive a form post here.
+ */
+export function proxyWarLeagueContentSecurityPolicy(
+  connectOrigins: readonly string[] = [],
+): string {
+  const connect = ["'self'", ...connectOrigins].join(" ");
   return [
     "default-src 'self'",
     "script-src 'self'",
     "style-src 'self' 'unsafe-inline'",
     "img-src 'self' data: blob:",
     "font-src 'self' data:",
-    "connect-src 'self'",
+    `connect-src ${connect}`,
     "worker-src 'self' blob:",
     "media-src 'self' blob:",
     "manifest-src 'self'",
