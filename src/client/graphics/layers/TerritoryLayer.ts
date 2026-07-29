@@ -19,8 +19,16 @@ import {
   MouseOverEvent,
 } from "../../InputHandler";
 import { FrameProfiler } from "../FrameProfiler";
+import { PointOfViewChangeEvent } from "../PointOfView";
 import { TransformHandler } from "../TransformHandler";
 import { Layer } from "./Layer";
+
+// Alpha a non-followed agent's territory/border paint down to when a PoV
+// is set (see `povPlayer`) — well below the normal 150/255, but never 0:
+// ownership must stay legible, just visually secondary to whoever the
+// viewer is following.
+const POV_DIMMED_FILL_ALPHA = 60;
+const POV_DIMMED_BORDER_ALPHA = 130;
 
 export class TerritoryLayer implements Layer {
   private canvas: HTMLCanvasElement;
@@ -55,6 +63,13 @@ export class TerritoryLayer implements Layer {
   private lastRefresh = 0;
 
   private lastFocusedPlayer: PlayerView | null = null;
+  // Set only via `PointOfViewChangeEvent` (see `PointOfViewSelector`).
+  // `null` on every route that never mounts that picker (live play, and
+  // a spectator route before/without a PoV pick) — `paintTerritory`
+  // reads this to dim every other nation's territory alpha so the
+  // followed agent's holdings read at full strength, without moving the
+  // camera or changing anyone's actual color.
+  private povPlayer: PlayerView | null = null;
 
   constructor(
     private game: GameView,
@@ -329,8 +344,22 @@ export class TerritoryLayer implements Layer {
       // TODO: consider re-enabling this on mobile or low end devices for smoother dragging.
       // this.lastDragTime = Date.now();
     });
+    this.eventBus.on(PointOfViewChangeEvent, (e) => this.onPointOfViewChange(e));
     this.redraw();
   }
+  private onPointOfViewChange(event: PointOfViewChangeEvent) {
+    if (this.povPlayer === event.player) {
+      return;
+    }
+    this.povPlayer = event.player;
+    // Every owned tile's alpha depends on `povPlayer` now (see
+    // `paintTerritory`), so a change here has to repaint everything, not
+    // just future updates — mirrors `redraw()`'s own full-map pass, just
+    // without recreating the canvases. Rare (a viewer picking/clearing a
+    // PoV), never a per-tick cost.
+    this.game.forEachTile((t) => this.paintTerritory(t));
+  }
+
 
   onMouseOver(event: MouseOverEvent) {
     this.lastMousePosition = { x: event.x, y: event.y };
@@ -560,6 +589,11 @@ export class TerritoryLayer implements Layer {
       this.highlightedTerritory &&
       this.highlightedTerritory.id() === owner.id();
     const myPlayer = this.game.myPlayer();
+    // Dim every OTHER agent's territory so the followed one reads at full
+    // strength — never recolors anything, just pulls back the alpha this
+    // layer already paints with. `null` when no PoV is set (the default,
+    // and every non-spectator route) leaves every tile exactly as before.
+    const isDimmedByPov = this.povPlayer !== null && owner !== this.povPlayer;
 
     if (this.game.isBorder(tile)) {
       // eslint-disable-next-line @typescript-eslint/no-unused-vars
@@ -579,13 +613,18 @@ export class TerritoryLayer implements Layer {
         this.imageData,
         tile,
         owner.borderColor(tile, isDefended),
-        255,
+        isDimmedByPov ? POV_DIMMED_BORDER_ALPHA : 255,
       );
     } else {
       // Alternative view only shows borders.
       this.clearAlternativeTile(tile);
 
-      this.paintTile(this.imageData, tile, owner.territoryColor(tile), 150);
+      this.paintTile(
+        this.imageData,
+        tile,
+        owner.territoryColor(tile),
+        isDimmedByPov ? POV_DIMMED_FILL_ALPHA : 150,
+      );
     }
   }
 

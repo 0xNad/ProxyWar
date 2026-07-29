@@ -2,52 +2,25 @@ import { html, LitElement, nothing } from "lit";
 import { customElement, state } from "lit/decorators.js";
 import { z } from "zod";
 import "../components/GithubSignIn";
-import { formatSignedCredits } from "../components/pnlDisplay";
 import {
   fetchLeagueData,
-  recentForm,
-  type FormEntry,
   type LeagueDataSnapshot,
-  type LeagueEpisodeRow,
   type LeagueStandingRow,
 } from "../leagueData";
 
-const MAX_CLAIM_PLAYER_NAME_LENGTH = 80;
-const DISMISS_STORAGE_KEY = "pw-account-league-claim-dismissed";
+const MAX_CLAIM_LABEL_LENGTH = 120;
+const DISMISS_STORAGE_KEY = "pw-account-claim-dismissed";
 
 const accountIdentitySchema = z.object({
-  participantId: z.string(),
+  accountId: z.string(),
   displayName: z.string().nullable(),
   githubLogin: z.string().nullable(),
   githubAvatarUrl: z.string().nullable(),
 });
 
-const accountMatchSchema = z.object({
-  premiereId: z.string(),
-  net: z.number(),
-  revealedAt: z.string().nullable(),
-});
-
-const accountCurrentPremiereSchema = z.object({
-  premiereId: z.string(),
-  status: z.enum(["open", "settled"]),
-  balance: z.number().nullable(),
-  positionCount: z.number(),
-  unrealizedPnl: z.number(),
-});
-
-const accountBettingSchema = z.object({
-  lifetimePoints: z.number(),
-  premieresTraded: z.number(),
-  premieresWon: z.number(),
-  rank: z.number().nullable(),
-  totalRankedParticipants: z.number(),
-  matches: z.array(accountMatchSchema),
-  currentPremiere: accountCurrentPremiereSchema.nullable(),
-});
-
 const accountClaimSchema = z.object({
-  playerName: z.string(),
+  lineageSlug: z.string(),
+  label: z.string(),
   claimedAt: z.string(),
   updatedAt: z.string(),
 });
@@ -56,8 +29,7 @@ const accountResponseSchema = z.object({
   schemaVersion: z.literal(1),
   csrfToken: z.string(),
   identity: accountIdentitySchema,
-  betting: accountBettingSchema,
-  league: z.object({ claim: accountClaimSchema.nullable() }),
+  claim: accountClaimSchema.nullable(),
 });
 
 const claimResponseSchema = z.object({
@@ -66,11 +38,15 @@ const claimResponseSchema = z.object({
 });
 
 type AccountResponse = z.infer<typeof accountResponseSchema>;
-type AccountMatch = z.infer<typeof accountMatchSchema>;
+
+/** `<slug>:v<N>` -> `<slug>` — mirrors the server's `deriveLineageSlug` (see `PlatformPolicyClaimStore.ts`). Client-side only for grouping the picker; the server derives its own copy from whatever `label` is actually submitted, never trusts this one. */
+function deriveLineageSlug(label: string): string {
+  return label.replace(/:v\d+$/i, "");
+}
 
 function readDismissed(): boolean {
   try {
-    return window.localStorage.getItem(DISMISS_STORAGE_KEY) === "1";
+    return window.sessionStorage.getItem(DISMISS_STORAGE_KEY) === "1";
   } catch {
     return false;
   }
@@ -78,25 +54,23 @@ function readDismissed(): boolean {
 
 function persistDismissed(): void {
   try {
-    window.localStorage.setItem(DISMISS_STORAGE_KEY, "1");
+    window.sessionStorage.setItem(DISMISS_STORAGE_KEY, "1");
   } catch {
-    // Best-effort — a private-browsing context that refuses localStorage
-    // just re-shows the prompt next load, which is a mild nag at worst.
+    // Best-effort — private browsing or a full storage quota just means
+    // the dismissal doesn't survive a reload.
   }
 }
 
 /**
- * One place a participant sees everything the system knows about them,
- * both as a bettor (real, earned — from `ReplayPremierePointsLedger`) and,
- * if they've made one, as a self-asserted league-agent owner (a claim,
- * never verified — see the League section's own copy). Standalone route
- * (`/account`, see `Main.ts`'s `handleUrl`), NOT mounted inside the game
- * engine/replay viewer: this page has no premiere to render behind it.
- *
- * Works signed out: `/api/premieres/account` mints/reuses the same signed
- * guest cookie every other premiere surface uses (never a second
- * identity), so a first-time visitor sees a coherent empty state rather
- * than an error.
+ * `app.proxywar.xyz`'s own account page — identity (display name, GitHub
+ * link) and a self-asserted "this model lineage is mine" claim. Nothing
+ * betting-specific lives here anymore: the platform is the sole account
+ * authority (see the platform build's contract), but it owns identity
+ * only, never a child app's own domain data (points, positions). Works
+ * signed out: `/api/account` mints/reuses the same signed platform cookie
+ * every platform surface uses, so a first-time visitor sees a coherent
+ * empty state rather than an error. Reachable with wagering off
+ * everywhere — this page has no dependency on any wagering flag at all.
  */
 @customElement("premiere-account-page")
 export class PremiereAccountPage extends LitElement {
@@ -112,12 +86,6 @@ export class PremiereAccountPage extends LitElement {
   @state() private claimError: string | null = null;
 
   createRenderRoot() {
-    // Light DOM, so page-level Tailwind applies. Two things bite here:
-    // custom elements are display:inline by default, and `body` is a flex
-    // row — so without `grow` the host shrink-wraps to the inner
-    // `max-w-3xl` (768px) and `mx-auto` then centres inside that shrunken
-    // box, pinning the content left with dead space beside it at any width
-    // above 768.
     this.classList.add("block", "w-full", "grow");
     return this;
   }
@@ -135,26 +103,19 @@ export class PremiereAccountPage extends LitElement {
     this.loading = true;
     this.loadError = false;
     try {
-      const response = await fetch("/api/premieres/account", {
+      const response = await fetch("/api/account", {
         method: "GET",
         headers: { Accept: "application/json" },
         credentials: "same-origin",
         cache: "no-store",
       });
-      if (response.status === 404) {
-        // Wagering isn't enabled on this deployment — a coherent, honest
-        // "not here" state, distinct from a real load failure.
-        this.account = null;
-        this.loadError = false;
-        return;
-      }
       const body: unknown = await response.json().catch(() => null);
       const parsed = accountResponseSchema.safeParse(body);
       if (!response.ok || !parsed.success) {
         throw new Error("account_load_failed");
       }
       this.account = parsed.data;
-      this.claimDraft = parsed.data.league.claim?.playerName ?? "";
+      this.claimDraft = parsed.data.claim?.label ?? "";
     } catch {
       this.account = null;
       this.loadError = true;
@@ -163,13 +124,13 @@ export class PremiereAccountPage extends LitElement {
     }
   }
 
-  private async submitClaim(playerName: string): Promise<void> {
+  private async submitClaim(label: string): Promise<void> {
     const account = this.account;
     if (account === null || this.savingClaim) return;
     this.savingClaim = true;
     this.claimError = null;
     try {
-      const response = await fetch("/api/premieres/account/league-claim", {
+      const response = await fetch("/api/account/claim", {
         method: "POST",
         headers: {
           Accept: "application/json",
@@ -178,7 +139,7 @@ export class PremiereAccountPage extends LitElement {
         },
         credentials: "same-origin",
         cache: "no-store",
-        body: JSON.stringify({ playerName }),
+        body: JSON.stringify({ label }),
       });
       const body: unknown = await response.json().catch(() => null);
       const parsed = claimResponseSchema.safeParse(body);
@@ -186,8 +147,6 @@ export class PremiereAccountPage extends LitElement {
         throw new Error("claim_save_failed");
       }
       this.editingClaim = false;
-      // Re-fetch: cheapest correct way to pick up a fresh CSRF token and
-      // reflect exactly what the server stored.
       await this.loadAccount();
     } catch {
       this.claimError = "Could not save your claim. Try again.";
@@ -229,7 +188,7 @@ export class PremiereAccountPage extends LitElement {
         Loading your account…
       </div>`;
     }
-    if (this.loadError) {
+    if (this.loadError || this.account === null) {
       return html`<div
         class="rounded-lg border border-danger/40 bg-danger/10 px-4 py-3 text-sm text-danger"
         role="alert"
@@ -237,17 +196,7 @@ export class PremiereAccountPage extends LitElement {
         Could not load your account. Try reloading the page.
       </div>`;
     }
-    if (this.account === null) {
-      return html`<div
-        class="rounded-lg border border-line bg-surface-2 px-4 py-6 text-sm text-ink-muted"
-      >
-        Betting isn't live on this deployment right now, so there's nothing
-        account-shaped to show yet.
-      </div>`;
-    }
-    return html`
-      ${this.renderIdentity()} ${this.renderBetting()} ${this.renderLeague()}
-    `;
+    return html` ${this.renderIdentity()} ${this.renderClaim()} `;
   }
 
   // ---------------------------------------------------------------------
@@ -259,7 +208,7 @@ export class PremiereAccountPage extends LitElement {
     const label =
       identity.githubLogin ??
       identity.displayName ??
-      `Guest ${identity.participantId.slice(-4)}`;
+      `Guest ${identity.accountId.slice(-4)}`;
     return html`
       <section
         aria-labelledby="account-identity-heading"
@@ -288,7 +237,7 @@ export class PremiereAccountPage extends LitElement {
             <span class="text-xs text-ink-muted">
               ${identity.githubLogin !== null
                 ? "Verified via GitHub — this identity now follows your GitHub account, not just this browser."
-                : "A guest identity tied to this browser (a signed cookie) — clearing cookies or switching browsers starts a new one, with no history."}
+                : "An account tied to this browser (a signed cookie) — clearing cookies or switching browsers starts a new one, with no history."}
             </span>
           </div>
         </div>
@@ -297,8 +246,8 @@ export class PremiereAccountPage extends LitElement {
               class="flex flex-wrap items-center gap-2 border-t border-line pt-3 text-xs text-ink-muted"
             >
               <span
-                >Linking GitHub carries your points and history to any browser
-                you sign into.</span
+                >Linking GitHub carries your identity to any betting or
+                league browser you sign into.</span
               >
               <premiere-github-sign-in></premiere-github-sign-in>
             </div>`
@@ -308,215 +257,18 @@ export class PremiereAccountPage extends LitElement {
   }
 
   // ---------------------------------------------------------------------
-  // Betting
+  // League model/policy claim
   // ---------------------------------------------------------------------
 
-  private renderBetting() {
-    const betting = this.account!.betting;
-    if (betting.premieresTraded === 0) {
-      return html`
-        <section
-          aria-labelledby="account-betting-heading"
-          class="flex flex-col gap-3 rounded-lg border border-line bg-surface-2 p-4"
-        >
-          <h2
-            id="account-betting-heading"
-            class="text-xs font-semibold uppercase tracking-wide text-ink-muted"
-          >
-            Betting
-          </h2>
-          <p class="text-sm text-ink-muted">
-            You haven't placed a trade yet. Your starting bankroll doesn't earn
-            anything by itself — only real trades, won or lost, count toward
-            your rank.
-          </p>
-          <a
-            href="/bet"
-            class="inline-flex w-fit items-center gap-1 rounded-md bg-accent px-3 py-1.5 text-sm font-bold text-on-accent outline-none transition-colors hover:bg-accent-strong focus-visible:ring-2 focus-visible:ring-accent"
-          >
-            Go to the live market →
-          </a>
-        </section>
-      `;
-    }
-    const positive = betting.lifetimePoints >= 0;
-    return html`
-      <section
-        aria-labelledby="account-betting-heading"
-        class="flex flex-col gap-4 rounded-lg border border-line bg-surface-2 p-4"
-      >
-        <h2
-          id="account-betting-heading"
-          class="text-xs font-semibold uppercase tracking-wide text-ink-muted"
-        >
-          Betting
-        </h2>
-        <div class="grid grid-cols-2 gap-3 sm:grid-cols-4">
-          <div class="flex flex-col gap-0.5">
-            <span class="text-[11px] uppercase tracking-wide text-ink-muted"
-              >Lifetime net</span
-            >
-            <span
-              class="font-mono text-lg font-bold tabular-nums ${positive
-                ? "text-positive"
-                : "text-danger"}"
-              >${formatSignedCredits(betting.lifetimePoints)}</span
-            >
-          </div>
-          <div class="flex flex-col gap-0.5">
-            <span class="text-[11px] uppercase tracking-wide text-ink-muted"
-              >Matches traded</span
-            >
-            <span class="font-mono text-lg font-bold tabular-nums text-ink"
-              >${betting.premieresTraded}</span
-            >
-          </div>
-          <div class="flex flex-col gap-0.5">
-            <span class="text-[11px] uppercase tracking-wide text-ink-muted"
-              >Matches won</span
-            >
-            <span class="font-mono text-lg font-bold tabular-nums text-ink"
-              >${betting.premieresWon}</span
-            >
-          </div>
-          <div class="flex flex-col gap-0.5">
-            <span class="text-[11px] uppercase tracking-wide text-ink-muted"
-              >Leaderboard rank</span
-            >
-            <span class="font-mono text-lg font-bold tabular-nums text-ink"
-              >${betting.rank === null
-                ? "—"
-                : `#${betting.rank} of ${betting.totalRankedParticipants}`}</span
-            >
-          </div>
-        </div>
-        <p class="text-[11px] leading-snug text-ink-muted">
-          Rank is net realized profit or loss across settled matches only —
-          sitting on your starting bankroll without trading earns nothing; being
-          profitable is what moves you up, not being present.
-        </p>
-        ${this.renderCurrentPremiere(betting.currentPremiere)}
-        ${this.renderMatchHistory(betting.matches)}
-      </section>
-    `;
-  }
-
-  private renderCurrentPremiere(
-    currentPremiere: AccountResponse["betting"]["currentPremiere"],
-  ) {
-    if (currentPremiere === null) return nothing;
-    const positive = currentPremiere.unrealizedPnl >= 0;
-    return html`
-      <div
-        class="flex flex-col gap-2 rounded-md border border-line-strong bg-surface-3 px-3 py-2.5"
-      >
-        <div class="flex items-center justify-between gap-2">
-          <span
-            class="text-xs font-semibold uppercase tracking-wide text-ink-muted"
-            >Live position — current match</span
-          >
-          <a
-            href="/bet/${currentPremiere.premiereId}"
-            class="text-xs font-bold text-accent outline-none hover:text-accent-strong focus-visible:ring-2 focus-visible:ring-accent"
-            >Go to the live market →</a
-          >
-        </div>
-        <div class="flex flex-wrap items-baseline gap-x-4 gap-y-1 text-sm">
-          <span class="text-ink-muted"
-            >Bankroll
-            <span class="font-mono font-semibold text-ink"
-              >${currentPremiere.balance === null
-                ? "—"
-                : `${currentPremiere.balance.toLocaleString()} cr`}</span
-            ></span
-          >
-          <span class="text-ink-muted"
-            >Open positions
-            <span class="font-mono font-semibold text-ink"
-              >${currentPremiere.positionCount}</span
-            ></span
-          >
-          <span class="text-ink-muted"
-            >Unrealized
-            <span
-              class="font-mono font-semibold ${positive
-                ? "text-positive"
-                : "text-danger"}"
-              >${formatSignedCredits(currentPremiere.unrealizedPnl)} cr</span
-            ></span
-          >
-        </div>
-      </div>
-    `;
-  }
-
-  private renderMatchHistory(matches: readonly AccountMatch[]) {
-    if (matches.length === 0) return nothing;
-    const hasBackfilled = matches.some((match) => match.net === 0);
-    return html`
-      <div class="flex flex-col gap-2">
-        <h3
-          class="text-xs font-semibold uppercase tracking-wide text-ink-muted"
-        >
-          Match history
-        </h3>
-        <ul class="flex max-h-96 flex-col gap-1 overflow-y-auto pr-1">
-          ${matches.map((match) => this.renderMatchRow(match))}
-        </ul>
-        ${hasBackfilled
-          ? html`<p class="text-[11px] leading-snug text-ink-muted">
-              † A flat 0 may be a real push, or a match settled before per-match
-              history existed — older records can't tell the two apart.
-            </p>`
-          : nothing}
-      </div>
-    `;
-  }
-
-  private renderMatchRow(match: AccountMatch) {
-    const positive = match.net > 0;
-    const flat = match.net === 0;
-    const dateLabel =
-      match.revealedAt !== null
-        ? new Date(match.revealedAt).toLocaleDateString()
-        : "date unknown";
-    return html`
-      <li
-        class="flex items-center justify-between gap-3 rounded-md bg-surface-3 px-2.5 py-1.5 text-sm"
-      >
-        <span class="text-ink-muted">${dateLabel}</span>
-        <span class="flex items-center gap-2">
-          <span
-            class="font-mono font-semibold tabular-nums ${flat
-              ? "text-ink-muted"
-              : positive
-                ? "text-positive"
-                : "text-danger"}"
-            >${formatSignedCredits(match.net)}${flat ? "†" : ""}</span
-          >
-          <a
-            href="/premiere/${match.premiereId}"
-            class="text-xs font-semibold text-accent outline-none hover:text-accent-strong focus-visible:ring-2 focus-visible:ring-accent"
-            >View →</a
-          >
-        </span>
-      </li>
-    `;
-  }
-
-  // ---------------------------------------------------------------------
-  // League
-  // ---------------------------------------------------------------------
-
-  private renderLeague() {
-    const claim = this.account!.league.claim;
+  private renderClaim() {
+    const claim = this.account!.claim;
     if (claim === null && !this.editingClaim) {
       return this.claimDismissed
         ? this.renderClaimDismissedRow()
         : this.renderClaimPrompt();
     }
     if (this.editingClaim) {
-      return this.renderClaimPicker(claim?.playerName ?? null);
+      return this.renderClaimPicker(claim);
     }
     return this.renderClaimed(claim!);
   }
@@ -524,14 +276,14 @@ export class PremiereAccountPage extends LitElement {
   private renderClaimDismissedRow() {
     return html`
       <section
-        aria-labelledby="account-league-heading"
+        aria-labelledby="account-claim-heading"
         class="flex items-center justify-between gap-2 rounded-lg border border-line bg-surface-2 px-4 py-3"
       >
         <h2
-          id="account-league-heading"
+          id="account-claim-heading"
           class="text-xs font-semibold uppercase tracking-wide text-ink-muted"
         >
-          League
+          League models
         </h2>
         <button
           type="button"
@@ -540,7 +292,7 @@ export class PremiereAccountPage extends LitElement {
             this.editingClaim = true;
           }}
         >
-          Own a league agent? Claim it →
+          Own a league model? Claim it →
         </button>
       </section>
     `;
@@ -549,18 +301,20 @@ export class PremiereAccountPage extends LitElement {
   private renderClaimPrompt() {
     return html`
       <section
-        aria-labelledby="account-league-heading"
+        aria-labelledby="account-claim-heading"
         class="flex flex-col gap-3 rounded-lg border border-line bg-surface-2 p-4"
       >
         <h2
-          id="account-league-heading"
+          id="account-claim-heading"
           class="text-xs font-semibold uppercase tracking-wide text-ink-muted"
         >
-          League
+          League models
         </h2>
         <p class="text-sm text-ink-muted">
-          Do you own one of the fourteen agents competing in the league? Most
-          traders don't — if that's you, no need to do anything here.
+          Do you own one of the models competing in the league? A person
+          owns a whole lineage of models and policies — claiming any one
+          version claims the whole line, past and future. Most visitors
+          don't own one — if that's you, no need to do anything here.
         </p>
         <div class="flex flex-wrap items-center gap-2">
           <button
@@ -570,32 +324,34 @@ export class PremiereAccountPage extends LitElement {
               this.editingClaim = true;
             }}
           >
-            Pick my agent
+            Pick my lineage
           </button>
           <button
             type="button"
             class="rounded-md border border-line px-3 py-1.5 text-sm font-semibold text-ink-muted outline-none transition-colors hover:bg-surface-hover hover:text-ink focus-visible:ring-2 focus-visible:ring-accent"
             @click=${() => this.dismissClaimPrompt()}
           >
-            I don't own an agent
+            I don't own a model
           </button>
         </div>
       </section>
     `;
   }
 
-  private renderClaimPicker(currentPlayerName: string | null) {
+  private renderClaimPicker(
+    currentClaim: { readonly lineageSlug: string; readonly label: string } | null,
+  ) {
     const data = this.leagueData;
     return html`
       <section
-        aria-labelledby="account-league-heading"
+        aria-labelledby="account-claim-heading"
         class="flex flex-col gap-3 rounded-lg border border-line bg-surface-2 p-4"
       >
         <h2
-          id="account-league-heading"
+          id="account-claim-heading"
           class="text-xs font-semibold uppercase tracking-wide text-ink-muted"
         >
-          League
+          League models
         </h2>
         ${this.renderLeagueStaleness()}
         ${!this.leagueDataLoaded
@@ -606,7 +362,7 @@ export class PremiereAccountPage extends LitElement {
             ? html`<p class="text-sm text-ink-muted">
                 League standings are unavailable right now — try again later.
               </p>`
-            : this.renderClaimForm(data.standings, currentPlayerName)}
+            : this.renderClaimForm(data.standings, currentClaim)}
         <div class="flex items-center gap-2">
           <button
             type="button"
@@ -625,33 +381,52 @@ export class PremiereAccountPage extends LitElement {
 
   private renderClaimForm(
     standings: readonly LeagueStandingRow[],
-    currentPlayerName: string | null,
+    currentClaim: { readonly lineageSlug: string; readonly label: string } | null,
   ) {
-    const sorted = [...standings].sort((a, b) => a.rank - b.rank);
-    const draft =
-      this.claimDraft || currentPlayerName || sorted[0]?.playerName || "";
+    // One entry per lineage — a lineage typically has only its latest
+    // version live in current standings anyway, but de-dupe defensively
+    // (first one wins, standings are already rank-sorted).
+    const byLineage = new Map<string, LeagueStandingRow>();
+    for (const standing of [...standings].sort((a, b) => a.rank - b.rank)) {
+      const label = standing.policyLabel ?? standing.playerName;
+      const slug = deriveLineageSlug(label);
+      if (!byLineage.has(slug)) byLineage.set(slug, standing);
+    }
+    const lineages = [...byLineage.entries()];
+    const draftSlug =
+      this.claimDraft.length > 0
+        ? deriveLineageSlug(this.claimDraft)
+        : (currentClaim?.lineageSlug ?? lineages[0]?.[0] ?? "");
     return html`
       <div class="flex flex-col gap-2">
         <label
-          for="account-league-claim-select"
+          for="account-claim-select"
           class="text-xs font-semibold text-ink-muted"
         >
-          Which agent is yours?
+          Which model lineage is yours?
         </label>
         <div class="flex flex-wrap items-center gap-2">
           <select
-            id="account-league-claim-select"
+            id="account-claim-select"
             class="min-w-[16rem] rounded-md border border-line bg-surface px-2.5 py-1.5 text-sm text-ink outline-none focus-visible:border-accent focus-visible:ring-2 focus-visible:ring-accent"
-            .value=${draft}
+            .value=${draftSlug}
             @change=${(event: Event) => {
-              this.claimDraft = (event.target as HTMLSelectElement).value;
+              const slug = (event.target as HTMLSelectElement).value;
+              const standing = byLineage.get(slug);
+              this.claimDraft =
+                (standing?.policyLabel ?? standing?.playerName ?? slug).slice(
+                  0,
+                  MAX_CLAIM_LABEL_LENGTH,
+                );
             }}
           >
-            ${sorted.map(
-              (standing) => html`
-                <option value=${standing.playerName}>
-                  #${standing.rank}
-                  ${standing.playerName}${standing.isHouse ? " (house)" : ""}
+            ${lineages.map(
+              ([slug, standing]) => html`
+                <option value=${slug}>
+                  #${standing.rank} ${standing.playerName}
+                  (${standing.policyLabel ?? slug})${standing.isHouse
+                    ? " (house)"
+                    : ""}
                 </option>
               `,
             )}
@@ -660,8 +435,15 @@ export class PremiereAccountPage extends LitElement {
             type="button"
             ?disabled=${this.savingClaim}
             class="rounded-md bg-accent px-3 py-1.5 text-sm font-bold text-on-accent outline-none transition-colors hover:bg-accent-strong focus-visible:ring-2 focus-visible:ring-accent disabled:cursor-not-allowed disabled:opacity-50"
-            @click=${() =>
-              this.submitClaim(draft.slice(0, MAX_CLAIM_PLAYER_NAME_LENGTH))}
+            @click=${() => {
+              const standing = byLineage.get(draftSlug);
+              const label = (
+                standing?.policyLabel ??
+                standing?.playerName ??
+                draftSlug
+              ).slice(0, MAX_CLAIM_LABEL_LENGTH);
+              void this.submitClaim(label);
+            }}
           >
             ${this.savingClaim ? "Saving…" : "This is me"}
           </button>
@@ -678,44 +460,57 @@ export class PremiereAccountPage extends LitElement {
     `;
   }
 
-  private renderClaimed(claim: { playerName: string; claimedAt: string }) {
+  private renderClaimed(claim: {
+    readonly lineageSlug: string;
+    readonly label: string;
+    readonly claimedAt: string;
+  }) {
     const data = this.leagueData;
     const standing =
-      data?.standings.find((s) => s.playerName === claim.playerName) ?? null;
+      data?.standings.find(
+        (s) => deriveLineageSlug(s.policyLabel ?? s.playerName) === claim.lineageSlug,
+      ) ?? null;
     return html`
       <section
-        aria-labelledby="account-league-heading"
+        aria-labelledby="account-claim-heading"
         class="flex flex-col gap-3 rounded-lg border border-line bg-surface-2 p-4"
       >
         <div class="flex items-center justify-between gap-2">
           <h2
-            id="account-league-heading"
+            id="account-claim-heading"
             class="text-xs font-semibold uppercase tracking-wide text-ink-muted"
           >
-            League
+            League models
           </h2>
           <span
             class="rounded-full border border-line-strong bg-surface-3 px-2 py-0.5 text-[10px] font-bold uppercase tracking-wide text-ink-muted"
-            title="This is what you told us — nobody has verified you actually own this agent."
+            title="This is what you told us — nobody has verified you actually own this model lineage."
             >Self-selected · unverified</span
           >
         </div>
         <p class="text-[11px] leading-snug text-ink-muted">
           There is currently no way to prove GitHub-account ownership of a
-          league agent, so this claim is private to you and never shown anywhere
-          another player can see it. A verified path arrives with Softmax
-          sign-in.
+          league model, so this claim is private to you and never shown
+          anywhere another player can see it — not on a public profile, a
+          leaderboard, or in any premiere. A verified path arrives with
+          Softmax sign-in.
         </p>
         ${this.renderLeagueStaleness()}
         ${standing === null
-          ? this.renderClaimedPlayerMissing(claim.playerName)
-          : this.renderClaimedPlayerFound(standing, data!)}
+          ? html`<p class="text-sm text-ink">
+              You claimed <strong>${claim.label}</strong>
+              (lineage <strong>${claim.lineageSlug}</strong>), but it's not
+              in the current league standings mirror — dropped from
+              rotation, renamed, or the mirror is between updates. Your
+              claim is preserved either way; pick again if this is stale.
+            </p>`
+          : this.renderClaimedLineageFound(claim, standing)}
         <button
           type="button"
           class="w-fit text-xs font-semibold text-ink-muted outline-none hover:text-ink focus-visible:ring-2 focus-visible:ring-accent"
           @click=${() => {
             this.editingClaim = true;
-            this.claimDraft = claim.playerName;
+            this.claimDraft = claim.label;
           }}
         >
           Change claim
@@ -724,38 +519,23 @@ export class PremiereAccountPage extends LitElement {
     `;
   }
 
-  private renderClaimedPlayerMissing(playerName: string) {
-    return html`
-      <p class="text-sm text-ink">
-        You claimed
-        <strong>${playerName}</strong>, but they're not in the current league
-        standings mirror — dropped from rotation, renamed, or the mirror is
-        between updates. Your claim is preserved either way; pick again if this
-        is stale.
-      </p>
-    `;
-  }
-
-  private renderClaimedPlayerFound(
+  private renderClaimedLineageFound(
+    claim: { readonly label: string },
     standing: LeagueStandingRow,
-    data: LeagueDataSnapshot,
   ) {
     if (standing.isHouse) {
       return html`
         <p class="text-sm text-ink">
           <strong>${standing.playerName}</strong> is the house agent — the
-          platform's own bot, not a player-owned entry. Its stats aren't shown
-          here.
+          platform's own bot, not a player-owned entry. Its stats aren't
+          shown here.
         </p>
       `;
     }
-    const form = recentForm(data, standing.playerName, 5);
     return html`
       <div class="flex flex-col gap-2">
         <div class="flex flex-wrap items-baseline justify-between gap-2">
-          <span class="text-base font-bold text-ink"
-            >${standing.playerName}</span
-          >
+          <span class="text-base font-bold text-ink">${standing.playerName}</span>
           <span class="font-mono text-xs tabular-nums text-ink-muted"
             >Rank #${standing.rank} · Rating
             ${standing.score !== null ? standing.score.toFixed(1) : "—"}</span
@@ -767,64 +547,9 @@ export class PremiereAccountPage extends LitElement {
               ? `${standing.roundsPlayed.toLocaleString()} rounds played`
               : "Rounds played unknown"}</span
           >
-          ${standing.policyLabel !== null
-            ? html`<span>Policy ${standing.policyLabel}</span>`
-            : nothing}
+          <span>Currently claimed as ${claim.label}</span>
         </div>
-        ${this.renderRecentFormWithLinks(form, data)}
       </div>
-    `;
-  }
-
-  private renderRecentFormWithLinks(
-    form: readonly FormEntry[],
-    data: LeagueDataSnapshot,
-  ) {
-    if (form.length === 0) {
-      return html`<p class="text-xs text-ink-muted">
-        No recent completed rounds on record.
-      </p>`;
-    }
-    const episodesById = new Map<string, LeagueEpisodeRow>(
-      data.episodes.map((episode) => [episode.episodeRequestId, episode]),
-    );
-    return html`
-      <ul class="flex flex-col gap-1">
-        ${form.map((entry) => {
-          const episode = episodesById.get(entry.episodeRequestId);
-          const outcomeLabel =
-            entry.outcome === "won"
-              ? "Won"
-              : entry.outcome === "eliminated"
-                ? "Eliminated"
-                : "Survived";
-          const href = episode?.fullRenderHref ?? episode?.watchHref ?? null;
-          return html`
-            <li
-              class="flex items-center justify-between gap-2 rounded-md bg-surface-3 px-2.5 py-1.5 text-xs"
-            >
-              <span class="flex items-center gap-2 text-ink-muted">
-                <span
-                  class="font-semibold ${entry.outcome === "won"
-                    ? "text-ink"
-                    : "text-ink-muted"}"
-                  >${outcomeLabel}</span
-                >
-                ${episode?.map !== null && episode?.map !== undefined
-                  ? html`<span>${episode.map}</span>`
-                  : nothing}
-              </span>
-              ${href !== null
-                ? html`<a
-                    href=${href}
-                    class="font-semibold text-accent outline-none hover:text-accent-strong focus-visible:ring-2 focus-visible:ring-accent"
-                    >Watch →</a
-                  >`
-                : nothing}
-            </li>
-          `;
-        })}
-      </ul>
     `;
   }
 
@@ -840,8 +565,8 @@ export class PremiereAccountPage extends LitElement {
         class="rounded-md border border-caution/40 bg-caution/10 px-2 py-1 text-[11px] font-semibold text-caution"
         role="status"
       >
-        League data is stale — last confirmed ${asOf}. Standings and form below
-        may be dated.
+        League data is stale — last confirmed ${asOf}. Standings below may
+        be dated.
       </p>
     `;
   }

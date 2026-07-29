@@ -80,6 +80,7 @@ import {
   openBettingPremierePage,
   parseBettingPremiereRoute,
 } from "./prediction/wagering/page/BettingPremierePage";
+import "./platform/PlayerProfilePage";
 import "./prediction/wagering/page/AccountPage";
 import "./SinglePlayerModal";
 import { StoreModal } from "./Store";
@@ -712,6 +713,17 @@ class Client {
       await this.openAccountPage();
       return;
     }
+    // The player profile page is likewise standalone — same reasoning as
+    // the account-page branch just above.
+    const playerProfileMatch = window.location.pathname.match(
+      /^\/player\/([^/]+)$/,
+    );
+    if (playerProfileMatch !== null) {
+      await this.openPlayerProfilePage(
+        decodeURIComponent(playerProfileMatch[1]),
+      );
+      return;
+    }
     // Wait for modal custom elements to be defined
     await Promise.all([
       customElements.whenDefined("join-lobby-modal"),
@@ -917,6 +929,20 @@ class Client {
     document.body.replaceChildren(
       document.createElement("premiere-account-page"),
     );
+  }
+
+  /**
+   * Mounts the standalone `/player/:name` profile page — the shared
+   * destination both the league standings and the points leaderboard link
+   * to. Same reasoning as `openAccountPage` just above: no lobby/game/
+   * replay concept behind it, only a data page over
+   * `/api/players/:name`. The custom element is registered by the static
+   * `PlayerProfilePage` import above.
+   */
+  private async openPlayerProfilePage(name: string): Promise<void> {
+    const page = document.createElement("player-profile-page");
+    page.setAttribute("name", name);
+    document.body.replaceChildren(page);
   }
 
   /**

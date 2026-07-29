@@ -6,6 +6,7 @@ import { EventBus } from "../../../core/EventBus";
 import { GameView, PlayerView } from "../../../core/game/GameView";
 import { aiLeagueSpectatorDisplayName } from "../../AiLeagueReplayMode";
 import { formatPercentage, renderNumber } from "../../Utils";
+import { PointOfViewChangeEvent } from "../PointOfView";
 import { GoToPlayerEvent } from "../TransformHandler";
 import { Layer } from "./Layer";
 
@@ -37,6 +38,8 @@ interface Entry {
   territoryDelta: "up" | "down" | "flat";
   /** Live market price for this seat (`priceLookup(player.clientID())`); `null` when no lookup is wired — compact view only. */
   price: number | null;
+  /** True iff this row is the viewer's followed PoV agent (see `PointOfViewSelector`) — pins the row visible and gives it a distinct, non-P&L, non-CTA accent. */
+  isPovPlayer: boolean;
 }
 
 @customElement("leader-board")
@@ -80,11 +83,19 @@ export class Leaderboard extends LitElement implements Layer {
   /** Previous tick's tiles-owned per player id — compact view's trend arrow only. */
   private previousTilesOwned = new Map<string, number>();
 
+  /** Set only via `PointOfViewChangeEvent`; `null` on every route that never mounts `PointOfViewSelector` (live play included) and whenever no PoV is followed. */
+  private povPlayerId: string | null = null;
+
   createRenderRoot() {
     return this; // use light DOM for Tailwind support
   }
 
-  init() {}
+  init() {
+    this.eventBus?.on(PointOfViewChangeEvent, (e) => {
+      this.povPlayerId = e.player?.id() ?? null;
+      this.updateLeaderboard();
+    });
+  }
 
   willUpdate(changed: Map<string, unknown>) {
     if (changed.has("visible") && this.visible) {
@@ -179,6 +190,7 @@ export class Leaderboard extends LitElement implements Layer {
         player: player,
         territoryDelta: territoryTrend(player.id(), tilesOwned),
         price: seatPrice(player),
+        isPovPlayer: player.id() === this.povPlayerId,
       };
     });
 
@@ -209,6 +221,40 @@ export class Leaderboard extends LitElement implements Layer {
           player: myPlayer,
           territoryDelta: territoryTrend(myPlayer.id(), myTilesOwned),
           price: seatPrice(myPlayer),
+          isPovPlayer: myPlayer.id() === this.povPlayerId,
+        });
+      }
+    }
+
+    // Same guarantee as the `isMyPlayer` block above, for the followed PoV
+    // agent: `showTopFive` (or a sort that pushes them down) must never
+    // make the one agent a viewer is following disappear from the panel.
+    if (
+      this.povPlayerId !== null &&
+      this.players.find((p) => p.isPovPlayer) === undefined
+    ) {
+      const povPlayer = sorted.find((p) => p.id() === this.povPlayerId);
+      if (povPlayer !== undefined && povPlayer.isAlive()) {
+        let povPlace = 0;
+        for (const p of sorted) {
+          povPlace++;
+          if (p === povPlayer) break;
+        }
+        const povTilesOwned = povPlayer.numTilesOwned();
+        this.players.push({
+          name: aiLeagueSpectatorDisplayName(povPlayer.displayName()),
+          position: povPlace,
+          score: formatPercentage(povTilesOwned / numTilesWithoutFallout),
+          gold: renderNumber(povPlayer.gold()),
+          maxTroops: renderTroops(this.game!.config().maxTroops(povPlayer)),
+          isMyPlayer: povPlayer === myPlayer,
+          isOnSameTeam:
+            myPlayer !== null &&
+            (povPlayer === myPlayer || povPlayer.isOnSameTeam(myPlayer)),
+          player: povPlayer,
+          territoryDelta: territoryTrend(povPlayer.id(), povTilesOwned),
+          price: seatPrice(povPlayer),
+          isPovPlayer: true,
         });
       }
     }
@@ -319,9 +365,13 @@ export class Leaderboard extends LitElement implements Layer {
                   class="py-1 pl-1.5 text-left ${index <
                   this.players.length - 1
                     ? "border-b border-slate-500"
-                    : ""} truncate"
+                    : ""} truncate ${player.isPovPlayer
+                    ? "text-violet-300"
+                    : ""}"
                 >
-                  ${player.name}
+                  ${player.isPovPlayer
+                    ? html`<span aria-hidden="true" title="Following" class="mr-1">◎</span>`
+                    : nothing}${player.name}
                 </div>
                 <div
                   class="py-1 text-center tabular-nums ${index <
@@ -458,9 +508,13 @@ export class Leaderboard extends LitElement implements Layer {
                   class="py-1 md:py-2 text-center ${index <
                   this.players.length - 1
                     ? "border-b border-slate-500"
-                    : ""} truncate"
+                    : ""} truncate ${player.isPovPlayer
+                    ? "text-violet-300"
+                    : ""}"
                 >
-                  ${player.name}
+                  ${player.isPovPlayer
+                    ? html`<span aria-hidden="true" title="Following" class="mr-1">◎</span>`
+                    : nothing}${player.name}
                 </div>
                 <div
                   class="py-1 md:py-2 text-center ${index <

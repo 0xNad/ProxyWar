@@ -2,8 +2,8 @@ import { html, LitElement, nothing } from "lit";
 import { customElement, property, state } from "lit/decorators.js";
 import { z } from "zod";
 import { formatSignedCredits } from "./pnlDisplay";
+import { playerProfileUrl } from "../../../platform/playerProfileLink";
 
-const MAX_DISPLAY_NAME_LENGTH = 32;
 /** Octicon "mark-github" path data — same mark used by `GithubSignIn.ts`. */
 const GITHUB_MARK_PATH =
   "M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8Z";
@@ -14,9 +14,8 @@ const pointsEntrySchema = z.object({
   lifetimePoints: z.number(),
   premieresTraded: z.number(),
   premieresWon: z.number(),
-  /** Verified GitHub login, when this identity has signed in — takes precedence over the freely-editable `displayName`. See `labelFor`. */
-  githubLogin: z.string().nullable(),
-  githubAvatarUrl: z.string().nullable(),
+  /** Non-null only for a genuinely platform-linked account (see `BettingPlatformAccountLinkStore`) — never derivable from free text. Takes precedence in `labelFor`'s badge, not in the name itself: `displayName` is already sourced from the platform once linked. */
+  platformAccountId: z.string().nullable(),
 });
 
 const leaderboardEntrySchema = pointsEntrySchema.extend({ rank: z.number() });
@@ -34,39 +33,27 @@ const leaderboardResponseSchema = z.object({
   }),
 });
 
-const displayNameResponseSchema = z.object({
-  schemaVersion: z.literal(1),
-  entry: pointsEntrySchema,
-});
-
 type LeaderboardEntry = z.infer<typeof leaderboardEntrySchema>;
 type LeaderboardViewer = z.infer<typeof leaderboardViewerSchema>;
 
-/**
- * A verified `githubLogin` ALWAYS wins over the freely-settable
- * `displayName` — the whole point of verified sign-in is that this name
- * can't be spoofed, unlike a self-claimed one. Anonymous fallback for a
- * participant with neither: never the raw `guest_<hmac>` id itself.
- */
+/** Falls back to a stable `Guest ####` label when no display name has ever been set — never an empty string. */
 function labelFor(entry: {
   displayName: string | null;
-  githubLogin: string | null;
   participantId: string;
 }): string {
-  return entry.githubLogin ?? entry.displayName ?? `Guest ${entry.participantId.slice(-4)}`;
+  return entry.displayName ?? `Guest ${entry.participantId.slice(-4)}`;
 }
 
 /**
- * Cross-premiere points leaderboard + display-name editor. Deliberately
+ * Cross-premiere points leaderboard, read-only for display name. Deliberately
  * NOT wired through `ReplayPremiereRuntimeController` — the leaderboard is
  * premiere-agnostic, so it authenticates independently via
- * `ReplayPremiereGuestSecurity.bootstrapRead`/`authorizeWrite`
- * (`/api/premieres/points/leaderboard`, `.../display-name`), reusing the
- * SAME signed guest cookie identity a premiere session already established
- * — never a second identity. Those paths sit under `/api/premieres`
- * deliberately: `serializeGuestCookie` hardcodes `Path=/api/premieres`, so a
- * route outside it would never receive the cookie and would mint a fresh
- * anonymous identity on every call.
+ * `ReplayPremiereGuestSecurity.bootstrapRead` (`/api/premieres/points/leaderboard`),
+ * reusing the SAME signed guest cookie identity a premiere session already
+ * established — never a second identity. Display name itself is
+ * platform-owned now (`app.proxywar.xyz`) — betting only ever reads it via
+ * `BettingPlatformAccountLinkStore`, never writes it; manage it from your
+ * account page on the platform, not here.
  */
 @customElement("premiere-points-leaderboard")
 export class PremierePointsLeaderboard extends LitElement {
@@ -78,9 +65,6 @@ export class PremierePointsLeaderboard extends LitElement {
   @state() private totalRanked = 0;
   @state() private viewer: LeaderboardViewer | null = null;
   @state() private csrfToken: string | null = null;
-  @state() private nameDraft = "";
-  @state() private savingName = false;
-  @state() private nameError: string | null = null;
 
   private previouslyFocused: HTMLElement | null = null;
   private loadedOnce = false;
@@ -139,43 +123,10 @@ export class PremierePointsLeaderboard extends LitElement {
       this.entries = parsed.data.leaderboard.entries;
       this.totalRanked = parsed.data.leaderboard.totalRankedParticipants;
       this.viewer = parsed.data.leaderboard.viewer;
-      this.nameDraft = this.viewer?.displayName ?? "";
     } catch {
       this.loadError = "Could not load points. Try again.";
     } finally {
       this.loading = false;
-    }
-  }
-
-  private async saveName(): Promise<void> {
-    if (this.csrfToken === null || this.savingName) return;
-    this.savingName = true;
-    this.nameError = null;
-    try {
-      const response = await fetch("/api/premieres/points/display-name", {
-        method: "POST",
-        headers: {
-          Accept: "application/json",
-          "Content-Type": "application/json",
-          "x-csrf-token": this.csrfToken,
-        },
-        credentials: "same-origin",
-        cache: "no-store",
-        body: JSON.stringify({ displayName: this.nameDraft }),
-      });
-      const body: unknown = await response.json().catch(() => null);
-      const parsed = displayNameResponseSchema.safeParse(body);
-      if (!response.ok || !parsed.success) {
-        throw new Error("display_name_save_failed");
-      }
-      // Re-fetch: cheapest correct way to reflect the sanitized name the
-      // server actually stored (it may differ from the raw draft — see
-      // `sanitizeDisplayName`) and hand back a fresh CSRF token.
-      await this.load();
-    } catch {
-      this.nameError = "Could not save your name. Try again.";
-    } finally {
-      this.savingName = false;
     }
   }
 
@@ -211,71 +162,8 @@ export class PremierePointsLeaderboard extends LitElement {
               <span aria-hidden="true">✕</span>
             </button>
           </div>
-          ${this.renderNameEditor()} ${this.renderBody()}
+          ${this.renderBody()}
         </div>
-      </div>
-    `;
-  }
-
-  private renderNameEditor() {
-    if (this.viewer?.githubLogin !== null && this.viewer?.githubLogin !== undefined) {
-      // A verified GitHub handle always wins over a self-claimed display
-      // name (see `labelFor`) — editing one here would silently do
-      // nothing visible on the board, so don't offer it.
-      const login = this.viewer.githubLogin;
-      return html`
-        <div
-          class="flex items-center gap-2 rounded-md border border-line bg-surface-2 px-3 py-2.5 text-xs text-ink-muted"
-        >
-          <svg
-            viewBox="0 0 16 16"
-            width="12"
-            height="12"
-            fill="currentColor"
-            aria-hidden="true"
-            class="shrink-0"
-          >
-            <path d=${GITHUB_MARK_PATH}></path>
-          </svg>
-          Your leaderboard name is your verified GitHub handle,
-          <span class="font-semibold text-ink">${login}</span>.
-        </div>
-      `;
-    }
-    return html`
-      <div class="flex flex-col gap-1.5 rounded-md border border-line bg-surface-2 px-3 py-2.5">
-        <label
-          for="points-leaderboard-name"
-          class="text-xs font-semibold uppercase tracking-wide text-ink-muted"
-        >
-          Your display name
-        </label>
-        <div class="flex items-center gap-2">
-          <input
-            id="points-leaderboard-name"
-            type="text"
-            maxlength=${MAX_DISPLAY_NAME_LENGTH}
-            placeholder=${this.viewer === null
-              ? "Guest"
-              : labelFor(this.viewer)}
-            .value=${this.nameDraft}
-            @input=${(event: InputEvent) => {
-              this.nameDraft = (event.target as HTMLInputElement).value;
-            }}
-            class="w-full rounded-md border border-line bg-surface px-2.5 py-1.5 text-sm text-ink outline-none focus-visible:border-accent focus-visible:ring-2 focus-visible:ring-accent"
-          />
-          <button
-            type="button"
-            ?disabled=${this.savingName}
-            @click=${() => this.saveName()}
-            class="shrink-0 rounded-md bg-accent px-3 py-1.5 text-sm font-bold text-on-accent outline-none transition-colors hover:bg-accent-strong focus-visible:ring-2 focus-visible:ring-accent disabled:cursor-not-allowed disabled:opacity-50"
-          >
-            ${this.savingName ? "Saving…" : "Save"}
-          </button>
-        </div>
-        ${this.nameError !== null
-          ? html`<p class="text-xs text-danger" role="alert">${this.nameError}</p>`
-          : nothing}
       </div>
     `;
   }
@@ -341,12 +229,11 @@ export class PremierePointsLeaderboard extends LitElement {
       </table>
     `;
   }
-
   private renderRow(
     entry: {
       participantId: string;
       displayName: string | null;
-      githubLogin: string | null;
+      platformAccountId: string | null;
       lifetimePoints: number;
       premieresTraded: number;
       premieresWon: number;
@@ -354,7 +241,7 @@ export class PremierePointsLeaderboard extends LitElement {
     rank: number | null,
   ) {
     const isViewer = entry.participantId === this.viewer?.participantId;
-    const verified = entry.githubLogin !== null;
+    const linked = entry.platformAccountId !== null;
     return html`
       <tr
         class="border-b border-line/50 ${isViewer ? "bg-accent-soft" : ""}"
@@ -365,12 +252,12 @@ export class PremierePointsLeaderboard extends LitElement {
         </td>
         <td
           class="max-w-[9rem] truncate py-1.5 pr-2 text-ink"
-          title=${verified
-            ? `Verified GitHub account: ${entry.githubLogin}`
+          title=${linked
+            ? `Linked platform account: ${labelFor(entry)}`
             : labelFor(entry)}
         >
           <span class="inline-flex max-w-full items-center gap-1">
-            ${verified
+            ${linked
               ? html`<svg
                   viewBox="0 0 16 16"
                   width="11"
@@ -382,8 +269,10 @@ export class PremierePointsLeaderboard extends LitElement {
                   <path d=${GITHUB_MARK_PATH}></path>
                 </svg>`
               : nothing}
-            <span class="truncate ${verified ? "font-semibold" : ""}"
-              >${labelFor(entry)}</span
+            <a
+              href=${playerProfileUrl(labelFor(entry))}
+              class="truncate text-accent outline-none hover:text-accent-strong hover:underline focus-visible:ring-2 focus-visible:ring-accent ${linked ? "font-semibold" : ""}"
+              >${labelFor(entry)}</a
             >
           </span>${isViewer ? " (you)" : ""}
         </td>

@@ -116,6 +116,10 @@ import {
   proxyWarPublicRendererAssetPrefixes,
 } from "../server/agents/ProxyWarPublicArtifacts";
 import {
+  buildLeaguePlayerSection,
+  readLeagueMirrorData,
+} from "../server/agents/LeaguePlayerProfile";
+import {
   buildProxyWarPublicReadinessReport,
   type ProxyWarPublicReadinessReport,
 } from "../server/agents/ProxyWarPublicReadiness";
@@ -129,14 +133,24 @@ import {
   getAppShellContent,
   setHtmlNoCacheHeaders,
 } from "../server/RenderHtml";
+import { createGithubOAuthClient, resolveGithubOAuthConfig } from "../server/GithubOAuthClient";
+import { createPlatformAccountRouter } from "../server/platform/PlatformAccountHttp";
+import { PlatformAccountSecurity } from "../server/platform/PlatformAccountSecurity";
+import { PlatformAccountStore } from "../server/platform/PlatformAccountStore";
+import { createPlatformGithubAuthRouter } from "../server/platform/PlatformGithubAuth";
+import { PlatformGithubIdentityLinkStore } from "../server/platform/PlatformGithubIdentityLinkStore";
+import { PlatformHandoffStore } from "../server/platform/PlatformHandoffStore";
+import { PlatformPolicyClaimStore } from "../server/platform/PlatformPolicyClaimStore";
 import {
-  leagueClaimMergerFor,
-  ReplayPremiereLeagueClaimStore,
-} from "../server/replay-premiere/account/ReplayPremiereLeagueClaimStore";
+  loadOrCreatePlatformHmacKey,
+  PLATFORM_HMAC_HEX_ENV,
+  resolvePlatformPrivateStateRoot,
+} from "../server/platform/PlatformSecrets";
+import { resolvePlatformReturnOrigins } from "../server/platform/PlatformReturnOrigins";
 import {
+  BettingPlatformAccountLinkStore,
   pointsMergerFor,
-  ReplayPremiereIdentityLinkStore,
-} from "../server/replay-premiere/points/ReplayPremiereIdentityLinkStore";
+} from "../server/replay-premiere/points/BettingPlatformAccountLinkStore";
 import {
   ReplayPremierePointsLedger,
   resolveReplayPremierePointsLedgerRoot,
@@ -162,10 +176,10 @@ import {
   toPublicReplayPremiereFailure,
 } from "../server/replay-premiere/ReplayPremiereErrors";
 import {
-  createReplayPremiereGithubAuthRouter,
-  createReplayPremiereGithubOAuthClient,
-  resolveReplayPremiereGithubOAuthConfig,
-} from "../server/replay-premiere/ReplayPremiereGithubAuth";
+  createBettingIdentityHandoffRouter,
+  createBettingIdentityStatusRouter,
+} from "../server/replay-premiere/BettingIdentityHandoff";
+import { createPlatformHandoffClient } from "../server/replay-premiere/PlatformHandoffClient";
 import { ReplayPremiereGuestSecurity } from "../server/replay-premiere/ReplayPremiereGuestSecurity";
 import {
   createReplayPremiereRouter,
@@ -238,6 +252,12 @@ const externalAgentExampleRootDir = path.join(
   "examples",
   "external-agent",
 );
+const platformEnabled = envFlag("PROXYWAR_PLATFORM_ENABLED");
+// Where THIS process's own account cookie/CSRF are scoped to — see
+// `PlatformAccountSecurity`'s doc. Deliberately reuses this origin's own
+// public URL, never a peer's: a child app never gets an
+// `expectedOrigin`-satisfying platform cookie, and vice versa.
+const configuredPlatformOrigin = firstConfiguredEnv("PROXYWAR_PLATFORM_ORIGIN");
 const replayPremiereGuestSecurity = new ReplayPremiereGuestSecurity({
   hmacKey: await loadOrCreateReplayPremiereGuestHmacKey({
     privateStateRoot: replayPremierePrivateStateRoot,
@@ -264,48 +284,42 @@ const replayPremierePointsLedgerRoot = resolveReplayPremierePointsLedgerRoot();
 export const replayPremierePointsLedger = await ReplayPremierePointsLedger.open(
   replayPremierePointsLedgerRoot,
 );
-// Self-asserted "this league agent is mine" claims — beside the points
-// ledger: same root, same atomic write-temp-then-rename convention, its
-// own file (`league-claims-v1.json`). Private to each participant's own
-// account read; never joined into the points leaderboard or any other
-// public response — see `ReplayPremiereLeagueClaimStore`'s class doc.
-// Opened BEFORE the identity link store below, which merges claims into
-// it on a GitHub link (`leagueClaimMergerFor`).
-export const replayPremiereLeagueClaimStore =
-  await ReplayPremiereLeagueClaimStore.open(replayPremierePointsLedgerRoot);
-// GitHub identity links — beside the points ledger: same root, same atomic
-// write-temp-then-rename conventions, its own file
-// (`github-identity-links-v1.json`). NOT the premiere private state root —
-// see `ReplayPremiereIdentityLinkStore`'s class doc.
-export const replayPremiereIdentityLinkStore =
-  await ReplayPremiereIdentityLinkStore.open(
+// Betting's link to the platform account authority — app.proxywar.xyz is
+// the sole account/session authority now (see the platform build's
+// contract), so betting never talks to GitHub directly and never writes a
+// display name; it only LEARNS a platformAccountId + cached display name
+// once a handoff redemption succeeds (`BettingIdentityHandoff.ts`), and
+// caches it here. Beside the points ledger: same root, same atomic
+// write-temp-then-rename convention, its own file
+// (`platform-account-links-v1.json`).
+export const bettingPlatformAccountLinkStore =
+  await BettingPlatformAccountLinkStore.open(
     replayPremierePointsLedgerRoot,
     pointsMergerFor(replayPremierePointsLedger),
-    leagueClaimMergerFor(replayPremiereLeagueClaimStore),
   );
-// "Sign in with GitHub" is cleanly absent — no button client-side, no
-// mounted route below — unless BOTH secrets are configured. See
-// `resolveReplayPremiereGithubOAuthConfig` and `RUNBOOK.md` for the exact
-// app-registration recipe.
-const replayPremiereGithubOAuthConfig = await resolveReplayPremiereGithubOAuthConfig();
-const replayPremiereGithubOAuthClient =
-  replayPremiereGithubOAuthConfig === null
-    ? null
-    : createReplayPremiereGithubOAuthClient(replayPremiereGithubOAuthConfig);
+// GitHub sign-in is cleanly absent — no button client-side, no mounted
+// route below — unless BOTH secrets are configured. See
+// `resolveGithubOAuthConfig` and `RUNBOOK.md` for the exact
+// app-registration recipe. One OAuth app, read once here, used ONLY by
+// the platform's own router (mounted further below, gated on
+// `platformEnabled`) — betting never sees these values.
+const githubOAuthConfig = await resolveGithubOAuthConfig();
+const githubOAuthClient =
+  githubOAuthConfig === null ? null : createGithubOAuthClient(githubOAuthConfig);
 // Wraps the raw ledger so a settlement always credits the CURRENT canonical
 // identity, even from a browser whose guest cookie was merged away by a
-// GitHub link completed on a different device. `resolveCanonicalParticipantId`
-// is a local file lookup, never a GitHub call — this can never block,
-// delay, or fail a trade because GitHub is unreachable (see
-// `ReplayPremiereIdentityLinkStore`'s class doc: the identity provider is
-// never in the path of a trade).
+// platform-account link completed on a different device.
+// `resolveCanonicalParticipantId` is a local file lookup, never a network
+// call to the platform — this can never block, delay, or fail a trade
+// because the platform is unreachable (see the contract: "Platform down:
+// betting trades, settles and ranks normally").
 const replayPremierePointsRecorder: ReplayPremiereSettlementPointsRecorder = {
   async recordPremiereSettlement(premiereId, settlements) {
     const resolved = await Promise.all(
       settlements.map(async (settlement) => ({
         ...settlement,
         participantId:
-          await replayPremiereIdentityLinkStore.resolveCanonicalParticipantId(
+          await bettingPlatformAccountLinkStore.resolveCanonicalParticipantId(
             settlement.participantId,
           ),
       })),
@@ -768,7 +782,6 @@ const pointsRoutesEnabled = envFlag("PROXYWAR_WAGERING_ENABLED");
 // reasoning; `bootstrapRead` mints/reuses the same signed guest cookie the
 // premiere session flow uses, so a viewer's identity here is the SAME
 // identity that owns their bankroll and positions.
-const MAX_DISPLAY_NAME_REQUEST_BYTES = 512;
 function sendReplayPremiereFailure(res: Response, error: unknown): void {
   const status = error instanceof ReplayPremiereError ? error.httpStatus : 503;
   if (error instanceof ReplayPremiereError) {
@@ -780,21 +793,21 @@ function sendReplayPremiereFailure(res: Response, error: unknown): void {
   }
   res.status(status).json(toPublicReplayPremiereFailure(error));
 }
-/** Attaches verified GitHub identity (or `null`s, when unlinked) to leaderboard/viewer entries in one bulk lookup — never per-row. */
+/** Attaches the platform-linked display name (or `null`, when unlinked) to leaderboard/viewer entries in one bulk lookup — never per-row. `platformAccountId` is non-null ONLY for a genuinely linked account (see `BettingPlatformAccountLinkStore.describeMany`), the anti-spoof primitive `/api/players/:name` below relies on. */
 async function decoratePointsEntries<T extends { participantId: string }>(
   entries: readonly T[],
 ): Promise<
-  Array<T & { githubLogin: string | null; githubAvatarUrl: string | null }>
+  Array<T & { displayName: string | null; platformAccountId: string | null }>
 > {
-  const described = await replayPremiereIdentityLinkStore.describeMany(
+  const described = await bettingPlatformAccountLinkStore.describeMany(
     entries.map((entry) => entry.participantId),
   );
   return entries.map((entry) => {
     const link = described.get(entry.participantId);
     return {
       ...entry,
-      githubLogin: link?.login ?? null,
-      githubAvatarUrl: link?.avatarUrl ?? null,
+      displayName: link?.displayName ?? null,
+      platformAccountId: link?.platformAccountId ?? null,
     };
   });
 }
@@ -811,11 +824,12 @@ app.get("/api/premieres/points/leaderboard", async (req, res) => {
     if (guest.setCookie !== null) {
       res.setHeader("Set-Cookie", guest.setCookie);
     }
-    // Resolve through any GitHub-link merge first: a browser whose guest
-    // cookie was merged away into a canonical identity still finds ITSELF
-    // here — never an empty orphaned row (see `ReplayPremiereIdentityLinkStore`).
+    // Resolve through any platform-account merge first: a browser whose
+    // guest cookie was merged away into a canonical identity still finds
+    // ITSELF here — never an empty orphaned row (see
+    // `BettingPlatformAccountLinkStore`).
     const viewerParticipantId =
-      await replayPremiereIdentityLinkStore.resolveCanonicalParticipantId(
+      await bettingPlatformAccountLinkStore.resolveCanonicalParticipantId(
         guest.participant.participantId,
       );
     const leaderboard = await replayPremierePointsLedger.readLeaderboard({
@@ -837,57 +851,12 @@ app.get("/api/premieres/points/leaderboard", async (req, res) => {
     sendReplayPremiereFailure(res, error);
   }
 });
-// Route-level JSON parsing: these mount above the global express.json() (which
-// has to stay below the premiere router), so req.body would otherwise be
-// undefined and every submission would 400 as a malformed name.
-app.post(
-  "/api/premieres/points/display-name",
-  express.json({ limit: "8kb" }),
-  async (req, res) => {
-    if (!pointsRoutesEnabled) {
-      res.status(404).json({ error: { code: "PREMIERE_UNAVAILABLE" } });
-      return;
-    }
-    try {
-      res.setHeader("Cache-Control", "no-store, max-age=0");
-      const authorization = replayPremiereGuestSecurity.authorizeWrite(
-        requestSecurityHeaders(req),
-      );
-      const body: unknown = req.body;
-      const displayName =
-        typeof body === "object" &&
-        body !== null &&
-        "displayName" in body &&
-        typeof body.displayName === "string" &&
-        body.displayName.length <= MAX_DISPLAY_NAME_REQUEST_BYTES
-          ? body.displayName
-          : null;
-      if (displayName === null) {
-        res.status(400).json({ error: { code: "PREMIERE_INVALID_REQUEST" } });
-        return;
-      }
-      const canonicalParticipantId =
-        await replayPremiereIdentityLinkStore.resolveCanonicalParticipantId(
-          authorization.participant.participantId,
-        );
-      const entry = await replayPremierePointsLedger.setDisplayName(
-        canonicalParticipantId,
-        displayName,
-      );
-      const [decoratedEntry] = await decoratePointsEntries([entry]);
-      res.status(200).json({ schemaVersion: 1, entry: decoratedEntry });
-    } catch (error) {
-      sendReplayPremiereFailure(res, error);
-    }
-  },
-);
 // -----------------------------------------------------------------------
 // Account page: the one place a participant sees everything the system
 // knows about THEM, both as a bettor and — if they've made one — as a
 // self-asserted league agent owner. Same guest identity and same
 // wagering gate as the points routes above.
 // -----------------------------------------------------------------------
-const MAX_LEAGUE_CLAIM_PLAYER_NAME_BYTES = 512;
 
 /**
  * The viewer's own live position in the "current" premiere — same
@@ -939,17 +908,16 @@ app.get("/api/premieres/account", async (req, res) => {
       res.setHeader("Set-Cookie", guest.setCookie);
     }
     const canonicalParticipantId =
-      await replayPremiereIdentityLinkStore.resolveCanonicalParticipantId(
+      await bettingPlatformAccountLinkStore.resolveCanonicalParticipantId(
         guest.participant.participantId,
       );
-    const [pointsEntry, board, githubStatus, leagueClaim, currentPremiere] =
+    const [pointsEntry, board, platformLink, currentPremiere] =
       await Promise.all([
         replayPremierePointsLedger.readParticipant(canonicalParticipantId),
         replayPremierePointsLedger.readLeaderboard({
           viewerParticipantId: canonicalParticipantId,
         }),
-        replayPremiereIdentityLinkStore.getStatus(canonicalParticipantId),
-        replayPremiereLeagueClaimStore.getClaim(canonicalParticipantId),
+        bettingPlatformAccountLinkStore.getStatus(canonicalParticipantId),
         readCurrentPremierePositionSummary(canonicalParticipantId),
       ]);
     const matches = Object.entries(pointsEntry?.premiereResults ?? {})
@@ -970,9 +938,15 @@ app.get("/api/premieres/account", async (req, res) => {
       csrfToken: guest.csrfToken,
       identity: {
         participantId: canonicalParticipantId,
-        displayName: pointsEntry?.displayName ?? null,
-        githubLogin: githubStatus.login,
-        githubAvatarUrl: githubStatus.avatarUrl,
+        // Sourced from the platform via the handoff, cached locally —
+        // never written by betting. See `BettingPlatformAccountLinkStore`.
+        displayName: platformLink.displayName,
+        platformLinked: platformLink.linked,
+        // Private, self-asserted, and stale-by-design (refreshed only on
+        // the next sign-in) — see `BettingPlatformAccountLinkStore`'s
+        // class doc. Never joined into the leaderboard or any public
+        // route: only this participant's OWN authenticated read sees it.
+        claim: platformLink.claim,
       },
       betting: {
         lifetimePoints: pointsEntry?.lifetimePoints ?? 0,
@@ -983,62 +957,27 @@ app.get("/api/premieres/account", async (req, res) => {
         matches,
         currentPremiere,
       },
-      league: {
-        claim: leagueClaim,
-      },
     });
   } catch (error) {
     sendReplayPremiereFailure(res, error);
   }
 });
-// Route-level JSON parsing — same reasoning as points/display-name above:
-// this mounts above the global `express.json()`.
-app.post(
-  "/api/premieres/account/league-claim",
-  express.json({ limit: "4kb" }),
-  async (req, res) => {
-    if (!pointsRoutesEnabled) {
-      res.status(404).json({ error: { code: "PREMIERE_UNAVAILABLE" } });
-      return;
-    }
-    try {
-      res.setHeader("Cache-Control", "no-store, max-age=0");
-      const authorization = replayPremiereGuestSecurity.authorizeWrite(
-        requestSecurityHeaders(req),
-      );
-      const body: unknown = req.body;
-      const playerName =
-        typeof body === "object" &&
-        body !== null &&
-        "playerName" in body &&
-        typeof body.playerName === "string" &&
-        body.playerName.length <= MAX_LEAGUE_CLAIM_PLAYER_NAME_BYTES
-          ? body.playerName
-          : null;
-      if (playerName === null) {
-        res.status(400).json({ error: { code: "PREMIERE_INVALID_REQUEST" } });
-        return;
-      }
-      const canonicalParticipantId =
-        await replayPremiereIdentityLinkStore.resolveCanonicalParticipantId(
-          authorization.participant.participantId,
-        );
-      const claim = await replayPremiereLeagueClaimStore.setClaim(
-        canonicalParticipantId,
-        playerName,
-      );
-      res.status(200).json({ schemaVersion: 1, claim });
-    } catch (error) {
-      sendReplayPremiereFailure(res, error);
-    }
-  },
-);
 // The account page itself — a plain app-shell document, not premiere-
 // scoped, so it needs none of `ReplayPremierePublicPage`'s per-premiere
 // metadata/CSP machinery. Always reachable (like `/premiere/:id`); the
 // client-side component degrades to "betting isn't live here" if the API
 // above 404s for a deployment with wagering off.
 app.get("/account", async (_req, res) => {
+  if (!platformEnabled) {
+    if (configuredPlatformOrigin === undefined) {
+      res
+        .status(503)
+        .send("Proxy War account management is not available on this deployment.");
+      return;
+    }
+    res.redirect(302, `${configuredPlatformOrigin}/account`);
+    return;
+  }
   try {
     const appShell = await getAppShellContent(
       path.resolve(staticRootDir, "index.html"),
@@ -1064,21 +1003,208 @@ app.get("/account", async (_req, res) => {
       .send("Proxy War account page is not built for this server.");
   }
 });
-// "Sign in with GitHub" — mounted ONLY when both OAuth secrets are
-// configured (see `resolveReplayPremiereGithubOAuthConfig`); unset means
-// these three paths simply don't exist (no route, no button, no broken
-// state) and fall through to `createReplayPremiereRouter`'s 404 below.
-if (replayPremiereGithubOAuthClient !== null) {
+// -----------------------------------------------------------------------
+// Player profile: the shared destination BOTH leaderboards (public league
+// standings and the betting points leaderboard) link to — one place that
+// shows a league competitor's rating/rank now plus recent results, and a
+// bettor's lifetime P&L, keyed by the SAME display name. Always mounted,
+// ungated by wagering (league data is public regardless), unlike the
+// points routes above — only the betting section inside it degrades to
+// absent when wagering is off or nobody matches.
+//
+// PUBLIC PAGE — this is the one surface in the whole codebase that must
+// NEVER consult a private, self-asserted "this league agent is mine"
+// claim (that lives on the platform now — `PlatformPolicyClaimStore`) or
+// treat a display name as proof of league-agent ownership. The betting
+// section below is keyed by a genuinely LINKED platform account matched
+// against the requested name — a coincidence of two independently-PUBLIC
+// facts (the league standings name, and the already-public
+// points-leaderboard display name), gated on `platformAccountId !== null`
+// so an anonymous, unlinked guest can never spoof it by typing a matching
+// free-text name, and never sourced from any claim store.
+// -----------------------------------------------------------------------
+const leagueDataJsonPath = path.join(runsRootDir, "league", "data.json");
+
+app.get("/api/players/:name", async (req, res) => {
+  try {
+    res.setHeader("Cache-Control", "no-store, max-age=0");
+    const name = req.params.name;
+    if (name.length === 0 || name.length > 200) {
+      res.status(400).json({ error: { code: "PLAYER_PROFILE_INVALID_NAME" } });
+      return;
+    }
+    const mirrorData = await readLeagueMirrorData(leagueDataJsonPath);
+    const league =
+      mirrorData === null ? null : buildLeaguePlayerSection(mirrorData, name);
+
+    // Betting section: only for a participant with a genuinely LINKED
+    // platform account (`platformAccountId !== null` — never true for an
+    // anonymous guest who merely typed a matching free-text display name)
+    // whose display name equals the requested name, and who has actually
+    // traded. `readLeaderboard` already restricts to `premieresTraded > 0`;
+    // the `limit: 100` keeps this a single bounded read instead of one per
+    // request growing with ledger size. Skipped entirely with wagering off,
+    // matching every other points surface's degrade-to-absent behavior.
+    let betting: {
+      lifetimePoints: number;
+      premieresTraded: number;
+      premieresWon: number;
+      rank: number;
+      totalRankedParticipants: number;
+    } | null = null;
+    if (pointsRoutesEnabled) {
+      const board = await replayPremierePointsLedger.readLeaderboard({
+        limit: 100,
+      });
+      const decorated = await decoratePointsEntries(board.entries);
+      const match = decorated.find(
+        (entry) => entry.platformAccountId !== null && entry.displayName === name,
+      );
+      if (match !== undefined) {
+        betting = {
+          lifetimePoints: match.lifetimePoints,
+          premieresTraded: match.premieresTraded,
+          premieresWon: match.premieresWon,
+          rank: match.rank,
+          totalRankedParticipants: board.totalRankedParticipants,
+        };
+      }
+    }
+
+    if (league === null && betting === null) {
+      res.status(404).json({ error: { code: "PLAYER_PROFILE_NOT_FOUND" } });
+      return;
+    }
+    res.status(200).json({ schemaVersion: 1, name, league, betting });
+  } catch (error) {
+    sendReplayPremiereFailure(res, error);
+  }
+});
+// The player profile page itself — a plain app-shell document, same
+// pattern as `/account` above: always reachable, no premiere/session
+// machinery behind it, the client-side component does all the fetching
+// (`GET /api/players/:name`) and rendering.
+app.get("/player/:name", async (_req, res) => {
+  try {
+    const appShell = await getAppShellContent(
+      path.resolve(staticRootDir, "index.html"),
+    );
+    const scriptNonce = randomBytes(24).toString("base64");
+    res.setHeader(
+      "Content-Security-Policy",
+      pageContentSecurityPolicyWithNonce(
+        proxyWarLeagueContentSecurityPolicy(),
+        scriptNonce,
+      ),
+    );
+    setHtmlNoCacheHeaders(res);
+    res.send(nonceInlineScripts(appShell, scriptNonce));
+  } catch (error) {
+    console.error(
+      `Failed to serve the player profile page: ${
+        error instanceof Error ? error.message : String(error)
+      }`,
+    );
+    res
+      .status(503)
+      .send("Proxy War player profile page is not built for this server.");
+  }
+});
+// GitHub sign-in lives ONLY on the platform now — app.proxywar.xyz is the
+// sole account authority (see the platform build's contract). Exactly one
+// of the two branches below mounts, based on `PROXYWAR_PLATFORM_ENABLED`:
+//
+// - Platform mode: the real `/api/auth/github/*` routes (only when OAuth
+//   credentials are configured — see `resolveGithubOAuthConfig`; unset
+//   means these paths simply don't exist, matching "unset env means the
+//   route doesn't exist" rather than "exists but always fails") plus the
+//   account/claim/handoff-issuance API.
+// - Child (betting) mode: the handoff start/callback routes that redirect
+//   to the platform and redeem its opaque code server-to-server — never
+//   GitHub directly.
+if (platformEnabled) {
+  // --- Platform-only state (app.proxywar.xyz) ---------------------------
+  // Every store below lives in its OWN root (`resolvePlatformPrivateStateRoot`,
+  // default `storage/platform-private`, override via
+  // PROXYWAR_PLATFORM_STATE_ROOT) — distinct from both the premiere state
+  // root (wiped every betting cycle) and the points-ledger root above
+  // (betting's own durable state). Constructed ONLY here, inside
+  // `platformEnabled` — a betting/league process never touches this root
+  // at all, satisfying the contract's "one writer per file" rule by
+  // construction, not just by convention.
+  const platformPrivateStateRoot = resolvePlatformPrivateStateRoot();
+  const platformAccountStore = await PlatformAccountStore.open(
+    platformPrivateStateRoot,
+  );
+  const platformPolicyClaimStore = await PlatformPolicyClaimStore.open(
+    platformPrivateStateRoot,
+  );
+  const platformGithubIdentityLinkStore =
+    await PlatformGithubIdentityLinkStore.open(
+      platformPrivateStateRoot,
+      platformAccountStore,
+      platformPolicyClaimStore,
+    );
+  const platformHandoffStore = new PlatformHandoffStore();
+  const platformAccountSecurity = new PlatformAccountSecurity({
+    hmacKey: await loadOrCreatePlatformHmacKey({
+      privateStateRoot: platformPrivateStateRoot,
+      servedRoots: [
+        process.cwd(),
+        staticRootDir,
+        artifactsRootDir,
+        docsRootDir,
+        externalAgentExampleRootDir,
+      ],
+      configuredHex: firstConfiguredEnv(PLATFORM_HMAC_HEX_ENV),
+    }),
+    expectedOrigin: replayPremierePublicOrigin,
+    production: replayPremierePublicOrigin.startsWith("https://"),
+  });
+  const platformReturnOrigins = resolvePlatformReturnOrigins();
+  if (githubOAuthClient !== null) {
+    app.use(
+      createPlatformGithubAuthRouter({
+        security: platformAccountSecurity,
+        identityLinkStore: platformGithubIdentityLinkStore,
+        oauthClient: githubOAuthClient,
+        publicOrigin: replayPremierePublicOrigin,
+        onOperatorError: (operatorCode, error) => {
+          console.error(
+            `Platform GitHub sign-in ${operatorCode}: ${
+              error instanceof Error ? error.message : String(error)
+            }`,
+          );
+        },
+      }),
+    );
+  }
   app.use(
-    createReplayPremiereGithubAuthRouter({
+    createPlatformAccountRouter({
+      security: platformAccountSecurity,
+      accounts: platformAccountStore,
+      claims: platformPolicyClaimStore,
+      identityLinkStore: platformGithubIdentityLinkStore,
+      handoffs: platformHandoffStore,
+      returnOrigins: platformReturnOrigins,
+      githubSignInAvailable: githubOAuthClient !== null,
+      onOperatorError: (operatorCode, error) => {
+        console.error(
+          `Platform account ${operatorCode}: ${
+            error instanceof Error ? error.message : String(error)
+          }`,
+        );
+      },
+    }),
+  );
+} else if (configuredPlatformOrigin !== undefined) {
+  app.use(
+    createBettingIdentityHandoffRouter({
       security: replayPremiereGuestSecurity,
-      identityLinkStore: replayPremiereIdentityLinkStore,
-      oauthClient: replayPremiereGithubOAuthClient,
-      publicOrigin: replayPremierePublicOrigin,
-      // "Current premiere" here matches /bet's own definition below
-      // (the most recently registered id) — at most one premiere ever
-      // has an open (unsettled) market at a time in this exhibition
-      // loop, so there is nothing to reconcile across instances.
+      linkStore: bettingPlatformAccountLinkStore,
+      handoffClient: createPlatformHandoffClient(configuredPlatformOrigin),
+      platformOrigin: configuredPlatformOrigin,
+      ownOrigin: replayPremierePublicOrigin,
       resolveCurrentMarketIdentityGuard: () => {
         const currentPremiereId = replayPremiereHttpRegistry
           .premiereIds()
@@ -1088,11 +1214,33 @@ if (replayPremiereGithubOAuthClient !== null) {
       },
       onOperatorError: (operatorCode, error) => {
         console.error(
-          `GitHub sign-in ${operatorCode}: ${
+          `Identity handoff ${operatorCode}: ${
             error instanceof Error ? error.message : String(error)
           }`,
         );
       },
+    }),
+  );
+  app.use(
+    createBettingIdentityStatusRouter({
+      security: replayPremiereGuestSecurity,
+      linkStore: bettingPlatformAccountLinkStore,
+      handoffAvailable: true,
+      onOperatorError: (operatorCode, error) => {
+        console.error(
+          `Identity status ${operatorCode}: ${
+            error instanceof Error ? error.message : String(error)
+          }`,
+        );
+      },
+    }),
+  );
+} else {
+  app.use(
+    createBettingIdentityStatusRouter({
+      security: replayPremiereGuestSecurity,
+      linkStore: bettingPlatformAccountLinkStore,
+      handoffAvailable: false,
     }),
   );
 }
@@ -1108,14 +1256,16 @@ app.use(
       trustedProxyAddresses: REPLAY_PREMIERE_LOOPBACK_PROXY_ADDRESSES,
     }),
     // Closes the durable Sybil hole: a signed cookie merged away by a
-    // GitHub link (on this device, another device, or a prior premiere/
-    // process lifetime) resolves to its canonical id before it ever
-    // reaches `interactions`, at every authenticated boundary — not just
-    // the settlement/points routes wired below. Local, cached file lookup
-    // (see `ReplayPremiereIdentityLinkStore.resolveCanonicalParticipantId`)
-    // — never GitHub — so this can never block, delay, or fail a trade.
+    // platform-account link (on this device, another device, or a prior
+    // premiere/process lifetime) resolves to its canonical id before it
+    // ever reaches `interactions`, at every authenticated boundary — not
+    // just the settlement/points routes wired below. Local, cached file
+    // lookup (see
+    // `BettingPlatformAccountLinkStore.resolveCanonicalParticipantId`) —
+    // never a call to the platform — so a platform outage can never
+    // block, delay, or fail a trade.
     resolveCanonicalParticipantId: (participantId) =>
-      replayPremiereIdentityLinkStore.resolveCanonicalParticipantId(
+      bettingPlatformAccountLinkStore.resolveCanonicalParticipantId(
         participantId,
       ),
     onOperatorError: (error) => {

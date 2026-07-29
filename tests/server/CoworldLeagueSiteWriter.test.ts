@@ -158,6 +158,13 @@ describe("coworldLeagueIndexHtml", () => {
     expect(html).toContain("proxywar-keystone:v40");
   });
 
+  test("links each standings row to the shared platform player profile", () => {
+    const html = coworldLeagueIndexHtml(sampleData());
+    expect(html).toContain(
+      '<a class="player-profile-link" href="https://app.proxywar.xyz/player/odin%20free">odin free</a>',
+    );
+  });
+
   test("separates the active champion from its historical rating row", () => {
     const html = coworldLeagueIndexHtml(sampleData());
     expect(html).toContain("Active champion");

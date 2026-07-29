@@ -8,7 +8,7 @@ import {
 import { GameStartingModal } from "../GameStartingModal";
 import { RefreshGraphicsEvent as RedrawGraphicsEvent } from "../InputHandler";
 import { FrameProfiler } from "./FrameProfiler";
-import { TransformHandler } from "./TransformHandler";
+import { isReplaySpectatorView, TransformHandler } from "./TransformHandler";
 import { UIState } from "./UIState";
 import { AlertFrame } from "./layers/AlertFrame";
 import { AttackingTroopsOverlay } from "./layers/AttackingTroopsOverlay";
@@ -36,6 +36,7 @@ import { NukeTrajectoryPreviewLayer } from "./layers/NukeTrajectoryPreviewLayer"
 import { PerformanceOverlay } from "./layers/PerformanceOverlay";
 import { PlayerInfoOverlay } from "./layers/PlayerInfoOverlay";
 import { PlayerPanel } from "./layers/PlayerPanel";
+import { PointOfViewSelector } from "./layers/PointOfViewSelector";
 import { RailroadLayer } from "./layers/RailroadLayer";
 import { ReplayPanel } from "./layers/ReplayPanel";
 import { SAMRadiusLayer } from "./layers/SAMRadiusLayer";
@@ -179,6 +180,32 @@ export function createRenderer(
     } else {
       document.body.appendChild(nativeSpectatorLeaderboard);
     }
+  }
+
+  // Platform PoV-follow picker — every spectator/replay route
+  // (`isReplaySpectatorView()`: bet, premiere, ai-league-replay,
+  // proxywar-replay, legacy openfront-replay, Coworld routes), not just
+  // betting or the AI-league promo UI. Live play never mounts this.
+  // Dynamically created the same way `nativeSpectatorLeaderboard` above
+  // is: `pov-selector` isn't in `index.html`, so there's nothing to
+  // `document.querySelector` for it.
+  const povSelector = isReplaySpectatorView()
+    ? (document.createElement("pov-selector") as PointOfViewSelector)
+    : null;
+  if (povSelector !== null) {
+    // A bare type-only usage of `PointOfViewSelector` (just the `as` cast
+    // above) gets elided by esbuild's dev transform — it never runs the
+    // `@customElement("pov-selector")` side effect, so the tag never
+    // registers. This `instanceof` check is a genuine value usage (same
+    // guard shape `leaderboard`/`replayPanel` already use above) and is
+    // what actually keeps the import, and therefore the registration,
+    // alive.
+    if (!(povSelector instanceof PointOfViewSelector)) {
+      console.error("pov-selector element failed to register");
+    }
+    povSelector.game = game;
+    povSelector.eventBus = eventBus;
+    document.body.appendChild(povSelector);
   }
 
   const gameLeftSidebar = document.querySelector(
@@ -404,9 +431,7 @@ export function createRenderer(
     settingsModal,
     teamStats,
     playerPanel,
-    headsUpMessage,
-    multiTabModal,
-    inGamePromo,
+    ...(povSelector !== null ? [povSelector] : []),
     alertFrame,
     performanceOverlay,
   ];

@@ -151,41 +151,6 @@ describe("ReplayPremierePointsLedger", () => {
       viewerParticipantId: guestC,
     });
     expect(untraded.viewer).toBeNull();
-
-    await ledger.setDisplayName(guestC, "Newcomer");
-    const withName = await ledger.readLeaderboard({
-      viewerParticipantId: guestC,
-    });
-    expect(withName.viewer).toEqual(
-      expect.objectContaining({
-        participantId: guestC,
-        displayName: "Newcomer",
-        premieresTraded: 0,
-        rank: null,
-      }),
-    );
-    // An untraded entry never shows up on the board itself.
-    expect(withName.entries.some((entry) => entry.participantId === guestC)).toBe(
-      false,
-    );
-  });
-
-  test("sanitizes display names: strips control/format characters, collapses whitespace, caps length, clears on blank", async () => {
-    const ledger = await ReplayPremierePointsLedger.open(root);
-    const entry = await ledger.setDisplayName(
-      guestA,
-      "  Da\u0000veey\u200b   the\tGreat  ",
-    );
-    // Control char and zero-width space stripped outright; the tab
-    // collapses to a single space (not deleted — deleting it would mash
-    // "the" and "Great" together); edges trimmed.
-    expect(entry.displayName).toBe("Daveey the Great");
-
-    const long = await ledger.setDisplayName(guestA, "x".repeat(100));
-    expect(long.displayName).toHaveLength(32);
-
-    const cleared = await ledger.setDisplayName(guestA, "   \u0000  ");
-    expect(cleared.displayName).toBeNull();
   });
 
   test("survives a fresh ledger instance pointed at the same root — durable across a process restart", async () => {
@@ -193,14 +158,12 @@ describe("ReplayPremierePointsLedger", () => {
     await first.recordPremiereSettlement(premiereOne, [
       { participantId: guestA, granted: 1_000, balance: 1_250 },
     ]);
-    await first.setDisplayName(guestA, "Daveey");
 
     const second = await ReplayPremierePointsLedger.open(root);
     const board = await second.readLeaderboard({ viewerParticipantId: guestA });
     expect(board.viewer).toEqual(
       expect.objectContaining({
         participantId: guestA,
-        displayName: "Daveey",
         lifetimePoints: 250,
         rank: 1,
       }),
@@ -237,7 +200,6 @@ describe("ReplayPremierePointsLedger", () => {
         schemaVersion: 1,
         entries: {
           [guestA]: {
-            displayName: "Legacy Name",
             lifetimePoints: 250,
             premieresTraded: 2,
             premieresWon: 1,
@@ -256,7 +218,6 @@ describe("ReplayPremierePointsLedger", () => {
     expect(board.viewer).toEqual(
       expect.objectContaining({
         participantId: guestA,
-        displayName: "Legacy Name",
         lifetimePoints: 250,
         premieresTraded: 2,
         premieresWon: 1,

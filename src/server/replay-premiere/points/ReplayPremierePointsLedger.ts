@@ -17,10 +17,8 @@ const PARTICIPANT_ID_PATTERN = /^guest_[a-f0-9]{32}$/;
 const PREMIERE_ID_PATTERN = /^prem_[a-z0-9]{16,32}$/;
 const LEDGER_FILE_NAME = "points-ledger-v1.json";
 const SCHEMA_VERSION = 1 as const;
-const MAX_DISPLAY_NAME_CODEPOINTS = 32;
 export interface ReplayPremierePointsEntry {
   readonly participantId: string;
-  readonly displayName: string | null;
   /** Lifetime realized net P&L (credits), summed only across premieres actually traded. See class doc. */
   readonly lifetimePoints: number;
   readonly premieresTraded: number;
@@ -70,7 +68,6 @@ export interface ReplayPremiereSettlementLedgerEntry {
  * both traded the SAME premiere and need folding into one row.
  */
 const storedEntrySchema = z.object({
-  displayName: z.string().nullable(),
   lifetimePoints: z.number().finite(),
   premieresTraded: z.number().int().nonnegative(),
   premieresWon: z.number().int().nonnegative(),
@@ -94,7 +91,6 @@ type StoredEntry = z.infer<typeof storedEntrySchema>;
  * from this migration onward carries its real per-premiere net.
  */
 const legacyStoredEntrySchema = z.object({
-  displayName: z.string().nullable(),
   lifetimePoints: z.number().finite(),
   premieresTraded: z.number().int().nonnegative(),
   premieresWon: z.number().int().nonnegative(),
@@ -301,23 +297,6 @@ export class ReplayPremierePointsLedger {
     });
   }
 
-  /** Sets (or clears, with an empty/whitespace-only name) a participant's leaderboard display name. Sanitized for display — see {@link sanitizeDisplayName}. */
-  async setDisplayName(
-    participantId: string,
-    rawName: string,
-  ): Promise<ReplayPremierePointsEntry> {
-    if (!PARTICIPANT_ID_PATTERN.test(participantId)) {
-      throw new Error(`invalid_participant_id: ${participantId}`);
-    }
-    const displayName = sanitizeDisplayName(rawName);
-    return this.mutate((file) => {
-      const entry = file.entries[participantId] ?? emptyEntry();
-      entry.displayName = displayName;
-      entry.updatedAt = new Date().toISOString();
-      file.entries[participantId] = entry;
-      return toPublicEntry(participantId, entry);
-    });
-  }
 
   /**
    * The viewer's own full record, including per-premiere history — never
@@ -468,7 +447,6 @@ export class ReplayPremierePointsLedger {
             premiereResults[premiereId] = 0;
         }
         entries[participantId] = {
-          displayName: legacy.data.displayName,
           lifetimePoints: legacy.data.lifetimePoints,
           premieresTraded: legacy.data.premieresTraded,
           premieresWon: legacy.data.premieresWon,
@@ -500,7 +478,6 @@ interface LedgerFile {
 
 function emptyEntry(): StoredEntry {
   return {
-    displayName: null,
     lifetimePoints: 0,
     premieresTraded: 0,
     premieresWon: 0,
@@ -536,7 +513,6 @@ function toPublicEntry(
 ): ReplayPremierePointsEntry {
   return {
     participantId,
-    displayName: entry.displayName,
     lifetimePoints: entry.lifetimePoints,
     premieresTraded: entry.premieresTraded,
     premieresWon: entry.premieresWon,
@@ -565,30 +541,3 @@ function boundedLimit(value: number): number {
   return Math.max(1, Math.min(100, Math.trunc(value)));
 }
 
-/**
- * Collapses whitespace (including tabs/newlines, which become a single
- * space rather than vanishing) FIRST, then strips remaining control/format
- * Unicode categories (invisible non-whitespace characters like NUL or a
- * zero-width space, which could otherwise visually spoof another name or
- * silently mash two words together) — order matters: stripping control
- * characters before collapsing whitespace would delete a tab/newline
- * outright and glue the words on either side of it together. Trims, then
- * caps length at {@link MAX_DISPLAY_NAME_CODEPOINTS} code points (not
- * UTF-16 units, so a name made of astral-plane characters isn't silently
- * split mid-character). An empty result after sanitizing clears the
- * display name (`null`) rather than storing an empty string.
- */
-function sanitizeDisplayName(raw: string): string | null {
-  if (typeof raw !== "string") {
-    throw new Error("invalid_display_name");
-  }
-  const stripped = raw
-    .replace(/\s+/g, " ")
-    .replace(/[\p{Cc}\p{Cf}]/gu, "")
-    .trim();
-  if (stripped.length === 0) return null;
-  const codePoints = Array.from(stripped);
-  return codePoints.length > MAX_DISPLAY_NAME_CODEPOINTS
-    ? codePoints.slice(0, MAX_DISPLAY_NAME_CODEPOINTS).join("")
-    : stripped;
-}

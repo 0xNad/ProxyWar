@@ -181,6 +181,16 @@ export const COWORLD_LEAGUE_DATA_PATH = "/ai-league-runs/league/data.json";
 const COWORLD_LEAGUE_WRITE_LOCK_RETRY_MS = 50;
 const COWORLD_LEAGUE_WRITE_LOCK_TIMEOUT_MS = 60_000;
 const COWORLD_LEAGUE_WRITE_LOCK_OWNER_GRACE_MS = 30_000;
+// Same platform/account origin `playerProfileLink.ts` links to client-side
+// from the points leaderboard — one shared destination for both
+// leaderboards. Overridable for tests; defaults to the real platform
+// origin, matching the DNS/tunnel already provisioned for it.
+const PLAYER_PROFILE_ORIGIN =
+  process.env.PROXYWAR_PLATFORM_ORIGIN ?? "https://app.proxywar.xyz";
+
+function playerProfileUrl(playerName: string): string {
+  return `${PLAYER_PROFILE_ORIGIN}/player/${encodeURIComponent(playerName)}`;
+}
 
 type CoworldLeagueTranslationSuffix =
   keyof typeof englishTranslations.coworld_league;
@@ -982,7 +992,9 @@ function standingsTable(data: CoworldLeagueMirrorData): string {
       return `
         <tr${row.isHouse ? ` class="house"` : ""}>
           <td class="rank">${escapeHtml(String(row.rank))}</td>
-          <td>${escapeHtml(row.playerName)}${
+          <td><a class="player-profile-link" href="${escapeHtml(
+            playerProfileUrl(row.playerName),
+          )}">${escapeHtml(row.playerName)}</a>${
             row.isHouse ? `<span class="badge house">HOUSE</span>` : ""
           }${policyProvenance}</td>
           <td class="score">${row.score === null ? "—" : escapeHtml(row.score.toFixed(2))}</td>
