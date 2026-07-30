@@ -1265,12 +1265,23 @@ open yet, so this browser is your identity for now."
   the agent manifests, and the Coworld adapter carry no owner field, and
   `/api/observatory/players` is 401 anonymously.
 
-  Scope of that evidence, so nobody over-reads it: those are the two schemas we
-  could read, for the signed-in user's OWN player. The nested `user` object came
-  back unexpanded (zero keys), `avatar_url` was null, and no public competitor
-  profile page was inspected. "No GitHub join is available to us" is
-  established; "Softmax stores no GitHub link anywhere" is likely but NOT
-  proven — recheck before building on it.
+  This was then checked for OTHER competitors, not just the signed-in user's own
+  player, by driving the dashboard's own navigation (Leagues → a division) and
+  reading the endpoints it actually calls —
+  `/api/observatory/v2/leagues/{id}/division-ladder` and
+  `/api/observatory/v2/divisions/{id}/first-place`. Divisions carry `id`, `name`,
+  `level`, `member_count`; a champion record carries `player_id`, `player_name`,
+  `second_player_id`, `second_player_name`, `taken_from_player_id`,
+  `taken_from_player_name`, `score`, `rounds_held`. No GitHub or email field in
+  any of it, no `github.com` link anywhere on the leagues view, and the public
+  site's navigation exposes no competitor directory at all — its only GitHub
+  link is to `Metta-AI/coworld`, the project's own repo.
+
+  Scope, so nobody over-reads it: this covers the surfaces the dashboard itself
+  uses. Some endpoint or profile view not reached here could still expose more,
+  and the nested `user` object in `players` came back unexpanded. "Competitors
+  are identified by `player_id`/`player_name`, and no GitHub join is available"
+  is established; "Softmax stores no GitHub link anywhere" remains unproven.
 
   So do NOT auto-assign agents by matching a GitHub login against `playerName`,
   a policy label, or an email. Nothing constrains those namespaces to agree, and
