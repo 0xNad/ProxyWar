@@ -1147,11 +1147,37 @@ is asserted by `tests/server/PlatformRootPage.test.ts`.
 
 ### 16.3 Known and deliberate gaps
 
-- **`beta.proxywar.xyz` has no handoff integration.** So the "follow this
-  agent's point of view" preference resolves on `app.` and `bet.` but not on the
-  league site, which is where replays are actually watched. The child-side
-  resolver already branches for it; the league simply never redeems a code. This
-  is the one piece of the identity story still missing.
+- **The PoV default is not on `beta.proxywar.xyz`, by decision — and it needs no
+  handoff to get there.** The mechanism is built and live: the league does not
+  need a session, an account link, or a redeemed code, because `beta`, `bet` and
+  `app` are cross-ORIGIN but same-SITE, so a credentialed `fetch` to
+  `GET {platform}/api/account/pov-claims` carries the platform's host-only
+  `SameSite=Lax` cookie. Verified in Chrome via
+  `Network.requestWillBeSentExtraInfo`: from `bet.proxywar.xyz`, the
+  `proxywar_platform_account` cookie is attached with `blockedReasons: none`.
+  The platform side is deployed and allowlist-verified live (`beta` gets the
+  CORS grant; `bet` and an arbitrary origin get an empty set and no header).
+
+  What is missing is only the CONSUMER. `beta` is served from the worktree
+  `~/Documents/proxywar_worktrees/replay-premiere-release-candidate` on branch
+  `codex/replay-premiere-release-candidate` — a different release line, which
+  contains no PoV feature at all (`PointOfView.ts`,
+  `PointOfViewSelector.ts`, `playerProfileLink.ts` are all absent) and still
+  serves `connect-src 'self'`, which would block the fetch as a silent console
+  violation regardless.
+
+  Bringing it over is a RELEASE decision, not a deploy: it means putting ~60
+  commits of platform/accounts/betting work onto the live league that the
+  Softmax mirror and 14 real agents use. The operator was asked and chose to
+  leave `beta` alone. The manual PoV picker already works there; only the
+  automatic default from a claim is absent. Do not "fix" this by repointing the
+  beta service at another branch.
+
+  Note the one commit that line had and this one lacked — `137fb530f`
+  (`fix(legal)`, removing OpenFront LLC's terms/privacy pages) — is now
+  cherry-picked here, so a future merge in this direction regresses nothing.
+  Those paths were never actually exposed on `app.`/`bet.` (league-wrapper mode
+  redirects them to `/league`), but the files were still in the tree.
 - **A lineage claim is self-asserted and private.** GitHub proves a *handle*,
   never that an agent belongs to someone. So a claim is a preference: never
   surfaced publicly, never labelled ownership. Softmax sign-in — which can
