@@ -1254,8 +1254,8 @@ open yet, so this browser is your identity for now."
   cherry-picked here, so a future merge in this direction regresses nothing.
   Those paths were never actually exposed on `app.`/`bet.` (league-wrapper mode
   redirects them to `/league`), but the files were still in the tree.
-- **A lineage claim is self-asserted and private, and no GitHub sign-in can
-  change that — there is nothing to join.** Measured 2026-07-30, including an
+- **A lineage claim is self-asserted and private, and no GitHub join is exposed
+  by anything we have inspected.** Measured 2026-07-30, including an
   AUTHENTICATED read of Softmax's own dashboard API: `GET
   /api/observatory/players` returns `user_id`, `user`, `id`, `name`,
   `is_default`, `avatar_url`, `created_at`, `disabled_at`, and `whoami` returns
