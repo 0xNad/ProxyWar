@@ -4,6 +4,15 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import englishTranslations from "../../../resources/lang/en.json";
 import { DEFAULT_PLATFORM_ORIGIN } from "../../core/PlatformOrigin";
+import { generateEmblemSvg } from "../identity/IdentityEmblems";
+import {
+  AgentIdentityView,
+  resolveAgentIdentityView,
+} from "../identity/IdentityMatching";
+import {
+  IdentityRegistrySnapshot,
+  loadIdentityRegistrySnapshot,
+} from "../identity/IdentityRegistry";
 
 /**
  * Static league-site writer for the hosted Coworld Proxywar league.
@@ -194,6 +203,13 @@ const PLAYER_PROFILE_ORIGIN =
 function playerProfileUrl(playerName: string): string {
   return `${PLAYER_PROFILE_ORIGIN}/player/${encodeURIComponent(playerName)}`;
 }
+
+/** Default when a caller renders without loading the registry (existing tests, and any future direct call) — every row falls back to a provisional identity: player name, no emblem/short-code/builder. Real production rendering always loads the tracked registry instead (see `writeCoworldLeagueSiteUnlocked`). */
+const EMPTY_LEAGUE_IDENTITY_SNAPSHOT: IdentityRegistrySnapshot = {
+  builders: [],
+  agents: [],
+  versions: [],
+};
 
 type CoworldLeagueTranslationSuffix =
   keyof typeof englishTranslations.coworld_league;
@@ -484,10 +500,19 @@ async function writeCoworldLeagueSiteUnlocked(
   // mirror to the client build. Best-effort: a missing source must never fail a
   // league publish.
   await copySocialImage(siteDir);
+  // A malformed/missing registry must never fail a league publish — fall
+  // back to the empty snapshot (every row renders provisional) and let
+  // `identity:validate` be the place that catches a bad registry file.
+  const identity = await loadIdentityRegistrySnapshot().catch((error) => {
+    console.warn(
+      `coworld-league-mirror: identity registry failed to load, rendering provisional identities: ${(error as Error).message}`,
+    );
+    return EMPTY_LEAGUE_IDENTITY_SNAPSHOT;
+  });
   // Publish data.json last. Existing pages only reload after observing a newer
   // snapshot, so they cannot race ahead of either the client or the HTML.
   await writeFileAtomic(clientPath, coworldLeagueClientJavaScript());
-  await writeFileAtomic(indexPath, coworldLeagueIndexHtml(data));
+  await writeFileAtomic(indexPath, coworldLeagueIndexHtml(data, identity));
   await writeFileAtomic(dataPath, `${JSON.stringify(data, null, 2)}\n`);
   return { indexPath, clientPath, dataPath };
 }
@@ -518,7 +543,10 @@ export async function markCoworldLeagueSiteStale(
   });
 }
 
-export function coworldLeagueIndexHtml(data: CoworldLeagueMirrorData): string {
+export function coworldLeagueIndexHtml(
+  data: CoworldLeagueMirrorData,
+  identity: IdentityRegistrySnapshot = EMPTY_LEAGUE_IDENTITY_SNAPSHOT,
+): string {
   const league = data.league;
   const roundChip =
     league.currentRoundNumber === null
@@ -646,6 +674,18 @@ ${leagueSocialMetaHtml()}
     .policy-unrated { font-style:italic; opacity:.7; }
     .badge { display:inline-block; border-radius:4px; padding:2px 7px; font:800 10px ui-monospace, SFMono-Regular, Menlo, monospace; letter-spacing:.08em; margin-left:6px; vertical-align:2px; }
     .badge.house { border:1px solid rgba(244,166,74,.5); color:var(--amber); }
+    .agent-identity { display:inline-flex; align-items:center; gap:6px; }
+    .agent-emblem { width:20px; height:20px; border-radius:4px; overflow:hidden; flex:0 0 auto; display:inline-block; vertical-align:-5px; }
+    .agent-emblem svg { display:block; width:100%; height:100%; }
+    .agent-shortcode { color:var(--muted); font:700 10px ui-monospace, SFMono-Regular, Menlo, monospace; letter-spacing:.06em; }
+    .builder-note { display:block; color:var(--muted); font:600 11px ui-monospace, SFMono-Regular, Menlo, monospace; margin-top:2px; font-style:italic; }
+    .integrity-drawer { margin-top:4px; }
+    .integrity-drawer summary { cursor:pointer; color:var(--muted); font:700 11px ui-monospace, SFMono-Regular, Menlo, monospace; list-style:none; }
+    .integrity-drawer summary::-webkit-details-marker { display:none; }
+    .integrity-drawer summary::before { content:"▸ "; }
+    .integrity-drawer[open] summary::before { content:"▾ "; }
+    .integrity-drawer .integrity-body { margin-top:4px; border-left:2px solid var(--line); padding-left:8px; }
+    .integrity-drawer .integrity-refresh { display:block; color:var(--muted); font-size:10px; margin-top:4px; }
     .battle-grid { display:grid; grid-template-columns:repeat(auto-fill, minmax(320px, 1fr)); gap:14px; }
     .battle { background:var(--surface); border:1px solid var(--line); border-radius:8px; padding:14px; display:flex; flex-direction:column; gap:10px; }
     .battle-head { display:flex; justify-content:space-between; gap:8px; align-items:baseline; }
@@ -757,14 +797,14 @@ ${leagueSocialMetaHtml()}
       <p id="standings-provenance" class="standings-note">${escapeHtml(
         translateText("coworld_league.standings_provenance"),
       )}</p>
-      ${standingsTable(data)}
+      ${standingsTable(data, identity)}
     </section>
     <section>
       <h2>Latest battles</h2>
       ${
         data.episodes.length === 0
           ? `<p class="lede">No completed episodes mirrored yet — next sync will pick them up.</p>`
-          : `<div class="battle-grid">${data.episodes.map(battleCard).join("\n")}</div>`
+          : `<div class="battle-grid">${data.episodes.map((episode) => battleCard(episode, identity)).join("\n")}</div>`
       }
     </section>
     <section>
@@ -960,7 +1000,44 @@ export function coworldLeagueClientAssetPath(): string {
   return `${COWORLD_LEAGUE_CLIENT_PATH}?v=${digest}`;
 }
 
-function standingsTable(data: CoworldLeagueMirrorData): string {
+/**
+ * Emblem + display name + short code for one resolved Agent, or the
+ * provisional (name-only) fallback when no AgentProfile matched — shared by
+ * both the standings table and battle cards so the two surfaces never drift
+ * on what "this participant's identity" looks like.
+ */
+function agentIdentityMarkup(
+  view: AgentIdentityView,
+  fallbackPlayerName: string,
+): string {
+  if (view.agent === null) {
+    return `<span class="agent-identity">${escapeHtml(fallbackPlayerName)}</span>`;
+  }
+  const emblem = `<span class="agent-emblem">${generateEmblemSvg(view.agent.id)}</span>`;
+  return `<span class="agent-identity">${emblem}${escapeHtml(
+    view.agent.displayName,
+  )} <span class="agent-shortcode">${escapeHtml(view.agent.shortCode)}</span></span>`;
+}
+
+/** "Unclaimed" note for a matched-but-builderless Agent — never a builder name that doesn't exist. House agents keep their existing HOUSE badge instead (a different, non-claim classification) and skip this note. */
+function builderNoteMarkup(view: AgentIdentityView, isHouse: boolean): string {
+  if (view.agent === null || isHouse) {
+    return "";
+  }
+  if (view.builder !== null) {
+    return `<span class="builder-note">${escapeHtml(
+      translateText("coworld_league.builder_label"),
+    )} ${escapeHtml(view.builder.displayName ?? view.builder.slug)}</span>`;
+  }
+  return `<span class="builder-note">${escapeHtml(
+    translateText("coworld_league.builder_unclaimed"),
+  )}</span>`;
+}
+
+function standingsTable(
+  data: CoworldLeagueMirrorData,
+  identity: IdentityRegistrySnapshot,
+): string {
   if (data.standings.length === 0) {
     return `<p class="lede">No standings mirrored yet.</p>`;
   }
@@ -1001,14 +1078,49 @@ function standingsTable(data: CoworldLeagueMirrorData): string {
             : `<span class="policy policy-unrated">${escapeHtml(
                 translateText("coworld_league.not_yet_rated"),
               )}</span>`;
+      const view = resolveAgentIdentityView(
+        {
+          playerName: row.playerName,
+          ratingPolicyLabel,
+          activeChampionPolicyLabel,
+        },
+        identity.agents,
+        identity.builders,
+        identity.versions,
+      );
+      const activeVersionLine =
+        view.version !== null && view.version.publicVersionLabel !== null
+          ? `<span class="builder-note">${escapeHtml(
+              translateText("coworld_league.active_version_label"),
+            )} ${escapeHtml(view.version.publicVersionLabel)}</span>`
+          : "";
+      // Raw Coworld identity — player name and exact policy labels — never
+      // disappears; it moves here, collapsed by default, instead of sitting
+      // inline as the primary label (spec Stage 1 item 7).
+      const integrityDrawer = `<details class="integrity-drawer">
+            <summary>${escapeHtml(
+              translateText("coworld_league.integrity_details"),
+            )}</summary>
+            <div class="integrity-body">
+              <span class="policy">${escapeHtml(
+                translateText("coworld_league.coworld_player_name"),
+              )} ${escapeHtml(row.playerName)}</span>
+              ${policyProvenance}
+              <span class="integrity-refresh">${escapeHtml(
+                translateText("coworld_league.refreshed_as_of"),
+              )} <span data-utc="${escapeHtml(data.generatedAt)}">${escapeHtml(
+                shortUtc(data.generatedAt),
+              )}</span></span>
+            </div>
+          </details>`;
       return `
         <tr${row.isHouse ? ` class="house"` : ""}>
           <td class="rank">${escapeHtml(String(row.rank))}</td>
           <td><a class="player-profile-link" href="${escapeHtml(
             playerProfileUrl(row.playerName),
-          )}">${escapeHtml(row.playerName)}</a>${
+          )}">${agentIdentityMarkup(view, row.playerName)}</a>${
             row.isHouse ? `<span class="badge house">HOUSE</span>` : ""
-          }${policyProvenance}</td>
+          }${builderNoteMarkup(view, row.isHouse)}${activeVersionLine}${integrityDrawer}</td>
           <td class="score">${row.score === null ? "—" : escapeHtml(row.score.toFixed(2))}</td>
           <td>${row.roundsPlayed === null ? "—" : escapeHtml(String(row.roundsPlayed))}</td>
         </tr>`;
@@ -1026,7 +1138,10 @@ function standingsTable(data: CoworldLeagueMirrorData): string {
   </table></div>`;
 }
 
-function battleCard(episode: CoworldLeagueEpisodeRow): string {
+function battleCard(
+  episode: CoworldLeagueEpisodeRow,
+  identity: IdentityRegistrySnapshot,
+): string {
   const totalTiles = episode.players.reduce(
     (sum, player) => sum + Math.max(0, player.tilesOwned),
     0,
@@ -1040,12 +1155,23 @@ function battleCard(episode: CoworldLeagueEpisodeRow): string {
   const combatantMarkup = (player: CoworldLeagueEpisodePlayerRow): string => {
     const share =
       totalTiles > 0 ? Math.max(0, player.tilesOwned) / totalTiles : 0;
+    // Episode player rows carry no policy label (Coworld's hosted-replay
+    // shape stops at slot/name/tilesOwned/isAlive/isWinner/color), so only
+    // the agent lookup — never version resolution — applies here; "Active
+    // version" stays a standings-table-only field until that data exists
+    // per-episode.
+    const view = resolveAgentIdentityView(
+      { playerName: player.name, ratingPolicyLabel: null, activeChampionPolicyLabel: null },
+      identity.agents,
+      identity.builders,
+      identity.versions,
+    );
     return `
         <div class="combatant" role="listitem">
           <span class="dot" aria-hidden="true" style="background:${escapeHtml(player.color)}"></span>
           <span class="name${player.isAlive ? "" : " dead"}"><a class="player-profile-link" href="${escapeHtml(
             playerProfileUrl(player.name),
-          )}">${escapeHtml(player.name)}</a>${
+          )}">${agentIdentityMarkup(view, player.name)}</a>${
             player.isWinner
               ? ` <span class="win" aria-hidden="true">★</span><span class="sr-only"> (${escapeHtml(
                   translateText("coworld_league.winner"),

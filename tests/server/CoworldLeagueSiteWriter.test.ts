@@ -166,7 +166,7 @@ describe("coworldLeagueIndexHtml", () => {
     // literal here is what let the origin move without the league site
     // noticing (see `core/PlatformOrigin.ts`).
     expect(html).toContain(
-      `<a class="player-profile-link" href="${DEFAULT_PLATFORM_ORIGIN}/player/odin%20free">odin free</a>`,
+      `<a class="player-profile-link" href="${DEFAULT_PLATFORM_ORIGIN}/player/odin%20free"><span class="agent-identity">odin free</span></a>`,
     );
   });
 
@@ -178,10 +178,10 @@ describe("coworldLeagueIndexHtml", () => {
     // the profile is about the agent, not this one match's outcome, so both
     // still link.
     expect(html).toContain(
-      `<a class="player-profile-link" href="${DEFAULT_PLATFORM_ORIGIN}/player/daveey">daveey</a>`,
+      `<a class="player-profile-link" href="${DEFAULT_PLATFORM_ORIGIN}/player/daveey"><span class="agent-identity">daveey</span></a>`,
     );
     expect(html).toContain(
-      `<a class="player-profile-link" href="${DEFAULT_PLATFORM_ORIGIN}/player/Loki">Loki</a>`,
+      `<a class="player-profile-link" href="${DEFAULT_PLATFORM_ORIGIN}/player/Loki"><span class="agent-identity">Loki</span></a>`,
     );
   });
 

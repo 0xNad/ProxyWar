@@ -1064,7 +1064,13 @@
     "latest_premiere_eyebrow": "Latest premiere",
     "latest_premiere_revealed": "Revealed {time}",
     "latest_premiere_watch": "Watch now",
-    "account_link": "Your account"
+    "account_link": "Your account",
+    "integrity_details": "Details & provenance",
+    "coworld_player_name": "Coworld player name:",
+    "refreshed_as_of": "Refreshed as of",
+    "builder_label": "Builder:",
+    "builder_unclaimed": "Unclaimed",
+    "active_version_label": "Active version:"
   },
   "replay_premiere": {
     "overlay_label": "Replay Premiere controls",

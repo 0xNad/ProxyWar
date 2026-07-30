@@ -1,4 +1,4 @@
-import { AgentProfile, AgentVersion } from "./IdentitySchemas";
+import { AgentProfile, AgentVersion, BuilderProfile } from "./IdentitySchemas";
 
 /**
  * Maps live Coworld mirror rows to registry identities. `playerName` is the
@@ -116,4 +116,34 @@ export function computeUnmappedPlayerNames(
   return livePlayerNames.filter(
     (playerName) => !registeredPlayerNames.has(playerName),
   );
+}
+
+/** Everything a render call site needs for one live participant, resolved in one pass. `builder` is non-null only once a verified claim exists — `agent.builderId` is the only path to it, never a name/email/GitHub match (see module doc). */
+export interface AgentIdentityView {
+  agent: AgentProfile | null;
+  builder: BuilderProfile | null;
+  version: ObservedVersion | null;
+}
+
+/** The one function mirror rendering actually calls: agent lookup, its registered Builder (if any), and its observed version, together. Never partial — `builder`/`version` are only meaningful when `agent` is non-null, and both stay `null` alongside a `null` agent. */
+export function resolveAgentIdentityView(
+  row: LiveIdentityInput,
+  agents: readonly AgentProfile[],
+  builders: readonly BuilderProfile[],
+  versions: readonly AgentVersion[],
+): AgentIdentityView {
+  const agent = findAgentForPlayerName(row.playerName, agents);
+  if (agent === null) {
+    return { agent: null, builder: null, version: null };
+  }
+  const builder =
+    agent.builderId === null
+      ? null
+      : (builders.find((candidate) => candidate.id === agent.builderId) ??
+        null);
+  return {
+    agent,
+    builder,
+    version: resolveObservedVersion(agent, versions, row),
+  };
 }
