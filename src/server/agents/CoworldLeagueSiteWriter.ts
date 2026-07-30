@@ -1043,7 +1043,9 @@ function battleCard(episode: CoworldLeagueEpisodeRow): string {
     return `
         <div class="combatant" role="listitem">
           <span class="dot" aria-hidden="true" style="background:${escapeHtml(player.color)}"></span>
-          <span class="name${player.isAlive ? "" : " dead"}">${escapeHtml(player.name)}${
+          <span class="name${player.isAlive ? "" : " dead"}"><a class="player-profile-link" href="${escapeHtml(
+            playerProfileUrl(player.name),
+          )}">${escapeHtml(player.name)}</a>${
             player.isWinner
               ? ` <span class="win" aria-hidden="true">★</span><span class="sr-only"> (${escapeHtml(
                   translateText("coworld_league.winner"),

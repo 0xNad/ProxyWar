@@ -170,6 +170,21 @@ describe("coworldLeagueIndexHtml", () => {
     );
   });
 
+  test("links each battle-card combatant to the shared platform player profile", () => {
+    const html = coworldLeagueIndexHtml(sampleData());
+    // Same identity space and same shared destination as the standings-row
+    // link above — a viewer must reach one profile regardless of which card
+    // they clicked from. Covers a winner (alive) and an eliminated combatant:
+    // the profile is about the agent, not this one match's outcome, so both
+    // still link.
+    expect(html).toContain(
+      `<a class="player-profile-link" href="${DEFAULT_PLATFORM_ORIGIN}/player/daveey">daveey</a>`,
+    );
+    expect(html).toContain(
+      `<a class="player-profile-link" href="${DEFAULT_PLATFORM_ORIGIN}/player/Loki">Loki</a>`,
+    );
+  });
+
   test("offers one link off the mirror to the account authority", () => {
     const html = coworldLeagueIndexHtml(sampleData());
     // The league page is a read-only mirror with no session of its own — it
