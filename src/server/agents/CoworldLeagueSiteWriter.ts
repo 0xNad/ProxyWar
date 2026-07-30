@@ -611,8 +611,8 @@ ${leagueSocialMetaHtml()}
     /* The one link off this read-only mirror to the account authority.
        44px min target, matching the mobile rules below — box-sizing:border-box
        puts the padding inside min-height, so 32px would BE 32px. */
-    a.chip.account-link { text-decoration:none; color:var(--fg); display:inline-flex; align-items:center; min-height:44px; }
-    a.chip.account-link:hover { border-color:var(--fg); }
+    a.chip.account-link { text-decoration:none; color:var(--text); display:inline-flex; align-items:center; min-height:44px; }
+    a.chip.account-link:hover { border-color:var(--text); }
     .stale-banner { border:1px solid rgba(244,166,74,.5); background:rgba(244,166,74,.08); color:var(--amber); border-radius:6px; padding:10px 12px; margin-bottom:14px; font-weight:800; }
     .sync-status { border:1px solid rgba(255,155,143,.5); background:rgba(255,155,143,.08); color:var(--bad); border-radius:6px; padding:10px 12px; margin-bottom:14px; font-weight:800; }
     .hero { border-top:1px solid var(--line); border-bottom:1px solid var(--line); padding:24px 0 20px; margin-bottom:18px; }

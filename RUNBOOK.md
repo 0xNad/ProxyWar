@@ -54,8 +54,8 @@ Two more gaps surfaced once admission itself worked (also fixed, §5):
 ## 1. One-time setup
 
 ```sh
-npm run inst                 # npm ci --ignore-scripts (verified present already)
-npx tsc --noEmit              # clean
+npm run inst     # npm ci --ignore-scripts (verified present already)
+npx tsc --noEmit # clean
 ```
 
 The tracked-code fixes below already landed on `claude/betting` (this session's commits);
@@ -90,7 +90,7 @@ docs manifests):
 
 ```sh
 mkdir -p /tmp/proxywar-premiere-manifests
-python3 - <<'PY'
+python3 - << 'PY'
 import json, os
 src, dst = "docs/ai-league-agent-manifests", "/tmp/proxywar-premiere-manifests"
 for fname in sorted(os.listdir(src)):
@@ -124,7 +124,7 @@ keeps the demo brisk to watch. Real observed run:
 
 ```sh
 mkdir -p /tmp/proxywar-premiere-staging
-git add -A && git commit -m "WIP checkpoint for controlled-exhibition provenance"   # if dirty
+git add -A && git commit -m "WIP checkpoint for controlled-exhibition provenance" # if dirty
 
 GAME_ENV=dev npx tsx src/scripts/replay-premiere-controlled-exhibition.ts \
   --run-id=local-dev-premiere-2 \
@@ -160,11 +160,11 @@ Compute checkpoints at 35%/65% of `turnCount` (matches
 
 ```sh
 GAME_ENV=dev \
-PROXYWAR_WAGERING_ENABLED=1 \
-PROXYWAR_PUBLIC_URL=http://127.0.0.1:8787 \
-PROXYWAR_REPLAY_PREMIERE_STATE_ROOT=/Users/<you>/.proxywar-dev-integrate/replay-premiere \
-PROXYWAR_LEAGUE_WRAPPER_ONLY=true \
-npx tsx src/scripts/ai-agent-demo-server.ts
+  PROXYWAR_WAGERING_ENABLED=1 \
+  PROXYWAR_PUBLIC_URL=http://127.0.0.1:8787 \
+  PROXYWAR_REPLAY_PREMIERE_STATE_ROOT=/Users/ \
+  PROXYWAR_LEAGUE_WRAPPER_ONLY=true < you > /.proxywar-dev-integrate/replay-premiere \
+  npx tsx src/scripts/ai-agent-demo-server.ts
 ```
 
 - `PROXYWAR_WAGERING_ENABLED=1` — turns on the LMSR market (off by default).
@@ -204,7 +204,7 @@ mkdir -p /private/tmp/proxywar-premiere-admit-inputs
 python3 -c "import os; open('/private/tmp/proxywar-premiere-admit-inputs/nonce.bin','wb').write(os.urandom(32))"
 chmod 600 /private/tmp/proxywar-premiere-admit-inputs/nonce.bin
 
-cat > /private/tmp/proxywar-premiere-admit-inputs/eligibility.json <<'JSON'
+cat > /private/tmp/proxywar-premiere-admit-inputs/eligibility.json << 'JSON'
 {
   "schemaVersion": 1,
   "eligibilityCheckVersion": "local-dev/v1",
@@ -218,7 +218,7 @@ cat > /private/tmp/proxywar-premiere-admit-inputs/eligibility.json <<'JSON'
 }
 JSON
 
-cat > /private/tmp/proxywar-premiere-admit-inputs/definition.json <<'JSON'
+cat > /private/tmp/proxywar-premiere-admit-inputs/definition.json << 'JSON'
 {
   "schemaVersion": 1,
   "title": "Local Dev Premiere - Controlled Exhibition",
@@ -245,16 +245,16 @@ premiere transitions to `failed`/void after a service-outage tolerance is exceed
 
 ```sh
 GAME_ENV=dev PROXYWAR_PUBLIC_URL=http://127.0.0.1:8787 npx tsx src/scripts/replay-premiere-admit.ts \
-  --premiere-id=prem_<20 lowercase alnum chars> \
-  --source-file=/private/tmp/proxywar-premiere-staging/local-dev-premiere-2.source.json \
+  --premiere-id=prem_ lowercase alnum chars \
+  \
   --expected-source-sha256=8eed82b5bc1a727e4e63097ed7a26e3c86d5c1ebff8c4c6eb4df37875b45ac34 \
-  --private-state-root=/Users/<you>/.proxywar-dev-integrate/replay-premiere \
+  --private-state-root=/Users/ \
   --served-root="$(pwd)" --served-root="$(pwd)/static" --served-root="$(pwd)/artifacts" \
   --served-root="$(pwd)/docs" --served-root="$(pwd)/examples/external-agent" \
   --eligibility-file=/private/tmp/proxywar-premiere-admit-inputs/eligibility.json \
   --definition-file=/private/tmp/proxywar-premiere-admit-inputs/definition.json \
   --deployment-origin=http://127.0.0.1:8787 \
-  --nonce-file=/private/tmp/proxywar-premiere-admit-inputs/nonce.bin
+  --nonce-file=/private/tmp/proxywar-premiere-admit-inputs/nonce.bin < 20 > --source-file=/private/tmp/proxywar-premiere-staging/local-dev-premiere-2.source.json < you > /.proxywar-dev-integrate/replay-premiere
 ```
 
 `--max-presentation-span-ms` is an optional CLI flag on `replay-premiere-admit.ts`.
@@ -268,7 +268,16 @@ flag can be omitted entirely. Pass it only if you deliberately want finer chunki
 Real successful output from this session:
 
 ```json
-{"premiereId":"prem_asvlm54vtb1oa57ulfcd","sourceRunId":"local-dev-premiere-2","sourceReplaySha256":"8eed82b5bc1a727e4e63097ed7a26e3c86d5c1ebff8c4c6eb4df37875b45ac34","eligibilityRecordHash":"9cd24f9dec4b98ded0ad70ca571db1a0015c6051e64c756d55d26bdc921bdc78","publicationCommitmentHash":"84c098b977f76415e1b2f6793888f154c6c5d42215c7b6e07a39c2e1d1413843","orderedDraftManifestRoot":"0e17acb3c2de3e237ab0cc5fb5d8ccc161728736e3e49dbc69553e638fcd7e11","admissionRecordHash":"7b047c35f170cf18913837686426a3ca798dec0ab6b1cae0ac45288138e0a62e","deploymentOriginSha256":"b1a61bf29a38ff3642af0dad0785e1677a58232f2e9bb85db3f7a80d8bf1a387"}
+{
+  "premiereId": "prem_asvlm54vtb1oa57ulfcd",
+  "sourceRunId": "local-dev-premiere-2",
+  "sourceReplaySha256": "8eed82b5bc1a727e4e63097ed7a26e3c86d5c1ebff8c4c6eb4df37875b45ac34",
+  "eligibilityRecordHash": "9cd24f9dec4b98ded0ad70ca571db1a0015c6051e64c756d55d26bdc921bdc78",
+  "publicationCommitmentHash": "84c098b977f76415e1b2f6793888f154c6c5d42215c7b6e07a39c2e1d1413843",
+  "orderedDraftManifestRoot": "0e17acb3c2de3e237ab0cc5fb5d8ccc161728736e3e49dbc69553e638fcd7e11",
+  "admissionRecordHash": "7b047c35f170cf18913837686426a3ca798dec0ab6b1cae0ac45288138e0a62e",
+  "deploymentOriginSha256": "b1a61bf29a38ff3642af0dad0785e1677a58232f2e9bb85db3f7a80d8bf1a387"
+}
 ```
 
 ## 7. Activate it
@@ -281,16 +290,16 @@ Admission never hot-registers; the server must restart and reconstruct its catal
 
 The same applies to **client** changes, and it is easy to lose an hour to:
 `npx vite build` writes a fresh `static/assets/index-<hash>.js`, but the
-server caches `index.html` in memory at boot, so it keeps serving the *old*
+server caches `index.html` in memory at boot, so it keeps serving the _old_
 hash until it restarts. Cache-busting the URL in the browser does not help —
 the stale reference is coming from the server, not the browser.
 
 To check what is actually live rather than what you built:
 
 ```sh
-ls static/assets/index-*.js | head -1                       # on disk
+ls static/assets/index-*.js | head -1 # on disk
 curl -s https://bet.proxywar.xyz/account \
-  | grep -oE 'assets/index-[A-Za-z0-9_-]+\.js' | head -1    # being served
+  | grep -oE 'assets/index-[A-Za-z0-9_-]+\.js' | head -1 # being served
 ```
 
 Different hashes mean your build has not gone live yet. On the hosted deploy
@@ -421,7 +430,7 @@ contract.** Once the replay actually loaded, the trade sidebar got stuck on
 "Loading market…" with a visible `invalid_response` error. The live
 `GET /api/premieres/<id>/market` response never included `premiereId` inside
 `market` (verified via direct `curl` against a real running server, before
-*and* after PariServer's in-flight rework — this was a pre-existing gap, not
+_and_ after PariServer's in-flight rework — this was a pre-existing gap, not
 something their change introduced) yet `marketStateSchema` (in
 `ReplayPremiereRuntime.ts`) required it under `.strict()`, so **every** real
 market response ever emitted by this server has always failed client-side
@@ -435,40 +444,41 @@ schema. Fix, all in `src/client/ReplayPremiereRuntime.ts` +
 `src/client/prediction/wagering/**` (NOT touching
 `src/server/replay-premiere/wagering/**`, per the "coordinate, don't edit"
 constraint):
-  - Removed `premiereId` from `marketStateSchema` and its two now-dead
-    comparison checks (`assertMarketStateBound`, the market-response bind
-    check in `readMarketState`).
-  - Added `liveVisibleSequence: nonNegativeIntegerSchema` to
-    `marketStateSchema`; added `MarketState.liveVisibleSequence` to the
-    client view type and its `serviceMapping.ts` passthrough.
-  - `tradeSchema`: dropped `checkpointId`, added `participantKind`
-    (`"real"|"synthetic"`), `sequence`, `idempotencyKey`.
-  - `ReplayPremiereTradeRequest`: `checkpointId: string` →
-    `sequence: number` (the freshest observed `market.liveVisibleSequence`,
-    per PariServer's semantics — "always send the freshest value you have,
-    don't cache a stale one across multiple orders"); `submitMarketOrder`'s
-    validation/body-construction and `assertTradeResponseBound`'s bind check
-    updated to match.
-  - Removed the stale checkpoint-window gate from the controller-level
-    `submitMarketOrder` (`ReplayPremiereRuntimeController`) — it looked up
-    `request.checkpointId` in `publicDefinition.checkpoints` and rejected if
-    that checkpoint's sequence was ahead of `observedSequence()` (the
-    *replay-turn* clock, an unrelated concept to the *market's* live-visible
-    clock). Continuous LMSR trading is explicitly, deliberately **not**
-    gated to a checkpoint window (see `BettingOverlay.ts`'s own doc comment:
-    "checkpoints are content beats the UI highlights, they gate nothing") —
-    this gate was a checkpoint-era leftover that never got scrubbed when the
-    continuous-market design landed, and would have permanently rejected
-    every order once no real gate concept existed to satisfy it. The server
-    is the sole remaining authority on sequence freshness (rejects a
-    stale/ahead claim with `410 order_sequence_unreleased`).
-  - `BettingOverlay`/`BettingPremierePage`/`TradeTicket` wiring: dropped
-    `checkpointId` threading through `onTrade`; `BettingPremiereMarketController`
-    now tracks `latestLiveVisibleSequence` from every poll/trade response and
-    sends it fresh on each order.
-  - Updated the 4 affected test fixtures (`tests/client/ReplayPremiereRuntime.test.ts`,
-    `tests/client/prediction/wagering/{components,serviceMapping,validate}.test.ts`)
-    to match the corrected wire shape. All 5 affected suites green (198 tests).
+
+- Removed `premiereId` from `marketStateSchema` and its two now-dead
+  comparison checks (`assertMarketStateBound`, the market-response bind
+  check in `readMarketState`).
+- Added `liveVisibleSequence: nonNegativeIntegerSchema` to
+  `marketStateSchema`; added `MarketState.liveVisibleSequence` to the
+  client view type and its `serviceMapping.ts` passthrough.
+- `tradeSchema`: dropped `checkpointId`, added `participantKind`
+  (`"real"|"synthetic"`), `sequence`, `idempotencyKey`.
+- `ReplayPremiereTradeRequest`: `checkpointId: string` →
+  `sequence: number` (the freshest observed `market.liveVisibleSequence`,
+  per PariServer's semantics — "always send the freshest value you have,
+  don't cache a stale one across multiple orders"); `submitMarketOrder`'s
+  validation/body-construction and `assertTradeResponseBound`'s bind check
+  updated to match.
+- Removed the stale checkpoint-window gate from the controller-level
+  `submitMarketOrder` (`ReplayPremiereRuntimeController`) — it looked up
+  `request.checkpointId` in `publicDefinition.checkpoints` and rejected if
+  that checkpoint's sequence was ahead of `observedSequence()` (the
+  _replay-turn_ clock, an unrelated concept to the _market's_ live-visible
+  clock). Continuous LMSR trading is explicitly, deliberately **not**
+  gated to a checkpoint window (see `BettingOverlay.ts`'s own doc comment:
+  "checkpoints are content beats the UI highlights, they gate nothing") —
+  this gate was a checkpoint-era leftover that never got scrubbed when the
+  continuous-market design landed, and would have permanently rejected
+  every order once no real gate concept existed to satisfy it. The server
+  is the sole remaining authority on sequence freshness (rejects a
+  stale/ahead claim with `410 order_sequence_unreleased`).
+- `BettingOverlay`/`BettingPremierePage`/`TradeTicket` wiring: dropped
+  `checkpointId` threading through `onTrade`; `BettingPremiereMarketController`
+  now tracks `latestLiveVisibleSequence` from every poll/trade response and
+  sends it fresh on each order.
+- Updated the 4 affected test fixtures (`tests/client/ReplayPremiereRuntime.test.ts`,
+  `tests/client/prediction/wagering/{components,serviceMapping,validate}.test.ts`)
+  to match the corrected wire shape. All 5 affected suites green (198 tests).
 
 **Root cause #4 (found once the market poll worked: the trade ticket's seat
 list was empty): `BettingOverlay.allSeats()`/`seatLabel()` sourced seats from
@@ -496,16 +506,16 @@ section).
 ```sh
 # Isolated server on its own port/state-root — avoids colliding with any
 # other agent's demo-server process (see §5's writer-lock note).
-mkdir -p /Users/<you>/.proxywar-dev-unblock/replay-premiere
-chmod 700 /Users/<you>/.proxywar-dev-unblock/replay-premiere   # required — the
-  # server rejects a world/group-readable private-state-root with
-  # `private_state_root_not_private` (503 PREMIERE_UNAVAILABLE) at boot.
+mkdir -p /Users/ < you > /.proxywar-dev-unblock/replay-premiere
+chmod 700 /Users/ < you > /.proxywar-dev-unblock/replay-premiere # required — the
+# server rejects a world/group-readable private-state-root with
+# `private_state_root_not_private` (503 PREMIERE_UNAVAILABLE) at boot.
 
 GAME_ENV=dev PROXYWAR_WAGERING_ENABLED=1 \
-PROXYWAR_PUBLIC_URL=http://127.0.0.1:8791 \
-PROXYWAR_REPLAY_PREMIERE_STATE_ROOT=/Users/<you>/.proxywar-dev-unblock/replay-premiere \
-PROXYWAR_LEAGUE_WRAPPER_ONLY=true AI_LEAGUE_DEMO_PORT=8791 \
-npx tsx src/scripts/ai-agent-demo-server.ts
+  PROXYWAR_PUBLIC_URL=http://127.0.0.1:8791 \
+  PROXYWAR_REPLAY_PREMIERE_STATE_ROOT=/Users/ \
+  PROXYWAR_LEAGUE_WRAPPER_ONLY=true AI_LEAGUE_DEMO_PORT=8791 < you > /.proxywar-dev-unblock/replay-premiere \
+  npx tsx src/scripts/ai-agent-demo-server.ts
 # NOTE: PORT= is NOT the right env var — the server reads AI_LEAGUE_DEMO_PORT
 # (see ProxyWarDemoServerConfig.ts); PORT is silently ignored and the
 # server falls back to the 8787 default, which will collide with any other
@@ -529,9 +539,9 @@ curl -s "http://127.0.0.1:8791/api/premieres/<id>/market"
   --remote-debugging-port=9222 --remote-allow-origins=* \
   --user-data-dir=/tmp/proxywar-chrome-profile-unblock \
   --no-first-run --no-default-browser-check &
-curl -s http://localhost:9222/json/version   # NOTE: use "localhost", not
-  # "127.0.0.1" — Chrome 150 binds the DevTools port on ::1 and 127.0.0.1
-  # gets a bare 404 with no explanation.
+curl -s http://localhost:9222/json/version # NOTE: use "localhost", not
+# "127.0.0.1" — Chrome 150 binds the DevTools port on ::1 and 127.0.0.1
+# gets a bare 404 with no explanation.
 ```
 
 **Local-only test workaround needed to reach `/bet/<id>` at all — not a code
@@ -544,7 +554,7 @@ authenticated call) resolves the requester's address via
 forwarding headers **only** from a loopback peer, exactly the shape of the
 real production Cloudflare-tunnel deployment. A browser connecting directly
 to `127.0.0.1:8791` (no tunnel in front, as in any purely local dev setup)
-*is* a loopback peer, so the resolver looks for a forwarding header, finds
+_is_ a loopback peer, so the resolver looks for a forwarding header, finds
 none, and returns `null` → every write 400s with `remote_address_unavailable`.
 Set a header that simulates the tunnel to unblock local testing:
 
@@ -562,8 +572,8 @@ a static header to every outgoing request from the tab before navigating.)
   `Canvas2D willReadFrequently` perf warning only), the LMSR trade ticket
   renders with all 4 seats populated at 25.0 each, bankroll `1,000 cr`.
 - **Buy, live, driven end to end**: selected a seat, entered a 150-chip
-  budget, the client's own preview quote read *"Buy 5 sh of Aggressive
-  Expander for 150 cr (avg 30.0). Price moves to 35.5."* — clicked "Buy
+  budget, the client's own preview quote read _"Buy 5 sh of Aggressive
+  Expander for 150 cr (avg 30.0). Price moves to 35.5."_ — clicked "Buy
   shares" and the **actual** post-trade state matched that preview exactly:
   bankroll `1,000 → 850` (debited exactly 150), `market.q` became
   `[5,0,0,0]`, and live prices became `[35.47, 21.51, 21.51, 21.51]`
@@ -576,10 +586,10 @@ a static header to every outgoing request from the tab before navigating.)
   and reload-survival were not driven live.** The session ran out of budget
   immediately after the verified buy above.
 - **A real, separate gap found but not fixed**: `BettingPremiereMarketController`
-  applies every poll response (an *anonymous* `GET /market`, where
+  applies every poll response (an _anonymous_ `GET /market`, where
   `positions` is always `null` per PariServer's contract) over the
   overlay's `market` property unconditionally. A `POST /market-orders`
-  response *does* carry the acting participant's real positions, so
+  response _does_ carry the acting participant's real positions, so
   "Your positions" briefly would be populated right after a trade — but the
   very next poll (every 2.5s) overwrites it back to `null`, so the positions
   panel and unrealised-P&L display cannot durably show anything. Confirmed
@@ -668,7 +678,7 @@ client's own reveal fetch) tripped this check even though nothing was
 actually wrong. Fixed by reusing the same `isRevealVerificationPending()`
 distinction `sendHeartbeat` already relies on for this identical race:
 only latch a hard failure when the replay's own state machine doesn't
-*also* think the match could be over — i.e., a genuinely inexplicable
+_also_ think the match could be over — i.e., a genuinely inexplicable
 claim, not an ordinary delivery race. Verified: `tsc --noEmit`, `eslint`,
 and the full suite (296 files / 3485 passed) all clean after this change.
 
@@ -686,7 +696,7 @@ natural end of a wagering premiere specifically (checkpoint-bypass is what
 removes the breathing room every other call site implicitly relied on).
 **Every single wagering-premiere run this session reached this failure
 state exactly once, right around natural settlement** — confirmed via
-direct `curl` each time that the *server's* own `/market` endpoint showed
+direct `curl` each time that the _server's_ own `/market` endpoint showed
 `status: "settled"` with a real `winnerSeatId`, never `"failed"`; the
 premiere genuinely completed normally every time, only the client's own
 display went wrong. This was diagnosed down to "some `latchFailure` call
@@ -709,7 +719,7 @@ wasn't isolated and landed in time.
 ### 13.4 What was verified live this session (real browser, real server, real crowd)
 
 - `/bet/<id>` with `PROXYWAR_SYNTHETIC_CROWD_ENABLED=1` (see §13.5): loads
-  to a rendering replay, zero *wagering-specific* console errors (the
+  to a rendering replay, zero _wagering-specific_ console errors (the
   CrazyGames/Turnstile/GTM/YouTube CSP-blocked script-tag noise from §12
   is present on every route including plain `/premiere/<id>` — it is a
   site-wide, pre-existing, unconditional `<script src>` tag in
@@ -748,7 +758,7 @@ wasn't isolated and landed in time.
 ### 13.5 Enabling the synthetic crowd (supersedes §10's "not available yet")
 
 ```sh
-PROXYWAR_SYNTHETIC_CROWD_ENABLED=1   # alongside PROXYWAR_WAGERING_ENABLED=1 — requires it
+PROXYWAR_SYNTHETIC_CROWD_ENABLED=1 # alongside PROXYWAR_WAGERING_ENABLED=1 — requires it
 ```
 
 Real env block used this session (isolated port/state-root, same discipline
@@ -757,12 +767,12 @@ own port AND its own `PROXYWAR_REPLAY_PREMIERE_STATE_ROOT`):
 
 ```sh
 GAME_ENV=dev \
-PROXYWAR_WAGERING_ENABLED=1 \
-PROXYWAR_SYNTHETIC_CROWD_ENABLED=1 \
-PROXYWAR_PUBLIC_URL=http://127.0.0.1:8793 \
-PROXYWAR_REPLAY_PREMIERE_STATE_ROOT=/Users/<you>/.proxywar-dev-<name>/replay-premiere \
-PROXYWAR_LEAGUE_WRAPPER_ONLY=true AI_LEAGUE_DEMO_PORT=8793 \
-npx tsx src/scripts/ai-agent-demo-server.ts
+  PROXYWAR_WAGERING_ENABLED=1 \
+  PROXYWAR_SYNTHETIC_CROWD_ENABLED=1 \
+  PROXYWAR_PUBLIC_URL=http://127.0.0.1:8793 \
+  PROXYWAR_REPLAY_PREMIERE_STATE_ROOT=/Users/ \
+  PROXYWAR_LEAGUE_WRAPPER_ONLY=true AI_LEAGUE_DEMO_PORT=8793 < you > /.proxywar-dev- < name > /replay-premiere \
+  npx tsx src/scripts/ai-agent-demo-server.ts
 ```
 
 No separate confirmation log line — verify indirectly via `curl .../market`
@@ -781,7 +791,7 @@ on screen before any click.
   otherwise fresh and valid. Use
   `datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")`.
 - **The server must already be running (with the correct
-  `PROXYWAR_PUBLIC_URL`/`PROXYWAR_LEAGUE_WRAPPER_ONLY=true`) *before* you
+  `PROXYWAR_PUBLIC_URL`/`PROXYWAR_LEAGUE_WRAPPER_ONLY=true`) _before_ you
   run `replay-premiere-admit.ts`**, not just before you restart it
   afterward — the admit script's leak-audit collector makes a real HTTP
   request against the deployment origin during admission itself, and
@@ -814,7 +824,7 @@ first, careless version of that same diagnostic — logging
 `this.currentNetworkState()`, which does an unchecked `this.projection!`
 read — itself threw when `latchFailure` fired before `this.projection` was
 set, got swallowed by `ReplayPremiereNetworkController.invokeCallback`'s
-catch-and-rethrow, and cascaded into a *second*, corrupted failure. That
+catch-and-rethrow, and cascaded into a _second_, corrupted failure. That
 cascade is what produced this session's first several "reproductions" —
 worth flagging so nobody re-walks that exact trap. The fixed, exception-safe
 version confirmed the real site).
@@ -926,12 +936,12 @@ Go to `https://github.com/settings/applications/new` (a personal **OAuth
 App**, not a GitHub App — no installation/webhook machinery needed) and fill
 in:
 
-| Field | Value |
-|---|---|
-| Application name | `Proxy War Betting` (anything recognizable; shown to the user on GitHub's consent screen, never in-product) |
-| Homepage URL | `https://bet.proxywar.xyz` |
-| Authorization callback URL | `https://bet.proxywar.xyz/api/premieres/auth/github/callback` — **exact**, see §15.2 for why |
-| Enable Device Flow | Leave unchecked — not used |
+| Field                      | Value                                                                                                       |
+| -------------------------- | ----------------------------------------------------------------------------------------------------------- |
+| Application name           | `Proxy War Betting` (anything recognizable; shown to the user on GitHub's consent screen, never in-product) |
+| Homepage URL               | `https://bet.proxywar.xyz`                                                                                  |
+| Authorization callback URL | `https://bet.proxywar.xyz/api/premieres/auth/github/callback` — **exact**, see §15.2 for why                |
+| Enable Device Flow         | Leave unchecked — not used                                                                                  |
 
 **Scopes: none beyond GitHub's default.** Do not check or request `user:email`
 or any repo/org scope. The product only ever needs `id`, `login`, and
@@ -1020,13 +1030,13 @@ every match. Exporting a variable in your shell would be lost at the next
 cycle, so **both values are read from files** and the script passes them in:
 
 ```sh
-printf '%s' '<the Client ID>'     > ~/.proxywar-deploy/github-oauth-client-id
+printf '%s' '<the Client ID>' > ~/.proxywar-deploy/github-oauth-client-id
 printf '%s' '<the Client Secret>' > ~/.proxywar-deploy/github-oauth-client-secret
 chmod 600 ~/.proxywar-deploy/github-oauth-client-secret
 ```
 
 That is the whole configuration step. `§15.3`'s three environment variables
-are still what the *server* reads; these two files are how this deploy
+are still what the _server_ reads; these two files are how this deploy
 supplies them. Note the asymmetry: `PROXYWAR_GITHUB_OAUTH_CLIENT_ID` is
 passed by **value** because it is public, while the secret is passed as
 `..._CLIENT_SECRET_FILE` — a **path** — so it never enters the process
@@ -1089,13 +1099,13 @@ of a user's models and policies, so they cannot exist only where wagering does.
 
 ### 16.1 What now runs where
 
-| Origin | Port | Owns | launchd label |
-|---|---|---|---|
-| `proxywar.xyz` (apex) | 8793 | accounts, GitHub OAuth, display names, lineage claims, player profiles | `com.proxywar.platform` |
-| `app.proxywar.xyz` | 8793 | nothing — 302s to the apex (see 16.2) | (same process) |
-| `bet.proxywar.xyz` | 8792 | the market, points ledger, guest bankrolls | `com.proxywar.betautocycle` |
-| `beta.proxywar.xyz` | 8788 | the league ladder and replays | (pre-existing) |
-| `www.proxywar.xyz` | — | edge 301 to `beta.../league` (zone rule "www to league") | (Cloudflare) |
+| Origin                | Port | Owns                                                                   | launchd label               |
+| --------------------- | ---- | ---------------------------------------------------------------------- | --------------------------- |
+| `proxywar.xyz` (apex) | 8793 | accounts, GitHub OAuth, display names, lineage claims, player profiles | `com.proxywar.platform`     |
+| `app.proxywar.xyz`    | 8793 | nothing — 302s to the apex (see 16.2)                                  | (same process)              |
+| `bet.proxywar.xyz`    | 8792 | the market, points ledger, guest bankrolls                             | `com.proxywar.betautocycle` |
+| `beta.proxywar.xyz`   | 8788 | the league ladder and replays                                          | (pre-existing)              |
+| `www.proxywar.xyz`    | —    | edge 301 to `beta.../league` (zone rule "www to league")               | (Cloudflare)                |
 
 `com.proxywar.platformleague` keeps the platform's own copy of the league
 mirror fresh. It exists because the platform must not depend on the betting
@@ -1133,8 +1143,8 @@ had to change together, and each is a trap on its own:
   narrowed to `http.host eq "www.proxywar.xyz"` and renamed "www to league" —
   narrowed, not deleted, because deleting it would have silently dropped www
   too. There is still no API path to it (`cert.pem` holds only an `ARGO TUNNEL
-  TOKEN`, `cloudflared` has no `rules` subcommand), so this is dashboard-only.
-- **The apex DNS record.** It was a *proxied placeholder* `A 192.0.2.1`, which
+TOKEN`, `cloudflared` has no `rules` subcommand), so this is dashboard-only.
+- **The apex DNS record.** It was a _proxied placeholder_ `A 192.0.2.1`, which
   only ever "worked" because the redirect rule fired first. Deleting the rule
   without fixing this would have served 5xx from the apex. There IS an API path
   here, contrary to what this section used to imply:
@@ -1143,7 +1153,7 @@ had to change together, and each is a trap on its own:
 - **`cloudflared` had to reload.** The apex ingress line had been staged in
   `~/.cloudflared/open-frontier-beta.yml` for days, but the running process
   predated it, so the apex hit the config's `http_status:404` catch-all. `kill
-  -HUP <pid>` reloads ingress without dropping the tunnel — no restart, no
+-HUP <pid>` reloads ingress without dropping the tunnel — no restart, no
   downtime for `beta`/`bet`/`app`.
 
 `app.proxywar.xyz` stays in the ingress but is NOT an alias. It now 302s to the
@@ -1172,7 +1182,7 @@ affected (points, markets and guest bankrolls never touch the platform origin).
 ```sh
 cd ~/.proxywar-deploy/bet-origin
 git fetch origin && git reset --hard origin/claude/betting
-env -u PROXYWAR_PLATFORM_ORIGIN npx vite build   # unset ON PURPOSE: exercises the shared fallback
+env -u PROXYWAR_PLATFORM_ORIGIN npx vite build # unset ON PURPOSE: exercises the shared fallback
 # then let the autocycler restart the origin on its next cycle (~25 min) —
 # autocycle-premiere.sh never rebuilds the client, only restarts the server
 curl -sS -D - -o /dev/null https://bet.proxywar.xyz/league | grep -i content-security-policy
@@ -1201,7 +1211,7 @@ secrets — it may check only that the value is present. To rotate:
 printf '%s' '<secret>' > ~/.proxywar-deploy/github-oauth-client-secret
 chmod 600 ~/.proxywar-deploy/github-oauth-client-secret
 launchctl kickstart -k "gui/$(id -u)/com.proxywar.platform"
-./verify-github-signin.sh          # defaults to the apex
+./verify-github-signin.sh # defaults to the apex
 ```
 
 `printf`, not `echo`: a trailing newline is trimmed by the resolver but the
@@ -1254,13 +1264,31 @@ open yet, so this browser is your identity for now."
   cherry-picked here, so a future merge in this direction regresses nothing.
   Those paths were never actually exposed on `app.`/`bet.` (league-wrapper mode
   redirects them to `/league`), but the files were still in the tree.
-- **A lineage claim is self-asserted and private.** GitHub proves a *handle*,
-  never that an agent belongs to someone. So a claim is a preference: never
-  surfaced publicly, never labelled ownership. Softmax sign-in — which can
-  prove owned policies — would swap in as verification. It is blocked on their
-  side (`softmax.com/cli-auth` validates callbacks against a literal
-  `127.0.0.1`/`localhost` allowlist; see
-  `docs/project-state/2026-07-27-softmax-signin-ask.md`).
+
+- **A lineage claim is self-asserted and private, and no amount of GitHub
+  sign-in can change that.** GitHub proves a _handle_, never that an agent
+  belongs to someone. Measured 2026-07-30, end to end: the league mirror's
+  `standings[]` carries no owner field, the agent manifests carry none, the
+  Coworld adapter references none, `GET /api/observatory/players` is 401 without
+  a token, and the identity Coworld returns from `whoami` is keyed to
+  `user_email` / `owner_user_id` with no GitHub field in the response we can
+  see. So there is nothing to join a GitHub account to a competitor, and
+  matching on `playerName`, a policy label, or an email would be an
+  account-takeover primitive rather than a proof — the same unsoundness this
+  tree already refuses for display names (next bullet).
+
+  Softmax sign-in is the only party that can prove it (`owner_user_id` →
+  `league-policy-memberships`). It is blocked on their side:
+  `softmax.com/cli-auth` validates callbacks against a literal
+  `127.0.0.1`/`localhost` allowlist. **The ask is drafted, not sent** — no
+  verified send record exists, and sending it needs an explicit operator
+  request. The decisive question to include: may a hosted server redeem a code
+  issued against a loopback callback, or is redemption bound to that redirect
+  URI? If it is bound, no flow we control can produce verified ownership, and
+  claims must keep saying "self-asserted". A local helper that resolves the
+  policies itself and posts them is NOT a proof: that payload is
+  client-supplied.
+
 - **Betting and account profiles are keyed by `platformAccountId`, never by
   display name.** Display names are not unique, so string matching would have
   collapsed two people's profiles into one arbitrary account's stats.
