@@ -137,6 +137,7 @@ import {
 import { createPlatformAccountRouter } from "../server/platform/PlatformAccountHttp";
 import { PlatformAccountSecurity } from "../server/platform/PlatformAccountSecurity";
 import { PlatformAccountStore } from "../server/platform/PlatformAccountStore";
+import { resolveCanonicalHostRedirect } from "../server/platform/PlatformCanonicalHost";
 import { createPlatformGithubAuthRouter } from "../server/platform/PlatformGithubAuth";
 import { PlatformGithubIdentityLinkStore } from "../server/platform/PlatformGithubIdentityLinkStore";
 import { PlatformHandoffStore } from "../server/platform/PlatformHandoffStore";
@@ -280,6 +281,32 @@ const platformAccountOrigin =
  */
 const leagueContentSecurityPolicy = (): string =>
   proxyWarLeagueContentSecurityPolicy([platformAccountOrigin]);
+// The account authority answers on exactly ONE hostname. After the apex
+// cutover `app.proxywar.xyz` still reaches this process through the tunnel,
+// and simply serving it would hand the visitor a second host-only session
+// whose every write then 403s with `origin_rejected` — see
+// `PlatformCanonicalHost` for why that shape is worse than a hard failure.
+// Mounted before any route so a deep link survives the bounce, and platform
+// mode only: a betting/league process has its own origin and must not redirect
+// anything. 302, not 301 — this is a compatibility shim for a hostname that
+// just moved once already, and a permanent redirect is cached indefinitely by
+// browsers that would then have to be told twice if it moves again.
+if (platformEnabled && configuredPlatformOrigin !== undefined) {
+  app.use((req, res, next) => {
+    const canonicalRedirect = resolveCanonicalHostRedirect({
+      canonicalOrigin: configuredPlatformOrigin,
+      host: req.headers.host,
+      method: req.method,
+      originalUrl: req.originalUrl,
+    });
+    if (canonicalRedirect === null) {
+      next();
+      return;
+    }
+    res.setHeader("Cache-Control", "no-store, max-age=0");
+    res.redirect(302, canonicalRedirect);
+  });
+}
 // Sibling origins this process links out to from its own homepage nav
 // (`PlatformRootPage`, platform mode only) and — for `bettingOrigin` only
 // — calls server-to-server for a linked bettor's public points stats (see
