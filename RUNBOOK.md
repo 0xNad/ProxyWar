@@ -1109,6 +1109,18 @@ code**, redeemed server-to-server and consumed atomically. Query strings leak
 through history, server logs, and `Referer`, and "one-time" cannot be enforced
 by a signature — hence a code, not a signed token.
 
+**The handoff is built but NOT live on `bet.proxywar.xyz`.** Its routes mount
+only when the betting process sets `PROXYWAR_PLATFORM_ORIGIN` (see the
+`else if (configuredPlatformOrigin !== undefined)` branch in
+`ai-agent-demo-server.ts`), and the deploy's betting launcher never sets it —
+so `GET /api/premieres/auth/handoff/start` answers 404 today and betting shows
+the no-handoff identity status. One env line in
+`start-proxywar-betautocycle.zsh` would mount it, and no shared secret is
+needed (the platform authorises a redemption from its own
+`PROXYWAR_PLATFORM_RETURN_ORIGINS` audience map). Deliberately left off: the
+operator's call on 2026-07-30 was that betting identity is inactive for now.
+Do not describe this link as live until that env line ships.
+
 ### 16.2 The apex cutover (done, 2026-07-30) and the one step left
 
 **1. The apex is live and canonical.** `proxywar.xyz` serves the platform;

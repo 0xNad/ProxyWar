@@ -1,5 +1,5 @@
 #!/bin/zsh
-# launchd entry point for the PLATFORM account origin (app.proxywar.xyz).
+# launchd entry point for the PLATFORM account origin (proxywar.xyz, the apex).
 #
 # This is the sole account and session authority: GitHub sign-in, account
 # records, display names, lineage claims, the handoff codes children redeem,
