@@ -1091,9 +1091,11 @@ of a user's models and policies, so they cannot exist only where wagering does.
 
 | Origin | Port | Owns | launchd label |
 |---|---|---|---|
-| `app.proxywar.xyz` | 8793 | accounts, GitHub OAuth, display names, lineage claims, player profiles | `com.proxywar.platform` |
+| `proxywar.xyz` (apex) | 8793 | accounts, GitHub OAuth, display names, lineage claims, player profiles | `com.proxywar.platform` |
+| `app.proxywar.xyz` | 8793 | nothing — 302s to the apex (see 16.2) | (same process) |
 | `bet.proxywar.xyz` | 8792 | the market, points ledger, guest bankrolls | `com.proxywar.betautocycle` |
 | `beta.proxywar.xyz` | 8788 | the league ladder and replays | (pre-existing) |
+| `www.proxywar.xyz` | — | edge 301 to `beta.../league` (zone rule "www to league") | (Cloudflare) |
 
 `com.proxywar.platformleague` keeps the platform's own copy of the league
 mirror fresh. It exists because the platform must not depend on the betting
@@ -1107,43 +1109,74 @@ code**, redeemed server-to-server and consumed atomically. Query strings leak
 through history, server logs, and `Referer`, and "one-time" cannot be enforced
 by a signature — hence a code, not a signed token.
 
-### 16.2 Only you can do these
+### 16.2 The apex cutover (done, 2026-07-30) and the one step left
 
-**1. Delete the Cloudflare redirect rule on the apex.** `proxywar.xyz` currently
-301s to the league for every path — a zone-level rule, not something the tunnel
-serves. `cert.pem` holds only an `ARGO TUNNEL TOKEN`, and `cloudflared` has no
-`rules` subcommand, so there is no API path to it. Until the rule is gone,
-`proxywar.xyz` cannot be the homepage no matter what the tunnel does.
+**1. The apex is live and canonical.** `proxywar.xyz` serves the platform;
+`PROXYWAR_PLATFORM_ORIGIN` and `PROXYWAR_PUBLIC_URL` are the apex, and
+`static/` was rebuilt so the client's build-time define matches. Three things
+had to change together, and each is a trap on its own:
 
-Once it is deleted, the cutover is one ingress line in
-`~/.cloudflared/open-frontier-beta.yml` (point `proxywar.xyz` at
-`http://127.0.0.1:8793`, same as `app.proxywar.xyz`) plus a `cloudflared`
-restart. Nothing in the code is keyed to the subdomain's *name* any more —
-three such hardcodes were found and removed (`playerProfileLink.ts`, the PoV
-resolver's `hostname.startsWith("app.")`, and the lineage-slug resolver), each
-of which would have failed silently with no error at cutover. Set
-`PROXYWAR_PLATFORM_ORIGIN` and the client's build-time define follows.
+- **The zone Redirect Rule.** It matched `proxywar.xyz` AND `www.proxywar.xyz`
+  and 301'd both to `beta.../league`, at the edge, before any origin. It was
+  narrowed to `http.host eq "www.proxywar.xyz"` and renamed "www to league" —
+  narrowed, not deleted, because deleting it would have silently dropped www
+  too. There is still no API path to it (`cert.pem` holds only an `ARGO TUNNEL
+  TOKEN`, `cloudflared` has no `rules` subcommand), so this is dashboard-only.
+- **The apex DNS record.** It was a *proxied placeholder* `A 192.0.2.1`, which
+  only ever "worked" because the redirect rule fired first. Deleting the rule
+  without fixing this would have served 5xx from the apex. There IS an API path
+  here, contrary to what this section used to imply:
+  `cloudflared tunnel route dns --overwrite-dns open-frontier-beta proxywar.xyz`
+  replaces it with a tunnel CNAME using the same `cert.pem`.
+- **`cloudflared` had to reload.** The apex ingress line had been staged in
+  `~/.cloudflared/open-frontier-beta.yml` for days, but the running process
+  predated it, so the apex hit the config's `http_status:404` catch-all. `kill
+  -HUP <pid>` reloads ingress without dropping the tunnel — no restart, no
+  downtime for `beta`/`bet`/`app`.
 
-**2. Register the GitHub OAuth app against the final origin.** App `3760561`
-exists but its callback still points at the betting origin, and a classic OAuth
-app has exactly one callback. No secret has been stashed for it deliberately —
-stashing one against a URL we are about to abandon is how a stale secret ends
-up in a deploy. When the platform origin is final:
+`app.proxywar.xyz` stays in the ingress but is NOT an alias. It now 302s to the
+apex (`resolveCanonicalHostRedirect`, `PlatformCanonicalHost.ts`) — GET/HEAD
+only, because a redirected write is re-sent as a GET and would look like a
+success that never happened, and loopback is exempt in both directions so
+health checks, the league refresher and dev on `127.0.0.1:8793` are untouched.
+Before that redirect existed, a visit to the stale host minted a SECOND
+host-only session whose reads worked and whose every write 403'd
+`origin_rejected`: worse than a hard failure, because it looks fine until you
+try to set a display name. The ops config claimed this redirect existed for
+days before it did; `grep resolveCanonicalHostRedirect src/` was empty.
+
+**2. Register the GitHub OAuth app — the operator's step, and only this one.**
+App `3760561` (client id `Ov23likxrRLTNNoQd5Dy`) is now named "Proxy War" with
+homepage `https://proxywar.xyz` and callback
+`https://proxywar.xyz/api/auth/github/callback`. Device flow is off. No scopes —
+the public profile is all that is read.
+
+What is left is the client secret, and it stays the operator's for two
+independent reasons: GitHub interposes a "Confirm access" password/passkey
+prompt on secret generation, and this repo's own rule (`AGENTS.md`, Autonomy)
+forbids an agent reading or writing OAuth secrets — it may check only that the
+value is present. So:
 
 ```sh
-printf '%s' '<id>'     > ~/.proxywar-deploy/github-oauth-client-id
+# github.com/settings/applications/3760561 -> "Generate a new client secret"
 printf '%s' '<secret>' > ~/.proxywar-deploy/github-oauth-client-secret
 chmod 600 ~/.proxywar-deploy/github-oauth-client-secret
-./verify-github-signin.sh
+launchctl kickstart -k "gui/$(id -u)/com.proxywar.platform"
+./verify-github-signin.sh          # defaults to the apex now
 ```
 
-Callback: `https://app.proxywar.xyz/api/auth/github/callback` (or the apex once
-cut over). No scopes — the public profile is all that is read.
+`printf`, not `echo`: a trailing newline is trimmed by the resolver but the
+verifier flags it, because the next secret-shaped file may not be so lucky. The
+mode matters — `resolveGithubOAuthClientSecret` `lstat`s the file and refuses
+anything group/world-readable, not-owned, or a symlink, so a 0644 secret fails
+closed rather than quietly working.
 
-Until those files exist the OAuth routes are **absent, not broken**: they 404,
-and the homepage's Account card and meta description both change wording to
-match rather than advertising a sign-in that does not answer. That conditional
-is asserted by `tests/server/PlatformRootPage.test.ts`.
+Until that file exists the OAuth routes are **absent, not broken**: in
+league-wrapper mode they fall through to the wrapper's `/league` 302 (a plain
+404 only without the wrapper), and the homepage's Account card and meta
+description both change wording to match rather than advertising a sign-in that
+does not answer. That conditional is asserted by
+`tests/server/PlatformRootPage.test.ts`.
 
 ### 16.3 Known and deliberate gaps
 
