@@ -2,11 +2,23 @@
 
 Guidance for Claude Code (claude.ai/code) working in this repository.
 
-The shared engineering rules, repository model, autonomy policy, prioritization, and the
-project-state reading list live in **AGENTS.md** — imported below so Claude loads the same
-rules any coding agent does, and so the "read `docs/project-state/` first" preamble is
-automatic. (AGENTS.md and CLAUDE.local.md are gitignored, so they load locally and are absent
-from public clones.)
+The shared engineering rules, repository model, autonomy policy, prioritization,
+and project-state reading list live in local **AGENTS.md**. `AGENTS.md` and
+`CLAUDE.local.md` are intentionally gitignored and absent from public clones.
+
+## Local-context bootstrap (fail closed)
+
+Before any mutation, confirm that both local files exist in the current
+checkout. A linked worktree normally has tracked `CLAUDE.md` but may not have
+the ignored instruction bundle. In that case, resolve the primary checkout from
+`git rev-parse --path-format=absolute --git-common-dir` (the parent of its
+terminal `.git` directory), then read its `AGENTS.md`, `CLAUDE.local.md`,
+`docs/project-state/STANDING-POSITION.md`, and
+`docs/project-state/context-for-new-codex-threads.md` explicitly.
+
+Do not assume the relative imports below succeeded. If the canonical local
+instruction bundle cannot be found, keep the worktree read-only and report the
+bootstrap gap.
 
 @AGENTS.md
 
@@ -40,7 +52,7 @@ AGENTS.md (local) lists the agent/beta commands (`agent:demo-server`, `agent:clo
 
 OpenFront.io is a real-time multiplayer territorial strategy game. There are four components:
 
-1. **`src/core/`** — Deterministic game simulation. Pure TypeScript with **no external dependencies**. Must remain fully deterministic (seeded PRNG, no floating-point math). Runs in a Web Worker thread. All `src/core` changes **must** include tests.
+1. **`src/core/`** — Deterministic game simulation. It has selected dependencies, but no provider calls or simulation networking may be introduced. It must remain deterministic (seeded PRNG, no floating-point simulation math). Runs in a Web Worker thread. All `src/core` changes **must** include tests.
 2. **`src/client/`** — Rendering (Pixi.js/WebGL), UI (Lit web components + Tailwind CSS 4), WebSocket communication.
 3. **`src/server/`** — Game coordination, intent relay, WebSocket management (Node.js/Express/ws).
 4. **API** — Closed-source Cloudflare Worker handling auth, stats, cosmetics, monetization. Not in this repo.
@@ -101,5 +113,5 @@ Tests use a `setup()` helper from `tests/util/Setup.ts` that creates a full game
 - Specialist role **subagents** live in `.claude/agents/` (invoked on demand, not as live threads). The **reviewer** subagent checks this project's invariants before risky changes; ask for it on edits to `AgentPlannerExecutor.ts` or `AgentDemoHub.ts`.
 - **Git guardrails:** never force-push, delete branches, or rewrite history. Land changes on a branch off `main` using the `claude/` prefix; commit/push and any deploy/publish are gated outward actions — do them only when the operator asked in-conversation.
 
-<!-- Local-only operating guide (working model, autonomy, internal workspaces). Gitignored; absent from public clones. -->
+<!-- Local-only operating guide. Gitignored; verify the bootstrap above before relying on this import. -->
 @CLAUDE.local.md
