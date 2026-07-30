@@ -170,6 +170,18 @@ describe("coworldLeagueIndexHtml", () => {
     );
   });
 
+  test("offers one link off the mirror to the account authority", () => {
+    const html = coworldLeagueIndexHtml(sampleData());
+    // The league page is a read-only mirror with no session of its own — it
+    // cannot show WHO you are, so the honest affordance is a link to the one
+    // origin that can. Absolute and cross-origin on purpose: this same HTML is
+    // served from beta.proxywar.xyz, where a relative /account is a 404.
+    expect(html).toContain(
+      `<a class="chip account-link" href="${DEFAULT_PLATFORM_ORIGIN}/account">`,
+    );
+    expect(html).toContain("Your account");
+  });
+
   test("separates the active champion from its historical rating row", () => {
     const html = coworldLeagueIndexHtml(sampleData());
     expect(html).toContain("Active champion");

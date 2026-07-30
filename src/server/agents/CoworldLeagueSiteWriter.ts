@@ -608,6 +608,11 @@ ${leagueSocialMetaHtml()}
     .chips { display:flex; gap:8px; flex-wrap:wrap; }
     .chip { border:1px solid var(--line); background:var(--surface); border-radius:999px; padding:7px 12px; font:800 12px ui-monospace, SFMono-Regular, Menlo, monospace; color:var(--muted); }
     .chip.live { border-color:rgba(126,224,168,.5); color:var(--good); }
+    /* The one link off this read-only mirror to the account authority.
+       44px min target, matching the mobile rules below — box-sizing:border-box
+       puts the padding inside min-height, so 32px would BE 32px. */
+    a.chip.account-link { text-decoration:none; color:var(--fg); display:inline-flex; align-items:center; min-height:44px; }
+    a.chip.account-link:hover { border-color:var(--fg); }
     .stale-banner { border:1px solid rgba(244,166,74,.5); background:rgba(244,166,74,.08); color:var(--amber); border-radius:6px; padding:10px 12px; margin-bottom:14px; font-weight:800; }
     .sync-status { border:1px solid rgba(255,155,143,.5); background:rgba(255,155,143,.08); color:var(--bad); border-radius:6px; padding:10px 12px; margin-bottom:14px; font-weight:800; }
     .hero { border-top:1px solid var(--line); border-bottom:1px solid var(--line); padding:24px 0 20px; margin-bottom:18px; }
@@ -700,6 +705,9 @@ ${leagueSocialMetaHtml()}
       <div class="chips">
         <span class="chip${league.currentRoundStatus === "running" ? " live" : ""}">${escapeHtml(roundChip)}</span>
         <span class="chip">UPDATED <span data-utc="${escapeHtml(data.generatedAt)}">${escapeHtml(shortUtc(data.generatedAt))}</span></span>
+        <a class="chip account-link" href="${escapeHtml(`${PLAYER_PROFILE_ORIGIN}/account`)}">${escapeHtml(
+          translateText("coworld_league.account_link"),
+        )}</a>
       </div>
     </header>
     ${staleBanner}

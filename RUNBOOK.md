@@ -1121,7 +1121,7 @@ needed (the platform authorises a redemption from its own
 operator's call on 2026-07-30 was that betting identity is inactive for now.
 Do not describe this link as live until that env line ships.
 
-### 16.2 The apex cutover (done, 2026-07-30) and the one step left
+### 16.2 The apex cutover and GitHub sign-in (both live, 2026-07-30)
 
 **1. The apex is live and canonical.** `proxywar.xyz` serves the platform;
 `PROXYWAR_PLATFORM_ORIGIN` and `PROXYWAR_PUBLIC_URL` are the apex, and
@@ -1157,38 +1157,69 @@ host-only session whose reads worked and whose every write 403'd
 try to set a display name. The ops config claimed this redirect existed for
 days before it did; `grep resolveCanonicalHostRedirect src/` was empty.
 
-**2. Register the GitHub OAuth app — the operator's step, and only this one.**
-App `3760561` (client id `Ov23likxrRLTNNoQd5Dy`) is now named "Proxy War" with
-homepage `https://proxywar.xyz` and callback
-`https://proxywar.xyz/api/auth/github/callback`. Device flow is off. No scopes —
-the public profile is all that is read.
+**Still owed after the cutover: one betting redeploy (gated).** The account
+origin's fallback used to be copy-pasted into four files; it is now
+`DEFAULT_PLATFORM_ORIGIN` (`src/core/PlatformOrigin.ts`). The platform itself
+was never affected — its launcher sets `PROXYWAR_PLATFORM_ORIGIN` explicitly —
+but `bet.proxywar.xyz` sets nothing, so until it is redeployed it still serves
+`connect-src 'self' https://app.proxywar.xyz` and still ships a client bundle
+that fetches the same host. That is not a harmless agreement between the two:
+`app.` only 302s now, CSP is re-checked against the redirect target, so the
+credentialed `/api/account/pov-claims` fetch is blocked. The PoV camera default
+on the market page is broken until this ships. Nothing else on betting is
+affected (points, markets and guest bankrolls never touch the platform origin).
 
-What is left is the client secret, and it stays the operator's for two
-independent reasons: GitHub interposes a "Confirm access" password/passkey
-prompt on secret generation, and this repo's own rule (`AGENTS.md`, Autonomy)
-forbids an agent reading or writing OAuth secrets — it may check only that the
-value is present. So:
+```sh
+cd ~/.proxywar-deploy/bet-origin
+git fetch origin && git reset --hard origin/claude/betting
+env -u PROXYWAR_PLATFORM_ORIGIN npx vite build   # unset ON PURPOSE: exercises the shared fallback
+# then let the autocycler restart the origin on its next cycle (~25 min) —
+# autocycle-premiere.sh never rebuilds the client, only restarts the server
+curl -sS -D - -o /dev/null https://bet.proxywar.xyz/league | grep -i content-security-policy
+```
+
+Do NOT "fix" this by setting `PROXYWAR_PLATFORM_ORIGIN` on the betting
+launcher: that env var is also what mounts the identity handoff routes (16.1),
+which the operator has deliberately left off.
+
+**2. GitHub sign-in is live (2026-07-30).** App `3760561` (client id
+`Ov23likxrRLTNNoQd5Dy`) is named "Proxy War", homepage `https://proxywar.xyz`,
+callback `https://proxywar.xyz/api/auth/github/callback`, device flow off, no
+scopes — the public profile is all that is read. Verified end to end: the
+authorize screen said "Public data only" and redirected back to
+`/account?github=linked`, and the page then showed the GitHub handle with
+"Verified via GitHub". `./verify-github-signin.sh` passes 11/11.
+
+The client secret was installed BY THE OPERATOR and must stay that way. Two
+independent reasons, both still true for the next rotation: GitHub interposes a
+"Confirm access" password/passkey prompt on secret generation, and this repo's
+own rule (`AGENTS.md`, Autonomy) forbids an agent reading or writing OAuth
+secrets — it may check only that the value is present. To rotate:
 
 ```sh
 # github.com/settings/applications/3760561 -> "Generate a new client secret"
 printf '%s' '<secret>' > ~/.proxywar-deploy/github-oauth-client-secret
 chmod 600 ~/.proxywar-deploy/github-oauth-client-secret
 launchctl kickstart -k "gui/$(id -u)/com.proxywar.platform"
-./verify-github-signin.sh          # defaults to the apex now
+./verify-github-signin.sh          # defaults to the apex
 ```
 
 `printf`, not `echo`: a trailing newline is trimmed by the resolver but the
 verifier flags it, because the next secret-shaped file may not be so lucky. The
 mode matters — `resolveGithubOAuthClientSecret` `lstat`s the file and refuses
 anything group/world-readable, not-owned, or a symlink, so a 0644 secret fails
-closed rather than quietly working.
+closed rather than quietly working. The secret is shown ONCE and is not
+recoverable; it is also not in the copy button's `value` attribute, so it cannot
+be lifted programmatically — plan for a human at that step.
 
-Until that file exists the OAuth routes are **absent, not broken**: in
+With the credentials absent the OAuth routes are **absent, not broken**: in
 league-wrapper mode they fall through to the wrapper's `/league` 302 (a plain
 404 only without the wrapper), and the homepage's Account card and meta
 description both change wording to match rather than advertising a sign-in that
 does not answer. That conditional is asserted by
-`tests/server/PlatformRootPage.test.ts`.
+`tests/server/PlatformRootPage.test.ts`, and the difference is observable:
+configured reads "Sign in with GitHub once…", unconfigured reads "Sign-in is not
+open yet, so this browser is your identity for now."
 
 ### 16.3 Known and deliberate gaps
 
