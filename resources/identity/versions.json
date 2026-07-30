@@ -1,0 +1,320 @@
+{
+  "schemaVersion": 1,
+  "versions": [
+    {
+      "id": "agtv_k1z-mickey-mouse_v1",
+      "agentId": "agt_k1z-mickey-mouse",
+      "publicVersionLabel": "v1",
+      "softmaxPolicyLabel": "mickey-mouse-intent:v1",
+      "immutableDigest": null,
+      "releaseDate": null,
+      "releaseNotes": null,
+      "declaredBaseModel": null,
+      "scaffoldDescription": null,
+      "sourceRepositoryRef": null,
+      "disclosureStatus": "undisclosed",
+      "qualificationStatus": "active",
+      "observedVia": [
+        "champion",
+        "rating"
+      ],
+      "observedAt": "2026-07-31T00:30:00.000Z"
+    },
+    {
+      "id": "agtv_daveey_v24",
+      "agentId": "agt_daveey",
+      "publicVersionLabel": "v24",
+      "softmaxPolicyLabel": "daveey-proxywar:v24",
+      "immutableDigest": null,
+      "releaseDate": null,
+      "releaseNotes": null,
+      "declaredBaseModel": null,
+      "scaffoldDescription": null,
+      "sourceRepositoryRef": null,
+      "disclosureStatus": "undisclosed",
+      "qualificationStatus": "active",
+      "observedVia": [
+        "champion",
+        "rating"
+      ],
+      "observedAt": "2026-07-31T00:30:00.000Z"
+    },
+    {
+      "id": "agtv_captain-underpants-maximum-aura_v1",
+      "agentId": "agt_captain-underpants-maximum-aura",
+      "publicVersionLabel": "v1",
+      "softmaxPolicyLabel": "captain-underpants-max-aura:v1",
+      "immutableDigest": null,
+      "releaseDate": null,
+      "releaseNotes": null,
+      "declaredBaseModel": null,
+      "scaffoldDescription": null,
+      "sourceRepositoryRef": null,
+      "disclosureStatus": "undisclosed",
+      "qualificationStatus": "active",
+      "observedVia": [
+        "champion",
+        "rating"
+      ],
+      "observedAt": "2026-07-31T00:30:00.000Z"
+    },
+    {
+      "id": "agtv_auri_v42",
+      "agentId": "agt_auri",
+      "publicVersionLabel": "v42",
+      "softmaxPolicyLabel": "proxywar-keystone:v42",
+      "immutableDigest": null,
+      "releaseDate": null,
+      "releaseNotes": null,
+      "declaredBaseModel": null,
+      "scaffoldDescription": null,
+      "sourceRepositoryRef": null,
+      "disclosureStatus": "undisclosed",
+      "qualificationStatus": "active",
+      "observedVia": [
+        "champion",
+        "rating"
+      ],
+      "observedAt": "2026-07-31T00:30:00.000Z"
+    },
+    {
+      "id": "agtv_relh_v3",
+      "agentId": "agt_relh",
+      "publicVersionLabel": "v3",
+      "softmaxPolicyLabel": "co-gas-proxywar-relhalpha:v3",
+      "immutableDigest": null,
+      "releaseDate": null,
+      "releaseNotes": null,
+      "declaredBaseModel": null,
+      "scaffoldDescription": null,
+      "sourceRepositoryRef": null,
+      "disclosureStatus": "undisclosed",
+      "qualificationStatus": "active",
+      "observedVia": [
+        "champion",
+        "rating"
+      ],
+      "observedAt": "2026-07-31T00:30:00.000Z"
+    },
+    {
+      "id": "agtv_calc_v159",
+      "agentId": "agt_calc",
+      "publicVersionLabel": "v159",
+      "softmaxPolicyLabel": "my-proxywar-agent:v159",
+      "immutableDigest": null,
+      "releaseDate": null,
+      "releaseNotes": null,
+      "declaredBaseModel": null,
+      "scaffoldDescription": null,
+      "sourceRepositoryRef": null,
+      "disclosureStatus": "undisclosed",
+      "qualificationStatus": "active",
+      "observedVia": [
+        "champion"
+      ],
+      "observedAt": "2026-07-31T00:30:00.000Z"
+    },
+    {
+      "id": "agtv_cyan-hellstar_v1",
+      "agentId": "agt_cyan-hellstar",
+      "publicVersionLabel": "v1",
+      "softmaxPolicyLabel": "sian-cyan7-gravity:v1",
+      "immutableDigest": null,
+      "releaseDate": null,
+      "releaseNotes": null,
+      "declaredBaseModel": null,
+      "scaffoldDescription": null,
+      "sourceRepositoryRef": null,
+      "disclosureStatus": "undisclosed",
+      "qualificationStatus": "active",
+      "observedVia": [
+        "champion"
+      ],
+      "observedAt": "2026-07-31T00:30:00.000Z"
+    },
+    {
+      "id": "agtv_sefirot_v1",
+      "agentId": "agt_sefirot",
+      "publicVersionLabel": "v1",
+      "softmaxPolicyLabel": "Eva-00-C5-v9:v1",
+      "immutableDigest": null,
+      "releaseDate": null,
+      "releaseNotes": null,
+      "declaredBaseModel": null,
+      "scaffoldDescription": null,
+      "sourceRepositoryRef": null,
+      "disclosureStatus": "undisclosed",
+      "qualificationStatus": "active",
+      "observedVia": [
+        "champion"
+      ],
+      "observedAt": "2026-07-31T00:30:00.000Z"
+    },
+    {
+      "id": "agtv_salomon-shdow_v13",
+      "agentId": "agt_salomon-shdow",
+      "publicVersionLabel": "v13",
+      "softmaxPolicyLabel": "fortress-empire-ohf:v13",
+      "immutableDigest": null,
+      "releaseDate": null,
+      "releaseNotes": null,
+      "declaredBaseModel": null,
+      "scaffoldDescription": null,
+      "sourceRepositoryRef": null,
+      "disclosureStatus": "undisclosed",
+      "qualificationStatus": "active",
+      "observedVia": [
+        "champion",
+        "rating"
+      ],
+      "observedAt": "2026-07-31T00:30:00.000Z"
+    },
+    {
+      "id": "agtv_softmaxwell_v2",
+      "agentId": "agt_softmaxwell",
+      "publicVersionLabel": "v2",
+      "softmaxPolicyLabel": "Sun Tzu:v2",
+      "immutableDigest": null,
+      "releaseDate": null,
+      "releaseNotes": null,
+      "declaredBaseModel": null,
+      "scaffoldDescription": null,
+      "sourceRepositoryRef": null,
+      "disclosureStatus": "undisclosed",
+      "qualificationStatus": "active",
+      "observedVia": [
+        "champion",
+        "rating"
+      ],
+      "observedAt": "2026-07-31T00:30:00.000Z"
+    },
+    {
+      "id": "agtv_peepee7_v6",
+      "agentId": "agt_peepee7",
+      "publicVersionLabel": "v6",
+      "softmaxPolicyLabel": "xX_UwU_Senpai_420_Xx:v6",
+      "immutableDigest": null,
+      "releaseDate": null,
+      "releaseNotes": null,
+      "declaredBaseModel": null,
+      "scaffoldDescription": null,
+      "sourceRepositoryRef": null,
+      "disclosureStatus": "undisclosed",
+      "qualificationStatus": "active",
+      "observedVia": [
+        "champion"
+      ],
+      "observedAt": "2026-07-31T00:30:00.000Z"
+    },
+    {
+      "id": "agtv_richard_v7",
+      "agentId": "agt_richard",
+      "publicVersionLabel": "v7",
+      "softmaxPolicyLabel": "co-gas-proxywar-richard:v7",
+      "immutableDigest": null,
+      "releaseDate": null,
+      "releaseNotes": null,
+      "declaredBaseModel": null,
+      "scaffoldDescription": null,
+      "sourceRepositoryRef": null,
+      "disclosureStatus": "undisclosed",
+      "qualificationStatus": "active",
+      "observedVia": [
+        "champion"
+      ],
+      "observedAt": "2026-07-31T00:30:00.000Z"
+    },
+    {
+      "id": "agtv_djizus_v22",
+      "agentId": "agt_djizus",
+      "publicVersionLabel": "v22",
+      "softmaxPolicyLabel": "gandhi:v22",
+      "immutableDigest": null,
+      "releaseDate": null,
+      "releaseNotes": null,
+      "declaredBaseModel": null,
+      "scaffoldDescription": null,
+      "sourceRepositoryRef": null,
+      "disclosureStatus": "undisclosed",
+      "qualificationStatus": "active",
+      "observedVia": [
+        "champion"
+      ],
+      "observedAt": "2026-07-31T00:30:00.000Z"
+    },
+    {
+      "id": "agtv_ron-swgy_v1",
+      "agentId": "agt_ron-swgy",
+      "publicVersionLabel": "v1",
+      "softmaxPolicyLabel": "ron-frontier-ranker:v1",
+      "immutableDigest": null,
+      "releaseDate": null,
+      "releaseNotes": null,
+      "declaredBaseModel": null,
+      "scaffoldDescription": null,
+      "sourceRepositoryRef": null,
+      "disclosureStatus": "undisclosed",
+      "qualificationStatus": "active",
+      "observedVia": [
+        "champion",
+        "rating"
+      ],
+      "observedAt": "2026-07-31T00:30:00.000Z"
+    },
+    {
+      "id": "agtv_sian-voidcrown_v1",
+      "agentId": "agt_sian-voidcrown",
+      "publicVersionLabel": "v1",
+      "softmaxPolicyLabel": "sian-cyan7-katana:v1",
+      "immutableDigest": null,
+      "releaseDate": null,
+      "releaseNotes": null,
+      "declaredBaseModel": null,
+      "scaffoldDescription": null,
+      "sourceRepositoryRef": null,
+      "disclosureStatus": "undisclosed",
+      "qualificationStatus": "active",
+      "observedVia": [
+        "champion"
+      ],
+      "observedAt": "2026-07-31T00:30:00.000Z"
+    },
+    {
+      "id": "agtv_james-boggs_v1",
+      "agentId": "agt_james-boggs",
+      "publicVersionLabel": "v1",
+      "softmaxPolicyLabel": "jamesboggs-warlord:v1",
+      "immutableDigest": null,
+      "releaseDate": null,
+      "releaseNotes": null,
+      "declaredBaseModel": null,
+      "scaffoldDescription": null,
+      "sourceRepositoryRef": null,
+      "disclosureStatus": "undisclosed",
+      "qualificationStatus": "active",
+      "observedVia": [
+        "champion",
+        "rating"
+      ],
+      "observedAt": "2026-07-31T00:30:00.000Z"
+    },
+    {
+      "id": "agtv_docxology_v1",
+      "agentId": "agt_docxology",
+      "publicVersionLabel": "v1",
+      "softmaxPolicyLabel": "daf-proxywar-v2:v1",
+      "immutableDigest": null,
+      "releaseDate": null,
+      "releaseNotes": null,
+      "declaredBaseModel": null,
+      "scaffoldDescription": null,
+      "sourceRepositoryRef": null,
+      "disclosureStatus": "undisclosed",
+      "qualificationStatus": "active",
+      "observedVia": [
+        "champion"
+      ],
+      "observedAt": "2026-07-31T00:30:00.000Z"
+    }
+  ]
+}
