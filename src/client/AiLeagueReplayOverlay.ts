@@ -1034,6 +1034,20 @@ function overlayHtml(input: AiLeagueReplayOverlayInput): string {
         user-select: all;
         cursor: text;
       }
+      /*
+       * The run id is support/debug provenance, not a headline. Left to wrap it
+       * took three lines and dominated the header. Keep it to one line with the
+       * full value in the tooltip (and selectable for copy/paste). Mobile
+       * already did this; it was only ever gated behind a breakpoint.
+       */
+      .ai-league-run-id {
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+        max-width: 100%;
+        user-select: all;
+        cursor: text;
+      }
       .ai-league-header-actions {
         display: flex;
         gap: 5px;
@@ -1793,10 +1807,12 @@ function overlayDetailsHtml(input: AiLeagueReplayOverlayInput): string {
   // is only meaningful when built-in opponents actually exist — it used to
   // render the nonsense "vs 0 built-in opponents". Both branches go through
   // translateText (this line was previously hardcoded English).
+
   const mapName =
     typeof input.summary?.runnerConfig?.map === "string"
       ? input.summary.runnerConfig.map
       : null;
+
   const spectatorTelemetry =
     input.spectatorTelemetry as AiLeagueSpectatorTelemetry | null;
   const detailsUnavailable =

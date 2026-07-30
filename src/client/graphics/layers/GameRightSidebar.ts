@@ -30,7 +30,6 @@ function playbackSpeedLabel(multiplier: number): string {
   const speed = 1 / multiplier;
   return `${Number.isInteger(speed) ? speed : speed.toFixed(1)}\u00d7`;
 }
-
 // Shared affordance for every control in the top-right cluster. These were bare
 // <div class="cursor-pointer"> wrappers: not focusable, no keyboard activation,
 // no hover/focus feedback, and 20px hit targets. One class keeps them
