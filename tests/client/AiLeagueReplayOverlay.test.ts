@@ -646,35 +646,6 @@ describe("AiLeagueReplayOverlay", () => {
     expect(setup).not.toContain("setup_turns");
   });
 
-  it("omits the built-in-opponent clause and difficulty for agent-vs-agent matches", () => {
-    // A league match has no built-in nations/bots. The setup line used to read
-    // "12 Proxy War agents vs 0 built-in opponents", and showed a built-in
-    // difficulty that has no meaning when no built-in opponent is playing.
-    mountAiLeagueReplayOverlay({
-      runID: "run-league-only",
-      artifactBasePath: "/ai-league-runs/run-league-only",
-      summary: {
-        roster: [{ agentID: "a1" }, { agentID: "a2" }],
-        runnerConfig: {
-          bots: 0,
-          nations: 0,
-          maxSteps: 500,
-          map: "World",
-          difficulty: "Easy",
-        },
-      },
-      decisions: [],
-    });
-
-    const setup = document.querySelector(".ai-league-match-setup")?.textContent;
-    expect(setup).toContain("ai_league_replay.setup_agents_only");
-    expect(setup).not.toContain("setup_agents_vs_builtin");
-    expect(setup).not.toContain("Easy");
-    // maxSteps counts decision steps, not game turns.
-    expect(setup).toContain("ai_league_replay.setup_decisions");
-    expect(setup).not.toContain("setup_turns");
-  });
-
   it("ends optional-detail loading honestly when no evidence is available", () => {
     mountAiLeagueReplayOverlay({
       runID: "unavailable-details",
