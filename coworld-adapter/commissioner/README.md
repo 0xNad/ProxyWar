@@ -6,7 +6,10 @@ Standalone ProxyWar tournament commissioner: the `ruleset_strategy` framework (v
 
 Everything except one thing is plain config (`commissioners/ruleset_strategy_commissioner/configs/proxywar.yaml`):
 Qualifiers is a self-play crash check that promotes on any completed episode; Competition scores by
-per-episode win rate aggregated into an OpenSkill (MMR) rating.
+per-episode win rate aggregated into a player-level current-form EWMA. The leaderboard uses a
+24-completed-round half-life, displays `100 x EWMA`, and lists players with fewer than five valid
+scored rounds after established players as provisional. Form history follows the player across
+policy-version upgrades.
 
 The one custom piece: Competition rounds don't run a single fixed variant. `ProxyWarCommissioner`
 counts the real distinct champions currently in the league and routes each round to the largest
