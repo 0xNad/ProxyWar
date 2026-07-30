@@ -8,7 +8,7 @@ import { z } from "zod";
  * Origin-agnostic by design: talks to `/api/identity/status` — a route
  * every origin mounts its OWN flavor of (see
  * `src/server/platform/PlatformAccountHttp.ts`'s route on
- * `app.proxywar.xyz`, `src/server/replay-premiere/BettingIdentityHandoff.ts`'s
+ * `proxywar.xyz`, `src/server/replay-premiere/BettingIdentityHandoff.ts`'s
  * on the betting/league origins) — rather than hardcoding which of the two
  * very different sign-in mechanics (direct GitHub OAuth on the platform;
  * a redirect-based handoff to the platform everywhere else) applies here.

@@ -3,7 +3,7 @@
  * owned by betting or the platform: it is pure protocol plumbing (token
  * exchange, `/user` fetch, secret resolution) with no opinion about who
  * calls it or what they do with the resulting `{id, login, avatarUrl}`.
- * `app.proxywar.xyz` is the only caller today (see
+ * `proxywar.xyz` is the only caller today (see
  * `src/server/platform/PlatformGithubAuth.ts`) — GitHub sign-in on the
  * betting/league origins was removed when the platform became the sole
  * account authority.

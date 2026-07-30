@@ -4,6 +4,7 @@ import express, { type Request, type Response } from "express";
 import fs from "fs/promises";
 import http from "http";
 import path from "path";
+import { DEFAULT_PLATFORM_ORIGIN } from "../core/PlatformOrigin";
 import {
   loadAgentDemoHubModel,
   proxyWarAgentProtocolSchema,
@@ -267,12 +268,14 @@ const platformEnabled = envFlag("PROXYWAR_PLATFORM_ENABLED");
 // `expectedOrigin`-satisfying platform cookie, and vice versa.
 const configuredPlatformOrigin = firstConfiguredEnv("PROXYWAR_PLATFORM_ORIGIN");
 // The platform account origin every league/replay page must be allowed to
-// `fetch()` for the PoV default (`/api/account/pov-claims`). Same env, same
-// hardcoded fallback as every other platform-origin reference in this tree
-// (`CoworldLeagueSiteWriter`, `playerProfileLink`) — `app.proxywar.xyz` is a
-// stand-in until the apex redirect is removed.
+// `fetch()` for the PoV default (`/api/account/pov-claims`). Same env as
+// above, and the fallback is `DEFAULT_PLATFORM_ORIGIN` — shared, not copied.
+// This line is why that matters: the BETTING process sets no
+// `PROXYWAR_PLATFORM_ORIGIN`, so the fallback is what lands in the CSP it
+// serves, and a stale one there is a silent console violation rather than an
+// error anyone sees (see `core/PlatformOrigin.ts`).
 const platformAccountOrigin =
-  configuredPlatformOrigin ?? "https://app.proxywar.xyz";
+  configuredPlatformOrigin ?? DEFAULT_PLATFORM_ORIGIN;
 /**
  * The league/replay CSP, in ONE place. Every document this process serves on
  * a league surface must allow the platform origin in `connect-src` or the PoV
@@ -358,7 +361,7 @@ const replayPremierePointsLedgerRoot = resolveReplayPremierePointsLedgerRoot();
 export const replayPremierePointsLedger = await ReplayPremierePointsLedger.open(
   replayPremierePointsLedgerRoot,
 );
-// Betting's link to the platform account authority — app.proxywar.xyz is
+// Betting's link to the platform account authority — proxywar.xyz is
 // the sole account/session authority now (see the platform build's
 // contract), so betting never talks to GitHub directly and never writes a
 // display name; it only LEARNS a platformAccountId + cached display name
@@ -1266,7 +1269,7 @@ app.get("/trader/:accountId", async (_req, res) => {
       .send("Proxy War trader profile page is not built for this server.");
   }
 });
-// GitHub sign-in lives ONLY on the platform now — app.proxywar.xyz is the
+// GitHub sign-in lives ONLY on the platform now — proxywar.xyz is the
 // sole account authority (see the platform build's contract). Exactly one
 // of the two branches below mounts, based on `PROXYWAR_PLATFORM_ENABLED`:
 //
@@ -1279,7 +1282,7 @@ app.get("/trader/:accountId", async (_req, res) => {
 //   to the platform and redeem its opaque code server-to-server — never
 //   GitHub directly.
 if (platformEnabled) {
-  // --- Platform-only state (app.proxywar.xyz) ---------------------------
+  // --- Platform-only state (proxywar.xyz) ---------------------------
   // Every store below lives in its OWN root (`resolvePlatformPrivateStateRoot`,
   // default `storage/platform-private`, override via
   // PROXYWAR_PLATFORM_STATE_ROOT) — distinct from both the premiere state

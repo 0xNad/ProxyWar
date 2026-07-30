@@ -1,6 +1,6 @@
 /**
  * Stateless browser-session, CSRF, and GitHub-link-intent security for the
- * PLATFORM's own account cookie — `app.proxywar.xyz` is the sole account
+ * PLATFORM's own account cookie — `proxywar.xyz` is the sole account
  * and session authority (see the platform build's contract).
  *
  * Deliberately a fresh class, not a reuse of the betting origin's
@@ -20,7 +20,7 @@
  *   widening a cookie's scope with `Domain=.proxywar.xyz` would let any
  *   sibling origin overwrite platform identity), so per RFC 6265 it is
  *   already strictly host-only to whichever single origin serves it
- *   (`app.proxywar.xyz`), and applies path-wide (`Path=/`) since every
+ *   (`proxywar.xyz`), and applies path-wide (`Path=/`) since every
  *   platform route — `/account`, `/api/account/*`, `/api/auth/github/*`,
  *   `/handoff/start` — legitimately needs it.
  *

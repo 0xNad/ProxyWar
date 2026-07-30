@@ -1,5 +1,5 @@
 /**
- * "Sign in with GitHub" on the platform — `app.proxywar.xyz` is the sole
+ * "Sign in with GitHub" on the platform — `proxywar.xyz` is the sole
  * account and session authority, so this is the ONLY place in the whole
  * system GitHub OAuth happens (see the platform build's contract; betting
  * no longer does this directly — it goes through the handoff instead, see

@@ -5,7 +5,7 @@
   <key>Label</key>
   <string>com.proxywar.platform</string>
 
-  <!-- The platform account origin (app.proxywar.xyz, port 8793): sole account
+  <!-- The platform account origin (proxywar.xyz apex, port 8793): sole account
        and session authority. Runs with wagering OFF. Independent of the
        betting autocycler and of Coworld generation by design. -->
   <key>ProgramArguments</key>

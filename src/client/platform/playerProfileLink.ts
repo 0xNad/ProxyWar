@@ -22,6 +22,8 @@
  * beta.proxywar.xyz for the league site) — so both are always ABSOLUTE
  * cross-origin URLs, never relative paths.
  */
+import { DEFAULT_PLATFORM_ORIGIN } from "../../core/PlatformOrigin";
+
 // The expression must be EXACTLY `process.env.PROXYWAR_PLATFORM_ORIGIN` to
 // match Vite's literal `define` key. Optional chaining (`process?.env?.X`)
 // silently defeats the substitution and then throws ReferenceError in the
@@ -34,7 +36,7 @@ export const PLAYER_PROFILE_ORIGIN =
   typeof CONFIGURED_PLATFORM_ORIGIN === "string" &&
   CONFIGURED_PLATFORM_ORIGIN !== ""
     ? CONFIGURED_PLATFORM_ORIGIN
-    : "https://app.proxywar.xyz";
+    : DEFAULT_PLATFORM_ORIGIN;
 
 /** `name` is a raw display name / league player name — never pre-encoded. */
 export function playerProfileUrl(name: string): string {

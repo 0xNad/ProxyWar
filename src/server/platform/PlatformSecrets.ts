@@ -1,6 +1,6 @@
 /**
  * Platform-only secret material: the private state root and HMAC signing
- * key for `app.proxywar.xyz`'s own session cookie
+ * key for `proxywar.xyz`'s own session cookie
  * (`PlatformAccountSecurity`). Deliberately its own root, distinct from
  * every one betting or the league own:
  *

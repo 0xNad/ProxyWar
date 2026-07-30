@@ -1,7 +1,7 @@
 /**
  * Betting's half of the platform handoff — replaces the old direct
  * "Sign in with GitHub" flow (`ReplayPremiereGithubAuth.ts`, removed): the
- * platform (`app.proxywar.xyz`) is now the sole account authority, so
+ * platform (`proxywar.xyz`) is now the sole account authority, so
  * betting never talks to GitHub itself. Two routes:
  *
  * - `GET /api/premieres/auth/handoff/start` — mints a short-lived,
@@ -64,7 +64,7 @@ export interface BettingIdentityHandoffRouterOptions {
   readonly security: ReplayPremiereGuestSecurity;
   readonly linkStore: BettingPlatformAccountLinkStore;
   readonly handoffClient: PlatformHandoffClient;
-  /** e.g. `https://app.proxywar.xyz` — MUST be one of the platform's own configured return origins for the `betting` audience. */
+  /** e.g. `https://proxywar.xyz` — MUST be one of the platform's own configured return origins for the `betting` audience. */
   readonly platformOrigin: string;
   /** This origin, exactly as the platform's allowlist has it — sent as `returnOrigin` on both halves so the platform can verify it was never reflected from client input. */
   readonly ownOrigin: string;

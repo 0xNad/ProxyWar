@@ -1,9 +1,9 @@
 /**
  * The platform's own homepage — `GET /` when `PROXYWAR_PLATFORM_ENABLED`.
- * `app.proxywar.xyz` is the sole account/session authority now (see the
- * platform build's contract) and is the intended eventual `proxywar.xyz`
- * apex once the operator drops the Cloudflare redirect rule still owning
- * it — so this is the page a stranger with zero context lands on. It says
+ * The apex `proxywar.xyz` is the sole account/session authority and, since
+ * the 2026-07-30 cutover, the homepage itself (RUNBOOK.md 16.2;
+ * `app.proxywar.xyz` now only 302s here) — so this is the page a stranger
+ * with zero context lands on. It says
  * what Proxy War is in two sentences and gives exactly four ways in
  * (League, Replays, Market, Account); it is NOT a dashboard, and it does
  * NOT duplicate `/account` (that page is where a signed-in identity's own

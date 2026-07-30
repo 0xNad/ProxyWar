@@ -131,12 +131,11 @@ async function fetchClaimLineageSlugs(
  * on the CURRENT origin rather than a hostname prefix, comparing against
  * the same configured platform origin every other cross-origin platform
  * link uses (`PLAYER_PROFILE_ORIGIN`, from `PROXYWAR_PLATFORM_ORIGIN` —
- * see `playerProfileLink.ts`'s doc): `app.proxywar.xyz` is a stand-in
- * only until the operator drops the apex's Cloudflare redirect, at which
- * point `proxywar.xyz` itself becomes the platform root and this must
- * keep working WITHOUT a code change — a hostname-prefix check
- * (`startsWith("app.")`) would silently stop matching the day that
- * happens, with no error and nothing to notice. `platformOrigin` is an
+ * see `playerProfileLink.ts`'s doc). That indirection is why the
+ * 2026-07-30 apex cutover needed no change here: a hostname-prefix check
+ * (`startsWith("app.")`) would have silently stopped matching the day
+ * `proxywar.xyz` itself became the platform root, with no error and
+ * nothing to notice. `platformOrigin` is an
  * injected parameter (default `PLAYER_PROFILE_ORIGIN`), exactly like
  * `fetchImpl`, so a test can exercise either origin without needing to
  * fake `process.env` at module-load time.

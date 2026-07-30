@@ -2,6 +2,7 @@ import { mkdtemp, readFile, readdir, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, test } from "vitest";
+import { DEFAULT_PLATFORM_ORIGIN } from "../../src/core/PlatformOrigin";
 import {
   COWORLD_LEAGUE_POLL_INTERVAL_MS,
   coworldLeagueClientAssetPath,
@@ -160,8 +161,12 @@ describe("coworldLeagueIndexHtml", () => {
 
   test("links each standings row to the shared platform player profile", () => {
     const html = coworldLeagueIndexHtml(sampleData());
+    // Asserted against the shared constant, not a literal: this process does
+    // not set PROXYWAR_PLATFORM_ORIGIN, so this IS the fallback path, and a
+    // literal here is what let the origin move without the league site
+    // noticing (see `core/PlatformOrigin.ts`).
     expect(html).toContain(
-      '<a class="player-profile-link" href="https://app.proxywar.xyz/player/odin%20free">odin free</a>',
+      `<a class="player-profile-link" href="${DEFAULT_PLATFORM_ORIGIN}/player/odin%20free">odin free</a>`,
     );
   });
 
@@ -202,7 +207,7 @@ describe("coworldLeagueIndexHtml", () => {
     expect(html).toContain("33 recovered turns (14%)");
     expect(html).not.toContain("degraded<");
     expect(html).not.toContain("⚠ 33");
-    expect(html).not.toContain("class=\"degraded elevated\"");
+    expect(html).not.toContain('class="degraded elevated"');
 
     const elevated = sampleData();
     elevated.episodes[0].degradedCount = 120;

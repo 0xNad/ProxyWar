@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { DEFAULT_PLATFORM_ORIGIN } from "../../src/core/PlatformOrigin";
 import {
   isProxyWarPublicDoc,
   isProxyWarPublicExternalAgentExample,
@@ -128,6 +129,26 @@ describe("ProxyWarPublicArtifacts", () => {
     expect(policy).toContain("frame-src 'none'");
     expect(policy).toContain("form-action 'none'");
     expect(policy).not.toContain("script-src 'self' https://app.proxywar.xyz");
+  });
+
+  it("names the apex literally when a process falls back to the shared default", () => {
+    // The teeth of the 2026-07-30 cutover, and deliberately a LITERAL: the
+    // betting process sets no PROXYWAR_PLATFORM_ORIGIN, so this fallback is
+    // what lands in the CSP it serves to every league document. When the
+    // account origin moved to the apex, the old copy-pasted default left
+    // `connect-src 'self' https://app.proxywar.xyz` live — a host that now
+    // only 302s, and CSP is enforced against redirect targets, so the
+    // credentialed PoV fetch behind it failed as a console violation with no
+    // failed response and no server-side trace.
+    //
+    // Asserting DEFAULT_PLATFORM_ORIGIN here would pass even if that constant
+    // regressed to `app.`, which is exactly the regression this guards. If
+    // this line has to change, so do the apex DNS record, the tunnel ingress,
+    // the platform's launchd env, and the GitHub OAuth callback — see
+    // RUNBOOK.md 16.2.
+    expect(
+      proxyWarLeagueContentSecurityPolicy([DEFAULT_PLATFORM_ORIGIN]),
+    ).toContain("connect-src 'self' https://proxywar.xyz");
   });
 
   it("defaults to a closed connect-src when no origin is passed", () => {

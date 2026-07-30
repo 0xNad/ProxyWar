@@ -51,7 +51,7 @@ function labelFor(entry: {
  * `ReplayPremiereGuestSecurity.bootstrapRead` (`/api/premieres/points/leaderboard`),
  * reusing the SAME signed guest cookie identity a premiere session already
  * established — never a second identity. Display name itself is
- * platform-owned now (`app.proxywar.xyz`) — betting only ever reads it via
+ * platform-owned now (`proxywar.xyz`) — betting only ever reads it via
  * `BettingPlatformAccountLinkStore`, never writes it; manage it from your
  * account page on the platform, not here.
  */

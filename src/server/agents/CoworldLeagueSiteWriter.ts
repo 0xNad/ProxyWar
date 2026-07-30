@@ -3,6 +3,7 @@ import { promises as fs } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import englishTranslations from "../../../resources/lang/en.json";
+import { DEFAULT_PLATFORM_ORIGIN } from "../../core/PlatformOrigin";
 
 /**
  * Static league-site writer for the hosted Coworld Proxywar league.
@@ -183,10 +184,12 @@ const COWORLD_LEAGUE_WRITE_LOCK_TIMEOUT_MS = 60_000;
 const COWORLD_LEAGUE_WRITE_LOCK_OWNER_GRACE_MS = 30_000;
 // Same platform/account origin `playerProfileLink.ts` links to client-side
 // from the points leaderboard — one shared destination for both
-// leaderboards. Overridable for tests; defaults to the real platform
-// origin, matching the DNS/tunnel already provisioned for it.
+// leaderboards. Overridable for tests; the fallback is shared with every
+// other consumer (`DEFAULT_PLATFORM_ORIGIN`) because this process is one of
+// the ones that does NOT set the env, so a per-file copy silently rots the
+// day the origin moves.
 const PLAYER_PROFILE_ORIGIN =
-  process.env.PROXYWAR_PLATFORM_ORIGIN ?? "https://app.proxywar.xyz";
+  process.env.PROXYWAR_PLATFORM_ORIGIN ?? DEFAULT_PLATFORM_ORIGIN;
 
 function playerProfileUrl(playerName: string): string {
   return `${PLAYER_PROFILE_ORIGIN}/player/${encodeURIComponent(playerName)}`;
@@ -959,7 +962,8 @@ function standingsTable(data: CoworldLeagueMirrorData): string {
       // so a stale-site regeneration cannot relabel or lose the last good row.
       // `null` means the rating policy is genuinely unknown — never surface the
       // old "unknown policy" jargon to viewers.
-      const ratingPolicyLabel = row.ratingPolicyLabel ?? row.policyLabel ?? null;
+      const ratingPolicyLabel =
+        row.ratingPolicyLabel ?? row.policyLabel ?? null;
       const activeChampionPolicyLabel = row.activeChampionPolicyLabel ?? null;
       const championKind = `<span class="policy-kind" title="${escapeHtml(
         translateText("coworld_league.active_champion_tip"),

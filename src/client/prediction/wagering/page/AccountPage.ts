@@ -63,7 +63,7 @@ function persistDismissed(): void {
 }
 
 /**
- * `app.proxywar.xyz`'s own account page — identity (display name, GitHub
+ * `proxywar.xyz`'s own account page — identity (display name, GitHub
  * link) and a self-asserted "these model lineages are mine" claim SET: a
  * person can own more than one lineage (the operator, verbatim:
  * "accounts are for all model"), so this page lets a viewer claim,
