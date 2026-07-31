@@ -1,10 +1,13 @@
 /**
- * Component coverage for the `/builders` directory: with 0 seeded
- * `BuilderProfile`s (today's real read-model state, per the identity
- * registry work landed so far) it must render honest empty copy — never a
- * blank screen or a fabricated placeholder builder — and once builders
- * exist each renders a labeled, status-badged link to `/builder/:slug`.
- * Follows the mount-into-jsdom convention in
+ * Component coverage for the `/builders` directory (Stage 6 item 3
+ * redesign): with 0 seeded `BuilderProfile`s (today's real read-model
+ * state) it must render honest empty copy — never a blank screen or a
+ * fabricated placeholder builder — REAL claimed builders link to
+ * `/builder/:slug`, and every REGISTERED agent with no claim yet (never
+ * house agents) gets an honest "Unclaimed" slot card linking to its own
+ * `/agent/:slug` profile, alongside a verification explainer pointing at
+ * the real onboarding entry (`links.enterTheLeagueUrl` — no `/build`
+ * route exists). Follows the mount-into-jsdom convention in
  * `tests/client/publicapp/AboutPage.test.ts`.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -39,7 +42,35 @@ function minimalBuilder(overrides: {
   return { avatarUrl: null, ...overrides };
 }
 
-function readModelBody(builders: unknown[]) {
+function minimalAgent(overrides: {
+  slug: string | null;
+  displayName: string;
+  status: "verified" | "house" | "unclaimed" | "unregistered";
+  builderId?: string | null;
+  builderDisplayName?: string | null;
+}) {
+  return {
+    registered: true,
+    id: overrides.slug === null ? null : `agt_${overrides.slug}`,
+    slug: overrides.slug,
+    playerName: overrides.slug ?? overrides.displayName,
+    displayName: overrides.displayName,
+    shortCode: null,
+    emblemSvg: null,
+    primaryColor: null,
+    secondaryColor: null,
+    tagline: null,
+    builderId: overrides.builderId ?? null,
+    builderDisplayName: overrides.builderDisplayName ?? null,
+    status: overrides.status,
+    standing: null,
+    activeVersion: null,
+    provenance: { ratingPolicyLabel: null, activeChampionPolicyLabel: null },
+    stats: null,
+  };
+}
+
+function readModelBody(builders: unknown[], agents: unknown[] = []) {
   return {
     schemaVersion: 1,
     generatedAt: "2026-07-30T00:00:00.000Z",
@@ -58,7 +89,7 @@ function readModelBody(builders: unknown[]) {
       scoreLabel: "Score",
     },
     builders,
-    agents: [],
+    agents,
     versions: [],
     rounds: [],
     matches: [],
@@ -156,6 +187,123 @@ describe("builders-directory-page", () => {
     expect(el.querySelector("footer")).not.toBeNull();
     expect(
       el.querySelector('a[href="/builders"][aria-current="page"]'),
+    ).not.toBeNull();
+  });
+
+  it("shows an honest 'Unclaimed' slot card linking to /agent/:slug for every registered agent with no builder claim, never a fabricated builder", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () =>
+        Response.json(
+          readModelBody(
+            [],
+            [
+              minimalAgent({
+                slug: "daveey",
+                displayName: "daveey",
+                status: "unclaimed",
+              }),
+            ],
+          ),
+        ),
+      ),
+    );
+    const el = mount();
+    await flushMicrotasks();
+
+    const slotLink = el.querySelector('a[href="/agent/daveey"]');
+    expect(slotLink).not.toBeNull();
+    expect(slotLink?.textContent).toContain("daveey");
+    expect(slotLink?.textContent).toContain("builders_directory.status_unclaimed");
+    // Never a fabricated /builder/:slug for an unclaimed agent.
+    expect(el.querySelectorAll('a[href^="/builder/"]')).toHaveLength(0);
+    expect(el.textContent).toContain(
+      "builders_directory.verification_explainer",
+    );
+    const cta = el.querySelector<HTMLAnchorElement>(
+      'a[href="https://github.com/example/proxywar-starter"]',
+    );
+    expect(cta?.textContent).toContain("builders_directory.verification_cta");
+  });
+
+  it("excludes house agents from the unclaimed list entirely, and never shows an unclaimed slot for an agent that already has a claimed builder", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () =>
+        Response.json(
+          readModelBody(
+            [],
+            [
+              minimalAgent({
+                slug: "house-agent",
+                displayName: "House Agent",
+                status: "house",
+              }),
+              minimalAgent({
+                slug: "claimed-agent",
+                displayName: "Claimed Agent",
+                status: "verified",
+                builderId: "bld_someone",
+                builderDisplayName: "Someone",
+              }),
+              minimalAgent({
+                slug: "genuinely-unclaimed",
+                displayName: "Genuinely Unclaimed",
+                status: "unclaimed",
+              }),
+            ],
+          ),
+        ),
+      ),
+    );
+    const el = mount();
+    await flushMicrotasks();
+
+    expect(
+      el.querySelector('a[href="/agent/house-agent"]'),
+    ).toBeNull();
+    expect(
+      el.querySelector('a[href="/agent/claimed-agent"]'),
+    ).toBeNull();
+    expect(
+      el.querySelector('a[href="/agent/genuinely-unclaimed"]'),
+    ).not.toBeNull();
+  });
+
+  it("shows BOTH real claimed builders and honest unclaimed slots together, under separate headings, when both exist", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () =>
+        Response.json(
+          readModelBody(
+            [
+              minimalBuilder({
+                id: "builder-1",
+                slug: "daveey",
+                displayName: "Daveey",
+                shortBio: null,
+                status: "verified",
+              }),
+            ],
+            [
+              minimalAgent({
+                slug: "still-unclaimed",
+                displayName: "Still Unclaimed",
+                status: "unclaimed",
+              }),
+            ],
+          ),
+        ),
+      ),
+    );
+    const el = mount();
+    await flushMicrotasks();
+
+    expect(el.textContent).toContain("builders_directory.claimed_heading");
+    expect(el.textContent).toContain("builders_directory.unclaimed_heading");
+    expect(el.querySelector('a[href="/builder/daveey"]')).not.toBeNull();
+    expect(
+      el.querySelector('a[href="/agent/still-unclaimed"]'),
     ).not.toBeNull();
   });
 });

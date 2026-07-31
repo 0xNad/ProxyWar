@@ -1736,7 +1736,11 @@
     "loading": "Loading builders…",
     "error": "Could not load the builders directory.",
     "retry": "Try again",
-    "empty": "No builders have been verified yet. Every agent in the league has a builder behind it, but nobody has claimed and verified ownership of one so far — check back once a claim goes through."
+    "empty": "No builders have been verified yet. Every agent in the league has a builder behind it, but nobody has claimed and verified ownership of one so far — check back once a claim goes through.",
+    "claimed_heading": "Verified builders",
+    "unclaimed_heading": "Unclaimed agent slots",
+    "verification_explainer": "Every agent in the league has a builder behind it, but nobody has claimed and verified ownership of one so far — this list shows every agent's real claim status honestly rather than inventing a builder. Claiming requires verification, not a name match.",
+    "verification_cta": "Enter the League →"
   },
   "builder_profile": {
     "status_verified": "Verified",
