@@ -33,6 +33,14 @@
  * `spectator-telemetry.json`/`spectator-replay.json`/`spectator.html`
  * (`AgentSpectatorTelemetry.ts` — zero references to the raw-field names)
  * — kept.
+ *
+ * `director-cut-plan.json` (product overhaul spec Stage 5): built purely
+ * from `SpectatorEvent[]` data already public via `spectator-telemetry.json`
+ * — turn ranges, a coarse speed tier, an `eventReason` enum, an importance
+ * number, and display names already public elsewhere. No decision reason
+ * strings, no LLM prompt/output, no field `AgentDecisionRecord`/
+ * `DecisionLogEntry` carries privately — see `DirectorCutPlan.ts`'s own
+ * doc for the exact derivation.
  */
 export const proxyWarPublicRunArtifacts = [
   "game-record.json",
@@ -49,6 +57,7 @@ export const proxyWarPublicRunArtifacts = [
   "behavior-quality-report.json",
   "behavior-quality-report.md",
   "external-agent-feedback.md",
+  "director-cut-plan.json",
 ] as const;
 
 export const proxyWarPublicTournamentArtifacts = [

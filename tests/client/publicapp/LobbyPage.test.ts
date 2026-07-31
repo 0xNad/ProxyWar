@@ -60,6 +60,7 @@ function match(overrides: Partial<PublicMatch>): PublicMatch {
     watchHref: null,
     fullRenderHref: null,
     premiereHref: null,
+    directorCut: null,
     ...overrides,
   };
 }

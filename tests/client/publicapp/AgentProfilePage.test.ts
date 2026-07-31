@@ -114,6 +114,7 @@ function minimalMatch(overrides: {
     watchHref: overrides.watchHref ?? null,
     fullRenderHref: overrides.fullRenderHref ?? null,
     premiereHref: null,
+    directorCut: null,
   };
 }
 

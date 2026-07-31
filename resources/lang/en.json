@@ -1639,6 +1639,7 @@
     "no_completed_matches": "No completed matches in the retained history yet.",
     "turns_count": "{count} turns",
     "decisions_count": "{count} decisions",
+    "director_cut_duration": "Director Cut · ~{minutes} min",
     "reveal_result": "Reveal result",
     "winner_label": "Winner: {name}",
     "no_winner": "No winner recorded for this match.",

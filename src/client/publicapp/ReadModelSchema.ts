@@ -83,6 +83,12 @@ export const PublicMatchSchema = z.object({
   watchHref: z.string().nullable(),
   fullRenderHref: z.string().nullable(),
   premiereHref: z.string().nullable(),
+  directorCut: z
+    .object({
+      durationEstimateSeconds: z.number(),
+      segmentCount: z.number(),
+    })
+    .nullable(),
 });
 export type PublicMatch = z.infer<typeof PublicMatchSchema>;
 

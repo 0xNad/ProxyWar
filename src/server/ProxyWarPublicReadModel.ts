@@ -110,6 +110,11 @@ export interface PublicMatchParticipant {
   color: string;
 }
 
+export interface PublicDirectorCutSummary {
+  durationEstimateSeconds: number;
+  segmentCount: number;
+}
+
 export interface PublicMatch {
   matchId: string;
   shortId: string;
@@ -125,6 +130,8 @@ export interface PublicMatch {
   watchHref: string | null;
   fullRenderHref: string | null;
   premiereHref: string | null;
+  /** Product overhaul spec Stage 5. `null` when no `director-cut-plan.json` artifact exists for this match yet (e.g. an older match generated before this feature shipped) — never fabricated. */
+  directorCut: PublicDirectorCutSummary | null;
 }
 
 export interface PublicFeaturedMatchResult {
@@ -341,6 +348,12 @@ function publicMatch(
     watchHref: episode.watchHref,
     fullRenderHref: episode.fullRenderHref,
     premiereHref: episode.premiereHref ?? null,
+    directorCut: episode.directorCut
+      ? {
+          durationEstimateSeconds: episode.directorCut.durationEstimateSeconds,
+          segmentCount: episode.directorCut.segmentCount,
+        }
+      : null,
   };
 }
 

@@ -252,6 +252,15 @@ export class WatchPage extends LitElement {
           count: match.decisionCount,
         }),
       );
+    if (match.directorCut !== null)
+      meta.push(
+        translateText("watch.director_cut_duration", {
+          minutes: Math.max(
+            1,
+            Math.round(match.directorCut.durationEstimateSeconds / 60),
+          ),
+        }),
+      );
     const roundLabel =
       match.roundNumber === null
         ? "—"
