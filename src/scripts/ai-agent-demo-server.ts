@@ -66,6 +66,7 @@ import {
   buildLeaguePlayerSection,
   readLeagueMirrorData,
 } from "../server/agents/LeaguePlayerProfile";
+import { readAgentStatsArtifact } from "../server/agents/AgentStatsArtifact";
 import {
   parsePlayerStrategySpec,
   PlayerStrategySpec,
@@ -1283,6 +1284,7 @@ app.get("/account", async (_req, res) => {
 // platform below, and `TraderProfilePage.ts` on the client.
 // -----------------------------------------------------------------------
 const leagueDataJsonPath = path.join(runsRootDir, "league", "data.json");
+const agentStatsJsonPath = path.join(runsRootDir, "league", "agent-stats.json");
 
 app.get("/api/players/:name", async (req, res) => {
   try {
@@ -1292,9 +1294,14 @@ app.get("/api/players/:name", async (req, res) => {
       res.status(400).json({ error: { code: "PLAYER_PROFILE_INVALID_NAME" } });
       return;
     }
-    const mirrorData = await readLeagueMirrorData(leagueDataJsonPath);
+    const [mirrorData, statsArtifact] = await Promise.all([
+      readLeagueMirrorData(leagueDataJsonPath),
+      readAgentStatsArtifact(agentStatsJsonPath),
+    ]);
     const league =
-      mirrorData === null ? null : buildLeaguePlayerSection(mirrorData, name);
+      mirrorData === null
+        ? null
+        : buildLeaguePlayerSection(mirrorData, name, statsArtifact);
     if (league === null) {
       res.status(404).json({ error: { code: "PLAYER_PROFILE_NOT_FOUND" } });
       return;

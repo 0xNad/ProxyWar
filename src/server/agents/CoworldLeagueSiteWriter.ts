@@ -4,6 +4,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import englishTranslations from "../../../resources/lang/en.json";
 import { DEFAULT_PLATFORM_ORIGIN } from "../../core/PlatformOrigin";
+import { readAgentStatsArtifact } from "./AgentStatsArtifact";
 import { buildProxyWarPublicReadModel } from "../ProxyWarPublicReadModel";
 import {
   readFeaturedMatchStore,
@@ -544,6 +545,14 @@ async function writeCoworldLeagueSiteUnlocked(
   const featuredMatchStore = await readFeaturedMatchStore(
     resolveFeaturedMatchStateRoot(),
   );
+  // Product overhaul spec Stage 6: best-effort, tolerant of absence (the
+  // stats batch job runs on its own periodic cadence — see
+  // `compute-agent-stats.ts`'s own doc for why this must never be a
+  // per-publish recomputation). Lives alongside data.json/read-model.json
+  // in the SAME site directory.
+  const statsArtifact = await readAgentStatsArtifact(
+    path.join(siteDir, "agent-stats.json"),
+  );
   // Publish data.json and read-model.json last. Existing pages only reload
   // after observing a newer data.json snapshot, so they cannot race ahead of
   // either the client or the HTML. read-model.json is the typed, normalized
@@ -554,6 +563,7 @@ async function writeCoworldLeagueSiteUnlocked(
     data,
     identity,
     featuredMatchStore,
+    statsArtifact,
   );
   await writeFileAtomic(clientPath, coworldLeagueClientJavaScript());
   await writeFileAtomic(indexPath, coworldLeagueIndexHtml(data, identity));

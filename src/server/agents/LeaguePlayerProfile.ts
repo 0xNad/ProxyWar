@@ -25,6 +25,11 @@
  * never by anything from here.
  */
 import { promises as fs } from "node:fs";
+import {
+  findPlayerStats,
+  type AgentStatsArtifact,
+} from "./AgentStatsArtifact";
+import type { PublicAgentStats } from "../ProxyWarPublicReadModel";
 
 export interface PlayerProfileStanding {
   readonly rank: number;
@@ -63,6 +68,15 @@ export interface PlayerProfileLeagueSection {
   readonly episodes: readonly PlayerProfileEpisode[];
   /** Record over `episodes` ONLY — never extrapolated past the retained window. `null` with no retained episodes for this player. */
   readonly recentRecord: { readonly wins: number; readonly played: number } | null;
+  /**
+   * Product overhaul spec Stage 6: the SAME `career`/`currentVersion`
+   * fingerprint+social object the public read model's `PublicAgent.stats`
+   * carries for this exact `playerName` — "one computation source, two
+   * views, never divergent numbers" (spec item 6) holds because both read
+   * the SAME `agent-stats.json` artifact, neither recomputes. `null` when
+   * the stats batch job hasn't produced a row for this player yet.
+   */
+  readonly stats: PublicAgentStats | null;
 }
 
 function asString(value: unknown): string | null {
@@ -218,6 +232,7 @@ function episodeSortKey(episode: ParsedEpisodeRow): number {
 export function buildLeaguePlayerSection(
   data: ParsedLeagueMirrorData,
   playerName: string,
+  statsArtifact: AgentStatsArtifact | null = null,
 ): PlayerProfileLeagueSection | null {
   const standingRow =
     data.standings.find((row) => row.playerName === playerName) ?? null;
@@ -261,6 +276,7 @@ export function buildLeaguePlayerSection(
           played: episodeViews.length,
         };
 
+  const playerStats = findPlayerStats(statsArtifact, playerName);
   return {
     generatedAt: data.generatedAt,
     lastGoodSyncAt: data.lastGoodSyncAt,
@@ -279,5 +295,8 @@ export function buildLeaguePlayerSection(
     policyLineageNote,
     episodes: episodeViews,
     recentRecord,
+    stats: playerStats === null
+      ? null
+      : { career: playerStats.career, currentVersion: playerStats.currentVersion },
   };
 }

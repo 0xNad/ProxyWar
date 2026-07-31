@@ -120,6 +120,62 @@ describe("buildLeaguePlayerSection", () => {
     expect(section?.recentRecord).toEqual({ wins: 1, played: 2 });
   });
 
+  test("carries the SAME career/currentVersion stats object /agent/:slug uses, when the stats artifact has a row for this player", async () => {
+    const data = await readLeagueMirrorDataFromObject(sampleMirrorFile());
+    const emptySlice = {
+      episodeCount: 5,
+      fingerprint: {
+        aggression: { value: 0.4, sampleSize: 60, threshold: 50, methodology: "m" },
+        diplomacyInitiated: null,
+        economicFocus: null,
+        territory: { share: null, absoluteTiles: null, meanRank: null },
+        armyStrength: null,
+      },
+      social: {
+        alliancesInitiated: null,
+        allianceAcceptanceRate: null,
+        betrayalCount: null,
+        frequentAllies: [],
+        primaryAdversaries: [],
+        treatyDuration: null,
+      },
+    };
+    const statsArtifact = {
+      schemaVersion: 1 as const,
+      generatedAt: "2026-07-31T00:00:00.000Z",
+      episodesScanned: 5,
+      players: [
+        {
+          playerName: "daveey-proxywar",
+          career: emptySlice,
+          currentVersion: null,
+        },
+      ],
+    };
+    const section = buildLeaguePlayerSection(
+      data,
+      "daveey-proxywar",
+      statsArtifact,
+    );
+    expect(section?.stats?.career.fingerprint.aggression?.value).toBe(0.4);
+    expect(section?.stats?.currentVersion).toBeNull();
+  });
+
+  test("returns stats: null when no stats artifact is passed, or no row matches this player", async () => {
+    const data = await readLeagueMirrorDataFromObject(sampleMirrorFile());
+    expect(
+      buildLeaguePlayerSection(data, "daveey-proxywar")?.stats,
+    ).toBeNull();
+    expect(
+      buildLeaguePlayerSection(data, "daveey-proxywar", {
+        schemaVersion: 1,
+        generatedAt: "2026-07-31T00:00:00.000Z",
+        episodesScanned: 0,
+        players: [],
+      })?.stats,
+    ).toBeNull();
+  });
+
   test("names the policy-lineage moment when the champion has shipped past the rating", async () => {
     const data = await readLeagueMirrorDataFromObject(sampleMirrorFile());
     const section = buildLeaguePlayerSection(data, "daveey-proxywar");

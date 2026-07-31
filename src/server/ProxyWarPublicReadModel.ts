@@ -11,6 +11,11 @@ import type {
 } from "./identity/IdentitySchemas";
 import { generateEmblemSvg } from "./identity/IdentityEmblems";
 import type {
+  AgentStatsArtifact,
+  PlayerAgentStats,
+} from "./agents/AgentStatsArtifact";
+import type { AgentStatsSlice } from "./agents/AgentStatsPipeline";
+import type {
   CoworldLeagueEpisodeRow,
   CoworldLeagueLatestPremiereCard,
   CoworldLeagueMirrorData,
@@ -96,6 +101,22 @@ export interface PublicAgent {
     ratingPolicyLabel: string | null;
     activeChampionPolicyLabel: string | null;
   };
+  /**
+   * Product overhaul spec Stage 6: strategic fingerprint + social record,
+   * computed by `compute-agent-stats.ts` from every retained episode this
+   * `playerName` appears in — the SAME computed object `/api/players/:name`
+   * serves for the same player (see `AgentStatsArtifact.ts`'s own doc).
+   * `null` when the stats batch job hasn't produced a row for this
+   * player yet (cold start, or a brand-new participant with zero
+   * retained episodes) — never a zeroed-out fake stats block.
+   */
+  stats: PublicAgentStats | null;
+}
+
+export interface PublicAgentStats {
+  career: AgentStatsSlice;
+  /** Best-effort, date-inferred (see `PlayerAgentStats.currentVersion`'s own doc) — `null` until the identity registry records a real `releaseDate` for this player's active version. */
+  currentVersion: (AgentStatsSlice & { versionLabel: string }) | null;
 }
 
 export type PublicAgentVersion = AgentVersion;
@@ -204,15 +225,28 @@ function publicBuilder(builder: BuilderProfile): PublicBuilder {
   };
 }
 
+function publicAgentStats(
+  playerName: string,
+  statsArtifact: AgentStatsArtifact | null,
+): PublicAgentStats | null {
+  const row: PlayerAgentStats | undefined = statsArtifact?.players.find(
+    (player) => player.playerName === playerName,
+  );
+  if (row === undefined) return null;
+  return { career: row.career, currentVersion: row.currentVersion };
+}
+
 function publicAgentFromView(
   playerName: string,
   standing: CoworldLeagueStandingRow | null,
   view: AgentIdentityView,
+  statsArtifact: AgentStatsArtifact | null,
 ): PublicAgent {
   const provenance = {
     ratingPolicyLabel: standing?.ratingPolicyLabel ?? standing?.policyLabel ?? null,
     activeChampionPolicyLabel: standing?.activeChampionPolicyLabel ?? null,
   };
+  const stats = publicAgentStats(playerName, statsArtifact);
   if (view.agent === null) {
     return {
       registered: false,
@@ -239,6 +273,7 @@ function publicAgentFromView(
             },
       activeVersion: null,
       provenance,
+      stats,
     };
   }
   return {
@@ -273,6 +308,7 @@ function publicAgentFromView(
             familyMismatch: view.version.familyMismatch,
           },
     provenance,
+    stats,
   };
 }
 
@@ -280,6 +316,7 @@ function publicAgentFromView(
 function publicAgents(
   standings: readonly CoworldLeagueStandingRow[],
   identity: IdentityRegistrySnapshot,
+  statsArtifact: AgentStatsArtifact | null,
 ): PublicAgent[] {
   const fromStandings = standings.map((row) => {
     const view = resolveAgentIdentityView(
@@ -292,7 +329,7 @@ function publicAgents(
       identity.builders,
       identity.versions,
     );
-    return publicAgentFromView(row.playerName, row, view);
+    return publicAgentFromView(row.playerName, row, view, statsArtifact);
   });
   const standingsPlayerNames = new Set(
     standings.map((row) => row.playerName),
@@ -312,7 +349,12 @@ function publicAgents(
         identity.builders,
         identity.versions,
       );
-      return publicAgentFromView(agent.policyMatchRule.playerName, null, view);
+      return publicAgentFromView(
+        agent.policyMatchRule.playerName,
+        null,
+        view,
+        statsArtifact,
+      );
     });
   return [...fromStandings, ...registeredNotInStandings];
 }
@@ -429,6 +471,13 @@ export function buildProxyWarPublicReadModel(
   mirror: CoworldLeagueMirrorData,
   identity: IdentityRegistrySnapshot,
   featuredMatchStore: FeaturedMatchStoreFile,
+  /**
+   * Product overhaul spec Stage 6. `null` when the stats batch job
+   * (`compute-agent-stats.ts`) hasn't produced an artifact yet — every
+   * `PublicAgent.stats` then reads `null` too, an honest cold-start state
+   * rather than a build failure.
+   */
+  statsArtifact: AgentStatsArtifact | null = null,
 ): ProxyWarPublicReadModel {
   const agentSlugByPlayerName = new Map(
     identity.agents.map((agent) => [
@@ -447,7 +496,7 @@ export function buildProxyWarPublicReadModel(
     },
     league: mirror.league,
     builders: identity.builders.map(publicBuilder),
-    agents: publicAgents(mirror.standings, identity),
+    agents: publicAgents(mirror.standings, identity, statsArtifact),
     versions: [...identity.versions],
     rounds: mirror.rounds,
     matches: mirror.episodes.map((episode) =>
