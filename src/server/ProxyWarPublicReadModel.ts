@@ -68,6 +68,17 @@ export interface PublicAgentActiveVersion {
   source: "champion" | "rating";
   /** True when the live label's family no longer matches this Agent's registered rule — an operator-review signal, never auto-remapped. */
   familyMismatch: boolean;
+  /**
+   * When the mirror FIRST recorded this exact policy label (spec Stage 6
+   * item 2) — `sync-version-registry.ts`'s own provenance field on the
+   * matching `AgentVersion` registry record, `null` for a live label that
+   * either has no registered record yet or predates that script's
+   * introduction. A "first observed" marker, deliberately never labeled
+   * "released" — this is the mirror's own observation date, not a
+   * builder's disclosed release date (`releaseDate`, a separate,
+   * still-usually-null field this read model never surfaces).
+   */
+  firstObservedAt: string | null;
 }
 
 /**
@@ -306,6 +317,7 @@ function publicAgentFromView(
             publicVersionLabel: view.version.publicVersionLabel,
             source: view.version.source,
             familyMismatch: view.version.familyMismatch,
+            firstObservedAt: view.version.registered?.firstObservedAt ?? null,
           },
     provenance,
     stats,

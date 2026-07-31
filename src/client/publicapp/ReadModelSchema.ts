@@ -31,6 +31,7 @@ const PublicAgentActiveVersionSchema = z.object({
   publicVersionLabel: z.string(),
   source: z.enum(["champion", "rating"]),
   familyMismatch: z.boolean(),
+  firstObservedAt: z.string().nullable(),
 });
 
 export const PublicAgentSchema = z.object({

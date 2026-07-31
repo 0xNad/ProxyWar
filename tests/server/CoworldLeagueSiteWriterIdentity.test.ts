@@ -57,6 +57,7 @@ function version(overrides: Partial<AgentVersion> = {}): AgentVersion {
     qualificationStatus: "active",
     observedVia: ["champion", "rating"],
     observedAt: "2026-07-31T00:30:00.000Z",
+    firstObservedAt: null,
     ...overrides,
   };
 }

@@ -196,23 +196,38 @@ async function main(): Promise<void> {
   ]);
   const byPlayer = await collectRawMatchesByPlayer(runs);
 
-  // Best-effort current-version release date per playerName, from the
-  // identity registry — see PlayerAgentStats.currentVersion's own doc.
+  // Current-version boundary per playerName, from the identity registry —
+  // see PlayerAgentStats.currentVersion's own doc. `releaseDate` (a
+  // builder's own disclosure) is authoritative when present;
+  // `firstObservedAt` (the mirror's own observation — see
+  // sync-version-registry.ts) is the honest fallback. Before
+  // sync-version-registry.ts existed, `releaseDate` was the ONLY source
+  // and stayed null for every real agent (no builder had disclosed one
+  // yet), so currentVersion was permanently null for everyone — this
+  // fallback is what actually unblocks the split for the common case.
   const currentVersionByPlayerName = new Map<
     string,
-    { releaseDate: string; versionLabel: string }
+    { boundary: string; versionLabel: string }
   >();
   if (identity !== null) {
     for (const agentProfile of identity.agents) {
       const versionsForAgent = identity.versions
-        .filter((v) => v.agentId === agentProfile.id && v.releaseDate !== null)
-        .sort((a, b) => (b.releaseDate ?? "").localeCompare(a.releaseDate ?? ""));
+        .filter(
+          (v) =>
+            v.agentId === agentProfile.id &&
+            (v.releaseDate !== null || v.firstObservedAt !== null),
+        )
+        .map((v) => ({
+          boundary: (v.releaseDate ?? v.firstObservedAt) as string,
+          versionLabel: v.publicVersionLabel,
+        }))
+        .sort((a, b) => b.boundary.localeCompare(a.boundary));
       const newest = versionsForAgent[0];
-      if (newest?.releaseDate !== null && newest !== undefined) {
-        currentVersionByPlayerName.set(agentProfile.policyMatchRule.playerName, {
-          releaseDate: newest.releaseDate,
-          versionLabel: newest.publicVersionLabel,
-        });
+      if (newest !== undefined) {
+        currentVersionByPlayerName.set(
+          agentProfile.policyMatchRule.playerName,
+          newest,
+        );
       }
     }
   }
@@ -224,7 +239,7 @@ async function main(): Promise<void> {
     let currentVersion: PlayerAgentStats["currentVersion"] = null;
     if (versionInfo !== undefined) {
       const qualifying = matches.filter(
-        (m) => m.completedAt !== null && m.completedAt >= versionInfo.releaseDate,
+        (m) => m.completedAt !== null && m.completedAt >= versionInfo.boundary,
       );
       if (qualifying.length > 0) {
         currentVersion = {

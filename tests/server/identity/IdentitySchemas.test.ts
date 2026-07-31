@@ -131,6 +131,7 @@ describe("AgentVersionSchema", () => {
     qualificationStatus: "active" as const,
     observedVia: ["champion", "rating"] as const,
     observedAt: "2026-07-31T00:30:00.000Z",
+    firstObservedAt: null,
   };
 
   test("accepts a fully-formed undisclosed version", () => {
@@ -151,5 +152,25 @@ describe("AgentVersionSchema", () => {
         observedAt: "yesterday",
       }).success,
     ).toBe(false);
+  });
+
+  test("accepts a real ISO timestamp for firstObservedAt, and rejects a malformed one", () => {
+    expect(
+      AgentVersionSchema.safeParse({
+        ...validVersion,
+        firstObservedAt: "2026-07-01T00:00:00.000Z",
+      }).success,
+    ).toBe(true);
+    expect(
+      AgentVersionSchema.safeParse({
+        ...validVersion,
+        firstObservedAt: "yesterday",
+      }).success,
+    ).toBe(false);
+  });
+
+  test("rejects a version record entirely missing firstObservedAt — it must be explicitly null, never omitted", () => {
+    const { firstObservedAt: _omit, ...withoutField } = validVersion;
+    expect(AgentVersionSchema.safeParse(withoutField).success).toBe(false);
   });
 });

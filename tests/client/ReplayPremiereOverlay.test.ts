@@ -1676,6 +1676,7 @@ describe("broadcast composition regions (Stage 4 item 1)", () => {
               publicVersionLabel: "v24",
               source: "champion",
               familyMismatch: false,
+              firstObservedAt: null,
             },
             provenance: {
               ratingPolicyLabel: null,

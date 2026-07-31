@@ -92,6 +92,7 @@ const identity: IdentityRegistrySnapshot = {
       qualificationStatus: "active",
       observedVia: ["rating"],
       observedAt: "2026-07-31T00:00:00.000Z",
+      firstObservedAt: null,
     },
   ],
 };

@@ -156,6 +156,18 @@ export const AgentVersionSchema = z
     observedVia: ObservedViaSchema,
     /** When this record was added/last confirmed observed — registry provenance, not a Softmax-reported field. */
     observedAt: IsoTimestampSchema,
+    /**
+     * The FIRST time the mirror ever detected this exact `softmaxPolicyLabel`
+     * live (spec Stage 6 item 3) — set once, on creation, and never
+     * overwritten afterward, unlike `observedAt` above (which the mirror
+     * bumps on every re-confirmation). Distinct from `releaseDate`: this is
+     * registry provenance the mirror derives itself, `releaseDate` is a
+     * builder disclosure that may predate or postdate it, or may never
+     * arrive at all. `null` only when a record predates this field's
+     * introduction and no retained match history could backfill it
+     * (`sync-version-registry.ts`'s own doc) — never a guessed date.
+     */
+    firstObservedAt: IsoTimestampSchema.nullable(),
   })
   .strict();
 export type AgentVersion = z.infer<typeof AgentVersionSchema>;

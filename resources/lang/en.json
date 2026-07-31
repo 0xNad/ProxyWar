@@ -1682,6 +1682,7 @@
     "active_version_label": "Active version",
     "pending_review_title": "This agent's live label no longer matches its registered rule — pending operator review.",
     "pending_review": "Pending review",
+    "first_observed": "first observed {date}",
     "recent_matches_heading": "Recent matches",
     "no_matches": "No completed matches for this agent yet.",
     "outcome_won": "Won",

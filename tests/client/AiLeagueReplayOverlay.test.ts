@@ -2568,6 +2568,7 @@ function publicAgentFixture(overrides: {
       publicVersionLabel: overrides.versionLabel,
       source: "champion",
       familyMismatch: false,
+      firstObservedAt: null,
     },
     provenance: {
       ratingPolicyLabel: null,

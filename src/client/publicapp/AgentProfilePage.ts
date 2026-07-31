@@ -232,6 +232,15 @@ export class AgentProfilePage extends LitElement {
               >${translateText("agent_profile.pending_review")}</span
             >`
           : nothing}
+        ${activeVersion.firstObservedAt !== null
+          ? html`<span class="ml-2 text-xs text-ink-muted"
+              >${translateText("agent_profile.first_observed", {
+                date: new Date(
+                  activeVersion.firstObservedAt,
+                ).toLocaleDateString(),
+              })}</span
+            >`
+          : nothing}
       </p>
     `;
   }

@@ -18,7 +18,8 @@
         "champion",
         "rating"
       ],
-      "observedAt": "2026-07-31T00:30:00.000Z"
+      "observedAt": "2026-07-31T00:30:00.000Z",
+      "firstObservedAt": null
     },
     {
       "id": "agtv_daveey_v24",
@@ -37,7 +38,8 @@
         "champion",
         "rating"
       ],
-      "observedAt": "2026-07-31T00:30:00.000Z"
+      "observedAt": "2026-07-31T00:30:00.000Z",
+      "firstObservedAt": null
     },
     {
       "id": "agtv_captain-underpants-maximum-aura_v1",
@@ -56,7 +58,8 @@
         "champion",
         "rating"
       ],
-      "observedAt": "2026-07-31T00:30:00.000Z"
+      "observedAt": "2026-07-31T00:30:00.000Z",
+      "firstObservedAt": null
     },
     {
       "id": "agtv_auri_v42",
@@ -75,7 +78,8 @@
         "champion",
         "rating"
       ],
-      "observedAt": "2026-07-31T00:30:00.000Z"
+      "observedAt": "2026-07-31T00:30:00.000Z",
+      "firstObservedAt": null
     },
     {
       "id": "agtv_relh_v3",
@@ -94,7 +98,8 @@
         "champion",
         "rating"
       ],
-      "observedAt": "2026-07-31T00:30:00.000Z"
+      "observedAt": "2026-07-31T00:30:00.000Z",
+      "firstObservedAt": null
     },
     {
       "id": "agtv_calc_v159",
@@ -112,7 +117,8 @@
       "observedVia": [
         "champion"
       ],
-      "observedAt": "2026-07-31T00:30:00.000Z"
+      "observedAt": "2026-07-31T00:30:00.000Z",
+      "firstObservedAt": null
     },
     {
       "id": "agtv_cyan-hellstar_v1",
@@ -130,7 +136,8 @@
       "observedVia": [
         "champion"
       ],
-      "observedAt": "2026-07-31T00:30:00.000Z"
+      "observedAt": "2026-07-31T00:30:00.000Z",
+      "firstObservedAt": null
     },
     {
       "id": "agtv_sefirot_v1",
@@ -148,7 +155,8 @@
       "observedVia": [
         "champion"
       ],
-      "observedAt": "2026-07-31T00:30:00.000Z"
+      "observedAt": "2026-07-31T00:30:00.000Z",
+      "firstObservedAt": null
     },
     {
       "id": "agtv_salomon-shdow_v13",
@@ -167,7 +175,8 @@
         "champion",
         "rating"
       ],
-      "observedAt": "2026-07-31T00:30:00.000Z"
+      "observedAt": "2026-07-31T00:30:00.000Z",
+      "firstObservedAt": null
     },
     {
       "id": "agtv_softmaxwell_v2",
@@ -186,7 +195,8 @@
         "champion",
         "rating"
       ],
-      "observedAt": "2026-07-31T00:30:00.000Z"
+      "observedAt": "2026-07-31T00:30:00.000Z",
+      "firstObservedAt": null
     },
     {
       "id": "agtv_peepee7_v6",
@@ -204,7 +214,8 @@
       "observedVia": [
         "champion"
       ],
-      "observedAt": "2026-07-31T00:30:00.000Z"
+      "observedAt": "2026-07-31T00:30:00.000Z",
+      "firstObservedAt": null
     },
     {
       "id": "agtv_richard_v7",
@@ -222,7 +233,8 @@
       "observedVia": [
         "champion"
       ],
-      "observedAt": "2026-07-31T00:30:00.000Z"
+      "observedAt": "2026-07-31T00:30:00.000Z",
+      "firstObservedAt": null
     },
     {
       "id": "agtv_djizus_v22",
@@ -240,7 +252,8 @@
       "observedVia": [
         "champion"
       ],
-      "observedAt": "2026-07-31T00:30:00.000Z"
+      "observedAt": "2026-07-31T00:30:00.000Z",
+      "firstObservedAt": null
     },
     {
       "id": "agtv_ron-swgy_v1",
@@ -259,7 +272,8 @@
         "champion",
         "rating"
       ],
-      "observedAt": "2026-07-31T00:30:00.000Z"
+      "observedAt": "2026-07-31T00:30:00.000Z",
+      "firstObservedAt": null
     },
     {
       "id": "agtv_sian-voidcrown_v1",
@@ -277,7 +291,8 @@
       "observedVia": [
         "champion"
       ],
-      "observedAt": "2026-07-31T00:30:00.000Z"
+      "observedAt": "2026-07-31T00:30:00.000Z",
+      "firstObservedAt": null
     },
     {
       "id": "agtv_james-boggs_v1",
@@ -296,7 +311,8 @@
         "champion",
         "rating"
       ],
-      "observedAt": "2026-07-31T00:30:00.000Z"
+      "observedAt": "2026-07-31T00:30:00.000Z",
+      "firstObservedAt": null
     },
     {
       "id": "agtv_docxology_v1",
@@ -314,7 +330,8 @@
       "observedVia": [
         "champion"
       ],
-      "observedAt": "2026-07-31T00:30:00.000Z"
+      "observedAt": "2026-07-31T00:30:00.000Z",
+      "firstObservedAt": null
     }
   ]
 }

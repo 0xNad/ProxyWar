@@ -39,6 +39,7 @@ function minimalAgent(overrides: {
   score?: number | null;
   roundsPlayed?: number | null;
   activeVersionLabel?: string | null;
+  firstObservedAt?: string | null;
   tagline?: string | null;
   stats?: unknown;
 }) {
@@ -73,6 +74,7 @@ function minimalAgent(overrides: {
             publicVersionLabel: overrides.activeVersionLabel,
             source: "champion" as const,
             familyMismatch: false,
+            firstObservedAt: overrides.firstObservedAt ?? null,
           },
     provenance: { ratingPolicyLabel: null, activeChampionPolicyLabel: null },
     stats: overrides.stats ?? null,
@@ -209,6 +211,58 @@ describe("agent-profile-page", () => {
     expect(el.textContent).toContain("#3");
     expect(el.textContent).toContain("1234.50");
     expect(el.textContent).toContain("v24");
+  });
+
+  it("shows a 'first observed' marker next to the active version when the registry has recorded one, and omits it when null", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () =>
+        Response.json(
+          readModelBody([
+            minimalAgent({
+              slug: "odin-free",
+              playerName: "odin-free",
+              displayName: "Odin",
+              shortCode: "ODN",
+              status: "verified",
+              builderDisplayName: "Ada",
+              rank: 3,
+              activeVersionLabel: "v24",
+              firstObservedAt: "2026-07-01T00:00:00.000Z",
+            }),
+          ]),
+        ),
+      ),
+    );
+    const withDate = mount("odin-free");
+    await flushMicrotasks();
+    expect(withDate.textContent).toContain("agent_profile.first_observed");
+
+    document.body.innerHTML = "";
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () =>
+        Response.json(
+          readModelBody([
+            minimalAgent({
+              slug: "odin-free",
+              playerName: "odin-free",
+              displayName: "Odin",
+              shortCode: "ODN",
+              status: "verified",
+              builderDisplayName: "Ada",
+              rank: 3,
+              activeVersionLabel: "v24",
+            }),
+          ]),
+        ),
+      ),
+    );
+    const withoutDate = mount("odin-free");
+    await flushMicrotasks();
+    expect(withoutDate.textContent).not.toContain(
+      "agent_profile.first_observed",
+    );
   });
 
   it("renders the strategic fingerprint from a real stats payload, hiding metrics below their own threshold", async () => {

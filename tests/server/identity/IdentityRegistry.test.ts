@@ -77,6 +77,7 @@ describe("registry save/load round trip", () => {
       qualificationStatus: "active",
       observedVia: ["champion", "rating"],
       observedAt: "2026-07-31T00:30:00.000Z",
+      firstObservedAt: null,
     };
     await saveAgentVersionRegistry([version], filePath);
     expect(await loadAgentVersionRegistry(filePath)).toEqual([version]);
