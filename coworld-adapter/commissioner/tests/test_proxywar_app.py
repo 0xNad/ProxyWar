@@ -2,8 +2,10 @@ import os
 from pathlib import Path
 from uuid import UUID
 
-import yaml
+from anyio import WouldBlock
+from fastapi.testclient import TestClient
 import pytest
+import yaml
 
 # Importing commissioners.proxywar_app also constructs the shared FastAPI app,
 # whose default config name is not bundled in this game-specific image.
@@ -16,6 +18,7 @@ from commissioners.common.protocol import (
     RoundStart,
     VariantInfo,
 )
+from commissioners.common.server import create_app
 from commissioners.common.ruleset_strategy.config import (
     RulesetStrategyCommissionerConfig,
 )
@@ -71,7 +74,10 @@ def competition_round_start(champion_count: int) -> RoundStart:
             VariantInfo(
                 id="tournament-12p-pangaea",
                 name="12-player Pangaea",
-                game_config={"num_agents": 12},
+                game_config={
+                    "num_agents": 12,
+                    "episode_timeout_seconds": 3600,
+                },
             )
         ],
         state={
@@ -147,3 +153,54 @@ def test_every_supported_ladder_shape_schedules_every_entrant(
         membership.policy_version_id for membership in round_start.memberships
     }
     assert scheduled_policy_ids == champion_policy_ids
+
+
+def test_live_dispatch_throttle_caps_competition_at_three_episodes() -> None:
+    throttle = commissioner().dispatch_throttle_config()
+
+    assert throttle.enabled is True
+    assert throttle.max_concurrent_episodes(3600) == 3
+    assert throttle.max_concurrent_episodes(180) == 3
+    assert throttle.episode_stagger_seconds(3600) == 0
+
+
+def test_live_17_champion_server_dispatches_three_then_drains_the_queue() -> None:
+    round_start = competition_round_start(17)
+
+    with TestClient(create_app(commissioner())).websocket_connect(
+        "/round"
+    ) as websocket:
+        websocket.send_json(round_start.to_json())
+
+        initial_messages = [websocket.receive_json() for _ in range(3)]
+        assert [message["type"] for message in initial_messages] == [
+            "schedule_episodes"
+        ] * 3
+        assert [
+            message["episodes"][0]["request_id"] for message in initial_messages
+        ] == ["0", "1", "2"]
+        assert all(len(message["episodes"]) == 1 for message in initial_messages)
+
+        with pytest.raises(WouldBlock):
+            websocket.portal.call(websocket._send_rx.receive_nowait)
+
+        for settled_index in range(3):
+            websocket.send_json(
+                {
+                    "type": "episode_failed",
+                    "request_id": str(settled_index),
+                    "error": "synthetic throttle-test settlement",
+                }
+            )
+            replacement = websocket.receive_json()
+            assert replacement["type"] == "schedule_episodes"
+            assert replacement["episodes"][0]["request_id"] == str(
+                settled_index + 3
+            )
+
+        with pytest.raises(WouldBlock):
+            websocket.portal.call(websocket._send_rx.receive_nowait)
+
+        websocket.send_json(
+            {"type": "round_abort", "reason": "synthetic throttle test complete"}
+        )

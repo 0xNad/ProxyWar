@@ -1,0 +1,16 @@
+# Commissioner-only reliability hotfix. The base is the exact public digest
+# behind canonical ProxyWar Coworld 0.1.15 (img_46e48293-ff26-404f-a629-46997bd3758a).
+# Keeping it immutable makes the release delta one config file: no Python
+# package, framework, scheduler, scoring, seating, or game-image changes.
+FROM public.ecr.aws/q5f4m8t9/cogames@sha256:e7e107456464afaf88c23b263b50443232f6081d451c3fc605af5f2547a9d02e
+
+COPY commissioners/ruleset_strategy_commissioner/configs/proxywar.yaml \
+    /app/commissioners/ruleset_strategy_commissioner/configs/proxywar.yaml
+
+# The inherited org.proxywar.source.* labels identify the immutable base. These
+# labels identify the config-only overlay; the release receipt binds its Git
+# commit and final uploaded Coworld/image IDs.
+LABEL org.proxywar.hotfix.scope="commissioner-config-only" \
+      org.proxywar.hotfix.base-client-hash="sha256:ee489223b39accab4ae5c96a25739956c4b9229d92c818d2e9ce6f2f27e18118" \
+      org.proxywar.hotfix.base-public-digest="sha256:e7e107456464afaf88c23b263b50443232f6081d451c3fc605af5f2547a9d02e" \
+      org.proxywar.hotfix.config-sha256="sha256:47b6a44136c621083d937b63682e20f7ee08e5dfa13f931f4c02c73a063dcba3"
