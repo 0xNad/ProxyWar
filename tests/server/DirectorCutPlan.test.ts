@@ -435,4 +435,100 @@ describe("buildDirectorCutPlan", () => {
       );
     });
   });
+
+  describe("a high-density, many-agent match doesn't collapse into one giant segment", () => {
+    const DENSE_ROSTER = Array.from({ length: 12 }, (_, i) => ({
+      agentID: `d${i + 1}`,
+      username: `Agent${i + 1}`,
+      profile: "opportunistic" as const,
+      clientID: `dc${i + 1}`,
+      brainType: "planner-executor" as const,
+    }));
+
+    /**
+     * Reproduces the exact real-world failure found generating a Director
+     * Cut for a 12-agent, 50,400-turn league match: 302 nuke events (one
+     * roughly every 167 turns) meant every candidate window was close
+     * enough to its neighbor to merge, gluing nearly the entire match into
+     * a single ~41,000-turn segment (56+ minutes). This fixture reproduces
+     * that density synthetically: one nuke every ~170 turns among 12
+     * agents, well inside the original `mergeGapTurns` for any match this
+     * size.
+     */
+    function denseNukeRecords(totalTurns: number): AgentDecisionRecord[] {
+      const records: AgentDecisionRecord[] = [];
+      let sequence = 1;
+      for (let turn = 500; turn < totalTurns; turn += 170) {
+        const actor = DENSE_ROSTER[sequence % DENSE_ROSTER.length];
+        const target = DENSE_ROSTER[(sequence + 1) % DENSE_ROSTER.length];
+        records.push(
+          record(sequence, turn, actor.agentID, actor.username, `p-${actor.agentID}`, "nuke", {
+            targetID: `p-${target.agentID}`,
+            targetName: target.username,
+          }),
+        );
+        sequence += 1;
+      }
+      return records;
+    }
+
+    it("stays within the same duration ceiling as a sparse match of the same length, instead of ballooning past it", () => {
+      const totalTurns = 50_400;
+      const denseRecords = denseNukeRecords(totalTurns);
+      const plan = buildDirectorCutPlan({
+        runID: "dc-dense",
+        matchID: "m-dense",
+        records: denseRecords,
+        roster: DENSE_ROSTER,
+        finalState: finalState(
+          totalTurns,
+          DENSE_ROSTER.map((entry) => ({
+            agentID: entry.agentID,
+            username: entry.username,
+            isAlive: true,
+          })),
+        ),
+      });
+      // Same ceiling the existing sparse 50k-turn test already enforces —
+      // a match with MORE drama must never take LONGER to compress than one
+      // with less, that would invert the whole point of a duration budget.
+      expect(plan.estimatedDurationSeconds).toBeLessThanOrEqual(900);
+    });
+
+    it("never merges into one segment spanning most of the match — the exact shape of the bug this regression test exists for", () => {
+      const totalTurns = 50_400;
+      const plan = buildDirectorCutPlan({
+        runID: "dc-dense",
+        matchID: "m-dense",
+        records: denseNukeRecords(totalTurns),
+        roster: DENSE_ROSTER,
+        finalState: finalState(
+          totalTurns,
+          DENSE_ROSTER.map((entry) => ({
+            agentID: entry.agentID,
+            username: entry.username,
+            isAlive: true,
+          })),
+        ),
+      });
+      const nonQuiet = plan.segments.filter(
+        (s) => s.eventReason !== "quiet_interval",
+      );
+      expect(nonQuiet.length).toBeGreaterThan(1);
+      const maxSpan = Math.max(
+        ...nonQuiet.map((s) => s.endTurn - s.startTurn + 1),
+      );
+      // No single NON-QUIET segment may swallow more than a fifth of the
+      // match — the original bug produced one ~41,000-turn non-quiet
+      // segment (82% of this exact totalTurns). A large quiet_interval
+      // span is the opposite of the bug: that's the fast-forward pacing
+      // working correctly, so it's deliberately excluded from this check.
+      expect(maxSpan).toBeLessThan(totalTurns * 0.2);
+      // At least one genuine quiet_interval must survive the fast-forward
+      // pacing — a dense match still has to have SOME breathing room.
+      expect(plan.segments.some((s) => s.eventReason === "quiet_interval")).toBe(
+        true,
+      );
+    });
+  });
 });

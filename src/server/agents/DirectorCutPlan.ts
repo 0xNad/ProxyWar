@@ -128,6 +128,16 @@ export interface DirectorCutPlanInput {
 const IMPORTANCE_FLOOR = 60;
 /** A segment plays at `slow` (the spec's "readable speed" for major events) once its peak importance reaches this — betrayals (100), nukes (95), eliminations (90), and formed alliances (92) all clear it; plain attacks (70) and early expansion (65) stay at `normal`. */
 const MAJOR_IMPORTANCE = 85;
+/**
+ * Fraction of the target runtime reserved for "important" (non-quiet)
+ * segments before `selectWindowsWithinBudget` stops admitting more
+ * candidates. Quiet turns are cheap (up to `MAX_QUIET_TURNS_PER_SECOND`),
+ * so the remaining share still comfortably covers pacing through the rest
+ * of even a 50k-turn match — this exists to bound worst-case duration
+ * (see `selectWindowsWithinBudget`'s own doc for why no importance tier is
+ * exempt from it), not to starve quiet-interval screen time.
+ */
+const IMPORTANT_SECONDS_BUDGET_FRACTION = 0.7;
 
 const OPENING_TURN_FRACTION = 0.03;
 const OPENING_TURN_CAP = 250;
@@ -215,7 +225,8 @@ export function buildDirectorCutPlan(
     leadInTurns,
     openingEnd,
   );
-  const merged = mergeOverlapping(withLeadIn, mergeGapTurns);
+  const budgetedWindows = selectWindowsWithinBudget(withLeadIn, totalTurns);
+  const merged = mergeOverlapping(budgetedWindows, mergeGapTurns);
   const clamped = merged
     .map((segment) => clampToBounds(segment, openingEnd, totalTurns))
     .filter((segment): segment is DirectorCutSegment => segment !== null);
@@ -486,6 +497,69 @@ function mergeOverlapping(
       ]),
     ),
   }));
+}
+
+/**
+ * Bounds worst-case duration on a high-agent-count/high-density match, where
+ * `mergeOverlapping` alone can chain nearly every bucket together (drama is
+ * near-continuous with e.g. 12 concurrent agents, so turn-adjacency stops
+ * meaning "one continuous beat"). Runs BEFORE `mergeOverlapping`, on
+ * individual candidate windows — running it after merge doesn't work: a
+ * single blob spanning most of the match, formed because SOME window
+ * inside it cleared any "always keep" bar, would report that whole blob's
+ * importance as the qualifying peak and keep the entire thing regardless
+ * of budget. Selecting per-window first means a dropped window can no
+ * longer act as connective tissue gluing two distant major windows into
+ * one, AND an outlier match with an extreme count of individually-major
+ * events (e.g. 300+ nukes in one real 12-agent match — verified against
+ * spectator telemetry, not a hypothetical) cannot blow the budget by
+ * count alone: every window, however important, competes for the same
+ * fixed budget.
+ *
+ * No importance tier is unconditionally exempt from the budget — an
+ * "always keep regardless of cost" carve-out re-creates exactly the
+ * runaway-duration bug this function exists to prevent, just gated on a
+ * narrower kind list instead of a wider importance floor (verified: even
+ * restricting to elimination/nuke/betrayal-break alone reproduces a
+ * 40,000+-turn merged blob on the same real match, because THAT specific
+ * match alone has 302 nuke events). Windows are ranked by importance —
+ * betrayals (100), nukes (95), eliminations (90), and formed alliances
+ * (92) naturally sort first — and kept greedily, highest importance
+ * first, until the
+ * important-seconds budget derived from `targetDurationSeconds` is spent.
+ * Whatever doesn't fit becomes `quiet_interval` via `fillQuietGaps` — an
+ * honest downgrade, not a silent omission: Director Cut fast-forwards
+ * through a quiet interval, it never cuts the turns inside one from
+ * playback, so a below-the-cutoff event still passes in front of the
+ * viewer, just without an individual readable-speed dwell.
+ */
+function selectWindowsWithinBudget(
+  windows: readonly LeadInWindow[],
+  totalTurns: number,
+): LeadInWindow[] {
+  const windowSeconds = (window: LeadInWindow): number =>
+    (window.endTurn - window.leadInStart + 1) /
+    (window.peakEvent.importance >= MAJOR_IMPORTANCE
+      ? SLOW_TURNS_PER_SECOND
+      : NORMAL_TURNS_PER_SECOND);
+
+  const ranked = [...windows].sort(
+    (a, b) =>
+      b.peakEvent.importance - a.peakEvent.importance ||
+      a.startTurn - b.startTurn,
+  );
+
+  const importantSecondsBudget =
+    targetDurationSeconds(totalTurns) * IMPORTANT_SECONDS_BUDGET_FRACTION;
+  let cumulativeSeconds = 0;
+  const selected: LeadInWindow[] = [];
+  for (const candidate of ranked) {
+    const cost = windowSeconds(candidate);
+    if (cumulativeSeconds + cost > importantSecondsBudget) continue;
+    selected.push(candidate);
+    cumulativeSeconds += cost;
+  }
+  return selected.sort((a, b) => a.leadInStart - b.leadInStart);
 }
 
 function clampToBounds(
