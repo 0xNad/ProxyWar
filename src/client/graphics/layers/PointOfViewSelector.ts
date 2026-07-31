@@ -19,6 +19,23 @@ type PovSource = "manual" | "claim" | "neutral";
 const WHOLE_BOARD_VALUE = "";
 
 /**
+ * Dispatched by the Stage 4 broadcast composition's competitor rail (either
+ * overlay) with `detail: { playerName: string }` when a viewer clicks a
+ * rail seat. This class is the ONLY listener — see `onFollowPlayerRequest`.
+ */
+export const BROADCAST_RAIL_FOLLOW_EVENT = "broadcast-rail-follow-player";
+
+/**
+ * Dispatched BY this class whenever the followed player changes (from a
+ * rail click, the dropdown, the crosshair button, or the silent initial
+ * claim/manual resolution) with `detail: { playerName: string | null }` —
+ * `null` for "whole board". Both overlays listen for this to keep the
+ * competitor rail's `followed`/`data-followed` state truthful.
+ */
+export const BROADCAST_RAIL_FOLLOWED_CHANGE_EVENT =
+  "broadcast-rail-followed-change";
+
+/**
  * Replay/spectator "follow an agent" picker. Mounted once per game load,
  * only on spectator routes (`isReplaySpectatorView()` — see
  * `GameRenderer.ts`); live play never sees this element.
@@ -64,7 +81,47 @@ export class PointOfViewSelector extends LitElement implements Layer {
   init() {
     this.refreshPlayers();
     void this.applyInitialSelection();
+    document.addEventListener(
+      BROADCAST_RAIL_FOLLOW_EVENT,
+      this.onFollowPlayerRequest,
+    );
   }
+
+  disconnectedCallback(): void {
+    super.disconnectedCallback();
+    document.removeEventListener(
+      BROADCAST_RAIL_FOLLOW_EVENT,
+      this.onFollowPlayerRequest,
+    );
+  }
+
+  /**
+   * Bridge for the Stage 4 broadcast composition's competitor rail (spec
+   * item 6: camera-follow discoverability) — a rail seat click, in either
+   * overlay (`AiLeagueReplayOverlay.ts`, `ReplayPremiereOverlay.ts`), lands
+   * here via a DOM CustomEvent (the SAME cross-overlay bridge pattern
+   * `ai-league-replay-jump-turn` already uses for a different control) and
+   * is treated EXACTLY like a manual dropdown pick: `applyPov(..., {
+   * persist: true, pan: true })` keeps this selector's own dropdown/
+   * crosshair state, the session-persisted manual pick, and the actual
+   * `GoToPlayerEvent`/`PointOfViewChangeEvent` emissions all in perfect
+   * sync with a rail click, rather than a second, parallel follow
+   * mechanism that could drift from this one.
+   */
+  private readonly onFollowPlayerRequest = (event: Event): void => {
+    const detail = (event as CustomEvent<{ playerName?: string }>).detail;
+    if (typeof detail?.playerName !== "string") return;
+    const player =
+      this.game
+        ?.playerViews()
+        .find(
+          (p) =>
+            p.displayName() === detail.playerName ||
+            p.name() === detail.playerName,
+        ) ?? null;
+    if (player === null) return;
+    this.applyPov(player, "manual", { persist: true, pan: true });
+  };
 
   getTickIntervalMs() {
     return 2000;
@@ -145,6 +202,16 @@ export class PointOfViewSelector extends LitElement implements Layer {
       writeManualPovSelection(player?.displayName() ?? null);
     }
     this.eventBus?.emit(new PointOfViewChangeEvent(player));
+    // Rail visual sync (spec item 6 polish): both overlays listen for this
+    // to highlight whichever rail seat is currently followed, keeping the
+    // rail's `data-followed` state truthful regardless of whether the PoV
+    // changed via a rail click, the dropdown, or the initial claim/manual
+    // resolution above.
+    document.dispatchEvent(
+      new CustomEvent(BROADCAST_RAIL_FOLLOWED_CHANGE_EVENT, {
+        detail: { playerName: player?.displayName() ?? null },
+      }),
+    );
     if (opts.pan && player) {
       this.eventBus?.emit(new GoToPlayerEvent(player));
     }

@@ -29,6 +29,15 @@ import { Layer } from "./Layer";
 // viewer is following.
 const POV_DIMMED_FILL_ALPHA = 60;
 const POV_DIMMED_BORDER_ALPHA = 130;
+// Diplomacy emphasis (product overhaul spec Stage 4 item 6): the followed
+// player's CURRENT allies/war targets get a LESS aggressive dim than
+// everyone else — "related but not the focus", legible as distinct from
+// both the followed player (full strength) and genuinely unrelated nations
+// (the base dimmed alpha above). Still opt-in-only: this tier only ever
+// applies once a PoV is already set by a direct viewer click (see
+// `PointOfViewSelector`'s own doc) — never on its own, never automatic.
+const POV_RELATED_FILL_ALPHA = 105;
+const POV_RELATED_BORDER_ALPHA = 190;
 
 export class TerritoryLayer implements Layer {
   private canvas: HTMLCanvasElement;
@@ -70,6 +79,12 @@ export class TerritoryLayer implements Layer {
   // followed agent's holdings read at full strength, without moving the
   // camera or changing anyone's actual color.
   private povPlayer: PlayerView | null = null;
+  // Diplomacy emphasis: `povPlayer`'s current ally/target smallIDs, recomputed
+  // every `tick()` while a PoV is set (cheap — `allies()`/`targets()` are
+  // small arrays) so it stays current as alliances form/break and new war
+  // targets appear, without a per-tile relationship recomputation cost (see
+  // `recomputeRelatedToPov`/`paintTerritory`).
+  private relatedToPovIds: ReadonlySet<number> | null = null;
 
   constructor(
     private game: GameView,
@@ -94,6 +109,15 @@ export class TerritoryLayer implements Layer {
   tick() {
     if (this.game.inSpawnPhase()) {
       this.spawnHighlight();
+    }
+    // Diplomacy emphasis: cheap (small arrays) every tick a PoV is set;
+    // a no-op allocation-free check otherwise. A changed relationship set
+    // (new alliance, new war target, a broken alliance) needs a full
+    // repaint — unlike an ownership change, nothing else already triggers
+    // one for tiles that didn't change hands but DID change relationship
+    // to the followed player.
+    if (this.povPlayer !== null && this.recomputeRelatedToPov()) {
+      this.game.forEachTile((t) => this.paintTerritory(t));
     }
 
     this.game.recentlyUpdatedTiles().forEach((t) => {
@@ -352,6 +376,7 @@ export class TerritoryLayer implements Layer {
       return;
     }
     this.povPlayer = event.player;
+    this.recomputeRelatedToPov();
     // Every owned tile's alpha depends on `povPlayer` now (see
     // `paintTerritory`), so a change here has to repaint everything, not
     // just future updates — mirrors `redraw()`'s own full-map pass, just
@@ -360,6 +385,30 @@ export class TerritoryLayer implements Layer {
     this.game.forEachTile((t) => this.paintTerritory(t));
   }
 
+  /**
+   * Recomputes `relatedToPovIds` from `povPlayer`'s CURRENT allies/targets.
+   * Returns whether the set actually changed (callers use this to decide
+   * whether a full repaint is warranted) — `null` -> non-null, a changed
+   * membership, or non-null -> `null` (PoV cleared) all count as a change;
+   * an unchanged set (the common per-tick case) returns `false` cheaply.
+   */
+  private recomputeRelatedToPov(): boolean {
+    if (this.povPlayer === null) {
+      if (this.relatedToPovIds === null) return false;
+      this.relatedToPovIds = null;
+      return true;
+    }
+    const next = new Set<number>();
+    for (const ally of this.povPlayer.allies()) next.add(ally.smallID());
+    for (const target of this.povPlayer.targets()) next.add(target.smallID());
+    const previous = this.relatedToPovIds;
+    const changed =
+      previous === null ||
+      next.size !== previous.size ||
+      [...next].some((id) => !previous.has(id));
+    this.relatedToPovIds = next;
+    return changed;
+  }
 
   onMouseOver(event: MouseOverEvent) {
     this.lastMousePosition = { x: event.x, y: event.y };
@@ -594,6 +643,14 @@ export class TerritoryLayer implements Layer {
     // layer already paints with. `null` when no PoV is set (the default,
     // and every non-spectator route) leaves every tile exactly as before.
     const isDimmedByPov = this.povPlayer !== null && owner !== this.povPlayer;
+    // Diplomacy emphasis (spec item 6): among the dimmed nations, the
+    // followed player's CURRENT allies/war targets get the lighter
+    // "related" dim instead of the base one — visually distinct from both
+    // the followed player (full strength) and genuinely unrelated nations.
+    const isRelatedToPov =
+      isDimmedByPov &&
+      this.relatedToPovIds !== null &&
+      this.relatedToPovIds.has(owner.smallID());
 
     if (this.game.isBorder(tile)) {
       // eslint-disable-next-line @typescript-eslint/no-unused-vars
@@ -613,7 +670,11 @@ export class TerritoryLayer implements Layer {
         this.imageData,
         tile,
         owner.borderColor(tile, isDefended),
-        isDimmedByPov ? POV_DIMMED_BORDER_ALPHA : 255,
+        isDimmedByPov
+          ? isRelatedToPov
+            ? POV_RELATED_BORDER_ALPHA
+            : POV_DIMMED_BORDER_ALPHA
+          : 255,
       );
     } else {
       // Alternative view only shows borders.
@@ -623,7 +684,11 @@ export class TerritoryLayer implements Layer {
         this.imageData,
         tile,
         owner.territoryColor(tile),
-        isDimmedByPov ? POV_DIMMED_FILL_ALPHA : 150,
+        isDimmedByPov
+          ? isRelatedToPov
+            ? POV_RELATED_FILL_ALPHA
+            : POV_DIMMED_FILL_ALPHA
+          : 150,
       );
     }
   }
