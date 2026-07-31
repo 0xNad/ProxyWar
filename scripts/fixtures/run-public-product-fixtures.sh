@@ -142,11 +142,10 @@ npx tsx src/scripts/replay-premiere-controlled-exhibition.ts \
   --served-root="$HERE/static" \
   --served-root="$ARTIFACTS_ROOT" \
   --brain=rule \
-  --disable-alliance-actions \
-  --max-steps=6 \
-  --turns-per-decision-step=50 \
-  --replay-tail-turns=300 \
-  --playback-turn-interval-ms=200 > /tmp/pw-fixture-premiere.log 2>&1
+  --max-steps=40 \
+  --turns-per-decision-step=200 \
+  --replay-tail-turns=2000 \
+  --playback-turn-interval-ms=25 > /tmp/pw-fixture-premiere.log 2>&1
 BUNDLE="$ADMIT_STAGING/fixture-premiere-live.source.json"
 SHA="$(shasum -a 256 "$BUNDLE" | awk '{print $1}')"
 
