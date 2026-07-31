@@ -1,3 +1,9 @@
+// Same stylesheet Main.ts uses — Tailwind + the shared `--pw-*`/`--color-*`
+// design tokens every public page's utility classes (bg-accent, text-ink,
+// bg-surface, ...) depend on. Vite only emits a CSS file for an entry that
+// actually imports one; without this, `public.html` gets no
+// `<link rel="stylesheet">` at all and every page renders unstyled.
+import "./styles.css";
 import "./LangSelector";
 import "./publicapp/AboutPage";
 import "./publicapp/AgentProfilePage";
