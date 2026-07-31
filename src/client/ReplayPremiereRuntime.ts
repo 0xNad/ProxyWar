@@ -3094,18 +3094,34 @@ export class ReplayPremiereRuntimeController {
     for (const player of frame.players) {
       nameBySmallId.set(player.smallID, player.displayName);
     }
+    // Keyed by `clientID` (the admission bundle's seat identity), NOT
+    // `playerID` (the core engine's own randomly-generated per-game id,
+    // which never correlates to a policy's `seatId` — see the field doc on
+    // `ReplayPremiereFramePlayer.clientID`).
     const framePlayerBySeatId = new Map(
-      frame.players.map((player) => [player.playerID, player] as const),
+      frame.players
+        .filter(
+          (player): player is typeof player & { clientID: string } =>
+            player.clientID !== null,
+        )
+        .map((player) => [player.clientID, player] as const),
     );
+    // Rank position is computed over the FULL field (any non-seat
+    // players, e.g. tribes/nations, still count toward a seat's true
+    // rank) but the lookup key is `clientID` (same rationale as
+    // `framePlayerBySeatId` above) — `player.playerID` never matches a
+    // policy's `seatId`.
     const rankedBySmallestShareFirst = [...frame.players].sort(
       (left, right) =>
         right.tilesOwned - left.tilesOwned ||
         left.displayName.localeCompare(right.displayName),
     );
     const rankBySeatId = new Map(
-      rankedBySmallestShareFirst.map(
-        (player, index) => [player.playerID, index + 1] as const,
-      ),
+      rankedBySmallestShareFirst
+        .map((player, index) => [player.clientID, index + 1] as const)
+        .filter(
+          (entry): entry is readonly [string, number] => entry[0] !== null,
+        ),
     );
     return policies.map((policy): ReplayPremiereRailSeatView => {
       const framePlayer = framePlayerBySeatId.get(policy.seatId);
@@ -5133,6 +5149,15 @@ export class ReplayPremiereRuntimeController {
 
 interface ReplayPremiereFramePlayer {
   playerID: string;
+  /**
+   * The admission bundle's seat identity (`ReplayPremierePolicyView.seatId`
+   * derives from this same source-side value, not `playerID` — the core
+   * engine assigns `playerID` a fresh random id per game
+   * (`PlayerInfo.id = random.nextID()`), so `playerID` can never be
+   * correlated back to a policy seat). `null` only for a tribe/nation
+   * (never a real competitor seat).
+   */
+  clientID: string | null;
   displayName: string;
   tilesOwned: number;
   smallID: number;
@@ -5620,9 +5645,12 @@ function parseReplayPremiereFrame(value: unknown): ReplayPremiereFrame | null {
     if (!isRecord(player)) return null;
     const allies = player.allies;
     const targets = player.targets;
+    const clientID = player.clientID;
     if (
       typeof player.playerID !== "string" ||
       !OPAQUE_ID_PATTERN.test(player.playerID) ||
+      (clientID !== null &&
+        (typeof clientID !== "string" || !OPAQUE_ID_PATTERN.test(clientID))) ||
       typeof player.displayName !== "string" ||
       player.displayName.length === 0 ||
       player.displayName.length > 256 ||
@@ -5637,6 +5665,7 @@ function parseReplayPremiereFrame(value: unknown): ReplayPremiereFrame | null {
     }
     parsedPlayers.push({
       playerID: player.playerID,
+      clientID: clientID ?? null,
       displayName: player.displayName,
       tilesOwned: Number(player.tilesOwned),
       smallID: Number(player.smallID),

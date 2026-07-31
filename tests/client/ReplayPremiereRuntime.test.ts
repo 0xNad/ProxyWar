@@ -3074,6 +3074,91 @@ describe("ReplayPremiereRuntimeController", () => {
   });
 });
 
+describe("ReplayPremiereRuntimeController — competitor rail seat identity", () => {
+  it("resolves competitor rail stats (territory, rank, alive, allies/wars) by clientID, NOT playerID — the core engine assigns playerID a fresh random id per game that never equals a policy's seatId", async () => {
+    const harness = runtimeHarness({ state: "playing" });
+    const record = {
+      sequence: 0,
+      presentationOffsetMs: 0,
+      turn: { turnNumber: 0, intents: [] },
+    };
+    harness.runtime.playback.appendVerifiedBatch({
+      premiereId: PREMIERE_ID,
+      chunkIndex: 0,
+      chunkHash: HASH_A,
+      previousChunkHash: null,
+      payloadHash: HASH_B,
+      startSequence: 0,
+      endSequence: 0,
+      verification: { payloadHashVerified: true, chunkHashVerified: true },
+      records: [record],
+    });
+    harness.runtime.playback.acknowledgeDispatchedRecord(record);
+    const started = harness.runtime.start();
+    await harness.callbacks.onReady?.(projection("playing"));
+    await started;
+    document.dispatchEvent(
+      new CustomEvent("ai-league-replay-frame", {
+        detail: {
+          sequence: 0,
+          turnNumber: 50,
+          players: [
+            {
+              // The core engine's own randomly-assigned per-game PlayerID
+              // (`PlayerInfo.id = random.nextID()`) — deliberately NOT
+              // equal to either policy's seatId, mirroring real production
+              // data where `id` and `clientID` are two fully independent
+              // fields (see `Game.ts`'s `PlayerInfo` constructor).
+              playerID: "rnd_9f31acbe02",
+              clientID: "seat_a",
+              displayName: "Alpha",
+              tilesOwned: 300,
+              smallID: 1,
+              allies: [],
+              targets: [2],
+            },
+            {
+              playerID: "rnd_44b710de9a",
+              clientID: "seat_b",
+              displayName: "Beta",
+              tilesOwned: 100,
+              smallID: 2,
+              allies: [],
+              targets: [],
+            },
+          ],
+        },
+      }),
+    );
+    const model = harness.models.at(-1);
+    const seatA = model?.competitorRailSeats.find(
+      (seat) => seat.seatId === "seat_a",
+    );
+    const seatB = model?.competitorRailSeats.find(
+      (seat) => seat.seatId === "seat_b",
+    );
+    // Before the fix, these NEVER resolved (framePlayer was always
+    // `undefined` since the lookup was keyed by the frame's `playerID`,
+    // which is never present as any policy's `seatId`) — every field
+    // stayed at its "unresolved" default (null/[]/alive: null) forever,
+    // for the ENTIRE match, regardless of how much real frame data
+    // arrived.
+    expect(seatA).toMatchObject({
+      territoryPercent: 75,
+      inMatchRank: 1,
+      alive: true,
+      wars: ["Beta"],
+      allies: [],
+    });
+    expect(seatB).toMatchObject({
+      territoryPercent: 25,
+      inMatchRank: 2,
+      alive: true,
+    });
+    harness.runtime.dispose();
+  });
+});
+
 describe("ReplayPremiereServiceClient", () => {
   it("ignores ordered stale aggregates but rejects inconsistent/incomparable evidence and capability drift", async () => {
     const inconsistent = sessionResponse("playing");
