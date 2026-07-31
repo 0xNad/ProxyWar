@@ -2520,6 +2520,7 @@ function publicAgentFixture(overrides: {
       ratingPolicyLabel: null,
       activeChampionPolicyLabel: null,
     },
+    stats: null,
   };
 }
 

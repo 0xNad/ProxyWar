@@ -1689,6 +1689,28 @@
     "outcome_eliminated": "Eliminated",
     "watch_link": "Watch →"
   },
+  "agent_stats": {
+    "fingerprint_heading": "Strategic Fingerprint",
+    "social_heading": "Social Record",
+    "fingerprint_below_threshold": "Not enough retained match data yet to show a strategic fingerprint.",
+    "social_below_threshold": "Not enough retained match data yet to show a social record.",
+    "sample_size": "{count, plural, one {# sample} other {# samples}}",
+    "turns_unit": "turns",
+    "aggression": "Aggression",
+    "diplomacy_initiated": "Diplomacy initiated",
+    "economic_focus": "Economic focus",
+    "territory_share": "Territory share",
+    "territory_tiles": "Territory (tiles)",
+    "territory_absolute_note": "The real map denominator wasn't resolvable for any retained episode, so this shows absolute tiles and rank instead of a share percentage.",
+    "mean_rank": "avg rank #{rank}",
+    "army_strength": "Relative army strength",
+    "alliances_initiated": "Alliances initiated",
+    "alliance_acceptance_rate": "Alliance acceptance rate",
+    "betrayal_count": "Betrayals",
+    "treaty_duration": "Avg. treaty duration",
+    "frequent_allies": "Frequent allies",
+    "primary_adversaries": "Primary adversaries"
+  },
   "builders_directory": {
     "status_verified": "Verified",
     "status_house": "House",

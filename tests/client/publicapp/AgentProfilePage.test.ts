@@ -40,6 +40,7 @@ function minimalAgent(overrides: {
   roundsPlayed?: number | null;
   activeVersionLabel?: string | null;
   tagline?: string | null;
+  stats?: unknown;
 }) {
   return {
     registered: true,
@@ -74,6 +75,7 @@ function minimalAgent(overrides: {
             familyMismatch: false,
           },
     provenance: { ratingPolicyLabel: null, activeChampionPolicyLabel: null },
+    stats: overrides.stats ?? null,
   };
 }
 
@@ -207,6 +209,80 @@ describe("agent-profile-page", () => {
     expect(el.textContent).toContain("#3");
     expect(el.textContent).toContain("1234.50");
     expect(el.textContent).toContain("v24");
+  });
+
+  it("renders the strategic fingerprint from a real stats payload, hiding metrics below their own threshold", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () =>
+        Response.json(
+          readModelBody([
+            minimalAgent({
+              slug: "daveey",
+              playerName: "daveey",
+              displayName: "daveey",
+              shortCode: "DAV",
+              status: "verified",
+              builderDisplayName: null,
+              rank: 1,
+              stats: {
+                career: {
+                  episodeCount: 118,
+                  fingerprint: {
+                    aggression: {
+                      value: 0.311,
+                      sampleSize: 11089,
+                      threshold: 50,
+                      methodology: "attack_count / total_event_count",
+                    },
+                    diplomacyInitiated: null,
+                    economicFocus: null,
+                    territory: {
+                      share: {
+                        value: 0.293,
+                        sampleSize: 118,
+                        threshold: 1,
+                        methodology: "real map tiles",
+                      },
+                      absoluteTiles: null,
+                      meanRank: null,
+                    },
+                    armyStrength: null,
+                  },
+                  social: {
+                    alliancesInitiated: {
+                      value: 90,
+                      sampleSize: 90,
+                      threshold: 1,
+                      methodology: "count",
+                    },
+                    allianceAcceptanceRate: null,
+                    betrayalCount: null,
+                    frequentAllies: [{ name: "Ron SWGY", count: 20 }],
+                    primaryAdversaries: [],
+                    treatyDuration: null,
+                  },
+                },
+                currentVersion: null,
+              },
+            }),
+          ]),
+        ),
+      ),
+    );
+    const el = mount("daveey");
+    await flushMicrotasks();
+
+    expect(el.textContent).toContain("agent_stats.fingerprint_heading");
+    expect(el.textContent).toContain("31%");
+    expect(el.textContent).toContain("29%");
+    expect(el.textContent).toContain("Ron SWGY");
+    // Below-threshold metrics never render, on the real page, not just the
+    // isolated render function.
+    expect(el.textContent).not.toContain("agent_stats.diplomacy_initiated");
+    expect(el.textContent).not.toContain(
+      "agent_stats.alliance_acceptance_rate",
+    );
   });
 
   it("renders 'Unclaimed' for a registered non-house agent with no builder claim, and skips the builder line for a house agent", async () => {

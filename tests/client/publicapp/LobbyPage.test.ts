@@ -40,6 +40,7 @@ function agent(overrides: Partial<PublicAgent>): PublicAgent {
     standing: null,
     activeVersion: null,
     provenance: { ratingPolicyLabel: null, activeChampionPolicyLabel: null },
+    stats: null,
     ...overrides,
   };
 }

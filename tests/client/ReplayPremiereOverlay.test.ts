@@ -1681,6 +1681,7 @@ describe("broadcast composition regions (Stage 4 item 1)", () => {
               ratingPolicyLabel: null,
               activeChampionPolicyLabel: null,
             },
+            stats: null,
           },
         ],
         versions: [],

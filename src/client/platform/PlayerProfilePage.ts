@@ -1,6 +1,8 @@
 import { html, LitElement, nothing } from "lit";
 import { customElement, property, state } from "lit/decorators.js";
 import { z } from "zod";
+import { PublicAgentStatsSchema } from "../AgentStatsSchema";
+import { renderAgentStatsSections } from "../AgentStatsSections";
 
 const standingSchema = z.object({
   rank: z.number(),
@@ -31,6 +33,13 @@ const leagueSectionSchema = z.object({
   policyLineageNote: z.string().nullable(),
   episodes: z.array(episodeSchema),
   recentRecord: z.object({ wins: z.number(), played: z.number() }).nullable(),
+  /**
+   * Product overhaul spec Stage 6: the SAME `PublicAgentStatsSchema`
+   * `/agent/:slug` validates against — "one computation source, two
+   * views" holds at the schema level too, not just the server's shared
+   * artifact.
+   */
+  stats: PublicAgentStatsSchema.nullable(),
 });
 
 const profileResponseSchema = z.object({
@@ -252,6 +261,7 @@ export class PlayerProfilePage extends LitElement {
               ${league.policyLineageNote}
             </p>`
           : nothing}
+        ${renderAgentStatsSections(league.stats)}
         ${this.renderRecentResults(league)}
       </section>
     `;

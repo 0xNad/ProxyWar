@@ -125,6 +125,28 @@ import "./styles/layout/container.css";
 import "./styles/layout/header.css";
 import "./styles/modal/chat.css";
 
+/**
+ * `translateText()` (`Utils.ts`) requires a connected `<lang-selector>`
+ * element to resolve keys. In the running game shell that element lives
+ * inside `Footer.ts`, nested under the header/nav chrome — but the
+ * standalone data pages this module mounts via `document.body.
+ * replaceChildren(...)` (`openAccountPage`, `openPlayerProfilePage`,
+ * `openTraderProfilePage`) wipe that body-nested element out, silently
+ * breaking every `translateText()` call on those pages (same failure
+ * mode `PublicApp.ts` already solved for the public app entry point).
+ * Call this before any such replace so a `<lang-selector>` always
+ * survives in `<head>`, which body swaps never touch.
+ */
+function ensureHeadLangSelector(): void {
+  // Checked against `document.head` specifically, never `document`: a
+  // body-nested `<lang-selector>` from `Footer.ts` may still be present
+  // at this exact call site, an instant before the `replaceChildren`
+  // call right after this one destroys it. Only a head-nested element
+  // survives that, so only a head-nested element satisfies the guard.
+  if (document.head.querySelector("lang-selector")) return;
+  document.head.appendChild(document.createElement("lang-selector"));
+}
+
 function updateAccountNavButton(userMeResponse: UserMeResponse | false) {
   const button = document.getElementById("nav-account-button");
   if (!button) return;
@@ -939,6 +961,7 @@ class Client {
    * element is registered by the static `AccountPage` import above.
    */
   private async openAccountPage(): Promise<void> {
+    ensureHeadLangSelector();
     document.body.replaceChildren(
       document.createElement("premiere-account-page"),
     );
@@ -952,6 +975,7 @@ class Client {
    * is registered by the static `PlayerProfilePage` import above.
    */
   private async openPlayerProfilePage(name: string): Promise<void> {
+    ensureHeadLangSelector();
     const page = document.createElement("player-profile-page");
     page.setAttribute("name", name);
     document.body.replaceChildren(page);
@@ -965,6 +989,7 @@ class Client {
    * registered by the static `TraderProfilePage` import above.
    */
   private async openTraderProfilePage(accountId: string): Promise<void> {
+    ensureHeadLangSelector();
     const page = document.createElement("trader-profile-page");
     page.setAttribute("account-id", accountId);
     document.body.replaceChildren(page);

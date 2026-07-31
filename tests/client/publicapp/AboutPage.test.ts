@@ -49,6 +49,7 @@ function minimalAgent(playerName: string) {
     standing: null,
     activeVersion: null,
     provenance: { ratingPolicyLabel: null, activeChampionPolicyLabel: null },
+    stats: null,
   };
 }
 

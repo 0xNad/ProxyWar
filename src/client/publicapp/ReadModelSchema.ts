@@ -1,4 +1,12 @@
 import { z } from "zod";
+import { PublicAgentStatsSchema } from "../AgentStatsSchema";
+export {
+  type AgentMetric,
+  type AgentStatsSlice,
+  type NamedCount,
+  type PublicAgentStats,
+  PublicAgentStatsSchema,
+} from "../AgentStatsSchema";
 
 /**
  * Client-side Zod validation for `GET /ai-league-runs/league/read-model.json`
@@ -45,6 +53,7 @@ export const PublicAgentSchema = z.object({
     ratingPolicyLabel: z.string().nullable(),
     activeChampionPolicyLabel: z.string().nullable(),
   }),
+  stats: PublicAgentStatsSchema.nullable(),
 });
 export type PublicAgent = z.infer<typeof PublicAgentSchema>;
 

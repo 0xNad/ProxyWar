@@ -60,6 +60,7 @@ function minimalAgent(overrides: {
           },
     activeVersion: null,
     provenance: { ratingPolicyLabel: null, activeChampionPolicyLabel: null },
+    stats: null,
   };
 }
 

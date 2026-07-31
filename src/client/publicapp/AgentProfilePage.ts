@@ -1,6 +1,7 @@
 import { html, LitElement, nothing } from "lit";
 import { customElement, property, state } from "lit/decorators.js";
 import { unsafeSVG } from "lit/directives/unsafe-svg.js";
+import { renderAgentStatsSections } from "../AgentStatsSections";
 import { translateText } from "../Utils";
 import {
   APP_SHELL_ROOT_CLASSES,
@@ -179,6 +180,7 @@ export class AgentProfilePage extends LitElement {
       ${agent.activeVersion !== null
         ? this.renderActiveVersion(agent.activeVersion)
         : nothing}
+      ${renderAgentStatsSections(agent.stats)}
       ${this.renderRecentMatches(agent, matches)}
     `;
   }
