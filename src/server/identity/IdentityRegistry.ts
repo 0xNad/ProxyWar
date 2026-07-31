@@ -16,12 +16,24 @@ import {
  * the repo's other tracked reference data (`countries.json`, `flags/`) —
  * the closest existing precedent for "small, curated, per-entity JSON the
  * server reads at runtime and an operator hand-edits occasionally".
+ *
+ * `PROXYWAR_IDENTITY_REGISTRY_DIR` overrides the directory — used ONLY by
+ * the Stage 8 fixture command (`proxywar-public-product-fixtures.ts`) to
+ * point a fixture-booted server at synthetic Builders/Agents/Versions
+ * without ever touching the tracked registry files. Unset in every real
+ * deployment env file (`deploy/*.env*`), so production always reads the
+ * real, tracked directory — this default IS the "never render fixture
+ * identities in production" guard (see `IdentityRegistryFixtureGuard.
+ * test.ts`, which asserts no deploy env file sets this var).
  */
-export const defaultIdentityRegistryDir = path.join(
-  process.cwd(),
-  "resources",
-  "identity",
-);
+export const IDENTITY_REGISTRY_DIR_ENV =
+  "PROXYWAR_IDENTITY_REGISTRY_DIR" as const;
+
+export const defaultIdentityRegistryDir =
+  process.env[IDENTITY_REGISTRY_DIR_ENV] !== undefined &&
+  process.env[IDENTITY_REGISTRY_DIR_ENV] !== ""
+    ? path.resolve(process.env[IDENTITY_REGISTRY_DIR_ENV])
+    : path.join(process.cwd(), "resources", "identity");
 
 export const defaultBuilderRegistryPath = (dir = defaultIdentityRegistryDir) =>
   path.join(dir, "builders.json");
