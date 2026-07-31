@@ -16,7 +16,7 @@ import {
   ReadModel,
   type PublicFeaturedMatch,
 } from "./ReadModelSchema";
-import { formatDuration } from "./WatchPage";
+import { computeDegradedShare, formatDuration } from "./WatchPage";
 import {
   armReminder,
   downloadIcsFile,
@@ -310,7 +310,7 @@ export class MatchDetailPage extends LitElement {
     readModel: ReadModel,
   ): TemplateResult {
     if (match.result !== null) {
-      return this.renderPostMatch(match, match.result, participants, readModel.agents);
+      return this.renderPostMatch(match, match.result, participants, readModel);
     }
     if (match.state === "revealed" || match.state === "archived") {
       return this.renderResultPending(match, participants);
@@ -351,8 +351,9 @@ export class MatchDetailPage extends LitElement {
     match: PublicFeaturedMatch,
     result: NonNullable<PublicFeaturedMatch["result"]>,
     participants: readonly FeaturedMatchParticipantCard[],
-    agents: readonly PublicAgent[],
+    readModel: ReadModel,
   ): TemplateResult {
+    const agents = readModel.agents;
     const winner = resolvePlacementAgent(result.winnerAgentId, agents);
     const placements = [...result.placements].sort(
       (a, b) => a.placement - b.placement,
@@ -445,6 +446,83 @@ export class MatchDetailPage extends LitElement {
         </h2>
         ${this.renderParticipantCards(participants)}
       </section>
+      ${this.renderMatchAnalysis(match, readModel)}
+    `;
+  }
+
+  /**
+   * Match-level Analysis disclosure (spec Stage 6 item 5): the deeper
+   * event-composition cut this `FeaturedMatch` record itself never
+   * carries (`PublicFeaturedMatchSchema` has no turnCount/decisionCount/
+   * degradedCount — those live on the archive's `PublicMatch`, a
+   * different record this page hasn't otherwise needed). Cross-
+   * references `readModel.matches` by `matchId`: the underlying archive
+   * row exists once the episode has synced into the mirror, which for a
+   * REVEALED featured match is normally true but not guaranteed the
+   * instant reveal lands — absent entirely (never a fabricated 0) when
+   * it hasn't yet. Reuses `computeDegradedShare` from `WatchPage.ts`
+   * (the SAME >= 15% elevated definition the archive cards and their
+   * filters already use), never a second definition of "degraded" for
+   * this page.
+   */
+  private renderMatchAnalysis(
+    match: PublicFeaturedMatch,
+    readModel: ReadModel,
+  ): TemplateResult | typeof nothing {
+    const archiveMatch = readModel.matches.find(
+      (candidate) => candidate.matchId === match.matchId,
+    );
+    if (archiveMatch === undefined) return nothing;
+    const rows: (TemplateResult | typeof nothing)[] = [];
+    if (archiveMatch.turnCount !== null) {
+      rows.push(html`
+        <div class="agent-analysis-row">
+          <dt>${translateText("match_detail.analysis_turn_count")}</dt>
+          <dd>${archiveMatch.turnCount.toLocaleString()}</dd>
+        </div>
+      `);
+    }
+    if (archiveMatch.decisionCount !== null) {
+      rows.push(html`
+        <div class="agent-analysis-row">
+          <dt>${translateText("match_detail.analysis_decision_count")}</dt>
+          <dd>${archiveMatch.decisionCount.toLocaleString()}</dd>
+        </div>
+      `);
+    }
+    if (archiveMatch.degradedCount !== null) {
+      const { share, elevated } = computeDegradedShare(
+        archiveMatch.degradedCount,
+        archiveMatch.decisionCount,
+      );
+      rows.push(html`
+        <div class="agent-analysis-row">
+          <dt>${translateText("match_detail.analysis_degraded_count")}</dt>
+          <dd>
+            ${archiveMatch.degradedCount.toLocaleString()}
+            ${share !== null
+              ? html`<span class="agent-analysis-detail"
+                  >${elevated ? "⚠ " : ""}${share}%</span
+                >`
+              : nothing}
+          </dd>
+        </div>
+      `);
+    }
+    return html`
+      <details class="agent-stats-section agent-analysis-tab mt-6">
+        <summary>${translateText("match_detail.analysis_heading")}</summary>
+        <p class="agent-analysis-updated">
+          ${translateText("match_detail.analysis_last_updated", {
+            date: new Date(readModel.generatedAt).toLocaleString(),
+          })}
+        </p>
+        ${rows.length > 0
+          ? html`<dl class="agent-analysis-grid">${rows}</dl>`
+          : html`<p class="agent-analysis-empty">
+              ${translateText("match_detail.analysis_no_composition")}
+            </p>`}
+      </details>
     `;
   }
 

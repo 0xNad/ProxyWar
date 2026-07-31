@@ -2,7 +2,7 @@ import { html, LitElement, nothing } from "lit";
 import { customElement, property, state } from "lit/decorators.js";
 import { z } from "zod";
 import { PublicAgentStatsSchema } from "../AgentStatsSchema";
-import { renderAgentStatsSections } from "../AgentStatsSections";
+import { renderAgentStatsSections, renderAnalysisTab } from "../AgentStatsSections";
 
 const standingSchema = z.object({
   rank: z.number(),
@@ -262,6 +262,7 @@ export class PlayerProfilePage extends LitElement {
             </p>`
           : nothing}
         ${renderAgentStatsSections(league.stats)}
+        ${renderAnalysisTab(league.stats, league.generatedAt)}
         ${this.renderRecentResults(league)}
       </section>
     `;

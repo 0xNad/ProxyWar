@@ -1,6 +1,6 @@
 import { render } from "lit";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { renderAgentStatsSections } from "../../src/client/AgentStatsSections";
+import { renderAgentStatsSections, renderAnalysisTab } from "../../src/client/AgentStatsSections";
 import type {
   AgentMetric,
   AgentStatsSlice,
@@ -213,5 +213,190 @@ describe("renderAgentStatsSections", () => {
     // currentVersion value (0.99 -> 99%).
     expect(container.textContent).toContain("10%");
     expect(container.textContent).not.toContain("99%");
+  });
+});
+
+describe("renderAnalysisTab", () => {
+  it("renders nothing when stats is null or has zero career episodes", () => {
+    const container = mountedContainer();
+    render(renderAnalysisTab(null, null), container);
+    expect(container.textContent).toBe("");
+
+    const emptyContainer = mountedContainer();
+    render(
+      renderAnalysisTab(
+        { career: emptySlice({ episodeCount: 0 }), currentVersion: null },
+        null,
+      ),
+      emptyContainer,
+    );
+    expect(emptyContainer.textContent).toBe("");
+  });
+
+  it("shows the Career period with sample size, threshold, and full methodology text visible (never just a hover tooltip)", () => {
+    const container = mountedContainer();
+    render(
+      renderAnalysisTab(
+        {
+          career: emptySlice({
+            episodeCount: 40,
+            fingerprint: {
+              aggression: metric({
+                value: 0.31,
+                sampleSize: 5000,
+                threshold: 50,
+                methodology: "attack_count / total_event_count",
+              }),
+              diplomacyInitiated: null,
+              economicFocus: null,
+              territory: { share: null, absoluteTiles: null, meanRank: null },
+              armyStrength: null,
+              reliability: null,
+            },
+          }),
+          currentVersion: null,
+        },
+        null,
+      ),
+      container,
+    );
+    expect(container.textContent).toContain("agent_stats.analysis_heading");
+    expect(container.textContent).toContain(
+      "agent_stats.analysis_career_heading",
+    );
+    expect(container.textContent).toContain("31%");
+    expect(container.textContent).toContain(
+      'agent_stats.analysis_sample_size:{"count":5000}',
+    );
+    expect(container.textContent).toContain(
+      'agent_stats.analysis_threshold:{"count":50}',
+    );
+    // Methodology is VISIBLE text here, unlike the terse summary view
+    // where it's only a hover `title` attribute.
+    expect(container.textContent).toContain(
+      "attack_count / total_event_count",
+    );
+  });
+
+  it("shows a labeled Current Version period when the pipeline produced one, alongside Career", () => {
+    const container = mountedContainer();
+    render(
+      renderAnalysisTab(
+        {
+          career: emptySlice({
+            episodeCount: 40,
+            fingerprint: {
+              aggression: metric({ value: 0.1 }),
+              diplomacyInitiated: null,
+              economicFocus: null,
+              territory: { share: null, absoluteTiles: null, meanRank: null },
+              armyStrength: null,
+              reliability: null,
+            },
+          }),
+          currentVersion: {
+            ...emptySlice({
+              episodeCount: 5,
+              fingerprint: {
+                aggression: metric({ value: 0.9 }),
+                diplomacyInitiated: null,
+                economicFocus: null,
+                territory: { share: null, absoluteTiles: null, meanRank: null },
+                armyStrength: null,
+                reliability: null,
+              },
+            }),
+            versionLabel: "v24",
+          },
+        },
+        null,
+      ),
+      container,
+    );
+    expect(container.textContent).toContain(
+      'agent_stats.analysis_version_heading:{"version":"v24"}',
+    );
+    // Both career (10%) and current-version (90%) values visible together.
+    expect(container.textContent).toContain("10%");
+    expect(container.textContent).toContain("90%");
+    expect(container.textContent).not.toContain(
+      "agent_stats.analysis_no_version_split",
+    );
+  });
+
+  it("shows an honest 'no version split yet' note when currentVersion is null, never an empty heading", () => {
+    const container = mountedContainer();
+    render(
+      renderAnalysisTab(
+        {
+          career: emptySlice({
+            episodeCount: 40,
+            fingerprint: {
+              aggression: metric({ value: 0.1 }),
+              diplomacyInitiated: null,
+              economicFocus: null,
+              territory: { share: null, absoluteTiles: null, meanRank: null },
+              armyStrength: null,
+              reliability: null,
+            },
+          }),
+          currentVersion: null,
+        },
+        null,
+      ),
+      container,
+    );
+    expect(container.textContent).toContain(
+      "agent_stats.analysis_no_version_split",
+    );
+    expect(container.textContent).not.toContain(
+      "agent_stats.analysis_version_heading",
+    );
+  });
+
+  it("shows a 'last updated' note when generatedAt is provided, and omits it when null", () => {
+    const stats = {
+      career: emptySlice({
+        episodeCount: 40,
+        fingerprint: {
+          aggression: metric({ value: 0.1 }),
+          diplomacyInitiated: null,
+          economicFocus: null,
+          territory: { share: null, absoluteTiles: null, meanRank: null },
+          armyStrength: null,
+          reliability: null,
+        },
+      }),
+      currentVersion: null,
+    };
+    const withDate = mountedContainer();
+    render(renderAnalysisTab(stats, "2026-07-31T00:00:00.000Z"), withDate);
+    expect(withDate.textContent).toContain("agent_stats.analysis_last_updated");
+
+    const withoutDate = mountedContainer();
+    render(renderAnalysisTab(stats, null), withoutDate);
+    expect(withoutDate.textContent).not.toContain(
+      "agent_stats.analysis_last_updated",
+    );
+  });
+
+  it("hides a below-threshold metric entirely in the analysis view too — never a placeholder", () => {
+    const container = mountedContainer();
+    render(
+      renderAnalysisTab(
+        {
+          career: emptySlice({ episodeCount: 40 }), // every metric null
+          currentVersion: null,
+        },
+        null,
+      ),
+      container,
+    );
+    // Career heading with 0 shown metrics -> the whole period is omitted
+    // (analysisPeriod's own "nothing clears threshold" rule), so the
+    // no-version-split note is the ONLY thing left.
+    expect(container.textContent).not.toContain(
+      "agent_stats.analysis_career_heading",
+    );
   });
 });

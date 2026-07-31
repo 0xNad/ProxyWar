@@ -194,3 +194,164 @@ export function renderAgentStatsSections(
     ${renderFingerprint(stats.career)} ${renderSocial(stats.career)}
   `;
 }
+
+/**
+ * Detailed row for the Analysis tab (spec Stage 6 item 5: "the deeper
+ * cuts already computed — per-version splits when available, event
+ * composition, sample sizes, periods, methodology strings, last-update.
+ * Every number carries its sample size; below threshold hidden."). Unlike
+ * `metricRow` (the terse summary view, methodology as a hover `title`),
+ * this shows sampleSize, threshold, AND the full methodology string as
+ * always-visible text — the whole point of an analysis view is that
+ * nothing stays hidden behind a hover. Still `null` -> entirely absent,
+ * same "hide below threshold" discipline as everywhere else; a hidden
+ * metric is never shown here with a placeholder either.
+ */
+function analysisMetricRow(
+  labelKey: string,
+  metric: AgentMetric | null,
+  format: (value: number) => string,
+): TemplateResult | typeof nothing {
+  if (metric === null) return nothing;
+  return html`
+    <div class="agent-analysis-row">
+      <dt>${translateText(labelKey)}</dt>
+      <dd>
+        <span class="agent-analysis-value">${format(metric.value)}</span>
+        <span class="agent-analysis-detail"
+          >${translateText("agent_stats.analysis_sample_size", {
+            count: metric.sampleSize,
+          })}</span
+        >
+        <span class="agent-analysis-detail"
+          >${translateText("agent_stats.analysis_threshold", {
+            count: metric.threshold,
+          })}</span
+        >
+        <span class="agent-analysis-methodology">${metric.methodology}</span>
+      </dd>
+    </div>
+  `;
+}
+
+function analysisRowsForSlice(
+  slice: AgentStatsSlice,
+): (TemplateResult | typeof nothing)[] {
+  const f = slice.fingerprint;
+  const s = slice.social;
+  return [
+    analysisMetricRow("agent_stats.aggression", f.aggression, formatPercent),
+    analysisMetricRow(
+      "agent_stats.diplomacy_initiated",
+      f.diplomacyInitiated,
+      formatPercent,
+    ),
+    analysisMetricRow(
+      "agent_stats.economic_focus",
+      f.economicFocus,
+      formatPercent,
+    ),
+    analysisMetricRow(
+      "agent_stats.territory_share",
+      f.territory.share,
+      formatPercent,
+    ),
+    analysisMetricRow("agent_stats.army_strength", f.armyStrength, formatPercent),
+    analysisMetricRow("agent_stats.reliability", f.reliability, formatPercent),
+    analysisMetricRow(
+      "agent_stats.alliances_initiated",
+      s.alliancesInitiated,
+      formatCount,
+    ),
+    analysisMetricRow(
+      "agent_stats.alliance_acceptance_rate",
+      s.allianceAcceptanceRate,
+      formatPercent,
+    ),
+    analysisMetricRow(
+      "agent_stats.betrayal_count",
+      s.betrayalCount,
+      formatCount,
+    ),
+    analysisMetricRow(
+      "agent_stats.treaty_duration",
+      s.treatyDuration,
+      formatTurns,
+    ),
+  ];
+}
+
+/** One labeled period ("Career" or "Current version vXX") inside the Analysis tab — every metric that clears its own threshold, with sample size/threshold/methodology all visible. Entirely omitted (never an empty section) when nothing in this slice clears any threshold. */
+function analysisPeriod(
+  headingText: string,
+  slice: AgentStatsSlice,
+): TemplateResult | typeof nothing {
+  const rows = analysisRowsForSlice(slice);
+  if (rows.every((row) => row === nothing)) return nothing;
+  return html`
+    <div class="agent-analysis-period">
+      <h3>
+        ${headingText}
+        ${translateText("agent_stats.analysis_episode_count", {
+          count: slice.episodeCount,
+        })}
+      </h3>
+      <dl class="agent-analysis-grid">${rows}</dl>
+    </div>
+  `;
+}
+
+/**
+ * The Analysis tab (spec Stage 6 item 5), shared between `/agent/:slug`
+ * and `/player/:name` exactly like `renderAgentStatsSections` above —
+ * "one computation source, two views, never divergent numbers" (spec
+ * item 6) extends to this deeper view too. A `<details>` disclosure
+ * (closed by default, same pattern `WatchPage.ts`'s "Reveal result"
+ * already establishes) so the terse summary view above stays the
+ * default, uncluttered read.
+ *
+ * Shows the Career period always (when it has anything to show), and the
+ * Current-Version period when the pipeline actually produced one
+ * (`stats.currentVersion !== null` — see `compute-agent-stats.ts`'s own
+ * doc for why this is honestly `null` for most agents today: it needs a
+ * registry `firstObservedAt`/`releaseDate` boundary AND at least one
+ * qualifying episode after it). When there's no version split yet, says
+ * so plainly rather than rendering an empty "Current Version" heading.
+ */
+export function renderAnalysisTab(
+  stats: PublicAgentStats | null,
+  generatedAt: string | null,
+): TemplateResult | typeof nothing {
+  if (stats === null || stats.career.episodeCount === 0) return nothing;
+  const careerPeriod = analysisPeriod(
+    translateText("agent_stats.analysis_career_heading"),
+    stats.career,
+  );
+  const versionPeriod =
+    stats.currentVersion !== null
+      ? analysisPeriod(
+          translateText("agent_stats.analysis_version_heading", {
+            version: stats.currentVersion.versionLabel,
+          }),
+          stats.currentVersion,
+        )
+      : nothing;
+  return html`
+    <details class="agent-stats-section agent-analysis-tab">
+      <summary>${translateText("agent_stats.analysis_heading")}</summary>
+      ${generatedAt !== null
+        ? html`<p class="agent-analysis-updated">
+            ${translateText("agent_stats.analysis_last_updated", {
+              date: new Date(generatedAt).toLocaleString(),
+            })}
+          </p>`
+        : nothing}
+      ${careerPeriod}
+      ${versionPeriod !== nothing
+        ? versionPeriod
+        : html`<p class="agent-analysis-empty">
+            ${translateText("agent_stats.analysis_no_version_split")}
+          </p>`}
+    </details>
+  `;
+}

@@ -439,6 +439,87 @@ describe("match-detail-page", () => {
     expect(winnerLink).not.toBeNull();
   });
 
+  it("shows the Analysis section with turn/decision/degraded composition and last-updated, when the FeaturedMatch's matchId resolves to an archive record", async () => {
+    stubFetch({
+      readModel: readModelBody({
+        matches: [
+          minimalMatch({
+            matchId: "feat_analysis",
+            completedAt: "2026-07-30T00:00:00.000Z",
+            winnerAgentSlug: null,
+            agentSlugs: [],
+          }),
+        ],
+      }),
+      detail: {
+        status: 200,
+        body: featuredMatchDetailBody({
+          matchId: "feat_analysis",
+          state: "revealed",
+          result: { winnerAgentId: null, placements: [] },
+        }),
+      },
+    });
+    const el = mount("feat_analysis");
+    await flushMicrotasks();
+
+    expect(el.textContent).toContain("match_detail.analysis_heading");
+    expect(el.textContent).toContain("match_detail.analysis_last_updated");
+    expect(el.textContent).toContain("match_detail.analysis_turn_count");
+    // minimalMatch's default turnCount=100, decisionCount=50.
+    expect(el.textContent).toContain("100");
+    expect(el.textContent).toContain("50");
+  });
+
+  it("omits the Analysis section entirely when the archive record doesn't exist yet for this matchId — never a fabricated 0", async () => {
+    stubFetch({
+      readModel: readModelBody({}), // no matches at all
+      detail: {
+        status: 200,
+        body: featuredMatchDetailBody({
+          matchId: "feat_no_archive",
+          state: "revealed",
+          result: { winnerAgentId: null, placements: [] },
+        }),
+      },
+    });
+    const el = mount("feat_no_archive");
+    await flushMicrotasks();
+
+    expect(el.textContent).not.toContain("match_detail.analysis_heading");
+  });
+
+  it("flags degraded turns above the elevated threshold in the analysis breakdown, using the SAME >= 15% definition WatchPage's archive already uses", async () => {
+    stubFetch({
+      readModel: readModelBody({
+        matches: [
+          {
+            ...minimalMatch({
+              matchId: "feat_degraded",
+              completedAt: "2026-07-30T00:00:00.000Z",
+              winnerAgentSlug: null,
+              agentSlugs: [],
+            }),
+            decisionCount: 100,
+            degradedCount: 30,
+          },
+        ],
+      }),
+      detail: {
+        status: 200,
+        body: featuredMatchDetailBody({
+          matchId: "feat_degraded",
+          state: "revealed",
+          result: { winnerAgentId: null, placements: [] },
+        }),
+      },
+    });
+    const el = mount("feat_degraded");
+    await flushMicrotasks();
+
+    expect(el.textContent).toContain("match_detail.analysis_degraded_count");
+    expect(el.textContent).toContain("30%");
+  });
   it("post-match: an unresolvable agentId (removed/unregistered) renders an honest 'unknown' label, never a fabricated name", async () => {
     stubFetch({
       readModel: readModelBody({ agents: [] }),

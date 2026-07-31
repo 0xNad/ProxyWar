@@ -1,7 +1,7 @@
 import { html, LitElement, nothing } from "lit";
 import { customElement, property, state } from "lit/decorators.js";
 import { unsafeSVG } from "lit/directives/unsafe-svg.js";
-import { renderAgentStatsSections } from "../AgentStatsSections";
+import { renderAgentStatsSections, renderAnalysisTab } from "../AgentStatsSections";
 import { translateText } from "../Utils";
 import {
   APP_SHELL_ROOT_CLASSES,
@@ -63,6 +63,7 @@ export class AgentProfilePage extends LitElement {
   @state() private agent: PublicAgent | null = null;
   @state() private recentMatches: ReadonlyArray<PublicMatch> = [];
   @state() private accountUrl: string | null = null;
+  @state() private generatedAt: string | null = null;
 
   createRenderRoot() {
     // Light DOM, so page-level Tailwind applies — same reasoning as
@@ -81,6 +82,7 @@ export class AgentProfilePage extends LitElement {
     try {
       const readModel: ReadModel = await fetchReadModel();
       this.accountUrl = readModel.links.accountUrl;
+      this.generatedAt = readModel.generatedAt;
       const agent =
         readModel.agents.find((candidate) => candidate.slug === this.slug) ??
         null;
@@ -181,6 +183,7 @@ export class AgentProfilePage extends LitElement {
         ? this.renderActiveVersion(agent.activeVersion)
         : nothing}
       ${renderAgentStatsSections(agent.stats)}
+      ${renderAnalysisTab(agent.stats, this.generatedAt)}
       ${this.renderRecentMatches(agent, matches)}
     `;
   }
