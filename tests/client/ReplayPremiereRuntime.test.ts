@@ -3159,6 +3159,81 @@ describe("ReplayPremiereRuntimeController — competitor rail seat identity", ()
   });
 });
 
+describe("ReplayPremiereRuntimeController — analyst mode (Stage 4 second half)", () => {
+  it("derives analystEvents/analystActionKindCounts from the SAME bounded warRoomEvents source the curated War Room feed uses, and keeps decisions permanently sealed", async () => {
+    const harness = runtimeHarness({ state: "playing" });
+    await bootstrapPlayingWithFrame(harness);
+
+    // Before any war event: sealed decisions, honest empty analyst arrays —
+    // never fabricated.
+    expect(harness.models.at(-1)).toMatchObject({
+      analystEvents: [],
+      analystActionKindCounts: [],
+      analystDecisionsUnavailableReason: "premiere_sealed",
+    });
+
+    document.dispatchEvent(
+      new CustomEvent("ai-league-replay-frame", {
+        detail: {
+          sequence: 0,
+          turnNumber: 50,
+          players: [],
+          warEvents: [
+            {
+              kind: "alliance",
+              actor: "Alpha",
+              target: "Beta",
+              detail: null,
+              turn: 50,
+            },
+            {
+              kind: "attack",
+              actor: "Alpha",
+              target: "Beta",
+              detail: null,
+              turn: 51,
+            },
+          ],
+        },
+      }),
+    );
+
+    const model = harness.models.at(-1);
+    // Same order/kinds as the curated War Room feed itself — confirms the
+    // SAME bounded source, not a wider one (`attack` only ever curates as
+    // `first_strike` the first time, matching `curateWarNarrative`).
+    expect(model?.warRoomEvents.map((event) => event.kind)).toEqual([
+      "alliance",
+      "first_strike",
+    ]);
+    expect(model?.analystEvents.map((event) => event.kind)).toEqual([
+      "alliance",
+      "first_strike",
+    ]);
+    expect(model?.analystEvents[0]).toMatchObject({
+      turnNumber: 50,
+      actorName: "Alpha",
+      targetName: "Beta",
+      tone: "pact",
+    });
+    expect(model?.analystEvents[1]).toMatchObject({
+      turnNumber: 51,
+      tone: "war",
+    });
+    expect(model?.analystActionKindCounts).toEqual(
+      expect.arrayContaining([
+        { kind: "alliance", count: 1 },
+        { kind: "first_strike", count: 1 },
+      ]),
+    );
+    // The one invariant that must never regress: a sealed/live Premiere
+    // never exposes decision-log telemetry, regardless of event volume.
+    expect(model?.analystDecisionsUnavailableReason).toBe("premiere_sealed");
+
+    harness.runtime.dispose();
+  });
+});
+
 describe("ReplayPremiereServiceClient", () => {
   it("ignores ordered stale aggregates but rejects inconsistent/incomparable evidence and capability drift", async () => {
     const inconsistent = sessionResponse("playing");

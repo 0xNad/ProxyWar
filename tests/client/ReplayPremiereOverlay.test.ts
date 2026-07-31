@@ -20,6 +20,10 @@ import {
   ReplayPremiereOverlayHandle,
   ReplayPremiereOverlayModel,
 } from "../../src/client/ReplayPremiereOverlay";
+import {
+  BROADCAST_RAIL_FOLLOWED_CHANGE_EVENT,
+  BROADCAST_RAIL_FOLLOW_EVENT,
+} from "../../src/client/graphics/layers/PointOfViewSelector";
 
 const handles: ReplayPremiereOverlayHandle[] = [];
 
@@ -1728,6 +1732,234 @@ describe("broadcast composition regions (Stage 4 item 1)", () => {
   });
 });
 
+describe("Stage 4 second-half wiring: camera-follow, drawer, analyst mode, lower thirds", () => {
+  it("dispatches the shared camera-follow event when a rail seat is clicked, and never automatically", () => {
+    const handle = mount(
+      makeModel({
+        state: "playing",
+        competitorRailSeats: [
+          {
+            seatId: "seat-a",
+            playerName: "Atlas Prime",
+            territoryPercent: 60,
+            inMatchRank: 1,
+            alive: true,
+            allies: [],
+            wars: [],
+          },
+        ],
+      }),
+    );
+    const followEvents: Array<{ playerName: string }> = [];
+    document.addEventListener(BROADCAST_RAIL_FOLLOW_EVENT, (event) => {
+      followEvents.push(
+        (event as CustomEvent<{ playerName: string }>).detail,
+      );
+    });
+    const seatButton = handle.element.querySelector<HTMLButtonElement>(
+      ".broadcast-rail-select",
+    );
+    expect(seatButton).not.toBeNull();
+    expect(followEvents).toHaveLength(0);
+    seatButton?.click();
+    expect(followEvents).toEqual([{ playerName: "Atlas Prime" }]);
+  });
+
+  it("highlights whichever rail seat PointOfViewSelector reports as followed, via the followed-change event, without owning follow state itself", () => {
+    const handle = mount(
+      makeModel({
+        state: "playing",
+        competitorRailSeats: [
+          {
+            seatId: "seat-a",
+            playerName: "Atlas Prime",
+            territoryPercent: 60,
+            inMatchRank: 1,
+            alive: true,
+            allies: [],
+            wars: [],
+          },
+          {
+            seatId: "seat-b",
+            playerName: "Borealis",
+            territoryPercent: 40,
+            inMatchRank: 2,
+            alive: true,
+            allies: [],
+            wars: [],
+          },
+        ],
+      }),
+    );
+    const entries = () =>
+      handle.element.querySelectorAll<HTMLElement>(".broadcast-rail-entry");
+    expect(entries()[0].dataset.followed).toBe("false");
+    expect(entries()[1].dataset.followed).toBe("false");
+
+    document.dispatchEvent(
+      new CustomEvent(BROADCAST_RAIL_FOLLOWED_CHANGE_EVENT, {
+        detail: { playerName: "Borealis" },
+      }),
+    );
+    expect(entries()[0].dataset.followed).toBe("false");
+    expect(entries()[1].dataset.followed).toBe("true");
+
+    document.dispatchEvent(
+      new CustomEvent(BROADCAST_RAIL_FOLLOWED_CHANGE_EVENT, {
+        detail: { playerName: null },
+      }),
+    );
+    expect(entries()[1].dataset.followed).toBe("false");
+  });
+
+  it("switches the drawer's active tab on a tab click; every panel (including analysis) is always mounted in the DOM", () => {
+    const handle = mount(makeModel({ state: "playing" }));
+    const tabs = () =>
+      handle.element.querySelectorAll<HTMLButtonElement>(
+        ".broadcast-drawer-tab",
+      );
+    expect([...tabs()].map((tab) => tab.dataset.tabId)).toEqual([
+      "agents",
+      "events",
+      "timeline",
+      "analysis",
+    ]);
+    const panelFor = (id: string) =>
+      handle.element.querySelector<HTMLElement>(
+        `.broadcast-drawer-panel[data-tab-id="${id}"]`,
+      );
+    expect(panelFor("agents")?.dataset.tabActive).toBe("true");
+    expect(panelFor("analysis")?.dataset.tabActive).toBe("false");
+
+    const analysisTab = [...tabs()].find(
+      (tab) => tab.dataset.tabId === "analysis",
+    );
+    analysisTab?.click();
+
+    expect(panelFor("agents")?.dataset.tabActive).toBe("false");
+    expect(panelFor("analysis")?.dataset.tabActive).toBe("true");
+  });
+
+  it("toggles analyst mode from the desktop header control (aria-pressed conveys state), independent of the drawer's active tab", () => {
+    const handle = mount(makeModel({ state: "playing" }));
+    expect(handle.element.dataset.analystMode).toBe("false");
+    const toggle = () =>
+      handle.element.querySelector<HTMLButtonElement>(".rp-analyst-toggle");
+    expect(toggle()?.getAttribute("aria-pressed")).toBe("false");
+    expect(toggle()?.textContent).toContain("broadcast.analyst_heading");
+
+    toggle()?.click();
+
+    expect(handle.element.dataset.analystMode).toBe("true");
+    expect(toggle()?.getAttribute("aria-pressed")).toBe("true");
+  });
+
+  it("never renders the analyst toggle in states with no drawer", () => {
+    for (const state of ["scheduled", "failed", "cancelled"] as const) {
+      const handle = mount(
+        makeModel({
+          state,
+          failureCode: state === "failed" ? "integrity_failure" : null,
+        }),
+      );
+      expect(handle.element.querySelector(".rp-analyst-toggle")).toBeNull();
+    }
+  });
+
+  it("analyst mode always reports decisions as sealed/unavailable, never a decision table, in every drawer-bearing state — the one invariant that must never regress", () => {
+    const cases: Array<Partial<ReplayPremiereOverlayModel>> = [
+      { state: "playing" },
+      { state: "checkpoint" },
+      { state: "revealed", reveal: resultsReveal() },
+      { state: "archived", reveal: resultsReveal() },
+    ];
+    for (const overrides of cases) {
+      const handle = mount(makeModel(overrides));
+      const analyst = handle.element.querySelector(".broadcast-analyst");
+      expect(analyst).not.toBeNull();
+      expect(
+        analyst?.querySelector(".broadcast-analyst-decisions-table"),
+      ).toBeNull();
+      expect(analyst?.textContent).toContain(
+        "broadcast.analyst_unavailable_premiere_sealed",
+      );
+    }
+  });
+
+  it("fires a lower-third pulse over the map for a newly curated War Room event", () => {
+    mount(
+      makeModel({
+        state: "playing",
+        warRoomEvents: [
+          {
+            id: "wr-1",
+            kind: "alliance",
+            turn: 10,
+            sequence: 5,
+            headline: "Atlas Prime and Borealis formed an alliance",
+            publicReason: null,
+            participants: ["Atlas Prime", "Borealis"],
+            expandedDetail: null,
+          },
+        ],
+      }),
+    );
+    const host = document.getElementById(
+      "replay-premiere-lower-third-host",
+    );
+    expect(host).not.toBeNull();
+    const card = host?.querySelector(".broadcast-lower-third");
+    expect(card?.getAttribute("data-kind")).toBe("alliance");
+    expect(card?.textContent).toContain(
+      "Atlas Prime and Borealis formed an alliance",
+    );
+  });
+
+  it("fires the synthetic finish lower-third exactly once a verified reveal exists, reusing the same reveal headline the results card renders", () => {
+    mount(makeModel({ state: "revealed", reveal: resultsReveal() }));
+    const host = document.getElementById(
+      "replay-premiere-lower-third-host",
+    );
+    const card = host?.querySelector(
+      '.broadcast-lower-third[data-kind="finish"]',
+    );
+    expect(card).not.toBeNull();
+    expect(card?.textContent).toContain("replay_premiere.winner");
+  });
+
+  it("de-dupes a lower-third pulse across repeated hydrates of the same curated event, and disposes the host on teardown", () => {
+    vi.useFakeTimers();
+    try {
+      const warRoomEvents = [
+        {
+          id: "wr-1",
+          kind: "alliance" as const,
+          turn: 10,
+          sequence: 5,
+          headline: "Atlas Prime and Borealis formed an alliance",
+          publicReason: null,
+          participants: ["Atlas Prime", "Borealis"],
+          expandedDetail: null,
+        },
+      ];
+      const handle = mount(
+        makeModel({ state: "playing", warRoomEvents }),
+      );
+      const host = () =>
+        document.getElementById("replay-premiere-lower-third-host");
+      expect(host()?.querySelector(".broadcast-lower-third")).not.toBeNull();
+      vi.advanceTimersByTime(5000);
+      expect(host()?.querySelector(".broadcast-lower-third")).toBeNull();
+      handle.hydrate(makeModel({ state: "playing", warRoomEvents }));
+      expect(host()?.querySelector(".broadcast-lower-third")).toBeNull();
+      handle.dispose();
+      expect(host()).toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
+
 function mount(
   model: ReplayPremiereOverlayModel,
   callbacks: ReplayPremiereOverlayCallbacks = {},
@@ -1803,6 +2035,9 @@ function makeModel(
     timelineMarkers: [],
     totalTurns: 1,
     maxSeekableTurn: 0,
+    analystEvents: [],
+    analystActionKindCounts: [],
+    analystDecisionsUnavailableReason: "premiere_sealed",
     ...overrides,
   };
 }

@@ -47,6 +47,8 @@ import {
   type ReplayPremiereWarEventView,
 } from "./ReplayPremiereOverlay";
 import type {
+  AnalystActionKindCount,
+  AnalystEventRow,
   CuratedWarRoomEvent,
   CuratedWarRoomEventKind,
   TimelineMarker,
@@ -3062,6 +3064,36 @@ export class ReplayPremiereRuntimeController {
   }
 
   /**
+   * Analyst mode (spec item 5) event log + action-kind chart: reuses the
+   * SAME bounded `warRoomEvents` this class already curates for the War
+   * Room feed — never a wider/different source. A sealed Premiere never
+   * curates `plan_change` (see `pushWarRoomEvent`'s own doc), so this can
+   * only ever surface alliance/first_strike/betrayal/elimination rows,
+   * same as the curated feed itself.
+   */
+  private buildAnalystEvents(): AnalystEventRow[] {
+    return this.warRoomEvents.map((event) => ({
+      sequence: event.sequence,
+      turnNumber: event.turn,
+      kind: event.kind,
+      tone: ANALYST_TONE_BY_WAR_ROOM_KIND[event.kind],
+      actorName: event.participants[0] ?? "",
+      targetName: event.participants[1] ?? null,
+      secondaryName: null,
+      message: event.headline,
+    }));
+  }
+
+  /** Count of each curated War Room kind observed so far, from the SAME bounded `warRoomEvents` source as `buildAnalystEvents`. */
+  private buildAnalystActionKindCounts(): AnalystActionKindCount[] {
+    const counts = new Map<CuratedWarRoomEventKind, number>();
+    for (const event of this.warRoomEvents) {
+      counts.set(event.kind, (counts.get(event.kind) ?? 0) + 1);
+    }
+    return [...counts.entries()].map(([kind, count]) => ({ kind, count }));
+  }
+
+  /**
    * Per-seat facts for the competitor rail, covering EVERY policy seat (not
    * just the top-3 `frameLeaders` truncates to) — spec item 1's "extend the
    * existing per-seat data to all seats" — bounded to the same released-only
@@ -4813,6 +4845,12 @@ export class ReplayPremiereRuntimeController {
       totalTurns: Math.max(1, currentTurn ?? 0),
       // Never null in live Premiere mode — see the model field's own doc.
       maxSeekableTurn: currentTurn ?? 0,
+      analystEvents: this.buildAnalystEvents(),
+      analystActionKindCounts: this.buildAnalystActionKindCounts(),
+      // A sealed/live Premiere never exposes decision-log telemetry (see
+      // `pushWarRoomEvent`'s `plan_change` doc) — a genuine, permanent
+      // data gap, never "still mid-premiere."
+      analystDecisionsUnavailableReason: "premiere_sealed",
       markerCounts: {
         ...(this.reactionSummary?.byKind ?? this.ownMarkCounts),
       },
@@ -5202,6 +5240,14 @@ const MAX_WAR_FEED_ENTRIES = 8;
 /** Alliance/betrayal/first-strike/elimination are rare relative to attacks/chat, so a generous cap is never actually reached in practice; it exists only as a hard ceiling. */
 const MAX_WAR_ROOM_EVENTS = 64;
 const MAX_TIMELINE_MARKERS = 128;
+/** Maps the curated War Room kind vocabulary onto the repo's existing `SpectatorEvent.tone` vocabulary (see `AgentSpectatorTelemetry.ts`) so `AnalystEventRow.tone` reads consistently with the Full Replay track's own analyst rows. `plan_change` is unreachable here (a sealed Premiere never curates it — see `pushWarRoomEvent`'s doc) but is mapped for type completeness. */
+const ANALYST_TONE_BY_WAR_ROOM_KIND: Record<CuratedWarRoomEventKind, string> = {
+  alliance: "pact",
+  first_strike: "war",
+  betrayal: "betrayal",
+  elimination: "war",
+  plan_change: "info",
+};
 
 interface ReplayPremiereFrame {
   sequence: number | null;

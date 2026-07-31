@@ -42,6 +42,9 @@ function model(
     timelineMarkers: [],
     totalTurns: 1,
     maxSeekableTurn: 0,
+    analystEvents: [],
+    analystActionKindCounts: [],
+    analystDecisionsUnavailableReason: "premiere_sealed",
     ...overrides,
   };
 }

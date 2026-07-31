@@ -423,6 +423,54 @@ describe("mountArchivedReplayPremiereOverlay", () => {
   });
 });
 
+describe("mountArchivedReplayPremiereOverlay — Stage 4 second-half wiring", () => {
+  it("mounts the broadcast drawer with all 4 tabs and camera-follow, and analyst mode reports the same permanent seal as the live path", () => {
+    const handle = mountArchivedReplayPremiereOverlay(samplePayload());
+    const tabs = handle.element.querySelectorAll<HTMLButtonElement>(
+      ".broadcast-drawer-tab",
+    );
+    expect([...tabs].map((tab) => tab.dataset.tabId)).toEqual([
+      "agents",
+      "events",
+      "timeline",
+      "analysis",
+    ]);
+    const railButton = handle.element.querySelector<HTMLButtonElement>(
+      ".broadcast-rail-select",
+    );
+    expect(railButton).not.toBeNull();
+    const analyst = handle.element.querySelector(".broadcast-analyst");
+    expect(analyst).not.toBeNull();
+    expect(
+      analyst?.querySelector(".broadcast-analyst-decisions-table"),
+    ).toBeNull();
+    expect(analyst?.textContent).toContain(
+      "broadcast.analyst_unavailable_premiere_sealed",
+    );
+    // No per-turn narrative survives archival — an honest empty event log,
+    // never fabricated from the durable summary's win/lose-only data.
+    expect(
+      analyst?.querySelector(".broadcast-analyst-events-list"),
+    ).toBeNull();
+    handle.dispose();
+  });
+
+  it("mounts the lower-third host over the map, pulses the synthetic finish event for an already-revealed rewatch, and disposes it with the overlay", () => {
+    const handle = mountArchivedReplayPremiereOverlay(samplePayload());
+    const host = document.getElementById(
+      "replay-premiere-lower-third-host",
+    );
+    expect(host).not.toBeNull();
+    expect(
+      host?.querySelector('.broadcast-lower-third[data-kind="finish"]'),
+    ).not.toBeNull();
+    handle.dispose();
+    expect(
+      document.getElementById("replay-premiere-lower-third-host"),
+    ).toBeNull();
+  });
+});
+
 function clipCapabilitiesResponse(enabled: boolean): Response {
   return new Response(
     JSON.stringify({

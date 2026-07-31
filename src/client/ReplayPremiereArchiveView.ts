@@ -417,6 +417,15 @@ function buildArchivedOverlayModel(
     // Revealed/archived: no more spoiler concern (see `FeaturedMatch.ts`'s
     // own "revealed" semantics) — full Replay-style unrestricted seeking.
     maxSeekableTurn: null,
+    // No per-turn narrative survives archival (same gap `warRoomEvents`
+    // documents above), so there is nothing bounded to build an analyst
+    // event log or action-kind chart from — an honest empty array, not a
+    // fabricated one. Decisions are unavailable for the same reason the
+    // live path is: the durable archive summary carries no per-turn
+    // decision log either.
+    analystEvents: [],
+    analystActionKindCounts: [],
+    analystDecisionsUnavailableReason: "premiere_sealed",
     headlineEvent: null,
     markerPolicySeatId: null,
     share: null,

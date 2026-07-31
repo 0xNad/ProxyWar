@@ -1,12 +1,24 @@
 import { translateText } from "./Utils";
 import {
+  renderAnalystPanel,
+  renderBroadcastDrawer,
   renderCompetitorRail,
   renderMatchTimeline,
   renderWarRoomFeed,
+  LowerThirdController,
+  type AnalystActionKindCount,
+  type AnalystEventRow,
+  type CompetitorRailCallbacks,
   type CompetitorRailEntry,
   type CuratedWarRoomEvent,
+  type BroadcastDrawerTabId,
+  type LowerThirdEvent,
   type TimelineMarker,
 } from "./BroadcastComposition";
+import {
+  BROADCAST_RAIL_FOLLOW_EVENT,
+  BROADCAST_RAIL_FOLLOWED_CHANGE_EVENT,
+} from "./graphics/layers/PointOfViewSelector";
 import { fetchReadModel, type PublicAgent } from "./publicapp/ReadModelSchema";
 
 export type ReplayPremierePublicState =
@@ -277,6 +289,25 @@ export interface ReplayPremiereOverlayModel {
    * concern and passes `null` (unrestricted, Full-Replay behavior).
    */
   maxSeekableTurn: number | null;
+  /**
+   * Already-public bounded per-turn events reused unfiltered from the SAME
+   * curated War Room source (`warRoomEvents` above) — never a wider/
+   * different data source (spec item 5's own "never a data-exposure
+   * change" contract). A sealed Premiere never curates `plan_change`, so
+   * this can only ever surface alliance/first_strike/betrayal/elimination
+   * rows, same as the War Room feed.
+   */
+  analystEvents: readonly AnalystEventRow[];
+  /** Count of each curated War Room kind observed so far, from the same bounded source as `analystEvents`. */
+  analystActionKindCounts: readonly AnalystActionKindCount[];
+  /**
+   * Always `"premiere_sealed"` for this overlay, live or archived: a
+   * sealed Premiere never exposes decision-log telemetry (see the runtime's
+   * own `plan_change` doc), and the durable archive summary carries no
+   * per-turn decision log either — the gap is permanent, not "still
+   * mid-premiere."
+   */
+  analystDecisionsUnavailableReason: "premiere_sealed";
 }
 
 export interface ReplayPremiereRailSeatView {
@@ -401,6 +432,8 @@ export interface ReplayPremiereOverlayHandle {
 
 const OVERLAY_ID = "replay-premiere-overlay";
 const AMBIENT_BODY_CLASS = "replay-premiere-ambient-mode";
+/** Lower-third host id (spec item 3) — see `mountReplayPremiereOverlay`'s own comment for why it mounts as a `document.body` sibling, not a descendant, of `#${OVERLAY_ID}`. */
+const LOWER_THIRD_HOST_ID = "replay-premiere-lower-third-host";
 
 const MARKERS: readonly {
   kind: ReplayPremiereMarkerKind;
@@ -462,6 +495,18 @@ export function mountReplayPremiereOverlay(
   );
   document.body.appendChild(overlay);
 
+  // Lower thirds (spec item 3) mount OVER the map, not inside this
+  // scrollable side panel, so a pulse is visible without opening/scrolling
+  // the overlay. A `document.body` SIBLING of `overlay`, never a
+  // descendant: `#${OVERLAY_ID}` sets its own `backdrop-filter`, which
+  // makes it a containing block for `position: fixed` descendants — a host
+  // nested inside it would be clipped to the narrow side panel's box
+  // instead of positioning against the full viewport.
+  const lowerThirdHost = document.createElement("div");
+  lowerThirdHost.id = LOWER_THIRD_HOST_ID;
+  document.body.appendChild(lowerThirdHost);
+  const lowerThirds = new LowerThirdController(lowerThirdHost);
+
   let model = initialModel;
   let disposed = false;
   let clockTimer: ReturnType<typeof setInterval> | null = null;
@@ -479,11 +524,82 @@ export function mountReplayPremiereOverlay(
   // blocker — it degrades to the same "unregistered" fallback the rail
   // already renders gracefully for a genuinely unmatched player.
   let identityByPlayerName: ReadonlyMap<string, PublicAgent> | null = null;
+  // Camera-follow discoverability (spec item 6): tracks whichever player the
+  // shared `PointOfViewSelector` currently follows, purely so the rail's
+  // `followed` highlight stays truthful — the click that CAUSES a follow is
+  // a fire-and-forget dispatch (`RAIL_CALLBACKS`), never a state change this
+  // overlay owns itself.
+  let followedPlayerName: string | null = null;
+  // Mobile drawer (spec item 7) / analyst mode (spec item 5): caller-owned
+  // UI state, same pattern as the caption draft below — read on render,
+  // mutated by a setter that re-renders.
+  let activeDrawerTab: BroadcastDrawerTabId = "agents";
+  let analystOpen = false;
   // Event handlers read the LATEST model through this accessor instead of the
   // render-time snapshot: volatile-only hydrates keep the same DOM nodes (and
   // therefore the same closures) alive across frames, so a click must see the
   // current sequence/turn, not the ones from whenever the button was built.
   const latestModel = () => model;
+
+  const currentBroadcastState = (): BroadcastState => ({
+    followedPlayerName,
+    activeDrawerTab,
+    setActiveDrawerTab(tab: BroadcastDrawerTabId) {
+      if (activeDrawerTab === tab) return;
+      activeDrawerTab = tab;
+      render();
+    },
+    analystOpen,
+    toggleAnalystOpen() {
+      analystOpen = !analystOpen;
+      render();
+    },
+  });
+
+  const onFollowedChange = (event: Event): void => {
+    const detail = (event as CustomEvent<{ playerName: string | null }>)
+      .detail;
+    followedPlayerName = detail?.playerName ?? null;
+    render();
+  };
+  document.addEventListener(
+    BROADCAST_RAIL_FOLLOWED_CHANGE_EVENT,
+    onFollowedChange,
+  );
+
+  /**
+   * Every curated War Room event becomes a lower-third trigger, plus one
+   * synthetic `finish` event fired exactly once a verified reveal exists
+   * (covers both the live "revealed" state and an archived rewatch's
+   * "archived" state — `isVerifiedRevealView` is the same check
+   * `renderStateBody` already gates the results payoff on). The controller
+   * de-dupes by `id`, so calling this on every render/hydrate is safe.
+   */
+  const syncLowerThirds = (m: ReplayPremiereOverlayModel): void => {
+    const events: LowerThirdEvent[] = m.warRoomEvents.map((event) => ({
+      id: event.id,
+      kind: event.kind,
+      headline: event.headline,
+    }));
+    if (isVerifiedRevealView(m)) {
+      const isWinner = m.reveal.outcome === "winner";
+      const winner = m.policies.find(
+        (policy) => policy.seatId === m.reveal.winnerSeatId,
+      );
+      events.push({
+        id: "finish",
+        kind: "finish",
+        headline: isWinner
+          ? winner === undefined
+            ? translateText("replay_premiere.winner_unavailable")
+            : translateText("replay_premiere.winner", {
+                name: safeDisplay(winner.displayName),
+              })
+          : translateText("replay_premiere.result_void"),
+      });
+    }
+    lowerThirds.sync(events);
+  };
 
   const safeRun = (
     button: HTMLButtonElement,
@@ -555,6 +671,7 @@ export function mountReplayPremiereOverlay(
     const focusKey = focusKeyFor(document.activeElement, overlay);
     overlay.dataset.state = model.state;
     overlay.dataset.ambient = String(model.ambient);
+    overlay.dataset.analystMode = String(analystOpen);
     document.body.classList.toggle(AMBIENT_BODY_CLASS, model.ambient);
     lastStructuralKey = structuralModelKey(model);
     overlay.replaceChildren(
@@ -565,10 +682,11 @@ export function mountReplayPremiereOverlay(
           captionDraft = nextCaption;
           captionTouched = true;
         },
-      }, identityByPlayerName),
+      }, identityByPlayerName, currentBroadcastState()),
     );
     restoreFocus(overlay, focusKey);
     updateClock();
+    syncLowerThirds(model);
   };
 
   const handle: ReplayPremiereOverlayHandle = {
@@ -595,7 +713,13 @@ export function mountReplayPremiereOverlay(
       // and keep every interactive element (and its hover/focus/press state)
       // alive.
       if (structuralModelKey(nextModel) === lastStructuralKey) {
-        applyVolatileModelUpdates(overlay, nextModel, callbacks, identityByPlayerName);
+        applyVolatileModelUpdates(
+          overlay,
+          nextModel,
+          callbacks,
+          identityByPlayerName,
+          followedPlayerName,
+        );
         if (shouldPatchCaption) {
           const caption = overlay.querySelector<HTMLTextAreaElement>(
             "#replay-premiere-caption",
@@ -605,6 +729,7 @@ export function mountReplayPremiereOverlay(
           }
         }
         updateClock();
+        syncLowerThirds(nextModel);
         return;
       }
       render();
@@ -614,9 +739,13 @@ export function mountReplayPremiereOverlay(
         return;
       }
       disposed = true;
-      if (clockTimer !== null) {
-        clearInterval(clockTimer);
-      }
+      clearInterval(clockTimer ?? undefined);
+      document.removeEventListener(
+        BROADCAST_RAIL_FOLLOWED_CHANGE_EVENT,
+        onFollowedChange,
+      );
+      lowerThirds.dispose();
+      lowerThirdHost.remove();
       overlay.remove();
       document.body.classList.remove(AMBIENT_BODY_CLASS);
       if (activeOverlay === handle) {
@@ -647,6 +776,24 @@ export function mountReplayPremiereOverlay(
 interface CaptionDraftState {
   captionDraft: string;
   setCaptionDraft(nextCaption: string): void;
+}
+
+/**
+ * Bundles the Stage 4 broadcast composition's caller-owned UI state
+ * (camera-follow highlight, drawer active tab, analyst-mode toggle) the same
+ * way {@link CaptionDraftState} bundles the caption draft — a read-only
+ * snapshot plus setters that trigger a re-render, threaded through the
+ * render closure rather than living on the model.
+ */
+interface BroadcastState {
+  /** Whichever player `PointOfViewSelector` currently follows (spec item 6) — used only to render the rail's `followed` highlight truthfully. */
+  followedPlayerName: string | null;
+  /** Mobile drawer (spec item 7): active tab at narrow/short viewports; irrelevant at desktop width, where CSS shows every non-Analysis panel regardless. */
+  activeDrawerTab: BroadcastDrawerTabId;
+  setActiveDrawerTab(tab: BroadcastDrawerTabId): void;
+  /** Analyst mode (spec item 5): the desktop header toggle's own state, separate from `activeDrawerTab` — the mobile Analysis tab is an entry point to the same content, never a second implementation. */
+  analystOpen: boolean;
+  toggleAnalystOpen(): void;
 }
 
 /** Latest-model accessor for event handlers (see mountReplayPremiereOverlay). */
@@ -690,6 +837,7 @@ function applyVolatileModelUpdates(
   model: ReplayPremiereOverlayModel,
   callbacks: ReplayPremiereOverlayCallbacks,
   identityByPlayerName: ReadonlyMap<string, PublicAgent> | null,
+  followedPlayerName: string | null,
 ): void {
   const position = overlay.querySelector<HTMLElement>(".rp-position");
   if (position !== null) {
@@ -717,7 +865,12 @@ function applyVolatileModelUpdates(
   if (rail !== null) {
     rail.replaceWith(
       renderCompetitorRail(
-        buildCompetitorRailEntries(model.competitorRailSeats, identityByPlayerName),
+        buildCompetitorRailEntries(
+          model.competitorRailSeats,
+          identityByPlayerName,
+          followedPlayerName,
+        ),
+        RAIL_CALLBACKS,
       ),
     );
   }
@@ -746,6 +899,19 @@ function applyVolatileModelUpdates(
       warRoom.replaceWith(nextWarRoom);
     }
   }
+  // The analyst panel draws from the same bounded War Room source, so it is
+  // refreshed the same unconditional way as the rail/timeline above.
+  const analyst = overlay.querySelector<HTMLElement>(".broadcast-analyst");
+  if (analyst !== null) {
+    analyst.replaceWith(
+      renderAnalystPanel({
+        decisions: null,
+        decisionsUnavailableReason: model.analystDecisionsUnavailableReason,
+        events: model.analystEvents,
+        actionKindCounts: model.analystActionKindCounts,
+      }),
+    );
+  }
 }
 
 /**
@@ -758,6 +924,7 @@ function applyVolatileModelUpdates(
 function buildCompetitorRailEntries(
   seats: readonly ReplayPremiereRailSeatView[],
   identityByPlayerName: ReadonlyMap<string, PublicAgent> | null,
+  followedPlayerName: string | null,
 ): CompetitorRailEntry[] {
   return seats.map((seat): CompetitorRailEntry => {
     const agent = identityByPlayerName?.get(seat.playerName) ?? null;
@@ -779,19 +946,38 @@ function buildCompetitorRailEntries(
       // `AgentEvaluationReport.ts`) — no bounded signal for it exists while a
       // Premiere is sealed/live, live or archived.
       degradedDecisionCount: null,
-      followed: false,
+      followed: seat.playerName === followedPlayerName,
     };
   });
 }
 
-/** Renders the three Stage 4 broadcast regions: already-bounded model data in, shared style-free components out (see `BroadcastComposition.ts`). */
+/** Opt-in-only camera-follow bridge (spec item 6): the SAME cross-overlay CustomEvent `PointOfViewSelector` is the only listener for — clicking a rail seat pans, exactly like the crosshair button, never automatic. A module-level constant since it captures no per-mount state. */
+const RAIL_CALLBACKS: CompetitorRailCallbacks = {
+  onSelect: (playerName: string) => {
+    document.dispatchEvent(
+      new CustomEvent(BROADCAST_RAIL_FOLLOW_EVENT, { detail: { playerName } }),
+    );
+  },
+};
+
+/** States where `renderBroadcastRegions` actually mounts a drawer (see `renderStateBody`) — the analyst toggle only appears when there is something for it to show/hide. */
+const BROADCAST_DRAWER_STATES: ReadonlySet<ReplayPremierePublicState> =
+  new Set(["playing", "checkpoint", "revealed", "archived"]);
+
+/** Renders the Stage 4 broadcast composition as a 4-tab drawer (Agents/Events/Timeline/Analysis): already-bounded model data in, shared style-free components out (see `BroadcastComposition.ts`). Every tab's panel is always in the DOM; this overlay's own CSS decides desktop (every panel but Analysis visible, no tab bar) vs. narrow viewport (tab bar, one panel at a time) — see `createStyle`'s own broadcast-drawer rules. */
 function renderBroadcastRegions(
   model: ReplayPremiereOverlayModel,
   callbacks: ReplayPremiereOverlayCallbacks,
   identityByPlayerName: ReadonlyMap<string, PublicAgent> | null,
-): HTMLElement[] {
+  broadcastState: BroadcastState,
+): HTMLElement {
   const rail = renderCompetitorRail(
-    buildCompetitorRailEntries(model.competitorRailSeats, identityByPlayerName),
+    buildCompetitorRailEntries(
+      model.competitorRailSeats,
+      identityByPlayerName,
+      broadcastState.followedPlayerName,
+    ),
+    RAIL_CALLBACKS,
   );
   const warRoom = renderWarRoomFeed(model.warRoomEvents, {
     onJumpToTurn: callbacks.onJumpToTurn,
@@ -802,7 +988,32 @@ function renderBroadcastRegions(
     maxSeekableTurn: model.maxSeekableTurn,
     onSeek: callbacks.onSeek,
   });
-  return [rail, warRoom, timeline];
+  const analyst = renderAnalystPanel({
+    decisions: null,
+    decisionsUnavailableReason: model.analystDecisionsUnavailableReason,
+    events: model.analystEvents,
+    actionKindCounts: model.analystActionKindCounts,
+  });
+  const agentsPanel = element("div", "rp-drawer-panel");
+  agentsPanel.append(rail);
+  const eventsPanel = element("div", "rp-drawer-panel");
+  eventsPanel.append(warRoom);
+  const timelinePanel = element("div", "rp-drawer-panel");
+  timelinePanel.append(timeline);
+  const analysisPanel = element("div", "rp-drawer-panel");
+  analysisPanel.append(analyst);
+  return renderBroadcastDrawer(
+    [
+      { id: "agents", content: agentsPanel },
+      { id: "events", content: eventsPanel },
+      { id: "timeline", content: timelinePanel },
+      { id: "analysis", content: analysisPanel },
+    ],
+    {
+      activeTab: broadcastState.activeDrawerTab,
+      onTabChange: broadcastState.setActiveDrawerTab,
+    },
+  );
 }
 
 function renderOverlay(
@@ -815,10 +1026,11 @@ function renderOverlay(
   ) => void,
   captionState: CaptionDraftState,
   identityByPlayerName: ReadonlyMap<string, PublicAgent> | null,
+  broadcastState: BroadcastState,
 ): HTMLElement {
   const shell = element("div", "rp-shell");
   shell.append(
-    renderHeader(model, callbacks, safeRun),
+    renderHeader(model, callbacks, safeRun, broadcastState),
     renderStateBody(
       model,
       latest,
@@ -826,6 +1038,7 @@ function renderOverlay(
       safeRun,
       captionState,
       identityByPlayerName,
+      broadcastState,
     ),
   );
   const actionStatus = element("p", "rp-action-status");
@@ -852,6 +1065,7 @@ function renderHeader(
     button: HTMLButtonElement,
     action: (() => ReplayPremiereCallbackResult) | undefined,
   ) => void,
+  broadcastState: BroadcastState,
 ): HTMLElement {
   const header = element("header", "rp-header");
   const titleGroup = element("div", "rp-title-group");
@@ -925,7 +1139,26 @@ function renderHeader(
     );
   });
   header.append(titleGroup, ambient);
+  if (BROADCAST_DRAWER_STATES.has(model.state)) {
+    header.append(renderAnalystToggle(broadcastState));
+  }
   return header;
+}
+
+/** Analyst mode's desktop entry point (spec item 5): same visual pattern as the ambient toggle, a peer control rather than a second, differently-styled affordance. The mobile Analysis tab is the narrow-viewport entry point to the SAME `renderAnalystPanel` output, never a second implementation. Reuses the existing `broadcast.analyst_heading` label for both states — `aria-pressed` (asserted below) already conveys on/off, matching the sibling Full Replay overlay's own toggle so neither surface invents a redundant "show/hide" key pair. */
+function renderAnalystToggle(
+  broadcastState: BroadcastState,
+): HTMLButtonElement {
+  const toggle = button(
+    "broadcast.analyst_heading",
+    "rp-ambient-toggle rp-analyst-toggle",
+  );
+  toggle.dataset.focusKey = "analyst-toggle";
+  toggle.setAttribute("aria-pressed", String(broadcastState.analystOpen));
+  toggle.addEventListener("click", () => {
+    broadcastState.toggleAnalystOpen();
+  });
+  return toggle;
 }
 
 function renderStateBody(
@@ -938,6 +1171,7 @@ function renderStateBody(
   ) => void,
   captionState: CaptionDraftState,
   identityByPlayerName: ReadonlyMap<string, PublicAgent> | null,
+  broadcastState: BroadcastState,
 ): HTMLElement {
   const body = element("div", "rp-body");
   if (!hasExactlyTwoCheckpoints(model.checkpoints)) {
@@ -971,7 +1205,12 @@ function renderStateBody(
       body.append(renderWarFeed(model));
       body.append(renderAmbientEvidence(model));
       body.append(
-        ...renderBroadcastRegions(model, callbacks, identityByPlayerName),
+        renderBroadcastRegions(
+          model,
+          callbacks,
+          identityByPlayerName,
+          broadcastState,
+        ),
       );
       body.append(renderShare(model, latest, callbacks, safeRun, captionState));
       break;
@@ -986,7 +1225,12 @@ function renderStateBody(
       body.append(renderWarFeed(model));
       body.append(renderAmbientEvidence(model));
       body.append(
-        ...renderBroadcastRegions(model, callbacks, identityByPlayerName),
+        renderBroadcastRegions(
+          model,
+          callbacks,
+          identityByPlayerName,
+          broadcastState,
+        ),
       );
       body.append(renderShare(model, latest, callbacks, safeRun, captionState));
       break;
@@ -1005,7 +1249,12 @@ function renderStateBody(
         renderResultsSummary(model.reveal, model.mapName, model.matchFormat),
       );
       body.append(
-        ...renderBroadcastRegions(model, callbacks, identityByPlayerName),
+        renderBroadcastRegions(
+          model,
+          callbacks,
+          identityByPlayerName,
+          broadcastState,
+        ),
       );
       body.append(renderMarkers(model, latest, callbacks, safeRun));
       body.append(renderShare(model, latest, callbacks, safeRun, captionState));
@@ -1028,7 +1277,12 @@ function renderStateBody(
         renderResultsSummary(model.reveal, model.mapName, model.matchFormat),
       );
       body.append(
-        ...renderBroadcastRegions(model, callbacks, identityByPlayerName),
+        renderBroadcastRegions(
+          model,
+          callbacks,
+          identityByPlayerName,
+          broadcastState,
+        ),
       );
       body.append(renderShare(model, latest, callbacks, safeRun, captionState));
       body.append(renderCounterChallenge(model, latest, callbacks, safeRun));
@@ -3869,6 +4123,51 @@ const OVERLAY_CSS = `
   #${OVERLAY_ID} .broadcast-timeline-marker[data-kind="spawn"],
   #${OVERLAY_ID} .broadcast-timeline-marker[data-kind="finish"] { --broadcast-kind: var(--rp-text-dim); }
 
+  /* ---- Broadcast drawer (spec item 7): Agents / Events / Timeline / Analysis.
+     Every panel is always in the DOM (BroadcastComposition.ts's own
+     contract). At desktop width every panel but Analysis stays visible with
+     no tab bar — there is no narrow-viewport reason to hide them — and
+     Analysis is gated behind the explicit header toggle ("default view is
+     always curated, analyst mode never auto-opens"). The mobile breakpoint
+     below flips this to one-panel-at-a-time behind real tabs. ---- */
+  #${OVERLAY_ID} .broadcast-drawer,
+  #${OVERLAY_ID} .broadcast-drawer-panels { display: contents; }
+  #${OVERLAY_ID} .broadcast-drawer-tabs { display: none; }
+  #${OVERLAY_ID} .broadcast-drawer-panel { display: block; }
+  #${OVERLAY_ID} .broadcast-drawer-panel[data-tab-id="analysis"] { display: none; }
+  #${OVERLAY_ID}[data-analyst-mode="true"] .broadcast-drawer-panel[data-tab-id="analysis"] { display: block; }
+
+  /* ---- Analyst mode (spec item 5) ---- */
+  #${OVERLAY_ID} .broadcast-analyst { display: grid; gap: 12px; }
+  #${OVERLAY_ID} .broadcast-analyst-chart-heading,
+  #${OVERLAY_ID} .broadcast-analyst-decisions-heading,
+  #${OVERLAY_ID} .broadcast-analyst-events-heading {
+    margin: 0 0 7px;
+    color: var(--rp-muted);
+    font-size: 11px;
+    font-weight: 800;
+    letter-spacing: 0.05em;
+    text-transform: uppercase;
+  }
+  #${OVERLAY_ID} .broadcast-analyst-chart-list { list-style: none; margin: 0; padding: 0; display: grid; gap: 5px; }
+  #${OVERLAY_ID} .broadcast-analyst-chart-row { display: grid; grid-template-columns: 84px 1fr 28px; align-items: center; gap: 8px; font-size: 11px; }
+  #${OVERLAY_ID} .broadcast-analyst-chart-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--rp-text-dim); }
+  #${OVERLAY_ID} .broadcast-analyst-chart-track { height: 7px; border-radius: var(--rp-r-pill); background: var(--rp-surface-3); overflow: hidden; }
+  #${OVERLAY_ID} .broadcast-analyst-chart-bar { display: block; height: 100%; width: calc(var(--broadcast-chart-fraction, 0) * 100%); background: var(--rp-accent); border-radius: var(--rp-r-pill); }
+  #${OVERLAY_ID} .broadcast-analyst-chart-count { text-align: right; color: var(--rp-muted); font-variant-numeric: tabular-nums; }
+  #${OVERLAY_ID} .broadcast-analyst-unavailable,
+  #${OVERLAY_ID} .broadcast-analyst-empty { margin: 0; color: var(--rp-muted); font-size: 12px; }
+  #${OVERLAY_ID} .broadcast-analyst-decisions { overflow-x: auto; }
+  #${OVERLAY_ID} .broadcast-analyst-decisions-table { width: 100%; border-collapse: collapse; font-size: 11px; }
+  #${OVERLAY_ID} .broadcast-analyst-decisions-table th,
+  #${OVERLAY_ID} .broadcast-analyst-decisions-table td { padding: 5px 6px; border-bottom: 1px solid var(--rp-line); text-align: left; overflow-wrap: anywhere; }
+  #${OVERLAY_ID} .broadcast-analyst-events-list { list-style: none; margin: 0; padding: 0; display: grid; gap: 5px; max-height: 220px; overflow-y: auto; }
+  #${OVERLAY_ID} .broadcast-analyst-events-row { padding: 6px 8px; border: 1px solid var(--rp-line); border-radius: var(--rp-r-xs); background: var(--rp-surface-2); font-size: 11px; color: var(--rp-text-dim); overflow-wrap: anywhere; }
+
+  /* Analyst-mode header toggle: same look as the ambient toggle, so it reads
+     as a peer control, not a second, differently-styled affordance. */
+  #${OVERLAY_ID} .rp-analyst-toggle[aria-pressed="true"] { border-color: var(--rp-accent); color: var(--rp-accent); background: var(--rp-accent-soft); }
+
   /* ---- Reactions / markers ---- */
   #${OVERLAY_ID} .rp-marker-list { display: grid; grid-template-columns: repeat(var(--rp-marker-columns, 4), minmax(0, 1fr)); gap: 6px; margin-top: 9px; }
   #${OVERLAY_ID} .rp-marker-button {
@@ -4158,9 +4457,7 @@ const OVERLAY_CSS = `
   #${OVERLAY_ID}[data-ambient="true"] .rp-leader-list { gap: 3px; margin-top: 5px; }
   #${OVERLAY_ID}[data-ambient="true"] .rp-leader { padding: 1px 0 5px; font-size: 13px; }
   #${OVERLAY_ID}[data-ambient="true"] .rp-headline { display: none; }
-  #${OVERLAY_ID}[data-ambient="true"] .broadcast-rail,
-  #${OVERLAY_ID}[data-ambient="true"] .broadcast-war-room,
-  #${OVERLAY_ID}[data-ambient="true"] .broadcast-timeline { display: none; }
+  #${OVERLAY_ID}[data-ambient="true"] .broadcast-drawer { display: none; }
   #${OVERLAY_ID}[data-ambient="true"] .rp-leader:nth-child(n + 3) { display: none; }
   #${OVERLAY_ID}[data-ambient="true"] .rp-markers { grid-column: 1 / -1; }
   #${OVERLAY_ID}[data-ambient="true"] .rp-marker-list { grid-template-columns: repeat(var(--rp-marker-columns, 4), 30px); gap: 5px; margin: 0; justify-content: space-between; }
@@ -4223,6 +4520,171 @@ const OVERLAY_CSS = `
     #${OVERLAY_ID} .rp-marker-label { font-size: 9px; }
     /* The hero countdown eases down one step on the narrow sheet. */
     #${OVERLAY_ID} .rp-countdown { font-size: 36px; }
+    /* ---- Broadcast drawer: narrow/short viewport flips to a real tab bar,
+       one panel visible at a time (BroadcastComposition.ts's own contract:
+       CSS alone decides desktop vs. narrow-viewport display). ---- */
+    #${OVERLAY_ID} .broadcast-drawer,
+    #${OVERLAY_ID} .broadcast-drawer-panels { display: block; }
+    #${OVERLAY_ID} .broadcast-drawer {
+      border: 1px solid var(--rp-line);
+      border-radius: var(--rp-r-lg);
+      background: var(--rp-surface);
+      overflow: hidden;
+    }
+    #${OVERLAY_ID} .broadcast-drawer-tabs {
+      display: flex;
+      gap: 2px;
+      padding: 4px;
+      background: var(--rp-surface-2);
+      border-bottom: 1px solid var(--rp-line);
+    }
+    #${OVERLAY_ID} .broadcast-drawer-tab {
+      flex: 1 1 0;
+      min-height: 34px;
+      padding: 6px 4px;
+      border: none;
+      border-radius: var(--rp-r-xs);
+      background: transparent;
+      color: var(--rp-muted);
+      font-size: 10.5px;
+      font-weight: 750;
+      cursor: pointer;
+    }
+    #${OVERLAY_ID} .broadcast-drawer-tab[aria-selected="true"] {
+      background: var(--rp-accent-soft);
+      color: var(--rp-accent);
+    }
+    #${OVERLAY_ID} .broadcast-drawer-tab-badge {
+      margin-left: 4px;
+      display: inline-block;
+      min-width: 15px;
+      padding: 0 4px;
+      border-radius: var(--rp-r-pill);
+      background: var(--rp-danger);
+      color: #fff;
+      font-size: 9px;
+      font-weight: 800;
+    }
+    #${OVERLAY_ID} .broadcast-drawer-panels { max-height: 240px; overflow: auto; }
+    #${OVERLAY_ID} .broadcast-drawer-panel {
+      display: none;
+      padding: 10px;
+      border: none;
+      border-radius: 0;
+      background: transparent;
+    }
+    #${OVERLAY_ID} .broadcast-drawer-panel[data-tab-active="true"] { display: block; }
+    #${OVERLAY_ID} .broadcast-drawer-panel > .broadcast-rail,
+    #${OVERLAY_ID} .broadcast-drawer-panel > .broadcast-war-room,
+    #${OVERLAY_ID} .broadcast-drawer-panel > .broadcast-timeline,
+    #${OVERLAY_ID} .broadcast-drawer-panel > .broadcast-analyst {
+      border: none;
+      border-radius: 0;
+      background: transparent;
+      padding: 0;
+    }
+    /* The desktop analyst toggle has no effect at this width — the
+       Analysis tab is the mobile entry point instead (spec: "a SEPARATE,
+       EXPLICIT toggle from the mobile drawer's Analysis tab"); this
+       overrides the desktop [data-analyst-mode] gate so the panel only
+       shows here when it is the active tab, never both/neither. */
+    #${OVERLAY_ID}[data-analyst-mode="true"] .broadcast-drawer-panel[data-tab-id="analysis"] { display: none; }
+    #${OVERLAY_ID}[data-analyst-mode="true"] .broadcast-drawer-panel[data-tab-id="analysis"][data-tab-active="true"] { display: block; }
+    #${OVERLAY_ID} .rp-analyst-toggle { display: none; }
+  }
+
+  /* ---- Mobile landscape (e.g. 844x390): the portrait bottom sheet is
+     full-width, but a short+wide viewport needs the OPPOSITE trade-off —
+     map dominant across most of the width, overlay collapsed to a slim
+     reachable strip along one edge, rather than the accidental "still eats
+     over half the screen" the shared (max-height:430px) query alone
+     produced. ---- */
+  @media (max-height: 430px) and (min-width: 560px) {
+    #${OVERLAY_ID}:not([data-ambient="true"]) {
+      top: 8px;
+      right: 8px;
+      bottom: 8px;
+      left: auto;
+      width: min(300px, 46vw);
+    }
+    #${OVERLAY_ID}:not([data-ambient="true"])[data-state] {
+      max-height: none;
+      height: calc(100% - 16px);
+    }
+    #${OVERLAY_ID}:not([data-ambient="true"]) .rp-shell::after { display: none; }
+    #${OVERLAY_ID} .broadcast-drawer-panels { max-height: 150px; }
+    #${OVERLAY_ID} .broadcast-drawer-tab { min-height: 28px; font-size: 9.5px; padding: 4px 2px; }
+  }
+
+  /* ---- Lower thirds (spec item 3): mounted as a position:fixed sibling
+     of #OVERLAY_ID directly under <body> (see mountReplayPremiereOverlay)
+     — a descendant would be clipped to the narrow side panel's box, since
+     #OVERLAY_ID's own backdrop-filter makes it a containing block for
+     fixed descendants. Being outside that scope means it does not inherit
+     the --rp-* custom properties, so the handful actually used here are
+     redeclared with the same values. ---- */
+  #${LOWER_THIRD_HOST_ID} {
+    --rp-bg-solid: #0a0f1c;
+    --rp-text: #f1f5f9;
+    --rp-text-dim: #cbd5e1;
+    --rp-line-strong: rgba(148, 163, 184, 0.34);
+    --rp-accent: #56c7f5;
+    --rp-positive: #34d399;
+    --rp-danger: #f87171;
+    --rp-mk-betrayal: #f87171;
+    --rp-controlled: #a78bfa;
+    --rp-shadow: 0 20px 48px rgba(0, 0, 0, 0.45);
+    --rp-r-lg: 14px;
+    --rp-r-pill: 999px;
+    position: fixed;
+    left: 50%;
+    bottom: 24px;
+    transform: translateX(-50%);
+    z-index: 40000;
+    pointer-events: none;
+    max-width: min(560px, calc(100vw - 32px));
+    font: 14px/1.4 Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  }
+  :root[data-theme="light"] #${LOWER_THIRD_HOST_ID} {
+    --rp-bg-solid: #f8fafc;
+    --rp-text: #0f172a;
+    --rp-text-dim: #334155;
+    --rp-line-strong: rgba(15, 23, 42, 0.2);
+    --rp-accent: #0284c7;
+    --rp-positive: #059669;
+    --rp-danger: #dc2626;
+    --rp-mk-betrayal: #dc2626;
+    --rp-controlled: #7c3aed;
+    --rp-shadow: 0 16px 36px rgba(15, 23, 42, 0.18);
+  }
+  #${LOWER_THIRD_HOST_ID} .broadcast-lower-third {
+    --broadcast-kind: var(--rp-accent);
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 11px 18px;
+    border: 1px solid var(--rp-line-strong);
+    border-radius: var(--rp-r-lg);
+    background: var(--rp-bg-solid);
+    color: var(--rp-text);
+    box-shadow: var(--rp-shadow);
+    opacity: 1;
+  }
+  #${LOWER_THIRD_HOST_ID} .broadcast-lower-third[data-kind="betrayal"] { --broadcast-kind: var(--rp-mk-betrayal); }
+  #${LOWER_THIRD_HOST_ID} .broadcast-lower-third[data-kind="elimination"],
+  #${LOWER_THIRD_HOST_ID} .broadcast-lower-third[data-kind="first_strike"] { --broadcast-kind: var(--rp-danger); }
+  #${LOWER_THIRD_HOST_ID} .broadcast-lower-third[data-kind="alliance"] { --broadcast-kind: var(--rp-positive); }
+  #${LOWER_THIRD_HOST_ID} .broadcast-lower-third[data-kind="plan_change"] { --broadcast-kind: var(--rp-controlled); }
+  #${LOWER_THIRD_HOST_ID} .broadcast-lower-third-glyph { color: var(--broadcast-kind); font-weight: 850; font-size: 16px; }
+  #${LOWER_THIRD_HOST_ID} .broadcast-lower-third-headline { font-weight: 700; overflow-wrap: anywhere; }
+  #${LOWER_THIRD_HOST_ID} .broadcast-lower-third[data-reduced-motion="false"] {
+    opacity: 0;
+    transform: translateY(12px);
+    animation: rp-lower-third-enter 320ms ease-out forwards;
+  }
+  @keyframes rp-lower-third-enter {
+    from { opacity: 0; transform: translateY(12px); }
+    to { opacity: 1; transform: translateY(0); }
   }
 
   /* ---- Reduced motion ---- */
