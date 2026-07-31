@@ -99,6 +99,7 @@ describe("player-profile-page", () => {
                   meanRank: null,
                 },
                 armyStrength: null,
+                reliability: null,
               },
               social: {
                 alliancesInitiated: {

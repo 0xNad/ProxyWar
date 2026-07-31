@@ -1704,6 +1704,7 @@
     "territory_absolute_note": "The real map denominator wasn't resolvable for any retained episode, so this shows absolute tiles and rank instead of a share percentage.",
     "mean_rank": "avg rank #{rank}",
     "army_strength": "Relative army strength",
+    "reliability": "Reliability",
     "alliances_initiated": "Alliances initiated",
     "alliance_acceptance_rate": "Alliance acceptance rate",
     "betrayal_count": "Betrayals",

@@ -118,6 +118,7 @@ function renderFingerprint(slice: AgentStatsSlice): TemplateResult {
     metricRow("agent_stats.economic_focus", f.economicFocus, formatPercent),
     territoryRow(f.territory),
     metricRow("agent_stats.army_strength", f.armyStrength, formatPercent),
+    metricRow("agent_stats.reliability", f.reliability, formatPercent),
   ];
   const anyShown = rows.some((row) => row !== nothing);
   return html`

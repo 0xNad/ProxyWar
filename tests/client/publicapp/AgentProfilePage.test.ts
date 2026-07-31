@@ -248,6 +248,12 @@ describe("agent-profile-page", () => {
                       meanRank: null,
                     },
                     armyStrength: null,
+                    reliability: {
+                      value: 0.975,
+                      sampleSize: 14143,
+                      threshold: 30,
+                      methodology: "1 - (fallbackCount / decisionCount)",
+                    },
                   },
                   social: {
                     alliancesInitiated: {
@@ -274,6 +280,7 @@ describe("agent-profile-page", () => {
     await flushMicrotasks();
 
     expect(el.textContent).toContain("agent_stats.fingerprint_heading");
+    expect(el.textContent).toContain("98%"); // reliability, rounded
     expect(el.textContent).toContain("31%");
     expect(el.textContent).toContain("29%");
     expect(el.textContent).toContain("Ron SWGY");

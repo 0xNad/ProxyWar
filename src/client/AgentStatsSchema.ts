@@ -43,6 +43,7 @@ const AgentFingerprintSchema = z.object({
   economicFocus: AgentMetricSchema.nullable(),
   territory: TerritoryShareResultSchema,
   armyStrength: AgentMetricSchema.nullable(),
+  reliability: AgentMetricSchema.nullable(),
 });
 
 const AgentSocialRecordSchema = z.object({
