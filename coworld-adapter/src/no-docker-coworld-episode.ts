@@ -28,6 +28,14 @@ import {
   parseCoworldSeedConfig,
   type CoworldEpisodeSeedContract,
 } from "./coworld-seed.ts";
+import {
+  coworldPostgameGraceMs,
+  finalizeCoworldPlayers,
+  prepareCoworldTerminalArtifacts,
+  runCoworldTerminalLifecycle,
+  serializeCoworldJsonArtifact,
+  type CoworldPlayerFinalization,
+} from "./coworld-terminal-lifecycle.ts";
 
 const localRoot = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
@@ -163,6 +171,7 @@ class CoworldProtocolServer {
   private spectatorReplay: Record<string, unknown> | null = null;
   private replayPayload: unknown = null;
   private portValue: number | null = null;
+  private acceptingPlayers = true;
 
   constructor(private readonly config: CoworldConfig) {
     this.server.on("upgrade", (request, socket, head) => {
@@ -295,10 +304,13 @@ class CoworldProtocolServer {
     );
   }
 
-  sendFinal(): void {
-    for (const [slot, websocket] of this.players.entries()) {
-      websocket.send(JSON.stringify({ type: "final", slot }));
-    }
+  async finalizePlayers(timeoutMs: number): Promise<CoworldPlayerFinalization> {
+    this.acceptingPlayers = false;
+    return await finalizeCoworldPlayers(
+      this.players,
+      WebSocket.OPEN,
+      timeoutMs,
+    );
   }
 
   private async decide(
@@ -380,6 +392,11 @@ class CoworldProtocolServer {
     head: Buffer,
     url: URL,
   ): void {
+    if (!this.acceptingPlayers) {
+      socket.write("HTTP/1.1 410 Gone\r\n\r\n");
+      socket.destroy();
+      return;
+    }
     const slot = Number(url.searchParams.get("slot"));
     const token = url.searchParams.get("token") ?? "";
     if (
@@ -412,10 +429,7 @@ class CoworldProtocolServer {
     });
   }
 
-  private handlePlayerMessage(
-    slot: number,
-    data: import("ws").RawData,
-  ): void {
+  private handlePlayerMessage(slot: number, data: import("ws").RawData): void {
     let message: Record<string, unknown>;
     try {
       message = JSON.parse(String(data));
@@ -686,19 +700,47 @@ async function runStandaloneNoDockerProof(): Promise<void> {
     await server.waitForPlayers();
     const result = await runProxyWarEpisode(config, workspace, server);
     server.setReplayPayload(result.replayPayload);
-    await fs.writeFile(
-      path.join(workspace, "results.json"),
-      `${JSON.stringify(result.results, null, 2)}\n`,
-    );
-    await fs.writeFile(
-      path.join(workspace, "replay"),
-      `${JSON.stringify(result.replayPayload, null, 2)}\n`,
-    );
     if (process.env.PROXYWAR_SKIP_ROUTE_CHECKS !== "1") {
       await runReplayChecks(port);
     }
-    server.sendFinal();
-    await waitForPlayersToExit(playerProcesses);
+    const graceMs = coworldPostgameGraceMs(
+      process.env.COWORLD_POSTGAME_SERVER_MS,
+    );
+    await runCoworldTerminalLifecycle({
+      prepare: async () => {
+        const replayBody = serializeCoworldJsonArtifact(
+          result.replayPayload,
+          "replay",
+        );
+        const resultsBody = serializeCoworldJsonArtifact(
+          result.results,
+          "results",
+        );
+        return await prepareCoworldTerminalArtifacts({
+          replay: {
+            uri: path.join(workspace, "replay"),
+            body: replayBody,
+            contentType: "application/json",
+          },
+          results: {
+            uri: path.join(workspace, "results.json"),
+            body: resultsBody,
+            contentType: "application/json",
+          },
+        });
+      },
+      finalizePlayers: async () => {
+        const finalization = await server.finalizePlayers(graceMs);
+        await waitForPlayersToExit(playerProcesses, graceMs);
+        return finalization;
+      },
+      beforePublish: (finalization) => {
+        logCoworldPlayerFinalization(finalization, graceMs);
+      },
+      publishReplay: async (prepared) => await prepared.replay.publish(),
+      publishResults: async (prepared) => await prepared.results.publish(),
+      discard: async (prepared) => await prepared.discard(),
+    });
     await fs.writeFile(
       path.join(workspace, "coworld-report.md"),
       coworldReport({
@@ -743,30 +785,52 @@ async function runCoworldGameContainer(): Promise<void> {
     await server.waitForPlayers();
     const result = await runProxyWarEpisode(config, workspace, server);
     server.setReplayPayload(result.replayPayload);
-    await writeUri(
-      requiredEnv("COGAME_RESULTS_URI"),
-      `${JSON.stringify(result.results, null, 2)}\n`,
-      "application/json",
+    const graceMs = coworldPostgameGraceMs(
+      process.env.COWORLD_POSTGAME_SERVER_MS,
     );
-    await writeUri(
-      requiredEnv("COGAME_SAVE_REPLAY_URI"),
-      `${JSON.stringify(result.replayPayload, null, 2)}\n`,
-      "application/json",
-    );
-    server.sendFinal();
-    await sleep(Number(process.env.COWORLD_POSTGAME_SERVER_MS ?? 1500));
-    console.log(
-      JSON.stringify(
-        {
-          ok: true,
-          proof: "coworld-container-proxywar-episode",
-          workspace,
-          proxyWarArtifactDir: result.proxyWarArtifactDir,
-        },
-        null,
-        2,
-      ),
-    );
+    await runCoworldTerminalLifecycle({
+      prepare: async () => {
+        const replayBody = serializeCoworldJsonArtifact(
+          result.replayPayload,
+          "replay",
+        );
+        const resultsBody = serializeCoworldJsonArtifact(
+          result.results,
+          "results",
+        );
+        return await prepareCoworldTerminalArtifacts({
+          replay: {
+            uri: requiredEnv("COGAME_SAVE_REPLAY_URI"),
+            body: replayBody,
+            contentType: "application/json",
+          },
+          results: {
+            uri: requiredEnv("COGAME_RESULTS_URI"),
+            body: resultsBody,
+            contentType: "application/json",
+          },
+        });
+      },
+      finalizePlayers: () => server.finalizePlayers(graceMs),
+      beforePublish: (finalization) => {
+        logCoworldPlayerFinalization(finalization, graceMs);
+        console.log(
+          JSON.stringify(
+            {
+              proof: "coworld-container-proxywar-episode",
+              phase: "publishing-terminal-artifacts",
+              workspace,
+              proxyWarArtifactDir: result.proxyWarArtifactDir,
+            },
+            null,
+            2,
+          ),
+        );
+      },
+      publishReplay: async (prepared) => await prepared.replay.publish(),
+      publishResults: async (prepared) => await prepared.results.publish(),
+      discard: async (prepared) => await prepared.discard(),
+    });
   } finally {
     await server.close();
   }
@@ -979,7 +1043,9 @@ async function runProxyWarEpisode(
         memTelemetrySnapshots += 1;
         // Hosted default stays every-10 (lean log tail); local repro can set
         // PROXYWAR_MEM_TELEMETRY_EVERY=1 for per-decision-step heap resolution.
-        const memEvery = Number(process.env.PROXYWAR_MEM_TELEMETRY_EVERY ?? "10");
+        const memEvery = Number(
+          process.env.PROXYWAR_MEM_TELEMETRY_EVERY ?? "10",
+        );
         if (memEvery <= 1 || memTelemetrySnapshots % memEvery === 1) {
           logMemTelemetry("snapshot", snapshot.turnNumber);
         }
@@ -1170,19 +1236,28 @@ function startPlayers(
   );
 }
 
-async function waitForPlayersToExit(children: ChildProcess[]): Promise<void> {
+async function waitForPlayersToExit(
+  children: ChildProcess[],
+  timeoutMs: number,
+): Promise<void> {
   await Promise.all(
     children.map(
       (child) =>
         new Promise<void>((resolve, reject) => {
           let stderr = "";
+          let settled = false;
           child.stderr?.on("data", (chunk) => {
             stderr += String(chunk);
           });
           child.stdout?.on("data", (chunk) => {
             process.stdout.write(`[player ${child.pid}] ${chunk}`);
           });
-          child.on("close", (code) => {
+          const onClose = (code: number | null) => {
+            if (settled) {
+              return;
+            }
+            settled = true;
+            clearTimeout(timeout);
             if (code === 0 || code === null) {
               resolve();
             } else {
@@ -1190,7 +1265,25 @@ async function waitForPlayersToExit(children: ChildProcess[]): Promise<void> {
                 new Error(`player ${child.pid} exited ${code}: ${stderr}`),
               );
             }
-          });
+          };
+          const timeout = setTimeout(() => {
+            if (settled) {
+              return;
+            }
+            settled = true;
+            child.off("close", onClose);
+            reject(
+              new Error(
+                `player ${child.pid} did not exit within ${timeoutMs}ms after final`,
+              ),
+            );
+          }, timeoutMs);
+          child.once("close", onClose);
+
+          if (child.exitCode !== null) {
+            onClose(child.exitCode);
+            return;
+          }
         }),
     ),
   );
@@ -1347,35 +1440,6 @@ async function readUriBuffer(uri: string): Promise<Buffer> {
     return Buffer.from(await response.arrayBuffer());
   }
   return await fs.readFile(uri);
-}
-
-async function writeUri(
-  uri: string,
-  body: string | Buffer,
-  contentType: string,
-): Promise<void> {
-  if (uri.startsWith("file://")) {
-    const filePath = new URL(uri);
-    await fs.mkdir(path.dirname(filePath.pathname), { recursive: true });
-    await fs.writeFile(filePath, body);
-    return;
-  }
-  if (/^https?:\/\//.test(uri)) {
-    const response = await fetch(uri, {
-      method: "PUT",
-      headers: { "content-type": contentType },
-      // string | Buffer is a valid request body at runtime; the DOM BodyInit
-      // type (loaded alongside Node's fetch in this monorepo) doesn't model
-      // Buffer, so assert the runtime-correct type.
-      body: body as BodyInit,
-    });
-    if (!response.ok) {
-      throw new Error(`${uri} returned HTTP ${response.status}`);
-    }
-    return;
-  }
-  await fs.mkdir(path.dirname(uri), { recursive: true });
-  await fs.writeFile(uri, body);
 }
 
 async function readReplayPayload(uri: string): Promise<unknown> {
@@ -1776,6 +1840,24 @@ function requiredEnv(name: string): string {
     throw new Error(`${name} is required`);
   }
   return value;
+}
+
+function logCoworldPlayerFinalization(
+  finalization: CoworldPlayerFinalization,
+  graceMs: number,
+): void {
+  if (
+    finalization.skippedSlots.length === 0 &&
+    finalization.sendFailedSlots.length === 0 &&
+    finalization.timedOutSlots.length === 0
+  ) {
+    return;
+  }
+  console.warn(
+    `[coworld] terminal player drain reached publication boundary with ${graceMs}ms deadline: ${JSON.stringify(
+      finalization,
+    )}`,
+  );
 }
 
 function coworldReport(input: {
