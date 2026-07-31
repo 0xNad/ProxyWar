@@ -1,6 +1,7 @@
 import { html, LitElement, nothing, TemplateResult } from "lit";
 import { customElement, state } from "lit/decorators.js";
 import { unsafeSVG } from "lit/directives/unsafe-svg.js";
+import { z } from "zod";
 import { translateText } from "../Utils";
 import {
   appShellFooter,
@@ -18,7 +19,13 @@ import {
   formatDuration,
   resolveWinnerName,
 } from "./WatchPage";
-import { buildIcsEvent } from "./Ics";
+import {
+  armReminder,
+  downloadIcsFile,
+  fireReminderIfDue,
+  readReminderState,
+  type ReminderState,
+} from "./PremiereReminder";
 
 /**
  * `/` — the event lobby (spec §4 Target IA: "no longer a bare redirect to
@@ -58,21 +65,90 @@ import { buildIcsEvent } from "./Ics";
  *      to replace this placeholder), so state C never claims a drama-score
  *      selection it isn't actually running.
  *
- * DELIBERATE DEFERRAL: states A/B stay exactly as spoiler-conservative on
- * participant identity as before — no agent name, emblem, version, color,
- * or Builder was added here. `CoworldLeaguePremiereCard` is intentionally
- * limited to 5 fields precisely so the premiere leak audit can guarantee no
- * held premiere is ever spoiled; widening it (or sourcing identity from
- * elsewhere) needs its own security review of the leak-surface list before
- * it's safe, which is out of scope for this pass.
+ * PARTICIPANT IDENTITY (states A/B): the deliberate deferral this file
+ * used to document here is now LIFTED — this is that follow-up security
+ * review. States A/B additionally fetch
+ * `GET /api/premieres/:premiereId/featured-match`, the one narrow,
+ * per-live-premiere channel `FeaturedMatchParticipantCard`s are ever
+ * allowed through (see that route's and `FeaturedMatchParticipants.ts`'s
+ * own docs for why a bulk read-model field was never safe). Most live/
+ * scheduled premieres have no backing `FeaturedMatch` record at all —
+ * plain FIFO/exhibition admission is still the common case — and that's
+ * the normal, non-error `{match:null, participants:[]}` response:
+ * renders EXACTLY as before, no participant section. When a record does
+ * exist, its participants render as compact cards (emblem, display name,
+ * exact version label, Builder attribution) ONLY once the server's own
+ * state gate (`resolveFeaturedMatchParticipantCards`) has already
+ * published/revealed/archived it — a `"scheduled"` record still reports
+ * an empty `participants` array, so this client never has to re-derive
+ * that gate itself. Never any result/outcome field: the participant card
+ * shape has no such field to leak in the first place.
  */
 
-/** localStorage key prefix for the local-only "Remind me" reminder state (see the class's Remind-me section for exactly what this does and doesn't guarantee). */
-const REMINDER_KEY_PREFIX = "proxywar:premiere-reminder:";
+/**
+ * One participant of a `FeaturedMatch`, resolved to safe display identity
+ * server-side (`FeaturedMatchParticipantCard` in
+ * `FeaturedMatchParticipants.ts`) — this shape has no result/outcome
+ * field to begin with, so nothing here can leak one no matter how it's
+ * rendered.
+ */
+const heroParticipantCardSchema = z.object({
+  playerName: z.string(),
+  displayName: z.string(),
+  agentSlug: z.string().nullable(),
+  emblemSvg: z.string().nullable(),
+  primaryColor: z.string().nullable(),
+  secondaryColor: z.string().nullable(),
+  versionLabel: z.string().nullable(),
+  builderId: z.string().nullable(),
+  builderDisplayName: z.string().nullable(),
+});
+type HeroParticipantCard = z.infer<typeof heroParticipantCardSchema>;
+
+/**
+ * Only `participants` is validated. The response's `match` field (the
+ * full `PublicFeaturedMatch`) is never read here — a `"scheduled"`
+ * record already reports an empty `participants` array server-side
+ * (`resolveFeaturedMatchParticipantCards`'s own state gate), so checking
+ * `participants.length` alone is equivalent to, and simpler than,
+ * separately checking `match !== null` first.
+ */
+const premiereFeaturedMatchResponseSchema = z.object({
+  schemaVersion: z.literal(1),
+  participants: z.array(heroParticipantCardSchema),
+});
+
+/**
+ * Fetches the one narrow, per-live-premiere participant-identity channel
+ * (`GET /api/premieres/:premiereId/featured-match`) — throws on a network
+ * failure or a schema mismatch, same contract as `fetchReadModel`;
+ * `loadHeroParticipants` swallows either into "no participant section".
+ */
+async function fetchHeroParticipants(
+  premiereId: string,
+  fetchImpl: typeof fetch = fetch,
+): Promise<HeroParticipantCard[]> {
+  const response = await fetchImpl(
+    `/api/premieres/${encodeURIComponent(premiereId)}/featured-match`,
+    {
+      method: "GET",
+      headers: { Accept: "application/json" },
+      credentials: "same-origin",
+      cache: "no-store",
+    },
+  );
+  if (!response.ok) {
+    throw new Error(`hero_participants_fetch_failed_${response.status}`);
+  }
+  const body: unknown = await response.json();
+  return premiereFeaturedMatchResponseSchema.parse(body).participants;
+}
+
 @customElement("lobby-page")
 export class LobbyPage extends LitElement {
   @state() private loadState: "loading" | "ready" | "error" = "loading";
   @state() private readModel: ReadModel | null = null;
+  @state() private heroParticipants: HeroParticipantCard[] = [];
   /** Drives hero state A's elapsed timer and state B's countdown — ticked ~1s by a component-owned interval, never a longer-lived timer and never the server clock continuously (see class doc on why the countdown stays client-clock-only). */
   @state() private nowMs = Date.now();
   private tickHandle: number | null = null;
@@ -89,7 +165,9 @@ export class LobbyPage extends LitElement {
       this.nowMs = Date.now();
       const live = this.readModel?.premieres.live;
       if (live !== null && live !== undefined && !live.premierePageLive) {
-        this.fireReminderIfDue(live, this.nowMs);
+        if (fireReminderIfDue(live.premiereId, live.scheduledAt, this.nowMs)) {
+          this.requestUpdate();
+        }
       }
     }, 1000);
   }
@@ -104,11 +182,40 @@ export class LobbyPage extends LitElement {
 
   private async load(): Promise<void> {
     this.loadState = "loading";
+    this.heroParticipants = [];
     try {
       this.readModel = await fetchReadModel();
       this.loadState = "ready";
+      const live = this.readModel.premieres.live;
+      if (live !== null) {
+        void this.loadHeroParticipants(live.premiereId);
+      }
     } catch {
       this.loadState = "error";
+    }
+  }
+
+  /**
+   * Fires alongside — never blocking — `load()`'s own ready/error
+   * transition: a failure here degrades silently to "no participant
+   * section" (states A/B's existing rendering, untouched), it never
+   * flips `loadState` to `"error"` on its own and never shows a second
+   * spinner.
+   *
+   * Guarded by `isConnected`, the same disconnect-race guard this
+   * codebase already uses for exactly this "fetch resolves after
+   * teardown" case (see `PatternInput.ts`'s `connectedCallback`) —
+   * `heroParticipants` MUST never be written after `disconnectedCallback`
+   * has already run.
+   */
+  private async loadHeroParticipants(premiereId: string): Promise<void> {
+    try {
+      const participants = await fetchHeroParticipants(premiereId);
+      if (!this.isConnected) return;
+      this.heroParticipants = participants;
+    } catch {
+      // Network failure or a schema mismatch — leave `heroParticipants`
+      // empty, i.e. exactly today's rendering.
     }
   }
 
@@ -253,6 +360,7 @@ export class LobbyPage extends LitElement {
               ${translateText("lobby.live_elapsed", { duration: elapsed })}
             </p>`
           : nothing}
+        ${this.renderHeroParticipants()}
         <div class="mt-4">
           <a
             href="/premiere/${encodeURIComponent(live.premiereId)}"
@@ -276,7 +384,7 @@ export class LobbyPage extends LitElement {
     const countdown = scheduledValid
       ? formatDuration(Math.max(0, scheduled.getTime() - this.nowMs))
       : null;
-    const reminder = this.reminderState(live.premiereId);
+    const reminder = readReminderState(live.premiereId);
     return this.heroShell(
       html`
         <span
@@ -308,6 +416,7 @@ export class LobbyPage extends LitElement {
               ${translateText("lobby.countdown_note")}
             </p>`
           : nothing}
+        ${this.renderHeroParticipants()}
         <div class="mt-4 flex flex-wrap items-center gap-3">
           <a
             href="/premiere/${encodeURIComponent(live.premiereId)}"
@@ -330,6 +439,70 @@ export class LobbyPage extends LitElement {
     );
   }
 
+  /**
+   * Compact participant cards shared by hero states A and B. Nothing —
+   * not even an empty section — when `heroParticipants` is empty, so a
+   * plain FIFO/exhibition premiere with no backing `FeaturedMatch`
+   * record (the common case) renders EXACTLY as it did before this
+   * feature existed. Deliberately reads only `displayName`/`emblemSvg`/
+   * `versionLabel`/`builderDisplayName` off each card — never anything
+   * result/outcome-shaped, and the card shape has no such field anyway.
+   */
+  private renderHeroParticipants(): TemplateResult {
+    if (this.heroParticipants.length === 0) {
+      return html``;
+    }
+    return html`
+      <div class="mt-4 border-t border-line pt-4">
+        <p class="text-sm font-black uppercase tracking-wide text-ink-muted">
+          ${translateText("lobby.hero_participants_heading")}
+        </p>
+        <ul class="mt-2 flex flex-col gap-2" role="list">
+          ${this.heroParticipants.map((participant) =>
+            this.renderHeroParticipantRow(participant),
+          )}
+        </ul>
+      </div>
+    `;
+  }
+
+  private renderHeroParticipantRow(
+    participant: HeroParticipantCard,
+  ): TemplateResult {
+    return html`
+      <li
+        class="flex items-center gap-3 rounded-md border border-line bg-surface-2 px-3 py-2"
+      >
+        ${participant.emblemSvg !== null
+          ? html`<span
+              class="inline-flex h-6 w-6 shrink-0 overflow-hidden"
+              aria-hidden="true"
+              >${unsafeSVG(participant.emblemSvg)}</span
+            >`
+          : html`<span
+              class="inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-full border border-line text-xs text-ink-muted"
+              aria-hidden="true"
+              >?</span
+            >`}
+        <span class="min-w-0 flex-1 truncate text-sm font-semibold text-ink"
+          >${participant.displayName}</span
+        >
+        ${participant.versionLabel !== null
+          ? html`<span class="font-mono text-xs text-ink-muted"
+              >${participant.versionLabel}</span
+            >`
+          : nothing}
+        ${participant.builderDisplayName !== null
+          ? html`<span class="text-xs text-ink-muted"
+              >${translateText("lobby.hero_participant_builder", {
+                builder: participant.builderDisplayName,
+              })}</span
+            >`
+          : nothing}
+      </li>
+    `;
+  }
+
   // ---- Add to calendar (ICS) ---------------------------------------------
 
   private renderAddToCalendar(
@@ -345,7 +518,7 @@ export class LobbyPage extends LitElement {
     `;
   }
 
-  /** Client-side only, no server round-trip — builds the .ics in-browser (`Ics.ts`) and offers it as a Blob download. `title` uses ONLY already-safe fields (round number, map label), same participant-identity constraint as the hero itself (see class doc). */
+  /** Client-side only, no server round-trip — see `PremiereReminder.ts`'s `downloadIcsFile`. `title` uses ONLY already-safe fields (round number, map label), same participant-identity constraint as the hero itself (see class doc). */
   private downloadIcs(
     event: MouseEvent,
     live: NonNullable<ReadModel["premieres"]["live"]>,
@@ -356,71 +529,21 @@ export class LobbyPage extends LitElement {
         ? `Proxy War Premiere — Round ${live.roundNumber} (${live.mapLabel})`
         : `Proxy War Premiere (${live.mapLabel})`;
     const url = `${window.location.origin}/premiere/${encodeURIComponent(live.premiereId)}`;
-    const ics = buildIcsEvent({ title, scheduledAt: live.scheduledAt, url });
-    const objectUrl = URL.createObjectURL(
-      new Blob([ics], { type: "text/calendar;charset=utf-8" }),
+    downloadIcsFile(
+      { title, scheduledAt: live.scheduledAt, url },
+      `proxy-war-premiere-${live.premiereId}`,
     );
-    const anchor = document.createElement("a");
-    anchor.href = objectUrl;
-    anchor.download = `proxy-war-premiere-${live.premiereId}.ics`;
-    anchor.click();
-    URL.revokeObjectURL(objectUrl);
   }
 
   // ---- Remind me (local, same-tab only) ----------------------------------
   //
-  // PURELY client-side, no server write (spec: "Remind me (local)"). This
-  // codebase has no service worker, so a reminder can never survive a
-  // closed tab or deliver an OS-level push notification — the button's own
-  // tooltip says exactly that. "Armed" persists in localStorage so a
-  // reload doesn't re-prompt; "fired" persists so a reload after start
-  // time doesn't re-show the cue or re-flash the tab title.
-
-  private reminderState(premiereId: string): "idle" | "armed" | "fired" {
-    try {
-      const raw = localStorage.getItem(`${REMINDER_KEY_PREFIX}${premiereId}`);
-      return raw === "armed" || raw === "fired" ? raw : "idle";
-    } catch {
-      return "idle";
-    }
-  }
-
-  private armReminder(premiereId: string): void {
-    try {
-      localStorage.setItem(`${REMINDER_KEY_PREFIX}${premiereId}`, "armed");
-    } catch {
-      // Storage unavailable (private browsing, quota) — no-op this session, never a crash.
-    }
-    this.requestUpdate();
-  }
-
-  /** Called every tick while a premiere is upcoming. Fires once, at or after `scheduledAt`: marks "fired" in localStorage and flashes the document title so the cue is visible even from a background tab — still requires the tab to stay open (see the button's tooltip copy). */
-  private fireReminderIfDue(
-    live: NonNullable<ReadModel["premieres"]["live"]>,
-    nowMs: number,
-  ): void {
-    if (this.reminderState(live.premiereId) !== "armed") return;
-    const startMs = Date.parse(live.scheduledAt);
-    if (Number.isNaN(startMs) || nowMs < startMs) return;
-    try {
-      localStorage.setItem(`${REMINDER_KEY_PREFIX}${live.premiereId}`, "fired");
-    } catch {
-      // Best effort — the visual cue still renders this tick regardless.
-    }
-    // Checked without a trailing space: the DOM's title-setting algorithm
-    // trims trailing whitespace, so `LIVE: ${title}` against an EMPTY base
-    // title normalizes to the stored value "LIVE:" with no trailing space —
-    // a `startsWith("LIVE: ")` check would never match its own output in
-    // that case and re-prepend the prefix on every subsequent tick.
-    if (!document.title.startsWith("LIVE:")) {
-      document.title = `LIVE: ${document.title}`;
-    }
-    this.requestUpdate();
-  }
+  // PURELY client-side, no server write (spec: "Remind me (local)"). See
+  // `PremiereReminder.ts`'s own doc for exactly what "armed"/"fired"
+  // persistence does and doesn't guarantee.
 
   private renderRemindMe(
     live: NonNullable<ReadModel["premieres"]["live"]>,
-    state: "idle" | "armed" | "fired",
+    state: ReminderState,
   ): TemplateResult {
     if (state === "fired") {
       return html`<span class="text-sm font-semibold text-ink-muted"
@@ -433,7 +556,10 @@ export class LobbyPage extends LitElement {
         title=${translateText("lobby.remind_me_tooltip")}
         class="inline-flex min-h-11 items-center justify-center rounded-md border border-line bg-surface-2 px-4 text-sm font-bold text-ink outline-none hover:border-ink-muted focus-visible:ring-2 focus-visible:ring-accent disabled:cursor-not-allowed disabled:opacity-60"
         ?disabled=${state === "armed"}
-        @click=${() => this.armReminder(live.premiereId)}
+        @click=${() => {
+          armReminder(live.premiereId);
+          this.requestUpdate();
+        }}
       >
         ${state === "armed"
           ? translateText("lobby.remind_me_armed")

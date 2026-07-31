@@ -501,3 +501,199 @@ describe("lobby-page hero state B: Add to calendar and Remind me", () => {
     expect(remounted.textContent).not.toContain("lobby.remind_me_button");
   });
 });
+
+type HeroParticipantCardFixture = {
+  playerName: string;
+  displayName: string;
+  agentSlug: string | null;
+  emblemSvg: string | null;
+  primaryColor: string | null;
+  secondaryColor: string | null;
+  versionLabel: string | null;
+  builderId: string | null;
+  builderDisplayName: string | null;
+};
+
+function heroParticipantCard(
+  overrides: Partial<HeroParticipantCardFixture> = {},
+): HeroParticipantCardFixture {
+  return {
+    playerName: "player-one",
+    displayName: "Agent One",
+    agentSlug: "agent-one",
+    emblemSvg: null,
+    primaryColor: null,
+    secondaryColor: null,
+    versionLabel: null,
+    builderId: null,
+    builderDisplayName: null,
+    ...overrides,
+  };
+}
+
+/**
+ * Routes the global `fetch` mock by URL: the read model for
+ * `read-model.json`, and a scriptable response for the narrow
+ * `/api/premieres/:id/featured-match` participant-identity channel —
+ * `"network-error"` rejects the fetch outright, `"malformed"` resolves a
+ * body that fails the client's own schema validation, and an array
+ * resolves the real `{schemaVersion, match, participants}` shape (a
+ * `match` stub only appears once `participants` is non-empty, matching
+ * the server's own `resolveFeaturedMatchParticipantCards` gate).
+ */
+function stubReadModelAndFeaturedMatchFetch(
+  model: ReadModel,
+  featuredMatch:
+    | HeroParticipantCardFixture[]
+    | "network-error"
+    | "malformed",
+): Mock {
+  const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+    const url = typeof input === "string" ? input : input.toString();
+    if (url.includes("/featured-match")) {
+      if (featuredMatch === "network-error") {
+        throw new Error("network down");
+      }
+      if (featuredMatch === "malformed") {
+        return {
+          ok: true,
+          json: async () => ({ nonsense: true }),
+        } as Response;
+      }
+      return {
+        ok: true,
+        json: async () => ({
+          schemaVersion: 1,
+          match: featuredMatch.length > 0 ? { matchId: "fm_1" } : null,
+          participants: featuredMatch,
+        }),
+      } as Response;
+    }
+    return { ok: true, json: async () => model } as Response;
+  });
+  vi.stubGlobal("fetch", fetchMock);
+  return fetchMock;
+}
+
+describe("lobby-page hero participant identity (states A/B)", () => {
+  function liveActive(premiereId: string): ReadModel {
+    return readModel({
+      premieres: {
+        live: {
+          premiereId,
+          roundNumber: 9,
+          mapLabel: "Ashfields",
+          scheduledAt: new Date(Date.now() - 60_000).toISOString(),
+          premierePageLive: true,
+        },
+        latest: null,
+      },
+    });
+  }
+
+  function liveUpcoming(premiereId: string): ReadModel {
+    return readModel({
+      premieres: {
+        live: {
+          premiereId,
+          roundNumber: 9,
+          mapLabel: "Ashfields",
+          scheduledAt: new Date(Date.now() + 600_000).toISOString(),
+          premierePageLive: false,
+        },
+        latest: null,
+      },
+    });
+  }
+
+  it("state A: renders compact participant cards once the narrow route resolves a non-empty roster", async () => {
+    stubReadModelAndFeaturedMatchFetch(liveActive("prem_a1"), [
+      heroParticipantCard({
+        displayName: "Agent One",
+        emblemSvg: '<svg data-test-emblem="one"></svg>',
+        versionLabel: "v24",
+        builderDisplayName: "Acme Corp",
+      }),
+      heroParticipantCard({
+        displayName: "Agent Two",
+        agentSlug: "agent-two",
+        emblemSvg: null,
+        versionLabel: null,
+        builderDisplayName: null,
+      }),
+    ]);
+    const el = mount();
+    await flushMicrotasks(15);
+    expect(el.textContent).toContain("lobby.hero_participants_heading");
+    expect(el.textContent).toContain("Agent One");
+    expect(el.innerHTML).toContain('data-test-emblem="one"');
+    expect(el.textContent).toContain("v24");
+    expect(el.textContent).toContain(
+      `lobby.hero_participant_builder:${JSON.stringify({ builder: "Acme Corp" })}`,
+    );
+    expect(el.textContent).toContain("Agent Two");
+  });
+
+  it("state B: renders compact participant cards once the narrow route resolves a non-empty roster", async () => {
+    stubReadModelAndFeaturedMatchFetch(liveUpcoming("prem_b1"), [
+      heroParticipantCard({ displayName: "Agent Three", versionLabel: "v3" }),
+    ]);
+    const el = mount();
+    await flushMicrotasks(15);
+    expect(el.textContent).toContain("lobby.hero_participants_heading");
+    expect(el.textContent).toContain("Agent Three");
+    expect(el.textContent).toContain("v3");
+  });
+
+  it("state A: no backing FeaturedMatch record renders exactly as before — no participant section, no error", async () => {
+    stubReadModelAndFeaturedMatchFetch(liveActive("prem_a2"), []);
+    const el = mount();
+    await flushMicrotasks(15);
+    expect(el.textContent).not.toContain("lobby.hero_participants_heading");
+    expect(el.textContent).toContain("lobby.live_premiere_badge");
+    expect(el.querySelector('[role="alert"]')).toBeNull();
+  });
+
+  it("state B: no backing FeaturedMatch record renders exactly as before — no participant section, no error", async () => {
+    stubReadModelAndFeaturedMatchFetch(liveUpcoming("prem_b2"), []);
+    const el = mount();
+    await flushMicrotasks(15);
+    expect(el.textContent).not.toContain("lobby.hero_participants_heading");
+    expect(el.textContent).toContain("lobby.upcoming_premiere_badge");
+    expect(el.querySelector('[role="alert"]')).toBeNull();
+  });
+
+  it("an unregistered participant (agentSlug: null) falls back to its raw displayName, with no emblem or version rendered for it", async () => {
+    stubReadModelAndFeaturedMatchFetch(liveActive("prem_a3"), [
+      heroParticipantCard({
+        displayName: "unclaimed-player-9",
+        agentSlug: null,
+        emblemSvg: null,
+        versionLabel: null,
+        builderDisplayName: null,
+      }),
+    ]);
+    const el = mount();
+    await flushMicrotasks(15);
+    expect(el.textContent).toContain("unclaimed-player-9");
+    expect(el.innerHTML).not.toContain("<svg");
+    expect(el.textContent).not.toContain("lobby.hero_participant_builder");
+  });
+
+  it("a network failure on the participant-identity fetch degrades gracefully — no crash, no participant section, no lingering spinner", async () => {
+    stubReadModelAndFeaturedMatchFetch(liveActive("prem_a4"), "network-error");
+    const el = mount();
+    await flushMicrotasks(15);
+    expect(el.textContent).not.toContain("lobby.hero_participants_heading");
+    expect(el.textContent).not.toContain("lobby.loading");
+    expect(el.textContent).toContain("lobby.live_premiere_badge");
+  });
+
+  it("a malformed participant-identity response (fails the client's own schema) degrades the same as a network failure", async () => {
+    stubReadModelAndFeaturedMatchFetch(liveActive("prem_a5"), "malformed");
+    const el = mount();
+    await flushMicrotasks(15);
+    expect(el.textContent).not.toContain("lobby.hero_participants_heading");
+    expect(el.textContent).toContain("lobby.live_premiere_badge");
+  });
+});
