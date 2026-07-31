@@ -235,11 +235,22 @@ independently re-verify every existing Builder out of band.
 - No authenticated Builder dashboard (above).
 - No real GitHub-login-to-Softmax-control verification mechanism exists yet
   (spec Stage 1 item 2) — see `PROXYWAR_IDENTITY_MODEL.md`.
-- Live-premiere fixture admission (deterministic end-to-end test coverage of
-  the active/late-join/no-seek/reveal Premiere states) is not reliable on
-  the current fixture map/manifest — 4 documented `test.todo` cases in
-  `tests/e2e/PublicProductJourneys.e2e.test.ts`. See the Stage 8 fixtures
-  commit message for the investigation.
-- No "premiere re-watch Director Cut" — Director Cut only covers Full Replay
-  playback; the archived Premiere re-watch view has no Director Cut
-  integration. See `PROXYWAR_DIRECTOR_CUT.md`'s Known gaps.
+- Live-premiere fixture admission itself is reliable now (a 2-seat
+  aggressive-vs-aggressive matchup, alliance actions disabled, deterministic
+  and fast). Three of its four E2E states are real, passing tests (active
+  premiere, late-join reads the current position, seek-past-edge rejection).
+  The fourth, reveal-after-end, is a documented `test.todo` — the runtime
+  reliably reaches liveVisibleSequence one turn short of the bundle's total
+  and then never commits the reveal; root cause not confirmed (leading
+  hypothesis: `ReplayPremiereChunks.ts`'s chunk-span logic at this
+  fixture's extreme 1ms/turn acceleration) but not patched from a guess in
+  integrity-critical premiere code. See
+  `tests/e2e/PublicProductJourneys.e2e.test.ts`'s own doc on that test for
+  the full investigation trail.
+- Premiere re-watch Director Cut: works (verified live) for a revealed
+  `rated_coworld`-sourced premiere with a `director-cut-plan.json` on its
+  run — it shares the exact Full Replay mounting path. It never applies to
+  `controlled_exhibition`-sourced premieres (no underlying replay renders
+  for those at all) and, like Full Replay generally, is absent for
+  hosted-mirror-only episodes with no local run directory. See
+  `PROXYWAR_DIRECTOR_CUT.md`'s "Premiere re-watch integration" section.

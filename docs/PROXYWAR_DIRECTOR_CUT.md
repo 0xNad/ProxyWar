@@ -293,16 +293,55 @@ button's own visual state is read from `directorCutHandle.isEnabled()`, not
 a DOM class, so a re-hydrate that calls the mount function again is a no-op
 against the controller's real state.
 
-## Known gaps
+## Premiere re-watch integration
 
-- **No Premiere re-watch Director Cut integration exists.**
-  `src/client/ReplayPremiereArchiveView.ts` and
-  `src/client/ReplayPremierePlayback.ts` contain no reference to
-  `DirectorCut`/`directorCut`/`director-cut` anywhere (grepped directly,
-  zero matches). Director Cut today is wired only into
-  `AiLeagueReplayOverlay.ts`'s Full Replay path; a Premiere-side "director
-  cut" re-watch, if it exists elsewhere in this project's planning, is not
-  implemented on this branch.
+**Correction (2026-07-31, this stage): the earlier "no integration exists"
+claim in this section was wrong** — it was based on grepping
+`ReplayPremiereArchiveView.ts`/`ReplayPremierePlayback.ts` alone, which
+indeed have zero Director Cut references, but that grep missed the actual
+mounting call chain. Traced directly and confirmed live:
+
+- `Main.ts`'s `openArchivedReplayPremiere` (the handler for a revealed/
+  archived `/premiere/:id`) calls `this.openAiLeagueReplay(payload.replayRunKey,
+  { source: "ai-league-replay" })` — the EXACT SAME function every ordinary
+  Full Replay page uses, with the same `artifactBasePath` derivation
+  (`/ai-league-runs/${runID}`). That function mounts
+  `mountAiLeagueReplayOverlay` and calls
+  `loadAiLeagueReplayDetails(artifactBasePath, ...)`
+  (`AiLeagueReplayArtifacts.ts:86-88`), which fetches `director-cut-plan.json`
+  generically off `artifactBasePath` — nothing in this chain special-cases
+  or excludes a premiere-originated call. `AiLeagueReplayOverlay.ts`'s
+  `syncDirectorCutController`/`mountAiLeagueDirectorCutToggle` therefore
+  mount exactly as they would for a normal archived match, verified live:
+  a run with a real `director-cut-plan.json` shows the Director Cut toggle
+  button when opened through this same `openAiLeagueReplay` path.
+- **Pre-reveal premieres are correctly untouched — verified by tracing the
+  other branch.** The live/sealed path (`openReplayPremiere`, used when no
+  server-injected archive payload exists yet) uses
+  `ReplayPremiereRuntimeController` entirely — it never calls
+  `openAiLeagueReplay`, so Director Cut has no path into a still-sealed
+  premiere's timeline. The routing between the two paths is a hard
+  branch on `readReplayPremiereArchivePayload()`'s presence
+  (`Main.ts:771-776`) — the server only ever injects that payload once a
+  premiere is revealed/archived, so there is no state where a sealed
+  premiere could accidentally take the Director Cut-bearing branch.
+- **Real caveat, found while tracing this: only `rated_coworld`-sourced
+  premieres get a `replayRunKey` at all.**
+  `ReplayPremiereArchiveRouter.ts:816-820` sets `replayRunKey` from
+  `publicRunKeyForSourceRunId(summary.sourceRunId)` ONLY when
+  `summary.sourceKind === "rated_coworld"` — a `controlled_exhibition`
+  -sourced premiere (the local/demo fallback used when the real-league
+  queue is empty, and this repo's own Stage 8 premiere fixture) gets
+  `replayRunKey: null`, so `openArchivedReplayPremiere` never calls
+  `openAiLeagueReplay` at all for it — no underlying replay renders
+  behind the archive summary, Director Cut included. This is consistent
+  with the rest of the archive view (the whole point of `replayRunKey`
+  being nullable is that an exhibition has no durable league-run replay
+  to point at), not a Director Cut-specific gap.
+- Net effect: Director Cut on premiere re-watch works today for any real,
+  `rated_coworld`-sourced revealed premiere whose run directory has a
+  `director-cut-plan.json` — which, per the very next bullet, is not
+  guaranteed for hosted-mirror-only episodes.
 - **The hosted Coworld mirror sync never produces `director-cut-plan.json`
   for remote-only episodes.** `CoworldLeagueSiteWriter.ts:93-97` notes the
   hosted mirror sync (`coworld-league-mirror.ts`) only ever receives
@@ -311,7 +350,11 @@ against the controller's real state.
   `writeAgentLeagueRunArtifacts` for every LOCALLY-produced match, but a
   purely hosted-mirror episode has no local run directory to generate one
   in, so `readDirectorCutSummaryFromRunDir` legitimately resolves to `null`
-  for those episodes.
+  for those episodes. Combined with the bullet above, this is the actual
+  remaining gap for premiere re-watch: the wiring is real, but a
+  `rated_coworld` premiere whose source episode was only ever mirrored
+  (never locally produced) still won't show a Director Cut toggle, because
+  the plan file was never generated for it.
   ("Lead change" as a segment trigger is a deliberate design omission, not a
   gap — see the pipeline section above for why it's infeasible without a
   fabricated territory curve.)
