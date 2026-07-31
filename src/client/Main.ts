@@ -83,6 +83,13 @@ import {
 import "./platform/PlayerProfilePage";
 import "./platform/TraderProfilePage";
 import "./prediction/wagering/page/AccountPage";
+import "./publicapp/AboutPage";
+import "./publicapp/AgentProfilePage";
+import "./publicapp/AgentsDirectoryPage";
+import "./publicapp/BuilderProfilePage";
+import "./publicapp/BuildersDirectoryPage";
+import "./publicapp/LobbyPage";
+import "./publicapp/WatchPage";
 import "./SinglePlayerModal";
 import { StoreModal } from "./Store";
 import "./TerritoryPatternsModal";
@@ -737,6 +744,49 @@ class Client {
       );
       return;
     }
+    // Stage 2 public pages (product overhaul §4): the event lobby, watch,
+    // agents/builders directories and profiles, about. All standalone —
+    // same reasoning as the account/player/trader branches just above, and
+    // registered before the modal-definition wait for the same reason:
+    // none of these pages touch the lobby/game/replay machinery below.
+    if (window.location.pathname === "/") {
+      await this.openLobbyPage();
+      return;
+    }
+    if (window.location.pathname === "/watch") {
+      await this.openWatchPage();
+      return;
+    }
+    if (window.location.pathname === "/agents") {
+      await this.openAgentsDirectoryPage();
+      return;
+    }
+    const agentProfileMatch = window.location.pathname.match(
+      /^\/agent\/([^/]+)$/,
+    );
+    if (agentProfileMatch !== null) {
+      await this.openAgentProfilePage(
+        decodeURIComponent(agentProfileMatch[1]),
+      );
+      return;
+    }
+    if (window.location.pathname === "/builders") {
+      await this.openBuildersDirectoryPage();
+      return;
+    }
+    const builderProfileMatch = window.location.pathname.match(
+      /^\/builder\/([^/]+)$/,
+    );
+    if (builderProfileMatch !== null) {
+      await this.openBuilderProfilePage(
+        decodeURIComponent(builderProfileMatch[1]),
+      );
+      return;
+    }
+    if (window.location.pathname === "/about") {
+      await this.openAboutPage();
+      return;
+    }
     // Wait for modal custom elements to be defined
     await Promise.all([
       customElements.whenDefined("join-lobby-modal"),
@@ -968,6 +1018,54 @@ class Client {
     const page = document.createElement("trader-profile-page");
     page.setAttribute("account-id", accountId);
     document.body.replaceChildren(page);
+  }
+
+  /**
+   * Mounts the `/` event lobby — the destination the old bare redirect to
+   * `/league` used to serve (spec Stage 2 item 4). Same reasoning as
+   * `openPlayerProfilePage` above: no lobby/game/replay concept behind it,
+   * only a data page over the published read model.
+   */
+  private async openLobbyPage(): Promise<void> {
+    document.body.replaceChildren(document.createElement("lobby-page"));
+  }
+
+  /** Mounts the `/watch` page — upcoming/active premieres plus the replay archive. */
+  private async openWatchPage(): Promise<void> {
+    document.body.replaceChildren(document.createElement("watch-page"));
+  }
+
+  /** Mounts the `/agents` roster directory. */
+  private async openAgentsDirectoryPage(): Promise<void> {
+    document.body.replaceChildren(
+      document.createElement("agents-directory-page"),
+    );
+  }
+
+  /** Mounts the `/agent/:slug` persistent Agent profile. */
+  private async openAgentProfilePage(slug: string): Promise<void> {
+    const page = document.createElement("agent-profile-page");
+    page.setAttribute("slug", slug);
+    document.body.replaceChildren(page);
+  }
+
+  /** Mounts the `/builders` directory. */
+  private async openBuildersDirectoryPage(): Promise<void> {
+    document.body.replaceChildren(
+      document.createElement("builders-directory-page"),
+    );
+  }
+
+  /** Mounts the `/builder/:slug` persistent Builder profile. */
+  private async openBuilderProfilePage(slug: string): Promise<void> {
+    const page = document.createElement("builder-profile-page");
+    page.setAttribute("slug", slug);
+    document.body.replaceChildren(page);
+  }
+
+  /** Mounts the `/about` page. */
+  private async openAboutPage(): Promise<void> {
+    document.body.replaceChildren(document.createElement("about-page"));
   }
 
   /**

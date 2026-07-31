@@ -495,6 +495,7 @@ describe("writeCoworldLeagueSite", () => {
       "client.js",
       "data.json",
       "index.html",
+      "read-model.json",
       "social.png",
     ]);
   });

@@ -1269,6 +1269,80 @@ app.get("/trader/:accountId", async (_req, res) => {
       .send("Proxy War trader profile page is not built for this server.");
   }
 });
+// -----------------------------------------------------------------------
+// Stage 2 public pages (product overhaul §4 Target IA): event lobby, watch,
+// agents/builders directories and profiles, about. Every one is a plain
+// app-shell document — same pattern as `/player/:name`/`/trader/:accountId`
+// just above (always reachable, no premiere/session machinery behind it,
+// the client-side component does all the fetching, via
+// `GET /ai-league-runs/league/read-model.json`, and rendering). Factored
+// into one helper here (unlike the three call sites above, which predate
+// this and are left as they are) because this adds seven more identical
+// call sites — see `getAppShellContent`'s own doc for why this can't be
+// hoisted further without breaking the per-request nonce.
+// -----------------------------------------------------------------------
+async function sendAppShellPage(
+  res: Response,
+  failureLabel: string,
+): Promise<void> {
+  try {
+    const appShell = await getAppShellContent(
+      path.resolve(staticRootDir, "index.html"),
+    );
+    const scriptNonce = randomBytes(24).toString("base64");
+    res.setHeader(
+      "Content-Security-Policy",
+      pageContentSecurityPolicyWithNonce(
+        leagueContentSecurityPolicy(),
+        scriptNonce,
+      ),
+    );
+    setHtmlNoCacheHeaders(res);
+    res.send(nonceInlineScripts(appShell, scriptNonce));
+  } catch (error) {
+    console.error(
+      `Failed to serve ${failureLabel}: ${
+        error instanceof Error ? error.message : String(error)
+      }`,
+    );
+    res.status(503).send(`Proxy War ${failureLabel} is not built for this server.`);
+  }
+}
+// The event lobby (spec Stage 2 item 4) — replaces the bare
+// `leagueWrapperOnly` gate's `res.redirect("/league")` fallback for "/"
+// that the live beta.proxywar.xyz process has served until now. Only takes
+// over in that exact mode: `leagueWrapperOnly && !platformEnabled` is
+// precisely the condition under which the later gate middleware (below)
+// would otherwise have redirected "/" to `/league`. Every other mode falls
+// through via `next()` to the existing conditional handler further down
+// this file (`platformEnabled` -> platform root page;
+// `betaAccess.enabled` -> `/public`; else -> the internal demo hub) —
+// unchanged, untouched, never intercepted.
+app.get("/", async (_req, res, next) => {
+  if (leagueWrapperOnly && !platformEnabled) {
+    await sendAppShellPage(res, "the event lobby");
+    return;
+  }
+  next();
+});
+app.get("/watch", async (_req, res) => {
+  await sendAppShellPage(res, "the watch page");
+});
+app.get("/agents", async (_req, res) => {
+  await sendAppShellPage(res, "the agents directory");
+});
+app.get("/agent/:slug", async (_req, res) => {
+  await sendAppShellPage(res, "the agent profile page");
+});
+app.get("/builders", async (_req, res) => {
+  await sendAppShellPage(res, "the builders directory");
+});
+app.get("/builder/:slug", async (_req, res) => {
+  await sendAppShellPage(res, "the builder profile page");
+});
+app.get("/about", async (_req, res) => {
+  await sendAppShellPage(res, "the about page");
+});
 // GitHub sign-in lives ONLY on the platform now — proxywar.xyz is the
 // sole account authority (see the platform build's contract). Exactly one
 // of the two branches below mounts, based on `PROXYWAR_PLATFORM_ENABLED`:

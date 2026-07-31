@@ -4,6 +4,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import englishTranslations from "../../../resources/lang/en.json";
 import { DEFAULT_PLATFORM_ORIGIN } from "../../core/PlatformOrigin";
+import { buildProxyWarPublicReadModel } from "../ProxyWarPublicReadModel";
 import { generateEmblemSvg } from "../identity/IdentityEmblems";
 import {
   AgentIdentityView,
@@ -174,6 +175,7 @@ export interface CoworldLeagueSitePaths {
   indexPath: string;
   clientPath: string;
   dataPath: string;
+  readModelPath: string;
 }
 
 /**
@@ -188,6 +190,8 @@ export const COWORLD_LEAGUE_POLL_TIMEOUT_MS = 10_000;
 const COWORLD_LEAGUE_FAILURES_BEFORE_WARNING = 2;
 export const COWORLD_LEAGUE_CLIENT_PATH = "/ai-league-runs/league/client.js";
 export const COWORLD_LEAGUE_DATA_PATH = "/ai-league-runs/league/data.json";
+export const COWORLD_LEAGUE_READ_MODEL_PATH =
+  "/ai-league-runs/league/read-model.json";
 const COWORLD_LEAGUE_WRITE_LOCK_RETRY_MS = 50;
 const COWORLD_LEAGUE_WRITE_LOCK_TIMEOUT_MS = 60_000;
 const COWORLD_LEAGUE_WRITE_LOCK_OWNER_GRACE_MS = 30_000;
@@ -494,6 +498,7 @@ async function writeCoworldLeagueSiteUnlocked(
   const indexPath = path.join(siteDir, "index.html");
   const clientPath = path.join(siteDir, "client.js");
   const dataPath = path.join(siteDir, "data.json");
+  const readModelPath = path.join(siteDir, "read-model.json");
   // Self-host the social preview image next to the page. The app shell's copy
   // is content-hashed by the build and this writer cannot know that hash, so
   // publishing a stable sibling keeps og:image resolvable without coupling the
@@ -509,12 +514,21 @@ async function writeCoworldLeagueSiteUnlocked(
     );
     return EMPTY_LEAGUE_IDENTITY_SNAPSHOT;
   });
-  // Publish data.json last. Existing pages only reload after observing a newer
-  // snapshot, so they cannot race ahead of either the client or the HTML.
+  // Publish data.json and read-model.json last. Existing pages only reload
+  // after observing a newer data.json snapshot, so they cannot race ahead of
+  // either the client or the HTML. read-model.json is the typed, normalized
+  // read every Stage 2+ SPA page fetches (spec Stage 2 item 1) — built from
+  // the exact same `data`/`identity` inputs the HTML above just rendered
+  // from, so the two are never inconsistent with each other.
+  const readModel = buildProxyWarPublicReadModel(data, identity);
   await writeFileAtomic(clientPath, coworldLeagueClientJavaScript());
   await writeFileAtomic(indexPath, coworldLeagueIndexHtml(data, identity));
   await writeFileAtomic(dataPath, `${JSON.stringify(data, null, 2)}\n`);
-  return { indexPath, clientPath, dataPath };
+  await writeFileAtomic(
+    readModelPath,
+    `${JSON.stringify(readModel, null, 2)}\n`,
+  );
+  return { indexPath, clientPath, dataPath, readModelPath };
 }
 
 export async function writeCoworldLeagueSite(

@@ -50,6 +50,11 @@ export const proxyWarPublicLeagueArtifacts = [
   "index.html",
   "client.js",
   "data.json",
+  // The typed, normalized public read model every Stage 2+ SPA page fetches
+  // (spec Stage 2 item 1) — same directory, same publication cadence, same
+  // atomic-write/last-good guarantees as data.json (see
+  // `writeCoworldLeagueSiteUnlocked`).
+  "read-model.json",
   // Social preview image published beside the league page. og:image must be
   // fetchable by external scrapers, so it has to be publicly gettable.
   "social.png",
