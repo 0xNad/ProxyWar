@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { mountAiLeagueReplayOverlay } from "../../src/client/AiLeagueReplayOverlay";
+import type { PublicAgent } from "../../src/client/publicapp/ReadModelSchema";
 import {
   initialReplayClipRenderableThroughTurn,
   replayClipPreviewTarget,
@@ -1270,12 +1271,13 @@ describe("AiLeagueReplayOverlay", () => {
       {
         name: "the server reports generation disabled",
         runID: "league-clip-disabled-1",
-        response: () => Promise.resolve(clipCapabilitiesResponse(false)),
+        response: (_url?: string) =>
+          Promise.resolve(clipCapabilitiesResponse(false)),
       },
       {
         name: "the capability request fails",
         runID: "league-clip-capability-failure-1",
-        response: () => Promise.reject(new TypeError("offline")),
+        response: (_url?: string) => Promise.reject(new TypeError("offline")),
       },
     ])(
       "hides the complete generation block when $name",
@@ -1300,11 +1302,13 @@ describe("AiLeagueReplayOverlay", () => {
           expect(
             document.querySelector("[data-ai-league-clip-render]"),
           ).toBeNull();
-          expect(fetchMock).toHaveBeenCalledTimes(1);
-          expect(fetchMock).toHaveBeenCalledWith(
-            "/api/clip-capabilities",
-            expect.objectContaining({ method: "GET" }),
+          // Stage 4 identity resolution (fetchReadModel) also fires once per
+          // mount, hitting this same URL-agnostic mock — assert only the
+          // clip-capabilities call count, not the mock's total call count.
+          const clipCapabilityCalls = fetchMock.mock.calls.filter(
+            ([url]) => url === "/api/clip-capabilities",
           );
+          expect(clipCapabilityCalls).toHaveLength(1);
         } finally {
           vi.unstubAllGlobals();
         }
@@ -1346,6 +1350,12 @@ describe("AiLeagueReplayOverlay", () => {
         vi.fn(async (url: string, init?: RequestInit) => {
           if (String(url) === "/api/clip-capabilities") {
             return clipCapabilitiesResponse(true);
+          }
+          // Stage 4 identity resolution (fetchReadModel) also fires once per
+          // mount — stub it out rather than letting it fall through into the
+          // clip-request tracking below (it is not a clip request).
+          if (String(url) === "/ai-league-runs/league/read-model.json") {
+            return new Response(null, { status: 404 });
           }
           requests.push({
             url: String(url),
@@ -1538,6 +1548,359 @@ describe("AiLeagueReplayOverlay", () => {
       } finally {
         vi.unstubAllGlobals();
       }
+    });
+  });
+
+  describe("Stage 4 broadcast composition", () => {
+    function frame(
+      turnNumber: number,
+      players: Array<{
+        playerID: string;
+        smallID: number;
+        username: string;
+        tilesOwned: number;
+        allies?: number[];
+        targets?: number[];
+      }>,
+    ): void {
+      document.dispatchEvent(
+        new CustomEvent("ai-league-replay-frame", {
+          detail: {
+            tick: turnNumber,
+            turnNumber,
+            players: players.map((player) => ({
+              playerID: player.playerID,
+              smallID: player.smallID,
+              clientID: null,
+              username: player.username,
+              displayName: player.username,
+              x: 0,
+              y: 0,
+              tilesOwned: player.tilesOwned,
+              allies: player.allies ?? [],
+              embargoes: [],
+              alliances: [],
+              targets: player.targets ?? [],
+            })),
+          },
+        }),
+      );
+    }
+
+    it("derives and renders the competitor rail from live frame state, decisions, and resolved identity", async () => {
+      const runID = "broadcast-rail-1";
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(async (url: string) => {
+          if (String(url) === "/ai-league-runs/league/read-model.json") {
+            return readModelResponse([
+              publicAgentFixture({
+                playerName: "Atlas",
+                displayName: "Atlas Prime",
+                slug: "atlas-prime",
+                emblemSvg: "<svg data-testid=\"atlas-emblem\"></svg>",
+                versionLabel: "v2.3",
+                builderDisplayName: "Builder Bob",
+              }),
+            ]);
+          }
+          return new Response(null, { status: 404 });
+        }),
+      );
+      try {
+        mountAiLeagueReplayOverlay({
+          runID,
+          artifactBasePath: `/ai-league-runs/${runID}`,
+          decisions: [
+            {
+              ...decisionFixture(1),
+              username: "Atlas",
+              turnNumber: 10,
+              planObjective: "expand",
+              fallbackUsed: false,
+            },
+            {
+              ...decisionFixture(2),
+              username: "Atlas",
+              turnNumber: 20,
+              planObjective: "consolidate",
+              fallbackUsed: true,
+              auditStatus: "failed",
+            },
+          ],
+          spectatorTelemetry: {
+            version: 1,
+            runID,
+            agents: [
+              {
+                agentID: "a1",
+                playerID: "p1",
+                username: "Atlas",
+                profile: "diplomatic",
+                colorIndex: 0,
+                finalTilesOwned: 60,
+                finalTroops: 1000,
+                isAlive: true,
+              },
+              {
+                agentID: "a2",
+                playerID: "p2",
+                username: "Blitz",
+                profile: "aggressive",
+                colorIndex: 1,
+                finalTilesOwned: 40,
+                finalTroops: 900,
+                isAlive: true,
+              },
+              {
+                agentID: "a3",
+                playerID: "p3",
+                username: "Ghost",
+                profile: "defensive",
+                colorIndex: 2,
+                finalTilesOwned: 0,
+                finalTroops: 0,
+                isAlive: false,
+              },
+            ],
+            relationships: [],
+            events: [],
+            communicationThreads: [],
+            timelineBuckets: [],
+          },
+        });
+
+        frame(600, [
+          { playerID: "p1", smallID: 1, username: "Atlas", tilesOwned: 60, targets: [2] },
+          { playerID: "p2", smallID: 2, username: "Blitz", tilesOwned: 40 },
+        ]);
+
+        const rail = document.querySelector("[data-ai-league-competitor-rail]");
+        expect(rail?.querySelectorAll(".broadcast-rail-entry")).toHaveLength(3);
+
+        // Ghost never appears in a frame (eliminated before this replay's
+        // current window) — alive comes from the telemetry roster's own
+        // isAlive, territory/rank stay null (never fabricated for a player
+        // absent from the live frame).
+        const ghostEntry = document.querySelector(
+          '.broadcast-rail-entry[data-alive="false"]',
+        );
+        expect(ghostEntry?.textContent).toContain("Ghost");
+        expect(
+          ghostEntry?.querySelector(".broadcast-rail-eliminated"),
+        ).not.toBeNull();
+        expect(
+          ghostEntry?.querySelector(".broadcast-rail-territory"),
+        ).toBeNull();
+        expect(ghostEntry?.querySelector(".broadcast-rail-rank")).toBeNull();
+
+        // Blitz: present in the frame, no registered identity — degrades to
+        // the raw frame name, still gets live territory/rank/war relations.
+        const blitzEntry = [
+          ...document.querySelectorAll(".broadcast-rail-entry"),
+        ].find((entry) => entry.textContent?.includes("Blitz"));
+        expect(blitzEntry?.getAttribute("data-alive")).toBe("true");
+        expect(
+          blitzEntry?.querySelector(".broadcast-rail-territory"),
+        ).not.toBeNull();
+        // translateText echoes the raw key (no interpolation) without a
+        // lang-selector in the DOM, so assert the wars branch fired rather
+        // than the (untranslatable-here) interpolated agent name.
+        expect(
+          blitzEntry?.querySelector(".broadcast-rail-wars"),
+        ).not.toBeNull();
+
+        // Atlas: present in the frame AND identity-resolved once the
+        // fetchReadModel() promise settles.
+        await vi.waitFor(() => {
+          expect(
+            document.querySelector(".broadcast-rail-name")?.textContent,
+          ).toContain("Atlas Prime");
+        });
+        const atlasEntry = [
+          ...document.querySelectorAll(".broadcast-rail-entry"),
+        ].find((entry) => entry.textContent?.includes("Atlas Prime"));
+        expect(atlasEntry?.querySelector(".broadcast-rail-version")?.textContent).toBe(
+          "v2.3",
+        );
+        expect(
+          atlasEntry?.querySelector(".broadcast-rail-emblem")?.innerHTML,
+        ).toContain("atlas-emblem");
+        expect(
+          atlasEntry?.querySelector(".broadcast-rail-builder"),
+        ).not.toBeNull();
+        expect(
+          atlasEntry?.querySelector(".broadcast-rail-territory"),
+        ).not.toBeNull();
+        expect(
+          atlasEntry?.querySelector(".broadcast-rail-degraded"),
+        ).not.toBeNull();
+        expect(
+          atlasEntry?.querySelector(".broadcast-rail-wars"),
+        ).not.toBeNull();
+      } finally {
+        vi.unstubAllGlobals();
+      }
+    });
+
+    it("curates a selective War Room feed and jumps to turn from an expanded event", () => {
+      const runID = "broadcast-war-room-1";
+      const jumps: number[] = [];
+      document.addEventListener("ai-league-replay-jump-turn", (domEvent) => {
+        jumps.push(
+          (domEvent as CustomEvent<{ turnNumber: number }>).detail.turnNumber,
+        );
+      });
+      mountAiLeagueReplayOverlay({
+        runID,
+        artifactBasePath: `/ai-league-runs/${runID}`,
+        decisions: [
+          {
+            ...decisionFixture(1),
+            username: "Atlas",
+            turnNumber: 10,
+            planObjective: "expand",
+          },
+          {
+            ...decisionFixture(2),
+            username: "Atlas",
+            turnNumber: 20,
+            planObjective: "consolidate",
+            reason: "Defend the core.",
+            planRationale: "Blitz is massing troops nearby.",
+          },
+        ],
+        spectatorTelemetry: {
+          version: 1,
+          runID,
+          agents: [],
+          relationships: [],
+          events: [
+            event(1, 50, "alliance_formed", "pact", "a1", "Atlas", "a3", "Civic", "Atlas and Civic form an alliance."),
+            event(2, 100, "attack", "war", "a2", "Blitz", "a1", "Atlas", "Blitz attacks Atlas."),
+            // Same ordered pair attacking again must NOT curate a second
+            // first_strike — only the first attack between a pair counts.
+            event(3, 150, "attack", "war", "a2", "Blitz", "a1", "Atlas", "Blitz attacks Atlas again."),
+            event(4, 200, "alliance_break", "betrayal", "a3", "Civic", "a1", "Atlas", "Civic breaks the pact."),
+            event(5, 999, "elimination", "war", "a2", "Blitz", null, null, "Blitz is eliminated."),
+          ],
+          communicationThreads: [],
+          timelineBuckets: [],
+        },
+      });
+
+      const warRoom = document.getElementById("ai-league-war-room");
+      expect(warRoom).not.toBeNull();
+      const items = warRoom?.querySelectorAll(".broadcast-war-room-item") ?? [];
+      expect(items).toHaveLength(5);
+      expect(
+        warRoom?.querySelectorAll('[data-kind="first_strike"]'),
+      ).toHaveLength(1);
+      expect(warRoom?.querySelector('[data-kind="alliance"]')).not.toBeNull();
+      expect(warRoom?.querySelector('[data-kind="betrayal"]')).not.toBeNull();
+      expect(
+        warRoom?.querySelector('[data-kind="elimination"]'),
+      ).not.toBeNull();
+      const planChangeItem = warRoom?.querySelector('[data-kind="plan_change"]');
+      expect(planChangeItem).not.toBeNull();
+
+      // Expand the plan-change row and confirm the raw planRationale text
+      // (not a translateText key) renders as the expanded detail, then jump
+      // to its turn from the detail's jump button.
+      planChangeItem
+        ?.querySelector<HTMLButtonElement>(".broadcast-war-room-summary")
+        ?.click();
+      expect(
+        planChangeItem?.querySelector(".broadcast-war-room-extra")
+          ?.textContent,
+      ).toBe("Blitz is massing troops nearby.");
+      expect(
+        planChangeItem?.querySelector(".broadcast-war-room-detail")
+          ?.textContent,
+      ).toContain("broadcast.war_room_stated_reason");
+      planChangeItem
+        ?.querySelector<HTMLButtonElement>(".broadcast-war-room-jump")
+        ?.click();
+      expect(jumps).toEqual([20]);
+    });
+
+    it("renders an unrestricted bottom timeline for Full Replay and dispatches jump-to-turn on seek", () => {
+      const runID = "broadcast-timeline-1";
+      const jumps: number[] = [];
+      document.addEventListener("ai-league-replay-jump-turn", (domEvent) => {
+        jumps.push(
+          (domEvent as CustomEvent<{ turnNumber: number }>).detail.turnNumber,
+        );
+      });
+      mountAiLeagueReplayOverlay({
+        runID,
+        artifactBasePath: `/ai-league-runs/${runID}`,
+        decisions: [],
+        replayMaxTurn: 1_000,
+        spectatorTelemetry: {
+          version: 1,
+          runID,
+          agents: [],
+          relationships: [],
+          events: [
+            event(1, 5, "spawn", "info", "a1", "Atlas", null, null, "Atlas enters the match."),
+            event(2, 50, "alliance_formed", "pact", "a1", "Atlas", "a3", "Civic", "Atlas and Civic form an alliance."),
+            event(3, 100, "attack", "war", "a2", "Blitz", "a1", "Atlas", "Blitz attacks Atlas."),
+            event(4, 200, "alliance_break", "betrayal", "a3", "Civic", "a1", "Atlas", "Civic breaks the pact."),
+            event(5, 300, "nuke", "threat", "a2", "Blitz", "a3", "Civic", "Blitz escalates nuclear pressure against Civic."),
+            event(6, 999, "elimination", "war", "a2", "Blitz", null, null, "Blitz is eliminated."),
+          ],
+          communicationThreads: [],
+          timelineBuckets: [],
+        },
+      });
+
+      const timeline = document.getElementById("ai-league-timeline");
+      expect(timeline).not.toBeNull();
+      const markers = timeline?.querySelectorAll(".broadcast-timeline-marker") ?? [];
+      // spawn, alliance, first_strike, betrayal, nuke, elimination, finish.
+      expect(markers).toHaveLength(7);
+      for (const kind of [
+        "spawn",
+        "alliance",
+        "first_strike",
+        "betrayal",
+        "nuke",
+        "elimination",
+        "finish",
+      ]) {
+        expect(
+          timeline?.querySelector(`[data-kind="${kind}"]`),
+          `expected a ${kind} marker`,
+        ).not.toBeNull();
+      }
+      // lead_change is never fabricated: this overlay only ever sees a live,
+      // forward-only frame stream, never a stored territory time series.
+      expect(timeline?.querySelector('[data-kind="lead_change"]')).toBeNull();
+      // Full Replay is unrestricted — every marker stays clickable.
+      expect(
+        [...markers].every((marker) => marker.getAttribute("data-seekable") === "true"),
+      ).toBe(true);
+
+      const finishMarker = timeline?.querySelector<HTMLButtonElement>(
+        '[data-kind="finish"]',
+      );
+      finishMarker?.click();
+      expect(jumps).toEqual([1_000]);
+    });
+
+    it("removes the War Room and timeline chrome on dispose", () => {
+      const runID = "broadcast-dispose-1";
+      const overlay = mountAiLeagueReplayOverlay({
+        runID,
+        artifactBasePath: `/ai-league-runs/${runID}`,
+        decisions: [],
+      });
+      expect(document.getElementById("ai-league-war-room")).not.toBeNull();
+      expect(document.getElementById("ai-league-timeline")).not.toBeNull();
+      overlay.dispose();
+      expect(document.getElementById("ai-league-war-room")).toBeNull();
+      expect(document.getElementById("ai-league-timeline")).toBeNull();
     });
   });
 });
@@ -1791,4 +2154,75 @@ function event(
     actionID: `${kind}:${sequence}`,
     importance: kind === "alliance_break" ? 100 : 85,
   };
+}
+
+function publicAgentFixture(overrides: {
+  playerName: string;
+  displayName: string;
+  slug: string;
+  emblemSvg: string;
+  versionLabel: string;
+  builderDisplayName: string;
+}): PublicAgent {
+  return {
+    registered: true,
+    id: overrides.slug,
+    slug: overrides.slug,
+    playerName: overrides.playerName,
+    displayName: overrides.displayName,
+    shortCode: null,
+    emblemSvg: overrides.emblemSvg,
+    primaryColor: "#112233",
+    secondaryColor: null,
+    tagline: null,
+    builderId: "builder-1",
+    builderDisplayName: overrides.builderDisplayName,
+    status: "verified",
+    standing: null,
+    activeVersion: {
+      publicVersionLabel: overrides.versionLabel,
+      source: "champion",
+      familyMismatch: false,
+    },
+    provenance: {
+      ratingPolicyLabel: null,
+      activeChampionPolicyLabel: null,
+    },
+  };
+}
+
+function readModelResponse(agents: PublicAgent[]): Response {
+  return new Response(
+    JSON.stringify({
+      schemaVersion: 1,
+      generatedAt: "2026-01-01T00:00:00.000Z",
+      lastGoodSyncAt: "2026-01-01T00:00:00.000Z",
+      stale: false,
+      feedStates: { championFeedStale: false, replayFeedStale: false },
+      league: {
+        id: "league-1",
+        name: "Proxy War League",
+        description: null,
+        divisionName: "Open",
+        roundIntervalMinutes: null,
+        episodesPerRound: null,
+        currentRoundNumber: null,
+        currentRoundStatus: null,
+        scoreLabel: "Rating",
+      },
+      builders: [],
+      agents,
+      versions: [],
+      rounds: [],
+      matches: [],
+      featuredMatches: [],
+      premieres: { live: null, latest: null },
+      links: {
+        enterTheLeagueUrl: "https://example.test/enter",
+        platformLabel: "Proxy War",
+        accountUrl: "https://example.test/account",
+      },
+    }),
+    { status: 200, headers: { "Content-Type": "application/json" } },
+  );
 }

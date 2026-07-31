@@ -4,6 +4,16 @@ import {
   isAiLeagueNativeSpectatorUiEnabled,
 } from "./AiLeagueReplayMode";
 import {
+  renderCompetitorRail,
+  renderMatchTimeline,
+  renderWarRoomFeed,
+  type CompetitorRailEntry,
+  type CuratedWarRoomEvent,
+  type TimelineMarker,
+  type TimelineMarkerKind,
+} from "./BroadcastComposition";
+import { fetchReadModel, type PublicAgent } from "./publicapp/ReadModelSchema";
+import {
   mountReplayScopedLeagueClipControl,
   type ReplayScopedLeagueClipControlHandle,
 } from "./ReplayClipControl";
@@ -175,6 +185,8 @@ export function mountAiLeagueReplayOverlay(input: AiLeagueReplayOverlayInput) {
   document.getElementById("ai-league-replay-overlay")?.remove();
   document.getElementById("ai-league-social-transcript")?.remove();
   document.getElementById("ai-league-headline-event")?.remove();
+  document.getElementById("ai-league-war-room")?.remove();
+  document.getElementById("ai-league-timeline")?.remove();
   document.body.classList.add("ai-league-replay-mode");
   document.body.classList.toggle(
     "ai-league-native-spectator-ui",
@@ -193,7 +205,22 @@ export function mountAiLeagueReplayOverlay(input: AiLeagueReplayOverlayInput) {
   document.body.appendChild(overlay);
   mountReplayPanelDisclosure(overlay);
   mountReplayPanelControls(overlay);
-  let clipControl = mountReplayDetailsBindings(overlay, currentInput);
+  // Identity (emblem/version/builder) is always public — never spoiler-
+  // sensitive on its own — so it fetches once per mount and degrades to
+  // "nothing resolved yet" (never blocks or fails the mount) on any error.
+  // Resolved once the fetch lands, then only the competitor rail re-renders
+  // (not the whole details block) so disclosure/toggle state is untouched.
+  let identityByPlayerName: ReadonlyMap<string, PublicAgent> = new Map();
+  void resolveAiLeagueIdentities().then((resolved) => {
+    identityByPlayerName = resolved;
+    if (!overlay.isConnected) return;
+    mountAiLeagueCompetitorRail(overlay, currentInput, identityByPlayerName);
+  });
+  let clipControl = mountReplayDetailsBindings(
+    overlay,
+    currentInput,
+    identityByPlayerName,
+  );
   mountReplayJumpControls(document);
   let disposed = false;
 
@@ -213,7 +240,11 @@ export function mountAiLeagueReplayOverlay(input: AiLeagueReplayOverlayInput) {
       subtitle.textContent = subtitleText;
     }
     const previousClipControl = clipControl;
-    clipControl = mountReplayDetailsBindings(overlay, currentInput);
+    clipControl = mountReplayDetailsBindings(
+      overlay,
+      currentInput,
+      identityByPlayerName,
+    );
     previousClipControl?.dispose();
   };
   const disposePlayheadSync = mountAiLeaguePlayheadSync(
@@ -295,6 +326,9 @@ function disposeReplayOverlay(overlay: HTMLElement) {
     __aiLeagueHeadlineCleanup?: () => void;
     __aiLeagueDiplomacyCleanup?: () => void;
     __aiLeagueSocialBubblesCleanup?: () => void;
+    __aiLeagueCompetitorRailCleanup?: () => void;
+    __aiLeagueWarRoomCleanup?: () => void;
+    __aiLeagueTimelineCleanup?: () => void;
   };
   win.__aiLeaguePanelDisclosureCleanup?.();
   win.__aiLeaguePanelControlsCleanup?.();
@@ -302,15 +336,23 @@ function disposeReplayOverlay(overlay: HTMLElement) {
   win.__aiLeagueHeadlineCleanup?.();
   win.__aiLeagueDiplomacyCleanup?.();
   win.__aiLeagueSocialBubblesCleanup?.();
+  win.__aiLeagueCompetitorRailCleanup?.();
+  win.__aiLeagueWarRoomCleanup?.();
+  win.__aiLeagueTimelineCleanup?.();
   delete win.__aiLeaguePanelDisclosureCleanup;
   delete win.__aiLeaguePanelControlsCleanup;
   delete win.__aiLeagueReplayJumpCleanup;
   delete win.__aiLeagueHeadlineCleanup;
   delete win.__aiLeagueDiplomacyCleanup;
   delete win.__aiLeagueSocialBubblesCleanup;
+  delete win.__aiLeagueCompetitorRailCleanup;
+  delete win.__aiLeagueWarRoomCleanup;
+  delete win.__aiLeagueTimelineCleanup;
   overlay.remove();
   document.getElementById("ai-league-social-transcript")?.remove();
   document.getElementById("ai-league-headline-event")?.remove();
+  document.getElementById("ai-league-war-room")?.remove();
+  document.getElementById("ai-league-timeline")?.remove();
   document.body.classList.remove(
     "ai-league-replay-mode",
     "ai-league-native-spectator-ui",
@@ -320,6 +362,7 @@ function disposeReplayOverlay(overlay: HTMLElement) {
 function mountReplayDetailsBindings(
   overlay: HTMLElement,
   input: AiLeagueReplayOverlayInput,
+  identityByPlayerName: ReadonlyMap<string, PublicAgent>,
 ): ReplayScopedLeagueClipControlHandle | null {
   const telemetry =
     input.spectatorTelemetry as AiLeagueSpectatorTelemetry | null;
@@ -331,6 +374,9 @@ function mountReplayDetailsBindings(
   mountAiLeagueDecisionsDisclosure(overlay);
   mountAiLeagueRadioToggle(overlay);
   mountAiLeagueShareImageButton(overlay);
+  mountAiLeagueCompetitorRail(overlay, input, identityByPlayerName);
+  mountAiLeagueWarRoom(input);
+  mountAiLeagueTimeline(input);
   const clipContainer = overlay.querySelector<HTMLElement>(
     "[data-ai-league-clip]",
   );
@@ -1742,6 +1788,320 @@ function overlayHtml(input: AiLeagueReplayOverlayInput): string {
         #ai-league-replay-overlay:not(.collapsed) ~ #ai-league-headline-event {
           bottom: calc(min(58vh, 520px) + 16px + env(safe-area-inset-bottom));
         }
+        #ai-league-war-room,
+        #ai-league-timeline {
+          display: none;
+        }
+      }
+      /*
+       * Stage 4 broadcast composition: left competitor rail (lives inside
+       * this panel's existing body, alongside the diplomacy standings strip
+       * — "restructure...alongside" per spec), right War Room event feed and
+       * bottom timeline (separate fixed-position chrome pieces, matching the
+       * file's own existing pattern of independently positioned overlay
+       * pieces: the political-radio transcript and the headline lower-third
+       * are already mounted the same way). All three classes below come from
+       * the shared, deliberately style-free BroadcastComposition module —
+       * only the --pw-* token wiring lives here.
+       */
+      .broadcast-rail {
+        border: 1px solid var(--pw-line, #2a3442);
+        border-radius: 8px;
+        padding: 9px;
+        margin: 0 0 10px;
+        background: var(--pw-surface, #111720);
+      }
+      .broadcast-rail-heading {
+        margin: 0 0 6px;
+        font-size: 11px;
+        font-weight: 900;
+        text-transform: uppercase;
+        letter-spacing: 0.04em;
+        color: var(--pw-text-dim, #cbd5e1);
+      }
+      .broadcast-rail-list {
+        display: grid;
+        gap: 8px;
+        max-height: 320px;
+        overflow-y: auto;
+        overflow-x: hidden;
+        min-height: 0;
+        scrollbar-gutter: stable;
+        margin: 0;
+        padding: 0;
+        list-style: none;
+      }
+      .broadcast-rail-empty {
+        color: var(--pw-muted, #a4afbf);
+        font-size: 12px;
+      }
+      .broadcast-rail-entry {
+        display: grid;
+        gap: 5px;
+        padding: 7px 8px;
+        border: 1px solid var(--pw-line, #2a3442);
+        border-radius: 8px;
+        background: var(--pw-surface-2, #18202b);
+        border-left: 3px solid var(--broadcast-agent-color, var(--pw-line-strong, #3a4656));
+      }
+      .broadcast-rail-entry[data-alive="false"] {
+        opacity: 0.55;
+      }
+      .broadcast-rail-identity {
+        display: flex;
+        align-items: center;
+        gap: 7px;
+        min-width: 0;
+      }
+      .broadcast-rail-emblem,
+      .broadcast-rail-emblem-placeholder {
+        flex: 0 0 auto;
+        width: 22px;
+        height: 22px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+      }
+      .broadcast-rail-emblem svg {
+        width: 100%;
+        height: 100%;
+      }
+      .broadcast-rail-emblem-placeholder {
+        border-radius: 50%;
+        background: var(--pw-surface-3, #212b38);
+        color: var(--pw-muted, #a4afbf);
+        font-size: 11px;
+        font-weight: 900;
+      }
+      .broadcast-rail-name-block {
+        display: grid;
+        min-width: 0;
+      }
+      .broadcast-rail-name {
+        font-weight: 900;
+        color: var(--pw-text, #edf1f7);
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      .broadcast-rail-version,
+      .broadcast-rail-builder {
+        display: block;
+        font-size: 10px;
+        color: var(--pw-muted, #a4afbf);
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      .broadcast-rail-stats {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 6px;
+        font-size: 11px;
+        font-weight: 700;
+        color: var(--pw-text-dim, #cbd5e1);
+      }
+      .broadcast-rail-eliminated {
+        color: var(--pw-danger, #f87171);
+        font-weight: 900;
+      }
+      .broadcast-rail-degraded {
+        color: var(--pw-caution-text, #fde68a);
+      }
+      .broadcast-rail-relations {
+        display: flex;
+        flex-direction: column;
+        gap: 2px;
+        font-size: 11px;
+        color: var(--pw-muted, #a4afbf);
+      }
+      .broadcast-rail-wars {
+        color: var(--pw-danger, #f87171);
+      }
+      .broadcast-rail-allies {
+        color: var(--pw-positive-text, #a7f3d0);
+      }
+      #ai-league-war-room {
+        position: fixed;
+        top: 12px;
+        right: 12px;
+        z-index: 50000;
+        width: min(360px, calc(100vw - 24px));
+        max-height: calc(100vh - 24px);
+        overflow: hidden;
+        border: 1px solid var(--pw-line-strong, #3a4656);
+        border-radius: var(--pw-r-xl, 18px);
+        background: var(--pw-glass-strong, rgba(10, 14, 20, 0.95));
+        color: var(--pw-text, #edf1f7);
+        box-shadow: var(--pw-shadow, 0 26px 74px rgba(0, 0, 0, 0.52));
+        backdrop-filter: blur(18px) saturate(1.15);
+        font: 13px/1.4 Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      }
+      .broadcast-war-room {
+        display: grid;
+        grid-template-rows: auto minmax(0, 1fr);
+        min-height: 0;
+        height: 100%;
+        padding: 12px;
+        gap: 8px;
+        box-sizing: border-box;
+      }
+      .broadcast-war-room-heading {
+        margin: 0;
+        font-size: 11px;
+        font-weight: 900;
+        text-transform: uppercase;
+        letter-spacing: 0.04em;
+        color: var(--pw-text-dim, #cbd5e1);
+      }
+      .broadcast-war-room-list {
+        display: grid;
+        gap: 7px;
+        margin: 0;
+        padding: 0;
+        list-style: none;
+        overflow-y: auto;
+        min-height: 0;
+        scrollbar-gutter: stable;
+      }
+      .broadcast-war-room-empty {
+        color: var(--pw-muted, #a4afbf);
+        font-size: 12px;
+      }
+      .broadcast-war-room-item {
+        border: 1px solid var(--pw-line, #2a3442);
+        border-radius: 8px;
+        background: var(--pw-surface-2, #18202b);
+      }
+      .broadcast-war-room-summary {
+        display: flex;
+        align-items: center;
+        gap: 7px;
+        width: 100%;
+        padding: 7px 9px;
+        background: transparent;
+        border: none;
+        text-align: left;
+        font: inherit;
+        color: inherit;
+        cursor: pointer;
+      }
+      .broadcast-war-room-glyph {
+        flex: 0 0 auto;
+        font-weight: 900;
+        color: var(--pw-info, #56c7f5);
+      }
+      .broadcast-war-room-kind {
+        flex: 0 0 auto;
+        font-size: 10px;
+        font-weight: 900;
+        text-transform: uppercase;
+        letter-spacing: 0.04em;
+        color: var(--pw-info, #56c7f5);
+      }
+      .broadcast-war-room-headline {
+        flex: 1 1 auto;
+        min-width: 0;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      .broadcast-war-room-turn {
+        flex: 0 0 auto;
+        font-size: 11px;
+        color: var(--pw-muted, #a4afbf);
+        font-variant-numeric: tabular-nums;
+      }
+      .broadcast-war-room-item[data-kind="betrayal"] .broadcast-war-room-glyph,
+      .broadcast-war-room-item[data-kind="elimination"] .broadcast-war-room-glyph {
+        color: var(--pw-danger, #f87171);
+      }
+      .broadcast-war-room-item[data-kind="alliance"] .broadcast-war-room-glyph {
+        color: var(--pw-positive, #34d399);
+      }
+      .broadcast-war-room-item[data-kind="first_strike"] .broadcast-war-room-glyph,
+      .broadcast-war-room-item[data-kind="plan_change"] .broadcast-war-room-glyph {
+        color: var(--pw-caution, #fbbf24);
+      }
+      .broadcast-war-room-detail {
+        padding: 0 9px 9px;
+        display: grid;
+        gap: 4px;
+        font-size: 12px;
+        color: var(--pw-text-dim, #cbd5e1);
+      }
+      .broadcast-war-room-detail[hidden] {
+        display: none;
+      }
+      .broadcast-war-room-reason,
+      .broadcast-war-room-extra {
+        margin: 0;
+      }
+      .broadcast-war-room-jump {
+        justify-self: start;
+      }
+      #ai-league-timeline {
+        position: fixed;
+        left: 404px;
+        right: 388px;
+        bottom: 12px;
+        z-index: 49995;
+        border: 1px solid var(--pw-line-strong, #3a4656);
+        border-radius: var(--pw-r-xl, 18px);
+        background: var(--pw-glass-strong, rgba(10, 14, 20, 0.95));
+        box-shadow: var(--pw-shadow-soft, 0 12px 32px rgba(0, 0, 0, 0.35));
+        backdrop-filter: blur(12px) saturate(1.1);
+        padding: 8px 12px;
+        box-sizing: border-box;
+      }
+      .broadcast-timeline-track {
+        position: relative;
+        height: 20px;
+        margin: 0;
+        padding: 0;
+        border-radius: 999px;
+        background: var(--pw-surface-2, #18202b);
+      }
+      .broadcast-timeline-marker {
+        position: absolute;
+        top: 50%;
+        left: var(--broadcast-timeline-position, 0%);
+        transform: translate(-50%, -50%);
+        width: 10px;
+        height: 10px;
+        padding: 0;
+        border: 1px solid var(--pw-line-strong, #3a4656);
+        border-radius: 50%;
+        background: var(--pw-info, #56c7f5);
+        cursor: pointer;
+      }
+      .broadcast-timeline-marker[data-seekable="false"] {
+        cursor: default;
+        opacity: 0.55;
+      }
+      .broadcast-timeline-marker[data-kind="spawn"] {
+        background: var(--pw-muted, #a4afbf);
+      }
+      .broadcast-timeline-marker[data-kind="alliance"] {
+        background: var(--pw-positive, #34d399);
+      }
+      .broadcast-timeline-marker[data-kind="first_strike"] {
+        background: var(--pw-caution, #fbbf24);
+      }
+      .broadcast-timeline-marker[data-kind="lead_change"] {
+        background: var(--pw-info, #56c7f5);
+      }
+      .broadcast-timeline-marker[data-kind="betrayal"],
+      .broadcast-timeline-marker[data-kind="elimination"],
+      .broadcast-timeline-marker[data-kind="nuke"] {
+        background: var(--pw-danger, #f87171);
+      }
+      .broadcast-timeline-marker[data-kind="nuke"] {
+        width: 12px;
+        height: 12px;
+      }
+      .broadcast-timeline-marker[data-kind="finish"] {
+        background: var(--pw-text, #edf1f7);
       }
     </style>
     <header data-ai-league-drag>
@@ -1767,6 +2127,7 @@ function overlayHtml(input: AiLeagueReplayOverlayInput): string {
           <div class="ai-league-muted">${escapeHtml(translateText("ai_league_replay.standings_waiting"))}</div>
         </div>
       </section>
+      <div data-ai-league-competitor-rail></div>
       <div data-ai-league-details>${overlayDetailsHtml(input)}</div>
     </div>
     <div class="ai-league-resize-handle" data-ai-league-resize aria-hidden="true"></div>`;
@@ -2302,6 +2663,624 @@ function stanceChipHtml(
       <span>${escapeHtml(aiLeagueSpectatorDisplayName(other.displayName || other.username))}</span>
       <span class="ai-league-stance-glyph" role="img" title="${escapeHtml(accessibleLabel)}" aria-label="${escapeHtml(accessibleLabel)}">${AI_LEAGUE_STANCE_ICON_SVG[kind]}${hasExtensionRequest ? `<span class="ai-league-stance-renew" aria-hidden="true">↻</span>` : ""}</span>
     </span>`;
+}
+
+// ---------------------------------------------------------------------------
+// Stage 4 broadcast composition — left competitor rail, right War Room feed,
+// bottom timeline. These wire the SHARED, style-free `BroadcastComposition`
+// components into this overlay's own existing data (frame state, decision
+// log, spectator telemetry) and existing turn-navigation mechanism
+// (`ai-league-replay-jump-turn`, the same event `mountReplayJumpControls`
+// already dispatches for the standings/comms "jump to turn" buttons). Full
+// Replay is unbounded/complete data — no spoiler restriction — so, unlike
+// the playhead-windowed decision log, none of this is windowed to the
+// current turn.
+// ---------------------------------------------------------------------------
+
+// Same reasoning as diplomacyRowsHtml's STANDINGS_MAX_ROWS: bots/tribes are
+// frame players too, and an uncapped rail would flood with dozens of rows.
+const AI_LEAGUE_RAIL_MAX_ROWS = 12;
+
+// Matches AgentDramaReport.ts's own HIGH_IMPORTANCE_THRESHOLD convention —
+// the War Room feed is deliberately selective, not a mirror of every event.
+const AI_LEAGUE_WAR_ROOM_IMPORTANCE_THRESHOLD = 80;
+
+/**
+ * Agent identity (emblem, exact version label, builder, color) is always
+ * public — only match OUTCOME is embargoed — so this fetches once per
+ * overlay mount via the existing public read model. A failed fetch degrades
+ * to "nothing resolved yet", exactly like an unmatched player (never blocks
+ * or fails the overlay mount).
+ */
+async function resolveAiLeagueIdentities(): Promise<
+  ReadonlyMap<string, PublicAgent>
+> {
+  try {
+    const readModel = await fetchReadModel();
+    const byPlayerName = new Map<string, PublicAgent>();
+    for (const agent of readModel.agents) {
+      byPlayerName.set(agent.playerName, agent);
+    }
+    return byPlayerName;
+  } catch {
+    return new Map();
+  }
+}
+
+/** Full roster of raw player names ever known to this match: every telemetry
+ * agent (the complete, pre-frame roster) plus any current-frame player not
+ * yet reflected there (defensive — telemetry should already be a superset).
+ */
+function aiLeagueCompetitorRoster(
+  telemetry: AiLeagueSpectatorTelemetry | null,
+  framePlayers: readonly AiLeagueReplayFramePlayer[],
+): { username: string; playerID: string | null }[] {
+  const seen = new Set<string>();
+  const roster: { username: string; playerID: string | null }[] = [];
+  for (const agent of telemetry?.agents ?? []) {
+    const key = agent.playerID ?? normalizeName(agent.username);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    roster.push({ username: agent.username, playerID: agent.playerID });
+  }
+  for (const player of framePlayers) {
+    const key = player.playerID ?? normalizeName(player.username);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    roster.push({ username: player.username, playerID: player.playerID });
+  }
+  return roster;
+}
+
+/**
+ * Degraded-decision count per agent — fallback recovery (already the
+ * panel's own "Recovered" signal, see recoveredShareHtml) or a failed audit
+ * (the engine could not confirm the decision's effect). "unknown" auditStatus
+ * is deliberately excluded: it just means unaudited (e.g. most non-combat
+ * actions), not degraded.
+ */
+function degradedDecisionCountByPlayer(
+  decisions: readonly AiLeagueDecisionLogEntry[],
+): ReadonlyMap<string, number> {
+  const counts = new Map<string, number>();
+  for (const decision of decisions) {
+    if (!decision.fallbackUsed && decision.auditStatus !== "failed") continue;
+    const key = normalizeName(decision.username);
+    counts.set(key, (counts.get(key) ?? 0) + 1);
+  }
+  return counts;
+}
+
+/**
+ * Allies/wars resolved to display names, reusing diplomacyStancesHtml's own
+ * bidirectional war detection (a rival targeting this player counts even if
+ * this player has not targeted back) and the same ally-suppresses-war
+ * precedence. Only resolvable for a player present in the CURRENT frame —
+ * `bySmallID` only ever covers the live frame, so an eliminated/not-yet-
+ * spawned player's allies/wars are "none known" (empty array), never
+ * fabricated.
+ */
+function aiLeagueRailRelations(
+  player: AiLeagueReplayFramePlayer,
+  bySmallID: ReadonlyMap<number, AiLeagueReplayFramePlayer>,
+  identityByPlayerName: ReadonlyMap<string, PublicAgent>,
+): { allies: string[]; wars: string[] } {
+  const nameFor = (other: AiLeagueReplayFramePlayer): string =>
+    identityByPlayerName.get(other.username)?.displayName ??
+    aiLeagueSpectatorDisplayName(other.displayName || other.username);
+
+  const allies = Array.isArray(player.allies) ? player.allies : [];
+  const alliedSmallIDs = new Set<number>(allies);
+  const allyNames = allies
+    .map((smallID) => bySmallID.get(smallID))
+    .filter((other): other is AiLeagueReplayFramePlayer => other !== undefined)
+    .map(nameFor);
+
+  const targets = Array.isArray(player.targets) ? player.targets : [];
+  const warSmallIDs = new Set<number>(targets);
+  for (const other of bySmallID.values()) {
+    if (other.smallID === player.smallID) continue;
+    if (
+      Array.isArray(other.targets) &&
+      other.targets.includes(player.smallID)
+    ) {
+      warSmallIDs.add(other.smallID);
+    }
+  }
+  const warNames = [...warSmallIDs]
+    .filter((smallID) => !alliedSmallIDs.has(smallID))
+    .map((smallID) => bySmallID.get(smallID))
+    .filter((other): other is AiLeagueReplayFramePlayer => other !== undefined)
+    .map(nameFor);
+
+  return { allies: allyNames, wars: warNames };
+}
+
+/**
+ * Derives every CompetitorRailEntry for the CURRENT frame. `territoryPercent`
+ * and `inMatchRank` mirror diplomacyRowsHtml's own math exactly (share of
+ * the currently-alive+spawned frame roster's tilesOwned, ranked descending)
+ * — a player absent from the current frame (eliminated or not yet spawned)
+ * gets `null` for both rather than a stale/fabricated value. `alive` prefers
+ * frame presence (the file's own live alive signal — ClientGameRunner only
+ * ever puts `isAlive() && hasSpawned()` players into a frame) and falls back
+ * to the telemetry roster's own `isAlive` field for a player currently
+ * absent from the frame.
+ */
+function competitorRailEntries(
+  telemetry: AiLeagueSpectatorTelemetry | null,
+  decisions: readonly AiLeagueDecisionLogEntry[],
+  framePlayers: readonly AiLeagueReplayFramePlayer[],
+  identityByPlayerName: ReadonlyMap<string, PublicAgent>,
+): CompetitorRailEntry[] {
+  const roster = aiLeagueCompetitorRoster(telemetry, framePlayers);
+  if (roster.length === 0) {
+    return [];
+  }
+
+  const bySmallID = new Map<number, AiLeagueReplayFramePlayer>();
+  const byPlayerID = new Map<string, AiLeagueReplayFramePlayer>();
+  for (const player of framePlayers) {
+    bySmallID.set(player.smallID, player);
+    byPlayerID.set(player.playerID, player);
+  }
+  const totalTiles = framePlayers.reduce(
+    (sum, player) => sum + Math.max(0, player.tilesOwned),
+    0,
+  );
+  const rankBySmallID = new Map<number, number>();
+  [...framePlayers]
+    .sort((a, b) => b.tilesOwned - a.tilesOwned)
+    .forEach((player, index) => rankBySmallID.set(player.smallID, index + 1));
+
+  const telemetryByPlayerID = new Map<string, AiLeagueSpectatorAgent>();
+  const telemetryByName = new Map<string, AiLeagueSpectatorAgent>();
+  for (const agent of telemetry?.agents ?? []) {
+    if (agent.playerID !== null) {
+      telemetryByPlayerID.set(agent.playerID, agent);
+    }
+    telemetryByName.set(normalizeName(agent.username), agent);
+  }
+  const degradedByName = degradedDecisionCountByPlayer(decisions);
+
+  const entries = roster.map(({ username, playerID }) => {
+    const framePlayer =
+      (playerID !== null ? byPlayerID.get(playerID) : undefined) ?? undefined;
+    const telemetryAgent =
+      (playerID !== null ? telemetryByPlayerID.get(playerID) : undefined) ??
+      telemetryByName.get(normalizeName(username)) ??
+      null;
+    const identity = identityByPlayerName.get(username) ?? null;
+    const displayName =
+      identity?.displayName ??
+      aiLeagueSpectatorDisplayName(
+        (framePlayer?.displayName ?? "") || username,
+      );
+    const territoryPercent =
+      framePlayer !== undefined && totalTiles > 0
+        ? (framePlayer.tilesOwned / totalTiles) * 100
+        : null;
+    const inMatchRank =
+      framePlayer !== undefined
+        ? (rankBySmallID.get(framePlayer.smallID) ?? null)
+        : null;
+    const alive =
+      framePlayer !== undefined ? true : (telemetryAgent?.isAlive ?? null);
+    const relations =
+      framePlayer !== undefined
+        ? aiLeagueRailRelations(framePlayer, bySmallID, identityByPlayerName)
+        : { allies: [], wars: [] };
+    return {
+      playerName: username,
+      displayName,
+      agentSlug: identity?.slug ?? null,
+      emblemSvg: identity?.emblemSvg ?? null,
+      primaryColor:
+        framePlayer !== undefined
+          ? aiLeagueDisplayColor(framePlayer)
+          : (identity?.primaryColor ?? null),
+      versionLabel: identity?.activeVersion?.publicVersionLabel ?? null,
+      builderDisplayName: identity?.builderDisplayName ?? null,
+      territoryPercent,
+      inMatchRank,
+      alive,
+      allies: relations.allies,
+      wars: relations.wars,
+      degradedDecisionCount: degradedByName.get(normalizeName(username)) ?? null,
+    } satisfies CompetitorRailEntry;
+  });
+
+  const ranked = [...entries].sort((a, b) => {
+    if (a.inMatchRank !== null && b.inMatchRank !== null) {
+      return a.inMatchRank - b.inMatchRank;
+    }
+    if (a.inMatchRank !== null) return -1;
+    if (b.inMatchRank !== null) return 1;
+    return 0;
+  });
+  return ranked.slice(0, AI_LEAGUE_RAIL_MAX_ROWS);
+}
+
+// Re-mounted independently of the frame stream (identity resolution lands
+// asynchronously; hydrate() re-renders the whole details block) — keyed by
+// the rail's own container so a re-mount replays the LAST known frame
+// instead of resetting to an empty roster and waiting for the next tick.
+const AI_LEAGUE_RAIL_LAST_FRAME = new WeakMap<
+  HTMLElement,
+  readonly AiLeagueReplayFramePlayer[]
+>();
+
+function mountAiLeagueCompetitorRail(
+  overlay: HTMLElement,
+  input: AiLeagueReplayOverlayInput,
+  identityByPlayerName: ReadonlyMap<string, PublicAgent>,
+): void {
+  const container = overlay.querySelector<HTMLElement>(
+    "[data-ai-league-competitor-rail]",
+  );
+  if (container === null) {
+    return;
+  }
+  const win = window as Window & {
+    __aiLeagueCompetitorRailCleanup?: () => void;
+  };
+  win.__aiLeagueCompetitorRailCleanup?.();
+  const telemetry =
+    input.spectatorTelemetry as AiLeagueSpectatorTelemetry | null;
+  const decisions = input.decisions;
+  // Same per-tick memoization approach as mountAiLeagueDiplomacyStrip: frames
+  // fire every game tick, so skip the DOM write when nothing actually
+  // changed for this roster.
+  let lastSnapshot = "";
+  const render = (framePlayers: readonly AiLeagueReplayFramePlayer[]) => {
+    AI_LEAGUE_RAIL_LAST_FRAME.set(container, framePlayers);
+    const entries = competitorRailEntries(
+      telemetry,
+      decisions,
+      framePlayers,
+      identityByPlayerName,
+    );
+    const snapshot = JSON.stringify(entries);
+    if (snapshot === lastSnapshot) {
+      return;
+    }
+    lastSnapshot = snapshot;
+    container.replaceChildren(renderCompetitorRail(entries));
+  };
+  render(AI_LEAGUE_RAIL_LAST_FRAME.get(container) ?? []);
+  const onFrame = (event: Event) => {
+    const detail = (event as CustomEvent<AiLeagueReplayFrameEventDetail>)
+      .detail;
+    if (!detail || !Array.isArray(detail.players)) {
+      return;
+    }
+    render(detail.players);
+  };
+  document.addEventListener("ai-league-replay-frame", onFrame);
+  win.__aiLeagueCompetitorRailCleanup = () => {
+    document.removeEventListener("ai-league-replay-frame", onFrame);
+  };
+}
+
+/**
+ * `plan_change` events, curated from THIS overlay's own decision log
+ * (`AiLeagueDecisionLogEntry.planObjective`) — the same field
+ * `latestDirectiveByPlayer` already surfaces as the per-agent "Directive"
+ * line. Neither AgentDramaReport.ts nor AgentMatchStory.ts model a
+ * strategy/plan-shift signal (their "kind"/"storyKind" fields only bucket
+ * individual decisions/spectator events, never a change relative to the
+ * agent's own prior turn) — this is a genuinely different, already-public,
+ * already-derivable signal already flowing into this exact overlay, so it is
+ * used directly rather than reaching for a fabricated heuristic. Selective
+ * by construction: only an actual value transition curates an event, and
+ * decisions carry no `importance` field to threshold against.
+ */
+function planChangeWarRoomEvents(
+  decisions: readonly AiLeagueDecisionLogEntry[],
+): CuratedWarRoomEvent[] {
+  const lastPlanByPlayer = new Map<string, string>();
+  const curated: CuratedWarRoomEvent[] = [];
+  const ordered = [...decisions].sort(
+    (a, b) => a.turnNumber - b.turnNumber || a.sequence - b.sequence,
+  );
+  for (const decision of ordered) {
+    const objective =
+      typeof decision.planObjective === "string" &&
+      decision.planObjective.trim().length > 0
+        ? decision.planObjective.trim()
+        : null;
+    if (objective === null) continue;
+    const key = normalizeName(decision.username);
+    const previous = lastPlanByPlayer.get(key);
+    lastPlanByPlayer.set(key, objective);
+    if (previous === undefined || previous === objective) continue;
+    const actor = aiLeagueSpectatorDisplayName(decision.username);
+    curated.push({
+      id: `plan-change:${decision.sequence}`,
+      kind: "plan_change",
+      turn: decision.turnNumber,
+      sequence: decision.sequence,
+      headline: translateText("ai_league_replay.event_plan_change", {
+        actor,
+        plan: objective,
+      }),
+      publicReason: decision.reason,
+      participants: [actor],
+      expandedDetail:
+        typeof decision.planRationale === "string" &&
+        decision.planRationale.trim().length > 0
+          ? decision.planRationale.trim()
+          : null,
+    });
+  }
+  return curated;
+}
+
+/**
+ * Curated War Room feed. Selective by kind:
+ *  - alliance/betrayal/elimination gate on
+ *    AI_LEAGUE_WAR_ROOM_IMPORTANCE_THRESHOLD (matching AgentDramaReport.ts's
+ *    own HIGH_IMPORTANCE_THRESHOLD) — a no-op in practice today (these kinds
+ *    are always emitted at 90+ importance server-side) but an honest,
+ *    future-proof guard rather than an unconditional pass-through.
+ *  - first_strike is selective by construction (first attack per ordered
+ *    pair only) rather than by importance: raw "attack" events are emitted
+ *    at importance 70, structurally below the threshold, so gating on
+ *    importance here would silently drop every first strike.
+ *  - elimination events (`addEliminationEvents`) never carry a target — the
+ *    eliminated agent IS the actor — so the headline is built from `actor`
+ *    alone.
+ * `lead_change`/before-after-territory `expandedDetail` are NOT produced:
+ * this overlay only ever sees a live, forward-only frame stream (no stored
+ * turn-by-turn territory series), so neither is derivable without
+ * fabricating a value.
+ */
+function curatedWarRoomEvents(
+  telemetry: AiLeagueSpectatorTelemetry | null,
+  decisions: readonly AiLeagueDecisionLogEntry[],
+): CuratedWarRoomEvent[] {
+  const curated: CuratedWarRoomEvent[] = [];
+  const firstStrikeSeen = new Set<string>();
+  const ordered = [...(telemetry?.events ?? [])].sort(
+    (a, b) => a.turnNumber - b.turnNumber || a.sequence - b.sequence,
+  );
+  for (const event of ordered) {
+    const actor = aiLeagueSpectatorDisplayName(event.actorName);
+    const target =
+      event.targetName !== null
+        ? aiLeagueSpectatorDisplayName(event.targetName)
+        : null;
+    const publicReason = event.publicText ?? event.message;
+
+    if (event.kind === "attack" && target !== null) {
+      const pairKey = `${event.actorAgentID}|${event.targetAgentID ?? target}`;
+      if (!firstStrikeSeen.has(pairKey)) {
+        firstStrikeSeen.add(pairKey);
+        curated.push({
+          id: event.id,
+          kind: "first_strike",
+          turn: event.turnNumber,
+          sequence: event.sequence,
+          headline: translateText("ai_league_replay.headline_first_strike", {
+            actor,
+            target,
+          }),
+          publicReason,
+          participants: [actor, target],
+          expandedDetail: null,
+        });
+      }
+      continue;
+    }
+    if (event.importance < AI_LEAGUE_WAR_ROOM_IMPORTANCE_THRESHOLD) continue;
+    if (event.kind === "alliance_formed" && target !== null) {
+      curated.push({
+        id: event.id,
+        kind: "alliance",
+        turn: event.turnNumber,
+        sequence: event.sequence,
+        headline: translateText("ai_league_replay.event_alliance_formed", {
+          actor,
+          target,
+        }),
+        publicReason,
+        participants: [actor, target],
+        expandedDetail: null,
+      });
+      continue;
+    }
+    if (event.kind === "alliance_break" && event.tone === "betrayal" && target !== null) {
+      curated.push({
+        id: event.id,
+        kind: "betrayal",
+        turn: event.turnNumber,
+        sequence: event.sequence,
+        headline: translateText("ai_league_replay.headline_betrayal", {
+          actor,
+          target,
+        }),
+        publicReason,
+        participants: [actor, target],
+        expandedDetail: null,
+      });
+      continue;
+    }
+    if (event.kind === "elimination") {
+      curated.push({
+        id: event.id,
+        kind: "elimination",
+        turn: event.turnNumber,
+        sequence: event.sequence,
+        headline: translateText("ai_league_replay.event_eliminated", {
+          actor,
+        }),
+        publicReason,
+        participants: [actor],
+        expandedDetail: null,
+      });
+    }
+  }
+  curated.push(...planChangeWarRoomEvents(decisions));
+  return curated.sort((a, b) => a.turn - b.turn || a.sequence - b.sequence);
+}
+
+function mountAiLeagueWarRoom(input: AiLeagueReplayOverlayInput): void {
+  const win = window as Window & { __aiLeagueWarRoomCleanup?: () => void };
+  win.__aiLeagueWarRoomCleanup?.();
+  document.getElementById("ai-league-war-room")?.remove();
+  const telemetry =
+    input.spectatorTelemetry as AiLeagueSpectatorTelemetry | null;
+  const events = curatedWarRoomEvents(telemetry, input.decisions);
+  const root = document.createElement("aside");
+  root.id = "ai-league-war-room";
+  root.append(
+    renderWarRoomFeed(events, {
+      onJumpToTurn: (turn) => {
+        document.dispatchEvent(
+          new CustomEvent("ai-league-replay-jump-turn", {
+            detail: { turnNumber: turn },
+            bubbles: true,
+          }),
+        );
+      },
+    }),
+  );
+  document.body.appendChild(root);
+  win.__aiLeagueWarRoomCleanup = () => {
+    root.remove();
+  };
+}
+
+/**
+ * `spawn`/`alliance`/`first_strike`/`betrayal`/`nuke`/`elimination` markers,
+ * derived from the same telemetry events as the War Room feed (unfiltered by
+ * importance here — timeline markers are inherently sparse/positional, not a
+ * feed that needs curating down). `lead_change` is intentionally never
+ * produced: see curatedWarRoomEvents's doc — no turn-by-turn territory
+ * series is available to this overlay, only a live forward-only frame
+ * stream, so lead-change detection is genuinely infeasible without
+ * fabricating a moment.
+ */
+function matchTimelineEventMarkers(
+  telemetry: AiLeagueSpectatorTelemetry | null,
+): TimelineMarker[] {
+  const markers: TimelineMarker[] = [];
+  const firstStrikeSeen = new Set<string>();
+  const ordered = [...(telemetry?.events ?? [])].sort(
+    (a, b) => a.turnNumber - b.turnNumber || a.sequence - b.sequence,
+  );
+  const push = (kind: TimelineMarkerKind, event: AiLeagueSpectatorEvent, label: string) => {
+    markers.push({ kind, turn: event.turnNumber, sequence: event.sequence, label });
+  };
+  for (const event of ordered) {
+    const actor = aiLeagueSpectatorDisplayName(event.actorName);
+    const target =
+      event.targetName !== null
+        ? aiLeagueSpectatorDisplayName(event.targetName)
+        : null;
+    switch (event.kind) {
+      case "spawn":
+        push("spawn", event, translateText("ai_league_replay.event_spawn", { actor }));
+        break;
+      case "alliance_formed":
+        if (target !== null) {
+          push("alliance", event, translateText("ai_league_replay.event_alliance_formed", { actor, target }));
+        }
+        break;
+      case "alliance_break":
+        if (event.tone === "betrayal" && target !== null) {
+          push("betrayal", event, translateText("ai_league_replay.headline_betrayal", { actor, target }));
+        }
+        break;
+      case "attack":
+        if (target !== null) {
+          const pairKey = `${event.actorAgentID}|${event.targetAgentID ?? target}`;
+          if (!firstStrikeSeen.has(pairKey)) {
+            firstStrikeSeen.add(pairKey);
+            push("first_strike", event, translateText("ai_league_replay.headline_first_strike", { actor, target }));
+          }
+        }
+        break;
+      case "nuke":
+        push(
+          "nuke",
+          event,
+          target !== null
+            ? translateText("ai_league_replay.event_nuke_target", { actor, target })
+            : translateText("ai_league_replay.event_nuke", { actor }),
+        );
+        break;
+      case "elimination":
+        push("elimination", event, translateText("ai_league_replay.event_eliminated", { actor }));
+        break;
+      default:
+        break;
+    }
+  }
+  return markers;
+}
+
+/** The canonical record range (same value already used for the Clip control
+ * and as `replayMaxTurn`) — falls back to the highest observed turn number
+ * across decisions/events only while that canonical bound has not arrived
+ * yet. */
+function aiLeagueFinishTurn(
+  input: AiLeagueReplayOverlayInput,
+  telemetry: AiLeagueSpectatorTelemetry | null,
+): number {
+  if (typeof input.replayMaxTurn === "number" && input.replayMaxTurn > 0) {
+    return input.replayMaxTurn;
+  }
+  const decisionMax = input.decisions.reduce(
+    (max, decision) => Math.max(max, decision.turnNumber),
+    0,
+  );
+  const eventMax = (telemetry?.events ?? []).reduce(
+    (max, event) => Math.max(max, event.turnNumber),
+    0,
+  );
+  return Math.max(1, decisionMax, eventMax);
+}
+
+function mountAiLeagueTimeline(input: AiLeagueReplayOverlayInput): void {
+  const win = window as Window & { __aiLeagueTimelineCleanup?: () => void };
+  win.__aiLeagueTimelineCleanup?.();
+  document.getElementById("ai-league-timeline")?.remove();
+  const telemetry =
+    input.spectatorTelemetry as AiLeagueSpectatorTelemetry | null;
+  const totalTurns = aiLeagueFinishTurn(input, telemetry);
+  const markers: TimelineMarker[] = [
+    ...matchTimelineEventMarkers(telemetry),
+    {
+      kind: "finish",
+      turn: totalTurns,
+      sequence: Number.MAX_SAFE_INTEGER,
+      label: translateText("ai_league_replay.timeline_finish"),
+    },
+  ];
+  const root = document.createElement("div");
+  root.id = "ai-league-timeline";
+  root.append(
+    renderMatchTimeline(markers, {
+      totalTurns,
+      // Full Replay is unrestricted (unlike a live Premiere, which must
+      // never seek past the live edge) — this literally IS the spec's
+      // `maxSeekableTurn: null` case.
+      maxSeekableTurn: null,
+      onSeek: (turn) => {
+        document.dispatchEvent(
+          new CustomEvent("ai-league-replay-jump-turn", {
+            detail: { turnNumber: turn },
+            bubbles: true,
+          }),
+        );
+      },
+    }),
+  );
+  document.body.appendChild(root);
+  win.__aiLeagueTimelineCleanup = () => {
+    root.remove();
+  };
 }
 
 function communicationThreadsHtml(
