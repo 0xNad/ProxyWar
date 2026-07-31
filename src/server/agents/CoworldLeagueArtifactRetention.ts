@@ -3,6 +3,7 @@ import { promises as fs } from "node:fs";
 import path from "node:path";
 import { gzipSync } from "node:zlib";
 import { isSafeCoworldEpisodeRequestId } from "./CoworldLeagueMirrorCore";
+import { withFileMutex } from "./FileMutex";
 import type { CoworldLeagueEpisodeRow } from "./CoworldLeagueSiteWriter";
 
 const managedRunPattern = /^league-coworld-[A-Za-z0-9-]+$/;
@@ -314,6 +315,103 @@ export async function writeCoworldLeagueRetentionPinManifest(
   }
 }
 
+type PinOwnerOperation =
+  | { type: "add"; episodeRequestId: string; publicRunKey: string; ownerTag: string }
+  | { type: "remove"; episodeRequestId: string; ownerTag: string };
+
+/** Pure: applies ONE add/remove operation to an in-memory pins array. No I/O — the caller owns locking/read/write around a whole batch. */
+function applyPinOwnerOperation(
+  pins: readonly CoworldLeagueRetentionPin[],
+  operation: PinOwnerOperation,
+): { pins: CoworldLeagueRetentionPin[]; changed: boolean } {
+  const existingIndex = pins.findIndex(
+    (pin) => pin.episodeRequestId === operation.episodeRequestId,
+  );
+  if (operation.type === "add") {
+    if (existingIndex === -1) {
+      return {
+        pins: [
+          ...pins,
+          {
+            episodeRequestId: operation.episodeRequestId,
+            publicRunKey: operation.publicRunKey,
+            reason: operation.ownerTag,
+          },
+        ],
+        changed: true,
+      };
+    }
+    const existing = pins[existingIndex];
+    const owners = existing.reason.split(";").map((tag) => tag.trim());
+    if (owners.includes(operation.ownerTag)) {
+      return { pins: pins.slice(), changed: false };
+    }
+    const nextPins = pins.slice();
+    nextPins[existingIndex] = {
+      ...existing,
+      reason: [...owners, operation.ownerTag].join(";"),
+    };
+    return { pins: nextPins, changed: true };
+  }
+  // remove
+  if (existingIndex === -1) return { pins: pins.slice(), changed: false };
+  const existing = pins[existingIndex];
+  const owners = existing.reason
+    .split(";")
+    .map((tag) => tag.trim())
+    .filter((tag) => tag.length > 0);
+  if (!owners.includes(operation.ownerTag)) {
+    return { pins: pins.slice(), changed: false };
+  }
+  const remainingOwners = owners.filter((tag) => tag !== operation.ownerTag);
+  const nextPins = pins.slice();
+  if (remainingOwners.length === 0) {
+    nextPins.splice(existingIndex, 1);
+  } else {
+    nextPins[existingIndex] = { ...existing, reason: remainingOwners.join(";") };
+  }
+  return { pins: nextPins, changed: true };
+}
+
+/**
+ * Applies MULTIPLE owner-tag operations to the manifest in ONE locked
+ * read-modify-write — the fix for a real bug this session's own review
+ * caught: a reconcile pass touching several `FeaturedMatch` records used
+ * to fire one independent `addRetentionPinOwner` call per record via
+ * `Promise.all`, each doing its OWN read+write against the SAME manifest
+ * file — concurrent callers could each read the pre-mutation state and the
+ * LATER write would silently discard the EARLIER one's change (a lost
+ * update), even though each individual write was itself atomic. Locked via
+ * `withFileMutex` (`FileMutex.ts`) keyed on the manifest path — this also
+ * closes the same race for the single-operation functions below, and for
+ * the OTHER writer (`replay-premiere-loop.ts`'s `pinHoldArtifacts`/
+ * `unpinHoldArtifacts`) if it runs concurrently with either.
+ */
+export async function applyRetentionPinOwnerBatch(
+  pinManifestPath: string,
+  operations: readonly PinOwnerOperation[],
+): Promise<boolean> {
+  if (operations.length === 0) return false;
+  return withFileMutex(pinManifestPath, async () => {
+    const manifest = await readCoworldLeagueRetentionPinManifest(
+      pinManifestPath,
+    );
+    let pins = manifest.pins;
+    let changed = false;
+    for (const operation of operations) {
+      const applied = applyPinOwnerOperation(pins, operation);
+      pins = applied.pins;
+      changed = changed || applied.changed;
+    }
+    if (!changed) return false;
+    await writeCoworldLeagueRetentionPinManifest(pinManifestPath, {
+      schemaVersion: 1,
+      pins,
+    });
+    return true;
+  });
+}
+
 /**
  * Two independent writers share one retention-pin manifest per artifact:
  * `replay-premiere-loop.ts`'s own premiere-hold claim (alive only for an
@@ -324,10 +422,16 @@ export async function writeCoworldLeagueRetentionPinManifest(
  * competing entries — so multi-owner protection has to live inside that
  * one entry's `reason` field, as an EXACT-MATCH set of owner tags
  * (`;`-joined). These two functions are the ONLY correct way to mutate
- * that set: idempotent add/remove of exactly ONE tag, atomically, leaving
- * every other owner's tag completely untouched. An artifact stays
- * protected as long as ANY tag remains; the pin entry itself is removed
- * only once the LAST tag is gone.
+ * that set for a SINGLE operation: idempotent add/remove of exactly ONE
+ * tag, atomically (locked via `withFileMutex`), leaving every other
+ * owner's tag completely untouched. An artifact stays protected as long
+ * as ANY tag remains; the pin entry itself is removed only once the LAST
+ * tag is gone. A caller applying SEVERAL operations at once (e.g. a
+ * reconcile pass touching multiple records) MUST use
+ * `applyRetentionPinOwnerBatch` instead — calling these single-operation
+ * functions concurrently (e.g. via `Promise.all`) reopens the same lost-
+ * update race the lock exists to close, since each call's lock is held
+ * only for ITS OWN read-modify-write, not across multiple calls.
  *
  * An earlier version of this file had each owner run its own bespoke
  * read-modify-write (a "return early if ANY pin already claims this key"
@@ -348,69 +452,18 @@ export async function addRetentionPinOwner(
   pinManifestPath: string,
   entry: { episodeRequestId: string; publicRunKey: string; ownerTag: string },
 ): Promise<boolean> {
-  const manifest = await readCoworldLeagueRetentionPinManifest(pinManifestPath);
-  const existingIndex = manifest.pins.findIndex(
-    (pin) => pin.episodeRequestId === entry.episodeRequestId,
-  );
-  if (existingIndex === -1) {
-    await writeCoworldLeagueRetentionPinManifest(pinManifestPath, {
-      schemaVersion: 1,
-      pins: [
-        ...manifest.pins,
-        {
-          episodeRequestId: entry.episodeRequestId,
-          publicRunKey: entry.publicRunKey,
-          reason: entry.ownerTag,
-        },
-      ],
-    });
-    return true;
-  }
-  const existing = manifest.pins[existingIndex];
-  const owners = existing.reason.split(";").map((tag) => tag.trim());
-  if (owners.includes(entry.ownerTag)) return false; // already owns it
-  const nextPins = manifest.pins.slice();
-  nextPins[existingIndex] = {
-    ...existing,
-    reason: [...owners, entry.ownerTag].join(";"),
-  };
-  await writeCoworldLeagueRetentionPinManifest(pinManifestPath, {
-    schemaVersion: 1,
-    pins: nextPins,
-  });
-  return true;
+  return applyRetentionPinOwnerBatch(pinManifestPath, [
+    { type: "add", ...entry },
+  ]);
 }
 
 export async function removeRetentionPinOwner(
   pinManifestPath: string,
   entry: { episodeRequestId: string; ownerTag: string },
 ): Promise<boolean> {
-  const manifest = await readCoworldLeagueRetentionPinManifest(pinManifestPath);
-  const existingIndex = manifest.pins.findIndex(
-    (pin) => pin.episodeRequestId === entry.episodeRequestId,
-  );
-  if (existingIndex === -1) return false;
-  const existing = manifest.pins[existingIndex];
-  const owners = existing.reason
-    .split(";")
-    .map((tag) => tag.trim())
-    .filter((tag) => tag.length > 0);
-  if (!owners.includes(entry.ownerTag)) return false;
-  const remainingOwners = owners.filter((tag) => tag !== entry.ownerTag);
-  const nextPins = manifest.pins.slice();
-  if (remainingOwners.length === 0) {
-    nextPins.splice(existingIndex, 1);
-  } else {
-    nextPins[existingIndex] = {
-      ...existing,
-      reason: remainingOwners.join(";"),
-    };
-  }
-  await writeCoworldLeagueRetentionPinManifest(pinManifestPath, {
-    schemaVersion: 1,
-    pins: nextPins,
-  });
-  return true;
+  return applyRetentionPinOwnerBatch(pinManifestPath, [
+    { type: "remove", ...entry },
+  ]);
 }
 
 function isJsonObject(value: unknown): value is JsonObject {

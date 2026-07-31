@@ -94,49 +94,69 @@ async function readLiveMirrorEpisodes(
 }
 
 /**
- * Emits or extends a Featured Match's retention pin. Best-effort by design
- * (never throws) — called from `premiere:publish`'s success path (where a
- * pin failure must never fail the publish itself) AND opportunistically
- * from `FeaturedMatchReconcile.ts`'s reconcile-on-read pass (the "extend"
- * half of the requirement: a premiere-lane record published before its
- * episode has reached the league mirror has no derivable `publicRunKey`
- * yet — see this module's own architecture note — so the very next
- * reconcile pass after the mirror catches up is what actually completes
- * the pin).
- *
- * No-ops (returns `false`) when:
- *  - the record's `episodeRequestId` is null (nothing to key a pin on), or
- *  - no matching episode exists in the live mirror yet — the run bundle
- *    this pin would protect doesn't exist on disk yet either, so there is
- *    nothing at risk of being pruned in the meantime, or
- *  - this match already owns the pin (idempotent).
+ * Read-only: resolves what pin-add operation (if any) a Featured Match
+ * needs, WITHOUT touching the pin manifest itself — the caller decides
+ * whether to apply it alone (`addRetentionPinOwner`, single-entry) or as
+ * part of a larger batch (`applyRetentionPinOwnerBatch`, e.g.
+ * `FeaturedMatchReconcile.ts`'s reconcile pass, which must combine every
+ * record's operation into ONE atomic manifest update rather than firing
+ * one independent locked write per record — see that module's own doc for
+ * why: `Promise.all`-ing several single-entry applies each still races
+ * every OTHER call in the same batch for lock acquisition order, and nothing
+ * guarantees they observe a consistent snapshot of each other's changes).
+ * Returns `null` when nothing is derivable yet (no episodeRequestId, no
+ * live mirror data, or no matching episode) — never a fabricated
+ * `publicRunKey`.
+ */
+export async function computeFeaturedMatchPinAddOperation(
+  match: Pick<FeaturedMatch, "matchId" | "episodeRequestId">,
+  options: FeaturedMatchRetentionPinOptions = {},
+): Promise<
+  | { type: "add"; episodeRequestId: string; publicRunKey: string; ownerTag: string }
+  | null
+> {
+  if (match.episodeRequestId === null) return null;
+  try {
+    const artifactsRoot =
+      options.artifactsRoot ?? path.join(process.cwd(), "artifacts");
+    const episodes = await readLiveMirrorEpisodes(artifactsRoot);
+    if (episodes === null) return null;
+    const references = retentionReferencesFromEpisodes([...episodes]);
+    const publicRunKey = references.publicRunKeyByEpisodeRequestId.get(
+      match.episodeRequestId,
+    );
+    if (publicRunKey === undefined) return null;
+    return {
+      type: "add",
+      episodeRequestId: match.episodeRequestId,
+      publicRunKey,
+      ownerTag: featuredMatchOwnerTag(match.matchId),
+    };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Emits or extends a Featured Match's retention pin, alone. Best-effort by
+ * design (never throws) — for a SINGLE record only (e.g.
+ * `premiere:publish`'s own success path, where a pin failure must never
+ * fail the publish itself). A caller processing SEVERAL records at once
+ * MUST use `computeFeaturedMatchPinAddOperation` + `applyRetentionPinOwnerBatch`
+ * instead — see that function's own doc.
  */
 export async function syncFeaturedMatchRetentionPin(
   match: Pick<FeaturedMatch, "matchId" | "episodeRequestId">,
   options: FeaturedMatchRetentionPinOptions = {},
 ): Promise<boolean> {
-  if (match.episodeRequestId === null) return false;
+  const operation = await computeFeaturedMatchPinAddOperation(match, options);
+  if (operation === null) return false;
   try {
     const pinManifestPath =
       options.pinManifestPath ?? resolvePinManifestPath();
-    const artifactsRoot =
-      options.artifactsRoot ?? path.join(process.cwd(), "artifacts");
-    const episodes = await readLiveMirrorEpisodes(artifactsRoot);
-    if (episodes === null) return false;
-    const references = retentionReferencesFromEpisodes([...episodes]);
-    const publicRunKey = references.publicRunKeyByEpisodeRequestId.get(
-      match.episodeRequestId,
-    );
-    if (publicRunKey === undefined) return false;
-
-    return await addRetentionPinOwner(pinManifestPath, {
-      episodeRequestId: match.episodeRequestId,
-      publicRunKey,
-      ownerTag: featuredMatchOwnerTag(match.matchId),
-    });
+    return await addRetentionPinOwner(pinManifestPath, operation);
   } catch {
-    // Best-effort: a broken pin write must never fail the caller (an
-    // operator publish action, or a spectator-facing reconcile-on-read).
+    // Best-effort: a broken pin write must never fail the caller.
     return false;
   }
 }

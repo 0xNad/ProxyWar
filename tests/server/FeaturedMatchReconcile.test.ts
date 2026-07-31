@@ -15,6 +15,7 @@ import {
   LATEST_PREMIERE_POINTER_SCHEMA_VERSION,
 } from "../../src/server/agents/CoworldLeaguePremiereSuppression";
 import { ReplayPremiereArchiveStore } from "../../src/server/replay-premiere/ReplayPremiereArchiveIndex";
+import { readCoworldLeagueRetentionPinManifest } from "../../src/server/agents/CoworldLeagueArtifactRetention";
 import { sha256Hex } from "../../src/server/replay-premiere/ReplayPremiereIntegrity";
 import { derivePremiereId } from "../../src/server/replay-premiere/ReplayPremiereLoopCore";
 import {
@@ -393,5 +394,134 @@ describe("reconcileFeaturedMatchStore", () => {
 
     const plain = await readFeaturedMatchStore(featuredMatchRoot);
     expect(plain.matches[0].state).toBe("revealed");
+  });
+});
+
+describe("reconcileFeaturedMatchStore — concurrency", () => {
+  async function seedMirrorEpisode(
+    episodeRequestId: string,
+    publicRunKey: string,
+  ): Promise<void> {
+    const dir = path.join(artifactsRoot, "ai-league-runs", "league");
+    await fs.mkdir(dir, { recursive: true });
+    let existing: { episodes: unknown[] } = { episodes: [] };
+    try {
+      existing = JSON.parse(
+        await fs.readFile(path.join(dir, "data.json"), "utf8"),
+      ) as { episodes: unknown[] };
+    } catch {
+      // cold start — no existing mirror file yet
+    }
+    existing.episodes.push({
+      episodeRequestId,
+      shortId: episodeRequestId.slice(-8),
+      roundNumber: 1,
+      completedAt: "2026-07-17T10:00:00Z",
+      map: "Pangaea",
+      mapSize: "Compact",
+      turnCount: 400,
+      decisionCount: 10,
+      degradedCount: 0,
+      winnerName: "Auri",
+      players: [],
+      watchHref: `/ai-league-runs/${publicRunKey}/spectator.html`,
+      fullRenderHref: `/ai-league-replay/${publicRunKey}`,
+    });
+    await fs.writeFile(
+      path.join(dir, "data.json"),
+      JSON.stringify(existing),
+      "utf8",
+    );
+  }
+
+  it("two concurrent reconcile calls against a store with multiple pending transitions produce a consistent store — no lost transitions", async () => {
+    const premiereIdA = derivePremiereId("ereq_concurrent_a");
+    await seedStore([
+      baseMatch({
+        matchId: `feat_${"a".repeat(20)}`,
+        episodeRequestId: "ereq_concurrent_a",
+        state: "published",
+      }),
+      baseMatch({
+        matchId: `feat_${"b".repeat(20)}`,
+        episodeRequestId: "ereq_concurrent_b",
+        state: "revealed",
+      }),
+    ]);
+    await writePointer(premiereIdA, "2026-07-31T00:10:00.000Z");
+    await seedArchive(derivePremiereId("ereq_concurrent_b"), {
+      terminalState: "archived",
+    });
+
+    const [resultA, resultB] = await Promise.all([
+      reconcileFeaturedMatchStore(featuredMatchRoot, options()),
+      reconcileFeaturedMatchStore(featuredMatchRoot, options()),
+    ]);
+
+    // Both calls must observe (eventually, once serialized) the SAME
+    // fully-reconciled outcome — neither transition is lost to the other
+    // call's write.
+    for (const result of [resultA, resultB]) {
+      const a = result.matches.find((m) => m.matchId === `feat_${"a".repeat(20)}`);
+      const b = result.matches.find((m) => m.matchId === `feat_${"b".repeat(20)}`);
+      expect(a?.state).toBe("revealed");
+      expect(b?.state).toBe("archived");
+      expect(b?.result?.winnerAgentId).toBe("agt_alpha");
+    }
+
+    const finalRead = await readFeaturedMatchStore(featuredMatchRoot);
+    const finalA = finalRead.matches.find((m) => m.matchId === `feat_${"a".repeat(20)}`);
+    const finalB = finalRead.matches.find((m) => m.matchId === `feat_${"b".repeat(20)}`);
+    expect(finalA?.state).toBe("revealed");
+    expect(finalB?.state).toBe("archived");
+  });
+
+  it("many concurrent reconcile calls against the same store never corrupt it or throw", async () => {
+    const premiereId = derivePremiereId("ereq_concurrent_many");
+    await seedStore([baseMatch({ episodeRequestId: "ereq_concurrent_many", state: "published" })]);
+    await writePointer(premiereId, "2026-07-31T00:10:00.000Z");
+
+    const results = await Promise.all(
+      Array.from({ length: 8 }, () =>
+        reconcileFeaturedMatchStore(featuredMatchRoot, options()),
+      ),
+    );
+    for (const result of results) {
+      expect(result.matches).toHaveLength(1);
+      expect(result.matches[0].state).toBe("revealed");
+    }
+    const finalRead = await readFeaturedMatchStore(featuredMatchRoot);
+    expect(finalRead.matches).toHaveLength(1);
+    expect(finalRead.matches[0].state).toBe("revealed");
+  });
+
+  it("a reconcile pass with N records each needing a NEW pin performs them atomically — the manifest ends with exactly N owner entries, none lost to interleaving", async () => {
+    const records = Array.from({ length: 5 }, (_, index) => {
+      const episodeRequestId = `ereq_batch_pin_${index}`;
+      return baseMatch({
+        matchId: `feat_${String(index).padStart(20, "0")}`,
+        episodeRequestId,
+        state: "published",
+      });
+    });
+    await seedStore(records);
+    for (let index = 0; index < records.length; index++) {
+      await seedMirrorEpisode(
+        `ereq_batch_pin_${index}`,
+        `league-coworld-batchpin${index}`,
+      );
+    }
+
+    await reconcileFeaturedMatchStore(featuredMatchRoot, options());
+
+    const manifest = await readCoworldLeagueRetentionPinManifest(pinManifestPath);
+    expect(manifest.pins).toHaveLength(5);
+    for (let index = 0; index < records.length; index++) {
+      const pin = manifest.pins.find(
+        (candidate) => candidate.episodeRequestId === `ereq_batch_pin_${index}`,
+      );
+      expect(pin).toBeDefined();
+      expect(pin?.reason).toBe(`featured-match:feat_${String(index).padStart(20, "0")}`);
+    }
   });
 });

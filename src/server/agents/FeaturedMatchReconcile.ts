@@ -12,7 +12,14 @@ import {
   type FeaturedMatchState,
   type FeaturedMatchStoreFile,
 } from "./FeaturedMatch";
-import { syncFeaturedMatchRetentionPin } from "./FeaturedMatchRetentionPin";
+import {
+  computeFeaturedMatchPinAddOperation,
+  resolvePinManifestPath,
+} from "./FeaturedMatchRetentionPin";
+import {
+  applyRetentionPinOwnerBatch,
+} from "./CoworldLeagueArtifactRetention";
+import { withFileMutex } from "./FileMutex";
 import { ReplayPremiereArchiveStore } from "../replay-premiere/ReplayPremiereArchiveIndex";
 import { resolveReplayPremierePrivateStateRoot } from "../replay-premiere/ReplayPremiereSecrets";
 import { derivePremiereId } from "../replay-premiere/ReplayPremiereLoopCore";
@@ -114,9 +121,31 @@ export interface ReconcileFeaturedMatchStoreOptions {
   pinManifestPath?: string;
 }
 
+/**
+ * Concurrency: the WHOLE read-modify-write below runs inside
+ * `withFileMutex(stateRoot, ...)` (`FileMutex.ts`) — both narrow API
+ * routes (`/api/featured-matches/:matchId`,
+ * `/api/premieres/:premiereId/featured-match`) call this function, so two
+ * concurrent spectator requests (or a request racing an operator CLI —
+ * `premiere:publish`/`premiere:cancel`, separate OS processes, also mutate
+ * this same store) could otherwise each read the SAME pre-mutation state
+ * and the LATER write would silently discard whatever the EARLIER write
+ * changed for any record the later pass didn't itself recompute. The lock
+ * is keyed on `stateRoot` (the store's own directory), the same resource
+ * every writer of this store already agrees on.
+ */
 export async function reconcileFeaturedMatchStore(
   stateRoot: string,
   options: ReconcileFeaturedMatchStoreOptions = {},
+): Promise<FeaturedMatchStoreFile> {
+  return withFileMutex(stateRoot, () =>
+    reconcileFeaturedMatchStoreLocked(stateRoot, options),
+  );
+}
+
+async function reconcileFeaturedMatchStoreLocked(
+  stateRoot: string,
+  options: ReconcileFeaturedMatchStoreOptions,
 ): Promise<FeaturedMatchStoreFile> {
   const store = await readFeaturedMatchStore(stateRoot);
   const reconcilable = store.matches.filter(
@@ -130,16 +159,35 @@ export async function reconcileFeaturedMatchStore(
   // be worth attempting again; the mirror may simply have caught up since
   // the last attempt). Best-effort and deterministic (awaited, not
   // fire-and-forget — this function's callers, including tests, must be
-  // able to trust the pin write already landed once this call resolves):
-  // `syncFeaturedMatchRetentionPin` itself never throws.
-  await Promise.all(
-    reconcilable.map((match) =>
-      syncFeaturedMatchRetentionPin(match, {
-        artifactsRoot: options.artifactsRoot,
-        pinManifestPath: options.pinManifestPath,
-      }),
-    ),
-  );
+  // able to trust the pin write already landed once this call resolves).
+  //
+  // `computeFeaturedMatchPinAddOperation` is READ-ONLY (only reads the live
+  // league mirror, a DIFFERENT file from the pin manifest) so running it in
+  // parallel across records is safe; the RESULTING operations are then
+  // applied in exactly ONE locked `applyRetentionPinOwnerBatch` call — see
+  // that function's own doc for why N separate `Promise.all`-ed
+  // single-entry applies (the previous version of this function) reopens a
+  // lost-update race against the pin manifest even though each individual
+  // write is itself atomic.
+  const pinOperations = (
+    await Promise.all(
+      reconcilable.map((match) =>
+        computeFeaturedMatchPinAddOperation(match, {
+          artifactsRoot: options.artifactsRoot,
+        }),
+      ),
+    )
+  ).filter((operation) => operation !== null);
+  if (pinOperations.length > 0) {
+    try {
+      await applyRetentionPinOwnerBatch(
+        options.pinManifestPath ?? resolvePinManifestPath(),
+        pinOperations,
+      );
+    } catch {
+      // Best-effort: a broken pin write must never fail this read path.
+    }
+  }
 
   const latestPointer = await bestEffortLatestPointer(
     options.storageStateDir,
