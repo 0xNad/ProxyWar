@@ -45,6 +45,18 @@ export class WatchPage extends LitElement {
    */
   @state() private clientNowMs = 0;
 
+  // -- Archive filters (spec Stage 6 item 4). Client-side only, over
+  // `ReadModel.matches` -- no new endpoint, no server round trip on
+  // change. "all" is every filter's neutral/no-op value throughout.
+  @state() private filterAgentSlug = "all";
+  @state() private filterMap = "all";
+  @state() private filterMapSize = "all";
+  @state() private filterFeatured: "all" | "featured" = "all";
+  @state() private filterCleanliness: "all" | "clean" | "degraded" = "all";
+  /** `<input type=date>` values, `""` when unset -- inclusive on both ends, compared against `completedAt`'s own date portion (UTC, matching the ISO string's own date segment, never locale-shifted). */
+  @state() private filterDateFrom = "";
+  @state() private filterDateTo = "";
+
   createRenderRoot() {
     // Light DOM, so page-level Tailwind applies — same reasoning as
     // `PlayerProfilePage`/`PremiereAccountPage`.
@@ -218,6 +230,18 @@ export class WatchPage extends LitElement {
         (a, b) =>
           new Date(b.completedAt).getTime() - new Date(a.completedAt).getTime(),
       );
+    const featuredMatchIds = new Set(
+      readModel.featuredMatches.map((match) => match.matchId),
+    );
+    const filtered = filterArchiveMatches(completed, featuredMatchIds, {
+      agentSlug: this.filterAgentSlug,
+      map: this.filterMap,
+      mapSize: this.filterMapSize,
+      featured: this.filterFeatured,
+      cleanliness: this.filterCleanliness,
+      dateFrom: this.filterDateFrom === "" ? null : this.filterDateFrom,
+      dateTo: this.filterDateTo === "" ? null : this.filterDateTo,
+    });
     return html`
       <section aria-labelledby="watch-archive-heading">
         <h2
@@ -230,18 +254,174 @@ export class WatchPage extends LitElement {
           ? html`<p class="text-sm text-ink-muted">
               ${translateText("watch.no_completed_matches")}
             </p>`
-          : html`<ul class="flex flex-col gap-3" role="list">
-              ${completed.map((match) =>
-                this.renderMatchCard(match, readModel.agents),
-              )}
-            </ul>`}
+          : html`
+              ${this.renderArchiveFilters(completed, readModel.agents)}
+              ${filtered.length === 0
+                ? html`<p class="text-sm text-ink-muted" role="status">
+                    ${translateText("watch.no_filtered_matches")}
+                  </p>`
+                : html`<ul class="flex flex-col gap-3" role="list">
+                    ${filtered.map((match) =>
+                      this.renderMatchCard(
+                        match,
+                        readModel.agents,
+                        featuredMatchIds.has(match.matchId),
+                      ),
+                    )}
+                  </ul>`}
+            `}
       </section>
+    `;
+  }
+
+  /**
+   * Filter controls over the already-fetched archive — plain `<select>`s
+   * and native date inputs, applied client-side with no server round
+   * trip. Options are derived from what's ACTUALLY in `completed` (never
+   * a static/guessed list), so an option only ever appears when at least
+   * one match could match it.
+   */
+  private renderArchiveFilters(
+    completed: readonly (PublicMatch & { completedAt: string })[],
+    agents: readonly PublicAgent[],
+  ) {
+    const agentSlugsInArchive = new Set(
+      completed.flatMap((match) =>
+        match.participants
+          .map((p) => p.agentSlug)
+          .filter((slug): slug is string => slug !== null),
+      ),
+    );
+    const agentOptions = agents
+      .filter(
+        (agent): agent is PublicAgent & { slug: string } =>
+          agent.slug !== null && agentSlugsInArchive.has(agent.slug),
+      )
+      .slice()
+      .sort((a, b) => a.displayName.localeCompare(b.displayName));
+    const mapOptions = [...new Set(completed.map((match) => match.map))].sort(
+      (a, b) => a.localeCompare(b),
+    );
+    const mapSizeOptions = [
+      ...new Set(completed.map((match) => match.mapSize)),
+    ].sort((a, b) => a.localeCompare(b));
+    const onChange =
+      (
+        prop:
+          | "filterAgentSlug"
+          | "filterMap"
+          | "filterMapSize"
+          | "filterDateFrom"
+          | "filterDateTo",
+      ) =>
+      (event: Event) => {
+        this[prop] = (event.target as HTMLSelectElement | HTMLInputElement)
+          .value;
+      };
+    return html`
+      <fieldset
+        class="mb-4 flex flex-wrap items-end gap-3 rounded-md border border-line bg-surface-2 p-3"
+      >
+        <legend class="sr-only">${translateText("watch.filters_heading")}</legend>
+        <label class="flex flex-col gap-1 text-xs text-ink-muted">
+          ${translateText("watch.filter_agent")}
+          <select
+            class="rounded border border-line bg-surface px-2 py-1 text-sm text-ink"
+            .value=${this.filterAgentSlug}
+            @change=${onChange("filterAgentSlug")}
+          >
+            <option value="all">${translateText("watch.filter_all")}</option>
+            ${agentOptions.map(
+              (agent) =>
+                html`<option value=${agent.slug}>${agent.displayName}</option>`,
+            )}
+          </select>
+        </label>
+        <label class="flex flex-col gap-1 text-xs text-ink-muted">
+          ${translateText("watch.filter_map")}
+          <select
+            class="rounded border border-line bg-surface px-2 py-1 text-sm text-ink"
+            .value=${this.filterMap}
+            @change=${onChange("filterMap")}
+          >
+            <option value="all">${translateText("watch.filter_all")}</option>
+            ${mapOptions.map(
+              (map) => html`<option value=${map}>${map}</option>`,
+            )}
+          </select>
+        </label>
+        <label class="flex flex-col gap-1 text-xs text-ink-muted">
+          ${translateText("watch.filter_match_size")}
+          <select
+            class="rounded border border-line bg-surface px-2 py-1 text-sm text-ink"
+            .value=${this.filterMapSize}
+            @change=${onChange("filterMapSize")}
+          >
+            <option value="all">${translateText("watch.filter_all")}</option>
+            ${mapSizeOptions.map(
+              (size) => html`<option value=${size}>${size}</option>`,
+            )}
+          </select>
+        </label>
+        <label class="flex flex-col gap-1 text-xs text-ink-muted">
+          ${translateText("watch.filter_featured")}
+          <select
+            class="rounded border border-line bg-surface px-2 py-1 text-sm text-ink"
+            .value=${this.filterFeatured}
+            @change=${(event: Event) => {
+              this.filterFeatured = (event.target as HTMLSelectElement)
+                .value as "all" | "featured";
+            }}
+          >
+            <option value="all">${translateText("watch.filter_all")}</option>
+            <option value="featured">
+              ${translateText("watch.filter_featured_only")}
+            </option>
+          </select>
+        </label>
+        <label class="flex flex-col gap-1 text-xs text-ink-muted">
+          ${translateText("watch.filter_cleanliness")}
+          <select
+            class="rounded border border-line bg-surface px-2 py-1 text-sm text-ink"
+            .value=${this.filterCleanliness}
+            @change=${(event: Event) => {
+              this.filterCleanliness = (event.target as HTMLSelectElement)
+                .value as "all" | "clean" | "degraded";
+            }}
+          >
+            <option value="all">${translateText("watch.filter_all")}</option>
+            <option value="clean">${translateText("watch.filter_clean_only")}</option>
+            <option value="degraded">
+              ${translateText("watch.filter_degraded_only")}
+            </option>
+          </select>
+        </label>
+        <label class="flex flex-col gap-1 text-xs text-ink-muted">
+          ${translateText("watch.filter_date_from")}
+          <input
+            type="date"
+            class="rounded border border-line bg-surface px-2 py-1 text-sm text-ink"
+            .value=${this.filterDateFrom}
+            @change=${onChange("filterDateFrom")}
+          />
+        </label>
+        <label class="flex flex-col gap-1 text-xs text-ink-muted">
+          ${translateText("watch.filter_date_to")}
+          <input
+            type="date"
+            class="rounded border border-line bg-surface px-2 py-1 text-sm text-ink"
+            .value=${this.filterDateTo}
+            @change=${onChange("filterDateTo")}
+          />
+        </label>
+      </fieldset>
     `;
   }
 
   private renderMatchCard(
     match: PublicMatch & { completedAt: string },
     agents: readonly PublicAgent[],
+    isFeatured: boolean,
   ) {
     const meta: string[] = [];
     if (match.turnCount !== null)
@@ -272,7 +452,15 @@ export class WatchPage extends LitElement {
         class="rounded-lg border border-line bg-surface-2 p-4 text-sm"
       >
         <div class="flex flex-wrap items-baseline justify-between gap-2">
-          <span class="font-semibold text-ink">${match.map}</span>
+          <span class="font-semibold text-ink"
+            >${match.map}
+            ${isFeatured
+              ? html`<span
+                  class="ml-1 rounded-full border border-accent/50 px-1.5 py-0.5 text-[10px] font-extrabold uppercase tracking-wide text-accent"
+                  >${translateText("watch.featured_badge")}</span
+                >`
+              : nothing}</span
+          >
           <span class="text-xs text-ink-muted"
             >${formatAbsoluteTime(match.completedAt)}</span
           >
@@ -338,6 +526,60 @@ export function computeDegradedShare(
       : null;
   const elevated = share !== null && share >= DEGRADED_WARNING_PERCENT;
   return { share, elevated };
+}
+
+/**
+ * Spec Stage 6 item 4: Agent / map / match-size / Featured-or-All /
+ * clean-or-degraded / date-range filters over the already-fetched
+ * archive, applied client-side (no server round trip). "all" is every
+ * filter's neutral value. `cleanliness` reuses the SAME `elevated`
+ * threshold `renderDegradedNote` already applies (>= 15% recovered
+ * turns) — "degraded" here means the same thing the warning badge means
+ * everywhere else on this card, not a second, different definition.
+ * Date bounds compare against `completedAt`'s own UTC date segment
+ * (`YYYY-MM-DD`), matching what an `<input type=date>` value already is
+ * — never locale-shifted.
+ */
+export function filterArchiveMatches(
+  matches: readonly (PublicMatch & { completedAt: string })[],
+  featuredMatchIds: ReadonlySet<string>,
+  filters: {
+    agentSlug: string;
+    map: string;
+    mapSize: string;
+    featured: "all" | "featured";
+    cleanliness: "all" | "clean" | "degraded";
+    dateFrom: string | null;
+    dateTo: string | null;
+  },
+): (PublicMatch & { completedAt: string })[] {
+  return matches.filter((match) => {
+    if (
+      filters.agentSlug !== "all" &&
+      !match.participants.some((p) => p.agentSlug === filters.agentSlug)
+    ) {
+      return false;
+    }
+    if (filters.map !== "all" && match.map !== filters.map) return false;
+    if (filters.mapSize !== "all" && match.mapSize !== filters.mapSize) {
+      return false;
+    }
+    if (filters.featured === "featured" && !featuredMatchIds.has(match.matchId)) {
+      return false;
+    }
+    if (filters.cleanliness !== "all") {
+      const { elevated } = computeDegradedShare(
+        match.degradedCount ?? 0,
+        match.decisionCount,
+      );
+      if (filters.cleanliness === "clean" && elevated) return false;
+      if (filters.cleanliness === "degraded" && !elevated) return false;
+    }
+    const matchDate = match.completedAt.slice(0, 10);
+    if (filters.dateFrom !== null && matchDate < filters.dateFrom) return false;
+    if (filters.dateTo !== null && matchDate > filters.dateTo) return false;
+    return true;
+  });
 }
 
 function renderDegradedNote(match: PublicMatch): TemplateResult | typeof nothing {

@@ -12,6 +12,7 @@ import type { WatchPage } from "../../../src/client/publicapp/WatchPage";
 import {
   computeDegradedShare,
   describeSchedule,
+  filterArchiveMatches,
   resolveWinnerName,
 } from "../../../src/client/publicapp/WatchPage";
 import type {
@@ -289,6 +290,196 @@ describe("watch-page replay archive", () => {
   it("returns null when the match has no winner", () => {
     expect(resolveWinnerName(match({ winnerAgentSlug: null }), [])).toBeNull();
   });
+
+  it("renders a Featured badge for a match present in featuredMatches, and never for one that isn't", async () => {
+    stubReadModelFetch(
+      readModel({
+        matches: [
+          match({
+            matchId: "feat",
+            completedAt: "2026-06-15T00:00:00.000Z",
+            map: "Feat Map",
+          }),
+          match({
+            matchId: "plain",
+            completedAt: "2026-06-14T00:00:00.000Z",
+            map: "Plain Map",
+          }),
+        ],
+        featuredMatches: [
+          {
+            matchId: "feat",
+            lane: "archive",
+            title: "Feature",
+            description: "",
+            map: "Feat Map",
+            format: "1v1",
+            category: null,
+            state: "archived",
+            scheduledAt: null,
+            revealAt: null,
+            postMatchSummary: null,
+            result: null,
+          },
+        ],
+      }),
+    );
+    const el = mount();
+    await flushMicrotasks();
+
+    const cards = Array.from(el.querySelectorAll("li"));
+    expect(cards).toHaveLength(2);
+    expect(cards[0]?.textContent).toContain("watch.featured_badge");
+    expect(cards[1]?.textContent).not.toContain("watch.featured_badge");
+  });
+
+  it("filters the visible list live as the Agent select changes", async () => {
+    stubReadModelFetch(
+      readModel({
+        agents: [
+          agent({ slug: "alpha", displayName: "Alpha" }),
+          agent({ slug: "beta", displayName: "Beta" }),
+        ],
+        matches: [
+          match({
+            matchId: "m-alpha",
+            completedAt: "2026-06-15T00:00:00.000Z",
+            map: "Alpha Map",
+            participants: [
+              {
+                slot: 0,
+                agentSlug: "alpha",
+                displayName: "Alpha",
+                tilesOwned: 10,
+                isAlive: true,
+                isWinner: true,
+                color: "#fff",
+              },
+            ],
+          }),
+          match({
+            matchId: "m-beta",
+            completedAt: "2026-06-14T00:00:00.000Z",
+            map: "Beta Map",
+            participants: [
+              {
+                slot: 0,
+                agentSlug: "beta",
+                displayName: "Beta",
+                tilesOwned: 10,
+                isAlive: true,
+                isWinner: true,
+                color: "#fff",
+              },
+            ],
+          }),
+        ],
+      }),
+    );
+    const el = mount();
+    await flushMicrotasks();
+    expect(el.querySelectorAll("li")).toHaveLength(2);
+
+    // Select the agent-filter <select> by its option set (first select
+    // whose options include an "Alpha" entry) — the filter fieldset's
+    // select elements have no distinguishing id/name of their own.
+    const selects = Array.from(el.querySelectorAll("select"));
+    const filterAgentSelect = selects.find((select) =>
+      Array.from(select.options).some((o) => o.textContent === "Alpha"),
+    );
+    expect(filterAgentSelect).toBeDefined();
+    filterAgentSelect!.value = "alpha";
+    filterAgentSelect!.dispatchEvent(new Event("change"));
+    await flushMicrotasks();
+
+    const filtered = Array.from(el.querySelectorAll("li"));
+    expect(filtered).toHaveLength(1);
+    expect(filtered[0]?.textContent).toContain("Alpha Map");
+
+    // Back to "all" restores both — proof the SAME dropdown drives both
+    // directions, not a one-way filter.
+    filterAgentSelect!.value = "all";
+    filterAgentSelect!.dispatchEvent(new Event("change"));
+    await flushMicrotasks();
+    expect(el.querySelectorAll("li")).toHaveLength(2);
+  });
+
+  it("shows an honest 'no matches match the filters' note when a filter combination excludes every match, without falling back to the unfiltered 'no completed matches' copy", async () => {
+    stubReadModelFetch(
+      readModel({
+        matches: [
+          match({
+            matchId: "m-1",
+            completedAt: "2026-06-15T00:00:00.000Z",
+            map: "Only Map",
+            mapSize: "Normal",
+          }),
+        ],
+      }),
+    );
+    const el = mount();
+    await flushMicrotasks();
+    expect(el.querySelectorAll("li")).toHaveLength(1);
+
+    const selects = Array.from(el.querySelectorAll("select"));
+    const filterMapSizeSelect = selects.find((select) =>
+      Array.from(select.options).some((o) => o.value === "Normal"),
+    );
+    expect(filterMapSizeSelect).toBeDefined();
+    filterMapSizeSelect!.value = "Normal";
+    filterMapSizeSelect!.dispatchEvent(new Event("change"));
+    await flushMicrotasks();
+    expect(el.querySelectorAll("li")).toHaveLength(1);
+
+    const filterCleanlinessSelect = selects.find((select) =>
+      Array.from(select.options).some((o) => o.value === "degraded"),
+    );
+    expect(filterCleanlinessSelect).toBeDefined();
+    filterCleanlinessSelect!.value = "degraded";
+    filterCleanlinessSelect!.dispatchEvent(new Event("change"));
+    await flushMicrotasks();
+
+    // The single match is clean (degradedCount null), so "degraded only"
+    // excludes it — the honest empty-FILTER note, distinct from the
+    // unfiltered "no completed matches at all" copy.
+    expect(el.querySelectorAll("li")).toHaveLength(0);
+    expect(el.textContent).toContain("watch.no_filtered_matches");
+    expect(el.textContent).not.toContain("watch.no_completed_matches");
+  });
+
+  it("only renders filter options that actually appear in the archive — never a static/guessed list", async () => {
+    stubReadModelFetch(
+      readModel({
+        agents: [
+          agent({ slug: "alpha", displayName: "Alpha" }),
+          agent({ slug: "never-played", displayName: "Never Played" }),
+        ],
+        matches: [
+          match({
+            matchId: "m-alpha",
+            completedAt: "2026-06-15T00:00:00.000Z",
+            map: "Alpha Map",
+            participants: [
+              {
+                slot: 0,
+                agentSlug: "alpha",
+                displayName: "Alpha",
+                tilesOwned: 10,
+                isAlive: true,
+                isWinner: true,
+                color: "#fff",
+              },
+            ],
+          }),
+        ],
+      }),
+    );
+    const el = mount();
+    await flushMicrotasks();
+
+    expect(el.textContent).toContain("Alpha");
+    expect(el.textContent).not.toContain("Never Played");
+  });
 });
 
 describe("computeDegradedShare", () => {
@@ -321,5 +512,138 @@ describe("describeSchedule", () => {
     expect(note).toContain("watch.started_ago");
     expect(note).toContain(`"duration":"1h 0m"`);
     expect(note).not.toContain("watch.starts_in");
+  });
+});
+
+describe("filterArchiveMatches", () => {
+  function completedMatch(overrides: Partial<PublicMatch>) {
+    return match({
+      completedAt: "2026-06-15T00:00:00.000Z",
+      ...overrides,
+    }) as PublicMatch & { completedAt: string };
+  }
+  const noFilter = {
+    agentSlug: "all",
+    map: "all",
+    mapSize: "all",
+    featured: "all" as const,
+    cleanliness: "all" as const,
+    dateFrom: null,
+    dateTo: null,
+  };
+
+  it("filters by participant agentSlug", () => {
+    const alpha = completedMatch({
+      matchId: "a",
+      participants: [
+        {
+          slot: 0,
+          agentSlug: "alpha",
+          displayName: "Alpha",
+          tilesOwned: 0,
+          isAlive: true,
+          isWinner: false,
+          color: "#000",
+        },
+      ],
+    });
+    const beta = completedMatch({ matchId: "b", participants: [] });
+    const result = filterArchiveMatches([alpha, beta], new Set(), {
+      ...noFilter,
+      agentSlug: "alpha",
+    });
+    expect(result.map((m) => m.matchId)).toEqual(["a"]);
+  });
+
+  it("filters by map and mapSize independently", () => {
+    const m1 = completedMatch({ matchId: "1", map: "Frost", mapSize: "Normal" });
+    const m2 = completedMatch({ matchId: "2", map: "Sand", mapSize: "Compact" });
+    expect(
+      filterArchiveMatches([m1, m2], new Set(), { ...noFilter, map: "Frost" })
+        .map((m) => m.matchId),
+    ).toEqual(["1"]);
+    expect(
+      filterArchiveMatches([m1, m2], new Set(), {
+        ...noFilter,
+        mapSize: "Compact",
+      }).map((m) => m.matchId),
+    ).toEqual(["2"]);
+  });
+
+  it("filters to featured-only via the matchId set, leaving 'all' unaffected", () => {
+    const featured = completedMatch({ matchId: "f" });
+    const plain = completedMatch({ matchId: "p" });
+    const featuredIds = new Set(["f"]);
+    expect(
+      filterArchiveMatches([featured, plain], featuredIds, {
+        ...noFilter,
+        featured: "featured",
+      }).map((m) => m.matchId),
+    ).toEqual(["f"]);
+    expect(
+      filterArchiveMatches([featured, plain], featuredIds, noFilter).map(
+        (m) => m.matchId,
+      ),
+    ).toEqual(["f", "p"]);
+  });
+
+  it("filters clean/degraded using the SAME elevated threshold renderDegradedNote uses (>= 15%)", () => {
+    const clean = completedMatch({
+      matchId: "clean",
+      degradedCount: 10,
+      decisionCount: 100,
+    }); // 10%, below threshold
+    const degraded = completedMatch({
+      matchId: "degraded",
+      degradedCount: 20,
+      decisionCount: 100,
+    }); // 20%, above threshold
+    expect(
+      filterArchiveMatches([clean, degraded], new Set(), {
+        ...noFilter,
+        cleanliness: "clean",
+      }).map((m) => m.matchId),
+    ).toEqual(["clean"]);
+    expect(
+      filterArchiveMatches([clean, degraded], new Set(), {
+        ...noFilter,
+        cleanliness: "degraded",
+      }).map((m) => m.matchId),
+    ).toEqual(["degraded"]);
+  });
+
+  it("filters by inclusive date range against completedAt's UTC date segment", () => {
+    const early = completedMatch({
+      matchId: "early",
+      completedAt: "2026-06-01T23:00:00.000Z",
+    });
+    const mid = completedMatch({
+      matchId: "mid",
+      completedAt: "2026-06-15T00:00:00.000Z",
+    });
+    const late = completedMatch({
+      matchId: "late",
+      completedAt: "2026-06-30T00:00:00.000Z",
+    });
+    const result = filterArchiveMatches([early, mid, late], new Set(), {
+      ...noFilter,
+      dateFrom: "2026-06-10",
+      dateTo: "2026-06-20",
+    });
+    expect(result.map((m) => m.matchId)).toEqual(["mid"]);
+  });
+
+  it("combines multiple filters with AND semantics, never OR", () => {
+    const matches = [
+      completedMatch({ matchId: "wrong-map", map: "Frost", mapSize: "Normal" }),
+      completedMatch({ matchId: "wrong-size", map: "Sand", mapSize: "Compact" }),
+      completedMatch({ matchId: "both-match", map: "Sand", mapSize: "Normal" }),
+    ];
+    const result = filterArchiveMatches(matches, new Set(), {
+      ...noFilter,
+      map: "Sand",
+      mapSize: "Normal",
+    });
+    expect(result.map((m) => m.matchId)).toEqual(["both-match"]);
   });
 });
