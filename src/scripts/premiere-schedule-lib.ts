@@ -1,0 +1,287 @@
+import path from "node:path";
+import {
+  FeaturedMatchSchema,
+  readFeaturedMatchStore,
+  resolveFeaturedMatchStateRoot,
+  writeFeaturedMatchStore,
+  type FeaturedMatch,
+  type FeaturedMatchStoreFile,
+} from "../server/agents/FeaturedMatch";
+import {
+  rankPremiereCandidates,
+  resolveDefaultArtifactsRoot,
+  resolveDefaultQueueReadyDir,
+} from "./premiere-candidates";
+
+/**
+ * Shared lookup/validation logic for the four `premiere:schedule`/
+ * `premiere:validate`/`premiere:publish`/`premiere:cancel` operator CLIs
+ * (product overhaul spec Stage 3 item 3). All four mutate the SAME
+ * `FeaturedMatch` store (`src/server/agents/FeaturedMatch.ts`) — this
+ * module is where their shared "resolve an operator-supplied id to a
+ * record" and "is this schedule internally consistent" logic lives, so
+ * the four scripts stay thin and never duplicate it.
+ *
+ * Concurrency: today's four CLIs are operator-invoked, one at a time, by
+ * hand or from a single supervised cron — `FeaturedMatch.ts`'s own store
+ * functions hold no lock, and neither does this module. A future turn
+ * wiring these into an automated pipeline (see the coexistence design
+ * note in `premiere-schedule.ts`'s module doc) MUST add real locking
+ * before more than one writer can run concurrently; do not assume it
+ * exists today.
+ */
+
+/**
+ * Real matches run roughly 20+ minutes wall-clock at the cadence
+ * `cycle-premiere.sh`/`generate-premiere-queue.sh` already tune for
+ * (`TARGET_MATCH_MS` there defaults to 21.6 minutes) — two premieres
+ * scheduled closer together than this can never both actually play out
+ * before the next is due. Kept generous (not exactly 20) because a
+ * schedule built today has no visibility into a future turn's actual
+ * per-item playback duration (`turnCount * turnIntervalMs`, only known
+ * once the match is claimed) — this is a coarse operator-facing safety
+ * rail, not a scheduling guarantee.
+ */
+export const MINIMUM_SCHEDULE_SPACING_MINUTES = 20;
+
+export interface ScheduleResolveOptions {
+  queueReadyDir?: string;
+  artifactsRoot?: string;
+  stateRoot?: string;
+  now?: () => Date;
+}
+
+function resolvedRoots(options: ScheduleResolveOptions) {
+  return {
+    queueReadyDir: options.queueReadyDir ?? resolveDefaultQueueReadyDir(),
+    artifactsRoot: options.artifactsRoot ?? resolveDefaultArtifactsRoot(),
+    stateRoot: options.stateRoot ?? resolveFeaturedMatchStateRoot(),
+  };
+}
+
+export interface ScheduleTargetFound {
+  found: true;
+  /** True when this record already exists in the store (an operator re-running `premiere:schedule` on an already-tracked candidate); false when it was just built fresh from a live queue candidate and has never been persisted. */
+  existedInStore: boolean;
+  record: FeaturedMatch;
+}
+
+export interface ScheduleTargetNotFound {
+  found: false;
+  /** Named reason — e.g. `not_found_in_queue_or_store`, or the exact `premiere:candidates` rejection reason (e.g. `already_published_on_league: ...`) when the id resolves to a rejected candidate. */
+  reason: string;
+}
+
+export type ScheduleTargetResult = ScheduleTargetFound | ScheduleTargetNotFound;
+
+/**
+ * Resolves an operator-supplied id (a `FeaturedMatch.matchId`, a premiere-
+ * queue item's directory name, or its `episodeId`/`experienceRequestId`)
+ * to the record `premiere:schedule` should act on. Checks the STORE first
+ * (an id already tracked, e.g. from a prior schedule/cancel) and only
+ * falls back to a fresh `premiere:candidates` scan when nothing in the
+ * store matches — this means an operator can re-target an
+ * already-scheduled record by the same id they originally used.
+ *
+ * Deliberately reuses `rankPremiereCandidates` rather than re-scanning
+ * `ready/` directly, so the named-rejection check (an id that resolves to
+ * an already-published episode) is inherited for free instead of
+ * re-implemented — this is exactly why an id that matches a REJECTED
+ * queue candidate resolves to `found: false` with that candidate's own
+ * rejection reason, never silently schedulable.
+ */
+export async function resolveScheduleTarget(
+  id: string,
+  options: ScheduleResolveOptions = {},
+): Promise<ScheduleTargetResult> {
+  const roots = resolvedRoots(options);
+  const store = await readFeaturedMatchStore(roots.stateRoot);
+  const existing = store.matches.find(
+    (record) =>
+      record.matchId === id ||
+      record.queueItemName === id ||
+      record.episodeRequestId === id,
+  );
+  if (existing !== undefined) {
+    return { found: true, existedInStore: true, record: existing };
+  }
+
+  const ranked = await rankPremiereCandidates({
+    queueReadyDir: roots.queueReadyDir,
+    artifactsRoot: roots.artifactsRoot,
+    now: options.now,
+  });
+  const rejectedMatch = ranked.rejected.find(
+    (rejection) =>
+      rejection.queueItemName === id ||
+      rejection.episodeId === id ||
+      rejection.experienceRequestId === id,
+  );
+  if (rejectedMatch !== undefined) {
+    return { found: false, reason: rejectedMatch.reason };
+  }
+  const candidate = ranked.candidates.find(
+    (entry) =>
+      entry.queueItemName === id ||
+      entry.meta.episodeId === id ||
+      entry.meta.experienceRequestId === id,
+  );
+  if (candidate === undefined) {
+    return { found: false, reason: "not_found_in_queue_or_store" };
+  }
+  return { found: true, existedInStore: false, record: candidate.featuredMatch };
+}
+
+export async function loadStore(
+  options: ScheduleResolveOptions = {},
+): Promise<{ stateRoot: string; store: FeaturedMatchStoreFile }> {
+  const roots = resolvedRoots(options);
+  return { stateRoot: roots.stateRoot, store: await readFeaturedMatchStore(roots.stateRoot) };
+}
+
+/** Upserts one record into the store by `matchId`, writing atomically. */
+export async function upsertRecord(
+  stateRoot: string,
+  record: FeaturedMatch,
+): Promise<FeaturedMatchStoreFile> {
+  const validated = FeaturedMatchSchema.parse(record);
+  const current = await readFeaturedMatchStore(stateRoot);
+  const withoutExisting = current.matches.filter(
+    (entry) => entry.matchId !== validated.matchId,
+  );
+  const next: FeaturedMatchStoreFile = {
+    schemaVersion: 1,
+    matches: [...withoutExisting, validated],
+  };
+  await writeFeaturedMatchStore(stateRoot, next);
+  return next;
+}
+
+export interface ScheduleValidationIssue {
+  matchId: string;
+  reason: string;
+}
+
+/**
+ * `premiere:validate`'s checking logic, factored out so `premiere:schedule`
+ * can run it eagerly against the WOULD-BE next state before writing (fail
+ * before persisting a conflict, not after). Checks, per scheduled/published
+ * premiere-lane record:
+ *
+ * - `scheduledAt` is a parseable date not already in the past (relative to
+ *   `now`).
+ * - `scheduledAt` is not within `MINIMUM_SCHEDULE_SPACING_MINUTES` of any
+ *   OTHER scheduled/published premiere-lane record's own `scheduledAt` —
+ *   two premieres this close can never both actually run.
+ * - `queueItemName` still exists in the live queue's `ready/` directory —
+ *   `cycle-premiere.sh`'s own FIFO consumption (unrelated to this
+ *   schedule) can claim and remove a queue item at any time; a scheduled
+ *   record whose source vanished out from under it is a real problem an
+ *   operator needs to see, not a silent no-op later.
+ *
+ * Archive-lane records are never scheduled (enforced by `FeaturedMatch.ts`'s
+ * own schema) so none of the above applies to them — this function only
+ * inspects premiere-lane records.
+ */
+export async function validateSchedule(
+  matches: readonly FeaturedMatch[],
+  options: ScheduleResolveOptions = {},
+): Promise<ScheduleValidationIssue[]> {
+  const now = options.now?.() ?? new Date();
+  const issues: ScheduleValidationIssue[] = [];
+  const active = matches.filter(
+    (record) =>
+      record.lane === "premiere" &&
+      (record.state === "scheduled" || record.state === "published"),
+  );
+
+  const roots = resolvedRoots(options);
+  let queueItemNames: ReadonlySet<string> | null = null;
+  const listQueueItemNames = async (): Promise<ReadonlySet<string>> => {
+    if (queueItemNames !== null) return queueItemNames;
+    const fs = await import("node:fs/promises");
+    try {
+      const entries = await fs.readdir(roots.queueReadyDir, {
+        withFileTypes: true,
+      });
+      queueItemNames = new Set(
+        entries.filter((entry) => entry.isDirectory()).map((entry) => entry.name),
+      );
+    } catch {
+      queueItemNames = new Set();
+    }
+    return queueItemNames;
+  };
+
+  for (const record of active) {
+    if (record.scheduledAt === null) {
+      issues.push({
+        matchId: record.matchId,
+        reason: "missing_scheduled_at: a scheduled/published premiere-lane record must carry a scheduledAt",
+      });
+      continue;
+    }
+    const scheduledMs = Date.parse(record.scheduledAt);
+    if (Number.isNaN(scheduledMs)) {
+      issues.push({
+        matchId: record.matchId,
+        reason: `invalid_scheduled_at: "${record.scheduledAt}" does not parse as a date`,
+      });
+      continue;
+    }
+    if (scheduledMs < now.getTime()) {
+      issues.push({
+        matchId: record.matchId,
+        reason: `scheduled_at_in_past: ${record.scheduledAt} is before ${now.toISOString()}`,
+      });
+    }
+    for (const other of active) {
+      if (other.matchId === record.matchId) continue;
+      if (other.scheduledAt === null) continue;
+      const otherMs = Date.parse(other.scheduledAt);
+      if (Number.isNaN(otherMs)) continue;
+      const spacingMinutes = Math.abs(scheduledMs - otherMs) / 60_000;
+      if (spacingMinutes < MINIMUM_SCHEDULE_SPACING_MINUTES) {
+        issues.push({
+          matchId: record.matchId,
+          reason: `schedule_collision: within ${spacingMinutes.toFixed(1)}min of ${other.matchId} (minimum spacing ${MINIMUM_SCHEDULE_SPACING_MINUTES}min)`,
+        });
+      }
+    }
+    if (record.queueItemName !== null) {
+      const names = await listQueueItemNames();
+      if (!names.has(record.queueItemName)) {
+        issues.push({
+          matchId: record.matchId,
+          reason: `queue_item_missing: "${record.queueItemName}" is no longer in the premiere queue's ready/ directory (claimed or expired elsewhere)`,
+        });
+      }
+    }
+  }
+  return issues;
+}
+
+export function parseIdArg(argv: string[], prefix = "--episode="): string | undefined {
+  const arg = argv.find((entry) => entry.startsWith(prefix));
+  return arg === undefined ? undefined : arg.slice(prefix.length);
+}
+
+export function parseValueArg(argv: string[], prefix: string): string | undefined {
+  const arg = argv.find((entry) => entry.startsWith(prefix));
+  return arg === undefined ? undefined : arg.slice(prefix.length);
+}
+
+export function resolveRootOverrides(argv: string[]): ScheduleResolveOptions {
+  const queueRootOverride = parseValueArg(argv, "--queue-root=");
+  const artifactsRootOverride = parseValueArg(argv, "--artifacts-root=");
+  const stateRootOverride = parseValueArg(argv, "--state-root=");
+  return {
+    queueReadyDir:
+      queueRootOverride === undefined
+        ? undefined
+        : path.join(path.resolve(queueRootOverride), "ready"),
+    artifactsRoot:
+      artifactsRootOverride === undefined ? undefined : path.resolve(artifactsRootOverride),
+    stateRoot: stateRootOverride === undefined ? undefined : path.resolve(stateRootOverride),
+  };
+}
