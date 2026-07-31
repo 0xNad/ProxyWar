@@ -19,6 +19,8 @@
     "premiere:prepare-projection": "cross-env GAME_ENV=dev tsx src/scripts/replay-premiere-prepare-projection.ts",
     "premiere:ingest-coworld": "tsx src/scripts/replay-premiere-ingest-coworld.ts",
     "premiere:loop": "cross-env GAME_ENV=dev tsx src/scripts/replay-premiere-loop.ts",
+    "premiere:candidates": "tsx src/scripts/premiere-candidates.ts",
+    "feature:candidates": "tsx src/scripts/feature-candidates.ts",
     "premiere-wagering:seal": "tsx src/scripts/premiere-wagering/seal-episode.ts",
     "premiere-wagering:roster": "tsx src/scripts/premiere-wagering/pull-active-roster.ts",
     "premiere-wagering:generate": "tsx src/scripts/premiere-wagering/generate-xp-request-episode.ts",
