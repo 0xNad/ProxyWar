@@ -5,6 +5,13 @@ import { fileURLToPath } from "node:url";
 import englishTranslations from "../../../resources/lang/en.json";
 import { DEFAULT_PLATFORM_ORIGIN } from "../../core/PlatformOrigin";
 import { readAgentStatsArtifact } from "./AgentStatsArtifact";
+import {
+  appendStandingsHistorySnapshot,
+  EMPTY_STANDINGS_HISTORY_STORE,
+  readStandingsHistoryStore,
+  snapshotFromMirrorData,
+  type StandingsHistoryStore,
+} from "./CoworldLeagueStandingsHistory";
 import { buildProxyWarPublicReadModel } from "../ProxyWarPublicReadModel";
 import {
   readFeaturedMatchStore,
@@ -197,6 +204,7 @@ export interface CoworldLeagueSitePaths {
   clientPath: string;
   dataPath: string;
   readModelPath: string;
+  standingsHistoryPath: string;
 }
 
 /**
@@ -520,6 +528,7 @@ async function writeCoworldLeagueSiteUnlocked(
   const clientPath = path.join(siteDir, "client.js");
   const dataPath = path.join(siteDir, "data.json");
   const readModelPath = path.join(siteDir, "read-model.json");
+  const standingsHistoryPath = path.join(siteDir, "standings-history.json");
   // Self-host the social preview image next to the page. The app shell's copy
   // is content-hashed by the build and this writer cannot know that hash, so
   // publishing a stable sibling keeps og:image resolvable without coupling the
@@ -553,6 +562,33 @@ async function writeCoworldLeagueSiteUnlocked(
   const statsArtifact = await readAgentStatsArtifact(
     path.join(siteDir, "agent-stats.json"),
   );
+  // Product overhaul spec: standings-history store for score/rank-over-time
+  // graphs — see `CoworldLeagueStandingsHistory.ts`'s own doc for why this
+  // can only ever grow forward from here, never backfilled. A corrupt file
+  // is left untouched on disk (never overwritten) and this cycle publishes
+  // with an empty series rather than either failing the league publish or
+  // silently discarding real accumulated history.
+  const existingStandingsHistory = await readStandingsHistoryStore(
+    standingsHistoryPath,
+  );
+  const standingsHistoryCorrupt = existingStandingsHistory === "corrupt";
+  if (standingsHistoryCorrupt) {
+    console.warn(
+      `coworld-league-mirror: standings-history.json is corrupt, leaving it untouched and publishing with an empty score series this cycle: ${standingsHistoryPath}`,
+    );
+  }
+  const candidateSnapshot = snapshotFromMirrorData(data);
+  const standingsHistory: StandingsHistoryStore = standingsHistoryCorrupt
+    ? EMPTY_STANDINGS_HISTORY_STORE
+    : candidateSnapshot === null
+      ? existingStandingsHistory
+      : appendStandingsHistorySnapshot(existingStandingsHistory, candidateSnapshot);
+  if (!standingsHistoryCorrupt) {
+    await writeFileAtomic(
+      standingsHistoryPath,
+      `${JSON.stringify(standingsHistory, null, 2)}\n`,
+    );
+  }
   // Publish data.json and read-model.json last. Existing pages only reload
   // after observing a newer data.json snapshot, so they cannot race ahead of
   // either the client or the HTML. read-model.json is the typed, normalized
@@ -564,6 +600,7 @@ async function writeCoworldLeagueSiteUnlocked(
     identity,
     featuredMatchStore,
     statsArtifact,
+    standingsHistory,
   );
   await writeFileAtomic(clientPath, coworldLeagueClientJavaScript());
   await writeFileAtomic(indexPath, coworldLeagueIndexHtml(data, identity));
@@ -572,7 +609,13 @@ async function writeCoworldLeagueSiteUnlocked(
     readModelPath,
     `${JSON.stringify(readModel, null, 2)}\n`,
   );
-  return { indexPath, clientPath, dataPath, readModelPath };
+  return {
+    indexPath,
+    clientPath,
+    dataPath,
+    readModelPath,
+    standingsHistoryPath,
+  };
 }
 
 export async function writeCoworldLeagueSite(

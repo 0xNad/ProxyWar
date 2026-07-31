@@ -1,7 +1,7 @@
-import { mkdtemp, readFile, readdir, rm, stat } from "node:fs/promises";
+import { mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { afterEach, describe, expect, test } from "vitest";
+import { afterEach, describe, expect, test, vi } from "vitest";
 import { DEFAULT_PLATFORM_ORIGIN } from "../../src/core/PlatformOrigin";
 import {
   COWORLD_LEAGUE_POLL_INTERVAL_MS,
@@ -660,6 +660,7 @@ describe("writeCoworldLeagueSite", () => {
       "index.html",
       "read-model.json",
       "social.png",
+      "standings-history.json",
     ]);
   });
 
@@ -699,6 +700,117 @@ describe("writeCoworldLeagueSite", () => {
     await expect(
       stat(`${path.resolve(siteDir)}.write-lock`),
     ).rejects.toMatchObject({ code: "ENOENT" });
+  });
+});
+
+describe("writeCoworldLeagueSite — standings-history publication", () => {
+  let siteDir: string | null = null;
+
+  afterEach(async () => {
+    if (siteDir !== null) {
+      await rm(siteDir, { recursive: true, force: true });
+      siteDir = null;
+    }
+  });
+
+  test("writes one snapshot on first publish, alongside data.json, inside the same write-lock", async () => {
+    siteDir = await mkdtemp(path.join(tmpdir(), "league-site-"));
+    const paths = await writeCoworldLeagueSite(siteDir, sampleData());
+    expect(paths.standingsHistoryPath).toBe(
+      path.join(siteDir, "standings-history.json"),
+    );
+    const history = JSON.parse(
+      await readFile(paths.standingsHistoryPath, "utf8"),
+    );
+    expect(history.schemaVersion).toBe(1);
+    expect(history.snapshots).toHaveLength(1);
+    expect(history.snapshots[0].roundNumber).toBe(268);
+    expect(
+      history.snapshots[0].agents.find(
+        (a: { playerName: string }) => a.playerName === "odin free",
+      ),
+    ).toEqual({
+      playerName: "odin free",
+      score: 31.05,
+      rank: 1,
+      activeVersionLabel: "qd1n:v2",
+    });
+  });
+
+  test("an unchanged republish never grows the file — dedup holds across real publish cycles", async () => {
+    siteDir = await mkdtemp(path.join(tmpdir(), "league-site-"));
+    const data = sampleData();
+    await writeCoworldLeagueSite(siteDir, data);
+    const paths = await writeCoworldLeagueSite(siteDir, {
+      ...data,
+      generatedAt: "2026-07-13T12:00:30.000Z",
+    });
+    const history = JSON.parse(
+      await readFile(paths.standingsHistoryPath, "utf8"),
+    );
+    expect(history.snapshots).toHaveLength(1);
+  });
+
+  test("a genuine score change appends a second snapshot", async () => {
+    siteDir = await mkdtemp(path.join(tmpdir(), "league-site-"));
+    const data = sampleData();
+    await writeCoworldLeagueSite(siteDir, data);
+    const moved = {
+      ...data,
+      generatedAt: "2026-07-13T12:05:00.000Z",
+      standings: data.standings.map((row) =>
+        row.playerName === "odin free" ? { ...row, score: 32.5 } : row,
+      ),
+    };
+    const paths = await writeCoworldLeagueSite(siteDir, moved);
+    const history = JSON.parse(
+      await readFile(paths.standingsHistoryPath, "utf8"),
+    );
+    expect(history.snapshots).toHaveLength(2);
+    expect(history.snapshots[1].recordedAt).toBe("2026-07-13T12:05:00.000Z");
+  });
+
+  test("a stale republish never appends a duplicate point", async () => {
+    siteDir = await mkdtemp(path.join(tmpdir(), "league-site-"));
+    const data = sampleData();
+    const paths = await writeCoworldLeagueSite(siteDir, data);
+    await markCoworldLeagueSiteStale(siteDir, "2026-07-13T12:05:00.000Z");
+    const history = JSON.parse(
+      await readFile(paths.standingsHistoryPath, "utf8"),
+    );
+    expect(history.snapshots).toHaveLength(1);
+  });
+
+  test("a corrupt standings-history.json is left untouched, and the publish still succeeds", async () => {
+    siteDir = await mkdtemp(path.join(tmpdir(), "league-site-"));
+    await writeFile(
+      path.join(siteDir, "standings-history.json"),
+      "not valid json",
+      "utf8",
+    );
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const paths = await writeCoworldLeagueSite(siteDir, sampleData());
+      expect(warnSpy).toHaveBeenCalledWith(
+        expect.stringContaining("standings-history.json is corrupt"),
+      );
+      // Never overwritten — the raw corrupt bytes are still there for
+      // possible manual recovery, rather than silently reset to empty.
+      const raw = await readFile(paths.standingsHistoryPath, "utf8");
+      expect(raw).toBe("not valid json");
+      // The rest of the publish (data.json/read-model.json) still succeeds.
+      const roundTrip = JSON.parse(await readFile(paths.dataPath, "utf8"));
+      expect(roundTrip.league.id).toBe("league_test");
+      const readModel = JSON.parse(
+        await readFile(paths.readModelPath, "utf8"),
+      );
+      const odin = readModel.agents.find(
+        (a: { playerName: string }) => a.playerName === "odin free",
+      );
+      expect(odin.timeSeries.score).toBeNull();
+    } finally {
+      warnSpy.mockRestore();
+    }
   });
 });
 
