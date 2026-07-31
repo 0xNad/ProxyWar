@@ -11,11 +11,13 @@ import "./publicapp/AgentsDirectoryPage";
 import "./publicapp/BuilderProfilePage";
 import "./publicapp/BuildersDirectoryPage";
 import "./publicapp/LobbyPage";
+import "./publicapp/MatchDetailPage";
 import "./publicapp/WatchPage";
 
 /**
  * Entry point for the Stage 2 public app (`/`, `/watch`, `/agents`,
- * `/agent/:slug`, `/builders`, `/builder/:slug`, `/about`) — a deliberately
+ * `/agent/:slug`, `/builders`, `/builder/:slug`, `/about`) plus Stage 3's
+ * `/match/:matchId` (item 6) — a deliberately
  * separate, minimal Vite entry from `Main.ts`'s game/replay/premiere
  * client. `Main.ts` statically imports the entire game engine (Pixi
  * renderer, `ClientGameRunner`, ad SDKs, etc.), so any route that loads it
@@ -78,6 +80,13 @@ function mount(pathname: string): boolean {
   if (builderProfileMatch !== null) {
     const page = document.createElement("builder-profile-page");
     page.setAttribute("slug", decodeURIComponent(builderProfileMatch[1]));
+    document.body.replaceChildren(page);
+    return true;
+  }
+  const matchDetailMatch = pathname.match(/^\/match\/([^/]+)$/);
+  if (matchDetailMatch !== null) {
+    const page = document.createElement("match-detail-page");
+    page.setAttribute("match-id", decodeURIComponent(matchDetailMatch[1]));
     document.body.replaceChildren(page);
     return true;
   }

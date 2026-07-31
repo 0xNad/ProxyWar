@@ -1,0 +1,740 @@
+import { html, LitElement, nothing, TemplateResult } from "lit";
+import { customElement, property, state } from "lit/decorators.js";
+import { unsafeSVG } from "lit/directives/unsafe-svg.js";
+import { z } from "zod";
+import { translateText } from "../Utils";
+import {
+  APP_SHELL_ROOT_CLASSES,
+  appShellFooter,
+  appShellHeader,
+} from "./AppShellChrome";
+import {
+  fetchReadModel,
+  PublicAgent,
+  PublicFeaturedMatchSchema,
+  PublicMatch,
+  ReadModel,
+  type PublicFeaturedMatch,
+} from "./ReadModelSchema";
+import { formatDuration } from "./WatchPage";
+import {
+  armReminder,
+  downloadIcsFile,
+  fireReminderIfDue,
+  readReminderState,
+  type ReminderState,
+} from "./PremiereReminder";
+
+const featuredMatchParticipantCardSchema = z.object({
+  playerName: z.string(),
+  displayName: z.string(),
+  agentSlug: z.string().nullable(),
+  emblemSvg: z.string().nullable(),
+  primaryColor: z.string().nullable(),
+  secondaryColor: z.string().nullable(),
+  versionLabel: z.string().nullable(),
+  builderId: z.string().nullable(),
+  builderDisplayName: z.string().nullable(),
+});
+type FeaturedMatchParticipantCard = z.infer<
+  typeof featuredMatchParticipantCardSchema
+>;
+
+/**
+ * `GET /api/featured-matches/:matchId`'s response shape — same "client
+ * validates its own trust boundary" discipline `ReadModelSchema.ts`
+ * applies to the bulk read model (see that file's doc), kept local to
+ * this page since this narrow per-match route is deliberately never
+ * folded into `ReadModelSchema.ts` itself (see `FeaturedMatchParticipants.ts`'s
+ * doc for why participant identity stays off the bulk mirror).
+ */
+const featuredMatchDetailResponseSchema = z.object({
+  schemaVersion: z.literal(1),
+  match: PublicFeaturedMatchSchema,
+  derivedPremiereId: z.string().nullable(),
+  participants: z.array(featuredMatchParticipantCardSchema),
+});
+
+type LoadState = "loading" | "ready" | "not-found" | "error";
+
+const STATE_LABEL: Record<PublicFeaturedMatch["state"], string> = {
+  candidate: "match_detail.state_candidate",
+  scheduled: "match_detail.state_scheduled",
+  published: "match_detail.state_published",
+  revealed: "match_detail.state_revealed",
+  archived: "match_detail.state_archived",
+  cancelled: "match_detail.state_cancelled",
+};
+
+const RECENT_FORM_LIMIT = 5;
+
+/**
+ * `/match/:matchId` — the canonical public page for one `FeaturedMatch`
+ * record (product overhaul spec Stage 3 item 6). Fetches BOTH the shared
+ * read model (`fetchReadModel()`, for `premieres.live`) and the narrow
+ * `GET /api/featured-matches/:matchId` detail route, then resolves to
+ * exactly one of four outcomes, checked in this priority order:
+ *
+ *   1. Not found — the detail route 404s (the record is absent, or still
+ *      `"candidate"` — see `FeaturedMatchParticipants.ts`'s doc for why
+ *      `"candidate"` is never public). Same `renderNotFound` pattern as
+ *      `AgentProfilePage`.
+ *   2. Live-redirect — `derivedPremiereId` matches the read model's
+ *      current `premieres.live.premiereId`: this record IS the premiere
+ *      playing back RIGHT NOW. Stage 4 owns that broadcast layout, not
+ *      this page — `window.location.replace(...)` to the existing
+ *      `/premiere/:id` route (`replace`, not `assign`, so this URL never
+ *      sits in back-history ahead of the live page a visitor actually
+ *      wants). This component never renders a broadcast UI itself; the
+ *      "Live Premiere" label lives entirely on that other page.
+ *   3. Post-match — `match.result !== null`. The server's own embargo
+ *      projection (`publicFeaturedMatch` in `ProxyWarPublicReadModel.ts`)
+ *      is the ONLY thing that ever populates `result`; this page trusts
+ *      it completely rather than re-deriving reveal state from `state`/
+ *      `revealAt` itself. That matters concretely: an archive-lane
+ *      record is revealed immediately on creation regardless of its raw
+ *      `state` string (see `isFeaturedMatchRevealed`'s doc), so
+ *      `result !== null` is the one correct signal here, not
+ *      `state === "revealed"`.
+ *   4. Pre-match — everything else (`state` is `"scheduled"` or
+ *      `"published"`, not yet live, not yet revealed). A `"cancelled"`
+ *      premiere-lane record also lands in this bucket by elimination —
+ *      it gets its own honest notice rather than a misleading countdown.
+ *
+ * PLACEMENTS-CORRELATION DECISION (post-match state, see
+ * `resolvePlacementAgent`): `result.placements`/`result.winnerAgentId`
+ * carry identity-registry Agent ids (`FeaturedMatchResultSchema`'s own
+ * doc), but the `participants` array this page also receives is already-
+ * resolved `FeaturedMatchParticipantCard`s with NO `agentId` field of
+ * their own (deliberately — see `FeaturedMatchParticipants.ts`'s doc), so
+ * a placement can't be matched against a participant CARD directly. It
+ * CAN, however, be resolved against the already-fetched bulk read
+ * model's `agents` array: every `PublicAgent.id` is the SAME identity-
+ * registry Agent id (`ProxyWarPublicReadModel.ts`'s `publicAgentFromView`
+ * sets `id: view.agent.id` off that same registry), and `agents` is
+ * exhaustive of every registered Agent regardless of standing (see
+ * `publicAgents`'s own doc: "standings first, then any registered Agent
+ * the live standings didn't mention"). This is a sound correlation, not
+ * a bulk participant-identity leak: the general Agent roster is already
+ * public on every page, independent of this match, and by the time the
+ * client can see a non-null `result` the server has already decided the
+ * record is revealed. A placement whose `agentId` is `null` (an
+ * unregistered participant) or that doesn't resolve against `agents` (a
+ * removed/never-registered id) renders an honest "unknown" label —
+ * never a fabricated name.
+ *
+ * DIRECTOR CUT / FULL REPLAY LINK: deliberately omitted. `PublicMatch`
+ * (the league archive entry with `watchHref`/`fullRenderHref`) is keyed
+ * by `episode.episodeRequestId`; `PublicFeaturedMatch` carries no such
+ * field client-side (see `PublicFeaturedMatchSchema` — `matchId` is the
+ * `feat_...` editorial id, a different namespace), so there is no wired,
+ * non-fabricated way to resolve this record to a `PublicMatch` row from
+ * here. Stage 5/6's Director Cut is what's actually specced to carry
+ * that link (same gap `LobbyPage`'s state C documents) — not invented
+ * here ahead of that work.
+ */
+@customElement("match-detail-page")
+export class MatchDetailPage extends LitElement {
+  @property({ type: String, attribute: "match-id" }) matchId = "";
+
+  @state() private loadState: LoadState = "loading";
+  @state() private match: PublicFeaturedMatch | null = null;
+  @state() private participants: FeaturedMatchParticipantCard[] = [];
+  @state() private readModel: ReadModel | null = null;
+  /** Drives the pre-match state's live countdown — same client-clock-only convention `LobbyPage`'s state B documents (never skew-corrected against the read model's periodic-mirror-poll `generatedAt`). */
+  @state() private nowMs = Date.now();
+  private tickHandle: number | null = null;
+
+  createRenderRoot() {
+    // Light DOM, so page-level Tailwind applies — same reasoning as
+    // `AgentProfilePage`/`LobbyPage`.
+    this.classList.add(...APP_SHELL_ROOT_CLASSES);
+    return this;
+  }
+
+  connectedCallback(): void {
+    super.connectedCallback();
+    void this.load();
+    this.tickHandle = window.setInterval(() => {
+      this.nowMs = Date.now();
+      if (
+        this.match !== null &&
+        this.match.result === null &&
+        this.match.scheduledAt !== null &&
+        fireReminderIfDue(this.matchId, this.match.scheduledAt, this.nowMs)
+      ) {
+        this.requestUpdate();
+      }
+    }, 1000);
+  }
+
+  disconnectedCallback(): void {
+    super.disconnectedCallback();
+    if (this.tickHandle !== null) {
+      clearInterval(this.tickHandle);
+      this.tickHandle = null;
+    }
+  }
+
+  private async load(): Promise<void> {
+    this.loadState = "loading";
+    try {
+      const [readModel, response] = await Promise.all([
+        fetchReadModel(),
+        fetch(`/api/featured-matches/${encodeURIComponent(this.matchId)}`, {
+          method: "GET",
+          headers: { Accept: "application/json" },
+          credentials: "same-origin",
+          cache: "no-store",
+        }),
+      ]);
+      this.readModel = readModel;
+      if (response.status === 404) {
+        this.match = null;
+        this.participants = [];
+        this.loadState = "not-found";
+        return;
+      }
+      const body: unknown = await response.json().catch(() => null);
+      const parsed = featuredMatchDetailResponseSchema.safeParse(body);
+      if (!response.ok || !parsed.success) {
+        throw new Error("featured_match_detail_load_failed");
+      }
+      const live = readModel.premieres.live;
+      if (
+        live !== null &&
+        parsed.data.derivedPremiereId !== null &&
+        parsed.data.derivedPremiereId === live.premiereId
+      ) {
+        // State 2 — Live-redirect. Stage 4 owns the broadcast layout; this
+        // page never renders it (see class doc). `replace`, not `assign`,
+        // per that same doc.
+        window.location.replace(
+          `/premiere/${encodeURIComponent(live.premiereId)}`,
+        );
+        return;
+      }
+      this.match = parsed.data.match;
+      this.participants = parsed.data.participants;
+      this.loadState = "ready";
+    } catch {
+      this.loadState = "error";
+    }
+  }
+
+  render() {
+    return html`
+      ${appShellHeader(
+        null,
+        undefined,
+        this.readModel?.links.accountUrl ?? undefined,
+      )}
+      <main class="mx-auto w-full max-w-3xl px-4 py-8">
+        ${this.loadState === "loading" ? this.renderLoading() : nothing}
+        ${this.loadState === "error" ? this.renderError() : nothing}
+        ${this.loadState === "not-found" ? this.renderNotFound() : nothing}
+        ${this.loadState === "ready" &&
+        this.match !== null &&
+        this.readModel !== null
+          ? this.renderMatch(this.match, this.participants, this.readModel)
+          : nothing}
+      </main>
+      ${appShellFooter()}
+    `;
+  }
+
+  private renderLoading() {
+    return html`<p class="text-sm text-ink-muted" role="status">
+      ${translateText("match_detail.loading")}
+    </p>`;
+  }
+
+  private renderError() {
+    return html`
+      <div
+        class="rounded-md border border-danger/40 bg-danger/10 px-3 py-2 text-sm text-danger"
+        role="alert"
+      >
+        ${translateText("match_detail.load_error")}
+        <button
+          type="button"
+          class="ml-2 font-semibold underline outline-none focus-visible:ring-2 focus-visible:ring-accent"
+          @click=${() => this.load()}
+        >
+          ${translateText("match_detail.try_again")}
+        </button>
+      </div>
+    `;
+  }
+
+  private renderNotFound() {
+    return html`
+      <h1 class="mb-2 text-xl font-bold text-ink">
+        ${translateText("match_detail.not_found_title")}
+      </h1>
+      <p class="text-sm text-ink-muted">
+        ${translateText("match_detail.not_found_body")}
+      </p>
+    `;
+  }
+
+  private renderMatch(
+    match: PublicFeaturedMatch,
+    participants: readonly FeaturedMatchParticipantCard[],
+    readModel: ReadModel,
+  ): TemplateResult {
+    return html`
+      <h1 class="mb-1 text-2xl font-bold text-ink">${match.title}</h1>
+      ${match.description !== ""
+        ? html`<p class="mb-2 text-sm text-ink-dim">${match.description}</p>`
+        : nothing}
+      <p class="mb-4 font-mono text-xs text-ink-muted">
+        ${match.map} · ${match.format}
+      </p>
+      ${match.result !== null
+        ? this.renderPostMatch(match, match.result, participants, readModel.agents)
+        : this.renderPreMatch(match, participants)}
+    `;
+  }
+
+  // ---- Post-match (state 3) ---------------------------------------------
+
+  private renderPostMatch(
+    match: PublicFeaturedMatch,
+    result: NonNullable<PublicFeaturedMatch["result"]>,
+    participants: readonly FeaturedMatchParticipantCard[],
+    agents: readonly PublicAgent[],
+  ): TemplateResult {
+    const winner = resolvePlacementAgent(result.winnerAgentId, agents);
+    const placements = [...result.placements].sort(
+      (a, b) => a.placement - b.placement,
+    );
+    return html`
+      <span
+        class="inline-flex items-center gap-2 rounded-full border border-line bg-surface-2 px-3 py-1 font-mono text-xs font-extrabold uppercase tracking-wide text-ink-muted"
+      >
+        ${translateText(STATE_LABEL[match.state])}
+      </span>
+      ${match.revealAt !== null
+        ? html`<p class="mt-2 text-xs text-ink-muted">
+            ${translateText("match_detail.revealed_at", {
+              time: new Date(match.revealAt).toLocaleString(),
+            })}
+          </p>`
+        : nothing}
+      <div class="mt-4 rounded-lg border border-line bg-surface-2 p-4">
+        <p class="text-sm font-black uppercase tracking-wide text-ink-muted">
+          ${translateText("match_detail.winner_heading")}
+        </p>
+        <p class="mt-1 text-lg font-bold text-ink">
+          ${winner === null
+            ? translateText("match_detail.winner_unknown")
+            : winner.href !== null
+              ? html`<a
+                  href=${winner.href}
+                  class="text-ink no-underline outline-none hover:text-accent focus-visible:ring-2 focus-visible:ring-accent"
+                  >${winner.label}</a
+                >`
+              : winner.label}
+        </p>
+      </div>
+      ${placements.length > 0
+        ? html`
+            <div class="mt-4">
+              <p
+                class="text-sm font-black uppercase tracking-wide text-ink-muted"
+              >
+                ${translateText("match_detail.placements_heading")}
+              </p>
+              <ol class="mt-2 flex flex-col gap-1.5" role="list">
+                ${placements.map((placement) => {
+                  const agent = resolvePlacementAgent(
+                    placement.agentId,
+                    agents,
+                  );
+                  return html`
+                    <li
+                      class="flex items-center gap-2 rounded-md border border-line bg-surface-2 px-3 py-1.5 text-sm"
+                    >
+                      <span
+                        class="w-6 shrink-0 font-mono font-black text-ink-muted"
+                        >#${placement.placement}</span
+                      >
+                      <span class="flex-1 truncate font-semibold text-ink">
+                        ${agent === null
+                          ? translateText("match_detail.placement_unknown")
+                          : agent.href !== null
+                            ? html`<a
+                                href=${agent.href}
+                                class="text-ink no-underline outline-none hover:text-accent focus-visible:ring-2 focus-visible:ring-accent"
+                                >${agent.label}</a
+                              >`
+                            : agent.label}
+                      </span>
+                    </li>
+                  `;
+                })}
+              </ol>
+            </div>
+          `
+        : nothing}
+      ${match.postMatchSummary !== null
+        ? html`<p class="mt-4 text-sm text-ink-dim">
+            ${match.postMatchSummary}
+          </p>`
+        : nothing}
+      <p
+        class="mt-4 rounded-md border border-line bg-surface-2 px-3 py-2 text-xs text-ink-muted"
+      >
+        ${translateText("match_detail.integrity_note")}
+      </p>
+      <section class="mt-6" aria-labelledby="match-detail-participants-heading">
+        <h2
+          id="match-detail-participants-heading"
+          class="mb-2 text-sm font-black uppercase tracking-wide text-ink-muted"
+        >
+          ${translateText("match_detail.participants_heading")}
+        </h2>
+        ${this.renderParticipantCards(participants)}
+      </section>
+    `;
+  }
+
+  // ---- Pre-match (state 4) -----------------------------------------------
+
+  private renderPreMatch(
+    match: PublicFeaturedMatch,
+    participants: readonly FeaturedMatchParticipantCard[],
+  ): TemplateResult {
+    if (match.state === "cancelled") {
+      return html`
+        <p
+          class="rounded-md border border-line bg-surface-2 px-3 py-2 text-sm text-ink-muted"
+        >
+          ${translateText("match_detail.cancelled_note")}
+        </p>
+      `;
+    }
+    const scheduled =
+      match.scheduledAt !== null ? new Date(match.scheduledAt) : null;
+    const scheduledValid = scheduled !== null && !Number.isNaN(scheduled.getTime());
+    const countdown = scheduledValid
+      ? formatDuration(Math.max(0, scheduled.getTime() - this.nowMs))
+      : null;
+    const reminder = readReminderState(this.matchId);
+    return html`
+      ${scheduledValid
+        ? html`
+            <p class="text-sm text-ink-muted">
+              ${translateText("match_detail.scheduled_for")}
+              <time datetime=${match.scheduledAt as string}
+                >${scheduled.toLocaleString()}
+                ${translateText("match_detail.local_time_suffix")}</time
+              >
+            </p>
+            <p
+              class="mt-1 font-mono text-lg font-black text-ink"
+              role="timer"
+              aria-live="polite"
+            >
+              ${translateText("match_detail.countdown_value", {
+                duration: countdown as string,
+              })}
+            </p>
+            <div class="mt-3 flex flex-wrap items-center gap-3">
+              <a
+                href="#"
+                class="inline-flex min-h-11 items-center justify-center rounded-md border border-line bg-surface-2 px-4 text-sm font-bold text-ink no-underline outline-none hover:border-ink-muted focus-visible:ring-2 focus-visible:ring-accent"
+                @click=${(event: MouseEvent) => this.downloadIcs(event, match)}
+                >${translateText("match_detail.add_to_calendar")}</a
+              >
+              ${this.renderRemindMe(reminder)}
+            </div>
+            ${reminder === "fired"
+              ? html`<p
+                  class="mt-3 rounded-md border border-live/50 bg-live/10 px-3 py-2 text-sm font-bold text-live"
+                  role="status"
+                >
+                  ${translateText("match_detail.remind_me_live_cue")}
+                </p>`
+              : nothing}
+          `
+        : html`<p class="text-sm text-ink-muted">
+            ${translateText("match_detail.schedule_unavailable")}
+          </p>`}
+      <section class="mt-6" aria-labelledby="match-detail-participants-heading">
+        <h2
+          id="match-detail-participants-heading"
+          class="mb-2 text-sm font-black uppercase tracking-wide text-ink-muted"
+        >
+          ${translateText("match_detail.participants_heading")}
+        </h2>
+        ${this.renderParticipantCards(participants)}
+      </section>
+      ${this.renderStorylines(participants)}
+    `;
+  }
+
+  /** Client-side only, no server round-trip — see `PremiereReminder.ts`'s `downloadIcsFile`. `match.title` is already the page's own public `<h1>`, so it carries no more spoiler risk here than it does rendered above. */
+  private downloadIcs(event: MouseEvent, match: PublicFeaturedMatch): void {
+    event.preventDefault();
+    if (match.scheduledAt === null) return;
+    const url = `${window.location.origin}/match/${encodeURIComponent(this.matchId)}`;
+    downloadIcsFile(
+      { title: match.title, scheduledAt: match.scheduledAt, url },
+      `proxy-war-match-${this.matchId}`,
+    );
+  }
+
+  // ---- Remind me (local, same-tab only) ----------------------------------
+  //
+  // PURELY client-side, no server write — see `PremiereReminder.ts`'s own
+  // doc for exactly what "armed"/"fired" persistence does and doesn't
+  // guarantee.
+
+  private renderRemindMe(state: ReminderState): TemplateResult {
+    if (state === "fired") {
+      return html`<span class="text-sm font-semibold text-ink-muted"
+        >${translateText("match_detail.remind_me_sent")}</span
+      >`;
+    }
+    return html`
+      <button
+        type="button"
+        title=${translateText("match_detail.remind_me_tooltip")}
+        class="inline-flex min-h-11 items-center justify-center rounded-md border border-line bg-surface-2 px-4 text-sm font-bold text-ink outline-none hover:border-ink-muted focus-visible:ring-2 focus-visible:ring-accent disabled:cursor-not-allowed disabled:opacity-60"
+        ?disabled=${state === "armed"}
+        @click=${() => {
+          armReminder(this.matchId);
+          this.requestUpdate();
+        }}
+      >
+        ${state === "armed"
+          ? translateText("match_detail.remind_me_armed")
+          : translateText("match_detail.remind_me_button")}
+      </button>
+    `;
+  }
+
+  // ---- Participant cards (shared by both branches) -----------------------
+
+  private renderParticipantCards(
+    participants: readonly FeaturedMatchParticipantCard[],
+  ): TemplateResult {
+    if (participants.length === 0) {
+      return html`<p class="text-sm text-ink-muted">
+        ${translateText("match_detail.participants_pending")}
+      </p>`;
+    }
+    return html`
+      <ul class="grid grid-cols-1 gap-3 sm:grid-cols-2" role="list">
+        ${participants.map((participant) =>
+          this.renderParticipantCard(participant),
+        )}
+      </ul>
+    `;
+  }
+
+  private renderParticipantCard(
+    participant: FeaturedMatchParticipantCard,
+  ): TemplateResult {
+    return html`
+      <li
+        class="flex items-center gap-3 rounded-md border border-line bg-surface-2 px-3 py-2"
+      >
+        ${participant.emblemSvg !== null
+          ? html`<span
+              class="inline-flex h-10 w-10 shrink-0 overflow-hidden"
+              aria-hidden="true"
+              >${unsafeSVG(participant.emblemSvg)}</span
+            >`
+          : html`<span
+              class="inline-flex h-10 w-10 shrink-0 items-center justify-center rounded-full border border-line text-sm text-ink-muted"
+              aria-hidden="true"
+              >?</span
+            >`}
+        <div class="min-w-0 flex-1">
+          <p class="truncate text-sm font-semibold text-ink">
+            ${participant.agentSlug !== null
+              ? html`<a
+                  href="/agent/${encodeURIComponent(participant.agentSlug)}"
+                  class="text-ink no-underline outline-none hover:text-accent focus-visible:ring-2 focus-visible:ring-accent"
+                  >${participant.displayName}</a
+                >`
+              : participant.displayName}
+          </p>
+          <p class="flex flex-wrap items-center gap-x-2 text-xs text-ink-muted">
+            ${participant.versionLabel !== null
+              ? html`<span class="font-mono">${participant.versionLabel}</span>`
+              : nothing}
+            ${participant.builderDisplayName !== null
+              ? html`<span
+                  >${translateText("match_detail.builder_label")}:
+                  ${participant.builderDisplayName}</span
+                >`
+              : nothing}
+          </p>
+        </div>
+      </li>
+    `;
+  }
+
+  // ---- Storylines: recent form / head-to-head -----------------------------
+  //
+  // Pure, evidence-only computation off the already-fetched read model's
+  // `matches` array — the same source `AgentProfilePage`'s own recent-
+  // matches section reads, reimplemented here (not imported) because the
+  // only existing recent-form/head-to-head helpers
+  // (`src/client/prediction/wagering/leagueData.ts`'s `recentForm`/
+  // `headToHead`) are wagering-only, keyed by a different `LeagueDataSnapshot`
+  // shape fetched from a different endpoint (`/ai-league-runs/league/data.json`)
+  // this page must not depend on. Skipped entirely (never a fabricated
+  // "no history" claim) for a participant with no registered `agentSlug`.
+
+  private renderStorylines(
+    participants: readonly FeaturedMatchParticipantCard[],
+  ): TemplateResult | typeof nothing {
+    const readModel = this.readModel;
+    if (readModel === null) return nothing;
+    const registered = participants.filter(
+      (participant): participant is FeaturedMatchParticipantCard & {
+        agentSlug: string;
+      } => participant.agentSlug !== null,
+    );
+    if (registered.length === 0) return nothing;
+    const matchups = pairwise(registered).filter(
+      ([a, b]) => headToHeadCount(readModel.matches, a.agentSlug, b.agentSlug) > 0,
+    );
+    return html`
+      <section class="mt-6" aria-labelledby="match-detail-storylines-heading">
+        <h2
+          id="match-detail-storylines-heading"
+          class="mb-2 text-sm font-black uppercase tracking-wide text-ink-muted"
+        >
+          ${translateText("match_detail.storylines_heading")}
+        </h2>
+        <ul class="flex flex-col gap-2" role="list">
+          ${registered.map((participant) => {
+            const form = recentFormForAgentSlug(
+              readModel.matches,
+              participant.agentSlug,
+            );
+            return html`
+              <li class="rounded-md border border-line bg-surface-2 px-3 py-2 text-sm">
+                <span class="font-semibold text-ink"
+                  >${participant.displayName}</span
+                >
+                <span class="ml-2 text-ink-muted">
+                  ${form.played === 0
+                    ? translateText("match_detail.no_recent_form")
+                    : translateText("match_detail.recent_form", {
+                        wins: form.wins,
+                        played: form.played,
+                      })}
+                </span>
+              </li>
+            `;
+          })}
+        </ul>
+        ${matchups.length > 0
+          ? html`
+              <ul class="mt-2 flex flex-col gap-2" role="list">
+                ${matchups.map(([a, b]) => {
+                  const count = headToHeadCount(
+                    readModel.matches,
+                    a.agentSlug,
+                    b.agentSlug,
+                  );
+                  return html`<li
+                    class="rounded-md border border-line bg-surface-2 px-3 py-2 text-sm text-ink-muted"
+                  >
+                    ${translateText("match_detail.head_to_head", {
+                      a: a.displayName,
+                      b: b.displayName,
+                      count,
+                    })}
+                  </li>`;
+                })}
+              </ul>
+            `
+          : nothing}
+        <p class="mt-2 text-[11px] italic leading-snug text-ink-muted">
+          ${translateText("match_detail.storylines_note")}
+        </p>
+      </section>
+    `;
+  }
+}
+
+declare global {
+  interface HTMLElementTagNameMap {
+    "match-detail-page": MatchDetailPage;
+  }
+}
+
+// ---- Pure helpers ----------------------------------------------------------
+
+interface ResolvedPlacementAgent {
+  label: string;
+  href: string | null;
+}
+
+/** See the class doc's "PLACEMENTS-CORRELATION DECISION" for why this lookup against the bulk read model's `agents` array is sound. Returns `null` — never a fabricated name — for a `null` `agentId` or one that doesn't resolve against the current roster. */
+function resolvePlacementAgent(
+  agentId: string | null,
+  agents: readonly PublicAgent[],
+): ResolvedPlacementAgent | null {
+  if (agentId === null) return null;
+  const agent = agents.find((candidate) => candidate.id === agentId);
+  if (agent === undefined) return null;
+  return {
+    label: agent.displayName,
+    href:
+      agent.slug !== null ? `/agent/${encodeURIComponent(agent.slug)}` : null,
+  };
+}
+
+/** Wins/played across this agent's most recent `RECENT_FORM_LIMIT` matches (most recent `completedAt` first, a `null` `completedAt` sorting last) — pure evidence off the read model, no rank/score computation of its own. */
+function recentFormForAgentSlug(
+  matches: readonly PublicMatch[],
+  agentSlug: string,
+): { wins: number; played: number } {
+  const recent = matches
+    .filter((match) =>
+      match.participants.some((p) => p.agentSlug === agentSlug),
+    )
+    .sort((a, b) => {
+      const at = a.completedAt === null ? -Infinity : Date.parse(a.completedAt);
+      const bt = b.completedAt === null ? -Infinity : Date.parse(b.completedAt);
+      return bt - at;
+    })
+    .slice(0, RECENT_FORM_LIMIT);
+  return {
+    wins: recent.filter((match) => match.winnerAgentSlug === agentSlug).length,
+    played: recent.length,
+  };
+}
+
+/** Count of past completed matches where BOTH agent slugs appear as participants — the read model's own evidence for "these two have met before", nothing inferred. */
+function headToHeadCount(
+  matches: readonly PublicMatch[],
+  slugA: string,
+  slugB: string,
+): number {
+  return matches.filter(
+    (match) =>
+      match.participants.some((p) => p.agentSlug === slugA) &&
+      match.participants.some((p) => p.agentSlug === slugB),
+  ).length;
+}
+
+/** Every unique unordered pair from `items`, i<j order preserved. */
+function pairwise<T>(items: readonly T[]): Array<[T, T]> {
+  const pairs: Array<[T, T]> = [];
+  for (let i = 0; i < items.length; i++) {
+    for (let j = i + 1; j < items.length; j++) {
+      pairs.push([items[i], items[j]]);
+    }
+  }
+  return pairs;
+}

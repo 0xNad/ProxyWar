@@ -1370,20 +1370,22 @@ app.get("/trader/:accountId", async (_req, res) => {
 });
 // -----------------------------------------------------------------------
 // Stage 2 public pages (product overhaul §4 Target IA): event lobby, watch,
-// agents/builders directories and profiles, about. Every one is a plain
+// agents/builders directories and profiles, about — plus Stage 3 item 6's
+// `/match/:matchId` canonical FeaturedMatch page. Every one is a plain
 // app-shell document — same pattern as `/player/:name`/`/trader/:accountId`
 // just above (always reachable, no premiere/session machinery behind it,
 // the client-side component does all the fetching, via
-// `GET /ai-league-runs/league/read-model.json`, and rendering). Factored
-// into one helper here (unlike the three call sites above, which predate
-// this and are left as they are) because this adds seven more identical
-// call sites — see `getAppShellContent`'s own doc for why this can't be
+// `GET /ai-league-runs/league/read-model.json` plus, for `/match/:matchId`,
+// `GET /api/featured-matches/:matchId`, and rendering). Factored into one
+// helper here (unlike the three call sites above, which predate this and
+// are left as they are) because this adds eight more identical call
+// sites — see `getAppShellContent`'s own doc for why this can't be
 // hoisted further without breaking the per-request nonce.
 // -----------------------------------------------------------------------
 // Serves `public.html`'s built output — the Stage 2 public app's own
 // lightweight Vite entry (`PublicApp.ts`), deliberately separate from the
 // game/replay/premiere `index.html` + `Main.ts` entry every other route
-// serves. Every caller below is one of the 7 public-app routes; game,
+// serves. Every caller below is one of the 8 public-app routes; game,
 // replay, premiere, `/player/:name`, `/account`, and `/trader/:accountId`
 // never call this — they keep using `index.html` unchanged (see
 // `RenderHtml.ts`'s `getAppShellContent`, which this reuses unmodified for
@@ -1446,6 +1448,9 @@ app.get("/builders", async (_req, res) => {
 });
 app.get("/builder/:slug", async (_req, res) => {
   await sendPublicAppShellPage(res, "the builder profile page");
+});
+app.get("/match/:matchId", async (_req, res) => {
+  await sendPublicAppShellPage(res, "the match detail page");
 });
 app.get("/about", async (_req, res) => {
   await sendPublicAppShellPage(res, "the about page");
