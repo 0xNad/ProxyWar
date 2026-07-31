@@ -215,6 +215,41 @@ describe("buildLeaguePlayerSection", () => {
     const section = buildLeaguePlayerSection(data, "house-warlord");
     expect(section?.stale).toBe(true);
   });
+
+  test("timeSeries defaults to both series null when no standings-history store is passed", async () => {
+    const data = await readLeagueMirrorDataFromObject(sampleMirrorFile());
+    const section = buildLeaguePlayerSection(data, "daveey-proxywar");
+    expect(section?.timeSeries).toEqual({ winrate: null, score: null });
+  });
+
+  test("timeSeries.score is populated per-player from the standings-history store passed in, matching /agent/:slug's own computation", async () => {
+    const data = await readLeagueMirrorDataFromObject(sampleMirrorFile());
+    const section = buildLeaguePlayerSection(data, "daveey-proxywar", null, {
+      schemaVersion: 1,
+      snapshots: [
+        {
+          recordedAt: "2026-07-26T00:00:00.000Z",
+          roundNumber: 267,
+          agents: [
+            { playerName: "daveey-proxywar", score: 20, rank: 4, activeVersionLabel: "daveey-proxywar:v23" },
+          ],
+        },
+        {
+          recordedAt: "2026-07-27T00:00:00.000Z",
+          roundNumber: 268,
+          agents: [
+            { playerName: "daveey-proxywar", score: 24.5, rank: 3, activeVersionLabel: "daveey-proxywar:v24" },
+          ],
+        },
+      ],
+    });
+    expect(section?.timeSeries.score?.points).toHaveLength(2);
+    expect(section?.timeSeries.score?.points[1]).toMatchObject({
+      score: 24.5,
+      rank: 3,
+      versionFirstObserved: true,
+    });
+  });
 });
 
 /** Round-trips a plain object through the real disk reader, so tests exercise the actual parser instead of hand-building the internal shape. */

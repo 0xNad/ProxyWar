@@ -29,6 +29,14 @@ import {
   findPlayerStats,
   type AgentStatsArtifact,
 } from "./AgentStatsArtifact";
+import {
+  computeAgentTimeSeries,
+  type AgentTimeSeries,
+} from "./AgentTimeSeries";
+import {
+  EMPTY_STANDINGS_HISTORY_STORE,
+  type StandingsHistoryStore,
+} from "./CoworldLeagueStandingsHistory";
 import type { PublicAgentStats } from "../ProxyWarPublicReadModel";
 
 export interface PlayerProfileStanding {
@@ -77,6 +85,16 @@ export interface PlayerProfileLeagueSection {
    * the stats batch job hasn't produced a row for this player yet.
    */
   readonly stats: PublicAgentStats | null;
+  /**
+   * Product overhaul spec: winrate-over-time (from `episodes` above) and
+   * score/rank-over-time (from the standings-history store) — see
+   * `AgentTimeSeries.ts`'s own doc for the "one computation source, two
+   * views" invariant this shares with `stats`, and `ProxyWarPublicReadModel
+   * .ts`'s `PublicAgent.timeSeries` for the exact same shape `/agent/:slug`
+   * carries for this player. Always present; each sub-series is
+   * independently `null` below its own documented sample threshold.
+   */
+  readonly timeSeries: AgentTimeSeries;
 }
 
 function asString(value: unknown): string | null {
@@ -233,6 +251,7 @@ export function buildLeaguePlayerSection(
   data: ParsedLeagueMirrorData,
   playerName: string,
   statsArtifact: AgentStatsArtifact | null = null,
+  standingsHistory: StandingsHistoryStore = EMPTY_STANDINGS_HISTORY_STORE,
 ): PlayerProfileLeagueSection | null {
   const standingRow =
     data.standings.find((row) => row.playerName === playerName) ?? null;
@@ -277,6 +296,11 @@ export function buildLeaguePlayerSection(
         };
 
   const playerStats = findPlayerStats(statsArtifact, playerName);
+  const timeSeries = computeAgentTimeSeries(
+    episodeViews,
+    standingsHistory.snapshots,
+    playerName,
+  );
   return {
     generatedAt: data.generatedAt,
     lastGoodSyncAt: data.lastGoodSyncAt,
@@ -295,6 +319,7 @@ export function buildLeaguePlayerSection(
     policyLineageNote,
     episodes: episodeViews,
     recentRecord,
+    timeSeries,
     stats: playerStats === null
       ? null
       : { career: playerStats.career, currentVersion: playerStats.currentVersion },

@@ -75,6 +75,7 @@ import {
   readLeagueMirrorData,
 } from "../server/agents/LeaguePlayerProfile";
 import { readAgentStatsArtifact } from "../server/agents/AgentStatsArtifact";
+import { readStandingsHistoryStore } from "../server/agents/CoworldLeagueStandingsHistory";
 import {
   parsePlayerStrategySpec,
   PlayerStrategySpec,
@@ -1297,6 +1298,11 @@ app.get("/account", async (_req, res) => {
 // -----------------------------------------------------------------------
 const leagueDataJsonPath = path.join(runsRootDir, "league", "data.json");
 const agentStatsJsonPath = path.join(runsRootDir, "league", "agent-stats.json");
+const standingsHistoryJsonPath = path.join(
+  runsRootDir,
+  "league",
+  "standings-history.json",
+);
 
 app.get("/api/players/:name", async (req, res) => {
   try {
@@ -1306,14 +1312,20 @@ app.get("/api/players/:name", async (req, res) => {
       res.status(400).json({ error: { code: "PLAYER_PROFILE_INVALID_NAME" } });
       return;
     }
-    const [mirrorData, statsArtifact] = await Promise.all([
+    const [mirrorData, statsArtifact, standingsHistory] = await Promise.all([
       readLeagueMirrorData(leagueDataJsonPath),
       readAgentStatsArtifact(agentStatsJsonPath),
+      readStandingsHistoryStore(standingsHistoryJsonPath),
     ]);
     const league =
       mirrorData === null
         ? null
-        : buildLeaguePlayerSection(mirrorData, name, statsArtifact);
+        : buildLeaguePlayerSection(
+            mirrorData,
+            name,
+            statsArtifact,
+            standingsHistory === "corrupt" ? undefined : standingsHistory,
+          );
     if (league === null) {
       res.status(404).json({ error: { code: "PLAYER_PROFILE_NOT_FOUND" } });
       return;

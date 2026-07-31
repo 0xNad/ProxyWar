@@ -15,6 +15,14 @@ import type {
   PlayerAgentStats,
 } from "./agents/AgentStatsArtifact";
 import type { AgentStatsSlice } from "./agents/AgentStatsPipeline";
+import {
+  computeAgentTimeSeries,
+  type AgentTimeSeries,
+} from "./agents/AgentTimeSeries";
+import {
+  EMPTY_STANDINGS_HISTORY_STORE,
+  type StandingsHistoryStore,
+} from "./agents/CoworldLeagueStandingsHistory";
 import type {
   CoworldLeagueEpisodeRow,
   CoworldLeagueLatestPremiereCard,
@@ -122,6 +130,17 @@ export interface PublicAgent {
    * retained episodes) — never a zeroed-out fake stats block.
    */
   stats: PublicAgentStats | null;
+  /**
+   * Product overhaul spec: winrate-over-time (from retained episodes) and
+   * score/rank-over-time (from the standings-history store) — see
+   * `AgentTimeSeries.ts`'s own doc for the "one computation source, two
+   * views" invariant this shares with `stats` above. Each sub-series is
+   * independently `null` below its own documented sample threshold; the
+   * container itself is always present (never `null`) so a page never has
+   * to special-case "no time series object at all" separately from "both
+   * series are below threshold".
+   */
+  timeSeries: AgentTimeSeries;
 }
 
 export interface PublicAgentStats {
@@ -252,12 +271,19 @@ function publicAgentFromView(
   standing: CoworldLeagueStandingRow | null,
   view: AgentIdentityView,
   statsArtifact: AgentStatsArtifact | null,
+  episodesForPlayer: readonly { completedAt: string | null; isWinner: boolean }[],
+  standingsHistory: StandingsHistoryStore,
 ): PublicAgent {
   const provenance = {
     ratingPolicyLabel: standing?.ratingPolicyLabel ?? standing?.policyLabel ?? null,
     activeChampionPolicyLabel: standing?.activeChampionPolicyLabel ?? null,
   };
   const stats = publicAgentStats(playerName, statsArtifact);
+  const timeSeries = computeAgentTimeSeries(
+    episodesForPlayer,
+    standingsHistory.snapshots,
+    playerName,
+  );
   if (view.agent === null) {
     return {
       registered: false,
@@ -285,6 +311,7 @@ function publicAgentFromView(
       activeVersion: null,
       provenance,
       stats,
+      timeSeries,
     };
   }
   return {
@@ -321,6 +348,7 @@ function publicAgentFromView(
           },
     provenance,
     stats,
+    timeSeries,
   };
 }
 
@@ -329,7 +357,20 @@ function publicAgents(
   standings: readonly CoworldLeagueStandingRow[],
   identity: IdentityRegistrySnapshot,
   statsArtifact: AgentStatsArtifact | null,
+  episodes: readonly CoworldLeagueEpisodeRow[],
+  standingsHistory: StandingsHistoryStore,
 ): PublicAgent[] {
+  const episodesByPlayer = new Map<
+    string,
+    { completedAt: string | null; isWinner: boolean }[]
+  >();
+  for (const episode of episodes) {
+    for (const player of episode.players) {
+      const list = episodesByPlayer.get(player.name) ?? [];
+      list.push({ completedAt: episode.completedAt, isWinner: player.isWinner });
+      episodesByPlayer.set(player.name, list);
+    }
+  }
   const fromStandings = standings.map((row) => {
     const view = resolveAgentIdentityView(
       {
@@ -341,7 +382,14 @@ function publicAgents(
       identity.builders,
       identity.versions,
     );
-    return publicAgentFromView(row.playerName, row, view, statsArtifact);
+    return publicAgentFromView(
+      row.playerName,
+      row,
+      view,
+      statsArtifact,
+      episodesByPlayer.get(row.playerName) ?? [],
+      standingsHistory,
+    );
   });
   const standingsPlayerNames = new Set(
     standings.map((row) => row.playerName),
@@ -366,6 +414,8 @@ function publicAgents(
         null,
         view,
         statsArtifact,
+        episodesByPlayer.get(agent.policyMatchRule.playerName) ?? [],
+        standingsHistory,
       );
     });
   return [...fromStandings, ...registeredNotInStandings];
@@ -490,6 +540,14 @@ export function buildProxyWarPublicReadModel(
    * rather than a build failure.
    */
   statsArtifact: AgentStatsArtifact | null = null,
+  /**
+   * Product overhaul spec: the standings-history store backing
+   * `PublicAgent.timeSeries.score` — see `CoworldLeagueStandingsHistory.ts`'s
+   * own doc. Defaults to the empty store so every existing test/caller that
+   * doesn't pass one gets an honest "no score history yet" rather than a
+   * required-argument break.
+   */
+  standingsHistory: StandingsHistoryStore = EMPTY_STANDINGS_HISTORY_STORE,
 ): ProxyWarPublicReadModel {
   const agentSlugByPlayerName = new Map(
     identity.agents.map((agent) => [
@@ -508,7 +566,13 @@ export function buildProxyWarPublicReadModel(
     },
     league: mirror.league,
     builders: identity.builders.map(publicBuilder),
-    agents: publicAgents(mirror.standings, identity, statsArtifact),
+    agents: publicAgents(
+      mirror.standings,
+      identity,
+      statsArtifact,
+      mirror.episodes,
+      standingsHistory,
+    ),
     versions: [...identity.versions],
     rounds: mirror.rounds,
     matches: mirror.episodes.map((episode) =>

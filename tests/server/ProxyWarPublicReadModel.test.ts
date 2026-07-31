@@ -452,4 +452,54 @@ describe("buildProxyWarPublicReadModel", () => {
     expect(model.versions).toEqual(snapshot.versions);
     expect(model.builders).toEqual([]);
   });
+
+  test("timeSeries defaults to both series null when no standings-history store is passed", () => {
+    const model = buildProxyWarPublicReadModel(baseMirror(), identitySnapshot(), featuredMatchStoreOf());
+    const daveey = model.agents.find((a) => a.playerName === "daveey");
+    expect(daveey?.timeSeries).toEqual({ winrate: null, score: null });
+  });
+
+  test("timeSeries.score is populated per-player from the standings-history store, and stays null below its own 2-snapshot threshold for a player with only one", () => {
+    const model = buildProxyWarPublicReadModel(
+      baseMirror(),
+      identitySnapshot(),
+      featuredMatchStoreOf(),
+      null,
+      {
+        schemaVersion: 1,
+        snapshots: [
+          {
+            recordedAt: "2026-07-30T00:00:00.000Z",
+            roundNumber: 99,
+            agents: [
+              { playerName: "daveey", score: 20, rank: 1, activeVersionLabel: "daveey-proxywar:v23" },
+            ],
+          },
+          {
+            recordedAt: "2026-07-31T00:00:00.000Z",
+            roundNumber: 100,
+            agents: [
+              { playerName: "daveey", score: 22.66, rank: 1, activeVersionLabel: "daveey-proxywar:v24" },
+            ],
+          },
+        ],
+      },
+    );
+    const daveey = model.agents.find((a) => a.playerName === "daveey");
+    expect(daveey?.timeSeries.score?.points).toHaveLength(2);
+    expect(daveey?.timeSeries.score?.points[1]).toMatchObject({
+      score: 22.66,
+      versionFirstObserved: true,
+    });
+    const unregistered = model.agents.find(
+      (a) => a.playerName === "unregistered-player",
+    );
+    expect(unregistered?.timeSeries.score).toBeNull();
+  });
+
+  test("timeSeries.winrate stays null with only one retained episode, below the 5-episode threshold", () => {
+    const model = buildProxyWarPublicReadModel(baseMirror(), identitySnapshot(), featuredMatchStoreOf());
+    const daveey = model.agents.find((a) => a.playerName === "daveey");
+    expect(daveey?.timeSeries.winrate).toBeNull();
+  });
 });
