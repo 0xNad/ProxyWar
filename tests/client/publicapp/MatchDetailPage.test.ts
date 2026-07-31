@@ -342,6 +342,48 @@ describe("match-detail-page", () => {
     expect(el.textContent).toContain("match_detail.participants_pending");
   });
 
+  it("revealed state with result still null renders an honest 'result pending' state, never the pre-match countdown", async () => {
+    stubFetch({
+      readModel: readModelBody({}),
+      detail: {
+        status: 200,
+        body: featuredMatchDetailBody({
+          matchId: "feat_revealed_pending",
+          state: "revealed",
+          scheduledAt: "2026-08-01T00:00:00.000Z",
+          result: null,
+          participants: [participantCard({ playerName: "Auri", agentSlug: "auri" })],
+        }),
+      },
+    });
+    const el = mount("feat_revealed_pending");
+    await flushMicrotasks();
+    expect(el.textContent).toContain("match_detail.result_pending");
+    expect(el.textContent).toContain("match_detail.state_revealed");
+    expect(el.textContent).toContain("Auri");
+    expect(el.textContent).not.toContain("match_detail.countdown_value");
+    expect(el.textContent).not.toContain("match_detail.scheduled_for");
+    expect(el.textContent).not.toContain("match_detail.winner_heading");
+  });
+
+  it("archived state with result still null ALSO renders 'result pending', not post-match", async () => {
+    stubFetch({
+      readModel: readModelBody({}),
+      detail: {
+        status: 200,
+        body: featuredMatchDetailBody({
+          matchId: "feat_archived_pending",
+          state: "archived",
+          result: null,
+        }),
+      },
+    });
+    const el = mount("feat_archived_pending");
+    await flushMicrotasks();
+    expect(el.textContent).toContain("match_detail.result_pending");
+    expect(el.textContent).toContain("match_detail.state_archived");
+  });
+
   it("cancelled state renders the cancelled note, not a countdown", async () => {
     stubFetch({
       readModel: readModelBody({}),

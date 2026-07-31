@@ -24,10 +24,8 @@ import {
   type AgentDemoJobRequest,
 } from "../server/agents/AgentDemoServerJobs";
 import { AgentRelayRateGuard } from "../server/agents/AgentRelayRateGuard";
-import {
-  readFeaturedMatchStore,
-  resolveFeaturedMatchStateRoot,
-} from "../server/agents/FeaturedMatch";
+import { resolveFeaturedMatchStateRoot } from "../server/agents/FeaturedMatch";
+import { reconcileFeaturedMatchStore } from "../server/agents/FeaturedMatchReconcile";
 import { resolveFeaturedMatchParticipantCards } from "../server/agents/FeaturedMatchParticipants";
 import { loadIdentityRegistrySnapshot } from "../server/identity/IdentityRegistry";
 import { publicFeaturedMatch } from "../server/ProxyWarPublicReadModel";
@@ -1171,7 +1169,7 @@ app.get("/api/featured-matches/:matchId", async (req, res) => {
   try {
     res.setHeader("Cache-Control", "no-store, max-age=0");
     const stateRoot = resolveFeaturedMatchStateRoot();
-    const store = await readFeaturedMatchStore(stateRoot);
+    const store = await reconcileFeaturedMatchStore(stateRoot);
     const match = store.matches.find(
       (candidate) =>
         candidate.matchId === req.params.matchId &&
@@ -1201,7 +1199,7 @@ app.get("/api/premieres/:premiereId/featured-match", async (req, res) => {
   try {
     res.setHeader("Cache-Control", "no-store, max-age=0");
     const stateRoot = resolveFeaturedMatchStateRoot();
-    const store = await readFeaturedMatchStore(stateRoot);
+    const store = await reconcileFeaturedMatchStore(stateRoot);
     const match = store.matches.find(
       (candidate) =>
         candidate.lane === "premiere" &&

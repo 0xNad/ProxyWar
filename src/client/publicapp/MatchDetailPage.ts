@@ -291,9 +291,57 @@ export class MatchDetailPage extends LitElement {
       <p class="mb-4 font-mono text-xs text-ink-muted">
         ${match.map} · ${match.format}
       </p>
-      ${match.result !== null
-        ? this.renderPostMatch(match, match.result, participants, readModel.agents)
-        : this.renderPreMatch(match, participants)}
+      ${this.renderMatchBody(match, participants, readModel)}
+    `;
+  }
+
+  /**
+   * Three-way dispatch. `state: "revealed"/"archived"` with `result: null`
+   * is a genuine, honest, bounded state — `FeaturedMatchReconcile.ts`'s own
+   * doc explains why: the runtime marks a premiere revealed immediately,
+   * but the outcome summary only becomes durable ~30 minutes later at
+   * reclamation. Routing that combination into `renderPreMatch` would show
+   * a countdown to an event that already happened; this gets its own
+   * "revealed, outcome pending" rendering instead.
+   */
+  private renderMatchBody(
+    match: PublicFeaturedMatch,
+    participants: readonly FeaturedMatchParticipantCard[],
+    readModel: ReadModel,
+  ): TemplateResult {
+    if (match.result !== null) {
+      return this.renderPostMatch(match, match.result, participants, readModel.agents);
+    }
+    if (match.state === "revealed" || match.state === "archived") {
+      return this.renderResultPending(match, participants);
+    }
+    return this.renderPreMatch(match, participants);
+  }
+
+  private renderResultPending(
+    match: PublicFeaturedMatch,
+    participants: readonly FeaturedMatchParticipantCard[],
+  ): TemplateResult {
+    return html`
+      <span
+        class="inline-flex items-center gap-2 rounded-full border border-line bg-surface-2 px-3 py-1 font-mono text-xs font-extrabold uppercase tracking-wide text-ink-muted"
+      >
+        ${translateText(STATE_LABEL[match.state])}
+      </span>
+      <p
+        class="mt-4 rounded-md border border-line bg-surface-2 px-3 py-2 text-sm text-ink-muted"
+      >
+        ${translateText("match_detail.result_pending")}
+      </p>
+      <section class="mt-6" aria-labelledby="match-detail-participants-heading">
+        <h2
+          id="match-detail-participants-heading"
+          class="mb-2 text-sm font-black uppercase tracking-wide text-ink-muted"
+        >
+          ${translateText("match_detail.participants_heading")}
+        </h2>
+        ${this.renderParticipantCards(participants)}
+      </section>
     `;
   }
 

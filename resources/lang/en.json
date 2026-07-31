@@ -1717,6 +1717,7 @@
     "placements_heading": "Placements",
     "placement_unknown": "Unregistered or unresolved participant",
     "integrity_note": "Results are auditable — every decision behind this match is logged.",
+    "result_pending": "This match has aired. Its result is being finalized and will appear here shortly.",
     "cancelled_note": "This match was cancelled before it aired.",
     "scheduled_for": "Scheduled for",
     "local_time_suffix": "(local time)",
