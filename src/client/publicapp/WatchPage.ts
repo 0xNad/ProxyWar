@@ -71,7 +71,7 @@ export class WatchPage extends LitElement {
 
   render() {
     return html`
-      ${appShellHeader("/watch")}
+      ${appShellHeader("/watch", undefined, this.readModel?.links.accountUrl)}
       <main class="mx-auto w-full max-w-3xl px-4 py-8">
         <h1 id="watch-page-heading" class="mb-6 text-2xl font-bold text-ink">
           ${translateText("watch.heading")}

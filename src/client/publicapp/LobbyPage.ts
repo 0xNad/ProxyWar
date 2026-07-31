@@ -74,6 +74,7 @@ export class LobbyPage extends LitElement {
           : this.readModel?.stale === true
             ? { label: translateText("lobby.stale_data_badge"), tone: "stale" }
             : undefined,
+        this.readModel?.links.accountUrl,
       )}
       <main id="lobby-main" class="mx-auto w-full max-w-6xl px-4 py-8">
         ${this.loadState === "loading" ? this.renderLoading() : nothing}

@@ -61,6 +61,7 @@ export class AgentProfilePage extends LitElement {
   @state() private loadState: LoadState = "loading";
   @state() private agent: PublicAgent | null = null;
   @state() private recentMatches: ReadonlyArray<PublicMatch> = [];
+  @state() private accountUrl: string | null = null;
 
   createRenderRoot() {
     // Light DOM, so page-level Tailwind applies — same reasoning as
@@ -78,6 +79,7 @@ export class AgentProfilePage extends LitElement {
     this.loadState = "loading";
     try {
       const readModel: ReadModel = await fetchReadModel();
+      this.accountUrl = readModel.links.accountUrl;
       const agent =
         readModel.agents.find((candidate) => candidate.slug === this.slug) ??
         null;
@@ -97,7 +99,7 @@ export class AgentProfilePage extends LitElement {
 
   render() {
     return html`
-      ${appShellHeader("/agents")}
+      ${appShellHeader("/agents", undefined, this.accountUrl ?? undefined)}
       <main class="mx-auto w-full max-w-3xl px-4 py-8">
         ${this.loadState === "loading" ? this.renderLoading() : nothing}
         ${this.loadState === "error" ? this.renderError() : nothing}

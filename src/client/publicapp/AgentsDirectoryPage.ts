@@ -32,6 +32,7 @@ type LoadState = "loading" | "ready" | "error";
 export class AgentsDirectoryPage extends LitElement {
   @state() private loadState: LoadState = "loading";
   @state() private agents: ReadonlyArray<PublicAgent> = [];
+  @state() private accountUrl: string | null = null;
 
   createRenderRoot() {
     // Light DOM, so page-level Tailwind applies — same reasoning as
@@ -50,6 +51,7 @@ export class AgentsDirectoryPage extends LitElement {
     try {
       const readModel: ReadModel = await fetchReadModel();
       this.agents = sortAgentsForRoster(readModel.agents);
+      this.accountUrl = readModel.links.accountUrl;
       this.loadState = "ready";
     } catch {
       this.loadState = "error";
@@ -58,7 +60,7 @@ export class AgentsDirectoryPage extends LitElement {
 
   render() {
     return html`
-      ${appShellHeader("/agents")}
+      ${appShellHeader("/agents", undefined, this.accountUrl ?? undefined)}
       <main class="mx-auto w-full max-w-5xl px-4 py-8">
         <h1 class="mb-5 text-xl font-bold text-ink">${translateText("agents_directory.title")}</h1>
         ${this.loadState === "loading" ? this.renderLoading() : nothing}

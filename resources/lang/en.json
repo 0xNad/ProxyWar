@@ -1770,6 +1770,7 @@
     "nav_primary": "Primary",
     "footer_tagline": "Built on Softmax Coworld",
     "footer_repository": "Repository",
-    "footer_about": "About"
+    "footer_about": "About",
+    "account_link": "Your account"
   }
 }

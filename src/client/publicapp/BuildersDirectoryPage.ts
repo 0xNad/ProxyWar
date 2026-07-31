@@ -71,7 +71,7 @@ export class BuildersDirectoryPage extends LitElement {
 
   render() {
     return html`
-      ${appShellHeader("/builders")}
+      ${appShellHeader("/builders", undefined, this.readModel?.links.accountUrl)}
       <main class="mx-auto w-full max-w-3xl px-4 py-8">
         <h1 class="mb-2 text-xl font-bold text-ink">
           ${translateText("builders_directory.title")}

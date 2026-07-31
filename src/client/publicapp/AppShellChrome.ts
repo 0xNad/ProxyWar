@@ -59,10 +59,18 @@ export interface AppShellStatusChip {
  * passed explicitly by the caller).
  * @param statusChip optional live/premiere/stale status chip — omitted on
  * pages with nothing to report.
+ * @param accountUrl the platform account authority's `/account` URL, when
+ * the caller's read model has loaded (`readModel.links.accountUrl` — same
+ * origin `CoworldLeagueSiteWriter.ts`'s league-page chip and
+ * `playerProfileLink.ts` already link to). Omitted while loading: this is
+ * a plain link, never a session-state fetch — the shell stays account-
+ * UNaware beyond it, exactly like every other cross-origin platform link
+ * in this codebase (PoV claims, account chips) already are.
  */
 export function appShellHeader(
   active: AppShellRoute | null,
   statusChip?: AppShellStatusChip,
+  accountUrl?: string,
 ): TemplateResult {
   return html`
     <header
@@ -107,6 +115,13 @@ export function appShellHeader(
                   ? "border-caution/50 text-caution"
                   : "border-line text-ink-muted"}"
               >${statusChip.label}</span
+            >`
+          : nothing}
+        ${accountUrl !== undefined
+          ? html`<a
+              href=${accountUrl}
+              class="rounded px-3 py-2 text-sm font-bold text-ink-muted no-underline outline-none hover:text-ink focus-visible:ring-2 focus-visible:ring-accent"
+              >${translateText("app_shell.account_link")}</a
             >`
           : nothing}
       </div>
