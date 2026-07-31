@@ -24,7 +24,6 @@ import {
 describe("ProxyWarPublicArtifacts", () => {
   it("allows the replay artifacts needed by the rendered OpenFront client", () => {
     expect(proxyWarPublicRunArtifacts).toContain("game-record.json");
-    expect(proxyWarPublicRunArtifacts).toContain("decisions.jsonl");
     expect(proxyWarPublicRunArtifacts).toContain("match-summary.json");
     expect(proxyWarPublicRunArtifacts).toContain("replay-ui.json");
     expect(proxyWarPublicRunArtifacts).toContain("match-package.html");
@@ -38,12 +37,21 @@ describe("ProxyWarPublicArtifacts", () => {
     expect(isProxyWarPublicRunArtifact("replay-ui.json")).toBe(true);
   });
 
+  it("PRIVACY: never allows decisions.jsonl or visual-report.html as public run artifacts — both carry raw LLM prompts/output (AgentDecisionLogWriter.ts's DecisionLogEntry.rawLlmPrompt/rawLlmOutput; visual-report.html's 'Raw decision details' panel embeds the full entry as JSON, prompts included)", () => {
+    expect(proxyWarPublicRunArtifacts).not.toContain("decisions.jsonl");
+    expect(proxyWarPublicRunArtifacts).not.toContain("visual-report.html");
+    expect(isProxyWarPublicRunArtifact("decisions.jsonl")).toBe(false);
+    expect(isProxyWarPublicRunArtifact("visual-report.html")).toBe(false);
+  });
+
   it("keeps non-public debug artifacts out of the closed beta artifact route", () => {
     expect(isProxyWarPublicRunArtifact("external-agent-feedback.json")).toBe(
       false,
     );
     expect(isProxyWarPublicRunArtifact("run-1.records.json")).toBe(false);
     expect(isProxyWarPublicRunArtifact("../game-record.json")).toBe(false);
+    expect(isProxyWarPublicRunArtifact("decisions.jsonl")).toBe(false);
+    expect(isProxyWarPublicRunArtifact("visual-report.html")).toBe(false);
   });
 
   it("allows only public-safe tournament showcase artifacts", () => {
@@ -177,7 +185,12 @@ describe("ProxyWarPublicArtifacts", () => {
       isProxyWarPublicLeaguePath(
         "/ai-league-runs/league-coworld-2026-07-13T10-40-45-699Z-9ed769ef/decisions.jsonl",
       ),
-    ).toBe(true);
+    ).toBe(false);
+    expect(
+      isProxyWarPublicLeaguePath(
+        "/ai-league-runs/league-coworld-2026-07-13T10-40-45-699Z-9ed769ef/visual-report.html",
+      ),
+    ).toBe(false);
     expect(
       isProxyWarPublicLeaguePath(
         "/ai-league-runs/league-coworld-2026-07-13T10-40-45-699Z-9ed769ef/replay-ui.json",

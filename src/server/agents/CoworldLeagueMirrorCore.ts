@@ -535,12 +535,25 @@ export function buildCoworldReplayUiArtifact(
       replayUiRecentDecisionLimit,
     ),
     artifacts: {
-      visualReport: Object.hasOwn(inlineRunArtifacts, "visual-report.html"),
+      // `visual-report.html`/`decisions.jsonl` were removed from the public
+      // artifact allowlist (`proxyWarPublicRunArtifacts`,
+      // `ProxyWarPublicArtifacts.ts`) — both carry raw LLM prompts/output
+      // and are never publicly servable regardless of whether the raw
+      // hosted payload happens to include the file. `Object.hasOwn` here
+      // would answer "does the file exist", which is a different, now-
+      // irrelevant question from "is it available to a client" — reporting
+      // `true` from file presence would be a stale/misleading signal (a
+      // client acting on it would build a link that always 404s). No
+      // consumer reads either field today (the UI row that once used them
+      // was removed on operator request — see `AiLeagueReplayOverlay.ts`'s
+      // history), so this is the honest value rather than dead plumbing
+      // pretending otherwise.
+      visualReport: false,
       spectatorTelemetry: Object.hasOwn(
         inlineRunArtifacts,
         "spectator-telemetry.json",
       ),
-      decisions: Object.hasOwn(inlineRunArtifacts, "decisions.jsonl"),
+      decisions: false,
       summary: Object.hasOwn(inlineRunArtifacts, "match-summary.json"),
     },
   };

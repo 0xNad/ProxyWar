@@ -1,6 +1,41 @@
+/**
+ * Every entry here is servable ANONYMOUSLY, with no invite/beta gate, on
+ * ANY run directory (not just published league episodes — see
+ * `servePublicRunArtifact`'s allowlist check in `ai-agent-demo-server.ts`,
+ * which applies `isProxyWarPublicRunArtifact` to every `runID`) AND — for
+ * a published league episode's own `league-<runID>` directory — through
+ * the beta-gate bypass too (`isProxyWarPublicLeaguePath`). Treat every
+ * addition here as a public HTTP response body, not an internal file.
+ *
+ * `decisions.jsonl` and `visual-report.html` are deliberately NOT on this
+ * list (removed after an audit found both actually reachable this way).
+ * `AgentDecisionLogWriter.ts`'s `DecisionLogEntry` carries optional
+ * `rawLlmPrompt`/`rawLlmOutput` fields (an agent's exact prompt/completion,
+ * copied through whenever the metadata is present) — `decisions.jsonl` is
+ * literally that array serialized one entry per line, and
+ * `visualReport()`'s per-decision "Raw decision details" `<details>`
+ * panel embeds `JSON.stringify(entry, null, 2)` — the SAME full entry,
+ * prompts included — directly into `visual-report.html`'s markup. Both
+ * are genuinely private (LLM prompts/outputs are not covered by any
+ * shipped public-copy claim, and the product's own "raw agent logs are
+ * not public" copy — `about.league_retention`, en.json — would be false
+ * while either stayed here). The local content engine reads
+ * `decisions.jsonl` from disk directly, not over HTTP, so removing it
+ * from this list does not affect artifact generation or that consumer —
+ * only public HTTP serving.
+ *
+ * Every OTHER entry here was re-verified this session to be genuinely
+ * derived-and-bounded, never a raw-record dump: `match-package.*`
+ * (`ProxyWarMatchPackage.ts`, built from `matchSummary()`'s aggregate
+ * counts/rates/grades — traced field by field, never a raw
+ * prompt/output/reason string), `match-story.md`, `objective-scorecard.md`,
+ * `behavior-quality-report.*`, `external-agent-feedback.md`,
+ * `spectator-telemetry.json`/`spectator-replay.json`/`spectator.html`
+ * (`AgentSpectatorTelemetry.ts` — zero references to the raw-field names)
+ * — kept.
+ */
 export const proxyWarPublicRunArtifacts = [
   "game-record.json",
-  "decisions.jsonl",
   "match-summary.json",
   "replay-ui.json",
   "match-package.json",
@@ -8,7 +43,6 @@ export const proxyWarPublicRunArtifacts = [
   "match-package.md",
   "spectator-replay.json",
   "spectator-telemetry.json",
-  "visual-report.html",
   "spectator.html",
   "objective-scorecard.md",
   "match-story.md",

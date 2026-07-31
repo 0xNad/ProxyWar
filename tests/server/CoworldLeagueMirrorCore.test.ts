@@ -411,7 +411,7 @@ describe("CoworldLeagueMirrorCore", () => {
     expect(artifact.artifacts).toEqual({
       visualReport: false,
       spectatorTelemetry: true,
-      decisions: true,
+      decisions: false,
       summary: true,
     });
     expect(JSON.stringify(artifact)).not.toContain("rawProviderOutput");
