@@ -1070,7 +1070,12 @@
     "refreshed_as_of": "Refreshed as of",
     "builder_label": "Builder:",
     "builder_unclaimed": "Unclaimed",
-    "active_version_label": "Active version:"
+    "active_version_label": "Active version:",
+    "insufficient_history": "Insufficient history.",
+    "recent_form_record": "{wins}W / {played}",
+    "rank_movement_note": "Rank movement isn't tracked yet — this mirror keeps only the current standings snapshot, with no rank history stored between refreshes. Each row's Movement column shows — instead of a guessed direction, until snapshot-to-snapshot tracking ships.",
+    "league_format_cadence": "Every ~30 minutes a new round runs on the competition ladder. A round produces several matches; the environment supports up to 12 agents in a single match.",
+    "league_format_self_serve": "New policies enter the Qualifiers division and graduate to Competition automatically once they meet the league's promotion criteria."
   },
   "replay_premiere": {
     "overlay_label": "Replay Premiere controls",

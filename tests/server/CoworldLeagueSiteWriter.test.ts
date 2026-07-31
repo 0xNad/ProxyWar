@@ -13,6 +13,8 @@ import {
   writeCoworldLeagueSite,
   type CoworldLeagueMirrorData,
 } from "../../src/server/agents/CoworldLeagueSiteWriter";
+import type { AgentProfile } from "../../src/server/identity/IdentitySchemas";
+import type { IdentityRegistrySnapshot } from "../../src/server/identity/IdentityRegistry";
 
 function sampleData(): CoworldLeagueMirrorData {
   return {
@@ -65,14 +67,20 @@ function sampleData(): CoworldLeagueMirrorData {
         isHouse: true,
       },
     ],
-    rounds: [
-      {
-        roundNumber: 268,
-        status: "running",
-        startedAt: "2026-07-13T10:36:00Z",
-        completedAt: null,
-      },
-    ],
+  rounds: [
+    {
+      roundNumber: 268,
+      status: "running",
+      startedAt: "2026-07-13T10:36:00Z",
+      completedAt: null,
+    },
+    {
+      roundNumber: 267,
+      status: "completed",
+      startedAt: "2026-07-13T10:05:00Z",
+      completedAt: "2026-07-13T10:20:00Z",
+    },
+  ],
     episodes: [
       {
         episodeRequestId: "ereq_aaaa",
@@ -289,7 +297,38 @@ describe("coworldLeagueIndexHtml", () => {
     expect(html).toContain(
       'aria-label="Scrollable league standings" tabindex="0"',
     );
-    expect(html).toContain("min-width:600px");
+    // Desktop table stays a real, wide <table> (7 columns now); the mobile
+    // fix below is what stops that width being forced on a 390px viewport.
+    expect(html).toContain("min-width:760px");
+    expect(html).toMatch(/<th scope="col">Rank<\/th>/);
+    expect(html).toMatch(/<th scope="col">Movement<\/th>/);
+  });
+
+  test("renders responsive standings cards instead of a crushed table at the mobile breakpoint", () => {
+    // The old anti-pattern: a >=600px table forced into a horizontally
+    // scrolling box below a 390px viewport (spec: "Mobile: responsive
+    // rows/cards, not a crushed table"). The fix keeps the real <table>
+    // markup for accessibility/desktop and re-lays it out as stacked cards
+    // only inside the mobile media query.
+    const html = coworldLeagueIndexHtml(sampleData());
+    const mobileBlockMatch = html.match(
+      /@media \(max-width:640px\) \{([\s\S]*?)\n {4}\}/,
+    );
+    expect(mobileBlockMatch).not.toBeNull();
+    const mobileCss = mobileBlockMatch?.[1] ?? "";
+    expect(mobileCss).toContain(".standings-scroll { overflow-x:visible;");
+    expect(mobileCss).toContain(
+      "table, tbody, tr { display:block; width:100%; }",
+    );
+    expect(mobileCss).toContain("content:attr(data-label)");
+    // The real table markup (not a second, hand-rolled card DOM) is what
+    // gets restyled — same rows serve both breakpoints.
+    expect(html).toContain(
+      '<table aria-labelledby="standings-title" aria-describedby="standings-provenance">',
+    );
+    expect(html).toContain('data-label="Movement"');
+    expect(html).toContain('data-label="Recent form"');
+    expect(html).toContain('data-label="Latest match"');
   });
 
   test("renders the map name and never leaks a difficulty label", () => {
@@ -381,6 +420,130 @@ describe("coworldLeagueIndexHtml", () => {
     const html = coworldLeagueIndexHtml(sampleData());
     expect(html).toContain("ROUND 268 · LIVE");
     expect(html).toContain("every 30 minutes");
+  });
+
+  test("computes recent form and latest match per row from the mirror's own episodes, never forcing a number when none exist", () => {
+    const html = coworldLeagueIndexHtml(sampleData());
+    // Auri appears (as a non-winner) in the one completed episode.
+    expect(html).toContain(
+      '<td class="recent-form" data-label="Recent form">0W / 1</td>',
+    );
+    expect(html).toContain(
+      '<td class="latest-match" data-label="Latest match"><a href="/ai-league-replay/coworld-run">Pangaea · Round 267</a></td>',
+    );
+    // odin free and the hostile-name row never appear in any mirrored
+    // episode — an honest gap, not a fabricated 0.
+    expect(
+      (html.match(
+        /<span class="muted-note">Insufficient history\.<\/span>/g,
+      ) ?? []).length,
+    ).toBe(4); // 2 rows × (recent form + latest match)
+  });
+
+  test("shows a real win count in recent form once the row actually won", () => {
+    const data = sampleData();
+    data.episodes[0].players[1] = { ...data.episodes[0].players[1], isWinner: true };
+    const html = coworldLeagueIndexHtml(data);
+    expect(html).toContain(
+      '<td class="recent-form" data-label="Recent form">1W / 1</td>',
+    );
+  });
+
+  test("the standings row's latest-match link prefers a revealed premiere over the replay bundle, same as its battle card", () => {
+    const data = sampleData();
+    data.episodes[0].premiereHref = "/premiere/prem_54d299b874f0adc7654fd1cc";
+    const html = coworldLeagueIndexHtml(data);
+    expect(html).toContain(
+      '<td class="latest-match" data-label="Latest match"><a href="/premiere/prem_54d299b874f0adc7654fd1cc">Pangaea · Round 267</a></td>',
+    );
+  });
+
+  test("never fabricates rank movement — every row shows the same honest dash, explained in its own section", () => {
+    const html = coworldLeagueIndexHtml(sampleData());
+    expect(
+      (html.match(/<td class="movement" data-label="Movement">—<\/td>/g) ?? [])
+        .length,
+    ).toBe(3);
+    // No invented up/down indicators anywhere on the page.
+    for (const glyph of ["↑", "↓", "▲", "▼", "⬆", "⬇"]) {
+      expect(html).not.toContain(glyph);
+    }
+    expect(html).toContain("<h2>Rank movement</h2>");
+    expect(html).toContain("tracked yet");
+    expect(html).toContain("guessed direction");
+  });
+
+  test("adds latest completed rounds, map rotation, and league format sections from real mirror data", () => {
+    const html = coworldLeagueIndexHtml(sampleData());
+    expect(html).toContain("<h2>Latest completed rounds</h2>");
+    expect(html).toContain('<span class="round-pill">#267</span>');
+    expect(html).toContain(
+      `<a href="${DEFAULT_PLATFORM_ORIGIN}/watch">Browse the full match archive</a>`,
+    );
+    expect(html).toContain("<h2>Map rotation</h2>");
+    expect(html).toContain('<span class="round-pill">Pangaea · Compact</span>');
+    expect(html).toContain("<h2>League format</h2>");
+    expect(html).toContain(
+      "Every ~30 minutes a new round runs on the competition ladder",
+    );
+    expect(html).toContain(
+      "Qualifiers division and graduate to Competition automatically",
+    );
+  });
+
+  test("shows an honest empty state for completed rounds and map rotation when the mirror has neither", () => {
+    const data = sampleData();
+    data.rounds = [
+      {
+        roundNumber: 268,
+        status: "running",
+        startedAt: "2026-07-13T10:36:00Z",
+        completedAt: null,
+      },
+    ];
+    data.episodes = [];
+    const html = coworldLeagueIndexHtml(data);
+    expect(
+      (html.match(/<p class="lede">Insufficient history\.<\/p>/g) ?? [])
+        .length,
+    ).toBe(2);
+  });
+
+  test("links a standings row to its registered Agent profile when resolved, and falls back to the player profile otherwise", () => {
+    const auri: AgentProfile = {
+      id: "agt_auri",
+      slug: "auri-prime",
+      displayName: "Auri Prime",
+      shortCode: "AUR",
+      builderId: null,
+      tagline: null,
+      description: null,
+      emblem: {
+        style: "geometric-svg-v1",
+        seed: "agt_auri",
+        assetPath: "resources/identity/emblems/agt_auri.svg",
+      },
+      primaryColor: "#c62f39",
+      secondaryColor: "#689e2e",
+      debutDate: null,
+      policyMatchRule: { playerName: "Auri", policyFamily: "proxywar-keystone" },
+      status: "verified",
+      publicStrategyDescription: null,
+    };
+    const identity: IdentityRegistrySnapshot = {
+      agents: [auri],
+      builders: [],
+      versions: [],
+    };
+    const html = coworldLeagueIndexHtml(sampleData(), identity);
+    expect(html).toContain(
+      `<a class="player-profile-link" href="${DEFAULT_PLATFORM_ORIGIN}/agent/auri-prime">`,
+    );
+    expect(html).toContain("Auri Prime");
+    // odin free has no registered Agent — its row must still resolve, never 404.
+    expect(html).toContain(
+      `<a class="player-profile-link" href="${DEFAULT_PLATFORM_ORIGIN}/player/odin%20free">`,
+    );
   });
 
   test("loads the same-origin update client and keeps a timed fallback", () => {

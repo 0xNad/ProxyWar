@@ -674,7 +674,7 @@ ${leagueSocialMetaHtml()}
     section { margin-bottom:26px; }
     .standings-scroll { width:100%; overflow-x:auto; border:1px solid var(--line); border-radius:8px; -webkit-overflow-scrolling:touch; }
     .standings-scroll:focus-visible { outline:2px solid var(--cyan); outline-offset:3px; }
-    table { width:100%; min-width:600px; border-collapse:collapse; background:var(--surface); }
+    table { width:100%; min-width:760px; border-collapse:collapse; background:var(--surface); }
     th, td { padding:10px 12px; border-bottom:1px solid var(--line); text-align:left; vertical-align:middle; }
     th { background:var(--surface2); font-size:11px; text-transform:uppercase; letter-spacing:.08em; color:var(--muted); }
     tr:last-child td { border-bottom:0; }
@@ -682,6 +682,11 @@ ${leagueSocialMetaHtml()}
     tr.house td:first-child { box-shadow:inset 3px 0 0 var(--amber); }
     td.rank { font:900 16px ui-monospace, SFMono-Regular, Menlo, monospace; width:52px; }
     td.score { font-family:ui-monospace, SFMono-Regular, Menlo, monospace; font-weight:800; }
+    td.movement { color:var(--muted); font:700 13px ui-monospace, SFMono-Regular, Menlo, monospace; }
+    td.recent-form, td.latest-match { font:600 12px ui-monospace, SFMono-Regular, Menlo, monospace; }
+    .muted-note { color:var(--muted); font-style:italic; opacity:.7; }
+    .completed-rounds-list { list-style:none; margin:0; padding:0; display:flex; flex-direction:column; gap:8px; }
+    .completed-rounds-list li { display:flex; gap:8px; align-items:center; color:var(--muted); font:700 12px ui-monospace, SFMono-Regular, Menlo, monospace; }
     .policy { display:block; color:var(--muted); font:600 12px ui-monospace, SFMono-Regular, Menlo, monospace; margin-top:2px; }
     .policy.active { color:var(--good); font-weight:800; }
     .policy-kind { display:inline-block; min-width:116px; font-size:10px; font-weight:900; letter-spacing:.08em; text-transform:uppercase; cursor:help; }
@@ -740,6 +745,19 @@ ${leagueSocialMetaHtml()}
       .battle-foot > .meta { flex:1 1 100%; }
       .battle-foot .links { margin-left:0; }
       .battle-foot .links a { display:inline-flex; align-items:center; min-height:44px; }
+      .standings-scroll { overflow-x:visible; border:0; }
+      .standings-scroll table { min-width:0; }
+      table thead { position:absolute; width:1px; height:1px; padding:0; margin:-1px; overflow:hidden; clip:rect(0, 0, 0, 0); white-space:nowrap; border:0; }
+      table, tbody, tr { display:block; width:100%; }
+      tbody tr { border:1px solid var(--line); border-radius:10px; padding:12px; margin-bottom:10px; background:var(--surface); }
+      tbody tr:last-child { margin-bottom:0; }
+      tr.house { border-left:3px solid var(--amber); }
+      tr.house td { background:transparent; }
+      tr.house td:first-child { box-shadow:none; }
+      table td { display:block; border-bottom:0; padding:5px 0; }
+      table td[data-label]::before { content:attr(data-label); display:block; font:800 10px ui-monospace, SFMono-Regular, Menlo, monospace; text-transform:uppercase; letter-spacing:.08em; color:var(--muted); margin-bottom:2px; }
+      td.rank { font-size:22px; }
+      td.agent-cell { padding-bottom:8px; }
     }
   </style>
 </head>
@@ -813,6 +831,7 @@ ${leagueSocialMetaHtml()}
       )}</p>
       ${standingsTable(data, identity)}
     </section>
+    ${standingsAppendixSections(data)}
     <section>
       <h2>Latest battles</h2>
       ${
@@ -1048,6 +1067,226 @@ function builderNoteMarkup(view: AgentIdentityView, isHouse: boolean): string {
   )}</span>`;
 }
 
+/**
+ * Same identity/profile destination the standings row's agent identity link
+ * uses for click-through: `/agent/:slug` when the row resolved to a
+ * registered Agent (an `AgentProfile.slug` is never null — see
+ * `IdentitySchemas.ts`), else the existing `/player/:name` fallback so an
+ * unmapped or house-only row never links to a profile page that doesn't
+ * exist (same rule `BuilderProfilePage.renderAgentRow` follows client-side).
+ */
+function standingsRowProfileUrl(
+  view: AgentIdentityView,
+  fallbackPlayerName: string,
+): string {
+  if (view.agent !== null) {
+    return `${PLAYER_PROFILE_ORIGIN}/agent/${encodeURIComponent(view.agent.slug)}`;
+  }
+  return playerProfileUrl(fallbackPlayerName);
+}
+
+/**
+ * Win/participation tally for one standings row over the mirror's own
+ * episode window — the same win-counting approach
+ * `LobbyPage.renderAgentsToWatch`'s `winsBySlug` map uses client-side,
+ * scoped to this row's `playerName`. Only completed episodes count; an
+ * episode still in progress has no winner yet. A player with zero recent
+ * episodes in this window is a real "no recent form" case, never forced to
+ * a fabricated number.
+ */
+function recentFormForPlayer(
+  playerName: string,
+  episodes: readonly CoworldLeagueEpisodeRow[],
+): { played: number; wins: number } {
+  let played = 0;
+  let wins = 0;
+  for (const episode of episodes) {
+    if (episode.completedAt === null) {
+      continue;
+    }
+    const entry = episode.players.find(
+      (player) => player.name === playerName,
+    );
+    if (entry === undefined) {
+      continue;
+    }
+    played += 1;
+    if (entry.isWinner) {
+      wins += 1;
+    }
+  }
+  return { played, wins };
+}
+
+function recentFormMarkup(
+  playerName: string,
+  episodes: readonly CoworldLeagueEpisodeRow[],
+): string {
+  const { played, wins } = recentFormForPlayer(playerName, episodes);
+  if (played === 0) {
+    return `<span class="muted-note">${escapeHtml(
+      translateText("coworld_league.insufficient_history"),
+    )}</span>`;
+  }
+  return escapeHtml(
+    translateText("coworld_league.recent_form_record")
+      .replace("{wins}", String(wins))
+      .replace("{played}", String(played)),
+  );
+}
+
+/**
+ * Most recent COMPLETED episode this player appears in, newest
+ * `completedAt` first. Mirrors `battleCard`'s own premiere-then-full-render
+ * link priority so a standings row's "latest match" link never points
+ * somewhere that episode's own card wouldn't also link to.
+ */
+function latestMatchForPlayer(
+  playerName: string,
+  episodes: readonly CoworldLeagueEpisodeRow[],
+): CoworldLeagueEpisodeRow | null {
+  let latest: CoworldLeagueEpisodeRow | null = null;
+  let latestTime = Number.NEGATIVE_INFINITY;
+  for (const episode of episodes) {
+    if (episode.completedAt === null) {
+      continue;
+    }
+    if (!episode.players.some((player) => player.name === playerName)) {
+      continue;
+    }
+    const time = Date.parse(episode.completedAt);
+    if (!Number.isFinite(time) || time <= latestTime) {
+      continue;
+    }
+    latest = episode;
+    latestTime = time;
+  }
+  return latest;
+}
+
+function latestMatchMarkup(
+  playerName: string,
+  episodes: readonly CoworldLeagueEpisodeRow[],
+): string {
+  const episode = latestMatchForPlayer(playerName, episodes);
+  if (episode === null) {
+    return `<span class="muted-note">${escapeHtml(
+      translateText("coworld_league.insufficient_history"),
+    )}</span>`;
+  }
+  const label = `${episode.map}${
+    episode.roundNumber === null ? "" : ` · Round ${episode.roundNumber}`
+  }`;
+  const href =
+    typeof episode.premiereHref === "string" &&
+    episode.premiereHref.length > 0
+      ? episode.premiereHref
+      : episode.fullRenderHref;
+  return href === null
+    ? escapeHtml(label)
+    : `<a href="${escapeHtml(href)}">${escapeHtml(label)}</a>`;
+}
+
+/**
+ * Distinct maps from the mirror's own recent-episodes window, most recently
+ * played first — a real summary of what has actually run, never an
+ * invented rotation schedule (spec §3: no fabricated methodology).
+ */
+function recentMapRotation(
+  episodes: readonly CoworldLeagueEpisodeRow[],
+): { map: string; mapSize: string }[] {
+  const seen = new Set<string>();
+  const rotation: { map: string; mapSize: string }[] = [];
+  const sorted = [...episodes]
+    .filter((episode) => episode.completedAt !== null)
+    .sort(
+      (a, b) =>
+        Date.parse(b.completedAt ?? "") - Date.parse(a.completedAt ?? ""),
+    );
+  for (const episode of sorted) {
+    if (seen.has(episode.map)) {
+      continue;
+    }
+    seen.add(episode.map);
+    rotation.push({ map: episode.map, mapSize: episode.mapSize });
+  }
+  return rotation;
+}
+
+/**
+ * The four spec-required standings-context sections that sit below the
+ * table: latest completed rounds (plus the one link off this page to the
+ * full replay archive), an honest rank-movement note, the recent map
+ * rotation, and the reviewed league-format copy. Grouped in one function —
+ * none of the four take enough independent inputs or call sites to justify
+ * separate top-level exports, and keeping them together is what makes "add
+ * a fifth context section" a one-place edit.
+ */
+function standingsAppendixSections(data: CoworldLeagueMirrorData): string {
+  const completedRounds = data.rounds
+    .filter((round) => round.completedAt !== null)
+    .slice(0, 5);
+  const completedRoundsBody =
+    completedRounds.length === 0
+      ? `<p class="lede">${escapeHtml(
+          translateText("coworld_league.insufficient_history"),
+        )}</p>`
+      : `<ul class="completed-rounds-list">${completedRounds
+          .map(
+            (round) =>
+              `<li><span class="round-pill">#${escapeHtml(
+                String(round.roundNumber),
+              )}</span> <span data-utc="${escapeHtml(
+                round.completedAt ?? "",
+              )}">${escapeHtml(shortUtc(round.completedAt ?? ""))}</span></li>`,
+          )
+          .join("\n")}</ul>`;
+
+  const mapRotation = recentMapRotation(data.episodes).slice(0, 6);
+  const mapRotationBody =
+    mapRotation.length === 0
+      ? `<p class="lede">${escapeHtml(
+          translateText("coworld_league.insufficient_history"),
+        )}</p>`
+      : `<div class="rounds-strip">${mapRotation
+          .map(
+            (entry) =>
+              `<span class="round-pill">${escapeHtml(entry.map)}${
+                entry.mapSize.length > 0
+                  ? ` · ${escapeHtml(entry.mapSize)}`
+                  : ""
+              }</span>`,
+          )
+          .join("\n")}</div>`;
+
+  return `<section>
+      <h2>Latest completed rounds</h2>
+      ${completedRoundsBody}
+      <p class="standings-note"><a href="${escapeHtml(
+        `${PLAYER_PROFILE_ORIGIN}/watch`,
+      )}">Browse the full match archive</a></p>
+    </section>
+    <section>
+      <h2>Rank movement</h2>
+      <p class="standings-note">${escapeHtml(
+        translateText("coworld_league.rank_movement_note"),
+      )}</p>
+    </section>
+    <section>
+      <h2>Map rotation</h2>
+      ${mapRotationBody}
+    </section>
+    <section>
+      <h2>League format</h2>
+      <p class="standings-note">${escapeHtml(
+        translateText("coworld_league.league_format_cadence"),
+      )}</p>
+      <p class="standings-note">${escapeHtml(
+        translateText("coworld_league.league_format_self_serve"),
+      )}</p>
+    </section>`;
+}
+
 function standingsTable(
   data: CoworldLeagueMirrorData,
   identity: IdentityRegistrySnapshot,
@@ -1055,6 +1294,7 @@ function standingsTable(
   if (data.standings.length === 0) {
     return `<p class="lede">No standings mirrored yet.</p>`;
   }
+  const ratedRoundsLabel = translateText("coworld_league.rated_rounds");
   const rows = data.standings
     .map((row) => {
       // Old snapshots used policyLabel for the rating row. Keep that fallback
@@ -1130,24 +1370,39 @@ function standingsTable(
       return `
         <tr${row.isHouse ? ` class="house"` : ""}>
           <td class="rank">${escapeHtml(String(row.rank))}</td>
-          <td><a class="player-profile-link" href="${escapeHtml(
-            playerProfileUrl(row.playerName),
+          <td class="movement" data-label="Movement">—</td>
+          <td class="agent-cell"><a class="player-profile-link" href="${escapeHtml(
+            standingsRowProfileUrl(view, row.playerName),
           )}">${agentIdentityMarkup(view, row.playerName)}</a>${
             row.isHouse ? `<span class="badge house">HOUSE</span>` : ""
           }${builderNoteMarkup(view, row.isHouse)}${activeVersionLine}${integrityDrawer}</td>
-          <td class="score">${row.score === null ? "—" : escapeHtml(row.score.toFixed(2))}</td>
-          <td>${row.roundsPlayed === null ? "—" : escapeHtml(String(row.roundsPlayed))}</td>
+          <td class="score" data-label="${escapeHtml(
+            data.league.scoreLabel,
+          )}">${row.score === null ? "—" : escapeHtml(row.score.toFixed(2))}</td>
+          <td class="recent-form" data-label="Recent form">${recentFormMarkup(
+            row.playerName,
+            data.episodes,
+          )}</td>
+          <td data-label="${escapeHtml(ratedRoundsLabel)}">${row.roundsPlayed === null ? "—" : escapeHtml(String(row.roundsPlayed))}</td>
+          <td class="latest-match" data-label="Latest match">${latestMatchMarkup(
+            row.playerName,
+            data.episodes,
+          )}</td>
         </tr>`;
     })
     .join("\n");
   return `<div class="standings-scroll" role="region" aria-describedby="standings-provenance" aria-label="${escapeHtml(
     translateText("coworld_league.standings_scroll_label"),
   )}" tabindex="0"><table aria-labelledby="standings-title" aria-describedby="standings-provenance">
-    <thead><tr><th>Rank</th><th>Warlord</th><th>${escapeHtml(
-      data.league.scoreLabel,
-    )}</th><th>${escapeHtml(
-      translateText("coworld_league.rated_rounds"),
-    )}</th></tr></thead>
+    <thead><tr>
+      <th scope="col">Rank</th>
+      <th scope="col">Movement</th>
+      <th scope="col">Warlord</th>
+      <th scope="col">${escapeHtml(data.league.scoreLabel)}</th>
+      <th scope="col">Recent form</th>
+      <th scope="col">${escapeHtml(ratedRoundsLabel)}</th>
+      <th scope="col">Latest match</th>
+    </tr></thead>
     <tbody>${rows}</tbody>
   </table></div>`;
 }
