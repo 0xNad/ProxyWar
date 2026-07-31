@@ -108,15 +108,29 @@ npx tsx src/scripts/proxywar-fixture-league-data.ts \
 
 # Live-premiere admission (active/late-join-sync/reveal-after-end E2E
 # coverage) is opt-in behind FIXTURE_ADMIT_LIVE_PREMIERE=1, default OFF.
-# It genuinely works end-to-end (manifest validation, git-provenance
-# check, leak audit, and admission all pass) EXCEPT that a --brain=rule
-# controlled match does not reliably reach a winner within a bounded
-# turn budget on this map/manifest combination -- confirmed across
-# several real attempts up to 8,400 turns, where repeated
-# `validationFallbackUsed` alliance-extend rejections stall expansion.
-# The default fixture path stays FAST (~30s) and 100% reliable instead
-# of gambling wall-clock time on convergence; see the Stage 8 report for
-# the exact blocker and next steps.
+#
+# Reliable AND deterministic (verified by two independent runs producing
+# byte-identical turnCount/winner): a 4-seat, all-profiles exhibition never
+# converged to a winner even at 300 decision steps / 60,000 turns (two
+# agents were still fighting past turn 56,800 when investigated) — the
+# rule brain's attack action always spends a fixed 10% of current troops
+# per decision (`RuleAgentBrain.ts`'s `legalActions.find(a => a.kind ===
+# "attack")` just takes the FIRST attack option, never the highest
+# `troopPercent` one), so elimination is geometric attrition, not a fast
+# knockout — with 4 roughly-matched agents splitting damage, no one side
+# accumulates a decisive advantage in bounded turns. `alliance_extend`
+# stalls (the original hypothesis) turned out NOT to be the real
+# bottleneck: disabling `alliance_request`/`alliance_extend` alone did not
+# fix 4-seat convergence either.
+#
+# What DOES converge reliably: 2 seats, both `aggressive` profile (so
+# nothing dilutes into building/diplomacy over attacking), with alliance
+# actions disabled so the objective manager never detours through them.
+# Two 1v1 agents mean the 10%-per-decision attrition on the loser compounds
+# every step with no third party to split it — verified deterministic:
+# reaches a winner at turn 21,400 in ~24s wall-clock, identical outcome on
+# a repeat run. `--max-steps=200` leaves ~2x headroom over the observed
+# convergence point.
 if [ "${FIXTURE_ADMIT_LIVE_PREMIERE:-0}" = "1" ]; then
 
 log "==> starting origin (needed for the premiere admission leak audit)"
@@ -127,15 +141,15 @@ chmod 700 "$PREMIERE_STATE_ROOT"
 start_origin
 wait_for_origin
 
-log "==> generating live premiere match (short, so it plays out to revealed quickly)"
+log "==> generating live premiere match (2-seat aggressive-vs-aggressive, alliance actions disabled — the reliably-converging configuration)"
 mkdir -p "$FIXTURE_ROOT/admit-manifests" "$ADMIT_STAGING"
 rm -f "$FIXTURE_ROOT/admit-manifests"/*.json
-for name in aggressive defensive diplomatic opportunistic; do
+for name in aggressive aggressive2; do
   cat > "$FIXTURE_ROOT/admit-manifests/$name.json" <<EOF
 {
   "schemaVersion": 1,
   "agentName": "Fixture $name",
-  "profile": "$name",
+  "profile": "aggressive",
   "brainType": "rule",
   "provider": { "provider": "rule" },
   "policyIdentity": {
@@ -155,9 +169,10 @@ npx tsx src/scripts/replay-premiere-controlled-exhibition.ts \
   --served-root="$HERE/static" \
   --served-root="$ARTIFACTS_ROOT" \
   --brain=rule \
-  --max-steps=40 \
+  --max-steps=200 \
   --turns-per-decision-step=200 \
   --replay-tail-turns=2000 \
+  --disable-action-kinds=alliance_request,alliance_extend \
   --playback-turn-interval-ms=25 > /tmp/pw-fixture-premiere.log 2>&1
 BUNDLE="$ADMIT_STAGING/fixture-premiere-live.source.json"
 SHA="$(shasum -a 256 "$BUNDLE" | awk '{print $1}')"
@@ -186,7 +201,7 @@ json.dump({
     "title": "Fixture Live Premiere",
     "spoilerNeutralDescription": "A short, deterministic fixture match for Stage 8 E2E coverage.",
     "map": {"id": "Asia", "label": "Asia"},
-    "matchFormat": {"id": "ffa-4", "label": "4-seat FFA", "seatCount": 4},
+    "matchFormat": {"id": "ffa-2", "label": "2-seat FFA", "seatCount": 2},
     "scheduledAt": iso(now),
     "playbackRate": 1,
     "checkpoints": [
