@@ -246,14 +246,30 @@ export default defineConfig(({ mode }) => {
         : [
             createHtmlPlugin({
               minify: false,
-              entry: "/src/client/Main.ts",
-              template: "index.html",
-              inject: {
-                data: {
-                  gitCommit: JSON.stringify("DEV"),
-                  ...htmlAssetData,
+              pages: [
+                {
+                  filename: "index.html",
+                  template: "index.html",
+                  entry: "/src/client/Main.ts",
+                  injectOptions: {
+                    data: {
+                      gitCommit: JSON.stringify("DEV"),
+                      ...htmlAssetData,
+                    },
+                  },
                 },
-              },
+                {
+                  filename: "public.html",
+                  template: "public.html",
+                  entry: "/src/client/PublicApp.ts",
+                  injectOptions: {
+                    data: {
+                      gitCommit: JSON.stringify("DEV"),
+                      ...htmlAssetData,
+                    },
+                  },
+                },
+              ],
             }),
           ]),
       ...(isProduction
@@ -287,12 +303,21 @@ export default defineConfig(({ mode }) => {
       emptyOutDir: true,
       assetsDir: "assets", // Sub-directory for assets
       rollupOptions: {
+        input: {
+          main: path.resolve(__dirname, "index.html"),
+          public: path.resolve(__dirname, "public.html"),
+        },
         output: {
+          // Split, not one shared "vendor": the public entry (PublicApp.ts)
+          // never imports pixi.js, only zod (ReadModelSchema.ts). A single
+          // combined chunk keyed on either module would put pixi.js in the
+          // one chunk BOTH entries depend on merely because they both need
+          // zod — silently reintroducing the game bundle on public routes
+          // this split exists to remove. Keeping them apart means each
+          // entry's own chunk graph only pulls what it actually imports.
           manualChunks: (id) => {
-            const vendorModules = ["pixi.js", "zod"];
-            if (vendorModules.some((module) => id.includes(module))) {
-              return "vendor";
-            }
+            if (id.includes("pixi.js")) return "vendor-game";
+            if (id.includes("zod")) return "vendor-shared";
           },
         },
       },

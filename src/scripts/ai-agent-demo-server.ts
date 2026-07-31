@@ -1281,13 +1281,21 @@ app.get("/trader/:accountId", async (_req, res) => {
 // call sites — see `getAppShellContent`'s own doc for why this can't be
 // hoisted further without breaking the per-request nonce.
 // -----------------------------------------------------------------------
-async function sendAppShellPage(
+// Serves `public.html`'s built output — the Stage 2 public app's own
+// lightweight Vite entry (`PublicApp.ts`), deliberately separate from the
+// game/replay/premiere `index.html` + `Main.ts` entry every other route
+// serves. Every caller below is one of the 7 public-app routes; game,
+// replay, premiere, `/player/:name`, `/account`, and `/trader/:accountId`
+// never call this — they keep using `index.html` unchanged (see
+// `RenderHtml.ts`'s `getAppShellContent`, which this reuses unmodified for
+// either shell — it's generic over `htmlPath`).
+async function sendPublicAppShellPage(
   res: Response,
   failureLabel: string,
 ): Promise<void> {
   try {
     const appShell = await getAppShellContent(
-      path.resolve(staticRootDir, "index.html"),
+      path.resolve(staticRootDir, "public.html"),
     );
     const scriptNonce = randomBytes(24).toString("base64");
     res.setHeader(
@@ -1320,28 +1328,28 @@ async function sendAppShellPage(
 // unchanged, untouched, never intercepted.
 app.get("/", async (_req, res, next) => {
   if (leagueWrapperOnly && !platformEnabled) {
-    await sendAppShellPage(res, "the event lobby");
+    await sendPublicAppShellPage(res, "the event lobby");
     return;
   }
   next();
 });
 app.get("/watch", async (_req, res) => {
-  await sendAppShellPage(res, "the watch page");
+  await sendPublicAppShellPage(res, "the watch page");
 });
 app.get("/agents", async (_req, res) => {
-  await sendAppShellPage(res, "the agents directory");
+  await sendPublicAppShellPage(res, "the agents directory");
 });
 app.get("/agent/:slug", async (_req, res) => {
-  await sendAppShellPage(res, "the agent profile page");
+  await sendPublicAppShellPage(res, "the agent profile page");
 });
 app.get("/builders", async (_req, res) => {
-  await sendAppShellPage(res, "the builders directory");
+  await sendPublicAppShellPage(res, "the builders directory");
 });
 app.get("/builder/:slug", async (_req, res) => {
-  await sendAppShellPage(res, "the builder profile page");
+  await sendPublicAppShellPage(res, "the builder profile page");
 });
 app.get("/about", async (_req, res) => {
-  await sendAppShellPage(res, "the about page");
+  await sendPublicAppShellPage(res, "the about page");
 });
 // GitHub sign-in lives ONLY on the platform now — proxywar.xyz is the
 // sole account authority (see the platform build's contract). Exactly one
