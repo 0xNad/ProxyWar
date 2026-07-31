@@ -204,9 +204,18 @@ json.dump({
     "matchFormat": {"id": "ffa-2", "label": "2-seat FFA", "seatCount": 2},
     "scheduledAt": iso(now),
     "playbackRate": 1,
+    # Checkpoints must land while BOTH seats are still alive (admission
+    # requires >=2 alive options at each checkpoint sequence — see
+    # ReplayPremiereCheckpointProjection.ts's checkpoint_projection_fewer_
+    # than_two_options). The production 35%/65% split (ReplayPremiereLoop
+    # Core.ts's checkpointSequencesForTurnCount) assumes a real league
+    # match's slower pace; this fixture's fast 2-seat elimination match
+    # resolves well before that — verified empirically against this exact
+    # deterministic bundle that 35%/65% (turns 7489/13910) fails admission
+    # (the loser is already eliminated by then) while 10%/20% succeeds.
     "checkpoints": [
-        {"id": "cp_00000001", "sequence": int(tc * 0.35)},
-        {"id": "cp_00000002", "sequence": int(tc * 0.65)},
+        {"id": "cp_00000001", "sequence": int(tc * 0.10)},
+        {"id": "cp_00000002", "sequence": int(tc * 0.20)},
     ],
 }, open(os.path.join(admit_in, "definition.json"), "w"), indent=2)
 print(f"    turns={tc} duration={tc*d['replay']['turnIntervalMs']/1000:.1f}s")
