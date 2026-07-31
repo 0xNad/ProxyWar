@@ -6,7 +6,7 @@ import {
 } from "./CoworldLeaguePremiereSuppression";
 import {
   readFeaturedMatchStore,
-  writeFeaturedMatchStore,
+  writeFeaturedMatchStoreUnlocked,
   type FeaturedMatch,
   type FeaturedMatchResult,
   type FeaturedMatchState,
@@ -214,7 +214,7 @@ async function reconcileFeaturedMatchStoreLocked(
 
   if (!changed) return store;
   const next: FeaturedMatchStoreFile = { ...store, matches: updated };
-  await writeFeaturedMatchStore(stateRoot, next);
+  await writeFeaturedMatchStoreUnlocked(stateRoot, next);
   return next;
 }
 

@@ -22,6 +22,7 @@ import {
   buildPremiereResultSummary,
   type PremiereResultSummaryV1,
 } from "../../src/server/replay-premiere/ReplayPremiereResultSummary";
+import { upsertRecord } from "../../src/scripts/premiere-schedule-lib";
 
 let featuredMatchRoot: string;
 let storageStateDir: string;
@@ -523,5 +524,62 @@ describe("reconcileFeaturedMatchStore — concurrency", () => {
       expect(pin).toBeDefined();
       expect(pin?.reason).toBe(`featured-match:feat_${String(index).padStart(20, "0")}`);
     }
+  });
+
+  it("a CLI-style upsertRecord (premiere-schedule-lib.ts's write path — separate-process shape) racing a server reconcile pass: final store contains BOTH effects, no silent lost update (review finding — store-layer locking)", async () => {
+    const matchIdA = `feat_${"a".repeat(20)}`;
+    const matchIdB = `feat_${"b".repeat(20)}`;
+    const premiereIdA = derivePremiereId("ereq_cli_race_a");
+    const recordB = baseMatch({
+      matchId: matchIdB,
+      episodeRequestId: "ereq_cli_race_b",
+      state: "scheduled",
+    });
+    await seedStore([
+      baseMatch({
+        matchId: matchIdA,
+        episodeRequestId: "ereq_cli_race_a",
+        state: "published",
+      }),
+      recordB,
+    ]);
+    await writePointer(premiereIdA, "2026-07-31T00:10:00.000Z");
+
+    // Two independent lock holders racing the SAME real cross-process file
+    // lock (`FileMutex.ts`, keyed on `featuredMatchRoot`) — exactly the
+    // shape of a `premiere:cancel` CLI invocation (a separate OS process in
+    // production) racing the demo server's reconcile-on-read pass. Before
+    // the fix, `upsertRecord` did its own unlocked read-modify-write:
+    // whichever of these two finished last would silently overwrite the
+    // OTHER'S change with its own stale pre-race snapshot of the store.
+    const [reconcileResult, cliResult] = await Promise.all([
+      reconcileFeaturedMatchStore(featuredMatchRoot, options()),
+      upsertRecord(featuredMatchRoot, {
+        ...recordB,
+        state: "cancelled",
+        scheduledAt: null,
+        updatedAt: "2026-07-31T00:05:00.000Z",
+      }),
+    ]);
+
+    // Each call's OWN return value must show the transition IT computed
+    // (guaranteed regardless of which lock holder ran first or second).
+    expect(
+      reconcileResult.matches.find((m) => m.matchId === matchIdA)?.state,
+    ).toBe("revealed");
+    expect(
+      cliResult.matches.find((m) => m.matchId === matchIdB)?.state,
+    ).toBe("cancelled");
+
+    // The real "no lost update" proof: a FINAL independent read after both
+    // calls have completed must show BOTH effects together — whichever
+    // call ran second read FRESH data (under the same lock) reflecting the
+    // first call's write, rather than a stale pre-race snapshot that would
+    // have silently reverted it.
+    const finalRead = await readFeaturedMatchStore(featuredMatchRoot);
+    const finalA = finalRead.matches.find((m) => m.matchId === matchIdA);
+    const finalB = finalRead.matches.find((m) => m.matchId === matchIdB);
+    expect(finalA?.state).toBe("revealed");
+    expect(finalB?.state).toBe("cancelled");
   });
 });

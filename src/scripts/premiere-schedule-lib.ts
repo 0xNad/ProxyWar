@@ -1,9 +1,9 @@
 import path from "node:path";
 import {
   FeaturedMatchSchema,
+  mutateFeaturedMatchStore,
   readFeaturedMatchStore,
   resolveFeaturedMatchStateRoot,
-  writeFeaturedMatchStore,
   type FeaturedMatch,
   type FeaturedMatchStoreFile,
 } from "../server/agents/FeaturedMatch";
@@ -22,13 +22,23 @@ import {
  * record" and "is this schedule internally consistent" logic lives, so
  * the four scripts stay thin and never duplicate it.
  *
- * Concurrency: today's four CLIs are operator-invoked, one at a time, by
- * hand or from a single supervised cron — `FeaturedMatch.ts`'s own store
- * functions hold no lock, and neither does this module. A future turn
- * wiring these into an automated pipeline (see the coexistence design
- * note in `premiere-schedule.ts`'s module doc) MUST add real locking
- * before more than one writer can run concurrently; do not assume it
- * exists today.
+ * Concurrency: `upsertRecord` (this module's only write path) runs its
+ * whole read-modify-write cycle inside `FeaturedMatch.ts`'s
+ * `mutateFeaturedMatchStore`, which holds a real cross-process filesystem
+ * lock (`FileMutex.ts`, keyed on the store's `stateRoot`) — the SAME lock
+ * the demo server's `reconcileFeaturedMatchStore` holds. This safely
+ * serializes any of the four CLIs against each other AND against the
+ * server, even though the CLIs run as separate OS processes an in-process
+ * mutex could never reach. What is NOT covered: a CLI's own pre-flight
+ * validation (e.g. `premiere:publish`'s "state is already X" checks) reads
+ * the store BEFORE the locked upsert and is not re-validated atomically
+ * with the write — a concurrent writer changing THAT SAME record between
+ * the pre-flight read and the upsert can still have its change to that one
+ * record overwritten by a stale-informed CLI write (every OTHER record is
+ * unaffected, since the upsert always reads fresh data for the rest of the
+ * store under the lock). Closing that narrower same-record race would need
+ * the CLI's user-facing validation itself to run inside the lock, which is
+ * a bigger design change than this module makes today.
  */
 
 /**
@@ -139,22 +149,31 @@ export async function loadStore(
   return { stateRoot: roots.stateRoot, store: await readFeaturedMatchStore(roots.stateRoot) };
 }
 
-/** Upserts one record into the store by `matchId`, writing atomically. */
+/**
+ * Upserts one record into the store by `matchId`. Runs the whole
+ * read-filter-write cycle inside `mutateFeaturedMatchStore` (`FeaturedMatch.ts`)
+ * so this CLI participates in the SAME cross-process lock the server's
+ * `reconcileFeaturedMatchStore` holds for its own read-modify-write — the
+ * CLI and the demo server are separate OS processes, so only a real
+ * filesystem lock (not an in-process mutex) can serialize them. Without
+ * this, a concurrent reconcile pass and this upsert could each read the
+ * same pre-mutation snapshot and the later write would silently discard
+ * whichever OTHER records the earlier write had just changed.
+ */
 export async function upsertRecord(
   stateRoot: string,
   record: FeaturedMatch,
 ): Promise<FeaturedMatchStoreFile> {
   const validated = FeaturedMatchSchema.parse(record);
-  const current = await readFeaturedMatchStore(stateRoot);
-  const withoutExisting = current.matches.filter(
-    (entry) => entry.matchId !== validated.matchId,
-  );
-  const next: FeaturedMatchStoreFile = {
-    schemaVersion: 1,
-    matches: [...withoutExisting, validated],
-  };
-  await writeFeaturedMatchStore(stateRoot, next);
-  return next;
+  return mutateFeaturedMatchStore(stateRoot, (current) => {
+    const withoutExisting = current.matches.filter(
+      (entry) => entry.matchId !== validated.matchId,
+    );
+    return {
+      ...current,
+      matches: [...withoutExisting, validated],
+    };
+  });
 }
 
 export interface ScheduleValidationIssue {

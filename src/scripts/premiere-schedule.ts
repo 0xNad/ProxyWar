@@ -68,9 +68,13 @@ import {
  *    never whether or when it decides to.
  * 4. Concurrency: the shell side's `mv`-based claim is already atomic
  *    (`premiere-queue-lib.sh`'s own doc explains why). The NEW read of
- *    `featured-matches.json` from shell has no such protection today —
- *    that turn must decide whether a lock is needed (this CLI family does
- *    not hold one; see `premiere-schedule-lib.ts`'s module doc).
+ *    `featured-matches.json` from shell (a raw `jq` read, bypassing
+ *    `FeaturedMatch.ts`'s TypeScript API and its locked
+ *    `mutateFeaturedMatchStore` entirely) has no such protection today —
+ *    that turn must decide whether a lock is needed for THAT shell-side
+ *    read (this CLI family's own TypeScript writes ARE already
+ *    lock-protected — see `premiere-schedule-lib.ts`'s module doc — but a
+ *    raw shell `jq` read participates in no lock at all).
  */
 
 async function main(): Promise<void> {

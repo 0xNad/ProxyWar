@@ -4,10 +4,10 @@ import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import {
   FeaturedMatchSchema,
+  mutateFeaturedMatchStore,
   newFeaturedMatchId,
   readFeaturedMatchStore,
   resolveFeaturedMatchStateRoot,
-  updateFeaturedMatchStore,
   writeFeaturedMatchStore,
   type FeaturedMatch,
 } from "../../../src/server/agents/FeaturedMatch";
@@ -214,10 +214,10 @@ describe("FeaturedMatch store (atomic read/write)", () => {
     expect(reread.matches).toEqual([record]);
   });
 
-  it("updateFeaturedMatchStore applies a mutation and persists it", async () => {
+  it("mutateFeaturedMatchStore applies a mutation and persists it", async () => {
     stateRoot = await mkdtemp(path.join(os.tmpdir(), "pw-featured-"));
     const record = baseRecord();
-    await updateFeaturedMatchStore(stateRoot, (file) => ({
+    await mutateFeaturedMatchStore(stateRoot, (file) => ({
       ...file,
       matches: [...file.matches, record],
     }));

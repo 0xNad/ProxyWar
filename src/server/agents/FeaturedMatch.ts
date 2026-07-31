@@ -3,6 +3,7 @@ import { promises as fs } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { z } from "zod";
+import { withFileMutex } from "./FileMutex";
 
 /**
  * The typed, persisted model for Stage 3's editorial layer (product
@@ -312,8 +313,28 @@ export async function readFeaturedMatchStore(
   return FeaturedMatchStoreFileSchema.parse(JSON.parse(raw));
 }
 
-/** Writes the whole store atomically. Callers own read-modify-write ordering; this module holds no lock of its own (today's CLIs run one at a time, operator-invoked — see the `premiere:schedule`/`validate`/`publish`/`cancel` doc comments for the concurrency note). */
-export async function writeFeaturedMatchStore(
+/**
+ * Cross-process concurrency contract for this store: EVERY read-modify-write
+ * caller — `FeaturedMatchReconcile.ts`'s `reconcileFeaturedMatchStore`
+ * (server routes), and every `premiere:schedule`/`publish`/`cancel` operator
+ * CLI (separate OS processes, NOT covered by any in-process mutex) — MUST
+ * use {@link mutateFeaturedMatchStore}, which holds ONE cross-process file
+ * lock (`FileMutex.ts`, keyed on `stateRoot`) across the entire
+ * read -> mutate -> write cycle. A caller that reads separately and later
+ * calls a write function on its own reopens exactly the lost-update race
+ * this contract exists to close: the later writer's snapshot silently
+ * discards whatever an interleaved writer already committed.
+ *
+ * `writeFeaturedMatchStoreUnlocked` is the raw write primitive, exported
+ * ONLY for a caller that already holds this store's lock itself (e.g.
+ * `reconcileFeaturedMatchStoreLocked`, which does async work between its own
+ * read and write and so cannot fit `mutateFeaturedMatchStore`'s synchronous
+ * `mutate` shape) — calling it without already holding the lock reopens the
+ * same race. `writeFeaturedMatchStore` is the locked public form, for the
+ * rare caller that writes a value not derived from reading this store first
+ * (so there is no read-then-write window to protect).
+ */
+export async function writeFeaturedMatchStoreUnlocked(
   stateRoot: string,
   file: FeaturedMatchStoreFile,
 ): Promise<void> {
@@ -325,13 +346,36 @@ export async function writeFeaturedMatchStore(
   );
 }
 
-/** Convenience: read, apply, validate, write — the shape every CLI in this family uses. Throws (never swallows) if `mutate` returns a store that fails schema validation, so an operator CLI bug fails loudly instead of corrupting the store. */
-export async function updateFeaturedMatchStore(
+/** Writes the whole store atomically, holding this store's cross-process lock for the duration of the write — see the concurrency contract above `writeFeaturedMatchStoreUnlocked`. */
+export async function writeFeaturedMatchStore(
+  stateRoot: string,
+  file: FeaturedMatchStoreFile,
+): Promise<void> {
+  await withFileMutex(stateRoot, () =>
+    writeFeaturedMatchStoreUnlocked(stateRoot, file),
+  );
+}
+
+/**
+ * The canonical read-modify-write primitive for this store: read, apply,
+ * validate, write, all under ONE hold of this store's cross-process lock
+ * (`FileMutex.ts`, keyed on `stateRoot` — the SAME lock
+ * `reconcileFeaturedMatchStore` holds for its own read-modify-write). Every
+ * true read-modify-write caller in this family — every operator CLI
+ * (`premiere:schedule`/`publish`/`cancel`, via `upsertRecord` in
+ * `premiere-schedule-lib.ts`) included — MUST go through this function, not
+ * a separate read followed by a separate write. Throws (never swallows) if
+ * `mutate` returns a store that fails schema validation, so an operator CLI
+ * bug fails loudly instead of corrupting the store.
+ */
+export async function mutateFeaturedMatchStore(
   stateRoot: string,
   mutate: (file: FeaturedMatchStoreFile) => FeaturedMatchStoreFile,
 ): Promise<FeaturedMatchStoreFile> {
-  const current = await readFeaturedMatchStore(stateRoot);
-  const next = mutate(current);
-  await writeFeaturedMatchStore(stateRoot, next);
-  return next;
+  return withFileMutex(stateRoot, async () => {
+    const current = await readFeaturedMatchStore(stateRoot);
+    const next = mutate(current);
+    await writeFeaturedMatchStoreUnlocked(stateRoot, next);
+    return next;
+  });
 }
