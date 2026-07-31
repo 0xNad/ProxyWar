@@ -439,11 +439,16 @@ export const ORDINARY_EPISODE: CoworldLeagueEpisodeRow = {
       color: "#f6b26b",
     },
   ],
-  // Points at the Stage 3 match detail page (reliably resolves for any
-  // known episodeRequestId, unlike the raw `/ai-league-replay/<runID>`
-  // viewer, which needs real game-record.json bytes this hand-authored
-  // fixture episode deliberately doesn't have).
-  watchHref: "/match/ereq_fixture-ordinary-0001",
+  // `/match/:episodeRequestId` was never actually wired to resolve archive
+  // episodes — `MatchDetailPage.ts` only queries
+  // `/api/featured-matches/:matchId`, a SEPARATE `feat_...`-namespaced
+  // state root (see that file's own doc comment). Pointing watchHref here
+  // produced a live, confirmed "Match not found" dead link on every
+  // /watch card for this episode (ui-audit, 2026-07-31). This hand-
+  // authored episode has no real spectator.html/game-record.json bytes
+  // either (see fullRenderHref below), so `null` is the honest value —
+  // WatchPage.ts's card correctly renders "replay pending" for it.
+  watchHref: null,
   fullRenderHref: null,
 };
 
