@@ -3,6 +3,7 @@ import {
   mountReplayScopedLeagueClipControl,
   type ReplayScopedLeagueClipControlHandle,
 } from "./ReplayClipControl";
+import type { TimelineMarker } from "./BroadcastComposition";
 import {
   mountReplayPremiereOverlay,
   type ReplayPremiereCheckpointView,
@@ -11,6 +12,7 @@ import {
   type ReplayPremiereOverlayModel,
   type ReplayPremierePolicyView,
   type ReplayPremierePublicState,
+  type ReplayPremiereRailSeatView,
   type ReplayPremiereResultsPredictionView,
   type ReplayPremiereResultsSummaryView,
   type ReplayPremiereRevealView,
@@ -117,6 +119,22 @@ export function readReplayPremiereArchivePayload(
   return parseArchivePayload(raw);
 }
 
+/**
+ * The existing full-replay jump-to-turn mechanism (`AiLeagueReplayOverlay.ts`
+ * dispatches the same event; `Main.ts`'s `openAiLeagueReplay` bootstrap —
+ * which `openArchivedReplayPremiere` always mounts alongside this overlay —
+ * already listens for it). Reused rather than duplicated for the archived
+ * premiere's own timeline/War-Room seek actions.
+ */
+function dispatchReplayJumpToTurn(turn: number): void {
+  document.dispatchEvent(
+    new CustomEvent("ai-league-replay-jump-turn", {
+      detail: { turnNumber: turn },
+      bubbles: true,
+    }),
+  );
+}
+
 export function mountArchivedReplayPremiereOverlay(
   payload: ReplayPremiereArchivePayload,
   ambient = false,
@@ -133,6 +151,13 @@ export function mountArchivedReplayPremiereOverlay(
       overlayHandle.dispose();
       mountArchivedReplayPremiereOverlay(payload, request.ambient);
     },
+    // An archived/revealed premiere has no more spoiler concern (matching
+    // `FeaturedMatch.ts`'s own "revealed" semantics), and the ordinary
+    // league replay mounted alongside it (`openArchivedReplayPremiere` ->
+    // `openAiLeagueReplay`) already owns a real jump-to-turn mechanism —
+    // reuse it rather than inventing a second one.
+    onSeek: (turn): void => dispatchReplayJumpToTurn(turn),
+    onJumpToTurn: (turn): void => dispatchReplayJumpToTurn(turn),
   });
   // The read-only archived model drops the whole share card, leaving only the
   // ambient toggle and an undiscoverable replay. Add back just two actions the
@@ -364,6 +389,34 @@ function buildArchivedOverlayModel(
     checkpoints: buildArchivedCheckpoints(summary.predictions, nameOf),
     activeCheckpointId: null,
     leaders: [],
+    competitorRailSeats: standings.map(
+      (standing): ReplayPremiereRailSeatView => ({
+        seatId: standing.seatId,
+        playerName: standing.displayName,
+        territoryPercent: null,
+        // A won seat is unambiguously rank 1; the archive summary never
+        // carries a full ordered placement for the rest — asserting one
+        // would fabricate a tie the data never establishes (same reasoning
+        // `FeaturedMatchReconcile.ts` documents for `placements`).
+        inMatchRank: standing.won ? 1 : null,
+        // Per-agent elimination history is not part of the durable archive
+        // summary (only final win/lose survives) — an honest gap, not
+        // "everyone survived."
+        alive: null,
+        allies: [],
+        wars: [],
+      }),
+    ),
+    // No per-turn narrative (alliances/betrayals/eliminations) survives into
+    // the durable archive summary — only final aggregates do (see `outcome`/
+    // `predictions`/`markers` above) — so there is nothing bounded to curate
+    // a War Room feed from. An honest empty feed, not a fabricated one.
+    warRoomEvents: [],
+    timelineMarkers: archivedTimelineMarkers(outcome),
+    totalTurns: Math.max(1, outcome?.turnCount ?? 1),
+    // Revealed/archived: no more spoiler concern (see `FeaturedMatch.ts`'s
+    // own "revealed" semantics) — full Replay-style unrestricted seeking.
+    maxSeekableTurn: null,
     headlineEvent: null,
     markerPolicySeatId: null,
     share: null,
@@ -380,6 +433,29 @@ function buildArchivedOverlayModel(
     clip: null,
     canRequestClip: false,
   };
+}
+
+/** Only spawn/finish are derivable from a durable archive summary — no per-turn narrative survives archival (see `buildArchivedOverlayModel`'s own comment). */
+function archivedTimelineMarkers(
+  outcome: ArchiveSummaryOutcome | null,
+): TimelineMarker[] {
+  const markers: TimelineMarker[] = [
+    {
+      kind: "spawn",
+      turn: 0,
+      sequence: 0,
+      label: translateText("replay_premiere.timeline_match_start"),
+    },
+  ];
+  if (outcome !== null) {
+    markers.push({
+      kind: "finish",
+      turn: outcome.turnCount,
+      sequence: 0,
+      label: translateText("replay_premiere.timeline_match_finish"),
+    });
+  }
+  return markers;
 }
 
 /**

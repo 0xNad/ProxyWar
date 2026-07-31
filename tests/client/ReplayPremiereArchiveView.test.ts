@@ -111,7 +111,7 @@ describe("readReplayPremiereArchivePayload", () => {
   });
 
   it("treats absent, malformed, and mismatched generation targets as unavailable", () => {
-    const fetchMock = vi.fn(async () => clipCapabilitiesResponse(true));
+    const fetchMock = vi.fn(async (_url: string) => clipCapabilitiesResponse(true));
     vi.stubGlobal("fetch", fetchMock);
     const invalidTargets: unknown[] = [
       undefined,
@@ -143,8 +143,14 @@ describe("readReplayPremiereArchivePayload", () => {
       document.getElementById("proxywar-premiere-archive")?.remove();
     }
 
-    // A rejected generation target never even probes the process capability.
-    expect(fetchMock).not.toHaveBeenCalled();
+    // A rejected generation target never even probes the process capability
+    // (the overlay's own once-per-mount identity resolution against the
+    // public read-model is unrelated and expected regardless).
+    expect(
+      fetchMock.mock.calls.filter(
+        ([url]) => url !== "/ai-league-runs/league/read-model.json",
+      ),
+    ).toHaveLength(0);
   });
 });
 
@@ -239,7 +245,7 @@ describe("mountArchivedReplayPremiereOverlay", () => {
   });
 
   it("hides archived generation when the process capability is off but keeps a promoted download", async () => {
-    const fetchMock = vi.fn(async () => clipCapabilitiesResponse(false));
+    const fetchMock = vi.fn(async (_url: string) => clipCapabilitiesResponse(false));
     vi.stubGlobal("fetch", fetchMock);
     const payload = samplePayload();
     payload.clip = {
@@ -258,7 +264,13 @@ describe("mountArchivedReplayPremiereOverlay", () => {
     expect(
       handle.element.querySelector(".rp-archived-clip-download"),
     ).not.toBeNull();
-    expect(fetchMock).toHaveBeenCalledTimes(1);
+    // One clip-capability probe, plus the overlay's own once-per-mount
+    // identity resolution against the public read-model (unrelated).
+    expect(
+      fetchMock.mock.calls.filter(
+        ([url]) => url !== "/ai-league-runs/league/read-model.json",
+      ),
+    ).toHaveLength(1);
     handle.dispose();
   });
 
@@ -272,7 +284,10 @@ describe("mountArchivedReplayPremiereOverlay", () => {
     const fetchMock = vi.fn(
       async (input: string | URL | Request, init?: RequestInit) => {
         const url = String(input);
-        if (url === "/api/clip-capabilities") {
+        if (
+          url === "/api/clip-capabilities" ||
+          url === "/ai-league-runs/league/read-model.json"
+        ) {
           return clipCapabilitiesResponse(true);
         }
         requests.push({
@@ -357,7 +372,7 @@ describe("mountArchivedReplayPremiereOverlay", () => {
   });
 
   it("does not show or probe generation when the archived replay source is unavailable", () => {
-    const fetchMock = vi.fn(async () => clipCapabilitiesResponse(true));
+    const fetchMock = vi.fn(async (_url: string) => clipCapabilitiesResponse(true));
     vi.stubGlobal("fetch", fetchMock);
     const handle = mountArchivedReplayPremiereOverlay({
       ...samplePayload(),
@@ -368,7 +383,13 @@ describe("mountArchivedReplayPremiereOverlay", () => {
     expect(
       handle.element.querySelector(".rp-archived-clip-generation"),
     ).toBeNull();
-    expect(fetchMock).not.toHaveBeenCalled();
+    // The overlay's own once-per-mount identity resolution against the
+    // public read-model is unrelated and expected regardless.
+    expect(
+      fetchMock.mock.calls.filter(
+        ([url]) => url !== "/ai-league-runs/league/read-model.json",
+      ),
+    ).toHaveLength(0);
     handle.dispose();
   });
 

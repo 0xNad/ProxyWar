@@ -21,6 +21,7 @@ import {
 } from "./ReplayPremiereNetwork";
 import {
   mountReplayPremiereOverlay,
+  warEventText,
   type ReplayPremiereCaptionRequest,
   type ReplayPremiereCheckpointPair,
   type ReplayPremiereCheckpointView,
@@ -37,6 +38,7 @@ import {
   type ReplayPremierePolicyIdentityView,
   type ReplayPremierePolicyView,
   type ReplayPremierePredictionRequest,
+  type ReplayPremiereRailSeatView,
   type ReplayPremiereReminderRequest,
   type ReplayPremiereResultsPredictionView,
   type ReplayPremiereResultsSummaryView,
@@ -44,6 +46,11 @@ import {
   type ReplayPremiereShareRequest,
   type ReplayPremiereWarEventView,
 } from "./ReplayPremiereOverlay";
+import type {
+  CuratedWarRoomEvent,
+  CuratedWarRoomEventKind,
+  TimelineMarker,
+} from "./BroadcastComposition";
 import {
   ReplayPremierePlaybackController,
   type ReplayPremierePlaybackEvent,
@@ -2483,6 +2490,17 @@ export class ReplayPremiereRuntimeController {
   } | null = null;
   private headlineEvent: string | null = null;
   private previousLeaderId: string | null = null;
+  /** Bounded, newest-last: Stage 4 War Room curated headlines (spec item 1), same released-only boundary as `warFeed`. */
+  private warRoomEvents: CuratedWarRoomEvent[] = [];
+  private warRoomEventSeq = 0;
+  /** Bounded, newest-last: Stage 4 bottom-timeline markers, same released-only boundary as `warFeed`. */
+  private timelineMarkers: TimelineMarker[] = [];
+  private matchStartMarkerAdded = false;
+  private finishMarkerAdded = false;
+  /** Only the FIRST agent-vs-agent attack becomes a "first strike" War Room/timeline entry. */
+  private firstStrikeReported = false;
+  /** Coworld player names (matches `ReplayPremierePolicyView.displayName`) confirmed eliminated by a `conquest` war event. */
+  private eliminatedPlayerNames = new Set<string>();
   private recovery: ReplayPremiereRecoveryNotice | null = null;
   private networkTerminalState:
     | "failed"
@@ -2896,18 +2914,36 @@ export class ReplayPremiereRuntimeController {
       this.previousLeaderId !== null &&
       leader.playerID !== this.previousLeaderId
     ) {
-      this.headlineEvent = translateText(
-        "replay_premiere.headline_lead_change",
-        { name: leader.displayName },
-      );
+      const label = translateText("replay_premiere.headline_lead_change", {
+        name: leader.displayName,
+      });
+      this.headlineEvent = label;
+      this.pushTimelineMarker({
+        kind: "lead_change",
+        turn: frame.turnNumber,
+        sequence: frame.sequence,
+        label,
+      });
     }
     this.previousLeaderId = leader?.playerID ?? this.previousLeaderId;
     this.latestFrame = frame;
+    if (!this.matchStartMarkerAdded) {
+      this.matchStartMarkerAdded = true;
+      this.pushTimelineMarker({
+        kind: "spawn",
+        turn: 0,
+        sequence: 0,
+        label: translateText("replay_premiere.timeline_match_start"),
+      });
+    }
     if (frame.warEvents.length > 0) {
       this.warFeed = [
         ...frame.warEvents.slice().reverse(),
         ...this.warFeed,
       ].slice(0, MAX_WAR_FEED_ENTRIES);
+      for (const warEvent of frame.warEvents) {
+        this.curateWarNarrative(warEvent, frame.sequence);
+      }
     }
     this.maybeSettleJoinSync(frame);
     this.hydrateOverlay();
@@ -2917,6 +2953,195 @@ export class ReplayPremiereRuntimeController {
     if (this.disposed) return;
     this.latchFailure("runtime_failure");
   };
+
+  private pushTimelineMarker(marker: TimelineMarker): void {
+    this.timelineMarkers = [...this.timelineMarkers, marker].slice(
+      -MAX_TIMELINE_MARKERS,
+    );
+  }
+
+  private pushWarRoomEvent(
+    kind: CuratedWarRoomEventKind,
+    warEvent: ReplayPremiereWarEventView,
+    sequence: number,
+  ): void {
+    this.warRoomEventSeq += 1;
+    const curated: CuratedWarRoomEvent = {
+      id: `wr-${this.warRoomEventSeq}`,
+      kind,
+      turn: warEvent.turn,
+      sequence,
+      headline: warEventText(warEvent),
+      // No stated-reason/before-after-territory telemetry survives into the
+      // sealed live war narrative (see `ReplayPremiereWarEventView`'s own
+      // doc) — an honest gap, not an omission of something available.
+      publicReason: null,
+      participants:
+        warEvent.target === null
+          ? [warEvent.actor]
+          : [warEvent.actor, warEvent.target],
+      expandedDetail: null,
+    };
+    this.warRoomEvents = [...this.warRoomEvents, curated].slice(
+      -MAX_WAR_ROOM_EVENTS,
+    );
+  }
+
+  /**
+   * Extends the existing spoiler-safe war-narrative precedent (`warFeed`)
+   * into the Stage 4 War Room feed and bottom timeline, using the same
+   * kind-mapping the Full Replay broadcast composition uses for the kinds
+   * that overlap: `alliance`/`betrayal` map 1:1, `conquest` (an agent fully
+   * defeating another — see `GameImpl.conquerPlayer`) maps to `elimination`,
+   * and only the FIRST `attack` becomes `first_strike` (every event here is
+   * already a fact of a moment the viewer has already watched — see
+   * `ReplayPremiereWarEventView`'s own doc). `nuke` has no War Room kind but
+   * does get a timeline marker. `emote`/`chat` carry neither. `plan_change`
+   * is never curated here: a sealed Premiere exposes no decision-log/plan
+   * telemetry at all (unlike Full Replay's `AiLeagueDecisionLogEntry`).
+   */
+  private curateWarNarrative(
+    warEvent: ReplayPremiereWarEventView,
+    sequence: number,
+  ): void {
+    switch (warEvent.kind) {
+      case "alliance":
+        this.pushTimelineMarker({
+          kind: "alliance",
+          turn: warEvent.turn,
+          sequence,
+          label: warEventText(warEvent),
+        });
+        this.pushWarRoomEvent("alliance", warEvent, sequence);
+        break;
+      case "betrayal":
+        this.pushTimelineMarker({
+          kind: "betrayal",
+          turn: warEvent.turn,
+          sequence,
+          label: warEventText(warEvent),
+        });
+        this.pushWarRoomEvent("betrayal", warEvent, sequence);
+        break;
+      case "conquest":
+        this.pushTimelineMarker({
+          kind: "elimination",
+          turn: warEvent.turn,
+          sequence,
+          label: warEventText(warEvent),
+        });
+        this.pushWarRoomEvent("elimination", warEvent, sequence);
+        if (warEvent.target !== null) {
+          this.eliminatedPlayerNames.add(warEvent.target);
+        }
+        break;
+      case "nuke":
+        this.pushTimelineMarker({
+          kind: "nuke",
+          turn: warEvent.turn,
+          sequence,
+          label: warEventText(warEvent),
+        });
+        break;
+      case "attack":
+        if (!this.firstStrikeReported) {
+          this.firstStrikeReported = true;
+          this.pushTimelineMarker({
+            kind: "first_strike",
+            turn: warEvent.turn,
+            sequence,
+            label: warEventText(warEvent),
+          });
+          this.pushWarRoomEvent("first_strike", warEvent, sequence);
+        }
+        break;
+      case "emote":
+      case "chat":
+        break;
+    }
+  }
+
+  /**
+   * Per-seat facts for the competitor rail, covering EVERY policy seat (not
+   * just the top-3 `frameLeaders` truncates to) — spec item 1's "extend the
+   * existing per-seat data to all seats" — bounded to the same released-only
+   * frame data as `leaders`/`warFeed`. `alive`/`allies`/`wars` come straight
+   * from the live diplomatic state the map itself already shows (see
+   * `ReplayPremiereFramePlayer`'s doc); a seat absent from the current frame
+   * is `alive: false` once a `conquest` event named it, else `null`
+   * (genuinely unknown — not yet spawned, most likely).
+   */
+  private buildCompetitorRailSeats(
+    policies: readonly ReplayPremierePolicyView[],
+  ): readonly ReplayPremiereRailSeatView[] {
+    const frame = this.latestFrame;
+    if (frame === null) {
+      return policies.map((policy) => ({
+        seatId: policy.seatId,
+        playerName: policy.displayName,
+        territoryPercent: null,
+        inMatchRank: null,
+        alive: null,
+        allies: [],
+        wars: [],
+      }));
+    }
+    const totalTiles = frame.players.reduce(
+      (sum, player) => sum + player.tilesOwned,
+      0,
+    );
+    const nameBySmallId = new Map<number, string>();
+    for (const player of frame.players) {
+      nameBySmallId.set(player.smallID, player.displayName);
+    }
+    const framePlayerBySeatId = new Map(
+      frame.players.map((player) => [player.playerID, player] as const),
+    );
+    const rankedBySmallestShareFirst = [...frame.players].sort(
+      (left, right) =>
+        right.tilesOwned - left.tilesOwned ||
+        left.displayName.localeCompare(right.displayName),
+    );
+    const rankBySeatId = new Map(
+      rankedBySmallestShareFirst.map(
+        (player, index) => [player.playerID, index + 1] as const,
+      ),
+    );
+    return policies.map((policy): ReplayPremiereRailSeatView => {
+      const framePlayer = framePlayerBySeatId.get(policy.seatId);
+      const alive =
+        framePlayer !== undefined
+          ? true
+          : this.eliminatedPlayerNames.has(policy.displayName)
+            ? false
+            : null;
+      return {
+        seatId: policy.seatId,
+        playerName: policy.displayName,
+        territoryPercent:
+          framePlayer === undefined || totalTiles <= 0
+            ? null
+            : (framePlayer.tilesOwned / totalTiles) * 100,
+        inMatchRank:
+          framePlayer === undefined
+            ? null
+            : (rankBySeatId.get(policy.seatId) ?? null),
+        alive,
+        allies:
+          framePlayer === undefined
+            ? []
+            : framePlayer.allies
+                .map((smallId) => nameBySmallId.get(smallId))
+                .filter((name): name is string => name !== undefined),
+        wars:
+          framePlayer === undefined
+            ? []
+            : framePlayer.targets
+                .map((smallId) => nameBySmallId.get(smallId))
+                .filter((name): name is string => name !== undefined),
+      };
+    });
+  }
 
   private onPlaybackEvent(event: ReplayPremierePlaybackEvent): void {
     if (this.disposed) return;
@@ -4479,6 +4704,19 @@ export class ReplayPremiereRuntimeController {
         ? manifest.releasedThroughSequence
         : null;
     const currentTurn = this.latestFrame?.turnNumber ?? null;
+    // "Never navigable past the live edge during a Premiere" (spec item 2)
+    // has no more meaning once the reveal itself is displayable, so the
+    // finish marker — and only the finish marker — is recorded exactly once
+    // at that point (mirrors `matchStartMarkerAdded`'s one-shot pattern).
+    if (displayReveal !== null && !this.finishMarkerAdded) {
+      this.finishMarkerAdded = true;
+      this.pushTimelineMarker({
+        kind: "finish",
+        turn: currentTurn ?? 0,
+        sequence: viewedSequence,
+        label: translateText("replay_premiere.timeline_match_finish"),
+      });
+    }
     const shareTurn = this.lastAcceptedReaction?.turn ?? currentTurn;
     const currentParticipantId = this.service.session()?.participantId ?? null;
     const manualShareDelivery =
@@ -4553,6 +4791,12 @@ export class ReplayPremiereRuntimeController {
           : null,
       leaders: frameLeaders(this.latestFrame),
       warEvents: this.warFeed,
+      competitorRailSeats: this.buildCompetitorRailSeats(policies),
+      warRoomEvents: this.warRoomEvents,
+      timelineMarkers: this.timelineMarkers,
+      totalTurns: Math.max(1, currentTurn ?? 0),
+      // Never null in live Premiere mode — see the model field's own doc.
+      maxSeekableTurn: currentTurn ?? 0,
       markerCounts: {
         ...(this.reactionSummary?.byKind ?? this.ownMarkCounts),
       },
@@ -4891,6 +5135,11 @@ interface ReplayPremiereFramePlayer {
   playerID: string;
   displayName: string;
   tilesOwned: number;
+  smallID: number;
+  /** Other players' `smallID`s this player currently holds an active alliance with — the same live diplomatic state already visible on the map. */
+  allies: readonly number[];
+  /** Other players' `smallID`s this player has recently targeted for attack (mirrors the core engine's own `targetDuration` "at war" window). */
+  targets: readonly number[];
 }
 
 /** Continuous starvation must outlive this before "Buffering live…" shows. */
@@ -4925,6 +5174,9 @@ const MAX_FRAME_BOOKKEEPING_DRIFT_STRIKES = 3;
 
 /** Newest-first entries kept for the overlay's battle feed. */
 const MAX_WAR_FEED_ENTRIES = 8;
+/** Alliance/betrayal/first-strike/elimination are rare relative to attacks/chat, so a generous cap is never actually reached in practice; it exists only as a hard ceiling. */
+const MAX_WAR_ROOM_EVENTS = 64;
+const MAX_TIMELINE_MARKERS = 128;
 
 interface ReplayPremiereFrame {
   sequence: number | null;
@@ -5339,6 +5591,15 @@ function preRevealManifest(
   return manifest !== null && "serverNow" in manifest ? manifest : null;
 }
 
+/** Bounded (mirrors the 64-player frame cap) list of valid small-integer player ids. */
+function isSmallIdArray(value: unknown): value is readonly number[] {
+  return (
+    Array.isArray(value) &&
+    value.length <= 64 &&
+    value.every((id) => Number.isSafeInteger(id) && id >= 0)
+  );
+}
+
 function parseReplayPremiereFrame(value: unknown): ReplayPremiereFrame | null {
   if (!isRecord(value)) return null;
   const sequence = value.sequence;
@@ -5356,15 +5617,21 @@ function parseReplayPremiereFrame(value: unknown): ReplayPremiereFrame | null {
   }
   const parsedPlayers: ReplayPremiereFramePlayer[] = [];
   for (const player of players) {
+    if (!isRecord(player)) return null;
+    const allies = player.allies;
+    const targets = player.targets;
     if (
-      !isRecord(player) ||
       typeof player.playerID !== "string" ||
       !OPAQUE_ID_PATTERN.test(player.playerID) ||
       typeof player.displayName !== "string" ||
       player.displayName.length === 0 ||
       player.displayName.length > 256 ||
       !Number.isSafeInteger(player.tilesOwned) ||
-      Number(player.tilesOwned) < 0
+      Number(player.tilesOwned) < 0 ||
+      !Number.isSafeInteger(player.smallID) ||
+      Number(player.smallID) < 0 ||
+      !isSmallIdArray(allies) ||
+      !isSmallIdArray(targets)
     ) {
       return null;
     }
@@ -5372,6 +5639,9 @@ function parseReplayPremiereFrame(value: unknown): ReplayPremiereFrame | null {
       playerID: player.playerID,
       displayName: player.displayName,
       tilesOwned: Number(player.tilesOwned),
+      smallID: Number(player.smallID),
+      allies,
+      targets,
     });
   }
   return {

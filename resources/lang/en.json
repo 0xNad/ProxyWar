@@ -1097,6 +1097,8 @@
     "war_chat": "{actor} → {target}: {message}",
     "war_chat_all": "{actor}: {message}",
     "war_turn": "t{turn}",
+    "timeline_match_start": "Match begins",
+    "timeline_match_finish": "Match finishes",
     "marker_with_count": "{marker} — marked {count} times by you",
     "community_marker_with_count": "{marker} — {count} accepted community marks",
     "marker_confirmed": "Your mark is saved: {marker} at turn {turn}",
@@ -1352,7 +1354,14 @@
     "headline_tag_betrayal": "Betrayal",
     "headline_tag_elimination": "Elimination",
     "headline_tag_first_strike": "First strike",
-    "standings_more": "+{count} more"
+    "standings_more": "+{count} more",
+    "event_spawn": "{actor} enters the match",
+    "event_alliance_formed": "{actor} and {target} form an alliance",
+    "event_eliminated": "{actor} is eliminated",
+    "event_nuke": "{actor} escalates nuclear pressure",
+    "event_nuke_target": "{actor} escalates nuclear pressure against {target}",
+    "event_plan_change": "{actor} shifts plan to {plan}",
+    "timeline_finish": "Match ends"
   },
   "error_modal": {
     "crashed": "Game crashed!",

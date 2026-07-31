@@ -29,6 +29,7 @@ afterEach(() => {
   }
   document.body.innerHTML = "";
   vi.restoreAllMocks();
+  vi.unstubAllGlobals();
 });
 
 describe("ReplayPremiereOverlay", () => {
@@ -1496,6 +1497,237 @@ describe("results summary panel", () => {
   });
 });
 
+describe("broadcast composition regions (Stage 4 item 1)", () => {
+  it("renders the competitor rail, war room feed, and timeline for a live playing premiere", () => {
+    const handle = mount(
+      makeModel({
+        state: "playing",
+        releasedSequence: 200,
+        currentTurn: 200,
+        competitorRailSeats: [
+          {
+            seatId: "seat-a",
+            playerName: "Atlas Prime",
+            territoryPercent: 60,
+            inMatchRank: 1,
+            alive: true,
+            allies: ["Borealis"],
+            wars: [],
+          },
+          {
+            seatId: "seat-b",
+            playerName: "Borealis",
+            territoryPercent: 40,
+            inMatchRank: 2,
+            alive: false,
+            allies: ["Atlas Prime"],
+            wars: [],
+          },
+        ],
+        warRoomEvents: [
+          {
+            id: "wr-1",
+            kind: "alliance",
+            turn: 50,
+            sequence: 100,
+            headline: "Atlas Prime and Borealis formed an alliance",
+            publicReason: null,
+            participants: ["Atlas Prime", "Borealis"],
+            expandedDetail: null,
+          },
+        ],
+        timelineMarkers: [
+          { kind: "spawn", turn: 0, sequence: 0, label: "Match begins" },
+          {
+            kind: "alliance",
+            turn: 50,
+            sequence: 100,
+            label: "Atlas Prime and Borealis formed an alliance",
+          },
+        ],
+        totalTurns: 200,
+        maxSeekableTurn: 200,
+      }),
+    );
+
+    const rail = handle.element.querySelector(".broadcast-rail");
+    expect(rail).not.toBeNull();
+    expect(rail?.textContent).toContain("Atlas Prime");
+    expect(rail?.textContent).toContain("Borealis");
+    const entries = rail?.querySelectorAll(".broadcast-rail-entry") ?? [];
+    expect(entries).toHaveLength(2);
+    expect(entries[1].textContent).toContain("broadcast.rail_eliminated");
+    expect(entries[0].textContent).not.toContain("broadcast.rail_eliminated");
+
+    const warRoom = handle.element.querySelector(".broadcast-war-room");
+    expect(warRoom).not.toBeNull();
+    expect(warRoom?.textContent).toContain(
+      "Atlas Prime and Borealis formed an alliance",
+    );
+
+    const timeline = handle.element.querySelector(".broadcast-timeline");
+    expect(timeline).not.toBeNull();
+    expect(
+      timeline?.querySelectorAll(".broadcast-timeline-marker"),
+    ).toHaveLength(2);
+  });
+
+  it("never makes a live Premiere timeline marker beyond the released turn boundary clickable", () => {
+    const onSeek = vi.fn();
+    const handle = mount(
+      makeModel({
+        state: "playing",
+        releasedSequence: 100,
+        currentTurn: 100,
+        timelineMarkers: [
+          { kind: "spawn", turn: 0, sequence: 0, label: "Match begins" },
+          {
+            kind: "elimination",
+            turn: 500,
+            sequence: 900,
+            label: "Beta eliminated",
+          },
+        ],
+        totalTurns: 100,
+        maxSeekableTurn: 100,
+      }),
+      { onSeek },
+    );
+    const markers = handle.element.querySelectorAll(
+      ".broadcast-timeline-marker",
+    );
+    expect(markers).toHaveLength(2);
+    expect(markers[0].tagName).toBe("BUTTON");
+    // Beyond the released boundary: a plain SPAN, never a clickable BUTTON —
+    // the literal enforcement of "never navigable past the live edge during
+    // a Premiere" (spec Stage 4 item 2).
+    expect(markers[1].tagName).toBe("SPAN");
+    expect((markers[1] as HTMLElement).dataset.seekable).toBe("false");
+    (markers[1] as HTMLElement).click();
+    expect(onSeek).not.toHaveBeenCalled();
+  });
+
+  it("an archived/revealed rewatch gets unrestricted (Full-Replay-style) seeking", () => {
+    const onSeek = vi.fn();
+    const handle = mount(
+      makeModel({
+        state: "archived",
+        releasedSequence: 999,
+        reveal: { outcome: "winner", winnerSeatId: "seat-a" },
+        timelineMarkers: [
+          { kind: "finish", turn: 5000, sequence: 999, label: "Match finishes" },
+        ],
+        totalTurns: 5000,
+        maxSeekableTurn: null,
+      }),
+      { onSeek },
+    );
+    const marker = handle.element.querySelector<HTMLElement>(
+      ".broadcast-timeline-marker",
+    );
+    expect(marker?.tagName).toBe("BUTTON");
+    expect(marker?.dataset.seekable).toBe("true");
+    marker?.click();
+    expect(onSeek).toHaveBeenCalledWith(5000);
+  });
+
+  it("resolves registered agent identity into the rail once fetched, and degrades an unmatched seat to its raw name", async () => {
+    const fetchMock = vi.fn(async () => ({
+      ok: true,
+      json: async () => ({
+        schemaVersion: 1,
+        generatedAt: "2026-07-20T20:00:00.000Z",
+        lastGoodSyncAt: "2026-07-20T20:00:00.000Z",
+        stale: false,
+        feedStates: { championFeedStale: false, replayFeedStale: false },
+        league: {
+          id: "league-1",
+          name: "League",
+          description: null,
+          divisionName: "Open",
+          roundIntervalMinutes: null,
+          episodesPerRound: null,
+          currentRoundNumber: null,
+          currentRoundStatus: null,
+          scoreLabel: "Score",
+        },
+        builders: [],
+        agents: [
+          {
+            registered: true,
+            id: "agent-1",
+            slug: "atlas-prime",
+            playerName: "Atlas Prime",
+            displayName: "Atlas Prime",
+            shortCode: "ATL",
+            emblemSvg: "<svg></svg>",
+            primaryColor: "#112233",
+            secondaryColor: null,
+            tagline: null,
+            builderId: "builder-1",
+            builderDisplayName: "Daveey",
+            status: "verified",
+            standing: null,
+            activeVersion: {
+              publicVersionLabel: "v24",
+              source: "champion",
+              familyMismatch: false,
+            },
+            provenance: {
+              ratingPolicyLabel: null,
+              activeChampionPolicyLabel: null,
+            },
+          },
+        ],
+        versions: [],
+        rounds: [],
+        matches: [],
+        featuredMatches: [],
+        premieres: { live: null, latest: null },
+        links: { enterTheLeagueUrl: "", platformLabel: "", accountUrl: "" },
+      }),
+    }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const handle = mount(
+      makeModel({
+        state: "playing",
+        releasedSequence: 10,
+        currentTurn: 10,
+        competitorRailSeats: [
+          {
+            seatId: "seat-a",
+            playerName: "Atlas Prime",
+            territoryPercent: 50,
+            inMatchRank: 1,
+            alive: true,
+            allies: [],
+            wars: [],
+          },
+          {
+            seatId: "seat-b",
+            playerName: "Unregistered Bot",
+            territoryPercent: 50,
+            inMatchRank: 2,
+            alive: true,
+            allies: [],
+            wars: [],
+          },
+        ],
+      }),
+    );
+
+    await vi.waitFor(() => {
+      expect(handle.element.textContent).toContain("v24");
+    });
+    expect(handle.element.textContent).toContain(
+      "broadcast.rail_builder:name=Daveey",
+    );
+    // An unmatched/unregistered seat renders its raw name — never a fabricated identity.
+    expect(handle.element.textContent).toContain("Unregistered Bot");
+  });
+});
+
 function mount(
   model: ReplayPremiereOverlayModel,
   callbacks: ReplayPremiereOverlayCallbacks = {},
@@ -1566,6 +1798,11 @@ function makeModel(
     ambient: false,
     canMark: true,
     canExportCounterChallenge: false,
+    competitorRailSeats: [],
+    warRoomEvents: [],
+    timelineMarkers: [],
+    totalTurns: 1,
+    maxSeekableTurn: 0,
     ...overrides,
   };
 }

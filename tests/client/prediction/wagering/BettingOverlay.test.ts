@@ -37,6 +37,11 @@ function model(
     releasedSequence: 0,
     checkpoints: [] as unknown as ReplayPremiereOverlayModel["checkpoints"],
     ambient: false,
+    competitorRailSeats: [],
+    warRoomEvents: [],
+    timelineMarkers: [],
+    totalTurns: 1,
+    maxSeekableTurn: 0,
     ...overrides,
   };
 }
