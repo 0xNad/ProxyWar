@@ -1,10 +1,10 @@
 import { promises as fs } from "node:fs";
 import path from "node:path";
 import {
+  addRetentionPinOwner,
   readCoworldLeagueRetentionPinManifest,
+  removeRetentionPinOwner,
   retentionReferencesFromEpisodes,
-  writeCoworldLeagueRetentionPinManifest,
-  type CoworldLeagueRetentionPin,
 } from "./CoworldLeagueArtifactRetention";
 import type { CoworldLeagueEpisodeRow } from "./CoworldLeagueSiteWriter";
 import type { FeaturedMatch } from "./FeaturedMatch";
@@ -15,12 +15,20 @@ import type { FeaturedMatch } from "./FeaturedMatch";
  * run bundle + cached `.replay`) must survive `coworld-league-prune.ts`'s
  * LRU cleanup for as long as its `/match/:matchId` page is live. This
  * module is the ONLY place that adds or removes a Featured Match's claim —
- * no second pinning system, no direct artifact deletion, ever: it exclusively
- * reads/writes `deploy/coworld-league-retention-pins.json` (or
- * `PROXYWAR_LEAGUE_RETENTION_PINS`) via `CoworldLeagueArtifactRetention.ts`'s
- * shared manifest I/O — the SAME file `replay-premiere-loop.ts`'s own
- * `pinHoldArtifacts`/`unpinHoldArtifacts` already write for the live
- * premiere hold's own (shorter, hold-duration) claim.
+ * no second pinning system, no direct artifact deletion, ever: it
+ * exclusively reads/writes `deploy/coworld-league-retention-pins.json` (or
+ * `PROXYWAR_LEAGUE_RETENTION_PINS`) via
+ * `CoworldLeagueArtifactRetention.ts`'s shared
+ * `addRetentionPinOwner`/`removeRetentionPinOwner` — the SAME atomic,
+ * multi-owner-safe primitive `replay-premiere-loop.ts`'s own
+ * `pinHoldArtifacts`/`unpinHoldArtifacts` use for the live premiere hold's
+ * own (shorter, hold-duration) claim on the identical file. See that
+ * module's own doc for exactly why a bespoke per-caller read-modify-write
+ * is unsafe here (two real, opposite-direction bugs were found and fixed
+ * in this session before this module reached its current form) — this
+ * module now carries NO manifest-mutation logic of its own, only the
+ * "what is my own owner tag" and "what publicRunKey does this episode
+ * resolve to" concerns.
  *
  * --- Scope traced before writing this: what actually consumes a pin ---
  *
@@ -37,34 +45,11 @@ import type { FeaturedMatch } from "./FeaturedMatch";
  * a Featured Match's public artifacts must never extend the private
  * source's lifetime; it doesn't, because this module writes to a different
  * file consumed by a different reclaimer entirely.
- *
- * --- Cooperative ownership: why pins carry a `;`-joined reason list ---
- *
- * `parseCoworldLeagueRetentionPins` (the schema's own validator, reused by
- * this module's writer) REJECTS a manifest with two pins sharing the same
- * `episodeRequestId` or `publicRunKey` — one entry per artifact, always.
- * But an episode can legitimately need protection from TWO independent,
- * differently-timed owners: `pinHoldArtifacts`'s own premiere-hold claim
- * (alive only for the admission's own duration — released the moment the
- * premiere reveals) and this module's Featured Match claim (alive for as
- * long as the operator keeps the record featured, independent of the
- * premiere hold's own release timing). Rather than a second file, this
- * module makes ONE pin entry cooperatively owned: `reason` is a `;`-joined
- * list of owner tags (`"premiere-hold:<premiereId>;featured-match:<matchId>"`).
- * `syncFeaturedMatchRetentionPin` APPENDS its own tag to an existing pin's
- * reason (never overwriting another owner's tag), and
- * `removeFeaturedMatchRetentionPin` only strips ITS OWN tag, deleting the
- * pin entry entirely only once no tag remains. This also means
- * `pinHoldArtifacts`'s existing `unpinHoldArtifacts` (which only strips a
- * pin whose reason STARTS WITH its own `"premiere-hold"` prefix) correctly
- * no-ops once a Featured Match tag has been appended — the reason string no
- * longer starts with "premiere-hold" alone, so the hold's own release can
- * never prematurely evict a still-featured match's protection.
  */
 
 const FEATURED_MATCH_REASON_PREFIX = "featured-match";
 
-function featuredMatchTag(matchId: string): string {
+function featuredMatchOwnerTag(matchId: string): string {
   return `${FEATURED_MATCH_REASON_PREFIX}:${matchId}`;
 }
 
@@ -109,33 +94,6 @@ async function readLiveMirrorEpisodes(
 }
 
 /**
- * PREPENDS the tag (not appends). This matters: `unpinHoldArtifacts` in
- * `replay-premiere-loop.ts` checks `pin.reason.startsWith("premiere-hold")`
- * — a plain prefix test that does not care what comes AFTER the prefix.
- * Appending `;featured-match:...` after an existing `"premiere-hold:..."`
- * reason would leave the combined string still starting with
- * "premiere-hold", so the hold's own release would still evict it — the
- * exact bug this module exists to avoid. Prepending guarantees the
- * combined reason starts with THIS module's own tag instead, so only
- * `removeFeaturedMatchRetentionPin`'s own targeted removal can strip it;
- * `withRemovedTag` below restores the exact original single-owner string
- * once this module's tag is removed, so the other owner's own prefix
- * check works normally again the moment this claim ends.
- */
-function withAppendedTag(reason: string, tag: string): string {
-  const tags = reason.split(";").map((entry) => entry.trim());
-  return tags.includes(tag) ? reason : [tag, ...tags].join(";");
-}
-
-function withRemovedTag(reason: string, tag: string): string | null {
-  const remaining = reason
-    .split(";")
-    .map((entry) => entry.trim())
-    .filter((entry) => entry.length > 0 && entry !== tag);
-  return remaining.length === 0 ? null : remaining.join(";");
-}
-
-/**
  * Emits or extends a Featured Match's retention pin. Best-effort by design
  * (never throws) — called from `premiere:publish`'s success path (where a
  * pin failure must never fail the publish itself) AND opportunistically
@@ -150,7 +108,8 @@ function withRemovedTag(reason: string, tag: string): string | null {
  *  - the record's `episodeRequestId` is null (nothing to key a pin on), or
  *  - no matching episode exists in the live mirror yet — the run bundle
  *    this pin would protect doesn't exist on disk yet either, so there is
- *    nothing at risk of being pruned in the meantime.
+ *    nothing at risk of being pruned in the meantime, or
+ *  - this match already owns the pin (idempotent).
  */
 export async function syncFeaturedMatchRetentionPin(
   match: Pick<FeaturedMatch, "matchId" | "episodeRequestId">,
@@ -170,35 +129,11 @@ export async function syncFeaturedMatchRetentionPin(
     );
     if (publicRunKey === undefined) return false;
 
-    const tag = featuredMatchTag(match.matchId);
-    const manifest = await readCoworldLeagueRetentionPinManifest(
-      pinManifestPath,
-    );
-    const existing = manifest.pins.find(
-      (pin) => pin.episodeRequestId === match.episodeRequestId,
-    );
-    if (existing !== undefined) {
-      const nextReason = withAppendedTag(existing.reason, tag);
-      if (nextReason === existing.reason) return false; // already owns it
-      const nextPins = manifest.pins.map((pin) =>
-        pin === existing ? { ...pin, reason: nextReason } : pin,
-      );
-      await writeCoworldLeagueRetentionPinManifest(pinManifestPath, {
-        schemaVersion: 1,
-        pins: nextPins,
-      });
-      return true;
-    }
-    const newPin: CoworldLeagueRetentionPin = {
+    return await addRetentionPinOwner(pinManifestPath, {
       episodeRequestId: match.episodeRequestId,
       publicRunKey,
-      reason: tag,
-    };
-    await writeCoworldLeagueRetentionPinManifest(pinManifestPath, {
-      schemaVersion: 1,
-      pins: [...manifest.pins, newPin],
+      ownerTag: featuredMatchOwnerTag(match.matchId),
     });
-    return true;
   } catch {
     // Best-effort: a broken pin write must never fail the caller (an
     // operator publish action, or a spectator-facing reconcile-on-read).
@@ -208,9 +143,9 @@ export async function syncFeaturedMatchRetentionPin(
 
 /**
  * Removes a Featured Match's retention tag. Never deletes an artifact
- * directly — only strips this module's own tag from the shared pin's
- * `reason`, leaving any other owner's tag (e.g. a still-live premiere
- * hold) fully intact. Best-effort: never throws.
+ * directly — only strips this module's own owner tag from the shared
+ * pin's `reason`, leaving any other owner's tag (e.g. a still-live
+ * premiere hold) fully intact. Best-effort: never throws.
  */
 export async function removeFeaturedMatchRetentionPin(
   matchId: string,
@@ -219,27 +154,26 @@ export async function removeFeaturedMatchRetentionPin(
   try {
     const pinManifestPath =
       options.pinManifestPath ?? resolvePinManifestPath();
-    const tag = featuredMatchTag(matchId);
+    // episodeRequestId isn't known at this call site (premiere:cancel only
+    // has matchId), so this needs to find the pin owning this tag rather
+    // than address it by episodeRequestId directly — but
+    // removeRetentionPinOwner is keyed by episodeRequestId. Resolve it by
+    // scanning the manifest for the entry carrying this owner tag.
     const manifest = await readCoworldLeagueRetentionPinManifest(
       pinManifestPath,
     );
-    let changed = false;
-    const nextPins: CoworldLeagueRetentionPin[] = [];
-    for (const pin of manifest.pins) {
-      if (!pin.reason.split(";").map((entry) => entry.trim()).includes(tag)) {
-        nextPins.push(pin);
-        continue;
-      }
-      changed = true;
-      const nextReason = withRemovedTag(pin.reason, tag);
-      if (nextReason !== null) nextPins.push({ ...pin, reason: nextReason });
-    }
-    if (!changed) return false;
-    await writeCoworldLeagueRetentionPinManifest(pinManifestPath, {
-      schemaVersion: 1,
-      pins: nextPins,
+    const tag = featuredMatchOwnerTag(matchId);
+    const owning = manifest.pins.find((pin) =>
+      pin.reason
+        .split(";")
+        .map((entry) => entry.trim())
+        .includes(tag),
+    );
+    if (owning === undefined) return false;
+    return await removeRetentionPinOwner(pinManifestPath, {
+      episodeRequestId: owning.episodeRequestId,
+      ownerTag: tag,
     });
-    return true;
   } catch {
     return false;
   }

@@ -7,6 +7,10 @@ import {
   syncFeaturedMatchRetentionPin,
 } from "../../src/server/agents/FeaturedMatchRetentionPin";
 import { readCoworldLeagueRetentionPinManifest } from "../../src/server/agents/CoworldLeagueArtifactRetention";
+import {
+  pinHoldArtifacts,
+  unpinHoldArtifacts,
+} from "../../src/scripts/replay-premiere-loop";
 import type { CoworldLeagueEpisodeRow } from "../../src/server/agents/CoworldLeagueSiteWriter";
 
 let scratch: string;
@@ -117,24 +121,11 @@ describe("syncFeaturedMatchRetentionPin", () => {
     expect(changed).toBe(false);
   });
 
-  it("appends its tag to an existing pin from another owner (e.g. a live premiere hold) rather than creating a duplicate entry", async () => {
+  it("adds its tag to an existing pin from another owner (e.g. a live premiere hold, via the REAL pinHoldArtifacts) rather than creating a duplicate entry", async () => {
     await seedMirrorEpisodes([episode("ereq_x", "league-coworld-abc")]);
-    // Simulate a pre-existing premiere-hold pin, exactly as
-    // replay-premiere-loop.ts's own pinHoldArtifacts would have written.
-    await fs.mkdir(path.dirname(pinManifestPath), { recursive: true });
-    await fs.writeFile(
-      pinManifestPath,
-      JSON.stringify({
-        schemaVersion: 1,
-        pins: [
-          {
-            episodeRequestId: "ereq_x",
-            publicRunKey: "league-coworld-abc",
-            reason: "premiere-hold:prem_abc",
-          },
-        ],
-      }),
-      "utf8",
+    await pinHoldArtifacts(
+      { publicRunKey: "league-coworld-abc", episodeRequestId: "ereq_x", premiereId: "prem_abc" },
+      { pinManifestPath },
     );
 
     const changed = await syncFeaturedMatchRetentionPin(
@@ -144,48 +135,33 @@ describe("syncFeaturedMatchRetentionPin", () => {
     expect(changed).toBe(true);
     const manifest = await readCoworldLeagueRetentionPinManifest(pinManifestPath);
     expect(manifest.pins).toHaveLength(1);
-    expect(manifest.pins[0].reason).toBe(
-      "featured-match:feat_x;premiere-hold:prem_abc",
+    const owners = manifest.pins[0].reason.split(";").map((s) => s.trim());
+    expect(owners).toEqual(
+      expect.arrayContaining(["featured-match:feat_x", "premiere-hold:prem_abc"]),
     );
   });
 
-  it("cooperative ownership survives the OTHER owner's own removal logic (mirrors unpinHoldArtifacts' startsWith('premiere-hold') filter)", async () => {
+  it("cooperative ownership survives the OTHER owner's own release (the REAL unpinHoldArtifacts) — the artifact stays protected by this module's own tag", async () => {
     await seedMirrorEpisodes([episode("ereq_x", "league-coworld-abc")]);
-    await fs.mkdir(path.dirname(pinManifestPath), { recursive: true });
-    await fs.writeFile(
-      pinManifestPath,
-      JSON.stringify({
-        schemaVersion: 1,
-        pins: [
-          {
-            episodeRequestId: "ereq_x",
-            publicRunKey: "league-coworld-abc",
-            reason: "premiere-hold:prem_abc",
-          },
-        ],
-      }),
-      "utf8",
+    await pinHoldArtifacts(
+      { publicRunKey: "league-coworld-abc", episodeRequestId: "ereq_x", premiereId: "prem_abc" },
+      { pinManifestPath },
     );
     await syncFeaturedMatchRetentionPin(
       { matchId: "feat_x", episodeRequestId: "ereq_x" },
       options(),
     );
 
-    // Simulate replay-premiere-loop.ts's unpinHoldArtifacts firing on hold
-    // release: it only strips a pin whose reason STARTS WITH
-    // "premiere-hold" for this episodeRequestId. After the append above,
-    // the combined reason no longer satisfies that prefix check.
-    const manifest = await readCoworldLeagueRetentionPinManifest(pinManifestPath);
-    const PREMIERE_PIN_REASON_PREFIX = "premiere-hold";
-    const remaining = manifest.pins.filter(
-      (pin) =>
-        !(
-          pin.episodeRequestId === "ereq_x" &&
-          pin.reason.startsWith(PREMIERE_PIN_REASON_PREFIX)
-        ),
+    // The premiere hold releases (its own real code path) while the match
+    // is still featured.
+    await unpinHoldArtifacts(
+      { publicRunKey: "league-coworld-abc", episodeRequestId: "ereq_x", premiereId: "prem_abc" },
+      { pinManifestPath },
     );
-    expect(remaining).toHaveLength(1);
-    expect(remaining[0].reason).toContain("featured-match:feat_x");
+
+    const manifest = await readCoworldLeagueRetentionPinManifest(pinManifestPath);
+    expect(manifest.pins).toHaveLength(1);
+    expect(manifest.pins[0].reason).toBe("featured-match:feat_x");
   });
 });
 

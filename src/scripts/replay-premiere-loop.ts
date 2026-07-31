@@ -5,10 +5,9 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import {
+  addRetentionPinOwner,
   minimumAvailableDiskBytes,
-  parseCoworldLeagueRetentionPins,
-  type CoworldLeagueRetentionPin,
-  type CoworldLeagueRetentionPinManifest,
+  removeRetentionPinOwner,
 } from "../server/agents/CoworldLeagueArtifactRetention";
 import {
   LATEST_PREMIERE_POINTER_SCHEMA_VERSION,
@@ -787,100 +786,51 @@ function parseRawReplayFacts(
 }
 
 // ---------------------------------------------------------------------------
-// Retention pin manifest (atomic read-modify-write, validated before write)
+// Retention pin manifest — this hold's own OWNER TAG within the shared,
+// possibly multi-owner pin manifest (see CoworldLeagueArtifactRetention.ts's
+// `addRetentionPinOwner`/`removeRetentionPinOwner` doc for why a bespoke
+// read-modify-write here is exactly the bug that mechanism exists to
+// prevent — a Featured Match's own retention claim on the SAME artifact
+// must survive independently of this hold's own release, and vice versa).
 // ---------------------------------------------------------------------------
-
-async function readPinManifest(
-  pinManifestPath: string,
-): Promise<CoworldLeagueRetentionPinManifest> {
-  try {
-    const raw: unknown = JSON.parse(await fs.readFile(pinManifestPath, "utf8"));
-    if (isRecord(raw) && raw.schemaVersion === 1 && Array.isArray(raw.pins)) {
-      return raw as unknown as CoworldLeagueRetentionPinManifest;
-    }
-    throw new Error("retention pin manifest is malformed");
-  } catch (error) {
-    if (isErrno(error, "ENOENT")) {
-      return { schemaVersion: 1, pins: [] };
-    }
-    throw error;
-  }
-}
-
-async function writePinManifest(
-  pinManifestPath: string,
-  manifest: CoworldLeagueRetentionPinManifest,
-): Promise<void> {
-  // Fail closed: never write a manifest the mirror could not read, or a mirror
-  // sync would break on the next tick.
-  parseCoworldLeagueRetentionPins(manifest, pinManifestPath);
-  await fs.mkdir(path.dirname(pinManifestPath), { recursive: true });
-  const temporaryPath = `${pinManifestPath}.${process.pid}.${randomUUID()}.tmp`;
-  try {
-    await fs.writeFile(
-      temporaryPath,
-      `${JSON.stringify(manifest, null, 2)}\n`,
-      "utf8",
-    );
-    await fs.rename(temporaryPath, pinManifestPath);
-  } catch (error) {
-    await fs.rm(temporaryPath, { force: true }).catch(() => undefined);
-    throw error;
-  }
-}
 
 const PREMIERE_PIN_REASON_PREFIX = "premiere-hold";
 
-async function pinHoldArtifacts(
-  hold: LoopHoldState,
-  config: LoopConfig,
+/** Exported (with tests/scripts/replay-premiere-loop-pins.test.ts) so the cross-writer ownership matrix against `FeaturedMatchRetentionPin.ts` exercises this REAL production code path, not a stand-in. */
+export function premiereHoldOwnerTag(premiereId: string): string {
+  return `${PREMIERE_PIN_REASON_PREFIX}:${premiereId}`;
+}
+
+/** Narrowed to exactly the fields this function reads — the internal call site still passes a full `LoopHoldState`/`LoopConfig` (structurally compatible), while a test can build a minimal fixture instead of the full, large hold/config shape. */
+export async function pinHoldArtifacts(
+  hold: Pick<LoopHoldState, "publicRunKey" | "episodeRequestId" | "premiereId">,
+  config: Pick<LoopConfig, "pinManifestPath">,
 ): Promise<void> {
   if (!isManagedPublicRunKey(hold.publicRunKey)) {
     log(`skipping pin for unmanaged run key ${hold.publicRunKey}`);
     return;
   }
-  const manifest = await readPinManifest(config.pinManifestPath);
-  if (
-    manifest.pins.some(
-      (pin) =>
-        pin.episodeRequestId === hold.episodeRequestId ||
-        pin.publicRunKey === hold.publicRunKey,
-    )
-  ) {
-    return;
-  }
-  const pin: CoworldLeagueRetentionPin = {
+  const changed = await addRetentionPinOwner(config.pinManifestPath, {
     episodeRequestId: hold.episodeRequestId,
     publicRunKey: hold.publicRunKey,
-    reason: `${PREMIERE_PIN_REASON_PREFIX}:${hold.premiereId}`,
-  };
-  await writePinManifest(config.pinManifestPath, {
-    schemaVersion: 1,
-    pins: [...manifest.pins, pin],
+    ownerTag: premiereHoldOwnerTag(hold.premiereId),
   });
-  log(`pinned ${hold.publicRunKey} for premiere ${hold.premiereId}`);
+  if (changed) {
+    log(`pinned ${hold.publicRunKey} for premiere ${hold.premiereId}`);
+  }
 }
 
-async function unpinHoldArtifacts(
-  hold: LoopHoldState,
-  config: LoopConfig,
+export async function unpinHoldArtifacts(
+  hold: Pick<LoopHoldState, "publicRunKey" | "episodeRequestId" | "premiereId">,
+  config: Pick<LoopConfig, "pinManifestPath">,
 ): Promise<void> {
-  const manifest = await readPinManifest(config.pinManifestPath);
-  const remaining = manifest.pins.filter(
-    (pin) =>
-      !(
-        pin.episodeRequestId === hold.episodeRequestId &&
-        pin.reason.startsWith(PREMIERE_PIN_REASON_PREFIX)
-      ),
-  );
-  if (remaining.length === manifest.pins.length) {
-    return;
-  }
-  await writePinManifest(config.pinManifestPath, {
-    schemaVersion: 1,
-    pins: remaining,
+  const changed = await removeRetentionPinOwner(config.pinManifestPath, {
+    episodeRequestId: hold.episodeRequestId,
+    ownerTag: premiereHoldOwnerTag(hold.premiereId),
   });
-  log(`unpinned ${hold.publicRunKey}`);
+  if (changed) {
+    log(`unpinned ${hold.publicRunKey}`);
+  }
 }
 
 // ---------------------------------------------------------------------------

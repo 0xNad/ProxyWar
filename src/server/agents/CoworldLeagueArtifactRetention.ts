@@ -314,6 +314,105 @@ export async function writeCoworldLeagueRetentionPinManifest(
   }
 }
 
+/**
+ * Two independent writers share one retention-pin manifest per artifact:
+ * `replay-premiere-loop.ts`'s own premiere-hold claim (alive only for an
+ * admission's own duration) and a Featured Match's claim
+ * (`FeaturedMatchRetentionPin.ts`, alive for as long as the operator keeps
+ * a record featured, independent of the hold's own release timing). The
+ * schema allows only ONE pin entry per `episodeRequestId` — never two
+ * competing entries — so multi-owner protection has to live inside that
+ * one entry's `reason` field, as an EXACT-MATCH set of owner tags
+ * (`;`-joined). These two functions are the ONLY correct way to mutate
+ * that set: idempotent add/remove of exactly ONE tag, atomically, leaving
+ * every other owner's tag completely untouched. An artifact stays
+ * protected as long as ANY tag remains; the pin entry itself is removed
+ * only once the LAST tag is gone.
+ *
+ * An earlier version of this file had each owner run its own bespoke
+ * read-modify-write (a "return early if ANY pin already claims this key"
+ * short-circuit in the premiere-hold writer, a prefix-`startsWith` removal
+ * check that only recognized its own reason format, and a separate
+ * prepend-vs-append tag-string convention in the Featured Match writer).
+ * That produced two real, opposite-direction bugs depending on write
+ * order: (a) a Featured Match pin written FIRST made the premiere-hold
+ * writer's dedup check see "already pinned" and skip recording its own
+ * ownership entirely — so a later Featured Match cancellation could strip
+ * the ONLY pin while a live hold still depended on it; (b) a premiere-hold
+ * pin written first, once a Featured Match tag was combined into the same
+ * reason, could never again be recognized/removed by the hold's own
+ * release path — an orphaned tag that nothing would ever clean up. Both
+ * writers MUST go through these two functions, not their own logic.
+ */
+export async function addRetentionPinOwner(
+  pinManifestPath: string,
+  entry: { episodeRequestId: string; publicRunKey: string; ownerTag: string },
+): Promise<boolean> {
+  const manifest = await readCoworldLeagueRetentionPinManifest(pinManifestPath);
+  const existingIndex = manifest.pins.findIndex(
+    (pin) => pin.episodeRequestId === entry.episodeRequestId,
+  );
+  if (existingIndex === -1) {
+    await writeCoworldLeagueRetentionPinManifest(pinManifestPath, {
+      schemaVersion: 1,
+      pins: [
+        ...manifest.pins,
+        {
+          episodeRequestId: entry.episodeRequestId,
+          publicRunKey: entry.publicRunKey,
+          reason: entry.ownerTag,
+        },
+      ],
+    });
+    return true;
+  }
+  const existing = manifest.pins[existingIndex];
+  const owners = existing.reason.split(";").map((tag) => tag.trim());
+  if (owners.includes(entry.ownerTag)) return false; // already owns it
+  const nextPins = manifest.pins.slice();
+  nextPins[existingIndex] = {
+    ...existing,
+    reason: [...owners, entry.ownerTag].join(";"),
+  };
+  await writeCoworldLeagueRetentionPinManifest(pinManifestPath, {
+    schemaVersion: 1,
+    pins: nextPins,
+  });
+  return true;
+}
+
+export async function removeRetentionPinOwner(
+  pinManifestPath: string,
+  entry: { episodeRequestId: string; ownerTag: string },
+): Promise<boolean> {
+  const manifest = await readCoworldLeagueRetentionPinManifest(pinManifestPath);
+  const existingIndex = manifest.pins.findIndex(
+    (pin) => pin.episodeRequestId === entry.episodeRequestId,
+  );
+  if (existingIndex === -1) return false;
+  const existing = manifest.pins[existingIndex];
+  const owners = existing.reason
+    .split(";")
+    .map((tag) => tag.trim())
+    .filter((tag) => tag.length > 0);
+  if (!owners.includes(entry.ownerTag)) return false;
+  const remainingOwners = owners.filter((tag) => tag !== entry.ownerTag);
+  const nextPins = manifest.pins.slice();
+  if (remainingOwners.length === 0) {
+    nextPins.splice(existingIndex, 1);
+  } else {
+    nextPins[existingIndex] = {
+      ...existing,
+      reason: remainingOwners.join(";"),
+    };
+  }
+  await writeCoworldLeagueRetentionPinManifest(pinManifestPath, {
+    schemaVersion: 1,
+    pins: nextPins,
+  });
+  return true;
+}
+
 function isJsonObject(value: unknown): value is JsonObject {
   return value !== null && typeof value === "object" && !Array.isArray(value);
 }
