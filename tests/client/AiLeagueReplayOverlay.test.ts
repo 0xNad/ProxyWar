@@ -1,5 +1,9 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { mountAiLeagueReplayOverlay } from "../../src/client/AiLeagueReplayOverlay";
+import {
+  BROADCAST_RAIL_FOLLOWED_CHANGE_EVENT,
+  BROADCAST_RAIL_FOLLOW_EVENT,
+} from "../../src/client/graphics/layers/PointOfViewSelector";
 import type { PublicAgent } from "../../src/client/publicapp/ReadModelSchema";
 import {
   initialReplayClipRenderableThroughTurn,
@@ -1675,7 +1679,7 @@ describe("AiLeagueReplayOverlay", () => {
           { playerID: "p2", smallID: 2, username: "Blitz", tilesOwned: 40 },
         ]);
 
-        const rail = document.querySelector("[data-ai-league-competitor-rail]");
+        const rail = document.querySelector("[data-ai-league-broadcast-drawer]");
         expect(rail?.querySelectorAll(".broadcast-rail-entry")).toHaveLength(3);
 
         // Ghost never appears in a frame (eliminated before this replay's
@@ -1789,7 +1793,7 @@ describe("AiLeagueReplayOverlay", () => {
         },
       });
 
-      const warRoom = document.getElementById("ai-league-war-room");
+      const warRoom = document.querySelector(".broadcast-war-room");
       expect(warRoom).not.toBeNull();
       const items = warRoom?.querySelectorAll(".broadcast-war-room-item") ?? [];
       expect(items).toHaveLength(5);
@@ -1855,7 +1859,7 @@ describe("AiLeagueReplayOverlay", () => {
         },
       });
 
-      const timeline = document.getElementById("ai-league-timeline");
+      const timeline = document.querySelector(".broadcast-timeline");
       expect(timeline).not.toBeNull();
       const markers = timeline?.querySelectorAll(".broadcast-timeline-marker") ?? [];
       // spawn, alliance, first_strike, betrayal, nuke, elimination, finish.
@@ -1889,18 +1893,240 @@ describe("AiLeagueReplayOverlay", () => {
       expect(jumps).toEqual([1_000]);
     });
 
-    it("removes the War Room and timeline chrome on dispose", () => {
+    it("removes the broadcast drawer and lower-third host on dispose", () => {
       const runID = "broadcast-dispose-1";
       const overlay = mountAiLeagueReplayOverlay({
         runID,
         artifactBasePath: `/ai-league-runs/${runID}`,
         decisions: [],
       });
-      expect(document.getElementById("ai-league-war-room")).not.toBeNull();
-      expect(document.getElementById("ai-league-timeline")).not.toBeNull();
+      expect(document.querySelector(".broadcast-war-room")).not.toBeNull();
+      expect(document.querySelector(".broadcast-timeline")).not.toBeNull();
+      expect(document.getElementById("ai-league-lower-third-host")).not.toBeNull();
       overlay.dispose();
-      expect(document.getElementById("ai-league-war-room")).toBeNull();
-      expect(document.getElementById("ai-league-timeline")).toBeNull();
+      expect(document.querySelector("[data-ai-league-broadcast-drawer]")).toBeNull();
+      expect(document.querySelector(".broadcast-war-room")).toBeNull();
+      expect(document.querySelector(".broadcast-timeline")).toBeNull();
+    });
+
+    it("dispatches BROADCAST_RAIL_FOLLOW_EVENT with the clicked seat's player name", () => {
+      const runID = "broadcast-follow-1";
+      const follows: Array<string | null> = [];
+      document.addEventListener(BROADCAST_RAIL_FOLLOW_EVENT, (domEvent) => {
+        follows.push(
+          (domEvent as CustomEvent<{ playerName: string }>).detail.playerName,
+        );
+      });
+      mountAiLeagueReplayOverlay({
+        runID,
+        artifactBasePath: `/ai-league-runs/${runID}`,
+        decisions: [],
+        spectatorTelemetry: {
+          version: 1,
+          runID,
+          agents: [
+            {
+              agentID: "a1",
+              playerID: "p1",
+              username: "Atlas",
+              profile: "diplomatic",
+              colorIndex: 0,
+              finalTilesOwned: 60,
+              finalTroops: 1000,
+              isAlive: true,
+            },
+          ],
+          relationships: [],
+          events: [],
+          communicationThreads: [],
+          timelineBuckets: [],
+        },
+      });
+      frame(600, [
+        { playerID: "p1", smallID: 1, username: "Atlas", tilesOwned: 60 },
+      ]);
+      const seat = document.querySelector<HTMLButtonElement>(
+        ".broadcast-rail-select",
+      );
+      expect(seat).not.toBeNull();
+      seat?.click();
+      expect(follows).toEqual(["Atlas"]);
+    });
+
+    it("reflects BROADCAST_RAIL_FOLLOWED_CHANGE_EVENT as the rail's followed-seat highlight", () => {
+      const runID = "broadcast-followed-state-1";
+      mountAiLeagueReplayOverlay({
+        runID,
+        artifactBasePath: `/ai-league-runs/${runID}`,
+        decisions: [],
+        spectatorTelemetry: {
+          version: 1,
+          runID,
+          agents: [
+            {
+              agentID: "a1",
+              playerID: "p1",
+              username: "Atlas",
+              profile: "diplomatic",
+              colorIndex: 0,
+              finalTilesOwned: 60,
+              finalTroops: 1000,
+              isAlive: true,
+            },
+            {
+              agentID: "a2",
+              playerID: "p2",
+              username: "Blitz",
+              profile: "aggressive",
+              colorIndex: 1,
+              finalTilesOwned: 40,
+              finalTroops: 900,
+              isAlive: true,
+            },
+          ],
+          relationships: [],
+          events: [],
+          communicationThreads: [],
+          timelineBuckets: [],
+        },
+      });
+      frame(600, [
+        { playerID: "p1", smallID: 1, username: "Atlas", tilesOwned: 60 },
+        { playerID: "p2", smallID: 2, username: "Blitz", tilesOwned: 40 },
+      ]);
+      const entriesBefore = document.querySelectorAll(".broadcast-rail-entry");
+      expect(
+        [...entriesBefore].every(
+          (entry) => entry.getAttribute("data-followed") === "false",
+        ),
+      ).toBe(true);
+
+      document.dispatchEvent(
+        new CustomEvent(BROADCAST_RAIL_FOLLOWED_CHANGE_EVENT, {
+          detail: { playerName: "Blitz" },
+        }),
+      );
+
+      const atlasEntry = [
+        ...document.querySelectorAll(".broadcast-rail-entry"),
+      ].find((entry) => entry.textContent?.includes("Atlas"));
+      const blitzEntry = [
+        ...document.querySelectorAll(".broadcast-rail-entry"),
+      ].find((entry) => entry.textContent?.includes("Blitz"));
+      expect(atlasEntry?.getAttribute("data-followed")).toBe("false");
+      expect(blitzEntry?.getAttribute("data-followed")).toBe("true");
+      expect(
+        blitzEntry
+          ?.querySelector(".broadcast-rail-select")
+          ?.getAttribute("aria-pressed"),
+      ).toBe("true");
+    });
+
+    it("switches the active drawer tab and marks only that panel data-tab-active", () => {
+      const runID = "broadcast-drawer-tabs-1";
+      mountAiLeagueReplayOverlay({
+        runID,
+        artifactBasePath: `/ai-league-runs/${runID}`,
+        decisions: [],
+      });
+      const drawer = document.querySelector("[data-ai-league-broadcast-drawer]");
+      expect(
+        drawer?.querySelector('.broadcast-drawer-panel[data-tab-id="agents"]')
+          ?.getAttribute("data-tab-active"),
+      ).toBe("true");
+      // "events" relocates to the document.body-level portal at a desktop
+      // viewport (see mountAiLeagueBroadcastDrawer's own doc) — query
+      // globally rather than scoped under the drawer placeholder.
+      expect(
+        document
+          .querySelector('.broadcast-drawer-panel[data-tab-id="events"]')
+          ?.getAttribute("data-tab-active"),
+      ).toBe("false");
+
+      drawer
+        ?.querySelector<HTMLButtonElement>('.broadcast-drawer-tab[data-tab-id="events"]')
+        ?.click();
+
+      expect(
+        drawer?.querySelector('.broadcast-drawer-panel[data-tab-id="agents"]')
+          ?.getAttribute("data-tab-active"),
+      ).toBe("false");
+      expect(
+        document
+          .querySelector('.broadcast-drawer-panel[data-tab-id="events"]')
+          ?.getAttribute("data-tab-active"),
+      ).toBe("true");
+      expect(
+        drawer
+          ?.querySelector('.broadcast-drawer-tab[data-tab-id="events"]')
+          ?.getAttribute("aria-selected"),
+      ).toBe("true");
+    });
+
+    it("toggles analyst mode via the desktop header button, showing the same analysis panel content the drawer's Analysis tab renders", () => {
+      const runID = "broadcast-analyst-toggle-1";
+      mountAiLeagueReplayOverlay({
+        runID,
+        artifactBasePath: `/ai-league-runs/${runID}`,
+        decisions: [decisionFixture(1)],
+      });
+      const toggle = document.querySelector<HTMLButtonElement>(
+        "[data-ai-league-analyst-toggle]",
+      );
+      expect(toggle).not.toBeNull();
+      expect(document.body.classList.contains("ai-league-analyst-mode")).toBe(false);
+      expect(toggle?.getAttribute("aria-pressed")).toBe("false");
+      expect(
+        document.querySelector('.broadcast-drawer-panel[data-tab-id="analysis"].broadcast-analyst'),
+      ).not.toBeNull();
+
+      toggle?.click();
+      expect(document.body.classList.contains("ai-league-analyst-mode")).toBe(true);
+      expect(toggle?.getAttribute("aria-pressed")).toBe("true");
+
+      toggle?.click();
+      expect(document.body.classList.contains("ai-league-analyst-mode")).toBe(false);
+      expect(toggle?.getAttribute("aria-pressed")).toBe("false");
+    });
+
+    it("fires a lower-third pulse over the map when a new curated event arrives via hydrate", () => {
+      const runID = "broadcast-lower-third-1";
+      const overlay = mountAiLeagueReplayOverlay({
+        runID,
+        artifactBasePath: `/ai-league-runs/${runID}`,
+        decisions: [],
+        spectatorTelemetry: {
+          version: 1,
+          runID,
+          agents: [],
+          relationships: [],
+          events: [],
+          communicationThreads: [],
+          timelineBuckets: [],
+        },
+      });
+      const host = document.getElementById("ai-league-lower-third-host");
+      expect(host).not.toBeNull();
+      expect(host?.querySelector(".broadcast-lower-third")).toBeNull();
+
+      overlay.hydrate({
+        spectatorTelemetry: {
+          version: 1,
+          runID,
+          agents: [],
+          relationships: [],
+          events: [
+            event(1, 999, "elimination", "war", "a2", "Blitz", null, null, "Blitz is eliminated."),
+          ],
+          communicationThreads: [],
+          timelineBuckets: [],
+        },
+      });
+
+      const pulse = host?.querySelector(".broadcast-lower-third");
+      expect(pulse).not.toBeNull();
+      expect(pulse?.getAttribute("data-kind")).toBe("elimination");
+      expect(pulse?.getAttribute("role")).toBe("status");
     });
   });
 });

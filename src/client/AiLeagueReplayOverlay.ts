@@ -4,14 +4,28 @@ import {
   isAiLeagueNativeSpectatorUiEnabled,
 } from "./AiLeagueReplayMode";
 import {
+  LowerThirdController,
+  renderAnalystPanel,
+  renderBroadcastDrawer,
   renderCompetitorRail,
   renderMatchTimeline,
   renderWarRoomFeed,
+  type AnalystActionKindCount,
+  type AnalystDecisionRow,
+  type AnalystEventRow,
+  type AnalystPanelData,
+  type BroadcastDrawerTab,
+  type BroadcastDrawerTabId,
   type CompetitorRailEntry,
   type CuratedWarRoomEvent,
+  type LowerThirdEvent,
   type TimelineMarker,
   type TimelineMarkerKind,
 } from "./BroadcastComposition";
+import {
+  BROADCAST_RAIL_FOLLOWED_CHANGE_EVENT,
+  BROADCAST_RAIL_FOLLOW_EVENT,
+} from "./graphics/layers/PointOfViewSelector";
 import { fetchReadModel, type PublicAgent } from "./publicapp/ReadModelSchema";
 import {
   mountReplayScopedLeagueClipControl,
@@ -185,8 +199,9 @@ export function mountAiLeagueReplayOverlay(input: AiLeagueReplayOverlayInput) {
   document.getElementById("ai-league-replay-overlay")?.remove();
   document.getElementById("ai-league-social-transcript")?.remove();
   document.getElementById("ai-league-headline-event")?.remove();
-  document.getElementById("ai-league-war-room")?.remove();
-  document.getElementById("ai-league-timeline")?.remove();
+  document.getElementById("ai-league-lower-third-host")?.remove();
+  document.getElementById(AI_LEAGUE_BROADCAST_DRAWER_PORTAL_ID)?.remove();
+  document.body.classList.remove("ai-league-analyst-mode");
   document.body.classList.add("ai-league-replay-mode");
   document.body.classList.toggle(
     "ai-league-native-spectator-ui",
@@ -208,20 +223,105 @@ export function mountAiLeagueReplayOverlay(input: AiLeagueReplayOverlayInput) {
   // Identity (emblem/version/builder) is always public — never spoiler-
   // sensitive on its own — so it fetches once per mount and degrades to
   // "nothing resolved yet" (never blocks or fails the mount) on any error.
-  // Resolved once the fetch lands, then only the competitor rail re-renders
-  // (not the whole details block) so disclosure/toggle state is untouched.
+  // Resolved once the fetch lands, then only the broadcast drawer
+  // re-renders (not the whole details block) so disclosure/toggle state is
+  // untouched.
   let identityByPlayerName: ReadonlyMap<string, PublicAgent> = new Map();
+  // Camera-follow discoverability (spec item 6): mirrors identityByPlayerName
+  // above — closure state updated by a document-level listener registered
+  // once at mount (below), passed down into every broadcast-drawer render so
+  // the rail's `followed` seat always reflects PointOfViewSelector's own
+  // current pick, however it was set (rail click, dropdown, crosshair,
+  // initial resolution).
+  let followedPlayerName: string | null = null;
   void resolveAiLeagueIdentities().then((resolved) => {
     identityByPlayerName = resolved;
     if (!overlay.isConnected) return;
-    mountAiLeagueCompetitorRail(overlay, currentInput, identityByPlayerName);
+    mountAiLeagueBroadcastDrawer(
+      overlay,
+      currentInput,
+      identityByPlayerName,
+      followedPlayerName,
+    );
   });
   let clipControl = mountReplayDetailsBindings(
     overlay,
     currentInput,
     identityByPlayerName,
+    followedPlayerName,
   );
   mountReplayJumpControls(document);
+
+  // Lower thirds (spec item 3): one controller per overlay mount, positioned
+  // over the map (never inside the scrollable side panel) so a pulse stays
+  // visible without opening/scrolling anything. Synced from the SAME
+  // curatedWarRoomEvents() source the War Room drawer tab already reads,
+  // plus a synthetic "finish" event once the viewer's own playhead reaches
+  // the match's canonical finish turn — Full Replay has no premiere seal, so
+  // "concludes" here means "the viewer has watched to the end", not "the
+  // data becomes available" (it always is).
+  const lowerThirdHost = document.createElement("div");
+  lowerThirdHost.id = "ai-league-lower-third-host";
+  document.body.appendChild(lowerThirdHost);
+  const lowerThird = new LowerThirdController(lowerThirdHost);
+  const syncLowerThirds = (): void => {
+    const telemetry =
+      currentInput.spectatorTelemetry as AiLeagueSpectatorTelemetry | null;
+    const totalTurns = aiLeagueFinishTurn(currentInput, telemetry);
+    const events: LowerThirdEvent[] = curatedWarRoomEvents(
+      telemetry,
+      currentInput.decisions,
+    ).map((event) => ({
+      id: event.id,
+      kind: event.kind,
+      headline: event.headline,
+    }));
+    if ((currentInput.currentTurn ?? 0) >= totalTurns) {
+      events.push({
+        id: "finish",
+        kind: "finish",
+        headline: translateText("ai_league_replay.timeline_finish"),
+      });
+    }
+    lowerThird.sync(events);
+  };
+  syncLowerThirds();
+
+  // Camera-follow discoverability (spec item 6): registered once here (not
+  // per-hydrate) since it must survive every renderDetails()/hydrate() call
+  // and only ever needs one live listener per overlay mount — same
+  // window-cleanup idiom as every other document-level listener in this
+  // file (e.g. __aiLeagueCompetitorRailCleanup's successor below).
+  const followedPlayerWin = window as Window & {
+    __aiLeagueFollowedPlayerCleanup?: () => void;
+  };
+  followedPlayerWin.__aiLeagueFollowedPlayerCleanup?.();
+  const onFollowedPlayerChange = (event: Event): void => {
+    const detail = (event as CustomEvent<{ playerName: string | null }>)
+      .detail;
+    if (detail === undefined || detail.playerName === followedPlayerName) {
+      return;
+    }
+    followedPlayerName = detail.playerName;
+    if (!overlay.isConnected) return;
+    mountAiLeagueBroadcastDrawer(
+      overlay,
+      currentInput,
+      identityByPlayerName,
+      followedPlayerName,
+    );
+  };
+  document.addEventListener(
+    BROADCAST_RAIL_FOLLOWED_CHANGE_EVENT,
+    onFollowedPlayerChange,
+  );
+  followedPlayerWin.__aiLeagueFollowedPlayerCleanup = () => {
+    document.removeEventListener(
+      BROADCAST_RAIL_FOLLOWED_CHANGE_EVENT,
+      onFollowedPlayerChange,
+    );
+  };
+
   let disposed = false;
 
   // Single re-render path for the details block, shared by hydrate() and the
@@ -244,13 +344,16 @@ export function mountAiLeagueReplayOverlay(input: AiLeagueReplayOverlayInput) {
       overlay,
       currentInput,
       identityByPlayerName,
+      followedPlayerName,
     );
     previousClipControl?.dispose();
+    syncLowerThirds();
   };
   const disposePlayheadSync = mountAiLeaguePlayheadSync(
     overlay,
     (turn) => {
       currentInput = { ...currentInput, currentTurn: turn };
+      syncLowerThirds();
       // Refresh ONLY the decision-log region. Re-rendering the whole details
       // block would re-mount the political-radio transcript, the headline
       // lower-third and the clip control, discarding their accumulated state.
@@ -306,6 +409,7 @@ export function mountAiLeagueReplayOverlay(input: AiLeagueReplayOverlayInput) {
       }
       disposed = true;
       disposePlayheadSync();
+      lowerThird.dispose();
       clipControl?.dispose();
       clipControl = null;
       disposeReplayOverlay(overlay);
@@ -326,9 +430,8 @@ function disposeReplayOverlay(overlay: HTMLElement) {
     __aiLeagueHeadlineCleanup?: () => void;
     __aiLeagueDiplomacyCleanup?: () => void;
     __aiLeagueSocialBubblesCleanup?: () => void;
-    __aiLeagueCompetitorRailCleanup?: () => void;
-    __aiLeagueWarRoomCleanup?: () => void;
-    __aiLeagueTimelineCleanup?: () => void;
+    __aiLeagueBroadcastDrawerCleanup?: () => void;
+    __aiLeagueFollowedPlayerCleanup?: () => void;
   };
   win.__aiLeaguePanelDisclosureCleanup?.();
   win.__aiLeaguePanelControlsCleanup?.();
@@ -336,26 +439,25 @@ function disposeReplayOverlay(overlay: HTMLElement) {
   win.__aiLeagueHeadlineCleanup?.();
   win.__aiLeagueDiplomacyCleanup?.();
   win.__aiLeagueSocialBubblesCleanup?.();
-  win.__aiLeagueCompetitorRailCleanup?.();
-  win.__aiLeagueWarRoomCleanup?.();
-  win.__aiLeagueTimelineCleanup?.();
+  win.__aiLeagueBroadcastDrawerCleanup?.();
+  win.__aiLeagueFollowedPlayerCleanup?.();
   delete win.__aiLeaguePanelDisclosureCleanup;
   delete win.__aiLeaguePanelControlsCleanup;
   delete win.__aiLeagueReplayJumpCleanup;
   delete win.__aiLeagueHeadlineCleanup;
   delete win.__aiLeagueDiplomacyCleanup;
   delete win.__aiLeagueSocialBubblesCleanup;
-  delete win.__aiLeagueCompetitorRailCleanup;
-  delete win.__aiLeagueWarRoomCleanup;
-  delete win.__aiLeagueTimelineCleanup;
+  delete win.__aiLeagueBroadcastDrawerCleanup;
+  delete win.__aiLeagueFollowedPlayerCleanup;
   overlay.remove();
   document.getElementById("ai-league-social-transcript")?.remove();
   document.getElementById("ai-league-headline-event")?.remove();
-  document.getElementById("ai-league-war-room")?.remove();
-  document.getElementById("ai-league-timeline")?.remove();
+  document.getElementById("ai-league-lower-third-host")?.remove();
+  document.getElementById(AI_LEAGUE_BROADCAST_DRAWER_PORTAL_ID)?.remove();
   document.body.classList.remove(
     "ai-league-replay-mode",
     "ai-league-native-spectator-ui",
+    "ai-league-analyst-mode",
   );
 }
 
@@ -363,6 +465,7 @@ function mountReplayDetailsBindings(
   overlay: HTMLElement,
   input: AiLeagueReplayOverlayInput,
   identityByPlayerName: ReadonlyMap<string, PublicAgent>,
+  followedPlayerName: string | null,
 ): ReplayScopedLeagueClipControlHandle | null {
   const telemetry =
     input.spectatorTelemetry as AiLeagueSpectatorTelemetry | null;
@@ -373,10 +476,14 @@ function mountReplayDetailsBindings(
   mountAiLeagueDecisionLogExpander(overlay, input.decisions);
   mountAiLeagueDecisionsDisclosure(overlay);
   mountAiLeagueRadioToggle(overlay);
+  mountAiLeagueAnalystToggle(overlay);
   mountAiLeagueShareImageButton(overlay);
-  mountAiLeagueCompetitorRail(overlay, input, identityByPlayerName);
-  mountAiLeagueWarRoom(input);
-  mountAiLeagueTimeline(input);
+  mountAiLeagueBroadcastDrawer(
+    overlay,
+    input,
+    identityByPlayerName,
+    followedPlayerName,
+  );
   const clipContainer = overlay.querySelector<HTMLElement>(
     "[data-ai-league-clip]",
   );
@@ -501,6 +608,45 @@ function mountAiLeagueRadioToggle(overlay: HTMLElement): void {
 }
 
 /**
+ * Analyst mode (spec item 5): a separate, explicit desktop toggle from the
+ * mobile drawer's "Analysis" tab — shows/hides the SAME renderAnalystPanel()
+ * output the drawer's "analysis" tab already renders. The class lives on
+ * document.body (same convention as mountAiLeagueRadioToggle's own
+ * `ai-league-radio-on`), never on the overlay root: the analysis panel is
+ * relocated to a document.body-level portal on desktop (see
+ * mountAiLeagueBroadcastDrawer's own doc), so an overlay-scoped class would
+ * stop matching it the moment it moves. Ships off by default (the curated
+ * rail/War Room/timeline view never auto-opens analyst mode), self-guards
+ * against a duplicate button on re-hydrate, and the DOM class IS the
+ * persisted state — untouched by every subsequent hydrate() since only the
+ * header (not this button) gets re-created.
+ */
+function mountAiLeagueAnalystToggle(overlay: HTMLElement): void {
+  const actions = overlay.querySelector<HTMLElement>(
+    ".ai-league-header-actions",
+  );
+  if (actions === null) return;
+  if (actions.querySelector("[data-ai-league-analyst-toggle]") !== null) {
+    return;
+  }
+  const toggle = document.createElement("button");
+  toggle.type = "button";
+  toggle.dataset.aiLeagueAnalystToggle = "";
+  toggle.setAttribute("aria-pressed", "false");
+  toggle.textContent = translateText("broadcast.analyst_heading");
+  const apply = (on: boolean) => {
+    document.body.classList.toggle("ai-league-analyst-mode", on);
+    toggle.setAttribute("aria-pressed", String(on));
+    toggle.classList.toggle("is-on", on);
+  };
+  apply(false);
+  toggle.addEventListener("click", () => {
+    apply(!document.body.classList.contains("ai-league-analyst-mode"));
+  });
+  actions.prepend(toggle);
+}
+
+/**
  * Advance the playhead-windowed panels as the replay runs. Re-renders the whole
  * details block on a throttle (not every frame — that block is expensive), and
  * only when the visible decision count actually changes, so an idle or paused
@@ -539,9 +685,19 @@ function mountAiLeaguePlayheadSync(
 }
 
 const AI_LEAGUE_MOBILE_BREAKPOINT = 740;
+// A landscape phone (e.g. 844x390) is wider than AI_LEAGUE_MOBILE_BREAKPOINT
+// but just as cramped vertically — treat "short and wider than tall" the
+// same as "narrow" so the panel defaults to its collapsed slim strip there
+// too (see the matching `@media (max-height: ...) and (orientation:
+// landscape)` rule in overlayHtml's stylesheet).
+const AI_LEAGUE_MOBILE_LANDSCAPE_MAX_HEIGHT = 430;
 
 function isNarrowReplayViewport(): boolean {
-  return window.innerWidth <= AI_LEAGUE_MOBILE_BREAKPOINT;
+  return (
+    window.innerWidth <= AI_LEAGUE_MOBILE_BREAKPOINT ||
+    (window.innerHeight <= AI_LEAGUE_MOBILE_LANDSCAPE_MAX_HEIGHT &&
+      window.innerWidth > window.innerHeight)
+  );
 }
 
 function mountReplayPanelDisclosure(overlay: HTMLElement) {
@@ -1788,22 +1944,46 @@ function overlayHtml(input: AiLeagueReplayOverlayInput): string {
         #ai-league-replay-overlay:not(.collapsed) ~ #ai-league-headline-event {
           bottom: calc(min(58vh, 520px) + 16px + env(safe-area-inset-bottom));
         }
-        #ai-league-war-room,
-        #ai-league-timeline {
-          display: none;
-        }
       }
       /*
-       * Stage 4 broadcast composition: left competitor rail (lives inside
-       * this panel's existing body, alongside the diplomacy standings strip
-       * — "restructure...alongside" per spec), right War Room event feed and
-       * bottom timeline (separate fixed-position chrome pieces, matching the
-       * file's own existing pattern of independently positioned overlay
-       * pieces: the political-radio transcript and the headline lower-third
-       * are already mounted the same way). All three classes below come from
-       * the shared, deliberately style-free BroadcastComposition module —
-       * only the --pw-* token wiring lives here.
+       * Stage 4 broadcast composition: ONE renderBroadcastDrawer() output
+       * mounted inline in this panel's body (spec item 7) with four tabs —
+       * agents (competitor rail), events (War Room feed), timeline, and
+       * analysis (spec item 5). On desktop the tab bar stays hidden and
+       * three of the four panels break out to fixed positions matching this
+       * panel's original chrome layout (agents inline alongside the
+       * diplomacy strip, events top-right, timeline bottom bar) — only
+       * the --pw-* token wiring for the shared, deliberately style-free
+       * BroadcastComposition module lives here. The mobile/landscape media
+       * queries near the end of this stylesheet undo the fixed positioning
+       * and turn this into an actual tabbed sheet on a narrow/short
+       * viewport.
        */
+      [data-ai-league-broadcast-drawer] .broadcast-drawer-tabs {
+        display: none;
+      }
+      .broadcast-drawer-tab {
+        border: 1px solid var(--pw-line-strong, #3a4656);
+        background: var(--pw-surface-2, #18202b);
+        color: var(--pw-text, #edf1f7);
+        border-radius: 8px;
+        font-weight: 700;
+        cursor: pointer;
+      }
+      .broadcast-drawer-tab[aria-selected="true"] {
+        border-color: var(--pw-accent, #f4a64a);
+        color: var(--pw-accent, #f4a64a);
+      }
+      .broadcast-drawer-tab-badge {
+        display: inline-block;
+        margin-left: 4px;
+        padding: 0 5px;
+        border-radius: 999px;
+        background: var(--pw-danger, #f87171);
+        color: #1a0505;
+        font-size: 10px;
+        font-weight: 900;
+      }
       .broadcast-rail {
         border: 1px solid var(--pw-line, #2a3442);
         border-radius: 8px;
@@ -1846,6 +2026,28 @@ function overlayHtml(input: AiLeagueReplayOverlayInput): string {
       }
       .broadcast-rail-entry[data-alive="false"] {
         opacity: 0.55;
+      }
+      .broadcast-rail-entry[data-followed="true"] {
+        border-color: var(--pw-accent, #f4a64a);
+        box-shadow: 0 0 0 1px var(--pw-accent, #f4a64a) inset;
+      }
+      .broadcast-rail-select {
+        display: grid;
+        gap: 5px;
+        width: 100%;
+        background: transparent;
+        border: none;
+        padding: 0;
+        margin: 0;
+        text-align: left;
+        font: inherit;
+        color: inherit;
+      }
+      button.broadcast-rail-select {
+        cursor: pointer;
+      }
+      button.broadcast-rail-select[aria-pressed="true"] .broadcast-rail-name {
+        color: var(--pw-accent, #f4a64a);
       }
       .broadcast-rail-identity {
         display: flex;
@@ -1921,7 +2123,7 @@ function overlayHtml(input: AiLeagueReplayOverlayInput): string {
       .broadcast-rail-allies {
         color: var(--pw-positive-text, #a7f3d0);
       }
-      #ai-league-war-room {
+      .broadcast-drawer-panel[data-tab-id="events"] {
         position: fixed;
         top: 12px;
         right: 12px;
@@ -2040,7 +2242,7 @@ function overlayHtml(input: AiLeagueReplayOverlayInput): string {
       .broadcast-war-room-jump {
         justify-self: start;
       }
-      #ai-league-timeline {
+      .broadcast-drawer-panel[data-tab-id="timeline"] {
         position: fixed;
         left: 404px;
         right: 388px;
@@ -2103,6 +2305,263 @@ function overlayHtml(input: AiLeagueReplayOverlayInput): string {
       .broadcast-timeline-marker[data-kind="finish"] {
         background: var(--pw-text, #edf1f7);
       }
+      /*
+       * Analyst mode (spec item 5): hidden on desktop by default (the
+       * curated rail/War Room/timeline view never auto-opens it) — the
+       * header's "Analyst mode" toggle adds ai-league-analyst-mode to the
+       * overlay root, which promotes this SAME drawer panel (identical DOM
+       * to the mobile "Analysis" tab's content) to a centered fixed panel.
+       */
+      .broadcast-drawer-panel[data-tab-id="analysis"] {
+        display: none;
+      }
+      body.ai-league-analyst-mode .broadcast-drawer-panel[data-tab-id="analysis"] {
+        display: block;
+        position: fixed;
+        left: 50%;
+        top: 50%;
+        transform: translate(-50%, -50%);
+        z-index: 50010;
+        width: min(640px, calc(100vw - 32px));
+        max-height: min(80vh, 720px);
+        overflow-y: auto;
+        border: 1px solid var(--pw-line-strong, #3a4656);
+        border-radius: var(--pw-r-xl, 18px);
+        background: var(--pw-glass-strong, rgba(10, 14, 20, 0.95));
+        color: var(--pw-text, #edf1f7);
+        box-shadow: var(--pw-shadow, 0 26px 74px rgba(0, 0, 0, 0.52));
+        backdrop-filter: blur(18px) saturate(1.15);
+        padding: 14px;
+        box-sizing: border-box;
+      }
+      .broadcast-analyst {
+        display: grid;
+        gap: 14px;
+        font-size: 12px;
+      }
+      .broadcast-analyst-chart {
+        display: grid;
+        gap: 6px;
+      }
+      .broadcast-analyst-chart-heading,
+      .broadcast-analyst-decisions-heading,
+      .broadcast-analyst-events-heading {
+        margin: 0;
+        font-size: 11px;
+        font-weight: 900;
+        text-transform: uppercase;
+        letter-spacing: 0.04em;
+        color: var(--pw-text-dim, #cbd5e1);
+      }
+      .broadcast-analyst-chart-row {
+        display: grid;
+        grid-template-columns: 90px 1fr 32px;
+        align-items: center;
+        gap: 8px;
+      }
+      .broadcast-analyst-chart-bar {
+        height: 8px;
+        border-radius: 999px;
+        background: var(--pw-surface-2, #18202b);
+        overflow: hidden;
+      }
+      .broadcast-analyst-chart-bar > span {
+        display: block;
+        height: 100%;
+        background: var(--pw-info, #56c7f5);
+        width: var(--broadcast-analyst-chart-width, 0%);
+      }
+      .broadcast-analyst-table {
+        width: 100%;
+        border-collapse: collapse;
+        font-size: 11px;
+      }
+      .broadcast-analyst-table th,
+      .broadcast-analyst-table td {
+        text-align: left;
+        padding: 4px 6px;
+        border-bottom: 1px solid var(--pw-line, #2a3442);
+      }
+      .broadcast-analyst-empty {
+        color: var(--pw-muted, #a4afbf);
+        font-size: 12px;
+      }
+      /*
+       * Lower thirds (spec item 3): fixed over the map (never inside this
+       * panel's scrollable body), pointer-events: none on the host so a
+       * pulse never blocks a map click, and the entrance animation gates on
+       * [data-reduced-motion="false"] — LowerThirdController itself sets
+       * that attribute; a reduced-motion viewer only ever gets a static
+       * opacity fade, never the scale pulse.
+       */
+      #ai-league-lower-third-host {
+        position: fixed;
+        top: 16px;
+        left: 50%;
+        transform: translateX(-50%);
+        z-index: 50005;
+        pointer-events: none;
+        display: flex;
+        justify-content: center;
+      }
+      .broadcast-lower-third {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        padding: 8px 16px;
+        border: 1px solid var(--pw-line-strong, #3a4656);
+        border-radius: 999px;
+        background: var(--pw-glass-strong, rgba(10, 14, 20, 0.95));
+        color: var(--pw-text, #edf1f7);
+        box-shadow: var(--pw-shadow, 0 26px 74px rgba(0, 0, 0, 0.52));
+        backdrop-filter: blur(18px) saturate(1.15);
+        font-weight: 700;
+        font-size: 13px;
+        opacity: 0;
+        animation: broadcast-lower-third-static-in 0.15s ease forwards;
+      }
+      .broadcast-lower-third[data-reduced-motion="false"] {
+        animation: broadcast-lower-third-pulse-in 0.4s ease forwards;
+      }
+      .broadcast-lower-third-glyph {
+        font-weight: 900;
+        color: var(--pw-info, #56c7f5);
+      }
+      .broadcast-lower-third[data-kind="betrayal"] .broadcast-lower-third-glyph,
+      .broadcast-lower-third[data-kind="elimination"] .broadcast-lower-third-glyph {
+        color: var(--pw-danger, #f87171);
+      }
+      .broadcast-lower-third[data-kind="alliance"] .broadcast-lower-third-glyph {
+        color: var(--pw-positive, #34d399);
+      }
+      .broadcast-lower-third[data-kind="first_strike"] .broadcast-lower-third-glyph,
+      .broadcast-lower-third[data-kind="plan_change"] .broadcast-lower-third-glyph {
+        color: var(--pw-caution, #fbbf24);
+      }
+      @keyframes broadcast-lower-third-static-in {
+        from { opacity: 0; }
+        to { opacity: 1; }
+      }
+      @keyframes broadcast-lower-third-pulse-in {
+        0% { opacity: 0; transform: scale(0.85); }
+        60% { opacity: 1; transform: scale(1.05); }
+        100% { opacity: 1; transform: scale(1); }
+      }
+      /*
+       * Mobile bottom-sheet drawer (spec item 7): undo every desktop fixed-
+       * position break-out above so all four panels sit back in normal flow
+       * inside this panel's own body, show the tab bar, and only render the
+       * active tab's panel — the SAME data-tab-active BroadcastComposition
+       * already stamps on every panel, never a second, parallel visibility
+       * mechanism.
+       */
+      @media (max-width: 740px) {
+        [data-ai-league-broadcast-drawer] .broadcast-drawer-tabs {
+          display: flex;
+          gap: 4px;
+          margin: 0 0 8px;
+        }
+        .broadcast-drawer-tab {
+          flex: 1 1 0;
+          min-width: 0;
+          min-height: 44px;
+          padding: 6px 4px;
+          font-size: 11px;
+        }
+        .broadcast-drawer-panel {
+          position: static;
+          top: auto;
+          left: auto;
+          right: auto;
+          bottom: auto;
+          transform: none;
+          width: auto;
+          max-height: none;
+          z-index: auto;
+          display: none;
+        }
+        .broadcast-drawer-panel[data-tab-active="true"] {
+          display: block;
+        }
+        body.ai-league-analyst-mode .broadcast-drawer-panel[data-tab-id="analysis"] {
+          position: static;
+          transform: none;
+          width: auto;
+          max-height: none;
+        }
+        [data-ai-league-analyst-toggle] {
+          display: none;
+        }
+        .broadcast-rail-list {
+          max-height: none;
+        }
+      }
+      /*
+       * Landscape phones (e.g. 844x390): width alone stays above the
+       * @media (max-width: 740px) breakpoint above, so this panel's own
+       * default (desktop) chrome would otherwise cover almost the full,
+       * already-short viewport height. Gate on height instead: same tabbed,
+       * in-flow drawer as the portrait rule above, plus a narrower/shorter
+       * panel geometry so the map stays dominant.
+       */
+      @media (max-height: 430px) and (orientation: landscape) {
+        #ai-league-replay-overlay,
+        body.ai-league-native-spectator-ui #ai-league-replay-overlay {
+          top: 8px;
+          left: 8px;
+          right: auto;
+          bottom: auto;
+          width: min(260px, 42vw);
+          max-height: calc(100vh - 16px);
+          border-radius: 12px;
+        }
+        #ai-league-replay-overlay:not(.collapsed) {
+          height: min(85vh, 360px);
+        }
+        #ai-league-replay-overlay header {
+          min-height: 40px;
+          padding: 5px 8px;
+        }
+        [data-ai-league-broadcast-drawer] .broadcast-drawer-tabs {
+          display: flex;
+          gap: 3px;
+          margin: 0 0 6px;
+        }
+        .broadcast-drawer-tab {
+          flex: 1 1 0;
+          min-width: 0;
+          min-height: 36px;
+          padding: 4px;
+          font-size: 10px;
+        }
+        .broadcast-drawer-panel {
+          position: static;
+          top: auto;
+          left: auto;
+          right: auto;
+          bottom: auto;
+          transform: none;
+          width: auto;
+          max-height: none;
+          z-index: auto;
+          display: none;
+        }
+        .broadcast-drawer-panel[data-tab-active="true"] {
+          display: block;
+        }
+        body.ai-league-analyst-mode .broadcast-drawer-panel[data-tab-id="analysis"] {
+          position: static;
+          transform: none;
+          width: auto;
+          max-height: none;
+        }
+        [data-ai-league-analyst-toggle] {
+          display: none;
+        }
+        .broadcast-rail-list {
+          max-height: 30vh;
+        }
+      }
     </style>
     <header data-ai-league-drag>
       <div>
@@ -2127,7 +2586,7 @@ function overlayHtml(input: AiLeagueReplayOverlayInput): string {
           <div class="ai-league-muted">${escapeHtml(translateText("ai_league_replay.standings_waiting"))}</div>
         </div>
       </section>
-      <div data-ai-league-competitor-rail></div>
+      <div data-ai-league-broadcast-drawer></div>
       <div data-ai-league-details>${overlayDetailsHtml(input)}</div>
     </div>
     <div class="ai-league-resize-handle" data-ai-league-resize aria-hidden="true"></div>`;
@@ -2904,51 +3363,268 @@ function competitorRailEntries(
 
 // Re-mounted independently of the frame stream (identity resolution lands
 // asynchronously; hydrate() re-renders the whole details block) — keyed by
-// the rail's own container so a re-mount replays the LAST known frame
+// the drawer's own container so a re-mount replays the LAST known frame
 // instead of resetting to an empty roster and waiting for the next tick.
-const AI_LEAGUE_RAIL_LAST_FRAME = new WeakMap<
+const AI_LEAGUE_BROADCAST_DRAWER_LAST_FRAME = new WeakMap<
   HTMLElement,
   readonly AiLeagueReplayFramePlayer[]
 >();
 
-function mountAiLeagueCompetitorRail(
+// Mobile drawer tab selection (spec item 7), keyed the same way — the
+// placeholder container itself is never replaced across a hydrate (only its
+// CHILDREN are, via container.replaceChildren() below), so this persists a
+// viewer's tab choice across every renderDetails()/hydrate() call without
+// needing a second piece of closure state threaded through
+// mountReplayDetailsBindings.
+const AI_LEAGUE_DRAWER_ACTIVE_TAB = new WeakMap<
+  HTMLElement,
+  BroadcastDrawerTabId
+>();
+
+/**
+ * Analyst mode (spec item 5): the SAME already-public decisions/events this
+ * overlay's curated rail/War Room/timeline already read, unfiltered. Full
+ * Replay is complete, unbounded data (no premiere seal, no released-chunks
+ * boundary) — decisionsUnavailableReason is only ever "no_data" (a
+ * genuinely decision-less match/context), never "premiere_sealed".
+ */
+function aiLeagueAnalystPanelData(
+  input: AiLeagueReplayOverlayInput,
+  telemetry: AiLeagueSpectatorTelemetry | null,
+): AnalystPanelData {
+  const hasDecisions = input.decisions.length > 0;
+  const decisions: AnalystDecisionRow[] = input.decisions.map((decision) => ({
+    sequence: decision.sequence,
+    turnNumber: decision.turnNumber,
+    playerName: decision.username,
+    brainType: decision.brainType,
+    selectedActionKind: decision.selectedActionKind,
+    selectedLegalActionId: decision.selectedLegalActionId,
+    reason: decision.reason,
+    planObjective: decision.planObjective ?? null,
+    decisionLatencyMs: decision.decisionLatencyMs,
+    fallbackUsed: decision.fallbackUsed,
+    accepted: decision.result.accepted,
+    auditStatus: decision.auditStatus ?? null,
+  }));
+  const events: AnalystEventRow[] = (telemetry?.events ?? []).map(
+    (event) => ({
+      sequence: event.sequence,
+      turnNumber: event.turnNumber,
+      kind: event.kind,
+      tone: event.tone,
+      actorName: event.actorName,
+      targetName: event.targetName,
+      secondaryName: null,
+      message: event.publicText ?? event.message,
+    }),
+  );
+  return {
+    decisions: hasDecisions ? decisions : null,
+    decisionsUnavailableReason: hasDecisions ? null : "no_data",
+    events,
+    actionKindCounts: aiLeagueAnalystActionKindCounts(input.decisions),
+  };
+}
+
+function aiLeagueAnalystActionKindCounts(
+  decisions: readonly AiLeagueDecisionLogEntry[],
+): AnalystActionKindCount[] {
+  const counts = new Map<string, number>();
+  for (const decision of decisions) {
+    counts.set(
+      decision.selectedActionKind,
+      (counts.get(decision.selectedActionKind) ?? 0) + 1,
+    );
+  }
+  return [...counts.entries()]
+    .map(([kind, count]) => ({ kind, count }))
+    .sort((a, b) => b.count - a.count || a.kind.localeCompare(b.kind));
+}
+
+/**
+ * ONE renderBroadcastDrawer() mount for all four tabs (spec item 7),
+ * replacing the file's former three independent mount points
+ * (mountAiLeagueCompetitorRail/mountAiLeagueWarRoom/mountAiLeagueTimeline).
+ * Every tab's DERIVATION stays exactly what it always was —
+ * competitorRailEntries()/curatedWarRoomEvents()/matchTimelineEventMarkers()
+ * are reused verbatim, only WHERE their output mounts changed.
+ * `followedPlayerName` (spec item 6) is threaded in from the outer mount
+ * closure so the rail's `followed` seat always reflects
+ * PointOfViewSelector's current pick.
+ *
+ * Desktop "escape to a floating panel" quirk: #ai-league-replay-overlay
+ * itself uses backdrop-filter for its frosted-glass chrome, and per the CSS
+ * spec, filter/backdrop-filter on an element makes THAT element the
+ * containing block for any position:fixed descendant — so an events/
+ * timeline/analysis panel nested inside the overlay could never actually
+ * float free of it, no matter what fixed coordinates its own CSS declared.
+ * AI_LEAGUE_BROADCAST_DRAWER_PORTAL_ID is a plain (no filter) document.body
+ * child that the "events"/"timeline"/"analysis" panels physically relocate
+ * into on a desktop-width viewport, escaping that trap; on a narrow/short
+ * viewport (this file's own mobile/landscape media queries put every panel
+ * back into `position: static`, immune to the same quirk) they relocate
+ * back into the drawer's own panel host, alongside "agents", for one
+ * cohesive tabbed sheet. "agents" itself never relocates — it always reads
+ * naturally inside this panel's own body, alongside the diplomacy strip,
+ * exactly like the rail did before this restructuring.
+ */
+const AI_LEAGUE_BROADCAST_DRAWER_PORTAL_ID = "ai-league-broadcast-drawer-portal";
+
+function relocateAiLeagueBroadcastDrawerPanels(
+  portal: HTMLElement,
+  panelsHost: HTMLElement,
+): void {
+  const desktop = !isNarrowReplayViewport();
+  for (const tabId of ["events", "timeline", "analysis"] as const) {
+    const panel = document.querySelector<HTMLElement>(
+      `.broadcast-drawer-panel[data-tab-id="${tabId}"]`,
+    );
+    if (panel === null) continue;
+    const home = desktop ? portal : panelsHost;
+    if (panel.parentElement !== home) {
+      home.appendChild(panel);
+    }
+  }
+}
+
+function mountAiLeagueBroadcastDrawer(
   overlay: HTMLElement,
   input: AiLeagueReplayOverlayInput,
   identityByPlayerName: ReadonlyMap<string, PublicAgent>,
+  followedPlayerName: string | null,
 ): void {
   const container = overlay.querySelector<HTMLElement>(
-    "[data-ai-league-competitor-rail]",
+    "[data-ai-league-broadcast-drawer]",
   );
   if (container === null) {
     return;
   }
+  let portal = document.getElementById(AI_LEAGUE_BROADCAST_DRAWER_PORTAL_ID);
+  if (portal === null) {
+    portal = document.createElement("div");
+    portal.id = AI_LEAGUE_BROADCAST_DRAWER_PORTAL_ID;
+    document.body.appendChild(portal);
+  }
+  const drawerPortal = portal;
   const win = window as Window & {
-    __aiLeagueCompetitorRailCleanup?: () => void;
+    __aiLeagueBroadcastDrawerCleanup?: () => void;
   };
-  win.__aiLeagueCompetitorRailCleanup?.();
+  win.__aiLeagueBroadcastDrawerCleanup?.();
   const telemetry =
     input.spectatorTelemetry as AiLeagueSpectatorTelemetry | null;
   const decisions = input.decisions;
+  const totalTurns = aiLeagueFinishTurn(input, telemetry);
+  const warRoomEvents = curatedWarRoomEvents(telemetry, decisions);
+  const timelineMarkers: TimelineMarker[] = [
+    ...matchTimelineEventMarkers(telemetry),
+    {
+      kind: "finish",
+      turn: totalTurns,
+      sequence: Number.MAX_SAFE_INTEGER,
+      label: translateText("ai_league_replay.timeline_finish"),
+    },
+  ];
+  const analystData = aiLeagueAnalystPanelData(input, telemetry);
+  const dispatchJumpToTurn = (turn: number): void => {
+    document.dispatchEvent(
+      new CustomEvent("ai-league-replay-jump-turn", {
+        detail: { turnNumber: turn },
+        bubbles: true,
+      }),
+    );
+  };
+
   // Same per-tick memoization approach as mountAiLeagueDiplomacyStrip: frames
-  // fire every game tick, so skip the DOM write when nothing actually
-  // changed for this roster.
+  // fire every game tick, so skip the DOM rebuild when nothing actually
+  // changed for this frame/tab-selection combination — but always re-check
+  // panel placement (cheap) since a viewport resize alone (no content
+  // change) still needs to relocate panels across the desktop/mobile
+  // breakpoint.
   let lastSnapshot = "";
   const render = (framePlayers: readonly AiLeagueReplayFramePlayer[]) => {
-    AI_LEAGUE_RAIL_LAST_FRAME.set(container, framePlayers);
-    const entries = competitorRailEntries(
+    AI_LEAGUE_BROADCAST_DRAWER_LAST_FRAME.set(container, framePlayers);
+    const activeTab = AI_LEAGUE_DRAWER_ACTIVE_TAB.get(container) ?? "agents";
+    const railEntries = competitorRailEntries(
       telemetry,
       decisions,
       framePlayers,
       identityByPlayerName,
+    ).map((entry) => ({
+      ...entry,
+      followed: entry.playerName === followedPlayerName,
+    }));
+    const snapshot = JSON.stringify({
+      railEntries,
+      warRoomEvents,
+      timelineMarkers,
+      analystData,
+      activeTab,
+    });
+    const panelsHost = container.querySelector<HTMLElement>(
+      ".broadcast-drawer-panels",
     );
-    const snapshot = JSON.stringify(entries);
     if (snapshot === lastSnapshot) {
+      if (panelsHost !== null) {
+        relocateAiLeagueBroadcastDrawerPanels(drawerPortal, panelsHost);
+      }
       return;
     }
     lastSnapshot = snapshot;
-    container.replaceChildren(renderCompetitorRail(entries));
+    // A previous render generation may have relocated panels into the
+    // portal; those are now-orphaned nodes container.replaceChildren()
+    // below can never reach (they live outside `container`), so clear them
+    // explicitly before building the new generation.
+    drawerPortal.replaceChildren();
+    const tabs: BroadcastDrawerTab[] = [
+      {
+        id: "agents",
+        content: renderCompetitorRail(railEntries, {
+          onSelect: (playerName) => {
+            document.dispatchEvent(
+              new CustomEvent(BROADCAST_RAIL_FOLLOW_EVENT, {
+                detail: { playerName },
+              }),
+            );
+          },
+        }),
+      },
+      {
+        id: "events",
+        content: renderWarRoomFeed(warRoomEvents, {
+          onJumpToTurn: dispatchJumpToTurn,
+        }),
+      },
+      {
+        id: "timeline",
+        content: renderMatchTimeline(timelineMarkers, {
+          totalTurns,
+          // Full Replay is unrestricted (unlike a live Premiere, which must
+          // never seek past the live edge) — this literally IS the spec's
+          // `maxSeekableTurn: null` case.
+          maxSeekableTurn: null,
+          onSeek: dispatchJumpToTurn,
+        }),
+      },
+      { id: "analysis", content: renderAnalystPanel(analystData) },
+    ];
+    container.replaceChildren(
+      renderBroadcastDrawer(tabs, {
+        activeTab,
+        onTabChange: (nextTab) => {
+          AI_LEAGUE_DRAWER_ACTIVE_TAB.set(container, nextTab);
+          render(AI_LEAGUE_BROADCAST_DRAWER_LAST_FRAME.get(container) ?? []);
+        },
+      }),
+    );
+    const nextPanelsHost = container.querySelector<HTMLElement>(
+      ".broadcast-drawer-panels",
+    );
+    if (nextPanelsHost !== null) {
+      relocateAiLeagueBroadcastDrawerPanels(drawerPortal, nextPanelsHost);
+    }
   };
-  render(AI_LEAGUE_RAIL_LAST_FRAME.get(container) ?? []);
+  render(AI_LEAGUE_BROADCAST_DRAWER_LAST_FRAME.get(container) ?? []);
   const onFrame = (event: Event) => {
     const detail = (event as CustomEvent<AiLeagueReplayFrameEventDetail>)
       .detail;
@@ -2957,9 +3633,19 @@ function mountAiLeagueCompetitorRail(
     }
     render(detail.players);
   };
+  const onResize = (): void => {
+    const panelsHost = container.querySelector<HTMLElement>(
+      ".broadcast-drawer-panels",
+    );
+    if (panelsHost !== null) {
+      relocateAiLeagueBroadcastDrawerPanels(drawerPortal, panelsHost);
+    }
+  };
   document.addEventListener("ai-league-replay-frame", onFrame);
-  win.__aiLeagueCompetitorRailCleanup = () => {
+  window.addEventListener("resize", onResize);
+  win.__aiLeagueBroadcastDrawerCleanup = () => {
     document.removeEventListener("ai-league-replay-frame", onFrame);
+    window.removeEventListener("resize", onResize);
   };
 }
 
@@ -3125,33 +3811,6 @@ function curatedWarRoomEvents(
   return curated.sort((a, b) => a.turn - b.turn || a.sequence - b.sequence);
 }
 
-function mountAiLeagueWarRoom(input: AiLeagueReplayOverlayInput): void {
-  const win = window as Window & { __aiLeagueWarRoomCleanup?: () => void };
-  win.__aiLeagueWarRoomCleanup?.();
-  document.getElementById("ai-league-war-room")?.remove();
-  const telemetry =
-    input.spectatorTelemetry as AiLeagueSpectatorTelemetry | null;
-  const events = curatedWarRoomEvents(telemetry, input.decisions);
-  const root = document.createElement("aside");
-  root.id = "ai-league-war-room";
-  root.append(
-    renderWarRoomFeed(events, {
-      onJumpToTurn: (turn) => {
-        document.dispatchEvent(
-          new CustomEvent("ai-league-replay-jump-turn", {
-            detail: { turnNumber: turn },
-            bubbles: true,
-          }),
-        );
-      },
-    }),
-  );
-  document.body.appendChild(root);
-  win.__aiLeagueWarRoomCleanup = () => {
-    root.remove();
-  };
-}
-
 /**
  * `spawn`/`alliance`/`first_strike`/`betrayal`/`nuke`/`elimination` markers,
  * derived from the same telemetry events as the War Room feed (unfiltered by
@@ -3241,47 +3900,6 @@ function aiLeagueFinishTurn(
     0,
   );
   return Math.max(1, decisionMax, eventMax);
-}
-
-function mountAiLeagueTimeline(input: AiLeagueReplayOverlayInput): void {
-  const win = window as Window & { __aiLeagueTimelineCleanup?: () => void };
-  win.__aiLeagueTimelineCleanup?.();
-  document.getElementById("ai-league-timeline")?.remove();
-  const telemetry =
-    input.spectatorTelemetry as AiLeagueSpectatorTelemetry | null;
-  const totalTurns = aiLeagueFinishTurn(input, telemetry);
-  const markers: TimelineMarker[] = [
-    ...matchTimelineEventMarkers(telemetry),
-    {
-      kind: "finish",
-      turn: totalTurns,
-      sequence: Number.MAX_SAFE_INTEGER,
-      label: translateText("ai_league_replay.timeline_finish"),
-    },
-  ];
-  const root = document.createElement("div");
-  root.id = "ai-league-timeline";
-  root.append(
-    renderMatchTimeline(markers, {
-      totalTurns,
-      // Full Replay is unrestricted (unlike a live Premiere, which must
-      // never seek past the live edge) — this literally IS the spec's
-      // `maxSeekableTurn: null` case.
-      maxSeekableTurn: null,
-      onSeek: (turn) => {
-        document.dispatchEvent(
-          new CustomEvent("ai-league-replay-jump-turn", {
-            detail: { turnNumber: turn },
-            bubbles: true,
-          }),
-        );
-      },
-    }),
-  );
-  document.body.appendChild(root);
-  win.__aiLeagueTimelineCleanup = () => {
-    root.remove();
-  };
 }
 
 function communicationThreadsHtml(
