@@ -90,8 +90,50 @@ async function main(): Promise<void> {
       argValue("latest-premiere-file"),
     );
 
+  // `ORDINARY_EPISODE` itself stays honest (`watchHref: null` — a pure
+  // data fixture has no filesystem access to back a real link with real
+  // bytes; see its own doc comment). THIS script, unlike that data file,
+  // actually writes artifacts to disk, so it can honestly promote the
+  // link to a real one by writing the self-contained spectator page the
+  // href points at — same pattern production uses
+  // (`coworld-league-mirror.ts`'s `/ai-league-runs/<key>/spectator.html`,
+  // served statically by `ai-agent-demo-server.ts`), just hand-authored
+  // instead of unpacked from a real replay. A shallow copy, never a
+  // mutation of the shared exported constant other consumers rely on.
+  // `league-` prefixed: `isProxyWarPublicLeaguePath`'s allowlist (checked
+  // by the leagueWrapperOnly gate in `ai-agent-demo-server.ts`, the mode
+  // every fixture/production league deployment actually runs in) only
+  // lets `/ai-league-runs/<key>/...` through for `league-*` keys — the
+  // exact same prefix `coworld-league-mirror.ts`'s real
+  // `publicRunKey = \`league-${replay.runID}\`` always applies. Omitting
+  // it 404s with "AI league replay record not found." before the file
+  // is ever looked up, confirmed live.
+  const ordinaryRunKey = "league-fixture-ordinary-0001";
+  const ordinarySpectatorDir = path.join(
+    artifactsDir,
+    "ai-league-runs",
+    ordinaryRunKey,
+  );
+  await fs.mkdir(ordinarySpectatorDir, { recursive: true });
+  await fs.writeFile(
+    path.join(ordinarySpectatorDir, "spectator.html"),
+    "<!doctype html><html lang=\"en\"><head><meta charset=\"UTF-8\">" +
+      "<title>Iron Vanguard vs House Keystone — Proxy War fixture replay</title>" +
+      "</head><body><h1>Iron Vanguard vs House Keystone</h1>" +
+      "<p>Fixture spectator page for episodeRequestId=" +
+      ORDINARY_EPISODE.episodeRequestId +
+      ". This fixture episode has no real replay bytes (see " +
+      "PublicProductFixtureData.ts's ORDINARY_EPISODE doc comment); this " +
+      "static page exists only so the /watch archive card's link " +
+      "genuinely resolves end to end in tests.</p></body></html>",
+  );
+  const ordinaryEpisodeWithWatchHref: CoworldLeagueEpisodeRow = {
+    ...ORDINARY_EPISODE,
+    watchHref: `/ai-league-runs/${ordinaryRunKey}/spectator.html`,
+  };
+
   const episodes: CoworldLeagueEpisodeRow[] = [
-    ORDINARY_EPISODE,
+    ordinaryEpisodeWithWatchHref,
     DEGRADED_EPISODE,
   ];
   if (dramaEpisode !== undefined) {

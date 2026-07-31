@@ -41,7 +41,7 @@ afterAll(async () => {
 }, 20_000);
 
 describe("first visit -> a completed match in two clicks", () => {
-  test("homepage -> Watch -> a match card reaches the match detail page", async () => {
+  test("homepage -> Watch -> a match card's own watch link resolves", async () => {
     await browser.goto(fixture.origin);
     // Click 1: the homepage's nav link into the Watch archive.
     const watchHref = await browser.evaluate<string | null>(
@@ -49,13 +49,26 @@ describe("first visit -> a completed match in two clicks", () => {
     );
     expect(watchHref).toBe("/watch");
     await browser.goto(`${fixture.origin}/watch`);
+    // A match card's own watch link is one of three real shapes
+    // (WatchPage.ts's `renderMatchCard`, `match.fullRenderHref ??
+    // match.watchHref`): `/match/:matchId` for a genuinely featured
+    // match, `/ai-league-runs/:runKey/spectator.html` for a
+    // self-contained legacy replay, or `/ai-league-replay/:runId` for a
+    // full-client render — never assume just the first shape (a fixed
+    // archive episode with no real replay bytes can legitimately use
+    // only the second; requiring `/match/` here previously masked a
+    // real dead-link bug by never actually resolving the found link's
+    // content, only its HTTP status, see PublicProductFixtureData.ts's
+    // ORDINARY_EPISODE doc comment).
+    const linkSelector =
+      'a[href^="/match/"], a[href^="/ai-league-runs/"], a[href^="/ai-league-replay/"]';
     await browser.waitFor(
-      `document.querySelectorAll('a[href*="/match/"]').length > 0`,
+      `document.querySelectorAll('${linkSelector}').length > 0`,
     );
-    // Click 2: a real completed match's own detail-page link.
+    // Click 2: a real completed match's own watch link.
     const matchLink = await browser.evaluate<string | null>(`
       (() => {
-        const links = [...document.querySelectorAll('a[href*="/match/"]')];
+        const links = [...document.querySelectorAll('${linkSelector}')];
         return links.length > 0 ? links[0].getAttribute('href') : null;
       })()
     `);
