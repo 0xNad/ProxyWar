@@ -736,6 +736,20 @@ export function buildEpisodeRow(input: {
    * for every existing consumer.
    */
   premiereHref?: string | null;
+  /**
+   * Product overhaul spec Stage 5. Summary of the run's
+   * `director-cut-plan.json` (durationEstimateSeconds, segmentCount) when
+   * one exists on disk for this run's unpacked directory; null/omitted
+   * otherwise (the artifact simply isn't there yet — a hosted-mirror-only
+   * episode, or a bundle unpacked before Director Cut plans existed). The
+   * caller (`coworld-league-mirror.ts`) resolves this from the local
+   * filesystem before calling — this function stays pure/IO-free like
+   * every other field here.
+   */
+  directorCut?: {
+    durationEstimateSeconds: number;
+    segmentCount: number;
+  } | null;
 }): CoworldLeagueEpisodeRow {
   const { meta, replay } = input;
   const colors = playerColorsFromSpectatorReplay(replay.spectatorReplay);
@@ -780,6 +794,9 @@ export function buildEpisodeRow(input: {
     fullRenderHref: input.fullRenderHref,
     ...(typeof input.premiereHref === "string" && input.premiereHref.length > 0
       ? { premiereHref: input.premiereHref }
+      : {}),
+    ...(input.directorCut !== null && input.directorCut !== undefined
+      ? { directorCut: input.directorCut }
       : {}),
   };
 }
@@ -986,4 +1003,40 @@ export function premiereHrefForEpisode(
   return revealedPremiereIds.has(premiereId)
     ? `/premiere/${encodeURIComponent(premiereId)}`
     : null;
+}
+
+/**
+ * Parses `director-cut-plan.json` raw file contents into the small summary
+ * `buildEpisodeRow`'s `directorCut` field carries — never the full plan
+ * (segments/notes/participatingAgents stay a per-match artifact fetched
+ * directly by the client player, never duplicated into data.json). Pure:
+ * the caller (`coworld-league-mirror.ts`) owns the actual file read and
+ * its own existence/ENOENT handling; this only has to handle "the file
+ * exists but isn't a well-formed DirectorCutPlan" — malformed JSON, wrong
+ * shape, or a non-finite/negative duration or segment count all resolve
+ * to `null` rather than a garbage row.
+ */
+export function parseDirectorCutPlanSummary(
+  raw: string,
+): { durationEstimateSeconds: number; segmentCount: number } | null {
+  let value: unknown;
+  try {
+    value = JSON.parse(raw);
+  } catch {
+    return null;
+  }
+  const record = asRecord(value);
+  if (record === null || record.reportKind !== "director-cut-plan") {
+    return null;
+  }
+  const durationEstimateSeconds = asNumber(record.estimatedDurationSeconds);
+  const segments = asArray(record.segments);
+  if (
+    durationEstimateSeconds === null ||
+    durationEstimateSeconds < 0 ||
+    segments.length === 0
+  ) {
+    return null;
+  }
+  return { durationEstimateSeconds, segmentCount: segments.length };
 }

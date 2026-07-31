@@ -8,6 +8,7 @@ import {
   mapNameFromVariant,
   mergeEpisodeRows,
   parseCompletedEpisodeMetaList,
+  parseDirectorCutPlanSummary,
   parseHostedReplayPayload,
   parseLeagueSummary,
   pickCompetitionDivision,
@@ -805,6 +806,95 @@ describe("revealed-premiere battle-card links (every round premieres, 2026-07-22
       expect(row).not.toHaveProperty("premiereHref");
       expect(JSON.stringify(row)).not.toContain("premiere");
     }
+  });
+
+  test("buildEpisodeRow carries directorCut only when one is resolved (additive data.json)", () => {
+    const replay = parseHostedReplayPayload(replayPayloadFixture);
+    expect(replay).not.toBeNull();
+    if (replay === null) {
+      return;
+    }
+    const meta = parseCompletedEpisodeMetaList(replayMetaFixture)[1];
+    const base = {
+      meta,
+      replay,
+      roundNumber: 267,
+      watchHref: null,
+      fullRenderHref: "/ai-league-replay/coworld-run",
+    };
+    const withPlan = buildEpisodeRow({
+      ...base,
+      directorCut: { durationEstimateSeconds: 420, segmentCount: 9 },
+    });
+    expect(withPlan.directorCut).toEqual({
+      durationEstimateSeconds: 420,
+      segmentCount: 9,
+    });
+    // Absent or null input leaves the field entirely OFF the row — the
+    // common case today, since the hosted mirror has no
+    // director-cut-plan.json for most episodes yet (see
+    // parseDirectorCutPlanSummary's own doc).
+    for (const row of [
+      buildEpisodeRow(base),
+      buildEpisodeRow({ ...base, directorCut: null }),
+    ]) {
+      expect(row).not.toHaveProperty("directorCut");
+      expect(JSON.stringify(row)).not.toContain("directorCut");
+    }
+  });
+});
+
+describe("parseDirectorCutPlanSummary (product overhaul spec Stage 5)", () => {
+  const validPlan = () =>
+    JSON.stringify({
+      schemaVersion: 1,
+      reportKind: "director-cut-plan",
+      runID: "run-1",
+      matchID: "match-1",
+      generatedAt: "2026-07-31T00:00:00.000Z",
+      totalTurns: 50_400,
+      segments: [
+        { startTurn: 0, endTurn: 250, speed: "normal" },
+        { startTurn: 251, endTurn: 50_400, speed: "fast" },
+      ],
+      importantTurnCount: 251,
+      estimatedDurationSeconds: 724,
+      degraded: true,
+      notes: [],
+    });
+
+  test("extracts durationEstimateSeconds and segmentCount from a well-formed plan", () => {
+    expect(parseDirectorCutPlanSummary(validPlan())).toEqual({
+      durationEstimateSeconds: 724,
+      segmentCount: 2,
+    });
+  });
+
+  test("rejects malformed JSON, wrong reportKind, missing segments, and a negative duration", () => {
+    expect(parseDirectorCutPlanSummary("not json")).toBeNull();
+    expect(
+      parseDirectorCutPlanSummary(
+        JSON.stringify({ reportKind: "something-else" }),
+      ),
+    ).toBeNull();
+    expect(
+      parseDirectorCutPlanSummary(
+        JSON.stringify({
+          reportKind: "director-cut-plan",
+          estimatedDurationSeconds: 300,
+          segments: [],
+        }),
+      ),
+    ).toBeNull();
+    expect(
+      parseDirectorCutPlanSummary(
+        JSON.stringify({
+          reportKind: "director-cut-plan",
+          estimatedDurationSeconds: -5,
+          segments: [{ startTurn: 0, endTurn: 10 }],
+        }),
+      ),
+    ).toBeNull();
   });
 });
 

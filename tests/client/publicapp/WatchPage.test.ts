@@ -236,6 +236,37 @@ describe("watch-page replay archive", () => {
     expect(details?.textContent).toContain("Winner Co");
   });
 
+  it("shows a Director Cut duration badge when the match carries one, and omits it otherwise", async () => {
+    stubReadModelFetch(
+      readModel({
+        matches: [
+          match({
+            matchId: "with-cut",
+            completedAt: "2026-06-15T00:00:00.000Z",
+            map: "Cut Map",
+            directorCut: { durationEstimateSeconds: 700, segmentCount: 9 },
+          }),
+          match({
+            matchId: "without-cut",
+            completedAt: "2026-06-14T00:00:00.000Z",
+            map: "No Cut Map",
+            directorCut: null,
+          }),
+        ],
+      }),
+    );
+    const el = mount();
+    await flushMicrotasks();
+
+    const cards = Array.from(el.querySelectorAll("li"));
+    expect(cards).toHaveLength(2);
+    // 700 seconds rounds to 12 minutes.
+    expect(cards[0]?.textContent).toContain("watch.director_cut_duration");
+    expect(cards[1]?.textContent).not.toContain(
+      "watch.director_cut_duration",
+    );
+  });
+
   it("resolves the winner via the participant's own displayName when the slug isn't a known agent", () => {
     const m = match({
       winnerAgentSlug: "ghost-slug",

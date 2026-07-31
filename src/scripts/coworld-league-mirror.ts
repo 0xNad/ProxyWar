@@ -25,6 +25,7 @@ import {
   buildStandingRows,
   mergeEpisodeRows,
   parseCompletedEpisodeMetaList,
+  parseDirectorCutPlanSummary,
   parseHostedReplayPayload,
   parseLeagueSummary,
   pickCompetitionDivision,
@@ -450,7 +451,7 @@ async function unpackEpisodeRunDir(
   replay: ParsedHostedReplay,
   runsRootDir: string,
   minimumFreeBytes: number,
-): Promise<{ watchHref: string; fullRenderHref: string } | null> {
+): Promise<{ watchHref: string; fullRenderHref: string; runDir: string } | null> {
   if (replay.spectatorReplay === null) {
     return null;
   }
@@ -503,7 +504,31 @@ async function unpackEpisodeRunDir(
   return {
     watchHref: `/ai-league-runs/${encodedRunKey}/spectator.html`,
     fullRenderHref: `/ai-league-replay/${encodedRunKey}`,
+    runDir,
   };
+}
+
+/**
+ * Product overhaul spec Stage 5: reads `director-cut-plan.json` from an
+ * episode's unpacked run directory, when one exists. Tolerant of absence —
+ * a missing file (the common case: the hosted platform doesn't inline this
+ * artifact today, so it's only ever present for episodes a LOCAL run wrote
+ * one for) or any other read failure resolves to `null`, exactly like
+ * every other optional-artifact path in this mirror. Parsing itself is
+ * delegated to the pure, unit-tested `parseDirectorCutPlanSummary`.
+ */
+async function readDirectorCutSummaryFromRunDir(
+  runDir: string,
+): Promise<{ durationEstimateSeconds: number; segmentCount: number } | null> {
+  try {
+    const raw = await fs.readFile(
+      path.join(runDir, "director-cut-plan.json"),
+      "utf8",
+    );
+    return parseDirectorCutPlanSummary(raw);
+  } catch {
+    return null;
+  }
 }
 
 function log(message: string): void {
@@ -888,6 +913,10 @@ async function syncOnce(options: MirrorOptions): Promise<void> {
           `Pinned replay ${meta.episodeRequestId} did not produce its declared run bundle`,
         );
       }
+      const directorCut =
+        unpacked !== null
+          ? await readDirectorCutSummaryFromRunDir(unpacked.runDir)
+          : null;
       freshEpisodes.push(
         buildEpisodeRow({
           meta,
@@ -902,6 +931,7 @@ async function syncOnce(options: MirrorOptions): Promise<void> {
             meta.episodeRequestId,
             revealedPremiereIds,
           ),
+          directorCut,
         }),
       );
       recoveredEpisodeRequestIds.add(meta.episodeRequestId);
