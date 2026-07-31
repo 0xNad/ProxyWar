@@ -136,6 +136,15 @@ class RulesetStrategyCommissioner(BaselineCommissioner):
         config = self._config()
         return timedelta(hours=config.ranking.ewma_halflife_hours)
 
+    def _leaderboard_ewma_halflife_rounds(self, ctx: DivisionLeaderboardContext) -> float | None:
+        return self._config().ranking.ewma_halflife_rounds
+
+    def _leaderboard_score_scale(self, ctx: DivisionLeaderboardContext) -> float:
+        return self._config().ranking.score_scale
+
+    def _leaderboard_provisional_min_rounds(self, ctx: DivisionLeaderboardContext) -> int:
+        return self._config().ranking.provisional_min_rounds
+
     def describe_division(self, ctx: DivisionDescriptionContext) -> DivisionCommissionerDescriptionPublic:
         config = self._config()
         memberships = list(ctx.active_memberships)

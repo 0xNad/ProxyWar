@@ -221,8 +221,10 @@ class BaselineCommissioner(Commissioner):
             return []
 
         completed_rounds_by_id = {round_row.id: round_row for round_row in ctx.completed_rounds}
+        completed_round_age = {round_row.id: age for age, round_row in enumerate(ctx.completed_rounds)}
         latest_completed_at = ctx.completed_rounds[0].completed_at
         assert latest_completed_at is not None, f"Completed round {ctx.completed_rounds[0].id} is missing completed_at"
+        round_half_life = self._leaderboard_ewma_halflife_rounds(ctx)
 
         player_rounds: dict[tuple[PlayerId, UUID], LeaderboardRoundResultSnapshot] = {}
         for result in ctx.round_results:
@@ -246,10 +248,13 @@ class BaselineCommissioner(Commissioner):
                     player_name=player_round.player_name,
                 )
             assert round_row.completed_at is not None, f"Completed round {round_row.id} is missing completed_at"
-            weight = 0.5 ** (
-                (latest_completed_at - round_row.completed_at).total_seconds()
-                / self._leaderboard_ewma_halflife(ctx).total_seconds()
-            )
+            if round_half_life is not None:
+                weight = 0.5 ** (completed_round_age[round_row.id] / round_half_life)
+            else:
+                weight = 0.5 ** (
+                    (latest_completed_at - round_row.completed_at).total_seconds()
+                    / self._leaderboard_ewma_halflife(ctx).total_seconds()
+                )
             aggs[player_round.player_id].policy_version_ids.add(player_round.policy_version_id)
             aggs[player_round.player_id].weighted_score_sum += player_round.score * weight
             aggs[player_round.player_id].weight_sum += weight
@@ -279,9 +284,12 @@ class BaselineCommissioner(Commissioner):
                 for round_row in ctx.recent_rounds
             ]
 
+        provisional_min_rounds = self._leaderboard_provisional_min_rounds(ctx)
+        score_scale = self._leaderboard_score_scale(ctx)
         ranked_aggs = sorted(
             aggs.values(),
             key=lambda agg: (
+                rounds_played_by_player[agg.player_id] < provisional_min_rounds,
                 -agg.score(),
                 agg.player_name or "",
                 str(agg.player_id),
@@ -292,7 +300,7 @@ class BaselineCommissioner(Commissioner):
                 player_id=agg.player_id,
                 player_name=agg.player_name,
                 rank=rank,
-                score=agg.score(),
+                score=agg.score() * score_scale,
                 rounds_played=rounds_played_by_player[agg.player_id],
                 policy_version_ids=agg.policy_version_ids,
                 recent_rounds=build_recent_rounds(agg.player_id),
@@ -302,6 +310,15 @@ class BaselineCommissioner(Commissioner):
 
     def _leaderboard_ewma_halflife(self, ctx: DivisionLeaderboardContext) -> timedelta:
         return DIVISION_LEADERBOARD_SCORE_EWMA_HALFLIFE
+
+    def _leaderboard_ewma_halflife_rounds(self, ctx: DivisionLeaderboardContext) -> float | None:
+        return None
+
+    def _leaderboard_score_scale(self, ctx: DivisionLeaderboardContext) -> float:
+        return 1.0
+
+    def _leaderboard_provisional_min_rounds(self, ctx: DivisionLeaderboardContext) -> int:
+        return 0
 
     def on_round_completed(self, ctx: OnRoundCompletedContext) -> OnRoundCompletedResult:
         return OnRoundCompletedResult(
