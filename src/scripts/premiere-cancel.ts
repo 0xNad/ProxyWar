@@ -1,6 +1,7 @@
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { loadStore, parseIdArg, resolveRootOverrides, upsertRecord } from "./premiere-schedule-lib";
+import { removeFeaturedMatchRetentionPin } from "../server/agents/FeaturedMatchRetentionPin";
 
 /**
  * `premiere:cancel --episode <id>` — Stage 3 item 3's operator override.
@@ -55,6 +56,13 @@ async function main(): Promise<void> {
     updatedAt: new Date().toISOString(),
   };
   await upsertRecord(stateRoot, updated);
+  // Never deletes artifacts directly — only removes this record's OWN
+  // retention claim (see FeaturedMatchRetentionPin.ts's cooperative-
+  // ownership doc); a still-live premiere hold's own pin, if any, survives
+  // untouched.
+  await removeFeaturedMatchRetentionPin(updated.matchId, {
+    artifactsRoot: roots.artifactsRoot,
+  });
 
   if (json) {
     console.log(JSON.stringify({ cancelled: updated }, null, 2));

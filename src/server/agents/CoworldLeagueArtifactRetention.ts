@@ -248,6 +248,72 @@ export async function readCoworldLeagueRetentionPins(
   return parseCoworldLeagueRetentionPins(value, pinManifestPath);
 }
 
+/**
+ * Raw manifest read (preserves the `pins[]` array with its `reason` field,
+ * unlike {@link readCoworldLeagueRetentionPins}'s Set-based projection) for
+ * a read-modify-write cycle. ENOENT-tolerant — a pin manifest that has
+ * never been written yet is a normal cold start, not an error. Same
+ * behavior `replay-premiere-loop.ts`'s own (private, unexported)
+ * `readPinManifest` has always had; exported here so a second writer
+ * (`FeaturedMatchRetentionPin.ts`) can share the exact same manifest
+ * format/file without a parallel pinning system, per the product-overhaul
+ * Stage 3 item 7 retention-pins requirement. `replay-premiere-loop.ts`
+ * itself is deliberately left using its own local copy rather than
+ * refactored to call this — it is a live, continuously-running critical
+ * loop, and swapping its internals for a decoupling-only refactor carries
+ * real risk for zero behavior change.
+ */
+export async function readCoworldLeagueRetentionPinManifest(
+  pinManifestPath: string,
+): Promise<CoworldLeagueRetentionPinManifest> {
+  try {
+    const raw: unknown = JSON.parse(
+      await fs.readFile(pinManifestPath, "utf8"),
+    );
+    if (isJsonObject(raw) && raw.schemaVersion === 1 && Array.isArray(raw.pins)) {
+      // Full validation (safe ids, no cross-pin duplicates, exact keys) —
+      // matches writePinManifest's own "fail closed" discipline: a manifest
+      // this reader can't validate is a loud failure, not a silent partial
+      // read, since a malformed pin list breaks the mirror's own read on
+      // the next sync tick regardless of who wrote it.
+      parseCoworldLeagueRetentionPins(raw, pinManifestPath);
+      return raw as unknown as CoworldLeagueRetentionPinManifest;
+    }
+    throw new Error(`retention pin manifest is malformed: ${pinManifestPath}`);
+  } catch (error) {
+    if (
+      error !== null &&
+      typeof error === "object" &&
+      "code" in error &&
+      (error as NodeJS.ErrnoException).code === "ENOENT"
+    ) {
+      return { schemaVersion: 1, pins: [] };
+    }
+    throw error;
+  }
+}
+
+/** Atomic temp+rename write, validated before write — same discipline as `replay-premiere-loop.ts`'s own local `writePinManifest`. */
+export async function writeCoworldLeagueRetentionPinManifest(
+  pinManifestPath: string,
+  manifest: CoworldLeagueRetentionPinManifest,
+): Promise<void> {
+  parseCoworldLeagueRetentionPins(manifest, pinManifestPath);
+  await fs.mkdir(path.dirname(pinManifestPath), { recursive: true });
+  const temporaryPath = `${pinManifestPath}.${process.pid}.${randomUUID()}.tmp`;
+  try {
+    await fs.writeFile(
+      temporaryPath,
+      `${JSON.stringify(manifest, null, 2)}\n`,
+      "utf8",
+    );
+    await fs.rename(temporaryPath, pinManifestPath);
+  } catch (error) {
+    await fs.rm(temporaryPath, { force: true }).catch(() => undefined);
+    throw error;
+  }
+}
+
 function isJsonObject(value: unknown): value is JsonObject {
   return value !== null && typeof value === "object" && !Array.isArray(value);
 }

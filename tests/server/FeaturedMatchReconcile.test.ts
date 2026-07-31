@@ -25,6 +25,8 @@ import {
 let featuredMatchRoot: string;
 let storageStateDir: string;
 let replayPremierePrivateStateRoot: string;
+let artifactsRoot: string;
+let pinManifestPath: string;
 
 beforeEach(async () => {
   const scratch = await fs.mkdtemp(
@@ -33,6 +35,12 @@ beforeEach(async () => {
   featuredMatchRoot = path.join(scratch, "featured-matches");
   storageStateDir = path.join(scratch, "storage");
   replayPremierePrivateStateRoot = path.join(scratch, "replay-premiere");
+  // Isolated from the real repo's own artifacts/ and
+  // deploy/coworld-league-retention-pins.json — the reconcile pass now
+  // also attempts a retention-pin "extend" sync, and this test root must
+  // never read or write anything under the actual checkout.
+  artifactsRoot = path.join(scratch, "artifacts");
+  pinManifestPath = path.join(scratch, "retention-pins.json");
   await fs.mkdir(featuredMatchRoot, { recursive: true });
 });
 
@@ -148,6 +156,8 @@ async function seedArchive(
 const options = () => ({
   storageStateDir,
   replayPremierePrivateStateRoot,
+  artifactsRoot,
+  pinManifestPath,
 });
 
 describe("reconcileFeaturedMatchStore", () => {
@@ -332,6 +342,14 @@ describe("reconcileFeaturedMatchStore", () => {
     const result = await reconcileFeaturedMatchStore(featuredMatchRoot, {
       storageStateDir: coldStorageDir,
       replayPremierePrivateStateRoot: coldReplayPremiereRoot,
+      artifactsRoot: path.join(
+        path.dirname(featuredMatchRoot),
+        "never-created-artifacts",
+      ),
+      pinManifestPath: path.join(
+        path.dirname(featuredMatchRoot),
+        "never-created-pins.json",
+      ),
     });
     expect(result.matches[0].state).toBe("published");
   });

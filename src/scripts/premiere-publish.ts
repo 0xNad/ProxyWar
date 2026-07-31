@@ -7,6 +7,7 @@ import {
   upsertRecord,
   validateSchedule,
 } from "./premiere-schedule-lib";
+import { syncFeaturedMatchRetentionPin } from "../server/agents/FeaturedMatchRetentionPin";
 
 /**
  * `premiere:publish --episode <id>` — Stage 3 item 3's operator "yes, run
@@ -70,6 +71,12 @@ async function main(): Promise<void> {
     updatedAt: new Date().toISOString(),
   };
   await upsertRecord(stateRoot, updated);
+  // Best-effort — see FeaturedMatchRetentionPin.ts's own doc for why this
+  // may legitimately no-op today (the episode may not have reached the
+  // league mirror yet) and self-heals via the next reconcile-on-read pass.
+  await syncFeaturedMatchRetentionPin(updated, {
+    artifactsRoot: roots.artifactsRoot,
+  });
 
   if (json) {
     console.log(JSON.stringify({ published: updated }, null, 2));

@@ -12,6 +12,7 @@ import {
   type FeaturedMatchState,
   type FeaturedMatchStoreFile,
 } from "./FeaturedMatch";
+import { syncFeaturedMatchRetentionPin } from "./FeaturedMatchRetentionPin";
 import { ReplayPremiereArchiveStore } from "../replay-premiere/ReplayPremiereArchiveIndex";
 import { resolveReplayPremierePrivateStateRoot } from "../replay-premiere/ReplayPremiereSecrets";
 import { derivePremiereId } from "../replay-premiere/ReplayPremiereLoopCore";
@@ -108,6 +109,9 @@ export interface ReconcileFeaturedMatchStoreOptions {
   /** `resolveFeaturedMatchStateRoot()`'s own override knob — passed straight through by callers that already resolved it. */
   storageStateDir?: string;
   replayPremierePrivateStateRoot?: string;
+  /** Forwarded to `syncFeaturedMatchRetentionPin` — see that module's own doc for the "extend" half of the Stage 3 item 7 retention-pin requirement this pass also performs. */
+  artifactsRoot?: string;
+  pinManifestPath?: string;
 }
 
 export async function reconcileFeaturedMatchStore(
@@ -121,7 +125,21 @@ export async function reconcileFeaturedMatchStore(
       match.episodeRequestId !== null &&
       (match.state === "published" || match.state === "revealed"),
   );
-  if (reconcilable.length === 0) return store;
+  // Opportunistic retention-pin "extend" pass — independent of the state
+  // flip below (a pin claim doesn't need the record's state to change to
+  // be worth attempting again; the mirror may simply have caught up since
+  // the last attempt). Best-effort and deterministic (awaited, not
+  // fire-and-forget — this function's callers, including tests, must be
+  // able to trust the pin write already landed once this call resolves):
+  // `syncFeaturedMatchRetentionPin` itself never throws.
+  await Promise.all(
+    reconcilable.map((match) =>
+      syncFeaturedMatchRetentionPin(match, {
+        artifactsRoot: options.artifactsRoot,
+        pinManifestPath: options.pinManifestPath,
+      }),
+    ),
+  );
 
   const latestPointer = await bestEffortLatestPointer(
     options.storageStateDir,
