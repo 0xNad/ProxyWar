@@ -102,6 +102,55 @@ const PublicPremiereLatestSchema = z.object({
   href: z.string(),
 });
 
+const PublicFeaturedMatchResultSchema = z.object({
+  winnerAgentId: z.string().nullable(),
+  placements: z.array(
+    z.object({ agentId: z.string().nullable(), placement: z.number() }),
+  ),
+});
+
+/**
+ * The PUBLIC-SAFE subset of the server's `FeaturedMatch` model (spec
+ * Stage 3 items 1/5), independent of the server's own Zod schema per this
+ * file's class doc. Deliberately never carries a `participants` field —
+ * see `ProxyWarPublicReadModel.ts`'s `PublicFeaturedMatch` doc for why.
+ * `result`/`postMatchSummary` are `null` until the server's own embargo
+ * projection decides the record is revealed; this client schema only
+ * validates wire SHAPE, it does not re-derive the embargo itself.
+ */
+export const PublicFeaturedMatchSchema = z.object({
+  matchId: z.string(),
+  lane: z.enum(["premiere", "archive"]),
+  title: z.string(),
+  description: z.string(),
+  map: z.string(),
+  format: z.string(),
+  category: z
+    .enum([
+      "top_four",
+      "champion_vs_challengers",
+      "version_debut",
+      "rivalry",
+      "builder_showcase",
+      "open_source_challenge",
+      "notable_league_battle",
+    ])
+    .nullable(),
+  state: z.enum([
+    "candidate",
+    "scheduled",
+    "published",
+    "revealed",
+    "archived",
+    "cancelled",
+  ]),
+  scheduledAt: z.string().nullable(),
+  revealAt: z.string().nullable(),
+  postMatchSummary: z.string().nullable(),
+  result: PublicFeaturedMatchResultSchema.nullable(),
+});
+export type PublicFeaturedMatch = z.infer<typeof PublicFeaturedMatchSchema>;
+
 export const ReadModelSchema = z.object({
   schemaVersion: z.literal(1),
   generatedAt: z.string(),
@@ -134,7 +183,7 @@ export const ReadModelSchema = z.object({
     }),
   ),
   matches: z.array(PublicMatchSchema),
-  featuredMatches: z.array(z.never()),
+  featuredMatches: z.array(PublicFeaturedMatchSchema),
   premieres: z.object({
     live: PublicPremiereLiveSchema.nullable(),
     latest: PublicPremiereLatestSchema.nullable(),

@@ -5,7 +5,7 @@
  * Follows the mount-into-jsdom + stubbed global fetch convention already
  * established in `WatchPage.test.ts`.
  */
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Mock } from "vitest";
 import "../../../src/client/publicapp/LobbyPage";
 import type { LobbyPage } from "../../../src/client/publicapp/LobbyPage";
@@ -324,5 +324,180 @@ describe("lobby-page loads no game bundle", () => {
       "/ai-league-runs/league/read-model.json",
       expect.anything(),
     );
+  });
+});
+
+describe("lobby-page hero live timers", () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("state A: the live elapsed-time note ticks upward every ~1s", async () => {
+    vi.setSystemTime(new Date("2026-07-31T00:00:10.000Z"));
+    stubReadModelFetch(
+      readModel({
+        premieres: {
+          live: {
+            premiereId: "prem_a",
+            roundNumber: 1,
+            mapLabel: "Ashfields",
+            scheduledAt: "2026-07-31T00:00:00.000Z",
+            premierePageLive: true,
+          },
+          latest: null,
+        },
+      }),
+    );
+    const el = mount();
+    await flushMicrotasks();
+    expect(el.textContent).toContain('lobby.live_elapsed:{"duration":"10s"}');
+    vi.advanceTimersByTime(3000);
+    await flushMicrotasks();
+    expect(el.textContent).toContain('lobby.live_elapsed:{"duration":"13s"}');
+  });
+
+  it("state B: the live countdown ticks downward every ~1s", async () => {
+    vi.setSystemTime(new Date("2026-07-31T00:00:00.000Z"));
+    stubReadModelFetch(
+      readModel({
+        premieres: {
+          live: {
+            premiereId: "prem_b",
+            roundNumber: 2,
+            mapLabel: "Britannia",
+            scheduledAt: "2026-07-31T00:01:00.000Z",
+            premierePageLive: false,
+          },
+          latest: null,
+        },
+      }),
+    );
+    const el = mount();
+    await flushMicrotasks();
+    expect(el.textContent).toContain(
+      'lobby.countdown_value:{"duration":"1m 0s"}',
+    );
+    vi.advanceTimersByTime(5000);
+    await flushMicrotasks();
+    expect(el.textContent).toContain(
+      'lobby.countdown_value:{"duration":"55s"}',
+    );
+  });
+
+  it("state B: an armed reminder fires at scheduled time — flashes the tab title, shows the live cue, and marks itself fired (never re-prompts)", async () => {
+    localStorage.clear();
+    vi.setSystemTime(new Date("2026-07-31T00:00:00.000Z"));
+    localStorage.setItem("proxywar:premiere-reminder:prem_fire", "armed");
+    stubReadModelFetch(
+      readModel({
+        premieres: {
+          live: {
+            premiereId: "prem_fire",
+            roundNumber: 4,
+            mapLabel: "Iceland",
+            scheduledAt: "2026-07-31T00:00:05.000Z",
+            premierePageLive: false,
+          },
+          latest: null,
+        },
+      }),
+    );
+    const el = mount();
+    await flushMicrotasks();
+    expect(el.textContent).not.toContain("lobby.remind_me_live_cue");
+    vi.setSystemTime(new Date("2026-07-31T00:00:06.000Z"));
+    vi.advanceTimersByTime(1000);
+    await flushMicrotasks();
+    expect(document.title.startsWith("LIVE:")).toBe(true);
+    expect(el.textContent).toContain("lobby.remind_me_live_cue");
+    expect(el.textContent).toContain("lobby.remind_me_sent");
+    expect(
+      localStorage.getItem("proxywar:premiere-reminder:prem_fire"),
+    ).toBe("fired");
+  });
+});
+
+describe("lobby-page hero state B: Add to calendar and Remind me", () => {
+  afterEach(() => {
+    localStorage.clear();
+  });
+
+  function upcomingReadModel(): ReadModel {
+    return readModel({
+      premieres: {
+        live: {
+          premiereId: "prem_ics",
+          roundNumber: 5,
+          mapLabel: "Ashfields",
+          scheduledAt: new Date(Date.now() + 600_000).toISOString(),
+          premierePageLive: false,
+        },
+        latest: null,
+      },
+    });
+  }
+
+  it("Add to calendar downloads a valid ICS blob built only from round/map — never a participant name", async () => {
+    stubReadModelFetch(upcomingReadModel());
+    const el = mount();
+    await flushMicrotasks();
+    const link = el.querySelector('a[href="#"]') as HTMLAnchorElement | null;
+    expect(link).not.toBeNull();
+    let capturedBlob: Blob | null = null;
+    const createObjectURLSpy = vi
+      .spyOn(URL, "createObjectURL")
+      .mockImplementation((obj: Blob | MediaSource) => {
+        capturedBlob = obj as Blob;
+        return "blob:mock-url";
+      });
+    const revokeObjectURLSpy = vi
+      .spyOn(URL, "revokeObjectURL")
+      .mockImplementation(() => {});
+    const clickSpy = vi
+      .spyOn(HTMLAnchorElement.prototype, "click")
+      .mockImplementation(() => {});
+    link!.dispatchEvent(
+      new MouseEvent("click", { bubbles: true, cancelable: true }),
+    );
+    expect(createObjectURLSpy).toHaveBeenCalledTimes(1);
+    expect(capturedBlob).not.toBeNull();
+    const text = await capturedBlob!.text();
+    expect(text).toContain("BEGIN:VCALENDAR");
+    expect(text).toContain("SUMMARY:Proxy War Premiere");
+    expect(text).not.toContain("daveey");
+    expect(clickSpy).toHaveBeenCalledTimes(1);
+    expect(revokeObjectURLSpy).toHaveBeenCalledTimes(1);
+    createObjectURLSpy.mockRestore();
+    revokeObjectURLSpy.mockRestore();
+    clickSpy.mockRestore();
+  });
+
+  it("Remind me arms a localStorage flag, disables re-arming, and survives a remount without re-prompting", async () => {
+    stubReadModelFetch(upcomingReadModel());
+    const el = mount();
+    await flushMicrotasks();
+    expect(el.textContent).toContain("lobby.remind_me_button");
+    const button = el.querySelector("button") as HTMLButtonElement;
+    button.click();
+    await flushMicrotasks();
+    expect(
+      localStorage.getItem("proxywar:premiere-reminder:prem_ics"),
+    ).toBe("armed");
+    expect(el.textContent).toContain("lobby.remind_me_armed");
+    expect(
+      (el.querySelector("button") as HTMLButtonElement).disabled,
+    ).toBe(true);
+
+    // Simulate a page reload: a fresh mount reads the same localStorage flag.
+    document.body.innerHTML = "";
+    stubReadModelFetch(upcomingReadModel());
+    const remounted = mount();
+    await flushMicrotasks();
+    expect(remounted.textContent).toContain("lobby.remind_me_armed");
+    expect(remounted.textContent).not.toContain("lobby.remind_me_button");
   });
 });

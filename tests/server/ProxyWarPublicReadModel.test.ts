@@ -3,6 +3,11 @@ import { buildProxyWarPublicReadModel } from "../../src/server/ProxyWarPublicRea
 import type { CoworldLeagueMirrorData } from "../../src/server/agents/CoworldLeagueSiteWriter";
 import type { IdentityRegistrySnapshot } from "../../src/server/identity/IdentityRegistry";
 import type { AgentProfile } from "../../src/server/identity/IdentitySchemas";
+import {
+  FeaturedMatchSchema,
+  type FeaturedMatch,
+  type FeaturedMatchStoreFile,
+} from "../../src/server/agents/FeaturedMatch";
 
 function agent(overrides: Partial<AgentProfile> = {}): AgentProfile {
   return {
@@ -102,9 +107,63 @@ function identitySnapshot(): IdentityRegistrySnapshot {
   return { builders: [], agents: [agent()], versions: [] };
 }
 
+function featuredMatch(overrides: Partial<FeaturedMatch> = {}): FeaturedMatch {
+  return {
+    schemaVersion: 1,
+    matchId: "feat_0000000000000000abcd",
+    lane: "premiere",
+    episodeRequestId: null,
+    queueItemName: "20260731T000000Z-run1",
+    title: "Round 100: Pangaea",
+    description: "A tense four-way standoff.",
+    participants: [
+      {
+        playerName: "daveey",
+        agentId: "agt_daveey",
+        agentVersionId: null,
+        builderId: null,
+      },
+    ],
+    map: "Pangaea",
+    format: "4p FFA",
+    provenance: {
+      source: "premiere-queue",
+      sourceRef: "20260731T000000Z-run1",
+      capturedAt: "2026-07-31T00:00:00.000Z",
+    },
+    state: "scheduled",
+    category: "top_four",
+    scheduledAt: "2026-07-31T00:10:00.000Z",
+    revealAt: null,
+    evidence: {
+      dramaScore: null,
+      dramaGrade: null,
+      entertainmentScore: null,
+      storyGrade: null,
+      turnCount: 8000,
+      decisionCount: null,
+      degradedCount: 0,
+      seatCount: 4,
+      replayComplete: true,
+      notes: [],
+    },
+    postMatchSummary: null,
+    result: null,
+    createdAt: "2026-07-31T00:00:00.000Z",
+    updatedAt: "2026-07-31T00:00:00.000Z",
+    ...overrides,
+  };
+}
+
+function featuredMatchStoreOf(
+  ...matches: FeaturedMatch[]
+): FeaturedMatchStoreFile {
+  return { schemaVersion: 1, matches };
+}
+
 describe("buildProxyWarPublicReadModel", () => {
   test("preserves generatedAt, lastGoodSyncAt, and stale exactly from the mirror", () => {
-    const model = buildProxyWarPublicReadModel(baseMirror(), identitySnapshot());
+    const model = buildProxyWarPublicReadModel(baseMirror(), identitySnapshot(), featuredMatchStoreOf());
     expect(model.generatedAt).toBe("2026-07-31T00:00:00.000Z");
     expect(model.lastGoodSyncAt).toBe("2026-07-31T00:00:00.000Z");
     expect(model.stale).toBe(false);
@@ -116,7 +175,7 @@ describe("buildProxyWarPublicReadModel", () => {
       generatedAt: "2026-07-31T01:00:00.000Z",
       lastGoodSyncAt: "2026-07-30T20:00:00.000Z",
     });
-    const model = buildProxyWarPublicReadModel(mirror, identitySnapshot());
+    const model = buildProxyWarPublicReadModel(mirror, identitySnapshot(), featuredMatchStoreOf());
     expect(model.stale).toBe(true);
     expect(model.generatedAt).toBe("2026-07-31T01:00:00.000Z");
     expect(model.lastGoodSyncAt).toBe("2026-07-30T20:00:00.000Z");
@@ -124,7 +183,7 @@ describe("buildProxyWarPublicReadModel", () => {
 
   test("feedStates default to false when the mirror omits championFeedStale/replayFeedStale", () => {
     const mirror = baseMirror({ championFeedStale: undefined, replayFeedStale: undefined });
-    const model = buildProxyWarPublicReadModel(mirror, identitySnapshot());
+    const model = buildProxyWarPublicReadModel(mirror, identitySnapshot(), featuredMatchStoreOf());
     expect(model.feedStates).toEqual({
       championFeedStale: false,
       replayFeedStale: false,
@@ -133,13 +192,13 @@ describe("buildProxyWarPublicReadModel", () => {
 
   test("a stale champion feed is carried through feedStates without touching the overall stale flag", () => {
     const mirror = baseMirror({ stale: false, championFeedStale: true });
-    const model = buildProxyWarPublicReadModel(mirror, identitySnapshot());
+    const model = buildProxyWarPublicReadModel(mirror, identitySnapshot(), featuredMatchStoreOf());
     expect(model.stale).toBe(false);
     expect(model.feedStates.championFeedStale).toBe(true);
   });
 
   test("a registered agent resolves full identity: slug, displayName, emblem, short code, standing, active version", () => {
-    const model = buildProxyWarPublicReadModel(baseMirror(), identitySnapshot());
+    const model = buildProxyWarPublicReadModel(baseMirror(), identitySnapshot(), featuredMatchStoreOf());
     const daveey = model.agents.find((a) => a.playerName === "daveey");
     expect(daveey?.registered).toBe(true);
     expect(daveey?.slug).toBe("daveey");
@@ -164,7 +223,7 @@ describe("buildProxyWarPublicReadModel", () => {
   });
 
   test("an unregistered live participant falls back to player-name-only, every identity field null", () => {
-    const model = buildProxyWarPublicReadModel(baseMirror(), identitySnapshot());
+    const model = buildProxyWarPublicReadModel(baseMirror(), identitySnapshot(), featuredMatchStoreOf());
     const unregistered = model.agents.find(
       (a) => a.playerName === "unregistered-player",
     );
@@ -179,7 +238,7 @@ describe("buildProxyWarPublicReadModel", () => {
 
   test("a registered agent absent from this cycle's live standings still appears (never disappears on a missed round)", () => {
     const mirror = baseMirror({ standings: [] });
-    const model = buildProxyWarPublicReadModel(mirror, identitySnapshot());
+    const model = buildProxyWarPublicReadModel(mirror, identitySnapshot(), featuredMatchStoreOf());
     const daveey = model.agents.find((a) => a.playerName === "daveey");
     expect(daveey?.registered).toBe(true);
     expect(daveey?.standing).toBeNull();
@@ -187,7 +246,7 @@ describe("buildProxyWarPublicReadModel", () => {
   });
 
   test("matches normalize episode participants and resolve winnerAgentSlug through the registry", () => {
-    const model = buildProxyWarPublicReadModel(baseMirror(), identitySnapshot());
+    const model = buildProxyWarPublicReadModel(baseMirror(), identitySnapshot(), featuredMatchStoreOf());
     expect(model.matches).toHaveLength(1);
     const match = model.matches[0];
     expect(match.matchId).toBe("ereq_1");
@@ -206,8 +265,133 @@ describe("buildProxyWarPublicReadModel", () => {
     expect(match.participants[1].agentSlug).toBeNull();
   });
 
-  test("featuredMatches is always empty (Stage 3 has not shipped) and never fabricated", () => {
-    const model = buildProxyWarPublicReadModel(baseMirror(), identitySnapshot());
+  test("candidate records are filtered out entirely — operator-only, never public", () => {
+    const store = featuredMatchStoreOf(
+      featuredMatch({ matchId: "feat_1111111111111111cccc", state: "candidate" }),
+      featuredMatch({ matchId: "feat_2222222222222222dddd", state: "scheduled" }),
+    );
+    const model = buildProxyWarPublicReadModel(baseMirror(), identitySnapshot(), store);
+    expect(model.featuredMatches).toHaveLength(1);
+    expect(model.featuredMatches[0].matchId).toBe("feat_2222222222222222dddd");
+  });
+
+  test("maps the public-safe field subset for a scheduled premiere-lane record, never leaking participants", () => {
+    const record = featuredMatch({
+      matchId: "feat_3333333333333333eeee",
+      state: "scheduled",
+      title: "Round 100: Pangaea",
+      description: "A tense four-way standoff.",
+      map: "Pangaea",
+      format: "4p FFA",
+      category: "top_four",
+      scheduledAt: "2026-07-31T00:10:00.000Z",
+      revealAt: "2026-07-31T01:00:00.000Z",
+    });
+    const model = buildProxyWarPublicReadModel(
+      baseMirror(),
+      identitySnapshot(),
+      featuredMatchStoreOf(record),
+    );
+    expect(model.featuredMatches[0]).toEqual({
+      matchId: "feat_3333333333333333eeee",
+      lane: "premiere",
+      title: "Round 100: Pangaea",
+      description: "A tense four-way standoff.",
+      map: "Pangaea",
+      format: "4p FFA",
+      category: "top_four",
+      state: "scheduled",
+      scheduledAt: "2026-07-31T00:10:00.000Z",
+      revealAt: "2026-07-31T01:00:00.000Z",
+      postMatchSummary: null,
+      result: null,
+    });
+    // The participant's own player name must never reach the wire through this projection.
+    expect(JSON.stringify(model.featuredMatches)).not.toContain("daveey");
+  });
+
+  test("EMBARGO: a scheduled premiere-lane record smuggling a populated result (schema-illegal, cast to simulate an upstream bug) still projects result: null", () => {
+    const illegal = {
+      ...featuredMatch({ state: "scheduled" }),
+      result: { winnerAgentId: "agt_daveey", placements: [{ agentId: "agt_daveey", placement: 1 }] },
+      postMatchSummary: "daveey dominated the board.",
+    } as FeaturedMatch;
+    const model = buildProxyWarPublicReadModel(
+      baseMirror(),
+      identitySnapshot(),
+      featuredMatchStoreOf(illegal),
+    );
+    expect(model.featuredMatches[0].result).toBeNull();
+    expect(model.featuredMatches[0].postMatchSummary).toBeNull();
+  });
+
+  test("EMBARGO: a published (but not yet revealed) premiere-lane record — schema-legal, since the store's own superRefine only forbids result on candidate/scheduled — is still embargoed by the projection itself", () => {
+    const record = FeaturedMatchSchema.parse(
+      featuredMatch({
+        state: "published",
+        result: { winnerAgentId: "agt_daveey", placements: [{ agentId: "agt_daveey", placement: 1 }] },
+        postMatchSummary: "daveey dominated the board.",
+      }),
+    );
+    const model = buildProxyWarPublicReadModel(
+      baseMirror(),
+      identitySnapshot(),
+      featuredMatchStoreOf(record),
+    );
+    expect(model.featuredMatches[0].result).toBeNull();
+    expect(model.featuredMatches[0].postMatchSummary).toBeNull();
+  });
+
+  test("a revealed premiere-lane record exposes its result and postMatchSummary unchanged", () => {
+    const result = { winnerAgentId: "agt_daveey", placements: [{ agentId: "agt_daveey", placement: 1 }] };
+    const record = featuredMatch({
+      state: "revealed",
+      result,
+      postMatchSummary: "daveey dominated the board.",
+    });
+    const model = buildProxyWarPublicReadModel(
+      baseMirror(),
+      identitySnapshot(),
+      featuredMatchStoreOf(record),
+    );
+    expect(model.featuredMatches[0].result).toEqual(result);
+    expect(model.featuredMatches[0].postMatchSummary).toBe("daveey dominated the board.");
+  });
+
+  test("an archived premiere-lane record (terminal, past reveal) stays exposed", () => {
+    const result = { winnerAgentId: "agt_daveey", placements: [{ agentId: "agt_daveey", placement: 1 }] };
+    const record = featuredMatch({ state: "archived", result });
+    const model = buildProxyWarPublicReadModel(
+      baseMirror(),
+      identitySnapshot(),
+      featuredMatchStoreOf(record),
+    );
+    expect(model.featuredMatches[0].result).toEqual(result);
+  });
+
+  test("archive-lane records are never embargoed regardless of state — the match was already public before this record existed", () => {
+    const result = { winnerAgentId: "agt_daveey", placements: [{ agentId: "agt_daveey", placement: 1 }] };
+    const record = featuredMatch({
+      lane: "archive",
+      episodeRequestId: "ereq_9",
+      queueItemName: null,
+      state: "published",
+      scheduledAt: null,
+      revealAt: null,
+      result,
+      postMatchSummary: "A decisive win.",
+    });
+    const model = buildProxyWarPublicReadModel(
+      baseMirror(),
+      identitySnapshot(),
+      featuredMatchStoreOf(record),
+    );
+    expect(model.featuredMatches[0].result).toEqual(result);
+    expect(model.featuredMatches[0].postMatchSummary).toBe("A decisive win.");
+  });
+
+  test("an empty featured match store still yields an empty (never fabricated) featuredMatches array", () => {
+    const model = buildProxyWarPublicReadModel(baseMirror(), identitySnapshot(), featuredMatchStoreOf());
     expect(model.featuredMatches).toEqual([]);
   });
 
@@ -228,7 +412,7 @@ describe("buildProxyWarPublicReadModel", () => {
         href: "/premiere/prem_0",
       },
     });
-    const model = buildProxyWarPublicReadModel(mirror, identitySnapshot());
+    const model = buildProxyWarPublicReadModel(mirror, identitySnapshot(), featuredMatchStoreOf());
     expect(model.premieres.live?.premiereId).toBe("prem_1");
     expect(model.premieres.live?.premierePageLive).toBe(true);
     // The live card always takes precedence — latest never co-renders with it.
@@ -245,25 +429,25 @@ describe("buildProxyWarPublicReadModel", () => {
         href: "/premiere/prem_0",
       },
     });
-    const model = buildProxyWarPublicReadModel(mirror, identitySnapshot());
+    const model = buildProxyWarPublicReadModel(mirror, identitySnapshot(), featuredMatchStoreOf());
     expect(model.premieres.live).toBeNull();
     expect(model.premieres.latest?.premiereId).toBe("prem_0");
   });
 
   test("premieres are both null when neither is present", () => {
-    const model = buildProxyWarPublicReadModel(baseMirror(), identitySnapshot());
+    const model = buildProxyWarPublicReadModel(baseMirror(), identitySnapshot(), featuredMatchStoreOf());
     expect(model.premieres).toEqual({ live: null, latest: null });
   });
 
   test("accountUrl is absolute and cross-origin to the platform, never a relative path", () => {
-    const model = buildProxyWarPublicReadModel(baseMirror(), identitySnapshot());
+    const model = buildProxyWarPublicReadModel(baseMirror(), identitySnapshot(), featuredMatchStoreOf());
     expect(model.links.accountUrl).toMatch(/^https:\/\//);
     expect(model.links.accountUrl.endsWith("/account")).toBe(true);
   });
 
   test("versions and builders pass through the identity snapshot verbatim", () => {
     const snapshot = identitySnapshot();
-    const model = buildProxyWarPublicReadModel(baseMirror(), snapshot);
+    const model = buildProxyWarPublicReadModel(baseMirror(), snapshot, featuredMatchStoreOf());
     expect(model.versions).toEqual(snapshot.versions);
     expect(model.builders).toEqual([]);
   });

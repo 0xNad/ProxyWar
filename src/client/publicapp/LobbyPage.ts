@@ -15,8 +15,10 @@ import {
 } from "./ReadModelSchema";
 import {
   computeDegradedShare,
+  formatDuration,
   resolveWinnerName,
 } from "./WatchPage";
+import { buildIcsEvent } from "./Ics";
 
 /**
  * `/` — the event lobby (spec §4 Target IA: "no longer a bare redirect to
@@ -27,10 +29,26 @@ import {
  * Hero state, checked in order:
  *   A. `premieres.live` present and `premierePageLive === true` — an active
  *      premiere. Label is ALWAYS "Live Premiere", never wording implying the
- *      match is executing at this instant beyond that literal label.
+ *      match is executing at this instant beyond that literal label. Shows a
+ *      live, ticking elapsed-time note (`renderHeroActivePremiere`):
+ *      `now - scheduledAt`, updated ~1s by a component-owned interval
+ *      (`connectedCallback`/`disconnectedCallback`) — `scheduledAt` is the
+ *      only anchor `CoworldLeaguePremiereCard` carries, so it doubles as the
+ *      elapsed-time origin once the premiere IS live.
  *   B. `premieres.live` present and `premierePageLive === false` — scheduled,
  *      counting down (client clock; same known simplification as
- *      `WatchPage`'s countdown, documented there).
+ *      `WatchPage`'s countdown, documented there). The countdown ticks live
+ *      the same way state A's elapsed timer does. Deliberately still a pure
+ *      client-clock countdown, NOT skew-corrected against the read model's
+ *      `generatedAt`: that timestamp is a periodic-mirror-poll snapshot
+ *      (`COWORLD_LEAGUE_POLL_INTERVAL_MS`, up to ~30s stale), so treating it
+ *      as a live clock-sync signal would trade small, usually-sub-second
+ *      client clock error for a systematic ~0-30s bias — not an honest
+ *      improvement. State B also offers "Add to calendar" (`Ics.ts`, a pure
+ *      client-side `.ics` download, no server round-trip) and a purely
+ *      local "Remind me" (localStorage-armed, same-tab visual cue + tab
+ *      title flash at start time — NOT a push/OS notification; this
+ *      codebase has no service worker to back that promise).
  *   C. Neither — falls back to `premieres.latest` (an actual revealed
  *      premiere) when present, else the single most recently completed
  *      match with a watchable render. This is deliberately the SIMPLEST
@@ -39,11 +57,25 @@ import {
  *      read model today (Stage 5's Director Cut is what's actually specced
  *      to replace this placeholder), so state C never claims a drama-score
  *      selection it isn't actually running.
+ *
+ * DELIBERATE DEFERRAL: states A/B stay exactly as spoiler-conservative on
+ * participant identity as before — no agent name, emblem, version, color,
+ * or Builder was added here. `CoworldLeaguePremiereCard` is intentionally
+ * limited to 5 fields precisely so the premiere leak audit can guarantee no
+ * held premiere is ever spoiled; widening it (or sourcing identity from
+ * elsewhere) needs its own security review of the leak-surface list before
+ * it's safe, which is out of scope for this pass.
  */
+
+/** localStorage key prefix for the local-only "Remind me" reminder state (see the class's Remind-me section for exactly what this does and doesn't guarantee). */
+const REMINDER_KEY_PREFIX = "proxywar:premiere-reminder:";
 @customElement("lobby-page")
 export class LobbyPage extends LitElement {
   @state() private loadState: "loading" | "ready" | "error" = "loading";
   @state() private readModel: ReadModel | null = null;
+  /** Drives hero state A's elapsed timer and state B's countdown — ticked ~1s by a component-owned interval, never a longer-lived timer and never the server clock continuously (see class doc on why the countdown stays client-clock-only). */
+  @state() private nowMs = Date.now();
+  private tickHandle: number | null = null;
 
   createRenderRoot() {
     this.classList.add(...APP_SHELL_ROOT_CLASSES);
@@ -53,6 +85,21 @@ export class LobbyPage extends LitElement {
   connectedCallback(): void {
     super.connectedCallback();
     void this.load();
+    this.tickHandle = window.setInterval(() => {
+      this.nowMs = Date.now();
+      const live = this.readModel?.premieres.live;
+      if (live !== null && live !== undefined && !live.premierePageLive) {
+        this.fireReminderIfDue(live, this.nowMs);
+      }
+    }, 1000);
+  }
+
+  disconnectedCallback(): void {
+    super.disconnectedCallback();
+    if (this.tickHandle !== null) {
+      clearInterval(this.tickHandle);
+      this.tickHandle = null;
+    }
   }
 
   private async load(): Promise<void> {
@@ -171,6 +218,16 @@ export class LobbyPage extends LitElement {
   private renderHeroActivePremiere(
     live: NonNullable<ReadModel["premieres"]["live"]>,
   ): TemplateResult {
+    // `CoworldLeaguePremiereCard` carries only `premierePageLive` and
+    // `scheduledAt` — there is no separate "actual start" timestamp, so
+    // once the premiere IS live, `scheduledAt` doubles as the
+    // elapsed-time anchor. It's the only signal available, and the
+    // correct one: the premiere pipeline flips `premierePageLive` at (or
+    // immediately after) `scheduledAt` by construction.
+    const startMs = Date.parse(live.scheduledAt);
+    const elapsed = Number.isNaN(startMs)
+      ? null
+      : formatDuration(Math.max(0, this.nowMs - startMs));
     return this.heroShell(
       html`
         <span
@@ -187,6 +244,15 @@ export class LobbyPage extends LitElement {
         <p class="mt-1 text-sm text-ink-muted">
           ${translateText("lobby.active_premiere_note")}
         </p>
+        ${elapsed !== null
+          ? html`<p
+              class="mt-1 font-mono text-sm font-bold text-live"
+              role="timer"
+              aria-live="polite"
+            >
+              ${translateText("lobby.live_elapsed", { duration: elapsed })}
+            </p>`
+          : nothing}
         <div class="mt-4">
           <a
             href="/premiere/${encodeURIComponent(live.premiereId)}"
@@ -205,6 +271,12 @@ export class LobbyPage extends LitElement {
   ): TemplateResult {
     const scheduled = new Date(live.scheduledAt);
     const scheduledValid = !Number.isNaN(scheduled.getTime());
+    // Pure client-clock countdown — see class doc for why this stays
+    // honest rather than skew-correcting against `generatedAt`.
+    const countdown = scheduledValid
+      ? formatDuration(Math.max(0, scheduled.getTime() - this.nowMs))
+      : null;
+    const reminder = this.reminderState(live.premiereId);
     return this.heroShell(
       html`
         <span
@@ -224,19 +296,150 @@ export class LobbyPage extends LitElement {
                 >${scheduled.toLocaleString()}
                 ${translateText("lobby.local_time_suffix")}</time
               >
+            </p>
+            <p
+              class="mt-1 font-mono text-lg font-black text-ink"
+              role="timer"
+              aria-live="polite"
+            >
+              ${translateText("lobby.countdown_value", { duration: countdown! })}
+            </p>
+            <p class="mt-1 text-xs text-ink-muted">
               ${translateText("lobby.countdown_note")}
             </p>`
           : nothing}
-        <div class="mt-4">
+        <div class="mt-4 flex flex-wrap items-center gap-3">
           <a
             href="/premiere/${encodeURIComponent(live.premiereId)}"
             class="inline-flex min-h-11 items-center justify-center rounded-md border border-line bg-surface-2 px-5 font-black text-ink no-underline outline-none hover:border-ink-muted focus-visible:ring-2 focus-visible:ring-accent"
             >${translateText("lobby.view_matchup")}</a
           >
+          ${scheduledValid ? this.renderAddToCalendar(live) : nothing}
+          ${scheduledValid ? this.renderRemindMe(live, reminder) : nothing}
         </div>
+        ${reminder === "fired"
+          ? html`<p
+              class="mt-3 rounded-md border border-live/50 bg-live/10 px-3 py-2 text-sm font-bold text-live"
+              role="status"
+            >
+              ${translateText("lobby.remind_me_live_cue")}
+            </p>`
+          : nothing}
       `,
       "border-info/40",
     );
+  }
+
+  // ---- Add to calendar (ICS) ---------------------------------------------
+
+  private renderAddToCalendar(
+    live: NonNullable<ReadModel["premieres"]["live"]>,
+  ): TemplateResult {
+    return html`
+      <a
+        href="#"
+        class="inline-flex min-h-11 items-center justify-center rounded-md border border-line bg-surface-2 px-4 text-sm font-bold text-ink no-underline outline-none hover:border-ink-muted focus-visible:ring-2 focus-visible:ring-accent"
+        @click=${(event: MouseEvent) => this.downloadIcs(event, live)}
+        >${translateText("lobby.add_to_calendar")}</a
+      >
+    `;
+  }
+
+  /** Client-side only, no server round-trip — builds the .ics in-browser (`Ics.ts`) and offers it as a Blob download. `title` uses ONLY already-safe fields (round number, map label), same participant-identity constraint as the hero itself (see class doc). */
+  private downloadIcs(
+    event: MouseEvent,
+    live: NonNullable<ReadModel["premieres"]["live"]>,
+  ): void {
+    event.preventDefault();
+    const title =
+      live.roundNumber !== null
+        ? `Proxy War Premiere — Round ${live.roundNumber} (${live.mapLabel})`
+        : `Proxy War Premiere (${live.mapLabel})`;
+    const url = `${window.location.origin}/premiere/${encodeURIComponent(live.premiereId)}`;
+    const ics = buildIcsEvent({ title, scheduledAt: live.scheduledAt, url });
+    const objectUrl = URL.createObjectURL(
+      new Blob([ics], { type: "text/calendar;charset=utf-8" }),
+    );
+    const anchor = document.createElement("a");
+    anchor.href = objectUrl;
+    anchor.download = `proxy-war-premiere-${live.premiereId}.ics`;
+    anchor.click();
+    URL.revokeObjectURL(objectUrl);
+  }
+
+  // ---- Remind me (local, same-tab only) ----------------------------------
+  //
+  // PURELY client-side, no server write (spec: "Remind me (local)"). This
+  // codebase has no service worker, so a reminder can never survive a
+  // closed tab or deliver an OS-level push notification — the button's own
+  // tooltip says exactly that. "Armed" persists in localStorage so a
+  // reload doesn't re-prompt; "fired" persists so a reload after start
+  // time doesn't re-show the cue or re-flash the tab title.
+
+  private reminderState(premiereId: string): "idle" | "armed" | "fired" {
+    try {
+      const raw = localStorage.getItem(`${REMINDER_KEY_PREFIX}${premiereId}`);
+      return raw === "armed" || raw === "fired" ? raw : "idle";
+    } catch {
+      return "idle";
+    }
+  }
+
+  private armReminder(premiereId: string): void {
+    try {
+      localStorage.setItem(`${REMINDER_KEY_PREFIX}${premiereId}`, "armed");
+    } catch {
+      // Storage unavailable (private browsing, quota) — no-op this session, never a crash.
+    }
+    this.requestUpdate();
+  }
+
+  /** Called every tick while a premiere is upcoming. Fires once, at or after `scheduledAt`: marks "fired" in localStorage and flashes the document title so the cue is visible even from a background tab — still requires the tab to stay open (see the button's tooltip copy). */
+  private fireReminderIfDue(
+    live: NonNullable<ReadModel["premieres"]["live"]>,
+    nowMs: number,
+  ): void {
+    if (this.reminderState(live.premiereId) !== "armed") return;
+    const startMs = Date.parse(live.scheduledAt);
+    if (Number.isNaN(startMs) || nowMs < startMs) return;
+    try {
+      localStorage.setItem(`${REMINDER_KEY_PREFIX}${live.premiereId}`, "fired");
+    } catch {
+      // Best effort — the visual cue still renders this tick regardless.
+    }
+    // Checked without a trailing space: the DOM's title-setting algorithm
+    // trims trailing whitespace, so `LIVE: ${title}` against an EMPTY base
+    // title normalizes to the stored value "LIVE:" with no trailing space —
+    // a `startsWith("LIVE: ")` check would never match its own output in
+    // that case and re-prepend the prefix on every subsequent tick.
+    if (!document.title.startsWith("LIVE:")) {
+      document.title = `LIVE: ${document.title}`;
+    }
+    this.requestUpdate();
+  }
+
+  private renderRemindMe(
+    live: NonNullable<ReadModel["premieres"]["live"]>,
+    state: "idle" | "armed" | "fired",
+  ): TemplateResult {
+    if (state === "fired") {
+      return html`<span class="text-sm font-semibold text-ink-muted"
+        >${translateText("lobby.remind_me_sent")}</span
+      >`;
+    }
+    return html`
+      <button
+        type="button"
+        title=${translateText("lobby.remind_me_tooltip")}
+        class="inline-flex min-h-11 items-center justify-center rounded-md border border-line bg-surface-2 px-4 text-sm font-bold text-ink outline-none hover:border-ink-muted focus-visible:ring-2 focus-visible:ring-accent disabled:cursor-not-allowed disabled:opacity-60"
+        ?disabled=${state === "armed"}
+        @click=${() => this.armReminder(live.premiereId)}
+      >
+        ${state === "armed"
+          ? translateText("lobby.remind_me_armed")
+          : translateText("lobby.remind_me_button")}
+      </button>
+    `;
   }
 
   // State C — No scheduled Premiere.

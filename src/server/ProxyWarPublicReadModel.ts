@@ -18,6 +18,13 @@ import type {
   CoworldLeagueRoundRow,
   CoworldLeagueStandingRow,
 } from "./agents/CoworldLeagueSiteWriter";
+import type {
+  FeaturedMatch,
+  FeaturedMatchCategory,
+  FeaturedMatchLane,
+  FeaturedMatchState,
+  FeaturedMatchStoreFile,
+} from "./agents/FeaturedMatch";
 
 /**
  * The typed, already-normalized public data model every Stage 2+ page
@@ -120,6 +127,35 @@ export interface PublicMatch {
   premiereHref: string | null;
 }
 
+export interface PublicFeaturedMatchResult {
+  winnerAgentId: string | null;
+  placements: { agentId: string | null; placement: number }[];
+}
+
+/**
+ * The PUBLIC-SAFE subset of `FeaturedMatch` (spec Stage 3 item 5). Never
+ * carries `participants` — even anonymized-by-id, that field would let a
+ * client read the read-model JSON directly (bypassing every hero/UI
+ * spoiler guard) and learn who is in an unrevealed premiere-lane record.
+ * `result`/`postMatchSummary` are only ever populated once
+ * `publicFeaturedMatches` below decides the record is actually revealed —
+ * see that function's doc for the embargo rule this type exists to carry.
+ */
+export interface PublicFeaturedMatch {
+  matchId: string;
+  lane: FeaturedMatchLane;
+  title: string;
+  description: string;
+  map: string;
+  format: string;
+  category: FeaturedMatchCategory | null;
+  state: FeaturedMatchState;
+  scheduledAt: string | null;
+  revealAt: string | null;
+  postMatchSummary: string | null;
+  result: PublicFeaturedMatchResult | null;
+}
+
 export interface PublicPremiereState {
   live: CoworldLeaguePremiereCard | null;
   latest: CoworldLeagueLatestPremiereCard | null;
@@ -140,8 +176,8 @@ export interface ProxyWarPublicReadModel {
   versions: PublicAgentVersion[];
   rounds: CoworldLeagueRoundRow[];
   matches: PublicMatch[];
-  /** Empty until Stage 3's FeaturedMatch model ships — never fabricated ahead of it. */
-  featuredMatches: [];
+  /** The public, embargo-correct projection of the `FeaturedMatch` store (spec Stage 3 items 1/5) — see `publicFeaturedMatches`' doc for the embargo rule. Excludes `state: "candidate"` records (operator-only, never public) and never carries `participants`. */
+  featuredMatches: PublicFeaturedMatch[];
   premieres: PublicPremiereState;
   links: {
     enterTheLeagueUrl: string;
@@ -308,9 +344,77 @@ function publicMatch(
   };
 }
 
+/**
+ * Whether a `FeaturedMatch` record's outcome is safe to project publicly.
+ * Archive-lane records were already public before the record existed (see
+ * `FeaturedMatch.ts`'s class doc — "Results are UI-gated ... never
+ * embargoed"), so they're always revealed. Premiere-lane records are only
+ * revealed once `state` has actually walked to `"revealed"`/`"archived"`.
+ *
+ * This intentionally does NOT trust the store's own `superRefine` embargo
+ * (which only forbids a `result` on `"candidate"`/`"scheduled"` — it does
+ * NOT forbid one on `"published"`, the state a premiere-lane record sits in
+ * for the entire window between scheduling and reveal). This function is
+ * the second, independent embargo layer the read-model projection owns for
+ * itself, per spec item 5.
+ */
+function isFeaturedMatchRevealed(match: FeaturedMatch): boolean {
+  if (match.lane === "archive") return true;
+  return match.state === "revealed" || match.state === "archived";
+}
+
+function publicFeaturedMatchResult(
+  match: FeaturedMatch,
+): PublicFeaturedMatchResult | null {
+  if (!isFeaturedMatchRevealed(match) || match.result === null) return null;
+  return {
+    winnerAgentId: match.result.winnerAgentId,
+    placements: match.result.placements.map((placement) => ({
+      agentId: placement.agentId,
+      placement: placement.placement,
+    })),
+  };
+}
+
+function publicFeaturedMatch(match: FeaturedMatch): PublicFeaturedMatch {
+  const revealed = isFeaturedMatchRevealed(match);
+  return {
+    matchId: match.matchId,
+    lane: match.lane,
+    title: match.title,
+    description: match.description,
+    map: match.map,
+    format: match.format,
+    category: match.category,
+    state: match.state,
+    scheduledAt: match.scheduledAt,
+    revealAt: match.revealAt,
+    // EMBARGO: never copy prose that could describe an unrevealed outcome —
+    // see `isFeaturedMatchRevealed`'s doc for why this can't trust the
+    // store's own validation alone.
+    postMatchSummary: revealed ? match.postMatchSummary : null,
+    result: publicFeaturedMatchResult(match),
+  };
+}
+
+/**
+ * Projects the `FeaturedMatch` store into the public read model (spec
+ * Stage 3 items 1/5). `"candidate"` records are operator-only ranked
+ * drafts from `premiere:candidates`/`feature:candidates` — never public —
+ * so they're filtered out entirely, not just embargoed.
+ */
+function publicFeaturedMatches(
+  store: FeaturedMatchStoreFile,
+): PublicFeaturedMatch[] {
+  return store.matches
+    .filter((match) => match.state !== "candidate")
+    .map(publicFeaturedMatch);
+}
+
 export function buildProxyWarPublicReadModel(
   mirror: CoworldLeagueMirrorData,
   identity: IdentityRegistrySnapshot,
+  featuredMatchStore: FeaturedMatchStoreFile,
 ): ProxyWarPublicReadModel {
   const agentSlugByPlayerName = new Map(
     identity.agents.map((agent) => [
@@ -335,7 +439,7 @@ export function buildProxyWarPublicReadModel(
     matches: mirror.episodes.map((episode) =>
       publicMatch(episode, agentSlugByPlayerName),
     ),
-    featuredMatches: [],
+    featuredMatches: publicFeaturedMatches(featuredMatchStore),
     premieres: {
       live: mirror.premiere ?? null,
       latest: mirror.premiere === undefined ? (mirror.latestPremiere ?? null) : null,

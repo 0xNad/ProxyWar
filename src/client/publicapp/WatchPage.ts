@@ -394,7 +394,12 @@ export function describeSchedule(scheduledAtIso: string, nowMs: number): string 
     : translateText("watch.started_ago", { duration });
 }
 
-function formatDuration(ms: number): string {
+/**
+ * `Xh Ym` / `Xm Ys` / `Xs` duration formatting, exported so `LobbyPage`'s
+ * hero-state countdown/elapsed-timer reuses the exact same convention
+ * instead of a second implementation.
+ */
+export function formatDuration(ms: number): string {
   const totalSeconds = Math.max(0, Math.floor(ms / 1000));
   const hours = Math.floor(totalSeconds / 3600);
   const minutes = Math.floor((totalSeconds % 3600) / 60);

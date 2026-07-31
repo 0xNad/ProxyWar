@@ -5,6 +5,10 @@ import { fileURLToPath } from "node:url";
 import englishTranslations from "../../../resources/lang/en.json";
 import { DEFAULT_PLATFORM_ORIGIN } from "../../core/PlatformOrigin";
 import { buildProxyWarPublicReadModel } from "../ProxyWarPublicReadModel";
+import {
+  readFeaturedMatchStore,
+  resolveFeaturedMatchStateRoot,
+} from "./FeaturedMatch";
 import { generateEmblemSvg } from "../identity/IdentityEmblems";
 import {
   AgentIdentityView,
@@ -514,13 +518,27 @@ async function writeCoworldLeagueSiteUnlocked(
     );
     return EMPTY_LEAGUE_IDENTITY_SNAPSHOT;
   });
+  // The featured-match store is operator-maintained, out-of-band state
+  // (`premiere:candidates`/`feature:candidates` rank drafts; a future
+  // schedule/publish CLI is what actually writes it) — a missing store is
+  // the normal cold-start case (`readFeaturedMatchStore` itself returns an
+  // empty, schema-valid file for that; a genuinely corrupt store is left to
+  // throw and fail this publish loudly, same "never silently reset"
+  // contract `FeaturedMatch.ts` documents on the store's own read function).
+  const featuredMatchStore = await readFeaturedMatchStore(
+    resolveFeaturedMatchStateRoot(),
+  );
   // Publish data.json and read-model.json last. Existing pages only reload
   // after observing a newer data.json snapshot, so they cannot race ahead of
   // either the client or the HTML. read-model.json is the typed, normalized
   // read every Stage 2+ SPA page fetches (spec Stage 2 item 1) — built from
   // the exact same `data`/`identity` inputs the HTML above just rendered
   // from, so the two are never inconsistent with each other.
-  const readModel = buildProxyWarPublicReadModel(data, identity);
+  const readModel = buildProxyWarPublicReadModel(
+    data,
+    identity,
+    featuredMatchStore,
+  );
   await writeFileAtomic(clientPath, coworldLeagueClientJavaScript());
   await writeFileAtomic(indexPath, coworldLeagueIndexHtml(data, identity));
   await writeFileAtomic(dataPath, `${JSON.stringify(data, null, 2)}\n`);
