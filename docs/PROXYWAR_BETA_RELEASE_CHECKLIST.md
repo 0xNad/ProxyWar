@@ -66,6 +66,30 @@ source of truth for that mapping, not this repo.
 | `PROXYWAR_WAGERING_ENABLED` | The entire wagering-surface gate. | UNSET on every league-origin process for this cutover — league surfaces must serve no betting UI or route. See `PROXYWAR_PUBLIC_APP_ARCHITECTURE.md`'s security-boundaries section. |
 | `PROXYWAR_GITHUB_OAUTH_CLIENT_ID` / `_SECRET_FILE` | GitHub sign-in on the platform origin. Secret passed as a FILE PATH, never a value (`ps eww <pid>` dumps env). | Set on the platform process only. Absent = sign-in cleanly does not exist (no button, no routes) — a valid unconfigured state, not a bug. |
 
+### Cutover switch, verified (not assumed)
+
+**The cutover flag is `PROXYWAR_LEAGUE_WRAPPER_ONLY` itself — no new flag,
+no renamed flag.** The pre-overhaul league origin already runs with this
+set `true` (per the row above); this overhaul's entire public app (every
+Stage 2-7 route: `/`, `/watch`, `/agents`, `/agent/:slug`, `/builders`,
+`/builder/:slug`, `/build`, `/about`, `/match/:matchId`, premiere pages)
+is reached through the exact same flag on the NEW build's code —
+`leagueWrapperOnly && !platformEnabled` is what selects
+`sendPublicAppShellPage()` (the `public.html` SPA shell) at `/` in
+`ai-agent-demo-server.ts`. Cutover is therefore: deploy this overhaul's
+code with the SAME existing env convention already in the running launchd
+plist — no plist edit, no new env var, no code-level flag flip required.
+Verified empirically this session, not assumed: every fixture-server run
+in Stage 8/9 (`npm run fixtures:public-product`, which sets
+`PROXYWAR_LEAGUE_WRAPPER_ONLY=true` and nothing else app-shell-related)
+served the full new app end to end — all 14 routes above returned 200
+with real content, confirmed again capturing this stage's after-
+screenshots. The pre-overhaul code, under the identical flag, only ever
+served `/league` (Stage 0 audit: "Only implemented public route on beta
+is `/league`... root is a bare redirect") — the difference is entirely in
+which code is running, not in any env value that needs to change at
+cutover time.
+
 ### CSP note
 
 There is no framework-level CSP middleware in this codebase. CSP is applied
@@ -131,7 +155,21 @@ Run each of these against the live host after deploy, not before:
       origin (confirms the `connect-src` CSP gap the Stage 0 audit found is
       not regressed)
 - [ ] one pre-match / upcoming-Premiere page
-- [ ] one active/live Premiere state
+- [ ] one active/live Premiere state. **Local/fixture testing note (found
+      2026-07-31 while capturing Stage 9 screenshots):** the premiere
+      page's interaction/session-bootstrap layer requires a trusted
+      `X-Forwarded-For` (only `127.0.0.1`/`::1` peers are trusted to
+      assert one, matching the managed Cloudflare Tunnel's real
+      loopback-with-header shape — `REPLAY_PREMIERE_LOOPBACK_PROXY_ADDRESSES`
+      in `ReplayPremiereClientAddress.ts`). A direct fixture-server
+      connection (no reverse proxy in front) has no forwarding header at
+      all, so the page hangs on "Loading premiere…" with
+      `operatorCode=remote_address_unavailable` in the server log — a
+      local-testing artifact, not a live-deployment bug (the real tunnel
+      always sets this header). Simulate it when testing locally:
+      `Network.setExtraHTTPHeaders({"X-Forwarded-For": "<any address>"})`
+      via CDP, or an equivalent header injection for a manual browser
+      test.
 - [ ] one completed match page
 - [ ] one Director Cut playback (a match with `director-cut-plan.json`
       present)
@@ -161,6 +199,49 @@ risks, next concrete step.
 
 ## Rollback path
 
+### Current deployed state (as of 2026-07-31, before this overhaul's cutover)
+
+- **`beta.proxywar.xyz` (league origin):** the pre-overhaul league-monitor
+  line — the last commit this overhaul's `main` ancestor shares with what
+  is live is `c35e6be87` (`fix(league): derive battle-card map from
+  variant_name; drop difficulty`). This overhaul (`claude/product-overhaul`)
+  branched from `claude/betting` at `6e0d90a7f`, whose own `main` ancestor
+  is the same `c35e6be87`. **Not yet re-verified against the current live
+  host** — this document records the branch-graph fact, not a live probe;
+  confirm the actual deployed commit on the host before relying on this for
+  a real rollback decision (`curl` a version/build marker if the deployment
+  exposes one, or check the running process's own checkout).
+- **`proxywar.xyz` (apex/platform origin):** live since 2026-07-30 from the
+  `claude/betting` line (`start-proxywar-platform.zsh`,
+  `PROXYWAR_PLATFORM_ENABLED=1` + `PROXYWAR_LEAGUE_WRAPPER_ONLY=true`) —
+  accounts, GitHub OAuth, `/player/:name`. This overhaul's identity/
+  read-model work extends this same line; the apex does not roll back to a
+  pre-accounts state as part of this cutover's rollback path (accounts
+  predate and are independent of this overhaul).
+- **Origin drift found while preparing this section (2026-07-31):**
+  `origin/main` has advanced 3 commits past `c35e6be87`
+  (`1855d5575`/`4b66af87b`/`6f366d8ed`, "schedule every competition
+  champion" + "Integrate production Coworld commissioner semantics") that
+  are NOT in `claude/product-overhaul`. Checked their diff: all three touch
+  only `coworld-adapter/commissioner/**` (Coworld scoring/scheduling
+  backend) — zero overlap with any file this overhaul touches. Not a
+  blocker for this cutover, but whoever merges `claude/product-overhaul`
+  toward `main` afterward should reconcile these first.
+
+### Rollback commands (verified to exist and parse; NOT executed)
+
+All of the following were confirmed present and syntactically valid this
+turn (`node --check`, `bash -n`) without running them:
+
+```bash
+# Routine restart / rollback trigger (fails closed — see deploy/README.md's
+# "Control-run transaction" for what "fails closed" restores):
+node deploy/mac/proxywar-beta-launchd-restart.mjs --dry-run
+node deploy/mac/proxywar-beta-launchd-restart.mjs
+# If the deployment serves a non-default port:
+node deploy/mac/proxywar-beta-launchd-restart.mjs --ready-url=http://127.0.0.1:<port>/league
+```
+
 If the cutover fails post-deploy smoke: `proxywar-beta-launchd-restart.mjs`
 without `--dry-run` restores the previously bootstrapped plist/wrapper if
 the new one fails its own readiness gate (it fails closed, never leaves a
@@ -169,7 +250,17 @@ exact hash-verify/bootout/bootstrap/recheck sequence). The old static
 league page (§4's first checklist item) is the last-resort fallback if the
 whole `public.html` SPA needs to be pulled — it requires no process restart,
 since `/league` is served from the pre-generated static mirror independent
-of which SPA build is currently live.
+of which SPA build is currently live, at:
+
+```text
+artifacts/ai-league-runs/league/index.html   (repo-relative, on the host's
+                                               configured PROXYWAR_ARTIFACTS_ROOT)
+```
+
+regenerated on its own ~30s cycle by the existing mirror writer
+(`CoworldLeagueSiteWriter.ts`), independent of whether the `public.html`
+SPA build currently deployed is this overhaul's or the pre-overhaul one —
+pulling the SPA never breaks `/league` itself.
 
 ## Known gaps
 
