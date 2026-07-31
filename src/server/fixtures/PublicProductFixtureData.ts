@@ -439,7 +439,11 @@ export const ORDINARY_EPISODE: CoworldLeagueEpisodeRow = {
       color: "#f6b26b",
     },
   ],
-  watchHref: null,
+  // Points at the Stage 3 match detail page (reliably resolves for any
+  // known episodeRequestId, unlike the raw `/ai-league-replay/<runID>`
+  // viewer, which needs real game-record.json bytes this hand-authored
+  // fixture episode deliberately doesn't have).
+  watchHref: "/match/ereq_fixture-ordinary-0001",
   fullRenderHref: null,
 };
 

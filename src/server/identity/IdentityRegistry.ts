@@ -29,11 +29,19 @@ import {
 export const IDENTITY_REGISTRY_DIR_ENV =
   "PROXYWAR_IDENTITY_REGISTRY_DIR" as const;
 
-export const defaultIdentityRegistryDir =
-  process.env[IDENTITY_REGISTRY_DIR_ENV] !== undefined &&
-  process.env[IDENTITY_REGISTRY_DIR_ENV] !== ""
-    ? path.resolve(process.env[IDENTITY_REGISTRY_DIR_ENV])
-    : path.join(process.cwd(), "resources", "identity");
+/** Same `environment`/`cwd`-parameterized shape as `resolveFeaturedMatchStateRoot`/`resolveReplayPremierePrivateStateRoot`, so the production guard is unit-testable without touching `process.env` globally. */
+export function resolveIdentityRegistryDir(
+  environment: Record<string, string | undefined> = process.env,
+  cwd: string = process.cwd(),
+): string {
+  const configured = environment[IDENTITY_REGISTRY_DIR_ENV];
+  if (configured !== undefined && configured !== "") {
+    return path.resolve(cwd, configured);
+  }
+  return path.join(cwd, "resources", "identity");
+}
+
+export const defaultIdentityRegistryDir = resolveIdentityRegistryDir();
 
 export const defaultBuilderRegistryPath = (dir = defaultIdentityRegistryDir) =>
   path.join(dir, "builders.json");

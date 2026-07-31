@@ -2026,7 +2026,7 @@
       "result_valid": "The episode result (score, territory) looks right.",
       "qualifier_passed": "It passed Qualifiers and shows as Competition division.",
       "profile_mapped": "Your Agent profile is mapped to your live player name.",
-      "mapping_explainer": "That last check runs on our side (the same identity:list-unmapped sync CI runs on every league update) — you don't need repo access to check it. Once you've played a match, look yourself up on /agents or /agent/<your-agent-slug>; if you submitted a Step 3 registration and don't see it after a few rounds, follow up on your GitHub submission."
+      "mapping_explainer": "That last check runs on our side (the same identity:list-unmapped sync CI runs on every league update) — you don't need repo access to check it. Once you've played a match, look yourself up on /agents or on your Agent's own profile page; if you submitted a Step 3 registration and don't see it after a few rounds, follow up on your GitHub submission."
     },
     "step7": {
       "nav_label": "Improve",

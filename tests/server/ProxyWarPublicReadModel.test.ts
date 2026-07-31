@@ -215,6 +215,7 @@ describe("buildProxyWarPublicReadModel", () => {
       publicVersionLabel: "v24",
       source: "champion",
       familyMismatch: false,
+      firstObservedAt: null,
     });
     // Raw label still present as provenance, never as the primary identity.
     expect(daveey?.provenance.activeChampionPolicyLabel).toBe(
