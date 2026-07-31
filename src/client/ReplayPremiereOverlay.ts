@@ -779,6 +779,7 @@ function buildCompetitorRailEntries(
       // `AgentEvaluationReport.ts`) — no bounded signal for it exists while a
       // Premiere is sealed/live, live or archived.
       degradedDecisionCount: null,
+      followed: false,
     };
   });
 }

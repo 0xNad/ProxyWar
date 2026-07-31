@@ -66,10 +66,23 @@ export interface CompetitorRailEntry {
   wars: readonly string[];
   /** Count of fallback/degraded decisions so far, or null when not tracked for this context. */
   degradedDecisionCount: number | null;
+  /** True when this is the viewer's current camera-follow target (spec item 6: rail-driven follow discoverability). */
+  followed: boolean;
+}
+
+export interface CompetitorRailCallbacks {
+  /**
+   * Camera-follow discoverability (spec item 6): clicking a rail seat pans
+   * to that Agent — the SAME opt-in-only pan `PointOfViewSelector`'s
+   * crosshair button already triggers, never automatic. Omit to render a
+   * non-interactive rail (e.g. a context with no game view attached).
+   */
+  onSelect?: (playerName: string) => void;
 }
 
 export function renderCompetitorRail(
   entries: readonly CompetitorRailEntry[],
+  callbacks: CompetitorRailCallbacks = {},
 ): HTMLElement {
   const aside = element("aside", "broadcast-rail");
   aside.setAttribute("aria-label", translateText("broadcast.rail_heading"));
@@ -91,18 +104,44 @@ export function renderCompetitorRail(
     );
   }
   for (const entry of entries) {
-    list.append(renderCompetitorRailEntry(entry));
+    list.append(renderCompetitorRailEntry(entry, callbacks));
   }
   aside.append(list);
   return aside;
 }
 
-function renderCompetitorRailEntry(entry: CompetitorRailEntry): HTMLElement {
+function renderCompetitorRailEntry(
+  entry: CompetitorRailEntry,
+  callbacks: CompetitorRailCallbacks,
+): HTMLElement {
   const item = element("li", "broadcast-rail-entry");
   item.dataset.alive =
     entry.alive === null ? "unknown" : entry.alive ? "true" : "false";
+  item.dataset.followed = String(entry.followed);
   if (entry.primaryColor !== null) {
     item.style.setProperty("--broadcast-agent-color", entry.primaryColor);
+  }
+
+  // The whole identity+stats surface is one button when selection is wired
+  // (camera-follow discoverability) — a plain non-interactive wrapper
+  // otherwise, matching every other optional-interactivity pattern already
+  // in this file (e.g. War Room's expand button).
+  const interactive = callbacks.onSelect !== undefined;
+  const surface = interactive
+    ? (element("button", "broadcast-rail-select") as HTMLButtonElement)
+    : element("div", "broadcast-rail-select");
+  if (interactive && surface instanceof HTMLButtonElement) {
+    surface.type = "button";
+    surface.setAttribute("aria-pressed", String(entry.followed));
+    surface.setAttribute(
+      "aria-label",
+      translateText("broadcast.rail_follow_label", {
+        name: entry.displayName,
+      }),
+    );
+    surface.addEventListener("click", () => {
+      callbacks.onSelect?.(entry.playerName);
+    });
   }
 
   const identityRow = element("div", "broadcast-rail-identity");
@@ -137,7 +176,7 @@ function renderCompetitorRailEntry(entry: CompetitorRailEntry): HTMLElement {
     );
   }
   identityRow.append(nameBlock);
-  item.append(identityRow);
+  surface.append(identityRow);
 
   const statsRow = element("div", "broadcast-rail-stats");
   if (entry.territoryPercent !== null) {
@@ -180,7 +219,8 @@ function renderCompetitorRailEntry(entry: CompetitorRailEntry): HTMLElement {
       ),
     );
   }
-  item.append(statsRow);
+  surface.append(statsRow);
+  item.append(surface);
 
   if (entry.allies.length > 0 || entry.wars.length > 0) {
     const relations = element("div", "broadcast-rail-relations");
@@ -445,4 +485,444 @@ export function renderMatchTimeline(
   }
   section.append(track);
   return section;
+}
+
+// ---------------------------------------------------------------------------
+// Lower thirds — brief major-event overlays over the map (spec item 3)
+// ---------------------------------------------------------------------------
+
+export type LowerThirdEventKind = CuratedWarRoomEventKind | "finish";
+
+const LOWER_THIRD_GLYPHS: Record<LowerThirdEventKind, string> = {
+  ...WAR_ROOM_GLYPHS,
+  finish: "\u25A0", // ■ filled square — distinct from every War Room kind glyph
+};
+
+/** A trigger for one lower-third pulse. `id` MUST be stable/unique per real event — it is the de-dupe key `LowerThirdController` uses to never re-announce the same event twice across repeated `sync()` calls (both overlays re-hydrate their whole model every frame). */
+export interface LowerThirdEvent {
+  id: string;
+  kind: LowerThirdEventKind;
+  headline: string;
+}
+
+export interface LowerThirdOptions {
+  /** Milliseconds a lower third stays visible before auto-dismissing. Default 4200. */
+  displayMs?: number;
+  /** Overrides the `prefers-reduced-motion` media query — for tests only. */
+  reducedMotion?: boolean;
+}
+
+/**
+ * The one stateful component in this otherwise-pure-render file: "auto-
+ * dismiss, one at a time" (spec item 3) is inherently a queue-plus-timer, and
+ * that logic is identical for both callers (Full Replay, Premiere) — sharing
+ * ONE implementation here beats duplicating a debounce/queue in two ~4000+
+ * line overlay files. Still data-in only: the caller decides which curated
+ * events are spoiler-safe/released-bounded to pass to `sync()`; this class
+ * never fetches or filters anything itself.
+ *
+ * Never a permanent banner: at most one lower third is ever in the DOM, it
+ * always auto-dismisses on its own timer, and there is no caller-facing way
+ * to pin one open.
+ */
+export class LowerThirdController {
+  private readonly container: HTMLElement;
+  private readonly displayMs: number;
+  private readonly reducedMotionOverride: boolean | undefined;
+  private readonly seenIds = new Set<string>();
+  private queue: LowerThirdEvent[] = [];
+  private current: LowerThirdEvent | null = null;
+  private dismissTimer: ReturnType<typeof setTimeout> | null = null;
+  private disposed = false;
+
+  constructor(container: HTMLElement, options: LowerThirdOptions = {}) {
+    this.container = container;
+    this.container.classList.add("broadcast-lower-third-host");
+    this.displayMs = options.displayMs ?? 4200;
+    this.reducedMotionOverride = options.reducedMotion;
+  }
+
+  /**
+   * Enqueues every event in `events` not already seen (by `id`) since this
+   * controller was created, then advances the queue if idle. Safe to call
+   * every frame with the caller's full current curated-event list — already-
+   * announced ids are silently skipped, so a re-hydrate never re-triggers a
+   * pulse for something already shown.
+   */
+  sync(events: readonly LowerThirdEvent[]): void {
+    if (this.disposed) return;
+    for (const event of events) {
+      if (this.seenIds.has(event.id)) continue;
+      this.seenIds.add(event.id);
+      this.queue.push(event);
+    }
+    this.advance();
+  }
+
+  dispose(): void {
+    this.disposed = true;
+    clearTimeout(this.dismissTimer ?? undefined);
+    this.dismissTimer = null;
+    this.current = null;
+    this.queue = [];
+    this.container.replaceChildren();
+  }
+
+  private advance(): void {
+    if (this.disposed || this.current !== null) return;
+    const next = this.queue.shift();
+    if (next === undefined) return;
+    this.current = next;
+    this.render(next);
+    this.dismissTimer = setTimeout(() => {
+      this.dismissTimer = null;
+      this.current = null;
+      this.container.replaceChildren();
+      this.advance();
+    }, this.displayMs);
+  }
+
+  private render(event: LowerThirdEvent): void {
+    const card = element("div", "broadcast-lower-third");
+    card.dataset.kind = event.kind;
+    // `prefers-reduced-motion` (spec item 3): the CONTROLLER's timing never
+    // changes (still auto-dismisses on the same schedule) — only the CSS
+    // pulse/entry animation is gated, via this data attribute, so a
+    // reduced-motion viewer gets a static appearance, never a jarring
+    // instant-appear/instant-vanish with no transition at all.
+    card.dataset.reducedMotion = String(this.isReducedMotion());
+    const glyph = element(
+      "span",
+      "broadcast-lower-third-glyph",
+      LOWER_THIRD_GLYPHS[event.kind] ?? "\u2022",
+    );
+    glyph.setAttribute("aria-hidden", "true");
+    card.append(
+      glyph,
+      element("span", "broadcast-lower-third-headline", event.headline),
+    );
+    // A single pulse, announced once — not a live region that would re-speak
+    // on every subsequent unrelated DOM patch.
+    card.setAttribute("role", "status");
+    this.container.replaceChildren(card);
+  }
+
+  private isReducedMotion(): boolean {
+    if (this.reducedMotionOverride !== undefined) {
+      return this.reducedMotionOverride;
+    }
+    return (
+      typeof window !== "undefined" &&
+      typeof window.matchMedia === "function" &&
+      window.matchMedia("(prefers-reduced-motion: reduce)").matches
+    );
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Mobile bottom drawer — Agents / Events / Timeline / Analysis tabs
+// (spec item 7). Pure structure: EVERY panel is always present in the DOM;
+// CSS alone decides desktop (all panels visible, no tab bar) vs. narrow
+// viewport (tab bar visible, only `data-tab-active="true"` shown) — see
+// this module's own doc for why: no separate desktop/mobile render path to
+// keep in sync, one tree, two stylesheets' worth of rules over it.
+// ---------------------------------------------------------------------------
+
+export type BroadcastDrawerTabId = "agents" | "events" | "timeline" | "analysis";
+
+export interface BroadcastDrawerTab {
+  id: BroadcastDrawerTabId;
+  /** Pre-rendered panel content — typically the output of `renderCompetitorRail`/`renderWarRoomFeed`/`renderMatchTimeline`/`renderAnalystPanel`. */
+  content: HTMLElement;
+  /** Small numeric badge on the tab button (e.g. a War Room unseen-event count). Omit or 0/null for no badge. */
+  badgeCount?: number | null;
+}
+
+export interface BroadcastDrawerOptions {
+  activeTab: BroadcastDrawerTabId;
+  onTabChange?: (tab: BroadcastDrawerTabId) => void;
+}
+
+export function renderBroadcastDrawer(
+  tabs: readonly BroadcastDrawerTab[],
+  options: BroadcastDrawerOptions,
+): HTMLElement {
+  const drawer = element("div", "broadcast-drawer");
+  drawer.setAttribute("aria-label", translateText("broadcast.drawer_heading"));
+  const tabList = element("div", "broadcast-drawer-tabs");
+  tabList.setAttribute("role", "tablist");
+  const panelHost = element("div", "broadcast-drawer-panels");
+  for (const tab of tabs) {
+    const isActive = tab.id === options.activeTab;
+    const tabButtonId = `broadcast-drawer-tab-${tab.id}`;
+    const panelId = `broadcast-drawer-panel-${tab.id}`;
+    const tabButton = element(
+      "button",
+      "broadcast-drawer-tab",
+      translateText(`broadcast.drawer_tab_${tab.id}`),
+    ) as HTMLButtonElement;
+    tabButton.type = "button";
+    tabButton.id = tabButtonId;
+    tabButton.setAttribute("role", "tab");
+    tabButton.setAttribute("aria-selected", String(isActive));
+    tabButton.setAttribute("aria-controls", panelId);
+    tabButton.tabIndex = isActive ? 0 : -1;
+    tabButton.dataset.tabId = tab.id;
+    if (tab.badgeCount !== undefined && tab.badgeCount !== null && tab.badgeCount > 0) {
+      tabButton.append(
+        element("span", "broadcast-drawer-tab-badge", String(tab.badgeCount)),
+      );
+    }
+    tabButton.addEventListener("click", () => {
+      options.onTabChange?.(tab.id);
+    });
+    tabList.append(tabButton);
+
+    tab.content.classList.add("broadcast-drawer-panel");
+    tab.content.id = panelId;
+    tab.content.dataset.tabId = tab.id;
+    tab.content.dataset.tabActive = String(isActive);
+    tab.content.setAttribute("role", "tabpanel");
+    tab.content.setAttribute("aria-labelledby", tabButtonId);
+    panelHost.append(tab.content);
+  }
+  drawer.append(tabList, panelHost);
+  return drawer;
+}
+
+// ---------------------------------------------------------------------------
+// Analyst mode (spec item 5) — the SAME already-public bounded data the
+// curated views above draw from, unfiltered/uncurated. A VIEW change, never
+// a data-exposure change: every field here already reaches the client
+// today (in `replay-ui.json`'s bounded decision rows, or the live
+// `SpectatorEvent` stream), just not rendered. The raw, private
+// `decisions.jsonl` / full `AgentDecisionRecord` (LLM generation trace,
+// strategic-priority internals, every considered option) is NEVER a valid
+// input here — the caller is the only place that boundary is enforced, by
+// construction, since it never has that private data to pass in the first
+// place (see `CoworldReplayUiDecision`'s own server-side schema).
+// ---------------------------------------------------------------------------
+
+/** One already-public bounded decision row (`CoworldReplayUiDecision`), showing every field the curated view leaves out. */
+export interface AnalystDecisionRow {
+  sequence: number;
+  turnNumber: number;
+  playerName: string;
+  brainType: string | null;
+  selectedActionKind: string;
+  selectedLegalActionId: string;
+  reason: string | null;
+  planObjective: string | null;
+  decisionLatencyMs: number | null;
+  fallbackUsed: boolean;
+  accepted: boolean;
+  auditStatus: string | null;
+}
+
+/** One already-public `SpectatorEvent`, unfiltered by importance/kind and undeduped — every field the curated War Room feed leaves out. */
+export interface AnalystEventRow {
+  sequence: number;
+  turnNumber: number;
+  kind: string;
+  tone: string;
+  actorName: string;
+  targetName: string | null;
+  secondaryName: string | null;
+  message: string;
+}
+
+export interface AnalystActionKindCount {
+  kind: string;
+  count: number;
+}
+
+/**
+ * `premiere_sealed`: a live/sealed Premiere never exposes decision-log
+ * telemetry at all (see `ReplayPremiereRuntime.ts`'s own doc on
+ * `plan_change` curation) — there is no bounded decision-row source to
+ * degrade to, only the full event log stays available. `no_data`: the
+ * decision-log source exists in principle (Full Replay) but this specific
+ * match/context has none (e.g. a still-cold-starting fixture).
+ */
+export type AnalystModeUnavailableReason = "premiere_sealed" | "no_data";
+
+export interface AnalystPanelData {
+  /** Null renders the unavailable-reason message instead of an empty table. */
+  decisions: readonly AnalystDecisionRow[] | null;
+  decisionsUnavailableReason: AnalystModeUnavailableReason | null;
+  events: readonly AnalystEventRow[];
+  actionKindCounts: readonly AnalystActionKindCount[];
+}
+
+export function renderAnalystPanel(data: AnalystPanelData): HTMLElement {
+  const section = element("section", "broadcast-analyst");
+  section.setAttribute(
+    "aria-label",
+    translateText("broadcast.analyst_heading"),
+  );
+  if (data.actionKindCounts.length > 0) {
+    section.append(renderAnalystActionChart(data.actionKindCounts));
+  }
+  section.append(renderAnalystDecisions(data));
+  section.append(renderAnalystEventLog(data.events));
+  return section;
+}
+
+/** A cheap, real bar chart — plain divs with a CSS custom property driving width, no charting library (D3 is the repo's only precedent and costs ~500+ LOC per new visualization; this needs none of that for a simple count distribution). */
+function renderAnalystActionChart(
+  counts: readonly AnalystActionKindCount[],
+): HTMLElement {
+  const wrap = element("div", "broadcast-analyst-chart");
+  wrap.append(
+    element(
+      "h4",
+      "broadcast-analyst-chart-heading",
+      translateText("broadcast.analyst_chart_heading"),
+    ),
+  );
+  const max = Math.max(1, ...counts.map((entry) => entry.count));
+  const list = element("ol", "broadcast-analyst-chart-list");
+  for (const entry of counts) {
+    const row = element("li", "broadcast-analyst-chart-row");
+    row.append(
+      element("span", "broadcast-analyst-chart-label", entry.kind),
+    );
+    const track = element("span", "broadcast-analyst-chart-track");
+    const bar = element("span", "broadcast-analyst-chart-bar");
+    bar.style.setProperty(
+      "--broadcast-chart-fraction",
+      String(entry.count / max),
+    );
+    track.append(bar);
+    row.append(
+      track,
+      element("span", "broadcast-analyst-chart-count", String(entry.count)),
+    );
+    list.append(row);
+  }
+  wrap.append(list);
+  return wrap;
+}
+
+function renderAnalystDecisions(data: AnalystPanelData): HTMLElement {
+  const wrap = element("div", "broadcast-analyst-decisions");
+  wrap.append(
+    element(
+      "h4",
+      "broadcast-analyst-decisions-heading",
+      translateText("broadcast.analyst_decisions_heading"),
+    ),
+  );
+  if (data.decisionsUnavailableReason !== null) {
+    wrap.append(
+      element(
+        "p",
+        "broadcast-analyst-unavailable",
+        translateText(
+          `broadcast.analyst_unavailable_${data.decisionsUnavailableReason}`,
+        ),
+      ),
+    );
+    return wrap;
+  }
+  const decisions = data.decisions ?? [];
+  if (decisions.length === 0) {
+    wrap.append(
+      element(
+        "p",
+        "broadcast-analyst-empty",
+        translateText("broadcast.analyst_decisions_empty"),
+      ),
+    );
+    return wrap;
+  }
+  const table = element("table", "broadcast-analyst-decisions-table");
+  const head = element("thead");
+  const headRow = element("tr");
+  for (const key of [
+    "turn",
+    "player",
+    "brain",
+    "action",
+    "latency",
+    "audit",
+    "reason",
+  ]) {
+    headRow.append(
+      element("th", "", translateText(`broadcast.analyst_decisions_col_${key}`)),
+    );
+  }
+  head.append(headRow);
+  table.append(head);
+  const body = element("tbody");
+  for (const row of decisions) {
+    const tr = element("tr", "broadcast-analyst-decisions-row");
+    tr.dataset.fallbackUsed = String(row.fallbackUsed);
+    tr.dataset.accepted = String(row.accepted);
+    tr.append(
+      element(
+        "td",
+        "",
+        translateText("broadcast.war_room_turn", { turn: row.turnNumber }),
+      ),
+      element("td", "", row.playerName),
+      element("td", "", row.brainType ?? "\u2014"),
+      element("td", "", row.selectedActionKind),
+      element(
+        "td",
+        "",
+        row.decisionLatencyMs === null
+          ? "\u2014"
+          : translateText("broadcast.analyst_latency_ms", {
+              ms: row.decisionLatencyMs,
+            }),
+      ),
+      element("td", "", row.auditStatus ?? "\u2014"),
+      element("td", "", row.reason ?? "\u2014"),
+    );
+    body.append(tr);
+  }
+  table.append(body);
+  wrap.append(table);
+  return wrap;
+}
+
+function renderAnalystEventLog(events: readonly AnalystEventRow[]): HTMLElement {
+  const wrap = element("div", "broadcast-analyst-events");
+  wrap.append(
+    element(
+      "h4",
+      "broadcast-analyst-events-heading",
+      translateText("broadcast.analyst_events_heading"),
+    ),
+  );
+  if (events.length === 0) {
+    wrap.append(
+      element(
+        "p",
+        "broadcast-analyst-empty",
+        translateText("broadcast.analyst_events_empty"),
+      ),
+    );
+    return wrap;
+  }
+  const list = element("ol", "broadcast-analyst-events-list");
+  list.setAttribute("role", "list");
+  for (const event of events) {
+    const item = element("li", "broadcast-analyst-events-row");
+    item.dataset.kind = event.kind;
+    item.dataset.tone = event.tone;
+    const parts = [
+      translateText("broadcast.war_room_turn", { turn: event.turnNumber }),
+      event.kind,
+      event.actorName,
+      event.targetName ?? "",
+      event.secondaryName ?? "",
+      event.message,
+    ].filter((part) => part !== "");
+    item.textContent = parts.join(" \u2022 ");
+    list.append(item);
+  }
+  wrap.append(list);
+  return wrap;
 }

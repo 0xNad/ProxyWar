@@ -2887,6 +2887,7 @@ function competitorRailEntries(
       allies: relations.allies,
       wars: relations.wars,
       degradedDecisionCount: degradedByName.get(normalizeName(username)) ?? null,
+      followed: false,
     } satisfies CompetitorRailEntry;
   });
 
