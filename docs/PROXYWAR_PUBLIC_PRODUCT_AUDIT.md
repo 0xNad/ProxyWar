@@ -1,6 +1,10 @@
 # Proxy War Public Product Audit — Stage 0
 
-**Date:** 2026-07-31 | **Surfaces:** beta.proxywar.xyz, proxywar.xyz | **Status:** Live at capture time
+**Date:** 2026-07-31 | **Surfaces:** beta.proxywar.xyz, proxywar.xyz | **Status:** Live at capture
+time; superseded by the shipped overhaul (Stage 8 complete, 2026-07-31) — see
+`PROXYWAR_PRODUCT_NORTH_STAR.md` and `PROXYWAR_PUBLIC_APP_ARCHITECTURE.md` for the current state,
+`PROXYWAR_BETA_RELEASE_CHECKLIST.md` §6 for the post-deploy re-verification of the findings below.
+This document itself is retained as the historical before-state baseline, not updated in place.
 
 Evidence: 15 screenshots across 4 viewports (1440×900, 1280×720, 390×844, 844×390 landscape) in
 `artifacts/product-overhaul/before/` (gitignored, kept as untracked operational artifacts per repo
