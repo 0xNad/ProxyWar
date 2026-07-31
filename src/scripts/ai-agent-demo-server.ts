@@ -28,6 +28,14 @@ import { resolveFeaturedMatchStateRoot } from "../server/agents/FeaturedMatch";
 import { reconcileFeaturedMatchStore } from "../server/agents/FeaturedMatchReconcile";
 import { resolveFeaturedMatchParticipantCards } from "../server/agents/FeaturedMatchParticipants";
 import { loadIdentityRegistrySnapshot } from "../server/identity/IdentityRegistry";
+import {
+  buildRegistrationDraft,
+  buildRegistrationIssueUrl,
+  BuildRegistrationSubmissionInputSchema,
+} from "../server/identity/BuildRegistrationSubmission";
+import { BuildFunnelCounters } from "../server/agents/BuildFunnelCounters";
+import { generateEmblemSvg, deriveEmblemPalette } from "../server/identity/IdentityEmblems";
+import { SlugSchema } from "../server/identity/IdentitySchemas";
 import { publicFeaturedMatch } from "../server/ProxyWarPublicReadModel";
 import { derivePremiereId } from "../server/replay-premiere/ReplayPremiereLoopCore";
 import { gameRecordFileIsRenderable } from "../server/agents/AgentSpectatorReplay";
@@ -786,7 +794,11 @@ const rateLimits = {
     firstConfiguredEnv("PROXYWAR_RATE_LIMIT_AGENT_RELAY"),
     600,
   ),
+  // `/build`'s emblem preview + registration-submission form; generous
+  // since it's read-mostly/local-compute, but still capped against spam.
+  build: positiveInt(firstConfiguredEnv("PROXYWAR_RATE_LIMIT_BUILD"), 40),
 };
+const buildFunnelCounters = new BuildFunnelCounters(artifactsRootDir);
 const betaAdminEnabled = envFlag("PROXYWAR_BETA_ADMIN_ENABLED");
 const allowPrivateAgentEndpoints = envFlag(
   "PROXYWAR_ALLOW_PRIVATE_AGENT_ENDPOINTS",
@@ -1390,7 +1402,8 @@ app.get("/trader/:accountId", async (_req, res) => {
 // Serves `public.html`'s built output — the Stage 2 public app's own
 // lightweight Vite entry (`PublicApp.ts`), deliberately separate from the
 // game/replay/premiere `index.html` + `Main.ts` entry every other route
-// serves. Every caller below is one of the 8 public-app routes; game,
+// serves. Every caller below is one of the 9 public-app routes (Stage 7
+// adds `/build`); game,
 // replay, premiere, `/player/:name`, `/account`, and `/trader/:accountId`
 // never call this — they keep using `index.html` unchanged (see
 // `RenderHtml.ts`'s `getAppShellContent`, which this reuses unmodified for
@@ -1459,6 +1472,9 @@ app.get("/match/:matchId", async (_req, res) => {
 });
 app.get("/about", async (_req, res) => {
   await sendPublicAppShellPage(res, "the about page");
+});
+app.get("/build", async (_req, res) => {
+  await sendPublicAppShellPage(res, "the build flow");
 });
 // GitHub sign-in lives ONLY on the platform now — proxywar.xyz is the
 // sole account authority (see the platform build's contract). Exactly one
@@ -1772,6 +1788,16 @@ app.use((_req, res, next) => {
 // the operator's account) — is unreachable. Reversible via env flag.
 if (leagueWrapperOnly) {
   app.use((req, res, next) => {
+    // `/api/build/*` is genuinely public (Stage 7's whole goal is a
+    // visitor becoming a competing builder without friction) and touches
+    // neither the operator's Coworld/Softmax account nor any match/relay
+    // state — safe in the same sense the premiere/points/account read-
+    // write paths below already are. Checked first since it applies to
+    // both the GET and POST branches below.
+    if (req.path.startsWith("/api/build/")) {
+      next();
+      return;
+    }
     if (req.method === "GET" || req.method === "HEAD") {
       const leagueClipRead = matchProxyWarLeagueClipReadPath(req.path);
       if (
@@ -1837,6 +1863,88 @@ if (leagueWrapperOnly) {
     res.status(404).send("not available in league wrapper mode");
   });
 }
+// `/build`'s own API surface — registered here (BEFORE the beta invite-code
+// gate below, so `/build` stays reachable whether or not the internal hub's
+// invite gate is on) and explicitly exempted from the leagueWrapperOnly
+// restriction above. `leagueWrapperOnly` is the hardened deployment mode
+// that also happens to be the ONLY mode where the built public-app static
+// bundle (`/assets/*`, matched by `isProxyWarPublicRendererAssetPath`) gets
+// served at all — so a `/build` blocked there would render its page shell
+// with a form that silently 404s on submit: exactly the "misleading
+// dashboard shell" the overhaul instructions forbid. None of the three
+// routes below touch the operator's Coworld/Softmax account, start a
+// match, or write to the identity registry (see each handler's own doc).
+
+/**
+ * `/build` Step 3's live emblem preview — pure, deterministic, no writes.
+ * Lets a visitor see the emblem + colors their entered Agent name would
+ * produce before submitting anything (same generator the real registry
+ * uses once an operator merges the submission — see
+ * `IdentityEmblems.ts`'s doc: same id, same bytes, forever).
+ */
+app.get("/api/build/emblem-preview", (req, res) => {
+  if (!enforceRateLimit("build", rateLimits.build, req, res)) {
+    return;
+  }
+  const rawSlug = typeof req.query.slug === "string" ? req.query.slug : "";
+  const parsedSlug = SlugSchema.safeParse(rawSlug);
+  if (!parsedSlug.success) {
+    res.status(400).json({ ok: false, error: "invalid_slug" });
+    return;
+  }
+  const seed = `agt_${parsedSlug.data}`;
+  const palette = deriveEmblemPalette(seed);
+  res.json({
+    ok: true,
+    svg: generateEmblemSvg(seed),
+    primaryColor: palette.primary,
+    secondaryColor: palette.secondary,
+  });
+});
+
+/**
+ * `/build` Step 3's registration submission — validates the form against
+ * the real registry schemas and returns a copy-pasteable profile-file JSON
+ * plus a prefilled GitHub issue URL. Never writes to
+ * `resources/identity/*.json` itself — see `BuildRegistrationSubmission.ts`'s
+ * doc for why instant self-service publication isn't safe.
+ */
+app.post("/api/build/registration-submission", (req, res) => {
+  if (!enforceRateLimit("build", rateLimits.build, req, res)) {
+    return;
+  }
+  const parsed = BuildRegistrationSubmissionInputSchema.safeParse(req.body);
+  if (!parsed.success) {
+    res.status(400).json({ ok: false, error: "invalid_submission" });
+    return;
+  }
+  const draft = buildRegistrationDraft(parsed.data);
+  res.json({
+    ok: true,
+    proposedAgent: draft.proposedAgent,
+    proposedBuilder: draft.proposedBuilder,
+    emblemPreviewSvg: draft.emblemPreviewSvg,
+    profileFileJson: draft.profileFileJson,
+    githubIssueUrl: buildRegistrationIssueUrl(draft),
+  });
+});
+
+/**
+ * `/build`'s silent step-progression counter — spec Stage 7 item 4
+ * ("collect, don't gate"). Fire-and-forget from the client; the response is
+ * always 204 regardless of whether the write lands, since nothing may ever
+ * depend on this succeeding.
+ */
+app.post("/api/build/funnel-event", (req, res) => {
+  if (!enforceRateLimit("build", rateLimits.build, req, res)) {
+    return;
+  }
+  const step = req.body?.step;
+  void buildFunnelCounters.recordStepReached(
+    typeof step === "number" ? step : -1,
+  );
+  res.status(204).end();
+});
 app.get("/beta", (req, res) => {
   const returnTo = normalizeProxyWarBetaReturnTo(queryParam(req.query.next));
   if (!betaAccess.enabled) {
@@ -2406,7 +2514,6 @@ app.get("/api/public-readiness", async (_req, res, next) => {
     next(error);
   }
 });
-
 app.get("/api/tester-dashboard", async (_req, res, next) => {
   try {
     const model = await loadAgentDemoHubModel({

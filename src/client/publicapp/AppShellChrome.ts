@@ -4,20 +4,19 @@ import { translateText } from "../Utils";
 /**
  * Shared header/footer chrome for every Stage 2+ public page
  * (`/`, `/watch`, `/agents`, `/agent/:slug`, `/builders`, `/builder/:slug`,
- * `/about`) — spec Stage 2 item 2 ("App shell per §4... reuse Stage 0 tokens
- * and primitives"). Not a wrapping custom element: these pages fully replace
- * `document.body` (same pattern as `PlayerProfilePage`/`TraderProfilePage`),
- * so each page's own `render()` includes `appShellHeader()`/
- * `appShellFooter()` at the top/bottom of its own template instead of
- * nesting inside a shell element.
+ * `/about`, `/build`) — spec Stage 2 item 2 ("App shell per §4... reuse
+ * Stage 0 tokens and primitives"). Not a wrapping custom element: these
+ * pages fully replace `document.body` (same pattern as
+ * `PlayerProfilePage`/`TraderProfilePage`), so each page's own `render()`
+ * includes `appShellHeader()`/`appShellFooter()` at the top/bottom of its
+ * own template instead of nesting inside a shell element.
  *
- * Nav is four items, not the spec's five (`Watch · League · Agents ·
- * Builders · Build`): `/build` does not exist yet (Stage 7). Per the
- * overhaul instructions, a stub nav entry to a page that isn't built is a
- * dead tab, which is explicitly disallowed — `Build` is added when Stage 7
- * ships, not before. `/about` is a secondary link per spec §4 ("+
- * About/How it works..."), not one of the primary five, so it lives in the
- * footer, not the header nav.
+ * Nav is the spec's full five (`Watch · League · Agents · Builders ·
+ * Build`) — `/build` shipped in Stage 7, so its nav entry is a link to a
+ * real, built page, never a stub (the overhaul instructions' dead-tab rule:
+ * a nav entry pointing at an unbuilt page is disallowed). `/about` is a
+ * secondary link per spec §4 ("+ About/How it works..."), not one of the
+ * primary five, so it lives in the footer, not the header nav.
  *
  * The brand mark reuses the EXACT existing treatment
  * (`CoworldLeagueSiteWriter.ts`'s `.mark` — a bordered "PW" glyph box) per
@@ -31,6 +30,7 @@ export type AppShellRoute =
   | "/league"
   | "/agents"
   | "/builders"
+  | "/build"
   | "/about";
 
 const NAV_ITEMS: ReadonlyArray<{
@@ -46,6 +46,7 @@ const NAV_ITEMS: ReadonlyArray<{
     labelKey: "app_shell.nav_builders",
     href: "/builders",
   },
+  { route: "/build", labelKey: "app_shell.nav_build", href: "/build" },
 ];
 
 export interface AppShellStatusChip {
