@@ -325,7 +325,7 @@ export class BuildPage extends LitElement {
                   ? "border-accent bg-accent/10 text-accent"
                   : this.step > index + 1
                     ? "border-line text-ink-muted hover:text-ink"
-                    : "border-line/60 text-ink-muted/60 hover:text-ink-muted"}"
+                    : "border-line/60 text-ink-muted/75 hover:text-ink-muted"}"
               >
                 ${index + 1}. ${translateText(labelKey)}
               </button>

@@ -578,7 +578,7 @@ export class MatchDetailPage extends LitElement {
             </div>
             ${reminder === "fired"
               ? html`<p
-                  class="mt-3 rounded-md border border-live/50 bg-live/10 px-3 py-2 text-sm font-bold text-live"
+                  class="mt-3 rounded-md border border-live/50 bg-live/10 px-3 py-2 text-sm font-bold text-live-text"
                   role="status"
                 >
                   ${translateText("match_detail.remind_me_live_cue")}

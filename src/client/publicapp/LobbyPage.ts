@@ -241,10 +241,48 @@ export class LobbyPage extends LitElement {
     `;
   }
 
+  /**
+   * A structural skeleton — not just a spinner/text line — reserving
+   * roughly the same vertical space as `renderReady()`'s hero + below-hero
+   * modules (League pulse / Agents to watch / Recent broadcasts / Builder
+   * band grid). Fixes a measured ~0.08 CLS: the page footer was jumping
+   * down once the real content replaced a one-line "Loading…" message.
+   * Every block is decorative (`aria-hidden`); the accessible loading
+   * state is still announced via the single `role="status"` text below,
+   * same as before. Pulses respect `prefers-reduced-motion` globally (see
+   * `styles.css`).
+   */
   private renderLoading() {
-    return html`<p class="text-sm text-ink-muted" role="status">
-      ${translateText("lobby.loading")}
-    </p>`;
+    const block = (extra = "") =>
+      html`<div
+        class="animate-pulse rounded-md bg-surface-2 ${extra}"
+        aria-hidden="true"
+      ></div>`;
+    return html`
+      <p class="sr-only" role="status">${translateText("lobby.loading")}</p>
+      <section class="mb-4" aria-hidden="true">
+        ${block("h-3 w-32")}
+        <div class="mt-2">${block("h-10 w-2/3 max-w-xl")}</div>
+        <div class="mt-3">${block("h-4 w-full max-w-2xl")}</div>
+      </section>
+      <section
+        class="rounded-xl border border-line bg-surface p-6 sm:p-8"
+        aria-hidden="true"
+      >
+        ${block("h-5 w-40")}
+        <div class="mt-3">${block("h-7 w-56")}</div>
+        <div class="mt-4">${block("h-11 w-36")}</div>
+      </section>
+      <div
+        class="mt-10 grid grid-cols-1 gap-8 lg:grid-cols-3"
+        aria-hidden="true"
+      >
+        <div class="lg:col-span-2">${block("h-64 w-full")}</div>
+        <div>${block("h-64 w-full")}</div>
+      </div>
+      <div class="mt-10" aria-hidden="true">${block("h-40 w-full")}</div>
+      <div class="mt-10" aria-hidden="true">${block("h-32 w-full")}</div>
+    `;
   }
 
   private renderError() {
@@ -338,7 +376,7 @@ export class LobbyPage extends LitElement {
     return this.heroShell(
       html`
         <span
-          class="inline-flex items-center gap-2 rounded-full border border-live/60 bg-live/10 px-3 py-1 font-mono text-xs font-extrabold uppercase tracking-wide text-live"
+          class="inline-flex items-center gap-2 rounded-full border border-live/60 bg-live/10 px-3 py-1 font-mono text-xs font-extrabold uppercase tracking-wide text-live-text"
         >
           <span class="h-2 w-2 rounded-full bg-live" aria-hidden="true"></span>
           ${translateText("lobby.live_premiere_badge")}
@@ -353,7 +391,7 @@ export class LobbyPage extends LitElement {
         </p>
         ${elapsed !== null
           ? html`<p
-              class="mt-1 font-mono text-sm font-bold text-live"
+              class="mt-1 font-mono text-sm font-bold text-live-text"
               role="timer"
               aria-live="polite"
             >
@@ -428,7 +466,7 @@ export class LobbyPage extends LitElement {
         </div>
         ${reminder === "fired"
           ? html`<p
-              class="mt-3 rounded-md border border-live/50 bg-live/10 px-3 py-2 text-sm font-bold text-live"
+              class="mt-3 rounded-md border border-live/50 bg-live/10 px-3 py-2 text-sm font-bold text-live-text"
               role="status"
             >
               ${translateText("lobby.remind_me_live_cue")}

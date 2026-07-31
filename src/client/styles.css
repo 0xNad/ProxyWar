@@ -55,6 +55,13 @@
   --color-info: #56c7f5;
   --color-info-strong: #0ea5e9;
   --color-live: #ef4444;
+  /* Text-safe variant of --color-live (WCAG AA, matches --pw-live-text in
+     styles/tokens.css) — the base red fails 4.5:1 for small/bold text on
+     the surface and bg-live/10 backgrounds these badges render on. Use for
+     any TEXT/icon rendered with text-live-* utilities; --color-live itself
+     stays reserved for solid dots/borders, which aren't held to text
+     contrast rules. */
+  --color-live-text: #fecaca;
   --color-positive: #34d399;
   --color-caution: #fbbf24;
   --color-danger: #f87171;
@@ -96,6 +103,18 @@
 
   dialog {
     margin: auto;
+  }
+}
+
+/* Global reduced-motion gate for Tailwind's built-in `animate-pulse`
+   (used by skeleton/loading placeholders) — Tailwind's utility does not
+   respect `prefers-reduced-motion` on its own. Loading-skeleton content
+   stays visible and correctly shaped either way; only the pulsing
+   opacity animation is disabled. Mirrors the existing spinner override
+   in index.html for the game-shell loading screen. */
+@media (prefers-reduced-motion: reduce) {
+  .animate-pulse {
+    animation: none;
   }
 }
 

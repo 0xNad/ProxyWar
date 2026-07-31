@@ -111,7 +111,7 @@ export function appShellHeader(
           ? html`<span
               class="rounded-full border px-3 py-1 font-mono text-xs font-extrabold ${statusChip.tone ===
               "live"
-                ? "border-live/60 text-live"
+                ? "border-live/60 text-live-text"
                 : statusChip.tone === "stale"
                   ? "border-caution/50 text-caution"
                   : "border-line text-ink-muted"}"

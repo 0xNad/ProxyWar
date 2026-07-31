@@ -166,7 +166,7 @@ export class WatchPage extends LitElement {
         class="rounded-lg border-2 border-live/50 bg-live/10 p-5"
       >
         <span
-          class="inline-block rounded-full border border-live/60 px-2 py-0.5 text-[11px] font-extrabold uppercase tracking-wide text-live"
+          class="inline-block rounded-full border border-live/60 px-2 py-0.5 text-[11px] font-extrabold uppercase tracking-wide text-live-text"
           >${translateText("watch.live_premiere_badge")}</span
         >
         <h2 id="watch-live-heading" class="mt-2 text-lg font-bold text-ink">
