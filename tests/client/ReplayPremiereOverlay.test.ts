@@ -1732,6 +1732,213 @@ describe("broadcast composition regions (Stage 4 item 1)", () => {
     // An unmatched/unregistered seat renders its raw name — never a fabricated identity.
     expect(handle.element.textContent).toContain("Unregistered Bot");
   });
+
+  it("keeps the panel's interactive chrome alive across many progressive live-frame hydrates that change the rail/war-room/timeline/analyst regions (flicker regression)", async () => {
+    // Regression for the sealed-premiere panel flicker: `structuralModelKey`
+    // used to omit `competitorRailSeats`/`warRoomEvents`/`timelineMarkers`/
+    // `totalTurns`/`maxSeekableTurn`/`analystEvents`/`analystActionKindCounts`
+    // from its volatile-field exclusion list even though every one of them
+    // changes on nearly every progressive chunk during real live playback
+    // (territory/rank tick, new curated events arrive, the released/seekable
+    // turn boundary advances) and `applyVolatileModelUpdates` already patches
+    // every one of them in place. Because the key changed on almost every
+    // frame, `hydrate()` took the full `render()` branch instead — tearing
+    // down and rebuilding the ENTIRE panel (not just those regions) on
+    // nearly every frame: the visible flicker, plus every other symptom a
+    // full teardown causes (a torn-down War Room row can never stay
+    // expanded, a torn-down rail follow button can swallow a click, any
+    // element without a `data-focus-key` loses focus).
+    const onMarker = vi.fn();
+    const model = makeModel({
+      state: "playing",
+      canMark: true,
+      releasedSequence: 100,
+      currentTurn: 100,
+      competitorRailSeats: [
+        {
+          seatId: "seat-a",
+          playerName: "Atlas Prime",
+          territoryPercent: 50,
+          inMatchRank: 1,
+          alive: true,
+          allies: [],
+          wars: [],
+        },
+      ],
+      warRoomEvents: [
+        {
+          id: "wr-1",
+          kind: "alliance",
+          turn: 50,
+          sequence: 100,
+          headline: "Atlas Prime formed an alliance",
+          publicReason: null,
+          participants: ["Atlas Prime"],
+          expandedDetail: null,
+        },
+      ],
+      timelineMarkers: [
+        { kind: "spawn", turn: 0, sequence: 0, label: "Match begins" },
+      ],
+      totalTurns: 100,
+      maxSeekableTurn: 100,
+      analystEvents: [],
+      analystActionKindCounts: [],
+    });
+    const handle = mount(model, { onMarker });
+
+    const ambientBefore = handle.element.querySelector<HTMLButtonElement>(
+      "[data-focus-key=ambient]",
+    );
+    const markerBefore = handle.element.querySelector<HTMLButtonElement>(
+      '.rp-marker-button[data-kind="turning_point"]',
+    );
+    const railBefore = handle.element.querySelector(".broadcast-rail");
+    expect(ambientBefore).not.toBeNull();
+    expect(markerBefore).not.toBeNull();
+    expect(railBefore).not.toBeNull();
+
+    // 40 volatile-only hydrates, each moving every one of the broadcast
+    // composition fields the way a real live premiere's frame stream does.
+    let warRoomEvents = model.warRoomEvents;
+    let timelineMarkers = model.timelineMarkers;
+    for (let frame = 1; frame <= 40; frame += 1) {
+      warRoomEvents = [
+        ...warRoomEvents,
+        {
+          id: `wr-frame-${frame}`,
+          kind: "first_strike" as const,
+          turn: 50 + frame,
+          sequence: 100 + frame,
+          headline: `Attack at frame ${frame}`,
+          publicReason: null,
+          participants: ["Atlas Prime"],
+          expandedDetail: null,
+        },
+      ];
+      timelineMarkers = [
+        ...timelineMarkers,
+        {
+          kind: "lead_change" as const,
+          turn: 50 + frame,
+          sequence: 100 + frame,
+          label: `Marker ${frame}`,
+        },
+      ];
+      handle.hydrate({
+        ...model,
+        releasedSequence: 100 + frame,
+        currentTurn: 100 + frame,
+        competitorRailSeats: [
+          {
+            seatId: "seat-a",
+            playerName: "Atlas Prime",
+            territoryPercent: 50 + frame,
+            inMatchRank: 1,
+            alive: true,
+            allies: [],
+            wars: [],
+          },
+        ],
+        warRoomEvents,
+        timelineMarkers,
+        totalTurns: 100 + frame,
+        maxSeekableTurn: 100 + frame,
+        analystEvents: [
+          {
+            kind: "attack" as const,
+            tone: "neutral" as const,
+            sequence: 100 + frame,
+            turnNumber: 50 + frame,
+            actorName: "Atlas Prime",
+            targetName: null,
+            secondaryName: null,
+            message: `Attack at frame ${frame}`,
+          },
+        ],
+        analystActionKindCounts: [{ kind: "attack" as const, count: frame }],
+      });
+    }
+
+    // The overlay's own chrome — never touched by the broadcast-region
+    // patches — was never torn down: same DOM nodes throughout.
+    expect(
+      handle.element.querySelector<HTMLButtonElement>(
+        "[data-focus-key=ambient]",
+      ),
+    ).toBe(ambientBefore);
+    expect(
+      handle.element.querySelector<HTMLButtonElement>(
+        '.rp-marker-button[data-kind="turning_point"]',
+      ),
+    ).toBe(markerBefore);
+
+    // The broadcast regions kept updating (never got stuck stale) — the
+    // fix is "patch instead of rebuild the whole panel", not "stop updating".
+    expect(handle.element.querySelector(".broadcast-rail")?.textContent).toContain(
+      "percent=90",
+    );
+    expect(
+      handle.element.querySelector(".broadcast-war-room")?.textContent,
+    ).toContain("Attack at frame 40");
+    expect(
+      handle.element.querySelectorAll(".broadcast-timeline-marker"),
+    ).toHaveLength(41);
+
+    // A click on the long-lived marker button still reports the LATEST
+    // moment — proof the button is the original node with live closures,
+    // not a frame-40 rebuild that happens to look the same.
+    markerBefore?.click();
+    await vi.waitFor(() =>
+      expect(onMarker).toHaveBeenCalledWith(
+        expect.objectContaining({ sequence: 140, turn: 140 }),
+      ),
+    );
+  });
+
+  it("does not rebuild the rail/timeline/analyst DOM when a hydrate repeats identical broadcast data", () => {
+    // Complements the churn regression above: the per-region content keys
+    // must not rebuild on every hydrate unconditionally either — only when
+    // their own derived data actually changed — so an in-progress hover/
+    // press on the rail's follow button survives a hydrate that happens to
+    // carry the exact same seat data (e.g. a duplicate/no-op frame).
+    const model = makeModel({
+      state: "playing",
+      currentTurn: 100,
+      competitorRailSeats: [
+        {
+          seatId: "seat-a",
+          playerName: "Atlas Prime",
+          territoryPercent: 50,
+          inMatchRank: 1,
+          alive: true,
+          allies: [],
+          wars: [],
+        },
+      ],
+      timelineMarkers: [
+        { kind: "spawn", turn: 0, sequence: 0, label: "Match begins" },
+      ],
+      totalTurns: 100,
+      maxSeekableTurn: 100,
+      analystEvents: [],
+      analystActionKindCounts: [],
+    });
+    const handle = mount(model);
+    const railBefore = handle.element.querySelector(".broadcast-rail");
+    const timelineBefore = handle.element.querySelector(".broadcast-timeline");
+    const analystBefore = handle.element.querySelector(".broadcast-analyst");
+
+    handle.hydrate({ ...model, releasedSequence: 1, currentTurn: 1 });
+
+    expect(handle.element.querySelector(".broadcast-rail")).toBe(railBefore);
+    expect(handle.element.querySelector(".broadcast-timeline")).toBe(
+      timelineBefore,
+    );
+    expect(handle.element.querySelector(".broadcast-analyst")).toBe(
+      analystBefore,
+    );
+  });
 });
 
 describe("Stage 4 second-half wiring: camera-follow, drawer, analyst mode, lower thirds", () => {

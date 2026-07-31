@@ -804,19 +804,41 @@ type LatestModel = () => ReplayPremiereOverlayModel;
  * playback. They are excluded from the structural key and patched in place by
  * {@link applyVolatileModelUpdates}; anything else triggers a full rebuild.
  */
-const VOLATILE_MODEL_KEYS = new Set([
-  "releasedSequence",
-  "currentTurn",
-  "leaders",
-  "warEvents",
-  "headlineEvent",
-  "authoritativeNow",
-  "suggestedCaption",
-]);
+const VOLATILE_MODEL_KEYS: Record<string, true> = {
+  releasedSequence: true,
+  currentTurn: true,
+  leaders: true,
+  warEvents: true,
+  headlineEvent: true,
+  authoritativeNow: true,
+  suggestedCaption: true,
+  // Broadcast composition regions (spec Stage 4 item 1): every one of these
+  // changes on nearly every progressive chunk during live playback, exactly
+  // like the fields above, and `applyVolatileModelUpdates` below already
+  // patches every one of them in place. Before this list included them,
+  // `structuralModelKey` changed on almost every `hydrate()` call during a
+  // live premiere (a live rail's territory/rank, the war narrative, and the
+  // live-growing turn span are never stable for more than one frame), so
+  // `hydrate()` took the `render()` branch — a full `overlay.replaceChildren`
+  // teardown/rebuild of the ENTIRE panel — on nearly every frame instead of
+  // ever reaching the volatile-patch path. That is the flicker: not a CSS
+  // issue, an actual full DOM teardown running many times per second, which
+  // also explains reports of "the panel feels dysfunctional" beyond flicker
+  // (a torn-down-and-rebuilt War Room row can never stay expanded, a
+  // torn-down rail follow button can swallow a click mid-press, and any
+  // element without a `data-focus-key` loses focus outright).
+  competitorRailSeats: true,
+  warRoomEvents: true,
+  timelineMarkers: true,
+  totalTurns: true,
+  maxSeekableTurn: true,
+  analystEvents: true,
+  analystActionKindCounts: true,
+};
 
 function structuralModelKey(model: ReplayPremiereOverlayModel): string {
   const structural = JSON.stringify(model, (key: string, value: unknown) =>
-    VOLATILE_MODEL_KEYS.has(key) ? undefined : value,
+    Object.hasOwn(VOLATILE_MODEL_KEYS, key) ? undefined : value,
   );
   // Derived structural facts of the volatile fields: crossing any of these
   // boundaries changes what is rendered (explainer retirement, marker/share
@@ -857,32 +879,46 @@ function applyVolatileModelUpdates(
   if (warFeed !== null) {
     warFeed.replaceWith(renderWarFeed(model));
   }
-  // The rail and timeline are display-only in every state this patch path
-  // reaches (a live Premiere never wires timeline seeking — see
-  // `ReplayPremiereOverlayModel.maxSeekableTurn`'s doc), so refreshing them
-  // in place per frame is as safe as the leaders card above.
+  // The rail has an interactive follow button (`RAIL_CALLBACKS.onSelect` is
+  // always wired) and the timeline can too (an archived/revealed rewatch
+  // wires `onSeek`), so both are keyed the same way the war room already is
+  // below — replaced only when their own derived content actually changed —
+  // instead of unconditionally, which would tear down and rebuild those
+  // buttons on every progressive frame even when nothing in that region
+  // moved, risking exactly the swallowed-click failure mode this whole
+  // volatile/structural split exists to prevent.
   const rail = overlay.querySelector<HTMLElement>(".broadcast-rail");
   if (rail !== null) {
-    rail.replaceWith(
-      renderCompetitorRail(
+    const nextRailKey = JSON.stringify(model.competitorRailSeats);
+    if (rail.dataset.seatsKey !== nextRailKey) {
+      const nextRail = renderCompetitorRail(
         buildCompetitorRailEntries(
           model.competitorRailSeats,
           identityByPlayerName,
           followedPlayerName,
         ),
         RAIL_CALLBACKS,
-      ),
-    );
+      );
+      nextRail.dataset.seatsKey = nextRailKey;
+      rail.replaceWith(nextRail);
+    }
   }
   const timeline = overlay.querySelector<HTMLElement>(".broadcast-timeline");
   if (timeline !== null) {
-    timeline.replaceWith(
-      renderMatchTimeline(model.timelineMarkers, {
+    const nextTimelineKey = JSON.stringify([
+      model.timelineMarkers,
+      model.totalTurns,
+      model.maxSeekableTurn,
+    ]);
+    if (timeline.dataset.timelineKey !== nextTimelineKey) {
+      const nextTimeline = renderMatchTimeline(model.timelineMarkers, {
         totalTurns: model.totalTurns,
         maxSeekableTurn: model.maxSeekableTurn,
         onSeek: callbacks.onSeek,
-      }),
-    );
+      });
+      nextTimeline.dataset.timelineKey = nextTimelineKey;
+      timeline.replaceWith(nextTimeline);
+    }
   }
   // The war room has interactive expand/collapse state per row, so it is
   // only rebuilt when the underlying curated events actually changed —
@@ -899,18 +935,26 @@ function applyVolatileModelUpdates(
       warRoom.replaceWith(nextWarRoom);
     }
   }
-  // The analyst panel draws from the same bounded War Room source, so it is
-  // refreshed the same unconditional way as the rail/timeline above.
+  // The analyst panel draws from the same bounded War Room source; nothing
+  // in it is interactive, but it is still keyed like the regions above so a
+  // viewer scrolled into its event log doesn't get their scroll position
+  // reset on every progressive frame when the log itself hasn't grown.
   const analyst = overlay.querySelector<HTMLElement>(".broadcast-analyst");
   if (analyst !== null) {
-    analyst.replaceWith(
-      renderAnalystPanel({
+    const nextAnalystKey = JSON.stringify([
+      model.analystEvents,
+      model.analystActionKindCounts,
+    ]);
+    if (analyst.dataset.analystKey !== nextAnalystKey) {
+      const nextAnalyst = renderAnalystPanel({
         decisions: null,
         decisionsUnavailableReason: model.analystDecisionsUnavailableReason,
         events: model.analystEvents,
         actionKindCounts: model.analystActionKindCounts,
-      }),
-    );
+      });
+      nextAnalyst.dataset.analystKey = nextAnalystKey;
+      analyst.replaceWith(nextAnalyst);
+    }
   }
 }
 
@@ -979,6 +1023,7 @@ function renderBroadcastRegions(
     ),
     RAIL_CALLBACKS,
   );
+  rail.dataset.seatsKey = JSON.stringify(model.competitorRailSeats);
   const warRoom = renderWarRoomFeed(model.warRoomEvents, {
     onJumpToTurn: callbacks.onJumpToTurn,
   });
@@ -988,12 +1033,21 @@ function renderBroadcastRegions(
     maxSeekableTurn: model.maxSeekableTurn,
     onSeek: callbacks.onSeek,
   });
+  timeline.dataset.timelineKey = JSON.stringify([
+    model.timelineMarkers,
+    model.totalTurns,
+    model.maxSeekableTurn,
+  ]);
   const analyst = renderAnalystPanel({
     decisions: null,
     decisionsUnavailableReason: model.analystDecisionsUnavailableReason,
     events: model.analystEvents,
     actionKindCounts: model.analystActionKindCounts,
   });
+  analyst.dataset.analystKey = JSON.stringify([
+    model.analystEvents,
+    model.analystActionKindCounts,
+  ]);
   const agentsPanel = element("div", "rp-drawer-panel");
   agentsPanel.append(rail);
   const eventsPanel = element("div", "rp-drawer-panel");
