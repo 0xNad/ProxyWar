@@ -86,17 +86,27 @@ wait_for_origin() {
 }
 
 log "==> generating drama match (real local simulation, no Softmax)"
-rm -rf "$HERE/artifacts/ai-league-runs/fixture-drama-001"
+# league- prefixed: isProxyWarPublicLeaguePath's allowlist (the
+# leagueWrapperOnly public-artifact gate in ai-agent-demo-server.ts, the
+# mode this fixture server and production both run in) only lets
+# /ai-league-replay/<key> and /ai-league-runs/<key>/... through for
+# league-*-prefixed keys — the same prefix coworld-league-mirror.ts's
+# real `publicRunKey = \`league-${replay.runID}\`` always applies.
+# Without it the "Watch replay" link on /watch 404s with "AI league
+# replay record not found." before the full replay overlay ever loads
+# (confirmed live).
+DRAMA_RUN_ID="league-fixture-drama-001"
+rm -rf "$HERE/artifacts/ai-league-runs/$DRAMA_RUN_ID"
 npx tsx src/scripts/ai-agent-league-smoke.ts \
   --brain=rule --runner=step-locked --scenario=actions \
   --max-steps=35 --turns-per-decision-step=140 --replay-tail-turns=7000 \
-  --bots=10 --run-id=fixture-drama-001 > /tmp/pw-fixture-drama.log 2>&1
+  --bots=10 --run-id="$DRAMA_RUN_ID" > /tmp/pw-fixture-drama.log 2>&1
 mkdir -p "$ARTIFACTS_ROOT/ai-league-runs"
-rm -rf "$ARTIFACTS_ROOT/ai-league-runs/fixture-drama-001"
-mv "$HERE/artifacts/ai-league-runs/fixture-drama-001" "$ARTIFACTS_ROOT/ai-league-runs/fixture-drama-001"
+rm -rf "$ARTIFACTS_ROOT/ai-league-runs/$DRAMA_RUN_ID"
+mv "$HERE/artifacts/ai-league-runs/$DRAMA_RUN_ID" "$ARTIFACTS_ROOT/ai-league-runs/$DRAMA_RUN_ID"
 npx tsx src/scripts/proxywar-fixture-episode-from-run.ts \
-  --run-dir="$ARTIFACTS_ROOT/ai-league-runs/fixture-drama-001" \
-  --run-id=fixture-drama-001 \
+  --run-dir="$ARTIFACTS_ROOT/ai-league-runs/$DRAMA_RUN_ID" \
+  --run-id="$DRAMA_RUN_ID" \
   --out="$FIXTURE_ROOT/drama-episode.json"
 
 log "==> writing identity registry + league mirror (upcoming premiere card only, for now)"
