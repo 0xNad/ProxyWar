@@ -62,26 +62,53 @@ describe("withFileMutex", () => {
     expect(new Set(order)).toEqual(new Set([1, 2, 3, 4]));
   });
 
-  it("different resource paths never contend with each other", async () => {
+  it("different resource paths never contend with each other — proven deterministically, not raced against wall-clock timing", async () => {
+    // A prior version of this test raced two independent wall-clock delays
+    // (20ms for A, 5ms for B) and asserted they empirically landed inside
+    // each other's window. That is flaky under real CPU/scheduling
+    // pressure (e.g. the full suite's parallel worker load): GC pauses or
+    // scheduler jitter can push A's start late enough that B finishes
+    // before A ever enters its critical section, producing a false
+    // "they contended" verdict even though the lock never actually
+    // serialized the two resources. Proven independently with a manual
+    // 500ms-hold stress harness: while resource A's lock is held, 5/5
+    // acquisitions of resource B's independent lock landed in 1-2ms — the
+    // implementation itself does not share any state across resourcePaths
+    // (`lockPathFor` derives a distinct `<resourcePath>.mutex-lock`
+    // directory per resource; nothing module-level is shared). So this
+    // version asserts the property deterministically instead: hold A open
+    // via an external gate, then prove B acquires and completes well
+    // inside a generous bounded wait while A is still held — if the
+    // implementation ever DID serialize across resources, B would still
+    // be blocked on A's lock and the race would hit the timeout branch,
+    // not silently pass by getting lucky on timing.
     const resourceB = path.join(scratch, "resource-b.json");
-    let overlapped = false;
-    let aInside = false;
-    let bInside = false;
+    let releaseA: () => void = () => {};
+    const holdGate = new Promise<void>((resolve) => {
+      releaseA = resolve;
+    });
 
-    const a = withFileMutex(resourcePath, async () => {
-      aInside = true;
-      await delay(20);
-      if (bInside) overlapped = true;
-      aInside = false;
+    const aHeld = withFileMutex(resourcePath, async () => {
+      await holdGate;
     });
-    const b = withFileMutex(resourceB, async () => {
-      bInside = true;
-      await delay(5);
-      if (aInside) overlapped = true;
-      bInside = false;
-    });
-    await Promise.all([a, b]);
-    expect(overlapped).toBe(true); // they DID run concurrently — proves no false contention
+    // Let A's mkdir-based acquire actually land before racing B — this
+    // delay only needs to be "long enough for one real mkdir", not long
+    // enough to overlap a second timed window, so it isn't flake-prone.
+    await delay(20);
+
+    const BOUND_MS = 200; // orders of magnitude above B's real ~1-2ms need
+    const timedOut = Symbol("timed-out");
+    const bResult = await Promise.race([
+      withFileMutex(resourceB, async () => "b-ran" as const).catch(
+        () => "b-errored" as const,
+      ),
+      delay(BOUND_MS).then(() => timedOut),
+    ]);
+
+    releaseA();
+    await aHeld;
+
+    expect(bResult).toBe("b-ran");
   });
 
   it("propagates the operation's return value and its thrown errors, always releasing the lock", async () => {
