@@ -5,6 +5,12 @@ import type {
   NamedCount,
   PublicAgentStats,
 } from "./AgentStatsSchema";
+import type {
+  AgentTimeSeries,
+  ScoreSeries,
+  WinrateSeries,
+} from "./AgentTimeSeriesSchema";
+import { renderTimeSeriesChart } from "./StatTimeSeriesChart";
 import { translateText } from "./Utils";
 
 /**
@@ -192,6 +198,98 @@ export function renderAgentStatsSections(
   if (stats === null || stats.career.episodeCount === 0) return nothing;
   return html`
     ${renderFingerprint(stats.career)} ${renderSocial(stats.career)}
+  `;
+}
+
+/**
+ * "Form" — winrate-over-time and score-over-time charts (product overhaul
+ * spec: stats graphs), shared between `/agent/:slug` and `/player/:name`
+ * exactly like every other function in this file. Each sub-chart is
+ * independently omitted when its own series is `null` (below its own
+ * documented sample threshold — see `AgentTimeSeries.ts`), and the whole
+ * section disappears when BOTH are, rather than rendering an empty
+ * heading.
+ */
+export function renderAgentFormSection(
+  timeSeries: AgentTimeSeries,
+): TemplateResult | typeof nothing {
+  if (timeSeries.winrate === null && timeSeries.score === null) return nothing;
+  return html`
+    <section
+      class="agent-stats-section"
+      aria-labelledby="agent-stats-form-heading"
+    >
+      <h2 id="agent-stats-form-heading">
+        ${translateText("agent_stats.form_heading")}
+      </h2>
+      ${timeSeries.winrate !== null
+        ? renderWinrateChart(timeSeries.winrate)
+        : nothing}
+      ${timeSeries.score !== null
+        ? renderScoreChart(timeSeries.score)
+        : nothing}
+    </section>
+  `;
+}
+
+function renderWinrateChart(series: WinrateSeries): TemplateResult {
+  const last = series.points[series.points.length - 1];
+  return html`
+    <div class="agent-stats-chart-block">
+      <h3>${translateText("agent_stats.winrate_chart_heading")}</h3>
+      ${renderTimeSeriesChart({
+        points: series.points.map((point) => ({
+          at: point.completedAt,
+          value: point.winRate,
+        })),
+        yDomain: [0, 1],
+        formatValue: formatPercent,
+        formatX: (at) => new Date(at).toLocaleDateString(),
+        color: "var(--pw-accent)",
+        ariaLabel: translateText("agent_stats.winrate_chart_aria_label", {
+          percent: Math.round(last.winRate * 100),
+          count: last.episodesSoFar,
+        }),
+        captionText: series.methodology,
+        tableCaption: translateText("agent_stats.winrate_chart_table_caption"),
+        columnValueLabel: translateText("agent_stats.winrate_chart_column"),
+      })}
+    </div>
+  `;
+}
+
+function renderScoreChart(series: ScoreSeries): TemplateResult {
+  const recordedSinceLabel = new Date(series.recordedSince).toLocaleDateString();
+  return html`
+    <div class="agent-stats-chart-block">
+      <h3>${translateText("agent_stats.score_chart_heading")}</h3>
+      <p class="agent-stats-chart-note">
+        ${translateText("agent_stats.score_chart_recorded_since", {
+          date: recordedSinceLabel,
+        })}
+      </p>
+      ${renderTimeSeriesChart({
+        points: series.points.map((point) => ({
+          at: point.recordedAt,
+          value: point.score,
+          marker: point.versionFirstObserved
+            ? translateText("agent_stats.version_first_observed_marker", {
+                version: point.activeVersionLabel ?? "",
+              })
+            : null,
+        })),
+        yDomain: null,
+        formatValue: (value) => value.toFixed(2),
+        formatX: (at) => new Date(at).toLocaleDateString(),
+        color: "var(--pw-info)",
+        ariaLabel: translateText("agent_stats.score_chart_aria_label", {
+          date: recordedSinceLabel,
+        }),
+        captionText: series.methodology,
+        tableCaption: translateText("agent_stats.score_chart_table_caption"),
+        columnValueLabel: translateText("agent_stats.score_chart_column"),
+      })}
+    </div>
   `;
 }
 

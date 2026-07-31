@@ -2,7 +2,12 @@ import { html, LitElement, nothing } from "lit";
 import { customElement, property, state } from "lit/decorators.js";
 import { z } from "zod";
 import { PublicAgentStatsSchema } from "../AgentStatsSchema";
-import { renderAgentStatsSections, renderAnalysisTab } from "../AgentStatsSections";
+import { AgentTimeSeriesSchema } from "../AgentTimeSeriesSchema";
+import {
+  renderAgentFormSection,
+  renderAgentStatsSections,
+  renderAnalysisTab,
+} from "../AgentStatsSections";
 
 const standingSchema = z.object({
   rank: z.number(),
@@ -40,6 +45,14 @@ const leagueSectionSchema = z.object({
    * artifact.
    */
   stats: PublicAgentStatsSchema.nullable(),
+  /**
+   * Product overhaul spec: the SAME `AgentTimeSeriesSchema` `/agent/:slug`
+   * validates against — see `AgentTimeSeries.ts`'s own doc for the "one
+   * computation source, two views" invariant this shares with `stats`.
+   * Optional on the wire for the same reason `ReadModelSchema.ts`'s
+   * `PublicAgentSchema.timeSeries` is — see that field's own doc.
+   */
+  timeSeries: AgentTimeSeriesSchema.optional(),
 });
 
 const profileResponseSchema = z.object({
@@ -262,6 +275,9 @@ export class PlayerProfilePage extends LitElement {
             </p>`
           : nothing}
         ${renderAgentStatsSections(league.stats)}
+        ${renderAgentFormSection(
+          league.timeSeries ?? { winrate: null, score: null },
+        )}
         ${renderAnalysisTab(league.stats, league.generatedAt)}
         ${this.renderRecentResults(league)}
       </section>

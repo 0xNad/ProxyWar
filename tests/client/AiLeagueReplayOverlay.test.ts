@@ -2575,6 +2575,7 @@ function publicAgentFixture(overrides: {
       activeChampionPolicyLabel: null,
     },
     stats: null,
+    timeSeries: { winrate: null, score: null },
   };
 }
 

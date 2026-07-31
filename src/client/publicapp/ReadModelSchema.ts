@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { PublicAgentStatsSchema } from "../AgentStatsSchema";
+import { AgentTimeSeriesSchema } from "../AgentTimeSeriesSchema";
 export {
   type AgentMetric,
   type AgentStatsSlice,
@@ -7,6 +8,12 @@ export {
   type PublicAgentStats,
   PublicAgentStatsSchema,
 } from "../AgentStatsSchema";
+export {
+  type AgentTimeSeries,
+  type ScoreSeries,
+  type WinrateSeries,
+  AgentTimeSeriesSchema,
+} from "../AgentTimeSeriesSchema";
 
 /**
  * Client-side Zod validation for `GET /ai-league-runs/league/read-model.json`
@@ -55,6 +62,8 @@ export const PublicAgentSchema = z.object({
     activeChampionPolicyLabel: z.string().nullable(),
   }),
   stats: PublicAgentStatsSchema.nullable(),
+  /** Product overhaul spec: winrate/score-over-time. Optional on the WIRE schema (the server always emits it — see `ProxyWarPublicReadModel.ts`'s `PublicAgent.timeSeries`, non-optional there) purely so older cached responses and every other page's own `PublicAgent` test fixture don't need updating for an additive field; callers default a missing value to "both series null" (see `AgentProfilePage.ts`'s render call site). */
+  timeSeries: AgentTimeSeriesSchema.optional(),
 });
 export type PublicAgent = z.infer<typeof PublicAgentSchema>;
 

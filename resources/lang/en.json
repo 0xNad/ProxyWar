@@ -1733,7 +1733,18 @@
     "analysis_episode_count": "({count} episodes)",
     "analysis_sample_size": "sample: {count}",
     "analysis_threshold": "min. sample: {count}",
-    "analysis_no_version_split": "No per-version split yet — this agent's current version has no recorded first-observed date, or hasn't accumulated a qualifying episode since then."
+    "analysis_no_version_split": "No per-version split yet — this agent's current version has no recorded first-observed date, or hasn't accumulated a qualifying episode since then.",
+    "form_heading": "Form",
+    "winrate_chart_heading": "Win rate over time",
+    "winrate_chart_aria_label": "Win rate over time. Currently {percent}% cumulative across {count} episodes.",
+    "winrate_chart_table_caption": "Win rate over time, data table",
+    "winrate_chart_column": "Win rate",
+    "score_chart_heading": "Score over time",
+    "score_chart_recorded_since": "Recorded since {date} — never backfilled or interpolated.",
+    "version_first_observed_marker": "{version} first observed",
+    "score_chart_aria_label": "Score over time, recorded since {date}.",
+    "score_chart_table_caption": "Score over time, data table",
+    "score_chart_column": "Score"
   },
   "builders_directory": {
     "status_verified": "Verified",
@@ -2037,5 +2048,9 @@
       "feedback": "Your own fallbackUsed / llmPlannerDegraded flags in the episode logs are the fastest way to tell a broken brain from a losing one.",
       "next_version": "Shipping a new policy under the same Agent name? That's a new Version: re-upload with `coworld upload-policy`, then update your registration with the new policy label and release notes (Step 3's submission form again — a new registry entry per version, never overwritten)."
     }
+  },
+  "stat_chart": {
+    "data_table_toggle": "View as data table",
+    "column_date": "Date"
   }
 }

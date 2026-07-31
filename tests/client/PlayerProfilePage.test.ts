@@ -44,6 +44,7 @@ function profileResponse(overrides: {
       episodes: [],
       recentRecord: null,
       stats: overrides.stats ?? null,
+      timeSeries: { winrate: null, score: null },
     },
   });
 }

@@ -118,18 +118,27 @@
   }
 }
 
-/* Ensure the main page never scrolls; modals handle internal scrolling */
-html {
-  height: 100%; /* Fallback */
-  height: 100dvh;
+/* Time-series charts (product overhaul: stats graphs) — StatTimeSeriesChart.ts.
+   Line/point colors are set inline per-series (design-token colors chosen by
+   the caller), so this block only covers layout and the hover-inspection
+   affordance; everything else follows this codebase's existing convention
+   of leaving the surrounding agent-stat-* markup otherwise unstyled. */
+.stat-chart-svg {
+  display: block;
+  width: 100%;
+  height: auto;
+  max-width: 480px;
 }
-
-body {
-  height: 100%;
-  overflow: hidden !important;
-  /* Safe area padding for notched devices */
-  padding: env(safe-area-inset-top) env(safe-area-inset-right)
-    env(safe-area-inset-bottom) env(safe-area-inset-left);
+.stat-chart-point {
+  transition: r 120ms ease;
+}
+.stat-chart-point:hover {
+  r: 5;
+}
+@media (prefers-reduced-motion: reduce) {
+  .stat-chart-point {
+    transition: none;
+  }
 }
 
 * {
