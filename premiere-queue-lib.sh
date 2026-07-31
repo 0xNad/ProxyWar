@@ -63,3 +63,41 @@ pq_publish() {
   local tmp_dir="$1" item_name="$2"
   mv "$tmp_dir" "$PW_QUEUE_READY_DIR/$item_name"
 }
+
+# Claims the ready/ item a scheduled `FeaturedMatch` record (state
+# "published", see FeaturedMatch.ts's state-machine doc) marks as DUE -
+# the operator's explicit schedule taking precedence over plain FIFO
+# `pq_claim` (product overhaul spec Stage 3 item 4; full design in
+# src/scripts/premiere-schedule.ts's "Autocycle coexistence" module doc).
+#
+# "Which item, if any" is delegated to premiere-autocycle-due.ts, a
+# read-only tsx helper that reads featured-matches.json and prints the
+# due item's name on stdout (nothing on no match) - this function's own
+# job is only the same atomic mv pq_claim already does. $1 is the
+# destination (must not already exist); $2 is the lead-minutes window,
+# passed straight through to the helper (mirrors cycle-premiere.sh's own
+# LEAD_MIN - admitting a record exactly that many minutes before its
+# scheduledAt is what makes the market open AT scheduledAt).
+#
+# Returns 1, printing nothing, whenever nothing is due - including: the
+# store doesn't exist yet, no record is in "published" state, every due
+# record's queue item already vanished, or the helper itself fails (a
+# broken schedule store must never take an operator's demo offline; it
+# just falls through to plain pq_claim exactly as if no schedule
+# existed). This is a pure ADDITION ahead of the existing pq_claim call -
+# when it returns 1, the caller's existing FIFO/exhibition fallback chain
+# runs completely unmodified.
+pq_claim_scheduled_due() {
+  local dest="$1" lead_minutes="$2" item
+  item="$(npx tsx src/scripts/premiere-autocycle-due.ts \
+    "--lead-minutes=${lead_minutes}" --queue-root="$PW_QUEUE_ROOT" 2>/dev/null)" || true
+  [ -z "$item" ] && return 1
+  if mv "$PW_QUEUE_READY_DIR/$item" "$dest" 2>/dev/null; then
+    echo "$item"
+    return 0
+  fi
+  # The named item vanished between the helper's read and this mv (a
+  # second consumer, or the operator manually clearing ready/) - report
+  # empty rather than a false claim, exactly like pq_claim's own race note.
+  return 1
+}

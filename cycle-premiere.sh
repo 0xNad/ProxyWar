@@ -220,7 +220,17 @@ echo "==> checking premiere queue"
 mkdir -p "$STAGING"
 rm -rf "$STAGING/queue-claim"
 QUEUE_ITEM=""
-if QUEUE_ITEM="$(pq_claim "$STAGING/queue-claim")"; then
+# The operator's explicit schedule (premiere:schedule + premiere:publish,
+# product overhaul spec Stage 3 item 4) takes precedence over plain FIFO -
+# see premiere-queue-lib.sh's pq_claim_scheduled_due doc. Falls through to
+# pq_claim completely unmodified whenever nothing is due, including when
+# no schedule exists at all.
+if QUEUE_ITEM="$(pq_claim_scheduled_due "$STAGING/queue-claim" "$LEAD_MIN")"; then
+  MATCH_KIND="real-league"
+  BUNDLE="$STAGING/queue-claim/bundle.source.json"
+  META_FILE="$STAGING/queue-claim/meta.json"
+  echo "==> MATCH KIND: real-league, SCHEDULED (queue item ${QUEUE_ITEM}; due per featured-matches.json; queue depth now $(pq_depth))"
+elif QUEUE_ITEM="$(pq_claim "$STAGING/queue-claim")"; then
   MATCH_KIND="real-league"
   BUNDLE="$STAGING/queue-claim/bundle.source.json"
   META_FILE="$STAGING/queue-claim/meta.json"
