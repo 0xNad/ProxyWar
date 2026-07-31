@@ -1,0 +1,25 @@
+/* Game shell ONLY (`index.html` + `Main.ts`): the main page never scrolls;
+ * modals handle internal scrolling. This used to live in the shared
+ * `styles.css` that BOTH `Main.ts` (game shell) and `PublicApp.ts` (every
+ * `/`, `/watch`, `/league`, `/agents`, `/builders`, `/build`, `/about`,
+ * `/agent/:slug`, `/builder/:slug`, `/match/:matchId` page) import for
+ * Tailwind + design tokens. `overflow: hidden !important` on `body` doesn't
+ * just lock the game canvas — it silently clips any public page taller than
+ * the viewport with no way to reach the rest (e.g. `/build`'s step 3
+ * Identity form, `/about`, `/`). Public pages want the opposite: normal
+ * document scroll (`APP_SHELL_ROOT_CLASSES`'s `min-h-screen`, not a fixed
+ * viewport-locked height). Import this file ONLY from `Main.ts` so the
+ * lock stays scoped to the one shell that actually wants it.
+ */
+html {
+  height: 100%; /* Fallback */
+  height: 100dvh;
+}
+
+body {
+  height: 100%;
+  overflow: hidden !important;
+  /* Safe area padding for notched devices */
+  padding: env(safe-area-inset-top) env(safe-area-inset-right)
+    env(safe-area-inset-bottom) env(safe-area-inset-left);
+}

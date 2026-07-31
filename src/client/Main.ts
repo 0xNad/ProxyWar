@@ -124,6 +124,11 @@ import "./styles/core/variables.css";
 import "./styles/layout/container.css";
 import "./styles/layout/header.css";
 import "./styles/modal/chat.css";
+// Game-shell-only viewport lock (`body{overflow:hidden}`) — split out of the
+// shared `styles.css` so it never leaks into the public app's pages
+// (`PublicApp.ts` imports `styles.css` too, but NOT this file). See the
+// stylesheet's own header comment for why.
+import "./styles/game-shell-scroll-lock.css";
 
 /**
  * `translateText()` (`Utils.ts`) requires a connected `<lang-selector>`

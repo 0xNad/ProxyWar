@@ -21,8 +21,16 @@ cd "$HERE"
 FIXTURE_ROOT="${FIXTURE_ROOT:?set FIXTURE_ROOT to an external-volume directory}"
 PORT="${FIXTURE_PORT:-8787}"
 ORIGIN="http://127.0.0.1:${PORT}"
-PIDFILE="/tmp/pw-fixture-origin.pid"
-LOGFILE="/tmp/pw-fixture-origin.log"
+# Port-scoped, NOT a shared fixed path — this script is run by multiple
+# concurrent sessions in the same worktree (each with its own FIXTURE_PORT
+# and FIXTURE_ROOT). A fixed `/tmp/pw-fixture-origin.pid` meant one
+# session's `stop_origin`/restart could `kill` a DIFFERENT session's
+# already-running origin process the moment two sessions' scripts
+# overlapped, because the last writer to the shared pidfile silently won.
+# Keying both paths on $PORT keeps each session's start/stop cycle scoped
+# to the process it actually owns.
+PIDFILE="/tmp/pw-fixture-origin-${PORT}.pid"
+LOGFILE="/tmp/pw-fixture-origin-${PORT}.log"
 
 IDENTITY_DIR="$FIXTURE_ROOT/identity"
 ARTIFACTS_ROOT="$FIXTURE_ROOT/artifacts"

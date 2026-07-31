@@ -128,8 +128,17 @@ export default defineConfig(({ mode }) => {
     // and this build/dev-time vite-plugin-html pass. Omitting these here does
     // not affect production — it serves prebuilt HTML — but it makes every dev
     // server page a 500, which is how it went unnoticed. Dev has no public
-    // origin, so relative values are correct rather than merely a placeholder.
-    socialPageUrl: "/",
+    // origin, so relative values are correct rather than merely a placeholder
+    // — EXCEPT the bare root "/" specifically: `<link rel="canonical" href="/">`
+    // reads as a real asset URL to Vite's OWN (not vite-plugin-html's) html
+    // transform, which resolves "/" to the project root and tries to
+    // `readFile()` it, throwing `EISDIR` and failing `vite build --mode
+    // development` outright (`npm run build-dev`) — never surfaced via `npm
+    // run dev`, which only ever runs the dev SERVER, not a build. An absolute
+    // URL short-circuits Vite's asset resolution (`isAbsoluteUrl` in
+    // `AssetUrls.ts`'s `buildAssetUrl` — same guard Vite's own html plugin
+    // uses) before it ever touches the filesystem.
+    socialPageUrl: "http://localhost/",
     socialImageUrl: buildAssetUrl(
       "images/GameplayScreenshot.png",
       assetManifest,
