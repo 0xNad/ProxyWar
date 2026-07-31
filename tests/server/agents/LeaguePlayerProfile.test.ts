@@ -130,6 +130,7 @@ describe("buildLeaguePlayerSection", () => {
         economicFocus: null,
         territory: { share: null, absoluteTiles: null, meanRank: null },
         armyStrength: null,
+        reliability: null,
       },
       social: {
         alliancesInitiated: null,

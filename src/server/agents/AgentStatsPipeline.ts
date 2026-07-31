@@ -59,6 +59,13 @@ const TERRITORY_MIN_EPISODES = 1;
 const ARMY_STRENGTH_MIN_EPISODES = 1;
 const ALLIANCES_INITIATED_MIN = 1;
 const BETRAYAL_MIN = 1;
+/**
+ * Reliability's REAL denominator is per-agent decision count from
+ * `decisions.jsonl` (see `computeMatchAgentMetrics`'s `decisionReliability`
+ * param doc) — a genuinely different scale from the event-derived
+ * thresholds above, so it gets its own minimum rather than reusing one.
+ */
+const RELIABILITY_MIN_DECISIONS = 30;
 
 const ECONOMIC_ACTION_KINDS = new Set<SpectatorEvent["actionKind"]>([
   "build",
@@ -91,8 +98,28 @@ export interface AgentFingerprint {
   diplomacyInitiated: AgentMetric | null;
   economicFocus: AgentMetric | null;
   territory: TerritoryShareResult;
-  /** Relative army strength (finalTroops / sum of all finalTroops in the match), meaned across qualifying episodes. */
+  /**
+   * PROVENANCE: this dimension is an ADDITION beyond the product overhaul
+   * spec's five named fingerprint dimensions (expansion/aggression/
+   * economy/diplomacy/reliability — `proxy-war-product-overhaul-final.md`
+   * §Stage 6 item 2) — `territory` above already carries expansion, and
+   * `reliability` below covers the spec's fifth dimension with real
+   * per-seat attribution. `armyStrength` stays because it is genuinely
+   * evidence-based (finalTroops is a real per-episode figure, never
+   * inferred), not because the spec asked for it.
+   */
   armyStrength: AgentMetric | null;
+  /**
+   * The spec's fifth dimension. `1 - (fallbackCount / decisionCount)`,
+   * summed across every retained episode — REAL per-seat attribution from
+   * `decisions.jsonl`'s per-decision `fallbackUsed` flag (see
+   * `computeMatchAgentMetrics`'s `decisionReliability` param), never an
+   * episode-level aggregate (`CoworldLeagueEpisodeRow.degradedCount` is
+   * NOT per-agent and is not used here). `null` when no run this agent
+   * appears in carries `decisions.jsonl` (older/foreign runs) rather than
+   * ever fabricating a rate from absent data.
+   */
+  reliability: AgentMetric | null;
 }
 
 export interface NamedCount {
@@ -142,6 +169,10 @@ export interface RawMatchAgentMetrics {
   adversaryCounts: ReadonlyMap<string, number>;
   /** Turn spans (alliance_formed -> alliance_break) for pairs that broke, this episode only. */
   treatyDurationsTurns: readonly number[];
+  /** This agent's total decisions this episode, from `decisions.jsonl`. `null` when that artifact wasn't available for this episode. */
+  decisionCount: number | null;
+  /** This agent's `fallbackUsed: true` decisions this episode, from `decisions.jsonl`. `null` exactly when `decisionCount` is `null`. */
+  fallbackCount: number | null;
 }
 
 /**
@@ -154,6 +185,20 @@ export function computeMatchAgentMetrics(
   telemetry: SpectatorTelemetry,
   agentID: string,
   realLandTileCount: number | null,
+  /**
+   * Per-agent decision reliability for THIS episode, keyed by `agentID`
+   * (`decisions.jsonl`'s own field — no name-matching needed, unlike the
+   * username-keyed cross-episode join `compute-agent-stats.ts` does at
+   * the aggregation layer). `undefined`/`null` (or no entry for this
+   * agentID) means the artifact wasn't available for this episode —
+   * `decisionCount`/`fallbackCount` come back `null`, never fabricated
+   * as 0, so `aggregateAgentStats` correctly excludes this episode from
+   * the reliability denominator entirely.
+   */
+  decisionReliability?: ReadonlyMap<
+    string,
+    { decisionCount: number; fallbackCount: number }
+  > | null,
 ): RawMatchAgentMetrics | null {
   const self = telemetry.agents.find((agent) => agent.agentID === agentID);
   if (self === undefined) {
@@ -285,6 +330,8 @@ export function computeMatchAgentMetrics(
       ? self.finalTroops / sumFinalTroops
       : null;
 
+  const reliability = decisionReliability?.get(agentID) ?? null;
+
   return {
     totalEventCount,
     attackCount,
@@ -302,6 +349,8 @@ export function computeMatchAgentMetrics(
     alliedNames,
     adversaryCounts,
     treatyDurationsTurns,
+    decisionCount: reliability?.decisionCount ?? null,
+    fallbackCount: reliability?.fallbackCount ?? null,
   };
 }
 
@@ -441,6 +490,22 @@ export function aggregateAgentStats(
     "count(alliance_break events with tone=betrayal, actorAgentID=this agent), summed across every retained episode",
   );
 
+  const reliabilityEpisodes = matches.filter((m) => m.decisionCount !== null);
+  const totalDecisions = reliabilityEpisodes.reduce(
+    (sum, m) => sum + (m.decisionCount ?? 0),
+    0,
+  );
+  const totalFallbacks = reliabilityEpisodes.reduce(
+    (sum, m) => sum + (m.fallbackCount ?? 0),
+    0,
+  );
+  const reliability = metric(
+    totalDecisions > 0 ? 1 - totalFallbacks / totalDecisions : 0,
+    totalDecisions,
+    RELIABILITY_MIN_DECISIONS,
+    "1 - (fallbackCount / decisionCount), summed across every retained episode with a decisions.jsonl artifact (per-agent, per-decision fallbackUsed flag — real per-seat attribution, never the mirror's episode-level degradedCount)",
+  );
+
   const alliedCounts = new Map<string, number>();
   for (const m of matches) {
     for (const name of m.alliedNames) {
@@ -486,6 +551,7 @@ export function aggregateAgentStats(
         meanRank,
       },
       armyStrength,
+      reliability,
     },
     social: {
       alliancesInitiated,

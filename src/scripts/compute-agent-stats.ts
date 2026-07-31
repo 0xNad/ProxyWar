@@ -37,6 +37,11 @@ interface RunDirEntry {
   map: string;
   mapSize: string;
   completedAt: string | null;
+  /** Per-agentID decision reliability for this episode; empty when `decisions.jsonl` wasn't retained for it (older/foreign runs) — never fabricated. */
+  decisionReliability: ReadonlyMap<
+    string,
+    { decisionCount: number; fallbackCount: number }
+  >;
 }
 
 async function readJsonIfExists(filePath: string): Promise<unknown | null> {
@@ -49,6 +54,45 @@ async function readJsonIfExists(filePath: string): Promise<unknown | null> {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+/**
+ * Reliability's real per-seat denominator (spec Stage 6 item 2's fifth
+ * fingerprint dimension). `decisions.jsonl` is JSONL (one decision record
+ * per line), NOT a JSON array — this is the only reader in this file
+ * that isn't a single `JSON.parse`. Malformed/unparseable lines are
+ * skipped individually rather than discarding the whole episode's
+ * reliability data over one bad line.
+ */
+async function readDecisionReliability(
+  runDir: string,
+): Promise<ReadonlyMap<string, { decisionCount: number; fallbackCount: number }>> {
+  const counts = new Map<string, { decisionCount: number; fallbackCount: number }>();
+  let raw: string;
+  try {
+    raw = await fs.readFile(path.join(runDir, "decisions.jsonl"), "utf8");
+  } catch {
+    return counts;
+  }
+  for (const line of raw.split("\n")) {
+    const trimmed = line.trim();
+    if (trimmed.length === 0) continue;
+    let record: unknown;
+    try {
+      record = JSON.parse(trimmed);
+    } catch {
+      continue;
+    }
+    if (!isRecord(record) || typeof record.agentID !== "string") continue;
+    const entry = counts.get(record.agentID) ?? {
+      decisionCount: 0,
+      fallbackCount: 0,
+    };
+    entry.decisionCount += 1;
+    if (record.fallbackUsed === true) entry.fallbackCount += 1;
+    counts.set(record.agentID, entry);
+  }
+  return counts;
 }
 
 async function scanRetainedRuns(runsRootDir: string): Promise<RunDirEntry[]> {
@@ -83,12 +127,14 @@ async function scanRetainedRuns(runsRootDir: string): Promise<RunDirEntry[]> {
       isRecord(summaryRaw) && typeof summaryRaw.completedAt === "string"
         ? summaryRaw.completedAt
         : null;
+    const decisionReliability = await readDecisionReliability(runDir);
     entries.push({
       runDir,
       telemetry: telemetryRaw as unknown as SpectatorTelemetry,
       map,
       mapSize,
       completedAt,
+      decisionReliability,
     });
   }
   return entries;
@@ -120,6 +166,7 @@ async function collectRawMatchesByPlayer(
         run.telemetry,
         agent.agentID,
         landTiles,
+        run.decisionReliability,
       );
       if (raw === null) continue;
       const list = byPlayer.get(agent.username) ?? [];

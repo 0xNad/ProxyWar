@@ -185,6 +185,33 @@ describe("computeMatchAgentMetrics", () => {
     // Blitz troops 3000 / sum(1000+3000+1000)=5000 = 0.6.
     expect(blitz?.relativeArmyStrength).toBeCloseTo(0.6);
   });
+
+  it("looks up decision reliability by agentID, and returns null decisionCount/fallbackCount when absent — never fabricated as 0", () => {
+    const withReliability = computeMatchAgentMetrics(
+      telemetry,
+      "a2",
+      null,
+      new Map([
+        ["a1", { decisionCount: 10, fallbackCount: 1 }],
+        ["a2", { decisionCount: 40, fallbackCount: 4 }],
+      ]),
+    );
+    expect(withReliability?.decisionCount).toBe(40);
+    expect(withReliability?.fallbackCount).toBe(4);
+
+    const noMapAtAll = computeMatchAgentMetrics(telemetry, "a2", null);
+    expect(noMapAtAll?.decisionCount).toBeNull();
+    expect(noMapAtAll?.fallbackCount).toBeNull();
+
+    const notInMap = computeMatchAgentMetrics(
+      telemetry,
+      "a2",
+      null,
+      new Map([["a1", { decisionCount: 10, fallbackCount: 1 }]]),
+    );
+    expect(notInMap?.decisionCount).toBeNull();
+    expect(notInMap?.fallbackCount).toBeNull();
+  });
 });
 
 describe("aggregateAgentStats — threshold gating (spec item 2: hide below threshold)", () => {
@@ -208,6 +235,8 @@ describe("aggregateAgentStats — threshold gating (spec item 2: hide below thre
       alliedNames: [],
       adversaryCounts: new Map(),
       treatyDurationsTurns: [],
+      decisionCount: null,
+      fallbackCount: null,
       ...overrides,
     };
   }
@@ -321,6 +350,42 @@ describe("aggregateAgentStats — threshold gating (spec item 2: hide below thre
     ]);
   });
 
+  it("hides reliability below its 30-decision aggregate threshold, pools fallbackCount/decisionCount across episodes BEFORE dividing, and excludes episodes with no decisions.jsonl entirely (never treats them as 0 decisions)", () => {
+    const belowThreshold = aggregateAgentStats([
+      rawMatch({ decisionCount: 10, fallbackCount: 1 }),
+      rawMatch({ decisionCount: 15, fallbackCount: 3 }),
+    ]);
+    expect(belowThreshold.fingerprint.reliability).toBeNull();
+
+    // Pooled: 1 - (1+3+2)/(10+15+30) = 1 - 6/55 ≈ 0.8909. A naive
+    // average of per-episode rates would differ — same statistical
+    // argument as aggression's pooling test above.
+    const atThreshold = aggregateAgentStats([
+      rawMatch({ decisionCount: 10, fallbackCount: 1 }),
+      rawMatch({ decisionCount: 15, fallbackCount: 3 }),
+      rawMatch({ decisionCount: 30, fallbackCount: 2 }),
+    ]);
+    expect(atThreshold.fingerprint.reliability).not.toBeNull();
+    expect(atThreshold.fingerprint.reliability?.sampleSize).toBe(55);
+    expect(atThreshold.fingerprint.reliability?.value).toBeCloseTo(
+      1 - 6 / 55,
+    );
+
+    // An episode with no decisions.jsonl (decisionCount: null, the
+    // default from rawMatch()) must be EXCLUDED from both numerator and
+    // denominator, not counted as a 0-decision/0-fallback episode.
+    const withMissingEpisode = aggregateAgentStats([
+      rawMatch({ decisionCount: 10, fallbackCount: 1 }),
+      rawMatch({ decisionCount: 15, fallbackCount: 3 }),
+      rawMatch({ decisionCount: 30, fallbackCount: 2 }),
+      rawMatch(), // decisionCount/fallbackCount null — no artifact.
+    ]);
+    expect(withMissingEpisode.fingerprint.reliability?.sampleSize).toBe(55);
+    expect(withMissingEpisode.fingerprint.reliability?.value).toBeCloseTo(
+      1 - 6 / 55,
+    );
+  });
+
   it("never fabricates a metric as zero when the underlying sample is empty — always null, not 0", () => {
     const stats = aggregateAgentStats([]);
     expect(stats.episodeCount).toBe(0);
@@ -330,6 +395,7 @@ describe("aggregateAgentStats — threshold gating (spec item 2: hide below thre
     expect(stats.fingerprint.territory.share).toBeNull();
     expect(stats.fingerprint.territory.absoluteTiles).toBeNull();
     expect(stats.fingerprint.armyStrength).toBeNull();
+    expect(stats.fingerprint.reliability).toBeNull();
     expect(stats.social.alliancesInitiated).toBeNull();
     expect(stats.social.allianceAcceptanceRate).toBeNull();
     expect(stats.social.betrayalCount).toBeNull();
