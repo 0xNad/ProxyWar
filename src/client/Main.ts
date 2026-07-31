@@ -1582,6 +1582,7 @@ class Client {
             decisions: details.recentDecisions,
             summary: details.summary,
             spectatorTelemetry: details.spectatorTelemetry,
+            directorCutPlan: details.directorCutPlan,
             detailsLoading: false,
             artifactAvailability: details.artifactAvailability,
           });
@@ -1595,6 +1596,7 @@ class Client {
             decisions: details.recentDecisions,
             summary: details.summary,
             spectatorTelemetry: details.spectatorTelemetry,
+            directorCutPlan: details.directorCutPlan,
             detailsLoading: false,
             artifactAvailability: details.artifactAvailability,
           });

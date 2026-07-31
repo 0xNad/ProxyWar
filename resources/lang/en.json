@@ -1319,6 +1319,8 @@
     "share_image_failed": "Capture failed",
     "radio_show": "Radio",
     "radio_hide": "Radio",
+    "director_cut_on": "Director Cut",
+    "director_cut_off": "Full Replay",
     "decisions_title": "Decision log",
     "decisions_show_older": "Show older ({count} remaining)",
     "decisions_show_recent": "Show recent only",

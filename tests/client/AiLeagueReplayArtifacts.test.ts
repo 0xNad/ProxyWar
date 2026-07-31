@@ -51,6 +51,13 @@ describe("AiLeagueReplayArtifacts", () => {
       if (url.endsWith("/spectator-telemetry.json")) {
         return jsonResponse({ version: 1, events: [] });
       }
+      if (url.endsWith("/director-cut-plan.json")) {
+        return jsonResponse({
+          schemaVersion: 1,
+          reportKind: "director-cut-plan",
+          segments: [],
+        });
+      }
       throw new Error(`unexpected request ${url}`);
     });
 
@@ -58,7 +65,7 @@ describe("AiLeagueReplayArtifacts", () => {
       fetchImpl,
     });
 
-    expect(fetchImpl).toHaveBeenCalledTimes(3);
+    expect(fetchImpl).toHaveBeenCalledTimes(4);
     expect(
       fetchImpl.mock.calls.map(([input]) => String(input)).join("\n"),
     ).not.toContain("decisions.jsonl");
@@ -74,6 +81,10 @@ describe("AiLeagueReplayArtifacts", () => {
       spectatorTelemetry: true,
       decisions: true,
       summary: true,
+    });
+    expect(details.directorCutPlan).toMatchObject({
+      schemaVersion: 1,
+      reportKind: "director-cut-plan",
     });
   });
 

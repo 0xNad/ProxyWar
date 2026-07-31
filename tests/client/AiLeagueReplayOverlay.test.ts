@@ -2128,6 +2128,112 @@ describe("AiLeagueReplayOverlay", () => {
       expect(pulse?.getAttribute("data-kind")).toBe("elimination");
       expect(pulse?.getAttribute("role")).toBe("status");
     });
+
+  });
+
+  describe("Director Cut (Stage 5 player integration)", () => {
+    function directorCutPlanFixture(runID: string) {
+      return {
+        schemaVersion: 1,
+        reportKind: "director-cut-plan",
+        runID,
+        matchID: runID,
+        generatedAt: "2026-07-31T00:00:00.000Z",
+        totalTurns: 999,
+        segments: [
+          {
+            startTurn: 0,
+            endTurn: 199,
+            speed: "fast",
+            eventReason: "quiet_interval",
+            importance: 0,
+            participatingAgents: [],
+          },
+          {
+            startTurn: 200,
+            endTurn: 999,
+            speed: "slow",
+            eventReason: "nuke",
+            importance: 95,
+            participatingAgents: ["Auri"],
+          },
+        ],
+        importantTurnCount: 800,
+        estimatedDurationSeconds: 300,
+        degraded: false,
+        notes: [],
+      };
+    }
+
+    function frame(tick: number): void {
+      document.dispatchEvent(
+        new CustomEvent("ai-league-replay-frame", { detail: { tick } }),
+      );
+    }
+
+    it("renders no toggle at all when no valid Director Cut plan is present", () => {
+      const runID = "director-cut-none-1";
+      mountAiLeagueReplayOverlay({
+        runID,
+        artifactBasePath: `/ai-league-runs/${runID}`,
+        decisions: [],
+      });
+      expect(
+        document.querySelector("[data-ai-league-director-cut-toggle]"),
+      ).toBeNull();
+    });
+
+    it("mounts enabled by default once a valid plan arrives via hydrate, and drives replay speed as the turn crosses segments", () => {
+      const runID = "director-cut-toggle-1";
+      const onReplaySpeedChange = vi.fn();
+      const overlay = mountAiLeagueReplayOverlay({
+        runID,
+        artifactBasePath: `/ai-league-runs/${runID}`,
+        decisions: [],
+        onReplaySpeedChange,
+      });
+      overlay.hydrate({
+        directorCutPlan: directorCutPlanFixture(runID),
+      });
+
+      const toggle = document.querySelector<HTMLButtonElement>(
+        "[data-ai-league-director-cut-toggle]",
+      );
+      expect(toggle).not.toBeNull();
+      expect(toggle?.getAttribute("aria-pressed")).toBe("true");
+      // Mounting applies the opening segment's speed immediately.
+      expect(onReplaySpeedChange).toHaveBeenCalledWith(0); // fastest
+      onReplaySpeedChange.mockClear();
+
+      frame(200);
+      expect(onReplaySpeedChange).toHaveBeenCalledWith(2); // slow
+    });
+
+    it("hands control back to Full Replay when toggled off, and never emits another speed change from the plan", () => {
+      const runID = "director-cut-toggle-2";
+      const onReplaySpeedChange = vi.fn();
+      const overlay = mountAiLeagueReplayOverlay({
+        runID,
+        artifactBasePath: `/ai-league-runs/${runID}`,
+        decisions: [],
+        onReplaySpeedChange,
+      });
+      overlay.hydrate({
+        directorCutPlan: directorCutPlanFixture(runID),
+      });
+      const toggle = document.querySelector<HTMLButtonElement>(
+        "[data-ai-league-director-cut-toggle]",
+      );
+      onReplaySpeedChange.mockClear();
+
+      toggle?.click();
+      expect(toggle?.getAttribute("aria-pressed")).toBe("false");
+      expect(onReplaySpeedChange).toHaveBeenCalledWith(1); // normal
+
+      onReplaySpeedChange.mockClear();
+      frame(200);
+      expect(onReplaySpeedChange).not.toHaveBeenCalled();
+    });
   });
 });
 

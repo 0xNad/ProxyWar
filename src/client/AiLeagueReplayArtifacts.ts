@@ -32,6 +32,13 @@ export interface AiLeagueReplayDetails {
   recentDecisions: AiLeagueReplayUiDecision[];
   summary: Record<string, unknown> | null;
   spectatorTelemetry: unknown;
+  /** Product overhaul spec Stage 5. Raw, unvalidated JSON — the overlay
+   * layer owns runtime shape-checking via `normalizeDirectorCutPlan`
+   * (`DirectorCutController.ts`), the same split `spectatorTelemetry`
+   * already uses here. `null` when absent (older bundle, generation
+   * failure, or fetch error) — Director Cut mode is simply unavailable,
+   * never a hard error; Full Replay is unaffected either way. */
+  directorCutPlan: unknown;
   artifactAvailability: AiLeagueReplayArtifactAvailability;
 }
 
@@ -69,10 +76,15 @@ export async function loadAiLeagueReplayDetails(
     request("replay-ui.json"),
     request("match-summary.json"),
   ]);
-  // Start telemetry concurrently, but keep it out of the core-details gate.
-  // Large or slow telemetry must not suppress the already-bounded replay UI.
+  // Start telemetry and the Director Cut plan concurrently, but keep both
+  // out of the core-details gate. Large/slow telemetry or a missing plan
+  // (older bundle, generation failure) must not suppress the already-
+  // bounded replay UI — Director Cut is a strictly additive enhancement.
   const telemetryResultPromise = Promise.allSettled([
     request("spectator-telemetry.json"),
+  ]);
+  const directorCutPlanResultPromise = Promise.allSettled([
+    request("director-cut-plan.json"),
   ]);
   const [uiResult, summaryResult] = await coreResultsPromise;
 
@@ -107,6 +119,7 @@ export async function loadAiLeagueReplayDetails(
     recentDecisions: replayUi?.recentDecisions ?? [],
     summary: Object.keys(summary).length > 0 ? summary : null,
     spectatorTelemetry: null,
+    directorCutPlan: null,
     artifactAvailability: {
       visualReport,
       spectatorTelemetry: false,
@@ -119,9 +132,14 @@ export async function loadAiLeagueReplayDetails(
   const [telemetryResult] = await telemetryResultPromise;
   const telemetryResponse = fulfilledOk(telemetryResult);
   const spectatorTelemetry = await parsedJson(telemetryResponse);
+  const [directorCutPlanResult] = await directorCutPlanResultPromise;
+  const directorCutPlan = await parsedJson(
+    fulfilledOk(directorCutPlanResult),
+  );
   return {
     ...partialDetails,
     spectatorTelemetry,
+    directorCutPlan,
     artifactAvailability: {
       ...partialDetails.artifactAvailability,
       spectatorTelemetry: telemetryResponse !== null,

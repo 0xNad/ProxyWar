@@ -26,6 +26,11 @@ import {
   BROADCAST_RAIL_FOLLOWED_CHANGE_EVENT,
   BROADCAST_RAIL_FOLLOW_EVENT,
 } from "./graphics/layers/PointOfViewSelector";
+import {
+  mountDirectorCutController,
+  normalizeDirectorCutPlan,
+  type DirectorCutControllerHandle,
+} from "./DirectorCutController";
 import { fetchReadModel, type PublicAgent } from "./publicapp/ReadModelSchema";
 import {
   mountReplayScopedLeagueClipControl,
@@ -181,6 +186,15 @@ interface AiLeagueReplayOverlayInput {
   artifactAvailability?: AiLeagueReplayArtifactAvailability;
   detailsLoading?: boolean;
   onReplaySpeedChange?: (speed: ReplaySpeedMultiplier) => void;
+  /**
+   * Product overhaul spec Stage 5. Raw, unvalidated JSON from
+   * `director-cut-plan.json` — this overlay owns runtime shape-checking via
+   * `normalizeDirectorCutPlan` (same split `spectatorTelemetry` already
+   * uses). Arrives asynchronously via `hydrate()`, same timing as
+   * `spectatorTelemetry`; the controller mounts (enabled by default — spec
+   * item 3) the first time a valid plan shows up and never re-mounts.
+   */
+  directorCutPlan?: unknown;
 }
 
 export interface AiLeagueReplayArtifactAvailability {
@@ -244,11 +258,34 @@ export function mountAiLeagueReplayOverlay(input: AiLeagueReplayOverlayInput) {
       followedPlayerName,
     );
   });
+  // Director Cut (spec Stage 5): one controller per overlay mount, mounted
+  // the first time a valid `director-cut-plan.json` arrives via hydrate()
+  // (it loads asynchronously, same timing as spectatorTelemetry) and never
+  // re-mounted afterward — `mountDirectorCutController` owns its own
+  // enabled/disabled state from then on, the toggle button only reads it.
+  let directorCutHandle: DirectorCutControllerHandle | null = null;
+  const syncDirectorCutController = (): void => {
+    if (directorCutHandle !== null) return;
+    const plan = normalizeDirectorCutPlan(currentInput.directorCutPlan);
+    if (plan === null) return;
+    directorCutHandle = mountDirectorCutController({
+      plan,
+      // Spec item 3: "Director Cut is the default for archived matches".
+      // This overlay only ever mounts for Full Replay (archived matches) —
+      // live/re-watched premieres run through ReplayPremiereRuntime.ts's
+      // own sealed real-time timeline instead, which never wires a
+      // director-cut-plan.json into this input at all.
+      enabledByDefault: true,
+      onSpeedChange: (speed) => currentInput.onReplaySpeedChange?.(speed),
+    });
+  };
+  syncDirectorCutController();
   let clipControl = mountReplayDetailsBindings(
     overlay,
     currentInput,
     identityByPlayerName,
     followedPlayerName,
+    directorCutHandle,
   );
   mountReplayJumpControls(document);
 
@@ -340,11 +377,13 @@ export function mountAiLeagueReplayOverlay(input: AiLeagueReplayOverlayInput) {
       subtitle.textContent = subtitleText;
     }
     const previousClipControl = clipControl;
+    syncDirectorCutController();
     clipControl = mountReplayDetailsBindings(
       overlay,
       currentInput,
       identityByPlayerName,
       followedPlayerName,
+      directorCutHandle,
     );
     previousClipControl?.dispose();
     syncLowerThirds();
@@ -412,6 +451,8 @@ export function mountAiLeagueReplayOverlay(input: AiLeagueReplayOverlayInput) {
       lowerThird.dispose();
       clipControl?.dispose();
       clipControl = null;
+      directorCutHandle?.dispose();
+      directorCutHandle = null;
       disposeReplayOverlay(overlay);
     },
   } satisfies AiLeagueReplayOverlayHandle;
@@ -466,6 +507,7 @@ function mountReplayDetailsBindings(
   input: AiLeagueReplayOverlayInput,
   identityByPlayerName: ReadonlyMap<string, PublicAgent>,
   followedPlayerName: string | null,
+  directorCutHandle: DirectorCutControllerHandle | null,
 ): ReplayScopedLeagueClipControlHandle | null {
   const telemetry =
     input.spectatorTelemetry as AiLeagueSpectatorTelemetry | null;
@@ -477,6 +519,7 @@ function mountReplayDetailsBindings(
   mountAiLeagueDecisionsDisclosure(overlay);
   mountAiLeagueRadioToggle(overlay);
   mountAiLeagueAnalystToggle(overlay);
+  mountAiLeagueDirectorCutToggle(overlay, directorCutHandle);
   mountAiLeagueShareImageButton(overlay);
   mountAiLeagueBroadcastDrawer(
     overlay,
@@ -642,6 +685,52 @@ function mountAiLeagueAnalystToggle(overlay: HTMLElement): void {
   apply(false);
   toggle.addEventListener("click", () => {
     apply(!document.body.classList.contains("ai-league-analyst-mode"));
+  });
+  actions.prepend(toggle);
+}
+
+/**
+ * Director Cut / Full Replay (spec Stage 5 item 3). Absent entirely until a
+ * valid plan has actually mounted a controller (no button for a match with
+ * no plan yet, or a legacy bundle with none at all — never a disabled
+ * button that does nothing). Self-guards against a duplicate on re-hydrate,
+ * same as `mountAiLeagueAnalystToggle`. State lives on the controller
+ * itself (mounted once, enabled by default per spec item 3), not on a DOM
+ * class: `directorCutHandle.isEnabled()` is the single source of truth this
+ * button reads and writes, so a re-hydrate that calls this again (button
+ * already exists, so it no-ops) never fights the controller's own state.
+ */
+function mountAiLeagueDirectorCutToggle(
+  overlay: HTMLElement,
+  directorCutHandle: DirectorCutControllerHandle | null,
+): void {
+  if (directorCutHandle === null) return;
+  const actions = overlay.querySelector<HTMLElement>(
+    ".ai-league-header-actions",
+  );
+  if (actions === null) return;
+  if (
+    actions.querySelector("[data-ai-league-director-cut-toggle]") !== null
+  ) {
+    return;
+  }
+  const toggle = document.createElement("button");
+  toggle.type = "button";
+  toggle.dataset.aiLeagueDirectorCutToggle = "";
+  const apply = (on: boolean) => {
+    toggle.setAttribute("aria-pressed", String(on));
+    toggle.classList.toggle("is-on", on);
+    toggle.textContent = translateText(
+      on
+        ? "ai_league_replay.director_cut_on"
+        : "ai_league_replay.director_cut_off",
+    );
+  };
+  apply(directorCutHandle.isEnabled());
+  toggle.addEventListener("click", () => {
+    const next = !directorCutHandle.isEnabled();
+    directorCutHandle.setEnabled(next);
+    apply(next);
   });
   actions.prepend(toggle);
 }
