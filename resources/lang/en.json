@@ -1821,5 +1821,27 @@
     "footer_repository": "Repository",
     "footer_about": "About",
     "account_link": "Your account"
+  },
+  "broadcast": {
+    "rail_heading": "Competitors",
+    "rail_empty": "Competitor data isn't available yet.",
+    "rail_builder": "Built by {name}",
+    "rail_territory": "{percent}% territory",
+    "rail_rank": "Rank #{rank}",
+    "rail_eliminated": "Eliminated",
+    "rail_degraded": "{count, plural, one {# degraded decision} other {# degraded decisions}}",
+    "rail_allies": "Allied: {names}",
+    "rail_wars": "At war: {names}",
+    "war_room_heading": "War Room",
+    "war_room_empty": "No notable events yet.",
+    "war_room_kind_alliance": "Alliance",
+    "war_room_kind_first_strike": "First strike",
+    "war_room_kind_betrayal": "Betrayal",
+    "war_room_kind_elimination": "Elimination",
+    "war_room_kind_plan_change": "Plan change",
+    "war_room_turn": "Turn {turn}",
+    "war_room_stated_reason": "Stated reason: {reason}",
+    "war_room_jump_to_turn": "Jump to turn {turn}",
+    "timeline_heading": "Match timeline"
   }
 }
