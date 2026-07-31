@@ -24,6 +24,14 @@ import {
   type AgentDemoJobRequest,
 } from "../server/agents/AgentDemoServerJobs";
 import { AgentRelayRateGuard } from "../server/agents/AgentRelayRateGuard";
+import {
+  readFeaturedMatchStore,
+  resolveFeaturedMatchStateRoot,
+} from "../server/agents/FeaturedMatch";
+import { resolveFeaturedMatchParticipantCards } from "../server/agents/FeaturedMatchParticipants";
+import { loadIdentityRegistrySnapshot } from "../server/identity/IdentityRegistry";
+import { publicFeaturedMatch } from "../server/ProxyWarPublicReadModel";
+import { derivePremiereId } from "../server/replay-premiere/ReplayPremiereLoopCore";
 import { gameRecordFileIsRenderable } from "../server/agents/AgentSpectatorReplay";
 import {
   agentStrategyProfiles,
@@ -1122,6 +1130,97 @@ app.get("/api/premieres/account", async (req, res) => {
     });
   } catch (error) {
     sendReplayPremiereFailure(res, error);
+  }
+});
+
+// Narrow, per-record FeaturedMatch detail + participant identity routes
+// (product overhaul spec Stage 3 item 6 / hero states A/B). Deliberately
+// separate from the bulk `read-model.json` mirror artifact and from the
+// `pointsRoutesEnabled` wagering gate above — this is league/editorial
+// data (a scheduled or published match and who is in it), always
+// available on a league-origin process regardless of the wagering flag,
+// exactly like `/league`/`read-model.json` already are. See
+// `FeaturedMatchParticipants.ts`'s own doc for why participant identity
+// must never be folded into the bulk read model: only a route keyed to
+// ONE match id (this route) or ONE live premiere id (the route below) is
+// safe, since either requires the caller to already know which specific
+// record they're asking about.
+async function loadFeaturedMatchDetail(
+  match: import("../server/agents/FeaturedMatch").FeaturedMatch | undefined,
+) {
+  if (match === undefined) return null;
+  const identity = await loadIdentityRegistrySnapshot();
+  return {
+    match: publicFeaturedMatch(match),
+    // Lets the client detect "is this record the CURRENTLY LIVE premiere"
+    // via a plain string comparison against the already-fetched read
+    // model's `premieres.live.premiereId`, without doing any hashing
+    // itself (derivePremiereId is a private server module, and there is
+    // no reason to reimplement/expose sha256 derivation client-side for
+    // one comparison). Null when the record predates episode-id tracking
+    // (FeaturedMatch.ts's own doc) or is archive-lane.
+    derivedPremiereId:
+      match.episodeRequestId === null
+        ? null
+        : derivePremiereId(match.episodeRequestId),
+    participants: resolveFeaturedMatchParticipantCards(match, identity),
+  };
+}
+
+app.get("/api/featured-matches/:matchId", async (req, res) => {
+  try {
+    res.setHeader("Cache-Control", "no-store, max-age=0");
+    const stateRoot = resolveFeaturedMatchStateRoot();
+    const store = await readFeaturedMatchStore(stateRoot);
+    const match = store.matches.find(
+      (candidate) =>
+        candidate.matchId === req.params.matchId &&
+        candidate.state !== "candidate",
+    );
+    const detail = await loadFeaturedMatchDetail(match);
+    if (detail === null) {
+      res.status(404).json({ error: { code: "FEATURED_MATCH_NOT_FOUND" } });
+      return;
+    }
+    res.status(200).json({ schemaVersion: 1, ...detail });
+  } catch (error) {
+    console.error("GET /api/featured-matches/:matchId failed", error);
+    res.status(500).json({ error: { code: "FEATURED_MATCH_LOOKUP_FAILED" } });
+  }
+});
+
+// Looks up the FeaturedMatch record (if any) whose derived premiere id
+// matches `:premiereId` — the lobby hero's lookup direction (it knows the
+// LIVE/SCHEDULED premiere id from the league mirror card, not a matchId).
+// A live premiere admitted outside the editorial scheduling flow (plain
+// FIFO or an exhibition fallback — still the common case; see
+// cycle-premiere.sh) has no matching record, and this returns
+// `{match: null, participants: []}` with 200, not a 404 - "no featured
+// match behind this premiere" is the normal, expected case, not an error.
+app.get("/api/premieres/:premiereId/featured-match", async (req, res) => {
+  try {
+    res.setHeader("Cache-Control", "no-store, max-age=0");
+    const stateRoot = resolveFeaturedMatchStateRoot();
+    const store = await readFeaturedMatchStore(stateRoot);
+    const match = store.matches.find(
+      (candidate) =>
+        candidate.lane === "premiere" &&
+        candidate.state !== "candidate" &&
+        candidate.episodeRequestId !== null &&
+        derivePremiereId(candidate.episodeRequestId) === req.params.premiereId,
+    );
+    const detail = await loadFeaturedMatchDetail(match);
+    res.status(200).json({
+      schemaVersion: 1,
+      match: detail?.match ?? null,
+      participants: detail?.participants ?? [],
+    });
+  } catch (error) {
+    console.error(
+      "GET /api/premieres/:premiereId/featured-match failed",
+      error,
+    );
+    res.status(500).json({ error: { code: "FEATURED_MATCH_LOOKUP_FAILED" } });
   }
 });
 // The account page itself — a plain app-shell document, not premiere-

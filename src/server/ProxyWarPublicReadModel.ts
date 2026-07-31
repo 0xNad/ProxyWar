@@ -376,7 +376,8 @@ function publicFeaturedMatchResult(
   };
 }
 
-function publicFeaturedMatch(match: FeaturedMatch): PublicFeaturedMatch {
+/** Exported for reuse by the narrow, per-match `/api/featured-matches/:matchId` route (never the bulk read model — see `PublicFeaturedMatch`'s own doc) so both share the exact same embargo projection rather than a parallel reimplementation that could drift. */
+export function publicFeaturedMatch(match: FeaturedMatch): PublicFeaturedMatch {
   const revealed = isFeaturedMatchRevealed(match);
   return {
     matchId: match.matchId,
