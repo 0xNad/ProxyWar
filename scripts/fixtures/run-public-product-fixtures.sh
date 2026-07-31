@@ -173,7 +173,13 @@ npx tsx src/scripts/replay-premiere-controlled-exhibition.ts \
   --turns-per-decision-step=200 \
   --replay-tail-turns=2000 \
   --disable-action-kinds=alliance_request,alliance_extend \
-  --playback-turn-interval-ms=25 > /tmp/pw-fixture-premiere.log 2>&1
+  --playback-turn-interval-ms=1 > /tmp/pw-fixture-premiere.log 2>&1
+# 1ms/turn (not the production-realistic 100ms/PREMIERE_REAL_TURN_INTERVAL_MS)
+# is deliberate: 21,400 turns at 1ms plays out live in ~21s, so the E2E
+# suite's "reveal after end" coverage can poll to a real reveal inside one
+# bounded test timeout instead of waiting ~36 minutes at real-time pacing.
+# Playback speed is presentation-only metadata (`replay.turnIntervalMs`);
+# it does not affect the deterministic turnCount/winner above.
 BUNDLE="$ADMIT_STAGING/fixture-premiere-live.source.json"
 SHA="$(shasum -a 256 "$BUNDLE" | awk '{print $1}')"
 
