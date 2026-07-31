@@ -224,6 +224,45 @@ describe("mountDirectorCutController", () => {
     handle.dispose();
   });
 
+  it("applies the segment covering a nonzero currentTurn when mounted enabled — late plan hydration, not the opening segment", () => {
+    const onSpeedChange = vi.fn();
+    const handle = mountDirectorCutController({
+      plan: THREE_SEGMENT_PLAN,
+      enabledByDefault: true,
+      onSpeedChange,
+      documentRef: document,
+      currentTurn: 230,
+    });
+    // Plan JSON can resolve well after playback started; turn 230 is in
+    // the "slow" (nuke) segment, not the opening "fastest" one — mounting
+    // enabled must never apply turn 0's segment regardless of where
+    // playback actually is.
+    expect(onSpeedChange).toHaveBeenCalledExactlyOnceWith(
+      ReplaySpeedMultiplier.slow,
+    );
+    handle.dispose();
+  });
+
+  it("re-syncs to the CURRENT turn's segment when re-enabled mid-match, not the opening segment — the masking bug the turn-0 case above cannot catch", () => {
+    const onSpeedChange = vi.fn();
+    const handle = mountDirectorCutController({
+      plan: THREE_SEGMENT_PLAN,
+      enabledByDefault: false,
+      onSpeedChange,
+      documentRef: document,
+    });
+    // Turn 0's segment is coincidentally "fastest", the same value a
+    // hardcoded-to-0 bug would also produce — passing a currentTurn whose
+    // segment DIFFERS from turn 0's is what actually proves setEnabled
+    // reads the passed turn instead of always resyncing to the opening
+    // segment.
+    handle.setEnabled(true, 230);
+    expect(onSpeedChange).toHaveBeenCalledExactlyOnceWith(
+      ReplaySpeedMultiplier.slow,
+    );
+    handle.dispose();
+  });
+
   it("stops reacting to frames after dispose", () => {
     const onSpeedChange = vi.fn();
     const handle = mountDirectorCutController({

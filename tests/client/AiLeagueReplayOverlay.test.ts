@@ -2167,7 +2167,9 @@ describe("AiLeagueReplayOverlay", () => {
 
     function frame(tick: number): void {
       document.dispatchEvent(
-        new CustomEvent("ai-league-replay-frame", { detail: { tick } }),
+        new CustomEvent("ai-league-replay-frame", {
+          detail: { tick, turnNumber: tick, players: [] },
+        }),
       );
     }
 
@@ -2233,6 +2235,57 @@ describe("AiLeagueReplayOverlay", () => {
       onReplaySpeedChange.mockClear();
       frame(200);
       expect(onReplaySpeedChange).not.toHaveBeenCalled();
+    });
+
+    it("applies the segment covering the current turn — not the opening one — when the plan hydrates after playback already advanced", () => {
+      // Late plan hydration: `director-cut-plan.json` loads asynchronously,
+      // same timing as spectator telemetry, so playback can already be
+      // well past turn 0 by the time it resolves.
+      const runID = "director-cut-late-hydrate";
+      const onReplaySpeedChange = vi.fn();
+      const overlay = mountAiLeagueReplayOverlay({
+        runID,
+        artifactBasePath: `/ai-league-runs/${runID}`,
+        decisions: [],
+        onReplaySpeedChange,
+      });
+      frame(200);
+      onReplaySpeedChange.mockClear();
+      overlay.hydrate({
+        directorCutPlan: directorCutPlanFixture(runID),
+      });
+
+      // Turn 200 is the plan's "slow" segment; a hardcoded-to-0 bug would
+      // apply "fast" (turn 0's segment) instead.
+      expect(onReplaySpeedChange).toHaveBeenCalledExactlyOnceWith(2); // slow
+    });
+
+    it("resyncs to the CURRENT turn's segment when toggled back on mid-match, not the opening segment", () => {
+      const runID = "director-cut-toggle-resync";
+      const onReplaySpeedChange = vi.fn();
+      const overlay = mountAiLeagueReplayOverlay({
+        runID,
+        artifactBasePath: `/ai-league-runs/${runID}`,
+        decisions: [],
+        onReplaySpeedChange,
+      });
+      overlay.hydrate({
+        directorCutPlan: directorCutPlanFixture(runID),
+      });
+      frame(200);
+      expect(onReplaySpeedChange).toHaveBeenCalledWith(2); // slow
+
+      const toggle = document.querySelector<HTMLButtonElement>(
+        "[data-ai-league-director-cut-toggle]",
+      );
+      toggle?.click(); // off
+      expect(onReplaySpeedChange).toHaveBeenCalledWith(1); // normal
+      onReplaySpeedChange.mockClear();
+
+      toggle?.click(); // back on, still at turn 200
+      // The masking bug: re-enabling always reapplied the opening ("fast")
+      // segment, self-correcting only at the next frame tick boundary.
+      expect(onReplaySpeedChange).toHaveBeenCalledExactlyOnceWith(2); // slow
     });
   });
 });

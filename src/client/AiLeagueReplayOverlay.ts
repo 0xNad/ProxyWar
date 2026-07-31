@@ -277,6 +277,10 @@ export function mountAiLeagueReplayOverlay(input: AiLeagueReplayOverlayInput) {
       // director-cut-plan.json into this input at all.
       enabledByDefault: true,
       onSpeedChange: (speed) => currentInput.onReplaySpeedChange?.(speed),
+      // Late hydration: the plan can resolve well after playback started
+      // (see comment above), so mounting enabled must apply the segment
+      // covering the CURRENT turn, never unconditionally the opening one.
+      currentTurn: currentInput.currentTurn ?? 0,
     });
   };
   syncDirectorCutController();
@@ -286,6 +290,7 @@ export function mountAiLeagueReplayOverlay(input: AiLeagueReplayOverlayInput) {
     identityByPlayerName,
     followedPlayerName,
     directorCutHandle,
+    () => currentInput.currentTurn ?? 0,
   );
   mountReplayJumpControls(document);
 
@@ -384,6 +389,7 @@ export function mountAiLeagueReplayOverlay(input: AiLeagueReplayOverlayInput) {
       identityByPlayerName,
       followedPlayerName,
       directorCutHandle,
+      () => currentInput.currentTurn ?? 0,
     );
     previousClipControl?.dispose();
     syncLowerThirds();
@@ -508,6 +514,7 @@ function mountReplayDetailsBindings(
   identityByPlayerName: ReadonlyMap<string, PublicAgent>,
   followedPlayerName: string | null,
   directorCutHandle: DirectorCutControllerHandle | null,
+  getCurrentTurn: () => number,
 ): ReplayScopedLeagueClipControlHandle | null {
   const telemetry =
     input.spectatorTelemetry as AiLeagueSpectatorTelemetry | null;
@@ -519,7 +526,7 @@ function mountReplayDetailsBindings(
   mountAiLeagueDecisionsDisclosure(overlay);
   mountAiLeagueRadioToggle(overlay);
   mountAiLeagueAnalystToggle(overlay);
-  mountAiLeagueDirectorCutToggle(overlay, directorCutHandle);
+  mountAiLeagueDirectorCutToggle(overlay, directorCutHandle, getCurrentTurn);
   mountAiLeagueShareImageButton(overlay);
   mountAiLeagueBroadcastDrawer(
     overlay,
@@ -703,6 +710,7 @@ function mountAiLeagueAnalystToggle(overlay: HTMLElement): void {
 function mountAiLeagueDirectorCutToggle(
   overlay: HTMLElement,
   directorCutHandle: DirectorCutControllerHandle | null,
+  getCurrentTurn: () => number,
 ): void {
   if (directorCutHandle === null) return;
   const actions = overlay.querySelector<HTMLElement>(
@@ -729,7 +737,10 @@ function mountAiLeagueDirectorCutToggle(
   apply(directorCutHandle.isEnabled());
   toggle.addEventListener("click", () => {
     const next = !directorCutHandle.isEnabled();
-    directorCutHandle.setEnabled(next);
+    // Re-enabling mid-match must resync to the segment covering the
+    // CURRENT turn, never the opening one (see DirectorCutController.ts's
+    // `setEnabled` doc) — irrelevant when turning off.
+    directorCutHandle.setEnabled(next, getCurrentTurn());
     apply(next);
   });
   actions.prepend(toggle);

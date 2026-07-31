@@ -127,8 +127,17 @@ export interface DirectorCutControllerHandle {
    * starts at) and stops reacting to frames — "Full Replay unaffected"
    * (spec Stage 5 acceptance) means this controller must never touch
    * `ReplaySpeedChangeEvent` again once disabled.
+   *
+   * `currentTurn` (default 0) is the segment to resync to when turning
+   * back ON. Toggling back on mid-match without it would always reapply
+   * the OPENING segment's speed at whatever nonzero turn playback is
+   * actually at, correcting itself only at the next frame tick boundary
+   * — a real, found bug. Callers own tracking "what turn is the viewer
+   * at" (`AiLeagueReplayOverlay.ts`'s `currentInput.currentTurn`, already
+   * fed by the same `ai-league-replay-frame` event this controller
+   * itself listens to) and must pass it here.
    */
-  setEnabled(enabled: boolean): void;
+  setEnabled(enabled: boolean, currentTurn?: number): void;
   isEnabled(): boolean;
   dispose(): void;
 }
@@ -147,6 +156,15 @@ export function mountDirectorCutController(options: {
   onSpeedChange: (speed: ReplaySpeedMultiplier) => void;
   onSegmentChange?: (segment: DirectorCutSegment | null) => void;
   documentRef?: Document;
+  /**
+   * The turn playback is actually at when this controller mounts (default
+   * 0). Plan JSON hydrates asynchronously, same timing as spectator
+   * telemetry (see `AiLeagueReplayOverlay.ts`'s `syncDirectorCutController`
+   * doc) — playback can already be well past turn 0 by the time this runs,
+   * and mounting enabled must apply the segment covering THAT turn, never
+   * unconditionally the opening one.
+   */
+  currentTurn?: number;
 }): DirectorCutControllerHandle {
   const doc = options.documentRef ?? document;
   let enabled = options.enabledByDefault;
@@ -171,16 +189,16 @@ export function mountDirectorCutController(options: {
   doc.addEventListener("ai-league-replay-frame", onFrame);
 
   if (enabled) {
-    applySegmentAt(0);
+    applySegmentAt(options.currentTurn ?? 0);
   }
 
   return {
-    setEnabled(next: boolean) {
+    setEnabled(next: boolean, currentTurn?: number) {
       if (next === enabled) return;
       enabled = next;
       if (enabled) {
         lastSegmentIndex = -1;
-        applySegmentAt(0);
+        applySegmentAt(currentTurn ?? 0);
       } else {
         lastSegmentIndex = -1;
         options.onSegmentChange?.(null);
