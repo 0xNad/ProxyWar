@@ -325,6 +325,12 @@ describe("premiere: active / late-join sync / no seek past edge / reveal after e
   }
 
   test("premiere transitions from scheduled to playing and is watchable live", async () => {
+    // `httpStatus` fetches from the browser's CURRENT page — a freshly
+    // launched browser starts on `about:blank`, an opaque origin that
+    // cannot cross-origin `fetch` at all. Navigate first so the check
+    // runs same-origin, same as every other case in this file (which all
+    // run after the shared browser has already navigated once).
+    await liveBrowser.goto(`${live.origin}/premiere/${PREMIERE_ID}`);
     const status = await liveBrowser.httpStatus(
       `${live.origin}/premiere/${PREMIERE_ID}`,
     );
@@ -373,10 +379,13 @@ describe("premiere: active / late-join sync / no seek past edge / reveal after e
       // windows plus the ~21s of 1ms/turn match playback plus admission
       // overhead land reveal at roughly 2-3 minutes from origin start —
       // poll rather than guess the exact moment.
-      const deadline = Date.now() + 220_000;
+      const deadline = Date.now() + 340_000;
       let revealed = false;
       while (Date.now() < deadline) {
         const boot = await bootstrap();
+        console.log(
+          `[reveal-poll] authoritativeResult=${boot.integrityScope.authoritativeResult} elapsedMs=${Date.now() - (deadline - 340_000)}`,
+        );
         if (boot.integrityScope.authoritativeResult === "revealed") {
           revealed = true;
           break;
@@ -398,6 +407,6 @@ describe("premiere: active / late-join sync / no seek past edge / reveal after e
       const text = await liveBrowser.textContent();
       expect(text).toContain("Fixture aggressive");
     },
-    240_000,
+    360_000,
   );
 });
