@@ -145,3 +145,67 @@ export async function startFixtureServer(
     },
   };
 }
+
+/**
+ * Boots a fixture server WITH live-premiere admission (active/late-join/
+ * no-seek/reveal E2E coverage) by shelling out to the exact bash
+ * orchestrator `npm run fixtures:public-product` itself uses
+ * (`FIXTURE_ADMIT_LIVE_PREMIERE=1`) — reusing the validated pipeline
+ * rather than re-implementing drama-match/exhibition-match/admission/
+ * mirror-regeneration logic a second time in TypeScript. Slow (~1 minute:
+ * a real deterministic 2-seat match generation + admission) and requires
+ * a CLEAN git checkout (the exhibition's build-provenance check — see
+ * `replay-premiere-controlled-exhibition.ts`'s
+ * `resolveControlledExhibitionBuildProvenance`) — both real constraints
+ * of the underlying admission pipeline, not something this helper adds.
+ * Callers needing the fast, no-live-premiere fixture MUST use
+ * `startFixtureServer` instead; do not add this to the main suite's
+ * `beforeAll`.
+ */
+export async function startFixtureServerWithLivePremiere(
+  port: number,
+): Promise<FixtureServerHandle> {
+  await fs.mkdir(EXTERNAL_SCRATCH_ROOT, { recursive: true });
+  const fixtureRoot = await fs.mkdtemp(
+    path.join(EXTERNAL_SCRATCH_ROOT, `e2e-live-${port}-`),
+  );
+  const origin = `http://127.0.0.1:${port}`;
+  await execFileAsync(
+    "bash",
+    ["scripts/fixtures/run-public-product-fixtures.sh"],
+    {
+      cwd: REPO_ROOT,
+      env: {
+        ...process.env,
+        FIXTURE_ROOT: fixtureRoot,
+        FIXTURE_PORT: String(port),
+        FIXTURE_ADMIT_LIVE_PREMIERE: "1",
+      },
+      maxBuffer: 64 * 1024 * 1024,
+    },
+  );
+  await waitForOrigin(origin, 15_000);
+  const pidFile = "/tmp/pw-fixture-origin.pid";
+  return {
+    origin,
+    fixtureRoot,
+    stop: async () => {
+      try {
+        const pid = Number((await fs.readFile(pidFile, "utf8")).trim());
+        if (Number.isInteger(pid) && pid > 0) {
+          try {
+            process.kill(-pid, "SIGKILL");
+          } catch {
+            process.kill(pid, "SIGKILL");
+          }
+        }
+      } catch {
+        // no pidfile / already gone
+      }
+      await fs.rm(pidFile, { force: true }).catch(() => {});
+      await fs.rm(fixtureRoot, { recursive: true, force: true }).catch(() => {
+        // best-effort cleanup
+      });
+    },
+  };
+}
