@@ -233,6 +233,21 @@ PROXYWAR_PUBLIC_URL="$ORIGIN" npx tsx src/scripts/replay-premiere-admit.ts \
   --deployment-origin="$ORIGIN" \
   --nonce-file="$ADMIT_STAGING/nonce.bin"
 
+log "==> regenerating league mirror with the now-live premiere (data.json/read-model.json were written before admission and don't know about it yet)"
+cat > "$FIXTURE_ROOT/premiere-live.json" <<EOF
+{
+  "premiereId": "prem_fixture0premiere01",
+  "roundNumber": null,
+  "mapLabel": "Asia",
+  "scheduledAt": "$(python3 -c "import datetime;print(datetime.datetime.now(datetime.timezone.utc).strftime('%Y-%m-%dT%H:%M:%S.000Z'))")",
+  "premierePageLive": true
+}
+EOF
+npx tsx src/scripts/proxywar-fixture-league-data.ts \
+  --root="$FIXTURE_ROOT" \
+  --drama-episode-file="$FIXTURE_ROOT/drama-episode.json" \
+  --premiere-upcoming-file="$FIXTURE_ROOT/premiere-live.json"
+
 log "==> restarting origin onto the admitted premiere (admission never hot-registers)"
 stop_origin
 start_origin
