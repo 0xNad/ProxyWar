@@ -1,7 +1,8 @@
-import { html, LitElement, nothing, TemplateResult } from "lit";
+import { html, LitElement, nothing, PropertyValues, TemplateResult } from "lit";
 import { customElement, state } from "lit/decorators.js";
 import { unsafeSVG } from "lit/directives/unsafe-svg.js";
 import { translateText } from "../Utils";
+import { analytics } from "../analytics/AnalyticsClient";
 import {
   appShellFooter,
   appShellHeader,
@@ -87,6 +88,7 @@ export class LobbyPage extends LitElement {
   /** Drives the live/upcoming countdown-or-elapsed note — ticked ~1s by a component-owned interval, never a longer-lived timer and never the server clock continuously (a periodic-mirror-poll snapshot is not a live clock-sync signal). */
   @state() private nowMs = Date.now();
   private tickHandle: number | null = null;
+  private trackedImpressions = new Set<string>();
 
   createRenderRoot() {
     this.classList.add(...APP_SHELL_ROOT_CLASSES);
@@ -112,6 +114,15 @@ export class LobbyPage extends LitElement {
     if (this.tickHandle !== null) {
       clearInterval(this.tickHandle);
       this.tickHandle = null;
+    }
+  }
+
+  updated(changedProperties: PropertyValues): void {
+    super.updated(changedProperties);
+    const event = this.promotableEvent;
+    if (event !== null && !this.trackedImpressions.has(event.matchId)) {
+      this.trackedImpressions.add(event.matchId);
+      analytics.track("featured_event_impression", { eventSlug: event.matchId });
     }
   }
 
@@ -363,6 +374,7 @@ export class LobbyPage extends LitElement {
         <div class="mt-5 flex flex-wrap items-center gap-3">
           <a
             href=${watchHref}
+            @click=${() => analytics.track("event_cta_clicked", { eventSlug: event.matchId })}
             class="inline-flex min-h-11 items-center justify-center rounded-md bg-accent px-5 font-black text-on-accent no-underline outline-none hover:bg-accent-strong focus-visible:ring-2 focus-visible:ring-accent"
             >${live
               ? translateText("lobby.event_stage_watch_live_cta")

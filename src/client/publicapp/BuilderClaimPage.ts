@@ -2,6 +2,7 @@ import { html, LitElement, nothing, TemplateResult } from "lit";
 import { customElement, property, state } from "lit/decorators.js";
 import { z } from "zod";
 import { translateText } from "../Utils";
+import { analytics } from "../analytics/AnalyticsClient";
 import {
   APP_SHELL_ROOT_CLASSES,
   appShellFooter,
@@ -384,6 +385,12 @@ export class BuilderClaimPage extends LitElement {
       this.submittedAgentSlug =
         this.unclaimedAgents.find((agent) => agent.id === agentId)?.slug ??
         null;
+      analytics.track("claim_started", {
+        claimId: parsed.data.claim.id,
+        ...(this.submittedAgentSlug !== null
+          ? { agentSlug: this.submittedAgentSlug }
+          : {}),
+      });
       this.resetForm();
       await this.loadMyClaims();
     } catch {

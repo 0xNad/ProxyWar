@@ -18,6 +18,7 @@ import {
   type ReplayPremiereRevealView,
 } from "./ReplayPremiereOverlay";
 import { translateText } from "./Utils";
+import { analytics } from "./analytics/AnalyticsClient";
 
 const ARCHIVE_DATA_ELEMENT_ID = "proxywar-premiere-archive";
 const PREMIERE_ID_PATTERN = /^prem_[a-z0-9]{16,32}$/;
@@ -207,6 +208,9 @@ function augmentArchivedOverlayActions(
     watch.className = "rp-button rp-button-primary";
     watch.textContent = translateText("replay_premiere.watch_full_replay");
     watch.addEventListener("click", () => {
+      analytics.track("switched_to_full_replay", {
+        matchId: payload.replayRunKey ?? undefined,
+      });
       mountArchivedReplayPremiereOverlay(payload, true);
     });
     actions.append(watch);

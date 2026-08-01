@@ -6,6 +6,7 @@ import {
   appShellHeader,
 } from "./AppShellChrome";
 import { translateText } from "../Utils";
+import { analytics } from "../analytics/AnalyticsClient";
 
 /**
  * `/build` — spec Stage 7 item 1: "a visitor becomes a competing builder
@@ -116,12 +117,10 @@ export class BuildPage extends LitElement {
   private reportStep(step: number): void {
     if (this.reportedSteps.has(step)) return;
     this.reportedSteps.add(step);
-    fetch("/api/build/funnel-event", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ step }),
-      keepalive: true,
-    }).catch(() => undefined);
+    if (step === 1) {
+      analytics.track("build_flow_started");
+    }
+    analytics.track("build_step_reached", { step });
   }
 
   private goToStep(step: number): void {
@@ -232,6 +231,7 @@ export class BuildPage extends LitElement {
         profileFileJson: body.profileFileJson,
         githubIssueUrl: body.githubIssueUrl,
       };
+      analytics.track("registration_draft_submitted");
     } catch {
       this.submitError = translateText("build_page.step3.submit_error");
     } finally {

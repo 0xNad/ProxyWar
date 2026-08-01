@@ -11,8 +11,12 @@ vi.mock("../../../src/client/Utils", () => ({
   translateText: (key: string, params?: Record<string, string | number>) =>
     params === undefined ? key : `${key}:${JSON.stringify(params)}`,
 }));
+vi.mock("../../../src/client/analytics/AnalyticsClient", () => ({
+  analytics: { track: vi.fn(), trackVisitStart: vi.fn() },
+}));
 import "../../../src/client/publicapp/BuildPage";
 import type { BuildPage } from "../../../src/client/publicapp/BuildPage";
+import { analytics } from "../../../src/client/analytics/AnalyticsClient";
 
 function mount(): BuildPage {
   const el = document.createElement("build-page") as BuildPage;
@@ -34,9 +38,6 @@ let fetchMock: Mock;
 beforeEach(() => {
   fetchMock = vi.fn(async (input: RequestInfo | URL) => {
     const url = String(input);
-    if (url.startsWith("/api/build/funnel-event")) {
-      return new Response(null, { status: 204 });
-    }
     if (url.startsWith("/api/build/emblem-preview")) {
       return new Response(
         JSON.stringify({
@@ -64,6 +65,7 @@ beforeEach(() => {
     return new Response(null, { status: 404 });
   });
   vi.stubGlobal("fetch", fetchMock);
+  vi.mocked(analytics.track).mockClear();
 });
 
 afterEach(() => {
@@ -80,15 +82,13 @@ describe("build-page", () => {
     expect(normalizedText(el)).toContain("build_page.step1.builder_term");
   });
 
-  it("reports the initial step reached via the silent funnel endpoint on mount", async () => {
+  it("tracks build_flow_started and build_step_reached for step 1 on mount", async () => {
     mount();
     await flushMicrotasks();
-    const funnelCalls = fetchMock.mock.calls.filter(([input]) =>
-      String(input).startsWith("/api/build/funnel-event"),
-    );
-    expect(funnelCalls.length).toBe(1);
-    const [, init] = funnelCalls[0] as [RequestInfo, RequestInit];
-    expect(JSON.parse(String(init.body))).toEqual({ step: 1 });
+    expect(analytics.track).toHaveBeenCalledWith("build_flow_started");
+    expect(analytics.track).toHaveBeenCalledWith("build_step_reached", {
+      step: 1,
+    });
   });
 
   it("advances to Step 2 via the stepper and reports the new step exactly once", async () => {
@@ -101,13 +101,14 @@ describe("build-page", () => {
     stepButtons[1].click();
     await flushMicrotasks();
     expect(normalizedText(el)).toContain("build_page.step2.heading");
-    const funnelCalls = fetchMock.mock.calls.filter(([input]) =>
-      String(input).startsWith("/api/build/funnel-event"),
+    const stepReachedCalls = vi.mocked(analytics.track).mock.calls.filter(
+      ([name]) => name === "build_step_reached",
     );
-    expect(funnelCalls.length).toBe(2);
+    expect(stepReachedCalls.length).toBe(2);
+    expect(stepReachedCalls[1]).toEqual(["build_step_reached", { step: 2 }]);
   });
 
-  it("re-visiting an already-reported step does not fire a duplicate funnel event", async () => {
+  it("re-visiting an already-reported step does not fire a duplicate analytics event", async () => {
     const el = mount();
     await flushMicrotasks();
     const stepButtons = () =>
@@ -118,11 +119,66 @@ describe("build-page", () => {
     await flushMicrotasks();
     stepButtons()[1].click();
     await flushMicrotasks();
-    const funnelCalls = fetchMock.mock.calls.filter(([input]) =>
-      String(input).startsWith("/api/build/funnel-event"),
+    const stepReachedCalls = vi.mocked(analytics.track).mock.calls.filter(
+      ([name]) => name === "build_step_reached",
     );
     // step 1 (mount) + step 2 (first visit) = 2, never a 3rd for the repeat visit
-    expect(funnelCalls.length).toBe(2);
+    expect(stepReachedCalls.length).toBe(2);
+  });
+
+  it("fires build_flow_started only when reaching step 1, not on later steps", async () => {
+    const el = mount();
+    await flushMicrotasks();
+    const stepButtons = () =>
+      el.querySelectorAll<HTMLButtonElement>('button[aria-current]');
+    for (let step = 2; step <= 7; step++) {
+      stepButtons()[step - 1].click();
+      await flushMicrotasks();
+    }
+    const flowStartedCalls = vi.mocked(analytics.track).mock.calls.filter(
+      ([name]) => name === "build_flow_started",
+    );
+    expect(flowStartedCalls.length).toBe(1);
+  });
+
+  it("fires build_step_reached with { step: N } for every step", async () => {
+    const el = mount();
+    await flushMicrotasks();
+    const stepButtons = () =>
+      el.querySelectorAll<HTMLButtonElement>('button[aria-current]');
+    for (let step = 2; step <= 7; step++) {
+      stepButtons()[step - 1].click();
+      await flushMicrotasks();
+    }
+    for (let step = 1; step <= 7; step++) {
+      expect(analytics.track).toHaveBeenCalledWith("build_step_reached", {
+        step,
+      });
+    }
+  });
+
+  it("BuildFunnel migration equivalence: visiting steps 1-7 in order emits exactly one build_flow_started and 7 build_step_reached calls", async () => {
+    const el = mount();
+    await flushMicrotasks();
+    const stepButtons = () =>
+      el.querySelectorAll<HTMLButtonElement>('button[aria-current]');
+    for (let step = 2; step <= 7; step++) {
+      stepButtons()[step - 1].click();
+      await flushMicrotasks();
+    }
+    const calls = vi.mocked(analytics.track).mock.calls;
+    const flowStartedCalls = calls.filter(
+      ([name]) => name === "build_flow_started",
+    );
+    const stepReachedCalls = calls.filter(
+      ([name]) => name === "build_step_reached",
+    );
+    expect(flowStartedCalls.length).toBe(1);
+    expect(flowStartedCalls[0]).toEqual(["build_flow_started"]);
+    expect(stepReachedCalls.length).toBe(7);
+    expect(stepReachedCalls.map(([, context]) => context?.step)).toEqual([
+      1, 2, 3, 4, 5, 6, 7,
+    ]);
   });
 
   it("Next/Back buttons move between adjacent steps and disable at the ends", async () => {
@@ -193,6 +249,7 @@ describe("build-page", () => {
       'a[href^="https://github.com/0xNad/ProxyWar/issues/new"]',
     );
     expect(issueLink).not.toBeNull();
+    expect(analytics.track).toHaveBeenCalledWith("registration_draft_submitted");
   });
 
   it("never sends a verifiedGithub field in the submission request body", async () => {

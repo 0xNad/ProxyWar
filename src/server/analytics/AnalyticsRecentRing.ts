@@ -1,6 +1,7 @@
 import { promises as fs } from "node:fs";
 import path from "node:path";
 import { z } from "zod";
+import { withFileMutex } from "../agents/FileMutex";
 import type { AnalyticsEvent } from "./AnalyticsEventSchema";
 import { normalizeAnalyticsRoute } from "./AnalyticsEventSchema";
 
@@ -43,21 +44,19 @@ function emptyFile(): RingFile {
 
 export class AnalyticsRecentRing {
   private readonly filePath: string;
-  private writeQueue: Promise<void> = Promise.resolve();
 
   constructor(artifactsRootDir: string) {
     this.filePath = path.join(artifactsRootDir, "analytics-recent-ring.json");
   }
 
-  /** Fire-and-forget from the ingest route — never throws. */
-  pushEvents(events: readonly AnalyticsEvent[], receivedAt: Date = new Date()): Promise<void> {
+  /** Fire-and-forget from the ingest route — never throws. Cross-process safe via `withFileMutex` — see `AnalyticsAggregateStore.ts`'s identical rationale (server-side hooks write from short-lived CLI processes, not just the demo server). */
+  async pushEvents(events: readonly AnalyticsEvent[], receivedAt: Date = new Date()): Promise<void> {
     if (events.length === 0) {
-      return Promise.resolve();
+      return;
     }
-    this.writeQueue = this.writeQueue
-      .then(() => this.append(events, receivedAt))
-      .catch(() => undefined);
-    return this.writeQueue;
+    await withFileMutex(this.filePath, () => this.append(events, receivedAt)).catch(
+      () => undefined,
+    );
   }
 
   async readAll(): Promise<AnalyticsRingEntry[]> {

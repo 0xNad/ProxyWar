@@ -1,3 +1,4 @@
+import { analytics } from "./analytics/AnalyticsClient";
 import { translateText } from "./Utils";
 
 const REPLAY_LOADING_ID = "proxywar-replay-loading";
@@ -80,11 +81,22 @@ export function setReplayLoadingProgress(text: string | null): void {
   progress.textContent = text;
 }
 
+/**
+ * Also the single hook point for `replay_load_started`/`succeeded`/`failed`
+ * (Phase 7): this function already brackets the exact "started loading" ->
+ * "first frame" / "load error" lifecycle with one-shot listeners (`{once:
+ * true}` + `cleanup()`), so there is no separate per-tick or duplicate-fire
+ * risk to guard against here — each of the three events can only land once
+ * per call. `matchId` is optional since not every caller necessarily has
+ * one at hand, but `Main.ts`'s `openAiLeagueReplay` always does.
+ */
 export function holdReplayLoadingScreenUntilFirstFrame(
   timeoutMs = REPLAY_LOADING_SLOW_TIMEOUT_MS,
   messageKey: ReplayLoadingMessageKey = "ai_league_replay.loading_replay",
+  matchId?: string,
 ): () => void {
   showReplayLoadingScreen(messageKey);
+  analytics.track("replay_load_started", matchId !== undefined ? { matchId } : undefined);
 
   let active = true;
   let slowTimer: ReturnType<typeof setTimeout> | null = null;
@@ -102,11 +114,16 @@ export function holdReplayLoadingScreenUntilFirstFrame(
 
   const onFirstFrame = () => {
     cleanup();
+    analytics.track("replay_load_succeeded", matchId !== undefined ? { matchId } : undefined);
     finishReplayLoadingScreen();
   };
 
   const onReplayError = () => {
     cleanup();
+    analytics.track("replay_load_failed", {
+      reason: "load_error",
+      ...(matchId !== undefined ? { matchId } : {}),
+    });
     showReplayLoadingFailure();
   };
 

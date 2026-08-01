@@ -1,5 +1,10 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
+const { trackMock } = vi.hoisted(() => ({ trackMock: vi.fn() }));
+vi.mock("../../src/client/analytics/AnalyticsClient", () => ({
+  analytics: { track: trackMock, trackVisitStart: vi.fn() },
+}));
+
 vi.mock("../../src/client/Utils", () => ({
   translateText: (key: string, params?: Record<string, string | number>) =>
     params === undefined
@@ -80,6 +85,7 @@ afterEach(() => {
   ).__proxyWarLeagueClipStates;
   vi.unstubAllGlobals();
   vi.restoreAllMocks();
+  trackMock.mockClear();
 });
 
 describe("readReplayPremiereArchivePayload", () => {
@@ -481,3 +487,27 @@ function clipCapabilitiesResponse(enabled: boolean): Response {
     { status: 200, headers: { "Content-Type": "application/json" } },
   );
 }
+
+describe("switched_to_full_replay analytics", () => {
+  it("tracks switched_to_full_replay with the replay run key when the watch-full-replay button is clicked", () => {
+    const handle = mountArchivedReplayPremiereOverlay(samplePayload());
+    const watchButton = Array.from(
+      handle.element.querySelectorAll<HTMLButtonElement>(".rp-button"),
+    ).find((button) => button.textContent === "replay_premiere.watch_full_replay");
+    expect(watchButton).toBeDefined();
+    watchButton?.click();
+    expect(trackMock).toHaveBeenCalledWith("switched_to_full_replay", {
+      matchId: "league-coworld-run-001",
+    });
+    handle.dispose();
+  });
+
+  it("never tracks switched_to_full_replay when there is no replay to watch", () => {
+    const handle = mountArchivedReplayPremiereOverlay({
+      ...samplePayload(),
+      replayRunKey: null,
+    });
+    expect(trackMock).not.toHaveBeenCalled();
+    handle.dispose();
+  });
+});

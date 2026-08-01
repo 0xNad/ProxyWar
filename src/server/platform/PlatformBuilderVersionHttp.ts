@@ -21,6 +21,7 @@
  */
 import express, { type Request, type Response, type Router } from "express";
 import { requestSecurityHeaders } from "../replay-premiere/ReplayPremiereHttp";
+import { emitServerAnalyticsEvent } from "../analytics/AnalyticsServerEmit";
 import {
   findVerifiedClaimForAgent,
   readBuilderClaimStore,
@@ -44,6 +45,7 @@ export interface PlatformBuilderVersionHttpOptions {
   readonly releaseStore: { readonly stateRoot: string };
   readonly claimStore: { readonly stateRoot: string };
   readonly identityLinkStore: PlatformGithubIdentityLinkStore;
+  readonly artifactsRootDir: string;
   readonly onOperatorError?: (operatorCode: string, error: unknown) => void;
 }
 
@@ -207,6 +209,9 @@ export function createPlatformBuilderVersionRouter(
             ),
         );
         const release = file.releases[file.releases.length - 1];
+        await emitServerAnalyticsEvent(options.artifactsRootDir, "version_release_created", {
+          versionLabel: release.versionLabel,
+        });
         res.status(200).json({ schemaVersion: 1, release });
       } catch (error) {
         if (error instanceof VersionReleaseValidationError) {

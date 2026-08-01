@@ -10,11 +10,15 @@ vi.mock("../../../src/client/Utils", () => ({
   translateText: (key: string, params?: Record<string, string | number>) =>
     params === undefined ? key : `${key}:${JSON.stringify(params)}`,
 }));
+vi.mock("../../../src/client/analytics/AnalyticsClient", () => ({
+  analytics: { track: vi.fn(), trackVisitStart: vi.fn() },
+}));
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Mock } from "vitest";
 import "../../../src/client/publicapp/MatchDetailPage";
 import type { MatchDetailPage } from "../../../src/client/publicapp/MatchDetailPage";
+import { analytics } from "../../../src/client/analytics/AnalyticsClient";
 import { READ_MODEL_PATH } from "../../../src/client/publicapp/ReadModelSchema";
 
 function mount(matchId: string): MatchDetailPage {
@@ -302,6 +306,7 @@ function stubFetch(handlers: {
 
 beforeEach(() => {
   stubFetch({});
+  vi.mocked(analytics.track).mockClear();
 });
 
 afterEach(() => {
@@ -407,6 +412,13 @@ describe("match-detail-page", () => {
     expect(el.textContent).toContain("v3");
     expect(el.textContent).toContain("Daveey");
     expect(el.textContent).not.toContain("match_detail.winner_heading");
+    const agentLink = el.querySelector<HTMLAnchorElement>('a[href="/agent/auri"]');
+    expect(agentLink).not.toBeNull();
+    agentLink!.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
+    expect(analytics.track).toHaveBeenCalledWith("agent_profile_opened_from_match", {
+      matchId: "feat_pre",
+      agentSlug: "auri",
+    });
   });
 
   it("pre-match with no scheduled time yet renders honestly without a fabricated countdown", async () => {
@@ -787,6 +799,38 @@ describe("match-detail-page", () => {
     expect(el.textContent).toContain("watch.recovered_share");
   });
 
+  it("league episode winner and placement agent links track agent_profile_opened_from_match on click", async () => {
+    stubFetch({
+      readModel: readModelBody({}),
+      episodeDetail: {
+        status: 200,
+        body: episodeMatchBody({
+          episodeRequestId: "ereq_result_click",
+          participants: [
+            participantCard({ playerName: "Frostfall", agentSlug: "frostfall" }),
+            participantCard({ playerName: "GhostRaider", agentSlug: "ghostraider" }),
+          ],
+        }),
+      },
+    });
+    const el = mount("ereq_result_click");
+    await flushMicrotasks();
+    const winnerLink = el.querySelector<HTMLAnchorElement>('a[href="/agent/frostfall"]');
+    expect(winnerLink).not.toBeNull();
+    winnerLink!.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
+    expect(analytics.track).toHaveBeenCalledWith("agent_profile_opened_from_match", {
+      matchId: "ereq_result_click",
+      agentSlug: "frostfall",
+    });
+    const placementLink = el.querySelector<HTMLAnchorElement>('a[href="/agent/ghostraider"]');
+    expect(placementLink).not.toBeNull();
+    placementLink!.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
+    expect(analytics.track).toHaveBeenCalledWith("agent_profile_opened_from_match", {
+      matchId: "ereq_result_click",
+      agentSlug: "ghostraider",
+    });
+  });
+
   it("actions: Director Cut label + minutes when directorCut is present", async () => {
     stubFetch({
       readModel: readModelBody({}),
@@ -927,12 +971,22 @@ describe("match-detail-page", () => {
     expect(el.textContent).toContain("GhostRaider overtakes Frostfall for the territory lead.");
     expect(el.textContent).toContain("match_detail.decisive_moment_stated_reason_label");
     expect(el.textContent).toContain("GhostRaider pressed a doomed final offensive.");
-    expect(el.querySelector('a[href="/agent/frostfall"]')).not.toBeNull();
+    const frostfallLink = el.querySelector<HTMLAnchorElement>('a[href="/agent/frostfall"]');
+    expect(frostfallLink).not.toBeNull();
+    frostfallLink!.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
+    expect(analytics.track).toHaveBeenCalledWith("agent_profile_opened_from_match", {
+      matchId: "ereq_decisive",
+      agentSlug: "frostfall",
+    });
     expect(el.querySelector('a[href="/agent/ghostraider"]')).not.toBeNull();
-    const jumpLinks = [...el.querySelectorAll("a")].filter((a) =>
+    const jumpLinks = [...el.querySelectorAll<HTMLAnchorElement>("a")].filter((a) =>
       a.getAttribute("href")?.includes("turn=20"),
     );
     expect(jumpLinks.length).toBeGreaterThan(0);
+    jumpLinks[0]!.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
+    expect(analytics.track).toHaveBeenCalledWith("decisive_moment_opened", {
+      matchId: "ereq_decisive",
+    });
   });
 
   it("decisive moments section is entirely absent (no heading, no placeholder) when the server provides none", async () => {

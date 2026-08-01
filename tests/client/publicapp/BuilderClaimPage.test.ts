@@ -15,10 +15,14 @@ vi.mock("../../../src/client/Utils", () => ({
   translateText: (key: string, params?: Record<string, string | number>) =>
     params === undefined ? key : `${key}:${JSON.stringify(params)}`,
 }));
+vi.mock("../../../src/client/analytics/AnalyticsClient", () => ({
+  analytics: { track: vi.fn(), trackVisitStart: vi.fn() },
+}));
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import "../../../src/client/publicapp/BuilderClaimPage";
 import type { BuilderClaimPage } from "../../../src/client/publicapp/BuilderClaimPage";
+import { analytics } from "../../../src/client/analytics/AnalyticsClient";
 
 function mount(agentSlug = ""): BuilderClaimPage {
   const el = document.createElement("builder-claim-page") as BuilderClaimPage;
@@ -173,6 +177,7 @@ function stubFetch(routes: {
 
 beforeEach(() => {
   vi.stubGlobal("fetch", vi.fn(async () => new Response(null, { status: 500 })));
+  vi.mocked(analytics.track).mockClear();
 });
 
 afterEach(() => {
@@ -263,6 +268,10 @@ describe("builder-claim-page", () => {
     expect(el.textContent).toContain("builder_claim.confirmation_heading");
     expect(el.textContent).toContain("builder_claim.state_draft");
     expect(el.querySelector('a[href="/agent/odin-free"]')).not.toBeNull();
+    expect(analytics.track).toHaveBeenCalledWith("claim_started", {
+      claimId: "clm_1",
+      agentSlug: "odin-free",
+    });
   });
 
   it("renders a distinct message for an already-verified submit rejection", async () => {
@@ -293,6 +302,35 @@ describe("builder-claim-page", () => {
     await flushMicrotasks();
 
     expect(el.textContent).toContain("builder_claim.error_already_verified");
+    expect(analytics.track).not.toHaveBeenCalledWith(
+      "claim_started",
+      expect.anything(),
+    );
+  });
+
+  it("does not emit claim_started when client-side form validation fails", async () => {
+    stubFetch({
+      account: accountBody("daveey"),
+      readModel: readModelBody([
+        minimalAgent({ id: "agent-1", slug: "odin-free", displayName: "Odin", builderId: null }),
+      ]),
+    });
+    const el = mount("odin-free");
+    await flushMicrotasks();
+
+    // Required fields (player name, display name, evidence note) are left blank.
+    const form = el.querySelector("form") as HTMLFormElement;
+    form.dispatchEvent(new Event("submit", { cancelable: true }));
+    await flushMicrotasks();
+
+    expect(el.textContent).toContain("builder_claim.validation_error");
+    expect(
+      vi.mocked(fetch).mock.calls.find(([, init]) => init?.method === "POST"),
+    ).toBeUndefined();
+    expect(analytics.track).not.toHaveBeenCalledWith(
+      "claim_started",
+      expect.anything(),
+    );
   });
 
   it("renders the account's own claims with a state badge and withdraw action for a non-terminal claim", async () => {

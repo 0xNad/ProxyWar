@@ -23,6 +23,7 @@ import {
   type BuilderClaimSubmission,
 } from "../../src/server/platform/PlatformBuilderClaimStore";
 import { loadAgentRegistry, loadBuilderRegistry } from "../../src/server/identity/IdentityRegistry";
+import { AnalyticsAggregateStore, totalEventCount } from "../../src/server/analytics/AnalyticsAggregateStore";
 
 const repoRoot = path.resolve(__dirname, "../..");
 const scriptsDir = path.join(repoRoot, "src", "scripts");
@@ -31,12 +32,13 @@ const AGENT_ID = "agt_daveey";
 
 function runCli(
   args: readonly string[],
+  env: Record<string, string> = {},
 ): { code: number; stdout: string; stderr: string } {
   try {
     const stdout = execFileSync(
       "npx",
       ["tsx", path.join(scriptsDir, "identity-claims.ts"), ...args],
-      { cwd: repoRoot, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] },
+      { cwd: repoRoot, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], env: { ...process.env, ...env } },
     );
     return { code: 0, stdout, stderr: "" };
   } catch (error) {
@@ -136,16 +138,20 @@ async function seedProofPendingClaim(
 describe("identity:claims CLI — real subprocess end to end", () => {
   let claimStateRoot: string;
   let registryDir: string;
+  let artifactsRootDir: string;
 
   beforeEach(async () => {
     claimStateRoot = await mkdtemp(path.join(os.tmpdir(), "pw-identity-claims-state-"));
     registryDir = await mkdtemp(path.join(os.tmpdir(), "pw-identity-claims-registry-"));
+    artifactsRootDir = await mkdtemp(path.join(os.tmpdir(), "pw-identity-claims-artifacts-"));
     await writeRegistryFixture(registryDir);
   });
 
   afterEach(async () => {
     await Promise.all(
-      [claimStateRoot, registryDir].map((dir) => rm(dir, { recursive: true, force: true })),
+      [claimStateRoot, registryDir, artifactsRootDir].map((dir) =>
+        rm(dir, { recursive: true, force: true }),
+      ),
     );
   });
 
@@ -185,16 +191,19 @@ describe("identity:claims CLI — real subprocess end to end", () => {
         builderDisplayName: "Ada Builder",
       });
 
-      const result = runCli([
-        "approve",
-        claimId,
-        "--note",
-        "evidence checked out",
-        "--dir",
-        registryDir,
-        "--claim-state-root",
-        claimStateRoot,
-      ]);
+      const result = runCli(
+        [
+          "approve",
+          claimId,
+          "--note",
+          "evidence checked out",
+          "--dir",
+          registryDir,
+          "--claim-state-root",
+          claimStateRoot,
+        ],
+        { PROXYWAR_ARTIFACTS_ROOT: artifactsRootDir },
+      );
       expect(result.code).toBe(0);
       expect(result.stdout).toContain(claimId);
       expect(result.stdout).toContain("verified");
@@ -249,6 +258,35 @@ describe("identity:claims CLI — real subprocess end to end", () => {
   );
 
   it(
+    "approve emits a claim_verified analytics event",
+    async () => {
+      const claimId = await seedProofPendingClaim(claimStateRoot, {
+        githubLogin: "ada-builder",
+        builderDisplayName: "Ada Builder",
+      });
+
+      const result = runCli(
+        [
+          "approve",
+          claimId,
+          "--note",
+          "evidence checked out",
+          "--dir",
+          registryDir,
+          "--claim-state-root",
+          claimStateRoot,
+        ],
+        { PROXYWAR_ARTIFACTS_ROOT: artifactsRootDir },
+      );
+      expect(result.code).toBe(0);
+
+      const file = await new AnalyticsAggregateStore(artifactsRootDir).readAll();
+      expect(totalEventCount(file, "claim_verified")).toBe(1);
+    },
+    30_000,
+  );
+
+  it(
     "reject requires --note and does not mutate without it; succeeds once provided",
     async () => {
       const claimId = await seedDraftClaim(claimStateRoot);
@@ -281,16 +319,19 @@ describe("identity:claims CLI — real subprocess end to end", () => {
         githubLogin: "ada-builder",
         builderDisplayName: "Ada Builder",
       });
-      const approveResult = runCli([
-        "approve",
-        claimId,
-        "--note",
-        "ok",
-        "--dir",
-        registryDir,
-        "--claim-state-root",
-        claimStateRoot,
-      ]);
+      const approveResult = runCli(
+        [
+          "approve",
+          claimId,
+          "--note",
+          "ok",
+          "--dir",
+          registryDir,
+          "--claim-state-root",
+          claimStateRoot,
+        ],
+        { PROXYWAR_ARTIFACTS_ROOT: artifactsRootDir },
+      );
       expect(approveResult.code).toBe(0);
 
       const revokeResult = runCli([

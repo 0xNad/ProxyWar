@@ -25,11 +25,15 @@ import type {
   ReadModel,
 } from "../../../src/client/publicapp/ReadModelSchema";
 import type * as UtilsModule from "../../../src/client/Utils";
+import { analytics } from "../../../src/client/analytics/AnalyticsClient";
 
 vi.mock("../../../src/client/Utils", async (importOriginal) => ({
   ...(await importOriginal<typeof UtilsModule>()),
   translateText: (key: string, params?: Record<string, string | number>) =>
     params === undefined ? key : `${key}:${JSON.stringify(params)}`,
+}));
+vi.mock("../../../src/client/analytics/AnalyticsClient", () => ({
+  analytics: { track: vi.fn(), trackVisitStart: vi.fn() },
 }));
 
 function agent(overrides: Partial<PublicAgent>): PublicAgent {
@@ -181,6 +185,7 @@ async function flushMicrotasks(times = 10): Promise<void> {
 afterEach(() => {
   document.body.innerHTML = "";
   vi.unstubAllGlobals();
+  vi.mocked(analytics.track).mockClear();
 });
 
 describe("watch-page featured event section", () => {
@@ -606,6 +611,81 @@ describe("watch-page replay archive", () => {
       (li) => li.textContent?.includes("Low Drama Map") || li.textContent?.includes("High Drama Map"),
     );
     expect(cards[0]?.textContent).toContain("High Drama Map");
+  });
+
+  it("fires event_cta_clicked with the match id when View Match or Watch Replay is clicked", async () => {
+    stubReadModelAndParticipantsFetch(
+      readModel({
+        matches: [
+          match({
+            matchId: "clickable-match",
+            completedAt: "2026-06-15T00:00:00.000Z",
+            map: "Click Map",
+            watchHref: "/replay/clickable-match",
+          }),
+        ],
+      }),
+    );
+    const el = mount();
+    await flushMicrotasks();
+
+    const card = Array.from(el.querySelectorAll("li")).find((li) =>
+      li.textContent?.includes("Click Map"),
+    );
+    const links = Array.from(card!.querySelectorAll("a"));
+    const viewMatchLink = links.find((a) => a.textContent === "watch.view_match");
+    const watchReplayLink = links.find((a) => a.textContent === "watch.watch_replay");
+    expect(viewMatchLink).toBeDefined();
+    expect(watchReplayLink).toBeDefined();
+
+    viewMatchLink!.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
+    expect(analytics.track).toHaveBeenCalledWith("event_cta_clicked", { matchId: "clickable-match" });
+
+    watchReplayLink!.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
+    expect(
+      vi.mocked(analytics.track).mock.calls.filter((call) => call[0] === "event_cta_clicked"),
+    ).toHaveLength(2);
+  });
+
+  it("fires featured_event_impression exactly once per featured match card, never for non-featured cards", async () => {
+    stubReadModelAndParticipantsFetch(
+      readModel({
+        matches: [
+          match({
+            matchId: "featured-in-archive",
+            completedAt: "2026-06-15T00:00:00.000Z",
+            map: "Featured Map",
+          }),
+          match({
+            matchId: "plain-match",
+            completedAt: "2026-06-14T00:00:00.000Z",
+            map: "Plain Map",
+          }),
+        ],
+        featuredMatches: [featuredMatch({ matchId: "featured-in-archive" })],
+      }),
+    );
+    const el = mount();
+    await flushMicrotasks();
+
+    expect(analytics.track).toHaveBeenCalledWith("featured_event_impression", {
+      matchId: "featured-in-archive",
+    });
+    expect(
+      vi.mocked(analytics.track).mock.calls.filter(
+        (call) => call[0] === "featured_event_impression",
+      ),
+    ).toHaveLength(1);
+
+    // Re-render (e.g. via a sort-order change) must not refire the same impression.
+    el.requestUpdate();
+    await el.updateComplete;
+    await flushMicrotasks();
+    expect(
+      vi.mocked(analytics.track).mock.calls.filter(
+        (call) => call[0] === "featured_event_impression",
+      ),
+    ).toHaveLength(1);
   });
 });
 

@@ -2,6 +2,7 @@ import { html, LitElement, nothing, TemplateResult } from "lit";
 import { customElement, property, state } from "lit/decorators.js";
 import { unsafeSVG } from "lit/directives/unsafe-svg.js";
 import { z } from "zod";
+import { analytics } from "../analytics/AnalyticsClient";
 import { translateText } from "../Utils";
 import {
   APP_SHELL_ROOT_CLASSES,
@@ -810,6 +811,11 @@ export class MatchDetailPage extends LitElement {
             ${participant.agentSlug !== null
               ? html`<a
                   href="/agent/${encodeURIComponent(participant.agentSlug)}"
+                  @click=${() =>
+                    analytics.track("agent_profile_opened_from_match", {
+                      matchId: this.matchId,
+                      agentSlug: participant.agentSlug!,
+                    })}
                   class="text-ink no-underline outline-none hover:text-accent focus-visible:ring-2 focus-visible:ring-accent"
                   >${participant.displayName}</a
                 >`
@@ -1012,6 +1018,11 @@ export class MatchDetailPage extends LitElement {
             : winnerSlug !== null
               ? html`<a
                   href="/agent/${encodeURIComponent(winnerSlug)}"
+                  @click=${() =>
+                    analytics.track("agent_profile_opened_from_match", {
+                      matchId: this.matchId,
+                      agentSlug: winnerSlug,
+                    })}
                   class="text-ink no-underline outline-none hover:text-accent focus-visible:ring-2 focus-visible:ring-accent"
                   >${winnerCard?.displayName ?? match.winnerName}</a
                 >`
@@ -1039,6 +1050,11 @@ export class MatchDetailPage extends LitElement {
                   ${agentSlug !== null
                     ? html`<a
                         href="/agent/${encodeURIComponent(agentSlug)}"
+                        @click=${() =>
+                          analytics.track("agent_profile_opened_from_match", {
+                            matchId: this.matchId,
+                            agentSlug,
+                          })}
                         class="text-ink no-underline outline-none hover:text-accent focus-visible:ring-2 focus-visible:ring-accent"
                         >${displayName}</a
                       >`
@@ -1219,6 +1235,11 @@ export class MatchDetailPage extends LitElement {
                     return slug !== null
                       ? html`<a
                           href="/agent/${encodeURIComponent(slug)}"
+                          @click=${() =>
+                            analytics.track("agent_profile_opened_from_match", {
+                              matchId: this.matchId,
+                              agentSlug: slug,
+                            })}
                           class="text-ink-muted no-underline outline-none hover:text-accent focus-visible:ring-2 focus-visible:ring-accent"
                           >${displayName}</a
                         >`
@@ -1235,6 +1256,10 @@ export class MatchDetailPage extends LitElement {
                 ${href !== null
                   ? html`<a
                       href=${href}
+                      @click=${() =>
+                        analytics.track("decisive_moment_opened", {
+                          matchId: this.matchId,
+                        })}
                       class="mt-1.5 inline-flex min-h-8 items-center text-xs font-bold text-accent no-underline outline-none hover:opacity-90 focus-visible:ring-2 focus-visible:ring-accent"
                       >${translateText(
                         "match_detail.decisive_moment_jump_link",

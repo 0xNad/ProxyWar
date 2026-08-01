@@ -1,4 +1,9 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+
+const { trackMock } = vi.hoisted(() => ({ trackMock: vi.fn() }));
+vi.mock("../../src/client/analytics/AnalyticsClient", () => ({
+  analytics: { track: trackMock, trackVisitStart: vi.fn() },
+}));
 import {
   activeWarPairCount,
   deriveMatchStateStripFields,
@@ -27,6 +32,7 @@ describe("AiLeagueReplayOverlay", () => {
     });
     document.body.innerHTML = "";
     localStorage.clear();
+    trackMock.mockClear();
   });
 
   it("accepts only a matching fresh-document Clip Preview target", () => {
@@ -2967,3 +2973,283 @@ function readModelResponse(agents: PublicAgent[]): Response {
     { status: 200, headers: { "Content-Type": "application/json" } },
   );
 }
+
+describe("Phase 7 analytics: Director Cut, timeline jump, watch-progress milestones", () => {
+  beforeEach(() => {
+    Object.defineProperty(window, "innerWidth", {
+      configurable: true,
+      value: 1024,
+    });
+    Object.defineProperty(window, "innerHeight", {
+      configurable: true,
+      value: 768,
+    });
+    document.body.innerHTML = "";
+    localStorage.clear();
+    trackMock.mockClear();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  function directorCutPlanFixture(runID: string) {
+    return {
+      schemaVersion: 1,
+      reportKind: "director-cut-plan",
+      runID,
+      matchID: runID,
+      generatedAt: "2026-07-31T00:00:00.000Z",
+      totalTurns: 999,
+      segments: [
+        {
+          startTurn: 0,
+          endTurn: 999,
+          speed: "fast",
+          eventReason: "quiet_interval",
+          importance: 0,
+          participatingAgents: [],
+        },
+      ],
+      importantTurnCount: 800,
+      estimatedDurationSeconds: 300,
+      degraded: false,
+      notes: [],
+    };
+  }
+
+  it("tracks director_cut_started once when the plan mounts enabled by default", () => {
+    const runID = "analytics-dc-mount-1";
+    const overlay = mountAiLeagueReplayOverlay({
+      runID,
+      artifactBasePath: `/ai-league-runs/${runID}`,
+      decisions: [],
+    });
+    expect(trackMock).not.toHaveBeenCalledWith(
+      "director_cut_started",
+      expect.anything(),
+    );
+    overlay.hydrate({ directorCutPlan: directorCutPlanFixture(runID) });
+    expect(trackMock).toHaveBeenCalledExactlyOnceWith("director_cut_started", {
+      matchId: runID,
+      replayMode: "director_cut",
+    });
+  });
+
+  it("tracks director_cut_started again on an explicit toggle-on, never on toggle-off", () => {
+    const runID = "analytics-dc-toggle-1";
+    const overlay = mountAiLeagueReplayOverlay({
+      runID,
+      artifactBasePath: `/ai-league-runs/${runID}`,
+      decisions: [],
+    });
+    overlay.hydrate({ directorCutPlan: directorCutPlanFixture(runID) });
+    trackMock.mockClear();
+
+    const toggle = document.querySelector<HTMLButtonElement>(
+      "[data-ai-league-director-cut-toggle]",
+    );
+    toggle?.click(); // off
+    expect(trackMock).not.toHaveBeenCalledWith(
+      "director_cut_started",
+      expect.anything(),
+    );
+    toggle?.click(); // back on
+    expect(trackMock).toHaveBeenCalledExactlyOnceWith("director_cut_started", {
+      matchId: runID,
+      replayMode: "director_cut",
+    });
+  });
+
+  it("tracks timeline_jump when the War Room feed's jump-to-turn action fires", () => {
+    const runID = "analytics-timeline-jump-1";
+    const jumps: number[] = [];
+    document.addEventListener("ai-league-replay-jump-turn", (domEvent) => {
+      jumps.push(
+        (domEvent as CustomEvent<{ turnNumber: number }>).detail.turnNumber,
+      );
+    });
+    mountAiLeagueReplayOverlay({
+      runID,
+      artifactBasePath: `/ai-league-runs/${runID}`,
+      currentTurn: 999,
+      decisions: [
+        { ...decisionFixture(1), username: "Atlas", turnNumber: 10, planObjective: "expand" },
+        {
+          ...decisionFixture(2),
+          username: "Atlas",
+          turnNumber: 20,
+          planObjective: "consolidate",
+          reason: "Defend the core.",
+          planRationale: "Blitz is massing troops nearby.",
+        },
+      ],
+      spectatorTelemetry: {
+        version: 1,
+        runID,
+        agents: [],
+        relationships: [],
+        events: [],
+        communicationThreads: [],
+        timelineBuckets: [],
+      },
+    });
+    const planChangeItem = document.querySelector('[data-kind="plan_change"]');
+    expect(planChangeItem).not.toBeNull();
+    planChangeItem
+      ?.querySelector<HTMLButtonElement>(".broadcast-war-room-summary")
+      ?.click();
+    trackMock.mockClear();
+    planChangeItem
+      ?.querySelector<HTMLButtonElement>(".broadcast-war-room-jump")
+      ?.click();
+    expect(jumps).toEqual([20]);
+    expect(trackMock).toHaveBeenCalledWith("timeline_jump", { matchId: runID });
+  });
+
+  it("tracks watched_30s and watched_2m exactly once each as wall-clock time elapses, in both replay modes", () => {
+    vi.useFakeTimers();
+    const runID = "analytics-watch-time-1";
+    mountAiLeagueReplayOverlay({
+      runID,
+      artifactBasePath: `/ai-league-runs/${runID}`,
+      decisions: [],
+      replayMaxTurn: 1000,
+    });
+    // Every mount registered by an earlier test in this file also reacts to
+    // this document-level event (none of them dispose); scope every
+    // assertion to THIS test's own runID so accumulated listeners from
+    // sibling tests never produce a false positive or negative here.
+    const callsFor = (name: string) =>
+      trackMock.mock.calls.filter(
+        ([calledName, context]) =>
+          calledName === name &&
+          (context as { matchId?: string } | undefined)?.matchId === runID,
+      );
+    const frame = (turnNumber: number) =>
+      document.dispatchEvent(
+        new CustomEvent("ai-league-replay-frame", {
+          detail: { tick: turnNumber, turnNumber, players: [] },
+        }),
+      );
+
+    frame(1); // first frame — starts the elapsed-time clock
+    expect(callsFor("watched_30s")).toHaveLength(0);
+
+    vi.advanceTimersByTime(30_000);
+    frame(2);
+    expect(callsFor("watched_30s")).toEqual([
+      ["watched_30s", { matchId: runID, replayMode: "full_replay" }],
+    ]);
+
+    // A later frame within the same second must not refire it.
+    frame(3);
+    expect(callsFor("watched_30s")).toHaveLength(1);
+
+    vi.advanceTimersByTime(90_000); // total elapsed now 120s
+    frame(4);
+    expect(callsFor("watched_2m")).toEqual([
+      ["watched_2m", { matchId: runID, replayMode: "full_replay" }],
+    ]);
+  });
+
+  it("tracks watched_50pct once turn progress crosses half of the finish turn", () => {
+    const runID = "analytics-watch-50pct-1";
+    mountAiLeagueReplayOverlay({
+      runID,
+      artifactBasePath: `/ai-league-runs/${runID}`,
+      decisions: [],
+      replayMaxTurn: 1000,
+    });
+    const callsFor = (name: string) =>
+      trackMock.mock.calls.filter(
+        ([calledName, context]) =>
+          calledName === name &&
+          (context as { matchId?: string } | undefined)?.matchId === runID,
+      );
+    const frame = (turnNumber: number) =>
+      document.dispatchEvent(
+        new CustomEvent("ai-league-replay-frame", {
+          detail: { tick: turnNumber, turnNumber, players: [] },
+        }),
+      );
+
+    frame(499);
+    expect(callsFor("watched_50pct")).toHaveLength(0);
+    frame(500);
+    expect(callsFor("watched_50pct")).toEqual([
+      ["watched_50pct", { matchId: runID, replayMode: "full_replay" }],
+    ]);
+    frame(501);
+    expect(callsFor("watched_50pct")).toHaveLength(1);
+  });
+
+  it("tracks completed exactly once when a terminal frame arrives, tagged with the active replay mode", () => {
+    const runID = "analytics-watch-completed-1";
+    const overlay = mountAiLeagueReplayOverlay({
+      runID,
+      artifactBasePath: `/ai-league-runs/${runID}`,
+      decisions: [],
+      replayMaxTurn: 1000,
+    });
+    overlay.hydrate({ directorCutPlan: directorCutPlanFixture(runID) });
+    trackMock.mockClear();
+    document.dispatchEvent(
+      new CustomEvent("ai-league-replay-frame", {
+        detail: { tick: 999, turnNumber: 999, terminal: true, players: [] },
+      }),
+    );
+    expect(trackMock).toHaveBeenCalledWith("completed", {
+      matchId: runID,
+      replayMode: "director_cut",
+    });
+    const completedCallsForThisRun = trackMock.mock.calls.filter(
+      ([name, context]) =>
+        name === "completed" &&
+        (context as { matchId?: string } | undefined)?.matchId === runID,
+    );
+    expect(completedCallsForThisRun).toHaveLength(1);
+    document.dispatchEvent(
+      new CustomEvent("ai-league-replay-frame", {
+        detail: { tick: 999, turnNumber: 999, terminal: true, players: [] },
+      }),
+    );
+    expect(
+      trackMock.mock.calls.filter(
+        ([name, context]) =>
+          name === "completed" &&
+          (context as { matchId?: string } | undefined)?.matchId === runID,
+      ),
+    ).toHaveLength(1);
+  });
+
+  it("stops emitting watch-progress milestones once the overlay is disposed", () => {
+    vi.useFakeTimers();
+    const runID = "analytics-watch-dispose-1";
+    const overlay = mountAiLeagueReplayOverlay({
+      runID,
+      artifactBasePath: `/ai-league-runs/${runID}`,
+      decisions: [],
+      replayMaxTurn: 1000,
+    });
+    document.dispatchEvent(
+      new CustomEvent("ai-league-replay-frame", {
+        detail: { tick: 1, turnNumber: 1, players: [] },
+      }),
+    );
+    overlay.dispose();
+    trackMock.mockClear();
+    vi.advanceTimersByTime(200_000);
+    document.dispatchEvent(
+      new CustomEvent("ai-league-replay-frame", {
+        detail: { tick: 2, turnNumber: 2, players: [] },
+      }),
+    );
+    expect(
+      trackMock.mock.calls.filter(
+        ([, context]) =>
+          (context as { matchId?: string } | undefined)?.matchId === runID,
+      ),
+    ).toHaveLength(0);
+  });
+});

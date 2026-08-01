@@ -1426,7 +1426,11 @@ class Client {
   ) {
     this.replayAttemptCleanup?.();
     this.replayLoadingCleanup?.();
-    this.replayLoadingCleanup = holdReplayLoadingScreenUntilFirstFrame();
+    this.replayLoadingCleanup = holdReplayLoadingScreenUntilFirstFrame(
+      undefined,
+      undefined,
+      runID,
+    );
 
     const artifactBasePath =
       options.artifactBasePath ??

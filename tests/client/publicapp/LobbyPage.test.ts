@@ -19,11 +19,15 @@ import type {
   ReadModel,
 } from "../../../src/client/publicapp/ReadModelSchema";
 import type * as UtilsModule from "../../../src/client/Utils";
+import { analytics } from "../../../src/client/analytics/AnalyticsClient";
 
 vi.mock("../../../src/client/Utils", async (importOriginal) => ({
   ...(await importOriginal<typeof UtilsModule>()),
   translateText: (key: string, params?: Record<string, string | number>) =>
     params === undefined ? key : `${key}:${JSON.stringify(params)}`,
+}));
+vi.mock("../../../src/client/analytics/AnalyticsClient", () => ({
+  analytics: { track: vi.fn(), trackVisitStart: vi.fn() },
 }));
 
 function agent(overrides: Partial<PublicAgent>): PublicAgent {
@@ -228,6 +232,7 @@ async function flushMicrotasks(times = 15): Promise<void> {
 afterEach(() => {
   document.body.innerHTML = "";
   vi.unstubAllGlobals();
+  vi.mocked(analytics.track).mockClear();
 });
 
 describe("lobby-page hero: promotable event", () => {
@@ -346,6 +351,57 @@ describe("lobby-page hero: promotable event", () => {
     await flushMicrotasks();
     expect(el.textContent).toContain("Auri vs Sefirot");
     expect(el.textContent).not.toContain("lobby.hero_participants_heading");
+  });
+});
+
+describe("lobby-page hero analytics", () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("fires featured_event_impression once for the hero's matchId, not again on a later re-render of the same event", async () => {
+    stubReadModelAndFeaturedMatchFetch(
+      readModel({ featuredMatches: [featuredMatch({ matchId: "feat_impr" })] }),
+      [],
+    );
+    mount();
+    await flushMicrotasks();
+    expect(analytics.track).toHaveBeenCalledWith("featured_event_impression", {
+      eventSlug: "feat_impr",
+    });
+    expect(
+      vi.mocked(analytics.track).mock.calls.filter(
+        (call) => call[0] === "featured_event_impression",
+      ),
+    ).toHaveLength(1);
+    // The 1s tick re-renders the hero (countdown/elapsed note) without
+    // changing the hero's matchId — the impression must not re-fire.
+    vi.advanceTimersByTime(3000);
+    await flushMicrotasks();
+    expect(
+      vi.mocked(analytics.track).mock.calls.filter(
+        (call) => call[0] === "featured_event_impression",
+      ),
+    ).toHaveLength(1);
+  });
+
+  it("clicking the hero watch CTA fires event_cta_clicked with the hero's matchId", async () => {
+    stubReadModelAndFeaturedMatchFetch(
+      readModel({ featuredMatches: [featuredMatch({ matchId: "feat_cta" })] }),
+      [],
+    );
+    const el = mount();
+    await flushMicrotasks();
+    const cta = el.querySelector('a[href="/premiere/prem_abc"]') as HTMLAnchorElement | null;
+    expect(cta).not.toBeNull();
+    cta!.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
+    expect(analytics.track).toHaveBeenCalledWith("event_cta_clicked", {
+      eventSlug: "feat_cta",
+    });
   });
 });
 

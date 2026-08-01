@@ -14,6 +14,7 @@ import {
   mutateBuilderClaimStore,
   submitClaim,
 } from "../../../src/server/platform/PlatformBuilderClaimStore";
+import { AnalyticsAggregateStore, totalEventCount } from "../../../src/server/analytics/AnalyticsAggregateStore";
 
 const EXPECTED_ORIGIN = "https://platform.example.test";
 const NOW = new Date("2026-08-01T00:00:00.000Z");
@@ -62,7 +63,11 @@ async function seedVerifiedClaim(
   );
 }
 
-async function harness(releaseStateRoot: string, claimStateRoot: string) {
+async function harness(
+  releaseStateRoot: string,
+  claimStateRoot: string,
+  artifactsRootDir: string,
+) {
   const accounts = await PlatformAccountStore.open(await tempDir("accounts-"));
   const policyClaims = await PlatformPolicyClaimStore.open(
     await tempDir("policy-claims-"),
@@ -86,6 +91,7 @@ async function harness(releaseStateRoot: string, claimStateRoot: string) {
       releaseStore: { stateRoot: releaseStateRoot },
       claimStore: { stateRoot: claimStateRoot },
       identityLinkStore,
+      artifactsRootDir,
       onOperatorError: (code, error) => operatorErrors.push({ code, error }),
     }),
   );
@@ -124,20 +130,23 @@ function mintAccount(security: PlatformAccountSecurity): {
 describe("PlatformBuilderVersionHttp", () => {
   let releaseStateRoot: string;
   let claimStateRoot: string;
+  let artifactsRootDir: string;
 
   beforeEach(async () => {
     releaseStateRoot = await tempDir("version-release-store-");
     claimStateRoot = await tempDir("builder-claim-store-");
+    artifactsRootDir = await tempDir("version-http-artifacts-");
   });
 
   afterEach(async () => {
     await rm(releaseStateRoot, { recursive: true, force: true });
     await rm(claimStateRoot, { recursive: true, force: true });
+    await rm(artifactsRootDir, { recursive: true, force: true });
   });
 
   it("lets a verified builder submit a release notice for their own agent", async () => {
     const owner = { accountId: "" };
-    const server = await harness(releaseStateRoot, claimStateRoot);
+    const server = await harness(releaseStateRoot, claimStateRoot, artifactsRootDir);
     try {
       const security = server.security;
       const account = mintAccount(security);
@@ -190,8 +199,41 @@ describe("PlatformBuilderVersionHttp", () => {
     }
   });
 
+  it("emits a version_release_created analytics event after a successful submit", async () => {
+    const server = await harness(releaseStateRoot, claimStateRoot, artifactsRootDir);
+    try {
+      const account = mintAccount(server.security);
+      await seedVerifiedClaim(claimStateRoot, account.accountId, "agt_daveey");
+
+      const response = await fetch(`${server.baseUrl}/api/account/version-releases`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Origin: EXPECTED_ORIGIN,
+          Cookie: account.cookie,
+          "x-csrf-token": account.csrfToken,
+        },
+        body: JSON.stringify({
+          agentId: "agt_daveey",
+          versionLabel: "v25",
+          releaseNotes: null,
+          baseModel: null,
+          scaffoldDescription: null,
+          sourceDisclosure: null,
+          intendedChanges: null,
+        }),
+      });
+      expect(response.status).toBe(200);
+
+      const file = await new AnalyticsAggregateStore(artifactsRootDir).readAll();
+      expect(totalEventCount(file, "version_release_created")).toBe(1);
+    } finally {
+      await server.close();
+    }
+  });
+
   it("rejects a release notice for an agent the caller has no verified claim for (403 PLATFORM_NOT_YOUR_AGENT)", async () => {
-    const server = await harness(releaseStateRoot, claimStateRoot);
+    const server = await harness(releaseStateRoot, claimStateRoot, artifactsRootDir);
     try {
       const security = server.security;
       const ownerAccount = mintAccount(security);
@@ -233,7 +275,7 @@ describe("PlatformBuilderVersionHttp", () => {
   });
 
   it("rejects a write with no CSRF token", async () => {
-    const server = await harness(releaseStateRoot, claimStateRoot);
+    const server = await harness(releaseStateRoot, claimStateRoot, artifactsRootDir);
     try {
       const account = mintAccount(server.security);
       const response = await fetch(`${server.baseUrl}/api/account/version-releases`, {
@@ -254,7 +296,7 @@ describe("PlatformBuilderVersionHttp", () => {
   });
 
   it("rejects an invalid request body with 400 PLATFORM_INVALID_REQUEST", async () => {
-    const server = await harness(releaseStateRoot, claimStateRoot);
+    const server = await harness(releaseStateRoot, claimStateRoot, artifactsRootDir);
     try {
       const account = mintAccount(server.security);
       await seedVerifiedClaim(claimStateRoot, account.accountId, "agt_daveey");

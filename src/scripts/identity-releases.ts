@@ -6,6 +6,8 @@ import {
   type PendingVersionRelease,
 } from "../server/platform/PlatformVersionReleaseStore";
 import { reconcilePendingReleases } from "../server/identity/VersionReleaseReconcile";
+import { emitServerAnalyticsEvent } from "../server/analytics/AnalyticsServerEmit";
+import { resolveDefaultArtifactsRoot } from "./premiere-candidates";
 
 /**
  * `identity:releases` — the operator/CI-facing half of Season Zero Phase
@@ -51,7 +53,7 @@ async function runList(argv: readonly string[]): Promise<void> {
   }
 }
 
-async function runReconcile(argv: readonly string[]): Promise<void> {
+async function runReconcile(argv: readonly string[], artifactsRootDir: string): Promise<void> {
   const dir = flagValue(argv, "--dir");
   // Accepted for runbook forward-compat ("run this after
   // sync-version-registry.ts <data-json>") but never read: matching only
@@ -85,6 +87,13 @@ async function runReconcile(argv: readonly string[]): Promise<void> {
     console.log("identity:releases reconcile — no newly observed releases");
     return;
   }
+  await Promise.all(
+    newlyObserved.map((release) =>
+      emitServerAnalyticsEvent(artifactsRootDir, "version_observed", {
+        versionLabel: release.versionLabel,
+      }),
+    ),
+  );
   for (const release of newlyObserved) {
     console.log(
       `${release.id} observed as ${release.observedVersionId} (first observed ${release.observedAt})`,
@@ -100,7 +109,7 @@ async function main(): Promise<void> {
     return;
   }
   if (subcommand === "reconcile") {
-    await runReconcile(argv.slice(1));
+    await runReconcile(argv.slice(1), resolveDefaultArtifactsRoot());
     return;
   }
   console.error(

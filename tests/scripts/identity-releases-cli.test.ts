@@ -8,6 +8,7 @@ import {
   mutateVersionReleaseStore,
   readVersionReleaseStore,
 } from "../../src/server/platform/PlatformVersionReleaseStore";
+import { AnalyticsAggregateStore, totalEventCount } from "../../src/server/analytics/AnalyticsAggregateStore";
 
 /**
  * Real subprocess (`tsx`) end-to-end coverage of `identity:releases`'s two
@@ -23,6 +24,7 @@ const scriptPath = path.join(repoRoot, "src", "scripts", "identity-releases.ts")
 function runCli(
   args: string[],
   releaseStateRoot: string,
+  artifactsRootDir: string,
 ): { code: number; stdout: string; stderr: string } {
   try {
     const stdout = execFileSync("npx", ["tsx", scriptPath, ...args], {
@@ -32,6 +34,7 @@ function runCli(
       env: {
         ...process.env,
         PROXYWAR_VERSION_RELEASE_STATE_ROOT: releaseStateRoot,
+        PROXYWAR_ARTIFACTS_ROOT: artifactsRootDir,
       },
     });
     return { code: 0, stdout, stderr: "" };
@@ -59,6 +62,7 @@ async function writeVersionRegistry(
 describe("identity:releases CLI — real subprocess end to end", () => {
   let releaseStateRoot: string;
   let registryDir: string;
+  let artifactsRootDir: string;
 
   beforeEach(async () => {
     releaseStateRoot = await mkdtemp(
@@ -67,18 +71,21 @@ describe("identity:releases CLI — real subprocess end to end", () => {
     registryDir = await mkdtemp(
       path.join(os.tmpdir(), "identity-releases-cli-registry-"),
     );
+    artifactsRootDir = await mkdtemp(
+      path.join(os.tmpdir(), "identity-releases-cli-artifacts-"),
+    );
   });
 
   afterEach(async () => {
     await Promise.all(
-      [releaseStateRoot, registryDir].map((dir) =>
+      [releaseStateRoot, registryDir, artifactsRootDir].map((dir) =>
         rm(dir, { recursive: true, force: true }),
       ),
     );
   });
 
   it("list prints an empty store cleanly", () => {
-    const result = runCli(["list"], releaseStateRoot);
+    const result = runCli(["list"], releaseStateRoot, artifactsRootDir);
     expect(result.code).toBe(0);
     expect(result.stdout).toContain("0 release(s)");
   });
@@ -126,6 +133,7 @@ describe("identity:releases CLI — real subprocess end to end", () => {
     const reconcileResult = runCli(
       ["reconcile", "--dir", registryDir, "--data-json", "/tmp/does-not-need-to-exist.json"],
       releaseStateRoot,
+      artifactsRootDir,
     );
     expect(reconcileResult.code).toBe(0);
     expect(reconcileResult.stdout).toContain(
@@ -139,19 +147,26 @@ describe("identity:releases CLI — real subprocess end to end", () => {
       observedAt: "2026-08-03T00:00:00.000Z",
     });
 
-    const listResult = runCli(["list", "--status", "observed"], releaseStateRoot);
+    const analyticsFile = await new AnalyticsAggregateStore(artifactsRootDir).readAll();
+    expect(totalEventCount(analyticsFile, "version_observed")).toBe(1);
+
+    const listResult = runCli(["list", "--status", "observed"], releaseStateRoot, artifactsRootDir);
     expect(listResult.code).toBe(0);
     expect(listResult.stdout).toContain(releaseId);
     expect(listResult.stdout).toContain("observed");
 
     // Reconciling again is idempotent: nothing new to link, no false re-print.
-    const secondReconcile = runCli(["reconcile", "--dir", registryDir], releaseStateRoot);
+    const secondReconcile = runCli(["reconcile", "--dir", registryDir], releaseStateRoot, artifactsRootDir);
     expect(secondReconcile.code).toBe(0);
     expect(secondReconcile.stdout).toContain("no newly observed releases");
+
+    // Idempotent reconcile: no additional version_observed events on the second pass.
+    const analyticsFileAfterSecond = await new AnalyticsAggregateStore(artifactsRootDir).readAll();
+    expect(totalEventCount(analyticsFileAfterSecond, "version_observed")).toBe(1);
   }, 30000);
 
   it("prints usage and exits non-zero on an unknown subcommand", () => {
-    const result = runCli(["bogus"], releaseStateRoot);
+    const result = runCli(["bogus"], releaseStateRoot, artifactsRootDir);
     expect(result.code).not.toBe(0);
     expect(result.stderr).toContain("usage: identity:releases");
   });

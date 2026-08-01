@@ -1950,6 +1950,7 @@ if (platformEnabled) {
       releaseStore: { stateRoot: versionReleaseStateRoot },
       claimStore: { stateRoot: builderClaimStateRoot },
       identityLinkStore: platformGithubIdentityLinkStore,
+      artifactsRootDir,
       onOperatorError: (operatorCode, error) => {
         console.error(
           `Platform version release ${operatorCode}: ${

@@ -52,13 +52,53 @@ methodology reference the report itself links back to.
 
 ## Instrumentation status
 
-**As of this phase, no page emits any event.** Phase 7 ships the collector,
-the client emitter (`AnalyticsClient.ts`), and the report; wiring
-`analytics.track(...)` calls into `LobbyPage`, `WatchPage`,
-`MatchDetailPage`, the replay overlays, `BuildPage`, and the profile pages
-is a deliberately separate, later pass. Every metric below therefore
-reports one of three states, and the operator report renders all three
-honestly rather than ever fabricating a number:
+Wired into the product surfaces as of this pass:
+
+- **Public pages** (`PublicApp.ts` central dispatch → `page_viewed` +
+  `returning_anonymous_visitor` on every route mount): `LobbyPage`
+  (`featured_event_impression` on the hero, `event_cta_clicked` on the
+  watch CTA), `WatchPage` (`featured_event_impression` per featured
+  programme card, `event_cta_clicked` on the view-match/watch-replay
+  links), `MatchDetailPage` (`agent_profile_opened_from_match` on every
+  agent link — participant card, winner, placements, decisive-moment
+  agents — plus `decisive_moment_opened` on the jump link), `BuildPage`
+  (`build_flow_started`/`build_step_reached`/`registration_draft_submitted`
+  — supersedes the Stage 7 `BuildFunnelCounters`/`/api/build/funnel-event`
+  pair, which stays live server-side only for backward compatibility with
+  any stale cached client bundle mid-deploy), `BuilderClaimPage`
+  (`claim_started` on a successful submission).
+- **Replay surfaces**: `ReplayLoadingScreen.ts`
+  (`replay_load_started`/`succeeded`/`failed`, threaded with the match id
+  from `Main.ts`'s `openAiLeagueReplay`), `AiLeagueReplayOverlay.ts`
+  (`director_cut_started` on default-on mount and on explicit toggle-on;
+  `timeline_jump` on every War-Room/timeline jump; `watched_30s`/
+  `watched_2m` from wall-clock elapsed time since the first frame,
+  `watched_50pct`/`completed` from turn progress against the match's own
+  finish turn — all one-shot per view, hooked onto the existing
+  `ai-league-replay-frame` event rather than a new per-tick loop),
+  `ReplayPremiereArchiveView.ts` (`switched_to_full_replay` on the
+  archived-premiere "Watch Full Replay" button).
+- **Server-side write paths**: `identity-claims.ts`'s `approve` subcommand
+  (`claim_verified`), `PlatformBuilderVersionHttp.ts`'s version-release
+  route (`version_release_created`), `identity-releases.ts`'s `reconcile`
+  subcommand (`version_observed` per newly-observed release).
+
+**Known, honest gaps** (the report shows `not_yet_instrumented` for these
+until a real feature/signal exists to hook, never a fabricated number):
+
+- `follow_bookmark` — no follow/bookmark feature exists yet in the
+  directory pages; the event name is reserved for when it ships.
+- `builder_profile_opened` — no builder-profile link site was in scope for
+  this pass (only agent-profile links from a match were); the event stays
+  ready for the next instrumentation pass.
+- `returning_authenticated_visitor` — the public pages have no cheap,
+  synchronous client-side "is this visitor logged in" signal at mount time
+  (the platform account session is an HttpOnly cookie, checked
+  server-side only); guessing from the route alone would misclassify an
+  anonymous visitor. Every route currently reports `page_viewed` +, when
+  applicable, `returning_anonymous_visitor` only.
+
+Every report metric still carries one of three honest states:
 
 - **`not_yet_instrumented`** — the event(s) this metric needs have never
   been recorded at all (all-time count is zero).

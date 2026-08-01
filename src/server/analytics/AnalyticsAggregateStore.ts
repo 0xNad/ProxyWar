@@ -1,6 +1,7 @@
 import { promises as fs } from "node:fs";
 import path from "node:path";
 import { z } from "zod";
+import { withFileMutex } from "../agents/FileMutex";
 import type { AnalyticsEvent, AnalyticsEventName } from "./AnalyticsEventSchema";
 import { normalizeAnalyticsRoute } from "./AnalyticsEventSchema";
 
@@ -76,6 +77,7 @@ const DIMENSION_CONTEXT_KEYS = [
   "eventSlug",
   "agentSlug",
   "builderSlug",
+  "claimId",
   "versionLabel",
   "reason",
   "replayMode",
@@ -84,21 +86,28 @@ const DIMENSION_CONTEXT_KEYS = [
 
 export class AnalyticsAggregateStore {
   private readonly filePath: string;
-  private writeQueue: Promise<void> = Promise.resolve();
 
   constructor(artifactsRootDir: string) {
     this.filePath = path.join(artifactsRootDir, "analytics-aggregates.json");
   }
 
-  /** Fire-and-forget from the ingest route — never throws. */
-  recordEvents(events: readonly AnalyticsEvent[], now: Date = new Date()): Promise<void> {
+  /**
+   * Fire-and-forget from the ingest route — never throws. Wrapped in
+   * `withFileMutex` (the same cross-process file lock
+   * `PlatformBuilderClaimStore.ts`/`PlatformVersionReleaseStore.ts` already
+   * use) rather than an in-process-only queue: server-side hooks
+   * (`claim_verified`, `version_release_created`, `version_observed`) run
+   * in short-lived CLI processes separate from the always-running demo
+   * server, so a same-process promise chain alone cannot prevent a lost
+   * update between two processes racing the same read-modify-write cycle.
+   */
+  async recordEvents(events: readonly AnalyticsEvent[], now: Date = new Date()): Promise<void> {
     if (events.length === 0) {
-      return Promise.resolve();
+      return;
     }
-    this.writeQueue = this.writeQueue
-      .then(() => this.applyEvents(events, now))
-      .catch(() => undefined);
-    return this.writeQueue;
+    await withFileMutex(this.filePath, () => this.applyEvents(events, now)).catch(
+      () => undefined,
+    );
   }
 
   async readAll(): Promise<AnalyticsAggregateFile> {

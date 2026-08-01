@@ -1,5 +1,10 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
+const { trackMock } = vi.hoisted(() => ({ trackMock: vi.fn() }));
+vi.mock("../../src/client/analytics/AnalyticsClient", () => ({
+  analytics: { track: trackMock, trackVisitStart: vi.fn() },
+}));
+
 vi.mock("../../src/client/Utils", () => ({
   translateText: vi.fn((key: string) => {
     const translations: Record<string, string> = {
@@ -45,6 +50,7 @@ describe("ReplayLoadingScreen", () => {
   afterEach(() => {
     vi.clearAllTimers();
     vi.useRealTimers();
+    trackMock.mockClear();
   });
 
   it("takes ownership of the static first-paint screen without duplicating it", () => {
@@ -205,5 +211,76 @@ describe("ReplayLoadingScreen", () => {
       screen?.querySelector<HTMLAnchorElement>("[data-replay-loading-back]")
         ?.hidden,
     ).toBe(false);
+  });
+});
+
+describe("ReplayLoadingScreen analytics", () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+    document.documentElement.className = "preload proxywar-replay-route";
+    document.body.innerHTML = `
+      <div id="proxywar-coworld-splash"></div>
+      <div id="proxywar-replay-loading" role="status" aria-busy="true">
+        <div class="proxywar-replay-loading-content">
+          <div class="proxywar-replay-loading-spinner" aria-hidden="true"></div>
+          <p data-replay-loading-message></p>
+          <div class="proxywar-replay-loading-actions">
+            <button type="button" data-replay-loading-retry hidden></button>
+            <a href="/league" data-replay-loading-back hidden></a>
+          </div>
+        </div>
+      </div>
+    `;
+  });
+
+  afterEach(() => {
+    vi.clearAllTimers();
+    vi.useRealTimers();
+    trackMock.mockClear();
+  });
+
+  it("tracks replay_load_started with the matchId as soon as loading begins", () => {
+    const cleanup = holdReplayLoadingScreenUntilFirstFrame(
+      undefined,
+      undefined,
+      "run-abc123",
+    );
+    expect(trackMock).toHaveBeenCalledWith("replay_load_started", {
+      matchId: "run-abc123",
+    });
+    cleanup();
+  });
+
+  it("tracks replay_load_started with no context when no matchId is supplied", () => {
+    const cleanup = holdReplayLoadingScreenUntilFirstFrame();
+    expect(trackMock).toHaveBeenCalledWith("replay_load_started", undefined);
+    cleanup();
+  });
+
+  it("tracks replay_load_succeeded exactly once when the first frame lands", () => {
+    holdReplayLoadingScreenUntilFirstFrame(undefined, undefined, "run-abc123");
+    trackMock.mockClear();
+    document.dispatchEvent(new CustomEvent("ai-league-replay-frame"));
+    expect(trackMock).toHaveBeenCalledExactlyOnceWith("replay_load_succeeded", {
+      matchId: "run-abc123",
+    });
+
+    // {once:true} listeners: a second frame event must not refire it.
+    document.dispatchEvent(new CustomEvent("ai-league-replay-frame"));
+    expect(trackMock).toHaveBeenCalledOnce();
+  });
+
+  it("tracks replay_load_failed with a bounded reason code when loading errors out", () => {
+    holdReplayLoadingScreenUntilFirstFrame(undefined, undefined, "run-abc123");
+    trackMock.mockClear();
+    document.dispatchEvent(new CustomEvent("ai-league-replay-load-error"));
+    expect(trackMock).toHaveBeenCalledExactlyOnceWith("replay_load_failed", {
+      reason: "load_error",
+      matchId: "run-abc123",
+    });
+
+    // Success can never land after a reported failure ({once:true} cleanup).
+    document.dispatchEvent(new CustomEvent("ai-league-replay-frame"));
+    expect(trackMock).toHaveBeenCalledOnce();
   });
 });

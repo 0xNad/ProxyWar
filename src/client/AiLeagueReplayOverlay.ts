@@ -28,6 +28,7 @@ import {
   BROADCAST_RAIL_FOLLOWED_CHANGE_EVENT,
   BROADCAST_RAIL_FOLLOW_EVENT,
 } from "./graphics/layers/PointOfViewSelector";
+import { analytics } from "./analytics/AnalyticsClient";
 import {
   mountDirectorCutController,
   normalizeDirectorCutPlan,
@@ -311,6 +312,54 @@ export function mountAiLeagueReplayOverlay(input: AiLeagueReplayOverlayInput) {
   );
   mountReplayJumpControls(document);
 
+  // Phase 7 watch-progress milestones. Hooks the SAME `ai-league-replay-frame`
+  // event every other per-frame subsystem here already listens to (playhead
+  // sync, Director Cut, lower thirds) — never a new timer or RAF loop.
+  // Wall-clock elapsed time since the first frame drives the 30s/2m
+  // milestones uniformly in both Director Cut and Full Replay (bounded on
+  // one `firstFrameAt` timestamp, diffed per frame — no per-tick network
+  // call, no `setInterval`); turn progress against the match's own finish
+  // turn (the same `aiLeagueFinishTurn` the lower-thirds sync above already
+  // computes) drives 50%/completion, so this needs no dependency on the
+  // Director Cut plan's own duration estimate. Each milestone is a
+  // one-shot flag in `watchMilestonesSent`, guaranteeing exactly one
+  // `analytics.track` call per milestone per view.
+  const watchMilestonesSent = new Set<string>();
+  let firstFrameAt: number | null = null;
+  const trackWatchMilestoneOnce = (
+    name: "watched_30s" | "watched_2m" | "watched_50pct" | "completed",
+  ): void => {
+    if (watchMilestonesSent.has(name)) return;
+    watchMilestonesSent.add(name);
+    analytics.track(name, {
+      matchId: currentInput.runID,
+      replayMode: directorCutHandle !== null ? "director_cut" : "full_replay",
+    });
+  };
+  const onWatchProgressFrame = (event: Event): void => {
+    const detail = (
+      event as CustomEvent<{ turnNumber?: unknown; terminal?: unknown }>
+    ).detail;
+    if (
+      typeof detail?.turnNumber !== "number" ||
+      !Number.isFinite(detail.turnNumber)
+    ) {
+      return;
+    }
+    if (firstFrameAt === null) firstFrameAt = Date.now();
+    const elapsedMs = Date.now() - firstFrameAt;
+    if (elapsedMs >= 30_000) trackWatchMilestoneOnce("watched_30s");
+    if (elapsedMs >= 120_000) trackWatchMilestoneOnce("watched_2m");
+    const telemetry =
+      currentInput.spectatorTelemetry as AiLeagueSpectatorTelemetry | null;
+    const totalTurns = aiLeagueFinishTurn(currentInput, telemetry);
+    if (totalTurns > 0 && detail.turnNumber / totalTurns >= 0.5) {
+      trackWatchMilestoneOnce("watched_50pct");
+    }
+    if (detail.terminal === true) trackWatchMilestoneOnce("completed");
+  };
+  document.addEventListener("ai-league-replay-frame", onWatchProgressFrame);
+
   // Lower thirds (spec item 3): one controller per overlay mount, positioned
   // over the map (never inside the scrollable side panel) so a pulse stays
   // visible without opening/scrolling anything. Synced from the SAME
@@ -481,6 +530,10 @@ export function mountAiLeagueReplayOverlay(input: AiLeagueReplayOverlayInput) {
       }
       disposed = true;
       disposePlayheadSync();
+      document.removeEventListener(
+        "ai-league-replay-frame",
+        onWatchProgressFrame,
+      );
       lowerThird.dispose();
       clipControl?.dispose();
       clipControl = null;
@@ -553,7 +606,12 @@ function mountReplayDetailsBindings(
   mountAiLeagueDecisionsDisclosure(overlay);
   mountAiLeagueRadioToggle(overlay);
   mountAiLeagueAnalystToggle(overlay);
-  mountAiLeagueDirectorCutToggle(overlay, directorCutHandle, getCurrentTurn);
+  mountAiLeagueDirectorCutToggle(
+    overlay,
+    directorCutHandle,
+    getCurrentTurn,
+    input.runID,
+  );
   mountAiLeagueShareImageButton(overlay);
   mountAiLeagueBroadcastDrawer(
     overlay,
@@ -739,6 +797,7 @@ function mountAiLeagueDirectorCutToggle(
   overlay: HTMLElement,
   directorCutHandle: DirectorCutControllerHandle | null,
   getCurrentTurn: () => number,
+  runID: string,
 ): void {
   if (directorCutHandle === null) return;
   const actions = overlay.querySelector<HTMLElement>(
@@ -762,7 +821,20 @@ function mountAiLeagueDirectorCutToggle(
         : "ai_league_replay.director_cut_off",
     );
   };
-  apply(directorCutHandle.isEnabled());
+  const initiallyEnabled = directorCutHandle.isEnabled();
+  apply(initiallyEnabled);
+  // First-ever creation of this button (guarded above) IS the one-shot
+  // "Director Cut mounted" point — fires once for the spec's "enabled by
+  // default" case, exactly like `analytics.track("director_cut_started")`
+  // fires again below only on an explicit user toggle-ON (never on toggle-
+  // OFF, and never twice for the same mount since the button only mounts
+  // once).
+  if (initiallyEnabled) {
+    analytics.track("director_cut_started", {
+      matchId: runID,
+      replayMode: "director_cut",
+    });
+  }
   toggle.addEventListener("click", () => {
     const next = !directorCutHandle.isEnabled();
     // Re-enabling mid-match must resync to the segment covering the
@@ -770,6 +842,12 @@ function mountAiLeagueDirectorCutToggle(
     // `setEnabled` doc) — irrelevant when turning off.
     directorCutHandle.setEnabled(next, getCurrentTurn());
     apply(next);
+    if (next) {
+      analytics.track("director_cut_started", {
+        matchId: runID,
+        replayMode: "director_cut",
+      });
+    }
   });
   actions.prepend(toggle);
 }
@@ -3725,6 +3803,7 @@ function mountAiLeagueBroadcastDrawer(
   const matchStateSeries = normalizeMatchStateSeries(input.matchStateSeries);
   const directorCutPlan = normalizeDirectorCutPlan(input.directorCutPlan);
   const dispatchJumpToTurn = (turn: number): void => {
+    analytics.track("timeline_jump", { matchId: input.runID });
     document.dispatchEvent(
       new CustomEvent("ai-league-replay-jump-turn", {
         detail: { turnNumber: turn },

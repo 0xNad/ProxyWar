@@ -36,6 +36,8 @@ import {
   saveBuilderRegistry,
 } from "../server/identity/IdentityRegistry";
 import { SlugSchema, type AgentProfile, type BuilderProfile } from "../server/identity/IdentitySchemas";
+import { emitServerAnalyticsEvent } from "../server/analytics/AnalyticsServerEmit";
+import { resolveDefaultArtifactsRoot } from "./premiere-candidates";
 
 function flagValue(argv: readonly string[], name: string): string | undefined {
   const index = argv.indexOf(name);
@@ -95,6 +97,7 @@ async function runApprove(
   claimId: string,
   argv: readonly string[],
   claimStateRoot: string,
+  artifactsRootDir: string,
 ): Promise<void> {
   const note = flagValue(argv, "--note") ?? null;
   const dir = flagValue(argv, "--dir") ?? defaultIdentityRegistryDir;
@@ -145,6 +148,12 @@ async function runApprove(
     applyOperatorAction(file, claimId, "approve", operatorId, note, now),
   );
   const approvedClaim = findClaimById(updated, claimId) as BuilderClaimRecord;
+  if (approvedClaim.state === "verified") {
+    await emitServerAnalyticsEvent(artifactsRootDir, "claim_verified", {
+      claimId: approvedClaim.id,
+      agentSlug: agents[agentIndex].slug,
+    });
+  }
 
   const slugCandidate = SlugSchema.safeParse(
     slugify(approvedClaim.builderProfileDraft.displayName),
@@ -290,9 +299,13 @@ async function main(): Promise<void> {
       process.exitCode = 1;
       return;
     }
-    if (subcommand === "approve") await runApprove(claimId, argv, claimStateRoot);
-    else if (subcommand === "reject") await runReject(claimId, argv, claimStateRoot);
-    else await runRevoke(claimId, argv, claimStateRoot);
+    if (subcommand === "approve") {
+      await runApprove(claimId, argv, claimStateRoot, resolveDefaultArtifactsRoot());
+    } else if (subcommand === "reject") {
+      await runReject(claimId, argv, claimStateRoot);
+    } else {
+      await runRevoke(claimId, argv, claimStateRoot);
+    }
     return;
   }
   console.error(

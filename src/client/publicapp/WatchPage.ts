@@ -1,4 +1,4 @@
-import { html, LitElement, nothing, TemplateResult } from "lit";
+import { html, LitElement, nothing, PropertyValues, TemplateResult } from "lit";
 import { customElement, state } from "lit/decorators.js";
 import { unsafeSVG } from "lit/directives/unsafe-svg.js";
 import { z } from "zod";
@@ -15,6 +15,7 @@ import {
   APP_SHELL_ROOT_CLASSES,
 } from "./AppShellChrome";
 import { translateText } from "../Utils";
+import { analytics } from "../analytics/AnalyticsClient";
 
 /**
  * `/watch` — Season Zero activation prompt Phase 5 ("Watch page"): a
@@ -69,6 +70,7 @@ export class WatchPage extends LitElement {
    * SORT, not a filter — no match is ever hidden by it.
    */
   @state() private sortOrder: "recent" | "dramatic" = "recent";
+  private trackedImpressions = new Set<string>();
 
   createRenderRoot() {
     // Light DOM, so page-level Tailwind applies — same reasoning as
@@ -80,6 +82,22 @@ export class WatchPage extends LitElement {
   connectedCallback(): void {
     super.connectedCallback();
     void this.load();
+  }
+
+  updated(changedProperties: PropertyValues): void {
+    super.updated(changedProperties);
+    const readModel = this.readModel;
+    if (readModel === null) return;
+    const featuredMatchIds = new Set(
+      readModel.featuredMatches.map((match) => match.matchId),
+    );
+    for (const match of readModel.matches) {
+      if (match.completedAt === null) continue;
+      if (!featuredMatchIds.has(match.matchId)) continue;
+      if (this.trackedImpressions.has(match.matchId)) continue;
+      this.trackedImpressions.add(match.matchId);
+      analytics.track("featured_event_impression", { matchId: match.matchId });
+    }
   }
 
   private async load(): Promise<void> {
@@ -673,12 +691,14 @@ export class WatchPage extends LitElement {
         </details>
         <a
           href="/match/${encodeURIComponent(match.matchId)}"
+          @click=${() => analytics.track("event_cta_clicked", { matchId: match.matchId })}
           class="mt-2 inline-block text-xs font-semibold text-accent outline-none hover:text-accent-strong focus-visible:ring-2 focus-visible:ring-accent"
           >${translateText("watch.view_match")}</a
         >
         ${watchHref !== null
           ? html`<a
               href=${watchHref}
+              @click=${() => analytics.track("event_cta_clicked", { matchId: match.matchId })}
               class="ml-3 mt-2 inline-block text-xs text-ink-muted outline-none hover:text-accent focus-visible:ring-2 focus-visible:ring-accent"
               >${translateText("watch.watch_replay")}</a
             >`

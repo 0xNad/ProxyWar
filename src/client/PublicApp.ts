@@ -4,6 +4,7 @@
 // actually imports one; without this, `public.html` gets no
 // `<link rel="stylesheet">` at all and every page renders unstyled.
 import "./styles.css";
+import { analytics } from "./analytics/AnalyticsClient";
 import "./LangSelector";
 import "./publicapp/AboutPage";
 import "./publicapp/AgentProfilePage";
@@ -125,7 +126,21 @@ function mount(pathname: string): boolean {
   return false;
 }
 
-if (!mount(window.location.pathname)) {
+/**
+ * `page_viewed` (+ `returning_anonymous_visitor` when the visitor id
+ * already existed — see `AnalyticsClient.trackVisitStart`'s doc) fires
+ * once per page load here, the single dispatch point every route above
+ * passes through. Never `{ authenticated: true }`: none of these routes
+ * have a cheap, synchronous client-side "is this visitor logged in"
+ * signal available at mount time (the platform account session is an
+ * HttpOnly cookie, checked server-side only) — guessing from the route
+ * alone (e.g. `/builder-dashboard`) would misclassify an anonymous
+ * visitor who lands there by mistake, so `returning_authenticated_visitor`
+ * intentionally never fires from here; see docs/SEASON_ZERO_ANALYTICS.md.
+ */
+if (mount(window.location.pathname)) {
+  analytics.trackVisitStart();
+} else {
   // Server-side routing only ever serves this entry for the routes `mount`
   // handles; reaching here means a stale cached `public.html` outlived a
   // route removal. Fail safe to the real league page rather than a blank
