@@ -14,6 +14,7 @@ import {
   readCoworldLeagueEpisodesFromDataJson,
   readLeagueEpisodeRecap,
 } from "../../../src/server/agents/LeagueEpisodeMatchPage";
+import { AGENT_MATCH_RECAP_SCHEMA_VERSION } from "../../../src/server/agents/AgentMatchRecap";
 import type { CoworldLeagueEpisodeRow } from "../../../src/server/agents/CoworldLeagueSiteWriter";
 import {
   FIXTURE_AGENTS,
@@ -51,7 +52,7 @@ function episode(overrides: Partial<CoworldLeagueEpisodeRow> = {}): CoworldLeagu
 }
 
 const AGENT_MATCH_RECAP_JSON = JSON.stringify({
-  schemaVersion: 1,
+  schemaVersion: AGENT_MATCH_RECAP_SCHEMA_VERSION,
   runID: "league-coworld-test-episode-0001",
   generatedAt: "2026-08-01T12:00:00.000Z",
   summary: "This match featured 1 first strike and 1 betrayal.",
@@ -86,7 +87,7 @@ describe("parseMatchRecapArtifact", () => {
 
   test("returns null for the wrong schemaVersion", () => {
     const wrongVersion = JSON.stringify({
-      schemaVersion: 2,
+      schemaVersion: AGENT_MATCH_RECAP_SCHEMA_VERSION + 1,
       summary: "x",
       beats: [{ turnNumber: 1, kind: "elimination", message: "x is eliminated." }],
     });
@@ -94,13 +95,13 @@ describe("parseMatchRecapArtifact", () => {
   });
 
   test("returns null when both the summary and every beat are absent — never a fabricated placeholder", () => {
-    const empty = JSON.stringify({ schemaVersion: 1, summary: "", beats: [] });
+    const empty = JSON.stringify({ schemaVersion: AGENT_MATCH_RECAP_SCHEMA_VERSION, summary: "", beats: [] });
     expect(parseMatchRecapArtifact(empty)).toBeNull();
   });
 
   test("drops individual malformed beat entries rather than casting garbage through", () => {
     const partiallyMalformed = JSON.stringify({
-      schemaVersion: 1,
+      schemaVersion: AGENT_MATCH_RECAP_SCHEMA_VERSION,
       summary: "",
       beats: [
         { turnNumber: 5, kind: "elimination", message: "Frostfall is eliminated." },

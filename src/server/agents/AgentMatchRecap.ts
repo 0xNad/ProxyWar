@@ -34,7 +34,29 @@ import type { SpectatorEvent, SpectatorTelemetry } from "./AgentSpectatorTelemet
  * `SpectatorEvent.message` the telemetry builder already generated (a
  * factual, already-vetted sentence — see `AgentSpectatorTelemetry.ts`'s
  * `eventForRecord`) or a small factual template built only from
- * `actorName`/`targetName`, never an inferred or embellished claim.
+ * `actorName`/`targetName`/real counts/turn numbers, never an inferred or
+ * embellished claim.
+ *
+ * 2026-08-01 live-verification fix: a real production match repeatedly
+ * re-requested an alliance between the SAME pair (no intervening break)
+ * roughly a dozen times, and separately first-struck 61 distinct ordered
+ * pairs — both individually factual, but 113 raw beats is an event log,
+ * not a digest, and every dramatic match will do this. Two changes:
+ * (1) same-UNORDERED-pair alliance formations aggregate into ONE beat
+ * anchored at the FIRST formation, carrying a "renewed N times" count;
+ * an active alliance's betrayal (`alliance_break`, tone `betrayal`) both
+ * closes that aggregation run AND is kept as its own individual beat
+ * (betrayals are the drama, never merged away) and RESETS the run, so a
+ * later re-formation starts a fresh aggregated beat. First strikes are
+ * already deduped one-per-ordered-pair (unchanged — that was already
+ * correct, matching the client's own dedupe rule) so no further
+ * aggregation applies there. (2) `MAX_PUBLIC_RECAP_BEATS` caps the final
+ * public beat list, trimming lowest-priority categories first (see
+ * `applyImportanceCap`'s doc) while the `summary` line keeps reporting
+ * the FULL raw counts (every alliance formation, not just aggregated
+ * beats) so nothing is hidden — a reader can always see "this match had
+ * 37 alliance formations" even though only a handful of alliance beats
+ * made the cut.
  *
  * `buildAgentMatchRecap` returns `null` when the curated pass finds zero
  * beats — a genuinely quiet match, never padded with a placeholder
@@ -48,8 +70,19 @@ export interface AgentMatchRecapBeat {
   message: string;
 }
 
+/**
+ * Bumped 1 -> 2 for the alliance-aggregation + importance cap fix above —
+ * a pre-fix `match-recap.json` (schemaVersion 1) is stale/spammy, never
+ * merely "old but still fine": `CoworldLeagueMatchNarrativeBackfill.ts`'s
+ * `isRecapStale` compares against this constant to force re-curation, and
+ * `LeagueEpisodeMatchPage.ts`'s `parseMatchRecapArtifact` refuses to parse
+ * anything but the current version (a stale artifact reads as "no recap
+ * yet", never as spammy content, until the backfill upgrades it).
+ */
+export const AGENT_MATCH_RECAP_SCHEMA_VERSION = 2;
+
 export interface AgentMatchRecap {
-  schemaVersion: 1;
+  schemaVersion: typeof AGENT_MATCH_RECAP_SCHEMA_VERSION;
   runID: string;
   generatedAt: string;
   summary: string;
@@ -67,6 +100,9 @@ export interface AgentMatchRecapInput {
   finalTurnCount: number | null;
 }
 
+/** Public beat cap — see the module doc's live-verification fix. Priority order when trimming is `applyImportanceCap`'s job; this is just the ceiling. */
+export const MAX_PUBLIC_RECAP_BEATS = 16;
+
 const BEAT_KIND_LABEL: Record<AgentMatchRecapBeat["kind"], string> = {
   alliance: "alliance",
   first_strike: "first strike",
@@ -75,21 +111,77 @@ const BEAT_KIND_LABEL: Record<AgentMatchRecapBeat["kind"], string> = {
   final_confrontation: "final clash",
 };
 
-/** Curates the War Room vocabulary (alliance/first-strike/betrayal/elimination) from an ordered event stream — same kind-mapping `curatedWarRoomEvents` (client) applies, ported server-side. Also returns the source `SpectatorEvent.id`s it consumed, so `finalConfrontationBeat` never double-reports an attack already covered as a first strike. */
-function curateWarRoomBeats(events: readonly SpectatorEvent[]): {
-  beats: AgentMatchRecapBeat[];
+/** Lower sorts first when trimming — betrayals/eliminations/final-clash are never trimmed by the cap (see `applyImportanceCap`); this only orders the two categories that DO get trimmed. */
+const TRIMMABLE_KIND_PRIORITY: Record<"alliance" | "first_strike", number> = {
+  alliance: 0,
+  first_strike: 1,
+};
+
+interface AllianceRun {
+  anchorTurn: number;
+  lastTurn: number;
+  count: number;
+  actorName: string;
+  targetName: string;
+}
+
+function unorderedPairKey(a: string, b: string): string {
+  return [a, b].sort().join("|");
+}
+
+function allianceBeatFromRun(run: AllianceRun): AgentMatchRecapBeat {
+  const renewals = run.count - 1;
+  const message =
+    renewals === 0
+      ? `${run.actorName} and ${run.targetName} form an alliance.`
+      : `${run.actorName} and ${run.targetName} form an alliance (renewed ${renewals} time${
+          renewals === 1 ? "" : "s"
+        } through turn ${run.lastTurn}).`;
+  return { turnNumber: run.anchorTurn, kind: "alliance", message };
+}
+
+export interface CuratedWarRoomBeats {
+  /** Aggregated per-pair alliance beats — see the module doc. */
+  allianceBeats: AgentMatchRecapBeat[];
+  /** One per ordered actor/target pair's first attack — already deduped, unchanged by the 2026-08-01 fix. */
+  firstStrikeBeats: AgentMatchRecapBeat[];
+  /** Every betrayal individually — never aggregated, never dropped by the cap. */
+  betrayalBeats: AgentMatchRecapBeat[];
+  /** Every elimination individually — never dropped by the cap. */
+  eliminationBeats: AgentMatchRecapBeat[];
+  /** Raw per-category counts for the summary line — BEFORE aggregation/capping, so the summary always reports the full picture even when the beat list is trimmed. */
+  rawCounts: { alliance: number; betrayal: number; firstStrike: number; elimination: number };
+  /** Every source `SpectatorEvent.id` this pass consumed, so `finalConfrontationBeat` never double-reports an attack already covered as a first strike. */
   includedEventIds: Set<string>;
-} {
-  const beats: AgentMatchRecapBeat[] = [];
+}
+
+/**
+ * Curates the War Room vocabulary (alliance/first-strike/betrayal/
+ * elimination) from an ordered event stream — same kind-mapping
+ * `curatedWarRoomEvents` (client) applies, ported server-side, PLUS the
+ * 2026-08-01 same-pair alliance aggregation (see module doc): repeated
+ * formations between the same unordered pair collapse into one beat
+ * anchored at the first formation; an intervening betrayal both stays its
+ * own individual beat AND resets the pair's aggregation run.
+ */
+function curateWarRoomBeats(events: readonly SpectatorEvent[]): CuratedWarRoomBeats {
+  const firstStrikeBeats: AgentMatchRecapBeat[] = [];
+  const betrayalBeats: AgentMatchRecapBeat[] = [];
+  const eliminationBeats: AgentMatchRecapBeat[] = [];
+  const finalizedAllianceBeats: AgentMatchRecapBeat[] = [];
+  const openAllianceRuns = new Map<string, AllianceRun>();
   const includedEventIds = new Set<string>();
   const firstStrikeSeen = new Set<string>();
+  const rawCounts = { alliance: 0, betrayal: 0, firstStrike: 0, elimination: 0 };
+
   for (const event of events) {
     if (event.kind === "attack" && event.targetAgentID !== null) {
       const key = `${event.actorAgentID}|${event.targetAgentID}`;
       if (!firstStrikeSeen.has(key)) {
         firstStrikeSeen.add(key);
         includedEventIds.add(event.id);
-        beats.push({
+        rawCounts.firstStrike += 1;
+        firstStrikeBeats.push({
           turnNumber: event.turnNumber,
           kind: "first_strike",
           message: `${event.actorName} strikes first against ${event.targetName}.`,
@@ -99,11 +191,21 @@ function curateWarRoomBeats(events: readonly SpectatorEvent[]): {
     }
     if (event.kind === "alliance_formed" && event.targetAgentID !== null) {
       includedEventIds.add(event.id);
-      beats.push({
-        turnNumber: event.turnNumber,
-        kind: "alliance",
-        message: event.message,
-      });
+      rawCounts.alliance += 1;
+      const key = unorderedPairKey(event.actorAgentID, event.targetAgentID);
+      const existingRun = openAllianceRuns.get(key);
+      if (existingRun === undefined) {
+        openAllianceRuns.set(key, {
+          anchorTurn: event.turnNumber,
+          lastTurn: event.turnNumber,
+          count: 1,
+          actorName: event.actorName,
+          targetName: event.targetName ?? event.targetAgentID,
+        });
+      } else {
+        existingRun.count += 1;
+        existingRun.lastTurn = event.turnNumber;
+      }
       continue;
     }
     if (
@@ -112,23 +214,42 @@ function curateWarRoomBeats(events: readonly SpectatorEvent[]): {
       event.targetAgentID !== null
     ) {
       includedEventIds.add(event.id);
-      beats.push({
+      rawCounts.betrayal += 1;
+      betrayalBeats.push({
         turnNumber: event.turnNumber,
         kind: "betrayal",
         message: event.message,
       });
+      const key = unorderedPairKey(event.actorAgentID, event.targetAgentID);
+      const openRun = openAllianceRuns.get(key);
+      if (openRun !== undefined) {
+        finalizedAllianceBeats.push(allianceBeatFromRun(openRun));
+        openAllianceRuns.delete(key);
+      }
       continue;
     }
     if (event.kind === "elimination") {
       includedEventIds.add(event.id);
-      beats.push({
+      rawCounts.elimination += 1;
+      eliminationBeats.push({
         turnNumber: event.turnNumber,
         kind: "elimination",
         message: event.message,
       });
     }
   }
-  return { beats, includedEventIds };
+  // Flush every alliance run still open at match end (formed, never broken).
+  for (const run of openAllianceRuns.values()) {
+    finalizedAllianceBeats.push(allianceBeatFromRun(run));
+  }
+  return {
+    allianceBeats: finalizedAllianceBeats,
+    firstStrikeBeats,
+    betrayalBeats,
+    eliminationBeats,
+    rawCounts,
+    includedEventIds,
+  };
 }
 
 /** One beat for the highest-importance attack/nuke event inside the SAME endgame window `DirectorCutPlan.ts`'s `final_conflict` segment covers — omitted (never fabricated) when no such event exists in that window, e.g. a match that ends on a turn cap with no late fighting. */
@@ -165,20 +286,41 @@ function finalConfrontationBeat(
   };
 }
 
-function buildSummary(beats: readonly AgentMatchRecapBeat[]): string {
-  const counts = new Map<AgentMatchRecapBeat["kind"], number>();
-  for (const beat of beats) {
-    counts.set(beat.kind, (counts.get(beat.kind) ?? 0) + 1);
-  }
+/**
+ * Trims to `MAX_PUBLIC_RECAP_BEATS`, chronologically ordered on output.
+ * Betrayal/elimination/final-confrontation beats are ALWAYS kept in full
+ * — they never count against the cap's trimming, only against its total
+ * (in the practically-impossible case where those three categories alone
+ * exceed the cap, every one of them still survives; the cap is then
+ * exceeded honestly rather than dropping a betrayal). Alliance beats trim
+ * before first-strike beats when the two combined don't fit the remaining
+ * budget, each category itself kept in chronological order.
+ */
+function applyImportanceCap(
+  neverTrimmed: readonly AgentMatchRecapBeat[],
+  trimmable: readonly AgentMatchRecapBeat[],
+): AgentMatchRecapBeat[] {
+  const remainingBudget = Math.max(0, MAX_PUBLIC_RECAP_BEATS - neverTrimmed.length);
+  const orderedTrimmable = [...trimmable].sort(
+    (a, b) =>
+      TRIMMABLE_KIND_PRIORITY[a.kind as "alliance" | "first_strike"] -
+        TRIMMABLE_KIND_PRIORITY[b.kind as "alliance" | "first_strike"] ||
+      a.turnNumber - b.turnNumber,
+  );
+  const kept = [...neverTrimmed, ...orderedTrimmable.slice(0, remainingBudget)];
+  return kept.sort((a, b) => a.turnNumber - b.turnNumber);
+}
+
+function buildSummary(counts: CuratedWarRoomBeats["rawCounts"], hasFinalConfrontation: boolean): string {
   const parts: string[] = [];
-  for (const kind of [
-    "alliance",
-    "betrayal",
-    "first_strike",
-    "elimination",
-    "final_confrontation",
-  ] as const) {
-    const count = counts.get(kind) ?? 0;
+  const entries: [AgentMatchRecapBeat["kind"], number][] = [
+    ["alliance", counts.alliance],
+    ["betrayal", counts.betrayal],
+    ["first_strike", counts.firstStrike],
+    ["elimination", counts.elimination],
+    ["final_confrontation", hasFinalConfrontation ? 1 : 0],
+  ];
+  for (const [kind, count] of entries) {
     if (count === 0) continue;
     const label = BEAT_KIND_LABEL[kind];
     parts.push(count === 1 ? `1 ${label}` : `${count} ${label}s`);
@@ -197,7 +339,7 @@ export function buildAgentMatchRecap(
   const orderedEvents = [...input.telemetry.events].sort(
     (a, b) => a.turnNumber - b.turnNumber || a.sequence - b.sequence,
   );
-  const { beats, includedEventIds } = curateWarRoomBeats(orderedEvents);
+  const curated = curateWarRoomBeats(orderedEvents);
   const totalTurns =
     input.finalTurnCount !== null && input.finalTurnCount > 0
       ? input.finalTurnCount
@@ -205,20 +347,23 @@ export function buildAgentMatchRecap(
   const finalBeat = finalConfrontationBeat(
     orderedEvents,
     totalTurns,
-    includedEventIds,
+    curated.includedEventIds,
   );
-  if (finalBeat !== null) {
-    beats.push(finalBeat);
-  }
+  const neverTrimmed = [
+    ...curated.betrayalBeats,
+    ...curated.eliminationBeats,
+    ...(finalBeat !== null ? [finalBeat] : []),
+  ];
+  const trimmable = [...curated.allianceBeats, ...curated.firstStrikeBeats];
+  const beats = applyImportanceCap(neverTrimmed, trimmable);
   if (beats.length === 0) {
     return null;
   }
-  beats.sort((a, b) => a.turnNumber - b.turnNumber);
   return {
-    schemaVersion: 1,
+    schemaVersion: AGENT_MATCH_RECAP_SCHEMA_VERSION,
     runID: input.runID,
     generatedAt: new Date().toISOString(),
-    summary: buildSummary(beats),
+    summary: buildSummary(curated.rawCounts, finalBeat !== null),
     beats,
   };
 }

@@ -4,6 +4,7 @@ import {
   publicRunKeyFromFullRenderHref,
   publicRunKeyFromWatchHref,
 } from "./CoworldLeagueArtifactRetention";
+import { AGENT_MATCH_RECAP_SCHEMA_VERSION } from "./AgentMatchRecap";
 import type { FeaturedMatchParticipantCard } from "./FeaturedMatchParticipants";
 import type {
   CoworldLeagueEpisodePlayerRow,
@@ -245,7 +246,7 @@ export function parseMatchRecapArtifact(raw: string): LeagueEpisodeRecap | null 
   }
   if (typeof value !== "object" || value === null) return null;
   const record = value as Record<string, unknown>;
-  if (record.schemaVersion !== 1) return null;
+  if (record.schemaVersion !== AGENT_MATCH_RECAP_SCHEMA_VERSION) return null;
   const summary = typeof record.summary === "string" ? record.summary : "";
   const beatsRaw = Array.isArray(record.beats) ? record.beats : [];
   const beats = beatsRaw

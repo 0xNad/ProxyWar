@@ -8,7 +8,11 @@ import {
   buildAgentMatchStory,
   writeAgentMatchStoryArtifacts,
 } from "./AgentMatchStory";
-import { buildAgentMatchRecap, writeAgentMatchRecapArtifacts } from "./AgentMatchRecap";
+import {
+  AGENT_MATCH_RECAP_SCHEMA_VERSION,
+  buildAgentMatchRecap,
+  writeAgentMatchRecapArtifacts,
+} from "./AgentMatchRecap";
 import {
   maximumDecisionsJsonlBytes,
   maximumSpectatorTelemetryBytes,
@@ -16,6 +20,8 @@ import {
   readMatchSummaryFinalTurnCount,
 } from "./CoworldLeagueBackfillIo";
 import { resolveMirroredMatchEvidence } from "./CoworldLeagueMirrorCore";
+
+const maximumMatchRecapBytes = 4 * 1024 * 1024;
 
 /**
  * IO orchestration for the mirror-side "drama recaps" gap closure — the
@@ -70,6 +76,12 @@ export type MatchNarrativeGenerationOutcome =
       source: "spectator-telemetry" | "decisions-log";
       recapBeatCount: number;
     }
+  | {
+      /** `drama-report.json`/`match-story.json` already existed and stayed untouched; ONLY `match-recap.json` was recomputed because its `schemaVersion` was stale (see `AgentMatchRecap.ts`'s 2026-08-01 fix) or it was missing entirely. */
+      status: "recap-upgraded";
+      source: "spectator-telemetry" | "decisions-log";
+      recapBeatCount: number;
+    }
   | { status: "failed"; error: string };
 
 export interface MatchNarrativeGenerationResult {
@@ -77,6 +89,95 @@ export interface MatchNarrativeGenerationResult {
   /** Whether this call actually attempted generation — the caller's per-cycle budget counter should only decrement when this is `true`. `already-exists` and `no-input` are both free. */
   attempted: boolean;
   outcome: MatchNarrativeGenerationOutcome;
+}
+
+async function readEvidenceInputs(
+  runDir: string,
+): Promise<{ spectatorTelemetryRaw: string | null; decisionsJsonlRaw: string | null }> {
+  const [spectatorTelemetryRaw, decisionsJsonlRaw] = await Promise.all([
+    readBoundedRunDirArtifact(
+      path.join(runDir, "spectator-telemetry.json"),
+      maximumSpectatorTelemetryBytes,
+    ),
+    readBoundedRunDirArtifact(
+      path.join(runDir, "decisions.jsonl"),
+      maximumDecisionsJsonlBytes,
+    ),
+  ]);
+  return { spectatorTelemetryRaw, decisionsJsonlRaw };
+}
+
+/**
+ * Whether `match-recap.json` needs (re)computing independent of whether
+ * `drama-report.json`/`match-story.json` already exist: missing entirely
+ * (never generated, OR a genuinely quiet match that legitimately produced
+ * none under the CURRENT algorithm — recomputing is harmless/idempotent
+ * either way, see `buildAgentMatchRecap`'s "never padded" doc) or present
+ * but stamped with an older `schemaVersion` than `AGENT_MATCH_RECAP_SCHEMA_VERSION`
+ * (a pre-fix artifact — see that constant's own doc for the 2026-08-01
+ * alliance-aggregation/cap fix this exists to force a re-curation for).
+ */
+async function recapNeedsRegeneration(runDir: string): Promise<boolean> {
+  const raw = await readBoundedRunDirArtifact(
+    path.join(runDir, "match-recap.json"),
+    maximumMatchRecapBytes,
+  );
+  if (raw === null) {
+    return true;
+  }
+  try {
+    const value = JSON.parse(raw) as { schemaVersion?: unknown };
+    return value.schemaVersion !== AGENT_MATCH_RECAP_SCHEMA_VERSION;
+  } catch {
+    return true;
+  }
+}
+
+/**
+ * Recomputes ONLY `match-recap.json` for a run dir whose `drama-report.json`/
+ * `match-story.json` already exist and stay untouched — see
+ * `recapNeedsRegeneration`'s doc. `null` when the raw telemetry/decisions
+ * inputs this run was originally generated from are no longer readable
+ * (e.g. pruned by retention since the original generation) — the caller
+ * treats that the same as `skipped-no-usable-evidence`, never a throw.
+ */
+async function upgradeStaleRecap(
+  runDir: string,
+  runKey: string,
+): Promise<MatchNarrativeGenerationOutcome | null> {
+  const { spectatorTelemetryRaw, decisionsJsonlRaw } = await readEvidenceInputs(runDir);
+  if (spectatorTelemetryRaw === null && decisionsJsonlRaw === null) {
+    return null;
+  }
+  const finalTurnCount = await readMatchSummaryFinalTurnCount(runDir);
+  const evidence = resolveMirroredMatchEvidence({
+    runID: runKey,
+    spectatorTelemetryRaw,
+    decisionsJsonlRaw,
+    finalTurnCount,
+  });
+  if (evidence === null) {
+    return null;
+  }
+  const recapPath = path.join(runDir, "match-recap.json");
+  const recap = buildAgentMatchRecap({
+    runID: runKey,
+    telemetry: evidence.telemetry,
+    finalTurnCount,
+  });
+  if (recap !== null) {
+    await writeAgentMatchRecapArtifacts({ recap, directory: runDir });
+  } else {
+    // The re-curated pass now finds zero public-worthy beats (e.g. every
+    // prior beat was churn the aggregation collapsed away) — remove the
+    // stale file rather than leave known-spammy content being served.
+    await fs.rm(recapPath, { force: true });
+  }
+  return {
+    status: "recap-upgraded",
+    source: evidence.source,
+    recapBeatCount: recap?.beats.length ?? 0,
+  };
 }
 
 /**
@@ -89,28 +190,54 @@ export interface MatchNarrativeGenerationResult {
  * outcome the caller logs and moves on from. Mirror resilience is sacred:
  * this function alone can never fail a sync cycle, and never blocks or
  * delays the league publish.
+ *
+ * Idempotency is layered: when `drama-report.json` already exists, this
+ * does NOT necessarily skip entirely — it separately checks whether
+ * `match-recap.json` is stale or missing (`recapNeedsRegeneration`) and,
+ * if so, upgrades ONLY the recap (`upgradeStaleRecap`) without re-running
+ * the drama/story generators (their output isn't changing).
  */
 export async function generateMatchNarrativeArtifactsForRunDir(
   runDir: string,
   runKey: string,
 ): Promise<MatchNarrativeGenerationResult> {
   const dramaReportPath = path.join(runDir, "drama-report.json");
+  let dramaReportExists = false;
   try {
     await fs.stat(dramaReportPath);
-    return { runKey, attempted: false, outcome: { status: "already-exists" } };
+    dramaReportExists = true;
   } catch {
-    // ENOENT (or any other stat failure) — fall through and generate.
+    // ENOENT (or any other stat failure) — fall through to full generation.
   }
-  const [spectatorTelemetryRaw, decisionsJsonlRaw] = await Promise.all([
-    readBoundedRunDirArtifact(
-      path.join(runDir, "spectator-telemetry.json"),
-      maximumSpectatorTelemetryBytes,
-    ),
-    readBoundedRunDirArtifact(
-      path.join(runDir, "decisions.jsonl"),
-      maximumDecisionsJsonlBytes,
-    ),
-  ]);
+
+  if (dramaReportExists) {
+    const needsRegeneration = await recapNeedsRegeneration(runDir);
+    if (!needsRegeneration) {
+      return { runKey, attempted: false, outcome: { status: "already-exists" } };
+    }
+    try {
+      const outcome = await upgradeStaleRecap(runDir, runKey);
+      if (outcome === null) {
+        return {
+          runKey,
+          attempted: true,
+          outcome: { status: "skipped-no-usable-evidence" },
+        };
+      }
+      return { runKey, attempted: true, outcome };
+    } catch (error) {
+      return {
+        runKey,
+        attempted: true,
+        outcome: {
+          status: "failed",
+          error: error instanceof Error ? error.message : String(error),
+        },
+      };
+    }
+  }
+
+  const { spectatorTelemetryRaw, decisionsJsonlRaw } = await readEvidenceInputs(runDir);
   if (spectatorTelemetryRaw === null && decisionsJsonlRaw === null) {
     return { runKey, attempted: false, outcome: { status: "no-input" } };
   }

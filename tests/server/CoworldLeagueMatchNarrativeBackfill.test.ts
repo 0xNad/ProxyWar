@@ -7,6 +7,7 @@ import {
   backfillMatchNarrativeArtifacts,
   generateMatchNarrativeArtifactsForRunDir,
 } from "../../src/server/agents/CoworldLeagueMatchNarrativeBackfill";
+import { AGENT_MATCH_RECAP_SCHEMA_VERSION } from "../../src/server/agents/AgentMatchRecap";
 
 /**
  * IO/budget/skip/idempotency/failure-isolation coverage for the mirror-side
@@ -131,7 +132,7 @@ describe("generateMatchNarrativeArtifactsForRunDir", () => {
     const recap = JSON.parse(
       await fs.readFile(path.join(runDir, "match-recap.json"), "utf8"),
     ) as { schemaVersion: number; beats: unknown[] };
-    expect(recap.schemaVersion).toBe(1);
+    expect(recap.schemaVersion).toBe(AGENT_MATCH_RECAP_SCHEMA_VERSION);
     expect(recap.beats.length).toBeGreaterThan(0);
   });
 
@@ -242,6 +243,56 @@ describe("generateMatchNarrativeArtifactsForRunDir", () => {
       "league-coworld-turncount-1",
     );
     expect(result.outcome.status).toBe("generated");
+  });
+
+  test("recap-upgraded: a stale (pre-fix) match-recap.json is re-curated without re-running drama/story generation", async () => {
+    const runDir = await writeRealRunDir("league-coworld-recap-upgrade-1", {
+      decisions: true,
+    });
+    const first = await generateMatchNarrativeArtifactsForRunDir(
+      runDir,
+      "league-coworld-recap-upgrade-1",
+    );
+    expect(first.outcome.status).toBe("generated");
+    const dramaReportPath = path.join(runDir, "drama-report.json");
+    const dramaReportWrittenAt = (await fs.stat(dramaReportPath)).mtimeMs;
+
+    // Simulate a pre-fix artifact on disk (schemaVersion 1, no cap/aggregation).
+    const recapPath = path.join(runDir, "match-recap.json");
+    await fs.writeFile(
+      recapPath,
+      JSON.stringify({
+        schemaVersion: 1,
+        runID: "league-coworld-recap-upgrade-1",
+        generatedAt: "2026-01-01T00:00:00.000Z",
+        summary: "stale pre-fix summary",
+        beats: [{ turnNumber: 1, kind: "alliance", message: "stale beat" }],
+      }),
+    );
+
+    const second = await generateMatchNarrativeArtifactsForRunDir(
+      runDir,
+      "league-coworld-recap-upgrade-1",
+    );
+    expect(second.attempted).toBe(true);
+    expect(second.outcome).toMatchObject({ status: "recap-upgraded" });
+    // drama-report.json is untouched — only the recap was recomputed.
+    expect((await fs.stat(dramaReportPath)).mtimeMs).toBe(dramaReportWrittenAt);
+    const upgraded = JSON.parse(await fs.readFile(recapPath, "utf8")) as {
+      schemaVersion: number;
+      summary: string;
+    };
+    expect(upgraded.schemaVersion).toBe(AGENT_MATCH_RECAP_SCHEMA_VERSION);
+    expect(upgraded.summary).not.toBe("stale pre-fix summary");
+
+    // A THIRD call, with the recap now current, is a free already-exists —
+    // proving the upgrade converges (never re-upgrades every cycle).
+    const third = await generateMatchNarrativeArtifactsForRunDir(
+      runDir,
+      "league-coworld-recap-upgrade-1",
+    );
+    expect(third.attempted).toBe(false);
+    expect(third.outcome).toEqual({ status: "already-exists" });
   });
 });
 

@@ -172,6 +172,23 @@ export function buildAgentDramaReport(
     }
   }
 
+  /**
+   * 2026-08-01 known characteristic (observed live, not a bug this generator
+   * needs to fix — `AgentMatchRecap.ts` is the module that reacts to this):
+   * `allianceFormedCount` is a RAW event count, uncapped and un-deduped per
+   * pair. An agent pair that repeatedly re-requests an alliance without an
+   * intervening break (no `break_alliance` action between them) produces one
+   * `alliance_formed` event per successful reciprocal request — a real
+   * production match hit 37 such formations between a small number of
+   * agents and saturated `dramaScore` at the 100 ceiling almost from
+   * `allianceFormedCount * 8` alone. That is an honest reading of THIS
+   * formula (more reciprocal diplomacy activity is scored as more drama,
+   * full stop) — not a defect to silently patch here; a future revision of
+   * the scoring weights is a product decision this module doesn't make
+   * unilaterally. Treat a saturated 100 as "at least this dramatic", not as
+   * a fine-grained signal that this match is meaningfully MORE dramatic
+   * than another 100-scored match.
+   */
   const dramaScore = Math.min(
     100,
     Math.round(

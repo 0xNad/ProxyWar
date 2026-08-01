@@ -230,4 +230,160 @@ describe("buildAgentMatchRecap", () => {
       },
     ]);
   });
+
+  it("aggregates same-pair alliance churn, resets on betrayal, and caps public beats without ever dropping a betrayal (2026-08-01 live-verification fix)", () => {
+    const totalTurns = 50_000;
+    const records: AgentDecisionRecord[] = [];
+    let sequence = 0;
+
+    // Alliance churn: c1<->c2 re-request an alliance 5 times with NO
+    // intervening break — must aggregate into ONE beat anchored at the
+    // first formation (turn 100), "renewed 4 times through turn 104".
+    for (let i = 0; i < 5; i++) {
+      const turn = 100 + i * 5;
+      sequence += 1;
+      records.push(
+        record(sequence, turn, "c1", "Cobalt", "p-c1", "alliance_request", {
+          recipientID: "p-c2",
+          recipientName: "Copper",
+        }),
+      );
+      sequence += 1;
+      records.push(
+        record(sequence, turn + 1, "c2", "Copper", "p-c2", "alliance_request", {
+          recipientID: "p-c1",
+          recipientName: "Cobalt",
+        }),
+      );
+    }
+
+    // Two real betrayal arcs (form once, break once) — d-pair at turn
+    // ~200/250, e-pair at turn ~300/350. Both betrayal beats and both
+    // (unaggregated, count=1) alliance beats must survive the cap.
+    for (const [pair, formTurn, breakTurn] of [
+      [["d1", "Delta", "d2", "Echo"], 200, 250],
+      [["e1", "Foxtrot", "e2", "Golf"], 300, 350],
+    ] as const) {
+      const [aID, aName, bID, bName] = pair;
+      sequence += 1;
+      records.push(
+        record(sequence, formTurn, aID, aName, `p-${aID}`, "alliance_request", {
+          recipientID: `p-${bID}`,
+          recipientName: bName,
+        }),
+      );
+      sequence += 1;
+      records.push(
+        record(sequence, formTurn + 1, bID, bName, `p-${bID}`, "alliance_request", {
+          recipientID: `p-${aID}`,
+          recipientName: aName,
+        }),
+      );
+      sequence += 1;
+      records.push(
+        record(sequence, breakTurn, aID, aName, `p-${aID}`, "break_alliance", {
+          recipientID: `p-${bID}`,
+          recipientName: bName,
+        }),
+      );
+    }
+
+    // 18 distinct ordered first-strike pairs (b1..b18 -> victim), turns
+    // 1000, 1010, ... 1170 — enough to exceed the cap on their own once
+    // combined with the 3 alliance beats above (3 + 18 = 21 trimmable
+    // candidates, remaining budget after 2 never-trimmed betrayals is 14).
+    const attackerIDs: string[] = [];
+    for (let i = 1; i <= 18; i++) {
+      const attackerID = `b${i}`;
+      attackerIDs.push(attackerID);
+      sequence += 1;
+      records.push(
+        record(sequence, 1000 + (i - 1) * 10, attackerID, `Bandit${i}`, `p-${attackerID}`, "attack", {
+          targetID: "p-victim",
+          targetName: "Victim",
+        }),
+      );
+    }
+
+    const roster = [
+      { agentID: "c1", username: "Cobalt", profile: "diplomatic" as const, clientID: "cc1", brainType: "planner-executor" as const },
+      { agentID: "c2", username: "Copper", profile: "diplomatic" as const, clientID: "cc2", brainType: "planner-executor" as const },
+      { agentID: "d1", username: "Delta", profile: "diplomatic" as const, clientID: "cd1", brainType: "planner-executor" as const },
+      { agentID: "d2", username: "Echo", profile: "diplomatic" as const, clientID: "cd2", brainType: "planner-executor" as const },
+      { agentID: "e1", username: "Foxtrot", profile: "diplomatic" as const, clientID: "ce1", brainType: "planner-executor" as const },
+      { agentID: "e2", username: "Golf", profile: "diplomatic" as const, clientID: "ce2", brainType: "planner-executor" as const },
+      { agentID: "victim", username: "Victim", profile: "defensive" as const, clientID: "cv", brainType: "planner-executor" as const },
+      ...attackerIDs.map((id, i) => ({
+        agentID: id,
+        username: `Bandit${i + 1}`,
+        profile: "aggressive" as const,
+        clientID: `c${id}`,
+        brainType: "planner-executor" as const,
+      })),
+    ];
+    const players = roster.map((entry) => ({
+      agentID: entry.agentID,
+      username: entry.username,
+      isAlive: true,
+    }));
+
+    const telemetry = buildAgentSpectatorTelemetry({
+      runID: "run-churn",
+      records,
+      roster,
+      finalState: finalState(totalTurns, players),
+    });
+    const build = () =>
+      buildAgentMatchRecap({ runID: "run-churn", telemetry, finalTurnCount: totalTurns });
+    const recap = build();
+    expect(recap).not.toBeNull();
+    if (recap === null) return;
+
+    // Cap respected.
+    expect(recap.beats.length).toBe(16);
+
+    // Betrayals never dropped, and never aggregated away.
+    const betrayalBeats = recap.beats.filter((beat) => beat.kind === "betrayal");
+    expect(betrayalBeats.length).toBe(2);
+    expect(betrayalBeats.map((beat) => beat.turnNumber)).toEqual([250, 350]);
+
+    // Alliance churn aggregated into one beat with a "renewed" count; the
+    // two form-then-break pairs stay unaggregated (count 1, no "renewed"
+    // suffix) since each only formed once before its betrayal.
+    const allianceBeats = recap.beats.filter((beat) => beat.kind === "alliance");
+    expect(allianceBeats.length).toBe(3);
+    expect(allianceBeats.map((beat) => beat.turnNumber)).toEqual([101, 201, 301]);
+    expect(allianceBeats[0].message).toBe(
+      "Copper and Cobalt form an alliance (renewed 8 times through turn 121).",
+    );
+    expect(allianceBeats[1].message).toBe("Echo and Delta form an alliance.");
+    expect(allianceBeats[2].message).toBe("Golf and Foxtrot form an alliance.");
+
+    // First strikes trimmed to fit the remaining budget (16 - 2 betrayals
+    // - 3 alliances = 11), earliest-turn-first, never re-ordered.
+    const firstStrikeBeats = recap.beats.filter((beat) => beat.kind === "first_strike");
+    expect(firstStrikeBeats.length).toBe(11);
+    expect(firstStrikeBeats.map((beat) => beat.turnNumber)).toEqual([
+      1000, 1010, 1020, 1030, 1040, 1050, 1060, 1070, 1080, 1090, 1100,
+    ]);
+
+    // Chronological ordering of the final trimmed list.
+    const turns = recap.beats.map((beat) => beat.turnNumber);
+    expect(turns).toEqual([...turns].sort((a, b) => a - b));
+
+    // The summary line reports the FULL raw counts (9+1+1=11 alliance
+    // formations — c1/c2's repeated re-requests each independently
+    // re-trigger `alliance_formed` once both directions have ever been
+    // pending, a real `AgentSpectatorTelemetry.ts` characteristic, not
+    // something this module fabricates — 2 betrayals, 18 first strikes),
+    // independent of how many beats survived the cap — "nothing is hidden".
+    expect(recap.summary).toBe(
+      "This match featured 11 alliances, 2 betrayals and 18 first strikes.",
+    );
+
+    // Determinism.
+    const second = build();
+    expect(second?.beats).toEqual(recap.beats);
+    expect(second?.summary).toEqual(recap.summary);
+  });
 });
