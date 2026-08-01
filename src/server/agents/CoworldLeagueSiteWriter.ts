@@ -97,18 +97,20 @@ export interface CoworldLeagueEpisodeRow {
   premiereHref?: string;
   /**
    * Product overhaul spec Stage 5. Optional/additive, same pattern as
-   * `premiereHref` above: `writeAgentLeagueRunArtifacts` already writes
-   * `director-cut-plan.json` for every LOCALLY-produced match, but the
-   * HOSTED Coworld mirror sync (`coworld-league-mirror.ts`) only ever
-   * receives `inlineRunArtifacts` containing `game-record.json`/
-   * `decisions.jsonl` from the real remote platform (confirmed via
-   * `CoworldLeagueMirrorCore.ts`'s own parser and `feature-candidates.ts`'s
-   * doc on exactly which keys the hosted payload actually carries) — a new
-   * artifact type reaching that mirror requires a Coworld PLATFORM-side
-   * change, out of this repo's reach. This field stays `undefined` on every
-   * row the hosted mirror builds today; a future local/alternate row writer
-   * with direct filesystem access to the match's own artifacts directory
-   * can populate it.
+   * `premiereHref` above. `writeAgentLeagueRunArtifacts` writes
+   * `director-cut-plan.json` for every LOCALLY-produced match; the HOSTED
+   * Coworld mirror (`coworld-league-mirror.ts`) now ALSO generates one for a
+   * mirrored run dir once it has the telemetry to build it from —
+   * `spectator-telemetry.json` when the hosted payload's own
+   * `inlineRunArtifacts` carries it (verified against real retained mirror
+   * runs — it does, for every currently observed production episode),
+   * falling back to deriving it from `decisions.jsonl` otherwise (see
+   * `CoworldLeagueMirrorCore.ts`'s `resolveMirroredDirectorCutPlan`).
+   * Generation is budgeted (one attempt per sync cycle by default,
+   * `--director-cut-budget`) and gradually backfills older retained runs, so
+   * a row can stay `undefined` for a cycle or two after its episode first
+   * appears — that is expected, not a bug, and this field simply omits
+   * itself until a plan exists on disk for that run.
    */
   directorCut?: { durationEstimateSeconds: number; segmentCount: number };
 }

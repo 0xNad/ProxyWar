@@ -39,6 +39,11 @@ import {
   type ParsedHostedReplay,
   type PremiereArchiveIndexSummary,
 } from "../server/agents/CoworldLeagueMirrorCore";
+import {
+  backfillDirectorCutPlans,
+  generateDirectorCutPlanForRunDir,
+  type DirectorCutGenerationResult,
+} from "../server/agents/CoworldLeagueDirectorCutBackfill";
 import { withCoworldLeagueMirrorOperationLock } from "../server/agents/CoworldLeagueMirrorOperationLock";
 import {
   buildPremiereSiteBlock,
@@ -142,6 +147,17 @@ interface MirrorOptions {
    * after restart churn; without the probe the card links a 404.
    */
   premiereProbeOrigin: string | null;
+  /**
+   * Max number of `director-cut-plan.json` generation attempts per sync
+   * cycle (`--director-cut-budget`, env `PROXYWAR_LEAGUE_DIRECTOR_CUT_BUDGET`,
+   * default 1). Shared across BOTH freshly-unpacked episodes (checked first,
+   * so a live match gets its cut as soon as budget allows) and the gradual
+   * backfill scan over older retained run dirs still missing one — keeps
+   * every cycle's extra parse/CPU work bounded and never risks delaying the
+   * league publish for a thundering herd of history. 0 disables generation
+   * entirely.
+   */
+  directorCutPlanBudget: number;
 }
 
 function parseOptions(argv: string[]): MirrorOptions {
@@ -183,6 +199,9 @@ function parseOptions(argv: string[]): MirrorOptions {
     premiereArchiveIndexPath: null,
     latestPremierePointerPath: null,
     premiereProbeOrigin: null,
+    directorCutPlanBudget: Number(
+      process.env.PROXYWAR_LEAGUE_DIRECTOR_CUT_BUDGET ?? "1",
+    ),
   };
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i];
@@ -280,6 +299,9 @@ function parseOptions(argv: string[]): MirrorOptions {
         options.premiereProbeOrigin = value;
         break;
       }
+      case "--director-cut-budget":
+        options.directorCutPlanBudget = Number(next());
+        break;
       default:
         throw new Error(`Unknown flag: ${arg}`);
     }
@@ -295,6 +317,8 @@ function parseOptions(argv: string[]): MirrorOptions {
     options.maxRetainedRunDirectories < options.maxRenderedEpisodes ||
     !Number.isFinite(options.minimumFreeBytes) ||
     options.minimumFreeBytes < 10 * 1024 * 1024 * 1024 ||
+    !Number.isInteger(options.directorCutPlanBudget) ||
+    options.directorCutPlanBudget < 0 ||
     !Number.isFinite(options.intervalSeconds)
   ) {
     throw new Error(
@@ -511,11 +535,11 @@ async function unpackEpisodeRunDir(
 /**
  * Product overhaul spec Stage 5: reads `director-cut-plan.json` from an
  * episode's unpacked run directory, when one exists. Tolerant of absence —
- * a missing file (the common case: the hosted platform doesn't inline this
- * artifact today, so it's only ever present for episodes a LOCAL run wrote
- * one for) or any other read failure resolves to `null`, exactly like
- * every other optional-artifact path in this mirror. Parsing itself is
- * delegated to the pure, unit-tested `parseDirectorCutPlanSummary`.
+ * a missing file (not yet generated this cycle, or generation was skipped
+ * for lack of usable input — see `generateDirectorCutPlanForRunDir` below)
+ * or any other read failure resolves to `null`, exactly like every other
+ * optional-artifact path in this mirror. Parsing itself is delegated to the
+ * pure, unit-tested `parseDirectorCutPlanSummary`.
  */
 async function readDirectorCutSummaryFromRunDir(
   runDir: string,
@@ -533,6 +557,32 @@ async function readDirectorCutSummaryFromRunDir(
 
 function log(message: string): void {
   console.log(`[league-mirror ${new Date().toISOString()}] ${message}`);
+}
+
+/**
+ * Logs a `director-cut-plan.json` generation attempt's outcome. Silent on
+ * the two free, expected-common skips (`already-exists`, `no-input`) — those
+ * would otherwise spam every cycle for the vast majority of run dirs that
+ * simply already have a plan or haven't been unpacked with telemetry yet.
+ */
+function logDirectorCutGenerationResult(result: DirectorCutGenerationResult): void {
+  const { runKey, outcome } = result;
+  switch (outcome.status) {
+    case "already-exists":
+    case "no-input":
+      return;
+    case "skipped-no-usable-telemetry":
+      log(`director cut plan skipped for ${runKey}: no usable telemetry`);
+      return;
+    case "generated":
+      log(
+        `director cut plan generated for ${runKey} (${outcome.source}, ${outcome.segmentCount} segment(s))`,
+      );
+      return;
+    case "failed":
+      log(`director cut plan generation failed for ${runKey}: ${outcome.error}`);
+      return;
+  }
 }
 
 /**
@@ -842,6 +892,11 @@ async function syncOnce(options: MirrorOptions): Promise<void> {
   });
 
   const freshEpisodes: CoworldLeagueEpisodeRow[] = [];
+  // Shared per-cycle budget for `director-cut-plan.json` generation — spent
+  // first on freshly-unpacked episodes below (so a live match gets its cut
+  // as soon as budget allows), then on the backfill scan after the loop.
+  let directorCutBudget = options.directorCutPlanBudget;
+  const directorCutAttemptedRunKeys = new Set<string>();
   const recoveredEpisodeRequestIds = new Set<string>();
   let replayEpisodeFailures = 0;
   for (const meta of episodeMetasToProcess) {
@@ -913,6 +968,18 @@ async function syncOnce(options: MirrorOptions): Promise<void> {
           `Pinned replay ${meta.episodeRequestId} did not produce its declared run bundle`,
         );
       }
+      if (unpacked !== null && directorCutBudget > 0) {
+        const runKey = path.basename(unpacked.runDir);
+        directorCutAttemptedRunKeys.add(runKey);
+        const result = await generateDirectorCutPlanForRunDir(
+          unpacked.runDir,
+          runKey,
+        );
+        logDirectorCutGenerationResult(result);
+        if (result.attempted) {
+          directorCutBudget -= 1;
+        }
+      }
       const directorCut =
         unpacked !== null
           ? await readDirectorCutSummaryFromRunDir(unpacked.runDir)
@@ -961,6 +1028,25 @@ async function syncOnce(options: MirrorOptions): Promise<void> {
     }
     log(`recovered ${recoveredEpisodeRequestIds.size} pinned replay bundle(s)`);
     return;
+  }
+
+  if (options.unpackRunDirs) {
+    try {
+      const results = await backfillDirectorCutPlans(
+        options.runsRootDir,
+        directorCutBudget,
+        directorCutAttemptedRunKeys,
+      );
+      for (const result of results) {
+        logDirectorCutGenerationResult(result);
+      }
+    } catch (error) {
+      log(
+        `director cut plan backfill failed: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+    }
   }
 
   const replayFeedStale =

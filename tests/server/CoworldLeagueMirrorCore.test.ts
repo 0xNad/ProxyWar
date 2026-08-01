@@ -1,3 +1,5 @@
+import { readFileSync } from "node:fs";
+import path from "node:path";
 import { describe, expect, test } from "vitest";
 import {
   activeChampionPolicyLabelsByPlayerId,
@@ -5,15 +7,18 @@ import {
   buildEpisodeRow,
   buildRoundRows,
   buildStandingRows,
+  deriveSpectatorTelemetryFromDecisionsLog,
   mapNameFromVariant,
   mergeEpisodeRows,
   parseCompletedEpisodeMetaList,
   parseDirectorCutPlanSummary,
   parseHostedReplayPayload,
   parseLeagueSummary,
+  parseMirroredSpectatorTelemetry,
   pickCompetitionDivision,
   premiereHrefForEpisode,
   resolveLatestRevealedPremiere,
+  resolveMirroredDirectorCutPlan,
   revealedPremiereIdsFromArchiveIndex,
   roundNumberByRoundId,
   scoreLabelFromStandings,
@@ -895,6 +900,218 @@ describe("parseDirectorCutPlanSummary (product overhaul spec Stage 5)", () => {
         }),
       ),
     ).toBeNull();
+  });
+});
+
+/**
+ * Product overhaul spec Stage 5 mirror gap closure. Fixtures are REAL data
+ * excerpted from an actual retained mirrored run in production
+ * (`artifacts/ai-league-runs/league-coworld-2026-07-31T19-22-21-473Z-9243b6cf/`
+ * on the deployed beta host) — every field present is a genuine value from
+ * that match, not fabricated. Trimmed for fixture size: the telemetry sample
+ * keeps all 12 real agents and a representative real-event subset (every
+ * elimination/nuke/alliance_formed plus an even stride across the match);
+ * the decisions sample keeps every agent's first spawn, up to two of each
+ * rarer action kind, and an even stride for the rest, with each real line
+ * projected down to only the fields `deriveSpectatorTelemetryFromDecisionsLog`
+ * actually reads (dropping the large `legalActionIDs`/observation-text
+ * fields it never touches).
+ */
+const realTelemetryFixtureRaw = readFileSync(
+  path.join(
+    __dirname,
+    "fixtures",
+    "coworld-mirror-director-cut-telemetry.sample.json",
+  ),
+  "utf8",
+);
+const realDecisionsFixtureRaw = readFileSync(
+  path.join(
+    __dirname,
+    "fixtures",
+    "coworld-mirror-director-cut-decisions.sample.jsonl",
+  ),
+  "utf8",
+);
+
+describe("parseMirroredSpectatorTelemetry (product overhaul spec Stage 5 mirror gap closure)", () => {
+  test("accepts a real retained mirrored run's spectator-telemetry.json", () => {
+    const telemetry = parseMirroredSpectatorTelemetry(realTelemetryFixtureRaw);
+    expect(telemetry).not.toBeNull();
+    expect(telemetry?.agents.length).toBe(12);
+    expect(telemetry?.events.length).toBeGreaterThan(0);
+    expect(telemetry?.agents.map((agent) => agent.username)).toContain(
+      "richard",
+    );
+  });
+
+  test("rejects malformed JSON, wrong version, no agents, and a malshaped event", () => {
+    expect(parseMirroredSpectatorTelemetry("not json")).toBeNull();
+    expect(
+      parseMirroredSpectatorTelemetry(
+        JSON.stringify({ version: 2, agents: [], events: [] }),
+      ),
+    ).toBeNull();
+    expect(
+      parseMirroredSpectatorTelemetry(
+        JSON.stringify({ version: 1, agents: [], events: [] }),
+      ),
+    ).toBeNull();
+    expect(
+      parseMirroredSpectatorTelemetry(
+        JSON.stringify({
+          version: 1,
+          agents: [{ agentID: "a1", username: "Alice" }],
+          events: [{ turnNumber: "not a number" }],
+        }),
+      ),
+    ).toBeNull();
+  });
+});
+
+describe("deriveSpectatorTelemetryFromDecisionsLog (product overhaul spec Stage 5 mirror gap closure)", () => {
+  test("rebuilds an equivalent telemetry from a real retained mirrored run's decisions.jsonl", () => {
+    const telemetry = deriveSpectatorTelemetryFromDecisionsLog(
+      realDecisionsFixtureRaw,
+      "coworld-derived-run",
+    );
+    expect(telemetry).not.toBeNull();
+    expect(telemetry?.agents.length).toBe(12);
+    expect(telemetry?.events.length).toBeGreaterThan(0);
+    // Every event's actor traces back to a real roster agent — no
+    // fabricated participant.
+    const agentIDs = new Set(telemetry?.agents.map((agent) => agent.agentID));
+    for (const event of telemetry?.events ?? []) {
+      expect(agentIDs.has(event.actorAgentID)).toBe(true);
+    }
+  });
+
+  test("skips torn/malformed lines instead of failing the whole derivation", () => {
+    const withGarbage = `not json\n${realDecisionsFixtureRaw}\n{"agentID":"only-partial"}\n`;
+    const telemetry = deriveSpectatorTelemetryFromDecisionsLog(
+      withGarbage,
+      "coworld-derived-run",
+    );
+    expect(telemetry).not.toBeNull();
+    expect(telemetry?.events.length).toBeGreaterThan(0);
+  });
+
+  test("resolves null when every line is unusable", () => {
+    expect(
+      deriveSpectatorTelemetryFromDecisionsLog("not json\n\n", "run-1"),
+    ).toBeNull();
+    expect(deriveSpectatorTelemetryFromDecisionsLog("", "run-1")).toBeNull();
+  });
+});
+
+describe("resolveMirroredDirectorCutPlan (product overhaul spec Stage 5 mirror gap closure)", () => {
+  test("tier 1: builds a real, gapless plan straight from spectator-telemetry.json", () => {
+    const outcome = resolveMirroredDirectorCutPlan({
+      runID: "league-coworld-real-run",
+      matchID: "league-coworld-real-run",
+      spectatorTelemetryRaw: realTelemetryFixtureRaw,
+      decisionsJsonlRaw: null,
+      finalTurnCount: null,
+    });
+    expect(outcome).not.toBeNull();
+    expect(outcome?.source).toBe("spectator-telemetry");
+    const plan = outcome?.plan;
+    expect(plan?.runID).toBe("league-coworld-real-run");
+    expect(plan?.totalTurns).toBeGreaterThan(0);
+    expect(plan?.segments.length).toBeGreaterThan(0);
+    // Segments fully and gaplessly partition [0, totalTurns].
+    const segments = plan?.segments ?? [];
+    expect(segments[0].startTurn).toBe(0);
+    expect(segments.at(-1)?.endTurn).toBe(plan?.totalTurns);
+    for (let i = 1; i < segments.length; i++) {
+      expect(segments[i].startTurn).toBe(segments[i - 1].endTurn + 1);
+    }
+  });
+
+  test("tier 1 stays non-degraded when match-summary.json supplies the authoritative turn count", () => {
+    const outcome = resolveMirroredDirectorCutPlan({
+      runID: "league-coworld-real-run",
+      matchID: "league-coworld-real-run",
+      spectatorTelemetryRaw: realTelemetryFixtureRaw,
+      decisionsJsonlRaw: null,
+      finalTurnCount: 6300,
+    });
+    expect(outcome?.plan.degraded).toBe(false);
+    expect(outcome?.plan.totalTurns).toBe(6300);
+  });
+
+  test("tier 2 fallback: builds a plan from decisions.jsonl when telemetry is absent", () => {
+    const outcome = resolveMirroredDirectorCutPlan({
+      runID: "league-coworld-fallback-run",
+      matchID: "league-coworld-fallback-run",
+      spectatorTelemetryRaw: null,
+      decisionsJsonlRaw: realDecisionsFixtureRaw,
+      finalTurnCount: null,
+    });
+    expect(outcome).not.toBeNull();
+    expect(outcome?.source).toBe("decisions-log");
+    expect(outcome?.plan.segments.length).toBeGreaterThan(0);
+  });
+
+  test("tier 2 fallback: falls through to decisions.jsonl when telemetry fails validation", () => {
+    const outcome = resolveMirroredDirectorCutPlan({
+      runID: "league-coworld-fallback-run",
+      matchID: "league-coworld-fallback-run",
+      spectatorTelemetryRaw: "not json",
+      decisionsJsonlRaw: realDecisionsFixtureRaw,
+      finalTurnCount: null,
+    });
+    expect(outcome?.source).toBe("decisions-log");
+  });
+
+  test("prefers spectator-telemetry.json over decisions.jsonl when both are present", () => {
+    const outcome = resolveMirroredDirectorCutPlan({
+      runID: "league-coworld-real-run",
+      matchID: "league-coworld-real-run",
+      spectatorTelemetryRaw: realTelemetryFixtureRaw,
+      decisionsJsonlRaw: realDecisionsFixtureRaw,
+      finalTurnCount: null,
+    });
+    expect(outcome?.source).toBe("spectator-telemetry");
+  });
+
+  test("resolves null (never throws) when neither input is usable", () => {
+    expect(
+      resolveMirroredDirectorCutPlan({
+        runID: "run-1",
+        matchID: "run-1",
+        spectatorTelemetryRaw: "not json",
+        decisionsJsonlRaw: "also not json",
+        finalTurnCount: null,
+      }),
+    ).toBeNull();
+    expect(
+      resolveMirroredDirectorCutPlan({
+        runID: "run-1",
+        matchID: "run-1",
+        spectatorTelemetryRaw: null,
+        decisionsJsonlRaw: null,
+        finalTurnCount: null,
+      }),
+    ).toBeNull();
+  });
+
+  test("is deterministic — identical mirrored input produces an identical plan", () => {
+    const build = () =>
+      resolveMirroredDirectorCutPlan({
+        runID: "league-coworld-real-run",
+        matchID: "league-coworld-real-run",
+        spectatorTelemetryRaw: realTelemetryFixtureRaw,
+        decisionsJsonlRaw: null,
+        finalTurnCount: 6300,
+      });
+    const first = build();
+    const second = build();
+    // generatedAt is a real timestamp and legitimately differs — compare
+    // everything else.
+    const { generatedAt: _g1, ...restFirst } = first?.plan ?? ({} as never);
+    const { generatedAt: _g2, ...restSecond } = second?.plan ?? ({} as never);
+    expect(restFirst).toEqual(restSecond);
   });
 });
 

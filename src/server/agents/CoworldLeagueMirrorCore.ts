@@ -9,6 +9,16 @@ import type {
   CoworldLeagueRoundRow,
   CoworldLeagueStandingRow,
 } from "./CoworldLeagueSiteWriter";
+import {
+  buildAgentSpectatorTelemetry,
+  type SpectatorTelemetry,
+} from "./AgentSpectatorTelemetry";
+import type {
+  AgentRunFinalState,
+  AgentRunRosterEntry,
+} from "./AgentDecisionLogWriter";
+import type { AgentDecisionRecord, LegalActionKind } from "./AgentTypes";
+import { buildDirectorCutPlan, type DirectorCutPlan } from "./DirectorCutPlan";
 
 /**
  * Pure transforms from Coworld Observatory read-API JSON (as emitted by the
@@ -1039,4 +1049,330 @@ export function parseDirectorCutPlanSummary(
     return null;
   }
   return { durationEstimateSeconds, segmentCount: segments.length };
+}
+
+// ---------------------------------------------------------------------------
+// Product overhaul spec Stage 5 gap closure: Director Cut plan generation for
+// mirrored (hosted-league) runs.
+//
+// Empirically verified against real retained mirror run directories (see
+// `artifacts/ai-league-runs/league-coworld-*/` in the canonical checkout): the
+// hosted Coworld replay payload's `inlineRunArtifacts` carries
+// `spectator-telemetry.json` — the FULL `SpectatorTelemetry` the origin's own
+// `writeAgentLeagueRunArtifacts` built, verbatim — for every currently
+// observed production episode, alongside `decisions.jsonl`/`game-record.json`/
+// `match-summary.json`. `unpackEpisodeRunDir` already writes every
+// `inlineRunArtifacts` entry into the run dir unmodified, so
+// `spectator-telemetry.json` is normally sitting right there once an episode
+// is unpacked — a strictly more faithful signal than re-deriving events from
+// raw decisions, and it needs zero new parsing: it's the EXACT SAME
+// `SpectatorTelemetry` a local match hands `buildDirectorCutPlan`.
+//
+// `decisions.jsonl` (the `DecisionLogEntry[]` JSONL `writeAgentLeagueRunArtifacts`
+// itself produces — see `AgentDecisionLogWriter.ts`'s `decisionLogEntry`) is
+// kept as a second-tier fallback for the rarer case where telemetry is
+// missing or fails validation. Every field `buildAgentSpectatorTelemetry`
+// actually reads off `AgentDecisionRecord` (`chosenActionID/Kind/Metadata`,
+// `intent`, `sequence`, `turnNumber`, `agentID`, `audit.after.playerID`)
+// survives that projection intact, so decisions.jsonl alone is enough to
+// rebuild an equivalent event stream without a new game-record/replay parser.
+// ---------------------------------------------------------------------------
+
+export interface DirectorCutPlanGenerationOutcome {
+  plan: DirectorCutPlan;
+  /** Which artifact the plan was actually built from — for logging/observability only, never published. */
+  source: "spectator-telemetry" | "decisions-log";
+}
+
+/**
+ * Tolerant parse + minimal shape validation of a mirrored run's
+ * `spectator-telemetry.json` contents into the exact `SpectatorTelemetry`
+ * `buildDirectorCutPlan` expects. Deliberately light-touch — this is the SAME
+ * producer's own trusted output, not third-party input — but still guards
+ * against a torn/partial download or a future schema break: requires
+ * `version === 1`, at least one agent, and every event carrying the handful
+ * of fields the plan generator and roster derivation actually read.
+ * Malformed or unparseable input resolves to `null`, never a throw.
+ */
+export function parseMirroredSpectatorTelemetry(
+  raw: string,
+): SpectatorTelemetry | null {
+  let value: unknown;
+  try {
+    value = JSON.parse(raw);
+  } catch {
+    return null;
+  }
+  const record = asRecord(value);
+  if (record === null || record.version !== 1) {
+    return null;
+  }
+  const agents = asArray(record.agents);
+  if (agents.length === 0) {
+    return null;
+  }
+  const agentsValid = agents.every((agent) => {
+    const entry = asRecord(agent);
+    return (
+      entry !== null &&
+      typeof entry.agentID === "string" &&
+      typeof entry.username === "string"
+    );
+  });
+  const events = asArray(record.events);
+  const eventsValid = events.every((event) => {
+    const entry = asRecord(event);
+    return (
+      entry !== null &&
+      typeof entry.turnNumber === "number" &&
+      typeof entry.sequence === "number" &&
+      typeof entry.importance === "number" &&
+      typeof entry.kind === "string" &&
+      typeof entry.actorAgentID === "string"
+    );
+  });
+  if (!agentsValid || !eventsValid) {
+    return null;
+  }
+  return record as unknown as SpectatorTelemetry;
+}
+
+function metadataRecord(
+  value: unknown,
+): Record<string, string | number | boolean | null> | undefined {
+  const record = asRecord(value);
+  if (record === null) {
+    return undefined;
+  }
+  const projected: Record<string, string | number | boolean | null> = {};
+  for (const [key, entry] of Object.entries(record)) {
+    if (
+      typeof entry === "string" ||
+      typeof entry === "number" ||
+      typeof entry === "boolean" ||
+      entry === null
+    ) {
+      projected[key] = entry;
+    }
+  }
+  return Object.keys(projected).length > 0 ? projected : undefined;
+}
+
+/**
+ * Tolerant projection of one `decisions.jsonl` line (a `DecisionLogEntry` —
+ * see `AgentDecisionLogWriter.ts`'s `decisionLogEntry`) back into the minimal
+ * `AgentDecisionRecord` shape `buildAgentSpectatorTelemetry` reads. Every
+ * field it actually consumes round-trips exactly; fields it never reads
+ * (`observationSummary`, `decidedAt`, …) get inert placeholders since they
+ * don't affect the derived event stream. Malformed/incomplete lines resolve
+ * to `null` and are skipped by the caller — one torn line never fails the
+ * whole derivation.
+ */
+function decisionRecordFromMirroredLogLine(
+  value: unknown,
+): AgentDecisionRecord | null {
+  const record = asRecord(value);
+  if (record === null) {
+    return null;
+  }
+  const sequence = asNumber(record.sequence);
+  const turnNumber = asNumber(record.turnNumber);
+  const agentID = asString(record.agentID);
+  const username = asString(record.username);
+  const profile = asString(record.profile);
+  const brainType = asString(record.brainType);
+  const chosenActionID = asString(record.selectedLegalActionId);
+  const chosenActionKind = asString(record.selectedActionKind);
+  const result = asRecord(record.result);
+  if (
+    sequence === null ||
+    turnNumber === null ||
+    agentID === null ||
+    username === null ||
+    profile === null ||
+    brainType === null ||
+    chosenActionID === null ||
+    chosenActionKind === null ||
+    result === null
+  ) {
+    return null;
+  }
+  const auditAfter = asRecord(record.auditAfter);
+  const playerID = auditAfter === null ? null : asString(auditAfter.playerID);
+  return {
+    sequence,
+    gameID: "",
+    agentID,
+    clientID: null,
+    username,
+    profile: profile as AgentDecisionRecord["profile"],
+    brainType: brainType as AgentDecisionRecord["brainType"],
+    turnNumber,
+    decidedAt: 0,
+    decisionLatencyMs: 0,
+    observationSummary: "",
+    legalActionIDs: [],
+    legalActionIDsByKind: {},
+    attackActionIDs: [],
+    chosenActionID,
+    chosenActionKind: chosenActionKind as LegalActionKind,
+    reason: "",
+    chosenActionMetadata: metadataRecord(record.selectedActionMetadata),
+    intent: (record.generatedIntent ?? null) as AgentDecisionRecord["intent"],
+    result: {
+      accepted: result.accepted === true,
+      reason: asString(result.reason) ?? "",
+      submittedIntent: null,
+    },
+    audit:
+      playerID === null
+        ? undefined
+        : {
+            auditStatus: "unknown",
+            auditReason: "",
+            after: {
+              tick: null,
+              playerID,
+              isAlive: null,
+              hasSpawned: null,
+              tilesOwned: null,
+              troops: null,
+              gold: null,
+              unitCounts: {},
+              outgoingAttackTargetIDs: [],
+              outgoingAllianceRequestRecipientIDs: [],
+              outgoingEmbargoTargetIDs: [],
+            },
+          },
+  };
+}
+
+/**
+ * Fallback tier: rebuilds an equivalent `SpectatorTelemetry` straight from a
+ * mirrored run's raw `decisions.jsonl`, for the rarer case where
+ * `spectator-telemetry.json` is missing or fails
+ * {@link parseMirroredSpectatorTelemetry}'s validation. Roster is derived by
+ * first-seen dedup on `agentID` — the mirror has no separate roster document
+ * for a hosted episode, but the only roster field `buildDirectorCutPlan`
+ * actually reads is `username` (see its own doc), which every decision line
+ * already carries. Torn/malformed lines are skipped, never fatal; `null`
+ * only when NO line parsed into a usable record.
+ */
+export function deriveSpectatorTelemetryFromDecisionsLog(
+  raw: string,
+  runID: string,
+): SpectatorTelemetry | null {
+  const records: AgentDecisionRecord[] = [];
+  const rosterByAgentID = new Map<string, AgentRunRosterEntry>();
+  for (const line of raw.split("\n")) {
+    const trimmed = line.trim();
+    if (trimmed.length === 0) {
+      continue;
+    }
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(trimmed);
+    } catch {
+      continue;
+    }
+    const record = decisionRecordFromMirroredLogLine(parsed);
+    if (record === null) {
+      continue;
+    }
+    records.push(record);
+    if (!rosterByAgentID.has(record.agentID)) {
+      rosterByAgentID.set(record.agentID, {
+        agentID: record.agentID,
+        username: record.username,
+        profile: record.profile,
+        clientID: null,
+        brainType: record.brainType,
+      });
+    }
+  }
+  if (records.length === 0) {
+    return null;
+  }
+  return buildAgentSpectatorTelemetry({
+    runID,
+    records,
+    roster: [...rosterByAgentID.values()],
+  });
+}
+
+/**
+ * Resolves the Director Cut plan for one mirrored run dir from whatever
+ * telemetry artifact is already sitting next to it, preferring the faithful
+ * `spectator-telemetry.json` tier and falling back to `decisions.jsonl`
+ * derivation. Returns `null` when NEITHER input is usable — the caller (the
+ * mirror script) logs and skips; this function itself never throws.
+ */
+export function resolveMirroredDirectorCutPlan(input: {
+  runID: string;
+  matchID: string;
+  spectatorTelemetryRaw: string | null;
+  decisionsJsonlRaw: string | null;
+  /** Authoritative turn count when known (from `match-summary.json`'s own `finalState`), else `null` to fall back to the telemetry's own max event turn (honest `degraded: true`). */
+  finalTurnCount: number | null;
+}): DirectorCutPlanGenerationOutcome | null {
+  const finalState: AgentRunFinalState | undefined =
+    input.finalTurnCount !== null && input.finalTurnCount > 0
+      ? {
+          phase: "final",
+          tick: null,
+          turnCount: input.finalTurnCount,
+          players: [],
+        }
+      : undefined;
+
+  if (input.spectatorTelemetryRaw !== null) {
+    const telemetry = parseMirroredSpectatorTelemetry(
+      input.spectatorTelemetryRaw,
+    );
+    if (telemetry !== null) {
+      return {
+        source: "spectator-telemetry",
+        plan: buildDirectorCutPlan({
+          runID: input.runID,
+          matchID: input.matchID,
+          records: [],
+          roster: telemetry.agents.map((agent) => ({
+            agentID: agent.agentID,
+            username: agent.username,
+            profile: agent.profile as AgentRunRosterEntry["profile"],
+            clientID: null,
+            brainType: "external-http" as AgentRunRosterEntry["brainType"],
+          })),
+          finalState,
+          spectatorTelemetry: telemetry,
+        }),
+      };
+    }
+  }
+  if (input.decisionsJsonlRaw !== null) {
+    const telemetry = deriveSpectatorTelemetryFromDecisionsLog(
+      input.decisionsJsonlRaw,
+      input.runID,
+    );
+    if (telemetry !== null) {
+      return {
+        source: "decisions-log",
+        plan: buildDirectorCutPlan({
+          runID: input.runID,
+          matchID: input.matchID,
+          records: [],
+          roster: telemetry.agents.map((agent) => ({
+            agentID: agent.agentID,
+            username: agent.username,
+            profile: agent.profile as AgentRunRosterEntry["profile"],
+            clientID: null,
+            brainType: "external-http" as AgentRunRosterEntry["brainType"],
+          })),
+          finalState,
+          spectatorTelemetry: telemetry,
+        }),
+      };
+    }
+  }
+  return null;
 }
