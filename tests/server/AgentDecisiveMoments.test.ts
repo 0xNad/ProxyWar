@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   buildAgentDecisiveMoments,
+  sanitizeStatedReason,
   MAX_DECISIVE_MOMENTS,
   MIN_DECISIVE_MOMENTS,
 } from "../../src/server/agents/AgentDecisiveMoments";
@@ -299,5 +300,200 @@ describe("buildAgentDecisiveMoments — importance rebalance (real-production-da
     for (let i = 1; i < artifact!.moments.length; i += 1) {
       expect(artifact!.moments[i].turn).toBeGreaterThanOrEqual(artifact!.moments[i - 1].turn);
     }
+  });
+});
+
+describe("sanitizeStatedReason", () => {
+  it("PRODUCTION INCIDENT: rejects the exact raw LLM-provider error string that shipped publicly (HTTP 403 'Invalid API Key format')", () => {
+    expect(
+      sanitizeStatedReason(
+        'LLM decision rejected (LLM provider failed: HTTP 403 "Invalid API Key format"); fallback: expand toward the nearest neutral territory',
+      ),
+    ).toBeNull();
+  });
+
+  it("rejects other real provider/network-failure error shapes", () => {
+    expect(
+      sanitizeStatedReason(
+        "LLM provider failed: OpenAI Responses API returned invalid JSON: Unexpected token < in JSON at position 0",
+      ),
+    ).toBeNull();
+    expect(sanitizeStatedReason("Error: connect ECONNREFUSED 127.0.0.1:443")).toBeNull();
+    expect(sanitizeStatedReason("Request timed out after 15000ms")).toBeNull();
+    expect(sanitizeStatedReason("fetch failed")).toBeNull();
+    expect(sanitizeStatedReason("Rate limited by upstream provider")).toBeNull();
+  });
+
+  it("rejects HTTP status code vocabulary", () => {
+    expect(sanitizeStatedReason("HTTP 500 Internal Server Error")).toBeNull();
+    expect(sanitizeStatedReason("Request failed with status 429")).toBeNull();
+    expect(sanitizeStatedReason("401 Unauthorized")).toBeNull();
+  });
+
+  it("rejects stack-trace-shaped text", () => {
+    expect(
+      sanitizeStatedReason(
+        "TypeError: Cannot read properties of undefined (reading foo)\n    at Object.<anonymous> (/app/src/server/agents/LlmAgentBrain.ts:88:20)",
+      ),
+    ).toBeNull();
+    expect(sanitizeStatedReason("Failure at LlmDecisionParser.ts:73 during parse")).toBeNull();
+  });
+
+  it("rejects serialized JSON/object-shaped payloads (does not start like prose)", () => {
+    expect(
+      sanitizeStatedReason('{"actionKind":"attack","targetID":"p-victim","confidence":0.8}'),
+    ).toBeNull();
+    expect(sanitizeStatedReason('["attack", "expand", "hold"]')).toBeNull();
+  });
+
+  it("rejects empty, whitespace-only, and overlong text", () => {
+    expect(sanitizeStatedReason("")).toBeNull();
+    expect(sanitizeStatedReason("   \n\t  ")).toBeNull();
+    expect(sanitizeStatedReason("x".repeat(401))).toBeNull();
+  });
+
+  it("preserves genuine prose reasons unchanged, including ones that mention adjacent-but-not-denylisted words", () => {
+    expect(
+      sanitizeStatedReason(
+        "Pressing the attack now while their defenses are still spread thin from the earlier naval assault.",
+      ),
+    ).toBe(
+      "Pressing the attack now while their defenses are still spread thin from the earlier naval assault.",
+    );
+    expect(
+      sanitizeStatedReason(
+        "Forming an alliance with Bravo to counter the growing threat from the north.",
+      ),
+    ).toBe("Forming an alliance with Bravo to counter the growing threat from the north.");
+    expect(
+      sanitizeStatedReason(
+        "This alliance offer seems suspicious given their recent history, declining for now.",
+      ),
+    ).toBe(
+      "This alliance offer seems suspicious given their recent history, declining for now.",
+    );
+  });
+
+  it("trims surrounding whitespace on an otherwise-valid reason", () => {
+    expect(sanitizeStatedReason("  Holding position to consolidate the northern border.  ")).toBe(
+      "Holding position to consolidate the northern border.",
+    );
+  });
+});
+
+describe("buildAgentDecisiveMoments — statedReason sanitization (P0 integration)", () => {
+  it("a contaminated NEAREST decision degrades statedReason to null — the honest-absence convention, never the raw junk", () => {
+    const snapshotsWithBadDecision: AgentSpectatorSnapshot[] = FIXTURE_SNAPSHOTS.map((snapshot) =>
+      snapshot.turnNumber === 50
+        ? {
+            ...snapshot,
+            decisions: [
+              {
+                sequence: 1,
+                agentID: "agent-p4",
+                username: "Delta",
+                profile: "aggressive",
+                brainType: "planner-executor",
+                turnNumber: 50,
+                selectedLegalActionId: "attack:1",
+                selectedActionKind: "attack",
+                reason:
+                  'LLM decision rejected (LLM provider failed: HTTP 403 "Invalid API Key format"); fallback: expand toward the nearest neutral territory',
+                decisionLatencyMs: 10,
+                accepted: true,
+                resultReason: "ok",
+                fallbackUsed: false,
+                intentSummary: "attack",
+              },
+            ],
+          }
+        : snapshot,
+    );
+    const series = buildAgentMatchStateSeries({
+      runID: "run-fixture",
+      matchID: "match-fixture",
+      replay: { snapshots: snapshotsWithBadDecision },
+      telemetry: null,
+    })!;
+    const artifact = buildAgentDecisiveMoments({
+      runID: "run-fixture",
+      series,
+      telemetryEvents: [],
+      totalTurns: 50,
+      replaySnapshots: snapshotsWithBadDecision,
+    });
+    const at50 = artifact!.moments.find((m) => m.turn === 50)!;
+    expect(at50.statedReason).toBeNull();
+  });
+
+  it("falls through a contaminated near decision to a genuine one slightly farther away within the same window", () => {
+    const snapshotsWithMixedDecisions: AgentSpectatorSnapshot[] = FIXTURE_SNAPSHOTS.map(
+      (snapshot) => {
+        if (snapshot.turnNumber === 50) {
+          return {
+            ...snapshot,
+            decisions: [
+              {
+                sequence: 1,
+                agentID: "agent-p4",
+                username: "Delta",
+                profile: "aggressive",
+                brainType: "planner-executor",
+                turnNumber: 50,
+                selectedLegalActionId: "attack:1",
+                selectedActionKind: "attack",
+                reason: "Error: connect ECONNREFUSED 127.0.0.1:443",
+                decisionLatencyMs: 10,
+                accepted: true,
+                resultReason: "ok",
+                fallbackUsed: false,
+                intentSummary: "attack",
+              },
+            ],
+          };
+        }
+        if (snapshot.turnNumber === 40) {
+          return {
+            ...snapshot,
+            decisions: [
+              {
+                sequence: 1,
+                agentID: "agent-p4",
+                username: "Delta",
+                profile: "aggressive",
+                brainType: "planner-executor",
+                turnNumber: 40,
+                selectedLegalActionId: "attack:1",
+                selectedActionKind: "attack",
+                reason: "Delta commits to the final push while Bravo's forces are overextended.",
+                decisionLatencyMs: 10,
+                accepted: true,
+                resultReason: "ok",
+                fallbackUsed: false,
+                intentSummary: "attack",
+              },
+            ],
+          };
+        }
+        return snapshot;
+      },
+    );
+    const series = buildAgentMatchStateSeries({
+      runID: "run-fixture",
+      matchID: "match-fixture",
+      replay: { snapshots: snapshotsWithMixedDecisions },
+      telemetry: null,
+    })!;
+    const artifact = buildAgentDecisiveMoments({
+      runID: "run-fixture",
+      series,
+      telemetryEvents: [],
+      totalTurns: 50,
+      replaySnapshots: snapshotsWithMixedDecisions,
+    });
+    const at50 = artifact!.moments.find((m) => m.turn === 50)!;
+    expect(at50.statedReason).toBe(
+      "Delta commits to the final push while Bravo's forces are overextended.",
+    );
   });
 });

@@ -43,7 +43,17 @@ import type { SpectatorEvent } from "./AgentSpectatorTelemetry";
  * already follows).
  */
 
-export const DECISIVE_MOMENTS_SCHEMA_VERSION = 1;
+/**
+ * Bumped 1 -> 2 for a P0 production fix: `statedReason` now runs through
+ * `sanitizeStatedReason` before shipping (see that function's own doc) —
+ * a pre-fix `decisive-moments.json` could carry a raw upstream error
+ * string as if it were an agent's stated reason. Forces
+ * `CoworldLeagueMatchNarrativeBackfill.ts`'s
+ * `decisiveMomentsNeedGeneration` to re-derive every already-published
+ * artifact through the sanitizer, exactly like `AgentMatchRecap.ts`'s own
+ * schema-version-triggered regeneration.
+ */
+export const DECISIVE_MOMENTS_SCHEMA_VERSION = 2;
 /** Spec-mandated bounds — "exactly three to five... where supported". Fewer than the floor and the whole artifact is omitted (see the module doc); more than the ceiling and only the most important survive. */
 export const MIN_DECISIVE_MOMENTS = 3;
 export const MAX_DECISIVE_MOMENTS = 5;
@@ -160,7 +170,64 @@ function momentState(sample: MatchStateSeriesSample | null): DecisiveMomentState
   };
 }
 
-/** Nearest decision (by absolute turn distance) any involved agent made, within `dedupeWindowTurns(totalTurns)` of `turn` — see `AgentDecisiveMomentsInput.replaySnapshots`' doc. */
+/**
+ * P0 production fix: a real match's `decisive-moments.json` shipped
+ * `LLM decision rejected (LLM provider failed: HTTP 403 "Invalid API Key
+ * format"); fallback: ...` — a raw upstream LLM-provider error — as an
+ * agent's public "stated reason". Traced to `LlmAgentBrain.ts`'s
+ * `decide()`/`fallback()`: a provider failure (network error, malformed
+ * response, or here an auth error) is folded into the SAME
+ * `AgentDecision.reason` field a genuine stated reason uses, with no
+ * distinction at the point of recording — see
+ * `docs/project-state/known-problems.md` for that upstream finding.
+ * FIXING THE RECORDER IS OUT OF SCOPE HERE (a separate concern from a
+ * different subsystem); this module's job is to never SHIP one publicly
+ * regardless of how it was recorded, so the filter is deliberately
+ * conservative and lives entirely on the OUTPUT side.
+ *
+ * `null` (never shipped, never the raw string) whenever the candidate
+ * text:
+ *  - is empty/whitespace-only, or exceeds `STATED_REASON_MAX_LENGTH` —
+ *    a genuine spoken-style reason is a short sentence, not a blob;
+ *  - does not START with a letter — rejects JSON/object-shaped payloads
+ *    (`{...}`, `[...]`), numeric codes, and other non-prose openers;
+ *  - matches ANY denylist pattern: HTTP status/error vocabulary,
+ *    exception/stack-trace shapes, or provider/network-failure
+ *    vocabulary (the EXACT shape the real incident above produced).
+ *
+ * Conservative on purpose: a plausible false positive (a genuine reason
+ * that happens to use a denylisted word) is an acceptable cost for never
+ * shipping a false negative (real junk reaching a public page) — the
+ * field degrades to an honestly-absent row either way (see
+ * `findStatedReason`), never a placeholder.
+ */
+const STATED_REASON_MAX_LENGTH = 400;
+const STATED_REASON_DENYLIST_PATTERNS: readonly RegExp[] = [
+  // HTTP status/error response shapes.
+  /\bhttp\/?\s*\d{3}\b/i,
+  /\b(400|401|402|403|404|405|408|409|429|500|502|503|504)\b/,
+  // Generic error/exception vocabulary — the words an error MESSAGE uses,
+  // not the words an agent uses to explain a military/diplomatic choice.
+  /\b(error|exception|invalid|unauthorized|forbidden|time(d)?[\s-]?out|failed|failure|rejected)\b/i,
+  /\b(traceback|stack trace|stacktrace)\b/i,
+  // Provider/network failure vocabulary — the exact shape the real
+  // incident this fix exists for produced.
+  /\bapi[\s-]?key\b/i,
+  /\b(provider failed|econnrefused|enotfound|fetch failed|network error|rate limit(ed)?)\b/i,
+  // Stack-trace-ish source locations (`foo.ts:42`, `at fn (file:1:2)`).
+  /\.(ts|tsx|js|jsx|mjs|cjs|py|go|rs):\d+/,
+  /\bat\s+\S+\s*\([^)]*:\d+:\d+\)/,
+];
+
+export function sanitizeStatedReason(raw: string): string | null {
+  const text = raw.trim();
+  if (text.length === 0 || text.length > STATED_REASON_MAX_LENGTH) return null;
+  if (!/^[A-Za-z]/.test(text)) return null;
+  if (STATED_REASON_DENYLIST_PATTERNS.some((pattern) => pattern.test(text))) return null;
+  return text;
+}
+
+/** Nearest decision (by absolute turn distance) any involved agent made, within `dedupeWindowTurns(totalTurns)` of `turn`, whose reason text survives `sanitizeStatedReason` — see that function's own doc and `AgentDecisiveMomentsInput.replaySnapshots`' doc. A contaminated NEAREST decision never blocks a genuine one slightly farther away: filtering happens BEFORE distance comparison. */
 function findStatedReason(
   snapshots: readonly AgentSpectatorSnapshot[] | null,
   involvedAgentIDs: ReadonlySet<string>,
@@ -183,10 +250,11 @@ function findStatedReason(
         continue;
       }
       if (!involvedAgentIDs.has(decision.agentID)) continue;
-      const text = decision.reason.trim().length > 0 ? decision.reason : decision.intentSummary;
-      if (text.trim().length === 0) continue;
+      const rawText = decision.reason.trim().length > 0 ? decision.reason : decision.intentSummary;
+      const sanitized = sanitizeStatedReason(rawText);
+      if (sanitized === null) continue;
       if (best === null || distance < best.distance) {
-        best = { text, distance };
+        best = { text: sanitized, distance };
       }
     }
   }

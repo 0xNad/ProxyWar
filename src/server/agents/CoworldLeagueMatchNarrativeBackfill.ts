@@ -13,7 +13,10 @@ import {
   buildAgentMatchRecap,
   writeAgentMatchRecapArtifacts,
 } from "./AgentMatchRecap";
-import { buildAgentDecisiveMoments } from "./AgentDecisiveMoments";
+import {
+  buildAgentDecisiveMoments,
+  DECISIVE_MOMENTS_SCHEMA_VERSION,
+} from "./AgentDecisiveMoments";
 import type { MatchStateSeries } from "./AgentMatchStateSeries";
 import type { SpectatorEvent } from "./AgentSpectatorTelemetry";
 import {
@@ -134,15 +137,19 @@ async function readReplaySnapshotsForDecisiveMoments(runDir: string) {
 }
 
 /**
- * `decisive-moments.json` needs (re)generating only when a real
- * `match-state-series.json` ALREADY exists but the moments artifact
- * doesn't yet — series absence is "not ready", not "missing work due",
- * so it never reports `true` (and never costs a repeat budget slot every
- * cycle) while the series backfill hasn't caught up to this run yet. Once
- * a series lands, this fires exactly once (the next call writes the
- * moments artifact, after which it's present and this returns `false`
- * again) — the same one-shot-upgrade shape `recapNeedsRegeneration`
- * already has for its own schemaVersion trigger.
+ * `decisive-moments.json` needs (re)generating when a real
+ * `match-state-series.json` ALREADY exists (series absence is "not
+ * ready", not "missing work due", so this never reports `true` — and
+ * never costs a repeat budget slot every cycle — while the series
+ * backfill hasn't caught up to this run yet) AND EITHER the moments
+ * artifact is missing entirely OR its `schemaVersion` is stale (the P0
+ * `statedReason` sanitization fix — see `AgentDecisiveMoments.ts`'s own
+ * schema-bump doc — needs every already-published artifact re-derived
+ * through the sanitizer, exactly like `recapNeedsRegeneration` already
+ * does for `match-recap.json`). Once a series lands (or a schema bump
+ * ships), this fires exactly once per run (the next call writes the
+ * current-schema moments artifact, after which this returns `false`
+ * again).
  */
 async function decisiveMomentsNeedGeneration(runDir: string): Promise<boolean> {
   const seriesRaw = await readBoundedRunDirArtifact(
@@ -156,7 +163,15 @@ async function decisiveMomentsNeedGeneration(runDir: string): Promise<boolean> {
     path.join(runDir, "decisive-moments.json"),
     maximumDecisiveMomentsBytes,
   );
-  return momentsRaw === null;
+  if (momentsRaw === null) {
+    return true;
+  }
+  try {
+    const value = JSON.parse(momentsRaw) as { schemaVersion?: unknown };
+    return value.schemaVersion !== DECISIVE_MOMENTS_SCHEMA_VERSION;
+  } catch {
+    return true;
+  }
 }
 
 /**
