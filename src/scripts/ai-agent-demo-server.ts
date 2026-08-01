@@ -44,6 +44,11 @@ import {
   BuildRegistrationSubmissionInputSchema,
 } from "../server/identity/BuildRegistrationSubmission";
 import { BuildFunnelCounters } from "../server/agents/BuildFunnelCounters";
+import { AnalyticsAggregateStore } from "../server/analytics/AnalyticsAggregateStore";
+import { AnalyticsIngestService } from "../server/analytics/AnalyticsIngestService";
+import { AnalyticsRecentRing } from "../server/analytics/AnalyticsRecentRing";
+import { buildAnalyticsReport } from "../server/analytics/AnalyticsReport";
+import { renderAnalyticsReportHtml } from "../server/analytics/AnalyticsReportPage";
 import { generateEmblemSvg, deriveEmblemPalette } from "../server/identity/IdentityEmblems";
 import { SlugSchema } from "../server/identity/IdentitySchemas";
 import { publicFeaturedMatch } from "../server/ProxyWarPublicReadModel";
@@ -810,8 +815,19 @@ const rateLimits = {
   // `/build`'s emblem preview + registration-submission form; generous
   // since it's read-mostly/local-compute, but still capped against spam.
   build: positiveInt(firstConfiguredEnv("PROXYWAR_RATE_LIMIT_BUILD"), 40),
+  // Product-analytics ingest (`/api/analytics/events`) — one call per
+  // client flush (interval + pagehide), each carrying a small batch; this
+  // caps request spam per IP, independent of the ingest service's own
+  // per-visitor-id limiter (see AnalyticsIngestService.ts).
+  analytics: positiveInt(firstConfiguredEnv("PROXYWAR_RATE_LIMIT_ANALYTICS"), 120),
 };
 const buildFunnelCounters = new BuildFunnelCounters(artifactsRootDir);
+const analyticsAggregateStore = new AnalyticsAggregateStore(artifactsRootDir);
+const analyticsRecentRing = new AnalyticsRecentRing(artifactsRootDir);
+const analyticsIngestService = new AnalyticsIngestService(
+  analyticsAggregateStore,
+  analyticsRecentRing,
+);
 const betaAdminEnabled = envFlag("PROXYWAR_BETA_ADMIN_ENABLED");
 const allowPrivateAgentEndpoints = envFlag(
   "PROXYWAR_ALLOW_PRIVATE_AGENT_ENDPOINTS",
@@ -1980,6 +1996,16 @@ if (leagueWrapperOnly) {
       next();
       return;
     }
+    // `/api/analytics/events` (Phase 7) is the same shape of exception:
+    // anonymous, PII-free, additive-only, and touches neither the
+    // operator's account nor any match/relay state. It must stay reachable
+    // in wrapper-only mode since that's the hardened mode the live public
+    // surface actually runs in — an ingest endpoint that only works in
+    // every OTHER mode would silently collect nothing in production.
+    if (req.path.startsWith("/api/analytics/")) {
+      next();
+      return;
+    }
     if (req.method === "GET" || req.method === "HEAD") {
       const leagueClipRead = matchProxyWarLeagueClipReadPath(req.path);
       if (
@@ -2126,6 +2152,54 @@ app.post("/api/build/funnel-event", (req, res) => {
     typeof step === "number" ? step : -1,
   );
   res.status(204).end();
+});
+
+/**
+ * Phase 7 product-analytics ingest — batched, schema-validated, additive-
+ * only, no PII (see `AnalyticsEventSchema.ts`'s doc). Same silent-collector
+ * shape as `/api/build/funnel-event` immediately above: always 204,
+ * regardless of whether the batch validated, was rate-limited, or landed —
+ * nothing here may ever surface an error a visitor's UX depends on.
+ */
+app.post("/api/analytics/events", (req, res) => {
+  if (!enforceRateLimit("analytics", rateLimits.analytics, req, res)) {
+    return;
+  }
+  void analyticsIngestService.ingest(req.body);
+  res.status(204).end();
+});
+
+/**
+ * Phase 7 operator report — invite-gated exactly like `/tester-dashboard`
+ * (same `hasValidBetaSession` check `AgentDemoHub.ts`'s tester dashboard
+ * relies on via the global gate further down this file), but registered
+ * here — beside its own ingest route — rather than beside
+ * `/tester-dashboard`, so this feature's server wiring stays one bounded
+ * block instead of touching that unrelated, frequently-edited section.
+ */
+app.get("/analytics-report", async (req, res) => {
+  if (betaAccess.enabled && !hasValidBetaSession(req)) {
+    res.redirect(`/beta?next=${encodeURIComponent(req.originalUrl)}`);
+    return;
+  }
+  const [aggregates, recentEvents] = await Promise.all([
+    analyticsAggregateStore.readAll(),
+    analyticsRecentRing.readAll(),
+  ]);
+  res.type("html").send(
+    renderAnalyticsReportHtml({
+      report: buildAnalyticsReport(aggregates),
+      recentEvents,
+    }),
+  );
+});
+app.get("/api/analytics-report", async (req, res) => {
+  if (betaAccess.enabled && !hasValidBetaSession(req)) {
+    res.status(401).json({ error: "Proxy War beta invite required" });
+    return;
+  }
+  const aggregates = await analyticsAggregateStore.readAll();
+  res.json(buildAnalyticsReport(aggregates));
 });
 app.get("/beta", (req, res) => {
   const returnTo = normalizeProxyWarBetaReturnTo(queryParam(req.query.next));
