@@ -103,6 +103,49 @@ describe("AnalyticsClient", () => {
     ]);
   });
 
+  test("does NOT re-emit returning_anonymous_visitor on a second page load the SAME day — same-day/same-session navigation must never inflate the return metric", () => {
+    // Prime storage with an existing, un-rotated visitor identity.
+    const priming = new AnalyticsClient({ flushIntervalMs: 1_000_000 });
+    priming.track("page_viewed");
+    priming.stop();
+
+    // First "page load" of the day: the visitor id already existed, so
+    // this DOES fire returning_anonymous_visitor.
+    const first = new AnalyticsClient({ flushIntervalMs: 1_000_000 });
+    first.trackVisitStart();
+    first.flush();
+    expect(
+      lastRequestBatch(fetch as ReturnType<typeof vi.fn>).events.map(
+        (event) => event.name,
+      ),
+    ).toEqual(["page_viewed", "returning_anonymous_visitor"]);
+    first.stop();
+
+    // A SECOND page load (a fresh client instance — exactly what a real
+    // browser navigation produces, a brand-new JS context) later the SAME
+    // day must NOT re-emit returning_anonymous_visitor: it is still the
+    // same UTC day the first load already counted.
+    const second = new AnalyticsClient({ flushIntervalMs: 1_000_000 });
+    second.trackVisitStart();
+    second.flush();
+    expect(
+      lastRequestBatch(fetch as ReturnType<typeof vi.fn>).events.map(
+        (event) => event.name,
+      ),
+    ).toEqual(["page_viewed"]);
+    second.stop();
+
+    // A third load also stays silent on the returning event.
+    const third = new AnalyticsClient({ flushIntervalMs: 1_000_000 });
+    third.trackVisitStart();
+    third.flush();
+    expect(
+      lastRequestBatch(fetch as ReturnType<typeof vi.fn>).events.map(
+        (event) => event.name,
+      ),
+    ).toEqual(["page_viewed"]);
+  });
+
   test("flush(true) prefers navigator.sendBeacon over fetch when it succeeds", () => {
     const sendBeaconMock = vi.fn(() => true);
     Object.defineProperty(navigator, "sendBeacon", {

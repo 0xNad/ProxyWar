@@ -1,6 +1,10 @@
 import type { AnalyticsBatch, AnalyticsEvent, AnalyticsEventContext, AnalyticsEventName } from "./AnalyticsEvents";
 import { ANALYTICS_SCHEMA_VERSION } from "./AnalyticsEvents";
-import { loadOrCreateVisitorIdentity, type VisitorIdentity } from "./VisitorId";
+import {
+  loadOrCreateVisitorIdentity,
+  shouldEmitReturningVisitorToday,
+  type VisitorIdentity,
+} from "./VisitorId";
 
 /**
  * Tiny, dependency-free client emitter for the Phase 7 product-analytics
@@ -53,11 +57,22 @@ export class AnalyticsClient {
       typeof window !== "undefined" && typeof fetch === "function" && typeof window.location === "object";
   }
 
-  /** Records a page view and, when the visitor id already existed before this call, a returning-visitor event. `authenticated` is supplied by the caller — this module never infers login state itself. */
+  /**
+   * Records a page view and, when the visitor id already existed before
+   * this call AND today is the first call to emit one (see
+   * `shouldEmitReturningVisitorToday`'s doc — at most once per visitor id
+   * per UTC day, so same-session/same-day navigation never inflates the
+   * report's returning-visitor metric), a returning-visitor event.
+   * `authenticated` is supplied by the caller — this module never infers
+   * login state itself.
+   */
   trackVisitStart(options: { authenticated?: boolean } = {}): void {
     this.track("page_viewed");
     const visitor = this.ensureStarted();
-    if (visitor?.isReturning === true) {
+    if (
+      visitor?.isReturning === true &&
+      shouldEmitReturningVisitorToday(this.storage)
+    ) {
       this.track(options.authenticated ? "returning_authenticated_visitor" : "returning_anonymous_visitor");
     }
   }

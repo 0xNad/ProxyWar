@@ -29,7 +29,15 @@ methodology reference the report itself links back to.
   correlating one visitor's behavior across more than ~30 days structurally
   impossible from this id alone. "Returning visitor" is derived from
   nothing but "this id already existed when the page loaded" — no
-  server-side session table, no IP matching.
+  server-side session table, no IP matching. The `returning_*_visitor`
+  EVENT itself is additionally gated to at most ONE emission per visitor
+  id per UTC day (`shouldEmitReturningVisitorToday`, a small
+  `localStorage`-keyed day-marker) — without this, a visitor id that
+  already existed is "returning" on every page load after the first
+  within a single browsing session, which would drive the report's
+  return-rate metric toward "pages per session" rather than any real
+  day-over-day signal. See "Report metrics" below for exactly what the
+  resulting metric measures.
 - **Storage is aggregate, not raw.** `AnalyticsAggregateStore.ts` keeps one
   JSON file: per-UTC-day, per-event-name counts, a bounded `byRoute`
   breakdown, and a bounded `byDimension` breakdown (event/agent/builder
@@ -70,20 +78,25 @@ Wired into the product surfaces as of this pass:
 - **Replay surfaces**: `ReplayLoadingScreen.ts`
   (`replay_load_started`/`succeeded`/`failed`, threaded with the match id
   from `Main.ts`'s `openAiLeagueReplay`), `AiLeagueReplayOverlay.ts`
-  (`director_cut_started` on default-on mount and on explicit toggle-on;
-  `timeline_jump` on every War-Room/timeline jump; `watched_30s`/
-  `watched_2m` from ACCUMULATED ACTIVE PLAYBACK seconds — each consecutive
-  frame's real delta, capped at ~2s so a pause/buffer/stall gap can never
+  (`director_cut_started` on default-on mount and on explicit toggle-on,
+  carrying both `matchId` and `replayMode`; `timeline_jump` on every
+  War-Room/timeline jump; `watched_30s`/`watched_2m`/`watched_50pct`/
+  `completed` — each carrying `replayMode` ("director_cut" or
+  "full_replay", whichever mode the viewer was actually in) since BOTH
+  modes emit the SAME event names and the report divides them apart by
+  this dimension (see "Report metrics" below). `watched_30s`/`watched_2m`
+  fire from ACCUMULATED ACTIVE PLAYBACK seconds — each consecutive frame's
+  real delta, capped at ~2s so a pause/buffer/stall gap can never
   masquerade as watched time, with accumulation halted entirely while
   `document.hidden` (a backgrounded tab contributes zero) — never
   wall-clock `Date.now() - firstFrameAt`, which would have inflated the
-  retention funnel for anyone who paused or backgrounded the tab;
-  `watched_50pct`/`completed` from turn progress against the match's own
-  finish turn (unaffected by the above fix — always correct) — all
-  one-shot per view, hooked onto the existing `ai-league-replay-frame`
-  event rather than a new per-tick loop), `ReplayPremiereArchiveView.ts`
-  (`switched_to_full_replay` on the archived-premiere "Watch Full Replay"
-  button).
+  retention funnel for anyone who paused or backgrounded the tab.
+  `watched_50pct`/`completed` fire from turn progress against the match's
+  own finish turn (unaffected by the above fix — always correct). All
+  four are one-shot per view, hooked onto the existing
+  `ai-league-replay-frame` event rather than a new per-tick loop),
+  `ReplayPremiereArchiveView.ts` (`switched_to_full_replay` on the
+  archived-premiere "Watch Full Replay" button).
 - **Directories/profiles**: `BuildersDirectoryPage.ts`
   (`builder_profile_opened` on each real claimed builder's `/builder/:slug`
   link).
@@ -144,14 +157,26 @@ Every report metric still carries one of three honest states:
 | --- | --- | --- |
 | Homepage → watch CTR | `event_cta_clicked` ÷ `page_viewed`, both on route `/` | all-time |
 | Replay load success rate | `replay_load_succeeded` ÷ `replay_load_started` | all-time |
-| Director Cut 30s/2m/50%/completion | `watched_30s` / `watched_2m` / `watched_50pct` / `completed` ÷ `director_cut_started` | all-time |
-| Most-watched Featured Events | `director_cut_started` grouped by `eventSlug`, ranked descending | all-time |
+| Director Cut 30s/2m/50%/completion | `watched_30s`/`watched_2m`/`watched_50pct`/`completed` WITH `context.replayMode="director_cut"` ÷ `director_cut_started` | all-time |
+| Full Replay 30s/2m/50%/completion | `watched_30s`/`watched_2m`/`watched_50pct`/`completed` WITH `context.replayMode="full_replay"` — raw counts, no rate (no "started" baseline event exists for Full Replay) | all-time |
+| Most-watched matches | `director_cut_started` grouped by `matchId`, ranked descending, labeled via a read-model lookup at report-serve time (falls back to the raw match id) | all-time |
 | Agent/Builder profile CTR | (`agent_profile_opened_from_match` + `builder_profile_opened`) ÷ `director_cut_started` | all-time |
-| Seven-day return rate | (`returning_anonymous_visitor` + `returning_authenticated_visitor`) ÷ `page_viewed` | trailing 7 UTC days |
+| Returning-visitor-day share | (`returning_anonymous_visitor` + `returning_authenticated_visitor`, each capped at ONE emission per visitor id per UTC day) ÷ `page_viewed` — the share of page views from an already-established visitor identity, NOT a strict N-days-later cohort return rate | trailing 7 UTC days |
 | Build flow funnel | raw stage counts: `build_flow_started`, `build_step_reached` at the final (7th) step, `registration_draft_submitted` | all-time, raw counts (see below) |
 | Claims and version releases | raw counts of `claim_started`, `claim_verified`, `version_release_created`, `version_observed` | all-time |
 | Failures by route | `replay_load_failed` grouped by normalized route template | all-time |
 | Failure reasons | `replay_load_failed` grouped by bounded `reason` code | all-time |
+
+**Why the Director Cut rates are filtered by `replayMode`**: both Director
+Cut and Full Replay viewers emit the identical `watched_30s`/`watched_2m`/
+`watched_50pct`/`completed` event names — only the `replayMode` context
+field distinguishes which mode a given milestone happened in. Dividing the
+TOTAL across both modes by `director_cut_started` could report over 100%
+whenever Full Replay viewers also crossed a milestone; filtering each
+numerator to `context.replayMode="director_cut"` keeps the rate bounded to
+what actually happened in Director Cut sessions. Full Replay's own
+milestone counts are reported separately, as raw counts, since there is no
+"started watching without Director Cut" event to divide by.
 
 ## Season Zero decision thresholds
 

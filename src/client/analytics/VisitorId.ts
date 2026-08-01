@@ -77,11 +77,51 @@ export function loadOrCreateVisitorIdentity(
     return { id: generateId(), createdAt: now, isReturning: false };
   }
 }
-
 function safeLocalStorage(): Storage | undefined {
   try {
     return typeof window !== "undefined" ? window.localStorage : undefined;
   } catch {
     return undefined;
+  }
+}
+
+export const RETURNING_VISITOR_EMIT_DAY_KEY = "pw_analytics_returning_emit_day";
+
+/**
+ * Gates `returning_anonymous_visitor`/`returning_authenticated_visitor` to
+ * AT MOST ONE emission per visitor id per UTC day. Without this, a visitor
+ * id already existing (per `loadOrCreateVisitorIdentity`'s `isReturning`)
+ * is true on EVERY page load after the first within the 30-day rotation
+ * window — including the second page of the SAME browsing session — which
+ * would drive the report's returning-visitor metric toward "pages per
+ * session" rather than any real day-over-day return signal. Call once per
+ * page load, immediately before deciding whether to emit; returns `true`
+ * (and marks today as emitted) only the first time it's called on a given
+ * UTC day, `false` on every subsequent call that same day.
+ *
+ * Mirrors the server-side `returning_authenticated_visitor` dedup in
+ * `PlatformAccountHttp.ts` (bounded, day-keyed, best-effort) — same
+ * "authenticated/returning visit-DAY, not strict session" semantics on
+ * both the client and server side of this event family.
+ */
+export function shouldEmitReturningVisitorToday(
+  storage: Storage | undefined = safeLocalStorage(),
+  now: number = Date.now(),
+): boolean {
+  if (storage === undefined) {
+    // No persistent storage to gate with (private browsing, disabled
+    // storage, non-browser test env) — never block emission on its
+    // account, just cannot deduplicate across page loads either.
+    return true;
+  }
+  try {
+    const todayKey = new Date(now).toISOString().slice(0, 10);
+    if (storage.getItem(RETURNING_VISITOR_EMIT_DAY_KEY) === todayKey) {
+      return false;
+    }
+    storage.setItem(RETURNING_VISITOR_EMIT_DAY_KEY, todayKey);
+    return true;
+  } catch {
+    return true;
   }
 }

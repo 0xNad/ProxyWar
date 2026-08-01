@@ -75,6 +75,7 @@ function utcDayKey(now: Date): string {
 /** Dimensions the report can rank/filter by — every other context field is route-scoped only. */
 const DIMENSION_CONTEXT_KEYS = [
   "eventSlug",
+  "matchId",
   "agentSlug",
   "builderSlug",
   "claimId",

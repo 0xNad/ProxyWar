@@ -1,6 +1,8 @@
 import { beforeEach, describe, expect, test } from "vitest";
 import {
   loadOrCreateVisitorIdentity,
+  RETURNING_VISITOR_EMIT_DAY_KEY,
+  shouldEmitReturningVisitorToday,
   VISITOR_ID_CREATED_AT_STORAGE_KEY,
   VISITOR_ID_ROTATION_MS,
   VISITOR_ID_STORAGE_KEY,
@@ -61,5 +63,49 @@ describe("loadOrCreateVisitorIdentity", () => {
     const identity = loadOrCreateVisitorIdentity(undefined, 1_000_000);
     expect(identity.isReturning).toBe(false);
     expect(identity.id.length).toBeGreaterThan(0);
+  });
+});
+
+describe("shouldEmitReturningVisitorToday", () => {
+  const DAY_MS = 24 * 60 * 60 * 1000;
+  const T0 = Date.parse("2026-08-01T00:00:00.000Z");
+
+  test("returns true on the first call of a UTC day, and marks that day as emitted", () => {
+    expect(shouldEmitReturningVisitorToday(window.localStorage, T0)).toBe(true);
+    expect(window.localStorage.getItem(RETURNING_VISITOR_EMIT_DAY_KEY)).toBe(
+      "2026-08-01",
+    );
+  });
+
+  test("returns false on every subsequent call the SAME UTC day — same-session navigation never re-fires", () => {
+    expect(shouldEmitReturningVisitorToday(window.localStorage, T0)).toBe(true);
+    // Same day, minutes later (e.g. the visitor's second, third, fourth
+    // page load in one browsing session).
+    expect(shouldEmitReturningVisitorToday(window.localStorage, T0 + 60_000)).toBe(
+      false,
+    );
+    expect(
+      shouldEmitReturningVisitorToday(window.localStorage, T0 + 23 * 60 * 60 * 1000),
+    ).toBe(false);
+  });
+
+  test("returns true again once the UTC day rolls over", () => {
+    expect(shouldEmitReturningVisitorToday(window.localStorage, T0)).toBe(true);
+    expect(shouldEmitReturningVisitorToday(window.localStorage, T0 + DAY_MS)).toBe(
+      true,
+    );
+  });
+
+  test("never blocks emission when storage genuinely throws on every access (private browsing, disabled storage)", () => {
+    const throwingStorage = {
+      getItem: () => {
+        throw new Error("storage disabled");
+      },
+      setItem: () => {
+        throw new Error("storage disabled");
+      },
+    } as unknown as Storage;
+    expect(shouldEmitReturningVisitorToday(throwingStorage, T0)).toBe(true);
+    expect(shouldEmitReturningVisitorToday(throwingStorage, T0 + 1)).toBe(true);
   });
 });

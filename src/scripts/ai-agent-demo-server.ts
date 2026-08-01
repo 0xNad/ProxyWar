@@ -57,7 +57,7 @@ import { BuildFunnelCounters } from "../server/agents/BuildFunnelCounters";
 import { AnalyticsAggregateStore } from "../server/analytics/AnalyticsAggregateStore";
 import { AnalyticsIngestService } from "../server/analytics/AnalyticsIngestService";
 import { AnalyticsRecentRing } from "../server/analytics/AnalyticsRecentRing";
-import { buildAnalyticsReport } from "../server/analytics/AnalyticsReport";
+import { applyMatchLabels, buildAnalyticsReport } from "../server/analytics/AnalyticsReport";
 import { renderAnalyticsReportHtml } from "../server/analytics/AnalyticsReportPage";
 import { generateEmblemSvg, deriveEmblemPalette } from "../server/identity/IdentityEmblems";
 import { SlugSchema } from "../server/identity/IdentitySchemas";
@@ -2396,13 +2396,20 @@ app.get("/analytics-report", async (req, res) => {
     res.redirect(`/beta?next=${encodeURIComponent(req.originalUrl)}`);
     return;
   }
-  const [aggregates, recentEvents] = await Promise.all([
+  const [aggregates, recentEvents, matchLabels] = await Promise.all([
     analyticsAggregateStore.readAll(),
     analyticsRecentRing.readAll(),
+    loadAnalyticsMatchLabels(),
   ]);
+  const report = buildAnalyticsReport(aggregates);
   res.type("html").send(
     renderAnalyticsReportHtml({
-      report: buildAnalyticsReport(aggregates),
+      report: {
+        ...report,
+        mostWatchedEvents: applyMatchLabels(report.mostWatchedEvents, (matchId) =>
+          matchLabels.get(matchId) ?? null,
+        ),
+      },
       recentEvents,
     }),
   );
@@ -2412,9 +2419,68 @@ app.get("/api/analytics-report", async (req, res) => {
     res.status(401).json({ error: "Proxy War beta invite required" });
     return;
   }
-  const aggregates = await analyticsAggregateStore.readAll();
-  res.json(buildAnalyticsReport(aggregates));
+  const [aggregates, matchLabels] = await Promise.all([
+    analyticsAggregateStore.readAll(),
+    loadAnalyticsMatchLabels(),
+  ]);
+  const report = buildAnalyticsReport(aggregates);
+  res.json({
+    ...report,
+    mostWatchedEvents: applyMatchLabels(report.mostWatchedEvents, (matchId) =>
+      matchLabels.get(matchId) ?? null,
+    ),
+  });
 });
+/**
+ * Best-effort matchId -> human label lookup for the "most-watched matches"
+ * ranking (`AnalyticsReport.ts`'s `applyMatchLabels`) — reads the SAME
+ * league read-model JSON `PlatformBuilderDashboardHttp`'s `readModelFilePath`
+ * already points at. `PublicMatch.matchId` is the actual league run id
+ * `director_cut_started`'s context carries (checked first); a
+ * `PublicFeaturedMatch.matchId` — a distinct `feat_...` editorial
+ * namespace — is included too in case a future emission point ever uses
+ * that id space. Never throws: a missing/malformed/absent read-model file
+ * just means every ranked item falls back to its raw id (`applyMatchLabels`
+ * already handles that), not a broken report page.
+ */
+async function loadAnalyticsMatchLabels(): Promise<Map<string, string>> {
+  const labels = new Map<string, string>();
+  try {
+    const raw = await fs.readFile(
+      path.join(runsRootDir, "league", "read-model.json"),
+      "utf8",
+    );
+    const parsed = JSON.parse(raw) as {
+      matches?: unknown;
+      featuredMatches?: unknown;
+    };
+    for (const entry of Array.isArray(parsed.matches) ? parsed.matches : []) {
+      const match = entry as { matchId?: unknown; map?: unknown; roundNumber?: unknown };
+      if (typeof match.matchId === "string" && typeof match.map === "string") {
+        labels.set(
+          match.matchId,
+          typeof match.roundNumber === "number"
+            ? `${match.map} (round ${match.roundNumber})`
+            : match.map,
+        );
+      }
+    }
+    for (const entry of Array.isArray(parsed.featuredMatches) ? parsed.featuredMatches : []) {
+      const match = entry as { matchId?: unknown; title?: unknown };
+      if (
+        typeof match.matchId === "string" &&
+        typeof match.title === "string" &&
+        !labels.has(match.matchId)
+      ) {
+        labels.set(match.matchId, match.title);
+      }
+    }
+  } catch {
+    // No read-model yet, malformed, or unreadable — every caller falls
+    // back to the raw match id, never a broken report page.
+  }
+  return labels;
+}
 app.get("/beta", (req, res) => {
   const returnTo = normalizeProxyWarBetaReturnTo(queryParam(req.query.next));
   if (!betaAccess.enabled) {

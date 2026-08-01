@@ -86,13 +86,20 @@ export function renderAnalyticsReportHtml(model: AnalyticsReportPageModel): stri
     </section>
 
     <section class="panel">
+      <h2>Full Replay milestones (raw counts — no "started" baseline to divide by)</h2>
+      <div class="grid">
+        ${report.fullReplayMilestones.map(countStatCard).join("\n")}
+      </div>
+    </section>
+
+    <section class="panel">
       <h2>Build flow funnel</h2>
       ${funnelStageTable(report.builderFunnel)}
     </section>
 
     <section class="panel">
-      <h2>Most-watched Featured Events</h2>
-      ${rankingTable(report.mostWatchedEvents, "Featured Event")}
+      <h2>Most-watched matches</h2>
+      ${rankingTable(report.mostWatchedEvents, "Match")}
     </section>
 
     <section class="panel">
