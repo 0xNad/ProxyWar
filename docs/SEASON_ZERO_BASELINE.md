@@ -608,3 +608,158 @@ side-effect of a Season Zero activation task. **Recommended next step for
 the operator**: a dedicated "platform-origin redeploy" task, scoped and
 reviewed the same way this task's own beta redeploy was, before the
 identity milestone can be considered live.
+
+## Addendum 2 — Final deploy wave + re-activation (same pass, second follow-up)
+
+Final dev-branch HEAD for this addendum: `c18fff859` (pushed). Beta
+redeployed onto `a5f6fbe2e` (one commit behind dev HEAD — the gap is only
+the docs-only round2-screenshots commit, no runtime effect).
+
+### 1. Validate + deploy
+
+Full matrix at `cb53c3e6d` (the tip named in this wave's brief), all green:
+`tsc` 0 errors; `lint` 0 errors/113 warnings (unchanged, nullish-coalescing
+only); `npm test` 417+236 files, 4962+2769 tests passed, 3 todo, 0 failed;
+`npm run test:e2e` 27/27; `build-prod` clean. Pushed
+(`c79e56ee9..cb53c3e6d`, fast-forward, no force). Deployed: rollback point
+recorded (release-candidate worktree pre-redeploy HEAD `2eaded111`, PID
+`63533`, healthy) → fetch + `checkout --detach cb53c3e6d` → `npm ci` → `tsc`
+clean → `build-prod` clean (includes the F9 asset-manifest shell rebuild)
+→ `launchctl kickstart -k gui/$UID/com.proxywar.beta` (PID `63533` ->
+`75280`) → ready on `:8788` in 1s, confirmed matching SHA via `lsof`
+cwd+`git rev-parse HEAD` → `launchctl kickstart -k
+gui/$UID/com.proxywar.league-mirror`, log confirms a fresh cycle ran.
+**Not touched**: `com.proxywar.platform` (PID/exit-status unchanged from
+Addendum 1's investigation) and `com.proxywar.betautocycle` (PID `383`
+unchanged) — `bet.proxywar.xyz/league` externally verified 200 throughout.
+Per this wave's brief, bet-origin trails the tip at `ce0105de7` and can
+ride its next independent refresh — not this pass's job.
+
+### 2. Regeneration verification (4 manual league-mirror cycles, budget-boosted)
+
+The default `--match-narrative-budget` is 1/cycle; clearing the full
+backlog of pre-fix `decisive-moments.json` artifacts (schemaVersion 1,
+several carrying the leaked LLM-provider error string) needed a larger
+one-off budget to finish inside a bounded number of cycles — used
+`--match-narrative-budget 20`, then `40`, then `150` (101 total run
+directories; the backfill scan order is deterministic ascending-by-name,
+i.e. chronological, so a budget smaller than the full backlog's rank
+position never reaches it in one pass) across 4 total manual cycles
+(1 auto + 3 boosted-budget). **Final state: 80/80 `decisive-moments.json`
+files at `schemaVersion: 2`, zero containing any `plan-err`/`HTTP
+4xx`/`HTTP 5xx`/`Invalid API Key` text anywhere** (verified by scanning
+every file's `statedReason` fields directly, not sampling).
+
+- **Recap v5 features, live on real production data**: terminal-elimination
+  compression — 101/101 fresh `match-recap.json` files carry a single
+  `"Final turn: N agents eliminated as the match ends."` beat instead of N
+  individual elimination beats (e.g. `"Final turn: 9 agents eliminated as
+  the match ends."`). Betrayal-repeat aggregation — 40 examples found
+  across fresh recaps, e.g. `"Auri and Ron SWGY break their alliance again
+  (3 more times through turn 12300, most recently the 4th time)."`
+- **Decisive-moments v2, F5 gap check — cured, with an example**: moment
+  type distribution across all 80 fresh files: `lead_change` 139
+  occurrences in 70/80 matches (87.5%), `final_confrontation` 56 in 56/80
+  (70%), `alliance_betrayal` 109, `territorial_swing` 54, `reversal` 30 —
+  no longer systematically absent. Concrete example carrying both types in
+  one match:
+  `league-coworld-2026-08-01T18-11-29-043Z-2df8b2f2`'s
+  `decisive-moments.json` includes both a `lead_change` and a
+  `final_confrontation` moment. **Yes, the F5 gap is cured** on freshly
+  generated real-production artifacts.
+- **Provisional identities live**: `agt_james-botts` (and `agt_jordan`)
+  registered in `resources/identity/agents.json` with a real generated
+  emblem (`geometric-svg-v1`, `resources/identity/emblems/agt_james-botts.svg`,
+  1140 bytes on disk). Live: `GET /agent/james-botts` → 200; the live
+  read-model's `agents[]` entry for James Botts shows `registered: true`
+  with a real inline `emblemSvg` (not a placeholder/fallback), a resolved
+  `standing` (rank 16) and `activeVersion`/`provenance` (policy label
+  `jamesboggs-warlord:v1`). Standings check: `GET
+  /ai-league-runs/league/read-model.json`'s `agents[]` — **0/19 entries
+  unregistered, 0/19 carrying a `provisionalSlug`** (i.e. zero anonymous
+  cards) as of this pass.
+
+### 3. Re-activation of the schedule
+
+Confirmed the prior slot's episode (`feat_21d64517e31863134746`) correctly
+went `isPubliclyPromotable: false` after aging out (its `EventPackage` was
+cleared — `subtitle`/`reasonToWatch`/`canonicalMatchUrl` all reverted to
+null in the live read model — and its title reverted to the spoiler-neutral
+form). Fresh pipeline, using the new sanctioned `feature:promote` CLI (no
+hand-rolled store writes this time):
+
+1. `feature:candidates --json` → strongest current candidate:
+   `ereq_253e5a33-24c3-45f7-9119-66b3013ffd19`, composite 90.67, 12/12
+   participants resolved.
+2. `feature:promote --episode=ereq_253e5a33-...` → `feat_4d20f6550c6c8d8e83bc`
+   ("12-player free-for-all — Round 1122 on World"), idempotent (re-run
+   confirmed `wasAlreadyPromoted: true`, same matchId reused).
+3. `premiere:package --featured=feat_4d20f6550c6c8d8e83bc` → title **"12-way
+   battle — World"** — spoiler-neutral by construction, confirmed no winner
+   name (the real winner is Auri; "Auri" does not appear anywhere in the
+   title).
+4. `--validate` → `isPubliclyPromotable: true`. Standalone `premiere:validate`
+   → `ok (2 record(s) checked)`.
+5. `season:add-event --season=season_season-zero
+   --featured=feat_4d20f6550c6c8d8e83bc --scheduled-at=2026-08-03T18:00:00.000Z`
+   (same weekly slot as before, still ≥24h out at scheduling time).
+6. **Found and fixed a real display gap while doing this**: `season:add-event`
+   has no counterpart removal command, and `LobbyPage.ts`'s
+   `renderSeasonSchedule` takes every `eventSlots` entry unfiltered by
+   `isPubliclyPromotable` — re-adding without removing the aged-out slot
+   would have rendered TWO entries at the same date. No `season:remove-event`
+   CLI exists (a real gap, noted here for a follow-up), so dropped the
+   stale slot via the sanctioned `loadSeasonRegistry`/`saveSeasonRegistry` +
+   `SeasonSchema`-validated path directly (`resources/season/seasons.json`
+   now carries exactly one `eventSlots` entry).
+7. Mirror cycle re-run; live read model confirmed:
+   `featuredMatches[].isPubliclyPromotable: true` for the new match,
+   `seasons[0].eventSlots` containing exactly the one new entry.
+
+**Live verification, screenshots**:
+`docs/verification-evidence/season-zero-activation/round2/homepage-desktop-1440.webp`,
+`.../homepage-mobile-390.webp`. Both show a single "SEASON ZERO SCHEDULE"
+entry: **"Featured spotlight — 8/3/2026  12-player free-for-all — Round
+1122 on World"** with a **"Played 8/1/2026"** note beneath it — exactly the
+"Featured spotlight" lane-presentation + played-date the brief specified
+(`isArchiveSpotlight` branch of `renderSeasonSchedule`, confirmed live, not
+just in source).
+
+### 4. Full live smoke
+
+All against `https://beta.proxywar.xyz` externally unless noted:
+
+| Check | Result |
+| --- | --- |
+| Core routes `/`, `/watch`, `/league`, `/build`, `/about`, `/agents`, `/builders` | all 200 |
+| Promoted match page `/match/feat_4d20f6550c6c8d8e83bc` | 200 |
+| Episode-id match page `/match/ereq_253e5a33-...` — decisive moments/recap content | 200; RECAP section shows the terminal-elimination + repeat-betrayal beats live; direct file check of this exact match's `decisive-moments.json` confirms `schemaVersion: 2`, no leaked error text |
+| Storylines capped (F8) | live page shows 5 explicit head-to-head lines + `"+61 more rivalries with prior history, not shown"` — capped, not a raw dump |
+| Degraded-turns tooltip (F7) | `"978 recovered turns (41%)"` span carries a real `title` attribute: `"Turns played by a safe fallback instead of an agent's own decision — most often the agent reporting its own planner degraded; less often an error, an illegal move, or a timeout."` |
+| `/agent/james-botts` | 200 |
+| Analytics ingest | `POST /api/analytics/events` → 204. First attempt used a malformed payload (missing the batch-level `schemaVersion` field `AnalyticsBatchSchema` requires) and was silently dropped — matches the route's own documented "always 204 regardless of whether the batch validated" contract; a corrected payload advanced `page_viewed`'s live UTC-day aggregate count 45 → 46 in `analytics-aggregates.json`, confirmed by direct before/after read |
+| Flag asset (F9) | homepage's injected `window.ASSET_MANIFEST` resolved a real hashed flag URL (`/_assets/flags/1_Airgialla.8ff4edcb40cb.svg`) → 200; hashed JS/CSS bundle URLs also 200 |
+| `bet.proxywar.xyz/league` | 200, untouched throughout this pass |
+
+### 5. Two operator-pending items
+
+1. **Main promotion decision** — unchanged since `c79e56ee9`
+   (main-promote's review): `origin/main` is untouched at `6f366d8ed`; the
+   operator must choose among (a) promote as-is (wagering surface already
+   public on the branch ref, would become default-branch-visible), (b)
+   build a wagering-free promotion branch (a real edit/rebase job — several
+   files hold inline conditional wagering branches rather than a cleanly
+   separable module), or (c) leave `main` alone (every live service already
+   runs `claude/product-overhaul`, never `main`). Not re-litigated or
+   re-decided in this pass — still pending.
+2. **Claim queue awaiting first real claims** — directly explained by
+   Addendum 1's platform-origin finding: the Builder/Agent claim HTTP API
+   (`createPlatformBuilderClaimRouter` et al.) is mounted only when
+   `PROXYWAR_PLATFORM_ENABLED` is set, true only for the platform-origin
+   launchd job — which is still running code from before commit `9c6756f60`
+   (the claim workflow itself) at last check. `resolveBuilderClaimStateRoot`
+   nests under the platform's own private state root, and no claim files
+   exist there yet — consistent with "the surface that would receive a
+   real claim has not been redeployed," not "claims were submitted and are
+   stuck." Resolving this is the same platform-origin redeploy flagged as
+   its own dedicated follow-up task in Addendum 1.
