@@ -1,5 +1,10 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { mountAiLeagueReplayOverlay } from "../../src/client/AiLeagueReplayOverlay";
+import {
+  activeWarPairCount,
+  deriveMatchStateStripFields,
+  mountAiLeagueReplayOverlay,
+  normalizeMatchStateSeries,
+} from "../../src/client/AiLeagueReplayOverlay";
 import {
   BROADCAST_RAIL_FOLLOWED_CHANGE_EVENT,
   BROADCAST_RAIL_FOLLOW_EVENT,
@@ -2378,6 +2383,261 @@ describe("AiLeagueReplayOverlay", () => {
       // The masking bug: re-enabling always reapplied the opening ("fast")
       // segment, self-correcting only at the next frame tick boundary.
       expect(onReplaySpeedChange).toHaveBeenCalledExactlyOnceWith(2); // slow
+    });
+  });
+
+  describe("Match-state strip (Season Zero broadcast Phase 5)", () => {
+    function agentSample(
+      username: string,
+      playerID: string,
+      territoryShare: number,
+      rank: number,
+      alive = true,
+    ) {
+      return { agentID: playerID, playerID, username, alive, tilesOwned: Math.round(territoryShare * 1000), troops: 10, territoryShare, rank };
+    }
+
+    function matchStateSeriesFixture(runID: string) {
+      return {
+        schemaVersion: 1,
+        runID,
+        matchID: runID,
+        generatedAt: "2026-08-01T00:00:00.000Z",
+        source: "spectator-replay-snapshots",
+        totalTurns: 1000,
+        samples: [
+          {
+            turn: 0,
+            tick: 0,
+            phase: "spawn",
+            agents: [
+              agentSample("Auri", "p1", 0.5, 1),
+              agentSample("Borealis", "p2", 0.5, 2),
+            ],
+            activeAlliancePairs: [],
+          },
+          {
+            turn: 200,
+            tick: 200,
+            phase: "active",
+            agents: [
+              agentSample("Auri", "p1", 0.7, 1),
+              agentSample("Borealis", "p2", 0.3, 2),
+            ],
+            activeAlliancePairs: [["p1", "p2"]],
+          },
+          {
+            turn: 400,
+            tick: 400,
+            phase: "active",
+            agents: [
+              // Distinct from the turn=200 sample's own delta (+20) so the
+              // two samples are distinguishable via the delta item's raw,
+              // untranslated `formatSignedPercent` text — `translateText`
+              // itself returns bare keys in this jsdom test environment (no
+              // `<lang-selector>`), so leader/alive/relations VALUES (which
+              // route through `translateText(key, params)`) cannot be
+              // read back from `textContent` here; only the delta's raw
+              // value bypasses that.
+              agentSample("Auri", "p1", 0.95, 1),
+              agentSample("Borealis", "p2", 0.05, 2, false),
+            ],
+            activeAlliancePairs: [],
+          },
+        ],
+        notes: [],
+      };
+    }
+
+    function frame(
+      turnNumber: number,
+      players: ReadonlyArray<{
+        smallID: number;
+        username: string;
+        targets?: number[];
+        allies?: number[];
+      }> = [],
+    ): void {
+      document.dispatchEvent(
+        new CustomEvent("ai-league-replay-frame", {
+          detail: {
+            tick: turnNumber,
+            turnNumber,
+            players: players.map((player) => ({
+              playerID: `player-${player.smallID}`,
+              smallID: player.smallID,
+              clientID: null,
+              username: player.username,
+              displayName: player.username,
+              x: 0,
+              y: 0,
+              tilesOwned: 0,
+              allies: player.allies ?? [],
+              targets: player.targets ?? [],
+              embargoes: [],
+              alliances: [],
+            })),
+          },
+        }),
+      );
+    }
+
+    it("windows the strip to the LATEST sample at or before the playhead, never a future one", () => {
+      const runID = "state-strip-window-1";
+      const overlay = mountAiLeagueReplayOverlay({
+        runID,
+        artifactBasePath: `/ai-league-runs/${runID}`,
+        decisions: [],
+      });
+      overlay.hydrate({ matchStateSeries: matchStateSeriesFixture(runID) });
+
+      // Turn 300 sits strictly between the turn=200 (delta +20) and turn=400
+      // (delta +25) samples — the rendered delta must read +20, never +25
+      // (which the playhead has not reached yet).
+      frame(300);
+      let delta = document.querySelector(".broadcast-state-strip-delta");
+      expect(delta).not.toBeNull();
+      expect(delta?.textContent).toContain("+20");
+      expect(delta?.textContent).not.toContain("+25");
+
+      // Advancing the playhead to turn 400 reveals the later sample.
+      frame(400);
+      delta = document.querySelector(".broadcast-state-strip-delta");
+      expect(delta?.textContent).toContain("+25");
+    });
+
+    it("stays entirely absent before the playhead reaches the first released sample", () => {
+      const runID = "state-strip-window-2";
+      const overlay = mountAiLeagueReplayOverlay({
+        runID,
+        artifactBasePath: `/ai-league-runs/${runID}`,
+        decisions: [],
+      });
+      const series = matchStateSeriesFixture(runID);
+      overlay.hydrate({
+        matchStateSeries: { ...series, samples: series.samples.slice(1) }, // first sample now at turn 200
+      });
+      frame(100);
+      expect(document.querySelector(".broadcast-state-strip")).toBeNull();
+    });
+
+    it("is absent entirely when no match-state-series artifact is available", () => {
+      const runID = "state-strip-absent-no-artifact";
+      mountAiLeagueReplayOverlay({
+        runID,
+        artifactBasePath: `/ai-league-runs/${runID}`,
+        decisions: [],
+      });
+      frame(400);
+      expect(document.querySelector(".broadcast-state-strip")).toBeNull();
+    });
+
+    it("derives activeWarCount honestly from the live frame's targets/allies — never from the series, which has no war concept", () => {
+      // translateText returns bare keys in this jsdom environment (no
+      // <lang-selector>), so the rendered relations VALUE can't be read
+      // back from textContent — verify the pure derivation directly
+      // instead, same as `activeWarPairCount`'s own unit coverage below.
+      const framePlayers = [
+        { smallID: 1, username: "Auri", allies: [], targets: [2, 3] },
+        { smallID: 2, username: "Borealis", allies: [3], targets: [] },
+        { smallID: 3, username: "Cascade", allies: [2], targets: [] },
+      ] as unknown as Parameters<typeof activeWarPairCount>[0];
+      // p1 attacks p2 and p3; p2 and p3 are allied (suppresses that pair) —
+      // two real at-war pairs: (p1, p2) and (p1, p3).
+      expect(activeWarPairCount(framePlayers)).toBe(2);
+    });
+
+    it("never double-counts a bidirectional attack as two war pairs", () => {
+      const framePlayers = [
+        { smallID: 1, username: "Auri", allies: [], targets: [2] },
+        { smallID: 2, username: "Borealis", allies: [], targets: [1] },
+      ] as unknown as Parameters<typeof activeWarPairCount>[0];
+      expect(activeWarPairCount(framePlayers)).toBe(1);
+    });
+
+    it("windows the pure derivation to the latest sample at or before the playhead, with the correct diffed delta and honest null-territory-delta on the first released sample", () => {
+      const series = normalizeMatchStateSeries(
+        matchStateSeriesFixture("state-strip-derive-1"),
+      );
+      if (series === null) throw new Error("fixture must normalize");
+      const identity = new Map<string, PublicAgent>();
+      const first = deriveMatchStateStripFields(series, 0, [], identity);
+      expect(first?.territoryShareDeltaPercent).toBeNull();
+      expect(first?.leader?.territoryPercent).toBeCloseTo(50);
+
+      const mid = deriveMatchStateStripFields(series, 300, [], identity);
+      expect(mid?.leader?.territoryPercent).toBeCloseTo(70); // windowed to turn=200, not turn=400
+      expect(mid?.territoryShareDeltaPercent).toBeCloseTo(20);
+      expect(mid?.aliveCount).toBe(2);
+      expect(mid?.activeAllianceCount).toBe(1);
+
+      const late = deriveMatchStateStripFields(series, 400, [], identity);
+      expect(late?.leader?.territoryPercent).toBeCloseTo(95);
+      expect(late?.territoryShareDeltaPercent).toBeCloseTo(25);
+      expect(late?.aliveCount).toBe(1); // Borealis eliminated by turn=400
+
+      expect(deriveMatchStateStripFields(null, 400, [], identity)).toBeNull();
+      // Before the first sample's own turn — no safe sample yet.
+      const laterSeries = {
+        ...series,
+        samples: series.samples.slice(1),
+      };
+      expect(
+        deriveMatchStateStripFields(laterSeries, 100, [], identity),
+      ).toBeNull();
+    });
+
+    it("prefers the Director Cut active segment label over the sample's own phase when Director Cut mode is on", () => {
+      const runID = "state-strip-phase-director-cut";
+      const overlay = mountAiLeagueReplayOverlay({
+        runID,
+        artifactBasePath: `/ai-league-runs/${runID}`,
+        decisions: [],
+      });
+      overlay.hydrate({
+        matchStateSeries: matchStateSeriesFixture(runID),
+        directorCutPlan: {
+          schemaVersion: 1,
+          reportKind: "director-cut-plan",
+          runID,
+          matchID: runID,
+          generatedAt: "2026-08-01T00:00:00.000Z",
+          totalTurns: 1000,
+          segments: [
+            {
+              startTurn: 0,
+              endTurn: 999,
+              speed: "normal",
+              eventReason: "First strike",
+              importance: 50,
+              participatingAgents: [],
+            },
+          ],
+          importantTurnCount: 1,
+          estimatedDurationSeconds: 60,
+          degraded: false,
+          notes: [],
+        },
+      });
+      // Enabled by default for Full Replay (spec item 3).
+      frame(200);
+      expect(
+        document.querySelector(".broadcast-state-strip")?.textContent,
+      ).toContain("First strike");
+    });
+
+    it("falls back to the sample's own translated phase when Director Cut mode is off", () => {
+      const runID = "state-strip-phase-fallback";
+      const overlay = mountAiLeagueReplayOverlay({
+        runID,
+        artifactBasePath: `/ai-league-runs/${runID}`,
+        decisions: [],
+      });
+      overlay.hydrate({ matchStateSeries: matchStateSeriesFixture(runID) });
+      frame(200); // sample at turn 200 has phase "active"; no Director Cut plan hydrated
+      expect(
+        document.querySelector(".broadcast-state-strip")?.textContent,
+      ).toContain("broadcast.phase_active");
     });
   });
 });

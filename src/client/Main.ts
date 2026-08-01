@@ -1613,6 +1613,7 @@ class Client {
             summary: details.summary,
             spectatorTelemetry: details.spectatorTelemetry,
             directorCutPlan: details.directorCutPlan,
+            matchStateSeries: details.matchStateSeries,
             detailsLoading: false,
             artifactAvailability: details.artifactAvailability,
           });
@@ -1627,6 +1628,7 @@ class Client {
             summary: details.summary,
             spectatorTelemetry: details.spectatorTelemetry,
             directorCutPlan: details.directorCutPlan,
+            matchStateSeries: details.matchStateSeries,
             detailsLoading: false,
             artifactAvailability: details.artifactAvailability,
           });

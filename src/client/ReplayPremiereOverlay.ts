@@ -3,6 +3,7 @@ import {
   renderAnalystPanel,
   renderBroadcastDrawer,
   renderCompetitorRail,
+  renderMatchStateStrip,
   renderMatchTimeline,
   renderWarRoomFeed,
   LowerThirdController,
@@ -13,6 +14,7 @@ import {
   type CuratedWarRoomEvent,
   type BroadcastDrawerTabId,
   type LowerThirdEvent,
+  type MatchStateStripInput,
   type TimelineMarker,
 } from "./BroadcastComposition";
 import {
@@ -308,6 +310,28 @@ export interface ReplayPremiereOverlayModel {
    * mid-premiere."
    */
   analystDecisionsUnavailableReason: "premiere_sealed";
+  /**
+   * Season Zero broadcast match-state strip (spec Phase 5) — always `null`
+   * for THIS overlay. `match-state-series.json` is a whole-match artifact;
+   * fetching it at all during sealed live playback (`playing`/`checkpoint`)
+   * would put the ENTIRE match's future state into client memory the
+   * instant it's fetched, a genuine spoiler/integrity leak no amount of
+   * careful render-time windowing can undo (unlike `warRoomEvents`/
+   * `timelineMarkers` above, which are built incrementally in
+   * `ReplayPremiereRuntime.ts` and structurally cannot contain unreleased
+   * content). The `revealed`/`archived` states this SAME live runtime
+   * produces are still bound to the viewer's own local playhead
+   * (`maxSeekableTurn` stays the current turn, never `null`, in live
+   * Premiere mode — see that field's own doc), so they are not a genuine
+   * "whole match now safe" re-watch either. `ReplayPremiereArchiveView.ts`'s
+   * static archive summary carries no per-turn artifact data at all (see
+   * its own `archivedTimelineMarkers` doc). A real, fully-windowed
+   * match-state strip only ever appears via the SEPARATE Full Replay /
+   * archived-re-watch path (`Main.ts`'s `openAiLeagueReplay` chain into
+   * `AiLeagueReplayOverlay.ts`), which fetches and windows the real
+   * artifact safely because it never mounts for a sealed Premiere.
+   */
+  matchStateStrip: MatchStateStripInput | null;
 }
 
 export interface ReplayPremiereRailSeatView {
@@ -898,6 +922,7 @@ const VOLATILE_MODEL_KEYS: Record<string, true> = {
   maxSeekableTurn: true,
   analystEvents: true,
   analystActionKindCounts: true,
+  matchStateStrip: true,
 };
 
 function structuralModelKey(model: ReplayPremiereOverlayModel): string {
@@ -1050,6 +1075,29 @@ function applyVolatileModelUpdates(
       analyst.replaceWith(nextAnalyst);
     }
   }
+  // Always `null` in production for THIS overlay — see the model field's
+  // own doc — but patched exactly like every other region above so a
+  // future real value (or a direct test-constructed model) is handled
+  // through the SAME insert/update/remove path, never a special case.
+  const existingStrip = overlay.querySelector<HTMLElement>(
+    ".broadcast-state-strip",
+  );
+  if (model.matchStateStrip === null) {
+    existingStrip?.remove();
+  } else {
+    const nextStripKey = JSON.stringify(model.matchStateStrip);
+    if (existingStrip === null) {
+      const nextStrip = renderMatchStateStrip(model.matchStateStrip);
+      nextStrip.dataset.stateStripKey = nextStripKey;
+      overlay
+        .querySelector<HTMLElement>(".rp-broadcast-regions-wrapper")
+        ?.prepend(nextStrip);
+    } else if (existingStrip.dataset.stateStripKey !== nextStripKey) {
+      const nextStrip = renderMatchStateStrip(model.matchStateStrip);
+      nextStrip.dataset.stateStripKey = nextStripKey;
+      existingStrip.replaceWith(nextStrip);
+    }
+  }
 }
 
 /**
@@ -1178,7 +1226,7 @@ function renderBroadcastRegions(
   timelinePanel.append(timeline);
   const analysisPanel = element("div", "rp-drawer-panel");
   analysisPanel.append(analyst);
-  return renderBroadcastDrawer(
+  const drawer = renderBroadcastDrawer(
     [
       { id: "agents", content: agentsPanel },
       { id: "events", content: eventsPanel },
@@ -1190,6 +1238,18 @@ function renderBroadcastRegions(
       onTabChange: broadcastState.setActiveDrawerTab,
     },
   );
+  // Always the SAME wrapper shape regardless of `model.matchStateStrip`'s
+  // null-ness (a volatile field — see its own doc): `applyVolatileModelUpdates`
+  // patches the strip in/out of this wrapper in place, so the structural
+  // shape returned here must never itself depend on that field's value.
+  const wrapper = element("div", "rp-broadcast-regions-wrapper");
+  if (model.matchStateStrip !== null) {
+    const strip = renderMatchStateStrip(model.matchStateStrip);
+    strip.dataset.stateStripKey = JSON.stringify(model.matchStateStrip);
+    wrapper.append(strip);
+  }
+  wrapper.append(drawer);
+  return wrapper;
 }
 
 function renderOverlay(
@@ -4166,6 +4226,38 @@ const OVERLAY_CSS = `
     background: var(--rp-surface);
     padding: 13px;
   }
+  /* The wrapper is layout-transparent: renderBroadcastRegions always
+     returns this same shape (strip optional, drawer always present) so the
+     volatile-patch path never has to rebuild it -- see that function's own
+     doc. display:contents keeps its children exactly where they'd sit
+     if the wrapper element did not exist at all. */
+  #${OVERLAY_ID} .rp-broadcast-regions-wrapper { display: contents; }
+  #${OVERLAY_ID} .broadcast-state-strip {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px 14px;
+    border: 1px solid var(--rp-line);
+    border-radius: var(--rp-r-lg);
+    background: var(--rp-surface);
+    padding: 9px 13px;
+    margin: 0 0 10px;
+  }
+  #${OVERLAY_ID} .broadcast-state-strip-item {
+    display: flex;
+    align-items: baseline;
+    gap: 5px;
+    font-size: 12px;
+  }
+  #${OVERLAY_ID} .broadcast-state-strip-label {
+    color: var(--rp-muted);
+    font-weight: 700;
+  }
+  #${OVERLAY_ID} .broadcast-state-strip-value {
+    color: var(--rp-text-dim);
+    font-weight: 600;
+  }
+  #${OVERLAY_ID} .broadcast-state-strip-delta[data-direction="up"] .broadcast-state-strip-value { color: var(--rp-positive); }
+  #${OVERLAY_ID} .broadcast-state-strip-delta[data-direction="down"] .broadcast-state-strip-value { color: var(--rp-danger); }
   #${OVERLAY_ID} .broadcast-rail-heading-row,
   #${OVERLAY_ID} .broadcast-war-room-heading-row {
     display: flex;

@@ -426,6 +426,12 @@ function buildArchivedOverlayModel(
     analystEvents: [],
     analystActionKindCounts: [],
     analystDecisionsUnavailableReason: "premiere_sealed",
+    // No per-turn artifact data survives archival either (same gap the
+    // block above documents) — real match-state-strip data only ever
+    // reaches a viewer via the separate "watch full replay" action into
+    // `openAiLeagueReplay`/`AiLeagueReplayOverlay.ts` (see the model
+    // field's own doc), never this durable summary page.
+    matchStateStrip: null,
     headlineEvent: null,
     markerPolicySeatId: null,
     share: null,

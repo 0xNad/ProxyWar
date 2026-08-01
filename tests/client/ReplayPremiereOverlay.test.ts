@@ -2048,6 +2048,99 @@ describe("broadcast composition regions (Stage 4 item 1)", () => {
     );
   });
 
+  it("renders no match-state strip at all for a sealed live premiere (playing/checkpoint) — matchStateStrip stays null by design", () => {
+    for (const state of ["playing", "checkpoint"] as const) {
+      const handle = mount(
+        makeModel({ state, matchStateStrip: null, currentTurn: 50 }),
+      );
+      expect(handle.element.querySelector(".broadcast-state-strip")).toBeNull();
+    }
+  });
+
+  it("renders the match-state strip when the model provides one (Full Replay / archived re-watch)", () => {
+    const handle = mount(
+      makeModel({
+        state: "archived",
+        reveal: resultsReveal(),
+        matchStateStrip: {
+          leader: { displayName: "Atlas Prime", territoryPercent: 62 },
+          territoryShareDeltaPercent: 4,
+          aliveCount: 3,
+          totalCount: 4,
+          activeAllianceCount: 1,
+          activeWarCount: 2,
+          currentPhaseLabel: "Final conflict",
+        },
+      }),
+    );
+    const strip = handle.element.querySelector(".broadcast-state-strip");
+    expect(strip).not.toBeNull();
+    expect(strip?.textContent).toContain("name=Atlas Prime,percent=62");
+    expect(strip?.textContent).toContain("alive=3,total=4");
+    expect(strip?.textContent).toContain("alliances=1,wars=2");
+    expect(strip?.textContent).toContain("Final conflict");
+  });
+
+  it("patches the match-state strip in place across hydrates without a full teardown (volatile-patch stability)", () => {
+    const model = makeModel({
+      state: "playing",
+      currentTurn: 50,
+      releasedSequence: 50,
+      maxSeekableTurn: 50,
+      totalTurns: 50,
+      matchStateStrip: {
+        leader: { displayName: "Atlas Prime", territoryPercent: 55 },
+        territoryShareDeltaPercent: 2,
+        aliveCount: 4,
+        totalCount: 4,
+        activeAllianceCount: 0,
+        activeWarCount: 1,
+        currentPhaseLabel: "Opening",
+      },
+    });
+    const handle = mount(model);
+    const ambientBefore = handle.element.querySelector<HTMLButtonElement>(
+      "[data-focus-key=ambient]",
+    );
+    const stripBefore = handle.element.querySelector(".broadcast-state-strip");
+    expect(stripBefore).not.toBeNull();
+
+    for (let frame = 1; frame <= 5; frame += 1) {
+      handle.hydrate({
+        ...model,
+        currentTurn: 50 + frame,
+        matchStateStrip: {
+          leader: { displayName: "Atlas Prime", territoryPercent: 55 + frame },
+          territoryShareDeltaPercent: 2,
+          aliveCount: 4,
+          totalCount: 4,
+          activeAllianceCount: 0,
+          activeWarCount: 1,
+          currentPhaseLabel: "Opening",
+        },
+      });
+    }
+
+    // Never touched by the strip patch: the overlay's own chrome survives.
+    expect(
+      handle.element.querySelector<HTMLButtonElement>(
+        "[data-focus-key=ambient]",
+      ),
+    ).toBe(ambientBefore);
+    // The strip content itself DID keep updating (patch, not "stop
+    // updating") — latest frame's territory percent is visible.
+    expect(
+      handle.element.querySelector(".broadcast-state-strip")?.textContent,
+    ).toContain("percent=60");
+
+    // Transitioning to `matchStateStrip: null` removes it cleanly; back to
+    // a real value re-inserts it — both through the same volatile path.
+    handle.hydrate({ ...model, matchStateStrip: null });
+    expect(handle.element.querySelector(".broadcast-state-strip")).toBeNull();
+    handle.hydrate({ ...model });
+    expect(handle.element.querySelector(".broadcast-state-strip")).not.toBeNull();
+  });
+
   it("does not rebuild the rail/timeline/analyst DOM when a hydrate repeats identical broadcast data", () => {
     // Complements the churn regression above: the per-region content keys
     // must not rebuild on every hydrate unconditionally either — only when
@@ -2411,6 +2504,7 @@ function makeModel(
     analystEvents: [],
     analystActionKindCounts: [],
     analystDecisionsUnavailableReason: "premiere_sealed",
+    matchStateStrip: null,
     ...overrides,
   };
 }

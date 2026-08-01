@@ -58,6 +58,13 @@ describe("AiLeagueReplayArtifacts", () => {
           segments: [],
         });
       }
+      if (url.endsWith("/match-state-series.json")) {
+        return jsonResponse({
+          schemaVersion: 1,
+          totalTurns: 50_400,
+          samples: [],
+        });
+      }
       throw new Error(`unexpected request ${url}`);
     });
 
@@ -65,7 +72,7 @@ describe("AiLeagueReplayArtifacts", () => {
       fetchImpl,
     });
 
-    expect(fetchImpl).toHaveBeenCalledTimes(4);
+    expect(fetchImpl).toHaveBeenCalledTimes(5);
     expect(
       fetchImpl.mock.calls.map(([input]) => String(input)).join("\n"),
     ).not.toContain("decisions.jsonl");
@@ -85,6 +92,10 @@ describe("AiLeagueReplayArtifacts", () => {
     expect(details.directorCutPlan).toMatchObject({
       schemaVersion: 1,
       reportKind: "director-cut-plan",
+    });
+    expect(details.matchStateSeries).toMatchObject({
+      schemaVersion: 1,
+      totalTurns: 50_400,
     });
   });
 

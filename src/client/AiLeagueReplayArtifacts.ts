@@ -39,6 +39,16 @@ export interface AiLeagueReplayDetails {
    * failure, or fetch error) — Director Cut mode is simply unavailable,
    * never a hard error; Full Replay is unaffected either way. */
   directorCutPlan: unknown;
+  /** Season Zero broadcast match-state strip. Raw, unvalidated JSON from
+   * `match-state-series.json` (`AgentMatchStateSeries.ts`) — the overlay
+   * layer owns runtime shape-checking via its own local normalizer, same
+   * split as `directorCutPlan` above. `null` when absent (older bundle,
+   * generation failure, or fetch error) — the state strip is simply
+   * unavailable, never a hard error. This overlay only ever mounts for
+   * Full Replay / archived re-watch (never a sealed live Premiere — see
+   * `ReplayPremiereOverlay.ts`'s `matchStateStrip` doc), so fetching this
+   * whole-match artifact here is always safe. */
+  matchStateSeries: unknown;
   artifactAvailability: AiLeagueReplayArtifactAvailability;
 }
 
@@ -86,6 +96,9 @@ export async function loadAiLeagueReplayDetails(
   const directorCutPlanResultPromise = Promise.allSettled([
     request("director-cut-plan.json"),
   ]);
+  const matchStateSeriesResultPromise = Promise.allSettled([
+    request("match-state-series.json"),
+  ]);
   const [uiResult, summaryResult] = await coreResultsPromise;
 
   const replayUi = await parsedReplayUi(uiResult);
@@ -120,6 +133,7 @@ export async function loadAiLeagueReplayDetails(
     summary: Object.keys(summary).length > 0 ? summary : null,
     spectatorTelemetry: null,
     directorCutPlan: null,
+    matchStateSeries: null,
     artifactAvailability: {
       visualReport,
       spectatorTelemetry: false,
@@ -136,10 +150,15 @@ export async function loadAiLeagueReplayDetails(
   const directorCutPlan = await parsedJson(
     fulfilledOk(directorCutPlanResult),
   );
+  const [matchStateSeriesResult] = await matchStateSeriesResultPromise;
+  const matchStateSeries = await parsedJson(
+    fulfilledOk(matchStateSeriesResult),
+  );
   return {
     ...partialDetails,
     spectatorTelemetry,
     directorCutPlan,
+    matchStateSeries,
     artifactAvailability: {
       ...partialDetails.artifactAvailability,
       spectatorTelemetry: telemetryResponse !== null,

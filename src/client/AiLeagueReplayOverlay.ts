@@ -8,6 +8,7 @@ import {
   renderAnalystPanel,
   renderBroadcastDrawer,
   renderCompetitorRail,
+  renderMatchStateStrip,
   renderMatchTimeline,
   renderWarRoomFeed,
   type AnalystActionKindCount,
@@ -19,6 +20,7 @@ import {
   type CompetitorRailEntry,
   type CuratedWarRoomEvent,
   type LowerThirdEvent,
+  type MatchStateStripInput,
   type TimelineMarker,
   type TimelineMarkerKind,
 } from "./BroadcastComposition";
@@ -29,6 +31,7 @@ import {
 import {
   mountDirectorCutController,
   normalizeDirectorCutPlan,
+  segmentForTurn,
   type DirectorCutControllerHandle,
 } from "./DirectorCutController";
 import { fetchReadModel, type PublicAgent } from "./publicapp/ReadModelSchema";
@@ -78,7 +81,7 @@ interface AiLeagueReplayFrameAlliance {
   hasExtensionRequest: boolean;
 }
 
-interface AiLeagueReplayFramePlayer {
+export interface AiLeagueReplayFramePlayer {
   playerID: string;
   smallID: number;
   clientID: string | null;
@@ -195,6 +198,19 @@ interface AiLeagueReplayOverlayInput {
    * item 3) the first time a valid plan shows up and never re-mounts.
    */
   directorCutPlan?: unknown;
+  /**
+   * Season Zero broadcast match-state strip (spec Phase 5). Raw,
+   * unvalidated JSON from `match-state-series.json` — this overlay owns
+   * runtime shape-checking via `normalizeMatchStateSeries`, the same split
+   * `directorCutPlan` above already uses. Arrives asynchronously via
+   * `hydrate()`, same timing as `directorCutPlan`. This overlay only ever
+   * mounts for Full Replay / archived re-watch (never a sealed live
+   * Premiere — see `ReplayPremiereOverlay.ts`'s `matchStateStrip` doc for
+   * why a sealed Premiere must never fetch this whole-match artifact at
+   * all), so windowing it to the viewer's own playhead here is always
+   * safe.
+   */
+  matchStateSeries?: unknown;
 }
 
 export interface AiLeagueReplayArtifactAvailability {
@@ -256,6 +272,7 @@ export function mountAiLeagueReplayOverlay(input: AiLeagueReplayOverlayInput) {
       currentInput,
       identityByPlayerName,
       followedPlayerName,
+      directorCutHandle,
     );
   });
   // Director Cut (spec Stage 5): one controller per overlay mount, mounted
@@ -360,6 +377,7 @@ export function mountAiLeagueReplayOverlay(input: AiLeagueReplayOverlayInput) {
       currentInput,
       identityByPlayerName,
       followedPlayerName,
+      directorCutHandle,
     );
   };
   document.addEventListener(
@@ -542,6 +560,7 @@ function mountReplayDetailsBindings(
     input,
     identityByPlayerName,
     followedPlayerName,
+    directorCutHandle,
   );
   const clipContainer = overlay.querySelector<HTMLElement>(
     "[data-ai-league-clip]",
@@ -2090,6 +2109,36 @@ function overlayHtml(input: AiLeagueReplayOverlayInput): string {
         font-size: 10px;
         font-weight: 900;
       }
+      .broadcast-state-strip {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 6px 14px;
+        border: 1px solid var(--pw-line, #2a3442);
+        border-radius: 8px;
+        padding: 8px 9px;
+        margin: 0 0 10px;
+        background: var(--pw-surface, #111720);
+      }
+      .broadcast-state-strip-item {
+        display: flex;
+        align-items: baseline;
+        gap: 5px;
+        font-size: 12px;
+      }
+      .broadcast-state-strip-label {
+        color: var(--pw-text-dim, #cbd5e1);
+        font-weight: 700;
+      }
+      .broadcast-state-strip-value {
+        color: var(--pw-text, #edf1f7);
+        font-weight: 600;
+      }
+      .broadcast-state-strip-delta[data-direction="up"] .broadcast-state-strip-value {
+        color: var(--pw-positive, #34d399);
+      }
+      .broadcast-state-strip-delta[data-direction="down"] .broadcast-state-strip-value {
+        color: var(--pw-danger, #f87171);
+      }
       .broadcast-rail {
         border: 1px solid var(--pw-line, #2a3442);
         border-radius: 8px;
@@ -3633,6 +3682,7 @@ function mountAiLeagueBroadcastDrawer(
   input: AiLeagueReplayOverlayInput,
   identityByPlayerName: ReadonlyMap<string, PublicAgent>,
   followedPlayerName: string | null,
+  directorCutHandle: DirectorCutControllerHandle | null,
 ): void {
   const container = overlay.querySelector<HTMLElement>(
     "[data-ai-league-broadcast-drawer]",
@@ -3669,6 +3719,11 @@ function mountAiLeagueBroadcastDrawer(
     },
   ];
   const analystData = aiLeagueAnalystPanelData(input, telemetry);
+  // Parsed once per mount (like everything else above), not per frame — the
+  // artifact itself never changes within one mount's lifetime, only which
+  // sample is windowed into view does.
+  const matchStateSeries = normalizeMatchStateSeries(input.matchStateSeries);
+  const directorCutPlan = normalizeDirectorCutPlan(input.directorCutPlan);
   const dispatchJumpToTurn = (turn: number): void => {
     document.dispatchEvent(
       new CustomEvent("ai-league-replay-jump-turn", {
@@ -3724,6 +3779,37 @@ function mountAiLeagueBroadcastDrawer(
     const warRoomEvents = allWarRoomEvents.filter(
       (event) => event.turn <= turnNumber,
     );
+    // Director Cut segment (when that mode is on) takes priority over the
+    // sample's own phase — spec item 3. `segmentForTurn` is a cheap binary
+    // search, safe to call every frame exactly like the rest of this
+    // closure already does.
+    const activeSegment =
+      directorCutHandle?.isEnabled() === true && directorCutPlan !== null
+        ? (segmentForTurn(directorCutPlan, turnNumber)?.segment ?? null)
+        : null;
+    const stripFields = deriveMatchStateStripFields(
+      matchStateSeries,
+      turnNumber,
+      framePlayers,
+      identityByPlayerName,
+    );
+    const stripInput: MatchStateStripInput | null =
+      stripFields === null
+        ? null
+        : {
+            leader: stripFields.leader,
+            territoryShareDeltaPercent: stripFields.territoryShareDeltaPercent,
+            aliveCount: stripFields.aliveCount,
+            totalCount: stripFields.totalCount,
+            activeAllianceCount: stripFields.activeAllianceCount,
+            activeWarCount: stripFields.activeWarCount,
+            currentPhaseLabel:
+              activeSegment !== null
+                ? activeSegment.eventReason
+                : translateText(
+                    MATCH_STATE_PHASE_LABEL_KEYS[stripFields.samplePhase],
+                  ),
+          };
     const snapshot = JSON.stringify({
       railEntries,
       warRoomEvents,
@@ -3733,6 +3819,7 @@ function mountAiLeagueBroadcastDrawer(
       activeTab,
       railCollapsed,
       warRoomCollapsed,
+      stripInput,
     });
     const panelsHost = container.querySelector<HTMLElement>(
       ".broadcast-drawer-panels",
@@ -3818,6 +3905,7 @@ function mountAiLeagueBroadcastDrawer(
       { id: "analysis", content: renderAnalystPanel(analystData) },
     ];
     container.replaceChildren(
+      ...(stripInput !== null ? [renderMatchStateStrip(stripInput)] : []),
       renderBroadcastDrawer(tabs, {
         activeTab,
         onTabChange: (nextTab) => {
@@ -4530,6 +4618,175 @@ function normalizeSpectatorTelemetry(
     return null;
   }
   return candidate as AiLeagueSpectatorTelemetry;
+}
+
+/**
+ * Client-local mirror of `AgentMatchStateSeries.ts`'s public shape (product
+ * overhaul Season Zero broadcast Phase 5). Client code never imports server
+ * modules — same pattern `DirectorCutController.ts`'s own top-of-file doc
+ * already establishes for `director-cut-plan.json`.
+ */
+export type AiLeagueMatchStatePhase = "spawn" | "active" | "finished";
+
+export interface AiLeagueMatchStateSample {
+  turn: number;
+  phase: AiLeagueMatchStatePhase;
+  agents: ReadonlyArray<{
+    playerID: string;
+    username: string;
+    alive: boolean;
+    territoryShare: number;
+    rank: number;
+  }>;
+  activeAlliancePairs: ReadonlyArray<readonly [string, string]>;
+}
+
+export interface AiLeagueMatchStateSeries {
+  totalTurns: number;
+  samples: readonly AiLeagueMatchStateSample[];
+}
+
+export function normalizeMatchStateSeries(value: unknown): AiLeagueMatchStateSeries | null {
+  if (value === null || typeof value !== "object") {
+    return null;
+  }
+  const candidate = value as Record<string, unknown>;
+  if (
+    candidate.schemaVersion !== 1 ||
+    typeof candidate.totalTurns !== "number" ||
+    !Array.isArray(candidate.samples)
+  ) {
+    return null;
+  }
+  for (const sample of candidate.samples) {
+    if (
+      typeof sample !== "object" ||
+      sample === null ||
+      typeof (sample as Partial<AiLeagueMatchStateSample>).turn !== "number" ||
+      !["spawn", "active", "finished"].includes(
+        (sample as Partial<AiLeagueMatchStateSample>).phase as string,
+      ) ||
+      !Array.isArray((sample as Partial<AiLeagueMatchStateSample>).agents) ||
+      !Array.isArray(
+        (sample as Partial<AiLeagueMatchStateSample>).activeAlliancePairs,
+      )
+    ) {
+      return null;
+    }
+    for (const agent of (sample as AiLeagueMatchStateSample).agents) {
+      if (
+        typeof agent !== "object" ||
+        agent === null ||
+        typeof agent.playerID !== "string" ||
+        typeof agent.username !== "string" ||
+        typeof agent.alive !== "boolean" ||
+        typeof agent.territoryShare !== "number" ||
+        typeof agent.rank !== "number"
+      ) {
+        return null;
+      }
+    }
+  }
+  return candidate as unknown as AiLeagueMatchStateSeries;
+}
+
+const MATCH_STATE_PHASE_LABEL_KEYS: Record<AiLeagueMatchStatePhase, string> = {
+  spawn: "broadcast.phase_spawn",
+  active: "broadcast.phase_active",
+  finished: "broadcast.phase_finished",
+};
+
+/**
+ * Windows the whole-match `match-state-series.json` artifact down to the
+ * ONE sample at or before the viewer's own playhead — the same released/
+ * redaction boundary every other broadcast region in this file already
+ * enforces (`warRoomEvents.filter(event.turn <= turnNumber)` above), just
+ * applied to a differently-shaped artifact. Never a future sample: if the
+ * playhead is before the first sample, there is no safe sample yet and this
+ * returns `null` — the strip stays entirely absent for that frame, exactly
+ * like `renderMatchStateStrip`'s own null-tolerant `leader`/`currentPhaseLabel`
+ * fields already do for a single missing field.
+ *
+ * `activeWarCount` deliberately does NOT come from the series — it has no
+ * war/peace concept at all (`AgentMatchStateSeries.ts`'s own module doc:
+ * a formal war flag "would have to be inferred from attack recency — not a
+ * real recorded state", the same fabrication class that doc already
+ * refuses). Instead this reuses the SAME live-frame `targets`/`allies`
+ * arrays `aiLeagueRailRelations` already trusts for the identical "wars"
+ * concept on the competitor rail, aggregated into unique pairs.
+ *
+ * `currentPhaseLabel` is resolved by the caller (Director Cut's active
+ * segment when that mode is on; this sample's own `phase` — translated —
+ * otherwise), so it is not part of this function's return.
+ */
+export function deriveMatchStateStripFields(
+  series: AiLeagueMatchStateSeries | null,
+  currentTurn: number,
+  framePlayers: readonly AiLeagueReplayFramePlayer[],
+  identityByPlayerName: ReadonlyMap<string, PublicAgent>,
+): (Omit<MatchStateStripInput, "currentPhaseLabel"> & {
+  samplePhase: AiLeagueMatchStatePhase;
+}) | null {
+  if (series === null) return null;
+  let sample: AiLeagueMatchStateSample | null = null;
+  let previousSample: AiLeagueMatchStateSample | null = null;
+  for (const candidate of series.samples) {
+    if (candidate.turn > currentTurn) break;
+    previousSample = sample;
+    sample = candidate;
+  }
+  if (sample === null) return null;
+  const leaderAgent = sample.agents.find((agent) => agent.rank === 1) ?? null;
+  const leader =
+    leaderAgent === null
+      ? null
+      : {
+          displayName:
+            identityByPlayerName.get(leaderAgent.username)?.displayName ??
+            aiLeagueSpectatorDisplayName(leaderAgent.username),
+          territoryPercent: leaderAgent.territoryShare * 100,
+        };
+  let territoryShareDeltaPercent: number | null = null;
+  if (leaderAgent !== null && previousSample !== null) {
+    const previousAgent = previousSample.agents.find(
+      (agent) => agent.playerID === leaderAgent.playerID,
+    );
+    if (previousAgent !== undefined) {
+      territoryShareDeltaPercent =
+        (leaderAgent.territoryShare - previousAgent.territoryShare) * 100;
+    }
+  }
+  return {
+    leader,
+    territoryShareDeltaPercent,
+    aliveCount: sample.agents.filter((agent) => agent.alive).length,
+    totalCount: sample.agents.length,
+    activeAllianceCount: sample.activeAlliancePairs.length,
+    activeWarCount: activeWarPairCount(framePlayers),
+    samplePhase: sample.phase,
+  };
+}
+
+/** Unique at-war PAIRS (never double-counted A-vs-B/B-vs-A) among the
+ * current live frame roster, same bidirectional-targets-minus-allies
+ * detection `aiLeagueRailRelations` already uses per-player, aggregated. */
+export function activeWarPairCount(
+  framePlayers: readonly AiLeagueReplayFramePlayer[],
+): number {
+  const bySmallID = new Map(framePlayers.map((player) => [player.smallID, player]));
+  const counted = new Set<string>();
+  for (const player of framePlayers) {
+    const allied = new Set(Array.isArray(player.allies) ? player.allies : []);
+    const targets = Array.isArray(player.targets) ? player.targets : [];
+    for (const targetSmallID of targets) {
+      if (allied.has(targetSmallID) || !bySmallID.has(targetSmallID)) continue;
+      const pairKey = [player.smallID, targetSmallID]
+        .sort((a, b) => a - b)
+        .join(":");
+      counted.add(pairKey);
+    }
+  }
+  return counted.size;
 }
 
 function agentName(

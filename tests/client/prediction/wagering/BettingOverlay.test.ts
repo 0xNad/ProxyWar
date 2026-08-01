@@ -45,6 +45,7 @@ function model(
     analystEvents: [],
     analystActionKindCounts: [],
     analystDecisionsUnavailableReason: "premiere_sealed",
+    matchStateStrip: null,
     ...overrides,
   };
 }

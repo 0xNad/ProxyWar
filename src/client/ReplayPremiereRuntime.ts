@@ -4851,6 +4851,10 @@ export class ReplayPremiereRuntimeController {
       // `pushWarRoomEvent`'s `plan_change` doc) — a genuine, permanent
       // data gap, never "still mid-premiere."
       analystDecisionsUnavailableReason: "premiere_sealed",
+      // See the model field's own doc: never populated from this live
+      // runtime, in ANY state it produces — real data only ever reaches
+      // the overlay via the separate Full Replay / archived-re-watch path.
+      matchStateStrip: null,
       markerCounts: {
         ...(this.reactionSummary?.byKind ?? this.ownMarkCounts),
       },
