@@ -923,10 +923,16 @@ async function runProxyWarEpisode(
   );
   const startedAt = Date.now();
   const mapLoader = new StaticMapLoader();
+  // cache:false — this process runs exactly one game, so the module-level map
+  // cache would only retain a dead master copy. The single parsed dataset
+  // below serves BOTH the spawn-candidate scan and (via the mirror's
+  // preloadedTerrain) the game itself; on World that removes two of the three
+  // full map copies the episode used to hold.
   const terrain = await modules.loadTerrainMap(
     selectedGameConfig.gameMap,
     selectedGameConfig.gameMapSize,
     mapLoader,
+    { cache: false },
   );
   const spawnCandidates = modules.buildSpawnCandidates(terrain.gameMap, {
     maxCandidates: 1000,
@@ -968,7 +974,10 @@ async function runProxyWarEpisode(
       `[MEM] ${label} turn=${turnNumber} rssMB=${mb(usage.rss)} heapUsedMB=${mb(usage.heapUsed)} heapTotalMB=${mb(usage.heapTotal)} externalMB=${mb(usage.external)} arrayBuffersMB=${mb(usage.arrayBuffers)}`,
     );
   };
-  const mirror = new modules.AgentLocalGameMirror(mapLoader, log);
+  // Hand the episode's map dataset to the mirror's game (ownership transfer:
+  // the game mutates tile state in place; the spawn scan above already ran on
+  // the pristine pre-game state, exactly like its former private copy).
+  const mirror = new modules.AgentLocalGameMirror(mapLoader, log, terrain);
   // Time-based curve too (snapshots can be sparse); unref'd so it never holds
   // the process open, cleared on completion.
   const memTelemetryTimer = setInterval(
