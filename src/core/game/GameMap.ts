@@ -83,10 +83,11 @@ export class GameMapImpl implements GameMap {
   private readonly width_: number;
   private readonly height_: number;
 
-  // Lookup tables (LUTs) contain pre-computed values to avoid performing division at runtime
-  private readonly refToX: number[];
-  private readonly refToY: number[];
-  private readonly yToRef: number[];
+  // Tile refs are row-major (ref = y * width + x), so coordinates are pure
+  // arithmetic. The former refToX/refToY/yToRef lookup tables cost ~16 MB per
+  // million tiles per map instance (plain JS number arrays) — on World-scale
+  // maps that was the single largest fixed allocation in the game process.
+  private readonly numTiles_: number;
 
   // Terrain bits (Uint8Array)
   private static readonly IS_LAND_BIT = 7;
@@ -115,19 +116,7 @@ export class GameMapImpl implements GameMap {
     this.height_ = height;
     this.terrain = terrainData;
     this.state = new Uint16Array(width * height);
-    // Precompute the LUTs
-    let ref = 0;
-    this.refToX = new Array(width * height);
-    this.refToY = new Array(width * height);
-    this.yToRef = new Array(height);
-    for (let y = 0; y < height; y++) {
-      this.yToRef[y] = ref;
-      for (let x = 0; x < width; x++) {
-        this.refToX[ref] = x;
-        this.refToY[ref] = y;
-        ref++;
-      }
-    }
+    this.numTiles_ = width * height;
   }
   numTilesWithFallout(): number {
     return this._numTilesWithFallout;
@@ -137,19 +126,19 @@ export class GameMapImpl implements GameMap {
     if (!this.isValidCoord(x, y)) {
       throw new Error(`Invalid coordinates: ${x},${y}`);
     }
-    return this.yToRef[y] + x;
+    return y * this.width_ + x;
   }
 
   isValidRef(ref: TileRef): boolean {
-    return ref >= 0 && ref < this.refToX.length;
+    return ref >= 0 && ref < this.numTiles_;
   }
 
   x(ref: TileRef): number {
-    return this.refToX[ref];
+    return ref % this.width_;
   }
 
   y(ref: TileRef): number {
-    return this.refToY[ref];
+    return Math.floor(ref / this.width_);
   }
 
   cell(ref: TileRef): Cell {
@@ -324,7 +313,7 @@ export class GameMapImpl implements GameMap {
   neighbors(ref: TileRef): TileRef[] {
     const neighbors: TileRef[] = [];
     const w = this.width_;
-    const x = this.refToX[ref];
+    const x = ref % w;
 
     if (ref >= w) neighbors.push(ref - w);
     if (ref < (this.height_ - 1) * w) neighbors.push(ref + w);
@@ -363,7 +352,7 @@ export class GameMapImpl implements GameMap {
     const maxY = Math.min(this.height_ - 1, center.y + radius);
     for (let i = minX; i <= maxX; ++i) {
       for (let j = minY; j <= maxY; j++) {
-        const t = this.yToRef[j] + i;
+        const t = j * this.width_ + i;
         const d2 = this.euclideanDistSquared(tile, t);
         if (d2 > radius * radius) continue;
         if (!filter || filter(t, d2)) {
