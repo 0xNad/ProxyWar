@@ -133,6 +133,9 @@ describe("ExternalHttpAgentBrain", () => {
     const decision = await brain.decide({ observation, legalActions });
 
     expect(decision.actionID).toBe("expand:terra-nullius:10");
+    // A genuine (non-fallback) decision keeps its real stated reason —
+    // unaffected by the fallback-path P0 fix below.
+    expect(decision.reason).toBe("Early neutral expansion is safe and useful.");
     expect(decision.metadata).toMatchObject({
       brain: "external-http",
       parseSuccess: true,
@@ -156,7 +159,7 @@ describe("ExternalHttpAgentBrain", () => {
     });
   });
 
-  it("falls back safely when the endpoint returns an unknown action id", async () => {
+  it("falls back safely when the endpoint returns an unknown action id, recording no stated reason", async () => {
     const brain = new ExternalHttpAgentBrain({
       endpointUrl: "https://1.1.1.1/decide",
       profile: "aggressive",
@@ -173,15 +176,28 @@ describe("ExternalHttpAgentBrain", () => {
     const decision = await brain.decide({ observation, legalActions });
 
     expect(decision.actionID).toBe("expand:terra-nullius:10");
-    expect(decision.reason).toContain("External agent fallback");
+    // P0 fix: a fallback decision has no stated reason — the external agent
+    // never produced a usable one, so `reason` is null rather than a
+    // synthesized "External agent fallback (...); ..." string.
+    expect(decision.reason).toBeNull();
     expect(decision.metadata).toMatchObject({
       brain: "external-http",
       parseSuccess: false,
       fallbackUsed: true,
     });
+    // The distinct fields carry what `reason` used to conflate: the
+    // external-agent failure text (unchanged field), and the substituted
+    // rule brain's own genuine reason (new field).
+    expect(decision.metadata?.externalFailureReason).toContain(
+      "unknown selectedLegalActionId",
+    );
+    expect(typeof decision.metadata?.fallbackReason).toBe("string");
+    expect(decision.metadata?.fallbackReason).not.toContain(
+      "External agent fallback",
+    );
   });
 
-  it("falls back safely when the endpoint returns extra JSON fields", async () => {
+  it("falls back safely when the endpoint returns extra JSON fields, recording no stated reason", async () => {
     const brain = new ExternalHttpAgentBrain({
       endpointUrl: "https://1.1.1.1/decide",
       profile: "aggressive",
@@ -199,12 +215,13 @@ describe("ExternalHttpAgentBrain", () => {
     const decision = await brain.decide({ observation, legalActions });
 
     expect(decision.actionID).toBe("expand:terra-nullius:10");
-    expect(decision.reason).toContain("External agent fallback");
+    expect(decision.reason).toBeNull();
     expect(decision.metadata).toMatchObject({
       brain: "external-http",
       parseSuccess: false,
       fallbackUsed: true,
     });
+    expect(typeof decision.metadata?.fallbackReason).toBe("string");
   });
 
   it("retries transient network resets before falling back", async () => {
@@ -233,13 +250,14 @@ describe("ExternalHttpAgentBrain", () => {
 
     expect(attempts).toBe(2);
     expect(decision.actionID).toBe("expand:terra-nullius:10");
+    expect(decision.reason).toBe("Retried after a transient socket reset.");
     expect(decision.metadata).toMatchObject({
       parseSuccess: true,
       fallbackUsed: false,
     });
   });
 
-  it("falls back safely when the endpoint times out", async () => {
+  it("falls back safely when the endpoint times out, recording no stated reason", async () => {
     const brain = new ExternalHttpAgentBrain({
       endpointUrl: "https://1.1.1.1/slow",
       profile: "aggressive",
@@ -255,6 +273,8 @@ describe("ExternalHttpAgentBrain", () => {
     const decision = await brain.decide({ observation, legalActions });
 
     expect(decision.actionID).toBe("expand:terra-nullius:10");
+    expect(decision.reason).toBeNull();
     expect(decision.metadata?.externalFailureReason).toContain("timed out");
+    expect(typeof decision.metadata?.fallbackReason).toBe("string");
   });
 });
