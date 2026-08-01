@@ -411,16 +411,39 @@ function computeCompositeScore(evidence: FeaturedMatchEvidence): number | null {
   return scores.reduce((total, value) => total + value, 0) / scores.length;
 }
 
+/**
+ * `CoworldLeagueEpisodeRow.players` carries no policy label at all (same
+ * Coworld hosted-replay shape limitation `CoworldLeagueSiteWriter.ts`'s own
+ * `battleCard` documents for the identical reason) — historical, per-match
+ * policy provenance genuinely does not exist for a hosted episode. But this
+ * function does not need the HISTORICAL label: a Featured Event's
+ * participant card is about "who this agent IS today" (spec decision #5:
+ * "current strategy description... version history"), and `standings`
+ * (already threaded into `buildCandidate` for `reasonToWatchClaims`'
+ * current-rank cross-reference — same precedent) carries each player's
+ * CURRENT `ratingPolicyLabel`/`activeChampionPolicyLabel` by name. Without
+ * this cross-reference every participant's `agentVersionId` resolved to
+ * `null` unconditionally, which fails `EventPackageGate.isPubliclyPromotable`
+ * for every candidate this CLI ever ranks — never a hand-wavable gap.
+ * Falls back to `null` (never fabricated) for a participant who no longer
+ * appears in current standings.
+ */
 function buildParticipants(
   row: CoworldLeagueEpisodeRow,
   identity: IdentityRegistrySnapshot,
+  standings: readonly CoworldLeagueStandingRow[],
 ): FeaturedMatchParticipant[] {
+  const standingByName = new Map(
+    standings.map((standing) => [standing.playerName, standing]),
+  );
   return row.players.map((player) => {
+    const standing = standingByName.get(player.name);
     const view = resolveAgentIdentityView(
       {
         playerName: player.name,
-        ratingPolicyLabel: null,
-        activeChampionPolicyLabel: null,
+        ratingPolicyLabel:
+          standing?.ratingPolicyLabel ?? standing?.policyLabel ?? null,
+        activeChampionPolicyLabel: standing?.activeChampionPolicyLabel ?? null,
       },
       identity.agents,
       identity.builders,
@@ -522,7 +545,7 @@ async function buildCandidate(
     queueItemName: null,
     title: buildTitle(row),
     description: buildDescription(row),
-    participants: buildParticipants(row, identity),
+    participants: buildParticipants(row, identity, standings),
     map: row.map,
     format: `${row.players.length}-player free-for-all`,
     provenance: {
