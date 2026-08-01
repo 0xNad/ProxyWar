@@ -3,6 +3,7 @@ import {
   buildRegistrationDraft,
   buildRegistrationIssueUrl,
   BuildRegistrationSubmissionInputSchema,
+  firstFieldError,
   type BuildRegistrationSubmissionInput,
 } from "../../../src/server/identity/BuildRegistrationSubmission";
 import { deriveEmblemPalette } from "../../../src/server/identity/IdentityEmblems";
@@ -135,5 +136,55 @@ describe("buildRegistrationIssueUrl", () => {
     const url = buildRegistrationIssueUrl(draft);
     const body = new URL(url).searchParams.get("body") ?? "";
     expect(body).not.toContain('"verifiedGithub"');
+  });
+});
+
+describe("firstFieldError", () => {
+  // 2026-08-01 P1 regression: a space in the optional GitHub-username field
+  // (e.g. pasting a display name like "James Botts" instead of a bare
+  // handle) 400'd with no field indication at all — just the generic
+  // "Couldn't generate the submission" banner on the client. This is the
+  // exact reproduction.
+  test("names claimedGithub with reason \"format\" for a space-containing value", () => {
+    const parsed = BuildRegistrationSubmissionInputSchema.safeParse(
+      baseInput({ claimedGithub: "James Botts" }),
+    );
+    expect(parsed.success).toBe(false);
+    if (parsed.success) throw new Error("unreachable");
+    expect(firstFieldError(parsed.error)).toEqual({
+      field: "claimedGithub",
+      reason: "format",
+    });
+  });
+
+  test("leaving the optional claimedGithub field empty (null) still succeeds — never a field error", () => {
+    const parsed = BuildRegistrationSubmissionInputSchema.safeParse(
+      baseInput({ claimedGithub: null }),
+    );
+    expect(parsed.success).toBe(true);
+  });
+
+  test("names a required field left empty with reason \"required\"", () => {
+    const parsed = BuildRegistrationSubmissionInputSchema.safeParse(
+      baseInput({ agentName: "" }),
+    );
+    expect(parsed.success).toBe(false);
+    if (parsed.success) throw new Error("unreachable");
+    expect(firstFieldError(parsed.error)).toEqual({
+      field: "agentName",
+      reason: "required",
+    });
+  });
+
+  test("names an over-length field with reason \"too_long\"", () => {
+    const parsed = BuildRegistrationSubmissionInputSchema.safeParse(
+      baseInput({ tagline: "x".repeat(200) }),
+    );
+    expect(parsed.success).toBe(false);
+    if (parsed.success) throw new Error("unreachable");
+    expect(firstFieldError(parsed.error)).toEqual({
+      field: "tagline",
+      reason: "too_long",
+    });
   });
 });

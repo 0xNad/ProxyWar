@@ -55,6 +55,58 @@ export type BuildRegistrationSubmissionInput = z.infer<
   typeof BuildRegistrationSubmissionInputSchema
 >;
 
+/**
+ * `/api/build/registration-submission`'s 400 response used to be a bare
+ * `{ok: false, error: "invalid_submission"}` with no field indication — a
+ * visitor who, say, typed a space into the optional GitHub-username field
+ * (`claimedGithub`'s regex rejects anything but letters/digits/hyphens) saw
+ * only a generic "check the required fields" banner with no clue WHICH
+ * field, on a form with ten of them (2026-08-01 P1 fix). `firstFieldError`
+ * turns the first Zod issue into a stable `{field, reason}` pair the route
+ * handler echoes back and the client keys an inline, per-field message off
+ * of — never exposing raw Zod internals over the wire.
+ */
+export type BuildRegistrationFieldErrorReason =
+  | "format"
+  | "required"
+  | "too_short"
+  | "too_long"
+  | "invalid";
+
+export interface BuildRegistrationFieldError {
+  field: string;
+  reason: BuildRegistrationFieldErrorReason;
+}
+
+function classifyIssueReason(
+  issue: z.ZodError["issues"][number],
+): BuildRegistrationFieldErrorReason {
+  switch (issue.code) {
+    case "invalid_format":
+      return "format";
+    case "too_small":
+      // `minimum === 1` on a trimmed string means "was left empty", i.e.
+      // the required-field case rather than a merely-too-short value.
+      return "minimum" in issue && issue.minimum === 1 ? "required" : "too_short";
+    case "too_big":
+      return "too_long";
+    case "invalid_type":
+      return "required";
+    default:
+      return "invalid";
+  }
+}
+
+export function firstFieldError(
+  error: z.ZodError,
+): BuildRegistrationFieldError | null {
+  const issue = error.issues[0];
+  if (issue === undefined) return null;
+  const field = issue.path[0];
+  if (typeof field !== "string") return null;
+  return { field, reason: classifyIssueReason(issue) };
+}
+
 /** Lowercase, hyphenated, URL-safe — same shape `SlugSchema` requires. */
 function slugify(raw: string): string {
   return raw

@@ -270,6 +270,87 @@ describe("build-page", () => {
     expect(body).toHaveProperty("claimedGithub");
   });
 
+  it("Step 3: a space-containing GitHub username shows the field-level error, never the generic banner, and never hits the network (2026-08-01 P1 fix)", async () => {
+    const el = mount();
+    await flushMicrotasks();
+    el.querySelectorAll<HTMLButtonElement>('button[aria-current]')[2].click();
+    await flushMicrotasks();
+    const form = el.querySelector("form")!;
+    const githubInput = form.querySelector<HTMLInputElement>(
+      'input[maxlength="39"]',
+    )!;
+    githubInput.value = "James Botts";
+    githubInput.dispatchEvent(new Event("input"));
+    await flushMicrotasks();
+    // Live validation already flags it before any submit attempt.
+    expect(normalizedText(el)).toContain("build_page.step3.github_error_format");
+
+    fetchMock.mockClear();
+    form.dispatchEvent(new Event("submit", { cancelable: true }));
+    await flushMicrotasks();
+    expect(
+      fetchMock.mock.calls.some(([input]) =>
+        String(input).startsWith("/api/build/registration-submission"),
+      ),
+    ).toBe(false);
+    expect(normalizedText(el)).toContain("build_page.step3.github_error_format");
+    expect(normalizedText(el)).not.toContain("build_page.step3.submit_error");
+  });
+
+  it("Step 3: leaving the optional GitHub username field empty still succeeds", async () => {
+    const el = mount();
+    await flushMicrotasks();
+    el.querySelectorAll<HTMLButtonElement>('button[aria-current]')[2].click();
+    await flushMicrotasks();
+    const form = el.querySelector("form")!;
+    form.dispatchEvent(new Event("submit", { cancelable: true }));
+    await flushMicrotasks();
+    const submissionCall = fetchMock.mock.calls.find(([input]) =>
+      String(input).startsWith("/api/build/registration-submission"),
+    );
+    expect(submissionCall).toBeDefined();
+    const [, init] = submissionCall as [RequestInfo, RequestInit];
+    const body = JSON.parse(String(init.body));
+    expect(body.claimedGithub).toBeNull();
+    expect(normalizedText(el)).toContain("build_page.step3.result_heading");
+    expect(normalizedText(el)).not.toContain(
+      "build_page.step3.github_error_format",
+    );
+  });
+
+  it("Step 3: a server 400 naming claimedGithub renders the field-level error, never the generic banner (defense in depth)", async () => {
+    fetchMock.mockImplementation(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.startsWith("/api/build/registration-submission")) {
+        return new Response(
+          JSON.stringify({
+            ok: false,
+            error: "invalid_submission",
+            field: "claimedGithub",
+            reason: "format",
+          }),
+          { status: 400 },
+        );
+      }
+      return new Response(null, { status: 404 });
+    });
+    const el = mount();
+    await flushMicrotasks();
+    el.querySelectorAll<HTMLButtonElement>('button[aria-current]')[2].click();
+    await flushMicrotasks();
+    const form = el.querySelector("form")!;
+    const githubInput = form.querySelector<HTMLInputElement>(
+      'input[maxlength="39"]',
+    )!;
+    githubInput.value = "octocat";
+    githubInput.dispatchEvent(new Event("input"));
+    await flushMicrotasks();
+    form.dispatchEvent(new Event("submit", { cancelable: true }));
+    await flushMicrotasks();
+    expect(normalizedText(el)).toContain("build_page.step3.github_error_format");
+    expect(normalizedText(el)).not.toContain("build_page.step3.submit_error");
+  });
+
   it("Step 6 renders the verify checklist without any dead/fabricated command", async () => {
     const el = mount();
     await flushMicrotasks();

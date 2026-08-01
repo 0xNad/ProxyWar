@@ -9,6 +9,28 @@ import { translateText } from "../Utils";
 import { analytics } from "../analytics/AnalyticsClient";
 
 /**
+ * MUST stay in sync with `BuildRegistrationSubmission.ts`'s `claimedGithub`
+ * Zod schema (`/^[a-zA-Z0-9-]{1,39}$/`) — validating client-side against a
+ * different pattern than the server enforces would let a value pass here
+ * and still 400 on submit, or reject something the server would accept.
+ * Checked BEFORE the network round-trip so a bad value (e.g. a space, which
+ * a person might type from a display name instead of a bare username) never
+ * has to wait on a fetch to learn it's wrong (2026-08-01 P1 fix — this field
+ * previously failed server-side with no field indication at all, just the
+ * generic "Couldn't generate the submission" banner).
+ */
+const GITHUB_USERNAME_PATTERN = /^[a-zA-Z0-9-]{1,39}$/;
+
+/** `null` (valid) unless a non-empty, non-username-shaped value was entered — the field is optional, so an empty value is always valid. */
+function validateClaimedGithub(raw: string): string | null {
+  const trimmed = raw.trim();
+  if (trimmed === "") return null;
+  return GITHUB_USERNAME_PATTERN.test(trimmed)
+    ? null
+    : translateText("build_page.step3.github_error_format");
+}
+
+/**
  * `/build` — spec Stage 7 item 1: "a visitor becomes a competing builder
  * without leaving `/build` until they genuinely need Softmax." Seven-step
  * guided flow, UNIFYING the existing paths rather than forking them:
@@ -58,6 +80,8 @@ export class BuildPage extends LitElement {
 
   @state() private submitting = false;
   @state() private submitError: string | null = null;
+  /** Field-level, shown inline under the GitHub-username input — distinct from `submitError`'s generic banner (2026-08-01 P1 fix). Set by client-side validation on input/submit, or by the server's `{field: "claimedGithub", reason}` 400 payload if it somehow gets past that. */
+  @state() private githubUsernameError: string | null = null;
   @state() private submissionResult: {
     profileFileJson: string;
     githubIssueUrl: string;
@@ -180,6 +204,16 @@ export class BuildPage extends LitElement {
   private async submitRegistration(): Promise<void> {
     this.submitting = true;
     this.submitError = null;
+    // Client-side gate: catches the exact failure the server would 400 on
+    // (2026-08-01 P1 fix) WITHOUT a network round-trip, and shows it inline
+    // under the field rather than as a generic banner.
+    const githubError = validateClaimedGithub(this.claimedGithub);
+    if (githubError !== null) {
+      this.githubUsernameError = githubError;
+      this.submitting = false;
+      return;
+    }
+    this.githubUsernameError = null;
     try {
       const response = await fetch("/api/build/registration-submission", {
         method: "POST",
@@ -217,6 +251,8 @@ export class BuildPage extends LitElement {
         ok: boolean;
         profileFileJson?: string;
         githubIssueUrl?: string;
+        field?: string;
+        reason?: string;
       };
       if (
         !response.ok ||
@@ -224,7 +260,17 @@ export class BuildPage extends LitElement {
         body.profileFileJson === undefined ||
         body.githubIssueUrl === undefined
       ) {
-        this.submitError = translateText("build_page.step3.submit_error");
+        // Defense in depth: if the server still rejects `claimedGithub`
+        // despite the client-side gate above (e.g. a future server-only
+        // rule), show it inline on that field instead of falling through
+        // to the generic banner.
+        if (body.field === "claimedGithub") {
+          this.githubUsernameError = translateText(
+            "build_page.step3.github_error_format",
+          );
+        } else {
+          this.submitError = translateText("build_page.step3.submit_error");
+        }
         return;
       }
       this.submissionResult = {
@@ -572,12 +618,29 @@ export class BuildPage extends LitElement {
             <input
               maxlength="39"
               .value=${this.claimedGithub}
-              @input=${(event: Event) =>
-                (this.claimedGithub = (
-                  event.target as HTMLInputElement
-                ).value)}
-              class="mt-1 w-full rounded-md border border-line bg-surface-2 px-3 py-2 text-sm text-ink outline-none focus-visible:ring-2 focus-visible:ring-accent"
+              aria-invalid=${this.githubUsernameError !== null ? "true" : "false"}
+              aria-describedby=${this.githubUsernameError !== null
+                ? "build-step3-github-error"
+                : nothing}
+              @input=${(event: Event) => {
+                this.claimedGithub = (event.target as HTMLInputElement).value;
+                this.githubUsernameError = validateClaimedGithub(
+                  this.claimedGithub,
+                );
+              }}
+              class="mt-1 w-full rounded-md border ${this
+                .githubUsernameError !== null
+                ? "border-danger"
+                : "border-line"} bg-surface-2 px-3 py-2 text-sm text-ink outline-none focus-visible:ring-2 focus-visible:ring-accent"
             />
+            ${this.githubUsernameError !== null
+              ? html`<span
+                  id="build-step3-github-error"
+                  role="alert"
+                  class="mt-1 block text-xs font-normal normal-case tracking-normal text-danger"
+                  >${this.githubUsernameError}</span
+                >`
+              : nothing}
           </label>
         </div>
         <p class="text-xs text-ink-muted">

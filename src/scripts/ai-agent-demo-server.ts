@@ -52,6 +52,7 @@ import {
   buildRegistrationDraft,
   buildRegistrationIssueUrl,
   BuildRegistrationSubmissionInputSchema,
+  firstFieldError,
 } from "../server/identity/BuildRegistrationSubmission";
 import { BuildFunnelCounters } from "../server/agents/BuildFunnelCounters";
 import { AnalyticsAggregateStore } from "../server/analytics/AnalyticsAggregateStore";
@@ -2337,7 +2338,16 @@ app.post("/api/build/registration-submission", (req, res) => {
   }
   const parsed = BuildRegistrationSubmissionInputSchema.safeParse(req.body);
   if (!parsed.success) {
-    res.status(400).json({ ok: false, error: "invalid_submission" });
+    // 2026-08-01 P1 fix: a bare `invalid_submission` gave a visitor no clue
+    // WHICH of the form's ten fields failed (e.g. a space in the optional
+    // GitHub-username field) — `firstFieldError` names it so the client can
+    // show an inline, per-field message instead of only a generic banner.
+    const fieldError = firstFieldError(parsed.error);
+    res.status(400).json({
+      ok: false,
+      error: "invalid_submission",
+      ...(fieldError ?? {}),
+    });
     return;
   }
   const draft = buildRegistrationDraft(parsed.data);
