@@ -68,6 +68,7 @@ function episode(
 
 async function writeMirrorData(
   episodes: CoworldLeagueEpisodeRow[],
+  standings: CoworldLeagueMirrorData["standings"] = [],
 ): Promise<void> {
   const siteDir = path.join(artifactsRoot, "ai-league-runs", "league");
   await fs.mkdir(siteDir, { recursive: true });
@@ -86,7 +87,7 @@ async function writeMirrorData(
       currentRoundStatus: null,
       scoreLabel: "Score",
     },
-    standings: [],
+    standings,
     rounds: [],
     episodes,
     links: {
@@ -504,5 +505,80 @@ describe("feature:candidates CLI", () => {
     expect(stdout[0]).toContain("rank");
     expect(stdout[0]).toContain("episodeRequestId");
     expect(stdout[0]).toContain("ereq_table");
+  });
+
+  test("resolves each participant's CURRENT agentVersionId from live standings, never fabricates one for an unmapped player", async () => {
+    // Real, committed resources/identity/ registry data (identity registry
+    // resolution is frozen to process.cwd() at MODULE LOAD time —
+    // resolveIdentityRegistryDir()'s own doc — so a per-test env override
+    // has no effect here; this deliberately exercises the real repo
+    // fixture instead of a synthetic one). agt_k1z-mickey-mouse's
+    // registered version agtv_k1z-mickey-mouse_v1 has
+    // softmaxPolicyLabel "mickey-mouse-intent:v1".
+    await writeMirrorData(
+      [
+        episode({
+          episodeRequestId: "ereq_version_resolution",
+          winnerName: "K1Z Mickey Mouse",
+          players: [
+            player({
+              slot: 0,
+              name: "K1Z Mickey Mouse",
+              isWinner: true,
+              isAlive: true,
+              tilesOwned: 900,
+            }),
+            player({
+              slot: 1,
+              name: "A Totally Unregistered Player",
+              isAlive: false,
+              tilesOwned: 0,
+            }),
+          ],
+        }),
+      ],
+      [
+        {
+          rank: 1,
+          playerName: "K1Z Mickey Mouse",
+          ratingPolicyLabel: null,
+          activeChampionPolicyLabel: "mickey-mouse-intent:v1",
+          policyLabel: null,
+          score: 1,
+          roundsPlayed: 5,
+          isHouse: false,
+        },
+      ],
+    );
+    expect(
+      await runFeatureCandidatesCli(
+        [`--artifacts-root=${artifactsRoot}`, "--json"],
+        io(),
+      ),
+    ).toBe(0);
+    const output = JSON.parse(stdout.join("\n")) as {
+      candidates: Array<{
+        match: {
+          participants: Array<{
+            playerName: string;
+            agentId: string | null;
+            agentVersionId: string | null;
+          }>;
+        };
+      }>;
+    };
+    const participants = output.candidates[0].match.participants;
+    const mapped = participants.find(
+      (p) => p.playerName === "K1Z Mickey Mouse",
+    );
+    expect(mapped?.agentId).toBe("agt_k1z-mickey-mouse");
+    expect(mapped?.agentVersionId).toBe("agtv_k1z-mickey-mouse_v1");
+    // An unmapped player (no registered AgentProfile at all) stays an
+    // honest null on both fields — never a guessed identity.
+    const unmapped = participants.find(
+      (p) => p.playerName === "A Totally Unregistered Player",
+    );
+    expect(unmapped?.agentId).toBeNull();
+    expect(unmapped?.agentVersionId).toBeNull();
   });
 });
