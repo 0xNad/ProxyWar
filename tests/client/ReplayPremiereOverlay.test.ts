@@ -1635,6 +1635,157 @@ describe("broadcast composition regions (Stage 4 item 1)", () => {
     expect(onSeek).toHaveBeenCalledWith(5000);
   });
 
+  it("an archived re-watch at playhead 0 starts with an EMPTY War Room feed and redacted markers — never the whole match's curated history (spec item 2)", () => {
+    // The exact regression this fixes: `maxSeekableTurn` is `null` for an
+    // archived/revealed rewatch (see the test above — intentionally
+    // unrestricted SEEKING), but that is NOT the same thing as "no more
+    // spoiler concern for content the viewer hasn't watched yet". Before
+    // this fix, redaction/windowing used `maxSeekableTurn` as the boundary,
+    // so it was silently skipped entirely in archived mode and a fresh
+    // re-watch rendered every curated event and every marker's real
+    // kind/label immediately, regardless of the viewer's own playhead
+    // (`model.currentTurn`), which genuinely starts at 0 for a fresh load.
+    const handle = mount(
+      makeModel({
+        state: "archived",
+        releasedSequence: 999,
+        currentTurn: 0,
+        reveal: { outcome: "winner", winnerSeatId: "seat-a" },
+        warRoomEvents: [
+          {
+            id: "wr-1",
+            kind: "betrayal",
+            turn: 300,
+            sequence: 500,
+            headline: "Borealis betrayed Atlas Prime",
+            publicReason: null,
+            participants: ["Atlas Prime", "Borealis"],
+            expandedDetail: null,
+          },
+          {
+            id: "wr-2",
+            kind: "elimination",
+            turn: 900,
+            sequence: 950,
+            headline: "Atlas Prime is eliminated",
+            publicReason: null,
+            participants: ["Atlas Prime"],
+            expandedDetail: null,
+          },
+        ],
+        timelineMarkers: [
+          { kind: "spawn", turn: 0, sequence: 0, label: "Match begins" },
+          {
+            kind: "betrayal",
+            turn: 300,
+            sequence: 500,
+            label: "Borealis betrayed Atlas Prime",
+          },
+          {
+            kind: "finish",
+            turn: 1000,
+            sequence: 999,
+            label: "Match finishes",
+          },
+        ],
+        totalTurns: 1000,
+        maxSeekableTurn: null,
+      }),
+    );
+
+    const warRoom = handle.element.querySelector(".broadcast-war-room");
+    expect(warRoom?.querySelectorAll(".broadcast-war-room-item")).toHaveLength(0);
+    expect(warRoom?.textContent).toContain("broadcast.war_room_empty");
+    expect(warRoom?.textContent).not.toContain("Borealis betrayed");
+    expect(warRoom?.textContent).not.toContain("eliminated");
+
+    const markers = handle.element.querySelectorAll<HTMLElement>(
+      ".broadcast-timeline-marker",
+    );
+    expect(markers).toHaveLength(3);
+    // turn 0 spawn: already reached — real content.
+    expect(markers[0].dataset.kind).toBe("spawn");
+    // turn 300 betrayal: not reached yet — content-free "upcoming" tick,
+    // even though the marker itself is still seekable (unrestricted).
+    expect(markers[1].dataset.kind).toBe("upcoming");
+    expect(markers[1].getAttribute("title")).toBe(
+      "broadcast.timeline_marker_upcoming",
+    );
+    expect(markers[1].dataset.seekable).toBe("true");
+    // finish is exempt from redaction (never spoiler content on its own).
+    expect(markers[2].dataset.kind).toBe("finish");
+  });
+
+  it("an archived re-watch reveals feed events and un-redacts markers as the playhead advances via hydrate (spec item 2)", () => {
+    const warRoomEvents = [
+      {
+        id: "wr-1",
+        kind: "betrayal" as const,
+        turn: 300,
+        sequence: 500,
+        headline: "Borealis betrayed Atlas Prime",
+        publicReason: null,
+        participants: ["Atlas Prime", "Borealis"],
+        expandedDetail: null,
+      },
+    ];
+    const timelineMarkers = [
+      {
+        kind: "betrayal" as const,
+        turn: 300,
+        sequence: 500,
+        label: "Borealis betrayed Atlas Prime",
+      },
+    ];
+    const model = makeModel({
+      state: "archived",
+      releasedSequence: 999,
+      currentTurn: 0,
+      reveal: { outcome: "winner", winnerSeatId: "seat-a" },
+      warRoomEvents,
+      timelineMarkers,
+      totalTurns: 1000,
+      maxSeekableTurn: null,
+    });
+    const handle = mount(model);
+
+    expect(
+      handle.element.querySelectorAll(".broadcast-war-room-item"),
+    ).toHaveLength(0);
+    expect(
+      handle.element.querySelector(".broadcast-timeline-marker"),
+    ).not.toBeNull();
+    expect(
+      handle.element.querySelector<HTMLElement>(".broadcast-timeline-marker")
+        ?.dataset.kind,
+    ).toBe("upcoming");
+
+    // Still short of the event's own turn: still windowed out.
+    handle.hydrate({ ...model, currentTurn: 299 });
+    expect(
+      handle.element.querySelectorAll(".broadcast-war-room-item"),
+    ).toHaveLength(0);
+    expect(
+      handle.element.querySelector<HTMLElement>(".broadcast-timeline-marker")
+        ?.dataset.kind,
+    ).toBe("upcoming");
+
+    // The playhead crosses the event's own turn: it appears, and the
+    // marker's real content is revealed — patched in place (see the
+    // volatile-patch key doc), never a full-panel rebuild.
+    handle.hydrate({ ...model, currentTurn: 300 });
+    const items = handle.element.querySelectorAll(".broadcast-war-room-item");
+    expect(items).toHaveLength(1);
+    expect(items[0].textContent).toContain("Borealis betrayed Atlas Prime");
+    const marker = handle.element.querySelector<HTMLElement>(
+      ".broadcast-timeline-marker",
+    );
+    expect(marker?.dataset.kind).toBe("betrayal");
+    expect(marker?.getAttribute("title")).toBe(
+      "Borealis betrayed Atlas Prime",
+    );
+  });
+
   it("resolves registered agent identity into the rail once fetched, and degrades an unmatched seat to its raw name", async () => {
     const fetchMock = vi.fn(async () => ({
       ok: true,
@@ -1929,7 +2080,13 @@ describe("broadcast composition regions (Stage 4 item 1)", () => {
     const timelineBefore = handle.element.querySelector(".broadcast-timeline");
     const analystBefore = handle.element.querySelector(".broadcast-analyst");
 
-    handle.hydrate({ ...model, releasedSequence: 1, currentTurn: 1 });
+    // currentTurn stays IDENTICAL to the initial model — it is now part of
+    // the timeline's own redaction boundary (spec item 2), so changing it
+    // is a genuine content change this same describe block's churn
+    // regression already covers; this test isolates the "truly unchanged
+    // data" case. releasedSequence alone varies as the volatile-but-
+    // irrelevant-to-these-regions per-frame noise.
+    handle.hydrate({ ...model, releasedSequence: 1 });
 
     expect(handle.element.querySelector(".broadcast-rail")).toBe(railBefore);
     expect(handle.element.querySelector(".broadcast-timeline")).toBe(
@@ -2099,6 +2256,10 @@ describe("Stage 4 second-half wiring: camera-follow, drawer, analyst mode, lower
     mount(
       makeModel({
         state: "playing",
+        // The playhead must have reached the event's own turn (spec item
+        // 2: windowed to the viewer's own actual current turn, never the
+        // network-released/seek-ceiling maxSeekableTurn).
+        currentTurn: 10,
         warRoomEvents: [
           {
             id: "wr-1",
@@ -2152,14 +2313,16 @@ describe("Stage 4 second-half wiring: camera-follow, drawer, analyst mode, lower
         },
       ];
       const handle = mount(
-        makeModel({ state: "playing", warRoomEvents }),
+        makeModel({ state: "playing", currentTurn: 10, warRoomEvents }),
       );
       const host = () =>
         document.getElementById("replay-premiere-lower-third-host");
       expect(host()?.querySelector(".broadcast-lower-third")).not.toBeNull();
       vi.advanceTimersByTime(5000);
       expect(host()?.querySelector(".broadcast-lower-third")).toBeNull();
-      handle.hydrate(makeModel({ state: "playing", warRoomEvents }));
+      handle.hydrate(
+        makeModel({ state: "playing", currentTurn: 10, warRoomEvents }),
+      );
       expect(host()?.querySelector(".broadcast-lower-third")).toBeNull();
       handle.dispose();
       expect(host()).toBeNull();

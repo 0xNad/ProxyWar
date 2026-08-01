@@ -618,13 +618,28 @@ export function mountReplayPremiereOverlay(
    * "archived" state — `isVerifiedRevealView` is the same check
    * `renderStateBody` already gates the results payoff on). The controller
    * de-dupes by `id`, so calling this on every render/hydrate is safe.
+   *
+   * Windowed to `m.currentTurn` — the viewer's own actual playhead (sourced
+   * from `this.latestFrame.turnNumber` in ReplayPremiereRuntime.ts, i.e.
+   * the SAME `ai-league-replay-frame` tick Full Replay's drawer uses) —
+   * NEVER `m.maxSeekableTurn` (the network-released/seek-ceiling boundary).
+   * A viewer can lag the released edge (buffering, a checkpoint pause,
+   * scrubbing earlier content), and `maxSeekableTurn` is `null` for an
+   * already-revealed/archived rewatch — using it here meant redaction was
+   * silently skipped entirely for exactly the case reported: an archived
+   * re-watch loads with its playhead at turn 0 but `maxSeekableTurn: null`,
+   * so every event queued and fired immediately instead of pulsing as the
+   * (re)watched match actually reaches each turn.
    */
   const syncLowerThirds = (m: ReplayPremiereOverlayModel): void => {
-    const events: LowerThirdEvent[] = m.warRoomEvents.map((event) => ({
-      id: event.id,
-      kind: event.kind,
-      headline: event.headline,
-    }));
+    const currentTurn = m.currentTurn ?? 0;
+    const events: LowerThirdEvent[] = m.warRoomEvents
+      .filter((event) => event.turn <= currentTurn)
+      .map((event) => ({
+        id: event.id,
+        kind: event.kind,
+        headline: event.headline,
+      }));
     if (isVerifiedRevealView(m)) {
       const isWinner = m.reveal.outcome === "winner";
       const winner = m.policies.find(
@@ -962,16 +977,27 @@ function applyVolatileModelUpdates(
       model.timelineMarkers,
       model.totalTurns,
       model.maxSeekableTurn,
+      // The viewer's own actual playhead (see the module-level doc on
+      // `syncLowerThirds` for why this must never be `maxSeekableTurn`)
+      // drives marker redaction — a turn crossing must be able to trigger
+      // a rebuild even when the marker SET itself hasn't changed yet.
+      model.currentTurn,
     ]);
     if (timeline.dataset.timelineKey !== nextTimelineKey) {
       const nextTimeline = renderMatchTimeline(model.timelineMarkers, {
         totalTurns: model.totalTurns,
         maxSeekableTurn: model.maxSeekableTurn,
-        // Live Premiere: `maxSeekableTurn` already IS the released-edge
-        // boundary (see the model field's own doc); an archived/revealed
-        // rewatch passes `null`, which already means "no more spoiler
-        // concern" for BOTH seekability and marker redaction alike.
-        currentTurn: model.maxSeekableTurn,
+        // The viewer's own actual current turn (sourced from
+        // `this.latestFrame.turnNumber` in ReplayPremiereRuntime.ts — the
+        // SAME `ai-league-replay-frame` tick Full Replay's drawer uses),
+        // NEVER `maxSeekableTurn` (the network-released/seek-ceiling
+        // boundary): a viewer can lag the released edge (buffering, a
+        // checkpoint pause, scrubbing earlier content), and
+        // `maxSeekableTurn` is `null` for an already-revealed/archived
+        // rewatch — using it here meant redaction was silently skipped
+        // entirely for exactly the reported case: an archived re-watch
+        // loads with its playhead at turn 0 but `maxSeekableTurn: null`.
+        currentTurn: model.currentTurn ?? null,
         onSeek: callbacks.onSeek,
       });
       nextTimeline.dataset.timelineKey = nextTimelineKey;
@@ -979,14 +1005,22 @@ function applyVolatileModelUpdates(
     }
   }
   // The war room has interactive expand/collapse state per row, so it is
-  // only rebuilt when the underlying curated events actually changed —
+  // only rebuilt when the underlying derived content actually changed —
   // otherwise an expanded row would silently collapse on the very next
-  // frame even when nothing new happened.
+  // frame even when nothing new happened. Windowed to the viewer's own
+  // playhead (`model.currentTurn`, see the timeline block's own doc just
+  // above) — `model.warRoomEvents` itself is not a safe render source on
+  // its own.
   const warRoom = overlay.querySelector<HTMLElement>(".broadcast-war-room");
   if (warRoom !== null) {
-    const nextKey = model.warRoomEvents.map((event) => event.id).join(",");
+    const windowedWarRoomEvents = model.warRoomEvents.filter(
+      (event) => event.turn <= (model.currentTurn ?? 0),
+    );
+    const nextKey = JSON.stringify([
+      windowedWarRoomEvents.map((event) => event.id),
+    ]);
     if (warRoom.dataset.eventsKey !== nextKey) {
-      const nextWarRoom = renderWarRoomFeed(model.warRoomEvents, {
+      const nextWarRoom = renderWarRoomFeed(windowedWarRoomEvents, {
         onJumpToTurn: callbacks.onJumpToTurn,
         collapsed: broadcastState.warRoomCollapsed,
         onToggleCollapsed: broadcastState.toggleWarRoomCollapsed,
@@ -1097,24 +1131,34 @@ function renderBroadcastRegions(
     },
   );
   rail.dataset.seatsKey = JSON.stringify(model.competitorRailSeats);
-  const warRoom = renderWarRoomFeed(model.warRoomEvents, {
+  // Windowed to the viewer's own actual playhead — see
+  // applyVolatileModelUpdates's matching block for the full rationale
+  // (never `maxSeekableTurn`, which is the seek ceiling, not the playhead,
+  // and is `null` for an archived/revealed rewatch).
+  const windowedWarRoomEvents = model.warRoomEvents.filter(
+    (event) => event.turn <= (model.currentTurn ?? 0),
+  );
+  const warRoom = renderWarRoomFeed(windowedWarRoomEvents, {
     onJumpToTurn: callbacks.onJumpToTurn,
     collapsed: broadcastState.warRoomCollapsed,
     onToggleCollapsed: broadcastState.toggleWarRoomCollapsed,
   });
-  warRoom.dataset.eventsKey = model.warRoomEvents.map((event) => event.id).join(",");
+  warRoom.dataset.eventsKey = JSON.stringify([
+    windowedWarRoomEvents.map((event) => event.id),
+  ]);
   const timeline = renderMatchTimeline(model.timelineMarkers, {
     totalTurns: model.totalTurns,
     maxSeekableTurn: model.maxSeekableTurn,
-    // See applyVolatileModelUpdates's own comment: `maxSeekableTurn` already
-    // IS the right redaction boundary in every state this drawer mounts in.
-    currentTurn: model.maxSeekableTurn,
+    // See applyVolatileModelUpdates's own comment: the viewer's own actual
+    // current turn is the redaction boundary, never `maxSeekableTurn`.
+    currentTurn: model.currentTurn ?? null,
     onSeek: callbacks.onSeek,
   });
   timeline.dataset.timelineKey = JSON.stringify([
     model.timelineMarkers,
     model.totalTurns,
     model.maxSeekableTurn,
+    model.currentTurn,
   ]);
   const analyst = renderAnalystPanel({
     decisions: null,
