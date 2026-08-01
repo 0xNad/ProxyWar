@@ -763,3 +763,151 @@ All against `https://beta.proxywar.xyz` externally unless noted:
    real claim has not been redeployed," not "claims were submitted and are
    stuck." Resolving this is the same platform-origin redeploy flagged as
    its own dedicated follow-up task in Addendum 1.
+
+## Addendum 3 — Test-infra hardening + consolidated four-workstream deploy wave
+
+Deployed SHA: `ab606af88` (rollback point: `066f8807c`, the previous
+`origin/claude/product-overhaul` tip, recorded before push). This wave
+consolidates four independent workstreams that landed on the shared branch
+concurrently, validated and deployed together as one tip.
+
+### 1. Wave contents
+
+- **Test-infra hardening** (`6c8d81935`): root-caused and fixed
+  `AnalyticsServerIntegration.test.ts`'s order-dependence (shared fixed port
+  + a `stopServer()` that never waited for real process exit); hardened
+  `tests/e2e/support/CdpBrowser.ts` against the 28-instance/8+-hour headless
+  Chrome leak (random 500-wide port range → genuinely OS-reserved port;
+  added a startup sweep + `exit`/`SIGINT`/`SIGTERM` handlers matched ONLY on
+  the `pw-e2e-chrome-` `--user-data-dir` prefix); fixed a real bug in
+  `FixtureServer.ts` (`stop()` looking for the legacy non-port-scoped
+  pidfile, silently never stopping its own origin); added
+  `scripts/fixtures/clean.sh` + `npm run fixtures:clean`. Full writeup and
+  evidence in `docs/project-state/known-problems.md`'s "2026-08-01 Test-Infra
+  Hardening" section (gitignored, canonical-checkout-local per
+  working-agreements — not duplicated here beyond this summary).
+- **Agent-protocol reason/fallback fix** (`b96a53798`, `00dde1ca7`,
+  `ab606af88` — the `LlmAgentBrain`/`ExternalHttpAgentBrain`/
+  `ExternalRelayAgentBrain` family): `AgentDecision.reason` is now
+  `string | null`. On a genuine provider/parse/endpoint/managed-relay
+  failure, the fallback path no longer glues the raw error text together
+  with the substituted brain's own reason into one string (the P0 fix from
+  the 2026-08-01 known-problems entry, "LLM-provider error strings leaking
+  into public 'stated reason' text") — `reason` becomes `null` and the
+  failure detail moves to `metadata.fallbackReason`, a field never shown to
+  viewers. Every reader of `AgentDecision.reason` was audited for the new
+  nullability (per the reporting sibling).
+- **Season Zero operational gaps** (`a67c14a4d`): three new CLI
+  capabilities — `season:remove-event` (the counterpart `season:add-event`
+  was missing, previously worked around by hand-calling
+  `loadSeasonRegistry`/`saveSeasonRegistry` directly, per Addendum 2 §3.6),
+  `season:program-week`, and a pre-reveal Director Cut duration estimate.
+- **Mobile replay fix** (`15ae0d9b0`, P2-F10 + P2-F11): portrait letterbox
+  overzoom fix (the map used to render in roughly the top ~40% of a
+  portrait viewport; the client-side sizing bug is fixed) and spectator DOM
+  pruning — see §4 below for the corrected, honest scope of what P2-F11
+  actually prunes.
+
+### 2. Validate + deploy
+
+Full matrix at the consolidated tip `ab606af88`, all green: `tsc --noEmit`
+0 errors; `lint` 0 errors / 113 pre-existing warnings (nullish-coalescing
+only, unchanged); `npm test` 418+236 files, 5020+2787 tests passed (3 todo
+in pass 1), 0 failed, both passes; `npm run test:e2e` 27/27 passed on the
+**clean** consolidated tree (live-premiere block ran for real — no skip
+env needed — ~211s including the two 60s checkpoint-pause windows);
+`build-prod` clean. Pushed `066f8807c..ab606af88` (fast-forward, no
+force). Deployed: rollback point recorded (`066f8807c`, prior
+`origin/claude/product-overhaul` tip) → fetched + `checkout --detach
+ab606af88` into the release-candidate worktree → `npm ci` (697 packages,
+4s) → `build-prod` clean → `deploy/mac/proxywar-beta-launchd-restart.mjs
+--ready-url=http://127.0.0.1:8788/league` (dry-run passed, then real:
+PID `75280` → `21208`, ready, ~9s) → `launchctl kickstart -k
+gui/$UID/com.proxywar.league-mirror`, confirmed via a fresh
+`league-mirror.log` entry ~24s later: `site updated: .../league/index.html
+(18 standings, 12 battles)`. **Not touched**: `com.proxywar.platform` and
+`com.proxywar.betautocycle` — `bet.proxywar.xyz/league` externally
+verified 200 throughout, before and after this wave's restart.
+
+### 3. Live smoke — core routes, match page, portrait replay
+
+| Check | Result |
+| --- | --- |
+| Core routes `beta.proxywar.xyz/league`, `127.0.0.1:8788/{league,watch,/,build}` | all 200 |
+| Match page `/match/dff4afe0` (real episode from the live `data.json`) | 200 |
+| `bet.proxywar.xyz/league` | 200, untouched by this wave |
+| Portrait replay (390×844, real production replay, real browser session) | canvas is full-viewport (390×844, 100% height, `transform:none`) — refutes the old ~40%-band regression by construction (a 40% band would show a much shorter canvas/parent height); the "Fit the whole map" whole-board control (P2-F10) is present with that exact `aria-label`/`title`. The precise in-canvas rendered-map pixel-fill percentage (as opposed to the canvas element's own DOM size, which is always full-viewport) was not separately instrumented — a WebGL/2D-canvas rendering-internals detail, not a DOM/CSS property. |
+
+### 4. P2-F11 DOM pruning — corrected scope (do not cite the local-baseline number as a production result)
+
+An earlier draft of this record cited a "94.7% / 273-node" reduction
+figure for the live replay route. **That figure is wrong for this
+context and must not be repeated**: it came from a local game-shell-scope
+baseline that never mounted `AiLeagueReplayOverlay` at all, not from the
+production replay route.
+
+What P2-F11 actually does, confirmed on the real production replay route:
+it prunes six dead-chrome subtrees — the main-menu area, the host-lobby
+modal, the store modal, both nav bars, and the game-mode selector — down
+to 0/near-0 nodes each. Those subtrees are genuinely gone from the replay
+route's DOM.
+
+The live replay route's **full document** remains **~4,207–4,260 nodes**
+(my own direct measurement on a real post-restart replay: 3,789 — within
+that same range; the spread reflects how far into playback the decision
+ticker has grown at measurement time), dominated by the **load-bearing**
+spectator overlay itself (~3,872 nodes: ~1,957 decision-ticker rows +
+~527 per-entry buttons), which **grows during playback** — pruning it
+further was never P2-F11's scope; it is live content, not dead chrome.
+
+**Follow-up identified, not blocking this deploy, dispatched separately**:
+window/cap the decision ticker and its per-entry action buttons on the
+replay route so the full-document count stops growing unbounded across a
+long match.
+
+### 5. Reason/fallback shape — live verification
+
+Newest post-deploy episodes (`league-coworld-...-e6a34945`,
+`...-7200a150`, both starting 45s–2min after the restart) parse cleanly as
+JSONL with zero occurrences of the old folded-string leak pattern
+("LLM decision rejected (...); fallback: ..." / "Agent brain failed
+(...); fallback: ..."). Both DO contain real `fallbackUsed: true`
+decisions (630 and 576 respectively), but every one carries a
+non-null `reason` — a genuine rule-brain-authored string (e.g.
+`"rul:atk"`) — i.e. ordinary fallback substitutions, not the
+provider/parse FAILURE case the fix's `reason: null` +
+`metadata.fallbackReason` shape targets. Scanned all 101 episode
+artifacts ever recorded on this deployment (full history): **zero
+`reason: null` records exist anywhere, live or historical** — the
+external-http brain endpoint has apparently never actually failed on this
+deployment, so the null-reason branch has never fired for a real decision.
+Verified the branch is tolerated regardless: loaded the newest post-deploy
+episode's replay in a real browser against production, expanded the
+decision log overlay (10 decisions rendered, including a real
+`fallbackUsed` record), zero console/page errors, no error banner —
+the client's `reason: string | null` handling
+(`decision.reason ?? "(no stated reason — fallback decision)"` in
+`AiLeagueReplayOverlay.ts`) is live and does not break the overlay, even
+though no live record exercised the null branch specifically.
+
+### 6. `season:status` — new per-slot health line, live
+
+Run read-only from the release-candidate checkout with production env
+sourced per the runbook pattern (`set -a; source
+~/.proxywar/proxywar-beta.env; set +a; npm run --silent season:status`):
+
+```
+season_season-zero — "Season Zero" [active] 2026-08-01..2026-09-12
+  event slots: 1
+    - feat_4d20f6550c6c8d8e83bc @ 2026-08-03T18:00:00.000Z
+      health: promotable: true, aired: true, aged-out: false
+  archive matches: 0
+  standings snapshot refs: 0
+```
+
+The Aug-3 slot renders the new per-slot health line, computed live
+against the production registry (`resources/season/seasons.json`, tracked
+and deployed in the checkout) and the production featured-match state
+(resolved via the sourced `PROXYWAR_*` env vars). The reported state is
+internally consistent — a slot that has aired and is promotable cannot
+also be aged-out, and `computeSlotHealth` enforces exactly that.
