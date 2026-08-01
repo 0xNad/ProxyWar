@@ -226,6 +226,33 @@ describe("builders-directory-page", () => {
     expect(cta?.textContent).toContain("builders_directory.verification_cta");
   });
 
+  it("shows an honest 'no verified Builders yet' message (never blank) when agents are registered but 0 builders are claimed, plus a /claim CTA", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () =>
+        Response.json(
+          readModelBody(
+            [],
+            [
+              minimalAgent({
+                slug: "daveey",
+                displayName: "daveey",
+                status: "unclaimed",
+              }),
+            ],
+          ),
+        ),
+      ),
+    );
+    const el = mount();
+    await flushMicrotasks();
+
+    expect(el.textContent).toContain("builders_directory.claimed_heading");
+    expect(el.textContent).toContain("builders_directory.claimed_empty");
+    const claimLink = el.querySelector<HTMLAnchorElement>('a[href="/claim"]');
+    expect(claimLink?.textContent).toContain("builders_directory.claim_cta");
+  });
+
   it("excludes house agents from the unclaimed list entirely, and never shows an unclaimed slot for an agent that already has a claimed builder", async () => {
     vi.stubGlobal(
       "fetch",

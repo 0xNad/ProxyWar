@@ -164,28 +164,39 @@ export class BuildersDirectoryPage extends LitElement {
     }
     return html`
       ${this.renderVerificationExplainer(readModel.links.enterTheLeagueUrl)}
+      <h2 class="mb-2 mt-6 text-sm font-bold uppercase tracking-wide text-ink-muted">
+        ${translateText("builders_directory.claimed_heading")}
+      </h2>
       ${readModel.builders.length > 0
         ? html`
-            <h2 class="mb-2 mt-6 text-sm font-bold uppercase tracking-wide text-ink-muted">
-              ${translateText("builders_directory.claimed_heading")}
-            </h2>
             <ul class="flex flex-col gap-2" role="list">
               ${readModel.builders.map((builder) =>
                 this.renderBuilderRow(builder),
               )}
             </ul>
           `
-        : nothing}
+        : html`
+            <p
+              class="rounded-md border border-line bg-surface-2 px-3 py-2.5 text-sm text-ink-muted"
+            >
+              ${translateText("builders_directory.claimed_empty")}
+            </p>
+          `}
       ${unclaimedAgents.length > 0
         ? html`
-            <h2 class="mb-2 mt-6 text-sm font-bold uppercase tracking-wide text-ink-muted">
-              ${translateText("builders_directory.unclaimed_heading")}
-            </h2>
-            <ul class="flex flex-col gap-2" role="list">
-              ${unclaimedAgents.map((agent) =>
-                this.renderUnclaimedAgentSlot(agent),
-              )}
-            </ul>
+            <details open class="mt-8 border-t border-line pt-4">
+              <summary
+                class="cursor-pointer text-xs font-bold uppercase tracking-wide text-ink-muted outline-none focus-visible:ring-2 focus-visible:ring-accent"
+              >
+                ${translateText("builders_directory.unclaimed_heading")}
+                (${unclaimedAgents.length})
+              </summary>
+              <ul class="mt-2 flex flex-col gap-2" role="list">
+                ${unclaimedAgents.map((agent) =>
+                  this.renderUnclaimedAgentSlot(agent),
+                )}
+              </ul>
+            </details>
           `
         : nothing}
     `;
@@ -194,11 +205,11 @@ export class BuildersDirectoryPage extends LitElement {
   /**
    * Explains WHY so many slots read "Unclaimed" (claim-gated verification,
    * never a name/email match — same invariant `IdentityMatching.ts`
-   * enforces) and links the real onboarding entry point. No `/build`
-   * route exists in this app (checked directly — `PublicApp.ts`'s route
-   * table has no such path), so this points at the same external
-   * `enterTheLeagueUrl` `AboutPage.ts`'s "Enter the League" CTA already
-   * uses, never a dead internal link.
+   * enforces), points at the real self-serve `/claim` flow (Season Zero
+   * activation Phase 3) for someone who already has an agent, and links
+   * the external onboarding entry point (`enterTheLeagueUrl`) for someone
+   * who hasn't entered the league at all yet — two different CTAs for two
+   * different visitors, never conflated.
    */
   private renderVerificationExplainer(enterTheLeagueUrl: string) {
     return html`
@@ -207,8 +218,13 @@ export class BuildersDirectoryPage extends LitElement {
       >
         <p>${translateText("builders_directory.verification_explainer")}</p>
         <a
-          href=${enterTheLeagueUrl}
+          href="/claim"
           class="mt-2 inline-block text-xs font-semibold text-accent no-underline outline-none hover:text-accent-strong focus-visible:ring-2 focus-visible:ring-accent"
+          >${translateText("builders_directory.claim_cta")}</a
+        >
+        <a
+          href=${enterTheLeagueUrl}
+          class="mt-2 ml-4 inline-block text-xs font-semibold text-accent no-underline outline-none hover:text-accent-strong focus-visible:ring-2 focus-visible:ring-accent"
           >${translateText("builders_directory.verification_cta")}</a
         >
       </div>

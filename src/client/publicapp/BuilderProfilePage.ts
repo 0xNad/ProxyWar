@@ -159,6 +159,20 @@ export class BuilderProfilePage extends LitElement {
         ? html`<p class="mb-6 text-sm text-ink-muted">${builder.shortBio}</p>`
         : nothing}
       ${this.renderAgentsSection(agents)}
+      ${builder.status === "verified" ? this.renderManageLink() : nothing}
+    `;
+  }
+
+  /** A verified Builder's own profile carries an unobtrusive "manage this profile" link to `/builder-dashboard` — authenticated/ownership checks happen entirely server-side on that route (a session that isn't the actual owner gets that route's own "not a verified builder" state), so this page itself never needs to fetch account status just to decide whether to show it. */
+  private renderManageLink() {
+    return html`
+      <p class="mt-2 text-xs text-ink-muted">
+        <a
+          href="/builder-dashboard"
+          class="font-semibold text-accent no-underline outline-none hover:text-accent-strong focus-visible:ring-2 focus-visible:ring-accent"
+          >${translateText("builder_profile.manage_link")}</a
+        >
+      </p>
     `;
   }
 

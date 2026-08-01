@@ -394,6 +394,56 @@ describe("agent-profile-page", () => {
     expect(houseEl.textContent).not.toContain("agent_profile.builder_label");
   });
 
+  it("renders a 'start a verified claim' CTA linking to /claim/:slug only for an unclaimed, registered agent", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () =>
+        Response.json(
+          readModelBody([
+            minimalAgent({
+              slug: "unclaimed-agent",
+              playerName: "unclaimed-agent",
+              displayName: "Unclaimed Agent",
+              shortCode: "UNC",
+              status: "unclaimed",
+              builderDisplayName: null,
+              rank: null,
+            }),
+          ]),
+        ),
+      ),
+    );
+    const el = mount("unclaimed-agent");
+    await flushMicrotasks();
+    expect(el.textContent).toContain("agent_profile.claim_cta");
+    expect(
+      el.querySelector('a[href="/claim/unclaimed-agent"]'),
+    ).not.toBeNull();
+
+    document.body.innerHTML = "";
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () =>
+        Response.json(
+          readModelBody([
+            minimalAgent({
+              slug: "verified-agent",
+              playerName: "verified-agent",
+              displayName: "Verified Agent",
+              shortCode: "VER",
+              status: "verified",
+              builderDisplayName: "Ada Builder",
+              rank: 1,
+            }),
+          ]),
+        ),
+      ),
+    );
+    const verifiedEl = mount("verified-agent");
+    await flushMicrotasks();
+    expect(verifiedEl.textContent).not.toContain("agent_profile.claim_cta");
+  });
+
   it("shows up to 10 recent matches filtered by participant.agentSlug, most recent completedAt first, with outcome and a watch link", async () => {
     const matches = [
       minimalMatch({

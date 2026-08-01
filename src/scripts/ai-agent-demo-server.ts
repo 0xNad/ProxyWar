@@ -167,6 +167,13 @@ import {
   resolveGithubOAuthConfig,
 } from "../server/GithubOAuthClient";
 import { createPlatformAccountRouter } from "../server/platform/PlatformAccountHttp";
+import { createPlatformBuilderClaimRouter } from "../server/platform/PlatformBuilderClaimHttp";
+import { resolveBuilderClaimStateRoot } from "../server/platform/PlatformBuilderClaimStore";
+import { createPlatformBuilderDashboardRouter } from "../server/platform/PlatformBuilderDashboardHttp";
+import { createPlatformBuilderEditRouter } from "../server/platform/PlatformBuilderEditHttp";
+import { resolveBuilderEditStateRoot } from "../server/platform/PlatformBuilderEditStore";
+import { createPlatformBuilderVersionRouter } from "../server/platform/PlatformBuilderVersionHttp";
+import { resolveVersionReleaseStateRoot } from "../server/platform/PlatformVersionReleaseStore";
 import { PlatformAccountSecurity } from "../server/platform/PlatformAccountSecurity";
 import { PlatformAccountStore } from "../server/platform/PlatformAccountStore";
 import { resolveCanonicalHostRedirect } from "../server/platform/PlatformCanonicalHost";
@@ -1674,6 +1681,19 @@ app.get("/about", async (_req, res) => {
 app.get("/build", async (_req, res) => {
   await sendPublicAppShellPage(res, "the build flow");
 });
+// Season Zero activation Phase 3+6: the verified-claim flow and the
+// minimal Builder dashboard are both public-app-shell pages (same
+// `public.html` shell, client-side routed) — never operator-gated,
+// exactly like every other `sendPublicAppShellPage` route above.
+app.get("/claim", async (_req, res) => {
+  await sendPublicAppShellPage(res, "the builder claim page");
+});
+app.get("/claim/:agentSlug", async (_req, res) => {
+  await sendPublicAppShellPage(res, "the builder claim page");
+});
+app.get("/builder-dashboard", async (_req, res) => {
+  await sendPublicAppShellPage(res, "the builder dashboard");
+});
 // GitHub sign-in lives ONLY on the platform now — proxywar.xyz is the
 // sole account authority (see the platform build's contract). Exactly one
 // of the two branches below mounts, based on `PROXYWAR_PLATFORM_ENABLED`:
@@ -1758,6 +1778,78 @@ if (platformEnabled) {
       onOperatorError: (operatorCode, error) => {
         console.error(
           `Platform account ${operatorCode}: ${
+            error instanceof Error ? error.message : String(error)
+          }`,
+        );
+      },
+    }),
+  );
+  // --- Season Zero activation Phase 3+6: Builder/Agent/Version claim
+  // workflow + the builder-improvement loop. Each store below is its own
+  // FileMutex-backed subdirectory of `platformPrivateStateRoot` (see each
+  // store's own doc for why: an operator CLI — `identity:claims`,
+  // `identity:edits`, `identity:releases` — mutates these as a SEPARATE OS
+  // process while this server keeps accepting requests, the same
+  // cross-process concurrency contract `FeaturedMatch.ts` already has).
+  // One bounded block, mounted immediately after the account router above.
+  const builderClaimStateRoot = resolveBuilderClaimStateRoot();
+  const builderEditStateRoot = resolveBuilderEditStateRoot();
+  const versionReleaseStateRoot = resolveVersionReleaseStateRoot();
+  app.use(
+    createPlatformBuilderClaimRouter({
+      security: platformAccountSecurity,
+      claimStore: { stateRoot: builderClaimStateRoot },
+      identityLinkStore: platformGithubIdentityLinkStore,
+      onOperatorError: (operatorCode, error) => {
+        console.error(
+          `Platform builder claim ${operatorCode}: ${
+            error instanceof Error ? error.message : String(error)
+          }`,
+        );
+      },
+    }),
+  );
+  app.use(
+    createPlatformBuilderEditRouter({
+      security: platformAccountSecurity,
+      editStore: { stateRoot: builderEditStateRoot },
+      claimStore: { stateRoot: builderClaimStateRoot },
+      identityLinkStore: platformGithubIdentityLinkStore,
+      onOperatorError: (operatorCode, error) => {
+        console.error(
+          `Platform builder edit ${operatorCode}: ${
+            error instanceof Error ? error.message : String(error)
+          }`,
+        );
+      },
+    }),
+  );
+  app.use(
+    createPlatformBuilderVersionRouter({
+      security: platformAccountSecurity,
+      releaseStore: { stateRoot: versionReleaseStateRoot },
+      claimStore: { stateRoot: builderClaimStateRoot },
+      identityLinkStore: platformGithubIdentityLinkStore,
+      onOperatorError: (operatorCode, error) => {
+        console.error(
+          `Platform version release ${operatorCode}: ${
+            error instanceof Error ? error.message : String(error)
+          }`,
+        );
+      },
+    }),
+  );
+  app.use(
+    createPlatformBuilderDashboardRouter({
+      security: platformAccountSecurity,
+      claimStore: { stateRoot: builderClaimStateRoot },
+      releaseStore: { stateRoot: versionReleaseStateRoot },
+      identityLinkStore: platformGithubIdentityLinkStore,
+      readModelFilePath: path.join(runsRootDir, "league", "read-model.json"),
+      featuredMatchStateRoot: resolveFeaturedMatchStateRoot(),
+      onOperatorError: (operatorCode, error) => {
+        console.error(
+          `Platform builder dashboard ${operatorCode}: ${
             error instanceof Error ? error.message : String(error)
           }`,
         );

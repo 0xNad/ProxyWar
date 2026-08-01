@@ -193,13 +193,24 @@ export class AgentProfilePage extends LitElement {
     `;
   }
 
-  /** `builderDisplayName` or an honest "Unclaimed" — skipped entirely for a house agent, whose status badge above already covers that classification (same rule `CoworldLeagueSiteWriter.builderNoteMarkup` applies). */
+  /** `builderDisplayName` or an honest, unobtrusive "Unclaimed" — skipped entirely for a house agent, whose status badge above already covers that classification (same rule `CoworldLeagueSiteWriter.builderNoteMarkup` applies). An unclaimed, registered Agent additionally gets a small "start a verified claim" CTA (Season Zero activation Phase 3) — deliberately plain text next to the label, never a second competing headline, so "Unclaimed" stays a status note rather than the dominant identity on the page. */
   private renderBuilderLine(agent: PublicAgent) {
     if (agent.status === "house") return nothing;
     const label =
       agent.builderDisplayName ?? translateText("agent_profile.builder_unclaimed");
+    const claimHref =
+      agent.status === "unclaimed" && agent.slug !== null
+        ? `/claim/${encodeURIComponent(agent.slug)}`
+        : null;
     return html`<p class="mb-3 text-sm text-ink-muted">
       ${translateText("agent_profile.builder_label")}: <span class="font-semibold text-ink">${label}</span>
+      ${claimHref !== null
+        ? html`<a
+            href=${claimHref}
+            class="ml-2 font-semibold text-accent no-underline outline-none hover:text-accent-strong focus-visible:ring-2 focus-visible:ring-accent"
+            >${translateText("agent_profile.claim_cta")}</a
+          >`
+        : nothing}
     </p>`;
   }
 

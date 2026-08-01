@@ -221,6 +221,60 @@ describe("builder-profile-page", () => {
     expect(el.textContent).not.toContain("Other");
   });
 
+  it("shows a builder-dashboard 'manage' link only for a verified builder, never for an unclaimed one", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () =>
+        Response.json(
+          readModelBody(
+            [
+              minimalBuilder({
+                id: "builder-1",
+                slug: "daveey",
+                displayName: "Daveey",
+                shortBio: null,
+                status: "verified",
+              }),
+            ],
+            [],
+          ),
+        ),
+      ),
+    );
+    const el = mount("daveey");
+    await flushMicrotasks();
+    const manageLink = el.querySelector<HTMLAnchorElement>(
+      'a[href="/builder-dashboard"]',
+    );
+    expect(manageLink?.textContent).toContain("builder_profile.manage_link");
+
+    document.body.innerHTML = "";
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () =>
+        Response.json(
+          readModelBody(
+            [
+              minimalBuilder({
+                id: "builder-2",
+                slug: "unclaimed-team",
+                displayName: null,
+                shortBio: null,
+                status: "unclaimed",
+              }),
+            ],
+            [],
+          ),
+        ),
+      ),
+    );
+    const unclaimedEl = mount("unclaimed-team");
+    await flushMicrotasks();
+    expect(
+      unclaimedEl.querySelector('a[href="/builder-dashboard"]'),
+    ).toBeNull();
+  });
+
   it("shows an honest empty-agents message when no agent cross-references this builder", async () => {
     vi.stubGlobal(
       "fetch",

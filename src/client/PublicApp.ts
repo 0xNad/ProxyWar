@@ -9,6 +9,8 @@ import "./publicapp/AboutPage";
 import "./publicapp/AgentProfilePage";
 import "./publicapp/AgentsDirectoryPage";
 import "./publicapp/BuildPage";
+import "./publicapp/BuilderClaimPage";
+import "./publicapp/BuilderDashboardPage";
 import "./publicapp/BuilderProfilePage";
 import "./publicapp/BuildersDirectoryPage";
 import "./publicapp/LobbyPage";
@@ -18,9 +20,11 @@ import "./publicapp/WatchPage";
 /**
  * Entry point for the Stage 2 public app (`/`, `/watch`, `/agents`,
  * `/agent/:slug`, `/builders`, `/builder/:slug`, `/about`) plus Stage 3's
- * `/match/:matchId` (item 6) and Stage 7's `/build` (item 1) — a deliberately
- * separate, minimal Vite entry from `Main.ts`'s game/replay/premiere
- * client. `Main.ts` statically imports the entire game engine (Pixi
+ * `/match/:matchId` (item 6), Stage 7's `/build` (item 1), and Season Zero
+ * Phase 3/6's `/claim`, `/claim/:agentSlug`, and `/builder-dashboard` — a
+ * deliberately separate, minimal Vite entry from `Main.ts`'s game/replay/
+ * premiere client. `Main.ts` statically imports the entire game engine
+ * (Pixi
  * renderer, `ClientGameRunner`, ad SDKs, etc.), so any route that loads it
  * downloads that whole bundle regardless of which page renders — this file
  * exists so the public pages never do. `public.html` (sibling to
@@ -97,6 +101,25 @@ function mount(pathname: string): boolean {
   }
   if (pathname === "/build") {
     document.body.replaceChildren(document.createElement("build-page"));
+    return true;
+  }
+  if (pathname === "/claim") {
+    document.body.replaceChildren(
+      document.createElement("builder-claim-page"),
+    );
+    return true;
+  }
+  const builderClaimMatch = pathname.match(/^\/claim\/([^/]+)$/);
+  if (builderClaimMatch !== null) {
+    const page = document.createElement("builder-claim-page");
+    page.setAttribute("agent-slug", decodeURIComponent(builderClaimMatch[1]));
+    document.body.replaceChildren(page);
+    return true;
+  }
+  if (pathname === "/builder-dashboard") {
+    document.body.replaceChildren(
+      document.createElement("builder-dashboard-page"),
+    );
     return true;
   }
   return false;
