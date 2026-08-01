@@ -77,6 +77,30 @@ const leagueEpisodePlayerSchema = z.object({
   placement: z.number(),
 });
 
+/** `Season Zero Phase 2`: `GET /api/matches/:episodeId`'s `decisiveMoments` — see `AgentDecisiveMoments.ts`'s own doc for the exactly-3-to-5, never-padded selection contract. `null` when no artifact backs it (never a placeholder). */
+const leagueEpisodeDecisiveMomentAgentStateSchema = z.object({
+  username: z.string(),
+  tilesOwned: z.number(),
+  troops: z.number(),
+  territoryShare: z.number(),
+  rank: z.number(),
+  alive: z.boolean(),
+});
+const leagueEpisodeDecisiveMomentStateSchema = z.object({
+  turn: z.number(),
+  agents: z.array(leagueEpisodeDecisiveMomentAgentStateSchema),
+});
+const leagueEpisodeDecisiveMomentSchema = z.object({
+  turn: z.number(),
+  type: z.string(),
+  headline: z.string(),
+  involvedAgents: z.array(z.string()),
+  beforeState: leagueEpisodeDecisiveMomentStateSchema.nullable(),
+  afterState: leagueEpisodeDecisiveMomentStateSchema.nullable(),
+  jumpToReplayTurn: z.number(),
+  statedReason: z.string().nullable(),
+});
+
 const leagueEpisodeMatchSchema = z.object({
   episodeRequestId: z.string(),
   shortId: z.string(),
@@ -102,6 +126,7 @@ const leagueEpisodeMatchSchema = z.object({
   recap: z
     .object({ summary: z.string(), beats: z.array(z.string()) })
     .nullable(),
+  decisiveMoments: z.array(leagueEpisodeDecisiveMomentSchema).nullable(),
 });
 type LeagueEpisodeMatch = z.infer<typeof leagueEpisodeMatchSchema>;
 
@@ -912,6 +937,7 @@ export class MatchDetailPage extends LitElement {
       ${this.renderLeagueEpisodeResult(match, participants)}
       ${this.renderLeagueEpisodeActions(match)}
       ${this.renderLeagueEpisodeRecap(match)}
+      ${this.renderLeagueEpisodeDecisiveMoments(match, participants)}
       <section
         class="mt-6"
         aria-labelledby="match-detail-participants-heading"
@@ -1119,6 +1145,106 @@ export class MatchDetailPage extends LitElement {
               )}
             </ul>`
           : nothing}
+      </section>
+    `;
+  }
+
+  /**
+   * Conditional "Decisive moments" section (Season Zero Phase 2 spec:
+   * "Every featured post-match page should present exactly three to five
+   * decisive moments where supported"). `match.decisiveMoments` is
+   * already `null` unless a real `decisive-moments.json` backs it — see
+   * `LeagueEpisodeMatchPage.ts`'s `readLeagueEpisodeDecisiveMoments` — so
+   * absence here IS the honest signal, never a placeholder, same
+   * convention `renderLeagueEpisodeRecap` follows. Each card's jump link
+   * appends `?turn=N` to `fullRenderHref`, the SAME query param
+   * `Main.ts`'s cold-load fast-forward and `AiLeagueReplayOverlay.ts`'s
+   * own in-app jump already read — no new mechanism. `statedReason` is
+   * always rendered under its own explicitly-labeled "stated by the
+   * agent" row, never merged into the headline, per the spec's
+   * stated-not-verified requirement.
+   */
+  private renderLeagueEpisodeDecisiveMoments(
+    match: LeagueEpisodeMatch,
+    participants: readonly FeaturedMatchParticipantCard[],
+  ): TemplateResult | typeof nothing {
+    if (match.decisiveMoments === null) return nothing;
+    const moments = match.decisiveMoments;
+    const cardByName = new Map(
+      participants.map((participant) => [participant.playerName, participant]),
+    );
+    const jumpHref = (turn: number): string | null => {
+      if (match.fullRenderHref === null) return null;
+      const url = new URL(match.fullRenderHref, window.location.origin);
+      url.searchParams.set("turn", String(turn));
+      return `${url.pathname}${url.search}`;
+    };
+    return html`
+      <section
+        class="mt-6"
+        aria-labelledby="match-detail-decisive-moments-heading"
+      >
+        <h2
+          id="match-detail-decisive-moments-heading"
+          class="mb-2 text-sm font-black uppercase tracking-wide text-ink-muted"
+        >
+          ${translateText("match_detail.decisive_moments_heading")}
+        </h2>
+        <ul class="mt-2 flex flex-col gap-2" role="list">
+          ${moments.map((moment) => {
+            const href = jumpHref(moment.jumpToReplayTurn);
+            return html`
+              <li
+                class="rounded-md border border-line bg-surface-2 px-3 py-2 text-sm"
+              >
+                <div class="flex flex-wrap items-center gap-2">
+                  <span
+                    class="rounded-full border border-line px-2 py-0.5 font-mono text-xs uppercase tracking-wide text-ink-muted"
+                    >${translateText(
+                      `match_detail.decisive_moment_type_${moment.type}`,
+                    )}</span
+                  >
+                  <span class="font-mono text-xs text-ink-muted"
+                    >${translateText("match_detail.decisive_moment_turn", {
+                      turn: moment.jumpToReplayTurn,
+                    })}</span
+                  >
+                </div>
+                <p class="mt-1 text-ink-dim">${moment.headline}</p>
+                <p class="mt-1 flex flex-wrap gap-x-2 gap-y-1 text-xs text-ink-muted">
+                  ${moment.involvedAgents.map((name) => {
+                    const card = cardByName.get(name) ?? null;
+                    const slug = card?.agentSlug ?? null;
+                    const displayName = card?.displayName ?? name;
+                    return slug !== null
+                      ? html`<a
+                          href="/agent/${encodeURIComponent(slug)}"
+                          class="text-ink-muted no-underline outline-none hover:text-accent focus-visible:ring-2 focus-visible:ring-accent"
+                          >${displayName}</a
+                        >`
+                      : html`<span>${displayName}</span>`;
+                  })}
+                </p>
+                ${moment.statedReason !== null
+                  ? html`<p class="mt-1 text-xs italic text-ink-muted">
+                      ${translateText(
+                        "match_detail.decisive_moment_stated_reason_label",
+                      )}: “${moment.statedReason}”
+                    </p>`
+                  : nothing}
+                ${href !== null
+                  ? html`<a
+                      href=${href}
+                      class="mt-1.5 inline-flex min-h-8 items-center text-xs font-bold text-accent no-underline outline-none hover:opacity-90 focus-visible:ring-2 focus-visible:ring-accent"
+                      >${translateText(
+                        "match_detail.decisive_moment_jump_link",
+                      )}</a
+                    >`
+                  : nothing}
+              </li>
+            `;
+          })}
+        </ul>
       </section>
     `;
   }

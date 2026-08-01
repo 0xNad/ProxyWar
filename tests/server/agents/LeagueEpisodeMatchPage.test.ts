@@ -240,7 +240,7 @@ describe("buildLeagueEpisodeMatchPageModel — placement ordering", () => {
         { slot: 1, name: "B", tilesOwned: 500, isAlive: true, isWinner: true, color: "#222222" },
       ],
     });
-    const model = buildLeagueEpisodeMatchPageModel(row, null);
+    const model = buildLeagueEpisodeMatchPageModel(row, null, null);
     expect(model.players.map((p) => p.name)).toEqual(["B", "A"]);
     expect(model.players[0].placement).toBe(1);
     expect(model.players[1].placement).toBe(2);
@@ -254,7 +254,7 @@ describe("buildLeagueEpisodeMatchPageModel — placement ordering", () => {
         { slot: 2, name: "High", tilesOwned: 300, isAlive: false, isWinner: false, color: "#333333" },
       ],
     });
-    const model = buildLeagueEpisodeMatchPageModel(row, null);
+    const model = buildLeagueEpisodeMatchPageModel(row, null, null);
     expect(model.players.map((p) => p.name)).toEqual(["Winner", "High", "Low"]);
   });
 
@@ -265,13 +265,13 @@ describe("buildLeagueEpisodeMatchPageModel — placement ordering", () => {
         { slot: 0, name: "SlotZero", tilesOwned: 500, isAlive: true, isWinner: false, color: "#222222" },
       ],
     });
-    const model = buildLeagueEpisodeMatchPageModel(row, null);
+    const model = buildLeagueEpisodeMatchPageModel(row, null, null);
     expect(model.players.map((p) => p.name)).toEqual(["SlotZero", "SlotTwo"]);
   });
 
   test("carries recap through unchanged and defaults optional fields honestly", () => {
     const row = episode({ premiereHref: undefined, directorCut: undefined });
-    const model = buildLeagueEpisodeMatchPageModel(row, { summary: "x", beats: ["y"] });
+    const model = buildLeagueEpisodeMatchPageModel(row, { summary: "x", beats: ["y"] }, null);
     expect(model.recap).toEqual({ summary: "x", beats: ["y"] });
     expect(model.premiereHref).toBeNull();
     expect(model.directorCut).toBeNull();

@@ -191,6 +191,18 @@ function episodeMatchBody(overrides: {
   winnerName?: string | null;
   directorCut?: { durationEstimateSeconds: number; segmentCount: number } | null;
   recap?: { summary: string; beats: string[] } | null;
+  decisiveMoments?:
+    | {
+        turn: number;
+        type: string;
+        headline: string;
+        involvedAgents: string[];
+        beforeState: unknown;
+        afterState: unknown;
+        jumpToReplayTurn: number;
+        statedReason: string | null;
+      }[]
+    | null;
   watchHref?: string | null;
   fullRenderHref?: string | null;
   participants?: unknown[];
@@ -241,6 +253,8 @@ function episodeMatchBody(overrides: {
       premiereHref: null,
       directorCut: overrides.directorCut ?? null,
       recap: overrides.recap ?? null,
+      decisiveMoments:
+        "decisiveMoments" in overrides ? overrides.decisiveMoments : null,
     },
     participants:
       overrides.participants ??
@@ -848,6 +862,86 @@ describe("match-detail-page", () => {
     const el = mount("ereq_norecap");
     await flushMicrotasks();
     expect(el.textContent).not.toContain("match_detail.episode_recap_heading");
+  });
+
+  it("decisive moments section renders 3 cards with type, headline, agent links, stated reason, and a turn-anchored jump link", async () => {
+    stubFetch({
+      readModel: readModelBody({}),
+      episodeDetail: {
+        status: 200,
+        body: episodeMatchBody({
+          episodeRequestId: "ereq_decisive",
+          fullRenderHref: "/ai-league-replay/league-coworld-test-episode",
+          participants: [
+            participantCard({ playerName: "Frostfall", agentSlug: "frostfall" }),
+            participantCard({ playerName: "GhostRaider", agentSlug: "ghostraider" }),
+          ],
+          decisiveMoments: [
+            {
+              turn: 20,
+              type: "lead_change",
+              headline: "GhostRaider overtakes Frostfall for the territory lead.",
+              involvedAgents: ["Frostfall", "GhostRaider"],
+              beforeState: null,
+              afterState: null,
+              jumpToReplayTurn: 20,
+              statedReason: null,
+            },
+            {
+              turn: 30,
+              type: "elimination",
+              headline: "GhostRaider is eliminated.",
+              involvedAgents: ["GhostRaider"],
+              beforeState: null,
+              afterState: null,
+              jumpToReplayTurn: 30,
+              statedReason: "GhostRaider pressed a doomed final offensive.",
+            },
+            {
+              turn: 40,
+              type: "final_confrontation",
+              headline: "Final clash: Frostfall strikes GhostRaider.",
+              involvedAgents: ["Frostfall"],
+              beforeState: null,
+              afterState: null,
+              jumpToReplayTurn: 40,
+              statedReason: null,
+            },
+          ],
+        }),
+      },
+    });
+    const el = mount("ereq_decisive");
+    await flushMicrotasks();
+    expect(el.textContent).toContain("match_detail.decisive_moments_heading");
+    expect(el.textContent).toContain("match_detail.decisive_moment_type_lead_change");
+    expect(el.textContent).toContain("match_detail.decisive_moment_type_elimination");
+    expect(el.textContent).toContain("match_detail.decisive_moment_type_final_confrontation");
+    expect(el.textContent).toContain("GhostRaider overtakes Frostfall for the territory lead.");
+    expect(el.textContent).toContain("match_detail.decisive_moment_stated_reason_label");
+    expect(el.textContent).toContain("GhostRaider pressed a doomed final offensive.");
+    expect(el.querySelector('a[href="/agent/frostfall"]')).not.toBeNull();
+    expect(el.querySelector('a[href="/agent/ghostraider"]')).not.toBeNull();
+    const jumpLinks = [...el.querySelectorAll("a")].filter((a) =>
+      a.getAttribute("href")?.includes("turn=20"),
+    );
+    expect(jumpLinks.length).toBeGreaterThan(0);
+  });
+
+  it("decisive moments section is entirely absent (no heading, no placeholder) when the server provides none", async () => {
+    stubFetch({
+      readModel: readModelBody({}),
+      episodeDetail: {
+        status: 200,
+        body: episodeMatchBody({
+          episodeRequestId: "ereq_nodecisive",
+          decisiveMoments: null,
+        }),
+      },
+    });
+    const el = mount("ereq_nodecisive");
+    await flushMicrotasks();
+    expect(el.textContent).not.toContain("match_detail.decisive_moments_heading");
   });
 
   it("technical drawer carries episodeRequestId, run key, and raw participant labels", async () => {

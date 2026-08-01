@@ -58,6 +58,32 @@ export interface LeagueEpisodeRecap {
   beats: string[];
 }
 
+/** Before/after territory snapshot for one decisive moment — mirrors `AgentDecisiveMoments.ts`'s `DecisiveMomentState` field for field, re-typed here so this module (like every other page-model file) never imports server-only agent types directly into the page-model surface. */
+export interface LeagueEpisodeDecisiveMomentState {
+  turn: number;
+  agents: {
+    username: string;
+    tilesOwned: number;
+    troops: number;
+    territoryShare: number;
+    rank: number;
+    alive: boolean;
+  }[];
+}
+
+/** Parsed from `decisive-moments.json` (`AgentDecisiveMoments.ts`) — see that module's doc for the exactly-3-to-5, never-padded selection contract. */
+export interface LeagueEpisodeDecisiveMoment {
+  turn: number;
+  type: string;
+  headline: string;
+  involvedAgents: string[];
+  beforeState: LeagueEpisodeDecisiveMomentState | null;
+  afterState: LeagueEpisodeDecisiveMomentState | null;
+  jumpToReplayTurn: number;
+  /** The agent's OWN stated reason where captured — `null` when none was — never verified reasoning, always rendered client-side as "stated by the agent". */
+  statedReason: string | null;
+}
+
 export interface LeagueEpisodeMatchPageModel {
   episodeRequestId: string;
   shortId: string;
@@ -77,6 +103,8 @@ export interface LeagueEpisodeMatchPageModel {
   premiereHref: string | null;
   directorCut: { durationEstimateSeconds: number; segmentCount: number } | null;
   recap: LeagueEpisodeRecap | null;
+  /** `null` when no `decisive-moments.json` exists for this episode yet (not backfilled, or a genuinely quiet match with fewer than `MIN_DECISIVE_MOMENTS` real candidates — see `AgentDecisiveMoments.ts`'s "never padded" doc) — the page renders no section, never a placeholder. */
+  decisiveMoments: LeagueEpisodeDecisiveMoment[] | null;
 }
 
 /** Reads `data.json`'s `episodes` array with the same tolerant, cast-after-shape-check pattern `FeaturedMatchRetentionPin.ts`/`coworld-league-mirror.ts` already use for this exact file — `null` for anything short of "a JSON object with an `episodes` array" (missing mirror cycle, corrupt write, etc.), never a thrown error. */
@@ -196,6 +224,7 @@ function placementOrderedPlayers(
 export function buildLeagueEpisodeMatchPageModel(
   row: CoworldLeagueEpisodeRow,
   recap: LeagueEpisodeRecap | null,
+  decisiveMoments: LeagueEpisodeDecisiveMoment[] | null,
 ): LeagueEpisodeMatchPageModel {
   return {
     episodeRequestId: row.episodeRequestId,
@@ -215,6 +244,7 @@ export function buildLeagueEpisodeMatchPageModel(
     premiereHref: row.premiereHref ?? null,
     directorCut: row.directorCut ?? null,
     recap,
+    decisiveMoments,
   };
 }
 
@@ -296,6 +326,123 @@ export async function readLeagueEpisodeRecap(
   }
 }
 
+const maximumDecisiveMomentsBytes = 2 * 1024 * 1024;
+
+function parseDecisiveMomentState(
+  value: unknown,
+): LeagueEpisodeDecisiveMomentState | null {
+  if (typeof value !== "object" || value === null) return null;
+  const record = value as Record<string, unknown>;
+  const turn = typeof record.turn === "number" ? record.turn : null;
+  const agentsRaw = Array.isArray(record.agents) ? record.agents : null;
+  if (turn === null || agentsRaw === null) return null;
+  const agents = agentsRaw
+    .map((entry) => {
+      if (typeof entry !== "object" || entry === null) return null;
+      const agent = entry as Record<string, unknown>;
+      if (
+        typeof agent.username !== "string" ||
+        typeof agent.tilesOwned !== "number" ||
+        typeof agent.troops !== "number" ||
+        typeof agent.territoryShare !== "number" ||
+        typeof agent.rank !== "number" ||
+        typeof agent.alive !== "boolean"
+      ) {
+        return null;
+      }
+      return {
+        username: agent.username,
+        tilesOwned: agent.tilesOwned,
+        troops: agent.troops,
+        territoryShare: agent.territoryShare,
+        rank: agent.rank,
+        alive: agent.alive,
+      };
+    })
+    .filter((agent): agent is LeagueEpisodeDecisiveMomentState["agents"][number] => agent !== null);
+  return { turn, agents };
+}
+
+/**
+ * Parses `decisive-moments.json` (`AgentDecisiveMoments.ts`'s
+ * `AgentDecisiveMomentsArtifact`) into the page's field-validated
+ * `LeagueEpisodeDecisiveMoment[]` — same "validate exactly what's read"
+ * discipline `parseMatchRecapArtifact` uses. Requires the current
+ * `DECISIVE_MOMENTS_SCHEMA_VERSION`; `null` for malformed JSON, a stale
+ * schema, or zero moments (never fabricated).
+ */
+export function parseDecisiveMomentsArtifact(
+  raw: string,
+): LeagueEpisodeDecisiveMoment[] | null {
+  let value: unknown;
+  try {
+    value = JSON.parse(raw);
+  } catch {
+    return null;
+  }
+  if (typeof value !== "object" || value === null) return null;
+  const record = value as Record<string, unknown>;
+  if (record.schemaVersion !== 1) return null;
+  const momentsRaw = Array.isArray(record.moments) ? record.moments : [];
+  const moments = momentsRaw
+    .map((entry) => {
+      if (typeof entry !== "object" || entry === null) return null;
+      const moment = entry as Record<string, unknown>;
+      if (
+        typeof moment.turn !== "number" ||
+        typeof moment.type !== "string" ||
+        typeof moment.headline !== "string" ||
+        !Array.isArray(moment.involvedAgents) ||
+        typeof moment.jumpToReplayTurn !== "number"
+      ) {
+        return null;
+      }
+      const involvedAgents = moment.involvedAgents.filter(
+        (agent): agent is string => typeof agent === "string",
+      );
+      if (moment.headline.length === 0 || involvedAgents.length === 0) {
+        return null;
+      }
+      return {
+        turn: moment.turn,
+        type: moment.type,
+        headline: moment.headline,
+        involvedAgents,
+        beforeState: parseDecisiveMomentState(moment.beforeState),
+        afterState: parseDecisiveMomentState(moment.afterState),
+        jumpToReplayTurn: moment.jumpToReplayTurn,
+        statedReason:
+          typeof moment.statedReason === "string" ? moment.statedReason : null,
+      };
+    })
+    .filter((moment): moment is LeagueEpisodeDecisiveMoment => moment !== null);
+  return moments.length === 0 ? null : moments;
+}
+
+/**
+ * Reads and parses `decisive-moments.json` from an episode's mirrored run
+ * directory, when one exists — same absence handling as
+ * `readLeagueEpisodeRecap` (the mirror only writes one once
+ * `CoworldLeagueMatchNarrativeBackfill.ts`'s decisive-moments step has
+ * processed that run AND at least `MIN_DECISIVE_MOMENTS` real candidates
+ * were found — see `AgentDecisiveMoments.ts`'s own doc).
+ */
+export async function readLeagueEpisodeDecisiveMoments(
+  runDir: string | null,
+): Promise<LeagueEpisodeDecisiveMoment[] | null> {
+  if (runDir === null) return null;
+  try {
+    const filePath = path.join(runDir, "decisive-moments.json");
+    const stat = await fs.stat(filePath);
+    if (!stat.isFile() || stat.size > maximumDecisiveMomentsBytes) {
+      return null;
+    }
+    const raw = await fs.readFile(filePath, "utf8");
+    return parseDecisiveMomentsArtifact(raw);
+  } catch {
+    return null;
+  }
+}
 /**
  * Spoiler-safe title for the match page's OG/social card and `<title>` —
  * participants and context, NEVER the winner/result (product overhaul

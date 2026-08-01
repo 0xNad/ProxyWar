@@ -35,8 +35,13 @@ import {
   leagueEpisodeSpoilerSafeDescription,
   leagueEpisodeSpoilerSafeTitle,
   readCoworldLeagueEpisodesFromDataJson,
+  readLeagueEpisodeDecisiveMoments,
   readLeagueEpisodeRecap,
 } from "../server/agents/LeagueEpisodeMatchPage";
+import {
+  renderMatchShareCardSvg,
+  type MatchShareCardInput,
+} from "../server/agents/MatchShareCard";
 import { loadIdentityRegistrySnapshot } from "../server/identity/IdentityRegistry";
 import {
   buildRegistrationDraft,
@@ -1301,12 +1306,14 @@ app.get("/api/matches/:episodeId", async (req, res) => {
       return;
     }
     const identity = await loadIdentityRegistrySnapshot();
-    const recap = await readLeagueEpisodeRecap(
-      findLeagueEpisodeRunDir(row, runsRootDir),
-    );
+    const runDir = findLeagueEpisodeRunDir(row, runsRootDir);
+    const [recap, decisiveMoments] = await Promise.all([
+      readLeagueEpisodeRecap(runDir),
+      readLeagueEpisodeDecisiveMoments(runDir),
+    ]);
     res.status(200).json({
       schemaVersion: 1,
-      match: buildLeagueEpisodeMatchPageModel(row, recap),
+      match: buildLeagueEpisodeMatchPageModel(row, recap, decisiveMoments),
       participants: buildLeagueEpisodeParticipantCards(row, identity),
     });
   } catch (error) {
@@ -1540,7 +1547,10 @@ async function sendPublicAppShellPage(
 // explains that to a visitor, not the social card.
 async function resolveMatchDetailPageMetadata(
   matchId: string,
-): Promise<{ title: string; description: string } | null> {
+): Promise<
+  | { title: string; description: string; card: MatchShareCardInput }
+  | null
+> {
   if (matchId.startsWith("feat_")) {
     const stateRoot = resolveFeaturedMatchStateRoot();
     const store = await reconcileFeaturedMatchStore(stateRoot);
@@ -1550,9 +1560,45 @@ async function resolveMatchDetailPageMetadata(
     );
     if (match === undefined) return null;
     const detail = publicFeaturedMatch(match);
+    // Spoiler safety is structural here: `result` is only ever non-null on
+    // the raw record once `state` is `"revealed"`/`"archived"` (see
+    // `FeaturedMatch.ts`'s own embargo contract) — this never independently
+    // re-decides revealed-ness, it only ever forwards what's ALREADY safe
+    // to read off `match.result`.
+    const nameByAgentId = new Map(
+      match.participants.map((participant) => [
+        participant.agentId,
+        participant.playerName,
+      ]),
+    );
+    const card: MatchShareCardInput = {
+      matchId,
+      title: detail.title,
+      mapLabel: match.map,
+      participants: match.participants.map((p) => p.playerName),
+      result:
+        match.result === null
+          ? null
+          : {
+              winnerName:
+                match.result.winnerAgentId === null
+                  ? null
+                  : (nameByAgentId.get(match.result.winnerAgentId) ?? null),
+              placements: match.result.placements
+                .map((entry) => ({
+                  name: entry.agentId === null ? null : nameByAgentId.get(entry.agentId),
+                  placement: entry.placement,
+                }))
+                .filter(
+                  (entry): entry is { name: string; placement: number } =>
+                    entry.name !== undefined && entry.name !== null,
+                ),
+            },
+    };
     return {
       title: `${detail.title} | Proxy War`,
       description: detail.description,
+      card,
     };
   }
   const episodes = await readCoworldLeagueEpisodesFromDataJson(
@@ -1561,9 +1607,29 @@ async function resolveMatchDetailPageMetadata(
   const row =
     episodes === null ? null : findLeagueEpisodeByRequestId(episodes, matchId);
   if (row === null) return null;
+  // League episodes are always post-match (see `MatchDetailPage.ts`'s own
+  // doc), so the card is always the result variant.
+  const card: MatchShareCardInput = {
+    matchId,
+    title: leagueEpisodeSpoilerSafeTitle(row),
+    mapLabel: row.map,
+    participants: row.players.map((p) => p.name),
+    result: {
+      winnerName: row.winnerName,
+      placements: [...row.players]
+        .sort(
+          (left, right) =>
+            Number(right.isWinner) - Number(left.isWinner) ||
+            right.tilesOwned - left.tilesOwned ||
+            left.slot - right.slot,
+        )
+        .map((player, index) => ({ name: player.name, placement: index + 1 })),
+    },
+  };
   return {
     title: leagueEpisodeSpoilerSafeTitle(row),
     description: leagueEpisodeSpoilerSafeDescription(row),
+    card,
   };
 }
 
@@ -1611,6 +1677,10 @@ async function sendMatchDetailPageShell(
       `/match/${encodeURIComponent(matchId)}`,
       replayPremierePublicOrigin,
     ).href;
+    const cardUrl = new URL(
+      `/match/${encodeURIComponent(matchId)}/card-v1.svg`,
+      replayPremierePublicOrigin,
+    ).href;
     const socialTags = [
       `<title>${escapeHtml(metadata.title)}</title>`,
       `<meta name="description" content="${escapeHtml(metadata.description)}">`,
@@ -1620,9 +1690,13 @@ async function sendMatchDetailPageShell(
       `<meta property="og:url" content="${escapeHtml(canonicalUrl)}">`,
       `<meta property="og:title" content="${escapeHtml(metadata.title)}">`,
       `<meta property="og:description" content="${escapeHtml(metadata.description)}">`,
-      `<meta name="twitter:card" content="summary">`,
+      `<meta property="og:image" content="${escapeHtml(cardUrl)}">`,
+      `<meta property="og:image:width" content="1200">`,
+      `<meta property="og:image:height" content="630">`,
+      `<meta name="twitter:card" content="summary_large_image">`,
       `<meta name="twitter:title" content="${escapeHtml(metadata.title)}">`,
       `<meta name="twitter:description" content="${escapeHtml(metadata.description)}">`,
+      `<meta name="twitter:image" content="${escapeHtml(cardUrl)}">`,
     ].join("\n");
     const withMetadata = stripShellSocialMetadata(appShell).replace(
       /<head(?:\s[^>]*)?>/i,
@@ -1674,6 +1748,35 @@ app.get("/builder/:slug", async (_req, res) => {
 });
 app.get("/match/:matchId", async (req, res) => {
   await sendMatchDetailPageShell(req, res);
+});
+// Season Zero Phase 2 share image — see `MatchShareCard.ts`'s own doc for
+// why this is SVG (no PNG rasterizer in this repo) rather than a new
+// pipeline. Spoiler safety is structural: `resolveMatchDetailPageMetadata`
+// only ever hands back a real `result` once the underlying record is
+// already safe to reveal (see that function's own doc) — this route
+// never independently decides embargo state.
+app.get("/match/:matchId/card-v1.svg", async (req, res) => {
+  const matchId = req.params.matchId;
+  try {
+    const metadata =
+      typeof matchId === "string"
+        ? await resolveMatchDetailPageMetadata(matchId)
+        : null;
+    if (metadata === null) {
+      res.status(404).send("Not found");
+      return;
+    }
+    res.setHeader("Content-Type", "image/svg+xml; charset=utf-8");
+    res.setHeader("Cache-Control", "public, max-age=300");
+    res.status(200).send(renderMatchShareCardSvg(metadata.card));
+  } catch (error) {
+    console.error(
+      `Failed to render match share card: ${
+        error instanceof Error ? error.message : String(error)
+      }`,
+    );
+    res.status(503).send("Not available");
+  }
 });
 app.get("/about", async (_req, res) => {
   await sendPublicAppShellPage(res, "the about page");

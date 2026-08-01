@@ -1953,7 +1953,17 @@
     "episode_run_key_unavailable": "Unavailable",
     "episode_raw_labels_label": "Raw participant labels",
     "episode_provenance_note": "Mirrored from the hosted Coworld league; results are derived from the downloaded replay data, never re-simulated.",
-    "quick_replay_link": "Quick replay (lightweight) →"
+    "quick_replay_link": "Quick replay (lightweight) →",
+    "decisive_moments_heading": "Decisive moments",
+    "decisive_moment_turn": "Turn {turn}",
+    "decisive_moment_type_lead_change": "Lead change",
+    "decisive_moment_type_reversal": "Reversal",
+    "decisive_moment_type_elimination": "Elimination",
+    "decisive_moment_type_alliance_betrayal": "Betrayal",
+    "decisive_moment_type_territorial_swing": "Territorial swing",
+    "decisive_moment_type_final_confrontation": "Final clash",
+    "decisive_moment_stated_reason_label": "Stated reason",
+    "decisive_moment_jump_link": "Jump to this moment in the replay →"
   },
   "about": {
     "title": "About Proxy War",
