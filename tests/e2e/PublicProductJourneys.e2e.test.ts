@@ -78,6 +78,65 @@ describe("first visit -> a completed match in two clicks", () => {
   });
 });
 
+describe("league battle card -> match page -> replay", () => {
+  test("a /league battle card's canonical /match/:episodeId link renders real episode content whose own replay action resolves", async () => {
+    await browser.goto(`${fixture.origin}/league`);
+    await browser.waitFor(
+      `document.querySelectorAll('a[href^="/match/"]').length > 0`,
+    );
+    const matchHref = await browser.evaluate<string | null>(`
+      (() => {
+        const link = document.querySelector('a[href^="/match/"]');
+        return link ? link.getAttribute('href') : null;
+      })()
+    `);
+    expect(matchHref).toMatch(/^\/match\/ereq_/);
+    await browser.goto(`${fixture.origin}${matchHref}`);
+    await browser.waitFor(`document.querySelector('h1') !== null`);
+    const text = await browser.textContent();
+    // Real episode content, never the not-found/error placeholder.
+    expect(text).not.toContain("Match not found");
+    expect(text).not.toContain("Could not load this match");
+    expect(text).toContain("Placements");
+    // The match page's own replay action (full render or quick replay)
+    // resolves — a genuine second hop, not just a syntactically-present
+    // href.
+    const replayHref = await browser.evaluate<string | null>(`
+      (() => {
+        const link = document.querySelector(
+          'a[href^="/ai-league-replay/"], a[href^="/ai-league-runs/"]',
+        );
+        return link ? link.getAttribute('href') : null;
+      })()
+    `);
+    expect(typeof replayHref).toBe("string");
+    const status = await browser.httpStatus(`${fixture.origin}${replayHref}`);
+    expect(status).toBe(200);
+  });
+});
+
+describe("direct reload of a league-episode match page", () => {
+  test("reloading /match/:episodeId directly renders the real episode (not a stale loading/not-found placeholder)", async () => {
+    await browser.goto(
+      `${fixture.origin}/match/${ORDINARY_EPISODE.episodeRequestId}`,
+    );
+    await browser.waitFor(`document.querySelector('h1') !== null`);
+    const text = await browser.textContent();
+    expect(text).not.toContain("Match not found");
+    expect(text).not.toContain("Could not load this match");
+    expect(text).toContain(ORDINARY_EPISODE.map);
+    expect(text).toContain("Placements");
+  });
+
+  test("an unknown episode id still renders the honest not-found state, not a raw server error", async () => {
+    await browser.goto(`${fixture.origin}/match/ereq_this-episode-does-not-exist`);
+    await browser.waitFor(`document.querySelector('h1') !== null`);
+    const text = await browser.textContent();
+    expect(text).not.toContain("Cannot GET");
+    expect(text.toLowerCase()).toContain("not found");
+  });
+});
+
 describe("league -> agent profile", () => {
   test("a standings row's Agent link reaches a real /agent/:slug page", async () => {
     await browser.goto(`${fixture.origin}/league`);
