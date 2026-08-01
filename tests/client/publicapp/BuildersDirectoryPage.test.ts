@@ -12,6 +12,11 @@
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
+const { trackMock } = vi.hoisted(() => ({ trackMock: vi.fn() }));
+vi.mock("../../../src/client/analytics/AnalyticsClient", () => ({
+  analytics: { track: trackMock, trackVisitStart: vi.fn() },
+}));
+
 vi.mock("../../../src/client/Utils", () => ({
   translateText: (key: string, params?: Record<string, string | number>) =>
     params === undefined ? key : `${key}:${JSON.stringify(params)}`,
@@ -114,6 +119,7 @@ beforeEach(() => {
 afterEach(() => {
   document.body.innerHTML = "";
   vi.unstubAllGlobals();
+  trackMock.mockClear();
 });
 
 describe("builders-directory-page", () => {
@@ -333,5 +339,33 @@ describe("builders-directory-page", () => {
     expect(
       el.querySelector('a[href="/agent/still-unclaimed"]'),
     ).not.toBeNull();
+  });
+
+  it("tracks builder_profile_opened with the builder slug when a claimed builder's card is clicked", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () =>
+        Response.json(
+          readModelBody([
+            minimalBuilder({
+              id: "builder-1",
+              slug: "daveey",
+              displayName: "Daveey",
+              shortBio: null,
+              status: "verified",
+            }),
+          ]),
+        ),
+      ),
+    );
+    const el = mount();
+    await flushMicrotasks();
+
+    const link = el.querySelector<HTMLAnchorElement>('a[href="/builder/daveey"]');
+    expect(link).not.toBeNull();
+    link?.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
+    expect(trackMock).toHaveBeenCalledWith("builder_profile_opened", {
+      builderSlug: "daveey",
+    });
   });
 });

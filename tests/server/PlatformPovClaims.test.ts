@@ -21,6 +21,10 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, test } from "vitest";
 import { z } from "zod";
+import {
+  AnalyticsAggregateStore,
+  totalEventCount,
+} from "../../src/server/analytics/AnalyticsAggregateStore";
 import { createPlatformAccountRouter } from "../../src/server/platform/PlatformAccountHttp";
 import { PlatformAccountSecurity } from "../../src/server/platform/PlatformAccountSecurity";
 import { PlatformAccountStore } from "../../src/server/platform/PlatformAccountStore";
@@ -113,6 +117,7 @@ beforeEach(async () => {
       ]),
       povClaimOrigins: new Set([LEAGUE_ORIGIN]),
       githubSignInAvailable: false,
+      artifactsRootDir: stateRoot,
     }),
   );
   server = await new Promise<http.Server>((resolve) => {
@@ -248,6 +253,67 @@ describe("GET /api/account/pov-claims", () => {
       Origin: LEAGUE_ORIGIN,
     });
     expect(response.headers["cache-control"]).toContain("no-store");
+  });
+});
+
+describe("returning_authenticated_visitor (GET /api/account)", () => {
+  /** `emitServerAnalyticsEvent` is fire-and-forget (`void`) from the route handler, so the write can land slightly after the HTTP response does — poll briefly rather than assume it's already flushed. */
+  async function waitForCount(expected: number, timeoutMs = 2_000): Promise<number> {
+    const deadline = Date.now() + timeoutMs;
+    let count = 0;
+    while (Date.now() < deadline) {
+      const file = await new AnalyticsAggregateStore(stateRoot).readAll();
+      count = totalEventCount(file, "returning_authenticated_visitor");
+      if (count >= expected) return count;
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+    return count;
+  }
+
+  test("does NOT emit on a visitor's first-ever bootstrap (the cookie is freshly minted, not returning)", async () => {
+    const response = await get("/api/account", { Origin: PLATFORM_ORIGIN });
+    expect(response.headers["set-cookie"]).toBeDefined();
+    // Give any (incorrect) emission a real chance to land before asserting absence.
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    const file = await new AnalyticsAggregateStore(stateRoot).readAll();
+    expect(totalEventCount(file, "returning_authenticated_visitor")).toBe(0);
+  });
+
+  test("emits once a request carries an ALREADY-ESTABLISHED account cookie", async () => {
+    const first = await get("/api/account", { Origin: PLATFORM_ORIGIN });
+    const cookie = accountCookieFor(first.headers["set-cookie"] ?? []);
+    const second = await get("/api/account", {
+      Origin: PLATFORM_ORIGIN,
+      Cookie: cookie,
+    });
+    expect(second.status).toBe(200);
+    // The cookie already existed, so bootstrapRead must not re-mint it.
+    expect(second.headers["set-cookie"]).toBeUndefined();
+    expect(await waitForCount(1)).toBe(1);
+  });
+
+  test("dedupes to at most one emission per account id per day across repeated requests", async () => {
+    const first = await get("/api/account", { Origin: PLATFORM_ORIGIN });
+    const cookie = accountCookieFor(first.headers["set-cookie"] ?? []);
+    for (let i = 0; i < 5; i++) {
+      await get("/api/account", { Origin: PLATFORM_ORIGIN, Cookie: cookie });
+    }
+    await waitForCount(1);
+    // A short real wait to let any (incorrect) extra emissions land before
+    // asserting the count never exceeded one.
+    await new Promise((resolve) => setTimeout(resolve, 150));
+    const file = await new AnalyticsAggregateStore(stateRoot).readAll();
+    expect(totalEventCount(file, "returning_authenticated_visitor")).toBe(1);
+  });
+
+  test("two distinct returning accounts each emit their own count", async () => {
+    const accountA = await get("/api/account", { Origin: PLATFORM_ORIGIN });
+    const cookieA = accountCookieFor(accountA.headers["set-cookie"] ?? []);
+    const accountB = await get("/api/account", { Origin: PLATFORM_ORIGIN });
+    const cookieB = accountCookieFor(accountB.headers["set-cookie"] ?? []);
+    await get("/api/account", { Origin: PLATFORM_ORIGIN, Cookie: cookieA });
+    await get("/api/account", { Origin: PLATFORM_ORIGIN, Cookie: cookieB });
+    expect(await waitForCount(2)).toBe(2);
   });
 });
 

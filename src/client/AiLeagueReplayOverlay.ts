@@ -315,17 +315,24 @@ export function mountAiLeagueReplayOverlay(input: AiLeagueReplayOverlayInput) {
   // Phase 7 watch-progress milestones. Hooks the SAME `ai-league-replay-frame`
   // event every other per-frame subsystem here already listens to (playhead
   // sync, Director Cut, lower thirds) — never a new timer or RAF loop.
-  // Wall-clock elapsed time since the first frame drives the 30s/2m
-  // milestones uniformly in both Director Cut and Full Replay (bounded on
-  // one `firstFrameAt` timestamp, diffed per frame — no per-tick network
-  // call, no `setInterval`); turn progress against the match's own finish
-  // turn (the same `aiLeagueFinishTurn` the lower-thirds sync above already
-  // computes) drives 50%/completion, so this needs no dependency on the
-  // Director Cut plan's own duration estimate. Each milestone is a
-  // one-shot flag in `watchMilestonesSent`, guaranteeing exactly one
+  // `activePlaybackMs` — NOT wall-clock `Date.now() - firstFrameAt` — drives
+  // the 30s/2m milestones: a paused, backgrounded, or buffering viewer must
+  // never inflate the retention funnel Season Zero actually measures. Each
+  // consecutive frame pair's real delta is added, capped at
+  // `MAX_FRAME_DELTA_MS` so a long pause/buffering stall (or simply the gap
+  // before the very first frame) can never masquerade as watched time, and
+  // accumulation halts entirely while `document.hidden` (a backgrounded tab
+  // contributes zero regardless of delta size, even if the underlying
+  // playback driver keeps dispatching frames while hidden). Turn progress
+  // against the match's own finish turn (the same `aiLeagueFinishTurn` the
+  // lower-thirds sync above already computes) drives 50%/completion — those
+  // were already correct and stay turn-based, not time-based. Each milestone
+  // is a one-shot flag in `watchMilestonesSent`, guaranteeing exactly one
   // `analytics.track` call per milestone per view.
+  const MAX_FRAME_DELTA_MS = 2_000;
   const watchMilestonesSent = new Set<string>();
-  let firstFrameAt: number | null = null;
+  let lastFrameAt: number | null = null;
+  let activePlaybackMs = 0;
   const trackWatchMilestoneOnce = (
     name: "watched_30s" | "watched_2m" | "watched_50pct" | "completed",
   ): void => {
@@ -346,10 +353,16 @@ export function mountAiLeagueReplayOverlay(input: AiLeagueReplayOverlayInput) {
     ) {
       return;
     }
-    if (firstFrameAt === null) firstFrameAt = Date.now();
-    const elapsedMs = Date.now() - firstFrameAt;
-    if (elapsedMs >= 30_000) trackWatchMilestoneOnce("watched_30s");
-    if (elapsedMs >= 120_000) trackWatchMilestoneOnce("watched_2m");
+    const now = Date.now();
+    if (lastFrameAt !== null && !document.hidden) {
+      const deltaMs = now - lastFrameAt;
+      if (deltaMs > 0) {
+        activePlaybackMs += Math.min(deltaMs, MAX_FRAME_DELTA_MS);
+      }
+    }
+    lastFrameAt = now;
+    if (activePlaybackMs >= 30_000) trackWatchMilestoneOnce("watched_30s");
+    if (activePlaybackMs >= 120_000) trackWatchMilestoneOnce("watched_2m");
     const telemetry =
       currentInput.spectatorTelemetry as AiLeagueSpectatorTelemetry | null;
     const totalTurns = aiLeagueFinishTurn(currentInput, telemetry);

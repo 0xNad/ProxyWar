@@ -12,6 +12,7 @@ import {
   ReadModel,
 } from "./ReadModelSchema";
 import { translateText } from "../Utils";
+import { analytics } from "../analytics/AnalyticsClient";
 
 type LoadState = "loading" | "ready" | "error";
 
@@ -258,6 +259,10 @@ export class BuildersDirectoryPage extends LitElement {
       <li>
         <a
           href="/builder/${encodeURIComponent(builder.slug)}"
+          @click=${() =>
+            analytics.track("builder_profile_opened", {
+              builderSlug: builder.slug,
+            })}
           class="flex flex-wrap items-center gap-x-3 gap-y-1 rounded-md border border-line bg-surface-2 px-3 py-2.5 text-sm no-underline outline-none hover:border-line-strong focus-visible:ring-2 focus-visible:ring-accent"
         >
           <span class="font-semibold text-ink">${label}</span>

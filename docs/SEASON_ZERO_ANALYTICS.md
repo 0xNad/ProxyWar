@@ -72,31 +72,62 @@ Wired into the product surfaces as of this pass:
   from `Main.ts`'s `openAiLeagueReplay`), `AiLeagueReplayOverlay.ts`
   (`director_cut_started` on default-on mount and on explicit toggle-on;
   `timeline_jump` on every War-Room/timeline jump; `watched_30s`/
-  `watched_2m` from wall-clock elapsed time since the first frame,
+  `watched_2m` from ACCUMULATED ACTIVE PLAYBACK seconds — each consecutive
+  frame's real delta, capped at ~2s so a pause/buffer/stall gap can never
+  masquerade as watched time, with accumulation halted entirely while
+  `document.hidden` (a backgrounded tab contributes zero) — never
+  wall-clock `Date.now() - firstFrameAt`, which would have inflated the
+  retention funnel for anyone who paused or backgrounded the tab;
   `watched_50pct`/`completed` from turn progress against the match's own
-  finish turn — all one-shot per view, hooked onto the existing
-  `ai-league-replay-frame` event rather than a new per-tick loop),
-  `ReplayPremiereArchiveView.ts` (`switched_to_full_replay` on the
-  archived-premiere "Watch Full Replay" button).
+  finish turn (unaffected by the above fix — always correct) — all
+  one-shot per view, hooked onto the existing `ai-league-replay-frame`
+  event rather than a new per-tick loop), `ReplayPremiereArchiveView.ts`
+  (`switched_to_full_replay` on the archived-premiere "Watch Full Replay"
+  button).
+- **Directories/profiles**: `BuildersDirectoryPage.ts`
+  (`builder_profile_opened` on each real claimed builder's `/builder/:slug`
+  link).
 - **Server-side write paths**: `identity-claims.ts`'s `approve` subcommand
   (`claim_verified`), `PlatformBuilderVersionHttp.ts`'s version-release
   route (`version_release_created`), `identity-releases.ts`'s `reconcile`
-  subcommand (`version_observed` per newly-observed release).
+  subcommand (`version_observed` per newly-observed release),
+  `PlatformAccountHttp.ts`'s `GET /api/account` bootstrap route
+  (`returning_authenticated_visitor`, see below).
+
+### `returning_authenticated_visitor` semantics
+
+Emitted server-side, not client-side: the platform account cookie
+(`PlatformAccountSecurity`) is HttpOnly, so the client genuinely has no
+cheap way to know "is this visitor already established" — but the SERVER
+does, for free, on every `GET /api/account` call. `bootstrapRead` returns
+`setCookie: null` precisely when it found an ALREADY-ESTABLISHED account
+cookie rather than minting a fresh one; that is the emission trigger.
+
+This is an **authenticated visit-DAY** count, not strict per-session
+counting, and "authenticated" means "carries an established platform
+account identity" — not necessarily a GitHub-linked one (an anonymous
+platform visitor still gets a stable `accountId` on first touch). Deduped
+to at most one emission per `accountId` per UTC day via a bounded,
+in-memory, day-keyed set inside `PlatformAccountHttp.ts` (best-effort: a
+process restart resets it, matching the "raw counts, don't overinterpret"
+posture the whole report already takes).
 
 **Known, honest gaps** (the report shows `not_yet_instrumented` for these
 until a real feature/signal exists to hook, never a fabricated number):
 
-- `follow_bookmark` — no follow/bookmark feature exists yet in the
-  directory pages; the event name is reserved for when it ships.
-- `builder_profile_opened` — no builder-profile link site was in scope for
-  this pass (only agent-profile links from a match were); the event stays
-  ready for the next instrumentation pass.
-- `returning_authenticated_visitor` — the public pages have no cheap,
-  synchronous client-side "is this visitor logged in" signal at mount time
-  (the platform account session is an HttpOnly cookie, checked
-  server-side only); guessing from the route alone would misclassify an
-  anonymous visitor. Every route currently reports `page_viewed` +, when
-  applicable, `returning_anonymous_visitor` only.
+- `follow_bookmark` — **no follow/bookmark feature exists in this
+  codebase at all** (verified by grep across `src/client` — no button, no
+  localStorage key, nothing). The product feature itself is unshipped;
+  this is not an instrumentation gap. The event name stays reserved in
+  the catalog for whenever a real follow/bookmark control ships — wire it
+  then, never before.
+- `builder_profile_opened` from `AgentProfilePage.ts` — that page's
+  builder line (`renderBuilderLine`) renders `builderDisplayName` as
+  **plain text**, not a link; there is no clickable builder-profile
+  affordance there to instrument. `BuildersDirectoryPage.ts`'s real
+  `/builder/:slug` link IS wired (above). Wiring `AgentProfilePage` would
+  require adding a link that doesn't exist today — a product/design
+  decision outside this pass's scope, not an oversight.
 
 Every report metric still carries one of three honest states:
 

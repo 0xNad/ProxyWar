@@ -3107,7 +3107,7 @@ describe("Phase 7 analytics: Director Cut, timeline jump, watch-progress milesto
     expect(trackMock).toHaveBeenCalledWith("timeline_jump", { matchId: runID });
   });
 
-  it("tracks watched_30s and watched_2m exactly once each as wall-clock time elapses, in both replay modes", () => {
+  it("tracks watched_30s and watched_2m from ACCUMULATED ACTIVE playback seconds across steady frames, not wall-clock elapsed time", () => {
     vi.useFakeTimers();
     const runID = "analytics-watch-time-1";
     mountAiLeagueReplayOverlay({
@@ -3133,24 +3133,118 @@ describe("Phase 7 analytics: Director Cut, timeline jump, watch-progress milesto
         }),
       );
 
-    frame(1); // first frame — starts the elapsed-time clock
+    frame(1); // first frame — no prior frame to diff against, contributes nothing
     expect(callsFor("watched_30s")).toHaveLength(0);
 
-    vi.advanceTimersByTime(30_000);
-    frame(2);
-    expect(callsFor("watched_30s")).toEqual([
-      ["watched_30s", { matchId: runID, replayMode: "full_replay" }],
-    ]);
-
-    // A later frame within the same second must not refire it.
-    frame(3);
+    // 15 steady 2s-spaced frames = 30,000ms of real, at-the-cap delta each.
+    for (let i = 0; i < 15; i++) {
+      vi.advanceTimersByTime(2_000);
+      frame(2 + i);
+    }
     expect(callsFor("watched_30s")).toHaveLength(1);
+    expect(callsFor("watched_2m")).toHaveLength(0);
 
-    vi.advanceTimersByTime(90_000); // total elapsed now 120s
-    frame(4);
+    // 45 more steady 2s-spaced frames = 90,000ms more, crossing 120,000ms total.
+    for (let i = 0; i < 45; i++) {
+      vi.advanceTimersByTime(2_000);
+      frame(20 + i);
+    }
     expect(callsFor("watched_2m")).toEqual([
       ["watched_2m", { matchId: runID, replayMode: "full_replay" }],
     ]);
+  });
+
+  it("caps a paused/stalled gap's contribution — a long wall-clock gap between frames never counts as watched time", () => {
+    vi.useFakeTimers();
+    const runID = "analytics-watch-paused-1";
+    mountAiLeagueReplayOverlay({
+      runID,
+      artifactBasePath: `/ai-league-runs/${runID}`,
+      decisions: [],
+      replayMaxTurn: 1000,
+    });
+    const callsFor = (name: string) =>
+      trackMock.mock.calls.filter(
+        ([calledName, context]) =>
+          calledName === name &&
+          (context as { matchId?: string } | undefined)?.matchId === runID,
+      );
+    const frame = (turnNumber: number) =>
+      document.dispatchEvent(
+        new CustomEvent("ai-league-replay-frame", {
+          detail: { tick: turnNumber, turnNumber, players: [] },
+        }),
+      );
+
+    frame(1);
+    // A single 60-second real-time gap (paused/buffering/stalled playback)
+    // must contribute at most the 2-second cap, nowhere near the 30s
+    // threshold on its own.
+    vi.advanceTimersByTime(60_000);
+    frame(2);
+    expect(callsFor("watched_30s")).toHaveLength(0);
+
+    // Repeating that 60-second-gap pattern would blow past 30s of WALL
+    // CLOCK almost instantly if wall-clock elapsed time were still being
+    // used — but each gap is capped at 2s of ACTIVE playback, so it takes
+    // exactly 15 such gaps (1 above + 14 here) to accumulate 30,000ms.
+    for (let i = 0; i < 13; i++) {
+      vi.advanceTimersByTime(60_000);
+      frame(3 + i);
+    }
+    expect(callsFor("watched_30s")).toHaveLength(0);
+    vi.advanceTimersByTime(60_000);
+    frame(20);
+    expect(callsFor("watched_30s")).toHaveLength(1);
+  });
+
+  it("halts accumulation entirely while the document is hidden, even if frames keep arriving", () => {
+    vi.useFakeTimers();
+    const runID = "analytics-watch-hidden-1";
+    mountAiLeagueReplayOverlay({
+      runID,
+      artifactBasePath: `/ai-league-runs/${runID}`,
+      decisions: [],
+      replayMaxTurn: 1000,
+    });
+    const callsFor = (name: string) =>
+      trackMock.mock.calls.filter(
+        ([calledName, context]) =>
+          calledName === name &&
+          (context as { matchId?: string } | undefined)?.matchId === runID,
+      );
+    const frame = (turnNumber: number) =>
+      document.dispatchEvent(
+        new CustomEvent("ai-league-replay-frame", {
+          detail: { tick: turnNumber, turnNumber, players: [] },
+        }),
+      );
+    const hiddenSpy = vi.spyOn(document, "hidden", "get");
+
+    hiddenSpy.mockReturnValue(false);
+    frame(1);
+    vi.advanceTimersByTime(2_000);
+    frame(2); // 2,000ms accumulated while visible
+    expect(callsFor("watched_30s")).toHaveLength(0);
+
+    // Tab backgrounded: frames keep arriving (the underlying playback
+    // driver need not pause), but none of this time may count as watched.
+    hiddenSpy.mockReturnValue(true);
+    for (let i = 0; i < 20; i++) {
+      vi.advanceTimersByTime(2_000);
+      frame(3 + i);
+    }
+    expect(callsFor("watched_30s")).toHaveLength(0);
+
+    // Foregrounded again: accumulation resumes.
+    hiddenSpy.mockReturnValue(false);
+    for (let i = 0; i < 14; i++) {
+      vi.advanceTimersByTime(2_000);
+      frame(30 + i);
+    }
+    // 2,000ms (before backgrounding) + 14 x 2,000ms (after foregrounding) = 30,000ms.
+    expect(callsFor("watched_30s")).toHaveLength(1);
+    hiddenSpy.mockRestore();
   });
 
   it("tracks watched_50pct once turn progress crosses half of the finish turn", () => {

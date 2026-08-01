@@ -1895,6 +1895,7 @@ if (platformEnabled) {
       returnOrigins: platformReturnOrigins,
       povClaimOrigins: platformPovClaimOrigins,
       githubSignInAvailable: githubOAuthClient !== null,
+      artifactsRootDir,
       onOperatorError: (operatorCode, error) => {
         console.error(
           `Platform account ${operatorCode}: ${
