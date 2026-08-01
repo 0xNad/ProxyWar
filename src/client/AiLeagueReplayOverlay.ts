@@ -1440,15 +1440,6 @@ function overlayHtml(input: AiLeagueReplayOverlayInput): string {
         margin: 0 0 10px;
         color: var(--pw-text-dim, #cbd5e1);
       }
-      .ai-league-playstyle {
-        display: flex;
-        align-items: center;
-        flex-wrap: wrap;
-        gap: 5px;
-        margin: 0 0 10px;
-        color: var(--pw-text-dim, #cbd5e1);
-        font-size: 12px;
-      }
       .ai-league-standings {
         display: grid;
         /* Header stays put, rows scroll. Without the fixed row track the block
@@ -2767,36 +2758,12 @@ function overlayDetailsHtml(input: AiLeagueReplayOverlayInput): string {
   const localFallbackCount = input.decisions.filter(
     (decision) => decision.fallbackUsed,
   ).length;
-  const localActionCounts = input.decisions.reduce<Record<string, number>>(
-    (counts, decision) => {
-      const kind = actionLabel(decision);
-      counts[kind] = (counts[kind] ?? 0) + 1;
-      return counts;
-    },
-    {},
-  );
   const decisionCount =
     nonNegativeCount(input.summary?.decisionCount) ?? input.decisions.length;
   const rejectedCount =
     nonNegativeCount(input.summary?.rejectedCount) ?? localRejectedCount;
   const fallbackCount =
     nonNegativeCount(input.summary?.fallbackCount) ?? localFallbackCount;
-  const actionCounts =
-    summaryActionCounts(input.summary?.actionCounts) ?? localActionCounts;
-  const agentCount = input.summary?.roster?.length ?? 0;
-  const bots = input.summary?.runnerConfig?.bots ?? null;
-  const nations = input.summary?.runnerConfig?.nations ?? null;
-  const maxSteps = input.summary?.runnerConfig?.maxSteps ?? null;
-  const configuredOpponentCount = numericCount(nations) + numericCount(bots);
-  // League matches are agent-vs-agent, so the "vs N built-in opponents" clause
-  // is only meaningful when built-in opponents actually exist — it used to
-  // render the nonsense "vs 0 built-in opponents". Both branches go through
-  // translateText (this line was previously hardcoded English).
-
-  const mapName =
-    typeof input.summary?.runnerConfig?.map === "string"
-      ? input.summary.runnerConfig.map
-      : null;
 
   const spectatorTelemetry =
     input.spectatorTelemetry as AiLeagueSpectatorTelemetry | null;
@@ -4545,20 +4512,6 @@ function nonNegativeCount(value: number | null | undefined): number | null {
   return Math.max(0, Math.trunc(value));
 }
 
-function summaryActionCounts(
-  value: Record<string, number | null | undefined> | null | undefined,
-): Record<string, number> | null {
-  if (value === null || value === undefined) {
-    return null;
-  }
-  return Object.fromEntries(
-    Object.entries(value).flatMap(([kind, count]) => {
-      const normalized = nonNegativeCount(count);
-      return normalized !== null && normalized > 0 ? [[kind, normalized]] : [];
-    }),
-  );
-}
-
 function normalizeSpectatorTelemetry(
   value: unknown,
 ): AiLeagueSpectatorTelemetry | null {
@@ -4656,52 +4609,6 @@ function actionLabel(decision: AiLeagueDecisionLogEntry): string {
     return "target";
   }
   return decision.selectedActionKind;
-}
-
-// Action-kind labels for the playstyle badges. Known kinds route through
-// translateText (ai_league_replay.action_<kind>); unknown kinds fall back to
-// the raw game-internal identifier so a new kind never renders blank.
-// Keys are the labels produced by actionLabel()/actionLabelFromKind() callers
-// (note: "expand"/"chat"/"target" are already-derived labels, while the rest
-// are raw selectedActionKind values). Unknown kinds fall back to the raw id.
-const AI_LEAGUE_ACTION_LABEL_KEYS: Record<string, string> = {
-  attack: "ai_league_replay.action_attack",
-  expand: "ai_league_replay.action_expand",
-  build: "ai_league_replay.action_build",
-  chat: "ai_league_replay.action_chat",
-  quick_chat: "ai_league_replay.action_chat",
-  emoji: "ai_league_replay.action_emoji",
-  target: "ai_league_replay.action_target",
-  target_player: "ai_league_replay.action_target",
-  alliance_request: "ai_league_replay.action_alliance_request",
-  alliance_extend: "ai_league_replay.action_alliance_extend",
-  alliance_reject: "ai_league_replay.action_alliance_reject",
-  break_alliance: "ai_league_replay.action_break_alliance",
-  donate_gold: "ai_league_replay.action_donate_gold",
-  donate_troops: "ai_league_replay.action_donate_troops",
-  embargo: "ai_league_replay.action_embargo",
-  embargo_all: "ai_league_replay.action_embargo_all",
-  nuke: "ai_league_replay.action_nuke",
-  // Kinds the legal-action builder actually emits that had no label, so they
-  // leaked raw snake_case ids into the panel ("upgrade_structure", "boat").
-  boat: "ai_league_replay.action_boat",
-  boat_retreat: "ai_league_replay.action_boat_retreat",
-  delete_unit: "ai_league_replay.action_delete_unit",
-  hold: "ai_league_replay.action_hold",
-  move_warship: "ai_league_replay.action_move_warship",
-  retreat: "ai_league_replay.action_retreat",
-  spawn: "ai_league_replay.action_spawn",
-  upgrade_structure: "ai_league_replay.action_upgrade_structure",
-};
-
-function actionLabelFromKind(kind: string): string {
-  const key = AI_LEAGUE_ACTION_LABEL_KEYS[kind];
-  if (key !== undefined) {
-    return translateText(key);
-  }
-  // Never surface a raw id. An unmapped kind (new action shipped ahead of its
-  // label) degrades to a readable phrase instead of "upgrade_structure".
-  return kind.replace(/_/g, " ");
 }
 
 function numericCount(value: number | string | null | undefined): number {
