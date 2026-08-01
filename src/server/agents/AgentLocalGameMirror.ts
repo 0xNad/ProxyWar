@@ -1,6 +1,7 @@
 import { Logger } from "winston";
 import { Game } from "../../core/game/Game";
 import { GameMapLoader } from "../../core/game/GameMapLoader";
+import { TerrainMapData } from "../../core/game/TerrainMapLoader";
 import { createGameRunner, GameRunner } from "../../core/GameRunner";
 import { ServerMessage } from "../../core/Schemas";
 
@@ -21,9 +22,17 @@ export class AgentLocalGameMirror {
   // (AGENT-02) that made the 4-player FFA episode OOM as decision steps grew.
   private consumedCount = 0;
 
+  /**
+   * `preloadedTerrain` (optional) is handed straight to `createGameRunner`,
+   * so the mirror's game runs on an already-loaded map dataset instead of
+   * loading a second full copy. Ownership transfers with it: the game mutates
+   * tile state in place, so the instance must be loaded for this match's
+   * exact map + size and must never seed another game.
+   */
   constructor(
     private readonly mapLoader: GameMapLoader,
     private readonly log?: Logger,
+    private readonly preloadedTerrain?: TerrainMapData,
   ) {}
 
   async ingest(messages: ServerMessage[]): Promise<number> {
@@ -78,6 +87,7 @@ export class AgentLocalGameMirror {
       undefined,
       this.mapLoader,
       () => undefined,
+      this.preloadedTerrain,
     );
     this.log?.info("agent local game mirror initialized", {
       gameID: start.gameStartInfo.gameID,

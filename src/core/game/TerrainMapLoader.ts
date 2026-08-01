@@ -32,14 +32,31 @@ export interface Nation {
   name: string;
 }
 
+export interface LoadTerrainMapOptions {
+  /**
+   * When false, skip the module-level map cache: parse fresh and return the
+   * parsed instance directly, without retaining a master copy or paying the
+   * defensive deep clone. A one-shot process (a hosted Coworld episode runs
+   * exactly one game) otherwise keeps three full map datasets alive where one
+   * suffices — cache master, spawn-scan clone, and game clone. The default
+   * (true) preserves client/worker behavior: cache the parse, hand out
+   * isolated clones.
+   */
+  cache?: boolean;
+}
+
 export async function loadTerrainMap(
   map: GameMapType,
   mapSize: GameMapSize,
   terrainMapFileLoader: GameMapLoader,
+  options?: LoadTerrainMapOptions,
 ): Promise<TerrainMapData> {
+  const useCache = options?.cache !== false;
   const cacheKey = `${map}:${mapSize}`;
-  const cached = loadedMaps.get(cacheKey);
-  if (cached !== undefined) return cloneTerrainMapData(cached);
+  if (useCache) {
+    const cached = loadedMaps.get(cacheKey);
+    if (cached !== undefined) return cloneTerrainMapData(cached);
+  }
   const mapFiles = terrainMapFileLoader.getMapData(map);
   const manifest = await mapFiles.manifest();
 
@@ -86,6 +103,9 @@ export async function loadTerrainMap(
     miniGameMap: miniMap,
     teamGameSpawnAreas,
   };
+  if (!useCache) {
+    return result;
+  }
   loadedMaps.set(cacheKey, result);
   return cloneTerrainMapData(result);
 }
