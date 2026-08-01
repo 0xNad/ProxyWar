@@ -1,4 +1,26 @@
 {
   "schemaVersion": 1,
-  "seasons": []
+  "seasons": [
+    {
+      "schemaVersion": 1,
+      "id": "season_season-zero",
+      "slug": "season-zero",
+      "title": "Season Zero",
+      "description": "A bounded six-week showcase and evaluation programme for ProxyWar's public league: self-serve builder recruiting, hosted Coworld matches, and weekly Featured Events surfaced on the homepage. No championship points system.",
+      "startDate": "2026-08-01",
+      "endDate": "2026-09-12",
+      "state": "active",
+      "eventSlots": [
+        {
+          "featuredMatchId": "feat_21d64517e31863134746",
+          "scheduledAt": "2026-08-03T18:00:00.000Z",
+          "addedAt": "2026-08-01T19:10:42.093Z"
+        }
+      ],
+      "archiveFeaturedMatchIds": [],
+      "standingsSnapshotRefs": [],
+      "createdAt": "2026-08-01T19:03:16.504Z",
+      "updatedAt": "2026-08-01T19:10:42.093Z"
+    }
+  ]
 }
