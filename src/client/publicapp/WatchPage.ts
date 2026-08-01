@@ -997,7 +997,7 @@ export function renderDegradedNote(match: {
 }): TemplateResult | typeof nothing {
   if (match.degradedCount === null || match.degradedCount === 0) return nothing;
   const { share } = computeDegradedShare(match.degradedCount, match.decisionCount);
-  return html`<span
+  return html`<span title=${translateText("watch.degraded_turns_tooltip")}
     >${share === null
       ? translateText("watch.recovered_plain", { count: match.degradedCount })
       : translateText("watch.recovered_share", {

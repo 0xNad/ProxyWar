@@ -150,6 +150,15 @@ const STATE_LABEL: Record<PublicFeaturedMatch["state"], string> = {
 
 const RECENT_FORM_LIMIT = 5;
 
+// 2026-08-01 P0 (F8): a large FFA's registered roster produces
+// n*(n-1)/2 candidate pairs (66 for a 12-player match) -- in a small,
+// repeatedly-competing league most of those qualify (`headToHeadCount >
+// 0`), so leaving this unbounded dumped dozens of rivalry lines into the
+// storylines section. Capped and sorted by rivalry depth (most-played
+// pair first) in `renderStorylines`, same magnitude as this file's own
+// `RECENT_FORM_LIMIT` and `LobbyPage.ts`'s preview-list limits.
+const HEAD_TO_HEAD_LIMIT = 5;
+
 /**
  * `/match/:matchId` — the canonical public page for one `FeaturedMatch`
  * record (product overhaul spec Stage 3 item 6). Fetches BOTH the shared
@@ -624,7 +633,9 @@ export class MatchDetailPage extends LitElement {
       );
       rows.push(html`
         <div class="agent-analysis-row">
-          <dt>${translateText("match_detail.analysis_degraded_count")}</dt>
+          <dt title=${translateText("match_detail.analysis_degraded_count_tooltip")}>
+            ${translateText("match_detail.analysis_degraded_count")}
+          </dt>
           <dd>
             ${archiveMatch.degradedCount.toLocaleString()}
             ${share !== null
@@ -860,9 +871,19 @@ export class MatchDetailPage extends LitElement {
       } => participant.agentSlug !== null,
     );
     if (registered.length === 0) return nothing;
-    const matchups = pairwise(registered).filter(
-      ([a, b]) => headToHeadCount(readModel.matches, a.agentSlug, b.agentSlug) > 0,
-    );
+    // F8: sorted by rivalry depth (most-played pair first) and capped at
+    // HEAD_TO_HEAD_LIMIT before rendering — see that constant's own doc for
+    // why an uncapped pairwise dump is a real problem for large FFAs.
+    const qualifyingMatchups = pairwise(registered)
+      .map(([a, b]): [typeof a, typeof b, number] => [
+        a,
+        b,
+        headToHeadCount(readModel.matches, a.agentSlug, b.agentSlug),
+      ])
+      .filter(([, , count]) => count > 0)
+      .sort((x, y) => y[2] - x[2]);
+    const matchups = qualifyingMatchups.slice(0, HEAD_TO_HEAD_LIMIT);
+    const hiddenMatchupCount = qualifyingMatchups.length - matchups.length;
     return html`
       <section class="mt-6" aria-labelledby="match-detail-storylines-heading">
         <h2
@@ -897,12 +918,7 @@ export class MatchDetailPage extends LitElement {
         ${matchups.length > 0
           ? html`
               <ul class="mt-2 flex flex-col gap-2" role="list">
-                ${matchups.map(([a, b]) => {
-                  const count = headToHeadCount(
-                    readModel.matches,
-                    a.agentSlug,
-                    b.agentSlug,
-                  );
+                ${matchups.map(([a, b, count]) => {
                   return html`<li
                     class="rounded-md border border-line bg-surface-2 px-3 py-2 text-sm text-ink-muted"
                   >
@@ -914,6 +930,13 @@ export class MatchDetailPage extends LitElement {
                   </li>`;
                 })}
               </ul>
+              ${hiddenMatchupCount > 0
+                ? html`<p class="mt-2 text-xs text-ink-muted">
+                    ${translateText("match_detail.head_to_head_more", {
+                      count: hiddenMatchupCount,
+                    })}
+                  </p>`
+                : nothing}
             `
           : nothing}
         <p class="mt-2 text-[11px] italic leading-snug text-ink-muted">
@@ -1310,7 +1333,9 @@ export class MatchDetailPage extends LitElement {
       );
       rows.push(html`
         <div class="agent-analysis-row">
-          <dt>${translateText("match_detail.analysis_degraded_count")}</dt>
+          <dt title=${translateText("match_detail.analysis_degraded_count_tooltip")}>
+            ${translateText("match_detail.analysis_degraded_count")}
+          </dt>
           <dd>
             ${match.degradedCount.toLocaleString()}
             ${share !== null

@@ -6,6 +6,7 @@
  * archive filtering/sorting, and winner-name resolution.
  */
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { render } from "lit";
 import "../../../src/client/publicapp/WatchPage";
 import type { WatchPage } from "../../../src/client/publicapp/WatchPage";
 import {
@@ -14,6 +15,7 @@ import {
   filterArchiveMatches,
   findPromotableEvent,
   isEventLive,
+  renderDegradedNote,
   resolveWinnerName,
   sortArchiveMatches,
 } from "../../../src/client/publicapp/WatchPage";
@@ -909,5 +911,23 @@ describe("sortArchiveMatches", () => {
     const result = sortArchiveMatches([scored, unscored], "dramatic");
     expect(result).toHaveLength(2);
     expect(result.map((m) => m.matchId).sort()).toEqual(["scored", "unscored"]);
+  });
+});
+
+describe("renderDegradedNote", () => {
+  it("carries an explanatory tooltip (F7) -- shared by WatchPage's archive cards and MatchDetailPage, so both surfaces get it in one fix", () => {
+    const container = document.createElement("div");
+    render(renderDegradedNote({ degradedCount: 20, decisionCount: 100 }), container);
+    const span = container.querySelector("span");
+    expect(span).not.toBeNull();
+    expect(span!.getAttribute("title")).toBe("watch.degraded_turns_tooltip");
+  });
+
+  it("renders nothing (no empty tooltip span either) when degradedCount is null or zero", () => {
+    for (const degradedCount of [null, 0]) {
+      const container = document.createElement("div");
+      render(renderDegradedNote({ degradedCount, decisionCount: 100 }), container);
+      expect(container.querySelector("span")).toBeNull();
+    }
   });
 });

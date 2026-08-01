@@ -633,6 +633,12 @@ describe("match-detail-page", () => {
 
     expect(el.textContent).toContain("match_detail.analysis_degraded_count");
     expect(el.textContent).toContain("30%");
+    // F7: the degraded/recovered-turns count carries an explanatory tooltip
+    // (same convention LobbyPage's hero badge already established) so a
+    // visitor unfamiliar with the term isn't left guessing.
+    expect(
+      el.querySelector("dt[title='match_detail.analysis_degraded_count_tooltip']"),
+    ).not.toBeNull();
   });
   it("post-match: an unresolvable agentId (removed/unregistered) renders an honest 'unknown' label, never a fabricated name", async () => {
     stubFetch({
@@ -728,6 +734,55 @@ describe("match-detail-page", () => {
     expect(el.textContent).toContain("match_detail.storylines_heading");
     expect(el.textContent).toContain("match_detail.recent_form");
     expect(el.textContent).toContain("match_detail.head_to_head");
+  });
+
+  it("storylines: head-to-head is capped at HEAD_TO_HEAD_LIMIT (5), sorted by rivalry depth, with a '+N more' note for the rest (F8: an uncapped pairwise dump for a large FFA)", async () => {
+    // 4 registered participants => 6 candidate pairs (4*3/2). Auri/Bolt have
+    // played twice (the deepest rivalry); every other pair has played
+    // exactly once. All 6 qualify (count > 0), so the cap must hide exactly
+    // one — and it must be a count=1 pair, never the count=2 one.
+    const matches = [
+      minimalMatch({ matchId: "m1", completedAt: "2026-07-01T00:00:00.000Z", winnerAgentSlug: "auri", agentSlugs: ["auri", "bolt"] }),
+      minimalMatch({ matchId: "m2", completedAt: "2026-07-02T00:00:00.000Z", winnerAgentSlug: "bolt", agentSlugs: ["auri", "bolt"] }),
+      minimalMatch({ matchId: "m3", completedAt: "2026-07-03T00:00:00.000Z", winnerAgentSlug: "auri", agentSlugs: ["auri", "cobalt"] }),
+      minimalMatch({ matchId: "m4", completedAt: "2026-07-04T00:00:00.000Z", winnerAgentSlug: "auri", agentSlugs: ["auri", "delta"] }),
+      minimalMatch({ matchId: "m5", completedAt: "2026-07-05T00:00:00.000Z", winnerAgentSlug: "bolt", agentSlugs: ["bolt", "cobalt"] }),
+      minimalMatch({ matchId: "m6", completedAt: "2026-07-06T00:00:00.000Z", winnerAgentSlug: "bolt", agentSlugs: ["bolt", "delta"] }),
+      minimalMatch({ matchId: "m7", completedAt: "2026-07-07T00:00:00.000Z", winnerAgentSlug: "cobalt", agentSlugs: ["cobalt", "delta"] }),
+    ];
+    stubFetch({
+      readModel: readModelBody({ matches }),
+      detail: {
+        status: 200,
+        body: featuredMatchDetailBody({
+          matchId: "feat_story_cap",
+          state: "published",
+          scheduledAt: "2026-08-01T00:00:00.000Z",
+          participants: [
+            participantCard({ playerName: "Auri", agentSlug: "auri" }),
+            participantCard({ playerName: "Bolt", agentSlug: "bolt" }),
+            participantCard({ playerName: "Cobalt", agentSlug: "cobalt" }),
+            participantCard({ playerName: "Delta", agentSlug: "delta" }),
+          ],
+        }),
+      },
+    });
+    const el = mount("feat_story_cap");
+    await flushMicrotasks();
+
+    const headToHeadLines = [...el.textContent!.matchAll(/match_detail\.head_to_head:(\{[^}]*\})/g)]
+      .map((match) => JSON.parse(match[1]!) as { a: string; b: string; count: number });
+    // Capped to 5, never all 6 candidate pairs.
+    expect(headToHeadLines).toHaveLength(5);
+    // The deepest rivalry (count 2) must survive the cap.
+    expect(
+      headToHeadLines.some(
+        (line) => line.count === 2 && new Set([line.a, line.b]).size === 2 &&
+          [line.a, line.b].sort().join() === ["Auri", "Bolt"].sort().join(),
+      ),
+    ).toBe(true);
+    // Exactly one qualifying pair is hidden behind the "+N more" note.
+    expect(el.textContent).toContain('match_detail.head_to_head_more:{"count":1}');
   });
 
   it("an unregistered participant (agentSlug null) falls back to raw displayName with a placeholder glyph, no agent link", async () => {
