@@ -1,5 +1,5 @@
 import { mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, test } from "vitest";
 import {
@@ -87,7 +87,10 @@ describe("premiere-suppression contract path", () => {
   test("defaults to the ProxyWar storage state dir", () => {
     delete process.env.PROXYWAR_STORAGE_STATE_DIR;
     expect(premiereSuppressionContractPath()).toBe(
-      "/Users/claude/Library/Application Support/ProxyWar/storage/premiere-suppression/contract-v1.json",
+      path.join(
+        homedir(),
+        "Library/Application Support/ProxyWar/storage/premiere-suppression/contract-v1.json",
+      ),
     );
   });
 

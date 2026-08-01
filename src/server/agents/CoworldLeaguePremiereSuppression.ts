@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { promises as fs } from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { PREMIERE_ID_PATTERN } from "../replay-premiere/ReplayPremiereContracts";
 import type { CoworldLeaguePremiereCard } from "./CoworldLeagueSiteWriter";
@@ -115,7 +116,7 @@ export function premiereSuppressionStorageStateDir(): string {
   const configured = process.env.PROXYWAR_STORAGE_STATE_DIR;
   return configured !== undefined && configured.length > 0
     ? configured
-    : "/Users/claude/Library/Application Support/ProxyWar/storage";
+    : path.join(os.homedir(), "Library/Application Support/ProxyWar/storage");
 }
 
 /**

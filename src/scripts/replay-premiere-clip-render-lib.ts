@@ -19,6 +19,7 @@ import { execFile, spawn, type ChildProcess } from "node:child_process";
 import { createHash } from "node:crypto";
 import fsSync, { promises as fs } from "node:fs";
 import http from "node:http";
+import os from "node:os";
 import path from "node:path";
 import WebSocket from "ws";
 
@@ -29,8 +30,10 @@ import WebSocket from "ws";
 export const DEFAULT_CHROME_BINARY =
   "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome";
 
-export const DEFAULT_FFMPEG_BINARY =
-  "/Users/claude/Library/Python/3.9/lib/python/site-packages/imageio_ffmpeg/binaries/ffmpeg-macos-aarch64-v7.1";
+export const DEFAULT_FFMPEG_BINARY = path.join(
+  os.homedir(),
+  "Library/Python/3.9/lib/python/site-packages/imageio_ffmpeg/binaries/ffmpeg-macos-aarch64-v7.1",
+);
 
 export const FFMPEG_BIN_ENV = "PROXYWAR_CLIP_FFMPEG_BIN";
 
