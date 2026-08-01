@@ -13,6 +13,10 @@ import type {
 import { generateEmblemSvg } from "../identity/IdentityEmblems";
 import { resolveAgentIdentityView } from "../identity/IdentityMatching";
 import type { IdentityRegistrySnapshot } from "../identity/IdentityRegistry";
+import {
+  computeProvisionalIdentities,
+  type ProvisionalIdentity,
+} from "../identity/ProvisionalIdentity";
 
 /**
  * Product overhaul: canonical match pages for ORDINARY league episodes
@@ -165,6 +169,7 @@ export function findLeagueEpisodeRunDir(
 function episodeParticipantCard(
   player: CoworldLeagueEpisodePlayerRow,
   identity: IdentityRegistrySnapshot,
+  provisionalIdentities: ReadonlyMap<string, ProvisionalIdentity>,
 ): FeaturedMatchParticipantCard {
   const view = resolveAgentIdentityView(
     {
@@ -176,13 +181,19 @@ function episodeParticipantCard(
     identity.builders,
     identity.versions,
   );
+  const provisional =
+    view.agent === null ? (provisionalIdentities.get(player.name) ?? null) : null;
   return {
     playerName: player.name,
     displayName: view.agent?.displayName ?? player.name,
-    agentSlug: view.agent?.slug ?? null,
-    emblemSvg: view.agent === null ? null : generateEmblemSvg(view.agent.id),
-    primaryColor: view.agent?.primaryColor ?? null,
-    secondaryColor: view.agent?.secondaryColor ?? null,
+    agentSlug: view.agent?.slug ?? provisional?.slug ?? null,
+    emblemSvg:
+      view.agent === null
+        ? (provisional?.emblemSvg ?? null)
+        : generateEmblemSvg(view.agent.id),
+    primaryColor: view.agent?.primaryColor ?? provisional?.primaryColor ?? null,
+    secondaryColor:
+      view.agent?.secondaryColor ?? provisional?.secondaryColor ?? null,
     versionLabel: view.version?.publicVersionLabel ?? null,
     builderId: view.builder?.id ?? null,
     builderDisplayName: view.builder?.displayName ?? null,
@@ -196,16 +207,23 @@ function episodeParticipantCard(
  * `CoworldLeagueSiteWriter.ts` and `buildParticipants()` in
  * `feature-candidates.ts`) — a registered agent gets emblem/slug/version/
  * builder; an unmapped player name falls back to a provisional card
- * (`displayName` = raw `playerName`, every identity field `null`), never
- * fabricated. Order matches `row.players` (slot order), so the client can
- * zip this array against `LeagueEpisodeMatchPageModel.players` by
- * `playerName`/`name`.
+ * (`displayName` = raw `playerName`, a generated emblem/slug/colors via
+ * `ProvisionalIdentity.ts`, `versionLabel`/`builderId`/`builderDisplayName`
+ * stay `null` — 2026-08-01 P0 fix), never fabricated beyond that. Order
+ * matches `row.players` (slot order), so the client can zip this array
+ * against `LeagueEpisodeMatchPageModel.players` by `playerName`/`name`.
  */
 export function buildLeagueEpisodeParticipantCards(
   row: CoworldLeagueEpisodeRow,
   identity: IdentityRegistrySnapshot,
 ): FeaturedMatchParticipantCard[] {
-  return row.players.map((player) => episodeParticipantCard(player, identity));
+  const provisionalIdentities = computeProvisionalIdentities(
+    row.players.map((player) => player.name),
+    new Set(identity.agents.map((agent) => agent.slug)),
+  );
+  return row.players.map((player) =>
+    episodeParticipantCard(player, identity, provisionalIdentities),
+  );
 }
 
 function placementOrderedPlayers(

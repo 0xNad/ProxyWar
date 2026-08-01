@@ -50,10 +50,16 @@ const STATUS_BADGE: Record<
  * by `slug` in the shared read model (same "one fetch, find by slug"
  * pattern as `BuilderProfilePage`), never a dedicated per-agent endpoint.
  *
- * An unregistered participant's `slug` is always `null` (see
- * `ReadModelSchema.ts`'s doc), so no route ever resolves to one here — this
- * page's `renderNotFound` is the correct, honest outcome for any slug that
- * doesn't match a registered `PublicAgent`, not a bug.
+ * A REGISTERED agent's `slug` always wins first. When no registered slug
+ * matches, this ALSO checks every unregistered `PublicAgent`'s
+ * `provisionalSlug` (see server `ProvisionalIdentity.ts`'s module doc) —
+ * a real, currently-competing participant with no registry entry yet
+ * still gets a working profile page (generated emblem, standing, recent
+ * matches) instead of an honest-but-unhelpful not-found, closing the gap
+ * the 2026-08-01 P0 production review found ("James Botts"/"Jordan"
+ * rendering as anonymous broken cards everywhere, `/agent/james-botts`
+ * 404ing). `renderNotFound` remains the correct, honest outcome only for
+ * a slug matching NEITHER a registered nor a live provisional identity.
  *
  * `slug` is a `@property`, matching `PlayerProfilePage`'s `name` attribute
  * pattern — the server-rendered app-shell document sets it directly from
@@ -89,6 +95,11 @@ export class AgentProfilePage extends LitElement {
       this.generatedAt = readModel.generatedAt;
       const agent =
         readModel.agents.find((candidate) => candidate.slug === this.slug) ??
+        readModel.agents.find(
+          (candidate) =>
+            !candidate.registered &&
+            (candidate.provisionalSlug ?? null) === this.slug,
+        ) ??
         null;
       if (agent === null) {
         this.agent = null;
@@ -97,7 +108,15 @@ export class AgentProfilePage extends LitElement {
         return;
       }
       this.agent = agent;
-      this.recentMatches = recentMatchesForAgent(readModel.matches, this.slug);
+      // A provisional identity has no `slug` (it's `null` by design — see
+      // `ProxyWarPublicReadModel.ts`) to key `PublicMatch.participants[]`
+      // against, which is resolved by `agentSlug` (a REGISTERED slug
+      // only); fall back to matching this agent's own raw `playerName`
+      // against `PublicMatchParticipant.displayName`, the one field every
+      // participant carries regardless of registration.
+      this.recentMatches = agent.registered
+        ? recentMatchesForAgent(readModel.matches, this.slug)
+        : recentMatchesForPlayerName(readModel.matches, agent.playerName);
       this.loadState = "ready";
     } catch {
       this.loadState = "error";
@@ -158,13 +177,16 @@ export class AgentProfilePage extends LitElement {
   ) {
     const badge = STATUS_BADGE[agent.status];
     const label = agent.registered ? agent.displayName : agent.playerName;
+    const emblemSvg = agent.registered
+      ? agent.emblemSvg
+      : (agent.provisionalEmblemSvg ?? null);
     return html`
       <header class="mb-2 flex flex-wrap items-center gap-2">
-        ${agent.registered && agent.emblemSvg !== null
+        ${emblemSvg !== null
           ? html`<span
               class="inline-flex h-10 w-10 shrink-0 overflow-hidden"
               aria-hidden="true"
-              >${unsafeSVG(agent.emblemSvg)}</span
+              >${unsafeSVG(emblemSvg)}</span
             >`
           : nothing}
         <h1 class="text-xl font-bold text-ink">${label}</h1>
@@ -178,6 +200,11 @@ export class AgentProfilePage extends LitElement {
           >${translateText(badge.key)}</span
         >
       </header>
+      ${!agent.registered
+        ? html`<p class="mb-3 text-sm text-ink-muted">
+            ${translateText("agent_profile.provisional_note")}
+          </p>`
+        : nothing}
       ${this.renderBuilderLine(agent)}
       ${agent.tagline !== null
         ? html`<p class="mb-4 text-sm text-ink-muted">${agent.tagline}</p>`
@@ -195,7 +222,7 @@ export class AgentProfilePage extends LitElement {
 
   /** `builderDisplayName` or an honest, unobtrusive "Unclaimed" — skipped entirely for a house agent, whose status badge above already covers that classification (same rule `CoworldLeagueSiteWriter.builderNoteMarkup` applies). An unclaimed, registered Agent additionally gets a small "start a verified claim" CTA (Season Zero activation Phase 3) — deliberately plain text next to the label, never a second competing headline, so "Unclaimed" stays a status note rather than the dominant identity on the page. */
   private renderBuilderLine(agent: PublicAgent) {
-    if (agent.status === "house") return nothing;
+    if (agent.status === "house" || !agent.registered) return nothing;
     const label =
       agent.builderDisplayName ?? translateText("agent_profile.builder_unclaimed");
     const claimHref =
@@ -282,18 +309,19 @@ export class AgentProfilePage extends LitElement {
             </p>`
           : html`
               <ul class="flex flex-col gap-1.5" role="list">
-                ${matches.map((match) =>
-                  this.renderMatchRow(agent.slug, match),
-                )}
+                ${matches.map((match) => this.renderMatchRow(agent, match))}
               </ul>
             `}
       </section>
     `;
   }
 
-  private renderMatchRow(agentSlug: string | null, match: PublicMatch) {
-    const participant =
-      match.participants.find((p) => p.agentSlug === agentSlug) ?? null;
+  /** Registered agents key their own row via `PublicMatchParticipant.agentSlug`; a provisional (unregistered) identity has no `agentSlug` to match on (that field is only ever set for a registered participant — see `ProxyWarPublicReadModel.ts`'s `publicMatch`), so this falls back to `displayName === agent.playerName`, the one field every participant carries regardless of registration. */
+  private renderMatchRow(agent: PublicAgent, match: PublicMatch) {
+    const participant = agent.registered
+      ? (match.participants.find((p) => p.agentSlug === agent.slug) ?? null)
+      : (match.participants.find((p) => p.displayName === agent.playerName) ??
+        null);
     // Same "outcome carries the word, colour stays reserved" call
     // `PlayerProfilePage.renderEpisodeRow` makes — this page never sits next
     // to a betting P&L view today, but the language stays consistent across
@@ -340,10 +368,29 @@ function recentMatchesForAgent(
   matches: readonly PublicMatch[],
   agentSlug: string,
 ): PublicMatch[] {
-  return matches
-    .filter((match) =>
+  return sortMatchesByRecency(
+    matches.filter((match) =>
       match.participants.some((p) => p.agentSlug === agentSlug),
-    )
+    ),
+  );
+}
+
+/** The provisional-identity sibling of `recentMatchesForAgent`, above — keys on `PublicMatchParticipant.displayName` (the raw Coworld `playerName`, always present) instead of `agentSlug` (only ever set for a registered participant). */
+function recentMatchesForPlayerName(
+  matches: readonly PublicMatch[],
+  playerName: string,
+): PublicMatch[] {
+  return sortMatchesByRecency(
+    matches.filter((match) =>
+      match.participants.some((p) => p.displayName === playerName),
+    ),
+  );
+}
+
+function sortMatchesByRecency(
+  matches: readonly PublicMatch[],
+): PublicMatch[] {
+  return [...matches]
     .sort((a, b) => {
       const at = a.completedAt === null ? -Infinity : Date.parse(a.completedAt);
       const bt = b.completedAt === null ? -Infinity : Date.parse(b.completedAt);

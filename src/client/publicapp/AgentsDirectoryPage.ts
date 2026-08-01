@@ -23,10 +23,14 @@ type LoadState = "loading" | "ready" | "error";
  * in their original read-model order. Never re-sorted alphabetically: this
  * reads as a leaderboard, not a phone book.
  *
- * Same identity discipline as `BuilderProfilePage.renderAgentRow`: an
- * unregistered participant (`registered === false`) shows only its raw
- * `playerName`, never an emblem, short code, or builder line, and never a
- * profile link — its `slug` is null, so there is nowhere to link it to.
+ * An unregistered participant (`registered === false`) shows only its raw
+ * `playerName` for a label and never a short code or builder line (neither
+ * concept applies pre-registration). It DOES get a generated, deterministic
+ * emblem and a working profile link — via `provisionalSlug`/
+ * `provisionalEmblemSvg`, see server `ProvisionalIdentity.ts`'s module doc
+ * — so a real, currently-competing participant never renders as an
+ * anonymous, unclickable card while awaiting operator registration
+ * (2026-08-01 P0 fix).
  */
 @customElement("agents-directory-page")
 export class AgentsDirectoryPage extends LitElement {
@@ -113,19 +117,30 @@ export class AgentsDirectoryPage extends LitElement {
 
   private renderAgentCard(agent: PublicAgent): TemplateResult {
     const label = agent.registered ? agent.displayName : agent.playerName;
+    // A registered agent links via its real, curated `slug`; an
+    // unregistered participant falls back to its `provisionalSlug` (see
+    // server `ProvisionalIdentity.ts`'s module doc) — a real, currently-
+    // competing participant with no registry entry still gets a working
+    // profile page instead of an inert card (2026-08-01 P0 fix).
+    const provisionalSlug = agent.provisionalSlug ?? null;
     const href =
       agent.registered && agent.slug !== null
         ? `/agent/${encodeURIComponent(agent.slug)}`
-        : null;
+        : provisionalSlug !== null
+          ? `/agent/${encodeURIComponent(provisionalSlug)}`
+          : null;
+    const emblemSvg = agent.registered
+      ? agent.emblemSvg
+      : (agent.provisionalEmblemSvg ?? null);
     const cardClasses =
       "flex h-full flex-col gap-2 rounded-md border border-line bg-surface-2 px-4 py-3 text-sm";
     const content = html`
       <div class="flex flex-wrap items-center gap-2">
-        ${agent.registered && agent.emblemSvg !== null
+        ${emblemSvg !== null
           ? html`<span
               class="inline-flex h-8 w-8 shrink-0 overflow-hidden"
               aria-hidden="true"
-              >${unsafeSVG(agent.emblemSvg)}</span
+              >${unsafeSVG(emblemSvg)}</span
             >`
           : nothing}
         <span class="font-semibold text-ink">${label}</span>
@@ -139,6 +154,13 @@ export class AgentsDirectoryPage extends LitElement {
               class="rounded-full border border-caution/40 bg-caution/10 px-2 py-0.5 text-[11px] font-bold uppercase tracking-wide text-caution"
               title=${translateText("agents_directory.house_badge_title")}
               >${translateText("agents_directory.house_badge")}</span
+            >`
+          : nothing}
+        ${!agent.registered
+          ? html`<span
+              class="rounded-full border border-line px-2 py-0.5 text-[11px] font-bold uppercase tracking-wide text-ink-muted"
+              title=${translateText("agents_directory.unregistered_badge_title")}
+              >${translateText("agents_directory.unregistered_badge")}</span
             >`
           : nothing}
       </div>

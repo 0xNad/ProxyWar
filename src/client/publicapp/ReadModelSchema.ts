@@ -51,6 +51,11 @@ export const PublicAgentSchema = z.object({
   emblemSvg: z.string().nullable(),
   primaryColor: z.string().nullable(),
   secondaryColor: z.string().nullable(),
+  /** Purely cosmetic fallback for `registered: false` — see server `ProvisionalIdentity.ts`'s module doc. `.optional()` for the SAME reason `timeSeries` below is: an additive field existing `PublicAgent` test fixtures across this codebase don't all need updating for; a missing value means "no provisional identity", identical to explicit `null`. */
+  provisionalSlug: z.string().nullable().optional(),
+  provisionalEmblemSvg: z.string().nullable().optional(),
+  provisionalPrimaryColor: z.string().nullable().optional(),
+  provisionalSecondaryColor: z.string().nullable().optional(),
   tagline: z.string().nullable(),
   builderId: z.string().nullable(),
   builderDisplayName: z.string().nullable(),

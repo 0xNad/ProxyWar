@@ -327,7 +327,7 @@ describe("buildLeagueEpisodeParticipantCards", () => {
     expect(frostfall?.displayName).not.toBe("FixtureFrostfall");
   });
 
-  test("an unmapped player name falls back to a provisional card, never a fabricated identity", () => {
+  test("an unmapped player name falls back to a provisional card (generated emblem/slug/colors), never a fabricated builder/version", () => {
     const row = episode({
       players: [
         {
@@ -345,10 +345,10 @@ describe("buildLeagueEpisodeParticipantCards", () => {
     expect(cards[0]).toEqual({
       playerName: "TotallyUnregisteredPlayer",
       displayName: "TotallyUnregisteredPlayer",
-      agentSlug: null,
-      emblemSvg: null,
-      primaryColor: null,
-      secondaryColor: null,
+      agentSlug: "totallyunregisteredplayer",
+      emblemSvg: expect.stringContaining("<svg"),
+      primaryColor: expect.stringMatching(/^#[0-9a-f]{6}$/),
+      secondaryColor: expect.stringMatching(/^#[0-9a-f]{6}$/),
       versionLabel: null,
       builderId: null,
       builderDisplayName: null,

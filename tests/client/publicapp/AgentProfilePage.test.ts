@@ -182,6 +182,56 @@ describe("agent-profile-page", () => {
     expect(el.textContent).toContain("agent_profile.not_found_body");
   });
 
+  it("resolves a provisional identity by provisionalSlug when no registered agent matches — never the anonymous not-found state (2026-08-01 P0 regression: 'James Botts'-style unregistered participant)", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () =>
+        Response.json(
+          readModelBody([
+            {
+              registered: false,
+              id: null,
+              slug: null,
+              playerName: "James Botts",
+              displayName: "James Botts",
+              shortCode: null,
+              emblemSvg: null,
+              primaryColor: null,
+              secondaryColor: null,
+              provisionalSlug: "james-botts",
+              provisionalEmblemSvg: '<svg data-testid="provisional-emblem"></svg>',
+              provisionalPrimaryColor: "#112233",
+              provisionalSecondaryColor: "#445566",
+              tagline: null,
+              builderId: null,
+              builderDisplayName: null,
+              status: "unregistered",
+              standing: { rank: 16, score: 0.01, roundsPlayed: 908, isHouse: false },
+              activeVersion: null,
+              provenance: {
+                ratingPolicyLabel: "jamesboggs-warlord:v1",
+                activeChampionPolicyLabel: "jamesboggs-warlord:v1",
+              },
+              stats: null,
+            },
+          ]),
+        ),
+      ),
+    );
+    const el = mount("james-botts");
+    await flushMicrotasks();
+
+    // Never the not-found/anonymous state — the whole point of the fix.
+    expect(el.textContent).not.toContain("agent_profile.not_found_body");
+    expect(el.querySelector("h1")?.textContent).toContain("James Botts");
+    // A generated provisional emblem renders, closing the "no emblem
+    // anywhere" complaint.
+    expect(el.querySelector('[data-testid="provisional-emblem"]')).not.toBeNull();
+    // Standing (rank/score/rounds) still renders for a provisional agent —
+    // it is a real, currently-competing participant, not a placeholder.
+    expect(el.textContent).toContain("#16");
+  });
+
   it("finds the agent by slug and renders its header, builder line, and standing", async () => {
     vi.stubGlobal(
       "fetch",

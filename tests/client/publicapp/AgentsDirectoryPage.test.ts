@@ -3,9 +3,14 @@
  * `standing.rank` ascending with unranked/unregistered agents pushed
  * after (never re-sorted alphabetically), a registered agent must link to
  * `/agent/<slug>` with the slug `encodeURIComponent`-escaped, and an
- * unregistered participant must render its raw `playerName` with no
- * profile link. Follows the mount-into-jsdom convention in
- * `tests/client/publicapp/BuilderProfilePage.test.ts`.
+ * unregistered participant with NO computed provisional identity renders
+ * its raw `playerName` with no profile link. An unregistered participant
+ * WITH a computed provisional identity (`provisionalSlug`/
+ * `provisionalEmblemSvg` — see server `ProvisionalIdentity.ts`) instead
+ * gets a working `/agent/<provisionalSlug>` link and a generated emblem
+ * (2026-08-01 P0 fix) — a real, currently-competing participant is never
+ * an anonymous, unclickable card. Follows the mount-into-jsdom convention
+ * in `tests/client/publicapp/BuilderProfilePage.test.ts`.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import "../../../src/client/publicapp/AgentsDirectoryPage";
@@ -163,7 +168,7 @@ describe("agents-directory-page", () => {
     expect(names[2]).toContain("raw-player");
   });
 
-  it("links a registered agent to /agent/<slug> with the slug escaped, and never links an unregistered participant", async () => {
+  it("links a registered agent to /agent/<slug> with the slug escaped, and never links an unregistered participant with no computed provisional identity", async () => {
     vi.stubGlobal(
       "fetch",
       vi.fn(async () =>
@@ -205,6 +210,48 @@ describe("agents-directory-page", () => {
     );
     expect(rawItem).toBeDefined();
     expect(rawItem?.querySelector("a")).toBeNull();
+  });
+
+  it("links an unregistered participant WITH a computed provisional identity to /agent/<provisionalSlug>, with a generated emblem — never an anonymous broken card (2026-08-01 P0 regression)", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () =>
+        Response.json(
+          readModelBody([
+            {
+              ...minimalAgent({
+                slug: null,
+                playerName: "James Botts",
+                displayName: "James Botts",
+                shortCode: null,
+                registered: false,
+                status: "unregistered",
+                builderDisplayName: null,
+                rank: 16,
+              }),
+              provisionalSlug: "james-botts",
+              provisionalEmblemSvg: '<svg data-testid="provisional-emblem"></svg>',
+              provisionalPrimaryColor: "#112233",
+              provisionalSecondaryColor: "#445566",
+            },
+          ]),
+        ),
+      ),
+    );
+    const el = mount();
+    await flushMicrotasks();
+
+    const link = el.querySelector('a[href="/agent/james-botts"]');
+    expect(link).not.toBeNull();
+    expect(link?.textContent).toContain("James Botts");
+    expect(
+      link?.querySelector('[data-testid="provisional-emblem"]'),
+    ).not.toBeNull();
+    // Clearly marked as not a full registered identity — an "Unregistered"
+    // badge, never confused with a claimed/verified brand.
+    expect(link?.textContent).toContain(
+      "agents_directory.unregistered_badge",
+    );
   });
 
   it("shows a House badge only for a house-status agent", async () => {

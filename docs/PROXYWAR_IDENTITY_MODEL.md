@@ -174,3 +174,57 @@ The submission is a validated draft end to end. The only way an entry in `builde
 ## Known gaps
 
 - **No real GitHub-login-to-Softmax-control verification mechanism exists yet.** This is spec Stage 1 item 2, and it is unsolved on this branch. `BuilderProfile.verifiedGithub` and `BuilderProfile.softmaxPlayerIdentities` stay `null`/empty by construction until such a mechanism is built — there is no automated way today to prove that the person submitting a `/build` claim actually controls the Softmax player identity (and therefore the live Coworld `playerName`) they're claiming. Every claim submission currently requires a human operator to manually cross-check the submitter's `claimedGithub` against their real platform-account GitHub login, and manually confirm Softmax-player control out of band, before hand-editing the registry files to grant `verified` status.
+
+## Known ambiguous roster links (2026-08-01)
+
+A P0 production review found two live `playerName`s (`identity:list-unmapped`
+would have caught both — see "Self-surfacing unmapped counts" below for why
+it didn't get run) with no registered `AgentProfile`. Both are now
+registered (`agt_james-botts`, `agt_jordan`), but one carries a genuine
+attribution ambiguity worth recording rather than silently resolving:
+
+- **`agt_james-botts` ("James Botts") vs `agt_james-boggs` ("James
+  Boggs")** — the live standings row for `James Botts` carries
+  `policyFamily: "jamesboggs-warlord"`, IDENTICAL to `agt_james-boggs`'s
+  registered `policyMatchRule.policyFamily`, while `agt_james-boggs`
+  itself has not appeared in any live standings row for at least the
+  mirror's current retained-episode window (7 episodes as of this
+  writing — too short to independently confirm continuity via match
+  history). This is suggestive of a Softmax account display-name change
+  (Boggs -> Botts) carrying the same underlying policy lineage forward,
+  but it is NOT proof: `policyFamily` is deliberately "display/validation
+  only, never re-derives matching" (`IdentityMatching.ts`'s own doc), and
+  the no-auto-attribution invariant this whole document describes exists
+  precisely because a self-chosen string match is not the same thing as
+  verified control. Per that invariant, this was **deliberately NOT
+  merged**: `agt_james-boggs` was left untouched (same `id`/`slug`/
+  `displayName`/emblem/history), and `agt_james-botts` was registered as
+  its own separate, honest entry (`policyMatchRule.playerName: "James
+  Botts"`, its own generated emblem). Both remain independently
+  `unclaimed`. An operator revisiting this should check: (a) whether
+  `James Boggs` ever reappears live under that exact name again (would
+  argue against a rename), and (b) whether a future verified claim on
+  either agent self-reports the same builder — the claim workflow
+  (`PlatformBuilderClaimStore.ts`) is the sanctioned place that
+  ambiguity actually gets resolved, via an operator-reviewed claim, not
+  a registry-file guess.
+- **`agt_jordan` ("Jordan")** — no existing registry entry shares a
+  `policyFamily` with `jordan-proxywar-auto`; this is a genuinely new
+  entrant with no prior link to evaluate. Registered as a plain new
+  entry, no note needed.
+
+## Self-surfacing unmapped counts
+
+`identity:list-unmapped` (`IdentityMatching.ts`'s `computeUnmappedPlayerNames`)
+has always correctly detected an unmapped live `playerName` — the P0 above
+confirmed this by re-running it against the exact live snapshot that
+produced the incident (`18 live participant(s), 17 registered agent(s)`,
+`UNMAPPED James Botts`, `UNMAPPED Jordan`). The gap was operational, not a
+matching-logic bug: nothing in the mirror sync loop ever ran this check on
+its own, so an unmapped participant could accumulate live for days with
+nothing surfacing it short of a manual CLI run or a human visually noticing
+a blank card. `CoworldLeagueMirrorCore.ts`'s sync cycle now logs the
+unmapped count (and every unmapped `playerName`) at `WARN` on every cycle
+where it is non-zero — see that module's `logUnmappedParticipants` call —
+so this class of drift is visible in ordinary server logs without anyone
+remembering to run a CLI.

@@ -167,30 +167,37 @@ describe("coworldLeagueIndexHtml", () => {
     expect(html).toContain("proxywar-keystone:v40");
   });
 
-  test("links each standings row to the shared platform player profile", () => {
+  test("links each standings row to a provisional /agent/:slug profile with a generated emblem (2026-08-01 P0 fix)", () => {
     const html = coworldLeagueIndexHtml(sampleData());
     // Asserted against the shared constant, not a literal: this process does
     // not set PROXYWAR_PLATFORM_ORIGIN, so this IS the fallback path, and a
     // literal here is what let the origin move without the league site
-    // noticing (see `core/PlatformOrigin.ts`).
+    // noticing (see `core/PlatformOrigin.ts`). No registered agent exists
+    // for "odin free" (default `EMPTY_LEAGUE_IDENTITY_SNAPSHOT`), so it gets
+    // a provisional identity: `/agent/odin-free` (slugified playerName)
+    // plus a generated emblem, never the old bare `/player/:name` link.
     expect(html).toContain(
-      `<a class="player-profile-link" href="${DEFAULT_PLATFORM_ORIGIN}/player/odin%20free"><span class="agent-identity">odin free</span></a>`,
+      `<a class="player-profile-link" href="${DEFAULT_PLATFORM_ORIGIN}/agent/odin-free"><span class="agent-identity"><span class="agent-emblem">`,
     );
+    expect(html).toContain(`</span>odin free</span></a>`);
   });
 
-  test("links each battle-card combatant to the shared platform player profile", () => {
+  test("links each battle-card combatant to a provisional /agent/:slug profile with a generated emblem", () => {
     const html = coworldLeagueIndexHtml(sampleData());
     // Same identity space and same shared destination as the standings-row
     // link above — a viewer must reach one profile regardless of which card
     // they clicked from. Covers a winner (alive) and an eliminated combatant:
     // the profile is about the agent, not this one match's outcome, so both
-    // still link.
+    // still link. Neither "daveey" nor "Loki" is registered in this test's
+    // default empty identity snapshot, so both get provisional identities.
     expect(html).toContain(
-      `<a class="player-profile-link" href="${DEFAULT_PLATFORM_ORIGIN}/player/daveey"><span class="agent-identity">daveey</span></a>`,
+      `<a class="player-profile-link" href="${DEFAULT_PLATFORM_ORIGIN}/agent/daveey"><span class="agent-identity"><span class="agent-emblem">`,
     );
+    expect(html).toContain(`</span>daveey</span></a>`);
     expect(html).toContain(
-      `<a class="player-profile-link" href="${DEFAULT_PLATFORM_ORIGIN}/player/Loki"><span class="agent-identity">Loki</span></a>`,
+      `<a class="player-profile-link" href="${DEFAULT_PLATFORM_ORIGIN}/agent/loki"><span class="agent-identity"><span class="agent-emblem">`,
     );
+    expect(html).toContain(`</span>Loki</span></a>`);
   });
 
   test("offers one link off the mirror to the account authority", () => {
@@ -517,7 +524,7 @@ describe("coworldLeagueIndexHtml", () => {
     ).toBe(2);
   });
 
-  test("links a standings row to its registered Agent profile when resolved, and falls back to the player profile otherwise", () => {
+  test("links a standings row to its registered Agent profile when resolved, and to a provisional Agent profile otherwise", () => {
     const auri: AgentProfile = {
       id: "agt_auri",
       slug: "auri-prime",
@@ -548,9 +555,11 @@ describe("coworldLeagueIndexHtml", () => {
       `<a class="player-profile-link" href="${DEFAULT_PLATFORM_ORIGIN}/agent/auri-prime">`,
     );
     expect(html).toContain("Auri Prime");
-    // odin free has no registered Agent — its row must still resolve, never 404.
+    // odin free has no registered Agent — its row must still resolve, never
+    // 404: a provisional identity now gives it its own `/agent/:slug`
+    // profile route (2026-08-01 P0 fix), not the old bare `/player/:name`.
     expect(html).toContain(
-      `<a class="player-profile-link" href="${DEFAULT_PLATFORM_ORIGIN}/player/odin%20free">`,
+      `<a class="player-profile-link" href="${DEFAULT_PLATFORM_ORIGIN}/agent/odin-free">`,
     );
   });
 

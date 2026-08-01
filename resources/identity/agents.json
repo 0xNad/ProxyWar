@@ -391,6 +391,52 @@
       },
       "status": "unclaimed",
       "publicStrategyDescription": null
+    },
+    {
+      "id": "agt_james-botts",
+      "slug": "james-botts",
+      "displayName": "James Botts",
+      "shortCode": "JBT",
+      "builderId": null,
+      "tagline": null,
+      "description": null,
+      "emblem": {
+        "style": "geometric-svg-v1",
+        "seed": "agt_james-botts",
+        "assetPath": "resources/identity/emblems/agt_james-botts.svg"
+      },
+      "primaryColor": "#2fc670",
+      "secondaryColor": "#2e539e",
+      "debutDate": null,
+      "policyMatchRule": {
+        "playerName": "James Botts",
+        "policyFamily": "jamesboggs-warlord"
+      },
+      "status": "unclaimed",
+      "publicStrategyDescription": null
+    },
+    {
+      "id": "agt_jordan",
+      "slug": "jordan",
+      "displayName": "Jordan",
+      "shortCode": "JOR",
+      "builderId": null,
+      "tagline": null,
+      "description": null,
+      "emblem": {
+        "style": "geometric-svg-v1",
+        "seed": "agt_jordan",
+        "assetPath": "resources/identity/emblems/agt_jordan.svg"
+      },
+      "primaryColor": "#75c62f",
+      "secondaryColor": "#2e9e79",
+      "debutDate": null,
+      "policyMatchRule": {
+        "playerName": "Jordan",
+        "policyFamily": "jordan-proxywar-auto"
+      },
+      "status": "unclaimed",
+      "publicStrategyDescription": null
     }
   ]
 }

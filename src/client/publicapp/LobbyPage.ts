@@ -704,6 +704,21 @@ export class LobbyPage extends LitElement {
     isDebut: boolean;
   }): TemplateResult {
     const { agent, rankDelta, isDebut } = entry;
+    // A registered agent links/emblems via its real fields; an
+    // unregistered participant falls back to its `provisionalSlug`/
+    // `provisionalEmblemSvg` (see server `ProvisionalIdentity.ts`) so a
+    // real, currently-competing participant on the homepage's own
+    // movement widget never renders as an anonymous, unclickable row
+    // (2026-08-01 P0 fix).
+    const provisionalSlug = agent.provisionalSlug ?? null;
+    const href = agent.registered && agent.slug !== null
+      ? `/agent/${encodeURIComponent(agent.slug)}`
+      : provisionalSlug !== null
+        ? `/agent/${encodeURIComponent(provisionalSlug)}`
+        : "/league";
+    const emblemSvg = agent.registered
+      ? agent.emblemSvg
+      : (agent.provisionalEmblemSvg ?? null);
     return html`
       <li
         class="flex items-center gap-3 rounded-md border border-line bg-surface-2 px-3 py-2"
@@ -711,17 +726,15 @@ export class LobbyPage extends LitElement {
         <span class="w-6 shrink-0 font-mono text-sm font-black text-ink-muted"
           >#${agent.standing?.rank}</span
         >
-        ${agent.registered && agent.emblemSvg !== null
+        ${emblemSvg !== null
           ? html`<span
               class="inline-flex h-6 w-6 shrink-0 overflow-hidden"
               aria-hidden="true"
-              >${unsafeSVG(agent.emblemSvg)}</span
+              >${unsafeSVG(emblemSvg)}</span
             >`
           : nothing}
         <a
-          href=${agent.slug !== null
-            ? `/agent/${encodeURIComponent(agent.slug)}`
-            : "/league"}
+          href=${href}
           class="min-w-0 flex-1 truncate text-sm font-semibold text-ink no-underline outline-none hover:text-accent focus-visible:ring-2 focus-visible:ring-accent"
           >${agent.displayName}</a
         >

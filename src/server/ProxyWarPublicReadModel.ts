@@ -10,6 +10,10 @@ import type {
   BuilderProfile,
 } from "./identity/IdentitySchemas";
 import { generateEmblemSvg } from "./identity/IdentityEmblems";
+import {
+  computeProvisionalIdentities,
+  type ProvisionalIdentity,
+} from "./identity/ProvisionalIdentity";
 import type {
   AgentStatsArtifact,
   PlayerAgentStats,
@@ -117,6 +121,21 @@ export interface PublicAgent {
   emblemSvg: string | null;
   primaryColor: string | null;
   secondaryColor: string | null;
+  /**
+   * A PURELY COSMETIC fallback for an unregistered (`registered: false`)
+   * participant — see `ProvisionalIdentity.ts`'s module doc. `null`
+   * whenever `registered` is `true` (a real identity is already
+   * complete; never populated redundantly). Deterministically derived
+   * from `playerName` alone: no Builder, no policy history, no short
+   * code, nothing the mirror didn't already report — a real participant
+   * with no registry entry gets a working profile link and a visual
+   * identity instead of an anonymous, unclickable card, without ever
+   * being mistaken for a verified or claimed identity.
+   */
+  provisionalSlug: string | null;
+  provisionalEmblemSvg: string | null;
+  provisionalPrimaryColor: string | null;
+  provisionalSecondaryColor: string | null;
   tagline: string | null;
   builderId: string | null;
   builderDisplayName: string | null;
@@ -370,6 +389,7 @@ function publicAgentFromView(
   statsArtifact: AgentStatsArtifact | null,
   episodesForPlayer: readonly { completedAt: string | null; isWinner: boolean }[],
   standingsHistory: StandingsHistoryStore,
+  provisionalIdentity: ProvisionalIdentity | null,
 ): PublicAgent {
   const provenance = {
     ratingPolicyLabel: standing?.ratingPolicyLabel ?? standing?.policyLabel ?? null,
@@ -392,6 +412,10 @@ function publicAgentFromView(
       emblemSvg: null,
       primaryColor: null,
       secondaryColor: null,
+      provisionalSlug: provisionalIdentity?.slug ?? null,
+      provisionalEmblemSvg: provisionalIdentity?.emblemSvg ?? null,
+      provisionalPrimaryColor: provisionalIdentity?.primaryColor ?? null,
+      provisionalSecondaryColor: provisionalIdentity?.secondaryColor ?? null,
       tagline: null,
       builderId: null,
       builderDisplayName: null,
@@ -421,6 +445,10 @@ function publicAgentFromView(
     emblemSvg: generateEmblemSvg(view.agent.id),
     primaryColor: view.agent.primaryColor,
     secondaryColor: view.agent.secondaryColor,
+    provisionalSlug: null,
+    provisionalEmblemSvg: null,
+    provisionalPrimaryColor: null,
+    provisionalSecondaryColor: null,
     tagline: view.agent.tagline,
     builderId: view.agent.builderId,
     builderDisplayName: view.builder?.displayName ?? view.builder?.slug ?? null,
@@ -468,6 +496,16 @@ function publicAgents(
       episodesByPlayer.set(player.name, list);
     }
   }
+  // Batch-computed once per publish cycle, over every LIVE playerName —
+  // never over `identity.agents` (an already-registered agent never needs
+  // one; see `publicAgentFromView`'s `registered: true` branch, which
+  // always passes `null` through regardless). Registered slugs are the
+  // reserved set a provisional slug must never collide with — see
+  // `ProvisionalIdentity.ts`'s own doc for why.
+  const provisionalIdentities = computeProvisionalIdentities(
+    standings.map((row) => row.playerName),
+    new Set(identity.agents.map((agent) => agent.slug)),
+  );
   const fromStandings = standings.map((row) => {
     const view = resolveAgentIdentityView(
       {
@@ -486,6 +524,7 @@ function publicAgents(
       statsArtifact,
       episodesByPlayer.get(row.playerName) ?? [],
       standingsHistory,
+      provisionalIdentities.get(row.playerName) ?? null,
     );
   });
   const standingsPlayerNames = new Set(
@@ -513,6 +552,7 @@ function publicAgents(
         statsArtifact,
         episodesByPlayer.get(agent.policyMatchRule.playerName) ?? [],
         standingsHistory,
+        null,
       );
     });
   return [...fromStandings, ...registeredNotInStandings];

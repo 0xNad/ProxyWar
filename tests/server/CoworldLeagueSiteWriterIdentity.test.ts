@@ -188,7 +188,7 @@ describe("registry identity rendering on the league mirror", () => {
     expect(drawerMatch?.[0]).toContain("Coworld player name: daveey");
   });
 
-  test("an unmapped live player renders provisional identity — player name only, no emblem, no short code — and is exactly what identity:list-unmapped would report", () => {
+  test("an unmapped live player renders a provisional identity — player name plus a generated emblem, never a short code or builder — matching exactly what identity:list-unmapped would report", () => {
     const identity: IdentityRegistrySnapshot = {
       builders: [],
       agents: [agent()], // only "daveey" is registered; "a brand new participant" is not
@@ -196,12 +196,20 @@ describe("registry identity rendering on the league mirror", () => {
     };
     const html = coworldLeagueIndexHtml(baseData(), identity);
     expect(html).toContain(
-      '<span class="agent-identity">a brand new participant</span>',
+      '<span class="agent-emblem"><svg',
     );
-    // No emblem/short-code markup attached to the unmapped row specifically —
-    // provable because the ONLY agent-emblem in the page belongs to daveey.
+    expect(html).toContain("a brand new participant</span>");
+    // No short-code markup ever attached to the unmapped row (that concept
+    // only applies to a real registered AgentProfile) — provable because
+    // the ONLY agent-shortcode in the page belongs to daveey.
+    const shortCodeCount = (html.match(/class="agent-shortcode"/g) ?? []).length;
+    expect(shortCodeCount).toBe(1);
+    // daveey (registered), "a brand new participant", AND "Auri" (both
+    // unregistered in THIS test's identity snapshot, which only contains
+    // "daveey") all now carry an emblem — 2026-08-01 P0 fix; a real,
+    // currently-competing participant is never anonymous.
     const emblemCount = (html.match(/class="agent-emblem"/g) ?? []).length;
-    expect(emblemCount).toBe(1);
+    expect(emblemCount).toBe(3);
   });
 
   test("a house agent shows the existing HOUSE badge and no separate Unclaimed note", () => {
@@ -255,11 +263,10 @@ describe("registry identity rendering on the league mirror", () => {
     );
   });
 
-  test("without an identity snapshot argument (legacy call site), every row falls back to provisional rendering — no crash, no emblem", () => {
+  test("without an identity snapshot argument (legacy call site), every row falls back to a provisional identity — no crash, a generated emblem, never a short code/builder", () => {
     const html = coworldLeagueIndexHtml(baseData());
-    expect(html).toContain(
-      '<span class="agent-identity">daveey</span>',
-    );
-    expect(html).not.toContain('class="agent-emblem"');
+    expect(html).toContain('<span class="agent-emblem"><svg');
+    expect(html).toContain("daveey</span>");
+    expect(html).not.toContain('class="agent-shortcode"');
   });
 });

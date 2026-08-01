@@ -238,6 +238,68 @@ describe("buildProxyWarPublicReadModel", () => {
     expect(unregistered?.status).toBe("unregistered");
   });
 
+  test("an unregistered live participant ALSO gets a purely cosmetic provisional identity — generated emblem, colors, and a working /agent/:slug — never a short code or builder (2026-08-01 P0 fix)", () => {
+    const model = buildProxyWarPublicReadModel(baseMirror(), identitySnapshot(), featuredMatchStoreOf());
+    const unregistered = model.agents.find(
+      (a) => a.playerName === "unregistered-player",
+    );
+    // Real identity fields stay untouched — this is NOT registration.
+    expect(unregistered?.registered).toBe(false);
+    expect(unregistered?.id).toBeNull();
+    expect(unregistered?.slug).toBeNull();
+    expect(unregistered?.shortCode).toBeNull();
+    expect(unregistered?.emblemSvg).toBeNull();
+    expect(unregistered?.builderId).toBeNull();
+    // The new provisional fields ARE populated, derived solely from the raw
+    // playerName — a real, currently-competing participant with no
+    // registry entry gets a working profile route and a visual identity
+    // instead of an anonymous card.
+    expect(unregistered?.provisionalSlug).toBe("unregistered-player");
+    expect(unregistered?.provisionalEmblemSvg).toContain("<svg");
+    expect(unregistered?.provisionalPrimaryColor).toMatch(/^#[0-9a-f]{6}$/);
+    expect(unregistered?.provisionalSecondaryColor).toMatch(/^#[0-9a-f]{6}$/);
+  });
+
+  test("a REGISTERED agent never carries a redundant provisional identity", () => {
+    const model = buildProxyWarPublicReadModel(baseMirror(), identitySnapshot(), featuredMatchStoreOf());
+    const daveey = model.agents.find((a) => a.playerName === "daveey");
+    expect(daveey?.registered).toBe(true);
+    expect(daveey?.provisionalSlug).toBeNull();
+    expect(daveey?.provisionalEmblemSvg).toBeNull();
+    expect(daveey?.provisionalPrimaryColor).toBeNull();
+    expect(daveey?.provisionalSecondaryColor).toBeNull();
+  });
+
+  test("still produces a valid provisional identity for a live playerName that happens to match a different row's already-registered slug namespace", () => {
+    // "daveey" is already a registered slug in `identitySnapshot()`; an
+    // unregistered participant who happens to share that exact live
+    // playerName (a distinct scenario from the already-registered "daveey"
+    // row above) must never be assigned the same provisional slug.
+    const mirror = baseMirror({
+      standings: [
+        {
+          rank: 1,
+          playerName: "daveey",
+          ratingPolicyLabel: null,
+          activeChampionPolicyLabel: "some-family:v9",
+          policyLabel: null,
+          score: 1,
+          roundsPlayed: 1,
+          isHouse: false,
+        },
+      ],
+    });
+    // Empty registry so "daveey" resolves to unregistered for THIS row.
+    const model = buildProxyWarPublicReadModel(
+      mirror,
+      { agents: [], builders: [], versions: [] },
+      featuredMatchStoreOf(),
+    );
+    const row = model.agents.find((a) => a.playerName === "daveey");
+    expect(row?.registered).toBe(false);
+    expect(row?.provisionalSlug).not.toBeNull();
+  });
+
   test("a registered agent absent from this cycle's live standings still appears (never disappears on a missed round)", () => {
     const mirror = baseMirror({ standings: [] });
     const model = buildProxyWarPublicReadModel(mirror, identitySnapshot(), featuredMatchStoreOf());

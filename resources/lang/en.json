@@ -1664,6 +1664,8 @@
     "empty": "No agents in the roster yet.",
     "house_badge_title": "A house-run exhibition seat, not an independent competitor.",
     "house_badge": "House",
+    "unregistered_badge_title": "A real, currently-competing participant awaiting operator registration in the identity registry.",
+    "unregistered_badge": "Unregistered",
     "unclaimed": "Unclaimed"
   },
   "agent_profile": {
@@ -1678,6 +1680,7 @@
     "builder_unclaimed": "Unclaimed",
     "builder_label": "Builder",
     "claim_cta": "Do you build this Agent? Start a verified claim →",
+    "provisional_note": "This is a real, currently-competing participant. It hasn't been added to the identity registry yet — its name, emblem, and colors below are generated placeholders, not a Builder-set identity.",
     "rank": "Rank",
     "score": "Score",
     "rated_rounds": "Rated rounds",

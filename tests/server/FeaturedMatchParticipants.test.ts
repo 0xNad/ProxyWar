@@ -98,7 +98,7 @@ const identity: IdentityRegistrySnapshot = {
 };
 
 describe("resolveFeaturedMatchParticipantCards", () => {
-  it("resolves a registered participant to full identity, and leaves an unregistered one falling back to raw playerName", () => {
+  it("resolves a registered participant to full identity, and gives an unregistered one a provisional identity derived from its raw playerName", () => {
     const cards = resolveFeaturedMatchParticipantCards(baseMatch(), identity);
     expect(cards).toHaveLength(2);
     expect(cards[0]).toEqual({
@@ -115,14 +115,28 @@ describe("resolveFeaturedMatchParticipantCards", () => {
     expect(cards[1]).toEqual({
       playerName: "GhostRaider",
       displayName: "GhostRaider",
-      agentSlug: null,
-      emblemSvg: null,
-      primaryColor: null,
-      secondaryColor: null,
+      // Never null anymore (2026-08-01 P0 fix) — a cosmetic, deterministic
+      // provisional identity derived solely from `playerName`, never a
+      // registered id/short code/builder/version.
+      agentSlug: "ghostraider",
+      emblemSvg: expect.stringContaining("<svg"),
+      primaryColor: expect.stringMatching(/^#[0-9a-f]{6}$/),
+      secondaryColor: expect.stringMatching(/^#[0-9a-f]{6}$/),
       versionLabel: null,
       builderId: null,
       builderDisplayName: null,
     });
+  });
+
+  it("never lets an unregistered participant's provisional slug collide with a real registered agent's slug", () => {
+    const match = baseMatch({
+      participants: [
+        { playerName: "auri", agentId: null, agentVersionId: null, builderId: null },
+      ],
+    });
+    const cards = resolveFeaturedMatchParticipantCards(match, identity);
+    expect(cards[0].agentSlug).not.toBe("auri");
+    expect(cards[0].agentSlug).toMatch(/^auri-[a-f0-9]{6}$/);
   });
 
   it("returns [] for a merely 'scheduled' record — never exposes participants before the operator's publish signal", () => {

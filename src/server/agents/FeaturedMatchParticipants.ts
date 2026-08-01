@@ -1,5 +1,9 @@
 import { generateEmblemSvg } from "../identity/IdentityEmblems";
 import type { IdentityRegistrySnapshot } from "../identity/IdentityRegistry";
+import {
+  computeProvisionalIdentities,
+  type ProvisionalIdentity,
+} from "../identity/ProvisionalIdentity";
 import type { FeaturedMatch, FeaturedMatchParticipant } from "./FeaturedMatch";
 
 /**
@@ -9,6 +13,14 @@ import type { FeaturedMatch, FeaturedMatchParticipant } from "./FeaturedMatch";
  * `ProxyWarPublicReadModel.ts`'s `publicFeaturedMatchResult` already
  * enforces — this module is participant identity ONLY, orthogonal to that
  * embargo).
+ *
+ * `agentSlug`/`emblemSvg`/`primaryColor`/`secondaryColor` fall back to a
+ * PURELY COSMETIC provisional identity (see `ProvisionalIdentity.ts`) when
+ * no `AgentProfile` matched — a real, currently-competing participant
+ * featured on the homepage hero or `/watch` never renders as an anonymous
+ * card (2026-08-01 P0 fix). `builderId`/`builderDisplayName`/`versionLabel`
+ * stay `null` regardless: a provisional identity carries NO ownership or
+ * release history, only what the live mirror itself already reported.
  */
 export interface FeaturedMatchParticipantCard {
   playerName: string;
@@ -53,8 +65,12 @@ export function resolveFeaturedMatchParticipantCards(
 ): FeaturedMatchParticipantCard[] {
   if (match.state === "candidate" || match.state === "scheduled") return [];
   const builderById = new Map(identity.builders.map((builder) => [builder.id, builder]));
+  const provisionalIdentities = computeProvisionalIdentities(
+    match.participants.map((participant) => participant.playerName),
+    new Set(identity.agents.map((agent) => agent.slug)),
+  );
   return match.participants.map((participant) =>
-    resolveOneParticipant(participant, identity, builderById),
+    resolveOneParticipant(participant, identity, builderById, provisionalIdentities),
   );
 }
 
@@ -62,6 +78,7 @@ function resolveOneParticipant(
   participant: FeaturedMatchParticipant,
   identity: IdentityRegistrySnapshot,
   builderById: ReadonlyMap<string, IdentityRegistrySnapshot["builders"][number]>,
+  provisionalIdentities: ReadonlyMap<string, ProvisionalIdentity>,
 ): FeaturedMatchParticipantCard {
   const agent =
     participant.agentId === null
@@ -73,13 +90,18 @@ function resolveOneParticipant(
       : identity.versions.find((candidate) => candidate.id === participant.agentVersionId);
   const builderId = participant.builderId ?? agent?.builderId ?? null;
   const builder = builderId === null ? undefined : builderById.get(builderId);
+  const provisional =
+    agent === undefined ? (provisionalIdentities.get(participant.playerName) ?? null) : null;
   return {
     playerName: participant.playerName,
     displayName: agent?.displayName ?? participant.playerName,
-    agentSlug: agent?.slug ?? null,
-    emblemSvg: agent === undefined ? null : generateEmblemSvg(agent.id),
-    primaryColor: agent?.primaryColor ?? null,
-    secondaryColor: agent?.secondaryColor ?? null,
+    agentSlug: agent?.slug ?? provisional?.slug ?? null,
+    emblemSvg:
+      agent === undefined
+        ? (provisional?.emblemSvg ?? null)
+        : generateEmblemSvg(agent.id),
+    primaryColor: agent?.primaryColor ?? provisional?.primaryColor ?? null,
+    secondaryColor: agent?.secondaryColor ?? provisional?.secondaryColor ?? null,
     versionLabel: version?.publicVersionLabel ?? null,
     builderId: builder?.id ?? null,
     builderDisplayName: builder?.displayName ?? null,

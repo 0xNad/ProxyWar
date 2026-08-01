@@ -25,12 +25,17 @@ import { loadSeasonRegistry } from "./season/SeasonRegistry";
 import { generateEmblemSvg } from "../identity/IdentityEmblems";
 import {
   AgentIdentityView,
+  computeUnmappedPlayerNames,
   resolveAgentIdentityView,
 } from "../identity/IdentityMatching";
 import {
   IdentityRegistrySnapshot,
   loadIdentityRegistrySnapshot,
 } from "../identity/IdentityRegistry";
+import {
+  computeProvisionalIdentities,
+  type ProvisionalIdentity,
+} from "../identity/ProvisionalIdentity";
 
 /**
  * Static league-site writer for the hosted Coworld Proxywar league.
@@ -266,7 +271,7 @@ function playerProfileUrl(playerName: string): string {
   return `${PLAYER_PROFILE_ORIGIN}/player/${encodeURIComponent(playerName)}`;
 }
 
-/** Default when a caller renders without loading the registry (existing tests, and any future direct call) — every row falls back to a provisional identity: player name, no emblem/short-code/builder. Real production rendering always loads the tracked registry instead (see `writeCoworldLeagueSiteUnlocked`). */
+/** Default when a caller renders without loading the registry (existing tests, and any future direct call) — every row falls back to a provisional identity: player name plus a generated emblem/colors/slug (`ProvisionalIdentity.ts`), never a short code or builder. Real production rendering always loads the tracked registry instead (see `writeCoworldLeagueSiteUnlocked`). */
 const EMPTY_LEAGUE_IDENTITY_SNAPSHOT: IdentityRegistrySnapshot = {
   builders: [],
   agents: [],
@@ -640,6 +645,25 @@ async function writeCoworldLeagueSiteUnlocked(
     await writeFileAtomic(
       standingsHistoryPath,
       `${JSON.stringify(standingsHistory, null, 2)}\n`,
+    );
+  }
+  // Self-surfacing `identity:list-unmapped` — a P0 production incident
+  // (2026-08-01, see `docs/PROXYWAR_IDENTITY_MODEL.md`'s "Self-surfacing
+  // unmapped counts") found that the matching logic was never the bug;
+  // nothing ever RAN the check against live data on an ongoing basis, so a
+  // real, currently-competing participant could render with only a
+  // provisional identity for days before a human noticed. Logging this on
+  // every publish cycle (not just when an operator remembers to run the
+  // CLI) turns that into an ordinary, greppable server-log signal — never
+  // gates the publish itself, since an unmapped participant is exactly
+  // the safe-degrade case this mirror is designed to keep serving through.
+  const unmappedPlayerNames = computeUnmappedPlayerNames(
+    data.standings.map((row) => row.playerName),
+    identity.agents,
+  );
+  if (unmappedPlayerNames.length > 0) {
+    console.warn(
+      `coworld-league-mirror: ${unmappedPlayerNames.length} unmapped live participant(s) with no registered AgentProfile (run identity:list-unmapped, then register or link them): ${unmappedPlayerNames.join(", ")}`,
     );
   }
   // Publish data.json and read-model.json last. Existing pages only reload
@@ -1176,17 +1200,27 @@ export function coworldLeagueClientAssetPath(): string {
 }
 
 /**
- * Emblem + display name + short code for one resolved Agent, or the
- * provisional (name-only) fallback when no AgentProfile matched — shared by
- * both the standings table and battle cards so the two surfaces never drift
- * on what "this participant's identity" looks like.
+ * Emblem + display name + short code for one resolved Agent, or a
+ * PURELY COSMETIC provisional identity (see `ProvisionalIdentity.ts`)
+ * when no `AgentProfile` matched but a live provisional one was computed
+ * for this row — shared by both the standings table and battle cards so
+ * the two surfaces never drift on what "this participant's identity"
+ * looks like. Falls back to plain `fallbackPlayerName` text only when
+ * NEITHER a real nor a provisional identity is available (`provisional`
+ * omitted or `null`) — 2026-08-01 P0 fix; a real, currently-competing
+ * participant no longer renders with zero visual identity on this page.
  */
 function agentIdentityMarkup(
   view: AgentIdentityView,
   fallbackPlayerName: string,
+  provisional: ProvisionalIdentity | null = null,
 ): string {
   if (view.agent === null) {
-    return `<span class="agent-identity">${escapeHtml(fallbackPlayerName)}</span>`;
+    if (provisional === null) {
+      return `<span class="agent-identity">${escapeHtml(fallbackPlayerName)}</span>`;
+    }
+    const emblem = `<span class="agent-emblem">${provisional.emblemSvg}</span>`;
+    return `<span class="agent-identity">${emblem}${escapeHtml(fallbackPlayerName)}</span>`;
   }
   const emblem = `<span class="agent-emblem">${generateEmblemSvg(view.agent.id)}</span>`;
   return `<span class="agent-identity">${emblem}${escapeHtml(
@@ -1213,16 +1247,22 @@ function builderNoteMarkup(view: AgentIdentityView, isHouse: boolean): string {
  * Same identity/profile destination the standings row's agent identity link
  * uses for click-through: `/agent/:slug` when the row resolved to a
  * registered Agent (an `AgentProfile.slug` is never null — see
- * `IdentitySchemas.ts`), else the existing `/player/:name` fallback so an
- * unmapped or house-only row never links to a profile page that doesn't
- * exist (same rule `BuilderProfilePage.renderAgentRow` follows client-side).
+ * `IdentitySchemas.ts`), else `/agent/<provisionalSlug>` when a live
+ * provisional identity was computed for this row (2026-08-01 P0 fix —
+ * `AgentProfilePage.ts` resolves a provisional profile there too), else
+ * the `/player/:name` fallback so a row with neither never links to a
+ * profile page that doesn't exist.
  */
 function standingsRowProfileUrl(
   view: AgentIdentityView,
   fallbackPlayerName: string,
+  provisional: ProvisionalIdentity | null = null,
 ): string {
   if (view.agent !== null) {
     return `${PLAYER_PROFILE_ORIGIN}/agent/${encodeURIComponent(view.agent.slug)}`;
+  }
+  if (provisional !== null) {
+    return `${PLAYER_PROFILE_ORIGIN}/agent/${encodeURIComponent(provisional.slug)}`;
   }
   return playerProfileUrl(fallbackPlayerName);
 }
@@ -1437,6 +1477,10 @@ function standingsTable(
     return `<p class="lede">No standings mirrored yet.</p>`;
   }
   const ratedRoundsLabel = translateText("coworld_league.rated_rounds");
+  const provisionalIdentities = computeProvisionalIdentities(
+    data.standings.map((row) => row.playerName),
+    new Set(identity.agents.map((agent) => agent.slug)),
+  );
   const rows = data.standings
     .map((row) => {
       // Old snapshots used policyLabel for the rating row. Keep that fallback
@@ -1509,13 +1553,15 @@ function standingsTable(
               )}</span></span>
             </div>
           </details>`;
+      const provisional =
+        view.agent === null ? (provisionalIdentities.get(row.playerName) ?? null) : null;
       return `
         <tr${row.isHouse ? ` class="house"` : ""}>
           <td class="rank">${escapeHtml(String(row.rank))}</td>
           <td class="movement" data-label="Movement">—</td>
           <td class="agent-cell"><a class="player-profile-link" href="${escapeHtml(
-            standingsRowProfileUrl(view, row.playerName),
-          )}">${agentIdentityMarkup(view, row.playerName)}</a>${
+            standingsRowProfileUrl(view, row.playerName, provisional),
+          )}">${agentIdentityMarkup(view, row.playerName, provisional)}</a>${
             row.isHouse ? `<span class="badge house">HOUSE</span>` : ""
           }${builderNoteMarkup(view, row.isHouse)}${activeVersionLine}${integrityDrawer}</td>
           <td class="score" data-label="${escapeHtml(
@@ -1563,6 +1609,10 @@ function battleCard(
       right.tilesOwned - left.tilesOwned ||
       left.slot - right.slot,
   );
+  const provisionalIdentities = computeProvisionalIdentities(
+    episode.players.map((player) => player.name),
+    new Set(identity.agents.map((agent) => agent.slug)),
+  );
   const combatantMarkup = (player: CoworldLeagueEpisodePlayerRow): string => {
     const share =
       totalTiles > 0 ? Math.max(0, player.tilesOwned) / totalTiles : 0;
@@ -1577,12 +1627,14 @@ function battleCard(
       identity.builders,
       identity.versions,
     );
+    const provisional =
+      view.agent === null ? (provisionalIdentities.get(player.name) ?? null) : null;
     return `
         <div class="combatant" role="listitem">
           <span class="dot" aria-hidden="true" style="background:${escapeHtml(player.color)}"></span>
           <span class="name${player.isAlive ? "" : " dead"}"><a class="player-profile-link" href="${escapeHtml(
-            playerProfileUrl(player.name),
-          )}">${agentIdentityMarkup(view, player.name)}</a>${
+            standingsRowProfileUrl(view, player.name, provisional),
+          )}">${agentIdentityMarkup(view, player.name, provisional)}</a>${
             player.isWinner
               ? ` <span class="win" aria-hidden="true">★</span><span class="sr-only"> (${escapeHtml(
                   translateText("coworld_league.winner"),
