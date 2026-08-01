@@ -64,9 +64,20 @@
 
     <!-- `nonceInlineScripts` (shared with every other app-shell route)
          requires at least one inline script to nonce — this is that one,
-         and it's genuinely useful: stamps which build served this page. -->
+         and it's genuinely useful: stamps which build served this page.
+
+         window.ASSET_MANIFEST/CDN_BASE mirror index.html's game-shell block
+         (`index.html` lines ~257-262) minus the replay/embedded-worker
+         fallback chain, which only applies to game routes. Without this,
+         every `assetUrl()` call on a public page (flags, icons, images) reads
+         `getAssetManifest()`'s `{}` fallback and requests the RAW unhashed
+         source path — which production only serves hashed under `_assets/`
+         (see `PublicAssetManifest.ts`'s `HASHED_PUBLIC_ASSET_GLOBS`), so
+         every such asset 404s. -->
     <script>
       window.GIT_COMMIT = <%- gitCommit %>;
+      window.ASSET_MANIFEST = <%- assetManifest %>;
+      window.CDN_BASE = <%- cdnBase %>;
     </script>
   </head>
 

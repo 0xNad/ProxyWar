@@ -137,4 +137,27 @@ describe("RenderHtml", () => {
     }
     expect(html).toContain('id="main-menu-area"');
   });
+
+  test("public.html injects window.ASSET_MANIFEST/CDN_BASE, same as index.html's game shell", async () => {
+    // Regression coverage for the 2026-08-01 P0 fix: public.html's inline
+    // script previously set ONLY window.GIT_COMMIT, so every assetUrl() call
+    // made by a component mounted under PublicApp.ts (e.g. LangSelector's
+    // flag icon) read AssetUrls.ts's getAssetManifest() `{}` fallback and
+    // requested the raw unhashed source path -- 404 in production, which
+    // only serves flags/icons/images/etc. hashed under `_assets/` (see
+    // PublicAssetManifest.ts's HASHED_PUBLIC_ASSET_GLOBS).
+    const html = await renderHtmlContent(path.resolve("public.html"));
+    const bootstrapScript = [
+      ...html.matchAll(/<script\b[^>]*>([\s\S]*?)<\/script>/gi),
+    ]
+      .map((match) => match[1])
+      .find((script) => script.includes("window.ASSET_MANIFEST"));
+    expect(bootstrapScript).toBeDefined();
+
+    const windowObject: Record<string, unknown> = {};
+    vm.runInNewContext(bootstrapScript!, { window: windowObject });
+    expect(windowObject.ASSET_MANIFEST).toEqual(expect.any(Object));
+    expect(windowObject.CDN_BASE).toBe("");
+    expect(windowObject.GIT_COMMIT).toBeDefined();
+  });
 });
