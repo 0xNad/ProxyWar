@@ -402,7 +402,7 @@ export class AgentLeagueMatchRunner {
       const selectedActions: Array<{
         action: LegalAction | null;
         requestedActionID: string;
-        reason: string;
+        reason: string | null;
       }> = [];
 
       for (const actionID of requestedActionIDs) {
@@ -628,7 +628,7 @@ export class AgentLeagueMatchRunner {
     const selectedActions: Array<{
       action: LegalAction | null;
       requestedActionID: string;
-      reason: string;
+      reason: string | null;
     }> = [];
 
     for (const actionID of requestedActionIDs) {
@@ -880,7 +880,7 @@ export class AgentLeagueMatchRunner {
     chosenAction: LegalAction | null;
     decision: AgentDecision;
     decisionLatencyMs: number;
-    reason: string;
+    reason: string | null;
     result: AgentActionResult;
   }): AgentDecisionRecord {
     const record: AgentDecisionRecord = {
@@ -1327,9 +1327,19 @@ async function decideWithSafetyFallback(input: {
       observation: input.observation,
       legalActions: input.legalActions,
     });
+    // 2026-08-01 P0 fix (see LlmAgentBrain.ts's fallback() for the original
+    // incident): this used to fold the brain-error text into `reason` —
+    // `"Agent brain failed (${reason}); fallback: ${fallbackDecision.reason}"`
+    // — the same anti-pattern the LLM-provider-error incident was caused by,
+    // reachable here whenever ANY brain throws (a network error, a timeout,
+    // an unexpected exception) rather than returning its own fallback
+    // decision. No stated reason exists on this path; the error text
+    // already has its own field (`brainErrorReason`, below), and the
+    // substituted brain's own genuine reason gets `metadata.fallbackReason`
+    // — same convention `LlmAgentBrain.fallback()` uses.
     return {
       actionID: fallbackDecision.actionID,
-      reason: `Agent brain failed (${reason}); fallback: ${fallbackDecision.reason}`,
+      reason: null,
       metadata: {
         ...fallbackDecision.metadata,
         brainType: input.brain.brainType ?? "rule",
@@ -1340,6 +1350,7 @@ async function decideWithSafetyFallback(input: {
         // behavior report) don't under-count it as a plain rule fallback.
         ...(isLlmBrain ? { llmPlannerDegraded: true } : {}),
         fallbackActionID: fallbackDecision.actionID,
+        fallbackReason: fallbackDecision.reason,
       },
     };
   }
@@ -1564,12 +1575,17 @@ function decisionReason(
   decision: AgentDecision,
   validation: ReturnType<typeof validateAgentDecision>,
   action: LegalAction | null,
-): string {
+): string | null {
   if (validation.ok) {
     return decision.reason;
   }
   const fallbackText = action ? ` fallback=${action.id}` : " no fallback";
-  return `${decision.reason}; ${validation.reason};${fallbackText}`;
+  // `decision.reason` is `null` on an upstream fallback/failure path (no
+  // stated reason to report) — omit it rather than interpolating the
+  // literal string "null" into a field consumers treat as a stated reason.
+  return decision.reason === null
+    ? `${validation.reason};${fallbackText}`
+    : `${decision.reason}; ${validation.reason};${fallbackText}`;
 }
 
 function distanceBetweenCandidates(

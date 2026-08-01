@@ -62,7 +62,8 @@ interface AiLeagueDecisionLogEntry {
   selectedActionMetadata?: Record<string, unknown>;
   socialText?: string;
   socialTargetName?: string;
-  reason: string;
+  /** `null` for a fallback/failure decision with no stated reason — see server `AgentDecision.reason`'s doc. */
+  reason: string | null;
   planObjective?: string;
   planRationale?: string;
   decisionLatencyMs: number;
@@ -4375,7 +4376,7 @@ function decisionHtml(decision: AiLeagueDecisionLogEntry): string {
       <code>${escapeHtml(decision.selectedLegalActionId)}</code>
       ${socialBubbleHtml(decision)}
       ${directive ? `<p class="ai-league-directive"><b>${escapeHtml(translateText("ai_league_replay.directive_label"))}</b> ${escapeHtml(directive)}</p>` : ""}
-      <p>${escapeHtml(decision.reason)}</p>
+      <p>${escapeHtml(decision.reason ?? "(no stated reason — fallback decision)")}</p>
     </article>`;
 }
 

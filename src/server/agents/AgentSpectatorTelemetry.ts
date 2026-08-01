@@ -565,7 +565,9 @@ function eventForRecord(input: {
         kind: "hold",
         tone: "info",
         message: `${input.actor.username} waits.`,
-        importance: /transport|risky|safety|rebuild/i.test(input.record.reason)
+        importance: /transport|risky|safety|rebuild/i.test(
+          input.record.reason ?? "",
+        )
           ? 36
           : 8,
       };

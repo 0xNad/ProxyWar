@@ -21,7 +21,8 @@ export interface AgentSpectatorDecision {
   turnNumber: number;
   selectedLegalActionId: string;
   selectedActionKind: string;
-  reason: string;
+  /** `null` for a fallback/failure decision with no stated reason — see `AgentDecision.reason`'s doc. */
+  reason: string | null;
   decisionLatencyMs: number;
   accepted: boolean;
   resultReason: string;
@@ -992,7 +993,7 @@ export function spectatorHtml(replay: AgentSpectatorReplay): string {
           '</div><strong>' + escapeHtml(decision.username) + '</strong>' +
           '<code>' + escapeHtml(decision.selectedLegalActionId) + '</code>' +
           socialBubbleHtml(decision) +
-          '<p>' + escapeHtml(decision.reason) + '</p>' +
+          '<p>' + escapeHtml(decision.reason || "(no stated reason — fallback decision)") + '</p>' +
           '<span class="muted">' + escapeHtml(decision.frameLabel) + ' · ' + decision.decisionLatencyMs + 'ms · ' + escapeHtml(decision.intentSummary) + '</span></article>';
       }).join("");
       document.querySelectorAll("#decisions .decision").forEach((node) => {
@@ -1028,7 +1029,7 @@ export function spectatorHtml(replay: AgentSpectatorReplay): string {
           '</div><strong>' + escapeHtml(decision.username) + '</strong>' +
           '<code>' + escapeHtml(decision.selectedLegalActionId) + '</code>' +
           socialBubbleHtml(decision) +
-          '<p>' + escapeHtml(decision.reason) + '</p>' +
+          '<p>' + escapeHtml(decision.reason || "(no stated reason — fallback decision)") + '</p>' +
           '<span class="muted">' + decision.decisionLatencyMs + 'ms · turn ' + decision.turnNumber + '</span></article>';
       }).join("");
       document.querySelectorAll("#current-decisions .decision").forEach((node) => {
@@ -1061,7 +1062,7 @@ export function spectatorHtml(replay: AgentSpectatorReplay): string {
         '<strong>' + escapeHtml(decision.username) + '</strong>' +
         '<code>' + escapeHtml(decision.selectedLegalActionId) + '</code>' +
         socialBubbleHtml(decision) +
-        '<p>' + escapeHtml(decision.reason) + '</p>' +
+        '<p>' + escapeHtml(decision.reason || "(no stated reason — fallback decision)") + '</p>' +
         '<p><b>Objective:</b> ' + escapeHtml(decision.objectiveSummary || decision.objectiveKind || "none") + '</p>' +
         '<p><b>Plan:</b> ' + escapeHtml(decision.planObjective || "none") + (decision.planFollowed === undefined ? '' : ' · followed=' + String(decision.planFollowed)) + '</p>' +
         '<p><b>Skill:</b> ' + escapeHtml(decision.selectedSkill || "none") + (decision.selectedSkillScore === undefined ? '' : ' · score=' + decision.selectedSkillScore) + '</p>' +

@@ -2606,7 +2606,7 @@ function isTransportWaitHoldRecord(record: AgentDecisionRecord): boolean {
   if (record.chosenActionKind !== "hold") {
     return false;
   }
-  const text = `${record.reason} ${record.observationSummary}`;
+  const text = `${record.reason ?? ""} ${record.observationSummary}`;
   return (
     /waiting for active transport|transport to land|active transport/i.test(
       text,

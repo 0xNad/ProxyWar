@@ -126,6 +126,24 @@ export class LlmAgentBrain implements AgentBrain {
     return this.fallback(input, prompt, rawOutput, parsed);
   }
 
+  /**
+   * 2026-08-01 P0 fix (see `docs/project-state/known-problems.md`): this path
+   * used to fold the provider/parse failure text into `AgentDecision.reason`
+   * — `reason: "LLM decision rejected (${parsed.reason}); fallback:
+   * ${fallbackDecision.reason}"` — the SAME field a genuine stated reason
+   * uses, with no distinction recorded at write time. A downstream
+   * sanitizer (`AgentDecisiveMoments.sanitizeStatedReason`) now filters raw
+   * error text at output time, but that is a defense, not the fix; the
+   * record itself was wrong. The LLM brain produced no stated reason here —
+   * either the provider call failed or its response didn't parse — so
+   * `reason` is `null` (see `AgentDecision.reason`'s doc). The failure text
+   * (`parsed.reason`) already has a distinct home in
+   * `metadata.llmParseFailureReason`; the substituted fallback brain's own
+   * genuine reason (not an error — a real rule-brain rationale) gets its
+   * own distinct field, `metadata.fallbackReason`, alongside the existing
+   * `fallbackUsed`/`fallbackActionID` degradation flags, rather than being
+   * discarded or re-mixed into `reason`.
+   */
   private async fallback(
     input: AgentBrainInput,
     prompt: string,
@@ -138,7 +156,7 @@ export class LlmAgentBrain implements AgentBrain {
     const fallbackDecision = await fallbackBrain.decide(input);
     return {
       actionID: fallbackDecision.actionID,
-      reason: `LLM decision rejected (${parsed.reason}); fallback: ${fallbackDecision.reason}`,
+      reason: null,
       metadata: {
         ...fallbackDecision.metadata,
         brain: "llm",
@@ -159,6 +177,7 @@ export class LlmAgentBrain implements AgentBrain {
         llmParseFailureReason: parsed.reason,
         fallbackUsed: true,
         fallbackActionID: fallbackDecision.actionID,
+        fallbackReason: fallbackDecision.reason,
       },
     };
   }

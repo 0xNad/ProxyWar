@@ -1162,7 +1162,7 @@ function holdReasonCategory(record: AgentDecisionRecord): AgentHoldReasonCategor
   if (isHoldReasonCategory(explicit)) {
     return explicit;
   }
-  const reason = `${record.reason} ${metadataString(record.decisionMetadata, "blockedHostileAttackSummary") ?? ""}`.toLowerCase();
+  const reason = `${record.reason ?? ""} ${metadataString(record.decisionMetadata, "blockedHostileAttackSummary") ?? ""}`.toLowerCase();
   if (reason.includes("transport") && reason.includes("wait")) {
     return "transport_wait";
   }
@@ -1233,7 +1233,7 @@ function diplomacyHasFollowThrough(
   const targetID = metadataString(record.chosenActionMetadata, "targetID")
     ?? metadataString(record.chosenActionMetadata, "recipientID")
     ?? metadataString(record.chosenActionMetadata, "playerID");
-  const reason = record.reason.toLowerCase();
+  const reason = (record.reason ?? "").toLowerCase();
   const metadataText = [
     metadataString(record.chosenActionMetadata, "message"),
     metadataString(record.chosenActionMetadata, "legalReason"),
