@@ -1038,3 +1038,121 @@ function renderAnalystEventLog(events: readonly AnalystEventRow[]): HTMLElement 
   wrap.append(list);
   return wrap;
 }
+
+// ---------------------------------------------------------------------------
+// Match-state strip (Season Zero activation prompt Phase 5, "Broadcast")
+// ---------------------------------------------------------------------------
+
+/**
+ * A compact, always-visible summary strip derived from the sampled
+ * `match-state-series.json` artifact (`AgentMatchStateSeries.ts` —
+ * `MatchStateSeriesSample`): current leader, territory-share change,
+ * alive count, active alliances/wars, and the current Director Cut
+ * segment or live event phase. Deliberately NO win probability (spec:
+ * "Do not add live win probability") — every field here is a plain,
+ * already-true fact about the CURRENT sample, never a forward-looking
+ * inference.
+ *
+ * Same "data-in only" contract as every other component in this file:
+ * this never reads `MatchStateSeries`/frame-state directly and never
+ * judges what's safe to show. The caller (whichever overlay mounts this
+ * — `ReplayPremiereOverlay.ts`/`AiLeagueReplayOverlay.ts`) is the one
+ * responsible for resolving `input` from ONLY the currently-released
+ * sample — the same playhead/released-sequence boundary
+ * `ReplayPremierePlaybackController.state().releasedThroughSequence`
+ * already gates every other region in this module (see
+ * `renderMatchTimeline`'s own windowing note) — this component has no
+ * way to enforce that itself, since it never sees the full series or the
+ * playback controller, only whatever ONE sample's worth of facts the
+ * caller hands it.
+ */
+export interface MatchStateStripInput {
+  /** `null` before any sample carries a resolvable leader (e.g. the very first released sample, or every seat tied at zero territory). */
+  leader: { displayName: string; territoryPercent: number } | null;
+  /** Percentage-point change in the leader's own territory share since the previous released sample — `null` on the first released sample (no prior point to diff against). Signed: positive = gained ground. */
+  territoryShareDeltaPercent: number | null;
+  aliveCount: number;
+  totalCount: number;
+  activeAllianceCount: number;
+  activeWarCount: number;
+  /** Current Director Cut segment label (e.g. "Opening", "First strike", "Final conflict") or live event phase — `null` before the caller can resolve one (e.g. pre-connection). */
+  currentPhaseLabel: string | null;
+}
+
+function formatSignedPercent(value: number): string {
+  const rounded = Math.round(value);
+  if (rounded === 0) return "±0";
+  return rounded > 0 ? `+${rounded}` : String(rounded);
+}
+
+function stripItem(className: string, label: string, value: string): HTMLElement {
+  const item = element("div", `broadcast-state-strip-item ${className}`);
+  item.append(
+    element("span", "broadcast-state-strip-label", label),
+    element("span", "broadcast-state-strip-value", value),
+  );
+  return item;
+}
+
+export function renderMatchStateStrip(input: MatchStateStripInput): HTMLElement {
+  const strip = element("div", "broadcast-state-strip");
+  strip.setAttribute("role", "status");
+  strip.setAttribute("aria-label", translateText("broadcast.state_strip_heading"));
+
+  strip.append(
+    stripItem(
+      "broadcast-state-strip-leader",
+      translateText("broadcast.state_strip_leader_label"),
+      input.leader === null
+        ? translateText("broadcast.state_strip_leader_unknown")
+        : translateText("broadcast.state_strip_leader_value", {
+            name: input.leader.displayName,
+            percent: Math.round(input.leader.territoryPercent),
+          }),
+    ),
+  );
+  if (input.territoryShareDeltaPercent !== null) {
+    const delta = stripItem(
+      "broadcast-state-strip-delta",
+      translateText("broadcast.state_strip_delta_label"),
+      formatSignedPercent(input.territoryShareDeltaPercent),
+    );
+    delta.dataset.direction =
+      input.territoryShareDeltaPercent > 0
+        ? "up"
+        : input.territoryShareDeltaPercent < 0
+          ? "down"
+          : "flat";
+    strip.append(delta);
+  }
+  strip.append(
+    stripItem(
+      "broadcast-state-strip-alive",
+      translateText("broadcast.state_strip_alive_label"),
+      translateText("broadcast.state_strip_alive_value", {
+        alive: input.aliveCount,
+        total: input.totalCount,
+      }),
+    ),
+  );
+  strip.append(
+    stripItem(
+      "broadcast-state-strip-relations",
+      translateText("broadcast.state_strip_relations_label"),
+      translateText("broadcast.state_strip_relations_value", {
+        alliances: input.activeAllianceCount,
+        wars: input.activeWarCount,
+      }),
+    ),
+  );
+  if (input.currentPhaseLabel !== null) {
+    strip.append(
+      stripItem(
+        "broadcast-state-strip-phase",
+        translateText("broadcast.state_strip_phase_label"),
+        input.currentPhaseLabel,
+      ),
+    );
+  }
+  return strip;
+}

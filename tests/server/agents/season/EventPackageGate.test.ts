@@ -103,6 +103,27 @@ describe("isPubliclyPromotable", () => {
     expect(result.missing).toContain("event_package_mismatched_featured_match_id");
   });
 
+  it("flags a premiere-lane record still in candidate/scheduled state — never promotable ahead of premiere:publish", () => {
+    expect(
+      isPubliclyPromotable(baseMatch({ state: "candidate" }), basePackage()).missing,
+    ).toContain("not_yet_published");
+    expect(
+      isPubliclyPromotable(baseMatch({ state: "scheduled" }), basePackage()).missing,
+    ).toContain("not_yet_published");
+  });
+
+  it("never flags not_yet_published for an archive-lane record regardless of state", () => {
+    const match = baseMatch({
+      lane: "archive",
+      state: "published",
+      scheduledAt: null,
+      queueItemName: null,
+      provenance: { source: "league-archive", sourceRef: "ereq_123", capturedAt: "2026-08-01T00:00:00.000Z" },
+    });
+    const pkg = basePackage({ scheduledAt: null, canonicalPremiereUrl: null, embargoState: "revealed" });
+    expect(isPubliclyPromotable(match, pkg).missing).not.toContain("not_yet_published");
+  });
+
   it("flags a missing title", () => {
     const result = isPubliclyPromotable(baseMatch({ title: "" }), basePackage());
     expect(result.missing).toContain("title");

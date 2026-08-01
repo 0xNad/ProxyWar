@@ -88,6 +88,7 @@ function readModelBody(agents: unknown[]) {
     rounds: [],
     matches: [],
     featuredMatches: [],
+    seasons: [],
     premieres: { live: null, latest: null },
     links: {
       enterTheLeagueUrl: "https://github.com/example/proxywar-starter",

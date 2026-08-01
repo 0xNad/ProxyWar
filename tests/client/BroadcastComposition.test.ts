@@ -17,6 +17,7 @@ import {
   renderWarRoomFeed,
   renderBroadcastDrawer,
   renderAnalystPanel,
+  renderMatchStateStrip,
   LowerThirdController,
   type CompetitorRailEntry,
   type CuratedWarRoomEvent,
@@ -24,6 +25,7 @@ import {
   type BroadcastDrawerTab,
   type LowerThirdEvent,
   type AnalystPanelData,
+  type MatchStateStripInput,
 } from "../../src/client/BroadcastComposition";
 
 afterEach(() => {
@@ -726,5 +728,69 @@ describe("renderAnalystPanel", () => {
     document.body.append(panel);
     expect(panel.textContent).toContain("broadcast.analyst_unavailable_premiere_sealed");
     expect(panel.textContent).toContain("attacks Beta");
+  });
+});
+
+function stateStripInput(
+  overrides: Partial<MatchStateStripInput> = {},
+): MatchStateStripInput {
+  return {
+    leader: { displayName: "Auri", territoryPercent: 42 },
+    territoryShareDeltaPercent: 3,
+    aliveCount: 3,
+    totalCount: 4,
+    activeAllianceCount: 1,
+    activeWarCount: 2,
+    currentPhaseLabel: "First strike",
+    ...overrides,
+  };
+}
+
+describe("renderMatchStateStrip", () => {
+  it("renders every field when fully populated, with no win-probability field anywhere", () => {
+    const strip = renderMatchStateStrip(stateStripInput());
+    document.body.append(strip);
+    expect(strip.getAttribute("role")).toBe("status");
+    expect(strip.textContent).toContain("broadcast.state_strip_leader_value:name=Auri,percent=42");
+    expect(strip.textContent).toContain("+3");
+    expect(strip.textContent).toContain("broadcast.state_strip_alive_value:alive=3,total=4");
+    expect(strip.textContent).toContain("broadcast.state_strip_relations_value:alliances=1,wars=2");
+    expect(strip.textContent).toContain("First strike");
+    expect(strip.textContent.toLowerCase()).not.toContain("probability");
+    expect(strip.textContent.toLowerCase()).not.toContain("win chance");
+  });
+
+  it("renders an honest 'unknown leader' state rather than fabricating one", () => {
+    const strip = renderMatchStateStrip(stateStripInput({ leader: null }));
+    document.body.append(strip);
+    expect(strip.textContent).toContain("broadcast.state_strip_leader_unknown");
+  });
+
+  it("omits the delta item entirely on the first released sample (no prior point to diff against)", () => {
+    const strip = renderMatchStateStrip(stateStripInput({ territoryShareDeltaPercent: null }));
+    document.body.append(strip);
+    expect(strip.querySelector(".broadcast-state-strip-delta")).toBeNull();
+  });
+
+  it("marks a negative territory delta with a down direction and a signed minus value", () => {
+    const strip = renderMatchStateStrip(stateStripInput({ territoryShareDeltaPercent: -5 }));
+    document.body.append(strip);
+    const delta = strip.querySelector(".broadcast-state-strip-delta") as HTMLElement | null;
+    expect(delta?.dataset.direction).toBe("down");
+    expect(strip.textContent).toContain("-5");
+  });
+
+  it("marks a flat (zero) delta distinctly from up/down", () => {
+    const strip = renderMatchStateStrip(stateStripInput({ territoryShareDeltaPercent: 0 }));
+    document.body.append(strip);
+    const delta = strip.querySelector(".broadcast-state-strip-delta") as HTMLElement | null;
+    expect(delta?.dataset.direction).toBe("flat");
+    expect(strip.textContent).toContain("±0");
+  });
+
+  it("omits the phase item entirely before the caller can resolve one", () => {
+    const strip = renderMatchStateStrip(stateStripInput({ currentPhaseLabel: null }));
+    document.body.append(strip);
+    expect(strip.querySelector(".broadcast-state-strip-phase")).toBeNull();
   });
 });

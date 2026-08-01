@@ -21,6 +21,7 @@ import {
   readEventPackageStore,
   resolveEventPackageStateRoot,
 } from "./season/EventPackage";
+import { loadSeasonRegistry } from "./season/SeasonRegistry";
 import { generateEmblemSvg } from "../identity/IdentityEmblems";
 import {
   AgentIdentityView,
@@ -591,6 +592,21 @@ async function writeCoworldLeagueSiteUnlocked(
   const eventPackageStore = await readEventPackageStore(
     resolveEventPackageStateRoot(),
   );
+  // Season Zero activation prompt Phase 4/5: the tracked, git-reviewed
+  // Season registry — same tolerant-load contract already applied to the
+  // identity registry above (`loadIdentityRegistrySnapshot`'s own
+  // `.catch`): a fresh checkout before any `season:create` has ever run,
+  // or a transient read hiccup, must never fail a league publish. Falls
+  // back to an empty registry (`seasons: []`), the same honest cold-start
+  // `SeasonRegistry.ts`'s own `loadSeasonRegistry` already returns for a
+  // genuinely missing file — this catch only guards the unexpected
+  // "file exists but failed to read/parse" case.
+  const seasonRegistry = await loadSeasonRegistry().catch((error) => {
+    console.warn(
+      `coworld-league-mirror: season registry failed to load, publishing with no seasons this cycle: ${(error as Error).message}`,
+    );
+    return { schemaVersion: 1 as const, seasons: [] };
+  });
   // Product overhaul spec Stage 6: best-effort, tolerant of absence (the
   // stats batch job runs on its own periodic cadence — see
   // `compute-agent-stats.ts`'s own doc for why this must never be a
@@ -639,6 +655,7 @@ async function writeCoworldLeagueSiteUnlocked(
     statsArtifact,
     standingsHistory,
     eventPackageStore,
+    seasonRegistry,
   );
   await writeFileAtomic(clientPath, coworldLeagueClientJavaScript());
   await writeFileAtomic(indexPath, coworldLeagueIndexHtml(data, identity));

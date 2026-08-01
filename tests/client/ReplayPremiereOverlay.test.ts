@@ -1840,6 +1840,7 @@ describe("broadcast composition regions (Stage 4 item 1)", () => {
         rounds: [],
         matches: [],
         featuredMatches: [],
+        seasons: [],
         premieres: { live: null, latest: null },
         links: { enterTheLeagueUrl: "", platformLabel: "", accountUrl: "" },
       }),

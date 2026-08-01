@@ -179,8 +179,40 @@ export const PublicFeaturedMatchSchema = z.object({
   revealAt: z.string().nullable(),
   postMatchSummary: z.string().nullable(),
   result: PublicFeaturedMatchResultSchema.nullable(),
+  /**
+   * Season Zero activation prompt Phase 4/5 — see
+   * `ProxyWarPublicReadModel.ts`'s `PublicFeaturedMatch.isPubliclyPromotable`
+   * for the full contract. THE flag Phase 5's hero/watch/schedule surfaces
+   * must check before treating this record as a promoted Featured Event
+   * rather than ordinary archive content.
+   */
+  isPubliclyPromotable: z.boolean(),
+  /** `EventPackage`-derived fields — all `null` together whenever `isPubliclyPromotable` is `false` (see the server type's own doc). `reasonToWatch` is claim TEXT only. */
+  subtitle: z.string().nullable(),
+  reasonToWatch: z.array(z.string()).nullable(),
+  directorCutEstimateSeconds: z.number().nullable(),
+  canonicalMatchUrl: z.string().nullable(),
+  canonicalPremiereUrl: z.string().nullable(),
 });
 export type PublicFeaturedMatch = z.infer<typeof PublicFeaturedMatchSchema>;
+
+/** Season Zero activation prompt Phase 5 — see `ProxyWarPublicReadModel.ts`'s `PublicSeason` for the full doc. `draft` seasons never reach the wire. */
+export const PublicSeasonSchema = z.object({
+  id: z.string(),
+  slug: z.string(),
+  title: z.string(),
+  description: z.string(),
+  startDate: z.string(),
+  endDate: z.string(),
+  state: z.enum(["active", "completed"]),
+  eventSlots: z.array(
+    z.object({
+      featuredMatchId: z.string(),
+      scheduledAt: z.string().nullable(),
+    }),
+  ),
+});
+export type PublicSeason = z.infer<typeof PublicSeasonSchema>;
 
 export const ReadModelSchema = z.object({
   schemaVersion: z.literal(1),
@@ -215,6 +247,7 @@ export const ReadModelSchema = z.object({
   ),
   matches: z.array(PublicMatchSchema),
   featuredMatches: z.array(PublicFeaturedMatchSchema),
+  seasons: z.array(PublicSeasonSchema),
   premieres: z.object({
     live: PublicPremiereLiveSchema.nullable(),
     latest: PublicPremiereLatestSchema.nullable(),

@@ -45,6 +45,7 @@ import {
   type EventPackageStoreFile,
 } from "./agents/season/EventPackage";
 import { isPubliclyPromotable } from "./agents/season/EventPackageGate";
+import type { SeasonRegistryFile } from "./agents/season/SeasonSchemas";
 
 /**
  * The typed, already-normalized public data model every Stage 2+ page
@@ -257,6 +258,55 @@ export interface PublicFeaturedMatch {
    * decide hero vs. ordinary archive presentation.
    */
   isPubliclyPromotable: boolean;
+  /**
+   * Season Zero activation prompt Phase 5 — the operator-authored
+   * `EventPackage` fields the hero/watch/schedule surfaces render once
+   * `isPubliclyPromotable` is `true`. ALL five fields are `null` together
+   * whenever `isPubliclyPromotable` is `false` — never a half-populated
+   * package peeking through before the gate says the record is complete.
+   * Safe to fold into the BULK model (unlike `participants` above):
+   * `isPubliclyPromotable` can only ever be `true` for a `published`/
+   * `revealed`/`archived` record (see `EventPackageGate.isPubliclyPromotable`'s
+   * own state-gate), the exact same state floor
+   * `resolveFeaturedMatchParticipantCards` already uses to allow
+   * participant identity to go public — so this prose can never leak an
+   * embargoed `scheduled`/`candidate` record's lineup ahead of that gate.
+   * `reasonToWatch` carries CLAIM TEXT ONLY (`EventPackageClaim.text`) —
+   * never `source`/`reference`, which are operator/internal.
+   */
+  subtitle: string | null;
+  reasonToWatch: string[] | null;
+  directorCutEstimateSeconds: number | null;
+  canonicalMatchUrl: string | null;
+  canonicalPremiereUrl: string | null;
+}
+
+/**
+ * Season Zero activation prompt Phase 5 — the public projection of one
+ * `Season` (spec Phase 4 "no second points system" model). Never carries
+ * `archiveFeaturedMatchIds`/`standingsSnapshotRefs`: the homepage/watch
+ * "Season Zero schedule" ask only needs the programme's own event slots,
+ * and the archive/standings surfaces already draw from `matches`/
+ * `featuredMatches`/`agents[].timeSeries` directly — no reason to expose
+ * a second path to the same data before a real consumer needs it.
+ * `draft` seasons are excluded entirely (operator-only, not yet
+ * announced) — same "candidate is never public" rule `publicFeaturedMatches`
+ * already applies to `FeaturedMatch`.
+ */
+export interface PublicSeasonEventSlot {
+  featuredMatchId: string;
+  scheduledAt: string | null;
+}
+
+export interface PublicSeason {
+  id: string;
+  slug: string;
+  title: string;
+  description: string;
+  startDate: string;
+  endDate: string;
+  state: "active" | "completed";
+  eventSlots: PublicSeasonEventSlot[];
 }
 
 export interface PublicPremiereState {
@@ -281,6 +331,8 @@ export interface ProxyWarPublicReadModel {
   matches: PublicMatch[];
   /** The public, embargo-correct projection of the `FeaturedMatch` store (spec Stage 3 items 1/5) — see `publicFeaturedMatches`' doc for the embargo rule. Excludes `state: "candidate"` records (operator-only, never public) and never carries `participants`. */
   featuredMatches: PublicFeaturedMatch[];
+  /** Season Zero activation prompt Phase 5 — active/completed seasons only (see `PublicSeason`'s own doc). `[]` whenever no season has been activated yet — an honest cold-start, never fabricated. */
+  seasons: PublicSeason[];
   premieres: PublicPremiereState;
   links: {
     enterTheLeagueUrl: string;
@@ -546,19 +598,40 @@ function publicFeaturedMatchResult(
 
 /**
  * Exported for reuse by the narrow, per-match `/api/featured-matches/:matchId`
- * route (never the bulk read model — see `PublicFeaturedMatch`'s own doc) so
- * both share the exact same embargo projection rather than a parallel
- * reimplementation that could drift. `pkg` defaults to `null` (nothing
- * generated / not looked up yet) — see `isPubliclyPromotable` field's own
- * doc: that call site currently passes no package (a future turn's job to
- * wire an event-package lookup into the per-match route), which is a safe
- * "not promotable" default, never a false positive.
+ * and `/api/premieres/:premiereId/featured-match` routes (never the bulk
+ * read model — see `PublicFeaturedMatch`'s own doc) so all three share the
+ * exact same embargo projection rather than a parallel reimplementation
+ * that could drift. `pkg` defaults to `null` for a caller that hasn't
+ * looked one up (an honest "not promotable" default, never a false
+ * positive) — `loadFeaturedMatchDetail` (`ai-agent-demo-server.ts`) and
+ * `publicFeaturedMatches` below both resolve and pass the real one.
  */
 export function publicFeaturedMatch(
   match: FeaturedMatch,
   pkg: EventPackage | null = null,
 ): PublicFeaturedMatch {
   const revealed = isFeaturedMatchRevealed(match);
+  const promotion = isPubliclyPromotable(match, pkg);
+  // `promotion.ok` already implies `pkg !== null` (see
+  // `EventPackageGate.isPubliclyPromotable`'s own null-package short
+  // circuit) — the `pkg !== null` check below is TypeScript narrowing,
+  // not a second real condition.
+  const packageFields =
+    promotion.ok && pkg !== null
+      ? {
+          subtitle: pkg.subtitle,
+          reasonToWatch: pkg.reasonToWatch.claims.map((claim) => claim.text),
+          directorCutEstimateSeconds: pkg.directorCutEstimateSeconds,
+          canonicalMatchUrl: pkg.canonicalMatchUrl,
+          canonicalPremiereUrl: pkg.canonicalPremiereUrl,
+        }
+      : {
+          subtitle: null,
+          reasonToWatch: null,
+          directorCutEstimateSeconds: null,
+          canonicalMatchUrl: null,
+          canonicalPremiereUrl: null,
+        };
   return {
     matchId: match.matchId,
     lane: match.lane,
@@ -575,7 +648,8 @@ export function publicFeaturedMatch(
     // store's own validation alone.
     postMatchSummary: revealed ? match.postMatchSummary : null,
     result: publicFeaturedMatchResult(match),
-    isPubliclyPromotable: isPubliclyPromotable(match, pkg).ok,
+    isPubliclyPromotable: promotion.ok,
+    ...packageFields,
   };
 }
 
@@ -594,6 +668,34 @@ function publicFeaturedMatches(
   return store.matches
     .filter((match) => match.state !== "candidate")
     .map((match) => publicFeaturedMatch(match, findEventPackage(packageStore, match.matchId)));
+}
+
+/**
+ * Season Zero activation prompt Phase 5 — `draft` seasons are excluded
+ * (operator-only, not yet announced; same "candidate never public" rule
+ * `publicFeaturedMatches` applies above). `active`/`completed` seasons
+ * project their event slots as-is: a slot's `featuredMatchId` only ever
+ * resolves client-side against the ALREADY-PUBLIC `featuredMatches[]`
+ * array (candidate records are filtered out of that array too), so a
+ * slot referencing an embargoed record simply fails to resolve rather
+ * than leaking anything.
+ */
+function publicSeasons(registry: SeasonRegistryFile): PublicSeason[] {
+  return registry.seasons
+    .filter((season) => season.state !== "draft")
+    .map((season) => ({
+      id: season.id,
+      slug: season.slug,
+      title: season.title,
+      description: season.description,
+      startDate: season.startDate,
+      endDate: season.endDate,
+      state: season.state as "active" | "completed",
+      eventSlots: season.eventSlots.map((slot) => ({
+        featuredMatchId: slot.featuredMatchId,
+        scheduledAt: slot.scheduledAt,
+      })),
+    }));
 }
 
 
@@ -626,6 +728,13 @@ export function buildProxyWarPublicReadModel(
    * wired in (see `CoworldLeagueSiteWriter.ts`'s production call site).
    */
   eventPackageStore: EventPackageStoreFile = EMPTY_EVENT_PACKAGE_STORE,
+  /**
+   * Season Zero activation prompt Phase 5: backs `seasons` (see
+   * `PublicSeason`'s own doc). Defaults to an empty registry — same
+   * "existing caller that doesn't pass one gets an honest cold-start
+   * default" contract as `standingsHistory`/`eventPackageStore` above.
+   */
+  seasonRegistry: SeasonRegistryFile = { schemaVersion: 1, seasons: [] },
 ): ProxyWarPublicReadModel {
   const agentSlugByPlayerName = new Map(
     identity.agents.map((agent) => [
@@ -657,6 +766,7 @@ export function buildProxyWarPublicReadModel(
       publicMatch(episode, agentSlugByPlayerName),
     ),
     featuredMatches: publicFeaturedMatches(featuredMatchStore, eventPackageStore),
+    seasons: publicSeasons(seasonRegistry),
     premieres: {
       live: mirror.premiere ?? null,
       latest: mirror.premiere === undefined ? (mirror.latestPremiere ?? null) : null,

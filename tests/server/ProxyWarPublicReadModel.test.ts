@@ -308,6 +308,11 @@ describe("buildProxyWarPublicReadModel", () => {
       postMatchSummary: null,
       result: null,
       isPubliclyPromotable: false,
+      subtitle: null,
+      reasonToWatch: null,
+      directorCutEstimateSeconds: null,
+      canonicalMatchUrl: null,
+      canonicalPremiereUrl: null,
     });
     // The participant's own player name must never reach the wire through this projection.
     expect(JSON.stringify(model.featuredMatches)).not.toContain("daveey");
@@ -449,7 +454,7 @@ describe("buildProxyWarPublicReadModel", () => {
     test("a record with a complete backing EventPackage and fully-resolved participants is promotable", () => {
       const record = featuredMatch({
         matchId: "feat_3333333333333333eeee",
-        state: "scheduled",
+        state: "published",
         episodeRequestId: "ereq_x",
         participants: [
           { playerName: "daveey", agentId: "agt_daveey", agentVersionId: "agtv_daveey_v1", builderId: null },
@@ -469,7 +474,7 @@ describe("buildProxyWarPublicReadModel", () => {
     test("a record with an EventPackage that is missing the reason-to-watch claims stays demoted", () => {
       const record = featuredMatch({
         matchId: "feat_3333333333333333eeee",
-        state: "scheduled",
+        state: "published",
         episodeRequestId: "ereq_x",
         participants: [
           { playerName: "daveey", agentId: "agt_daveey", agentVersionId: "agtv_daveey_v1", builderId: null },

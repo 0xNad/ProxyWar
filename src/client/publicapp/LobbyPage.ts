@@ -1,7 +1,6 @@
 import { html, LitElement, nothing, TemplateResult } from "lit";
 import { customElement, state } from "lit/decorators.js";
 import { unsafeSVG } from "lit/directives/unsafe-svg.js";
-import { z } from "zod";
 import { translateText } from "../Utils";
 import {
   appShellFooter,
@@ -11,14 +10,21 @@ import {
 import {
   fetchReadModel,
   PublicAgent,
+  PublicFeaturedMatch,
   PublicMatch,
   ReadModel,
 } from "./ReadModelSchema";
 import {
   computeDegradedShare,
   curatedDramaScoreOf,
+  fetchFeaturedEventParticipants,
+  findPromotableEvent,
   formatDuration,
+  isEventLive,
+  renderParticipantChips,
+  renderParticipantChipsFromMatch,
   resolveWinnerName,
+  type FeaturedEventParticipant,
 } from "./WatchPage";
 import {
   armReminder,
@@ -29,145 +35,56 @@ import {
 } from "./PremiereReminder";
 
 /**
- * `/` — the event lobby (spec §4 Target IA: "no longer a bare redirect to
- * the league table"; Stage 2 item 4, three hero states). No game/replay
- * bundle loads here — every action is a plain link to another route
- * (spec Stage 2 item 6).
+ * `/` — the event lobby (Season Zero activation prompt Phase 5,
+ * "Homepage"). The first viewport is EVENT-FIRST: a single visual event
+ * stage, never the old generic eyebrow/mission-headline/plain-bordered-
+ * event-box/map+round/CTA pattern this file used to render — see
+ * `renderHero`'s own doc for the three states this now dispatches on.
  *
- * Hero state, checked in order:
- *   A. `premieres.live` present and `premierePageLive === true` — an active
- *      premiere. Label is ALWAYS "Live Premiere", never wording implying the
- *      match is executing at this instant beyond that literal label. Shows a
- *      live, ticking elapsed-time note (`renderHeroActivePremiere`):
- *      `now - scheduledAt`, updated ~1s by a component-owned interval
- *      (`connectedCallback`/`disconnectedCallback`) — `scheduledAt` is the
- *      only anchor `CoworldLeaguePremiereCard` carries, so it doubles as the
- *      elapsed-time origin once the premiere IS live.
- *   B. `premieres.live` present and `premierePageLive === false` — scheduled,
- *      counting down (client clock; same known simplification as
- *      `WatchPage`'s countdown, documented there). The countdown ticks live
- *      the same way state A's elapsed timer does. Deliberately still a pure
- *      client-clock countdown, NOT skew-corrected against the read model's
- *      `generatedAt`: that timestamp is a periodic-mirror-poll snapshot
- *      (`COWORLD_LEAGUE_POLL_INTERVAL_MS`, up to ~30s stale), so treating it
- *      as a live clock-sync signal would trade small, usually-sub-second
- *      client clock error for a systematic ~0-30s bias — not an honest
- *      improvement. State B also offers "Add to calendar" (`Ics.ts`, a pure
- *      client-side `.ics` download, no server round-trip) and a purely
- *      local "Remind me" (localStorage-armed, same-tab visual cue + tab
- *      title flash at start time — NOT a push/OS notification; this
- *      codebase has no service worker to back that promise).
- *   C. Neither — falls back to `premieres.latest` (an actual revealed
- *      premiere) when present, else evidence-aware selection among the
- *      most recently completed, watchable matches: within a bounded
- *      recency window (the last 8 watchable matches — completedAt !==
- *      null && fullRenderHref !== null — sorted by completedAt desc,
- *      matching the scale of this file's other bounded lists like the
- *      league-pulse top 5), the one with the single highest
- *      `dramaEvidence.curatedDramaScore` wins (ties broken by more-recent
- *      completedAt). A scored `dramaEvidence` only turns available once the
- *      mirror's budgeted backfill (`CoworldLeagueMatchNarrativeBackfill.ts`)
- *      has reached that episode, so when NONE of the windowed matches have
- *      it yet, this falls back to the prior, purely-recency selection
- *      (window[0]) — never a fabricated score. The window is bounded so an
- *      old high-scoring match already pushed off the front page is never
- *      dredged back up on the strength of its score alone.
+ * The load-bearing change from the prior design: hero selection now keys
+ * off `ReadModel.featuredMatches[].isPubliclyPromotable` via
+ * `WatchPage.findPromotableEvent` (Season Zero Phase 4's gate —
+ * `EventPackageGate.isPubliclyPromotable`, wired through
+ * `ProxyWarPublicReadModel.ts`), NEVER off the raw, anonymous
+ * `ReadModel.premieres.live`/`latest` pointers (`CoworldLeaguePremiereCard`
+ * — map/round/time only, no title, no reason to watch — System B's
+ * continuous, un-packaged premiere roll). A premiere-lane record can only
+ * ever report `isPubliclyPromotable: true` once it carries a complete
+ * `EventPackage` AND has reached `state: "published"` (the operator's own
+ * `premiere:publish` "yes, run this one" signal) — see that gate's own
+ * state-check doc. No game/replay bundle loads here — every action is a
+ * plain link to another route.
  *
- * PARTICIPANT IDENTITY (states A/B): the deliberate deferral this file
- * used to document here is now LIFTED — this is that follow-up security
- * review. States A/B additionally fetch
- * `GET /api/premieres/:premiereId/featured-match`, the one narrow,
- * per-live-premiere channel `FeaturedMatchParticipantCard`s are ever
- * allowed through (see that route's and `FeaturedMatchParticipants.ts`'s
- * own docs for why a bulk read-model field was never safe). Most live/
- * scheduled premieres have no backing `FeaturedMatch` record at all —
- * plain FIFO/exhibition admission is still the common case — and that's
- * the normal, non-error `{match:null, participants:[]}` response:
- * renders EXACTLY as before, no participant section. When a record does
- * exist, its participants render as compact cards (emblem, display name,
- * exact version label, Builder attribution) ONLY once the server's own
- * state gate (`resolveFeaturedMatchParticipantCards`) has already
- * published/revealed/archived it — a `"scheduled"` record still reports
- * an empty `participants` array, so this client never has to re-derive
- * that gate itself. Never any result/outcome field: the participant card
- * shape has no such field to leak in the first place.
+ * `findPromotableEvent`/`isEventLive`/participant-fetch/chip-render
+ * helpers live in `WatchPage.ts` and are shared verbatim with this file —
+ * see that module's own doc for why (one source of truth for "is there a
+ * live/upcoming Featured Event right now").
  */
 
 /**
- * One participant of a `FeaturedMatch`, resolved to safe display identity
- * server-side (`FeaturedMatchParticipantCard` in
- * `FeaturedMatchParticipants.ts`) — this shape has no result/outcome
- * field to begin with, so nothing here can leak one no matter how it's
- * rendered.
- */
-const heroParticipantCardSchema = z.object({
-  playerName: z.string(),
-  displayName: z.string(),
-  agentSlug: z.string().nullable(),
-  emblemSvg: z.string().nullable(),
-  primaryColor: z.string().nullable(),
-  secondaryColor: z.string().nullable(),
-  versionLabel: z.string().nullable(),
-  builderId: z.string().nullable(),
-  builderDisplayName: z.string().nullable(),
-});
-type HeroParticipantCard = z.infer<typeof heroParticipantCardSchema>;
-
-/**
- * Only `participants` is validated. The response's `match` field (the
- * full `PublicFeaturedMatch`) is never read here — a `"scheduled"`
- * record already reports an empty `participants` array server-side
- * (`resolveFeaturedMatchParticipantCards`'s own state gate), so checking
- * `participants.length` alone is equivalent to, and simpler than,
- * separately checking `match !== null` first.
- */
-const premiereFeaturedMatchResponseSchema = z.object({
-  schemaVersion: z.literal(1),
-  participants: z.array(heroParticipantCardSchema),
-});
-
-/**
- * Fetches the one narrow, per-live-premiere participant-identity channel
- * (`GET /api/premieres/:premiereId/featured-match`) — throws on a network
- * failure or a schema mismatch, same contract as `fetchReadModel`;
- * `loadHeroParticipants` swallows either into "no participant section".
- */
-async function fetchHeroParticipants(
-  premiereId: string,
-  fetchImpl: typeof fetch = fetch,
-): Promise<HeroParticipantCard[]> {
-  const response = await fetchImpl(
-    `/api/premieres/${encodeURIComponent(premiereId)}/featured-match`,
-    {
-      method: "GET",
-      headers: { Accept: "application/json" },
-      credentials: "same-origin",
-      cache: "no-store",
-    },
-  );
-  if (!response.ok) {
-    throw new Error(`hero_participants_fetch_failed_${response.status}`);
-  }
-  const body: unknown = await response.json();
-  return premiereFeaturedMatchResponseSchema.parse(body).participants;
-}
-
-/**
- * Bounded recency window (most-recent-N by `completedAt`) that hero state C
- * and Recent broadcasts both rank by `dramaEvidence.curatedDramaScore`
- * within — matches the scale of this file's other bounded lists (e.g. the
- * league pulse's top 5). Bounding the window means a high-scoring match
- * that has already aged off the front page is never dredged back up on
- * score alone.
+ * Bounded recency window (most-recent-N by `completedAt`) that the
+ * Director-Cut fallback hero state and Recent Director Cuts both rank by
+ * `dramaEvidence.curatedDramaScore` within — matches the scale of this
+ * file's other bounded lists (e.g. the league pulse's top 5). Bounding
+ * the window means a high-scoring match that has already aged off the
+ * front page is never dredged back up on score alone.
  */
 const DRAMA_RECENCY_WINDOW_SIZE = 8;
+
+/** Agents-to-know cap — small enough to stay a highlight reel, not a second standings table. */
+const AGENTS_TO_KNOW_LIMIT = 5;
+/** League-movement cap — same reasoning. */
+const LEAGUE_MOVEMENT_LIMIT = 5;
+/** Season-schedule preview cap — the schedule module is a below-hero teaser, not the full programme (that's `/watch`'s job). */
+const SEASON_SCHEDULE_PREVIEW_LIMIT = 3;
 
 @customElement("lobby-page")
 export class LobbyPage extends LitElement {
   @state() private loadState: "loading" | "ready" | "error" = "loading";
   @state() private readModel: ReadModel | null = null;
-  @state() private heroParticipants: HeroParticipantCard[] = [];
-  /** Drives hero state A's elapsed timer and state B's countdown — ticked ~1s by a component-owned interval, never a longer-lived timer and never the server clock continuously (see class doc on why the countdown stays client-clock-only). */
+  @state() private promotableEvent: PublicFeaturedMatch | null = null;
+  @state() private heroParticipants: FeaturedEventParticipant[] = [];
+  /** Drives the live/upcoming countdown-or-elapsed note — ticked ~1s by a component-owned interval, never a longer-lived timer and never the server clock continuously (a periodic-mirror-poll snapshot is not a live clock-sync signal). */
   @state() private nowMs = Date.now();
   private tickHandle: number | null = null;
 
@@ -181,9 +98,9 @@ export class LobbyPage extends LitElement {
     void this.load();
     this.tickHandle = window.setInterval(() => {
       this.nowMs = Date.now();
-      const live = this.readModel?.premieres.live;
-      if (live !== null && live !== undefined && !live.premierePageLive) {
-        if (fireReminderIfDue(live.premiereId, live.scheduledAt, this.nowMs)) {
+      const event = this.promotableEvent;
+      if (event !== null && event.scheduledAt !== null) {
+        if (fireReminderIfDue(event.matchId, event.scheduledAt, this.nowMs)) {
           this.requestUpdate();
         }
       }
@@ -201,12 +118,14 @@ export class LobbyPage extends LitElement {
   private async load(): Promise<void> {
     this.loadState = "loading";
     this.heroParticipants = [];
+    this.promotableEvent = null;
     try {
       this.readModel = await fetchReadModel();
       this.loadState = "ready";
-      const live = this.readModel.premieres.live;
-      if (live !== null) {
-        void this.loadHeroParticipants(live.premiereId);
+      const event = findPromotableEvent(this.readModel);
+      this.promotableEvent = event;
+      if (event !== null) {
+        void this.loadHeroParticipants(event.matchId);
       }
     } catch {
       this.loadState = "error";
@@ -216,24 +135,22 @@ export class LobbyPage extends LitElement {
   /**
    * Fires alongside — never blocking — `load()`'s own ready/error
    * transition: a failure here degrades silently to "no participant
-   * section" (states A/B's existing rendering, untouched), it never
-   * flips `loadState` to `"error"` on its own and never shows a second
-   * spinner.
+   * section", it never flips `loadState` to `"error"` on its own and
+   * never shows a second spinner.
    *
    * Guarded by `isConnected`, the same disconnect-race guard this
    * codebase already uses for exactly this "fetch resolves after
-   * teardown" case (see `PatternInput.ts`'s `connectedCallback`) —
-   * `heroParticipants` MUST never be written after `disconnectedCallback`
-   * has already run.
+   * teardown" case — `heroParticipants` MUST never be written after
+   * `disconnectedCallback` has already run.
    */
-  private async loadHeroParticipants(premiereId: string): Promise<void> {
+  private async loadHeroParticipants(matchId: string): Promise<void> {
     try {
-      const participants = await fetchHeroParticipants(premiereId);
+      const participants = await fetchFeaturedEventParticipants(matchId);
       if (!this.isConnected) return;
       this.heroParticipants = participants;
     } catch {
       // Network failure or a schema mismatch — leave `heroParticipants`
-      // empty, i.e. exactly today's rendering.
+      // empty, i.e. no participant section renders.
     }
   }
 
@@ -241,7 +158,7 @@ export class LobbyPage extends LitElement {
     return html`
       ${appShellHeader(
         "/",
-        this.readModel?.premieres.live?.premierePageLive === true
+        this.isCurrentEventLive()
           ? { label: translateText("lobby.live_premiere_badge"), tone: "live" }
           : this.readModel?.stale === true
             ? { label: translateText("lobby.stale_data_badge"), tone: "stale" }
@@ -259,16 +176,16 @@ export class LobbyPage extends LitElement {
     `;
   }
 
+  private isCurrentEventLive(): boolean {
+    return this.promotableEvent !== null && isEventLive(this.promotableEvent, this.nowMs);
+  }
+
   /**
    * A structural skeleton — not just a spinner/text line — reserving
    * roughly the same vertical space as `renderReady()`'s hero + below-hero
-   * modules (League pulse / Agents to watch / Recent broadcasts / Builder
-   * band grid). Fixes a measured ~0.08 CLS: the page footer was jumping
-   * down once the real content replaced a one-line "Loading…" message.
-   * Every block is decorative (`aria-hidden`); the accessible loading
-   * state is still announced via the single `role="status"` text below,
-   * same as before. Pulses respect `prefers-reduced-motion` globally (see
-   * `styles.css`).
+   * modules. Every block is decorative (`aria-hidden`); the accessible
+   * loading state is still announced via the single `role="status"` text
+   * below. Pulses respect `prefers-reduced-motion` globally.
    */
   private renderLoading() {
     const block = (extra = "") =>
@@ -278,21 +195,21 @@ export class LobbyPage extends LitElement {
       ></div>`;
     return html`
       <p class="sr-only" role="status">${translateText("lobby.loading")}</p>
-      <section class="mb-4" aria-hidden="true">
-        ${block("h-3 w-32")}
-        <div class="mt-2">${block("h-10 w-2/3 max-w-xl")}</div>
-        <div class="mt-3">${block("h-4 w-full max-w-2xl")}</div>
-      </section>
       <section
-        class="rounded-xl border border-line bg-surface p-6 sm:p-8"
+        class="overflow-hidden rounded-xl border border-line bg-surface p-6 sm:p-8"
         aria-hidden="true"
       >
         ${block("h-5 w-40")}
-        <div class="mt-3">${block("h-7 w-56")}</div>
-        <div class="mt-4">${block("h-11 w-36")}</div>
+        <div class="mt-3">${block("h-9 w-2/3 max-w-xl")}</div>
+        <div class="mt-3">${block("h-4 w-full max-w-2xl")}</div>
+        <div class="mt-5 flex gap-2">
+          ${block("h-9 w-9 rounded-full")}${block("h-9 w-9 rounded-full")}${block("h-9 w-9 rounded-full")}
+        </div>
+        <div class="mt-5">${block("h-11 w-56")}</div>
       </section>
+      <div class="mt-8" aria-hidden="true">${block("h-24 w-full")}</div>
       <div
-        class="mt-10 grid grid-cols-1 gap-8 lg:grid-cols-3"
+        class="mt-8 grid grid-cols-1 gap-8 lg:grid-cols-3"
         aria-hidden="true"
       >
         <div class="lg:col-span-2">${block("h-64 w-full")}</div>
@@ -333,37 +250,38 @@ export class LobbyPage extends LitElement {
             })}
           </div>`
         : nothing}
-      <section class="mb-4">
-        <p class="font-mono text-xs font-extrabold uppercase tracking-widest text-accent">
-          ${translateText("lobby.eyebrow")}
-        </p>
-        <h1 class="mt-1 text-4xl font-black leading-tight text-ink sm:text-5xl">
-          ${translateText("lobby.hero_title")}
-        </h1>
-        <p class="mt-3 max-w-2xl text-base text-ink-dim">
-          ${translateText("lobby.hero_subtitle")}
-        </p>
-      </section>
       ${this.renderHero(model)}
-      <div class="mt-10 grid grid-cols-1 gap-8 lg:grid-cols-3">
-        <div class="lg:col-span-2">${this.renderLeaguePulse(model)}</div>
-        <div>${this.renderAgentsToWatch(model)}</div>
+      ${this.renderSeasonSchedule(model)}
+      <div class="mt-8 grid grid-cols-1 gap-8 lg:grid-cols-3">
+        <div class="lg:col-span-2">${this.renderLeagueMovement(model)}</div>
+        <div>${this.renderAgentsToKnow(model)}</div>
       </div>
-      ${this.renderRecentBroadcasts(model)} ${this.renderBuilderBand(model)}
+      ${this.renderRecentDirectorCuts(model)} ${this.renderBuilderBand(model)}
     `;
   }
 
-  // ---- Hero -----------------------------------------------------------
+  // ---- Hero / event stage -------------------------------------------------
 
+  /**
+   * Three states, checked in order:
+   *   A. A complete, `isPubliclyPromotable` premiere-lane event exists
+   *      (`state: "published"`) — the visual event stage: title, reason
+   *      to watch, status, full lineup, Director Cut runtime once known,
+   *      one primary CTA. Live vs. upcoming is a pure `scheduledAt <=
+   *      now` comparison against the client clock (`isEventLive`).
+   *   B. No promotable event — falls back to the single best recent
+   *      Director Cut within a bounded recency window (evidence-ranked by
+   *      `dramaEvidence.curatedDramaScore`, ties/absence falling back to
+   *      recency), shown with its own competitors/reason/runtime — NEVER
+   *      a bare map+round card.
+   *   C. Neither exists yet (a fresh league with no retained history) —
+   *      an honest empty note.
+   */
   private renderHero(model: ReadModel): TemplateResult {
-    const live = model.premieres.live;
-    if (live !== null && live.premierePageLive) {
-      return this.renderHeroActivePremiere(live);
+    if (this.promotableEvent !== null) {
+      return this.renderHeroPromotableEvent(this.promotableEvent);
     }
-    if (live !== null && !live.premierePageLive) {
-      return this.renderHeroUpcomingPremiere(live);
-    }
-    return this.renderHeroNoPremiere(model);
+    return this.renderHeroDirectorCutFallback(model);
   }
 
   private heroShell(inner: TemplateResult, accentClass: string): TemplateResult {
@@ -377,110 +295,85 @@ export class LobbyPage extends LitElement {
     `;
   }
 
-  // State A — Active Premiere.
-  private renderHeroActivePremiere(
-    live: NonNullable<ReadModel["premieres"]["live"]>,
-  ): TemplateResult {
-    // `CoworldLeaguePremiereCard` carries only `premierePageLive` and
-    // `scheduledAt` — there is no separate "actual start" timestamp, so
-    // once the premiere IS live, `scheduledAt` doubles as the
-    // elapsed-time anchor. It's the only signal available, and the
-    // correct one: the premiere pipeline flips `premierePageLive` at (or
-    // immediately after) `scheduledAt` by construction.
-    const startMs = Date.parse(live.scheduledAt);
-    const elapsed = Number.isNaN(startMs)
-      ? null
-      : formatDuration(Math.max(0, this.nowMs - startMs));
+  private renderHeroPromotableEvent(event: PublicFeaturedMatch): TemplateResult {
+    const live = this.isCurrentEventLive();
+    const scheduled =
+      event.scheduledAt !== null ? new Date(event.scheduledAt) : null;
+    const scheduledValid = scheduled !== null && !Number.isNaN(scheduled.getTime());
+    const elapsedOrCountdown =
+      live && scheduledValid
+        ? formatDuration(Math.max(0, this.nowMs - scheduled!.getTime()))
+        : !live && scheduledValid
+          ? formatDuration(Math.max(0, scheduled!.getTime() - this.nowMs))
+          : null;
+    const reminder = readReminderState(event.matchId);
+    const watchHref = event.canonicalPremiereUrl ?? `/match/${encodeURIComponent(event.matchId)}`;
     return this.heroShell(
       html`
         <span
-          class="inline-flex items-center gap-2 rounded-full border border-live/60 bg-live/10 px-3 py-1 font-mono text-xs font-extrabold uppercase tracking-wide text-live-text"
+          class="inline-flex items-center gap-2 rounded-full border ${live
+            ? "border-live/60 bg-live/10 text-live-text"
+            : "border-info/50 bg-info/10 text-info"} px-3 py-1 font-mono text-xs font-extrabold uppercase tracking-wide"
         >
-          <span class="h-2 w-2 rounded-full bg-live" aria-hidden="true"></span>
-          ${translateText("lobby.live_premiere_badge")}
+          ${live
+            ? html`<span class="h-2 w-2 rounded-full bg-live" aria-hidden="true"></span>`
+            : nothing}
+          ${live
+            ? translateText("lobby.live_premiere_badge")
+            : translateText("lobby.upcoming_premiere_badge")}
         </span>
-        <h2 class="mt-3 text-2xl font-extrabold text-ink">
-          ${live.mapLabel}${live.roundNumber !== null
-            ? translateText("lobby.round_suffix", { round: live.roundNumber })
-            : ""}
-        </h2>
-        <p class="mt-1 text-sm text-ink-muted">
-          ${translateText("lobby.active_premiere_note")}
-        </p>
-        ${elapsed !== null
-          ? html`<p
-              class="mt-1 font-mono text-sm font-bold text-live-text"
-              role="timer"
-              aria-live="polite"
-            >
-              ${translateText("lobby.live_elapsed", { duration: elapsed })}
+        <h1 class="mt-3 text-3xl font-black leading-tight text-ink sm:text-4xl">
+          ${event.title}
+        </h1>
+        ${event.subtitle !== null
+          ? html`<p class="mt-1 text-base text-ink-dim">${event.subtitle}</p>`
+          : nothing}
+        ${event.reasonToWatch !== null && event.reasonToWatch.length > 0
+          ? html`<p class="mt-3 max-w-2xl text-sm text-ink-muted">
+              ${event.reasonToWatch.join(" ")}
             </p>`
           : nothing}
-        ${this.renderHeroParticipants()}
-        <div class="mt-4">
-          <a
-            href="/premiere/${encodeURIComponent(live.premiereId)}"
-            class="inline-flex min-h-11 items-center justify-center rounded-md bg-accent px-5 font-black text-on-accent no-underline outline-none hover:bg-accent-strong focus-visible:ring-2 focus-visible:ring-accent"
-            >${translateText("lobby.watch_now")}</a
-          >
-        </div>
-      `,
-      "border-live/50",
-    );
-  }
-
-  // State B — Upcoming Premiere.
-  private renderHeroUpcomingPremiere(
-    live: NonNullable<ReadModel["premieres"]["live"]>,
-  ): TemplateResult {
-    const scheduled = new Date(live.scheduledAt);
-    const scheduledValid = !Number.isNaN(scheduled.getTime());
-    // Pure client-clock countdown — see class doc for why this stays
-    // honest rather than skew-correcting against `generatedAt`.
-    const countdown = scheduledValid
-      ? formatDuration(Math.max(0, scheduled.getTime() - this.nowMs))
-      : null;
-    const reminder = readReminderState(live.premiereId);
-    return this.heroShell(
-      html`
-        <span
-          class="inline-flex items-center gap-2 rounded-full border border-info/50 bg-info/10 px-3 py-1 font-mono text-xs font-extrabold uppercase tracking-wide text-info"
-        >
-          ${translateText("lobby.upcoming_premiere_badge")}
-        </span>
-        <h2 class="mt-3 text-2xl font-extrabold text-ink">
-          ${live.mapLabel}${live.roundNumber !== null
-            ? translateText("lobby.round_suffix", { round: live.roundNumber })
-            : ""}
-        </h2>
         ${scheduledValid
-          ? html`<p class="mt-1 text-sm text-ink-muted">
-              ${translateText("lobby.scheduled_for")}
-              <time datetime=${live.scheduledAt}
-                >${scheduled.toLocaleString()}
-                ${translateText("lobby.local_time_suffix")}</time
-              >
-            </p>
-            <p
-              class="mt-1 font-mono text-lg font-black text-ink"
-              role="timer"
-              aria-live="polite"
-            >
-              ${translateText("lobby.countdown_value", { duration: countdown! })}
-            </p>
-            <p class="mt-1 text-xs text-ink-muted">
-              ${translateText("lobby.countdown_note")}
+          ? html`<p class="mt-3 text-sm text-ink-muted">
+              ${live
+                ? translateText("lobby.live_elapsed", { duration: elapsedOrCountdown! })
+                : html`${translateText("lobby.scheduled_for")}
+                    <time datetime=${event.scheduledAt!}
+                      >${scheduled!.toLocaleString()}
+                      ${translateText("lobby.local_time_suffix")}</time
+                    >
+                    · ${translateText("lobby.countdown_value", { duration: elapsedOrCountdown! })}`}
             </p>`
           : nothing}
-        ${this.renderHeroParticipants()}
-        <div class="mt-4 flex flex-wrap items-center gap-3">
+        ${event.directorCutEstimateSeconds !== null
+          ? html`<p class="mt-1 text-xs font-semibold text-ink-muted">
+              ${translateText("lobby.event_stage_director_cut_runtime", {
+                minutes: Math.max(1, Math.round(event.directorCutEstimateSeconds / 60)),
+              })}
+            </p>`
+          : nothing}
+        ${this.heroParticipants.length > 0
+          ? html`<div class="mt-4 border-t border-line pt-4">
+              <p class="text-sm font-black uppercase tracking-wide text-ink-muted">
+                ${translateText("lobby.hero_participants_heading")}
+              </p>
+              ${renderParticipantChips(this.heroParticipants)}
+            </div>`
+          : nothing}
+        <div class="mt-5 flex flex-wrap items-center gap-3">
           <a
-            href="/premiere/${encodeURIComponent(live.premiereId)}"
-            class="inline-flex min-h-11 items-center justify-center rounded-md border border-line bg-surface-2 px-5 font-black text-ink no-underline outline-none hover:border-ink-muted focus-visible:ring-2 focus-visible:ring-accent"
-            >${translateText("lobby.view_matchup")}</a
+            href=${watchHref}
+            class="inline-flex min-h-11 items-center justify-center rounded-md bg-accent px-5 font-black text-on-accent no-underline outline-none hover:bg-accent-strong focus-visible:ring-2 focus-visible:ring-accent"
+            >${live
+              ? translateText("lobby.event_stage_watch_live_cta")
+              : scheduledValid
+                ? translateText("lobby.event_stage_watch_premiere_cta", {
+                    time: scheduled!.toLocaleString(),
+                  })
+                : translateText("lobby.watch_now")}</a
           >
-          ${scheduledValid ? this.renderAddToCalendar(live) : nothing}
-          ${scheduledValid ? this.renderRemindMe(live, reminder) : nothing}
+          ${!live && scheduledValid ? this.renderAddToCalendar(event) : nothing}
+          ${!live && scheduledValid ? this.renderRemindMe(event, reminder) : nothing}
         </div>
         ${reminder === "fired"
           ? html`<p
@@ -491,114 +384,40 @@ export class LobbyPage extends LitElement {
             </p>`
           : nothing}
       `,
-      "border-info/40",
+      live ? "border-live/50" : "border-info/40",
     );
-  }
-
-  /**
-   * Compact participant cards shared by hero states A and B. Nothing —
-   * not even an empty section — when `heroParticipants` is empty, so a
-   * plain FIFO/exhibition premiere with no backing `FeaturedMatch`
-   * record (the common case) renders EXACTLY as it did before this
-   * feature existed. Deliberately reads only `displayName`/`emblemSvg`/
-   * `versionLabel`/`builderDisplayName` off each card — never anything
-   * result/outcome-shaped, and the card shape has no such field anyway.
-   */
-  private renderHeroParticipants(): TemplateResult {
-    if (this.heroParticipants.length === 0) {
-      return html``;
-    }
-    return html`
-      <div class="mt-4 border-t border-line pt-4">
-        <p class="text-sm font-black uppercase tracking-wide text-ink-muted">
-          ${translateText("lobby.hero_participants_heading")}
-        </p>
-        <ul class="mt-2 flex flex-col gap-2" role="list">
-          ${this.heroParticipants.map((participant) =>
-            this.renderHeroParticipantRow(participant),
-          )}
-        </ul>
-      </div>
-    `;
-  }
-
-  private renderHeroParticipantRow(
-    participant: HeroParticipantCard,
-  ): TemplateResult {
-    return html`
-      <li
-        class="flex items-center gap-3 rounded-md border border-line bg-surface-2 px-3 py-2"
-      >
-        ${participant.emblemSvg !== null
-          ? html`<span
-              class="inline-flex h-6 w-6 shrink-0 overflow-hidden"
-              aria-hidden="true"
-              >${unsafeSVG(participant.emblemSvg)}</span
-            >`
-          : html`<span
-              class="inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-full border border-line text-xs text-ink-muted"
-              aria-hidden="true"
-              >?</span
-            >`}
-        <span class="min-w-0 flex-1 truncate text-sm font-semibold text-ink"
-          >${participant.displayName}</span
-        >
-        ${participant.versionLabel !== null
-          ? html`<span class="font-mono text-xs text-ink-muted"
-              >${participant.versionLabel}</span
-            >`
-          : nothing}
-        ${participant.builderDisplayName !== null
-          ? html`<span class="text-xs text-ink-muted"
-              >${translateText("lobby.hero_participant_builder", {
-                builder: participant.builderDisplayName,
-              })}</span
-            >`
-          : nothing}
-      </li>
-    `;
   }
 
   // ---- Add to calendar (ICS) ---------------------------------------------
 
-  private renderAddToCalendar(
-    live: NonNullable<ReadModel["premieres"]["live"]>,
-  ): TemplateResult {
+  private renderAddToCalendar(event: PublicFeaturedMatch): TemplateResult {
     return html`
       <a
         href="#"
         class="inline-flex min-h-11 items-center justify-center rounded-md border border-line bg-surface-2 px-4 text-sm font-bold text-ink no-underline outline-none hover:border-ink-muted focus-visible:ring-2 focus-visible:ring-accent"
-        @click=${(event: MouseEvent) => this.downloadIcs(event, live)}
+        @click=${(clickEvent: MouseEvent) => this.downloadIcs(clickEvent, event)}
         >${translateText("lobby.add_to_calendar")}</a
       >
     `;
   }
 
-  /** Client-side only, no server round-trip — see `PremiereReminder.ts`'s `downloadIcsFile`. `title` uses ONLY already-safe fields (round number, map label), same participant-identity constraint as the hero itself (see class doc). */
-  private downloadIcs(
-    event: MouseEvent,
-    live: NonNullable<ReadModel["premieres"]["live"]>,
-  ): void {
-    event.preventDefault();
-    const title =
-      live.roundNumber !== null
-        ? `Proxy War Premiere — Round ${live.roundNumber} (${live.mapLabel})`
-        : `Proxy War Premiere (${live.mapLabel})`;
-    const url = `${window.location.origin}/premiere/${encodeURIComponent(live.premiereId)}`;
+  /** Client-side only, no server round-trip — see `PremiereReminder.ts`'s `downloadIcsFile`. Uses the event's own real title/subtitle: safe at this point because `isPubliclyPromotable` already requires `state: "published"` or later, the same floor participant identity itself goes public at. */
+  private downloadIcs(clickEvent: MouseEvent, event: PublicFeaturedMatch): void {
+    clickEvent.preventDefault();
+    if (event.scheduledAt === null) return;
+    const url =
+      event.canonicalPremiereUrl ??
+      `${window.location.origin}/match/${encodeURIComponent(event.matchId)}`;
     downloadIcsFile(
-      { title, scheduledAt: live.scheduledAt, url },
-      `proxy-war-premiere-${live.premiereId}`,
+      { title: event.title, scheduledAt: event.scheduledAt, url },
+      `proxy-war-premiere-${event.matchId}`,
     );
   }
 
   // ---- Remind me (local, same-tab only) ----------------------------------
-  //
-  // PURELY client-side, no server write (spec: "Remind me (local)"). See
-  // `PremiereReminder.ts`'s own doc for exactly what "armed"/"fired"
-  // persistence does and doesn't guarantee.
 
   private renderRemindMe(
-    live: NonNullable<ReadModel["premieres"]["live"]>,
+    event: PublicFeaturedMatch,
     state: ReminderState,
   ): TemplateResult {
     if (state === "fired") {
@@ -613,7 +432,7 @@ export class LobbyPage extends LitElement {
         class="inline-flex min-h-11 items-center justify-center rounded-md border border-line bg-surface-2 px-4 text-sm font-bold text-ink outline-none hover:border-ink-muted focus-visible:ring-2 focus-visible:ring-accent disabled:cursor-not-allowed disabled:opacity-60"
         ?disabled=${state === "armed"}
         @click=${() => {
-          armReminder(live.premiereId);
+          armReminder(event.matchId);
           this.requestUpdate();
         }}
       >
@@ -624,40 +443,18 @@ export class LobbyPage extends LitElement {
     `;
   }
 
-  // State C — No scheduled Premiere.
-  private renderHeroNoPremiere(model: ReadModel): TemplateResult {
-    const latest = model.premieres.latest;
-    if (latest !== null) {
-      return this.heroShell(
-        html`
-          <span
-            class="inline-flex items-center gap-2 rounded-full border border-line bg-surface-2 px-3 py-1 font-mono text-xs font-extrabold uppercase tracking-wide text-ink-muted"
-          >
-            ${translateText("lobby.latest_premiere_badge")}
-          </span>
-          <h2 class="mt-3 text-2xl font-extrabold text-ink">
-            ${latest.mapLabel}${latest.roundNumber !== null
-              ? translateText("lobby.round_suffix", { round: latest.roundNumber })
-              : ""}
-          </h2>
-          <p class="mt-1 text-sm text-ink-muted">
-            ${translateText("lobby.latest_premiere_note")}
-          </p>
-          <div class="mt-4">
-            <a
-              href=${latest.href}
-              class="inline-flex min-h-11 items-center justify-center rounded-md border border-line bg-surface-2 px-5 font-black text-ink no-underline outline-none hover:border-ink-muted focus-visible:ring-2 focus-visible:ring-accent"
-              >${translateText("lobby.browse_all_matches")}</a
-            >
-          </div>
-        `,
-        "border-line",
-      );
-    }
-    // No premiere at all yet — evidence-aware fallback within a bounded
-    // recency window (see class doc): score-rank when at least one
-    // windowed match has dramaEvidence, else the exact prior behavior —
-    // the single most recently completed, watchable match.
+  // ---- Hero fallback: best recent Director Cut ---------------------------
+
+  /**
+   * No promotable Featured Event exists right now — the doc's own
+   * fallback: "lead with the best recent Director Cut; show its
+   * competitors; show why it is worth watching; show its runtime; show
+   * the next expected schedule window." Ranked exactly like `renderHero`'s
+   * OLD state-C fallback (evidence-aware within a bounded recency
+   * window), but now with competitors + Director Cut runtime rendered
+   * inline, never just a bare map+round label.
+   */
+  private renderHeroDirectorCutFallback(model: ReadModel): TemplateResult {
     const recencyWindow = [...model.matches]
       .filter(
         (match) => match.completedAt !== null && match.fullRenderHref !== null,
@@ -677,9 +474,9 @@ export class LobbyPage extends LitElement {
         : recencyWindow.at(0);
     if (fallback === undefined) {
       return this.heroShell(
-        html`<h2 class="text-2xl font-extrabold text-ink">
+        html`<h1 class="text-2xl font-extrabold text-ink">
             ${translateText("lobby.no_premiere_title")}
-          </h2>
+          </h1>
           <p class="mt-1 text-sm text-ink-muted">
             ${translateText("lobby.no_premiere_note")}
           </p>
@@ -693,6 +490,15 @@ export class LobbyPage extends LitElement {
         "border-line",
       );
     }
+    const dramaScore = curatedDramaScoreOf(fallback);
+    const roundLabel =
+      fallback.roundNumber !== null
+        ? translateText("lobby.round_suffix", { round: fallback.roundNumber })
+        : "";
+    const runtimeMinutes =
+      fallback.directorCut !== null
+        ? Math.max(1, Math.round(fallback.directorCut.durationEstimateSeconds / 60))
+        : null;
     return this.heroShell(
       html`
         <span
@@ -700,29 +506,37 @@ export class LobbyPage extends LitElement {
         >
           ${translateText("lobby.recent_battle_badge")}
         </span>
-        ${(() => {
-          const dramaScore = curatedDramaScoreOf(fallback);
-          return dramaScore !== null
-            ? html`<span
-                class="ml-2 inline-flex items-center gap-2 rounded-full border border-line bg-surface-2 px-3 py-1 font-mono text-xs font-extrabold uppercase tracking-wide text-ink-muted"
-              >
-                ${translateText("lobby.high_drama_badge", { score: dramaScore })}
-              </span>`
-            : nothing;
-        })()}
-        <h2 class="mt-3 text-2xl font-extrabold text-ink">
-          ${fallback.map}${fallback.roundNumber !== null
-            ? translateText("lobby.round_suffix", { round: fallback.roundNumber })
-            : ""}
-        </h2>
+        ${dramaScore !== null
+          ? html`<span
+              class="ml-2 inline-flex items-center gap-2 rounded-full border border-line bg-surface-2 px-3 py-1 font-mono text-xs font-extrabold uppercase tracking-wide text-ink-muted"
+            >
+              ${translateText("lobby.high_drama_badge", { score: dramaScore })}
+            </span>`
+          : nothing}
+        <h1 class="mt-3 text-2xl font-extrabold text-ink sm:text-3xl">
+          ${fallback.map}${roundLabel}
+        </h1>
         <p class="mt-1 text-sm text-ink-muted">
           ${translateText("lobby.recent_battle_note")}
         </p>
-        <div class="mt-4">
+        ${runtimeMinutes !== null
+          ? html`<p class="mt-1 text-xs font-semibold text-ink-muted">
+              ${translateText("lobby.event_stage_director_cut_runtime", {
+                minutes: runtimeMinutes,
+              })}
+            </p>`
+          : nothing}
+        ${renderParticipantChipsFromMatch(fallback, model.agents)}
+        ${this.renderNextExpectedWindow(model)}
+        <div class="mt-5">
           <a
             href=${fallback.fullRenderHref!}
-            class="inline-flex min-h-11 items-center justify-center rounded-md border border-line bg-surface-2 px-5 font-black text-ink no-underline outline-none hover:border-ink-muted focus-visible:ring-2 focus-visible:ring-accent"
-            >${translateText("lobby.browse_all_matches")}</a
+            class="inline-flex min-h-11 items-center justify-center rounded-md bg-accent px-5 font-black text-on-accent no-underline outline-none hover:bg-accent-strong focus-visible:ring-2 focus-visible:ring-accent"
+            >${runtimeMinutes !== null
+              ? translateText("lobby.event_stage_director_cut_cta", {
+                  minutes: runtimeMinutes,
+                })
+              : translateText("lobby.browse_all_matches")}</a
           >
         </div>
       `,
@@ -730,21 +544,121 @@ export class LobbyPage extends LitElement {
     );
   }
 
-  // ---- League pulse -----------------------------------------------------
-
-  private renderLeaguePulse(model: ReadModel): TemplateResult {
-    const top5 = [...model.agents]
-      .filter((agent) => agent.standing !== null)
-      .sort((a, b) => (a.standing?.rank ?? 0) - (b.standing?.rank ?? 0))
-      .slice(0, 5);
+  /** Season Zero activation prompt Phase 5: "show the next expected schedule window" — the earliest FUTURE event slot across every active season, regardless of whether it already has a complete package. Omitted entirely when none exists (never a fabricated date). */
+  private renderNextExpectedWindow(model: ReadModel): TemplateResult | typeof nothing {
+    const nowIso = new Date(this.nowMs).toISOString();
+    const nextSlot = model.seasons
+      .filter((season) => season.state === "active")
+      .flatMap((season) => season.eventSlots)
+      .filter((slot) => slot.scheduledAt !== null && slot.scheduledAt > nowIso)
+      .sort((a, b) => (a.scheduledAt ?? "").localeCompare(b.scheduledAt ?? ""))
+      .at(0);
+    if (nextSlot === undefined || nextSlot.scheduledAt === null) return nothing;
     return html`
-      <section aria-labelledby="league-pulse-heading">
+      <p class="mt-3 text-xs font-semibold text-ink-muted">
+        ${translateText("lobby.next_expected_window", {
+          date: new Date(nextSlot.scheduledAt).toLocaleString(),
+        })}
+      </p>
+    `;
+  }
+
+  // ---- Season Zero schedule -----------------------------------------------
+
+  /**
+   * Doc: "Next event or Season Zero schedule" — a compact preview of the
+   * active Season's programme (up to `SEASON_SCHEDULE_PREVIEW_LIMIT`
+   * upcoming slots), complementing the hero's single spotlight rather
+   * than duplicating it. Omitted entirely when no season is active.
+   */
+  private renderSeasonSchedule(model: ReadModel): TemplateResult | typeof nothing {
+    const active = model.seasons.find((season) => season.state === "active");
+    if (active === undefined) return nothing;
+    const featuredMatchById = new Map(
+      model.featuredMatches.map((match) => [match.matchId, match]),
+    );
+    const upcomingSlots = [...active.eventSlots]
+      .sort((a, b) => (a.scheduledAt ?? "").localeCompare(b.scheduledAt ?? ""))
+      .slice(0, SEASON_SCHEDULE_PREVIEW_LIMIT);
+    return html`
+      <section class="mt-8 rounded-xl border border-line bg-surface-2 p-5" aria-labelledby="season-schedule-heading">
+        <div class="flex flex-wrap items-baseline justify-between gap-2">
+          <h2 id="season-schedule-heading" class="text-sm font-black uppercase tracking-wide text-ink-muted">
+            ${translateText("lobby.season_schedule_heading", { title: active.title })}
+          </h2>
+          <span class="font-mono text-xs text-ink-muted">
+            ${new Date(active.startDate).toLocaleDateString()} – ${new Date(active.endDate).toLocaleDateString()}
+          </span>
+        </div>
+        ${upcomingSlots.length === 0
+          ? html`<p class="mt-2 text-sm text-ink-muted">
+              ${translateText("lobby.season_schedule_empty")}
+            </p>`
+          : html`<ol class="mt-3 flex flex-col gap-2" role="list">
+              ${upcomingSlots.map((slot) => {
+                const resolved = featuredMatchById.get(slot.featuredMatchId);
+                return html`
+                  <li class="flex items-center gap-3 rounded-md border border-line bg-surface px-3 py-2">
+                    <span class="font-mono text-xs text-ink-muted">
+                      ${slot.scheduledAt !== null
+                        ? new Date(slot.scheduledAt).toLocaleDateString()
+                        : "—"}
+                    </span>
+                    ${resolved !== undefined
+                      ? html`<a
+                          href="/match/${encodeURIComponent(resolved.matchId)}"
+                          class="min-w-0 flex-1 truncate text-sm font-semibold text-ink no-underline outline-none hover:text-accent focus-visible:ring-2 focus-visible:ring-accent"
+                          >${resolved.title}</a
+                        >`
+                      : html`<span class="min-w-0 flex-1 truncate text-sm text-ink-muted"
+                          >${translateText("lobby.season_schedule_tbd")}</span
+                        >`}
+                  </li>
+                `;
+              })}
+            </ol>`}
+      </section>
+    `;
+  }
+
+  // ---- League movement -----------------------------------------------------
+
+  /**
+   * Doc: "rank changes; version debuts; meaningful recent form." Replaces
+   * the prior static top-5-by-rank list with a delta-aware one: each
+   * agent's rank movement is read straight off `timeSeries.score.points`
+   * (`ScoreSeriesPoint.rank`, comparing the last two recorded points —
+   * `AgentTimeSeries`'s own doc: below-threshold series are `null`, never
+   * a fabricated 1-2 point "trend"), and `versionFirstObserved` on the
+   * latest point flags a genuine version debut — no invented notability.
+   */
+  private renderLeagueMovement(model: ReadModel): TemplateResult {
+    const withMovement = model.agents
+      .filter((agent) => agent.standing !== null)
+      .map((agent) => {
+        const points = agent.timeSeries?.score?.points ?? [];
+        const latest = points.at(-1);
+        const previous = points.at(-2);
+        const rankDelta =
+          latest !== undefined && previous !== undefined
+            ? previous.rank - latest.rank
+            : null;
+        return {
+          agent,
+          rankDelta,
+          isDebut: latest?.versionFirstObserved === true,
+        };
+      })
+      .sort((a, b) => (a.agent.standing?.rank ?? 0) - (b.agent.standing?.rank ?? 0))
+      .slice(0, LEAGUE_MOVEMENT_LIMIT);
+    return html`
+      <section aria-labelledby="league-movement-heading">
         <div class="mb-3 flex items-baseline justify-between gap-2">
           <h2
-            id="league-pulse-heading"
+            id="league-movement-heading"
             class="text-sm font-black uppercase tracking-wide text-ink-muted"
           >
-            ${translateText("lobby.league_pulse_heading")}
+            ${translateText("lobby.league_movement_heading")}
           </h2>
           <span class="font-mono text-xs text-ink-muted">
             ${model.league.currentRoundNumber !== null
@@ -756,12 +670,12 @@ export class LobbyPage extends LitElement {
               : ""}
           </span>
         </div>
-        ${top5.length === 0
+        ${withMovement.length === 0
           ? html`<p class="text-sm text-ink-muted">
               ${translateText("lobby.no_standings")}
             </p>`
           : html`<ol class="flex flex-col gap-2" role="list">
-              ${top5.map((agent) => this.renderPulseRow(agent))}
+              ${withMovement.map((entry) => this.renderMovementRow(entry))}
             </ol>`}
         <a
           href="/league"
@@ -772,7 +686,12 @@ export class LobbyPage extends LitElement {
     `;
   }
 
-  private renderPulseRow(agent: PublicAgent): TemplateResult {
+  private renderMovementRow(entry: {
+    agent: PublicAgent;
+    rankDelta: number | null;
+    isDebut: boolean;
+  }): TemplateResult {
+    const { agent, rankDelta, isDebut } = entry;
     return html`
       <li
         class="flex items-center gap-3 rounded-md border border-line bg-surface-2 px-3 py-2"
@@ -794,9 +713,18 @@ export class LobbyPage extends LitElement {
           class="min-w-0 flex-1 truncate text-sm font-semibold text-ink no-underline outline-none hover:text-accent focus-visible:ring-2 focus-visible:ring-accent"
           >${agent.displayName}</a
         >
-        ${agent.activeVersion !== null
-          ? html`<span class="font-mono text-xs text-ink-muted"
-              >${agent.activeVersion.publicVersionLabel}</span
+        ${isDebut
+          ? html`<span
+              class="rounded-full border border-accent/50 px-1.5 py-0.5 font-mono text-[10px] font-extrabold uppercase tracking-wide text-accent"
+              >${translateText("lobby.version_debut_badge")}</span
+            >`
+          : nothing}
+        ${rankDelta !== null && rankDelta !== 0
+          ? html`<span
+              class="font-mono text-xs font-bold ${rankDelta > 0 ? "text-live-text" : "text-danger"}"
+              >${rankDelta > 0
+                ? translateText("lobby.rank_change_up", { delta: rankDelta })
+                : translateText("lobby.rank_change_down", { delta: Math.abs(rankDelta) })}</span
             >`
           : nothing}
         <span class="font-mono text-xs font-bold text-ink-muted"
@@ -809,42 +737,34 @@ export class LobbyPage extends LitElement {
     `;
   }
 
-  // ---- Agents to watch ---------------------------------------------------
+  // ---- Agents to know ------------------------------------------------------
 
-  /** Evidence-based only: agents with 2+ wins among the matches this read model carries — no invented notability score. Ties on win count are broken by the highest `curatedDramaScoreOf` value among that agent's wins (agents with no scored wins sort after agents that have at least one, within the same win-count tier) — still no invented notability, just a second real signal when the first one ties. */
-  private renderAgentsToWatch(model: ReadModel): TemplateResult {
+  /**
+   * Doc: "actual identity and style; not simply 'has at least two wins.'"
+   * Selection: registered agents with an operator-written `tagline`
+   * (real identity/style copy) first, ranked by standing rank; agents
+   * with no tagline fill remaining slots ranked by recent win count as a
+   * fallback signal — still evidence-based, never a fabricated
+   * personality blurb.
+   */
+  private renderAgentsToKnow(model: ReadModel): TemplateResult {
     const winsBySlug = new Map<string, number>();
-    const bestDramaScoreBySlug = new Map<string, number>();
     for (const match of model.matches) {
       if (match.winnerAgentSlug === null) continue;
-      winsBySlug.set(
-        match.winnerAgentSlug,
-        (winsBySlug.get(match.winnerAgentSlug) ?? 0) + 1,
-      );
-      const curatedDramaScore = curatedDramaScoreOf(match);
-      if (curatedDramaScore !== null) {
-        bestDramaScoreBySlug.set(
-          match.winnerAgentSlug,
-          Math.max(
-            bestDramaScoreBySlug.get(match.winnerAgentSlug) ?? -1,
-            curatedDramaScore,
-          ),
-        );
-      }
+      winsBySlug.set(match.winnerAgentSlug, (winsBySlug.get(match.winnerAgentSlug) ?? 0) + 1);
     }
-    const notable = model.agents
-      .filter((agent) => agent.slug !== null && (winsBySlug.get(agent.slug) ?? 0) >= 2)
-      .sort((a, b) => {
-        const winsDiff =
-          (winsBySlug.get(b.slug ?? "") ?? 0) -
-          (winsBySlug.get(a.slug ?? "") ?? 0);
-        if (winsDiff !== 0) return winsDiff;
-        return (
-          (bestDramaScoreBySlug.get(b.slug ?? "") ?? -1) -
-          (bestDramaScoreBySlug.get(a.slug ?? "") ?? -1)
-        );
-      })
-      .slice(0, 5);
+    const withTagline = model.agents
+      .filter((agent) => agent.registered && agent.tagline !== null)
+      .sort((a, b) => (a.standing?.rank ?? 999) - (b.standing?.rank ?? 999));
+    const withoutTagline = model.agents
+      .filter(
+        (agent) =>
+          !(agent.registered && agent.tagline !== null) &&
+          agent.slug !== null &&
+          (winsBySlug.get(agent.slug) ?? 0) >= 2,
+      )
+      .sort((a, b) => (winsBySlug.get(b.slug ?? "") ?? 0) - (winsBySlug.get(a.slug ?? "") ?? 0));
+    const notable = [...withTagline, ...withoutTagline].slice(0, AGENTS_TO_KNOW_LIMIT);
     return html`
       <section aria-labelledby="agents-to-watch-heading">
         <h2
@@ -858,50 +778,53 @@ export class LobbyPage extends LitElement {
               ${translateText("lobby.no_notable_agents")}
             </p>`
           : html`<ul class="flex flex-col gap-2" role="list">
-              ${notable.map(
-                (agent) => html`
-                  <li
-                    class="flex items-center gap-2 rounded-md border border-line bg-surface-2 px-3 py-2"
-                  >
-                    ${agent.registered && agent.emblemSvg !== null
-                      ? html`<span
-                          class="inline-flex h-6 w-6 shrink-0 overflow-hidden"
-                          aria-hidden="true"
-                          >${unsafeSVG(agent.emblemSvg)}</span
-                        >`
-                      : nothing}
-                    <a
-                      href=${agent.slug !== null
-                        ? `/agent/${encodeURIComponent(agent.slug)}`
-                        : "/league"}
-                      class="min-w-0 flex-1 truncate text-sm font-semibold text-ink no-underline outline-none hover:text-accent focus-visible:ring-2 focus-visible:ring-accent"
-                      >${agent.displayName}</a
-                    >
-                    <span class="font-mono text-xs text-ink-muted"
-                      >${translateText("lobby.recent_wins", {
-                        count: winsBySlug.get(agent.slug ?? "") ?? 0,
-                      })}</span
-                    >
-                  </li>
-                `,
-              )}
+              ${notable.map((agent) => this.renderAgentToKnowRow(agent, winsBySlug))}
             </ul>`}
       </section>
     `;
   }
 
-  // ---- Recent broadcasts --------------------------------------------------
+  private renderAgentToKnowRow(
+    agent: PublicAgent,
+    winsBySlug: ReadonlyMap<string, number>,
+  ): TemplateResult {
+    return html`
+      <li class="flex items-start gap-2 rounded-md border border-line bg-surface-2 px-3 py-2">
+        ${agent.registered && agent.emblemSvg !== null
+          ? html`<span class="mt-0.5 inline-flex h-6 w-6 shrink-0 overflow-hidden" aria-hidden="true"
+              >${unsafeSVG(agent.emblemSvg)}</span
+            >`
+          : nothing}
+        <div class="min-w-0 flex-1">
+          <a
+            href=${agent.slug !== null ? `/agent/${encodeURIComponent(agent.slug)}` : "/league"}
+            class="truncate text-sm font-semibold text-ink no-underline outline-none hover:text-accent focus-visible:ring-2 focus-visible:ring-accent"
+            >${agent.displayName}</a
+          >
+          ${agent.tagline !== null
+            ? html`<p class="truncate text-xs text-ink-muted">${agent.tagline}</p>`
+            : html`<p class="text-xs text-ink-muted">
+                ${translateText("lobby.recent_wins", {
+                  count: winsBySlug.get(agent.slug ?? "") ?? 0,
+                })}
+              </p>`}
+        </div>
+      </li>
+    `;
+  }
+
+  // ---- Recent Director Cuts ------------------------------------------------
 
   /**
-   * Ranks a bounded recency window by `curatedDramaScoreOf` desc (scored
-   * matches first, unscored matches sorting after them but keeping their
-   * own relative recency order — a stable partition, never a fabricated
-   * tie-break) to pick which 3 broadcasts earn the slot, then re-sorts
-   * just those 3 back to the newest-first display convention this section
-   * has always used — selection and display order are separate concerns
-   * here.
+   * Doc: "visible lineups; title; reason to watch; runtime; spoiler-safe
+   * result." Ranks a bounded recency window by `curatedDramaScoreOf` desc
+   * (scored matches first, unscored matches keeping their own relative
+   * recency order — a stable partition, never a fabricated tie-break) to
+   * pick which 3 broadcasts earn the slot, then re-sorts just those 3
+   * back to newest-first for display — selection and display order are
+   * separate concerns.
    */
-  private renderRecentBroadcasts(model: ReadModel): TemplateResult {
+  private renderRecentDirectorCuts(model: ReadModel): TemplateResult {
     const recencyWindow = [...model.matches]
       .filter((match) => match.completedAt !== null)
       .sort((a, b) => (b.completedAt ?? "").localeCompare(a.completedAt ?? ""))
@@ -952,6 +875,14 @@ export class LobbyPage extends LitElement {
             ? translateText("lobby.round_suffix", { round: match.roundNumber })
             : ""}
         </p>
+        ${renderParticipantChipsFromMatch(match, agents)}
+        ${match.directorCut !== null
+          ? html`<p class="mt-2 inline-block rounded border border-line px-1.5 py-0.5 font-mono text-[11px] text-ink-muted">
+              ${translateText("lobby.event_stage_director_cut_runtime", {
+                minutes: Math.max(1, Math.round(match.directorCut.durationEstimateSeconds / 60)),
+              })}
+            </p>`
+          : nothing}
         ${match.degradedCount !== null && match.degradedCount > 0
           ? html`<p
               class="mt-1 inline-block rounded border px-1.5 py-0.5 font-mono text-[11px] ${elevated
@@ -1029,5 +960,11 @@ export class LobbyPage extends LitElement {
         </div>
       </section>
     `;
+  }
+}
+
+declare global {
+  interface HTMLElementTagNameMap {
+    "lobby-page": LobbyPage;
   }
 }

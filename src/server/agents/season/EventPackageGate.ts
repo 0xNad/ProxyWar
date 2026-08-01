@@ -55,6 +55,19 @@ export function isPubliclyPromotable(
 
   const missing: string[] = [];
 
+  // Same state-gate `FeaturedMatchParticipants.ts`'s own
+  // `resolveFeaturedMatchParticipantCards` already enforces for
+  // participant CARDS ("a record the operator hasn't explicitly
+  // published yet never exposes who is in it"): a `candidate`/`scheduled`
+  // premiere-lane record must never be publicly promotable, no matter how
+  // complete its EventPackage draft is — `premiere:publish`'s state flip
+  // is the operator's own "yes, commit to running this" signal, and Phase
+  // 5's hero/watch surfaces embed the SAME participant identity + prose
+  // this gate guards, so the two embargoes must never disagree.
+  if (match.lane === "premiere" && (match.state === "candidate" || match.state === "scheduled")) {
+    missing.push("not_yet_published");
+  }
+
   if (match.title.trim().length === 0 || pkg.title.trim().length === 0) {
     missing.push("title");
   }

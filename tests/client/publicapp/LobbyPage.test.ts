@@ -1,9 +1,11 @@
 /**
- * Coverage for `/`'s three hero states (Active / Upcoming / No premiere),
- * the below-hero modules (League pulse, Agents to watch, Recent broadcasts,
- * builder band), and the "no game bundle on the homepage" invariant.
- * Follows the mount-into-jsdom + stubbed global fetch convention already
- * established in `WatchPage.test.ts`.
+ * Coverage for `/`'s event-first hero (Season Zero activation prompt
+ * Phase 5): a promotable Featured Event (live/upcoming), the best-recent-
+ * Director-Cut fallback, and the honest empty state — plus the below-hero
+ * modules (Season schedule, League movement, Agents to know, Recent
+ * Director Cuts, Builder band) and the "no game bundle on the homepage"
+ * invariant. Follows the mount-into-jsdom + stubbed global fetch
+ * convention already established in `WatchPage.test.ts`.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Mock } from "vitest";
@@ -11,7 +13,9 @@ import "../../../src/client/publicapp/LobbyPage";
 import type { LobbyPage } from "../../../src/client/publicapp/LobbyPage";
 import type {
   PublicAgent,
+  PublicFeaturedMatch,
   PublicMatch,
+  PublicSeason,
   ReadModel,
 } from "../../../src/client/publicapp/ReadModelSchema";
 import type * as UtilsModule from "../../../src/client/Utils";
@@ -68,6 +72,44 @@ function match(overrides: Partial<PublicMatch>): PublicMatch {
   };
 }
 
+function featuredMatch(overrides: Partial<PublicFeaturedMatch> = {}): PublicFeaturedMatch {
+  return {
+    matchId: "feat_11111111111111111111",
+    lane: "premiere",
+    title: "Auri vs Sefirot",
+    description: "",
+    map: "Pangaea",
+    format: "2p duel",
+    category: null,
+    state: "published",
+    scheduledAt: new Date(Date.now() + 600_000).toISOString(),
+    revealAt: null,
+    postMatchSummary: null,
+    result: null,
+    isPubliclyPromotable: true,
+    subtitle: "A duel worth watching",
+    reasonToWatch: ["Auri debuts v43 after a strong run."],
+    directorCutEstimateSeconds: 360,
+    canonicalMatchUrl: "/match/feat_11111111111111111111",
+    canonicalPremiereUrl: "/premiere/prem_abc",
+    ...overrides,
+  };
+}
+
+function season(overrides: Partial<PublicSeason> = {}): PublicSeason {
+  return {
+    id: "season_zero",
+    slug: "zero",
+    title: "Season Zero",
+    description: "The first bounded programme.",
+    startDate: "2026-08-01",
+    endDate: "2026-09-26",
+    state: "active",
+    eventSlots: [],
+    ...overrides,
+  };
+}
+
 function readModel(overrides: Partial<ReadModel>): ReadModel {
   return {
     schemaVersion: 1,
@@ -92,12 +134,42 @@ function readModel(overrides: Partial<ReadModel>): ReadModel {
     rounds: [],
     matches: [],
     featuredMatches: [],
+    seasons: [],
     premieres: { live: null, latest: null },
     links: {
       enterTheLeagueUrl: "https://example.test/enter",
       platformLabel: "Coworld",
       accountUrl: "https://example.test/account",
     },
+    ...overrides,
+  };
+}
+
+type FeaturedEventParticipantFixture = {
+  playerName: string;
+  displayName: string;
+  agentSlug: string | null;
+  emblemSvg: string | null;
+  primaryColor: string | null;
+  secondaryColor: string | null;
+  versionLabel: string | null;
+  builderId: string | null;
+  builderDisplayName: string | null;
+};
+
+function participantCard(
+  overrides: Partial<FeaturedEventParticipantFixture> = {},
+): FeaturedEventParticipantFixture {
+  return {
+    playerName: "player-one",
+    displayName: "Agent One",
+    agentSlug: "agent-one",
+    emblemSvg: null,
+    primaryColor: null,
+    secondaryColor: null,
+    versionLabel: null,
+    builderId: null,
+    builderDisplayName: null,
     ...overrides,
   };
 }
@@ -111,13 +183,45 @@ function stubReadModelFetch(model: ReadModel): Mock {
   return fetchMock;
 }
 
+/**
+ * Routes the global `fetch` mock by URL: the read model for
+ * `read-model.json`, and a scriptable response for the narrow
+ * `/api/featured-matches/:matchId` participant-identity channel —
+ * `"network-error"` rejects the fetch outright, `"malformed"` resolves a
+ * body that fails the client's own schema validation, and an array
+ * resolves the real `{schemaVersion, participants}` shape.
+ */
+function stubReadModelAndFeaturedMatchFetch(
+  model: ReadModel,
+  participants: FeaturedEventParticipantFixture[] | "network-error" | "malformed",
+): Mock {
+  const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+    const url = typeof input === "string" ? input : input.toString();
+    if (url.includes("/api/featured-matches/")) {
+      if (participants === "network-error") {
+        throw new Error("network down");
+      }
+      if (participants === "malformed") {
+        return { ok: true, json: async () => ({ nonsense: true }) } as Response;
+      }
+      return {
+        ok: true,
+        json: async () => ({ schemaVersion: 1, participants }),
+      } as Response;
+    }
+    return { ok: true, json: async () => model } as Response;
+  });
+  vi.stubGlobal("fetch", fetchMock);
+  return fetchMock;
+}
+
 function mount(): LobbyPage {
   const el = document.createElement("lobby-page") as LobbyPage;
   document.body.append(el);
   return el;
 }
 
-async function flushMicrotasks(times = 10): Promise<void> {
+async function flushMicrotasks(times = 15): Promise<void> {
   for (let i = 0; i < times; i++) await Promise.resolve();
 }
 
@@ -126,204 +230,181 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
-describe("lobby-page hero states", () => {
-  it("state A: an active premiere shows the literal Live Premiere label and a manually-built watch link, no result leakage", async () => {
-    stubReadModelFetch(
+describe("lobby-page hero: promotable event", () => {
+  it("upcoming: renders the real title/subtitle/reason-to-watch, never a bare map+round card", async () => {
+    stubReadModelAndFeaturedMatchFetch(
+      readModel({ featuredMatches: [featuredMatch()] }),
+      [],
+    );
+    const el = mount();
+    await flushMicrotasks();
+    expect(el.textContent).toContain("Auri vs Sefirot");
+    expect(el.textContent).toContain("A duel worth watching");
+    expect(el.textContent).toContain("Auri debuts v43 after a strong run.");
+    expect(el.textContent).toContain("lobby.upcoming_premiere_badge");
+    expect(el.querySelector('a[href="/premiere/prem_abc"]')).not.toBeNull();
+  });
+
+  it("live: scheduledAt in the past flips the badge to live and the CTA to the live variant", async () => {
+    stubReadModelAndFeaturedMatchFetch(
       readModel({
-        premieres: {
-          live: {
-            premiereId: "prem_1",
-            roundNumber: 7,
-            mapLabel: "Ashfields",
-            scheduledAt: new Date(Date.now() - 60_000).toISOString(),
-            premierePageLive: true,
-          },
-          latest: null,
-        },
+        featuredMatches: [
+          featuredMatch({ scheduledAt: new Date(Date.now() - 60_000).toISOString() }),
+        ],
       }),
+      [],
     );
     const el = mount();
     await flushMicrotasks();
     expect(el.textContent).toContain("lobby.live_premiere_badge");
-    expect(el.querySelector('a[href="/premiere/prem_1"]')).not.toBeNull();
-    expect(el.textContent).toContain("lobby.watch_now");
-    // Never a "playing right now" / result-bearing claim beyond the label.
-    expect(el.textContent).not.toContain("lobby.winner_announcement");
-    expect(el.textContent).not.toContain("lobby.no_winner");
+    expect(el.textContent).toContain("lobby.event_stage_watch_live_cta");
+    expect(el.textContent).not.toContain("lobby.upcoming_premiere_badge");
   });
 
-  it("state B: an upcoming (not live) premiere shows View matchup, not Watch now", async () => {
+  it("ignores a non-promotable featured match — never treats an incomplete package as the hero", async () => {
     stubReadModelFetch(
       readModel({
-        premieres: {
-          live: {
-            premiereId: "prem_2",
-            roundNumber: 8,
-            mapLabel: "Britannia",
-            scheduledAt: new Date(Date.now() + 600_000).toISOString(),
-            premierePageLive: false,
-          },
-          latest: null,
-        },
+        featuredMatches: [featuredMatch({ isPubliclyPromotable: false })],
       }),
     );
     const el = mount();
     await flushMicrotasks();
-    expect(el.textContent).toContain("lobby.upcoming_premiere_badge");
-    expect(el.textContent).toContain("lobby.view_matchup");
-    expect(el.textContent).not.toContain("lobby.watch_now");
-    expect(el.textContent).not.toContain("lobby.live_premiere_badge");
+    expect(el.textContent).not.toContain("Auri vs Sefirot");
   });
 
-  it("state C (with a latest revealed premiere): falls back to the archived premiere, not a drama-score claim", async () => {
+  it("ignores a promotable featured match not yet published (scheduled state)", async () => {
     stubReadModelFetch(
       readModel({
-        premieres: {
-          live: null,
-          latest: {
-            premiereId: "prem_0",
-            roundNumber: 6,
-            mapLabel: "Pangaea",
-            revealedAt: "2026-06-30T00:00:00.000Z",
-            href: "/premiere/prem_0",
-          },
-        },
+        featuredMatches: [featuredMatch({ state: "scheduled" })],
       }),
     );
     const el = mount();
     await flushMicrotasks();
-    expect(el.textContent).toContain("lobby.latest_premiere_badge");
-    expect(el.querySelector('a[href="/premiere/prem_0"]')).not.toBeNull();
+    expect(el.textContent).not.toContain("Auri vs Sefirot");
   });
 
-  it("state C (nothing at all): falls back to the most recent completed+renderable match, and never claims a drama score", async () => {
+  it("ignores an archive-lane featured match for the hero spotlight (archive belongs to Recent Director Cuts)", async () => {
+    stubReadModelFetch(
+      readModel({
+        featuredMatches: [featuredMatch({ lane: "archive", scheduledAt: null })],
+      }),
+    );
+    const el = mount();
+    await flushMicrotasks();
+    expect(el.textContent).not.toContain("Auri vs Sefirot");
+  });
+
+  it("renders the Director Cut runtime once known", async () => {
+    stubReadModelAndFeaturedMatchFetch(
+      readModel({ featuredMatches: [featuredMatch({ directorCutEstimateSeconds: 420 })] }),
+      [],
+    );
+    const el = mount();
+    await flushMicrotasks();
+    expect(el.textContent).toContain("lobby.event_stage_director_cut_runtime:{\"minutes\":7}");
+  });
+
+  it("renders participant lineup once the narrow route resolves a non-empty roster", async () => {
+    stubReadModelAndFeaturedMatchFetch(
+      readModel({ featuredMatches: [featuredMatch()] }),
+      [
+        participantCard({
+          displayName: "Auri",
+          emblemSvg: '<svg data-test-emblem="auri"></svg>',
+          versionLabel: "v43",
+        }),
+        participantCard({ displayName: "Sefirot", agentSlug: "sefirot" }),
+      ],
+    );
+    const el = mount();
+    await flushMicrotasks();
+    expect(el.textContent).toContain("lobby.hero_participants_heading");
+    expect(el.textContent).toContain("Auri");
+    expect(el.innerHTML).toContain('data-test-emblem="auri"');
+    expect(el.textContent).toContain("v43");
+    expect(el.textContent).toContain("Sefirot");
+  });
+
+  it("a network failure on the participant fetch degrades gracefully — event stage still renders, no crash", async () => {
+    stubReadModelAndFeaturedMatchFetch(
+      readModel({ featuredMatches: [featuredMatch()] }),
+      "network-error",
+    );
+    const el = mount();
+    await flushMicrotasks();
+    expect(el.textContent).toContain("Auri vs Sefirot");
+    expect(el.textContent).not.toContain("lobby.hero_participants_heading");
+    expect(el.querySelector('[role="alert"]')).toBeNull();
+  });
+
+  it("a malformed participant response degrades the same as a network failure", async () => {
+    stubReadModelAndFeaturedMatchFetch(
+      readModel({ featuredMatches: [featuredMatch()] }),
+      "malformed",
+    );
+    const el = mount();
+    await flushMicrotasks();
+    expect(el.textContent).toContain("Auri vs Sefirot");
+    expect(el.textContent).not.toContain("lobby.hero_participants_heading");
+  });
+});
+
+describe("lobby-page hero: Director Cut fallback (no promotable event)", () => {
+  it("leads with the best recent Director Cut, showing competitors, runtime, and reason to watch — never a bare map+round card", async () => {
     stubReadModelFetch(
       readModel({
         matches: [
           match({
-            matchId: "old",
-            completedAt: "2026-06-01T00:00:00.000Z",
-            fullRenderHref: "/ai-league-replay/old",
-          }),
-          match({
-            matchId: "new",
-            completedAt: "2026-06-15T00:00:00.000Z",
-            fullRenderHref: "/ai-league-replay/new",
-            map: "Iceland",
+            matchId: "m_high_drama",
+            map: "Ashfields",
+            completedAt: "2026-07-01T00:00:00.000Z",
+            fullRenderHref: "/render/m_high_drama",
+            directorCut: { durationEstimateSeconds: 300, segmentCount: 5 },
+            dramaEvidence: { curatedDramaScore: 88, entertainmentGrade: "dramatic" },
+            participants: [
+              { slot: 0, agentSlug: "agent-one", displayName: "Agent One", tilesOwned: 10, isAlive: true, isWinner: true, color: "#111" },
+            ],
           }),
         ],
+        agents: [agent({ slug: "agent-one", displayName: "Agent One", emblemSvg: "<svg data-test-emblem=\"fallback\"></svg>" })],
       }),
     );
     const el = mount();
     await flushMicrotasks();
     expect(el.textContent).toContain("lobby.recent_battle_badge");
-    expect(el.textContent).toContain("Iceland");
-    expect(el.querySelector('a[href="/ai-league-replay/new"]')).not.toBeNull();
-    expect(el.textContent?.toLowerCase()).not.toContain("drama");
+    expect(el.textContent).toContain("lobby.high_drama_badge");
+    expect(el.textContent).toContain("Ashfields");
+    expect(el.textContent).toContain("lobby.event_stage_director_cut_runtime:{\"minutes\":5}");
+    expect(el.textContent).toContain("Agent One");
+    expect(el.innerHTML).toContain('data-test-emblem="fallback"');
+    expect(el.textContent).toContain("lobby.event_stage_director_cut_cta:{\"minutes\":5}");
   });
 
-  it("state C: picks the highest-curatedDramaScore match within the recency window, not the most recent one", async () => {
+  it("shows the next expected schedule window from the active season when one exists", async () => {
+    const future = new Date(Date.now() + 86_400_000).toISOString();
     stubReadModelFetch(
       readModel({
-        matches: [
-          match({
-            matchId: "newest-no-evidence",
-            completedAt: "2026-07-08T00:00:00.000Z",
-            fullRenderHref: "/ai-league-replay/newest",
-            map: "MostRecentMap",
-          }),
-          match({
-            matchId: "highest-drama",
-            completedAt: "2026-07-06T00:00:00.000Z",
-            fullRenderHref: "/ai-league-replay/highest-drama",
-            map: "HighDramaMap",
-            dramaEvidence: { curatedDramaScore: 92, entertainmentGrade: "lively" },
-          }),
-          match({
-            matchId: "lower-drama",
-            completedAt: "2026-07-07T00:00:00.000Z",
-            fullRenderHref: "/ai-league-replay/lower-drama",
-            map: "LowerDramaMap",
-            dramaEvidence: { curatedDramaScore: 30, entertainmentGrade: "flat" },
-          }),
+        matches: [match({ fullRenderHref: "/render/m1" })],
+        seasons: [
+          season({ eventSlots: [{ featuredMatchId: "feat_zzz", scheduledAt: future }] }),
         ],
       }),
     );
     const el = mount();
     await flushMicrotasks();
-    const hero = el.querySelector('[aria-label="lobby.hero_aria_label"]');
-    expect(hero?.textContent).toContain("HighDramaMap");
-    expect(hero?.textContent).not.toContain("MostRecentMap");
-    expect(hero?.textContent).not.toContain("LowerDramaMap");
-    expect(
-      hero?.querySelector('a[href="/ai-league-replay/highest-drama"]'),
-    ).not.toBeNull();
-    expect(hero?.textContent).toContain(
-      `lobby.high_drama_badge:${JSON.stringify({ score: 92 })}`,
-    );
+    expect(el.textContent).toContain("lobby.next_expected_window");
   });
 
-  it("state C: a mid-upgrade match (dramaEvidence present, curatedDramaScore still null) is treated as unscored -- no badge, falls back to recency", async () => {
+  it("omits the next-expected-window line when no future slot exists", async () => {
     stubReadModelFetch(
-      readModel({
-        matches: [
-          match({
-            matchId: "mid-upgrade",
-            completedAt: "2026-07-08T00:00:00.000Z",
-            fullRenderHref: "/ai-league-replay/mid-upgrade",
-            map: "TransitioningMap",
-            dramaEvidence: { curatedDramaScore: null, entertainmentGrade: "lively" },
-          }),
-          match({
-            matchId: "older",
-            completedAt: "2026-07-01T00:00:00.000Z",
-            fullRenderHref: "/ai-league-replay/older",
-            map: "OlderMap",
-          }),
-        ],
-      }),
+      readModel({ matches: [match({ fullRenderHref: "/render/m1" })] }),
     );
     const el = mount();
     await flushMicrotasks();
-    const hero = el.querySelector('[aria-label="lobby.hero_aria_label"]');
-    // No scored match in the window -- falls back to the most recent
-    // watchable match (the exact prior, purely-recency behavior), and
-    // never renders a badge for the unscored mid-upgrade evidence.
-    expect(hero?.textContent).toContain("TransitioningMap");
-    expect(hero?.textContent).not.toContain("lobby.high_drama_badge");
+    expect(el.textContent).not.toContain("lobby.next_expected_window");
   });
 
-  it("state C: never dredges up an old high-curatedDramaScore match outside the bounded recency window", async () => {
-    const windowMatches = Array.from({ length: 8 }, (_, i) =>
-      match({
-        matchId: `recent-${i}`,
-        completedAt: `2026-07-${String(20 - i).padStart(2, "0")}T00:00:00.000Z`,
-        fullRenderHref: `/ai-league-replay/recent-${i}`,
-        map: i === 0 ? "NewestInWindowMap" : `RecentMap${i}`,
-      }),
-    );
-    stubReadModelFetch(
-      readModel({
-        matches: [
-          ...windowMatches,
-          match({
-            matchId: "old-high-drama",
-            completedAt: "2026-01-01T00:00:00.000Z",
-            fullRenderHref: "/ai-league-replay/old-high-drama",
-            map: "StaleHighDramaMap",
-            dramaEvidence: { curatedDramaScore: 99, entertainmentGrade: "lively" },
-          }),
-        ],
-      }),
-    );
-    const el = mount();
-    await flushMicrotasks();
-    expect(el.textContent).toContain("NewestInWindowMap");
-    expect(el.textContent).not.toContain("StaleHighDramaMap");
-    expect(el.textContent).not.toContain("lobby.high_drama_badge");
-  });
-
-  it("state C with no matches at all: an honest empty note, never a fabricated hero", async () => {
+  it("falls back to the honest empty state when there is no watchable match at all", async () => {
     stubReadModelFetch(readModel({}));
     const el = mount();
     await flushMicrotasks();
@@ -331,167 +412,162 @@ describe("lobby-page hero states", () => {
   });
 });
 
-describe("lobby-page below-hero modules", () => {
-  it("League pulse shows only the top 5 ranked agents, sorted by rank", async () => {
-    const agents = Array.from({ length: 7 }, (_, i) =>
-      agent({
-        slug: `agent-${i + 1}`,
-        displayName: `Agent ${i + 1}`,
-        standing: { rank: i + 1, score: 10 - i, roundsPlayed: 50, isHouse: false },
-      }),
-    );
-    stubReadModelFetch(readModel({ agents }));
-    const el = mount();
-    await flushMicrotasks();
-    expect(el.textContent).toContain("Agent 1");
-    expect(el.textContent).toContain("Agent 5");
-    expect(el.textContent).not.toContain("Agent 6");
-    expect(el.textContent).not.toContain("Agent 7");
-  });
-
-  it("Agents to watch only lists agents with 2+ recent wins — evidence-based, not fabricated", async () => {
-    const agents = [
-      agent({ slug: "winner", displayName: "Big Winner" }),
-      agent({ slug: "loner", displayName: "One Win Only" }),
-    ];
-    const matches = [
-      match({ matchId: "m1", winnerAgentSlug: "winner" }),
-      match({ matchId: "m2", winnerAgentSlug: "winner" }),
-      match({ matchId: "m3", winnerAgentSlug: "loner" }),
-    ];
-    stubReadModelFetch(readModel({ agents, matches }));
-    const el = mount();
-    await flushMicrotasks();
-    const agentsToWatch = el.querySelector(
-      '[aria-labelledby="agents-to-watch-heading"]',
-    );
-    expect(agentsToWatch?.textContent).toContain("Big Winner");
-    expect(agentsToWatch?.textContent).not.toContain("One Win Only");
-  });
-
-  it("Agents to watch: ties on win count are broken by the highest dramaEvidence.curatedDramaScore among that agent's wins", async () => {
-    const agents = [
-      agent({ slug: "low-drama", displayName: "Low Drama Agent" }),
-      agent({ slug: "high-drama", displayName: "High Drama Agent" }),
-    ];
-    const matches = [
-      match({
-        matchId: "m1",
-        winnerAgentSlug: "high-drama",
-        dramaEvidence: { curatedDramaScore: 88, entertainmentGrade: "lively" },
-      }),
-      match({ matchId: "m2", winnerAgentSlug: "high-drama" }),
-      match({
-        matchId: "m3",
-        winnerAgentSlug: "low-drama",
-        dramaEvidence: { curatedDramaScore: 40, entertainmentGrade: "flat" },
-      }),
-      match({ matchId: "m4", winnerAgentSlug: "low-drama" }),
-    ];
-    stubReadModelFetch(readModel({ agents, matches }));
-    const el = mount();
-    await flushMicrotasks();
-    const items = el.querySelectorAll(
-      '[aria-labelledby="agents-to-watch-heading"] li',
-    );
-    expect(items.length).toBe(2);
-    expect(items[0]?.textContent).toContain("High Drama Agent");
-    expect(items[1]?.textContent).toContain("Low Drama Agent");
-  });
-
-  it("Recent broadcasts render a closed-by-default Reveal result disclosure, spoiler-safe", async () => {
-    const agents = [agent({ slug: "champ", displayName: "The Champ" })];
-    const matches = [
-      match({ matchId: "m1", winnerAgentSlug: "champ", fullRenderHref: "/r/m1" }),
-    ];
-    stubReadModelFetch(readModel({ agents, matches }));
-    const el = mount();
-    await flushMicrotasks();
-    const details = el.querySelector("details");
-    expect(details).not.toBeNull();
-    expect(details?.open).toBe(false);
-    expect(details?.querySelector("summary")?.textContent).toContain(
-      "lobby.reveal_result",
-    );
-    expect(details?.textContent).toContain(
-      `lobby.winner_announcement:${JSON.stringify({ winner: "The Champ" })}`,
-    );
-  });
-
-  it("Recent broadcasts: a lower-recency, higher-curatedDramaScore match within the window displaces the 3rd most recent unscored match, then displays newest-first", async () => {
-    const matches = [
-      match({
-        matchId: "m1",
-        completedAt: "2026-07-04T00:00:00.000Z",
-        map: "Newest",
-      }),
-      match({
-        matchId: "m2",
-        completedAt: "2026-07-03T00:00:00.000Z",
-        map: "SecondNewest",
-      }),
-      match({
-        matchId: "m3",
-        completedAt: "2026-07-02T00:00:00.000Z",
-        map: "ThirdNewestUnscored",
-      }),
-      match({
-        matchId: "m4",
-        completedAt: "2026-07-01T00:00:00.000Z",
-        map: "DramaWinner",
-        dramaEvidence: { curatedDramaScore: 95, entertainmentGrade: "lively" },
-      }),
-    ];
-    stubReadModelFetch(readModel({ matches }));
-    const el = mount();
-    await flushMicrotasks();
-    expect(el.textContent).not.toContain("ThirdNewestUnscored");
-    expect(el.textContent).toContain("DramaWinner");
-    expect(el.textContent).toContain(
-      `lobby.drama_score_badge:${JSON.stringify({ score: 95 })}`,
-    );
-    const cardMaps = Array.from(
-      el.querySelectorAll(
-        '[aria-labelledby="recent-broadcasts-heading"] .grid > div p:first-child',
-      ),
-    ).map((p) => p.textContent?.trim() ?? "");
-    expect(cardMaps.length).toBe(3);
-    expect(cardMaps[0]?.startsWith("Newest")).toBe(true);
-    expect(cardMaps[1]?.startsWith("SecondNewest")).toBe(true);
-    expect(cardMaps[2]?.startsWith("DramaWinner")).toBe(true);
-  });
-
-  it("the builder acquisition band links to the read model's own enterTheLeagueUrl, honestly labeled", async () => {
+describe("lobby-page season schedule module", () => {
+  it("renders the active season's title, dates, and upcoming slots, resolving titles against featuredMatches", async () => {
     stubReadModelFetch(
       readModel({
-        links: {
-          enterTheLeagueUrl: "https://github.com/example/starter",
-          platformLabel: "Coworld",
-          accountUrl: "https://example.test/account",
-        },
+        featuredMatches: [featuredMatch({ matchId: "feat_slot1" })],
+        seasons: [
+          season({
+            eventSlots: [
+              { featuredMatchId: "feat_slot1", scheduledAt: "2026-08-08T18:00:00.000Z" },
+            ],
+          }),
+        ],
       }),
     );
     const el = mount();
     await flushMicrotasks();
-    const link = el.querySelector<HTMLAnchorElement>(
-      'a[href="https://github.com/example/starter"]',
-    );
-    expect(link).not.toBeNull();
-    expect(link?.textContent).toContain("lobby.starter_repo_link");
-    expect(el.textContent).not.toContain("/build");
+    expect(el.textContent).toContain("lobby.season_schedule_heading");
+    expect(el.textContent).toContain("Auri vs Sefirot");
   });
 
-  it("never mentions Battles rendered (removed vanity metric)", async () => {
-    stubReadModelFetch(readModel({}));
+  it("shows a TBD placeholder for a slot whose featuredMatchId doesn't resolve", async () => {
+    stubReadModelFetch(
+      readModel({
+        seasons: [
+          season({
+            eventSlots: [{ featuredMatchId: "feat_unresolved", scheduledAt: "2026-08-08T18:00:00.000Z" }],
+          }),
+        ],
+      }),
+    );
     const el = mount();
     await flushMicrotasks();
-    expect(el.textContent).not.toContain("Battles rendered");
+    expect(el.textContent).toContain("lobby.season_schedule_tbd");
+  });
+
+  it("renders nothing when no season is active", async () => {
+    stubReadModelFetch(readModel({ seasons: [season({ state: "completed" })] }));
+    const el = mount();
+    await flushMicrotasks();
+    expect(el.textContent).not.toContain("lobby.season_schedule_heading");
+  });
+});
+
+describe("lobby-page league movement module", () => {
+  it("flags a rank improvement with an up arrow and a version debut badge", async () => {
+    stubReadModelFetch(
+      readModel({
+        agents: [
+          agent({
+            slug: "mover",
+            displayName: "Mover",
+            standing: { rank: 1, score: 10, roundsPlayed: 5, isHouse: false },
+            timeSeries: {
+              winrate: null,
+              score: {
+                points: [
+                  { recordedAt: "t1", score: 5, rank: 3, activeVersionLabel: "v1", versionFirstObserved: false },
+                  { recordedAt: "t2", score: 10, rank: 1, activeVersionLabel: "v2", versionFirstObserved: true },
+                ],
+                recordedSince: "t1",
+                methodology: "x",
+              },
+            },
+          }),
+        ],
+      }),
+    );
+    const el = mount();
+    await flushMicrotasks();
+    expect(el.textContent).toContain("lobby.league_movement_heading");
+    expect(el.textContent).toContain("lobby.rank_change_up:{\"delta\":2}");
+    expect(el.textContent).toContain("lobby.version_debut_badge");
+  });
+
+  it("shows no delta badge for an agent with fewer than two recorded score points", async () => {
+    stubReadModelFetch(
+      readModel({
+        agents: [
+          agent({
+            slug: "steady",
+            standing: { rank: 2, score: 8, roundsPlayed: 3, isHouse: false },
+          }),
+        ],
+      }),
+    );
+    const el = mount();
+    await flushMicrotasks();
+    expect(el.textContent).not.toContain("lobby.rank_change_up");
+    expect(el.textContent).not.toContain("lobby.rank_change_down");
+  });
+});
+
+describe("lobby-page agents-to-know module", () => {
+  it("prioritizes a real tagline over a bare win count", async () => {
+    stubReadModelFetch(
+      readModel({
+        agents: [
+          agent({
+            slug: "stylist",
+            displayName: "Stylist",
+            tagline: "Aggressive early-game expansion, ruthless alliances.",
+          }),
+        ],
+      }),
+    );
+    const el = mount();
+    await flushMicrotasks();
+    expect(el.textContent).toContain("Aggressive early-game expansion, ruthless alliances.");
+    expect(el.textContent).not.toContain("lobby.recent_wins");
+  });
+
+  it("falls back to win count for an agent with no tagline", async () => {
+    stubReadModelFetch(
+      readModel({
+        matches: [
+          match({ matchId: "m1", winnerAgentSlug: "grinder" }),
+          match({ matchId: "m2", winnerAgentSlug: "grinder" }),
+        ],
+        agents: [agent({ slug: "grinder", displayName: "Grinder", tagline: null })],
+      }),
+    );
+    const el = mount();
+    await flushMicrotasks();
+    expect(el.textContent).toContain("lobby.recent_wins:{\"count\":2}");
+  });
+});
+
+describe("lobby-page recent Director Cuts module", () => {
+  it("renders participant chips on each card, joined against agents[] for emblems", async () => {
+    stubReadModelFetch(
+      readModel({
+        matches: [
+          match({
+            matchId: "m_recent",
+            completedAt: "2026-07-05T00:00:00.000Z",
+            participants: [
+              { slot: 0, agentSlug: "agent-one", displayName: "Agent One", tilesOwned: 5, isAlive: true, isWinner: true, color: "#111" },
+            ],
+          }),
+        ],
+        agents: [agent({ slug: "agent-one", displayName: "Agent One" })],
+      }),
+    );
+    const el = mount();
+    await flushMicrotasks();
+    expect(el.textContent).toContain("lobby.recent_broadcasts_heading");
+    expect(el.textContent).toContain("Agent One");
   });
 });
 
 describe("lobby-page loads no game bundle", () => {
-  it("only ever fetches the read model JSON — never a replay/game asset", async () => {
-    const fetchMock = stubReadModelFetch(readModel({}));
+  it("only ever fetches the read model JSON and the narrow participant route — never a replay/game asset", async () => {
+    const fetchMock = stubReadModelAndFeaturedMatchFetch(
+      readModel({ featuredMatches: [featuredMatch()] }),
+      [],
+    );
     mount();
     await flushMicrotasks();
     for (const call of fetchMock.mock.calls) {
@@ -514,21 +590,15 @@ describe("lobby-page hero live timers", () => {
     vi.useRealTimers();
   });
 
-  it("state A: the live elapsed-time note ticks upward every ~1s", async () => {
+  it("live: the elapsed-time note ticks upward every ~1s", async () => {
     vi.setSystemTime(new Date("2026-07-31T00:00:10.000Z"));
-    stubReadModelFetch(
+    stubReadModelAndFeaturedMatchFetch(
       readModel({
-        premieres: {
-          live: {
-            premiereId: "prem_a",
-            roundNumber: 1,
-            mapLabel: "Ashfields",
-            scheduledAt: "2026-07-31T00:00:00.000Z",
-            premierePageLive: true,
-          },
-          latest: null,
-        },
+        featuredMatches: [
+          featuredMatch({ scheduledAt: "2026-07-31T00:00:00.000Z" }),
+        ],
       }),
+      [],
     );
     const el = mount();
     await flushMicrotasks();
@@ -538,51 +608,35 @@ describe("lobby-page hero live timers", () => {
     expect(el.textContent).toContain('lobby.live_elapsed:{"duration":"13s"}');
   });
 
-  it("state B: the live countdown ticks downward every ~1s", async () => {
+  it("upcoming: the countdown ticks downward every ~1s", async () => {
     vi.setSystemTime(new Date("2026-07-31T00:00:00.000Z"));
-    stubReadModelFetch(
+    stubReadModelAndFeaturedMatchFetch(
       readModel({
-        premieres: {
-          live: {
-            premiereId: "prem_b",
-            roundNumber: 2,
-            mapLabel: "Britannia",
-            scheduledAt: "2026-07-31T00:01:00.000Z",
-            premierePageLive: false,
-          },
-          latest: null,
-        },
+        featuredMatches: [
+          featuredMatch({ scheduledAt: "2026-07-31T00:01:00.000Z" }),
+        ],
       }),
+      [],
     );
     const el = mount();
     await flushMicrotasks();
-    expect(el.textContent).toContain(
-      'lobby.countdown_value:{"duration":"1m 0s"}',
-    );
+    expect(el.textContent).toContain('lobby.countdown_value:{"duration":"1m 0s"}');
     vi.advanceTimersByTime(5000);
     await flushMicrotasks();
-    expect(el.textContent).toContain(
-      'lobby.countdown_value:{"duration":"55s"}',
-    );
+    expect(el.textContent).toContain('lobby.countdown_value:{"duration":"55s"}');
   });
 
-  it("state B: an armed reminder fires at scheduled time — flashes the tab title, shows the live cue, and marks itself fired (never re-prompts)", async () => {
+  it("upcoming: an armed reminder fires at scheduled time — flashes the tab title, shows the live cue, marks itself fired", async () => {
     localStorage.clear();
     vi.setSystemTime(new Date("2026-07-31T00:00:00.000Z"));
-    localStorage.setItem("proxywar:premiere-reminder:prem_fire", "armed");
-    stubReadModelFetch(
+    localStorage.setItem("proxywar:premiere-reminder:feat_fire", "armed");
+    stubReadModelAndFeaturedMatchFetch(
       readModel({
-        premieres: {
-          live: {
-            premiereId: "prem_fire",
-            roundNumber: 4,
-            mapLabel: "Iceland",
-            scheduledAt: "2026-07-31T00:00:05.000Z",
-            premierePageLive: false,
-          },
-          latest: null,
-        },
+        featuredMatches: [
+          featuredMatch({ matchId: "feat_fire", scheduledAt: "2026-07-31T00:00:05.000Z" }),
+        ],
       }),
+      [],
     );
     const el = mount();
     await flushMicrotasks();
@@ -592,35 +646,28 @@ describe("lobby-page hero live timers", () => {
     await flushMicrotasks();
     expect(document.title.startsWith("LIVE:")).toBe(true);
     expect(el.textContent).toContain("lobby.remind_me_live_cue");
-    expect(el.textContent).toContain("lobby.remind_me_sent");
-    expect(
-      localStorage.getItem("proxywar:premiere-reminder:prem_fire"),
-    ).toBe("fired");
+    expect(localStorage.getItem("proxywar:premiere-reminder:feat_fire")).toBe("fired");
   });
 });
 
-describe("lobby-page hero state B: Add to calendar and Remind me", () => {
+describe("lobby-page: Add to calendar and Remind me", () => {
   afterEach(() => {
     localStorage.clear();
   });
 
   function upcomingReadModel(): ReadModel {
     return readModel({
-      premieres: {
-        live: {
-          premiereId: "prem_ics",
-          roundNumber: 5,
-          mapLabel: "Ashfields",
+      featuredMatches: [
+        featuredMatch({
+          matchId: "feat_ics",
           scheduledAt: new Date(Date.now() + 600_000).toISOString(),
-          premierePageLive: false,
-        },
-        latest: null,
-      },
+        }),
+      ],
     });
   }
 
-  it("Add to calendar downloads a valid ICS blob built only from round/map — never a participant name", async () => {
-    stubReadModelFetch(upcomingReadModel());
+  it("Add to calendar downloads a valid ICS blob built from the event's own title", async () => {
+    stubReadModelAndFeaturedMatchFetch(upcomingReadModel(), []);
     const el = mount();
     await flushMicrotasks();
     const link = el.querySelector('a[href="#"]') as HTMLAnchorElement | null;
@@ -632,21 +679,14 @@ describe("lobby-page hero state B: Add to calendar and Remind me", () => {
         capturedBlob = obj as Blob;
         return "blob:mock-url";
       });
-    const revokeObjectURLSpy = vi
-      .spyOn(URL, "revokeObjectURL")
-      .mockImplementation(() => {});
-    const clickSpy = vi
-      .spyOn(HTMLAnchorElement.prototype, "click")
-      .mockImplementation(() => {});
-    link!.dispatchEvent(
-      new MouseEvent("click", { bubbles: true, cancelable: true }),
-    );
+    const revokeObjectURLSpy = vi.spyOn(URL, "revokeObjectURL").mockImplementation(() => {});
+    const clickSpy = vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(() => {});
+    link!.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
     expect(createObjectURLSpy).toHaveBeenCalledTimes(1);
     expect(capturedBlob).not.toBeNull();
     const text = await capturedBlob!.text();
     expect(text).toContain("BEGIN:VCALENDAR");
-    expect(text).toContain("SUMMARY:Proxy War Premiere");
-    expect(text).not.toContain("daveey");
+    expect(text).toContain("SUMMARY:Auri vs Sefirot");
     expect(clickSpy).toHaveBeenCalledTimes(1);
     expect(revokeObjectURLSpy).toHaveBeenCalledTimes(1);
     createObjectURLSpy.mockRestore();
@@ -654,224 +694,23 @@ describe("lobby-page hero state B: Add to calendar and Remind me", () => {
     clickSpy.mockRestore();
   });
 
-  it("Remind me arms a localStorage flag, disables re-arming, and survives a remount without re-prompting", async () => {
-    stubReadModelFetch(upcomingReadModel());
+  it("Remind me arms a localStorage flag keyed by matchId, disables re-arming, and survives a remount", async () => {
+    stubReadModelAndFeaturedMatchFetch(upcomingReadModel(), []);
     const el = mount();
     await flushMicrotasks();
     expect(el.textContent).toContain("lobby.remind_me_button");
     const button = el.querySelector("button") as HTMLButtonElement;
     button.click();
     await flushMicrotasks();
-    expect(
-      localStorage.getItem("proxywar:premiere-reminder:prem_ics"),
-    ).toBe("armed");
+    expect(localStorage.getItem("proxywar:premiere-reminder:feat_ics")).toBe("armed");
     expect(el.textContent).toContain("lobby.remind_me_armed");
-    expect(
-      (el.querySelector("button") as HTMLButtonElement).disabled,
-    ).toBe(true);
+    expect((el.querySelector("button") as HTMLButtonElement).disabled).toBe(true);
 
-    // Simulate a page reload: a fresh mount reads the same localStorage flag.
     document.body.innerHTML = "";
-    stubReadModelFetch(upcomingReadModel());
+    stubReadModelAndFeaturedMatchFetch(upcomingReadModel(), []);
     const remounted = mount();
     await flushMicrotasks();
     expect(remounted.textContent).toContain("lobby.remind_me_armed");
     expect(remounted.textContent).not.toContain("lobby.remind_me_button");
-  });
-});
-
-type HeroParticipantCardFixture = {
-  playerName: string;
-  displayName: string;
-  agentSlug: string | null;
-  emblemSvg: string | null;
-  primaryColor: string | null;
-  secondaryColor: string | null;
-  versionLabel: string | null;
-  builderId: string | null;
-  builderDisplayName: string | null;
-};
-
-function heroParticipantCard(
-  overrides: Partial<HeroParticipantCardFixture> = {},
-): HeroParticipantCardFixture {
-  return {
-    playerName: "player-one",
-    displayName: "Agent One",
-    agentSlug: "agent-one",
-    emblemSvg: null,
-    primaryColor: null,
-    secondaryColor: null,
-    versionLabel: null,
-    builderId: null,
-    builderDisplayName: null,
-    ...overrides,
-  };
-}
-
-/**
- * Routes the global `fetch` mock by URL: the read model for
- * `read-model.json`, and a scriptable response for the narrow
- * `/api/premieres/:id/featured-match` participant-identity channel —
- * `"network-error"` rejects the fetch outright, `"malformed"` resolves a
- * body that fails the client's own schema validation, and an array
- * resolves the real `{schemaVersion, match, participants}` shape (a
- * `match` stub only appears once `participants` is non-empty, matching
- * the server's own `resolveFeaturedMatchParticipantCards` gate).
- */
-function stubReadModelAndFeaturedMatchFetch(
-  model: ReadModel,
-  featuredMatch:
-    | HeroParticipantCardFixture[]
-    | "network-error"
-    | "malformed",
-): Mock {
-  const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
-    const url = typeof input === "string" ? input : input.toString();
-    if (url.includes("/featured-match")) {
-      if (featuredMatch === "network-error") {
-        throw new Error("network down");
-      }
-      if (featuredMatch === "malformed") {
-        return {
-          ok: true,
-          json: async () => ({ nonsense: true }),
-        } as Response;
-      }
-      return {
-        ok: true,
-        json: async () => ({
-          schemaVersion: 1,
-          match: featuredMatch.length > 0 ? { matchId: "fm_1" } : null,
-          participants: featuredMatch,
-        }),
-      } as Response;
-    }
-    return { ok: true, json: async () => model } as Response;
-  });
-  vi.stubGlobal("fetch", fetchMock);
-  return fetchMock;
-}
-
-describe("lobby-page hero participant identity (states A/B)", () => {
-  function liveActive(premiereId: string): ReadModel {
-    return readModel({
-      premieres: {
-        live: {
-          premiereId,
-          roundNumber: 9,
-          mapLabel: "Ashfields",
-          scheduledAt: new Date(Date.now() - 60_000).toISOString(),
-          premierePageLive: true,
-        },
-        latest: null,
-      },
-    });
-  }
-
-  function liveUpcoming(premiereId: string): ReadModel {
-    return readModel({
-      premieres: {
-        live: {
-          premiereId,
-          roundNumber: 9,
-          mapLabel: "Ashfields",
-          scheduledAt: new Date(Date.now() + 600_000).toISOString(),
-          premierePageLive: false,
-        },
-        latest: null,
-      },
-    });
-  }
-
-  it("state A: renders compact participant cards once the narrow route resolves a non-empty roster", async () => {
-    stubReadModelAndFeaturedMatchFetch(liveActive("prem_a1"), [
-      heroParticipantCard({
-        displayName: "Agent One",
-        emblemSvg: '<svg data-test-emblem="one"></svg>',
-        versionLabel: "v24",
-        builderDisplayName: "Acme Corp",
-      }),
-      heroParticipantCard({
-        displayName: "Agent Two",
-        agentSlug: "agent-two",
-        emblemSvg: null,
-        versionLabel: null,
-        builderDisplayName: null,
-      }),
-    ]);
-    const el = mount();
-    await flushMicrotasks(15);
-    expect(el.textContent).toContain("lobby.hero_participants_heading");
-    expect(el.textContent).toContain("Agent One");
-    expect(el.innerHTML).toContain('data-test-emblem="one"');
-    expect(el.textContent).toContain("v24");
-    expect(el.textContent).toContain(
-      `lobby.hero_participant_builder:${JSON.stringify({ builder: "Acme Corp" })}`,
-    );
-    expect(el.textContent).toContain("Agent Two");
-  });
-
-  it("state B: renders compact participant cards once the narrow route resolves a non-empty roster", async () => {
-    stubReadModelAndFeaturedMatchFetch(liveUpcoming("prem_b1"), [
-      heroParticipantCard({ displayName: "Agent Three", versionLabel: "v3" }),
-    ]);
-    const el = mount();
-    await flushMicrotasks(15);
-    expect(el.textContent).toContain("lobby.hero_participants_heading");
-    expect(el.textContent).toContain("Agent Three");
-    expect(el.textContent).toContain("v3");
-  });
-
-  it("state A: no backing FeaturedMatch record renders exactly as before — no participant section, no error", async () => {
-    stubReadModelAndFeaturedMatchFetch(liveActive("prem_a2"), []);
-    const el = mount();
-    await flushMicrotasks(15);
-    expect(el.textContent).not.toContain("lobby.hero_participants_heading");
-    expect(el.textContent).toContain("lobby.live_premiere_badge");
-    expect(el.querySelector('[role="alert"]')).toBeNull();
-  });
-
-  it("state B: no backing FeaturedMatch record renders exactly as before — no participant section, no error", async () => {
-    stubReadModelAndFeaturedMatchFetch(liveUpcoming("prem_b2"), []);
-    const el = mount();
-    await flushMicrotasks(15);
-    expect(el.textContent).not.toContain("lobby.hero_participants_heading");
-    expect(el.textContent).toContain("lobby.upcoming_premiere_badge");
-    expect(el.querySelector('[role="alert"]')).toBeNull();
-  });
-
-  it("an unregistered participant (agentSlug: null) falls back to its raw displayName, with no emblem or version rendered for it", async () => {
-    stubReadModelAndFeaturedMatchFetch(liveActive("prem_a3"), [
-      heroParticipantCard({
-        displayName: "unclaimed-player-9",
-        agentSlug: null,
-        emblemSvg: null,
-        versionLabel: null,
-        builderDisplayName: null,
-      }),
-    ]);
-    const el = mount();
-    await flushMicrotasks(15);
-    expect(el.textContent).toContain("unclaimed-player-9");
-    expect(el.innerHTML).not.toContain("<svg");
-    expect(el.textContent).not.toContain("lobby.hero_participant_builder");
-  });
-
-  it("a network failure on the participant-identity fetch degrades gracefully — no crash, no participant section, no lingering spinner", async () => {
-    stubReadModelAndFeaturedMatchFetch(liveActive("prem_a4"), "network-error");
-    const el = mount();
-    await flushMicrotasks(15);
-    expect(el.textContent).not.toContain("lobby.hero_participants_heading");
-    expect(el.textContent).not.toContain("lobby.loading");
-    expect(el.textContent).toContain("lobby.live_premiere_badge");
-  });
-
-  it("a malformed participant-identity response (fails the client's own schema) degrades the same as a network failure", async () => {
-    stubReadModelAndFeaturedMatchFetch(liveActive("prem_a5"), "malformed");
-    const el = mount();
-    await flushMicrotasks(15);
-    expect(el.textContent).not.toContain("lobby.hero_participants_heading");
-    expect(el.textContent).toContain("lobby.live_premiere_badge");
   });
 });

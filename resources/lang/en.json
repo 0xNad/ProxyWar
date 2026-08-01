@@ -1625,7 +1625,19 @@
     "view_match": "View match →",
     "builder_band_title": "Think your agent can beat them?",
     "builder_band_note": "League entry is self-serve: fork the starter repository, build a policy, and upload it — no waitlist. A dedicated build flow is coming; for now this links out to the starter repo.",
-    "starter_repo_link": "Starter repo →"
+    "starter_repo_link": "Starter repo →",
+    "event_stage_watch_premiere_cta": "Watch the Premiere — {time}",
+    "event_stage_watch_live_cta": "Watch the Premiere — Live now",
+    "event_stage_director_cut_cta": "Watch the {minutes}-minute Director Cut",
+    "event_stage_director_cut_runtime": "~{minutes} min Director Cut",
+    "season_schedule_heading": "{title} schedule",
+    "season_schedule_empty": "No upcoming events scheduled yet.",
+    "season_schedule_tbd": "Flagship event — details soon",
+    "next_expected_window": "Next expected event window: {date}",
+    "league_movement_heading": "League movement",
+    "version_debut_badge": "New version",
+    "rank_change_up": "▲{delta}",
+    "rank_change_down": "▼{delta}"
   },
   "watch": {
     "heading": "Watch",
@@ -1635,6 +1647,7 @@
     "premiere_heading": "Premiere",
     "no_premiere": "No scheduled premiere right now.",
     "live_premiere_badge": "Live Premiere",
+    "upcoming_premiere_badge": "Upcoming premiere",
     "round_label": "Round {round}",
     "watch_now": "Watch now",
     "archived_premiere_badge": "Archived premiere",
@@ -1675,7 +1688,11 @@
     "unknown_time": "at an unknown time",
     "schedule_unavailable": "Scheduled time unavailable.",
     "starts_in": "Starts in {duration}, by your device's clock.",
-    "started_ago": "Scheduled start was {duration} ago, by your device's clock."
+    "started_ago": "Scheduled start was {duration} ago, by your device's clock.",
+    "latest_director_cuts_heading": "Latest Director Cuts",
+    "season_schedule_heading": "{title} schedule",
+    "season_schedule_empty": "No events scheduled yet.",
+    "season_schedule_tbd": "Flagship event — details soon"
   },
   "agents_directory": {
     "title": "Agents",
@@ -2098,7 +2115,17 @@
     "analyst_events_heading": "Full public event log",
     "analyst_events_empty": "No events recorded yet.",
     "analyst_unavailable_premiere_sealed": "Decision data is sealed until this premiere reveals — the curated War Room and timeline stay live.",
-    "analyst_unavailable_no_data": "No decision data is available for this match."
+    "analyst_unavailable_no_data": "No decision data is available for this match.",
+    "state_strip_heading": "Match state",
+    "state_strip_leader_label": "Leader",
+    "state_strip_leader_unknown": "Not yet determined",
+    "state_strip_leader_value": "{name} · {percent}%",
+    "state_strip_delta_label": "Territory Δ",
+    "state_strip_alive_label": "Alive",
+    "state_strip_alive_value": "{alive}/{total}",
+    "state_strip_relations_label": "Alliances/Wars",
+    "state_strip_relations_value": "{alliances}/{wars}",
+    "state_strip_phase_label": "Phase"
   },
   "build_page": {
     "eyebrow": "Enter the league",

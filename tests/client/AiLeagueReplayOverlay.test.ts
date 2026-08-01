@@ -2696,6 +2696,7 @@ function readModelResponse(agents: PublicAgent[]): Response {
       rounds: [],
       matches: [],
       featuredMatches: [],
+      seasons: [],
       premieres: { live: null, latest: null },
       links: {
         enterTheLeagueUrl: "https://example.test/enter",

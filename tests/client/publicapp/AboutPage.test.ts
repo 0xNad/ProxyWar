@@ -77,6 +77,7 @@ function readModelBody(enterTheLeagueUrl: string) {
     rounds: [],
     matches: [],
     featuredMatches: [],
+    seasons: [],
     premieres: { live: null, latest: null },
     links: {
       enterTheLeagueUrl,

@@ -28,6 +28,11 @@ import { resolveFeaturedMatchStateRoot } from "../server/agents/FeaturedMatch";
 import { reconcileFeaturedMatchStore } from "../server/agents/FeaturedMatchReconcile";
 import { resolveFeaturedMatchParticipantCards } from "../server/agents/FeaturedMatchParticipants";
 import {
+  findEventPackage,
+  readEventPackageStore,
+  resolveEventPackageStateRoot,
+} from "../server/agents/season/EventPackage";
+import {
   buildLeagueEpisodeMatchPageModel,
   buildLeagueEpisodeParticipantCards,
   findLeagueEpisodeByRequestId,
@@ -1202,8 +1207,20 @@ async function loadFeaturedMatchDetail(
 ) {
   if (match === undefined) return null;
   const identity = await loadIdentityRegistrySnapshot();
+  // Season Zero activation prompt Phase 5: resolves this match's
+  // `EventPackage` (if any) so `publicFeaturedMatch`'s
+  // `isPubliclyPromotable`/`subtitle`/`reasonToWatch`/`directorCutEstimateSeconds`/
+  // canonical-URL fields report real values through this narrow route —
+  // without this lookup every record would fall back to `publicFeaturedMatch`'s
+  // own safe "no package passed" default (`isPubliclyPromotable: false`),
+  // which would make the Phase 5 hero/watch surfaces unable to ever find a
+  // real promotable event through this channel.
+  const eventPackageStore = await readEventPackageStore(
+    resolveEventPackageStateRoot(),
+  );
+  const eventPackage = findEventPackage(eventPackageStore, match.matchId);
   return {
-    match: publicFeaturedMatch(match),
+    match: publicFeaturedMatch(match, eventPackage),
     // Lets the client detect "is this record the CURRENTLY LIVE premiere"
     // via a plain string comparison against the already-fetched read
     // model's `premieres.live.premiereId`, without doing any hashing
