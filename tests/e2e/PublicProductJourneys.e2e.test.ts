@@ -444,63 +444,82 @@ describe("premiere: active / late-join sync / no seek past edge / reveal after e
     expect(beyondEdge.liveVisibleSequence).toBeGreaterThan(0);
   });
 
-  // NOT converted to a real test — documented gap, investigated in depth
-  // rather than forced. The other three cases in this describe block
-  // (active/late-join/no-seek-past-edge) are real, passing tests against
-  // this exact same admitted premiere; only the terminal reveal itself
-  // reproducibly stalls.
+  // Root-caused 2026-08-01. NOT a runtime bug — `bootstrap()`'s
+  // `integrityScope.authoritativeResult` can never observe a reveal: it is
+  // a hardcoded `z.literal("not_revealed")` in
+  // `ReplayPremiereWire.ts`'s `createPremierePublicBootstrap` (enforced by
+  // `ReplayPremierePublicPage.ts`'s `spoilerNeutralModel`, which THROWS if
+  // that field is ever anything else — the bootstrap payload is
+  // deliberately spoiler-neutral so it is safe to cache/embed pre-reveal).
+  // The three earlier cases' `bootstrap()` polling was only ever exercising
+  // the pre-reveal payload shape, never the actual reveal signal.
   //
-  // Symptom, confirmed live over two independent ~5-6 minute observation
-  // windows with correct UTC timestamps throughout: `liveVisibleSequence`
-  // reaches 21399 (one turn short of the bundle's full 21400) within
-  // roughly the expected ~24s (2x ~60s REPLAY_PREMIERE_CHECKPOINT_PAUSE_MS
-  // windows + ~21s of 1ms/turn playback), then never advances again —
-  // `bootstrap()`'s `authoritativeResult` stays `not_revealed` even after
-  // 330+ continuous seconds of polling (both `bootstrap` and
-  // `live-projection`, which per `ReplayPremiereRuntimeCoordinator.ts`'s
-  // `synchronizeUnlocked()` should keep driving the release loop forward).
-  //
-  // Ruled out: (1) NOT a checkpoint-pause timing issue — both checkpoints
-  // visibly resolve (liveVisibleSequence jumps past each one) well before
-  // the stall point. (2) NOT `operationCeiling` starvation —
-  // `ReplayPremiereRuntimeCoordinator.ts`'s per-synchronize op ceiling is
-  // `this.drafts.length + 8`, comfortably enough to drain any remaining
-  // backlog in one call. (3) `authoritativeElapsedAt()`
-  // (`ReplayPremiereRuntimeCoordinator.ts:1485-1496`, `now - actualStartAt
-  // - totalPausedAt`) should be several hundred thousand ms by the time of
-  // the stall — far more than the ~21,400ms `presentationOffsetMs` a
-  // turn-1ms-scaled terminal draft needs — so the simple elapsed-time gate
-  // (`if (draft.descriptor.presentationOffsetMs > elapsed) break;`,
-  // `ReplayPremiereRuntimeCoordinator.ts:871`) does not explain it either
-  // on its own.
-  //
-  // Leading but UNCONFIRMED hypothesis: `ReplayPremiereChunks.ts`'s chunk
-  // builder flushes a chunk once
-  // `record.presentationOffsetMs - pending[0].presentationOffsetMs >
-  // options.maxPresentationSpanMs` (line ~88) — at this fixture's
-  // 1ms/turn scale, `maxPresentationSpanMs` (apparently tuned for
-  // realistic ~100ms/turn pacing) may group the ENTIRE 21,400-turn match
-  // into one or very few oversized chunks, which could interact with the
-  // terminal-chunk-uniqueness invariant
-  // (`terminalChunks.length !== 1 || chunks.at(-1).terminal !== true` at
-  // `ReplayPremiereChunks.ts:184-191`) or a chunk-count/byte ceiling in a
-  // way not yet traced to a concrete failing assertion. NOT fixed here:
-  // `ReplayPremiereRuntimeCoordinator.ts`/`ReplayPremiereChunks.ts`/
-  // `ReplayPremierePublication.ts` are integrity-critical premiere
-  // infrastructure (checksum chains, reveal commitments) — patching them
-  // from an unconfirmed hypothesis under time pressure is the wrong call.
-  // A production, realistically-paced premiere (~100ms/turn, the
-  // `PREMIERE_REAL_TURN_INTERVAL_MS` constant) is far outside this
-  // fixture's accelerated regime and has no evidence of this issue.
-  //
-  // Next step for whoever picks this up: log `this.drafts.length` and
-  // each draft's `presentationOffsetMs` span at admission time for this
-  // exact fixture bundle, and compare against
-  // `REPLAY_PREMIERE_MAX_PRESENTATION_SPAN_MS` /
-  // whatever sets `maxPresentationSpanMs` at admission
-  // (`replay-premiere-admit.ts`) to confirm or rule out the chunking
-  // hypothesis directly, before touching any runtime code.
-  test.todo(
+  // Direct reproduction against a real admitted premiere (isolated clean
+  // clone at HEAD `09aeba224`, `FIXTURE_ADMIT_LIVE_PREMIERE=1`, temporary
+  // instrumentation in `synchronizeUnlocked()`, reverted after use) proved
+  // the release/reveal pipeline itself is correct: `nextDraftIndex`
+  // advanced through all 24 drafts, the terminal draft's
+  // `presentationOffsetMs` (21399) cleared the elapsed-time gate the moment
+  // real playback caught up, and `commitTerminalReveal()` committed on the
+  // first attempt with no retry/error. `GET
+  // /api/premieres/:id/reveal` (the same endpoint
+  // `ReplayPremiereNetwork.ts`'s real client polls via its own
+  // `revealPath()`, never `bootstrap()`) returned HTTP 200 with the full
+  // authoritative result (Fixture aggressive won, turnCount 21400)
+  // immediately once real elapsed time cleared the two checkpoint pauses
+  // plus 1ms/turn playback. Production pacing is unaffected either way —
+  // this was a test-only assertion-target mistake, not a fixture-pacing
+  // artifact and not a runtime defect.
+  test(
     "the premiere page shows the real result once revealed",
+    async () => {
+      // Checkpoints pause the release clock for
+      // REPLAY_PREMIERE_CHECKPOINT_PAUSE_MS (60s) each and this fixture has
+      // two (10%/20% of the 21,400-turn match), so real wall-clock
+      // time-to-reveal is roughly 2*60s of pause plus ~21s of 1ms/turn
+      // playback — comfortably inside this generous deadline with margin
+      // for whatever real time the earlier cases in this block already
+      // consumed.
+      const deadline = Date.now() + 240_000;
+      let revealStatus = 0;
+      let revealBody: {
+        authoritativeResult: { bytes: string; sha256: string };
+      } | null = null;
+      while (Date.now() < deadline) {
+        const response = await fetch(
+          `${live.origin}/api/premieres/${PREMIERE_ID}/reveal`,
+        );
+        revealStatus = response.status;
+        if (revealStatus === 200) {
+          revealBody = await response.json();
+          break;
+        }
+        // Exception to the no-real-timers rule: this polls a real running
+        // server process advancing on the real system clock (a separate
+        // premiere-runtime `setTimeout` scheduler in another process) —
+        // there is no fake-timer boundary to control here, matching this
+        // file's existing real-delay precedent (`FixtureServer.ts`,
+        // `CdpBrowser.ts`). `Promise.withResolvers()` is unavailable under
+        // this repo's ES2022 `lib` target (tsconfig.json), so this matches
+        // the plain-executor pattern already used throughout this file.
+        expect(revealStatus).toBe(404);
+        await new Promise((resolve) => setTimeout(resolve, 2_000));
+      }
+      expect(revealStatus).toBe(200);
+      expect(revealBody).not.toBeNull();
+      expect(revealBody!.authoritativeResult.bytes.length).toBeGreaterThan(0);
+      expect(revealBody!.authoritativeResult.sha256).toMatch(/^[0-9a-f]{64}$/);
+      // The live-projection tap and the reveal agree on the same final
+      // sequence: nothing is fabricated or diverges between the two.
+      const final = await liveProjection(0);
+      expect(final.liveVisibleSequence).toBe(21_399);
+      // bootstrap()'s pre-reveal field is unaffected by the real reveal —
+      // this is the deliberate spoiler-neutral contract, not a stale-read
+      // bug. Documented here so a future reader doesn't reintroduce the
+      // exact confusion this test replaces.
+      const boot = await bootstrap();
+      expect(boot.integrityScope.authoritativeResult).toBe("not_revealed");
+    },
+    260_000,
   );
 });
