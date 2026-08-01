@@ -7,12 +7,13 @@
   "scripts": {
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "prepare:docker-context": "node scripts/prepare-docker-context.mjs",
-    "build:image": "npm run prepare:docker-context && docker build --platform linux/amd64 -f Dockerfile.coworld -t proxywar-coworld-local:latest .docker-context",
+    "build:image": "npm run gate:memory && npm run prepare:docker-context && docker build --platform linux/amd64 -f Dockerfile.coworld -t proxywar-coworld-local:latest .docker-context",
     "preflight:legal-action-ids": "node src/legal-action-id-preflight.ts",
     "certify": "mkdir -p tmp && TMPDIR=\"$PWD/tmp\" uvx --from coworld==0.1.32 coworld certify coworld/coworld_manifest.json --timeout-seconds 180",
     "certify:ffa": "mkdir -p tmp && TMPDIR=\"$PWD/tmp\" uvx --from coworld==0.1.32 coworld certify coworld/coworld_manifest_ffa4p.json --timeout-seconds 240",
     "run:episode": "mkdir -p tmp && TMPDIR=\"$PWD/tmp\" uvx --from coworld==0.1.32 coworld run-episode coworld/coworld_manifest.json --verify-replay --timeout-seconds 3600",
-    "run:episode:preflight": "npm run run:episode && npm run preflight:legal-action-ids -- coworld/results/replay"
+    "run:episode:preflight": "npm run run:episode && npm run preflight:legal-action-ids -- coworld/results/replay",
+    "gate:memory": "node scripts/memory-gate.mjs"
   },
   "dependencies": {
     "@anthropic-ai/bedrock-sdk": "^0.29.2",
