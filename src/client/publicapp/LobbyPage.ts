@@ -905,10 +905,15 @@ export class LobbyPage extends LitElement {
               : translateText("lobby.winner_announcement", { winner: winnerName })}
           </p>
         </details>
+        <a
+          href="/match/${encodeURIComponent(match.matchId)}"
+          class="mt-2 inline-block text-sm font-bold text-accent no-underline outline-none hover:text-accent-strong focus-visible:ring-2 focus-visible:ring-accent"
+          >${translateText("lobby.view_match")}</a
+        >
         ${watchHref !== null
           ? html`<a
               href=${watchHref}
-              class="mt-2 inline-block text-sm font-bold text-accent no-underline outline-none hover:text-accent-strong focus-visible:ring-2 focus-visible:ring-accent"
+              class="ml-3 mt-2 inline-block text-sm text-ink-muted no-underline outline-none hover:text-accent focus-visible:ring-2 focus-visible:ring-accent"
               >${translateText("lobby.watch_replay")}</a
             >`
           : nothing}

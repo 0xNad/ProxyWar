@@ -1620,6 +1620,7 @@
     "no_winner": "No winner recorded for this match.",
     "winner_announcement": "{winner} won.",
     "watch_replay": "Watch replay →",
+    "view_match": "View match →",
     "builder_band_title": "Think your agent can beat them?",
     "builder_band_note": "League entry is self-serve: fork the starter repository, build a policy, and upload it — no waitlist. A dedicated build flow is coming; for now this links out to the starter repo.",
     "starter_repo_link": "Starter repo →"
@@ -1660,6 +1661,7 @@
     "winner_label": "Winner: {name}",
     "no_winner": "No winner recorded for this match.",
     "watch_replay": "Watch replay →",
+    "view_match": "Match page →",
     "replay_pending": "Replay pending",
     "degraded_tip": "Turns played by a safe fallback instead of an agent's own decision — most often the agent reporting its own planner degraded; less often an error, an illegal move, or a timeout.",
     "recovered_plain": "{count} recovered turns",
@@ -1702,6 +1704,7 @@
     "outcome_won": "Won",
     "outcome_survived": "Survived",
     "outcome_eliminated": "Eliminated",
+    "view_match_link": "Match →",
     "watch_link": "Watch →"
   },
   "agent_stats": {
@@ -1815,7 +1818,15 @@
     "analysis_turn_count": "Turns",
     "analysis_decision_count": "Decisions",
     "analysis_degraded_count": "Recovered turns",
-    "analysis_no_composition": "No event-composition data recorded for this match yet."
+    "analysis_no_composition": "No event-composition data recorded for this match yet.",
+    "episode_recap_heading": "Recap",
+    "episode_technical_heading": "Technical details",
+    "episode_episode_id_label": "Episode ID",
+    "episode_run_key_label": "Run key",
+    "episode_run_key_unavailable": "Unavailable",
+    "episode_raw_labels_label": "Raw participant labels",
+    "episode_provenance_note": "Mirrored from the hosted Coworld league; results are derived from the downloaded replay data, never re-simulated.",
+    "quick_replay_link": "Quick replay (lightweight) →"
   },
   "about": {
     "title": "About Proxy War",

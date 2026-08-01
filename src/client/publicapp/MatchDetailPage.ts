@@ -16,7 +16,11 @@ import {
   ReadModel,
   type PublicFeaturedMatch,
 } from "./ReadModelSchema";
-import { computeDegradedShare, formatDuration } from "./WatchPage";
+import {
+  computeDegradedShare,
+  formatDuration,
+  renderDegradedNote,
+} from "./WatchPage";
 import {
   armReminder,
   downloadIcsFile,
@@ -52,6 +56,58 @@ const featuredMatchDetailResponseSchema = z.object({
   schemaVersion: z.literal(1),
   match: PublicFeaturedMatchSchema,
   derivedPremiereId: z.string().nullable(),
+  participants: z.array(featuredMatchParticipantCardSchema),
+});
+
+/**
+ * `GET /api/matches/:episodeId`'s response shape (product overhaul: the
+ * ordinary-league-episode sibling of the schema above) — see
+ * `LeagueEpisodeMatchPage.ts`'s own doc for why every field here is
+ * already public. `players` is placement-ordered (winner first); `recap`
+ * is `null` whenever no real `match-story.md` artifact backs it — never a
+ * placeholder.
+ */
+const leagueEpisodePlayerSchema = z.object({
+  slot: z.number(),
+  name: z.string(),
+  tilesOwned: z.number(),
+  isAlive: z.boolean(),
+  isWinner: z.boolean(),
+  color: z.string(),
+  placement: z.number(),
+});
+
+const leagueEpisodeMatchSchema = z.object({
+  episodeRequestId: z.string(),
+  shortId: z.string(),
+  runKey: z.string().nullable(),
+  roundNumber: z.number().nullable(),
+  completedAt: z.string().nullable(),
+  map: z.string(),
+  mapSize: z.string(),
+  turnCount: z.number().nullable(),
+  decisionCount: z.number().nullable(),
+  degradedCount: z.number().nullable(),
+  winnerName: z.string().nullable(),
+  players: z.array(leagueEpisodePlayerSchema),
+  watchHref: z.string().nullable(),
+  fullRenderHref: z.string().nullable(),
+  premiereHref: z.string().nullable(),
+  directorCut: z
+    .object({
+      durationEstimateSeconds: z.number(),
+      segmentCount: z.number(),
+    })
+    .nullable(),
+  recap: z
+    .object({ summary: z.string(), beats: z.array(z.string()) })
+    .nullable(),
+});
+type LeagueEpisodeMatch = z.infer<typeof leagueEpisodeMatchSchema>;
+
+const leagueEpisodeMatchDetailResponseSchema = z.object({
+  schemaVersion: z.literal(1),
+  match: leagueEpisodeMatchSchema,
   participants: z.array(featuredMatchParticipantCardSchema),
 });
 
@@ -139,6 +195,7 @@ export class MatchDetailPage extends LitElement {
 
   @state() private loadState: LoadState = "loading";
   @state() private match: PublicFeaturedMatch | null = null;
+  @state() private episodeMatch: LeagueEpisodeMatch | null = null;
   @state() private participants: FeaturedMatchParticipantCard[] = [];
   @state() private readModel: ReadModel | null = null;
   /** Drives the pre-match state's live countdown — same client-clock-only convention `LobbyPage`'s state B documents (never skew-corrected against the read model's periodic-mirror-poll `generatedAt`). */
@@ -176,45 +233,80 @@ export class MatchDetailPage extends LitElement {
     }
   }
 
+  /**
+   * Resolution order (product overhaul: every mirrored league episode now
+   * gets a page too, not just `FeaturedMatch` records) — dispatched purely
+   * from `matchId`'s prefix, never by probing both routes: `feat_...` is
+   * the `FeaturedMatch` store's own id namespace
+   * (`/^feat_[a-f0-9]{20}$/`, `FeaturedMatch.ts`), `ereq_...` is Coworld's
+   * own episode-request id namespace
+   * (`/^ereq_[A-Za-z0-9_-]+$/`, `CoworldLeagueMirrorCore.ts`'s
+   * `isSafeCoworldEpisodeRequestId`) — the two never collide (see
+   * `PremiereReminder.ts`'s own doc for the same observation about this
+   * exact pair of id spaces), so there is no ambiguity to resolve by
+   * trying one then the other.
+   */
   private async load(): Promise<void> {
     this.loadState = "loading";
+    const isFeaturedMatchId = this.matchId.startsWith("feat_");
     try {
       const [readModel, response] = await Promise.all([
         fetchReadModel(),
-        fetch(`/api/featured-matches/${encodeURIComponent(this.matchId)}`, {
-          method: "GET",
-          headers: { Accept: "application/json" },
-          credentials: "same-origin",
-          cache: "no-store",
-        }),
+        fetch(
+          isFeaturedMatchId
+            ? `/api/featured-matches/${encodeURIComponent(this.matchId)}`
+            : `/api/matches/${encodeURIComponent(this.matchId)}`,
+          {
+            method: "GET",
+            headers: { Accept: "application/json" },
+            credentials: "same-origin",
+            cache: "no-store",
+          },
+        ),
       ]);
       this.readModel = readModel;
       if (response.status === 404) {
         this.match = null;
+        this.episodeMatch = null;
         this.participants = [];
         this.loadState = "not-found";
         return;
       }
       const body: unknown = await response.json().catch(() => null);
-      const parsed = featuredMatchDetailResponseSchema.safeParse(body);
-      if (!response.ok || !parsed.success) {
-        throw new Error("featured_match_detail_load_failed");
-      }
-      const live = readModel.premieres.live;
-      if (
-        live !== null &&
-        parsed.data.derivedPremiereId !== null &&
-        parsed.data.derivedPremiereId === live.premiereId
-      ) {
-        // State 2 — Live-redirect. Stage 4 owns the broadcast layout; this
-        // page never renders it (see class doc). `replace`, not `assign`,
-        // per that same doc.
-        window.location.replace(
-          `/premiere/${encodeURIComponent(live.premiereId)}`,
-        );
+      if (isFeaturedMatchId) {
+        const parsed = featuredMatchDetailResponseSchema.safeParse(body);
+        if (!response.ok || !parsed.success) {
+          throw new Error("featured_match_detail_load_failed");
+        }
+        const live = readModel.premieres.live;
+        if (
+          live !== null &&
+          parsed.data.derivedPremiereId !== null &&
+          parsed.data.derivedPremiereId === live.premiereId
+        ) {
+          // State 2 — Live-redirect. Stage 4 owns the broadcast layout; this
+          // page never renders it (see class doc). `replace`, not `assign`,
+          // per that same doc.
+          window.location.replace(
+            `/premiere/${encodeURIComponent(live.premiereId)}`,
+          );
+          return;
+        }
+        this.match = parsed.data.match;
+        this.episodeMatch = null;
+        this.participants = parsed.data.participants;
+        this.loadState = "ready";
         return;
       }
-      this.match = parsed.data.match;
+      // League episode — always completed+published by definition (the
+      // mirror only ever lists an episode once it has a downloaded
+      // replay), so there is no pre-match/live-redirect branch here.
+      const parsed = leagueEpisodeMatchDetailResponseSchema.safeParse(body);
+      if (!response.ok || !parsed.success) {
+        throw new Error("league_episode_detail_load_failed");
+      }
+      this.match = null;
+      this.episodeMatch = parsed.data.match;
       this.participants = parsed.data.participants;
       this.loadState = "ready";
     } catch {
@@ -237,6 +329,15 @@ export class MatchDetailPage extends LitElement {
         this.match !== null &&
         this.readModel !== null
           ? this.renderMatch(this.match, this.participants, this.readModel)
+          : nothing}
+        ${this.loadState === "ready" &&
+        this.episodeMatch !== null &&
+        this.readModel !== null
+          ? this.renderLeagueEpisodeMatch(
+              this.episodeMatch,
+              this.participants,
+              this.readModel,
+            )
           : nothing}
       </main>
       ${appShellFooter()}
@@ -788,6 +889,324 @@ export class MatchDetailPage extends LitElement {
           ${translateText("match_detail.storylines_note")}
         </p>
       </section>
+    `;
+  }
+
+  // ---- League episode (ordinary league match) render path ---------------
+  //
+  // Product overhaul: every mirrored league episode now gets a canonical
+  // page too, not just `FeaturedMatch` records — resolved via
+  // `GET /api/matches/:episodeId` (see `load()`'s id-prefix dispatch).
+  // League episodes are completed+published by definition (the mirror
+  // only ever lists an episode once it has a downloaded replay), so this
+  // is ALWAYS a post-match render — no pre-match/live-redirect states
+  // apply here, unlike the `FeaturedMatch` branch above.
+
+  private renderLeagueEpisodeMatch(
+    match: LeagueEpisodeMatch,
+    participants: readonly FeaturedMatchParticipantCard[],
+    readModel: ReadModel,
+  ): TemplateResult {
+    return html`
+      ${this.renderLeagueEpisodeHeader(match)}
+      ${this.renderLeagueEpisodeResult(match, participants)}
+      ${this.renderLeagueEpisodeActions(match)}
+      ${this.renderLeagueEpisodeRecap(match)}
+      <section
+        class="mt-6"
+        aria-labelledby="match-detail-participants-heading"
+      >
+        <h2
+          id="match-detail-participants-heading"
+          class="mb-2 text-sm font-black uppercase tracking-wide text-ink-muted"
+        >
+          ${translateText("match_detail.participants_heading")}
+        </h2>
+        ${this.renderParticipantCards(participants)}
+      </section>
+      ${this.renderStorylines(participants)}
+      ${this.renderLeagueEpisodeTechnicalDrawer(match, readModel)}
+    `;
+  }
+
+  private renderLeagueEpisodeHeader(match: LeagueEpisodeMatch): TemplateResult {
+    const roundLabel =
+      match.roundNumber !== null
+        ? translateText("watch.round_label", { round: match.roundNumber })
+        : null;
+    return html`
+      <h1 class="mb-1 text-2xl font-bold text-ink">
+        ${match.map}${roundLabel !== null ? html` · ${roundLabel}` : nothing}
+      </h1>
+      <p
+        class="mb-4 flex flex-wrap items-center gap-1 font-mono text-xs text-ink-muted"
+      >
+        <span
+          >${match.completedAt !== null
+            ? new Date(match.completedAt).toLocaleString()
+            : translateText("watch.unknown_time")}</span
+        >
+        ${renderDegradedNote(match)}
+      </p>
+    `;
+  }
+
+  /**
+   * Winner + placements, sourced directly from `match.players` (already
+   * placement-ordered by the server — see `LeagueEpisodeMatchPage.ts`'s
+   * `placementOrderedPlayers`) rather than the `agentId`-keyed correlation
+   * the `FeaturedMatch` branch's `renderPostMatch` needs — an episode's
+   * players carry their own `name`/`tilesOwned`/`isWinner` directly, so no
+   * bulk-`agents`-array lookup is required. Agent profile links come from
+   * zipping against `participants` by `playerName` — the SAME
+   * `FeaturedMatchParticipantCard` identity resolution every other branch
+   * of this page already uses.
+   */
+  private renderLeagueEpisodeResult(
+    match: LeagueEpisodeMatch,
+    participants: readonly FeaturedMatchParticipantCard[],
+  ): TemplateResult {
+    const cardByName = new Map(
+      participants.map((participant) => [
+        participant.playerName,
+        participant,
+      ]),
+    );
+    const winnerCard =
+      match.winnerName === null ? null : (cardByName.get(match.winnerName) ?? null);
+    const winnerSlug = winnerCard?.agentSlug ?? null;
+    return html`
+      <div class="mt-4 rounded-lg border border-line bg-surface-2 p-4">
+        <p class="text-sm font-black uppercase tracking-wide text-ink-muted">
+          ${translateText("match_detail.winner_heading")}
+        </p>
+        <p class="mt-1 text-lg font-bold text-ink">
+          ${match.winnerName === null
+            ? translateText("watch.no_winner")
+            : winnerSlug !== null
+              ? html`<a
+                  href="/agent/${encodeURIComponent(winnerSlug)}"
+                  class="text-ink no-underline outline-none hover:text-accent focus-visible:ring-2 focus-visible:ring-accent"
+                  >${winnerCard?.displayName ?? match.winnerName}</a
+                >`
+              : (winnerCard?.displayName ?? match.winnerName)}
+        </p>
+      </div>
+      <div class="mt-4">
+        <p class="text-sm font-black uppercase tracking-wide text-ink-muted">
+          ${translateText("match_detail.placements_heading")}
+        </p>
+        <ol class="mt-2 flex flex-col gap-1.5" role="list">
+          ${match.players.map((player) => {
+            const card = cardByName.get(player.name) ?? null;
+            const displayName = card?.displayName ?? player.name;
+            const agentSlug = card?.agentSlug ?? null;
+            return html`
+              <li
+                class="flex items-center gap-2 rounded-md border border-line bg-surface-2 px-3 py-1.5 text-sm"
+              >
+                <span
+                  class="w-6 shrink-0 font-mono font-black text-ink-muted"
+                  >#${player.placement}</span
+                >
+                <span class="flex-1 truncate font-semibold text-ink">
+                  ${agentSlug !== null
+                    ? html`<a
+                        href="/agent/${encodeURIComponent(agentSlug)}"
+                        class="text-ink no-underline outline-none hover:text-accent focus-visible:ring-2 focus-visible:ring-accent"
+                        >${displayName}</a
+                      >`
+                    : displayName}
+                </span>
+                ${player.isAlive
+                  ? nothing
+                  : html`<span
+                      class="shrink-0 font-mono text-xs text-ink-muted"
+                      >${translateText("coworld_league.eliminated")}</span
+                    >`}
+              </li>
+            `;
+          })}
+        </ol>
+      </div>
+      <p
+        class="mt-4 rounded-md border border-line bg-surface-2 px-3 py-2 text-xs text-ink-muted"
+      >
+        ${translateText("match_detail.integrity_note")}
+      </p>
+    `;
+  }
+
+  /**
+   * Primary action: Director Cut (when the mirror generated one for this
+   * run) or plain Full Replay, both pointing at `fullRenderHref` — Director
+   * Cut is a PLAYBACK MODE inside that same real-client renderer
+   * (`AiLeagueReplayOverlay.ts`'s `mountDirectorCutController`, enabled by
+   * default for archived matches), never a separate URL. Secondary action:
+   * the lightweight `watchHref` spectator page, shown only when it's a
+   * genuinely different link (a fixture/test row can point both hrefs at
+   * the same URL).
+   */
+  private renderLeagueEpisodeActions(match: LeagueEpisodeMatch): TemplateResult {
+    const primaryHref = match.fullRenderHref;
+    const primaryLabel =
+      match.directorCut !== null
+        ? translateText("watch.director_cut_duration", {
+            minutes: Math.max(
+              1,
+              Math.round(match.directorCut.durationEstimateSeconds / 60),
+            ),
+          })
+        : translateText("watch.watch_replay");
+    const secondaryHref =
+      match.watchHref !== null && match.watchHref !== primaryHref
+        ? match.watchHref
+        : null;
+    return html`
+      <div class="mt-6 flex flex-wrap items-center gap-3">
+        ${primaryHref !== null
+          ? html`<a
+              href=${primaryHref}
+              class="inline-flex min-h-11 items-center justify-center rounded-md bg-accent px-4 text-sm font-bold text-surface no-underline outline-none hover:opacity-90 focus-visible:ring-2 focus-visible:ring-accent"
+              >${primaryLabel}</a
+            >`
+          : html`<span class="text-sm text-ink-muted"
+              >${translateText("watch.replay_pending")}</span
+            >`}
+        ${secondaryHref !== null
+          ? html`<a
+              href=${secondaryHref}
+              class="inline-flex min-h-11 items-center justify-center rounded-md border border-line bg-surface-2 px-4 text-sm font-bold text-ink no-underline outline-none hover:border-ink-muted focus-visible:ring-2 focus-visible:ring-accent"
+              >${translateText("match_detail.quick_replay_link")}</a
+            >`
+          : nothing}
+      </div>
+    `;
+  }
+
+  /**
+   * Conditional recap section (product overhaul spec: "a recap SECTION
+   * ONLY when real artifacts support it"). `match.recap` is already
+   * `null` unless a real `match-story.md` backs it — see
+   * `LeagueEpisodeMatchPage.ts`'s `readLeagueEpisodeRecap` — so no
+   * additional "is this worth showing" check is needed here; absence IS
+   * the honest signal, never a placeholder.
+   */
+  private renderLeagueEpisodeRecap(
+    match: LeagueEpisodeMatch,
+  ): TemplateResult | typeof nothing {
+    if (match.recap === null) return nothing;
+    const recap = match.recap;
+    return html`
+      <section class="mt-6" aria-labelledby="match-detail-recap-heading">
+        <h2
+          id="match-detail-recap-heading"
+          class="mb-2 text-sm font-black uppercase tracking-wide text-ink-muted"
+        >
+          ${translateText("match_detail.episode_recap_heading")}
+        </h2>
+        ${recap.summary.length > 0
+          ? html`<p class="text-sm text-ink-dim">${recap.summary}</p>`
+          : nothing}
+        ${recap.beats.length > 0
+          ? html`<ul class="mt-2 flex flex-col gap-1.5" role="list">
+              ${recap.beats.map(
+                (beat) => html`<li
+                  class="rounded-md border border-line bg-surface-2 px-3 py-1.5 text-sm text-ink-dim"
+                >
+                  ${beat}
+                </li>`,
+              )}
+            </ul>`
+          : nothing}
+      </section>
+    `;
+  }
+
+  /**
+   * Technical/integrity drawer — same `<details class="agent-stats-section
+   * agent-analysis-tab">` disclosure pattern `renderMatchAnalysis` already
+   * establishes on the `FeaturedMatch` branch (episodeRequestId/run key/
+   * raw participant labels/provenance instead of turn/decision counts
+   * alone, since an episode page has no separate archive row to cross-
+   * reference — every field is already on `match` itself).
+   */
+  private renderLeagueEpisodeTechnicalDrawer(
+    match: LeagueEpisodeMatch,
+    readModel: ReadModel,
+  ): TemplateResult {
+    const rows: (TemplateResult | typeof nothing)[] = [];
+    if (match.turnCount !== null) {
+      rows.push(html`
+        <div class="agent-analysis-row">
+          <dt>${translateText("match_detail.analysis_turn_count")}</dt>
+          <dd>${match.turnCount.toLocaleString()}</dd>
+        </div>
+      `);
+    }
+    if (match.decisionCount !== null) {
+      rows.push(html`
+        <div class="agent-analysis-row">
+          <dt>${translateText("match_detail.analysis_decision_count")}</dt>
+          <dd>${match.decisionCount.toLocaleString()}</dd>
+        </div>
+      `);
+    }
+    if (match.degradedCount !== null) {
+      const { share, elevated } = computeDegradedShare(
+        match.degradedCount,
+        match.decisionCount,
+      );
+      rows.push(html`
+        <div class="agent-analysis-row">
+          <dt>${translateText("match_detail.analysis_degraded_count")}</dt>
+          <dd>
+            ${match.degradedCount.toLocaleString()}
+            ${share !== null
+              ? html`<span class="agent-analysis-detail"
+                  >${elevated ? "⚠ " : ""}${share}%</span
+                >`
+              : nothing}
+          </dd>
+        </div>
+      `);
+    }
+    rows.push(html`
+      <div class="agent-analysis-row">
+        <dt>${translateText("match_detail.episode_episode_id_label")}</dt>
+        <dd class="font-mono">${match.episodeRequestId}</dd>
+      </div>
+    `);
+    rows.push(html`
+      <div class="agent-analysis-row">
+        <dt>${translateText("match_detail.episode_run_key_label")}</dt>
+        <dd class="font-mono">
+          ${match.runKey ??
+          translateText("match_detail.episode_run_key_unavailable")}
+        </dd>
+      </div>
+    `);
+    rows.push(html`
+      <div class="agent-analysis-row">
+        <dt>${translateText("match_detail.episode_raw_labels_label")}</dt>
+        <dd>${match.players.map((player) => player.name).join(", ")}</dd>
+      </div>
+    `);
+    return html`
+      <details class="agent-stats-section agent-analysis-tab mt-6">
+        <summary>
+          ${translateText("match_detail.episode_technical_heading")}
+        </summary>
+        <p class="agent-analysis-updated">
+          ${translateText("match_detail.analysis_last_updated", {
+            date: new Date(readModel.generatedAt).toLocaleString(),
+          })}
+        </p>
+        <dl class="agent-analysis-grid">${rows}</dl>
+        <p class="mt-2 text-[11px] italic leading-snug text-ink-muted">
+          ${translateText("match_detail.episode_provenance_note")}
+        </p>
+      </details>
     `;
   }
 }

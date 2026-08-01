@@ -338,34 +338,42 @@ describe("coworldLeagueIndexHtml", () => {
     expect(html.toLowerCase()).not.toContain("difficulty");
   });
 
-  test("links the full render as the single replay button", () => {
+  test("links the canonical match page first, then the full render as a secondary replay link", () => {
     const html = coworldLeagueIndexHtml(sampleData());
+    expect(html).toContain('href="/match/ereq_aaaa">▶ View match page</a>');
     expect(html).toContain('href="/ai-league-replay/coworld-run"');
     expect(html).toContain("▶ Watch replay");
-    expect(html).toContain("replay pending");
+    // The second episode has no replay bundle yet, but still gets its own
+    // canonical match-page link — never "replay pending" text anymore,
+    // since every episode is now reachable via /match/:episodeId
+    // regardless of replay-bundle availability.
+    expect(html).toContain('href="/match/ereq_bbbb">▶ View match page</a>');
+    expect(html).not.toContain("replay pending");
     // The spectator page is no longer linked from battle cards.
     expect(html).not.toContain("spectator.html");
   });
 
-  test("a revealed premiere adds a Watch-the-premiere link beside the replay link", () => {
+  test("a revealed premiere adds a Watch-the-premiere link beside the match and replay links", () => {
     const data = sampleData();
     data.episodes[0].premiereHref = "/premiere/prem_54d299b874f0adc7654fd1cc";
     const html = coworldLeagueIndexHtml(data);
     expect(html).toContain(
       '<a href="/premiere/prem_54d299b874f0adc7654fd1cc">▶ Watch the premiere</a>',
     );
-    // Both links render on the same card, premiere first, dot-separated.
+    // Match page first, then premiere, then replay — dot-separated.
     expect(html).toContain(
-      '▶ Watch the premiere</a><span class="link-sep"> · </span><a href="/ai-league-replay/coworld-run">▶ Watch replay</a>',
+      '<a href="/match/ereq_aaaa">▶ View match page</a><span class="link-sep"> · </span><a href="/premiere/prem_54d299b874f0adc7654fd1cc">▶ Watch the premiere</a><span class="link-sep"> · </span><a href="/ai-league-replay/coworld-run">▶ Watch replay</a>',
     );
-    // The second (linkless) card still reads "replay pending".
-    expect(html).toContain("replay pending");
+    // The second (replay-linkless) card still gets its own match-page link.
+    expect(html).toContain('href="/match/ereq_bbbb">▶ View match page</a>');
   });
 
-  test("without a premiereHref no premiere link or separator is emitted", () => {
+  test("without a premiereHref no premiere link or separator is emitted between match and replay links", () => {
     const html = coworldLeagueIndexHtml(sampleData());
     expect(html).not.toContain("Watch the premiere");
-    expect(html).not.toContain('class="link-sep"');
+    expect(html).toContain(
+      '<a href="/match/ereq_aaaa">▶ View match page</a><span class="link-sep"> · </span><a href="/ai-league-replay/coworld-run">▶ Watch replay</a>',
+    );
   });
 
   test("a premiere link renders even when the replay bundle is still pending", () => {

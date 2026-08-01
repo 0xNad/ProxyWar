@@ -307,10 +307,15 @@ export class AgentProfilePage extends LitElement {
         <span class="text-ink-muted">${match.map}</span>
         <span class="text-ink-muted">${when}</span>
         <span class="font-semibold ${outcome.cls}">${outcome.label}</span>
+        <a
+          href="/match/${encodeURIComponent(match.matchId)}"
+          class="ml-auto font-semibold text-accent outline-none hover:text-accent-strong focus-visible:ring-2 focus-visible:ring-accent"
+          >${translateText("agent_profile.view_match_link")}</a
+        >
         ${href !== null
           ? html`<a
               href=${href}
-              class="ml-auto font-semibold text-accent outline-none hover:text-accent-strong focus-visible:ring-2 focus-visible:ring-accent"
+              class="font-semibold text-ink-muted outline-none hover:text-accent focus-visible:ring-2 focus-visible:ring-accent"
               >${translateText("agent_profile.watch_link")}</a
             >`
           : nothing}

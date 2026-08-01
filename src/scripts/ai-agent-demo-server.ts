@@ -27,6 +27,16 @@ import { AgentRelayRateGuard } from "../server/agents/AgentRelayRateGuard";
 import { resolveFeaturedMatchStateRoot } from "../server/agents/FeaturedMatch";
 import { reconcileFeaturedMatchStore } from "../server/agents/FeaturedMatchReconcile";
 import { resolveFeaturedMatchParticipantCards } from "../server/agents/FeaturedMatchParticipants";
+import {
+  buildLeagueEpisodeMatchPageModel,
+  buildLeagueEpisodeParticipantCards,
+  findLeagueEpisodeByRequestId,
+  findLeagueEpisodeRunDir,
+  leagueEpisodeSpoilerSafeDescription,
+  leagueEpisodeSpoilerSafeTitle,
+  readCoworldLeagueEpisodesFromDataJson,
+  readLeagueEpisodeRecap,
+} from "../server/agents/LeagueEpisodeMatchPage";
 import { loadIdentityRegistrySnapshot } from "../server/identity/IdentityRegistry";
 import {
   buildRegistrationDraft,
@@ -215,8 +225,10 @@ import {
 import type { ReplayPremiereSettlementPointsRecorder } from "../server/replay-premiere/ReplayPremiereInteractions";
 import {
   createReplayPremierePublicPageRouter,
+  escapeHtml,
   nonceInlineScripts,
   pageContentSecurityPolicyWithNonce,
+  stripShellSocialMetadata,
 } from "../server/replay-premiere/ReplayPremierePublicPage";
 import { ReplayPremiereRuntimeRegistry } from "../server/replay-premiere/ReplayPremiereRuntimeCoordinator";
 import {
@@ -1235,6 +1247,50 @@ app.get("/api/premieres/:premiereId/featured-match", async (req, res) => {
     res.status(500).json({ error: { code: "FEATURED_MATCH_LOOKUP_FAILED" } });
   }
 });
+// Product overhaul: the ORDINARY-league-episode sibling of
+// `/api/featured-matches/:matchId` above — same narrow, per-record shape
+// (one id in, one match's page model out), but resolves against the
+// hosted Coworld mirror's own `CoworldLeagueEpisodeRow[]` (`data.json`)
+// rather than the `feat_...`-namespaced `FeaturedMatch` store. The two id
+// spaces never collide (`feat_[a-f0-9]{20}` vs `ereq_[A-Za-z0-9_-]+` — see
+// `FeaturedMatch.ts`/`CoworldLeagueMirrorCore.ts`'s own id validators), so
+// `MatchDetailPage.ts` dispatches to this route purely from the id's
+// prefix rather than probing both. See `LeagueEpisodeMatchPage.ts`'s own
+// doc for why every field here is already public (or, for `recap`, drawn
+// from the one recap artifact on the public run-artifact allowlist).
+app.get("/api/matches/:episodeId", async (req, res) => {
+  try {
+    res.setHeader("Cache-Control", "no-store, max-age=0");
+    const episodeId = req.params.episodeId;
+    if (typeof episodeId !== "string") {
+      res.status(404).json({ error: { code: "LEAGUE_EPISODE_NOT_FOUND" } });
+      return;
+    }
+    const episodes = await readCoworldLeagueEpisodesFromDataJson(
+      leagueDataJsonPath,
+    );
+    const row =
+      episodes === null
+        ? null
+        : findLeagueEpisodeByRequestId(episodes, episodeId);
+    if (row === null) {
+      res.status(404).json({ error: { code: "LEAGUE_EPISODE_NOT_FOUND" } });
+      return;
+    }
+    const identity = await loadIdentityRegistrySnapshot();
+    const recap = await readLeagueEpisodeRecap(
+      findLeagueEpisodeRunDir(row, runsRootDir),
+    );
+    res.status(200).json({
+      schemaVersion: 1,
+      match: buildLeagueEpisodeMatchPageModel(row, recap),
+      participants: buildLeagueEpisodeParticipantCards(row, identity),
+    });
+  } catch (error) {
+    console.error("GET /api/matches/:episodeId failed", error);
+    res.status(500).json({ error: { code: "LEAGUE_EPISODE_LOOKUP_FAILED" } });
+  }
+});
 // The account page itself — a plain app-shell document, not premiere-
 // scoped, so it needs none of `ReplayPremierePublicPage`'s per-premiere
 // metadata/CSP machinery. Always reachable (like `/premiere/:id`); the
@@ -1447,6 +1503,120 @@ async function sendPublicAppShellPage(
     res.status(503).send(`Proxy War ${failureLabel} is not built for this server.`);
   }
 }
+// Resolves the spoiler-safe `{title, description}` pair `/match/:matchId`'s
+// OG/social card and `<title>` use, from the SAME two sources
+// `MatchDetailPage.ts` itself resolves against, in the same order: the
+// `feat_...` `FeaturedMatch` store (its own `title`/`description` fields —
+// already spoiler-safe for premiere-lane records by construction, and
+// archive-lane records are never embargoed in the first place, see
+// `isFeaturedMatchRevealed`'s doc), then the `ereq_...` league-episode
+// mirror (`leagueEpisodeSpoilerSafeTitle`/`Description` — NEVER the
+// winner, per spec). `null` for an unknown/unpublished id; the caller
+// then falls back to the site-wide default metadata already baked into
+// `public.html` — the client's own "not found" state is what actually
+// explains that to a visitor, not the social card.
+async function resolveMatchDetailPageMetadata(
+  matchId: string,
+): Promise<{ title: string; description: string } | null> {
+  if (matchId.startsWith("feat_")) {
+    const stateRoot = resolveFeaturedMatchStateRoot();
+    const store = await reconcileFeaturedMatchStore(stateRoot);
+    const match = store.matches.find(
+      (candidate) =>
+        candidate.matchId === matchId && candidate.state !== "candidate",
+    );
+    if (match === undefined) return null;
+    const detail = publicFeaturedMatch(match);
+    return {
+      title: `${detail.title} | Proxy War`,
+      description: detail.description,
+    };
+  }
+  const episodes = await readCoworldLeagueEpisodesFromDataJson(
+    leagueDataJsonPath,
+  );
+  const row =
+    episodes === null ? null : findLeagueEpisodeByRequestId(episodes, matchId);
+  if (row === null) return null;
+  return {
+    title: leagueEpisodeSpoilerSafeTitle(row),
+    description: leagueEpisodeSpoilerSafeDescription(row),
+  };
+}
+
+// Serves `/match/:matchId` — same `public.html` shell as every other
+// `sendPublicAppShellPage` route, but with per-match OG/social metadata
+// spliced into `<head>` (title, description, canonical, `og:*`,
+// `twitter:*`) so a shared link previews the actual match instead of the
+// generic site card. Reuses `stripShellSocialMetadata` from
+// `ReplayPremierePublicPage.ts` (the exact same strip this file's own
+// premiere page already relies on) rather than a second parallel regex
+// implementation. A metadata-resolution failure of any kind (unknown id,
+// corrupt store/mirror file) degrades to the generic site-wide card
+// exactly like `sendPublicAppShellPage` — never a 5xx for a viewer who
+// simply followed a stale or malformed link.
+async function sendMatchDetailPageShell(
+  req: Request,
+  res: Response,
+): Promise<void> {
+  const matchId = req.params.matchId;
+  if (typeof matchId !== "string") {
+    res.status(400).send("Invalid match id");
+    return;
+  }
+  try {
+    const appShell = await getAppShellContent(
+      path.resolve(staticRootDir, "public.html"),
+    );
+    const metadata = await resolveMatchDetailPageMetadata(matchId).catch(
+      () => null,
+    );
+    const scriptNonce = randomBytes(24).toString("base64");
+    res.setHeader(
+      "Content-Security-Policy",
+      pageContentSecurityPolicyWithNonce(
+        leagueContentSecurityPolicy(),
+        scriptNonce,
+      ),
+    );
+    setHtmlNoCacheHeaders(res);
+    if (metadata === null) {
+      res.send(nonceInlineScripts(appShell, scriptNonce));
+      return;
+    }
+    const canonicalUrl = new URL(
+      `/match/${encodeURIComponent(matchId)}`,
+      replayPremierePublicOrigin,
+    ).href;
+    const socialTags = [
+      `<title>${escapeHtml(metadata.title)}</title>`,
+      `<meta name="description" content="${escapeHtml(metadata.description)}">`,
+      `<link rel="canonical" href="${escapeHtml(canonicalUrl)}">`,
+      `<meta property="og:site_name" content="Proxy War">`,
+      `<meta property="og:type" content="website">`,
+      `<meta property="og:url" content="${escapeHtml(canonicalUrl)}">`,
+      `<meta property="og:title" content="${escapeHtml(metadata.title)}">`,
+      `<meta property="og:description" content="${escapeHtml(metadata.description)}">`,
+      `<meta name="twitter:card" content="summary">`,
+      `<meta name="twitter:title" content="${escapeHtml(metadata.title)}">`,
+      `<meta name="twitter:description" content="${escapeHtml(metadata.description)}">`,
+    ].join("\n");
+    const withMetadata = stripShellSocialMetadata(appShell).replace(
+      /<head(?:\s[^>]*)?>/i,
+      (headTag) => `${headTag}\n${socialTags}`,
+    );
+    res.send(nonceInlineScripts(withMetadata, scriptNonce));
+  } catch (error) {
+    console.error(
+      `Failed to serve the match detail page: ${
+        error instanceof Error ? error.message : String(error)
+      }`,
+    );
+    res
+      .status(503)
+      .send("Proxy War the match detail page is not built for this server.");
+  }
+}
 // The event lobby (spec Stage 2 item 4) — replaces the bare
 // `leagueWrapperOnly` gate's `res.redirect("/league")` fallback for "/"
 // that the live beta.proxywar.xyz process has served until now. Only takes
@@ -1479,8 +1649,8 @@ app.get("/builders", async (_req, res) => {
 app.get("/builder/:slug", async (_req, res) => {
   await sendPublicAppShellPage(res, "the builder profile page");
 });
-app.get("/match/:matchId", async (_req, res) => {
-  await sendPublicAppShellPage(res, "the match detail page");
+app.get("/match/:matchId", async (req, res) => {
+  await sendMatchDetailPageShell(req, res);
 });
 app.get("/about", async (_req, res) => {
   await sendPublicAppShellPage(res, "the about page");

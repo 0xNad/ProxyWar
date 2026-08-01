@@ -1592,11 +1592,17 @@ function battleCard(
       translateText("coworld_league.degraded_tip"),
     )}">${elevated ? "⚠ " : ""}${escapeHtml(label)}</span>`;
   })();
-  // Battle-card links. The premiere link is present ONLY when the mirror
-  // attached a revealed-premiere href (see CoworldLeagueEpisodeRow.premiereHref
-  // — outcome already public, never pre-reveal). The `typeof` guard also
-  // tolerates legacy merged data.json rows where the optional field is absent.
-  const cardLinks: string[] = [];
+  // Battle-card links. Product overhaul: the canonical `/match/:episodeId`
+  // page (`episode.episodeRequestId`, always present) is now the PRIMARY
+  // action on every card — the premiere link is present ONLY when the
+  // mirror attached a revealed-premiere href (see
+  // `CoworldLeagueEpisodeRow.premiereHref` — outcome already public, never
+  // pre-reveal), and the raw replay link is now a secondary/direct action.
+  // The `typeof` guard also tolerates legacy merged data.json rows where
+  // the optional field is absent.
+  const cardLinks: string[] = [
+    `<a href="/match/${encodeURIComponent(episode.episodeRequestId)}">▶ View match page</a>`,
+  ];
   if (
     typeof episode.premiereHref === "string" &&
     episode.premiereHref.length > 0
@@ -1644,11 +1650,7 @@ function battleCard(
       <div class="battle-foot">
         <span class="meta">${escapeHtml(meta.join(" · "))}</span>
         ${degraded}
-        <span class="links">${
-          cardLinks.length === 0
-            ? `<span class="meta">replay pending</span>`
-            : cardLinks.join(`<span class="link-sep"> · </span>`)
-        }</span>
+        <span class="links">${cardLinks.join(`<span class="link-sep"> · </span>`)}</span>
       </div>
     </article>`;
 }

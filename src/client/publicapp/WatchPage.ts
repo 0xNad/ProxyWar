@@ -482,13 +482,18 @@ export class WatchPage extends LitElement {
               : translateText("watch.no_winner")}
           </p>
         </details>
+        <a
+          href="/match/${encodeURIComponent(match.matchId)}"
+          class="mt-2 inline-block text-xs font-semibold text-accent outline-none hover:text-accent-strong focus-visible:ring-2 focus-visible:ring-accent"
+          >${translateText("watch.view_match")}</a
+        >
         ${watchHref !== null
           ? html`<a
               href=${watchHref}
-              class="mt-2 inline-block text-xs font-semibold text-accent outline-none hover:text-accent-strong focus-visible:ring-2 focus-visible:ring-accent"
+              class="ml-3 mt-2 inline-block text-xs text-ink-muted outline-none hover:text-accent focus-visible:ring-2 focus-visible:ring-accent"
               >${translateText("watch.watch_replay")}</a
             >`
-          : html`<span class="mt-2 inline-block text-xs text-ink-muted"
+          : html`<span class="ml-3 mt-2 inline-block text-xs text-ink-muted"
               >${translateText("watch.replay_pending")}</span
             >`}
       </li>
@@ -582,7 +587,16 @@ export function filterArchiveMatches(
   });
 }
 
-function renderDegradedNote(match: PublicMatch): TemplateResult | typeof nothing {
+/**
+ * Reused by `MatchDetailPage.ts`'s league-episode render path (a
+ * `LeagueEpisodeMatch`, a different type than `PublicMatch`, structurally
+ * carries the same two fields) — narrowed to exactly the fields this badge
+ * needs so both types satisfy it without a second parallel implementation.
+ */
+export function renderDegradedNote(match: {
+  degradedCount: number | null;
+  decisionCount: number | null;
+}): TemplateResult | typeof nothing {
   const count = match.degradedCount;
   if (count === null || count <= 0) return nothing;
   const { share, elevated } = computeDegradedShare(count, match.decisionCount);

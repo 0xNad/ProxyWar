@@ -423,7 +423,14 @@ function interpolate(
   );
 }
 
-function stripShellSocialMetadata(appShell: string): string {
+/**
+ * Strips every `<title>`, description meta, `og:*`/`twitter:*`/`proxywar:*`
+ * meta, and canonical `<link>` from an app shell's `<head>` — shared by this
+ * module's own premiere page AND `/match/:matchId`'s per-match OG injection
+ * in `ai-agent-demo-server.ts` (`sendMatchDetailPageShell`), so there is one
+ * strip implementation, not two that could drift.
+ */
+export function stripShellSocialMetadata(appShell: string): string {
   return appShell
     .replace(/<title(?:\s[^>]*)?>[\s\S]*?<\/title>/gi, "")
     .replace(/<(?:meta|link)\b[^>]*>/gi, (tag) => {
