@@ -12,6 +12,7 @@ vi.mock("../../../src/client/Utils", () => ({
 }));
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import type { Mock } from "vitest";
 import "../../../src/client/publicapp/MatchDetailPage";
 import type { MatchDetailPage } from "../../../src/client/publicapp/MatchDetailPage";
 import { READ_MODEL_PATH } from "../../../src/client/publicapp/ReadModelSchema";
@@ -174,29 +175,107 @@ function featuredMatchDetailBody(overrides: {
   };
 }
 
-/** Dispatches by URL — MatchDetailPage fetches the read model AND the per-match route concurrently. */
+/** `GET /api/matches/:episodeId`'s response shape — see `LeagueEpisodeMatchPage.ts`. */
+function episodeMatchBody(overrides: {
+  episodeRequestId: string;
+  players?: {
+    slot: number;
+    name: string;
+    tilesOwned: number;
+    isAlive: boolean;
+    isWinner: boolean;
+    color: string;
+    placement: number;
+  }[];
+  winnerName?: string | null;
+  directorCut?: { durationEstimateSeconds: number; segmentCount: number } | null;
+  recap?: { summary: string; beats: string[] } | null;
+  watchHref?: string | null;
+  fullRenderHref?: string | null;
+  participants?: unknown[];
+}) {
+  const players = overrides.players ?? [
+    {
+      slot: 0,
+      name: "Frostfall",
+      tilesOwned: 200_000,
+      isAlive: true,
+      isWinner: true,
+      color: "#6fa8dc",
+      placement: 1,
+    },
+    {
+      slot: 1,
+      name: "GhostRaider",
+      tilesOwned: 20_000,
+      isAlive: false,
+      isWinner: false,
+      color: "#e06666",
+      placement: 2,
+    },
+  ];
+  return {
+    schemaVersion: 1,
+    match: {
+      episodeRequestId: overrides.episodeRequestId,
+      shortId: overrides.episodeRequestId,
+      runKey: "league-coworld-test-episode",
+      roundNumber: 42,
+      completedAt: "2026-08-01T12:00:00.000Z",
+      map: "Pangaea",
+      mapSize: "Compact",
+      turnCount: 4000,
+      decisionCount: 400,
+      degradedCount: 10,
+      winnerName: overrides.winnerName ?? players.find((p) => p.isWinner)?.name ?? null,
+      players,
+      watchHref:
+        "watchHref" in overrides
+          ? overrides.watchHref
+          : "/ai-league-runs/league-coworld-test-episode/spectator.html",
+      fullRenderHref:
+        "fullRenderHref" in overrides
+          ? overrides.fullRenderHref
+          : "/ai-league-replay/league-coworld-test-episode",
+      premiereHref: null,
+      directorCut: overrides.directorCut ?? null,
+      recap: overrides.recap ?? null,
+    },
+    participants:
+      overrides.participants ??
+      players.map((player) => participantCard({ playerName: player.name })),
+  };
+}
+
+/** Dispatches by URL — MatchDetailPage fetches the read model AND the per-match route concurrently. Returns the mock so a test can inspect which URLs were actually requested. */
 function stubFetch(handlers: {
   readModel?: unknown;
   detail?: { status: number; body?: unknown };
-}) {
-  vi.stubGlobal(
-    "fetch",
-    vi.fn(async (input: RequestInfo | URL) => {
-      const url = String(input);
-      if (url.includes(READ_MODEL_PATH)) {
-        return handlers.readModel === undefined
-          ? new Response(null, { status: 500 })
-          : Response.json(handlers.readModel);
-      }
-      if (url.includes("/api/featured-matches/")) {
-        const detail = handlers.detail ?? { status: 500 };
-        return detail.body === undefined
-          ? new Response(null, { status: detail.status })
-          : Response.json(detail.body, { status: detail.status });
-      }
-      throw new Error(`unexpected fetch url in test: ${url}`);
-    }),
-  );
+  episodeDetail?: { status: number; body?: unknown };
+}): Mock {
+  const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+    const url = String(input);
+    if (url.includes(READ_MODEL_PATH)) {
+      return handlers.readModel === undefined
+        ? new Response(null, { status: 500 })
+        : Response.json(handlers.readModel);
+    }
+    if (url.includes("/api/featured-matches/")) {
+      const detail = handlers.detail ?? { status: 500 };
+      return detail.body === undefined
+        ? new Response(null, { status: detail.status })
+        : Response.json(detail.body, { status: detail.status });
+    }
+    if (url.includes("/api/matches/")) {
+      const detail = handlers.episodeDetail ?? { status: 500 };
+      return detail.body === undefined
+        ? new Response(null, { status: detail.status })
+        : Response.json(detail.body, { status: detail.status });
+    }
+    throw new Error(`unexpected fetch url in test: ${url}`);
+  });
+  vi.stubGlobal("fetch", fetchMock);
+  return fetchMock;
 }
 
 beforeEach(() => {
@@ -643,5 +722,164 @@ describe("match-detail-page", () => {
     await flushMicrotasks();
     expect(el.querySelector("header")).not.toBeNull();
     expect(el.querySelector("footer")).not.toBeNull();
+  });
+
+  // ---- League episode branch (ereq_... ids, GET /api/matches/:episodeId) --
+
+  it("an ereq_ id resolves via /api/matches/, never /api/featured-matches/", async () => {
+    const fetchMock = stubFetch({
+      readModel: readModelBody({}),
+      episodeDetail: { status: 200, body: episodeMatchBody({ episodeRequestId: "ereq_dispatch" }) },
+    });
+    mount("ereq_dispatch");
+    await flushMicrotasks();
+    const urls = fetchMock.mock.calls.map((call) => String(call[0]));
+    expect(urls.some((url) => url.includes("/api/matches/ereq_dispatch"))).toBe(true);
+    expect(urls.some((url) => url.includes("/api/featured-matches/"))).toBe(false);
+  });
+
+  it("an unknown episode id renders the same honest not-found state as a featured match", async () => {
+    stubFetch({ readModel: readModelBody({}), episodeDetail: { status: 404 } });
+    const el = mount("ereq_unknown");
+    await flushMicrotasks();
+    expect(el.textContent).toContain("match_detail.not_found_title");
+  });
+
+  it("renders header, winner, placements, and the recovered-turns integrity chip from the episode model alone (no bulk-agents correlation needed)", async () => {
+    stubFetch({
+      readModel: readModelBody({}),
+      episodeDetail: {
+        status: 200,
+        body: episodeMatchBody({ episodeRequestId: "ereq_render" }),
+      },
+    });
+    const el = mount("ereq_render");
+    await flushMicrotasks();
+    expect(el.textContent).toContain("Pangaea");
+    expect(el.textContent).toContain("match_detail.winner_heading");
+    expect(el.textContent).toContain("Frostfall");
+    expect(el.textContent).toContain("match_detail.placements_heading");
+    expect(el.textContent).toContain("#1");
+    expect(el.textContent).toContain("#2");
+    expect(el.textContent).toContain("coworld_league.eliminated");
+    expect(el.textContent).toContain("watch.recovered_share");
+  });
+
+  it("actions: Director Cut label + minutes when directorCut is present", async () => {
+    stubFetch({
+      readModel: readModelBody({}),
+      episodeDetail: {
+        status: 200,
+        body: episodeMatchBody({
+          episodeRequestId: "ereq_dcut",
+          directorCut: { durationEstimateSeconds: 300, segmentCount: 5 },
+        }),
+      },
+    });
+    const el = mount("ereq_dcut");
+    await flushMicrotasks();
+    expect(el.textContent).toContain("watch.director_cut_duration");
+    expect(el.textContent).toContain('"minutes":5');
+    const primaryLink = el.querySelector('a[href="/ai-league-replay/league-coworld-test-episode"]');
+    expect(primaryLink).not.toBeNull();
+  });
+
+  it("actions: plain Watch Replay label (no Director Cut wording) when directorCut is absent", async () => {
+    stubFetch({
+      readModel: readModelBody({}),
+      episodeDetail: {
+        status: 200,
+        body: episodeMatchBody({ episodeRequestId: "ereq_noreplaycut", directorCut: null }),
+      },
+    });
+    const el = mount("ereq_noreplaycut");
+    await flushMicrotasks();
+    expect(el.textContent).not.toContain("watch.director_cut_duration");
+    expect(el.textContent).toContain("watch.watch_replay");
+  });
+
+  it("actions: honest 'replay pending' when fullRenderHref is null, never a broken link", async () => {
+    stubFetch({
+      readModel: readModelBody({}),
+      episodeDetail: {
+        status: 200,
+        body: episodeMatchBody({
+          episodeRequestId: "ereq_pending",
+          fullRenderHref: null,
+          watchHref: null,
+        }),
+      },
+    });
+    const el = mount("ereq_pending");
+    await flushMicrotasks();
+    expect(el.textContent).toContain("watch.replay_pending");
+  });
+
+  it("recap section renders the summary and beats when the server provides a real recap", async () => {
+    stubFetch({
+      readModel: readModelBody({}),
+      episodeDetail: {
+        status: 200,
+        body: episodeMatchBody({
+          episodeRequestId: "ereq_recap",
+          recap: {
+            summary: "A cascading three-front war decided the match.",
+            beats: ["Turn 812: a surprise naval assault.", "Turn 1930: an alliance partner defects."],
+          },
+        }),
+      },
+    });
+    const el = mount("ereq_recap");
+    await flushMicrotasks();
+    expect(el.textContent).toContain("match_detail.episode_recap_heading");
+    expect(el.textContent).toContain("A cascading three-front war decided the match.");
+    expect(el.textContent).toContain("Turn 812: a surprise naval assault.");
+  });
+
+  it("recap section is entirely absent (no heading, no placeholder) when the server provides no recap", async () => {
+    stubFetch({
+      readModel: readModelBody({}),
+      episodeDetail: {
+        status: 200,
+        body: episodeMatchBody({ episodeRequestId: "ereq_norecap", recap: null }),
+      },
+    });
+    const el = mount("ereq_norecap");
+    await flushMicrotasks();
+    expect(el.textContent).not.toContain("match_detail.episode_recap_heading");
+  });
+
+  it("technical drawer carries episodeRequestId, run key, and raw participant labels", async () => {
+    stubFetch({
+      readModel: readModelBody({}),
+      episodeDetail: {
+        status: 200,
+        body: episodeMatchBody({ episodeRequestId: "ereq_technical_details" }),
+      },
+    });
+    const el = mount("ereq_technical_details");
+    await flushMicrotasks();
+    expect(el.textContent).toContain("match_detail.episode_technical_heading");
+    expect(el.textContent).toContain("ereq_technical_details");
+    expect(el.textContent).toContain("league-coworld-test-episode");
+    expect(el.textContent).toContain("Frostfall, GhostRaider");
+    expect(el.textContent).toContain("match_detail.episode_provenance_note");
+  });
+
+  it("never renders pre-match/countdown/live-redirect UI for a league episode (always post-match)", async () => {
+    stubFetch({
+      readModel: readModelBody({
+        live: { premiereId: "prem_live0000000000000000" },
+      }),
+      episodeDetail: {
+        status: 200,
+        body: episodeMatchBody({ episodeRequestId: "ereq_alwayspost" }),
+      },
+    });
+    const el = mount("ereq_alwayspost");
+    await flushMicrotasks();
+    expect(el.textContent).not.toContain("match_detail.countdown_value");
+    expect(el.textContent).not.toContain("match_detail.scheduled_for");
+    expect(window.location.pathname).not.toContain("/premiere/");
   });
 });

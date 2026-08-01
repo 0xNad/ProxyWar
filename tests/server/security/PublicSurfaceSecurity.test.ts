@@ -14,6 +14,7 @@ import { promises as fs } from "node:fs";
 import path from "node:path";
 import { promisify } from "node:util";
 import { afterAll, beforeAll, describe, expect, test } from "vitest";
+import { ORDINARY_EPISODE } from "../../../src/server/fixtures/PublicProductFixtureData";
 
 const execFileAsync = promisify(execFile);
 const REPO_ROOT = path.resolve(__dirname, "../../..");
@@ -272,5 +273,73 @@ describe("public JSON (read-model.json) never carries a private field", () => {
       forbiddenKeyNames.has(key),
     );
     expect(offenders).toEqual([]);
+  });
+});
+
+describe("GET /api/matches/:episodeId (league-episode match page) never carries a private field", () => {
+  const forbiddenKeyNames = new Set([
+    "decisions",
+    "decisiontail",
+    "prompt",
+    "rawllmoutput",
+    "rawllmprompt",
+    "privatepolicyoutput",
+    "token",
+    "tokens",
+    "secret",
+    "apikey",
+    "verifiedgithub",
+  ]);
+
+  function collectKeyNames(value: unknown, into: Set<string>): void {
+    if (Array.isArray(value)) {
+      for (const item of value) collectKeyNames(item, into);
+      return;
+    }
+    if (value !== null && typeof value === "object") {
+      for (const [key, nested] of Object.entries(value)) {
+        into.add(key.toLowerCase().replace(/[_-]/g, ""));
+        collectKeyNames(nested, into);
+      }
+    }
+  }
+
+  test("a real fixture episode's response has no forbidden field name anywhere in its schema", async () => {
+    const response = await fetch(
+      `${ORIGIN}/api/matches/${encodeURIComponent(ORDINARY_EPISODE.episodeRequestId)}`,
+    );
+    expect(response.status).toBe(200);
+    const body = await response.json();
+    const keyNames = new Set<string>();
+    collectKeyNames(body, keyNames);
+    const offenders = [...keyNames].filter((key) => forbiddenKeyNames.has(key));
+    expect(offenders).toEqual([]);
+  });
+
+  test("an unknown episode id 404s rather than leaking a stack trace or path echo", async () => {
+    const response = await fetch(`${ORIGIN}/api/matches/ereq_totally-unknown-id`);
+    expect(response.status).toBe(404);
+    const body = await response.text();
+    expect(body).not.toContain("Cannot GET");
+    expect(body).not.toContain("at ");
+  });
+
+  test("the featured-match id namespace (feat_...) is never resolved by the episode route", async () => {
+    const response = await fetch(
+      `${ORIGIN}/api/matches/${encodeURIComponent("feat_00000000000000000000")}`,
+    );
+    expect(response.status).toBe(404);
+  });
+});
+
+describe("/match/:matchId page shell (OG/social metadata) is spoiler-safe for a league episode", () => {
+  test("the raw, un-hydrated HTML never contains the episode's own winner name in <title>/description/og:*", async () => {
+    const response = await fetch(
+      `${ORIGIN}/match/${encodeURIComponent(ORDINARY_EPISODE.episodeRequestId)}`,
+    );
+    expect(response.status).toBe(200);
+    const html = await response.text();
+    expect(html).not.toContain(`${ORDINARY_EPISODE.winnerName} wins`);
+    expect(html.toLowerCase()).not.toContain("winner:");
   });
 });
