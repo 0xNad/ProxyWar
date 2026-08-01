@@ -1,5 +1,6 @@
-import { html, LitElement, TemplateResult } from "lit";
+import { html, LitElement, PropertyValues, TemplateResult } from "lit";
 import { property, query, state } from "lit/decorators.js";
+import { isReplaySpectatorView } from "../graphics/TransformHandler";
 
 /**
  * Base class for modal components that provides unified Escape key handling and common modal patterns.
@@ -33,6 +34,26 @@ export abstract class BaseModal extends LitElement {
 
   createRenderRoot() {
     return this;
+  }
+
+  /**
+   * Spectator/replay routes (`isReplaySpectatorView()`) can never open ANY
+   * lobby/account/store/settings modal: the nav bar that would open one is
+   * itself CSS-hidden for these routes (`.in-[.in-game]:hidden` /
+   * `.proxywar-replay-route`), and `Navigation.ts`'s `showPage()` is
+   * already a no-op there. Main.ts/GameRenderer.ts still `querySelector`
+   * and wire up every one of these elements unconditionally though (some
+   * unguarded property assignments and method calls), so removing the DOM
+   * nodes outright would crash them. Blocking Lit's own render cycle here
+   * instead keeps every element instance, property assignment, and method
+   * call working exactly as before — it just never builds the (often
+   * large: cosmetic grids, map pickers, language lists, keybind tables...)
+   * internal DOM tree that otherwise ships the ENTIRE hidden multiplayer
+   * chrome on every replay page load (P2-F11).
+   */
+  protected shouldUpdate(changedProperties: PropertyValues): boolean {
+    if (isReplaySpectatorView()) return false;
+    return super.shouldUpdate(changedProperties);
   }
 
   public isOpen(): boolean {

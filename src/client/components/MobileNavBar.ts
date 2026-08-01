@@ -1,5 +1,6 @@
-import { html, LitElement, TemplateResult } from "lit";
+import { html, LitElement, PropertyValues, TemplateResult } from "lit";
 import { customElement } from "lit/decorators.js";
+import { isReplaySpectatorView } from "../graphics/TransformHandler";
 import { NavNotificationsController } from "./NavNotificationsController";
 
 @customElement("mobile-nav-bar")
@@ -8,6 +9,15 @@ export class MobileNavBar extends LitElement {
 
   createRenderRoot() {
     return this;
+  }
+
+  // Same reasoning as DesktopNavBar.ts: the mobile sidebar's nav items only
+  // ever open pages that are unreachable on a spectator/replay route, and
+  // the whole sidebar is CSS-hidden once a game/replay is active. Skipping
+  // its render avoids building that DOM on every replay page load (P2-F11).
+  protected shouldUpdate(changedProperties: PropertyValues): boolean {
+    if (isReplaySpectatorView()) return false;
+    return super.shouldUpdate(changedProperties);
   }
 
   connectedCallback() {

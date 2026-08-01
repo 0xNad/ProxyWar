@@ -8,6 +8,15 @@ export class PlayPage extends LitElement {
     return this;
   }
 
+  // play-page itself stays mounted/rendering unconditionally on every route,
+  // including spectator/replay: `<game-mode-selector>` nested in its
+  // template (see render() below) is queried and used unconditionally by
+  // Main.ts's shared join/lobby plumbing (`this.gameModeSelector.stop()`),
+  // which replay startup ALSO runs through — blocking this render would
+  // make that querySelector() return null and crash. The actual weight
+  // (map picker, mode/difficulty pickers) lives inside GameModeSelector's
+  // OWN render, which is what's gated instead (see GameModeSelector.ts).
+
   render() {
     return html`
       <div

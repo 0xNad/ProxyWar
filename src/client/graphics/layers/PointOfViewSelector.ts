@@ -11,7 +11,7 @@ import {
   resolveClaimedLineageSlugs,
   writeManualPovSelection,
 } from "../PointOfView";
-import { GoToPlayerEvent } from "../TransformHandler";
+import { FitWholeMapEvent, GoToPlayerEvent } from "../TransformHandler";
 import { Layer } from "./Layer";
 
 type PovSource = "manual" | "claim" | "neutral";
@@ -212,8 +212,21 @@ export class PointOfViewSelector extends LitElement implements Layer {
         detail: { playerName: player?.displayName() ?? null },
       }),
     );
-    if (opts.pan && player) {
-      this.eventBus?.emit(new GoToPlayerEvent(player));
+    // A manual pan request always resolves to a camera move: a followed
+    // player pans/tracks to them (GoToPlayerEvent, unchanged); "Whole
+    // board" instead recentres to the literal whole-map fit
+    // (FitWholeMapEvent) — the one-gesture way back out of the portrait
+    // spectator overzoom default (see TransformHandler.centerAll's
+    // PORTRAIT_TARGET_VERTICAL_FILL). The initial silent resolution in
+    // applyInitialSelection() always passes `pan: false`, so this never
+    // fires on load — only in direct response to the viewer's own dropdown
+    // pick, rail click, or crosshair tap.
+    if (opts.pan) {
+      if (player) {
+        this.eventBus?.emit(new GoToPlayerEvent(player));
+      } else {
+        this.eventBus?.emit(new FitWholeMapEvent());
+      }
     }
   }
 
@@ -227,6 +240,8 @@ export class PointOfViewSelector extends LitElement implements Layer {
     const player = this.selectedId === null ? null : this.findById(this.selectedId);
     if (player) {
       this.eventBus?.emit(new GoToPlayerEvent(player));
+    } else {
+      this.eventBus?.emit(new FitWholeMapEvent());
     }
   }
 
@@ -265,28 +280,30 @@ export class PointOfViewSelector extends LitElement implements Layer {
               </option>`,
           )}
         </select>
-        ${this.selectedId !== null
-          ? html`<button
-              type="button"
-              title="Center camera on the followed agent"
-              aria-label="Center camera on the followed agent"
-              class="p-1 rounded hover:bg-white/10 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-info/60"
-              @click=${() => this.onCenterClick()}
-            >
-              <svg
-                viewBox="0 0 16 16"
-                width="13"
-                height="13"
-                fill="none"
-                stroke="currentColor"
-                stroke-width="1.5"
-                aria-hidden="true"
-              >
-                <circle cx="8" cy="8" r="2.25" />
-                <path d="M8 1v3M8 12v3M1 8h3M12 8h3" />
-              </svg>
-            </button>`
-          : nothing}
+        <button
+          type="button"
+          title=${this.selectedId !== null
+            ? "Center camera on the followed agent"
+            : "Fit the whole map"}
+          aria-label=${this.selectedId !== null
+            ? "Center camera on the followed agent"
+            : "Fit the whole map"}
+          class="p-1 rounded hover:bg-white/10 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-info/60"
+          @click=${() => this.onCenterClick()}
+        >
+          <svg
+            viewBox="0 0 16 16"
+            width="13"
+            height="13"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="1.5"
+            aria-hidden="true"
+          >
+            <circle cx="8" cy="8" r="2.25" />
+            <path d="M8 1v3M8 12v3M1 8h3M12 8h3" />
+          </svg>
+        </button>
         <span class="sr-only" role="status">${this.captionText()}</span>
       </div>
       ${this.source === "claim"

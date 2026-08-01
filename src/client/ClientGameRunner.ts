@@ -569,7 +569,13 @@ export class ClientGameRunner {
         });
         this.gameView.update(gu);
         if (this.shouldLockFullMapReplayView()) {
-          this.renderer.transformHandler.centerAll(0.94);
+          // Clip/promo recording must always land the literal whole-map
+          // "contain" fit, never the portrait-overzoom crop centerAll() now
+          // applies to narrow viewports (P2-F10) — forceWholeMap bypasses
+          // that branch regardless of the recording window's shape.
+          this.renderer.transformHandler.centerAll(0.94, {
+            forceWholeMap: true,
+          });
         } else {
           this.focusReplaySpectatorOnce();
         }

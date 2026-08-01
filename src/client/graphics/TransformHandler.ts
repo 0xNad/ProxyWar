@@ -35,6 +35,18 @@ export class GoToPositionEvent implements GameEvent {
   ) {}
 }
 
+/**
+ * Explicit "show the whole map" request — the one-gesture way back to a full
+ * board view from the portrait spectator default (see
+ * PORTRAIT_TARGET_VERTICAL_FILL) or from any deliberate zoom-in. Dispatched
+ * by the PoV selector's "Whole board" pick/crosshair (PointOfViewSelector),
+ * never by anything automatic. Handled by forcing centerAll()'s literal
+ * whole-map "contain" landing regardless of viewport aspect.
+ */
+export class FitWholeMapEvent implements GameEvent {
+  constructor() {}
+}
+
 export class GoToUnitEvent implements GameEvent {
   constructor(public unit: UnitView) {}
 }
@@ -46,6 +58,17 @@ export const CAMERA_SMOOTHING = 0.03;
 // deliberate zoom-out is allowed to land: <1 leaves a small margin around
 // the board instead of stopping exactly at its edge.
 const SPECTATOR_ZOOM_OUT_MARGIN = 0.85;
+// Portrait spectator viewports (phone/tablet held upright) land outside the
+// `cover` aspect-ratio band in centerAll(): a portrait viewport's aspect
+// (~0.4-0.6) is far from virtually every OpenFront map's aspect (roughly
+// square to 2:1 landscape), so plain "contain" there fits the map to the
+// viewport's narrower dimension (width) and wastes the rest of the taller
+// dimension as letterbox bands (P2-F10). PORTRAIT_TARGET_VERTICAL_FILL is
+// the fraction of the portrait viewport's HEIGHT the map should occupy
+// instead: enough to read as "filling the screen", short of a true `cover`
+// landing (which would crop most maps down to a narrow vertical sliver and
+// lose spectator context). See centerAll() for the full derivation.
+const PORTRAIT_TARGET_VERTICAL_FILL = 0.75;
 
 export class TransformHandler {
   public scale: number = 1.8;
@@ -81,6 +104,9 @@ export class TransformHandler {
     this.eventBus.on(GoToPositionEvent, (e) => this.onGoToPosition(e));
     this.eventBus.on(GoToUnitEvent, (e) => this.onGoToUnit(e));
     this.eventBus.on(CenterCameraEvent, () => this.centerCamera());
+    this.eventBus.on(FitWholeMapEvent, () =>
+      this.centerAll(0.95, { forceWholeMap: true }),
+    );
 
     // Replay/spectator: start fit-to-map (whole board centered) from t=0.
     // GameRenderer.initialize() also calls centerAll() shortly after, but
@@ -459,7 +485,7 @@ export class TransformHandler {
     this.changed = true;
   }
 
-  centerAll(fit: number = 1) {
+  centerAll(fit: number = 1, options: { forceWholeMap?: boolean } = {}) {
     //position entire map centered on the screen.
     //
     //Replay/spectator surfaces (bet/premiere/ai-league-replay routes) use a
@@ -474,23 +500,56 @@ export class TransformHandler {
     //
     //Cropping is skipped back to "contain" outside a plausible desktop
     //aspect-ratio band (mirrors GameModeSelector's object-contain fallback
-    //for extreme map aspect ratios) so a portrait/mobile viewport doesn't
+    //for extreme map aspect ratios) so a landscape/tablet viewport doesn't
     //get most of the map cropped away.
+    //
+    //`options.forceWholeMap` (FitWholeMapEvent, the PoV selector's "Whole
+    //board" pick/crosshair) bypasses `cover` AND the portrait branch below
+    //entirely, landing the literal whole-map "contain" fit no matter the
+    //viewport shape — the one-gesture way back to the full board.
     const vpWidth = this.boundingRect().width;
     const vpHeight = this.boundingRect().height;
     const mapWidth = this.game.width();
     const mapHeight = this.game.height();
 
     const aspectRatioDeviation = vpWidth / vpHeight / (mapWidth / mapHeight);
+    const spectator = !options.forceWholeMap && isReplaySpectatorView();
     const cover =
-      isReplaySpectatorView() &&
-      aspectRatioDeviation > 0.5 &&
-      aspectRatioDeviation < 2;
-    const effectiveFit = cover ? Math.max(fit, 1) : fit;
+      spectator && aspectRatioDeviation > 0.5 && aspectRatioDeviation < 2;
 
-    const scHor = (vpWidth / mapWidth) * effectiveFit;
-    const scVer = (vpHeight / mapHeight) * effectiveFit;
-    const tScale = cover ? Math.max(scHor, scVer) : Math.min(scHor, scVer);
+    const rawScHor = vpWidth / mapWidth;
+    const rawScVer = vpHeight / mapHeight;
+    const containScale = Math.min(rawScHor, rawScVer);
+    const coverScale = Math.max(rawScHor, rawScVer);
+
+    let tScale: number;
+    if (cover) {
+      tScale = coverScale * Math.max(fit, 1);
+    } else if (spectator && vpHeight > vpWidth) {
+      // Portrait spectator viewport (P2-F10): `cover` above excludes it for
+      // virtually every real map (portrait's ~0.4-0.6 aspect vs. maps
+      // running roughly square to 2:1 landscape), so plain "contain" would
+      // fit the map to the viewport's WIDTH and waste most of its HEIGHT as
+      // letterbox bands. Overzoom instead: land at whichever scale renders
+      // the map at PORTRAIT_TARGET_VERTICAL_FILL of the viewport's height —
+      // `rawScVer * FILL` always yields exactly that fraction, independent
+      // of the map's own aspect ratio (rendered height = mapHeight * scale
+      // = mapHeight * rawScVer * FILL = vpHeight * FILL). Clamped so this
+      // never zooms in LESS than a whole-map contain fit (rare near-square
+      // maps already exceed the target) or MORE than a true cover fit
+      // (never crop tighter than cover would). Horizontal panning reaches
+      // whatever this overzoom crops off the sides; the PoV selector's
+      // "Whole board" control (FitWholeMapEvent, forceWholeMap above) and
+      // pinch-zoom-out (spectatorZoomFloor below) both reach the true
+      // whole-map fit in one gesture.
+      const portraitTarget = rawScVer * PORTRAIT_TARGET_VERTICAL_FILL;
+      tScale = Math.min(
+        Math.max(containScale * fit, portraitTarget),
+        coverScale,
+      );
+    } else {
+      tScale = containScale * fit;
+    }
 
     const oHor = (mapWidth - vpWidth) / 2 / tScale;
     const oVer = (mapHeight - vpHeight) / 2 / tScale;
@@ -500,15 +559,13 @@ export class TransformHandler {
     // "whole map visible" (plain contain) scale, backed off by
     // SPECTATOR_ZOOM_OUT_MARGIN so a deliberate scroll-out lands a touch
     // past a snug fit rather than exactly on its edge. Both are independent
-    // of `cover`/`effectiveFit` above (which only pick the *landing*
-    // framing) — onZoom()/clampOffsets() gate their use on
+    // of `cover`/the landing-framing branches above (which only pick the
+    // *landing* scale) — onZoom()/clampOffsets() gate their use on
     // isReplaySpectatorView() at each call site, so live play (which never
     // sets that) is unaffected by these being set unconditionally here.
-    const containScale = Math.min(vpWidth / mapWidth, vpHeight / mapHeight);
-    this.spectatorFillScale = Math.max(
-      vpWidth / mapWidth,
-      vpHeight / mapHeight,
-    );
+    // Reuses the raw containScale/coverScale computed above (identical
+    // formulas — recomputing under new names here would just shadow them).
+    this.spectatorFillScale = coverScale;
     this.spectatorZoomFloor = containScale * SPECTATOR_ZOOM_OUT_MARGIN;
 
     this.override(oHor, oVer, tScale);
