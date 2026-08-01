@@ -20,6 +20,11 @@ import type {
 import type { AgentDecisionRecord, LegalActionKind } from "./AgentTypes";
 import { buildDirectorCutPlan, type DirectorCutPlan } from "./DirectorCutPlan";
 import { AGENT_MATCH_RECAP_SCHEMA_VERSION } from "./AgentMatchRecap";
+import {
+  buildAgentMatchStateSeries,
+  MATCH_STATE_SERIES_SCHEMA_VERSION,
+  type MatchStateSeries,
+} from "./AgentMatchStateSeries";
 
 /**
  * Pure transforms from Coworld Observatory read-API JSON (as emitted by the
@@ -1525,6 +1530,8 @@ export function resolveMirroredDirectorCutPlan(input: {
   spectatorTelemetryRaw: string | null;
   decisionsJsonlRaw: string | null;
   finalTurnCount: number | null;
+  /** Season Zero Phase 2: when a `match-state-series.json` was already generated for this run (`CoworldLeagueMatchStateSeriesBackfill.ts` runs strictly before this one in the mirror cycle), threading it through adds honest `lead_change`/`reversal` segments (`DirectorCutPlan.ts`). `null` (not yet generated, or the source replay had zero snapshots) degrades exactly as before this fix — no such segments, never fabricated. */
+  matchStateSeries?: MatchStateSeries | null;
 }): DirectorCutPlanGenerationOutcome | null {
   const evidence = resolveMirroredMatchEvidence(input);
   if (evidence === null) {
@@ -1539,6 +1546,129 @@ export function resolveMirroredDirectorCutPlan(input: {
       roster: evidence.roster,
       finalState: evidence.finalState,
       spectatorTelemetry: evidence.telemetry,
+      matchStateSeries: input.matchStateSeries ?? null,
     }),
   };
+}
+
+// ---------------------------------------------------------------------------
+// Season Zero Phase 2: the sampled match-state series (`AgentMatchStateSeries.ts`).
+// ---------------------------------------------------------------------------
+
+/**
+ * Tolerant parse + minimal shape validation of a mirrored run's
+ * `spectator-replay.json` into the exact shape `buildAgentMatchStateSeries`
+ * reads (`snapshots[].turnNumber`/`players[]`) — same light-touch trust
+ * level as {@link parseMirroredSpectatorTelemetry} (this producer's own
+ * trusted output, guarded only against a torn download or future schema
+ * break). Malformed/unparseable input resolves to `null`, never a throw.
+ */
+export function parseMirroredSpectatorReplay(
+  raw: string,
+): Pick<AgentSpectatorReplay, "snapshots"> | null {
+  let value: unknown;
+  try {
+    value = JSON.parse(raw);
+  } catch {
+    return null;
+  }
+  const record = asRecord(value);
+  if (record === null) {
+    return null;
+  }
+  const snapshots = asArray(record.snapshots);
+  const snapshotsValid = snapshots.every((snapshot) => {
+    const entry = asRecord(snapshot);
+    if (entry === null || typeof entry.turnNumber !== "number") return false;
+    const players = asArray(entry.players);
+    return players.every((player) => {
+      const playerEntry = asRecord(player);
+      return (
+        playerEntry !== null &&
+        typeof playerEntry.playerID === "string" &&
+        typeof playerEntry.tilesOwned === "number" &&
+        typeof playerEntry.troops === "number" &&
+        typeof playerEntry.isAlive === "boolean"
+      );
+    });
+  });
+  if (!snapshotsValid) {
+    return null;
+  }
+  return record as unknown as Pick<AgentSpectatorReplay, "snapshots">;
+}
+
+/**
+ * Tolerant parse + minimal shape validation of an already-generated
+ * `match-state-series.json` — used by every downstream consumer (recap,
+ * Director Cut) that reads the series back rather than rebuilding it.
+ * Requires the current `MATCH_STATE_SERIES_SCHEMA_VERSION`; a stale or
+ * malformed artifact resolves to `null` (read as "no series yet"), never a
+ * throw and never silently trusted past a schema change.
+ */
+export function parseMirroredMatchStateSeries(raw: string): MatchStateSeries | null {
+  let value: unknown;
+  try {
+    value = JSON.parse(raw);
+  } catch {
+    return null;
+  }
+  const record = asRecord(value);
+  if (
+    record === null ||
+    record.schemaVersion !== MATCH_STATE_SERIES_SCHEMA_VERSION ||
+    record.source !== "spectator-replay-snapshots"
+  ) {
+    return null;
+  }
+  const samples = asArray(record.samples);
+  const samplesValid = samples.every((sample) => {
+    const entry = asRecord(sample);
+    return entry !== null && typeof entry.turn === "number" && Array.isArray(entry.agents);
+  });
+  if (!samplesValid) {
+    return null;
+  }
+  return record as unknown as MatchStateSeries;
+}
+
+/**
+ * Resolves (generates fresh, never reads an existing file) the match-state
+ * series for one mirrored run dir from its `spectator-replay.json` +
+ * whichever telemetry tier resolves — thin wrapper over
+ * `buildAgentMatchStateSeries`, used by
+ * `CoworldLeagueMatchStateSeriesBackfill.ts`. `null` when the replay is
+ * absent/unusable (never a fabricated series) — telemetry alone, unlike
+ * every other mirror-side generator in this file, is NOT sufficient input
+ * here (see `AgentMatchStateSeries.ts`'s "source decision": this artifact
+ * is a re-projection of `spectator-replay.json` specifically, not derivable
+ * from `decisions.jsonl` the way `SpectatorTelemetry` is).
+ */
+export function resolveMirroredMatchStateSeries(input: {
+  runID: string;
+  matchID: string;
+  spectatorReplayRaw: string | null;
+  spectatorTelemetryRaw: string | null;
+  decisionsJsonlRaw: string | null;
+  finalTurnCount: number | null;
+}): MatchStateSeries | null {
+  if (input.spectatorReplayRaw === null) {
+    return null;
+  }
+  const replay = parseMirroredSpectatorReplay(input.spectatorReplayRaw);
+  if (replay === null) {
+    return null;
+  }
+  const evidence = resolveMirroredMatchEvidence({
+    runID: input.runID,
+    spectatorTelemetryRaw: input.spectatorTelemetryRaw,
+    decisionsJsonlRaw: input.decisionsJsonlRaw,
+    finalTurnCount: input.finalTurnCount,
+  });
+  return buildAgentMatchStateSeries({
+    runID: input.runID,
+    matchID: input.matchID,
+    replay,
+    telemetry: evidence?.telemetry ?? null,
+  });
 }

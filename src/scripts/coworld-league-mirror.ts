@@ -47,6 +47,11 @@ import {
   type DirectorCutGenerationResult,
 } from "../server/agents/CoworldLeagueDirectorCutBackfill";
 import {
+  backfillMatchStateSeries,
+  generateMatchStateSeriesForRunDir,
+  type MatchStateSeriesGenerationResult,
+} from "../server/agents/CoworldLeagueMatchStateSeriesBackfill";
+import {
   backfillMatchNarrativeArtifacts,
   generateMatchNarrativeArtifactsForRunDir,
   type MatchNarrativeGenerationResult,
@@ -175,6 +180,24 @@ interface MirrorOptions {
    * disables generation entirely.
    */
   matchNarrativeBudget: number;
+  /**
+   * Season Zero Phase 2: max number of `match-state-series.json`
+   * generation attempts per sync cycle (`--match-state-series-budget`, env
+   * `PROXYWAR_LEAGUE_MATCH_STATE_SERIES_BUDGET`, default 3) — same
+   * fresh-episodes-first-then-gradual-backfill budget shape as
+   * `directorCutPlanBudget`/`matchNarrativeBudget`, a SEPARATE counter.
+   * Defaults HIGHER than the other two: this generation is a pure
+   * re-projection of already-written artifacts (no telemetry curation, no
+   * importance scoring — see `AgentMatchStateSeries.ts`'s own doc), so it
+   * is strictly cheaper, and staying ahead of the historical backlog gives
+   * `director-cut-plan.json`/`match-recap.json` generation the best chance
+   * of seeing a real series on THEIR first pass rather than a later cycle
+   * (see `CoworldLeagueMatchStateSeriesBackfill.ts`'s own ordering-dependency
+   * doc — this is why it also runs strictly BEFORE the other two below,
+   * both for freshly-unpacked episodes and the backfill scan). 0 disables
+   * generation entirely.
+   */
+  matchStateSeriesBudget: number;
 }
 
 function parseOptions(argv: string[]): MirrorOptions {
@@ -221,6 +244,9 @@ function parseOptions(argv: string[]): MirrorOptions {
     ),
     matchNarrativeBudget: Number(
       process.env.PROXYWAR_LEAGUE_MATCH_NARRATIVE_BUDGET ?? "1",
+    ),
+    matchStateSeriesBudget: Number(
+      process.env.PROXYWAR_LEAGUE_MATCH_STATE_SERIES_BUDGET ?? "3",
     ),
   };
   for (let i = 0; i < argv.length; i++) {
@@ -325,6 +351,9 @@ function parseOptions(argv: string[]): MirrorOptions {
       case "--match-narrative-budget":
         options.matchNarrativeBudget = Number(next());
         break;
+      case "--match-state-series-budget":
+        options.matchStateSeriesBudget = Number(next());
+        break;
       default:
         throw new Error(`Unknown flag: ${arg}`);
     }
@@ -344,6 +373,8 @@ function parseOptions(argv: string[]): MirrorOptions {
     options.directorCutPlanBudget < 0 ||
     !Number.isInteger(options.matchNarrativeBudget) ||
     options.matchNarrativeBudget < 0 ||
+    !Number.isInteger(options.matchStateSeriesBudget) ||
+    options.matchStateSeriesBudget < 0 ||
     !Number.isFinite(options.intervalSeconds)
   ) {
     throw new Error(
@@ -695,6 +726,32 @@ function logMatchNarrativeGenerationResult(
 }
 
 /**
+ * Logs a `match-state-series.json` generation attempt's outcome — same
+ * silent-on-free-skips convention as {@link logDirectorCutGenerationResult}.
+ */
+function logMatchStateSeriesGenerationResult(
+  result: MatchStateSeriesGenerationResult,
+): void {
+  const { runKey, outcome } = result;
+  switch (outcome.status) {
+    case "already-exists":
+    case "no-input":
+      return;
+    case "skipped-no-usable-replay":
+      log(`match state series skipped for ${runKey}: no usable replay`);
+      return;
+    case "generated":
+      log(
+        `match state series generated for ${runKey} (${outcome.sampleCount} sample(s))`,
+      );
+      return;
+    case "failed":
+      log(`match state series generation failed for ${runKey}: ${outcome.error}`);
+      return;
+  }
+}
+
+/**
  * Read the premiere-suppression contract, or resolve to a stale (non-
  * suppressing) state when no contract path is configured. Fail-open: any
  * unreadable/corrupt/stale contract also resolves to a stale state inside
@@ -1001,6 +1058,14 @@ async function syncOnce(options: MirrorOptions): Promise<void> {
   });
 
   const freshEpisodes: CoworldLeagueEpisodeRow[] = [];
+  // Season Zero Phase 2: `match-state-series.json` generation runs FIRST
+  // (spent first, both here and in the backfill scan below) so that
+  // director-cut/match-narrative generation for the SAME run, in the SAME
+  // cycle, has the best chance of seeing a real series on their own first
+  // pass — see `CoworldLeagueMatchStateSeriesBackfill.ts`'s ordering-
+  // dependency doc.
+  let matchStateSeriesBudget = options.matchStateSeriesBudget;
+  const matchStateSeriesAttemptedRunKeys = new Set<string>();
   // Shared per-cycle budget for `director-cut-plan.json` generation — spent
   // first on freshly-unpacked episodes below (so a live match gets its cut
   // as soon as budget allows), then on the backfill scan after the loop.
@@ -1082,6 +1147,18 @@ async function syncOnce(options: MirrorOptions): Promise<void> {
           `Pinned replay ${meta.episodeRequestId} did not produce its declared run bundle`,
         );
       }
+      if (unpacked !== null && matchStateSeriesBudget > 0) {
+        const runKey = path.basename(unpacked.runDir);
+        matchStateSeriesAttemptedRunKeys.add(runKey);
+        const result = await generateMatchStateSeriesForRunDir(
+          unpacked.runDir,
+          runKey,
+        );
+        logMatchStateSeriesGenerationResult(result);
+        if (result.attempted) {
+          matchStateSeriesBudget -= 1;
+        }
+      }
       if (unpacked !== null && directorCutBudget > 0) {
         const runKey = path.basename(unpacked.runDir);
         directorCutAttemptedRunKeys.add(runKey);
@@ -1162,6 +1239,22 @@ async function syncOnce(options: MirrorOptions): Promise<void> {
   }
 
   if (options.unpackRunDirs) {
+    try {
+      const results = await backfillMatchStateSeries(
+        options.runsRootDir,
+        matchStateSeriesBudget,
+        matchStateSeriesAttemptedRunKeys,
+      );
+      for (const result of results) {
+        logMatchStateSeriesGenerationResult(result);
+      }
+    } catch (error) {
+      log(
+        `match state series backfill failed: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+    }
     try {
       const results = await backfillDirectorCutPlans(
         options.runsRootDir,

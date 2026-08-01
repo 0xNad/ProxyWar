@@ -123,6 +123,7 @@ describe("buildAgentMatchRecap", () => {
       runID: "run-1",
       telemetry,
       finalTurnCount: totalTurns,
+      series: null,
     });
     expect(recap).not.toBeNull();
     const kinds = recap?.beats.map((beat) => beat.kind);
@@ -167,6 +168,7 @@ describe("buildAgentMatchRecap", () => {
       runID: "run-quiet",
       telemetry,
       finalTurnCount: totalTurns,
+      series: null,
     });
     expect(recap).toBeNull();
   });
@@ -184,7 +186,7 @@ describe("buildAgentMatchRecap", () => {
         { agentID: "a3", username: "Cinder", isAlive: false },
       ]),
     });
-    const input = { runID: "run-det", telemetry, finalTurnCount: totalTurns };
+    const input = { runID: "run-det", telemetry, finalTurnCount: totalTurns, series: null };
     const first = buildAgentMatchRecap(input);
     const second = buildAgentMatchRecap(input);
     expect(first?.beats).toEqual(second?.beats);
@@ -221,6 +223,7 @@ describe("buildAgentMatchRecap", () => {
       runID: "run-degraded",
       telemetry,
       finalTurnCount: null,
+      series: null,
     });
     expect(recap).not.toBeNull();
     expect(recap?.beats).toEqual([
@@ -335,7 +338,7 @@ describe("buildAgentMatchRecap", () => {
       finalState: finalState(totalTurns, players),
     });
     const build = () =>
-      buildAgentMatchRecap({ runID: "run-churn", telemetry, finalTurnCount: totalTurns });
+      buildAgentMatchRecap({ runID: "run-churn", telemetry, finalTurnCount: totalTurns, series: null });
     const recap = build();
     expect(recap).not.toBeNull();
     if (recap === null) return;
@@ -449,7 +452,7 @@ describe("curatedDramaScore", () => {
     expect(dramaReport.dramaScore).toBe(100);
     expect(dramaReport.dramaGrade).toBe("dramatic");
 
-    const recap = buildAgentMatchRecap({ runID: "run-pure-churn", telemetry, finalTurnCount: totalTurns });
+    const recap = buildAgentMatchRecap({ runID: "run-pure-churn", telemetry, finalTurnCount: totalTurns, series: null });
     expect(recap).not.toBeNull();
     if (recap === null) return;
     // One aggregated alliance pair, nothing else — the curated score must
@@ -516,7 +519,7 @@ describe("curatedDramaScore", () => {
       roster,
       finalState: finalState(totalTurns, players),
     });
-    const recap = buildAgentMatchRecap({ runID: "run-betrayal-heavy", telemetry, finalTurnCount: totalTurns });
+    const recap = buildAgentMatchRecap({ runID: "run-betrayal-heavy", telemetry, finalTurnCount: totalTurns, series: null });
     expect(recap).not.toBeNull();
     if (recap === null) return;
     expect(recap.beats.filter((b) => b.kind === "betrayal").length).toBe(4);
@@ -538,7 +541,7 @@ describe("curatedDramaScore", () => {
         { agentID: "a3", username: "Cinder", isAlive: false },
       ]),
     });
-    const recap = buildAgentMatchRecap({ runID: "run-methodology", telemetry, finalTurnCount: totalTurns });
+    const recap = buildAgentMatchRecap({ runID: "run-methodology", telemetry, finalTurnCount: totalTurns, series: null });
     expect(recap).not.toBeNull();
     if (recap === null) return;
     expect(recap.curatedDramaScoreMethodology.length).toBeGreaterThan(20);

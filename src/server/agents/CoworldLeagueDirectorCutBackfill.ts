@@ -3,11 +3,15 @@ import { promises as fs } from "node:fs";
 import path from "node:path";
 import {
   maximumDecisionsJsonlBytes,
+  maximumMatchStateSeriesBytes,
   maximumSpectatorTelemetryBytes,
   readBoundedRunDirArtifact,
   readMatchSummaryFinalTurnCount,
 } from "./CoworldLeagueBackfillIo";
-import { resolveMirroredDirectorCutPlan } from "./CoworldLeagueMirrorCore";
+import {
+  parseMirroredMatchStateSeries,
+  resolveMirroredDirectorCutPlan,
+} from "./CoworldLeagueMirrorCore";
 
 /**
  * IO orchestration for Product overhaul spec Stage 5's mirror-side gap
@@ -87,7 +91,7 @@ export async function generateDirectorCutPlanForRunDir(
   } catch {
     // ENOENT (or any other stat failure) — fall through and generate.
   }
-  const [spectatorTelemetryRaw, decisionsJsonlRaw] = await Promise.all([
+  const [spectatorTelemetryRaw, decisionsJsonlRaw, matchStateSeriesRaw] = await Promise.all([
     readBoundedRunDirArtifact(
       path.join(runDir, "spectator-telemetry.json"),
       maximumSpectatorTelemetryBytes,
@@ -96,18 +100,30 @@ export async function generateDirectorCutPlanForRunDir(
       path.join(runDir, "decisions.jsonl"),
       maximumDecisionsJsonlBytes,
     ),
+    // Season Zero Phase 2: when the (separately, strictly-earlier-in-cycle
+    // — see `CoworldLeagueMatchStateSeriesBackfill.ts`'s own doc) series
+    // backfill has already generated one, thread it through for honest
+    // `lead_change`/`reversal` segments. Absent/unparseable degrades
+    // exactly as before this fix — never a throw.
+    readBoundedRunDirArtifact(
+      path.join(runDir, "match-state-series.json"),
+      maximumMatchStateSeriesBytes,
+    ),
   ]);
   if (spectatorTelemetryRaw === null && decisionsJsonlRaw === null) {
     return { runKey, attempted: false, outcome: { status: "no-input" } };
   }
   try {
     const finalTurnCount = await readMatchSummaryFinalTurnCount(runDir);
+    const matchStateSeries =
+      matchStateSeriesRaw === null ? null : parseMirroredMatchStateSeries(matchStateSeriesRaw);
     const resolved = resolveMirroredDirectorCutPlan({
       runID: runKey,
       matchID: runKey,
       spectatorTelemetryRaw,
       decisionsJsonlRaw,
       finalTurnCount,
+      matchStateSeries,
     });
     if (resolved === null) {
       return {

@@ -13,15 +13,25 @@ import {
   buildAgentMatchRecap,
   writeAgentMatchRecapArtifacts,
 } from "./AgentMatchRecap";
+import { buildAgentDecisiveMoments } from "./AgentDecisiveMoments";
+import type { MatchStateSeries } from "./AgentMatchStateSeries";
+import type { SpectatorEvent } from "./AgentSpectatorTelemetry";
 import {
   maximumDecisionsJsonlBytes,
+  maximumMatchStateSeriesBytes,
+  maximumSpectatorReplayBytes,
   maximumSpectatorTelemetryBytes,
   readBoundedRunDirArtifact,
   readMatchSummaryFinalTurnCount,
 } from "./CoworldLeagueBackfillIo";
-import { resolveMirroredMatchEvidence } from "./CoworldLeagueMirrorCore";
+import {
+  parseMirroredMatchStateSeries,
+  parseMirroredSpectatorReplay,
+  resolveMirroredMatchEvidence,
+} from "./CoworldLeagueMirrorCore";
 
 const maximumMatchRecapBytes = 4 * 1024 * 1024;
+const maximumDecisiveMomentsBytes = 2 * 1024 * 1024;
 
 /**
  * IO orchestration for the mirror-side "drama recaps" gap closure — the
@@ -72,6 +82,8 @@ export type MatchNarrativeGenerationOutcome =
       recapBeatCount: number;
       /** `AgentMatchRecap.ts`'s `curatedDramaScore` — the PUBLIC ranking input (see that module's doc). `null` only when the curated pass found zero beats (a genuinely quiet match, `match-recap.json` legitimately not written) — never a fabricated 0 conflated with "unavailable" versus "quiet". */
       curatedDramaScore: number | null;
+      /** Season Zero Phase 2: `decisive-moments.json`'s moment count. `null` when no series was available yet OR the curated pass found fewer than `MIN_DECISIVE_MOMENTS` genuine candidates — see `AgentDecisiveMoments.ts`'s "never padded" doc; never conflated with "unavailable". */
+      decisiveMomentCount: number | null;
     }
   | {
       status: "generated-recap-only";
@@ -79,6 +91,8 @@ export type MatchNarrativeGenerationOutcome =
       recapBeatCount: number;
       /** See the `"generated"` variant's doc — same field, populated independent of `drama-report.json`/`match-story.json` since this variant never generates those. */
       curatedDramaScore: number | null;
+      /** See the `"generated"` variant's doc. */
+      decisiveMomentCount: number | null;
     }
   | {
       /** `drama-report.json`/`match-story.json` already existed and stayed untouched; ONLY `match-recap.json` was recomputed because its `schemaVersion` was stale (see `AgentMatchRecap.ts`'s 2026-08-01 fix) or it was missing entirely. */
@@ -87,6 +101,8 @@ export type MatchNarrativeGenerationOutcome =
       recapBeatCount: number;
       /** See the `"generated"` variant's doc. */
       curatedDramaScore: number | null;
+      /** See the `"generated"` variant's doc. */
+      decisiveMomentCount: number | null;
     }
   | { status: "failed"; error: string };
 
@@ -95,6 +111,87 @@ export interface MatchNarrativeGenerationResult {
   /** Whether this call actually attempted generation — the caller's per-cycle budget counter should only decrement when this is `true`. `already-exists` and `no-input` are both free. */
   attempted: boolean;
   outcome: MatchNarrativeGenerationOutcome;
+}
+
+/** Season Zero Phase 2: reads `match-state-series.json` when the (separately, strictly-earlier-in-cycle — see `CoworldLeagueMatchStateSeriesBackfill.ts`'s own doc) series backfill has already generated one for this run. `null` when absent/oversize/stale-schema/malformed — `buildAgentMatchRecap` degrades to no `lead_change`/`reversal` beats exactly as before this fix, never a throw. */
+async function readMatchStateSeries(runDir: string) {
+  const raw = await readBoundedRunDirArtifact(
+    path.join(runDir, "match-state-series.json"),
+    maximumMatchStateSeriesBytes,
+  );
+  return raw === null ? null : parseMirroredMatchStateSeries(raw);
+}
+
+/** `spectator-replay.json`'s full snapshots (with per-snapshot `decisions[]`, for `AgentDecisiveMoments.ts`'s `statedReason` lookups) — `null` on absence/oversize/malformed, which degrades every moment's `statedReason` to `null`, never a throw. */
+async function readReplaySnapshotsForDecisiveMoments(runDir: string) {
+  const raw = await readBoundedRunDirArtifact(
+    path.join(runDir, "spectator-replay.json"),
+    maximumSpectatorReplayBytes,
+  );
+  if (raw === null) return null;
+  const replay = parseMirroredSpectatorReplay(raw);
+  return replay === null ? null : replay.snapshots;
+}
+
+/**
+ * `decisive-moments.json` needs (re)generating only when a real
+ * `match-state-series.json` ALREADY exists but the moments artifact
+ * doesn't yet — series absence is "not ready", not "missing work due",
+ * so it never reports `true` (and never costs a repeat budget slot every
+ * cycle) while the series backfill hasn't caught up to this run yet. Once
+ * a series lands, this fires exactly once (the next call writes the
+ * moments artifact, after which it's present and this returns `false`
+ * again) — the same one-shot-upgrade shape `recapNeedsRegeneration`
+ * already has for its own schemaVersion trigger.
+ */
+async function decisiveMomentsNeedGeneration(runDir: string): Promise<boolean> {
+  const seriesRaw = await readBoundedRunDirArtifact(
+    path.join(runDir, "match-state-series.json"),
+    maximumMatchStateSeriesBytes,
+  );
+  if (seriesRaw === null) {
+    return false;
+  }
+  const momentsRaw = await readBoundedRunDirArtifact(
+    path.join(runDir, "decisive-moments.json"),
+    maximumDecisiveMomentsBytes,
+  );
+  return momentsRaw === null;
+}
+
+/**
+ * Writes (or, if the curated pass now yields too few candidates, removes a
+ * stale) `decisive-moments.json`, reusing the SAME `series`/telemetry
+ * events this call's recap generation already resolved — one evidence
+ * resolution, two derived artifacts. `null` series (no
+ * `match-state-series.json` yet) skips entirely, never fabricated. Returns
+ * the written moment count, or `null` when nothing was written.
+ */
+async function writeDecisiveMomentsArtifact(input: {
+  runDir: string;
+  runKey: string;
+  series: MatchStateSeries | null;
+  telemetryEvents: readonly SpectatorEvent[];
+  totalTurns: number;
+}): Promise<number | null> {
+  const momentsPath = path.join(input.runDir, "decisive-moments.json");
+  if (input.series === null) {
+    return null;
+  }
+  const replaySnapshots = await readReplaySnapshotsForDecisiveMoments(input.runDir);
+  const artifact = buildAgentDecisiveMoments({
+    runID: input.runKey,
+    series: input.series,
+    telemetryEvents: input.telemetryEvents,
+    totalTurns: input.totalTurns,
+    replaySnapshots,
+  });
+  if (artifact === null) {
+    await fs.rm(momentsPath, { force: true });
+    return null;
+  }
+  await fs.writeFile(momentsPath, `${JSON.stringify(artifact, null, 2)}\n`);
+  return artifact.moments.length;
 }
 
 async function readEvidenceInputs(
@@ -166,10 +263,12 @@ async function upgradeStaleRecap(
     return null;
   }
   const recapPath = path.join(runDir, "match-recap.json");
+  const series = await readMatchStateSeries(runDir);
   const recap = buildAgentMatchRecap({
     runID: runKey,
     telemetry: evidence.telemetry,
     finalTurnCount,
+    series,
   });
   if (recap !== null) {
     await writeAgentMatchRecapArtifacts({ recap, directory: runDir });
@@ -179,11 +278,19 @@ async function upgradeStaleRecap(
     // stale file rather than leave known-spammy content being served.
     await fs.rm(recapPath, { force: true });
   }
+  const decisiveMomentCount = await writeDecisiveMomentsArtifact({
+    runDir,
+    runKey,
+    series,
+    telemetryEvents: evidence.telemetry.events,
+    totalTurns: series?.totalTurns ?? 0,
+  });
   return {
     status: "recap-upgraded",
     source: evidence.source,
     recapBeatCount: recap?.beats.length ?? 0,
     curatedDramaScore: recap?.curatedDramaScore ?? null,
+    decisiveMomentCount,
   };
 }
 
@@ -219,7 +326,8 @@ export async function generateMatchNarrativeArtifactsForRunDir(
 
   if (dramaReportExists) {
     const needsRegeneration = await recapNeedsRegeneration(runDir);
-    if (!needsRegeneration) {
+    const decisiveMomentsMissing = await decisiveMomentsNeedGeneration(runDir);
+    if (!needsRegeneration && !decisiveMomentsMissing) {
       return { runKey, attempted: false, outcome: { status: "already-exists" } };
     }
     try {
@@ -264,14 +372,23 @@ export async function generateMatchNarrativeArtifactsForRunDir(
       };
     }
 
+    const series = await readMatchStateSeries(runDir);
     const recap = buildAgentMatchRecap({
       runID: runKey,
       telemetry: evidence.telemetry,
       finalTurnCount,
+      series,
     });
     if (recap !== null) {
       await writeAgentMatchRecapArtifacts({ recap, directory: runDir });
     }
+    const decisiveMomentCount = await writeDecisiveMomentsArtifact({
+      runDir,
+      runKey,
+      series,
+      telemetryEvents: evidence.telemetry.events,
+      totalTurns: series?.totalTurns ?? 0,
+    });
 
     if (evidence.records.length === 0) {
       // decisions.jsonl was absent/unusable even though telemetry resolved
@@ -286,6 +403,7 @@ export async function generateMatchNarrativeArtifactsForRunDir(
           source: evidence.source,
           recapBeatCount: recap?.beats.length ?? 0,
           curatedDramaScore: recap?.curatedDramaScore ?? null,
+          decisiveMomentCount,
         },
       };
     }
@@ -323,6 +441,7 @@ export async function generateMatchNarrativeArtifactsForRunDir(
         entertainmentGrade: matchStory.grade,
         recapBeatCount: recap?.beats.length ?? 0,
         curatedDramaScore: recap?.curatedDramaScore ?? null,
+        decisiveMomentCount,
       },
     };
   } catch (error) {

@@ -8,6 +8,15 @@ import {
   type SpectatorEvent,
   type SpectatorTelemetry,
 } from "./AgentSpectatorTelemetry";
+import {
+  computeLeadChanges,
+  computeMajorReversals,
+  LEAD_CHANGE_MARGIN_SHARE,
+  REVERSAL_MIN_PLACES,
+  type LeadChange,
+  type MajorReversal,
+} from "./AgentMatchStateDerivations";
+import type { MatchStateSeries } from "./AgentMatchStateSeries";
 
 /**
  * Product overhaul spec Stage 5: a deterministic, inspectable "telemetry-
@@ -35,20 +44,28 @@ import {
  * derived from real mid-match events, never invented; `plan.degraded`
  * records this and `plan.notes` explains exactly what was unavailable.
  *
- * Genuinely infeasible without fabrication, so deliberately NOT attempted:
- * "lead change" as a segment trigger (spec Stage 5 item 1 lists it
- * alongside the others). No per-turn territory-ownership series exists
- * anywhere in this artifact-writing pipeline — `SpectatorAgent` only ever
- * carries `finalTilesOwned` (the match's LAST tile count, not a turn-by-turn
- * curve — confirmed via `AgentSpectatorTelemetry.ts`'s own schema), and the
- * only place a turn-by-turn territory curve could be reconstructed is a full
- * headless re-simulation of the raw `GameRecord.turns[]` through the core
- * engine, a heavyweight operation out of proportion to "generated alongside
- * the other lightweight per-match artifacts". "Major attacks" (real,
- * telemetry-derived, high-importance `attack` events) covers the same
- * narrative territory — a large attack is the closest honestly-derivable
- * proxy for "the standings shifted here" without inventing a curve this
- * pipeline does not have.
+ * Season Zero Phase 2 gap closure: "lead change"/"reversal" segments ARE
+ * now attempted (spec Stage 5 item 1 listed lead change alongside the
+ * others as a future addition) — but ONLY when the caller passes a real
+ * `matchStateSeries` (`AgentMatchStateSeries.ts`). Without one (the
+ * default until the mirror's series backfill reaches a given run, or a
+ * source replay with zero snapshots), this module degrades EXACTLY as
+ * before this fix: "major attacks" remains the closest honestly-derivable
+ * proxy for "the standings shifted here". Lead-change/reversal segments
+ * are built directly as `DirectorCutSegment`s from
+ * `AgentMatchStateDerivations.ts`'s own derivations (see
+ * `buildSeriesDerivedSegments`) — they do NOT flow through the
+ * `SpectatorEvent`-keyed candidate-window/budget pipeline below (that
+ * pipeline is keyed on real `SpectatorEvent`s; a lead change is not one),
+ * and are bounded by their OWN small fixed count
+ * (`MAX_LEAD_CHANGE_SEGMENTS`/`MAX_REVERSAL_SEGMENTS`) rather than
+ * competing in `selectWindowsWithinBudget`'s shared important-seconds
+ * budget — the same "guaranteed inclusion, small and bounded" treatment
+ * `openingSegment`/`finalConflictSegment` already get, chosen because
+ * honest lead-change/reversal data is inherently rare (bounded by the
+ * series' own <=80 samples) and always narratively load-bearing per the
+ * spec, unlike the potentially-hundreds of attack/nuke events the shared
+ * budget exists to ration.
  */
 
 // ---------------------------------------------------------------------------
@@ -69,6 +86,10 @@ export type DirectorCutEventReason =
   | "nuke"
   | "elimination"
   | "final_conflict"
+  /** Anchored on a confirmed `LeadChange` from `AgentMatchStateDerivations.ts` — see the module doc. */
+  | "lead_change"
+  /** Anchored on a `MajorReversal` (a >=3-place rank swing) from `AgentMatchStateDerivations.ts` — see the module doc. */
+  | "reversal"
   /** No underlying event cleared the importance floor in this window — a real gap, not an omission. Always `speed: "fast"`, `importance: 0`. */
   | "quiet_interval";
 
@@ -117,6 +138,8 @@ export interface DirectorCutPlanInput {
   finalState?: AgentRunFinalState;
   /** Pass the ALREADY-BUILT telemetry when the caller has it (every production caller does) to avoid recomputation and guarantee consistency with the rest of that match's artifacts. Recomputed internally from `records`/`roster`/`finalState` only when absent (e.g. in isolated unit tests). */
   spectatorTelemetry?: SpectatorTelemetry;
+  /** Season Zero Phase 2: the sampled match-state series (`AgentMatchStateSeries.ts`), when already generated for this run — unlocks `lead_change`/`reversal` segments (see the module doc). `null`/absent degrades exactly as before this fix. */
+  matchStateSeries?: MatchStateSeries | null;
 }
 
 // ---------------------------------------------------------------------------
@@ -156,6 +179,18 @@ const TARGET_DURATION_ANCHORS: readonly [turns: number, seconds: number][] = [
   [10_000, 300],
   [50_000, 720],
 ];
+
+/**
+ * `lead_change`/`reversal` segments are guaranteed-inclusion and bounded by
+ * a small fixed COUNT (not the shared important-seconds budget — see the
+ * module doc). Ranked by `marginShare`/`abs(placesChanged)` respectively
+ * before truncating, so the MOST decisive swings survive when a match
+ * (rare, given the series' own <=80-sample cap) produces more than the cap.
+ */
+const MAX_LEAD_CHANGE_SEGMENTS = 6;
+const MAX_REVERSAL_SEGMENTS = 6;
+/** A lead change/reversal's segment `importance` interpolates from `IMPORTANCE_FLOOR` (the weakest still-qualifying swing) up toward this ceiling as its margin/place-count grows — capped here, never above `MAJOR_IMPORTANCE`'s neighborhood, so a lead-change segment competes fairly with real high-drama events for `speed: "slow"` without a small overtake accidentally outranking a betrayal. */
+const SERIES_SEGMENT_IMPORTANCE_CEILING = 95;
 
 // ---------------------------------------------------------------------------
 // Generator
@@ -228,6 +263,12 @@ export function buildDirectorCutPlan(
   );
   const budgetedWindows = selectWindowsWithinBudget(withLeadIn, totalTurns);
   const merged = mergeOverlapping(budgetedWindows, mergeGapTurns);
+  const seriesDerivedSegments = buildSeriesDerivedSegments(
+    input.matchStateSeries ?? null,
+    leadInTurns,
+    openingEnd,
+    totalTurns,
+  );
   const clamped = merged
     .map((segment) => clampToBounds(segment, openingEnd, totalTurns))
     .filter((segment): segment is DirectorCutSegment => segment !== null);
@@ -250,9 +291,12 @@ export function buildDirectorCutPlan(
     input.roster,
   );
 
-  const named = [openingSegment, ...clamped, finalConflictSegment].sort(
-    (a, b) => a.startTurn - b.startTurn,
-  );
+  const named = [
+    openingSegment,
+    ...clamped,
+    ...seriesDerivedSegments,
+    finalConflictSegment,
+  ].sort((a, b) => a.startTurn - b.startTurn);
   const partitioned = fillQuietGaps(named, totalTurns);
 
   const importantTurnCount = partitioned
@@ -606,6 +650,103 @@ function buildFinalConflictSegment(
     importance: Math.max(peakImportance, 50),
     participatingAgents: participants,
   };
+}
+
+/** Strength=0 at exactly the qualification threshold (`LEAD_CHANGE_MARGIN_SHARE`/`REVERSAL_MIN_PLACES`), strength=1 at this "very decisive" reference point and beyond (clamped) — `seriesSegmentImportance` maps `[0, 1]` onto `[IMPORTANCE_FLOOR, SERIES_SEGMENT_IMPORTANCE_CEILING]`. 0.30 = a 30-percentage-point overtake counts as maximally decisive. */
+const LEAD_CHANGE_STRENGTH_REFERENCE_MARGIN = 0.3;
+/** See `LEAD_CHANGE_STRENGTH_REFERENCE_MARGIN` — 8 places counts as a maximally decisive reversal (the largest possible in a 9-agent match, comfortably above the game's typical roster size). */
+const REVERSAL_STRENGTH_REFERENCE_PLACES = 8;
+
+/** Linearly maps `value` from `[threshold, reference]` onto importance `[IMPORTANCE_FLOOR, SERIES_SEGMENT_IMPORTANCE_CEILING]`, clamped at both ends — `value === threshold` (the weakest swing that still qualified as a lead change/reversal at all) lands exactly at the floor. */
+function seriesSegmentImportance(
+  value: number,
+  threshold: number,
+  reference: number,
+): number {
+  const strength = Math.min(1, Math.max(0, (value - threshold) / (reference - threshold)));
+  return Math.round(
+    IMPORTANCE_FLOOR + strength * (SERIES_SEGMENT_IMPORTANCE_CEILING - IMPORTANCE_FLOOR),
+  );
+}
+
+function leadChangeSegment(
+  change: LeadChange,
+  leadInTurns: number,
+  openingEnd: number,
+  totalTurns: number,
+): DirectorCutSegment {
+  const importance = seriesSegmentImportance(
+    change.marginShare,
+    LEAD_CHANGE_MARGIN_SHARE,
+    LEAD_CHANGE_STRENGTH_REFERENCE_MARGIN,
+  );
+  return {
+    startTurn: Math.max(openingEnd, change.turn - leadInTurns),
+    endTurn: Math.min(totalTurns, change.turn + leadInTurns),
+    speed: importance >= MAJOR_IMPORTANCE ? "slow" : "normal",
+    eventReason: "lead_change",
+    importance,
+    participatingAgents: dedupedNames([change.fromUsername, change.toUsername]),
+  };
+}
+
+/**
+ * Windowed on `toTurn` (leadInTurns either side), NOT the reversal's full
+ * `[fromTurn, toTurn]` climb — `REVERSAL_MAX_SAMPLE_GAP` bounds a reversal
+ * by SAMPLE count, not turn count, so on a sparsely-sampled late-match
+ * reversal that raw span can legitimately run to thousands of turns; a
+ * segment that wide would dominate the cut at merely `normal` pace instead
+ * of behaving like the other short, readable-speed highlight windows this
+ * planner otherwise produces. `fromTurn`/`toTurn` stay on `MajorReversal`
+ * itself for recap/decisive-moment consumers that DO want the real span.
+ */
+function reversalSegment(
+  reversal: MajorReversal,
+  leadInTurns: number,
+  openingEnd: number,
+  totalTurns: number,
+): DirectorCutSegment {
+  const importance = seriesSegmentImportance(
+    Math.abs(reversal.placesChanged),
+    REVERSAL_MIN_PLACES,
+    REVERSAL_STRENGTH_REFERENCE_PLACES,
+  );
+  return {
+    startTurn: Math.max(openingEnd, reversal.toTurn - leadInTurns),
+    endTurn: Math.min(totalTurns, reversal.toTurn + leadInTurns),
+    speed: importance >= MAJOR_IMPORTANCE ? "slow" : "normal",
+    eventReason: "reversal",
+    importance,
+    participatingAgents: dedupedNames([reversal.username]),
+  };
+}
+
+/**
+ * Builds the guaranteed-inclusion `lead_change`/`reversal` segments (see the
+ * module doc) directly from `AgentMatchStateDerivations.ts` — `[]` when
+ * `series` is `null` (no series generated for this run yet), never a
+ * fabricated segment. Ranked by swing strength and truncated to
+ * `MAX_LEAD_CHANGE_SEGMENTS`/`MAX_REVERSAL_SEGMENTS` before being handed to
+ * the caller, which sorts everything by `startTurn` and lets
+ * `fillQuietGaps` resolve any overlap with a higher-importance
+ * telemetry-derived segment (see that function's own doc).
+ */
+function buildSeriesDerivedSegments(
+  series: MatchStateSeries | null,
+  leadInTurns: number,
+  openingEnd: number,
+  totalTurns: number,
+): DirectorCutSegment[] {
+  if (series === null) return [];
+  const leadChanges = [...computeLeadChanges(series)]
+    .sort((a, b) => b.marginShare - a.marginShare)
+    .slice(0, MAX_LEAD_CHANGE_SEGMENTS)
+    .map((change) => leadChangeSegment(change, leadInTurns, openingEnd, totalTurns));
+  const reversals = [...computeMajorReversals(series)]
+    .sort((a, b) => Math.abs(b.placesChanged) - Math.abs(a.placesChanged))
+    .slice(0, MAX_REVERSAL_SEGMENTS)
+    .map((reversal) => reversalSegment(reversal, leadInTurns, openingEnd, totalTurns));
+  return [...leadChanges, ...reversals];
 }
 
 /** Sorts named segments, merges any that now overlap after `final_conflict`/`opening` clamping absorbed part of a candidate window, then fills every remaining gap in `[0, totalTurns]` with an explicit `quiet_interval` segment so `segments` is a complete, gapless partition. */

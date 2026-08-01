@@ -4,6 +4,12 @@ import {
   FINAL_CONFLICT_TURN_CAP,
   FINAL_CONFLICT_TURN_FRACTION,
 } from "./DirectorCutPlan";
+import {
+  computeLeadChanges,
+  computeMajorReversals,
+  ordinalLabel,
+} from "./AgentMatchStateDerivations";
+import type { MatchStateSeries } from "./AgentMatchStateSeries";
 import type { SpectatorEvent, SpectatorTelemetry } from "./AgentSpectatorTelemetry";
 
 /**
@@ -27,15 +33,20 @@ import type { SpectatorEvent, SpectatorTelemetry } from "./AgentSpectatorTelemet
  * genuine attack/nuke event, using the SAME endgame window
  * `DirectorCutPlan.ts`'s own `final_conflict` segment uses
  * (`FINAL_CONFLICT_TURN_FRACTION`/`FINAL_CONFLICT_TURN_CAP`, imported, not
- * duplicated). `lead_change` is deliberately never produced here either —
- * see `curatedWarRoomEvents`'s own doc: no turn-by-turn territory series
- * is available from decision-record telemetry, so a lead-change beat
- * would have to fabricate a moment. Every beat message is either the
- * `SpectatorEvent.message` the telemetry builder already generated (a
- * factual, already-vetted sentence — see `AgentSpectatorTelemetry.ts`'s
- * `eventForRecord`) or a small factual template built only from
- * `actorName`/`targetName`/real counts/turn numbers, never an inferred or
- * embellished claim.
+ * duplicated). Season Zero Phase 2 gap closure: `lead_change`/`reversal`
+ * beats ARE now produced, but ONLY when the caller passes a real
+ * `MatchStateSeries` (`AgentMatchStateSeries.ts`) — the sampled
+ * territory/rank series that used to be genuinely unavailable from
+ * decision-record telemetry alone (see that module's own "source
+ * decision" doc). A recap built without a series (`series: null`) simply
+ * omits both beat kinds, exactly as before this fix — never a fabricated
+ * moment. Every beat message is either the `SpectatorEvent.message` the
+ * telemetry builder already generated (a factual, already-vetted sentence
+ * — see `AgentSpectatorTelemetry.ts`'s `eventForRecord`), a small factual
+ * template built only from `actorName`/`targetName`/real counts/turn
+ * numbers, or (for `lead_change`/`reversal`) a template built only from
+ * `AgentMatchStateDerivations.ts`'s own computed usernames/shares/ranks —
+ * never an inferred or embellished claim.
  *
  * 2026-08-01 live-verification fix: a real production match repeatedly
  * re-requested an alliance between the SAME pair (no intervening break)
@@ -74,7 +85,14 @@ import type { SpectatorEvent, SpectatorTelemetry } from "./AgentSpectatorTelemet
 
 export interface AgentMatchRecapBeat {
   turnNumber: number;
-  kind: "alliance" | "first_strike" | "betrayal" | "elimination" | "final_confrontation";
+  kind:
+    | "alliance"
+    | "first_strike"
+    | "betrayal"
+    | "elimination"
+    | "final_confrontation"
+    | "lead_change"
+    | "reversal";
   message: string;
 }
 
@@ -83,15 +101,18 @@ export interface AgentMatchRecapBeat {
  * 2 -> 3 for the addition of `curatedDramaScore`/`curatedDramaScoreMethodology`
  * (see `computeCuratedDramaScore`'s doc) — the PUBLIC "best battles" ranking
  * input, replacing `AgentDramaReport.dramaScore` for that purpose on public
- * surfaces. Either bump means a pre-fix `match-recap.json` is stale, never
- * merely "old but still fine": `CoworldLeagueMatchNarrativeBackfill.ts`'s
+ * surfaces, then 3 -> 4 for Season Zero Phase 2's `lead_change`/`reversal`
+ * beats (see the module doc) — a pre-fix `match-recap.json` never carries
+ * either kind even when a series is now available, so it must be
+ * re-curated, not merely left as "old but still fine". Every bump means
+ * exactly that: `CoworldLeagueMatchNarrativeBackfill.ts`'s
  * `recapNeedsRegeneration` compares against this constant to force
  * re-curation, and `LeagueEpisodeMatchPage.ts`'s `parseMatchRecapArtifact`
  * refuses to parse anything but the current version (a stale artifact
  * reads as "no recap yet", never as spammy/scoreless content, until the
  * backfill upgrades it).
  */
-export const AGENT_MATCH_RECAP_SCHEMA_VERSION = 3;
+export const AGENT_MATCH_RECAP_SCHEMA_VERSION = 4;
 
 export interface AgentMatchRecap {
   schemaVersion: typeof AGENT_MATCH_RECAP_SCHEMA_VERSION;
@@ -114,6 +135,8 @@ export interface AgentMatchRecapInput {
   telemetry: SpectatorTelemetry;
   /** Authoritative turn count when known (`match-summary.json`'s `finalState.turnCount`), else `null` to fall back to the telemetry's own max event turn — same fallback `DirectorCutPlan.ts`'s `resolveTotalTurns` uses. */
   finalTurnCount: number | null;
+  /** `null` when no `match-state-series.json` was available for this run yet (e.g. before the mirror's series backfill reached it, or the source replay had zero snapshots) — `lead_change`/`reversal` beats are simply omitted, never fabricated. See `AgentMatchStateSeries.ts`. */
+  series: MatchStateSeries | null;
 }
 
 /** Public beat cap — see the module doc's live-verification fix. Priority order when trimming is `applyImportanceCap`'s job; this is just the ceiling. */
@@ -125,12 +148,19 @@ const BEAT_KIND_LABEL: Record<AgentMatchRecapBeat["kind"], string> = {
   betrayal: "betrayal",
   elimination: "elimination",
   final_confrontation: "final clash",
+  lead_change: "lead change",
+  reversal: "reversal",
 };
 
-/** Lower sorts first when trimming — betrayals/eliminations/final-clash are never trimmed by the cap (see `applyImportanceCap`); this only orders the two categories that DO get trimmed. */
-const TRIMMABLE_KIND_PRIORITY: Record<"alliance" | "first_strike", number> = {
-  alliance: 0,
-  first_strike: 1,
+/** Lower sorts first when trimming — betrayals/eliminations/final-clash are never trimmed by the cap (see `applyImportanceCap`); this only orders the categories that DO get trimmed. `lead_change`/`reversal` sort ahead of `alliance`/`first_strike`: they are derived from the sampled match-state series (typically far rarer per match than alliance/first-strike events — a confirmed, margin-cleared overtake is uncommon), so when the cap DOES bite, this new decisive-derivation content is kept before the higher-volume War Room categories. */
+const TRIMMABLE_KIND_PRIORITY: Record<
+  "alliance" | "first_strike" | "lead_change" | "reversal",
+  number
+> = {
+  lead_change: 0,
+  reversal: 1,
+  alliance: 2,
+  first_strike: 3,
 };
 
 interface AllianceRun {
@@ -400,6 +430,34 @@ function finalConfrontationBeat(
 }
 
 /**
+ * `lead_change`/`reversal` beats — the Season Zero Phase 2 gap closure.
+ * `null` series (no `match-state-series.json` yet, or its source replay had
+ * zero snapshots) yields an empty array for both, never a fabricated one.
+ * Thresholds/methodology live in `AgentMatchStateDerivations.ts`, reused
+ * here verbatim rather than re-implemented.
+ */
+function leadChangeBeats(series: MatchStateSeries | null): AgentMatchRecapBeat[] {
+  if (series === null) return [];
+  return computeLeadChanges(series).map((change) => ({
+    turnNumber: change.turn,
+    kind: "lead_change",
+    message: `${change.toUsername} overtakes ${change.fromUsername} for the territory lead.`,
+  }));
+}
+
+function reversalBeats(series: MatchStateSeries | null): AgentMatchRecapBeat[] {
+  if (series === null) return [];
+  return computeMajorReversals(series).map((reversal) => ({
+    turnNumber: reversal.toTurn,
+    kind: "reversal",
+    message:
+      reversal.placesChanged > 0
+        ? `${reversal.username} claws back to ${ordinalLabel(reversal.toRank)} place from ${ordinalLabel(reversal.fromRank)}.`
+        : `${reversal.username} collapses to ${ordinalLabel(reversal.toRank)} place from ${ordinalLabel(reversal.fromRank)}.`,
+  }));
+}
+
+/**
  * Trims to `MAX_PUBLIC_RECAP_BEATS`, chronologically ordered on output.
  * Betrayal/elimination/final-confrontation beats are ALWAYS kept in full
  * — they never count against the cap's trimming, only against its total
@@ -416,15 +474,24 @@ function applyImportanceCap(
   const remainingBudget = Math.max(0, MAX_PUBLIC_RECAP_BEATS - neverTrimmed.length);
   const orderedTrimmable = [...trimmable].sort(
     (a, b) =>
-      TRIMMABLE_KIND_PRIORITY[a.kind as "alliance" | "first_strike"] -
-        TRIMMABLE_KIND_PRIORITY[b.kind as "alliance" | "first_strike"] ||
+      TRIMMABLE_KIND_PRIORITY[
+        a.kind as "alliance" | "first_strike" | "lead_change" | "reversal"
+      ] -
+        TRIMMABLE_KIND_PRIORITY[
+          b.kind as "alliance" | "first_strike" | "lead_change" | "reversal"
+        ] ||
       a.turnNumber - b.turnNumber,
   );
   const kept = [...neverTrimmed, ...orderedTrimmable.slice(0, remainingBudget)];
   return kept.sort((a, b) => a.turnNumber - b.turnNumber);
 }
 
-function buildSummary(counts: CuratedWarRoomBeats["rawCounts"], hasFinalConfrontation: boolean): string {
+function buildSummary(
+  counts: CuratedWarRoomBeats["rawCounts"],
+  hasFinalConfrontation: boolean,
+  leadChangeCount: number,
+  reversalCount: number,
+): string {
   const parts: string[] = [];
   const entries: [AgentMatchRecapBeat["kind"], number][] = [
     ["alliance", counts.alliance],
@@ -432,6 +499,8 @@ function buildSummary(counts: CuratedWarRoomBeats["rawCounts"], hasFinalConfront
     ["first_strike", counts.firstStrike],
     ["elimination", counts.elimination],
     ["final_confrontation", hasFinalConfrontation ? 1 : 0],
+    ["lead_change", leadChangeCount],
+    ["reversal", reversalCount],
   ];
   for (const [kind, count] of entries) {
     if (count === 0) continue;
@@ -467,7 +536,14 @@ export function buildAgentMatchRecap(
     ...curated.eliminationBeats,
     ...(finalBeat !== null ? [finalBeat] : []),
   ];
-  const trimmable = [...curated.allianceBeats, ...curated.firstStrikeBeats];
+  const leadChanges = leadChangeBeats(input.series);
+  const reversals = reversalBeats(input.series);
+  const trimmable = [
+    ...curated.allianceBeats,
+    ...curated.firstStrikeBeats,
+    ...leadChanges,
+    ...reversals,
+  ];
   const beats = applyImportanceCap(neverTrimmed, trimmable);
   if (beats.length === 0) {
     return null;
@@ -476,7 +552,12 @@ export function buildAgentMatchRecap(
     schemaVersion: AGENT_MATCH_RECAP_SCHEMA_VERSION,
     runID: input.runID,
     generatedAt: new Date().toISOString(),
-    summary: buildSummary(curated.rawCounts, finalBeat !== null),
+    summary: buildSummary(
+      curated.rawCounts,
+      finalBeat !== null,
+      leadChanges.length,
+      reversals.length,
+    ),
     beats,
     curatedDramaScore: computeCuratedDramaScore(curated, finalBeat !== null),
     curatedDramaScoreMethodology: CURATED_DRAMA_SCORE_METHODOLOGY,

@@ -51,6 +51,24 @@
  * ranking/evidence signals, read directly off disk by
  * `feature-candidates.ts` and the mirror's read-model projection, never
  * served as page content).
+ *
+ * `match-state-series.json` (Season Zero Phase 2, `AgentMatchStateSeries.ts`):
+ * a PURE re-projection of two artifacts already on this exact list —
+ * `spectator-replay.json` (per-sample `tilesOwned`/`troops`/`isAlive`/
+ * `agentID`/`playerID`/`username`) and `spectator-telemetry.json`
+ * (`activeAlliancePairs`, derived from real `alliance_formed`/
+ * `alliance_break` events). Zero new fields, zero new privacy surface —
+ * see that module's own doc for the exact derivation.
+ *
+ * `decisive-moments.json` (Season Zero Phase 2, `AgentDecisiveMoments.ts`):
+ * headlines/before-after-state built from `match-state-series.json` and
+ * `SpectatorEvent.message` (both already public, as above); the one new
+ * field, `statedReason`, is sourced from `spectator-replay.json`'s OWN
+ * `AgentSpectatorSnapshot.decisions[].reason`/`.intentSummary` — already
+ * serialized verbatim into that already-public artifact today, so this is
+ * a re-surfacing of an existing public field, never a new one. Explicitly
+ * labeled client-side as the agent's OWN stated reason, not verified
+ * reasoning (spec requirement).
  */
 export const proxyWarPublicRunArtifacts = [
   "game-record.json",
@@ -69,6 +87,8 @@ export const proxyWarPublicRunArtifacts = [
   "external-agent-feedback.md",
   "director-cut-plan.json",
   "match-recap.json",
+  "match-state-series.json",
+  "decisive-moments.json",
 ] as const;
 
 export const proxyWarPublicTournamentArtifacts = [

@@ -3,10 +3,11 @@ import path from "node:path";
 
 /**
  * Shared IO primitives for every mirror-side, post-hoc backfill agent
- * (`CoworldLeagueDirectorCutBackfill.ts`, `CoworldLeagueMatchNarrativeBackfill.ts`):
- * bounded artifact reads and the authoritative-turn-count lookup both agents
- * need identically. Factored out rather than duplicated a second time — see
- * each backfill's own module doc for why generation IO lives outside
+ * (`CoworldLeagueDirectorCutBackfill.ts`, `CoworldLeagueMatchNarrativeBackfill.ts`,
+ * `CoworldLeagueMatchStateSeriesBackfill.ts`): bounded artifact reads and
+ * the authoritative-turn-count lookup every agent needs identically.
+ * Factored out rather than duplicated a second time — see each backfill's
+ * own module doc for why generation IO lives outside
  * `coworld-league-mirror.ts` itself (that script can never be safely
  * `import`ed by a test).
  */
@@ -14,6 +15,10 @@ import path from "node:path";
 export const maximumSpectatorTelemetryBytes = 32 * 1024 * 1024;
 export const maximumDecisionsJsonlBytes = 64 * 1024 * 1024;
 export const maximumMatchSummaryBytes = 8 * 1024 * 1024;
+/** `spectator-replay.json` is capped to 80 snapshots at write time (`AgentSpectatorReplay.ts`'s `maxReplaySnapshotsForArtifact`) — smaller in the common case than telemetry, but a 12-agent match with the per-player 800-tile cap on every snapshot can still run several MB, so this stays generous rather than tight. */
+export const maximumSpectatorReplayBytes = 16 * 1024 * 1024;
+/** `match-state-series.json` is a re-projection of the (already bounded) spectator replay, strictly smaller than its source. */
+export const maximumMatchStateSeriesBytes = 8 * 1024 * 1024;
 
 /**
  * Reads a run dir artifact bounded by `maxBytes` (checked via `stat` before
