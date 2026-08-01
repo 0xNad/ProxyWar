@@ -1,6 +1,12 @@
 import { randomUUID } from "node:crypto";
 import { promises as fs } from "node:fs";
 import path from "node:path";
+import {
+  maximumDecisionsJsonlBytes,
+  maximumSpectatorTelemetryBytes,
+  readBoundedRunDirArtifact,
+  readMatchSummaryFinalTurnCount,
+} from "./CoworldLeagueBackfillIo";
 import { resolveMirroredDirectorCutPlan } from "./CoworldLeagueMirrorCore";
 
 /**
@@ -16,69 +22,9 @@ import { resolveMirroredDirectorCutPlan } from "./CoworldLeagueMirrorCore";
  * `CoworldLeaguePremiereSuppression.ts`, `CoworldLeagueMirrorCore.ts`) — this
  * follows the same split, and returns structured results rather than logging
  * itself, matching `pruneCoworldLeagueMirrorArtifacts`'s own pattern in
- * `CoworldLeagueArtifactRetention.ts`.
+ * `CoworldLeagueArtifactRetention.ts`. Bounded-read/turn-count IO lives in
+ * `CoworldLeagueBackfillIo.ts`, shared with `CoworldLeagueMatchNarrativeBackfill.ts`.
  */
-
-const maximumSpectatorTelemetryBytes = 32 * 1024 * 1024;
-const maximumDecisionsJsonlBytes = 64 * 1024 * 1024;
-const maximumMatchSummaryBytes = 8 * 1024 * 1024;
-
-/**
- * Reads a run dir artifact bounded by `maxBytes` (checked via `stat` before
- * the read, so an oversize file is never pulled into memory). Missing file,
- * non-regular file, oversize, or any other read failure all resolve to
- * `null` — the same fail-open leaf shape as every other optional-artifact
- * reader in this mirror (compare `coworld-league-mirror.ts`'s own
- * `readPremiereArchiveIndex`, which collapses the identical set of failure
- * modes to one outcome for the same reason).
- */
-async function readBoundedRunDirArtifact(
-  filePath: string,
-  maxBytes: number,
-): Promise<string | null> {
-  try {
-    const stat = await fs.stat(filePath);
-    if (!stat.isFile() || stat.size > maxBytes) {
-      return null;
-    }
-    return await fs.readFile(filePath, "utf8");
-  } catch {
-    return null;
-  }
-}
-
-/**
- * The authoritative turn count from a run dir's `match-summary.json` (the
- * ORIGINAL `finalState` the origin's own `writeAgentLeagueRunArtifacts`
- * recorded — see `matchSummary()`'s own `finalState: input.finalState ??
- * null` field), when present and well-formed. `null` on any absence/failure
- * — the caller then falls back to the telemetry's own max event turn
- * (honestly `degraded: true`), never a hard failure.
- */
-async function readDirectorCutFinalTurnCount(
-  runDir: string,
-): Promise<number | null> {
-  const raw = await readBoundedRunDirArtifact(
-    path.join(runDir, "match-summary.json"),
-    maximumMatchSummaryBytes,
-  );
-  if (raw === null) {
-    return null;
-  }
-  try {
-    const value = JSON.parse(raw) as {
-      finalState?: { turnCount?: unknown } | null;
-    };
-    const turnCount = value.finalState?.turnCount;
-    return typeof turnCount === "number" &&
-      Number.isFinite(turnCount) &&
-      turnCount > 0
-      ? turnCount
-      : null;
-  } catch {
-    return null;
-  }
-}
 
 async function writeDirectorCutPlanAtomic(
   planPath: string,
@@ -155,7 +101,7 @@ export async function generateDirectorCutPlanForRunDir(
     return { runKey, attempted: false, outcome: { status: "no-input" } };
   }
   try {
-    const finalTurnCount = await readDirectorCutFinalTurnCount(runDir);
+    const finalTurnCount = await readMatchSummaryFinalTurnCount(runDir);
     const resolved = resolveMirroredDirectorCutPlan({
       runID: runKey,
       matchID: runKey,

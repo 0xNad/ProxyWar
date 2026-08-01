@@ -760,6 +760,20 @@ export function buildEpisodeRow(input: {
     durationEstimateSeconds: number;
     segmentCount: number;
   } | null;
+  /**
+   * Product overhaul spec Stage "drama recaps" gap closure — the mirror-side
+   * sibling of `directorCut` above, SAME optional/additive/disk-resolved-by-
+   * the-caller shape: a compact `{dramaScore, entertainmentGrade}` summary
+   * of `drama-report.json`/`match-story.json` when both exist on disk for
+   * this run (`CoworldLeagueMatchNarrativeBackfill.ts`), null/omitted
+   * otherwise. Ranking/evidence signal only — never recap prose (the recap
+   * itself is the separate, event-derived `match-recap.json` /
+   * `LeagueEpisodeRecap`, unrelated to this scalar pair).
+   */
+  dramaEvidence?: {
+    dramaScore: number;
+    entertainmentGrade: string;
+  } | null;
 }): CoworldLeagueEpisodeRow {
   const { meta, replay } = input;
   const colors = playerColorsFromSpectatorReplay(replay.spectatorReplay);
@@ -807,6 +821,9 @@ export function buildEpisodeRow(input: {
       : {}),
     ...(input.directorCut !== null && input.directorCut !== undefined
       ? { directorCut: input.directorCut }
+      : {}),
+    ...(input.dramaEvidence !== null && input.dramaEvidence !== undefined
+      ? { dramaEvidence: input.dramaEvidence }
       : {}),
   };
 }
@@ -1051,6 +1068,50 @@ export function parseDirectorCutPlanSummary(
   return { durationEstimateSeconds, segmentCount: segments.length };
 }
 
+/**
+ * Parses `drama-report.json` + `match-story.json` raw file contents into the
+ * small `{dramaScore, entertainmentGrade}` summary `buildEpisodeRow`'s
+ * `dramaEvidence` field carries — same "small, additive, provenance-marked"
+ * projection `directorCut` established above, never the full reports
+ * (neither `drama-report.json`/`.md` nor `match-story.json` is on
+ * `ProxyWarPublicArtifacts.ts`'s public allowlist; only the derived scalar
+ * pair here and the separate `match-recap.json` artifact are ever public).
+ * Pure: callers own the actual file reads and ENOENT handling; this only
+ * handles "the files exist but aren't well-formed" — malformed JSON, wrong
+ * `reportKind`, or a non-finite score resolves to `null`. Requires BOTH
+ * reports (they're written atomically together by
+ * `CoworldLeagueMatchNarrativeBackfill.ts` — one existing without the other
+ * means a torn write, never a valid partial evidence pair).
+ */
+export function parseMatchNarrativeSummary(
+  dramaReportRaw: string,
+  matchStoryRaw: string,
+): { dramaScore: number; entertainmentGrade: string } | null {
+  let dramaValue: unknown;
+  let storyValue: unknown;
+  try {
+    dramaValue = JSON.parse(dramaReportRaw);
+    storyValue = JSON.parse(matchStoryRaw);
+  } catch {
+    return null;
+  }
+  const dramaRecord = asRecord(dramaValue);
+  const storyRecord = asRecord(storyValue);
+  if (
+    dramaRecord === null ||
+    dramaRecord.reportKind !== "drama-and-tom-scorer" ||
+    storyRecord === null
+  ) {
+    return null;
+  }
+  const dramaScore = asNumber(dramaRecord.dramaScore);
+  const entertainmentGrade = asString(storyRecord.grade);
+  if (dramaScore === null || dramaScore < 0 || entertainmentGrade === null) {
+    return null;
+  }
+  return { dramaScore, entertainmentGrade };
+}
+
 // ---------------------------------------------------------------------------
 // Product overhaul spec Stage 5 gap closure: Director Cut plan generation for
 // mirrored (hosted-league) runs.
@@ -1247,21 +1308,26 @@ function decisionRecordFromMirroredLogLine(
   };
 }
 
+export interface MirroredDecisionRecords {
+  records: AgentDecisionRecord[];
+  roster: AgentRunRosterEntry[];
+}
+
 /**
- * Fallback tier: rebuilds an equivalent `SpectatorTelemetry` straight from a
- * mirrored run's raw `decisions.jsonl`, for the rarer case where
- * `spectator-telemetry.json` is missing or fails
- * {@link parseMirroredSpectatorTelemetry}'s validation. Roster is derived by
- * first-seen dedup on `agentID` — the mirror has no separate roster document
- * for a hosted episode, but the only roster field `buildDirectorCutPlan`
- * actually reads is `username` (see its own doc), which every decision line
- * already carries. Torn/malformed lines are skipped, never fatal; `null`
- * only when NO line parsed into a usable record.
+ * Tolerant per-line parse of a mirrored run's raw `decisions.jsonl` into the
+ * minimal `AgentDecisionRecord[]`/roster `buildAgentSpectatorTelemetry` (and,
+ * downstream, `buildAgentDramaReport`/`buildAgentMatchStory`, which require
+ * `records` verbatim — neither accepts a pre-built `SpectatorTelemetry`)
+ * reads. Roster is derived by first-seen dedup on `agentID` — the mirror has
+ * no separate roster document for a hosted episode, but every field these
+ * generators actually read off a roster entry (`username`, and — inertly,
+ * never read by any of them — `profile`/`brainType`) already round-trips off
+ * every decision line. Torn/malformed lines are skipped, never fatal; an
+ * empty `records` array signals "nothing usable", handled by callers.
  */
-export function deriveSpectatorTelemetryFromDecisionsLog(
+export function agentDecisionRecordsFromMirroredDecisionsLog(
   raw: string,
-  runID: string,
-): SpectatorTelemetry | null {
+): MirroredDecisionRecords {
   const records: AgentDecisionRecord[] = [];
   const rosterByAgentID = new Map<string, AgentRunRosterEntry>();
   for (const line of raw.split("\n")) {
@@ -1290,31 +1356,63 @@ export function deriveSpectatorTelemetryFromDecisionsLog(
       });
     }
   }
-  if (records.length === 0) {
-    return null;
-  }
-  return buildAgentSpectatorTelemetry({
-    runID,
-    records,
-    roster: [...rosterByAgentID.values()],
-  });
+  return { records, roster: [...rosterByAgentID.values()] };
 }
 
 /**
- * Resolves the Director Cut plan for one mirrored run dir from whatever
- * telemetry artifact is already sitting next to it, preferring the faithful
- * `spectator-telemetry.json` tier and falling back to `decisions.jsonl`
- * derivation. Returns `null` when NEITHER input is usable — the caller (the
- * mirror script) logs and skips; this function itself never throws.
+ * Fallback tier: rebuilds an equivalent `SpectatorTelemetry` straight from a
+ * mirrored run's raw `decisions.jsonl`, for the rarer case where
+ * `spectator-telemetry.json` is missing or fails
+ * {@link parseMirroredSpectatorTelemetry}'s validation. `null` only when NO
+ * line parsed into a usable record.
  */
-export function resolveMirroredDirectorCutPlan(input: {
+export function deriveSpectatorTelemetryFromDecisionsLog(
+  raw: string,
+  runID: string,
+): SpectatorTelemetry | null {
+  const { records, roster } = agentDecisionRecordsFromMirroredDecisionsLog(raw);
+  if (records.length === 0) {
+    return null;
+  }
+  return buildAgentSpectatorTelemetry({ runID, records, roster });
+}
+
+export interface ResolvedMirroredMatchEvidence {
+  /** Which artifact the telemetry was actually built from — for logging/observability only, never published. */
+  source: "spectator-telemetry" | "decisions-log";
+  telemetry: SpectatorTelemetry;
+  /**
+   * Raw records reconstructed from `decisions.jsonl` — the REQUIRED,
+   * unmodified-signature input `buildAgentDramaReport`/`buildAgentMatchStory`
+   * need (unlike `buildDirectorCutPlan`, neither accepts a pre-built
+   * `SpectatorTelemetry`). Empty only when `decisionsJsonlRaw` was absent,
+   * oversize, or unparseable while `spectatorTelemetryRaw` still resolved —
+   * a real, distinct evidence gap (not an error): a caller needing records
+   * degrades honestly (e.g. recap-only) rather than fabricating them.
+   */
+  records: AgentDecisionRecord[];
+  roster: AgentRunRosterEntry[];
+  finalState: AgentRunFinalState | undefined;
+}
+
+/**
+ * Shared two-tier telemetry/record resolution for every mirror-side,
+ * post-hoc match-narrative generator (Director Cut, drama report, match
+ * story, match recap): prefers the faithful `spectator-telemetry.json` tier
+ * and falls back to `decisions.jsonl` derivation, exactly like
+ * {@link resolveMirroredDirectorCutPlan} always did — this IS that logic,
+ * factored out so a second generator never re-implements it. Always ALSO
+ * resolves the raw `decisions.jsonl` records (independent of which
+ * telemetry tier wins) since `buildAgentDramaReport`/`buildAgentMatchStory`
+ * need them directly. `null` only when NEITHER input is usable at all.
+ */
+export function resolveMirroredMatchEvidence(input: {
   runID: string;
-  matchID: string;
   spectatorTelemetryRaw: string | null;
   decisionsJsonlRaw: string | null;
   /** Authoritative turn count when known (from `match-summary.json`'s own `finalState`), else `null` to fall back to the telemetry's own max event turn (honest `degraded: true`). */
   finalTurnCount: number | null;
-}): DirectorCutPlanGenerationOutcome | null {
+}): ResolvedMirroredMatchEvidence | null {
   const finalState: AgentRunFinalState | undefined =
     input.finalTurnCount !== null && input.finalTurnCount > 0
       ? {
@@ -1325,6 +1423,11 @@ export function resolveMirroredDirectorCutPlan(input: {
         }
       : undefined;
 
+  const fromDecisionsLog =
+    input.decisionsJsonlRaw !== null
+      ? agentDecisionRecordsFromMirroredDecisionsLog(input.decisionsJsonlRaw)
+      : { records: [], roster: [] };
+
   if (input.spectatorTelemetryRaw !== null) {
     const telemetry = parseMirroredSpectatorTelemetry(
       input.spectatorTelemetryRaw,
@@ -1332,47 +1435,63 @@ export function resolveMirroredDirectorCutPlan(input: {
     if (telemetry !== null) {
       return {
         source: "spectator-telemetry",
-        plan: buildDirectorCutPlan({
-          runID: input.runID,
-          matchID: input.matchID,
-          records: [],
-          roster: telemetry.agents.map((agent) => ({
-            agentID: agent.agentID,
-            username: agent.username,
-            profile: agent.profile as AgentRunRosterEntry["profile"],
-            clientID: null,
-            brainType: "external-http" as AgentRunRosterEntry["brainType"],
-          })),
-          finalState,
-          spectatorTelemetry: telemetry,
-        }),
+        telemetry,
+        records: fromDecisionsLog.records,
+        roster: telemetry.agents.map((agent) => ({
+          agentID: agent.agentID,
+          username: agent.username,
+          profile: agent.profile as AgentRunRosterEntry["profile"],
+          clientID: null,
+          brainType: "external-http" as AgentRunRosterEntry["brainType"],
+        })),
+        finalState,
       };
     }
   }
-  if (input.decisionsJsonlRaw !== null) {
-    const telemetry = deriveSpectatorTelemetryFromDecisionsLog(
-      input.decisionsJsonlRaw,
-      input.runID,
-    );
-    if (telemetry !== null) {
-      return {
-        source: "decisions-log",
-        plan: buildDirectorCutPlan({
-          runID: input.runID,
-          matchID: input.matchID,
-          records: [],
-          roster: telemetry.agents.map((agent) => ({
-            agentID: agent.agentID,
-            username: agent.username,
-            profile: agent.profile as AgentRunRosterEntry["profile"],
-            clientID: null,
-            brainType: "external-http" as AgentRunRosterEntry["brainType"],
-          })),
-          finalState,
-          spectatorTelemetry: telemetry,
-        }),
-      };
-    }
+  if (fromDecisionsLog.records.length > 0) {
+    const telemetry = buildAgentSpectatorTelemetry({
+      runID: input.runID,
+      records: fromDecisionsLog.records,
+      roster: fromDecisionsLog.roster,
+    });
+    return {
+      source: "decisions-log",
+      telemetry,
+      records: fromDecisionsLog.records,
+      roster: fromDecisionsLog.roster,
+      finalState,
+    };
   }
   return null;
+}
+
+/**
+ * Resolves the Director Cut plan for one mirrored run dir from whatever
+ * telemetry artifact is already sitting next to it — thin wrapper over
+ * {@link resolveMirroredMatchEvidence}. `null` when neither input is usable
+ * — the caller (the mirror script) logs and skips; this function itself
+ * never throws.
+ */
+export function resolveMirroredDirectorCutPlan(input: {
+  runID: string;
+  matchID: string;
+  spectatorTelemetryRaw: string | null;
+  decisionsJsonlRaw: string | null;
+  finalTurnCount: number | null;
+}): DirectorCutPlanGenerationOutcome | null {
+  const evidence = resolveMirroredMatchEvidence(input);
+  if (evidence === null) {
+    return null;
+  }
+  return {
+    source: evidence.source,
+    plan: buildDirectorCutPlan({
+      runID: input.runID,
+      matchID: input.matchID,
+      records: [],
+      roster: evidence.roster,
+      finalState: evidence.finalState,
+      spectatorTelemetry: evidence.telemetry,
+    }),
+  };
 }

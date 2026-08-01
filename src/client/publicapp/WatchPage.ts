@@ -56,6 +56,13 @@ export class WatchPage extends LitElement {
   /** `<input type=date>` values, `""` when unset -- inclusive on both ends, compared against `completedAt`'s own date portion (UTC, matching the ISO string's own date segment, never locale-shifted). */
   @state() private filterDateFrom = "";
   @state() private filterDateTo = "";
+  /**
+   * Ranking of the (already filtered) archive — "recent" (default) keeps
+   * the caller's completedAt-desc order; "dramatic" ranks by
+   * `dramaEvidence.dramaScore` desc, evidence-less matches last. This is a
+   * SORT, not a filter — no match is ever hidden by it.
+   */
+  @state() private sortOrder: "recent" | "dramatic" = "recent";
 
   createRenderRoot() {
     // Light DOM, so page-level Tailwind applies — same reasoning as
@@ -242,6 +249,7 @@ export class WatchPage extends LitElement {
       dateFrom: this.filterDateFrom === "" ? null : this.filterDateFrom,
       dateTo: this.filterDateTo === "" ? null : this.filterDateTo,
     });
+    const sorted = sortArchiveMatches(filtered, this.sortOrder);
     return html`
       <section aria-labelledby="watch-archive-heading">
         <h2
@@ -256,12 +264,12 @@ export class WatchPage extends LitElement {
             </p>`
           : html`
               ${this.renderArchiveFilters(completed, readModel.agents)}
-              ${filtered.length === 0
+              ${sorted.length === 0
                 ? html`<p class="text-sm text-ink-muted" role="status">
                     ${translateText("watch.no_filtered_matches")}
                   </p>`
                 : html`<ul class="flex flex-col gap-3" role="list">
-                    ${filtered.map((match) =>
+                    ${sorted.map((match) =>
                       this.renderMatchCard(
                         match,
                         readModel.agents,
@@ -414,6 +422,22 @@ export class WatchPage extends LitElement {
             @change=${onChange("filterDateTo")}
           />
         </label>
+        <label class="flex flex-col gap-1 text-xs text-ink-muted">
+          ${translateText("watch.sort_label")}
+          <select
+            class="rounded border border-line bg-surface px-2 py-1 text-sm text-ink"
+            .value=${this.sortOrder}
+            @change=${(event: Event) => {
+              this.sortOrder = (event.target as HTMLSelectElement)
+                .value as "recent" | "dramatic";
+            }}
+          >
+            <option value="recent">${translateText("watch.sort_recent")}</option>
+            <option value="dramatic">
+              ${translateText("watch.sort_dramatic")}
+            </option>
+          </select>
+        </label>
       </fieldset>
     `;
   }
@@ -439,6 +463,12 @@ export class WatchPage extends LitElement {
             1,
             Math.round(match.directorCut.durationEstimateSeconds / 60),
           ),
+        }),
+      );
+    if (match.dramaEvidence !== null)
+      meta.push(
+        translateText("watch.drama_score", {
+          score: match.dramaEvidence.dramaScore,
         }),
       );
     const roundLabel =
@@ -585,6 +615,40 @@ export function filterArchiveMatches(
     if (filters.dateTo !== null && matchDate > filters.dateTo) return false;
     return true;
   });
+}
+
+/**
+ * Ranks the (already filtered) archive for display. "recent" re-sorts by
+ * `completedAt` descending rather than trusting the caller's own upstream
+ * ordering — kept self-contained and correct regardless of the order
+ * `matches` arrives in, instead of leaning on the invariant that
+ * `renderReplayArchive` happens to sort before filtering. "dramatic" sorts
+ * by `dramaEvidence.dramaScore` descending; matches with `dramaEvidence
+ * === null` (the drama backfill hasn't reached that episode yet) sort
+ * AFTER every scored match, keeping their relative order among themselves
+ * — `Array.prototype.sort` is a stable sort per spec, and the `-1`
+ * fallback below never collides with a real score since `dramaScore` is
+ * always in `[0, 100]`. Never drops a match — a sort, not a filter.
+ */
+export function sortArchiveMatches(
+  matches: readonly (PublicMatch & { completedAt: string })[],
+  sortOrder: "recent" | "dramatic",
+): (PublicMatch & { completedAt: string })[] {
+  if (sortOrder === "dramatic") {
+    return matches
+      .slice()
+      .sort(
+        (a, b) =>
+          (b.dramaEvidence?.dramaScore ?? -1) -
+          (a.dramaEvidence?.dramaScore ?? -1),
+      );
+  }
+  return matches
+    .slice()
+    .sort(
+      (a, b) =>
+        new Date(b.completedAt).getTime() - new Date(a.completedAt).getTime(),
+    );
 }
 
 /**

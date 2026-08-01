@@ -141,8 +141,9 @@ const IMPORTANT_SECONDS_BUDGET_FRACTION = 0.7;
 
 const OPENING_TURN_FRACTION = 0.03;
 const OPENING_TURN_CAP = 250;
-const FINAL_CONFLICT_TURN_FRACTION = 0.05;
-const FINAL_CONFLICT_TURN_CAP = 400;
+/** Exported so `AgentMatchRecap.ts`'s "final confrontation" beat uses the SAME endgame window this module's own `final_conflict` segment does — one tuned definition of "the final stretch of the match", not two that could silently drift apart. */
+export const FINAL_CONFLICT_TURN_FRACTION = 0.05;
+export const FINAL_CONFLICT_TURN_CAP = 400;
 
 /** Readable real-time pace assumptions for `estimatedDurationSeconds` — independent of match length, since a viewer needs roughly the same wall-clock time to read one alliance regardless of whether it lands at turn 500 of a 10k-turn match or turn 40000 of a 50k-turn one. */
 const SLOW_TURNS_PER_SECOND = 6;

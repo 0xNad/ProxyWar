@@ -1087,7 +1087,7 @@ export class MatchDetailPage extends LitElement {
   /**
    * Conditional recap section (product overhaul spec: "a recap SECTION
    * ONLY when real artifacts support it"). `match.recap` is already
-   * `null` unless a real `match-story.md` backs it — see
+   * `null` unless a real `match-recap.json` backs it — see
    * `LeagueEpisodeMatchPage.ts`'s `readLeagueEpisodeRecap` — so no
    * additional "is this worth showing" check is needed here; absence IS
    * the honest signal, never a placeholder.

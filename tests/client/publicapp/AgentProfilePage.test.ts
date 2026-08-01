@@ -119,6 +119,7 @@ function minimalMatch(overrides: {
     fullRenderHref: overrides.fullRenderHref ?? null,
     premiereHref: null,
     directorCut: null,
+    dramaEvidence: null,
   };
 }
 

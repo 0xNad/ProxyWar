@@ -14,6 +14,7 @@ import {
   describeSchedule,
   filterArchiveMatches,
   resolveWinnerName,
+  sortArchiveMatches,
 } from "../../../src/client/publicapp/WatchPage";
 import type {
   PublicAgent,
@@ -69,6 +70,7 @@ function match(overrides: Partial<PublicMatch>): PublicMatch {
     fullRenderHref: null,
     premiereHref: null,
     directorCut: null,
+    dramaEvidence: null,
     ...overrides,
   };
 }
@@ -481,6 +483,89 @@ describe("watch-page replay archive", () => {
     expect(el.textContent).toContain("Alpha");
     expect(el.textContent).not.toContain("Never Played");
   });
+
+  it("shows a Drama score badge when the match carries dramaEvidence, and omits it otherwise", async () => {
+    stubReadModelFetch(
+      readModel({
+        matches: [
+          match({
+            matchId: "with-drama",
+            completedAt: "2026-06-15T00:00:00.000Z",
+            map: "Drama Map",
+            dramaEvidence: { dramaScore: 82, entertainmentGrade: "lively" },
+          }),
+          match({
+            matchId: "without-drama",
+            completedAt: "2026-06-14T00:00:00.000Z",
+            map: "No Drama Map",
+            dramaEvidence: null,
+          }),
+        ],
+      }),
+    );
+    const el = mount();
+    await flushMicrotasks();
+
+    const cards = Array.from(el.querySelectorAll("li"));
+    expect(cards).toHaveLength(2);
+    expect(cards[0]?.textContent).toContain("watch.drama_score");
+    expect(cards[1]?.textContent).not.toContain("watch.drama_score");
+  });
+
+  it("offers a Most recent / Most dramatic sort control, and reorders the visible cards when 'Most dramatic' is selected, keeping evidence-less matches visible at the end", async () => {
+    stubReadModelFetch(
+      readModel({
+        matches: [
+          match({
+            matchId: "low-drama",
+            completedAt: "2026-06-20T00:00:00.000Z",
+            map: "Low Drama Map",
+            dramaEvidence: { dramaScore: 20, entertainmentGrade: "flat" },
+          }),
+          match({
+            matchId: "no-drama",
+            completedAt: "2026-06-18T00:00:00.000Z",
+            map: "No Drama Map",
+            dramaEvidence: null,
+          }),
+          match({
+            matchId: "high-drama",
+            completedAt: "2026-06-01T00:00:00.000Z",
+            map: "High Drama Map",
+            dramaEvidence: { dramaScore: 95, entertainmentGrade: "lively" },
+          }),
+        ],
+      }),
+    );
+    const el = mount();
+    await flushMicrotasks();
+
+    // Default "recent" order: most recently completed first.
+    let cards = Array.from(el.querySelectorAll("li"));
+    expect(cards.map((c) => c.textContent)).toEqual([
+      expect.stringContaining("Low Drama Map"),
+      expect.stringContaining("No Drama Map"),
+      expect.stringContaining("High Drama Map"),
+    ]);
+
+    const selects = Array.from(el.querySelectorAll("select"));
+    const sortSelect = selects.find((select) =>
+      Array.from(select.options).some((o) => o.value === "dramatic"),
+    );
+    expect(sortSelect).toBeDefined();
+    sortSelect!.value = "dramatic";
+    sortSelect!.dispatchEvent(new Event("change"));
+    await flushMicrotasks();
+
+    // "Most dramatic": highest score first, evidence-less match last --
+    // still present, never dropped.
+    cards = Array.from(el.querySelectorAll("li"));
+    expect(cards.map((c) => c.textContent)).toEqual([
+      expect.stringContaining("High Drama Map"),
+      expect.stringContaining("Low Drama Map"),
+      expect.stringContaining("No Drama Map"),
+    ]);
+  });
 });
 
 describe("computeDegradedShare", () => {
@@ -646,5 +731,97 @@ describe("filterArchiveMatches", () => {
       mapSize: "Normal",
     });
     expect(result.map((m) => m.matchId)).toEqual(["both-match"]);
+  });
+});
+
+describe("sortArchiveMatches", () => {
+  function completedMatch(overrides: Partial<PublicMatch>) {
+    return match({
+      completedAt: "2026-06-15T00:00:00.000Z",
+      ...overrides,
+    }) as PublicMatch & { completedAt: string };
+  }
+
+  it("'dramatic' orders by dramaScore descending, with null-evidence matches sorted after every scored match", () => {
+    const highest = completedMatch({
+      matchId: "highest",
+      dramaEvidence: { dramaScore: 91, entertainmentGrade: "lively" },
+    });
+    const middle = completedMatch({
+      matchId: "middle",
+      dramaEvidence: { dramaScore: 40, entertainmentGrade: "flat" },
+    });
+    const lowestScored = completedMatch({
+      matchId: "lowest-scored",
+      dramaEvidence: { dramaScore: 0, entertainmentGrade: "stalled" },
+    });
+    const noEvidenceFirst = completedMatch({
+      matchId: "no-evidence-first",
+      dramaEvidence: null,
+    });
+    const noEvidenceSecond = completedMatch({
+      matchId: "no-evidence-second",
+      dramaEvidence: null,
+    });
+    const result = sortArchiveMatches(
+      [
+        middle,
+        noEvidenceFirst,
+        highest,
+        noEvidenceSecond,
+        lowestScored,
+      ],
+      "dramatic",
+    );
+    // Scored matches descend by dramaScore; the two null-evidence matches
+    // land after every scored match, in their original relative order
+    // (stable partition) -- never dropped, just sorted last.
+    expect(result.map((m) => m.matchId)).toEqual([
+      "highest",
+      "middle",
+      "lowest-scored",
+      "no-evidence-first",
+      "no-evidence-second",
+    ]);
+  });
+
+  it("'recent' produces completedAt-descending order regardless of input order", () => {
+    const oldest = completedMatch({
+      matchId: "oldest",
+      completedAt: "2026-06-01T00:00:00.000Z",
+    });
+    const middle = completedMatch({
+      matchId: "middle",
+      completedAt: "2026-06-15T00:00:00.000Z",
+    });
+    const newest = completedMatch({
+      matchId: "newest",
+      completedAt: "2026-06-30T00:00:00.000Z",
+    });
+    // Deliberately unsorted input -- "recent" must not trust the
+    // caller's order.
+    const result = sortArchiveMatches([middle, oldest, newest], "recent");
+    expect(result.map((m) => m.matchId)).toEqual([
+      "newest",
+      "middle",
+      "oldest",
+    ]);
+  });
+
+  it("never drops a match -- 'dramatic' is a sort, not a filter", () => {
+    const scored = completedMatch({
+      matchId: "scored",
+      dramaEvidence: { dramaScore: 50, entertainmentGrade: "promising" },
+    });
+    const unscored = completedMatch({
+      matchId: "unscored",
+      dramaEvidence: null,
+    });
+    const result = sortArchiveMatches([scored, unscored], "dramatic");
+    expect(result).toHaveLength(2);
+    expect(result.map((m) => m.matchId).sort()).toEqual([
+      "scored",
+      "unscored",
+    ]);
   });
 });

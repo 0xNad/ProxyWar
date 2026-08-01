@@ -166,6 +166,12 @@ export interface PublicDirectorCutSummary {
   segmentCount: number;
 }
 
+/** "Drama recaps" gap closure — a compact ranking/evidence signal from `drama-report.json`/`match-story.json`, never recap prose (the recap itself is `LeagueEpisodeMatchPage.ts`'s separate `match-recap.json`-backed `LeagueEpisodeRecap`). `dramaScore` is `AgentDramaReport`'s 0-100 composite; `entertainmentGrade` is `AgentMatchStory`'s `grade`. */
+export interface PublicDramaEvidence {
+  dramaScore: number;
+  entertainmentGrade: string;
+}
+
 export interface PublicMatch {
   matchId: string;
   shortId: string;
@@ -183,6 +189,8 @@ export interface PublicMatch {
   premiereHref: string | null;
   /** Product overhaul spec Stage 5. `null` when no `director-cut-plan.json` artifact exists for this match yet (e.g. an older match generated before this feature shipped) — never fabricated. */
   directorCut: PublicDirectorCutSummary | null;
+  /** `null` until `CoworldLeagueMatchNarrativeBackfill.ts` has generated evidence for this run (budgeted, gradual — same convergence characteristic as `directorCut`) — never fabricated. */
+  dramaEvidence: PublicDramaEvidence | null;
 }
 
 export interface PublicFeaturedMatchResult {
@@ -456,6 +464,12 @@ function publicMatch(
       ? {
           durationEstimateSeconds: episode.directorCut.durationEstimateSeconds,
           segmentCount: episode.directorCut.segmentCount,
+        }
+      : null,
+    dramaEvidence: episode.dramaEvidence
+      ? {
+          dramaScore: episode.dramaEvidence.dramaScore,
+          entertainmentGrade: episode.dramaEvidence.entertainmentGrade,
         }
       : null,
   };

@@ -14,11 +14,13 @@ import {
   parseDirectorCutPlanSummary,
   parseHostedReplayPayload,
   parseLeagueSummary,
+  parseMatchNarrativeSummary,
   parseMirroredSpectatorTelemetry,
   pickCompetitionDivision,
   premiereHrefForEpisode,
   resolveLatestRevealedPremiere,
   resolveMirroredDirectorCutPlan,
+  resolveMirroredMatchEvidence,
   revealedPremiereIdsFromArchiveIndex,
   roundNumberByRoundId,
   scoreLabelFromStandings,
@@ -847,6 +849,39 @@ describe("revealed-premiere battle-card links (every round premieres, 2026-07-22
       expect(JSON.stringify(row)).not.toContain("directorCut");
     }
   });
+
+  test("buildEpisodeRow carries dramaEvidence only when it's resolved (additive data.json)", () => {
+    const replay = parseHostedReplayPayload(replayPayloadFixture);
+    expect(replay).not.toBeNull();
+    if (replay === null) {
+      return;
+    }
+    const meta = parseCompletedEpisodeMetaList(replayMetaFixture)[1];
+    const base = {
+      meta,
+      replay,
+      roundNumber: 267,
+      watchHref: null,
+      fullRenderHref: "/ai-league-replay/coworld-run",
+    };
+    const withEvidence = buildEpisodeRow({
+      ...base,
+      dramaEvidence: { dramaScore: 62, entertainmentGrade: "lively" },
+    });
+    expect(withEvidence.dramaEvidence).toEqual({
+      dramaScore: 62,
+      entertainmentGrade: "lively",
+    });
+    // Absent or null input leaves the field entirely OFF the row — the
+    // common case until the budgeted backfill has reached a given run.
+    for (const row of [
+      buildEpisodeRow(base),
+      buildEpisodeRow({ ...base, dramaEvidence: null }),
+    ]) {
+      expect(row).not.toHaveProperty("dramaEvidence");
+      expect(JSON.stringify(row)).not.toContain("dramaEvidence");
+    }
+  });
 });
 
 describe("parseDirectorCutPlanSummary (product overhaul spec Stage 5)", () => {
@@ -898,6 +933,68 @@ describe("parseDirectorCutPlanSummary (product overhaul spec Stage 5)", () => {
           estimatedDurationSeconds: -5,
           segments: [{ startTurn: 0, endTurn: 10 }],
         }),
+      ),
+    ).toBeNull();
+  });
+});
+
+describe("parseMatchNarrativeSummary (drama recaps gap closure)", () => {
+  const validDramaReport = () =>
+    JSON.stringify({
+      schemaVersion: 1,
+      reportKind: "drama-and-tom-scorer",
+      runID: "run-1",
+      dramaScore: 62,
+    });
+  const validMatchStory = () =>
+    JSON.stringify({
+      schemaVersion: 1,
+      runID: "run-1",
+      entertainmentScore: 81,
+      grade: "lively",
+    });
+
+  test("extracts dramaScore and entertainmentGrade from a well-formed pair", () => {
+    expect(
+      parseMatchNarrativeSummary(validDramaReport(), validMatchStory()),
+    ).toEqual({ dramaScore: 62, entertainmentGrade: "lively" });
+  });
+
+  test("rejects malformed JSON on either side", () => {
+    expect(
+      parseMatchNarrativeSummary("not json", validMatchStory()),
+    ).toBeNull();
+    expect(
+      parseMatchNarrativeSummary(validDramaReport(), "not json"),
+    ).toBeNull();
+  });
+
+  test("rejects the wrong drama-report reportKind", () => {
+    expect(
+      parseMatchNarrativeSummary(
+        JSON.stringify({ reportKind: "something-else", dramaScore: 10 }),
+        validMatchStory(),
+      ),
+    ).toBeNull();
+  });
+
+  test("rejects a missing/negative dramaScore or a missing grade", () => {
+    expect(
+      parseMatchNarrativeSummary(
+        JSON.stringify({ reportKind: "drama-and-tom-scorer" }),
+        validMatchStory(),
+      ),
+    ).toBeNull();
+    expect(
+      parseMatchNarrativeSummary(
+        JSON.stringify({ reportKind: "drama-and-tom-scorer", dramaScore: -1 }),
+        validMatchStory(),
+      ),
+    ).toBeNull();
+    expect(
+      parseMatchNarrativeSummary(
+        validDramaReport(),
+        JSON.stringify({ entertainmentScore: 40 }),
       ),
     ).toBeNull();
   });
@@ -1112,6 +1209,75 @@ describe("resolveMirroredDirectorCutPlan (product overhaul spec Stage 5 mirror g
     const { generatedAt: _g1, ...restFirst } = first?.plan ?? ({} as never);
     const { generatedAt: _g2, ...restSecond } = second?.plan ?? ({} as never);
     expect(restFirst).toEqual(restSecond);
+  });
+});
+
+describe("resolveMirroredMatchEvidence (shared two-tier resolver, drama recaps gap closure)", () => {
+  test("tier 1 + records: telemetry from spectator-telemetry.json, records reconstructed from decisions.jsonl independently", () => {
+    const evidence = resolveMirroredMatchEvidence({
+      runID: "league-coworld-real-run",
+      spectatorTelemetryRaw: realTelemetryFixtureRaw,
+      decisionsJsonlRaw: realDecisionsFixtureRaw,
+      finalTurnCount: null,
+    });
+    expect(evidence).not.toBeNull();
+    expect(evidence?.source).toBe("spectator-telemetry");
+    expect(evidence?.telemetry.agents.length).toBe(12);
+    // Records are reconstructed from decisions.jsonl regardless of which
+    // telemetry tier won — buildAgentDramaReport/buildAgentMatchStory need
+    // them verbatim.
+    expect(evidence?.records.length).toBeGreaterThan(0);
+  });
+
+  test("tier 1 only: telemetry resolves but records stay empty when decisions.jsonl is absent — a real, distinct evidence gap", () => {
+    const evidence = resolveMirroredMatchEvidence({
+      runID: "league-coworld-real-run",
+      spectatorTelemetryRaw: realTelemetryFixtureRaw,
+      decisionsJsonlRaw: null,
+      finalTurnCount: null,
+    });
+    expect(evidence).not.toBeNull();
+    expect(evidence?.source).toBe("spectator-telemetry");
+    expect(evidence?.records).toEqual([]);
+  });
+
+  test("tier 2 fallback: telemetry AND records both derive from decisions.jsonl when spectator-telemetry.json is absent/unusable", () => {
+    const evidence = resolveMirroredMatchEvidence({
+      runID: "league-coworld-fallback-run",
+      spectatorTelemetryRaw: "not json",
+      decisionsJsonlRaw: realDecisionsFixtureRaw,
+      finalTurnCount: null,
+    });
+    expect(evidence).not.toBeNull();
+    expect(evidence?.source).toBe("decisions-log");
+    expect(evidence?.records.length).toBeGreaterThan(0);
+    expect(evidence?.telemetry.agents.length).toBeGreaterThan(0);
+  });
+
+  test("resolves null (never throws) when neither input is usable", () => {
+    expect(
+      resolveMirroredMatchEvidence({
+        runID: "run-1",
+        spectatorTelemetryRaw: "not json",
+        decisionsJsonlRaw: "also not json",
+        finalTurnCount: null,
+      }),
+    ).toBeNull();
+  });
+
+  test("finalState is built from finalTurnCount and passed through unconditionally", () => {
+    const evidence = resolveMirroredMatchEvidence({
+      runID: "league-coworld-real-run",
+      spectatorTelemetryRaw: realTelemetryFixtureRaw,
+      decisionsJsonlRaw: null,
+      finalTurnCount: 6300,
+    });
+    expect(evidence?.finalState).toEqual({
+      phase: "final",
+      tick: null,
+      turnCount: 6300,
+      players: [],
+    });
   });
 });
 

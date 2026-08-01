@@ -41,6 +41,16 @@
  * strings, no LLM prompt/output, no field `AgentDecisionRecord`/
  * `DecisionLogEntry` carries privately — see `DirectorCutPlan.ts`'s own
  * doc for the exact derivation.
+ *
+ * `match-recap.json` ("drama recaps" gap closure): the public match page's
+ * event-derived recap — factual sentences built ONLY from
+ * `SpectatorEvent.message`/`actorName`/`targetName`/`turnNumber`, the same
+ * already-public fields `director-cut-plan.json` derives from. Deliberately
+ * NOT `match-story.json`/`drama-report.json` (both stay OFF this list —
+ * `AgentMatchRecap.ts`'s own doc explains why those two stay
+ * ranking/evidence signals, read directly off disk by
+ * `feature-candidates.ts` and the mirror's read-model projection, never
+ * served as page content).
  */
 export const proxyWarPublicRunArtifacts = [
   "game-record.json",
@@ -58,6 +68,7 @@ export const proxyWarPublicRunArtifacts = [
   "behavior-quality-report.md",
   "external-agent-feedback.md",
   "director-cut-plan.json",
+  "match-recap.json",
 ] as const;
 
 export const proxyWarPublicTournamentArtifacts = [

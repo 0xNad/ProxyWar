@@ -108,6 +108,12 @@ export const PublicMatchSchema = z.object({
       segmentCount: z.number(),
     })
     .nullable(),
+  dramaEvidence: z
+    .object({
+      dramaScore: z.number(),
+      entertainmentGrade: z.string(),
+    })
+    .nullable(),
 });
 export type PublicMatch = z.infer<typeof PublicMatchSchema>;
 

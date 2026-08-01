@@ -63,6 +63,7 @@ function match(overrides: Partial<PublicMatch>): PublicMatch {
     fullRenderHref: null,
     premiereHref: null,
     directorCut: null,
+    dramaEvidence: null,
     ...overrides,
   };
 }
@@ -221,6 +222,77 @@ describe("lobby-page hero states", () => {
     expect(el.textContent?.toLowerCase()).not.toContain("drama");
   });
 
+  it("state C: picks the highest-dramaScore match within the recency window, not the most recent one", async () => {
+    stubReadModelFetch(
+      readModel({
+        matches: [
+          match({
+            matchId: "newest-no-evidence",
+            completedAt: "2026-07-08T00:00:00.000Z",
+            fullRenderHref: "/ai-league-replay/newest",
+            map: "MostRecentMap",
+          }),
+          match({
+            matchId: "highest-drama",
+            completedAt: "2026-07-06T00:00:00.000Z",
+            fullRenderHref: "/ai-league-replay/highest-drama",
+            map: "HighDramaMap",
+            dramaEvidence: { dramaScore: 92, entertainmentGrade: "lively" },
+          }),
+          match({
+            matchId: "lower-drama",
+            completedAt: "2026-07-07T00:00:00.000Z",
+            fullRenderHref: "/ai-league-replay/lower-drama",
+            map: "LowerDramaMap",
+            dramaEvidence: { dramaScore: 30, entertainmentGrade: "flat" },
+          }),
+        ],
+      }),
+    );
+    const el = mount();
+    await flushMicrotasks();
+    const hero = el.querySelector('[aria-label="lobby.hero_aria_label"]');
+    expect(hero?.textContent).toContain("HighDramaMap");
+    expect(hero?.textContent).not.toContain("MostRecentMap");
+    expect(hero?.textContent).not.toContain("LowerDramaMap");
+    expect(
+      hero?.querySelector('a[href="/ai-league-replay/highest-drama"]'),
+    ).not.toBeNull();
+    expect(hero?.textContent).toContain(
+      `lobby.high_drama_badge:${JSON.stringify({ score: 92 })}`,
+    );
+  });
+
+  it("state C: never dredges up an old high-dramaScore match outside the bounded recency window", async () => {
+    const windowMatches = Array.from({ length: 8 }, (_, i) =>
+      match({
+        matchId: `recent-${i}`,
+        completedAt: `2026-07-${String(20 - i).padStart(2, "0")}T00:00:00.000Z`,
+        fullRenderHref: `/ai-league-replay/recent-${i}`,
+        map: i === 0 ? "NewestInWindowMap" : `RecentMap${i}`,
+      }),
+    );
+    stubReadModelFetch(
+      readModel({
+        matches: [
+          ...windowMatches,
+          match({
+            matchId: "old-high-drama",
+            completedAt: "2026-01-01T00:00:00.000Z",
+            fullRenderHref: "/ai-league-replay/old-high-drama",
+            map: "StaleHighDramaMap",
+            dramaEvidence: { dramaScore: 99, entertainmentGrade: "lively" },
+          }),
+        ],
+      }),
+    );
+    const el = mount();
+    await flushMicrotasks();
+    expect(el.textContent).toContain("NewestInWindowMap");
+    expect(el.textContent).not.toContain("StaleHighDramaMap");
+    expect(el.textContent).not.toContain("lobby.high_drama_badge");
+  });
+
   it("state C with no matches at all: an honest empty note, never a fabricated hero", async () => {
     stubReadModelFetch(readModel({}));
     const el = mount();
@@ -267,6 +339,36 @@ describe("lobby-page below-hero modules", () => {
     expect(agentsToWatch?.textContent).not.toContain("One Win Only");
   });
 
+  it("Agents to watch: ties on win count are broken by the highest dramaEvidence.dramaScore among that agent's wins", async () => {
+    const agents = [
+      agent({ slug: "low-drama", displayName: "Low Drama Agent" }),
+      agent({ slug: "high-drama", displayName: "High Drama Agent" }),
+    ];
+    const matches = [
+      match({
+        matchId: "m1",
+        winnerAgentSlug: "high-drama",
+        dramaEvidence: { dramaScore: 88, entertainmentGrade: "lively" },
+      }),
+      match({ matchId: "m2", winnerAgentSlug: "high-drama" }),
+      match({
+        matchId: "m3",
+        winnerAgentSlug: "low-drama",
+        dramaEvidence: { dramaScore: 40, entertainmentGrade: "flat" },
+      }),
+      match({ matchId: "m4", winnerAgentSlug: "low-drama" }),
+    ];
+    stubReadModelFetch(readModel({ agents, matches }));
+    const el = mount();
+    await flushMicrotasks();
+    const items = el.querySelectorAll(
+      '[aria-labelledby="agents-to-watch-heading"] li',
+    );
+    expect(items.length).toBe(2);
+    expect(items[0]?.textContent).toContain("High Drama Agent");
+    expect(items[1]?.textContent).toContain("Low Drama Agent");
+  });
+
   it("Recent broadcasts render a closed-by-default Reveal result disclosure, spoiler-safe", async () => {
     const agents = [agent({ slug: "champ", displayName: "The Champ" })];
     const matches = [
@@ -284,6 +386,49 @@ describe("lobby-page below-hero modules", () => {
     expect(details?.textContent).toContain(
       `lobby.winner_announcement:${JSON.stringify({ winner: "The Champ" })}`,
     );
+  });
+
+  it("Recent broadcasts: a lower-recency, higher-dramaScore match within the window displaces the 3rd most recent unscored match, then displays newest-first", async () => {
+    const matches = [
+      match({
+        matchId: "m1",
+        completedAt: "2026-07-04T00:00:00.000Z",
+        map: "Newest",
+      }),
+      match({
+        matchId: "m2",
+        completedAt: "2026-07-03T00:00:00.000Z",
+        map: "SecondNewest",
+      }),
+      match({
+        matchId: "m3",
+        completedAt: "2026-07-02T00:00:00.000Z",
+        map: "ThirdNewestUnscored",
+      }),
+      match({
+        matchId: "m4",
+        completedAt: "2026-07-01T00:00:00.000Z",
+        map: "DramaWinner",
+        dramaEvidence: { dramaScore: 95, entertainmentGrade: "lively" },
+      }),
+    ];
+    stubReadModelFetch(readModel({ matches }));
+    const el = mount();
+    await flushMicrotasks();
+    expect(el.textContent).not.toContain("ThirdNewestUnscored");
+    expect(el.textContent).toContain("DramaWinner");
+    expect(el.textContent).toContain(
+      `lobby.drama_score_badge:${JSON.stringify({ score: 95 })}`,
+    );
+    const cardMaps = Array.from(
+      el.querySelectorAll(
+        '[aria-labelledby="recent-broadcasts-heading"] .grid > div p:first-child',
+      ),
+    ).map((p) => p.textContent?.trim() ?? "");
+    expect(cardMaps.length).toBe(3);
+    expect(cardMaps[0]?.startsWith("Newest")).toBe(true);
+    expect(cardMaps[1]?.startsWith("SecondNewest")).toBe(true);
+    expect(cardMaps[2]?.startsWith("DramaWinner")).toBe(true);
   });
 
   it("the builder acquisition band links to the read model's own enterTheLeagueUrl, honestly labeled", async () => {

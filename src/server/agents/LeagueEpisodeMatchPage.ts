@@ -28,11 +28,16 @@ import type { IdentityRegistrySnapshot } from "../identity/IdentityRegistry";
  * Every field below is either already public on `data.json`/
  * `read-model.json` (participants, placements, map, turn/decision/
  * degraded counts, hrefs, Director Cut summary) or derived from
- * `match-story.md` — the ONE recap artifact on the public run-artifact
- * allowlist (`ProxyWarPublicArtifacts.ts`; `match-story.json`,
- * `drama-report.json`, and `decisions.jsonl` are NOT, so this module never
- * reads them). See `readLeagueEpisodeRecap`'s own doc for why hosted
- * league episodes almost never have one.
+ * `match-recap.json` — the event-derived recap artifact on the public
+ * run-artifact allowlist (`ProxyWarPublicArtifacts.ts`; `match-story.md`
+ * is ALSO public but deliberately never read here — its "Spectator
+ * Summary"/"Highlights" are `AgentMatchStory.ts` diagnostic prose (an
+ * entertainment-tuning QA artifact), not a battle story; `match-story.json`
+ * and `drama-report.json` stay OFF the allowlist entirely and are read only
+ * by `feature-candidates.ts`/the mirror's read-model projection as
+ * ranking/evidence signals — see `AgentMatchRecap.ts`'s own doc). See
+ * `readLeagueEpisodeRecap`'s own doc for why hosted league episodes don't
+ * always have one.
  */
 
 export interface LeagueEpisodeMatchPagePlayer {
@@ -46,7 +51,7 @@ export interface LeagueEpisodeMatchPagePlayer {
   placement: number;
 }
 
-/** Excerpted verbatim from `match-story.md` — see that file's own doc. `null` whenever no real artifact backs it (never a placeholder). */
+/** Parsed from `match-recap.json` (`AgentMatchRecap.ts`) — event-derived facts only. `null` whenever no real artifact backs it (never a placeholder). */
 export interface LeagueEpisodeRecap {
   summary: string;
   beats: string[];
@@ -212,83 +217,79 @@ export function buildLeagueEpisodeMatchPageModel(
   };
 }
 
-const maximumMatchStoryMarkdownBytes = 2 * 1024 * 1024;
-const NO_HIGHLIGHTS_PLACEHOLDER = "No spectator highlights were generated.";
-
-function extractMarkdownSection(
-  markdown: string,
-  heading: string,
-  nextHeading: string,
-): string | null {
-  const pattern = new RegExp(
-    `## ${heading}\\n\\n([\\s\\S]*?)\\n\\n## ${nextHeading}`,
-  );
-  return pattern.exec(markdown)?.[1] ?? null;
-}
+const maximumMatchRecapBytes = 2 * 1024 * 1024;
 
 /**
- * Parses the EXACT structure `agentMatchStoryMarkdown` (`AgentMatchStory.ts`)
- * writes — the "Spectator Summary" paragraph (after its stat-bullet block)
- * and the "Highlights" bullet list — never reaches into `match-story.json`'s
- * internal fields (`AgentMatchStoryBeat.reason` etc. are NOT audited for
- * public re-exposure; `match-story.json` isn't even on
- * `ProxyWarPublicArtifacts.ts`'s allowlist). Every excerpted string is byte-
- * identical to content this repo already serves anonymously over HTTP as
- * `match-story.md`. Returns `null` when the summary paragraph is empty AND
- * every highlight is the "none generated" placeholder — an artifact that
- * technically exists but carries no real recap content, same "never a
- * fabricated placeholder" rule the rest of this codebase follows.
+ * Parses `match-recap.json` (`AgentMatchRecap.ts`'s `AgentMatchRecap`) into
+ * the page's `LeagueEpisodeRecap` — a narrow field-validated projection
+ * (`summary`/`beats[].message` only; `schemaVersion`/`runID`/`generatedAt`/
+ * `beats[].turnNumber`/`beats[].kind` are internal-only, never re-exposed),
+ * same "validate exactly what's read, cast nothing blindly" discipline
+ * `CoworldLeagueMirrorCore.ts`'s tolerant parsers use. Every beat message is
+ * rendered as `Turn N: <message>` — the artifact's own beats are already
+ * ordered by `turnNumber`, so this only formats, never reorders or filters.
+ * `null` for malformed JSON, the wrong `schemaVersion`, or a recap with zero
+ * beats and an empty summary (an artifact that technically exists but
+ * carries no real content — same "never a fabricated placeholder" rule the
+ * rest of this codebase follows; in practice `AgentMatchRecap.ts` never
+ * writes that shape, since it returns `null` instead of writing anything
+ * when the curated pass finds zero beats, but this reader stays defensive
+ * regardless of the writer's own guarantee).
  */
-export function parseMatchStoryMarkdown(raw: string): LeagueEpisodeRecap | null {
-  const summarySection = extractMarkdownSection(
-    raw,
-    "Spectator Summary",
-    "Highlights",
-  );
-  const summaryParagraphs = (summarySection ?? "")
-    .split("\n\n")
-    .map((part) => part.trim())
-    .filter((part) => part.length > 0 && !part.startsWith("-"));
-  const summary = summaryParagraphs[summaryParagraphs.length - 1] ?? "";
-  const highlightsSection = extractMarkdownSection(
-    raw,
-    "Highlights",
-    "Boringness Warnings",
-  );
-  const beats = (highlightsSection ?? "")
-    .split("\n")
-    .map((line) => line.trim())
-    .filter((line) => line.startsWith("- "))
-    .map((line) => line.slice(2).trim())
-    .filter((line) => line.length > 0 && line !== NO_HIGHLIGHTS_PLACEHOLDER);
+export function parseMatchRecapArtifact(raw: string): LeagueEpisodeRecap | null {
+  let value: unknown;
+  try {
+    value = JSON.parse(raw);
+  } catch {
+    return null;
+  }
+  if (typeof value !== "object" || value === null) return null;
+  const record = value as Record<string, unknown>;
+  if (record.schemaVersion !== 1) return null;
+  const summary = typeof record.summary === "string" ? record.summary : "";
+  const beatsRaw = Array.isArray(record.beats) ? record.beats : [];
+  const beats = beatsRaw
+    .map((entry) => {
+      if (typeof entry !== "object" || entry === null) return null;
+      const beat = entry as Record<string, unknown>;
+      const turnNumber =
+        typeof beat.turnNumber === "number" && Number.isFinite(beat.turnNumber)
+          ? beat.turnNumber
+          : null;
+      const message = typeof beat.message === "string" ? beat.message : null;
+      if (turnNumber === null || message === null || message.length === 0) {
+        return null;
+      }
+      return `Turn ${turnNumber}: ${message}`;
+    })
+    .filter((beat): beat is string => beat !== null);
   if (summary.length === 0 && beats.length === 0) return null;
   return { summary, beats };
 }
 
 /**
- * Reads and parses `match-story.md` from an episode's mirrored run
+ * Reads and parses `match-recap.json` from an episode's mirrored run
  * directory, when one exists. `null` for a missing/oversized/unreadable
- * file — expected for the overwhelming majority of hosted league episodes:
- * `feature-candidates.ts`'s own module doc verifies the hosted Coworld
- * mirror NEVER calls `buildAgentMatchStory`/`writeAgentMatchStoryArtifacts`
- * (that pipeline only runs for LOCALLY-produced matches via
- * `ai-agent-league-smoke.ts` and friends, which never publish into the
- * hosted league this reads from). This still checks the filesystem rather
- * than assuming absence, so a future pipeline change picks up recaps with
- * no code change here.
+ * file — expected for many hosted league episodes: the mirror only writes
+ * one once `CoworldLeagueMatchNarrativeBackfill.ts` has processed that run
+ * (budgeted, gradual) AND the match actually had story-worthy events (a
+ * genuinely quiet match legitimately never gets one — see
+ * `AgentMatchRecap.ts`'s own doc). This still checks the filesystem rather
+ * than assuming absence, so a future backfill pass picks up recaps with no
+ * code change here.
  */
 export async function readLeagueEpisodeRecap(
   runDir: string | null,
 ): Promise<LeagueEpisodeRecap | null> {
   if (runDir === null) return null;
   try {
-    const filePath = path.join(runDir, "match-story.md");
+    const filePath = path.join(runDir, "match-recap.json");
     const stat = await fs.stat(filePath);
-    if (!stat.isFile() || stat.size > maximumMatchStoryMarkdownBytes) {
+    if (!stat.isFile() || stat.size > maximumMatchRecapBytes) {
       return null;
     }
     const raw = await fs.readFile(filePath, "utf8");
-    return parseMatchStoryMarkdown(raw);
+    return parseMatchRecapArtifact(raw);
   } catch {
     return null;
   }

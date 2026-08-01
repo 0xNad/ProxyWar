@@ -33,40 +33,32 @@ import {
  * placement. READ-ONLY: this CLI never writes the `FeaturedMatch` store —
  * see `premiere:schedule`/`publish` for that.
  *
- * ## Empirical finding: drama/story artifact availability (do not assume)
+ * ## Drama/story artifact availability (updated — "drama recaps" gap closure)
  *
  * Every candidate this CLI ranks comes from `CoworldLeagueEpisodeRow[]`,
- * which is populated exclusively by `coworld-league-mirror.ts` downloading
- * HOSTED Coworld replays and unpacking them via that script's
- * `unpackEpisodeRunDir` into `<artifactsRoot>/ai-league-runs/<runKey>/`.
- * That unpack step writes only whatever the hosted payload's own
- * `inlineRunArtifacts` contains (verified via `CoworldLeagueMirrorCore`'s
- * own parser and its test fixtures: `game-record.json` and
- * `decisions.jsonl` are the keys that actually appear) plus a handful of
- * mirror-generated files (`replay-ui.json`, `spectator-replay.json`,
- * `spectator.html`, `.mirror-bundle-version`). It NEVER calls
- * `buildAgentDramaReport`/`buildAgentMatchStory`.
+ * populated by `coworld-league-mirror.ts` downloading HOSTED Coworld
+ * replays and unpacking them via that script's `unpackEpisodeRunDir` into
+ * `<artifactsRoot>/ai-league-runs/<runKey>/`. That mirror now ALSO runs
+ * `CoworldLeagueMatchNarrativeBackfill.ts` (budgeted, gradual — same
+ * fresh-episodes-first-then-backfill shape `director-cut-plan.json`
+ * generation already used) to call `buildAgentDramaReport`/
+ * `buildAgentMatchStory`/`buildAgentMatchRecap` for a mirrored run and
+ * write `drama-report.json`/`match-story.json`/`match-recap.json` next to
+ * it — previously this ONLY happened for LOCALLY-produced matches via
+ * `ai-agent-league-smoke.ts`/`ai-agent-tournament.ts`/
+ * `ai-agent-frontier-benchmark.ts`, which never published into the hosted
+ * league this CLI's data source mirrors.
  *
- * Those two builders — and their disk writers,
- * `writeAgentDramaReportArtifacts`/`writeAgentMatchStoryArtifacts`, which
- * are the ONLY code in this repository that produces `drama-report.json`/
- * `match-story.json` — are called exclusively from
- * `AgentDecisionLogWriter.ts`'s local match-artifact pipeline, i.e. only
- * when a match is run LOCALLY through `ai-agent-league-smoke.ts` /
- * `ai-agent-tournament.ts` / `ai-agent-frontier-benchmark.ts` and friends.
- * That local pipeline never publishes into the hosted Coworld league this
- * CLI's data source mirrors.
- *
- * Net result: for every candidate this CLI can currently see,
- * `drama-report.json`/`match-story.json` will not exist on disk, and
- * `evidence.dramaScore`/`evidence.entertainmentScore` will be `null` with
- * an honest note explaining why. This CLI still derives each candidate's
- * expected artifact directory from its `watchHref`/`fullRenderHref` (the
- * same `league-coworld-<runID>` key `CoworldLeagueArtifactRetention.ts`
- * already parses) and checks file existence per candidate rather than
- * assuming absence — if the mirror pipeline is ever extended to attach
- * drama/story evidence to hosted episodes, this CLI picks it up with no
- * code change.
+ * Net result: `drama-report.json`/`match-story.json` now exist on disk for
+ * any hosted episode the backfill has already reached — budgeted, so a
+ * given candidate may still show `null` evidence for a cycle or two after
+ * it first appears, exactly like `directorCut` does; that's expected, not
+ * a defect. This CLI already derived each candidate's expected artifact
+ * directory from its `watchHref`/`fullRenderHref` (the same
+ * `league-coworld-<runID>` key `CoworldLeagueArtifactRetention.ts` already
+ * parses) and checked file existence per candidate rather than assuming
+ * absence — no code change was needed here for real evidence to start
+ * ranking candidates once the mirror-side backfill began writing it.
  */
 
 interface CliIo {

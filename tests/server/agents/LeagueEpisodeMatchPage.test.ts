@@ -10,7 +10,7 @@ import {
   leagueEpisodeRunKey,
   leagueEpisodeSpoilerSafeDescription,
   leagueEpisodeSpoilerSafeTitle,
-  parseMatchStoryMarkdown,
+  parseMatchRecapArtifact,
   readCoworldLeagueEpisodesFromDataJson,
   readLeagueEpisodeRecap,
 } from "../../../src/server/agents/LeagueEpisodeMatchPage";
@@ -50,90 +50,67 @@ function episode(overrides: Partial<CoworldLeagueEpisodeRow> = {}): CoworldLeagu
   };
 }
 
-const AGENT_MATCH_STORY_MARKDOWN = [
-  "# Match Story league-coworld-test-episode-0001",
-  "",
-  "## Spectator Summary",
-  "",
-  "- Entertainment score: 82/100 (lively)",
-  "- Decisions: 400",
-  "- Post-spawn non-hold actions: 300/380 (79%)",
-  "- Transport-wait holds: 2",
-  "- Attack-safety holds: 1",
-  "- Support-cooldown holds: 0",
-  "- Unexplained holds: 0",
-  "- Action diversity: 6 action categories",
-  "- Accepted rate: 98%",
-  "- Repetition: 1 repeated kind(s), 0 exact repeat(s)",
-  "",
-  "Frostfall opened with an aggressive naval push, forcing an early alliance collapse.",
-  "",
-  "## Highlights",
-  "",
-  "- Turn 812: Frostfall launches a surprise naval assault.",
-  "- Turn 1930: Ghost Raider's alliance partner defects mid-battle.",
-  "",
-  "## Boringness Warnings",
-  "",
-  "- No major boringness warnings were detected.",
-  "",
-  "## Suggested Improvements",
-  "",
-  "- Keep running longer matches and inspect the rendered replay.",
-  "",
-].join("\n");
+const AGENT_MATCH_RECAP_JSON = JSON.stringify({
+  schemaVersion: 1,
+  runID: "league-coworld-test-episode-0001",
+  generatedAt: "2026-08-01T12:00:00.000Z",
+  summary: "This match featured 1 first strike and 1 betrayal.",
+  beats: [
+    {
+      turnNumber: 812,
+      kind: "first_strike",
+      message: "Frostfall strikes first against Ghost Raider.",
+    },
+    {
+      turnNumber: 1930,
+      kind: "betrayal",
+      message: "Ghost Raider breaks alliance with Frostfall.",
+    },
+  ],
+});
 
-describe("parseMatchStoryMarkdown", () => {
-  test("extracts the spectator-summary paragraph and highlight bullets from the real agentMatchStoryMarkdown format", () => {
-    const recap = parseMatchStoryMarkdown(AGENT_MATCH_STORY_MARKDOWN);
+describe("parseMatchRecapArtifact", () => {
+  test("extracts the summary and formats each beat as 'Turn N: message' from the real AgentMatchRecap shape", () => {
+    const recap = parseMatchRecapArtifact(AGENT_MATCH_RECAP_JSON);
     expect(recap).not.toBeNull();
-    expect(recap?.summary).toBe(
-      "Frostfall opened with an aggressive naval push, forcing an early alliance collapse.",
-    );
+    expect(recap?.summary).toBe("This match featured 1 first strike and 1 betrayal.");
     expect(recap?.beats).toEqual([
-      "Turn 812: Frostfall launches a surprise naval assault.",
-      "Turn 1930: Ghost Raider's alliance partner defects mid-battle.",
+      "Turn 812: Frostfall strikes first against Ghost Raider.",
+      "Turn 1930: Ghost Raider breaks alliance with Frostfall.",
     ]);
   });
 
-  test("filters out the 'no highlights generated' placeholder rather than surfacing it as a fabricated beat", () => {
-    const markdown = AGENT_MATCH_STORY_MARKDOWN.replace(
-      "- Turn 812: Frostfall launches a surprise naval assault.\n- Turn 1930: Ghost Raider's alliance partner defects mid-battle.\n",
-      "- No spectator highlights were generated.\n",
-    );
-    const recap = parseMatchStoryMarkdown(markdown);
-    expect(recap).not.toBeNull();
-    expect(recap?.beats).toEqual([]);
-    // The summary paragraph still carries real content, so the recap as a
-    // whole is still worth showing (never entirely discarded just because
-    // highlights were empty).
-    expect(recap?.summary.length).toBeGreaterThan(0);
+  test("returns null for malformed JSON", () => {
+    expect(parseMatchRecapArtifact("not valid json at all")).toBeNull();
   });
 
-  test("returns null for malformed markdown with none of the expected headings", () => {
-    expect(parseMatchStoryMarkdown("# Just a title\n\nSome unrelated prose.\n")).toBeNull();
+  test("returns null for the wrong schemaVersion", () => {
+    const wrongVersion = JSON.stringify({
+      schemaVersion: 2,
+      summary: "x",
+      beats: [{ turnNumber: 1, kind: "elimination", message: "x is eliminated." }],
+    });
+    expect(parseMatchRecapArtifact(wrongVersion)).toBeNull();
   });
 
-  test("returns null when both the summary and every highlight are empty/placeholder", () => {
-    const markdown = [
-      "# Match Story x",
-      "",
-      "## Spectator Summary",
-      "",
-      "- Entertainment score: 10/100 (stalled)",
-      "",
-      "",
-      "",
-      "## Highlights",
-      "",
-      "- No spectator highlights were generated.",
-      "",
-      "## Boringness Warnings",
-      "",
-      "- none",
-      "",
-    ].join("\n");
-    expect(parseMatchStoryMarkdown(markdown)).toBeNull();
+  test("returns null when both the summary and every beat are absent — never a fabricated placeholder", () => {
+    const empty = JSON.stringify({ schemaVersion: 1, summary: "", beats: [] });
+    expect(parseMatchRecapArtifact(empty)).toBeNull();
+  });
+
+  test("drops individual malformed beat entries rather than casting garbage through", () => {
+    const partiallyMalformed = JSON.stringify({
+      schemaVersion: 1,
+      summary: "",
+      beats: [
+        { turnNumber: 5, kind: "elimination", message: "Frostfall is eliminated." },
+        { turnNumber: "not a number", kind: "elimination", message: "bad turn" },
+        { turnNumber: 6, kind: "elimination", message: "" },
+        { turnNumber: 7 },
+      ],
+    });
+    const recap = parseMatchRecapArtifact(partiallyMalformed);
+    expect(recap?.beats).toEqual(["Turn 5: Frostfall is eliminated."]);
   });
 });
 
@@ -148,24 +125,33 @@ describe("readLeagueEpisodeRecap", () => {
     expect(await readLeagueEpisodeRecap(null)).toBeNull();
   });
 
-  test("null when match-story.md does not exist on disk (the common hosted-mirror case)", async () => {
+  test("null when match-recap.json does not exist on disk (a genuinely quiet match, or not yet backfilled)", async () => {
     scratch = await mkdtemp(path.join(tmpdir(), "league-episode-recap-"));
     expect(await readLeagueEpisodeRecap(scratch)).toBeNull();
   });
 
-  test("parses a real match-story.md when present", async () => {
+  test("parses a real match-recap.json when present", async () => {
     scratch = await mkdtemp(path.join(tmpdir(), "league-episode-recap-"));
-    await writeFile(path.join(scratch, "match-story.md"), AGENT_MATCH_STORY_MARKDOWN);
+    await writeFile(path.join(scratch, "match-recap.json"), AGENT_MATCH_RECAP_JSON);
     const recap = await readLeagueEpisodeRecap(scratch);
     expect(recap).not.toBeNull();
     expect(recap?.beats.length).toBe(2);
   });
 
-  test("null (never thrown) for an oversized match-story.md, exceeding the read ceiling", async () => {
+  test("never reads match-story.md as a recap source, even when present", async () => {
+    scratch = await mkdtemp(path.join(tmpdir(), "league-episode-recap-"));
+    await writeFile(
+      path.join(scratch, "match-story.md"),
+      "## Spectator Summary\n\nEntertainment diagnostics only.\n",
+    );
+    expect(await readLeagueEpisodeRecap(scratch)).toBeNull();
+  });
+
+  test("null (never thrown) for an oversized match-recap.json, exceeding the read ceiling", async () => {
     scratch = await mkdtemp(path.join(tmpdir(), "league-episode-recap-"));
     // One byte over the module's 2 MiB ceiling.
     await writeFile(
-      path.join(scratch, "match-story.md"),
+      path.join(scratch, "match-recap.json"),
       "x".repeat(2 * 1024 * 1024 + 1),
     );
     await expect(readLeagueEpisodeRecap(scratch)).resolves.toBeNull();

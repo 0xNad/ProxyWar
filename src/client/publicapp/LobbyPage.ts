@@ -57,13 +57,20 @@ import {
  *      title flash at start time — NOT a push/OS notification; this
  *      codebase has no service worker to back that promise).
  *   C. Neither — falls back to `premieres.latest` (an actual revealed
- *      premiere) when present, else the single most recently completed
- *      match with a watchable render. This is deliberately the SIMPLEST
- *      honest selection, not a drama-score ranking: no per-match "drama
- *      report" artifact is available for hosted league episodes in this
- *      read model today (Stage 5's Director Cut is what's actually specced
- *      to replace this placeholder), so state C never claims a drama-score
- *      selection it isn't actually running.
+ *      premiere) when present, else evidence-aware selection among the
+ *      most recently completed, watchable matches: within a bounded
+ *      recency window (the last 8 watchable matches — completedAt !==
+ *      null && fullRenderHref !== null — sorted by completedAt desc,
+ *      matching the scale of this file's other bounded lists like the
+ *      league-pulse top 5), the one with the single highest
+ *      `dramaEvidence.dramaScore` wins (ties broken by more-recent
+ *      completedAt). `dramaEvidence` only turns non-null once the
+ *      mirror's budgeted backfill (`CoworldLeagueMatchNarrativeBackfill.ts`)
+ *      has reached that episode, so when NONE of the windowed matches have
+ *      it yet, this falls back to the prior, purely-recency selection
+ *      (window[0]) — never a fabricated score. The window is bounded so an
+ *      old high-scoring match already pushed off the front page is never
+ *      dredged back up on the strength of its score alone.
  *
  * PARTICIPANT IDENTITY (states A/B): the deliberate deferral this file
  * used to document here is now LIFTED — this is that follow-up security
@@ -143,6 +150,15 @@ async function fetchHeroParticipants(
   const body: unknown = await response.json();
   return premiereFeaturedMatchResponseSchema.parse(body).participants;
 }
+
+/**
+ * Bounded recency window (most-recent-N by `completedAt`) that hero state C
+ * and Recent broadcasts both rank by `dramaEvidence.dramaScore` within —
+ * matches the scale of this file's other bounded lists (e.g. the league
+ * pulse's top 5). Bounding the window means a high-scoring match that has
+ * already aged off the front page is never dredged back up on score alone.
+ */
+const DRAMA_RECENCY_WINDOW_SIZE = 8;
 
 @customElement("lobby-page")
 export class LobbyPage extends LitElement {
@@ -636,15 +652,27 @@ export class LobbyPage extends LitElement {
         "border-line",
       );
     }
-    // No premiere at all yet — the simplest honest fallback: the single
-    // most recently completed, watchable match (see class doc for why this
-    // is not a drama-score selection).
-    const fallback = [...model.matches]
+    // No premiere at all yet — evidence-aware fallback within a bounded
+    // recency window (see class doc): score-rank when at least one
+    // windowed match has dramaEvidence, else the exact prior behavior —
+    // the single most recently completed, watchable match.
+    const recencyWindow = [...model.matches]
       .filter(
         (match) => match.completedAt !== null && match.fullRenderHref !== null,
       )
       .sort((a, b) => (b.completedAt ?? "").localeCompare(a.completedAt ?? ""))
-      .at(0);
+      .slice(0, DRAMA_RECENCY_WINDOW_SIZE);
+    const scoredInWindow = recencyWindow.filter(
+      (match) => match.dramaEvidence !== null,
+    );
+    const fallback =
+      scoredInWindow.length > 0
+        ? [...scoredInWindow].sort(
+            (a, b) =>
+              b.dramaEvidence!.dramaScore - a.dramaEvidence!.dramaScore ||
+              (b.completedAt ?? "").localeCompare(a.completedAt ?? ""),
+          )[0]
+        : recencyWindow.at(0);
     if (fallback === undefined) {
       return this.heroShell(
         html`<h2 class="text-2xl font-extrabold text-ink">
@@ -670,6 +698,15 @@ export class LobbyPage extends LitElement {
         >
           ${translateText("lobby.recent_battle_badge")}
         </span>
+        ${fallback.dramaEvidence !== null
+          ? html`<span
+              class="ml-2 inline-flex items-center gap-2 rounded-full border border-line bg-surface-2 px-3 py-1 font-mono text-xs font-extrabold uppercase tracking-wide text-ink-muted"
+            >
+              ${translateText("lobby.high_drama_badge", {
+                score: fallback.dramaEvidence.dramaScore,
+              })}
+            </span>`
+          : nothing}
         <h2 class="mt-3 text-2xl font-extrabold text-ink">
           ${fallback.map}${fallback.roundNumber !== null
             ? translateText("lobby.round_suffix", { round: fallback.roundNumber })
@@ -771,23 +808,38 @@ export class LobbyPage extends LitElement {
 
   // ---- Agents to watch ---------------------------------------------------
 
-  /** Evidence-based only: agents with 2+ wins among the matches this read model carries — no invented notability score. */
+  /** Evidence-based only: agents with 2+ wins among the matches this read model carries — no invented notability score. Ties on win count are broken by the highest dramaEvidence.dramaScore among that agent's wins (agents with no scored wins sort after agents that have at least one, within the same win-count tier) — still no invented notability, just a second real signal when the first one ties. */
   private renderAgentsToWatch(model: ReadModel): TemplateResult {
     const winsBySlug = new Map<string, number>();
+    const bestDramaScoreBySlug = new Map<string, number>();
     for (const match of model.matches) {
       if (match.winnerAgentSlug === null) continue;
       winsBySlug.set(
         match.winnerAgentSlug,
         (winsBySlug.get(match.winnerAgentSlug) ?? 0) + 1,
       );
+      if (match.dramaEvidence !== null) {
+        bestDramaScoreBySlug.set(
+          match.winnerAgentSlug,
+          Math.max(
+            bestDramaScoreBySlug.get(match.winnerAgentSlug) ?? -1,
+            match.dramaEvidence.dramaScore,
+          ),
+        );
+      }
     }
     const notable = model.agents
       .filter((agent) => agent.slug !== null && (winsBySlug.get(agent.slug) ?? 0) >= 2)
-      .sort(
-        (a, b) =>
+      .sort((a, b) => {
+        const winsDiff =
           (winsBySlug.get(b.slug ?? "") ?? 0) -
-          (winsBySlug.get(a.slug ?? "") ?? 0),
-      )
+          (winsBySlug.get(a.slug ?? "") ?? 0);
+        if (winsDiff !== 0) return winsDiff;
+        return (
+          (bestDramaScoreBySlug.get(b.slug ?? "") ?? -1) -
+          (bestDramaScoreBySlug.get(a.slug ?? "") ?? -1)
+        );
+      })
       .slice(0, 5);
     return html`
       <section aria-labelledby="agents-to-watch-heading">
@@ -836,11 +888,31 @@ export class LobbyPage extends LitElement {
 
   // ---- Recent broadcasts --------------------------------------------------
 
+  /**
+   * Ranks a bounded recency window by dramaEvidence.dramaScore desc (scored
+   * matches first, undramaEvidence matches sorting after them but keeping
+   * their own relative recency order — a stable partition, never a
+   * fabricated tie-break) to pick which 3 broadcasts earn the slot, then
+   * re-sorts just those 3 back to the newest-first display convention this
+   * section has always used — selection and display order are separate
+   * concerns here.
+   */
   private renderRecentBroadcasts(model: ReadModel): TemplateResult {
-    const recent = [...model.matches]
+    const recencyWindow = [...model.matches]
       .filter((match) => match.completedAt !== null)
       .sort((a, b) => (b.completedAt ?? "").localeCompare(a.completedAt ?? ""))
-      .slice(0, 3);
+      .slice(0, DRAMA_RECENCY_WINDOW_SIZE);
+    const scored = recencyWindow
+      .filter((match) => match.dramaEvidence !== null)
+      .sort(
+        (a, b) => b.dramaEvidence!.dramaScore - a.dramaEvidence!.dramaScore,
+      );
+    const unscored = recencyWindow.filter(
+      (match) => match.dramaEvidence === null,
+    );
+    const recent = [...scored, ...unscored]
+      .slice(0, 3)
+      .sort((a, b) => (b.completedAt ?? "").localeCompare(a.completedAt ?? ""));
     if (recent.length === 0) {
       return html``;
     }
@@ -891,6 +963,15 @@ export class LobbyPage extends LitElement {
                     count: match.degradedCount,
                     share,
                   })}
+            </p>`
+          : nothing}
+        ${match.dramaEvidence !== null
+          ? html`<p
+              class="mt-1 inline-block rounded border border-accent/50 px-1.5 py-0.5 font-mono text-[11px] text-accent"
+            >
+              ${translateText("lobby.drama_score_badge", {
+                score: match.dramaEvidence.dramaScore,
+              })}
             </p>`
           : nothing}
         <details class="mt-2">

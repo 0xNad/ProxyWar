@@ -28,6 +28,7 @@ import {
   parseDirectorCutPlanSummary,
   parseHostedReplayPayload,
   parseLeagueSummary,
+  parseMatchNarrativeSummary,
   pickCompetitionDivision,
   premiereHrefForEpisode,
   resolveLatestRevealedPremiere,
@@ -44,6 +45,11 @@ import {
   generateDirectorCutPlanForRunDir,
   type DirectorCutGenerationResult,
 } from "../server/agents/CoworldLeagueDirectorCutBackfill";
+import {
+  backfillMatchNarrativeArtifacts,
+  generateMatchNarrativeArtifactsForRunDir,
+  type MatchNarrativeGenerationResult,
+} from "../server/agents/CoworldLeagueMatchNarrativeBackfill";
 import { withCoworldLeagueMirrorOperationLock } from "../server/agents/CoworldLeagueMirrorOperationLock";
 import {
   buildPremiereSiteBlock,
@@ -158,6 +164,16 @@ interface MirrorOptions {
    * entirely.
    */
   directorCutPlanBudget: number;
+  /**
+   * Max number of drama-report/match-story/match-recap generation attempts
+   * per sync cycle (`--match-narrative-budget`, env
+   * `PROXYWAR_LEAGUE_MATCH_NARRATIVE_BUDGET`, default 1) — same
+   * fresh-episodes-first-then-gradual-backfill budget shape as
+   * `directorCutPlanBudget` above, a SEPARATE counter so drama/story
+   * generation never competes with Director Cut for the same slots. 0
+   * disables generation entirely.
+   */
+  matchNarrativeBudget: number;
 }
 
 function parseOptions(argv: string[]): MirrorOptions {
@@ -201,6 +217,9 @@ function parseOptions(argv: string[]): MirrorOptions {
     premiereProbeOrigin: null,
     directorCutPlanBudget: Number(
       process.env.PROXYWAR_LEAGUE_DIRECTOR_CUT_BUDGET ?? "1",
+    ),
+    matchNarrativeBudget: Number(
+      process.env.PROXYWAR_LEAGUE_MATCH_NARRATIVE_BUDGET ?? "1",
     ),
   };
   for (let i = 0; i < argv.length; i++) {
@@ -302,6 +321,9 @@ function parseOptions(argv: string[]): MirrorOptions {
       case "--director-cut-budget":
         options.directorCutPlanBudget = Number(next());
         break;
+      case "--match-narrative-budget":
+        options.matchNarrativeBudget = Number(next());
+        break;
       default:
         throw new Error(`Unknown flag: ${arg}`);
     }
@@ -319,6 +341,8 @@ function parseOptions(argv: string[]): MirrorOptions {
     options.minimumFreeBytes < 10 * 1024 * 1024 * 1024 ||
     !Number.isInteger(options.directorCutPlanBudget) ||
     options.directorCutPlanBudget < 0 ||
+    !Number.isInteger(options.matchNarrativeBudget) ||
+    options.matchNarrativeBudget < 0 ||
     !Number.isFinite(options.intervalSeconds)
   ) {
     throw new Error(
@@ -555,6 +579,27 @@ async function readDirectorCutSummaryFromRunDir(
   }
 }
 
+/**
+ * "Drama recaps" gap closure: reads `drama-report.json` + `match-story.json`
+ * from an episode's unpacked run directory, when BOTH exist (they're
+ * written atomically together — see `generateMatchNarrativeArtifactsForRunDir`'s
+ * own doc). Tolerant of absence, exactly like {@link readDirectorCutSummaryFromRunDir}
+ * above. Parsing is delegated to the pure, unit-tested `parseMatchNarrativeSummary`.
+ */
+async function readMatchNarrativeSummaryFromRunDir(
+  runDir: string,
+): Promise<{ dramaScore: number; entertainmentGrade: string } | null> {
+  try {
+    const [dramaReportRaw, matchStoryRaw] = await Promise.all([
+      fs.readFile(path.join(runDir, "drama-report.json"), "utf8"),
+      fs.readFile(path.join(runDir, "match-story.json"), "utf8"),
+    ]);
+    return parseMatchNarrativeSummary(dramaReportRaw, matchStoryRaw);
+  } catch {
+    return null;
+  }
+}
+
 function log(message: string): void {
   console.log(`[league-mirror ${new Date().toISOString()}] ${message}`);
 }
@@ -581,6 +626,37 @@ function logDirectorCutGenerationResult(result: DirectorCutGenerationResult): vo
       return;
     case "failed":
       log(`director cut plan generation failed for ${runKey}: ${outcome.error}`);
+      return;
+  }
+}
+
+/**
+ * Logs a drama-report/match-story/match-recap generation attempt's outcome
+ * — same silent-on-free-skips convention as {@link logDirectorCutGenerationResult}.
+ */
+function logMatchNarrativeGenerationResult(
+  result: MatchNarrativeGenerationResult,
+): void {
+  const { runKey, outcome } = result;
+  switch (outcome.status) {
+    case "already-exists":
+    case "no-input":
+      return;
+    case "skipped-no-usable-evidence":
+      log(`match narrative generation skipped for ${runKey}: no usable evidence`);
+      return;
+    case "generated":
+      log(
+        `match narrative generated for ${runKey} (${outcome.source}, drama ${outcome.dramaScore}, ${outcome.entertainmentGrade}, ${outcome.recapBeatCount} recap beat(s))`,
+      );
+      return;
+    case "generated-recap-only":
+      log(
+        `match narrative generated recap-only for ${runKey} (${outcome.source}, ${outcome.recapBeatCount} recap beat(s); no decisions.jsonl records for drama/story)`,
+      );
+      return;
+    case "failed":
+      log(`match narrative generation failed for ${runKey}: ${outcome.error}`);
       return;
   }
 }
@@ -897,6 +973,11 @@ async function syncOnce(options: MirrorOptions): Promise<void> {
   // as soon as budget allows), then on the backfill scan after the loop.
   let directorCutBudget = options.directorCutPlanBudget;
   const directorCutAttemptedRunKeys = new Set<string>();
+  // Same shape, separate counter, for drama-report/match-story/match-recap
+  // generation — a distinct budget so the two generators never compete for
+  // the same slots.
+  let matchNarrativeBudget = options.matchNarrativeBudget;
+  const matchNarrativeAttemptedRunKeys = new Set<string>();
   const recoveredEpisodeRequestIds = new Set<string>();
   let replayEpisodeFailures = 0;
   for (const meta of episodeMetasToProcess) {
@@ -980,9 +1061,25 @@ async function syncOnce(options: MirrorOptions): Promise<void> {
           directorCutBudget -= 1;
         }
       }
+      if (unpacked !== null && matchNarrativeBudget > 0) {
+        const runKey = path.basename(unpacked.runDir);
+        matchNarrativeAttemptedRunKeys.add(runKey);
+        const result = await generateMatchNarrativeArtifactsForRunDir(
+          unpacked.runDir,
+          runKey,
+        );
+        logMatchNarrativeGenerationResult(result);
+        if (result.attempted) {
+          matchNarrativeBudget -= 1;
+        }
+      }
       const directorCut =
         unpacked !== null
           ? await readDirectorCutSummaryFromRunDir(unpacked.runDir)
+          : null;
+      const dramaEvidence =
+        unpacked !== null
+          ? await readMatchNarrativeSummaryFromRunDir(unpacked.runDir)
           : null;
       freshEpisodes.push(
         buildEpisodeRow({
@@ -999,6 +1096,7 @@ async function syncOnce(options: MirrorOptions): Promise<void> {
             revealedPremiereIds,
           ),
           directorCut,
+          dramaEvidence,
         }),
       );
       recoveredEpisodeRequestIds.add(meta.episodeRequestId);
@@ -1043,6 +1141,22 @@ async function syncOnce(options: MirrorOptions): Promise<void> {
     } catch (error) {
       log(
         `director cut plan backfill failed: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+    }
+    try {
+      const results = await backfillMatchNarrativeArtifacts(
+        options.runsRootDir,
+        matchNarrativeBudget,
+        matchNarrativeAttemptedRunKeys,
+      );
+      for (const result of results) {
+        logMatchNarrativeGenerationResult(result);
+      }
+    } catch (error) {
+      log(
+        `match narrative backfill failed: ${
           error instanceof Error ? error.message : String(error)
         }`,
       );

@@ -113,6 +113,19 @@ export interface CoworldLeagueEpisodeRow {
    * itself until a plan exists on disk for that run.
    */
   directorCut?: { durationEstimateSeconds: number; segmentCount: number };
+  /**
+   * Same optional/additive/budgeted-backfill shape as `directorCut` above,
+   * one gap-closure phase later: a compact ranking/evidence signal — never
+   * recap prose — from the mirror's `drama-report.json`/`match-story.json`
+   * pair once both exist for a run (`CoworldLeagueMatchNarrativeBackfill.ts`,
+   * `resolveMirroredMatchEvidence`). `dramaScore` is `AgentDramaReport`'s
+   * 0-100 composite; `entertainmentGrade` is `AgentMatchStory`'s `grade`.
+   * The recap the match page actually shows is the separate, event-derived
+   * `match-recap.json` (`LeagueEpisodeMatchPage.ts`'s `LeagueEpisodeRecap`)
+   * — this field is ranking evidence for the lobby/`/watch` sort/
+   * `feature:candidates`, not prose.
+   */
+  dramaEvidence?: { dramaScore: number; entertainmentGrade: string };
 }
 
 export interface CoworldLeagueRoundRow {
