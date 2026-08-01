@@ -347,7 +347,23 @@ export class WatchPage extends LitElement {
 
   // -- 3. Season Zero schedule ------------------------------------------------
 
-  /** Doc order item 3. Full active-season programme (unlike `LobbyPage`'s compact below-hero teaser) — every event slot, chronological, resolved against `featuredMatches` for title/state where possible. */
+  /**
+   * Doc order item 3. Full active-season programme (unlike `LobbyPage`'s
+   * compact below-hero teaser) — every event slot, chronological,
+   * resolved against `featuredMatches` for title/state where possible.
+   *
+   * 2026-08-01 P0 production review: an ARCHIVE-lane slot is a SPOTLIGHT
+   * of an already-completed match, never an upcoming contest — a slot's
+   * own `scheduledAt` is the season PROGRAMME's own "featuring starting"
+   * date (when the operator chose to spotlight it), which is NOT the
+   * same thing as a premiere's future air time, and must never be
+   * presented as one. This branches on `resolved.lane` (the read model's
+   * own ground truth, present regardless of which list a season
+   * operator happened to file the reference under) to show a distinct
+   * label per lane, plus the match's own ACTUAL `completedAt` for
+   * archive lane so a viewer is never left assuming the match hasn't
+   * happened yet.
+   */
   private renderSeasonSchedule(readModel: ReadModel) {
     const active = readModel.seasons.find((season) => season.state === "active");
     if (active === undefined) return nothing;
@@ -371,10 +387,21 @@ export class WatchPage extends LitElement {
           : html`<ol class="flex flex-col gap-2" role="list">
               ${slots.map((slot) => {
                 const resolved = featuredMatchById.get(slot.featuredMatchId);
+                const isArchiveSpotlight = resolved !== undefined && resolved.lane === "archive";
+                const dateLabel =
+                  resolved === undefined
+                    ? null
+                    : isArchiveSpotlight
+                      ? translateText("watch.season_schedule_spotlight_label", {
+                          date: slot.scheduledAt !== null ? formatAbsoluteTime(slot.scheduledAt) : "—",
+                        })
+                      : translateText("watch.season_schedule_premiere_label", {
+                          date: slot.scheduledAt !== null ? formatAbsoluteTime(slot.scheduledAt) : "—",
+                        });
                 return html`
-                  <li class="flex items-center gap-3 rounded-md border border-line bg-surface-2 px-3 py-2 text-sm">
+                  <li class="flex flex-col gap-1 rounded-md border border-line bg-surface-2 px-3 py-2 text-sm sm:flex-row sm:items-center sm:gap-3">
                     <span class="font-mono text-xs text-ink-muted">
-                      ${slot.scheduledAt !== null ? formatAbsoluteTime(slot.scheduledAt) : "—"}
+                      ${dateLabel ?? (slot.scheduledAt !== null ? formatAbsoluteTime(slot.scheduledAt) : "—")}
                     </span>
                     ${resolved !== undefined
                       ? html`<a
@@ -385,6 +412,13 @@ export class WatchPage extends LitElement {
                       : html`<span class="min-w-0 flex-1 truncate text-ink-muted"
                           >${translateText("watch.season_schedule_tbd")}</span
                         >`}
+                    ${isArchiveSpotlight && resolved.completedAt !== null
+                      ? html`<span class="text-xs text-ink-muted"
+                          >${translateText("watch.season_schedule_played_note", {
+                            date: formatAbsoluteTime(resolved.completedAt),
+                          })}</span
+                        >`
+                      : nothing}
                   </li>
                 `;
               })}
@@ -993,7 +1027,8 @@ export function resolveWinnerName(
   return participant?.displayName ?? null;
 }
 
-function formatAbsoluteTime(iso: string): string {
+/** Exported (2026-08-01 P0) so `LobbyPage`'s own season-schedule strip formats a slot's date/time identically — one source of truth, matching `formatDuration`'s own export precedent just below. */
+export function formatAbsoluteTime(iso: string): string {
   const date = new Date(iso);
   return Number.isNaN(date.getTime()) ? iso : date.toLocaleString();
 }

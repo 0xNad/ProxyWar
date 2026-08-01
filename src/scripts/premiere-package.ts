@@ -14,6 +14,7 @@ import {
   type EventPackage,
 } from "../server/agents/season/EventPackage";
 import {
+  containsWinnerName,
   isFeaturedEventRevealed,
   isPubliclyPromotable,
 } from "../server/agents/season/EventPackageGate";
@@ -83,6 +84,28 @@ function directorCutEstimateSeconds(
   return episode?.directorCut?.durationEstimateSeconds ?? null;
 }
 
+/**
+ * SPOILER-NEUTRAL by construction (2026-08-01 P0 production review):
+ * generated fresh from participants/map every run, deliberately
+ * INDEPENDENT of `match.title` — defense in depth, so a future
+ * `FeaturedMatch` writer's own title mistake (like `feature-candidates.ts`'s
+ * pre-fix `buildTitle`, which baked the winner straight in) can never
+ * propagate into the one field `ProxyWarPublicReadModel.ts` projects
+ * publicly (`publicFeaturedMatch`'s `title: match.title`). NEVER reads
+ * `match.result`. Falls back to `defaultSubtitle`'s own map/format shape
+ * when there are no participants to name yet (the gate already requires
+ * participants for promotion, but this must still degrade honestly for
+ * a draft built before that's resolved).
+ */
+function defaultTitle(match: FeaturedMatch): string {
+  const names = match.participants.map((participant) => participant.playerName);
+  if (names.length === 0) {
+    return `${match.map} — ${match.format}`;
+  }
+  const lineup = names.length <= 3 ? names.join(" vs ") : `${names.length}-way battle`;
+  return `${lineup} — ${match.map}`;
+}
+
 function defaultSubtitle(match: FeaturedMatch): string {
   return `${match.map} — ${match.format}`;
 }
@@ -113,7 +136,7 @@ export function buildEventPackageDraft(
   const draft: EventPackage = {
     schemaVersion: 1,
     featuredMatchId: match.matchId,
-    title: options.titleOverride ?? existing?.title ?? match.title,
+    title: options.titleOverride ?? existing?.title ?? defaultTitle(match),
     subtitle: options.subtitleOverride ?? existing?.subtitle ?? defaultSubtitle(match),
     reasonToWatch: { claims },
     mapLabel: match.map,
@@ -144,6 +167,21 @@ function printCompleteness(match: FeaturedMatch, pkg: EventPackage, identity: Id
     pkg.reasonToWatch.claims,
     identity.agents.map((agent) => agent.displayName),
   );
+  // 2026-08-01 P0: same non-blocking warning UX as the unreferenced-
+  // claims check above, but for a DIFFERENT signal `findUnreferencedProseClaims`
+  // can't catch — a winner's name can legitimately appear in OTHER
+  // evidence-backed claims (e.g. a standings-rank claim) while STILL
+  // spoiling the result the moment it shows up in the title/subtitle
+  // specifically. See `EventPackageGate.containsWinnerName`'s own doc —
+  // this warns the operator immediately on any run (not just
+  // `--validate`); `isPubliclyPromotable` (checked above) is the actual
+  // BLOCKING half of this same check.
+  if (containsWinnerName(pkg.title, match)) {
+    warnings.push(`title names the winner ("${pkg.title}") — spoils the result pre-reveal-click`);
+  }
+  if (containsWinnerName(pkg.subtitle, match)) {
+    warnings.push(`subtitle names the winner ("${pkg.subtitle}") — spoils the result pre-reveal-click`);
+  }
   if (warnings.length > 0) {
     console.log("prose warnings (not blocking):");
     for (const warning of warnings) console.log(`  - ${warning}`);

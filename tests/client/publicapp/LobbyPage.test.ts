@@ -88,6 +88,7 @@ function featuredMatch(overrides: Partial<PublicFeaturedMatch> = {}): PublicFeat
     state: "published",
     scheduledAt: new Date(Date.now() + 600_000).toISOString(),
     revealAt: null,
+    completedAt: null,
     postMatchSummary: null,
     result: null,
     isPubliclyPromotable: true,
@@ -486,6 +487,56 @@ describe("lobby-page season schedule module", () => {
     await flushMicrotasks();
     expect(el.textContent).toContain("lobby.season_schedule_heading");
     expect(el.textContent).toContain("Auri vs Sefirot");
+  });
+
+  it("2026-08-01 P0: a premiere-lane slot shows a 'Premieres' label, never a bare date", async () => {
+    stubReadModelFetch(
+      readModel({
+        featuredMatches: [featuredMatch({ matchId: "feat_slot1", lane: "premiere" })],
+        seasons: [
+          season({
+            eventSlots: [
+              { featuredMatchId: "feat_slot1", scheduledAt: "2026-08-08T18:00:00.000Z" },
+            ],
+          }),
+        ],
+      }),
+    );
+    const el = mount();
+    await flushMicrotasks();
+    expect(el.textContent).toContain("lobby.season_schedule_premiere_label");
+    expect(el.textContent).not.toContain("lobby.season_schedule_spotlight_label");
+    expect(el.textContent).not.toContain("lobby.season_schedule_played_note");
+  });
+
+  it("2026-08-01 P0: an archive-lane slot shows a 'Featured spotlight' label plus the honest played-on date, never implying a future contest", async () => {
+    stubReadModelFetch(
+      readModel({
+        featuredMatches: [
+          featuredMatch({
+            matchId: "feat_slot1",
+            lane: "archive",
+            scheduledAt: null,
+            completedAt: "2026-08-01T00:00:00.000Z",
+          }),
+        ],
+        seasons: [
+          season({
+            eventSlots: [
+              // The season programme's own "featuring starting" date — a
+              // FUTURE date relative to the match's real completedAt, the
+              // exact real-world scenario the P0 review flagged.
+              { featuredMatchId: "feat_slot1", scheduledAt: "2026-08-03T18:00:00.000Z" },
+            ],
+          }),
+        ],
+      }),
+    );
+    const el = mount();
+    await flushMicrotasks();
+    expect(el.textContent).toContain("lobby.season_schedule_spotlight_label");
+    expect(el.textContent).toContain("lobby.season_schedule_played_note");
+    expect(el.textContent).not.toContain("lobby.season_schedule_premiere_label");
   });
 
   it("shows a TBD placeholder for a slot whose featuredMatchId doesn't resolve", async () => {

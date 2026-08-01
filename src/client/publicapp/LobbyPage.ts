@@ -582,6 +582,12 @@ export class LobbyPage extends LitElement {
    * active Season's programme (up to `SEASON_SCHEDULE_PREVIEW_LIMIT`
    * upcoming slots), complementing the hero's single spotlight rather
    * than duplicating it. Omitted entirely when no season is active.
+   *
+   * 2026-08-01 P0 — same archive-vs-premiere lane branch as
+   * `WatchPage.renderSeasonSchedule`'s own (fuller) doc explains: an
+   * archive-lane slot is a SPOTLIGHT of something already played, never
+   * an upcoming contest, regardless of which list a season operator
+   * filed the reference under.
    */
   private renderSeasonSchedule(model: ReadModel): TemplateResult | typeof nothing {
     const active = model.seasons.find((season) => season.state === "active");
@@ -609,22 +615,35 @@ export class LobbyPage extends LitElement {
           : html`<ol class="mt-3 flex flex-col gap-2" role="list">
               ${upcomingSlots.map((slot) => {
                 const resolved = featuredMatchById.get(slot.featuredMatchId);
+                const isArchiveSpotlight = resolved !== undefined && resolved.lane === "archive";
+                const slotDate = slot.scheduledAt !== null ? new Date(slot.scheduledAt).toLocaleDateString() : "—";
                 return html`
-                  <li class="flex items-center gap-3 rounded-md border border-line bg-surface px-3 py-2">
-                    <span class="font-mono text-xs text-ink-muted">
-                      ${slot.scheduledAt !== null
-                        ? new Date(slot.scheduledAt).toLocaleDateString()
-                        : "—"}
-                    </span>
-                    ${resolved !== undefined
-                      ? html`<a
-                          href="/match/${encodeURIComponent(resolved.matchId)}"
-                          class="min-w-0 flex-1 truncate text-sm font-semibold text-ink no-underline outline-none hover:text-accent focus-visible:ring-2 focus-visible:ring-accent"
-                          >${resolved.title}</a
+                  <li class="flex flex-col gap-0.5 rounded-md border border-line bg-surface px-3 py-2">
+                    <div class="flex items-center gap-3">
+                      <span class="font-mono text-xs text-ink-muted">
+                        ${resolved === undefined
+                          ? slotDate
+                          : isArchiveSpotlight
+                            ? translateText("lobby.season_schedule_spotlight_label", { date: slotDate })
+                            : translateText("lobby.season_schedule_premiere_label", { date: slotDate })}
+                      </span>
+                      ${resolved !== undefined
+                        ? html`<a
+                            href="/match/${encodeURIComponent(resolved.matchId)}"
+                            class="min-w-0 flex-1 truncate text-sm font-semibold text-ink no-underline outline-none hover:text-accent focus-visible:ring-2 focus-visible:ring-accent"
+                            >${resolved.title}</a
+                          >`
+                        : html`<span class="min-w-0 flex-1 truncate text-sm text-ink-muted"
+                            >${translateText("lobby.season_schedule_tbd")}</span
+                          >`}
+                    </div>
+                    ${isArchiveSpotlight && resolved.completedAt !== null
+                      ? html`<span class="pl-0 text-[11px] text-ink-muted"
+                          >${translateText("lobby.season_schedule_played_note", {
+                            date: new Date(resolved.completedAt).toLocaleDateString(),
+                          })}</span
                         >`
-                      : html`<span class="min-w-0 flex-1 truncate text-sm text-ink-muted"
-                          >${translateText("lobby.season_schedule_tbd")}</span
-                        >`}
+                      : nothing}
                   </li>
                 `;
               })}

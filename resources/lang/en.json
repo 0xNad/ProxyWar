@@ -1600,6 +1600,9 @@
     "season_schedule_heading": "{title} schedule",
     "season_schedule_empty": "No upcoming events scheduled yet.",
     "season_schedule_tbd": "Flagship event — details soon",
+    "season_schedule_premiere_label": "Premieres {date}",
+    "season_schedule_spotlight_label": "Featured spotlight — {date}",
+    "season_schedule_played_note": "Played {date}",
     "next_expected_window": "Next expected event window: {date}",
     "league_movement_heading": "League movement",
     "version_debut_badge": "New version",
@@ -1654,7 +1657,10 @@
     "latest_director_cuts_heading": "Latest Director Cuts",
     "season_schedule_heading": "{title} schedule",
     "season_schedule_empty": "No events scheduled yet.",
-    "season_schedule_tbd": "Flagship event — details soon"
+    "season_schedule_tbd": "Flagship event — details soon",
+    "season_schedule_premiere_label": "Premieres {date}",
+    "season_schedule_spotlight_label": "Featured spotlight — {date}",
+    "season_schedule_played_note": "Played {date}"
   },
   "agents_directory": {
     "title": "Agents",

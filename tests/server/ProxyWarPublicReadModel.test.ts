@@ -367,6 +367,7 @@ describe("buildProxyWarPublicReadModel", () => {
       state: "scheduled",
       scheduledAt: "2026-07-31T00:10:00.000Z",
       revealAt: "2026-07-31T01:00:00.000Z",
+      completedAt: null,
       postMatchSummary: null,
       result: null,
       isPubliclyPromotable: false,
@@ -463,6 +464,34 @@ describe("buildProxyWarPublicReadModel", () => {
   test("an empty featured match store still yields an empty (never fabricated) featuredMatches array", () => {
     const model = buildProxyWarPublicReadModel(baseMirror(), identitySnapshot(), featuredMatchStoreOf());
     expect(model.featuredMatches).toEqual([]);
+  });
+
+  test("2026-08-01 P0: completedAt resolves the ACTUAL match completion date from the live mirror by episodeRequestId, for either lane", () => {
+    const record = featuredMatch({
+      lane: "archive",
+      episodeRequestId: "ereq_1",
+      queueItemName: null,
+      scheduledAt: null,
+      provenance: { source: "league-archive", sourceRef: "ereq_1", capturedAt: "2026-07-31T00:00:00.000Z" },
+    });
+    const model = buildProxyWarPublicReadModel(baseMirror(), identitySnapshot(), featuredMatchStoreOf(record));
+    // baseMirror()'s ereq_1 episode has completedAt "2026-07-30T00:00:00.000Z".
+    expect(model.featuredMatches[0]?.completedAt).toBe("2026-07-30T00:00:00.000Z");
+  });
+
+  test("completedAt is null (never fabricated) when episodeRequestId is null or hasn't reached the mirror yet", () => {
+    const noEpisodeId = featuredMatch({ episodeRequestId: null });
+    const notYetMirrored = featuredMatch({
+      matchId: "feat_1111111111111111bbbb",
+      episodeRequestId: "ereq_not_mirrored_yet",
+    });
+    const model = buildProxyWarPublicReadModel(
+      baseMirror(),
+      identitySnapshot(),
+      featuredMatchStoreOf(noEpisodeId, notYetMirrored),
+    );
+    expect(model.featuredMatches[0]?.completedAt).toBeNull();
+    expect(model.featuredMatches[1]?.completedAt).toBeNull();
   });
 
   describe("isPubliclyPromotable (Season Zero Phase 4 gate wiring)", () => {

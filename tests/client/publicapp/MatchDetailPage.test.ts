@@ -173,6 +173,7 @@ function featuredMatchDetailBody(overrides: {
       state: overrides.state ?? "published",
       scheduledAt: overrides.scheduledAt ?? null,
       revealAt: null,
+      completedAt: null,
       postMatchSummary: null,
       result: overrides.result ?? null,
       isPubliclyPromotable: false,

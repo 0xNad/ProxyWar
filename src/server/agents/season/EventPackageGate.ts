@@ -42,6 +42,41 @@ export function isFeaturedEventRevealed(match: FeaturedMatch): boolean {
   return match.lane === "archive" || match.state === "revealed" || match.state === "archived";
 }
 
+/**
+ * Resolves the winning participant's `playerName` from `match.result` +
+ * `match.participants` — `null` when there's no result yet, no winner
+ * (a draw/void placement), or the winner's `agentId` doesn't match any
+ * current participant (should not happen, but never guessed at).
+ */
+function winnerPlayerName(match: FeaturedMatch): string | null {
+  if (match.result === null || match.result.winnerAgentId === null) return null;
+  const winnerAgentId = match.result.winnerAgentId;
+  return (
+    match.participants.find((participant) => participant.agentId === winnerAgentId)
+      ?.playerName ?? null
+  );
+}
+
+/**
+ * 2026-08-01 P0 production review: a title/subtitle containing the
+ * winner's name defeats every "Reveal result" disclosure gate anywhere
+ * that text renders pre-reveal-click (the Season Zero schedule strip
+ * chief among them — it links straight to package prose with no gate of
+ * its own). CONSERVATIVE, case-insensitive substring check — Coworld
+ * `playerName`s are free text (e.g. "K1Z Mickey Mouse"), so exact-case
+ * matching alone would miss trivial re-casing. This deliberately does
+ * NOT try to catch a PARAPHRASED spoiler ("the reigning champion just
+ * extended..."); it is the same narrow, no-false-negative-on-the-exact-
+ * name class of signal `EventPackageProseClaims.ts`'s own checks already
+ * are, and is reused there (via `printCompleteness`) for the SAME
+ * non-blocking operator warning, not just this gate's hard block.
+ */
+export function containsWinnerName(text: string, match: FeaturedMatch): boolean {
+  const name = winnerPlayerName(match);
+  if (name === null || name.trim().length === 0) return false;
+  return text.toLowerCase().includes(name.toLowerCase());
+}
+
 export function isPubliclyPromotable(
   match: FeaturedMatch,
   pkg: EventPackage | null,
@@ -73,6 +108,17 @@ export function isPubliclyPromotable(
   }
   if (pkg.subtitle.trim().length === 0) {
     missing.push("subtitle");
+  }
+  // 2026-08-01 P0: a title/subtitle naming the winner defeats the
+  // Reveal-result gate everywhere it renders — see `containsWinnerName`'s
+  // own doc. `match.title` is checked alongside `pkg.title` since
+  // `ProxyWarPublicReadModel.ts`'s `publicFeaturedMatch` projects
+  // `match.title` directly, not `pkg.title`.
+  if (containsWinnerName(match.title, match) || containsWinnerName(pkg.title, match)) {
+    missing.push("title_spoils_result");
+  }
+  if (containsWinnerName(pkg.subtitle, match)) {
+    missing.push("subtitle_spoils_result");
   }
   if (pkg.reasonToWatch.claims.length === 0) {
     missing.push("reason_to_watch");

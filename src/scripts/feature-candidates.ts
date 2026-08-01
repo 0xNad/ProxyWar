@@ -489,23 +489,37 @@ function buildResult(
   };
 }
 
+/**
+ * SPOILER-NEUTRAL by construction — NEVER references `row.winnerName`
+ * (2026-08-01 P0 production review: a title baking in the winner
+ * defeats every "Reveal result" disclosure gate anywhere this title
+ * renders pre-reveal-click — the Season Zero schedule strip chief
+ * among them, since it links straight to this text with no gate of its
+ * own). Participants (named when few enough to read as a real lineup,
+ * else a count) + map + round only — the same "participants/map/round/
+ * stakes, never result" contract `premiere:package`'s own title
+ * generator now shares (`premiere-package.ts`'s `defaultTitle`).
+ */
 function buildTitle(row: CoworldLeagueEpisodeRow): string {
   const roundLabel =
     row.roundNumber !== null
       ? `Round ${row.roundNumber}`
       : "an unnumbered round";
-  return row.winnerName !== null
-    ? `${row.winnerName} wins — ${roundLabel} on ${row.map}`
-    : `${roundLabel} on ${row.map}`;
+  const names = row.players.map((player) => player.name);
+  const lineup =
+    names.length > 0 && names.length <= 3
+      ? names.join(" vs ")
+      : `${row.players.length}-player free-for-all`;
+  return `${lineup} — ${roundLabel} on ${row.map}`;
 }
 
+/** See `buildTitle` — same spoiler-neutrality contract, same incident. `winnerName` is deliberately never read here. */
 function buildDescription(row: CoworldLeagueEpisodeRow): string {
   const facts: string[] = [
     `${row.players.length} participant${row.players.length === 1 ? "" : "s"}`,
   ];
   if (row.turnCount !== null) facts.push(`${row.turnCount} turns`);
   if (row.decisionCount !== null) facts.push(`${row.decisionCount} decisions`);
-  if (row.winnerName !== null) facts.push(`winner: ${row.winnerName}`);
   const roundLabel =
     row.roundNumber !== null
       ? `round ${row.roundNumber}`

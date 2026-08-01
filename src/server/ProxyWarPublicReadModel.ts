@@ -260,6 +260,22 @@ export interface PublicFeaturedMatch {
   state: FeaturedMatchState;
   scheduledAt: string | null;
   revealAt: string | null;
+  /**
+   * 2026-08-01 P0 production review: the ACTUAL match completion date,
+   * looked up against the live mirror's `episodes[]` by
+   * `episodeRequestId` — distinct from `scheduledAt` above (a premiere
+   * lane's FUTURE air time, or the programme's own "featured starting"
+   * date on a Season event slot; see `PublicSeason`'s own doc) and from
+   * `revealAt` (when a premiere's RESULT unsealed). An archive-lane
+   * record is a SPOTLIGHT of something that already happened — a
+   * client rendering it MUST show this date, never imply the match is
+   * still upcoming just because a Season programme slot's own
+   * `scheduledAt` (when it's being FEATURED) happens to be in the
+   * future. `null` whenever the episode hasn't reached the live mirror
+   * yet (premiere lane, pre-reveal — an honest "not public yet", not a
+   * bug) or the mirror itself failed to load this cycle.
+   */
+  completedAt: string | null;
   postMatchSummary: string | null;
   result: PublicFeaturedMatchResult | null;
   /**
@@ -649,6 +665,8 @@ function publicFeaturedMatchResult(
 export function publicFeaturedMatch(
   match: FeaturedMatch,
   pkg: EventPackage | null = null,
+  /** 2026-08-01 P0 — see `PublicFeaturedMatch.completedAt`'s own doc. Defaults to `null` for a caller (existing tests, any future one) that doesn't resolve the live mirror — an honest "not looked up" default, matching `pkg`'s own contract just above. */
+  episodeCompletedAt: string | null = null,
 ): PublicFeaturedMatch {
   const revealed = isFeaturedMatchRevealed(match);
   const promotion = isPubliclyPromotable(match, pkg);
@@ -683,6 +701,7 @@ export function publicFeaturedMatch(
     state: match.state,
     scheduledAt: match.scheduledAt,
     revealAt: match.revealAt,
+    completedAt: episodeCompletedAt,
     // EMBARGO: never copy prose that could describe an unrevealed outcome —
     // see `isFeaturedMatchRevealed`'s doc for why this can't trust the
     // store's own validation alone.
@@ -699,15 +718,30 @@ export function publicFeaturedMatch(
  * drafts from `premiere:candidates`/`feature:candidates` — never public —
  * so they're filtered out entirely, not just embargoed. `packageStore`
  * resolves each match's `EventPackage` (Season Zero Phase 4) for the
- * `isPubliclyPromotable` gate — see that field's own doc.
+ * `isPubliclyPromotable` gate — see that field's own doc. `mirror`
+ * resolves each match's ACTUAL completion date (Season Zero P0 — see
+ * `PublicFeaturedMatch.completedAt`'s own doc) — `null` when
+ * `episodeRequestId` is itself `null` or hasn't reached the mirror yet.
  */
 function publicFeaturedMatches(
   store: FeaturedMatchStoreFile,
   packageStore: EventPackageStoreFile,
+  mirror: CoworldLeagueMirrorData,
 ): PublicFeaturedMatch[] {
+  const completedAtByEpisodeRequestId = new Map(
+    mirror.episodes.map((episode) => [episode.episodeRequestId, episode.completedAt]),
+  );
   return store.matches
     .filter((match) => match.state !== "candidate")
-    .map((match) => publicFeaturedMatch(match, findEventPackage(packageStore, match.matchId)));
+    .map((match) =>
+      publicFeaturedMatch(
+        match,
+        findEventPackage(packageStore, match.matchId),
+        match.episodeRequestId === null
+          ? null
+          : (completedAtByEpisodeRequestId.get(match.episodeRequestId) ?? null),
+      ),
+    );
 }
 
 /**
@@ -805,7 +839,7 @@ export function buildProxyWarPublicReadModel(
     matches: mirror.episodes.map((episode) =>
       publicMatch(episode, agentSlugByPlayerName),
     ),
-    featuredMatches: publicFeaturedMatches(featuredMatchStore, eventPackageStore),
+    featuredMatches: publicFeaturedMatches(featuredMatchStore, eventPackageStore, mirror),
     seasons: publicSeasons(seasonRegistry),
     premieres: {
       live: mirror.premiere ?? null,

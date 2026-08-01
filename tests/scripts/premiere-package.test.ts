@@ -4,6 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { buildEventPackageDraft } from "../../src/scripts/premiere-package";
+import { isPubliclyPromotable } from "../../src/server/agents/season/EventPackageGate";
 import type { FeaturedMatch } from "../../src/server/agents/FeaturedMatch";
 import type { EventPackage } from "../../src/server/agents/season/EventPackage";
 import type { IdentityRegistrySnapshot } from "../../src/server/identity/IdentityRegistry";
@@ -57,13 +58,43 @@ describe("buildEventPackageDraft", () => {
   it("generates a fresh draft with structural fields derived from the match", () => {
     const draft = buildEventPackageDraft(baseMatch(), null, identity(), null, NOW);
     expect(draft.featuredMatchId).toBe(FEAT_ID);
-    expect(draft.title).toBe("Auri vs Sefirot");
+    // baseMatch() has zero participants (see this file's other "zero
+    // participants" comment) — the spoiler-neutral title generator
+    // (2026-08-01 P0) falls back to map/format, same shape as
+    // defaultSubtitle, rather than blindly copying match.title.
+    expect(draft.title).toBe("Pangaea — 2p duel");
     expect(draft.mapLabel).toBe("Pangaea");
     expect(draft.format).toBe("2p duel");
     expect(draft.canonicalMatchUrl).toBe(`/match/${FEAT_ID}`);
     expect(draft.canonicalPremiereUrl).toContain("/premiere/");
     expect(draft.embargoState).toBe("embargoed");
     expect(draft.createdAt).toBe(NOW);
+  });
+
+  it("generates a spoiler-neutral title from participants + map when a lineup exists, never from match.title", () => {
+    const match = baseMatch({
+      title: "Auri wins — Pangaea duel", // a spoiler-laden match.title must NEVER leak through
+      participants: [
+        { playerName: "Auri", agentId: "agt_auri", agentVersionId: null, builderId: null },
+        { playerName: "Sefirot", agentId: "agt_sefirot", agentVersionId: null, builderId: null },
+      ],
+    });
+    const draft = buildEventPackageDraft(match, null, identity(), null, NOW);
+    expect(draft.title).toBe("Auri vs Sefirot — Pangaea");
+    expect(draft.title).not.toContain("wins");
+  });
+
+  it("falls back to a participant count for a large lineup rather than an unreadable name list", () => {
+    const match = baseMatch({
+      participants: Array.from({ length: 12 }, (_, index) => ({
+        playerName: `Player${index}`,
+        agentId: null,
+        agentVersionId: null,
+        builderId: null,
+      })),
+    });
+    const draft = buildEventPackageDraft(match, null, identity(), null, NOW);
+    expect(draft.title).toBe("12-way battle — Pangaea");
   });
 
   it("never sets a canonical premiere URL for an archive-lane match", () => {
@@ -129,6 +160,22 @@ describe("buildEventPackageDraft", () => {
   it("leaves the Director Cut estimate null when no matching episode/plan exists yet", () => {
     const draft = buildEventPackageDraft(baseMatch(), null, identity(), null, NOW);
     expect(draft.directorCutEstimateSeconds).toBeNull();
+  });
+
+  it("rejects a package whose title/subtitle names the winner once the match carries a result", () => {
+    const match = baseMatch({
+      lane: "archive",
+      title: "Auri wins — Pangaea duel",
+      participants: [
+        { playerName: "Auri", agentId: "agt_auri", agentVersionId: null, builderId: null },
+        { playerName: "Sefirot", agentId: "agt_sefirot", agentVersionId: null, builderId: null },
+      ],
+      result: { winnerAgentId: "agt_auri", placements: [{ agentId: "agt_auri", placement: 1 }] },
+    });
+    const draft = buildEventPackageDraft(match, null, identity(), null, NOW, {
+      titleOverride: "Auri wins — Pangaea duel",
+    });
+    expect(isPubliclyPromotable(match, draft).missing).toContain("title_spoils_result");
   });
 });
 
@@ -210,4 +257,31 @@ describe("premiere:package CLI — real subprocess end to end", () => {
     expect(validated.code).not.toBe(0);
     expect(validated.stdout).toContain("participants");
   }, 30000);
+
+  it("warns (non-blocking) when an explicit --title= override names the winner", async () => {
+    await writeFile(
+      path.join(featuredMatchStateRoot, "featured-matches.json"),
+      JSON.stringify({
+        schemaVersion: 1,
+        matches: [
+          baseMatch({
+            lane: "archive",
+            scheduledAt: null,
+            queueItemName: null,
+            provenance: { source: "league-archive", sourceRef: "ereq_x", capturedAt: NOW },
+            participants: [
+              { playerName: "Auri", agentId: "agt_auri", agentVersionId: null, builderId: null },
+            ],
+            result: { winnerAgentId: "agt_auri", placements: [{ agentId: "agt_auri", placement: 1 }] },
+          }),
+        ],
+      }),
+      "utf8",
+    );
+    const result = runCli([`--featured=${FEAT_ID}`, `--title=Auri wins the Pangaea duel`]);
+    expect(result.code).toBe(0); // never blocking at the CLI-warning level
+    expect(result.stdout).toContain("event package saved");
+    expect(result.stdout).toContain("prose warnings (not blocking):");
+    expect(result.stdout).toContain("title names the winner");
+  });
 });

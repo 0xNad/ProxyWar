@@ -182,6 +182,8 @@ export const PublicFeaturedMatchSchema = z.object({
   ]),
   scheduledAt: z.string().nullable(),
   revealAt: z.string().nullable(),
+  /** 2026-08-01 P0 — see `ProxyWarPublicReadModel.ts`'s `PublicFeaturedMatch.completedAt` for the full contract (the ACTUAL match completion date, distinct from `scheduledAt`). */
+  completedAt: z.string().nullable(),
   postMatchSummary: z.string().nullable(),
   result: PublicFeaturedMatchResultSchema.nullable(),
   /**

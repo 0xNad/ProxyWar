@@ -94,6 +94,7 @@ function featuredMatch(overrides: Partial<PublicFeaturedMatch> = {}): PublicFeat
     state: "published",
     scheduledAt: new Date(Date.now() + 600_000).toISOString(),
     revealAt: null,
+    completedAt: null,
     postMatchSummary: null,
     result: null,
     isPubliclyPromotable: true,
@@ -350,6 +351,57 @@ describe("watch-page season schedule section", () => {
     await flushMicrotasks();
     expect(el.textContent).toContain("watch.season_schedule_heading");
     expect(el.textContent).toContain("Auri vs Sefirot");
+  });
+
+  it("2026-08-01 P0: a premiere-lane slot shows a 'Premieres' label", async () => {
+    stubReadModelAndParticipantsFetch(
+      readModel({
+        featuredMatches: [featuredMatch({ matchId: "feat_slot", lane: "premiere" })],
+        seasons: [
+          season({
+            eventSlots: [
+              { featuredMatchId: "feat_slot", scheduledAt: "2026-08-08T18:00:00.000Z" },
+            ],
+          }),
+        ],
+      }),
+    );
+    const el = mount();
+    await flushMicrotasks();
+    expect(el.textContent).toContain("watch.season_schedule_premiere_label");
+    expect(el.textContent).not.toContain("watch.season_schedule_spotlight_label");
+    expect(el.textContent).not.toContain("watch.season_schedule_played_note");
+  });
+
+  it("2026-08-01 P0: an archive-lane slot is presented as a 'Featured spotlight' of an already-completed match, with the honest played-on date, never as an upcoming contest", async () => {
+    stubReadModelAndParticipantsFetch(
+      readModel({
+        featuredMatches: [
+          featuredMatch({
+            matchId: "feat_slot",
+            lane: "archive",
+            scheduledAt: null,
+            completedAt: "2026-08-01T00:00:00.000Z",
+          }),
+        ],
+        seasons: [
+          season({
+            eventSlots: [
+              // The season programme's own "featuring starting" date — a
+              // FUTURE date relative to the match's real completedAt, the
+              // exact real-world scenario the P0 review flagged (a schedule
+              // strip showing "8/3/2026" on an already-decided match).
+              { featuredMatchId: "feat_slot", scheduledAt: "2026-08-03T18:00:00.000Z" },
+            ],
+          }),
+        ],
+      }),
+    );
+    const el = mount();
+    await flushMicrotasks();
+    expect(el.textContent).toContain("watch.season_schedule_spotlight_label");
+    expect(el.textContent).toContain("watch.season_schedule_played_note");
+    expect(el.textContent).not.toContain("watch.season_schedule_premiere_label");
   });
 
   it("renders nothing when no season is active", async () => {
