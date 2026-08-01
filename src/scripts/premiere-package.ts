@@ -26,7 +26,8 @@ import {
   type IdentityRegistrySnapshot,
 } from "../server/identity/IdentityRegistry";
 import type { CoworldLeagueMirrorData } from "../server/agents/CoworldLeagueSiteWriter";
-import { resolveDefaultArtifactsRoot } from "./premiere-candidates";
+import { resolveDefaultArtifactsRoot, resolveDefaultQueueReadyDir, resolveSealedBundleTurnStats } from "./premiere-candidates";
+import { estimatePreRevealDirectorCutSeconds } from "../server/agents/DirectorCutPlan";
 import { parseValueArg } from "./season-lib";
 
 /**
@@ -60,8 +61,8 @@ function canonicalPremiereUrl(match: FeaturedMatch): string | null {
   return `/premiere/${derivePremiereId(match.episodeRequestId)}`;
 }
 
-/** Mirrors `feature-candidates.ts`'s own tolerant-read contract: a missing/malformed live mirror is a normal "no evidence yet" state, never a crash. */
-async function readLiveMirrorData(artifactsRoot: string): Promise<CoworldLeagueMirrorData | null> {
+/** Mirrors `feature-candidates.ts`'s own tolerant-read contract: a missing/malformed live mirror is a normal "no evidence yet" state, never a crash. Exported so `season-program-week-lib.ts` reuses this SAME read rather than a third near-duplicate (see that module's own doc). */
+export async function readLiveMirrorData(artifactsRoot: string): Promise<CoworldLeagueMirrorData | null> {
   const dataPath = path.join(artifactsRoot, "ai-league-runs", "league", "data.json");
   try {
     const raw = await fs.readFile(dataPath, "utf8");
@@ -75,13 +76,39 @@ async function readLiveMirrorData(artifactsRoot: string): Promise<CoworldLeagueM
   }
 }
 
+/**
+ * Post-reveal: reads the mirror's matching episode row, exactly as
+ * before. Pre-reveal fallback (Runbook "Known gaps" fix): when that
+ * lookup can't resolve yet — the normal state for a freshly scheduled
+ * sealed premiere, since its `episodeRequestId` structurally cannot
+ * appear in the mirror until AFTER reveal publishes it there (see
+ * `premiere:schedule`'s own `already_published_on_league` refusal) — a
+ * premiere-lane match falls back to `estimatePreRevealDirectorCutSeconds`
+ * fed the sealed bundle's own admission-safe `turnCount`/`checkpointTurns`
+ * (`sealedBundleTurnStats`, resolved by the caller via
+ * `resolveSealedBundleTurnStats` — a plain data param here, not an I/O
+ * call, so this function stays synchronous and unit-testable without
+ * mocking the filesystem). `null` sealed stats (no queue item, unreadable
+ * meta.json, etc.) simply mean no fallback is possible — same honest
+ * "unavailable, not fabricated" contract as the mirror path.
+ */
 function directorCutEstimateSeconds(
   match: FeaturedMatch,
   mirror: CoworldLeagueMirrorData | null,
+  sealedBundleTurnStats: { turnCount: number; checkpointTurns: readonly number[] } | null,
 ): number | null {
-  if (match.episodeRequestId === null || mirror === null) return null;
-  const episode = mirror.episodes.find((row) => row.episodeRequestId === match.episodeRequestId);
-  return episode?.directorCut?.durationEstimateSeconds ?? null;
+  if (match.episodeRequestId !== null && mirror !== null) {
+    const episode = mirror.episodes.find((row) => row.episodeRequestId === match.episodeRequestId);
+    const fromMirror = episode?.directorCut?.durationEstimateSeconds ?? null;
+    if (fromMirror !== null) return fromMirror;
+  }
+  if (match.lane === "premiere" && sealedBundleTurnStats !== null) {
+    return estimatePreRevealDirectorCutSeconds({
+      totalTurns: sealedBundleTurnStats.turnCount,
+      checkpointTurns: sealedBundleTurnStats.checkpointTurns,
+    });
+  }
+  return null;
 }
 
 /**
@@ -115,6 +142,8 @@ export interface BuildEventPackageDraftOptions {
   subtitleOverride?: string;
   editorialNotesOverride?: string;
   embargoOverride?: "embargoed" | "revealed";
+  /** Pre-reveal Director Cut estimate fallback input — see `directorCutEstimateSeconds`'s own doc for why this is a plain data param rather than an I/O call inside this function. `undefined`/omitted (every caller before this fix) behaves identically to `null`: no pre-reveal fallback attempted. */
+  sealedBundleTurnStats?: { turnCount: number; checkpointTurns: readonly number[] } | null;
 }
 
 export function buildEventPackageDraft(
@@ -142,7 +171,7 @@ export function buildEventPackageDraft(
     mapLabel: match.map,
     format: match.format,
     scheduledAt: match.scheduledAt,
-    directorCutEstimateSeconds: directorCutEstimateSeconds(match, mirror),
+    directorCutEstimateSeconds: directorCutEstimateSeconds(match, mirror, options.sealedBundleTurnStats ?? null),
     canonicalMatchUrl: canonicalMatchUrl(match),
     canonicalPremiereUrl: canonicalPremiereUrl(match),
     embargoState:
@@ -192,7 +221,7 @@ async function main(): Promise<void> {
   const argv = process.argv.slice(2);
   const featuredMatchId = parseValueArg(argv, "--featured=");
   if (featuredMatchId === undefined) {
-    console.error("usage: premiere:package --featured=<feat_id> [--title=] [--subtitle=] [--editorial-notes=] [--embargo=embargoed|revealed] [--validate] [--json]");
+    console.error("usage: premiere:package --featured=<feat_id> [--title=] [--subtitle=] [--editorial-notes=] [--embargo=embargoed|revealed] [--queue-root=] [--validate] [--json]");
     process.exitCode = 1;
     return;
   }
@@ -227,11 +256,25 @@ async function main(): Promise<void> {
 
   const artifactsRoot = resolveDefaultArtifactsRoot();
   const mirror = await readLiveMirrorData(artifactsRoot);
+
+  const queueRootOverride = parseValueArg(argv, "--queue-root=");
+  const queueReadyDir =
+    queueRootOverride === undefined
+      ? resolveDefaultQueueReadyDir()
+      : path.join(path.resolve(queueRootOverride), "ready");
+  const sealedBundleTurnStats =
+    match.lane === "premiere" && match.queueItemName !== null
+      ? await resolveSealedBundleTurnStats(queueReadyDir, match.queueItemName).then((result) =>
+          result.ok ? { turnCount: result.turnCount, checkpointTurns: result.checkpointTurns } : null,
+        )
+      : null;
+
   const draft = buildEventPackageDraft(match, existing, identity, mirror, new Date().toISOString(), {
     titleOverride: parseValueArg(argv, "--title="),
     subtitleOverride: parseValueArg(argv, "--subtitle="),
     editorialNotesOverride: parseValueArg(argv, "--editorial-notes="),
     embargoOverride: parseValueArg(argv, "--embargo=") as "embargoed" | "revealed" | undefined,
+    sealedBundleTurnStats,
   });
   await upsertEventPackage(eventPackageStateRoot, draft);
 

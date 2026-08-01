@@ -10,6 +10,8 @@ import {
   type SeasonStandingsSnapshotRef,
   type SeasonState,
 } from "./SeasonSchemas";
+import type { FeaturedMatch } from "../FeaturedMatch";
+import { PREMIERE_LOOP_HOLD_WINDOW_MS } from "../../replay-premiere/ReplayPremiereLoopCore";
 
 /**
  * Tracked, human-readable Season registry — see `SeasonSchemas.ts`'s own
@@ -254,6 +256,81 @@ export function addEventSlot(
     ...withoutExisting,
     { featuredMatchId: slot.featuredMatchId, scheduledAt: slot.scheduledAt, addedAt: now },
   ];
+  const parsed = SeasonSchema.safeParse({ ...found, eventSlots, updatedAt: now });
+  if (!parsed.success) {
+    return { ok: false, reason: `invalid_season: ${parsed.error.message}` };
+  }
+  return { ok: true, season: parsed.data };
+}
+
+/**
+ * `season:remove-event`'s "refuse to drop a slot whose event is currently
+ * live/airing" guard (a real gap the Season Zero re-activation had to work
+ * around by hand — see `SEASON_ZERO_BASELINE.md`). `FeaturedMatch.state`
+ * has no distinct "airing right now" value of its own (`published` covers
+ * everything from "just committed" through "actively admitted on the bet
+ * origin / replay-premiere-loop" until the reveal flips it to `revealed`
+ * — see that schema's own class doc), so this treats a `published`
+ * premiere-lane record as live for a bounded window starting at its own
+ * `scheduledAt` (falling back to the season slot's own `scheduledAt` when
+ * the `FeaturedMatch` record predates one being set): `PREMIERE_LOOP_HOLD_WINDOW_MS`
+ * (75 minutes — playback duration + margin, `ReplayPremiereLoopCore.ts`'s
+ * own real-world bound on how long a held episode can plausibly still be
+ * playing) is reused rather than inventing a second "how long is a
+ * premiere live for" number. An archive-lane match (already public,
+ * never premiered) or one that has already reached `revealed`/`archived`/
+ * `cancelled` is never live. A `scheduledAt` still in the future (the
+ * common "operator wants to swap next week's slot" case) is never live
+ * either — only a window that has actually started.
+ */
+export function isEventCurrentlyLive(
+  match: FeaturedMatch,
+  slot: SeasonEventSlot,
+  now: Date,
+): boolean {
+  if (match.lane !== "premiere" || match.state !== "published") return false;
+  const scheduledAt = match.scheduledAt ?? slot.scheduledAt;
+  if (scheduledAt === null) return false;
+  const scheduledTime = Date.parse(scheduledAt);
+  if (Number.isNaN(scheduledTime)) return false;
+  const elapsedMs = now.getTime() - scheduledTime;
+  return elapsedMs >= 0 && elapsedMs <= PREMIERE_LOOP_HOLD_WINDOW_MS;
+}
+
+/**
+ * Removes one event slot by `featuredMatchId`. Idempotent: removing a
+ * slot that is not present succeeds as a no-op (the season's
+ * post-condition — "this match is not in the programme" — already
+ * holds), matching `addEventSlot`'s own dedupe-by-id treatment rather
+ * than forcing every caller to special-case "already gone" as an error.
+ * Never allowed once a season is `completed` — same rule `addEventSlot`
+ * enforces, for the same reason (a wrapped-up programme's schedule is
+ * final). The "is this event currently live" guard is deliberately NOT
+ * enforced here — it needs the `FeaturedMatch` store, which this
+ * intentionally FeaturedMatch-free module never reads (see the class
+ * doc) — `season-lib.ts`'s `runSeasonRemoveEvent` checks
+ * `isEventCurrentlyLive` above before ever calling this pure mutation.
+ */
+export function removeEventSlot(
+  registry: SeasonRegistryFile,
+  id: string,
+  featuredMatchId: string,
+  now: string,
+): SeasonMutationResult {
+  const found = requireSeason(registry, id);
+  if (isError(found)) return found;
+  if (found.state === "completed") {
+    return {
+      ok: false,
+      reason: "season_completed: cannot remove an event slot from a completed season",
+    };
+  }
+  const eventSlots = found.eventSlots.filter(
+    (entry) => entry.featuredMatchId !== featuredMatchId,
+  );
+  if (eventSlots.length === found.eventSlots.length) {
+    return { ok: true, season: found };
+  }
   const parsed = SeasonSchema.safeParse({ ...found, eventSlots, updatedAt: now });
   if (!parsed.success) {
     return { ok: false, reason: `invalid_season: ${parsed.error.message}` };

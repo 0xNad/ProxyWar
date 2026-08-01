@@ -602,9 +602,22 @@ npm run season:activate -- --season=season_zero
 npm run season:add-event -- --season=season_zero --featured=<feat_id> --scheduled-at=<ISO>
 npm run season:add-event -- --season=season_zero --featured=<feat_id> --archive
 npm run season:add-event -- --season=season_zero --standings-snapshot=<snapshotGeneratedAtISO> --label="season open"
+npm run season:remove-event -- --season=season_zero --featured=<feat_id>
 npm run season:status -- --season=season_zero
 npm run season:complete -- --season=season_zero
 ```
+
+`season:remove-event` (fixed 2026-08-01 — the prior gap: an aged-out slot
+had to be dropped via a hand-called `loadSeasonRegistry`/
+`saveSeasonRegistry`, see `SEASON_ZERO_BASELINE.md`) is validated,
+idempotent on an already-absent slot (`SeasonRegistry.removeEventSlot`'s
+own doc), and refuses a slot whose event is currently live/airing
+(`SeasonRegistry.isEventCurrentlyLive` — a published premiere-lane
+record inside `PREMIERE_LOOP_HOLD_WINDOW_MS` of its own `scheduledAt`).
+`season:status` now prints a per-slot health line
+(`promotable`/`aired`/`aged-out` — `season-lib.ts`'s `computeSlotHealth`)
+cross-referencing the live `FeaturedMatch`/`EventPackage` stores, so a
+stale slot is visible without re-deriving it by hand.
 
 ### 8.2 The "no anonymous public Premiere" gate
 
@@ -685,37 +698,69 @@ against the prose fields — a conservative, NEVER-blocking check that
 flags (never rejects) a number or known Agent display name mentioned in
 prose with no matching `claims[]` entry backing it.
 
-### 8.5 Weekly programming workflow
+**Director Cut estimate, pre- and post-reveal (fixed 2026-08-01).** Post-
+reveal, the estimate still comes from the live league mirror's matching
+episode row. Pre-reveal, a premiere-lane record's `episodeRequestId`
+structurally cannot appear in that mirror yet (`premiere:schedule`
+itself refuses a fresh candidate whose id already does), so this now
+falls back to `DirectorCutPlan.estimatePreRevealDirectorCutSeconds` —
+the same rate/anchor math `buildDirectorCutPlan` uses for a real match,
+fed a structural (never narrative) turn-span partition built ONLY from
+the sealed bundle's own `meta.json` (`turnCount`/`checkpointTurns`, read
+via a narrow, non-passthrough schema — `resolveSealedBundleTurnStats` in
+`premiere-candidates.ts` — so a poisoned/future `meta.json` can never
+leak a result-bearing field into this estimate). `--queue-root=`
+resolves the sealed bundle the same way `premiere:schedule` does.
+
+### 8.5 Weekly programming workflow — `season:program-week`
+
+```bash
+npm run season:program-week                                    # dry run: preview, no writes
+npm run season:program-week -- --execute                       # commit
+npm run season:program-week -- --episode=<id> --execute         # override auto-pick
+npm run season:program-week -- --at=2026-08-08T18:00:00Z --execute  # override the cadence slot
+```
 
 Matches the doc's own cadence: **one flagship Featured Event per week**,
 optional midweek highlights from ordinary league matches, continuous
 league activity underneath. Do not schedule more Premieres than the
 audience can support.
 
-1. `npm run premiere:candidates` / `npm run feature:candidates` — pick a
-   candidate with a real reason to watch (§8.3's claims are now visible
-   in the CLI output).
-2. Commit the pick into `featured-matches.json` (§2.1):
-   - premiere lane: `npm run premiere:schedule -- --episode=<id> --at=<ISO>`.
-     `participants` is resolved automatically from the sealed bundle's
-     spoiler-safe seat roster at this step — nothing further to do for
-     identity. A candidate whose bundle carries no resolvable lineup
-     refuses to schedule outright.
-   - archive lane: `npm run feature:promote -- --episode=<episodeRequestId>`
-     (participants were already resolved by `feature:candidates`' own
-     evidence pass; this just persists that draft — see §2.1).
-3. `npm run premiere:package -- --featured=<feat_id>` to generate the
-   `EventPackage` draft; edit prose via `--title=`/`--subtitle=`/
-   `--editorial-notes=` and re-run to refresh evidence.
-4. `npm run premiere:package -- --featured=<feat_id> --validate` — confirm
-   `isPubliclyPromotable: true` before treating the event as ready.
-   Premiere-lane records also require `state: "published"` for the gate
-   (`not_yet_published`) — run step 5's `premiere:publish` first if this
-   still reports `false` for that reason alone.
-5. `npm run premiere:validate` (§2.1) for the ordinary schedule-integrity
-   check, then `npm run premiere:publish` when it's time to go live.
-6. `npm run season:add-event -- --season=<id> --featured=<feat_id> --scheduled-at=<ISO>`
-   to fold the event into the active Season's programme.
+`season:program-week` (fixed 2026-08-01 — the prior gap: programming one
+week took five to six separate manual CLI invocations, an operational
+tax the weekly cadence could not survive) is the ONE command for this:
+it ranks both candidate lanes, picks the top gate-eligible candidate (a
+clean, non-severely-
+degraded premiere-lane pick first, falling back to archive — override
+with `--episode=`), runs that lane's real promotion primitives
+(`premiere:schedule` + `premiere:publish` for premiere — both are
+required; `EventPackageGate.isPubliclyPromotable`'s `not_yet_published`
+check needs `state: "published"`, not merely `"scheduled"` —
+`feature:promote` for archive), generates a spoiler-neutral
+`EventPackage` (every run, from scratch — never carrying forward a
+previous run's operator prose), validates the gate, and — ONLY once the
+gate passes — folds the event into the active Season's programme at the
+next weekly cadence slot (one week after the season's own latest
+scheduled slot, or one week from now for a season's first flagship).
+
+**DRY RUN BY DEFAULT.** Every read (both rankings, sealed-bundle
+participant/turn-stat resolution, the live mirror, identity, current
+store state) always happens against real data, so the dry-run preview
+and gate result are exactly what `--execute` would produce — only the
+writes are withheld. `--execute` commits every step up to
+`season:add-event`, but NEVER folds a gate-failing event into the
+season programme: a failing gate hard-fails with the exact `missing[]`
+list `EventPackageGate.isPubliclyPromotable` produced, and the run
+prints its full undo commands (`season:remove-event` always;
+`premiere:cancel` too for the premiere lane) alongside a human review
+summary of every step it took.
+
+The five/six-step manual sequence this replaces (still available for a
+one-off override or to inspect an individual step) is unchanged:
+`premiere:candidates`/`feature:candidates` → `premiere:schedule`
+(+`premiere:publish`) or `feature:promote` → `premiere:package` →
+`premiere:package --validate` (+`premiere:validate`) →
+`season:add-event`.
 
 ## Known gaps
 
@@ -738,26 +783,4 @@ audience can support.
   comments reference it directly, but root cause was never investigated.
   Current workaround is re-admitting with a fresh premiere id and confirming
   via `curl` before opening a browser.
-- **A premiere-lane `EventPackage`'s Director Cut estimate is
-  structurally unavailable until reveal, a real gap of the same
-  character the participants fix (§2.1) just closed for `participants`.**
-  `premiere-package.ts`'s `directorCutEstimateSeconds()` looks up
-  `mirror.episodes.find(row => row.episodeRequestId === match.episodeRequestId)`
-  — but `premiere:schedule`'s own pre-flight (rightly) REFUSES to
-  schedule a fresh candidate whose `episodeRequestId` already appears in
-  that same mirror (`already_published_on_league`, §2). A successfully
-  scheduled premiere-lane record's `episodeRequestId` can therefore never
-  match a mirror row until AFTER reveal publishes it there — so
-  `EventPackageGate.isPubliclyPromotable`'s `director_cut_estimate` check
-  is unsatisfiable for a premiere pre-reveal by the current wiring alone
-  (confirmed while building this session's own gate-passing test — it only
-  passes by seeding the mirror row AFTER `premiere:schedule` succeeds,
-  which sidesteps rather than reflects the real operational sequence).
-  Unlike drama/story evidence above (soft, not gate-checked), this IS a
-  hard gate requirement. A real fix needs an ESTIMATE derived from data
-  actually available pre-reveal — the sealed queue item's own `meta.json`
-  (`turnCount`/`checkpointTurns`/`turnIntervalMs`) is the only candidate
-  source, analogous to how `checkpointTurns` already implies a segment
-  structure — but no such formula exists yet. Out of scope for the
-  participants fix; flagged here so the next operator packaging a real
-  premiere doesn't waste time assuming it's their own setup at fault.
+

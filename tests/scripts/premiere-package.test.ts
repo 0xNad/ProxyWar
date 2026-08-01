@@ -1,9 +1,11 @@
 import { execFileSync } from "node:child_process";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { buildEventPackageDraft } from "../../src/scripts/premiere-package";
+import { estimatePreRevealDirectorCutSeconds } from "../../src/server/agents/DirectorCutPlan";
 import { isPubliclyPromotable } from "../../src/server/agents/season/EventPackageGate";
 import type { FeaturedMatch } from "../../src/server/agents/FeaturedMatch";
 import type { EventPackage } from "../../src/server/agents/season/EventPackage";
@@ -162,6 +164,29 @@ describe("buildEventPackageDraft", () => {
     expect(draft.directorCutEstimateSeconds).toBeNull();
   });
 
+  it("falls back to the pre-reveal estimate (from sealedBundleTurnStats) when the mirror can't resolve it yet", () => {
+    const sealedBundleTurnStats = { turnCount: 10_000, checkpointTurns: [3000, 6000] };
+    const draft = buildEventPackageDraft(baseMatch(), null, identity(), null, NOW, { sealedBundleTurnStats });
+    expect(draft.directorCutEstimateSeconds).toBe(estimatePreRevealDirectorCutSeconds({ totalTurns: 10_000, checkpointTurns: [3000, 6000] }));
+    expect(draft.directorCutEstimateSeconds).toBe(300);
+  });
+
+  it("prefers the mirror's real post-reveal estimate over the pre-reveal fallback when both are available", () => {
+    const mirror = {
+      episodes: [{ episodeRequestId: "ereq_x", directorCut: { durationEstimateSeconds: 420, segmentCount: 6 } }],
+    } as unknown as CoworldLeagueMirrorData;
+    const sealedBundleTurnStats = { turnCount: 10_000, checkpointTurns: [3000, 6000] };
+    const draft = buildEventPackageDraft(baseMatch(), null, identity(), mirror, NOW, { sealedBundleTurnStats });
+    expect(draft.directorCutEstimateSeconds).toBe(420);
+  });
+
+  it("never applies the pre-reveal fallback to an archive-lane match", () => {
+    const match = baseMatch({ lane: "archive", queueItemName: null, scheduledAt: null, episodeRequestId: "ereq_x" });
+    const sealedBundleTurnStats = { turnCount: 10_000, checkpointTurns: [3000, 6000] };
+    const draft = buildEventPackageDraft(match, null, identity(), null, NOW, { sealedBundleTurnStats });
+    expect(draft.directorCutEstimateSeconds).toBeNull();
+  });
+
   it("rejects a package whose title/subtitle names the winner once the match carries a result", () => {
     const match = baseMatch({
       lane: "archive",
@@ -283,5 +308,40 @@ describe("premiere:package CLI — real subprocess end to end", () => {
     expect(result.stdout).toContain("event package saved");
     expect(result.stdout).toContain("prose warnings (not blocking):");
     expect(result.stdout).toContain("title names the winner");
+  });
+
+  it("resolves the pre-reveal Director Cut estimate from a real sealed bundle via --queue-root, end to end", () => {
+    const queueRoot = mkdtempSync(path.join(os.tmpdir(), "pw-package-queue-"));
+    const itemDir = path.join(queueRoot, "ready", "20260801T000000Z-run1");
+    mkdirSync(itemDir, { recursive: true });
+    writeFileSync(
+      path.join(itemDir, "meta.json"),
+      JSON.stringify({
+        schemaVersion: 1,
+        kind: "real-league",
+        runId: "run1",
+        sourceFile: "bundle.source.json",
+        sha256: "abc",
+        turnCount: 10000,
+        seatCount: 2,
+        map: "world",
+        checkpointTurns: [3000, 6000],
+        turnIntervalMs: 120,
+        coworldId: "cow_x",
+        variantId: "v1",
+        episodeId: null,
+        experienceRequestId: "ereq_x",
+        generatedAt: NOW,
+      }),
+      "utf8",
+    );
+    const result = runCli([`--featured=${FEAT_ID}`, `--queue-root=${queueRoot}`, "--json"]);
+    expect(result.code).toBe(0);
+    // main() always appends printCompleteness's own lines after the JSON
+    // in --json mode too — same behavior premiere-package.ts's own doc
+    // describes ("After every save ... it prints isPubliclyPromotable").
+    const draft = JSON.parse(result.stdout.slice(0, result.stdout.indexOf("\nisPubliclyPromotable")));
+    expect(draft.directorCutEstimateSeconds).toBe(300);
+    rmSync(queueRoot, { recursive: true, force: true });
   });
 });

@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   buildDirectorCutPlan,
+  estimatePreRevealDirectorCutSeconds,
   type DirectorCutSegment,
 } from "../../src/server/agents/DirectorCutPlan";
 import {
@@ -530,5 +531,67 @@ describe("buildDirectorCutPlan", () => {
         true,
       );
     });
+  });
+});
+
+/**
+ * Runbook "Known gaps" fix: a premiere-lane package's Director Cut
+ * estimate is structurally unavailable pre-reveal (no `SpectatorEvent`
+ * evidence — the sealed bundle never retains `decisions.jsonl`). This
+ * function derives an honest estimate from ONLY `totalTurns`/
+ * `checkpointTurns` by reusing the SAME rate/anchor math
+ * `buildDirectorCutPlan`'s own `estimateDurationSeconds` runs on real
+ * segments (`estimateDurationFromSpans`, exercised indirectly here).
+ */
+describe("estimatePreRevealDirectorCutSeconds", () => {
+  it("returns 0 for a zero/negative turn count", () => {
+    expect(estimatePreRevealDirectorCutSeconds({ totalTurns: 0, checkpointTurns: [3000, 6000] })).toBe(0);
+    expect(estimatePreRevealDirectorCutSeconds({ totalTurns: -5, checkpointTurns: [] })).toBe(0);
+  });
+
+  it("degrades to a single whole-match quiet span (target-duration only) when checkpoints are empty", () => {
+    // totalTurns === the first TARGET_DURATION_ANCHORS point (10_000 -> 300s)
+    // exactly, so an all-quiet estimate converges to exactly the anchor.
+    expect(estimatePreRevealDirectorCutSeconds({ totalTurns: 10_000, checkpointTurns: [] })).toBe(300);
+  });
+
+  it("degrades the same way for non-finite/malformed checkpoint values", () => {
+    expect(
+      estimatePreRevealDirectorCutSeconds({ totalTurns: 10_000, checkpointTurns: [Number.NaN, Number.POSITIVE_INFINITY] }),
+    ).toBe(300);
+  });
+
+  it("a small checkpoint window barely moves the estimate off the target-only baseline", () => {
+    // A modest normal-paced window (3000 turns of 10000) still fits
+    // entirely inside the target's own budget (below the 600 turns/sec
+    // quiet-pace ceiling), so the estimator adapts the quiet pace to
+    // land on exactly the same target as the checkpoint-free case.
+    expect(estimatePreRevealDirectorCutSeconds({ totalTurns: 10_000, checkpointTurns: [3000, 6000] })).toBe(300);
+  });
+
+  it("a large checkpoint window that exceeds the target budget pushes the estimate ABOVE the checkpoint-free baseline", () => {
+    // 9000 of 10000 turns paced "normal" (15 turns/sec) costs 600s on its
+    // own — already double the 300s target — so the remaining 1000 quiet
+    // turns hit the 600 turns/sec ceiling instead of adapting down to fit,
+    // and the total estimate genuinely exceeds the checkpoint-free 300s.
+    // This is the load-bearing proof that checkpointTurns actually change
+    // the derived estimate, not just decorate an unrelated computation.
+    const estimate = estimatePreRevealDirectorCutSeconds({ totalTurns: 10_000, checkpointTurns: [500, 9500] });
+    expect(estimate).toBe(602);
+    expect(estimate).toBeGreaterThan(300);
+  });
+
+  it("is order-independent — [max, min] produces the same window as [min, max]", () => {
+    const ascending = estimatePreRevealDirectorCutSeconds({ totalTurns: 10_000, checkpointTurns: [500, 9500] });
+    const descending = estimatePreRevealDirectorCutSeconds({ totalTurns: 10_000, checkpointTurns: [9500, 500] });
+    expect(descending).toBe(ascending);
+  });
+
+  it("clamps out-of-range checkpoints to the match's own turn bounds", () => {
+    // Clamped to [0, 10000] -- the whole match paced "normal" (never
+    // "slow": no confirmed high-importance event exists pre-reveal).
+    expect(estimatePreRevealDirectorCutSeconds({ totalTurns: 10_000, checkpointTurns: [-500, 20_000] })).toBe(
+      Math.round(10_000 / 15),
+    );
   });
 });

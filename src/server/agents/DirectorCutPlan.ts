@@ -825,21 +825,31 @@ function targetDurationSeconds(totalTurns: number): number {
   return Math.max(1, secondsA + (totalTurns - turnsA) * slope);
 }
 
-function estimateDurationSeconds(
-  segments: readonly DirectorCutSegment[],
+/**
+ * A turn span's simplified pacing bucket for {@link estimateDurationFromSpans}
+ * — the same three buckets `estimateDurationSeconds` already reads off a
+ * real `DirectorCutSegment` (`quiet_interval` -> `"quiet"`, `speed: "slow"`
+ * -> `"slow"`, everything else -> `"normal"`), factored out so a caller
+ * with real turn SPANS but no full `DirectorCutSegment[]` (no `SpectatorEvent`
+ * evidence to build one from — see `estimatePreRevealDirectorCutSeconds`
+ * below) can reuse the exact SAME rate/target math without fabricating a
+ * `DirectorCutEventReason` it has no evidence for.
+ */
+export type DirectorCutPacingSpan = { turns: number; pace: "slow" | "normal" | "quiet" };
+
+function estimateDurationFromSpans(
+  spans: readonly DirectorCutPacingSpan[],
   totalTurns: number,
 ): number {
   let importantSeconds = 0;
   let quietTurnCount = 0;
-  for (const segment of segments) {
-    const span = segment.endTurn - segment.startTurn + 1;
-    if (segment.eventReason === "quiet_interval") {
-      quietTurnCount += span;
+  for (const span of spans) {
+    if (span.pace === "quiet") {
+      quietTurnCount += span.turns;
       continue;
     }
-    const rate =
-      segment.speed === "slow" ? SLOW_TURNS_PER_SECOND : NORMAL_TURNS_PER_SECOND;
-    importantSeconds += span / rate;
+    const rate = span.pace === "slow" ? SLOW_TURNS_PER_SECOND : NORMAL_TURNS_PER_SECOND;
+    importantSeconds += span.turns / rate;
   }
   const target = targetDurationSeconds(totalTurns);
   const quietTurnsPerSecond = deriveQuietTurnsPerSecond(
@@ -850,4 +860,68 @@ function estimateDurationSeconds(
   const quietSeconds =
     quietTurnCount > 0 ? quietTurnCount / quietTurnsPerSecond : 0;
   return Math.round(importantSeconds + quietSeconds);
+}
+
+function estimateDurationSeconds(
+  segments: readonly DirectorCutSegment[],
+  totalTurns: number,
+): number {
+  return estimateDurationFromSpans(
+    segments.map((segment) => ({
+      turns: segment.endTurn - segment.startTurn + 1,
+      pace:
+        segment.eventReason === "quiet_interval"
+          ? "quiet"
+          : segment.speed === "slow"
+            ? "slow"
+            : "normal",
+    })),
+    totalTurns,
+  );
+}
+
+/**
+ * Runbook §"Known gaps": a premiere-lane `EventPackage`'s Director Cut
+ * estimate is structurally unavailable pre-reveal — `premiere-package.ts`'s
+ * mirror-row lookup can never resolve for a freshly scheduled sealed
+ * premiere (its `episodeRequestId` cannot yet appear in the public league
+ * mirror; `premiere:schedule` itself refuses a candidate whose id already
+ * does). This is the fix: reuses {@link estimateDurationFromSpans} — the
+ * SAME rate/anchor math `buildDirectorCutPlan`'s own `estimateDurationSeconds`
+ * runs on real segments — fed a STRUCTURAL (never narrative) turn-span
+ * partition built ONLY from the sealed bundle's own `meta.json` fields
+ * (`turnCount`/`checkpointTurns`) — the one signal a pre-reveal bundle
+ * actually carries about where meaningful post-spawn play concentrates
+ * (`PremiereWageringCheckpoints.checkpointTurnsForEpisode` places the two
+ * checkpoints at ~35%/65% of the POST-SPAWN window specifically so a
+ * wagering market resolves against real gameplay, never the spawn phase).
+ *
+ * Honest by construction: the checkpoint window paces `"normal"` (never
+ * `"slow"` — that tier requires a confirmed high-importance
+ * `SpectatorEvent`, which is exactly the evidence sealed bundles never
+ * retain); everything outside the window degrades to `"quiet"`, the same
+ * default `buildDirectorCutPlan` itself falls back to for a match with no
+ * qualifying events. Malformed/missing checkpoints degrade to a single
+ * quiet span covering the whole match (equivalent to
+ * `targetDurationSeconds(totalTurns)` alone) rather than throwing —
+ * matching every other tolerant-degradation path in this module.
+ */
+export function estimatePreRevealDirectorCutSeconds(input: {
+  totalTurns: number;
+  checkpointTurns: readonly number[];
+}): number {
+  const totalTurns = Math.max(0, Math.round(input.totalTurns));
+  if (totalTurns <= 0) return 0;
+  const finiteCheckpoints = input.checkpointTurns.filter((turn) => Number.isFinite(turn));
+  const clampTurn = (turn: number) => Math.min(totalTurns, Math.max(0, Math.round(turn)));
+  const windowStart = finiteCheckpoints.length > 0 ? clampTurn(Math.min(...finiteCheckpoints)) : 0;
+  const windowEnd =
+    finiteCheckpoints.length > 0
+      ? Math.max(windowStart, clampTurn(Math.max(...finiteCheckpoints)))
+      : 0;
+  const spans: DirectorCutPacingSpan[] = [];
+  if (windowStart > 0) spans.push({ turns: windowStart, pace: "quiet" });
+  if (windowEnd > windowStart) spans.push({ turns: windowEnd - windowStart, pace: "normal" });
+  if (totalTurns > windowEnd) spans.push({ turns: totalTurns - windowEnd, pace: "quiet" });
+  return estimateDurationFromSpans(spans, totalTurns);
 }

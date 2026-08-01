@@ -5,7 +5,7 @@ import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 /**
- * Real subprocess (`tsx`) end-to-end coverage of the five `season:*`
+ * Real subprocess (`tsx`) end-to-end coverage of the six `season:*`
  * entry points themselves — argv parsing, exit codes, and the real
  * `isMainModule` dispatch — matching `premiere-schedule-cli.test.ts`'s
  * own established pattern. Business logic itself is covered by
@@ -17,6 +17,7 @@ const FEAT_ID = `feat_${"d".repeat(20)}`;
 
 describe("season:* CLIs — real subprocess end to end", () => {
   let registryDir: string;
+  let stateDir: string;
 
   function runCli(scriptName: string, args: string[]): { code: number; stdout: string; stderr: string } {
     try {
@@ -24,7 +25,12 @@ describe("season:* CLIs — real subprocess end to end", () => {
         cwd: repoRoot,
         encoding: "utf8",
         stdio: ["ignore", "pipe", "pipe"],
-        env: { ...process.env, PROXYWAR_SEASON_REGISTRY_DIR: registryDir },
+        env: {
+          ...process.env,
+          PROXYWAR_SEASON_REGISTRY_DIR: registryDir,
+          PROXYWAR_FEATURED_MATCH_STATE_ROOT: stateDir,
+          PROXYWAR_EVENT_PACKAGE_STATE_ROOT: stateDir,
+        },
       });
       return { code: 0, stdout, stderr: "" };
     } catch (error) {
@@ -35,10 +41,14 @@ describe("season:* CLIs — real subprocess end to end", () => {
 
   beforeEach(async () => {
     registryDir = await mkdtemp(path.join(os.tmpdir(), "pw-season-cli-"));
+    stateDir = await mkdtemp(path.join(os.tmpdir(), "pw-season-cli-state-"));
   });
 
   afterEach(async () => {
-    await rm(registryDir, { recursive: true, force: true });
+    await Promise.all([
+      rm(registryDir, { recursive: true, force: true }),
+      rm(stateDir, { recursive: true, force: true }),
+    ]);
   });
 
   it("full lifecycle: create -> add-event -> status -> activate -> complete", () => {
@@ -47,7 +57,6 @@ describe("season:* CLIs — real subprocess end to end", () => {
       "--title=Season Zero",
       "--start=2026-08-01",
       "--end=2026-09-26",
-      "--description=an eight-week flagship programme",
     ]);
     expect(created.code).toBe(0);
     expect(created.stdout).toContain("season_zero");
@@ -63,6 +72,7 @@ describe("season:* CLIs — real subprocess end to end", () => {
     expect(status.code).toBe(0);
     expect(status.stdout).toContain(FEAT_ID);
     expect(status.stdout).toContain("[draft]");
+    expect(status.stdout).toContain("featured match not found");
 
     const activated = runCli("season-activate.ts", ["--season=season_zero"]);
     expect(activated.code).toBe(0);
@@ -118,4 +128,71 @@ describe("season:* CLIs — real subprocess end to end", () => {
     const status = runCli("season-status.ts", ["--season=season_zero"]);
     expect(status.stdout).toContain("standings snapshot refs: 1");
   }, 30000);
+
+  describe("season:remove-event", () => {
+    it("refuses with no --season/--featured", () => {
+      const result = runCli("season-remove-event.ts", []);
+      expect(result.code).not.toBe(0);
+      expect(result.stderr).toContain("usage:");
+    });
+
+    it("removes a present slot, then season:status no longer lists it", () => {
+      runCli("season-create.ts", [
+        "--slug=zero",
+        "--title=Season Zero",
+        "--start=2026-08-01",
+        "--end=2026-09-26",
+      ]);
+      runCli("season-add-event.ts", [
+        "--season=season_zero",
+        `--featured=${FEAT_ID}`,
+        "--scheduled-at=2026-08-08T18:00:00.000Z",
+      ]);
+      const beforeRemoval = runCli("season-status.ts", ["--season=season_zero"]);
+      expect(beforeRemoval.stdout).toContain("event slots: 1");
+
+      const removed = runCli("season-remove-event.ts", [`--season=season_zero`, `--featured=${FEAT_ID}`]);
+      expect(removed.code).toBe(0);
+
+      const afterRemoval = runCli("season-status.ts", ["--season=season_zero"]);
+      expect(afterRemoval.stdout).toContain("event slots: 0");
+      expect(afterRemoval.stdout).not.toContain(FEAT_ID);
+    }, 30000);
+
+    it("is idempotent: removing an already-absent slot still exits 0", () => {
+      runCli("season-create.ts", [
+        "--slug=zero",
+        "--title=Season Zero",
+        "--start=2026-08-01",
+        "--end=2026-09-26",
+      ]);
+      const removed = runCli("season-remove-event.ts", [`--season=season_zero`, `--featured=${FEAT_ID}`]);
+      expect(removed.code).toBe(0);
+    });
+
+    it("reports a clear error for an unknown season", () => {
+      const result = runCli("season-remove-event.ts", [`--season=season_missing`, `--featured=${FEAT_ID}`]);
+      expect(result.code).not.toBe(0);
+      expect(result.stdout).toContain("season_not_found");
+    });
+
+    it("--json emits a machine-readable result", () => {
+      runCli("season-create.ts", [
+        "--slug=zero",
+        "--title=Season Zero",
+        "--start=2026-08-01",
+        "--end=2026-09-26",
+      ]);
+      runCli("season-add-event.ts", [
+        "--season=season_zero",
+        `--featured=${FEAT_ID}`,
+        "--scheduled-at=2026-08-08T18:00:00.000Z",
+      ]);
+      const result = runCli("season-remove-event.ts", [`--season=season_zero`, `--featured=${FEAT_ID}`, "--json"]);
+      expect(result.code).toBe(0);
+      const parsed = JSON.parse(result.stdout);
+      expect(parsed.ok).toBe(true);
+      expect(parsed.season.eventSlots).toEqual([]);
+    }, 30000);
+  });
 });

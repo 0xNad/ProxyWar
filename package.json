@@ -33,6 +33,8 @@
     "season:complete": "tsx src/scripts/season-complete.ts",
     "season:add-event": "tsx src/scripts/season-add-event.ts",
     "season:status": "tsx src/scripts/season-status.ts",
+    "season:remove-event": "tsx src/scripts/season-remove-event.ts",
+    "season:program-week": "tsx src/scripts/season-program-week.ts",
     "premiere-wagering:seal": "tsx src/scripts/premiere-wagering/seal-episode.ts",
     "premiere-wagering:roster": "tsx src/scripts/premiere-wagering/pull-active-roster.ts",
     "premiere-wagering:generate": "tsx src/scripts/premiere-wagering/generate-xp-request-episode.ts",

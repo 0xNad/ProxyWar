@@ -444,6 +444,71 @@ export async function resolveSealedBundleParticipants(
   };
 }
 
+/**
+ * DirectorCutPlan.ts's own "Known gaps" fix: reads ONLY `turnCount`/
+ * `checkpointTurns` off a sealed queue item's `meta.json` —
+ * `SealedBundleSeatsOnlySchema` above already established the narrow,
+ * non-passthrough-schema discipline for `bundle.source.json`; the same
+ * discipline applies here even though `meta.json` (unlike
+ * `bundle.source.json`) carries no result-bearing field today
+ * (`MetaJsonSchema` above has none) — a narrow schema still strips
+ * anything a future or poisoned `meta.json` might add that this call has
+ * no business reading, rather than relying on "the producer never writes
+ * that field" holding forever. Used ONLY by `premiere:package`'s
+ * pre-reveal Director Cut estimate fallback
+ * (`DirectorCutPlan.estimatePreRevealDirectorCutSeconds`) — never by
+ * `rankPremiereCandidates` above, which keeps reading the full (trusted,
+ * own-producer) `MetaJsonSchema` for ranking.
+ */
+const SealedBundleTurnStatsSchema = z.object({
+  turnCount: z.number().int().nonnegative(),
+  checkpointTurns: z.array(z.number()),
+});
+
+/** `meta.json` is a small hand-written manifest, not a game record — bounded generously so a corrupt/oversized file fails fast rather than blocking a read. */
+const MAX_SEALED_BUNDLE_META_BYTES = 4 * 1024 * 1024;
+
+export type ResolveSealedBundleTurnStatsResult =
+  | { ok: true; turnCount: number; checkpointTurns: number[] }
+  | { ok: false; reason: string };
+
+export async function resolveSealedBundleTurnStats(
+  queueReadyDir: string,
+  queueItemName: string,
+): Promise<ResolveSealedBundleTurnStatsResult> {
+  const metaPath = path.join(queueReadyDir, queueItemName, "meta.json");
+  let stat;
+  try {
+    stat = await fs.stat(metaPath);
+  } catch {
+    return { ok: false, reason: `sealed bundle meta not found at ${metaPath}` };
+  }
+  if (!stat.isFile() || stat.size > MAX_SEALED_BUNDLE_META_BYTES) {
+    return {
+      ok: false,
+      reason: `${metaPath} is not a regular file within the ${MAX_SEALED_BUNDLE_META_BYTES}-byte bound`,
+    };
+  }
+  let raw: unknown;
+  try {
+    raw = JSON.parse(await fs.readFile(metaPath, "utf8"));
+  } catch {
+    return { ok: false, reason: `${metaPath} is not valid JSON` };
+  }
+  const parsed = SealedBundleTurnStatsSchema.safeParse(raw);
+  if (!parsed.success) {
+    return {
+      ok: false,
+      reason: `${metaPath} does not carry a valid turnCount/checkpointTurns (${parsed.error.issues[0]?.message ?? "schema mismatch"})`,
+    };
+  }
+  return {
+    ok: true,
+    turnCount: parsed.data.turnCount,
+    checkpointTurns: parsed.data.checkpointTurns,
+  };
+}
+
 export async function rankPremiereCandidates(options: {
   queueReadyDir: string;
   artifactsRoot: string;

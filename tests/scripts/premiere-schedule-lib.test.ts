@@ -9,7 +9,7 @@ import {
   upsertRecord,
   validateSchedule,
 } from "../../src/scripts/premiere-schedule-lib";
-import { resolveSealedBundleParticipants } from "../../src/scripts/premiere-candidates";
+import { resolveSealedBundleParticipants, resolveSealedBundleTurnStats } from "../../src/scripts/premiere-candidates";
 import {
   readFeaturedMatchStore,
   writeFeaturedMatchStore,
@@ -515,6 +515,72 @@ describe("resolveSealedBundleParticipants", () => {
     expect(result.participants).toEqual([
       { playerName: "Auri", agentId: "agt_auri", agentVersionId: "agtv_auri_v43", builderId: null },
     ]);
+  });
+});
+
+describe("resolveSealedBundleTurnStats", () => {
+  let queueRoot: string;
+
+  beforeEach(async () => {
+    queueRoot = await mkdtemp(path.join(os.tmpdir(), "pw-sealed-bundle-turnstats-"));
+  });
+
+  afterEach(async () => {
+    await rm(queueRoot, { recursive: true, force: true });
+  });
+
+  const readyDir = () => path.join(queueRoot, "ready");
+
+  it("reads turnCount/checkpointTurns off meta.json", async () => {
+    await writeQueueItem(queueRoot, "item1", metaFor({ turnCount: 9000, checkpointTurns: [3150, 5850] }));
+    const result = await resolveSealedBundleTurnStats(readyDir(), "item1");
+    expect(result).toEqual({ ok: true, turnCount: 9000, checkpointTurns: [3150, 5850] });
+  });
+
+  /**
+   * Spoiler-safety regression: `DirectorCutPlan.estimatePreRevealDirectorCutSeconds`
+   * (`premiere:package`'s pre-reveal estimate fallback) must never see a
+   * result-bearing field even if a future/poisoned `meta.json` carried
+   * one — same narrow-schema discipline `resolveSealedBundleParticipants`'s
+   * own "never reads gameRecord/authoritativeResult" test proves for
+   * `bundle.source.json`. A non-passthrough zod schema strips unknown
+   * keys by construction; this asserts that end-to-end against a
+   * `meta.json` deliberately poisoned with winner/result fields no real
+   * producer writes today.
+   */
+  it("strips a poisoned meta.json down to ONLY turnCount/checkpointTurns — never leaks a result-bearing field", async () => {
+    await writeQueueItem(
+      queueRoot,
+      "item2",
+      metaFor({
+        turnCount: 9000,
+        checkpointTurns: [3150, 5850],
+        winnerName: "SPOILER_SHOULD_NEVER_LEAK",
+        result: { winnerAgentId: "agt_should_never_leak", placements: [] },
+        spoilerNotes: "the outcome is secret",
+      }),
+    );
+    const result = await resolveSealedBundleTurnStats(readyDir(), "item2");
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result).toEqual({ ok: true, turnCount: 9000, checkpointTurns: [3150, 5850] });
+    expect(Object.keys(result).sort()).toEqual(["checkpointTurns", "ok", "turnCount"]);
+    expect(JSON.stringify(result)).not.toContain("SPOILER");
+  });
+
+  it("fails cleanly when the sealed bundle's meta.json is missing", async () => {
+    const result = await resolveSealedBundleTurnStats(readyDir(), "item-missing");
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.reason).toContain("not found");
+  });
+
+  it("fails cleanly when turnCount/checkpointTurns are the wrong shape", async () => {
+    const dir = path.join(queueRoot, "ready", "item3");
+    await mkdir(dir, { recursive: true });
+    await writeFile(path.join(dir, "meta.json"), JSON.stringify({ turnCount: "not-a-number" }), "utf8");
+    const result = await resolveSealedBundleTurnStats(readyDir(), "item3");
+    expect(result.ok).toBe(false);
   });
 });
 

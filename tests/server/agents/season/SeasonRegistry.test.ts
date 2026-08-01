@@ -10,13 +10,16 @@ import {
   addStandingsSnapshotRef,
   completeSeason,
   createSeason,
+  isEventCurrentlyLive,
   loadSeasonRegistry,
+  removeEventSlot,
   resolveSeasonRegistryDir,
   saveSeasonRegistry,
   withSeason,
   SEASON_REGISTRY_DIR_ENV,
 } from "../../../../src/server/agents/season/SeasonRegistry";
-import type { SeasonRegistryFile } from "../../../../src/server/agents/season/SeasonSchemas";
+import type { SeasonRegistryFile, SeasonEventSlot } from "../../../../src/server/agents/season/SeasonSchemas";
+import type { FeaturedMatch } from "../../../../src/server/agents/FeaturedMatch";
 
 const NOW = "2026-08-01T00:00:00.000Z";
 
@@ -265,5 +268,128 @@ describe("addStandingsSnapshotRef", () => {
     );
     expect(dupe.ok).toBe(false);
     if (!dupe.ok) expect(dupe.reason).toContain("snapshot_already_referenced");
+  });
+});
+
+function baseFeaturedMatch(overrides: Partial<FeaturedMatch> = {}): FeaturedMatch {
+  return {
+    schemaVersion: 1,
+    matchId: `feat_${"a".repeat(20)}`,
+    lane: "premiere",
+    episodeRequestId: "ereq_x",
+    queueItemName: "20260801T000000Z-run1",
+    title: "Test",
+    description: "",
+    participants: [],
+    map: "world",
+    format: "16p FFA",
+    provenance: { source: "premiere-queue", sourceRef: "20260801T000000Z-run1", capturedAt: NOW },
+    state: "published",
+    category: null,
+    scheduledAt: "2026-08-08T18:00:00.000Z",
+    revealAt: null,
+    evidence: {
+      dramaScore: null,
+      dramaGrade: null,
+      entertainmentScore: null,
+      storyGrade: null,
+      turnCount: 9000,
+      decisionCount: null,
+      degradedCount: null,
+      seatCount: 2,
+      replayComplete: true,
+      notes: [],
+    },
+    postMatchSummary: null,
+    result: null,
+    createdAt: NOW,
+    updatedAt: NOW,
+    ...overrides,
+  };
+}
+
+function baseSlot(overrides: Partial<SeasonEventSlot> = {}): SeasonEventSlot {
+  return {
+    featuredMatchId: `feat_${"a".repeat(20)}`,
+    scheduledAt: "2026-08-08T18:00:00.000Z",
+    addedAt: NOW,
+    ...overrides,
+  };
+}
+
+describe("removeEventSlot", () => {
+  const feat = `feat_${"a".repeat(20)}`;
+
+  it("removes a present slot", () => {
+    const withSlot = addEventSlot(registryOf(baseSeason()), "season_zero", { featuredMatchId: feat, scheduledAt: NOW }, NOW);
+    expect(withSlot.ok).toBe(true);
+    if (!withSlot.ok) return;
+    const result = removeEventSlot(registryOf(withSlot.season), "season_zero", feat, NOW);
+    expect(result.ok).toBe(true);
+    if (result.ok) expect(result.season.eventSlots).toEqual([]);
+  });
+
+  it("is idempotent: removing an already-absent slot succeeds as a no-op", () => {
+    const result = removeEventSlot(registryOf(baseSeason()), "season_zero", feat, NOW);
+    expect(result.ok).toBe(true);
+    if (result.ok) expect(result.season.eventSlots).toEqual([]);
+    // Calling it again produces the identical result — true idempotency.
+    const again = removeEventSlot(registryOf(baseSeason()), "season_zero", feat, NOW);
+    expect(again).toEqual(result);
+  });
+
+  it("refuses to remove an event slot from a completed season", () => {
+    const withSlot = addEventSlot(registryOf(baseSeason()), "season_zero", { featuredMatchId: feat, scheduledAt: NOW }, NOW);
+    expect(withSlot.ok).toBe(true);
+    if (!withSlot.ok) return;
+    const completedSeason = { ...withSlot.season, state: "completed" as const };
+    const result = removeEventSlot(registryOf(completedSeason), "season_zero", feat, NOW);
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.reason).toContain("season_completed");
+  });
+
+  it("reports season_not_found for an unknown season id", () => {
+    const result = removeEventSlot(registryOf(baseSeason()), "season_missing", feat, NOW);
+    expect(result.ok).toBe(false);
+  });
+});
+
+describe("isEventCurrentlyLive", () => {
+  it("is false for an archive-lane match regardless of state", () => {
+    const match = baseFeaturedMatch({ lane: "archive", state: "published", queueItemName: null, scheduledAt: null });
+    const slot = baseSlot();
+    expect(isEventCurrentlyLive(match, slot, new Date("2026-08-08T18:30:00.000Z"))).toBe(false);
+  });
+
+  it("is false for a premiere-lane match not yet published (scheduled)", () => {
+    const match = baseFeaturedMatch({ state: "scheduled" });
+    const slot = baseSlot();
+    expect(isEventCurrentlyLive(match, slot, new Date("2026-08-08T18:30:00.000Z"))).toBe(false);
+  });
+
+  it("is true for a published premiere-lane match inside its live window", () => {
+    const match = baseFeaturedMatch({ state: "published", scheduledAt: "2026-08-08T18:00:00.000Z" });
+    const slot = baseSlot({ scheduledAt: "2026-08-08T18:00:00.000Z" });
+    // 30 minutes after scheduledAt — well inside PREMIERE_LOOP_HOLD_WINDOW_MS (75min).
+    expect(isEventCurrentlyLive(match, slot, new Date("2026-08-08T18:30:00.000Z"))).toBe(true);
+  });
+
+  it("is false once the live window has elapsed", () => {
+    const match = baseFeaturedMatch({ state: "published", scheduledAt: "2026-08-08T18:00:00.000Z" });
+    const slot = baseSlot({ scheduledAt: "2026-08-08T18:00:00.000Z" });
+    // 2 hours later — past the 75-minute hold window.
+    expect(isEventCurrentlyLive(match, slot, new Date("2026-08-08T20:00:00.000Z"))).toBe(false);
+  });
+
+  it("is false before the scheduled time even if published", () => {
+    const match = baseFeaturedMatch({ state: "published", scheduledAt: "2026-08-08T18:00:00.000Z" });
+    const slot = baseSlot({ scheduledAt: "2026-08-08T18:00:00.000Z" });
+    expect(isEventCurrentlyLive(match, slot, new Date("2026-08-08T17:00:00.000Z"))).toBe(false);
+  });
+
+  it("falls back to the slot's own scheduledAt when the match has none", () => {
+    const match = baseFeaturedMatch({ state: "published", scheduledAt: null });
+    const slot = baseSlot({ scheduledAt: "2026-08-08T18:00:00.000Z" });
+    expect(isEventCurrentlyLive(match, slot, new Date("2026-08-08T18:30:00.000Z"))).toBe(true);
   });
 });
