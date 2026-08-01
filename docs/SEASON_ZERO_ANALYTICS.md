@@ -191,6 +191,22 @@ Every report metric still carries one of three honest states:
 | Failures by route | `replay_load_failed` grouped by normalized route template | all-time |
 | Failure reasons | `replay_load_failed` grouped by bounded `reason` code | all-time |
 
+**Data validity note — the `returning_*_visitor` double-count fix**: the
+`returning_authenticated_visitor` double-count described above was fixed in
+`9a3a81d78` (committed 2026-08-01T19:11:17Z), landing in the same wave as
+`c9a224eea`/`cf5c90fae`'s other report-contract fixes. As of this writing
+that commit is on `claude/product-overhaul` but has not yet gone through its
+own deploy restart (a code fix to `PlatformAccountHttp.ts`'s emission logic
+only takes effect once the platform-account-serving process actually
+restarts onto it — unlike a pure data file, the running process's
+already-loaded JS does not hot-reload). **Return metrics are valid, and
+`sevenDayReturnRate`/`returningAuthenticatedVisitors` trustworthy, only from
+the moment that restart actually happens — the operator/next deploy wave
+should record that exact timestamp here. Any daily aggregate dated before it
+carries the known double-count** (`returning_authenticated_visitor` firing
+on a plain returning guest, inflating the numerator) and should be read with
+that caveat, not treated as a clean baseline.
+
 **Why the Director Cut rates are filtered by `replayMode`**: both Director
 Cut and Full Replay viewers emit the identical `watched_30s`/`watched_2m`/
 `watched_50pct`/`completed` event names — only the `replayMode` context
