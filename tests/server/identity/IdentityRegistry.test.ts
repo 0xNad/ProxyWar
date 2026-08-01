@@ -118,10 +118,39 @@ describe("load failure modes", () => {
 });
 
 describe("loadIdentityRegistrySnapshot against the real tracked registry", () => {
-  test("the committed resources/identity/* files parse and validate cleanly", async () => {
+  // Deliberately NOT hardcoded exact counts (2026-08-01 fix — a P0
+  // registry-gap fix registering two more live participants broke a
+  // literal `toBe(17)`/`toBe(17)` the moment the roster grew, which was
+  // never the actual invariant anyone cared about). What this file's
+  // module doc and `builders.json EMPTY by design` actually promise:
+  // parses+validates cleanly (implicit — `loadIdentityRegistrySnapshot`
+  // throws on a schema violation), no fabricated Builder data, every
+  // tracked version traces back to a real agent, and every id/slug is
+  // unique. Assert those, not a snapshot of today's roster size.
+  test("the committed resources/identity/* files parse and validate cleanly, with no fabricated Builder data and no orphaned versions", async () => {
     const snapshot = await loadIdentityRegistrySnapshot();
-    expect(snapshot.agents.length).toBe(17);
+
+    expect(snapshot.agents.length).toBeGreaterThan(0);
+    // No Builder is fabricated for Season Zero — every claim is real or
+    // absent, never invented. See docs/PROXYWAR_IDENTITY_MODEL.md.
     expect(snapshot.builders.length).toBe(0);
-    expect(snapshot.versions.length).toBe(17);
+
+    const agentIds = new Set(snapshot.agents.map((agent) => agent.id));
+    expect(agentIds.size).toBe(snapshot.agents.length);
+    const agentSlugs = new Set(snapshot.agents.map((agent) => agent.slug));
+    expect(agentSlugs.size).toBe(snapshot.agents.length);
+    for (const agent of snapshot.agents) {
+      expect(agent.id).toBe(`agt_${agent.slug}`);
+    }
+
+    // A version may be missing for an agent that hasn't been version-mapped
+    // yet (never fabricated), but a version must never reference an agent
+    // that doesn't exist.
+    for (const version of snapshot.versions) {
+      expect(agentIds.has(version.agentId)).toBe(true);
+    }
+    expect(snapshot.versions.length).toBeLessThanOrEqual(
+      snapshot.agents.length,
+    );
   });
 });
