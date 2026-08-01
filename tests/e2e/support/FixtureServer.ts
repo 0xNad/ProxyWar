@@ -18,12 +18,14 @@
  * separate process, started with the env var already in its `env`, does
  * not have this problem.
  */
-import { promises as fs } from "node:fs";
-import path from "node:path";
 import { spawn, execFile, type ChildProcess } from "node:child_process";
+import { promises as fs } from "node:fs";
+import { createRequire } from "node:module";
+import path from "node:path";
 import { promisify } from "node:util";
 
 const execFileAsync = promisify(execFile);
+const require = createRequire(import.meta.url);
 const REPO_ROOT = path.resolve(__dirname, "../../..");
 export const EXTERNAL_SCRATCH_ROOT =
   "/Volumes/ProxyWar Workspace/ProxyWar/e2e-fixture-scratch";
@@ -48,6 +50,23 @@ async function waitForOrigin(origin: string, timeoutMs: number): Promise<void> {
   throw new Error("fixture server did not come up in time");
 }
 
+// Graceful-then-forced shutdown of a real child process; the bounded wait
+// is a real-clock grace period for SIGTERM, not something fakeable (same
+// pattern as `tests/server/PlatformRootPage.test.ts`'s `stopServer`). A
+// fire-and-forget kill that returns before the OS actually reclaims the
+// process is exactly what made `tests/server/analytics/
+// AnalyticsServerIntegration.test.ts` order-dependent under load before
+// its own 2026-08 hardening — this mirrors that fix here.
+async function stopServer(child: ChildProcess | null): Promise<void> {
+  if (child === null || child.exitCode !== null) return;
+  child.kill("SIGTERM");
+  await Promise.race([
+    new Promise<void>((resolve) => child.once("close", () => resolve())),
+    new Promise<void>((resolve) => setTimeout(resolve, 5_000)),
+  ]);
+  if (child.exitCode === null) child.kill("SIGKILL");
+}
+
 function fixtureEnv(fixtureRoot: string): Record<string, string> {
   return {
     identityDir: path.join(fixtureRoot, "identity"),
@@ -67,83 +86,98 @@ export async function startFixtureServer(
   const fixtureRoot = await fs.mkdtemp(
     path.join(EXTERNAL_SCRATCH_ROOT, `e2e-${port}-`),
   );
-  const paths = fixtureEnv(fixtureRoot);
-  const leagueSiteDir = path.join(paths.artifactsRoot, "ai-league-runs", "league");
-  await fs.mkdir(paths.identityDir, { recursive: true });
-  await fs.mkdir(leagueSiteDir, { recursive: true });
+  let serverProcess: ChildProcess | null = null;
+  try {
+    const paths = fixtureEnv(fixtureRoot);
+    const leagueSiteDir = path.join(paths.artifactsRoot, "ai-league-runs", "league");
+    await fs.mkdir(paths.identityDir, { recursive: true });
+    await fs.mkdir(leagueSiteDir, { recursive: true });
 
-  const upcomingPremiereFile = path.join(fixtureRoot, "premiere-upcoming.json");
-  await fs.writeFile(
-    upcomingPremiereFile,
-    JSON.stringify({
-      premiereId: "prem_fixture0upcoming01",
-      roundNumber: 503,
-      mapLabel: "World",
-      scheduledAt: new Date(Date.now() + 2 * 60 * 60 * 1000).toISOString(),
-      premierePageLive: false,
-    }),
-  );
+    const upcomingPremiereFile = path.join(fixtureRoot, "premiere-upcoming.json");
+    await fs.writeFile(
+      upcomingPremiereFile,
+      JSON.stringify({
+        premiereId: "prem_fixture0upcoming01",
+        roundNumber: 503,
+        mapLabel: "World",
+        scheduledAt: new Date(Date.now() + 2 * 60 * 60 * 1000).toISOString(),
+        premierePageLive: false,
+      }),
+    );
 
-  // Genuinely separate process — see this module's doc for why.
-  await execFileAsync(
-    "npx",
-    [
-      "tsx",
-      "src/scripts/proxywar-fixture-league-data.ts",
-      `--root=${fixtureRoot}`,
-      `--premiere-upcoming-file=${upcomingPremiereFile}`,
-    ],
-    {
-      cwd: REPO_ROOT,
-      env: {
-        ...process.env,
-        PROXYWAR_IDENTITY_REGISTRY_DIR: paths.identityDir,
+    // Genuinely separate process — see this module's doc for why.
+    await execFileAsync(
+      "npx",
+      [
+        "tsx",
+        "src/scripts/proxywar-fixture-league-data.ts",
+        `--root=${fixtureRoot}`,
+        `--premiere-upcoming-file=${upcomingPremiereFile}`,
+      ],
+      {
+        cwd: REPO_ROOT,
+        env: {
+          ...process.env,
+          PROXYWAR_IDENTITY_REGISTRY_DIR: paths.identityDir,
+        },
       },
-    },
-  );
+    );
 
-  const origin = `http://127.0.0.1:${port}`;
-  const serverProcess: ChildProcess = spawn(
-    "npx",
-    ["tsx", "src/scripts/ai-agent-demo-server.ts"],
-    {
-      cwd: REPO_ROOT,
-      env: {
-        ...process.env,
-        PROXYWAR_LEAGUE_WRAPPER_ONLY: "true",
-        PROXYWAR_ARTIFACTS_ROOT: paths.artifactsRoot,
-        PROXYWAR_IDENTITY_REGISTRY_DIR: paths.identityDir,
-        PROXYWAR_NATIONS_DIR: paths.nationsDir,
-        PROXYWAR_FEATURED_MATCH_STATE_ROOT: paths.featuredMatchStateRoot,
-        PROXYWAR_REPLAY_PREMIERE_STATE_ROOT: paths.premiereStateRoot,
-        PROXYWAR_PLATFORM_STATE_ROOT: paths.platformStateRoot,
-        AI_LEAGUE_RENDERER_PORT: String(port + 10_000),
-        GAME_ENV: "dev",
-        PORT: String(port),
-        AI_LEAGUE_DEMO_PORT: String(port),
+    const origin = `http://127.0.0.1:${port}`;
+    serverProcess = spawn(
+      process.execPath,
+      [
+        require.resolve("tsx/cli"),
+        "--tsconfig",
+        path.join(REPO_ROOT, "tsconfig.json"),
+        path.join(REPO_ROOT, "src", "scripts", "ai-agent-demo-server.ts"),
+      ],
+      {
+        cwd: REPO_ROOT,
+        env: {
+          ...process.env,
+          PROXYWAR_LEAGUE_WRAPPER_ONLY: "true",
+          PROXYWAR_ARTIFACTS_ROOT: paths.artifactsRoot,
+          PROXYWAR_IDENTITY_REGISTRY_DIR: paths.identityDir,
+          PROXYWAR_NATIONS_DIR: paths.nationsDir,
+          PROXYWAR_FEATURED_MATCH_STATE_ROOT: paths.featuredMatchStateRoot,
+          PROXYWAR_REPLAY_PREMIERE_STATE_ROOT: paths.premiereStateRoot,
+          PROXYWAR_PLATFORM_STATE_ROOT: paths.platformStateRoot,
+          AI_LEAGUE_RENDERER_PORT: String(port + 10_000),
+          GAME_ENV: "dev",
+          PORT: String(port),
+          AI_LEAGUE_DEMO_PORT: String(port),
+        },
+        stdio: "ignore",
       },
-      stdio: "ignore",
-      detached: true,
-    },
-  );
-  await waitForOrigin(origin, 45_000);
+    );
+    await waitForOrigin(origin, 45_000);
 
-  return {
-    origin,
-    fixtureRoot,
-    stop: async () => {
-      if (serverProcess.pid !== undefined) {
-        try {
-          process.kill(-serverProcess.pid, "SIGKILL");
-        } catch {
-          serverProcess.kill("SIGKILL");
-        }
-      }
-      await fs.rm(fixtureRoot, { recursive: true, force: true }).catch(() => {
-        // best-effort cleanup
-      });
-    },
-  };
+    const readyServerProcess = serverProcess;
+    return {
+      origin,
+      fixtureRoot,
+      stop: async () => {
+        await stopServer(readyServerProcess);
+        await fs.rm(fixtureRoot, { recursive: true, force: true }).catch(() => {
+          // best-effort cleanup
+        });
+      },
+    };
+  } catch (error) {
+    // Nothing here left a caller holding a `FixtureServerHandle` to call
+    // `stop()` on — clean up everything this call itself started before
+    // rethrowing, or a failed boot leaks its scratch directory (and any
+    // spawned server) forever. Exactly the accumulation this whole file's
+    // 2026-08 hardening pass found: dozens of `e2e-live-*` directories on
+    // the external scratch volume, one per failed boot with no cleanup
+    // path at all.
+    await stopServer(serverProcess);
+    await fs.rm(fixtureRoot, { recursive: true, force: true }).catch(() => {
+      // best-effort cleanup
+    });
+    throw error;
+  }
 }
 
 /**
@@ -162,50 +196,116 @@ export async function startFixtureServer(
  * `startFixtureServer` instead; do not add this to the main suite's
  * `beforeAll`.
  */
+
+/**
+ * Fails fast, with a self-explanatory message, when the live-premiere
+ * build-provenance gate (`resolveControlledExhibitionBuildProvenance` in
+ * `replay-premiere-controlled-exhibition.ts`) would reject the current
+ * tree. `git status`/`diff` take well under a second; the exhibition
+ * pipeline this guards takes ~1 minute, so checking up front avoids
+ * burning that minute only to fail with an opaque "Command failed: bash
+ * scripts/fixtures/run-public-product-fixtures.sh" from deep inside the
+ * shelled-out script. Set `PROXYWAR_E2E_SKIP_PROVENANCE_BLOCK=1` to skip
+ * this whole block instead — that's handled at the test-file level via
+ * `describe.skipIf`, upstream of this function ever running.
+ */
+async function assertCleanCheckoutForLivePremiereGate(): Promise<void> {
+  const [status, diff] = await Promise.all([
+    execFileAsync(
+      "git",
+      ["status", "--porcelain=v1", "--untracked-files=all"],
+      { cwd: REPO_ROOT },
+    ),
+    execFileAsync("git", ["diff", "--name-only", "HEAD", "--"], {
+      cwd: REPO_ROOT,
+    }),
+  ]);
+  const dirtyFiles = status.stdout
+    .split("\n")
+    .map((line) => line.trim())
+    .filter((line) => line !== "");
+  if (dirtyFiles.length === 0 && diff.stdout.trim() === "") return;
+  throw new Error(
+    [
+      "live-premiere build-provenance gate: this block admits a real replay through `resolveControlledExhibitionBuildProvenance`, which requires an exact committed git build and refuses to run against a dirty tree.",
+      `dirty files (${dirtyFiles.length}):`,
+      ...dirtyFiles.map((line) => `  ${line}`),
+      "commit or stash to run this block, or set PROXYWAR_E2E_SKIP_PROVENANCE_BLOCK=1 to skip it for a local dirty-tree run (CI/clean runs are unaffected).",
+    ].join("\n"),
+  );
+}
+
+/** Stops the process recorded in `pidFile` (if any) and removes the
+ * pidfile either way — same kill discipline as
+ * `scripts/fixtures/run-public-product-fixtures.sh`'s own `stop_origin`. */
+async function stopByPidFile(pidFile: string): Promise<void> {
+  try {
+    const pid = Number((await fs.readFile(pidFile, "utf8")).trim());
+    if (Number.isInteger(pid) && pid > 0) {
+      try {
+        process.kill(-pid, "SIGKILL");
+      } catch {
+        process.kill(pid, "SIGKILL");
+      }
+    }
+  } catch {
+    // no pidfile / already gone
+  }
+  await fs.rm(pidFile, { force: true }).catch(() => {
+    // best-effort cleanup
+  });
+}
+
 export async function startFixtureServerWithLivePremiere(
   port: number,
 ): Promise<FixtureServerHandle> {
+  await assertCleanCheckoutForLivePremiereGate();
   await fs.mkdir(EXTERNAL_SCRATCH_ROOT, { recursive: true });
   const fixtureRoot = await fs.mkdtemp(
     path.join(EXTERNAL_SCRATCH_ROOT, `e2e-live-${port}-`),
   );
   const origin = `http://127.0.0.1:${port}`;
-  await execFileAsync(
-    "bash",
-    ["scripts/fixtures/run-public-product-fixtures.sh"],
-    {
-      cwd: REPO_ROOT,
-      env: {
-        ...process.env,
-        FIXTURE_ROOT: fixtureRoot,
-        FIXTURE_PORT: String(port),
-        FIXTURE_ADMIT_LIVE_PREMIERE: "1",
+  const pidFile = `/tmp/pw-fixture-origin-${port}.pid`;
+  try {
+    await execFileAsync(
+      "bash",
+      ["scripts/fixtures/run-public-product-fixtures.sh"],
+      {
+        cwd: REPO_ROOT,
+        env: {
+          ...process.env,
+          FIXTURE_ROOT: fixtureRoot,
+          FIXTURE_PORT: String(port),
+          FIXTURE_ADMIT_LIVE_PREMIERE: "1",
+        },
+        maxBuffer: 64 * 1024 * 1024,
       },
-      maxBuffer: 64 * 1024 * 1024,
-    },
-  );
-  await waitForOrigin(origin, 15_000);
-  const pidFile = "/tmp/pw-fixture-origin.pid";
-  return {
-    origin,
-    fixtureRoot,
-    stop: async () => {
-      try {
-        const pid = Number((await fs.readFile(pidFile, "utf8")).trim());
-        if (Number.isInteger(pid) && pid > 0) {
-          try {
-            process.kill(-pid, "SIGKILL");
-          } catch {
-            process.kill(pid, "SIGKILL");
-          }
-        }
-      } catch {
-        // no pidfile / already gone
-      }
-      await fs.rm(pidFile, { force: true }).catch(() => {});
-      await fs.rm(fixtureRoot, { recursive: true, force: true }).catch(() => {
-        // best-effort cleanup
-      });
-    },
-  };
+    );
+    await waitForOrigin(origin, 15_000);
+    return {
+      origin,
+      fixtureRoot,
+      stop: async () => {
+        await stopByPidFile(pidFile);
+        await fs.rm(fixtureRoot, { recursive: true, force: true }).catch(() => {
+          // best-effort cleanup
+        });
+      },
+    };
+  } catch (error) {
+    // Same rationale as `startFixtureServer`'s catch above: the shell
+    // script starts the real origin process BEFORE the exhibition-
+    // admission steps that can still fail, and a throw here leaves the
+    // caller with no `FixtureServerHandle` to ever call `stop()` on —
+    // clean up here (both the pidfile's process and the scratch
+    // directory) or leak them on every failed boot. This is exactly what
+    // left dozens of stale `pw-fixture-origin-*.pid` files and matching
+    // `e2e-live-*` scratch directories behind (see `scripts/fixtures/
+    // clean.sh`, added alongside this fix).
+    await stopByPidFile(pidFile);
+    await fs.rm(fixtureRoot, { recursive: true, force: true }).catch(() => {
+      // best-effort cleanup
+    });
+    throw error;
+  }
 }

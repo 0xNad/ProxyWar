@@ -12,9 +12,37 @@
  * Deliberately narrow: navigate, evaluate, click (via evaluate — no real
  * mouse events, which this suite's cases don't need), viewport, and a
  * couple of wait helpers. Not a general-purpose automation library.
+ *
+ * Leak-proofing (2026-08 hardening — an audit found 28 accumulated headless
+ * Chrome instances spanning 8+ hours, several sharing
+ * `--remote-debugging-port=9452`):
+ *  - The debugging port is a genuinely free OS-assigned ephemeral port
+ *    (`reserveDebugPort`), not a random guess in a fixed 500-wide range —
+ *    the random range is exactly how concurrent runs ended up sharing a
+ *    port.
+ *  - Every instance's `--user-data-dir` is a unique `mkdtemp` under the
+ *    harness-specific `pw-e2e-chrome-` prefix. Every kill/sweep below
+ *    matches ONLY that prefix — never a bare process-name or
+ *    `--remote-debugging-port` match — because the operator's own real
+ *    Chrome legitimately runs with CDP enabled too (see the
+ *    `browser-harness` skill) and must never be touched.
+ *  - `close()` kills the tracked Chrome PID plus any surviving helper
+ *    processes (GPU/renderer/utility) still carrying this instance's exact
+ *    `--user-data-dir`, and waits briefly for real exit before removing the
+ *    profile directory.
+ *  - A defensive startup sweep runs on every `launch()`: it kills any
+ *    process whose command line carries the `pw-e2e-chrome-` prefix and is
+ *    still alive from a run that never tore down cleanly (a crashed test
+ *    process, a hard `vitest` timeout, `Ctrl-C`, or CI cancellation all
+ *    skip a file's `afterAll`).
+ *  - Process-exit handlers (`exit`/`SIGINT`/`SIGTERM`) reap every live
+ *    instance synchronously even when the owning test file's `afterAll`
+ *    never runs at all. `exit` handlers cannot await async work, so this is
+ *    a direct `SIGKILL`, not the graceful WS-close path `close()` uses.
  */
-import { spawn, type ChildProcess } from "node:child_process";
+import { execFileSync, spawn, type ChildProcess } from "node:child_process";
 import { mkdtemp, rm } from "node:fs/promises";
+import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 import WebSocket from "ws";
@@ -25,12 +53,114 @@ const CHROME_CANDIDATES = [
   process.env.CHROME_PATH,
 ].filter((value): value is string => typeof value === "string");
 
+// Harness-specific `--user-data-dir` prefix. This is the ONLY signal every
+// kill/sweep function below trusts to prove a process is ours — see the
+// leak-proofing doc above.
+const USER_DATA_DIR_PREFIX = path.join(os.tmpdir(), "pw-e2e-chrome-");
+
 interface CdpMessage {
   id?: number;
   method?: string;
   params?: unknown;
   result?: unknown;
   error?: { message: string };
+}
+
+/** Reserves a genuinely free ephemeral TCP port from the OS instead of
+ * guessing inside a fixed range (same pattern as
+ * `tests/server/PlatformRootPage.test.ts`'s `reservePort`). `new
+ * Promise(executor)`, not `Promise.withResolvers` — this project targets
+ * ES2022 lib (no ES2024). */
+async function reserveDebugPort(): Promise<number> {
+  const listener = net.createServer();
+  await new Promise<void>((resolve, reject) => {
+    listener.once("error", reject);
+    listener.listen(0, "127.0.0.1", resolve);
+  });
+  const address = listener.address();
+  if (address === null || typeof address === "string") {
+    listener.close();
+    throw new Error("Failed to reserve a local debugging port");
+  }
+  await new Promise<void>((resolve, reject) =>
+    listener.close((error) =>
+      error === undefined ? resolve() : reject(error),
+    ),
+  );
+  return address.port;
+}
+
+/** PID + exact `--user-data-dir` value for every live process PROVABLY
+ * launched by this harness — matched on the `pw-e2e-chrome-` prefix, never
+ * on process name or `--remote-debugging-port` alone. `-ww` disables BSD
+ * `ps`'s default command-line truncation, so a long Chrome helper argv
+ * still exposes the flag this needs. */
+function findOwnedChromeProcesses(): Array<{ pid: number; userDataDir: string }> {
+  let output: string;
+  try {
+    output = execFileSync("ps", ["-axww", "-o", "pid=,command="], {
+      encoding: "utf8",
+    });
+  } catch {
+    return [];
+  }
+  const marker = `--user-data-dir=${USER_DATA_DIR_PREFIX}`;
+  const owned: Array<{ pid: number; userDataDir: string }> = [];
+  for (const line of output.split("\n")) {
+    const trimmed = line.trim();
+    if (trimmed === "") continue;
+    const match = /^(\d+)\s+(.*)$/.exec(trimmed);
+    if (match === null) continue;
+    const [, pidText, command] = match;
+    const markerIndex = command.indexOf(marker);
+    if (markerIndex === -1) continue;
+    const valueStart = markerIndex + "--user-data-dir=".length;
+    const rest = command.slice(valueStart);
+    const spaceIndex = rest.indexOf(" ");
+    const userDataDir = spaceIndex === -1 ? rest : rest.slice(0, spaceIndex);
+    owned.push({ pid: Number(pidText), userDataDir });
+  }
+  return owned;
+}
+
+function killPid(pid: number): void {
+  try {
+    process.kill(pid, "SIGKILL");
+  } catch {
+    // already gone
+  }
+}
+
+/** Defensive startup sweep: kills only Chrome processes PROVABLY ours (see
+ * `findOwnedChromeProcesses`'s doc) that are still around from a run that
+ * never tore down cleanly — the exact failure mode the 28-instance, 8+
+ * hour leak audit found. Cheap and idempotent; harmless if nothing stale is
+ * found. */
+function sweepStaleInstances(): void {
+  for (const { pid } of findOwnedChromeProcesses()) killPid(pid);
+}
+
+// Registered once per process: reaps every live instance even when the
+// owning test file's `afterAll` never runs (a hard `vitest` timeout,
+// `Ctrl-C`, or CI cancellation all skip it). See the leak-proofing doc at
+// the top of this file.
+const liveInstances = new Set<CdpBrowser>();
+let exitHandlersInstalled = false;
+function installExitHandlersOnce(): void {
+  if (exitHandlersInstalled) return;
+  exitHandlersInstalled = true;
+  const reapAll = (): void => {
+    for (const instance of liveInstances) instance.killSync();
+  };
+  process.on("exit", reapAll);
+  process.on("SIGINT", () => {
+    reapAll();
+    process.exit(130);
+  });
+  process.on("SIGTERM", () => {
+    reapAll();
+    process.exit(143);
+  });
 }
 
 export class CdpBrowser {
@@ -48,8 +178,11 @@ export class CdpBrowser {
   >();
 
   static async launch(): Promise<CdpBrowser> {
+    sweepStaleInstances();
     const browser = new CdpBrowser();
     await browser.start();
+    liveInstances.add(browser);
+    installExitHandlersOnce();
     return browser;
   }
 
@@ -60,10 +193,8 @@ export class CdpBrowser {
         "no Chrome binary found — set CHROME_PATH or install Google Chrome",
       );
     }
-    this.userDataDir = await mkdtemp(
-      path.join(os.tmpdir(), "pw-e2e-chrome-"),
-    );
-    const port = 9200 + Math.floor(Math.random() * 500);
+    this.userDataDir = await mkdtemp(USER_DATA_DIR_PREFIX);
+    const port = await reserveDebugPort();
     this.process = spawn(
       chromePath,
       [
@@ -289,19 +420,36 @@ export class CdpBrowser {
     throw new Error(`waitFor timed out: ${predicateExpression}`);
   }
 
+  /** Synchronous best-effort kill for the `process.on("exit", ...)` path,
+   * where async work cannot run. Kills the tracked top-level Chrome PID
+   * plus any surviving helper process (GPU/renderer/utility) still
+   * carrying this instance's exact `--user-data-dir` — Chrome is not
+   * always reliable about reaping its own helpers when the top-level
+   * process is force-killed rather than shut down gracefully. */
+  killSync(): void {
+    if (this.process?.pid !== undefined) killPid(this.process.pid);
+    if (this.userDataDir !== null) {
+      for (const { pid, userDataDir } of findOwnedChromeProcesses()) {
+        if (userDataDir === this.userDataDir) killPid(pid);
+      }
+    }
+  }
+
   async close(): Promise<void> {
     try {
       this.ws?.close();
     } catch {
       // ignore
     }
-    if (this.process?.pid !== undefined) {
-      try {
-        this.process.kill("SIGKILL");
-      } catch {
-        // ignore
-      }
-    }
+    const exited =
+      this.process === null
+        ? Promise.resolve()
+        : new Promise<void>((resolve) => this.process?.once("exit", () => resolve()));
+    this.killSync();
+    await Promise.race([
+      exited,
+      new Promise<void>((resolve) => setTimeout(resolve, 2_000)),
+    ]);
     if (this.userDataDir !== null) {
       await rm(this.userDataDir, { recursive: true, force: true }).catch(
         () => {
@@ -309,5 +457,6 @@ export class CdpBrowser {
         },
       );
     }
+    liveInstances.delete(this);
   }
 }

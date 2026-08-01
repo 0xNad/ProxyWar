@@ -27,6 +27,17 @@ import {
 
 const PORT = 18788;
 
+// The live-premiere block below (`startFixtureServerWithLivePremiere`)
+// requires a clean committed git checkout — see that block's own doc.
+// That's correct-by-design for CI/clean runs, but in multi-session local
+// development it just means "this block never runs while you have
+// uncommitted work", which `FixtureServer.ts` now fails fast and
+// explains. Set this to genuinely SKIP (not fake-pass) the block instead
+// of failing on a local dirty-tree run; CI/clean-tree runs are unaffected
+// either way, since a clean tree never hits the gate at all.
+const SKIP_PROVENANCE_BLOCK =
+  process.env.PROXYWAR_E2E_SKIP_PROVENANCE_BLOCK === "1";
+
 let fixture: FixtureServerHandle;
 let browser: CdpBrowser;
 
@@ -351,7 +362,9 @@ describe("premiere: upcoming state (does not require live admission)", () => {
   });
 });
 
-describe("premiere: active / late-join sync / no seek past edge / reveal after end", () => {
+describe.skipIf(SKIP_PROVENANCE_BLOCK)(
+  "premiere: active / late-join sync / no seek past edge / reveal after end",
+  () => {
   // Boots a SEPARATE, dedicated fixture server with a real admitted live
   // premiere (`startFixtureServerWithLivePremiere`) rather than reusing
   // the shared `fixture` above — this path is real but slow (~1 minute
@@ -522,4 +535,5 @@ describe("premiere: active / late-join sync / no seek past edge / reveal after e
     },
     260_000,
   );
-});
+  },
+);
