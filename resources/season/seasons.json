@@ -12,15 +12,15 @@
       "state": "active",
       "eventSlots": [
         {
-          "featuredMatchId": "feat_21d64517e31863134746",
+          "featuredMatchId": "feat_4d20f6550c6c8d8e83bc",
           "scheduledAt": "2026-08-03T18:00:00.000Z",
-          "addedAt": "2026-08-01T19:10:42.093Z"
+          "addedAt": "2026-08-01T21:28:44.283Z"
         }
       ],
       "archiveFeaturedMatchIds": [],
       "standingsSnapshotRefs": [],
       "createdAt": "2026-08-01T19:03:16.504Z",
-      "updatedAt": "2026-08-01T19:10:42.093Z"
+      "updatedAt": "2026-08-01T21:29:46.165Z"
     }
   ]
 }
