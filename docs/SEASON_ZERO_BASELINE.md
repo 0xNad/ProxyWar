@@ -253,6 +253,123 @@ procedure for whoever holds push authority:
    and is explicitly operator-gated per `AGENTS.md`. **Not executed here.**
 5. Keep a rollback point: tag `origin/main`'s pre-merge SHA before pushing.
 
+### Promotion review completed 2026-08-01 — push withheld pending operator decision
+
+Executed by `main-promote`. Divergence re-verified at the true final tip after
+6 concurrent sibling sessions finished landing work in this shared worktree:
+**351 commits ahead of `origin/main` (`6f366d8ed`), 0 behind**, tip
+`c66f1d754d7f53c5e991d61a049bc6b5fa2a900a`
+(`git merge-base --is-ancestor origin/main HEAD` true — still a structurally
+clean fast-forward).
+
+**Step 1 — full validation at the promoted tip, all green:**
+
+| Check | Result |
+| --- | --- |
+| `npm exec -- tsc --noEmit` | 0 errors |
+| `npm run lint` | 0 errors, 113 warnings (nullish-coalescing only) |
+| `npm test` | 415+235 files, 4898+2739 tests passed, 3 todo, 0 failed |
+| `npm run test:e2e` | 27/27 pass |
+| `npm run build-prod` | clean (`tsc --noEmit` + `vite build` both exit 0) |
+
+**Step 2 — public-surface diff review, two hygiene issues found and fixed**
+(both committed to `claude/product-overhaul`, both re-validated above):
+
+1. `.omp/` (16 files: agent role prompts, guard hook, model-routing
+   SETUP.md) was tracked and about to reach the public default branch even
+   though `SETUP.md` itself documents it as gitignored "public-repo hygiene"
+   alongside `.claude/`/`.codex/` — the gitignore entries were simply never
+   added. Fixed: added `.omp/`, `WATCHDOG.md`, `WATCHDOG.yml` to
+   `.gitignore` and untracked (commit `681b54e81`).
+2. `DEFAULT_FFMPEG_BINARY` (`replay-premiere-clip-render-lib.ts`) and
+   `premiereSuppressionStorageStateDir()`'s fallback
+   (`CoworldLeaguePremiereSuppression.ts`) hardcoded the literal operator
+   home path `/Users/claude/...` as a compiled-in public default, and a
+   test asserted that exact literal — breaking for any contributor/CI whose
+   home directory differs, and leaking the operator's real macOS username.
+   Both already have working env-var overrides
+   (`PROXYWAR_CLIP_FFMPEG_BIN`, `PROXYWAR_STORAGE_STATE_DIR`); only the
+   compiled-in default changed, from a literal to `os.homedir()`-derived
+   (identical resolved value on the real deployment machine, no behavior
+   change there). Fixed: commit `bb6280483`.
+
+No secrets, API keys, tokens, or real personal emails found across the full
+`origin/main..HEAD` diff (grepped for key/token/secret/bearer/PEM patterns
+and email addresses; only test fixtures with obviously-fake values matched,
+e.g. `clip-test@proxywar.invalid`, `Bearer abcdefghijklmnopqrstuvwxyz012345`
+in a redaction test). No TODOs referencing private/internal-only context.
+
+**Step 3 — the wagering surface is real, not a false alarm.** An earlier
+brief in this task characterized the 2026-07-27 "zero wagering code on the
+league line" decision as being about the *deployed* origin only, and treated
+this as a pure verification step. The operator corrected that reading
+mid-task: the standing decision, as recorded just above in this same
+section (point 3), is about `main` — the public default branch — carrying
+zero wagering code, full stop; the betting surface is a separate fork never
+merged to `main`. This branch plainly contains wagering/betting source and
+tests. Documented as an inventory instead of a merge precondition:
+
+- **86 tracked files, 19,279 LOC** touch wagering/betting
+  (`src/client/prediction/wagering/**`,
+  `src/server/replay-premiere/wagering/**`,
+  `src/scripts/premiere-wagering/**`, `BettingProfileServiceAuth.ts`,
+  `PlatformBettingHandoff`/`PlatformBettingProfileProjection` HTTP glue, and
+  their matching test files): 49 source files / 9,588 LOC + 37 test files /
+  9,691 LOC. **0 of these 86 files exist on `origin/main` today** — `main`
+  is genuinely wagering-free right now.
+- **Gating is structural, not a convention.** `PROXYWAR_WAGERING_ENABLED`
+  (absent by default) gates every mount point: `ai-agent-demo-server.ts`
+  hard-404s `/api/premieres/points/leaderboard` when unset
+  (`if (!pointsRoutesEnabled) { res.status(404)...; return; }`);
+  `ReplayPremiereInteractions`'s market-mutating methods throw
+  `invalidInteraction("wagering_disabled")` unless `wageringEnabled` was
+  explicitly passed in at construction (default `false`); `PlatformAccountHttp.ts`
+  and `PlatformGithubAuth.ts` are documented and structurally verified to
+  never read the flag at all, so account/identity features are unaffected
+  either way. Exercised by `PlatformBettingHandoff.test.ts`,
+  `PlatformBettingProfileProjection.test.ts`, `PlatformRootPage.test.ts`,
+  and `PlayerProfileIsolation.test.ts` under both flag states — all green as
+  part of the Step 1 run above. Live confirmation already on record above
+  ("Deployed state"): the league origin's `/bet` returns 503 (no handler);
+  `bet.proxywar.xyz` is the separate origin that actually serves it.
+- **This code is already public.** `claude/product-overhaul` (current tip
+  `c66f1d754`) is already pushed to `origin` — the same public
+  `0xNad/ProxyWar` GitHub repo — just not on the default branch. Anyone
+  browsing branches on the public repo can already read this code today;
+  promoting to `main` would change *default-branch visibility and
+  discoverability*, not first-time public existence.
+
+**Step 4/5 — not executed.** No tag was cut, `origin/main` was not
+force-fetched or fast-forwarded, and no filtered/wagering-free promotion
+branch was built (that is itself a significant surgical action requiring
+its own explicit go-ahead, not something to improvise under a "push
+withheld" instruction). `origin/main` remains at `6f366d8ed3cb814b61a0c7`
+`3ac4be6ca1e60ef961`, untouched.
+
+**Decision needed from the operator.** Options, as scoped by the operator
+mid-task:
+
+- **(a) Promote as-is**, explicitly acknowledging the wagering surface is
+  already public on the branch (and, as above, technically already
+  reachable on `origin` today via the branch ref) and choosing to accept it
+  reaching `main`'s default-branch visibility too.
+- **(b) Build a wagering-free promotion branch** — a filtered/rebased
+  branch that drops the 86 files above (and anything that imports them)
+  before promoting to `main`. Nontrivial: several non-wagering files
+  (`PlatformAccountHttp.ts` request handlers, `ai-agent-demo-server.ts`
+  route wiring, `ReplayPremiereInteractions.ts`,
+  `ReplayPremiereRuntimeCoordinator.ts`, `ReplayPremiereStartup.ts`) hold
+  conditional wagering branches inline rather than importing a cleanly
+  separable module, so this is a real edit/rebase job, not a mechanical
+  file-drop, and needs its own plan and review.
+- **(c) Leave `main` where it is** and keep `claude/product-overhaul` as the
+  operative branch for every deployed service (as today — every live
+  ProxyWar process already fetches this branch, never `main`).
+
+The two hygiene fixes above (`.omp/` untrack, hardcoded-path removal) are
+kept regardless of which option is chosen — they are correct independent of
+the wagering question and already committed to `claude/product-overhaul`.
+
 ## Validation matrix (final consolidated HEAD `c9a224eea`)
 
 Full matrix re-run at final HEAD, after sz-season/sz-analytics/sz-identity
