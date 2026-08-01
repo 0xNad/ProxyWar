@@ -166,9 +166,24 @@ export interface PublicDirectorCutSummary {
   segmentCount: number;
 }
 
-/** "Drama recaps" gap closure — a compact ranking/evidence signal from `drama-report.json`/`match-story.json`, never recap prose (the recap itself is `LeagueEpisodeMatchPage.ts`'s separate `match-recap.json`-backed `LeagueEpisodeRecap`). `dramaScore` is `AgentDramaReport`'s 0-100 composite; `entertainmentGrade` is `AgentMatchStory`'s `grade`. */
+/**
+ * "Drama recaps" gap closure, then the 2026-08-01 "best battles" ranking
+ * fix — a compact ranking/evidence signal, never recap prose (the recap
+ * itself is `LeagueEpisodeMatchPage.ts`'s separate `match-recap.json`-
+ * backed `LeagueEpisodeRecap`). `curatedDramaScore` is `AgentMatchRecap`'s
+ * deduped 0-100 score (see that module's doc) — the PUBLIC ranking/badge
+ * input; `null` only when the recap hasn't (re)generated to the current
+ * schema for this run yet (a transition/backfill-lag state, degrades to
+ * "unscored" on every consumer, same as `dramaEvidence` itself being
+ * `null`). The legacy `AgentDramaReport.dramaScore` composite is
+ * deliberately NOT projected here — nothing on a public surface still
+ * reads it after this fix; it remains on the `drama-report.json` artifact
+ * and `AgentDramaReport`'s own type for any consumer that legitimately
+ * needs the raw generator output. `entertainmentGrade` is
+ * `AgentMatchStory`'s `grade` — unrelated to and unaffected by this fix.
+ */
 export interface PublicDramaEvidence {
-  dramaScore: number;
+  curatedDramaScore: number | null;
   entertainmentGrade: string;
 }
 
@@ -468,7 +483,7 @@ function publicMatch(
       : null,
     dramaEvidence: episode.dramaEvidence
       ? {
-          dramaScore: episode.dramaEvidence.dramaScore,
+          curatedDramaScore: episode.dramaEvidence.curatedDramaScore,
           entertainmentGrade: episode.dramaEvidence.entertainmentGrade,
         }
       : null,

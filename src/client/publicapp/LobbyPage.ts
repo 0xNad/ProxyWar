@@ -16,6 +16,7 @@ import {
 } from "./ReadModelSchema";
 import {
   computeDegradedShare,
+  curatedDramaScoreOf,
   formatDuration,
   resolveWinnerName,
 } from "./WatchPage";
@@ -63,8 +64,8 @@ import {
  *      null && fullRenderHref !== null — sorted by completedAt desc,
  *      matching the scale of this file's other bounded lists like the
  *      league-pulse top 5), the one with the single highest
- *      `dramaEvidence.dramaScore` wins (ties broken by more-recent
- *      completedAt). `dramaEvidence` only turns non-null once the
+ *      `dramaEvidence.curatedDramaScore` wins (ties broken by more-recent
+ *      completedAt). A scored `dramaEvidence` only turns available once the
  *      mirror's budgeted backfill (`CoworldLeagueMatchNarrativeBackfill.ts`)
  *      has reached that episode, so when NONE of the windowed matches have
  *      it yet, this falls back to the prior, purely-recency selection
@@ -153,10 +154,11 @@ async function fetchHeroParticipants(
 
 /**
  * Bounded recency window (most-recent-N by `completedAt`) that hero state C
- * and Recent broadcasts both rank by `dramaEvidence.dramaScore` within —
- * matches the scale of this file's other bounded lists (e.g. the league
- * pulse's top 5). Bounding the window means a high-scoring match that has
- * already aged off the front page is never dredged back up on score alone.
+ * and Recent broadcasts both rank by `dramaEvidence.curatedDramaScore`
+ * within — matches the scale of this file's other bounded lists (e.g. the
+ * league pulse's top 5). Bounding the window means a high-scoring match
+ * that has already aged off the front page is never dredged back up on
+ * score alone.
  */
 const DRAMA_RECENCY_WINDOW_SIZE = 8;
 
@@ -663,13 +665,13 @@ export class LobbyPage extends LitElement {
       .sort((a, b) => (b.completedAt ?? "").localeCompare(a.completedAt ?? ""))
       .slice(0, DRAMA_RECENCY_WINDOW_SIZE);
     const scoredInWindow = recencyWindow.filter(
-      (match) => match.dramaEvidence !== null,
+      (match) => curatedDramaScoreOf(match) !== null,
     );
     const fallback =
       scoredInWindow.length > 0
         ? [...scoredInWindow].sort(
             (a, b) =>
-              b.dramaEvidence!.dramaScore - a.dramaEvidence!.dramaScore ||
+              (curatedDramaScoreOf(b) ?? -1) - (curatedDramaScoreOf(a) ?? -1) ||
               (b.completedAt ?? "").localeCompare(a.completedAt ?? ""),
           )[0]
         : recencyWindow.at(0);
@@ -698,15 +700,16 @@ export class LobbyPage extends LitElement {
         >
           ${translateText("lobby.recent_battle_badge")}
         </span>
-        ${fallback.dramaEvidence !== null
-          ? html`<span
-              class="ml-2 inline-flex items-center gap-2 rounded-full border border-line bg-surface-2 px-3 py-1 font-mono text-xs font-extrabold uppercase tracking-wide text-ink-muted"
-            >
-              ${translateText("lobby.high_drama_badge", {
-                score: fallback.dramaEvidence.dramaScore,
-              })}
-            </span>`
-          : nothing}
+        ${(() => {
+          const dramaScore = curatedDramaScoreOf(fallback);
+          return dramaScore !== null
+            ? html`<span
+                class="ml-2 inline-flex items-center gap-2 rounded-full border border-line bg-surface-2 px-3 py-1 font-mono text-xs font-extrabold uppercase tracking-wide text-ink-muted"
+              >
+                ${translateText("lobby.high_drama_badge", { score: dramaScore })}
+              </span>`
+            : nothing;
+        })()}
         <h2 class="mt-3 text-2xl font-extrabold text-ink">
           ${fallback.map}${fallback.roundNumber !== null
             ? translateText("lobby.round_suffix", { round: fallback.roundNumber })
@@ -808,7 +811,7 @@ export class LobbyPage extends LitElement {
 
   // ---- Agents to watch ---------------------------------------------------
 
-  /** Evidence-based only: agents with 2+ wins among the matches this read model carries — no invented notability score. Ties on win count are broken by the highest dramaEvidence.dramaScore among that agent's wins (agents with no scored wins sort after agents that have at least one, within the same win-count tier) — still no invented notability, just a second real signal when the first one ties. */
+  /** Evidence-based only: agents with 2+ wins among the matches this read model carries — no invented notability score. Ties on win count are broken by the highest `curatedDramaScoreOf` value among that agent's wins (agents with no scored wins sort after agents that have at least one, within the same win-count tier) — still no invented notability, just a second real signal when the first one ties. */
   private renderAgentsToWatch(model: ReadModel): TemplateResult {
     const winsBySlug = new Map<string, number>();
     const bestDramaScoreBySlug = new Map<string, number>();
@@ -818,12 +821,13 @@ export class LobbyPage extends LitElement {
         match.winnerAgentSlug,
         (winsBySlug.get(match.winnerAgentSlug) ?? 0) + 1,
       );
-      if (match.dramaEvidence !== null) {
+      const curatedDramaScore = curatedDramaScoreOf(match);
+      if (curatedDramaScore !== null) {
         bestDramaScoreBySlug.set(
           match.winnerAgentSlug,
           Math.max(
             bestDramaScoreBySlug.get(match.winnerAgentSlug) ?? -1,
-            match.dramaEvidence.dramaScore,
+            curatedDramaScore,
           ),
         );
       }
@@ -889,13 +893,13 @@ export class LobbyPage extends LitElement {
   // ---- Recent broadcasts --------------------------------------------------
 
   /**
-   * Ranks a bounded recency window by dramaEvidence.dramaScore desc (scored
-   * matches first, undramaEvidence matches sorting after them but keeping
-   * their own relative recency order — a stable partition, never a
-   * fabricated tie-break) to pick which 3 broadcasts earn the slot, then
-   * re-sorts just those 3 back to the newest-first display convention this
-   * section has always used — selection and display order are separate
-   * concerns here.
+   * Ranks a bounded recency window by `curatedDramaScoreOf` desc (scored
+   * matches first, unscored matches sorting after them but keeping their
+   * own relative recency order — a stable partition, never a fabricated
+   * tie-break) to pick which 3 broadcasts earn the slot, then re-sorts
+   * just those 3 back to the newest-first display convention this section
+   * has always used — selection and display order are separate concerns
+   * here.
    */
   private renderRecentBroadcasts(model: ReadModel): TemplateResult {
     const recencyWindow = [...model.matches]
@@ -903,12 +907,12 @@ export class LobbyPage extends LitElement {
       .sort((a, b) => (b.completedAt ?? "").localeCompare(a.completedAt ?? ""))
       .slice(0, DRAMA_RECENCY_WINDOW_SIZE);
     const scored = recencyWindow
-      .filter((match) => match.dramaEvidence !== null)
+      .filter((match) => curatedDramaScoreOf(match) !== null)
       .sort(
-        (a, b) => b.dramaEvidence!.dramaScore - a.dramaEvidence!.dramaScore,
+        (a, b) => (curatedDramaScoreOf(b) ?? -1) - (curatedDramaScoreOf(a) ?? -1),
       );
     const unscored = recencyWindow.filter(
-      (match) => match.dramaEvidence === null,
+      (match) => curatedDramaScoreOf(match) === null,
     );
     const recent = [...scored, ...unscored]
       .slice(0, 3)
@@ -965,15 +969,16 @@ export class LobbyPage extends LitElement {
                   })}
             </p>`
           : nothing}
-        ${match.dramaEvidence !== null
-          ? html`<p
-              class="mt-1 inline-block rounded border border-accent/50 px-1.5 py-0.5 font-mono text-[11px] text-accent"
-            >
-              ${translateText("lobby.drama_score_badge", {
-                score: match.dramaEvidence.dramaScore,
-              })}
-            </p>`
-          : nothing}
+        ${(() => {
+          const dramaScore = curatedDramaScoreOf(match);
+          return dramaScore !== null
+            ? html`<p
+                class="mt-1 inline-block rounded border border-accent/50 px-1.5 py-0.5 font-mono text-[11px] text-accent"
+              >
+                ${translateText("lobby.drama_score_badge", { score: dramaScore })}
+              </p>`
+            : nothing;
+        })()}
         <details class="mt-2">
           <summary
             class="cursor-pointer text-sm font-bold text-accent outline-none focus-visible:ring-2 focus-visible:ring-accent"

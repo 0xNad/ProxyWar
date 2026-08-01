@@ -116,16 +116,25 @@ export interface CoworldLeagueEpisodeRow {
   /**
    * Same optional/additive/budgeted-backfill shape as `directorCut` above,
    * one gap-closure phase later: a compact ranking/evidence signal — never
-   * recap prose — from the mirror's `drama-report.json`/`match-story.json`
-   * pair once both exist for a run (`CoworldLeagueMatchNarrativeBackfill.ts`,
-   * `resolveMirroredMatchEvidence`). `dramaScore` is `AgentDramaReport`'s
-   * 0-100 composite; `entertainmentGrade` is `AgentMatchStory`'s `grade`.
-   * The recap the match page actually shows is the separate, event-derived
-   * `match-recap.json` (`LeagueEpisodeMatchPage.ts`'s `LeagueEpisodeRecap`)
-   * — this field is ranking evidence for the lobby/`/watch` sort/
-   * `feature:candidates`, not prose.
+   * recap prose — from the mirror's `drama-report.json`/`match-story.json`/
+   * `match-recap.json` (`CoworldLeagueMatchNarrativeBackfill.ts`).
+   * `dramaScore` is `AgentDramaReport`'s 0-100 composite (legacy, requires
+   * both `drama-report.json` and `match-story.json`); `entertainmentGrade`
+   * is `AgentMatchStory`'s `grade`. `curatedDramaScore` is
+   * `AgentMatchRecap`'s deduped 0-100 score — the PUBLIC "best battles"
+   * ranking input (see that module's doc) — resolved independently from
+   * `match-recap.json`, `null` when that artifact is missing/stale/absent
+   * (a genuinely quiet match, or mid-upgrade). The recap the match page
+   * actually shows is the separate, event-derived `match-recap.json`
+   * (`LeagueEpisodeMatchPage.ts`'s `LeagueEpisodeRecap`) — this field is
+   * ranking evidence for the lobby/`/watch` sort/`feature:candidates`,
+   * not prose.
    */
-  dramaEvidence?: { dramaScore: number; entertainmentGrade: string };
+  dramaEvidence?: {
+    dramaScore: number;
+    entertainmentGrade: string;
+    curatedDramaScore: number | null;
+  };
 }
 
 export interface CoworldLeagueRoundRow {

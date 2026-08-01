@@ -110,7 +110,7 @@ export const PublicMatchSchema = z.object({
     .nullable(),
   dramaEvidence: z
     .object({
-      dramaScore: z.number(),
+      curatedDramaScore: z.number().nullable(),
       entertainmentGrade: z.string(),
     })
     .nullable(),

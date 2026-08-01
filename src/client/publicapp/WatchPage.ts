@@ -59,7 +59,7 @@ export class WatchPage extends LitElement {
   /**
    * Ranking of the (already filtered) archive — "recent" (default) keeps
    * the caller's completedAt-desc order; "dramatic" ranks by
-   * `dramaEvidence.dramaScore` desc, evidence-less matches last. This is a
+   * `curatedDramaScoreOf` desc, evidence-less matches last. This is a
    * SORT, not a filter — no match is ever hidden by it.
    */
   @state() private sortOrder: "recent" | "dramatic" = "recent";
@@ -465,10 +465,11 @@ export class WatchPage extends LitElement {
           ),
         }),
       );
-    if (match.dramaEvidence !== null)
+    const dramaScore = curatedDramaScoreOf(match);
+    if (dramaScore !== null)
       meta.push(
         translateText("watch.drama_score", {
-          score: match.dramaEvidence.dramaScore,
+          score: dramaScore,
         }),
       );
     const roundLabel =
@@ -618,17 +619,37 @@ export function filterArchiveMatches(
 }
 
 /**
+ * `AgentMatchRecap`'s deduped 0-100 public "best battles" ranking score
+ * (see that module's own doc for the formula) — the PUBLIC ranking/badge
+ * input every consumer below reads instead of the legacy
+ * `AgentDramaReport.dramaScore` composite (that raw, un-deduped metric
+ * saturates on same-pair alliance-churn event counts alone and is
+ * deliberately no longer projected to public surfaces — see
+ * `ProxyWarPublicReadModel.ts`'s `PublicDramaEvidence` doc). `null` when
+ * this match has no scored evidence yet, or its recap hasn't
+ * (re)generated to the current schema — every ranking/badge use treats
+ * both the same way: "unscored", never a fabricated 0. Exported so
+ * `LobbyPage.ts` shares this exact definition rather than a second one
+ * that could drift, same pattern as `computeDegradedShare`/
+ * `resolveWinnerName` below.
+ */
+export function curatedDramaScoreOf(match: PublicMatch): number | null {
+  return match.dramaEvidence?.curatedDramaScore ?? null;
+}
+
+/**
  * Ranks the (already filtered) archive for display. "recent" re-sorts by
  * `completedAt` descending rather than trusting the caller's own upstream
  * ordering — kept self-contained and correct regardless of the order
  * `matches` arrives in, instead of leaning on the invariant that
- * `renderReplayArchive` happens to sort before filtering. "dramatic" sorts
- * by `dramaEvidence.dramaScore` descending; matches with `dramaEvidence
- * === null` (the drama backfill hasn't reached that episode yet) sort
- * AFTER every scored match, keeping their relative order among themselves
- * — `Array.prototype.sort` is a stable sort per spec, and the `-1`
- * fallback below never collides with a real score since `dramaScore` is
- * always in `[0, 100]`. Never drops a match — a sort, not a filter.
+ * `renderReplayArchive` happens to sort before filtering. "dramatic"
+ * sorts by `curatedDramaScoreOf` descending; matches with no curated
+ * score (the drama backfill/recap-upgrade hasn't reached that episode
+ * yet) sort AFTER every scored match, keeping their relative order among
+ * themselves — `Array.prototype.sort` is a stable sort per spec, and the
+ * `-1` fallback below never collides with a real score since
+ * `curatedDramaScore` is always in `[0, 100]`. Never drops a match — a
+ * sort, not a filter.
  */
 export function sortArchiveMatches(
   matches: readonly (PublicMatch & { completedAt: string })[],
@@ -639,8 +660,7 @@ export function sortArchiveMatches(
       .slice()
       .sort(
         (a, b) =>
-          (b.dramaEvidence?.dramaScore ?? -1) -
-          (a.dramaEvidence?.dramaScore ?? -1),
+          (curatedDramaScoreOf(b) ?? -1) - (curatedDramaScoreOf(a) ?? -1),
       );
   }
   return matches

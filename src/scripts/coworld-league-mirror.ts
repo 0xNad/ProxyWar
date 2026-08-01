@@ -28,6 +28,7 @@ import {
   parseDirectorCutPlanSummary,
   parseHostedReplayPayload,
   parseLeagueSummary,
+  parseCuratedDramaScore,
   parseMatchNarrativeSummary,
   pickCompetitionDivision,
   premiereHrefForEpisode,
@@ -584,20 +585,40 @@ async function readDirectorCutSummaryFromRunDir(
  * from an episode's unpacked run directory, when BOTH exist (they're
  * written atomically together — see `generateMatchNarrativeArtifactsForRunDir`'s
  * own doc). Tolerant of absence, exactly like {@link readDirectorCutSummaryFromRunDir}
- * above. Parsing is delegated to the pure, unit-tested `parseMatchNarrativeSummary`.
+ * above. Legacy-pair parsing is delegated to the pure, unit-tested
+ * `parseMatchNarrativeSummary`; `curatedDramaScore` — the PUBLIC ranking
+ * input, see `AgentMatchRecap.ts`'s doc — is resolved INDEPENDENTLY from
+ * `match-recap.json` (`parseCuratedDramaScore`) so it degrades on its own
+ * (missing/stale recap -> `null`) without requiring the legacy pair to be
+ * absent too.
  */
 async function readMatchNarrativeSummaryFromRunDir(
   runDir: string,
-): Promise<{ dramaScore: number; entertainmentGrade: string } | null> {
+): Promise<{ dramaScore: number; entertainmentGrade: string; curatedDramaScore: number | null } | null> {
+  let legacy: { dramaScore: number; entertainmentGrade: string } | null;
   try {
     const [dramaReportRaw, matchStoryRaw] = await Promise.all([
       fs.readFile(path.join(runDir, "drama-report.json"), "utf8"),
       fs.readFile(path.join(runDir, "match-story.json"), "utf8"),
     ]);
-    return parseMatchNarrativeSummary(dramaReportRaw, matchStoryRaw);
+    legacy = parseMatchNarrativeSummary(dramaReportRaw, matchStoryRaw);
   } catch {
+    legacy = null;
+  }
+  if (legacy === null) {
     return null;
   }
+  let curatedDramaScore: number | null;
+  try {
+    const matchRecapRaw = await fs.readFile(
+      path.join(runDir, "match-recap.json"),
+      "utf8",
+    );
+    curatedDramaScore = parseCuratedDramaScore(matchRecapRaw);
+  } catch {
+    curatedDramaScore = null;
+  }
+  return { ...legacy, curatedDramaScore };
 }
 
 function log(message: string): void {
@@ -647,16 +668,28 @@ function logMatchNarrativeGenerationResult(
       return;
     case "generated":
       log(
-        `match narrative generated for ${runKey} (${outcome.source}, drama ${outcome.dramaScore}, ${outcome.entertainmentGrade}, ${outcome.recapBeatCount} recap beat(s))`,
+        `match narrative generated for ${runKey} (${outcome.source}, drama ${outcome.dramaScore}, curated ${outcome.curatedDramaScore ?? "n/a"}, ${outcome.entertainmentGrade}, ${outcome.recapBeatCount} recap beat(s))`,
       );
       return;
     case "generated-recap-only":
       log(
-        `match narrative generated recap-only for ${runKey} (${outcome.source}, ${outcome.recapBeatCount} recap beat(s); no decisions.jsonl records for drama/story)`,
+        `match narrative generated recap-only for ${runKey} (${outcome.source}, curated ${outcome.curatedDramaScore ?? "n/a"}, ${outcome.recapBeatCount} recap beat(s); no decisions.jsonl records for drama/story)`,
+      );
+      return;
+    case "recap-upgraded":
+      log(
+        `match recap re-curated for ${runKey} (${outcome.source}, curated ${outcome.curatedDramaScore ?? "n/a"}, ${outcome.recapBeatCount} recap beat(s); drama-report/match-story untouched)`,
       );
       return;
     case "failed":
       log(`match narrative generation failed for ${runKey}: ${outcome.error}`);
+      return;
+    default:
+      // Exhaustiveness guard: a compile error here means a new
+      // `MatchNarrativeGenerationOutcome` status was added without a
+      // logging case above (this is exactly how the `recap-upgraded`
+      // case went silently unlogged the first time).
+      outcome satisfies never;
       return;
   }
 }

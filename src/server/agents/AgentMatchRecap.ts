@@ -58,6 +58,14 @@ import type { SpectatorEvent, SpectatorTelemetry } from "./AgentSpectatorTelemet
  * 37 alliance formations" even though only a handful of alliance beats
  * made the cut.
  *
+ * 2026-08-01 "best battles" ranking fix: this module also now computes
+ * `curatedDramaScore` (see `computeCuratedDramaScore`'s doc) from the SAME
+ * deduped beats above, and that — not `AgentDramaReport.dramaScore` — is
+ * what the public lobby/`/watch`/`feature:candidates` ranking surfaces
+ * rank and badge on. `AgentDramaReport.ts`'s generator and its own
+ * `dramaScore` are untouched; this is a parallel, curated score for
+ * public consumption only.
+ *
  * `buildAgentMatchRecap` returns `null` when the curated pass finds zero
  * beats — a genuinely quiet match, never padded with a placeholder
  * sentence (same "never a fabricated placeholder" rule
@@ -71,15 +79,19 @@ export interface AgentMatchRecapBeat {
 }
 
 /**
- * Bumped 1 -> 2 for the alliance-aggregation + importance cap fix above —
- * a pre-fix `match-recap.json` (schemaVersion 1) is stale/spammy, never
+ * Bumped 1 -> 2 for the alliance-aggregation + importance cap fix, then
+ * 2 -> 3 for the addition of `curatedDramaScore`/`curatedDramaScoreMethodology`
+ * (see `computeCuratedDramaScore`'s doc) — the PUBLIC "best battles" ranking
+ * input, replacing `AgentDramaReport.dramaScore` for that purpose on public
+ * surfaces. Either bump means a pre-fix `match-recap.json` is stale, never
  * merely "old but still fine": `CoworldLeagueMatchNarrativeBackfill.ts`'s
- * `isRecapStale` compares against this constant to force re-curation, and
- * `LeagueEpisodeMatchPage.ts`'s `parseMatchRecapArtifact` refuses to parse
- * anything but the current version (a stale artifact reads as "no recap
- * yet", never as spammy content, until the backfill upgrades it).
+ * `recapNeedsRegeneration` compares against this constant to force
+ * re-curation, and `LeagueEpisodeMatchPage.ts`'s `parseMatchRecapArtifact`
+ * refuses to parse anything but the current version (a stale artifact
+ * reads as "no recap yet", never as spammy/scoreless content, until the
+ * backfill upgrades it).
  */
-export const AGENT_MATCH_RECAP_SCHEMA_VERSION = 2;
+export const AGENT_MATCH_RECAP_SCHEMA_VERSION = 3;
 
 export interface AgentMatchRecap {
   schemaVersion: typeof AGENT_MATCH_RECAP_SCHEMA_VERSION;
@@ -87,6 +99,10 @@ export interface AgentMatchRecap {
   generatedAt: string;
   summary: string;
   beats: AgentMatchRecapBeat[];
+  /** 0..100 — see `computeCuratedDramaScore`'s doc. The PUBLIC drama ranking/badge input; `AgentDramaReport.dramaScore` stays the untouched legacy metric, unaffected by this field. */
+  curatedDramaScore: number;
+  /** Human-readable formula string carried alongside the score — same "ship the formula as free text" convention `AgentStatsPipeline.ts`'s `AgentMetric.methodology` uses for its own metrics. */
+  curatedDramaScoreMethodology: string;
 }
 
 export interface AgentMatchRecapPaths {
@@ -252,6 +268,76 @@ function curateWarRoomBeats(events: readonly SpectatorEvent[]): CuratedWarRoomBe
   };
 }
 
+/**
+ * Curated (dedupe-based) drama score for the PUBLIC ranking surface (lobby
+ * "best recent"/"high drama" badge, `/watch` "Most dramatic" sort,
+ * `feature:candidates`) — this is what those surfaces rank/badge on
+ * instead of `AgentDramaReport.dramaScore`, because that generator's
+ * `allianceFormedCount` is a RAW, un-deduped event count that saturates
+ * the 100 ceiling on same-pair alliance re-request churn alone (see
+ * `AgentDramaReport.ts`'s own 2026-08-01 doc — a real production match
+ * hit 37 reformations between one pair and capped out on
+ * `allianceFormedCount * 8` almost by itself). `AgentDramaReport.ts` and
+ * its `dramaScore` stay exactly as-is — that generator's own artifact,
+ * and any consumer that still legitimately wants the raw count, keeps
+ * reading it there unchanged. This is a SEPARATE score computed from the
+ * SAME dedupe pass `curateWarRoomBeats` already runs to build the public
+ * recap beats, so it is only ever as inflated as what a reader actually
+ * SEES in the recap.
+ *
+ * Weights mirror `AgentDramaReport.dramaScore`'s recognizable shape
+ * (betrayals heaviest, then eliminations, then alliances, lightest-weight
+ * signal last) but every input here is a DISTINCT, already-deduped count:
+ *
+ *   - betrayals: every individual betrayal beat, never aggregated away
+ *     (`curated.betrayalBeats.length`) x 20 — the single most decisive
+ *     "this actually happened" political signal.
+ *   - eliminations: `curated.eliminationBeats.length` x 14 — a match's
+ *     hardest outcome-anchored beat.
+ *   - alliances: DISTINCT unordered pairs, one beat per pair no matter how
+ *     many times they re-request (`curated.allianceBeats.length` — the
+ *     exact aggregation `curateWarRoomBeats` already performs for the
+ *     recap itself) x 9 — this is the direct fix for the churn-saturation
+ *     bug: 37 re-formations between one pair score the SAME as 1.
+ *   - first strikes: DISTINCT ordered actor/target pairs, already deduped
+ *     one-per-pair at capture time (`curated.firstStrikeBeats.length`) x 3.
+ *   - final confrontation: +12 flat when the endgame window produced a
+ *     genuine attack/nuke beat (0/1, never a count).
+ *
+ * Summed, then capped to [0, 100]. Pure and deterministic — same curated
+ * beats in, same score out, every time (see the "determinism" test).
+ * `curatedDramaScoreMethodology` ships this same formula as free text
+ * (same convention `AgentStatsPipeline.ts`'s `AgentMetric.methodology`
+ * uses) so the field stays self-documenting wherever the recap JSON
+ * travels, independent of this source comment.
+ */
+const CURATED_DRAMA_WEIGHTS = {
+  betrayal: 20,
+  elimination: 14,
+  alliancePair: 9,
+  firstStrikePair: 3,
+  finalConfrontation: 12,
+} as const;
+
+export const CURATED_DRAMA_SCORE_METHODOLOGY =
+  `betrayal beats x${CURATED_DRAMA_WEIGHTS.betrayal} + elimination beats x${CURATED_DRAMA_WEIGHTS.elimination} + ` +
+  `distinct alliance pairs x${CURATED_DRAMA_WEIGHTS.alliancePair} (same-pair re-formations aggregate into one pair, never scored per re-request) + ` +
+  `distinct first-strike pairs x${CURATED_DRAMA_WEIGHTS.firstStrikePair} + ${CURATED_DRAMA_WEIGHTS.finalConfrontation} if the match ended on a genuine final clash beat; ` +
+  `summed and capped to [0, 100] — computed from the same deduped War Room beats this recap shows, never from raw un-deduped event counts`;
+
+function computeCuratedDramaScore(
+  curated: CuratedWarRoomBeats,
+  hasFinalConfrontation: boolean,
+): number {
+  const raw =
+    curated.betrayalBeats.length * CURATED_DRAMA_WEIGHTS.betrayal +
+    curated.eliminationBeats.length * CURATED_DRAMA_WEIGHTS.elimination +
+    curated.allianceBeats.length * CURATED_DRAMA_WEIGHTS.alliancePair +
+    curated.firstStrikeBeats.length * CURATED_DRAMA_WEIGHTS.firstStrikePair +
+    (hasFinalConfrontation ? CURATED_DRAMA_WEIGHTS.finalConfrontation : 0);
+  return Math.min(100, Math.round(raw));
+}
+
 /** One beat for the highest-importance attack/nuke event inside the SAME endgame window `DirectorCutPlan.ts`'s `final_conflict` segment covers — omitted (never fabricated) when no such event exists in that window, e.g. a match that ends on a turn cap with no late fighting. */
 function finalConfrontationBeat(
   events: readonly SpectatorEvent[],
@@ -365,6 +451,8 @@ export function buildAgentMatchRecap(
     generatedAt: new Date().toISOString(),
     summary: buildSummary(curated.rawCounts, finalBeat !== null),
     beats,
+    curatedDramaScore: computeCuratedDramaScore(curated, finalBeat !== null),
+    curatedDramaScoreMethodology: CURATED_DRAMA_SCORE_METHODOLOGY,
   };
 }
 

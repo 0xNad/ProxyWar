@@ -492,7 +492,7 @@ describe("watch-page replay archive", () => {
             matchId: "with-drama",
             completedAt: "2026-06-15T00:00:00.000Z",
             map: "Drama Map",
-            dramaEvidence: { dramaScore: 82, entertainmentGrade: "lively" },
+            dramaEvidence: { curatedDramaScore: 82, entertainmentGrade: "lively" },
           }),
           match({
             matchId: "without-drama",
@@ -512,6 +512,27 @@ describe("watch-page replay archive", () => {
     expect(cards[1]?.textContent).not.toContain("watch.drama_score");
   });
 
+  it("omits the Drama score badge when dramaEvidence exists but curatedDramaScore is still null (mid-upgrade transition)", async () => {
+    stubReadModelFetch(
+      readModel({
+        matches: [
+          match({
+            matchId: "mid-upgrade",
+            completedAt: "2026-06-15T00:00:00.000Z",
+            map: "Transitioning Map",
+            dramaEvidence: { curatedDramaScore: null, entertainmentGrade: "lively" },
+          }),
+        ],
+      }),
+    );
+    const el = mount();
+    await flushMicrotasks();
+
+    const cards = Array.from(el.querySelectorAll("li"));
+    expect(cards).toHaveLength(1);
+    expect(cards[0]?.textContent).not.toContain("watch.drama_score");
+  });
+
   it("offers a Most recent / Most dramatic sort control, and reorders the visible cards when 'Most dramatic' is selected, keeping evidence-less matches visible at the end", async () => {
     stubReadModelFetch(
       readModel({
@@ -520,7 +541,7 @@ describe("watch-page replay archive", () => {
             matchId: "low-drama",
             completedAt: "2026-06-20T00:00:00.000Z",
             map: "Low Drama Map",
-            dramaEvidence: { dramaScore: 20, entertainmentGrade: "flat" },
+            dramaEvidence: { curatedDramaScore: 20, entertainmentGrade: "flat" },
           }),
           match({
             matchId: "no-drama",
@@ -532,7 +553,7 @@ describe("watch-page replay archive", () => {
             matchId: "high-drama",
             completedAt: "2026-06-01T00:00:00.000Z",
             map: "High Drama Map",
-            dramaEvidence: { dramaScore: 95, entertainmentGrade: "lively" },
+            dramaEvidence: { curatedDramaScore: 95, entertainmentGrade: "lively" },
           }),
         ],
       }),
@@ -742,18 +763,18 @@ describe("sortArchiveMatches", () => {
     }) as PublicMatch & { completedAt: string };
   }
 
-  it("'dramatic' orders by dramaScore descending, with null-evidence matches sorted after every scored match", () => {
+  it("'dramatic' orders by curatedDramaScore descending, with null-evidence matches sorted after every scored match", () => {
     const highest = completedMatch({
       matchId: "highest",
-      dramaEvidence: { dramaScore: 91, entertainmentGrade: "lively" },
+      dramaEvidence: { curatedDramaScore: 91, entertainmentGrade: "lively" },
     });
     const middle = completedMatch({
       matchId: "middle",
-      dramaEvidence: { dramaScore: 40, entertainmentGrade: "flat" },
+      dramaEvidence: { curatedDramaScore: 40, entertainmentGrade: "flat" },
     });
     const lowestScored = completedMatch({
       matchId: "lowest-scored",
-      dramaEvidence: { dramaScore: 0, entertainmentGrade: "stalled" },
+      dramaEvidence: { curatedDramaScore: 0, entertainmentGrade: "stalled" },
     });
     const noEvidenceFirst = completedMatch({
       matchId: "no-evidence-first",
@@ -773,7 +794,7 @@ describe("sortArchiveMatches", () => {
       ],
       "dramatic",
     );
-    // Scored matches descend by dramaScore; the two null-evidence matches
+    // Scored matches descend by curatedDramaScore; the two null-evidence matches
     // land after every scored match, in their original relative order
     // (stable partition) -- never dropped, just sorted last.
     expect(result.map((m) => m.matchId)).toEqual([
@@ -782,6 +803,34 @@ describe("sortArchiveMatches", () => {
       "lowest-scored",
       "no-evidence-first",
       "no-evidence-second",
+    ]);
+  });
+
+  it("'dramatic' treats a mid-upgrade recap (dramaEvidence present but curatedDramaScore still null) as unscored -- same degrade-cleanly rule as no dramaEvidence at all", () => {
+    const scored = completedMatch({
+      matchId: "scored",
+      dramaEvidence: { curatedDramaScore: 55, entertainmentGrade: "lively" },
+    });
+    const transitioning = completedMatch({
+      matchId: "transitioning",
+      // Legacy evidence already exists (dramaEvidence !== null) but the
+      // recap hasn't been re-curated to the current schema yet -- the
+      // exact "recap-null" transition-window state `upgradeStaleRecap`
+      // resolves on its next backfill pass.
+      dramaEvidence: { curatedDramaScore: null, entertainmentGrade: "lively" },
+    });
+    const noEvidence = completedMatch({
+      matchId: "no-evidence",
+      dramaEvidence: null,
+    });
+    const result = sortArchiveMatches(
+      [transitioning, noEvidence, scored],
+      "dramatic",
+    );
+    expect(result.map((m) => m.matchId)).toEqual([
+      "scored",
+      "transitioning",
+      "no-evidence",
     ]);
   });
 
@@ -811,7 +860,7 @@ describe("sortArchiveMatches", () => {
   it("never drops a match -- 'dramatic' is a sort, not a filter", () => {
     const scored = completedMatch({
       matchId: "scored",
-      dramaEvidence: { dramaScore: 50, entertainmentGrade: "promising" },
+      dramaEvidence: { curatedDramaScore: 50, entertainmentGrade: "promising" },
     });
     const unscored = completedMatch({
       matchId: "unscored",

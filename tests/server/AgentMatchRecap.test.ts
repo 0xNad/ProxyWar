@@ -4,6 +4,7 @@ import {
   type AgentMatchRecapBeat,
 } from "../../src/server/agents/AgentMatchRecap";
 import { buildAgentSpectatorTelemetry } from "../../src/server/agents/AgentSpectatorTelemetry";
+import { buildAgentDramaReport } from "../../src/server/agents/AgentDramaReport";
 import type { AgentDecisionRecord, LegalActionKind } from "../../src/server/agents/AgentTypes";
 import type { AgentRunFinalState } from "../../src/server/agents/AgentDecisionLogWriter";
 
@@ -385,5 +386,162 @@ describe("buildAgentMatchRecap", () => {
     const second = build();
     expect(second?.beats).toEqual(recap.beats);
     expect(second?.summary).toEqual(recap.summary);
+  });
+});
+
+describe("curatedDramaScore", () => {
+  // The discriminating assertion this whole fix exists for: the legacy
+  // `AgentDramaReport.dramaScore` saturates at 100 on raw, un-deduped
+  // alliance-churn event counts (see `AgentDramaReport.ts`'s own
+  // 2026-08-01 doc — a real production match hit 37 same-pair
+  // reformations and saturated almost from `allianceFormedCount * 8`
+  // alone), while `curatedDramaScore` — computed from the SAME deduped
+  // beats the public recap shows — must score that exact scenario LOW,
+  // and a genuinely dramatic multi-pair betrayal-heavy match HIGH.
+  it("scores pure same-pair alliance churn LOW even though the legacy dramaScore saturates at 100", () => {
+    const totalTurns = 20_000;
+    const records: AgentDecisionRecord[] = [];
+    let sequence = 0;
+    // 37 reciprocal alliance re-requests between the SAME pair, no
+    // intervening break — mirrors the real production churn match
+    // `AgentDramaReport.ts`'s doc describes. No attacks, no eliminations,
+    // no other agents: every raw `alliance_formed` event this produces
+    // belongs to the one aggregated pair.
+    for (let i = 0; i < 37; i++) {
+      const turn = 100 + i * 5;
+      sequence += 1;
+      records.push(
+        record(sequence, turn, "p1", "Pact1", "p-p1", "alliance_request", {
+          recipientID: "p-p2",
+          recipientName: "Pact2",
+        }),
+      );
+      sequence += 1;
+      records.push(
+        record(sequence, turn + 1, "p2", "Pact2", "p-p2", "alliance_request", {
+          recipientID: "p-p1",
+          recipientName: "Pact1",
+        }),
+      );
+    }
+    const roster = [
+      { agentID: "p1", username: "Pact1", profile: "diplomatic" as const, clientID: "cp1", brainType: "planner-executor" as const },
+      { agentID: "p2", username: "Pact2", profile: "diplomatic" as const, clientID: "cp2", brainType: "planner-executor" as const },
+    ];
+    const players = roster.map((entry) => ({ agentID: entry.agentID, username: entry.username, isAlive: true }));
+    const telemetry = buildAgentSpectatorTelemetry({
+      runID: "run-pure-churn",
+      records,
+      roster,
+      finalState: finalState(totalTurns, players),
+    });
+    const dramaReport = buildAgentDramaReport({
+      runID: "run-pure-churn",
+      matchID: "run-pure-churn",
+      scenario: "test",
+      brainMode: "planner-executor",
+      records,
+      roster,
+      finalState: finalState(totalTurns, players),
+    });
+    // Sanity: this fixture really does reproduce the known saturation bug.
+    expect(dramaReport.allianceFormedCount).toBeGreaterThan(12);
+    expect(dramaReport.dramaScore).toBe(100);
+    expect(dramaReport.dramaGrade).toBe("dramatic");
+
+    const recap = buildAgentMatchRecap({ runID: "run-pure-churn", telemetry, finalTurnCount: totalTurns });
+    expect(recap).not.toBeNull();
+    if (recap === null) return;
+    // One aggregated alliance pair, nothing else — the curated score must
+    // NOT inherit the legacy metric's saturation.
+    expect(recap.beats.filter((b) => b.kind === "alliance").length).toBe(1);
+    expect(recap.curatedDramaScore).toBeLessThanOrEqual(15);
+    expect(recap.curatedDramaScore).toBeLessThan(dramaReport.dramaScore);
+  });
+
+  it("scores a genuine multi-pair betrayal-heavy match HIGH", () => {
+    const totalTurns = 20_000;
+    const records: AgentDecisionRecord[] = [];
+    let sequence = 0;
+
+    // Four distinct betrayal arcs (form once, break once) across four
+    // separate pairs — real, non-churned political beats.
+    const betrayalPairs: readonly [string, string, string, string][] = [
+      ["b1", "Bishop1", "b2", "Bishop2"],
+      ["b3", "Bishop3", "b4", "Bishop4"],
+      ["b5", "Bishop5", "b6", "Bishop6"],
+      ["b7", "Bishop7", "b8", "Bishop8"],
+    ];
+    let arcTurn = 1000;
+    for (const [aID, aName, bID, bName] of betrayalPairs) {
+      sequence += 1;
+      records.push(record(sequence, arcTurn, aID, aName, `p-${aID}`, "alliance_request", { recipientID: `p-${bID}`, recipientName: bName }));
+      sequence += 1;
+      records.push(record(sequence, arcTurn + 1, bID, bName, `p-${bID}`, "alliance_request", { recipientID: `p-${aID}`, recipientName: aName }));
+      sequence += 1;
+      records.push(record(sequence, arcTurn + 50, aID, aName, `p-${aID}`, "break_alliance", { recipientID: `p-${bID}`, recipientName: bName }));
+      arcTurn += 100;
+    }
+
+    // Six distinct first-strike attackers against one victim, plus a
+    // repeat attack from the first attacker late in the match, inside the
+    // final-confrontation window (last 400 of 20,000 turns).
+    const attackerIDs = ["f1", "f2", "f3", "f4", "f5", "f6"];
+    attackerIDs.forEach((attackerID, i) => {
+      sequence += 1;
+      records.push(record(sequence, 2000 + i * 10, attackerID, `Foe${i + 1}`, `p-${attackerID}`, "attack", { targetID: "p-victim", targetName: "Victim" }));
+    });
+    sequence += 1;
+    records.push(record(sequence, totalTurns - 300, "f1", "Foe1", "p-f1", "attack", { targetID: "p-victim", targetName: "Victim" }));
+
+    const roster = [
+      ...betrayalPairs.flatMap(([aID, aName, bID, bName]) => [
+        { agentID: aID, username: aName, profile: "diplomatic" as const, clientID: `c${aID}`, brainType: "planner-executor" as const },
+        { agentID: bID, username: bName, profile: "diplomatic" as const, clientID: `c${bID}`, brainType: "planner-executor" as const },
+      ]),
+      { agentID: "victim", username: "Victim", profile: "defensive" as const, clientID: "cv", brainType: "planner-executor" as const },
+      ...attackerIDs.map((id, i) => ({ agentID: id, username: `Foe${i + 1}`, profile: "aggressive" as const, clientID: `c${id}`, brainType: "planner-executor" as const })),
+      { agentID: "e1", username: "Elim1", profile: "defensive" as const, clientID: "ce1", brainType: "planner-executor" as const },
+      { agentID: "e2", username: "Elim2", profile: "defensive" as const, clientID: "ce2", brainType: "planner-executor" as const },
+      { agentID: "e3", username: "Elim3", profile: "defensive" as const, clientID: "ce3", brainType: "planner-executor" as const },
+    ];
+    const players = roster.map((entry) => ({
+      agentID: entry.agentID,
+      username: entry.username,
+      isAlive: !["e1", "e2", "e3"].includes(entry.agentID),
+    }));
+    const telemetry = buildAgentSpectatorTelemetry({
+      runID: "run-betrayal-heavy",
+      records,
+      roster,
+      finalState: finalState(totalTurns, players),
+    });
+    const recap = buildAgentMatchRecap({ runID: "run-betrayal-heavy", telemetry, finalTurnCount: totalTurns });
+    expect(recap).not.toBeNull();
+    if (recap === null) return;
+    expect(recap.beats.filter((b) => b.kind === "betrayal").length).toBe(4);
+    expect(recap.beats.filter((b) => b.kind === "elimination").length).toBe(3);
+    expect(recap.beats.some((b) => b.kind === "final_confrontation")).toBe(true);
+    expect(recap.curatedDramaScore).toBeGreaterThanOrEqual(90);
+    expect(recap.curatedDramaScore).toBeLessThanOrEqual(100);
+  });
+
+  it("ships a non-empty, formula-describing methodology string", () => {
+    const totalTurns = 10_000;
+    const telemetry = buildAgentSpectatorTelemetry({
+      runID: "run-methodology",
+      records: dramaticRecords(totalTurns),
+      roster: ROSTER,
+      finalState: finalState(totalTurns, [
+        { agentID: "a1", username: "Atlas", isAlive: true },
+        { agentID: "a2", username: "Blitz", isAlive: true },
+        { agentID: "a3", username: "Cinder", isAlive: false },
+      ]),
+    });
+    const recap = buildAgentMatchRecap({ runID: "run-methodology", telemetry, finalTurnCount: totalTurns });
+    expect(recap).not.toBeNull();
+    if (recap === null) return;
+    expect(recap.curatedDramaScoreMethodology.length).toBeGreaterThan(20);
+    expect(recap.curatedDramaScoreMethodology).toContain("betrayal");
   });
 });

@@ -70,17 +70,23 @@ export type MatchNarrativeGenerationOutcome =
       dramaScore: number;
       entertainmentGrade: string;
       recapBeatCount: number;
+      /** `AgentMatchRecap.ts`'s `curatedDramaScore` — the PUBLIC ranking input (see that module's doc). `null` only when the curated pass found zero beats (a genuinely quiet match, `match-recap.json` legitimately not written) — never a fabricated 0 conflated with "unavailable" versus "quiet". */
+      curatedDramaScore: number | null;
     }
   | {
       status: "generated-recap-only";
       source: "spectator-telemetry" | "decisions-log";
       recapBeatCount: number;
+      /** See the `"generated"` variant's doc — same field, populated independent of `drama-report.json`/`match-story.json` since this variant never generates those. */
+      curatedDramaScore: number | null;
     }
   | {
       /** `drama-report.json`/`match-story.json` already existed and stayed untouched; ONLY `match-recap.json` was recomputed because its `schemaVersion` was stale (see `AgentMatchRecap.ts`'s 2026-08-01 fix) or it was missing entirely. */
       status: "recap-upgraded";
       source: "spectator-telemetry" | "decisions-log";
       recapBeatCount: number;
+      /** See the `"generated"` variant's doc. */
+      curatedDramaScore: number | null;
     }
   | { status: "failed"; error: string };
 
@@ -177,6 +183,7 @@ async function upgradeStaleRecap(
     status: "recap-upgraded",
     source: evidence.source,
     recapBeatCount: recap?.beats.length ?? 0,
+    curatedDramaScore: recap?.curatedDramaScore ?? null,
   };
 }
 
@@ -278,6 +285,7 @@ export async function generateMatchNarrativeArtifactsForRunDir(
           status: "generated-recap-only",
           source: evidence.source,
           recapBeatCount: recap?.beats.length ?? 0,
+          curatedDramaScore: recap?.curatedDramaScore ?? null,
         },
       };
     }
@@ -314,6 +322,7 @@ export async function generateMatchNarrativeArtifactsForRunDir(
         dramaScore: dramaReport.dramaScore,
         entertainmentGrade: matchStory.grade,
         recapBeatCount: recap?.beats.length ?? 0,
+        curatedDramaScore: recap?.curatedDramaScore ?? null,
       },
     };
   } catch (error) {

@@ -19,6 +19,7 @@ import type {
 } from "./AgentDecisionLogWriter";
 import type { AgentDecisionRecord, LegalActionKind } from "./AgentTypes";
 import { buildDirectorCutPlan, type DirectorCutPlan } from "./DirectorCutPlan";
+import { AGENT_MATCH_RECAP_SCHEMA_VERSION } from "./AgentMatchRecap";
 
 /**
  * Pure transforms from Coworld Observatory read-API JSON (as emitted by the
@@ -763,16 +764,25 @@ export function buildEpisodeRow(input: {
   /**
    * Product overhaul spec Stage "drama recaps" gap closure — the mirror-side
    * sibling of `directorCut` above, SAME optional/additive/disk-resolved-by-
-   * the-caller shape: a compact `{dramaScore, entertainmentGrade}` summary
-   * of `drama-report.json`/`match-story.json` when both exist on disk for
-   * this run (`CoworldLeagueMatchNarrativeBackfill.ts`), null/omitted
+   * the-caller shape: a compact evidence summary of `drama-report.json`/
+   * `match-story.json`/`match-recap.json` when at least one exists on disk
+   * for this run (`CoworldLeagueMatchNarrativeBackfill.ts`), null/omitted
    * otherwise. Ranking/evidence signal only — never recap prose (the recap
    * itself is the separate, event-derived `match-recap.json` /
-   * `LeagueEpisodeRecap`, unrelated to this scalar pair).
+   * `LeagueEpisodeRecap`, unrelated to these scalars).
+   *
+   * `dramaScore`/`entertainmentGrade` are the legacy `AgentDramaReport`/
+   * `AgentMatchStory` pair, requiring BOTH those reports (unchanged).
+   * `curatedDramaScore` is the PUBLIC ranking input (see
+   * `AgentMatchRecap.ts`'s doc) resolved independently from
+   * `match-recap.json` — `null` when that artifact is missing, stale, or
+   * (a genuinely quiet match) never written, distinct from `dramaScore`
+   * being present without it during the upgrade transition window.
    */
   dramaEvidence?: {
     dramaScore: number;
     entertainmentGrade: string;
+    curatedDramaScore: number | null;
   } | null;
 }): CoworldLeagueEpisodeRow {
   const { meta, replay } = input;
@@ -1110,6 +1120,43 @@ export function parseMatchNarrativeSummary(
     return null;
   }
   return { dramaScore, entertainmentGrade };
+}
+
+/**
+ * Parses `match-recap.json` raw content into just `curatedDramaScore` —
+ * the PUBLIC "best battles" ranking input (see `AgentMatchRecap.ts`'s own
+ * doc for the formula) — independent of `parseMatchNarrativeSummary`
+ * above, so a run can carry a curated score even in the
+ * `generated-recap-only` case (no `drama-report.json`/`match-story.json`
+ * at all — see `CoworldLeagueMatchNarrativeBackfill.ts`'s doc for when
+ * that happens). `null` whenever the recap is missing, unparseable, or
+ * stamped with a `schemaVersion` older than
+ * `AGENT_MATCH_RECAP_SCHEMA_VERSION` (a pre-curated-score artifact
+ * awaiting `upgradeStaleRecap` — the SAME staleness rule
+ * `recapNeedsRegeneration` already applies elsewhere) — never a
+ * fabricated 0. A genuinely quiet match (curated pass found zero beats)
+ * has no `match-recap.json` at all and also resolves to `null` here —
+ * the caller cannot distinguish "quiet" from "not generated yet" from
+ * this function alone, which is correct: only
+ * `MatchNarrativeGenerationOutcome` (in-memory, same generation cycle)
+ * knows which one actually happened.
+ */
+export function parseCuratedDramaScore(matchRecapRaw: string): number | null {
+  let value: unknown;
+  try {
+    value = JSON.parse(matchRecapRaw);
+  } catch {
+    return null;
+  }
+  const record = asRecord(value);
+  if (record === null || record.schemaVersion !== AGENT_MATCH_RECAP_SCHEMA_VERSION) {
+    return null;
+  }
+  const curatedDramaScore = asNumber(record.curatedDramaScore);
+  if (curatedDramaScore === null || curatedDramaScore < 0) {
+    return null;
+  }
+  return curatedDramaScore;
 }
 
 // ---------------------------------------------------------------------------

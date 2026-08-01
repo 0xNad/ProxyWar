@@ -222,7 +222,7 @@ describe("lobby-page hero states", () => {
     expect(el.textContent?.toLowerCase()).not.toContain("drama");
   });
 
-  it("state C: picks the highest-dramaScore match within the recency window, not the most recent one", async () => {
+  it("state C: picks the highest-curatedDramaScore match within the recency window, not the most recent one", async () => {
     stubReadModelFetch(
       readModel({
         matches: [
@@ -237,14 +237,14 @@ describe("lobby-page hero states", () => {
             completedAt: "2026-07-06T00:00:00.000Z",
             fullRenderHref: "/ai-league-replay/highest-drama",
             map: "HighDramaMap",
-            dramaEvidence: { dramaScore: 92, entertainmentGrade: "lively" },
+            dramaEvidence: { curatedDramaScore: 92, entertainmentGrade: "lively" },
           }),
           match({
             matchId: "lower-drama",
             completedAt: "2026-07-07T00:00:00.000Z",
             fullRenderHref: "/ai-league-replay/lower-drama",
             map: "LowerDramaMap",
-            dramaEvidence: { dramaScore: 30, entertainmentGrade: "flat" },
+            dramaEvidence: { curatedDramaScore: 30, entertainmentGrade: "flat" },
           }),
         ],
       }),
@@ -263,7 +263,37 @@ describe("lobby-page hero states", () => {
     );
   });
 
-  it("state C: never dredges up an old high-dramaScore match outside the bounded recency window", async () => {
+  it("state C: a mid-upgrade match (dramaEvidence present, curatedDramaScore still null) is treated as unscored -- no badge, falls back to recency", async () => {
+    stubReadModelFetch(
+      readModel({
+        matches: [
+          match({
+            matchId: "mid-upgrade",
+            completedAt: "2026-07-08T00:00:00.000Z",
+            fullRenderHref: "/ai-league-replay/mid-upgrade",
+            map: "TransitioningMap",
+            dramaEvidence: { curatedDramaScore: null, entertainmentGrade: "lively" },
+          }),
+          match({
+            matchId: "older",
+            completedAt: "2026-07-01T00:00:00.000Z",
+            fullRenderHref: "/ai-league-replay/older",
+            map: "OlderMap",
+          }),
+        ],
+      }),
+    );
+    const el = mount();
+    await flushMicrotasks();
+    const hero = el.querySelector('[aria-label="lobby.hero_aria_label"]');
+    // No scored match in the window -- falls back to the most recent
+    // watchable match (the exact prior, purely-recency behavior), and
+    // never renders a badge for the unscored mid-upgrade evidence.
+    expect(hero?.textContent).toContain("TransitioningMap");
+    expect(hero?.textContent).not.toContain("lobby.high_drama_badge");
+  });
+
+  it("state C: never dredges up an old high-curatedDramaScore match outside the bounded recency window", async () => {
     const windowMatches = Array.from({ length: 8 }, (_, i) =>
       match({
         matchId: `recent-${i}`,
@@ -281,7 +311,7 @@ describe("lobby-page hero states", () => {
             completedAt: "2026-01-01T00:00:00.000Z",
             fullRenderHref: "/ai-league-replay/old-high-drama",
             map: "StaleHighDramaMap",
-            dramaEvidence: { dramaScore: 99, entertainmentGrade: "lively" },
+            dramaEvidence: { curatedDramaScore: 99, entertainmentGrade: "lively" },
           }),
         ],
       }),
@@ -339,7 +369,7 @@ describe("lobby-page below-hero modules", () => {
     expect(agentsToWatch?.textContent).not.toContain("One Win Only");
   });
 
-  it("Agents to watch: ties on win count are broken by the highest dramaEvidence.dramaScore among that agent's wins", async () => {
+  it("Agents to watch: ties on win count are broken by the highest dramaEvidence.curatedDramaScore among that agent's wins", async () => {
     const agents = [
       agent({ slug: "low-drama", displayName: "Low Drama Agent" }),
       agent({ slug: "high-drama", displayName: "High Drama Agent" }),
@@ -348,13 +378,13 @@ describe("lobby-page below-hero modules", () => {
       match({
         matchId: "m1",
         winnerAgentSlug: "high-drama",
-        dramaEvidence: { dramaScore: 88, entertainmentGrade: "lively" },
+        dramaEvidence: { curatedDramaScore: 88, entertainmentGrade: "lively" },
       }),
       match({ matchId: "m2", winnerAgentSlug: "high-drama" }),
       match({
         matchId: "m3",
         winnerAgentSlug: "low-drama",
-        dramaEvidence: { dramaScore: 40, entertainmentGrade: "flat" },
+        dramaEvidence: { curatedDramaScore: 40, entertainmentGrade: "flat" },
       }),
       match({ matchId: "m4", winnerAgentSlug: "low-drama" }),
     ];
@@ -388,7 +418,7 @@ describe("lobby-page below-hero modules", () => {
     );
   });
 
-  it("Recent broadcasts: a lower-recency, higher-dramaScore match within the window displaces the 3rd most recent unscored match, then displays newest-first", async () => {
+  it("Recent broadcasts: a lower-recency, higher-curatedDramaScore match within the window displaces the 3rd most recent unscored match, then displays newest-first", async () => {
     const matches = [
       match({
         matchId: "m1",
@@ -409,7 +439,7 @@ describe("lobby-page below-hero modules", () => {
         matchId: "m4",
         completedAt: "2026-07-01T00:00:00.000Z",
         map: "DramaWinner",
-        dramaEvidence: { dramaScore: 95, entertainmentGrade: "lively" },
+        dramaEvidence: { curatedDramaScore: 95, entertainmentGrade: "lively" },
       }),
     ];
     stubReadModelFetch(readModel({ matches }));

@@ -3,6 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, test } from "vitest";
 import { runFeatureCandidatesCli } from "../../src/scripts/feature-candidates";
+import { AGENT_MATCH_RECAP_SCHEMA_VERSION } from "../../src/server/agents/AgentMatchRecap";
 import type {
   CoworldLeagueEpisodePlayerRow,
   CoworldLeagueEpisodeRow,
@@ -343,6 +344,106 @@ describe("feature:candidates CLI", () => {
         note.includes("match-story.json not found"),
       ),
     ).toBe(true);
+  });
+
+  test("prefers match-recap.json's curated drama score over drama-report.json's legacy composite, and falls back honestly with the distinction visible when no recap exists", async () => {
+    // A: both drama-report.json (legacy, high raw score) AND a CURRENT
+    // match-recap.json (curated, lower deduped score) -- curated wins.
+    await writeRunArtifact("league-coworld-both", "drama-report.json", {
+      dramaScore: 97,
+      dramaGrade: "dramatic",
+    });
+    await writeRunArtifact("league-coworld-both", "match-recap.json", {
+      schemaVersion: AGENT_MATCH_RECAP_SCHEMA_VERSION,
+      runID: "league-coworld-both",
+      generatedAt: "2026-08-01T00:00:00.000Z",
+      summary: "This match featured 1 alliance.",
+      beats: [{ turnNumber: 5, kind: "alliance", message: "x and y form an alliance." }],
+      curatedDramaScore: 22,
+      curatedDramaScoreMethodology: "betrayal beats x20 ...",
+    });
+    // B: ONLY drama-report.json (legacy) -- honest fallback, distinction visible.
+    await writeRunArtifact("league-coworld-legacy-only", "drama-report.json", {
+      dramaScore: 55,
+      dramaGrade: "lively",
+    });
+    // C: a STALE (pre-fix schema) match-recap.json alongside drama-report.json
+    // -- treated exactly like "no recap", never trusted at a stale formula.
+    await writeRunArtifact("league-coworld-stale-recap", "drama-report.json", {
+      dramaScore: 61,
+      dramaGrade: "lively",
+    });
+    await writeRunArtifact("league-coworld-stale-recap", "match-recap.json", {
+      schemaVersion: AGENT_MATCH_RECAP_SCHEMA_VERSION - 1,
+      runID: "league-coworld-stale-recap",
+      generatedAt: "2026-01-01T00:00:00.000Z",
+      summary: "stale pre-fix summary",
+      beats: [{ turnNumber: 1, kind: "alliance", message: "stale" }],
+    });
+
+    await writeMirrorData([
+      episode({
+        episodeRequestId: "ereq_both",
+        watchHref: "/ai-league-runs/league-coworld-both/spectator.html",
+        fullRenderHref: "/ai-league-replay/league-coworld-both",
+        players: [player({ slot: 0, name: "Solo", isWinner: true, isAlive: true })],
+      }),
+      episode({
+        episodeRequestId: "ereq_legacy_only",
+        watchHref: "/ai-league-runs/league-coworld-legacy-only/spectator.html",
+        fullRenderHref: "/ai-league-replay/league-coworld-legacy-only",
+        players: [player({ slot: 0, name: "Solo", isWinner: true, isAlive: true })],
+      }),
+      episode({
+        episodeRequestId: "ereq_stale_recap",
+        watchHref: "/ai-league-runs/league-coworld-stale-recap/spectator.html",
+        fullRenderHref: "/ai-league-replay/league-coworld-stale-recap",
+        players: [player({ slot: 0, name: "Solo", isWinner: true, isAlive: true })],
+      }),
+    ]);
+
+    expect(
+      await runFeatureCandidatesCli(
+        [`--artifacts-root=${artifactsRoot}`, "--json"],
+        io(),
+      ),
+    ).toBe(0);
+    const output = JSON.parse(stdout.join("\n")) as {
+      candidates: Array<{
+        dramaScoreSource: "curated" | "legacy" | null;
+        match: {
+          episodeRequestId: string | null;
+          evidence: { dramaScore: number | null; dramaGrade: string | null; notes: string[] };
+        };
+      }>;
+    };
+    const byId = new Map(
+      output.candidates.map((c) => [c.match.episodeRequestId, c]),
+    );
+
+    const both = byId.get("ereq_both")!;
+    expect(both.dramaScoreSource).toBe("curated");
+    expect(both.match.evidence.dramaScore).toBe(22); // curated, NOT the legacy 97
+    expect(
+      both.match.evidence.notes.some((note) =>
+        note.includes("CURATED") && note.includes("match-recap.json"),
+      ),
+    ).toBe(true);
+
+    const legacyOnly = byId.get("ereq_legacy_only")!;
+    expect(legacyOnly.dramaScoreSource).toBe("legacy");
+    expect(legacyOnly.match.evidence.dramaScore).toBe(55);
+    expect(
+      legacyOnly.match.evidence.notes.some((note) =>
+        note.includes("LEGACY") && note.includes("curated score is unavailable"),
+      ),
+    ).toBe(true);
+
+    const staleRecap = byId.get("ereq_stale_recap")!;
+    // A pre-fix-schema recap must never be trusted as curated -- honest
+    // fallback to legacy, same as no recap existing at all.
+    expect(staleRecap.dramaScoreSource).toBe("legacy");
+    expect(staleRecap.match.evidence.dramaScore).toBe(61);
   });
 
   test("never populates queueItemName/scheduledAt/revealAt for an archive-lane record", async () => {

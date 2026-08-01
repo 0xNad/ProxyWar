@@ -19,6 +19,7 @@ import {
   type FeaturedMatchParticipant,
   type FeaturedMatchResult,
 } from "../server/agents/FeaturedMatch";
+import { AGENT_MATCH_RECAP_SCHEMA_VERSION } from "../server/agents/AgentMatchRecap";
 import { resolveAgentIdentityView } from "../server/identity/IdentityMatching";
 import {
   loadIdentityRegistrySnapshot,
@@ -94,6 +95,17 @@ export interface RankedFeatureCandidate {
   artifactDirectory: string | null;
   dramaArtifactFound: boolean;
   matchStoryArtifactFound: boolean;
+  /**
+   * 2026-08-01 "best battles" ranking fix: which source `match.evidence.
+   * dramaScore`/`dramaGrade` actually came from — `"curated"` when
+   * `match-recap.json`'s deduped `curatedDramaScore` was available (the
+   * preferred, non-inflatable score — see `AgentMatchRecap.ts`'s doc),
+   * `"legacy"` when this run only has the raw, un-deduped
+   * `drama-report.json` composite (an honest fallback, visible here and
+   * in `evidence.notes` rather than silently blended with curated runs),
+   * `null` when neither exists for this run.
+   */
+  dramaScoreSource: "curated" | "legacy" | null;
 }
 
 function parseArgs(argv: readonly string[]): CliOptions {
@@ -228,21 +240,75 @@ function findArtifactDirectory(
   return runKey === null ? null : path.join(runsRootDir, runKey);
 }
 
+/**
+ * Reads and validates `match-recap.json`'s `curatedDramaScore` — the
+ * PUBLIC "best battles" ranking score (deduped alliance/betrayal/
+ * elimination/final-clash beats, see `AgentMatchRecap.ts`'s own doc for
+ * the formula) — preferred over `drama-report.json`'s legacy raw
+ * composite when available. Same narrow-field-validation rationale as
+ * {@link readDramaEvidence}: a mirror-side format drift, or a pre-fix
+ * artifact stamped with an older `schemaVersion` (awaiting
+ * `upgradeStaleRecap`), degrades to "absent" — an honest fallback to the
+ * legacy score, never a stale-formula score silently ranking matches.
+ */
+async function readCuratedDramaScore(filePath: string): Promise<number | null> {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(await fs.readFile(filePath, "utf8"));
+  } catch {
+    return null;
+  }
+  if (
+    typeof parsed !== "object" ||
+    parsed === null ||
+    !("schemaVersion" in parsed) ||
+    parsed.schemaVersion !== AGENT_MATCH_RECAP_SCHEMA_VERSION ||
+    !("curatedDramaScore" in parsed) ||
+    typeof parsed.curatedDramaScore !== "number"
+  ) {
+    return null;
+  }
+  return parsed.curatedDramaScore;
+}
+
+/**
+ * Mirrors `AgentDramaReport.ts`'s private `dramaGradeFor` thresholds
+ * exactly (flat < 15, mild < 40, lively < 70, else dramatic) so a curated
+ * score gets a grade label in the same vocabulary a legacy score would.
+ * Duplicated rather than imported: that module is deliberately left
+ * untouched by this fix (see its own class doc) and doesn't export the
+ * helper. Presentation labeling only — never fed back into either
+ * score's own math.
+ */
+function curatedDramaGradeFor(score: number): string {
+  if (score < 15) return "flat";
+  if (score < 40) return "mild";
+  if (score < 70) return "lively";
+  return "dramatic";
+}
+
 function buildEvidence(
   row: CoworldLeagueEpisodeRow,
   drama: DramaEvidence | null,
   story: StoryEvidence | null,
+  curated: number | null,
   directory: string | null,
 ): FeaturedMatchEvidence {
   const notes: string[] = [];
 
   let dramaScore: number | null = null;
   let dramaGrade: string | null = null;
-  if (drama !== null) {
+  if (curated !== null) {
+    dramaScore = curated;
+    dramaGrade = curatedDramaGradeFor(curated);
+    notes.push(
+      `drama score ${curated} (${dramaGrade}) read from match-recap.json's CURATED public "best battles" ranking score (deduped alliance/betrayal/elimination/final-clash beats — see AgentMatchRecap.ts) in the episode's mirrored run directory; preferred over drama-report.json's legacy composite`,
+    );
+  } else if (drama !== null) {
     dramaScore = drama.dramaScore;
     dramaGrade = drama.dramaGrade;
     notes.push(
-      `drama score ${drama.dramaScore} (${drama.dramaGrade}) read from drama-report.json in the episode's mirrored run directory`,
+      `drama score ${drama.dramaScore} (${drama.dramaGrade}) read from drama-report.json's LEGACY raw composite in the episode's mirrored run directory — match-recap.json's curated score is unavailable for this run (not yet generated/upgraded, or the curated pass found nothing story-worthy); this raw composite is un-deduped and can overstate churn-heavy matches (see AgentDramaReport.ts's own doc), so treat it as a lower-confidence fallback signal`,
     );
   } else if (directory === null) {
     notes.push(
@@ -250,7 +316,7 @@ function buildEvidence(
     );
   } else {
     notes.push(
-      `drama-report.json not found under ${directory} — hosted Coworld league episodes are downloaded via the league mirror, which never runs the drama scorer (that scorer only runs for locally-run matches); this is expected, not a defect`,
+      `drama-report.json not found (and match-recap.json's curated score is also unavailable) under ${directory} — hosted Coworld league episodes are downloaded via the league mirror, which never runs the drama scorer/curator until the narrative backfill reaches this run; this is expected, not a defect`,
     );
   }
 
@@ -422,15 +488,18 @@ async function buildCandidate(
   now: Date,
 ): Promise<Omit<RankedFeatureCandidate, "rank">> {
   const directory = findArtifactDirectory(row, runsRootDir);
-  const [drama, story] = await Promise.all([
+  const [drama, story, curated] = await Promise.all([
     directory === null
       ? Promise.resolve(null)
       : readDramaEvidence(path.join(directory, "drama-report.json")),
     directory === null
       ? Promise.resolve(null)
       : readStoryEvidence(path.join(directory, "match-story.json")),
+    directory === null
+      ? Promise.resolve(null)
+      : readCuratedDramaScore(path.join(directory, "match-recap.json")),
   ]);
-  const evidence = buildEvidence(row, drama, story, directory);
+  const evidence = buildEvidence(row, drama, story, curated, directory);
   const nowIso = now.toISOString();
   const match = FeaturedMatchSchema.parse({
     schemaVersion: 1,
@@ -465,6 +534,7 @@ async function buildCandidate(
     artifactDirectory: directory,
     dramaArtifactFound: drama !== null,
     matchStoryArtifactFound: story !== null,
+    dramaScoreSource: curated !== null ? "curated" : drama !== null ? "legacy" : null,
   };
 }
 
@@ -519,6 +589,7 @@ function formatTable(ranked: readonly RankedFeatureCandidate[]): string {
       candidate.severelyDegraded ? "DEGRADED" : "",
       candidate.dramaArtifactFound ? "" : "no-drama",
       candidate.matchStoryArtifactFound ? "" : "no-story",
+      candidate.dramaScoreSource === "legacy" ? "legacy-drama" : "",
     ]
       .filter((flag) => flag !== "")
       .join(",");

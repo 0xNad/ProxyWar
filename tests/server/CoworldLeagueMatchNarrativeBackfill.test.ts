@@ -281,9 +281,17 @@ describe("generateMatchNarrativeArtifactsForRunDir", () => {
     const upgraded = JSON.parse(await fs.readFile(recapPath, "utf8")) as {
       schemaVersion: number;
       summary: string;
+      curatedDramaScore: number;
     };
     expect(upgraded.schemaVersion).toBe(AGENT_MATCH_RECAP_SCHEMA_VERSION);
     expect(upgraded.summary).not.toBe("stale pre-fix summary");
+    // The whole point of the 2 -> 3 bump: a pre-fix artifact (which never
+    // had this field at all) now carries the curated public ranking score.
+    expect(typeof upgraded.curatedDramaScore).toBe("number");
+    expect(second.outcome).toMatchObject({ status: "recap-upgraded" });
+    if (second.outcome.status === "recap-upgraded") {
+      expect(second.outcome.curatedDramaScore).toBe(upgraded.curatedDramaScore);
+    }
 
     // A THIRD call, with the recap now current, is a free already-exists —
     // proving the upgrade converges (never re-upgrades every cycle).

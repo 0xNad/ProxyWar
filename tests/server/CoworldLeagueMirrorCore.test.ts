@@ -1,6 +1,7 @@
 import { readFileSync } from "node:fs";
 import path from "node:path";
 import { describe, expect, test } from "vitest";
+import { AGENT_MATCH_RECAP_SCHEMA_VERSION } from "../../src/server/agents/AgentMatchRecap";
 import {
   activeChampionPolicyLabelsByPlayerId,
   buildCoworldReplayUiArtifact,
@@ -14,6 +15,7 @@ import {
   parseDirectorCutPlanSummary,
   parseHostedReplayPayload,
   parseLeagueSummary,
+  parseCuratedDramaScore,
   parseMatchNarrativeSummary,
   parseMirroredSpectatorTelemetry,
   pickCompetitionDivision,
@@ -866,11 +868,12 @@ describe("revealed-premiere battle-card links (every round premieres, 2026-07-22
     };
     const withEvidence = buildEpisodeRow({
       ...base,
-      dramaEvidence: { dramaScore: 62, entertainmentGrade: "lively" },
+      dramaEvidence: { dramaScore: 62, entertainmentGrade: "lively", curatedDramaScore: 40 },
     });
     expect(withEvidence.dramaEvidence).toEqual({
       dramaScore: 62,
       entertainmentGrade: "lively",
+      curatedDramaScore: 40,
     });
     // Absent or null input leaves the field entirely OFF the row — the
     // common case until the budgeted backfill has reached a given run.
@@ -996,6 +999,45 @@ describe("parseMatchNarrativeSummary (drama recaps gap closure)", () => {
         validDramaReport(),
         JSON.stringify({ entertainmentScore: 40 }),
       ),
+    ).toBeNull();
+  });
+});
+
+describe("parseCuratedDramaScore (best-battles ranking fix)", () => {
+  const validRecap = (overrides: Record<string, unknown> = {}) =>
+    JSON.stringify({
+      schemaVersion: AGENT_MATCH_RECAP_SCHEMA_VERSION,
+      runID: "run-1",
+      generatedAt: "2026-08-01T00:00:00.000Z",
+      summary: "This match featured 1 betrayal.",
+      beats: [{ turnNumber: 5, kind: "betrayal", message: "x betrays y." }],
+      curatedDramaScore: 42,
+      curatedDramaScoreMethodology: "betrayal beats x20 ...",
+      ...overrides,
+    });
+
+  test("extracts curatedDramaScore from a current-schema recap", () => {
+    expect(parseCuratedDramaScore(validRecap())).toBe(42);
+  });
+
+  test("rejects malformed JSON", () => {
+    expect(parseCuratedDramaScore("not json")).toBeNull();
+  });
+
+  test("rejects a stale schemaVersion — the exact upgrade-transition case", () => {
+    expect(
+      parseCuratedDramaScore(
+        validRecap({ schemaVersion: AGENT_MATCH_RECAP_SCHEMA_VERSION - 1 }),
+      ),
+    ).toBeNull();
+  });
+
+  test("rejects a missing or negative curatedDramaScore", () => {
+    expect(
+      parseCuratedDramaScore(validRecap({ curatedDramaScore: undefined })),
+    ).toBeNull();
+    expect(
+      parseCuratedDramaScore(validRecap({ curatedDramaScore: -1 })),
     ).toBeNull();
   });
 });
