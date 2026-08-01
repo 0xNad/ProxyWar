@@ -37,6 +37,39 @@ function element<K extends keyof HTMLElementTagNameMap>(
   return result;
 }
 
+/**
+ * Shared collapse/expand toggle button for a side panel's heading row (spec
+ * item 1: a side rail must never be permanently half the viewport with no
+ * way to shrink it back — collapse/expand, not drag, is the promised
+ * control). Purely a button + a `data-collapsed` attribute on the section
+ * root; this file stays deliberately style-free, so hiding the body on
+ * collapse is each caller overlay's own CSS rule keyed off that attribute,
+ * exactly like every other `data-*`-driven rule already in this module.
+ * `collapsed`/`onToggle` are CALLER-owned state (same pattern as
+ * `ReplayPremiereOverlayCallbacks`'s `activeDrawerTab`/`analystOpen`) —
+ * this component never persists anything itself.
+ */
+function renderCollapseToggle(
+  className: string,
+  collapsed: boolean,
+  labels: { collapse: string; expand: string },
+  onToggle: () => void,
+): HTMLButtonElement {
+  const toggle = element("button", className) as HTMLButtonElement;
+  toggle.type = "button";
+  toggle.setAttribute("aria-expanded", String(!collapsed));
+  toggle.setAttribute(
+    "aria-label",
+    collapsed ? labels.expand : labels.collapse,
+  );
+  // Monochrome glyphs only (this file's own visual direction: no emojis) —
+  // a caret rather than a symbol pair keeps one glyph doing double duty via
+  // CSS `[aria-expanded]` rotation instead of swapping text content.
+  toggle.textContent = "\u25BE";
+  toggle.addEventListener("click", onToggle);
+  return toggle;
+}
+
 // ---------------------------------------------------------------------------
 // Left competitor rail
 // ---------------------------------------------------------------------------
@@ -78,6 +111,9 @@ export interface CompetitorRailCallbacks {
    * non-interactive rail (e.g. a context with no game view attached).
    */
   onSelect?: (playerName: string) => void;
+  /** Collapse/expand (spec item 1). Omit `onToggleCollapsed` to render a rail with no toggle at all (always expanded) — see `renderCollapseToggle`'s own doc for the caller-owned-state contract. */
+  collapsed?: boolean;
+  onToggleCollapsed?: () => void;
 }
 
 export function renderCompetitorRail(
@@ -86,12 +122,33 @@ export function renderCompetitorRail(
 ): HTMLElement {
   const aside = element("aside", "broadcast-rail");
   aside.setAttribute("aria-label", translateText("broadcast.rail_heading"));
-  const heading = element(
-    "h3",
-    "broadcast-rail-heading",
-    translateText("broadcast.rail_heading"),
+  const collapsible = callbacks.onToggleCollapsed !== undefined;
+  const collapsed = collapsible && callbacks.collapsed === true;
+  if (collapsible) {
+    aside.dataset.collapsed = String(collapsed);
+  }
+  const headingRow = element("div", "broadcast-rail-heading-row");
+  headingRow.append(
+    element(
+      "h3",
+      "broadcast-rail-heading",
+      translateText("broadcast.rail_heading"),
+    ),
   );
-  aside.append(heading);
+  if (collapsible) {
+    headingRow.append(
+      renderCollapseToggle(
+        "broadcast-rail-collapse-toggle",
+        collapsed,
+        {
+          collapse: translateText("broadcast.rail_collapse"),
+          expand: translateText("broadcast.rail_expand"),
+        },
+        () => callbacks.onToggleCollapsed?.(),
+      ),
+    );
+  }
+  aside.append(headingRow);
   const list = element("ol", "broadcast-rail-list");
   list.setAttribute("role", "list");
   if (entries.length === 0) {
@@ -298,6 +355,9 @@ export interface CuratedWarRoomEvent {
 
 export interface WarRoomFeedCallbacks {
   onJumpToTurn?: (turn: number, sequence: number) => void;
+  /** Collapse/expand (spec item 1). Omit `onToggleCollapsed` to render a feed with no toggle at all (always expanded) — see `renderCollapseToggle`'s own doc for the caller-owned-state contract. */
+  collapsed?: boolean;
+  onToggleCollapsed?: () => void;
 }
 
 export function renderWarRoomFeed(
@@ -305,13 +365,33 @@ export function renderWarRoomFeed(
   callbacks: WarRoomFeedCallbacks = {},
 ): HTMLElement {
   const section = element("section", "broadcast-war-room");
-  section.append(
+  const collapsible = callbacks.onToggleCollapsed !== undefined;
+  const collapsed = collapsible && callbacks.collapsed === true;
+  if (collapsible) {
+    section.dataset.collapsed = String(collapsed);
+  }
+  const headingRow = element("div", "broadcast-war-room-heading-row");
+  headingRow.append(
     element(
       "h3",
       "broadcast-war-room-heading",
       translateText("broadcast.war_room_heading"),
     ),
   );
+  if (collapsible) {
+    headingRow.append(
+      renderCollapseToggle(
+        "broadcast-war-room-collapse-toggle",
+        collapsed,
+        {
+          collapse: translateText("broadcast.war_room_collapse"),
+          expand: translateText("broadcast.war_room_expand"),
+        },
+        () => callbacks.onToggleCollapsed?.(),
+      ),
+    );
+  }
+  section.append(headingRow);
   const list = element("ol", "broadcast-war-room-list");
   list.setAttribute("role", "list");
   if (events.length === 0) {
@@ -420,7 +500,16 @@ export type TimelineMarkerKind =
   | "betrayal"
   | "nuke"
   | "elimination"
-  | "finish";
+  | "finish"
+  /**
+   * Synthetic redaction kind (never produced by a derivation module):
+   * `renderMatchTimeline` itself substitutes this for any marker whose
+   * `turn` is beyond `options.currentTurn`, in place of the marker's real
+   * `kind`/`label`. See `MatchTimelineOptions.currentTurn`'s own doc for
+   * why — a real kind/label ahead of the playhead is itself a spoiler,
+   * independent of whether the turn is seekable.
+   */
+  | "upcoming";
 
 export interface TimelineMarker {
   kind: TimelineMarkerKind;
@@ -441,6 +530,21 @@ export interface MatchTimelineOptions {
    * wires up.
    */
   maxSeekableTurn: number | null;
+  /**
+   * The viewer's own current playhead turn. A marker beyond this turn
+   * renders as a content-free `"upcoming"` tick — real `kind`/`label` are
+   * substituted out of the DOM entirely, not merely hidden by CSS — so a
+   * spoiler (e.g. "BETRAYAL: X betrayed Y" surfaced via the marker's own
+   * hover tooltip) can never leak ahead of playback, even when the marker
+   * stays navigable (Full Replay's `maxSeekableTurn: null` is deliberately
+   * unrestricted — seeking ahead is fine; the marker's CONTENT leaking
+   * before the viewer gets there is not). The `"finish"` kind is exempt —
+   * its label never carries match content, only "the match ends here". Pass
+   * `null` where there is no meaningful playhead concept (an
+   * already-revealed/archived rewatch — see each caller's own doc) to skip
+   * redaction entirely.
+   */
+  currentTurn: number | null;
   onSeek?: (turn: number) => void;
 }
 
@@ -464,17 +568,25 @@ export function renderMatchTimeline(
     const seekable =
       options.maxSeekableTurn === null ||
       marker.turn <= options.maxSeekableTurn;
+    const redact =
+      marker.kind !== "finish" &&
+      options.currentTurn !== null &&
+      marker.turn > options.currentTurn;
+    const kind: TimelineMarkerKind = redact ? "upcoming" : marker.kind;
+    const label = redact
+      ? translateText("broadcast.timeline_marker_upcoming")
+      : marker.label;
     const markerElement = seekable
       ? (element("button", "broadcast-timeline-marker") as HTMLButtonElement)
       : element("span", "broadcast-timeline-marker");
-    markerElement.dataset.kind = marker.kind;
+    markerElement.dataset.kind = kind;
     markerElement.dataset.seekable = String(seekable);
     markerElement.style.setProperty(
       "--broadcast-timeline-position",
       `${positionPercent}%`,
     );
-    markerElement.title = marker.label;
-    markerElement.setAttribute("aria-label", marker.label);
+    markerElement.title = label;
+    markerElement.setAttribute("aria-label", label);
     if (seekable && markerElement instanceof HTMLButtonElement) {
       markerElement.type = "button";
       markerElement.addEventListener("click", () => {

@@ -165,6 +165,29 @@ describe("renderCompetitorRail", () => {
     ) as HTMLButtonElement;
     expect(followedButton.getAttribute("aria-pressed")).toBe("true");
   });
+  it("renders no collapse toggle when onToggleCollapsed is omitted, and sets no dataset.collapsed attribute", () => {
+    const rail = renderCompetitorRail([railEntry()]);
+    document.body.append(rail);
+    expect(rail.querySelector(".broadcast-rail-collapse-toggle")).toBeNull();
+    expect((rail as HTMLElement).dataset.collapsed).toBeUndefined();
+  });
+
+  it("renders a working collapse toggle when onToggleCollapsed is wired, reflecting the caller-owned collapsed flag (spec item 1)", () => {
+    const onToggleCollapsed = vi.fn();
+    const rail = renderCompetitorRail([railEntry()], {
+      collapsed: true,
+      onToggleCollapsed,
+    });
+    document.body.append(rail);
+    expect((rail as HTMLElement).dataset.collapsed).toBe("true");
+    const toggle = rail.querySelector(
+      ".broadcast-rail-collapse-toggle",
+    ) as HTMLButtonElement;
+    expect(toggle).not.toBeNull();
+    expect(toggle.getAttribute("aria-expanded")).toBe("false");
+    toggle.click();
+    expect(onToggleCollapsed).toHaveBeenCalledTimes(1);
+  });
 });
 
 function warRoomEvent(
@@ -241,6 +264,32 @@ describe("renderWarRoomFeed", () => {
     document.body.append(feed);
     expect(feed.querySelector(".broadcast-war-room-detail")).toBeNull();
   });
+
+  it("renders no collapse toggle when onToggleCollapsed is omitted, and sets no dataset.collapsed attribute", () => {
+    const feed = renderWarRoomFeed([warRoomEvent()]);
+    document.body.append(feed);
+    expect(
+      feed.querySelector(".broadcast-war-room-collapse-toggle"),
+    ).toBeNull();
+    expect((feed as HTMLElement).dataset.collapsed).toBeUndefined();
+  });
+
+  it("renders a working collapse toggle when onToggleCollapsed is wired, reflecting the caller-owned collapsed flag (spec item 1)", () => {
+    const onToggleCollapsed = vi.fn();
+    const feed = renderWarRoomFeed([warRoomEvent()], {
+      collapsed: true,
+      onToggleCollapsed,
+    });
+    document.body.append(feed);
+    expect((feed as HTMLElement).dataset.collapsed).toBe("true");
+    const toggle = feed.querySelector(
+      ".broadcast-war-room-collapse-toggle",
+    ) as HTMLButtonElement;
+    expect(toggle).not.toBeNull();
+    expect(toggle.getAttribute("aria-expanded")).toBe("false");
+    toggle.click();
+    expect(onToggleCollapsed).toHaveBeenCalledTimes(1);
+  });
 });
 
 function marker(overrides: Partial<TimelineMarker> = {}): TimelineMarker {
@@ -251,7 +300,7 @@ describe("renderMatchTimeline", () => {
   it("renders one marker element per input marker, positioned proportionally", () => {
     const timeline = renderMatchTimeline(
       [marker({ turn: 50 }), marker({ turn: 100 })],
-      { totalTurns: 200, maxSeekableTurn: null },
+      { totalTurns: 200, maxSeekableTurn: null, currentTurn: null },
     );
     document.body.append(timeline);
     const markers = timeline.querySelectorAll(".broadcast-timeline-marker");
@@ -265,6 +314,7 @@ describe("renderMatchTimeline", () => {
     const timeline = renderMatchTimeline([marker({ turn: 50 })], {
       totalTurns: 200,
       maxSeekableTurn: null,
+      currentTurn: null,
       onSeek,
     });
     document.body.append(timeline);
@@ -279,7 +329,7 @@ describe("renderMatchTimeline", () => {
     const onSeek = vi.fn();
     const timeline = renderMatchTimeline(
       [marker({ turn: 50 }), marker({ turn: 150 })],
-      { totalTurns: 200, maxSeekableTurn: 100, onSeek },
+      { totalTurns: 200, maxSeekableTurn: 100, currentTurn: null, onSeek },
     );
     document.body.append(timeline);
     const markers = timeline.querySelectorAll(".broadcast-timeline-marker");
@@ -290,6 +340,67 @@ describe("renderMatchTimeline", () => {
     // A SPAN has no click handler wired at all — clicking it cannot invoke onSeek.
     (markers[1] as HTMLElement).click();
     expect(onSeek).not.toHaveBeenCalled();
+  });
+
+  it("redacts a marker's kind and label once its turn is beyond currentTurn — content-free ticks ahead of the playhead is the safe default (spec item 2)", () => {
+    const timeline = renderMatchTimeline(
+      [
+        marker({ turn: 50, kind: "betrayal", label: "BETRAYAL: Auri betrayed Beta" }),
+        marker({ turn: 150, kind: "betrayal", label: "BETRAYAL: Gamma betrayed Delta" }),
+      ],
+      { totalTurns: 200, maxSeekableTurn: null, currentTurn: 100 },
+    );
+    document.body.append(timeline);
+    const markers = timeline.querySelectorAll(".broadcast-timeline-marker");
+    // Already reached: full content survives.
+    expect((markers[0] as HTMLElement).dataset.kind).toBe("betrayal");
+    expect(markers[0].getAttribute("title")).toBe("BETRAYAL: Auri betrayed Beta");
+    expect(markers[0].getAttribute("aria-label")).toBe("BETRAYAL: Auri betrayed Beta");
+    // Not reached yet: real kind/label never leak into the DOM at all.
+    expect((markers[1] as HTMLElement).dataset.kind).toBe("upcoming");
+    expect(markers[1].getAttribute("title")).toBe(
+      "broadcast.timeline_marker_upcoming",
+    );
+    expect(markers[1].getAttribute("aria-label")).toBe(
+      "broadcast.timeline_marker_upcoming",
+    );
+    expect(markers[1].textContent).not.toContain("Gamma");
+    expect(markers[1].textContent).not.toContain("Delta");
+  });
+
+  it("still allows seeking a redacted future marker — Full Replay's unrestricted seek stays intact even though its content is hidden", () => {
+    const onSeek = vi.fn();
+    const timeline = renderMatchTimeline(
+      [marker({ turn: 150, kind: "betrayal", label: "BETRAYAL: spoiler" })],
+      { totalTurns: 200, maxSeekableTurn: null, currentTurn: 100, onSeek },
+    );
+    document.body.append(timeline);
+    const el = timeline.querySelector(".broadcast-timeline-marker") as HTMLButtonElement;
+    expect(el.tagName).toBe("BUTTON");
+    el.click();
+    expect(onSeek).toHaveBeenCalledWith(150);
+  });
+
+  it("never redacts the finish marker — its label never carries match content", () => {
+    const timeline = renderMatchTimeline(
+      [marker({ turn: 500, kind: "finish", label: "Match finish" })],
+      { totalTurns: 500, maxSeekableTurn: null, currentTurn: 0 },
+    );
+    document.body.append(timeline);
+    const el = timeline.querySelector(".broadcast-timeline-marker") as HTMLElement;
+    expect(el.dataset.kind).toBe("finish");
+    expect(el.getAttribute("title")).toBe("Match finish");
+  });
+
+  it("skips redaction entirely when currentTurn is null — an already-revealed/archived rewatch has no more spoiler concern", () => {
+    const timeline = renderMatchTimeline(
+      [marker({ turn: 500, kind: "betrayal", label: "BETRAYAL: spoiler" })],
+      { totalTurns: 500, maxSeekableTurn: null, currentTurn: null },
+    );
+    document.body.append(timeline);
+    const el = timeline.querySelector(".broadcast-timeline-marker") as HTMLElement;
+    expect(el.dataset.kind).toBe("betrayal");
+    expect(el.getAttribute("title")).toBe("BETRAYAL: spoiler");
   });
 });
 

@@ -535,6 +535,24 @@ export function mountReplayPremiereOverlay(
   // mutated by a setter that re-renders.
   let activeDrawerTab: BroadcastDrawerTabId = "agents";
   let analystOpen = false;
+  // Collapse/expand (spec item 1): a side rail must never be permanently
+  // half the viewport with no way to shrink it back — same caller-owned
+  // UI-state pattern as activeDrawerTab/analystOpen above, plus
+  // localStorage persistence (try/catch-optional, same idiom
+  // AiLeagueReplayOverlay.ts's own readStoredPanelLayout/persistPanelLayout
+  // already use for THAT overlay's panel layout) so the choice survives a
+  // reload.
+  let railCollapsed = false;
+  let warRoomCollapsed = false;
+  try {
+    railCollapsed =
+      localStorage.getItem(REPLAY_PREMIERE_RAIL_COLLAPSED_KEY) === "true";
+    warRoomCollapsed =
+      localStorage.getItem(REPLAY_PREMIERE_WAR_ROOM_COLLAPSED_KEY) ===
+      "true";
+  } catch {
+    // Collapse-state persistence is optional.
+  }
   // Event handlers read the LATEST model through this accessor instead of the
   // render-time snapshot: volatile-only hydrates keep the same DOM nodes (and
   // therefore the same closures) alive across frames, so a click must see the
@@ -552,6 +570,32 @@ export function mountReplayPremiereOverlay(
     analystOpen,
     toggleAnalystOpen() {
       analystOpen = !analystOpen;
+      render();
+    },
+    railCollapsed,
+    toggleRailCollapsed() {
+      railCollapsed = !railCollapsed;
+      try {
+        localStorage.setItem(
+          REPLAY_PREMIERE_RAIL_COLLAPSED_KEY,
+          String(railCollapsed),
+        );
+      } catch {
+        // Collapse-state persistence is optional.
+      }
+      render();
+    },
+    warRoomCollapsed,
+    toggleWarRoomCollapsed() {
+      warRoomCollapsed = !warRoomCollapsed;
+      try {
+        localStorage.setItem(
+          REPLAY_PREMIERE_WAR_ROOM_COLLAPSED_KEY,
+          String(warRoomCollapsed),
+        );
+      } catch {
+        // Collapse-state persistence is optional.
+      }
       render();
     },
   });
@@ -718,7 +762,7 @@ export function mountReplayPremiereOverlay(
           nextModel,
           callbacks,
           identityByPlayerName,
-          followedPlayerName,
+          currentBroadcastState(),
         );
         if (shouldPatchCaption) {
           const caption = overlay.querySelector<HTMLTextAreaElement>(
@@ -794,6 +838,11 @@ interface BroadcastState {
   /** Analyst mode (spec item 5): the desktop header toggle's own state, separate from `activeDrawerTab` — the mobile Analysis tab is an entry point to the same content, never a second implementation. */
   analystOpen: boolean;
   toggleAnalystOpen(): void;
+  /** Collapse/expand (spec item 1): a side rail must never be permanently half the viewport with no way to shrink it back — localStorage-persisted, see mountReplayPremiereOverlay's own read/write. */
+  railCollapsed: boolean;
+  toggleRailCollapsed(): void;
+  warRoomCollapsed: boolean;
+  toggleWarRoomCollapsed(): void;
 }
 
 /** Latest-model accessor for event handlers (see mountReplayPremiereOverlay). */
@@ -859,7 +908,7 @@ function applyVolatileModelUpdates(
   model: ReplayPremiereOverlayModel,
   callbacks: ReplayPremiereOverlayCallbacks,
   identityByPlayerName: ReadonlyMap<string, PublicAgent> | null,
-  followedPlayerName: string | null,
+  broadcastState: BroadcastState,
 ): void {
   const position = overlay.querySelector<HTMLElement>(".rp-position");
   if (position !== null) {
@@ -895,9 +944,13 @@ function applyVolatileModelUpdates(
         buildCompetitorRailEntries(
           model.competitorRailSeats,
           identityByPlayerName,
-          followedPlayerName,
+          broadcastState.followedPlayerName,
         ),
-        RAIL_CALLBACKS,
+        {
+          ...RAIL_CALLBACKS,
+          collapsed: broadcastState.railCollapsed,
+          onToggleCollapsed: broadcastState.toggleRailCollapsed,
+        },
       );
       nextRail.dataset.seatsKey = nextRailKey;
       rail.replaceWith(nextRail);
@@ -914,6 +967,11 @@ function applyVolatileModelUpdates(
       const nextTimeline = renderMatchTimeline(model.timelineMarkers, {
         totalTurns: model.totalTurns,
         maxSeekableTurn: model.maxSeekableTurn,
+        // Live Premiere: `maxSeekableTurn` already IS the released-edge
+        // boundary (see the model field's own doc); an archived/revealed
+        // rewatch passes `null`, which already means "no more spoiler
+        // concern" for BOTH seekability and marker redaction alike.
+        currentTurn: model.maxSeekableTurn,
         onSeek: callbacks.onSeek,
       });
       nextTimeline.dataset.timelineKey = nextTimelineKey;
@@ -930,6 +988,8 @@ function applyVolatileModelUpdates(
     if (warRoom.dataset.eventsKey !== nextKey) {
       const nextWarRoom = renderWarRoomFeed(model.warRoomEvents, {
         onJumpToTurn: callbacks.onJumpToTurn,
+        collapsed: broadcastState.warRoomCollapsed,
+        onToggleCollapsed: broadcastState.toggleWarRoomCollapsed,
       });
       nextWarRoom.dataset.eventsKey = nextKey;
       warRoom.replaceWith(nextWarRoom);
@@ -1004,6 +1064,15 @@ const RAIL_CALLBACKS: CompetitorRailCallbacks = {
   },
 };
 
+// Collapse/expand persistence (spec item 1) for the broadcast composition's
+// two side panels — read/written inline in mountReplayPremiereOverlay (see
+// railCollapsed/warRoomCollapsed there), same try/catch-optional idiom
+// AiLeagueReplayOverlay.ts's own layout persistence uses.
+const REPLAY_PREMIERE_RAIL_COLLAPSED_KEY =
+  "replay-premiere-broadcast-rail-collapsed-v1";
+const REPLAY_PREMIERE_WAR_ROOM_COLLAPSED_KEY =
+  "replay-premiere-broadcast-war-room-collapsed-v1";
+
 /** States where `renderBroadcastRegions` actually mounts a drawer (see `renderStateBody`) — the analyst toggle only appears when there is something for it to show/hide. */
 const BROADCAST_DRAWER_STATES: ReadonlySet<ReplayPremierePublicState> =
   new Set(["playing", "checkpoint", "revealed", "archived"]);
@@ -1021,16 +1090,25 @@ function renderBroadcastRegions(
       identityByPlayerName,
       broadcastState.followedPlayerName,
     ),
-    RAIL_CALLBACKS,
+    {
+      ...RAIL_CALLBACKS,
+      collapsed: broadcastState.railCollapsed,
+      onToggleCollapsed: broadcastState.toggleRailCollapsed,
+    },
   );
   rail.dataset.seatsKey = JSON.stringify(model.competitorRailSeats);
   const warRoom = renderWarRoomFeed(model.warRoomEvents, {
     onJumpToTurn: callbacks.onJumpToTurn,
+    collapsed: broadcastState.warRoomCollapsed,
+    onToggleCollapsed: broadcastState.toggleWarRoomCollapsed,
   });
   warRoom.dataset.eventsKey = model.warRoomEvents.map((event) => event.id).join(",");
   const timeline = renderMatchTimeline(model.timelineMarkers, {
     totalTurns: model.totalTurns,
     maxSeekableTurn: model.maxSeekableTurn,
+    // See applyVolatileModelUpdates's own comment: `maxSeekableTurn` already
+    // IS the right redaction boundary in every state this drawer mounts in.
+    currentTurn: model.maxSeekableTurn,
     onSeek: callbacks.onSeek,
   });
   timeline.dataset.timelineKey = JSON.stringify([
@@ -4044,6 +4122,13 @@ const OVERLAY_CSS = `
     background: var(--rp-surface);
     padding: 13px;
   }
+  #${OVERLAY_ID} .broadcast-rail-heading-row,
+  #${OVERLAY_ID} .broadcast-war-room-heading-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 6px;
+  }
   #${OVERLAY_ID} .broadcast-rail-heading,
   #${OVERLAY_ID} .broadcast-war-room-heading,
   #${OVERLAY_ID} .broadcast-timeline[aria-label] { margin: 0; }
@@ -4055,6 +4140,43 @@ const OVERLAY_CSS = `
     letter-spacing: 0.07em;
     text-transform: uppercase;
   }
+  /*
+   * Collapse/expand (spec item 1): a side rail must never be permanently
+   * half the viewport with no way to shrink it back — the caret rotates via
+   * [aria-expanded] rather than swapping glyphs.
+   */
+  #${OVERLAY_ID} .broadcast-rail-collapse-toggle,
+  #${OVERLAY_ID} .broadcast-war-room-collapse-toggle {
+    flex: none;
+    width: 22px;
+    height: 22px;
+    line-height: 1;
+    border: 1px solid var(--rp-line-strong);
+    border-radius: var(--rp-r-xs);
+    background: var(--rp-surface-2);
+    color: var(--rp-muted);
+    cursor: pointer;
+    transition: transform 0.15s ease;
+  }
+  #${OVERLAY_ID} .broadcast-rail-collapse-toggle[aria-expanded="false"],
+  #${OVERLAY_ID} .broadcast-war-room-collapse-toggle[aria-expanded="false"] {
+    transform: rotate(-90deg);
+  }
+  #${OVERLAY_ID} .broadcast-rail[data-collapsed="true"] .broadcast-rail-list,
+  #${OVERLAY_ID} .broadcast-war-room[data-collapsed="true"] .broadcast-war-room-list {
+    display: none;
+  }
+  /*
+   * Bounded rail (spec item 1 fix): unlike AiLeagueReplayOverlay.ts's own
+   * floating panels (already viewport-bounded by their own fixed geometry),
+   * this overlay embeds these two lists inline in a single scrolling column
+   * (this overlay's own root is the only scroll container) with no per-list
+   * bound at all — so a match with many curated events or a full roster grew
+   * the War Room section without limit, at times consuming over half the
+   * panel's own height with no way to shrink it back (the actual "War Room
+   * panel takes half the screen" report). A bounded, independently
+   * scrolling ~340px rail — plus the collapse toggle above — is the fix.
+   */
   #${OVERLAY_ID} .broadcast-rail-list,
   #${OVERLAY_ID} .broadcast-war-room-list {
     display: grid;
@@ -4062,6 +4184,10 @@ const OVERLAY_CSS = `
     margin: 9px 0 0;
     padding: 0;
     list-style: none;
+    max-height: 340px;
+    overflow-y: auto;
+    min-height: 0;
+    scrollbar-gutter: stable;
   }
   #${OVERLAY_ID} .broadcast-rail-empty,
   #${OVERLAY_ID} .broadcast-war-room-empty { margin: 0; color: var(--rp-muted); font-size: 12px; }

@@ -1758,6 +1758,11 @@ describe("AiLeagueReplayOverlay", () => {
       mountAiLeagueReplayOverlay({
         runID,
         artifactBasePath: `/ai-league-runs/${runID}`,
+        // High enough to include every curated event below (spec item 2:
+        // the feed windows to the viewer's own playhead) — this test's own
+        // point is curation SELECTIVITY, not windowing; windowing itself is
+        // covered by its own dedicated test below.
+        currentTurn: 999,
         decisions: [
           {
             ...decisionFixture(1),
@@ -1841,6 +1846,10 @@ describe("AiLeagueReplayOverlay", () => {
         artifactBasePath: `/ai-league-runs/${runID}`,
         decisions: [],
         replayMaxTurn: 1_000,
+        // See the War Room curation test's own comment above — high enough
+        // that windowing (spec item 2) never strips a fixture event this
+        // test asserts on.
+        currentTurn: 999,
         spectatorTelemetry: {
           version: 1,
           runID,
@@ -2110,6 +2119,10 @@ describe("AiLeagueReplayOverlay", () => {
       expect(host?.querySelector(".broadcast-lower-third")).toBeNull();
 
       overlay.hydrate({
+        // The playhead must have reached the event's own turn (spec item 2:
+        // windowed to the viewer's own playhead) — hydrate() alone, without
+        // this, must never pulse a turn the viewer hasn't reached yet.
+        currentTurn: 999,
         spectatorTelemetry: {
           version: 1,
           runID,
@@ -2129,6 +2142,85 @@ describe("AiLeagueReplayOverlay", () => {
       expect(pulse?.getAttribute("role")).toBe("status");
     });
 
+
+    it("windows the War Room feed to the viewer's own playhead — a future event never renders until playback reaches its turn (spec item 2)", () => {
+      const runID = "broadcast-windowing-1";
+      mountAiLeagueReplayOverlay({
+        runID,
+        artifactBasePath: `/ai-league-runs/${runID}`,
+        decisions: [],
+        // Deliberately omitted: currentTurn — a fresh/archived-rewatch load
+        // starts at turn 0, exactly "playhead at 0" from the bug report.
+        spectatorTelemetry: {
+          version: 1,
+          runID,
+          agents: [],
+          relationships: [],
+          events: [
+            event(1, 10, "elimination", "war", "a1", "Atlas", null, null, "Atlas is eliminated."),
+            event(2, 500, "elimination", "war", "a2", "Blitz", null, null, "Blitz is eliminated."),
+          ],
+          communicationThreads: [],
+          timelineBuckets: [],
+        },
+      });
+
+      const warRoom = document.querySelector(".broadcast-war-room");
+      // At turn 0, NEITHER curated event (turn 10, turn 500) has happened yet.
+      expect(warRoom?.querySelectorAll(".broadcast-war-room-item")).toHaveLength(0);
+      expect(warRoom?.textContent).toContain("broadcast.war_room_empty");
+
+      // Advancing to turn 10 must reveal exactly the turn-10 event — never
+      // the turn-500 one, which the viewer has not reached yet.
+      frame(10, []);
+      expect(document.querySelectorAll(".broadcast-war-room-item")).toHaveLength(1);
+
+      // Only once the playhead reaches turn 500 does the second event appear.
+      frame(499, []);
+      expect(document.querySelectorAll(".broadcast-war-room-item")).toHaveLength(1);
+      frame(500, []);
+      expect(document.querySelectorAll(".broadcast-war-room-item")).toHaveLength(2);
+    });
+
+    it("redacts a future timeline marker's kind and label until the playhead reaches it, then reveals the real content (spec item 2)", () => {
+      const runID = "broadcast-marker-redaction-1";
+      mountAiLeagueReplayOverlay({
+        runID,
+        artifactBasePath: `/ai-league-runs/${runID}`,
+        decisions: [],
+        replayMaxTurn: 1_000,
+        spectatorTelemetry: {
+          version: 1,
+          runID,
+          agents: [],
+          relationships: [],
+          events: [
+            event(1, 300, "alliance_break", "betrayal", "a2", "Blitz", "a1", "Atlas", "Blitz says the pact is over."),
+          ],
+          communicationThreads: [],
+          timelineBuckets: [],
+        },
+      });
+
+      const betrayalOrUpcoming = () =>
+        document.querySelector<HTMLElement>(
+          '.broadcast-timeline-marker:not([data-kind="finish"])',
+        );
+      let m = betrayalOrUpcoming();
+      // Content-free tick: neither the real kind nor its label reach the DOM
+      // at all while the marker's own turn is still ahead of the playhead.
+      expect(m?.dataset.kind).toBe("upcoming");
+      expect(m?.getAttribute("title")).toBe("broadcast.timeline_marker_upcoming");
+
+      frame(300, []);
+      m = betrayalOrUpcoming();
+      // Once the playhead reaches the marker's own turn, the real kind and
+      // label render — no longer the redaction placeholder.
+      expect(m?.dataset.kind).toBe("betrayal");
+      expect(m?.getAttribute("title")).not.toBe(
+        "broadcast.timeline_marker_upcoming",
+      );
+    });
   });
 
   describe("Director Cut (Stage 5 player integration)", () => {
