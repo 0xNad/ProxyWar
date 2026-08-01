@@ -55,6 +55,24 @@ async function main(): Promise<void> {
     process.exitCode = 1;
     return;
   }
+  // Defense in depth, not the primary fix: `premiere:schedule` (see its
+  // own module doc) is where a premiere-lane record's participants get
+  // resolved from its sealed bundle. This never SHOULD trigger for a
+  // record that went through that path — it guards against a record
+  // reaching "scheduled" some OTHER way (e.g. a hand-rolled
+  // `mutateFeaturedMatchStore` call, the exact workaround
+  // `feature:promote` replaces for the archive lane) and closes the same
+  // gap `EventPackageGate.isPubliclyPromotable` enforces, at the last
+  // operator checkpoint before a premiere goes live — "no anonymous
+  // public Premiere" must never depend on every possible writer
+  // remembering to resolve participants.
+  if (record.participants.length === 0) {
+    console.error(
+      `cannot publish "${id}": this record has zero participants — a premiere can never be publicly promotable without a resolved lineup (EventPackageGate.ts). Re-run premiere:schedule on it to resolve participants from the sealed bundle, or drop this candidate.`,
+    );
+    process.exitCode = 1;
+    return;
+  }
 
   const issues = await validateSchedule(store.matches, roots);
   const ownIssues = issues.filter((issue) => issue.matchId === record.matchId);

@@ -327,18 +327,41 @@ npm run feature:candidates
 npm run feature:candidates -- --json
 ```
 
-### 2.1 Scheduling CLIs (operate on `featured-matches.json`)
+### 2.1 Scheduling / promotion CLIs (operate on `featured-matches.json`)
 
-All four accept `--queue-root=<dir> --artifacts-root=<dir> --state-root=<dir> --json`
+`premiere:schedule`/`publish`/`cancel`/`validate` accept
+`--queue-root=<dir> --artifacts-root=<dir> --state-root=<dir> --json`
 overrides; `<id>` resolves against `matchId`, `queueItemName`, or
-`episodeRequestId`.
+`episodeRequestId`. `feature:promote` accepts
+`--artifacts-root=<dir> --state-root=<dir> --json`; `<id>` there is always
+an `episodeRequestId`.
 
 | CLI | npm script | Effect |
 |---|---|---|
-| `src/scripts/premiere-schedule.ts` | `premiere:schedule --episode=<id> --at=<ISO-8601>` | `candidate`/`scheduled` → `scheduled`, sets `scheduledAt`. Premiere-lane only. Refuses to resurrect a `cancelled` record. Re-validates the **whole** resulting schedule before writing. |
-| `src/scripts/premiere-publish.ts` | `premiere:publish --episode=<id>` | `scheduled` → `published` — the explicit "yes, run this one" signal that `pq_claim_scheduled_due` (§1.2) actually keys off. Also best-effort syncs a `FeaturedMatch`-owned retention pin (§6). |
+| `src/scripts/premiere-schedule.ts` | `premiere:schedule --episode=<id> --at=<ISO-8601>` | `candidate`/`scheduled` → `scheduled`, sets `scheduledAt`. Premiere-lane only. **Also this lane's promote step** — a premiere-lane record only enters the store here, and this is where `participants` gets resolved (see below), so there is no separate `premiere:promote`. Refuses to resurrect a `cancelled` record. Re-validates the **whole** resulting schedule before writing. |
+| `src/scripts/premiere-publish.ts` | `premiere:publish --episode=<id>` | `scheduled` → `published` — the explicit "yes, run this one" signal that `pq_claim_scheduled_due` (§1.2) actually keys off. Also best-effort syncs a `FeaturedMatch`-owned retention pin (§6). Refuses (defense in depth) a record with zero `participants`. |
 | `src/scripts/premiere-cancel.ts` | `premiere:cancel --episode=<id>` | `scheduled`/`published` → `cancelled` (terminal, not deleted — stays as an audit trail). Frees the `scheduledAt` slot and removes this record's own retention-pin ownership. |
 | `src/scripts/premiere-validate.ts` | `premiere:validate` | Reports every scheduling problem (past-dated slots, collisions, a scheduled record whose source queue item vanished from `ready/`). Non-zero exit on any issue — safe in cron/CI ahead of `premiere:publish`. **Run this after any manual edit to `featured-matches.json`.** |
+| `src/scripts/feature-promote.ts` | `feature:promote --episode=<episodeRequestId>` | The archive lane's promote step — `feature:candidates` stays read-only by design, so this is the one CLI that upserts a ranked archive-lane candidate's draft into the store (via the same lock-protected `upsertRecord`). Idempotent by `episodeRequestId`: re-running reuses the existing record's `matchId`/`createdAt` rather than minting a duplicate (`feature-candidates.ts`'s `buildCandidate` mints a fresh `matchId` on every ranking pass, harmless there since nothing persists it — this CLI is what makes persistence safe). |
+
+**Participant resolution (fixed 2026-08-01):** a premiere-lane candidate's
+`participants` used to be permanently `[]` — `premiere-candidates.ts`
+deliberately never opens `bundle.source.json` during ranking (too large,
+irrelevant to the sort), and nothing downstream ever populated it either,
+so `EventPackageGate.isPubliclyPromotable`'s `participants.length === 0`
+check made every sealed premiere structurally unpromotable. `premiere:schedule`
+now resolves participants for the ONE candidate being committed
+(`ensurePremiereParticipants` in `premiere-schedule-lib.ts`), reading
+**only** `bundle.source.json`'s top-level `seats` field
+(`resolveSealedBundleParticipants` in `premiere-candidates.ts`) — the same
+spoiler-safe seat roster (`seatId`/`displayName`/`policyIdentity`)
+`ReplayPremierePublicPage.ts` already renders on the public bet-surface
+page during live trading, well before reveal. `gameRecord`/
+`authoritativeResult` (the actually embargoed, result-bearing fields) are
+never read by this path. A bundle with no resolvable seats hard-fails
+`premiere:schedule` outright — never silently produces another
+unpromotable record; `premiere:publish` re-checks `participants.length`
+as defense in depth against any other writer bypassing `premiere:schedule`.
 
 ## 3. Admission
 
@@ -672,25 +695,27 @@ audience can support.
 1. `npm run premiere:candidates` / `npm run feature:candidates` — pick a
    candidate with a real reason to watch (§8.3's claims are now visible
    in the CLI output).
-2. `npm run premiere:schedule -- --episode=<id> --at=<ISO>` (§2.1) to
-   commit the pick into `featured-matches.json`.
+2. Commit the pick into `featured-matches.json` (§2.1):
+   - premiere lane: `npm run premiere:schedule -- --episode=<id> --at=<ISO>`.
+     `participants` is resolved automatically from the sealed bundle's
+     spoiler-safe seat roster at this step — nothing further to do for
+     identity. A candidate whose bundle carries no resolvable lineup
+     refuses to schedule outright.
+   - archive lane: `npm run feature:promote -- --episode=<episodeRequestId>`
+     (participants were already resolved by `feature:candidates`' own
+     evidence pass; this just persists that draft — see §2.1).
 3. `npm run premiere:package -- --featured=<feat_id>` to generate the
    `EventPackage` draft; edit prose via `--title=`/`--subtitle=`/
    `--editorial-notes=` and re-run to refresh evidence.
 4. `npm run premiere:package -- --featured=<feat_id> --validate` — confirm
    `isPubliclyPromotable: true` before treating the event as ready.
+   Premiere-lane records also require `state: "published"` for the gate
+   (`not_yet_published`) — run step 5's `premiere:publish` first if this
+   still reports `false` for that reason alone.
 5. `npm run premiere:validate` (§2.1) for the ordinary schedule-integrity
    check, then `npm run premiere:publish` when it's time to go live.
 6. `npm run season:add-event -- --season=<id> --featured=<feat_id> --scheduled-at=<ISO>`
    to fold the event into the active Season's programme.
-
-**Never promote a package-less record as the featured hero.** If
-`premiere:package --validate` reports `isPubliclyPromotable: false`,
-the record stays reachable at its own URL but must not be presented as
-the flagship event — fix the missing fields (the exact reasons are
-printed) and re-validate, or fall back to the best recent Director Cut
-per the doc's own "no scheduled Featured Event" guidance (a client-side
-decision, out of this phase's scope).
 
 ## Known gaps
 
@@ -713,3 +738,26 @@ decision, out of this phase's scope).
   comments reference it directly, but root cause was never investigated.
   Current workaround is re-admitting with a fresh premiere id and confirming
   via `curl` before opening a browser.
+- **A premiere-lane `EventPackage`'s Director Cut estimate is
+  structurally unavailable until reveal, a real gap of the same
+  character the participants fix (§2.1) just closed for `participants`.**
+  `premiere-package.ts`'s `directorCutEstimateSeconds()` looks up
+  `mirror.episodes.find(row => row.episodeRequestId === match.episodeRequestId)`
+  — but `premiere:schedule`'s own pre-flight (rightly) REFUSES to
+  schedule a fresh candidate whose `episodeRequestId` already appears in
+  that same mirror (`already_published_on_league`, §2). A successfully
+  scheduled premiere-lane record's `episodeRequestId` can therefore never
+  match a mirror row until AFTER reveal publishes it there — so
+  `EventPackageGate.isPubliclyPromotable`'s `director_cut_estimate` check
+  is unsatisfiable for a premiere pre-reveal by the current wiring alone
+  (confirmed while building this session's own gate-passing test — it only
+  passes by seeding the mirror row AFTER `premiere:schedule` succeeds,
+  which sidesteps rather than reflects the real operational sequence).
+  Unlike drama/story evidence above (soft, not gate-checked), this IS a
+  hard gate requirement. A real fix needs an ESTIMATE derived from data
+  actually available pre-reveal — the sealed queue item's own `meta.json`
+  (`turnCount`/`checkpointTurns`/`turnIntervalMs`) is the only candidate
+  source, analogous to how `checkpointTurns` already implies a segment
+  structure — but no such formula exists yet. Out of scope for the
+  participants fix; flagged here so the next operator packaging a real
+  premiere doesn't waste time assuming it's their own setup at fault.

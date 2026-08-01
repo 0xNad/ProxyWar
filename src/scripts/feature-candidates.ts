@@ -666,56 +666,79 @@ function formatTable(ranked: readonly RankedFeatureCandidate[]): string {
   ].join("\n");
 }
 
+export interface RankFeatureCandidatesResult {
+  generatedAt: Date;
+  artifactsRoot: string;
+  totalEpisodes: number;
+  candidates: RankedFeatureCandidate[];
+}
+
+/**
+ * The structured ranking pass itself, factored out of
+ * `runFeatureCandidatesCli` (Season Zero activation prompt Phase 4
+ * fallout: `feature:promote` — the sanctioned wrapper that was missing —
+ * needs this same ranked list to pick a candidate's `.match` draft to
+ * persist, not a re-parse of the CLI's own `--json` stdout). Zero
+ * behavior change versus the pre-extraction inline version: same
+ * tolerant identity-load-failure degrade (warns via `io`, never throws),
+ * same episode filter, same `compareCandidates` ordering.
+ */
+export async function rankFeatureCandidates(
+  options: { artifactsRoot?: string } = {},
+  io: CliIo = defaultIo,
+): Promise<RankFeatureCandidatesResult> {
+  const artifactsRoot = resolveArtifactsRoot(options.artifactsRoot);
+  const siteDir = path.join(artifactsRoot, "ai-league-runs", "league");
+  const runsRootDir = path.join(artifactsRoot, "ai-league-runs");
+  const mirrorData = await readLiveMirrorData(siteDir);
+  const identity = await loadIdentityRegistrySnapshot().catch((error: unknown) => {
+    io.stderr(
+      `feature:candidates — identity registry failed to load, participants will show as unmapped: ${
+        error instanceof Error ? error.message : String(error)
+      }`,
+    );
+    return {
+      builders: [],
+      agents: [],
+      versions: [],
+    } satisfies IdentityRegistrySnapshot;
+  });
+  const episodes = (mirrorData?.episodes ?? []).filter(
+    (episode) => episode.completedAt !== null,
+  );
+  const now = new Date();
+  const built = await Promise.all(
+    episodes.map((row) => buildCandidate(row, runsRootDir, identity, mirrorData?.standings ?? [], episodes, now)),
+  );
+  const candidates: RankedFeatureCandidate[] = [...built]
+    .sort(compareCandidates)
+    .map((candidate, index) => ({ ...candidate, rank: index + 1 }));
+  return { generatedAt: now, artifactsRoot, totalEpisodes: episodes.length, candidates };
+}
+
 export async function runFeatureCandidatesCli(
   argv: readonly string[],
   io: CliIo = defaultIo,
 ): Promise<number> {
   try {
     const options = parseArgs(argv);
-    const artifactsRoot = resolveArtifactsRoot(options.artifactsRoot);
-    const siteDir = path.join(artifactsRoot, "ai-league-runs", "league");
-    const runsRootDir = path.join(artifactsRoot, "ai-league-runs");
-    const mirrorData = await readLiveMirrorData(siteDir);
-    const identity = await loadIdentityRegistrySnapshot().catch(
-      (error: unknown) => {
-        io.stderr(
-          `feature:candidates — identity registry failed to load, participants will show as unmapped: ${
-            error instanceof Error ? error.message : String(error)
-          }`,
-        );
-        return {
-          builders: [],
-          agents: [],
-          versions: [],
-        } satisfies IdentityRegistrySnapshot;
-      },
-    );
-    const episodes = (mirrorData?.episodes ?? []).filter(
-      (episode) => episode.completedAt !== null,
-    );
-    const now = new Date();
-    const built = await Promise.all(
-      episodes.map((row) => buildCandidate(row, runsRootDir, identity, mirrorData?.standings ?? [], episodes, now)),
-    );
-    const ranked: RankedFeatureCandidate[] = [...built]
-      .sort(compareCandidates)
-      .map((candidate, index) => ({ ...candidate, rank: index + 1 }));
+    const result = await rankFeatureCandidates({ artifactsRoot: options.artifactsRoot }, io);
 
     if (options.json) {
       io.stdout(
         JSON.stringify(
           {
-            generatedAt: now.toISOString(),
-            artifactsRoot,
-            totalEpisodes: episodes.length,
-            candidates: ranked,
+            generatedAt: result.generatedAt.toISOString(),
+            artifactsRoot: result.artifactsRoot,
+            totalEpisodes: result.totalEpisodes,
+            candidates: result.candidates,
           },
           null,
           2,
         ),
       );
     } else {
-      io.stdout(formatTable(ranked));
+      io.stdout(formatTable(result.candidates));
     }
     return 0;
   } catch (error) {

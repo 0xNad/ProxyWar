@@ -8,8 +8,11 @@ import {
   newFeaturedMatchId,
   type FeaturedMatch,
   type FeaturedMatchEvidence,
+  type FeaturedMatchParticipant,
 } from "../server/agents/FeaturedMatch";
 import type { CoworldLeagueMirrorData } from "../server/agents/CoworldLeagueSiteWriter";
+import { resolveAgentIdentityView } from "../server/identity/IdentityMatching";
+import type { IdentityRegistrySnapshot } from "../server/identity/IdentityRegistry";
 
 /**
  * `premiere:candidates` — read-only ranking CLI for Stage 3's SEALED
@@ -287,6 +290,158 @@ function rankCandidates(
     }
     return a.queueItemName.localeCompare(b.queueItemName);
   });
+}
+
+/**
+ * SPOILER-SAFE, single-candidate seat identity read — the fix for a real
+ * bug found activating Season Zero: `buildFeaturedMatchDraft` above
+ * always leaves `participants: []` (this module's ranking pass
+ * deliberately never opens `bundle.source.json` — module doc), and
+ * neither `premiere:package` nor `premiere:publish` ever populated it
+ * either, so a premiere-lane record could NEVER satisfy
+ * `EventPackageGate.isPubliclyPromotable`'s `participants.length === 0`
+ * check — every sealed premiere was structurally unpromotable. This is
+ * called ONLY by `premiere-schedule-lib.ts`'s `ensurePremiereParticipants`,
+ * for the ONE specific candidate an operator has just committed to
+ * scheduling — never from the bulk `rankPremiereCandidates` scan above,
+ * so that function's own "never opens bundle.source.json" invariant and
+ * its O(ready-dir-size) cost stay exactly as documented.
+ *
+ * WHY THIS IS SAFE PRE-REVEAL: a sealed bundle's seat roster is NOT
+ * embargoed — only the RESULT is (spec §2's "no anonymous public
+ * Premiere" is about missing editorial metadata, never about hiding who
+ * is playing). `ReplayPremierePublicPage.ts` already renders this EXACT
+ * roster shape (`seatId`/`displayName`/`policyIdentity`) into the public
+ * bet-surface page's HTML social metadata AND JS bootstrap
+ * (`seatMetadata`/`policyIdentities`) during LIVE TRADING, well before
+ * reveal — see that module's `renderReplayPremierePageHtml`/`policyIdentityStrings`. The
+ * ONLY embargoed fields on `bundle.source.json` are `gameRecord` (full
+ * turn-by-turn game state, including who won) and `authoritativeResult`
+ * (the sealed, hashed outcome `ReplayPremiereAuthoritativeResult.ts`
+ * verifies at reveal time) — `SealedBundleSeatsOnlySchema` below declares
+ * ONLY the top-level `seats` field, so `.parse()`'s default (non-
+ * passthrough) behavior STRIPS `gameRecord`/`authoritativeResult`/
+ * `provenance`/everything else out of the returned value; the raw parsed
+ * object holding those result-bearing fields is discarded (never
+ * assigned to a named variable, logged, or returned) the moment this
+ * function returns. `JSON.parse` necessarily deserializes the whole file
+ * into memory first (there is no streaming JSON reader in this
+ * codebase) — that is an unavoidable consequence of the file being one
+ * JSON document, not a leak: nothing outside this function ever sees
+ * those bytes.
+ */
+const SealedBundlePolicyIdentitySchema = z.union([
+  z.object({
+    namespace: z.literal("softmax_policy_version"),
+    policyVersionId: z.string(),
+    policyName: z.string(),
+    serverAssignedVersion: z.string(),
+  }),
+  z.object({
+    namespace: z.literal("local_manifest"),
+    manifestName: z.string(),
+    declaredVersion: z.string(),
+    manifestSha256: z.string(),
+    contentSha256: z.string(),
+  }),
+]);
+
+const SealedBundleSeatsOnlySchema = z.object({
+  seats: z.array(
+    z.object({
+      seatId: z.string(),
+      displayName: z.string(),
+      policyIdentity: SealedBundlePolicyIdentitySchema,
+    }),
+  ),
+});
+type SealedBundleSeat = z.infer<typeof SealedBundleSeatsOnlySchema>["seats"][number];
+
+/** Same bound `PremiereWageringSourceBundle.ts`'s `MAX_GAME_RECORD_BYTES` uses for the same file family (`bundle.source.json` embeds a full game record). */
+const MAX_SEALED_BUNDLE_BYTES = 512 * 1024 * 1024;
+
+/**
+ * `displayName` is the real Coworld player name for this seat (verbatim
+ * `game-record.json` `player.username` — see `PremiereWageringSourceBundle.ts`'s
+ * own doc comment on why), the SAME namespace `findAgentForPlayerName`
+ * matches on everywhere else. The bundle's `policyIdentity.policyName`
+ * (when `namespace === "softmax_policy_version"`) is the EXACT policy
+ * label live for this specific captured match — passed as
+ * `ratingPolicyLabel` rather than cross-referencing CURRENT live
+ * standings (unlike `feature-candidates.ts`'s `buildParticipants`, which
+ * has no historical label available at all and must fall back to
+ * "current"): footage of an already-played sealed match should credit
+ * the version that ACTUALLY played in it, not whatever the agent has
+ * moved on to by air time. `local_manifest` seats (a locally-produced
+ * exhibition identity scheme, never emitted by THIS queue's own
+ * `PremiereWageringSourceBundle.ts` builder today) have no comparable
+ * label in this shape — `agentVersionId` stays `null` rather than
+ * guessed from a different field.
+ */
+function resolveSealedBundleParticipant(
+  seat: SealedBundleSeat,
+  identity: IdentityRegistrySnapshot,
+): FeaturedMatchParticipant {
+  const ratingPolicyLabel =
+    seat.policyIdentity.namespace === "softmax_policy_version"
+      ? seat.policyIdentity.policyName
+      : null;
+  const view = resolveAgentIdentityView(
+    { playerName: seat.displayName, ratingPolicyLabel, activeChampionPolicyLabel: null },
+    identity.agents,
+    identity.builders,
+    identity.versions,
+  );
+  return {
+    playerName: seat.displayName,
+    agentId: view.agent?.id ?? null,
+    agentVersionId: view.version?.registered?.id ?? null,
+    builderId: view.builder?.id ?? null,
+  };
+}
+
+export type ResolveSealedBundleParticipantsResult =
+  | { ok: true; participants: FeaturedMatchParticipant[] }
+  | { ok: false; reason: string };
+
+export async function resolveSealedBundleParticipants(
+  queueReadyDir: string,
+  queueItemName: string,
+  identity: IdentityRegistrySnapshot,
+): Promise<ResolveSealedBundleParticipantsResult> {
+  const bundlePath = path.join(queueReadyDir, queueItemName, "bundle.source.json");
+  let stat;
+  try {
+    stat = await fs.stat(bundlePath);
+  } catch {
+    return { ok: false, reason: `sealed bundle not found at ${bundlePath}` };
+  }
+  if (!stat.isFile() || stat.size > MAX_SEALED_BUNDLE_BYTES) {
+    return {
+      ok: false,
+      reason: `${bundlePath} is not a regular file within the ${MAX_SEALED_BUNDLE_BYTES}-byte bound`,
+    };
+  }
+  let raw: unknown;
+  try {
+    raw = JSON.parse(await fs.readFile(bundlePath, "utf8"));
+  } catch {
+    return { ok: false, reason: `${bundlePath} is not valid JSON` };
+  }
+  const parsed = SealedBundleSeatsOnlySchema.safeParse(raw);
+  if (!parsed.success) {
+    return {
+      ok: false,
+      reason: `${bundlePath} does not carry a valid top-level "seats" array (${parsed.error.issues[0]?.message ?? "schema mismatch"})`,
+    };
+  }
+  if (parsed.data.seats.length === 0) {
+    return { ok: false, reason: `${bundlePath} carries zero seats` };
+  }
+  return {
+    ok: true,
+    participants: parsed.data.seats.map((seat) => resolveSealedBundleParticipant(seat, identity)),
+  };
 }
 
 export async function rankPremiereCandidates(options: {

@@ -5,13 +5,16 @@ import {
   readFeaturedMatchStore,
   resolveFeaturedMatchStateRoot,
   type FeaturedMatch,
+  type FeaturedMatchParticipant,
   type FeaturedMatchStoreFile,
 } from "../server/agents/FeaturedMatch";
 import {
   rankPremiereCandidates,
   resolveDefaultArtifactsRoot,
   resolveDefaultQueueReadyDir,
+  resolveSealedBundleParticipants,
 } from "./premiere-candidates";
+import type { IdentityRegistrySnapshot } from "../server/identity/IdentityRegistry";
 
 /**
  * Shared lookup/validation logic for the four `premiere:schedule`/
@@ -140,6 +143,54 @@ export async function resolveScheduleTarget(
     return { found: false, reason: "not_found_in_queue_or_store" };
   }
   return { found: true, existedInStore: false, record: candidate.featuredMatch };
+}
+
+export type EnsurePremiereParticipantsResult =
+  | { ok: true; participants: FeaturedMatchParticipant[] }
+  | { ok: false; reason: string };
+
+/**
+ * The fix for a real bug found activating Season Zero: a premiere-lane
+ * record's `participants` was NEVER populated by any writer in this
+ * family (`buildFeaturedMatchDraft`'s own doc explains why the RANKING
+ * pass can't — see `premiere-candidates.ts`), which made
+ * `EventPackageGate.isPubliclyPromotable`'s `participants.length === 0`
+ * check unconditionally fail for every sealed premiere ever scheduled —
+ * the "no anonymous public Premiere" gate was structurally unpassable
+ * for its own primary lane. Called by `premiere-schedule.ts` for BOTH
+ * branches `resolveScheduleTarget` can return: a fresh candidate
+ * (`participants: []` from `buildFeaturedMatchDraft`) and a pre-existing
+ * store record created before this fix shipped (self-heals on the next
+ * re-schedule, no separate migration needed — the real store checked at
+ * fix time had zero premiere-lane records yet).
+ *
+ * No-op (cheap, no bundle I/O) for an archive-lane record or one that
+ * already carries a resolved lineup — archive-lane participants are
+ * resolved at CREATION time by `feature:promote`
+ * (`feature-candidates.ts`'s `buildParticipants`), and a premiere-lane
+ * record is never re-resolved once non-empty (matches this module's own
+ * "only the specific record being acted on pays any I/O cost" design —
+ * unlike `premiere:package`'s prose fields, participants have no
+ * operator-editable half to preserve, so "already resolved" is a
+ * complete, stable answer, not a staleness risk worth re-checking on
+ * every schedule call).
+ */
+export async function ensurePremiereParticipants(
+  record: FeaturedMatch,
+  identity: IdentityRegistrySnapshot,
+  options: ScheduleResolveOptions = {},
+): Promise<EnsurePremiereParticipantsResult> {
+  if (record.lane !== "premiere" || record.participants.length > 0) {
+    return { ok: true, participants: record.participants };
+  }
+  if (record.queueItemName === null) {
+    return {
+      ok: false,
+      reason: `${record.matchId} has no queueItemName to locate its sealed bundle`,
+    };
+  }
+  const roots = resolvedRoots(options);
+  return resolveSealedBundleParticipants(roots.queueReadyDir, record.queueItemName, identity);
 }
 
 export async function loadStore(

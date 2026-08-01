@@ -1,6 +1,7 @@
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import {
+  ensurePremiereParticipants,
   loadStore,
   parseIdArg,
   parseValueArg,
@@ -9,6 +10,10 @@ import {
   upsertRecord,
   validateSchedule,
 } from "./premiere-schedule-lib";
+import {
+  loadIdentityRegistrySnapshot,
+  type IdentityRegistrySnapshot,
+} from "../server/identity/IdentityRegistry";
 
 /**
  * `premiere:schedule --episode <id> --at <ISO>` — Stage 3 item 3's
@@ -119,9 +124,25 @@ async function main(): Promise<void> {
     return;
   }
 
+  const identity = await loadIdentityRegistrySnapshot().catch(
+    (): IdentityRegistrySnapshot => ({ builders: [], agents: [], versions: [] }),
+  );
+  const participants = await ensurePremiereParticipants(target.record, identity, roots);
+  if (!participants.ok) {
+    console.error(
+      `cannot schedule "${id}": participant identity could not be resolved from the sealed bundle — ${participants.reason}`,
+    );
+    console.error(
+      `  a premiere-lane record can never be publicly promotable with an unresolved lineup (EventPackageGate.ts's "no anonymous public Premiere" gate) — fix the sealed bundle, or this candidate cannot be scheduled.`,
+    );
+    process.exitCode = 1;
+    return;
+  }
+
   const now = new Date();
   const updated = {
     ...target.record,
+    participants: participants.participants,
     scheduledAt: new Date(scheduledMs).toISOString(),
     state: "scheduled" as const,
     updatedAt: now.toISOString(),

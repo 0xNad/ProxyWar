@@ -22,6 +22,7 @@
     "premiere:loop": "cross-env GAME_ENV=dev tsx src/scripts/replay-premiere-loop.ts",
     "premiere:candidates": "tsx src/scripts/premiere-candidates.ts",
     "feature:candidates": "tsx src/scripts/feature-candidates.ts",
+    "feature:promote": "tsx src/scripts/feature-promote.ts",
     "premiere:schedule": "tsx src/scripts/premiere-schedule.ts",
     "premiere:validate": "tsx src/scripts/premiere-validate.ts",
     "premiere:publish": "tsx src/scripts/premiere-publish.ts",

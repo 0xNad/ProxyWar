@@ -4,15 +4,19 @@ import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
   MINIMUM_SCHEDULE_SPACING_MINUTES,
+  ensurePremiereParticipants,
   resolveScheduleTarget,
   upsertRecord,
   validateSchedule,
 } from "../../src/scripts/premiere-schedule-lib";
+import { resolveSealedBundleParticipants } from "../../src/scripts/premiere-candidates";
 import {
   readFeaturedMatchStore,
   writeFeaturedMatchStore,
   type FeaturedMatch,
 } from "../../src/server/agents/FeaturedMatch";
+import type { IdentityRegistrySnapshot } from "../../src/server/identity/IdentityRegistry";
+import type { AgentProfile, AgentVersion } from "../../src/server/identity/IdentitySchemas";
 
 const NOW = new Date("2026-08-01T00:00:00.000Z");
 
@@ -57,15 +61,58 @@ function baseMatch(overrides: Partial<FeaturedMatch> = {}): FeaturedMatch {
   };
 }
 
+/** A sealed bundle's realistic top-level `seats` shape (see `premiere-candidates.ts`'s `resolveSealedBundleParticipants` doc) — `gameRecord`/`authoritativeResult` are included to prove the narrow schema strips them, never asserted on. */
+interface SeatFixture {
+  seatId: string;
+  displayName: string;
+  policyName: string;
+}
+
+const DEFAULT_SEATS: SeatFixture[] = [
+  { seatId: "c1", displayName: "Auri", policyName: "auri-intent:v43" },
+  { seatId: "c2", displayName: "Sefirot", policyName: "sefirot-intent:v10" },
+];
+
 async function writeQueueItem(
   queueRoot: string,
   name: string,
   meta: Record<string, unknown>,
+  seats: readonly SeatFixture[] | "malformed" | "missing" = DEFAULT_SEATS,
 ): Promise<void> {
   const dir = path.join(queueRoot, "ready", name);
   await mkdir(dir, { recursive: true });
   await writeFile(path.join(dir, "meta.json"), JSON.stringify(meta), "utf8");
-  await writeFile(path.join(dir, "bundle.source.json"), "{}", "utf8");
+  if (seats === "missing") {
+    return;
+  }
+  if (seats === "malformed") {
+    await writeFile(path.join(dir, "bundle.source.json"), "{}", "utf8");
+    return;
+  }
+  await writeFile(
+    path.join(dir, "bundle.source.json"),
+    JSON.stringify({
+      schemaVersion: 1,
+      bundleKind: "proxywar_rated_coworld_source",
+      sourceRunId: "run1",
+      // Result-bearing fields present ONLY to prove
+      // resolveSealedBundleParticipants's schema strips them — never
+      // asserted on by any test below.
+      gameRecord: { info: { players: [] } },
+      authoritativeResult: { encoding: "base64", bytes: "AA==", sha256: "x" },
+      seats: seats.map((seat) => ({
+        seatId: seat.seatId,
+        displayName: seat.displayName,
+        policyIdentity: {
+          namespace: "softmax_policy_version",
+          policyVersionId: `pv_${seat.seatId}`,
+          policyName: seat.policyName,
+          serverAssignedVersion: "v1",
+        },
+      })),
+    }),
+    "utf8",
+  );
 }
 
 function metaFor(overrides: Partial<Record<string, unknown>> = {}) {
@@ -324,5 +371,198 @@ describe("upsertRecord", () => {
     const store = await readFeaturedMatchStore(stateRoot);
     expect(store.matches).toHaveLength(1);
     expect(store.matches[0]?.state).toBe("scheduled");
+  });
+});
+
+function agentProfile(overrides: Partial<AgentProfile> = {}): AgentProfile {
+  return {
+    id: "agt_auri",
+    slug: "auri",
+    displayName: "Auri",
+    shortCode: "AURI",
+    builderId: null,
+    tagline: null,
+    description: null,
+    emblem: { style: "geometric-svg-v1", seed: "agt_auri", assetPath: "resources/identity/emblems/agt_auri.svg" },
+    primaryColor: "#112233",
+    secondaryColor: "#445566",
+    debutDate: null,
+    policyMatchRule: { playerName: "Auri", policyFamily: "auri-intent" },
+    status: "unclaimed",
+    publicStrategyDescription: null,
+    ...overrides,
+  };
+}
+
+function agentVersion(overrides: Partial<AgentVersion> = {}): AgentVersion {
+  return {
+    id: "agtv_auri_v43",
+    agentId: "agt_auri",
+    publicVersionLabel: "v43",
+    softmaxPolicyLabel: "auri-intent:v43",
+    immutableDigest: null,
+    releaseDate: null,
+    releaseNotes: null,
+    declaredBaseModel: null,
+    scaffoldDescription: null,
+    sourceRepositoryRef: null,
+    disclosureStatus: "undisclosed",
+    qualificationStatus: "active",
+    observedVia: ["rating"],
+    observedAt: NOW.toISOString(),
+    firstObservedAt: NOW.toISOString(),
+    ...overrides,
+  };
+}
+
+/** Auri (v43) registered; Sefirot deliberately absent — the "unmapped participant stays honest null" case. */
+function identity(): IdentityRegistrySnapshot {
+  return { builders: [], agents: [agentProfile()], versions: [agentVersion()] };
+}
+
+describe("resolveSealedBundleParticipants", () => {
+  let queueRoot: string;
+
+  beforeEach(async () => {
+    queueRoot = await mkdtemp(path.join(os.tmpdir(), "pw-sealed-bundle-"));
+  });
+
+  afterEach(async () => {
+    await rm(queueRoot, { recursive: true, force: true });
+  });
+
+  const readyDir = () => path.join(queueRoot, "ready");
+
+  it("resolves registered participants by exact playerName + policy label, never fabricating an unmapped one", async () => {
+    await writeQueueItem(queueRoot, "item1", metaFor());
+    const result = await resolveSealedBundleParticipants(readyDir(), "item1", identity());
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.participants).toEqual([
+      { playerName: "Auri", agentId: "agt_auri", agentVersionId: "agtv_auri_v43", builderId: null },
+      { playerName: "Sefirot", agentId: null, agentVersionId: null, builderId: null },
+    ]);
+  });
+
+  it("credits the version that ACTUALLY played the sealed match, not a different currently-registered version under the same family", async () => {
+    await writeQueueItem(queueRoot, "item2", metaFor(), [
+      { seatId: "c1", displayName: "Auri", policyName: "auri-intent:v42" },
+    ]);
+    // Only v43 is registered; the sealed match itself shows v42 — this
+    // must resolve to null (no fabricated cross-version match), not v43.
+    const result = await resolveSealedBundleParticipants(readyDir(), "item2", identity());
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.participants[0]).toEqual({
+      playerName: "Auri",
+      agentId: "agt_auri",
+      agentVersionId: null,
+      builderId: null,
+    });
+  });
+
+  it("fails cleanly when the sealed bundle is missing", async () => {
+    await writeQueueItem(queueRoot, "item3", metaFor(), "missing");
+    const result = await resolveSealedBundleParticipants(readyDir(), "item3", identity());
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.reason).toContain("not found");
+  });
+
+  it("fails cleanly when the sealed bundle has no seats array", async () => {
+    await writeQueueItem(queueRoot, "item4", metaFor(), "malformed");
+    const result = await resolveSealedBundleParticipants(readyDir(), "item4", identity());
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.reason).toContain("seats");
+  });
+
+  it("fails cleanly when the bundle carries zero seats", async () => {
+    await writeQueueItem(queueRoot, "item5", metaFor(), []);
+    const result = await resolveSealedBundleParticipants(readyDir(), "item5", identity());
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.reason).toContain("zero seats");
+  });
+
+  it("never reads gameRecord/authoritativeResult — a bundle carrying only seats plus junk elsewhere still resolves", async () => {
+    const dir = path.join(queueRoot, "ready", "item6");
+    await mkdir(dir, { recursive: true });
+    await writeFile(path.join(dir, "meta.json"), JSON.stringify(metaFor()), "utf8");
+    await writeFile(
+      path.join(dir, "bundle.source.json"),
+      JSON.stringify({
+        gameRecord: "THIS WOULD BE A SPOILER IF READ",
+        authoritativeResult: { winner: "should never be touched" },
+        seats: [
+          {
+            seatId: "c1",
+            displayName: "Auri",
+            policyIdentity: {
+              namespace: "softmax_policy_version",
+              policyVersionId: "pv1",
+              policyName: "auri-intent:v43",
+              serverAssignedVersion: "v1",
+            },
+          },
+        ],
+      }),
+      "utf8",
+    );
+    const result = await resolveSealedBundleParticipants(readyDir(), "item6", identity());
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.participants).toEqual([
+      { playerName: "Auri", agentId: "agt_auri", agentVersionId: "agtv_auri_v43", builderId: null },
+    ]);
+  });
+});
+
+describe("ensurePremiereParticipants", () => {
+  let queueRoot: string;
+
+  beforeEach(async () => {
+    queueRoot = await mkdtemp(path.join(os.tmpdir(), "pw-ensure-participants-"));
+  });
+
+  afterEach(async () => {
+    await rm(queueRoot, { recursive: true, force: true });
+  });
+
+  const roots = () => ({ queueReadyDir: path.join(queueRoot, "ready"), now: () => NOW });
+
+  it("resolves participants for a premiere-lane record with an empty lineup", async () => {
+    await writeQueueItem(queueRoot, "20260801T000000Z-run1", metaFor());
+    const result = await ensurePremiereParticipants(baseMatch(), identity(), roots());
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.participants).toHaveLength(2);
+    expect(result.participants[0]?.agentId).toBe("agt_auri");
+  });
+
+  it("is a no-op (no bundle I/O) for a record that already has participants", async () => {
+    // No queue item written at all — if this attempted bundle I/O it
+    // would fail; it must short-circuit before ever touching the queue.
+    const record = baseMatch({
+      participants: [{ playerName: "Already", agentId: "agt_x", agentVersionId: null, builderId: null }],
+    });
+    const result = await ensurePremiereParticipants(record, identity(), roots());
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.participants).toEqual(record.participants);
+  });
+
+  it("is a no-op for an archive-lane record regardless of participants", async () => {
+    const record = baseMatch({ lane: "archive", participants: [] });
+    const result = await ensurePremiereParticipants(record, identity(), roots());
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.participants).toEqual([]);
+  });
+
+  it("fails when the sealed bundle cannot be resolved — the no-lineup case must hard-fail, never silently proceed empty", async () => {
+    await writeQueueItem(queueRoot, "20260801T000000Z-run1", metaFor(), "missing");
+    const result = await ensurePremiereParticipants(baseMatch(), identity(), roots());
+    expect(result.ok).toBe(false);
   });
 });
