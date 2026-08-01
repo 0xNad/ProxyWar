@@ -1,4 +1,4 @@
-import { getSpawnTiles } from "../../core/execution/Util";
+import { isValidSpawnSite } from "../../core/execution/Util";
 import {
   diplomacyReservedSlots,
   diplomacySlotsEnabled,
@@ -824,6 +824,16 @@ function spawnActionCandidates(
   return selected;
 }
 
+function spawnCandidateQuality(candidate: SpawnCandidate): number {
+  return spawnQualityFromScores(
+    candidate.opportunityScore,
+    candidate.pressureScore,
+    candidate.safetyScore,
+    candidate.diplomacyScore,
+    candidate.localLandScore ?? 0,
+  );
+}
+
 function compareSpawnCandidateQuality(
   a: SpawnCandidate,
   b: SpawnCandidate,
@@ -836,8 +846,40 @@ function compareSpawnCandidateQuality(
   );
 }
 
-function spawnCandidateQuality(candidate: SpawnCandidate): number {
-  const safetyScore = candidate.safetyScore;
+/**
+ * Object-form spatial scouts for small, already-materialized pools (the
+ * per-turn spawn-action cut). Delegates to the index-form implementation;
+ * candidates without coordinates are skipped exactly like before.
+ */
+function spatialSpawnScouts(
+  candidates: readonly SpawnCandidate[],
+  columns: number,
+  rows: number,
+): SpawnCandidate[] {
+  const positioned: SpawnCandidate[] = [];
+  for (const candidate of candidates) {
+    if (typeof candidate.x === "number" && typeof candidate.y === "number") {
+      positioned.push(candidate);
+    }
+  }
+  const indices = spatialSpawnScoutIndices(
+    positioned.length,
+    (i) => positioned[i].x as number,
+    (i) => positioned[i].y as number,
+    (a, b) => compareSpawnCandidateQuality(positioned[a], positioned[b]),
+    columns,
+    rows,
+  );
+  return indices.map((i) => positioned[i]);
+}
+
+function spawnQualityFromScores(
+  opportunityScore: number,
+  pressureScore: number,
+  safetyScore: number,
+  diplomacyScore: number,
+  localLandScore: number,
+): number {
   const middleSafetyBand = Math.max(0, 1 - Math.abs(safetyScore - 0.32) / 0.24);
   const lowSafetyPenalty =
     safetyScore < 0.18
@@ -846,98 +888,72 @@ function spawnCandidateQuality(candidate: SpawnCandidate): number {
         ? (0.23 - safetyScore) * 1.1
         : 0;
   return (
-    candidate.opportunityScore * 0.32 +
-    candidate.pressureScore * 0.18 +
+    opportunityScore * 0.32 +
+    pressureScore * 0.18 +
     middleSafetyBand * 0.03 +
-    (candidate.localLandScore ?? 0) * 0.5 +
+    localLandScore * 0.5 +
     safetyScore * 0.25 +
-    candidate.diplomacyScore * 0.28 -
+    diplomacyScore * 0.28 -
     lowSafetyPenalty
   );
 }
 
-function spatialSpawnScouts(
-  candidates: readonly SpawnCandidate[],
+/**
+ * Index-form spatial scouts: one best candidate per grid cell so remote map
+ * regions keep representation after the quality-core fill. Operates on the
+ * columnar candidate arrays by index; iteration runs in candidate insertion
+ * order and the returned indices are sorted by the shared quality comparator,
+ * exactly like the former object-based spatialSpawnScouts.
+ */
+function spatialSpawnScoutIndices(
+  candidateCount: number,
+  xOf: (i: number) => number,
+  yOf: (i: number) => number,
+  compareIndexQuality: (a: number, b: number) => number,
   columns: number,
   rows: number,
-): SpawnCandidate[] {
-  const bounds = spawnCandidateCoordinateBounds(candidates);
-  if (bounds === null || columns <= 0 || rows <= 0) {
+): number[] {
+  if (candidateCount === 0 || columns <= 0 || rows <= 0) {
     return [];
   }
-
-  const bestByCell = new Map<string, SpawnCandidate>();
-  for (const candidate of candidates) {
-    if (typeof candidate.x !== "number" || typeof candidate.y !== "number") {
-      continue;
-    }
-    const cellX = Math.max(
-      0,
-      Math.min(
-        columns - 1,
-        Math.floor(((candidate.x - bounds.minX) / bounds.width) * columns),
-      ),
-    );
-    const cellY = Math.max(
-      0,
-      Math.min(
-        rows - 1,
-        Math.floor(((candidate.y - bounds.minY) / bounds.height) * rows),
-      ),
-    );
-    const key = `${cellX}:${cellY}`;
-    const current = bestByCell.get(key);
-    if (
-      current === undefined ||
-      compareSpawnCandidateQuality(candidate, current) < 0
-    ) {
-      bestByCell.set(key, candidate);
-    }
-  }
-
-  return [...bestByCell.values()].sort(compareSpawnCandidateQuality);
-}
-
-function spawnCandidateCoordinateBounds(
-  candidates: readonly SpawnCandidate[],
-): {
-  minX: number;
-  maxX: number;
-  minY: number;
-  maxY: number;
-  width: number;
-  height: number;
-} | null {
-  // NOTE: compute min/max with a single loop, NOT Math.min(...xs)/Math.max(...xs).
-  // Spreading a large coordinate array as function arguments overflows the
-  // engine argument limit ("Maximum call stack size exceeded") on maps whose
-  // spawn-candidate pool is large — which crashed the agent at game start.
+  // Single-loop min/max, never Math.min(...xs): spreading a large coordinate
+  // array overflows the engine argument limit on big spawn pools.
   let minX = Infinity;
   let maxX = -Infinity;
   let minY = Infinity;
   let maxY = -Infinity;
-  let found = false;
-  for (const candidate of candidates) {
-    if (typeof candidate.x !== "number" || typeof candidate.y !== "number") {
-      continue;
+  for (let i = 0; i < candidateCount; i++) {
+    const x = xOf(i);
+    const y = yOf(i);
+    if (x < minX) minX = x;
+    if (x > maxX) maxX = x;
+    if (y < minY) minY = y;
+    if (y > maxY) maxY = y;
+  }
+  const boundsWidth = Math.max(1, maxX - minX + 1);
+  const boundsHeight = Math.max(1, maxY - minY + 1);
+
+  const bestByCell = new Map<number, number>();
+  for (let i = 0; i < candidateCount; i++) {
+    const cellX = Math.max(
+      0,
+      Math.min(
+        columns - 1,
+        Math.floor(((xOf(i) - minX) / boundsWidth) * columns),
+      ),
+    );
+    const cellY = Math.max(
+      0,
+      Math.min(rows - 1, Math.floor(((yOf(i) - minY) / boundsHeight) * rows)),
+    );
+    const cell = cellY * columns + cellX;
+    const current = bestByCell.get(cell);
+    if (current === undefined || compareIndexQuality(i, current) < 0) {
+      bestByCell.set(cell, i);
     }
-    found = true;
-    if (candidate.x < minX) minX = candidate.x;
-    if (candidate.x > maxX) maxX = candidate.x;
-    if (candidate.y < minY) minY = candidate.y;
-    if (candidate.y > maxY) maxY = candidate.y;
   }
-  if (!found) {
-    return null;
-  }
-  return {
-    minX,
-    maxX,
-    minY,
-    maxY,
-    width: Math.max(1, maxX - minX + 1),
-    height: Math.max(1, maxY - minY + 1),
-  };
+
+  return [...bestByCell.values()].sort(compareIndexQuality);
 }
 
 function hostileAttackTroopPercentages(): number[] {
@@ -961,7 +977,23 @@ export function buildSpawnCandidates(
     1,
     Math.min(gameMap.width(), gameMap.height()) / 2,
   );
-  const candidates: SpawnCandidate[] = [];
+  // Columnar accumulation: the full-map scan can pass hundreds of thousands
+  // of tiles on large maps, and building a SpawnCandidate object (plus the
+  // BFS set behind getSpawnTiles) for every one of them just to keep the top
+  // ~1-2k was the dominant episode start-up allocation (~160 MB of committed
+  // heap on World 12P). Scores land in parallel number arrays; SpawnCandidate
+  // objects materialize only for the selected pool. Score math, comparator
+  // semantics, and selection order are unchanged from the object pipeline.
+  const tiles: number[] = [];
+  const pressureScores: number[] = [];
+  const safetyScores: number[] = [];
+  const diplomacyScores: number[] = [];
+  const opportunityScores: number[] = [];
+  const localLandScores: number[] = [];
+  const localLandRadius = Math.max(
+    16,
+    Math.round(Math.min(gameMap.width(), gameMap.height()) * 0.096),
+  );
 
   gameMap.forEachTile((tile) => {
     if (tile % stride !== 0) {
@@ -970,7 +1002,7 @@ export function buildSpawnCandidates(
     if (!gameMap.isLand(tile) || gameMap.isBorder(tile)) {
       return;
     }
-    if (getSpawnTiles(gameMap, tile, true) === null) {
+    if (!isValidSpawnSite(gameMap, tile)) {
       return;
     }
 
@@ -989,72 +1021,95 @@ export function buildSpawnCandidates(
       1 -
       Math.abs(y - centerY) /
         Math.max(centerY, gameMap.height() - 1 - centerY, 1);
-    const localLandScore = localLandRatio(
-      gameMap,
-      tile,
-      Math.max(
-        16,
-        Math.round(Math.min(gameMap.width(), gameMap.height()) * 0.096),
-      ),
-    );
+    const localLandScore = localLandRatio(gameMap, tile, localLandRadius);
     const opportunityScore =
       edgeDistance / maxEdgeDistance + deterministicFraction(tile);
 
-    candidates.push({
-      tile,
-      x,
-      y,
-      pressureScore,
-      safetyScore,
-      diplomacyScore,
-      opportunityScore,
-      localLandScore,
-    });
+    tiles.push(tile);
+    pressureScores.push(pressureScore);
+    safetyScores.push(safetyScore);
+    diplomacyScores.push(diplomacyScore);
+    opportunityScores.push(opportunityScore);
+    localLandScores.push(localLandScore);
   });
 
-  return selectSpawnCandidatePool(candidates, maxCandidates);
-}
-
-function selectSpawnCandidatePool(
-  candidates: SpawnCandidate[],
-  maxCandidates: number,
-): SpawnCandidate[] {
   if (maxCandidates <= 0) {
     return [];
   }
-  if (candidates.length <= maxCandidates) {
-    return candidates.sort(compareSpawnCandidateQuality);
+
+  const count = tiles.length;
+  const quality = new Float64Array(count);
+  for (let i = 0; i < count; i++) {
+    quality[i] = spawnQualityFromScores(
+      opportunityScores[i],
+      pressureScores[i],
+      safetyScores[i],
+      diplomacyScores[i],
+      localLandScores[i],
+    );
+  }
+  const compareIndexQuality = (a: number, b: number): number =>
+    quality[b] - quality[a] ||
+    opportunityScores[b] - opportunityScores[a] ||
+    localLandScores[b] - localLandScores[a] ||
+    tiles[a] - tiles[b];
+  const materialize = (i: number): SpawnCandidate => ({
+    tile: tiles[i],
+    x: gameMap.x(tiles[i]),
+    y: gameMap.y(tiles[i]),
+    pressureScore: pressureScores[i],
+    safetyScore: safetyScores[i],
+    diplomacyScore: diplomacyScores[i],
+    opportunityScore: opportunityScores[i],
+    localLandScore: localLandScores[i],
+  });
+
+  const qualitySorted: number[] = new Array(count);
+  for (let i = 0; i < count; i++) {
+    qualitySorted[i] = i;
+  }
+  qualitySorted.sort(compareIndexQuality);
+
+  if (count <= maxCandidates) {
+    return qualitySorted.map(materialize);
   }
 
-  const selected: SpawnCandidate[] = [];
+  const selected: number[] = [];
   const selectedTiles = new Set<TileRef>();
-  const addCandidate = (candidate: SpawnCandidate): void => {
-    if (selected.length >= maxCandidates || selectedTiles.has(candidate.tile)) {
+  const addCandidate = (i: number): void => {
+    if (selected.length >= maxCandidates || selectedTiles.has(tiles[i])) {
       return;
     }
-    selected.push(candidate);
-    selectedTiles.add(candidate.tile);
+    selected.push(i);
+    selectedTiles.add(tiles[i]);
   };
-  const qualitySorted = [...candidates].sort(compareSpawnCandidateQuality);
   const coreTarget = Math.min(
     maxCandidates,
     Math.max(200, Math.floor(maxCandidates * 0.72)),
   );
 
-  for (const candidate of qualitySorted) {
+  for (const i of qualitySorted) {
     if (selected.length >= coreTarget) {
       break;
     }
-    addCandidate(candidate);
+    addCandidate(i);
   }
-  for (const candidate of spatialSpawnScouts(candidates, 24, 16)) {
-    addCandidate(candidate);
+  const scoutIndices = spatialSpawnScoutIndices(
+    count,
+    (i) => gameMap.x(tiles[i]),
+    (i) => gameMap.y(tiles[i]),
+    compareIndexQuality,
+    24,
+    16,
+  );
+  for (const i of scoutIndices) {
+    addCandidate(i);
   }
-  for (const candidate of qualitySorted) {
-    addCandidate(candidate);
+  for (const i of qualitySorted) {
+    addCandidate(i);
   }
 
-  return selected;
+  return selected.map(materialize);
 }
 
 function localLandRatio(

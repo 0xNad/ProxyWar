@@ -156,6 +156,38 @@ export function getSpawnTiles(
   return spawnTiles;
 }
 
+/**
+ * Boolean twin of `getSpawnTiles(gm, tile, true) !== null` that never
+ * materializes the BFS set. The `euclDistFN(tile, 4, true)` filter is
+ * distance-only, so the BFS region is exactly the shifted-center Euclidean
+ * disk; a bounded box scan enumerates the same membership (equivalence is
+ * pinned by tests/core/SpawnSiteEquivalence.test.ts). Spawn-candidate scans
+ * call this once per land tile of the whole map, so the per-call Set/array
+ * allocations of `getSpawnTiles` dominated episode start-up memory churn.
+ */
+export function isValidSpawnSite(gm: GameMap, tile: TileRef): boolean {
+  const rootX = gm.x(tile) - 0.5;
+  const rootY = gm.y(tile) - 0.5;
+  const minX = Math.max(0, Math.floor(rootX - 4));
+  const maxX = Math.min(gm.width() - 1, Math.ceil(rootX + 4));
+  const minY = Math.max(0, Math.floor(rootY - 4));
+  const maxY = Math.min(gm.height() - 1, Math.ceil(rootY + 4));
+  for (let y = minY; y <= maxY; y++) {
+    const dy = y - rootY;
+    for (let x = minX; x <= maxX; x++) {
+      const dx = x - rootX;
+      if (dx * dx + dy * dy > 16) {
+        continue;
+      }
+      const t = gm.ref(x, y);
+      if (gm.hasOwner(t) || !gm.isLand(t)) {
+        return false;
+      }
+    }
+  }
+  return true;
+}
+
 export function closestTile(
   gm: GameMap,
   refs: Iterable<TileRef>,
